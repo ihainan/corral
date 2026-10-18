@@ -43,6 +43,7 @@ type fwdGrant struct {
 	userID    int64
 	loginHash string
 	forwardID string
+	ret       string // tickets only: where to land on the subdomain, fixed when issued
 	expires   time.Time
 	checked   time.Time
 }
@@ -98,12 +99,60 @@ func (s *Server) forwardLabel(host string) (port int, id string, ok bool) {
 	return port, m[2], true
 }
 
-func (s *Server) forwardOrigin(f *store.Forward) string {
-	o := s.cfg.PublicURL.Scheme + "://" + strconv.Itoa(f.Port) + "-" + f.ID + "." + s.cfg.ForwardDomain
+func (s *Server) forwardOrigin(f *store.Forward) string { return s.forwardOriginFor(f.Port, f.ID) }
+
+// forwardOriginFor is the exact Origin a browser sends for a forward's pages.
+func (s *Server) forwardOriginFor(port int, id string) string {
+	o := s.cfg.PublicURL.Scheme + "://" + strconv.Itoa(port) + "-" + id + "." + s.cfg.ForwardDomain
 	if p := s.cfg.PublicURL.Port(); p != "" {
 		o += ":" + p // non-default port (development setups)
 	}
 	return o
+}
+
+// forwardCrossSite reports a request that a page of another origin made,
+// including another forwarded port: those are the same site, so the
+// SameSite=Lax cookie comes along. Any Origin must be the forward's own;
+// WebSocket upgrades and state-changing requests without one are refused when
+// the browser says they came from elsewhere.
+func forwardCrossSite(r *http.Request, own string) bool {
+	if origin := r.Header.Get("Origin"); origin != "" {
+		return origin != own
+	}
+	upgrade := strings.EqualFold(r.Header.Get("Upgrade"), "websocket")
+	if !upgrade && (r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodOptions) {
+		return false
+	}
+	switch r.Header.Get("Sec-Fetch-Site") {
+	case "", "same-origin", "none":
+		return false
+	}
+	return true
+}
+
+// safeReturnPath accepts a path on the same site to redirect to: no scheme or
+// host, no "//" or backslash (browsers read both as another host), no control
+// characters, also after percent-decoding.
+func safeReturnPath(p string) bool {
+	if u, err := url.Parse(p); err != nil || u.Scheme != "" || u.Host != "" || u.Opaque != "" || u.User != nil {
+		return false
+	}
+	for range 3 {
+		if !strings.HasPrefix(p, "/") || strings.HasPrefix(p, "//") || strings.ContainsFunc(p, func(r rune) bool {
+			return r == '\\' || r < 0x20 || r == 0x7f
+		}) {
+			return false
+		}
+		dec, err := url.PathUnescape(p)
+		if err != nil {
+			return false
+		}
+		if dec == p {
+			return true
+		}
+		p = dec
+	}
+	return false // still encoded after three rounds: not a path a browser produces
 }
 
 // canUseForward applies sharing: the owner always, other active users when shared.
@@ -116,7 +165,7 @@ func canUseForward(u *store.User, f *store.Forward) bool {
 func (s *Server) handleForwardOpen(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	ret := r.URL.Query().Get("return")
-	if !strings.HasPrefix(ret, "/") || strings.HasPrefix(ret, "//") || strings.ContainsAny(ret, "\\\r\n") {
+	if !safeReturnPath(ret) {
 		ret = "/"
 	}
 	u, hash, err := s.auth.Authenticate(r.Context(), s.sessionCookie(r))
@@ -136,9 +185,9 @@ func (s *Server) handleForwardOpen(w http.ResponseWriter, r *http.Request) {
 	}
 	s.fwd.mu.Lock()
 	s.fwd.sweep()
-	s.fwd.tickets[tokHash] = &fwdGrant{userID: u.ID, loginHash: hash, forwardID: f.ID, expires: time.Now().Add(ticketTTL)}
+	s.fwd.tickets[tokHash] = &fwdGrant{userID: u.ID, loginHash: hash, forwardID: f.ID, ret: ret, expires: time.Now().Add(ticketTTL)}
 	s.fwd.mu.Unlock()
-	q := url.Values{"ticket": {tok}, "return": {ret}}
+	q := url.Values{"ticket": {tok}}
 	http.Redirect(w, r, s.forwardOrigin(f)+fwdAuthPath+"?"+q.Encode(), http.StatusFound)
 }
 
@@ -159,6 +208,10 @@ func (f *forwarder) sweep() {
 
 // serveForward handles every request on a forwarding subdomain.
 func (s *Server) serveForward(w http.ResponseWriter, r *http.Request, port int, id string) {
+	if forwardCrossSite(r, s.forwardOriginFor(port, id)) {
+		http.Error(w, "This request did not come from this forwarded port's own pages.", http.StatusForbidden)
+		return
+	}
 	mainLogin := s.cfg.Origin() + "/fwd/" + id + "?return=" + url.QueryEscape(r.URL.RequestURI())
 
 	if r.URL.Path == fwdAuthPath {
@@ -183,11 +236,8 @@ func (s *Server) serveForward(w http.ResponseWriter, r *http.Request, port int, 
 		s.fwd.mu.Unlock()
 		http.SetCookie(w, &http.Cookie{Name: s.fwdCookieName(), Value: tok, Path: "/", HttpOnly: true, Secure: s.cfg.SecureCookies(),
 			SameSite: http.SameSiteLaxMode, MaxAge: int(fwdTokenTTL.Seconds())})
-		ret := r.URL.Query().Get("return")
-		if !strings.HasPrefix(ret, "/") || strings.HasPrefix(ret, "//") {
-			ret = "/"
-		}
-		http.Redirect(w, r, ret, http.StatusFound)
+		// Only the path fixed when the ticket was issued; the query here is ignored.
+		http.Redirect(w, r, g.ret, http.StatusFound)
 		return
 	}
 
@@ -361,7 +411,7 @@ func (s *Server) proxyTo(w http.ResponseWriter, r *http.Request, client *ssh.Cli
 			for _, k := range []string{"X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto", "X-Real-Ip", "Forwarded"} {
 				h.Del(k)
 			}
-			if o := h.Get("Origin"); o != "" {
+			if o := h.Get("Origin"); o != "" { // already checked to be this forward's own
 				h.Set("Origin", "http://"+local)
 			}
 			if ref := h.Get("Referer"); strings.HasPrefix(ref, public) {

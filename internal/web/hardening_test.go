@@ -7,14 +7,21 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/coder/websocket"
 	"golang.org/x/crypto/ssh"
 
+	"github.com/ihainan/corral/internal/config"
 	"github.com/ihainan/corral/internal/notify"
 	"github.com/ihainan/corral/internal/sshx"
+	"github.com/ihainan/corral/internal/testutil"
 )
 
 // withPush turns notifications on for the harness server.
@@ -160,6 +167,159 @@ func TestPortListingOutputIsBounded(t *testing.T) {
 	r := admin.do("GET", fmt.Sprintf("/api/hosts/%d/ports", hostID), nil)
 	if r.Status != http.StatusBadGateway || r.code() != "ports_failed" {
 		t.Fatalf("endless port list: %d %s", r.Status, r.Body)
+	}
+}
+
+// fwdEnv is a harness with forwarding on, a host and a forward to app's port.
+type fwdEnv struct {
+	h      *harness
+	admin  *client
+	srv    *testutil.SSHServer
+	hostID int64
+	id     string
+	port   int
+}
+
+func newForwardEnv(t *testing.T, app http.Handler, opts ...harnessOpt) *fwdEnv {
+	t.Helper()
+	ts := httptest.NewServer(app)
+	t.Cleanup(ts.Close)
+	e := &fwdEnv{port: ts.Listener.Addr().(*net.TCPAddr).Port}
+	e.h = newHarness(t, append([]harnessOpt{func(c *config.Config) { c.ForwardDomain = "fwd.test" }}, opts...)...)
+	e.admin = e.h.admin()
+	e.srv = e.h.sshServer(t.TempDir())
+	e.hostID = e.h.hostFor(e.admin, e.srv.Addr.Port)
+	// A terminal once, to pin the host key; then closed so forwarding dials its own connection.
+	r := e.admin.do("POST", "/api/sessions", map[string]any{"host_id": e.hostID})
+	mustStatus(t, r, 201, "terminal (pins the key)")
+	mustStatus(t, e.admin.do("DELETE", "/api/sessions/"+r.json()["id"].(string), nil), 200, "close terminal")
+	r = e.admin.do("POST", "/api/forwards", map[string]any{"host_id": e.hostID, "port": e.port})
+	mustStatus(t, r, 200, "create forward")
+	e.id = r.json()["id"].(string)
+	return e
+}
+
+func (e *fwdEnv) origin() string { return e.h.srv.forwardOriginFor(e.port, e.id) }
+
+// dialWS opens a WebSocket on the forward with the given Origin ("" for none).
+func (e *fwdEnv) dialWS(f *fwdClient, origin string) (*websocket.Conn, error) {
+	hdr := http.Header{}
+	hdr.Set("Cookie", "corral_fwd="+f.cookie)
+	if origin != "" {
+		hdr.Set("Origin", origin)
+	}
+	ws, _, err := websocket.Dial(context.Background(), strings.Replace(e.h.ts.URL, "http", "ws", 1)+"/ws",
+		&websocket.DialOptions{HTTPHeader: hdr, Host: f.host})
+	return ws, err
+}
+
+// echoApp reports the Origin it saw, and keeps WebSockets open, echoing.
+var echoApp = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/ws" {
+		c, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+		if err != nil {
+			return
+		}
+		defer c.CloseNow()
+		for {
+			_, m, err := c.Read(r.Context())
+			if err != nil {
+				return
+			}
+			c.Write(r.Context(), websocket.MessageText, m)
+		}
+	}
+	fmt.Fprintf(w, "origin=%s", r.Header.Get("Origin"))
+})
+
+func TestForwardRefusesRequestsFromOtherOrigins(t *testing.T) {
+	e := newForwardEnv(t, echoApp)
+	f, _ := e.h.openForward(e.admin, e.id)
+	own := e.origin()
+	sibling := e.h.srv.forwardOriginFor(e.port+1, "zzzz") // another forwarded port: same site
+	cases := []struct {
+		method string
+		hdr    map[string]string
+		want   int
+	}{
+		{"GET", nil, 200},
+		{"GET", map[string]string{"Origin": own}, 200},
+		{"GET", map[string]string{"Origin": sibling}, 403},
+		{"POST", map[string]string{"Origin": own}, 200},
+		{"POST", map[string]string{"Origin": sibling}, 403},
+		{"POST", map[string]string{"Origin": "null"}, 403},
+		{"POST", map[string]string{"Origin": e.h.cfg.Origin()}, 403}, // even the main site
+		{"POST", nil, 200}, // no Origin and no browser hints: not a browser
+		{"POST", map[string]string{"Sec-Fetch-Site": "same-origin"}, 200},
+		{"POST", map[string]string{"Sec-Fetch-Site": "same-site"}, 403},
+		{"DELETE", map[string]string{"Sec-Fetch-Site": "cross-site"}, 403},
+		{"OPTIONS", map[string]string{"Origin": sibling}, 403},
+	}
+	for _, c := range cases {
+		if got := f.send(c.method, "/x", c.hdr); got != c.want {
+			t.Errorf("%s with %v: %d, want %d", c.method, c.hdr, got, c.want)
+		}
+	}
+	// The app sees the localhost form only for the forward's own pages.
+	if _, body := f.get("/x", map[string]string{"Origin": own}); !strings.Contains(body, "origin=http://localhost:"+strconv.Itoa(e.port)) {
+		t.Fatalf("origin not rewritten: %s", body)
+	}
+	if ws, err := e.dialWS(f, sibling); err == nil {
+		ws.CloseNow()
+		t.Fatal("WebSocket from another forwarded port was accepted")
+	}
+	ws, err := e.dialWS(f, own)
+	if err != nil {
+		t.Fatalf("WebSocket from the forward's own page: %v", err)
+	}
+	ws.CloseNow()
+}
+
+func TestSafeReturnPath(t *testing.T) {
+	for _, ok := range []string{"/", "/hello", "/a/b?x=1&y=%2F", "/search?q=caf%C3%A9", "/a%20b"} {
+		if !safeReturnPath(ok) {
+			t.Errorf("%q refused", ok)
+		}
+	}
+	for _, bad := range []string{"", "hello", "//evil.example", "/\\evil.example", "/%5Cevil.example", "/%5cevil.example",
+		"/%2F/evil.example", "%2F%2Fevil.example", "/%252F%252Fevil.example", "https://evil.example/", "/a\r\nSet-Cookie: x",
+		"/%0d%0aSet-Cookie:x", "/\x00", "/%zz", "/%25252525252F"} {
+		if safeReturnPath(bad) {
+			t.Errorf("%q accepted", bad)
+		}
+	}
+}
+
+func TestForwardTicketReturnIsFixedWhenIssued(t *testing.T) {
+	e := newForwardEnv(t, echoApp)
+	issue := func(ret string) *url.URL {
+		req, _ := http.NewRequest("GET", e.h.ts.URL+"/fwd/"+e.id+"?return="+url.QueryEscape(ret), nil)
+		req.AddCookie(&http.Cookie{Name: e.h.srv.cookieName(), Value: e.admin.cookie})
+		res, err := noRedirect.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res.Body.Close()
+		loc, _ := url.Parse(res.Header.Get("Location"))
+		if loc.Query().Has("return") {
+			t.Fatalf("return path travels outside the ticket: %s", loc)
+		}
+		return loc
+	}
+	redeem := func(loc *url.URL, extra string) string {
+		f := &fwdClient{h: e.h, host: loc.Host}
+		res, _ := f.get(loc.RequestURI()+extra, nil)
+		return res.Header.Get("Location")
+	}
+	if got := redeem(issue("/app/page?x=1"), ""); got != "/app/page?x=1" {
+		t.Fatalf("return path: %q", got)
+	}
+	if got := redeem(issue("/%5Cevil.example"), ""); got != "/" {
+		t.Fatalf("unsafe return path kept: %q", got)
+	}
+	// A return given at redemption is ignored.
+	if got := redeem(issue("/ok"), "&return=/%5Cevil.example"); got != "/ok" {
+		t.Fatalf("redemption honoured a supplied return: %q", got)
 	}
 }
 

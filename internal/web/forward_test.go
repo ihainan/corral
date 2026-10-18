@@ -49,7 +49,25 @@ func (f *fwdClient) get(path string, extra map[string]string) (*http.Response, s
 	return res, string(b)
 }
 
-var noRedirect = &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+// send makes a request with any method to the subdomain, with its cookie.
+func (f *fwdClient) send(method, path string, hdr map[string]string) int {
+	f.h.t.Helper()
+	req, _ := http.NewRequest(method, f.h.ts.URL+path, strings.NewReader("x=1"))
+	req.Host = f.host
+	for k, v := range hdr {
+		req.Header.Set(k, v)
+	}
+	req.AddCookie(&http.Cookie{Name: "corral_fwd", Value: f.cookie})
+	res, err := noRedirect.Do(req)
+	if err != nil {
+		f.h.t.Fatal(err)
+	}
+	io.Copy(io.Discard, res.Body)
+	res.Body.Close()
+	return res.StatusCode
+}
+
+var noRedirect =&http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 
 // open runs the ticket hand-off for a signed-in client and returns a client
 // holding the subdomain cookie.
