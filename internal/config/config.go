@@ -12,6 +12,7 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -41,7 +42,65 @@ type Config struct {
 	// Empty disables both features.
 	ForwardDomain string
 
+	// VS Code in the browser: code-server started on a host on demand and
+	// served on "code-<id>.<ForwardDomain>". Never shipped with Corral: the
+	// host downloads it (CodeServerURL), or the gateway uploads it from
+	// CodeServerDir.
+	CodeServer        bool
+	CodeServerVersion string
+	CodeServerURL     string // with {version} and optionally {arch} (amd64, arm64)
+	CodeServerDir     string // holds code-server-{version}-linux-{arch}.tar.gz; "" downloads on the host
+
 	DefaultLanguage string
+}
+
+const (
+	defaultCodeServerVersion = "4.138.0"
+	defaultCodeServerURL     = "https://github.com/coder/code-server/releases/download/v{version}/code-server-{version}-linux-{arch}.tar.gz"
+)
+
+var semverRE = regexp.MustCompile(`^[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}$`)
+
+// CodeServerFile is the release archive name for an architecture.
+func (c *Config) CodeServerFile(arch string) string {
+	return "code-server-" + c.CodeServerVersion + "-linux-" + arch + ".tar.gz"
+}
+
+// CodeServerDownload is the download URL for an architecture.
+func (c *Config) CodeServerDownload(arch string) string {
+	return strings.NewReplacer("{version}", c.CodeServerVersion, "{arch}", arch).Replace(c.CodeServerURL)
+}
+
+func (c *Config) loadCodeServer() error {
+	switch v := env("CORRAL_CODE_SERVER", ""); v {
+	case "":
+		c.CodeServer = c.ForwardDomain != ""
+	case "on":
+		if c.ForwardDomain == "" {
+			return errors.New("CORRAL_CODE_SERVER=on needs CORRAL_FORWARD_DOMAIN: VS Code is served on a forwarding subdomain")
+		}
+		c.CodeServer = true
+	case "off":
+		c.CodeServer = false
+	default:
+		return fmt.Errorf("CORRAL_CODE_SERVER must be on or off, got %q", v)
+	}
+	c.CodeServerVersion = env("CORRAL_CODE_SERVER_VERSION", defaultCodeServerVersion)
+	if !semverRE.MatchString(c.CodeServerVersion) {
+		return fmt.Errorf("CORRAL_CODE_SERVER_VERSION must look like 4.138.0, got %q", c.CodeServerVersion)
+	}
+	c.CodeServerURL = env("CORRAL_CODE_SERVER_URL", defaultCodeServerURL)
+	u, err := url.Parse(c.CodeServerURL)
+	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || !strings.Contains(c.CodeServerURL, "{version}") ||
+		strings.ContainsAny(c.CodeServerURL, "'\"\\$` \t\r\n") {
+		return fmt.Errorf("CORRAL_CODE_SERVER_URL must be an https URL containing {version} (and optionally {arch}), got %q", c.CodeServerURL)
+	}
+	if c.CodeServerDir = env("CORRAL_CODE_SERVER_DIR", ""); c.CodeServerDir != "" {
+		if st, err := os.Stat(c.CodeServerDir); err != nil || !st.IsDir() {
+			return fmt.Errorf("CORRAL_CODE_SERVER_DIR must be an existing directory, got %q", c.CodeServerDir)
+		}
+	}
+	return nil
 }
 
 // SecureCookies reports whether cookies should carry the Secure attribute.
@@ -132,6 +191,9 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("CORRAL_MAX_SESSIONS_PER_USER: invalid %q", v)
 		}
 		c.MaxSessionsPerUser = n
+	}
+	if err := c.loadCodeServer(); err != nil {
+		return nil, err
 	}
 	if v := env("CORRAL_UPLOAD_MAX_MB", ""); v != "" {
 		n, err := strconv.Atoi(v)
