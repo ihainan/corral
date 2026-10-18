@@ -303,8 +303,11 @@ func (s *Server) apiUpdateHost(w http.ResponseWriter, r *http.Request) {
 		_ = s.store.DeleteCredential(r.Context(), u.ID, *dropCred)
 	}
 	if endpointChanged {
-		// A different machine must be verified afresh.
+		// A different machine must be verified afresh, and nothing open
+		// through the old address may carry on.
 		_ = s.store.ForgetHostKey(r.Context(), u.ID, h.ID)
+		s.closeHostForwards(u.ID, h.ID)
+		s.forgetHostCode(u.ID, h.ID)
 	}
 	s.audit(r, "host.update", hostTarget(h), map[string]any{"endpoint_changed": endpointChanged})
 	updated, _ := s.store.Host(r.Context(), u.ID, h.ID)
@@ -324,6 +327,7 @@ func (s *Server) apiDeleteHost(w http.ResponseWriter, r *http.Request) {
 	// Deleted first, then closed: a connect finishing now fails its host re-check.
 	s.cancelPendingForHost(u.ID, h.ID)
 	s.closeHostForwards(u.ID, h.ID)
+	s.forgetHostCode(u.ID, h.ID)
 	s.terms.CloseHost(u.ID, h.ID, "host deleted")
 	if h.Auth == store.AuthPassword && h.CredentialID != nil {
 		_ = s.store.DeleteCredential(r.Context(), u.ID, *h.CredentialID)

@@ -12,6 +12,7 @@ export interface Bootstrap {
   setup_needed: boolean
   default_language: string
   forwarding: boolean
+  code: boolean // hosts can be opened in VS Code (code-server)
   upload_max_bytes: number
   user: Me | null
 }

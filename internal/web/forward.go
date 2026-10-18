@@ -36,7 +36,10 @@ const (
 	fwdTokenTTL       = 12 * time.Hour
 )
 
-var fwdLabelRE = regexp.MustCompile(`^([0-9]{1,5})-([a-z2-9]{4})$`)
+var (
+	fwdLabelRE  = regexp.MustCompile(`^([0-9]{1,5})-([a-z2-9]{4})$`)
+	codeLabelRE = regexp.MustCompile(`^code-([a-z2-9]{4})$`) // VS Code; port 0
+)
 
 // fwdCookieName uses the __Host- prefix on HTTPS so a forwarded app cannot
 // plant a same-named cookie for all subdomains.
@@ -47,7 +50,8 @@ func (s *Server) fwdCookieName() string {
 	return fwdCookieInsecure
 }
 
-// forwardLabel extracts port and id when host is a forwarding subdomain.
+// forwardLabel extracts port and id when host is a forwarding subdomain;
+// port is 0 for a code forward ("code-<id>").
 func (s *Server) forwardLabel(host string) (port int, id string, ok bool) {
 	if s.cfg.ForwardDomain == "" {
 		return 0, "", false
@@ -59,6 +63,9 @@ func (s *Server) forwardLabel(host string) (port int, id string, ok bool) {
 	label, found := strings.CutSuffix(host, "."+s.cfg.ForwardDomain)
 	if !found {
 		return 0, "", false
+	}
+	if m := codeLabelRE.FindStringSubmatch(label); m != nil {
+		return 0, m[1], true
 	}
 	m := fwdLabelRE.FindStringSubmatch(label)
 	if m == nil {
@@ -73,9 +80,14 @@ func (s *Server) forwardLabel(host string) (port int, id string, ok bool) {
 
 func (s *Server) forwardOrigin(f *store.Forward) string { return s.forwardOriginFor(f.Port, f.ID) }
 
-// forwardOriginFor is the exact Origin a browser sends for a forward's pages.
+// forwardOriginFor is the exact Origin a browser sends for a forward's pages
+// (port 0: a code forward).
 func (s *Server) forwardOriginFor(port int, id string) string {
-	o := s.cfg.PublicURL.Scheme + "://" + strconv.Itoa(port) + "-" + id + "." + s.cfg.ForwardDomain
+	label := strconv.Itoa(port) + "-" + id
+	if port == 0 {
+		label = "code-" + id
+	}
+	o := s.cfg.PublicURL.Scheme + "://" + label + "." + s.cfg.ForwardDomain
 	if p := s.cfg.PublicURL.Port(); p != "" {
 		o += ":" + p // non-default port (development setups)
 	}
@@ -210,11 +222,12 @@ func (s *Server) serveForward(w http.ResponseWriter, r *http.Request, port int, 
 	}
 	defer s.fwd.endStream(st)
 	f, err := s.store.ForwardByID(ctx, id)
-	if err != nil || f.Port != port {
+	if err != nil || f.Port != port || (f.Kind == store.KindCode) != (port == 0) {
 		s.fwd.dropGrant(tokHash)
 		http.Error(w, "This forwarded port no longer exists.", http.StatusNotFound)
 		return
 	}
+	code := f.Kind == store.KindCode
 	s.fwd.setForward(st, f.OwnerID, f.HostID)
 	// Sign-in, sharing and the owner's account are checked on every request:
 	// ending any of them takes effect at once.
@@ -234,6 +247,13 @@ func (s *Server) serveForward(w http.ResponseWriter, r *http.Request, port int, 
 	ctx, cancelAtExpiry := context.WithDeadline(ctx, expiry)
 	defer cancelAtExpiry()
 	defer recheckEvery(ctx, loginRecheck, func() bool { return s.forwardAllowed(ctx, g, f) }, cancel)()
+	var sock string
+	if code {
+		if sock = s.code.socket(f.OwnerID, f.HostID); sock == "" {
+			http.Error(w, "VS Code is not running on this host. Open it again from Corral.", http.StatusBadGateway)
+			return
+		}
+	}
 	fc, err := s.forwardConn(ctx, f)
 	if errors.Is(err, errFwdBusy) {
 		http.Error(w, "Too many forwarded connections are open right now. Try again in a moment.", http.StatusServiceUnavailable)
@@ -244,6 +264,9 @@ func (s *Server) serveForward(w http.ResponseWriter, r *http.Request, port int, 
 		return
 	}
 	defer s.fwd.release(fc)
+	if code {
+		s.fwd.setCodeSocket(fc, sock)
+	}
 	// Ending the request (revocation, expiry) must also free a handler stuck
 	// writing to a browser that stopped reading, or it would keep its quotas.
 	cw := &cutoffWriter{ResponseWriter: w}
@@ -368,8 +391,15 @@ func (s *Server) forwardLoginRedirect(w http.ResponseWriter, r *http.Request, ta
 // reference held until release: a running terminal session's connection when
 // there is one, otherwise a connection opened with the stored credential and
 // closed once unused for a while.
+//
+// VS Code (code forwards and setting up code-server) always gets a
+// connection of its own: it is long-lived and heavy, and a terminal must not
+// depend on it.
 func (s *Server) forwardConn(ctx context.Context, f *store.Forward) (*fwdConn, error) {
 	for _, sess := range s.terms.Running(f.OwnerID, f.HostID) {
+		if f.Kind == store.KindCode {
+			break
+		}
 		return s.fwd.borrow(sess.Client())
 	}
 	key := [2]int64{f.OwnerID, f.HostID}
@@ -439,6 +469,13 @@ func (s *Server) dialForward(ctx context.Context, ownerID, hostID int64) (*ssh.C
 func (s *Server) proxyTo(w http.ResponseWriter, r *http.Request, fc *fwdConn, f *store.Forward) {
 	target := "127.0.0.1:" + strconv.Itoa(f.Port)
 	local := "localhost:" + strconv.Itoa(f.Port)
+	unavailable := "Nothing is answering on port " + strconv.Itoa(f.Port) + " of the host."
+	if f.Kind == store.KindCode {
+		// code-server on its socket; it accepts a WebSocket when Origin and
+		// Host agree, so both say localhost.
+		target, local = codeUpstream, "localhost"
+		unavailable = "VS Code is not answering on the host. Open it again from Corral."
+	}
 	public := s.forwardOrigin(f)
 	rp := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
@@ -477,7 +514,7 @@ func (s *Server) proxyTo(w http.ResponseWriter, r *http.Request, fc *fwdConn, f 
 			return nil
 		},
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
-			http.Error(w, "Nothing is answering on port "+strconv.Itoa(f.Port)+" of the host.", http.StatusBadGateway)
+			http.Error(w, unavailable, http.StatusBadGateway)
 		},
 	}
 	rp.ServeHTTP(w, r)
@@ -592,6 +629,10 @@ func (s *Server) apiUpdateForward(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("id")
+	if f, err := s.store.ForwardByID(r.Context(), id); err == nil && f.OwnerID == currentUser(r).ID && f.Kind == store.KindCode {
+		writeError(w, http.StatusConflict, "code_private", "VS Code is only ever available to its owner")
+		return
+	}
 	if err := s.store.SetForwardSharing(r.Context(), currentUser(r).ID, id, b.Sharing); err != nil {
 		writeError(w, http.StatusNotFound, "not_found", "no such forward")
 		return

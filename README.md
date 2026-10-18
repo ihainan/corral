@@ -49,6 +49,11 @@ anyone with both can decrypt stored SSH credentials.
 | `CORRAL_MAX_SESSIONS_PER_USER` | `20` | Open sessions per user |
 | `CORRAL_UPLOAD_MAX_MB` | `100` | Upload size limit |
 | `CORRAL_LOGIN_IDLE_TIMEOUT` / `CORRAL_LOGIN_MAX_AGE` | `168h` / `720h` | Browser sign-in lifetime |
+| `CORRAL_FORWARD_DOMAIN` | — | Parent domain for forwarded ports (`<port>-<id>.`) and VS Code (`code-<id>.`); needs an `https://` public URL |
+| `CORRAL_CODE_SERVER` | `on` with a forward domain | `on` / `off`: open hosts in VS Code in the browser ([code-server](https://github.com/coder/code-server), MIT, not bundled) |
+| `CORRAL_CODE_SERVER_VERSION` | `4.138.0` | code-server release installed on hosts |
+| `CORRAL_CODE_SERVER_URL` | GitHub release | Download URL template (https), with `{version}` and optionally `{arch}` (`amd64`, `arm64`) |
+| `CORRAL_CODE_SERVER_DIR` | — | Gateway directory holding `code-server-{version}-linux-{arch}.tar.gz`; uploaded over SFTP instead of downloaded on the host (hosts without internet) |
 
 ## Develop
 

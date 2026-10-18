@@ -41,6 +41,18 @@ func TestRouteTableIsExplicit(t *testing.T) {
 			t.Errorf("admin route %s is not admin-only", key)
 		}
 	}
+	// Host-scoped routes added later are signed-in (and owner-checked by ownedHost).
+	signedIn := map[string]bool{"GET /api/hosts/{id}/code": false, "POST /api/hosts/{id}/code": false, "POST /api/hosts/{id}/code/stop": false}
+	for _, r := range h.srv.Routes() {
+		if _, ok := signedIn[r.Method+" "+r.Pattern]; ok {
+			signedIn[r.Method+" "+r.Pattern] = r.Access == SignedIn
+		}
+	}
+	for k, ok := range signedIn {
+		if !ok {
+			t.Errorf("route %s missing or not signed-in", k)
+		}
+	}
 	// An unknown API path must not fall through to anything else.
 	c := &client{h: h}
 	mustStatus(t, c.do("GET", "/api/hosts/1/../../admin/users", nil), http.StatusUnauthorized, "path traversal on API")
@@ -306,6 +318,7 @@ func TestRemoteExecCallSitesAreReviewed(t *testing.T) {
 		"web/herdr.go: w.Run(ctx)": true, // watcher loop, runs no remote command itself
 		"web/ports.go: out, err := sshx.Output(ctx, c, listenCommand, sshx.MaxOutput)":                       true,
 		`sshx/exec.go: ok, err := ch.SendRequest("exec", true, ssh.Marshal(&struct{ Command string }{cmd}))`: true, // Output's own exec; its callers are listed here
+		"web/code.go: out, err := sshx.Output(ctx, fc.client, cmd, sshx.MaxOutput)":                          true, // codeRun: only codeserver commands, checked below
 	}
 	re := regexp.MustCompile(`\.(Start|Run|Output|CombinedOutput)\(|SendRequest\("exec"`)
 	root, _ := filepath.Abs("..")
@@ -326,6 +339,18 @@ func TestRemoteExecCallSitesAreReviewed(t *testing.T) {
 		}
 		return nil
 	})
+	// codeRun runs whatever it is given, so it must only ever be given the
+	// fixed scripts of the codeserver package.
+	b, _ := os.ReadFile("code.go")
+	calls := regexp.MustCompile(`s\.codeRun\(([^)]*)`).FindAllStringSubmatch(string(b), -1)
+	if len(calls) == 0 {
+		t.Fatal("no codeRun calls found")
+	}
+	for _, c := range calls {
+		if args := strings.Split(c[1], ","); len(args) < 3 || !strings.HasPrefix(strings.TrimSpace(args[2]), "codeserver.") {
+			t.Errorf("codeRun called with a command not from the codeserver package: %s", c[0])
+		}
+	}
 }
 
 // Cross-site requests and sockets are refused.

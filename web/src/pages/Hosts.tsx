@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useState } from 'react'
-import { MoreHorizontal, Pencil, Plus, Server, Trash2, X } from 'lucide-react'
+import { CircleStop, Code2, MoreHorizontal, Pencil, Plus, Server, Trash2, X } from 'lucide-react'
 import { api, type Host, type SessionInfo } from '../api'
 import { relTime, t } from '../i18n'
 import { linkHandler, navigate } from '../router'
 import { Confirm, EmptyState, LoadError, Menu } from '../components/ui'
 import { useConnect } from '../connect'
+import { useSession } from '../app'
+import { useCode } from '../terminal/CodeDialog'
 
 export function HostsPage() {
   const [hosts, setHosts] = useState<Host[] | null>(null)
@@ -45,6 +47,12 @@ export function HostsPage() {
   }, [load, refreshSessions])
 
   const { connect, busyHost, dialogs } = useConnect((s) => navigate('/t/' + s.id))
+  const { boot } = useSession()
+  const code = useCode()
+  const refreshCode = code.refresh
+  useEffect(() => {
+    if (boot.code && hosts) refreshCode(hosts.filter((h) => h.auth !== 'ask').map((h) => h.id))
+  }, [boot.code, hosts, refreshCode])
   const running = sessions.filter((s) => s.state === 'running')
   const byHost = (id: number) => running.filter((s) => s.host_id === id).sort((a, b) => a.created_at - b.created_at)
 
@@ -140,6 +148,8 @@ export function HostsPage() {
                       )}
                       items={() => [
                         { label: t('common.edit'), icon: <Pencil size={16} />, href: `/hosts/${h.id}/edit`, onSelect: () => navigate(`/hosts/${h.id}/edit`) },
+                        boot.code && h.auth !== 'ask' ? { label: t('code.open'), icon: <Code2 size={16} />, onSelect: () => code.open(h.id, h.name) } : null,
+                        boot.code && code.running[h.id] ? { label: t('code.stop'), icon: <CircleStop size={16} />, onSelect: () => code.stop(h.id) } : null,
                         { label: t('host.delete'), icon: <Trash2 size={16} />, danger: true, separator: true, onSelect: () => deleteHost(h) },
                       ]}
                     />
@@ -170,6 +180,7 @@ export function HostsPage() {
       )}
       {confirm}
       {dialogs}
+      {code.dialog}
     </main>
   )
 }

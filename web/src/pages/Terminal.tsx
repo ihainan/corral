@@ -5,7 +5,7 @@ import { FitAddon } from '@xterm/addon-fit'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import { WebglAddon } from '@xterm/addon-webgl'
-import { ArrowUp, Check, ChevronDown, ChevronLeft, Globe, LayoutGrid, ImagePlus, MessageSquareText, MoreVertical, Minus, Palette, Paperclip, Plus, TextSelect, Keyboard as KeyboardIcon, Power, RotateCw, Server, X } from 'lucide-react'
+import { ArrowUp, Check, ChevronDown, ChevronLeft, CircleStop, Code2, Globe, LayoutGrid, ImagePlus, MessageSquareText, MoreVertical, Minus, Palette, Paperclip, Plus, TextSelect, Keyboard as KeyboardIcon, Power, RotateCw, Server, X } from 'lucide-react'
 import { api, ApiError, errorText, uploadFile, type HerdrSummary, type Host, type SessionInfo } from '../api'
 import { t } from '../i18n'
 import { navigate } from '../router'
@@ -20,6 +20,7 @@ import { chromeVars } from '../terminal/themes'
 import { SchemeDialog } from '../terminal/SchemePicker'
 import { HerdrPanel } from '../terminal/HerdrPanel'
 import { PortsDialog, openForward } from '../terminal/PortsDialog'
+import { useCode } from '../terminal/CodeDialog'
 import { useSession } from '../app'
 
 const isTouch = window.matchMedia('(pointer: coarse)').matches || navigator.maxTouchPoints > 0
@@ -120,6 +121,12 @@ export function TerminalPage({ id }: { id: string }) {
   const panelOpen = panel && panelSheet === sheetPanel
   const { boot } = useSession()
   const [portsOpen, setPortsOpen] = useState(false)
+  const code = useCode()
+  const refreshCode = code.refresh
+  const codeHost = boot.code ? info?.host_id : undefined
+  useEffect(() => {
+    if (codeHost) refreshCode([codeHost])
+  }, [codeHost, refreshCode])
   const [schemesOpen, setSchemesOpen] = useState(false)
   const scheme = termScheme()
   // Links to localhost in the terminal open through port forwarding.
@@ -746,6 +753,8 @@ export function TerminalPage({ id }: { id: string }) {
     { label: t('term.upload'), icon: <ImagePlus size={16} />, onSelect: () => fileRef.current?.click() },
     { label: t('term.copyMode'), icon: <TextSelect size={16} />, onSelect: openCopyMode },
     boot.forwarding && info ? { label: t('ports.title'), icon: <Globe size={16} />, onSelect: () => setPortsOpen(true) } : null,
+    boot.code && info ? { label: t('code.open'), icon: <Code2 size={16} />, onSelect: () => code.open(info.host_id, info.host_name) } : null,
+    boot.code && info && code.running[info.host_id] ? { label: t('code.stop'), icon: <CircleStop size={16} />, onSelect: () => code.stop(info.host_id) } : null,
     { label: t('settings.termTheme'), icon: <Palette size={16} />, separator: true, onSelect: () => setSchemesOpen(true) },
     { label: t('term.fontLarger'), icon: <Plus size={16} />, onSelect: () => setPrefs({ fontSize: Math.min(28, getPrefs().fontSize + 1) }) },
     { label: t('term.fontSmaller'), icon: <Minus size={16} />, onSelect: () => setPrefs({ fontSize: Math.max(9, getPrefs().fontSize - 1) }) },
@@ -949,6 +958,7 @@ export function TerminalPage({ id }: { id: string }) {
       {copyText !== null && <CopyMode text={copyText} onClose={() => setCopyText(null)} />}
       {schemesOpen && <SchemeDialog onClose={() => setSchemesOpen(false)} />}
       {portsOpen && info && <PortsDialog hostId={info.host_id} onClose={() => setPortsOpen(false)} />}
+      {code.dialog}
       {confirm}
       {dialogs}
     </div>

@@ -150,11 +150,18 @@ const (
 	ShareUsers   = "users"   // anyone signed in to this Corral
 )
 
+// Forward kinds.
+const (
+	KindPort = "port" // a TCP port on the host
+	KindCode = "code" // the owner's code-server on the host; Port is 0, always private
+)
+
 type Forward struct {
 	ID        string `json:"id"`
 	OwnerID   int64  `json:"-"`
 	HostID    int64  `json:"host_id"`
 	Port      int    `json:"port"`
+	Kind      string `json:"kind"`
 	Sharing   string `json:"sharing"`
 	CreatedAt int64  `json:"created_at"`
 }
@@ -176,6 +183,19 @@ func newForwardID() (string, error) {
 // EnsureForward returns the forward for (owner, host, port), creating it with
 // a fresh random id if needed.
 func (s *Store) EnsureForward(ctx context.Context, ownerID, hostID int64, port int) (*Forward, error) {
+	if port < 1 {
+		return nil, errors.New("invalid port")
+	}
+	return s.ensureForward(ctx, ownerID, hostID, port, KindPort)
+}
+
+// EnsureCodeForward returns the owner's code forward for a host (one per
+// owner and host, stable while it exists), creating it if needed.
+func (s *Store) EnsureCodeForward(ctx context.Context, ownerID, hostID int64) (*Forward, error) {
+	return s.ensureForward(ctx, ownerID, hostID, 0, KindCode)
+}
+
+func (s *Store) ensureForward(ctx context.Context, ownerID, hostID int64, port int, kind string) (*Forward, error) {
 	if f, err := s.forwardFor(ctx, ownerID, hostID, port); err == nil {
 		return f, nil
 	}
@@ -185,8 +205,8 @@ func (s *Store) EnsureForward(ctx context.Context, ownerID, hostID int64, port i
 			return nil, err
 		}
 		_, err = s.db.ExecContext(ctx,
-			`INSERT INTO forwards (id, owner_id, host_id, port, created_at)
-			 SELECT ?, ?, id, ?, ? FROM hosts WHERE owner_id = ? AND id = ?`, id, ownerID, port, s.unix(), ownerID, hostID)
+			`INSERT INTO forwards (id, owner_id, host_id, port, kind, created_at)
+			 SELECT ?, ?, id, ?, ?, ? FROM hosts WHERE owner_id = ? AND id = ?`, id, ownerID, port, kind, s.unix(), ownerID, hostID)
 		if err == nil {
 			return s.forwardFor(ctx, ownerID, hostID, port)
 		}
@@ -202,7 +222,7 @@ func (s *Store) EnsureForward(ctx context.Context, ownerID, hostID int64, port i
 
 func scanForward(row interface{ Scan(...any) error }) (*Forward, error) {
 	f := &Forward{}
-	if err := row.Scan(&f.ID, &f.OwnerID, &f.HostID, &f.Port, &f.Sharing, &f.CreatedAt); err != nil {
+	if err := row.Scan(&f.ID, &f.OwnerID, &f.HostID, &f.Port, &f.Kind, &f.Sharing, &f.CreatedAt); err != nil {
 		return nil, notFound(err)
 	}
 	return f, nil
@@ -210,18 +230,18 @@ func scanForward(row interface{ Scan(...any) error }) (*Forward, error) {
 
 func (s *Store) forwardFor(ctx context.Context, ownerID, hostID int64, port int) (*Forward, error) {
 	return scanForward(s.db.QueryRowContext(ctx,
-		`SELECT id, owner_id, host_id, port, sharing, created_at FROM forwards WHERE owner_id = ? AND host_id = ? AND port = ?`, ownerID, hostID, port))
+		`SELECT id, owner_id, host_id, port, kind, sharing, created_at FROM forwards WHERE owner_id = ? AND host_id = ? AND port = ?`, ownerID, hostID, port))
 }
 
 // ForwardByID looks a forward up by its public id; callers must check access.
 func (s *Store) ForwardByID(ctx context.Context, id string) (*Forward, error) {
 	return scanForward(s.db.QueryRowContext(ctx,
-		`SELECT id, owner_id, host_id, port, sharing, created_at FROM forwards WHERE id = ?`, id))
+		`SELECT id, owner_id, host_id, port, kind, sharing, created_at FROM forwards WHERE id = ?`, id))
 }
 
 func (s *Store) ListForwards(ctx context.Context, ownerID int64) ([]*Forward, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, owner_id, host_id, port, sharing, created_at FROM forwards WHERE owner_id = ? ORDER BY created_at DESC`, ownerID)
+		`SELECT id, owner_id, host_id, port, kind, sharing, created_at FROM forwards WHERE owner_id = ? AND kind = 'port' ORDER BY created_at DESC`, ownerID)
 	if err != nil {
 		return nil, err
 	}
@@ -237,8 +257,10 @@ func (s *Store) ListForwards(ctx context.Context, ownerID int64) ([]*Forward, er
 	return out, rows.Err()
 }
 
+// SetForwardSharing changes a port forward's sharing; code forwards stay private.
 func (s *Store) SetForwardSharing(ctx context.Context, ownerID int64, id, sharing string) error {
-	return affectedOrNotFound(s.db.ExecContext(ctx, `UPDATE forwards SET sharing = ? WHERE owner_id = ? AND id = ?`, sharing, ownerID, id))
+	return affectedOrNotFound(s.db.ExecContext(ctx,
+		`UPDATE forwards SET sharing = ? WHERE owner_id = ? AND id = ? AND kind = 'port'`, sharing, ownerID, id))
 }
 
 func (s *Store) DeleteForward(ctx context.Context, ownerID int64, id string) error {
