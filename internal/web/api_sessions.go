@@ -503,7 +503,7 @@ func openSFTP(c *ssh.Client) (*sftp.Client, func(), error) {
 			done <- result{err: err}
 			return
 		}
-		if !hold(func() { sess.Close() }) {
+		if !hold(func() { go sess.Close() }) {
 			return
 		}
 		fail := func(err error) { sess.Close(); done <- result{err: err} }
@@ -527,11 +527,13 @@ func openSFTP(c *ssh.Client) (*sftp.Client, func(), error) {
 		outR, outW := io.Pipe()
 		inR, inW := io.Pipe()
 		var once sync.Once
+		// Local pipes close at once; the channel close needs the transport and
+		// may wait on a stalled host, so it runs in the background.
 		closeAll := func() {
 			once.Do(func() {
 				outR.CloseWithError(io.ErrClosedPipe)
 				inW.CloseWithError(io.ErrClosedPipe)
-				sess.Close()
+				go sess.Close()
 			})
 		}
 		if !hold(closeAll) {
@@ -567,10 +569,11 @@ func openSFTP(c *ssh.Client) (*sftp.Client, func(), error) {
 	case <-t.C:
 		mu.Lock()
 		abandoned = true
-		if release != nil {
-			release()
-		}
+		rel := release
 		mu.Unlock()
+		if rel != nil {
+			rel()
+		}
 		return nil, nil, errors.New("file transfer did not start in time")
 	}
 }
@@ -607,7 +610,14 @@ func (s *Server) apiUpload(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "unauthorized", "please sign in")
 		return
 	}
-	stopBody := context.AfterFunc(ctx, func() { r.Body.Close() })
+	// Reading the body ends with the login at the latest; cancelling also
+	// interrupts a read that is blocked on a client that stopped sending.
+	rc := http.NewResponseController(w)
+	_ = rc.SetReadDeadline(expiry)
+	stopBody := context.AfterFunc(ctx, func() {
+		_ = rc.SetReadDeadline(time.Now())
+		r.Body.Close()
+	})
 	defer stopBody()
 	mr, err := r.MultipartReader()
 	if err != nil {
