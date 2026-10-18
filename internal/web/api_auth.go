@@ -190,15 +190,21 @@ func (s *Server) apiChangePassword(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
-// Settings are one JSON object of fields plus "_w": for each field the
-// writer (one page load of the app) and that writer's request number that
-// last set it. A later arrival wins, which is all settings need, except that
-// a writer's own older request never undoes its newer one (a keepalive sent
-// while the page closed may overtake a normal save). No client clock is
-// involved. Every request also names the account it was made for, so a tab
-// that missed a sign-in elsewhere cannot write into the new account.
+// Settings are one JSON object of fields plus "_ws": for each writer (one
+// page load of the app) heard from recently, the highest request number it
+// sent for each field. A later arrival wins, which is all settings need,
+// except that a writer's own older request never undoes its newer one (a
+// keepalive sent while the page closed may overtake a normal save), also
+// when other writers set the field in between. No client clock is involved.
+// Every request also names the account it was made for, so a tab that
+// missed a sign-in elsewhere cannot write into the new account.
 
-const settingsWriters = "_w"
+const (
+	settingsWriters = "_ws"
+	// Writers remembered per account, the least recently heard from going
+	// first; a request from a writer forgotten since is taken as new.
+	maxSettingWriters = 16
+)
 
 // settingRules lists the known settings and checks their values.
 var settingRules = map[string]func(json.RawMessage) bool{
@@ -247,9 +253,10 @@ func isBool(raw json.RawMessage) bool {
 	return json.Unmarshal(raw, &v) == nil
 }
 
+// settingWriter is one writer's entry in settingsWriters.
 type settingWriter struct {
-	ID  string `json:"id"`
-	Seq int64  `json:"seq"`
+	ID  string           `json:"id"`
+	Seq map[string]int64 `json:"seq"` // per field, the highest request number it sent
 }
 
 var writerIDRE = regexp.MustCompile(`^[A-Za-z0-9_-]{8,64}$`)
@@ -306,18 +313,31 @@ func (s *Server) apiPatchSettings(w http.ResponseWriter, r *http.Request) {
 		if json.Unmarshal([]byte(old), &obj) != nil || obj == nil {
 			obj = map[string]json.RawMessage{}
 		}
-		writers := map[string]settingWriter{}
+		var writers []settingWriter // least recently heard from first
 		if raw, ok := obj[settingsWriters]; ok {
 			_ = json.Unmarshal(raw, &writers)
 		}
-		delete(obj, "_ts") // bookkeeping of an earlier format
+		delete(obj, "_ts") // bookkeeping of earlier formats
+		delete(obj, "_w")
+		// This writer moves to the end (heard from last), with its record.
+		me := settingWriter{ID: b.Writer, Seq: map[string]int64{}}
+		if i := slices.IndexFunc(writers, func(w settingWriter) bool { return w.ID == b.Writer }); i >= 0 {
+			if writers[i].Seq != nil {
+				me.Seq = writers[i].Seq
+			}
+			writers = slices.Delete(writers, i, i+1)
+		}
 		for k, v := range b.Set {
-			if prev, ok := writers[k]; ok && prev.ID == b.Writer && prev.Seq >= b.Seq {
+			if me.Seq[k] >= b.Seq {
 				superseded = append(superseded, k) // this writer already sent something newer
 				continue
 			}
-			obj[k], writers[k] = v, settingWriter{ID: b.Writer, Seq: b.Seq}
+			obj[k], me.Seq[k] = v, b.Seq
 			accepted = append(accepted, k)
+		}
+		writers = append(writers, me)
+		if n := len(writers) - maxSettingWriters; n > 0 {
+			writers = writers[n:]
 		}
 		rawW, _ := json.Marshal(writers)
 		obj[settingsWriters] = rawW

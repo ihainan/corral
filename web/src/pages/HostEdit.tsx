@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useState, type FormEvent } from 'react'
 import { ArrowLeft, ChevronRight, KeyRound } from 'lucide-react'
 import { api, ApiError, errorText, type Host, type KeyCred } from '../api'
 import { t } from '../i18n'
@@ -25,29 +25,51 @@ export function HostEditPage({ id }: { id?: number }) {
   const [keys, setKeys] = useState<KeyCred[]>([])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<{ field?: string; text: string } | null>(null)
+  // The host's version the form shows; an edit is refused if it was saved
+  // elsewhere since (stale), and the form can then be opened again.
+  const [version, setVersion] = useState<number | undefined>(undefined)
+  const [stale, setStale] = useState(false)
+
+  const fill = useCallback((h: Host) => {
+    setName(h.name)
+    setAddress(h.address)
+    setPort(String(h.port))
+    setUsername(h.username)
+    setAuth(h.auth)
+    setPassword('')
+    setHadPassword(h.auth === 'password')
+    setCredentialId(h.auth === 'key' ? h.credential_id : null)
+    setPersist(h.persistence)
+    setHerdrName(h.herdr_session ?? '')
+    setTmuxName(h.tmux_session)
+    setVersion(h.version)
+    setLoaded(true)
+  }, [])
 
   useEffect(() => {
     api<KeyCred[]>('GET', '/api/credentials').then(setKeys).catch(() => {})
     if (!editing) return
     api<Host>('GET', '/api/hosts/' + id)
-      .then((h) => {
-        setName(h.name)
-        setAddress(h.address)
-        setPort(String(h.port))
-        setUsername(h.username)
-        setAuth(h.auth)
-        setHadPassword(h.auth === 'password')
-        setCredentialId(h.auth === 'key' ? h.credential_id : null)
-        setPersist(h.persistence)
-        setHerdrName(h.herdr_session ?? '')
-        setTmuxName(h.tmux_session)
-        setLoaded(true)
-      })
+      .then(fill)
       .catch((e) => {
         toast(errorText(e), true)
         navigate('/', true)
       })
-  }, [editing, id, toast])
+  }, [editing, id, toast, fill])
+
+  const reopen = async () => {
+    if (busy) return
+    setBusy(true)
+    try {
+      fill(await api<Host>('GET', '/api/hosts/' + id))
+      setError(null)
+      setStale(false)
+    } catch (e) {
+      toast(errorText(e), true)
+    } finally {
+      setBusy(false)
+    }
+  }
 
   const [generating, setGenerating] = useState(false)
   const generateKey = async () => {
@@ -96,11 +118,12 @@ export function HostEditPage({ id }: { id?: number }) {
       herdr_session: persist === 'herdr' ? herdrName : keep(herdrName),
     }
     try {
-      if (editing) await api('PUT', '/api/hosts/' + id, body)
+      if (editing) await api('PUT', '/api/hosts/' + id, { ...body, version })
       else await api('POST', '/api/hosts', body)
       navigate('/')
     } catch (err) {
       const field = err instanceof ApiError ? err.field : undefined
+      setStale(err instanceof ApiError && err.code === 'host_changed')
       setError({ field, text: err instanceof ApiError && err.code === 'invalid_field' ? fieldMessage(field, err.message) : errorText(err) })
       if (field === 'tmux_session' || field === 'herdr_session') setAdvOpen(true)
       setBusy(false)
@@ -222,6 +245,11 @@ export function HostEditPage({ id }: { id?: number }) {
         </details>
 
         {error && !error.field && <p className="err" role="alert">{error.text}</p>}
+        {stale && (
+          <div>
+            <button type="button" className="btn" onClick={reopen} disabled={busy}>{t('host.reopen')}</button>
+          </div>
+        )}
         <div className="form-actions">
           <a className="btn" href="/" onClick={linkHandler('/')}>{t('common.cancel')}</a>
           <button className="btn btn-primary" disabled={busy}>{busy ? t('common.saving') : t('common.save')}</button>

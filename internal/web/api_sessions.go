@@ -140,7 +140,12 @@ func (s *Server) openSession(ctx context.Context, w http.ResponseWriter, r *http
 	if h.Persistence != store.PersistNone {
 		for _, rs := range s.terms.Running(u.ID, h.ID) {
 			if rs.HostConfig == cfg {
-				writeJSON(w, http.StatusOK, rs.Info())
+				// Marked as reused: a client that gave up on this open must
+				// not close it, as other devices may be using it.
+				writeJSON(w, http.StatusOK, struct {
+					term.Info
+					Reused bool `json:"reused"`
+				}{rs.Info(), true})
 				return
 			}
 		}
@@ -323,6 +328,8 @@ func (s *Server) apiCloseSession(w http.ResponseWriter, r *http.Request) {
 //           {"t":"state","state":"exited|lost|closed","code":N,"reason":"…","offset":N}
 //           (sent after every output byte up to offset)
 //           {"t":"pong","ts":N}
+//           {"t":"error","code":"too_many_viewers"}  then close 4429: the
+//           session already has as many viewers as it allows
 // Browser → server
 //   binary: keyboard input
 //   text:   {"t":"resize","cols":N,"rows":N} | {"t":"ping","ts":N}
@@ -332,6 +339,9 @@ func (s *Server) apiCloseSession(w http.ResponseWriter, r *http.Request) {
 const (
 	maxFrame          = 64 << 10
 	maxSocketsPerUser = 32
+	// statusTooManyViewers closes a socket the session has no room for
+	// (application range 4000-4999; 429 as in Too Many Requests).
+	statusTooManyViewers websocket.StatusCode = 4429
 )
 
 // loginRecheck is how often long-lived connections (terminal sockets,
@@ -386,7 +396,12 @@ func (s *Server) apiSessionSocket(w http.ResponseWriter, r *http.Request) {
 
 	sub, backlog, start, reset, ev, err := sess.Attach(offset, have)
 	if err != nil {
-		c.Close(websocket.StatusPolicyViolation, "too many windows for this session")
+		// Said in a frame and a close code of its own, so the browser stops
+		// reconnecting instead of retrying a socket that is refused anyway.
+		wctx, wcancel := context.WithTimeout(ctx, 10*time.Second)
+		_ = c.Write(wctx, websocket.MessageText, []byte(`{"t":"error","code":"too_many_viewers"}`))
+		wcancel()
+		c.Close(statusTooManyViewers, "too_many_viewers")
 		return
 	}
 	defer sess.Detach(sub)

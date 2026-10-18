@@ -30,18 +30,21 @@ type Host struct {
 	CreatedAt       int64  `json:"created_at"`
 	UpdatedAt       int64  `json:"updated_at"`
 	LastConnectedAt int64  `json:"last_connected_at"`
+	// Version changes with every saved edit; an edit is only saved while
+	// the host is still at the version it was loaded at.
+	Version int64 `json:"version"`
 	// ConnVersion changes with every edit to what a connection to the host
 	// is (target, user, authentication, saved password) or the key it trusts.
 	ConnVersion int64 `json:"-"`
 }
 
-const hostCols = `id, owner_id, name, address, port, username, auth, credential_id, persistence, tmux_session, herdr_session, created_at, updated_at, last_connected_at, conn_version`
+const hostCols = `id, owner_id, name, address, port, username, auth, credential_id, persistence, tmux_session, herdr_session, created_at, updated_at, last_connected_at, conn_version, version`
 
 func scanHost(row interface{ Scan(...any) error }) (*Host, error) {
 	h := &Host{}
 	var cred sql.NullInt64
 	err := row.Scan(&h.ID, &h.OwnerID, &h.Name, &h.Address, &h.Port, &h.Username, &h.Auth, &cred,
-		&h.Persistence, &h.TmuxSession, &h.HerdrSession, &h.CreatedAt, &h.UpdatedAt, &h.LastConnectedAt, &h.ConnVersion)
+		&h.Persistence, &h.TmuxSession, &h.HerdrSession, &h.CreatedAt, &h.UpdatedAt, &h.LastConnectedAt, &h.ConnVersion, &h.Version)
 	if err != nil {
 		return nil, notFound(err)
 	}
@@ -85,7 +88,8 @@ func (s *Store) CreateHost(ctx context.Context, h *Host) (*Host, error) {
 	return s.Host(ctx, h.OwnerID, id)
 }
 
-// UpdateHost saves a host; with newConn it also bumps the connection version.
+// UpdateHost saves a host if it is still at h.Version (ErrNotFound if not)
+// and bumps that; with newConn it also bumps the connection version.
 func (s *Store) UpdateHost(ctx context.Context, h *Host, newConn bool) error {
 	bump := 0
 	if newConn {
@@ -93,10 +97,10 @@ func (s *Store) UpdateHost(ctx context.Context, h *Host, newConn bool) error {
 	}
 	return affectedOrNotFound(s.db.ExecContext(ctx,
 		`UPDATE hosts SET name = ?, address = ?, port = ?, username = ?, auth = ?, credential_id = ?, persistence = ?, tmux_session = ?,
-		   herdr_session = ?, updated_at = ?, conn_version = conn_version + ?
-		 WHERE owner_id = ? AND id = ?`,
+		   herdr_session = ?, updated_at = ?, conn_version = conn_version + ?, version = version + 1
+		 WHERE owner_id = ? AND id = ? AND version = ?`,
 		h.Name, h.Address, h.Port, h.Username, h.Auth, h.CredentialID, h.Persistence, h.TmuxSession, h.HerdrSession, s.unix(), bump,
-		h.OwnerID, h.ID))
+		h.OwnerID, h.ID, h.Version))
 }
 
 // BumpConnVersion marks every existing connection to the host as outdated.

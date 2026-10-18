@@ -434,6 +434,11 @@ func TestPersistentHostsKeepOneSession(t *testing.T) {
 	if a.json()["id"] != b.json()["id"] {
 		t.Fatalf("a second session was started for a tmux host: %v vs %v", a.json()["id"], b.json()["id"])
 	}
+	// Only the reused answer says so: a client cancelling its open must not
+	// close a session another device is using.
+	if a.json()["reused"] == true || b.json()["reused"] != true || b.json()["state"] != "running" {
+		t.Fatalf("reuse not marked as such: new %s, reused %s", a.Body, b.Body)
+	}
 
 	plain := admin.do("POST", "/api/hosts", map[string]any{"name": "plain", "address": "127.0.0.1", "port": srv.Addr.Port,
 		"username": "alice", "auth": "password", "password": "alice-pass", "persistence": "none"})
@@ -538,6 +543,29 @@ func TestSettingsPatchOrderingValidationAndAccount(t *testing.T) {
 	if got := admin.do("GET", "/api/me/settings", nil).json(); got["termTheme"] != "nord" {
 		t.Fatalf("a later arrival from another page did not win: %v", got)
 	}
+	// A's older request still loses after B wrote the field in between.
+	r = patch("pageAAAA", 1, map[string]any{"termTheme": "dracula"})
+	if sup, _ := r.json()["superseded"].([]any); r.Status != 200 || len(sup) != 1 {
+		t.Fatalf("an older request was revived by another writer: %d %s", r.Status, r.Body)
+	}
+	if got := admin.do("GET", "/api/me/settings", nil).json(); got["termTheme"] != "nord" {
+		t.Fatalf("an older request was revived by another writer: %v", got)
+	}
+	// Writers are remembered within a bound, the least recently heard from
+	// forgotten first.
+	for i := range maxSettingWriters {
+		mustStatus(t, patch(fmt.Sprintf("pageC%03d", i), 1, map[string]any{"keybar": true}), 200, "another page")
+	}
+	mustStatus(t, patch("pageAAAA", 1, map[string]any{"termTheme": "dracula"}), 200, "A seq 1 again")
+	if got := admin.do("GET", "/api/me/settings", nil).json(); got["termTheme"] != "dracula" {
+		t.Fatalf("a forgotten writer is still remembered: %v", got)
+	}
+	data, _ := h.store.UserSettings(context.Background(), int64(uid.(float64)))
+	var stored map[string]json.RawMessage
+	var writers []settingWriter
+	if json.Unmarshal([]byte(data), &stored) != nil || json.Unmarshal(stored[settingsWriters], &writers) != nil || len(writers) != maxSettingWriters {
+		t.Fatalf("writers kept: %d (%s)", len(writers), data)
+	}
 	mustStatus(t, patch("pageAAAA", 3, map[string]any{"fontSize": map[string]any{}}), 400, "object as font size")
 	mustStatus(t, patch("pageAAAA", 3, map[string]any{"fontSize": 99}), 400, "font size out of range")
 	mustStatus(t, patch("pageAAAA", 3, map[string]any{"_w": 1}), 400, "reserved name")
@@ -548,4 +576,72 @@ func TestSettingsPatchOrderingValidationAndAccount(t *testing.T) {
 	if r := admin.do("PUT", "/api/me/settings", map[string]any{"termTheme": "x"}); r.Status == 200 {
 		t.Fatal("whole-object PUT still overwrites settings")
 	}
+}
+
+// A session with as many viewers as it allows refuses one more with a reason
+// the browser can act on (stop reconnecting) instead of a plain close.
+func TestTooManyViewersIsSaid(t *testing.T) {
+	h := newHarness(t)
+	admin := h.admin()
+	srv := h.sshServer(t.TempDir())
+	r := admin.do("POST", "/api/sessions", map[string]any{"host_id": h.hostFor(admin, srv.Addr.Port)})
+	mustStatus(t, r, 201, "open")
+	id := r.json()["id"].(string)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for i := 0; i < 8; i++ {
+		ws, err := h.dialWS(admin, id, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer ws.CloseNow()
+		if _, b, err := ws.Read(ctx); err != nil || !bytes.Contains(b, []byte(`"hello"`)) {
+			t.Fatalf("viewer %d: %s %v", i+1, b, err)
+		}
+	}
+	ws, err := h.dialWS(admin, id, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ws.CloseNow()
+	typ, b, err := ws.Read(ctx)
+	if err != nil || typ != websocket.MessageText || string(b) != `{"t":"error","code":"too_many_viewers"}` {
+		t.Fatalf("one viewer too many got %v %s %v", typ, b, err)
+	}
+	_, _, err = ws.Read(ctx)
+	var ce websocket.CloseError
+	if !errors.As(err, &ce) || ce.Code != 4429 || ce.Reason != "too_many_viewers" {
+		t.Fatalf("one viewer too many closed with %v", err)
+	}
+}
+
+// An edit from a form loaded before the host was saved elsewhere is refused
+// instead of silently restoring the older settings.
+func TestStaleHostEditIsRefused(t *testing.T) {
+	h := newHarness(t)
+	admin := h.admin()
+	id := h.hostFor(admin, 2222)
+	path := fmt.Sprintf("/api/hosts/%d", id)
+	loaded := admin.do("GET", path, nil).json()["version"]
+	edit := func(address string, version any) resp {
+		body := map[string]any{"name": "box", "address": address, "port": 2222, "username": "alice", "auth": "password", "persistence": "tmux"}
+		if version != nil {
+			body["version"] = version
+		}
+		return admin.do("PUT", path, body)
+	}
+	a := edit("10.0.0.1", loaded) // device A saves first
+	mustStatus(t, a, 200, "first edit")
+	if a.json()["version"] == loaded {
+		t.Fatalf("version not bumped by an edit: %s", a.Body)
+	}
+	b := edit("127.0.0.1", loaded) // device B, from a form loaded before that
+	if b.Status != 409 || b.code() != "host_changed" {
+		t.Fatalf("a stale edit was not refused: %d %s", b.Status, b.Body)
+	}
+	if got := admin.do("GET", path, nil).json(); got["address"] != "10.0.0.1" || got["version"] != a.json()["version"] {
+		t.Fatalf("a refused edit changed the host: %v", got)
+	}
+	mustStatus(t, edit("10.0.0.2", a.json()["version"]), 200, "edit from a fresh form")
+	mustStatus(t, edit("10.0.0.3", nil), 200, "edit without a version")
 }

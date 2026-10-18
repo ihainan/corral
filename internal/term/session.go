@@ -95,6 +95,13 @@ type Session struct {
 	input  chan []byte
 	pumps  sync.WaitGroup
 
+	// sizeMu puts changes of the remote terminal size in one order: it is
+	// held from recording a size until it was sent, so the host always ends
+	// up at the size recorded last. Taken before mu, never while holding it.
+	sizeMu  sync.Mutex
+	ptySize [2]int                     // cols, rows the host was last sent; under sizeMu
+	winch   func(rows, cols int) error // sends a size to the host (ssh.Session.WindowChange)
+
 	mu        sync.Mutex
 	buf       *ring
 	subs      map[*Sub]struct{}
@@ -328,10 +335,14 @@ func (s *Session) Write(ctx context.Context, p []byte) error {
 	return nil
 }
 
+// Resize records the size a viewer asked for, tells the other viewers, and
+// sends it to the host.
 func (s *Session) Resize(cols, rows int) error {
 	if cols < 2 || rows < 1 || cols > 1000 || rows > 500 {
 		return errors.New("invalid size")
 	}
+	s.sizeMu.Lock()
+	defer s.sizeMu.Unlock()
 	s.mu.Lock()
 	same := s.cols == cols && s.rows == rows
 	s.cols, s.rows = cols, rows
@@ -349,24 +360,39 @@ func (s *Session) Resize(cols, rows int) error {
 		}
 	}
 	s.mu.Unlock()
-	if same || !running {
+	// Compared with what the host was sent, not with what was recorded: a
+	// size whose sending failed is sent again when it is reported again.
+	if !running || s.ptySize == [2]int{cols, rows} {
 		return nil
 	}
-	return s.ssh.WindowChange(rows, cols)
+	return s.sendSize(cols, rows)
+}
+
+// sendSize sends a size to the host; called with sizeMu held.
+func (s *Session) sendSize(cols, rows int) error {
+	if err := s.winch(rows, cols); err != nil {
+		return err
+	}
+	s.ptySize = [2]int{cols, rows}
+	return nil
 }
 
 // Redraw nudges full-screen programs (tmux, vim) to repaint by briefly changing
 // the window size. Used after a full replay, whose head may be incomplete.
+// It holds the size for its whole run, so a resize asked for meanwhile is
+// applied after it and is never undone by it.
 func (s *Session) Redraw() {
+	s.sizeMu.Lock()
+	defer s.sizeMu.Unlock()
 	s.mu.Lock()
 	cols, rows, running := s.cols, s.rows, s.state == StateRunning
 	s.mu.Unlock()
 	if !running || cols < 3 {
 		return
 	}
-	_ = s.ssh.WindowChange(rows, cols-1)
+	_ = s.sendSize(cols-1, rows)
 	time.Sleep(60 * time.Millisecond)
-	_ = s.ssh.WindowChange(rows, cols)
+	_ = s.sendSize(cols, rows)
 }
 
 // end moves the session to a final state once and tells every viewer. When the

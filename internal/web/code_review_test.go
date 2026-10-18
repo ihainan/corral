@@ -510,3 +510,42 @@ func TestCodeServerRevokedAfterItsStart(t *testing.T) {
 	}
 	eventually(t, "the instance started for a revoked job still runs", func() bool { return !alive(pid) })
 }
+
+// Opening VS Code again (from a second device) checks the running instance
+// once more; until that is done, the tabs already open on it keep working.
+// A check that fails takes the instance out of service.
+func TestCodeServerReopenKeepsOpenTabsServed(t *testing.T) {
+	e := newCodeEnv(t, false)
+	ownerID := e.h.userID(e.owner)
+	st, _ := e.start(e.owner)
+	if st["state"] != codeReady {
+		t.Fatalf("start: %v", st)
+	}
+	f, _ := e.openCode(e.owner, st)
+	pid := e.pid()
+	release := e.holdTurn(t) // the second open waits here, in "checking"
+	mustStatus(t, e.owner.do("POST", fmt.Sprintf("/api/hosts/%d/code", e.hostID), nil), 202, "open again")
+	if st := e.h.srv.code.status(ownerID, e.hostID); st.State != codeChecking {
+		t.Fatalf("second open: %+v", st)
+	}
+	if res, body := f.get("/", nil); res.StatusCode != 200 || !strings.Contains(body, "fake vscode") {
+		t.Fatalf("the open tab during a second open: %d %s", res.StatusCode, body)
+	}
+	release()
+	if st, _ := e.waitCode(e.owner); st["state"] != codeReady || e.pid() != pid {
+		t.Fatalf("second open: %v (pid %d, was %d)", st, e.pid(), pid)
+	}
+	if res, _ := f.get("/", nil); res.StatusCode != 200 {
+		t.Fatalf("the open tab after a second open: %d", res.StatusCode)
+	}
+
+	e.mu.Lock()
+	e.refuse = func(string) bool { return true } // the next check fails on the host
+	e.mu.Unlock()
+	if st, _ := e.start(e.owner); st["state"] != codeFailed {
+		t.Fatalf("a failing check: %v", st)
+	}
+	if s := e.h.srv.code.socket(ownerID, e.hostID); s != "" {
+		t.Fatalf("an instance whose check failed is still served at %q", s)
+	}
+}

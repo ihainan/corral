@@ -83,6 +83,9 @@ type hostBody struct {
 	Persistence  string `json:"persistence"`
 	TmuxSession  string `json:"tmux_session"`
 	HerdrSession string `json:"herdr_session"`
+	// Edits: the host's version the form was loaded at (see store.Host).
+	// Omitted, the edit is saved whatever changed since.
+	Version *int64 `json:"version"`
 }
 
 var (
@@ -272,6 +275,12 @@ func (s *Server) updateHost(w http.ResponseWriter, r *http.Request, b *hostBody)
 	if !ok {
 		return
 	}
+	// Saved since the form was loaded (on another device or tab): saving it
+	// would silently undo that edit. Checked before anything is stored.
+	if b.Version != nil && *b.Version != h.Version {
+		writeHostChanged(w)
+		return
+	}
 	if err := s.validateHost(r.Context(), u, b); err != nil {
 		writeFieldError(w, err)
 		return
@@ -320,7 +329,10 @@ func (s *Server) updateHost(w http.ResponseWriter, r *http.Request, b *hostBody)
 			h.CredentialID = &id
 		}
 	}
-	if err := s.store.UpdateHost(r.Context(), h, connChanged); err != nil {
+	if err := s.store.UpdateHost(r.Context(), h, connChanged); errors.Is(err, store.ErrNotFound) {
+		writeHostChanged(w) // changed or deleted since it was read
+		return
+	} else if err != nil {
 		s.internalError(w, r, err)
 		return
 	}
@@ -338,6 +350,10 @@ func (s *Server) updateHost(w http.ResponseWriter, r *http.Request, b *hostBody)
 	s.audit(r, "host.update", hostTarget(h), map[string]any{"endpoint_changed": endpointChanged, "connection_changed": connChanged})
 	updated, _ := s.store.Host(r.Context(), u.ID, h.ID)
 	writeJSON(w, http.StatusOK, updated)
+}
+
+func writeHostChanged(w http.ResponseWriter) {
+	writeError(w, http.StatusConflict, "host_changed", "this host was changed elsewhere; open it again to edit it")
 }
 
 func sameID(a, b *int64) bool { return (a == nil && b == nil) || (a != nil && b != nil && *a == *b) }
