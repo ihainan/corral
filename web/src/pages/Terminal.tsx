@@ -264,7 +264,7 @@ export function TerminalPage({ id }: { id: string }) {
     let composing = false
     const latched = () => mods.current.ctrl !== 'off' || mods.current.alt !== 'off'
     const onCompStart = () => {
-      claimNext = false // the key became part of a composition
+      dropClaims() // the key became part of a composition
       composing = true
       typedChar = null
     }
@@ -283,15 +283,34 @@ export function TerminalPage({ id }: { id: string }) {
     // so nothing has to be guessed or settled. Keys with Ctrl/Alt/Meta, latched
     // key-bar modifiers, special keys, compositions, and the key right after a
     // dead key or AltGraph (whose state xterm tracks itself) take xterm's path.
-    let claimNext = false
-    let xtermDeadKey = false
+    // xterm internals this relies on (checked against @xterm/xterm 6.0.0): the
+    // composition helper, so a finished composition is sent before the next
+    // key, and the dead-key flag, so xterm keeps handling the key after one.
+    type Core = { _compositionHelper?: { keydown(e: KeyboardEvent): boolean }; _unprocessedDeadKey?: boolean }
+    const core = (term as unknown as { _core?: Core })._core
+    const internalsOk = !!core && typeof core._compositionHelper?.keydown === 'function' && typeof core._unprocessedDeadKey === 'boolean'
+    // Keys left to the browser whose text has not arrived yet, oldest first:
+    // each insertText belongs to the oldest one, so a late text still lands
+    // on its own key and in order.
+    let claims = 0
     const onPrintableInput = (e: Event) => {
       const ie = e as InputEvent
-      if (e.target !== ta || !claimNext || ie.inputType !== 'insertText' || !ie.data || ie.isComposing || composing) return
-      claimNext = false
+      if (e.target !== ta || claims === 0 || ie.inputType !== 'insertText' || !ie.data || ie.isComposing || composing) return
+      claims--
       e.stopPropagation() // ours alone; xterm must not send it as well
+      // Take exactly the inserted text back out of the textarea: xterm never
+      // has typed characters in it (its composition handling compares the
+      // textarea's contents), and anything else in it is left alone.
+      const t = ta as HTMLTextAreaElement
+      const end = t.selectionStart
+      const start = end - ie.data.length
+      if (start >= 0 && t.value.slice(start, end) === ie.data) {
+        t.value = t.value.slice(0, start) + t.value.slice(end)
+        t.selectionStart = t.selectionEnd = start
+      }
       term.input(ie.data, true)
     }
+    const dropClaims = () => (claims = 0)
 
     const onBeforeInput = (e: Event) => {
       const ie = e as InputEvent
@@ -304,6 +323,7 @@ export function TerminalPage({ id }: { id: string }) {
     // Capture on the container: it runs before any listener on the textarea,
     // xterm's own (also capturing) included, so a claimed event stops here.
     el.addEventListener('input', onPrintableInput, true)
+    ta?.addEventListener('blur', dropClaims)
     ta?.addEventListener('paste', onPasteEv, true)
     const onUserInput = userInputEvent(term)
     let userData = false
@@ -340,21 +360,20 @@ export function TerminalPage({ id }: { id: string }) {
     }
     term.attachCustomKeyEventHandler((e) => {
       // The keypress of a key left to the browser: its input event carries the text.
-      if (e.type === 'keypress' && claimNext) return false
+      if (e.type === 'keypress' && claims > 0) return false
       if (e.type !== 'keydown') return true
       if (e.isComposing || e.keyCode === 229) return true
-      const modifierOnly = ['Shift', 'Control', 'Alt', 'Meta', 'CapsLock'].includes(e.key)
-      if (!modifierOnly) claimNext = false
-      // xterm treats Dead and AltGraph as a dead key and expects to see the
-      // next key itself.
-      const afterDead = xtermDeadKey
-      if (!modifierOnly) xtermDeadKey = e.key === 'Dead' || e.key === 'AltGraph'
       if (
-        !afterDead && [...e.key].length === 1 && e.key !== ' ' &&
+        internalsOk && !core!._unprocessedDeadKey && [...e.key].length === 1 && e.key !== ' ' &&
         !e.ctrlKey && !e.altKey && !e.metaKey && !e.getModifierState('AltGraph') && !latched()
       ) {
-        claimNext = true
-        return false // no preventDefault: the browser (and input method) insert the text
+        // What xterm does first for every key: send a composition that just
+        // ended. If it says the key belongs to a composition, leave it to xterm.
+        if (core!._compositionHelper!.keydown(e)) {
+          claims = Math.min(claims + 1, 16)
+          return false // no preventDefault: the browser (and input method) insert the text
+        }
+        return true
       }
       typedChar = e.key.length === 1 && !e.metaKey && !e.ctrlKey ? e.key : null
       // A physical Ctrl/Alt chord while a key-bar modifier is latched: combine both.
@@ -364,6 +383,7 @@ export function TerminalPage({ id }: { id: string }) {
       if (latched() && e.key.length === 1 && (e.ctrlKey || physAlt) && !e.metaKey && !pasteKey && !e.getModifierState('AltGraph')) {
         const m = activeMods()
         conn.send(applyMods(e.key, { ctrl: m.ctrl || e.ctrlKey, alt: m.alt || physAlt, shift: false }))
+        if (internalsOk) core!._unprocessedDeadKey = false // we handled this key, as xterm would have
         releaseOnce()
         e.preventDefault()
         return false
@@ -372,6 +392,7 @@ export function TerminalPage({ id }: { id: string }) {
       if (special && latched() && !e.metaKey) {
         const m = activeMods()
         conn.send(specialKey(special, { ctrl: m.ctrl || e.ctrlKey, alt: m.alt || e.altKey, shift: e.shiftKey }, term.modes.applicationCursorKeysMode))
+        if (internalsOk) core!._unprocessedDeadKey = false
         releaseOnce()
         e.preventDefault()
         return false
@@ -403,6 +424,7 @@ export function TerminalPage({ id }: { id: string }) {
       ta?.removeEventListener('compositionend', onCompEnd)
       ta?.removeEventListener('beforeinput', onBeforeInput)
       el.removeEventListener('input', onPrintableInput, true)
+      ta?.removeEventListener('blur', dropClaims)
       ta?.removeEventListener('paste', onPasteEv, true)
       dataSub.dispose()
       userSub?.dispose()
