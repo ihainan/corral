@@ -11,7 +11,9 @@ const statusKey = (s: string) => {
 
 type PanelProps = {
   summary: HerdrSummary
-  onClose: () => void
+  // While the connection is down the summary is old: shown, but not actionable.
+  stale: boolean
+  onClose: (viaKeyboard: boolean) => void
   onFocus: (action: 'focus_workspace' | 'focus_pane', target: string) => void
 }
 
@@ -22,9 +24,9 @@ export function HerdrPanel(props: PanelProps & { sheet: boolean }) {
 }
 
 function HerdrSheet(props: PanelProps) {
-  const ref = useFocusTrap<HTMLDivElement>(props.onClose)
+  const ref = useFocusTrap<HTMLDivElement>(() => props.onClose(true))
   return (
-    <div className="herdr-backdrop" onMouseDown={(e) => e.target === e.currentTarget && props.onClose()}>
+    <div className="herdr-backdrop" onMouseDown={(e) => e.target === e.currentTarget && props.onClose(false)}>
       <div className="herdr-panel sheet" role="dialog" aria-modal="true" aria-label={t('herdr.title')} ref={ref}>
         <div className="handle" aria-hidden="true" />
         <PanelBody {...props} />
@@ -47,7 +49,7 @@ function HerdrDock(props: PanelProps) {
       onKeyDown={(e) => {
         if (e.key === 'Escape') {
           e.stopPropagation()
-          props.onClose()
+          props.onClose(true)
         }
       }}
     >
@@ -63,14 +65,18 @@ function PanelBody(props: PanelProps) {
       <div className="herdr-head">
         <div>
           <h2 className="herdr-title">{t('herdr.title')}</h2>
-          {s.waiting > 0 && <div className="herdr-waiting st-blocked">{t('herdr.waiting', { n: s.waiting })}</div>}
+          {props.stale ? (
+            <div className="herdr-waiting">{t('herdr.stale')}</div>
+          ) : (
+            s.waiting > 0 && <div className="herdr-waiting st-blocked">{t('herdr.waiting', { n: s.waiting })}</div>
+          )}
         </div>
-        <button className="icon-btn" onClick={props.onClose} aria-label={t('common.close')}><X size={18} /></button>
+        <button className="icon-btn" onClick={() => props.onClose(false)} aria-label={t('common.close')}><X size={18} /></button>
       </div>
-      <ul className="herdr-list">
+      <ul className={'herdr-list' + (props.stale ? ' stale' : '')}>
         {s.workspaces.map((w) => (
           <li key={w.id} className={w.focused ? 'focused' : undefined}>
-            <button className="herdr-ws" onClick={() => props.onFocus('focus_workspace', w.id)}>
+            <button className="herdr-ws" disabled={props.stale} aria-current={w.focused ? 'true' : undefined} onClick={() => props.onFocus('focus_workspace', w.id)}>
               <span className="herdr-num">{w.number}</span>
               <span className="herdr-label">{w.label}</span>
               <span className={'herdr-status st-' + w.status}>{statusKey(w.status)}</span>
@@ -79,7 +85,7 @@ function PanelBody(props: PanelProps) {
               <ul className="herdr-agents">
                 {w.agents.map((a) => (
                   <li key={a.pane_id}>
-                    <button className="herdr-agent" onClick={() => props.onFocus('focus_pane', a.pane_id)}>
+                    <button className="herdr-agent" disabled={props.stale} onClick={() => props.onFocus('focus_pane', a.pane_id)}>
                       <span className={'dot st-' + a.status} aria-hidden="true" />
                       <span className="herdr-agent-main">
                         <span className="herdr-agent-name">{a.agent}</span>

@@ -78,6 +78,8 @@ export function usePrefs(): Prefs {
 
 const media = window.matchMedia('(prefers-color-scheme: dark)')
 media.addEventListener('change', () => {
+  // A new snapshot, so components reading isDark()/isTermDark() re-render.
+  state = { ...state }
   applyTheme()
   subs.forEach((s) => s())
 })

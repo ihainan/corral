@@ -127,7 +127,7 @@ const zh = {
   'host.persistTmuxHint': '网关重启或连接中断后，重新连接仍会回到原来的会话。远端没装 tmux 时自动改用普通终端。',
   'host.persistNone': '普通终端',
   'host.persistHerdrHint': '连接后进入 herdr，适合同时跑多个编程助手。终端里会多出「工作区」面板，显示每个助手的状态。远端没装 herdr 时自动改用普通终端。',
-  'host.persistNoneHint': '不做会话保持，断开后远端正在运行的程序会结束。',
+  'host.persistNoneHint': '不做会话保持：网关重启或与主机的连接中断时，远端正在运行的程序会随之结束。只是浏览器断网不受影响。',
   'host.herdrSession': 'herdr 会话名',
   'host.herdrSessionHint': '留空表示 herdr 的默认会话。',
   'herdr.title': '工作区',
@@ -286,7 +286,7 @@ const zh = {
   'settings.username': '登录名：{name}',
   'push.thisDevice': '这台设备的通知',
   'push.offHint': '已关闭',
-  'push.unregistered': '这台设备的通知没有登记成功，收不到提醒。关掉再打开试试。',
+  'push.unregistered': '这台设备没有登记成功，收不到提醒。请重新打开开关再试一次。',
   'push.disableFailed': '关闭通知失败。',
   'push.testHint': '确认这台设备能收到提醒。',
   'push.testSend': '发送',
@@ -302,6 +302,8 @@ const zh = {
   'ports.badPort': '端口号范围是 1 到 65535。',
   'ports.shareLabel': '端口 {port} 的访问范围',
   'keys.namePlaceholder': '例如：笔记本',
+  'herdr.stale': '连接中断，显示的是断开前的状态',
+  'term.sessionsFailed': '会话列表加载失败。',
 }
 
 type Key = keyof typeof zh
@@ -433,7 +435,7 @@ const en: Record<Key, string> = {
   'host.persistTmuxHint': 'After a gateway restart or a dropped connection, reconnecting returns to the same session. Falls back to a plain shell when tmux is missing.',
   'host.persistNone': 'Plain shell',
   'host.persistHerdrHint': 'Attach to herdr, made for running several coding agents. The terminal gains a Workspaces panel with each agent\'s status. Falls back to a plain shell when herdr is missing.',
-  'host.persistNoneHint': 'No persistence: programs on the host end when you disconnect.',
+  'host.persistNoneHint': 'No persistence: programs on the host end if the gateway restarts or loses its connection to the host. A browser going offline is fine.',
   'host.herdrSession': 'herdr session name',
   'host.herdrSessionHint': 'Leave empty for herdr\'s default session.',
   'herdr.title': 'Workspaces',
@@ -592,7 +594,7 @@ const en: Record<Key, string> = {
   'settings.username': 'Username: {name}',
   'push.thisDevice': 'Notifications on this device',
   'push.offHint': 'Off',
-  'push.unregistered': 'This device is not registered, so alerts will not arrive. Turn it off and on again.',
+  'push.unregistered': 'This device is not registered, so alerts will not arrive. Turn the switch on to try again.',
   'push.disableFailed': 'Could not turn off notifications.',
   'push.testHint': 'Check that alerts reach this device.',
   'push.testSend': 'Send',
@@ -608,6 +610,8 @@ const en: Record<Key, string> = {
   'ports.badPort': 'Ports range from 1 to 65535.',
   'ports.shareLabel': 'Who can open port {port}',
   'keys.namePlaceholder': 'e.g. laptop',
+  'herdr.stale': 'Disconnected: showing the last known state',
+  'term.sessionsFailed': 'Could not load sessions.',
 }
 
 const tables: Record<string, Record<Key, string>> = { 'zh-CN': zh, en }

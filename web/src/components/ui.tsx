@@ -5,12 +5,28 @@ import { t } from '../i18n'
 
 export const isCoarse = () => window.matchMedia('(pointer: coarse)').matches
 
+// Open layers, innermost last. Only the top one reacts to Tab and Escape, so a
+// dialog opened over a sheet does not fight it for focus.
+const layers: object[] = []
+function useLayer() {
+  const id = useRef({}).current
+  useEffect(() => {
+    layers.push(id)
+    return () => {
+      const i = layers.lastIndexOf(id)
+      if (i >= 0) layers.splice(i, 1)
+    }
+  }, [id])
+  return useCallback(() => layers[layers.length - 1] === id, [id])
+}
+
 // Focus handling for modal layers: focus moves in on open, Tab stays inside,
 // Escape closes, and focus returns to where it was afterwards.
 export function useFocusTrap<T extends HTMLElement>(onClose: () => void) {
   const ref = useRef<T>(null)
   const closeRef = useRef(onClose)
   closeRef.current = onClose
+  const isTop = useLayer()
   useEffect(() => {
     const prev = document.activeElement as HTMLElement | null
     const root = ref.current
@@ -20,6 +36,7 @@ export function useFocusTrap<T extends HTMLElement>(onClose: () => void) {
     const first = root?.querySelector<HTMLElement>('input, textarea, select') ?? focusables()[0]
     first?.focus()
     const onKey = (e: KeyboardEvent) => {
+      if (!isTop()) return
       if (e.key === 'Escape') {
         e.stopPropagation()
         closeRef.current()
@@ -104,14 +121,17 @@ export interface MenuItem {
   href?: string
   danger?: boolean
   separator?: boolean // draw a divider before this item
+  keepOpen?: boolean // e.g. "retry": the menu stays open to show the result
 }
 
 export function Menu(props: { label: string; button: (open: boolean, toggle: (e: React.MouseEvent<HTMLElement>) => void) => ReactNode; items: () => (MenuItem | null)[]; note?: string }) {
   const [anchor, setAnchor] = useState<DOMRect | null>(null)
   const [sheet, setSheet] = useState(false)
+  const trigger = useRef<HTMLElement | null>(null)
   const close = useCallback(() => setAnchor(null), [])
   const toggle = (e: React.MouseEvent<HTMLElement>) => {
     if (anchor) return close()
+    trigger.current = e.currentTarget
     setSheet(isCoarse())
     setAnchor(e.currentTarget.getBoundingClientRect())
   }
@@ -130,7 +150,7 @@ export function Menu(props: { label: string; button: (open: boolean, toggle: (e:
             <button className="btn btn-block" onClick={close}>{t('common.cancel')}</button>
           </Dialog>
         ) : (
-          <Popover anchor={anchor} onClose={close} label={props.label}>
+          <Popover anchor={anchor} trigger={trigger.current} onClose={close} label={props.label}>
             {props.note && <div className="menu-note">{props.note}</div>}
             {items.map((it, i) => <MenuEntry key={i} item={it} close={close} />)}
           </Popover>
@@ -153,47 +173,69 @@ function MenuEntry({ item, close }: { item: MenuItem; close: () => void }) {
       {item.href ? (
         <a className={cls} role="menuitem" href={item.href} onClick={(e) => { close(); if (item.onSelect) { e.preventDefault(); item.onSelect() } }}>{body}</a>
       ) : (
-        <button className={cls} role="menuitem" onClick={() => { close(); item.onSelect?.() }}>{body}</button>
+        <button className={cls} role="menuitem" onClick={() => { if (!item.keepOpen) close(); item.onSelect?.() }}>{body}</button>
       )}
     </>
   )
 }
 
-function Popover({ anchor, onClose, label, children }: { anchor: DOMRect; onClose: () => void; label: string; children: ReactNode }) {
+function Popover({ anchor, trigger, onClose, label, children }: { anchor: DOMRect; trigger: HTMLElement | null; onClose: () => void; label: string; children: ReactNode }) {
   const ref = useRef<HTMLDivElement>(null)
-  const [pos, setPos] = useState<{ top: number; left: number } | null>(null)
+  const isTop = useLayer()
+  const [pos, setPos] = useState<{ top: number; left: number; maxHeight: number } | null>(null)
+  // Placed below the trigger if it fits, else above, else wherever there is
+  // more room with the list scrolling inside. Re-placed when the content
+  // changes size (items that load after opening).
   useLayoutEffect(() => {
     const el = ref.current
     if (!el) return
-    const w = el.offsetWidth
-    const h = el.offsetHeight
-    const below = anchor.bottom + 6
-    const top = below + h > window.innerHeight - 8 ? Math.max(8, anchor.top - h - 6) : below
-    const left = Math.min(Math.max(8, anchor.right - w), window.innerWidth - w - 8)
-    setPos({ top, left })
+    const place = () => {
+      const w = el.offsetWidth
+      const h = el.scrollHeight
+      const below = window.innerHeight - anchor.bottom - 14
+      const above = anchor.top - 14
+      const down = h <= below || below >= above
+      const maxHeight = Math.max(120, down ? below : above)
+      const top = down ? anchor.bottom + 6 : Math.max(8, anchor.top - 6 - Math.min(h, maxHeight))
+      const left = Math.min(Math.max(8, anchor.right - w), window.innerWidth - w - 8)
+      setPos((p) => (p && p.top === top && p.left === left && p.maxHeight === maxHeight ? p : { top, left, maxHeight }))
+    }
+    place()
+    const ro = new ResizeObserver(place)
+    ro.observe(el)
+    return () => ro.disconnect()
   }, [anchor])
   useEffect(() => {
-    const onDown = (e: PointerEvent) => {
-      if (!ref.current?.contains(e.target as Node)) onClose()
+    // The trigger toggles the menu itself; treating it as "outside" would
+    // close on pointerdown and reopen on click.
+    const outside = (t: EventTarget | null) => !ref.current?.contains(t as Node) && !trigger?.contains(t as Node)
+    const onDown = (e: PointerEvent) => outside(e.target) && onClose()
+    const onKey = (e: KeyboardEvent) => {
+      if (!isTop()) return
+      if (e.key === 'Escape') {
+        e.stopPropagation()
+        onClose()
+        trigger?.focus()
+      } else if (e.key === 'Tab') {
+        onClose()
+        trigger?.focus()
+      }
     }
-    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose()
-    const onScroll = (e: Event) => {
-      if (!ref.current?.contains(e.target as Node)) onClose()
-    }
+    const onScroll = (e: Event) => outside(e.target) && onClose()
     document.addEventListener('pointerdown', onDown, true)
-    document.addEventListener('keydown', onKey)
+    document.addEventListener('keydown', onKey, true)
     window.addEventListener('resize', onClose)
     window.addEventListener('scroll', onScroll, true)
     ref.current?.querySelector<HTMLElement>('.menu-item')?.focus()
     return () => {
       document.removeEventListener('pointerdown', onDown, true)
-      document.removeEventListener('keydown', onKey)
+      document.removeEventListener('keydown', onKey, true)
       window.removeEventListener('resize', onClose)
       window.removeEventListener('scroll', onScroll, true)
     }
-  }, [onClose])
+  }, [onClose, trigger, isTop])
   return createPortal(
-    <div ref={ref} className="menu" role="menu" aria-label={label} style={pos ? { top: pos.top, left: pos.left } : { top: -9999, left: -9999 }}>
+    <div ref={ref} className="menu" role="menu" aria-label={label} style={pos ? { top: pos.top, left: pos.left, maxHeight: pos.maxHeight } : { top: -9999, left: -9999 }}>
       {children}
     </div>,
     document.body,

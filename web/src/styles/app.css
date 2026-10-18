@@ -157,7 +157,7 @@ code, .mono { font-family: var(--font-mono); font-size: 0.9em; }
 }
 @media (min-width: 1024px) { .page { padding-top: 32px; } }
 .page-form { max-width: calc(560px + 2 * var(--pad-x)); }
-.page-head { display: flex; align-items: center; gap: 8px; min-height: 36px; }
+.page-head { display: flex; align-items: center; gap: 8px; min-height: 36px; flex-wrap: wrap; }
 .page-head h1 { font-size: 20px; line-height: 28px; font-weight: 600; }
 .page-head > .icon-btn:first-child { margin-left: -10px; }
 .section { display: flex; flex-direction: column; gap: 8px; }
@@ -214,6 +214,7 @@ code, .mono { font-family: var(--font-mono); font-size: 0.9em; }
 .input:focus, .select:focus, .textarea:focus { border-color: var(--accent); box-shadow: var(--focus); }
 .input[aria-invalid='true'] { border-color: var(--danger); }
 .textarea { height: auto; min-height: 120px; padding: 10px 12px; resize: vertical; font-family: var(--font-mono); font-size: 13px; line-height: 1.5; }
+@media (pointer: coarse) { .textarea { font-size: 16px; } }
 .row2 { display: flex; gap: 12px; }
 .row2 > * { flex: 1; min-width: 0; }
 .row2 > .port { flex: 0 0 96px; }
@@ -330,7 +331,9 @@ a.setting:hover { text-decoration: none; background: var(--bg-hover); }
   position: fixed; z-index: 120; min-width: 200px; max-width: calc(100vw - 16px);
   background: var(--surface); border-radius: var(--r-lg); box-shadow: var(--shadow-pop);
   padding: 4px; display: flex; flex-direction: column; animation: pop 0.14s var(--ease);
+  overflow-y: auto; overscroll-behavior: contain;
 }
+.menu > * { flex: none; }
 .menu-item {
   display: flex; align-items: center; gap: 10px; width: 100%; min-height: 36px; padding: 0 10px;
   border: 0; background: none; border-radius: var(--r-sm); cursor: pointer; text-align: left; color: var(--fg); font-size: 14px; font-weight: 400;

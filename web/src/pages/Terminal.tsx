@@ -5,7 +5,7 @@ import { FitAddon } from '@xterm/addon-fit'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import { WebglAddon } from '@xterm/addon-webgl'
-import { ArrowUp, Check, ChevronDown, ChevronLeft, Globe, LayoutGrid, ImagePlus, MessageSquareText, MoreVertical, Minus, Paperclip, Plus, TextSelect, Keyboard as KeyboardIcon, Power, Server, X } from 'lucide-react'
+import { ArrowUp, Check, ChevronDown, ChevronLeft, Globe, LayoutGrid, ImagePlus, MessageSquareText, MoreVertical, Minus, Paperclip, Plus, TextSelect, Keyboard as KeyboardIcon, Power, RotateCw, Server, X } from 'lucide-react'
 import { api, errorText, uploadFile, type HerdrSummary, type Host, type SessionInfo } from '../api'
 import { t } from '../i18n'
 import { navigate } from '../router'
@@ -79,6 +79,7 @@ export function TerminalPage({ id }: { id: string }) {
     if (!v && !isTouch) termRef.current?.focus()
   }
   const [sessions, setSessions] = useState<SessionInfo[] | null>(null)
+  const [sessionsFailed, setSessionsFailed] = useState(false)
   const ended = status === 'ended' || status === 'gone' || end !== null
   const showKeybar = isTouch && prefs.keybar && !ended
   const { boot } = useSession()
@@ -211,6 +212,12 @@ export function TerminalPage({ id }: { id: string }) {
     // input-method results and the terminal's own replies pass through untouched.
     let typedChar: string | null = null
     let composing = false
+    // Input the user just produced (keys, paste, IME). Terminal replies are
+    // generated while output is parsed, never inside these events, so while a
+    // replay is parsed only data arriving right after one of them goes out.
+    let userAt = -1
+    const markUser = () => (userAt = performance.now())
+    const fromUser = () => performance.now() - userAt < 50
     const latched = () => mods.current.ctrl !== 'off' || mods.current.alt !== 'off'
     const onCompStart = () => {
       composing = true
@@ -219,13 +226,18 @@ export function TerminalPage({ id }: { id: string }) {
     const onCompEnd = () => {
       composing = false
       typedChar = null
+      markUser()
     }
     // iOS soft keyboards report printable keys through input events.
     const onBeforeInput = (e: Event) => {
+      markUser()
       const ie = e as InputEvent
       typedChar = !ie.isComposing && ie.inputType === 'insertText' && ie.data && [...ie.data].length === 1 ? ie.data : null
     }
-    const onPasteEv = () => (typedChar = null)
+    const onPasteEv = () => {
+      typedChar = null
+      markUser()
+    }
     ta?.addEventListener('compositionstart', onCompStart)
     ta?.addEventListener('compositionend', onCompEnd)
     ta?.addEventListener('beforeinput', onBeforeInput)
@@ -233,7 +245,7 @@ export function TerminalPage({ id }: { id: string }) {
     const dataSub = term.onData((data) => {
       const typed = typedChar !== null && data === typedChar && !composing
       typedChar = null
-      if (replaying && !typed) return
+      if (replaying && !typed && !fromUser()) return
       if (typed && latched()) {
         conn.send(applyMods(data, activeMods()))
         releaseOnce()
@@ -261,6 +273,7 @@ export function TerminalPage({ id }: { id: string }) {
     term.attachCustomKeyEventHandler((e) => {
       if (e.type !== 'keydown') return true
       if (e.isComposing || e.keyCode === 229) return true
+      markUser()
       typedChar = e.key.length === 1 && !e.metaKey && !e.ctrlKey ? e.key : null
       // A physical Ctrl/Alt chord while a key-bar modifier is latched: combine both.
       // Clipboard shortcuts, AltGr and text-producing Option are left alone.
@@ -368,6 +381,10 @@ export function TerminalPage({ id }: { id: string }) {
       // it is down, ignore offsetTop: iOS 26 can leave a stale value behind.
       const keyboardUp = vv ? window.innerHeight - vv.height > 120 : false
       root.style.transform = keyboardUp && vv ? `translateY(${Math.round(vv.offsetTop)}px)` : ''
+      // Dialogs and sheets opened over the terminal follow the same box.
+      const de = document.documentElement.style
+      de.setProperty('--vv-h', `${Math.round(h)}px`)
+      de.setProperty('--vv-top', keyboardUp && vv ? `${Math.round(vv.offsetTop)}px` : '0px')
       if (window.scrollY !== 0) window.scrollTo(0, 0)
     }
     apply()
@@ -380,6 +397,8 @@ export function TerminalPage({ id }: { id: string }) {
       vv?.removeEventListener('scroll', apply)
       window.removeEventListener('resize', apply)
       document.documentElement.classList.remove('term-mode')
+      document.documentElement.style.removeProperty('--vv-h')
+      document.documentElement.style.removeProperty('--vv-top')
     }
   }, [])
 
@@ -618,12 +637,15 @@ export function TerminalPage({ id }: { id: string }) {
     const start = Math.max(0, buf.length - 3000)
     // A soft-wrapped row continues the previous line: join them, so copied
     // commands and URLs come out whole.
+    // Rows are taken untrimmed (a space before the wrap point is content) and
+    // trailing blanks are cut once per logical line.
     for (let i = start; i < buf.length; i++) {
       const line = buf.getLine(i)
-      const text = line?.translateToString(true) ?? ''
+      const text = line?.translateToString(false) ?? ''
       if (line?.isWrapped && lines.length > 0) lines[lines.length - 1] += text
       else lines.push(text)
     }
+    for (let i = 0; i < lines.length; i++) lines[i] = lines[i].trimEnd()
     while (lines.length && lines[lines.length - 1] === '') lines.pop()
     setCopyText(lines.join('\n'))
   }
@@ -666,20 +688,24 @@ export function TerminalPage({ id }: { id: string }) {
     end ? (end.state === 'exited' ? t('term.ended.exited', { code: end.code }) : end.state === 'lost' ? t('term.ended.lost') : t('term.ended.closed')) :
     ended ? t('term.ended.closed') : ''
 
-  const loadSessions = () =>
+  const loadSessions = () => {
+    setSessionsFailed(false)
+    setSessions(null)
     api<SessionInfo[]>('GET', '/api/sessions')
       .then((l) => setSessions(l.filter((x) => x.state === 'running').sort((a, b) => a.created_at - b.created_at)))
-      .catch(() => setSessions(null))
-  const switcherItems = (): MenuItem[] => {
+      .catch(() => setSessionsFailed(true))
+  }
+  const switcherItems = (): (MenuItem | null)[] => {
     const list = sessions ?? []
     const nth = (x: SessionInfo) => list.filter((y) => y.host_id === x.host_id).indexOf(x) + 1
     return [
+      sessionsFailed ? { label: t('common.retry'), icon: <RotateCw size={16} />, keepOpen: true, onSelect: loadSessions } : null,
       ...list.map((x) => ({
         label: `${x.host_name} · ${t('hosts.sessionN', { n: nth(x) })}${x.title ? ' · ' + x.title : ''}`,
         icon: x.id === id ? <Check size={16} /> : <span className="menu-icon-space" />,
         onSelect: () => x.id !== id && navigate('/t/' + x.id),
       })),
-      { label: t('term.backToHosts'), icon: <Server size={16} />, separator: list.length > 0, onSelect: () => navigate('/') },
+      { label: t('term.backToHosts'), icon: <Server size={16} />, separator: list.length > 0 || sessionsFailed, onSelect: () => navigate('/') },
     ]
   }
 
@@ -739,7 +765,7 @@ export function TerminalPage({ id }: { id: string }) {
         <Menu
           label={t('term.switchSession')}
           items={switcherItems}
-          note={sessions === null ? t('term.sessionsLoading') : undefined}
+          note={sessionsFailed ? t('term.sessionsFailed') : sessions === null ? t('term.sessionsLoading') : undefined}
           button={(open, toggle) => (
             <button
               className="term-title"
@@ -765,7 +791,7 @@ export function TerminalPage({ id }: { id: string }) {
         {herdr && !ended && (
           <button className="icon-btn herdr-btn" aria-pressed={panel} onClick={() => setPanel(!panel)} aria-label={t('herdr.title') + (herdr.waiting > 0 ? ' · ' + t('herdr.waiting', { n: herdr.waiting }) : '')} title={t('herdr.title')}>
             <LayoutGrid size={19} />
-            {herdr.waiting > 0 && <span className="herdr-count">{herdr.waiting}</span>}
+            {herdr.waiting > 0 && !paused && <span className="herdr-count">{herdr.waiting}</span>}
           </button>
         )}
         {!ended && (
@@ -791,7 +817,12 @@ export function TerminalPage({ id }: { id: string }) {
           <HerdrPanel
             summary={herdr}
             sheet={sheetPanel}
-            onClose={() => setPanel(false)}
+            stale={paused}
+            onClose={(viaKeyboard) => {
+              setPanel(false)
+              // A keyboard user (also an iPad with a hardware keyboard) keeps typing.
+              if (viaKeyboard) termRef.current?.focus()
+            }}
             onFocus={async (action, target) => {
               try {
                 await api('POST', `/api/sessions/${id}/herdr`, { action, target })
