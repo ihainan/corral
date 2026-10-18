@@ -1,0 +1,10 @@
+/data/
+/corral
+/dist/
+web/node_modules/
+web/dist/*
+!web/dist/.gitkeep
+*.db
+*.db-*
+.env
+*.key
