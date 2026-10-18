@@ -8,9 +8,13 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"testing"
 
+	"golang.org/x/crypto/ssh"
+
 	"github.com/ihainan/corral/internal/notify"
+	"github.com/ihainan/corral/internal/sshx"
 )
 
 // withPush turns notifications on for the harness server.
@@ -128,5 +132,57 @@ func TestPushSubscriptionsPerUserAreCapped(t *testing.T) {
 	}
 	if r.Status != http.StatusOK {
 		t.Fatal(r.Status)
+	}
+}
+
+func TestPortListingOutputIsBounded(t *testing.T) {
+	old := sshx.MaxOutput
+	sshx.MaxOutput = 64 << 10
+	defer func() { sshx.MaxOutput = old }()
+	h := newHarness(t)
+	admin := h.admin()
+	srv := h.sshServer(t.TempDir())
+	srv.HandleExec(func(cmd string) func(ssh.Channel) {
+		if cmd != listenCommand {
+			return nil
+		}
+		return func(ch ssh.Channel) {
+			line := []byte(strings.Repeat("LISTEN 0 4096 127.0.0.1:8080 0.0.0.0:*\n", 100))
+			for {
+				if _, err := ch.Write(line); err != nil {
+					return
+				}
+			}
+		}
+	})
+	hostID := h.hostFor(admin, srv.Addr.Port)
+	mustStatus(t, admin.do("POST", "/api/sessions", map[string]any{"host_id": hostID}), 201, "terminal")
+	r := admin.do("GET", fmt.Sprintf("/api/hosts/%d/ports", hostID), nil)
+	if r.Status != http.StatusBadGateway || r.code() != "ports_failed" {
+		t.Fatalf("endless port list: %d %s", r.Status, r.Body)
+	}
+}
+
+func TestHerdrActionsPerSessionAreLimited(t *testing.T) {
+	h := herdrSockets{path: map[string]string{}, busy: map[string]int{}}
+	var releases []func()
+	for i := 0; i < maxHerdrOpsPerSession; i++ {
+		rel, ok := h.acquire("s1")
+		if !ok {
+			t.Fatalf("slot %d refused", i)
+		}
+		releases = append(releases, rel)
+	}
+	if _, ok := h.acquire("s1"); ok {
+		t.Fatal("more herdr actions in flight than allowed")
+	}
+	if rel, ok := h.acquire("s2"); !ok {
+		t.Fatal("another session was limited too")
+	} else {
+		rel()
+	}
+	releases[0]()
+	if _, ok := h.acquire("s1"); !ok {
+		t.Fatal("slot not released")
 	}
 }

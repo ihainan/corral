@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ssh"
+
+	"github.com/ihainan/corral/internal/sshx"
 )
 
 // listenCommand lists listening TCP sockets. Fixed text; `ss` is preferred,
@@ -23,31 +25,18 @@ type ListeningPort struct {
 
 // listeningPorts runs listenCommand over an existing SSH connection.
 func listeningPorts(ctx context.Context, c *ssh.Client) ([]ListeningPort, error) {
-	sess, err := c.NewSession()
-	if err != nil {
-		return nil, err
-	}
-	defer sess.Close()
-	type res struct {
-		out []byte
-		err error
-	}
-	ch := make(chan res, 1)
-	go func() {
-		out, err := sess.Output(listenCommand)
-		ch <- res{out, err}
-	}()
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	select {
-	case <-ctx.Done():
+	out, err := sshx.Output(ctx, c, listenCommand, sshx.MaxOutput)
+	switch {
+	case ctx.Err() != nil:
 		return nil, errors.New("listing ports timed out")
-	case r := <-ch:
-		if r.err != nil && len(r.out) == 0 {
-			return nil, r.err
-		}
-		return parseListening(string(r.out)), nil
+	case errors.Is(err, sshx.ErrOutputTooLarge):
+		return nil, err
+	case err != nil && len(out) == 0:
+		return nil, err
 	}
+	return parseListening(string(out)), nil
 }
 
 func parseListening(out string) []ListeningPort {

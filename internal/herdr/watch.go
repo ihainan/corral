@@ -69,7 +69,7 @@ func (w *Watcher) once(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	ev, err := Dial(w.client, w.socketPath)
+	ev, err := Dial(ctx, w.client, w.socketPath)
 	if err != nil {
 		return err
 	}
@@ -124,7 +124,7 @@ func (w *Watcher) once(ctx context.Context) error {
 }
 
 func (w *Watcher) refresh(ctx context.Context) (*Snapshot, error) {
-	c, err := Dial(w.client, w.socketPath)
+	c, err := Dial(ctx, w.client, w.socketPath)
 	if err != nil {
 		return nil, err
 	}

@@ -51,7 +51,7 @@ func TestLiveHerdrReadOnly(t *testing.T) {
 	if sock == "" {
 		t.Skip("no running default session")
 	}
-	cl, err := Dial(c, sock)
+	cl, err := Dial(ctx, c, sock)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +65,7 @@ func TestLiveHerdrReadOnly(t *testing.T) {
 		t.Logf("  agent %s %s %q", a.Agent, a.AgentStatus, a.Title)
 	}
 	// The event stream must open; we only listen for a few seconds.
-	ev, err := Dial(c, sock)
+	ev, err := Dial(ctx, c, sock)
 	if err != nil {
 		t.Fatal(err)
 	}
