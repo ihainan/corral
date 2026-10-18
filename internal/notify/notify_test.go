@@ -104,3 +104,49 @@ func TestPushDoesNotFollowRedirects(t *testing.T) {
 		t.Fatalf("push followed a redirect: status %d, %d hits elsewhere", res.StatusCode, elsewhere.Load())
 	}
 }
+
+func TestDeliverySkipsEndedLoginsAndRevokedUsers(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer srv.Close()
+	live := map[string]bool{"live": true}
+	n, st := newTestNotifier(t, Options{ExtraPushHosts: []string{"127.0.0.1"},
+		LoginValid: func(_ context.Context, h string) bool { return live[h] }})
+	n.http.Transport = srv.Client().Transport
+	ctx := context.Background()
+	u, err := st.CreateUser(ctx, "alice", "", "x", store.RoleMember)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, h := range []string{"live", "stale"} {
+		if err := st.CreateLoginSession(ctx, h, u.ID, "", ""); err != nil {
+			t.Fatal(err)
+		}
+		s := testSubscription(t, srv.URL+"/"+h)
+		s.UserID, s.LoginHash = u.ID, h
+		if err := st.SavePushSubscription(ctx, s, 10); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The "stale" login still has its row (not yet pruned) but is no longer valid.
+	n.deliver(ctx, u.ID, 0, Note{Title: "t"})
+	subs, _ := st.PushSubscriptions(ctx, u.ID)
+	if hits.Load() != 1 || len(subs) != 1 || subs[0].LoginHash != "live" {
+		t.Fatalf("%d pushes sent, %d subscriptions left", hits.Load(), len(subs))
+	}
+	// A note queued before the user's access ended is dropped.
+	n.Revoke(u.ID)
+	n.deliver(ctx, u.ID, 0, Note{Title: "t"})
+	if hits.Load() != 1 {
+		t.Fatal("a note queued before revocation was still sent")
+	}
+	// Subscriptions need a login that exists.
+	s := testSubscription(t, srv.URL+"/x")
+	s.UserID, s.LoginHash = u.ID, "missing"
+	if err := st.SavePushSubscription(ctx, s, 10); err == nil {
+		t.Fatal("subscription saved for a login that does not exist")
+	}
+}

@@ -5,6 +5,7 @@ package web
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -107,6 +108,9 @@ func (s *Server) onTerminalAlert(sess *term.Session, a term.Alert) {
 
 // Push API ----------------------------------------------------------------
 
+// maxPushSubscriptionsPerUser caps stored devices; the oldest make way.
+var maxPushSubscriptionsPerUser = 10
+
 func (s *Server) apiPushInfo(w http.ResponseWriter, r *http.Request) {
 	if s.notifier == nil {
 		writeJSON(w, http.StatusOK, map[string]any{"enabled": false})
@@ -147,9 +151,16 @@ func (s *Server) apiPushSubscribe(w http.ResponseWriter, r *http.Request) {
 	if len(ua) > 200 {
 		ua = ua[:200]
 	}
-	if err := s.store.SavePushSubscription(r.Context(), &store.PushSubscription{
-		UserID: currentUser(r).ID, Endpoint: b.Endpoint, P256dh: b.Keys.P256dh, Auth: b.Keys.Auth, UserAgent: ua,
-	}); err != nil {
+	// Bound to this browser login: signing out (or any end of the login)
+	// removes it, so a shared or handed-on device stops receiving.
+	err := s.store.SavePushSubscription(r.Context(), &store.PushSubscription{
+		UserID: currentUser(r).ID, LoginHash: loginHash(r), Endpoint: b.Endpoint, P256dh: b.Keys.P256dh, Auth: b.Keys.Auth, UserAgent: ua,
+	}, maxPushSubscriptionsPerUser)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "please sign in")
+		return
+	}
+	if err != nil {
 		s.internalError(w, r, err)
 		return
 	}

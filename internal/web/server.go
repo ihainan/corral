@@ -95,6 +95,9 @@ func New(d Deps) *Server {
 		// stop immediately; closing terminals can take a moment per host.
 		s.closeSockets(userID, "")
 		s.closeUserForwards(userID)
+		if s.notifier != nil {
+			s.notifier.Revoke(userID)
+		}
 		s.terms.CloseUser(userID, "access revoked")
 	}
 	s.registerRoutes()

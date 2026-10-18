@@ -48,12 +48,17 @@ type Notifier struct {
 	mu            sync.Mutex
 	recent        map[string]time.Time // per user+tag, to collapse bursts
 	minGap        time.Duration
+	revoked       map[int64]uint64 // per user, bumped when access ends; older queued notes are dropped
+	loginValid    func(ctx context.Context, loginHash string) bool
 }
 
 type Options struct {
 	Subscriber      string   // contact for push services, e.g. "https://ssh.example.com"
 	ExtraPushHosts  []string // host suffixes to allow besides the major push services
 	WebhookPrefixes []string // URL prefixes users may send webhooks to; empty disables webhooks
+	// LoginValid reports whether the browser login a subscription belongs to
+	// is still in force; nil treats every login as ended.
+	LoginValid func(ctx context.Context, loginHash string) bool
 }
 
 func New(ctx context.Context, st *store.Store, log *slog.Logger, opt Options) (*Notifier, error) {
@@ -72,7 +77,7 @@ func New(ctx context.Context, st *store.Store, log *slog.Logger, opt Options) (*
 		// endpoint must not be able to bounce the gateway to another address.
 		http: &http.Client{Timeout: 15 * time.Second, Transport: &http.Transport{Proxy: http.ProxyFromEnvironment},
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
-		recent: map[string]time.Time{}, minGap: 20 * time.Second,
+		recent: map[string]time.Time{}, minGap: 20 * time.Second, revoked: map[int64]uint64{}, loginValid: opt.LoginValid,
 	}, nil
 }
 
@@ -192,18 +197,42 @@ func (n *Notifier) Send(ctx context.Context, userID int64, note Note) {
 			}
 		}
 	}
+	gen := n.revoked[userID]
 	n.mu.Unlock()
 
-	go n.deliver(context.WithoutCancel(ctx), userID, note)
+	go n.deliver(context.WithoutCancel(ctx), userID, gen, note)
 }
 
-func (n *Notifier) deliver(ctx context.Context, userID int64, note Note) {
+// Revoke drops notes for a user that are queued but not yet sent, for when
+// their access ends (disabled, signed out everywhere).
+func (n *Notifier) Revoke(userID int64) {
+	n.mu.Lock()
+	n.revoked[userID]++
+	n.mu.Unlock()
+}
+
+func (n *Notifier) stale(userID int64, gen uint64) bool {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.revoked[userID] != gen
+}
+
+func (n *Notifier) deliver(ctx context.Context, userID int64, gen uint64, note Note) {
 	payload, _ := json.Marshal(note)
 	subs, err := n.store.PushSubscriptions(ctx, userID)
 	if err != nil {
 		n.log.Error("push: list subscriptions", "err", err)
 	}
 	for _, s := range subs {
+		if n.stale(userID, gen) {
+			return
+		}
+		// A device whose login ended (expired, signed out, password changed)
+		// gets nothing more, even before the login row is cleaned up.
+		if s.LoginHash == "" || n.loginValid == nil || !n.loginValid(ctx, s.LoginHash) {
+			_ = n.store.DeletePushSubscriptionHard(ctx, s.ID)
+			continue
+		}
 		if n.CheckEndpoint(s.Endpoint) != nil {
 			_ = n.store.DeletePushSubscriptionHard(ctx, s.ID)
 			continue
@@ -225,7 +254,9 @@ func (n *Notifier) deliver(ctx context.Context, userID int64, note Note) {
 			_ = n.store.MarkPushResult(ctx, s.ID, false)
 		}
 	}
-	n.sendWebhook(ctx, userID, note)
+	if !n.stale(userID, gen) {
+		n.sendWebhook(ctx, userID, note)
+	}
 }
 
 // push sends one encrypted message to one browser.
@@ -258,6 +289,9 @@ func topic(tag string) string {
 
 func (n *Notifier) sendWebhook(ctx context.Context, userID int64, note Note) {
 	if !n.WebhooksEnabled() {
+		return
+	}
+	if u, err := n.store.UserByID(ctx, userID); err != nil || u.Disabled {
 		return
 	}
 	raw, err := n.store.UserSettings(ctx, userID)
