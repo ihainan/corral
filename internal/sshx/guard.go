@@ -105,25 +105,6 @@ func DialVia(ctx context.Context, c *ssh.Client, network, addr string, opt DialO
 	})
 }
 
-// OpenSubsystem opens a session channel running a subsystem (e.g. "sftp"),
-// with the same guarantees as DialVia: it gives up when ctx ends, its quota
-// is held until the channel has really ended, and Close never leaves I/O
-// blocked. A refused subsystem's channel is closed the same way.
-func OpenSubsystem(ctx context.Context, c *ssh.Client, name string, opt DialOptions) (net.Conn, error) {
-	return openGuarded(ctx, c, "ssh", name, opt, func() (ssh.Channel, <-chan *ssh.Request, error) {
-		ch, reqs, err := c.OpenChannel("session", nil)
-		if err != nil {
-			return nil, nil, err
-		}
-		go io.Copy(io.Discard, ch.Stderr()) // ends with the channel
-		ok, err := ch.SendRequest("subsystem", true, ssh.Marshal(&struct{ Name string }{name}))
-		if err == nil && !ok {
-			err = fmt.Errorf("the host refused the %s subsystem", name)
-		}
-		return ch, reqs, err
-	})
-}
-
 // openGuarded opens a channel with open and wraps it (see DialVia). An open
 // that fails after the channel exists hands back the channel too, so it is
 // closed and accounted for like any other.
@@ -261,9 +242,13 @@ type guardedConn struct {
 func newGuardedConn(ch ssh.Channel, reqs <-chan *ssh.Request, network, addr string, client *ssh.Client, release func(),
 	dedicated bool, grace time.Duration) *guardedConn {
 	g := &guardedConn{ch: ch, client: client, network: network, addr: addr, dedicated: dedicated, grace: grace,
-		release: release, running: 3, ended: make(chan struct{})}
+		release: release, running: 4, ended: make(chan struct{})}
 	g.rd, g.rdFeed = io.Pipe()
 	g.wrSrc, g.wr = io.Pipe()
+	go func() { // extended data (stderr), discarded; it ends with the channel
+		defer g.done()
+		io.Copy(io.Discard, ch.Stderr())
+	}()
 	go func() { // the channel's requests: the stream closes when the channel has ended
 		defer g.done()
 		for r := range reqs {
