@@ -614,3 +614,34 @@ func TestTooManyViewersIsSaid(t *testing.T) {
 		t.Fatalf("one viewer too many closed with %v", err)
 	}
 }
+
+// An edit from a form loaded before the host was saved elsewhere is refused
+// instead of silently restoring the older settings.
+func TestStaleHostEditIsRefused(t *testing.T) {
+	h := newHarness(t)
+	admin := h.admin()
+	id := h.hostFor(admin, 2222)
+	path := fmt.Sprintf("/api/hosts/%d", id)
+	loaded := admin.do("GET", path, nil).json()["version"]
+	edit := func(address string, version any) resp {
+		body := map[string]any{"name": "box", "address": address, "port": 2222, "username": "alice", "auth": "password", "persistence": "tmux"}
+		if version != nil {
+			body["version"] = version
+		}
+		return admin.do("PUT", path, body)
+	}
+	a := edit("10.0.0.1", loaded) // device A saves first
+	mustStatus(t, a, 200, "first edit")
+	if a.json()["version"] == loaded {
+		t.Fatalf("version not bumped by an edit: %s", a.Body)
+	}
+	b := edit("127.0.0.1", loaded) // device B, from a form loaded before that
+	if b.Status != 409 || b.code() != "host_changed" {
+		t.Fatalf("a stale edit was not refused: %d %s", b.Status, b.Body)
+	}
+	if got := admin.do("GET", path, nil).json(); got["address"] != "10.0.0.1" || got["version"] != a.json()["version"] {
+		t.Fatalf("a refused edit changed the host: %v", got)
+	}
+	mustStatus(t, edit("10.0.0.2", a.json()["version"]), 200, "edit from a fresh form")
+	mustStatus(t, edit("10.0.0.3", nil), 200, "edit without a version")
+}

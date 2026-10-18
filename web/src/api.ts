@@ -31,6 +31,7 @@ export interface Host {
   created_at: number
   updated_at: number
   last_connected_at: number
+  version: number // changes with every saved edit; sent back with an edit
 }
 
 export interface KeyCred {

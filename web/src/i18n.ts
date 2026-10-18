@@ -45,6 +45,7 @@ const zh = {
   'error.sftp_unavailable': '这台主机不允许传输文件。',
   'error.sftp_failed': '文件上传失败。',
   'error.session_ended': '会话已结束。',
+  'error.host_changed': '这台主机刚在别处被修改过，请重新打开后再改。',
 
   'login.title': '登录',
   'login.username': '用户名',
@@ -142,6 +143,7 @@ const zh = {
   'host.tmuxSession': 'tmux 会话名',
   'host.addressSplit': '已从地址中拆出用户名和端口。',
   'host.advanced': '高级选项',
+  'host.reopen': '重新打开',
   'host.delete': '删除主机',
 
   'keys.title': '密钥',
@@ -426,6 +428,7 @@ const en: Record<Key, string> = {
   'error.sftp_unavailable': 'This host does not allow file transfer.',
   'error.sftp_failed': 'Upload failed.',
   'error.session_ended': 'The session has ended.',
+  'error.host_changed': 'This host was just changed elsewhere. Open it again to make your changes.',
 
   'login.title': 'Sign in',
   'login.username': 'Username',
@@ -523,6 +526,7 @@ const en: Record<Key, string> = {
   'host.tmuxSession': 'tmux session name',
   'host.addressSplit': 'User name and port were taken from the address.',
   'host.advanced': 'Advanced',
+  'host.reopen': 'Open again',
   'host.delete': 'Delete host',
 
   'keys.title': 'Keys',
