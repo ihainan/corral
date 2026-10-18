@@ -47,6 +47,8 @@ const FONT_STACK = "'JetBrains Mono', 'SFMono-Regular', Menlo, Consolas, 'PingFa
 // colour and DCS reports. This is only the fallback for telling them apart
 // from typing, see userInputEvent.
 const REPLY = /^(?:\x1b\[[?>]?[\d;]*[cnRt]|\x1b\[\??[\d;]*\$y|\x1b\[[IO]|\x1bP[\s\S]*?\x1b\\|\x1b\][\s\S]*?(?:\x07|\x1b\\))+$/
+const CLAIM_GAP = 100 // ms between two takeover claims of one window while it types
+
 // The button code of a mouse report (SGR or X10/default encoding), or null.
 // A wheel is buttons 64-67, with any modifier bits.
 function mouseButton(data: string): number | null {
@@ -268,17 +270,19 @@ export function TerminalPage({ id }: { id: string }) {
     let claimedAt = 0
     let claimTimer: number | undefined
     // The user acted here (typed, pasted, clicked): this window takes the
-    // terminal over. While it is in charge the claim is repeated at most once
-    // a second (an action within the second is claimed when it ends), in case
-    // another window took over meanwhile and the news has not arrived yet:
-    // the latest action at the gateway wins.
+    // terminal over. While it is in charge the claim is repeated with the
+    // actions, in case another window took over meanwhile and the news has
+    // not arrived yet: the latest action at the gateway wins. Claims are at
+    // least CLAIM_GAP apart (an action within the gap is claimed when it
+    // ends, unless another window is reported to have taken over first;
+    // actions of two windows that close together count as simultaneous).
     takeOverRef.current = () => {
       const now = Date.now()
-      if (!following && inCharge && now - claimedAt < 1000) {
+      if (!following && inCharge && now - claimedAt < CLAIM_GAP) {
         claimTimer ??= window.setTimeout(() => {
           claimTimer = undefined
           takeOverRef.current()
-        }, claimedAt + 1000 - now)
+        }, claimedAt + CLAIM_GAP - now)
         return
       }
       clearTimeout(claimTimer)
@@ -373,6 +377,12 @@ export function TerminalPage({ id }: { id: string }) {
       onLatency: setLatency,
       onSize: (cols, rows, own) => {
         inCharge = own
+        if (!own) {
+          // Another window took over after this one's last claim: an action
+          // still waiting to be claimed came before that, so it is dropped.
+          clearTimeout(claimTimer)
+          claimTimer = undefined
+        }
         const mine = fit.proposeDimensions()
         if (own || !mine || (mine.cols === cols && mine.rows === rows)) {
           // This window's size (it set it, or it is the same grid anyway):

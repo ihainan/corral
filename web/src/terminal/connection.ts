@@ -142,7 +142,7 @@ export class TermConnection {
   // applies while this window is the one in charge of it.
   resize(cols: number, rows: number, take = false) {
     this.size = clampSize(cols, rows)
-    if (take) this.takeUnsent = true
+    if (take && !this.full) this.takeUnsent = true // a session with no room takes no actions
     if (this.isOpen()) this.sendSize(this.ws!, false)
   }
 
@@ -230,12 +230,15 @@ export class TermConnection {
         } else if (m.t === 'live') {
           this.backlog = false
           this.flushQueue(ws) // caught up: now it can be told whether the screen changed
+          if (this.takeUnsent && this.size) this.sendSize(ws, true)
           this.h.onLive?.()
         } else if (m.t === 'error' && m.code === 'too_many_viewers') {
           // Open in too many windows already: retrying would only be refused again.
           this.full = true
           if (this.queue.length > 0) this.h.onDropped?.()
           this.queue = []
+          this.takeUnsent = false
+          this.takeSeq = 0
           this.drop()
           this.setStatus('full')
         } else if (m.t === 'herdr') {
@@ -285,6 +288,8 @@ export class TermConnection {
         this.full = true
         if (this.queue.length > 0) this.h.onDropped?.()
         this.queue = []
+        this.takeUnsent = false
+        this.takeSeq = 0
         this.setStatus('full')
       }
       if (this.closed || this.ended || this.full) return
