@@ -269,9 +269,12 @@ func (s *Server) apiCloseSession(w http.ResponseWriter, r *http.Request) {
 
 const (
 	maxFrame          = 64 << 10
-	loginRecheck      = time.Minute
 	maxSocketsPerUser = 32
 )
+
+// loginRecheck is how often long-lived connections (terminal sockets,
+// forwarded WebSockets and streams) re-check the login they run under.
+var loginRecheck = time.Minute
 
 func (s *Server) apiSessionSocket(w http.ResponseWriter, r *http.Request) {
 	u := currentUser(r)

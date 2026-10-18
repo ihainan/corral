@@ -35,32 +35,57 @@ type Manager struct {
 	OnEnd         func(s *Session, state string, duration time.Duration)
 	OnAlert       func(s *Session, a Alert) // bells and notification escapes in output, called from one worker
 	alerts        chan *Session             // sessions with an alert waiting
+	spillMu       sync.Mutex
+	spilled       []*Session // sessions whose alert did not fit in alerts; each at most once
 	stop          chan struct{}
 }
 
-// alertQueue bounds sessions waiting for the alert worker.
-var alertQueue = 256
+// alertQueue bounds sessions waiting for the alert worker; alertRetry is how
+// often the worker picks up those that did not fit.
+var (
+	alertQueue = 256
+	alertRetry = time.Second
+)
 
 func NewManager(detachTimeout time.Duration, maxPerUser int) *Manager {
 	m := &Manager{sessions: map[string]*Session{}, pending: map[int64]int{}, detachTimeout: detachTimeout,
 		maxPerUser: maxPerUser, alerts: make(chan *Session, alertQueue), stop: make(chan struct{})}
 	go m.reap()
-	go m.alertWorker()
+	go m.alertWorker(alertRetry)
 	return m
 }
 
 // alertWorker delivers terminal alerts one at a time.
-func (m *Manager) alertWorker() {
+func (m *Manager) alertWorker(retry time.Duration) {
+	t := time.NewTicker(retry)
+	defer t.Stop()
+	deliver := func(s *Session) {
+		if a := s.takeAlert(); a != nil && s.onAlert != nil {
+			s.onAlert(s, *a)
+		}
+	}
 	for {
 		select {
 		case <-m.stop:
 			return
 		case s := <-m.alerts:
-			if a := s.takeAlert(); a != nil && s.onAlert != nil {
-				s.onAlert(s, *a)
+			deliver(s)
+		case <-t.C:
+			m.spillMu.Lock()
+			spilled := m.spilled
+			m.spilled = nil
+			m.spillMu.Unlock()
+			for _, s := range spilled {
+				deliver(s)
 			}
 		}
 	}
+}
+
+func (m *Manager) spill(s *Session) {
+	m.spillMu.Lock()
+	m.spilled = append(m.spilled, s)
+	m.spillMu.Unlock()
 }
 
 func (m *Manager) Shutdown() {
@@ -192,7 +217,7 @@ func (m *Manager) Start(ctx context.Context, res *Reservation, owner, hostID int
 			client: client, ssh: sess, stdin: stdin, input: make(chan []byte, inputQueue),
 			buf: newRing(ringSize), subs: map[*Sub]struct{}{}, state: StateRunning,
 			cols: cols, rows: rows, idleSince: time.Now(), finished: make(chan struct{}), uploads: make(chan struct{}, 2),
-			onAlert: m.OnAlert, alertq: m.alerts,
+			onAlert: m.OnAlert, alertq: m.alerts, spill: m.spill,
 		}
 		s.pumps.Add(2)
 		go s.pump(stdout)

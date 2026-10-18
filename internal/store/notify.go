@@ -45,24 +45,31 @@ type PushSubscription struct {
 // SavePushSubscription upserts by endpoint. An endpoint moving to another user
 // or login (shared device, new sign-in) is reassigned rather than duplicated.
 // The login must still exist (ErrNotFound otherwise). Beyond keep
-// subscriptions per user, the oldest are dropped.
+// subscriptions per user, the least recently registered are dropped, never
+// the one just registered.
 func (s *Store) SavePushSubscription(ctx context.Context, p *PushSubscription, keep int) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	var seq int64
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(registered), 0) + 1 FROM push_subscriptions`).Scan(&seq); err != nil {
+		return err
+	}
 	if err := affectedOrNotFound(tx.ExecContext(ctx,
-		`INSERT INTO push_subscriptions (user_id, login_hash, endpoint, p256dh, auth, user_agent, created_at)
-		 SELECT user_id, token_hash, ?, ?, ?, ?, ? FROM login_sessions WHERE token_hash = ? AND user_id = ?
+		`INSERT INTO push_subscriptions (user_id, login_hash, endpoint, p256dh, auth, user_agent, created_at, registered)
+		 SELECT user_id, token_hash, ?, ?, ?, ?, ?, ? FROM login_sessions WHERE token_hash = ? AND user_id = ?
 		 ON CONFLICT(endpoint) DO UPDATE SET user_id = excluded.user_id, login_hash = excluded.login_hash,
-		   p256dh = excluded.p256dh, auth = excluded.auth, user_agent = excluded.user_agent, failures = 0`,
-		p.Endpoint, p.P256dh, p.Auth, p.UserAgent, s.unix(), p.LoginHash, p.UserID)); err != nil {
+		   p256dh = excluded.p256dh, auth = excluded.auth, user_agent = excluded.user_agent, failures = 0,
+		   registered = excluded.registered`,
+		p.Endpoint, p.P256dh, p.Auth, p.UserAgent, s.unix(), seq, p.LoginHash, p.UserID)); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx,
-		`DELETE FROM push_subscriptions WHERE user_id = ? AND id NOT IN
-		   (SELECT id FROM push_subscriptions WHERE user_id = ? ORDER BY id DESC LIMIT ?)`, p.UserID, p.UserID, keep); err != nil {
+		`DELETE FROM push_subscriptions WHERE user_id = ? AND endpoint != ? AND id NOT IN
+		   (SELECT id FROM push_subscriptions WHERE user_id = ? AND endpoint != ? ORDER BY registered DESC LIMIT ?)`,
+		p.UserID, p.Endpoint, p.UserID, p.Endpoint, max(keep-1, 0)); err != nil {
 		return err
 	}
 	return tx.Commit()

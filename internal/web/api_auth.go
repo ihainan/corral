@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -117,8 +118,17 @@ func (s *Server) signIn(w http.ResponseWriter, r *http.Request, u *store.User) {
 
 func (s *Server) apiLogout(w http.ResponseWriter, r *http.Request) {
 	hash := loginHash(r)
-	_ = s.auth.Logout(r.Context(), hash)
-	s.closeSockets(currentUser(r).ID, hash)
+	// Not tied to the request: a browser giving up must not leave the login
+	// (and the push subscriptions and forward access hanging off it) behind.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 10*time.Second)
+	defer cancel()
+	err := s.auth.Logout(ctx, hash)
+	s.closeSockets(currentUser(r).ID, hash) // what is open ends either way
+	if err != nil {
+		s.log.Error("sign-out failed", "err", err)
+		writeError(w, http.StatusInternalServerError, "logout_failed", "could not sign out; try again")
+		return
+	}
 	s.audit(r, "logout", "", nil)
 	s.clearSessionCookie(w)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})

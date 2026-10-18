@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net"
 	"net/netip"
 	"net/url"
 	"os"
@@ -73,15 +74,29 @@ func Load() (*Config, error) {
 	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
 		return nil, fmt.Errorf("CORRAL_PUBLIC_URL must be an absolute http(s) URL, got %q", raw)
 	}
-	c.PublicURL = &url.URL{Scheme: u.Scheme, Host: u.Host}
+	// Browsers leave the default port out of Origin, so the configured origin
+	// must too, or every same-site check fails.
+	host := u.Host
+	if p := u.Port(); (u.Scheme == "https" && p == "443") || (u.Scheme == "http" && p == "80") {
+		host = strings.TrimSuffix(host, ":"+p)
+	}
+	c.PublicURL = &url.URL{Scheme: u.Scheme, Host: host}
 	// Forwarded ports are sibling subdomains that run arbitrary apps. Only the
 	// __Host- cookie prefix, which needs HTTPS, stops one from planting a login
 	// cookie for the parent domain that the main site would then accept.
 	// A loopback IP address as the main site has no parent domain to share,
-	// which keeps local development over plain HTTP possible.
-	if c.ForwardDomain != "" && u.Scheme != "https" && !isLoopbackIP(u.Hostname()) {
-		return nil, fmt.Errorf("CORRAL_FORWARD_DOMAIN needs CORRAL_PUBLIC_URL to use https:// (got %q): "+
-			"over plain HTTP a forwarded app could set cookies for the main site", raw)
+	// which keeps local development over plain HTTP possible, but only when
+	// the server itself listens on loopback: otherwise the plain-HTTP cookies
+	// would be in use on a reachable server.
+	if c.ForwardDomain != "" && u.Scheme != "https" {
+		if !isLoopbackIP(u.Hostname()) {
+			return nil, fmt.Errorf("CORRAL_FORWARD_DOMAIN needs CORRAL_PUBLIC_URL to use https:// (got %q): "+
+				"over plain HTTP a forwarded app could set cookies for the main site", raw)
+		}
+		if h, _, err := net.SplitHostPort(c.Listen); err != nil || !isLoopbackIP(h) {
+			return nil, fmt.Errorf("CORRAL_FORWARD_DOMAIN over plain HTTP is only for local development: "+
+				"CORRAL_LISTEN must then be a loopback address such as 127.0.0.1:8080 (got %q), or use an https:// CORRAL_PUBLIC_URL", c.Listen)
+		}
 	}
 
 	if c.MasterKey, err = loadMasterKey(); err != nil {

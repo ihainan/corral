@@ -5,12 +5,14 @@ import (
 	"crypto/ecdh"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/ihainan/corral/internal/store"
 )
@@ -102,6 +104,59 @@ func TestPushDoesNotFollowRedirects(t *testing.T) {
 	res.Body.Close()
 	if res.StatusCode != http.StatusTemporaryRedirect || elsewhere.Load() != 0 {
 		t.Fatalf("push followed a redirect: status %d, %d hits elsewhere", res.StatusCode, elsewhere.Load())
+	}
+}
+
+// stallTransport holds every request until its context ends.
+type stallTransport struct{ entered chan string }
+
+func (s stallTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	s.entered <- r.URL.Path
+	select {
+	case <-r.Context().Done():
+		return nil, r.Context().Err()
+	case <-time.After(5 * time.Second):
+		return nil, errors.New("push was not cancelled")
+	}
+}
+
+// A push still being prepared (DNS, TLS, request) when its login ends is
+// cancelled, and only that login's.
+func TestRevokingALoginCancelsItsPushesInFlight(t *testing.T) {
+	cases := []struct {
+		name   string
+		revoke func(n *Notifier, userID int64)
+	}{
+		{"sign-out", func(n *Notifier, id int64) { n.RevokeLogin(id, "phone") }},
+		{"password change elsewhere", func(n *Notifier, id int64) { n.RevokeOtherLogins(id, "laptop") }},
+		{"user disabled", func(n *Notifier, id int64) { n.Revoke(id) }},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			n, st := newTestNotifier(t, Options{ExtraPushHosts: []string{"push.test"},
+				LoginValid: func(context.Context, string) bool { return true }})
+			tr := stallTransport{entered: make(chan string, 1)}
+			n.http.Transport = tr
+			ctx := context.Background()
+			u, _ := st.CreateUser(ctx, "alice", "", "x", store.RoleMember)
+			if err := st.CreateLoginSession(ctx, "phone", u.ID, "", ""); err != nil {
+				t.Fatal(err)
+			}
+			s := testSubscription(t, "https://push.test/phone")
+			s.UserID, s.LoginHash = u.ID, "phone"
+			if err := st.SavePushSubscription(ctx, s, 10); err != nil {
+				t.Fatal(err)
+			}
+			done := make(chan struct{})
+			go func() { n.deliver(ctx, u.ID, 0, Note{Title: "t"}); close(done) }()
+			<-tr.entered
+			c.revoke(n, u.ID)
+			select {
+			case <-done:
+			case <-time.After(2 * time.Second):
+				t.Fatal("push in flight was not cancelled")
+			}
+		})
 	}
 }
 

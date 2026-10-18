@@ -105,6 +105,7 @@ type Session struct {
 	alerts  alertScanner
 	onAlert func(*Session, Alert) // from Manager.OnAlert, fixed before output starts
 	alertq  chan<- *Session       // the manager's alert queue
+	spill   func(*Session)        // the manager's overflow list, for when alertq is full
 	alert   *Alert                // waiting for the alert worker; later alerts merge into it
 	queued  bool                  // the session is in alertq
 }
@@ -120,15 +121,17 @@ func (s *Session) noteAlert(a Alert) {
 // queueAlert hands a waiting alert to the manager's worker; called with mu
 // held. A session is queued at most once, so a program ringing the bell in a
 // loop costs one queue slot, not a goroutine per bell. When the queue is full
-// the alert stays waiting and the next output tries again.
+// the session goes on the manager's overflow list (also at most once), which
+// the worker drains on a timer, so a last alert is not lost to a busy moment.
 func (s *Session) queueAlert() {
 	if s.alert == nil || s.queued || s.alertq == nil {
 		return
 	}
+	s.queued = true
 	select {
 	case s.alertq <- s:
-		s.queued = true
 	default:
+		s.spill(s)
 	}
 }
 

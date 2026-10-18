@@ -18,6 +18,7 @@ import (
 	"github.com/coder/websocket"
 	"golang.org/x/crypto/ssh"
 
+	"github.com/ihainan/corral/internal/auth"
 	"github.com/ihainan/corral/internal/config"
 	"github.com/ihainan/corral/internal/notify"
 	"github.com/ihainan/corral/internal/sshx"
@@ -139,6 +140,32 @@ func TestPushSubscriptionsPerUserAreCapped(t *testing.T) {
 	}
 	if r.Status != http.StatusOK {
 		t.Fatal(r.Status)
+	}
+}
+
+// The cap drops the least recently registered devices, never the one just
+// registered, even when it is an old row taken over from someone else.
+func TestPushSubscriptionCapKeepsTheDeviceJustRegistered(t *testing.T) {
+	setVar(t, &maxPushSubscriptionsPerUser, 3)
+	h := newHarness(t)
+	h.withPush()
+	admin := h.admin()
+	bob := h.member(admin, "bob")
+	mustStatus(t, bob.subscribe(fcm+"shared"), 200, "bob's device") // the oldest row
+	for i := 1; i <= 3; i++ {
+		mustStatus(t, admin.subscribe(fmt.Sprintf("%sa%d", fcm, i)), 200, "subscribe")
+	}
+	mustStatus(t, admin.subscribe(fcm+"shared"), 200, "device moves to the admin")
+	got := h.endpoints(h.userID(admin))
+	if len(got) != 3 || !got[fcm+"shared"] || got[fcm+"a1"] {
+		t.Fatalf("kept %v, want the moved device and the two newest", got)
+	}
+	// Registering again counts as recent: a2 survives, a3 is now the oldest.
+	mustStatus(t, admin.subscribe(fcm+"a2"), 200, "re-register")
+	mustStatus(t, admin.subscribe(fcm+"a4"), 200, "new device")
+	got = h.endpoints(h.userID(admin))
+	if len(got) != 3 || !got[fcm+"a2"] || !got[fcm+"a4"] || !got[fcm+"shared"] {
+		t.Fatalf("kept %v, want a2, a4 and shared", got)
 	}
 }
 
@@ -322,6 +349,39 @@ func TestForwardTicketReturnIsFixedWhenIssued(t *testing.T) {
 	// A return given at redemption is ignored.
 	if got := redeem(issue("/ok"), "&return=/%5Cevil.example"); got != "/ok" {
 		t.Fatalf("redemption honoured a supplied return: %q", got)
+	}
+}
+
+// Sign-out deletes the login even if the browser gave up on the request, and
+// says so when it could not.
+func TestLogoutDeletesTheLoginOrFails(t *testing.T) {
+	h := newHarness(t)
+	admin := h.admin()
+	other := h.login("root")
+	u, err := h.store.UserByName(context.Background(), "root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	logout := func(c *client, ctx context.Context) *httptest.ResponseRecorder {
+		ctx = context.WithValue(context.WithValue(ctx, userKey, u), loginKey, auth.HashToken(c.cookie))
+		rec := httptest.NewRecorder()
+		h.srv.apiLogout(rec, httptest.NewRequest("POST", "/api/logout", nil).WithContext(ctx))
+		return rec
+	}
+	gone, cancel := context.WithCancel(context.Background())
+	cancel() // the browser already went away
+	if rec := logout(other, gone); rec.Code != 200 {
+		t.Fatalf("sign-out of a cancelled request: %d %s", rec.Code, rec.Body)
+	}
+	mustStatus(t, other.do("GET", "/api/me", nil), http.StatusUnauthorized, "login after sign-out")
+
+	h.store.Close() // the database refuses the delete
+	rec := logout(admin, context.Background())
+	if rec.Code != http.StatusInternalServerError || !strings.Contains(rec.Body.String(), "logout_failed") {
+		t.Fatalf("failed sign-out reported: %d %s", rec.Code, rec.Body)
+	}
+	if strings.Contains(rec.Header().Get("Set-Cookie"), "Max-Age=0") {
+		t.Fatal("cookie cleared although the login was not deleted")
 	}
 }
 

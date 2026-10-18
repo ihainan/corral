@@ -20,6 +20,8 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ssh"
+
+	"github.com/ihainan/corral/internal/sshx"
 )
 
 // Limits; variables so tests can lower them.
@@ -29,11 +31,13 @@ var (
 	maxFwdDials          = 32   // connections being set up at once, in total
 	maxFwdStreamsPerUser = 64   // proxied requests and WebSockets in flight per user
 	maxFwdStreams        = 1024 // and in total
+	maxFwdChannels       = 512  // channels to forwarded ports (open, idle or opening), in total
 	maxFwdTicketsPerUser = 16   // unredeemed tickets per user; the oldest give way
 	maxFwdGrantsPerUser  = 64   // subdomain cookies per user; the oldest give way
 
-	fwdConnIdle  = 10 * time.Minute // forwarding-only connections without users are closed after this
-	fwdReapEvery = time.Minute
+	fwdConnIdle       = 10 * time.Minute // forwarding-only connections without users are closed after this
+	fwdReapEvery      = time.Minute
+	fwdConnectTimeout = 10 * time.Second // opening a channel to a forwarded port
 )
 
 var (
@@ -66,6 +70,7 @@ type forwarder struct {
 	dials     map[[2]int64]*fwdDial    // connections being opened; requests for the same host wait for them
 	streams   map[*fwdStream]struct{}
 	perUser   map[int64]int // streams per user
+	channels  int           // channels to forwarded ports, counted until each is really finished
 	closed    bool
 	stop      chan struct{}
 	wg        sync.WaitGroup
@@ -100,19 +105,48 @@ func newForwarder() *forwarder {
 		perUser: map[int64]int{}, stop: make(chan struct{})}
 }
 
-// newFwdTransport proxies over one SSH connection, to 127.0.0.1 on the host only.
-func newFwdTransport(c *ssh.Client) *http.Transport {
+// newFwdTransport proxies over one SSH connection, to 127.0.0.1 on the host
+// only. Every channel it opens counts against maxFwdChannels from the start
+// of the open until the channel is finished for good (sshx.DialVia), so
+// requests that gave up cannot leave uncounted channels behind.
+func (f *forwarder) newFwdTransport(c *ssh.Client) *http.Transport {
 	return &http.Transport{
 		DialContext: func(ctx context.Context, _, addr string) (net.Conn, error) {
 			if h, _, err := net.SplitHostPort(addr); err != nil || h != "127.0.0.1" {
 				return nil, fmt.Errorf("forwarding only reaches 127.0.0.1, not %q", addr)
 			}
-			return c.DialContext(ctx, "tcp", addr)
+			if !f.takeChannel() {
+				return nil, errFwdBusy
+			}
+			ctx, cancel := context.WithTimeout(ctx, fwdConnectTimeout)
+			defer cancel()
+			conn, err := sshx.DialVia(ctx, c, "tcp", addr, f.releaseChannel)
+			if err != nil {
+				f.releaseChannel()
+			}
+			return conn, err
 		},
+		MaxIdleConns:          16,
 		MaxIdleConnsPerHost:   4,
 		IdleConnTimeout:       30 * time.Second,
 		ResponseHeaderTimeout: 2 * time.Minute,
 	}
+}
+
+func (f *forwarder) takeChannel() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.closed || f.channels >= maxFwdChannels {
+		return false
+	}
+	f.channels++
+	return true
+}
+
+func (f *forwarder) releaseChannel() {
+	f.mu.Lock()
+	f.channels--
+	f.mu.Unlock()
 }
 
 // Tickets and grants -------------------------------------------------------
@@ -242,76 +276,78 @@ func (f *forwarder) borrow(c *ssh.Client) (*fwdConn, error) {
 	}
 	fc := f.borrowed[c]
 	if fc == nil {
-		fc = &fwdConn{client: c, transport: newFwdTransport(c)}
+		fc = &fwdConn{client: c, transport: f.newFwdTransport(c)}
 		f.borrowed[c] = fc
 	}
 	fc.users++
 	return fc, nil
 }
 
-// pooled takes a reference on an open forwarding connection, if there is one.
-func (f *forwarder) pooled(key [2]int64) *fwdConn {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	fc := f.conns[key]
-	if fc != nil {
-		fc.users++
-	}
-	return fc
-}
-
-// startDial registers a connection about to be opened, within the limits.
-// When one to the same host is already being opened, it returns that one
-// with lead false: the caller waits for it instead of dialling again.
-func (f *forwarder) startDial(ownerID, hostID int64, cancel context.CancelFunc) (d *fwdDial, lead bool, err error) {
+// acquire takes a reference on the open forwarding connection to key, or
+// else claims the dial for it (lead) or returns the dial already under way to
+// wait for. One step under the lock, so two requests cannot both find the
+// pool empty and both dial.
+func (f *forwarder) acquire(key [2]int64, cancel context.CancelFunc) (fc *fwdConn, d *fwdDial, lead bool, err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.closed {
-		return nil, false, errFwdRevoked
+		return nil, nil, false, errFwdRevoked
 	}
-	key := [2]int64{ownerID, hostID}
+	if fc := f.conns[key]; fc != nil {
+		fc.users++
+		return fc, nil, false, nil
+	}
 	if d := f.dials[key]; d != nil {
-		return d, false, nil
+		return nil, d, false, nil
 	}
 	mine := 0
 	for k := range f.conns {
-		if k[0] == ownerID {
+		if k[0] == key[0] {
 			mine++
 		}
 	}
 	for k := range f.dials {
-		if k[0] == ownerID {
+		if k[0] == key[0] {
 			mine++
 		}
 	}
 	if len(f.dials) >= maxFwdDials || len(f.conns)+len(f.dials) >= maxFwdConns || mine >= maxFwdConnsPerUser {
-		return nil, false, errFwdBusy
+		return nil, nil, false, errFwdBusy
 	}
-	d = &fwdDial{ownerID: ownerID, hostID: hostID, cancel: cancel, done: make(chan struct{})}
+	d = &fwdDial{ownerID: key[0], hostID: key[1], cancel: cancel, done: make(chan struct{})}
 	f.dials[key] = d
-	return d, true, nil
+	return nil, d, true, nil
 }
 
 // finishDial ends a dial: on success (c set, err nil) the connection is
 // pooled, unless the dial was revoked meanwhile, and returned with a
-// reference held.
+// reference held. A connection already in the pool is never replaced.
 func (f *forwarder) finishDial(d *fwdDial, c *ssh.Client, err error) (*fwdConn, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	key := [2]int64{d.ownerID, d.hostID}
 	delete(f.dials, key)
 	defer close(d.done)
 	if err == nil && (d.revoked || f.closed) {
-		c.Close()
 		err = errFwdRevoked
 	}
 	if err != nil {
 		d.err = err
+		f.mu.Unlock()
+		if c != nil {
+			c.Close()
+		}
 		return nil, err
 	}
-	fc := &fwdConn{client: c, transport: newFwdTransport(c), owned: true, users: 1}
+	if existing := f.conns[key]; existing != nil { // cannot happen with acquire; never orphan a connection
+		existing.users++
+		f.mu.Unlock()
+		c.Close()
+		return existing, nil
+	}
+	fc := &fwdConn{client: c, transport: f.newFwdTransport(c), owned: true, users: 1}
 	f.conns[key] = fc
 	f.wg.Add(1)
+	f.mu.Unlock()
 	go func() {
 		defer f.wg.Done()
 		_ = c.Wait()
@@ -333,11 +369,21 @@ func (f *forwarder) release(fc *fwdConn) {
 	}
 }
 
-// closeConn drops a pooled connection; called with mu held.
-func (f *forwarder) closeConn(key [2]int64, fc *fwdConn) {
+// detachConn takes a pooled connection out of the pool; called with mu held.
+// The returned func closes it, and runs after mu is released: closing can
+// wait on the network, and must not hold up every other forward.
+func (f *forwarder) detachConn(key [2]int64, fc *fwdConn) func() {
 	delete(f.conns, key)
-	fc.client.Close()
-	fc.transport.CloseIdleConnections()
+	return func() {
+		fc.client.Close()
+		fc.transport.CloseIdleConnections()
+	}
+}
+
+func runAll(fs []func()) {
+	for _, fn := range fs {
+		fn()
+	}
 }
 
 // reap closes forwarding connections nobody has used for a while. A
@@ -353,20 +399,22 @@ func (f *forwarder) reap() {
 			return
 		case <-t.C:
 		}
+		var later []func()
 		f.mu.Lock()
 		f.sweep()
 		for k, fc := range f.conns {
 			if fc.users == 0 && time.Since(fc.idleSince) > fwdConnIdle {
-				f.closeConn(k, fc)
+				later = append(later, f.detachConn(k, fc))
 			}
 		}
 		for c, fc := range f.borrowed {
 			if fc.users == 0 && time.Since(fc.idleSince) > fwdReapEvery {
 				delete(f.borrowed, c) // the terminal owns the connection; only our transport goes
-				fc.transport.CloseIdleConnections()
+				later = append(later, fc.transport.CloseIdleConnections)
 			}
 		}
 		f.mu.Unlock()
+		runAll(later)
 	}
 }
 
@@ -376,8 +424,8 @@ func (f *forwarder) reap() {
 // use matches, and, when conn is set, the forwarding connections (and dials)
 // to matching owner/host pairs.
 func (f *forwarder) revoke(use func(fwdUse) bool, conn func(ownerID, hostID int64) bool) {
+	var later []func()
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	for k, g := range f.tickets {
 		if use(g.fwdUse) {
 			delete(f.tickets, k)
@@ -393,26 +441,28 @@ func (f *forwarder) revoke(use func(fwdUse) bool, conn func(ownerID, hostID int6
 			st.cancel()
 		}
 	}
-	if conn == nil {
-		return
-	}
-	for _, d := range f.dials {
-		if conn(d.ownerID, d.hostID) {
-			d.revoked = true
-			d.cancel()
+	if conn != nil {
+		for _, d := range f.dials {
+			if conn(d.ownerID, d.hostID) {
+				d.revoked = true
+				d.cancel()
+			}
+		}
+		for k, fc := range f.conns {
+			if conn(k[0], k[1]) {
+				later = append(later, f.detachConn(k, fc))
+			}
 		}
 	}
-	for k, fc := range f.conns {
-		if conn(k[0], k[1]) {
-			f.closeConn(k, fc)
-		}
-	}
+	f.mu.Unlock()
+	runAll(later)
 }
 
 // shutdown ends every request, dial and connection, stops the reaper and
 // waits for the background goroutines.
 func (f *forwarder) shutdown() {
 	f.closeOnce.Do(func() {
+		var later []func()
 		f.mu.Lock()
 		f.closed = true
 		close(f.stop)
@@ -424,13 +474,14 @@ func (f *forwarder) shutdown() {
 			d.cancel()
 		}
 		for k, fc := range f.conns {
-			f.closeConn(k, fc)
+			later = append(later, f.detachConn(k, fc))
 		}
 		for c, fc := range f.borrowed {
 			delete(f.borrowed, c)
-			fc.transport.CloseIdleConnections()
+			later = append(later, fc.transport.CloseIdleConnections)
 		}
 		f.mu.Unlock()
+		runAll(later)
 	})
 	f.wg.Wait()
 }
