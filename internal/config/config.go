@@ -77,7 +77,9 @@ func Load() (*Config, error) {
 	// Forwarded ports are sibling subdomains that run arbitrary apps. Only the
 	// __Host- cookie prefix, which needs HTTPS, stops one from planting a login
 	// cookie for the parent domain that the main site would then accept.
-	if c.ForwardDomain != "" && u.Scheme != "https" {
+	// A loopback IP address as the main site has no parent domain to share,
+	// which keeps local development over plain HTTP possible.
+	if c.ForwardDomain != "" && u.Scheme != "https" && !isLoopbackIP(u.Hostname()) {
 		return nil, fmt.Errorf("CORRAL_FORWARD_DOMAIN needs CORRAL_PUBLIC_URL to use https:// (got %q): "+
 			"over plain HTTP a forwarded app could set cookies for the main site", raw)
 	}
@@ -187,4 +189,9 @@ func envDuration(key string, def time.Duration) (time.Duration, error) {
 		return 0, fmt.Errorf("%s: invalid duration %q", key, v)
 	}
 	return d, nil
+}
+
+func isLoopbackIP(host string) bool {
+	ip, err := netip.ParseAddr(host)
+	return err == nil && ip.IsLoopback()
 }
