@@ -65,35 +65,65 @@ func (s *Server) apiListSessions(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) apiOpenSession(w http.ResponseWriter, r *http.Request) {
 	u := currentUser(r)
-	var b struct {
-		HostID   int64  `json:"host_id"`
-		Cols     int    `json:"cols"`
-		Rows     int    `json:"rows"`
-		Password string `json:"password"` // for hosts set to ask every time
-		// After a host key change: the fingerprint the user saw and accepted.
-		// The connection only goes ahead if the host presents exactly this key.
-		AcceptFingerprint string `json:"accept_fingerprint"`
-	}
+	var b openBody
 	if err := readJSON(r, &b); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
-	// Opens for one user and host take turns, so two taps cannot both find
-	// nothing running and start two. Everything below is decided after the
-	// turn comes: the host as it is now, and whether the login still holds.
-	release, err := s.openGate.acquire(r.Context(), [2]int64{u.ID, b.HostID})
+	// Waiting for the turn and everything after it end with the login at
+	// the latest, and revoking access (sign-out, disable, password change,
+	// host deletion) cancels them.
+	expiry, err := s.auth.LoginExpiry(r.Context(), loginHash(r))
 	if err != nil {
-		if errors.Is(err, errGateBusy) {
-			writeError(w, http.StatusTooManyRequests, "busy", "this host is already being opened; try again in a moment")
-		}
-		return // the request went away while waiting
-	}
-	defer release()
-	if ok, err := s.auth.LoginValid(r.Context(), loginHash(r)); err != nil || !ok {
 		writeError(w, http.StatusUnauthorized, "unauthorized", "please sign in")
 		return
 	}
-	h, err := s.store.Host(r.Context(), u.ID, b.HostID)
+	ctx, cancel := context.WithDeadline(r.Context(), expiry)
+	defer cancel()
+	untrack := s.trackPending(u.ID, &liveSocket{loginHash: loginHash(r), hostID: b.HostID, cancel: cancel})
+	defer untrack()
+	// Opens, edits and forwarding dials of one host take turns, so two taps
+	// cannot both find nothing running and start two, and an open reads the
+	// host, its credential and its pinned key as they are together. The
+	// response is written after the turn is over.
+	resp, err := s.underHostGate(ctx, u.ID, b.HostID, func(w http.ResponseWriter) { s.openSession(ctx, w, r, &b) })
+	switch {
+	case errors.Is(err, errGateBusy):
+		writeError(w, http.StatusTooManyRequests, "busy", "this host is already being opened; try again in a moment")
+	case err != nil && r.Context().Err() == nil:
+		writeError(w, http.StatusUnauthorized, "unauthorized", "please sign in") // signed out or expired while waiting
+	case err == nil:
+		resp.writeTo(w)
+	}
+}
+
+type openBody struct {
+	HostID   int64  `json:"host_id"`
+	Cols     int    `json:"cols"`
+	Rows     int    `json:"rows"`
+	Password string `json:"password"` // for hosts set to ask every time
+	// After a host key change: the fingerprint the user saw and accepted.
+	// The connection only goes ahead if the host presents exactly this key.
+	AcceptFingerprint string `json:"accept_fingerprint"`
+}
+
+// openSession runs with the host's turn held; ctx ends with the login.
+func (s *Server) openSession(ctx context.Context, w http.ResponseWriter, r *http.Request, b *openBody) {
+	u := currentUser(r)
+	switch ok, err := s.auth.LoginValid(ctx, loginHash(r)); {
+	case ctx.Err() != nil:
+		if r.Context().Err() == nil {
+			writeError(w, http.StatusUnauthorized, "unauthorized", "please sign in")
+		}
+		return
+	case err != nil:
+		s.internalError(w, r, err)
+		return
+	case !ok:
+		writeError(w, http.StatusUnauthorized, "unauthorized", "please sign in")
+		return
+	}
+	h, err := s.store.Host(ctx, u.ID, b.HostID)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "not_found", "no such host")
 		return
@@ -110,9 +140,7 @@ func (s *Server) apiOpenSession(w http.ResponseWriter, r *http.Request) {
 	if h.Persistence != store.PersistNone {
 		for _, rs := range s.terms.Running(u.ID, h.ID) {
 			if rs.HostConfig == cfg {
-				info := rs.Info()
-				release()
-				writeJSON(w, http.StatusOK, info)
+				writeJSON(w, http.StatusOK, rs.Info())
 				return
 			}
 		}
@@ -131,7 +159,7 @@ func (s *Server) apiOpenSession(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusConflict, "credential_missing", "this host has no saved credential; edit the host")
 			return
 		}
-		_, sec, err := s.openCredential(r.Context(), u.ID, *h.CredentialID)
+		_, sec, err := s.openCredential(ctx, u.ID, *h.CredentialID)
 		if err != nil {
 			s.internalError(w, r, err)
 			return
@@ -144,18 +172,8 @@ func (s *Server) apiOpenSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer res.Release() // no-op once Start took it
-	// The whole setup ends with the login at the latest, and revoking access
-	// (disable, sign-out, password change, host deletion) cancels it.
-	expiry, err := s.auth.LoginExpiry(r.Context(), loginHash(r))
-	if err != nil {
-		writeError(w, http.StatusUnauthorized, "unauthorized", "please sign in")
-		return
-	}
-	ctx, cancel := context.WithDeadline(r.Context(), expiry)
-	defer cancel()
-	untrack := s.trackPending(u.ID, &liveSocket{loginHash: loginHash(r), hostID: h.ID, cancel: cancel})
-	defer untrack()
-	// Registered first, then checked: a revocation in between is caught either way.
+	// Registered (by the caller) first, then checked: a revocation in between
+	// is caught either way.
 	if _, err := s.auth.CheckLogin(ctx, loginHash(r)); err != nil {
 		writeError(w, http.StatusUnauthorized, "unauthorized", "please sign in")
 		return
@@ -200,6 +218,13 @@ func (s *Server) apiOpenSession(w http.ResponseWriter, r *http.Request) {
 	}
 	if accepted {
 		s.audit(r, "hostkey.accept", hostTarget(h), map[string]any{"fingerprint": dialed.SeenKey.Fingerprint})
+		// Another machine key: nothing connected under the old one is reused.
+		_ = s.store.BumpConnVersion(ctx, u.ID, h.ID)
+		s.closeHostForwards(u.ID, h.ID)
+		s.forgetHostCode(u.ID, h.ID)
+		if nh, err := s.store.Host(ctx, u.ID, h.ID); err == nil {
+			cfg = hostConfig(nh)
+		}
 	}
 	// Last check before anything runs on the host.
 	if _, err := s.auth.CheckLogin(ctx, loginHash(r)); err != nil || ctx.Err() != nil {
@@ -237,9 +262,7 @@ func (s *Server) apiOpenSession(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = s.store.TouchHostConnected(r.Context(), u.ID, h.ID)
 	s.audit(r, "session.open", hostTarget(h), map[string]any{"session": sess.ID})
-	info := sess.Info()
-	release()
-	writeJSON(w, http.StatusCreated, info)
+	writeJSON(w, http.StatusCreated, sess.Info())
 }
 
 var errHostKeyRejected = errors.New("host key rejected")
@@ -778,7 +801,51 @@ func hostConfig(h *store.Host) string {
 	if h.CredentialID != nil {
 		cred = *h.CredentialID
 	}
-	return fmt.Sprintf("%s|%d|%s|%s|%d|%s|%s|%s", h.Address, h.Port, h.Username, h.Auth, cred, h.Persistence, h.TmuxSession, h.HerdrSession)
+	return fmt.Sprintf("%d|%s|%d|%s|%s|%d|%s|%s|%s", h.ConnVersion, h.Address, h.Port, h.Username, h.Auth, cred, h.Persistence,
+		h.TmuxSession, h.HerdrSession)
+}
+
+// underHostGate runs f with the host's turn held, collecting its response;
+// the caller writes it once the turn is over, so a slow client never holds
+// the turn.
+func (s *Server) underHostGate(ctx context.Context, owner, host int64, f func(w http.ResponseWriter)) (*bufferedResponse, error) {
+	release, err := s.hostGate.acquire(ctx, [2]int64{owner, host})
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	resp := &bufferedResponse{header: http.Header{}}
+	f(resp)
+	return resp, nil
+}
+
+// bufferedResponse holds a small response until it can be written.
+type bufferedResponse struct {
+	header http.Header
+	status int
+	body   bytes.Buffer
+}
+
+func (b *bufferedResponse) Header() http.Header { return b.header }
+
+func (b *bufferedResponse) WriteHeader(code int) {
+	if b.status == 0 {
+		b.status = code
+	}
+}
+
+func (b *bufferedResponse) Write(p []byte) (int, error) {
+	b.WriteHeader(http.StatusOK)
+	return b.body.Write(p)
+}
+
+func (b *bufferedResponse) writeTo(w http.ResponseWriter) {
+	for k, v := range b.header {
+		w.Header()[k] = v
+	}
+	b.WriteHeader(http.StatusOK)
+	w.WriteHeader(b.status)
+	w.Write(b.body.Bytes())
 }
 
 var errGateBusy = errors.New("too many waiting")

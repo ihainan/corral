@@ -465,7 +465,7 @@ func TestEditedHostIsNotServedAnOldSession(t *testing.T) {
 	if a.json()["id"] == b.json()["id"] {
 		t.Fatal("an edited host was given its old session")
 	}
-	if n := h.srv.openGate.size(); n != 0 {
+	if n := h.srv.hostGate.size(); n != 0 {
 		t.Fatalf("open gate keeps %d entries after the opens finished", n)
 	}
 }

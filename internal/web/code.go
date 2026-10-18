@@ -450,6 +450,52 @@ func (s *Server) stopCode(ctx context.Context, f *store.Forward) error {
 		return err
 	}
 	defer s.fwd.release(fc)
+	return s.stopCodeOn(ctx, fc)
+}
+
+// codeStopperFor prepares stopping VS Code on a host that is about to be
+// deleted: what is needed to reach it is read now, the stop runs in the
+// background afterwards and never holds up the delete. nil when there is
+// nothing to stop or no saved way in.
+func (s *Server) codeStopperFor(ctx context.Context, h *store.Host) func() {
+	if !s.cfg.CodeServer || h.Auth == store.AuthAsk || h.CredentialID == nil || !s.store.HasCodeForward(ctx, h.OwnerID, h.ID) {
+		return nil
+	}
+	_, sec, err := s.openCredential(ctx, h.OwnerID, *h.CredentialID)
+	if err != nil {
+		return nil
+	}
+	k, err := s.store.HostKey(ctx, h.OwnerID, h.ID)
+	if err != nil {
+		return nil
+	}
+	t := sshx.Target{Address: h.Address, Port: h.Port, User: h.Username, Password: sec.Password, PrivateKey: []byte(sec.PrivateKey),
+		Passphrase: []byte(sec.Passphrase), Pinned: &sshx.Pinned{KeyType: k.KeyType, KeyData: k.KeyData, Fingerprint: k.Fingerprint}}
+	return func() {
+		s.code.mu.Lock()
+		if s.code.closed {
+			s.code.mu.Unlock()
+			return
+		}
+		s.code.wg.Add(1)
+		s.code.mu.Unlock()
+		go func() {
+			defer s.code.wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), codeStepTimeout)
+			defer cancel()
+			dialed, err := sshx.Dial(ctx, s.guard, t)
+			if err != nil {
+				return
+			}
+			defer dialed.Client.Close()
+			if err := s.stopCodeOn(ctx, &fwdConn{client: dialed.Client}); err != nil {
+				s.log.Info("could not stop VS Code on a deleted host", "host", h.Name, "err", err)
+			}
+		}()
+	}
+}
+
+func (s *Server) stopCodeOn(ctx context.Context, fc *fwdConn) error {
 	_, sock, err := s.probeCode(ctx, fc)
 	if err != nil {
 		return err

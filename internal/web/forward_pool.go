@@ -84,6 +84,7 @@ type fwdConn struct {
 	client    *ssh.Client
 	transport *http.Transport
 	owned     bool      // opened for forwarding (closed when idle), not a terminal's
+	version   int64     // pooled: the host's connection version it was made with
 	codeSock  string    // the owner's code-server socket on the host (codeUpstream), under forwarder.mu
 	users     int       // requests and port listings using it now
 	idleSince time.Time // when users last dropped to zero
@@ -328,15 +329,19 @@ func (f *forwarder) borrow(c *ssh.Client) (*fwdConn, error) {
 // else claims the dial for it (lead) or returns the dial already under way to
 // wait for. One step under the lock, so two requests cannot both find the
 // pool empty and both dial.
-func (f *forwarder) acquire(key [2]int64, cancel context.CancelFunc) (fc *fwdConn, d *fwdDial, lead bool, err error) {
+// A pooled connection made with an older connection version is retired.
+func (f *forwarder) acquire(key [2]int64, version int64, cancel context.CancelFunc) (fc *fwdConn, d *fwdDial, lead bool, err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.closed {
 		return nil, nil, false, errFwdRevoked
 	}
 	if fc := f.conns[key]; fc != nil {
-		fc.users++
-		return fc, nil, false, nil
+		if fc.version >= version {
+			fc.users++
+			return fc, nil, false, nil
+		}
+		go f.detachConn(key, fc)() // closing may wait on the network: not under mu
 	}
 	if d := f.dials[key]; d != nil {
 		return nil, d, false, nil
@@ -363,7 +368,7 @@ func (f *forwarder) acquire(key [2]int64, cancel context.CancelFunc) (fc *fwdCon
 // finishDial ends a dial: on success (c set, err nil) the connection is
 // pooled, unless the dial was revoked meanwhile, and returned with a
 // reference held. A connection already in the pool is never replaced.
-func (f *forwarder) finishDial(d *fwdDial, c *ssh.Client, err error) (*fwdConn, error) {
+func (f *forwarder) finishDial(d *fwdDial, c *ssh.Client, version int64, err error) (*fwdConn, error) {
 	f.mu.Lock()
 	key := [2]int64{d.ownerID, d.hostID}
 	delete(f.dials, key)
@@ -386,7 +391,7 @@ func (f *forwarder) finishDial(d *fwdDial, c *ssh.Client, err error) (*fwdConn, 
 		return existing, nil
 	}
 	fc := f.newFwdConn(c, true)
-	fc.users = 1
+	fc.users, fc.version = 1, version
 	f.conns[key] = fc
 	f.wg.Add(1)
 	f.mu.Unlock()
