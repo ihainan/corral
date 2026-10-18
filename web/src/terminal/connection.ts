@@ -56,6 +56,10 @@ export class TermConnection {
   private everOpen = false
   private full = false
   private sizeSeq = 0 // this socket's size requests so far
+  private takePending = false // a takeover asked for while not connected
+  // Names this window to the gateway on every connection, so a reconnect
+  // is the same viewer (still in charge of the size if it was).
+  private viewer = Array.from(crypto.getRandomValues(new Uint8Array(12)), (b) => b.toString(36).padStart(2, '0')).join('')
   opens = 0 // counts accepted sockets; input held elsewhere checks it did not change
   status: Status = 'connecting'
 
@@ -127,8 +131,10 @@ export class TermConnection {
   // terminal is taken over; otherwise (the window changed size) the size only
   // applies while this window is the one in charge of it.
   resize(cols: number, rows: number, take = false) {
-    this.size = { cols, rows }
+    // The gateway refuses larger sizes; send the largest it takes instead.
+    this.size = { cols: Math.min(cols, 1000), rows: Math.min(rows, 500) }
     if (this.isOpen()) this.sendSize(this.ws!, take)
+    else if (take) this.takePending = true // sent with the size once connected
   }
 
   private sendSize(ws: WebSocket, take: boolean) {
@@ -163,7 +169,7 @@ export class TermConnection {
     this.drop()
     const gen = this.gen
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const q = this.offset !== null ? `?offset=${this.offset}` : ''
+    const q = `?viewer=${this.viewer}` + (this.offset !== null ? `&offset=${this.offset}` : '')
     const ws = new WebSocket(`${proto}//${location.host}/api/sessions/${this.id}/ws${q}`)
     ws.binaryType = 'arraybuffer'
     this.ws = ws
@@ -191,7 +197,8 @@ export class TermConnection {
           const first = !this.everOpen
           this.everOpen = true
           this.sizeSeq = 0 // numbered per socket
-          if (this.size) this.sendSize(ws, first)
+          if (this.size) this.sendSize(ws, first || this.takePending)
+          this.takePending = false
           this.h.onHello?.()
           ws.send(JSON.stringify({ t: 'visible', v: document.visibilityState === 'visible' }))
           this.startPing(ws, gen)

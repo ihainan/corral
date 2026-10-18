@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"path"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -332,6 +333,8 @@ func (s *Server) apiCloseSession(w http.ResponseWriter, r *http.Request) {
 //           session already has as many viewers as it allows
 // Browser → server
 //   binary: keyboard input
+// (the socket URL may carry ?viewer=ID, the same for all connections of one
+// browser window, so a reconnecting window keeps being the one in charge)
 //   text:   {"t":"resize","cols":N,"rows":N,"seq":N,"take":bool} | {"t":"ping","ts":N}
 //           (seq numbers this socket's resize requests, from 1; take: the user
 //           acted here, so the size is taken over; without it the size only
@@ -340,6 +343,8 @@ func (s *Server) apiCloseSession(w http.ResponseWriter, r *http.Request) {
 //   the terminal's current size, whether this socket set it, and the last of
 //   its resize requests applied; sent on attach, whenever the size or the
 //   socket that set it changes, and in answer to each resize request)
+
+var viewerIDRE = regexp.MustCompile(`^[A-Za-z0-9_-]{8,64}$`)
 
 const (
 	maxFrame          = 64 << 10
@@ -399,7 +404,13 @@ func (s *Server) apiSessionSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	c.SetReadLimit(1 << 20)
 
-	sub, backlog, start, reset, ev, err := sess.Attach(offset, have)
+	// The browser window, so its reconnections count as the same viewer
+	// (the one in charge of the terminal size stays in charge).
+	viewer := r.URL.Query().Get("viewer")
+	if !viewerIDRE.MatchString(viewer) {
+		viewer = ""
+	}
+	sub, backlog, start, reset, ev, err := sess.AttachAs(viewer, offset, have)
 	if err != nil {
 		// Said in a frame and a close code of its own, so the browser stops
 		// reconnecting instead of retrying a socket that is refused anyway.

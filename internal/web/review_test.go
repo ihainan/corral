@@ -705,7 +705,7 @@ func TestSizeNotesSayWhoSetIt(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	a, err := h.dialWS(admin, id, "")
+	a, err := h.dialWS(admin, id, "?viewer=windowAAAA")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -736,5 +736,24 @@ func TestSizeNotesSayWhoSetIt(t *testing.T) {
 	}
 	if n := next(a); n.Cols != 80 || n.Own || n.Ack != 1 {
 		t.Fatalf("a after b took over: %+v", n)
+	}
+	// Window a takes over again, then reconnects while its first connection
+	// is still attached: the new connection is a, still in charge, so its
+	// window's own resize applies.
+	send(a, map[string]any{"t": "resize", "cols": 120, "rows": 40, "seq": 2, "take": true})
+	if n := next(a); n.Cols != 120 || !n.Own {
+		t.Fatalf("a taking over again: %+v", n)
+	}
+	a2, err := h.dialWS(admin, id, "?viewer=windowAAAA")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a2.CloseNow()
+	if n := next(a2); n.Cols != 120 || !n.Own {
+		t.Fatalf("a's new connection on attaching: %+v", n)
+	}
+	send(a2, map[string]any{"t": "resize", "cols": 130, "rows": 40, "seq": 1})
+	if n := next(a2); n.Cols != 130 || !n.Own || n.Ack != 1 {
+		t.Fatalf("a's new connection resizing: %+v", n)
 	}
 }

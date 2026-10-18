@@ -262,12 +262,25 @@ export function TerminalPage({ id }: { id: string }) {
     // Set while another viewer's size is shown (see onSize); fitting to this
     // window then waits until this viewer takes the terminal over.
     let following: { cols: number; rows: number } | null = null
+    // Whether the gateway last said this window is in charge of the size,
+    // and when this window last claimed it.
+    let inCharge = false
+    let claimedAt = 0
+    // The user acted here (typed, pasted, clicked): this window takes the
+    // terminal over. While it is in charge the claim is repeated at most once
+    // a second, in case another window took over meanwhile and the news has
+    // not arrived yet: the latest action at the gateway wins.
     takeOverRef.current = () => {
-      if (!following) return
-      following = null
-      setFollowing(null)
-      applyScale()
-      safeFit()
+      const now = Date.now()
+      if (!following && inCharge && now - claimedAt < 1000) return
+      claimedAt = now
+      inCharge = true
+      if (following) {
+        following = null
+        setFollowing(null)
+        applyScale()
+        safeFit()
+      }
       conn.resize(term.cols, term.rows, true) // tell the host even if nothing changed locally
     }
     const safeFit = () => {
@@ -349,18 +362,22 @@ export function TerminalPage({ id }: { id: string }) {
       onEnd: setEnd,
       onLatency: setLatency,
       onSize: (cols, rows, own) => {
+        inCharge = own
         const mine = fit.proposeDimensions()
         if (own || !mine || (mine.cols === cols && mine.rows === rows)) {
           // This window's size (it set it, or it is the same grid anyway):
           // fit to this window, in case another viewer's size was shown
-          // until now. Should the fit differ (the window changed meanwhile),
-          // it is reported, and applies while this window is in charge.
+          // until now.
           if (following) {
             following = null
             setFollowing(null)
             applyScale()
           }
           safeFit()
+          // In charge, but the gateway has another size than this window now
+          // shows (it reported one from before the window changed): report
+          // the current one, unless a report is already on its way.
+          if (own && (term.cols !== cols || term.rows !== rows) && resizeTimer === undefined) conn.resize(term.cols, term.rows)
           return
         }
         // Another viewer set this size: show the terminal at it, so what the

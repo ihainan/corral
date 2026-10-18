@@ -119,7 +119,7 @@ func TestAlertScanner(t *testing.T) {
 // A size change reaches every viewer, so the others can follow it.
 func TestResizeTellsEveryViewer(t *testing.T) {
 	s := &Session{subs: map[*Sub]struct{}{}, state: StateExited, cols: 80, rows: 24}
-	a, b := &Sub{Size: make(chan SizeNote, 1)}, &Sub{Size: make(chan SizeNote, 1)}
+	a, b := &Sub{Size: make(chan SizeNote, 1), viewer: "a", done: make(chan struct{})}, &Sub{Size: make(chan SizeNote, 1), viewer: "b", done: make(chan struct{})}
 	s.subs[a], s.subs[b] = struct{}{}, struct{}{}
 	if err := s.ResizeFrom(a, 1, true, 120, 40); err != nil {
 		t.Fatal(err)
@@ -175,15 +175,41 @@ func TestResizeTellsEveryViewer(t *testing.T) {
 	if got := <-a.Size; got.Ack != 3 || !got.Own {
 		t.Fatalf("a late request: %+v", got)
 	}
-	// Once the viewer in charge leaves, a resize without take applies again.
-	s.subs[b] = struct{}{}
+	// An invalid size changes nothing but is answered, so the asking viewer
+	// does not wait for an answer that never comes.
+	if err := s.ResizeFrom(a, 4, true, 5000, 30); err == nil {
+		t.Fatal("an invalid size was accepted")
+	}
+	if got := <-a.Size; got != (SizeNote{Cols: 100, Rows: 30, Own: true, Ack: 4}) {
+		t.Fatalf("an invalid size: %+v", got)
+	}
+	// b takes over; a second connection of window b (b reconnecting while
+	// the first is still attached) counts as b.
 	_ = s.ResizeFrom(b, 3, true, 90, 30)
 	<-a.Size
 	<-b.Size
-	delete(s.subs, b)
-	s.sizeBy = nil // as Detach does
-	_ = s.ResizeFrom(a, 4, false, 100, 30)
-	if got := <-a.Size; got != (SizeNote{Cols: 100, Rows: 30, Own: true, Ack: 4}) {
+	b2 := &Sub{Size: make(chan SizeNote, 1), viewer: "b", done: make(chan struct{})}
+	s.subs[b2] = struct{}{}
+	_ = s.ResizeFrom(b2, 1, false, 95, 30)
+	if got := <-b2.Size; got != (SizeNote{Cols: 95, Rows: 30, Own: true, Ack: 1}) {
+		t.Fatalf("window b's new connection: %+v", got)
+	}
+	<-a.Size
+	<-b.Size
+	// A request of a connection that already left is ignored.
+	s.Detach(b)
+	_ = s.ResizeFrom(b, 4, true, 70, 20)
+	if s.cols != 95 || s.sizeBy != "b" {
+		t.Fatalf("a request after leaving changed the size: %dx%d by %q", s.cols, s.rows, s.sizeBy)
+	}
+	// Once all of window b's connections left, nobody is in charge and a
+	// resize without take applies again.
+	s.Detach(b2)
+	if s.sizeBy != "" {
+		t.Fatalf("still in charge after leaving: %q", s.sizeBy)
+	}
+	_ = s.ResizeFrom(a, 5, false, 100, 30)
+	if got := <-a.Size; got != (SizeNote{Cols: 100, Rows: 30, Own: true, Ack: 5}) {
 		t.Fatalf("after the viewer in charge left: %+v", got)
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"strconv"
 	"sync"
 	"time"
 
@@ -61,7 +62,11 @@ type Sub struct {
 	Size chan SizeNote
 	done chan struct{}
 	once sync.Once
-	ack  int64 // the last resize request number of this viewer applied; under Session.mu
+	// The browser window this is (one window reconnecting has a new Sub with
+	// the same viewer), and the last of this Sub's resize requests handled;
+	// both under Session.mu.
+	viewer string
+	ack    int64
 }
 
 // SizeNote is the terminal size as told to one viewer: whether that viewer
@@ -120,7 +125,8 @@ type Session struct {
 	reason    string
 	cols      int
 	rows      int
-	sizeBy    *Sub // the viewer that set the size, nil if none (or it left)
+	sizeBy    string    // the viewer (window) in charge of the size; "" if none, or it left
+	subSeq    int       // numbers viewers that did not name themselves
 	idleSince time.Time // when the last viewer left; zero while viewed
 	endedAt   time.Time
 	title     string
@@ -240,11 +246,7 @@ func (s *Session) pump(r io.Reader) {
 				case sub.C <- chunk:
 				default:
 					// Too slow to keep up: drop it; the browser reconnects from its offset.
-					delete(s.subs, sub)
-					sub.close()
-					if len(s.subs) == 0 {
-						s.idleSince = time.Now()
-					}
+					s.removeSub(sub)
 				}
 			}
 			s.mu.Unlock()
@@ -273,6 +275,12 @@ func (s *Session) writer() {
 // Attach registers a viewer. It returns the output the viewer is missing and
 // whether that output is a full replay (the viewer must clear its screen first).
 func (s *Session) Attach(fromOffset uint64, haveOffset bool) (sub *Sub, backlog []byte, start uint64, reset bool, ev *Event, err error) {
+	return s.AttachAs("", fromOffset, haveOffset)
+}
+
+// AttachAs is Attach for the browser window named viewer (the same name on
+// each of its connections); "" stands for a viewer of its own.
+func (s *Session) AttachAs(viewer string, fromOffset uint64, haveOffset bool) (sub *Sub, backlog []byte, start uint64, reset bool, ev *Event, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.state == StateRunning && len(s.subs) >= maxViewers {
@@ -290,8 +298,12 @@ func (s *Session) Attach(fromOffset uint64, haveOffset bool) (sub *Sub, backlog 
 	if reset {
 		backlog, start = s.buf.all()
 	}
-	sub = &Sub{C: make(chan Chunk, subBuffer), Events: make(chan Event, 4), Meta: make(chan []byte, 1), Size: make(chan SizeNote, 1), done: make(chan struct{})}
-	sub.Size <- SizeNote{Cols: s.cols, Rows: s.rows}
+	if viewer == "" {
+		s.subSeq++
+		viewer = "#" + strconv.Itoa(s.subSeq) // cannot clash with a named one (see the web layer)
+	}
+	sub = &Sub{C: make(chan Chunk, subBuffer), Events: make(chan Event, 4), Meta: make(chan []byte, 1), Size: make(chan SizeNote, 1), done: make(chan struct{}), viewer: viewer}
+	sub.Size <- SizeNote{Cols: s.cols, Rows: s.rows, Own: s.sizeBy == viewer}
 	if s.meta != nil {
 		sub.Meta <- s.meta
 	}
@@ -313,15 +325,27 @@ func (s *Session) Detach(sub *Sub) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.subs[sub]; ok {
-		delete(s.subs, sub)
-		sub.close()
-		if s.sizeBy == sub {
-			s.sizeBy = nil
-		}
-		if len(s.subs) == 0 {
-			s.idleSince = time.Now()
+		s.removeSub(sub)
+	}
+}
+
+// removeSub ends a viewer's subscription; called with mu held. A window
+// whose last connection this was is no longer in charge of the size.
+func (s *Session) removeSub(sub *Sub) {
+	delete(s.subs, sub)
+	sub.close()
+	if len(s.subs) == 0 {
+		s.idleSince = time.Now()
+	}
+	if s.sizeBy != sub.viewer {
+		return
+	}
+	for other := range s.subs {
+		if other.viewer == sub.viewer {
+			return
 		}
 	}
+	s.sizeBy = ""
 }
 
 // Write queues input. When the host is slow to read, it waits (which pauses
@@ -352,25 +376,34 @@ func (s *Session) Write(ctx context.Context, p []byte) error {
 // Resize records a size set by no particular viewer (see ResizeFrom).
 func (s *Session) Resize(cols, rows int) error { return s.ResizeFrom(nil, 0, true, cols, rows) }
 
+const maxCols, maxRows = 1000, 500 // the largest size accepted
+
 // ResizeFrom handles request number seq of viewer from: its size. With take
 // (the user acted in that viewer) the size is taken over; without (its
 // window changed size) it applies only while that viewer set the size, or
 // nobody did. The size is sent to the host and every viewer hears of a change
 // of size or of the viewer that set it; the asking viewer always hears back,
 // so it knows its request was handled and whether it is the one in charge.
+// An invalid size changes nothing, but is answered like any request.
 func (s *Session) ResizeFrom(from *Sub, seq int64, take bool, cols, rows int) error {
-	if cols < 2 || rows < 1 || cols > 1000 || rows > 500 {
-		return errors.New("invalid size")
-	}
+	valid := cols >= 2 && rows >= 1 && cols <= maxCols && rows <= maxRows
 	s.sizeMu.Lock()
 	defer s.sizeMu.Unlock()
 	s.mu.Lock()
-	if from != nil && seq > from.ack {
-		from.ack = seq
+	by := ""
+	if from != nil {
+		if _, ok := s.subs[from]; !ok { // it left while this request waited
+			s.mu.Unlock()
+			return nil
+		}
+		if seq > from.ack {
+			from.ack = seq
+		}
+		by = from.viewer
 	}
-	setter := from
-	if !take && s.sizeBy != nil && s.sizeBy != from {
-		cols, rows, setter = s.cols, s.rows, s.sizeBy // someone else's size stays
+	setter := by
+	if !valid || (!take && s.sizeBy != "" && s.sizeBy != by) {
+		cols, rows, setter = s.cols, s.rows, s.sizeBy // the size stays as it is
 	}
 	changed := s.cols != cols || s.rows != rows || s.sizeBy != setter
 	s.cols, s.rows, s.sizeBy = cols, rows, setter
@@ -379,7 +412,7 @@ func (s *Session) ResizeFrom(from *Sub, seq int64, take bool, cols, rows int) er
 		if !changed && sub != from {
 			continue
 		}
-		note := SizeNote{Cols: cols, Rows: rows, Own: sub == setter, Ack: sub.ack}
+		note := SizeNote{Cols: cols, Rows: rows, Own: setter != "" && sub.viewer == setter, Ack: sub.ack}
 		select {
 		case <-sub.Size:
 		default:
@@ -390,6 +423,9 @@ func (s *Session) ResizeFrom(from *Sub, seq int64, take bool, cols, rows int) er
 		}
 	}
 	s.mu.Unlock()
+	if !valid {
+		return errors.New("invalid size")
+	}
 	// Compared with what the host was sent, not with what was recorded: a
 	// size whose sending failed is sent again when it is reported again.
 	if !running || s.ptySize == [2]int{cols, rows} {
