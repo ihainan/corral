@@ -7,6 +7,7 @@ package term
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"sync"
@@ -71,6 +72,8 @@ type Info struct {
 	Cols      int    `json:"cols"`
 	Rows      int    `json:"rows"`
 	Title     string `json:"title"`
+	// Side information such as the herdr summary, as last published.
+	Meta json.RawMessage `json:"meta,omitempty"`
 }
 
 type Session struct {
@@ -177,7 +180,7 @@ func (s *Session) Info() Info {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return Info{ID: s.ID, HostID: s.HostID, HostName: s.HostName, State: s.state, CreatedAt: s.Created.Unix(),
-		Viewers: len(s.subs), Cols: s.cols, Rows: s.rows, Title: s.title}
+		Viewers: len(s.subs), Cols: s.cols, Rows: s.rows, Title: s.title, Meta: append(json.RawMessage(nil), s.meta...)}
 }
 
 // Client exposes the SSH connection for side channels (file upload, herdr).

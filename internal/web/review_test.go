@@ -310,7 +310,10 @@ func TestChangedHostKeyRefusedBeforeCredentialsAreSent(t *testing.T) {
 	admin := h.admin()
 	srv := h.sshServer(t.TempDir())
 	id := h.hostFor(admin, srv.Addr.Port)
-	mustStatus(t, admin.do("POST", "/api/sessions", map[string]any{"host_id": id}), 201, "first connect pins")
+	first := admin.do("POST", "/api/sessions", map[string]any{"host_id": id})
+	mustStatus(t, first, 201, "first connect pins")
+	// End it: a running session would be returned as is, without a new connection.
+	mustStatus(t, admin.do("DELETE", "/api/sessions/"+first.json()["id"].(string), nil), 200, "close first")
 	srv.RotateHostKey()
 	before := srv.Attempts()
 	r := admin.do("POST", "/api/sessions", map[string]any{"host_id": id})
@@ -326,7 +329,9 @@ func TestChangedHostKeyRefusedBeforeCredentialsAreSent(t *testing.T) {
 	if r.code() != "host_key_changed" {
 		t.Fatalf("wrong confirmation accepted: %d %s", r.Status, r.Body)
 	}
-	mustStatus(t, admin.do("POST", "/api/sessions", map[string]any{"host_id": id, "accept_fingerprint": got}), 201, "accepted key")
+	accepted := admin.do("POST", "/api/sessions", map[string]any{"host_id": id, "accept_fingerprint": got})
+	mustStatus(t, accepted, 201, "accepted key")
+	mustStatus(t, admin.do("DELETE", "/api/sessions/"+accepted.json()["id"].(string), nil), 200, "close accepted")
 	mustStatus(t, admin.do("POST", "/api/sessions", map[string]any{"host_id": id}), 201, "new key now pinned")
 }
 
@@ -411,5 +416,34 @@ func TestPasswordPolicyAllowsEightCharacters(t *testing.T) {
 	}
 	if err := auth.CheckPasswordPolicy("short7!"); err == nil {
 		t.Fatal("7-character password accepted")
+	}
+}
+
+// With tmux or herdr every gateway session would attach the same remote
+// session, so opening the host again returns the running one; plain shells
+// are independent and each open starts a new one.
+func TestPersistentHostsKeepOneSession(t *testing.T) {
+	h := newHarness(t)
+	admin := h.admin()
+	srv := h.sshServer(t.TempDir())
+	id := h.hostFor(admin, srv.Addr.Port) // tmux by default
+	a := admin.do("POST", "/api/sessions", map[string]any{"host_id": id})
+	mustStatus(t, a, 201, "first open")
+	b := admin.do("POST", "/api/sessions", map[string]any{"host_id": id})
+	mustStatus(t, b, 200, "second open returns the running session")
+	if a.json()["id"] != b.json()["id"] {
+		t.Fatalf("a second session was started for a tmux host: %v vs %v", a.json()["id"], b.json()["id"])
+	}
+
+	plain := admin.do("POST", "/api/hosts", map[string]any{"name": "plain", "address": "127.0.0.1", "port": srv.Addr.Port,
+		"username": "alice", "auth": "password", "password": "alice-pass", "persistence": "none"})
+	mustStatus(t, plain, 201, "create plain host")
+	pid := plain.json()["id"]
+	c := admin.do("POST", "/api/sessions", map[string]any{"host_id": pid})
+	d := admin.do("POST", "/api/sessions", map[string]any{"host_id": pid})
+	mustStatus(t, c, 201, "plain open 1")
+	mustStatus(t, d, 201, "plain open 2")
+	if c.json()["id"] == d.json()["id"] {
+		t.Fatal("plain shells were merged into one session")
 	}
 }

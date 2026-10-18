@@ -40,16 +40,17 @@ type Route struct {
 }
 
 type Server struct {
-	cfg    *config.Config
-	store  *store.Store
-	auth   *auth.Service
-	vault  *vault.Vault
-	guard  *netguard.Guard
-	terms  *term.Manager
-	log    *slog.Logger
-	mux    *http.ServeMux
-	routes []Route
-	static fs.FS
+	openLocks sync.Map // [user, host] -> *sync.Mutex, see lockOpen
+	cfg       *config.Config
+	store     *store.Store
+	auth      *auth.Service
+	vault     *vault.Vault
+	guard     *netguard.Guard
+	terms     *term.Manager
+	log       *slog.Logger
+	mux       *http.ServeMux
+	routes    []Route
+	static    fs.FS
 
 	herdrSocks herdrSockets
 	notifier   *notify.Notifier // nil disables push

@@ -84,6 +84,20 @@ func (s *Server) apiOpenSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// With tmux or herdr every gateway session attaches the same remote
+	// session, so a second one would only mirror the first (and fight it over
+	// the terminal size). Opening such a host again returns the running one.
+	// Opens for one user and host are serialised so two taps cannot both
+	// find nothing running and start two.
+	if h.Persistence != store.PersistNone {
+		unlock := s.lockOpen(u.ID, h.ID)
+		defer unlock()
+		if running := s.terms.Running(u.ID, h.ID); len(running) > 0 {
+			writeJSON(w, http.StatusOK, running[0].Info())
+			return
+		}
+	}
+
 	t := sshx.Target{Address: h.Address, Port: h.Port, User: h.Username}
 	switch h.Auth {
 	case store.AuthAsk:
@@ -733,4 +747,12 @@ func (s *Server) apiUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	s.audit(r, "file.upload", sess.HostName, map[string]any{"session": sess.ID, "path": full, "bytes": written, "type": ctype})
 	writeJSON(w, http.StatusCreated, map[string]any{"path": full, "bytes": written, "type": ctype})
+}
+
+// lockOpen serialises session opens for one user and host.
+func (s *Server) lockOpen(userID, hostID int64) func() {
+	v, _ := s.openLocks.LoadOrStore([2]int64{userID, hostID}, &sync.Mutex{})
+	mu := v.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
 }
