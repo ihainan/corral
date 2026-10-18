@@ -43,12 +43,16 @@ type Target struct {
 	Passphrase []byte
 
 	Pinned *Pinned
+	// Accept is a fingerprint the user explicitly accepted after a key change.
+	// A different key than the pinned one is allowed only if it matches exactly.
+	Accept string
 }
 
 // Result carries the key we saw, so the caller can pin it after success.
 type Result struct {
-	Client  *ssh.Client
-	SeenKey *Pinned
+	Client   *ssh.Client
+	SeenKey  *Pinned
+	Replaced bool // the host presented the accepted new key instead of the pinned one
 }
 
 var ErrAuthFailed = errors.New("authentication failed")
@@ -93,6 +97,7 @@ func Dial(ctx context.Context, guard *netguard.Guard, t Target) (*Result, error)
 	}
 
 	seen := &Pinned{}
+	replaced := false
 	cfg := &ssh.ClientConfig{
 		User:    t.User,
 		Auth:    auths,
@@ -102,6 +107,10 @@ func Dial(ctx context.Context, guard *netguard.Guard, t Target) (*Result, error)
 			seen.KeyData = key.Marshal()
 			seen.Fingerprint = ssh.FingerprintSHA256(key)
 			if t.Pinned != nil && !bytes.Equal(t.Pinned.KeyData, seen.KeyData) {
+				if t.Accept != "" && t.Accept == seen.Fingerprint {
+					replaced = true
+					return nil
+				}
 				return &HostKeyChangedError{Expected: t.Pinned.Fingerprint, Got: seen.Fingerprint}
 			}
 			return nil
@@ -132,7 +141,7 @@ func Dial(ctx context.Context, guard *netguard.Guard, t Target) (*Result, error)
 	_ = conn.SetDeadline(time.Time{})
 	client := ssh.NewClient(c, chans, reqs)
 	go keepalive(client)
-	return &Result{Client: client, SeenKey: seen}, nil
+	return &Result{Client: client, SeenKey: seen, Replaced: replaced}, nil
 }
 
 func isAuthError(err error) bool {
@@ -142,21 +151,30 @@ func isAuthError(err error) bool {
 // keepalive probes the server and closes the client when it stops answering, so
 // a dead network path surfaces as a closed session instead of a silent hang.
 func keepalive(c *ssh.Client) {
+	closed := make(chan struct{})
+	go func() {
+		_ = c.Wait()
+		close(closed)
+	}()
 	t := time.NewTicker(30 * time.Second)
 	defer t.Stop()
 	misses := 0
-	for range t.C {
+	for {
+		select {
+		case <-closed:
+			return
+		case <-t.C:
+		}
 		errc := make(chan error, 1)
 		go func() {
 			_, _, err := c.SendRequest("keepalive@openssh.com", true, nil)
 			errc <- err
 		}()
 		select {
+		case <-closed:
+			return
 		case err := <-errc:
 			if err != nil {
-				if errors.Is(err, net.ErrClosed) || err.Error() == "EOF" {
-					return
-				}
 				misses++
 			} else {
 				misses = 0

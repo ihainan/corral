@@ -16,16 +16,21 @@ import (
 
 const (
 	ringSize      = 2 << 20 // recent output kept per session
-	subBuffer     = 256     // queued chunks per viewer before it is dropped as too slow
+	subBuffer     = 64      // queued chunks per viewer (≤ 2 MiB) before it is dropped as too slow
 	readChunk     = 32 << 10
-	exitedLinger  = 5 * time.Minute
+	inputQueue    = 256 // pending keyboard messages per session
+	maxViewers    = 8   // open sockets per session
 	StateRunning  = "running"
 	StateExited   = "exited" // the remote program ended normally
 	StateLost     = "lost"   // the SSH connection dropped
 	StateClosed   = "closed" // closed by the user or an administrator
 )
 
-var ErrClosed = errors.New("session closed")
+var (
+	ErrClosed         = errors.New("session closed")
+	ErrInputBusy      = errors.New("the host is not reading input")
+	ErrTooManyViewers = errors.New("too many open windows for this session")
+)
 
 // Chunk is a piece of output and the absolute offset where it starts.
 type Chunk struct {
@@ -33,11 +38,12 @@ type Chunk struct {
 	Data   []byte
 }
 
-// Event is a state change pushed to viewers alongside output.
+// Event is a state change pushed to viewers after all output before it.
 type Event struct {
 	State    string
 	ExitCode int
 	Reason   string
+	Offset   uint64 // total output; a viewer has everything once it reached this
 }
 
 // Sub is one attached viewer.
@@ -73,6 +79,8 @@ type Session struct {
 	client *ssh.Client
 	ssh    *ssh.Session
 	stdin  io.WriteCloser
+	input  chan []byte
+	pumps  sync.WaitGroup
 
 	mu        sync.Mutex
 	buf       *ring
@@ -85,9 +93,9 @@ type Session struct {
 	idleSince time.Time // when the last viewer left; zero while viewed
 	endedAt   time.Time
 	title     string
+	finished  chan struct{} // closed when the session reached a final state
 
-	writeMu sync.Mutex
-	onEnd   func(*Session)
+	onEnd func(*Session)
 }
 
 func (s *Session) Info() Info {
@@ -97,8 +105,11 @@ func (s *Session) Info() Info {
 		Viewers: len(s.subs), Cols: s.cols, Rows: s.rows, Title: s.title}
 }
 
-// Client exposes the SSH connection for side channels (file upload, port probes).
+// Client exposes the SSH connection for side channels (file upload, herdr).
 func (s *Session) Client() *ssh.Client { return s.client }
+
+// Finished is closed when the session ends.
+func (s *Session) Finished() <-chan struct{} { return s.finished }
 
 func (s *Session) State() string {
 	s.mu.Lock()
@@ -108,6 +119,7 @@ func (s *Session) State() string {
 
 // pump copies remote output into the ring and fans it out to viewers.
 func (s *Session) pump(r io.Reader) {
+	defer s.pumps.Done()
 	buf := make([]byte, readChunk)
 	for {
 		n, err := r.Read(buf)
@@ -137,11 +149,29 @@ func (s *Session) pump(r io.Reader) {
 	}
 }
 
+// writer is the only goroutine that writes to the remote stdin, so a host that
+// stops reading input blocks this goroutine instead of request handlers.
+func (s *Session) writer() {
+	for {
+		select {
+		case <-s.finished:
+			return
+		case p := <-s.input:
+			if _, err := s.stdin.Write(p); err != nil {
+				return
+			}
+		}
+	}
+}
+
 // Attach registers a viewer. It returns the output the viewer is missing and
 // whether that output is a full replay (the viewer must clear its screen first).
-func (s *Session) Attach(fromOffset uint64, haveOffset bool) (sub *Sub, backlog []byte, start uint64, reset bool, ev *Event) {
+func (s *Session) Attach(fromOffset uint64, haveOffset bool) (sub *Sub, backlog []byte, start uint64, reset bool, ev *Event, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.state == StateRunning && len(s.subs) >= maxViewers {
+		return nil, nil, 0, false, nil, ErrTooManyViewers
+	}
 	if haveOffset {
 		if b, ok := s.buf.since(fromOffset); ok {
 			backlog, start = b, fromOffset
@@ -156,7 +186,7 @@ func (s *Session) Attach(fromOffset uint64, haveOffset bool) (sub *Sub, backlog 
 	}
 	sub = &Sub{C: make(chan Chunk, subBuffer), Events: make(chan Event, 4), done: make(chan struct{})}
 	if s.state != StateRunning {
-		e := Event{State: s.state, ExitCode: s.exitCode, Reason: s.reason}
+		e := Event{State: s.state, ExitCode: s.exitCode, Reason: s.reason, Offset: s.buf.end()}
 		ev = &e
 		sub.close()
 		return
@@ -167,6 +197,9 @@ func (s *Session) Attach(fromOffset uint64, haveOffset bool) (sub *Sub, backlog 
 }
 
 func (s *Session) Detach(sub *Sub) {
+	if sub == nil {
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.subs[sub]; ok {
@@ -178,14 +211,19 @@ func (s *Session) Detach(sub *Sub) {
 	}
 }
 
+// Write queues keyboard input without blocking the caller.
 func (s *Session) Write(p []byte) error {
-	if s.State() != StateRunning {
+	select {
+	case <-s.finished:
 		return ErrClosed
+	default:
 	}
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-	_, err := s.stdin.Write(p)
-	return err
+	select {
+	case s.input <- append([]byte(nil), p...):
+		return nil
+	default:
+		return ErrInputBusy
+	}
 }
 
 func (s *Session) Resize(cols, rows int) error {
@@ -217,7 +255,9 @@ func (s *Session) Redraw() {
 	_ = s.ssh.WindowChange(rows, cols)
 }
 
-// end moves the session to a final state once and tells every viewer.
+// end moves the session to a final state once and tells every viewer. When the
+// remote side ended on its own, the caller waits for the output pumps first so
+// the final event follows the last byte.
 func (s *Session) end(state string, code int, reason string) {
 	s.mu.Lock()
 	if s.state != StateRunning {
@@ -225,7 +265,7 @@ func (s *Session) end(state string, code int, reason string) {
 		return
 	}
 	s.state, s.exitCode, s.reason, s.endedAt = state, code, reason, time.Now()
-	ev := Event{State: state, ExitCode: code, Reason: reason}
+	ev := Event{State: state, ExitCode: code, Reason: reason, Offset: s.buf.end()}
 	for sub := range s.subs {
 		select {
 		case sub.Events <- ev:
@@ -234,6 +274,7 @@ func (s *Session) end(state string, code int, reason string) {
 		sub.close()
 	}
 	s.subs = map[*Sub]struct{}{}
+	close(s.finished)
 	s.mu.Unlock()
 	if s.ssh != nil {
 		s.ssh.Close()
@@ -247,6 +288,20 @@ func (s *Session) end(state string, code int, reason string) {
 }
 
 func (s *Session) Close(reason string) { s.end(StateClosed, 0, reason) }
+
+// waitPumps waits (briefly) for remaining output to be read after the remote
+// program exited.
+func (s *Session) waitPumps(limit time.Duration) {
+	done := make(chan struct{})
+	go func() {
+		s.pumps.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(limit):
+	}
+}
 
 // scanTitle picks up OSC 0/2 window titles so the session list can show what is
 // running. It only looks within a single chunk, which is enough for titles.

@@ -3,10 +3,10 @@
 package testutil
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/binary"
-	"io"
 	"net"
 	"sync"
 	"testing"
@@ -127,7 +127,31 @@ func (s *SSHServer) session(ch ssh.Channel, reqs <-chan *ssh.Request, root strin
 			r.Reply(true, nil)
 			ch.Write([]byte("ready\r\n"))
 			go func() {
-				io.Copy(ch, ch) // echo
+				// Echo input. Typing "burst!" makes the "program" print 300 KB and exit
+				// at once, to test that no output is lost when a session ends.
+				buf := make([]byte, 4096)
+				var line []byte
+				for {
+					n, err := ch.Read(buf)
+					if n > 0 {
+						ch.Write(buf[:n])
+						line = append(line, buf[:n]...)
+						if bytes.Contains(line, []byte("burst!")) {
+							chunk := bytes.Repeat([]byte("0123456789abcdef"), 64)
+							for i := 0; i < 300; i++ {
+								ch.Write(chunk)
+							}
+							ch.Write([]byte("END-OF-BURST"))
+							break
+						}
+						if len(line) > 1024 {
+							line = line[len(line)-64:]
+						}
+					}
+					if err != nil {
+						break
+					}
+				}
 				ch.SendRequest("exit-status", false, []byte{0, 0, 0, 0})
 				ch.Close()
 			}()

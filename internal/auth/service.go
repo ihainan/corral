@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"regexp"
 	"strings"
@@ -98,7 +99,7 @@ func (s *Service) CompleteSetup(ctx context.Context, token, username, displayNam
 	if s.setupHash == "" {
 		return nil, ErrSetupDone
 	}
-	if HashToken(token) != s.setupHash {
+	if subtle.ConstantTimeCompare([]byte(HashToken(token)), []byte(s.setupHash)) != 1 {
 		return nil, ErrBadSetupToken
 	}
 	if err := CheckUsername(username); err != nil {
@@ -127,14 +128,20 @@ func (s *Service) CompleteSetup(ctx context.Context, token, username, displayNam
 	return u, nil
 }
 
+// AllowAttempt applies the per-address limit shared by sign-in, setup and
+// invite redemption (everything that hashes a password for an anonymous caller).
+func (s *Service) AllowAttempt(ip string) bool { return s.limiter.allow(ip, s.now()) }
+
 // Login checks credentials and, on success, returns a new session token.
 func (s *Service) Login(ctx context.Context, username, password, ip, ua string) (*store.User, string, error) {
-	if !s.limiter.allow(ip, s.now()) {
+	if !s.AllowAttempt(ip) {
 		return nil, "", ErrRateLimited
 	}
 	u, err := s.store.UserByName(ctx, strings.TrimSpace(username))
 	if errors.Is(err, store.ErrNotFound) {
-		VerifyPassword(password, dummyHash)
+		if _, err := CheckPassword(password, dummyHash); errors.Is(err, ErrBusy) {
+			return nil, "", ErrBusy
+		}
 		return nil, "", ErrInvalidLogin
 	}
 	if err != nil {
@@ -144,26 +151,41 @@ func (s *Service) Login(ctx context.Context, username, password, ip, ua string) 
 	if until := time.Unix(u.LockedUntil(), 0); until.After(now) {
 		return nil, "", &LockedError{RetryAfter: until.Sub(now).Round(time.Second)}
 	}
-	ok := VerifyPassword(password, u.PasswordHash())
-	if !ok || u.Disabled {
-		if !ok {
-			failures := u.FailedLogins() + 1
-			var lockUntil int64
-			if failures >= freeAttempts {
-				wait := time.Minute << min(failures-freeAttempts, 4)
-				lockUntil = now.Add(min(wait, maxLockout)).Unix()
-			}
-			if err := s.store.RecordLoginFailure(ctx, u.ID, lockUntil); err != nil {
+	ok, err := CheckPassword(password, u.PasswordHash())
+	if err != nil {
+		return nil, "", err // busy: not the user's fault, not counted
+	}
+	if !ok {
+		failures, err := s.store.RecordLoginFailure(ctx, u.ID)
+		if err != nil {
+			return nil, "", err
+		}
+		if failures >= freeAttempts {
+			wait := min(time.Minute<<min(failures-freeAttempts, 4), maxLockout)
+			if err := s.store.ExtendLockout(ctx, u.ID, now.Add(wait).Unix()); err != nil {
 				return nil, "", err
 			}
 		}
 		return nil, "", ErrInvalidLogin
 	}
+	if u.Disabled {
+		return nil, "", ErrInvalidLogin
+	}
 	if err := s.store.ResetLoginFailures(ctx, u.ID); err != nil {
 		return nil, "", err
 	}
-	tok, err := s.startSession(ctx, u.ID, ip, ua)
+	tok, hash, err := NewToken()
 	if err != nil {
+		return nil, "", err
+	}
+	if len(ua) > 300 {
+		ua = ua[:300]
+	}
+	// Created only if the password we just verified is still the current one.
+	if err := s.store.CreateLoginSessionIfCurrent(ctx, hash, u.ID, u.PasswordHash(), ip, ua); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, "", ErrInvalidLogin
+		}
 		return nil, "", err
 	}
 	return u, tok, nil
@@ -196,28 +218,47 @@ func (s *Service) Authenticate(ctx context.Context, token string) (*store.User, 
 		return nil, "", ErrUnauthorized
 	}
 	hash := HashToken(token)
-	ls, err := s.store.LoginSessionByHash(ctx, hash)
-	if errors.Is(err, store.ErrNotFound) {
-		return nil, "", ErrUnauthorized
-	}
+	u, err := s.CheckLogin(ctx, hash)
 	if err != nil {
 		return nil, "", err
+	}
+	return u, hash, nil
+}
+
+// CheckLogin re-validates a login by its stored hash. Long-lived connections
+// call it periodically so expiry, sign-out and disabling reach them too.
+func (s *Service) CheckLogin(ctx context.Context, hash string) (*store.User, error) {
+	ls, err := s.store.LoginSessionByHash(ctx, hash)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, ErrUnauthorized
+	}
+	if err != nil {
+		return nil, err
 	}
 	now := s.now()
 	if now.Sub(time.Unix(ls.LastSeenAt, 0)) > s.idle || now.Sub(time.Unix(ls.CreatedAt, 0)) > s.maxAge {
 		_ = s.store.DeleteLoginSession(ctx, hash)
-		return nil, "", ErrUnauthorized
+		return nil, ErrUnauthorized
 	}
 	u, err := s.store.UserByID(ctx, ls.UserID)
 	if err != nil {
-		return nil, "", ErrUnauthorized
+		return nil, ErrUnauthorized
 	}
 	if u.Disabled {
 		_ = s.store.DeleteLoginSession(ctx, hash)
-		return nil, "", ErrUnauthorized
+		return nil, ErrUnauthorized
 	}
 	s.touch(ctx, hash, now)
-	return u, hash, nil
+	return u, nil
+}
+
+// LoginExpiry is when a login ends at the latest, regardless of activity.
+func (s *Service) LoginExpiry(ctx context.Context, hash string) (time.Time, error) {
+	ls, err := s.store.LoginSessionByHash(ctx, hash)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return time.Unix(ls.CreatedAt, 0).Add(s.maxAge), nil
 }
 
 // touch refreshes last_seen at most once a minute per session to spare writes.
@@ -243,7 +284,11 @@ func (s *Service) Logout(ctx context.Context, sessionHash string) error {
 // ChangePassword verifies the current password, stores the new one and signs
 // out every other browser.
 func (s *Service) ChangePassword(ctx context.Context, u *store.User, current, next, keepSession string) error {
-	if !VerifyPassword(current, u.PasswordHash()) {
+	ok, err := CheckPassword(current, u.PasswordHash())
+	if err != nil {
+		return err
+	}
+	if !ok {
 		return ErrInvalidLogin
 	}
 	if err := CheckPasswordPolicy(next); err != nil {
@@ -310,6 +355,10 @@ func (s *Service) InviteInfo(ctx context.Context, token string) (*store.Invite, 
 }
 
 func (s *Service) RedeemInvite(ctx context.Context, token, username, displayName, password string) (*store.User, error) {
+	// Check the invite before spending a password hash on the request.
+	if _, err := s.InviteInfo(ctx, token); err != nil {
+		return nil, err
+	}
 	if err := CheckUsername(username); err != nil {
 		return nil, err
 	}

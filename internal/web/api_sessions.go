@@ -10,14 +10,18 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"os"
 	"path"
 	"strconv"
-	"os"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/coder/websocket"
 	"github.com/pkg/sftp"
+	"golang.org/x/crypto/ssh"
 
 	"github.com/ihainan/corral/internal/netguard"
 	"github.com/ihainan/corral/internal/sshx"
@@ -32,6 +36,29 @@ func vaultSealed(c *store.Credential) vault.Sealed {
 
 func parseInt(s string) (int64, error) { return strconv.ParseInt(s, 10, 64) }
 
+// failureReason turns a connection error into a fixed category. Remote error
+// text is never returned or stored: a hostile server controls it and could
+// echo back the password it was sent.
+func failureReason(err error) string {
+	var ne net.Error
+	switch {
+	case errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &ne) && ne.Timeout()):
+		return "timeout"
+	case strings.Contains(err.Error(), "connection refused"):
+		return "refused"
+	case strings.Contains(err.Error(), "no such host") || strings.Contains(err.Error(), "cannot resolve"):
+		return "dns"
+	case strings.Contains(err.Error(), "network is unreachable") || strings.Contains(err.Error(), "no route to host"):
+		return "unreachable"
+	case strings.Contains(err.Error(), "cannot use private key"):
+		return "bad_key"
+	case strings.Contains(err.Error(), "ssh: handshake failed"):
+		return "handshake"
+	default:
+		return "other"
+	}
+}
+
 func (s *Server) apiListSessions(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.terms.List(currentUser(r).ID))
 }
@@ -43,6 +70,9 @@ func (s *Server) apiOpenSession(w http.ResponseWriter, r *http.Request) {
 		Cols     int    `json:"cols"`
 		Rows     int    `json:"rows"`
 		Password string `json:"password"` // for hosts set to ask every time
+		// After a host key change: the fingerprint the user saw and accepted.
+		// The connection only goes ahead if the host presents exactly this key.
+		AcceptFingerprint string `json:"accept_fingerprint"`
 	}
 	if err := readJSON(r, &b); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
@@ -77,9 +107,16 @@ func (s *Server) apiOpenSession(w http.ResponseWriter, r *http.Request) {
 	if k, err := s.store.HostKey(r.Context(), u.ID, h.ID); err == nil {
 		t.Pinned = &sshx.Pinned{KeyType: k.KeyType, KeyData: k.KeyData, Fingerprint: k.Fingerprint}
 	}
+	t.Accept = b.AcceptFingerprint
 
-	res, err := sshx.Dial(r.Context(), s.guard, t)
+	res, err := s.terms.Reserve(u.ID)
 	if err != nil {
+		writeError(w, http.StatusTooManyRequests, "too_many_sessions", "close some sessions first")
+		return
+	}
+	dialed, err := sshx.Dial(r.Context(), s.guard, t)
+	if err != nil {
+		res.Release()
 		var hk *sshx.HostKeyChangedError
 		switch {
 		case errors.As(err, &hk):
@@ -93,28 +130,42 @@ func (s *Server) apiOpenSession(w http.ResponseWriter, r *http.Request) {
 			s.audit(r, "session.auth_failed", hostTarget(h), nil)
 			writeError(w, http.StatusUnprocessableEntity, "auth_failed", "the host rejected the user name or credential")
 		default:
-			s.audit(r, "session.connect_failed", hostTarget(h), map[string]any{"error": err.Error()})
-			writeErrorExtra(w, http.StatusBadGateway, "connect_failed", "cannot connect to the host", map[string]any{"detail": err.Error()})
+			reason := failureReason(err)
+			s.audit(r, "session.connect_failed", hostTarget(h), map[string]any{"reason": reason})
+			writeErrorExtra(w, http.StatusBadGateway, "connect_failed", "cannot connect to the host", map[string]any{"reason": reason})
 		}
 		return
 	}
-	if t.Pinned == nil && res.SeenKey != nil {
-		_ = s.store.PinHostKey(r.Context(), u.ID, h.ID, &store.HostKey{KeyType: res.SeenKey.KeyType, KeyData: res.SeenKey.KeyData, Fingerprint: res.SeenKey.Fingerprint})
+	switch {
+	case t.Pinned == nil:
+		_ = s.store.PinHostKey(r.Context(), u.ID, h.ID, toHostKey(dialed.SeenKey))
+	case dialed.Replaced:
+		// The host presented exactly the key the user accepted: re-pin it.
+		_ = s.store.ReplaceHostKey(r.Context(), u.ID, h.ID, t.Pinned.Fingerprint, toHostKey(dialed.SeenKey))
+		s.audit(r, "hostkey.accept", hostTarget(h), map[string]any{"fingerprint": dialed.SeenKey.Fingerprint})
 	}
-	sess, err := s.terms.Start(u.ID, h.ID, h.Name, res.Client, term.StartOptions{
+	sess, err := s.terms.Start(res, u.ID, h.ID, h.Name, dialed.Client, term.StartOptions{
 		Cols: b.Cols, Rows: b.Rows, Persistence: h.Persistence, TmuxSession: h.TmuxSession,
 	})
 	if err != nil {
-		if errors.Is(err, term.ErrTooMany) {
-			writeError(w, http.StatusTooManyRequests, "too_many_sessions", "close some sessions first")
-			return
-		}
-		writeErrorExtra(w, http.StatusBadGateway, "start_failed", "connected, but could not start a shell", map[string]any{"detail": err.Error()})
+		writeError(w, http.StatusBadGateway, "start_failed", "connected, but could not start a shell")
+		return
+	}
+	// Access may have been revoked while we were connecting. The session is
+	// registered first, then checked, so a concurrent revocation either sees it
+	// (and closes it) or this check sees the revocation.
+	if _, err := s.auth.CheckLogin(r.Context(), loginHash(r)); err != nil {
+		sess.Close("access revoked")
+		writeError(w, http.StatusUnauthorized, "unauthorized", "please sign in")
 		return
 	}
 	_ = s.store.TouchHostConnected(r.Context(), u.ID, h.ID)
 	s.audit(r, "session.open", hostTarget(h), map[string]any{"session": sess.ID})
 	writeJSON(w, http.StatusCreated, sess.Info())
+}
+
+func toHostKey(p *sshx.Pinned) *store.HostKey {
+	return &store.HostKey{KeyType: p.KeyType, KeyData: p.KeyData, Fingerprint: p.Fingerprint}
 }
 
 func (s *Server) apiCloseSession(w http.ResponseWriter, r *http.Request) {
@@ -133,16 +184,22 @@ func (s *Server) apiCloseSession(w http.ResponseWriter, r *http.Request) {
 // Server → browser
 //   binary: 8-byte big-endian offset, then raw terminal output
 //   text:   {"t":"hello","offset":N,"reset":bool}  sent first
-//           {"t":"state","state":"exited|lost|closed","code":N,"reason":"…"}
+//           {"t":"state","state":"exited|lost|closed","code":N,"reason":"…","offset":N}
+//           (sent after every output byte up to offset)
 //           {"t":"pong","ts":N}
 // Browser → server
 //   binary: keyboard input
 //   text:   {"t":"resize","cols":N,"rows":N} | {"t":"ping","ts":N}
 
-const maxFrame = 64 << 10
+const (
+	maxFrame         = 64 << 10
+	loginRecheck     = time.Minute
+	maxSocketsPerUser = 32
+)
 
 func (s *Server) apiSessionSocket(w http.ResponseWriter, r *http.Request) {
 	u := currentUser(r)
+	hash := loginHash(r)
 	sess, err := s.terms.Get(u.ID, r.PathValue("id"))
 	if err != nil {
 		writeError(w, http.StatusNotFound, "not_found", "no such session")
@@ -155,18 +212,37 @@ func (s *Server) apiSessionSocket(w http.ResponseWriter, r *http.Request) {
 			offset, have = n, true
 		}
 	}
+	ctx, cancel := context.WithCancel(context.WithoutCancel(r.Context()))
+	defer cancel()
+	untrack, ok := s.trackSocket(u.ID, &liveSocket{loginHash: hash, cancel: cancel})
+	if !ok {
+		writeError(w, http.StatusTooManyRequests, "too_many_windows", "too many open terminal windows")
+		return
+	}
+	defer untrack()
+	// Registered before this check, so a sign-out racing with us is caught either way.
+	if _, err := s.auth.CheckLogin(ctx, hash); err != nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "please sign in")
+		return
+	}
+	expiry, err := s.auth.LoginExpiry(ctx, hash)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "please sign in")
+		return
+	}
+
 	// Origin was already checked against the configured site in guardRequest.
 	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true, CompressionMode: websocket.CompressionDisabled})
 	if err != nil {
 		return
 	}
 	c.SetReadLimit(1 << 20)
-	ctx, cancel := context.WithCancel(r.Context())
-	defer cancel()
-	untrack := s.trackSocket(u.ID, &liveSocket{loginHash: loginHash(r), cancel: cancel})
-	defer untrack()
 
-	sub, backlog, start, reset, ev := sess.Attach(offset, have)
+	sub, backlog, start, reset, ev, err := sess.Attach(offset, have)
+	if err != nil {
+		c.Close(websocket.StatusPolicyViolation, "too many windows for this session")
+		return
+	}
 	defer sess.Detach(sub)
 
 	writeText := func(v any) error {
@@ -192,6 +268,23 @@ func (s *Server) apiSessionSocket(w http.ResponseWriter, r *http.Request) {
 		}
 		return nil
 	}
+	sendState := func(e term.Event) {
+		_ = writeText(map[string]any{"t": "state", "state": e.State, "code": e.ExitCode, "reason": e.Reason, "offset": e.Offset})
+		c.Close(websocket.StatusNormalClosure, "session ended")
+	}
+	// drain forwards output already queued for this viewer, keeping order.
+	drain := func() error {
+		for {
+			select {
+			case ch := <-sub.C:
+				if err := writeData(ch.Offset, ch.Data); err != nil {
+					return err
+				}
+			default:
+				return nil
+			}
+		}
+	}
 
 	if err := writeText(map[string]any{"t": "hello", "offset": start, "reset": reset, "state": sess.State()}); err != nil {
 		return
@@ -200,8 +293,7 @@ func (s *Server) apiSessionSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if ev != nil {
-		_ = writeText(map[string]any{"t": "state", "state": ev.State, "code": ev.ExitCode, "reason": ev.Reason})
-		c.Close(websocket.StatusNormalClosure, "session ended")
+		sendState(*ev)
 		return
 	}
 	if reset && start > 0 {
@@ -217,7 +309,7 @@ func (s *Server) apiSessionSocket(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if typ == websocket.MessageBinary {
-				if err := sess.Write(data); err != nil {
+				if err := sess.Write(data); errors.Is(err, term.ErrClosed) {
 					return
 				}
 				continue
@@ -243,37 +335,42 @@ func (s *Server) apiSessionSocket(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
+	recheck := time.NewTicker(loginRecheck)
+	defer recheck.Stop()
+	expire := time.NewTimer(time.Until(expiry))
+	defer expire.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			c.Close(websocket.StatusGoingAway, "closing")
 			return
+		case <-expire.C:
+			c.Close(websocket.StatusPolicyViolation, "sign-in expired")
+			return
+		case <-recheck.C:
+			if _, err := s.auth.CheckLogin(ctx, hash); err != nil {
+				c.Close(websocket.StatusPolicyViolation, "signed out")
+				return
+			}
 		case ch := <-sub.C:
 			if err := writeData(ch.Offset, ch.Data); err != nil {
 				return
 			}
 		case e := <-sub.Events:
-			_ = writeText(map[string]any{"t": "state", "state": e.State, "code": e.ExitCode, "reason": e.Reason})
-			c.Close(websocket.StatusNormalClosure, "session ended")
+			if drain() == nil {
+				sendState(e)
+			}
 			return
 		case <-sub.Done():
-			// Drain anything already queued before giving up on this viewer.
-		drain:
-			for {
-				select {
-				case ch := <-sub.C:
-					if err := writeData(ch.Offset, ch.Data); err != nil {
-						return
-					}
-				case e := <-sub.Events:
-					_ = writeText(map[string]any{"t": "state", "state": e.State, "code": e.ExitCode, "reason": e.Reason})
-					c.Close(websocket.StatusNormalClosure, "session ended")
-					return
-				default:
-					break drain
-				}
+			if drain() != nil {
+				return
 			}
-			c.Close(websocket.StatusTryAgainLater, "reconnect")
+			select {
+			case e := <-sub.Events:
+				sendState(e)
+			default:
+				c.Close(websocket.StatusTryAgainLater, "reconnect")
+			}
 			return
 		case ts := <-pongs:
 			if err := writeText(map[string]any{"t": "pong", "ts": ts}); err != nil {
@@ -292,6 +389,38 @@ func (s *Server) apiSessionSocket(w http.ResponseWriter, r *http.Request) {
 var uploadExt = map[string]string{
 	"image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif", "image/webp": ".webp",
 	"application/pdf": ".pdf", "text/plain; charset=utf-8": ".txt",
+}
+
+var errTooLarge = errors.New("file too large")
+
+// openSFTP starts the sftp subsystem on its own channel so every exit path can
+// close that channel (pkg/sftp's NewClient leaks it when the subsystem is refused).
+func openSFTP(c *ssh.Client) (*sftp.Client, func(), error) {
+	sess, err := c.NewSession()
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := sess.RequestSubsystem("sftp"); err != nil {
+		sess.Close()
+		return nil, nil, err
+	}
+	pw, err := sess.StdinPipe()
+	if err != nil {
+		sess.Close()
+		return nil, nil, err
+	}
+	pr, err := sess.StdoutPipe()
+	if err != nil {
+		sess.Close()
+		return nil, nil, err
+	}
+	client, err := sftp.NewClientPipe(pr, pw)
+	if err != nil {
+		sess.Close()
+		return nil, nil, err
+	}
+	var once sync.Once
+	return client, func() { once.Do(func() { client.Close(); sess.Close() }) }, nil
 }
 
 func (s *Server) apiUpload(w http.ResponseWriter, r *http.Request) {
@@ -335,20 +464,24 @@ func (s *Server) apiUpload(w http.ResponseWriter, r *http.Request) {
 		ext = ".bin"
 	}
 
-	client, err := sftp.NewClient(sess.Client())
+	client, closeSFTP, err := openSFTP(sess.Client())
 	if err != nil {
-		writeErrorExtra(w, http.StatusBadGateway, "sftp_unavailable", "the host does not allow file transfer", map[string]any{"detail": err.Error()})
+		writeError(w, http.StatusBadGateway, "sftp_unavailable", "the host does not allow file transfer")
 		return
 	}
-	defer client.Close()
+	defer closeSFTP()
+	// A cancelled request (browser gone) stops the transfer.
+	stop := context.AfterFunc(r.Context(), closeSFTP)
+	defer stop()
+
 	home, err := client.Getwd()
 	if err != nil {
-		writeErrorExtra(w, http.StatusBadGateway, "sftp_failed", "cannot find the home directory", map[string]any{"detail": err.Error()})
+		writeError(w, http.StatusBadGateway, "sftp_failed", "cannot find the home directory")
 		return
 	}
 	dir := path.Join(home, ".cache", "corral", "uploads")
 	if err := client.MkdirAll(dir); err != nil {
-		writeErrorExtra(w, http.StatusBadGateway, "sftp_failed", "cannot create the upload directory", map[string]any{"detail": err.Error()})
+		writeError(w, http.StatusBadGateway, "sftp_failed", "cannot create the upload directory")
 		return
 	}
 	_ = client.Chmod(path.Join(home, ".cache", "corral"), 0o700)
@@ -360,11 +493,16 @@ func (s *Server) apiUpload(w http.ResponseWriter, r *http.Request) {
 	full := path.Join(dir, name)
 	f, err := client.OpenFile(full, os.O_WRONLY|os.O_CREATE|os.O_EXCL)
 	if err != nil {
-		writeErrorExtra(w, http.StatusBadGateway, "sftp_failed", "cannot create the file", map[string]any{"detail": err.Error()})
+		writeError(w, http.StatusBadGateway, "sftp_failed", "cannot create the file")
 		return
 	}
 	_ = f.Chmod(0o600)
-	written, err := io.Copy(f, io.MultiReader(bytes.NewReader(head), part))
+	limit := s.cfg.UploadMaxBytes
+	src := io.LimitReader(io.MultiReader(bytes.NewReader(head), part), limit+1)
+	written, err := io.Copy(f, src)
+	if err == nil && written > limit {
+		err = errTooLarge
+	}
 	closeErr := f.Close()
 	if err == nil {
 		err = closeErr
@@ -372,11 +510,11 @@ func (s *Server) apiUpload(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		_ = client.Remove(full)
 		var tooBig *http.MaxBytesError
-		if errors.As(err, &tooBig) {
-			writeError(w, http.StatusRequestEntityTooLarge, "too_large", fmt.Sprintf("files are limited to %d MB", s.cfg.UploadMaxBytes>>20))
+		if errors.Is(err, errTooLarge) || errors.As(err, &tooBig) {
+			writeError(w, http.StatusRequestEntityTooLarge, "too_large", fmt.Sprintf("files are limited to %d MB", limit>>20))
 			return
 		}
-		writeErrorExtra(w, http.StatusBadGateway, "sftp_failed", "upload failed", map[string]any{"detail": err.Error()})
+		writeError(w, http.StatusBadGateway, "sftp_failed", "upload failed")
 		return
 	}
 	s.audit(r, "file.upload", sess.HostName, map[string]any{"session": sess.ID, "path": full, "bytes": written, "type": ctype})

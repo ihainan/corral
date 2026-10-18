@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"sort"
 	"sync"
 	"time"
@@ -16,13 +15,20 @@ import (
 )
 
 var (
-	ErrNotFound    = errors.New("session not found")
-	ErrTooMany     = errors.New("too many open sessions")
+	ErrNotFound = errors.New("session not found")
+	ErrTooMany  = errors.New("too many open sessions")
+)
+
+const (
+	setupTimeout  = 20 * time.Second // PTY + shell request after the SSH handshake
+	exitedLinger  = 5 * time.Minute  // ended sessions stay listed so a returning tab sees why
+	keptEndedMax  = 10               // ended sessions kept per user
 )
 
 type Manager struct {
 	mu            sync.Mutex
 	sessions      map[string]*Session
+	pending       map[int64]int // reserved slots per user (dialing, not yet registered)
 	detachTimeout time.Duration
 	maxPerUser    int
 	OnEnd         func(s *Session, state string, duration time.Duration)
@@ -30,13 +36,18 @@ type Manager struct {
 }
 
 func NewManager(detachTimeout time.Duration, maxPerUser int) *Manager {
-	m := &Manager{sessions: map[string]*Session{}, detachTimeout: detachTimeout, maxPerUser: maxPerUser, stop: make(chan struct{})}
+	m := &Manager{sessions: map[string]*Session{}, pending: map[int64]int{}, detachTimeout: detachTimeout,
+		maxPerUser: maxPerUser, stop: make(chan struct{})}
 	go m.reap()
 	return m
 }
 
 func (m *Manager) Shutdown() {
-	close(m.stop)
+	select {
+	case <-m.stop:
+	default:
+		close(m.stop)
+	}
 	m.mu.Lock()
 	all := make([]*Session, 0, len(m.sessions))
 	for _, s := range m.sessions {
@@ -55,9 +66,38 @@ type StartOptions struct {
 	TmuxSession string // validated by the caller: [A-Za-z0-9._-]{1,64}
 }
 
-// Reserve checks the per-user limit before dialing, so a burst of requests
-// cannot open more SSH connections than allowed.
-func (m *Manager) countFor(owner int64) int {
+// Reservation holds one of a user's session slots while a connection is being
+// set up, so concurrent requests cannot exceed the limit.
+type Reservation struct {
+	m     *Manager
+	owner int64
+	once  sync.Once
+}
+
+func (r *Reservation) Release() {
+	r.once.Do(func() {
+		r.m.mu.Lock()
+		r.m.pending[r.owner]--
+		if r.m.pending[r.owner] <= 0 {
+			delete(r.m.pending, r.owner)
+		}
+		r.m.mu.Unlock()
+	})
+}
+
+// Reserve claims a slot before dialing; call Release on every exit path
+// (Start releases it itself once the session is registered or has failed).
+func (m *Manager) Reserve(owner int64) (*Reservation, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.countRunning(owner)+m.pending[owner] >= m.maxPerUser {
+		return nil, ErrTooMany
+	}
+	m.pending[owner]++
+	return &Reservation{m: m, owner: owner}, nil
+}
+
+func (m *Manager) countRunning(owner int64) int {
 	n := 0
 	for _, s := range m.sessions {
 		if s.OwnerID == owner && s.State() == StateRunning {
@@ -67,67 +107,82 @@ func (m *Manager) countFor(owner int64) int {
 	return n
 }
 
-// Start takes ownership of an established SSH client and runs the shell.
-func (m *Manager) Start(owner, hostID int64, hostName string, client *ssh.Client, opt StartOptions) (*Session, error) {
-	m.mu.Lock()
-	if m.countFor(owner) >= m.maxPerUser {
-		m.mu.Unlock()
-		client.Close()
-		return nil, ErrTooMany
-	}
-	m.mu.Unlock()
-
-	sess, err := client.NewSession()
-	if err != nil {
-		client.Close()
-		return nil, err
-	}
+// Start takes ownership of an established SSH client and runs the shell. The
+// client is closed on every failure path.
+func (m *Manager) Start(res *Reservation, owner, hostID int64, hostName string, client *ssh.Client, opt StartOptions) (*Session, error) {
+	defer res.Release()
 	cols, rows := clamp(opt.Cols, 20, 1000, 80), clamp(opt.Rows, 5, 500, 24)
-	modes := ssh.TerminalModes{ssh.ECHO: 1, ssh.TTY_OP_ISPEED: 115200, ssh.TTY_OP_OSPEED: 115200}
-	_ = sess.Setenv("COLORTERM", "truecolor") // servers often refuse custom env; that is fine
-	if err := sess.RequestPty("xterm-256color", rows, cols, modes); err != nil {
-		sess.Close()
-		client.Close()
-		return nil, fmt.Errorf("cannot allocate terminal: %w", err)
-	}
-	stdin, err := sess.StdinPipe()
-	if err != nil {
-		sess.Close()
-		client.Close()
-		return nil, err
-	}
-	stdout, err := sess.StdoutPipe()
-	if err != nil {
-		sess.Close()
-		client.Close()
-		return nil, err
-	}
-	stderr, err := sess.StderrPipe()
-	if err != nil {
-		sess.Close()
-		client.Close()
-		return nil, err
-	}
 
-	switch opt.Persistence {
-	case "tmux":
-		err = sess.Start(TmuxCommand(opt.TmuxSession))
-	default:
-		err = sess.Shell()
+	type setup struct {
+		sess *ssh.Session
+		s    *Session
+		err  error
 	}
-	if err != nil {
-		sess.Close()
-		client.Close()
-		return nil, fmt.Errorf("cannot start shell: %w", err)
-	}
+	done := make(chan setup, 1)
+	go func() {
+		sess, err := client.NewSession()
+		if err != nil {
+			done <- setup{err: err}
+			return
+		}
+		fail := func(err error) { sess.Close(); done <- setup{err: err} }
+		modes := ssh.TerminalModes{ssh.ECHO: 1, ssh.TTY_OP_ISPEED: 115200, ssh.TTY_OP_OSPEED: 115200}
+		_ = sess.Setenv("COLORTERM", "truecolor") // servers often refuse custom env; that is fine
+		if err := sess.RequestPty("xterm-256color", rows, cols, modes); err != nil {
+			fail(fmt.Errorf("cannot allocate terminal: %w", err))
+			return
+		}
+		stdin, err := sess.StdinPipe()
+		if err != nil {
+			fail(err)
+			return
+		}
+		stdout, err := sess.StdoutPipe()
+		if err != nil {
+			fail(err)
+			return
+		}
+		stderr, err := sess.StderrPipe()
+		if err != nil {
+			fail(err)
+			return
+		}
+		if opt.Persistence == "tmux" {
+			err = sess.Start(TmuxCommand(opt.TmuxSession))
+		} else {
+			err = sess.Shell()
+		}
+		if err != nil {
+			fail(fmt.Errorf("cannot start shell: %w", err))
+			return
+		}
+		s := &Session{
+			ID: newID(), OwnerID: owner, HostID: hostID, HostName: hostName, Created: time.Now(),
+			client: client, ssh: sess, stdin: stdin, input: make(chan []byte, inputQueue),
+			buf: newRing(ringSize), subs: map[*Sub]struct{}{}, state: StateRunning,
+			cols: cols, rows: rows, idleSince: time.Now(), finished: make(chan struct{}),
+		}
+		s.pumps.Add(2)
+		go s.pump(stdout)
+		go s.pump(stderr)
+		done <- setup{sess: sess, s: s}
+	}()
 
-	s := &Session{
-		ID: newID(), OwnerID: owner, HostID: hostID, HostName: hostName, Created: time.Now(),
-		client: client, ssh: sess, stdin: stdin,
-		buf: newRing(ringSize), subs: map[*Sub]struct{}{}, state: StateRunning,
-		cols: cols, rows: rows, idleSince: time.Now(),
+	var st setup
+	select {
+	case st = <-done:
+	case <-time.After(setupTimeout):
+		client.Close() // unblocks the setup goroutine
+		<-done
+		return nil, errors.New("the host did not start a terminal in time")
 	}
+	if st.err != nil {
+		client.Close()
+		return nil, st.err
+	}
+	s := st.s
 	s.onEnd = func(s *Session) {
+		m.trimEnded(s.OwnerID)
 		if m.OnEnd != nil {
 			m.OnEnd(s, s.State(), time.Since(s.Created))
 		}
@@ -137,15 +192,16 @@ func (m *Manager) Start(owner, hostID int64, hostName string, client *ssh.Client
 	m.sessions[s.ID] = s
 	m.mu.Unlock()
 
-	go s.pump(io.MultiReader(stdout))
-	go s.pump(stderr)
+	go s.writer()
 	go func() {
-		err := sess.Wait()
+		err := st.sess.Wait()
 		var exit *ssh.ExitError
 		switch {
 		case err == nil:
+			s.waitPumps(3 * time.Second)
 			s.end(StateExited, 0, "")
 		case errors.As(err, &exit):
+			s.waitPumps(3 * time.Second)
 			s.end(StateExited, exit.ExitStatus(), "")
 		default:
 			s.end(StateLost, -1, "connection lost")
@@ -163,7 +219,8 @@ func (m *Manager) Start(owner, hostID int64, hostName string, client *ssh.Client
 // login shell when tmux is missing. The script is fixed text; the only variable
 // part is the session name, which is validated and shell-quoted.
 func TmuxCommand(name string) string {
-	script := `if command -v tmux >/dev/null 2>&1; then exec tmux -u new-session -A -s "$1"; ` +
+	script := `PATH="$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"; ` +
+		`if command -v tmux >/dev/null 2>&1; then exec tmux -u new-session -A -s "$1"; ` +
 		`else printf '\r\n[corral] tmux is not installed on this host; starting a plain shell.\r\n'; exec "${SHELL:-/bin/sh}" -l; fi`
 	return "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(name)
 }
@@ -196,27 +253,24 @@ func (m *Manager) List(owner int64) []Info {
 	return out
 }
 
-// CloseUser ends every session a user owns, used when access is revoked.
-func (m *Manager) CloseUser(owner int64, reason string) {
+// Running returns a user's live sessions to a host (used for side channels).
+func (m *Manager) Running(owner, hostID int64) []*Session {
 	m.mu.Lock()
-	var mine []*Session
+	defer m.mu.Unlock()
+	var out []*Session
 	for _, s := range m.sessions {
-		if s.OwnerID == owner {
-			mine = append(mine, s)
+		if s.OwnerID == owner && s.HostID == hostID && s.State() == StateRunning {
+			out = append(out, s)
 		}
 	}
-	m.mu.Unlock()
-	for _, s := range mine {
-		s.Close(reason)
-	}
+	return out
 }
 
-// CloseHost ends sessions to a host, used when the host entry is deleted.
-func (m *Manager) CloseHost(owner, hostID int64, reason string) {
+func (m *Manager) closeMatching(match func(*Session) bool, reason string) {
 	m.mu.Lock()
 	var hit []*Session
 	for _, s := range m.sessions {
-		if s.OwnerID == owner && s.HostID == hostID {
+		if match(s) {
 			hit = append(hit, s)
 		}
 	}
@@ -224,6 +278,16 @@ func (m *Manager) CloseHost(owner, hostID int64, reason string) {
 	for _, s := range hit {
 		s.Close(reason)
 	}
+}
+
+// CloseUser ends every session a user owns, used when access is revoked.
+func (m *Manager) CloseUser(owner int64, reason string) {
+	m.closeMatching(func(s *Session) bool { return s.OwnerID == owner }, reason)
+}
+
+// CloseHost ends sessions to a host, used when the host entry is deleted.
+func (m *Manager) CloseHost(owner, hostID int64, reason string) {
+	m.closeMatching(func(s *Session) bool { return s.OwnerID == owner && s.HostID == hostID }, reason)
 }
 
 func (m *Manager) Remove(owner int64, id string) error {
@@ -238,8 +302,33 @@ func (m *Manager) Remove(owner int64, id string) error {
 	return nil
 }
 
+// trimEnded keeps only the most recent ended sessions of a user.
+func (m *Manager) trimEnded(owner int64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var ended []*Session
+	for _, s := range m.sessions {
+		if s.OwnerID == owner && s.State() != StateRunning {
+			ended = append(ended, s)
+		}
+	}
+	if len(ended) <= keptEndedMax {
+		return
+	}
+	sort.Slice(ended, func(i, j int) bool { return ended[i].endedAtTime().After(ended[j].endedAtTime()) })
+	for _, s := range ended[keptEndedMax:] {
+		delete(m.sessions, s.ID)
+	}
+}
+
+func (s *Session) endedAtTime() time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.endedAt
+}
+
 // reap closes sessions nobody has looked at for detachTimeout and forgets
-// finished ones after a short grace period (so a returning tab can see why).
+// finished ones after a short grace period.
 func (m *Manager) reap() {
 	t := time.NewTicker(30 * time.Second)
 	defer t.Stop()

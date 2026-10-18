@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"golang.org/x/crypto/argon2"
@@ -27,6 +28,21 @@ const (
 )
 
 var hashSlots = make(chan struct{}, 4)
+
+// ErrBusy means every hashing slot stayed taken for too long (a flood of
+// sign-in attempts); the caller should answer "try again later".
+var ErrBusy = errors.New("server is busy, try again")
+
+const slotWait = 5 * time.Second
+
+func acquireSlot() bool {
+	select {
+	case hashSlots <- struct{}{}:
+		return true
+	case <-time.After(slotWait):
+		return false
+	}
+}
 
 const (
 	MinPasswordLen = 10
@@ -48,7 +64,9 @@ func HashPassword(pw string) (string, error) {
 	if _, err := rand.Read(salt); err != nil {
 		return "", err
 	}
-	hashSlots <- struct{}{}
+	if !acquireSlot() {
+		return "", ErrBusy
+	}
 	key := argon2.IDKey([]byte(pw), salt, argonTime, argonMemory, argonThreads, argonKeyLen)
 	<-hashSlots
 	b64 := base64.RawStdEncoding
@@ -56,33 +74,48 @@ func HashPassword(pw string) (string, error) {
 		argon2.Version, argonMemory, argonTime, argonThreads, b64.EncodeToString(salt), b64.EncodeToString(key)), nil
 }
 
+// VerifyPassword reports whether pw matches; a busy server counts as a mismatch.
+// Login paths that track failures use CheckPassword to tell the two apart.
 func VerifyPassword(pw, encoded string) bool {
+	ok, _ := CheckPassword(pw, encoded)
+	return ok
+}
+
+// CheckPassword returns ErrBusy when no hashing slot became free in time, so a
+// flood of requests cannot make a correct password look wrong (and lock the account).
+func CheckPassword(pw, encoded string) (bool, error) {
 	parts := strings.Split(encoded, "$")
 	if len(parts) != 6 || parts[1] != "argon2id" {
-		return false
+		return false, nil
 	}
 	var version int
 	if _, err := fmt.Sscanf(parts[2], "v=%d", &version); err != nil || version != argon2.Version {
-		return false
+		return false, nil
 	}
 	var m, t uint32
 	var p uint8
 	if _, err := fmt.Sscanf(parts[3], "m=%d,t=%d,p=%d", &m, &t, &p); err != nil {
-		return false
+		return false, nil
 	}
 	b64 := base64.RawStdEncoding
 	salt, err := b64.DecodeString(parts[4])
 	if err != nil {
-		return false
+		return false, nil
 	}
 	want, err := b64.DecodeString(parts[5])
 	if err != nil {
-		return false
+		return false, nil
 	}
-	hashSlots <- struct{}{}
+	// Refuse absurd parameters from a tampered hash instead of burning memory.
+	if m > 256*1024 || t > 10 || p > 8 || len(want) > 64 {
+		return false, nil
+	}
+	if !acquireSlot() {
+		return false, ErrBusy
+	}
 	got := argon2.IDKey([]byte(pw), salt, t, m, p, uint32(len(want)))
 	<-hashSlots
-	return subtle.ConstantTimeCompare(got, want) == 1
+	return subtle.ConstantTimeCompare(got, want) == 1, nil
 }
 
 // dummyHash is verified against when the username does not exist, so a miss
@@ -110,5 +143,3 @@ func HashToken(token string) string {
 	sum := sha256.Sum256([]byte(token))
 	return hex.EncodeToString(sum[:])
 }
-
-var errNoToken = errors.New("no token")

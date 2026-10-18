@@ -127,6 +127,15 @@ func (s *Store) PinHostKey(ctx context.Context, ownerID, hostID int64, k *HostKe
 		k.KeyType, k.KeyData, k.Fingerprint, s.unix(), ownerID, hostID))
 }
 
+// ReplaceHostKey swaps the pinned key, but only if it is still the one the
+// user saw as "old" when accepting the change.
+func (s *Store) ReplaceHostKey(ctx context.Context, ownerID, hostID int64, oldFingerprint string, k *HostKey) error {
+	return affectedOrNotFound(s.db.ExecContext(ctx,
+		`UPDATE host_keys SET key_type = ?, key_data = ?, fingerprint = ?, first_seen = ?
+		 WHERE host_id = (SELECT id FROM hosts WHERE owner_id = ? AND id = ?) AND fingerprint = ?`,
+		k.KeyType, k.KeyData, k.Fingerprint, s.unix(), ownerID, hostID, oldFingerprint))
+}
+
 // ForgetHostKey drops the pinned key so the next connection pins a new one.
 func (s *Store) ForgetHostKey(ctx context.Context, ownerID, hostID int64) error {
 	_, err := s.db.ExecContext(ctx,

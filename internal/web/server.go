@@ -299,8 +299,12 @@ func wsOrigin(origin string) string {
 
 // sockets ------------------------------------------------------------------
 
-func (s *Server) trackSocket(userID int64, ls *liveSocket) func() {
+func (s *Server) trackSocket(userID int64, ls *liveSocket) (func(), bool) {
 	s.sockMu.Lock()
+	if len(s.socks[userID]) >= maxSocketsPerUser {
+		s.sockMu.Unlock()
+		return nil, false
+	}
 	if s.socks[userID] == nil {
 		s.socks[userID] = map[*liveSocket]struct{}{}
 	}
@@ -313,7 +317,7 @@ func (s *Server) trackSocket(userID int64, ls *liveSocket) func() {
 			delete(s.socks, userID)
 		}
 		s.sockMu.Unlock()
-	}
+	}, true
 }
 
 // closeSockets closes a user's open terminal sockets; with loginHash set, only

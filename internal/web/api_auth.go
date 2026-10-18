@@ -52,6 +52,10 @@ type credentialsBody struct {
 }
 
 func (s *Server) apiSetup(w http.ResponseWriter, r *http.Request) {
+	if !s.auth.AllowAttempt(s.clientIP(r)) {
+		writeError(w, http.StatusTooManyRequests, "rate_limited", "too many attempts, try again later")
+		return
+	}
 	var b credentialsBody
 	if err := readJSON(r, &b); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
@@ -86,6 +90,8 @@ func (s *Server) apiLogin(w http.ResponseWriter, r *http.Request) {
 				map[string]any{"retry_after": int(locked.RetryAfter.Seconds())})
 		case errors.Is(err, auth.ErrRateLimited):
 			writeError(w, http.StatusTooManyRequests, "rate_limited", "too many attempts, try again later")
+		case errors.Is(err, auth.ErrBusy):
+			writeError(w, http.StatusServiceUnavailable, "busy", "the server is busy, try again in a moment")
 		case errors.Is(err, auth.ErrInvalidLogin):
 			s.auditAs(r, nil, "login.failed", truncate(b.Username, 64), nil)
 			writeError(w, http.StatusUnauthorized, "invalid_login", "wrong username or password")
@@ -214,6 +220,10 @@ func (s *Server) apiInviteInfo(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) apiInviteRedeem(w http.ResponseWriter, r *http.Request) {
+	if !s.auth.AllowAttempt(s.clientIP(r)) {
+		writeError(w, http.StatusTooManyRequests, "rate_limited", "too many attempts, try again later")
+		return
+	}
 	var b credentialsBody
 	if err := readJSON(r, &b); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
@@ -242,6 +252,8 @@ func (s *Server) writeAccountError(w http.ResponseWriter, r *http.Request, err e
 		writeError(w, http.StatusForbidden, "bad_setup_token", "the setup link is wrong; copy it again from the server log")
 	case errors.Is(err, auth.ErrSetupDone):
 		writeError(w, http.StatusConflict, "setup_done", "setup is already complete")
+	case errors.Is(err, auth.ErrBusy):
+		writeError(w, http.StatusServiceUnavailable, "busy", "the server is busy, try again in a moment")
 	default:
 		s.internalError(w, r, err)
 	}
@@ -292,36 +304,27 @@ func (s *Server) apiAdminUpdateUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found", "no such user")
 		return
 	}
-	// Never leave the install without an active administrator.
-	losesAdmin := target.IsAdmin() && !target.Disabled &&
-		((b.Role != nil && *b.Role != store.RoleAdmin) || (b.Disabled != nil && *b.Disabled))
-	if losesAdmin {
-		n, err := s.store.CountActiveAdmins(r.Context())
-		if err != nil {
-			s.internalError(w, r, err)
-			return
-		}
-		if n <= 1 {
+	if b.Role != nil && *b.Role != store.RoleAdmin && *b.Role != store.RoleMember {
+		writeError(w, http.StatusBadRequest, "invalid", "unknown role")
+		return
+	}
+	if b.Role == nil && b.Disabled == nil {
+		writeJSON(w, http.StatusOK, target)
+		return
+	}
+	// One transaction: the change is refused if it would leave no active administrator.
+	if err := s.store.UpdateUserGuarded(r.Context(), id, b.Role, b.Disabled); err != nil {
+		if errors.Is(err, store.ErrLastAdmin) {
 			writeError(w, http.StatusConflict, "last_admin", "at least one active administrator must remain")
 			return
 		}
+		s.internalError(w, r, err)
+		return
 	}
 	if b.Role != nil {
-		if *b.Role != store.RoleAdmin && *b.Role != store.RoleMember {
-			writeError(w, http.StatusBadRequest, "invalid", "unknown role")
-			return
-		}
-		if err := s.store.SetRole(r.Context(), id, *b.Role); err != nil {
-			s.internalError(w, r, err)
-			return
-		}
 		s.audit(r, "user.role", target.Username, map[string]any{"role": *b.Role})
 	}
 	if b.Disabled != nil {
-		if err := s.store.SetDisabled(r.Context(), id, *b.Disabled); err != nil {
-			s.internalError(w, r, err)
-			return
-		}
 		if *b.Disabled {
 			if err := s.auth.EndAccess(r.Context(), id); err != nil {
 				s.internalError(w, r, err)

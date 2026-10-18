@@ -99,8 +99,17 @@ func (s *Store) CountActiveAdmins(ctx context.Context) (int, error) {
 	return n, err
 }
 
-func (s *Store) RecordLoginFailure(ctx context.Context, id int64, lockedUntil int64) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE users SET failed_logins = failed_logins + 1, locked_until = ? WHERE id = ?`, lockedUntil, id)
+// RecordLoginFailure increments the failure count atomically and returns the
+// new count, so concurrent wrong guesses cannot each think they were the first.
+func (s *Store) RecordLoginFailure(ctx context.Context, id int64) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, `UPDATE users SET failed_logins = failed_logins + 1 WHERE id = ? RETURNING failed_logins`, id).Scan(&n)
+	return n, err
+}
+
+// ExtendLockout pushes the lockout forward, never backward.
+func (s *Store) ExtendLockout(ctx context.Context, id, until int64) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE users SET locked_until = MAX(locked_until, ?) WHERE id = ?`, until, id)
 	return err
 }
 
@@ -112,6 +121,40 @@ func (s *Store) ResetLoginFailures(ctx context.Context, id int64) error {
 func (s *Store) SetPassword(ctx context.Context, id int64, hash string) error {
 	return affectedOrNotFound(s.db.ExecContext(ctx,
 		`UPDATE users SET password_hash = ?, password_changed_at = ?, failed_logins = 0, locked_until = 0 WHERE id = ?`, hash, s.unix(), id))
+}
+
+var ErrLastAdmin = errors.New("at least one active administrator must remain")
+
+// UpdateUserGuarded changes role and/or disabled state in one transaction and
+// refuses a change that would leave no active administrator.
+func (s *Store) UpdateUserGuarded(ctx context.Context, id int64, role *string, disabled *bool) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if role != nil {
+		if err := affectedOrNotFound(tx.ExecContext(ctx, `UPDATE users SET role = ? WHERE id = ?`, *role, id)); err != nil {
+			return err
+		}
+	}
+	if disabled != nil {
+		v := 0
+		if *disabled {
+			v = 1
+		}
+		if err := affectedOrNotFound(tx.ExecContext(ctx, `UPDATE users SET disabled = ? WHERE id = ?`, v, id)); err != nil {
+			return err
+		}
+	}
+	var admins int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE role = ? AND disabled = 0`, RoleAdmin).Scan(&admins); err != nil {
+		return err
+	}
+	if admins == 0 {
+		return ErrLastAdmin
+	}
+	return tx.Commit()
 }
 
 func (s *Store) SetDisabled(ctx context.Context, id int64, disabled bool) error {
@@ -147,6 +190,17 @@ func (s *Store) CreateLoginSession(ctx context.Context, tokenHash string, userID
 		`INSERT INTO login_sessions (token_hash, user_id, created_at, last_seen_at, ip, user_agent) VALUES (?, ?, ?, ?, ?, ?)`,
 		tokenHash, userID, now, now, ip, ua)
 	return err
+}
+
+// CreateLoginSessionIfCurrent creates a login only if the account still has the
+// password hash we verified and is not disabled. A sign-in that started before
+// a password change or a disable therefore cannot complete after it.
+func (s *Store) CreateLoginSessionIfCurrent(ctx context.Context, tokenHash string, userID int64, verifiedHash, ip, ua string) error {
+	now := s.unix()
+	return affectedOrNotFound(s.db.ExecContext(ctx,
+		`INSERT INTO login_sessions (token_hash, user_id, created_at, last_seen_at, ip, user_agent)
+		 SELECT ?, id, ?, ?, ?, ? FROM users WHERE id = ? AND password_hash = ? AND disabled = 0`,
+		tokenHash, now, now, ip, ua, userID, verifiedHash))
 }
 
 func (s *Store) LoginSessionByHash(ctx context.Context, tokenHash string) (*LoginSession, error) {
