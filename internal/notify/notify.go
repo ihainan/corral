@@ -43,7 +43,7 @@ type Notifier struct {
 	vapidPrivate  string
 	subscriber    string
 	pushHosts     []string
-	webhookPrefix []string
+	webhookPrefix []webhookPrefix
 	http          *http.Client
 	mu            sync.Mutex
 	recent        map[string]time.Time // per user+tag, to collapse bursts
@@ -57,16 +57,57 @@ type Options struct {
 }
 
 func New(ctx context.Context, st *store.Store, log *slog.Logger, opt Options) (*Notifier, error) {
+	prefixes, err := parseWebhookPrefixes(opt.WebhookPrefixes)
+	if err != nil {
+		return nil, err
+	}
 	pub, priv, err := vapidKeys(ctx, st)
 	if err != nil {
 		return nil, err
 	}
 	return &Notifier{
 		store: st, log: log, vapidPublic: pub, vapidPrivate: priv, subscriber: opt.Subscriber,
-		pushHosts: append(append([]string{}, defaultPushHosts...), opt.ExtraPushHosts...), webhookPrefix: opt.WebhookPrefixes,
-		http:   &http.Client{Timeout: 15 * time.Second, Transport: &http.Transport{Proxy: http.ProxyFromEnvironment}},
+		pushHosts: append(append([]string{}, defaultPushHosts...), opt.ExtraPushHosts...), webhookPrefix: prefixes,
+		// Never follow redirects, for push and webhooks alike: an allowed
+		// endpoint must not be able to bounce the gateway to another address.
+		http: &http.Client{Timeout: 15 * time.Second, Transport: &http.Transport{Proxy: http.ProxyFromEnvironment},
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
 		recent: map[string]time.Time{}, minGap: 20 * time.Second,
 	}, nil
+}
+
+// webhookPrefix is an allowed webhook destination: exact scheme and host
+// (with port), and a path prefix matched on whole segments.
+type webhookPrefix struct {
+	scheme, host, path string // path always ends with "/"
+}
+
+func parseWebhookPrefixes(raw []string) ([]webhookPrefix, error) {
+	var out []webhookPrefix
+	for _, p := range raw {
+		u, err := url.Parse(p)
+		if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || u.User != nil ||
+			u.Opaque != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || hasDotSegment(u.Path) {
+			return nil, fmt.Errorf("webhook prefix %q must be an http(s) URL with a host and an optional path, nothing else", p)
+		}
+		path := u.EscapedPath()
+		if !strings.HasSuffix(path, "/") {
+			path += "/" // "https://hooks.example.com" means the whole host, never "hooks.example.com.evil"
+		}
+		out = append(out, webhookPrefix{scheme: u.Scheme, host: strings.ToLower(u.Host), path: path})
+	}
+	return out, nil
+}
+
+// hasDotSegment reports "." or ".." path segments, which a server may resolve
+// to a path outside the allowed prefix.
+func hasDotSegment(p string) bool {
+	for _, seg := range strings.Split(p, "/") {
+		if seg == "." || seg == ".." {
+			return true
+		}
+	}
+	return false
 }
 
 func vapidKeys(ctx context.Context, st *store.Store) (string, string, error) {
@@ -116,11 +157,17 @@ var ErrWebhookNotAllowed = errors.New("webhook URL is not allowed by the adminis
 
 func (n *Notifier) CheckWebhook(raw string) error {
 	u, err := url.Parse(raw)
-	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.User != nil {
+	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || u.User != nil || u.Opaque != "" ||
+		hasDotSegment(u.Path) {
 		return ErrWebhookNotAllowed
 	}
+	path := u.EscapedPath()
+	if path == "" {
+		path = "/"
+	}
+	host := strings.ToLower(u.Host)
 	for _, p := range n.webhookPrefix {
-		if p != "" && strings.HasPrefix(raw, p) {
+		if u.Scheme == p.scheme && host == p.host && (path+"/" == p.path || strings.HasPrefix(path, p.path)) {
 			return nil
 		}
 	}
@@ -161,16 +208,7 @@ func (n *Notifier) deliver(ctx context.Context, userID int64, note Note) {
 			_ = n.store.DeletePushSubscriptionHard(ctx, s.ID)
 			continue
 		}
-		urgency := webpush.UrgencyHigh
-		if note.Quiet {
-			urgency = webpush.UrgencyNormal
-		}
-		res, err := webpush.SendNotificationWithContext(ctx, payload, &webpush.Subscription{
-			Endpoint: s.Endpoint, Keys: webpush.Keys{P256dh: s.P256dh, Auth: s.Auth},
-		}, &webpush.Options{
-			HTTPClient: n.http, Subscriber: n.subscriber, VAPIDPublicKey: n.vapidPublic, VAPIDPrivateKey: n.vapidPrivate,
-			TTL: 3600, Urgency: urgency, Topic: topic(note.Tag),
-		})
+		res, err := n.push(ctx, s, payload, note)
 		if err != nil {
 			n.log.Warn("push: send failed", "user", userID, "err", err)
 			_ = n.store.MarkPushResult(ctx, s.ID, false)
@@ -188,6 +226,20 @@ func (n *Notifier) deliver(ctx context.Context, userID int64, note Note) {
 		}
 	}
 	n.sendWebhook(ctx, userID, note)
+}
+
+// push sends one encrypted message to one browser.
+func (n *Notifier) push(ctx context.Context, s *store.PushSubscription, payload []byte, note Note) (*http.Response, error) {
+	urgency := webpush.UrgencyHigh
+	if note.Quiet {
+		urgency = webpush.UrgencyNormal
+	}
+	return webpush.SendNotificationWithContext(ctx, payload, &webpush.Subscription{
+		Endpoint: s.Endpoint, Keys: webpush.Keys{P256dh: s.P256dh, Auth: s.Auth},
+	}, &webpush.Options{
+		HTTPClient: n.http, Subscriber: n.subscriber, VAPIDPublicKey: n.vapidPublic, VAPIDPrivateKey: n.vapidPrivate,
+		TTL: 3600, Urgency: urgency, Topic: topic(note.Tag),
+	})
 }
 
 // topic must be URL-safe base64 alphabet and at most 32 characters.
@@ -224,10 +276,7 @@ func (n *Notifier) sendWebhook(ctx context.Context, userID int64, note Note) {
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
-	// Do not follow redirects: an allowed prefix must not bounce us elsewhere.
-	client := *n.http
-	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	res, err := client.Do(req)
+	res, err := n.http.Do(req) // does not follow redirects
 	if err != nil {
 		n.log.Warn("webhook failed", "user", userID, "err", err)
 		return
