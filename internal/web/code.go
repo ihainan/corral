@@ -7,9 +7,16 @@ package web
 //
 // Starting is a background job the browser polls; there is at most one per
 // owner and host. Its state lives in memory: after a gateway restart the
-// next start finds code-server still running and reuses it. Starts and stops
-// of one host run strictly in the order they were asked for (a ticket queue);
-// on the host, installing, starting and stopping also hold a lock.
+// next start finds code-server still running and reuses it.
+//
+// Starts and stops of one host take turns in the order they were asked for
+// (a ticket queue, bounded per host and per user). A turn passes on only
+// once the host has confirmed that its operation ended (or never ran). When
+// that cannot be confirmed (host unreachable, no answer in time), the host
+// is marked as needing a cleanup: every later start or stop first settles
+// that operation on the host, and is refused until it can. On the host,
+// installing, starting and stopping also hold a lock, and each operation has
+// an id that a settle can claim so it never runs late.
 //
 // An install is a task the user started on the host: it carries on after a
 // plain sign-out, but disabling the user, an administrator's password reset,
@@ -32,6 +39,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/crypto/ssh"
+
 	"github.com/ihainan/corral/internal/codeserver"
 	"github.com/ihainan/corral/internal/sshx"
 	"github.com/ihainan/corral/internal/store"
@@ -48,18 +57,25 @@ const (
 	codeReady       = "ready"
 	codeFailed      = "failed"
 	codeStopping    = "stopping"
+	codeCleaningUp  = "cleanup" // an earlier operation's end could not be confirmed
 )
 
 // Limits and timeouts; variables so tests can lower them.
 var (
-	maxCodeJobsPerUser  = 3
+	maxCodeJobsPerUser  = 3                // starts working at once, per user
+	maxCodeOpsPerHost   = 4                // starts and stops asked for and not yet ended, per host
+	maxCodeOpsPerUser   = 8                // the same, per user
 	codeStepTimeout     = 2 * time.Minute  // checking, starting, stopping
 	codeInstallTimeout  = 15 * time.Minute // downloading or uploading, checking and unpacking the release
-	codeCancelTimeout   = time.Minute      // ending a cancelled install on the host
+	codeCancelTimeout   = time.Minute      // ending or settling an operation whose end is unknown
 	codeHealthAttempts  = 20
 	codeHealthInterval  = 500 * time.Millisecond
 	codeHealthPerTryMax = 5 * time.Second
 )
+
+// Tests only: codeHookBeforeRegister runs between a start's access check and
+// its registration, codeHookAfterStart once the host has answered the start.
+var codeHookBeforeRegister, codeHookAfterStart func()
 
 type codeStatus struct {
 	State   string `json:"state"`
@@ -85,12 +101,25 @@ type codeQueue struct {
 	changed       chan struct{} // closed (and replaced) when serving moves on
 }
 
+// codeCleanup is an operation on the host whose end was not confirmed: an
+// install to cancel, or a start or stop to settle. target is how the
+// operation reached the host (also after the host was edited).
+type codeCleanup struct {
+	target  *sshx.Target
+	install string // the install's task id, or
+	op      string // the start's or stop's operation id
+	err     string // why the last attempt failed
+}
+
 type codeServers struct {
 	mu      sync.Mutex
 	jobs    map[[2]int64]*codeJob // by owner and host
 	stops   map[[2]int64]int      // stops queued or running
 	queues  map[[2]int64]*codeQueue
-	userGen map[int64]uint64 // bumped when a user's access is revoked (disable, admin reset)
+	ops     map[[2]int64]int          // turns taken and not yet ended, per host
+	userOps map[int64]int             // the same, per user
+	cleanup map[[2]int64]*codeCleanup // unconfirmed operations, per host
+	userGen map[int64]uint64          // bumped when a user's access is revoked (disable, admin reset)
 	closed  bool
 	wg      sync.WaitGroup
 }
@@ -99,11 +128,21 @@ func (c *codeServers) status(owner, host int64) codeStatus {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	key := [2]int64{owner, host}
-	if j := c.jobs[key]; j != nil {
+	j := c.jobs[key]
+	switch {
+	case j != nil && j.running:
 		return j.status
-	}
-	if c.stops[key] > 0 {
+	case c.stops[key] > 0:
 		return codeStatus{State: codeStopping}
+	case c.cleanup[key] != nil:
+		st := codeStatus{State: codeCleaningUp, Error: "cleanup_pending", Message: "Corral could not confirm that an earlier VS Code " +
+			"operation on this host ended (" + c.cleanup[key].err + "); it checks again before the next start or stop"}
+		if j != nil && j.status.State == codeFailed {
+			st.State = codeFailed // a start that has just failed says so (and why it matters)
+		}
+		return st
+	case j != nil:
+		return j.status
 	}
 	return codeStatus{State: codeStopped}
 }
@@ -126,21 +165,29 @@ func (c *codeServers) update(key [2]int64, j *codeJob, f func(*codeJob)) {
 	}
 }
 
+var errCodeQueueFull = errors.New("too many VS Code starts and stops are waiting")
+
 // enqueue takes the next turn for a host; called with mu held, together with
 // registering what the turn is for, so the order of requests is the order
-// of turns.
-func (c *codeServers) enqueue(key [2]int64) uint64 {
+// of turns. The turn counts against the host's and the user's limits until
+// it ends (doneTurn) or is given up (waitTurn, abandon).
+func (c *codeServers) enqueue(key [2]int64) (uint64, error) {
+	if c.ops[key] >= maxCodeOpsPerHost || c.userOps[key[0]] >= maxCodeOpsPerUser {
+		return 0, errCodeQueueFull
+	}
 	if c.queues == nil {
-		c.queues = map[[2]int64]*codeQueue{}
+		c.queues, c.ops, c.userOps = map[[2]int64]*codeQueue{}, map[[2]int64]int{}, map[int64]int{}
 	}
 	q := c.queues[key]
 	if q == nil {
 		q = &codeQueue{abandoned: map[uint64]bool{}, changed: make(chan struct{})}
 		c.queues[key] = q
 	}
+	c.ops[key]++
+	c.userOps[key[0]]++
 	t := q.next
 	q.next++
-	return t
+	return t, nil
 }
 
 // waitTurn waits until ticket t is served. Giving up passes the turn on.
@@ -158,14 +205,21 @@ func (c *codeServers) waitTurn(ctx context.Context, key [2]int64, t uint64) erro
 		case <-ch:
 		case <-ctx.Done():
 			c.mu.Lock()
-			if q.serving == t {
-				c.advance(key, q)
-			} else {
-				q.abandoned[t] = true
-			}
+			c.abandonLocked(key, t)
 			c.mu.Unlock()
 			return ctx.Err()
 		}
+	}
+}
+
+// abandonLocked gives up ticket t, served or not.
+func (c *codeServers) abandonLocked(key [2]int64, t uint64) {
+	q := c.queues[key]
+	if q.serving == t {
+		c.advance(key, q)
+	} else {
+		q.abandoned[t] = true
+		c.uncount(key)
 	}
 }
 
@@ -176,7 +230,17 @@ func (c *codeServers) doneTurn(key [2]int64) {
 	c.advance(key, c.queues[key])
 }
 
+func (c *codeServers) uncount(key [2]int64) {
+	if c.ops[key]--; c.ops[key] <= 0 {
+		delete(c.ops, key)
+	}
+	if c.userOps[key[0]]--; c.userOps[key[0]] <= 0 {
+		delete(c.userOps, key[0])
+	}
+}
+
 func (c *codeServers) advance(key [2]int64, q *codeQueue) {
+	c.uncount(key)
 	q.serving++
 	for q.abandoned[q.serving] {
 		delete(q.abandoned, q.serving)
@@ -218,7 +282,8 @@ func (c *codeServers) shutdown() {
 }
 
 // forgetHostCode ends what Corral knows about code-server on a host (deleted
-// or its connection settings changed), cancelling a start in progress.
+// or its connection settings changed), cancelling a start in progress. A
+// cleanup still to be done stays: it is done with the old settings.
 func (s *Server) forgetHostCode(owner, host int64) {
 	s.code.forget(func(k [2]int64) bool { return k == [2]int64{owner, host} })
 }
@@ -274,6 +339,9 @@ func (s *Server) apiCodeStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	key := [2]int64{h.OwnerID, h.ID}
+	if codeHookBeforeRegister != nil {
+		codeHookBeforeRegister()
+	}
 	s.code.mu.Lock()
 	if s.code.closed {
 		s.code.mu.Unlock()
@@ -297,14 +365,33 @@ func (s *Server) apiCodeStart(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusTooManyRequests, "busy", "VS Code is already starting on other hosts; wait for them first")
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*codeInstallTimeout+3*codeStepTimeout+codeCancelTimeout)
+	ticket, err := s.code.enqueue(key) // with the registration: after any stop asked for earlier
+	if err != nil {
+		s.code.mu.Unlock()
+		writeError(w, http.StatusTooManyRequests, "busy", "VS Code is being started or stopped too often on this host; try again in a moment")
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*codeInstallTimeout+3*codeStepTimeout+3*codeCancelTimeout)
 	j := &codeJob{status: codeStatus{State: codeChecking}, running: true, cancel: cancel, userGen: s.code.userGen[h.OwnerID],
 		version: h.ConnVersion}
 	s.code.jobs[key] = j
-	ticket := s.code.enqueue(key) // with the registration: after any stop asked for earlier
-	first := j.status             // the job updates it from now on
+	first := j.status
 	s.code.wg.Add(1)
 	s.code.mu.Unlock()
+	// Registered first, then checked, and only then started: access revoked
+	// before this point is seen here; revoked after it, it cancels the job.
+	if !s.codeAccessHolds(r, u, h, j) {
+		cancel()
+		s.code.mu.Lock()
+		if s.code.jobs[key] == j {
+			delete(s.code.jobs, key)
+		}
+		s.code.abandonLocked(key, ticket)
+		s.code.mu.Unlock()
+		s.code.wg.Done()
+		writeError(w, http.StatusUnauthorized, "unauthorized", "please sign in")
+		return
+	}
 	go func() {
 		defer s.code.wg.Done()
 		defer cancel()
@@ -318,19 +405,27 @@ func (s *Server) apiCodeStart(w http.ResponseWriter, r *http.Request) {
 		defer s.code.doneTurn(key)
 		s.runCode(ctx, key, j, h, f)
 	}()
-	// Registered first, then checked: access revoked just before is seen here,
-	// access revoked from now on cancels the job.
-	if _, err := s.auth.CheckLogin(r.Context(), loginHash(r)); err != nil || !s.ownerActive(r.Context(), u.ID) {
-		s.code.update(key, j, func(j *codeJob) { j.cancel() })
-		s.forgetHostCode(h.OwnerID, h.ID)
-		writeError(w, http.StatusUnauthorized, "unauthorized", "please sign in")
-		return
-	}
 	s.audit(r, "code.start", hostTarget(h), map[string]any{"version": s.cfg.CodeServerVersion})
 	writeJSON(w, http.StatusAccepted, first)
 }
 
-// POST /api/hosts/{id}/code/stop stops code-server on the host.
+// codeAccessHolds re-checks, for a job just registered, what the request was
+// let in with: the login, the owner's account and revocation generation, and
+// the host's connection settings.
+func (s *Server) codeAccessHolds(r *http.Request, u *store.User, h *store.Host, j *codeJob) bool {
+	if _, err := s.auth.CheckLogin(r.Context(), loginHash(r)); err != nil || !s.ownerActive(r.Context(), u.ID) {
+		return false
+	}
+	if s.code.gen(h.OwnerID) != j.userGen {
+		return false
+	}
+	cur, err := s.store.Host(r.Context(), h.OwnerID, h.ID)
+	return err == nil && cur.ConnVersion == j.version
+}
+
+// POST /api/hosts/{id}/code/stop stops code-server on the host. The stop
+// runs in the background, in its turn; the answer waits for it unless the
+// client goes away first.
 func (s *Server) apiCodeStop(w http.ResponseWriter, r *http.Request) {
 	h, ok := s.codeHost(w, r)
 	if !ok {
@@ -342,12 +437,26 @@ func (s *Server) apiCodeStop(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, r, err)
 		return
 	}
-	// One step: the instance to stop (as known now), cancelling a start in
-	// progress, and the turn, so a start asked for after this runs after it.
+	// One step: the turn, the instance to stop (when known now), and
+	// cancelling a start in progress, so a start asked for after this runs
+	// after it.
 	s.code.mu.Lock()
+	if s.code.closed {
+		s.code.mu.Unlock()
+		writeError(w, http.StatusServiceUnavailable, "busy", "the server is shutting down")
+		return
+	}
+	ticket, err := s.code.enqueue(key)
+	if err != nil {
+		s.code.mu.Unlock()
+		writeError(w, http.StatusTooManyRequests, "busy", "VS Code is being started or stopped too often on this host; try again in a moment")
+		return
+	}
 	target := ""
 	if j := s.code.jobs[key]; j != nil {
-		target = j.instance
+		if j.status.State == codeReady {
+			target = j.instance
+		}
 		if j.cancel != nil {
 			j.cancel()
 		}
@@ -357,31 +466,52 @@ func (s *Server) apiCodeStop(w http.ResponseWriter, r *http.Request) {
 		s.code.stops = map[[2]int64]int{}
 	}
 	s.code.stops[key]++
-	ticket := s.code.enqueue(key)
+	s.code.wg.Add(1)
 	s.code.mu.Unlock()
-	defer func() {
-		s.code.mu.Lock()
-		if s.code.stops[key]--; s.code.stops[key] <= 0 {
-			delete(s.code.stops, key)
-		}
-		s.code.mu.Unlock()
-	}()
 	s.revokeForwardGrants(f.ID, 0) // open VS Code tabs end now
-	ctx, cancel := context.WithTimeout(r.Context(), 3*codeStepTimeout+codeCancelTimeout)
-	defer cancel()
-	if err := s.code.waitTurn(ctx, key, ticket); err != nil {
-		writeError(w, http.StatusConflict, "busy", "VS Code is being started or stopped on this host; try again in a moment")
-		return
-	}
-	defer s.code.doneTurn(key)
-	if h.Auth != store.AuthAsk && h.CredentialID != nil {
-		if err := s.stopCode(ctx, f, target); err != nil {
-			writeError(w, http.StatusBadGateway, "code_unreachable", "could not stop VS Code on the host: "+err.Error())
+	done := make(chan error, 1)
+	go func() {
+		defer s.code.wg.Done()
+		defer func() {
+			s.code.mu.Lock()
+			if s.code.stops[key]--; s.code.stops[key] <= 0 {
+				delete(s.code.stops, key)
+			}
+			s.code.mu.Unlock()
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), 3*codeStepTimeout+3*codeCancelTimeout)
+		defer cancel()
+		if err := s.code.waitTurn(ctx, key, ticket); err != nil {
+			done <- codeFail("busy", "VS Code was being started or stopped on this host for too long")
 			return
 		}
+		defer s.code.doneTurn(key)
+		if err := s.reconcileCode(key); err != nil {
+			done <- err
+			return
+		}
+		if h.Auth == store.AuthAsk || h.CredentialID == nil {
+			done <- nil // no way in: nothing Corral can stop
+			return
+		}
+		done <- s.stopCode(ctx, key, h, f, target)
+	}()
+	select {
+	case err := <-done:
+		var cf *codeFailure
+		switch {
+		case err == nil:
+			s.audit(r, "code.stop", hostTarget(h), nil)
+			writeJSON(w, http.StatusOK, codeStatus{State: codeStopped})
+		case errors.As(err, &cf) && cf.code == "cleanup_pending":
+			writeError(w, http.StatusConflict, "cleanup_pending", cf.msg)
+		case errors.As(err, &cf) && cf.code == "busy":
+			writeError(w, http.StatusConflict, "busy", cf.msg)
+		default:
+			writeError(w, http.StatusBadGateway, "code_unreachable", "could not stop VS Code on the host: "+err.Error())
+		}
+	case <-r.Context().Done(): // the stop carries on
 	}
-	s.audit(r, "code.stop", hostTarget(h), nil)
-	writeJSON(w, http.StatusOK, codeStatus{State: codeStopped})
 }
 
 // The job --------------------------------------------------------------------
@@ -415,7 +545,11 @@ func (s *Server) runCode(ctx context.Context, key [2]int64, j *codeJob, h *store
 		s.code.update(key, j, func(j *codeJob) { j.status = codeStatus{State: state} })
 		return still()
 	}
-	sock, instance, err := s.startCode(ctx, h, f, step, still)
+	var sock, instance string
+	err := s.reconcileCode(key) // an earlier operation's end first
+	if err == nil {
+		sock, instance, err = s.startCode(ctx, key, h, f, step, still)
+	}
 	s.code.update(key, j, func(j *codeJob) {
 		j.running = false
 		if err == nil {
@@ -434,22 +568,25 @@ func (s *Server) runCode(ctx context.Context, key [2]int64, j *codeJob, h *store
 	})
 }
 
-// codeRun runs one of the codeserver commands and returns its answer fields.
-func (s *Server) codeRun(ctx context.Context, fc *fwdConn, cmd string, limit time.Duration, opt sshx.ExecOptions) (map[string]string, error) {
+// codeRun runs one of the codeserver commands over c and returns its answer
+// fields, and whether the command is known to have ended on the host. When
+// it is not, the operation may still run there: the caller settles it.
+func (s *Server) codeRun(ctx context.Context, c *ssh.Client, cmd string, limit time.Duration, opt sshx.ExecOptions) (map[string]string, bool, error) {
 	ctx, cancel := context.WithTimeout(ctx, limit)
 	defer cancel()
-	out, err := sshx.Exec(ctx, fc.client, cmd, sshx.MaxOutput, opt)
-	fields := codeserver.Fields(out)
-	if err != nil && fields["error"] == "" && fields["result"] == "" {
-		if errors.Is(err, sshx.ErrBusy) {
-			return nil, codeFail("busy", "earlier commands on this host are still running; try again in a moment")
-		}
-		if ctx.Err() != nil {
-			return nil, codeFail("timeout", "the host did not answer in time")
-		}
-		return nil, codeFail("failed", "a command on the host failed: %v", err)
+	r, err := sshx.Exec(ctx, c, cmd, sshx.MaxOutput, opt)
+	fields := codeserver.Fields(r.Out)
+	switch {
+	case errors.Is(err, sshx.ErrBusy): // nothing was started
+		return nil, true, codeFail("busy", "earlier commands on this host are still running; try again in a moment")
+	case !r.Ended && ctx.Err() != nil:
+		return fields, false, codeFail("timeout", "the host did not answer in time")
+	case !r.Ended:
+		return fields, false, codeFail("failed", "a command on the host failed: %v", err)
+	case fields["error"] == "" && fields["result"] == "":
+		return fields, true, codeFail("failed", "a command on the host gave no answer: %v", err)
 	}
-	return fields, nil
+	return fields, true, nil
 }
 
 // codeConn opens (or reuses) the forwarding connection for VS Code.
@@ -465,8 +602,8 @@ func (s *Server) codeConn(ctx context.Context, f *store.Forward) (*fwdConn, erro
 }
 
 // probeCode checks the host and works out the socket path.
-func (s *Server) probeCode(ctx context.Context, fc *fwdConn) (*codeserver.Probe, string, error) {
-	fields, err := s.codeRun(ctx, fc, codeserver.ProbeCommand(s.cfg.CodeServerVersion), codeStepTimeout, sshx.ExecOptions{})
+func (s *Server) probeCode(ctx context.Context, c *ssh.Client) (*codeserver.Probe, string, error) {
+	fields, _, err := s.codeRun(ctx, c, codeserver.ProbeCommand(s.cfg.CodeServerVersion), codeStepTimeout, sshx.ExecOptions{})
 	if err != nil {
 		return nil, "", err
 	}
@@ -484,9 +621,9 @@ func (s *Server) probeCode(ctx context.Context, fc *fwdConn) (*codeserver.Probe,
 	return p, sock, nil
 }
 
-// codeTarget is what reaching the host takes, read now: an install that has
-// to be ended is ended on the machine and account it ran on, also after the
-// host was edited or deleted.
+// codeTarget is what reaching the host takes, read now: an operation whose
+// end is unknown is settled on the machine and account it ran on, also
+// after the host was edited or deleted.
 func (s *Server) codeTarget(ctx context.Context, h *store.Host) (*sshx.Target, error) {
 	if h.CredentialID == nil {
 		return nil, errors.New("no stored credential")
@@ -503,7 +640,78 @@ func (s *Server) codeTarget(ctx context.Context, h *store.Host) (*sshx.Target, e
 		Passphrase: []byte(sec.Passphrase), Pinned: &sshx.Pinned{KeyType: k.KeyType, KeyData: k.KeyData, Fingerprint: k.Fingerprint}}, nil
 }
 
-func (s *Server) startCode(ctx context.Context, h *store.Host, f *store.Forward, step func(string) error, still func() error) (string, string, error) {
+// Cleanups ---------------------------------------------------------------------
+
+// runCleanup ends or settles an operation on the host, over a connection of
+// its own; nil when the host confirmed it.
+func (s *Server) runCleanup(cl *codeCleanup) error {
+	ctx, cancel := context.WithTimeout(context.Background(), codeCancelTimeout)
+	defer cancel()
+	dialed, err := sshx.Dial(ctx, s.guard, *cl.target)
+	if err != nil {
+		return fmt.Errorf("could not reach the host: %w", err)
+	}
+	defer dialed.Client.Close()
+	var fields map[string]string
+	var ended bool
+	if cl.install != "" {
+		fields, ended, err = s.codeRun(ctx, dialed.Client, codeserver.CancelInstallCommand(cl.install), codeCancelTimeout, sshx.ExecOptions{})
+	} else {
+		fields, ended, err = s.codeRun(ctx, dialed.Client, codeserver.SettleCommand(cl.op), codeCancelTimeout, sshx.ExecOptions{})
+	}
+	switch {
+	case err != nil:
+		return err
+	case !ended || fields["result"] != "ok":
+		return fmt.Errorf("the host answered %q", fields["error"])
+	}
+	return nil
+}
+
+// settle makes sure an operation whose end is unknown is over on the host.
+// If the host cannot confirm it now, the host's next start or stop has to
+// (cleanup pending).
+func (s *Server) settle(key [2]int64, cl *codeCleanup) {
+	if err := s.runCleanup(cl); err != nil {
+		s.log.Warn("could not confirm that a VS Code operation on the host ended", "err", err)
+		s.code.mu.Lock()
+		if s.code.cleanup == nil {
+			s.code.cleanup = map[[2]int64]*codeCleanup{}
+		}
+		cl.err = err.Error()
+		s.code.cleanup[key] = cl
+		s.code.mu.Unlock()
+	}
+}
+
+// reconcileCode comes first in every turn: a cleanup still to be done must
+// succeed before anything else runs on the host.
+func (s *Server) reconcileCode(key [2]int64) error {
+	s.code.mu.Lock()
+	cl := s.code.cleanup[key]
+	s.code.mu.Unlock()
+	if cl == nil {
+		return nil
+	}
+	if err := s.runCleanup(cl); err != nil {
+		s.code.mu.Lock()
+		cl.err = err.Error()
+		s.code.mu.Unlock()
+		return codeFail("cleanup_pending", "Corral could not confirm that an earlier VS Code operation on this host ended (%v); "+
+			"try again once the host is reachable", err)
+	}
+	s.code.mu.Lock()
+	if s.code.cleanup[key] == cl {
+		delete(s.code.cleanup, key)
+	}
+	s.code.mu.Unlock()
+	return nil
+}
+
+// Starting -------------------------------------------------------------------
+
+func (s *Server) startCode(ctx context.Context, key [2]int64, h *store.Host, f *store.Forward, step func(string) error,
+	still func() error) (string, string, error) {
 	if err := still(); err != nil {
 		return "", "", err
 	}
@@ -515,7 +723,11 @@ func (s *Server) startCode(ctx context.Context, h *store.Host, f *store.Forward,
 	if err := still(); err != nil { // the connection came from the current settings
 		return "", "", err
 	}
-	p, sock, err := s.probeCode(ctx, fc)
+	target, err := s.codeTarget(ctx, h)
+	if err != nil {
+		return "", "", codeFail("connect", "could not read how to reach the host: %v", err)
+	}
+	p, sock, err := s.probeCode(ctx, fc.client)
 	if err != nil {
 		return "", "", err
 	}
@@ -527,14 +739,22 @@ func (s *Server) startCode(ctx context.Context, h *store.Host, f *store.Forward,
 		return "", "", codeFail("no_setsid", "the host has no setsid (util-linux), which VS Code needs")
 	}
 	if !p.Installed {
-		if err := s.installCode(ctx, h, fc, p, step); err != nil {
+		if err := s.installCode(ctx, key, target, p, step); err != nil {
 			return "", "", err
 		}
 	}
 	if err := step(codeStarting); err != nil {
 		return "", "", err
 	}
-	fields, err := s.codeRun(ctx, fc, codeserver.StartCommand(ver, sock, newTaskID()), codeStepTimeout, sshx.ExecOptions{})
+	instance, op := newTaskID(), newTaskID()
+	fields, ended, err := s.codeRun(ctx, fc.client, codeserver.StartCommand(ver, sock, instance, op), codeStepTimeout, sshx.ExecOptions{})
+	if !ended {
+		s.settle(key, &codeCleanup{target: target, op: op})
+		if err == nil {
+			err = codeFail("timeout", "the start did not finish")
+		}
+		return "", "", err
+	}
 	if err != nil {
 		return "", "", err
 	}
@@ -546,27 +766,57 @@ func (s *Server) startCode(ctx context.Context, h *store.Host, f *store.Forward,
 		return "", "", codeFail("start", "an earlier code-server on the host could not be stopped safely (%s)", strings.TrimSpace(fields["detail"]))
 	case "nosetsid":
 		return "", "", codeFail("no_setsid", "code-server did not get a process group of its own on the host")
+	case "locked":
+		return "", "", codeFail("busy", "another install, start or stop of VS Code is running on this host account; try again in a moment")
 	}
 	if r := fields["result"]; r != "started" && r != "running" {
 		return "", "", codeFail("start", "code-server did not start (%s %s); its log is ~/.local/state/corral/code-server.log on the host",
 			fields["error"], strings.TrimSpace(fields["detail"]))
+	}
+	if fields["result"] == "running" {
+		instance = fields["instance"]
+	}
+	if codeHookAfterStart != nil {
+		codeHookAfterStart()
+	}
+	// Revoked meanwhile: an instance this job started itself is stopped again.
+	if err := still(); err != nil {
+		if fields["result"] == "started" {
+			s.stopStarted(key, target, fc.client, sock, instance)
+		}
+		return "", "", err
 	}
 	s.fwd.setCodeSocket(fc, sock)
 	if err := s.codeHealthy(ctx, fc); err != nil {
 		return "", "", codeFail("start", "code-server does not answer on its socket (%v); its log is ~/.local/state/corral/code-server.log on the host", err)
 	}
 	if err := still(); err != nil {
+		if fields["result"] == "started" {
+			s.stopStarted(key, target, fc.client, sock, instance)
+		}
 		return "", "", err
 	}
-	return sock, fields["instance"], nil
+	return sock, instance, nil
+}
+
+// stopStarted stops the instance a job started when the job's access was
+// revoked before it was ready.
+func (s *Server) stopStarted(key [2]int64, target *sshx.Target, c *ssh.Client, sock, instance string) {
+	ctx, cancel := context.WithTimeout(context.Background(), codeStepTimeout)
+	defer cancel()
+	op := newTaskID()
+	if _, ended, _ := s.codeRun(ctx, c, codeserver.StopCommand(sock, instance, op), codeStepTimeout, sshx.ExecOptions{}); !ended {
+		s.settle(key, &codeCleanup{target: target, op: op})
+	}
 }
 
 // installCode installs the release in one command on the host (see
 // codeserver.InstallCommand): downloaded there, or the gateway's copy sent
-// on its input. Its channel counts against the forwarding channel quota until
-// it has really ended. If the command's outcome is unknown (cancelled, timed
-// out, connection lost), the install is ended on the host before returning.
-func (s *Server) installCode(ctx context.Context, h *store.Host, fc *fwdConn, p *codeserver.Probe, step func(string) error) error {
+// on its input. It runs over a connection of its own, bounded in time and
+// closed when the time is up. If the command's end is unknown (cancelled,
+// timed out, connection lost), the install is ended on the host before
+// returning, or the host is marked for a cleanup.
+func (s *Server) installCode(ctx context.Context, key [2]int64, target *sshx.Target, p *codeserver.Probe, step func(string) error) error {
 	ver, sum := s.cfg.CodeServerVersion, s.cfg.CodeServerSHA256[p.Arch]
 	switch {
 	case sum == "":
@@ -605,32 +855,39 @@ func (s *Server) installCode(ctx context.Context, h *store.Host, fc *fwdConn, p 
 			return err
 		}
 	}
-	target, err := s.codeTarget(ctx, h)
+	ictx, cancel := context.WithTimeout(ctx, codeInstallTimeout)
+	defer cancel()
+	dialed, err := sshx.Dial(ictx, s.guard, *target)
 	if err != nil {
-		return codeFail("connect", "could not read how to reach the host: %v", err)
+		return codeFail("connect", "could not connect to the host: %v", err)
 	}
-	release, ok := s.fwd.takeChannel(fc.client)
-	if !ok {
-		return codeFail("busy", "too many forwarding connections are open; try again in a moment")
-	}
+	defer dialed.Client.Close()
+	// Time up or cancelled: the connection goes, and with it anything still
+	// copying the input or waiting for the host.
+	stop := context.AfterFunc(ictx, func() { dialed.Client.Close() })
+	defer stop()
 	task := newTaskID()
 	phases := map[string]string{"downloading": codeDownloading, "uploading": codeUploading, "checking": codeExtracting, "extracting": codeExtracting}
-	fields, err := s.codeRun(ctx, fc, codeserver.InstallCommand(task, ver, p.Arch, from, url, sum), codeInstallTimeout, sshx.ExecOptions{
-		Stdin: input, Release: release,
+	fields, ended, err := s.codeRun(ictx, dialed.Client, codeserver.InstallCommand(task, ver, p.Arch, from, url, sum), codeInstallTimeout, sshx.ExecOptions{
+		Stdin: input,
 		OnLine: func(line string) {
 			if ph, ok := phases[strings.TrimPrefix(line, "phase=")]; ok && strings.HasPrefix(line, "phase=") {
 				_ = step(ph)
 			}
 		},
 	})
-	if err != nil || (fields["result"] == "" && fields["error"] == "") || ctx.Err() != nil {
-		s.cancelInstall(target, task)
-		if err == nil {
-			err = codeFail("timeout", "the install did not finish")
-		}
+	if !ended {
+		dialed.Client.Close()
+		s.settle(key, &codeCleanup{target: target, install: task})
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+		if err == nil {
+			err = codeFail("timeout", "the install did not finish")
+		}
+		return err
+	}
+	if err != nil {
 		return err
 	}
 	switch fields["error"] {
@@ -640,7 +897,7 @@ func (s *Server) installCode(ctx context.Context, h *store.Host, fc *fwdConn, p 
 			"put %s in CORRAL_CODE_SERVER_DIR on the gateway to upload it instead",
 			strings.TrimSpace(fields["detail"]), s.cfg.CodeServerFile(p.Arch))
 	case "nodownloader":
-		return codeFail("no_downloader", "the host has neither curl nor wget to download code-server")
+		return codeFail("no_downloader", "the host has neither curl nor wget (with timeout) to download code-server")
 	case "checksum":
 		return codeFail("checksum", "the code-server archive on the host does not match its trusted SHA-256 digest (got %s); it was removed",
 			strings.TrimSpace(fields["detail"]))
@@ -651,9 +908,12 @@ func (s *Server) installCode(ctx context.Context, h *store.Host, fc *fwdConn, p 
 	case "nosetsid":
 		return codeFail("no_setsid", "the host has no setsid (util-linux), which VS Code needs")
 	case "members", "layout":
-		return codeFail("archive", "the code-server archive holds unexpected files (%s); nothing was installed", fields["error"])
+		return codeFail("archive", "the code-server archive holds unexpected files (%s %s); nothing was installed",
+			fields["error"], strings.TrimSpace(fields["detail"]))
 	case "locked":
-		return codeFail("busy", "another install or start of VS Code is running on this host account; try again in a moment")
+		return codeFail("busy", "another install, start or stop of VS Code is running on this host account; try again in a moment")
+	case "cancelled":
+		return codeFail("timeout", "the install was cancelled")
 	default:
 		return codeFail("extract", "installing code-server failed (%s %s)", fields["error"], strings.TrimSpace(fields["detail"]))
 	}
@@ -661,23 +921,6 @@ func (s *Server) installCode(ctx context.Context, h *store.Host, fc *fwdConn, p 
 		return codeFail("extract", "installing code-server failed")
 	}
 	return nil
-}
-
-// cancelInstall ends an install whose outcome is unknown, on a connection of
-// its own made with the settings the install ran with, and waits for it.
-func (s *Server) cancelInstall(t *sshx.Target, task string) {
-	ctx, cancel := context.WithTimeout(context.Background(), codeCancelTimeout)
-	defer cancel()
-	dialed, err := sshx.Dial(ctx, s.guard, *t)
-	if err != nil {
-		s.log.Warn("could not reach the host to end a cancelled VS Code install", "err", err)
-		return
-	}
-	defer dialed.Client.Close()
-	fields, err := s.codeRun(ctx, &fwdConn{client: dialed.Client}, codeserver.CancelInstallCommand(task), codeCancelTimeout, sshx.ExecOptions{})
-	if err != nil || fields["result"] != "ok" {
-		s.log.Warn("could not end a cancelled VS Code install on the host", "err", err, "answer", fields["error"])
-	}
 }
 
 // codeHealthy waits for code-server to answer /healthz on its socket.
@@ -720,66 +963,57 @@ func fileSHA256(path string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// newTaskID names one install, or one start of code-server in its pid file.
+// newTaskID names one install, operation, or instance of code-server.
 func newTaskID() string {
 	b := make([]byte, 8)
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
 }
 
-// stopCode stops code-server on the host (also one started before a restart
-// of the gateway). With target, only that instance.
-func (s *Server) stopCode(ctx context.Context, f *store.Forward, target string) error {
+// Stopping -------------------------------------------------------------------
+
+// stopCode stops instance target on the host. Without a target (nothing
+// known here, as after a gateway restart, or a start still under way) it
+// stops the instance the host names now, and only that one.
+func (s *Server) stopCode(ctx context.Context, key [2]int64, h *store.Host, f *store.Forward, target string) error {
 	fc, err := s.codeConn(ctx, f)
 	if err != nil {
 		return err
 	}
 	defer s.fwd.release(fc)
-	return s.stopCodeOn(ctx, fc, target)
-}
-
-// codeStopperFor prepares stopping VS Code on a host that is about to be
-// deleted: what is needed to reach it is read now, the stop runs in the
-// background afterwards and never holds up the delete. nil when there is
-// nothing to stop or no saved way in.
-func (s *Server) codeStopperFor(ctx context.Context, h *store.Host) func() {
-	if !s.cfg.CodeServer || h.Auth == store.AuthAsk || h.CredentialID == nil || !s.store.HasCodeForward(ctx, h.OwnerID, h.ID) {
-		return nil
-	}
 	t, err := s.codeTarget(ctx, h)
 	if err != nil {
-		return nil
+		return codeFail("connect", "could not read how to reach the host: %v", err)
 	}
-	return func() {
-		s.code.mu.Lock()
-		if s.code.closed {
-			s.code.mu.Unlock()
-			return
-		}
-		s.code.wg.Add(1)
-		s.code.mu.Unlock()
-		go func() {
-			defer s.code.wg.Done()
-			ctx, cancel := context.WithTimeout(context.Background(), codeStepTimeout)
-			defer cancel()
-			dialed, err := sshx.Dial(ctx, s.guard, *t)
-			if err != nil {
-				return
-			}
-			defer dialed.Client.Close()
-			if err := s.stopCodeOn(ctx, &fwdConn{client: dialed.Client}, ""); err != nil {
-				s.log.Info("could not stop VS Code on a deleted host", "host", h.Name, "err", err)
-			}
-		}()
-	}
-}
-
-func (s *Server) stopCodeOn(ctx context.Context, fc *fwdConn, target string) error {
-	_, sock, err := s.probeCode(ctx, fc)
+	_, sock, err := s.probeCode(ctx, fc.client)
 	if err != nil {
 		return err
 	}
-	fields, err := s.codeRun(ctx, fc, codeserver.StopCommand(sock, target), codeStepTimeout, sshx.ExecOptions{})
+	if target == "" {
+		fields, _, err := s.codeRun(ctx, fc.client, codeserver.InstanceCommand(), codeStepTimeout, sshx.ExecOptions{})
+		switch {
+		case err != nil:
+			return err
+		case fields["error"] == "verify":
+			return errors.New("its pid file could not be verified, so nothing was stopped")
+		case fields["result"] != "ok":
+			return fmt.Errorf("the host did not say what runs (%s)", fields["error"])
+		case fields["instance"] == "":
+			return nil // nothing runs
+		case !codeserver.ValidTarget(fields["instance"]):
+			return errors.New("the host named an unusable instance")
+		}
+		target = fields["instance"]
+	}
+	op := newTaskID()
+	fields, ended, err := s.codeRun(ctx, fc.client, codeserver.StopCommand(sock, target, op), codeStepTimeout, sshx.ExecOptions{})
+	if !ended {
+		s.settle(key, &codeCleanup{target: t, op: op})
+		if err == nil {
+			err = errors.New("the stop did not finish")
+		}
+		return err
+	}
 	if err != nil {
 		return err
 	}
@@ -796,4 +1030,63 @@ func (s *Server) stopCodeOn(ctx context.Context, fc *fwdConn, target string) err
 		return fmt.Errorf("the stop did not finish (%s)", fields["error"])
 	}
 	return nil
+}
+
+// codeStopperFor prepares stopping VS Code on a host that is about to be
+// deleted: what is needed to reach it is read now, the stop runs in the
+// background afterwards and never holds up the delete. A cleanup still to
+// be done is done first. Whatever runs is stopped (the force path: nothing
+// on a deleted host is to be kept). nil when there is nothing to do or no
+// saved way in.
+func (s *Server) codeStopperFor(ctx context.Context, h *store.Host) func() {
+	key := [2]int64{h.OwnerID, h.ID}
+	s.code.mu.Lock()
+	cl := s.code.cleanup[key]
+	delete(s.code.cleanup, key)
+	s.code.mu.Unlock()
+	var t *sshx.Target
+	if s.cfg.CodeServer && h.Auth != store.AuthAsk && h.CredentialID != nil && s.store.HasCodeForward(ctx, h.OwnerID, h.ID) {
+		t, _ = s.codeTarget(ctx, h)
+	}
+	if cl == nil && t == nil {
+		return nil
+	}
+	return func() {
+		s.code.mu.Lock()
+		if s.code.closed {
+			s.code.mu.Unlock()
+			return
+		}
+		s.code.wg.Add(1)
+		s.code.mu.Unlock()
+		go func() {
+			defer s.code.wg.Done()
+			if cl != nil {
+				if err := s.runCleanup(cl); err != nil {
+					s.log.Warn("could not confirm that a VS Code operation on a deleted host ended", "host", h.Name, "err", err)
+				}
+			}
+			if t == nil {
+				return
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), codeStepTimeout)
+			defer cancel()
+			dialed, err := sshx.Dial(ctx, s.guard, *t)
+			if err != nil {
+				return
+			}
+			defer dialed.Client.Close()
+			_, sock, err := s.probeCode(ctx, dialed.Client)
+			if err == nil {
+				var fields map[string]string
+				fields, _, err = s.codeRun(ctx, dialed.Client, codeserver.ForceStopCommand(sock, newTaskID()), codeStepTimeout, sshx.ExecOptions{})
+				if err == nil && fields["result"] != "ok" {
+					err = fmt.Errorf("the host answered %q", fields["error"])
+				}
+			}
+			if err != nil {
+				s.log.Info("could not stop VS Code on a deleted host", "host", h.Name, "err", err)
+			}
+		}()
+	}
 }

@@ -318,7 +318,7 @@ func TestRemoteExecCallSitesAreReviewed(t *testing.T) {
 		"web/herdr.go: w.Run(ctx)": true, // watcher loop, runs no remote command itself
 		"web/ports.go: out, err := sshx.Output(ctx, c, listenCommand, sshx.MaxOutput)":                       true,
 		`sshx/exec.go: ok, err := ch.SendRequest("exec", true, ssh.Marshal(&struct{ Command string }{cmd}))`: true, // Output's and Exec's own exec; their callers are listed here
-		"web/code.go: out, err := sshx.Exec(ctx, fc.client, cmd, sshx.MaxOutput, opt)":                       true, // codeRun: only codeserver commands, checked below
+		"web/code.go: r, err := sshx.Exec(ctx, c, cmd, sshx.MaxOutput, opt)":                                 true, // codeRun: only codeserver commands, checked below
 	}
 	re := regexp.MustCompile(`\.(Start|Run|Output|CombinedOutput|Exec)\(|SendRequest\("exec"`)
 	root, _ := filepath.Abs("..")

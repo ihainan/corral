@@ -170,34 +170,96 @@ command -v setsid >/dev/null 2>&1 || { echo error=nosetsid; exit 1; }
 exec 9>"$ST/.lock" && flock -w 120 9 || { echo error=locked; exit 1; }
 `
 
+// claim, right after lock, makes an operation (install, start, stop) run at
+// most once, and only if nothing settled it first: it creates the
+// operation's control directory op-<id> (an atomic step). If a cancel or a
+// settle created it first, the operation must not run. Control directories
+// stay as the record of what ran; old ones are pruned.
+const claim = `find "$ST" -maxdepth 1 -name 'op-*' -mtime +1 -exec rm -rf {} + 2>/dev/null
+mkdir "$ST/op-$T" 2>/dev/null || { echo error=cancelled; exit 1; }
+`
+
+// procs knows processes and process groups by /proc. A process is named by
+// its id and start time (field 22 of /proc/<pid>/stat), so a reused id is
+// told apart. A group is gone when no live (non-zombie) process is in it;
+// while any is, no new process can be given its id.
+const procs = `starttime() { sed 's/^.*) //' "/proc/$1/stat" 2>/dev/null | cut -d' ' -f20; }
+pgrp() { sed 's/^.*) //' "/proc/$1/stat" 2>/dev/null | cut -d' ' -f3; }
+running() { sed 's/^.*) //' "/proc/$1/stat" 2>/dev/null | awk -v st="$2" '$1 != "Z" && $20 == st {ok=1} END {exit !ok}'; }
+members() { cat /proc/[0-9]*/stat 2>/dev/null | sed 's/^.*) //' | awk -v g="$1" '$1 != "Z" && $3 == g {f = 1} END {exit !f}'; }
+# ours: the group led by process $1 (started at $2) still has live members:
+# the leader itself or, once it has ended, what is left of its group.
+ours() { s=$(starttime "$1"); if [ -n "$s" ] && [ "$s" != "$2" ]; then return 1; fi; members "$1"; }
+# ghalt ends that group (TERM, then KILL) and waits until all of it is gone.
+ghalt() {
+  ours "$1" "$2" || return 0
+  kill -TERM "-$1" 2>/dev/null
+  i=0; while ours "$1" "$2" && [ $i -lt 10 ]; do sleep 1; i=$((i+1)); done
+  ours "$1" "$2" || return 0
+  kill -KILL "-$1" 2>/dev/null
+  i=0; while ours "$1" "$2" && [ $i -lt 5 ]; do sleep 1; i=$((i+1)); done
+  ! ours "$1" "$2"
+}
+# tree lists process $1 and its descendants.
+tree() { cat /proc/[0-9]*/stat 2>/dev/null | sed -n 's/^\([0-9][0-9]*\) .*) [A-Za-z] \([0-9][0-9]*\) .*$/\1 \2/p' |
+  awk -v r="$1" '{par[$1] = $2} END {n = 1; q[1] = r; print r; for (i = 1; i <= n; i++) for (c in par) if (par[c] == q[i]) {q[++n] = c; print c}}'; }
+anyleft() { for e in "$@"; do running "${e%%:*}" "${e#*:}" && return 0; done; return 1; }
+# thalt ends process $1 and its descendants as they are now (each named by
+# id and start time) and waits until all of them are gone.
+thalt() {
+  set -- $(tree "$1" | while read -r p; do s=$(starttime "$p"); [ -n "$s" ] && echo "$p:$s"; done)
+  for sig in TERM KILL; do
+    for e in "$@"; do running "${e%%:*}" "${e#*:}" && kill "-$sig" "${e%%:*}" 2>/dev/null; done
+    i=0; while anyleft "$@" && [ $i -lt 10 ]; do sleep 1; i=$((i+1)); done
+  done
+  ! anyleft "$@"
+}
+`
+
 // Source of the release archive for InstallCommand.
 const (
 	FromDownload = "download" // the host downloads it from the URL
 	FromStdin    = "stdin"    // the gateway sends it on the command's input
 )
 
+// DownloadSeconds bounds a download on the host, retries included.
+var DownloadSeconds = 600
+
+// CancelWaitSeconds bounds how long a cancel waits for an install that has
+// claimed its operation to show its process group (or that it ended).
+var CancelWaitSeconds = 20
+
 // installWork runs in its own session and process group (setsid), so a
-// cancelled install can be ended as a whole (CancelInstallCommand). It
-// records its process id and start time in the staging directory, gets the
-// archive into it, checks the digest, checks every member's path and link
-// target stays inside the release's top directory, unpacks without taking
-// owners from the archive, checks the entry point is a regular executable
-// file, and renames the release into place. It reports its phase as it goes.
-const installWork = `me=$(sed 's/^.*) //' /proc/$$/stat 2>/dev/null)
+// cancelled install can be ended as a whole (CancelInstallCommand). Unless
+// it is cancelled already, it publishes its process id and start time in
+// the control directory, then gets the archive into the staging directory,
+// checks the digest, checks every listed member's path and link target stays
+// inside the release's top directory, unpacks without taking owners from the
+// archive, checks what was unpacked (entry point a regular executable, no
+// special or set-id files, every symbolic link resolving inside the
+// release), and renames the release into place. Before each step it looks
+// for a cancel. It reports its phase as it goes.
+const installWork = `export LC_ALL=C
+me=$(sed 's/^.*) //' /proc/$$/stat 2>/dev/null)
 [ "$(echo "$me" | cut -d' ' -f3)" = "$$" ] || { echo error=nosetsid; exit 1; }
-echo "$$ $(echo "$me" | cut -d' ' -f20)" >"$STAGE/task.pid"
+cancelled() { [ -e "$C/cancel" ]; }
+cancelled && { echo error=cancelled; exit 1; }
+echo "$$ $(echo "$me" | cut -d' ' -f20)" >"$C/pid.new" && mv "$C/pid.new" "$C/pid" || { echo error=stage; exit 1; }
+trap 'rm -rf "$STAGE"' EXIT
+trap 'exit 1' HUP INT TERM PIPE
+cancelled && { echo error=cancelled; exit 1; }
 F="$STAGE/archive.tar.gz"
-cancelled() { [ -e "$ST/cancel-$T" ]; }
 if [ "$M" = stdin ]; then
   echo phase=uploading
   cat >"$F" || { echo error=upload; exit 1; }
 else
   echo phase=downloading
-  # HTTPS only, redirects included.
+  # HTTPS only, redirects included; the whole download is bounded.
   if command -v curl >/dev/null 2>&1; then
-    curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 20 --retry 2 -o "$F" "$U" 2>"$STAGE/err"; rc=$?
-  elif command -v wget >/dev/null 2>&1; then
-    wget -q --https-only -T 20 -t 2 -O "$F" "$U" 2>"$STAGE/err"; rc=$?
+    curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 20 --max-time "$MAXT" --retry 2 --retry-max-time "$MAXT" \
+      -o "$F" "$U" 2>"$STAGE/err"; rc=$?
+  elif command -v wget >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
+    timeout "$MAXT" wget -q --https-only -T 20 -t 2 -O "$F" "$U" 2>"$STAGE/err"; rc=$?
   else
     echo error=nodownloader; exit 1
   fi
@@ -224,6 +286,7 @@ awk -v top="$TOP" "$inside"' /^[lh]/ { line = $0; for (k = 0; k < 5; k++) sub(/^
     d = name; sub(/\/[^\/]*\/?$/, "", d); if (i == 0 || t ~ /^\// || !ok(d "/" t)) bad = 1 }
   else { i = index(line, " link to "); t = substr(line, i + 9); if (i == 0 || !ok(t)) bad = 1 } } END { exit bad }' "$STAGE/list" ||
   { echo error=members; exit 1; }
+cancelled && { echo error=cancelled; exit 1; }
 mkdir -m 0700 "$STAGE/x" && tar --no-same-owner -xzf "$F" -C "$STAGE/x" 2>"$STAGE/err" ||
   { echo error=extract; echo "detail=$(tail -c 300 "$STAGE/err" 2>/dev/null | tr '\n' ' ')"; exit 1; }
 S="$STAGE/x/$TOP"
@@ -231,6 +294,16 @@ E="$S/bin/code-server"
 if [ -L "$S" ] || [ ! -d "$S" ] || [ -L "$S/bin" ] || [ ! -d "$S/bin" ] || [ -L "$E" ] || [ ! -f "$E" ] || [ ! -x "$E" ]; then
   echo error=layout; exit 1
 fi
+[ -z "$(find "$STAGE/x" \( -type b -o -type c -o -type p -o -type s \) -print | head -n 1)" ] ||
+  { echo error=members; echo "detail=a device file, pipe or socket"; exit 1; }
+[ -z "$(find "$STAGE/x" -type f \( -perm -4000 -o -perm -2000 \) -print | head -n 1)" ] ||
+  { echo error=members; echo "detail=a set-id file"; exit 1; }
+R=$(cd "$S" && pwd -P) || { echo error=layout; exit 1; }
+find "$STAGE/x" -type l -print >"$STAGE/links" || { echo error=members; exit 1; }
+while IFS= read -r l; do
+  r=$(readlink -f "$l") || { echo error=members; echo "detail=a link that does not resolve"; exit 1; }
+  case "$r" in "$R"|"$R"/*) ;; *) echo error=members; echo "detail=a link that leads out of the release"; exit 1 ;; esac
+done <"$STAGE/links"
 cancelled && { echo error=cancelled; exit 1; }
 [ -e "$D" ] || mv "$S" "$D"
 [ -x "$D/bin/code-server" ] || { echo error=install; exit 1; }
@@ -239,72 +312,97 @@ echo result=ok
 
 // InstallCommand installs a release on the host in one go, holding the
 // host's lock throughout: everything happens in the task's own staging
-// directory (created afresh, mode 0700, removed on every exit), so neither
-// a concurrent install nor anything else can change the archive between its
-// digest check and unpacking. With FromStdin the archive is read from the
-// command's input. task must satisfy ValidTask.
+// directory (created afresh, mode 0700, removed when the install has ended),
+// so neither a concurrent install nor anything else can change the archive
+// between its digest check and unpacking. With FromStdin the archive is read
+// from the command's input. It answers only once the install's process group
+// is gone. task must satisfy ValidTask; it is also the operation's id.
 func InstallCommand(task, version, arch, from, url, sha256 string) string {
-	return script(layout+lock+`umask 077
+	return script(layout+lock+claim+procs+`umask 077
 D="$L/code-server-$V"
 STAGE="$ST/install-$T"
-find "$ST" -maxdepth 1 -name 'cancel-*' -mtime +1 -exec rm -f {} + 2>/dev/null
-if [ -e "$ST/cancel-$T" ]; then rm -f "$ST/cancel-$T"; echo error=cancelled; exit 1; fi
-if [ -x "$D/bin/code-server" ]; then [ "$M" = stdin ] && cat >/dev/null; echo result=ok; exit 0; fi
+C="$ST/op-$T"
+if [ -x "$D/bin/code-server" ]; then [ "$M" = stdin ] && cat >/dev/null; : >"$C/done"; echo result=ok; exit 0; fi
 mkdir -p "$L" && chmod 700 "$L" || { echo error=mkdir; exit 1; }
+# The lock is ours, so no install runs: staging left here is from one that was killed.
+rm -rf "$ST"/install-*
 mkdir -m 0700 "$STAGE" || { echo error=stage; exit 1; }
-trap 'rm -rf "$STAGE"; rm -f "$ST/cancel-$T"' EXIT
-trap 'exit 1' HUP INT TERM
-export L ST D STAGE T V A M U H
-setsid sh -c "$W" corral-code-install
-# (Should setsid have had to fork, wait for the install itself.)
-if read -r wp _ <"$STAGE/task.pid" 2>/dev/null; then while kill -0 "$wp" 2>/dev/null; do sleep 1; done; fi
-`, "T", task, "V", version, "A", arch, "M", from, "U", url, "H", sha256, "W", installWork)
+export L ST D STAGE C T V A M U H MAXT
+# (In a subshell, which is no process group leader, setsid need not fork.)
+( setsid sh -c "$W" corral-code-install )
+rc=$?
+# Answer once all of the install's group is gone.
+if read -r wp wst <"$C/pid" 2>/dev/null; then while ours "$wp" "$wst"; do sleep 1; done; fi
+rm -rf "$STAGE"
+: >"$C/done"
+exit $rc
+`, "T", task, "V", version, "A", arch, "M", from, "U", url, "H", sha256, "MAXT", strconv.Itoa(DownloadSeconds), "W", installWork)
 }
 
-// CancelInstallCommand ends a cancelled install: it marks the task cancelled
-// (so an install still waiting for the lock gives up), ends the task's
-// process group and waits until it is gone, then removes its staging
-// directory. It reports an error when the group survives.
+// CancelInstallCommand ends an install for good. If the install has not
+// claimed its control directory yet, the cancel claims it, and the install
+// never runs. Otherwise it marks the install cancelled (the install looks
+// before each step), waits (bounded) until the install's worker has
+// published its process group or is known never to run (the install ended,
+// or nothing holds the host's lock any more), ends that group and waits
+// until all of it is gone, then removes the staging directory. It answers
+// error=kill when the group survives and error=pending when the install
+// could not be told to have ended; the control directory stays either way.
 func CancelInstallCommand(task string) string {
-	return script(layout+`STAGE="$ST/install-$T"
-mkdir -p "$ST" 2>/dev/null && : >"$ST/cancel-$T"
-if [ -f "$STAGE/task.pid" ] && read -r pid st <"$STAGE/task.pid" && [ -n "$pid" ] &&
-   [ "$(sed 's/^.*) //' "/proc/$pid/stat" 2>/dev/null | cut -d' ' -f20)" = "$st" ]; then
-  kill -TERM "-$pid" 2>/dev/null
-  i=0
-  while kill -0 "-$pid" 2>/dev/null && [ $i -lt 10 ]; do sleep 1; i=$((i+1)); done
-  kill -KILL "-$pid" 2>/dev/null
-  i=0
-  while kill -0 "-$pid" 2>/dev/null && [ $i -lt 5 ]; do sleep 1; i=$((i+1)); done
-  if kill -0 "-$pid" 2>/dev/null; then echo error=kill; exit 1; fi
+	return script(layout+procs+`STAGE="$ST/install-$T"
+C="$ST/op-$T"
+mkdir -p "$ST" || { echo error=mkdir; exit 1; }
+if mkdir "$C" 2>/dev/null; then : >"$C/cancel"; echo result=ok; exit 0; fi
+: >"$C/cancel"
+free=
+exec 8>>"$ST/.lock"
+i=0
+while [ ! -f "$C/pid" ] && [ ! -e "$C/done" ] && [ $i -lt "$WAIT" ]; do
+  if command -v flock >/dev/null 2>&1 && flock -n 8; then free=1; flock -u 8; break; fi
+  sleep 1; i=$((i+1))
+done
+exec 8>&-
+if [ -f "$C/pid" ]; then
+  read -r pid st <"$C/pid"
+  ghalt "$pid" "$st" || { echo error=kill; exit 1; }
+elif [ ! -e "$C/done" ] && [ -z "$free" ]; then
+  echo error=pending; exit 1
 fi
 rm -rf "$STAGE"
 rm -f "$L"/.upload-* "$L"/.download-* 2>/dev/null
 echo result=ok
-`, "T", task)
+`, "T", task, "WAIT", strconv.Itoa(CancelWaitSeconds))
 }
 
-// instance reads the pid file: the process id, its start time (field 22 of
-// /proc/<pid>/stat, so a reused process id is told apart) and the instance
-// id Corral gave it. alive is true when that very process still runs (and
-// is not a zombie). An old pid file holds only a process id: legacy is true
-// when that process runs one of Corral's installed releases.
+// SettleCommand makes sure an operation (a start or stop whose answer was
+// lost) is over: holding the host's lock, nothing else runs; claiming the
+// operation's control directory makes sure it never runs later.
+func SettleCommand(op string) string {
+	return script(layout+lock+`mkdir "$ST/op-$T" 2>/dev/null
+echo result=ok
+`, "T", op)
+}
+
+// instance reads the pid file: the process id, its start time and the
+// instance id Corral gave it. An old pid file holds only a process id: legacy
+// is true when that process runs one of Corral's installed releases. cur
+// names the recorded instance: its id, or pid:<n> for an old one.
 const instance = `P="$ST/code-server.pid"
-starttime() { sed 's/^.*) //' "/proc/$1/stat" 2>/dev/null | cut -d' ' -f20; }
-running() { sed 's/^.*) //' "/proc/$1/stat" 2>/dev/null | awk -v st="$2" '$1 != "Z" && $20 == st {ok=1} END {exit !ok}'; }
 pid=; st=; id=
 [ -f "$P" ] && read -r pid st id <"$P"
-alive() { [ -n "$pid" ] && [ -n "$st" ] && running "$pid" "$st"; }
+# alive: the recorded instance still runs (the process, or what is left of its
+# group once it has ended); up: the process runs and serves its socket.
+alive() { [ -n "$pid" ] && [ -n "$st" ] && { running "$pid" "$st" || ours "$pid" "$st"; }; }
+up() { [ -n "$pid" ] && [ -n "$st" ] && running "$pid" "$st" && [ -S "$S" ]; }
 legacy() { [ -n "$pid" ] && [ -z "$st" ] && [ -d "/proc/$pid" ] && tr '\000' '\n' <"/proc/$pid/cmdline" 2>/dev/null | awk -v p="$L/code-server-" 'index($0, p) == 1 {f = 1} END {exit !f}'; }
-# halt ends the recorded process group and waits until it is gone.
+unverifiable() { [ -n "$pid" ] && [ -z "$st" ] && [ -d "/proc/$pid" ] && [ ! -r "/proc/$pid/cmdline" ]; }
+cur=
+if [ -n "$st" ]; then cur=$id; elif [ -n "$pid" ]; then cur="pid:$pid"; fi
+# halt ends the instance: its process group or, for an old instance that has
+# no group of its own, its process tree; it waits until all of it is gone.
 halt() {
-  kill -TERM "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null
-  i=0
-  while [ -d "/proc/$pid" ] && ! grep -q '^State:.*Z' "/proc/$pid/status" 2>/dev/null && [ $i -lt 10 ]; do sleep 1; i=$((i+1)); done
-  kill -KILL "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null
-  i=0
-  while [ -d "/proc/$pid" ] && ! grep -q '^State:.*Z' "/proc/$pid/status" 2>/dev/null && [ $i -lt 5 ]; do sleep 1; i=$((i+1)); done
-  ! { [ -d "/proc/$pid" ] && ! grep -q '^State:.*Z' "/proc/$pid/status" 2>/dev/null; }
+  [ -n "$st" ] || st=$(starttime "$pid")
+  if running "$pid" "$st" && [ "$(pgrp "$pid")" != "$pid" ]; then thalt "$pid"; else ghalt "$pid" "$st"; fi
 }
 `
 
@@ -321,18 +419,19 @@ fi
 `
 
 // StartCommand starts code-server detached in its own session and process
-// group (checked), or reports that it already runs. An earlier instance that
-// runs without its socket, or one recorded in the old pid file format, is
-// stopped first; a recorded process that cannot be verified is not
-// overwritten. instanceID is recorded with the process id and start time.
-func StartCommand(version, socket, instanceID string) string {
-	return script(layout+lock+instance+`umask 077
+// group (checked) as instance instanceID, or reports the instance that
+// already runs. An earlier instance that runs without its socket, or one
+// recorded in the old pid file format, is stopped first; a recorded process
+// that cannot be verified is not overwritten. op is the operation's id (see
+// SettleCommand).
+func StartCommand(version, socket, instanceID, op string) string {
+	return script(layout+lock+claim+procs+instance+`umask 077
 D="$L/code-server-$V"
 mkdir -p "$DATA/extensions" && chmod 700 "$HOME/.local/share/corral" "$DATA" || { echo error=mkdir; exit 1; }
-`+socketDir+`if alive && [ -S "$S" ]; then echo result=running; echo "instance=$id"; exit 0; fi
+`+socketDir+`if up; then echo result=running; echo "instance=$id"; exit 0; fi
 if alive || legacy; then
   halt || { echo error=kill; echo "detail=an earlier code-server (pid $pid) would not stop"; exit 1; }
-elif [ -n "$pid" ] && [ -z "$st" ] && [ -d "/proc/$pid" ] && [ ! -r "/proc/$pid/cmdline" ]; then
+elif unverifiable; then
   echo error=verify; echo "detail=cannot tell whether process $pid from the pid file is code-server"; exit 1
 fi
 [ -x "$D/bin/code-server" ] || { echo error=notinstalled; exit 1; }
@@ -347,7 +446,7 @@ i=0
 while [ $i -lt 30 ]; do
   if [ -S "$S" ]; then
     # In a session and process group of its own, or stopping it would not reach all of it.
-    if [ "$(sed 's/^.*) //' "/proc/$new/stat" 2>/dev/null | cut -d' ' -f3)" != "$new" ]; then
+    if [ "$(pgrp "$new")" != "$new" ]; then
       kill "$new" 2>/dev/null; rm -f "$P"; echo error=nosetsid; exit 1
     fi
     echo result=started; echo "instance=$I"; exit 0
@@ -358,25 +457,56 @@ done
 echo error=start
 echo "detail=$(tail -n 5 "$ST/code-server.log" 2>/dev/null | tr '\n' ' ' | cut -c1-300)"
 exit 1
-`, "V", version, "S", socket, "I", instanceID)
+`, "V", version, "S", socket, "I", instanceID, "T", op)
 }
 
-// StopCommand stops the code-server named by the pid file (its whole
-// process group), but only that very process: same id and start time, and,
-// when instanceID is given, that instance (a newer one is left running and
-// reported as result=other). An old-format pid file is honoured when its
-// process runs one of Corral's releases. It fails, and leaves the state in
-// place, when it cannot read the pid file or the process survives.
-func StopCommand(socket, instanceID string) string {
-	return script(layout+lock+instance+`if [ ! -f "$P" ]; then rm -f "$S"; echo result=ok; exit 0; fi
+const stopBody = `if [ ! -f "$P" ]; then rm -f "$S"; echo result=ok; exit 0; fi
 if [ -z "$pid" ]; then echo error=verify; exit 1; fi
-if [ -n "$I" ] && [ -n "$id" ] && [ "$id" != "$I" ] && alive; then echo result=other; echo "instance=$id"; exit 0; fi
+if [ "$FORCE" != 1 ] && [ "$cur" != "$I" ]; then echo result=other; echo "instance=$cur"; exit 0; fi
 if alive || legacy; then
   halt || { echo error=kill; exit 1; }
+elif unverifiable; then
+  echo error=verify; exit 1
 fi
 rm -f "$P" "$S"
 echo result=ok
-`, "S", socket, "I", instanceID)
+`
+
+// StopCommand stops instance target (an instance id, or pid:<n> for one
+// recorded in the old pid file format, as InstanceCommand names it): its
+// whole process group (or, for an old instance without one, its process
+// tree), waiting until all of it is gone. Another instance is left running
+// and reported as result=other. It fails, and leaves the state in place,
+// when it cannot verify the recorded process or the process survives. op is
+// the operation's id (see SettleCommand).
+func StopCommand(socket, target, op string) string {
+	return script(layout+lock+claim+procs+instance+`[ -n "$I" ] || { echo error=target; exit 1; }
+`+stopBody, "S", socket, "I", target, "T", op, "FORCE", "0")
+}
+
+// ForceStopCommand stops whichever instance runs. Only for a host that is
+// being deleted, where nothing else is to be kept running.
+func ForceStopCommand(socket, op string) string {
+	return script(layout+lock+claim+procs+instance+stopBody, "S", socket, "I", "", "T", op, "FORCE", "1")
+}
+
+// InstanceCommand names the instance that runs (instance=<id>, or
+// instance=pid:<n> for an old one), if any.
+func InstanceCommand() string {
+	return script(layout + lock + procs + instance + `if alive; then echo "instance=$id"
+elif legacy; then echo "instance=pid:$pid"
+elif unverifiable; then echo error=verify; exit 1
+fi
+echo result=ok
+`)
+}
+
+// ValidTarget reports whether a stop target is an instance id or pid:<n>.
+func ValidTarget(t string) bool {
+	if n, ok := strings.CutPrefix(t, "pid:"); ok {
+		return n != "" && len(n) <= 10 && strings.Trim(n, "0123456789") == ""
+	}
+	return ValidTask(t)
 }
 
 // ValidVersion reports whether a version can be put into paths and commands.
