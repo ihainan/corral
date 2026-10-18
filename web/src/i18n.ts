@@ -382,6 +382,7 @@ const zh = {
   'term.fullShort': '窗口过多',
   'term.full': '这个会话已在太多窗口中打开，请先关掉其他设备或标签页上的这个会话，再点重试。',
   'term.waitUpload': '剪贴板里的图片还在上传，传完再发送。',
+  'term.uploadNotPasted': '连接中断过，路径没有自动粘贴：{path}',
 }
 
 type Key = keyof typeof zh
@@ -768,6 +769,7 @@ const en: Record<Key, string> = {
   'term.fullShort': 'Too many windows',
   'term.full': 'This session is open in too many windows. Close it on another device or tab, then retry.',
   'term.waitUpload': 'The clipboard image is still uploading; send once it is done.',
+  'term.uploadNotPasted': 'The connection was interrupted, so the path was not pasted: {path}',
 }
 
 const tables: Record<string, Record<Key, string>> = { 'zh-CN': zh, en }

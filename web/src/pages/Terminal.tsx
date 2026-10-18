@@ -370,6 +370,9 @@ export function TerminalPage({ id }: { id: string }) {
           setFollowing(null)
           applyScale()
           safeFit()
+          // Corrected once per socket: two windows connecting at the same
+          // moment must not keep correcting each other.
+          sizeGraceUntil = 0
           if (resizeTimer === undefined) report(term.cols, term.rows)
           return
         }
@@ -392,6 +395,8 @@ export function TerminalPage({ id }: { id: string }) {
         setHerdrFresh(false)
         // The size the gateway shows first may predate the one just reported.
         sizeGraceUntil = sentSize ? Date.now() + 1500 : 0
+        // Sizes reported over an earlier socket say nothing about this one.
+        if (!sentSize) sent = null
       },
       // Input typed while disconnected is sent once the connection is back,
       // unless there was too much of it or it waited too long.
@@ -447,6 +452,10 @@ export function TerminalPage({ id }: { id: string }) {
           const d = held[0]
           if (typeof d === 'object' && 'clip' in d) {
             const file = await d.clip
+            if (!stillSame()) {
+              droppedInput()
+              break
+            }
             if (file) await uploadRef.current([file], pasteDirect)
             else send('\x16')
           } else {
@@ -956,8 +965,11 @@ export function TerminalPage({ id }: { id: string }) {
   const uploadRef = useRef<(files: File[], paste?: (s: string) => void) => Promise<void>>(async () => {})
   const upload = useCallback(
     async (files: File[], paste?: (s: string) => void) => {
-      // Decided when the upload starts, not when it ends.
+      // Decided when the upload starts, not when it ends: the target, and
+      // for the terminal the connection (after a reconnect the screen may
+      // have changed, so the path is shown instead of pasted).
       const toDraft = !paste && !!composerRef.current
+      const opens = connRef.current?.opens
       for (const f of files) {
         toast(t('term.uploading', { name: f.name || 'image' }))
         try {
@@ -971,8 +983,12 @@ export function TerminalPage({ id }: { id: string }) {
             await untilNotComposing(composingRef.current, hostEl.current?.querySelector('textarea') ?? null)
             settleRef.current()
             const s = quoted + ' '
+            const c = connRef.current
             if (paste) paste(s)
-            else termRef.current?.paste(s)
+            else if (!c?.isOpen() || c.opens !== opens) {
+              toast(t('term.uploadNotPasted', { path: r.path }), true)
+              continue
+            } else termRef.current?.paste(s)
             toast(t('term.uploaded'))
           } else {
             toast(r.path)
