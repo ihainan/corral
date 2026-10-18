@@ -42,7 +42,7 @@ const (
 var (
 	maxCodeJobsPerUser  = 3
 	codeStepTimeout     = 2 * time.Minute  // checking, extracting, starting, stopping
-	codeInstallTimeout  = 15 * time.Minute // downloading or uploading the release
+	codeInstallTimeout  = 15 * time.Minute // downloading or uploading, and unpacking, the release
 	codeHealthAttempts  = 20
 	codeHealthInterval  = 500 * time.Millisecond
 	codeHealthPerTryMax = 5 * time.Second
@@ -188,7 +188,7 @@ func (s *Server) apiCodeStart(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusTooManyRequests, "busy", "VS Code is already starting on other hosts; wait for them first")
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), codeInstallTimeout+4*codeStepTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*codeInstallTimeout+3*codeStepTimeout)
 	j := &codeJob{status: codeStatus{State: codeChecking}, running: true, cancel: cancel}
 	s.code.jobs[key] = j
 	s.code.wg.Add(1)
@@ -354,7 +354,7 @@ func (s *Server) startCode(ctx context.Context, h *store.Host, f *store.Forward,
 			archive = codeserver.DownloadPath(ver, p.Arch)
 		}
 		step(codeExtracting)
-		fields, err := s.codeRun(ctx, fc, codeserver.ExtractCommand(ver, p.Arch, archive), codeStepTimeout)
+		fields, err := s.codeRun(ctx, fc, codeserver.ExtractCommand(ver, p.Arch, archive), codeInstallTimeout) // a few hundred MB on slow disks
 		if err != nil {
 			return "", err
 		}
