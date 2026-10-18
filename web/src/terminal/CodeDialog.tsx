@@ -34,6 +34,23 @@ interface Job {
 }
 
 const REQUEST_TIMEOUT = 15000
+
+// The new tab shows where it is going while the host gets ready, instead of
+// a blank page (on phones it comes to the front at once).
+function waitingPage(win: Window, name: string) {
+  try {
+    const d = win.document
+    d.title = t('code.waitTitle', { name })
+    const dark = window.matchMedia('(prefers-color-scheme: dark)').matches
+    d.body.style.cssText = `margin:0;min-height:100vh;display:grid;place-items:center;font:15px/1.5 -apple-system,system-ui,sans-serif;background:${dark ? '#0f1115' : '#fff'};color:${dark ? '#e6e8ec' : '#16181d'}`
+    const p = d.createElement('p')
+    p.style.cssText = 'max-width:32ch;text-align:center;padding:0 24px'
+    p.textContent = t('code.waitBody', { name })
+    d.body.replaceChildren(p)
+  } catch {
+    /* a blank tab is fine too */
+  }
+}
 const OVERALL_LIMIT = 15 * 60 * 1000 // a first install downloads and unpacks a few hundred MB
 
 // useCode gives the "Open in VS Code" and "Stop VS Code" actions, the
@@ -69,7 +86,10 @@ export function useCode() {
     endTask(true)
     const win = window.open('about:blank', '_blank')
     // VS Code must not be able to navigate this tab.
-    if (win) win.opener = null
+    if (win) {
+      win.opener = null
+      waitingPage(win, name)
+    }
     const mine = { ctl: new AbortController(), win }
     task.current = mine
     const current = () => task.current === mine

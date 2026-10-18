@@ -128,27 +128,30 @@ export async function api<T>(method: string, path: string, body?: unknown, opts:
   const onAbort = () => ctl.abort()
   opts.signal?.addEventListener('abort', onAbort)
   const timer = opts.timeoutMs ? setTimeout(() => ctl.abort(), opts.timeoutMs) : undefined
+  let data: any = null
   try {
-    res = await fetch(path, {
-      method,
-      credentials: 'same-origin',
-      signal: ctl.signal,
-      headers: body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
-      body: body !== undefined ? JSON.stringify(body) : undefined,
-    })
-  } catch {
-    if (opts.signal?.aborted) throw new ApiError(0, 'aborted', '')
-    throw new ApiError(0, 'network', t('error.network'))
+    try {
+      res = await fetch(path, {
+        method,
+        credentials: 'same-origin',
+        signal: ctl.signal,
+        headers: body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
+        body: body !== undefined ? JSON.stringify(body) : undefined,
+      })
+      // The timeout and cancellation cover reading the body too.
+      const text = await res.text()
+      try {
+        data = text ? JSON.parse(text) : null
+      } catch {
+        /* not JSON */
+      }
+    } catch {
+      if (opts.signal?.aborted) throw new ApiError(0, 'aborted', '')
+      throw new ApiError(0, 'network', t('error.network'))
+    }
   } finally {
     clearTimeout(timer)
     opts.signal?.removeEventListener('abort', onAbort)
-  }
-  const text = await res.text()
-  let data: any = null
-  try {
-    data = text ? JSON.parse(text) : null
-  } catch {
-    /* not JSON */
   }
   if (!res.ok) {
     if (res.status === 401 && path !== '/api/login') unauthorized(sentAt)

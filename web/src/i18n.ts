@@ -363,6 +363,8 @@ const zh = {
   'code.openNow': '打开 VS Code',
   'code.stopWaiting': '不再等待',
   'code.waitHint': '关掉这个窗口只是不再等待，主机上的安装和启动会继续。',
+  'code.waitTitle': '正在打开 VS Code：{name}',
+  'code.waitBody': '正在 {name} 上启动 VS Code，就绪后这个页面会自动打开它。进度在原来的页面里。',
 }
 
 type Key = keyof typeof zh
@@ -730,6 +732,8 @@ const en: Record<Key, string> = {
   'code.openNow': 'Open VS Code',
   'code.stopWaiting': 'Stop waiting',
   'code.waitHint': 'Closing this only stops waiting; installing and starting continue on the host.',
+  'code.waitTitle': 'Opening VS Code: {name}',
+  'code.waitBody': 'Starting VS Code on {name}. This page opens it when ready; progress is shown on the original page.',
 }
 
 const tables: Record<string, Record<Key, string>> = { 'zh-CN': zh, en }

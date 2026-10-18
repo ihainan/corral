@@ -134,6 +134,7 @@ export function TerminalPage({ id }: { id: string }) {
 
   // Latest modifier state for the xterm data callback.
   const openComposerRef = useRef<() => void>(() => {})
+  const settlePunctRef = useRef<() => void>(() => {})
   const mods = useRef<{ ctrl: ModState; alt: ModState }>({ ctrl: 'off', alt: 'off' })
   mods.current = { ctrl, alt }
   const releaseOnce = useCallback(() => {
@@ -264,6 +265,11 @@ export function TerminalPage({ id }: { id: string }) {
     let composing = false
     const latched = () => mods.current.ctrl !== 'off' || mods.current.alt !== 'off'
     const onCompStart = () => {
+      // A pending punctuation key becomes part of the composition.
+      if (punct !== null) {
+        punct = null
+        clearTimeout(punctTimer)
+      }
       composing = true
       typedChar = null
     }
@@ -275,31 +281,57 @@ export function TerminalPage({ id }: { id: string }) {
     // Chinese (and other) input methods turn punctuation keys into full-width
     // marks: the browser reports a keydown for the ASCII key ("," "."), then the
     // input method inserts "，" "。". xterm would send the ASCII character on
-    // keydown and cancel the event, so the mark never arrived. Punctuation keys
-    // are therefore left to the browser, and whatever text it actually inserts
-    // is sent; if nothing is inserted shortly, the key's own character is.
+    // keydown and cancel the event, so the mark never arrived. A punctuation key
+    // is therefore left to the browser and is "pending" until its text arrives:
+    //  - the next insertText is its text; we send it and xterm never sees it;
+    //  - anything else typed, pasted or sent from the key bar first settles the
+    //    pending key with its own character, so order is kept;
+    //  - starting a composition hands it to the input method;
+    //  - with no text after 80 ms the key's own character is sent, and a late
+    //    insertText for it (before any other key) is dropped as a duplicate.
     let punct: string | null = null
     let punctTimer: number | undefined
+    let lateUntil = 0 // after a fallback send: a stray insertText before then is the same key
     const sendPunct = (text: string) => {
       punct = null
       clearTimeout(punctTimer)
-      if (ta) ta.value = ''
+      if (ta && !composing) ta.value = ''
       term.input(text, true)
     }
+    const settlePunct = () => {
+      if (punct === null) return
+      const key = punct
+      sendPunct(key)
+      lateUntil = performance.now() + 300
+    }
+    settlePunctRef.current = settlePunct
     const onPunctInput = (e: Event) => {
       const ie = e as InputEvent
-      if (punct !== null && ie.inputType === 'insertText' && ie.data) sendPunct(ie.data)
+      if (e.target !== ta || ie.inputType !== 'insertText' || !ie.data || composing) return
+      if (punct !== null) {
+        e.stopPropagation() // ours alone: xterm would send it again after keyup
+        sendPunct(ie.data)
+      } else if (performance.now() < lateUntil) {
+        e.stopPropagation() // the key's text arriving after we already sent it
+        lateUntil = 0
+        if (ta) ta.value = ''
+      }
     }
 
     const onBeforeInput = (e: Event) => {
       const ie = e as InputEvent
       typedChar = !ie.isComposing && ie.inputType === 'insertText' && ie.data && [...ie.data].length === 1 ? ie.data : null
     }
-    const onPasteEv = () => (typedChar = null)
+    const onPasteEv = () => {
+      settlePunct()
+      typedChar = null
+    }
     ta?.addEventListener('compositionstart', onCompStart)
     ta?.addEventListener('compositionend', onCompEnd)
     ta?.addEventListener('beforeinput', onBeforeInput)
-    ta?.addEventListener('input', onPunctInput)
+    // Capture on the container: it runs before any listener on the textarea,
+    // xterm's own (also capturing) included, so a claimed event stops here.
+    el.addEventListener('input', onPunctInput, true)
     ta?.addEventListener('paste', onPasteEv, true)
     const onUserInput = userInputEvent(term)
     let userData = false
@@ -335,14 +367,18 @@ export function TerminalPage({ id }: { id: string }) {
       F7: 'F7', F8: 'F8', F9: 'F9', F10: 'F10', F11: 'F11', F12: 'F12',
     }
     term.attachCustomKeyEventHandler((e) => {
-      if (e.type === 'keypress' && punct !== null) return false // the input event will carry it
+      // The keypress of the pending key: its input event will carry the text.
+      if (e.type === 'keypress' && punct !== null && e.key === punct) return false
       if (e.type !== 'keydown') return true
       if (e.isComposing || e.keyCode === 229) return true
-      if (/^[!-/:-@[-`{-~]$/.test(e.key) && !e.ctrlKey && !e.altKey && !e.metaKey && !latched()) {
+      if (!['Shift', 'Control', 'Alt', 'Meta', 'CapsLock', 'AltGraph'].includes(e.key)) lateUntil = 0
+      const isPunct = /^[!-/:-@[-`{-~]$/.test(e.key) && !e.ctrlKey && !e.altKey && !e.metaKey && !latched()
+      // Any other key settles a pending one first, so nothing overtakes it.
+      if (punct !== null && !['Shift', 'Control', 'Alt', 'Meta', 'CapsLock', 'AltGraph'].includes(e.key)) settlePunct()
+      if (isPunct) {
         const key = e.key
-        if (punct !== null) sendPunct(punct) // a previous one never got its input event
         punct = key
-        punctTimer = window.setTimeout(() => punct === key && sendPunct(key), 80)
+        punctTimer = window.setTimeout(() => punct === key && settlePunct(), 80)
         return false // no preventDefault: the browser and input method insert the text
       }
       typedChar = e.key.length === 1 && !e.metaKey && !e.ctrlKey ? e.key : null
@@ -391,7 +427,8 @@ export function TerminalPage({ id }: { id: string }) {
       ta?.removeEventListener('compositionstart', onCompStart)
       ta?.removeEventListener('compositionend', onCompEnd)
       ta?.removeEventListener('beforeinput', onBeforeInput)
-      ta?.removeEventListener('input', onPunctInput)
+      el.removeEventListener('input', onPunctInput, true)
+      settlePunctRef.current = () => {}
       clearTimeout(punctTimer)
       ta?.removeEventListener('paste', onPasteEv, true)
       dataSub.dispose()
@@ -633,11 +670,13 @@ export function TerminalPage({ id }: { id: string }) {
   }, [upload])
 
   const sendKey = (k: SpecialKey) => {
+    settlePunctRef.current()
     const term = termRef.current
     connRef.current?.send(specialKey(k, activeMods(), term?.modes.applicationCursorKeysMode ?? false))
     releaseOnce()
   }
   const sendText = (s: string) => {
+    settlePunctRef.current()
     connRef.current?.send(applyMods(s, activeMods()))
     releaseOnce()
   }

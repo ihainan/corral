@@ -2,7 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useRef, useState, ty
 import { KeyRound, LogOut, ScrollText, Server, Settings, Users } from 'lucide-react'
 import { api, ApiError, bumpAuthGen, setUnauthorizedHandler, type Bootstrap, type Me } from './api'
 import { applyDefaultLanguage, t } from './i18n'
-import { resetPrefsSession, sendPendingPrefs, syncPrefsFromServer } from './prefs'
+import { freezePrefs, resetPrefsSession, sendPendingPrefs, syncPrefsFromServer } from './prefs'
 import { match, navigate, usePath, linkHandler } from './router'
 import { BrandMark, ToastProvider, useToast } from './components/ui'
 import { disablePush, syncPush } from './push'
@@ -139,6 +139,7 @@ type NavKey = 'hosts' | 'keys' | 'settings' | 'users' | 'audit'
 // account's alerts.
 export async function signOut(setMe: (m: Me | null) => void, toast: (m: string, e?: boolean) => void) {
   // Settings changed just before signing out still belong to this account.
+  freezePrefs(true)
   await sendPendingPrefs(3000)
   await disablePush().catch(() => {})
   try {
@@ -147,10 +148,12 @@ export async function signOut(setMe: (m: Me | null) => void, toast: (m: string, 
     // A 401 means we were already signed out; anything else did not sign us out.
     if (!(e instanceof ApiError && e.status === 401)) {
       toast(t('nav.signOutFailed'), true)
+      freezePrefs(false)
       return
     }
   }
   resetPrefsSession()
+  freezePrefs(false)
   setMe(null)
   navigate('/login', true)
 }

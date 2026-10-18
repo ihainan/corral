@@ -76,7 +76,16 @@ function request(p: typeof pending) {
   return { user: owner, writer, seq: ++seq, set }
 }
 
+// While signing out, settings are frozen: a change then would miss the final
+// send and be dropped with the sign-in.
+let frozen = false
+export function freezePrefs(on: boolean) {
+  frozen = on
+  if (!on && pending.size) save()
+}
+
 export function setPrefs(patch: Partial<Prefs>) {
+  if (frozen) return
   state = { ...state, ...patch }
   for (const [k, v] of Object.entries(patch)) {
     edits++
