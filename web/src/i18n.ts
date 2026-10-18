@@ -304,6 +304,9 @@ const zh = {
   'keys.namePlaceholder': '例如：笔记本',
   'herdr.stale': '连接中断，显示的是断开前的状态',
   'term.sessionsFailed': '会话列表加载失败。',
+  'push.syncFailed': '这台设备的通知没能登记到当前账号，请到设置里重新开启。',
+  'herdr.busy': '操作太频繁，请稍后再试。',
+  'ports.busy': '网关正忙，请稍后重试。',
 }
 
 type Key = keyof typeof zh
@@ -612,6 +615,9 @@ const en: Record<Key, string> = {
   'keys.namePlaceholder': 'e.g. laptop',
   'herdr.stale': 'Disconnected: showing the last known state',
   'term.sessionsFailed': 'Could not load sessions.',
+  'push.syncFailed': 'Notifications on this device could not be moved to this account. Turn them on again in Settings.',
+  'herdr.busy': 'Too many actions at once. Try again in a moment.',
+  'ports.busy': 'The gateway is busy. Try again in a moment.',
 }
 
 const tables: Record<string, Record<Key, string>> = { 'zh-CN': zh, en }

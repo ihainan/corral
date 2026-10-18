@@ -38,7 +38,11 @@ export function PortsDialog({ hostId, onClose }: { hostId: number; onClose: () =
     setPorts(null)
     api<ListeningPort[]>('GET', `/api/hosts/${hostId}/ports`)
       .then(setPorts)
-      .catch((e) => setPortsError(e instanceof ApiError && e.code === 'no_connection' ? t('ports.needsConnection') : t('ports.loadFailed')))
+      .catch((e) =>
+        setPortsError(
+          e instanceof ApiError && e.code === 'no_connection' ? t('ports.needsConnection') : e instanceof ApiError && e.code === 'busy' ? t('ports.busy') : t('ports.loadFailed'),
+        ),
+      )
   }
   const loadForwards = () =>
     api<Forward[]>('GET', '/api/forwards')

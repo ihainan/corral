@@ -44,11 +44,6 @@ export function App() {
       .catch(() => setError(true))
   }, [])
 
-  // Whoever signs in on this device takes over its notifications.
-  useEffect(() => {
-    if (me) void syncPush()
-  }, [me?.id])
-
   if (error) {
     return (
       <div className="auth-wrap">
@@ -63,9 +58,23 @@ export function App() {
 
   return (
     <SessionCtx.Provider value={{ boot, me, setMe }}>
-      <ToastProvider>{route(path, boot, me)}</ToastProvider>
+      <ToastProvider>
+        <PushSync userId={me?.id} />
+        {route(path, boot, me)}
+      </ToastProvider>
     </SessionCtx.Provider>
   )
+}
+
+// Whoever signs in on this device takes over its notifications. A failure
+// is said out loud: otherwise alerts silently stop arriving.
+function PushSync({ userId }: { userId?: number }) {
+  const toast = useToast()
+  useEffect(() => {
+    if (!userId) return
+    void syncPush().then((ok) => ok || toast(t('push.syncFailed'), true))
+  }, [userId, toast])
+  return null
 }
 
 function Redirect({ to }: { to: string }) {

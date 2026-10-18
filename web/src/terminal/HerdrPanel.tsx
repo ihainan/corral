@@ -39,7 +39,14 @@ function HerdrSheet(props: PanelProps) {
 function HerdrDock(props: PanelProps) {
   const ref = useRef<HTMLElement>(null)
   useEffect(() => {
-    ref.current?.querySelector<HTMLElement>('.herdr-list button')?.focus()
+    const prev = document.activeElement as HTMLElement | null
+    const root = ref.current
+    root?.querySelector<HTMLElement>('.herdr-list button')?.focus()
+    return () => {
+      // Hand focus back only if the panel still had it.
+      const a = document.activeElement
+      if (!a || a === document.body || root?.contains(a)) prev?.focus?.()
+    }
   }, [])
   return (
     <aside

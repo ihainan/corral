@@ -6,7 +6,7 @@ import { Unicode11Addon } from '@xterm/addon-unicode11'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import { WebglAddon } from '@xterm/addon-webgl'
 import { ArrowUp, Check, ChevronDown, ChevronLeft, Globe, LayoutGrid, ImagePlus, MessageSquareText, MoreVertical, Minus, Paperclip, Plus, TextSelect, Keyboard as KeyboardIcon, Power, RotateCw, Server, X } from 'lucide-react'
-import { api, errorText, uploadFile, type HerdrSummary, type Host, type SessionInfo } from '../api'
+import { api, ApiError, errorText, uploadFile, type HerdrSummary, type Host, type SessionInfo } from '../api'
 import { t } from '../i18n'
 import { navigate } from '../router'
 import { getPrefs, isTermDark, setChromeColor, setPrefs, usePrefs } from '../prefs'
@@ -42,12 +42,21 @@ const FONT_STACK = "'JetBrains Mono', 'SFMono-Regular', Menlo, Consolas, 'PingFa
 // While replayed output is parsed, xterm answers the old queries in it. The
 // answers have fixed shapes: device attributes and status (CSI … c / n / R),
 // mode reports (CSI … $ y), window reports (CSI … t), focus (CSI I / O),
-// colour and DCS reports. Data made only of these is dropped during a replay;
-// anything else is the user's and goes out. (Ctrl+F3 encodes like a cursor
-// report and would be lost if pressed during the replay itself.)
+// colour and DCS reports. This is only the fallback for telling them apart
+// from typing, see userInputEvent.
 const REPLY = /^(?:\x1b\[[?>]?[\d;]*[cnRt]|\x1b\[\??[\d;]*\$y|\x1b\[[IO]|\x1bP[\s\S]*?\x1b\\|\x1b\][\s\S]*?(?:\x07|\x1b\\))+$/
 export function isTerminalReply(data: string): boolean {
   return REPLY.test(data)
+}
+
+// xterm marks data it sends because of the user (keys, paste, IME, mouse)
+// with an internal onUserInput event fired right before onData; its own
+// replies come without it. That is the exact signal, but not public API, so
+// it is looked up defensively (checked against @xterm/xterm 6.0.0).
+type Listen = (cb: () => void) => { dispose(): void }
+function userInputEvent(term: Terminal): Listen | null {
+  const ev = (term as unknown as { _core?: { coreService?: { onUserInput?: Listen } } })._core?.coreService?.onUserInput
+  return typeof ev === 'function' ? ev : null
 }
 
 function shellPath(p: string): string | null {
@@ -84,8 +93,12 @@ export function TerminalPage({ id }: { id: string }) {
   // sidebar too), a sheet on narrow ones (always starts closed).
   const sheetPanel = useMedia('(max-width: 999px)')
   const [panel, setPanelState] = useState(() => !sheetPanel && local.get('corral.herdrPanel') === '1')
+  // The form the panel was opened in. A panel is only drawn in that form, so
+  // crossing the breakpoint never mounts the other form, even for one render.
+  const [panelSheet, setPanelSheet] = useState(sheetPanel)
   const setPanel = (v: boolean) => {
     setPanelState(v)
+    setPanelSheet(sheetPanel)
     if (!sheetPanel) local.set('corral.herdrPanel', v ? '1' : '0')
     if (!v && !isTouch) termRef.current?.focus()
   }
@@ -93,8 +106,10 @@ export function TerminalPage({ id }: { id: string }) {
   const [sessionsFailed, setSessionsFailed] = useState(false)
   // False from a disconnect until this connection sends a new herdr summary.
   const [herdrFresh, setHerdrFresh] = useState(true)
+  // Only a new socket brings a new summary; a brief "offline" while the socket
+  // stays up is covered by `paused` and needs no fresh summary afterwards.
   useEffect(() => {
-    if (status !== 'open') setHerdrFresh(false)
+    if (status === 'connecting' || status === 'reconnecting') setHerdrFresh(false)
   }, [status])
   // Crossing the width where the panel turns from docked to a sheet closes it,
   // so it never reappears in another form above a dialog that is open.
@@ -106,6 +121,7 @@ export function TerminalPage({ id }: { id: string }) {
   }, [sheetPanel])
   const ended = status === 'ended' || status === 'gone' || end !== null
   const showKeybar = isTouch && prefs.keybar && !ended
+  const panelOpen = panel && panelSheet === sheetPanel
   const { boot } = useSession()
   const [portsOpen, setPortsOpen] = useState(false)
   // Links to localhost in the terminal open through port forwarding.
@@ -258,10 +274,15 @@ export function TerminalPage({ id }: { id: string }) {
     ta?.addEventListener('compositionend', onCompEnd)
     ta?.addEventListener('beforeinput', onBeforeInput)
     ta?.addEventListener('paste', onPasteEv, true)
+    const onUserInput = userInputEvent(term)
+    let userData = false
+    const userSub = onUserInput?.(() => (userData = true))
     const dataSub = term.onData((data) => {
       const typed = typedChar !== null && data === typedChar && !composing
+      const fromUser = userData
       typedChar = null
-      if (replaying && isTerminalReply(data)) return
+      userData = false
+      if (replaying && (onUserInput ? !fromUser : isTerminalReply(data))) return
       if (typed && latched()) {
         conn.send(applyMods(data, activeMods()))
         releaseOnce()
@@ -337,6 +358,7 @@ export function TerminalPage({ id }: { id: string }) {
       ta?.removeEventListener('beforeinput', onBeforeInput)
       ta?.removeEventListener('paste', onPasteEv, true)
       dataSub.dispose()
+      userSub?.dispose()
       binSub.dispose()
       resizeSub.dispose()
       conn.dispose()
@@ -804,7 +826,7 @@ export function TerminalPage({ id }: { id: string }) {
         />
         <div className="spacer" />
         {herdr && !ended && (
-          <button className="icon-btn herdr-btn" aria-pressed={panel} onClick={() => setPanel(!panel)} aria-label={t('herdr.title') + (herdr.waiting > 0 && !herdrStale ? ' · ' + t('herdr.waiting', { n: herdr.waiting }) : '')} title={t('herdr.title')}>
+          <button className="icon-btn herdr-btn" aria-pressed={panelOpen} onClick={() => setPanel(!panelOpen)} aria-label={t('herdr.title') + (herdr.waiting > 0 && !herdrStale ? ' · ' + t('herdr.waiting', { n: herdr.waiting }) : '')} title={t('herdr.title')}>
             <LayoutGrid size={19} />
             {herdr.waiting > 0 && !herdrStale && <span className="herdr-count">{herdr.waiting}</span>}
           </button>
@@ -826,9 +848,9 @@ export function TerminalPage({ id }: { id: string }) {
       </header>
 
       {paused && <div className="term-paused" role="status">{t('term.paused')}</div>}
-      <div className={'term-body' + (herdr && panel && !sheetPanel ? ' with-panel' : '') + (paused ? ' is-paused' : '') + (ended ? ' is-ended' : '')}>
+      <div className={'term-body' + (herdr && panelOpen && !sheetPanel ? ' with-panel' : '') + (paused ? ' is-paused' : '') + (ended ? ' is-ended' : '')}>
         <div className="term-host-el" ref={hostEl} />
-        {herdr && panel && !ended && (
+        {herdr && panelOpen && !ended && (
           <HerdrPanel
             summary={herdr}
             sheet={sheetPanel}
@@ -842,8 +864,8 @@ export function TerminalPage({ id }: { id: string }) {
               try {
                 await api('POST', `/api/sessions/${id}/herdr`, { action, target })
                 if (sheetPanel) setPanel(false)
-              } catch {
-                toast(t('herdr.focusFailed'), true)
+              } catch (e) {
+                toast(e instanceof ApiError && e.code === 'herdr_busy' ? t('herdr.busy') : t('herdr.focusFailed'), true)
               }
             }}
           />
