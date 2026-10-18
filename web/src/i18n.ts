@@ -124,6 +124,7 @@ const zh = {
   'host.persistTmux': '用 tmux 保持会话（推荐）',
   'host.persistTmuxHint': '网关重启或连接中断后，重新连接仍会回到原来的会话。远端没装 tmux 时自动改用普通终端。',
   'host.tmuxSession': 'tmux 会话名',
+  'host.addressSplit': '已从地址中拆出用户名和端口。',
   'host.advanced': '高级选项',
   'host.delete': '删除主机',
 
@@ -360,6 +361,7 @@ const en: Record<Key, string> = {
   'host.persistTmux': 'Keep sessions with tmux (recommended)',
   'host.persistTmuxHint': 'After a gateway restart or a dropped connection, reconnecting returns to the same session. Falls back to a plain shell when tmux is missing.',
   'host.tmuxSession': 'tmux session name',
+  'host.addressSplit': 'User name and port were taken from the address.',
   'host.advanced': 'Advanced',
   'host.delete': 'Delete host',
 
@@ -475,15 +477,31 @@ const tables: Record<string, Record<Key, string>> = { 'zh-CN': zh, en }
 export type Lang = 'zh-CN' | 'en'
 
 let current: Lang = pickLanguage()
+let chosen = savedLanguage() !== null
 
-function pickLanguage(): Lang {
+function savedLanguage(): Lang | null {
   try {
     const saved = localStorage.getItem('corral.lang')
     if (saved === 'zh-CN' || saved === 'en') return saved
   } catch {
     /* storage unavailable */
   }
-  return navigator.language?.toLowerCase().startsWith('zh') ? 'zh-CN' : 'en'
+  return null
+}
+
+function pickLanguage(): Lang {
+  return savedLanguage() ?? (navigator.language?.toLowerCase().startsWith('zh') ? 'zh-CN' : 'en')
+}
+
+// applyDefaultLanguage uses the deployment's default unless the user picked a
+// language themselves. Returns true when the language changed.
+export function applyDefaultLanguage(def: string): boolean {
+  if (chosen) return false
+  const l: Lang = def.toLowerCase().startsWith('zh') ? 'zh-CN' : 'en'
+  if (l === current) return false
+  current = l
+  document.documentElement.lang = l
+  return true
 }
 
 export function getLang(): Lang {
@@ -492,6 +510,7 @@ export function getLang(): Lang {
 
 export function setLang(l: Lang) {
   current = l
+  chosen = true
   try {
     localStorage.setItem('corral.lang', l)
   } catch {

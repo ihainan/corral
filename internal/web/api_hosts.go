@@ -85,10 +85,24 @@ type hostBody struct {
 }
 
 var (
-	tmuxNameRE = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
-	hostnameRE = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$`)
-	sshUserRE  = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9._-]{0,63}$`)
+	// tmux rewrites "." and ":" in session names, which would break attaching
+	// by name, so they are not allowed.
+	tmuxNameRE = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+	hostnameRE = regexp.MustCompile(`^[A-Za-z0-9_]([A-Za-z0-9._-]{0,251}[A-Za-z0-9_])?$`)
+	// The user name travels in the SSH protocol, never through a shell, so any
+	// visible characters are fine (e.g. "user@corp", "DOMAIN\\user").
+	sshUserRE = regexp.MustCompile(`^[^\s\x00-\x1f\x7f]{1,255}$`)
+	tmuxUnsafe = regexp.MustCompile(`[^A-Za-z0-9_-]`)
 )
+
+// defaultTmuxSession is "corral-<user>" with characters tmux would rewrite replaced.
+func defaultTmuxSession(username string) string {
+	name := "corral-" + tmuxUnsafe.ReplaceAllString(username, "_")
+	if len(name) > 64 {
+		name = name[:64]
+	}
+	return name
+}
 
 type fieldError struct{ field, msg string }
 
@@ -113,7 +127,7 @@ func (s *Server) validateHost(ctx context.Context, owner *store.User, b *hostBod
 		return &fieldError{"port", "must be 1–65535"}
 	}
 	if !sshUserRE.MatchString(b.Username) {
-		return &fieldError{"username", "must be a valid user name"}
+		return &fieldError{"username", "enter the user name, without spaces"}
 	}
 	switch b.Auth {
 	case store.AuthPassword, store.AuthAsk:
@@ -134,11 +148,12 @@ func (s *Server) validateHost(ctx context.Context, owner *store.User, b *hostBod
 	if b.Persistence != store.PersistNone && b.Persistence != store.PersistTmux {
 		return &fieldError{"persistence", "must be none or tmux"}
 	}
+	b.TmuxSession = strings.TrimSpace(b.TmuxSession)
 	if b.TmuxSession == "" {
-		b.TmuxSession = "corral-" + owner.Username
+		b.TmuxSession = defaultTmuxSession(owner.Username)
 	}
 	if !tmuxNameRE.MatchString(b.TmuxSession) {
-		return &fieldError{"tmux_session", "letters, digits, dot, dash and underscore only"}
+		return &fieldError{"tmux_session", "letters, digits, dash and underscore only"}
 	}
 	return nil
 }

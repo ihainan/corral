@@ -1,7 +1,7 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from 'react'
 import { CircleUserRound, Fence, KeyRound, LogOut, Menu as MenuIcon, ScrollText, Server, Settings, Users } from 'lucide-react'
 import { api, ApiError, setUnauthorizedHandler, type Bootstrap, type Me } from './api'
-import { t } from './i18n'
+import { applyDefaultLanguage, t } from './i18n'
 import { syncPrefsFromServer } from './prefs'
 import { match, navigate, usePath, linkHandler } from './router'
 import { Menu, ToastProvider, useToast } from './components/ui'
@@ -35,6 +35,7 @@ export function App() {
     })
     api<Bootstrap>('GET', '/api/bootstrap')
       .then((b) => {
+        applyDefaultLanguage(b.default_language)
         setBoot(b)
         setMe(b.user)
         if (b.user) syncPrefsFromServer()

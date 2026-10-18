@@ -5,10 +5,10 @@ import '@fontsource/jetbrains-mono/700.css'
 import '@xterm/xterm/css/xterm.css'
 import './styles/app.css'
 import './styles/terminal.css'
-import { getLang, setLang } from './i18n'
+import { getLang } from './i18n'
 import { App } from './app'
 
-setLang(getLang())
+document.documentElement.lang = getLang()
 
 // Older versions kept composer drafts in sessionStorage; drafts can hold secrets.
 try {

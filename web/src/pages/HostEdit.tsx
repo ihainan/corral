@@ -62,6 +62,16 @@ export function HostEditPage({ id }: { id?: number }) {
     }
   }
 
+  // "alice@10.0.0.5:2222" pasted into the address fills user name and port too.
+  const splitAddress = () => {
+    const m = address.trim().match(/^(?:([^@\s]+)@)?(\[[0-9a-fA-F:]+\]|[^:\s]+)(?::(\d{1,5}))?$/)
+    if (!m || (!m[1] && !m[3])) return
+    setAddress(m[2].replace(/^\[|\]$/g, ''))
+    if (m[1]) setUsername(m[1])
+    if (m[3]) setPort(m[3])
+    toast(t('host.addressSplit'))
+  }
+
   const submit = async (e: FormEvent) => {
     e.preventDefault()
     setBusy(true)
@@ -102,7 +112,7 @@ export function HostEditPage({ id }: { id?: number }) {
         </Field>
         <div className="row">
           <Field label={t('host.address')} htmlFor="h-addr" error={fe('address')}>
-            <input id="h-addr" className="input" value={address} onChange={(e) => setAddress(e.target.value)} placeholder={t('host.addressPlaceholder')}
+            <input id="h-addr" className="input" value={address} onChange={(e) => setAddress(e.target.value)} onBlur={splitAddress} placeholder={t('host.addressPlaceholder')}
               autoCapitalize="none" autoCorrect="off" spellCheck={false} inputMode="url" required aria-invalid={!!fe('address')} />
           </Field>
           <div className="field port">
@@ -204,10 +214,10 @@ function fieldMessage(field: string | undefined, fallback: string): string {
     case 'name': return '请填写名称，最多 64 个字符。'
     case 'address': return '请填写有效的主机名或 IP 地址。'
     case 'port': return '端口范围是 1 到 65535。'
-    case 'username': return '请填写有效的用户名。'
+    case 'username': return '请填写用户名，不能包含空格。'
     case 'password': return '请填写密码。'
     case 'credential_id': return '请选择一把密钥。'
-    case 'tmux_session': return '只能包含字母、数字、点、短横线和下划线。'
+    case 'tmux_session': return '只能包含字母、数字、短横线和下划线。'
     default: return fallback
   }
 }
