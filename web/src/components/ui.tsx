@@ -5,6 +5,35 @@ import { t } from '../i18n'
 
 export const isCoarse = () => window.matchMedia('(pointer: coarse)').matches
 
+// Whether the latest interaction was a key press (a hardware keyboard) rather
+// than a tap or click.
+let lastWasKey = false
+if (typeof document !== 'undefined') {
+  document.addEventListener('keydown', () => (lastWasKey = true), true)
+  document.addEventListener('pointerdown', () => (lastWasKey = false), true)
+}
+const isTextEntry = (el: Element | null) => !!el && (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT' || (el as HTMLElement).isContentEditable)
+
+// A layer opened by a tap on a touch screen puts the on-screen keyboard
+// away, and closing it does not bring the keyboard back: focus returns to a
+// text field only when keys are in use. leaveField runs on open, restoreFocus
+// on close.
+export function leaveField() {
+  const a = document.activeElement
+  if (isCoarse() && !lastWasKey && isTextEntry(a)) (a as HTMLElement).blur()
+}
+export function restoreFocus(prev: HTMLElement | null, root: HTMLElement | null) {
+  // Give focus back only if it was ours to give: a layer that closes
+  // underneath another must not pull focus out of the one on top.
+  const a = document.activeElement
+  if (a && a !== document.body && !root?.contains(a)) return
+  if (isCoarse() && !lastWasKey && isTextEntry(prev)) {
+    if (a && a !== document.body) (a as HTMLElement).blur()
+    return
+  }
+  prev?.focus?.()
+}
+
 // Open layers, innermost last. Only the top one reacts to Tab and Escape, so a
 // dialog opened over a sheet does not fight it for focus.
 const layers: object[] = []
@@ -30,6 +59,7 @@ export function useFocusTrap<T extends HTMLElement>(onClose: () => void) {
   useEffect(() => {
     const prev = document.activeElement as HTMLElement | null
     const root = ref.current
+    leaveField()
     const focusables = () =>
       [...(root?.querySelectorAll<HTMLElement>('a[href], button:not([disabled]), input:not([disabled]), select, textarea, [tabindex]:not([tabindex="-1"])') ?? [])]
         .filter((el) => el.offsetParent !== null || el === document.activeElement)
@@ -63,10 +93,7 @@ export function useFocusTrap<T extends HTMLElement>(onClose: () => void) {
     document.addEventListener('keydown', onKey, true)
     return () => {
       document.removeEventListener('keydown', onKey, true)
-      // Give focus back only if it was ours to give: a layer that closes
-      // underneath another must not pull focus out of the one on top.
-      const a = document.activeElement
-      if (!a || a === document.body || root?.contains(a)) prev?.focus?.()
+      restoreFocus(prev, root)
     }
   }, [])
   return ref

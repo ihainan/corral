@@ -2,7 +2,7 @@ import { useEffect, useRef } from 'react'
 import { X } from 'lucide-react'
 import type { HerdrSummary } from '../api'
 import { hasKey, t } from '../i18n'
-import { useFocusTrap } from '../components/ui'
+import { leaveField, restoreFocus, useFocusTrap } from '../components/ui'
 
 const statusKey = (s: string) => {
   const k = 'herdr.status.' + s
@@ -41,12 +41,9 @@ function HerdrDock(props: PanelProps) {
   useEffect(() => {
     const prev = document.activeElement as HTMLElement | null
     const root = ref.current
+    leaveField()
     root?.querySelector<HTMLElement>('.herdr-list button')?.focus()
-    return () => {
-      // Hand focus back only if the panel still had it.
-      const a = document.activeElement
-      if (!a || a === document.body || root?.contains(a)) prev?.focus?.()
-    }
+    return () => restoreFocus(prev, root)
   }, [])
   return (
     <aside
