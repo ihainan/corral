@@ -407,6 +407,9 @@ func (s *Server) closeOtherLogins(userID int64, keep string) {
 		}
 	}
 	s.endForwardOtherLogins(userID, keep)
+	if s.notifier != nil {
+		s.notifier.RevokeOtherLogins(userID, keep)
+	}
 }
 
 // closeSockets closes a user's open terminal sockets and cancels connections
@@ -421,8 +424,11 @@ func (s *Server) closeSockets(userID int64, loginHash string) {
 			}
 		}
 	}
-	if loginHash != "" {
-		s.endForwardLogin(userID, loginHash) // all of the user's: closeUserForwards
+	if loginHash != "" { // all of the user's: closeUserForwards and notifier.Revoke
+		s.endForwardLogin(userID, loginHash)
+		if s.notifier != nil {
+			s.notifier.RevokeLogin(userID, loginHash)
+		}
 	}
 }
 

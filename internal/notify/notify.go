@@ -49,7 +49,15 @@ type Notifier struct {
 	recent        map[string]time.Time // per user+tag, to collapse bursts
 	minGap        time.Duration
 	revoked       map[int64]uint64 // per user, bumped when access ends; older queued notes are dropped
+	sending       map[*sending]struct{}
 	loginValid    func(ctx context.Context, loginHash string) bool
+}
+
+// sending is one push in progress, cancelled when its login or user loses access.
+type sending struct {
+	userID    int64
+	loginHash string
+	cancel    context.CancelFunc
 }
 
 type Options struct {
@@ -77,7 +85,7 @@ func New(ctx context.Context, st *store.Store, log *slog.Logger, opt Options) (*
 		// endpoint must not be able to bounce the gateway to another address.
 		http: &http.Client{Timeout: 15 * time.Second, Transport: &http.Transport{Proxy: http.ProxyFromEnvironment},
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
-		recent: map[string]time.Time{}, minGap: 20 * time.Second, revoked: map[int64]uint64{}, loginValid: opt.LoginValid,
+		recent: map[string]time.Time{}, minGap: 20 * time.Second, revoked: map[int64]uint64{}, sending: map[*sending]struct{}{}, loginValid: opt.LoginValid,
 	}, nil
 }
 
@@ -203,12 +211,59 @@ func (n *Notifier) Send(ctx context.Context, userID int64, note Note) {
 	go n.deliver(context.WithoutCancel(ctx), userID, gen, note)
 }
 
-// Revoke drops notes for a user that are queued but not yet sent, for when
-// their access ends (disabled, signed out everywhere).
+// Revoke drops notes for a user that are queued but not yet sent and cancels
+// pushes in progress, for when their access ends (disabled, signed out
+// everywhere).
 func (n *Notifier) Revoke(userID int64) {
 	n.mu.Lock()
+	defer n.mu.Unlock()
 	n.revoked[userID]++
-	n.mu.Unlock()
+	n.cancelSending(func(sd *sending) bool { return sd.userID == userID })
+}
+
+// RevokeLogin cancels pushes in progress to the devices of one browser login
+// (signed out). Their subscriptions go with the login row.
+func (n *Notifier) RevokeLogin(userID int64, loginHash string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.cancelSending(func(sd *sending) bool { return sd.userID == userID && sd.loginHash == loginHash })
+}
+
+// RevokeOtherLogins is RevokeLogin for every login of the user but keep
+// (after a password change).
+func (n *Notifier) RevokeOtherLogins(userID int64, keep string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.cancelSending(func(sd *sending) bool { return sd.userID == userID && sd.loginHash != keep })
+}
+
+// cancelSending is called with mu held.
+func (n *Notifier) cancelSending(match func(*sending) bool) {
+	for sd := range n.sending {
+		if match(sd) {
+			sd.cancel()
+		}
+	}
+}
+
+// begin registers a push to one device so revoking its login or user cancels
+// it; false when the user's access ended since the note was queued.
+func (n *Notifier) begin(ctx context.Context, userID int64, loginHash string, gen uint64) (context.Context, func(), bool) {
+	ctx, cancel := context.WithCancel(ctx)
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.revoked[userID] != gen {
+		cancel()
+		return nil, nil, false
+	}
+	sd := &sending{userID: userID, loginHash: loginHash, cancel: cancel}
+	n.sending[sd] = struct{}{}
+	return ctx, func() {
+		n.mu.Lock()
+		delete(n.sending, sd)
+		n.mu.Unlock()
+		cancel()
+	}, true
 }
 
 func (n *Notifier) stale(userID int64, gen uint64) bool {
@@ -224,20 +279,25 @@ func (n *Notifier) deliver(ctx context.Context, userID int64, gen uint64, note N
 		n.log.Error("push: list subscriptions", "err", err)
 	}
 	for _, s := range subs {
-		if n.stale(userID, gen) {
+		sctx, end, ok := n.begin(ctx, userID, s.LoginHash, gen)
+		if !ok {
 			return
 		}
-		// A device whose login ended (expired, signed out, password changed)
-		// gets nothing more, even before the login row is cleaned up.
-		if s.LoginHash == "" || n.loginValid == nil || !n.loginValid(ctx, s.LoginHash) {
+		// Checked after registering, so a sign-out from here on cancels the
+		// send. A device whose login ended (expired, signed out, password
+		// changed) gets nothing more, even before the login row is cleaned up.
+		if s.LoginHash == "" || n.loginValid == nil || !n.loginValid(sctx, s.LoginHash) {
+			end()
 			_ = n.store.DeletePushSubscriptionHard(ctx, s.ID)
 			continue
 		}
 		if n.CheckEndpoint(s.Endpoint) != nil {
+			end()
 			_ = n.store.DeletePushSubscriptionHard(ctx, s.ID)
 			continue
 		}
-		res, err := n.push(ctx, s, payload, note)
+		res, err := n.push(sctx, s, payload, note)
+		end()
 		if err != nil {
 			n.log.Warn("push: send failed", "user", userID, "err", err)
 			_ = n.store.MarkPushResult(ctx, s.ID, false)
