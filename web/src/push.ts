@@ -27,9 +27,34 @@ export async function enablePush(publicKey: string): Promise<PushState> {
   if (perm !== 'granted') return perm === 'denied' ? 'denied' : 'off'
   const reg = (await navigator.serviceWorker.getRegistration()) ?? (await navigator.serviceWorker.register('/sw.js'))
   await navigator.serviceWorker.ready
-  const sub = (await reg.pushManager.getSubscription()) ?? (await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: keyBytes(publicKey) as BufferSource }))
-  await api('POST', '/api/push/subscriptions', sub.toJSON())
+  const existing = await reg.pushManager.getSubscription()
+  const sub = existing ?? (await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: keyBytes(publicKey) as BufferSource }))
+  try {
+    await api('POST', '/api/push/subscriptions', sub.toJSON())
+  } catch (e) {
+    // A subscription the server does not know about would read as "on" here
+    // while no alert ever arrives, so drop the one we just made.
+    if (!existing) await sub.unsubscribe().catch(() => {})
+    throw e
+  }
   return 'on'
+}
+
+// syncPush registers this device's existing subscription to whoever is
+// signed in now. The server keys subscriptions by endpoint, so after an
+// account switch this moves the device to the new account. Returns false when
+// the server did not take it.
+export async function syncPush(): Promise<boolean> {
+  if (!('serviceWorker' in navigator) || !('PushManager' in window)) return true
+  const reg = await navigator.serviceWorker.getRegistration()
+  const sub = await reg?.pushManager.getSubscription()
+  if (!sub) return true
+  try {
+    await api('POST', '/api/push/subscriptions', sub.toJSON())
+    return true
+  } catch {
+    return false
+  }
 }
 
 export async function disablePush(): Promise<void> {

@@ -1,10 +1,11 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from 'react'
-import { CircleUserRound, Fence, KeyRound, LogOut, Menu as MenuIcon, ScrollText, Server, Settings, Users } from 'lucide-react'
+import { KeyRound, LogOut, ScrollText, Server, Settings, Users } from 'lucide-react'
 import { api, ApiError, setUnauthorizedHandler, type Bootstrap, type Me } from './api'
 import { applyDefaultLanguage, t } from './i18n'
 import { syncPrefsFromServer } from './prefs'
 import { match, navigate, usePath, linkHandler } from './router'
-import { Menu, ToastProvider, useToast } from './components/ui'
+import { BrandMark, ToastProvider, useToast } from './components/ui'
+import { disablePush, syncPush } from './push'
 import { LoginPage, SetupPage, InvitePage } from './pages/Auth'
 import { HostsPage } from './pages/Hosts'
 import { HostEditPage } from './pages/HostEdit'
@@ -42,6 +43,11 @@ export function App() {
       })
       .catch(() => setError(true))
   }, [])
+
+  // Whoever signs in on this device takes over its notifications.
+  useEffect(() => {
+    if (me) void syncPush()
+  }, [me?.id])
 
   if (error) {
     return (
@@ -94,72 +100,72 @@ function nextPath(): string {
 
 type NavKey = 'hosts' | 'keys' | 'settings' | 'users' | 'audit'
 
+// signOut ends the browser session. The push subscription of this device is
+// removed first, so the next person signing in here does not get the previous
+// account's alerts.
+export async function signOut(setMe: (m: Me | null) => void, toast: (m: string, e?: boolean) => void) {
+  await disablePush().catch(() => {})
+  try {
+    await api('POST', '/api/logout')
+  } catch (e) {
+    // A 401 means we were already signed out; anything else did not sign us out.
+    if (!(e instanceof ApiError && e.status === 401)) {
+      toast(t('nav.signOutFailed'), true)
+      return
+    }
+  }
+  setMe(null)
+  navigate('/login', true)
+}
+
 function Shell({ active, children }: { active: NavKey; children: ReactNode }) {
   const { me, setMe } = useSession()
   const toast = useToast()
-  const items: { key: NavKey; href: string; label: string; icon: ReactNode; admin?: boolean }[] = [
-    { key: 'hosts', href: '/', label: t('nav.hosts'), icon: <Server size={17} /> },
-    { key: 'keys', href: '/keys', label: t('nav.keys'), icon: <KeyRound size={17} /> },
-    { key: 'settings', href: '/settings', label: t('nav.settings'), icon: <Settings size={17} /> },
-    { key: 'users', href: '/admin/users', label: t('nav.users'), icon: <Users size={17} />, admin: true },
-    { key: 'audit', href: '/admin/audit', label: t('nav.audit'), icon: <ScrollText size={17} />, admin: true },
+  const main: { key: NavKey; href: string; label: string; icon: ReactNode }[] = [
+    { key: 'hosts', href: '/', label: t('nav.hosts'), icon: <Server size={17} strokeWidth={1.75} /> },
+    { key: 'keys', href: '/keys', label: t('nav.keys'), icon: <KeyRound size={17} strokeWidth={1.75} /> },
+    { key: 'settings', href: '/settings', label: t('nav.settings'), icon: <Settings size={17} strokeWidth={1.75} /> },
   ]
-  const visible = items.filter((i) => !i.admin || me?.role === 'admin')
-  const signOut = async () => {
-    try {
-      await api('POST', '/api/logout')
-    } catch (e) {
-      // A 401 means we were already signed out; anything else did not sign us out.
-      if (!(e instanceof ApiError && e.status === 401)) {
-        toast(t('nav.signOutFailed'), true)
-        return
-      }
-    }
-    setMe(null)
-    navigate('/login', true)
-  }
+  const admin: typeof main = me?.role === 'admin'
+    ? [
+        { key: 'users', href: '/admin/users', label: t('nav.users'), icon: <Users size={17} strokeWidth={1.75} /> },
+        { key: 'audit', href: '/admin/audit', label: t('nav.audit'), icon: <ScrollText size={17} strokeWidth={1.75} /> },
+      ]
+    : []
+  const item = (i: (typeof main)[number]) => (
+    <a key={i.key} className="nav-item" href={i.href} onClick={linkHandler(i.href)} aria-current={i.key === active ? 'page' : undefined} title={i.label}>
+      {i.icon}
+      <span className="label">{i.label}</span>
+    </a>
+  )
+  // On phones the admin pages sit under Settings in the tab bar.
+  const tabActive = active === 'users' || active === 'audit' ? 'settings' : active
   return (
     <div className="shell">
-      <header className="topbar">
-        <a className="brand" href="/" onClick={linkHandler('/')}>
-          <Fence size={20} aria-hidden="true" />
-          {t('app.name')}
+      <nav className="sidebar" aria-label={t('nav.main')}>
+        <a className="brand" href="/" onClick={linkHandler('/')} aria-label={t('app.name')}>
+          <BrandMark />
+          <span className="label">{t('app.name')}</span>
         </a>
-        <nav className="topnav" aria-label={t('common.more')}>
-          {visible.map((i) => (
-            <a key={i.key} href={i.href} onClick={linkHandler(i.href)} aria-current={i.key === active ? 'page' : undefined}>
-              {i.label}
-            </a>
-          ))}
-        </nav>
-        <div className="spacer" />
-        <Menu
-          button={(open, toggle) => (
-            <button className="icon-btn" aria-label={t('nav.account')} aria-expanded={open} onClick={toggle}>
-              <MenuIcon size={20} className="nav-menu-only" />
-              <CircleUserRound size={21} className="nav-wide-only" />
-            </button>
-          )}
-        >
-          {(close) => (
-            <>
-              <div className="menu-note">{me?.display_name || me?.username}</div>
-              {visible.map((i) => (
-                <a key={i.key} href={i.href} className="nav-menu-only" onClick={(e) => { close(); linkHandler(i.href)(e) }}>
-                  {i.icon}
-                  {i.label}
-                </a>
-              ))}
-              <hr className="nav-menu-only" />
-              <button onClick={signOut}>
-                <LogOut size={17} />
-                {t('nav.signOut')}
-              </button>
-            </>
-          )}
-        </Menu>
-      </header>
-      {children}
+        {main.map(item)}
+        {admin.length > 0 && <div className="nav-group">{t('nav.admin')}</div>}
+        {admin.map(item)}
+        <div className="sidebar-foot">
+          <span className="sidebar-user">{me?.display_name || me?.username}</span>
+          <button className="icon-btn" onClick={() => signOut(setMe, toast)} aria-label={t('nav.signOut')} title={t('nav.signOut')}>
+            <LogOut size={16} strokeWidth={1.75} />
+          </button>
+        </div>
+      </nav>
+      <div className="content">{children}</div>
+      <nav className="tabbar" aria-label={t('nav.main')}>
+        {main.map((i) => (
+          <a key={i.key} className="tab" href={i.href} onClick={linkHandler(i.href)} aria-current={i.key === tabActive ? 'page' : undefined}>
+            {i.icon}
+            <span>{i.label}</span>
+          </a>
+        ))}
+      </nav>
     </div>
   )
 }

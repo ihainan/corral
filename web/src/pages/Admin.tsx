@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
-import { MoreHorizontal, UserPlus } from 'lucide-react'
+import { KeySquare, MoreHorizontal, ScrollText, Shield, UserCheck, UserPlus, UserRound, UserX } from 'lucide-react'
 import { api, errorText, type AdminUser, type AuditEntry } from '../api'
 import { relTime, t } from '../i18n'
 import { useSession } from '../app'
-import { Confirm, CopyButton, Dialog, Field, LoadError, Menu, useToast } from '../components/ui'
+import { Confirm, CopyButton, Dialog, EmptyState, Field, LoadError, Menu, useToast } from '../components/ui'
 
 export function AdminUsersPage() {
   const { me } = useSession()
@@ -42,52 +42,53 @@ export function AdminUsersPage() {
           {t('admin.invite')}
         </button>
       </div>
-      {failed && users !== null && <LoadError onRetry={load} />}
-      {users === null && failed ? (
-        <LoadError onRetry={load} />
-      ) : users === null ? (
-        <p className="empty-inline">{t('common.loading')}</p>
+      {failed && <LoadError onRetry={load} />}
+      {users === null ? (
+        !failed && <p className="loading">{t('common.loading')}</p>
       ) : (
-        <div className="list">
+        <ul className="rows">
           {users.map((u) => (
-            <div className="item" key={u.id}>
-              <div className="item-main" style={{ cursor: 'default' }}>
-                <span className="item-title">
-                  <span>{u.display_name || u.username}</span>
-                  {u.id === me?.id && <span className="tag">（{t('admin.you')}）</span>}
+            <li className="row" key={u.id}>
+              <div className="row-main">
+                <UserRound className="row-icon" size={18} strokeWidth={1.75} />
+                <span className="row-title">
+                  {u.display_name || u.username}
+                  {u.id === me?.id && <span className="you">{t('admin.you')}</span>}
                 </span>
-                <span className="item-sub">
+                <span className="row-meta">{u.role === 'admin' ? t('admin.roleAdmin') : t('admin.roleMember')}</span>
+                <span className="row-sub">
                   <span className="mono">{u.username}</span>
-                  {' · '}
-                  {u.role === 'admin' ? t('admin.roleAdmin') : t('admin.roleMember')}
                   {u.open_sessions > 0 ? ' · ' + t('admin.openSessions', { n: u.open_sessions }) : ''}
-                  {u.disabled && <span className="state state-lost">{' · ' + t('admin.disabled')}</span>}
+                  {u.disabled && <span className="state-danger">{' · ' + t('admin.disabled')}</span>}
                 </span>
               </div>
-              <div className="item-actions">
+              <div className="row-actions">
                 <Menu
+                  label={u.display_name || u.username}
                   button={(open, toggle) => (
                     <button className="icon-btn" aria-label={`${t('common.more')}：${u.username}`} aria-expanded={open} onClick={toggle}>
                       <MoreHorizontal size={18} />
                     </button>
                   )}
-                >
-                  {(close) => (
-                    <>
-                      <button onClick={() => { close(); update(u, { role: u.role === 'admin' ? 'member' : 'admin' }) }}>
-                        {u.role === 'admin' ? t('admin.makeMember') : t('admin.makeAdmin')}
-                      </button>
-                      <button onClick={() => { close(); setDialog(<ResetDialog user={u} onClose={() => setDialog(null)} />) }}>
-                        {t('admin.resetPassword')}
-                      </button>
-                      <hr />
-                      {u.disabled ? (
-                        <button onClick={() => { close(); update(u, { disabled: false }) }}>{t('admin.enable')}</button>
-                      ) : (
-                        <button
-                          className="danger"
-                          onClick={() => {
-                            close()
+                  items={() => [
+                    {
+                      label: u.role === 'admin' ? t('admin.makeMember') : t('admin.makeAdmin'),
+                      icon: <Shield size={16} />,
+                      onSelect: () => update(u, { role: u.role === 'admin' ? 'member' : 'admin' }),
+                    },
+                    {
+                      label: t('admin.resetPassword'),
+                      icon: <KeySquare size={16} />,
+                      onSelect: () => setDialog(<ResetDialog user={u} onClose={() => setDialog(null)} />),
+                    },
+                    u.disabled
+                      ? { label: t('admin.enable'), icon: <UserCheck size={16} />, separator: true, onSelect: () => update(u, { disabled: false }) }
+                      : {
+                          label: t('admin.disable'),
+                          icon: <UserX size={16} />,
+                          danger: true,
+                          separator: true,
+                          onSelect: () =>
                             setDialog(
                               <Confirm
                                 title={t('admin.disable')}
@@ -100,19 +101,14 @@ export function AdminUsersPage() {
                                   load()
                                 }}
                               />,
-                            )
-                          }}
-                        >
-                          {t('admin.disable')}
-                        </button>
-                      )}
-                    </>
-                  )}
-                </Menu>
+                            ),
+                        },
+                  ]}
+                />
               </div>
-            </div>
+            </li>
           ))}
-        </div>
+        </ul>
       )}
       {dialog}
     </main>
@@ -250,36 +246,71 @@ export function AdminAuditPage() {
       {entries === null && failed ? (
         <LoadError onRetry={() => load()} />
       ) : entries === null ? (
-        <p className="empty-inline">{t('common.loading')}</p>
+        <p className="loading">{t('common.loading')}</p>
       ) : entries.length === 0 ? (
-        <p className="empty-inline">{t('admin.auditEmpty')}</p>
+        <EmptyState icon={<ScrollText size={20} strokeWidth={1.75} />} title={t('admin.auditEmpty')} />
       ) : (
         <>
-          <div className="table-wrap">
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>{t('audit.time')}</th>
-                  <th>{t('audit.user')}</th>
-                  <th>{t('audit.action')}</th>
-                  <th>{t('audit.target')}</th>
-                  <th>{t('audit.ip')}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {entries.map((e) => (
+          <table className="audit-table">
+            <colgroup>
+              <col style={{ width: '14%' }} />
+              <col style={{ width: '14%' }} />
+              <col style={{ width: '22%' }} />
+              <col />
+              <col style={{ width: '16%' }} />
+            </colgroup>
+            <thead>
+              <tr>
+                <th>{t('audit.time')}</th>
+                <th>{t('audit.user')}</th>
+                <th>{t('audit.action')}</th>
+                <th>{t('audit.target')}</th>
+                <th>{t('audit.ip')}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {entries.map((e) => {
+                const detail = Object.keys(e.detail ?? {}).length > 0 ? JSON.stringify(e.detail) : ''
+                return (
                   <tr key={e.id}>
-                    <td className="nowrap" title={new Date(e.ts * 1000).toLocaleString()}>{relTime(e.ts)}</td>
-                    <td className="nowrap">{e.username || '—'}</td>
-                    <td className="nowrap mono">{e.action}</td>
-                    <td>{e.target}{Object.keys(e.detail ?? {}).length > 0 && <div className="hint mono">{JSON.stringify(e.detail)}</div>}</td>
-                    <td className="nowrap mono">{e.ip}</td>
+                    <td className="tnum" title={new Date(e.ts * 1000).toLocaleString()}>{relTime(e.ts)}</td>
+                    <td title={e.username}>{e.username || '—'}</td>
+                    <td className="code" title={e.action}>{e.action}</td>
+                    <td title={[e.target, detail].filter(Boolean).join('\n')}>
+                      {e.target || '—'}
+                      {detail && <span className="detail">{detail}</span>}
+                    </td>
+                    <td className="code" title={e.ip}>{e.ip}</td>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                )
+              })}
+            </tbody>
+          </table>
+          <div className="audit-list">
+            {entries.map((e) => {
+              const detail = Object.keys(e.detail ?? {}).length > 0 ? JSON.stringify(e.detail, null, 2) : ''
+              return (
+                <details className="audit-item" key={e.id}>
+                  <summary>
+                    <span className="top">
+                      <span className="action">{e.action}</span>
+                      <span className="row-meta">{relTime(e.ts)}</span>
+                    </span>
+                    <span className="hint">
+                      {e.username || '—'}
+                      {e.target ? ' · ' + e.target : ''}
+                    </span>
+                  </summary>
+                  <pre>{[new Date(e.ts * 1000).toLocaleString(), e.ip, detail].filter(Boolean).join('\n')}</pre>
+                </details>
+              )
+            })}
           </div>
-          {more && <div><button className="btn" disabled={loading} onClick={() => load(entries[entries.length - 1].id)}>{t('admin.loadMore')}</button></div>}
+          {more && (
+            <div>
+              <button className="btn" disabled={loading} onClick={() => load(entries[entries.length - 1].id)}>{t('admin.loadMore')}</button>
+            </div>
+          )}
         </>
       )}
     </main>

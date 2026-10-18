@@ -65,26 +65,35 @@ export function HostEditPage({ id }: { id?: number }) {
   }
 
   // "alice@10.0.0.5:2222" pasted into the address fills user name and port too.
+  // Runs on blur and again on submit, since Enter submits without a blur.
   const splitAddress = () => {
     const m = address.trim().match(/^(?:([^@\s]+)@)?(\[[0-9a-fA-F:]+\]|[^:\s]+)(?::(\d{1,5}))?$/)
-    if (!m || (!m[1] && !m[3])) return
-    setAddress(m[2].replace(/^\[|\]$/g, ''))
-    if (m[1]) setUsername(m[1])
-    if (m[3]) setPort(m[3])
+    if (!m || (!m[1] && !m[3])) return { address, username, port }
+    const out = { address: m[2].replace(/^\[|\]$/g, ''), username: m[1] ?? username, port: m[3] ?? port }
+    setAddress(out.address)
+    setUsername(out.username)
+    setPort(out.port)
     toast(t('host.addressSplit'))
+    return out
   }
+  const [advOpen, setAdvOpen] = useState(false)
 
   const submit = async (e: FormEvent) => {
     e.preventDefault()
+    if (busy) return
     setBusy(true)
     setError(null)
+    const a = splitAddress()
+    // The session name of the mode not chosen is hidden, so it must never be
+    // the reason a save fails: keep it only when it would pass validation.
+    const keep = (v: string) => (/^[A-Za-z0-9_-]{1,64}$/.test(v.trim()) ? v : '')
     const body = {
-      name, address, port: Number(port) || 22, username, auth,
+      name, address: a.address, port: Number(a.port) || 22, username: a.username, auth,
       password: auth === 'password' ? password : '',
       credential_id: auth === 'key' ? credentialId : null,
       persistence: persist,
-      tmux_session: tmuxName,
-      herdr_session: herdrName,
+      tmux_session: persist === 'tmux' ? tmuxName : keep(tmuxName),
+      herdr_session: persist === 'herdr' ? herdrName : keep(herdrName),
     }
     try {
       if (editing) await api('PUT', '/api/hosts/' + id, body)
@@ -93,16 +102,17 @@ export function HostEditPage({ id }: { id?: number }) {
     } catch (err) {
       const field = err instanceof ApiError ? err.field : undefined
       setError({ field, text: err instanceof ApiError && err.code === 'invalid_field' ? fieldMessage(field, err.message) : errorText(err) })
+      if (field === 'tmux_session' || field === 'herdr_session') setAdvOpen(true)
       setBusy(false)
     }
   }
 
   const fe = (f: string) => (error?.field === f ? error.text : undefined)
   const selectedKey = keys.find((k) => k.id === credentialId)
-  if (!loaded) return <main className="page page-narrow"><p className="empty-inline">{t('common.loading')}</p></main>
+  if (!loaded) return <main className="page page-form"><p className="loading">{t('common.loading')}</p></main>
 
   return (
-    <main className="page page-narrow">
+    <main className="page page-form">
       <div className="page-head">
         <a className="icon-btn" href="/" onClick={linkHandler('/')} aria-label={t('common.back')}>
           <ArrowLeft size={20} />
@@ -113,7 +123,7 @@ export function HostEditPage({ id }: { id?: number }) {
         <Field label={t('host.name')} htmlFor="h-name" error={fe('name')}>
           <input id="h-name" className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder={t('host.namePlaceholder')} required aria-invalid={!!fe('name')} />
         </Field>
-        <div className="row">
+        <div className="row2">
           <Field label={t('host.address')} htmlFor="h-addr" error={fe('address')}>
             <input id="h-addr" className="input" value={address} onChange={(e) => setAddress(e.target.value)} onBlur={splitAddress} placeholder={t('host.addressPlaceholder')}
               autoCapitalize="none" autoCorrect="off" spellCheck={false} inputMode="url" required aria-invalid={!!fe('address')} />
@@ -192,7 +202,7 @@ export function HostEditPage({ id }: { id?: number }) {
           </p>
         </div>
 
-        <details className="adv">
+        <details className="adv" open={advOpen} onToggle={(e) => setAdvOpen(e.currentTarget.open)}>
           <summary>
             <ChevronRight size={16} />
             {t('host.advanced')}
@@ -212,7 +222,7 @@ export function HostEditPage({ id }: { id?: number }) {
         </details>
 
         {error && !error.field && <p className="err" role="alert">{error.text}</p>}
-        <div className="dialog-actions">
+        <div className="form-actions">
           <a className="btn" href="/" onClick={linkHandler('/')}>{t('common.cancel')}</a>
           <button className="btn btn-primary" disabled={busy}>{busy ? t('common.saving') : t('common.save')}</button>
         </div>

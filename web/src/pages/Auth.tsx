@@ -1,21 +1,20 @@
 import { useEffect, useState, type FormEvent } from 'react'
-import { Fence } from 'lucide-react'
 import { api, ApiError, errorText, type Me } from '../api'
 import { t } from '../i18n'
 import { navigate } from '../router'
 import { syncPrefsFromServer } from '../prefs'
 import { useSession } from '../app'
-import { Field } from '../components/ui'
+import { BrandMark, Field } from '../components/ui'
 
 function AuthFrame({ title, intro, children }: { title: string; intro?: string; children: React.ReactNode }) {
   return (
     <div className="auth-wrap">
       <main className="auth">
         <div className="brand">
-          <Fence size={22} aria-hidden="true" />
+          <BrandMark />
           {t('app.name')}
         </div>
-        <div className="card form">
+        <div className="form">
           <h1>{title}</h1>
           {intro && <p className="lead">{intro}</p>}
           {children}

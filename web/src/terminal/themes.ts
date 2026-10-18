@@ -1,27 +1,28 @@
 import type { ITheme } from '@xterm/xterm'
 
-// Terminal palettes tuned to sit inside the app's light and dark surfaces.
+// Terminal palettes. The page chrome around the terminal (top bar, key bar)
+// takes its colours from the same choice, see .term-root.dark/.light.
 
 export const lightTheme: ITheme = {
-  background: '#fbfbfc',
+  background: '#ffffff',
   foreground: '#1f2329',
   cursor: '#2c5fcc',
-  cursorAccent: '#fbfbfc',
+  cursorAccent: '#ffffff',
   selectionBackground: '#c9d8f5',
   black: '#1f2329', red: '#c4302b', green: '#2f7d3b', yellow: '#946200',
   blue: '#2c5fcc', magenta: '#9b3fb0', cyan: '#127a87', white: '#a4abb6',
   brightBlack: '#6b7280', brightRed: '#e0443e', brightGreen: '#3c9a4a', brightYellow: '#b07a00',
-  brightBlue: '#3f74e6', brightMagenta: '#b456c9', brightCyan: '#1593a3', brightWhite: '#d9dde3',
+  brightBlue: '#3f74e6', brightMagenta: '#b456c9', brightCyan: '#1593a3', brightWhite: '#c9ced6',
 }
 
 export const darkTheme: ITheme = {
-  background: '#101317',
-  foreground: '#d9dee6',
-  cursor: '#8fb0f6',
-  cursorAccent: '#101317',
-  selectionBackground: '#33476e',
-  black: '#2a3038', red: '#ef6b6b', green: '#7cc68a', yellow: '#e2b65c',
-  blue: '#7fa4f4', magenta: '#cf8ee0', cyan: '#6fc4d0', white: '#c9ced6',
-  brightBlack: '#5c6573', brightRed: '#ff8a85', brightGreen: '#97dba3', brightYellow: '#f2cb79',
-  brightBlue: '#9dbbf8', brightMagenta: '#dfa7ec', brightCyan: '#8ad6e0', brightWhite: '#f1f3f6',
+  background: '#0f1115',
+  foreground: '#d7dae0',
+  cursor: '#e6e8ec',
+  cursorAccent: '#0f1115',
+  selectionBackground: '#4a78ec59',
+  black: '#1c1f25', red: '#ef6f6c', green: '#7dc58f', yellow: '#e5b567',
+  blue: '#7aa2f7', magenta: '#c99be6', cyan: '#6cc4cf', white: '#c5c9d1',
+  brightBlack: '#5c6370', brightRed: '#ff8f8b', brightGreen: '#9adba8', brightYellow: '#f2cc85',
+  brightBlue: '#9bbbfa', brightMagenta: '#dcb4f2', brightCyan: '#8fd8e1', brightWhite: '#f2f4f7',
 }

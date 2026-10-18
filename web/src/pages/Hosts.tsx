@@ -1,27 +1,28 @@
 import { useCallback, useEffect, useState } from 'react'
-import { MoreHorizontal, Pencil, Plus, Server, SquareTerminal, Trash2, X } from 'lucide-react'
+import { MoreHorizontal, Pencil, Plus, Server, Trash2, X } from 'lucide-react'
 import { api, type Host, type SessionInfo } from '../api'
 import { relTime, t } from '../i18n'
 import { linkHandler, navigate } from '../router'
-import { Confirm, LoadError, Menu, useToast } from '../components/ui'
+import { Confirm, EmptyState, LoadError, Menu } from '../components/ui'
 import { useConnect } from '../connect'
 
 export function HostsPage() {
-  const toast = useToast()
   const [hosts, setHosts] = useState<Host[] | null>(null)
   const [failed, setFailed] = useState(false)
-  const [sessFailed, setSessFailed] = useState(false)
   const [sessions, setSessions] = useState<SessionInfo[]>([])
+  const [sessFailed, setSessFailed] = useState(false)
   const [confirm, setConfirm] = useState<React.ReactNode>(null)
 
-  const refreshSessions = () =>
-    api<SessionInfo[]>('GET', '/api/sessions')
-      .then((x) => {
-        setSessions(x)
-        setSessFailed(false)
-      })
-      .catch(() => setSessFailed(true))
-
+  const refreshSessions = useCallback(
+    () =>
+      api<SessionInfo[]>('GET', '/api/sessions')
+        .then((x) => {
+          setSessions(x)
+          setSessFailed(false)
+        })
+        .catch(() => setSessFailed(true)),
+    [],
+  )
   const load = useCallback(() => {
     api<Host[]>('GET', '/api/hosts')
       .then((h) => {
@@ -29,9 +30,8 @@ export function HostsPage() {
         setFailed(false)
       })
       .catch(() => setFailed(true))
-    refreshSessions()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [toast])
+    void refreshSessions()
+  }, [refreshSessions])
 
   useEffect(() => {
     load()
@@ -42,148 +42,133 @@ export function HostsPage() {
       document.removeEventListener('visibilitychange', onVisible)
       clearInterval(timer)
     }
-  }, [load])
+  }, [load, refreshSessions])
 
   const { connect, busyHost, dialogs } = useConnect((s) => navigate('/t/' + s.id))
   const running = sessions.filter((s) => s.state === 'running')
+  const byHost = (id: number) => running.filter((s) => s.host_id === id).sort((a, b) => a.created_at - b.created_at)
 
+  const closeSession = (s: SessionInfo) =>
+    setConfirm(
+      <Confirm
+        title={t('hosts.closeSession')}
+        body={t('hosts.closeSessionConfirm')}
+        confirm={t('hosts.closeSession')}
+        danger
+        onClose={() => setConfirm(null)}
+        onConfirm={async () => {
+          await api('DELETE', '/api/sessions/' + s.id)
+          load()
+        }}
+      />,
+    )
+  const deleteHost = (h: Host) =>
+    setConfirm(
+      <Confirm
+        title={t('host.delete')}
+        body={t('hosts.deleteConfirm', { name: h.name })}
+        confirm={t('common.delete')}
+        danger
+        onClose={() => setConfirm(null)}
+        onConfirm={async () => {
+          await api('DELETE', '/api/hosts/' + h.id)
+          load()
+        }}
+      />,
+    )
+
+  const empty = hosts !== null && hosts.length === 0
   return (
     <main className="page">
       <div className="page-head">
         <h1>{t('hosts.title')}</h1>
         <div className="spacer" />
-        <a className="btn btn-primary" href="/hosts/new" onClick={linkHandler('/hosts/new')}>
-          <Plus size={17} />
-          {t('hosts.add')}
-        </a>
+        {sessFailed && (
+          <button className="link-btn quiet-note" onClick={refreshSessions}>{t('hosts.sessionsStale')}</button>
+        )}
+        {!empty && (
+          <a className="btn btn-primary" href="/hosts/new" onClick={linkHandler('/hosts/new')}>
+            <Plus size={16} />
+            {t('hosts.add')}
+          </a>
+        )}
       </div>
 
-      {sessFailed && <p className="err" role="status">{t('hosts.sessionsFailed')}</p>}
-      {running.length > 0 && (
-        <section className="section" aria-labelledby="running-h">
-          <h2 id="running-h">{t('hosts.sessions')}</h2>
-          <div className="list">
-            {running.map((s) => (
-              <div className="item" key={s.id}>
-                <div className="item-icon"><SquareTerminal size={18} /></div>
-                <a className="item-main" href={'/t/' + s.id} onClick={linkHandler('/t/' + s.id)}>
-                  <span className="item-title">
-                    <span>{s.host_name}</span>
-                    <span className="state state-running">{t('hosts.state.running')}</span>
-                  </span>
-                  <span className="item-sub">
-                    {s.title ? s.title + ' · ' : ''}
-                    {relTime(s.created_at)}
-                    {s.viewers > 0 ? ' · ' + t('hosts.viewers', { n: s.viewers }) : ''}
-                  </span>
-                </a>
-                <div className="item-actions">
-                  <button
-                    className="icon-btn"
-                    aria-label={t('hosts.closeSession')}
-                    title={t('hosts.closeSession')}
-                    onClick={() =>
-                      setConfirm(
-                        <Confirm
-                          title={t('hosts.closeSession')}
-                          body={t('hosts.closeSessionConfirm')}
-                          confirm={t('hosts.closeSession')}
-                          danger
-                          onClose={() => setConfirm(null)}
-                          onConfirm={async () => {
-                            await api('DELETE', '/api/sessions/' + s.id)
-                            load()
-                          }}
-                        />,
-                      )
-                    }
-                  >
-                    <X size={18} />
-                  </button>
-                </div>
-              </div>
-            ))}
-          </div>
-        </section>
-      )}
-
-      <section className="section" aria-labelledby="hosts-h">
-        {running.length > 0 && <h2 id="hosts-h">{t('hosts.title')}</h2>}
-        {failed && hosts !== null && <LoadError onRetry={load} />}
-        {hosts === null && failed ? (
-          <LoadError onRetry={load} />
-        ) : hosts === null ? (
-          <p className="empty-inline">{t('common.loading')}</p>
-        ) : hosts.length === 0 ? (
-          <div className="empty">
-            <Server size={28} aria-hidden="true" />
-            <h2>{t('hosts.empty.title')}</h2>
-            <p>{t('hosts.empty.body')}</p>
+      {failed && <LoadError onRetry={load} text={t('hosts.loadFailed')} />}
+      {hosts === null && !failed && <p className="loading">{t('common.loading')}</p>}
+      {empty && (
+        <EmptyState
+          icon={<Server size={20} strokeWidth={1.75} />}
+          title={t('hosts.empty.title')}
+          body={t('hosts.empty.body')}
+          action={
             <a className="btn btn-primary" href="/hosts/new" onClick={linkHandler('/hosts/new')}>
-              <Plus size={17} />
+              <Plus size={16} />
               {t('hosts.add')}
             </a>
-          </div>
-        ) : (
-          <div className="list">
-            {hosts.map((h) => (
-              <div className="item" key={h.id}>
-                <div className="item-icon"><Server size={18} /></div>
-                <button className="item-main" onClick={() => connect(h)} disabled={busyHost === h.id} aria-label={`${t('hosts.connect')} ${h.name}`}>
-                  <span className="item-title">
-                    <span>{h.name}</span>
-                    {busyHost === h.id && <span className="tag">{t('hosts.connecting')}</span>}
-                  </span>
-                  <span className="item-sub">
-                    <span className="mono">{h.username}@{h.address}{h.port !== 22 ? ':' + h.port : ''}</span>
-                    {h.last_connected_at ? ' · ' + t('hosts.lastConnected', { when: relTime(h.last_connected_at) }) : ''}
-                  </span>
-                </button>
-                <div className="item-actions">
-                  <Menu
-                    button={(open, toggle) => (
-                      <button className="icon-btn" aria-label={`${t('common.more')}：${h.name}`} aria-expanded={open} onClick={toggle}>
-                        <MoreHorizontal size={18} />
-                      </button>
-                    )}
-                  >
-                    {(close) => (
-                      <>
-                        <a href={`/hosts/${h.id}/edit`} onClick={(e) => { close(); linkHandler(`/hosts/${h.id}/edit`)(e) }}>
-                          <Pencil size={16} />
-                          {t('common.edit')}
-                        </a>
-                        <button
-                          className="danger"
-                          onClick={() => {
-                            close()
-                            setConfirm(
-                              <Confirm
-                                title={t('host.delete')}
-                                body={t('hosts.deleteConfirm', { name: h.name })}
-                                confirm={t('common.delete')}
-                                danger
-                                onClose={() => setConfirm(null)}
-                                onConfirm={async () => {
-                                  await api('DELETE', '/api/hosts/' + h.id)
-                                  load()
-                                }}
-                              />,
-                            )
-                          }}
-                        >
-                          <Trash2 size={16} />
-                          {t('common.delete')}
+          }
+        />
+      )}
+      {hosts && hosts.length > 0 && (
+        <ul className="rows">
+          {hosts.map((h) => {
+            const mine = byHost(h.id)
+            return (
+              <li key={h.id} className="row-group">
+                <div className="row">
+                  <button className="row-main" onClick={() => connect(h)} disabled={busyHost === h.id} aria-label={`${t('hosts.connect')} ${h.name}`}>
+                    <Server className="row-icon" size={18} strokeWidth={1.75} />
+                    <span className="row-title">{h.name}</span>
+                    <span className="row-meta">
+                      {busyHost === h.id ? t('hosts.connecting') : h.last_connected_at ? relTime(h.last_connected_at) : ''}
+                    </span>
+                    <span className="row-sub">
+                      {h.username}@{h.address}
+                      {h.port !== 22 ? ':' + h.port : ''}
+                      {h.persistence !== 'none' ? ' · ' + h.persistence : ''}
+                    </span>
+                  </button>
+                  <div className="row-actions">
+                    <Menu
+                      label={h.name}
+                      button={(open, toggle) => (
+                        <button className="icon-btn" aria-label={`${t('common.more')}：${h.name}`} aria-expanded={open} onClick={toggle}>
+                          <MoreHorizontal size={18} />
                         </button>
-                      </>
-                    )}
-                  </Menu>
+                      )}
+                      items={() => [
+                        { label: t('common.edit'), icon: <Pencil size={16} />, href: `/hosts/${h.id}/edit`, onSelect: () => navigate(`/hosts/${h.id}/edit`) },
+                        ...mine.map((s, i) => ({
+                          label: t('hosts.closeNamed', { name: t('hosts.sessionN', { n: i + 1 }) }),
+                          icon: <X size={16} />,
+                          onSelect: () => closeSession(s),
+                          separator: i === 0,
+                        })),
+                        { label: t('host.delete'), icon: <Trash2 size={16} />, danger: true, separator: true, onSelect: () => deleteHost(h) },
+                      ]}
+                    />
+                  </div>
                 </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </section>
+                {mine.map((s, i) => (
+                  <div className="row row-session" key={s.id}>
+                    <a className="row-main no-icon" href={'/t/' + s.id} onClick={linkHandler('/t/' + s.id)}>
+                      <span className="row-title">
+                        <span className="dot ok" aria-hidden="true" style={{ marginRight: 8, verticalAlign: 'middle' }} />
+                        {t('hosts.sessionN', { n: i + 1 })}
+                        {s.title && <span className="you">{s.title}</span>}
+                      </span>
+                      <span className="row-meta">
+                        {relTime(s.created_at)}
+                        {s.viewers > 0 ? ' · ' + t('hosts.viewers', { n: s.viewers }) : ''}
+                      </span>
+                    </a>
+                  </div>
+                ))}
+              </li>
+            )
+          })}
+        </ul>
+      )}
       {confirm}
       {dialogs}
     </main>

@@ -5,13 +5,13 @@ import { FitAddon } from '@xterm/addon-fit'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import { WebglAddon } from '@xterm/addon-webgl'
-import { ArrowLeft, Globe, LayoutGrid, ImagePlus, MessageSquareText, MoreVertical, Minus, Plus, TextSelect, Keyboard as KeyboardIcon, Power, X } from 'lucide-react'
+import { ArrowUp, Check, ChevronDown, ChevronLeft, Globe, LayoutGrid, ImagePlus, MessageSquareText, MoreVertical, Minus, Paperclip, Plus, TextSelect, Keyboard as KeyboardIcon, Power, Server, X } from 'lucide-react'
 import { api, errorText, uploadFile, type HerdrSummary, type Host, type SessionInfo } from '../api'
 import { t } from '../i18n'
 import { navigate } from '../router'
-import { getPrefs, isDark, setPrefs, usePrefs } from '../prefs'
+import { getPrefs, isTermDark, setChromeColor, setPrefs, usePrefs } from '../prefs'
 import { local } from '../storage'
-import { Confirm, Menu, copyText as copyToClipboard, useFocusTrap, useToast } from '../components/ui'
+import { Confirm, Menu, copyText as copyToClipboard, useFocusTrap, useToast, type MenuItem } from '../components/ui'
 import { useConnect } from '../connect'
 import { TermConnection, type EndInfo, type Status } from '../terminal/connection'
 import { applyMods, specialKey, type Mods, type SpecialKey } from '../terminal/keys'
@@ -22,6 +22,19 @@ import { PortsDialog, openForward } from '../terminal/PortsDialog'
 import { useSession } from '../app'
 
 const isTouch = window.matchMedia('(pointer: coarse)').matches || navigator.maxTouchPoints > 0
+const isMac = /Mac|iPhone|iPad/.test(navigator.platform)
+const HIGH_LATENCY = 300 // ms; below this the status just says "connected"
+
+function useMedia(q: string) {
+  const [m, setM] = useState(() => window.matchMedia(q).matches)
+  useEffect(() => {
+    const mq = window.matchMedia(q)
+    const on = () => setM(mq.matches)
+    mq.addEventListener('change', on)
+    return () => mq.removeEventListener('change', on)
+  }, [q])
+  return m
+}
 const FONT_STACK = "'JetBrains Mono', 'SFMono-Regular', Menlo, Consolas, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', monospace"
 
 // Quote a remote path for a POSIX shell when it contains anything beyond safe
@@ -56,14 +69,25 @@ export function TerminalPage({ id }: { id: string }) {
   const [dragOver, setDragOver] = useState(false)
   const [confirm, setConfirm] = useState<React.ReactNode>(null)
   const [herdr, setHerdr] = useState<HerdrSummary | null>(null)
-  const [panel, setPanel] = useState(() => window.matchMedia('(min-width: 1000px)').matches)
-  const showKeybar = isTouch && prefs.keybar
+  // Docked on wide screens (remembered, off by default: herdr draws its own
+  // sidebar too), a sheet on narrow ones (always starts closed).
+  const sheetPanel = useMedia('(max-width: 999px)')
+  const [panel, setPanelState] = useState(() => !sheetPanel && local.get('corral.herdrPanel') === '1')
+  const setPanel = (v: boolean) => {
+    setPanelState(v)
+    if (!sheetPanel) local.set('corral.herdrPanel', v ? '1' : '0')
+    if (!v && !isTouch) termRef.current?.focus()
+  }
+  const [sessions, setSessions] = useState<SessionInfo[] | null>(null)
+  const ended = status === 'ended' || status === 'gone' || end !== null
+  const showKeybar = isTouch && prefs.keybar && !ended
   const { boot } = useSession()
   const [portsOpen, setPortsOpen] = useState(false)
   // Links to localhost in the terminal open through port forwarding.
   const linkTarget = useRef<(uri: string) => void>(() => {})
 
   // Latest modifier state for the xterm data callback.
+  const openComposerRef = useRef<() => void>(() => {})
   const mods = useRef<{ ctrl: ModState; alt: ModState }>({ ctrl: 'off', alt: 'off' })
   mods.current = { ctrl, alt }
   const releaseOnce = useCallback(() => {
@@ -92,13 +116,13 @@ export function TerminalPage({ id }: { id: string }) {
     const term = new Terminal({
       fontFamily: FONT_STACK,
       fontSize: p.fontSize,
-      lineHeight: 1.12,
+      lineHeight: isTouch ? 1.2 : 1.25,
       cursorBlink: true,
       scrollback: 10000,
       allowProposedApi: true,
       macOptionIsMeta: p.optionIsMeta,
       rescaleOverlappingGlyphs: true,
-      theme: isDark() ? darkTheme : lightTheme,
+      theme: isTermDark() ? darkTheme : lightTheme,
       linkHandler: { activate: (_e, uri) => linkTarget.current(uri) },
     })
     term.loadAddon(new Unicode11Addon())
@@ -240,7 +264,6 @@ export function TerminalPage({ id }: { id: string }) {
       typedChar = e.key.length === 1 && !e.metaKey && !e.ctrlKey ? e.key : null
       // A physical Ctrl/Alt chord while a key-bar modifier is latched: combine both.
       // Clipboard shortcuts, AltGr and text-producing Option are left alone.
-      const isMac = /Mac|iPhone|iPad/.test(navigator.platform)
       const physAlt = e.altKey && !e.getModifierState('AltGraph') && (!isMac || getPrefs().optionIsMeta)
       const pasteKey = e.ctrlKey && e.key.toLowerCase() === 'v'
       if (latched() && e.key.length === 1 && (e.ctrlKey || physAlt) && !e.metaKey && !pasteKey) {
@@ -256,6 +279,10 @@ export function TerminalPage({ id }: { id: string }) {
         conn.send(specialKey(special, { ctrl: m.ctrl || e.ctrlKey, alt: m.alt || e.altKey, shift: e.shiftKey }, term.modes.applicationCursorKeysMode))
         releaseOnce()
         e.preventDefault()
+        return false
+      }
+      if (e.key === 'Enter' && e.shiftKey && (isMac ? e.metaKey : e.ctrlKey)) {
+        openComposerRef.current()
         return false
       }
       if (e.key === 'Enter' && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
@@ -297,13 +324,36 @@ export function TerminalPage({ id }: { id: string }) {
     if (!term) return
     term.options.fontSize = prefs.fontSize
     term.options.macOptionIsMeta = prefs.optionIsMeta
-    term.options.theme = isDark() ? darkTheme : lightTheme
+    term.options.theme = isTermDark() ? darkTheme : lightTheme
+    setChromeColor(isTermDark() ? '#0f1115' : '#ffffff')
+    // Menus and dialogs opened over the terminal follow its colours.
+    document.documentElement.classList.toggle('term-dark', isTermDark())
     try {
       fitRef.current?.fit()
     } catch {
       /* ignore */
     }
   }, [prefs])
+  useEffect(
+    () => () => {
+      setChromeColor(null)
+      document.documentElement.classList.remove('term-dark')
+    },
+    [],
+  )
+
+  // An ended session: dim it, stop the cursor, close the herdr panel.
+  useEffect(() => {
+    if (!ended) return
+    const term = termRef.current
+    if (term) {
+      term.options.cursorBlink = false
+      term.options.cursorInactiveStyle = 'none'
+      term.blur()
+    }
+    setPanelState(false)
+    setComposer(false)
+  }, [ended])
 
   // Follow the visual viewport so the key bar sits right above the soft
   // keyboard. iOS Safari does not shrink the layout viewport for the keyboard.
@@ -538,6 +588,7 @@ export function TerminalPage({ id }: { id: string }) {
   const toggleComposer = () => {
     if (composer) {
       setComposer(false)
+      if (!isTouch) termRef.current?.focus()
       return
     }
     // Mount and focus inside the tap itself: iOS only raises the keyboard for a
@@ -545,6 +596,19 @@ export function TerminalPage({ id }: { id: string }) {
     flushSync(() => setComposer(true))
     composerRef.current?.focus()
   }
+  openComposerRef.current = () => {
+    if (ended) return
+    flushSync(() => setComposer(true))
+    composerRef.current?.focus()
+  }
+
+  // The composer grows with its text up to 40% of the screen.
+  useEffect(() => {
+    const el = composerRef.current
+    if (!el) return
+    el.style.height = 'auto'
+    el.style.height = Math.min(el.scrollHeight, window.innerHeight * 0.4) + 'px'
+  }, [draft, composer])
 
   const openCopyMode = () => {
     const term = termRef.current
@@ -552,7 +616,14 @@ export function TerminalPage({ id }: { id: string }) {
     const buf = term.buffer.active
     const lines: string[] = []
     const start = Math.max(0, buf.length - 3000)
-    for (let i = start; i < buf.length; i++) lines.push(buf.getLine(i)?.translateToString(true) ?? '')
+    // A soft-wrapped row continues the previous line: join them, so copied
+    // commands and URLs come out whole.
+    for (let i = start; i < buf.length; i++) {
+      const line = buf.getLine(i)
+      const text = line?.translateToString(true) ?? ''
+      if (line?.isWrapped && lines.length > 0) lines[lines.length - 1] += text
+      else lines.push(text)
+    }
     while (lines.length && lines[lines.length - 1] === '') lines.pop()
     setCopyText(lines.join('\n'))
   }
@@ -563,7 +634,7 @@ export function TerminalPage({ id }: { id: string }) {
     const local = ['localhost', '127.0.0.1', '0.0.0.0', '[::1]'].includes(u.hostname)
     const hostId = info?.host_id
     if (local && boot.forwarding && hostId) {
-      void openForward(hostId, Number(u.port || (u.protocol === 'https:' ? 443 : 80)), u.pathname + u.search, toast)
+      void openForward(hostId, Number(u.port || (u.protocol === 'https:' ? 443 : 80)), u.pathname + u.search, toast, u.hash)
     } else {
       window.open(uri, '_blank', 'noopener,noreferrer')
     }
@@ -581,19 +652,71 @@ export function TerminalPage({ id }: { id: string }) {
     }
   }
 
+  const slow = status === 'open' && latency !== null && latency > HIGH_LATENCY
   const statusText =
-    status === 'open' ? (latency !== null ? t('term.latency', { ms: latency }) : '') :
+    ended ? t('term.endedShort') :
+    status === 'open' ? (slow ? t('term.latency', { ms: latency }) : t('term.connected')) :
     status === 'connecting' ? t('term.connecting') :
     status === 'reconnecting' ? t('term.reconnecting') :
-    status === 'offline' ? t('term.offline') :
-    status === 'ended' || status === 'gone' ? t('term.endedShort') : ''
+    status === 'offline' ? t('term.offline') : ''
+  const statusClass = ended ? 's-ended' : slow ? 's-slow' : 's-' + status
+  const paused = !ended && (status === 'reconnecting' || status === 'offline')
 
   const endText = status === 'gone' ? t('term.ended.gone') :
-    end ? (end.state === 'exited' ? t('term.ended.exited', { code: end.code }) : end.state === 'lost' ? t('term.ended.lost') : t('term.ended.closed')) : ''
+    end ? (end.state === 'exited' ? t('term.ended.exited', { code: end.code }) : end.state === 'lost' ? t('term.ended.lost') : t('term.ended.closed')) :
+    ended ? t('term.ended.closed') : ''
+
+  const loadSessions = () =>
+    api<SessionInfo[]>('GET', '/api/sessions')
+      .then((l) => setSessions(l.filter((x) => x.state === 'running').sort((a, b) => a.created_at - b.created_at)))
+      .catch(() => setSessions(null))
+  const switcherItems = (): MenuItem[] => {
+    const list = sessions ?? []
+    const nth = (x: SessionInfo) => list.filter((y) => y.host_id === x.host_id).indexOf(x) + 1
+    return [
+      ...list.map((x) => ({
+        label: `${x.host_name} · ${t('hosts.sessionN', { n: nth(x) })}${x.title ? ' · ' + x.title : ''}`,
+        icon: x.id === id ? <Check size={16} /> : <span className="menu-icon-space" />,
+        onSelect: () => x.id !== id && navigate('/t/' + x.id),
+      })),
+      { label: t('term.backToHosts'), icon: <Server size={16} />, separator: list.length > 0, onSelect: () => navigate('/') },
+    ]
+  }
+
+  const moreItems = (): (MenuItem | null)[] => [
+    { label: t('term.upload'), icon: <ImagePlus size={16} />, onSelect: () => fileRef.current?.click() },
+    { label: t('term.copyMode'), icon: <TextSelect size={16} />, onSelect: openCopyMode },
+    boot.forwarding && info ? { label: t('ports.title'), icon: <Globe size={16} />, onSelect: () => setPortsOpen(true) } : null,
+    { label: t('term.fontLarger'), icon: <Plus size={16} />, separator: true, onSelect: () => setPrefs({ fontSize: Math.min(28, getPrefs().fontSize + 1) }) },
+    { label: t('term.fontSmaller'), icon: <Minus size={16} />, onSelect: () => setPrefs({ fontSize: Math.max(9, getPrefs().fontSize - 1) }) },
+    isTouch ? { label: prefs.keybar ? t('term.hideKeybar') : t('term.showKeybar'), icon: <KeyboardIcon size={16} />, onSelect: () => setPrefs({ keybar: !prefs.keybar }) } : null,
+    ended
+      ? null
+      : {
+          label: t('term.closeSession'),
+          icon: <Power size={16} />,
+          danger: true,
+          separator: true,
+          onSelect: () =>
+            setConfirm(
+              <Confirm
+                title={t('term.closeSession')}
+                body={t('hosts.closeSessionConfirm')}
+                confirm={t('term.closeSession')}
+                danger
+                onClose={() => setConfirm(null)}
+                onConfirm={async () => {
+                  await api('DELETE', '/api/sessions/' + id)
+                  navigate('/', true)
+                }}
+              />,
+            ),
+        },
+  ]
 
   return (
     <div
-      className="term-root"
+      className={'term-root ' + (isTermDark() ? 'dark' : 'light')}
       ref={rootRef}
       onDragOver={(e) => {
         if (e.dataTransfer.types.includes('Files')) {
@@ -611,140 +734,138 @@ export function TerminalPage({ id }: { id: string }) {
     >
       <header className="term-bar">
         <button className="icon-btn" onClick={() => navigate('/')} aria-label={t('term.backToHosts')} title={t('term.backToHosts')}>
-          <ArrowLeft size={20} />
+          <ChevronLeft size={20} />
         </button>
-        <div className="term-title">
-          <span className="term-host">{info?.host_name ?? ''}</span>
-          <span className={'term-status s-' + status}>
-            <span className="dot" aria-hidden="true" />
-            {statusText || (info?.title ?? '')}
-          </span>
-        </div>
-        {herdr && (
-          <button className="icon-btn herdr-btn" aria-pressed={panel} onClick={() => setPanel((p) => !p)} aria-label={t('herdr.title')} title={t('herdr.title')}>
+        <Menu
+          label={t('term.switchSession')}
+          items={switcherItems}
+          note={sessions === null ? t('term.sessionsLoading') : undefined}
+          button={(open, toggle) => (
+            <button
+              className="term-title"
+              aria-expanded={open}
+              aria-label={`${info?.host_name ?? ''}，${t('term.switchSession')}`}
+              onClick={(e) => {
+                if (!open) void loadSessions()
+                toggle(e)
+              }}
+            >
+              <span className="term-host">
+                <span className="term-host-name">{info?.host_name ?? ''}</span>
+                <ChevronDown size={12} strokeWidth={2.25} aria-hidden="true" />
+              </span>
+              <span className={'term-status ' + statusClass} aria-live="polite">
+                <span className="dot" aria-hidden="true" />
+                {statusText}
+              </span>
+            </button>
+          )}
+        />
+        <div className="spacer" />
+        {herdr && !ended && (
+          <button className="icon-btn herdr-btn" aria-pressed={panel} onClick={() => setPanel(!panel)} aria-label={t('herdr.title') + (herdr.waiting > 0 ? ' · ' + t('herdr.waiting', { n: herdr.waiting }) : '')} title={t('herdr.title')}>
             <LayoutGrid size={19} />
             {herdr.waiting > 0 && <span className="herdr-count">{herdr.waiting}</span>}
           </button>
         )}
-        <button className="icon-btn" onClick={() => fileRef.current?.click()} aria-label={t('term.upload')} title={t('term.upload')}>
-          <ImagePlus size={19} />
-        </button>
-        <button className="icon-btn" aria-pressed={composer} onClick={toggleComposer} aria-label={t('term.composer')} title={t('term.composer')}>
-          <MessageSquareText size={19} />
-        </button>
+        {!ended && (
+          <button className="icon-btn" aria-pressed={composer} onClick={toggleComposer} aria-label={t('term.composer')} title={t('term.composer') + (isTouch ? '' : isMac ? ' (⇧⌘↩)' : ' (Ctrl+Shift+Enter)')}>
+            <MessageSquareText size={19} />
+          </button>
+        )}
         <Menu
+          label={t('common.more')}
+          items={moreItems}
           button={(open, toggle) => (
             <button className="icon-btn" aria-label={t('common.more')} aria-expanded={open} onClick={toggle}>
               <MoreVertical size={19} />
             </button>
           )}
-        >
-          {(close) => (
-            <>
-              <button onClick={() => { close(); openCopyMode() }}><TextSelect size={16} />{t('term.copyMode')}</button>
-              {boot.forwarding && info && (
-                <button onClick={() => { close(); setPortsOpen(true) }}><Globe size={16} />{t('ports.title')}</button>
-              )}
-              <button onClick={() => setPrefs({ fontSize: Math.min(28, prefs.fontSize + 1) })}><Plus size={16} />{t('term.fontLarger')}</button>
-              <button onClick={() => setPrefs({ fontSize: Math.max(9, prefs.fontSize - 1) })}><Minus size={16} />{t('term.fontSmaller')}</button>
-              {isTouch && (
-                <button onClick={() => { close(); setPrefs({ keybar: !prefs.keybar }) }}>
-                  <KeyboardIcon size={16} />
-                  {prefs.keybar ? t('term.hideKeybar') : t('term.showKeybar')}
-                </button>
-              )}
-              <hr />
-              <button
-                className="danger"
-                onClick={() => {
-                  close()
-                  setConfirm(
-                    <Confirm
-                      title={t('term.closeSession')}
-                      body={t('hosts.closeSessionConfirm')}
-                      confirm={t('term.closeSession')}
-                      danger
-                      onClose={() => setConfirm(null)}
-                      onConfirm={async () => {
-                        await api('DELETE', '/api/sessions/' + id)
-                        navigate('/', true)
-                      }}
-                    />,
-                  )
-                }}
-              >
-                <Power size={16} />
-                {t('term.closeSession')}
-              </button>
-            </>
-          )}
-        </Menu>
+        />
       </header>
 
-      <div className={'term-body' + (herdr && panel ? ' with-panel' : '')}>
+      {paused && <div className="term-paused" role="status">{t('term.paused')}</div>}
+      <div className={'term-body' + (herdr && panel && !sheetPanel ? ' with-panel' : '') + (paused ? ' is-paused' : '') + (ended ? ' is-ended' : '')}>
         <div className="term-host-el" ref={hostEl} />
-        {herdr && panel && (
+        {herdr && panel && !ended && (
           <HerdrPanel
             summary={herdr}
+            sheet={sheetPanel}
             onClose={() => setPanel(false)}
             onFocus={async (action, target) => {
               try {
                 await api('POST', `/api/sessions/${id}/herdr`, { action, target })
-                if (window.matchMedia('(max-width: 999px)').matches) setPanel(false)
+                if (sheetPanel) setPanel(false)
               } catch {
                 toast(t('herdr.focusFailed'), true)
               }
             }}
           />
         )}
-        {endText && (
-          <div className="term-ended" role="alert">
-            <p>{endText}</p>
-            <div className="dialog-actions">
-              <button className="btn" onClick={() => navigate('/')}>{t('term.backToHosts')}</button>
-              {hostIdForReconnect > 0 && <button className="btn btn-primary" onClick={reconnect}>{t('term.reopen')}</button>}
-            </div>
-          </div>
-        )}
         {dragOver && <div className="term-drop">{t('term.dropHint')}</div>}
       </div>
 
-      {composer && (
-        <div className="composer">
-          <textarea
-            ref={composerRef}
-            className="composer-input"
-            value={draft}
-            aria-label={t('term.composer')}
-            placeholder={t('term.composerPlaceholder')}
-            rows={Math.min(6, Math.max(1, draft.split('\n').length))}
-            onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.nativeEvent.isComposing || e.keyCode === 229) return
-              if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-                e.preventDefault()
-                sendComposer(true)
-              }
-            }}
-          />
-          <div className="composer-actions">
-            <button className="btn" onClick={() => sendComposer(false)} disabled={!draft}>{t('term.insert')}</button>
-            <button className="btn btn-primary" onClick={() => sendComposer(true)}>{t('term.send')}</button>
+      {ended ? (
+        <div className="term-ended" role="alert">
+          <p>{endText}</p>
+          <div className="term-ended-actions">
+            <button className="btn btn-ghost" onClick={() => navigate('/')}>{t('common.back')}</button>
+            {hostIdForReconnect > 0 && <button className="btn btn-primary" onClick={reconnect}>{t('term.reopen')}</button>}
           </div>
         </div>
-      )}
+      ) : (
+        <>
+          {composer && (
+            <div className="composer">
+              <div className="composer-box">
+                <textarea
+                  ref={composerRef}
+                  className="composer-input"
+                  value={draft}
+                  aria-label={t('term.composer')}
+                  placeholder={isTouch ? t('term.composerPlaceholder') : t('term.composerPlaceholderKey', { key: isMac ? '⌘↩' : 'Ctrl+Enter' })}
+                  rows={1}
+                  onChange={(e) => setDraft(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.nativeEvent.isComposing || e.keyCode === 229) return
+                    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                      e.preventDefault()
+                      sendComposer(true)
+                    } else if (e.key === 'Escape') {
+                      e.preventDefault()
+                      toggleComposer()
+                    }
+                  }}
+                />
+                <div className="composer-tools">
+                  <button type="button" className="icon-btn" onClick={() => fileRef.current?.click()} aria-label={t('term.upload')} title={t('term.upload')}>
+                    <Paperclip size={18} />
+                  </button>
+                  <button type="button" className="btn btn-ghost composer-insert" onClick={() => sendComposer(false)} disabled={!draft} title={t('term.insertHint')}>
+                    {t('term.insert')}
+                  </button>
+                  <div className="spacer" />
+                  <button type="button" className="composer-send" onClick={() => sendComposer(true)} aria-label={t('term.send')} title={t('term.send')}>
+                    <ArrowUp size={18} strokeWidth={2.25} />
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
 
-      {showKeybar && (
-        <KeyBar
-          ctrl={ctrl}
-          alt={alt}
-          fn={fn}
-          onMod={(m) => (m === 'ctrl' ? setCtrl(cycle(ctrl)) : setAlt(cycle(alt)))}
-          onFn={() => setFn((f) => !f)}
-          onKey={sendKey}
-          onText={sendText}
-          onKeyboard={toggleKeyboard}
-        />
+          {showKeybar && (
+            <KeyBar
+              ctrl={ctrl}
+              alt={alt}
+              fn={fn}
+              onMod={(m) => (m === 'ctrl' ? setCtrl(cycle(ctrl)) : setAlt(cycle(alt)))}
+              onFn={() => setFn((f) => !f)}
+              onKey={sendKey}
+              onText={sendText}
+              onKeyboard={toggleKeyboard}
+            />
+          )}
+        </>
       )}
 
       <input

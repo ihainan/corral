@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Keyboard } from 'lucide-react'
 import type { SpecialKey } from './keys'
 import { t } from '../i18n'
@@ -13,7 +13,6 @@ interface KeyProps {
   repeat?: boolean
   mod?: ModState
   wide?: boolean
-  accent?: boolean
 }
 
 const MOVE_CANCEL = 10 // px: beyond this the gesture is a scroll of the bar, not a key press
@@ -41,7 +40,7 @@ function Key(p: KeyProps) {
     <button
       type="button"
       tabIndex={-1}
-      className={'kb-key' + (p.wide ? ' wide' : '') + (p.accent ? ' accent' : '') + (p.mod && p.mod !== 'off' ? ' mod-' + p.mod : '')}
+      className={'kb-key' + (p.wide ? ' wide' : '') + (p.mod && p.mod !== 'off' ? ' mod-' + p.mod : '')}
       aria-label={p.aria}
       aria-pressed={p.mod ? p.mod !== 'off' : undefined}
       // Preventing mousedown (not pointerdown, which WebKit treats as cancelling
@@ -103,39 +102,62 @@ export interface KeyBarProps {
   onKeyboard: () => void
 }
 
+// Layout: Esc/Tab and the modifiers stay put on the left, the keyboard toggle
+// on the right; everything between scrolls sideways. Fn swaps the scrolling
+// part for function and navigation keys.
 export function KeyBar(p: KeyBarProps) {
   const arrows: [SpecialKey, string, string][] = [
     ['Up', '↑', 'Up'], ['Down', '↓', 'Down'], ['Left', '←', 'Left'], ['Right', '→', 'Right'],
   ]
   const symbols = ['|', '/', '~', '-', '`', '\\', '_', ':', '*', '&', '$']
   const fkeys: SpecialKey[] = ['F1', 'F2', 'F3', 'F4', 'F5', 'F6', 'F7', 'F8', 'F9', 'F10', 'F11', 'F12']
+  const rowRef = useRef<HTMLDivElement>(null)
+  const [atEnd, setAtEnd] = useState(false)
+  const onScroll = () => {
+    const el = rowRef.current
+    if (el) setAtEnd(el.scrollLeft + el.clientWidth >= el.scrollWidth - 2)
+  }
+  useEffect(onScroll, [p.fn])
   return (
-    <div className="keybar" role="toolbar" aria-label="Keys">
-      <div className="kb-row">
+    <div className="keybar" role="toolbar" aria-label={t('term.keys')}>
+      <div className="kb-group kb-fixed">
         <Key label="Esc" aria="Escape" onPress={() => p.onKey('Esc')} onLong={() => { p.onKey('Esc'); p.onKey('Esc') }} />
-        <Key label="Ctrl" aria="Ctrl" mod={p.ctrl} onPress={() => p.onMod('ctrl')} />
         <Key label="Tab" aria="Tab" onPress={() => p.onKey('Tab')} onLong={() => p.onKey('ShiftTab')} />
+        <Key label="Ctrl" aria="Ctrl" mod={p.ctrl} onPress={() => p.onMod('ctrl')} />
+        <Key label="Alt" aria="Alt" mod={p.alt} onPress={() => p.onMod('alt')} />
+      </div>
+      <div className={'kb-row' + (atEnd ? ' at-end' : '')} ref={rowRef} onScroll={onScroll}>
+        <div className="kb-group">
+          <Key label="Fn" aria="Fn" mod={p.fn ? 'once' : 'off'} onPress={p.onFn} />
+        </div>
         {p.fn ? (
           <>
-            {fkeys.map((k) => <Key key={k} label={k} aria={k} onPress={() => p.onKey(k)} />)}
-            <Key label="Home" aria="Home" wide onPress={() => p.onKey('Home')} />
-            <Key label="End" aria="End" wide onPress={() => p.onKey('End')} />
-            <Key label="PgUp" aria="Page Up" wide repeat onPress={() => p.onKey('PageUp')} />
-            <Key label="PgDn" aria="Page Down" wide repeat onPress={() => p.onKey('PageDown')} />
-            <Key label="Del" aria="Delete" onPress={() => p.onKey('Delete')} />
-            <Key label="Alt" aria="Alt" mod={p.alt} onPress={() => p.onMod('alt')} />
+            <div className="kb-group">
+              {fkeys.map((k) => <Key key={k} label={k} aria={k} onPress={() => p.onKey(k)} />)}
+            </div>
+            <div className="kb-group">
+              <Key label="Home" aria="Home" wide onPress={() => p.onKey('Home')} />
+              <Key label="End" aria="End" wide onPress={() => p.onKey('End')} />
+              <Key label="PgUp" aria="Page Up" wide repeat onPress={() => p.onKey('PageUp')} />
+              <Key label="PgDn" aria="Page Down" wide repeat onPress={() => p.onKey('PageDown')} />
+              <Key label="Del" aria="Delete" onPress={() => p.onKey('Delete')} />
+            </div>
           </>
         ) : (
           <>
-            {arrows.map(([k, label, aria]) => <Key key={k} label={label} aria={aria} repeat onPress={() => p.onKey(k)} />)}
-            <Key label="Alt" aria="Alt" mod={p.alt} onPress={() => p.onMod('alt')} />
-            <Key label="⏎" aria={t('term.agentNewline')} onPress={() => p.onKey('AgentNewline')} />
-            {symbols.map((s) => <Key key={s} label={s} aria={s} onPress={() => p.onText(s)} />)}
+            <div className="kb-group">
+              {arrows.map(([k, label, aria]) => <Key key={k} label={label} aria={aria} repeat onPress={() => p.onKey(k)} />)}
+            </div>
+            <div className="kb-group">
+              <Key label={<span className="kb-text">{t('term.newlineKey')}</span>} aria={t('term.agentNewline')} wide onPress={() => p.onKey('AgentNewline')} />
+            </div>
+            <div className="kb-group">
+              {symbols.map((s) => <Key key={s} label={s} aria={s} onPress={() => p.onText(s)} />)}
+            </div>
           </>
         )}
       </div>
-      <div className="kb-fixed">
-        <Key label="Fn" aria="Fn" accent={p.fn} onPress={p.onFn} />
+      <div className="kb-group kb-fixed">
         <Key label={<Keyboard size={18} />} aria={t('term.keyboard')} onPress={p.onKeyboard} onLong={() => p.onKey('Enter')} />
       </div>
     </div>

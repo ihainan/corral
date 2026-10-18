@@ -6,13 +6,18 @@ import { api } from './api'
 
 export interface Prefs {
   theme: 'system' | 'light' | 'dark'
+  // Terminal colours are separate from the page theme: most people want a
+  // dark terminal even in a light UI.
+  termTheme: 'dark' | 'light' | 'ui'
   fontSize: number
   keybar: boolean
   optionIsMeta: boolean
   webgl: boolean
 }
 
-const defaults: Prefs = { theme: 'system', fontSize: 14, keybar: true, optionIsMeta: true, webgl: false }
+// Phones get a slightly smaller default so common output fits without wrapping.
+const phone = window.matchMedia('(pointer: coarse) and (max-width: 599px)').matches
+const defaults: Prefs = { theme: 'system', termTheme: 'dark', fontSize: phone ? 13 : 14, keybar: true, optionIsMeta: true, webgl: false }
 
 let state: Prefs = load()
 const subs = new Set<() => void>()
@@ -81,10 +86,27 @@ export function isDark(): boolean {
   return state.theme === 'dark' || (state.theme === 'system' && media.matches)
 }
 
+export function isTermDark(): boolean {
+  return state.termTheme === 'dark' || (state.termTheme === 'ui' && isDark())
+}
+
+// The browser chrome colour (status bar, tab strip) follows the page, or the
+// terminal while one is open.
+let chromeOverride: string | null = null
+export function setChromeColor(c: string | null) {
+  chromeOverride = c
+  paintChrome()
+}
+function paintChrome() {
+  const c = chromeOverride ?? (isDark() ? '#0f1115' : '#ffffff')
+  document.querySelectorAll('meta[name="theme-color"]').forEach((m) => m.setAttribute('content', c))
+}
+
 export function applyTheme() {
   const root = document.documentElement
   if (state.theme === 'system') root.removeAttribute('data-theme')
   else root.setAttribute('data-theme', state.theme)
+  paintChrome()
 }
 
 applyTheme()
