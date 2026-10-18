@@ -134,7 +134,7 @@ func (s *Server) registerRoutes() {
 	s.handle("PUT /api/me", SignedIn, s.apiUpdateMe)
 	s.handle("POST /api/me/password", SignedIn, s.apiChangePassword)
 	s.handle("GET /api/me/settings", SignedIn, s.apiGetSettings)
-	s.handle("PUT /api/me/settings", SignedIn, s.apiPutSettings)
+	s.handle("PATCH /api/me/settings", SignedIn, s.apiPatchSettings)
 
 	s.handle("GET /api/hosts", SignedIn, s.apiListHosts)
 	s.handle("POST /api/hosts", SignedIn, s.apiCreateHost)

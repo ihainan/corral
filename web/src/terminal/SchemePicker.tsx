@@ -21,9 +21,9 @@ export function Swatch({ scheme }: { scheme: Scheme }) {
   )
 }
 
-function Option(props: { scheme: Scheme; label?: string; hint?: string; selected: boolean; onPick: () => void }) {
+function Option(props: { scheme: Scheme; label?: string; hint?: string; selected: boolean; onPick: () => void; tabStop: boolean }) {
   return (
-    <button type="button" className="scheme-option" aria-pressed={props.selected} onClick={props.onPick}>
+    <button type="button" className="scheme-option" aria-pressed={props.selected} onClick={props.onPick} tabIndex={props.tabStop ? 0 : -1}>
       <Swatch scheme={props.scheme} />
       <span className="scheme-name">
         {props.label ?? props.scheme.name}
@@ -34,16 +34,38 @@ function Option(props: { scheme: Scheme; label?: string; hint?: string; selected
   )
 }
 
-// Arrow keys move between options in reading order; Tab still leaves the list.
+// The list is one Tab stop (the selected option, else the first); arrow
+// keys move by what is on screen: left/right to the neighbour, up/down to
+// the nearest option in the row above or below.
 function arrowNav(e: React.KeyboardEvent<HTMLElement>) {
   const opts = [...e.currentTarget.querySelectorAll<HTMLElement>('.scheme-option')]
-  const i = opts.indexOf(document.activeElement as HTMLElement)
+  const cur = document.activeElement as HTMLElement
+  const i = opts.indexOf(cur)
   if (i < 0) return
-  const cols = Math.max(1, Math.round(e.currentTarget.clientWidth / (opts[i].offsetWidth || 1)))
-  const step = { ArrowRight: 1, ArrowLeft: -1, ArrowDown: cols, ArrowUp: -cols, Home: -i, End: opts.length - 1 - i }[e.key]
-  if (step === undefined) return
+  let next: HTMLElement | undefined
+  if (e.key === 'ArrowRight') next = opts[i + 1]
+  else if (e.key === 'ArrowLeft') next = opts[i - 1]
+  else if (e.key === 'Home') next = opts[0]
+  else if (e.key === 'End') next = opts[opts.length - 1]
+  else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    const r = cur.getBoundingClientRect()
+    const down = e.key === 'ArrowDown'
+    const rows = opts.filter((o) => {
+      const t = o.getBoundingClientRect().top
+      return down ? t > r.top + 4 : t < r.top - 4
+    })
+    if (rows.length) {
+      const rowTop = down ? Math.min(...rows.map((o) => o.getBoundingClientRect().top)) : Math.max(...rows.map((o) => o.getBoundingClientRect().top))
+      const row = rows.filter((o) => Math.abs(o.getBoundingClientRect().top - rowTop) < 4)
+      next = row.reduce((a, b) => (Math.abs(b.getBoundingClientRect().left - r.left) < Math.abs(a.getBoundingClientRect().left - r.left) ? b : a))
+    }
+  }
+  if (!e.key.startsWith('Arrow') && e.key !== 'Home' && e.key !== 'End') return
   e.preventDefault()
-  opts[Math.min(opts.length - 1, Math.max(0, i + step))].focus()
+  if (!next) return
+  for (const o of opts) o.tabIndex = o === next ? 0 : -1
+  next.focus()
+  next.scrollIntoView({ block: 'nearest' })
 }
 
 // Picking applies at once, so the terminal behind the dialog previews it.
@@ -57,6 +79,8 @@ export function SchemeDialog({ onClose }: { onClose: () => void }) {
   const group = (dark: boolean) => allSchemes.filter((s) => s.dark === dark && match(s))
   const dark = group(true)
   const light = group(false)
+  const shown = [...(needle ? [] : ['ui']), ...dark.map((x) => x.id), ...light.map((x) => x.id)]
+  const tabStop = shown.includes(current) ? current : shown[0]
   return (
     <Dialog title={t('settings.termTheme')} onClose={onClose} wide seeThrough>
       <label className="scheme-search">
@@ -83,17 +107,18 @@ export function SchemeDialog({ onClose }: { onClose: () => void }) {
               label={t('settings.termThemeUi')}
               hint={t('schemes.followHint')}
               selected={current === 'ui'}
+              tabStop={tabStop === 'ui'}
               onPick={() => pick('ui')}
             />
           </div>
         )}
         {dark.length > 0 && <h3 className="scheme-group">{t('schemes.dark')}</h3>}
         <div className="scheme-grid">
-          {dark.map((s) => <Option key={s.id} scheme={s} selected={current === s.id} onPick={() => pick(s.id)} />)}
+          {dark.map((s) => <Option key={s.id} scheme={s} selected={current === s.id} tabStop={tabStop === s.id} onPick={() => pick(s.id)} />)}
         </div>
         {light.length > 0 && <h3 className="scheme-group">{t('schemes.light')}</h3>}
         <div className="scheme-grid">
-          {light.map((s) => <Option key={s.id} scheme={s} selected={current === s.id} onPick={() => pick(s.id)} />)}
+          {light.map((s) => <Option key={s.id} scheme={s} selected={current === s.id} tabStop={tabStop === s.id} onPick={() => pick(s.id)} />)}
         </div>
         {dark.length + light.length === 0 && <p className="hint">{t('schemes.none')}</p>}
       </div>

@@ -84,8 +84,10 @@ export function chromeVars(s: Scheme): Record<string, string> {
   const key = mix(bg, fg, d ? 0.1 : 0)
   const keyActive = mix(bg, fg, d ? 0.18 : 0.1)
   const hover = mix(bg, fg, d ? 0.08 : 0.06)
-  const surfaces = [bg, chrome, key, hover]
   const accentSoft = mix(bg, s.theme.blue ?? '#4a78ec', d ? 0.22 : 0.14)
+  // Every surface chrome text sits on, including the highlighted row
+  // (current herdr workspace, latched modifier keys).
+  const surfaces = [bg, chrome, key, hover, accentSoft]
   return {
     '--term-bg': bg,
     '--term-chrome': chrome,
@@ -97,6 +99,6 @@ export function chromeVars(s: Scheme): Record<string, string> {
     '--term-fg-2': readable(mix(fg, bg, 0.25), surfaces, 4.5, d),
     '--term-fg-3': readable(mix(fg, bg, 0.45), surfaces, 4.5, d),
     '--term-accent-soft': accentSoft,
-    '--term-accent-text': readable(s.theme.blue ?? '#4a78ec', [...surfaces, accentSoft], 4.5, d),
+    '--term-accent-text': readable(s.theme.blue ?? '#4a78ec', surfaces, 4.5, d),
   }
 }

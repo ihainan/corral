@@ -324,6 +324,7 @@ const zh = {
   'hosts.noViewers': '没有窗口在看',
   'schemes.count': '找到 {n} 套配色',
   'settings.notices': '第三方声明',
+  'hosts.closeSessionOf': '结束「{name}」？',
 }
 
 type Key = keyof typeof zh
@@ -652,6 +653,7 @@ const en: Record<Key, string> = {
   'hosts.noViewers': 'not open anywhere',
   'schemes.count': '{n} schemes found',
   'settings.notices': 'Third-party notices',
+  'hosts.closeSessionOf': 'End “{name}”?',
 }
 
 const tables: Record<string, Record<Key, string>> = { 'zh-CN': zh, en }

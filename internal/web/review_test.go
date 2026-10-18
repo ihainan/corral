@@ -507,3 +507,33 @@ func TestOpenGateWaitsCancelsAndForgets(t *testing.T) {
 		t.Fatalf("gate keeps %d entries with nobody holding or waiting", n)
 	}
 }
+
+// Settings are patched field by field and a field only takes a newer
+// change: a late request (a keepalive sent while a page closed, an old
+// device) cannot undo a newer value, and fields never overwrite each other.
+func TestSettingsPatchKeepsTheNewestChangePerField(t *testing.T) {
+	h := newHarness(t)
+	admin := h.admin()
+	patch := func(set map[string]any, ts map[string]int64) resp {
+		return admin.do("PATCH", "/api/me/settings", map[string]any{"set": set, "ts": ts})
+	}
+	mustStatus(t, patch(map[string]any{"termTheme": "dracula", "fontSize": 15}, map[string]int64{"termTheme": 200, "fontSize": 200}), 200, "first patch")
+	mustStatus(t, patch(map[string]any{"termTheme": "nord"}, map[string]int64{"termTheme": 100}), 200, "older change")
+	mustStatus(t, patch(map[string]any{"keybar": false}, map[string]int64{"keybar": 150}), 200, "other field")
+	got := admin.do("GET", "/api/me/settings", nil).json()
+	if got["termTheme"] != "dracula" || got["fontSize"] != float64(15) || got["keybar"] != false {
+		t.Fatalf("merge went wrong: %v", got)
+	}
+	if _, ok := got["_ts"]; ok {
+		t.Fatal("bookkeeping leaked into the settings")
+	}
+	mustStatus(t, patch(map[string]any{"termTheme": "nord"}, map[string]int64{"termTheme": 300}), 200, "newer change")
+	if got := admin.do("GET", "/api/me/settings", nil).json(); got["termTheme"] != "nord" {
+		t.Fatalf("a newer change was not taken: %v", got)
+	}
+	mustStatus(t, patch(map[string]any{"_ts": map[string]any{}}, map[string]int64{"_ts": 999}), 400, "reserved name")
+	mustStatus(t, patch(map[string]any{"fontSize": 12}, nil), 400, "missing ts")
+	if r := admin.do("PUT", "/api/me/settings", map[string]any{"termTheme": "x"}); r.Status == 200 {
+		t.Fatal("whole-object PUT still overwrites settings")
+	}
+}

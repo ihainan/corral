@@ -30,8 +30,11 @@ if ('serviceWorker' in navigator && location.protocol === 'https:') {
 {
   const vv = window.visualViewport
   const apply = () => {
-    const h = vv ? vv.height : window.innerHeight
-    const keyboardUp = vv ? window.innerHeight - vv.height > 120 : false
+    const zoomed = vv ? (vv.scale ?? 1) > 1.01 : false
+    const h = vv && !zoomed ? vv.height : window.innerHeight
+    // Pinch zoom also shrinks the visual viewport; only an unzoomed one that
+    // lost height is the keyboard.
+    const keyboardUp = vv ? (vv.scale ?? 1) <= 1.01 && window.innerHeight - vv.height > 120 : false
     const de = document.documentElement.style
     de.setProperty('--vv-h', `${Math.round(h)}px`)
     de.setProperty('--vv-top', keyboardUp && vv ? `${Math.round(vv.offsetTop)}px` : '0px')

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -185,34 +186,88 @@ func (s *Server) apiChangePassword(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
+// Settings are stored as one JSON object of fields plus "_ts", the time
+// (client clock, milliseconds) each field was last changed. Clients send only
+// the fields they changed, each with its time, and a field is only taken if
+// it is newer than what is stored: a late or replayed request (a keepalive
+// sent while the page closed, a stale device) can never overwrite a newer
+// value, and changes to different fields never undo each other.
+
+const settingsTS = "_ts"
+
 func (s *Server) apiGetSettings(w http.ResponseWriter, r *http.Request) {
 	data, err := s.store.UserSettings(r.Context(), currentUser(r).ID)
 	if err != nil {
 		s.internalError(w, r, err)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	var obj map[string]json.RawMessage
+	if json.Unmarshal([]byte(data), &obj) != nil || obj == nil {
+		obj = map[string]json.RawMessage{}
+	}
+	delete(obj, settingsTS)
 	w.Header().Set("Cache-Control", "no-store")
-	w.Write([]byte(data))
+	writeJSON(w, http.StatusOK, obj)
 }
 
-func (s *Server) apiPutSettings(w http.ResponseWriter, r *http.Request) {
-	var raw json.RawMessage
-	if err := readJSON(r, &raw); err != nil {
+var settingKeyRE = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9]{0,63}$`)
+
+func (s *Server) apiPatchSettings(w http.ResponseWriter, r *http.Request) {
+	var b struct {
+		Set map[string]json.RawMessage `json:"set"`
+		TS  map[string]int64           `json:"ts"`
+	}
+	if err := readJSON(r, &b); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
-	var obj map[string]any
-	if err := json.Unmarshal(raw, &obj); err != nil || len(raw) > 64<<10 {
-		writeError(w, http.StatusBadRequest, "bad_request", "settings must be a JSON object under 64 KiB")
+	if len(b.Set) == 0 || len(b.Set) > 64 {
+		writeError(w, http.StatusBadRequest, "bad_request", "send between 1 and 64 changed settings")
 		return
 	}
-	if err := s.store.SaveUserSettings(r.Context(), currentUser(r).ID, string(raw)); err != nil {
+	for k := range b.Set {
+		if !settingKeyRE.MatchString(k) || b.TS[k] <= 0 {
+			writeError(w, http.StatusBadRequest, "bad_request", "each setting needs a plain name and a positive ts")
+			return
+		}
+	}
+	err := s.store.MergeUserSettings(r.Context(), currentUser(r).ID, func(old string) (string, error) {
+		var obj map[string]json.RawMessage
+		if json.Unmarshal([]byte(old), &obj) != nil || obj == nil {
+			obj = map[string]json.RawMessage{}
+		}
+		ts := map[string]int64{}
+		if raw, ok := obj[settingsTS]; ok {
+			_ = json.Unmarshal(raw, &ts)
+		}
+		for k, v := range b.Set {
+			if b.TS[k] > ts[k] {
+				obj[k], ts[k] = v, b.TS[k]
+			}
+		}
+		rawTS, _ := json.Marshal(ts)
+		obj[settingsTS] = rawTS
+		out, err := json.Marshal(obj)
+		if err != nil {
+			return "", err
+		}
+		if len(out) > 64<<10 {
+			return "", errSettingsTooLarge
+		}
+		return string(out), nil
+	})
+	if errors.Is(err, errSettingsTooLarge) {
+		writeError(w, http.StatusBadRequest, "bad_request", "settings must stay under 64 KiB")
+		return
+	}
+	if err != nil {
 		s.internalError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
+
+var errSettingsTooLarge = errors.New("settings too large")
 
 func (s *Server) apiInviteInfo(w http.ResponseWriter, r *http.Request) {
 	inv, err := s.auth.InviteInfo(r.Context(), r.PathValue("token"))

@@ -51,7 +51,7 @@ export function HostsPage() {
   const closeSession = (s: SessionInfo) =>
     setConfirm(
       <Confirm
-        title={t('hosts.closeSession')}
+        title={t('hosts.closeSessionOf', { name: s.host_name + (s.title ? '：' + s.title : '') })}
         body={t('hosts.closeSessionConfirm')}
         confirm={t('hosts.closeSession')}
         danger

@@ -2,7 +2,7 @@ import { createContext, useContext, useEffect, useState, type ReactNode } from '
 import { KeyRound, LogOut, ScrollText, Server, Settings, Users } from 'lucide-react'
 import { api, ApiError, setUnauthorizedHandler, type Bootstrap, type Me } from './api'
 import { applyDefaultLanguage, t } from './i18n'
-import { syncPrefsFromServer } from './prefs'
+import { flushPrefs, resetPrefsSession, syncPrefsFromServer } from './prefs'
 import { match, navigate, usePath, linkHandler } from './router'
 import { BrandMark, ToastProvider, useToast } from './components/ui'
 import { disablePush, syncPush } from './push'
@@ -31,6 +31,7 @@ export function App() {
 
   useEffect(() => {
     setUnauthorizedHandler(() => {
+      resetPrefsSession()
       setMe(null)
       if (!location.pathname.startsWith('/login')) navigate('/login?next=' + encodeURIComponent(location.pathname), true)
     })
@@ -113,6 +114,8 @@ type NavKey = 'hosts' | 'keys' | 'settings' | 'users' | 'audit'
 // removed first, so the next person signing in here does not get the previous
 // account's alerts.
 export async function signOut(setMe: (m: Me | null) => void, toast: (m: string, e?: boolean) => void) {
+  // Settings changed just before signing out still belong to this account.
+  await Promise.race([flushPrefs(), new Promise((r) => setTimeout(r, 3000))])
   await disablePush().catch(() => {})
   try {
     await api('POST', '/api/logout')
@@ -123,6 +126,7 @@ export async function signOut(setMe: (m: Me | null) => void, toast: (m: string, 
       return
     }
   }
+  resetPrefsSession()
   setMe(null)
   navigate('/login', true)
 }

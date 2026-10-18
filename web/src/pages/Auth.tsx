@@ -148,6 +148,7 @@ export function InvitePage({ token }: { token: string }) {
         onSubmit={async (v) => {
           const r = await api<{ user: Me }>('POST', '/api/invites/' + encodeURIComponent(token) + '/redeem', v)
           setMe(r.user)
+          syncPrefsFromServer(r.user.id)
           navigate('/', true)
         }}
       />

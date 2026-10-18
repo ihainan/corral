@@ -20,12 +20,15 @@ export interface Prefs {
 const phone = window.matchMedia('(pointer: coarse) and (max-width: 599px)').matches
 const defaults: Prefs = { theme: 'system', termTheme: 'corral-dark', fontSize: phone ? 13 : 14, keybar: true, optionIsMeta: true, webgl: false }
 
-let state: Prefs = load()
-const subs = new Set<() => void>()
+// The local copy is kept per account (several people may share a device);
+// until the account is known the last one used here paints the first frame.
+const LAST = 'corral.prefs.last'
+const cacheKey = (uid: number | null) => (uid === null ? null : 'corral.prefs.' + uid)
 
-function load(): Prefs {
+function readCache(uid: number | null): Prefs {
   try {
-    const raw = localStorage.getItem('corral.prefs')
+    const key = cacheKey(uid ?? Number(localStorage.getItem(LAST) ?? NaN))
+    const raw = key && !key.endsWith('NaN') ? localStorage.getItem(key) : null
     if (raw) return { ...defaults, ...JSON.parse(raw) }
   } catch {
     /* ignore */
@@ -33,9 +36,14 @@ function load(): Prefs {
   return { ...defaults }
 }
 
+let owner: number | null = null
+let state: Prefs = readCache(null)
+const subs = new Set<() => void>()
+
 function emit() {
   try {
-    localStorage.setItem('corral.prefs', JSON.stringify(state))
+    const key = cacheKey(owner)
+    if (key) localStorage.setItem(key, JSON.stringify(state))
   } catch {
     /* ignore */
   }
@@ -43,38 +51,35 @@ function emit() {
   subs.forEach((s) => s())
 }
 
-// Saving. Every change bumps `version`; `confirmed` is the newest version
-// the server has acknowledged. PUTs go out one at a time, so an older
-// snapshot can never land after a newer one. Until the latest change is
-// confirmed, a marker in localStorage names the account it belongs to: the
-// next load on this device then pushes the local settings instead of letting
-// the server's older copy overwrite them.
-const DIRTY = 'corral.prefsDirty'
-let version = 0
-let confirmed = 0
-let owner: number | null = null
+// Saving. Only changed fields are sent, each stamped with the time it was
+// changed; the server keeps a field only if the stamp is newer than what it
+// has (see apiPatchSettings). So requests may arrive in any order, a
+// keepalive may race a normal save, and another device's newer change is
+// never undone. Pending changes belong to one account and one sign-in:
+// signing out or in drops them, and a save already queued for the previous
+// account is not sent.
+type Pending = Map<string, { value: unknown; ts: number }>
+let pending: Pending = new Map()
+let generation = 0
+let lastTS = 0
 let saveTimer: number | undefined
 let queue: Promise<void> = Promise.resolve()
 
-function markDirty() {
-  try {
-    localStorage.setItem(DIRTY, owner === null ? '' : String(owner))
-  } catch {
-    /* ignore */
+const stamp = () => (lastTS = Math.max(lastTS + 1, Date.now()))
+
+function body(p: Pending) {
+  const set: Record<string, unknown> = {}
+  const ts: Record<string, number> = {}
+  for (const [k, v] of p) {
+    set[k] = v.value
+    ts[k] = v.ts
   }
-}
-function clearDirty() {
-  try {
-    localStorage.removeItem(DIRTY)
-  } catch {
-    /* ignore */
-  }
+  return { set, ts }
 }
 
 export function setPrefs(patch: Partial<Prefs>) {
   state = { ...state, ...patch }
-  version++
-  markDirty()
+  for (const [k, v] of Object.entries(patch)) pending.set(k, { value: v, ts: stamp() })
   emit()
   clearTimeout(saveTimer)
   saveTimer = window.setTimeout(save, 600)
@@ -83,53 +88,69 @@ export function setPrefs(patch: Partial<Prefs>) {
 function save() {
   clearTimeout(saveTimer)
   saveTimer = undefined
+  const gen = generation
   queue = queue.then(async () => {
-    const v = version
-    const snapshot = state
+    if (gen !== generation || pending.size === 0) return
+    const sent = new Map(pending)
     try {
-      await api('PUT', '/api/me/settings', snapshot)
-      if (v > confirmed) confirmed = v
-      if (confirmed === version) clearDirty()
+      await api('PATCH', '/api/me/settings', body(sent))
+      // Drop what was confirmed, unless it changed again meanwhile.
+      for (const [k, v] of sent) if (pending.get(k)?.ts === v.ts) pending.delete(k)
     } catch {
-      /* stays dirty; retried on the next change or the next load */
+      /* kept; goes with the next save or the keepalive on leaving */
     }
   })
 }
 
-// Leaving the page: whatever is not confirmed yet goes out with keepalive,
-// which survives the unload. The marker stays until a later load confirms it.
+// Sends what is still pending now, e.g. before signing out.
+export async function flushPrefs() {
+  save()
+  await queue
+}
+
+// Leaving the page: pending fields go out with keepalive, which survives
+// the unload. Their stamps make a duplicate or late arrival harmless.
 function flush() {
-  if (confirmed === version) return
+  if (pending.size === 0 || owner === null) return
   clearTimeout(saveTimer)
   saveTimer = undefined
   void fetch('/api/me/settings', {
-    method: 'PUT', credentials: 'same-origin', keepalive: true,
-    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(state),
+    method: 'PATCH', credentials: 'same-origin', keepalive: true,
+    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body(pending)),
   }).catch(() => {})
 }
 window.addEventListener('pagehide', flush)
 document.addEventListener('visibilitychange', () => document.visibilityState === 'hidden' && flush())
 
+// Forget the signed-in account's pending work (sign-out).
+export function resetPrefsSession() {
+  generation++
+  pending = new Map()
+  clearTimeout(saveTimer)
+  saveTimer = undefined
+  owner = null
+}
+
 export async function syncPrefsFromServer(userId: number) {
-  owner = userId
-  let dirtyFor: string | null = null
-  try {
-    dirtyFor = localStorage.getItem(DIRTY)
-  } catch {
-    /* ignore */
+  if (owner !== userId) {
+    resetPrefsSession()
+    owner = userId
+    state = readCache(userId)
+    try {
+      localStorage.setItem(LAST, String(userId))
+    } catch {
+      /* ignore */
+    }
+    emit()
   }
-  if (dirtyFor === String(userId)) {
-    // This account changed something here that the server may not have.
-    version++
-    save()
-    return
-  }
-  if (dirtyFor !== null) clearDirty() // another account's leftovers
-  const started = version
+  const gen = generation
   try {
     const remote = await api<Partial<Prefs>>('GET', '/api/me/settings')
-    if (version !== started) return // changed meanwhile; that change wins
-    state = { ...defaults, ...state, ...remote }
+    if (gen !== generation || owner !== userId) return // signed out or switched meanwhile
+    // The server's copy, except for fields changed here and not yet confirmed.
+    const local: Partial<Prefs> = {}
+    for (const [k, v] of pending) (local as Record<string, unknown>)[k] = v.value
+    state = { ...defaults, ...remote, ...local }
     emit()
   } catch {
     /* keep local */

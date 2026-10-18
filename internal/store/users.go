@@ -364,6 +364,30 @@ func (s *Store) UserSettings(ctx context.Context, userID int64) (string, error) 
 	return data, err
 }
 
+// MergeUserSettings reads, changes and writes a user's settings in one
+// transaction, so concurrent patches cannot lose each other's fields.
+func (s *Store) MergeUserSettings(ctx context.Context, userID int64, merge func(old string) (string, error)) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	old := "{}"
+	err = tx.QueryRowContext(ctx, `SELECT data FROM user_settings WHERE user_id = ?`, userID).Scan(&old)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	data, err := merge(old)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO user_settings (user_id, data) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET data = excluded.data`, userID, data); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func (s *Store) SaveUserSettings(ctx context.Context, userID int64, data string) error {
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO user_settings (user_id, data) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET data = excluded.data`, userID, data)
