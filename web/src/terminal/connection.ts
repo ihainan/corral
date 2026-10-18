@@ -25,7 +25,9 @@ export interface Handlers {
   onMeta?(m: any): void // side information such as herdr state
   onSize?(cols: number, rows: number): void // the terminal's size as set by whichever viewer set it last
   onLive?(): void // the replayed backlog has been delivered
-  onHello?(): void // a new socket was accepted; state from the old one is stale
+  // A new socket was accepted; state from the old one is stale. sentSize:
+  // this window's size was reported on it.
+  onHello?(sentSize: boolean): void
   onDropped?(): void // input typed while disconnected was discarded (too much, or too old)
 }
 
@@ -53,6 +55,7 @@ export class TermConnection {
   private backlog = false
   private everOpen = false
   private full = false
+  opens = 0 // counts accepted sockets; input held elsewhere checks it did not change
   status: Status = 'connecting'
 
   constructor(private id: string, private h: Handlers) {
@@ -80,6 +83,10 @@ export class TermConnection {
   // replayed long after the user stopped expecting it.
   send(data: string | Uint8Array): SendResult {
     const bytes = typeof data === 'string' ? new TextEncoder().encode(data) : data
+    if (this.full) {
+      this.h.onDropped?.()
+      return 'dropped'
+    }
     // Behind input still waiting (the socket is back but not yet confirmed), it waits too.
     if (this.isOpen() && this.queue.length === 0) {
       for (let i = 0; i < bytes.length; i += FRAME_MAX) this.ws!.send(bytes.subarray(i, i + FRAME_MAX))
@@ -96,6 +103,15 @@ export class TermConnection {
     }
     this.queue.push({ at: now, data: bytes, offset: this.offset })
     return 'queued'
+  }
+
+  // sendNow sends at once, or not at all (false) when the connection is not
+  // usable now or earlier input still waits; nothing is queued.
+  sendNow(data: string): boolean {
+    if (!this.isOpen() || this.queue.length > 0) return false
+    const bytes = new TextEncoder().encode(data)
+    for (let i = 0; i < bytes.length; i += FRAME_MAX) this.ws!.send(bytes.subarray(i, i + FRAME_MAX))
+    return true
   }
 
   // follow forgets this window's size while another viewer's is shown, so a
@@ -156,7 +172,7 @@ export class TermConnection {
       if (typeof e.data === 'string') {
         const m = JSON.parse(e.data)
         if (m.t === 'hello') {
-          this.h.onHello?.()
+          this.opens++
           gotHello = true
           this.attempt = 0
           this.backlog = true
@@ -172,7 +188,9 @@ export class TermConnection {
           // pocket must not take the terminal back from the desk.
           const first = !this.everOpen
           this.everOpen = true
-          if (this.size && (first || document.visibilityState === 'visible')) ws.send(JSON.stringify({ t: 'resize', ...this.size }))
+          const sentSize = !!this.size && (first || document.visibilityState === 'visible')
+          if (sentSize) ws.send(JSON.stringify({ t: 'resize', ...this.size }))
+          this.h.onHello?.(sentSize)
           ws.send(JSON.stringify({ t: 'visible', v: document.visibilityState === 'visible' }))
           this.startPing(ws, gen)
         } else if (m.t === 'state') {
@@ -188,6 +206,7 @@ export class TermConnection {
         } else if (m.t === 'error' && m.code === 'too_many_viewers') {
           // Open in too many windows already: retrying would only be refused again.
           this.full = true
+          if (this.queue.length > 0) this.h.onDropped?.()
           this.queue = []
           this.drop()
           this.setStatus('full')
@@ -231,6 +250,7 @@ export class TermConnection {
       this.ws = null
       if (ev.code === 4429) {
         this.full = true
+        if (this.queue.length > 0) this.h.onDropped?.()
         this.queue = []
         this.setStatus('full')
       }

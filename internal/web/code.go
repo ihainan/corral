@@ -556,6 +556,7 @@ func (s *Server) runCode(ctx context.Context, key [2]int64, j *codeJob, h *store
 	if err == nil {
 		sock, instance, err = s.startCode(ctx, key, h, f, step, still)
 	}
+	inherited := false
 	s.code.update(key, j, func(j *codeJob) {
 		j.running = false
 		if err == nil {
@@ -563,6 +564,7 @@ func (s *Server) runCode(ctx context.Context, key [2]int64, j *codeJob, h *store
 			j.status = codeStatus{State: codeReady, URL: s.cfg.Origin() + "/fwd/" + f.ID}
 			return
 		}
+		inherited = j.socket != ""
 		j.socket = "" // an instance it began with did not pass the check either
 		var cf *codeFailure
 		if !errors.As(err, &cf) {
@@ -573,6 +575,10 @@ func (s *Server) runCode(ctx context.Context, key [2]int64, j *codeJob, h *store
 		}
 		j.status = codeStatus{State: codeFailed, Error: cf.code, Message: cf.msg}
 	})
+	// Tabs kept open on that instance while it was checked end too, as on stop.
+	if inherited {
+		s.revokeForwardGrants(f.ID, 0)
+	}
 }
 
 // codeRun runs one of the codeserver commands over c and returns its answer

@@ -47,9 +47,18 @@ const FONT_STACK = "'JetBrains Mono', 'SFMono-Regular', Menlo, Consolas, 'PingFa
 // colour and DCS reports. This is only the fallback for telling them apart
 // from typing, see userInputEvent.
 const REPLY = /^(?:\x1b\[[?>]?[\d;]*[cnRt]|\x1b\[\??[\d;]*\$y|\x1b\[[IO]|\x1bP[\s\S]*?\x1b\\|\x1b\][\s\S]*?(?:\x07|\x1b\\))+$/
-// Mouse reports (SGR or X10 encoding); a wheel is buttons 64-67.
-const isMouseReport = (data: string) => /^\x1b\[<\d+;\d+;\d+[Mm]$/.test(data) || /^\x1b\[M...$/s.test(data)
-const isWheelReport = (data: string) => /^\x1b\[<6[4-7];\d+;\d+[Mm]$/.test(data) || /^\x1b\[M[`-c]..$/s.test(data)
+// The button code of a mouse report (SGR or X10/default encoding), or null.
+// A wheel is buttons 64-67, with any modifier bits.
+function mouseButton(data: string): number | null {
+  const sgr = /^\x1b\[<(\d+);\d+;\d+[Mm]$/.exec(data)
+  if (sgr) return Number(sgr[1])
+  return /^\x1b\[M...$/s.test(data) ? data.charCodeAt(3) - 32 : null
+}
+const isMouseReport = (data: string) => mouseButton(data) !== null
+const isWheelReport = (data: string) => {
+  const b = mouseButton(data)
+  return b !== null && (b & 0xc0) === 0x40
+}
 
 export function isTerminalReply(data: string): boolean {
   return REPLY.test(data)
@@ -127,7 +136,7 @@ export function TerminalPage({ id }: { id: string }) {
   // Text from the key bar or an upload goes in at the composer's cursor.
   const insertDraft = useCallback((s: string) => {
     const el = composerRef.current
-    if (!el) return
+    if (!el) return setDraft((d) => d + s) // closed meanwhile: the draft keeps it
     const a = el.selectionStart ?? el.value.length
     const b = el.selectionEnd ?? a
     setDraft(el.value.slice(0, a) + s + el.value.slice(b))
@@ -309,6 +318,13 @@ export function TerminalPage({ id }: { id: string }) {
     // must not reach the host as typing; they are dropped until the replay ends.
     let replaying = false
     let lastDropToast = 0
+    let sizeGraceUntil = 0
+    const droppedInput = () => {
+      const now = Date.now()
+      if (now - lastDropToast < 5000) return
+      lastDropToast = now
+      toast(t('term.inputDropped'), true)
+    }
     const conn = new TermConnection(id, {
       // RIS (ESC c) travels in the same write queue as the replay that follows,
       // so output still being parsed cannot land after the reset.
@@ -344,10 +360,12 @@ export function TerminalPage({ id }: { id: string }) {
           safeFit()
           return
         }
-        if (sent === cols + 'x' + rows) {
-          // The size this window reported last, now outdated (it was taken
-          // before the font loaded, say): not another viewer's. Report the
-          // current one, unless that is already on its way.
+        if (sent === cols + 'x' + rows || resizeTimer !== undefined || Date.now() < sizeGraceUntil) {
+          // Not another viewer's: the size this window reported last, now
+          // outdated (taken before the font loaded, say), a size from before
+          // this window's report reached the gateway, or one about to be
+          // replaced by a resize of this window. Report the current size,
+          // unless that is already on its way.
           following = null
           setFollowing(null)
           applyScale()
@@ -359,9 +377,7 @@ export function TerminalPage({ id }: { id: string }) {
         // programs draw for that size lines up, until this one takes over.
         following = { cols, rows }
         setFollowing({ cols, rows })
-        // A resize of this window still waiting to be reported is outdated now.
-        clearTimeout(resizeTimer)
-        resizeTimer = undefined
+        sent = null // a later report of that old size is another viewer's
         conn.follow()
         if (term.cols !== cols || term.rows !== rows) term.resize(cols, rows)
         requestAnimationFrame(applyScale)
@@ -372,15 +388,14 @@ export function TerminalPage({ id }: { id: string }) {
       },
       onLive: () => term.write('', () => (replaying = false)),
       // Every new socket: the herdr summary is old until this one sends its own.
-      onHello: () => setHerdrFresh(false),
+      onHello: (sentSize) => {
+        setHerdrFresh(false)
+        // The size the gateway shows first may predate the one just reported.
+        sizeGraceUntil = sentSize ? Date.now() + 1500 : 0
+      },
       // Input typed while disconnected is sent once the connection is back,
       // unless there was too much of it or it waited too long.
-      onDropped: () => {
-        const now = Date.now()
-        if (now - lastDropToast < 5000) return
-        lastDropToast = now
-        toast(t('term.inputDropped'), true)
-      },
+      onDropped: () => droppedInput(),
     })
     connRef.current = conn
     // Sizes go out through here, so a size coming back can be told apart:
@@ -398,8 +413,12 @@ export function TerminalPage({ id }: { id: string }) {
     // and several Ctrl+V are handled one after another, in order.
     type Held = string | Uint8Array | { clip: Promise<File | null> }
     let held: Held[] | null = null
+    let heldSince = 0 // the connection's open count when input started waiting
     let draining = false
     let direct = false // the path of the image being handled skips the queue
+    // Held input goes out only over the connection it was typed on: after a
+    // reconnect the screen may have changed (as for input typed offline).
+    const stillSame = () => conn.isOpen() && conn.opens === heldSince
     const send = (d: string | Uint8Array) => void conn.send(d)
     const out = (d: string | Uint8Array) => {
       if (held && !direct) held.push(d)
@@ -408,6 +427,7 @@ export function TerminalPage({ id }: { id: string }) {
     outRef.current = out
     heldRef.current = () => held !== null
     const pasteDirect = (s: string) => {
+      if (!stillSame()) return droppedInput()
       direct = true
       try {
         term.paste(s)
@@ -420,6 +440,10 @@ export function TerminalPage({ id }: { id: string }) {
       draining = true
       try {
         while (held && held.length > 0) {
+          if (!stillSame()) {
+            droppedInput()
+            break
+          }
           const d = held[0]
           if (typeof d === 'object' && 'clip' in d) {
             const file = await d.clip
@@ -569,7 +593,13 @@ export function TerminalPage({ id }: { id: string }) {
         out(data)
       }
     })
+    // Mouse reports in the default encoding come here; they are the user's.
     const binSub = term.onBinary((data) => {
+      if (!isWheelReport(data)) {
+        const scaledClick = following && scale < 1
+        takeOverRef.current()
+        if (scaledClick) return
+      }
       const bytes = new Uint8Array(data.length)
       for (let i = 0; i < data.length; i++) bytes[i] = data.charCodeAt(i) & 0xff
       out(bytes)
@@ -630,7 +660,10 @@ export function TerminalPage({ id }: { id: string }) {
         // (Ctrl+V then Enter in vim inserts a literal CR).
         takeOverRef.current()
         settleRef.current()
-        held ??= []
+        if (!held) {
+          held = []
+          heldSince = conn.opens
+        }
         held.push({ clip: Promise.race([clipboardImage(), new Promise<null>((r) => setTimeout(() => r(null), 1500))]) })
         void drain()
         return false
@@ -923,12 +956,14 @@ export function TerminalPage({ id }: { id: string }) {
   const uploadRef = useRef<(files: File[], paste?: (s: string) => void) => Promise<void>>(async () => {})
   const upload = useCallback(
     async (files: File[], paste?: (s: string) => void) => {
+      // Decided when the upload starts, not when it ends.
+      const toDraft = !paste && !!composerRef.current
       for (const f of files) {
         toast(t('term.uploading', { name: f.name || 'image' }))
         try {
           const r = await uploadFile(id, f)
           const quoted = shellPath(r.path)
-          if (quoted && !paste && composerRef.current) {
+          if (quoted && toDraft) {
             insertDraft(quoted + ' ')
             toast(t('term.uploaded'))
           } else if (quoted) {
@@ -1027,8 +1062,12 @@ export function TerminalPage({ id }: { id: string }) {
       toast(t('term.tooLong'), true) // keep the draft; upload it as a file instead
       return
     }
-    if (heldRef.current()) outRef.current(payload) // after the input waiting for a clipboard image
-    else if (conn.send(payload) !== 'sent') {
+    // Sent at once or not at all: the draft stays until it surely went out.
+    if (heldRef.current()) {
+      toast(t('term.waitUpload'), true) // a clipboard image is still being uploaded
+      return
+    }
+    if (!conn.sendNow(payload)) {
       toast(t('term.notConnected'), true)
       return
     }

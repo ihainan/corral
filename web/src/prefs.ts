@@ -40,10 +40,12 @@ let owner: number | null = null
 let state: Prefs = readCache(null)
 const subs = new Set<() => void>()
 
-function emit() {
+// write is false when the cache already holds the state (another tab wrote
+// it): writing back would start the other tab's storage event again.
+function emit(write = true) {
   try {
     const key = cacheKey(owner)
-    if (key) localStorage.setItem(key, JSON.stringify(state))
+    if (key && write) localStorage.setItem(key, JSON.stringify(state))
   } catch {
     /* ignore */
   }
@@ -187,7 +189,7 @@ window.addEventListener('storage', (e) => {
       const other = sanitize(JSON.parse(e.newValue)) as Record<string, unknown>
       for (const k of pending.keys()) delete other[k]
       state = { ...state, ...other }
-      emit()
+      emit(false)
     } catch {
       /* ignore */
     }

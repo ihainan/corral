@@ -318,7 +318,27 @@ func (s *Server) apiPatchSettings(w http.ResponseWriter, r *http.Request) {
 			_ = json.Unmarshal(raw, &writers)
 		}
 		delete(obj, "_ts") // bookkeeping of earlier formats
-		delete(obj, "_w")
+		// The previous format kept only the last writer of each field: carry
+		// those numbers over, so a late request from that writer still loses.
+		if raw, ok := obj["_w"]; ok {
+			var last map[string]struct {
+				ID  string `json:"id"`
+				Seq int64  `json:"seq"`
+			}
+			_ = json.Unmarshal(raw, &last)
+			for k, lw := range last {
+				i := slices.IndexFunc(writers, func(w settingWriter) bool { return w.ID == lw.ID })
+				if i < 0 {
+					writers = append(writers, settingWriter{ID: lw.ID, Seq: map[string]int64{}})
+					i = len(writers) - 1
+				}
+				if writers[i].Seq == nil {
+					writers[i].Seq = map[string]int64{}
+				}
+				writers[i].Seq[k] = max(writers[i].Seq[k], lw.Seq)
+			}
+			delete(obj, "_w")
+		}
 		// This writer moves to the end (heard from last), with its record.
 		me := settingWriter{ID: b.Writer, Seq: map[string]int64{}}
 		if i := slices.IndexFunc(writers, func(w settingWriter) bool { return w.ID == b.Writer }); i >= 0 {

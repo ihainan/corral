@@ -521,7 +521,7 @@ func TestCodeServerReopenKeepsOpenTabsServed(t *testing.T) {
 	if st["state"] != codeReady {
 		t.Fatalf("start: %v", st)
 	}
-	f, _ := e.openCode(e.owner, st)
+	f, id := e.openCode(e.owner, st)
 	pid := e.pid()
 	release := e.holdTurn(t) // the second open waits here, in "checking"
 	mustStatus(t, e.owner.do("POST", fmt.Sprintf("/api/hosts/%d/code", e.hostID), nil), 202, "open again")
@@ -542,9 +542,19 @@ func TestCodeServerReopenKeepsOpenTabsServed(t *testing.T) {
 	e.mu.Lock()
 	e.refuse = func(string) bool { return true } // the next check fails on the host
 	e.mu.Unlock()
-	if st, _ := e.start(e.owner); st["state"] != codeFailed {
+	// A tab connected while that check runs (through the inherited socket)
+	// ends when the check fails.
+	release = e.holdTurn(t)
+	mustStatus(t, e.owner.do("POST", fmt.Sprintf("/api/hosts/%d/code", e.hostID), nil), 202, "open once more")
+	ws, err := e.dialCode(f, id)
+	if err != nil || !echoes(ws) {
+		t.Fatalf("VS Code WebSocket during the check: %v", err)
+	}
+	release()
+	if st, _ := e.waitCode(e.owner); st["state"] != codeFailed {
 		t.Fatalf("a failing check: %v", st)
 	}
+	mustClose(t, ws, "a VS Code tab after its instance failed the check")
 	if s := e.h.srv.code.socket(ownerID, e.hostID); s != "" {
 		t.Fatalf("an instance whose check failed is still served at %q", s)
 	}

@@ -516,6 +516,27 @@ func TestOpenGateWaitsCancelsAndForgets(t *testing.T) {
 // Settings: a later arrival wins, except that a writer's own older request
 // never undoes its newer one; values are checked; and a request made for
 // another account is refused.
+// Settings saved in the previous format (only the last writer of each field)
+// keep that writer's request numbers when the new format takes over.
+func TestSettingsOldFormatKeepsRequestNumbers(t *testing.T) {
+	h := newHarness(t)
+	admin := h.admin()
+	uid := admin.do("GET", "/api/me", nil).json()["id"]
+	old := `{"termTheme":"dracula","_w":{"termTheme":{"id":"pageAAAA","seq":5}}}`
+	if err := h.srv.store.MergeUserSettings(context.Background(), int64(uid.(float64)), func(string) (string, error) { return old, nil }); err != nil {
+		t.Fatal(err)
+	}
+	// Another page writes first, then A's late request numbered below 5 arrives.
+	mustStatus(t, admin.do("PATCH", "/api/me/settings", map[string]any{"user": uid, "writer": "pageBBBB", "seq": 1, "set": map[string]any{"keybar": false}}), 200, "B")
+	r := admin.do("PATCH", "/api/me/settings", map[string]any{"user": uid, "writer": "pageAAAA", "seq": 4, "set": map[string]any{"termTheme": "nord"}})
+	if sup, _ := r.json()["superseded"].([]any); r.Status != 200 || len(sup) != 1 {
+		t.Fatalf("A's older request was accepted after the format change: %d %s", r.Status, r.Body)
+	}
+	if got := admin.do("GET", "/api/me/settings", nil).json(); got["termTheme"] != "dracula" {
+		t.Fatalf("settings: %v", got)
+	}
+}
+
 func TestSettingsPatchOrderingValidationAndAccount(t *testing.T) {
 	h := newHarness(t)
 	admin := h.admin()
