@@ -30,6 +30,7 @@ func TestRouteTableIsExplicit(t *testing.T) {
 	public := map[string]bool{
 		"GET /api/bootstrap": true, "POST /api/setup": true, "POST /api/login": true,
 		"GET /api/invites/{token}": true, "POST /api/invites/{token}/redeem": true,
+		"GET /fwd/{id}": true, // checks the sign-in itself and redirects to it
 	}
 	for _, r := range h.srv.Routes() {
 		key := r.Method + " " + r.Pattern
@@ -302,7 +303,8 @@ func TestRemoteExecCallSitesAreReviewed(t *testing.T) {
 		"term/manager.go: err = sess.Start(HerdrCommand(opt.HerdrSession))":                                               true,
 		"web/api_sessions.go: sess, err := s.terms.Start(ctx, res, u.ID, h.ID, h.Name, dialed.Client, term.StartOptions{": true,
 		"herdr/client.go: out, err := s.Output(DiscoverCommand)":                                                          true,
-		"web/herdr.go: w.Run(ctx)": true, // watcher loop, runs no remote command itself
+		"web/herdr.go: w.Run(ctx)":                             true, // watcher loop, runs no remote command itself
+		"web/ports.go: out, err := sess.Output(listenCommand)": true,
 	}
 	re := regexp.MustCompile(`\.(Start|Run|Output|CombinedOutput)\(`)
 	root, _ := filepath.Abs("..")

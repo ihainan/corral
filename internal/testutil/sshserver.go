@@ -4,6 +4,8 @@ package testutil
 
 import (
 	"bytes"
+	"io"
+	"strconv"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/binary"
@@ -119,6 +121,10 @@ func (s *SSHServer) serve(c net.Conn, cfg *ssh.ServerConfig, root string) {
 		}
 	}()
 	for nc := range chans {
+		if nc.ChannelType() == "direct-tcpip" {
+			go directTCPIP(nc)
+			continue
+		}
 		if nc.ChannelType() != "session" {
 			nc.Reject(ssh.UnknownChannelType, "only sessions")
 			continue
@@ -196,4 +202,33 @@ func (s *SSHServer) session(ch ssh.Channel, reqs <-chan *ssh.Request, root strin
 			}
 		}
 	}
+}
+
+// directTCPIP serves "ssh -L"-style channels by dialing the requested address.
+func directTCPIP(nc ssh.NewChannel) {
+	var req struct {
+		Host       string
+		Port       uint32
+		OriginHost string
+		OriginPort uint32
+	}
+	if err := ssh.Unmarshal(nc.ExtraData(), &req); err != nil {
+		nc.Reject(ssh.ConnectionFailed, "bad request")
+		return
+	}
+	conn, err := net.Dial("tcp", net.JoinHostPort(req.Host, strconv.Itoa(int(req.Port))))
+	if err != nil {
+		nc.Reject(ssh.ConnectionFailed, err.Error())
+		return
+	}
+	ch, reqs, err := nc.Accept()
+	if err != nil {
+		conn.Close()
+		return
+	}
+	go ssh.DiscardRequests(reqs)
+	go func() { io.Copy(ch, conn); ch.CloseWrite() }()
+	io.Copy(conn, ch)
+	conn.Close()
+	ch.Close()
 }

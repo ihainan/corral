@@ -323,6 +323,7 @@ func (s *Server) apiDeleteHost(w http.ResponseWriter, r *http.Request) {
 	}
 	// Deleted first, then closed: a connect finishing now fails its host re-check.
 	s.cancelPendingForHost(u.ID, h.ID)
+	s.closeHostForwards(u.ID, h.ID)
 	s.terms.CloseHost(u.ID, h.ID, "host deleted")
 	if h.Auth == store.AuthPassword && h.CredentialID != nil {
 		_ = s.store.DeleteCredential(r.Context(), u.ID, *h.CredentialID)

@@ -5,7 +5,7 @@ import { FitAddon } from '@xterm/addon-fit'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import { WebglAddon } from '@xterm/addon-webgl'
-import { ArrowLeft, LayoutGrid, ImagePlus, MessageSquareText, MoreVertical, Minus, Plus, TextSelect, Keyboard as KeyboardIcon, Power, X } from 'lucide-react'
+import { ArrowLeft, Globe, LayoutGrid, ImagePlus, MessageSquareText, MoreVertical, Minus, Plus, TextSelect, Keyboard as KeyboardIcon, Power, X } from 'lucide-react'
 import { api, errorText, uploadFile, type HerdrSummary, type Host, type SessionInfo } from '../api'
 import { t } from '../i18n'
 import { navigate } from '../router'
@@ -18,6 +18,8 @@ import { applyMods, specialKey, type Mods, type SpecialKey } from '../terminal/k
 import { KeyBar, type ModState } from '../terminal/KeyBar'
 import { darkTheme, lightTheme } from '../terminal/themes'
 import { HerdrPanel } from '../terminal/HerdrPanel'
+import { PortsDialog, openForward } from '../terminal/PortsDialog'
+import { useSession } from '../app'
 
 const isTouch = window.matchMedia('(pointer: coarse)').matches || navigator.maxTouchPoints > 0
 const FONT_STACK = "'JetBrains Mono', 'SFMono-Regular', Menlo, Consolas, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', monospace"
@@ -56,6 +58,10 @@ export function TerminalPage({ id }: { id: string }) {
   const [herdr, setHerdr] = useState<HerdrSummary | null>(null)
   const [panel, setPanel] = useState(() => window.matchMedia('(min-width: 1000px)').matches)
   const showKeybar = isTouch && prefs.keybar
+  const { boot } = useSession()
+  const [portsOpen, setPortsOpen] = useState(false)
+  // Links to localhost in the terminal open through port forwarding.
+  const linkTarget = useRef<(uri: string) => void>(() => {})
 
   // Latest modifier state for the xterm data callback.
   const mods = useRef<{ ctrl: ModState; alt: ModState }>({ ctrl: 'off', alt: 'off' })
@@ -93,17 +99,13 @@ export function TerminalPage({ id }: { id: string }) {
       macOptionIsMeta: p.optionIsMeta,
       rescaleOverlappingGlyphs: true,
       theme: isDark() ? darkTheme : lightTheme,
-      linkHandler: {
-        activate: (_e, uri) => {
-          if (/^https?:\/\//i.test(uri)) window.open(uri, '_blank', 'noopener,noreferrer')
-        },
-      },
+      linkHandler: { activate: (_e, uri) => linkTarget.current(uri) },
     })
     term.loadAddon(new Unicode11Addon())
     term.unicode.activeVersion = '11'
     const fit = new FitAddon()
     term.loadAddon(fit)
-    term.loadAddon(new WebLinksAddon((_e, uri) => window.open(uri, '_blank', 'noopener,noreferrer')))
+    term.loadAddon(new WebLinksAddon((_e, uri) => linkTarget.current(uri)))
     term.open(el)
     // The DOM renderer is the default: it is correct at every pixel ratio.
     // WebGL is faster on desktops with real GPUs and is opt-in.
@@ -547,6 +549,18 @@ export function TerminalPage({ id }: { id: string }) {
     setCopyText(lines.join('\n'))
   }
 
+  linkTarget.current = (uri: string) => {
+    if (!/^https?:\/\//i.test(uri)) return
+    const u = new URL(uri)
+    const local = ['localhost', '127.0.0.1', '0.0.0.0', '[::1]'].includes(u.hostname)
+    const hostId = info?.host_id
+    if (local && boot.forwarding && hostId) {
+      void openForward(hostId, Number(u.port || (u.protocol === 'https:' ? 443 : 80)), u.pathname + u.search, toast)
+    } else {
+      window.open(uri, '_blank', 'noopener,noreferrer')
+    }
+  }
+
   const hostIdForReconnect = info?.host_id ?? Number(local.get('corral.sessHost.' + id) || 0)
   const { connect, dialogs } = useConnect((s) => navigate('/t/' + s.id, true))
   const reconnect = async () => {
@@ -620,6 +634,9 @@ export function TerminalPage({ id }: { id: string }) {
           {(close) => (
             <>
               <button onClick={() => { close(); openCopyMode() }}><TextSelect size={16} />{t('term.copyMode')}</button>
+              {boot.forwarding && info && (
+                <button onClick={() => { close(); setPortsOpen(true) }}><Globe size={16} />{t('ports.title')}</button>
+              )}
               <button onClick={() => setPrefs({ fontSize: Math.min(28, prefs.fontSize + 1) })}><Plus size={16} />{t('term.fontLarger')}</button>
               <button onClick={() => setPrefs({ fontSize: Math.max(9, prefs.fontSize - 1) })}><Minus size={16} />{t('term.fontSmaller')}</button>
               {isTouch && (
@@ -735,6 +752,7 @@ export function TerminalPage({ id }: { id: string }) {
       />
 
       {copyText !== null && <CopyMode text={copyText} onClose={() => setCopyText(null)} />}
+      {portsOpen && info && <PortsDialog hostId={info.host_id} onClose={() => setPortsOpen(false)} />}
       {confirm}
       {dialogs}
     </div>

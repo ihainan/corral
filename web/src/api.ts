@@ -182,3 +182,17 @@ export interface HerdrSummary {
   workspaces: HerdrWorkspace[]
   waiting: number
 }
+
+export interface Forward {
+  id: string
+  host_id: number
+  port: number
+  sharing: 'private' | 'users'
+  created_at: number
+  url: string
+}
+
+export interface ListeningPort {
+  port: number
+  address: string
+}

@@ -53,6 +53,7 @@ type Server struct {
 
 	herdrSocks herdrSockets
 	notifier   *notify.Notifier // nil disables push
+	fwd        *forwarder
 	vis        visibility
 
 	sockMu  sync.Mutex
@@ -82,7 +83,8 @@ func New(d Deps) *Server {
 	s := &Server{cfg: d.Config, store: d.Store, auth: d.Auth, vault: d.Vault, guard: d.Guard, terms: d.Terms,
 		log: d.Log, mux: http.NewServeMux(), static: d.Static, socks: map[int64]map[*liveSocket]struct{}{},
 		pending: map[int64]map[*liveSocket]struct{}{}, herdrSocks: herdrSockets{path: map[string]string{}},
-		notifier: d.Notifier, vis: visibility{seen: map[string]map[*liveSocket]bool{}}}
+		notifier: d.Notifier, vis: visibility{seen: map[string]map[*liveSocket]bool{}}, fwd: newForwarder()}
+	go s.reapForwardConns(make(chan struct{}))
 	s.terms.OnAlert = s.onTerminalAlert
 	prev := s.auth.OnUserGone
 	s.auth.OnUserGone = func(userID int64) {
@@ -92,6 +94,7 @@ func New(d Deps) *Server {
 		// Cancel what is still connecting and the open sockets first: those must
 		// stop immediately; closing terminals can take a moment per host.
 		s.closeSockets(userID, "")
+		s.closeUserForwards(userID)
 		s.terms.CloseUser(userID, "access revoked")
 	}
 	s.registerRoutes()
@@ -100,7 +103,17 @@ func New(d Deps) *Server {
 
 func (s *Server) Routes() []Route { return append([]Route(nil), s.routes...) }
 
-func (s *Server) Handler() http.Handler { return s.withHeaders(s.mux) }
+// Handler serves the main site, and forwarded ports on their own subdomains.
+func (s *Server) Handler() http.Handler {
+	main := s.withHeaders(s.mux)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if port, id, ok := s.forwardLabel(r.Host); ok {
+			s.serveForward(w, r, port, id)
+			return
+		}
+		main.ServeHTTP(w, r)
+	})
+}
 
 func (s *Server) registerRoutes() {
 	// Public
@@ -136,6 +149,13 @@ func (s *Server) registerRoutes() {
 	s.handle("GET /api/sessions/{id}/ws", SignedIn, s.apiSessionSocket)
 	s.handle("POST /api/sessions/{id}/upload", SignedIn, s.apiUpload)
 	s.handle("POST /api/sessions/{id}/herdr", SignedIn, s.apiHerdrAction)
+
+	s.handle("GET /api/forwards", SignedIn, s.apiListForwards)
+	s.handle("POST /api/forwards", SignedIn, s.apiCreateForward)
+	s.handle("PUT /api/forwards/{id}", SignedIn, s.apiUpdateForward)
+	s.handle("DELETE /api/forwards/{id}", SignedIn, s.apiDeleteForward)
+	s.handle("GET /api/hosts/{id}/ports", SignedIn, s.apiHostPorts)
+	s.handle("GET /fwd/{id}", Public, s.handleForwardOpen)
 
 	s.handle("GET /api/push", SignedIn, s.apiPushInfo)
 	s.handle("POST /api/push/subscriptions", SignedIn, s.apiPushSubscribe)

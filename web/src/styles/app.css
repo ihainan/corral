@@ -238,3 +238,6 @@ table.table { border-collapse: collapse; width: 100%; font-size: 13.5px; }
 .table tr:last-child td { border-bottom: 0; }
 .table td.nowrap { white-space: nowrap; font-variant-numeric: tabular-nums; }
 .table td.detail { color: var(--muted); font-family: var(--font-mono); font-size: 12px; word-break: break-all; min-width: 200px; }
+
+.port-item { min-height: 52px; }
+.port-share { min-height: 32px; padding: 3px 8px; font-size: 13px; width: auto; margin-top: 4px; }
