@@ -55,8 +55,12 @@ type Sub struct {
 	C      chan Chunk
 	Events chan Event
 	Meta   chan []byte // side information (e.g. herdr state); only the latest matters
-	done   chan struct{}
-	once   sync.Once
+	// The terminal size whenever it changes (and once on subscribing); only
+	// the latest matters. Viewers of another size follow it until they take
+	// the terminal over by sending their own size.
+	Size chan [2]int
+	done chan struct{}
+	once sync.Once
 }
 
 func (s *Sub) Done() <-chan struct{} { return s.done }
@@ -268,7 +272,8 @@ func (s *Session) Attach(fromOffset uint64, haveOffset bool) (sub *Sub, backlog 
 	if reset {
 		backlog, start = s.buf.all()
 	}
-	sub = &Sub{C: make(chan Chunk, subBuffer), Events: make(chan Event, 4), Meta: make(chan []byte, 1), done: make(chan struct{})}
+	sub = &Sub{C: make(chan Chunk, subBuffer), Events: make(chan Event, 4), Meta: make(chan []byte, 1), Size: make(chan [2]int, 1), done: make(chan struct{})}
+	sub.Size <- [2]int{s.cols, s.rows}
 	if s.meta != nil {
 		sub.Meta <- s.meta
 	}
@@ -331,6 +336,18 @@ func (s *Session) Resize(cols, rows int) error {
 	same := s.cols == cols && s.rows == rows
 	s.cols, s.rows = cols, rows
 	running := s.state == StateRunning
+	if !same {
+		for sub := range s.subs {
+			select {
+			case <-sub.Size:
+			default:
+			}
+			select {
+			case sub.Size <- [2]int{cols, rows}:
+			default:
+			}
+		}
+	}
 	s.mu.Unlock()
 	if same || !running {
 		return nil

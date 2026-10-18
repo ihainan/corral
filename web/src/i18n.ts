@@ -371,6 +371,8 @@ const zh = {
   'code.waitHint': '关掉这个窗口只是不再等待，主机上的安装和启动会继续。',
   'code.waitTitle': '正在打开 VS Code：{name}',
   'code.waitBody': '正在 {name} 上启动 VS Code，就绪后这个页面会自动打开它。进度在原来的页面里。',
+  'term.following': '正在按另一台设备的尺寸显示（{cols}×{rows}），在这里输入会自动切换',
+  'term.takeOver': '改用本设备尺寸',
 }
 
 type Key = keyof typeof zh
@@ -746,6 +748,8 @@ const en: Record<Key, string> = {
   'code.waitHint': 'Closing this only stops waiting; installing and starting continue on the host.',
   'code.waitTitle': 'Opening VS Code: {name}',
   'code.waitBody': 'Starting VS Code on {name}. This page opens it when ready; progress is shown on the original page.',
+  'term.following': 'Showing another device\'s size ({cols}×{rows}); typing here switches to this one',
+  'term.takeOver': 'Use this device\'s size',
 }
 
 const tables: Record<string, Record<Key, string>> = { 'zh-CN': zh, en }

@@ -326,6 +326,8 @@ func (s *Server) apiCloseSession(w http.ResponseWriter, r *http.Request) {
 // Browser → server
 //   binary: keyboard input
 //   text:   {"t":"resize","cols":N,"rows":N} | {"t":"ping","ts":N}
+//   (server text also includes {"t":"size","cols":N,"rows":N}: the terminal's
+//   current size, sent on attach and whenever any viewer changes it)
 
 const (
 	maxFrame          = 64 << 10
@@ -535,6 +537,10 @@ func (s *Server) apiSessionSocket(w http.ResponseWriter, r *http.Request) {
 			err := c.Write(wctx, websocket.MessageText, m)
 			wcancel()
 			if err != nil {
+				return
+			}
+		case sz := <-sub.Size:
+			if err := writeText(map[string]any{"t": "size", "cols": sz[0], "rows": sz[1]}); err != nil {
 				return
 			}
 		}

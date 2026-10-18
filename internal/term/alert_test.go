@@ -115,3 +115,26 @@ func TestAlertScanner(t *testing.T) {
 		t.Fatalf("alerts: %+v", got)
 	}
 }
+
+// A size change reaches every viewer, so the others can follow it.
+func TestResizeTellsEveryViewer(t *testing.T) {
+	s := &Session{subs: map[*Sub]struct{}{}, state: StateExited, cols: 80, rows: 24}
+	a, b := &Sub{Size: make(chan [2]int, 1)}, &Sub{Size: make(chan [2]int, 1)}
+	s.subs[a], s.subs[b] = struct{}{}, struct{}{}
+	if err := s.Resize(120, 40); err != nil {
+		t.Fatal(err)
+	}
+	for _, sub := range []*Sub{a, b} {
+		if got := <-sub.Size; got != [2]int{120, 40} {
+			t.Fatalf("viewer got %v", got)
+		}
+	}
+	if err := s.Resize(120, 40); err != nil { // unchanged: nothing new to tell
+		t.Fatal(err)
+	}
+	select {
+	case got := <-a.Size:
+		t.Fatalf("an unchanged size was sent again: %v", got)
+	default:
+	}
+}

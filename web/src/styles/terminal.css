@@ -215,3 +215,9 @@ html.term-dark .overlay, html.term-dark .menu, html.term-dark .toast {
 .herdr-ws:disabled:hover, .herdr-agent:disabled:hover { background: none; }
 
 
+.ime-debug { position: absolute; z-index: 60; top: calc(env(safe-area-inset-top, 0px) + 48px); left: 4px; right: 4px; max-height: 45%; overflow: auto; background: rgba(0, 0, 0, 0.85); color: #9f9; border-radius: 6px; padding: 6px; }
+.ime-debug pre { margin: 0; font: 10px/1.35 var(--font-mono); white-space: pre-wrap; word-break: break-all; }
+.ime-debug .btn { float: right; height: 26px; }
+.term-following { gap: 12px; justify-content: center; padding: 0 12px; }
+.term-following .link-btn { color: var(--term-accent-text); font-size: 12px; white-space: nowrap; }
+.term-following span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

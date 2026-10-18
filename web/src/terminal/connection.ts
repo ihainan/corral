@@ -23,6 +23,7 @@ export interface Handlers {
   onEnd(info: EndInfo): void
   onLatency(ms: number): void
   onMeta?(m: any): void // side information such as herdr state
+  onSize?(cols: number, rows: number): void // the terminal's size as set by whichever viewer set it last
   onLive?(): void // the replayed backlog has been delivered
   onHello?(): void // a new socket was accepted; state from the old one is stale
 }
@@ -157,6 +158,8 @@ export class TermConnection {
           this.h.onLive?.()
         } else if (m.t === 'herdr') {
           this.h.onMeta?.(m)
+        } else if (m.t === 'size') {
+          this.h.onSize?.(m.cols, m.rows)
         } else if (m.t === 'pong') {
           clearTimeout(this.pongDeadline)
           this.h.onLatency(Math.max(0, Date.now() - m.ts))

@@ -139,6 +139,7 @@ export function TerminalPage({ id }: { id: string }) {
     if (!v && !isTouch) termRef.current?.focus()
   }
   const [sessions, setSessions] = useState<SessionInfo[] | null>(null)
+  const [imeLines, setImeLines] = useState<string[]>([])
   const [sessionsFailed, setSessionsFailed] = useState(false)
   // False from a disconnect until this connection sends a new herdr summary.
   const [herdrFresh, setHerdrFresh] = useState(true)
@@ -169,6 +170,8 @@ export function TerminalPage({ id }: { id: string }) {
   // Latest modifier state for the xterm data callback.
   const openComposerRef = useRef<() => void>(() => {})
   const settleRef = useRef<() => void>(() => {})
+  const takeOverRef = useRef<() => void>(() => {})
+  const [following, setFollowing] = useState<{ cols: number; rows: number } | null>(null)
   const outRef = useRef<(d: string | Uint8Array) => void>(() => {})
   const composingRef = useRef<() => boolean>(() => false)
   const mods = useRef<{ ctrl: ModState; alt: ModState }>({ ctrl: 'off', alt: 'off' })
@@ -232,7 +235,18 @@ export function TerminalPage({ id }: { id: string }) {
     ta?.setAttribute('autocorrect', 'off')
     ta?.setAttribute('spellcheck', 'false')
 
+    // Set while another viewer's size is shown (see onSize); fitting to this
+    // window then waits until this viewer takes the terminal over.
+    let following: { cols: number; rows: number } | null = null
+    takeOverRef.current = () => {
+      if (!following) return
+      following = null
+      setFollowing(null)
+      safeFit()
+      conn.resize(term.cols, term.rows) // tell the host even if nothing changed locally
+    }
     const safeFit = () => {
+      if (following) return
       try {
         fit.fit()
       } catch {
@@ -282,6 +296,22 @@ export function TerminalPage({ id }: { id: string }) {
       onStatus: setStatus,
       onEnd: setEnd,
       onLatency: setLatency,
+      onSize: (cols, rows) => {
+        const mine = fit.proposeDimensions()
+        if (!mine || (mine.cols === cols && mine.rows === rows)) {
+          // This window's own size (again): fit to it, in case another
+          // viewer's size was being shown until now.
+          following = null
+          setFollowing(null)
+          safeFit()
+          return
+        }
+        // Another viewer set this size: show the terminal at it, so what the
+        // programs draw for that size lines up, until this one takes over.
+        following = { cols, rows }
+        setFollowing({ cols, rows })
+        if (term.cols !== cols || term.rows !== rows) term.resize(cols, rows)
+      },
       onMeta: (m) => {
         setHerdr(m as HerdrSummary)
         setHerdrFresh(true)
@@ -397,7 +427,22 @@ export function TerminalPage({ id }: { id: string }) {
     const onUserInput = userInputEvent(term)
     let userData = false
     const userSub = onUserInput?.(() => (userData = true))
+    // Diagnostics for input methods on devices we cannot reproduce: with
+    // #imedebug in the address, the last events and what was sent are shown.
+    const imeLog = location.hash.includes('imedebug') ? (line: string) => setImeLines((l) => [...l.slice(-29), line]) : null
+    if (imeLog && ta) {
+      const describe = (e: Event) => {
+        const k = e as KeyboardEvent & InputEvent & CompositionEvent
+        const parts = [e.type, k.key !== undefined ? 'key=' + JSON.stringify(k.key) : '', k.keyCode ? 'kc=' + k.keyCode : '',
+          k.inputType ? 'it=' + k.inputType : '', k.data != null ? 'data=' + JSON.stringify(k.data) : '', k.isComposing ? 'composing' : '',
+          'val=' + JSON.stringify(ta.value.slice(-12))]
+        imeLog(parts.filter(Boolean).join(' '))
+      }
+      for (const t of ['keydown', 'keyup', 'beforeinput', 'input', 'compositionstart', 'compositionupdate', 'compositionend']) ta.addEventListener(t, describe, true)
+    }
     const dataSub = term.onData((data) => {
+      imeLog?.('→ sent ' + JSON.stringify(data))
+      if (!replaying) takeOverRef.current() // typing here takes the terminal over
       const typed = typedChar !== null && data === typedChar && !composing
       const fromUser = userData
       typedChar = null
@@ -417,6 +462,7 @@ export function TerminalPage({ id }: { id: string }) {
     })
     let resizeTimer: number | undefined
     const resizeSub = term.onResize(({ cols, rows }) => {
+      if (following) return // showing another viewer's size; not ours to report
       // Keyboard animations fire many resizes; tell the host once things settle.
       clearTimeout(resizeTimer)
       resizeTimer = window.setTimeout(() => conn.resize(cols, rows), 120)
@@ -781,12 +827,14 @@ export function TerminalPage({ id }: { id: string }) {
   }, [upload])
 
   const sendKey = (k: SpecialKey) => {
+    takeOverRef.current()
     settleRef.current()
     const term = termRef.current
     outRef.current(specialKey(k, activeMods(), term?.modes.applicationCursorKeysMode ?? false))
     releaseOnce()
   }
   const sendText = (s: string) => {
+    takeOverRef.current()
     settleRef.current()
     outRef.current(applyMods(s, activeMods()))
     releaseOnce()
@@ -801,6 +849,7 @@ export function TerminalPage({ id }: { id: string }) {
   // The composer's text and the optional Enter go out as one message, and only
   // while connected; otherwise the draft stays so nothing is half-sent.
   const sendComposer = (submit: boolean) => {
+    takeOverRef.current()
     settleRef.current()
     const term = termRef.current
     const conn = connRef.current
@@ -1036,6 +1085,18 @@ export function TerminalPage({ id }: { id: string }) {
       </header>
 
       {paused && <div className="term-paused" role="status">{t('term.paused')}</div>}
+      {following && !paused && !ended && (
+        <div className="term-paused term-following" role="status">
+          <span>{t('term.following', { cols: following.cols, rows: following.rows })}</span>
+          <button className="link-btn" onClick={() => takeOverRef.current()}>{t('term.takeOver')}</button>
+        </div>
+      )}
+      {imeLines.length > 0 && (
+        <div className="ime-debug">
+          <button className="btn" onClick={() => void copyToClipboard(imeLines.join('\n'))}>{t('common.copy')}</button>
+          <pre>{imeLines.join('\n')}</pre>
+        </div>
+      )}
       <div className={'term-body' + (herdr && panelOpen && !sheetPanel ? ' with-panel' : '') + (paused ? ' is-paused' : '') + (ended ? ' is-ended' : '')}>
         <div className="term-host-el" ref={hostEl} />
         {herdr && panelOpen && !ended && (
