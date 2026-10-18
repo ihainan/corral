@@ -8,3 +8,5 @@ web/dist/*
 *.db-*
 .env
 *.key
+web/tsconfig.tsbuildinfo
+.claude/
