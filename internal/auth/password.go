@@ -63,7 +63,7 @@ func acquireSlot() bool {
 }
 
 const (
-	MinPasswordLen = 10
+	MinPasswordLen = 8
 	MaxPasswordLen = 256
 )
 

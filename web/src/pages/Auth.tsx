@@ -99,7 +99,7 @@ function AccountForm(props: { submitLabel: string; onSubmit: (v: { username: str
         <input id="acct-display" className="input" autoComplete="name" value={display} onChange={(e) => setDisplay(e.target.value)} />
       </Field>
       <Field label={t('login.password')} htmlFor="acct-pass" hint={t('setup.passwordHint')} error={field === 'weak_password' ? error : undefined}>
-        <input id="acct-pass" className="input" type="password" autoComplete="new-password" minLength={10} value={password}
+        <input id="acct-pass" className="input" type="password" autoComplete="new-password" minLength={8} value={password}
           onChange={(e) => setPassword(e.target.value)} required aria-invalid={field === 'weak_password'} />
       </Field>
       {error && !['bad_username', 'username_taken', 'weak_password'].includes(field) && <p className="err" role="alert">{error}</p>}

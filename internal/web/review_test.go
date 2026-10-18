@@ -404,3 +404,12 @@ func TestSessionSurvivesKeyReexchange(t *testing.T) {
 		}
 	}
 }
+
+func TestPasswordPolicyAllowsEightCharacters(t *testing.T) {
+	if err := auth.CheckPasswordPolicy("veB3#jJaH"); err != nil {
+		t.Fatalf("9-character password rejected: %v", err)
+	}
+	if err := auth.CheckPasswordPolicy("short7!"); err == nil {
+		t.Fatal("7-character password accepted")
+	}
+}

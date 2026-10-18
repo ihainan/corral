@@ -198,7 +198,7 @@ function ResetDialog({ user, onClose }: { user: AdminUser; onClose: () => void }
       <form className="form" onSubmit={submit}>
         <p className="lead">{t('admin.resetPasswordBody', { name: user.display_name || user.username })}</p>
         <Field label={t('settings.newPassword')} htmlFor="rp-pw" hint={t('setup.passwordHint')} error={error}>
-          <input id="rp-pw" className="input" type="password" autoComplete="new-password" minLength={10} value={pw} onChange={(e) => setPw(e.target.value)} required />
+          <input id="rp-pw" className="input" type="password" autoComplete="new-password" minLength={8} value={pw} onChange={(e) => setPw(e.target.value)} required />
         </Field>
         <div className="dialog-actions">
           <button type="button" className="btn" onClick={onClose}>{t('common.cancel')}</button>

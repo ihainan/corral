@@ -113,7 +113,7 @@ export function SettingsPage() {
             <input id="s-cur" className="input" type="password" autoComplete="current-password" value={cur} onChange={(e) => setCur(e.target.value)} required />
           </Field>
           <Field label={t('settings.newPassword')} htmlFor="s-next" hint={t('setup.passwordHint')}>
-            <input id="s-next" className="input" type="password" autoComplete="new-password" minLength={10} value={next} onChange={(e) => setNext(e.target.value)} required />
+            <input id="s-next" className="input" type="password" autoComplete="new-password" minLength={8} value={next} onChange={(e) => setNext(e.target.value)} required />
           </Field>
           {pwError && <p className="err" role="alert">{pwError}</p>}
           <div><button className="btn" disabled={busy === 'password'}>{t('settings.password')}</button></div>
