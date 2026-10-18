@@ -1,0 +1,73 @@
+Dracula
+Dracula+
+Nord
+Nord Light
+iTerm2 Solarized Dark
+iTerm2 Solarized Light
+Selenized Dark
+Selenized Light
+Gruvbox Dark
+Gruvbox Dark Hard
+Gruvbox Light
+Gruvbox Material Dark
+Gruvbox Material Light
+Atom One Dark
+Atom One Light
+One Half Dark
+One Half Light
+TokyoNight Night
+TokyoNight Storm
+TokyoNight Moon
+TokyoNight Day
+Catppuccin Mocha
+Catppuccin Macchiato
+Catppuccin Frappe
+Catppuccin Latte
+Monokai Pro
+Monokai Pro Light
+Monokai Classic
+GitHub Dark Default
+GitHub Dark Dimmed
+GitHub Light Default
+Tomorrow Night
+Tomorrow Night Eighties
+Tomorrow
+Rose Pine
+Rose Pine Moon
+Rose Pine Dawn
+Everforest Dark Med
+Everforest Light Med
+Kanagawa Wave
+Kanagawa Dragon
+Kanagawa Lotus
+Ayu
+Ayu Mirage
+Ayu Light
+Material Darker
+Night Owl
+Night Owlish Light
+Snazzy
+Nightfox
+Doom One
+Iceberg Dark
+Iceberg Light
+Oceanic Next
+Xcode Dark
+Xcode Light
+Apple System Colors
+Apple System Colors Light
+Ubuntu
+Zenburn
+Synthwave
+Poimandres
+Vesper
+Flexoki Dark
+Flexoki Light
+Spacegray
+Jellybeans
+Cobalt2
+Horizon
+Sonokai
+Moonfly
+Builtin Tango Dark
+Builtin Tango Light

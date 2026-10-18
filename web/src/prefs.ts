@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from 'react'
 import { api } from './api'
+import { resolveScheme, type Scheme } from './terminal/themes'
 
 // Per-user preferences. Cached locally for a fast first paint, synced to the
 // server so a phone and a laptop share them.
@@ -7,8 +8,8 @@ import { api } from './api'
 export interface Prefs {
   theme: 'system' | 'light' | 'dark'
   // Terminal colours are separate from the page theme: most people want a
-  // dark terminal even in a light UI.
-  termTheme: 'dark' | 'light' | 'ui'
+  // dark terminal even in a light UI. A scheme id, or "ui" (see resolveScheme).
+  termTheme: string
   fontSize: number
   keybar: boolean
   optionIsMeta: boolean
@@ -17,7 +18,7 @@ export interface Prefs {
 
 // Phones get a slightly smaller default so common output fits without wrapping.
 const phone = window.matchMedia('(pointer: coarse) and (max-width: 599px)').matches
-const defaults: Prefs = { theme: 'system', termTheme: 'dark', fontSize: phone ? 13 : 14, keybar: true, optionIsMeta: true, webgl: false }
+const defaults: Prefs = { theme: 'system', termTheme: 'corral-dark', fontSize: phone ? 13 : 14, keybar: true, optionIsMeta: true, webgl: false }
 
 let state: Prefs = load()
 const subs = new Set<() => void>()
@@ -47,14 +48,32 @@ export function setPrefs(patch: Partial<Prefs>) {
   state = { ...state, ...patch }
   emit()
   clearTimeout(saveTimer)
-  saveTimer = window.setTimeout(() => {
-    api('PUT', '/api/me/settings', state).catch(() => {})
-  }, 600)
+  saveTimer = window.setTimeout(save, 600)
 }
+
+function save() {
+  saveTimer = undefined
+  api('PUT', '/api/me/settings', state).catch(() => {})
+}
+
+// A change made just before a reload or closing the tab must still reach
+// the server, or the next page load would read the old value back.
+function flush() {
+  if (saveTimer === undefined) return
+  clearTimeout(saveTimer)
+  saveTimer = undefined
+  void fetch('/api/me/settings', {
+    method: 'PUT', credentials: 'same-origin', keepalive: true,
+    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(state),
+  }).catch(() => {})
+}
+window.addEventListener('pagehide', flush)
+document.addEventListener('visibilitychange', () => document.visibilityState === 'hidden' && flush())
 
 export async function syncPrefsFromServer() {
   try {
     const remote = await api<Partial<Prefs>>('GET', '/api/me/settings')
+    if (saveTimer !== undefined) return // a change made meanwhile wins; it is on its way
     state = { ...defaults, ...state, ...remote }
     emit()
   } catch {
@@ -88,8 +107,12 @@ export function isDark(): boolean {
   return state.theme === 'dark' || (state.theme === 'system' && media.matches)
 }
 
+export function termScheme(): Scheme {
+  return resolveScheme(state.termTheme, isDark())
+}
+
 export function isTermDark(): boolean {
-  return state.termTheme === 'dark' || (state.termTheme === 'ui' && isDark())
+  return termScheme().dark
 }
 
 // The browser chrome colour (status bar, tab strip) follows the page, or the

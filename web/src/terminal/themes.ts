@@ -1,7 +1,9 @@
 import type { ITheme } from '@xterm/xterm'
+import { schemes, type Scheme } from './schemes'
 
-// Terminal palettes. The page chrome around the terminal (top bar, key bar)
-// takes its colours from the same choice, see .term-root.dark/.light.
+// Terminal palettes. Corral's own pair comes first; the rest are the bundled
+// schemes. The page chrome around the terminal (top bar, key bar, composer)
+// is derived from the chosen palette, see chromeVars.
 
 export const lightTheme: ITheme = {
   background: '#ffffff',
@@ -25,4 +27,47 @@ export const darkTheme: ITheme = {
   blue: '#7aa2f7', magenta: '#c99be6', cyan: '#6cc4cf', white: '#c5c9d1',
   brightBlack: '#5c6370', brightRed: '#ff8f8b', brightGreen: '#9adba8', brightYellow: '#f2cc85',
   brightBlue: '#9bbbfa', brightMagenta: '#dcb4f2', brightCyan: '#8fd8e1', brightWhite: '#f2f4f7',
+}
+
+export const corralDark: Scheme = { id: 'corral-dark', name: 'Corral Dark', dark: true, theme: darkTheme }
+export const corralLight: Scheme = { id: 'corral-light', name: 'Corral Light', dark: false, theme: lightTheme }
+export const allSchemes: Scheme[] = [corralDark, corralLight, ...schemes]
+export type { Scheme }
+
+// The stored preference: a scheme id, or "ui" to follow the page theme with
+// Corral's own pair. "dark"/"light" are the values used before schemes.
+export function resolveScheme(pref: string, uiDark: boolean): Scheme {
+  if (pref === 'ui') return uiDark ? corralDark : corralLight
+  if (pref === 'dark') return corralDark
+  if (pref === 'light') return corralLight
+  return allSchemes.find((s) => s.id === pref) ?? corralDark
+}
+
+function mix(a: string, b: string, t: number): string {
+  const p = (h: string) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16))
+  const [x, y] = [p(a), p(b)]
+  return '#' + x.map((v, i) => Math.round(v + (y[i] - v) * t).toString(16).padStart(2, '0')).join('')
+}
+
+// CSS variables for the chrome, blended from the palette's background and
+// foreground so any scheme gets a matching top bar and key bar. Corral's own
+// pair keeps its hand-tuned values in terminal.css.
+export function chromeVars(s: Scheme): Record<string, string> {
+  if (s === corralDark || s === corralLight) return {}
+  const bg = s.theme.background ?? '#000000'
+  const fg = s.theme.foreground ?? '#ffffff'
+  const accent = s.theme.blue ?? '#4a78ec'
+  return {
+    '--term-bg': bg,
+    '--term-chrome': mix(bg, fg, s.dark ? 0.04 : 0.03),
+    '--term-line': mix(bg, fg, s.dark ? 0.1 : 0.12),
+    '--term-key': mix(bg, fg, s.dark ? 0.1 : 0),
+    '--term-key-active': mix(bg, fg, s.dark ? 0.18 : 0.1),
+    '--term-hover': mix(bg, fg, s.dark ? 0.08 : 0.06),
+    '--term-fg': fg,
+    '--term-fg-2': mix(fg, bg, 0.3),
+    '--term-fg-3': mix(fg, bg, 0.5),
+    '--term-accent-soft': mix(bg, accent, s.dark ? 0.22 : 0.14),
+    '--term-accent-text': accent,
+  }
 }

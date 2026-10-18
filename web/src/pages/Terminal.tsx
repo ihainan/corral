@@ -5,18 +5,19 @@ import { FitAddon } from '@xterm/addon-fit'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import { WebglAddon } from '@xterm/addon-webgl'
-import { ArrowUp, Check, ChevronDown, ChevronLeft, Globe, LayoutGrid, ImagePlus, MessageSquareText, MoreVertical, Minus, Paperclip, Plus, TextSelect, Keyboard as KeyboardIcon, Power, RotateCw, Server, X } from 'lucide-react'
+import { ArrowUp, Check, ChevronDown, ChevronLeft, Globe, LayoutGrid, ImagePlus, MessageSquareText, MoreVertical, Minus, Palette, Paperclip, Plus, TextSelect, Keyboard as KeyboardIcon, Power, RotateCw, Server, X } from 'lucide-react'
 import { api, ApiError, errorText, uploadFile, type HerdrSummary, type Host, type SessionInfo } from '../api'
 import { t } from '../i18n'
 import { navigate } from '../router'
-import { getPrefs, isTermDark, setChromeColor, setPrefs, usePrefs } from '../prefs'
+import { getPrefs, setChromeColor, setPrefs, termScheme, usePrefs } from '../prefs'
 import { local } from '../storage'
 import { Confirm, Menu, copyText as copyToClipboard, useFocusTrap, useToast, type MenuItem } from '../components/ui'
 import { useConnect } from '../connect'
 import { TermConnection, type EndInfo, type Status } from '../terminal/connection'
 import { applyMods, specialKey, type Mods, type SpecialKey } from '../terminal/keys'
 import { KeyBar, type ModState } from '../terminal/KeyBar'
-import { darkTheme, lightTheme } from '../terminal/themes'
+import { chromeVars } from '../terminal/themes'
+import { SchemeDialog } from '../terminal/SchemePicker'
 import { HerdrPanel } from '../terminal/HerdrPanel'
 import { PortsDialog, openForward } from '../terminal/PortsDialog'
 import { useSession } from '../app'
@@ -119,6 +120,8 @@ export function TerminalPage({ id }: { id: string }) {
   const panelOpen = panel && panelSheet === sheetPanel
   const { boot } = useSession()
   const [portsOpen, setPortsOpen] = useState(false)
+  const [schemesOpen, setSchemesOpen] = useState(false)
+  const scheme = termScheme()
   // Links to localhost in the terminal open through port forwarding.
   const linkTarget = useRef<(uri: string) => void>(() => {})
 
@@ -158,7 +161,7 @@ export function TerminalPage({ id }: { id: string }) {
       allowProposedApi: true,
       macOptionIsMeta: p.optionIsMeta,
       rescaleOverlappingGlyphs: true,
-      theme: isTermDark() ? darkTheme : lightTheme,
+      theme: termScheme().theme,
       linkHandler: { activate: (_e, uri) => linkTarget.current(uri) },
     })
     term.loadAddon(new Unicode11Addon())
@@ -371,10 +374,11 @@ export function TerminalPage({ id }: { id: string }) {
     if (!term) return
     term.options.fontSize = prefs.fontSize
     term.options.macOptionIsMeta = prefs.optionIsMeta
-    term.options.theme = isTermDark() ? darkTheme : lightTheme
-    setChromeColor(isTermDark() ? '#0f1115' : '#ffffff')
+    const scheme = termScheme()
+    term.options.theme = scheme.theme
+    setChromeColor(scheme.theme.background ?? null)
     // Menus and dialogs opened over the terminal follow its colours.
-    document.documentElement.classList.toggle('term-dark', isTermDark())
+    document.documentElement.classList.toggle('term-dark', scheme.dark)
     try {
       fitRef.current?.fit()
     } catch {
@@ -747,7 +751,8 @@ export function TerminalPage({ id }: { id: string }) {
     { label: t('term.upload'), icon: <ImagePlus size={16} />, onSelect: () => fileRef.current?.click() },
     { label: t('term.copyMode'), icon: <TextSelect size={16} />, onSelect: openCopyMode },
     boot.forwarding && info ? { label: t('ports.title'), icon: <Globe size={16} />, onSelect: () => setPortsOpen(true) } : null,
-    { label: t('term.fontLarger'), icon: <Plus size={16} />, separator: true, onSelect: () => setPrefs({ fontSize: Math.min(28, getPrefs().fontSize + 1) }) },
+    { label: t('settings.termTheme'), icon: <Palette size={16} />, separator: true, onSelect: () => setSchemesOpen(true) },
+    { label: t('term.fontLarger'), icon: <Plus size={16} />, onSelect: () => setPrefs({ fontSize: Math.min(28, getPrefs().fontSize + 1) }) },
     { label: t('term.fontSmaller'), icon: <Minus size={16} />, onSelect: () => setPrefs({ fontSize: Math.max(9, getPrefs().fontSize - 1) }) },
     isTouch ? { label: prefs.keybar ? t('term.hideKeybar') : t('term.showKeybar'), icon: <KeyboardIcon size={16} />, onSelect: () => setPrefs({ keybar: !prefs.keybar }) } : null,
     ended
@@ -776,7 +781,8 @@ export function TerminalPage({ id }: { id: string }) {
 
   return (
     <div
-      className={'term-root ' + (isTermDark() ? 'dark' : 'light')}
+      className={'term-root ' + (scheme.dark ? 'dark' : 'light')}
+      style={chromeVars(scheme) as React.CSSProperties}
       ref={rootRef}
       onDragOver={(e) => {
         if (e.dataTransfer.types.includes('Files')) {
@@ -946,6 +952,7 @@ export function TerminalPage({ id }: { id: string }) {
       />
 
       {copyText !== null && <CopyMode text={copyText} onClose={() => setCopyText(null)} />}
+      {schemesOpen && <SchemeDialog onClose={() => setSchemesOpen(false)} />}
       {portsOpen && info && <PortsDialog hostId={info.host_id} onClose={() => setPortsOpen(false)} />}
       {confirm}
       {dialogs}

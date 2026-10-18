@@ -138,32 +138,29 @@ export function HostsPage() {
                       )}
                       items={() => [
                         { label: t('common.edit'), icon: <Pencil size={16} />, href: `/hosts/${h.id}/edit`, onSelect: () => navigate(`/hosts/${h.id}/edit`) },
-                        ...mine.map((s, i) => ({
-                          label: t('hosts.closeNamed', { name: t('hosts.sessionN', { n: i + 1 }) }),
-                          icon: <X size={16} />,
-                          onSelect: () => closeSession(s),
-                          separator: i === 0,
-                        })),
                         { label: t('host.delete'), icon: <Trash2 size={16} />, danger: true, separator: true, onSelect: () => deleteHost(h) },
                       ]}
                     />
                   </div>
                 </div>
-                {mine.map((s, i) => (
-                  <div className="row row-session" key={s.id}>
-                    <a className="row-main no-icon" href={'/t/' + s.id} onClick={linkHandler('/t/' + s.id)}>
-                      <span className="row-title">
-                        <span className="dot ok" aria-hidden="true" style={{ marginRight: 8, verticalAlign: 'middle' }} />
-                        {t('hosts.sessionN', { n: i + 1 })}
-                        {s.title && <span className="you">{s.title}</span>}
-                      </span>
-                      <span className="row-meta">
-                        {relTime(s.created_at)}
-                        {s.viewers > 0 ? ' · ' + t('hosts.viewers', { n: s.viewers }) : ''}
-                      </span>
-                    </a>
-                  </div>
-                ))}
+                {mine.map((s, i) => {
+                  const name = mine.length > 1 ? t('hosts.sessionN', { n: i + 1 }) : t('hosts.session')
+                  return (
+                    <div className="row row-session" key={s.id}>
+                      <a className="row-main" href={'/t/' + s.id} onClick={linkHandler('/t/' + s.id)} aria-label={`${t('hosts.open')} ${h.name} ${name}`}>
+                        <span className={'dot ' + (s.meta?.waiting ? 'warn' : 'ok')} aria-hidden="true" />
+                        <span className="row-title">{s.title || name}</span>
+                        <span className="row-meta" title={new Date(s.created_at * 1000).toLocaleString()}>{t('hosts.startedAgo', { when: relTime(s.created_at) })}</span>
+                        <span className="row-sub">{sessionDetail(s, h)}</span>
+                      </a>
+                      <div className="row-actions">
+                        <button className="icon-btn" aria-label={t('hosts.closeNamed', { name })} title={t('hosts.closeSession')} onClick={() => closeSession(s)}>
+                          <X size={16} />
+                        </button>
+                      </div>
+                    </div>
+                  )
+                })}
               </li>
             )
           })}
@@ -173,4 +170,24 @@ export function HostsPage() {
       {dialogs}
     </main>
   )
+}
+
+// The line under a running session: what herdr reports (where you are, who
+// is waiting), otherwise how it is being used.
+function sessionDetail(s: SessionInfo, h: Host): string {
+  const parts: string[] = []
+  const m = s.meta
+  if (m && m.t === 'herdr') {
+    const focused = m.workspaces.find((w) => w.focused)
+    if (focused) parts.push(t('hosts.herdrAt', { name: focused.label }))
+    parts.push(t('hosts.herdrSpaces', { n: m.workspaces.length }))
+    const agents = m.workspaces.reduce((n, w) => n + w.agents.length, 0)
+    if (agents > 0) parts.push(t('hosts.herdrAgents', { n: agents }))
+    if (m.waiting > 0) parts.push(t('hosts.herdrWaiting', { n: m.waiting }))
+  } else {
+    parts.push(h.persistence === 'tmux' ? 'tmux' : h.persistence === 'herdr' ? 'herdr' : t('host.persistNone'))
+  }
+  parts.push(s.viewers > 0 ? t('hosts.viewers', { n: s.viewers }) : t('hosts.noViewers'))
+  parts.push(`${s.cols}×${s.rows}`)
+  return parts.join(' · ')
 }

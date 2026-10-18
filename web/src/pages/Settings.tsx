@@ -7,6 +7,7 @@ import { setPrefs, usePrefs } from '../prefs'
 import { linkHandler } from '../router'
 import { signOut, useSession } from '../app'
 import { Field, useToast } from '../components/ui'
+import { CurrentScheme, SchemeDialog } from '../terminal/SchemePicker'
 
 const fontSizes = [11, 12, 13, 14, 15, 16, 18, 20]
 
@@ -53,6 +54,7 @@ export function SettingsPage() {
   const prefs = usePrefs()
   const toast = useToast()
   const [lang, setLangState] = useState<Lang>(getLang())
+  const [schemesOpen, setSchemesOpen] = useState(false)
   const fontIdx = fontSizes.indexOf(prefs.fontSize)
   const stepFont = (d: number) => {
     const i = fontIdx === -1 ? fontSizes.indexOf(14) : fontIdx
@@ -94,12 +96,10 @@ export function SettingsPage() {
         <h2>{t('settings.terminal')}</h2>
         <div className="settings-group">
           <Setting label={t('settings.termTheme')} id="tt-l">
-            <Seg
-              labelledBy="tt-l"
-              value={prefs.termTheme}
-              options={[['dark', t('settings.themeDark')], ['light', t('settings.themeLight')], ['ui', t('settings.termThemeUi')]]}
-              onChange={(v) => setPrefs({ termTheme: v })}
-            />
+            <button type="button" className="btn scheme-btn" aria-labelledby="tt-l tt-v" onClick={() => setSchemesOpen(true)}>
+              <span id="tt-v"><CurrentScheme /></span>
+              <ChevronRight size={16} />
+            </button>
           </Setting>
           <Setting label={t('settings.fontSize')} id="fs-l">
             <div className="stepper" role="group" aria-labelledby="fs-l">
@@ -117,6 +117,8 @@ export function SettingsPage() {
           <Switch label={t('settings.webgl')} hint={t('settings.webglHint')} checked={prefs.webgl} onChange={(v) => setPrefs({ webgl: v })} />
         </div>
       </section>
+
+      {schemesOpen && <SchemeDialog onClose={() => setSchemesOpen(false)} />}
 
       <PushSection />
 

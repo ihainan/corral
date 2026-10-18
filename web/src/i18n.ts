@@ -307,6 +307,21 @@ const zh = {
   'push.syncFailed': '这台设备的通知没能登记到当前账号，请到设置里重新开启。',
   'herdr.busy': '操作太频繁，请稍后再试。',
   'ports.busy': '网关正忙，请稍后重试。',
+  'schemes.search': '搜索 {n} 套配色',
+  'schemes.searchLabel': '搜索配色',
+  'schemes.followHint': '界面浅色时用浅色，深色时用深色',
+  'schemes.dark': '深色',
+  'schemes.light': '浅色',
+  'schemes.none': '没有找到这个名字的配色。',
+  'schemes.done': '完成',
+  'hosts.session': '终端会话',
+  'hosts.open': '打开',
+  'hosts.startedAgo': '{when}开始',
+  'hosts.herdrAt': '当前在「{name}」',
+  'hosts.herdrSpaces': '{n} 个工作区',
+  'hosts.herdrAgents': '{n} 个助手',
+  'hosts.herdrWaiting': '{n} 个在等你',
+  'hosts.noViewers': '没有窗口在看',
 }
 
 type Key = keyof typeof zh
@@ -618,6 +633,21 @@ const en: Record<Key, string> = {
   'push.syncFailed': 'Notifications on this device could not be moved to this account. Turn them on again in Settings.',
   'herdr.busy': 'Too many actions at once. Try again in a moment.',
   'ports.busy': 'The gateway is busy. Try again in a moment.',
+  'schemes.search': 'Search {n} schemes',
+  'schemes.searchLabel': 'Search schemes',
+  'schemes.followHint': 'Light or dark with the app theme',
+  'schemes.dark': 'Dark',
+  'schemes.light': 'Light',
+  'schemes.none': 'No scheme by that name.',
+  'schemes.done': 'Done',
+  'hosts.session': 'Terminal session',
+  'hosts.open': 'Open',
+  'hosts.startedAgo': 'started {when}',
+  'hosts.herdrAt': 'in “{name}”',
+  'hosts.herdrSpaces': '{n} workspaces',
+  'hosts.herdrAgents': '{n} agents',
+  'hosts.herdrWaiting': '{n} waiting for you',
+  'hosts.noViewers': 'not open anywhere',
 }
 
 const tables: Record<string, Record<Key, string>> = { 'zh-CN': zh, en }

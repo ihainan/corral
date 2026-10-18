@@ -50,6 +50,7 @@ export interface SessionInfo {
   cols: number
   rows: number
   title: string
+  meta?: HerdrSummary // last side information published by the session
 }
 
 export interface AdminUser {
