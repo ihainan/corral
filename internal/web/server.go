@@ -17,6 +17,7 @@ import (
 
 	"github.com/ihainan/corral/internal/auth"
 	"github.com/ihainan/corral/internal/config"
+	"github.com/ihainan/corral/internal/herdr"
 	"github.com/ihainan/corral/internal/netguard"
 	"github.com/ihainan/corral/internal/store"
 	"github.com/ihainan/corral/internal/term"
@@ -50,6 +51,9 @@ type Server struct {
 	routes []Route
 	static fs.FS
 
+	herdrSocks herdrSockets
+	onAgent    func(*term.Session, *store.Host, herdr.Transition) // set by notifications
+
 	sockMu  sync.Mutex
 	socks   map[int64]map[*liveSocket]struct{} // open WebSockets per user, closed on sign-out
 	pending map[int64]map[*liveSocket]struct{} // connections being set up, cancelled on sign-out
@@ -75,7 +79,7 @@ type Deps struct {
 func New(d Deps) *Server {
 	s := &Server{cfg: d.Config, store: d.Store, auth: d.Auth, vault: d.Vault, guard: d.Guard, terms: d.Terms,
 		log: d.Log, mux: http.NewServeMux(), static: d.Static, socks: map[int64]map[*liveSocket]struct{}{},
-		pending: map[int64]map[*liveSocket]struct{}{}}
+		pending: map[int64]map[*liveSocket]struct{}{}, herdrSocks: herdrSockets{path: map[string]string{}}}
 	prev := s.auth.OnUserGone
 	s.auth.OnUserGone = func(userID int64) {
 		if prev != nil {
@@ -127,6 +131,7 @@ func (s *Server) registerRoutes() {
 	s.handle("DELETE /api/sessions/{id}", SignedIn, s.apiCloseSession)
 	s.handle("GET /api/sessions/{id}/ws", SignedIn, s.apiSessionSocket)
 	s.handle("POST /api/sessions/{id}/upload", SignedIn, s.apiUpload)
+	s.handle("POST /api/sessions/{id}/herdr", SignedIn, s.apiHerdrAction)
 
 	// Admin
 	s.handle("GET /api/admin/users", AdminOnly, s.apiAdminListUsers)

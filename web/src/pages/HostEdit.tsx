@@ -19,7 +19,8 @@ export function HostEditPage({ id }: { id?: number }) {
   const [password, setPassword] = useState('')
   const [hadPassword, setHadPassword] = useState(false)
   const [credentialId, setCredentialId] = useState<number | null>(null)
-  const [persist, setPersist] = useState(true)
+  const [persist, setPersist] = useState<Host['persistence']>('tmux')
+  const [herdrName, setHerdrName] = useState('')
   const [tmuxName, setTmuxName] = useState('')
   const [keys, setKeys] = useState<KeyCred[]>([])
   const [busy, setBusy] = useState(false)
@@ -37,7 +38,8 @@ export function HostEditPage({ id }: { id?: number }) {
         setAuth(h.auth)
         setHadPassword(h.auth === 'password')
         setCredentialId(h.auth === 'key' ? h.credential_id : null)
-        setPersist(h.persistence === 'tmux')
+        setPersist(h.persistence)
+        setHerdrName(h.herdr_session ?? '')
         setTmuxName(h.tmux_session)
         setLoaded(true)
       })
@@ -80,8 +82,9 @@ export function HostEditPage({ id }: { id?: number }) {
       name, address, port: Number(port) || 22, username, auth,
       password: auth === 'password' ? password : '',
       credential_id: auth === 'key' ? credentialId : null,
-      persistence: persist ? 'tmux' : 'none',
+      persistence: persist,
       tmux_session: tmuxName,
+      herdr_session: herdrName,
     }
     try {
       if (editing) await api('PUT', '/api/hosts/' + id, body)
@@ -175,14 +178,19 @@ export function HostEditPage({ id }: { id?: number }) {
           </div>
         )}
 
-        <label className="check">
-          <input type="checkbox" checked={persist} onChange={(e) => setPersist(e.target.checked)} />
-          <span>
-            {t('host.persistTmux')}
-            <br />
-            <span className="hint">{t('host.persistTmuxHint')}</span>
-          </span>
-        </label>
+        <div className="field">
+          <span className="field-label" id="persist-label">{t('host.persistence')}</span>
+          <div className="seg" role="group" aria-labelledby="persist-label">
+            {(['tmux', 'herdr', 'none'] as const).map((v) => (
+              <button type="button" key={v} aria-pressed={persist === v} onClick={() => setPersist(v)}>
+                {v === 'tmux' ? t('host.persistTmux') : v === 'herdr' ? 'herdr' : t('host.persistNone')}
+              </button>
+            ))}
+          </div>
+          <p className="hint">
+            {persist === 'tmux' ? t('host.persistTmuxHint') : persist === 'herdr' ? t('host.persistHerdrHint') : t('host.persistNoneHint')}
+          </p>
+        </div>
 
         <details className="adv">
           <summary>
@@ -190,9 +198,16 @@ export function HostEditPage({ id }: { id?: number }) {
             {t('host.advanced')}
           </summary>
           <div className="form">
-            <Field label={t('host.tmuxSession')} htmlFor="h-tmux" optional error={fe('tmux_session')}>
-              <input id="h-tmux" className="input mono" value={tmuxName} onChange={(e) => setTmuxName(e.target.value)} autoCapitalize="none" autoCorrect="off" spellCheck={false} />
-            </Field>
+            {persist === 'tmux' && (
+              <Field label={t('host.tmuxSession')} htmlFor="h-tmux" optional error={fe('tmux_session')}>
+                <input id="h-tmux" className="input mono" value={tmuxName} onChange={(e) => setTmuxName(e.target.value)} autoCapitalize="none" autoCorrect="off" spellCheck={false} />
+              </Field>
+            )}
+            {persist === 'herdr' && (
+              <Field label={t('host.herdrSession')} htmlFor="h-herdr" optional hint={t('host.herdrSessionHint')} error={fe('herdr_session')}>
+                <input id="h-herdr" className="input mono" value={herdrName} onChange={(e) => setHerdrName(e.target.value)} autoCapitalize="none" autoCorrect="off" spellCheck={false} />
+              </Field>
+            )}
           </div>
         </details>
 
@@ -217,7 +232,7 @@ function fieldMessage(field: string | undefined, fallback: string): string {
     case 'username': return '请填写用户名，不能包含空格。'
     case 'password': return '请填写密码。'
     case 'credential_id': return '请选择一把密钥。'
-    case 'tmux_session': return '只能包含字母、数字、短横线和下划线。'
+    case 'tmux_session': case 'herdr_session': return '只能包含字母、数字、短横线和下划线。'
     default: return fallback
   }
 }

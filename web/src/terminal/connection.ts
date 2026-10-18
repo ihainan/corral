@@ -21,6 +21,7 @@ export interface Handlers {
   onStatus(s: Status): void
   onEnd(info: EndInfo): void
   onLatency(ms: number): void
+  onMeta?(m: any): void // side information such as herdr state
 }
 
 export type SendResult = 'sent' | 'queued' | 'dropped'
@@ -144,6 +145,8 @@ export class TermConnection {
           this.drop()
           this.setStatus('ended')
           this.h.onEnd({ state: m.state, code: m.code, reason: m.reason })
+        } else if (m.t === 'herdr') {
+          this.h.onMeta?.(m)
         } else if (m.t === 'pong') {
           clearTimeout(this.pongDeadline)
           this.h.onLatency(Math.max(0, Date.now() - m.ts))

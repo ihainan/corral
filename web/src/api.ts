@@ -24,8 +24,9 @@ export interface Host {
   username: string
   auth: 'password' | 'key' | 'ask'
   credential_id: number | null
-  persistence: 'none' | 'tmux'
+  persistence: 'none' | 'tmux' | 'herdr'
   tmux_session: string
+  herdr_session: string
   created_at: number
   updated_at: number
   last_connected_at: number
@@ -155,4 +156,29 @@ export async function uploadFile(sessionId: string, file: Blob, onProgress?: (p:
 export function errorText(e: unknown): string {
   if (e instanceof ApiError) return e.human
   return t('error.internal')
+}
+
+export interface HerdrAgent {
+  pane_id: string
+  agent: string
+  status: string
+  title: string
+  cwd: string
+}
+
+export interface HerdrWorkspace {
+  id: string
+  label: string
+  number: number
+  status: string
+  focused: boolean
+  agents: HerdrAgent[]
+}
+
+export interface HerdrSummary {
+  t: 'herdr'
+  session: string
+  version: string
+  workspaces: HerdrWorkspace[]
+  waiting: number
 }

@@ -85,7 +85,7 @@ type Snapshot struct {
 	Workspaces        []Workspace `json:"workspaces"`
 	Tabs              []Tab       `json:"tabs"`
 	Panes             []Pane      `json:"panes"`
-	Agents            []Agent     `json:"agents"`
+	Agents            []Pane      `json:"agents"` // the panes that run a detected agent
 }
 
 type Workspace struct {
@@ -117,13 +117,7 @@ type Pane struct {
 	Agent       string `json:"agent,omitempty"`
 	Cwd         string `json:"cwd"`
 	Focused     bool   `json:"focused"`
-	Title       string `json:"title,omitempty"`
-}
-
-type Agent struct {
-	PaneID string `json:"pane_id"`
-	Name   string `json:"name"`
-	Status string `json:"status"`
+	Title       string `json:"terminal_title_stripped,omitempty"`
 }
 
 // Status values herdr reports for agents.
@@ -270,6 +264,10 @@ func (c *Client) SendKeys(ctx context.Context, paneID string, keys []string) err
 
 func (c *Client) FocusPane(ctx context.Context, paneID string) error {
 	return c.Call(ctx, "pane.focus", map[string]any{"pane_id": paneID}, nil)
+}
+
+func (c *Client) FocusWorkspace(ctx context.Context, workspaceID string) error {
+	return c.Call(ctx, "workspace.focus", map[string]any{"workspace_id": workspaceID}, nil)
 }
 
 // Subscribe starts an event stream on this connection. Each event is reported

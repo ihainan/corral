@@ -53,6 +53,7 @@ type Event struct {
 type Sub struct {
 	C      chan Chunk
 	Events chan Event
+	Meta   chan []byte // side information (e.g. herdr state); only the latest matters
 	done   chan struct{}
 	once   sync.Once
 }
@@ -100,6 +101,26 @@ type Session struct {
 
 	onEnd   func(*Session)
 	uploads chan struct{} // limits concurrent file transfers on this connection
+	meta    []byte        // latest side information, replayed to new viewers
+}
+
+// PublishMeta replaces the session's side information and offers it to every
+// viewer. A viewer that has not picked up the previous value gets the newer
+// one instead (state, not a log: dropping intermediate values is fine).
+func (s *Session) PublishMeta(b []byte) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.meta = b
+	for sub := range s.subs {
+		select {
+		case <-sub.Meta:
+		default:
+		}
+		select {
+		case sub.Meta <- b:
+		default:
+		}
+	}
 }
 
 // UploadSlot reserves one of the session's transfer slots.
@@ -198,7 +219,10 @@ func (s *Session) Attach(fromOffset uint64, haveOffset bool) (sub *Sub, backlog 
 	if reset {
 		backlog, start = s.buf.all()
 	}
-	sub = &Sub{C: make(chan Chunk, subBuffer), Events: make(chan Event, 4), done: make(chan struct{})}
+	sub = &Sub{C: make(chan Chunk, subBuffer), Events: make(chan Event, 4), Meta: make(chan []byte, 1), done: make(chan struct{})}
+	if s.meta != nil {
+		sub.Meta <- s.meta
+	}
 	if s.state != StateRunning {
 		e := Event{State: s.state, ExitCode: s.exitCode, Reason: s.reason, Offset: s.buf.end()}
 		ev = &e

@@ -63,8 +63,9 @@ func (m *Manager) Shutdown() {
 // StartOptions describes what to run once the SSH connection is up.
 type StartOptions struct {
 	Cols, Rows  int
-	Persistence string // "none" or "tmux"
-	TmuxSession string // validated by the caller: [A-Za-z0-9._-]{1,64}
+	Persistence  string // "none", "tmux" or "herdr"
+	TmuxSession  string // validated by the caller: [A-Za-z0-9_-]{1,64}
+	HerdrSession string // validated by the caller; "" attaches herdr's default session
 }
 
 // Reservation holds one of a user's session slots while a connection is being
@@ -154,9 +155,12 @@ func (m *Manager) Start(ctx context.Context, res *Reservation, owner, hostID int
 			fail(ctx.Err())
 			return
 		}
-		if opt.Persistence == "tmux" {
+		switch opt.Persistence {
+		case "tmux":
 			err = sess.Start(TmuxCommand(opt.TmuxSession))
-		} else {
+		case "herdr":
+			err = sess.Start(HerdrCommand(opt.HerdrSession))
+		default:
 			err = sess.Shell()
 		}
 		if err != nil {
@@ -243,6 +247,16 @@ func TmuxCommand(name string) string {
 	script := `PATH="$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"; ` +
 		`if command -v tmux >/dev/null 2>&1; then exec tmux -u new-session -A -s "$1"; ` +
 		`else printf '\r\n[corral] tmux is not installed on this host; starting a plain shell.\r\n'; exec "${SHELL:-/bin/sh}" -l; fi`
+	return "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(name)
+}
+
+// HerdrCommand attaches to herdr (its default session, or a named one),
+// falling back to a login shell when herdr is missing. Fixed script; the only
+// variable part is the validated, quoted session name.
+func HerdrCommand(name string) string {
+	script := `PATH="$HOME/.local/bin:$HOME/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"; ` +
+		`if command -v herdr >/dev/null 2>&1; then if [ -n "$1" ]; then exec herdr --session "$1"; else exec herdr; fi; ` +
+		`else printf '\r\n[corral] herdr is not installed on this host; starting a plain shell.\r\n'; exec "${SHELL:-/bin/sh}" -l; fi`
 	return "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(name)
 }
 

@@ -10,8 +10,9 @@ const (
 	AuthKey      = "key"      // stored private key credential
 	AuthAsk      = "ask"      // password typed at connect time, never stored
 
-	PersistNone = "none"
-	PersistTmux = "tmux"
+	PersistNone  = "none"
+	PersistTmux  = "tmux"
+	PersistHerdr = "herdr"
 )
 
 type Host struct {
@@ -25,18 +26,19 @@ type Host struct {
 	CredentialID    *int64 `json:"credential_id"`
 	Persistence     string `json:"persistence"`
 	TmuxSession     string `json:"tmux_session"`
+	HerdrSession    string `json:"herdr_session"`
 	CreatedAt       int64  `json:"created_at"`
 	UpdatedAt       int64  `json:"updated_at"`
 	LastConnectedAt int64  `json:"last_connected_at"`
 }
 
-const hostCols = `id, owner_id, name, address, port, username, auth, credential_id, persistence, tmux_session, created_at, updated_at, last_connected_at`
+const hostCols = `id, owner_id, name, address, port, username, auth, credential_id, persistence, tmux_session, herdr_session, created_at, updated_at, last_connected_at`
 
 func scanHost(row interface{ Scan(...any) error }) (*Host, error) {
 	h := &Host{}
 	var cred sql.NullInt64
 	err := row.Scan(&h.ID, &h.OwnerID, &h.Name, &h.Address, &h.Port, &h.Username, &h.Auth, &cred,
-		&h.Persistence, &h.TmuxSession, &h.CreatedAt, &h.UpdatedAt, &h.LastConnectedAt)
+		&h.Persistence, &h.TmuxSession, &h.HerdrSession, &h.CreatedAt, &h.UpdatedAt, &h.LastConnectedAt)
 	if err != nil {
 		return nil, notFound(err)
 	}
@@ -70,9 +72,9 @@ func (s *Store) Host(ctx context.Context, ownerID, id int64) (*Host, error) {
 func (s *Store) CreateHost(ctx context.Context, h *Host) (*Host, error) {
 	now := s.unix()
 	res, err := s.db.ExecContext(ctx,
-		`INSERT INTO hosts (owner_id, name, address, port, username, auth, credential_id, persistence, tmux_session, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		h.OwnerID, h.Name, h.Address, h.Port, h.Username, h.Auth, h.CredentialID, h.Persistence, h.TmuxSession, now, now)
+		`INSERT INTO hosts (owner_id, name, address, port, username, auth, credential_id, persistence, tmux_session, herdr_session, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		h.OwnerID, h.Name, h.Address, h.Port, h.Username, h.Auth, h.CredentialID, h.Persistence, h.TmuxSession, h.HerdrSession, now, now)
 	if err != nil {
 		return nil, err
 	}
@@ -82,9 +84,9 @@ func (s *Store) CreateHost(ctx context.Context, h *Host) (*Host, error) {
 
 func (s *Store) UpdateHost(ctx context.Context, h *Host) error {
 	return affectedOrNotFound(s.db.ExecContext(ctx,
-		`UPDATE hosts SET name = ?, address = ?, port = ?, username = ?, auth = ?, credential_id = ?, persistence = ?, tmux_session = ?, updated_at = ?
+		`UPDATE hosts SET name = ?, address = ?, port = ?, username = ?, auth = ?, credential_id = ?, persistence = ?, tmux_session = ?, herdr_session = ?, updated_at = ?
 		 WHERE owner_id = ? AND id = ?`,
-		h.Name, h.Address, h.Port, h.Username, h.Auth, h.CredentialID, h.Persistence, h.TmuxSession, s.unix(), h.OwnerID, h.ID))
+		h.Name, h.Address, h.Port, h.Username, h.Auth, h.CredentialID, h.Persistence, h.TmuxSession, h.HerdrSession, s.unix(), h.OwnerID, h.ID))
 }
 
 func (s *Store) DeleteHost(ctx context.Context, ownerID, id int64) error {

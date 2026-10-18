@@ -174,7 +174,7 @@ func (s *Server) apiOpenSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sess, err := s.terms.Start(ctx, res, u.ID, h.ID, h.Name, dialed.Client, term.StartOptions{
-		Cols: b.Cols, Rows: b.Rows, Persistence: h.Persistence, TmuxSession: h.TmuxSession,
+		Cols: b.Cols, Rows: b.Rows, Persistence: h.Persistence, TmuxSession: h.TmuxSession, HerdrSession: h.HerdrSession,
 	})
 	if err != nil {
 		if ctx.Err() != nil {
@@ -196,6 +196,9 @@ func (s *Server) apiOpenSession(w http.ResponseWriter, r *http.Request) {
 		sess.Close("host deleted")
 		writeError(w, http.StatusNotFound, "not_found", "no such host")
 		return
+	}
+	if h.Persistence == store.PersistHerdr {
+		go s.watchHerdr(sess, h)
 	}
 	_ = s.store.TouchHostConnected(r.Context(), u.ID, h.ID)
 	s.audit(r, "session.open", hostTarget(h), map[string]any{"session": sess.ID})
@@ -449,6 +452,13 @@ func (s *Server) apiSessionSocket(w http.ResponseWriter, r *http.Request) {
 			return
 		case ts := <-pongs:
 			if err := writeText(map[string]any{"t": "pong", "ts": ts}); err != nil {
+				return
+			}
+		case m := <-sub.Meta:
+			wctx, wcancel := context.WithTimeout(ctx, 10*time.Second)
+			err := c.Write(wctx, websocket.MessageText, m)
+			wcancel()
+			if err != nil {
 				return
 			}
 		}

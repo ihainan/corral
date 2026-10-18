@@ -299,8 +299,10 @@ func TestShellQuotingRoundTrips(t *testing.T) {
 func TestRemoteExecCallSitesAreReviewed(t *testing.T) {
 	allowed := map[string]bool{
 		"term/manager.go: err = sess.Start(TmuxCommand(opt.TmuxSession))": true,
+		"term/manager.go: err = sess.Start(HerdrCommand(opt.HerdrSession))": true,
 		"web/api_sessions.go: sess, err := s.terms.Start(ctx, res, u.ID, h.ID, h.Name, dialed.Client, term.StartOptions{": true,
 		"herdr/client.go: out, err := s.Output(DiscoverCommand)": true,
+		"web/herdr.go: w.Run(ctx)": true, // watcher loop, runs no remote command itself
 	}
 	re := regexp.MustCompile(`\.(Start|Run|Output|CombinedOutput)\(`)
 	root, _ := filepath.Abs("..")

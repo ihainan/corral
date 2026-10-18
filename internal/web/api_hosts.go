@@ -82,6 +82,7 @@ type hostBody struct {
 	CredentialID *int64 `json:"credential_id"` // auth=key
 	Persistence  string `json:"persistence"`
 	TmuxSession  string `json:"tmux_session"`
+	HerdrSession string `json:"herdr_session"`
 }
 
 var (
@@ -145,8 +146,12 @@ func (s *Server) validateHost(ctx context.Context, owner *store.User, b *hostBod
 	if b.Persistence == "" {
 		b.Persistence = store.PersistTmux
 	}
-	if b.Persistence != store.PersistNone && b.Persistence != store.PersistTmux {
-		return &fieldError{"persistence", "must be none or tmux"}
+	if b.Persistence != store.PersistNone && b.Persistence != store.PersistTmux && b.Persistence != store.PersistHerdr {
+		return &fieldError{"persistence", "must be none, tmux or herdr"}
+	}
+	b.HerdrSession = strings.TrimSpace(b.HerdrSession)
+	if b.HerdrSession != "" && !tmuxNameRE.MatchString(b.HerdrSession) {
+		return &fieldError{"herdr_session", "letters, digits, dash and underscore only"}
 	}
 	b.TmuxSession = strings.TrimSpace(b.TmuxSession)
 	if b.TmuxSession == "" {
@@ -210,7 +215,7 @@ func (s *Server) apiCreateHost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h := &store.Host{OwnerID: u.ID, Name: b.Name, Address: b.Address, Port: b.Port, Username: b.Username,
-		Auth: b.Auth, Persistence: b.Persistence, TmuxSession: b.TmuxSession}
+		Auth: b.Auth, Persistence: b.Persistence, TmuxSession: b.TmuxSession, HerdrSession: b.HerdrSession}
 	switch b.Auth {
 	case store.AuthKey:
 		h.CredentialID = b.CredentialID
@@ -254,6 +259,7 @@ func (s *Server) apiUpdateHost(w http.ResponseWriter, r *http.Request) {
 	oldCred := h.CredentialID
 	oldAuth := h.Auth
 	h.Name, h.Address, h.Port, h.Username, h.Persistence, h.TmuxSession = b.Name, b.Address, b.Port, b.Username, b.Persistence, b.TmuxSession
+	h.HerdrSession = b.HerdrSession
 	h.Auth = b.Auth
 
 	var dropCred *int64 // a host-private password credential that is no longer used

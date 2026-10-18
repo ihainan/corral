@@ -5,8 +5,8 @@ import { FitAddon } from '@xterm/addon-fit'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import { WebglAddon } from '@xterm/addon-webgl'
-import { ArrowLeft, ImagePlus, MessageSquareText, MoreVertical, Minus, Plus, TextSelect, Keyboard as KeyboardIcon, Power, X } from 'lucide-react'
-import { api, errorText, uploadFile, type Host, type SessionInfo } from '../api'
+import { ArrowLeft, LayoutGrid, ImagePlus, MessageSquareText, MoreVertical, Minus, Plus, TextSelect, Keyboard as KeyboardIcon, Power, X } from 'lucide-react'
+import { api, errorText, uploadFile, type HerdrSummary, type Host, type SessionInfo } from '../api'
 import { t } from '../i18n'
 import { navigate } from '../router'
 import { getPrefs, isDark, setPrefs, usePrefs } from '../prefs'
@@ -17,6 +17,7 @@ import { TermConnection, type EndInfo, type Status } from '../terminal/connectio
 import { applyMods, specialKey, type Mods, type SpecialKey } from '../terminal/keys'
 import { KeyBar, type ModState } from '../terminal/KeyBar'
 import { darkTheme, lightTheme } from '../terminal/themes'
+import { HerdrPanel } from '../terminal/HerdrPanel'
 
 const isTouch = window.matchMedia('(pointer: coarse)').matches || navigator.maxTouchPoints > 0
 const FONT_STACK = "'JetBrains Mono', 'SFMono-Regular', Menlo, Consolas, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', monospace"
@@ -52,6 +53,8 @@ export function TerminalPage({ id }: { id: string }) {
   const [copyText, setCopyText] = useState<string | null>(null)
   const [dragOver, setDragOver] = useState(false)
   const [confirm, setConfirm] = useState<React.ReactNode>(null)
+  const [herdr, setHerdr] = useState<HerdrSummary | null>(null)
+  const [panel, setPanel] = useState(() => window.matchMedia('(min-width: 1000px)').matches)
   const showKeybar = isTouch && prefs.keybar
 
   // Latest modifier state for the xterm data callback.
@@ -128,6 +131,19 @@ export function TerminalPage({ id }: { id: string }) {
       }
     }
     safeFit()
+    // Cell size is measured when the font is set. The web font may still be
+    // loading at that point (glyphs then get the fallback's width), so set the
+    // font again once it is ready, which makes xterm measure afresh.
+    void Promise.all([
+      document.fonts?.load(`${p.fontSize}px "JetBrains Mono"`),
+      document.fonts?.load(`bold ${p.fontSize}px "JetBrains Mono"`),
+    ])
+      .then(() => {
+        if (termRef.current !== term) return
+        term.options.fontFamily = FONT_STACK + ', monospace'
+        safeFit()
+      })
+      .catch(() => {})
 
     const conn = new TermConnection(id, {
       // RIS (ESC c) travels in the same write queue as the replay that follows,
@@ -151,6 +167,7 @@ export function TerminalPage({ id }: { id: string }) {
       onStatus: setStatus,
       onEnd: setEnd,
       onLatency: setLatency,
+      onMeta: (m) => setHerdr(m as HerdrSummary),
     })
     connRef.current = conn
     conn.resize(term.cols, term.rows)
@@ -581,6 +598,12 @@ export function TerminalPage({ id }: { id: string }) {
             {statusText || (info?.title ?? '')}
           </span>
         </div>
+        {herdr && (
+          <button className="icon-btn herdr-btn" aria-pressed={panel} onClick={() => setPanel((p) => !p)} aria-label={t('herdr.title')} title={t('herdr.title')}>
+            <LayoutGrid size={19} />
+            {herdr.waiting > 0 && <span className="herdr-count">{herdr.waiting}</span>}
+          </button>
+        )}
         <button className="icon-btn" onClick={() => fileRef.current?.click()} aria-label={t('term.upload')} title={t('term.upload')}>
           <ImagePlus size={19} />
         </button>
@@ -633,8 +656,22 @@ export function TerminalPage({ id }: { id: string }) {
         </Menu>
       </header>
 
-      <div className="term-body">
+      <div className={'term-body' + (herdr && panel ? ' with-panel' : '')}>
         <div className="term-host-el" ref={hostEl} />
+        {herdr && panel && (
+          <HerdrPanel
+            summary={herdr}
+            onClose={() => setPanel(false)}
+            onFocus={async (action, target) => {
+              try {
+                await api('POST', `/api/sessions/${id}/herdr`, { action, target })
+                if (window.matchMedia('(max-width: 999px)').matches) setPanel(false)
+              } catch {
+                toast(t('herdr.focusFailed'), true)
+              }
+            }}
+          />
+        )}
         {endText && (
           <div className="term-ended" role="alert">
             <p>{endText}</p>
