@@ -19,7 +19,7 @@ func TestBellStormIsCoalesced(t *testing.T) {
 	var mu sync.Mutex
 	var last Alert
 	s := &Session{buf: newRing(ringSize), subs: map[*Sub]struct{}{}, state: StateRunning, finished: make(chan struct{}),
-		alertq: m.alerts, onAlert: func(_ *Session, a Alert) {
+		alertq: m.alerts, spill: m.spill, onAlert: func(_ *Session, a Alert) {
 			if calls.Add(1) == 1 {
 				<-release // the first delivery is slow; everything after it piles up
 			}
@@ -45,6 +45,59 @@ func TestBellStormIsCoalesced(t *testing.T) {
 	defer mu.Unlock()
 	if c := calls.Load(); c != 2 || last.Message != "build finished" {
 		t.Fatalf("%d deliveries, last %+v; want the first bell, then one merged alert keeping the message", c, last)
+	}
+}
+
+// An alert that finds the queue full is still delivered, without waiting for
+// more output from its session.
+func TestAlertIsRetriedWhenTheQueueIsFull(t *testing.T) {
+	oldQ, oldR := alertQueue, alertRetry
+	alertQueue, alertRetry = 1, 20*time.Millisecond
+	m := NewManager(time.Hour, 5)
+	alertQueue, alertRetry = oldQ, oldR
+	defer m.Shutdown()
+	release := make(chan struct{})
+	var mu sync.Mutex
+	got := map[*Session]bool{}
+	onAlert := func(s *Session, _ Alert) {
+		mu.Lock()
+		first := len(got) == 0
+		got[s] = true
+		mu.Unlock()
+		if first {
+			<-release // the worker is busy while the others ring
+		}
+	}
+	ring := func() *Session {
+		s := &Session{buf: newRing(ringSize), subs: map[*Sub]struct{}{}, state: StateRunning, finished: make(chan struct{}),
+			alertq: m.alerts, spill: m.spill, onAlert: onAlert}
+		s.pumps.Add(1)
+		s.pump(bytes.NewReader([]byte{0x07}))
+		return s
+	}
+	a := ring()
+	for deadline := time.Now().Add(2 * time.Second); ; time.Sleep(5 * time.Millisecond) {
+		mu.Lock()
+		busy := got[a]
+		mu.Unlock()
+		if busy || time.Now().After(deadline) {
+			break
+		}
+	}
+	b, c := ring(), ring() // b fills the queue, c does not fit and rings only once
+	close(release)
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		mu.Lock()
+		done := got[b] && got[c]
+		mu.Unlock()
+		if done {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("an alert that did not fit in the queue was never delivered")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
