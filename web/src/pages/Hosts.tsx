@@ -1,19 +1,25 @@
 import { useCallback, useEffect, useState } from 'react'
 import { MoreHorizontal, Pencil, Plus, Server, SquareTerminal, Trash2, X } from 'lucide-react'
-import { api, errorText, type Host, type SessionInfo } from '../api'
+import { api, type Host, type SessionInfo } from '../api'
 import { relTime, t } from '../i18n'
 import { linkHandler, navigate } from '../router'
-import { Confirm, Menu, useToast } from '../components/ui'
+import { Confirm, LoadError, Menu, useToast } from '../components/ui'
 import { useConnect } from '../connect'
 
 export function HostsPage() {
   const toast = useToast()
   const [hosts, setHosts] = useState<Host[] | null>(null)
+  const [failed, setFailed] = useState(false)
   const [sessions, setSessions] = useState<SessionInfo[]>([])
   const [confirm, setConfirm] = useState<React.ReactNode>(null)
 
   const load = useCallback(() => {
-    api<Host[]>('GET', '/api/hosts').then(setHosts).catch((e) => toast(errorText(e), true))
+    api<Host[]>('GET', '/api/hosts')
+      .then((h) => {
+        setHosts(h)
+        setFailed(false)
+      })
+      .catch(() => setFailed(true))
     api<SessionInfo[]>('GET', '/api/sessions').then(setSessions).catch(() => {})
   }, [toast])
 
@@ -92,7 +98,9 @@ export function HostsPage() {
 
       <section className="section" aria-labelledby="hosts-h">
         {running.length > 0 && <h2 id="hosts-h">{t('hosts.title')}</h2>}
-        {hosts === null ? (
+        {hosts === null && failed ? (
+          <LoadError onRetry={load} />
+        ) : hosts === null ? (
           <p className="empty-inline">{t('common.loading')}</p>
         ) : hosts.length === 0 ? (
           <div className="empty">

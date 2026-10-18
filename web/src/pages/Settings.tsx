@@ -13,20 +13,27 @@ export function SettingsPage() {
   const [cur, setCur] = useState('')
   const [next, setNext] = useState('')
   const [pwError, setPwError] = useState('')
+  const [busy, setBusy] = useState<'' | 'profile' | 'password'>('')
   const [lang, setLangState] = useState<Lang>(getLang())
 
   const saveProfile = async (e: FormEvent) => {
     e.preventDefault()
+    if (busy) return
+    setBusy('profile')
     try {
       const m = await api<Me>('PUT', '/api/me', { display_name: display })
       setMe(m)
       toast(t('settings.saved'))
     } catch (err) {
       toast(errorText(err), true)
+    } finally {
+      setBusy('')
     }
   }
   const changePassword = async (e: FormEvent) => {
     e.preventDefault()
+    if (busy) return
+    setBusy('password')
     setPwError('')
     try {
       await api('POST', '/api/me/password', { current: cur, next })
@@ -35,6 +42,8 @@ export function SettingsPage() {
       toast(t('settings.passwordChanged'))
     } catch (err) {
       setPwError(errorText(err))
+    } finally {
+      setBusy('')
     }
   }
 
@@ -93,7 +102,7 @@ export function SettingsPage() {
           <Field label={t('settings.displayName')} htmlFor="s-display">
             <input id="s-display" className="input" value={display} onChange={(e) => setDisplay(e.target.value)} />
           </Field>
-          <div><button className="btn">{t('common.save')}</button></div>
+          <div><button className="btn" disabled={busy === 'profile'}>{t('common.save')}</button></div>
         </form>
       </section>
 
@@ -107,7 +116,7 @@ export function SettingsPage() {
             <input id="s-next" className="input" type="password" autoComplete="new-password" minLength={10} value={next} onChange={(e) => setNext(e.target.value)} required />
           </Field>
           {pwError && <p className="err" role="alert">{pwError}</p>}
-          <div><button className="btn">{t('settings.password')}</button></div>
+          <div><button className="btn" disabled={busy === 'password'}>{t('settings.password')}</button></div>
         </form>
       </section>
     </main>

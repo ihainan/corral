@@ -1,4 +1,4 @@
-import { useRef } from 'react'
+import { useEffect, useRef } from 'react'
 import { Keyboard } from 'lucide-react'
 import type { SpecialKey } from './keys'
 import { t } from '../i18n'
@@ -31,6 +31,12 @@ function Key(p: KeyProps) {
     clearTimeout(s.rep)
     clearInterval(s.rep)
   }
+  const cancel = () => {
+    clear()
+    st.current = null
+  }
+  // Stop any repeat if the key disappears mid-press (e.g. the Fn row toggles).
+  useEffect(() => cancel, [])
   return (
     <button
       type="button"
@@ -42,14 +48,19 @@ function Key(p: KeyProps) {
       // the click) keeps focus in the terminal's hidden input.
       onMouseDown={(e) => e.preventDefault()}
       onContextMenu={(e) => e.preventDefault()}
+      // Activation without a pointer (VoiceOver, Switch Control, keyboard) arrives
+      // as a click with detail 0; pointer presses are handled below.
+      onClick={(e) => {
+        if (e.detail === 0) p.onPress()
+      }}
       onPointerDown={(e) => {
         clear()
+        e.currentTarget.setPointerCapture?.(e.pointerId)
         const s = { x: e.clientX, y: e.clientY, fired: false, moved: false } as NonNullable<typeof st.current>
         st.current = s
         if (p.onLong) {
           s.long = window.setTimeout(() => {
             s.fired = true
-            navigator.vibrate?.(8)
             p.onLong!()
           }, LONG_PRESS)
         } else if (p.repeat) {
@@ -70,14 +81,11 @@ function Key(p: KeyProps) {
       }}
       onPointerUp={() => {
         const s = st.current
-        clear()
-        st.current = null
+        cancel()
         if (s && !s.fired && !s.moved) p.onPress()
       }}
-      onPointerCancel={() => {
-        clear()
-        st.current = null
-      }}
+      onPointerCancel={cancel}
+      onLostPointerCapture={cancel}
     >
       {p.label}
     </button>

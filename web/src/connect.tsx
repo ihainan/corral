@@ -1,6 +1,6 @@
-import { useState, type FormEvent, type ReactNode } from 'react'
+import { useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { api, ApiError, errorText, type Host, type SessionInfo } from './api'
-import { t } from './i18n'
+import { hasKey, t } from './i18n'
 import { Dialog, Field, useToast } from './components/ui'
 
 // Rough terminal size for the first frame, before xterm measures the real one.
@@ -11,7 +11,7 @@ function estimateSize() {
 }
 
 type Pending =
-  | { kind: 'password'; host: Host }
+  | { kind: 'password'; host: Host; accept?: string }
   | { kind: 'hostkey'; host: Host; expected: string; got: string; password?: string }
   | null
 
@@ -25,18 +25,33 @@ export function useConnect(onOpen: (s: SessionInfo) => void): {
   const toast = useToast()
   const [busyHost, setBusyHost] = useState<number | null>(null)
   const [pending, setPending] = useState<Pending>(null)
+  // Each attempt gets a number; cancelling bumps it so a late success is undone
+  // instead of navigating the user somewhere they backed out of.
+  const attempt = useRef(0)
 
-  const open = async (h: Host, password?: string): Promise<'done' | 'retry-password'> => {
+  const cancel = () => {
+    attempt.current++
+    setPending(null)
+    setBusyHost(null)
+  }
+
+  const open = async (h: Host, password?: string, accept?: string): Promise<'done' | 'retry-password'> => {
+    const mine = ++attempt.current
     setBusyHost(h.id)
     try {
-      const s = await api<SessionInfo>('POST', '/api/sessions', { host_id: h.id, ...estimateSize(), password })
+      const s = await api<SessionInfo>('POST', '/api/sessions', { host_id: h.id, ...estimateSize(), password, accept_fingerprint: accept })
+      if (mine !== attempt.current) {
+        void api('DELETE', '/api/sessions/' + s.id).catch(() => {})
+        return 'done'
+      }
       setPending(null)
       onOpen(s)
       return 'done'
     } catch (e) {
+      if (mine !== attempt.current) return 'done'
       if (e instanceof ApiError) {
         if (e.code === 'password_required') {
-          setPending({ kind: 'password', host: h })
+          setPending({ kind: 'password', host: h, accept })
           return 'done'
         }
         if (e.code === 'host_key_changed') {
@@ -47,23 +62,24 @@ export function useConnect(onOpen: (s: SessionInfo) => void): {
           toast(e.human, true)
           return 'retry-password'
         }
-        const detail = typeof e.extra.detail === 'string' ? `（${e.extra.detail}）` : ''
-        toast(e.human + detail, true)
+        const key = 'connect.reason.' + String(e.extra.reason ?? '')
+        toast(hasKey(key) ? e.human + ' ' + t(key) : e.human, true)
       } else toast(errorText(e), true)
       setPending(null)
       return 'done'
     } finally {
-      setBusyHost(null)
+      if (mine === attempt.current) setBusyHost(null)
     }
   }
 
   let dialogs: ReactNode = null
   if (pending?.kind === 'password') {
-    dialogs = <PasswordDialog host={pending.host} onClose={() => setPending(null)} onSubmit={(pw) => open(pending.host, pw)} />
+    const p = pending
+    dialogs = <PasswordDialog host={p.host} onClose={cancel} onSubmit={(pw) => open(p.host, pw, p.accept)} />
   } else if (pending?.kind === 'hostkey') {
     const p = pending
     dialogs = (
-      <Dialog title={t('hostkey.title')} onClose={() => setPending(null)}>
+      <Dialog title={t('hostkey.title')} onClose={cancel}>
         <p className="lead">{t('hostkey.body', { name: p.host.name })}</p>
         <div className="field">
           <span className="field-label">{t('hostkey.expected')}</span>
@@ -74,13 +90,14 @@ export function useConnect(onOpen: (s: SessionInfo) => void): {
           <code className="mono" style={{ wordBreak: 'break-all' }}>{p.got}</code>
         </div>
         <div className="dialog-actions">
-          <button className="btn" onClick={() => setPending(null)}>{t('common.cancel')}</button>
+          <button className="btn" onClick={cancel}>{t('common.cancel')}</button>
           <button
             className="btn btn-danger"
-            onClick={async () => {
-              await api('DELETE', `/api/hosts/${p.host.id}/hostkey`).catch(() => {})
-              if (p.host.auth === 'ask' && !p.password) setPending({ kind: 'password', host: p.host })
-              else void open(p.host, p.password)
+            onClick={() => {
+              // Retry with the exact fingerprint shown above: the gateway re-pins
+              // only if the host presents that very key.
+              if (p.host.auth === 'ask' && !p.password) setPending({ kind: 'password', host: p.host, accept: p.got })
+              else void open(p.host, p.password, p.got)
             }}
           >
             {t('hostkey.trust')}
@@ -99,6 +116,7 @@ function PasswordDialog(props: { host: Host; onClose: () => void; onSubmit: (pw:
   const [error, setError] = useState('')
   const submit = async (e: FormEvent) => {
     e.preventDefault()
+    if (busy) return
     setBusy(true)
     setError('')
     const r = await props.onSubmit(pw)

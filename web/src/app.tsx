@@ -1,10 +1,10 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from 'react'
 import { CircleUserRound, Fence, KeyRound, LogOut, Menu as MenuIcon, ScrollText, Server, Settings, Users } from 'lucide-react'
-import { api, setUnauthorizedHandler, type Bootstrap, type Me } from './api'
+import { api, ApiError, setUnauthorizedHandler, type Bootstrap, type Me } from './api'
 import { t } from './i18n'
 import { syncPrefsFromServer } from './prefs'
 import { match, navigate, usePath, linkHandler } from './router'
-import { Menu, ToastProvider } from './components/ui'
+import { Menu, ToastProvider, useToast } from './components/ui'
 import { LoginPage, SetupPage, InvitePage } from './pages/Auth'
 import { HostsPage } from './pages/Hosts'
 import { HostEditPage } from './pages/HostEdit'
@@ -95,6 +95,7 @@ type NavKey = 'hosts' | 'keys' | 'settings' | 'users' | 'audit'
 
 function Shell({ active, children }: { active: NavKey; children: ReactNode }) {
   const { me, setMe } = useSession()
+  const toast = useToast()
   const items: { key: NavKey; href: string; label: string; icon: ReactNode; admin?: boolean }[] = [
     { key: 'hosts', href: '/', label: t('nav.hosts'), icon: <Server size={17} /> },
     { key: 'keys', href: '/keys', label: t('nav.keys'), icon: <KeyRound size={17} /> },
@@ -104,7 +105,15 @@ function Shell({ active, children }: { active: NavKey; children: ReactNode }) {
   ]
   const visible = items.filter((i) => !i.admin || me?.role === 'admin')
   const signOut = async () => {
-    await api('POST', '/api/logout').catch(() => {})
+    try {
+      await api('POST', '/api/logout')
+    } catch (e) {
+      // A 401 means we were already signed out; anything else did not sign us out.
+      if (!(e instanceof ApiError && e.status === 401)) {
+        toast(t('nav.signOutFailed'), true)
+        return
+      }
+    }
     setMe(null)
     navigate('/login', true)
   }

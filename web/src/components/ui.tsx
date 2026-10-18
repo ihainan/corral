@@ -2,24 +2,54 @@ import { createContext, useCallback, useContext, useEffect, useRef, useState, ty
 import { Check, Copy } from 'lucide-react'
 import { t } from '../i18n'
 
-// Dialog ---------------------------------------------------------------------
-
-export function Dialog(props: { title: string; onClose: () => void; children: ReactNode; sheet?: boolean; labelledBy?: string }) {
-  const ref = useRef<HTMLDivElement>(null)
+// Focus handling for modal layers: focus moves in on open, Tab stays inside,
+// Escape closes, and focus returns to where it was afterwards.
+export function useFocusTrap<T extends HTMLElement>(onClose: () => void) {
+  const ref = useRef<T>(null)
+  const closeRef = useRef(onClose)
+  closeRef.current = onClose
   useEffect(() => {
     const prev = document.activeElement as HTMLElement | null
-    const first = ref.current?.querySelector<HTMLElement>('input, textarea, select, button.btn-primary, button')
+    const root = ref.current
+    const focusables = () =>
+      [...(root?.querySelectorAll<HTMLElement>('a[href], button:not([disabled]), input:not([disabled]), select, textarea, [tabindex]:not([tabindex="-1"])') ?? [])]
+        .filter((el) => el.offsetParent !== null || el === document.activeElement)
+    const first = root?.querySelector<HTMLElement>('input, textarea, select') ?? focusables()[0]
     first?.focus()
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') props.onClose()
+      if (e.key === 'Escape') {
+        e.stopPropagation()
+        closeRef.current()
+        return
+      }
+      if (e.key !== 'Tab') return
+      const list = focusables()
+      if (list.length === 0) {
+        e.preventDefault()
+        return
+      }
+      const i = list.indexOf(document.activeElement as HTMLElement)
+      if (e.shiftKey && (i <= 0)) {
+        e.preventDefault()
+        list[list.length - 1].focus()
+      } else if (!e.shiftKey && (i === -1 || i === list.length - 1)) {
+        e.preventDefault()
+        list[0].focus()
+      }
     }
-    window.addEventListener('keydown', onKey)
+    document.addEventListener('keydown', onKey, true)
     return () => {
-      window.removeEventListener('keydown', onKey)
+      document.removeEventListener('keydown', onKey, true)
       prev?.focus?.()
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+  return ref
+}
+
+// Dialog ---------------------------------------------------------------------
+
+export function Dialog(props: { title: string; onClose: () => void; children: ReactNode; sheet?: boolean }) {
+  const ref = useFocusTrap<HTMLDivElement>(props.onClose)
   return (
     <div className={'overlay' + (props.sheet !== false ? ' sheet-mode' : '')} onMouseDown={(e) => e.target === e.currentTarget && props.onClose()}>
       <div className="dialog" role="dialog" aria-modal="true" aria-label={props.title} ref={ref}>
@@ -177,6 +207,15 @@ export function Field(props: { label: string; htmlFor?: string; optional?: boole
       </label>
       {props.children}
       {props.error ? <p className="err">{props.error}</p> : props.hint ? <p className="hint">{props.hint}</p> : null}
+    </div>
+  )
+}
+
+export function LoadError({ onRetry }: { onRetry: () => void }) {
+  return (
+    <div className="empty" role="alert">
+      <p>{t('common.loadFailed')}</p>
+      <button className="btn" onClick={onRetry}>{t('common.retry')}</button>
     </div>
   )
 }

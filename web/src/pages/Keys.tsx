@@ -2,13 +2,19 @@ import { useEffect, useState, type FormEvent } from 'react'
 import { KeyRound, Trash2 } from 'lucide-react'
 import { api, ApiError, errorText, type KeyCred } from '../api'
 import { relTime, t } from '../i18n'
-import { Confirm, CopyButton, Dialog, Field, useToast } from '../components/ui'
+import { Confirm, CopyButton, Dialog, Field, LoadError } from '../components/ui'
 
 export function KeysPage() {
-  const toast = useToast()
   const [keys, setKeys] = useState<KeyCred[] | null>(null)
+  const [failed, setFailed] = useState(false)
   const [dialog, setDialog] = useState<React.ReactNode>(null)
-  const load = () => api<KeyCred[]>('GET', '/api/credentials').then(setKeys).catch((e) => toast(errorText(e), true))
+  const load = () =>
+    api<KeyCred[]>('GET', '/api/credentials')
+      .then((k) => {
+        setKeys(k)
+        setFailed(false)
+      })
+      .catch(() => setFailed(true))
   useEffect(() => {
     load()
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -26,7 +32,9 @@ export function KeysPage() {
         </button>
       </div>
       <p className="lead">{t('keys.intro')}</p>
-      {keys === null ? (
+      {keys === null && failed ? (
+        <LoadError onRetry={load} />
+      ) : keys === null ? (
         <p className="empty-inline">{t('common.loading')}</p>
       ) : keys.length === 0 ? (
         <p className="empty-inline">{t('keys.empty')}</p>
@@ -77,14 +85,18 @@ export function KeysPage() {
 function GenerateDialog({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
   const [name, setName] = useState('')
   const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
   const submit = async (e: FormEvent) => {
     e.preventDefault()
+    if (busy) return
+    setBusy(true)
     try {
       await api('POST', '/api/credentials', { name, mode: 'generate' })
       onDone()
       onClose()
     } catch (err) {
       setError(errorText(err))
+      setBusy(false)
     }
   }
   return (
@@ -95,7 +107,7 @@ function GenerateDialog({ onClose, onDone }: { onClose: () => void; onDone: () =
         </Field>
         <div className="dialog-actions">
           <button type="button" className="btn" onClick={onClose}>{t('common.cancel')}</button>
-          <button className="btn btn-primary" disabled={!name.trim()}>{t('keys.generate')}</button>
+          <button className="btn btn-primary" disabled={busy || !name.trim()}>{t('keys.generate')}</button>
         </div>
       </form>
     </Dialog>
@@ -107,14 +119,18 @@ function ImportDialog({ onClose, onDone }: { onClose: () => void; onDone: () => 
   const [pk, setPk] = useState('')
   const [phrase, setPhrase] = useState('')
   const [error, setError] = useState<{ field?: string; text: string } | null>(null)
+  const [busy, setBusy] = useState(false)
   const submit = async (e: FormEvent) => {
     e.preventDefault()
+    if (busy) return
+    setBusy(true)
     try {
       await api('POST', '/api/credentials', { name, mode: 'import', private_key: pk, passphrase: phrase })
       onDone()
       onClose()
     } catch (err) {
       setError({ field: err instanceof ApiError ? err.field : undefined, text: errorText(err) })
+      setBusy(false)
     }
   }
   return (
@@ -132,7 +148,7 @@ function ImportDialog({ onClose, onDone }: { onClose: () => void; onDone: () => 
         {error && !error.field && <p className="err">{error.text}</p>}
         <div className="dialog-actions">
           <button type="button" className="btn" onClick={onClose}>{t('common.cancel')}</button>
-          <button className="btn btn-primary" disabled={!name.trim() || !pk.trim()}>{t('keys.import')}</button>
+          <button className="btn btn-primary" disabled={busy || !name.trim() || !pk.trim()}>{t('keys.import')}</button>
         </div>
       </form>
     </Dialog>

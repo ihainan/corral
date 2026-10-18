@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { flushSync } from 'react-dom'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
@@ -9,7 +10,8 @@ import { api, errorText, uploadFile, type Host, type SessionInfo } from '../api'
 import { t } from '../i18n'
 import { navigate } from '../router'
 import { getPrefs, isDark, setPrefs, usePrefs } from '../prefs'
-import { Confirm, Menu, copyText as copyToClipboard, useToast } from '../components/ui'
+import { local } from '../storage'
+import { Confirm, Menu, copyText as copyToClipboard, useFocusTrap, useToast } from '../components/ui'
 import { useConnect } from '../connect'
 import { TermConnection, type EndInfo, type Status } from '../terminal/connection'
 import { applyMods, specialKey, type Mods, type SpecialKey } from '../terminal/keys'
@@ -18,6 +20,14 @@ import { darkTheme, lightTheme } from '../terminal/themes'
 
 const isTouch = window.matchMedia('(pointer: coarse)').matches || navigator.maxTouchPoints > 0
 const FONT_STACK = "'JetBrains Mono', 'SFMono-Regular', Menlo, Consolas, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', monospace"
+
+// Quote a remote path for a POSIX shell when it contains anything beyond safe
+// characters. Generated upload names are safe; the home directory may not be.
+function shellPath(p: string): string | null {
+  if (/[\x00-\x1f\x7f]/.test(p)) return null
+  if (/^[\w@%+=:,./~-]+$/.test(p)) return p
+  return "'" + p.replaceAll("'", "'\\''") + "'"
+}
 
 export function TerminalPage({ id }: { id: string }) {
   const prefs = usePrefs()
@@ -38,7 +48,7 @@ export function TerminalPage({ id }: { id: string }) {
   const [alt, setAlt] = useState<ModState>('off')
   const [fn, setFn] = useState(false)
   const [composer, setComposer] = useState(false)
-  const [draft, setDraft] = useState(() => sessionStorage.getItem('corral.draft.' + id) ?? '')
+  const [draft, setDraft] = useState('') // kept in memory only: drafts may hold secrets
   const [copyText, setCopyText] = useState<string | null>(null)
   const [dragOver, setDragOver] = useState(false)
   const [confirm, setConfirm] = useState<React.ReactNode>(null)
@@ -60,7 +70,7 @@ export function TerminalPage({ id }: { id: string }) {
         const s = list.find((x) => x.id === id)
         if (s) {
           setInfo(s)
-          try { localStorage.setItem('corral.sessHost.' + id, String(s.host_id)) } catch { /* ignore */ }
+          local.set('corral.sessHost.' + id, String(s.host_id))
         }
       })
       .catch(() => {})
@@ -86,8 +96,7 @@ export function TerminalPage({ id }: { id: string }) {
         },
       },
     })
-    const unicode = new Unicode11Addon()
-    term.loadAddon(unicode)
+    term.loadAddon(new Unicode11Addon())
     term.unicode.activeVersion = '11'
     const fit = new FitAddon()
     term.loadAddon(fit)
@@ -106,7 +115,6 @@ export function TerminalPage({ id }: { id: string }) {
     }
     termRef.current = term
     fitRef.current = fit
-    // iOS zooms into inputs smaller than 16px; the helper textarea is invisible anyway.
     const ta = el.querySelector('textarea')
     ta?.setAttribute('autocapitalize', 'off')
     ta?.setAttribute('autocorrect', 'off')
@@ -122,8 +130,17 @@ export function TerminalPage({ id }: { id: string }) {
     safeFit()
 
     const conn = new TermConnection(id, {
-      onReset: () => term.reset(),
-      onData: (d) => term.write(d),
+      // RIS (ESC c) travels in the same write queue as the replay that follows,
+      // so output still being parsed cannot land after the reset.
+      onReset: () => term.write('\x1bc'),
+      onData: (d) => {
+        try {
+          term.write(d)
+          return true
+        } catch {
+          return false // xterm's write buffer is full; resume later from here
+        }
+      },
       onStatus: setStatus,
       onEnd: setEnd,
       onLatency: setLatency,
@@ -131,9 +148,33 @@ export function TerminalPage({ id }: { id: string }) {
     connRef.current = conn
     conn.resize(term.cols, term.rows)
 
+    // Latched Ctrl/Alt from the key bar apply only to keys the user typed, not to
+    // pastes, input-method results or the terminal's own replies to the host.
+    let typedKey = false
+    let composing = false
+    const onCompStart = () => (composing = true)
+    const onCompEnd = () => {
+      composing = false
+      typedKey = false
+    }
+    // On iOS the soft keyboard reports printable keys through input events; mark
+    // those as typed too, unless an input method is composing.
+    const onBeforeInput = (e: Event) => {
+      const ie = e as InputEvent
+      if (!ie.isComposing && ie.inputType === 'insertText') typedKey = true
+    }
+    ta?.addEventListener('compositionstart', onCompStart)
+    ta?.addEventListener('compositionend', onCompEnd)
+    ta?.addEventListener('beforeinput', onBeforeInput)
     const dataSub = term.onData((data) => {
-      conn.send(applyMods(data, activeMods()))
-      releaseOnce()
+      const fromKey = typedKey && !composing
+      typedKey = false
+      if (fromKey && (mods.current.ctrl !== 'off' || mods.current.alt !== 'off')) {
+        conn.send(applyMods(data, activeMods()))
+        releaseOnce()
+      } else {
+        conn.send(data)
+      }
     })
     const binSub = term.onBinary((data) => {
       const bytes = new Uint8Array(data.length)
@@ -147,7 +188,10 @@ export function TerminalPage({ id }: { id: string }) {
       resizeTimer = window.setTimeout(() => conn.resize(cols, rows), 120)
     })
     term.attachCustomKeyEventHandler((e) => {
-      if (e.type === 'keydown' && e.key === 'Enter' && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
+      if (e.type !== 'keydown') return true
+      if (e.isComposing || e.keyCode === 229) return true
+      typedKey = e.key.length === 1
+      if (e.key === 'Enter' && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
         conn.send('\x1b\r') // newline without submitting, for Claude Code / Codex
         return false
       }
@@ -166,6 +210,9 @@ export function TerminalPage({ id }: { id: string }) {
       ro.disconnect()
       clearTimeout(fitTimer)
       clearTimeout(resizeTimer)
+      ta?.removeEventListener('compositionstart', onCompStart)
+      ta?.removeEventListener('compositionend', onCompEnd)
+      ta?.removeEventListener('beforeinput', onBeforeInput)
       dataSub.dispose()
       binSub.dispose()
       resizeSub.dispose()
@@ -212,12 +259,14 @@ export function TerminalPage({ id }: { id: string }) {
     }
   }, [])
 
-  // Touch: one finger scrolls (or wheels inside full-screen programs), two fingers resize text.
+  // Touch: one finger scrolls, two fingers resize text. Scrolling is delivered
+  // as wheel events to xterm, which encodes them for whatever mouse protocol the
+  // program enabled (or scrolls its own scrollback when none is active).
   useEffect(() => {
     const el = hostEl.current!
-    let startY = 0
     let lastY = 0
     let lastT = 0
+    let startY = 0
     let acc = 0
     let moved = false
     let velocity = 0
@@ -228,40 +277,37 @@ export function TerminalPage({ id }: { id: string }) {
       const term = termRef.current
       return term && term.rows > 0 ? el.clientHeight / term.rows : 18
     }
-    const scrollBy = (lines: number) => {
-      const term = termRef.current
-      const conn = connRef.current
-      if (!term || !conn || lines === 0) return
-      const n = Math.min(Math.abs(lines), 12)
-      if (term.modes.mouseTrackingMode !== 'none') {
-        const col = Math.max(1, Math.floor(term.cols / 2))
-        const row = Math.max(1, Math.floor(term.rows / 2))
-        const btn = lines > 0 ? 65 : 64
-        conn.send(`\x1b[<${btn};${col};${row}M`.repeat(n))
-      } else if (term.buffer.active.type === 'alternate') {
-        const seq = specialKey(lines > 0 ? 'Down' : 'Up', { ctrl: false, alt: false, shift: false }, term.modes.applicationCursorKeysMode)
-        conn.send(seq.repeat(Math.min(n, 6)))
-      } else {
-        term.scrollLines(lines)
-      }
+    const wheel = (lines: number) => {
+      const target = el.querySelector('.xterm-screen') ?? el
+      const r = target.getBoundingClientRect()
+      target.dispatchEvent(
+        new WheelEvent('wheel', {
+          deltaY: lines * cellHeight(), deltaMode: WheelEvent.DOM_DELTA_PIXEL, bubbles: true, cancelable: true,
+          clientX: r.left + r.width / 2, clientY: r.top + r.height / 2,
+        }),
+      )
     }
     const dist = (t: TouchList) => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY)
+    // Any change in the number of fingers starts a fresh gesture.
+    const rebase = (e: TouchEvent) => {
+      cancelAnimationFrame(inertia)
+      acc = 0
+      velocity = 0
+      pinch = e.touches.length === 2 ? { dist: dist(e.touches), size: getPrefs().fontSize } : null
+      if (e.touches.length === 1) {
+        startY = lastY = e.touches[0].clientY
+        lastT = performance.now()
+      }
+    }
 
     const onStart = (e: TouchEvent) => {
-      cancelAnimationFrame(inertia)
-      if (e.touches.length === 2) {
-        pinch = { dist: dist(e.touches), size: getPrefs().fontSize }
-        return
-      }
-      startY = lastY = e.touches[0].clientY
-      lastT = performance.now()
-      acc = 0
-      moved = false
-      velocity = 0
+      if (e.touches.length === 1) moved = false
+      rebase(e)
     }
     const onMove = (e: TouchEvent) => {
       if (pinch && e.touches.length === 2) {
         e.preventDefault()
+        moved = true
         const size = Math.round(Math.min(28, Math.max(9, pinch.size * (dist(e.touches) / pinch.dist))))
         if (size !== getPrefs().fontSize) setPrefs({ fontSize: size })
         return
@@ -282,16 +328,20 @@ export function TerminalPage({ id }: { id: string }) {
       const lines = Math.trunc(acc / ch)
       if (lines !== 0) {
         acc -= lines * ch
-        scrollBy(lines)
+        wheel(lines)
       }
     }
     const onEnd = (e: TouchEvent) => {
-      if (pinch) {
-        if (e.touches.length < 2) pinch = null
+      if (e.touches.length > 0) {
+        rebase(e)
         return
       }
       if (!moved) return
       e.preventDefault()
+      if (pinch) {
+        pinch = null
+        return
+      }
       let v = -velocity * 16 // px per frame
       const ch = cellHeight()
       let rest = 0
@@ -302,20 +352,27 @@ export function TerminalPage({ id }: { id: string }) {
         const lines = Math.trunc(rest / ch)
         if (lines !== 0) {
           rest -= lines * ch
-          scrollBy(lines)
+          wheel(lines)
         }
         inertia = requestAnimationFrame(step)
       }
       if (Math.abs(v) > 2) inertia = requestAnimationFrame(step)
     }
+    const onCancel = () => {
+      cancelAnimationFrame(inertia)
+      pinch = null
+      moved = false
+    }
     el.addEventListener('touchstart', onStart, { passive: true, capture: true })
     el.addEventListener('touchmove', onMove, { passive: false, capture: true })
     el.addEventListener('touchend', onEnd, { passive: false, capture: true })
+    el.addEventListener('touchcancel', onCancel, { capture: true })
     return () => {
       cancelAnimationFrame(inertia)
       el.removeEventListener('touchstart', onStart, { capture: true })
       el.removeEventListener('touchmove', onMove, { capture: true })
       el.removeEventListener('touchend', onEnd, { capture: true })
+      el.removeEventListener('touchcancel', onCancel, { capture: true })
     }
   }, [])
 
@@ -327,8 +384,13 @@ export function TerminalPage({ id }: { id: string }) {
         toast(t('term.uploading', { name: f.name || 'image' }))
         try {
           const r = await uploadFile(id, f)
-          termRef.current?.paste(r.path + ' ')
-          toast(t('term.uploaded'))
+          const quoted = shellPath(r.path)
+          if (quoted) {
+            termRef.current?.paste(quoted + ' ')
+            toast(t('term.uploaded'))
+          } else {
+            toast(r.path)
+          }
         } catch (e) {
           toast(errorText(e), true)
         }
@@ -367,13 +429,36 @@ export function TerminalPage({ id }: { id: string }) {
     else termRef.current?.focus()
   }
 
+  // The composer's text and the optional Enter go out as one message, and only
+  // while connected; otherwise the draft stays so nothing is half-sent.
   const sendComposer = (submit: boolean) => {
-    const text = draft
-    if (!text && !submit) return
-    if (text) termRef.current?.paste(text)
-    if (submit) connRef.current?.send('\r')
+    const term = termRef.current
+    const conn = connRef.current
+    if (!term || !conn) return
+    if (!draft && !submit) return
+    if (!conn.isOpen()) {
+      toast(t('term.notConnected'), true)
+      return
+    }
+    let payload = draft.replace(/\r?\n/g, '\r')
+    if (payload && term.modes.bracketedPasteMode) payload = '\x1b[200~' + payload + '\x1b[201~'
+    if (submit) payload += '\r'
+    if (conn.send(payload) !== 'sent') {
+      toast(t('term.notConnected'), true)
+      return
+    }
     setDraft('')
-    sessionStorage.removeItem('corral.draft.' + id)
+    composerRef.current?.focus()
+  }
+
+  const toggleComposer = () => {
+    if (composer) {
+      setComposer(false)
+      return
+    }
+    // Mount and focus inside the tap itself: iOS only raises the keyboard for a
+    // focus that happens during the user's gesture.
+    flushSync(() => setComposer(true))
     composerRef.current?.focus()
   }
 
@@ -388,7 +473,7 @@ export function TerminalPage({ id }: { id: string }) {
     setCopyText(lines.join('\n'))
   }
 
-  const hostIdForReconnect = info?.host_id ?? Number(localStorage.getItem('corral.sessHost.' + id) || 0)
+  const hostIdForReconnect = info?.host_id ?? Number(local.get('corral.sessHost.' + id) || 0)
   const { connect, dialogs } = useConnect((s) => navigate('/t/' + s.id, true))
   const reconnect = async () => {
     if (!hostIdForReconnect) return navigate('/')
@@ -442,7 +527,7 @@ export function TerminalPage({ id }: { id: string }) {
         <button className="icon-btn" onClick={() => fileRef.current?.click()} aria-label={t('term.upload')} title={t('term.upload')}>
           <ImagePlus size={19} />
         </button>
-        <button className="icon-btn" aria-pressed={composer} onClick={() => { setComposer((c) => !c); setTimeout(() => composerRef.current?.focus(), 50) }} aria-label={t('term.composer')} title={t('term.composer')}>
+        <button className="icon-btn" aria-pressed={composer} onClick={toggleComposer} aria-label={t('term.composer')} title={t('term.composer')}>
           <MessageSquareText size={19} />
         </button>
         <Menu
@@ -511,13 +596,12 @@ export function TerminalPage({ id }: { id: string }) {
             ref={composerRef}
             className="composer-input"
             value={draft}
+            aria-label={t('term.composer')}
             placeholder={t('term.composerPlaceholder')}
             rows={Math.min(6, Math.max(1, draft.split('\n').length))}
-            onChange={(e) => {
-              setDraft(e.target.value)
-              sessionStorage.setItem('corral.draft.' + id, e.target.value)
-            }}
+            onChange={(e) => setDraft(e.target.value)}
             onKeyDown={(e) => {
+              if (e.nativeEvent.isComposing || e.keyCode === 229) return
               if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
                 e.preventDefault()
                 sendComposer(true)
@@ -556,19 +640,34 @@ export function TerminalPage({ id }: { id: string }) {
         }}
       />
 
-      {copyText !== null && (
-        <div className="copy-mode" role="dialog" aria-label={t('term.copyMode')}>
-          <div className="copy-bar">
-            <span className="hint">{t('term.copyModeHint')}</span>
-            <div className="spacer" />
-            <button className="btn" onClick={async () => { const sel = window.getSelection()?.toString(); if (await copyToClipboard(sel || copyText)) toast(t('common.copied')) }}>{t('common.copy')}</button>
-            <button className="icon-btn" onClick={() => setCopyText(null)} aria-label={t('common.close')}><X size={20} /></button>
-          </div>
-          <pre className="copy-text" ref={(el) => { if (el) el.scrollTop = el.scrollHeight }}>{copyText}</pre>
-        </div>
-      )}
+      {copyText !== null && <CopyMode text={copyText} onClose={() => setCopyText(null)} />}
       {confirm}
       {dialogs}
+    </div>
+  )
+}
+
+// Copy mode shows the scrollback as real text, so native selection works on touch screens.
+function CopyMode({ text, onClose }: { text: string; onClose: () => void }) {
+  const toast = useToast()
+  const ref = useFocusTrap<HTMLDivElement>(onClose)
+  return (
+    <div className="copy-mode" role="dialog" aria-modal="true" aria-label={t('term.copyMode')} ref={ref}>
+      <div className="copy-bar">
+        <span className="hint">{t('term.copyModeHint')}</span>
+        <div className="spacer" />
+        <button
+          className="btn"
+          onClick={async () => {
+            const sel = window.getSelection()?.toString()
+            if (await copyToClipboard(sel || text)) toast(t('common.copied'))
+          }}
+        >
+          {t('common.copy')}
+        </button>
+        <button className="icon-btn" onClick={onClose} aria-label={t('common.close')}><X size={20} /></button>
+      </div>
+      <pre className="copy-text" tabIndex={0} ref={(el) => { if (el) el.scrollTop = el.scrollHeight }}>{text}</pre>
     </div>
   )
 }

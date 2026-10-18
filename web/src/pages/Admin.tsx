@@ -3,14 +3,21 @@ import { MoreHorizontal, UserPlus } from 'lucide-react'
 import { api, errorText, type AdminUser, type AuditEntry } from '../api'
 import { relTime, t } from '../i18n'
 import { useSession } from '../app'
-import { Confirm, CopyButton, Dialog, Field, Menu, useToast } from '../components/ui'
+import { Confirm, CopyButton, Dialog, Field, LoadError, Menu, useToast } from '../components/ui'
 
 export function AdminUsersPage() {
   const { me } = useSession()
   const toast = useToast()
   const [users, setUsers] = useState<AdminUser[] | null>(null)
+  const [failed, setFailed] = useState(false)
   const [dialog, setDialog] = useState<React.ReactNode>(null)
-  const load = () => api<AdminUser[]>('GET', '/api/admin/users').then(setUsers).catch((e) => toast(errorText(e), true))
+  const load = () =>
+    api<AdminUser[]>('GET', '/api/admin/users')
+      .then((u) => {
+        setUsers(u)
+        setFailed(false)
+      })
+      .catch(() => setFailed(true))
   useEffect(() => {
     load()
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -35,7 +42,9 @@ export function AdminUsersPage() {
           {t('admin.invite')}
         </button>
       </div>
-      {users === null ? (
+      {users === null && failed ? (
+        <LoadError onRetry={load} />
+      ) : users === null ? (
         <p className="empty-inline">{t('common.loading')}</p>
       ) : (
         <div className="list">
@@ -115,12 +124,16 @@ function InviteDialog({ onClose }: { onClose: () => void }) {
   const [ttl, setTtl] = useState(72)
   const [link, setLink] = useState<{ url: string; expires_at: number } | null>(null)
   const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
   const submit = async (e: FormEvent) => {
     e.preventDefault()
+    if (busy) return
+    setBusy(true)
     try {
       setLink(await api('POST', '/api/admin/invites', { role, note, ttl_hours: ttl }))
     } catch (err) {
       setError(errorText(err))
+      setBusy(false)
     }
   }
   return (
@@ -153,7 +166,7 @@ function InviteDialog({ onClose }: { onClose: () => void }) {
           {error && <p className="err">{error}</p>}
           <div className="dialog-actions">
             <button type="button" className="btn" onClick={onClose}>{t('common.cancel')}</button>
-            <button className="btn btn-primary">{t('admin.inviteCreate')}</button>
+            <button className="btn btn-primary" disabled={busy}>{t('admin.inviteCreate')}</button>
           </div>
         </form>
       )}
@@ -165,14 +178,18 @@ function ResetDialog({ user, onClose }: { user: AdminUser; onClose: () => void }
   const toast = useToast()
   const [pw, setPw] = useState('')
   const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
   const submit = async (e: FormEvent) => {
     e.preventDefault()
+    if (busy) return
+    setBusy(true)
     try {
       await api('POST', `/api/admin/users/${user.id}/password`, { password: pw })
       toast(t('settings.saved'))
       onClose()
     } catch (err) {
       setError(errorText(err))
+      setBusy(false)
     }
   }
   return (
@@ -184,7 +201,7 @@ function ResetDialog({ user, onClose }: { user: AdminUser; onClose: () => void }
         </Field>
         <div className="dialog-actions">
           <button type="button" className="btn" onClick={onClose}>{t('common.cancel')}</button>
-          <button className="btn btn-primary">{t('admin.resetPassword')}</button>
+          <button className="btn btn-primary" disabled={busy}>{t('admin.resetPassword')}</button>
         </div>
       </form>
     </Dialog>
@@ -194,14 +211,17 @@ function ResetDialog({ user, onClose }: { user: AdminUser; onClose: () => void }
 export function AdminAuditPage() {
   const toast = useToast()
   const [entries, setEntries] = useState<AuditEntry[] | null>(null)
+  const [failed, setFailed] = useState(false)
   const [more, setMore] = useState(true)
   const load = async (before?: number) => {
     try {
       const rows = await api<AuditEntry[]>('GET', '/api/admin/audit' + (before ? '?before=' + before : ''))
       setEntries((prev) => (before && prev ? [...prev, ...rows] : rows))
       setMore(rows.length === 100)
+      setFailed(false)
     } catch (e) {
-      toast(errorText(e), true)
+      if (before) toast(errorText(e), true)
+      else setFailed(true)
     }
   }
   useEffect(() => {
@@ -211,7 +231,9 @@ export function AdminAuditPage() {
   return (
     <main className="page">
       <div className="page-head"><h1>{t('admin.audit')}</h1></div>
-      {entries === null ? (
+      {entries === null && failed ? (
+        <LoadError onRetry={() => load()} />
+      ) : entries === null ? (
         <p className="empty-inline">{t('common.loading')}</p>
       ) : entries.length === 0 ? (
         <p className="empty-inline">{t('admin.auditEmpty')}</p>
