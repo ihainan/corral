@@ -543,6 +543,29 @@ func TestSettingsPatchOrderingValidationAndAccount(t *testing.T) {
 	if got := admin.do("GET", "/api/me/settings", nil).json(); got["termTheme"] != "nord" {
 		t.Fatalf("a later arrival from another page did not win: %v", got)
 	}
+	// A's older request still loses after B wrote the field in between.
+	r = patch("pageAAAA", 1, map[string]any{"termTheme": "dracula"})
+	if sup, _ := r.json()["superseded"].([]any); r.Status != 200 || len(sup) != 1 {
+		t.Fatalf("an older request was revived by another writer: %d %s", r.Status, r.Body)
+	}
+	if got := admin.do("GET", "/api/me/settings", nil).json(); got["termTheme"] != "nord" {
+		t.Fatalf("an older request was revived by another writer: %v", got)
+	}
+	// Writers are remembered within a bound, the least recently heard from
+	// forgotten first.
+	for i := range maxSettingWriters {
+		mustStatus(t, patch(fmt.Sprintf("pageC%03d", i), 1, map[string]any{"keybar": true}), 200, "another page")
+	}
+	mustStatus(t, patch("pageAAAA", 1, map[string]any{"termTheme": "dracula"}), 200, "A seq 1 again")
+	if got := admin.do("GET", "/api/me/settings", nil).json(); got["termTheme"] != "dracula" {
+		t.Fatalf("a forgotten writer is still remembered: %v", got)
+	}
+	data, _ := h.store.UserSettings(context.Background(), int64(uid.(float64)))
+	var stored map[string]json.RawMessage
+	var writers []settingWriter
+	if json.Unmarshal([]byte(data), &stored) != nil || json.Unmarshal(stored[settingsWriters], &writers) != nil || len(writers) != maxSettingWriters {
+		t.Fatalf("writers kept: %d (%s)", len(writers), data)
+	}
 	mustStatus(t, patch("pageAAAA", 3, map[string]any{"fontSize": map[string]any{}}), 400, "object as font size")
 	mustStatus(t, patch("pageAAAA", 3, map[string]any{"fontSize": 99}), 400, "font size out of range")
 	mustStatus(t, patch("pageAAAA", 3, map[string]any{"_w": 1}), 400, "reserved name")
