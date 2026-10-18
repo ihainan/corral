@@ -14,7 +14,7 @@ export interface EndInfo {
 }
 
 export interface Handlers {
-  onReset(): void
+  onReset(): boolean // false: could not be taken in (terminal overloaded)
   // Return false if the data could not be taken in (terminal overloaded); the
   // connection then resumes from the start of this chunk.
   onData(data: Uint8Array): boolean
@@ -127,7 +127,11 @@ export class TermConnection {
         if (m.t === 'hello') {
           gotHello = true
           this.attempt = 0
-          if (m.reset || this.offset === null) this.h.onReset()
+          if ((m.reset || this.offset === null) && !this.h.onReset()) {
+            this.drop()
+            this.scheduleReconnect(1000)
+            return
+          }
           this.offset = m.offset
           this.setStatus('open')
           if (this.size) ws.send(JSON.stringify({ t: 'resize', ...this.size }))

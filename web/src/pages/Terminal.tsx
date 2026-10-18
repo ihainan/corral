@@ -132,7 +132,14 @@ export function TerminalPage({ id }: { id: string }) {
     const conn = new TermConnection(id, {
       // RIS (ESC c) travels in the same write queue as the replay that follows,
       // so output still being parsed cannot land after the reset.
-      onReset: () => term.write('\x1bc'),
+      onReset: () => {
+        try {
+          term.write('\x1bc')
+          return true
+        } catch {
+          return false
+        }
+      },
       onData: (d) => {
         try {
           term.write(d)
@@ -148,28 +155,35 @@ export function TerminalPage({ id }: { id: string }) {
     connRef.current = conn
     conn.resize(term.cols, term.rows)
 
-    // Latched Ctrl/Alt from the key bar apply only to keys the user typed, not to
-    // pastes, input-method results or the terminal's own replies to the host.
-    let typedKey = false
+    // Latched Ctrl/Alt from the key bar apply only to what the user typed:
+    // a character applies when xterm emits exactly that character for the key
+    // just pressed; special keys (Enter, arrows, Tab…) are encoded here. Pastes,
+    // input-method results and the terminal's own replies pass through untouched.
+    let typedChar: string | null = null
     let composing = false
-    const onCompStart = () => (composing = true)
+    const latched = () => mods.current.ctrl !== 'off' || mods.current.alt !== 'off'
+    const onCompStart = () => {
+      composing = true
+      typedChar = null
+    }
     const onCompEnd = () => {
       composing = false
-      typedKey = false
+      typedChar = null
     }
-    // On iOS the soft keyboard reports printable keys through input events; mark
-    // those as typed too, unless an input method is composing.
+    // iOS soft keyboards report printable keys through input events.
     const onBeforeInput = (e: Event) => {
       const ie = e as InputEvent
-      if (!ie.isComposing && ie.inputType === 'insertText') typedKey = true
+      typedChar = !ie.isComposing && ie.inputType === 'insertText' && ie.data && [...ie.data].length === 1 ? ie.data : null
     }
+    const onPasteEv = () => (typedChar = null)
     ta?.addEventListener('compositionstart', onCompStart)
     ta?.addEventListener('compositionend', onCompEnd)
     ta?.addEventListener('beforeinput', onBeforeInput)
+    ta?.addEventListener('paste', onPasteEv, true)
     const dataSub = term.onData((data) => {
-      const fromKey = typedKey && !composing
-      typedKey = false
-      if (fromKey && (mods.current.ctrl !== 'off' || mods.current.alt !== 'off')) {
+      const typed = typedChar !== null && data === typedChar && !composing
+      typedChar = null
+      if (typed && latched()) {
         conn.send(applyMods(data, activeMods()))
         releaseOnce()
       } else {
@@ -187,10 +201,24 @@ export function TerminalPage({ id }: { id: string }) {
       clearTimeout(resizeTimer)
       resizeTimer = window.setTimeout(() => conn.resize(cols, rows), 120)
     })
+    const specialFor: Record<string, SpecialKey> = {
+      Enter: 'Enter', Tab: 'Tab', Escape: 'Esc', Backspace: 'Backspace', Delete: 'Delete', Insert: 'Insert',
+      ArrowUp: 'Up', ArrowDown: 'Down', ArrowLeft: 'Left', ArrowRight: 'Right', Home: 'Home', End: 'End',
+      PageUp: 'PageUp', PageDown: 'PageDown', F1: 'F1', F2: 'F2', F3: 'F3', F4: 'F4', F5: 'F5', F6: 'F6',
+      F7: 'F7', F8: 'F8', F9: 'F9', F10: 'F10', F11: 'F11', F12: 'F12',
+    }
     term.attachCustomKeyEventHandler((e) => {
       if (e.type !== 'keydown') return true
       if (e.isComposing || e.keyCode === 229) return true
-      typedKey = e.key.length === 1
+      typedChar = e.key.length === 1 && !e.metaKey && !e.ctrlKey ? e.key : null
+      const special = specialFor[e.key]
+      if (special && latched() && !e.metaKey) {
+        const m = activeMods()
+        conn.send(specialKey(special, { ctrl: m.ctrl || e.ctrlKey, alt: m.alt || e.altKey, shift: e.shiftKey }, term.modes.applicationCursorKeysMode))
+        releaseOnce()
+        e.preventDefault()
+        return false
+      }
       if (e.key === 'Enter' && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
         conn.send('\x1b\r') // newline without submitting, for Claude Code / Codex
         return false
@@ -213,6 +241,7 @@ export function TerminalPage({ id }: { id: string }) {
       ta?.removeEventListener('compositionstart', onCompStart)
       ta?.removeEventListener('compositionend', onCompEnd)
       ta?.removeEventListener('beforeinput', onBeforeInput)
+      ta?.removeEventListener('paste', onPasteEv, true)
       dataSub.dispose()
       binSub.dispose()
       resizeSub.dispose()
@@ -243,7 +272,13 @@ export function TerminalPage({ id }: { id: string }) {
     const vv = window.visualViewport
     const apply = () => {
       const h = vv ? vv.height : window.innerHeight
-      if (rootRef.current) rootRef.current.style.height = `${Math.round(h)}px`
+      const root = rootRef.current
+      if (!root) return
+      root.style.height = `${Math.round(h)}px`
+      // While the keyboard is up iOS may pan the visual viewport; follow it. When
+      // it is down, ignore offsetTop: iOS 26 can leave a stale value behind.
+      const keyboardUp = vv ? window.innerHeight - vv.height > 120 : false
+      root.style.transform = keyboardUp && vv ? `translateY(${Math.round(vv.offsetTop)}px)` : ''
       if (window.scrollY !== 0) window.scrollTo(0, 0)
     }
     apply()
@@ -277,15 +312,20 @@ export function TerminalPage({ id }: { id: string }) {
       const term = termRef.current
       return term && term.rows > 0 ? el.clientHeight / term.rows : 18
     }
+    // One wheel event per line: in mouse-reporting mode xterm sends one report
+    // per event regardless of its delta.
     const wheel = (lines: number) => {
       const target = el.querySelector('.xterm-screen') ?? el
       const r = target.getBoundingClientRect()
-      target.dispatchEvent(
-        new WheelEvent('wheel', {
-          deltaY: lines * cellHeight(), deltaMode: WheelEvent.DOM_DELTA_PIXEL, bubbles: true, cancelable: true,
-          clientX: r.left + r.width / 2, clientY: r.top + r.height / 2,
-        }),
-      )
+      const n = Math.min(Math.abs(lines), 10)
+      for (let i = 0; i < n; i++) {
+        target.dispatchEvent(
+          new WheelEvent('wheel', {
+            deltaY: Math.sign(lines), deltaMode: WheelEvent.DOM_DELTA_LINE, bubbles: true, cancelable: true,
+            clientX: r.left + r.width / 2, clientY: r.top + r.height / 2,
+          }),
+        )
+      }
     }
     const dist = (t: TouchList) => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY)
     // Any change in the number of fingers starts a fresh gesture.
@@ -395,7 +435,7 @@ export function TerminalPage({ id }: { id: string }) {
           toast(errorText(e), true)
         }
       }
-      if (!isTouch) termRef.current?.focus()
+      if (!isTouch && !document.querySelector('[aria-modal="true"]')) termRef.current?.focus()
     },
     [id, toast],
   )

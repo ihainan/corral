@@ -42,6 +42,7 @@ export function AdminUsersPage() {
           {t('admin.invite')}
         </button>
       </div>
+      {failed && users !== null && <LoadError onRetry={load} />}
       {users === null && failed ? (
         <LoadError onRetry={load} />
       ) : users === null ? (

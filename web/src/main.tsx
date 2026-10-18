@@ -10,6 +10,16 @@ import { App } from './app'
 
 setLang(getLang())
 
+// Older versions kept composer drafts in sessionStorage; drafts can hold secrets.
+try {
+  for (let i = sessionStorage.length - 1; i >= 0; i--) {
+    const k = sessionStorage.key(i)
+    if (k?.startsWith('corral.draft.')) sessionStorage.removeItem(k)
+  }
+} catch {
+  /* storage unavailable */
+}
+
 if ('serviceWorker' in navigator && location.protocol === 'https:') {
   navigator.serviceWorker.register('/sw.js').catch(() => {})
 }

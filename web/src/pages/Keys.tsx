@@ -32,6 +32,7 @@ export function KeysPage() {
         </button>
       </div>
       <p className="lead">{t('keys.intro')}</p>
+      {failed && keys !== null && <LoadError onRetry={load} />}
       {keys === null && failed ? (
         <LoadError onRetry={load} />
       ) : keys === null ? (

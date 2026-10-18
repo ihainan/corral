@@ -1,4 +1,4 @@
-import { useRef, useState, type FormEvent, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { api, ApiError, errorText, type Host, type SessionInfo } from './api'
 import { hasKey, t } from './i18n'
 import { Dialog, Field, useToast } from './components/ui'
@@ -28,19 +28,29 @@ export function useConnect(onOpen: (s: SessionInfo) => void): {
   // Each attempt gets a number; cancelling bumps it so a late success is undone
   // instead of navigating the user somewhere they backed out of.
   const attempt = useRef(0)
+  const inflight = useRef(false)
+  // Leaving the page counts as cancelling.
+  useEffect(() => () => {
+    attempt.current++
+  }, [])
 
   const cancel = () => {
     attempt.current++
+    inflight.current = false
     setPending(null)
     setBusyHost(null)
   }
 
   const open = async (h: Host, password?: string, accept?: string): Promise<'done' | 'retry-password'> => {
+    if (inflight.current) return 'done' // a second tap while connecting does nothing
+    inflight.current = true
     const mine = ++attempt.current
     setBusyHost(h.id)
     try {
       const s = await api<SessionInfo>('POST', '/api/sessions', { host_id: h.id, ...estimateSize(), password, accept_fingerprint: accept })
       if (mine !== attempt.current) {
+        // Cancelled while connecting: close what was opened. If that fails the
+        // session simply shows up in the running list.
         void api('DELETE', '/api/sessions/' + s.id).catch(() => {})
         return 'done'
       }
@@ -68,6 +78,7 @@ export function useConnect(onOpen: (s: SessionInfo) => void): {
       setPending(null)
       return 'done'
     } finally {
+      inflight.current = false
       if (mine === attempt.current) setBusyHost(null)
     }
   }
@@ -93,6 +104,7 @@ export function useConnect(onOpen: (s: SessionInfo) => void): {
           <button className="btn" onClick={cancel}>{t('common.cancel')}</button>
           <button
             className="btn btn-danger"
+            disabled={busyHost === p.host.id}
             onClick={() => {
               // Retry with the exact fingerprint shown above: the gateway re-pins
               // only if the host presents that very key.

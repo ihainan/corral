@@ -98,6 +98,7 @@ export function HostsPage() {
 
       <section className="section" aria-labelledby="hosts-h">
         {running.length > 0 && <h2 id="hosts-h">{t('hosts.title')}</h2>}
+        {failed && hosts !== null && <LoadError onRetry={load} />}
         {hosts === null && failed ? (
           <LoadError onRetry={load} />
         ) : hosts === null ? (

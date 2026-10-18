@@ -47,13 +47,18 @@ export function HostEditPage({ id }: { id?: number }) {
       })
   }, [editing, id, toast])
 
+  const [generating, setGenerating] = useState(false)
   const generateKey = async () => {
+    if (generating) return
+    setGenerating(true)
     try {
       const k = await api<KeyCred>('POST', '/api/credentials', { name: name ? `${name} key` : 'corral key', mode: 'generate' })
       setKeys((ks) => [...ks, k])
       setCredentialId(k.id)
     } catch (e) {
       toast(errorText(e), true)
+    } finally {
+      setGenerating(false)
     }
   }
 
@@ -143,7 +148,7 @@ export function HostEditPage({ id }: { id?: number }) {
             )}
             {fe('credential_id') && <p className="err">{fe('credential_id')}</p>}
             <div>
-              <button type="button" className="btn" onClick={generateKey}>
+              <button type="button" className="btn" onClick={generateKey} disabled={generating}>
                 <KeyRound size={16} />
                 {t('host.keyCreate')}
               </button>
