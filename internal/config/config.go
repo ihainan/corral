@@ -74,6 +74,13 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("CORRAL_PUBLIC_URL must be an absolute http(s) URL, got %q", raw)
 	}
 	c.PublicURL = &url.URL{Scheme: u.Scheme, Host: u.Host}
+	// Forwarded ports are sibling subdomains that run arbitrary apps. Only the
+	// __Host- cookie prefix, which needs HTTPS, stops one from planting a login
+	// cookie for the parent domain that the main site would then accept.
+	if c.ForwardDomain != "" && u.Scheme != "https" {
+		return nil, fmt.Errorf("CORRAL_FORWARD_DOMAIN needs CORRAL_PUBLIC_URL to use https:// (got %q): "+
+			"over plain HTTP a forwarded app could set cookies for the main site", raw)
+	}
 
 	if c.MasterKey, err = loadMasterKey(); err != nil {
 		return nil, err
