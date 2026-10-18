@@ -169,14 +169,29 @@ function flush() {
   }).catch(() => {})
 }
 window.addEventListener('pagehide', flush)
+// Coming back to the page also picks up what other devices changed meanwhile.
+let lastSync = 0
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'hidden') flush()
-  else if (pending.size) save()
+  if (document.visibilityState === 'hidden') return flush()
+  if (pending.size) save()
+  if (owner !== null && Date.now() - lastSync > 10_000) void syncPrefsFromServer(owner)
 })
 
-// Another tab signed in as someone else: this page's account is gone.
 window.addEventListener('storage', (e) => {
+  // Another tab signed in as someone else: this page's account is gone.
   if (e.key === LAST && owner !== null && e.newValue !== String(owner)) location.reload()
+  // Another tab of this browser changed a setting: follow it at once, except
+  // for fields changed here that are still being saved.
+  if (owner !== null && e.key === cacheKey(owner) && e.newValue) {
+    try {
+      const other = sanitize(JSON.parse(e.newValue)) as Record<string, unknown>
+      for (const k of pending.keys()) delete other[k]
+      state = { ...state, ...other }
+      emit()
+    } catch {
+      /* ignore */
+    }
+  }
 })
 
 // Forget the signed-in account's pending work (sign-out).
@@ -216,12 +231,15 @@ export async function syncPrefsFromServer(userId: number) {
   }
   const gen = generation
   const startedAt = edits
+  lastSync = Date.now()
   try {
     const remote = sanitize(await api<unknown>('GET', '/api/me/settings'))
     if (gen !== generation || owner !== userId) return // signed out or switched meanwhile
     // Fields changed on this page after the request went out keep their
     // local value, saved or not: the response may predate them.
     for (const [k, at] of editedAt) if (at > startedAt) delete (remote as Record<string, unknown>)[k]
+    for (const k of pending.keys()) delete (remote as Record<string, unknown>)[k] // not saved yet
+
     state = { ...defaults, ...state, ...remote }
     emit()
   } catch {

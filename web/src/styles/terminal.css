@@ -49,7 +49,7 @@ html.term-mode body { position: fixed; inset: 0; }
 .term-status .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--term-fg-3); flex: none; display: none; }
 .term-status.s-connecting, .term-status.s-reconnecting, .term-status.s-slow { color: var(--warn); }
 .term-status.s-connecting .dot, .term-status.s-reconnecting .dot { display: block; background: var(--warn); animation: pulse 1.2s ease-in-out infinite; }
-.term-status.s-offline { color: var(--danger); }
+.term-status.s-offline, .term-status.s-full { color: var(--danger); }
 @keyframes pulse { 50% { opacity: 0.3; } }
 
 .term-paused {
@@ -221,3 +221,5 @@ html.term-dark .overlay, html.term-dark .menu, html.term-dark .toast {
 .term-following { gap: 12px; justify-content: center; padding: 0 12px; }
 .term-following .link-btn { color: var(--term-accent-text); font-size: 12px; white-space: nowrap; }
 .term-following span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.term-full { height: auto; min-height: 28px; padding: 4px 12px; }
+.term-full span { white-space: normal; }

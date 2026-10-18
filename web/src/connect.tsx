@@ -47,11 +47,14 @@ export function useConnect(onOpen: (s: SessionInfo) => void): {
     const mine = ++attempt.current
     setBusyHost(h.id)
     try {
-      const s = await api<SessionInfo>('POST', '/api/sessions', { host_id: h.id, ...estimateSize(), password, accept_fingerprint: accept })
+      // reused: an already running tmux/herdr session was returned, which
+      // other devices may be using.
+      const s = await api<SessionInfo & { reused?: boolean }>('POST', '/api/sessions', { host_id: h.id, ...estimateSize(), password, accept_fingerprint: accept })
       if (mine !== attempt.current) {
-        // Cancelled while connecting: close what was opened. If that fails the
-        // session simply shows up in the running list.
-        void api('DELETE', '/api/sessions/' + s.id).catch(() => {})
+        // Cancelled while connecting: close what was opened for this (never a
+        // reused session). If that fails the session simply shows up in the
+        // running list.
+        if (!s.reused) void api('DELETE', '/api/sessions/' + s.id).catch(() => {})
         return 'done'
       }
       setPending(null)

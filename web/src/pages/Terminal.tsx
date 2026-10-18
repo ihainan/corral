@@ -47,6 +47,10 @@ const FONT_STACK = "'JetBrains Mono', 'SFMono-Regular', Menlo, Consolas, 'PingFa
 // colour and DCS reports. This is only the fallback for telling them apart
 // from typing, see userInputEvent.
 const REPLY = /^(?:\x1b\[[?>]?[\d;]*[cnRt]|\x1b\[\??[\d;]*\$y|\x1b\[[IO]|\x1bP[\s\S]*?\x1b\\|\x1b\][\s\S]*?(?:\x07|\x1b\\))+$/
+// Mouse reports (SGR or X10 encoding); a wheel is buttons 64-67.
+const isMouseReport = (data: string) => /^\x1b\[<\d+;\d+;\d+[Mm]$/.test(data) || /^\x1b\[M...$/s.test(data)
+const isWheelReport = (data: string) => /^\x1b\[<6[4-7];\d+;\d+[Mm]$/.test(data) || /^\x1b\[M[`-c]..$/s.test(data)
+
 export function isTerminalReply(data: string): boolean {
   return REPLY.test(data)
 }
@@ -107,7 +111,6 @@ export function TerminalPage({ id }: { id: string }) {
   const rootRef = useRef<HTMLDivElement>(null)
   const hostEl = useRef<HTMLDivElement>(null)
   const termRef = useRef<Terminal | null>(null)
-  const fitRef = useRef<FitAddon | null>(null)
   const connRef = useRef<TermConnection | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
   const composerRef = useRef<HTMLTextAreaElement>(null)
@@ -184,6 +187,7 @@ export function TerminalPage({ id }: { id: string }) {
   const takeOverRef = useRef<() => void>(() => {})
   const [following, setFollowing] = useState<{ cols: number; rows: number } | null>(null)
   const outRef = useRef<(d: string | Uint8Array) => void>(() => {})
+  const safeFitRef = useRef(() => {})
   const heldRef = useRef<() => boolean>(() => false) // input is waiting for a Ctrl+V clipboard check or upload
   const composingRef = useRef<() => boolean>(() => false)
   const mods = useRef<{ ctrl: ModState; alt: ModState }>({ ctrl: 'off', alt: 'off' })
@@ -241,7 +245,6 @@ export function TerminalPage({ id }: { id: string }) {
       }
     }
     termRef.current = term
-    fitRef.current = fit
     const ta = el.querySelector('textarea')
     ta?.setAttribute('autocapitalize', 'off')
     ta?.setAttribute('autocorrect', 'off')
@@ -254,16 +257,37 @@ export function TerminalPage({ id }: { id: string }) {
       if (!following) return
       following = null
       setFollowing(null)
+      applyScale()
       safeFit()
-      conn.resize(term.cols, term.rows) // tell the host even if nothing changed locally
+      report(term.cols, term.rows) // tell the host even if nothing changed locally
     }
     const safeFit = () => {
-      if (following) return
+      if (following) return void requestAnimationFrame(applyScale)
       try {
         fit.fit()
       } catch {
         /* not visible yet */
       }
+    }
+    safeFitRef.current = safeFit
+    // Another viewer's grid can be larger than this window (a desktop's on a
+    // phone): it is shown scaled down to fit, so all of it can be seen. At
+    // this window's own size nothing is scaled.
+    let scale = 1
+    const applyScale = () => {
+      const x = el.querySelector<HTMLElement>('.xterm')
+      const screen = el.querySelector<HTMLElement>('.xterm-screen')
+      if (!x || !screen) return
+      const cs = getComputedStyle(el)
+      const w = el.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight)
+      const h = el.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom)
+      const next = following && screen.offsetWidth > 0 && screen.offsetHeight > 0
+        ? Math.min(1, w / screen.offsetWidth, h / screen.offsetHeight)
+        : 1
+      if (next === scale) return
+      scale = next
+      x.style.transformOrigin = '0 0'
+      x.style.transform = scale < 1 ? `scale(${scale})` : ''
     }
     safeFit()
     // Cell size is measured when the font is set. The web font may still be
@@ -316,14 +340,31 @@ export function TerminalPage({ id }: { id: string }) {
           // viewer's size was being shown until now.
           following = null
           setFollowing(null)
+          applyScale()
           safeFit()
+          return
+        }
+        if (sent === cols + 'x' + rows) {
+          // The size this window reported last, now outdated (it was taken
+          // before the font loaded, say): not another viewer's. Report the
+          // current one, unless that is already on its way.
+          following = null
+          setFollowing(null)
+          applyScale()
+          safeFit()
+          if (resizeTimer === undefined) report(term.cols, term.rows)
           return
         }
         // Another viewer set this size: show the terminal at it, so what the
         // programs draw for that size lines up, until this one takes over.
         following = { cols, rows }
         setFollowing({ cols, rows })
+        // A resize of this window still waiting to be reported is outdated now.
+        clearTimeout(resizeTimer)
+        resizeTimer = undefined
+        conn.follow()
         if (term.cols !== cols || term.rows !== rows) term.resize(cols, rows)
+        requestAnimationFrame(applyScale)
       },
       onMeta: (m) => {
         setHerdr(m as HerdrSummary)
@@ -342,7 +383,14 @@ export function TerminalPage({ id }: { id: string }) {
       },
     })
     connRef.current = conn
-    conn.resize(term.cols, term.rows)
+    // Sizes go out through here, so a size coming back can be told apart:
+    // this window's own (sent) or another viewer's.
+    let sent: string | null = null
+    const report = (cols: number, rows: number) => {
+      sent = cols + 'x' + rows
+      conn.resize(cols, rows)
+    }
+    report(term.cols, term.rows)
 
     // Everything typed goes out through here, so it can wait its turn while
     // Ctrl+V checks the clipboard and uploads an image: keys typed meanwhile
@@ -499,12 +547,21 @@ export function TerminalPage({ id }: { id: string }) {
     }
     const dataSub = term.onData((data) => {
       imeLog?.('→ sent ' + JSON.stringify(data))
-      if (!replaying) takeOverRef.current() // typing here takes the terminal over
       const typed = typedChar !== null && data === typedChar && !composing
-      const fromUser = userData
+      const fromUser = onUserInput ? userData : !isTerminalReply(data)
       typedChar = null
       userData = false
-      if (replaying && (onUserInput ? !fromUser : isTerminalReply(data))) return
+      // xterm's own answers (to queries, focus changes) during a replay are
+      // stale; while another viewer's size is shown, that viewer answers.
+      if (!fromUser && (replaying || following)) return
+      // Typing, pasting or clicking here takes the terminal over; scrolling
+      // with the wheel only scrolls, at the size being shown. A click on a
+      // scaled-down grid lands elsewhere than it looks, so it only takes over.
+      if (fromUser && !isWheelReport(data)) {
+        const scaledClick = following && scale < 1 && isMouseReport(data)
+        takeOverRef.current()
+        if (scaledClick) return
+      }
       if (typed && latched()) {
         out(applyMods(data, activeMods()))
         releaseOnce()
@@ -522,7 +579,10 @@ export function TerminalPage({ id }: { id: string }) {
       if (following) return // showing another viewer's size; not ours to report
       // Keyboard animations fire many resizes; tell the host once things settle.
       clearTimeout(resizeTimer)
-      resizeTimer = window.setTimeout(() => conn.resize(cols, rows), 120)
+      resizeTimer = window.setTimeout(() => {
+        resizeTimer = undefined
+        if (!following) report(cols, rows)
+      }, 120)
     })
     const specialFor: Record<string, SpecialKey> = {
       Enter: 'Enter', Tab: 'Tab', Escape: 'Esc', Backspace: 'Backspace', Delete: 'Delete', Insert: 'Insert',
@@ -568,6 +628,7 @@ export function TerminalPage({ id }: { id: string }) {
         e.preventDefault()
         // Keys typed while the clipboard is checked wait, so ^V keeps its place
         // (Ctrl+V then Enter in vim inserts a literal CR).
+        takeOverRef.current()
         settleRef.current()
         held ??= []
         held.push({ clip: Promise.race([clipboardImage(), new Promise<null>((r) => setTimeout(() => r(null), 1500))]) })
@@ -600,6 +661,7 @@ export function TerminalPage({ id }: { id: string }) {
       const pasteKey = e.ctrlKey && e.key.toLowerCase() === 'v'
       if (latched() && e.key.length === 1 && (e.ctrlKey || physAlt) && !e.metaKey && !pasteKey && !e.getModifierState('AltGraph')) {
         const m = activeMods()
+        takeOverRef.current()
         settleRef.current()
         out(applyMods(e.key, { ctrl: m.ctrl || e.ctrlKey, alt: m.alt || physAlt, shift: false }))
         releaseOnce()
@@ -609,6 +671,7 @@ export function TerminalPage({ id }: { id: string }) {
       const special = specialFor[e.key]
       if (special && latched() && !e.metaKey) {
         const m = activeMods()
+        takeOverRef.current()
         settleRef.current()
         out(specialKey(special, { ctrl: m.ctrl || e.ctrlKey, alt: m.alt || e.altKey, shift: e.shiftKey }, term.modes.applicationCursorKeysMode))
         releaseOnce()
@@ -624,6 +687,7 @@ export function TerminalPage({ id }: { id: string }) {
       }
       if (e.key === 'Enter' && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
         e.preventDefault()
+        takeOverRef.current()
         settleRef.current()
         out('\x1b\r') // newline without submitting, for Claude Code / Codex
         return false
@@ -671,11 +735,9 @@ export function TerminalPage({ id }: { id: string }) {
     setChromeColor(scheme.theme.background ?? null)
     // Menus and dialogs opened over the terminal follow its colours.
     document.documentElement.classList.toggle('term-dark', scheme.dark)
-    try {
-      fitRef.current?.fit()
-    } catch {
-      /* ignore */
-    }
+    // Through the follow check: while another viewer's size is shown the grid
+    // stays at that size (only its scale changes).
+    safeFitRef.current()
   }, [prefs])
   useEffect(
     () => () => {
@@ -1058,7 +1120,8 @@ export function TerminalPage({ id }: { id: string }) {
     status === 'open' ? (slow ? t('term.latency', { ms: latency }) : t('term.connected')) :
     status === 'connecting' ? t('term.connecting') :
     status === 'reconnecting' ? t('term.reconnecting') :
-    status === 'offline' ? t('term.offline') : ''
+    status === 'offline' ? t('term.offline') :
+    status === 'full' ? t('term.fullShort') : ''
   const statusClass = ended ? 's-ended' : slow ? 's-slow' : 's-' + status
   const paused = !ended && (status === 'reconnecting' || status === 'offline')
   const herdrStale = paused || !herdrFresh
@@ -1189,7 +1252,16 @@ export function TerminalPage({ id }: { id: string }) {
           label={t('common.more')}
           items={moreItems}
           button={(open, toggle) => (
-            <button className="icon-btn" aria-label={t('common.more')} aria-expanded={open} onClick={toggle}>
+            <button
+              className="icon-btn"
+              aria-label={t('common.more')}
+              aria-expanded={open}
+              onClick={(e) => {
+                // VS Code may have been started or stopped on another device.
+                if (!open && boot.code && info) refreshCode([info.host_id])
+                toggle(e)
+              }}
+            >
               <MoreVertical size={19} />
             </button>
           )}
@@ -1197,6 +1269,12 @@ export function TerminalPage({ id }: { id: string }) {
       </header>
 
       {paused && <div className="term-paused" role="status">{t('term.paused')}</div>}
+      {status === 'full' && (
+        <div className="term-paused term-following term-full" role="alert">
+          <span>{t('term.full')}</span>
+          <button className="link-btn" onClick={() => connRef.current?.retry()}>{t('common.retry')}</button>
+        </div>
+      )}
       {following && !paused && !ended && (
         <div className="term-paused term-following" role="status">
           <span>{t('term.following', { cols: following.cols, rows: following.rows })}</span>

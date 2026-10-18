@@ -5,7 +5,7 @@
 // us to reset and replays what it still has. Phones suspend background tabs
 // within seconds, so reconnecting is the normal path, not an edge case.
 
-export type Status = 'connecting' | 'open' | 'reconnecting' | 'offline' | 'ended' | 'gone'
+export type Status = 'connecting' | 'open' | 'reconnecting' | 'offline' | 'ended' | 'gone' | 'full'
 
 export interface EndInfo {
   state: 'exited' | 'lost' | 'closed'
@@ -47,9 +47,12 @@ export class TermConnection {
   private pongDeadline: number | undefined
   private closed = false
   private ended = false
-  private queue: { at: number; data: Uint8Array }[] = []
+  // Input typed while disconnected, with the output position it was typed at.
+  private queue: { at: number; data: Uint8Array; offset: number | null }[] = []
   private size: { cols: number; rows: number } | null = null
   private backlog = false
+  private everOpen = false
+  private full = false
   status: Status = 'connecting'
 
   constructor(private id: string, private h: Handlers) {
@@ -77,7 +80,8 @@ export class TermConnection {
   // replayed long after the user stopped expecting it.
   send(data: string | Uint8Array): SendResult {
     const bytes = typeof data === 'string' ? new TextEncoder().encode(data) : data
-    if (this.isOpen()) {
+    // Behind input still waiting (the socket is back but not yet confirmed), it waits too.
+    if (this.isOpen() && this.queue.length === 0) {
       for (let i = 0; i < bytes.length; i += FRAME_MAX) this.ws!.send(bytes.subarray(i, i + FRAME_MAX))
       return 'sent'
     }
@@ -90,8 +94,22 @@ export class TermConnection {
       this.h.onDropped?.()
       return 'dropped'
     }
-    this.queue.push({ at: now, data: bytes })
+    this.queue.push({ at: now, data: bytes, offset: this.offset })
     return 'queued'
+  }
+
+  // follow forgets this window's size while another viewer's is shown, so a
+  // reconnect does not report it; the next resize brings it back.
+  follow() {
+    this.size = null
+  }
+
+  // retry tries again after the session was full.
+  retry() {
+    if (!this.full) return
+    this.full = false
+    this.attempt = 0
+    this.open()
   }
 
   resize(cols: number, rows: number) {
@@ -122,7 +140,7 @@ export class TermConnection {
   }
 
   private open() {
-    if (this.closed || this.ended) return
+    if (this.closed || this.ended || this.full) return
     clearTimeout(this.timer)
     this.drop()
     const gen = this.gen
@@ -149,9 +167,13 @@ export class TermConnection {
           }
           this.offset = m.offset
           this.setStatus('open')
-          if (this.size) ws.send(JSON.stringify({ t: 'resize', ...this.size }))
+          // This window's size, unless it is showing another viewer's (size
+          // is null then) or reconnected in the background: a phone in a
+          // pocket must not take the terminal back from the desk.
+          const first = !this.everOpen
+          this.everOpen = true
+          if (this.size && (first || document.visibilityState === 'visible')) ws.send(JSON.stringify({ t: 'resize', ...this.size }))
           ws.send(JSON.stringify({ t: 'visible', v: document.visibilityState === 'visible' }))
-          this.flushQueue(ws)
           this.startPing(ws, gen)
         } else if (m.t === 'state') {
           this.ended = true
@@ -161,13 +183,22 @@ export class TermConnection {
           this.h.onEnd({ state: m.state, code: m.code, reason: m.reason })
         } else if (m.t === 'live') {
           this.backlog = false
+          this.flushQueue(ws) // caught up: now it can be told whether the screen changed
           this.h.onLive?.()
+        } else if (m.t === 'error' && m.code === 'too_many_viewers') {
+          // Open in too many windows already: retrying would only be refused again.
+          this.full = true
+          this.queue = []
+          this.drop()
+          this.setStatus('full')
         } else if (m.t === 'herdr') {
           this.h.onMeta?.(m)
         } else if (m.t === 'size') {
           this.h.onSize?.(m.cols, m.rows)
         } else if (m.t === 'pong') {
           clearTimeout(this.pongDeadline)
+          // The socket outlived a network change: send what waited meanwhile.
+          if (!this.backlog) this.flushQueue(ws)
           this.h.onLatency(Math.max(0, Date.now() - m.ts))
         }
         return
@@ -194,11 +225,16 @@ export class TermConnection {
       this.offset = start + data.length
     }
 
-    ws.onclose = () => {
+    ws.onclose = (ev) => {
       if (gen !== this.gen) return
       this.stopPing()
       this.ws = null
-      if (this.closed || this.ended) return
+      if (ev.code === 4429) {
+        this.full = true
+        this.queue = []
+        this.setStatus('full')
+      }
+      if (this.closed || this.ended || this.full) return
       // A socket refused before hello usually means the session is gone (404).
       if (!gotHello && this.attempt >= 1) void this.checkGone()
       this.scheduleReconnect()
@@ -227,7 +263,7 @@ export class TermConnection {
   }
 
   private scheduleReconnect(minDelay = 0) {
-    if (this.closed || this.ended) return
+    if (this.closed || this.ended || this.full) return
     if (!navigator.onLine) {
       this.setStatus('offline')
       return
@@ -242,9 +278,14 @@ export class TermConnection {
 
   private flushQueue(ws: WebSocket) {
     const now = Date.now()
+    // Input typed while away is sent only if nothing was output since it was
+    // typed; otherwise it could land somewhere else than intended (another
+    // device may have quit the program or switched panes meanwhile).
+    if (this.queue.length === 0) return
+    const unchanged = this.queue[0].offset !== null && this.queue[0].offset === this.offset
     const fresh = this.queue.filter((q) => now - q.at < QUEUE_MAX_AGE)
-    if (fresh.length < this.queue.length) this.h.onDropped?.()
-    for (const q of fresh) ws.send(q.data)
+    if (!unchanged || fresh.length < this.queue.length) this.h.onDropped?.()
+    if (unchanged) for (const q of fresh) ws.send(q.data)
     this.queue = []
   }
 
@@ -293,7 +334,7 @@ export class TermConnection {
   }
 
   private onOnline = () => {
-    if (this.closed || this.ended) return
+    if (this.closed || this.ended || this.full) return
     if (this.probe(2500)) {
       // The socket survived the outage; show it as open while the probe runs.
       if (this.offset !== null) this.setStatus('open')
@@ -305,7 +346,7 @@ export class TermConnection {
   }
 
   private onOffline = () => {
-    if (this.closed || this.ended) return
+    if (this.closed || this.ended || this.full) return
     this.setStatus('offline')
   }
 }

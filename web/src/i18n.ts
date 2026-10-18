@@ -377,6 +377,8 @@ const zh = {
   'term.following': '正在按另一台设备的尺寸显示（{cols}×{rows}），在这里输入会自动切换',
   'term.takeOver': '改用本设备尺寸',
   'term.inputDropped': '连接中断期间输入的部分内容没有发出，请在恢复后重新输入。',
+  'term.fullShort': '窗口过多',
+  'term.full': '这个会话已在太多窗口中打开，请先关掉其他设备或标签页上的这个会话，再点重试。',
 }
 
 type Key = keyof typeof zh
@@ -758,6 +760,8 @@ const en: Record<Key, string> = {
   'term.following': 'Showing another device\'s size ({cols}×{rows}); typing here switches to this one',
   'term.takeOver': 'Use this device\'s size',
   'term.inputDropped': 'Some of what you typed while disconnected was not sent. Type it again once the connection is back.',
+  'term.fullShort': 'Too many windows',
+  'term.full': 'This session is open in too many windows. Close it on another device or tab, then retry.',
 }
 
 const tables: Record<string, Record<Key, string>> = { 'zh-CN': zh, en }

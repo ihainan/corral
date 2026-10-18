@@ -69,9 +69,14 @@ self.addEventListener('notificationclick', (e) => {
   if (url.origin !== self.location.origin) return
   e.waitUntil(
     self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((list) => {
-      for (const c of list) {
-        if ('navigate' in c) return c.focus().then(() => c.navigate(url.href))
-      }
+      const path = (c) => new URL(c.url).pathname
+      // A window already showing it comes to the front as it is.
+      const same = list.find((c) => path(c) === url.pathname)
+      if (same) return same.focus()
+      // Else a window that is not on a terminal page is reused; a terminal
+      // page is never navigated away (its composer draft would be lost).
+      const free = list.find((c) => 'navigate' in c && !path(c).startsWith('/t/'))
+      if (free) return free.focus().then(() => free.navigate(url.href))
       return self.clients.openWindow(url.href)
     }),
   )
