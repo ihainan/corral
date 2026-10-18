@@ -134,6 +134,7 @@ export function TerminalPage({ id }: { id: string }) {
 
   // Latest modifier state for the xterm data callback.
   const openComposerRef = useRef<() => void>(() => {})
+  const settleRef = useRef<() => void>(() => {})
   const mods = useRef<{ ctrl: ModState; alt: ModState }>({ ctrl: 'off', alt: 'off' })
   mods.current = { ctrl, alt }
   const releaseOnce = useCallback(() => {
@@ -289,14 +290,18 @@ export function TerminalPage({ id }: { id: string }) {
     type Core = { _compositionHelper?: { keydown(e: KeyboardEvent): boolean }; _unprocessedDeadKey?: boolean }
     const core = (term as unknown as { _core?: Core })._core
     const internalsOk = !!core && typeof core._compositionHelper?.keydown === 'function' && typeof core._unprocessedDeadKey === 'boolean'
-    // Keys left to the browser whose text has not arrived yet, oldest first:
-    // each insertText belongs to the oldest one, so a late text still lands
-    // on its own key and in order.
-    let claims = 0
+    // The key left to the browser, identified by its physical code, until its
+    // text arrives, it is released, or another key is pressed. Browsers insert
+    // a key's text (an input method's commit included) before the next key
+    // event, so a claim never spans keys; text arriving outside one is
+    // ordinary input for xterm.
+    let claim: string | null = null
+    let lastImeKey = -Infinity
+    let lastKeyAlt = false // the last key was pressed with Option/Alt
     const onPrintableInput = (e: Event) => {
       const ie = e as InputEvent
-      if (e.target !== ta || claims === 0 || ie.inputType !== 'insertText' || !ie.data || ie.isComposing || composing) return
-      claims--
+      if (e.target !== ta || claim === null || ie.inputType !== 'insertText' || !ie.data || ie.isComposing || composing) return
+      claim = null
       e.stopPropagation() // ours alone; xterm must not send it as well
       // Take exactly the inserted text back out of the textarea: xterm never
       // has typed characters in it (its composition handling compares the
@@ -310,11 +315,20 @@ export function TerminalPage({ id }: { id: string }) {
       }
       term.input(ie.data, true)
     }
-    const dropClaims = () => (claims = 0)
+    const dropClaims = () => (claim = null)
+    // Before anything is sent past xterm (key bar, Shift+Enter, latched
+    // modifiers, composer, upload paths): send a composition that just ended
+    // and clear xterm's dead-key flag, as xterm does for a key it handles.
+    settleRef.current = () => {
+      if (!internalsOk) return
+      core!._compositionHelper!.keydown(new KeyboardEvent('keydown'))
+      core!._unprocessedDeadKey = false
+      claim = null
+    }
 
     const onBeforeInput = (e: Event) => {
       const ie = e as InputEvent
-      typedChar = !ie.isComposing && ie.inputType === 'insertText' && ie.data && [...ie.data].length === 1 ? ie.data : null
+      typedChar = !lastKeyAlt && !ie.isComposing && ie.inputType === 'insertText' && ie.data && [...ie.data].length === 1 ? ie.data : null
     }
     const onPasteEv = () => (typedChar = null)
     ta?.addEventListener('compositionstart', onCompStart)
@@ -359,31 +373,51 @@ export function TerminalPage({ id }: { id: string }) {
       F7: 'F7', F8: 'F8', F9: 'F9', F10: 'F10', F11: 'F11', F12: 'F12',
     }
     term.attachCustomKeyEventHandler((e) => {
-      // The keypress of a key left to the browser: its input event carries the text.
-      if (e.type === 'keypress' && claims > 0) return false
+      // The keypress of the claimed key: its input event carries the text.
+      if (e.type === 'keypress' && claim !== null && e.code === claim) return false
+      if (e.type === 'keyup') {
+        if (claim !== null && e.code === claim) claim = null
+        return true
+      }
       if (e.type !== 'keydown') return true
-      if (e.isComposing || e.keyCode === 229) return true
+      if (e.isComposing || e.keyCode === 229) {
+        claim = null
+        lastImeKey = performance.now()
+        return true
+      }
+      const modifierOnly = ['Shift', 'Control', 'Alt', 'Meta', 'CapsLock', 'AltGraph'].includes(e.key)
+      if (!modifierOnly) {
+        claim = null
+        lastKeyAlt = e.altKey
+      }
+      // Only punctuation: that is what input methods turn into full-width marks
+      // without a composition. Letters and digits keep xterm's path.
       if (
-        internalsOk && !core!._unprocessedDeadKey && [...e.key].length === 1 && e.key !== ' ' &&
-        !e.ctrlKey && !e.altKey && !e.metaKey && !e.getModifierState('AltGraph') && !latched()
+        internalsOk && !term.options.screenReaderMode && !core!._unprocessedDeadKey &&
+        /^[!-/:-@[-`{-~]$/.test(e.key) && e.code &&
+        !e.ctrlKey && !e.altKey && !e.metaKey && !e.getModifierState('AltGraph') && !latched() &&
+        ta!.selectionStart === ta!.selectionEnd &&
+        performance.now() - lastImeKey > 50 // xterm may still be reading a 229 key's textarea change
       ) {
         // What xterm does first for every key: send a composition that just
         // ended. If it says the key belongs to a composition, leave it to xterm.
         if (core!._compositionHelper!.keydown(e)) {
-          claims = Math.min(claims + 1, 16)
+          claim = e.code
           return false // no preventDefault: the browser (and input method) insert the text
         }
         return true
       }
-      typedChar = e.key.length === 1 && !e.metaKey && !e.ctrlKey ? e.key : null
+      // Text made with Option/Alt (when it is not Meta) is a character of its
+      // own, not a key to apply latched key-bar modifiers to.
+      typedChar = e.key.length === 1 && !e.metaKey && !e.ctrlKey && !e.altKey ? e.key : null
       // A physical Ctrl/Alt chord while a key-bar modifier is latched: combine both.
       // Clipboard shortcuts, AltGr and text-producing Option are left alone.
       const physAlt = e.altKey && !e.getModifierState('AltGraph') && (!isMac || getPrefs().optionIsMeta)
       const pasteKey = e.ctrlKey && e.key.toLowerCase() === 'v'
       if (latched() && e.key.length === 1 && (e.ctrlKey || physAlt) && !e.metaKey && !pasteKey && !e.getModifierState('AltGraph')) {
         const m = activeMods()
+        settleRef.current()
         conn.send(applyMods(e.key, { ctrl: m.ctrl || e.ctrlKey, alt: m.alt || physAlt, shift: false }))
-        if (internalsOk) core!._unprocessedDeadKey = false // we handled this key, as xterm would have
         releaseOnce()
         e.preventDefault()
         return false
@@ -391,8 +425,8 @@ export function TerminalPage({ id }: { id: string }) {
       const special = specialFor[e.key]
       if (special && latched() && !e.metaKey) {
         const m = activeMods()
+        settleRef.current()
         conn.send(specialKey(special, { ctrl: m.ctrl || e.ctrlKey, alt: m.alt || e.altKey, shift: e.shiftKey }, term.modes.applicationCursorKeysMode))
-        if (internalsOk) core!._unprocessedDeadKey = false
         releaseOnce()
         e.preventDefault()
         return false
@@ -402,6 +436,7 @@ export function TerminalPage({ id }: { id: string }) {
         return false
       }
       if (e.key === 'Enter' && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
+        settleRef.current()
         conn.send('\x1b\r') // newline without submitting, for Claude Code / Codex
         return false
       }
@@ -637,6 +672,7 @@ export function TerminalPage({ id }: { id: string }) {
           const r = await uploadFile(id, f)
           const quoted = shellPath(r.path)
           if (quoted) {
+            settleRef.current()
             termRef.current?.paste(quoted + ' ')
             toast(t('term.uploaded'))
           } else {
@@ -665,11 +701,13 @@ export function TerminalPage({ id }: { id: string }) {
   }, [upload])
 
   const sendKey = (k: SpecialKey) => {
+    settleRef.current()
     const term = termRef.current
     connRef.current?.send(specialKey(k, activeMods(), term?.modes.applicationCursorKeysMode ?? false))
     releaseOnce()
   }
   const sendText = (s: string) => {
+    settleRef.current()
     connRef.current?.send(applyMods(s, activeMods()))
     releaseOnce()
   }
@@ -683,6 +721,7 @@ export function TerminalPage({ id }: { id: string }) {
   // The composer's text and the optional Enter go out as one message, and only
   // while connected; otherwise the draft stays so nothing is half-sent.
   const sendComposer = (submit: boolean) => {
+    settleRef.current()
     const term = termRef.current
     const conn = connRef.current
     if (!term || !conn) return
