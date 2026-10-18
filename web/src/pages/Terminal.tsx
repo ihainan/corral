@@ -353,11 +353,16 @@ export function TerminalPage({ id }: { id: string }) {
         const mine = fit.proposeDimensions()
         if (!mine || (mine.cols === cols && mine.rows === rows)) {
           // This window's own size (again): fit to it, in case another
-          // viewer's size was being shown until now.
+          // viewer's size was being shown until now. The gateway has this
+          // size already, so the fit is not reported: reporting it could
+          // answer a late echo and start two windows resizing in turn.
           following = null
           setFollowing(null)
           applyScale()
           safeFit()
+          clearTimeout(resizeTimer)
+          resizeTimer = undefined
+          sent = cols + 'x' + rows
           return
         }
         if (sent === cols + 'x' + rows || resizeTimer !== undefined || Date.now() < sizeGraceUntil) {
@@ -959,16 +964,17 @@ export function TerminalPage({ id }: { id: string }) {
 
   // Files: paste, drop, or pick. Uploaded over SFTP; the remote path is pasted
   // into the terminal, which is how Claude Code and Codex pick up images.
-  // Paths go where the files came from: uploads started in the terminal
-  // (paste, Ctrl+V) pass how to paste there; the others (file picker, drop,
-  // the composer) go into the composer's draft when it is open.
-  const uploadRef = useRef<(files: File[], paste?: (s: string) => void) => Promise<void>>(async () => {})
+  // Paths go where the files came from: uploads started in the terminal go
+  // there (Ctrl+V passes its own paste, a paste sets toTerm); the others
+  // (file picker, drop, the composer) go into the composer's draft when it
+  // is open.
+  const uploadRef = useRef<(files: File[], paste?: (s: string) => void, toTerm?: boolean) => Promise<void>>(async () => {})
   const upload = useCallback(
-    async (files: File[], paste?: (s: string) => void) => {
+    async (files: File[], paste?: (s: string) => void, toTerm = false) => {
       // Decided when the upload starts, not when it ends: the target, and
       // for the terminal the connection (after a reconnect the screen may
       // have changed, so the path is shown instead of pasted).
-      const toDraft = !paste && !!composerRef.current
+      const toDraft = !paste && !toTerm && !!composerRef.current
       const opens = connRef.current?.opens
       for (const f of files) {
         toast(t('term.uploading', { name: f.name || 'image' }))
@@ -1010,7 +1016,7 @@ export function TerminalPage({ id }: { id: string }) {
       if (files.length === 0) return
       e.preventDefault()
       e.stopPropagation()
-      void upload(files, (s) => termRef.current?.paste(s))
+      void upload(files, undefined, true)
     }
     el.addEventListener('paste', onPaste, { capture: true })
     return () => el.removeEventListener('paste', onPaste, { capture: true })
