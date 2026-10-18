@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { flushSync } from 'react-dom'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
@@ -121,6 +121,17 @@ export function TerminalPage({ id }: { id: string }) {
   const [fn, setFn] = useState(false)
   const [composer, setComposer] = useState(false)
   const [draft, setDraft] = useState('') // kept in memory only: drafts may hold secrets
+  // Text from the key bar or an upload goes in at the composer's cursor.
+  const insertDraft = useCallback((s: string) => {
+    const el = composerRef.current
+    if (!el) return
+    const a = el.selectionStart ?? el.value.length
+    const b = el.selectionEnd ?? a
+    setDraft(el.value.slice(0, a) + s + el.value.slice(b))
+    requestAnimationFrame(() => {
+      el.selectionStart = el.selectionEnd = a + s.length
+    })
+  }, [])
   const [copyText, setCopyText] = useState<string | null>(null)
   const [dragOver, setDragOver] = useState(false)
   const [confirm, setConfirm] = useState<React.ReactNode>(null)
@@ -173,6 +184,7 @@ export function TerminalPage({ id }: { id: string }) {
   const takeOverRef = useRef<() => void>(() => {})
   const [following, setFollowing] = useState<{ cols: number; rows: number } | null>(null)
   const outRef = useRef<(d: string | Uint8Array) => void>(() => {})
+  const heldRef = useRef<() => boolean>(() => false) // input is waiting for a Ctrl+V clipboard check or upload
   const composingRef = useRef<() => boolean>(() => false)
   const mods = useRef<{ ctrl: ModState; alt: ModState }>({ ctrl: 'off', alt: 'off' })
   mods.current = { ctrl, alt }
@@ -272,6 +284,7 @@ export function TerminalPage({ id }: { id: string }) {
     // it (device attributes, cursor position…). Those answers are stale and
     // must not reach the host as typing; they are dropped until the replay ends.
     let replaying = false
+    let lastDropToast = 0
     const conn = new TermConnection(id, {
       // RIS (ESC c) travels in the same write queue as the replay that follows,
       // so output still being parsed cannot land after the reset.
@@ -319,18 +332,61 @@ export function TerminalPage({ id }: { id: string }) {
       onLive: () => term.write('', () => (replaying = false)),
       // Every new socket: the herdr summary is old until this one sends its own.
       onHello: () => setHerdrFresh(false),
+      // Input typed while disconnected is sent once the connection is back,
+      // unless there was too much of it or it waited too long.
+      onDropped: () => {
+        const now = Date.now()
+        if (now - lastDropToast < 5000) return
+        lastDropToast = now
+        toast(t('term.inputDropped'), true)
+      },
     })
     connRef.current = conn
     conn.resize(term.cols, term.rows)
 
     // Everything typed goes out through here, so it can wait its turn while
-    // Ctrl+V checks the clipboard.
-    let held: (string | Uint8Array)[] | null = null
+    // Ctrl+V checks the clipboard and uploads an image: keys typed meanwhile
+    // (Enter right after pasting a screenshot) go out after the image's path,
+    // and several Ctrl+V are handled one after another, in order.
+    type Held = string | Uint8Array | { clip: Promise<File | null> }
+    let held: Held[] | null = null
+    let draining = false
+    let direct = false // the path of the image being handled skips the queue
+    const send = (d: string | Uint8Array) => void conn.send(d)
     const out = (d: string | Uint8Array) => {
-      if (held) held.push(d)
-      else conn.send(d)
+      if (held && !direct) held.push(d)
+      else send(d)
     }
     outRef.current = out
+    heldRef.current = () => held !== null
+    const pasteDirect = (s: string) => {
+      direct = true
+      try {
+        term.paste(s)
+      } finally {
+        direct = false
+      }
+    }
+    const drain = async () => {
+      if (draining) return
+      draining = true
+      try {
+        while (held && held.length > 0) {
+          const d = held[0]
+          if (typeof d === 'object' && 'clip' in d) {
+            const file = await d.clip
+            if (file) await uploadRef.current([file], pasteDirect)
+            else send('\x16')
+          } else {
+            send(d)
+          }
+          held?.shift()
+        }
+      } finally {
+        held = null
+        draining = false
+      }
+    }
 
     // Latched Ctrl/Alt from the key bar apply only to what the user typed:
     // a character applies when xterm emits exactly that character for the key
@@ -512,14 +568,10 @@ export function TerminalPage({ id }: { id: string }) {
         e.preventDefault()
         // Keys typed while the clipboard is checked wait, so ^V keeps its place
         // (Ctrl+V then Enter in vim inserts a literal CR).
+        settleRef.current()
         held ??= []
-        void Promise.race([clipboardImage(), new Promise<null>((r) => setTimeout(() => r(null), 1500))]).then((file) => {
-          if (file) void uploadRef.current([file])
-          else conn.send('\x16')
-          const queued = held ?? []
-          held = null
-          for (const d of queued) conn.send(d)
-        })
+        held.push({ clip: Promise.race([clipboardImage(), new Promise<null>((r) => setTimeout(() => r(null), 1500))]) })
+        void drain()
         return false
       }
       // Only punctuation: that is what input methods turn into full-width marks
@@ -563,11 +615,15 @@ export function TerminalPage({ id }: { id: string }) {
         e.preventDefault()
         return false
       }
+      // Shortcuts handled here cancel the key, or its keypress would reach
+      // xterm and send a plain CR as well (submitting the prompt).
       if (e.key === 'Enter' && e.shiftKey && (isMac ? e.metaKey : e.ctrlKey)) {
+        e.preventDefault()
         openComposerRef.current()
         return false
       }
       if (e.key === 'Enter' && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
+        e.preventDefault()
         settleRef.current()
         out('\x1b\r') // newline without submitting, for Claude Code / Codex
         return false
@@ -647,13 +703,16 @@ export function TerminalPage({ id }: { id: string }) {
   useEffect(() => {
     const vv = window.visualViewport
     const apply = () => {
-      const h = vv ? vv.height : window.innerHeight
+      // Pinch zoom also shrinks the visual viewport; only an unzoomed one
+      // that lost height is the keyboard (as in main.tsx).
+      const zoomed = vv ? (vv.scale ?? 1) > 1.01 : false
+      const h = vv && !zoomed ? vv.height : window.innerHeight
       const root = rootRef.current
       if (!root) return
       root.style.height = `${Math.round(h)}px`
       // While the keyboard is up iOS may pan the visual viewport; follow it. When
       // it is down, ignore offsetTop: iOS 26 can leave a stale value behind.
-      const keyboardUp = vv ? window.innerHeight - vv.height > 120 : false
+      const keyboardUp = vv && !zoomed ? window.innerHeight - vv.height > 120 : false
       root.style.transform = keyboardUp && vv ? `translateY(${Math.round(vv.offsetTop)}px)` : ''
 
       if (window.scrollY !== 0) window.scrollTo(0, 0)
@@ -796,19 +855,27 @@ export function TerminalPage({ id }: { id: string }) {
 
   // Files: paste, drop, or pick. Uploaded over SFTP; the remote path is pasted
   // into the terminal, which is how Claude Code and Codex pick up images.
-  const uploadRef = useRef<(files: File[]) => Promise<void>>(async () => {})
+  // Paths go where the files came from: uploads started in the terminal
+  // (paste, Ctrl+V) pass how to paste there; the others (file picker, drop,
+  // the composer) go into the composer's draft when it is open.
+  const uploadRef = useRef<(files: File[], paste?: (s: string) => void) => Promise<void>>(async () => {})
   const upload = useCallback(
-    async (files: File[]) => {
+    async (files: File[], paste?: (s: string) => void) => {
       for (const f of files) {
         toast(t('term.uploading', { name: f.name || 'image' }))
         try {
           const r = await uploadFile(id, f)
           const quoted = shellPath(r.path)
-          if (quoted) {
+          if (quoted && !paste && composerRef.current) {
+            insertDraft(quoted + ' ')
+            toast(t('term.uploaded'))
+          } else if (quoted) {
             // Never paste into a composition in progress: wait for it to end.
             await untilNotComposing(composingRef.current, hostEl.current?.querySelector('textarea') ?? null)
             settleRef.current()
-            termRef.current?.paste(quoted + ' ')
+            const s = quoted + ' '
+            if (paste) paste(s)
+            else termRef.current?.paste(s)
             toast(t('term.uploaded'))
           } else {
             toast(r.path)
@@ -817,9 +884,9 @@ export function TerminalPage({ id }: { id: string }) {
           toast(errorText(e), true)
         }
       }
-      if (!isTouch && !document.querySelector('[aria-modal="true"]')) termRef.current?.focus()
+      if (!isTouch && !document.querySelector('[aria-modal="true"]')) (composerRef.current ?? termRef.current)?.focus()
     },
-    [id, toast],
+    [id, toast, insertDraft],
   )
   uploadRef.current = upload
 
@@ -830,30 +897,52 @@ export function TerminalPage({ id }: { id: string }) {
       if (files.length === 0) return
       e.preventDefault()
       e.stopPropagation()
-      void upload(files)
+      void upload(files, (s) => termRef.current?.paste(s))
     }
     el.addEventListener('paste', onPaste, { capture: true })
     return () => el.removeEventListener('paste', onPaste, { capture: true })
   }, [upload])
 
-  const sendKey = (k: SpecialKey) => {
-    takeOverRef.current()
-    settleRef.current()
-    const term = termRef.current
-    outRef.current(specialKey(k, activeMods(), term?.modes.applicationCursorKeysMode ?? false))
-    releaseOnce()
+  // A key-bar key pressed while an input method is still composing goes out
+  // once the composition is committed, so the committed text comes first.
+  const afterComposition = (f: () => void) => {
+    if (!composingRef.current()) return f()
+    void untilNotComposing(composingRef.current, hostEl.current?.querySelector('textarea') ?? null).then(f)
   }
+  const sendKey = (k: SpecialKey) =>
+    afterComposition(() => {
+      takeOverRef.current()
+      settleRef.current()
+      const term = termRef.current
+      outRef.current(specialKey(k, activeMods(), term?.modes.applicationCursorKeysMode ?? false))
+      releaseOnce()
+    })
   const sendText = (s: string) => {
-    takeOverRef.current()
-    settleRef.current()
-    outRef.current(applyMods(s, activeMods()))
-    releaseOnce()
+    // Typing in the composer: symbols go into the draft. Keys (Esc, arrows,
+    // Tab, Ctrl…) still go to the terminal, so a running program can be
+    // interrupted or steered while a message is being written.
+    const m = activeMods()
+    if (composerRef.current && document.activeElement === composerRef.current && !m.ctrl && !m.alt) {
+      insertDraft(s)
+      return
+    }
+    afterComposition(() => {
+      takeOverRef.current()
+      settleRef.current()
+      outRef.current(applyMods(s, activeMods()))
+      releaseOnce()
+    })
   }
   const cycle = (m: ModState): ModState => (m === 'off' ? 'once' : m === 'once' ? 'lock' : 'off')
   const toggleKeyboard = () => {
-    const ta = hostEl.current?.querySelector('textarea')
-    if (ta && document.activeElement === ta) ta.blur()
-    else termRef.current?.focus()
+    // With the composer open the keyboard belongs to it.
+    const target = composerRef.current ?? hostEl.current?.querySelector('textarea')
+    if (target && document.activeElement === target) {
+      settleRef.current() // a composition that just ended is sent, not cleared by the blur
+      target.blur()
+    } else {
+      target?.focus()
+    }
   }
 
   // The composer's text and the optional Enter go out as one message, and only
@@ -876,7 +965,8 @@ export function TerminalPage({ id }: { id: string }) {
       toast(t('term.tooLong'), true) // keep the draft; upload it as a file instead
       return
     }
-    if (conn.send(payload) !== 'sent') {
+    if (heldRef.current()) outRef.current(payload) // after the input waiting for a clipboard image
+    else if (conn.send(payload) !== 'sent') {
       toast(t('term.notConnected'), true)
       return
     }
@@ -901,12 +991,21 @@ export function TerminalPage({ id }: { id: string }) {
     composerRef.current?.focus()
   }
 
-  // The composer grows with its text up to 40% of the screen.
+  // The composer grows with its text up to 40% of what is visible, and less
+  // on very short screens (a phone on its side with the keyboard up), so the
+  // terminal and the key bar keep some room.
   useEffect(() => {
     const el = composerRef.current
     if (!el) return
-    el.style.height = 'auto'
-    el.style.height = Math.min(el.scrollHeight, window.innerHeight * 0.4) + 'px'
+    const fit = () => {
+      const vh = window.visualViewport?.height ?? window.innerHeight
+      el.style.height = 'auto'
+      el.style.height = Math.min(el.scrollHeight, Math.max(40, Math.min(vh * 0.4, vh - 260))) + 'px'
+    }
+    fit()
+    const vv = window.visualViewport
+    vv?.addEventListener('resize', fit)
+    return () => vv?.removeEventListener('resize', fit)
   }, [draft, composer])
 
   const openCopyMode = () => {
@@ -1036,10 +1135,13 @@ export function TerminalPage({ id }: { id: string }) {
       }}
       onDragLeave={(e) => e.currentTarget === e.target && setDragOver(false)}
       onDrop={(e) => {
-        e.preventDefault()
         setDragOver(false)
+        // Only files are ours; dragged text keeps the browser's own handling
+        // (dropping into the composer inserts it).
         const files = [...e.dataTransfer.files]
-        if (files.length) void upload(files)
+        if (files.length === 0) return
+        e.preventDefault()
+        void upload(files)
       }}
     >
       <header className="term-bar">
@@ -1153,6 +1255,12 @@ export function TerminalPage({ id }: { id: string }) {
                   placeholder={isTouch ? t('term.composerPlaceholder') : t('term.composerPlaceholderKey', { key: isMac ? '⌘↩' : 'Ctrl+Enter' })}
                   rows={1}
                   onChange={(e) => setDraft(e.target.value)}
+                  onPaste={(e) => {
+                    const files = [...(e.clipboardData?.files ?? [])]
+                    if (files.length === 0) return
+                    e.preventDefault()
+                    void upload(files)
+                  }}
                   onKeyDown={(e) => {
                     if (e.nativeEvent.isComposing || e.keyCode === 229) return
                     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
@@ -1221,6 +1329,11 @@ export function TerminalPage({ id }: { id: string }) {
 function CopyMode({ text, onClose }: { text: string; onClose: () => void }) {
   const toast = useToast()
   const ref = useFocusTrap<HTMLDivElement>(onClose)
+  // Start at the bottom once; later renders must not move a reader back down.
+  const pre = useRef<HTMLPreElement>(null)
+  useLayoutEffect(() => {
+    if (pre.current) pre.current.scrollTop = pre.current.scrollHeight
+  }, [])
   return (
     <div className="copy-mode" role="dialog" aria-modal="true" aria-label={t('term.copyMode')} ref={ref}>
       <div className="copy-bar">
@@ -1237,7 +1350,7 @@ function CopyMode({ text, onClose }: { text: string; onClose: () => void }) {
         </button>
         <button className="icon-btn" onClick={onClose} aria-label={t('common.close')}><X size={20} /></button>
       </div>
-      <pre className="copy-text" tabIndex={0} ref={(el) => { if (el) el.scrollTop = el.scrollHeight }}>{text}</pre>
+      <pre className="copy-text" tabIndex={0} ref={pre}>{text}</pre>
     </div>
   )
 }

@@ -292,7 +292,7 @@ const zh = {
   'push.testSend': '发送',
   'push.testFailed': '测试通知没有发出。',
   'term.connected': '已连接',
-  'term.paused': '输入暂停，连接恢复后可继续',
+  'term.paused': '连接中断，正在重连。几秒内的输入会在恢复后补发',
   'term.composerPlaceholderKey': '输入要发送的内容，{key} 发送',
   'term.insertHint': '把内容放进终端，不按回车',
   'term.newlineKey': '换行',
@@ -376,6 +376,7 @@ const zh = {
   'code.waitBody': '正在 {name} 上启动 VS Code，就绪后这个页面会自动打开它。进度在原来的页面里。',
   'term.following': '正在按另一台设备的尺寸显示（{cols}×{rows}），在这里输入会自动切换',
   'term.takeOver': '改用本设备尺寸',
+  'term.inputDropped': '连接中断期间输入的部分内容没有发出，请在恢复后重新输入。',
 }
 
 type Key = keyof typeof zh
@@ -672,7 +673,7 @@ const en: Record<Key, string> = {
   'push.testSend': 'Send',
   'push.testFailed': 'The test notification was not sent.',
   'term.connected': 'Connected',
-  'term.paused': 'Input paused until the connection is back',
+  'term.paused': 'Disconnected, reconnecting. Input from the last few seconds is sent once it is back',
   'term.composerPlaceholderKey': 'Type a message, {key} to send',
   'term.insertHint': 'Put the text into the terminal without pressing Enter',
   'term.newlineKey': 'Newline',
@@ -756,6 +757,7 @@ const en: Record<Key, string> = {
   'code.waitBody': 'Starting VS Code on {name}. This page opens it when ready; progress is shown on the original page.',
   'term.following': 'Showing another device\'s size ({cols}×{rows}); typing here switches to this one',
   'term.takeOver': 'Use this device\'s size',
+  'term.inputDropped': 'Some of what you typed while disconnected was not sent. Type it again once the connection is back.',
 }
 
 const tables: Record<string, Record<Key, string>> = { 'zh-CN': zh, en }

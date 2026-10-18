@@ -26,6 +26,7 @@ export interface Handlers {
   onSize?(cols: number, rows: number): void // the terminal's size as set by whichever viewer set it last
   onLive?(): void // the replayed backlog has been delivered
   onHello?(): void // a new socket was accepted; state from the old one is stale
+  onDropped?(): void // input typed while disconnected was discarded (too much, or too old)
 }
 
 export type SendResult = 'sent' | 'queued' | 'dropped'
@@ -81,9 +82,14 @@ export class TermConnection {
       return 'sent'
     }
     const now = Date.now()
+    const before = this.queue.length
     this.queue = this.queue.filter((q) => now - q.at < QUEUE_MAX_AGE)
+    if (this.queue.length < before) this.h.onDropped?.()
     const queued = this.queue.reduce((n, q) => n + q.data.length, 0)
-    if (queued + bytes.length > QUEUE_MAX_BYTES) return 'dropped'
+    if (queued + bytes.length > QUEUE_MAX_BYTES) {
+      this.h.onDropped?.()
+      return 'dropped'
+    }
     this.queue.push({ at: now, data: bytes })
     return 'queued'
   }
@@ -236,7 +242,9 @@ export class TermConnection {
 
   private flushQueue(ws: WebSocket) {
     const now = Date.now()
-    for (const q of this.queue) if (now - q.at < QUEUE_MAX_AGE) ws.send(q.data)
+    const fresh = this.queue.filter((q) => now - q.at < QUEUE_MAX_AGE)
+    if (fresh.length < this.queue.length) this.h.onDropped?.()
+    for (const q of fresh) ws.send(q.data)
     this.queue = []
   }
 
