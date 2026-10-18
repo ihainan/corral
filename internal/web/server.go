@@ -55,6 +55,7 @@ type Server struct {
 	herdrSocks herdrSockets
 	notifier   *notify.Notifier // nil disables push
 	fwd        *forwarder
+	code       codeServers
 	vis        visibility
 
 	sockMu  sync.Mutex
@@ -84,7 +85,7 @@ func New(d Deps) *Server {
 	s := &Server{cfg: d.Config, store: d.Store, auth: d.Auth, vault: d.Vault, guard: d.Guard, terms: d.Terms,
 		log: d.Log, mux: http.NewServeMux(), static: d.Static, socks: map[int64]map[*liveSocket]struct{}{},
 		pending: map[int64]map[*liveSocket]struct{}{}, herdrSocks: herdrSockets{path: map[string]string{}},
-		notifier: d.Notifier, vis: visibility{seen: map[string]map[*liveSocket]bool{}}, fwd: newForwarder()}
+		notifier: d.Notifier, vis: visibility{seen: map[string]map[*liveSocket]bool{}}, fwd: newForwarder(), code: codeServers{jobs: map[[2]int64]*codeJob{}}}
 	s.fwd.wg.Add(1)
 	go s.fwd.reap()
 	s.terms.OnAlert = s.onTerminalAlert
@@ -97,6 +98,7 @@ func New(d Deps) *Server {
 		// stop immediately; closing terminals can take a moment per host.
 		s.closeSockets(userID, "")
 		s.closeUserForwards(userID)
+		s.forgetUserCode(userID)
 		if s.notifier != nil {
 			s.notifier.Revoke(userID)
 		}
@@ -161,6 +163,10 @@ func (s *Server) registerRoutes() {
 	s.handle("DELETE /api/forwards/{id}", SignedIn, s.apiDeleteForward)
 	s.handle("GET /api/hosts/{id}/ports", SignedIn, s.apiHostPorts)
 	s.handle("GET /fwd/{id}", Public, s.handleForwardOpen)
+
+	s.handle("GET /api/hosts/{id}/code", SignedIn, s.apiCodeStatus)
+	s.handle("POST /api/hosts/{id}/code", SignedIn, s.apiCodeStart)
+	s.handle("POST /api/hosts/{id}/code/stop", SignedIn, s.apiCodeStop)
 
 	s.handle("GET /api/push", SignedIn, s.apiPushInfo)
 	s.handle("POST /api/push/subscriptions", SignedIn, s.apiPushSubscribe)

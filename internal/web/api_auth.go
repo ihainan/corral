@@ -36,6 +36,7 @@ func (s *Server) apiBootstrap(w http.ResponseWriter, r *http.Request) {
 		"setup_needed":     needed,
 		"default_language": s.cfg.DefaultLanguage,
 		"forwarding":       s.cfg.ForwardDomain != "",
+		"code":             s.cfg.CodeServer,
 		"upload_max_bytes": s.cfg.UploadMaxBytes,
 		"user":             nil,
 	}

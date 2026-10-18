@@ -7,8 +7,11 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"io"
 	"net"
+	"os"
+	"os/exec"
 	"strconv"
 	"sync"
 	"testing"
@@ -158,6 +161,10 @@ func (s *SSHServer) serve(c net.Conn, cfg *ssh.ServerConfig, root string) {
 		if onChannel != nil && onChannel(nc) {
 			continue
 		}
+		if nc.ChannelType() == "direct-streamlocal@openssh.com" {
+			go directStreamLocal(nc)
+			continue
+		}
 		if nc.ChannelType() == "direct-tcpip" {
 			go directTCPIP(nc)
 			continue
@@ -278,4 +285,60 @@ func directTCPIP(nc ssh.NewChannel) {
 	io.Copy(conn, ch)
 	conn.Close()
 	ch.Close()
+}
+
+// directStreamLocal serves "ssh -L"-style channels to a Unix socket.
+func directStreamLocal(nc ssh.NewChannel) {
+	var req struct {
+		SocketPath string
+		Reserved0  string
+		Reserved1  uint32
+	}
+	if err := ssh.Unmarshal(nc.ExtraData(), &req); err != nil {
+		nc.Reject(ssh.ConnectionFailed, "bad request")
+		return
+	}
+	conn, err := net.Dial("unix", req.SocketPath)
+	if err != nil {
+		nc.Reject(ssh.ConnectionFailed, err.Error())
+		return
+	}
+	ch, reqs, err := nc.Accept()
+	if err != nil {
+		conn.Close()
+		return
+	}
+	go ssh.DiscardRequests(reqs)
+	go func() { io.Copy(ch, conn); ch.CloseWrite() }()
+	io.Copy(conn, ch)
+	conn.Close()
+	ch.Close()
+}
+
+// ShellExec runs exec requests that match through the local sh, with HOME set
+// to home and extra environment entries, like a real host would. Others fall
+// back to the default echoing shell.
+func ShellExec(home string, match func(cmd string) bool, env ...string) func(cmd string) func(ssh.Channel) {
+	return func(cmd string) func(ssh.Channel) {
+		if !match(cmd) {
+			return nil
+		}
+		return func(ch ssh.Channel) {
+			c := exec.Command("sh", "-c", cmd)
+			c.Dir = home
+			c.Env = append([]string{"HOME=" + home, "PATH=" + os.Getenv("PATH")}, env...)
+			c.Stdout = ch
+			c.Stderr = ch.Stderr()
+			status := byte(0)
+			if err := c.Run(); err != nil {
+				status = 1
+				var ee *exec.ExitError
+				if errors.As(err, &ee) && ee.ExitCode() > 0 {
+					status = byte(ee.ExitCode())
+				}
+			}
+			ch.CloseWrite()
+			ch.SendRequest("exit-status", false, []byte{0, 0, 0, status})
+		}
+	}
 }

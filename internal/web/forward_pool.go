@@ -84,6 +84,7 @@ type fwdConn struct {
 	client    *ssh.Client
 	transport *http.Transport
 	owned     bool      // opened for forwarding (closed when idle), not a terminal's
+	codeSock  string    // the owner's code-server socket on the host (codeUpstream), under forwarder.mu
 	users     int       // requests and port listings using it now
 	idleSince time.Time // when users last dropped to zero
 }
@@ -117,7 +118,13 @@ func (f *forwarder) newFwdConn(c *ssh.Client, owned bool) *fwdConn {
 	fc := &fwdConn{client: c, owned: owned}
 	fc.transport = &http.Transport{
 		DialContext: func(ctx context.Context, _, addr string) (net.Conn, error) {
-			if h, _, err := net.SplitHostPort(addr); err != nil || h != "127.0.0.1" {
+			network := "tcp"
+			if addr == codeUpstream {
+				network, addr = "unix", f.codeSocket(fc)
+				if addr == "" {
+					return nil, errors.New("code-server is not running")
+				}
+			} else if h, _, err := net.SplitHostPort(addr); err != nil || h != "127.0.0.1" {
 				return nil, fmt.Errorf("forwarding only reaches 127.0.0.1, not %q", addr)
 			}
 			release, ok := f.takeChannel(c)
@@ -126,7 +133,7 @@ func (f *forwarder) newFwdConn(c *ssh.Client, owned bool) *fwdConn {
 			}
 			ctx, cancel := context.WithTimeout(ctx, fwdConnectTimeout)
 			defer cancel()
-			return sshx.DialVia(ctx, c, "tcp", addr, sshx.DialOptions{Release: release, Dedicated: owned})
+			return sshx.DialVia(ctx, c, network, addr, sshx.DialOptions{Release: release, Dedicated: owned})
 		},
 		MaxIdleConns:          16,
 		MaxIdleConnsPerHost:   4,
@@ -134,6 +141,28 @@ func (f *forwarder) newFwdConn(c *ssh.Client, owned bool) *fwdConn {
 		ResponseHeaderTimeout: 2 * time.Minute,
 	}
 	return fc
+}
+
+// codeUpstream is the request address that stands for the connection's
+// code-server socket.
+const codeUpstream = "code-server.corral:80"
+
+func (f *forwarder) codeSocket(fc *fwdConn) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return fc.codeSock
+}
+
+// setCodeSocket points codeUpstream at a socket; keep-alive channels to an
+// earlier one are dropped.
+func (f *forwarder) setCodeSocket(fc *fwdConn, path string) {
+	f.mu.Lock()
+	changed := fc.codeSock != "" && fc.codeSock != path
+	fc.codeSock = path
+	f.mu.Unlock()
+	if changed {
+		fc.transport.CloseIdleConnections()
+	}
 }
 
 // takeChannel reserves a channel on c; the release is the reservation's only
@@ -532,4 +561,7 @@ func (s *Server) revokeForwardGrants(id string, keepUser int64) {
 
 // Close stops background work and closes the forwarding connections. Call it
 // once the HTTP server has stopped taking requests.
-func (s *Server) Close() { s.fwd.shutdown() }
+func (s *Server) Close() {
+	s.code.shutdown()
+	s.fwd.shutdown()
+}
