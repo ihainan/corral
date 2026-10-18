@@ -1,6 +1,7 @@
 package sshx
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -24,10 +25,25 @@ var ErrOutputTooLarge = errors.New("remote command printed too much output")
 // keeps its place against MaxAuxPerConn until the host has really let go of
 // it. The connection itself is never closed: it may carry a terminal.
 func Output(ctx context.Context, c *ssh.Client, cmd string, limit int) ([]byte, error) {
-	release, ok := takeAux(c)
+	return Exec(ctx, c, cmd, limit, ExecOptions{})
+}
+
+// ExecOptions add to Output.
+type ExecOptions struct {
+	Stdin   io.Reader         // copied to the command's input, which is then closed
+	OnLine  func(line string) // each output line as it arrives (from another goroutine)
+	Release func()            // a further quota, given back once the channel has really ended
+}
+
+// Exec is Output with options; see there.
+func Exec(ctx context.Context, c *ssh.Client, cmd string, limit int, opt ExecOptions) ([]byte, error) {
+	extra := oneShot(opt.Release)
+	aux, ok := takeAux(c)
 	if !ok {
+		extra()
 		return nil, ErrBusy
 	}
+	release := oneShot(func() { aux(); extra() })
 	if err := ctx.Err(); err != nil {
 		release()
 		return nil, err
@@ -39,7 +55,7 @@ func Output(ctx context.Context, c *ssh.Client, cmd string, limit int) ([]byte, 
 	res := make(chan result, 1)
 	go func() {
 		defer release()
-		out, err := runCommand(ctx, c, cmd, limit)
+		out, err := runCommand(ctx, c, cmd, limit, opt)
 		res <- result{out, err}
 	}()
 	select {
@@ -54,7 +70,7 @@ func Output(ctx context.Context, c *ssh.Client, cmd string, limit int) ([]byte, 
 // request stream is closed (the host closed the channel, or the connection
 // ended) and the goroutines reading it have returned. It opens the channel
 // itself rather than through ssh.Session, which hides that stream.
-func runCommand(ctx context.Context, c *ssh.Client, cmd string, limit int) ([]byte, error) {
+func runCommand(ctx context.Context, c *ssh.Client, cmd string, limit int, opt ExecOptions) ([]byte, error) {
 	ch, reqs, err := c.OpenChannel("session", nil) // waits for the host to answer, or for the connection to end
 	if err != nil {
 		return nil, err
@@ -97,8 +113,19 @@ func runCommand(ctx context.Context, c *ssh.Client, cmd string, limit int) ([]by
 		}
 		return nil, err
 	}
+	if opt.Stdin != nil {
+		wg.Add(1)
+		go func() { // ends with the input, or when the channel does
+			defer wg.Done()
+			io.Copy(ch, opt.Stdin)
+			ch.CloseWrite()
+		}()
+	} else {
+		ch.CloseWrite()
+	}
 	var buf []byte
 	over := false
+	lineStart := 0
 	chunk := make([]byte, 32<<10)
 	for {
 		n, rerr := ch.Read(chunk)
@@ -108,6 +135,14 @@ func runCommand(ctx context.Context, c *ssh.Client, cmd string, limit int) ([]by
 				ch.Close() // keep reading (and discarding) until the channel ends
 			} else {
 				buf = append(buf, chunk[:n]...)
+				for opt.OnLine != nil {
+					i := bytes.IndexByte(buf[lineStart:], '\n')
+					if i < 0 {
+						break
+					}
+					opt.OnLine(string(buf[lineStart : lineStart+i]))
+					lineStart += i + 1
+				}
 			}
 		}
 		if rerr != nil {

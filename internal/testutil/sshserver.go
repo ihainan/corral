@@ -329,6 +329,15 @@ func ShellExec(home string, match func(cmd string) bool, env ...string) func(cmd
 			c.Env = append([]string{"HOME=" + home, "PATH=" + os.Getenv("PATH")}, env...)
 			c.Stdout = ch
 			c.Stderr = ch.Stderr()
+			// The channel's input goes to the command, as with sshd; the copy is
+			// not waited for, so a client that never closes its input cannot hold
+			// up the command's end.
+			if in, err := c.StdinPipe(); err == nil {
+				go func() {
+					io.Copy(in, ch)
+					in.Close()
+				}()
+			}
 			status := byte(0)
 			if err := c.Run(); err != nil {
 				status = 1
