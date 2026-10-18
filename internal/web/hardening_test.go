@@ -18,6 +18,7 @@ import (
 	"github.com/coder/websocket"
 	"golang.org/x/crypto/ssh"
 
+	"github.com/ihainan/corral/internal/auth"
 	"github.com/ihainan/corral/internal/config"
 	"github.com/ihainan/corral/internal/notify"
 	"github.com/ihainan/corral/internal/sshx"
@@ -348,6 +349,39 @@ func TestForwardTicketReturnIsFixedWhenIssued(t *testing.T) {
 	// A return given at redemption is ignored.
 	if got := redeem(issue("/ok"), "&return=/%5Cevil.example"); got != "/ok" {
 		t.Fatalf("redemption honoured a supplied return: %q", got)
+	}
+}
+
+// Sign-out deletes the login even if the browser gave up on the request, and
+// says so when it could not.
+func TestLogoutDeletesTheLoginOrFails(t *testing.T) {
+	h := newHarness(t)
+	admin := h.admin()
+	other := h.login("root")
+	u, err := h.store.UserByName(context.Background(), "root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	logout := func(c *client, ctx context.Context) *httptest.ResponseRecorder {
+		ctx = context.WithValue(context.WithValue(ctx, userKey, u), loginKey, auth.HashToken(c.cookie))
+		rec := httptest.NewRecorder()
+		h.srv.apiLogout(rec, httptest.NewRequest("POST", "/api/logout", nil).WithContext(ctx))
+		return rec
+	}
+	gone, cancel := context.WithCancel(context.Background())
+	cancel() // the browser already went away
+	if rec := logout(other, gone); rec.Code != 200 {
+		t.Fatalf("sign-out of a cancelled request: %d %s", rec.Code, rec.Body)
+	}
+	mustStatus(t, other.do("GET", "/api/me", nil), http.StatusUnauthorized, "login after sign-out")
+
+	h.store.Close() // the database refuses the delete
+	rec := logout(admin, context.Background())
+	if rec.Code != http.StatusInternalServerError || !strings.Contains(rec.Body.String(), "logout_failed") {
+		t.Fatalf("failed sign-out reported: %d %s", rec.Code, rec.Body)
+	}
+	if strings.Contains(rec.Header().Get("Set-Cookie"), "Max-Age=0") {
+		t.Fatal("cookie cleared although the login was not deleted")
 	}
 }
 
