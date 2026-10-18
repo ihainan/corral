@@ -6,6 +6,7 @@
 package term
 
 import (
+	"context"
 	"errors"
 	"io"
 	"sync"
@@ -18,7 +19,9 @@ const (
 	ringSize      = 2 << 20 // recent output kept per session
 	subBuffer     = 64      // queued chunks per viewer (≤ 2 MiB) before it is dropped as too slow
 	readChunk     = 32 << 10
-	inputQueue    = 256 // pending keyboard messages per session
+	inputQueue    = 64       // pending input chunks per session
+	inputChunk    = 32 << 10 // so the queue holds at most ~2 MiB
+	inputWait     = 10 * time.Second
 	maxViewers    = 8   // open sockets per session
 	StateRunning  = "running"
 	StateExited   = "exited" // the remote program ended normally
@@ -211,19 +214,29 @@ func (s *Session) Detach(sub *Sub) {
 	}
 }
 
-// Write queues keyboard input without blocking the caller.
-func (s *Session) Write(p []byte) error {
-	select {
-	case <-s.finished:
-		return ErrClosed
-	default:
+// Write queues input. When the host is slow to read, it waits (which pauses
+// reading from the browser, i.e. back-pressure) for up to inputWait, then
+// fails loudly: silently dropping keystrokes could turn a command into another.
+func (s *Session) Write(ctx context.Context, p []byte) error {
+	for len(p) > 0 {
+		n := min(len(p), inputChunk)
+		chunk := append([]byte(nil), p[:n]...)
+		t := time.NewTimer(inputWait)
+		select {
+		case s.input <- chunk:
+			t.Stop()
+		case <-s.finished:
+			t.Stop()
+			return ErrClosed
+		case <-ctx.Done():
+			t.Stop()
+			return ctx.Err()
+		case <-t.C:
+			return ErrInputBusy
+		}
+		p = p[n:]
 	}
-	select {
-	case s.input <- append([]byte(nil), p...):
-		return nil
-	default:
-		return ErrInputBusy
-	}
+	return nil
 }
 
 func (s *Session) Resize(cols, rows int) error {

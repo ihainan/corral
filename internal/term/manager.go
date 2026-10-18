@@ -1,6 +1,7 @@
 package term
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -109,7 +110,9 @@ func (m *Manager) countRunning(owner int64) int {
 
 // Start takes ownership of an established SSH client and runs the shell. The
 // client is closed on every failure path.
-func (m *Manager) Start(res *Reservation, owner, hostID int64, hostName string, client *ssh.Client, opt StartOptions) (*Session, error) {
+// Cancelling ctx (access revoked, request gone) aborts setup before anything
+// runs on the host.
+func (m *Manager) Start(ctx context.Context, res *Reservation, owner, hostID int64, hostName string, client *ssh.Client, opt StartOptions) (*Session, error) {
 	defer res.Release()
 	cols, rows := clamp(opt.Cols, 20, 1000, 80), clamp(opt.Rows, 5, 500, 24)
 
@@ -147,6 +150,10 @@ func (m *Manager) Start(res *Reservation, owner, hostID int64, hostName string, 
 			fail(err)
 			return
 		}
+		if ctx.Err() != nil {
+			fail(ctx.Err())
+			return
+		}
 		if opt.Persistence == "tmux" {
 			err = sess.Start(TmuxCommand(opt.TmuxSession))
 		} else {
@@ -171,8 +178,12 @@ func (m *Manager) Start(res *Reservation, owner, hostID int64, hostName string, 
 	var st setup
 	select {
 	case st = <-done:
-	case <-time.After(setupTimeout):
+	case <-ctx.Done():
 		client.Close() // unblocks the setup goroutine
+		<-done
+		return nil, ctx.Err()
+	case <-time.After(setupTimeout):
+		client.Close()
 		<-done
 		return nil, errors.New("the host did not start a terminal in time")
 	}
@@ -193,6 +204,10 @@ func (m *Manager) Start(res *Reservation, owner, hostID int64, hostName string, 
 	m.mu.Unlock()
 
 	go s.writer()
+	// Both the program exiting and the connection dropping end the session.
+	// Either way, remaining output is read first, and an exit status that
+	// arrived wins over "connection lost".
+	exited := make(chan struct{})
 	go func() {
 		err := st.sess.Wait()
 		var exit *ssh.ExitError
@@ -204,12 +219,18 @@ func (m *Manager) Start(res *Reservation, owner, hostID int64, hostName string, 
 			s.waitPumps(3 * time.Second)
 			s.end(StateExited, exit.ExitStatus(), "")
 		default:
+			s.waitPumps(3 * time.Second)
 			s.end(StateLost, -1, "connection lost")
 		}
+		close(exited)
 	}()
 	go func() {
-		// The whole connection dropping (network, keepalive failure) ends the session too.
 		_ = client.Wait()
+		s.waitPumps(3 * time.Second)
+		select {
+		case <-exited:
+		case <-time.After(500 * time.Millisecond):
+		}
 		s.end(StateLost, -1, "connection lost")
 	}()
 	return s, nil

@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -33,13 +34,30 @@ var hashSlots = make(chan struct{}, 4)
 // sign-in attempts); the caller should answer "try again later".
 var ErrBusy = errors.New("server is busy, try again")
 
-const slotWait = 5 * time.Second
+const (
+	slotWait   = 5 * time.Second
+	maxWaiters = 64 // beyond this, new requests are refused at once instead of queueing
+)
+
+var waiters atomic.Int32
 
 func acquireSlot() bool {
 	select {
 	case hashSlots <- struct{}{}:
 		return true
-	case <-time.After(slotWait):
+	default:
+	}
+	if waiters.Add(1) > maxWaiters {
+		waiters.Add(-1)
+		return false
+	}
+	defer waiters.Add(-1)
+	t := time.NewTimer(slotWait)
+	defer t.Stop()
+	select {
+	case hashSlots <- struct{}{}:
+		return true
+	case <-t.C:
 		return false
 	}
 }

@@ -50,8 +50,9 @@ type Server struct {
 	routes []Route
 	static fs.FS
 
-	sockMu sync.Mutex
-	socks  map[int64]map[*liveSocket]struct{} // open WebSockets per user, closed on sign-out
+	sockMu  sync.Mutex
+	socks   map[int64]map[*liveSocket]struct{} // open WebSockets per user, closed on sign-out
+	pending map[int64]map[*liveSocket]struct{} // connections being set up, cancelled on sign-out
 }
 
 type liveSocket struct {
@@ -72,7 +73,8 @@ type Deps struct {
 
 func New(d Deps) *Server {
 	s := &Server{cfg: d.Config, store: d.Store, auth: d.Auth, vault: d.Vault, guard: d.Guard, terms: d.Terms,
-		log: d.Log, mux: http.NewServeMux(), static: d.Static, socks: map[int64]map[*liveSocket]struct{}{}}
+		log: d.Log, mux: http.NewServeMux(), static: d.Static, socks: map[int64]map[*liveSocket]struct{}{},
+		pending: map[int64]map[*liveSocket]struct{}{}}
 	prev := s.auth.OnUserGone
 	s.auth.OnUserGone = func(userID int64) {
 		if prev != nil {
@@ -111,7 +113,6 @@ func (s *Server) registerRoutes() {
 	s.handle("PUT /api/hosts/{id}", SignedIn, s.apiUpdateHost)
 	s.handle("DELETE /api/hosts/{id}", SignedIn, s.apiDeleteHost)
 	s.handle("GET /api/hosts/{id}/hostkey", SignedIn, s.apiGetHostKey)
-	s.handle("DELETE /api/hosts/{id}/hostkey", SignedIn, s.apiForgetHostKey)
 
 	s.handle("GET /api/credentials", SignedIn, s.apiListCredentials)
 	s.handle("POST /api/credentials", SignedIn, s.apiCreateCredential)
@@ -320,14 +321,34 @@ func (s *Server) trackSocket(userID int64, ls *liveSocket) (func(), bool) {
 	}, true
 }
 
-// closeSockets closes a user's open terminal sockets; with loginHash set, only
-// those opened by that browser login.
+// trackPending registers an in-progress connection so revoking access cancels it.
+func (s *Server) trackPending(userID int64, ls *liveSocket) func() {
+	s.sockMu.Lock()
+	if s.pending[userID] == nil {
+		s.pending[userID] = map[*liveSocket]struct{}{}
+	}
+	s.pending[userID][ls] = struct{}{}
+	s.sockMu.Unlock()
+	return func() {
+		s.sockMu.Lock()
+		delete(s.pending[userID], ls)
+		if len(s.pending[userID]) == 0 {
+			delete(s.pending, userID)
+		}
+		s.sockMu.Unlock()
+	}
+}
+
+// closeSockets closes a user's open terminal sockets and cancels connections
+// being set up; with loginHash set, only those of that browser login.
 func (s *Server) closeSockets(userID int64, loginHash string) {
 	s.sockMu.Lock()
 	defer s.sockMu.Unlock()
-	for ls := range s.socks[userID] {
-		if loginHash == "" || ls.loginHash == loginHash {
-			ls.cancel()
+	for _, set := range []map[*liveSocket]struct{}{s.socks[userID], s.pending[userID]} {
+		for ls := range set {
+			if loginHash == "" || ls.loginHash == loginHash {
+				ls.cancel()
+			}
 		}
 	}
 }

@@ -282,7 +282,7 @@ func (s *Service) Logout(ctx context.Context, sessionHash string) error {
 }
 
 // ChangePassword verifies the current password, stores the new one and signs
-// out every other browser.
+// out every other browser, atomically with respect to admin resets.
 func (s *Service) ChangePassword(ctx context.Context, u *store.User, current, next, keepSession string) error {
 	ok, err := CheckPassword(current, u.PasswordHash())
 	if err != nil {
@@ -298,10 +298,13 @@ func (s *Service) ChangePassword(ctx context.Context, u *store.User, current, ne
 	if err != nil {
 		return err
 	}
-	if err := s.store.SetPassword(ctx, u.ID, hash); err != nil {
+	if err := s.store.ChangePasswordIf(ctx, u.ID, u.PasswordHash(), hash, keepSession); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return ErrInvalidLogin // password or login changed underneath us
+		}
 		return err
 	}
-	return s.store.DeleteUserLoginSessions(ctx, u.ID, keepSession)
+	return nil
 }
 
 // ResetPassword is the admin path: new password, all sessions and terminals ended.

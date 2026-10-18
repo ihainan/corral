@@ -325,19 +325,6 @@ func (s *Server) apiGetHostKey(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"pinned": true, "key_type": k.KeyType, "fingerprint": k.Fingerprint, "first_seen": k.FirstSeen})
 }
 
-func (s *Server) apiForgetHostKey(w http.ResponseWriter, r *http.Request) {
-	h, ok := s.ownedHost(w, r)
-	if !ok {
-		return
-	}
-	if err := s.store.ForgetHostKey(r.Context(), currentUser(r).ID, h.ID); err != nil {
-		s.internalError(w, r, err)
-		return
-	}
-	s.audit(r, "hostkey.forget", hostTarget(h), nil)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
-}
-
 func hostTarget(h *store.Host) string {
 	return fmt.Sprintf("%s (%s@%s:%d)", h.Name, h.Username, h.Address, h.Port)
 }

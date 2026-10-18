@@ -123,6 +123,34 @@ func (s *Store) SetPassword(ctx context.Context, id int64, hash string) error {
 		`UPDATE users SET password_hash = ?, password_changed_at = ?, failed_logins = 0, locked_until = 0 WHERE id = ?`, hash, s.unix(), id))
 }
 
+// ChangePasswordIf replaces the password only if it is still the one the
+// caller verified and the caller's login still exists, and signs out every
+// other login in the same transaction. A slow change request can therefore
+// not undo an administrator's reset that happened meanwhile.
+func (s *Store) ChangePasswordIf(ctx context.Context, userID int64, verifiedHash, newHash, keepSession string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var n int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM login_sessions WHERE token_hash = ? AND user_id = ?`, keepSession, userID).Scan(&n); err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	if err := affectedOrNotFound(tx.ExecContext(ctx,
+		`UPDATE users SET password_hash = ?, password_changed_at = ?, failed_logins = 0, locked_until = 0
+		 WHERE id = ? AND password_hash = ? AND disabled = 0`, newHash, s.unix(), userID, verifiedHash)); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM login_sessions WHERE user_id = ? AND token_hash != ?`, userID, keepSession); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 var ErrLastAdmin = errors.New("at least one active administrator must remain")
 
 // UpdateUserGuarded changes role and/or disabled state in one transaction and

@@ -244,3 +244,60 @@ func TestLastAdminCannotStepDown(t *testing.T) {
 		t.Fatalf("sole admin disabled themselves: %d %s", r.Status, r.Body)
 	}
 }
+
+// Round 2 -------------------------------------------------------------------
+
+func TestSlowPasswordChangeCannotUndoAdminReset(t *testing.T) {
+	st, _ := store.OpenMemory()
+	defer st.Close()
+	ctx := context.Background()
+	old, _ := auth.HashPassword("old-password-1")
+	u, _ := st.CreateUser(ctx, "erin", "", old, store.RoleMember)
+	_ = st.CreateLoginSession(ctx, "login1", u.ID, "", "")
+	// Admin resets the password and signs the user out.
+	reset, _ := auth.HashPassword("admin-chosen-1")
+	_ = st.SetPassword(ctx, u.ID, reset)
+	_ = st.DeleteUserLoginSessions(ctx, u.ID, "")
+	// The user's change request, verified against the old hash, lands afterwards.
+	mine, _ := auth.HashPassword("attacker-new-1")
+	if err := st.ChangePasswordIf(ctx, u.ID, old, mine, "login1"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("stale change applied: %v", err)
+	}
+	got, _ := st.UserByID(ctx, u.ID)
+	if got.PasswordHash() != reset {
+		t.Fatal("admin reset was overwritten")
+	}
+}
+
+func TestHostKeyCannotBeForgottenDirectly(t *testing.T) {
+	h := newHarness(t)
+	admin := h.admin()
+	srv := h.sshServer(t.TempDir())
+	id := h.hostFor(admin, srv.Addr.Port)
+	if r := admin.do("DELETE", fmt.Sprintf("/api/hosts/%d/hostkey", id), nil); r.Status != http.StatusNotFound && r.Status != http.StatusMethodNotAllowed {
+		t.Fatalf("hostkey can be deleted: %d", r.Status)
+	}
+}
+
+func TestSocketEndsWhenLoginExpires(t *testing.T) {
+	h := newHarness(t, func(c *config.Config) { c.LoginAbsoluteLimit = 3 * time.Second })
+	admin := h.admin()
+	srv := h.sshServer(t.TempDir())
+	r := admin.do("POST", "/api/sessions", map[string]any{"host_id": h.hostFor(admin, srv.Addr.Port)})
+	mustStatus(t, r, 201, "open")
+	ws, err := h.dialWS(admin, r.json()["id"].(string), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ws.CloseNow()
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	for {
+		if _, _, err := ws.Read(ctx); err != nil {
+			if ctx.Err() != nil {
+				t.Fatal("socket outlived the login")
+			}
+			return
+		}
+	}
+}
