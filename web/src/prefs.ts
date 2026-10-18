@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from 'react'
-import { api } from './api'
+import { api, authGen, unauthorized } from './api'
 import { resolveScheme, type Scheme } from './terminal/themes'
 
 // Per-user preferences. Cached locally for a fast first paint, synced to the
@@ -51,7 +51,9 @@ function emit() {
   subs.forEach((s) => s())
 }
 
-// Saving. Only changed fields are sent. The server takes the later arrival,
+// Saving. Only changed fields are sent. The server takes the later arrival
+// (across devices the last change to reach it wins, which is the intended
+// behaviour for settings),
 // except that this page's own older request never undoes its newer one: each
 // page load is a writer with its own request numbers (see apiPatchSettings).
 // No clock is involved. Each request names the account it is for, and the
@@ -92,6 +94,7 @@ function save() {
   const gen = generation
   queue = queue.then(async () => {
     if (gen !== generation || pending.size === 0 || owner === null) return
+    const sentAt = authGen()
     const sent = new Map(pending)
     const ctl = new AbortController()
     const timer = window.setTimeout(() => ctl.abort(), 10000)
@@ -108,6 +111,7 @@ function save() {
       } else if (res.status === 400 || res.status === 401 || res.status === 409) {
         // Refused for good: invalid, signed out, or now another account.
         for (const [k, v] of sent) if (pending.get(k)?.edit === v.edit) pending.delete(k)
+        if (res.status === 401) unauthorized(sentAt) // signed out: let the app notice
       } else scheduleRetry()
     } catch {
       if (gen === generation) scheduleRetry()
@@ -123,10 +127,25 @@ function scheduleRetry() {
 }
 window.addEventListener('online', () => pending.size && save())
 
-// Sends what is still pending now, e.g. before signing out.
-export async function flushPrefs() {
-  save()
-  await queue
+// Sends what is still pending right now, outside the queue, within a time
+// budget: used before signing out, when an older request may be stuck. The
+// request number makes it win over that older request whatever arrives first.
+export async function sendPendingPrefs(budgetMs: number) {
+  if (pending.size === 0 || owner === null) return
+  clearTimeout(saveTimer)
+  saveTimer = undefined
+  const ctl = new AbortController()
+  const timer = window.setTimeout(() => ctl.abort(), budgetMs)
+  try {
+    await fetch('/api/me/settings', {
+      method: 'PATCH', credentials: 'same-origin', signal: ctl.signal,
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(request(pending)),
+    })
+  } catch {
+    /* signing out anyway */
+  } finally {
+    clearTimeout(timer)
+  }
 }
 
 // Leaving the page: pending fields go out with keepalive, which survives

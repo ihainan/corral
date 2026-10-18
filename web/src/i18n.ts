@@ -358,6 +358,11 @@ const zh = {
   'error.code_disabled': '服务器未开启 VS Code。',
   'error.code_private': 'VS Code 只能自己使用，不能共享。',
   'error.code_unreachable': '无法连接到主机来停止 VS Code。',
+  'code.tooLong': '等了很久还没就绪，请稍后再试，或检查这台主机的网络和磁盘空间。',
+  'code.readyOpenHere': 'VS Code 已就绪。新标签页没能打开（可能被浏览器拦截，或已被关闭），点下面的按钮打开。',
+  'code.openNow': '打开 VS Code',
+  'code.stopWaiting': '不再等待',
+  'code.waitHint': '关掉这个窗口只是不再等待，主机上的安装和启动会继续。',
 }
 
 type Key = keyof typeof zh
@@ -720,6 +725,11 @@ const en: Record<Key, string> = {
   'error.code_disabled': 'VS Code is not enabled on this server.',
   'error.code_private': 'VS Code is only for you; it cannot be shared.',
   'error.code_unreachable': 'Could not reach the host to stop VS Code.',
+  'code.tooLong': 'This is taking too long. Try again later, or check the host\'s network and disk space.',
+  'code.readyOpenHere': 'VS Code is ready. The new tab could not be used (blocked or closed); open it with the button below.',
+  'code.openNow': 'Open VS Code',
+  'code.stopWaiting': 'Stop waiting',
+  'code.waitHint': 'Closing this only stops waiting; installing and starting continue on the host.',
 }
 
 const tables: Record<string, Record<Key, string>> = { 'zh-CN': zh, en }

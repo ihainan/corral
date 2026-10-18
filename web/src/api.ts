@@ -104,17 +104,44 @@ export function setUnauthorizedHandler(fn: () => void) {
   onUnauthorized = fn
 }
 
-export async function api<T>(method: string, path: string, body?: unknown): Promise<T> {
+// Counts sign-ins and sign-outs on this page. A 401 only signs the page out
+// if no sign-in or sign-out happened since its request was sent: a late
+// answer to a request of an earlier sign-in must not end the current one.
+let authGeneration = 0
+export const authGen = () => authGeneration
+export function bumpAuthGen() {
+  authGeneration++
+}
+export function unauthorized(sentAt: number) {
+  if (sentAt === authGeneration && onUnauthorized) onUnauthorized()
+}
+
+export interface ApiOptions {
+  signal?: AbortSignal
+  timeoutMs?: number
+}
+
+export async function api<T>(method: string, path: string, body?: unknown, opts: ApiOptions = {}): Promise<T> {
   let res: Response
+  const sentAt = authGeneration
+  const ctl = new AbortController()
+  const onAbort = () => ctl.abort()
+  opts.signal?.addEventListener('abort', onAbort)
+  const timer = opts.timeoutMs ? setTimeout(() => ctl.abort(), opts.timeoutMs) : undefined
   try {
     res = await fetch(path, {
       method,
       credentials: 'same-origin',
+      signal: ctl.signal,
       headers: body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
       body: body !== undefined ? JSON.stringify(body) : undefined,
     })
   } catch {
+    if (opts.signal?.aborted) throw new ApiError(0, 'aborted', '')
     throw new ApiError(0, 'network', t('error.network'))
+  } finally {
+    clearTimeout(timer)
+    opts.signal?.removeEventListener('abort', onAbort)
   }
   const text = await res.text()
   let data: any = null
@@ -124,7 +151,7 @@ export async function api<T>(method: string, path: string, body?: unknown): Prom
     /* not JSON */
   }
   if (!res.ok) {
-    if (res.status === 401 && path !== '/api/login' && onUnauthorized) onUnauthorized()
+    if (res.status === 401 && path !== '/api/login') unauthorized(sentAt)
     throw new ApiError(res.status, data?.error ?? 'internal', data?.message ?? '', data?.extra)
   }
   return data as T

@@ -1,8 +1,8 @@
-import { createContext, useContext, useEffect, useState, type ReactNode } from 'react'
+import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
 import { KeyRound, LogOut, ScrollText, Server, Settings, Users } from 'lucide-react'
-import { api, ApiError, setUnauthorizedHandler, type Bootstrap, type Me } from './api'
+import { api, ApiError, bumpAuthGen, setUnauthorizedHandler, type Bootstrap, type Me } from './api'
 import { applyDefaultLanguage, t } from './i18n'
-import { flushPrefs, resetPrefsSession, syncPrefsFromServer } from './prefs'
+import { resetPrefsSession, sendPendingPrefs, syncPrefsFromServer } from './prefs'
 import { match, navigate, usePath, linkHandler } from './router'
 import { BrandMark, ToastProvider, useToast } from './components/ui'
 import { disablePush, syncPush } from './push'
@@ -21,11 +21,34 @@ interface Session {
 }
 
 const SessionCtx = createContext<Session>(null!)
+const AUTH_EVENT = 'corral.authEvent'
 export const useSession = () => useContext(SessionCtx)
 
 export function App() {
   const [boot, setBoot] = useState<Bootstrap | null>(null)
-  const [me, setMe] = useState<Me | null>(null)
+  const [me, setMeState] = useState<Me | null>(null)
+  // Every sign-in, sign-out or account switch: requests sent before it can no
+  // longer sign this page out, and other tabs reload into the new state.
+  // (Learning who is signed in at startup is not a change and tells no one.)
+  const meRef = useRef<Me | null>(null)
+  const booted = useRef(false)
+  const setMe = useCallback((m: Me | null) => {
+    if ((m?.id ?? null) !== (meRef.current?.id ?? null)) {
+      bumpAuthGen()
+      try {
+        if (booted.current) localStorage.setItem(AUTH_EVENT, String(Date.now()))
+      } catch {
+        /* ignore */
+      }
+    }
+    meRef.current = m
+    setMeState(m)
+  }, [])
+  useEffect(() => {
+    const onStorage = (e: StorageEvent) => e.key === AUTH_EVENT && location.reload()
+    window.addEventListener('storage', onStorage)
+    return () => window.removeEventListener('storage', onStorage)
+  }, [])
   const [error, setError] = useState(false)
   const path = usePath()
 
@@ -40,6 +63,7 @@ export function App() {
         applyDefaultLanguage(b.default_language)
         setBoot(b)
         setMe(b.user)
+        booted.current = true
         if (b.user) syncPrefsFromServer(b.user.id)
       })
       .catch(() => setError(true))
@@ -115,7 +139,7 @@ type NavKey = 'hosts' | 'keys' | 'settings' | 'users' | 'audit'
 // account's alerts.
 export async function signOut(setMe: (m: Me | null) => void, toast: (m: string, e?: boolean) => void) {
   // Settings changed just before signing out still belong to this account.
-  await Promise.race([flushPrefs(), new Promise((r) => setTimeout(r, 3000))])
+  await sendPendingPrefs(3000)
   await disablePush().catch(() => {})
   try {
     await api('POST', '/api/logout')
