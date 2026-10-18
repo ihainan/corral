@@ -134,7 +134,7 @@ func TestRevokingALoginCancelsItsPushesInFlight(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			n, st := newTestNotifier(t, Options{ExtraPushHosts: []string{"push.test"},
-				LoginValid: func(context.Context, string) bool { return true }})
+				LoginValid: func(context.Context, string) (bool, error) { return true, nil }})
 			tr := stallTransport{entered: make(chan string, 1)}
 			n.http.Transport = tr
 			ctx := context.Background()
@@ -144,7 +144,7 @@ func TestRevokingALoginCancelsItsPushesInFlight(t *testing.T) {
 			}
 			s := testSubscription(t, "https://push.test/phone")
 			s.UserID, s.LoginHash = u.ID, "phone"
-			if err := st.SavePushSubscription(ctx, s, 10); err != nil {
+			if _, err := st.SavePushSubscription(ctx, s, 10); err != nil {
 				t.Fatal(err)
 			}
 			done := make(chan struct{})
@@ -169,7 +169,7 @@ func TestDeliverySkipsEndedLoginsAndRevokedUsers(t *testing.T) {
 	defer srv.Close()
 	live := map[string]bool{"live": true}
 	n, st := newTestNotifier(t, Options{ExtraPushHosts: []string{"127.0.0.1"},
-		LoginValid: func(_ context.Context, h string) bool { return live[h] }})
+		LoginValid: func(_ context.Context, h string) (bool, error) { return live[h], nil }})
 	n.http.Transport = srv.Client().Transport
 	ctx := context.Background()
 	u, err := st.CreateUser(ctx, "alice", "", "x", store.RoleMember)
@@ -182,7 +182,7 @@ func TestDeliverySkipsEndedLoginsAndRevokedUsers(t *testing.T) {
 		}
 		s := testSubscription(t, srv.URL+"/"+h)
 		s.UserID, s.LoginHash = u.ID, h
-		if err := st.SavePushSubscription(ctx, s, 10); err != nil {
+		if _, err := st.SavePushSubscription(ctx, s, 10); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -201,7 +201,7 @@ func TestDeliverySkipsEndedLoginsAndRevokedUsers(t *testing.T) {
 	// Subscriptions need a login that exists.
 	s := testSubscription(t, srv.URL+"/x")
 	s.UserID, s.LoginHash = u.ID, "missing"
-	if err := st.SavePushSubscription(ctx, s, 10); err == nil {
+	if _, err := st.SavePushSubscription(ctx, s, 10); err == nil {
 		t.Fatal("subscription saved for a login that does not exist")
 	}
 }

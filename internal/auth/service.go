@@ -238,9 +238,17 @@ func (s *Service) CheckLogin(ctx context.Context, hash string) (*store.User, err
 
 // LoginValid reports whether a login is still in force, without counting the
 // check as activity (used before sending to a device bound to that login).
-func (s *Service) LoginValid(ctx context.Context, hash string) bool {
+// An error means it could not be checked (cancelled, database trouble): the
+// login is not known to be invalid.
+func (s *Service) LoginValid(ctx context.Context, hash string) (bool, error) {
 	_, err := s.validLogin(ctx, hash)
-	return err == nil
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, ErrUnauthorized):
+		return false, nil
+	}
+	return false, err
 }
 
 func (s *Service) validLogin(ctx context.Context, hash string) (*store.User, error) {
@@ -257,8 +265,11 @@ func (s *Service) validLogin(ctx context.Context, hash string) (*store.User, err
 		return nil, ErrUnauthorized
 	}
 	u, err := s.store.UserByID(ctx, ls.UserID)
-	if err != nil {
+	if errors.Is(err, store.ErrNotFound) {
 		return nil, ErrUnauthorized
+	}
+	if err != nil {
+		return nil, err
 	}
 	// A login older than the current password is void, even if deleting it
 	// after a password change or reset did not happen.

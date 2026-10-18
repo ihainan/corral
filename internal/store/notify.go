@@ -34,6 +34,7 @@ type PushSubscription struct {
 	ID        int64  `json:"id"`
 	UserID    int64  `json:"-"`
 	LoginHash string `json:"-"` // the browser login it belongs to; deleting that login deletes it
+	Version   int64  `json:"-"` // registration sequence: changes whenever the endpoint is registered again
 	Endpoint  string `json:"-"`
 	P256dh    string `json:"-"`
 	Auth      string `json:"-"`
@@ -46,16 +47,16 @@ type PushSubscription struct {
 // or login (shared device, new sign-in) is reassigned rather than duplicated.
 // The login must still exist (ErrNotFound otherwise). Beyond keep
 // subscriptions per user, the least recently registered are dropped, never
-// the one just registered.
-func (s *Store) SavePushSubscription(ctx context.Context, p *PushSubscription, keep int) error {
+// the one just registered. It returns the registration's version.
+func (s *Store) SavePushSubscription(ctx context.Context, p *PushSubscription, keep int) (int64, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer tx.Rollback()
 	var seq int64
 	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(registered), 0) + 1 FROM push_subscriptions`).Scan(&seq); err != nil {
-		return err
+		return 0, err
 	}
 	if err := affectedOrNotFound(tx.ExecContext(ctx,
 		`INSERT INTO push_subscriptions (user_id, login_hash, endpoint, p256dh, auth, user_agent, created_at, registered)
@@ -64,20 +65,20 @@ func (s *Store) SavePushSubscription(ctx context.Context, p *PushSubscription, k
 		   p256dh = excluded.p256dh, auth = excluded.auth, user_agent = excluded.user_agent, failures = 0,
 		   registered = excluded.registered`,
 		p.Endpoint, p.P256dh, p.Auth, p.UserAgent, s.unix(), seq, p.LoginHash, p.UserID)); err != nil {
-		return err
+		return 0, err
 	}
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM push_subscriptions WHERE user_id = ? AND endpoint != ? AND id NOT IN
 		   (SELECT id FROM push_subscriptions WHERE user_id = ? AND endpoint != ? ORDER BY registered DESC LIMIT ?)`,
 		p.UserID, p.Endpoint, p.UserID, p.Endpoint, max(keep-1, 0)); err != nil {
-		return err
+		return 0, err
 	}
-	return tx.Commit()
+	return seq, tx.Commit()
 }
 
 func (s *Store) PushSubscriptions(ctx context.Context, userID int64) ([]*PushSubscription, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, user_id, COALESCE(login_hash, ''), endpoint, p256dh, auth, user_agent, created_at, last_ok_at
+		`SELECT id, user_id, COALESCE(login_hash, ''), registered, endpoint, p256dh, auth, user_agent, created_at, last_ok_at
 		 FROM push_subscriptions WHERE user_id = ? ORDER BY id`, userID)
 	if err != nil {
 		return nil, err
@@ -86,7 +87,7 @@ func (s *Store) PushSubscriptions(ctx context.Context, userID int64) ([]*PushSub
 	out := []*PushSubscription{}
 	for rows.Next() {
 		p := &PushSubscription{}
-		if err := rows.Scan(&p.ID, &p.UserID, &p.LoginHash, &p.Endpoint, &p.P256dh, &p.Auth, &p.UserAgent, &p.CreatedAt, &p.LastOKAt); err != nil {
+		if err := rows.Scan(&p.ID, &p.UserID, &p.LoginHash, &p.Version, &p.Endpoint, &p.P256dh, &p.Auth, &p.UserAgent, &p.CreatedAt, &p.LastOKAt); err != nil {
 			return nil, err
 		}
 		out = append(out, p)
@@ -103,21 +104,34 @@ func (s *Store) DeletePushSubscriptionByID(ctx context.Context, userID, id int64
 	return affectedOrNotFound(s.db.ExecContext(ctx, `DELETE FROM push_subscriptions WHERE user_id = ? AND id = ?`, userID, id))
 }
 
-func (s *Store) MarkPushResult(ctx context.Context, id int64, ok bool) error {
+// PushSubscriptionCurrent reports whether a subscription still has the
+// registration version a delivery read (it was not registered again since,
+// possibly by someone else).
+func (s *Store) PushSubscriptionCurrent(ctx context.Context, id, version int64) (bool, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM push_subscriptions WHERE id = ? AND registered = ?`, id, version).Scan(&n)
+	return n > 0, err
+}
+
+// MarkPushResult records a delivery outcome, for that registration version only.
+func (s *Store) MarkPushResult(ctx context.Context, id, version int64, ok bool) error {
 	if ok {
-		_, err := s.db.ExecContext(ctx, `UPDATE push_subscriptions SET last_ok_at = ?, failures = 0 WHERE id = ?`, s.unix(), id)
+		_, err := s.db.ExecContext(ctx, `UPDATE push_subscriptions SET last_ok_at = ?, failures = 0 WHERE id = ? AND registered = ?`,
+			s.unix(), id, version)
 		return err
 	}
 	// Endpoints that keep failing are dropped; the browser re-subscribes on next visit.
-	if _, err := s.db.ExecContext(ctx, `UPDATE push_subscriptions SET failures = failures + 1 WHERE id = ?`, id); err != nil {
+	if _, err := s.db.ExecContext(ctx, `UPDATE push_subscriptions SET failures = failures + 1 WHERE id = ? AND registered = ?`, id, version); err != nil {
 		return err
 	}
-	_, err := s.db.ExecContext(ctx, `DELETE FROM push_subscriptions WHERE id = ? AND failures >= 5`, id)
+	_, err := s.db.ExecContext(ctx, `DELETE FROM push_subscriptions WHERE id = ? AND registered = ? AND failures >= 5`, id, version)
 	return err
 }
 
-func (s *Store) DeletePushSubscriptionHard(ctx context.Context, id int64) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM push_subscriptions WHERE id = ?`, id)
+// DeletePushSubscriptionHard removes a subscription the sender found dead,
+// unless it was registered again meanwhile.
+func (s *Store) DeletePushSubscriptionHard(ctx context.Context, id, version int64) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM push_subscriptions WHERE id = ? AND registered = ?`, id, version)
 	return err
 }
 

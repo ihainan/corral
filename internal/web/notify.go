@@ -153,7 +153,7 @@ func (s *Server) apiPushSubscribe(w http.ResponseWriter, r *http.Request) {
 	}
 	// Bound to this browser login: signing out (or any end of the login)
 	// removes it, so a shared or handed-on device stops receiving.
-	err := s.store.SavePushSubscription(r.Context(), &store.PushSubscription{
+	version, err := s.store.SavePushSubscription(r.Context(), &store.PushSubscription{
 		UserID: currentUser(r).ID, LoginHash: loginHash(r), Endpoint: b.Endpoint, P256dh: b.Keys.P256dh, Auth: b.Keys.Auth, UserAgent: ua,
 	}, maxPushSubscriptionsPerUser)
 	if errors.Is(err, store.ErrNotFound) {
@@ -164,6 +164,8 @@ func (s *Server) apiPushSubscribe(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, r, err)
 		return
 	}
+	// Notes already on their way to this device for its previous owner stop.
+	s.notifier.Rebound(b.Endpoint, version)
 	s.audit(r, "push.subscribe", "", nil)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
