@@ -20,8 +20,10 @@ package sshx
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
+	"strconv"
 	"sync"
 	"time"
 
@@ -114,13 +116,14 @@ func DialVia(ctx context.Context, c *ssh.Client, network, addr string, opt DialO
 	}
 	grace := StuckGrace
 	type result struct {
-		conn net.Conn
+		ch   ssh.Channel
+		reqs <-chan *ssh.Request
 		err  error
 	}
 	res := make(chan result, 1)
 	go func() {
-		conn, err := c.Dial(network, addr)
-		res <- result{conn, err}
+		ch, reqs, err := openForwarded(c, network, addr)
+		res <- result{ch, reqs, err}
 	}()
 	// adopt hands the quota to the channel, or gives it back if none opened.
 	adopt := func(r result) *guardedConn {
@@ -128,7 +131,7 @@ func DialVia(ctx context.Context, c *ssh.Client, network, addr string, opt DialO
 			release()
 			return nil
 		}
-		return newGuardedConn(r.conn, c, release, opt.Dedicated, grace)
+		return newGuardedConn(r.ch, r.reqs, network, addr, c, release, opt.Dedicated, grace)
 	}
 	select {
 	case r := <-res:
@@ -164,33 +167,79 @@ func DialVia(ctx context.Context, c *ssh.Client, network, addr string, opt DialO
 	}
 }
 
-// guardedConn decouples callers from the channel: two pumps move the data,
-// so Close can make reads and writes return at once, while the pumps keep
-// going until the channel has really ended (the host closed it or sent EOF,
-// or the connection ended). Only then is the quota released.
+// openForwarded opens a "direct-tcpip" or "direct-streamlocal" channel as
+// ssh.Client.Dial does, but keeps the channel's request stream: it is closed
+// when the channel has really ended, which is what quotas wait for.
+func openForwarded(c *ssh.Client, network, addr string) (ssh.Channel, <-chan *ssh.Request, error) {
+	switch network {
+	case "tcp":
+		host, p, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, nil, err
+		}
+		port, err := strconv.ParseUint(p, 10, 16)
+		if err != nil {
+			return nil, nil, err
+		}
+		return c.OpenChannel("direct-tcpip", ssh.Marshal(&struct {
+			Host       string
+			Port       uint32
+			OriginAddr string
+			OriginPort uint32
+		}{host, uint32(port), "0.0.0.0", 0}))
+	case "unix":
+		return c.OpenChannel("direct-streamlocal@openssh.com", ssh.Marshal(&struct {
+			SocketPath string
+			Reserved0  string
+			Reserved1  uint32
+		}{addr, "", 0}))
+	}
+	return nil, nil, fmt.Errorf("sshx: cannot forward network %q", network)
+}
+
+// guardedConn decouples callers from the channel: pumps move the data, so
+// Close can make reads and writes return at once. The quota is released only
+// once the channel has really ended: its request stream is closed (the host
+// closed the channel, or the connection ended; data EOF alone is not the
+// end) and every goroutine working on it has returned.
 type guardedConn struct {
-	ch        net.Conn
+	ch        ssh.Channel
 	client    *ssh.Client
+	network   string
+	addr      string
 	dedicated bool
 	grace     time.Duration
+	release   func()
 
 	rd     *io.PipeReader // callers read here; the read pump fills it
 	rdFeed *io.PipeWriter
 	wr     *io.PipeWriter // callers write here; the write pump drains it
 	wrSrc  *io.PipeReader
 
+	mu       sync.Mutex
+	running  int // goroutines working on the channel
+	released bool
+
 	closeOnce sync.Once
 	ended     chan struct{}
 }
 
-func newGuardedConn(ch net.Conn, client *ssh.Client, release func(), dedicated bool, grace time.Duration) *guardedConn {
-	g := &guardedConn{ch: ch, client: client, dedicated: dedicated, grace: grace, ended: make(chan struct{})}
+func newGuardedConn(ch ssh.Channel, reqs <-chan *ssh.Request, network, addr string, client *ssh.Client, release func(),
+	dedicated bool, grace time.Duration) *guardedConn {
+	g := &guardedConn{ch: ch, client: client, network: network, addr: addr, dedicated: dedicated, grace: grace,
+		release: release, running: 3, ended: make(chan struct{})}
 	g.rd, g.rdFeed = io.Pipe()
 	g.wrSrc, g.wr = io.Pipe()
-	var pumps sync.WaitGroup
-	pumps.Add(2)
-	go func() { // read pump: until EOF or the connection ends, also after Close
-		defer pumps.Done()
+	go func() { // the channel's requests: the stream closes when the channel has ended
+		defer g.done()
+		for r := range reqs {
+			if r.WantReply {
+				r.Reply(false, nil)
+			}
+		}
+	}()
+	go func() { // read pump: until EOF or the channel ends, also after Close
+		defer g.done()
 		buf := make([]byte, 32<<10)
 		for {
 			n, err := ch.Read(buf)
@@ -204,7 +253,7 @@ func newGuardedConn(ch net.Conn, client *ssh.Client, release func(), dedicated b
 		}
 	}()
 	go func() { // write pump: until Close or a failed write
-		defer pumps.Done()
+		defer g.done()
 		buf := make([]byte, 32<<10)
 		for {
 			n, err := g.wrSrc.Read(buf)
@@ -219,12 +268,28 @@ func newGuardedConn(ch net.Conn, client *ssh.Client, release func(), dedicated b
 			}
 		}
 	}()
-	go func() {
-		pumps.Wait()
-		release()
-		close(g.ended)
-	}()
 	return g
+}
+
+func (g *guardedConn) start() {
+	g.mu.Lock()
+	g.running++
+	g.mu.Unlock()
+}
+
+// done ends one goroutine; the last one releases the quota, once.
+func (g *guardedConn) done() {
+	g.mu.Lock()
+	g.running--
+	end := g.running == 0 && !g.released
+	if end {
+		g.released = true
+	}
+	g.mu.Unlock()
+	if end {
+		g.release()
+		close(g.ended)
+	}
 }
 
 func (g *guardedConn) Read(p []byte) (int, error)  { return g.rd.Read(p) }
@@ -235,7 +300,11 @@ func (g *guardedConn) Close() error {
 	g.closeOnce.Do(func() {
 		g.rd.CloseWithError(net.ErrClosed)
 		g.wr.CloseWithError(net.ErrClosed)
-		go g.ch.Close() // sends the close; may wait on a stalled connection
+		g.start()
+		go func() { // sends the close; may wait on a stalled connection
+			defer g.done()
+			g.ch.Close()
+		}()
 		if g.dedicated {
 			t := time.AfterFunc(g.grace, func() {
 				select {
@@ -250,8 +319,15 @@ func (g *guardedConn) Close() error {
 	return nil
 }
 
-func (g *guardedConn) LocalAddr() net.Addr                { return g.ch.LocalAddr() }
-func (g *guardedConn) RemoteAddr() net.Addr               { return g.ch.RemoteAddr() }
-func (g *guardedConn) SetDeadline(t time.Time) error      { return g.ch.SetDeadline(t) }
-func (g *guardedConn) SetReadDeadline(t time.Time) error  { return g.ch.SetReadDeadline(t) }
-func (g *guardedConn) SetWriteDeadline(t time.Time) error { return g.ch.SetWriteDeadline(t) }
+type chanAddr struct{ network, addr string }
+
+func (a chanAddr) Network() string { return a.network }
+func (a chanAddr) String() string  { return a.addr }
+
+var errNoDeadline = errors.New("sshx: channels do not support deadlines; use Close")
+
+func (g *guardedConn) LocalAddr() net.Addr              { return chanAddr{g.network, "ssh"} }
+func (g *guardedConn) RemoteAddr() net.Addr             { return chanAddr{g.network, g.addr} }
+func (g *guardedConn) SetDeadline(time.Time) error      { return errNoDeadline }
+func (g *guardedConn) SetReadDeadline(time.Time) error  { return errNoDeadline }
+func (g *guardedConn) SetWriteDeadline(time.Time) error { return errNoDeadline }
