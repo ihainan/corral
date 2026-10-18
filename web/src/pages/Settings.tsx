@@ -152,6 +152,9 @@ export function SettingsPage() {
           </button>
         </div>
       </section>
+      <p className="notices">
+        <a href="/THIRD-PARTY-NOTICES.txt" target="_blank" rel="noopener">{t('settings.notices')}</a>
+      </p>
     </main>
   )
 }

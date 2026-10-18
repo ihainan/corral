@@ -214,8 +214,4 @@ html.term-dark .overlay, html.term-dark .menu, html.term-dark .toast {
 .herdr-ws:disabled, .herdr-agent:disabled { cursor: default; }
 .herdr-ws:disabled:hover, .herdr-agent:disabled:hover { background: none; }
 
-/* On iOS fixed layers are placed against the layout viewport, which the soft
-   keyboard does not shrink: follow the visual viewport in terminal mode. */
-html.term-mode .overlay { top: var(--vv-top, 0px); bottom: auto; height: var(--vv-h, 100%); }
-html.term-mode .dialog { max-height: calc(var(--vv-h, 100dvh) - 32px); }
-@media (max-width: 520px) { html.term-mode .sheet-mode .dialog { max-height: calc(var(--vv-h, 100dvh) - 24px); } }
+

@@ -49,25 +49,54 @@ function mix(a: string, b: string, t: number): string {
   return '#' + x.map((v, i) => Math.round(v + (y[i] - v) * t).toString(16).padStart(2, '0')).join('')
 }
 
+function luminance(h: string): number {
+  const c = [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16) / 255).map((v) => (v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4))
+  return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
+}
+
+export function contrast(a: string, b: string): number {
+  const [x, y] = [luminance(a), luminance(b)].sort((p, q) => q - p)
+  return (x + 0.05) / (y + 0.05)
+}
+
+// Moves `fg` towards white or black until it reads against every background
+// given at the ratio asked for (WCAG: 4.5 for text).
+function readable(fg: string, bgs: string[], min: number, dark: boolean): string {
+  const target = dark ? '#ffffff' : '#000000'
+  for (let t = 0; t <= 1.0001; t += 0.05) {
+    const c = mix(fg, target, t)
+    if (bgs.every((bg) => contrast(c, bg) >= min)) return c
+  }
+  return target
+}
+
 // CSS variables for the chrome, blended from the palette's background and
-// foreground so any scheme gets a matching top bar and key bar. Corral's own
-// pair keeps its hand-tuned values in terminal.css.
+// foreground so any scheme gets a matching top bar and key bar; text colours
+// are then pushed until they reach 4.5:1 on every surface they sit on. The
+// terminal itself keeps the scheme's colours untouched. Corral's own pair
+// keeps its hand-tuned values in terminal.css.
 export function chromeVars(s: Scheme): Record<string, string> {
   if (s === corralDark || s === corralLight) return {}
   const bg = s.theme.background ?? '#000000'
   const fg = s.theme.foreground ?? '#ffffff'
-  const accent = s.theme.blue ?? '#4a78ec'
+  const d = s.dark
+  const chrome = mix(bg, fg, d ? 0.04 : 0.03)
+  const key = mix(bg, fg, d ? 0.1 : 0)
+  const keyActive = mix(bg, fg, d ? 0.18 : 0.1)
+  const hover = mix(bg, fg, d ? 0.08 : 0.06)
+  const surfaces = [bg, chrome, key, hover]
+  const accentSoft = mix(bg, s.theme.blue ?? '#4a78ec', d ? 0.22 : 0.14)
   return {
     '--term-bg': bg,
-    '--term-chrome': mix(bg, fg, s.dark ? 0.04 : 0.03),
-    '--term-line': mix(bg, fg, s.dark ? 0.1 : 0.12),
-    '--term-key': mix(bg, fg, s.dark ? 0.1 : 0),
-    '--term-key-active': mix(bg, fg, s.dark ? 0.18 : 0.1),
-    '--term-hover': mix(bg, fg, s.dark ? 0.08 : 0.06),
-    '--term-fg': fg,
-    '--term-fg-2': mix(fg, bg, 0.3),
-    '--term-fg-3': mix(fg, bg, 0.5),
-    '--term-accent-soft': mix(bg, accent, s.dark ? 0.22 : 0.14),
-    '--term-accent-text': accent,
+    '--term-chrome': chrome,
+    '--term-line': mix(bg, fg, d ? 0.1 : 0.12),
+    '--term-key': key,
+    '--term-key-active': keyActive,
+    '--term-hover': hover,
+    '--term-fg': readable(fg, [...surfaces, keyActive], 4.5, d),
+    '--term-fg-2': readable(mix(fg, bg, 0.25), surfaces, 4.5, d),
+    '--term-fg-3': readable(mix(fg, bg, 0.45), surfaces, 4.5, d),
+    '--term-accent-soft': accentSoft,
+    '--term-accent-text': readable(s.theme.blue ?? '#4a78ec', [...surfaces, accentSoft], 4.5, d),
   }
 }

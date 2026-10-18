@@ -1,5 +1,6 @@
 // Generated from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes),
-// Windows Terminal format. Do not edit by hand. Original licence:
+// Windows Terminal format, commit 86a776d947b6f0c95d35005cb67f3cea435362fc. Do not edit by hand. Original licence
+// (also shipped in public/THIRD-PARTY-NOTICES.txt):
 //
 // MIT License
 //

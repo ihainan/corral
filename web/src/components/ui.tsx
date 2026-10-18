@@ -33,7 +33,10 @@ export function useFocusTrap<T extends HTMLElement>(onClose: () => void) {
     const focusables = () =>
       [...(root?.querySelectorAll<HTMLElement>('a[href], button:not([disabled]), input:not([disabled]), select, textarea, [tabindex]:not([tabindex="-1"])') ?? [])]
         .filter((el) => el.offsetParent !== null || el === document.activeElement)
-    const first = root?.querySelector<HTMLElement>('input, textarea, select') ?? focusables()[0]
+    // Fields marked data-touch-nofocus are skipped on touch screens, where
+    // focusing them would pop the keyboard over the content.
+    const skip = isCoarse() ? ':not([data-touch-nofocus])' : ''
+    const first = root?.querySelector<HTMLElement>(`input${skip}, textarea${skip}, select${skip}`) ?? focusables().find((el) => !(isCoarse() && el.hasAttribute('data-touch-nofocus')))
     first?.focus()
     const onKey = (e: KeyboardEvent) => {
       if (!isTop()) return

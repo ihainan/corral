@@ -34,6 +34,18 @@ function Option(props: { scheme: Scheme; label?: string; hint?: string; selected
   )
 }
 
+// Arrow keys move between options in reading order; Tab still leaves the list.
+function arrowNav(e: React.KeyboardEvent<HTMLElement>) {
+  const opts = [...e.currentTarget.querySelectorAll<HTMLElement>('.scheme-option')]
+  const i = opts.indexOf(document.activeElement as HTMLElement)
+  if (i < 0) return
+  const cols = Math.max(1, Math.round(e.currentTarget.clientWidth / (opts[i].offsetWidth || 1)))
+  const step = { ArrowRight: 1, ArrowLeft: -1, ArrowDown: cols, ArrowUp: -cols, Home: -i, End: opts.length - 1 - i }[e.key]
+  if (step === undefined) return
+  e.preventDefault()
+  opts[Math.min(opts.length - 1, Math.max(0, i + step))].focus()
+}
+
 // Picking applies at once, so the terminal behind the dialog previews it.
 export function SchemeDialog({ onClose }: { onClose: () => void }) {
   const prefs = usePrefs()
@@ -56,12 +68,14 @@ export function SchemeDialog({ onClose }: { onClose: () => void }) {
           onChange={(e) => setQ(e.target.value)}
           placeholder={t('schemes.search', { n: allSchemes.length })}
           aria-label={t('schemes.searchLabel')}
+          data-touch-nofocus
           autoCapitalize="none"
           autoCorrect="off"
           spellCheck={false}
         />
       </label>
-      <div className="scheme-scroll">
+      <p className="sr-only" aria-live="polite">{needle ? t('schemes.count', { n: dark.length + light.length }) : ''}</p>
+      <div className="scheme-scroll" onKeyDown={arrowNav}>
         {!needle && (
           <div className="scheme-grid">
             <Option

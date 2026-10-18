@@ -322,6 +322,8 @@ const zh = {
   'hosts.herdrAgents': '{n} 个助手',
   'hosts.herdrWaiting': '{n} 个在等你',
   'hosts.noViewers': '没有窗口在看',
+  'schemes.count': '找到 {n} 套配色',
+  'settings.notices': '第三方声明',
 }
 
 type Key = keyof typeof zh
@@ -648,6 +650,8 @@ const en: Record<Key, string> = {
   'hosts.herdrAgents': '{n} agents',
   'hosts.herdrWaiting': '{n} waiting for you',
   'hosts.noViewers': 'not open anywhere',
+  'schemes.count': '{n} schemes found',
+  'settings.notices': 'Third-party notices',
 }
 
 const tables: Record<string, Record<Key, string>> = { 'zh-CN': zh, en }

@@ -39,7 +39,7 @@ export function App() {
         applyDefaultLanguage(b.default_language)
         setBoot(b)
         setMe(b.user)
-        if (b.user) syncPrefsFromServer()
+        if (b.user) syncPrefsFromServer(b.user.id)
       })
       .catch(() => setError(true))
   }, [])

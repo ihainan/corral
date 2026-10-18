@@ -419,10 +419,7 @@ export function TerminalPage({ id }: { id: string }) {
       // it is down, ignore offsetTop: iOS 26 can leave a stale value behind.
       const keyboardUp = vv ? window.innerHeight - vv.height > 120 : false
       root.style.transform = keyboardUp && vv ? `translateY(${Math.round(vv.offsetTop)}px)` : ''
-      // Dialogs and sheets opened over the terminal follow the same box.
-      const de = document.documentElement.style
-      de.setProperty('--vv-h', `${Math.round(h)}px`)
-      de.setProperty('--vv-top', keyboardUp && vv ? `${Math.round(vv.offsetTop)}px` : '0px')
+
       if (window.scrollY !== 0) window.scrollTo(0, 0)
     }
     apply()
@@ -435,8 +432,6 @@ export function TerminalPage({ id }: { id: string }) {
       vv?.removeEventListener('scroll', apply)
       window.removeEventListener('resize', apply)
       document.documentElement.classList.remove('term-mode')
-      document.documentElement.style.removeProperty('--vv-h')
-      document.documentElement.style.removeProperty('--vv-top')
     }
   }, [])
 

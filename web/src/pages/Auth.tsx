@@ -42,7 +42,7 @@ export function LoginPage() {
     try {
       const r = await api<{ user: Me }>('POST', '/api/login', { username, password })
       setMe(r.user)
-      syncPrefsFromServer()
+      syncPrefsFromServer(r.user.id)
       navigate(nextPath(), true)
     } catch (err) {
       setError(errorText(err))

@@ -147,14 +147,14 @@ export function HostsPage() {
                   const name = mine.length > 1 ? t('hosts.sessionN', { n: i + 1 }) : t('hosts.session')
                   return (
                     <div className="row row-session" key={s.id}>
-                      <a className="row-main" href={'/t/' + s.id} onClick={linkHandler('/t/' + s.id)} aria-label={`${t('hosts.open')} ${h.name} ${name}`}>
+                      <a className="row-main" href={'/t/' + s.id} onClick={linkHandler('/t/' + s.id)} aria-label={`${h.name}：${s.title || name}`} aria-describedby={'sd-' + s.id} title={s.title || undefined}>
                         <span className={'dot ' + (s.meta?.waiting ? 'warn' : 'ok')} aria-hidden="true" />
                         <span className="row-title">{s.title || name}</span>
                         <span className="row-meta" title={new Date(s.created_at * 1000).toLocaleString()}>{t('hosts.startedAgo', { when: relTime(s.created_at) })}</span>
-                        <span className="row-sub">{sessionDetail(s, h)}</span>
+                        <span className="row-sub" id={'sd-' + s.id}>{sessionDetail(s, h)}</span>
                       </a>
                       <div className="row-actions">
-                        <button className="icon-btn" aria-label={t('hosts.closeNamed', { name })} title={t('hosts.closeSession')} onClick={() => closeSession(s)}>
+                        <button className="icon-btn" aria-label={t('hosts.closeNamed', { name: `${h.name}：${s.title || name}` })} title={t('hosts.closeSession')} onClick={() => closeSession(s)}>
                           <X size={16} />
                         </button>
                       </div>

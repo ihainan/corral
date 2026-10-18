@@ -43,23 +43,63 @@ function emit() {
   subs.forEach((s) => s())
 }
 
+// Saving. Every change bumps `version`; `confirmed` is the newest version
+// the server has acknowledged. PUTs go out one at a time, so an older
+// snapshot can never land after a newer one. Until the latest change is
+// confirmed, a marker in localStorage names the account it belongs to: the
+// next load on this device then pushes the local settings instead of letting
+// the server's older copy overwrite them.
+const DIRTY = 'corral.prefsDirty'
+let version = 0
+let confirmed = 0
+let owner: number | null = null
 let saveTimer: number | undefined
+let queue: Promise<void> = Promise.resolve()
+
+function markDirty() {
+  try {
+    localStorage.setItem(DIRTY, owner === null ? '' : String(owner))
+  } catch {
+    /* ignore */
+  }
+}
+function clearDirty() {
+  try {
+    localStorage.removeItem(DIRTY)
+  } catch {
+    /* ignore */
+  }
+}
+
 export function setPrefs(patch: Partial<Prefs>) {
   state = { ...state, ...patch }
+  version++
+  markDirty()
   emit()
   clearTimeout(saveTimer)
   saveTimer = window.setTimeout(save, 600)
 }
 
 function save() {
+  clearTimeout(saveTimer)
   saveTimer = undefined
-  api('PUT', '/api/me/settings', state).catch(() => {})
+  queue = queue.then(async () => {
+    const v = version
+    const snapshot = state
+    try {
+      await api('PUT', '/api/me/settings', snapshot)
+      if (v > confirmed) confirmed = v
+      if (confirmed === version) clearDirty()
+    } catch {
+      /* stays dirty; retried on the next change or the next load */
+    }
+  })
 }
 
-// A change made just before a reload or closing the tab must still reach
-// the server, or the next page load would read the old value back.
+// Leaving the page: whatever is not confirmed yet goes out with keepalive,
+// which survives the unload. The marker stays until a later load confirms it.
 function flush() {
-  if (saveTimer === undefined) return
+  if (confirmed === version) return
   clearTimeout(saveTimer)
   saveTimer = undefined
   void fetch('/api/me/settings', {
@@ -70,10 +110,25 @@ function flush() {
 window.addEventListener('pagehide', flush)
 document.addEventListener('visibilitychange', () => document.visibilityState === 'hidden' && flush())
 
-export async function syncPrefsFromServer() {
+export async function syncPrefsFromServer(userId: number) {
+  owner = userId
+  let dirtyFor: string | null = null
+  try {
+    dirtyFor = localStorage.getItem(DIRTY)
+  } catch {
+    /* ignore */
+  }
+  if (dirtyFor === String(userId)) {
+    // This account changed something here that the server may not have.
+    version++
+    save()
+    return
+  }
+  if (dirtyFor !== null) clearDirty() // another account's leftovers
+  const started = version
   try {
     const remote = await api<Partial<Prefs>>('GET', '/api/me/settings')
-    if (saveTimer !== undefined) return // a change made meanwhile wins; it is on its way
+    if (version !== started) return // changed meanwhile; that change wins
     state = { ...defaults, ...state, ...remote }
     emit()
   } catch {

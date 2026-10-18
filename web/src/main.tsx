@@ -24,6 +24,24 @@ if ('serviceWorker' in navigator && location.protocol === 'https:') {
   navigator.serviceWorker.register('/sw.js').catch(() => {})
 }
 
+// iOS places fixed layers against the layout viewport, which the soft
+// keyboard does not shrink. Dialogs and sheets size themselves from these
+// variables instead, so their buttons stay above the keyboard.
+{
+  const vv = window.visualViewport
+  const apply = () => {
+    const h = vv ? vv.height : window.innerHeight
+    const keyboardUp = vv ? window.innerHeight - vv.height > 120 : false
+    const de = document.documentElement.style
+    de.setProperty('--vv-h', `${Math.round(h)}px`)
+    de.setProperty('--vv-top', keyboardUp && vv ? `${Math.round(vv.offsetTop)}px` : '0px')
+  }
+  apply()
+  vv?.addEventListener('resize', apply)
+  vv?.addEventListener('scroll', apply)
+  window.addEventListener('resize', apply)
+}
+
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <App />

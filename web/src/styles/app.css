@@ -444,3 +444,16 @@ details.adv > .form { margin-top: 16px; }
 .scheme-current .swatch-dots i { width: 4px; height: 4px; }
 .scheme-current .swatch-dots { gap: 2px; }
 .overlay.see-through { background: rgba(0, 0, 0, 0.12); }
+
+/* Floating layers follow the visual viewport (see main.tsx), so the iOS soft
+   keyboard never hides a dialog's buttons. */
+.overlay { top: var(--vv-top, 0px); bottom: auto; height: var(--vv-h, 100%); }
+.dialog { max-height: calc(var(--vv-h, 100dvh) - 32px); }
+@media (max-width: 520px) { .sheet-mode .dialog { max-height: calc(var(--vv-h, 100dvh) - 24px); } }
+@media (max-width: 519.98px) {
+  /* Narrow screens: a session's details may wrap; its start time gives way. */
+  .row-session .row-main > .row-meta { display: none; }
+  .row-session .row-sub { white-space: normal; }
+}
+.notices { font-size: 12px; color: var(--fg-3); }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
