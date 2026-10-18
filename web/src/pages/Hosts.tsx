@@ -10,8 +10,17 @@ export function HostsPage() {
   const toast = useToast()
   const [hosts, setHosts] = useState<Host[] | null>(null)
   const [failed, setFailed] = useState(false)
+  const [sessFailed, setSessFailed] = useState(false)
   const [sessions, setSessions] = useState<SessionInfo[]>([])
   const [confirm, setConfirm] = useState<React.ReactNode>(null)
+
+  const refreshSessions = () =>
+    api<SessionInfo[]>('GET', '/api/sessions')
+      .then((x) => {
+        setSessions(x)
+        setSessFailed(false)
+      })
+      .catch(() => setSessFailed(true))
 
   const load = useCallback(() => {
     api<Host[]>('GET', '/api/hosts')
@@ -20,14 +29,15 @@ export function HostsPage() {
         setFailed(false)
       })
       .catch(() => setFailed(true))
-    api<SessionInfo[]>('GET', '/api/sessions').then(setSessions).catch(() => {})
+    refreshSessions()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [toast])
 
   useEffect(() => {
     load()
     const onVisible = () => document.visibilityState === 'visible' && load()
     document.addEventListener('visibilitychange', onVisible)
-    const timer = setInterval(() => document.visibilityState === 'visible' && api<SessionInfo[]>('GET', '/api/sessions').then(setSessions).catch(() => {}), 10000)
+    const timer = setInterval(() => document.visibilityState === 'visible' && refreshSessions(), 10000)
     return () => {
       document.removeEventListener('visibilitychange', onVisible)
       clearInterval(timer)
@@ -48,6 +58,7 @@ export function HostsPage() {
         </a>
       </div>
 
+      {sessFailed && <p className="err" role="status">{t('hosts.sessionsFailed')}</p>}
       {running.length > 0 && (
         <section className="section" aria-labelledby="running-h">
           <h2 id="running-h">{t('hosts.sessions')}</h2>

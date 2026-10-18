@@ -78,8 +78,11 @@ export function useConnect(onOpen: (s: SessionInfo) => void): {
       setPending(null)
       return 'done'
     } finally {
-      inflight.current = false
-      if (mine === attempt.current) setBusyHost(null)
+      // Only the current attempt holds the lock; a cancelled one already released it.
+      if (mine === attempt.current) {
+        inflight.current = false
+        setBusyHost(null)
+      }
     }
   }
 

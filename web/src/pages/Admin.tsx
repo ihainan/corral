@@ -214,15 +214,24 @@ export function AdminAuditPage() {
   const [entries, setEntries] = useState<AuditEntry[] | null>(null)
   const [failed, setFailed] = useState(false)
   const [more, setMore] = useState(true)
+  const [loading, setLoading] = useState(false)
   const load = async (before?: number) => {
+    if (loading) return
+    setLoading(true)
     try {
       const rows = await api<AuditEntry[]>('GET', '/api/admin/audit' + (before ? '?before=' + before : ''))
-      setEntries((prev) => (before && prev ? [...prev, ...rows] : rows))
+      setEntries((prev) => {
+        if (!before || !prev) return rows
+        const seen = new Set(prev.map((e) => e.id))
+        return [...prev, ...rows.filter((e) => !seen.has(e.id))]
+      })
       setMore(rows.length === 100)
       setFailed(false)
     } catch (e) {
       if (before) toast(errorText(e), true)
       else setFailed(true)
+    } finally {
+      setLoading(false)
     }
   }
   useEffect(() => {
@@ -264,7 +273,7 @@ export function AdminAuditPage() {
               </tbody>
             </table>
           </div>
-          {more && <div><button className="btn" onClick={() => load(entries[entries.length - 1].id)}>{t('admin.loadMore')}</button></div>}
+          {more && <div><button className="btn" disabled={loading} onClick={() => load(entries[entries.length - 1].id)}>{t('admin.loadMore')}</button></div>}
         </>
       )}
     </main>

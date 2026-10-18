@@ -29,6 +29,7 @@ const PING_EVERY = 15_000
 const PONG_TIMEOUT = 8_000
 const QUEUE_MAX_BYTES = 8 << 10
 const QUEUE_MAX_AGE = 10_000
+const FRAME_MAX = 256 << 10 // the gateway accepts messages up to 1 MiB; stay well below
 
 export class TermConnection {
   private ws: WebSocket | null = null
@@ -70,7 +71,7 @@ export class TermConnection {
   send(data: string | Uint8Array): SendResult {
     const bytes = typeof data === 'string' ? new TextEncoder().encode(data) : data
     if (this.isOpen()) {
-      this.ws!.send(bytes)
+      for (let i = 0; i < bytes.length; i += FRAME_MAX) this.ws!.send(bytes.subarray(i, i + FRAME_MAX))
       return 'sent'
     }
     const now = Date.now()

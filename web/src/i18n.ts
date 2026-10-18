@@ -190,6 +190,8 @@ const zh = {
   'audit.target': '对象',
   'audit.ip': '来源地址',
 
+  'term.tooLong': '内容太长了，请改用上传文件发送。',
+  'hosts.sessionsFailed': '会话列表刷新失败，显示的可能不是最新状态。',
   'term.notConnected': '当前未连接，内容已保留，连接恢复后再发送。',
   'error.busy': '服务器正忙，请稍后重试。',
   'error.too_many_windows': '这个会话打开的窗口太多了，请先关闭一些。',
@@ -424,6 +426,8 @@ const en: Record<Key, string> = {
   'audit.target': 'Target',
   'audit.ip': 'Address',
 
+  'term.tooLong': 'This is too long to send. Upload it as a file instead.',
+  'hosts.sessionsFailed': 'Could not refresh sessions; this list may be out of date.',
   'term.notConnected': 'Not connected. Your text is kept; send it once the connection is back.',
   'error.busy': 'The server is busy. Try again in a moment.',
   'error.too_many_windows': 'Too many windows are open for this session. Close some first.',

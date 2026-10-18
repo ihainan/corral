@@ -211,6 +211,14 @@ export function TerminalPage({ id }: { id: string }) {
       if (e.type !== 'keydown') return true
       if (e.isComposing || e.keyCode === 229) return true
       typedChar = e.key.length === 1 && !e.metaKey && !e.ctrlKey ? e.key : null
+      // A physical Ctrl/Alt chord while a key-bar modifier is latched: combine both.
+      if (latched() && e.key.length === 1 && (e.ctrlKey || e.altKey) && !e.metaKey) {
+        const m = activeMods()
+        conn.send(applyMods(e.key, { ctrl: m.ctrl || e.ctrlKey, alt: m.alt || e.altKey, shift: false }))
+        releaseOnce()
+        e.preventDefault()
+        return false
+      }
       const special = specialFor[e.key]
       if (special && latched() && !e.metaKey) {
         const m = activeMods()
@@ -314,7 +322,9 @@ export function TerminalPage({ id }: { id: string }) {
     }
     // One wheel event per line: in mouse-reporting mode xterm sends one report
     // per event regardless of its delta.
-    const wheel = (lines: number) => {
+    // Returns how many lines were dispatched (at most 10 per call; the rest
+    // stays in the caller's accumulator for the next frame).
+    const wheel = (lines: number): number => {
       const target = el.querySelector('.xterm-screen') ?? el
       const r = target.getBoundingClientRect()
       const n = Math.min(Math.abs(lines), 10)
@@ -326,6 +336,7 @@ export function TerminalPage({ id }: { id: string }) {
           }),
         )
       }
+      return n * Math.sign(lines)
     }
     const dist = (t: TouchList) => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY)
     // Any change in the number of fingers starts a fresh gesture.
@@ -366,10 +377,7 @@ export function TerminalPage({ id }: { id: string }) {
       acc -= dy
       const ch = cellHeight()
       const lines = Math.trunc(acc / ch)
-      if (lines !== 0) {
-        acc -= lines * ch
-        wheel(lines)
-      }
+      if (lines !== 0) acc -= wheel(lines) * ch
     }
     const onEnd = (e: TouchEvent) => {
       if (e.touches.length > 0) {
@@ -390,10 +398,7 @@ export function TerminalPage({ id }: { id: string }) {
         if (Math.abs(v) < 0.6) return
         rest += v
         const lines = Math.trunc(rest / ch)
-        if (lines !== 0) {
-          rest -= lines * ch
-          wheel(lines)
-        }
+        if (lines !== 0) rest -= wheel(lines) * ch
         inertia = requestAnimationFrame(step)
       }
       if (Math.abs(v) > 2) inertia = requestAnimationFrame(step)
@@ -483,6 +488,10 @@ export function TerminalPage({ id }: { id: string }) {
     let payload = draft.replace(/\r?\n/g, '\r')
     if (payload && term.modes.bracketedPasteMode) payload = '\x1b[200~' + payload + '\x1b[201~'
     if (submit) payload += '\r'
+    if (new TextEncoder().encode(payload).length > 4 << 20) {
+      toast(t('term.tooLong'), true) // keep the draft; upload it as a file instead
+      return
+    }
     if (conn.send(payload) !== 'sent') {
       toast(t('term.notConnected'), true)
       return
