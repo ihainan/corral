@@ -142,6 +142,32 @@ func TestPushSubscriptionsPerUserAreCapped(t *testing.T) {
 	}
 }
 
+// The cap drops the least recently registered devices, never the one just
+// registered, even when it is an old row taken over from someone else.
+func TestPushSubscriptionCapKeepsTheDeviceJustRegistered(t *testing.T) {
+	setVar(t, &maxPushSubscriptionsPerUser, 3)
+	h := newHarness(t)
+	h.withPush()
+	admin := h.admin()
+	bob := h.member(admin, "bob")
+	mustStatus(t, bob.subscribe(fcm+"shared"), 200, "bob's device") // the oldest row
+	for i := 1; i <= 3; i++ {
+		mustStatus(t, admin.subscribe(fmt.Sprintf("%sa%d", fcm, i)), 200, "subscribe")
+	}
+	mustStatus(t, admin.subscribe(fcm+"shared"), 200, "device moves to the admin")
+	got := h.endpoints(h.userID(admin))
+	if len(got) != 3 || !got[fcm+"shared"] || got[fcm+"a1"] {
+		t.Fatalf("kept %v, want the moved device and the two newest", got)
+	}
+	// Registering again counts as recent: a2 survives, a3 is now the oldest.
+	mustStatus(t, admin.subscribe(fcm+"a2"), 200, "re-register")
+	mustStatus(t, admin.subscribe(fcm+"a4"), 200, "new device")
+	got = h.endpoints(h.userID(admin))
+	if len(got) != 3 || !got[fcm+"a2"] || !got[fcm+"a4"] || !got[fcm+"shared"] {
+		t.Fatalf("kept %v, want a2, a4 and shared", got)
+	}
+}
+
 func TestPortListingOutputIsBounded(t *testing.T) {
 	old := sshx.MaxOutput
 	sshx.MaxOutput = 64 << 10
