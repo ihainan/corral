@@ -77,8 +77,8 @@ func runCommand(ctx context.Context, c *ssh.Client, cmd string, limit int) ([]by
 		defer wg.Done()
 		io.Copy(io.Discard, ch.Stderr())
 	}()
-	// Giving up (or a refused or finished command) asks the host to close,
-	// then waits for the channel to end, however long the host takes.
+	// Giving up (or a refused command) asks the host to close, then waits for
+	// the channel to end, however long the host takes.
 	end := func() {
 		ch.Close()
 		io.Copy(io.Discard, ch)
@@ -114,7 +114,11 @@ func runCommand(ctx context.Context, c *ssh.Client, cmd string, limit int) ([]by
 			break
 		}
 	}
-	end()
+	// Data EOF is not the end: the host may still send the exit status. Wait
+	// for the channel to close on its own; only giving up closes it actively
+	// (the cancel above, or going over the limit).
+	wg.Wait()
+	ch.Close()
 	switch {
 	case over:
 		return buf, ErrOutputTooLarge

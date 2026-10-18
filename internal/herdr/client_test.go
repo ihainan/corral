@@ -59,6 +59,39 @@ func silentHerdr(t *testing.T) *ssh.Client {
 	return dialTest(t, srv)
 }
 
+// Discovery end to end against the test SSH server: the session list, the
+// "not installed" answer, and a host that sends EOF before the exit status.
+func TestDiscoverOverSSH(t *testing.T) {
+	srv := testutil.StartSSHServer(t, "alice", "alice-pass", t.TempDir())
+	missing := false
+	srv.HandleExec(func(cmd string) func(ssh.Channel) {
+		if cmd != DiscoverCommand {
+			return nil
+		}
+		return func(ch ssh.Channel) {
+			if missing {
+				ch.Write([]byte(`{"missing":true}` + "\n"))
+			} else {
+				ch.Write([]byte(`{"sessions":[{"name":"default","default":true,"running":true,"socket_path":"/run/herdr/default.sock"}]}` + "\n"))
+			}
+			ch.CloseWrite()
+			time.Sleep(100 * time.Millisecond) // the exit status comes after EOF
+			ch.SendRequest("exit-status", false, []byte{0, 0, 0, 0})
+		}
+	})
+	c := dialTest(t, srv)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	list, err := Discover(ctx, c)
+	if err != nil || len(list) != 1 || !list[0].Default || !list[0].Running || list[0].SocketPath != "/run/herdr/default.sock" {
+		t.Fatalf("discover: %+v %v", list, err)
+	}
+	missing = true
+	if _, err := Discover(ctx, c); !errors.Is(err, ErrNotInstalled) {
+		t.Fatalf("discover without herdr: %v", err)
+	}
+}
+
 func TestCallTimesOutOnSilentHerdr(t *testing.T) {
 	old := callTimeout
 	callTimeout = 200 * time.Millisecond
