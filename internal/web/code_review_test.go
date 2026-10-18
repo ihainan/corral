@@ -45,13 +45,33 @@ func TestCodeServerArchiveDigestIsChecked(t *testing.T) {
 	})
 }
 
-// The SFTP upload uses a forwarding channel like any other.
-func TestCodeServerUploadCountsAgainstChannels(t *testing.T) {
-	e := newCodeEnv(t, true)
-	setVar(t, &maxFwdChannelsPerConn, 0)
+// An install is bounded in time: when the time is up its connection goes,
+// and the install is ended on the host.
+func TestCodeServerInstallIsBounded(t *testing.T) {
+	e := newCodeEnv(t, false)
+	pidFile := filepath.Join(e.home, "curl.pid")
+	os.WriteFile(filepath.Join(filepath.Dir(e.curlLog), "curl"), []byte("#!/bin/sh\necho $$ >"+pidFile+"\nexec sleep 60\n"), 0o755)
+	setVar(t, &codeInstallTimeout, 2*time.Second)
+	start := time.Now()
 	st, _ := e.start(e.owner)
-	if st["state"] != codeFailed || st["error"] != "busy" {
-		t.Fatalf("upload over the channel limit: %v", st)
+	if st["state"] != codeFailed || st["error"] != "timeout" || time.Since(start) > 20*time.Second {
+		t.Fatalf("install past its time: %v after %v", st, time.Since(start))
+	}
+	b, _ := os.ReadFile(pidFile)
+	pid, _ := strconv.Atoi(strings.TrimSpace(string(b)))
+	t.Cleanup(func() {
+		if pid > 0 {
+			syscall.Kill(pid, syscall.SIGKILL)
+		}
+	})
+	if pid <= 0 || alive(pid) {
+		t.Fatalf("the download still runs on the host (pid %d)", pid)
+	}
+	if left := e.staging(); len(left) != 0 {
+		t.Fatalf("staging left behind: %v", left)
+	}
+	if st := e.h.srv.code.status(e.h.userID(e.owner), e.hostID); st.State != codeFailed {
+		t.Fatalf("state after the bounded install: %+v", st)
 	}
 }
 
@@ -171,8 +191,11 @@ func TestCodeServerInstallLifetime(t *testing.T) {
 func (e *codeEnv) holdTurn(t *testing.T) func() {
 	key := [2]int64{e.h.userID(e.owner), e.hostID}
 	e.h.srv.code.mu.Lock()
-	ticket := e.h.srv.code.enqueue(key)
+	ticket, err := e.h.srv.code.enqueue(key)
 	e.h.srv.code.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := e.h.srv.code.waitTurn(context.Background(), key, ticket); err != nil {
 		t.Fatal(err)
 	}
@@ -319,4 +342,171 @@ func TestCodeServerCancelledInstallIsEndedOnTheHost(t *testing.T) {
 	mustStatus(t, e.admin.do("PUT", fmt.Sprintf("/api/admin/users/%d", ownerID), map[string]any{"disabled": false}), 200, "enable")
 	again := e.h.login("alice")
 	mustStatus(t, again.do("POST", fmt.Sprintf("/api/hosts/%d/code/stop", e.hostID), nil), 200, "stop after cancel")
+}
+
+// A revocation that completes after the request was let in but before its
+// job is registered: the job never starts on the host.
+func TestCodeServerRevokedBeforeRegistration(t *testing.T) {
+	e := newCodeEnv(t, false)
+	ownerID := e.h.userID(e.owner)
+	before := len(e.ran())
+	codeHookBeforeRegister = func() {
+		mustStatus(t, e.admin.do("POST", fmt.Sprintf("/api/admin/users/%d/password", ownerID), map[string]string{"password": "reset-password-1"}), 200, "reset")
+	}
+	t.Cleanup(func() { codeHookBeforeRegister = nil })
+	mustStatus(t, e.owner.do("POST", fmt.Sprintf("/api/hosts/%d/code", e.hostID), nil), 401, "start")
+	codeHookBeforeRegister = nil
+	time.Sleep(300 * time.Millisecond)
+	if ran := e.ran(); len(ran) != before {
+		t.Fatalf("the start ran on the host after the reset: %d commands", len(ran)-before)
+	}
+	e.h.srv.code.mu.Lock()
+	ops, queues, jobs := len(e.h.srv.code.ops), len(e.h.srv.code.queues), len(e.h.srv.code.jobs)
+	e.h.srv.code.mu.Unlock()
+	if ops != 0 || queues != 0 || jobs != 0 {
+		t.Fatalf("left behind: %d turns, %d queues, %d jobs", ops, queues, jobs)
+	}
+}
+
+// An operation whose end the host cannot confirm puts the host in cleanup:
+// starts and stops are refused until the host confirms it, then go ahead,
+// the cleanup first.
+func TestCodeServerUnconfirmedCleanupBlocksTheHost(t *testing.T) {
+	e := newCodeEnv(t, false)
+	curl := filepath.Join(filepath.Dir(e.curlLog), "curl")
+	good, _ := os.ReadFile(curl)
+	pidFile := filepath.Join(e.home, "curl.pid")
+	os.WriteFile(curl, []byte("#!/bin/sh\necho $$ >"+pidFile+"\nexec sleep 60\n"), 0o755)
+	t.Cleanup(func() {
+		if b, _ := os.ReadFile(pidFile); len(b) > 0 {
+			pid, _ := strconv.Atoi(strings.TrimSpace(string(b)))
+			syscall.Kill(pid, syscall.SIGKILL)
+		}
+	})
+	e.setRefuse(func(cmd string) bool { return strings.Contains(cmd, `then : >"$C/cancel"`) }) // the install's cancel
+	setVar(t, &codeInstallTimeout, 2*time.Second)
+	if st, _ := e.start(e.owner); st["state"] != codeFailed || st["error"] != "cleanup_pending" {
+		t.Fatalf("install past its time: %v", st)
+	}
+	key := [2]int64{e.h.userID(e.owner), e.hostID}
+	e.h.srv.code.mu.Lock()
+	delete(e.h.srv.code.jobs, key) // the failed start forgotten: the host itself is in cleanup
+	e.h.srv.code.mu.Unlock()
+	r := e.owner.do("GET", fmt.Sprintf("/api/hosts/%d/code", e.hostID), nil)
+	if st := r.json(); st["state"] != codeCleaningUp || st["error"] != "cleanup_pending" {
+		t.Fatalf("state with an unconfirmed install: %s", r.Body)
+	}
+	if st, _ := e.start(e.owner); st["state"] != codeFailed || st["error"] != "cleanup_pending" {
+		t.Fatalf("start before the cleanup: %v", st)
+	}
+	mustStatus(t, e.owner.do("POST", fmt.Sprintf("/api/hosts/%d/code/stop", e.hostID), nil), 409, "stop before the cleanup")
+	installs := func() int {
+		n := 0
+		for _, c := range e.ran() {
+			if strings.Contains(c, "corral-code-install") {
+				n++
+			}
+		}
+		return n
+	}
+	if n := installs(); n != 1 {
+		t.Fatalf("%d installs ran while the cleanup was pending", n)
+	}
+	// Once the host confirms it, things go ahead.
+	e.setRefuse(nil)
+	os.WriteFile(curl, good, 0o755)
+	setVar(t, &codeInstallTimeout, time.Minute)
+	if st, _ := e.start(e.owner); st["state"] != codeReady {
+		t.Fatalf("start after the cleanup: %v", st)
+	}
+	b, _ := os.ReadFile(pidFile)
+	if pid, _ := strconv.Atoi(strings.TrimSpace(string(b))); pid <= 0 || alive(pid) {
+		t.Fatalf("the first download still runs (pid %d)", pid)
+	}
+	if left := e.staging(); len(left) != 0 {
+		t.Fatalf("staging left behind: %v", left)
+	}
+}
+
+// A stop with no instance known here (as after a gateway restart) stops
+// exactly the instance the host names, never "whatever runs".
+func TestCodeServerStopReadsTheInstanceFromTheHost(t *testing.T) {
+	e := newCodeEnv(t, false)
+	if st, _ := e.start(e.owner); st["state"] != codeReady {
+		t.Fatalf("start: %v", st)
+	}
+	b, _ := os.ReadFile(filepath.Join(e.home, ".local/state/corral/code-server.pid"))
+	f := strings.Fields(string(b))
+	if len(f) != 3 {
+		t.Fatalf("pid file: %q", b)
+	}
+	pid, _ := strconv.Atoi(f[0])
+	key := [2]int64{e.h.userID(e.owner), e.hostID}
+	e.h.srv.code.mu.Lock()
+	delete(e.h.srv.code.jobs, key) // as after a restart
+	e.h.srv.code.mu.Unlock()
+	mustStatus(t, e.owner.do("POST", fmt.Sprintf("/api/hosts/%d/code/stop", e.hostID), nil), 200, "stop")
+	eventually(t, "code-server still running after the stop", func() bool { return !alive(pid) })
+	named := false
+	for _, c := range e.ran() {
+		if strings.Contains(c, "error=target") && strings.Contains(c, f[2]) {
+			named = true
+		}
+		if strings.Contains(c, "FORCE") && strings.Contains(c, "error=target") && !strings.Contains(c, f[2]) {
+			t.Error("a stop without the instance's id ran")
+		}
+	}
+	if !named {
+		t.Fatal("the stop did not name the instance")
+	}
+}
+
+// Starts and stops waiting for a host are bounded, and counted until they end.
+func TestCodeServerOperationsAreBounded(t *testing.T) {
+	e := newCodeEnv(t, false)
+	setVar(t, &maxCodeOpsPerHost, 3)
+	key := [2]int64{e.h.userID(e.owner), e.hostID}
+	count := func() int {
+		e.h.srv.code.mu.Lock()
+		defer e.h.srv.code.mu.Unlock()
+		return e.h.srv.code.ops[key]
+	}
+	release := e.holdTurn(t)
+	s1 := e.owner.doAsync("POST", fmt.Sprintf("/api/hosts/%d/code/stop", e.hostID), nil)
+	s2 := e.owner.doAsync("POST", fmt.Sprintf("/api/hosts/%d/code/stop", e.hostID), nil)
+	eventually(t, "stops not counted", func() bool { return count() == 3 })
+	mustStatus(t, e.owner.do("POST", fmt.Sprintf("/api/hosts/%d/code/stop", e.hostID), nil), 429, "a stop past the limit")
+	mustStatus(t, e.owner.do("POST", fmt.Sprintf("/api/hosts/%d/code", e.hostID), nil), 429, "a start past the limit")
+	release()
+	mustStatus(t, awaitResp(t, s1, "stop"), 200, "stop")
+	mustStatus(t, awaitResp(t, s2, "stop"), 200, "stop")
+	eventually(t, "turns still counted after they ended", func() bool {
+		e.h.srv.code.mu.Lock()
+		defer e.h.srv.code.mu.Unlock()
+		return len(e.h.srv.code.ops) == 0 && len(e.h.srv.code.userOps) == 0 && len(e.h.srv.code.queues) == 0
+	})
+}
+
+// Access revoked right after a job started an instance: the job stops that
+// instance again instead of leaving it running unannounced.
+func TestCodeServerRevokedAfterItsStart(t *testing.T) {
+	e := newCodeEnv(t, false)
+	ownerID := e.h.userID(e.owner)
+	var pid int
+	codeHookAfterStart = func() {
+		pid = e.pid()
+		if err := e.h.srv.store.BumpConnVersion(context.Background(), ownerID, e.hostID); err != nil {
+			t.Error(err)
+		}
+	}
+	t.Cleanup(func() { codeHookAfterStart = nil })
+	st, _ := e.start(e.owner)
+	codeHookAfterStart = nil
+	if st["state"] != codeFailed || st["error"] != "revoked" {
+		t.Fatalf("start revoked after the host answered: %v", st)
+	}
+	if pid <= 0 {
+		t.Fatal("no instance was started")
+	}
+	eventually(t, "the instance started for a revoked job still runs", func() bool { return !alive(pid) })
 }

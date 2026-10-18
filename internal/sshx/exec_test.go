@@ -12,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -55,9 +56,9 @@ func TestOutputIsCapped(t *testing.T) {
 	if err != nil || string(out) != "hello" {
 		t.Fatalf("small output: %q %v", out, err)
 	}
-	out, err = Output(ctx, c, "flood", 1<<20)
-	if !errors.Is(err, ErrOutputTooLarge) || len(out) > 1<<20 {
-		t.Fatalf("flood: %d bytes, %v", len(out), err)
+	r, err := Exec(ctx, c, "flood", 1<<20, ExecOptions{})
+	if !errors.Is(err, ErrOutputTooLarge) || len(r.Out) > 1<<20 || r.Ended {
+		t.Fatalf("flood: %d bytes, %v (ended %v)", len(r.Out), err, r.Ended)
 	}
 	// The connection is still usable afterwards.
 	if out, err := Output(ctx, c, "small", 1<<20); err != nil || string(out) != "hello" {
@@ -87,8 +88,9 @@ func TestExitStatusAfterEOFIsKept(t *testing.T) {
 	if out, err := Output(ctx, c, "ok", 1<<20); err != nil || string(out) != "hello" {
 		t.Fatalf("exit status after EOF: %q %v", out, err)
 	}
-	if _, err := Output(ctx, c, "fail", 1<<20); err == nil || !strings.Contains(err.Error(), "status 3") {
-		t.Fatalf("failing command after EOF: %v", err)
+	var exit *ExitError
+	if r, err := Exec(ctx, c, "fail", 1<<20, ExecOptions{}); !errors.As(err, &exit) || exit.Status != 3 || !r.Ended || string(r.Out) != "hello" {
+		t.Fatalf("failing command after EOF: %v (ended %v)", err, r.Ended)
 	}
 }
 
@@ -114,7 +116,7 @@ func TestExecOptions(t *testing.T) {
 	input := bytes.Repeat([]byte("x"), 3<<20)
 	var mu sync.Mutex
 	var lines []string
-	out, err := Exec(context.Background(), c, "count", 1<<20, ExecOptions{Stdin: bytes.NewReader(input), OnLine: func(l string) {
+	r, err := Exec(context.Background(), c, "count", 1<<20, ExecOptions{Stdin: bytes.NewReader(input), OnLine: func(l string) {
 		mu.Lock()
 		lines = append(lines, l)
 		mu.Unlock()
@@ -122,8 +124,15 @@ func TestExecOptions(t *testing.T) {
 	mu.Lock()
 	got := strings.Join(lines, "|")
 	mu.Unlock()
-	if err != nil || string(out) != "got=3145728\npartial line\n" || got != "got=3145728|partial line" {
-		t.Fatalf("exec: %q %v, lines %q", out, err, got)
+	if err != nil || !r.Ended || string(r.Out) != "got=3145728\npartial line\n" || got != "got=3145728|partial line" {
+		t.Fatalf("exec: %q %v (ended %v), lines %q", r.Out, err, r.Ended, got)
+	}
+
+	// An input that cannot be read is an error, not a shorter input.
+	if _, err := Exec(context.Background(), c, "count", 1<<20, ExecOptions{
+		Stdin: io.MultiReader(bytes.NewReader(input[:1000]), iotest.ErrReader(errors.New("disk gone")))}); err == nil ||
+		!strings.Contains(err.Error(), "disk gone") {
+		t.Fatalf("failing input: %v", err)
 	}
 
 	var released atomic.Int32

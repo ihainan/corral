@@ -16,11 +16,13 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/coder/websocket"
+	"golang.org/x/crypto/ssh"
 
 	"github.com/ihainan/corral/internal/codeserver"
 	"github.com/ihainan/corral/internal/config"
@@ -113,6 +115,23 @@ type codeEnv struct {
 	home    string
 	hostID  int64
 	curlLog string
+
+	mu     sync.Mutex
+	cmds   []string              // every command run on the host
+	refuse func(cmd string) bool // commands the host answers error=pending to
+}
+
+// ran lists the commands run on the host so far.
+func (e *codeEnv) ran() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]string(nil), e.cmds...)
+}
+
+func (e *codeEnv) setRefuse(f func(cmd string) bool) {
+	e.mu.Lock()
+	e.refuse = f
+	e.mu.Unlock()
 }
 
 // newCodeEnv sets up a host whose "remote" commands run here under a
@@ -153,8 +172,22 @@ func newCodeEnv(t *testing.T, upload bool) *codeEnv {
 	e.owner = e.h.member(e.admin, "alice")
 	e.srv = e.h.sshServer(e.home) // SFTP paths start in HOME, as on a real host
 	exe, _ := os.Executable()
-	e.srv.HandleExec(testutil.ShellExec(e.home, func(cmd string) bool { return strings.HasSuffix(cmd, " "+codeserver.Tag) },
-		"CORRAL_FAKE_CODE_SERVER=1", "CORRAL_TEST_BINARY="+exe, "PATH="+bin+":"+os.Getenv("PATH")))
+	shell := testutil.ShellExec(e.home, func(cmd string) bool { return strings.HasSuffix(cmd, " "+codeserver.Tag) },
+		"CORRAL_FAKE_CODE_SERVER=1", "CORRAL_TEST_BINARY="+exe, "PATH="+bin+":"+os.Getenv("PATH"))
+	e.srv.HandleExec(func(cmd string) func(ssh.Channel) {
+		e.mu.Lock()
+		e.cmds = append(e.cmds, cmd)
+		refuse := e.refuse
+		e.mu.Unlock()
+		if refuse != nil && refuse(cmd) {
+			return func(ch ssh.Channel) {
+				ch.Write([]byte("error=pending\n"))
+				ch.CloseWrite()
+				ch.SendRequest("exit-status", false, []byte{0, 0, 0, 1})
+			}
+		}
+		return shell(cmd)
+	})
 	t.Cleanup(e.killCodeServer)
 	e.hostID = e.h.hostFor(e.owner, e.srv.Addr.Port)
 	r := e.owner.do("POST", "/api/sessions", map[string]any{"host_id": e.hostID}) // pins the host key
