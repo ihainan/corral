@@ -9,13 +9,14 @@ import { Dialog, useToast } from '../components/ui'
 // treated as a pop-up) and pointed at VS Code once it is ready.
 
 export interface CodeStatus {
-  state: 'stopped' | 'checking' | 'downloading' | 'uploading' | 'extracting' | 'starting' | 'ready' | 'failed'
+  state: 'stopped' | 'checking' | 'downloading' | 'uploading' | 'extracting' | 'starting' | 'ready' | 'failed' | 'stopping' | 'cleanup'
   error?: string
   message?: string
   url?: string
 }
 
-const working = (s: CodeStatus['state']) => s !== 'ready' && s !== 'failed' && s !== 'stopped'
+// 'cleanup': an earlier operation's end is unconfirmed; nothing more happens until the next start.
+const working = (s: CodeStatus['state']) => s !== 'ready' && s !== 'failed' && s !== 'stopped' && s !== 'cleanup'
 
 function failureText(st: CodeStatus): string {
   const key = 'code.err.' + (st.error ?? '')
