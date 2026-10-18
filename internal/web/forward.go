@@ -259,10 +259,13 @@ func afterFuncWait(ctx context.Context, f func()) (stop func()) {
 		defer close(done)
 		f()
 	})
-	return func() {
-		if !stopAfter() {
-			<-done
-		}
+	var once sync.Once
+	return func() { // safe to call more than once, also concurrently
+		once.Do(func() {
+			if !stopAfter() {
+				<-done
+			}
+		})
 	}
 }
 

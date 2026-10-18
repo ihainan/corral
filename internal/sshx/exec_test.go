@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -57,6 +58,33 @@ func TestOutputIsCapped(t *testing.T) {
 	// The connection is still usable afterwards.
 	if out, err := Output(ctx, c, "small", 1<<20); err != nil || string(out) != "hello" {
 		t.Fatalf("after flood: %q %v", out, err)
+	}
+}
+
+// A host may send EOF first and the exit status a moment later: reading EOF
+// must not close the channel and cut the status off.
+func TestExitStatusAfterEOFIsKept(t *testing.T) {
+	srv := testutil.StartSSHServer(t, "alice", "alice-pass", t.TempDir())
+	srv.HandleExec(func(cmd string) func(ssh.Channel) {
+		return func(ch ssh.Channel) {
+			ch.Write([]byte("hello"))
+			ch.CloseWrite()
+			time.Sleep(200 * time.Millisecond)
+			status := byte(0)
+			if cmd == "fail" {
+				status = 3
+			}
+			ch.SendRequest("exit-status", false, []byte{0, 0, 0, status})
+		}
+	})
+	c := dialTest(t, srv)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if out, err := Output(ctx, c, "ok", 1<<20); err != nil || string(out) != "hello" {
+		t.Fatalf("exit status after EOF: %q %v", out, err)
+	}
+	if _, err := Output(ctx, c, "fail", 1<<20); err == nil || !strings.Contains(err.Error(), "status 3") {
+		t.Fatalf("failing command after EOF: %v", err)
 	}
 }
 

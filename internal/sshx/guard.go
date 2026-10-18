@@ -237,6 +237,11 @@ func newGuardedConn(ch ssh.Channel, reqs <-chan *ssh.Request, network, addr stri
 				r.Reply(false, nil)
 			}
 		}
+		// The channel is gone (closed by the host, or the connection ended):
+		// nothing more can be written, so the write pump stops now instead
+		// of waiting for a caller that may never close (a proxy holding a
+		// half-closed WebSocket, say).
+		g.wrSrc.CloseWithError(net.ErrClosed)
 	}()
 	go func() { // read pump: until EOF or the channel ends, also after Close
 		defer g.done()
