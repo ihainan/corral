@@ -4,8 +4,10 @@ package web
 // streams that outlive their login.
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"testing"
 	"time"
@@ -122,6 +124,63 @@ func TestPortListingCountsAsAStream(t *testing.T) {
 	r := e.owner.do("GET", fmt.Sprintf("/api/hosts/%d/ports", e.hostID), nil)
 	if r.Status != http.StatusServiceUnavailable || r.code() != "busy" {
 		t.Fatalf("port listing over the limit: %d %s", r.Status, r.Body)
+	}
+}
+
+// floodApp streams without end, over a plain response and over a WebSocket.
+var floodApp = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	chunk := bytes.Repeat([]byte("x"), 64<<10)
+	if r.URL.Path == "/ws" {
+		c, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+		if err != nil {
+			return
+		}
+		defer c.CloseNow()
+		for c.Write(r.Context(), websocket.MessageBinary, chunk) == nil {
+		}
+		return
+	}
+	for {
+		if _, err := w.Write(chunk); err != nil {
+			return
+		}
+		http.NewResponseController(w).Flush()
+	}
+})
+
+func (e *fwdEnv) streams() int {
+	e.h.srv.fwd.mu.Lock()
+	defer e.h.srv.fwd.mu.Unlock()
+	return len(e.h.srv.fwd.streams)
+}
+
+// A browser that stopped reading leaves the proxy blocked writing to it.
+// Ending the request (here: signing out) must still end the handler, for a
+// plain streamed response and for a WebSocket.
+func TestRevocationFreesHandlersBlockedOnASlowBrowser(t *testing.T) {
+	for _, path := range []string{"/stream", "/ws"} {
+		t.Run(path, func(t *testing.T) {
+			e := newForwardEnv(t, floodApp)
+			f, _ := e.h.openForward(e.owner, e.id)
+			conn, err := net.Dial("tcp", e.h.ts.Listener.Addr().String())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer conn.Close()
+			req := "GET " + path + " HTTP/1.1\r\nHost: " + f.host + "\r\nCookie: corral_fwd=" + f.cookie + "\r\n"
+			if path == "/ws" {
+				req += "Connection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+			}
+			conn.Write([]byte(req + "\r\n"))
+			conn.(*net.TCPConn).SetReadBuffer(4 << 10)
+			if _, err := conn.Read(make([]byte, 512)); err != nil { // the response starts, then we stop reading
+				t.Fatal(err)
+			}
+			eventually(t, "stream never started", func() bool { return e.streams() == 1 })
+			time.Sleep(time.Second) // every buffer on the way fills up
+			mustStatus(t, e.owner.do("POST", "/api/logout", nil), 200, "logout")
+			eventually(t, "handler stayed blocked writing to a browser that stopped reading", func() bool { return e.streams() == 0 })
+		})
 	}
 }
 
