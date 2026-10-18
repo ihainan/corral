@@ -147,10 +147,15 @@ export function TerminalPage({ id }: { id: string }) {
       })
       .catch(() => {})
 
+    // While replayed output is being parsed, xterm answers old queries found in
+    // it (device attributes, cursor position…). Those answers are stale and
+    // must not reach the host as typing; they are dropped until the replay ends.
+    let replaying = false
     const conn = new TermConnection(id, {
       // RIS (ESC c) travels in the same write queue as the replay that follows,
       // so output still being parsed cannot land after the reset.
       onReset: () => {
+        replaying = true
         try {
           term.write('\x1bc')
           return true
@@ -158,8 +163,9 @@ export function TerminalPage({ id }: { id: string }) {
           return false
         }
       },
-      onData: (d) => {
+      onData: (d, backlog) => {
         try {
+          if (backlog) replaying = true
           term.write(d)
           return true
         } catch {
@@ -170,6 +176,7 @@ export function TerminalPage({ id }: { id: string }) {
       onEnd: setEnd,
       onLatency: setLatency,
       onMeta: (m) => setHerdr(m as HerdrSummary),
+      onLive: () => term.write('', () => (replaying = false)),
     })
     connRef.current = conn
     conn.resize(term.cols, term.rows)
@@ -202,6 +209,7 @@ export function TerminalPage({ id }: { id: string }) {
     const dataSub = term.onData((data) => {
       const typed = typedChar !== null && data === typedChar && !composing
       typedChar = null
+      if (replaying && !typed) return
       if (typed && latched()) {
         conn.send(applyMods(data, activeMods()))
         releaseOnce()

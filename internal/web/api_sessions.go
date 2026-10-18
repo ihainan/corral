@@ -259,6 +259,7 @@ func (s *Server) apiCloseSession(w http.ResponseWriter, r *http.Request) {
 // Server → browser
 //   binary: 8-byte big-endian offset, then raw terminal output
 //   text:   {"t":"hello","offset":N,"reset":bool}  sent first
+//           {"t":"live"}  after the backlog: output from here on is new
 //           {"t":"state","state":"exited|lost|closed","code":N,"reason":"…","offset":N}
 //           (sent after every output byte up to offset)
 //           {"t":"pong","ts":N}
@@ -370,6 +371,11 @@ func (s *Server) apiSessionSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := writeData(start, backlog); err != nil {
+		return
+	}
+	// Replayed output may contain old terminal queries; the browser ignores its
+	// automatic answers until this marker.
+	if err := writeText(map[string]any{"t": "live"}); err != nil {
 		return
 	}
 	if ev != nil {

@@ -17,11 +17,13 @@ export interface Handlers {
   onReset(): boolean // false: could not be taken in (terminal overloaded)
   // Return false if the data could not be taken in (terminal overloaded); the
   // connection then resumes from the start of this chunk.
-  onData(data: Uint8Array): boolean
+  // backlog is true for replayed output sent before the "live" marker.
+  onData(data: Uint8Array, backlog: boolean): boolean
   onStatus(s: Status): void
   onEnd(info: EndInfo): void
   onLatency(ms: number): void
   onMeta?(m: any): void // side information such as herdr state
+  onLive?(): void // the replayed backlog has been delivered
 }
 
 export type SendResult = 'sent' | 'queued' | 'dropped'
@@ -44,6 +46,7 @@ export class TermConnection {
   private ended = false
   private queue: { at: number; data: Uint8Array }[] = []
   private size: { cols: number; rows: number } | null = null
+  private backlog = false
   status: Status = 'connecting'
 
   constructor(private id: string, private h: Handlers) {
@@ -129,6 +132,7 @@ export class TermConnection {
         if (m.t === 'hello') {
           gotHello = true
           this.attempt = 0
+          this.backlog = true
           if ((m.reset || this.offset === null) && !this.h.onReset()) {
             this.drop()
             this.scheduleReconnect(1000)
@@ -146,6 +150,9 @@ export class TermConnection {
           this.drop()
           this.setStatus('ended')
           this.h.onEnd({ state: m.state, code: m.code, reason: m.reason })
+        } else if (m.t === 'live') {
+          this.backlog = false
+          this.h.onLive?.()
         } else if (m.t === 'herdr') {
           this.h.onMeta?.(m)
         } else if (m.t === 'pong') {
@@ -166,7 +173,7 @@ export class TermConnection {
         data = data.subarray(skip)
         start = this.offset
       }
-      if (!this.h.onData(data)) {
+      if (!this.h.onData(data, this.backlog)) {
         // Not taken in: come back for these bytes once the terminal has caught up.
         this.offset = start
         this.drop()
