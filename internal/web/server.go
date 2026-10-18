@@ -57,6 +57,7 @@ type Server struct {
 
 type liveSocket struct {
 	loginHash string
+	hostID    int64 // for pending connects: deleting the host cancels them
 	cancel    context.CancelFunc
 }
 
@@ -336,6 +337,31 @@ func (s *Server) trackPending(userID int64, ls *liveSocket) func() {
 			delete(s.pending, userID)
 		}
 		s.sockMu.Unlock()
+	}
+}
+
+// cancelPendingForHost stops connects to a host that is being deleted.
+func (s *Server) cancelPendingForHost(userID, hostID int64) {
+	s.sockMu.Lock()
+	defer s.sockMu.Unlock()
+	for ls := range s.pending[userID] {
+		if ls.hostID == hostID {
+			ls.cancel()
+		}
+	}
+}
+
+// closeOtherLogins closes sockets and pending connects of every login of the
+// user except keep (after a password change).
+func (s *Server) closeOtherLogins(userID int64, keep string) {
+	s.sockMu.Lock()
+	defer s.sockMu.Unlock()
+	for _, set := range []map[*liveSocket]struct{}{s.socks[userID], s.pending[userID]} {
+		for ls := range set {
+			if ls.loginHash != keep {
+				ls.cancel()
+			}
+		}
 	}
 }
 

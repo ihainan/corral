@@ -46,6 +46,9 @@ type Target struct {
 	// Accept is a fingerprint the user explicitly accepted after a key change.
 	// A different key than the pinned one is allowed only if it matches exactly.
 	Accept string
+	// Verify, when set, makes the trust decision during the handshake, before
+	// any credential is sent; it replaces the Pinned/Accept comparison.
+	Verify func(seen *Pinned) error
 }
 
 // Result carries the key we saw, so the caller can pin it after success.
@@ -106,6 +109,9 @@ func Dial(ctx context.Context, guard *netguard.Guard, t Target) (*Result, error)
 			seen.KeyType = key.Type()
 			seen.KeyData = key.Marshal()
 			seen.Fingerprint = ssh.FingerprintSHA256(key)
+			if t.Verify != nil {
+				return t.Verify(seen)
+			}
 			if t.Pinned != nil && !bytes.Equal(t.Pinned.KeyData, seen.KeyData) {
 				if t.Accept != "" && t.Accept == seen.Fingerprint {
 					replaced = true
@@ -126,7 +132,13 @@ func Dial(ctx context.Context, guard *netguard.Guard, t Target) (*Result, error)
 	if dl, ok := ctx.Deadline(); ok {
 		_ = conn.SetDeadline(dl)
 	}
+	// Cancelling (sign-out, disable) during the handshake closes the socket at once.
+	stop := context.AfterFunc(ctx, func() { conn.Close() })
 	c, chans, reqs, err := ssh.NewClientConn(conn, net.JoinHostPort(t.Address, strconv.Itoa(t.Port)), cfg)
+	if !stop() && err == nil {
+		c.Close()
+		return nil, ctx.Err()
+	}
 	if err != nil {
 		conn.Close()
 		var hk *HostKeyChangedError

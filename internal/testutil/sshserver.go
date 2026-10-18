@@ -16,39 +16,26 @@ import (
 )
 
 type SSHServer struct {
-	Addr    *net.TCPAddr
-	HostKey ssh.PublicKey
-	ln      net.Listener
-	mu      sync.Mutex
-	conns   []net.Conn
-	Execs   []string
+	Addr         *net.TCPAddr
+	HostKey      ssh.PublicKey
+	ln           net.Listener
+	mu           sync.Mutex
+	conns        []net.Conn
+	Execs        []string
+	cfg          *ssh.ServerConfig
+	user, pass   string
+	AuthAttempts int // password checks received, to prove credentials were (not) sent
 }
 
 // StartSSHServer accepts user/password and serves until the test ends.
 func StartSSHServer(t *testing.T, user, password, sftpRoot string) *SSHServer {
 	t.Helper()
-	_, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	signer, err := ssh.NewSignerFromKey(priv)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg := &ssh.ServerConfig{
-		PasswordCallback: func(c ssh.ConnMetadata, pw []byte) (*ssh.Permissions, error) {
-			if c.User() == user && string(pw) == password {
-				return nil, nil
-			}
-			return nil, errAuth
-		},
-	}
-	cfg.AddHostKey(signer)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := &SSHServer{Addr: ln.Addr().(*net.TCPAddr), HostKey: signer.PublicKey(), ln: ln}
+	s := &SSHServer{Addr: ln.Addr().(*net.TCPAddr), ln: ln, user: user, pass: password}
+	s.RotateHostKey()
 	t.Cleanup(s.Close)
 	go func() {
 		for {
@@ -59,10 +46,47 @@ func StartSSHServer(t *testing.T, user, password, sftpRoot string) *SSHServer {
 			s.mu.Lock()
 			s.conns = append(s.conns, c)
 			s.mu.Unlock()
+			s.mu.Lock()
+			cfg := s.cfg
+			s.mu.Unlock()
 			go s.serve(c, cfg, sftpRoot)
 		}
 	}()
 	return s
+}
+
+// RotateHostKey makes the server present a new host key to later connections.
+func (s *SSHServer) RotateHostKey() {
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		panic(err)
+	}
+	signer, err := ssh.NewSignerFromKey(priv)
+	if err != nil {
+		panic(err)
+	}
+	cfg := &ssh.ServerConfig{
+		PasswordCallback: func(c ssh.ConnMetadata, pw []byte) (*ssh.Permissions, error) {
+			s.mu.Lock()
+			s.AuthAttempts++
+			s.mu.Unlock()
+			if c.User() == s.user && string(pw) == s.pass {
+				return nil, nil
+			}
+			return nil, errAuth
+		},
+	}
+	cfg.AddHostKey(signer)
+	s.mu.Lock()
+	s.cfg = cfg
+	s.HostKey = signer.PublicKey()
+	s.mu.Unlock()
+}
+
+func (s *SSHServer) Attempts() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.AuthAttempts
 }
 
 type authErr struct{}

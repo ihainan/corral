@@ -244,7 +244,9 @@ func (s *Service) CheckLogin(ctx context.Context, hash string) (*store.User, err
 	if err != nil {
 		return nil, ErrUnauthorized
 	}
-	if u.Disabled {
+	// A login older than the current password is void, even if deleting it
+	// after a password change or reset did not happen.
+	if u.Disabled || ls.CreatedAt < u.PasswordChangedAt {
 		_ = s.store.DeleteLoginSession(ctx, hash)
 		return nil, ErrUnauthorized
 	}
@@ -316,21 +318,28 @@ func (s *Service) ResetPassword(ctx context.Context, userID int64, next string) 
 	if err != nil {
 		return err
 	}
-	if err := s.store.SetPassword(ctx, userID, hash); err != nil {
+	if err := s.store.ResetPasswordTx(ctx, userID, hash); err != nil {
 		return err
 	}
-	return s.EndAccess(ctx, userID)
+	s.CloseConnections(userID)
+	return nil
 }
 
 // EndAccess signs a user out everywhere and closes everything they had open.
+// It keeps going if the caller's request is cancelled: half-revoked access is
+// worse than a slow response.
 func (s *Service) EndAccess(ctx context.Context, userID int64) error {
-	if err := s.store.DeleteUserLoginSessions(ctx, userID, ""); err != nil {
-		return err
-	}
+	err := s.store.DeleteUserLoginSessions(context.WithoutCancel(ctx), userID, "")
+	s.CloseConnections(userID)
+	return err
+}
+
+// CloseConnections ends a user's terminals, sockets and pending connects. The
+// logins themselves must already be gone (or the account disabled).
+func (s *Service) CloseConnections(userID int64) {
 	if s.OnUserGone != nil {
 		s.OnUserGone(userID)
 	}
-	return nil
 }
 
 // CreateInvite returns the raw invite token; only its hash is stored.

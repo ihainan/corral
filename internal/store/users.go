@@ -148,6 +148,29 @@ func (s *Store) ChangePasswordIf(ctx context.Context, userID int64, verifiedHash
 	if _, err := tx.ExecContext(ctx, `DELETE FROM login_sessions WHERE user_id = ? AND token_hash != ?`, userID, keepSession); err != nil {
 		return err
 	}
+	// The browser that changed the password stays signed in; its login counts
+	// as created now so it passes the "older than the password" check.
+	if _, err := tx.ExecContext(ctx, `UPDATE login_sessions SET created_at = ? WHERE token_hash = ?`, s.unix(), keepSession); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// ResetPasswordTx sets a new password and removes every login of the user in
+// one transaction (the admin reset path).
+func (s *Store) ResetPasswordTx(ctx context.Context, userID int64, hash string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := affectedOrNotFound(tx.ExecContext(ctx,
+		`UPDATE users SET password_hash = ?, password_changed_at = ?, failed_logins = 0, locked_until = 0 WHERE id = ?`, hash, s.unix(), userID)); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM login_sessions WHERE user_id = ?`, userID); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
@@ -173,6 +196,11 @@ func (s *Store) UpdateUserGuarded(ctx context.Context, id int64, role *string, d
 		}
 		if err := affectedOrNotFound(tx.ExecContext(ctx, `UPDATE users SET disabled = ? WHERE id = ?`, v, id)); err != nil {
 			return err
+		}
+		if *disabled {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM login_sessions WHERE user_id = ?`, id); err != nil {
+				return err
+			}
 		}
 	}
 	var admins int

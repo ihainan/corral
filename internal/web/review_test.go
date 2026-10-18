@@ -301,3 +301,61 @@ func TestSocketEndsWhenLoginExpires(t *testing.T) {
 		}
 	}
 }
+
+// Round 3 -------------------------------------------------------------------
+
+func TestChangedHostKeyRefusedBeforeCredentialsAreSent(t *testing.T) {
+	h := newHarness(t)
+	admin := h.admin()
+	srv := h.sshServer(t.TempDir())
+	id := h.hostFor(admin, srv.Addr.Port)
+	mustStatus(t, admin.do("POST", "/api/sessions", map[string]any{"host_id": id}), 201, "first connect pins")
+	srv.RotateHostKey()
+	before := srv.Attempts()
+	r := admin.do("POST", "/api/sessions", map[string]any{"host_id": id})
+	if r.code() != "host_key_changed" {
+		t.Fatalf("changed key accepted: %d %s", r.Status, r.Body)
+	}
+	if srv.Attempts() != before {
+		t.Fatal("password was sent to a host with an unexpected key")
+	}
+	got := r.json()["extra"].(map[string]any)["got"].(string)
+	// A wrong confirmation is still refused, a matching one re-pins.
+	r = admin.do("POST", "/api/sessions", map[string]any{"host_id": id, "accept_fingerprint": "SHA256:not-it"})
+	if r.code() != "host_key_changed" {
+		t.Fatalf("wrong confirmation accepted: %d %s", r.Status, r.Body)
+	}
+	mustStatus(t, admin.do("POST", "/api/sessions", map[string]any{"host_id": id, "accept_fingerprint": got}), 201, "accepted key")
+	mustStatus(t, admin.do("POST", "/api/sessions", map[string]any{"host_id": id}), 201, "new key now pinned")
+}
+
+func TestStaleHashCannotChangePasswordEvenWithLiveLogin(t *testing.T) {
+	st, _ := store.OpenMemory()
+	defer st.Close()
+	ctx := context.Background()
+	old, _ := auth.HashPassword("old-password-1")
+	u, _ := st.CreateUser(ctx, "frank", "", old, store.RoleMember)
+	_ = st.CreateLoginSession(ctx, "login1", u.ID, "", "")
+	newer, _ := auth.HashPassword("newer-password-1")
+	_ = st.SetPassword(ctx, u.ID, newer) // someone changed it meanwhile; login still exists
+	mine, _ := auth.HashPassword("mine-password-1")
+	if err := st.ChangePasswordIf(ctx, u.ID, old, mine, "login1"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("change against a stale hash applied: %v", err)
+	}
+}
+
+func TestLoginsOlderThanPasswordAreVoid(t *testing.T) {
+	st, _ := store.OpenMemory()
+	defer st.Close()
+	ctx := context.Background()
+	svc := auth.NewService(st, time.Hour, 24*time.Hour)
+	pw, _ := auth.HashPassword("gina-password-1")
+	u, _ := st.CreateUser(ctx, "gina", "", pw, store.RoleMember)
+	tok, hash, _ := auth.NewToken()
+	_ = st.CreateLoginSession(ctx, hash, u.ID, "", "")
+	time.Sleep(1100 * time.Millisecond)
+	_ = st.SetPassword(ctx, u.ID, pw) // password_changed_at moves past the login
+	if _, _, err := svc.Authenticate(ctx, tok); err == nil {
+		t.Fatal("a login older than the password still works")
+	}
+}

@@ -104,31 +104,45 @@ func (s *Server) apiOpenSession(w http.ResponseWriter, r *http.Request) {
 		}
 		t.Password, t.PrivateKey, t.Passphrase = sec.Password, []byte(sec.PrivateKey), []byte(sec.Passphrase)
 	}
-	// Only a host with no key on record is trusted on first use; a failed lookup
-	// is an error, not "first use".
-	k, err := s.store.HostKey(r.Context(), u.ID, h.ID)
-	switch {
-	case err == nil:
-		t.Pinned = &sshx.Pinned{KeyType: k.KeyType, KeyData: k.KeyData, Fingerprint: k.Fingerprint}
-	case !errors.Is(err, store.ErrNotFound):
-		s.internalError(w, r, err)
-		return
-	}
-	t.Accept = b.AcceptFingerprint
-
 	res, err := s.terms.Reserve(u.ID)
 	if err != nil {
 		writeError(w, http.StatusTooManyRequests, "too_many_sessions", "close some sessions first")
 		return
 	}
-	// Revoking access (disable, sign-out) cancels this while it is still connecting.
-	ctx, cancel := context.WithCancel(r.Context())
+	defer res.Release() // no-op once Start took it
+	// The whole setup ends with the login at the latest, and revoking access
+	// (disable, sign-out, password change, host deletion) cancels it.
+	expiry, err := s.auth.LoginExpiry(r.Context(), loginHash(r))
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "please sign in")
+		return
+	}
+	ctx, cancel := context.WithDeadline(r.Context(), expiry)
 	defer cancel()
-	untrack := s.trackPending(u.ID, &liveSocket{loginHash: loginHash(r), cancel: cancel})
+	untrack := s.trackPending(u.ID, &liveSocket{loginHash: loginHash(r), hostID: h.ID, cancel: cancel})
 	defer untrack()
+	// Registered first, then checked: a revocation in between is caught either way.
+	if _, err := s.auth.CheckLogin(ctx, loginHash(r)); err != nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "please sign in")
+		return
+	}
+
+	// The trust decision runs inside the handshake, before credentials are sent,
+	// against the key on record at that moment.
+	accepted := false
+	t.Verify = func(seen *sshx.Pinned) error {
+		ok, wasReplaced, err := s.trustHostKey(ctx, h, seen, b.AcceptFingerprint)
+		if err != nil {
+			return err
+		}
+		accepted = wasReplaced
+		if !ok {
+			return errHostKeyRejected
+		}
+		return nil
+	}
 	dialed, err := sshx.Dial(ctx, s.guard, t)
 	if err != nil {
-		res.Release()
 		var hk *sshx.HostKeyChangedError
 		switch {
 		case errors.As(err, &hk):
@@ -141,6 +155,8 @@ func (s *Server) apiOpenSession(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, sshx.ErrAuthFailed):
 			s.audit(r, "session.auth_failed", hostTarget(h), nil)
 			writeError(w, http.StatusUnprocessableEntity, "auth_failed", "the host rejected the user name or credential")
+		case ctx.Err() != nil:
+			writeError(w, http.StatusUnauthorized, "unauthorized", "please sign in")
 		default:
 			reason := failureReason(err)
 			s.audit(r, "session.connect_failed", hostTarget(h), map[string]any{"reason": reason})
@@ -148,21 +164,11 @@ func (s *Server) apiOpenSession(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	if err := s.recordHostKey(r, h, t.Pinned, dialed); err != nil {
-		res.Release()
-		dialed.Client.Close()
-		var hk *sshx.HostKeyChangedError
-		if errors.As(err, &hk) {
-			writeErrorExtra(w, http.StatusConflict, "host_key_changed", "the host key has changed",
-				map[string]any{"expected": hk.Expected, "got": hk.Got})
-			return
-		}
-		s.internalError(w, r, err)
-		return
+	if accepted {
+		s.audit(r, "hostkey.accept", hostTarget(h), map[string]any{"fingerprint": dialed.SeenKey.Fingerprint})
 	}
 	// Last check before anything runs on the host.
 	if _, err := s.auth.CheckLogin(ctx, loginHash(r)); err != nil || ctx.Err() != nil {
-		res.Release()
 		dialed.Client.Close()
 		writeError(w, http.StatusUnauthorized, "unauthorized", "please sign in")
 		return
@@ -171,15 +177,24 @@ func (s *Server) apiOpenSession(w http.ResponseWriter, r *http.Request) {
 		Cols: b.Cols, Rows: b.Rows, Persistence: h.Persistence, TmuxSession: h.TmuxSession,
 	})
 	if err != nil {
+		if ctx.Err() != nil {
+			writeError(w, http.StatusUnauthorized, "unauthorized", "please sign in")
+			return
+		}
 		writeError(w, http.StatusBadGateway, "start_failed", "connected, but could not start a shell")
 		return
 	}
-	// Access may have been revoked while we were connecting. The session is
-	// registered first, then checked, so a concurrent revocation either sees it
-	// (and closes it) or this check sees the revocation.
-	if _, err := s.auth.CheckLogin(r.Context(), loginHash(r)); err != nil {
+	// Access or the host may have gone while we were starting. The session is
+	// registered first, then checked, so a concurrent revocation or deletion
+	// either sees it (and closes it) or this check sees the change.
+	if _, err := s.auth.CheckLogin(ctx, loginHash(r)); err != nil {
 		sess.Close("access revoked")
 		writeError(w, http.StatusUnauthorized, "unauthorized", "please sign in")
+		return
+	}
+	if _, err := s.store.Host(ctx, u.ID, h.ID); err != nil {
+		sess.Close("host deleted")
+		writeError(w, http.StatusNotFound, "not_found", "no such host")
 		return
 	}
 	_ = s.store.TouchHostConnected(r.Context(), u.ID, h.ID)
@@ -187,35 +202,38 @@ func (s *Server) apiOpenSession(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, sess.Info())
 }
 
-// recordHostKey pins the key seen on first use, or swaps in the key the user
-// accepted. If another request recorded a key meanwhile, the stored key must be
-// exactly the one we saw; otherwise the connection is refused.
-func (s *Server) recordHostKey(r *http.Request, h *store.Host, pinned *sshx.Pinned, d *sshx.Result) error {
-	ctx := r.Context()
-	seen := toHostKey(d.SeenKey)
-	switch {
-	case pinned == nil:
-		if err := s.store.PinHostKey(ctx, h.OwnerID, h.ID, seen); err != nil && !errors.Is(err, store.ErrNotFound) {
-			return err
+var errHostKeyRejected = errors.New("host key rejected")
+
+// trustHostKey decides, during the handshake, whether the presented key is
+// trusted. With no key on record it is pinned (trust on first use). A different
+// key is accepted only when it is exactly the fingerprint the user confirmed,
+// and then replaces the record atomically. Concurrent requests resolve through
+// the conditional writes: whatever ends up stored must equal what we saw.
+func (s *Server) trustHostKey(ctx context.Context, h *store.Host, seen *sshx.Pinned, accept string) (ok, replaced bool, err error) {
+	want := toHostKey(seen)
+	for attempt := 0; attempt < 3; attempt++ {
+		cur, err := s.store.HostKey(ctx, h.OwnerID, h.ID)
+		switch {
+		case errors.Is(err, store.ErrNotFound):
+			if err := s.store.PinHostKey(ctx, h.OwnerID, h.ID, want); err != nil && !errors.Is(err, store.ErrNotFound) {
+				return false, false, err
+			}
+			continue // re-read: we or a concurrent request pinned something
+		case err != nil:
+			return false, false, err
 		}
-	case d.Replaced:
-		if err := s.store.ReplaceHostKey(ctx, h.OwnerID, h.ID, pinned.Fingerprint, seen); err != nil && !errors.Is(err, store.ErrNotFound) {
-			return err
+		if bytes.Equal(cur.KeyData, want.KeyData) {
+			return true, replaced, nil
 		}
-	default:
-		return nil // matched the pinned key
+		if accept == "" || accept != want.Fingerprint {
+			return false, false, &sshx.HostKeyChangedError{Expected: cur.Fingerprint, Got: want.Fingerprint}
+		}
+		if err := s.store.ReplaceHostKey(ctx, h.OwnerID, h.ID, cur.Fingerprint, want); err != nil && !errors.Is(err, store.ErrNotFound) {
+			return false, false, err
+		}
+		replaced = true
 	}
-	k, err := s.store.HostKey(ctx, h.OwnerID, h.ID)
-	if err != nil {
-		return err
-	}
-	if !bytes.Equal(k.KeyData, seen.KeyData) {
-		return &sshx.HostKeyChangedError{Expected: k.Fingerprint, Got: seen.Fingerprint}
-	}
-	if d.Replaced {
-		s.audit(r, "hostkey.accept", hostTarget(h), map[string]any{"fingerprint": seen.Fingerprint})
-	}
-	return nil
+	return false, false, errors.New("host key record kept changing")
 }
 
 func toHostKey(p *sshx.Pinned) *store.HostKey {
@@ -450,61 +468,85 @@ var uploadExt = map[string]string{
 
 var errTooLarge = errors.New("file too large")
 
-// openSFTP starts the sftp subsystem on its own channel so every exit path can
-// close that channel (pkg/sftp's NewClient leaks it when the subsystem is
-// refused). Setup has a time limit, stderr is drained so it cannot stall the
-// channel, and closing shuts the channel first so blocked reads return.
+// openSFTP starts the sftp subsystem on its own channel with hard bounds that
+// do not depend on the host cooperating:
+//   - opening the channel and the subsystem handshake share one time limit;
+//     on timeout we return at once and a background goroutine cleans up;
+//   - the sftp client talks through local pipes, so closing them unblocks it
+//     immediately even if the host never answers;
+//   - stderr is read continuously so it cannot fill the channel window.
 func openSFTP(c *ssh.Client) (*sftp.Client, func(), error) {
-	sess, err := c.NewSession()
-	if err != nil {
-		return nil, nil, err
-	}
-	sess.Stderr = io.Discard
-	pw, err := sess.StdinPipe()
-	if err != nil {
-		sess.Close()
-		return nil, nil, err
-	}
-	pr, err := sess.StdoutPipe()
-	if err != nil {
-		sess.Close()
-		return nil, nil, err
-	}
 	type result struct {
+		sess   *ssh.Session
 		client *sftp.Client
+		close  func()
 		err    error
 	}
 	done := make(chan result, 1)
 	go func() {
-		if err := sess.RequestSubsystem("sftp"); err != nil {
+		sess, err := c.NewSession()
+		if err != nil {
 			done <- result{err: err}
 			return
 		}
-		client, err := sftp.NewClientPipe(pr, pw)
-		done <- result{client, err}
-	}()
-	var res result
-	select {
-	case res = <-done:
-	case <-time.After(15 * time.Second):
-		sess.Close() // unblocks the setup goroutine
-		res = <-done
-		if res.client != nil {
-			res.client.Close()
+		fail := func(err error) { sess.Close(); done <- result{err: err} }
+		chIn, err := sess.StdinPipe()
+		if err != nil {
+			fail(err)
+			return
 		}
+		chOut, err := sess.StdoutPipe()
+		if err != nil {
+			fail(err)
+			return
+		}
+		chErr, err := sess.StderrPipe()
+		if err != nil {
+			fail(err)
+			return
+		}
+		go io.Copy(io.Discard, chErr)
+		if err := sess.RequestSubsystem("sftp"); err != nil {
+			fail(err)
+			return
+		}
+		// Local pipes between the sftp client and the channel.
+		outR, outW := io.Pipe()
+		inR, inW := io.Pipe()
+		go func() { _, err := io.Copy(outW, chOut); outW.CloseWithError(err) }()
+		go func() { _, err := io.Copy(chIn, inR); inR.CloseWithError(err) }()
+		var once sync.Once
+		closeAll := func() {
+			once.Do(func() {
+				outR.CloseWithError(io.ErrClosedPipe)
+				inW.CloseWithError(io.ErrClosedPipe)
+				sess.Close()
+			})
+		}
+		client, err := sftp.NewClientPipe(outR, inW)
+		if err != nil {
+			closeAll()
+			done <- result{err: err}
+			return
+		}
+		done <- result{sess: sess, client: client, close: func() { closeAll(); go client.Close() }}
+	}()
+	t := time.NewTimer(15 * time.Second)
+	defer t.Stop()
+	select {
+	case r := <-done:
+		if r.err != nil {
+			return nil, nil, r.err
+		}
+		return r.client, r.close, nil
+	case <-t.C:
+		go func() { // the host may still answer later; tidy up whenever it does
+			if r := <-done; r.close != nil {
+				r.close()
+			}
+		}()
 		return nil, nil, errors.New("file transfer did not start in time")
 	}
-	if res.err != nil {
-		sess.Close()
-		return nil, nil, res.err
-	}
-	var once sync.Once
-	return res.client, func() {
-		once.Do(func() {
-			sess.Close()
-			go res.client.Close() // returns once its reader sees the closed channel
-		})
-	}, nil
 }
 
 func (s *Server) apiUpload(w http.ResponseWriter, r *http.Request) {

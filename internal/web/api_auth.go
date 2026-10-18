@@ -169,14 +169,8 @@ func (s *Server) apiChangePassword(w http.ResponseWriter, r *http.Request) {
 		s.writeAccountError(w, r, err)
 		return
 	}
-	// Other browsers are signed out; their terminal sockets go with them.
-	s.sockMu.Lock()
-	for ls := range s.socks[u.ID] {
-		if ls.loginHash != keep {
-			ls.cancel()
-		}
-	}
-	s.sockMu.Unlock()
+	// Other browsers are signed out; their sockets and pending connects go with them.
+	s.closeOtherLogins(u.ID, keep)
 	s.audit(r, "password.change", u.Username, nil)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
@@ -326,10 +320,8 @@ func (s *Server) apiAdminUpdateUser(w http.ResponseWriter, r *http.Request) {
 	}
 	if b.Disabled != nil {
 		if *b.Disabled {
-			if err := s.auth.EndAccess(r.Context(), id); err != nil {
-				s.internalError(w, r, err)
-				return
-			}
+			// Logins were removed in the same transaction; now close what is open.
+			s.auth.CloseConnections(id)
 			s.audit(r, "user.disable", target.Username, nil)
 		} else {
 			s.audit(r, "user.enable", target.Username, nil)
