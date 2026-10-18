@@ -240,22 +240,47 @@ func (s *Server) apiCreateHost(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, created)
 }
 
-func (s *Server) apiUpdateHost(w http.ResponseWriter, r *http.Request) {
-	u := currentUser(r)
-	h, ok := s.ownedHost(w, r)
+// hostTurn runs f with the host's turn held (see underHostGate): edits do not
+// interleave with opens, code-server starts or forwarding dials of the host.
+func (s *Server) hostTurn(w http.ResponseWriter, r *http.Request, f func(w http.ResponseWriter)) {
+	id, ok := pathID(r)
 	if !ok {
+		writeError(w, http.StatusNotFound, "not_found", "no such host")
 		return
 	}
+	resp, err := s.underHostGate(r.Context(), currentUser(r).ID, id, f)
+	switch {
+	case errors.Is(err, errGateBusy):
+		writeError(w, http.StatusTooManyRequests, "busy", "this host is busy; try again in a moment")
+	case err == nil:
+		resp.writeTo(w)
+	}
+}
+
+func (s *Server) apiUpdateHost(w http.ResponseWriter, r *http.Request) {
 	var b hostBody
 	if err := readJSON(r, &b); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
-	if err := s.validateHost(r.Context(), u, &b); err != nil {
+	s.hostTurn(w, r, func(w http.ResponseWriter) { s.updateHost(w, r, &b) })
+}
+
+func (s *Server) updateHost(w http.ResponseWriter, r *http.Request, b *hostBody) {
+	u := currentUser(r)
+	h, ok := s.ownedHost(w, r)
+	if !ok {
+		return
+	}
+	if err := s.validateHost(r.Context(), u, b); err != nil {
 		writeFieldError(w, err)
 		return
 	}
 	endpointChanged := h.Address != b.Address || h.Port != b.Port
+	// Anything that changes what a connection to the host is: connections
+	// made before are then neither reused nor borrowed nor kept in the pool.
+	connChanged := endpointChanged || h.Username != b.Username || h.Auth != b.Auth ||
+		(b.Auth == store.AuthKey && !sameID(h.CredentialID, b.CredentialID)) || (b.Auth == store.AuthPassword && b.Password != "")
 	oldCred := h.CredentialID
 	oldAuth := h.Auth
 	h.Name, h.Address, h.Port, h.Username, h.Persistence, h.TmuxSession = b.Name, b.Address, b.Port, b.Username, b.Persistence, b.TmuxSession
@@ -295,7 +320,7 @@ func (s *Server) apiUpdateHost(w http.ResponseWriter, r *http.Request) {
 			h.CredentialID = &id
 		}
 	}
-	if err := s.store.UpdateHost(r.Context(), h); err != nil {
+	if err := s.store.UpdateHost(r.Context(), h, connChanged); err != nil {
 		s.internalError(w, r, err)
 		return
 	}
@@ -303,23 +328,33 @@ func (s *Server) apiUpdateHost(w http.ResponseWriter, r *http.Request) {
 		_ = s.store.DeleteCredential(r.Context(), u.ID, *dropCred)
 	}
 	if endpointChanged {
-		// A different machine must be verified afresh, and nothing open
-		// through the old address may carry on.
-		_ = s.store.ForgetHostKey(r.Context(), u.ID, h.ID)
+		_ = s.store.ForgetHostKey(r.Context(), u.ID, h.ID) // a different machine is verified afresh
+	}
+	if connChanged {
+		// Nothing open through the old settings carries on.
 		s.closeHostForwards(u.ID, h.ID)
 		s.forgetHostCode(u.ID, h.ID)
 	}
-	s.audit(r, "host.update", hostTarget(h), map[string]any{"endpoint_changed": endpointChanged})
+	s.audit(r, "host.update", hostTarget(h), map[string]any{"endpoint_changed": endpointChanged, "connection_changed": connChanged})
 	updated, _ := s.store.Host(r.Context(), u.ID, h.ID)
 	writeJSON(w, http.StatusOK, updated)
 }
 
+func sameID(a, b *int64) bool { return (a == nil && b == nil) || (a != nil && b != nil && *a == *b) }
+
 func (s *Server) apiDeleteHost(w http.ResponseWriter, r *http.Request) {
+	s.hostTurn(w, r, func(w http.ResponseWriter) { s.deleteHost(w, r) })
+}
+
+func (s *Server) deleteHost(w http.ResponseWriter, r *http.Request) {
 	u := currentUser(r)
 	h, ok := s.ownedHost(w, r)
 	if !ok {
 		return
 	}
+	// VS Code left running on the host is stopped (best effort, after the
+	// delete, with what is needed to reach the host read now).
+	stopCode := s.codeStopperFor(r.Context(), h)
 	if err := s.store.DeleteHost(r.Context(), u.ID, h.ID); err != nil {
 		s.internalError(w, r, err)
 		return
@@ -333,6 +368,9 @@ func (s *Server) apiDeleteHost(w http.ResponseWriter, r *http.Request) {
 		_ = s.store.DeleteCredential(r.Context(), u.ID, *h.CredentialID)
 	}
 	s.audit(r, "host.delete", hostTarget(h), nil)
+	if stopCode != nil {
+		stopCode()
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 

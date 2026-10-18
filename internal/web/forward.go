@@ -395,12 +395,23 @@ func (s *Server) forwardLoginRedirect(w http.ResponseWriter, r *http.Request, ta
 // VS Code (code forwards and setting up code-server) always gets a
 // connection of its own: it is long-lived and heavy, and a terminal must not
 // depend on it.
+//
+// Only connections made with the host's current settings are used: a
+// terminal opened before an edit is not borrowed, and a pooled connection of
+// an older connection version is replaced.
 func (s *Server) forwardConn(ctx context.Context, f *store.Forward) (*fwdConn, error) {
+	h, err := s.store.Host(ctx, f.OwnerID, f.HostID)
+	if err != nil {
+		return nil, err
+	}
+	cfg := hostConfig(h)
 	for _, sess := range s.terms.Running(f.OwnerID, f.HostID) {
 		if f.Kind == store.KindCode {
 			break
 		}
-		return s.fwd.borrow(sess.Client())
+		if sess.HostConfig == cfg {
+			return s.fwd.borrow(sess.Client())
+		}
 	}
 	key := [2]int64{f.OwnerID, f.HostID}
 	for range 3 {
@@ -409,7 +420,7 @@ func (s *Server) forwardConn(ctx context.Context, f *store.Forward) (*fwdConn, e
 		dctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 		// Registered before the host and owner are read: revoking either from
 		// now on cancels this dial and keeps its connection out of the pool.
-		fc, d, lead, err := s.fwd.acquire(key, cancel)
+		fc, d, lead, err := s.fwd.acquire(key, h.ConnVersion, cancel)
 		switch {
 		case err != nil:
 			cancel()
@@ -418,9 +429,9 @@ func (s *Server) forwardConn(ctx context.Context, f *store.Forward) (*fwdConn, e
 			cancel()
 			return fc, nil
 		case lead:
-			client, err := s.dialForward(dctx, f.OwnerID, f.HostID)
+			client, version, err := s.dialForward(dctx, f.OwnerID, f.HostID)
 			cancel()
-			return s.fwd.finishDial(d, client, err)
+			return s.fwd.finishDial(d, client, version, err)
 		}
 		cancel()
 		select {
@@ -435,32 +446,43 @@ func (s *Server) forwardConn(ctx context.Context, f *store.Forward) (*fwdConn, e
 	return nil, errFwdBusy // the connection kept going away as soon as it was opened
 }
 
-func (s *Server) dialForward(ctx context.Context, ownerID, hostID int64) (*ssh.Client, error) {
+// dialForward connects with the host's settings, credential and pinned key
+// read together, with the host's turn held so an edit cannot change them
+// halfway. It returns the connection version it connected with.
+func (s *Server) dialForward(ctx context.Context, ownerID, hostID int64) (*ssh.Client, int64, error) {
+	release, err := s.hostGate.acquire(ctx, [2]int64{ownerID, hostID})
+	if errors.Is(err, errGateBusy) {
+		return nil, 0, errFwdBusy
+	}
+	if err != nil {
+		return nil, 0, err
+	}
+	defer release()
 	if !s.ownerActive(ctx, ownerID) {
-		return nil, errFwdRevoked
+		return nil, 0, errFwdRevoked
 	}
 	h, err := s.store.Host(ctx, ownerID, hostID)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if h.Auth == store.AuthAsk || h.CredentialID == nil {
-		return nil, errors.New("no stored credential")
+		return nil, 0, errors.New("no stored credential")
 	}
 	_, sec, err := s.openCredential(ctx, ownerID, *h.CredentialID)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	k, err := s.store.HostKey(ctx, ownerID, h.ID)
 	if err != nil {
-		return nil, errors.New("connect to this host once from a terminal first")
+		return nil, 0, errors.New("connect to this host once from a terminal first")
 	}
 	dialed, err := sshx.Dial(ctx, s.guard, sshx.Target{Address: h.Address, Port: h.Port, User: h.Username,
 		Password: sec.Password, PrivateKey: []byte(sec.PrivateKey), Passphrase: []byte(sec.Passphrase),
 		Pinned: &sshx.Pinned{KeyType: k.KeyType, KeyData: k.KeyData, Fingerprint: k.Fingerprint}})
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	return dialed.Client, nil
+	return dialed.Client, h.ConnVersion, nil
 }
 
 // proxyTo relays the request to 127.0.0.1:<port> on the host. Requests look

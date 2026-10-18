@@ -233,6 +233,12 @@ func (s *Store) forwardFor(ctx context.Context, ownerID, hostID int64, port int)
 		`SELECT id, owner_id, host_id, port, kind, sharing, created_at FROM forwards WHERE owner_id = ? AND host_id = ? AND port = ?`, ownerID, hostID, port))
 }
 
+// HasCodeForward reports whether VS Code was ever opened for the host.
+func (s *Store) HasCodeForward(ctx context.Context, ownerID, hostID int64) bool {
+	_, err := s.forwardFor(ctx, ownerID, hostID, 0)
+	return err == nil
+}
+
 // ForwardByID looks a forward up by its public id; callers must check access.
 func (s *Store) ForwardByID(ctx context.Context, id string) (*Forward, error) {
 	return scanForward(s.db.QueryRowContext(ctx,

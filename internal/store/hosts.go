@@ -30,15 +30,18 @@ type Host struct {
 	CreatedAt       int64  `json:"created_at"`
 	UpdatedAt       int64  `json:"updated_at"`
 	LastConnectedAt int64  `json:"last_connected_at"`
+	// ConnVersion changes with every edit to what a connection to the host
+	// is (target, user, authentication, saved password) or the key it trusts.
+	ConnVersion int64 `json:"-"`
 }
 
-const hostCols = `id, owner_id, name, address, port, username, auth, credential_id, persistence, tmux_session, herdr_session, created_at, updated_at, last_connected_at`
+const hostCols = `id, owner_id, name, address, port, username, auth, credential_id, persistence, tmux_session, herdr_session, created_at, updated_at, last_connected_at, conn_version`
 
 func scanHost(row interface{ Scan(...any) error }) (*Host, error) {
 	h := &Host{}
 	var cred sql.NullInt64
 	err := row.Scan(&h.ID, &h.OwnerID, &h.Name, &h.Address, &h.Port, &h.Username, &h.Auth, &cred,
-		&h.Persistence, &h.TmuxSession, &h.HerdrSession, &h.CreatedAt, &h.UpdatedAt, &h.LastConnectedAt)
+		&h.Persistence, &h.TmuxSession, &h.HerdrSession, &h.CreatedAt, &h.UpdatedAt, &h.LastConnectedAt, &h.ConnVersion)
 	if err != nil {
 		return nil, notFound(err)
 	}
@@ -82,11 +85,23 @@ func (s *Store) CreateHost(ctx context.Context, h *Host) (*Host, error) {
 	return s.Host(ctx, h.OwnerID, id)
 }
 
-func (s *Store) UpdateHost(ctx context.Context, h *Host) error {
+// UpdateHost saves a host; with newConn it also bumps the connection version.
+func (s *Store) UpdateHost(ctx context.Context, h *Host, newConn bool) error {
+	bump := 0
+	if newConn {
+		bump = 1
+	}
 	return affectedOrNotFound(s.db.ExecContext(ctx,
-		`UPDATE hosts SET name = ?, address = ?, port = ?, username = ?, auth = ?, credential_id = ?, persistence = ?, tmux_session = ?, herdr_session = ?, updated_at = ?
+		`UPDATE hosts SET name = ?, address = ?, port = ?, username = ?, auth = ?, credential_id = ?, persistence = ?, tmux_session = ?,
+		   herdr_session = ?, updated_at = ?, conn_version = conn_version + ?
 		 WHERE owner_id = ? AND id = ?`,
-		h.Name, h.Address, h.Port, h.Username, h.Auth, h.CredentialID, h.Persistence, h.TmuxSession, h.HerdrSession, s.unix(), h.OwnerID, h.ID))
+		h.Name, h.Address, h.Port, h.Username, h.Auth, h.CredentialID, h.Persistence, h.TmuxSession, h.HerdrSession, s.unix(), bump,
+		h.OwnerID, h.ID))
+}
+
+// BumpConnVersion marks every existing connection to the host as outdated.
+func (s *Store) BumpConnVersion(ctx context.Context, ownerID, id int64) error {
+	return affectedOrNotFound(s.db.ExecContext(ctx, `UPDATE hosts SET conn_version = conn_version + 1 WHERE owner_id = ? AND id = ?`, ownerID, id))
 }
 
 func (s *Store) DeleteHost(ctx context.Context, ownerID, id int64) error {

@@ -41,7 +41,7 @@ type Route struct {
 }
 
 type Server struct {
-	openGate keyedGate // one session open at a time per user and host
+	hostGate keyedGate // per host: opens, edits and forwarding dials take turns
 	cfg      *config.Config
 	store    *store.Store
 	auth     *auth.Service

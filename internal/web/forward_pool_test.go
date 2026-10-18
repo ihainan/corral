@@ -62,19 +62,19 @@ func TestForwardPoolNeverOrphansAConnection(t *testing.T) {
 	key := [2]int64{1, 2}
 	noop := func() {}
 
-	_, d, lead, err := f.acquire(key, noop)
+	_, d, lead, err := f.acquire(key, 1, noop)
 	if err != nil || !lead {
 		t.Fatalf("first request should dial: %v %v", lead, err)
 	}
-	if _, d2, lead2, _ := f.acquire(key, noop); lead2 || d2 != d {
+	if _, d2, lead2, _ := f.acquire(key, 1, noop); lead2 || d2 != d {
 		t.Fatal("a second request dialled while the first dial was under way")
 	}
 	first := sshClient(t, srv)
-	fc, err := f.finishDial(d, first, nil)
+	fc, err := f.finishDial(d, first, 1, nil)
 	if err != nil || fc.client != first {
 		t.Fatalf("dial not pooled: %v", err)
 	}
-	got, d3, lead3, err := f.acquire(key, noop)
+	got, d3, lead3, err := f.acquire(key, 1, noop)
 	if err != nil || got != fc || d3 != nil || lead3 {
 		t.Fatal("a request after the dial did not reuse the pooled connection")
 	}
@@ -85,7 +85,7 @@ func TestForwardPoolNeverOrphansAConnection(t *testing.T) {
 	late := &fwdDial{ownerID: key[0], hostID: key[1], cancel: noop, done: make(chan struct{})}
 	f.mu.Unlock()
 	second := sshClient(t, srv)
-	if fc2, err := f.finishDial(late, second, nil); err != nil || fc2 != fc {
+	if fc2, err := f.finishDial(late, second, 1, nil); err != nil || fc2 != fc {
 		t.Fatal("pooled connection was replaced")
 	}
 	if !closedSoon(second) {
