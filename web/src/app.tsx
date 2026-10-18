@@ -137,7 +137,15 @@ type NavKey = 'hosts' | 'keys' | 'settings' | 'users' | 'audit'
 // signOut ends the browser session. The push subscription of this device is
 // removed first, so the next person signing in here does not get the previous
 // account's alerts.
-export async function signOut(setMe: (m: Me | null) => void, toast: (m: string, e?: boolean) => void) {
+// One sign-out at a time: a second tap joins the first instead of starting
+// another flow that could unfreeze settings while the first is still running.
+let signingOut: Promise<void> | null = null
+export function signOut(setMe: (m: Me | null) => void, toast: (m: string, e?: boolean) => void): Promise<void> {
+  signingOut ??= signOutOnce(setMe, toast).finally(() => (signingOut = null))
+  return signingOut
+}
+
+async function signOutOnce(setMe: (m: Me | null) => void, toast: (m: string, e?: boolean) => void) {
   // Settings changed just before signing out still belong to this account.
   freezePrefs(true)
   await sendPendingPrefs(3000)
