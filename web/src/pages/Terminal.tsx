@@ -212,9 +212,13 @@ export function TerminalPage({ id }: { id: string }) {
       if (e.isComposing || e.keyCode === 229) return true
       typedChar = e.key.length === 1 && !e.metaKey && !e.ctrlKey ? e.key : null
       // A physical Ctrl/Alt chord while a key-bar modifier is latched: combine both.
-      if (latched() && e.key.length === 1 && (e.ctrlKey || e.altKey) && !e.metaKey) {
+      // Clipboard shortcuts, AltGr and text-producing Option are left alone.
+      const isMac = /Mac|iPhone|iPad/.test(navigator.platform)
+      const physAlt = e.altKey && !e.getModifierState('AltGraph') && (!isMac || getPrefs().optionIsMeta)
+      const pasteKey = e.ctrlKey && e.key.toLowerCase() === 'v'
+      if (latched() && e.key.length === 1 && (e.ctrlKey || physAlt) && !e.metaKey && !pasteKey) {
         const m = activeMods()
-        conn.send(applyMods(e.key, { ctrl: m.ctrl || e.ctrlKey, alt: m.alt || e.altKey, shift: false }))
+        conn.send(applyMods(e.key, { ctrl: m.ctrl || e.ctrlKey, alt: m.alt || physAlt, shift: false }))
         releaseOnce()
         e.preventDefault()
         return false
@@ -392,16 +396,20 @@ export function TerminalPage({ id }: { id: string }) {
       }
       let v = -velocity * 16 // px per frame
       const ch = cellHeight()
-      let rest = 0
+      // Lines owed from the drag itself carry over into the fling.
+      let rest = acc
+      acc = 0
+      if (Math.abs(v) <= 2) v = 0
       const step = () => {
         v *= 0.94
-        if (Math.abs(v) < 0.6) return
+        if (Math.abs(v) < 0.6) v = 0
         rest += v
         const lines = Math.trunc(rest / ch)
         if (lines !== 0) rest -= wheel(lines) * ch
-        inertia = requestAnimationFrame(step)
+        // Keep going until the speed is gone and no whole line is owed.
+        if (v !== 0 || Math.abs(rest) >= ch) inertia = requestAnimationFrame(step)
       }
-      if (Math.abs(v) > 2) inertia = requestAnimationFrame(step)
+      inertia = requestAnimationFrame(step)
     }
     const onCancel = () => {
       cancelAnimationFrame(inertia)

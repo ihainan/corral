@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from 'react'
+import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { MoreHorizontal, UserPlus } from 'lucide-react'
 import { api, errorText, type AdminUser, type AuditEntry } from '../api'
 import { relTime, t } from '../i18n'
@@ -215,11 +215,16 @@ export function AdminAuditPage() {
   const [failed, setFailed] = useState(false)
   const [more, setMore] = useState(true)
   const [loading, setLoading] = useState(false)
+  const busy = useRef(false)
+  const gen = useRef(0)
   const load = async (before?: number) => {
-    if (loading) return
+    if (busy.current) return
+    busy.current = true
     setLoading(true)
+    const mine = ++gen.current
     try {
       const rows = await api<AuditEntry[]>('GET', '/api/admin/audit' + (before ? '?before=' + before : ''))
+      if (mine !== gen.current) return
       setEntries((prev) => {
         if (!before || !prev) return rows
         const seen = new Set(prev.map((e) => e.id))
@@ -231,6 +236,7 @@ export function AdminAuditPage() {
       if (before) toast(errorText(e), true)
       else setFailed(true)
     } finally {
+      busy.current = false
       setLoading(false)
     }
   }
