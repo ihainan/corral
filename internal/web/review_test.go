@@ -447,3 +447,63 @@ func TestPersistentHostsKeepOneSession(t *testing.T) {
 		t.Fatal("plain shells were merged into one session")
 	}
 }
+
+// A session is only reused while the host still describes it: after an edit
+// (here the persistence mode, which also covers a plain shell turning into
+// tmux) opening the host starts a new session.
+func TestEditedHostIsNotServedAnOldSession(t *testing.T) {
+	h := newHarness(t)
+	admin := h.admin()
+	srv := h.sshServer(t.TempDir())
+	id := h.hostFor(admin, srv.Addr.Port)
+	a := admin.do("POST", "/api/sessions", map[string]any{"host_id": id})
+	mustStatus(t, a, 201, "first open")
+	mustStatus(t, admin.do("PUT", fmt.Sprintf("/api/hosts/%d", id), map[string]any{"name": "box", "address": "127.0.0.1", "port": srv.Addr.Port,
+		"username": "alice", "auth": "password", "persistence": "tmux", "tmux_session": "other"}), 200, "edit host")
+	b := admin.do("POST", "/api/sessions", map[string]any{"host_id": id})
+	mustStatus(t, b, 201, "open after edit starts a new session")
+	if a.json()["id"] == b.json()["id"] {
+		t.Fatal("an edited host was given its old session")
+	}
+	if n := h.srv.openGate.size(); n != 0 {
+		t.Fatalf("open gate keeps %d entries after the opens finished", n)
+	}
+}
+
+func TestOpenGateWaitsCancelsAndForgets(t *testing.T) {
+	var g keyedGate
+	key := [2]int64{1, 2}
+	release, err := g.acquire(context.Background(), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { _, err := g.acquire(ctx, key); done <- err }()
+	select {
+	case err := <-done:
+		t.Fatalf("second open did not wait: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled wait returned %v", err)
+	}
+	old := maxGateWaiters
+	maxGateWaiters = 1
+	defer func() { maxGateWaiters = old }()
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	defer cancel2()
+	go func() { _, _ = g.acquire(ctx2, key) }()
+	time.Sleep(50 * time.Millisecond)
+	if _, err := g.acquire(context.Background(), key); !errors.Is(err, errGateBusy) {
+		t.Fatalf("a full queue still took a waiter: %v", err)
+	}
+	cancel2()
+	time.Sleep(20 * time.Millisecond)
+	release()
+	release() // idempotent
+	if n := g.size(); n != 0 {
+		t.Fatalf("gate keeps %d entries with nobody holding or waiting", n)
+	}
+}

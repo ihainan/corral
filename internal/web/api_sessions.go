@@ -78,23 +78,43 @@ func (s *Server) apiOpenSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
+	// Opens for one user and host take turns, so two taps cannot both find
+	// nothing running and start two. Everything below is decided after the
+	// turn comes: the host as it is now, and whether the login still holds.
+	release, err := s.openGate.acquire(r.Context(), [2]int64{u.ID, b.HostID})
+	if err != nil {
+		if errors.Is(err, errGateBusy) {
+			writeError(w, http.StatusTooManyRequests, "busy", "this host is already being opened; try again in a moment")
+		}
+		return // the request went away while waiting
+	}
+	defer release()
+	if ok, err := s.auth.LoginValid(r.Context(), loginHash(r)); err != nil || !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "please sign in")
+		return
+	}
 	h, err := s.store.Host(r.Context(), u.ID, b.HostID)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "not_found", "no such host")
 		return
 	}
+	cfg := hostConfig(h)
 
 	// With tmux or herdr every gateway session attaches the same remote
 	// session, so a second one would only mirror the first (and fight it over
-	// the terminal size). Opening such a host again returns the running one.
-	// Opens for one user and host are serialised so two taps cannot both
-	// find nothing running and start two.
+	// the terminal size). Opening such a host again returns the running one,
+	// as long as it was made with the host's current settings; after an edit
+	// a new session is started. (For "ask" hosts this re-attaches without a
+	// password, like opening the session from the list: no new connection is
+	// made and nothing is sent to the host.)
 	if h.Persistence != store.PersistNone {
-		unlock := s.lockOpen(u.ID, h.ID)
-		defer unlock()
-		if running := s.terms.Running(u.ID, h.ID); len(running) > 0 {
-			writeJSON(w, http.StatusOK, running[0].Info())
-			return
+		for _, rs := range s.terms.Running(u.ID, h.ID) {
+			if rs.HostConfig == cfg {
+				info := rs.Info()
+				release()
+				writeJSON(w, http.StatusOK, info)
+				return
+			}
 		}
 	}
 
@@ -189,6 +209,7 @@ func (s *Server) apiOpenSession(w http.ResponseWriter, r *http.Request) {
 	}
 	sess, err := s.terms.Start(ctx, res, u.ID, h.ID, h.Name, dialed.Client, term.StartOptions{
 		Cols: b.Cols, Rows: b.Rows, Persistence: h.Persistence, TmuxSession: h.TmuxSession, HerdrSession: h.HerdrSession,
+		HostConfig: cfg,
 	})
 	if err != nil {
 		if ctx.Err() != nil {
@@ -216,7 +237,9 @@ func (s *Server) apiOpenSession(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = s.store.TouchHostConnected(r.Context(), u.ID, h.ID)
 	s.audit(r, "session.open", hostTarget(h), map[string]any{"session": sess.ID})
-	writeJSON(w, http.StatusCreated, sess.Info())
+	info := sess.Info()
+	release()
+	writeJSON(w, http.StatusCreated, info)
 }
 
 var errHostKeyRejected = errors.New("host key rejected")
@@ -749,10 +772,73 @@ func (s *Server) apiUpload(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]any{"path": full, "bytes": written, "type": ctype})
 }
 
-// lockOpen serialises session opens for one user and host.
-func (s *Server) lockOpen(userID, hostID int64) func() {
-	v, _ := s.openLocks.LoadOrStore([2]int64{userID, hostID}, &sync.Mutex{})
-	mu := v.(*sync.Mutex)
-	mu.Lock()
-	return mu.Unlock
+// hostConfig fingerprints the settings a connection is made with.
+func hostConfig(h *store.Host) string {
+	cred := int64(0)
+	if h.CredentialID != nil {
+		cred = *h.CredentialID
+	}
+	return fmt.Sprintf("%s|%d|%s|%s|%d|%s|%s|%s", h.Address, h.Port, h.Username, h.Auth, cred, h.Persistence, h.TmuxSession, h.HerdrSession)
+}
+
+var errGateBusy = errors.New("too many waiting")
+
+// maxGateWaiters bounds how many opens of one host may queue up.
+var maxGateWaiters = 4
+
+// keyedGate lets one holder per key through at a time. Waiting can be
+// cancelled, and entries disappear when nobody holds or waits for them.
+type keyedGate struct {
+	mu    sync.Mutex
+	gates map[[2]int64]*gate
+}
+
+type gate struct {
+	turn chan struct{}
+	refs int // holder and waiters
+}
+
+func (g *keyedGate) acquire(ctx context.Context, key [2]int64) (func(), error) {
+	g.mu.Lock()
+	if g.gates == nil {
+		g.gates = map[[2]int64]*gate{}
+	}
+	gt := g.gates[key]
+	if gt == nil {
+		gt = &gate{turn: make(chan struct{}, 1)}
+		g.gates[key] = gt
+	}
+	if gt.refs > maxGateWaiters {
+		g.mu.Unlock()
+		return nil, errGateBusy
+	}
+	gt.refs++
+	g.mu.Unlock()
+	select {
+	case gt.turn <- struct{}{}:
+	case <-ctx.Done():
+		g.drop(key, gt)
+		return nil, ctx.Err()
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			<-gt.turn
+			g.drop(key, gt)
+		})
+	}, nil
+}
+
+func (g *keyedGate) drop(key [2]int64, gt *gate) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if gt.refs--; gt.refs == 0 {
+		delete(g.gates, key)
+	}
+}
+
+func (g *keyedGate) size() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return len(g.gates)
 }

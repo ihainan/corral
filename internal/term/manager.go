@@ -111,6 +111,9 @@ type StartOptions struct {
 	Persistence  string // "none", "tmux" or "herdr"
 	TmuxSession  string // validated by the caller: [A-Za-z0-9_-]{1,64}
 	HerdrSession string // validated by the caller; "" attaches herdr's default session
+	// HostConfig fingerprints the host settings the connection was made with,
+	// so a session is only reused while the host still describes it.
+	HostConfig string
 }
 
 // Reservation holds one of a user's session slots while a connection is being
@@ -213,7 +216,7 @@ func (m *Manager) Start(ctx context.Context, res *Reservation, owner, hostID int
 			return
 		}
 		s := &Session{
-			ID: newID(), OwnerID: owner, HostID: hostID, HostName: hostName, Created: time.Now(),
+			ID: newID(), OwnerID: owner, HostID: hostID, HostName: hostName, Created: time.Now(), HostConfig: opt.HostConfig,
 			client: client, ssh: sess, stdin: stdin, input: make(chan []byte, inputQueue),
 			buf: newRing(ringSize), subs: map[*Sub]struct{}{}, state: StateRunning,
 			cols: cols, rows: rows, idleSince: time.Now(), finished: make(chan struct{}), uploads: make(chan struct{}, 2),

@@ -82,6 +82,8 @@ type Session struct {
 	HostID   int64
 	HostName string
 	Created  time.Time
+	// The host configuration the session was opened with (see StartOptions).
+	HostConfig string
 
 	client *ssh.Client
 	ssh    *ssh.Session
