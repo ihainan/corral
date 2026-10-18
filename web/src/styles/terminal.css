@@ -1,0 +1,104 @@
+/* Full-screen terminal. The root is sized to the visual viewport in JS so the
+   key bar lands right above the soft keyboard on iOS. */
+
+html.term-mode, html.term-mode body { overflow: hidden; overscroll-behavior: none; }
+html.term-mode body { position: fixed; inset: 0; }
+
+.term-root {
+  position: fixed; top: 0; left: 0; right: 0; height: 100dvh;
+  display: flex; flex-direction: column;
+  background: var(--term-bg);
+  --term-bg: #fbfbfc;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme='light']) .term-root { --term-bg: #101317; } }
+:root[data-theme='dark'] .term-root { --term-bg: #101317; }
+
+.term-bar {
+  flex: none; display: flex; align-items: center; gap: 2px;
+  padding: calc(env(safe-area-inset-top, 0px) + 4px) max(6px, env(safe-area-inset-right, 0px)) 4px max(6px, env(safe-area-inset-left, 0px));
+  background: var(--surface); border-bottom: 1px solid var(--line); min-height: 48px;
+}
+.term-title { flex: 1; min-width: 0; display: flex; flex-direction: column; line-height: 1.2; padding: 0 4px; }
+.term-host { font-weight: 650; font-size: 14.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.term-status { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; min-height: 15px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.term-status .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--faint); flex: none; }
+.term-status.s-open .dot { background: var(--ok); }
+.term-status.s-reconnecting .dot, .term-status.s-connecting .dot { background: var(--warn); animation: pulse 1.2s ease-in-out infinite; }
+.term-status.s-offline .dot { background: var(--danger); }
+@keyframes pulse { 50% { opacity: 0.3; } }
+
+.term-body { flex: 1; min-height: 0; position: relative; }
+.term-host-el {
+  position: absolute; inset: 0;
+  padding: 6px max(6px, env(safe-area-inset-right, 0px)) 4px max(8px, env(safe-area-inset-left, 0px));
+  touch-action: none;
+}
+.term-host-el .xterm { height: 100%; }
+.term-host-el .xterm-viewport { overscroll-behavior: contain; }
+/* Keep iOS from zooming when the hidden input takes focus. */
+.term-host-el .xterm-helper-textarea { font-size: 16px !important; }
+
+.term-ended {
+  position: absolute; left: 50%; top: 40%; transform: translate(-50%, -50%);
+  width: min(380px, calc(100% - 32px)); background: var(--surface); border: 1px solid var(--line);
+  border-radius: 14px; box-shadow: var(--shadow); padding: 18px; display: flex; flex-direction: column; gap: 14px;
+}
+.term-drop {
+  position: absolute; inset: 10px; border: 2px dashed var(--accent); border-radius: 12px;
+  display: grid; place-items: center; background: color-mix(in srgb, var(--accent-soft) 75%, transparent);
+  color: var(--fg); font-weight: 600; pointer-events: none;
+}
+
+/* Composer: a plain text field so IME, dictation and autocorrect behave. */
+.composer {
+  flex: none; display: flex; gap: 8px; align-items: flex-end;
+  padding: 8px max(8px, env(safe-area-inset-right, 0px)) 8px max(8px, env(safe-area-inset-left, 0px));
+  background: var(--surface); border-top: 1px solid var(--line);
+}
+.composer-input {
+  flex: 1; min-width: 0; min-height: 40px; max-height: 40vh; resize: none;
+  border: 1px solid var(--line); border-radius: 10px; padding: 9px 11px; background: var(--bg);
+  font: 16px/1.4 var(--font-ui); color: var(--fg);
+}
+.composer-input:focus { outline: none; border-color: var(--accent); }
+.composer-actions { display: flex; gap: 6px; flex: none; }
+.composer-actions .btn { min-height: 40px; }
+
+/* Key bar */
+.keybar {
+  flex: none; display: flex; align-items: center; gap: 4px;
+  padding: 6px max(6px, env(safe-area-inset-right, 0px)) calc(6px + env(safe-area-inset-bottom, 0px)) max(6px, env(safe-area-inset-left, 0px));
+  background: var(--surface-2); border-top: 1px solid var(--line);
+  user-select: none; -webkit-user-select: none;
+}
+html.kb-open .keybar { padding-bottom: 6px; }
+.kb-row {
+  flex: 1; min-width: 0; display: flex; gap: 4px; overflow-x: auto; scrollbar-width: none; touch-action: pan-x;
+  /* Fade the right edge so it reads as scrollable. */
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 22px), transparent);
+  mask-image: linear-gradient(to right, #000 calc(100% - 22px), transparent);
+  padding-right: 18px;
+}
+.kb-row::-webkit-scrollbar { display: none; }
+.kb-fixed { display: flex; gap: 4px; flex: none; }
+.kb-key {
+  flex: none; min-width: 34px; height: 38px; padding: 0 6px; border-radius: 7px;
+  border: 1px solid var(--line); border-bottom-width: 2px; background: var(--surface); color: var(--fg);
+  font: 500 13px/1 var(--font-mono); display: grid; place-items: center; position: relative; cursor: pointer;
+  touch-action: manipulation;
+}
+.kb-key.wide { min-width: 46px; }
+.kb-key:active { background: var(--accent-soft); }
+.kb-key.accent { color: var(--accent); border-color: var(--accent); }
+.kb-key.mod-once { background: var(--accent-soft); color: var(--accent); border-color: var(--accent); }
+.kb-key.mod-lock { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
+.kb-key.mod-lock::after { content: ''; position: absolute; left: 12px; right: 12px; bottom: 4px; height: 2px; border-radius: 1px; background: currentColor; }
+
+/* Copy mode: real text, so native selection works on touch screens. */
+.copy-mode { position: absolute; inset: 0; z-index: 50; display: flex; flex-direction: column; background: var(--surface); }
+.copy-bar { display: flex; align-items: center; gap: 8px; padding: calc(env(safe-area-inset-top, 0px) + 6px) max(10px, env(safe-area-inset-right, 0px)) 6px max(12px, env(safe-area-inset-left, 0px)); border-bottom: 1px solid var(--line); }
+.copy-text {
+  flex: 1; margin: 0; overflow: auto; padding: 12px max(12px, env(safe-area-inset-right, 0px)) calc(12px + env(safe-area-inset-bottom, 0px)) max(12px, env(safe-area-inset-left, 0px));
+  font: 13px/1.45 var(--font-mono); white-space: pre-wrap; word-break: break-all;
+  user-select: text; -webkit-user-select: text; -webkit-touch-callout: default;
+}

@@ -80,10 +80,16 @@ func run(log *slog.Logger) error {
 	}
 	web.Version = version
 
+	static := webui.FS()
+	// For frontend development: serve files straight from a build directory.
+	if dir := os.Getenv("CORRAL_STATIC_DIR"); dir != "" {
+		static = os.DirFS(dir)
+	}
+
 	srv := web.New(web.Deps{
 		Config: cfg, Store: st, Auth: authSvc, Vault: v,
 		Guard: netguard.New(cfg.AllowedNetworks, cfg.DeniedNetworks),
-		Terms: terms, Log: log, Static: webui.FS(),
+		Terms: terms, Log: log, Static: static,
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
