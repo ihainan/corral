@@ -78,6 +78,23 @@ function untilNotComposing(composingNow: () => boolean, ta: HTMLTextAreaElement 
   })
 }
 
+// The first image on the clipboard as a file, or null if there is none or
+// the browser refuses (it may ask for permission the first time).
+async function clipboardImage(): Promise<File | null> {
+  try {
+    for (const item of await navigator.clipboard.read()) {
+      const type = item.types.find((t) => t.startsWith('image/'))
+      if (type) {
+        const blob = await item.getType(type)
+        return new File([blob], 'clipboard.' + (type.split('/')[1] || 'png').replace('jpeg', 'jpg'), { type })
+      }
+    }
+  } catch {
+    /* no permission, or nothing readable */
+  }
+  return null
+}
+
 function shellPath(p: string): string | null {
   if (/[\x00-\x1f\x7f]/.test(p)) return null
   if (/^[\w@%+=:,./~-]+$/.test(p)) return p
@@ -152,6 +169,7 @@ export function TerminalPage({ id }: { id: string }) {
   // Latest modifier state for the xterm data callback.
   const openComposerRef = useRef<() => void>(() => {})
   const settleRef = useRef<() => void>(() => {})
+  const outRef = useRef<(d: string | Uint8Array) => void>(() => {})
   const composingRef = useRef<() => boolean>(() => false)
   const mods = useRef<{ ctrl: ModState; alt: ModState }>({ ctrl: 'off', alt: 'off' })
   mods.current = { ctrl, alt }
@@ -275,6 +293,15 @@ export function TerminalPage({ id }: { id: string }) {
     connRef.current = conn
     conn.resize(term.cols, term.rows)
 
+    // Everything typed goes out through here, so it can wait its turn while
+    // Ctrl+V checks the clipboard.
+    let held: (string | Uint8Array)[] | null = null
+    const out = (d: string | Uint8Array) => {
+      if (held) held.push(d)
+      else conn.send(d)
+    }
+    outRef.current = out
+
     // Latched Ctrl/Alt from the key bar apply only to what the user typed:
     // a character applies when xterm emits exactly that character for the key
     // just pressed; special keys (Enter, arrows, Tab…) are encoded here. Pastes,
@@ -377,16 +404,16 @@ export function TerminalPage({ id }: { id: string }) {
       userData = false
       if (replaying && (onUserInput ? !fromUser : isTerminalReply(data))) return
       if (typed && latched()) {
-        conn.send(applyMods(data, activeMods()))
+        out(applyMods(data, activeMods()))
         releaseOnce()
       } else {
-        conn.send(data)
+        out(data)
       }
     })
     const binSub = term.onBinary((data) => {
       const bytes = new Uint8Array(data.length)
       for (let i = 0; i < data.length; i++) bytes[i] = data.charCodeAt(i) & 0xff
-      conn.send(bytes)
+      out(bytes)
     })
     let resizeTimer: number | undefined
     const resizeSub = term.onResize(({ cols, rows }) => {
@@ -421,6 +448,24 @@ export function TerminalPage({ id }: { id: string }) {
         claim = null
         lastKeyAlt = e.altKey
       }
+      // Ctrl+V with an image on the clipboard uploads it and types its path,
+      // as Claude Code and Codex do with a local clipboard (they cannot reach
+      // this browser's). With no image, or no clipboard access, ^V goes to
+      // the host as before (vim and readline use it).
+      if (e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && e.code === 'KeyV' && !latched() && typeof navigator.clipboard?.read === 'function') {
+        e.preventDefault()
+        // Keys typed while the clipboard is checked wait, so ^V keeps its place
+        // (Ctrl+V then Enter in vim inserts a literal CR).
+        held ??= []
+        void Promise.race([clipboardImage(), new Promise<null>((r) => setTimeout(() => r(null), 1500))]).then((file) => {
+          if (file) void uploadRef.current([file])
+          else conn.send('\x16')
+          const queued = held ?? []
+          held = null
+          for (const d of queued) conn.send(d)
+        })
+        return false
+      }
       // Only punctuation: that is what input methods turn into full-width marks
       // without a composition. Letters and digits keep xterm's path.
       if (
@@ -448,7 +493,7 @@ export function TerminalPage({ id }: { id: string }) {
       if (latched() && e.key.length === 1 && (e.ctrlKey || physAlt) && !e.metaKey && !pasteKey && !e.getModifierState('AltGraph')) {
         const m = activeMods()
         settleRef.current()
-        conn.send(applyMods(e.key, { ctrl: m.ctrl || e.ctrlKey, alt: m.alt || physAlt, shift: false }))
+        out(applyMods(e.key, { ctrl: m.ctrl || e.ctrlKey, alt: m.alt || physAlt, shift: false }))
         releaseOnce()
         e.preventDefault()
         return false
@@ -457,7 +502,7 @@ export function TerminalPage({ id }: { id: string }) {
       if (special && latched() && !e.metaKey) {
         const m = activeMods()
         settleRef.current()
-        conn.send(specialKey(special, { ctrl: m.ctrl || e.ctrlKey, alt: m.alt || e.altKey, shift: e.shiftKey }, term.modes.applicationCursorKeysMode))
+        out(specialKey(special, { ctrl: m.ctrl || e.ctrlKey, alt: m.alt || e.altKey, shift: e.shiftKey }, term.modes.applicationCursorKeysMode))
         releaseOnce()
         e.preventDefault()
         return false
@@ -468,7 +513,7 @@ export function TerminalPage({ id }: { id: string }) {
       }
       if (e.key === 'Enter' && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
         settleRef.current()
-        conn.send('\x1b\r') // newline without submitting, for Claude Code / Codex
+        out('\x1b\r') // newline without submitting, for Claude Code / Codex
         return false
       }
       return true
@@ -695,6 +740,7 @@ export function TerminalPage({ id }: { id: string }) {
 
   // Files: paste, drop, or pick. Uploaded over SFTP; the remote path is pasted
   // into the terminal, which is how Claude Code and Codex pick up images.
+  const uploadRef = useRef<(files: File[]) => Promise<void>>(async () => {})
   const upload = useCallback(
     async (files: File[]) => {
       for (const f of files) {
@@ -719,6 +765,7 @@ export function TerminalPage({ id }: { id: string }) {
     },
     [id, toast],
   )
+  uploadRef.current = upload
 
   useEffect(() => {
     const el = hostEl.current!
@@ -736,12 +783,12 @@ export function TerminalPage({ id }: { id: string }) {
   const sendKey = (k: SpecialKey) => {
     settleRef.current()
     const term = termRef.current
-    connRef.current?.send(specialKey(k, activeMods(), term?.modes.applicationCursorKeysMode ?? false))
+    outRef.current(specialKey(k, activeMods(), term?.modes.applicationCursorKeysMode ?? false))
     releaseOnce()
   }
   const sendText = (s: string) => {
     settleRef.current()
-    connRef.current?.send(applyMods(s, activeMods()))
+    outRef.current(applyMods(s, activeMods()))
     releaseOnce()
   }
   const cycle = (m: ModState): ModState => (m === 'off' ? 'once' : m === 'once' ? 'lock' : 'off')
