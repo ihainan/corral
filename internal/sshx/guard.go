@@ -100,6 +100,35 @@ type DialOptions struct {
 // held until it has really ended. The returned connection's reads and writes
 // return at once after Close, whatever the host does.
 func DialVia(ctx context.Context, c *ssh.Client, network, addr string, opt DialOptions) (net.Conn, error) {
+	return openGuarded(ctx, c, network, addr, opt, func() (ssh.Channel, <-chan *ssh.Request, error) {
+		return openForwarded(c, network, addr)
+	})
+}
+
+// OpenSubsystem opens a session channel running a subsystem (e.g. "sftp"),
+// with the same guarantees as DialVia: it gives up when ctx ends, its quota
+// is held until the channel has really ended, and Close never leaves I/O
+// blocked. A refused subsystem's channel is closed the same way.
+func OpenSubsystem(ctx context.Context, c *ssh.Client, name string, opt DialOptions) (net.Conn, error) {
+	return openGuarded(ctx, c, "ssh", name, opt, func() (ssh.Channel, <-chan *ssh.Request, error) {
+		ch, reqs, err := c.OpenChannel("session", nil)
+		if err != nil {
+			return nil, nil, err
+		}
+		go io.Copy(io.Discard, ch.Stderr()) // ends with the channel
+		ok, err := ch.SendRequest("subsystem", true, ssh.Marshal(&struct{ Name string }{name}))
+		if err == nil && !ok {
+			err = fmt.Errorf("the host refused the %s subsystem", name)
+		}
+		return ch, reqs, err
+	})
+}
+
+// openGuarded opens a channel with open and wraps it (see DialVia). An open
+// that fails after the channel exists hands back the channel too, so it is
+// closed and accounted for like any other.
+func openGuarded(ctx context.Context, c *ssh.Client, network, addr string, opt DialOptions,
+	open func() (ssh.Channel, <-chan *ssh.Request, error)) (net.Conn, error) {
 	release := oneShot(opt.Release)
 	if opt.Aux {
 		aux, ok := takeAux(c)
@@ -122,16 +151,21 @@ func DialVia(ctx context.Context, c *ssh.Client, network, addr string, opt DialO
 	}
 	res := make(chan result, 1)
 	go func() {
-		ch, reqs, err := openForwarded(c, network, addr)
+		ch, reqs, err := open()
 		res <- result{ch, reqs, err}
 	}()
 	// adopt hands the quota to the channel, or gives it back if none opened.
 	adopt := func(r result) *guardedConn {
-		if r.err != nil {
+		if r.ch == nil {
 			release()
 			return nil
 		}
-		return newGuardedConn(r.ch, r.reqs, network, addr, c, release, opt.Dedicated, grace)
+		g := newGuardedConn(r.ch, r.reqs, network, addr, c, release, opt.Dedicated, grace)
+		if r.err != nil {
+			g.Close()
+			return nil
+		}
+		return g
 	}
 	select {
 	case r := <-res:

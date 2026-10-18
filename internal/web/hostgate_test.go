@@ -203,6 +203,9 @@ func TestDeletingAHostStopsItsCodeServer(t *testing.T) {
 		t.Fatalf("start: %v", st)
 	}
 	pid := e.pid()
+	if pid <= 0 {
+		t.Fatal("no pid recorded")
+	}
 	mustStatus(t, e.owner.do("DELETE", fmt.Sprintf("/api/hosts/%d", e.hostID), nil), 200, "delete host")
 	eventually(t, "code-server kept running on a deleted host", func() bool { return syscall.Kill(pid, 0) != nil })
 }

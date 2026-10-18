@@ -53,6 +53,7 @@ anyone with both can decrypt stored SSH credentials.
 | `CORRAL_CODE_SERVER` | `on` with a forward domain | `on` / `off`: open hosts in VS Code in the browser ([code-server](https://github.com/coder/code-server), MIT, not bundled) |
 | `CORRAL_CODE_SERVER_VERSION` | `4.138.0` | code-server release installed on hosts |
 | `CORRAL_CODE_SERVER_URL` | GitHub release | Download URL template (https), with `{version}` and optionally `{arch}` (`amd64`, `arm64`) |
+| `CORRAL_CODE_SERVER_SHA256` | built in for `4.138.0` | Trusted archive digests, `amd64=<sha256>,arm64=<sha256>`; required for other versions. Archives are checked before they are unpacked |
 | `CORRAL_CODE_SERVER_DIR` | — | Gateway directory holding `code-server-{version}-linux-{arch}.tar.gz`; uploaded over SFTP instead of downloaded on the host (hosts without internet) |
 
 ## Develop

@@ -126,6 +126,10 @@ func newCodeEnv(t *testing.T, upload bool) *codeEnv {
 	e := &codeEnv{home: t.TempDir()}
 	release := filepath.Join(t.TempDir(), "code-server-4.138.0-linux-"+codeArch()+".tar.gz")
 	writeCodeRelease(t, release)
+	sum, err := fileSHA256(release)
+	if err != nil {
+		t.Fatal(err)
+	}
 	bin := t.TempDir()
 	e.curlLog = filepath.Join(bin, "curl.log")
 	curl := "#!/bin/sh\necho \"$*\" >>" + e.curlLog + "\n"
@@ -140,6 +144,7 @@ func newCodeEnv(t *testing.T, upload bool) *codeEnv {
 		c.CodeServer = true
 		c.CodeServerVersion = "4.138.0"
 		c.CodeServerURL = "https://mirror.test/v{version}/code-server-{version}-linux-{arch}.tar.gz"
+		c.CodeServerSHA256 = map[string]string{codeArch(): sum}
 		if upload {
 			c.CodeServerDir = filepath.Dir(release)
 		}
@@ -160,7 +165,11 @@ func newCodeEnv(t *testing.T, upload bool) *codeEnv {
 
 func (e *codeEnv) pid() int {
 	b, _ := os.ReadFile(filepath.Join(e.home, ".local/state/corral/code-server.pid"))
-	n, _ := strconv.Atoi(strings.TrimSpace(string(b)))
+	fields := strings.Fields(string(b)) // pid, start time, instance
+	if len(fields) == 0 {
+		return 0
+	}
+	n, _ := strconv.Atoi(fields[0])
 	return n
 }
 
@@ -169,7 +178,7 @@ func (e *codeEnv) killCodeServer() {
 		syscall.Kill(-pid, syscall.SIGKILL)
 		syscall.Kill(pid, syscall.SIGKILL)
 	}
-	if sock, err := codeserver.SocketPath(e.home, strconv.Itoa(os.Getuid())); err == nil && strings.HasPrefix(sock, "/tmp/corral-") {
+	if sock, err := codeserver.SocketPath(e.home, strconv.Itoa(os.Getuid()), ""); err == nil && strings.HasPrefix(sock, "/tmp/corral-") {
 		os.RemoveAll(filepath.Dir(sock))
 	}
 }
@@ -253,7 +262,7 @@ func TestCodeServerInstallStartReuseStop(t *testing.T) {
 	if res.StatusCode != 200 || !strings.Contains(body, "fake vscode host=localhost") {
 		t.Fatalf("VS Code page: %d %s", res.StatusCode, body)
 	}
-	for _, want := range []string{"--socket-mode 600", "--auth none", "--disable-telemetry", "--disable-update-check", "--user-data-dir"} {
+	for _, want := range []string{"--socket-mode 600", "--auth none", "--disable-telemetry", "--disable-update-check", "--disable-proxy", "--user-data-dir"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("code-server started without %s: %s", want, body)
 		}
@@ -269,6 +278,9 @@ func TestCodeServerInstallStartReuseStop(t *testing.T) {
 
 	// Opening again reuses the running code-server (and its subdomain).
 	pid := e.pid()
+	if pid <= 0 {
+		t.Fatal("no pid recorded")
+	}
 	st2, _ := e.start(e.owner)
 	if st2["state"] != codeReady || st2["url"] != st["url"] || e.pid() != pid {
 		t.Fatalf("not reused: %v (pid %d, was %d)", st2, e.pid(), pid)

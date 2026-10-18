@@ -50,6 +50,9 @@ type Config struct {
 	CodeServerVersion string
 	CodeServerURL     string // with {version} and optionally {arch} (amd64, arm64)
 	CodeServerDir     string // holds code-server-{version}-linux-{arch}.tar.gz; "" downloads on the host
+	// CodeServerSHA256 is the trusted digest of each release archive, by
+	// architecture. Archives are checked against it before unpacking.
+	CodeServerSHA256 map[string]string
 
 	DefaultLanguage string
 }
@@ -59,7 +62,19 @@ const (
 	defaultCodeServerURL     = "https://github.com/coder/code-server/releases/download/v{version}/code-server-{version}-linux-{arch}.tar.gz"
 )
 
-var semverRE = regexp.MustCompile(`^[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}$`)
+var (
+	semverRE = regexp.MustCompile(`^[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}$`)
+	sha256RE = regexp.MustCompile(`^[0-9a-f]{64}$`)
+)
+
+// knownCodeServerSHA256 pins the archives of releases Corral knows (the
+// digests GitHub publishes for the release assets).
+var knownCodeServerSHA256 = map[string]map[string]string{
+	"4.138.0": {
+		"amd64": "5d63f26c5dabc2acd29610b9b27f413b016aa67019e2cfcdf54031625e18f535",
+		"arm64": "fbebf4b18e97a5a48b7b105be0161d411e54ccfb53a1ffb1673c16518024fa30",
+	},
+}
 
 // CodeServerFile is the release archive name for an architecture.
 func (c *Config) CodeServerFile(arch string) string {
@@ -99,6 +114,26 @@ func (c *Config) loadCodeServer() error {
 		if st, err := os.Stat(c.CodeServerDir); err != nil || !st.IsDir() {
 			return fmt.Errorf("CORRAL_CODE_SERVER_DIR must be an existing directory, got %q", c.CodeServerDir)
 		}
+	}
+	// Digests: given ones, else the built-in ones for this version; a
+	// release without digests is never installed.
+	c.CodeServerSHA256 = map[string]string{}
+	if v := env("CORRAL_CODE_SERVER_SHA256", ""); v != "" {
+		for _, part := range strings.Split(v, ",") {
+			arch, sum, ok := strings.Cut(strings.TrimSpace(part), "=")
+			sum = strings.ToLower(strings.TrimSpace(sum))
+			if arch = strings.TrimSpace(arch); !ok || (arch != "amd64" && arch != "arm64") || !sha256RE.MatchString(sum) {
+				return fmt.Errorf("CORRAL_CODE_SERVER_SHA256 must look like amd64=<64 hex digits>,arm64=<64 hex digits>, got %q", v)
+			}
+			c.CodeServerSHA256[arch] = sum
+		}
+	} else if known, ok := knownCodeServerSHA256[c.CodeServerVersion]; ok {
+		for a, sum := range known {
+			c.CodeServerSHA256[a] = sum
+		}
+	} else if c.CodeServer {
+		return fmt.Errorf("code-server %s is not one Corral knows the archive digests of: set CORRAL_CODE_SERVER_SHA256 "+
+			"(amd64=<sha256>,arm64=<sha256>) from the release, or use %s", c.CodeServerVersion, defaultCodeServerVersion)
 	}
 	return nil
 }

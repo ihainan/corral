@@ -11,6 +11,9 @@ package web
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -20,6 +23,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/pkg/sftp"
 
 	"github.com/ihainan/corral/internal/codeserver"
 	"github.com/ihainan/corral/internal/sshx"
@@ -36,6 +41,7 @@ const (
 	codeStarting    = "starting"
 	codeReady       = "ready"
 	codeFailed      = "failed"
+	codeStopping    = "stopping"
 )
 
 // Limits and timeouts; variables so tests can lower them.
@@ -67,6 +73,10 @@ type codeServers struct {
 	jobs   map[[2]int64]*codeJob // by owner and host
 	closed bool
 	wg     sync.WaitGroup
+	// turns serialises whole starts and stops per host on the gateway (the
+	// scripts also lock on the host), so a stop never cleans up after a
+	// start that came later, nor a start runs into a stop.
+	turns keyedGate
 }
 
 func (c *codeServers) status(owner, host int64) codeStatus {
@@ -171,7 +181,7 @@ func (s *Server) apiCodeStart(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "busy", "the server is shutting down")
 		return
 	}
-	if j := s.code.jobs[key]; j != nil && j.running {
+	if j := s.code.jobs[key]; j != nil && j.running && j.status.State != codeStopping {
 		st := j.status
 		s.code.mu.Unlock()
 		writeJSON(w, http.StatusAccepted, st)
@@ -191,15 +201,26 @@ func (s *Server) apiCodeStart(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*codeInstallTimeout+3*codeStepTimeout)
 	j := &codeJob{status: codeStatus{State: codeChecking}, running: true, cancel: cancel}
 	s.code.jobs[key] = j
+	first := j.status // the job updates it from now on
 	s.code.wg.Add(1)
 	s.code.mu.Unlock()
 	go func() {
 		defer s.code.wg.Done()
 		defer cancel()
+		// After a stop (or another start) of this host has finished.
+		release, err := s.code.turns.acquire(ctx, key)
+		if err != nil {
+			s.code.update(key, j, func(j *codeJob) {
+				j.running = false
+				j.status = codeStatus{State: codeFailed, Error: "busy", Message: "VS Code is being started or stopped on this host"}
+			})
+			return
+		}
+		defer release()
 		s.runCode(ctx, key, j, h, f)
 	}()
 	s.audit(r, "code.start", hostTarget(h), map[string]any{"version": s.cfg.CodeServerVersion})
-	writeJSON(w, http.StatusAccepted, j.status)
+	writeJSON(w, http.StatusAccepted, first)
 }
 
 // POST /api/hosts/{id}/code/stop stops code-server on the host.
@@ -208,18 +229,31 @@ func (s *Server) apiCodeStop(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	s.forgetHostCode(h.OwnerID, h.ID)
+	key := [2]int64{h.OwnerID, h.ID}
+	s.forgetHostCode(h.OwnerID, h.ID) // cancels a start in progress
 	f, err := s.store.EnsureCodeForward(r.Context(), h.OwnerID, h.ID)
 	if err != nil {
 		s.internalError(w, r, err)
 		return
 	}
 	s.revokeForwardGrants(f.ID, 0) // open VS Code tabs end now
+	stopping := &codeJob{status: codeStatus{State: codeStopping}, running: true}
+	s.code.mu.Lock()
+	s.code.jobs[key] = stopping
+	s.code.mu.Unlock()
+	defer s.code.update(key, stopping, func(*codeJob) { delete(s.code.jobs, key) })
+	ctx, cancel := context.WithTimeout(r.Context(), 3*codeStepTimeout)
+	defer cancel()
+	// Wait for a start in progress to give up, then stop.
+	release, err := s.code.turns.acquire(ctx, key)
+	if err != nil {
+		writeError(w, http.StatusConflict, "busy", "VS Code is being started or stopped on this host; try again in a moment")
+		return
+	}
+	defer release()
 	if h.Auth != store.AuthAsk && h.CredentialID != nil {
-		ctx, cancel := context.WithTimeout(r.Context(), codeStepTimeout)
-		defer cancel()
 		if err := s.stopCode(ctx, f); err != nil {
-			writeError(w, http.StatusBadGateway, "code_unreachable", "could not reach the host to stop VS Code: "+err.Error())
+			writeError(w, http.StatusBadGateway, "code_unreachable", "could not stop VS Code on the host: "+err.Error())
 			return
 		}
 	}
@@ -303,7 +337,7 @@ func (s *Server) probeCode(ctx context.Context, fc *fwdConn) (*codeserver.Probe,
 	if err != nil {
 		return nil, "", codeFail("failed", "%v", err)
 	}
-	sock, err := codeserver.SocketPath(p.Home, p.UID)
+	sock, err := codeserver.SocketPath(p.Home, p.UID, p.Runtime)
 	if err != nil {
 		return nil, "", codeFail("socket", "%v", err)
 	}
@@ -322,6 +356,9 @@ func (s *Server) startCode(ctx context.Context, h *store.Host, f *store.Forward,
 	}
 	ver := s.cfg.CodeServerVersion
 	if !p.Installed {
+		if s.cfg.CodeServerSHA256[p.Arch] == "" {
+			return "", codeFail("no_checksum", "no trusted SHA-256 digest is configured for code-server %s on %s (CORRAL_CODE_SERVER_SHA256)", ver, p.Arch)
+		}
 		if !p.Tar {
 			return "", codeFail("no_tar", "the host has no tar, which unpacking code-server needs")
 		}
@@ -354,18 +391,28 @@ func (s *Server) startCode(ctx context.Context, h *store.Host, f *store.Forward,
 			archive = codeserver.DownloadPath(ver, p.Arch)
 		}
 		step(codeExtracting)
-		fields, err := s.codeRun(ctx, fc, codeserver.ExtractCommand(ver, p.Arch, archive), codeInstallTimeout) // a few hundred MB on slow disks
+		fields, err := s.codeRun(ctx, fc, codeserver.ExtractCommand(ver, p.Arch, archive, s.cfg.CodeServerSHA256[p.Arch]), codeInstallTimeout) // a few hundred MB on slow disks
 		if err != nil {
 			return "", err
 		}
-		if fields["result"] != "ok" {
+		switch {
+		case fields["error"] == "checksum":
+			return "", codeFail("checksum", "the code-server archive on the host does not match its trusted SHA-256 digest (got %s); it was removed",
+				strings.TrimSpace(fields["detail"]))
+		case fields["error"] == "nosha":
+			return "", codeFail("no_sha", "the host has neither sha256sum nor shasum to check the code-server archive")
+		case fields["result"] != "ok":
 			return "", codeFail("extract", "unpacking code-server failed (%s %s)", fields["error"], strings.TrimSpace(fields["detail"]))
 		}
 	}
 	step(codeStarting)
-	fields, err := s.codeRun(ctx, fc, codeserver.StartCommand(ver, sock), codeStepTimeout)
+	fields, err := s.codeRun(ctx, fc, codeserver.StartCommand(ver, sock, newInstanceID()), codeStepTimeout)
 	if err != nil {
 		return "", err
+	}
+	if fields["error"] == "socketdir" {
+		return "", codeFail("socket", "the directory for code-server's socket is not a private directory of the account (%s)",
+			strings.TrimSpace(fields["detail"]))
 	}
 	if r := fields["result"]; r != "started" && r != "running" {
 		return "", codeFail("start", "code-server did not start (%s %s); its log is ~/.local/state/corral/code-server.log on the host",
@@ -405,10 +452,20 @@ func (s *Server) codeHealthy(ctx context.Context, fc *fwdConn) error {
 	return last
 }
 
-// uploadCode copies the release from CORRAL_CODE_SERVER_DIR to the host.
+// uploadCode copies the release from CORRAL_CODE_SERVER_DIR to the host,
+// after checking it against its trusted digest. The SFTP channel counts
+// against the forwarding channel quota until it has really ended; the
+// connection is VS Code's own, so a host that will not let go of it loses
+// the connection.
 func (s *Server) uploadCode(ctx context.Context, fc *fwdConn, arch string) error {
 	name := s.cfg.CodeServerFile(arch)
-	src, err := os.Open(filepath.Join(s.cfg.CodeServerDir, name))
+	path := filepath.Join(s.cfg.CodeServerDir, name)
+	if sum, err := fileSHA256(path); err != nil {
+		return codeFail("archive_missing", "%s is not in CORRAL_CODE_SERVER_DIR on the gateway", name)
+	} else if sum != s.cfg.CodeServerSHA256[arch] {
+		return codeFail("checksum", "%s in CORRAL_CODE_SERVER_DIR does not match its trusted SHA-256 digest", name)
+	}
+	src, err := os.Open(path)
 	if err != nil {
 		return codeFail("archive_missing", "%s is not in CORRAL_CODE_SERVER_DIR on the gateway", name)
 	}
@@ -420,13 +477,24 @@ func (s *Server) uploadCode(ctx context.Context, fc *fwdConn, arch string) error
 	if fields["result"] != "ok" {
 		return codeFail("upload", "could not create ~/.local/lib/corral on the host")
 	}
-	client, closeSFTP, err := openSFTP(fc.client)
+	release, ok := s.fwd.takeChannel(fc.client)
+	if !ok {
+		return codeFail("busy", "too many forwarding connections are open; try again in a moment")
+	}
+	octx, cancel := context.WithTimeout(ctx, fwdConnectTimeout)
+	conn, err := sshx.OpenSubsystem(octx, fc.client, "sftp", sshx.DialOptions{Release: release, Dedicated: fc.owned})
+	cancel()
 	if err != nil {
 		return codeFail("upload", "could not open SFTP on the host: %v", err)
 	}
-	defer closeSFTP()
-	stop := context.AfterFunc(ctx, closeSFTP) // cancelling ends a transfer at once
+	defer conn.Close()
+	stop := context.AfterFunc(ctx, func() { conn.Close() }) // a cancel or timeout ends the transfer at once
 	defer stop()
+	client, err := sftp.NewClientPipe(conn, conn)
+	if err != nil {
+		return codeFail("upload", "could not open SFTP on the host: %v", err)
+	}
+	defer client.Close()
 	dst, err := client.OpenFile(codeserver.UploadPath(s.cfg.CodeServerVersion, arch), os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
 	if err != nil {
 		return codeFail("upload", "could not create the archive on the host: %v", err)
@@ -440,6 +508,26 @@ func (s *Server) uploadCode(ctx context.Context, fc *fwdConn, arch string) error
 		return codeFail("upload", "uploading code-server failed: %v", err)
 	}
 	return nil
+}
+
+func fileSHA256(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// newInstanceID names one start of code-server in its pid file.
+func newInstanceID() string {
+	b := make([]byte, 8)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
 }
 
 // stopCode stops code-server on the host (also one started before a restart
@@ -504,8 +592,13 @@ func (s *Server) stopCodeOn(ctx context.Context, fc *fwdConn) error {
 	if err != nil {
 		return err
 	}
-	if fields["result"] != "ok" {
-		return errors.New("the stop command did not finish")
+	switch {
+	case fields["error"] == "verify":
+		return errors.New("its pid file could not be read, so nothing was stopped")
+	case fields["error"] == "kill":
+		return errors.New("code-server is still running after being told to stop")
+	case fields["result"] != "ok":
+		return fmt.Errorf("the stop did not finish (%s)", fields["error"])
 	}
 	return nil
 }
