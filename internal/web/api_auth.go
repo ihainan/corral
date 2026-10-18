@@ -6,6 +6,9 @@ import (
 	"errors"
 	"net/http"
 	"regexp"
+	"slices"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -186,14 +189,69 @@ func (s *Server) apiChangePassword(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
-// Settings are stored as one JSON object of fields plus "_ts", the time
-// (client clock, milliseconds) each field was last changed. Clients send only
-// the fields they changed, each with its time, and a field is only taken if
-// it is newer than what is stored: a late or replayed request (a keepalive
-// sent while the page closed, a stale device) can never overwrite a newer
-// value, and changes to different fields never undo each other.
+// Settings are one JSON object of fields plus "_w": for each field the
+// writer (one page load of the app) and that writer's request number that
+// last set it. A later arrival wins, which is all settings need, except that
+// a writer's own older request never undoes its newer one (a keepalive sent
+// while the page closed may overtake a normal save). No client clock is
+// involved. Every request also names the account it was made for, so a tab
+// that missed a sign-in elsewhere cannot write into the new account.
 
-const settingsTS = "_ts"
+const settingsWriters = "_w"
+
+// settingRules lists the known settings and checks their values.
+var settingRules = map[string]func(json.RawMessage) bool{
+	"theme":        oneOf("system", "light", "dark"),
+	"termTheme":    matches(regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,63}$`)),
+	"fontSize":     intRange(9, 28),
+	"keybar":       isBool,
+	"optionIsMeta": isBool,
+	"webgl":        isBool,
+	"webhook":      webhookURL,
+}
+
+func oneOf(vals ...string) func(json.RawMessage) bool {
+	return func(raw json.RawMessage) bool {
+		var v string
+		return json.Unmarshal(raw, &v) == nil && slices.Contains(vals, v)
+	}
+}
+
+func matches(re *regexp.Regexp) func(json.RawMessage) bool {
+	return func(raw json.RawMessage) bool {
+		var v string
+		return json.Unmarshal(raw, &v) == nil && re.MatchString(v)
+	}
+}
+
+func intRange(lo, hi int) func(json.RawMessage) bool {
+	return func(raw json.RawMessage) bool {
+		var v int
+		return json.Unmarshal(raw, &v) == nil && v >= lo && v <= hi && strings.TrimSpace(string(raw)) == strconv.Itoa(v)
+	}
+}
+
+// webhookURL is empty (off) or an https URL without spaces; whether its
+// prefix is allowed is checked when sending.
+func webhookURL(raw json.RawMessage) bool {
+	var v string
+	if json.Unmarshal(raw, &v) != nil || len(v) > 2048 {
+		return false
+	}
+	return v == "" || (strings.HasPrefix(v, "https://") && len(v) > len("https://") && !strings.ContainsAny(v, " \t\r\n"))
+}
+
+func isBool(raw json.RawMessage) bool {
+	var v bool
+	return json.Unmarshal(raw, &v) == nil
+}
+
+type settingWriter struct {
+	ID  string `json:"id"`
+	Seq int64  `json:"seq"`
+}
+
+var writerIDRE = regexp.MustCompile(`^[A-Za-z0-9_-]{8,64}$`)
 
 func (s *Server) apiGetSettings(w http.ResponseWriter, r *http.Request) {
 	data, err := s.store.UserSettings(r.Context(), currentUser(r).ID)
@@ -205,48 +263,63 @@ func (s *Server) apiGetSettings(w http.ResponseWriter, r *http.Request) {
 	if json.Unmarshal([]byte(data), &obj) != nil || obj == nil {
 		obj = map[string]json.RawMessage{}
 	}
-	delete(obj, settingsTS)
+	out := map[string]json.RawMessage{}
+	for k, v := range obj {
+		if rule, ok := settingRules[k]; ok && rule(v) { // stored before validation existed: skip what no longer passes
+			out[k] = v
+		}
+	}
 	w.Header().Set("Cache-Control", "no-store")
-	writeJSON(w, http.StatusOK, obj)
+	writeJSON(w, http.StatusOK, out)
 }
-
-var settingKeyRE = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9]{0,63}$`)
 
 func (s *Server) apiPatchSettings(w http.ResponseWriter, r *http.Request) {
 	var b struct {
-		Set map[string]json.RawMessage `json:"set"`
-		TS  map[string]int64           `json:"ts"`
+		User   int64                      `json:"user"`
+		Writer string                     `json:"writer"`
+		Seq    int64                      `json:"seq"`
+		Set    map[string]json.RawMessage `json:"set"`
 	}
 	if err := readJSON(r, &b); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
-	if len(b.Set) == 0 || len(b.Set) > 64 {
-		writeError(w, http.StatusBadRequest, "bad_request", "send between 1 and 64 changed settings")
+	if b.User != currentUser(r).ID {
+		writeError(w, http.StatusConflict, "user_mismatch", "these settings were made for another account")
 		return
 	}
-	for k := range b.Set {
-		if !settingKeyRE.MatchString(k) || b.TS[k] <= 0 {
-			writeError(w, http.StatusBadRequest, "bad_request", "each setting needs a plain name and a positive ts")
+	if !writerIDRE.MatchString(b.Writer) || b.Seq <= 0 || len(b.Set) == 0 || len(b.Set) > len(settingRules) {
+		writeError(w, http.StatusBadRequest, "bad_request", "send a writer id, a positive seq and the changed settings")
+		return
+	}
+	for k, v := range b.Set {
+		if rule, ok := settingRules[k]; !ok || !rule(v) {
+			writeError(w, http.StatusBadRequest, "bad_setting", "unknown setting or invalid value: "+k)
 			return
 		}
 	}
+	var accepted, superseded []string
 	err := s.store.MergeUserSettings(r.Context(), currentUser(r).ID, func(old string) (string, error) {
+		accepted, superseded = nil, nil
 		var obj map[string]json.RawMessage
 		if json.Unmarshal([]byte(old), &obj) != nil || obj == nil {
 			obj = map[string]json.RawMessage{}
 		}
-		ts := map[string]int64{}
-		if raw, ok := obj[settingsTS]; ok {
-			_ = json.Unmarshal(raw, &ts)
+		writers := map[string]settingWriter{}
+		if raw, ok := obj[settingsWriters]; ok {
+			_ = json.Unmarshal(raw, &writers)
 		}
+		delete(obj, "_ts") // bookkeeping of an earlier format
 		for k, v := range b.Set {
-			if b.TS[k] > ts[k] {
-				obj[k], ts[k] = v, b.TS[k]
+			if prev, ok := writers[k]; ok && prev.ID == b.Writer && prev.Seq >= b.Seq {
+				superseded = append(superseded, k) // this writer already sent something newer
+				continue
 			}
+			obj[k], writers[k] = v, settingWriter{ID: b.Writer, Seq: b.Seq}
+			accepted = append(accepted, k)
 		}
-		rawTS, _ := json.Marshal(ts)
-		obj[settingsTS] = rawTS
+		rawW, _ := json.Marshal(writers)
+		obj[settingsWriters] = rawW
 		out, err := json.Marshal(obj)
 		if err != nil {
 			return "", err
@@ -264,7 +337,9 @@ func (s *Server) apiPatchSettings(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	sort.Strings(accepted)
+	sort.Strings(superseded)
+	writeJSON(w, http.StatusOK, map[string]any{"accepted": accepted, "superseded": superseded})
 }
 
 var errSettingsTooLarge = errors.New("settings too large")

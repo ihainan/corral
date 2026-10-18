@@ -508,31 +508,43 @@ func TestOpenGateWaitsCancelsAndForgets(t *testing.T) {
 	}
 }
 
-// Settings are patched field by field and a field only takes a newer
-// change: a late request (a keepalive sent while a page closed, an old
-// device) cannot undo a newer value, and fields never overwrite each other.
-func TestSettingsPatchKeepsTheNewestChangePerField(t *testing.T) {
+// Settings: a later arrival wins, except that a writer's own older request
+// never undoes its newer one; values are checked; and a request made for
+// another account is refused.
+func TestSettingsPatchOrderingValidationAndAccount(t *testing.T) {
 	h := newHarness(t)
 	admin := h.admin()
-	patch := func(set map[string]any, ts map[string]int64) resp {
-		return admin.do("PATCH", "/api/me/settings", map[string]any{"set": set, "ts": ts})
+	uid := admin.do("GET", "/api/me", nil).json()["id"]
+	patch := func(writer string, seq int, set map[string]any) resp {
+		return admin.do("PATCH", "/api/me/settings", map[string]any{"user": uid, "writer": writer, "seq": seq, "set": set})
 	}
-	mustStatus(t, patch(map[string]any{"termTheme": "dracula", "fontSize": 15}, map[string]int64{"termTheme": 200, "fontSize": 200}), 200, "first patch")
-	mustStatus(t, patch(map[string]any{"termTheme": "nord"}, map[string]int64{"termTheme": 100}), 200, "older change")
-	mustStatus(t, patch(map[string]any{"keybar": false}, map[string]int64{"keybar": 150}), 200, "other field")
+	mustStatus(t, patch("pageAAAA", 2, map[string]any{"termTheme": "dracula", "fontSize": 15}), 200, "A seq 2")
+	r := patch("pageAAAA", 1, map[string]any{"termTheme": "nord"}) // A's older request arriving late
+	mustStatus(t, r, 200, "A seq 1 late")
+	if sup, _ := r.json()["superseded"].([]any); len(sup) != 1 || sup[0] != "termTheme" {
+		t.Fatalf("late request not reported as superseded: %s", r.Body)
+	}
+	mustStatus(t, patch("pageBBBB", 1, map[string]any{"keybar": false}), 200, "B other field")
 	got := admin.do("GET", "/api/me/settings", nil).json()
 	if got["termTheme"] != "dracula" || got["fontSize"] != float64(15) || got["keybar"] != false {
 		t.Fatalf("merge went wrong: %v", got)
 	}
-	if _, ok := got["_ts"]; ok {
-		t.Fatal("bookkeeping leaked into the settings")
+	for k := range got {
+		if strings.HasPrefix(k, "_") {
+			t.Fatalf("bookkeeping leaked into the settings: %v", got)
+		}
 	}
-	mustStatus(t, patch(map[string]any{"termTheme": "nord"}, map[string]int64{"termTheme": 300}), 200, "newer change")
+	mustStatus(t, patch("pageBBBB", 2, map[string]any{"termTheme": "nord"}), 200, "B later arrival")
 	if got := admin.do("GET", "/api/me/settings", nil).json(); got["termTheme"] != "nord" {
-		t.Fatalf("a newer change was not taken: %v", got)
+		t.Fatalf("a later arrival from another page did not win: %v", got)
 	}
-	mustStatus(t, patch(map[string]any{"_ts": map[string]any{}}, map[string]int64{"_ts": 999}), 400, "reserved name")
-	mustStatus(t, patch(map[string]any{"fontSize": 12}, nil), 400, "missing ts")
+	mustStatus(t, patch("pageAAAA", 3, map[string]any{"fontSize": map[string]any{}}), 400, "object as font size")
+	mustStatus(t, patch("pageAAAA", 3, map[string]any{"fontSize": 99}), 400, "font size out of range")
+	mustStatus(t, patch("pageAAAA", 3, map[string]any{"_w": 1}), 400, "reserved name")
+	mustStatus(t, patch("pageAAAA", 3, map[string]any{"colour": "x"}), 400, "unknown setting")
+	if r := admin.do("PATCH", "/api/me/settings", map[string]any{"user": 99999, "writer": "pageAAAA", "seq": 4, "set": map[string]any{"keybar": true}}); r.code() != "user_mismatch" {
+		t.Fatalf("a request for another account was accepted: %d %s", r.Status, r.Body)
+	}
 	if r := admin.do("PUT", "/api/me/settings", map[string]any{"termTheme": "x"}); r.Status == 200 {
 		t.Fatal("whole-object PUT still overwrites settings")
 	}

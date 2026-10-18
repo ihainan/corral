@@ -48,10 +48,12 @@ export function HostsPage() {
   const running = sessions.filter((s) => s.state === 'running')
   const byHost = (id: number) => running.filter((s) => s.host_id === id).sort((a, b) => a.created_at - b.created_at)
 
-  const closeSession = (s: SessionInfo) =>
+  // The confirmation names exactly what the row showed, plus when it started,
+  // so sessions without a title (or with the same one) can be told apart.
+  const closeSession = (s: SessionInfo, label: string) =>
     setConfirm(
       <Confirm
-        title={t('hosts.closeSessionOf', { name: s.host_name + (s.title ? '：' + s.title : '') })}
+        title={t('hosts.closeSessionOf', { name: `${s.host_name}：${label}（${t('hosts.startedAgo', { when: relTime(s.created_at) })}）` })}
         body={t('hosts.closeSessionConfirm')}
         confirm={t('hosts.closeSession')}
         danger
@@ -154,7 +156,7 @@ export function HostsPage() {
                         <span className="row-sub" id={'sd-' + s.id}>{sessionDetail(s, h)}</span>
                       </a>
                       <div className="row-actions">
-                        <button className="icon-btn" aria-label={t('hosts.closeNamed', { name: `${h.name}：${s.title || name}` })} title={t('hosts.closeSession')} onClick={() => closeSession(s)}>
+                        <button className="icon-btn" aria-label={t('hosts.closeNamed', { name: `${h.name}：${s.title || name}` })} title={t('hosts.closeSession')} onClick={() => closeSession(s, s.title || name)}>
                           <X size={16} />
                         </button>
                       </div>

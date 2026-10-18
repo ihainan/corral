@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"io/fs"
 	"log/slog"
 	"net"
@@ -463,7 +464,13 @@ func readJSON(r *http.Request, v any) error {
 	}
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
-	return dec.Decode(v)
+	if err := dec.Decode(v); err != nil {
+		return err
+	}
+	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return errors.New("unexpected data after the JSON body")
+	}
+	return nil
 }
 
 func pathID(r *http.Request) (int64, bool) {

@@ -29,7 +29,7 @@ function readCache(uid: number | null): Prefs {
   try {
     const key = cacheKey(uid ?? Number(localStorage.getItem(LAST) ?? NaN))
     const raw = key && !key.endsWith('NaN') ? localStorage.getItem(key) : null
-    if (raw) return { ...defaults, ...JSON.parse(raw) }
+    if (raw) return { ...defaults, ...sanitize(JSON.parse(raw)) }
   } catch {
     /* ignore */
   }
@@ -51,35 +51,36 @@ function emit() {
   subs.forEach((s) => s())
 }
 
-// Saving. Only changed fields are sent, each stamped with the time it was
-// changed; the server keeps a field only if the stamp is newer than what it
-// has (see apiPatchSettings). So requests may arrive in any order, a
-// keepalive may race a normal save, and another device's newer change is
-// never undone. Pending changes belong to one account and one sign-in:
-// signing out or in drops them, and a save already queued for the previous
-// account is not sent.
-type Pending = Map<string, { value: unknown; ts: number }>
-let pending: Pending = new Map()
+// Saving. Only changed fields are sent. The server takes the later arrival,
+// except that this page's own older request never undoes its newer one: each
+// page load is a writer with its own request numbers (see apiPatchSettings).
+// No clock is involved. Each request names the account it is for, and the
+// server refuses it if the browser is signed in as someone else by then.
+// Pending changes belong to one sign-in: signing out or in drops them, and
+// requests of an earlier sign-in are never sent.
+const writer = Array.from(crypto.getRandomValues(new Uint8Array(12)), (b) => b.toString(36).padStart(2, '0')).join('')
+let seq = 0
+let edits = 0 // counts changes made on this page
+const editedAt = new Map<string, number>() // field -> edits count when last changed here
+let pending = new Map<string, { value: unknown; edit: number }>()
 let generation = 0
-let lastTS = 0
 let saveTimer: number | undefined
 let queue: Promise<void> = Promise.resolve()
+let retryTimer: number | undefined
 
-const stamp = () => (lastTS = Math.max(lastTS + 1, Date.now()))
-
-function body(p: Pending) {
+function request(p: typeof pending) {
   const set: Record<string, unknown> = {}
-  const ts: Record<string, number> = {}
-  for (const [k, v] of p) {
-    set[k] = v.value
-    ts[k] = v.ts
-  }
-  return { set, ts }
+  for (const [k, v] of p) set[k] = v.value
+  return { user: owner, writer, seq: ++seq, set }
 }
 
 export function setPrefs(patch: Partial<Prefs>) {
   state = { ...state, ...patch }
-  for (const [k, v] of Object.entries(patch)) pending.set(k, { value: v, ts: stamp() })
+  for (const [k, v] of Object.entries(patch)) {
+    edits++
+    editedAt.set(k, edits)
+    pending.set(k, { value: v, edit: edits })
+  }
   emit()
   clearTimeout(saveTimer)
   saveTimer = window.setTimeout(save, 600)
@@ -90,17 +91,37 @@ function save() {
   saveTimer = undefined
   const gen = generation
   queue = queue.then(async () => {
-    if (gen !== generation || pending.size === 0) return
+    if (gen !== generation || pending.size === 0 || owner === null) return
     const sent = new Map(pending)
+    const ctl = new AbortController()
+    const timer = window.setTimeout(() => ctl.abort(), 10000)
     try {
-      await api('PATCH', '/api/me/settings', body(sent))
-      // Drop what was confirmed, unless it changed again meanwhile.
-      for (const [k, v] of sent) if (pending.get(k)?.ts === v.ts) pending.delete(k)
+      const res = await fetch('/api/me/settings', {
+        method: 'PATCH', credentials: 'same-origin', signal: ctl.signal,
+        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(request(sent)),
+      })
+      if (gen !== generation) return
+      if (res.ok) {
+        // Accepted or superseded by this page's own newer request: either way
+        // done, unless the field changed again meanwhile.
+        for (const [k, v] of sent) if (pending.get(k)?.edit === v.edit) pending.delete(k)
+      } else if (res.status === 400 || res.status === 401 || res.status === 409) {
+        // Refused for good: invalid, signed out, or now another account.
+        for (const [k, v] of sent) if (pending.get(k)?.edit === v.edit) pending.delete(k)
+      } else scheduleRetry()
     } catch {
-      /* kept; goes with the next save or the keepalive on leaving */
+      if (gen === generation) scheduleRetry()
+    } finally {
+      clearTimeout(timer)
     }
   })
 }
+
+function scheduleRetry() {
+  clearTimeout(retryTimer)
+  retryTimer = window.setTimeout(() => pending.size && save(), 15000)
+}
+window.addEventListener('online', () => pending.size && save())
 
 // Sends what is still pending now, e.g. before signing out.
 export async function flushPrefs() {
@@ -109,26 +130,48 @@ export async function flushPrefs() {
 }
 
 // Leaving the page: pending fields go out with keepalive, which survives
-// the unload. Their stamps make a duplicate or late arrival harmless.
+// the unload; the request number keeps a late arrival from undoing anything.
 function flush() {
   if (pending.size === 0 || owner === null) return
   clearTimeout(saveTimer)
   saveTimer = undefined
   void fetch('/api/me/settings', {
     method: 'PATCH', credentials: 'same-origin', keepalive: true,
-    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body(pending)),
+    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(request(pending)),
   }).catch(() => {})
 }
 window.addEventListener('pagehide', flush)
-document.addEventListener('visibilitychange', () => document.visibilityState === 'hidden' && flush())
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') flush()
+  else if (pending.size) save()
+})
+
+// Another tab signed in as someone else: this page's account is gone.
+window.addEventListener('storage', (e) => {
+  if (e.key === LAST && owner !== null && e.newValue !== String(owner)) location.reload()
+})
 
 // Forget the signed-in account's pending work (sign-out).
 export function resetPrefsSession() {
   generation++
   pending = new Map()
+  editedAt.clear()
+  queue = Promise.resolve() // requests of the old sign-in no longer hold up new ones
   clearTimeout(saveTimer)
+  clearTimeout(retryTimer)
   saveTimer = undefined
   owner = null
+}
+
+// Values from the server or the local cache are checked, not trusted.
+function sanitize(raw: unknown): Partial<Prefs> {
+  const o = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>
+  const out: Partial<Prefs> = {}
+  if (o.theme === 'system' || o.theme === 'light' || o.theme === 'dark') out.theme = o.theme
+  if (typeof o.termTheme === 'string' && /^[a-z0-9][a-z0-9-]{0,63}$/.test(o.termTheme)) out.termTheme = o.termTheme
+  if (Number.isInteger(o.fontSize) && (o.fontSize as number) >= 9 && (o.fontSize as number) <= 28) out.fontSize = o.fontSize as number
+  for (const k of ['keybar', 'optionIsMeta', 'webgl'] as const) if (typeof o[k] === 'boolean') out[k] = o[k] as boolean
+  return out
 }
 
 export async function syncPrefsFromServer(userId: number) {
@@ -144,13 +187,14 @@ export async function syncPrefsFromServer(userId: number) {
     emit()
   }
   const gen = generation
+  const startedAt = edits
   try {
-    const remote = await api<Partial<Prefs>>('GET', '/api/me/settings')
+    const remote = sanitize(await api<unknown>('GET', '/api/me/settings'))
     if (gen !== generation || owner !== userId) return // signed out or switched meanwhile
-    // The server's copy, except for fields changed here and not yet confirmed.
-    const local: Partial<Prefs> = {}
-    for (const [k, v] of pending) (local as Record<string, unknown>)[k] = v.value
-    state = { ...defaults, ...remote, ...local }
+    // Fields changed on this page after the request went out keep their
+    // local value, saved or not: the response may predate them.
+    for (const [k, at] of editedAt) if (at > startedAt) delete (remote as Record<string, unknown>)[k]
+    state = { ...defaults, ...state, ...remote }
     emit()
   } catch {
     /* keep local */
