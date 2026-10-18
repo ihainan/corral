@@ -106,11 +106,6 @@ export function TerminalPage({ id }: { id: string }) {
   const [sessionsFailed, setSessionsFailed] = useState(false)
   // False from a disconnect until this connection sends a new herdr summary.
   const [herdrFresh, setHerdrFresh] = useState(true)
-  // Only a new socket brings a new summary; a brief "offline" while the socket
-  // stays up is covered by `paused` and needs no fresh summary afterwards.
-  useEffect(() => {
-    if (status === 'connecting' || status === 'reconnecting') setHerdrFresh(false)
-  }, [status])
   // Crossing the width where the panel turns from docked to a sheet closes it,
   // so it never reappears in another form above a dialog that is open.
   const firstSheet = useRef(sheetPanel)
@@ -245,6 +240,8 @@ export function TerminalPage({ id }: { id: string }) {
         setHerdrFresh(true)
       },
       onLive: () => term.write('', () => (replaying = false)),
+      // Every new socket: the herdr summary is old until this one sends its own.
+      onHello: () => setHerdrFresh(false),
     })
     connRef.current = conn
     conn.resize(term.cols, term.rows)

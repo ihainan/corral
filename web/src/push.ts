@@ -46,10 +46,10 @@ export async function enablePush(publicKey: string): Promise<PushState> {
 // the server did not take it.
 export async function syncPush(): Promise<boolean> {
   if (!('serviceWorker' in navigator) || !('PushManager' in window)) return true
-  const reg = await navigator.serviceWorker.getRegistration()
-  const sub = await reg?.pushManager.getSubscription()
-  if (!sub) return true
   try {
+    const reg = await navigator.serviceWorker.getRegistration()
+    const sub = await reg?.pushManager.getSubscription()
+    if (!sub) return true
     await api('POST', '/api/push/subscriptions', sub.toJSON())
     return true
   } catch {

@@ -24,6 +24,7 @@ export interface Handlers {
   onLatency(ms: number): void
   onMeta?(m: any): void // side information such as herdr state
   onLive?(): void // the replayed backlog has been delivered
+  onHello?(): void // a new socket was accepted; state from the old one is stale
 }
 
 export type SendResult = 'sent' | 'queued' | 'dropped'
@@ -130,6 +131,7 @@ export class TermConnection {
       if (typeof e.data === 'string') {
         const m = JSON.parse(e.data)
         if (m.t === 'hello') {
+          this.h.onHello?.()
           gotHello = true
           this.attempt = 0
           this.backlog = true
