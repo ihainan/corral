@@ -19,6 +19,7 @@ import (
 
 	"github.com/ihainan/corral/internal/auth"
 	"github.com/ihainan/corral/internal/config"
+	"github.com/ihainan/corral/internal/sshx"
 	"github.com/ihainan/corral/internal/store"
 )
 
@@ -357,5 +358,49 @@ func TestLoginsOlderThanPasswordAreVoid(t *testing.T) {
 	_ = st.SetPassword(ctx, u.ID, pw) // password_changed_at moves past the login
 	if _, _, err := svc.Authenticate(ctx, tok); err == nil {
 		t.Fatal("a login older than the password still works")
+	}
+}
+
+// Round 4 -------------------------------------------------------------------
+
+// Later key exchanges re-run the host key callback after the connecting
+// request (and its context) is gone; the session must survive them.
+func TestSessionSurvivesKeyReexchange(t *testing.T) {
+	sshx.RekeyThreshold = 64 << 10
+	defer func() { sshx.RekeyThreshold = 0 }()
+	h := newHarness(t)
+	admin := h.admin()
+	srv := h.sshServer(t.TempDir())
+	r := admin.do("POST", "/api/sessions", map[string]any{"host_id": h.hostFor(admin, srv.Addr.Port)})
+	mustStatus(t, r, 201, "open")
+	id := r.json()["id"].(string)
+	ws, err := h.dialWS(admin, id, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ws.CloseNow()
+	ws.SetReadLimit(1 << 20)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	payload := bytes.Repeat([]byte("x"), 32<<10)
+	for i := 0; i < 12; i++ { // ~400 KB each way: several re-exchanges at 64 KB
+		if err := ws.Write(ctx, websocket.MessageBinary, payload); err != nil {
+			t.Fatal(err)
+		}
+	}
+	received := 0
+	for received < 12*len(payload) {
+		typ, data, err := ws.Read(ctx)
+		if err != nil {
+			t.Fatalf("socket ended after %d bytes: %v", received, err)
+		}
+		if typ == websocket.MessageBinary {
+			received += len(data) - 8
+		}
+	}
+	for _, s := range h.terms.List(1) {
+		if s.ID == id && s.State != "running" {
+			t.Fatalf("session state %s after key re-exchange", s.State)
+		}
 	}
 }

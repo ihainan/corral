@@ -98,7 +98,18 @@ type Session struct {
 	title     string
 	finished  chan struct{} // closed when the session reached a final state
 
-	onEnd func(*Session)
+	onEnd   func(*Session)
+	uploads chan struct{} // limits concurrent file transfers on this connection
+}
+
+// UploadSlot reserves one of the session's transfer slots.
+func (s *Session) UploadSlot() (release func(), ok bool) {
+	select {
+	case s.uploads <- struct{}{}:
+		return func() { <-s.uploads }, true
+	default:
+		return nil, false
+	}
 }
 
 func (s *Session) Info() Info {
@@ -289,11 +300,13 @@ func (s *Session) end(state string, code int, reason string) {
 	s.subs = map[*Sub]struct{}{}
 	close(s.finished)
 	s.mu.Unlock()
-	if s.ssh != nil {
-		s.ssh.Close()
-	}
+	// The connection first: closing it cannot block, and it makes the channel
+	// close below fail fast instead of waiting on a stalled transport.
 	if s.client != nil {
 		s.client.Close()
+	}
+	if s.ssh != nil {
+		s.ssh.Close()
 	}
 	if s.onEnd != nil {
 		s.onEnd(s)

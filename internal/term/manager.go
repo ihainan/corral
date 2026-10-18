@@ -167,7 +167,7 @@ func (m *Manager) Start(ctx context.Context, res *Reservation, owner, hostID int
 			ID: newID(), OwnerID: owner, HostID: hostID, HostName: hostName, Created: time.Now(),
 			client: client, ssh: sess, stdin: stdin, input: make(chan []byte, inputQueue),
 			buf: newRing(ringSize), subs: map[*Sub]struct{}{}, state: StateRunning,
-			cols: cols, rows: rows, idleSince: time.Now(), finished: make(chan struct{}),
+			cols: cols, rows: rows, idleSince: time.Now(), finished: make(chan struct{}), uploads: make(chan struct{}, 2),
 		}
 		s.pumps.Add(2)
 		go s.pump(stdout)
@@ -296,9 +296,16 @@ func (m *Manager) closeMatching(match func(*Session) bool, reason string) {
 		}
 	}
 	m.mu.Unlock()
+	// In parallel: one host that is slow to close must not hold up the others.
+	var wg sync.WaitGroup
 	for _, s := range hit {
-		s.Close(reason)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s.Close(reason)
+		}()
 	}
+	wg.Wait()
 }
 
 // CloseUser ends every session a user owns, used when access is revoked.

@@ -477,16 +477,33 @@ var errTooLarge = errors.New("file too large")
 //   - stderr is read continuously so it cannot fill the channel window.
 func openSFTP(c *ssh.Client) (*sftp.Client, func(), error) {
 	type result struct {
-		sess   *ssh.Session
 		client *sftp.Client
 		close  func()
 		err    error
 	}
 	done := make(chan result, 1)
+	// If we give up waiting, whatever the setup goroutine has acquired so far is
+	// released right away (and anything acquired later as soon as it is).
+	var mu sync.Mutex
+	abandoned := false
+	var release func()
+	hold := func(f func()) bool {
+		mu.Lock()
+		defer mu.Unlock()
+		if abandoned {
+			f()
+			return false
+		}
+		release = f
+		return true
+	}
 	go func() {
 		sess, err := c.NewSession()
 		if err != nil {
 			done <- result{err: err}
+			return
+		}
+		if !hold(func() { sess.Close() }) {
 			return
 		}
 		fail := func(err error) { sess.Close(); done <- result{err: err} }
@@ -506,15 +523,9 @@ func openSFTP(c *ssh.Client) (*sftp.Client, func(), error) {
 			return
 		}
 		go io.Copy(io.Discard, chErr)
-		if err := sess.RequestSubsystem("sftp"); err != nil {
-			fail(err)
-			return
-		}
 		// Local pipes between the sftp client and the channel.
 		outR, outW := io.Pipe()
 		inR, inW := io.Pipe()
-		go func() { _, err := io.Copy(outW, chOut); outW.CloseWithError(err) }()
-		go func() { _, err := io.Copy(chIn, inR); inR.CloseWithError(err) }()
 		var once sync.Once
 		closeAll := func() {
 			once.Do(func() {
@@ -523,13 +534,27 @@ func openSFTP(c *ssh.Client) (*sftp.Client, func(), error) {
 				sess.Close()
 			})
 		}
+		if !hold(closeAll) {
+			return
+		}
+		if err := sess.RequestSubsystem("sftp"); err != nil {
+			closeAll()
+			done <- result{err: err}
+			return
+		}
+		go func() { _, err := io.Copy(outW, chOut); outW.CloseWithError(err) }()
+		go func() { _, err := io.Copy(chIn, inR); inR.CloseWithError(err) }()
 		client, err := sftp.NewClientPipe(outR, inW)
 		if err != nil {
 			closeAll()
 			done <- result{err: err}
 			return
 		}
-		done <- result{sess: sess, client: client, close: func() { closeAll(); go client.Close() }}
+		closer := func() { closeAll(); go client.Close() }
+		if !hold(closer) {
+			return
+		}
+		done <- result{client: client, close: closer}
 	}()
 	t := time.NewTimer(15 * time.Second)
 	defer t.Stop()
@@ -540,11 +565,12 @@ func openSFTP(c *ssh.Client) (*sftp.Client, func(), error) {
 		}
 		return r.client, r.close, nil
 	case <-t.C:
-		go func() { // the host may still answer later; tidy up whenever it does
-			if r := <-done; r.close != nil {
-				r.close()
-			}
-		}()
+		mu.Lock()
+		abandoned = true
+		if release != nil {
+			release()
+		}
+		mu.Unlock()
 		return nil, nil, errors.New("file transfer did not start in time")
 	}
 }
@@ -560,6 +586,29 @@ func (s *Server) apiUpload(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "session_ended", "this session has ended")
 		return
 	}
+	releaseSlot, ok := sess.UploadSlot()
+	if !ok {
+		writeError(w, http.StatusTooManyRequests, "busy", "another upload is in progress")
+		return
+	}
+	defer releaseSlot()
+	// Bound to the login like a terminal socket: sign-out, password change,
+	// disable or the login's expiry stop the transfer.
+	expiry, err := s.auth.LoginExpiry(r.Context(), loginHash(r))
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "please sign in")
+		return
+	}
+	ctx, cancel := context.WithDeadline(r.Context(), expiry)
+	defer cancel()
+	untrack := s.trackPending(u.ID, &liveSocket{loginHash: loginHash(r), hostID: sess.HostID, cancel: cancel})
+	defer untrack()
+	if _, err := s.auth.CheckLogin(ctx, loginHash(r)); err != nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "please sign in")
+		return
+	}
+	stopBody := context.AfterFunc(ctx, func() { r.Body.Close() })
+	defer stopBody()
 	mr, err := r.MultipartReader()
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", "expected a multipart upload")
@@ -598,7 +647,7 @@ func (s *Server) apiUpload(w http.ResponseWriter, r *http.Request) {
 	defer closeSFTP()
 	// A cancelled request (browser gone) stops the transfer; so does a host
 	// that stops answering for too long.
-	stop := context.AfterFunc(r.Context(), closeSFTP)
+	stop := context.AfterFunc(ctx, closeSFTP)
 	defer stop()
 	watchdog := time.AfterFunc(30*time.Minute, closeSFTP)
 	defer watchdog.Stop()

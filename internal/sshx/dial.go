@@ -62,6 +62,10 @@ var ErrAuthFailed = errors.New("authentication failed")
 
 const dialTimeout = 15 * time.Second
 
+// RekeyThreshold overrides how many bytes pass before SSH re-negotiates keys
+// (0 keeps the library default). Tests lower it to exercise key re-exchange.
+var RekeyThreshold uint64
+
 func Dial(ctx context.Context, guard *netguard.Guard, t Target) (*Result, error) {
 	ctx, cancel := context.WithTimeout(ctx, dialTimeout)
 	defer cancel()
@@ -101,29 +105,46 @@ func Dial(ctx context.Context, guard *netguard.Guard, t Target) (*Result, error)
 
 	seen := &Pinned{}
 	replaced := false
+	var verified []byte
 	cfg := &ssh.ClientConfig{
 		User:    t.User,
 		Auth:    auths,
 		Timeout: dialTimeout,
 		HostKeyCallback: func(_ string, _ net.Addr, key ssh.PublicKey) error {
+			// The callback also runs on every later key exchange of this
+			// connection. Those must present the key verified at connect time;
+			// they are not re-decided (the deciding request is long gone).
+			if verified != nil {
+				if !bytes.Equal(verified, key.Marshal()) {
+					return &HostKeyChangedError{Expected: seen.Fingerprint, Got: ssh.FingerprintSHA256(key)}
+				}
+				return nil
+			}
 			seen.KeyType = key.Type()
 			seen.KeyData = key.Marshal()
 			seen.Fingerprint = ssh.FingerprintSHA256(key)
 			if t.Verify != nil {
-				return t.Verify(seen)
+				if err := t.Verify(seen); err != nil {
+					return err
+				}
+				verified = seen.KeyData
+				return nil
 			}
 			if t.Pinned != nil && !bytes.Equal(t.Pinned.KeyData, seen.KeyData) {
 				if t.Accept != "" && t.Accept == seen.Fingerprint {
 					replaced = true
+					verified = seen.KeyData
 					return nil
 				}
 				return &HostKeyChangedError{Expected: t.Pinned.Fingerprint, Got: seen.Fingerprint}
 			}
+			verified = seen.KeyData
 			return nil
 		},
 		// Prefer modern algorithms but keep RSA for older servers.
 		HostKeyAlgorithms: nil,
 	}
+	cfg.RekeyThreshold = RekeyThreshold
 
 	conn, err := guard.DialTCP(ctx, t.Address, t.Port)
 	if err != nil {
