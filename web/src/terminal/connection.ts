@@ -246,6 +246,9 @@ export class TermConnection {
         } else if (m.t === 'size') {
           if (this.takeSeq > 0 && (m.ack ?? 0) >= this.takeSeq) this.takeSeq = 0 // the takeover arrived
           if ((m.ack ?? 0) < this.sizeSeq) return // from before this window's latest request
+          // Another window took over after this one's requests: a takeover
+          // still waiting to be sent came before that, so it is dropped.
+          if (!m.own) this.takeUnsent = false
           this.h.onSize?.(m.cols, m.rows, !!m.own)
         } else if (m.t === 'pong') {
           clearTimeout(this.pongDeadline)
