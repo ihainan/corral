@@ -18,6 +18,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -221,6 +222,17 @@ func (s *Server) serveForward(w http.ResponseWriter, r *http.Request, port int, 
 		s.forwardLoginRedirect(w, r, mainLogin)
 		return
 	}
+	// A WebSocket or a long response lives no longer than the login, and
+	// re-checks access as often as a terminal socket does: logins also end
+	// by expiring, which nothing announces.
+	expiry, err := s.auth.LoginExpiry(ctx, g.loginHash)
+	if err != nil {
+		s.forwardLoginRedirect(w, r, mainLogin)
+		return
+	}
+	ctx, cancelAtExpiry := context.WithDeadline(ctx, expiry)
+	defer cancelAtExpiry()
+	defer recheckEvery(ctx, loginRecheck, func() bool { return s.forwardAllowed(ctx, g, f) }, cancel)()
 	fc, err := s.forwardConn(ctx, f)
 	if errors.Is(err, errFwdBusy) {
 		http.Error(w, "Too many forwarded connections are open right now. Try again in a moment.", http.StatusServiceUnavailable)
@@ -232,6 +244,37 @@ func (s *Server) serveForward(w http.ResponseWriter, r *http.Request, port int, 
 	}
 	defer s.fwd.release(fc)
 	s.proxyTo(w, r.WithContext(ctx), fc, f)
+}
+
+// recheckEvery runs check every d while ctx lasts and calls fail (once) when
+// it reports false. It uses a timer rather than a goroutine, as most proxied
+// requests are short. The returned func stops it.
+func recheckEvery(ctx context.Context, d time.Duration, check func() bool, fail func()) (stop func()) {
+	var mu sync.Mutex
+	stopped := false
+	var t *time.Timer
+	mu.Lock() // t is set before the first run reads it
+	defer mu.Unlock()
+	t = time.AfterFunc(d, func() {
+		if ctx.Err() != nil {
+			return
+		}
+		if !check() {
+			fail()
+			return
+		}
+		mu.Lock()
+		if !stopped {
+			t.Reset(d)
+		}
+		mu.Unlock()
+	})
+	return func() {
+		mu.Lock()
+		stopped = true
+		t.Stop()
+		mu.Unlock()
+	}
 }
 
 // forwardAllowed re-checks a grant: the login is live and is still the
@@ -269,20 +312,20 @@ func (s *Server) forwardConn(ctx context.Context, f *store.Forward) (*fwdConn, e
 	}
 	key := [2]int64{f.OwnerID, f.HostID}
 	for range 3 {
-		if fc := s.fwd.pooled(key); fc != nil {
-			return fc, nil
-		}
 		// The dial is shared by every request waiting for it, so it does not
 		// end with the request that started it; revocation cancels it.
 		dctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 		// Registered before the host and owner are read: revoking either from
 		// now on cancels this dial and keeps its connection out of the pool.
-		d, lead, err := s.fwd.startDial(f.OwnerID, f.HostID, cancel)
-		if err != nil {
+		fc, d, lead, err := s.fwd.acquire(key, cancel)
+		switch {
+		case err != nil:
 			cancel()
 			return nil, err
-		}
-		if lead {
+		case fc != nil:
+			cancel()
+			return fc, nil
+		case lead:
 			client, err := s.dialForward(dctx, f.OwnerID, f.HostID)
 			cancel()
 			return s.fwd.finishDial(d, client, err)
@@ -515,7 +558,16 @@ func (s *Server) apiHostPorts(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	fc, err := s.forwardConn(r.Context(), &store.Forward{OwnerID: h.OwnerID, HostID: h.ID})
+	// Counted like a proxied request, and ended by the same revocations.
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	st, ok := s.fwd.startStream(fwdUse{userID: h.OwnerID, loginHash: loginHash(r), ownerID: h.OwnerID, hostID: h.ID}, cancel)
+	if !ok {
+		writeError(w, http.StatusServiceUnavailable, "busy", "too many forwarding connections are open; try again in a moment")
+		return
+	}
+	defer s.fwd.endStream(st)
+	fc, err := s.forwardConn(ctx, &store.Forward{OwnerID: h.OwnerID, HostID: h.ID})
 	if errors.Is(err, errFwdBusy) {
 		writeError(w, http.StatusServiceUnavailable, "busy", "too many forwarding connections are open; try again in a moment")
 		return
@@ -525,7 +577,7 @@ func (s *Server) apiHostPorts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer s.fwd.release(fc)
-	ports, err := listeningPorts(r.Context(), fc.client)
+	ports, err := listeningPorts(ctx, fc.client) // returns only once the remote command is really over
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "ports_failed", "could not list ports on the host")
 		return

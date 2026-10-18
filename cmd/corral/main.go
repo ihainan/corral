@@ -138,8 +138,21 @@ func run(log *slog.Logger) error {
 	shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_ = hs.Shutdown(shutCtx)
-	srv.Close() // forwarded connections and background work
-	terms.Shutdown()
+	// Terminals first: closing their SSH connections cannot block and unblocks
+	// anything still waiting on them (forwards borrowing them included). Then
+	// the forwarding connections and background work. Bounded, so a stuck
+	// host cannot keep the process from exiting.
+	done := make(chan struct{})
+	go func() {
+		terms.Shutdown()
+		srv.Close()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		log.Warn("gave up waiting for connections to close")
+	}
 	return nil
 }
 
