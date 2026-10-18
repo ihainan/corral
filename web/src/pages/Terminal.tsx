@@ -61,6 +61,20 @@ function userInputEvent(term: Terminal): Listen | null {
   return typeof ev === 'function' ? ev : null
 }
 
+// Resolves once no composition is in progress (at once if none is).
+function untilNotComposing(composingNow: () => boolean, ta: HTMLTextAreaElement | null): Promise<void> {
+  if (!composingNow() || !ta) return Promise.resolve()
+  return new Promise((resolve) => {
+    const done = () => {
+      ta.removeEventListener('compositionend', done)
+      ta.removeEventListener('blur', done)
+      setTimeout(resolve, 0) // let xterm send the composition first
+    }
+    ta.addEventListener('compositionend', done)
+    ta.addEventListener('blur', done)
+  })
+}
+
 function shellPath(p: string): string | null {
   if (/[\x00-\x1f\x7f]/.test(p)) return null
   if (/^[\w@%+=:,./~-]+$/.test(p)) return p
@@ -135,6 +149,7 @@ export function TerminalPage({ id }: { id: string }) {
   // Latest modifier state for the xterm data callback.
   const openComposerRef = useRef<() => void>(() => {})
   const settleRef = useRef<() => void>(() => {})
+  const composingRef = useRef<() => boolean>(() => false)
   const mods = useRef<{ ctrl: ModState; alt: ModState }>({ ctrl: 'off', alt: 'off' })
   mods.current = { ctrl, alt }
   const releaseOnce = useCallback(() => {
@@ -287,7 +302,7 @@ export function TerminalPage({ id }: { id: string }) {
     // xterm internals this relies on (checked against @xterm/xterm 6.0.0): the
     // composition helper, so a finished composition is sent before the next
     // key, and the dead-key flag, so xterm keeps handling the key after one.
-    type Core = { _compositionHelper?: { keydown(e: KeyboardEvent): boolean }; _unprocessedDeadKey?: boolean }
+    type Core = { _compositionHelper?: { keydown(e: KeyboardEvent): boolean; isComposing?: boolean }; _unprocessedDeadKey?: boolean }
     const core = (term as unknown as { _core?: Core })._core
     const internalsOk = !!core && typeof core._compositionHelper?.keydown === 'function' && typeof core._unprocessedDeadKey === 'boolean'
     // The key left to the browser, identified by its physical code, until its
@@ -296,7 +311,11 @@ export function TerminalPage({ id }: { id: string }) {
     // event, so a claim never spans keys; text arriving outside one is
     // ordinary input for xterm.
     let claim: string | null = null
-    let lastImeKey = -Infinity
+    // After a 229 key xterm reads its textarea change in a zero-delay timer;
+    // no punctuation is claimed until that has run. A timer queued from inside
+    // our own zero-delay timer runs after xterm's (timers of equal delay run in
+    // order), which is the completion signal.
+    let imeKeyPending = 0
     let lastKeyAlt = false // the last key was pressed with Option/Alt
     const onPrintableInput = (e: Event) => {
       const ie = e as InputEvent
@@ -315,16 +334,22 @@ export function TerminalPage({ id }: { id: string }) {
       }
       term.input(ie.data, true)
     }
-    const dropClaims = () => (claim = null)
+    const dropClaims = () => {
+      claim = null
+      lastKeyAlt = false
+    }
     // Before anything is sent past xterm (key bar, Shift+Enter, latched
     // modifiers, composer, upload paths): send a composition that just ended
     // and clear xterm's dead-key flag, as xterm does for a key it handles.
+    // A composition still in progress is never forced out: only one that has
+    // ended and is waiting to be sent is.
     settleRef.current = () => {
       if (!internalsOk) return
-      core!._compositionHelper!.keydown(new KeyboardEvent('keydown'))
+      if (!composing && !core!._compositionHelper!.isComposing) core!._compositionHelper!.keydown(new KeyboardEvent('keydown'))
       core!._unprocessedDeadKey = false
       claim = null
     }
+    composingRef.current = () => composing || (internalsOk && !!core!._compositionHelper!.isComposing)
 
     const onBeforeInput = (e: Event) => {
       const ie = e as InputEvent
@@ -377,12 +402,15 @@ export function TerminalPage({ id }: { id: string }) {
       if (e.type === 'keypress' && claim !== null && e.code === claim) return false
       if (e.type === 'keyup') {
         if (claim !== null && e.code === claim) claim = null
+        if (e.key === 'Alt') lastKeyAlt = false
         return true
       }
       if (e.type !== 'keydown') return true
       if (e.isComposing || e.keyCode === 229) {
         claim = null
-        lastImeKey = performance.now()
+        lastKeyAlt = false
+        imeKeyPending++
+        setTimeout(() => setTimeout(() => imeKeyPending--, 0), 0)
         return true
       }
       const modifierOnly = ['Shift', 'Control', 'Alt', 'Meta', 'CapsLock', 'AltGraph'].includes(e.key)
@@ -397,7 +425,7 @@ export function TerminalPage({ id }: { id: string }) {
         /^[!-/:-@[-`{-~]$/.test(e.key) && e.code &&
         !e.ctrlKey && !e.altKey && !e.metaKey && !e.getModifierState('AltGraph') && !latched() &&
         ta!.selectionStart === ta!.selectionEnd &&
-        performance.now() - lastImeKey > 50 // xterm may still be reading a 229 key's textarea change
+        imeKeyPending === 0
       ) {
         // What xterm does first for every key: send a composition that just
         // ended. If it says the key belongs to a composition, leave it to xterm.
@@ -672,6 +700,8 @@ export function TerminalPage({ id }: { id: string }) {
           const r = await uploadFile(id, f)
           const quoted = shellPath(r.path)
           if (quoted) {
+            // Never paste into a composition in progress: wait for it to end.
+            await untilNotComposing(composingRef.current, hostEl.current?.querySelector('textarea') ?? null)
             settleRef.current()
             termRef.current?.paste(quoted + ' ')
             toast(t('term.uploaded'))
