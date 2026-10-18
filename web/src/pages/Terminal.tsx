@@ -272,6 +272,25 @@ export function TerminalPage({ id }: { id: string }) {
       typedChar = null
     }
     // iOS soft keyboards report printable keys through input events.
+    // Chinese (and other) input methods turn punctuation keys into full-width
+    // marks: the browser reports a keydown for the ASCII key ("," "."), then the
+    // input method inserts "，" "。". xterm would send the ASCII character on
+    // keydown and cancel the event, so the mark never arrived. Punctuation keys
+    // are therefore left to the browser, and whatever text it actually inserts
+    // is sent; if nothing is inserted shortly, the key's own character is.
+    let punct: string | null = null
+    let punctTimer: number | undefined
+    const sendPunct = (text: string) => {
+      punct = null
+      clearTimeout(punctTimer)
+      if (ta) ta.value = ''
+      term.input(text, true)
+    }
+    const onPunctInput = (e: Event) => {
+      const ie = e as InputEvent
+      if (punct !== null && ie.inputType === 'insertText' && ie.data) sendPunct(ie.data)
+    }
+
     const onBeforeInput = (e: Event) => {
       const ie = e as InputEvent
       typedChar = !ie.isComposing && ie.inputType === 'insertText' && ie.data && [...ie.data].length === 1 ? ie.data : null
@@ -280,6 +299,7 @@ export function TerminalPage({ id }: { id: string }) {
     ta?.addEventListener('compositionstart', onCompStart)
     ta?.addEventListener('compositionend', onCompEnd)
     ta?.addEventListener('beforeinput', onBeforeInput)
+    ta?.addEventListener('input', onPunctInput)
     ta?.addEventListener('paste', onPasteEv, true)
     const onUserInput = userInputEvent(term)
     let userData = false
@@ -315,8 +335,16 @@ export function TerminalPage({ id }: { id: string }) {
       F7: 'F7', F8: 'F8', F9: 'F9', F10: 'F10', F11: 'F11', F12: 'F12',
     }
     term.attachCustomKeyEventHandler((e) => {
+      if (e.type === 'keypress' && punct !== null) return false // the input event will carry it
       if (e.type !== 'keydown') return true
       if (e.isComposing || e.keyCode === 229) return true
+      if (/^[!-/:-@[-`{-~]$/.test(e.key) && !e.ctrlKey && !e.altKey && !e.metaKey && !latched()) {
+        const key = e.key
+        if (punct !== null) sendPunct(punct) // a previous one never got its input event
+        punct = key
+        punctTimer = window.setTimeout(() => punct === key && sendPunct(key), 80)
+        return false // no preventDefault: the browser and input method insert the text
+      }
       typedChar = e.key.length === 1 && !e.metaKey && !e.ctrlKey ? e.key : null
       // A physical Ctrl/Alt chord while a key-bar modifier is latched: combine both.
       // Clipboard shortcuts, AltGr and text-producing Option are left alone.
@@ -363,6 +391,8 @@ export function TerminalPage({ id }: { id: string }) {
       ta?.removeEventListener('compositionstart', onCompStart)
       ta?.removeEventListener('compositionend', onCompEnd)
       ta?.removeEventListener('beforeinput', onBeforeInput)
+      ta?.removeEventListener('input', onPunctInput)
+      clearTimeout(punctTimer)
       ta?.removeEventListener('paste', onPasteEv, true)
       dataSub.dispose()
       userSub?.dispose()
