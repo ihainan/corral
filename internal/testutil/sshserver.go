@@ -1,0 +1,151 @@
+// Package testutil provides an in-process SSH server for tests: password auth,
+// a PTY "shell" that echoes input back, and an SFTP subsystem rooted in a temp dir.
+package testutil
+
+import (
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/binary"
+	"io"
+	"net"
+	"sync"
+	"testing"
+
+	"github.com/pkg/sftp"
+	"golang.org/x/crypto/ssh"
+)
+
+type SSHServer struct {
+	Addr    *net.TCPAddr
+	HostKey ssh.PublicKey
+	ln      net.Listener
+	mu      sync.Mutex
+	conns   []net.Conn
+	Execs   []string
+}
+
+// StartSSHServer accepts user/password and serves until the test ends.
+func StartSSHServer(t *testing.T, user, password, sftpRoot string) *SSHServer {
+	t.Helper()
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := ssh.NewSignerFromKey(priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &ssh.ServerConfig{
+		PasswordCallback: func(c ssh.ConnMetadata, pw []byte) (*ssh.Permissions, error) {
+			if c.User() == user && string(pw) == password {
+				return nil, nil
+			}
+			return nil, errAuth
+		},
+	}
+	cfg.AddHostKey(signer)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &SSHServer{Addr: ln.Addr().(*net.TCPAddr), HostKey: signer.PublicKey(), ln: ln}
+	t.Cleanup(s.Close)
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			s.mu.Lock()
+			s.conns = append(s.conns, c)
+			s.mu.Unlock()
+			go s.serve(c, cfg, sftpRoot)
+		}
+	}()
+	return s
+}
+
+type authErr struct{}
+
+func (authErr) Error() string { return "denied" }
+
+var errAuth = authErr{}
+
+func (s *SSHServer) Close() {
+	s.ln.Close()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, c := range s.conns {
+		c.Close()
+	}
+}
+
+func (s *SSHServer) serve(c net.Conn, cfg *ssh.ServerConfig, root string) {
+	sc, chans, reqs, err := ssh.NewServerConn(c, cfg)
+	if err != nil {
+		c.Close()
+		return
+	}
+	defer sc.Close()
+	go func() {
+		for r := range reqs {
+			if r.WantReply {
+				r.Reply(r.Type == "keepalive@openssh.com", nil)
+			}
+		}
+	}()
+	for nc := range chans {
+		if nc.ChannelType() != "session" {
+			nc.Reject(ssh.UnknownChannelType, "only sessions")
+			continue
+		}
+		ch, creqs, err := nc.Accept()
+		if err != nil {
+			return
+		}
+		go s.session(ch, creqs, root)
+	}
+}
+
+func (s *SSHServer) session(ch ssh.Channel, reqs <-chan *ssh.Request, root string) {
+	defer ch.Close()
+	for r := range reqs {
+		switch r.Type {
+		case "pty-req", "env", "window-change":
+			if r.WantReply {
+				r.Reply(true, nil)
+			}
+		case "shell", "exec":
+			if r.Type == "exec" && len(r.Payload) >= 4 {
+				n := binary.BigEndian.Uint32(r.Payload)
+				if int(n) <= len(r.Payload)-4 {
+					s.mu.Lock()
+					s.Execs = append(s.Execs, string(r.Payload[4:4+n]))
+					s.mu.Unlock()
+				}
+			}
+			r.Reply(true, nil)
+			ch.Write([]byte("ready\r\n"))
+			go func() {
+				io.Copy(ch, ch) // echo
+				ch.SendRequest("exit-status", false, []byte{0, 0, 0, 0})
+				ch.Close()
+			}()
+		case "subsystem":
+			if len(r.Payload) >= 4 && string(r.Payload[4:]) == "sftp" {
+				r.Reply(true, nil)
+				srv, err := sftp.NewServer(ch, sftp.WithServerWorkingDirectory(root))
+				if err != nil {
+					return
+				}
+				srv.Serve()
+				return
+			}
+			r.Reply(false, nil)
+		default:
+			if r.WantReply {
+				r.Reply(false, nil)
+			}
+		}
+	}
+}
