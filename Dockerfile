@@ -23,4 +23,5 @@ USER corral
 ENV CORRAL_LISTEN=0.0.0.0:8080 CORRAL_DATA_DIR=/data
 VOLUME /data
 EXPOSE 8080
-ENTRYPOINT ["/usr/local/bin/corral", "serve"]
+ENTRYPOINT ["/usr/local/bin/corral"]
+CMD ["serve"]
