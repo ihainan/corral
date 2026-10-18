@@ -61,17 +61,20 @@ function userInputEvent(term: Terminal): Listen | null {
   return typeof ev === 'function' ? ev : null
 }
 
-// Resolves once no composition is in progress (at once if none is).
+// Resolves once no composition is in progress (at once if none is). After a
+// compositionend the check is repeated once xterm has sent it, since a new
+// composition may already have started (Korean does this between syllables).
 function untilNotComposing(composingNow: () => boolean, ta: HTMLTextAreaElement | null): Promise<void> {
   if (!composingNow() || !ta) return Promise.resolve()
   return new Promise((resolve) => {
-    const done = () => {
-      ta.removeEventListener('compositionend', done)
-      ta.removeEventListener('blur', done)
-      setTimeout(resolve, 0) // let xterm send the composition first
-    }
-    ta.addEventListener('compositionend', done)
-    ta.addEventListener('blur', done)
+    const check = () => setTimeout(() => {
+      if (composingNow() && document.activeElement === ta) return // wait for the next end
+      ta.removeEventListener('compositionend', check)
+      ta.removeEventListener('blur', check)
+      resolve()
+    }, 0)
+    ta.addEventListener('compositionend', check)
+    ta.addEventListener('blur', check)
   })
 }
 
