@@ -29,6 +29,15 @@ type SSHServer struct {
 	AuthAttempts int // password checks received, to prove credentials were (not) sent
 	onExec       func(cmd string) func(ch ssh.Channel)
 	onChannel    func(nc ssh.NewChannel) bool
+	beforeAuth   func()
+}
+
+// BeforeAuth runs f in every password check before answering it, e.g. to hold
+// a client mid-connect.
+func (s *SSHServer) BeforeAuth(f func()) {
+	s.mu.Lock()
+	s.beforeAuth = f
+	s.mu.Unlock()
 }
 
 // HandleExec lets a test run a command itself: f returns what to do with the
@@ -89,7 +98,11 @@ func (s *SSHServer) RotateHostKey() {
 		PasswordCallback: func(c ssh.ConnMetadata, pw []byte) (*ssh.Permissions, error) {
 			s.mu.Lock()
 			s.AuthAttempts++
+			beforeAuth := s.beforeAuth
 			s.mu.Unlock()
+			if beforeAuth != nil {
+				beforeAuth()
+			}
 			if c.User() == s.user && string(pw) == s.pass {
 				return nil, nil
 			}

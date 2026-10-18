@@ -18,7 +18,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -33,34 +32,9 @@ const (
 	fwdAuthPath       = "/__corral/auth"
 	ticketTTL         = time.Minute
 	fwdTokenTTL       = 12 * time.Hour
-	fwdCheckEvery     = 30 * time.Second
-	fwdConnIdle       = 10 * time.Minute
 )
 
 var fwdLabelRE = regexp.MustCompile(`^([0-9]{1,5})-([a-z2-9]{4})$`)
-
-type fwdGrant struct {
-	userID    int64
-	loginHash string
-	forwardID string
-	ret       string // tickets only: where to land on the subdomain, fixed when issued
-	expires   time.Time
-	checked   time.Time
-}
-
-// forwarder holds tickets, subdomain grants and SSH connections opened only
-// for forwarding (when the user has no terminal open to that host).
-type forwarder struct {
-	mu      sync.Mutex
-	tickets map[string]*fwdGrant // one-time, keyed by ticket hash
-	grants  map[string]*fwdGrant // per subdomain cookie, keyed by token hash
-	conns   map[[2]int64]*fwdConn
-}
-
-type fwdConn struct {
-	client   *ssh.Client
-	lastUsed time.Time
-}
 
 // fwdCookieName uses the __Host- prefix on HTTPS so a forwarded app cannot
 // plant a same-named cookie for all subdomains.
@@ -69,10 +43,6 @@ func (s *Server) fwdCookieName() string {
 		return "__Host-corral_fwd"
 	}
 	return fwdCookieInsecure
-}
-
-func newForwarder() *forwarder {
-	return &forwarder{tickets: map[string]*fwdGrant{}, grants: map[string]*fwdGrant{}, conns: map[[2]int64]*fwdConn{}}
 }
 
 // forwardLabel extracts port and id when host is a forwarding subdomain.
@@ -174,7 +144,7 @@ func (s *Server) handleForwardOpen(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	f, err := s.store.ForwardByID(r.Context(), id)
-	if err != nil || !canUseForward(u, f) {
+	if err != nil || !canUseForward(u, f) || !s.ownerActive(r.Context(), f.OwnerID) {
 		http.Error(w, "This forwarded port does not exist or is not shared with you.", http.StatusNotFound)
 		return
 	}
@@ -183,27 +153,10 @@ func (s *Server) handleForwardOpen(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, r, err)
 		return
 	}
-	s.fwd.mu.Lock()
-	s.fwd.sweep()
-	s.fwd.tickets[tokHash] = &fwdGrant{userID: u.ID, loginHash: hash, forwardID: f.ID, ret: ret, expires: time.Now().Add(ticketTTL)}
-	s.fwd.mu.Unlock()
+	s.fwd.addTicket(tokHash, &fwdGrant{fwdUse: fwdUse{userID: u.ID, loginHash: hash, forwardID: f.ID, ownerID: f.OwnerID, hostID: f.HostID},
+		ret: ret, expires: time.Now().Add(ticketTTL)})
 	q := url.Values{"ticket": {tok}}
 	http.Redirect(w, r, s.forwardOrigin(f)+fwdAuthPath+"?"+q.Encode(), http.StatusFound)
-}
-
-// sweep drops expired tickets and grants; called with mu held.
-func (f *forwarder) sweep() {
-	now := time.Now()
-	for k, g := range f.tickets {
-		if now.After(g.expires) {
-			delete(f.tickets, k)
-		}
-	}
-	for k, g := range f.grants {
-		if now.After(g.expires) {
-			delete(f.grants, k)
-		}
-	}
 }
 
 // serveForward handles every request on a forwarding subdomain.
@@ -215,12 +168,7 @@ func (s *Server) serveForward(w http.ResponseWriter, r *http.Request, port int, 
 	mainLogin := s.cfg.Origin() + "/fwd/" + id + "?return=" + url.QueryEscape(r.URL.RequestURI())
 
 	if r.URL.Path == fwdAuthPath {
-		s.fwd.mu.Lock()
-		g := s.fwd.tickets[auth.HashToken(r.URL.Query().Get("ticket"))]
-		if g != nil {
-			delete(s.fwd.tickets, auth.HashToken(r.URL.Query().Get("ticket"))) // single use
-		}
-		s.fwd.mu.Unlock()
+		g := s.fwd.takeTicket(auth.HashToken(r.URL.Query().Get("ticket")))
 		if g == nil || time.Now().After(g.expires) || g.forwardID != id {
 			http.Error(w, "This link has expired. Open the port again from Corral.", http.StatusForbidden)
 			return
@@ -230,10 +178,7 @@ func (s *Server) serveForward(w http.ResponseWriter, r *http.Request, port int, 
 			s.internalError(w, r, err)
 			return
 		}
-		grant := &fwdGrant{userID: g.userID, loginHash: g.loginHash, forwardID: id, expires: time.Now().Add(fwdTokenTTL)}
-		s.fwd.mu.Lock()
-		s.fwd.grants[tokHash] = grant
-		s.fwd.mu.Unlock()
+		s.fwd.addGrant(tokHash, &fwdGrant{fwdUse: g.fwdUse, expires: time.Now().Add(fwdTokenTTL)})
 		http.SetCookie(w, &http.Cookie{Name: s.fwdCookieName(), Value: tok, Path: "/", HttpOnly: true, Secure: s.cfg.SecureCookies(),
 			SameSite: http.SameSiteLaxMode, MaxAge: int(fwdTokenTTL.Seconds())})
 		// Only the path fixed when the ticket was issued; the query here is ignored.
@@ -247,43 +192,62 @@ func (s *Server) serveForward(w http.ResponseWriter, r *http.Request, port int, 
 		return
 	}
 	tokHash := auth.HashToken(c.Value)
-	s.fwd.mu.Lock()
-	g := s.fwd.grants[tokHash]
-	s.fwd.mu.Unlock()
-	if g == nil || g.forwardID != id || time.Now().After(g.expires) {
+	g, ok := s.fwd.grant(tokHash)
+	if !ok || g.forwardID != id {
 		s.forwardLoginRedirect(w, r, mainLogin)
 		return
 	}
-	f, err := s.store.ForwardByID(r.Context(), id)
+	// Registered before access is re-checked, so a revocation from now on
+	// cancels this request (and its WebSocket, if it becomes one).
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	st, ok := s.fwd.startStream(g, cancel)
+	if !ok {
+		http.Error(w, "Too many open connections through forwarded ports. Close some tabs and try again.", http.StatusServiceUnavailable)
+		return
+	}
+	defer s.fwd.endStream(st)
+	f, err := s.store.ForwardByID(ctx, id)
 	if err != nil || f.Port != port {
-		s.revokeGrant(tokHash)
+		s.fwd.dropGrant(tokHash)
 		http.Error(w, "This forwarded port no longer exists.", http.StatusNotFound)
 		return
 	}
-	// Re-check the sign-in and sharing periodically, not on every asset request.
-	if time.Since(g.checked) > fwdCheckEvery {
-		u, err := s.auth.CheckLogin(r.Context(), g.loginHash)
-		if err != nil || u.ID != g.userID || !canUseForward(u, f) {
-			s.revokeGrant(tokHash)
-			s.forwardLoginRedirect(w, r, mainLogin)
-			return
-		}
-		s.fwd.mu.Lock()
-		g.checked = time.Now()
-		s.fwd.mu.Unlock()
+	s.fwd.setForward(st, f.OwnerID, f.HostID)
+	// Sign-in, sharing and the owner's account are checked on every request:
+	// ending any of them takes effect at once.
+	if !s.forwardAllowed(ctx, g, f) {
+		s.fwd.dropGrant(tokHash)
+		s.forwardLoginRedirect(w, r, mainLogin)
+		return
 	}
-	client, err := s.forwardClient(r.Context(), f)
+	fc, err := s.forwardConn(ctx, f)
+	if errors.Is(err, errFwdBusy) {
+		http.Error(w, "Too many forwarded connections are open right now. Try again in a moment.", http.StatusServiceUnavailable)
+		return
+	}
 	if err != nil {
 		http.Error(w, "Cannot reach the host. Open a terminal to it in Corral, then try again.", http.StatusBadGateway)
 		return
 	}
-	s.proxyTo(w, r, client, f)
+	defer s.fwd.release(fc)
+	s.proxyTo(w, r.WithContext(ctx), fc, f)
 }
 
-func (s *Server) revokeGrant(tokHash string) {
-	s.fwd.mu.Lock()
-	delete(s.fwd.grants, tokHash)
-	s.fwd.mu.Unlock()
+// forwardAllowed re-checks a grant: the login is live and is still the
+// user's, the forward is theirs or shared, and its owner is not disabled.
+func (s *Server) forwardAllowed(ctx context.Context, g fwdUse, f *store.Forward) bool {
+	u, err := s.auth.CheckLogin(ctx, g.loginHash)
+	if err != nil || u.ID != g.userID || !canUseForward(u, f) {
+		return false
+	}
+	return f.OwnerID == u.ID || s.ownerActive(ctx, f.OwnerID)
+}
+
+// ownerActive: a disabled user's forwards, shared ones included, stop working.
+func (s *Server) ownerActive(ctx context.Context, ownerID int64) bool {
+	o, err := s.store.UserByID(ctx, ownerID)
+	return err == nil && !o.Disabled
 }
 
 // Navigations are sent to sign in; sub-resource requests just fail.
@@ -295,34 +259,63 @@ func (s *Server) forwardLoginRedirect(w http.ResponseWriter, r *http.Request, ta
 	http.Error(w, "Sign in to Corral to use this forwarded port.", http.StatusUnauthorized)
 }
 
-// forwardClient returns an SSH connection to the forward's host: a running
-// terminal session's connection when there is one, otherwise a connection
-// opened with the stored credential and closed after a while unused.
-func (s *Server) forwardClient(ctx context.Context, f *store.Forward) (*ssh.Client, error) {
+// forwardConn returns an SSH connection to the forward's host, with a
+// reference held until release: a running terminal session's connection when
+// there is one, otherwise a connection opened with the stored credential and
+// closed once unused for a while.
+func (s *Server) forwardConn(ctx context.Context, f *store.Forward) (*fwdConn, error) {
 	for _, sess := range s.terms.Running(f.OwnerID, f.HostID) {
-		return sess.Client(), nil
+		return s.fwd.borrow(sess.Client())
 	}
 	key := [2]int64{f.OwnerID, f.HostID}
-	s.fwd.mu.Lock()
-	if c := s.fwd.conns[key]; c != nil {
-		c.lastUsed = time.Now()
-		s.fwd.mu.Unlock()
-		return c.client, nil
+	for range 3 {
+		if fc := s.fwd.pooled(key); fc != nil {
+			return fc, nil
+		}
+		// The dial is shared by every request waiting for it, so it does not
+		// end with the request that started it; revocation cancels it.
+		dctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+		// Registered before the host and owner are read: revoking either from
+		// now on cancels this dial and keeps its connection out of the pool.
+		d, lead, err := s.fwd.startDial(f.OwnerID, f.HostID, cancel)
+		if err != nil {
+			cancel()
+			return nil, err
+		}
+		if lead {
+			client, err := s.dialForward(dctx, f.OwnerID, f.HostID)
+			cancel()
+			return s.fwd.finishDial(d, client, err)
+		}
+		cancel()
+		select {
+		case <-d.done:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		if d.err != nil {
+			return nil, d.err
+		}
 	}
-	s.fwd.mu.Unlock()
+	return nil, errFwdBusy // the connection kept going away as soon as it was opened
+}
 
-	h, err := s.store.Host(ctx, f.OwnerID, f.HostID)
+func (s *Server) dialForward(ctx context.Context, ownerID, hostID int64) (*ssh.Client, error) {
+	if !s.ownerActive(ctx, ownerID) {
+		return nil, errFwdRevoked
+	}
+	h, err := s.store.Host(ctx, ownerID, hostID)
 	if err != nil {
 		return nil, err
 	}
 	if h.Auth == store.AuthAsk || h.CredentialID == nil {
 		return nil, errors.New("no stored credential")
 	}
-	_, sec, err := s.openCredential(ctx, f.OwnerID, *h.CredentialID)
+	_, sec, err := s.openCredential(ctx, ownerID, *h.CredentialID)
 	if err != nil {
 		return nil, err
 	}
-	k, err := s.store.HostKey(ctx, f.OwnerID, h.ID)
+	k, err := s.store.HostKey(ctx, ownerID, h.ID)
 	if err != nil {
 		return nil, errors.New("connect to this host once from a terminal first")
 	}
@@ -332,73 +325,13 @@ func (s *Server) forwardClient(ctx context.Context, f *store.Forward) (*ssh.Clie
 	if err != nil {
 		return nil, err
 	}
-	s.fwd.mu.Lock()
-	if existing := s.fwd.conns[key]; existing != nil { // lost a race; keep the first
-		s.fwd.mu.Unlock()
-		dialed.Client.Close()
-		return existing.client, nil
-	}
-	s.fwd.conns[key] = &fwdConn{client: dialed.Client, lastUsed: time.Now()}
-	s.fwd.mu.Unlock()
-	go func() {
-		_ = dialed.Client.Wait()
-		s.fwd.mu.Lock()
-		if c := s.fwd.conns[key]; c != nil && c.client == dialed.Client {
-			delete(s.fwd.conns, key)
-		}
-		s.fwd.mu.Unlock()
-	}()
 	return dialed.Client, nil
-}
-
-// reapForwardConns closes idle forwarding-only connections.
-func (s *Server) reapForwardConns(stop <-chan struct{}) {
-	t := time.NewTicker(time.Minute)
-	defer t.Stop()
-	for {
-		select {
-		case <-stop:
-			return
-		case <-t.C:
-		}
-		s.fwd.mu.Lock()
-		s.fwd.sweep()
-		for k, c := range s.fwd.conns {
-			if time.Since(c.lastUsed) > fwdConnIdle {
-				c.client.Close()
-				delete(s.fwd.conns, k)
-			}
-		}
-		s.fwd.mu.Unlock()
-	}
-}
-
-// closeUserForwards ends forwarding access for a user whose access was revoked.
-func (s *Server) closeUserForwards(userID int64) {
-	s.fwd.mu.Lock()
-	defer s.fwd.mu.Unlock()
-	for k, g := range s.fwd.grants {
-		if g.userID == userID {
-			delete(s.fwd.grants, k)
-		}
-	}
-	for k, g := range s.fwd.tickets {
-		if g.userID == userID {
-			delete(s.fwd.tickets, k)
-		}
-	}
-	for k, c := range s.fwd.conns {
-		if k[0] == userID {
-			c.client.Close()
-			delete(s.fwd.conns, k)
-		}
-	}
 }
 
 // proxyTo relays the request to 127.0.0.1:<port> on the host. Requests look
 // like local ones (Host and Origin are rewritten to localhost:<port>) so dev
 // servers such as Vite and Next.js accept them without configuration.
-func (s *Server) proxyTo(w http.ResponseWriter, r *http.Request, client *ssh.Client, f *store.Forward) {
+func (s *Server) proxyTo(w http.ResponseWriter, r *http.Request, fc *fwdConn, f *store.Forward) {
 	target := "127.0.0.1:" + strconv.Itoa(f.Port)
 	local := "localhost:" + strconv.Itoa(f.Port)
 	public := s.forwardOrigin(f)
@@ -419,15 +352,8 @@ func (s *Server) proxyTo(w http.ResponseWriter, r *http.Request, client *ssh.Cli
 			}
 			stripCookie(h, s.fwdCookieName())
 		},
-		Transport: &http.Transport{
-			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-				return client.DialContext(ctx, "tcp", target)
-			},
-			MaxIdleConnsPerHost:   4,
-			IdleConnTimeout:       30 * time.Second,
-			ResponseHeaderTimeout: 2 * time.Minute,
-		},
-		FlushInterval: -1, // stream server-sent events and long responses as they arrive
+		Transport:     fc.transport, // one per SSH connection, so idle keep-alives are reused and bounded
+		FlushInterval: -1,           // stream server-sent events and long responses as they arrive
 		ModifyResponse: func(res *http.Response) error {
 			if loc := res.Header.Get("Location"); loc != "" {
 				for _, from := range []string{"http://" + local, "http://127.0.0.1:" + strconv.Itoa(f.Port), "http://0.0.0.0:" + strconv.Itoa(f.Port)} {
@@ -483,28 +409,6 @@ func dropCookieDomain(c string) string {
 		out = append(out, p)
 	}
 	return strings.Join(out, ";")
-}
-
-// closeHostForwards drops forwarding connections to a deleted host. Its
-// forwards are removed by the database (cascade); their grants then fail the
-// per-request lookup.
-func (s *Server) closeHostForwards(userID, hostID int64) {
-	s.fwd.mu.Lock()
-	defer s.fwd.mu.Unlock()
-	if c := s.fwd.conns[[2]int64{userID, hostID}]; c != nil {
-		c.client.Close()
-		delete(s.fwd.conns, [2]int64{userID, hostID})
-	}
-}
-
-func (s *Server) revokeForwardGrants(id string) {
-	s.fwd.mu.Lock()
-	defer s.fwd.mu.Unlock()
-	for k, g := range s.fwd.grants {
-		if g.forwardID == id {
-			delete(s.fwd.grants, k)
-		}
-	}
 }
 
 // Management API ----------------------------------------------------------
@@ -588,7 +492,7 @@ func (s *Server) apiUpdateForward(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if b.Sharing == store.SharePrivate {
-		s.revokeForwardGrants(id) // others' access ends now; the owner signs in again transparently
+		s.revokeForwardGrants(id, currentUser(r).ID) // others' access ends now, open connections included
 	}
 	s.audit(r, "forward.share", id, map[string]any{"sharing": b.Sharing})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
@@ -600,7 +504,7 @@ func (s *Server) apiDeleteForward(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found", "no such forward")
 		return
 	}
-	s.revokeForwardGrants(id)
+	s.revokeForwardGrants(id, 0)
 	s.audit(r, "forward.delete", id, nil)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
@@ -611,12 +515,17 @@ func (s *Server) apiHostPorts(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	client, err := s.forwardClient(r.Context(), &store.Forward{OwnerID: h.OwnerID, HostID: h.ID})
+	fc, err := s.forwardConn(r.Context(), &store.Forward{OwnerID: h.OwnerID, HostID: h.ID})
+	if errors.Is(err, errFwdBusy) {
+		writeError(w, http.StatusServiceUnavailable, "busy", "too many forwarding connections are open; try again in a moment")
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusConflict, "no_connection", "open a terminal to this host first")
 		return
 	}
-	ports, err := listeningPorts(r.Context(), client)
+	defer s.fwd.release(fc)
+	ports, err := listeningPorts(r.Context(), fc.client)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "ports_failed", "could not list ports on the host")
 		return

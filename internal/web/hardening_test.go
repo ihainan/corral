@@ -174,6 +174,7 @@ func TestPortListingOutputIsBounded(t *testing.T) {
 type fwdEnv struct {
 	h      *harness
 	admin  *client
+	owner  *client // "alice", a member: owns the host and the forward
 	srv    *testutil.SSHServer
 	hostID int64
 	id     string
@@ -187,13 +188,14 @@ func newForwardEnv(t *testing.T, app http.Handler, opts ...harnessOpt) *fwdEnv {
 	e := &fwdEnv{port: ts.Listener.Addr().(*net.TCPAddr).Port}
 	e.h = newHarness(t, append([]harnessOpt{func(c *config.Config) { c.ForwardDomain = "fwd.test" }}, opts...)...)
 	e.admin = e.h.admin()
+	e.owner = e.h.member(e.admin, "alice")
 	e.srv = e.h.sshServer(t.TempDir())
-	e.hostID = e.h.hostFor(e.admin, e.srv.Addr.Port)
+	e.hostID = e.h.hostFor(e.owner, e.srv.Addr.Port)
 	// A terminal once, to pin the host key; then closed so forwarding dials its own connection.
-	r := e.admin.do("POST", "/api/sessions", map[string]any{"host_id": e.hostID})
+	r := e.owner.do("POST", "/api/sessions", map[string]any{"host_id": e.hostID})
 	mustStatus(t, r, 201, "terminal (pins the key)")
-	mustStatus(t, e.admin.do("DELETE", "/api/sessions/"+r.json()["id"].(string), nil), 200, "close terminal")
-	r = e.admin.do("POST", "/api/forwards", map[string]any{"host_id": e.hostID, "port": e.port})
+	mustStatus(t, e.owner.do("DELETE", "/api/sessions/"+r.json()["id"].(string), nil), 200, "close terminal")
+	r = e.owner.do("POST", "/api/forwards", map[string]any{"host_id": e.hostID, "port": e.port})
 	mustStatus(t, r, 200, "create forward")
 	e.id = r.json()["id"].(string)
 	return e
@@ -234,7 +236,7 @@ var echoApp = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 
 func TestForwardRefusesRequestsFromOtherOrigins(t *testing.T) {
 	e := newForwardEnv(t, echoApp)
-	f, _ := e.h.openForward(e.admin, e.id)
+	f, _ := e.h.openForward(e.owner, e.id)
 	own := e.origin()
 	sibling := e.h.srv.forwardOriginFor(e.port+1, "zzzz") // another forwarded port: same site
 	cases := []struct {
@@ -294,7 +296,7 @@ func TestForwardTicketReturnIsFixedWhenIssued(t *testing.T) {
 	e := newForwardEnv(t, echoApp)
 	issue := func(ret string) *url.URL {
 		req, _ := http.NewRequest("GET", e.h.ts.URL+"/fwd/"+e.id+"?return="+url.QueryEscape(ret), nil)
-		req.AddCookie(&http.Cookie{Name: e.h.srv.cookieName(), Value: e.admin.cookie})
+		req.AddCookie(&http.Cookie{Name: e.h.srv.cookieName(), Value: e.owner.cookie})
 		res, err := noRedirect.Do(req)
 		if err != nil {
 			t.Fatal(err)

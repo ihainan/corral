@@ -84,7 +84,8 @@ func New(d Deps) *Server {
 		log: d.Log, mux: http.NewServeMux(), static: d.Static, socks: map[int64]map[*liveSocket]struct{}{},
 		pending: map[int64]map[*liveSocket]struct{}{}, herdrSocks: herdrSockets{path: map[string]string{}, busy: map[string]int{}},
 		notifier: d.Notifier, vis: visibility{seen: map[string]map[*liveSocket]bool{}}, fwd: newForwarder()}
-	go s.reapForwardConns(make(chan struct{}))
+	s.fwd.wg.Add(1)
+	go s.fwd.reap()
 	s.terms.OnAlert = s.onTerminalAlert
 	prev := s.auth.OnUserGone
 	s.auth.OnUserGone = func(userID int64) {
@@ -405,6 +406,7 @@ func (s *Server) closeOtherLogins(userID int64, keep string) {
 			}
 		}
 	}
+	s.endForwardOtherLogins(userID, keep)
 }
 
 // closeSockets closes a user's open terminal sockets and cancels connections
@@ -418,6 +420,9 @@ func (s *Server) closeSockets(userID int64, loginHash string) {
 				ls.cancel()
 			}
 		}
+	}
+	if loginHash != "" {
+		s.endForwardLogin(userID, loginHash) // all of the user's: closeUserForwards
 	}
 }
 

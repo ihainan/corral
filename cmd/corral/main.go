@@ -138,6 +138,7 @@ func run(log *slog.Logger) error {
 	shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_ = hs.Shutdown(shutCtx)
+	srv.Close() // forwarded connections and background work
 	terms.Shutdown()
 	return nil
 }

@@ -67,7 +67,7 @@ func (f *fwdClient) send(method, path string, hdr map[string]string) int {
 	return res.StatusCode
 }
 
-var noRedirect =&http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+var noRedirect = &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 
 // open runs the ticket hand-off for a signed-in client and returns a client
 // holding the subdomain cookie.
@@ -182,7 +182,7 @@ func TestPortForwardingFlow(t *testing.T) {
 	p2 := app2.Listener.Addr().(*net.TCPAddr).Port
 	r2 := admin.do("POST", "/api/forwards", map[string]any{"host_id": hostID, "port": p2})
 	id2 := r2.json()["id"].(string)
-	if res, _ := fb.get("/hello", nil); res.StatusCode != 200 { // uses the grant; its periodic check is now fresh
+	if res, _ := fb.get("/hello", nil); res.StatusCode != 200 {
 		t.Fatalf("bob on the shared forward: %d", res.StatusCode)
 	}
 	other := &fwdClient{h: h, host: strconv.Itoa(p2) + "-" + id2 + ".fwd.test", cookie: fb.cookie}
