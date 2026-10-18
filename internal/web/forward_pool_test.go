@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -93,6 +94,46 @@ func TestForwardPoolNeverOrphansAConnection(t *testing.T) {
 	f.mu.Unlock()
 	if pooled != fc {
 		t.Fatal("pool lost its connection")
+	}
+}
+
+// The per-connection channel limit belongs to the SSH connection: dropping
+// and recreating the transport around a terminal's connection (the reaper
+// does) must not reset it while channels are still open.
+func TestChannelLimitSurvivesANewTransport(t *testing.T) {
+	setVar(t, &maxFwdChannelsPerConn, 1)
+	quiet, err := net.Listen("tcp", "127.0.0.1:0") // keeps the forwarded channel open
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer quiet.Close()
+	go func() {
+		for {
+			c, err := quiet.Accept()
+			if err != nil {
+				return
+			}
+			defer c.Close()
+		}
+	}()
+	srv := testutil.StartSSHServer(t, "alice", "alice-pass", t.TempDir())
+	c := sshClient(t, srv)
+	f := newForwarder()
+	defer f.shutdown()
+	ctx := context.Background()
+	fc, _ := f.borrow(c)
+	conn, err := fc.transport.DialContext(ctx, "tcp", quiet.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	f.release(fc)
+	f.mu.Lock()
+	delete(f.borrowed, c) // what the reaper does with an unused wrapper
+	f.mu.Unlock()
+	fc2, _ := f.borrow(c)
+	if _, err := fc2.transport.DialContext(ctx, "tcp", quiet.Addr().String()); err == nil {
+		t.Fatal("a new transport reset the connection's channel limit")
 	}
 }
 
@@ -181,6 +222,26 @@ func TestRevocationFreesHandlersBlockedOnASlowBrowser(t *testing.T) {
 			mustStatus(t, e.owner.do("POST", "/api/logout", nil), 200, "logout")
 			eventually(t, "handler stayed blocked writing to a browser that stopped reading", func() bool { return e.streams() == 0 })
 		})
+	}
+}
+
+// The write cut-off for a cancelled request must be over by the time the
+// handler returns: on HTTP/1.1 the connection serves the next request
+// right after, which a late "deadline in the past" would break.
+func TestCutoffNeverOutlivesTheHandler(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	var finished atomic.Bool
+	started := make(chan struct{})
+	stop := afterFuncWait(ctx, func() {
+		close(started)
+		time.Sleep(100 * time.Millisecond)
+		finished.Store(true)
+	})
+	cancel()
+	<-started // the callback is running as the handler returns
+	stop()
+	if !finished.Load() {
+		t.Fatal("stop returned while the cut-off was still running")
 	}
 }
 

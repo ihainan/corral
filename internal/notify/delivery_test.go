@@ -76,6 +76,58 @@ func TestReboundEndpointStopsTheOldOwnersDeliveries(t *testing.T) {
 	}
 }
 
+// Versions never repeat, also after the rows that used them are gone: a
+// delivery to a deleted registration is cancelled when the endpoint is
+// registered again, even if nothing else is left in the table.
+func TestReRegisteringAfterDeleteCancelsTheOldDelivery(t *testing.T) {
+	n, st := newTestNotifier(t, Options{ExtraPushHosts: []string{"push.test"},
+		LoginValid: func(context.Context, string) (bool, error) { return true, nil }})
+	tr := stallTransport{entered: make(chan string, 4)}
+	n.http.Transport = tr
+	ctx := context.Background()
+	old := subscribe(t, st, "alice", "alice-phone", "https://push.test/dev")
+	done := make(chan struct{})
+	go func() { n.pushOne(ctx, old.UserID, 0, old, []byte(`{}`), Note{}); close(done) }()
+	<-tr.entered
+	if err := st.DeletePushSubscription(ctx, old.UserID, old.Endpoint); err != nil { // the table is empty now
+		t.Fatal(err)
+	}
+	bob := subscribe(t, st, "bob", "bob-phone", "https://push.test/dev")
+	if bob.Version <= old.Version {
+		t.Fatalf("version went from %d to %d", old.Version, bob.Version)
+	}
+	n.Rebound(bob.Endpoint, bob.Version)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("delivery to the deleted registration was not cancelled")
+	}
+}
+
+// Registration callbacks can run out of order: a late one for an older
+// registration must not cancel deliveries to the newer one.
+func TestLateReboundLeavesNewerDeliveriesAlone(t *testing.T) {
+	n, st := newTestNotifier(t, Options{ExtraPushHosts: []string{"push.test"},
+		LoginValid: func(context.Context, string) (bool, error) { return true, nil }})
+	tr := stallTransport{entered: make(chan string, 4)}
+	n.http.Transport = tr
+	ctx := context.Background()
+	v1 := subscribe(t, st, "alice", "alice-phone", "https://push.test/dev")
+	v2 := subscribe(t, st, "bob", "bob-phone", "https://push.test/dev")
+	n.Rebound(v2.Endpoint, v2.Version)
+	done := make(chan struct{})
+	go func() { n.pushOne(ctx, v2.UserID, 0, v2, []byte(`{}`), Note{}); close(done) }()
+	<-tr.entered
+	n.Rebound(v1.Endpoint, v1.Version) // the first registration's callback, late
+	select {
+	case <-done:
+		t.Fatal("a late callback for an older registration cancelled the newer delivery")
+	case <-time.After(200 * time.Millisecond):
+	}
+	n.Revoke(v2.UserID)
+	<-done
+}
+
 // A webhook in flight is cancelled when the user loses access.
 func TestRevokingAUserCancelsItsWebhookInFlight(t *testing.T) {
 	n, st := newTestNotifier(t, Options{WebhookPrefixes: []string{"https://hooks.test/"}})

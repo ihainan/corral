@@ -245,11 +245,13 @@ func (n *Notifier) RevokeOtherLogins(userID int64, keep string) {
 
 // Rebound cancels deliveries to earlier registrations of an endpoint that was
 // just registered again (perhaps by another user or login): they must not
-// reach the device with the previous owner's notes.
+// reach the device with the previous owner's notes. Versions only grow, so
+// only strictly older ones are cancelled: a late call for an older
+// registration leaves newer deliveries alone.
 func (n *Notifier) Rebound(endpoint string, version int64) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	n.cancelSending(func(sd *sending) bool { return sd.endpoint == endpoint && sd.version != version })
+	n.cancelSending(func(sd *sending) bool { return sd.endpoint == endpoint && sd.version < version })
 }
 
 // cancelSending is called with mu held.

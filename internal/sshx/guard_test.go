@@ -166,7 +166,8 @@ func TestChannelOpenedAfterCancelReleasesOnce(t *testing.T) {
 // like a host that stops processing anything on the connection.
 type freezer struct {
 	ln     net.Listener
-	frozen atomic.Bool
+	frozen atomic.Bool // both directions
+	up     atomic.Bool // client to host only: the host never hears from us
 }
 
 func newFreezer(t *testing.T, target string) *freezer {
@@ -187,19 +188,19 @@ func newFreezer(t *testing.T, target string) *freezer {
 				in.Close()
 				return
 			}
-			go f.relay(in, out)
-			go f.relay(out, in)
+			go f.relay(out, in, &f.up)
+			go f.relay(in, out, nil)
 		}
 	}()
 	return f
 }
 
-func (f *freezer) relay(dst, src net.Conn) {
+func (f *freezer) relay(dst, src net.Conn, dir *atomic.Bool) {
 	defer dst.Close()
 	buf := make([]byte, 32<<10)
 	for {
 		n, err := src.Read(buf)
-		for f.frozen.Load() {
+		for f.frozen.Load() || (dir != nil && dir.Load()) {
 			time.Sleep(10 * time.Millisecond)
 		}
 		if n > 0 {
@@ -284,4 +285,93 @@ func TestStuckChannelOnSharedConnectionKeepsIt(t *testing.T) {
 	if quota.Load() != 0 {
 		t.Fatal("quota released twice")
 	}
+}
+
+func dialVia(t *testing.T, fr *freezer) *ssh.Client {
+	c, err := ssh.Dial("tcp", fr.ln.Addr().String(), &ssh.ClientConfig{User: "alice",
+		Auth: []ssh.AuthMethod{ssh.Password("alice-pass")}, HostKeyCallback: ssh.InsecureIgnoreHostKey(), Timeout: 5 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.Close() })
+	return c
+}
+
+// A host that sends EOF but never closes the channel: the channel is not
+// over, so its quota is held until the close really happens.
+func TestEOFIsNotTheEndOfAChannel(t *testing.T) {
+	srv := testutil.StartSSHServer(t, "alice", "alice-pass", t.TempDir())
+	srv.HandleChannel(func(nc ssh.NewChannel) bool {
+		if nc.ChannelType() != "direct-tcpip" {
+			return false
+		}
+		ch, reqs, err := nc.Accept()
+		if err == nil {
+			go ssh.DiscardRequests(reqs)
+			ch.CloseWrite() // EOF, and nothing else
+			go io.Copy(io.Discard, ch)
+		}
+		return true
+	})
+	fr := newFreezer(t, srv.Addr.String())
+	c := dialVia(t, fr)
+	var quota atomic.Int32
+	quota.Store(1)
+	conn, err := DialVia(context.Background(), c, "tcp", "127.0.0.1:1", DialOptions{Release: func() { quota.Add(-1) }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.Copy(io.Discard, conn); err != nil { // reads EOF
+		t.Fatal(err)
+	}
+	fr.up.Store(true) // our close will not reach the host
+	conn.Close()
+	time.Sleep(300 * time.Millisecond)
+	if quota.Load() != 1 {
+		t.Fatal("quota released on EOF, before the channel was closed")
+	}
+	fr.up.Store(false)
+	eventually(t, "quota not released once the channel closed", func() bool { return quota.Load() == 0 })
+}
+
+// A refused exec leaves the session channel open until the host closes it:
+// the side operation keeps its place until then.
+func TestRefusedExecHoldsItsPlaceUntilTheChannelEnds(t *testing.T) {
+	srv := testutil.StartSSHServer(t, "alice", "alice-pass", t.TempDir())
+	var fr *freezer
+	srv.HandleChannel(func(nc ssh.NewChannel) bool {
+		if nc.ChannelType() != "session" {
+			return false
+		}
+		ch, reqs, err := nc.Accept()
+		if err != nil {
+			return true
+		}
+		go func() {
+			for r := range reqs {
+				if r.Type == "exec" {
+					fr.up.Store(true) // from now on the host hears nothing from us
+					r.Reply(false, nil)
+					ch.CloseWrite()
+				} else if r.WantReply {
+					r.Reply(false, nil)
+				}
+			}
+		}()
+		return true
+	})
+	fr = newFreezer(t, srv.Addr.String())
+	c := dialVia(t, fr)
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	returnsWithin(t, 3*time.Second, func() {
+		if _, err := Output(ctx, c, "ss", 1<<20); err == nil {
+			t.Error("refused command succeeded")
+		}
+	})
+	if auxInUse(c) != 1 {
+		t.Fatal("refused command gave up its place while the channel was still open")
+	}
+	fr.up.Store(false)
+	eventually(t, "place not given back once the channel closed", func() bool { return auxInUse(c) == 0 })
 }

@@ -304,10 +304,10 @@ func TestRemoteExecCallSitesAreReviewed(t *testing.T) {
 		"web/api_sessions.go: sess, err := s.terms.Start(ctx, res, u.ID, h.ID, h.Name, dialed.Client, term.StartOptions{": true,
 		"herdr/client.go: out, err := sshx.Output(ctx, c, DiscoverCommand, sshx.MaxOutput)":                               true,
 		"web/herdr.go: w.Run(ctx)": true, // watcher loop, runs no remote command itself
-		"web/ports.go: out, err := sshx.Output(ctx, c, listenCommand, sshx.MaxOutput)": true,
-		"sshx/exec.go: if err := s.Start(cmd); err != nil {":                           true, // Output's own start; its callers are listed here
+		"web/ports.go: out, err := sshx.Output(ctx, c, listenCommand, sshx.MaxOutput)":                       true,
+		`sshx/exec.go: ok, err := ch.SendRequest("exec", true, ssh.Marshal(&struct{ Command string }{cmd}))`: true, // Output's own exec; its callers are listed here
 	}
-	re := regexp.MustCompile(`\.(Start|Run|Output|CombinedOutput)\(`)
+	re := regexp.MustCompile(`\.(Start|Run|Output|CombinedOutput)\(|SendRequest\("exec"`)
 	root, _ := filepath.Abs("..")
 	filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() || !strings.HasSuffix(p, ".go") || strings.HasSuffix(p, "_test.go") || strings.Contains(p, "testutil") {

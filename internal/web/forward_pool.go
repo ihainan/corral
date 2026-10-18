@@ -70,8 +70,9 @@ type forwarder struct {
 	borrowed  map[*ssh.Client]*fwdConn // terminal sessions' connections in use for forwarding
 	dials     map[[2]int64]*fwdDial    // connections being opened; requests for the same host wait for them
 	streams   map[*fwdStream]struct{}
-	perUser   map[int64]int // streams per user
-	channels  int           // channels to forwarded ports, counted until each is really finished
+	perUser   map[int64]int       // streams per user
+	channels  int                 // channels to forwarded ports, counted until each is really finished
+	perClient map[*ssh.Client]int // the same per SSH connection; outlives transports dropped by the reaper
 	closed    bool
 	stop      chan struct{}
 	wg        sync.WaitGroup
@@ -82,7 +83,6 @@ type forwarder struct {
 type fwdConn struct {
 	client    *ssh.Client
 	transport *http.Transport
-	channels  int       // its channels to forwarded ports, until each has really ended
 	owned     bool      // opened for forwarding (closed when idle), not a terminal's
 	users     int       // requests and port listings using it now
 	idleSince time.Time // when users last dropped to zero
@@ -104,7 +104,7 @@ type fwdStream struct {
 func newForwarder() *forwarder {
 	return &forwarder{tickets: map[string]*fwdGrant{}, grants: map[string]*fwdGrant{}, conns: map[[2]int64]*fwdConn{},
 		borrowed: map[*ssh.Client]*fwdConn{}, dials: map[[2]int64]*fwdDial{}, streams: map[*fwdStream]struct{}{},
-		perUser: map[int64]int{}, stop: make(chan struct{})}
+		perUser: map[int64]int{}, perClient: map[*ssh.Client]int{}, stop: make(chan struct{})}
 }
 
 // newFwdConn wraps an SSH connection with a transport that proxies over it,
@@ -120,7 +120,7 @@ func (f *forwarder) newFwdConn(c *ssh.Client, owned bool) *fwdConn {
 			if h, _, err := net.SplitHostPort(addr); err != nil || h != "127.0.0.1" {
 				return nil, fmt.Errorf("forwarding only reaches 127.0.0.1, not %q", addr)
 			}
-			release, ok := f.takeChannel(fc)
+			release, ok := f.takeChannel(c)
 			if !ok {
 				return nil, errFwdBusy
 			}
@@ -136,22 +136,26 @@ func (f *forwarder) newFwdConn(c *ssh.Client, owned bool) *fwdConn {
 	return fc
 }
 
-// takeChannel reserves a channel on fc; the release is the reservation's
-// only owner and acts once.
-func (f *forwarder) takeChannel(fc *fwdConn) (release func(), ok bool) {
+// takeChannel reserves a channel on c; the release is the reservation's only
+// owner and acts once. The count belongs to the SSH connection, not to the
+// transport wrapping it, which the reaper may drop and recreate while
+// channels it opened are still ending.
+func (f *forwarder) takeChannel(c *ssh.Client) (release func(), ok bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.closed || f.channels >= maxFwdChannels || fc.channels >= maxFwdChannelsPerConn {
+	if f.closed || f.channels >= maxFwdChannels || f.perClient[c] >= maxFwdChannelsPerConn {
 		return nil, false
 	}
 	f.channels++
-	fc.channels++
+	f.perClient[c]++
 	var once sync.Once
 	return func() {
 		once.Do(func() {
 			f.mu.Lock()
 			f.channels--
-			fc.channels--
+			if f.perClient[c]--; f.perClient[c] <= 0 {
+				delete(f.perClient, c)
+			}
 			f.mu.Unlock()
 		})
 	}, true

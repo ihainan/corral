@@ -54,8 +54,16 @@ func (s *Store) SavePushSubscription(ctx context.Context, p *PushSubscription, k
 		return 0, err
 	}
 	defer tx.Rollback()
-	var seq int64
-	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(registered), 0) + 1 FROM push_subscriptions`).Scan(&seq); err != nil {
+	// A fresh version from a counter that never repeats, also after deletes.
+	res, err := tx.ExecContext(ctx, `INSERT INTO push_registration_seq DEFAULT VALUES`)
+	if err != nil {
+		return 0, err
+	}
+	seq, err := res.LastInsertId()
+	if err != nil {
+		return 0, err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM push_registration_seq WHERE id = ?`, seq); err != nil {
 		return 0, err
 	}
 	if err := affectedOrNotFound(tx.ExecContext(ctx,
