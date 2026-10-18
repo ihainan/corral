@@ -371,6 +371,7 @@ export function TerminalPage({ id }: { id: string }) {
     // event, so a claim never spans keys; text arriving outside one is
     // ordinary input for xterm.
     let claim: string | null = null
+    const IME_KEY = '\u0000ime' // a claim made for a 229 key (its event.code is often empty)
     // After a 229 key xterm reads its textarea change in a zero-delay timer;
     // no punctuation is claimed until that has run. A timer queued from inside
     // our own zero-delay timer runs after xterm's (timers of equal delay run in
@@ -477,7 +478,7 @@ export function TerminalPage({ id }: { id: string }) {
       // The keypress of the claimed key: its input event carries the text.
       if (e.type === 'keypress' && claim !== null && e.code === claim) return false
       if (e.type === 'keyup') {
-        if (claim !== null && e.code === claim) claim = null
+        if (claim !== null && (e.code === claim || (claim === IME_KEY && e.keyCode === 229))) claim = null
         if (e.key === 'Alt') lastKeyAlt = false
         return true
       }
@@ -485,6 +486,15 @@ export function TerminalPage({ id }: { id: string }) {
       if (e.isComposing || e.keyCode === 229) {
         claim = null
         lastKeyAlt = false
+        // iOS keyboards (Chinese among them) commit a candidate as a 229
+        // keydown followed by a plain insertText, with no composition at all.
+        // xterm then relies on comparing the textarea before and after, which
+        // on iOS Safari sent nothing (or a stray DEL). Outside a composition
+        // the inserted text is claimed and sent like a punctuation key's, and
+        // taken back out of the textarea, so xterm's comparison finds nothing.
+        if (!e.isComposing && !composing && internalsOk && !core!._compositionHelper!.isComposing && !term.options.screenReaderMode) {
+          claim = IME_KEY
+        }
         imeKeyPending++
         setTimeout(() => setTimeout(() => imeKeyPending--, 0), 0)
         return true
