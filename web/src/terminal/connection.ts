@@ -39,6 +39,11 @@ const QUEUE_MAX_BYTES = 8 << 10
 const QUEUE_MAX_AGE = 10_000
 const FRAME_MAX = 256 << 10 // the gateway accepts messages up to 1 MiB; stay well below
 
+// The largest size the gateway accepts; larger windows report this.
+export const MAX_COLS = 1000
+export const MAX_ROWS = 500
+export const clampSize = (cols: number, rows: number) => ({ cols: Math.min(cols, MAX_COLS), rows: Math.min(rows, MAX_ROWS) })
+
 export class TermConnection {
   private ws: WebSocket | null = null
   private gen = 0 // increases with every socket; callbacks from older sockets are ignored
@@ -56,7 +61,12 @@ export class TermConnection {
   private everOpen = false
   private full = false
   private sizeSeq = 0 // this socket's size requests so far
-  private takePending = false // a takeover asked for while not connected
+  // Takeovers not known to have reached the gateway: one asked for but not
+  // sent yet (not connected), and one sent as request number takeSeq on the
+  // current socket and not answered yet (the socket may have lost it). Either
+  // is sent again on the next socket.
+  private takeUnsent = false
+  private takeSeq = 0
   // Names this window to the gateway on every connection, so a reconnect
   // is the same viewer (still in charge of the size if it was).
   private viewer = Array.from(crypto.getRandomValues(new Uint8Array(12)), (b) => b.toString(36).padStart(2, '0')).join('')
@@ -131,14 +141,20 @@ export class TermConnection {
   // terminal is taken over; otherwise (the window changed size) the size only
   // applies while this window is the one in charge of it.
   resize(cols: number, rows: number, take = false) {
-    // The gateway refuses larger sizes; send the largest it takes instead.
-    this.size = { cols: Math.min(cols, 1000), rows: Math.min(rows, 500) }
-    if (this.isOpen()) this.sendSize(this.ws!, take)
-    else if (take) this.takePending = true // sent with the size once connected
+    this.size = clampSize(cols, rows)
+    if (take) this.takeUnsent = true
+    if (this.isOpen()) this.sendSize(this.ws!, false)
   }
 
+  // sendSize sends this window's size, as a takeover with take or when one
+  // is waiting to be sent.
   private sendSize(ws: WebSocket, take: boolean) {
+    take ||= this.takeUnsent
     ws.send(JSON.stringify({ t: 'resize', ...this.size, seq: ++this.sizeSeq, take }))
+    if (take) {
+      this.takeUnsent = false
+      this.takeSeq = this.sizeSeq
+    }
   }
 
   private setStatus(s: Status) {
@@ -196,9 +212,12 @@ export class TermConnection {
           // a pocket must not take the terminal back from the desk).
           const first = !this.everOpen
           this.everOpen = true
-          this.sizeSeq = 0 // numbered per socket
-          if (this.size) this.sendSize(ws, first || this.takePending)
-          this.takePending = false
+          // Numbered per socket; a takeover the old socket may have lost is
+          // sent again.
+          const resend = this.takeSeq > 0
+          this.sizeSeq = 0
+          this.takeSeq = 0
+          if (this.size) this.sendSize(ws, first || resend)
           this.h.onHello?.()
           ws.send(JSON.stringify({ t: 'visible', v: document.visibilityState === 'visible' }))
           this.startPing(ws, gen)
@@ -222,12 +241,16 @@ export class TermConnection {
         } else if (m.t === 'herdr') {
           this.h.onMeta?.(m)
         } else if (m.t === 'size') {
+          if (this.takeSeq > 0 && (m.ack ?? 0) >= this.takeSeq) this.takeSeq = 0 // the takeover arrived
           if ((m.ack ?? 0) < this.sizeSeq) return // from before this window's latest request
           this.h.onSize?.(m.cols, m.rows, !!m.own)
         } else if (m.t === 'pong') {
           clearTimeout(this.pongDeadline)
           // The socket outlived a network change: send what waited meanwhile.
-          if (!this.backlog) this.flushQueue(ws)
+          if (!this.backlog) {
+            this.flushQueue(ws)
+            if (this.takeUnsent && this.size) this.sendSize(ws, true) // asked for while away
+          }
           this.h.onLatency(Math.max(0, Date.now() - m.ts))
         }
         return

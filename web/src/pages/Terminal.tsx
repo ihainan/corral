@@ -13,7 +13,7 @@ import { getPrefs, setChromeColor, setPrefs, termScheme, usePrefs } from '../pre
 import { local } from '../storage'
 import { Confirm, Menu, copyText as copyToClipboard, useFocusTrap, useToast, type MenuItem } from '../components/ui'
 import { useConnect } from '../connect'
-import { TermConnection, type EndInfo, type Status } from '../terminal/connection'
+import { clampSize, TermConnection, type EndInfo, type Status } from '../terminal/connection'
 import { applyMods, specialKey, type Mods, type SpecialKey } from '../terminal/keys'
 import { KeyBar, type ModState } from '../terminal/KeyBar'
 import { chromeVars } from '../terminal/themes'
@@ -266,13 +266,23 @@ export function TerminalPage({ id }: { id: string }) {
     // and when this window last claimed it.
     let inCharge = false
     let claimedAt = 0
+    let claimTimer: number | undefined
     // The user acted here (typed, pasted, clicked): this window takes the
     // terminal over. While it is in charge the claim is repeated at most once
-    // a second, in case another window took over meanwhile and the news has
-    // not arrived yet: the latest action at the gateway wins.
+    // a second (an action within the second is claimed when it ends), in case
+    // another window took over meanwhile and the news has not arrived yet:
+    // the latest action at the gateway wins.
     takeOverRef.current = () => {
       const now = Date.now()
-      if (!following && inCharge && now - claimedAt < 1000) return
+      if (!following && inCharge && now - claimedAt < 1000) {
+        claimTimer ??= window.setTimeout(() => {
+          claimTimer = undefined
+          takeOverRef.current()
+        }, claimedAt + 1000 - now)
+        return
+      }
+      clearTimeout(claimTimer)
+      claimTimer = undefined
       claimedAt = now
       inCharge = true
       if (following) {
@@ -377,7 +387,8 @@ export function TerminalPage({ id }: { id: string }) {
           // In charge, but the gateway has another size than this window now
           // shows (it reported one from before the window changed): report
           // the current one, unless a report is already on its way.
-          if (own && (term.cols !== cols || term.rows !== rows) && resizeTimer === undefined) conn.resize(term.cols, term.rows)
+          const shown = clampSize(term.cols, term.rows) // a larger window reports the largest size
+          if (own && (shown.cols !== cols || shown.rows !== rows) && resizeTimer === undefined) conn.resize(term.cols, term.rows)
           return
         }
         // Another viewer set this size: show the terminal at it, so what the
@@ -738,6 +749,7 @@ export function TerminalPage({ id }: { id: string }) {
       ro.disconnect()
       clearTimeout(fitTimer)
       clearTimeout(resizeTimer)
+      clearTimeout(claimTimer)
       ta?.removeEventListener('compositionstart', onCompStart)
       ta?.removeEventListener('compositionend', onCompEnd)
       ta?.removeEventListener('beforeinput', onBeforeInput)
