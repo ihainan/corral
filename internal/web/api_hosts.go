@@ -92,7 +92,7 @@ var (
 	hostnameRE = regexp.MustCompile(`^[A-Za-z0-9_]([A-Za-z0-9._-]{0,251}[A-Za-z0-9_])?$`)
 	// The user name travels in the SSH protocol, never through a shell, so any
 	// visible characters are fine (e.g. "user@corp", "DOMAIN\\user").
-	sshUserRE = regexp.MustCompile(`^[^\s\x00-\x1f\x7f]{1,255}$`)
+	sshUserRE  = regexp.MustCompile(`^[^\s\x00-\x1f\x7f]{1,255}$`)
 	tmuxUnsafe = regexp.MustCompile(`[^A-Za-z0-9_-]`)
 )
 

@@ -146,11 +146,8 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 	w.Run(ctx)
 }
 
-// onAgentTransition is where "needs you" alerts start (wired to notifications).
 func (s *Server) onAgentTransition(sess *term.Session, h *store.Host, tr herdr.Transition) {
-	if s.onAgent != nil {
-		s.onAgent(sess, h, tr)
-	}
+	s.onHerdrTransition(sess, h, tr)
 }
 
 // POST /api/sessions/{id}/herdr {"action":"focus_workspace"|"focus_pane","target":"…"}

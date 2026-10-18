@@ -21,9 +21,9 @@ var (
 )
 
 const (
-	setupTimeout  = 20 * time.Second // PTY + shell request after the SSH handshake
-	exitedLinger  = 5 * time.Minute  // ended sessions stay listed so a returning tab sees why
-	keptEndedMax  = 10               // ended sessions kept per user
+	setupTimeout = 20 * time.Second // PTY + shell request after the SSH handshake
+	exitedLinger = 5 * time.Minute  // ended sessions stay listed so a returning tab sees why
+	keptEndedMax = 10               // ended sessions kept per user
 )
 
 type Manager struct {
@@ -33,6 +33,7 @@ type Manager struct {
 	detachTimeout time.Duration
 	maxPerUser    int
 	OnEnd         func(s *Session, state string, duration time.Duration)
+	OnAlert       func(s *Session, a Alert) // bells and notification escapes in output
 	stop          chan struct{}
 }
 
@@ -62,7 +63,7 @@ func (m *Manager) Shutdown() {
 
 // StartOptions describes what to run once the SSH connection is up.
 type StartOptions struct {
-	Cols, Rows  int
+	Cols, Rows   int
 	Persistence  string // "none", "tmux" or "herdr"
 	TmuxSession  string // validated by the caller: [A-Za-z0-9_-]{1,64}
 	HerdrSession string // validated by the caller; "" attaches herdr's default session
@@ -172,6 +173,7 @@ func (m *Manager) Start(ctx context.Context, res *Reservation, owner, hostID int
 			client: client, ssh: sess, stdin: stdin, input: make(chan []byte, inputQueue),
 			buf: newRing(ringSize), subs: map[*Sub]struct{}{}, state: StateRunning,
 			cols: cols, rows: rows, idleSince: time.Now(), finished: make(chan struct{}), uploads: make(chan struct{}, 2),
+			onAlert: m.OnAlert,
 		}
 		s.pumps.Add(2)
 		go s.pump(stdout)

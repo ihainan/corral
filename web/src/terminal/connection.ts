@@ -137,6 +137,7 @@ export class TermConnection {
           this.offset = m.offset
           this.setStatus('open')
           if (this.size) ws.send(JSON.stringify({ t: 'resize', ...this.size }))
+          ws.send(JSON.stringify({ t: 'visible', v: document.visibilityState === 'visible' }))
           this.flushQueue(ws)
           this.startPing(ws, gen)
         } else if (m.t === 'state') {
@@ -261,6 +262,8 @@ export class TermConnection {
   }
 
   private onVisible = () => {
+    // Tell the gateway whether someone is looking, so it knows when to notify.
+    if (this.isOpen()) this.ws!.send(JSON.stringify({ t: 'visible', v: document.visibilityState === 'visible' }))
     if (document.visibilityState !== 'visible' || this.closed || this.ended) return
     if (this.probe(2500)) return
     if (!this.ws || this.ws.readyState !== WebSocket.CONNECTING) {

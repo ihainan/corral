@@ -37,17 +37,17 @@ type Note struct {
 var defaultPushHosts = []string{".push.apple.com", "fcm.googleapis.com", ".push.services.mozilla.com", ".notify.windows.com"}
 
 type Notifier struct {
-	store          *store.Store
-	log            *slog.Logger
-	vapidPublic    string
-	vapidPrivate   string
-	subscriber     string
-	pushHosts      []string
-	webhookPrefix  []string
-	http           *http.Client
-	mu             sync.Mutex
-	recent         map[string]time.Time // per user+tag, to collapse bursts
-	minGap         time.Duration
+	store         *store.Store
+	log           *slog.Logger
+	vapidPublic   string
+	vapidPrivate  string
+	subscriber    string
+	pushHosts     []string
+	webhookPrefix []string
+	http          *http.Client
+	mu            sync.Mutex
+	recent        map[string]time.Time // per user+tag, to collapse bursts
+	minGap        time.Duration
 }
 
 type Options struct {

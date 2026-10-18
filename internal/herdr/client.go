@@ -79,13 +79,13 @@ func Discover(ctx context.Context, c *ssh.Client) ([]SessionInfo, error) {
 
 // Snapshot is the subset of `session.snapshot` the gateway uses.
 type Snapshot struct {
-	Version           string      `json:"version"`
-	FocusedWorkspace  string      `json:"focused_workspace_id"`
-	FocusedPane       string      `json:"focused_pane_id"`
-	Workspaces        []Workspace `json:"workspaces"`
-	Tabs              []Tab       `json:"tabs"`
-	Panes             []Pane      `json:"panes"`
-	Agents            []Pane      `json:"agents"` // the panes that run a detected agent
+	Version          string      `json:"version"`
+	FocusedWorkspace string      `json:"focused_workspace_id"`
+	FocusedPane      string      `json:"focused_pane_id"`
+	Workspaces       []Workspace `json:"workspaces"`
+	Tabs             []Tab       `json:"tabs"`
+	Panes            []Pane      `json:"panes"`
+	Agents           []Pane      `json:"agents"` // the panes that run a detected agent
 }
 
 type Workspace struct {

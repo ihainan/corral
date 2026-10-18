@@ -16,17 +16,17 @@ import (
 )
 
 const (
-	ringSize      = 2 << 20 // recent output kept per session
-	subBuffer     = 64      // queued chunks per viewer (≤ 2 MiB) before it is dropped as too slow
-	readChunk     = 32 << 10
-	inputQueue    = 64       // pending input chunks per session
-	inputChunk    = 32 << 10 // so the queue holds at most ~2 MiB
-	inputWait     = 10 * time.Second
-	maxViewers    = 8   // open sockets per session
-	StateRunning  = "running"
-	StateExited   = "exited" // the remote program ended normally
-	StateLost     = "lost"   // the SSH connection dropped
-	StateClosed   = "closed" // closed by the user or an administrator
+	ringSize     = 2 << 20 // recent output kept per session
+	subBuffer    = 64      // queued chunks per viewer (≤ 2 MiB) before it is dropped as too slow
+	readChunk    = 32 << 10
+	inputQueue   = 64       // pending input chunks per session
+	inputChunk   = 32 << 10 // so the queue holds at most ~2 MiB
+	inputWait    = 10 * time.Second
+	maxViewers   = 8 // open sockets per session
+	StateRunning = "running"
+	StateExited  = "exited" // the remote program ended normally
+	StateLost    = "lost"   // the SSH connection dropped
+	StateClosed  = "closed" // closed by the user or an administrator
 )
 
 var (
@@ -59,7 +59,7 @@ type Sub struct {
 }
 
 func (s *Sub) Done() <-chan struct{} { return s.done }
-func (s *Sub) close()               { s.once.Do(func() { close(s.done) }) }
+func (s *Sub) close()                { s.once.Do(func() { close(s.done) }) }
 
 type Info struct {
 	ID        string `json:"id"`
@@ -102,6 +102,8 @@ type Session struct {
 	onEnd   func(*Session)
 	uploads chan struct{} // limits concurrent file transfers on this connection
 	meta    []byte        // latest side information, replayed to new viewers
+	alerts  alertScanner
+	onAlert func(*Session, Alert) // from Manager.OnAlert, fixed before output starts
 }
 
 // PublishMeta replaces the session's side information and offers it to every
@@ -163,6 +165,9 @@ func (s *Session) pump(r io.Reader) {
 			off := s.buf.end()
 			s.buf.write(buf[:n])
 			s.scanTitle(buf[:n])
+			if s.onAlert != nil {
+				s.alerts.feed(buf[:n], func(a Alert) { go s.onAlert(s, a) })
+			}
 			for sub := range s.subs {
 				chunk := Chunk{Offset: off, Data: append([]byte(nil), buf[:n]...)}
 				select {

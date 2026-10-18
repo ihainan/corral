@@ -267,8 +267,8 @@ func (s *Server) apiCloseSession(w http.ResponseWriter, r *http.Request) {
 //   text:   {"t":"resize","cols":N,"rows":N} | {"t":"ping","ts":N}
 
 const (
-	maxFrame         = 64 << 10
-	loginRecheck     = time.Minute
+	maxFrame          = 64 << 10
+	loginRecheck      = time.Minute
 	maxSocketsPerUser = 32
 )
 
@@ -295,12 +295,16 @@ func (s *Server) apiSessionSocket(w http.ResponseWriter, r *http.Request) {
 	// Everything on this socket, including the backlog, ends when the login does.
 	ctx, cancel := context.WithDeadline(context.WithoutCancel(r.Context()), expiry)
 	defer cancel()
-	untrack, ok := s.trackSocket(u.ID, &liveSocket{loginHash: hash, cancel: cancel})
+	me := &liveSocket{loginHash: hash, cancel: cancel}
+	untrack, ok := s.trackSocket(u.ID, me)
 	if !ok {
 		writeError(w, http.StatusTooManyRequests, "too_many_windows", "too many open terminal windows")
 		return
 	}
 	defer untrack()
+	// Until the page says otherwise, an open socket counts as someone watching.
+	s.vis.set(sess.ID, me, true)
+	defer s.vis.drop(sess.ID, me)
 	// Registered before this check, so a sign-out racing with us is caught either way.
 	if _, err := s.auth.CheckLogin(ctx, hash); err != nil {
 		writeError(w, http.StatusUnauthorized, "unauthorized", "please sign in")
@@ -394,10 +398,11 @@ func (s *Server) apiSessionSocket(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			var m struct {
-				T    string `json:"t"`
-				Cols int    `json:"cols"`
-				Rows int    `json:"rows"`
-				TS   int64  `json:"ts"`
+				T       string `json:"t"`
+				Cols    int    `json:"cols"`
+				Rows    int    `json:"rows"`
+				TS      int64  `json:"ts"`
+				Visible bool   `json:"v"`
 			}
 			if json.Unmarshal(data, &m) != nil {
 				continue
@@ -410,6 +415,8 @@ func (s *Server) apiSessionSocket(w http.ResponseWriter, r *http.Request) {
 				case pongs <- m.TS:
 				default:
 				}
+			case "visible":
+				s.vis.set(sess.ID, me, m.Visible)
 			}
 		}
 	}()

@@ -11,12 +11,14 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/ihainan/corral/internal/auth"
 	"github.com/ihainan/corral/internal/config"
 	"github.com/ihainan/corral/internal/netguard"
+	"github.com/ihainan/corral/internal/notify"
 	"github.com/ihainan/corral/internal/store"
 	"github.com/ihainan/corral/internal/term"
 	"github.com/ihainan/corral/internal/vault"
@@ -86,10 +88,19 @@ func run(log *slog.Logger) error {
 		static = os.DirFS(dir)
 	}
 
+	notifier, err := notify.New(context.Background(), st, log, notify.Options{
+		Subscriber:      cfg.Origin(),
+		ExtraPushHosts:  splitList(os.Getenv("CORRAL_PUSH_HOSTS")),
+		WebhookPrefixes: splitList(os.Getenv("CORRAL_WEBHOOK_PREFIXES")),
+	})
+	if err != nil {
+		return fmt.Errorf("notifications: %w", err)
+	}
+
 	srv := web.New(web.Deps{
 		Config: cfg, Store: st, Auth: authSvc, Vault: v,
 		Guard: netguard.New(cfg.AllowedNetworks, cfg.DeniedNetworks),
-		Terms: terms, Log: log, Static: static,
+		Terms: terms, Log: log, Static: static, Notifier: notifier,
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -128,6 +139,16 @@ func run(log *slog.Logger) error {
 	_ = hs.Shutdown(shutCtx)
 	terms.Shutdown()
 	return nil
+}
+
+func splitList(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func pruneLogins(ctx context.Context, st *store.Store, cfg *config.Config) {

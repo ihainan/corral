@@ -17,8 +17,8 @@ import (
 
 	"github.com/ihainan/corral/internal/auth"
 	"github.com/ihainan/corral/internal/config"
-	"github.com/ihainan/corral/internal/herdr"
 	"github.com/ihainan/corral/internal/netguard"
+	"github.com/ihainan/corral/internal/notify"
 	"github.com/ihainan/corral/internal/store"
 	"github.com/ihainan/corral/internal/term"
 	"github.com/ihainan/corral/internal/vault"
@@ -52,7 +52,8 @@ type Server struct {
 	static fs.FS
 
 	herdrSocks herdrSockets
-	onAgent    func(*term.Session, *store.Host, herdr.Transition) // set by notifications
+	notifier   *notify.Notifier // nil disables push
+	vis        visibility
 
 	sockMu  sync.Mutex
 	socks   map[int64]map[*liveSocket]struct{} // open WebSockets per user, closed on sign-out
@@ -66,20 +67,23 @@ type liveSocket struct {
 }
 
 type Deps struct {
-	Config *config.Config
-	Store  *store.Store
-	Auth   *auth.Service
-	Vault  *vault.Vault
-	Guard  *netguard.Guard
-	Terms  *term.Manager
-	Log    *slog.Logger
-	Static fs.FS // built frontend; nil serves a placeholder
+	Config   *config.Config
+	Store    *store.Store
+	Auth     *auth.Service
+	Vault    *vault.Vault
+	Guard    *netguard.Guard
+	Terms    *term.Manager
+	Log      *slog.Logger
+	Static   fs.FS // built frontend; nil serves a placeholder
+	Notifier *notify.Notifier
 }
 
 func New(d Deps) *Server {
 	s := &Server{cfg: d.Config, store: d.Store, auth: d.Auth, vault: d.Vault, guard: d.Guard, terms: d.Terms,
 		log: d.Log, mux: http.NewServeMux(), static: d.Static, socks: map[int64]map[*liveSocket]struct{}{},
-		pending: map[int64]map[*liveSocket]struct{}{}, herdrSocks: herdrSockets{path: map[string]string{}}}
+		pending: map[int64]map[*liveSocket]struct{}{}, herdrSocks: herdrSockets{path: map[string]string{}},
+		notifier: d.Notifier, vis: visibility{seen: map[string]map[*liveSocket]bool{}}}
+	s.terms.OnAlert = s.onTerminalAlert
 	prev := s.auth.OnUserGone
 	s.auth.OnUserGone = func(userID int64) {
 		if prev != nil {
@@ -133,6 +137,11 @@ func (s *Server) registerRoutes() {
 	s.handle("POST /api/sessions/{id}/upload", SignedIn, s.apiUpload)
 	s.handle("POST /api/sessions/{id}/herdr", SignedIn, s.apiHerdrAction)
 
+	s.handle("GET /api/push", SignedIn, s.apiPushInfo)
+	s.handle("POST /api/push/subscriptions", SignedIn, s.apiPushSubscribe)
+	s.handle("DELETE /api/push/subscriptions", SignedIn, s.apiPushUnsubscribe)
+	s.handle("POST /api/push/test", SignedIn, s.apiPushTest)
+
 	// Admin
 	s.handle("GET /api/admin/users", AdminOnly, s.apiAdminListUsers)
 	s.handle("PUT /api/admin/users/{id}", AdminOnly, s.apiAdminUpdateUser)
@@ -154,8 +163,11 @@ const (
 	loginKey
 )
 
-func currentUser(r *http.Request) *store.User { u, _ := r.Context().Value(userKey).(*store.User); return u }
-func loginHash(r *http.Request) string        { h, _ := r.Context().Value(loginKey).(string); return h }
+func currentUser(r *http.Request) *store.User {
+	u, _ := r.Context().Value(userKey).(*store.User)
+	return u
+}
+func loginHash(r *http.Request) string { h, _ := r.Context().Value(loginKey).(string); return h }
 
 func (s *Server) handle(pattern string, access Access, h http.HandlerFunc) {
 	method, path, _ := strings.Cut(pattern, " ")

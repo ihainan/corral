@@ -1,4 +1,5 @@
-import { useState, type FormEvent } from 'react'
+import { useEffect, useState, type FormEvent } from 'react'
+import { disablePush, enablePush, pushState, type PushState } from '../push'
 import { api, errorText, type Me } from '../api'
 import { getLang, setLang, t, type Lang } from '../i18n'
 import { setPrefs, usePrefs } from '../prefs'
@@ -50,6 +51,8 @@ export function SettingsPage() {
   return (
     <main className="page page-narrow">
       <div className="page-head"><h1>{t('settings.title')}</h1></div>
+
+      <PushSection />
 
       <section className="section">
         <h2>{t('settings.appearance')}</h2>
@@ -120,5 +123,60 @@ export function SettingsPage() {
         </form>
       </section>
     </main>
+  )
+}
+
+function PushSection() {
+  const toast = useToast()
+  const [info, setInfo] = useState<{ enabled: boolean; public_key?: string; devices?: { id: number; user_agent: string; created_at: number }[] } | null>(null)
+  const [state, setState] = useState<PushState | null>(null)
+  const [busy, setBusy] = useState(false)
+  const refresh = () => {
+    api<typeof info>('GET', '/api/push').then(setInfo).catch(() => setInfo({ enabled: false }))
+    pushState().then(setState).catch(() => setState('unsupported'))
+  }
+  useEffect(refresh, [])
+  if (!info || !state) return null
+  let body: React.ReactNode
+  if (!info.enabled) body = <p className="hint">{t('push.unavailable')}</p>
+  else if (state === 'needs-home-screen') body = <p className="hint">{t('push.needsHomeScreen')}</p>
+  else if (state === 'unsupported') body = <p className="hint">{t('push.unsupported')}</p>
+  else if (state === 'denied') body = <p className="err">{t('push.denied')}</p>
+  else if (state === 'off')
+    body = (
+      <div>
+        <button
+          className="btn btn-primary"
+          disabled={busy}
+          onClick={async () => {
+            setBusy(true)
+            try {
+              setState(await enablePush(info.public_key!))
+              refresh()
+            } catch {
+              toast(t('push.failed'), true)
+            } finally {
+              setBusy(false)
+            }
+          }}
+        >
+          {t('push.enable')}
+        </button>
+      </div>
+    )
+  else
+    body = (
+      <div className="row" style={{ alignItems: 'center', flexWrap: 'wrap' }}>
+        <span className="state state-running" style={{ flex: '1 1 auto' }}>{t('push.enabled')}</span>
+        <button className="btn" style={{ flex: 'none' }} onClick={async () => { await api('POST', '/api/push/test'); toast(t('push.testSent')) }}>{t('push.test')}</button>
+        <button className="btn btn-ghost" style={{ flex: 'none' }} onClick={async () => { await disablePush(); refresh() }}>{t('push.disable')}</button>
+      </div>
+    )
+  return (
+    <section className="section">
+      <h2>{t('push.title')}</h2>
+      <p className="hint">{t('push.intro')}</p>
+      {body}
+    </section>
   )
 }
