@@ -209,12 +209,13 @@ code, .mono { font-family: var(--font-mono); font-size: 0.9em; }
   border: 1px solid var(--line-strong); background: var(--bg); color: var(--fg);
   font-size: 16px; /* keeps iOS from zooming on focus */
 }
-@media (pointer: fine) { .input, .select, .textarea { font-size: 14px; } }
+/* 14px only where no touch pointer exists at all, so iOS never zooms on focus. */
+@media not all and (any-pointer: coarse) { .input, .select, .textarea { font-size: 14px; } }
 .input::placeholder, .textarea::placeholder { color: var(--fg-4); }
 .input:focus, .select:focus, .textarea:focus { border-color: var(--accent); box-shadow: var(--focus); }
 .input[aria-invalid='true'] { border-color: var(--danger); }
 .textarea { height: auto; min-height: 120px; padding: 10px 12px; resize: vertical; font-family: var(--font-mono); font-size: 13px; line-height: 1.5; }
-@media (pointer: coarse) { .textarea { font-size: 16px; } }
+@media (any-pointer: coarse) { .textarea { font-size: 16px; } }
 .row2 { display: flex; gap: 12px; }
 .row2 > * { flex: 1; min-width: 0; }
 .row2 > .port { flex: 0 0 96px; }

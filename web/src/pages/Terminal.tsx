@@ -39,6 +39,17 @@ const FONT_STACK = "'JetBrains Mono', 'SFMono-Regular', Menlo, Consolas, 'PingFa
 
 // Quote a remote path for a POSIX shell when it contains anything beyond safe
 // characters. Generated upload names are safe; the home directory may not be.
+// While replayed output is parsed, xterm answers the old queries in it. The
+// answers have fixed shapes: device attributes and status (CSI … c / n / R),
+// mode reports (CSI … $ y), window reports (CSI … t), focus (CSI I / O),
+// colour and DCS reports. Data made only of these is dropped during a replay;
+// anything else is the user's and goes out. (Ctrl+F3 encodes like a cursor
+// report and would be lost if pressed during the replay itself.)
+const REPLY = /^(?:\x1b\[[?>]?[\d;]*[cnRt]|\x1b\[\??[\d;]*\$y|\x1b\[[IO]|\x1bP[\s\S]*?\x1b\\|\x1b\][\s\S]*?(?:\x07|\x1b\\))+$/
+export function isTerminalReply(data: string): boolean {
+  return REPLY.test(data)
+}
+
 function shellPath(p: string): string | null {
   if (/[\x00-\x1f\x7f]/.test(p)) return null
   if (/^[\w@%+=:,./~-]+$/.test(p)) return p
@@ -80,6 +91,19 @@ export function TerminalPage({ id }: { id: string }) {
   }
   const [sessions, setSessions] = useState<SessionInfo[] | null>(null)
   const [sessionsFailed, setSessionsFailed] = useState(false)
+  // False from a disconnect until this connection sends a new herdr summary.
+  const [herdrFresh, setHerdrFresh] = useState(true)
+  useEffect(() => {
+    if (status !== 'open') setHerdrFresh(false)
+  }, [status])
+  // Crossing the width where the panel turns from docked to a sheet closes it,
+  // so it never reappears in another form above a dialog that is open.
+  const firstSheet = useRef(sheetPanel)
+  useEffect(() => {
+    if (firstSheet.current === sheetPanel) return
+    firstSheet.current = sheetPanel
+    setPanelState(false)
+  }, [sheetPanel])
   const ended = status === 'ended' || status === 'gone' || end !== null
   const showKeybar = isTouch && prefs.keybar && !ended
   const { boot } = useSession()
@@ -200,7 +224,10 @@ export function TerminalPage({ id }: { id: string }) {
       onStatus: setStatus,
       onEnd: setEnd,
       onLatency: setLatency,
-      onMeta: (m) => setHerdr(m as HerdrSummary),
+      onMeta: (m) => {
+        setHerdr(m as HerdrSummary)
+        setHerdrFresh(true)
+      },
       onLive: () => term.write('', () => (replaying = false)),
     })
     connRef.current = conn
@@ -212,12 +239,6 @@ export function TerminalPage({ id }: { id: string }) {
     // input-method results and the terminal's own replies pass through untouched.
     let typedChar: string | null = null
     let composing = false
-    // Input the user just produced (keys, paste, IME). Terminal replies are
-    // generated while output is parsed, never inside these events, so while a
-    // replay is parsed only data arriving right after one of them goes out.
-    let userAt = -1
-    const markUser = () => (userAt = performance.now())
-    const fromUser = () => performance.now() - userAt < 50
     const latched = () => mods.current.ctrl !== 'off' || mods.current.alt !== 'off'
     const onCompStart = () => {
       composing = true
@@ -226,18 +247,13 @@ export function TerminalPage({ id }: { id: string }) {
     const onCompEnd = () => {
       composing = false
       typedChar = null
-      markUser()
     }
     // iOS soft keyboards report printable keys through input events.
     const onBeforeInput = (e: Event) => {
-      markUser()
       const ie = e as InputEvent
       typedChar = !ie.isComposing && ie.inputType === 'insertText' && ie.data && [...ie.data].length === 1 ? ie.data : null
     }
-    const onPasteEv = () => {
-      typedChar = null
-      markUser()
-    }
+    const onPasteEv = () => (typedChar = null)
     ta?.addEventListener('compositionstart', onCompStart)
     ta?.addEventListener('compositionend', onCompEnd)
     ta?.addEventListener('beforeinput', onBeforeInput)
@@ -245,7 +261,7 @@ export function TerminalPage({ id }: { id: string }) {
     const dataSub = term.onData((data) => {
       const typed = typedChar !== null && data === typedChar && !composing
       typedChar = null
-      if (replaying && !typed && !fromUser()) return
+      if (replaying && isTerminalReply(data)) return
       if (typed && latched()) {
         conn.send(applyMods(data, activeMods()))
         releaseOnce()
@@ -273,7 +289,6 @@ export function TerminalPage({ id }: { id: string }) {
     term.attachCustomKeyEventHandler((e) => {
       if (e.type !== 'keydown') return true
       if (e.isComposing || e.keyCode === 229) return true
-      markUser()
       typedChar = e.key.length === 1 && !e.metaKey && !e.ctrlKey ? e.key : null
       // A physical Ctrl/Alt chord while a key-bar modifier is latched: combine both.
       // Clipboard shortcuts, AltGr and text-producing Option are left alone.
@@ -636,16 +651,15 @@ export function TerminalPage({ id }: { id: string }) {
     const lines: string[] = []
     const start = Math.max(0, buf.length - 3000)
     // A soft-wrapped row continues the previous line: join them, so copied
-    // commands and URLs come out whole.
-    // Rows are taken untrimmed (a space before the wrap point is content) and
-    // trailing blanks are cut once per logical line.
+    // commands and URLs come out whole. Trimming drops only cells nothing was
+    // printed in (such as the gap a wide character leaves before a wrap);
+    // printed spaces stay.
     for (let i = start; i < buf.length; i++) {
       const line = buf.getLine(i)
-      const text = line?.translateToString(false) ?? ''
+      const text = line?.translateToString(true) ?? ''
       if (line?.isWrapped && lines.length > 0) lines[lines.length - 1] += text
       else lines.push(text)
     }
-    for (let i = 0; i < lines.length; i++) lines[i] = lines[i].trimEnd()
     while (lines.length && lines[lines.length - 1] === '') lines.pop()
     setCopyText(lines.join('\n'))
   }
@@ -683,6 +697,7 @@ export function TerminalPage({ id }: { id: string }) {
     status === 'offline' ? t('term.offline') : ''
   const statusClass = ended ? 's-ended' : slow ? 's-slow' : 's-' + status
   const paused = !ended && (status === 'reconnecting' || status === 'offline')
+  const herdrStale = paused || !herdrFresh
 
   const endText = status === 'gone' ? t('term.ended.gone') :
     end ? (end.state === 'exited' ? t('term.ended.exited', { code: end.code }) : end.state === 'lost' ? t('term.ended.lost') : t('term.ended.closed')) :
@@ -789,9 +804,9 @@ export function TerminalPage({ id }: { id: string }) {
         />
         <div className="spacer" />
         {herdr && !ended && (
-          <button className="icon-btn herdr-btn" aria-pressed={panel} onClick={() => setPanel(!panel)} aria-label={t('herdr.title') + (herdr.waiting > 0 ? ' · ' + t('herdr.waiting', { n: herdr.waiting }) : '')} title={t('herdr.title')}>
+          <button className="icon-btn herdr-btn" aria-pressed={panel} onClick={() => setPanel(!panel)} aria-label={t('herdr.title') + (herdr.waiting > 0 && !herdrStale ? ' · ' + t('herdr.waiting', { n: herdr.waiting }) : '')} title={t('herdr.title')}>
             <LayoutGrid size={19} />
-            {herdr.waiting > 0 && !paused && <span className="herdr-count">{herdr.waiting}</span>}
+            {herdr.waiting > 0 && !herdrStale && <span className="herdr-count">{herdr.waiting}</span>}
           </button>
         )}
         {!ended && (
@@ -817,7 +832,7 @@ export function TerminalPage({ id }: { id: string }) {
           <HerdrPanel
             summary={herdr}
             sheet={sheetPanel}
-            stale={paused}
+            stale={herdrStale}
             onClose={(viaKeyboard) => {
               setPanel(false)
               // A keyboard user (also an iPad with a hardware keyboard) keeps typing.

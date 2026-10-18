@@ -60,7 +60,10 @@ export function useFocusTrap<T extends HTMLElement>(onClose: () => void) {
     document.addEventListener('keydown', onKey, true)
     return () => {
       document.removeEventListener('keydown', onKey, true)
-      prev?.focus?.()
+      // Give focus back only if it was ours to give: a layer that closes
+      // underneath another must not pull focus out of the one on top.
+      const a = document.activeElement
+      if (!a || a === document.body || root?.contains(a)) prev?.focus?.()
     }
   }, [])
   return ref
@@ -179,6 +182,22 @@ function MenuEntry({ item, close }: { item: MenuItem; close: () => void }) {
   )
 }
 
+// Arrow keys, Home and End move between menu items (the ARIA menu pattern);
+// Tab leaves the menu and closes it.
+function menuKeys(e: React.KeyboardEvent<HTMLElement>) {
+  const items = [...e.currentTarget.querySelectorAll<HTMLElement>('.menu-item')]
+  if (items.length === 0) return
+  const i = items.indexOf(document.activeElement as HTMLElement)
+  let next = -1
+  if (e.key === 'ArrowDown') next = (i + 1) % items.length
+  else if (e.key === 'ArrowUp') next = (i - 1 + items.length) % items.length
+  else if (e.key === 'Home') next = 0
+  else if (e.key === 'End') next = items.length - 1
+  if (next < 0) return
+  e.preventDefault()
+  items[next].focus()
+}
+
 function Popover({ anchor, trigger, onClose, label, children }: { anchor: DOMRect; trigger: HTMLElement | null; onClose: () => void; label: string; children: ReactNode }) {
   const ref = useRef<HTMLDivElement>(null)
   const isTop = useLayer()
@@ -235,7 +254,7 @@ function Popover({ anchor, trigger, onClose, label, children }: { anchor: DOMRec
     }
   }, [onClose, trigger, isTop])
   return createPortal(
-    <div ref={ref} className="menu" role="menu" aria-label={label} style={pos ? { top: pos.top, left: pos.left, maxHeight: pos.maxHeight } : { top: -9999, left: -9999 }}>
+    <div ref={ref} className="menu" role="menu" aria-label={label} onKeyDown={menuKeys} style={pos ? { top: pos.top, left: pos.left, maxHeight: pos.maxHeight } : { top: -9999, left: -9999 }}>
       {children}
     </div>,
     document.body,

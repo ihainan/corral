@@ -71,7 +71,7 @@ function PanelBody(props: PanelProps) {
             s.waiting > 0 && <div className="herdr-waiting st-blocked">{t('herdr.waiting', { n: s.waiting })}</div>
           )}
         </div>
-        <button className="icon-btn" onClick={() => props.onClose(false)} aria-label={t('common.close')}><X size={18} /></button>
+        <button className="icon-btn" onClick={(e) => props.onClose(e.detail === 0)} aria-label={t('common.close')}><X size={18} /></button>
       </div>
       <ul className={'herdr-list' + (props.stale ? ' stale' : '')}>
         {s.workspaces.map((w) => (
