@@ -55,12 +55,22 @@ type Sub struct {
 	C      chan Chunk
 	Events chan Event
 	Meta   chan []byte // side information (e.g. herdr state); only the latest matters
-	// The terminal size whenever it changes (and once on subscribing); only
-	// the latest matters. Viewers of another size follow it until they take
-	// the terminal over by sending their own size.
-	Size chan [2]int
+	// The terminal size whenever it or the viewer that set it changes (and
+	// once on subscribing); only the latest matters. Viewers of another size
+	// follow it until they take the terminal over by sending their own size.
+	Size chan SizeNote
 	done chan struct{}
 	once sync.Once
+	ack  int64 // the last resize request number of this viewer applied; under Session.mu
+}
+
+// SizeNote is the terminal size as told to one viewer: whether that viewer
+// set it, and how many of its own resize requests had been applied, so a
+// note older than the viewer's latest request can be recognised and ignored.
+type SizeNote struct {
+	Cols, Rows int
+	Own        bool
+	Ack        int64
 }
 
 func (s *Sub) Done() <-chan struct{} { return s.done }
@@ -110,6 +120,7 @@ type Session struct {
 	reason    string
 	cols      int
 	rows      int
+	sizeBy    *Sub // the viewer that set the size, nil if none (or it left)
 	idleSince time.Time // when the last viewer left; zero while viewed
 	endedAt   time.Time
 	title     string
@@ -279,8 +290,8 @@ func (s *Session) Attach(fromOffset uint64, haveOffset bool) (sub *Sub, backlog 
 	if reset {
 		backlog, start = s.buf.all()
 	}
-	sub = &Sub{C: make(chan Chunk, subBuffer), Events: make(chan Event, 4), Meta: make(chan []byte, 1), Size: make(chan [2]int, 1), done: make(chan struct{})}
-	sub.Size <- [2]int{s.cols, s.rows}
+	sub = &Sub{C: make(chan Chunk, subBuffer), Events: make(chan Event, 4), Meta: make(chan []byte, 1), Size: make(chan SizeNote, 1), done: make(chan struct{})}
+	sub.Size <- SizeNote{Cols: s.cols, Rows: s.rows}
 	if s.meta != nil {
 		sub.Meta <- s.meta
 	}
@@ -304,6 +315,9 @@ func (s *Session) Detach(sub *Sub) {
 	if _, ok := s.subs[sub]; ok {
 		delete(s.subs, sub)
 		sub.close()
+		if s.sizeBy == sub {
+			s.sizeBy = nil
+		}
 		if len(s.subs) == 0 {
 			s.idleSince = time.Now()
 		}
@@ -335,28 +349,44 @@ func (s *Session) Write(ctx context.Context, p []byte) error {
 	return nil
 }
 
-// Resize records the size a viewer asked for, tells the other viewers, and
-// sends it to the host.
-func (s *Session) Resize(cols, rows int) error {
+// Resize records a size set by no particular viewer (see ResizeFrom).
+func (s *Session) Resize(cols, rows int) error { return s.ResizeFrom(nil, 0, true, cols, rows) }
+
+// ResizeFrom handles request number seq of viewer from: its size. With take
+// (the user acted in that viewer) the size is taken over; without (its
+// window changed size) it applies only while that viewer set the size, or
+// nobody did. The size is sent to the host and every viewer hears of a change
+// of size or of the viewer that set it; the asking viewer always hears back,
+// so it knows its request was handled and whether it is the one in charge.
+func (s *Session) ResizeFrom(from *Sub, seq int64, take bool, cols, rows int) error {
 	if cols < 2 || rows < 1 || cols > 1000 || rows > 500 {
 		return errors.New("invalid size")
 	}
 	s.sizeMu.Lock()
 	defer s.sizeMu.Unlock()
 	s.mu.Lock()
-	same := s.cols == cols && s.rows == rows
-	s.cols, s.rows = cols, rows
+	if from != nil && seq > from.ack {
+		from.ack = seq
+	}
+	setter := from
+	if !take && s.sizeBy != nil && s.sizeBy != from {
+		cols, rows, setter = s.cols, s.rows, s.sizeBy // someone else's size stays
+	}
+	changed := s.cols != cols || s.rows != rows || s.sizeBy != setter
+	s.cols, s.rows, s.sizeBy = cols, rows, setter
 	running := s.state == StateRunning
-	if !same {
-		for sub := range s.subs {
-			select {
-			case <-sub.Size:
-			default:
-			}
-			select {
-			case sub.Size <- [2]int{cols, rows}:
-			default:
-			}
+	for sub := range s.subs {
+		if !changed && sub != from {
+			continue
+		}
+		note := SizeNote{Cols: cols, Rows: rows, Own: sub == setter, Ack: sub.ack}
+		select {
+		case <-sub.Size:
+		default:
+		}
+		select {
+		case sub.Size <- note:
+		default:
 		}
 	}
 	s.mu.Unlock()

@@ -332,9 +332,14 @@ func (s *Server) apiCloseSession(w http.ResponseWriter, r *http.Request) {
 //           session already has as many viewers as it allows
 // Browser → server
 //   binary: keyboard input
-//   text:   {"t":"resize","cols":N,"rows":N} | {"t":"ping","ts":N}
-//   (server text also includes {"t":"size","cols":N,"rows":N}: the terminal's
-//   current size, sent on attach and whenever any viewer changes it)
+//   text:   {"t":"resize","cols":N,"rows":N,"seq":N,"take":bool} | {"t":"ping","ts":N}
+//           (seq numbers this socket's resize requests, from 1; take: the user
+//           acted here, so the size is taken over; without it the size only
+//           applies while this socket set it, or nobody did)
+//   (server text also includes {"t":"size","cols":N,"rows":N,"own":bool,"ack":N}:
+//   the terminal's current size, whether this socket set it, and the last of
+//   its resize requests applied; sent on attach, whenever the size or the
+//   socket that set it changes, and in answer to each resize request)
 
 const (
 	maxFrame          = 64 << 10
@@ -487,6 +492,8 @@ func (s *Server) apiSessionSocket(w http.ResponseWriter, r *http.Request) {
 				T       string `json:"t"`
 				Cols    int    `json:"cols"`
 				Rows    int    `json:"rows"`
+				Seq     int64  `json:"seq"`
+				Take    bool   `json:"take"`
 				TS      int64  `json:"ts"`
 				Visible bool   `json:"v"`
 			}
@@ -495,7 +502,7 @@ func (s *Server) apiSessionSocket(w http.ResponseWriter, r *http.Request) {
 			}
 			switch m.T {
 			case "resize":
-				_ = sess.Resize(m.Cols, m.Rows)
+				_ = sess.ResizeFrom(sub, m.Seq, m.Take, m.Cols, m.Rows)
 			case "ping":
 				select {
 				case pongs <- m.TS:
@@ -555,7 +562,7 @@ func (s *Server) apiSessionSocket(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		case sz := <-sub.Size:
-			if err := writeText(map[string]any{"t": "size", "cols": sz[0], "rows": sz[1]}); err != nil {
+			if err := writeText(map[string]any{"t": "size", "cols": sz.Cols, "rows": sz.Rows, "own": sz.Own, "ack": sz.Ack}); err != nil {
 				return
 			}
 		}

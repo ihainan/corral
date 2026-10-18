@@ -119,22 +119,71 @@ func TestAlertScanner(t *testing.T) {
 // A size change reaches every viewer, so the others can follow it.
 func TestResizeTellsEveryViewer(t *testing.T) {
 	s := &Session{subs: map[*Sub]struct{}{}, state: StateExited, cols: 80, rows: 24}
-	a, b := &Sub{Size: make(chan [2]int, 1)}, &Sub{Size: make(chan [2]int, 1)}
+	a, b := &Sub{Size: make(chan SizeNote, 1)}, &Sub{Size: make(chan SizeNote, 1)}
 	s.subs[a], s.subs[b] = struct{}{}, struct{}{}
-	if err := s.Resize(120, 40); err != nil {
+	if err := s.ResizeFrom(a, 1, true, 120, 40); err != nil {
 		t.Fatal(err)
 	}
-	for _, sub := range []*Sub{a, b} {
-		if got := <-sub.Size; got != [2]int{120, 40} {
-			t.Fatalf("viewer got %v", got)
-		}
+	if got := <-a.Size; got != (SizeNote{Cols: 120, Rows: 40, Own: true, Ack: 1}) {
+		t.Fatalf("the viewer that set it got %+v", got)
 	}
-	if err := s.Resize(120, 40); err != nil { // unchanged: nothing new to tell
+	if got := <-b.Size; got != (SizeNote{Cols: 120, Rows: 40}) {
+		t.Fatalf("the other viewer got %+v", got)
+	}
+	// The same size again from the same viewer: only it hears back (its
+	// request was applied); the others have nothing new to learn.
+	if err := s.ResizeFrom(a, 2, true, 120, 40); err != nil {
 		t.Fatal(err)
+	}
+	if got := <-a.Size; got != (SizeNote{Cols: 120, Rows: 40, Own: true, Ack: 2}) {
+		t.Fatalf("the repeated request was not answered: %+v", got)
 	}
 	select {
-	case got := <-a.Size:
-		t.Fatalf("an unchanged size was sent again: %v", got)
+	case got := <-b.Size:
+		t.Fatalf("an unchanged size was sent again: %+v", got)
 	default:
+	}
+	// The same size taken over by the other viewer: both hear of it.
+	if err := s.ResizeFrom(b, 1, true, 120, 40); err != nil {
+		t.Fatal(err)
+	}
+	if got := <-a.Size; got != (SizeNote{Cols: 120, Rows: 40, Ack: 2}) {
+		t.Fatalf("the first viewer got %+v", got)
+	}
+	if got := <-b.Size; got != (SizeNote{Cols: 120, Rows: 40, Own: true, Ack: 1}) {
+		t.Fatalf("the viewer taking over got %+v", got)
+	}
+	// A window of a, resized without the user acting there (take false):
+	// b's size stays; a hears back that it is not in charge.
+	_ = s.ResizeFrom(a, 3, false, 100, 30)
+	if got := <-a.Size; got != (SizeNote{Cols: 120, Rows: 40, Ack: 3}) {
+		t.Fatalf("a resize without take: %+v", got)
+	}
+	select {
+	case got := <-b.Size:
+		t.Fatalf("b was told of a change that did not happen: %+v", got)
+	default:
+	}
+	// b's own window change applies, b being in charge.
+	_ = s.ResizeFrom(b, 2, false, 110, 35)
+	if got := <-b.Size; got != (SizeNote{Cols: 110, Rows: 35, Own: true, Ack: 2}) {
+		t.Fatalf("b's own resize: %+v", got)
+	}
+	<-a.Size
+	// An older request number never lowers what was applied.
+	_ = s.ResizeFrom(a, 1, true, 100, 30)
+	if got := <-a.Size; got.Ack != 3 || !got.Own {
+		t.Fatalf("a late request: %+v", got)
+	}
+	// Once the viewer in charge leaves, a resize without take applies again.
+	s.subs[b] = struct{}{}
+	_ = s.ResizeFrom(b, 3, true, 90, 30)
+	<-a.Size
+	<-b.Size
+	delete(s.subs, b)
+	s.sizeBy = nil // as Detach does
+	_ = s.ResizeFrom(a, 4, false, 100, 30)
+	if got := <-a.Size; got != (SizeNote{Cols: 100, Rows: 30, Own: true, Ack: 4}) {
+		t.Fatalf("after the viewer in charge left: %+v", got)
 	}
 }

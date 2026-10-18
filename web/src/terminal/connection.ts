@@ -23,11 +23,11 @@ export interface Handlers {
   onEnd(info: EndInfo): void
   onLatency(ms: number): void
   onMeta?(m: any): void // side information such as herdr state
-  onSize?(cols: number, rows: number): void // the terminal's size as set by whichever viewer set it last
+  // The terminal's size, and whether this window set it. Notes older than
+  // this window's latest size request are left out (they predate it).
+  onSize?(cols: number, rows: number, own: boolean): void
   onLive?(): void // the replayed backlog has been delivered
-  // A new socket was accepted; state from the old one is stale. sentSize:
-  // this window's size was reported on it.
-  onHello?(sentSize: boolean): void
+  onHello?(): void // a new socket was accepted; state from the old one is stale
   onDropped?(): void // input typed while disconnected was discarded (too much, or too old)
 }
 
@@ -55,6 +55,7 @@ export class TermConnection {
   private backlog = false
   private everOpen = false
   private full = false
+  private sizeSeq = 0 // this socket's size requests so far
   opens = 0 // counts accepted sockets; input held elsewhere checks it did not change
   status: Status = 'connecting'
 
@@ -114,12 +115,6 @@ export class TermConnection {
     return true
   }
 
-  // follow forgets this window's size while another viewer's is shown, so a
-  // reconnect does not report it; the next resize brings it back.
-  follow() {
-    this.size = null
-  }
-
   // retry tries again after the session was full.
   retry() {
     if (!this.full) return
@@ -128,9 +123,16 @@ export class TermConnection {
     this.open()
   }
 
-  resize(cols: number, rows: number) {
+  // resize reports this window's size. take: the user acted here, so the
+  // terminal is taken over; otherwise (the window changed size) the size only
+  // applies while this window is the one in charge of it.
+  resize(cols: number, rows: number, take = false) {
     this.size = { cols, rows }
-    if (this.isOpen()) this.ws!.send(JSON.stringify({ t: 'resize', cols, rows }))
+    if (this.isOpen()) this.sendSize(this.ws!, take)
+  }
+
+  private sendSize(ws: WebSocket, take: boolean) {
+    ws.send(JSON.stringify({ t: 'resize', ...this.size, seq: ++this.sizeSeq, take }))
   }
 
   private setStatus(s: Status) {
@@ -183,14 +185,14 @@ export class TermConnection {
           }
           this.offset = m.offset
           this.setStatus('open')
-          // This window's size, unless it is showing another viewer's (size
-          // is null then) or reconnected in the background: a phone in a
-          // pocket must not take the terminal back from the desk.
+          // This window's size: opening the session takes it over; a
+          // reconnect only keeps it if this window was in charge (a phone in
+          // a pocket must not take the terminal back from the desk).
           const first = !this.everOpen
           this.everOpen = true
-          const sentSize = !!this.size && (first || document.visibilityState === 'visible')
-          if (sentSize) ws.send(JSON.stringify({ t: 'resize', ...this.size }))
-          this.h.onHello?.(sentSize)
+          this.sizeSeq = 0 // numbered per socket
+          if (this.size) this.sendSize(ws, first)
+          this.h.onHello?.()
           ws.send(JSON.stringify({ t: 'visible', v: document.visibilityState === 'visible' }))
           this.startPing(ws, gen)
         } else if (m.t === 'state') {
@@ -213,7 +215,8 @@ export class TermConnection {
         } else if (m.t === 'herdr') {
           this.h.onMeta?.(m)
         } else if (m.t === 'size') {
-          this.h.onSize?.(m.cols, m.rows)
+          if ((m.ack ?? 0) < this.sizeSeq) return // from before this window's latest request
+          this.h.onSize?.(m.cols, m.rows, !!m.own)
         } else if (m.t === 'pong') {
           clearTimeout(this.pongDeadline)
           // The socket outlived a network change: send what waited meanwhile.

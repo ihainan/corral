@@ -268,7 +268,7 @@ export function TerminalPage({ id }: { id: string }) {
       setFollowing(null)
       applyScale()
       safeFit()
-      report(term.cols, term.rows) // tell the host even if nothing changed locally
+      conn.resize(term.cols, term.rows, true) // tell the host even if nothing changed locally
     }
     const safeFit = () => {
       if (following) return void requestAnimationFrame(applyScale)
@@ -318,7 +318,6 @@ export function TerminalPage({ id }: { id: string }) {
     // must not reach the host as typing; they are dropped until the replay ends.
     let replaying = false
     let lastDropToast = 0
-    let sizeGraceUntil = 0
     const droppedInput = () => {
       const now = Date.now()
       if (now - lastDropToast < 5000) return
@@ -349,44 +348,25 @@ export function TerminalPage({ id }: { id: string }) {
       onStatus: setStatus,
       onEnd: setEnd,
       onLatency: setLatency,
-      onSize: (cols, rows) => {
+      onSize: (cols, rows, own) => {
         const mine = fit.proposeDimensions()
-        if (!mine || (mine.cols === cols && mine.rows === rows)) {
-          // This window's own size (again): fit to it, in case another
-          // viewer's size was being shown until now. The gateway has this
-          // size already, so the fit is not reported: reporting it could
-          // answer a late echo and start two windows resizing in turn.
-          following = null
-          setFollowing(null)
-          applyScale()
+        if (own || !mine || (mine.cols === cols && mine.rows === rows)) {
+          // This window's size (it set it, or it is the same grid anyway):
+          // fit to this window, in case another viewer's size was shown
+          // until now. Should the fit differ (the window changed meanwhile),
+          // it is reported, and applies while this window is in charge.
+          if (following) {
+            following = null
+            setFollowing(null)
+            applyScale()
+          }
           safeFit()
-          clearTimeout(resizeTimer)
-          resizeTimer = undefined
-          sent = cols + 'x' + rows
-          return
-        }
-        if (sent === cols + 'x' + rows || resizeTimer !== undefined || Date.now() < sizeGraceUntil) {
-          // Not another viewer's: the size this window reported last, now
-          // outdated (taken before the font loaded, say), a size from before
-          // this window's report reached the gateway, or one about to be
-          // replaced by a resize of this window. Report the current size,
-          // unless that is already on its way.
-          following = null
-          setFollowing(null)
-          applyScale()
-          safeFit()
-          // Corrected once per socket: two windows connecting at the same
-          // moment must not keep correcting each other.
-          sizeGraceUntil = 0
-          if (resizeTimer === undefined) report(term.cols, term.rows)
           return
         }
         // Another viewer set this size: show the terminal at it, so what the
         // programs draw for that size lines up, until this one takes over.
         following = { cols, rows }
         setFollowing({ cols, rows })
-        sent = null // a later report of that old size is another viewer's
-        conn.follow()
         if (term.cols !== cols || term.rows !== rows) term.resize(cols, rows)
         requestAnimationFrame(applyScale)
       },
@@ -396,26 +376,13 @@ export function TerminalPage({ id }: { id: string }) {
       },
       onLive: () => term.write('', () => (replaying = false)),
       // Every new socket: the herdr summary is old until this one sends its own.
-      onHello: (sentSize) => {
-        setHerdrFresh(false)
-        // The size the gateway shows first may predate the one just reported.
-        sizeGraceUntil = sentSize ? Date.now() + 1500 : 0
-        // Sizes reported over an earlier socket say nothing about this one.
-        if (!sentSize) sent = null
-      },
+      onHello: () => setHerdrFresh(false),
       // Input typed while disconnected is sent once the connection is back,
       // unless there was too much of it or it waited too long.
       onDropped: () => droppedInput(),
     })
     connRef.current = conn
-    // Sizes go out through here, so a size coming back can be told apart:
-    // this window's own (sent) or another viewer's.
-    let sent: string | null = null
-    const report = (cols: number, rows: number) => {
-      sent = cols + 'x' + rows
-      conn.resize(cols, rows)
-    }
-    report(term.cols, term.rows)
+    conn.resize(term.cols, term.rows) // sent once connected
 
     // Everything typed goes out through here, so it can wait its turn while
     // Ctrl+V checks the clipboard and uploads an image: keys typed meanwhile
@@ -625,7 +592,7 @@ export function TerminalPage({ id }: { id: string }) {
       clearTimeout(resizeTimer)
       resizeTimer = window.setTimeout(() => {
         resizeTimer = undefined
-        if (!following) report(cols, rows)
+        if (!following) conn.resize(cols, rows)
       }, 120)
     })
     const specialFor: Record<string, SpecialKey> = {

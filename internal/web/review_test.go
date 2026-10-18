@@ -666,3 +666,75 @@ func TestStaleHostEditIsRefused(t *testing.T) {
 	mustStatus(t, edit("10.0.0.2", a.json()["version"]), 200, "edit from a fresh form")
 	mustStatus(t, edit("10.0.0.3", nil), 200, "edit without a version")
 }
+
+// Size notes over the socket say whether that socket set the size and how
+// many of its requests were applied; a resize without take does not move
+// the size away from the viewer in charge.
+func TestSizeNotesSayWhoSetIt(t *testing.T) {
+	h := newHarness(t)
+	admin := h.admin()
+	srv := h.sshServer(t.TempDir())
+	r := admin.do("POST", "/api/sessions", map[string]any{"host_id": h.hostFor(admin, srv.Addr.Port)})
+	mustStatus(t, r, 201, "open")
+	id := r.json()["id"].(string)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	type note struct {
+		T          string
+		Cols, Rows int
+		Own        bool
+		Ack        int64
+	}
+	// next returns the next size note on ws.
+	next := func(ws *websocket.Conn) note {
+		t.Helper()
+		for {
+			typ, b, err := ws.Read(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var n note
+			if typ == websocket.MessageText && json.Unmarshal(b, &n) == nil && n.T == "size" {
+				return n
+			}
+		}
+	}
+	send := func(ws *websocket.Conn, v map[string]any) {
+		b, _ := json.Marshal(v)
+		if err := ws.Write(ctx, websocket.MessageText, b); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a, err := h.dialWS(admin, id, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.CloseNow()
+	next(a) // the size on attaching
+	b, err := h.dialWS(admin, id, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.CloseNow()
+	next(b)
+
+	send(a, map[string]any{"t": "resize", "cols": 120, "rows": 40, "seq": 1, "take": true})
+	if n := next(a); n.Cols != 120 || !n.Own || n.Ack != 1 {
+		t.Fatalf("a after taking over: %+v", n)
+	}
+	if n := next(b); n.Cols != 120 || n.Own || n.Ack != 0 {
+		t.Fatalf("b after a took over: %+v", n)
+	}
+	// b's window changes size without the user acting there: a stays in charge.
+	send(b, map[string]any{"t": "resize", "cols": 80, "rows": 24, "seq": 1})
+	if n := next(b); n.Cols != 120 || n.Own || n.Ack != 1 {
+		t.Fatalf("b after a resize without take: %+v", n)
+	}
+	send(b, map[string]any{"t": "resize", "cols": 80, "rows": 24, "seq": 2, "take": true})
+	if n := next(b); n.Cols != 80 || !n.Own || n.Ack != 2 {
+		t.Fatalf("b after taking over: %+v", n)
+	}
+	if n := next(a); n.Cols != 80 || n.Own || n.Ack != 1 {
+		t.Fatalf("a after b took over: %+v", n)
+	}
+}
