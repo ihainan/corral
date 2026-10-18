@@ -310,8 +310,8 @@ func TestCodeServerUploadFromDir(t *testing.T) {
 	if b, _ := os.ReadFile(e.curlLog); len(b) != 0 {
 		t.Fatalf("the host downloaded although the gateway has the release: %s", b)
 	}
-	if _, err := os.Stat(filepath.Join(e.home, codeserver.UploadPath("4.138.0", codeArch()))); err == nil {
-		t.Fatal("uploaded archive left behind")
+	if left := e.staging(); len(left) != 0 {
+		t.Fatalf("install files left behind: %v", left)
 	}
 	f, id := e.openCode(e.owner, st)
 	ws, err := e.dialCode(f, id)
@@ -437,4 +437,15 @@ func TestCodeServerNeedsSetUp(t *testing.T) {
 	if b := admin2.do("GET", "/api/bootstrap", nil).json(); b["code"] != true {
 		t.Fatalf("bootstrap: %v", b)
 	}
+}
+
+// staging lists what installs leave in the state directory: there should be
+// nothing once they have ended.
+func (e *codeEnv) staging() []string {
+	var left []string
+	for _, pat := range []string{"install-*", ".upload-*", ".download-*"} {
+		m, _ := filepath.Glob(filepath.Join(e.home, ".local/state/corral", pat))
+		left = append(left, m...)
+	}
+	return left
 }
