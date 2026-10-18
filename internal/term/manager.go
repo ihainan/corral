@@ -33,15 +33,34 @@ type Manager struct {
 	detachTimeout time.Duration
 	maxPerUser    int
 	OnEnd         func(s *Session, state string, duration time.Duration)
-	OnAlert       func(s *Session, a Alert) // bells and notification escapes in output
+	OnAlert       func(s *Session, a Alert) // bells and notification escapes in output, called from one worker
+	alerts        chan *Session             // sessions with an alert waiting
 	stop          chan struct{}
 }
 
+// alertQueue bounds sessions waiting for the alert worker.
+var alertQueue = 256
+
 func NewManager(detachTimeout time.Duration, maxPerUser int) *Manager {
 	m := &Manager{sessions: map[string]*Session{}, pending: map[int64]int{}, detachTimeout: detachTimeout,
-		maxPerUser: maxPerUser, stop: make(chan struct{})}
+		maxPerUser: maxPerUser, alerts: make(chan *Session, alertQueue), stop: make(chan struct{})}
 	go m.reap()
+	go m.alertWorker()
 	return m
+}
+
+// alertWorker delivers terminal alerts one at a time.
+func (m *Manager) alertWorker() {
+	for {
+		select {
+		case <-m.stop:
+			return
+		case s := <-m.alerts:
+			if a := s.takeAlert(); a != nil && s.onAlert != nil {
+				s.onAlert(s, *a)
+			}
+		}
+	}
 }
 
 func (m *Manager) Shutdown() {
@@ -173,7 +192,7 @@ func (m *Manager) Start(ctx context.Context, res *Reservation, owner, hostID int
 			client: client, ssh: sess, stdin: stdin, input: make(chan []byte, inputQueue),
 			buf: newRing(ringSize), subs: map[*Sub]struct{}{}, state: StateRunning,
 			cols: cols, rows: rows, idleSince: time.Now(), finished: make(chan struct{}), uploads: make(chan struct{}, 2),
-			onAlert: m.OnAlert,
+			onAlert: m.OnAlert, alertq: m.alerts,
 		}
 		s.pumps.Add(2)
 		go s.pump(stdout)
