@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -17,6 +18,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/ihainan/corral/internal/config"
+	"github.com/ihainan/corral/internal/herdr"
 	"github.com/ihainan/corral/internal/testutil"
 )
 
@@ -223,6 +225,117 @@ func TestRevocationFreesHandlersBlockedOnASlowBrowser(t *testing.T) {
 			eventually(t, "handler stayed blocked writing to a browser that stopped reading", func() bool { return e.streams() == 0 })
 		})
 	}
+}
+
+// A herdr session end to end on the test SSH server: the terminal starts,
+// discovery over the same connection finds the running herdr session (the
+// host sends EOF before the exit status), and the gateway starts watching
+// its socket.
+func TestHerdrSessionIsDiscovered(t *testing.T) {
+	h := newHarness(t)
+	admin := h.admin()
+	srv := h.sshServer(t.TempDir())
+	srv.HandleExec(func(cmd string) func(ssh.Channel) {
+		if cmd != herdr.DiscoverCommand {
+			return nil // the terminal itself: the default echoing shell
+		}
+		return func(ch ssh.Channel) {
+			ch.Write([]byte(`{"sessions":[{"name":"default","default":true,"running":true,"socket_path":"/run/herdr.sock"}]}`))
+			ch.CloseWrite()
+			time.Sleep(50 * time.Millisecond)
+			ch.SendRequest("exit-status", false, []byte{0, 0, 0, 0})
+		}
+	})
+	r := admin.do("POST", "/api/hosts", map[string]any{"name": "box", "address": "127.0.0.1", "port": srv.Addr.Port,
+		"username": "alice", "auth": "password", "password": "alice-pass", "persistence": "herdr"})
+	mustStatus(t, r, 201, "create host")
+	r = admin.do("POST", "/api/sessions", map[string]any{"host_id": int64(r.json()["id"].(float64))})
+	mustStatus(t, r, 201, "open herdr session")
+	id := r.json()["id"].(string)
+	eventually(t, "herdr session was never discovered", func() bool { return h.srv.herdrSocks.get(id) == "/run/herdr.sock" })
+}
+
+// holdApp accepts a WebSocket and keeps it open without a word.
+var holdApp = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+	if err != nil {
+		return
+	}
+	defer c.CloseNow()
+	c.Read(r.Context())
+})
+
+func (e *fwdEnv) channels() int {
+	e.h.srv.fwd.mu.Lock()
+	defer e.h.srv.fwd.mu.Unlock()
+	return e.h.srv.fwd.channels
+}
+
+// The SSH connection under an upgraded forward drops while the browser keeps
+// its side open and silent: the proxy still waits on the browser, but the
+// channel is gone, so its quota must come back without waiting for that.
+func TestChannelQuotaReturnsWhenSSHDropsUnderAnOpenWebSocket(t *testing.T) {
+	e := newForwardEnv(t, holdApp)
+	f, _ := e.h.openForward(e.owner, e.id)
+	conn, err := net.Dial("tcp", e.h.ts.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close() // only at the end: the browser's side stays open
+	conn.Write([]byte("GET /ws HTTP/1.1\r\nHost: " + f.host + "\r\nCookie: corral_fwd=" + f.cookie +
+		"\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n"))
+	if _, err := conn.Read(make([]byte, 512)); err != nil { // 101 Switching Protocols
+		t.Fatal(err)
+	}
+	eventually(t, "forwarded WebSocket never opened", func() bool { return e.channels() == 1 })
+	e.srv.Close() // the host side goes away
+	eventually(t, "channel quota kept after the SSH connection ended", func() bool { return e.channels() == 0 })
+}
+
+// stop may be called more than once, also concurrently, cancelled or not.
+func TestAfterFuncWaitStopIsIdempotent(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stop := afterFuncWait(ctx, func() {})
+	returnsWithin := func(what string, f func()) {
+		done := make(chan struct{})
+		go func() { f(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal(what)
+		}
+	}
+	returnsWithin("second stop hung", func() { stop(); stop() })
+	returnsWithin("concurrent stops hung", func() {
+		var wg sync.WaitGroup
+		for range 8 {
+			wg.Add(1)
+			go func() { defer wg.Done(); stop() }()
+		}
+		wg.Wait()
+	})
+	// Cancelled: every stop returns, and only after the callback finished.
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	var finished atomic.Bool
+	started := make(chan struct{})
+	stop2 := afterFuncWait(ctx2, func() { close(started); time.Sleep(50 * time.Millisecond); finished.Store(true) })
+	cancel2()
+	<-started
+	returnsWithin("stops after a cancel hung", func() {
+		var wg sync.WaitGroup
+		for range 4 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				stop2()
+				if !finished.Load() {
+					t.Error("a stop returned before the callback finished")
+				}
+			}()
+		}
+		wg.Wait()
+	})
 }
 
 // The write cut-off for a cancelled request must be over by the time the
