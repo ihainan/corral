@@ -247,8 +247,23 @@ func (s *Server) serveForward(w http.ResponseWriter, r *http.Request, port int, 
 	// Ending the request (revocation, expiry) must also free a handler stuck
 	// writing to a browser that stopped reading, or it would keep its quotas.
 	cw := &cutoffWriter{ResponseWriter: w}
-	defer context.AfterFunc(ctx, cw.cut)()
+	defer afterFuncWait(ctx, cw.cut)() // the cut never outlives the handler (and its connection's next request)
 	s.proxyTo(cw, r.WithContext(ctx), fc, f)
+}
+
+// afterFuncWait is context.AfterFunc whose stop also waits for a call of f
+// that already started, so f never runs after the caller returned.
+func afterFuncWait(ctx context.Context, f func()) (stop func()) {
+	done := make(chan struct{})
+	stopAfter := context.AfterFunc(ctx, func() {
+		defer close(done)
+		f()
+	})
+	return func() {
+		if !stopAfter() {
+			<-done
+		}
+	}
 }
 
 // cutoffWriter lets a cancelled request stop writing to the browser: a
