@@ -86,7 +86,7 @@ type codeStatus struct {
 
 type codeJob struct {
 	status   codeStatus
-	socket   string // where code-server listens, once ready
+	socket   string // where code-server listens, once ready (or still, see socket)
 	instance string // the instance it started or found, once ready
 	running  bool   // the start job is still working
 	cancel   context.CancelFunc
@@ -147,11 +147,14 @@ func (c *codeServers) status(owner, host int64) codeStatus {
 	return codeStatus{State: codeStopped}
 }
 
-// socket is the code-server socket of a ready instance, or "".
+// socket is the code-server socket of a ready instance, or "". A start asked
+// for while an instance is ready (VS Code opened again, e.g. on a second
+// device) begins with that instance's socket, so the tabs open on it keep
+// working while the start checks it again; a check that fails ends that.
 func (c *codeServers) socket(owner, host int64) string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if j := c.jobs[[2]int64{owner, host}]; j != nil && j.status.State == codeReady {
+	if j := c.jobs[[2]int64{owner, host}]; j != nil && (j.status.State == codeReady || j.running) {
 		return j.socket
 	}
 	return ""
@@ -374,6 +377,9 @@ func (s *Server) apiCodeStart(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*codeInstallTimeout+3*codeStepTimeout+3*codeCancelTimeout)
 	j := &codeJob{status: codeStatus{State: codeChecking}, running: true, cancel: cancel, userGen: s.code.userGen[h.OwnerID],
 		version: h.ConnVersion}
+	if old := s.code.jobs[key]; old != nil && old.status.State == codeReady {
+		j.socket = old.socket // see socket; its instance is known again once the start confirms it
+	}
 	s.code.jobs[key] = j
 	first := j.status
 	s.code.wg.Add(1)
@@ -557,6 +563,7 @@ func (s *Server) runCode(ctx context.Context, key [2]int64, j *codeJob, h *store
 			j.status = codeStatus{State: codeReady, URL: s.cfg.Origin() + "/fwd/" + f.ID}
 			return
 		}
+		j.socket = "" // an instance it began with did not pass the check either
 		var cf *codeFailure
 		if !errors.As(err, &cf) {
 			cf = &codeFailure{code: "failed", msg: err.Error()}
