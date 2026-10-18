@@ -4,12 +4,12 @@ package testutil
 
 import (
 	"bytes"
-	"io"
-	"strconv"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/binary"
+	"io"
 	"net"
+	"strconv"
 	"sync"
 	"testing"
 
@@ -27,6 +27,33 @@ type SSHServer struct {
 	cfg          *ssh.ServerConfig
 	user, pass   string
 	AuthAttempts int // password checks received, to prove credentials were (not) sent
+	onExec       func(cmd string) func(ch ssh.Channel)
+	onChannel    func(nc ssh.NewChannel) bool
+	beforeAuth   func()
+}
+
+// BeforeAuth runs f in every password check before answering it, e.g. to hold
+// a client mid-connect.
+func (s *SSHServer) BeforeAuth(f func()) {
+	s.mu.Lock()
+	s.beforeAuth = f
+	s.mu.Unlock()
+}
+
+// HandleExec lets a test run a command itself: f returns what to do with the
+// channel, or nil for the default echoing shell. The channel closes after.
+func (s *SSHServer) HandleExec(f func(cmd string) func(ch ssh.Channel)) {
+	s.mu.Lock()
+	s.onExec = f
+	s.mu.Unlock()
+}
+
+// HandleChannel lets a test take channels of other types (e.g. Unix socket
+// forwarding); returning false falls back to the default handling.
+func (s *SSHServer) HandleChannel(f func(nc ssh.NewChannel) bool) {
+	s.mu.Lock()
+	s.onChannel = f
+	s.mu.Unlock()
 }
 
 // StartSSHServer accepts user/password and serves until the test ends.
@@ -71,7 +98,11 @@ func (s *SSHServer) RotateHostKey() {
 		PasswordCallback: func(c ssh.ConnMetadata, pw []byte) (*ssh.Permissions, error) {
 			s.mu.Lock()
 			s.AuthAttempts++
+			beforeAuth := s.beforeAuth
 			s.mu.Unlock()
+			if beforeAuth != nil {
+				beforeAuth()
+			}
 			if c.User() == s.user && string(pw) == s.pass {
 				return nil, nil
 			}
@@ -121,6 +152,12 @@ func (s *SSHServer) serve(c net.Conn, cfg *ssh.ServerConfig, root string) {
 		}
 	}()
 	for nc := range chans {
+		s.mu.Lock()
+		onChannel := s.onChannel
+		s.mu.Unlock()
+		if onChannel != nil && onChannel(nc) {
+			continue
+		}
 		if nc.ChannelType() == "direct-tcpip" {
 			go directTCPIP(nc)
 			continue
@@ -149,9 +186,19 @@ func (s *SSHServer) session(ch ssh.Channel, reqs <-chan *ssh.Request, root strin
 			if r.Type == "exec" && len(r.Payload) >= 4 {
 				n := binary.BigEndian.Uint32(r.Payload)
 				if int(n) <= len(r.Payload)-4 {
+					cmd := string(r.Payload[4 : 4+n])
 					s.mu.Lock()
-					s.Execs = append(s.Execs, string(r.Payload[4:4+n]))
+					s.Execs = append(s.Execs, cmd)
+					onExec := s.onExec
 					s.mu.Unlock()
+					if onExec != nil {
+						if run := onExec(cmd); run != nil {
+							r.Reply(true, nil)
+							go ssh.DiscardRequests(reqs)
+							run(ch)
+							return
+						}
+					}
 				}
 			}
 			r.Reply(true, nil)

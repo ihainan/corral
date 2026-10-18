@@ -228,6 +228,22 @@ func (s *Service) Authenticate(ctx context.Context, token string) (*store.User, 
 // CheckLogin re-validates a login by its stored hash. Long-lived connections
 // call it periodically so expiry, sign-out and disabling reach them too.
 func (s *Service) CheckLogin(ctx context.Context, hash string) (*store.User, error) {
+	u, err := s.validLogin(ctx, hash)
+	if err != nil {
+		return nil, err
+	}
+	s.touch(ctx, hash, s.now())
+	return u, nil
+}
+
+// LoginValid reports whether a login is still in force, without counting the
+// check as activity (used before sending to a device bound to that login).
+func (s *Service) LoginValid(ctx context.Context, hash string) bool {
+	_, err := s.validLogin(ctx, hash)
+	return err == nil
+}
+
+func (s *Service) validLogin(ctx context.Context, hash string) (*store.User, error) {
 	ls, err := s.store.LoginSessionByHash(ctx, hash)
 	if errors.Is(err, store.ErrNotFound) {
 		return nil, ErrUnauthorized
@@ -250,7 +266,6 @@ func (s *Service) CheckLogin(ctx context.Context, hash string) (*store.User, err
 		_ = s.store.DeleteLoginSession(ctx, hash)
 		return nil, ErrUnauthorized
 	}
-	s.touch(ctx, hash, now)
 	return u, nil
 }
 

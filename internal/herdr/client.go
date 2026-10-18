@@ -19,6 +19,8 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ssh"
+
+	"github.com/ihainan/corral/internal/sshx"
 )
 
 // SessionInfo is one entry of `herdr session list --json`.
@@ -45,36 +47,18 @@ var ErrNotInstalled = errors.New("herdr is not installed on this host")
 
 // Discover runs the session list on the host.
 func Discover(ctx context.Context, c *ssh.Client) ([]SessionInfo, error) {
-	s, err := c.NewSession()
+	out, err := sshx.Output(ctx, c, DiscoverCommand, sshx.MaxOutput)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("herdr session list: %w", err)
 	}
-	defer s.Close()
-	type res struct {
-		out []byte
-		err error
+	var d discoverOutput
+	if err := json.Unmarshal(out, &d); err != nil {
+		return nil, fmt.Errorf("herdr session list: unexpected output")
 	}
-	ch := make(chan res, 1)
-	go func() {
-		out, err := s.Output(DiscoverCommand)
-		ch <- res{out, err}
-	}()
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case r := <-ch:
-		if r.err != nil {
-			return nil, fmt.Errorf("herdr session list: %w", r.err)
-		}
-		var d discoverOutput
-		if err := json.Unmarshal(r.out, &d); err != nil {
-			return nil, fmt.Errorf("herdr session list: unexpected output")
-		}
-		if d.Missing {
-			return nil, ErrNotInstalled
-		}
-		return d.Sessions, nil
+	if d.Missing {
+		return nil, ErrNotInstalled
 	}
+	return d.Sessions, nil
 }
 
 // Snapshot is the subset of `session.snapshot` the gateway uses.
@@ -138,9 +122,9 @@ type Client struct {
 	seq  atomic.Int64
 }
 
-// Dial opens the socket through the SSH connection.
-func Dial(c *ssh.Client, socketPath string) (*Client, error) {
-	conn, err := c.Dial("unix", socketPath)
+// Dial opens the socket through the SSH connection, giving up when ctx ends.
+func Dial(ctx context.Context, c *ssh.Client, socketPath string) (*Client, error) {
+	conn, err := c.DialContext(ctx, "unix", socketPath)
 	if err != nil {
 		return nil, fmt.Errorf("cannot reach herdr socket: %w", err)
 	}
@@ -172,8 +156,10 @@ func (e *APIError) Error() string { return "herdr: " + e.Code + ": " + e.Message
 
 const maxLine = 4 << 20
 
-func (c *Client) readLine(deadline time.Time) ([]byte, error) {
-	_ = c.conn.SetReadDeadline(deadline)
+// callTimeout bounds one request/response exchange.
+var callTimeout = 10 * time.Second
+
+func (c *Client) readLine() ([]byte, error) {
 	var buf []byte
 	for {
 		chunk, isPrefix, err := c.r.ReadLine()
@@ -190,7 +176,9 @@ func (c *Client) readLine(deadline time.Time) ([]byte, error) {
 	}
 }
 
-// Call sends one request and waits for its response.
+// Call sends one request and waits for its response, for at most
+// callTimeout or until ctx ends. SSH channels have no deadlines, so giving up
+// means closing the connection; the client is unusable afterwards.
 func (c *Client) Call(ctx context.Context, method string, params any, out any) error {
 	if params == nil {
 		params = struct{}{}
@@ -200,16 +188,23 @@ func (c *Client) Call(ctx context.Context, method string, params any, out any) e
 	if err != nil {
 		return err
 	}
-	deadline := time.Now().Add(10 * time.Second)
-	if dl, ok := ctx.Deadline(); ok && dl.Before(deadline) {
-		deadline = dl
+	ctx, cancel := context.WithTimeout(ctx, callTimeout)
+	defer cancel()
+	stop := context.AfterFunc(ctx, func() { c.conn.Close() })
+	defer stop()
+	err = c.exchange(id, b, out)
+	if err != nil && ctx.Err() != nil {
+		return fmt.Errorf("herdr: %s: %w", method, ctx.Err())
 	}
-	_ = c.conn.SetWriteDeadline(deadline)
-	if _, err := c.conn.Write(append(b, '\n')); err != nil {
+	return err
+}
+
+func (c *Client) exchange(id string, req []byte, out any) error {
+	if _, err := c.conn.Write(append(req, '\n')); err != nil {
 		return err
 	}
 	for {
-		line, err := c.readLine(deadline)
+		line, err := c.readLine()
 		if err != nil {
 			return err
 		}
@@ -278,12 +273,10 @@ func (c *Client) Subscribe(ctx context.Context, subs []map[string]any, fn func(e
 	if err := c.Call(ctx, "events.subscribe", map[string]any{"subscriptions": subs}, nil); err != nil {
 		return err
 	}
-	go func() {
-		<-ctx.Done()
-		c.conn.Close()
-	}()
+	stop := context.AfterFunc(ctx, func() { c.conn.Close() })
+	defer stop()
 	for {
-		line, err := c.readLine(time.Time{})
+		line, err := c.readLine()
 		if err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()

@@ -70,6 +70,7 @@ func newHarness(t *testing.T, opts ...harnessOpt) *harness {
 	h.srv = New(Deps{Config: h.cfg, Store: st, Auth: h.auth, Vault: v,
 		Guard: netguard.New(h.cfg.AllowedNetworks, h.cfg.DeniedNetworks), Terms: h.terms,
 		Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	t.Cleanup(h.srv.Close) // runs before the terminal manager's shutdown
 	handler = h.srv.Handler()
 	return h
 }

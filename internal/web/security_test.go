@@ -302,9 +302,10 @@ func TestRemoteExecCallSitesAreReviewed(t *testing.T) {
 		"term/manager.go: err = sess.Start(TmuxCommand(opt.TmuxSession))":                                                 true,
 		"term/manager.go: err = sess.Start(HerdrCommand(opt.HerdrSession))":                                               true,
 		"web/api_sessions.go: sess, err := s.terms.Start(ctx, res, u.ID, h.ID, h.Name, dialed.Client, term.StartOptions{": true,
-		"herdr/client.go: out, err := s.Output(DiscoverCommand)":                                                          true,
-		"web/herdr.go: w.Run(ctx)":                             true, // watcher loop, runs no remote command itself
-		"web/ports.go: out, err := sess.Output(listenCommand)": true,
+		"herdr/client.go: out, err := sshx.Output(ctx, c, DiscoverCommand, sshx.MaxOutput)":                               true,
+		"web/herdr.go: w.Run(ctx)": true, // watcher loop, runs no remote command itself
+		"web/ports.go: out, err := sshx.Output(ctx, c, listenCommand, sshx.MaxOutput)": true,
+		"sshx/exec.go: if err := s.Start(cmd); err != nil {":                           true, // Output's own start; its callers are listed here
 	}
 	re := regexp.MustCompile(`\.(Start|Run|Output|CombinedOutput)\(`)
 	root, _ := filepath.Abs("..")

@@ -49,6 +49,24 @@ func (f *fwdClient) get(path string, extra map[string]string) (*http.Response, s
 	return res, string(b)
 }
 
+// send makes a request with any method to the subdomain, with its cookie.
+func (f *fwdClient) send(method, path string, hdr map[string]string) int {
+	f.h.t.Helper()
+	req, _ := http.NewRequest(method, f.h.ts.URL+path, strings.NewReader("x=1"))
+	req.Host = f.host
+	for k, v := range hdr {
+		req.Header.Set(k, v)
+	}
+	req.AddCookie(&http.Cookie{Name: "corral_fwd", Value: f.cookie})
+	res, err := noRedirect.Do(req)
+	if err != nil {
+		f.h.t.Fatal(err)
+	}
+	io.Copy(io.Discard, res.Body)
+	res.Body.Close()
+	return res.StatusCode
+}
+
 var noRedirect = &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 
 // open runs the ticket hand-off for a signed-in client and returns a client
@@ -164,7 +182,7 @@ func TestPortForwardingFlow(t *testing.T) {
 	p2 := app2.Listener.Addr().(*net.TCPAddr).Port
 	r2 := admin.do("POST", "/api/forwards", map[string]any{"host_id": hostID, "port": p2})
 	id2 := r2.json()["id"].(string)
-	if res, _ := fb.get("/hello", nil); res.StatusCode != 200 { // uses the grant; its periodic check is now fresh
+	if res, _ := fb.get("/hello", nil); res.StatusCode != 200 {
 		t.Fatalf("bob on the shared forward: %d", res.StatusCode)
 	}
 	other := &fwdClient{h: h, host: strconv.Itoa(p2) + "-" + id2 + ".fwd.test", cookie: fb.cookie}

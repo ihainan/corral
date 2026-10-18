@@ -82,9 +82,10 @@ type Deps struct {
 func New(d Deps) *Server {
 	s := &Server{cfg: d.Config, store: d.Store, auth: d.Auth, vault: d.Vault, guard: d.Guard, terms: d.Terms,
 		log: d.Log, mux: http.NewServeMux(), static: d.Static, socks: map[int64]map[*liveSocket]struct{}{},
-		pending: map[int64]map[*liveSocket]struct{}{}, herdrSocks: herdrSockets{path: map[string]string{}},
+		pending: map[int64]map[*liveSocket]struct{}{}, herdrSocks: herdrSockets{path: map[string]string{}, busy: map[string]int{}},
 		notifier: d.Notifier, vis: visibility{seen: map[string]map[*liveSocket]bool{}}, fwd: newForwarder()}
-	go s.reapForwardConns(make(chan struct{}))
+	s.fwd.wg.Add(1)
+	go s.fwd.reap()
 	s.terms.OnAlert = s.onTerminalAlert
 	prev := s.auth.OnUserGone
 	s.auth.OnUserGone = func(userID int64) {
@@ -95,6 +96,9 @@ func New(d Deps) *Server {
 		// stop immediately; closing terminals can take a moment per host.
 		s.closeSockets(userID, "")
 		s.closeUserForwards(userID)
+		if s.notifier != nil {
+			s.notifier.Revoke(userID)
+		}
 		s.terms.CloseUser(userID, "access revoked")
 	}
 	s.registerRoutes()
@@ -402,6 +406,7 @@ func (s *Server) closeOtherLogins(userID int64, keep string) {
 			}
 		}
 	}
+	s.endForwardOtherLogins(userID, keep)
 }
 
 // closeSockets closes a user's open terminal sockets and cancels connections
@@ -415,6 +420,9 @@ func (s *Server) closeSockets(userID int64, loginHash string) {
 				ls.cancel()
 			}
 		}
+	}
+	if loginHash != "" {
+		s.endForwardLogin(userID, loginHash) // all of the user's: closeUserForwards
 	}
 }
 

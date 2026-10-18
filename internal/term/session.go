@@ -104,6 +104,41 @@ type Session struct {
 	meta    []byte        // latest side information, replayed to new viewers
 	alerts  alertScanner
 	onAlert func(*Session, Alert) // from Manager.OnAlert, fixed before output starts
+	alertq  chan<- *Session       // the manager's alert queue
+	alert   *Alert                // waiting for the alert worker; later alerts merge into it
+	queued  bool                  // the session is in alertq
+}
+
+// noteAlert merges an alert into the one waiting; called with mu held. A
+// notification with text wins over a plain bell.
+func (s *Session) noteAlert(a Alert) {
+	if s.alert == nil || a.Message != "" {
+		s.alert = &a
+	}
+}
+
+// queueAlert hands a waiting alert to the manager's worker; called with mu
+// held. A session is queued at most once, so a program ringing the bell in a
+// loop costs one queue slot, not a goroutine per bell. When the queue is full
+// the alert stays waiting and the next output tries again.
+func (s *Session) queueAlert() {
+	if s.alert == nil || s.queued || s.alertq == nil {
+		return
+	}
+	select {
+	case s.alertq <- s:
+		s.queued = true
+	default:
+	}
+}
+
+// takeAlert is the worker's side of the hand-off.
+func (s *Session) takeAlert() *Alert {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	a := s.alert
+	s.alert, s.queued = nil, false
+	return a
 }
 
 // PublishMeta replaces the session's side information and offers it to every
@@ -166,7 +201,8 @@ func (s *Session) pump(r io.Reader) {
 			s.buf.write(buf[:n])
 			s.scanTitle(buf[:n])
 			if s.onAlert != nil {
-				s.alerts.feed(buf[:n], func(a Alert) { go s.onAlert(s, a) })
+				s.alerts.feed(buf[:n], s.noteAlert)
+				s.queueAlert()
 			}
 			for sub := range s.subs {
 				chunk := Chunk{Offset: off, Data: append([]byte(nil), buf[:n]...)}

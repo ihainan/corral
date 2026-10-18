@@ -72,10 +72,32 @@ func summarize(session string, s *herdr.Snapshot) herdrSummary {
 	return out
 }
 
-// herdrSockets remembers which herdr socket each terminal session is watching.
+// herdrSockets remembers which herdr socket each terminal session is watching,
+// and how many actions are waiting on herdr per session.
 type herdrSockets struct {
 	mu   sync.Mutex
 	path map[string]string
+	busy map[string]int
+}
+
+// maxHerdrOpsPerSession bounds herdr actions in flight per terminal session,
+// so a stalled herdr cannot pile up channels and goroutines.
+var maxHerdrOpsPerSession = 4
+
+func (h *herdrSockets) acquire(id string) (release func(), ok bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.busy[id] >= maxHerdrOpsPerSession {
+		return nil, false
+	}
+	h.busy[id]++
+	return func() {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		if h.busy[id]--; h.busy[id] <= 0 {
+			delete(h.busy, id)
+		}
+	}, true
 }
 
 func (h *herdrSockets) set(id, path string) {
@@ -171,14 +193,20 @@ func (s *Server) apiHerdrAction(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", "action and target are required")
 		return
 	}
-	c, err := herdr.Dial(sess.Client(), socket)
+	release, ok := s.herdrSocks.acquire(sess.ID)
+	if !ok {
+		writeError(w, http.StatusTooManyRequests, "herdr_busy", "herdr is still answering earlier actions")
+		return
+	}
+	defer release()
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	c, err := herdr.Dial(ctx, sess.Client(), socket)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "herdr_unavailable", "cannot reach herdr")
 		return
 	}
 	defer c.Close()
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-	defer cancel()
 	switch b.Action {
 	case "focus_workspace":
 		err = c.FocusWorkspace(ctx, b.Target)

@@ -33,6 +33,7 @@ func (s *Store) SetAppSettingOnce(ctx context.Context, key, value string) (strin
 type PushSubscription struct {
 	ID        int64  `json:"id"`
 	UserID    int64  `json:"-"`
+	LoginHash string `json:"-"` // the browser login it belongs to; deleting that login deletes it
 	Endpoint  string `json:"-"`
 	P256dh    string `json:"-"`
 	Auth      string `json:"-"`
@@ -42,19 +43,35 @@ type PushSubscription struct {
 }
 
 // SavePushSubscription upserts by endpoint. An endpoint moving to another user
-// (shared device, new sign-in) is reassigned rather than duplicated.
-func (s *Store) SavePushSubscription(ctx context.Context, p *PushSubscription) error {
-	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO push_subscriptions (user_id, endpoint, p256dh, auth, user_agent, created_at) VALUES (?, ?, ?, ?, ?, ?)
-		 ON CONFLICT(endpoint) DO UPDATE SET user_id = excluded.user_id, p256dh = excluded.p256dh, auth = excluded.auth,
-		   user_agent = excluded.user_agent, failures = 0`,
-		p.UserID, p.Endpoint, p.P256dh, p.Auth, p.UserAgent, s.unix())
-	return err
+// or login (shared device, new sign-in) is reassigned rather than duplicated.
+// The login must still exist (ErrNotFound otherwise). Beyond keep
+// subscriptions per user, the oldest are dropped.
+func (s *Store) SavePushSubscription(ctx context.Context, p *PushSubscription, keep int) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := affectedOrNotFound(tx.ExecContext(ctx,
+		`INSERT INTO push_subscriptions (user_id, login_hash, endpoint, p256dh, auth, user_agent, created_at)
+		 SELECT user_id, token_hash, ?, ?, ?, ?, ? FROM login_sessions WHERE token_hash = ? AND user_id = ?
+		 ON CONFLICT(endpoint) DO UPDATE SET user_id = excluded.user_id, login_hash = excluded.login_hash,
+		   p256dh = excluded.p256dh, auth = excluded.auth, user_agent = excluded.user_agent, failures = 0`,
+		p.Endpoint, p.P256dh, p.Auth, p.UserAgent, s.unix(), p.LoginHash, p.UserID)); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM push_subscriptions WHERE user_id = ? AND id NOT IN
+		   (SELECT id FROM push_subscriptions WHERE user_id = ? ORDER BY id DESC LIMIT ?)`, p.UserID, p.UserID, keep); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) PushSubscriptions(ctx context.Context, userID int64) ([]*PushSubscription, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, user_id, endpoint, p256dh, auth, user_agent, created_at, last_ok_at FROM push_subscriptions WHERE user_id = ? ORDER BY id`, userID)
+		`SELECT id, user_id, COALESCE(login_hash, ''), endpoint, p256dh, auth, user_agent, created_at, last_ok_at
+		 FROM push_subscriptions WHERE user_id = ? ORDER BY id`, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -62,7 +79,7 @@ func (s *Store) PushSubscriptions(ctx context.Context, userID int64) ([]*PushSub
 	out := []*PushSubscription{}
 	for rows.Next() {
 		p := &PushSubscription{}
-		if err := rows.Scan(&p.ID, &p.UserID, &p.Endpoint, &p.P256dh, &p.Auth, &p.UserAgent, &p.CreatedAt, &p.LastOKAt); err != nil {
+		if err := rows.Scan(&p.ID, &p.UserID, &p.LoginHash, &p.Endpoint, &p.P256dh, &p.Auth, &p.UserAgent, &p.CreatedAt, &p.LastOKAt); err != nil {
 			return nil, err
 		}
 		out = append(out, p)
