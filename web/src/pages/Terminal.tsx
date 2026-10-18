@@ -134,7 +134,6 @@ export function TerminalPage({ id }: { id: string }) {
 
   // Latest modifier state for the xterm data callback.
   const openComposerRef = useRef<() => void>(() => {})
-  const settlePunctRef = useRef<() => void>(() => {})
   const mods = useRef<{ ctrl: ModState; alt: ModState }>({ ctrl: 'off', alt: 'off' })
   mods.current = { ctrl, alt }
   const releaseOnce = useCallback(() => {
@@ -265,66 +264,46 @@ export function TerminalPage({ id }: { id: string }) {
     let composing = false
     const latched = () => mods.current.ctrl !== 'off' || mods.current.alt !== 'off'
     const onCompStart = () => {
-      lastComposition = performance.now()
-      // A pending punctuation key becomes part of the composition.
-      punct = null
+      claimNext = false // the key became part of a composition
       composing = true
       typedChar = null
     }
     const onCompEnd = () => {
-      lastComposition = performance.now()
       composing = false
       typedChar = null
     }
     // iOS soft keyboards report printable keys through input events.
-    // Chinese (and other) input methods turn punctuation keys into full-width
-    // marks: the browser reports a keydown for the ASCII key ("," "."), then the
-    // input method inserts "，" "。". xterm would send the ASCII character on
-    // keydown and cancel the event, so the mark never arrived.
-    // Only while an input method is in use (a composition happened in the last
-    // few minutes) is a punctuation key left to the browser; everyone else
-    // keeps xterm's normal path. A deferred key is "pending" until its key
-    // press ends: text the input method inserts before then is sent in its
-    // place; at keyup (or when anything else is typed, pasted or sent first)
-    // the key's own character is sent. Text arriving after keyup is a new
-    // input and goes through xterm as usual, so nothing is guessed by timing.
-    const IME_RECENT = 5 * 60 * 1000
-    let lastComposition = -Infinity
-    let punct: string | null = null
-    let afterDeadKey = false
-    const imeInUse = () => performance.now() - lastComposition < IME_RECENT
-    const sendPunct = (text: string) => {
-      punct = null
-      if (ta && !composing) ta.value = ''
-      term.input(text, true)
-    }
-    const settlePunct = () => {
-      if (punct !== null) sendPunct(punct)
-    }
-    settlePunctRef.current = settlePunct
-    const onPunctInput = (e: Event) => {
+    // Printable keys are sent as the text the browser actually inserts, not
+    // as the character the key reports. With an input method active the two
+    // differ: a Chinese input method reports keydown "," and inserts "，". xterm
+    // sends the reported character on keydown and cancels the event, so the
+    // inserted mark was lost. Now a plain printable keydown is left to the
+    // browser, and the insertText it produces next is sent (and kept from
+    // xterm, which would send it again). The browser emits these in key order,
+    // so nothing has to be guessed or settled. Keys with Ctrl/Alt/Meta, latched
+    // key-bar modifiers, special keys, compositions, and the key right after a
+    // dead key or AltGraph (whose state xterm tracks itself) take xterm's path.
+    let claimNext = false
+    let xtermDeadKey = false
+    const onPrintableInput = (e: Event) => {
       const ie = e as InputEvent
-      if (e.target !== ta || punct === null || ie.inputType !== 'insertText' || !ie.data || composing) return
+      if (e.target !== ta || !claimNext || ie.inputType !== 'insertText' || !ie.data || ie.isComposing || composing) return
+      claimNext = false
       e.stopPropagation() // ours alone; xterm must not send it as well
-      sendPunct(ie.data)
+      term.input(ie.data, true)
     }
-    const onBlurPunct = () => settlePunct()
 
     const onBeforeInput = (e: Event) => {
       const ie = e as InputEvent
       typedChar = !ie.isComposing && ie.inputType === 'insertText' && ie.data && [...ie.data].length === 1 ? ie.data : null
     }
-    const onPasteEv = () => {
-      settlePunct()
-      typedChar = null
-    }
+    const onPasteEv = () => (typedChar = null)
     ta?.addEventListener('compositionstart', onCompStart)
     ta?.addEventListener('compositionend', onCompEnd)
     ta?.addEventListener('beforeinput', onBeforeInput)
     // Capture on the container: it runs before any listener on the textarea,
     // xterm's own (also capturing) included, so a claimed event stops here.
-    el.addEventListener('input', onPunctInput, true)
-    ta?.addEventListener('blur', onBlurPunct)
+    el.addEventListener('input', onPrintableInput, true)
     ta?.addEventListener('paste', onPasteEv, true)
     const onUserInput = userInputEvent(term)
     let userData = false
@@ -360,26 +339,22 @@ export function TerminalPage({ id }: { id: string }) {
       F7: 'F7', F8: 'F8', F9: 'F9', F10: 'F10', F11: 'F11', F12: 'F12',
     }
     term.attachCustomKeyEventHandler((e) => {
-      // The keypress of the pending key: its input event will carry the text.
-      if (e.type === 'keypress' && punct !== null && e.key === punct) return false
-      // The key press ends: whatever it was going to insert has had its chance.
-      if (e.type === 'keyup' && punct !== null && e.key === punct) {
-        settlePunct()
-        return false
-      }
+      // The keypress of a key left to the browser: its input event carries the text.
+      if (e.type === 'keypress' && claimNext) return false
       if (e.type !== 'keydown') return true
       if (e.isComposing || e.keyCode === 229) return true
-      const modifierOnly = ['Shift', 'Control', 'Alt', 'Meta', 'CapsLock', 'AltGraph'].includes(e.key)
-      // Any other key settles a pending one first, so nothing overtakes it.
-      if (!modifierOnly) settlePunct()
-      const deadBefore = afterDeadKey
-      if (!modifierOnly) afterDeadKey = e.key === 'Dead'
+      const modifierOnly = ['Shift', 'Control', 'Alt', 'Meta', 'CapsLock'].includes(e.key)
+      if (!modifierOnly) claimNext = false
+      // xterm treats Dead and AltGraph as a dead key and expects to see the
+      // next key itself.
+      const afterDead = xtermDeadKey
+      if (!modifierOnly) xtermDeadKey = e.key === 'Dead' || e.key === 'AltGraph'
       if (
-        imeInUse() && !deadBefore && /^[!-/:-@[-`{-~]$/.test(e.key) &&
+        !afterDead && [...e.key].length === 1 && e.key !== ' ' &&
         !e.ctrlKey && !e.altKey && !e.metaKey && !e.getModifierState('AltGraph') && !latched()
       ) {
-        punct = e.key
-        return false // no preventDefault: the browser and input method insert the text
+        claimNext = true
+        return false // no preventDefault: the browser (and input method) insert the text
       }
       typedChar = e.key.length === 1 && !e.metaKey && !e.ctrlKey ? e.key : null
       // A physical Ctrl/Alt chord while a key-bar modifier is latched: combine both.
@@ -427,9 +402,7 @@ export function TerminalPage({ id }: { id: string }) {
       ta?.removeEventListener('compositionstart', onCompStart)
       ta?.removeEventListener('compositionend', onCompEnd)
       ta?.removeEventListener('beforeinput', onBeforeInput)
-      el.removeEventListener('input', onPunctInput, true)
-      ta?.removeEventListener('blur', onBlurPunct)
-      settlePunctRef.current = () => {}
+      el.removeEventListener('input', onPrintableInput, true)
       ta?.removeEventListener('paste', onPasteEv, true)
       dataSub.dispose()
       userSub?.dispose()
@@ -642,7 +615,6 @@ export function TerminalPage({ id }: { id: string }) {
           const r = await uploadFile(id, f)
           const quoted = shellPath(r.path)
           if (quoted) {
-            settlePunctRef.current()
             termRef.current?.paste(quoted + ' ')
             toast(t('term.uploaded'))
           } else {
@@ -671,13 +643,11 @@ export function TerminalPage({ id }: { id: string }) {
   }, [upload])
 
   const sendKey = (k: SpecialKey) => {
-    settlePunctRef.current()
     const term = termRef.current
     connRef.current?.send(specialKey(k, activeMods(), term?.modes.applicationCursorKeysMode ?? false))
     releaseOnce()
   }
   const sendText = (s: string) => {
-    settlePunctRef.current()
     connRef.current?.send(applyMods(s, activeMods()))
     releaseOnce()
   }
@@ -691,7 +661,6 @@ export function TerminalPage({ id }: { id: string }) {
   // The composer's text and the optional Enter go out as one message, and only
   // while connected; otherwise the draft stays so nothing is half-sent.
   const sendComposer = (submit: boolean) => {
-    settlePunctRef.current()
     const term = termRef.current
     const conn = connRef.current
     if (!term || !conn) return
