@@ -62,7 +62,7 @@ func TestCodeServerConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !c.CodeServer || c.CodeServerVersion != "4.138.0" ||
+	if !c.CodeServer || c.CodeServerVersion != "4.138.0" || len(c.CodeServerSHA256["amd64"]) != 64 || len(c.CodeServerSHA256["arm64"]) != 64 ||
 		c.CodeServerDownload("amd64") != "https://github.com/coder/code-server/releases/download/v4.138.0/code-server-4.138.0-linux-amd64.tar.gz" ||
 		c.CodeServerFile("arm64") != "code-server-4.138.0-linux-arm64.tar.gz" {
 		t.Fatalf("defaults: %+v %s", c, c.CodeServerDownload("amd64"))
@@ -95,8 +95,19 @@ func TestCodeServerConfig(t *testing.T) {
 	t.Setenv("CORRAL_CODE_SERVER_DIR", dir)
 	t.Setenv("CORRAL_CODE_SERVER_URL", "https://mirror.example/cs/{version}/{arch}.tgz")
 	t.Setenv("CORRAL_CODE_SERVER_VERSION", "4.100.2")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "CORRAL_CODE_SERVER_SHA256") {
+		t.Fatalf("a version without digests was accepted: %v", err)
+	}
+	for _, bad := range []string{"amd64=xyz", "amd64", "x86=" + strings.Repeat("a", 64), "amd64=" + strings.Repeat("a", 63)} {
+		t.Setenv("CORRAL_CODE_SERVER_SHA256", bad)
+		if _, err := Load(); err == nil {
+			t.Errorf("CORRAL_CODE_SERVER_SHA256=%q accepted", bad)
+		}
+	}
+	t.Setenv("CORRAL_CODE_SERVER_SHA256", "amd64="+strings.Repeat("A", 64)+", arm64="+strings.Repeat("b", 64))
 	c, err = Load()
-	if err != nil || c.CodeServerDir != dir || c.CodeServerDownload("arm64") != "https://mirror.example/cs/4.100.2/arm64.tgz" {
+	if err != nil || c.CodeServerDir != dir || c.CodeServerDownload("arm64") != "https://mirror.example/cs/4.100.2/arm64.tgz" ||
+		c.CodeServerSHA256["amd64"] != strings.Repeat("a", 64) || c.CodeServerSHA256["arm64"] != strings.Repeat("b", 64) {
 		t.Fatalf("custom: %+v %v", c, err)
 	}
 	t.Setenv("CORRAL_CODE_SERVER", "off")
