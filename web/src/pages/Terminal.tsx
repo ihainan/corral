@@ -269,6 +269,7 @@ export function TerminalPage({ id }: { id: string }) {
     let inCharge = false
     let claimedAt = 0
     let claimTimer: number | undefined
+    let claimOpens = 0 // the connection claimTimer was made on (see conn.opens)
     // The user acted here (typed, pasted, clicked): this window takes the
     // terminal over. While it is in charge the claim is repeated with the
     // actions, in case another window took over meanwhile and the news has
@@ -281,12 +282,19 @@ export function TerminalPage({ id }: { id: string }) {
       const now = Date.now()
       if (!following && inCharge && now - claimedAt < CLAIM_GAP) {
         // Valid only on the connection it was made for: after a reconnect
-        // (or a refusal and retry) the gateway's state is news to this window.
-        const opens = conn.opens
-        claimTimer ??= window.setTimeout(() => {
+        // (or a refusal and retry) the gateway's state is news to this
+        // window, and an action on the new connection replaces it.
+        if (claimTimer !== undefined && claimOpens !== conn.opens) {
+          clearTimeout(claimTimer)
           claimTimer = undefined
-          if (conn.opens === opens) takeOverRef.current()
-        }, claimedAt + CLAIM_GAP - now)
+        }
+        if (claimTimer === undefined) {
+          claimOpens = conn.opens
+          claimTimer = window.setTimeout(() => {
+            claimTimer = undefined
+            if (conn.opens === claimOpens) takeOverRef.current()
+          }, claimedAt + CLAIM_GAP - now)
+        }
         return
       }
       clearTimeout(claimTimer)
