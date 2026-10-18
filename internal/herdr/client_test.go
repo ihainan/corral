@@ -10,6 +10,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
+	"github.com/ihainan/corral/internal/sshx"
 	"github.com/ihainan/corral/internal/testutil"
 )
 
@@ -86,21 +87,43 @@ func TestCallHonoursCancel(t *testing.T) {
 	}
 }
 
-func TestDialHonoursContext(t *testing.T) {
-	srv := testutil.StartSSHServer(t, "alice", "alice-pass", t.TempDir())
-	hold := make(chan struct{})
-	defer close(hold)
-	srv.HandleChannel(func(nc ssh.NewChannel) bool {
-		if nc.ChannelType() != streamLocal {
-			return false
-		}
-		go func() { <-hold; nc.Reject(ssh.ConnectionFailed, "gone") }() // never answers the open in time
-		return true
-	})
-	c := dialTest(t, srv)
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-	defer cancel()
-	if err := within(t, 3*time.Second, func() error { _, err := Dial(ctx, c, "/run/herdr.sock"); return err }); err == nil {
-		t.Fatal("dial succeeded")
+// A host that never answers the channel open: Dial gives up at the deadline
+// (its own 10 s one when the caller has none, as for the watcher), and once
+// the grace period is over the SSH connection is closed, so nothing stays
+// blocked behind it.
+func TestDialGivesUpOnSilentHost(t *testing.T) {
+	oldGrace, oldDial := sshx.StuckGrace, dialTimeout
+	sshx.StuckGrace, dialTimeout = 100*time.Millisecond, 200*time.Millisecond
+	defer func() { sshx.StuckGrace, dialTimeout = oldGrace, oldDial }()
+	for _, name := range []string{"caller deadline", "own deadline"} {
+		t.Run(name, func(t *testing.T) {
+			srv := testutil.StartSSHServer(t, "alice", "alice-pass", t.TempDir())
+			hold := make(chan struct{})
+			defer close(hold)
+			srv.HandleChannel(func(nc ssh.NewChannel) bool {
+				if nc.ChannelType() != streamLocal {
+					return false
+				}
+				go func() { <-hold; nc.Reject(ssh.ConnectionFailed, "gone") }() // never answers the open in time
+				return true
+			})
+			c := dialTest(t, srv)
+			ctx := context.Background()
+			if name == "caller deadline" {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, 100*time.Millisecond)
+				defer cancel()
+			}
+			if err := within(t, 3*time.Second, func() error { _, err := Dial(ctx, c, "/run/herdr.sock"); return err }); err == nil {
+				t.Fatal("dial succeeded")
+			}
+			closed := make(chan struct{})
+			go func() { c.Wait(); close(closed) }()
+			select {
+			case <-closed:
+			case <-time.After(2 * time.Second):
+				t.Fatal("SSH connection with a stuck channel open was left open")
+			}
+		})
 	}
 }
