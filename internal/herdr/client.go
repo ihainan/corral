@@ -126,12 +126,13 @@ type Client struct {
 var dialTimeout = 10 * time.Second
 
 // Dial opens the socket through the SSH connection, giving up when ctx ends
-// or after dialTimeout. Like every operation on the connection, a host that
-// never answers is cut off by closing the SSH connection (sshx.StuckGrace).
+// or after dialTimeout. The connection carries a terminal, so herdr traffic is
+// a side operation: it is never cut off by closing the connection, and while
+// sshx.MaxAuxPerConn of them are unfinished, Dial fails with sshx.ErrBusy.
 func Dial(ctx context.Context, c *ssh.Client, socketPath string) (*Client, error) {
 	ctx, cancel := context.WithTimeout(ctx, dialTimeout)
 	defer cancel()
-	conn, err := sshx.DialVia(ctx, c, "unix", socketPath, nil)
+	conn, err := sshx.DialVia(ctx, c, "unix", socketPath, sshx.DialOptions{Aux: true})
 	if err != nil {
 		return nil, fmt.Errorf("cannot reach herdr socket: %w", err)
 	}
@@ -185,8 +186,7 @@ func (c *Client) readLine() ([]byte, error) {
 
 // Call sends one request and waits for its response, for at most
 // callTimeout or until ctx ends. SSH channels have no deadlines, so giving up
-// means closing the channel (and, if the host does not let go, the SSH
-// connection); the client is unusable afterwards.
+// means closing the client, which is unusable afterwards.
 func (c *Client) Call(ctx context.Context, method string, params any, out any) error {
 	if params == nil {
 		params = struct{}{}

@@ -26,14 +26,15 @@ import (
 
 // Limits; variables so tests can lower them.
 var (
-	maxFwdConnsPerUser   = 8    // forwarding-only SSH connections (incl. dials) per host owner
-	maxFwdConns          = 256  // and in total
-	maxFwdDials          = 32   // connections being set up at once, in total
-	maxFwdStreamsPerUser = 64   // proxied requests and WebSockets in flight per user
-	maxFwdStreams        = 1024 // and in total
-	maxFwdChannels       = 512  // channels to forwarded ports (open, idle or opening), in total
-	maxFwdTicketsPerUser = 16   // unredeemed tickets per user; the oldest give way
-	maxFwdGrantsPerUser  = 64   // subdomain cookies per user; the oldest give way
+	maxFwdConnsPerUser    = 8    // forwarding-only SSH connections (incl. dials) per host owner
+	maxFwdConns           = 256  // and in total
+	maxFwdDials           = 32   // connections being set up at once, in total
+	maxFwdStreamsPerUser  = 64   // proxied requests and WebSockets in flight per user
+	maxFwdStreams         = 1024 // and in total
+	maxFwdChannels        = 512  // channels to forwarded ports (open, idle, opening or closing), in total
+	maxFwdChannelsPerConn = 64   // and per SSH connection (a terminal's included)
+	maxFwdTicketsPerUser  = 16   // unredeemed tickets per user; the oldest give way
+	maxFwdGrantsPerUser   = 64   // subdomain cookies per user; the oldest give way
 
 	fwdConnIdle       = 10 * time.Minute // forwarding-only connections without users are closed after this
 	fwdReapEvery      = time.Minute
@@ -81,6 +82,7 @@ type forwarder struct {
 type fwdConn struct {
 	client    *ssh.Client
 	transport *http.Transport
+	channels  int       // its channels to forwarded ports, until each has really ended
 	owned     bool      // opened for forwarding (closed when idle), not a terminal's
 	users     int       // requests and port listings using it now
 	idleSince time.Time // when users last dropped to zero
@@ -105,48 +107,54 @@ func newForwarder() *forwarder {
 		perUser: map[int64]int{}, stop: make(chan struct{})}
 }
 
-// newFwdTransport proxies over one SSH connection, to 127.0.0.1 on the host
-// only. Every channel it opens counts against maxFwdChannels from the start
-// of the open until the channel is finished for good (sshx.DialVia), so
-// requests that gave up cannot leave uncounted channels behind.
-func (f *forwarder) newFwdTransport(c *ssh.Client) *http.Transport {
-	return &http.Transport{
+// newFwdConn wraps an SSH connection with a transport that proxies over it,
+// to 127.0.0.1 on the host only. Every channel it opens counts against
+// maxFwdChannels and maxFwdChannelsPerConn from the start of the open until
+// the channel has really ended (sshx.DialVia owns the release), so requests
+// that gave up cannot leave uncounted channels behind. Only on connections
+// opened for forwarding may a channel that will not end close the connection.
+func (f *forwarder) newFwdConn(c *ssh.Client, owned bool) *fwdConn {
+	fc := &fwdConn{client: c, owned: owned}
+	fc.transport = &http.Transport{
 		DialContext: func(ctx context.Context, _, addr string) (net.Conn, error) {
 			if h, _, err := net.SplitHostPort(addr); err != nil || h != "127.0.0.1" {
 				return nil, fmt.Errorf("forwarding only reaches 127.0.0.1, not %q", addr)
 			}
-			if !f.takeChannel() {
+			release, ok := f.takeChannel(fc)
+			if !ok {
 				return nil, errFwdBusy
 			}
 			ctx, cancel := context.WithTimeout(ctx, fwdConnectTimeout)
 			defer cancel()
-			conn, err := sshx.DialVia(ctx, c, "tcp", addr, f.releaseChannel)
-			if err != nil {
-				f.releaseChannel()
-			}
-			return conn, err
+			return sshx.DialVia(ctx, c, "tcp", addr, sshx.DialOptions{Release: release, Dedicated: owned})
 		},
 		MaxIdleConns:          16,
 		MaxIdleConnsPerHost:   4,
 		IdleConnTimeout:       30 * time.Second,
 		ResponseHeaderTimeout: 2 * time.Minute,
 	}
+	return fc
 }
 
-func (f *forwarder) takeChannel() bool {
+// takeChannel reserves a channel on fc; the release is the reservation's
+// only owner and acts once.
+func (f *forwarder) takeChannel(fc *fwdConn) (release func(), ok bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.closed || f.channels >= maxFwdChannels {
-		return false
+	if f.closed || f.channels >= maxFwdChannels || fc.channels >= maxFwdChannelsPerConn {
+		return nil, false
 	}
 	f.channels++
-	return true
-}
-
-func (f *forwarder) releaseChannel() {
-	f.mu.Lock()
-	f.channels--
-	f.mu.Unlock()
+	fc.channels++
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			f.mu.Lock()
+			f.channels--
+			fc.channels--
+			f.mu.Unlock()
+		})
+	}, true
 }
 
 // Tickets and grants -------------------------------------------------------
@@ -276,7 +284,7 @@ func (f *forwarder) borrow(c *ssh.Client) (*fwdConn, error) {
 	}
 	fc := f.borrowed[c]
 	if fc == nil {
-		fc = &fwdConn{client: c, transport: f.newFwdTransport(c)}
+		fc = f.newFwdConn(c, false)
 		f.borrowed[c] = fc
 	}
 	fc.users++
@@ -344,7 +352,8 @@ func (f *forwarder) finishDial(d *fwdDial, c *ssh.Client, err error) (*fwdConn, 
 		c.Close()
 		return existing, nil
 	}
-	fc := &fwdConn{client: c, transport: f.newFwdTransport(c), owned: true, users: 1}
+	fc := f.newFwdConn(c, true)
+	fc.users = 1
 	f.conns[key] = fc
 	f.wg.Add(1)
 	f.mu.Unlock()

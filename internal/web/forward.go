@@ -577,7 +577,11 @@ func (s *Server) apiHostPorts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer s.fwd.release(fc)
-	ports, err := listeningPorts(ctx, fc.client) // returns only once the remote command is really over
+	ports, err := listeningPorts(ctx, fc.client)
+	if errors.Is(err, sshx.ErrBusy) {
+		writeError(w, http.StatusServiceUnavailable, "busy", "earlier port listings on this host are still running; try again in a moment")
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "ports_failed", "could not list ports on the host")
 		return

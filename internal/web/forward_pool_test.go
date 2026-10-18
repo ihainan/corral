@@ -106,6 +106,12 @@ func TestForwardChannelsAreCapped(t *testing.T) {
 	}
 	ws.Close(websocket.StatusNormalClosure, "")
 	eventually(t, "channel was not given back", func() bool { res, _ := f.get("/x", nil); return res.StatusCode == 200 })
+	e.h.srv.fwd.mu.Lock()
+	n := e.h.srv.fwd.channels
+	e.h.srv.fwd.mu.Unlock()
+	if n < 0 || n > 1 {
+		t.Fatalf("%d channels counted", n)
+	}
 }
 
 // Port listing counts against the same per-user limit as proxied requests.

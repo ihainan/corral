@@ -384,27 +384,3 @@ func TestLogoutDeletesTheLoginOrFails(t *testing.T) {
 		t.Fatal("cookie cleared although the login was not deleted")
 	}
 }
-
-func TestHerdrActionsPerSessionAreLimited(t *testing.T) {
-	h := herdrSockets{path: map[string]string{}, busy: map[string]int{}}
-	var releases []func()
-	for i := 0; i < maxHerdrOpsPerSession; i++ {
-		rel, ok := h.acquire("s1")
-		if !ok {
-			t.Fatalf("slot %d refused", i)
-		}
-		releases = append(releases, rel)
-	}
-	if _, ok := h.acquire("s1"); ok {
-		t.Fatal("more herdr actions in flight than allowed")
-	}
-	if rel, ok := h.acquire("s2"); !ok {
-		t.Fatal("another session was limited too")
-	} else {
-		rel()
-	}
-	releases[0]()
-	if _, ok := h.acquire("s1"); !ok {
-		t.Fatal("slot not released")
-	}
-}
