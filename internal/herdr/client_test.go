@@ -2,6 +2,7 @@ package herdr
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 	"strconv"
@@ -88,42 +89,39 @@ func TestCallHonoursCancel(t *testing.T) {
 }
 
 // A host that never answers the channel open: Dial gives up at the deadline
-// (its own 10 s one when the caller has none, as for the watcher), and once
-// the grace period is over the SSH connection is closed, so nothing stays
-// blocked behind it.
+// (its own 10 s one when the caller has none, as for the watcher). The
+// terminal's connection stays up; the unanswered opens keep their places, so
+// once sshx.MaxAuxPerConn are stuck further herdr traffic is refused.
 func TestDialGivesUpOnSilentHost(t *testing.T) {
-	oldGrace, oldDial := sshx.StuckGrace, dialTimeout
-	sshx.StuckGrace, dialTimeout = 100*time.Millisecond, 200*time.Millisecond
-	defer func() { sshx.StuckGrace, dialTimeout = oldGrace, oldDial }()
-	for _, name := range []string{"caller deadline", "own deadline"} {
-		t.Run(name, func(t *testing.T) {
-			srv := testutil.StartSSHServer(t, "alice", "alice-pass", t.TempDir())
-			hold := make(chan struct{})
-			defer close(hold)
-			srv.HandleChannel(func(nc ssh.NewChannel) bool {
-				if nc.ChannelType() != streamLocal {
-					return false
-				}
-				go func() { <-hold; nc.Reject(ssh.ConnectionFailed, "gone") }() // never answers the open in time
-				return true
-			})
-			c := dialTest(t, srv)
-			ctx := context.Background()
-			if name == "caller deadline" {
-				var cancel context.CancelFunc
-				ctx, cancel = context.WithTimeout(ctx, 100*time.Millisecond)
-				defer cancel()
-			}
-			if err := within(t, 3*time.Second, func() error { _, err := Dial(ctx, c, "/run/herdr.sock"); return err }); err == nil {
-				t.Fatal("dial succeeded")
-			}
-			closed := make(chan struct{})
-			go func() { c.Wait(); close(closed) }()
-			select {
-			case <-closed:
-			case <-time.After(2 * time.Second):
-				t.Fatal("SSH connection with a stuck channel open was left open")
-			}
-		})
+	oldDial, oldMax := dialTimeout, sshx.MaxAuxPerConn
+	dialTimeout, sshx.MaxAuxPerConn = 200*time.Millisecond, 2
+	defer func() { dialTimeout, sshx.MaxAuxPerConn = oldDial, oldMax }()
+	srv := testutil.StartSSHServer(t, "alice", "alice-pass", t.TempDir())
+	hold := make(chan struct{})
+	defer close(hold)
+	srv.HandleChannel(func(nc ssh.NewChannel) bool {
+		if nc.ChannelType() != streamLocal {
+			return false
+		}
+		go func() { <-hold; nc.Reject(ssh.ConnectionFailed, "gone") }() // never answers the open in time
+		return true
+	})
+	c := dialTest(t, srv)
+	short, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	for _, ctx := range []context.Context{short, context.Background()} { // caller's deadline, then Dial's own
+		if err := within(t, 3*time.Second, func() error { _, err := Dial(ctx, c, "/run/herdr.sock"); return err }); err == nil {
+			t.Fatal("dial succeeded")
+		}
+	}
+	if _, err := Dial(context.Background(), c, "/run/herdr.sock"); !errors.Is(err, sshx.ErrBusy) {
+		t.Fatalf("dial with two stuck: %v", err)
+	}
+	closed := make(chan struct{})
+	go func() { c.Wait(); close(closed) }()
+	select {
+	case <-closed:
+		t.Fatal("stuck herdr traffic closed the terminal's connection")
+	case <-time.After(300 * time.Millisecond):
 	}
 }

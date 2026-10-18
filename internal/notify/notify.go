@@ -50,13 +50,18 @@ type Notifier struct {
 	minGap        time.Duration
 	revoked       map[int64]uint64 // per user, bumped when access ends; older queued notes are dropped
 	sending       map[*sending]struct{}
-	loginValid    func(ctx context.Context, loginHash string) bool
+	loginValid    func(ctx context.Context, loginHash string) (bool, error)
 }
 
-// sending is one push in progress, cancelled when its login or user loses access.
+// sending is one delivery in progress: a push to one registration of a
+// device (cancelled when its login or user loses access, or the endpoint is
+// registered again), or a webhook (loginHash and endpoint empty; cancelled
+// when the user loses access).
 type sending struct {
 	userID    int64
 	loginHash string
+	endpoint  string
+	version   int64
 	cancel    context.CancelFunc
 }
 
@@ -65,8 +70,9 @@ type Options struct {
 	ExtraPushHosts  []string // host suffixes to allow besides the major push services
 	WebhookPrefixes []string // URL prefixes users may send webhooks to; empty disables webhooks
 	// LoginValid reports whether the browser login a subscription belongs to
-	// is still in force; nil treats every login as ended.
-	LoginValid func(ctx context.Context, loginHash string) bool
+	// is still in force, or an error if that could not be checked; nil
+	// treats every login as ended.
+	LoginValid func(ctx context.Context, loginHash string) (bool, error)
 }
 
 func New(ctx context.Context, st *store.Store, log *slog.Logger, opt Options) (*Notifier, error) {
@@ -226,7 +232,7 @@ func (n *Notifier) Revoke(userID int64) {
 func (n *Notifier) RevokeLogin(userID int64, loginHash string) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	n.cancelSending(func(sd *sending) bool { return sd.userID == userID && sd.loginHash == loginHash })
+	n.cancelSending(func(sd *sending) bool { return sd.userID == userID && sd.loginHash != "" && sd.loginHash == loginHash })
 }
 
 // RevokeOtherLogins is RevokeLogin for every login of the user but keep
@@ -234,7 +240,16 @@ func (n *Notifier) RevokeLogin(userID int64, loginHash string) {
 func (n *Notifier) RevokeOtherLogins(userID int64, keep string) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	n.cancelSending(func(sd *sending) bool { return sd.userID == userID && sd.loginHash != keep })
+	n.cancelSending(func(sd *sending) bool { return sd.userID == userID && sd.loginHash != "" && sd.loginHash != keep })
+}
+
+// Rebound cancels deliveries to earlier registrations of an endpoint that was
+// just registered again (perhaps by another user or login): they must not
+// reach the device with the previous owner's notes.
+func (n *Notifier) Rebound(endpoint string, version int64) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.cancelSending(func(sd *sending) bool { return sd.endpoint == endpoint && sd.version != version })
 }
 
 // cancelSending is called with mu held.
@@ -246,17 +261,18 @@ func (n *Notifier) cancelSending(match func(*sending) bool) {
 	}
 }
 
-// begin registers a push to one device so revoking its login or user cancels
-// it; false when the user's access ended since the note was queued.
-func (n *Notifier) begin(ctx context.Context, userID int64, loginHash string, gen uint64) (context.Context, func(), bool) {
+// begin registers a delivery so revocations cancel it; false when the
+// user's access ended since the note was queued. Callers re-check what they
+// rely on after this, so a revocation is either seen or cancels them.
+func (n *Notifier) begin(ctx context.Context, sd *sending, gen uint64) (context.Context, func(), bool) {
 	ctx, cancel := context.WithCancel(ctx)
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	if n.revoked[userID] != gen {
+	if n.revoked[sd.userID] != gen {
 		cancel()
 		return nil, nil, false
 	}
-	sd := &sending{userID: userID, loginHash: loginHash, cancel: cancel}
+	sd.cancel = cancel
 	n.sending[sd] = struct{}{}
 	return ctx, func() {
 		n.mu.Lock()
@@ -279,44 +295,61 @@ func (n *Notifier) deliver(ctx context.Context, userID int64, gen uint64, note N
 		n.log.Error("push: list subscriptions", "err", err)
 	}
 	for _, s := range subs {
-		sctx, end, ok := n.begin(ctx, userID, s.LoginHash, gen)
-		if !ok {
+		if !n.pushOne(ctx, userID, gen, s, payload, note) {
 			return
-		}
-		// Checked after registering, so a sign-out from here on cancels the
-		// send. A device whose login ended (expired, signed out, password
-		// changed) gets nothing more, even before the login row is cleaned up.
-		if s.LoginHash == "" || n.loginValid == nil || !n.loginValid(sctx, s.LoginHash) {
-			end()
-			_ = n.store.DeletePushSubscriptionHard(ctx, s.ID)
-			continue
-		}
-		if n.CheckEndpoint(s.Endpoint) != nil {
-			end()
-			_ = n.store.DeletePushSubscriptionHard(ctx, s.ID)
-			continue
-		}
-		res, err := n.push(sctx, s, payload, note)
-		end()
-		if err != nil {
-			n.log.Warn("push: send failed", "user", userID, "err", err)
-			_ = n.store.MarkPushResult(ctx, s.ID, false)
-			continue
-		}
-		res.Body.Close()
-		switch {
-		case res.StatusCode == http.StatusGone || res.StatusCode == http.StatusNotFound:
-			_ = n.store.DeletePushSubscriptionHard(ctx, s.ID)
-		case res.StatusCode >= 200 && res.StatusCode < 300:
-			_ = n.store.MarkPushResult(ctx, s.ID, true)
-		default:
-			n.log.Warn("push: rejected", "user", userID, "status", res.StatusCode)
-			_ = n.store.MarkPushResult(ctx, s.ID, false)
 		}
 	}
 	if !n.stale(userID, gen) {
-		n.sendWebhook(ctx, userID, note)
+		n.sendWebhook(ctx, userID, gen, note)
 	}
+}
+
+// pushOne delivers to one registration of a device; false when the user's
+// access ended (the rest of the note is dropped).
+func (n *Notifier) pushOne(ctx context.Context, userID int64, gen uint64, s *store.PushSubscription, payload []byte, note Note) bool {
+	sctx, end, ok := n.begin(ctx, &sending{userID: userID, loginHash: s.LoginHash, endpoint: s.Endpoint, version: s.Version}, gen)
+	if !ok {
+		return false
+	}
+	defer end()
+	// Checked after registering, so a sign-out or the endpoint being
+	// registered again from here on cancels the send.
+	if cur, err := n.store.PushSubscriptionCurrent(sctx, s.ID, s.Version); err != nil || !cur {
+		return true // registered again (maybe by someone else), or cannot tell: not this note's device now
+	}
+	// A device whose login ended (expired, signed out, password changed) gets
+	// nothing more, even before the login row is cleaned up. Only a login
+	// known to be over removes it; one that could not be checked is skipped.
+	valid, err := false, error(nil)
+	if s.LoginHash != "" && n.loginValid != nil {
+		valid, err = n.loginValid(sctx, s.LoginHash)
+	}
+	if err != nil {
+		return true
+	}
+	if !valid || n.CheckEndpoint(s.Endpoint) != nil {
+		_ = n.store.DeletePushSubscriptionHard(ctx, s.ID, s.Version)
+		return true
+	}
+	res, err := n.push(sctx, s, payload, note)
+	if err != nil {
+		if sctx.Err() == nil {
+			n.log.Warn("push: send failed", "user", userID, "err", err)
+			_ = n.store.MarkPushResult(ctx, s.ID, s.Version, false)
+		}
+		return true
+	}
+	res.Body.Close()
+	switch {
+	case res.StatusCode == http.StatusGone || res.StatusCode == http.StatusNotFound:
+		_ = n.store.DeletePushSubscriptionHard(ctx, s.ID, s.Version)
+	case res.StatusCode >= 200 && res.StatusCode < 300:
+		_ = n.store.MarkPushResult(ctx, s.ID, s.Version, true)
+	default:
+		n.log.Warn("push: rejected", "user", userID, "status", res.StatusCode)
+		_ = n.store.MarkPushResult(ctx, s.ID, s.Version, false)
+	}
+	return true
 }
 
 // push sends one encrypted message to one browser.
@@ -347,10 +380,17 @@ func topic(tag string) string {
 	return b.String()
 }
 
-func (n *Notifier) sendWebhook(ctx context.Context, userID int64, note Note) {
+func (n *Notifier) sendWebhook(ctx context.Context, userID int64, gen uint64, note Note) {
 	if !n.WebhooksEnabled() {
 		return
 	}
+	// Registered like a push, so disabling the user cancels it; the account
+	// is checked after registering.
+	ctx, end, ok := n.begin(ctx, &sending{userID: userID}, gen)
+	if !ok {
+		return
+	}
+	defer end()
 	if u, err := n.store.UserByID(ctx, userID); err != nil || u.Disabled {
 		return
 	}

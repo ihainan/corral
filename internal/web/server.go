@@ -82,7 +82,7 @@ type Deps struct {
 func New(d Deps) *Server {
 	s := &Server{cfg: d.Config, store: d.Store, auth: d.Auth, vault: d.Vault, guard: d.Guard, terms: d.Terms,
 		log: d.Log, mux: http.NewServeMux(), static: d.Static, socks: map[int64]map[*liveSocket]struct{}{},
-		pending: map[int64]map[*liveSocket]struct{}{}, herdrSocks: herdrSockets{path: map[string]string{}, busy: map[string]int{}},
+		pending: map[int64]map[*liveSocket]struct{}{}, herdrSocks: herdrSockets{path: map[string]string{}},
 		notifier: d.Notifier, vis: visibility{seen: map[string]map[*liveSocket]bool{}}, fwd: newForwarder()}
 	s.fwd.wg.Add(1)
 	go s.fwd.reap()

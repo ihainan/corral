@@ -9,6 +9,7 @@ package web
 // is signed in, issues it; the subdomain swaps it for its own cookie.
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"net"
@@ -243,7 +244,50 @@ func (s *Server) serveForward(w http.ResponseWriter, r *http.Request, port int, 
 		return
 	}
 	defer s.fwd.release(fc)
-	s.proxyTo(w, r.WithContext(ctx), fc, f)
+	// Ending the request (revocation, expiry) must also free a handler stuck
+	// writing to a browser that stopped reading, or it would keep its quotas.
+	cw := &cutoffWriter{ResponseWriter: w}
+	defer context.AfterFunc(ctx, cw.cut)()
+	s.proxyTo(cw, r.WithContext(ctx), fc, f)
+}
+
+// cutoffWriter lets a cancelled request stop writing to the browser: a
+// response write is given a deadline in the past, a hijacked (upgraded)
+// connection is closed.
+type cutoffWriter struct {
+	http.ResponseWriter
+	mu       sync.Mutex
+	cutOff   bool
+	hijacked net.Conn
+}
+
+func (c *cutoffWriter) Unwrap() http.ResponseWriter { return c.ResponseWriter }
+
+func (c *cutoffWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	conn, brw, err := http.NewResponseController(c.ResponseWriter).Hijack()
+	if err != nil {
+		return nil, nil, err
+	}
+	c.mu.Lock()
+	c.hijacked = conn
+	late := c.cutOff
+	c.mu.Unlock()
+	if late {
+		conn.Close()
+	}
+	return conn, brw, nil
+}
+
+func (c *cutoffWriter) cut() {
+	c.mu.Lock()
+	c.cutOff = true
+	conn := c.hijacked
+	c.mu.Unlock()
+	if conn != nil {
+		conn.Close()
+		return
+	}
+	_ = http.NewResponseController(c.ResponseWriter).SetWriteDeadline(time.Now())
 }
 
 // recheckEvery runs check every d while ctx lasts and calls fail (once) when
@@ -577,7 +621,11 @@ func (s *Server) apiHostPorts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer s.fwd.release(fc)
-	ports, err := listeningPorts(ctx, fc.client) // returns only once the remote command is really over
+	ports, err := listeningPorts(ctx, fc.client)
+	if errors.Is(err, sshx.ErrBusy) {
+		writeError(w, http.StatusServiceUnavailable, "busy", "earlier port listings on this host are still running; try again in a moment")
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "ports_failed", "could not list ports on the host")
 		return

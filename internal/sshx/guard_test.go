@@ -2,9 +2,9 @@ package sshx
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -14,21 +14,35 @@ import (
 	"github.com/ihainan/corral/internal/testutil"
 )
 
-func lowerGrace(t *testing.T) {
+func setGrace(t *testing.T, d time.Duration) {
 	old := StuckGrace
-	StuckGrace = 150 * time.Millisecond
+	StuckGrace = d
 	t.Cleanup(func() { StuckGrace = old })
 }
 
-// waitClosed fails unless c's connection is closed soon.
-func waitClosed(t *testing.T, c *ssh.Client) {
-	t.Helper()
+func setMaxAux(t *testing.T, n int) {
+	old := MaxAuxPerConn
+	MaxAuxPerConn = n
+	t.Cleanup(func() { MaxAuxPerConn = old })
+}
+
+func isClosed(c *ssh.Client, within time.Duration) bool {
 	closed := make(chan struct{})
 	go func() { c.Wait(); close(closed) }()
 	select {
 	case <-closed:
-	case <-time.After(3 * time.Second):
-		t.Fatal("SSH connection with a stuck operation was left open")
+		return true
+	case <-time.After(within):
+		return false
+	}
+}
+
+func eventually(t *testing.T, what string, ok func() bool) {
+	t.Helper()
+	for deadline := time.Now().Add(3 * time.Second); !ok(); time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal(what)
+		}
 	}
 }
 
@@ -44,13 +58,14 @@ func returnsWithin(t *testing.T, d time.Duration, f func()) {
 	}
 }
 
-// A host that never answers the session open: Output gives up at the
-// deadline and the connection is closed, so its goroutine ends too.
-func TestOutputEndsStuckChannelOpen(t *testing.T) {
-	lowerGrace(t)
+// A host that never answers the session open. Output returns at its
+// deadline, but the connection (which may carry a terminal) stays up, and the
+// operation keeps its place until the host lets go: past MaxAuxPerConn,
+// further side operations are refused.
+func TestStuckSideOperationsAreCappedNotCutOff(t *testing.T) {
+	setMaxAux(t, 2)
 	srv := testutil.StartSSHServer(t, "alice", "alice-pass", t.TempDir())
 	hold := make(chan struct{})
-	defer close(hold)
 	srv.HandleChannel(func(nc ssh.NewChannel) bool {
 		if nc.ChannelType() != "session" {
 			return false
@@ -59,14 +74,92 @@ func TestOutputEndsStuckChannelOpen(t *testing.T) {
 		return true
 	})
 	c := dialTest(t, srv)
+	for range 2 {
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		returnsWithin(t, 3*time.Second, func() {
+			if _, err := Output(ctx, c, "ss", 1<<20); !errors.Is(err, context.DeadlineExceeded) {
+				t.Errorf("stuck command: %v", err)
+			}
+		})
+		cancel()
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	if _, err := Output(ctx, c, "ss", 1<<20); !errors.Is(err, ErrBusy) {
+		t.Fatalf("third side operation with two stuck: %v", err)
+	}
+	if _, err := DialVia(ctx, c, "unix", "/run/x.sock", DialOptions{Aux: true}); !errors.Is(err, ErrBusy) {
+		t.Fatalf("socket dial with two stuck: %v", err)
+	}
+	if isClosed(c, 300*time.Millisecond) {
+		t.Fatal("a stuck side operation closed the connection")
+	}
+	if _, _, err := c.SendRequest("keepalive@openssh.com", true, nil); err != nil {
+		t.Fatalf("connection no longer usable: %v", err)
+	}
+	close(hold) // the host finally answers: the places come back
+	eventually(t, "side operations kept their places after ending", func() bool { return auxInUse(c) == 0 })
+}
+
+// A cancelled context is refused before any channel is opened.
+func TestNoChannelIsOpenedForACancelledContext(t *testing.T) {
+	srv := testutil.StartSSHServer(t, "alice", "alice-pass", t.TempDir())
+	var opens atomic.Int32
+	srv.HandleChannel(func(nc ssh.NewChannel) bool { opens.Add(1); return false })
+	c := dialTest(t, srv)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var released atomic.Int32
+	if _, err := DialVia(ctx, c, "tcp", "127.0.0.1:1", DialOptions{Release: func() { released.Add(1) }}); err == nil {
+		t.Fatal("dial with a cancelled context succeeded")
+	}
+	if _, err := Output(ctx, c, "ss", 1<<20); err == nil {
+		t.Fatal("command with a cancelled context ran")
+	}
+	time.Sleep(50 * time.Millisecond)
+	if opens.Load() != 0 || released.Load() != 1 || auxInUse(c) != 0 {
+		t.Fatalf("%d channels opened, quota released %d times", opens.Load(), released.Load())
+	}
+}
+
+// A channel that opens only after the caller gave up is closed in the
+// background, and its quota is released exactly once, when it has ended.
+func TestChannelOpenedAfterCancelReleasesOnce(t *testing.T) {
+	srv := testutil.StartSSHServer(t, "alice", "alice-pass", t.TempDir())
+	answer := make(chan struct{})
+	srv.HandleChannel(func(nc ssh.NewChannel) bool {
+		if nc.ChannelType() != "direct-tcpip" {
+			return false
+		}
+		go func() {
+			<-answer
+			ch, reqs, err := nc.Accept()
+			if err != nil {
+				return
+			}
+			go ssh.DiscardRequests(reqs)
+			io.Copy(io.Discard, ch) // until our close arrives
+			ch.Close()
+		}()
+		return true
+	})
+	c := dialTest(t, srv)
+	var quota atomic.Int32
+	quota.Store(1) // taken by the caller, handed to DialVia
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
-	returnsWithin(t, 3*time.Second, func() {
-		if _, err := Output(ctx, c, "ss", 1<<20); err == nil {
-			t.Error("stuck command succeeded")
-		}
-	})
-	waitClosed(t, c)
+	if _, err := DialVia(ctx, c, "tcp", "127.0.0.1:1", DialOptions{Release: func() { quota.Add(-1) }}); err == nil {
+		t.Fatal("dial past its deadline succeeded")
+	}
+	if quota.Load() != 1 {
+		t.Fatal("quota released while the open was still pending")
+	}
+	close(answer) // now it opens
+	eventually(t, "quota of the late channel never released", func() bool { return quota.Load() <= 0 })
+	time.Sleep(200 * time.Millisecond)
+	if q := quota.Load(); q != 0 {
+		t.Fatalf("quota released %d times", 1-q)
+	}
 }
 
 // freezer relays a TCP connection and can stop relaying in both directions,
@@ -94,7 +187,6 @@ func newFreezer(t *testing.T, target string) *freezer {
 				in.Close()
 				return
 			}
-			t.Cleanup(func() { in.Close(); out.Close() })
 			go f.relay(in, out)
 			go f.relay(out, in)
 		}
@@ -103,6 +195,7 @@ func newFreezer(t *testing.T, target string) *freezer {
 }
 
 func (f *freezer) relay(dst, src net.Conn) {
+	defer dst.Close()
 	buf := make([]byte, 32<<10)
 	for {
 		n, err := src.Read(buf)
@@ -120,52 +213,75 @@ func (f *freezer) relay(dst, src net.Conn) {
 	}
 }
 
-// Closing a forwarded channel whose close the host never answers: the read
-// blocked on it would wait forever; after the grace period the SSH connection
-// is closed, the read returns and the channel counts as finished.
-func TestStuckChannelCloseClosesTheConnection(t *testing.T) {
-	lowerGrace(t)
+// stuckChannel opens a channel through a relay, starts a reader on it, then
+// freezes the relay (the host stops answering, its close included) and
+// closes the channel.
+func stuckChannel(t *testing.T, dedicated bool) (c *ssh.Client, fr *freezer, quota *atomic.Int32, readDone chan struct{}) {
 	quiet, err := net.Listen("tcp", "127.0.0.1:0") // accepts, never says anything
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer quiet.Close()
+	t.Cleanup(func() { quiet.Close() })
 	go func() {
 		for {
 			c, err := quiet.Accept()
 			if err != nil {
 				return
 			}
-			defer c.Close()
+			t.Cleanup(func() { c.Close() })
 		}
 	}()
 	srv := testutil.StartSSHServer(t, "alice", "alice-pass", t.TempDir())
-	fr := newFreezer(t, srv.Addr.String())
-	c, err := ssh.Dial("tcp", fr.ln.Addr().String(), &ssh.ClientConfig{User: "alice",
+	fr = newFreezer(t, srv.Addr.String())
+	c, err = ssh.Dial("tcp", fr.ln.Addr().String(), &ssh.ClientConfig{User: "alice",
 		Auth: []ssh.AuthMethod{ssh.Password("alice-pass")}, HostKeyCallback: ssh.InsecureIgnoreHostKey(), Timeout: 5 * time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer c.Close()
-	var ended sync.WaitGroup
-	ended.Add(1)
+	t.Cleanup(func() { c.Close() })
+	quota = &atomic.Int32{}
+	quota.Store(1)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	conn, err := DialVia(ctx, c, "tcp", quiet.Addr().String(), ended.Done)
+	conn, err := DialVia(ctx, c, "tcp", quiet.Addr().String(), DialOptions{Release: func() { quota.Add(-1) }, Dedicated: dedicated})
 	if err != nil {
 		t.Fatal(err)
 	}
-	read := make(chan struct{})
-	go func() { io.Copy(io.Discard, conn); close(read) }()
+	readDone = make(chan struct{})
+	go func() { io.Copy(io.Discard, conn); close(readDone) }()
 	time.Sleep(50 * time.Millisecond)
 	fr.frozen.Store(true)
 	conn.Close()
-	select {
-	case <-read:
-	case <-time.After(3 * time.Second):
-		t.Fatal("read on a closed channel stayed blocked")
+	return c, fr, quota, readDone
+}
+
+// On a connection dedicated to forwarding, a channel whose close is never
+// answered ends the connection after the grace period.
+func TestStuckChannelOnDedicatedConnectionClosesIt(t *testing.T) {
+	setGrace(t, 150*time.Millisecond)
+	c, _, quota, readDone := stuckChannel(t, true)
+	returnsWithin(t, time.Second, func() { <-readDone })
+	if !isClosed(c, 3*time.Second) {
+		t.Fatal("dedicated connection with a stuck channel left open")
 	}
-	returnsWithin(t, 3*time.Second, ended.Wait)
-	waitClosed(t, c)
-	fr.frozen.Store(false)
+	eventually(t, "quota not released after the connection ended", func() bool { return quota.Load() == 0 })
+}
+
+// On a connection a terminal may depend on, the reader is released at once
+// but the connection stays up; the quota is held until the host answers.
+func TestStuckChannelOnSharedConnectionKeepsIt(t *testing.T) {
+	setGrace(t, 150*time.Millisecond)
+	c, fr, quota, readDone := stuckChannel(t, false)
+	returnsWithin(t, time.Second, func() { <-readDone })
+	if isClosed(c, 500*time.Millisecond) {
+		t.Fatal("a stuck side channel closed a shared connection")
+	}
+	if quota.Load() != 1 {
+		t.Fatal("quota released before the channel ended")
+	}
+	fr.frozen.Store(false) // the host catches up and answers the close
+	eventually(t, "quota not released once the channel ended", func() bool { return quota.Load() == 0 })
+	if quota.Load() != 0 {
+		t.Fatal("quota released twice")
+	}
 }

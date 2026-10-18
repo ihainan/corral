@@ -3,7 +3,7 @@ package sshx
 import (
 	"context"
 	"errors"
-	"sync"
+	"io"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -14,78 +14,80 @@ var MaxOutput = 1 << 20
 
 var ErrOutputTooLarge = errors.New("remote command printed too much output")
 
-// Output runs a fixed command over c and returns its stdout; stderr is
-// discarded. It stops reading, closing the channel, once the output passes
-// limit bytes. When ctx ends it closes the channel, and if the host does not
-// let go (channel open, exec or close unanswered) closes c after StuckGrace:
-// Output only returns once nothing of it is left running.
+// Output runs a fixed command over c as a side operation (see MaxAuxPerConn)
+// and returns its stdout; stderr is discarded. Past limit bytes it stops
+// keeping output and closes the channel. It returns when the command is done
+// or ctx ends; in the latter case the channel is closed and the operation
+// keeps its place against MaxAuxPerConn until the host has really let go of
+// it. The connection itself is never closed: it may carry a terminal.
 func Output(ctx context.Context, c *ssh.Client, cmd string, limit int) ([]byte, error) {
-	outer := ctx
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	var mu sync.Mutex
-	var sess *ssh.Session
-	finished := watch(ctx, c, func() {
-		mu.Lock()
-		s := sess
-		mu.Unlock()
-		if s != nil {
-			s.Close()
-		}
-	})
-	defer finished()
-	s, err := c.NewSession()
-	if err != nil {
-		return nil, orCtx(outer, err)
+	release, ok := takeAux(c)
+	if !ok {
+		return nil, ErrBusy
 	}
-	mu.Lock()
-	sess = s
-	mu.Unlock()
-	// Runs before finished; cancelling first puts the close under the watch
-	// too, in case the host never answers it.
-	defer func() { cancel(); s.Close() }()
-	if ctx.Err() != nil {
+	if err := ctx.Err(); err != nil {
+		release()
+		return nil, err
+	}
+	type result struct {
+		out []byte
+		err error
+	}
+	res := make(chan result, 1)
+	go func() {
+		defer release()
+		out, err := runCommand(ctx, c, cmd, limit)
+		res <- result{out, err}
+	}()
+	select {
+	case r := <-res:
+		return r.out, r.err
+	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
-	w := &capWriter{limit: limit, full: cancel} // too much: end it like a timeout
-	s.Stdout = w
+}
+
+// runCommand returns only once the session channel has ended.
+func runCommand(ctx context.Context, c *ssh.Client, cmd string, limit int) ([]byte, error) {
+	s, err := c.NewSession() // waits for the host to answer the open, or for the connection to end
+	if err != nil {
+		return nil, err
+	}
+	defer s.Close()
+	stop := context.AfterFunc(ctx, func() { s.Close() }) // giving up: ask the host to close
+	defer stop()
+	stdout, err := s.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
 	if err := s.Start(cmd); err != nil {
-		return nil, orCtx(outer, err)
+		s.Close()
+		io.Copy(io.Discard, stdout) // returns once the channel has ended
+		return nil, err
 	}
-	err = s.Wait()
-	switch {
-	case w.over:
-		return w.buf, ErrOutputTooLarge
-	case outer.Err() != nil:
-		return nil, outer.Err()
-	}
-	return w.buf, err
-}
-
-// orCtx prefers the context's error: a failure caused by giving up is reported as such.
-func orCtx(ctx context.Context, err error) error {
-	if ctx.Err() != nil {
-		return ctx.Err()
-	}
-	return err
-}
-
-// capWriter keeps up to limit bytes and fails (closing the channel) beyond.
-type capWriter struct {
-	buf   []byte
-	limit int
-	over  bool
-	full  func()
-}
-
-func (w *capWriter) Write(p []byte) (int, error) {
-	if len(w.buf)+len(p) > w.limit {
-		if !w.over {
-			w.over = true
-			w.full()
+	var buf []byte
+	over := false
+	chunk := make([]byte, 32<<10)
+	for {
+		n, rerr := stdout.Read(chunk)
+		if n > 0 && !over {
+			if len(buf)+n > limit {
+				over = true
+				s.Close() // keep reading (and discarding) until the channel ends
+			} else {
+				buf = append(buf, chunk[:n]...)
+			}
 		}
-		return 0, ErrOutputTooLarge
+		if rerr != nil {
+			break
+		}
 	}
-	w.buf = append(w.buf, p...)
-	return len(p), nil
+	err = s.Wait() // the channel's requests end with the channel
+	switch {
+	case over:
+		return buf, ErrOutputTooLarge
+	case ctx.Err() != nil:
+		return nil, ctx.Err()
+	}
+	return buf, err
 }
