@@ -280,9 +280,12 @@ export function TerminalPage({ id }: { id: string }) {
       if (conn.status === 'full') return // refused: actions here take nothing over
       const now = Date.now()
       if (!following && inCharge && now - claimedAt < CLAIM_GAP) {
+        // Valid only on the connection it was made for: after a reconnect
+        // (or a refusal and retry) the gateway's state is news to this window.
+        const opens = conn.opens
         claimTimer ??= window.setTimeout(() => {
           claimTimer = undefined
-          takeOverRef.current()
+          if (conn.opens === opens) takeOverRef.current()
         }, claimedAt + CLAIM_GAP - now)
         return
       }
