@@ -55,6 +55,13 @@ type Config struct {
 	CodeServerSHA256 map[string]string
 
 	DefaultLanguage string
+
+	// Session recording (asciicast files under DataDir/recordings): off by
+	// default; when on, every session's output is recorded, kept for
+	// RecordingDays and cut at RecordingMaxBytes each.
+	Recording         bool
+	RecordingDays     int
+	RecordingMaxBytes int64
 }
 
 const (
@@ -230,6 +237,9 @@ func Load() (*Config, error) {
 	if err := c.loadCodeServer(); err != nil {
 		return nil, err
 	}
+	if err := c.loadRecording(); err != nil {
+		return nil, err
+	}
 	if v := env("CORRAL_UPLOAD_MAX_MB", ""); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n < 1 {
@@ -306,4 +316,31 @@ func envDuration(key string, def time.Duration) (time.Duration, error) {
 func isLoopbackIP(host string) bool {
 	ip, err := netip.ParseAddr(host)
 	return err == nil && ip.IsLoopback()
+}
+
+func (c *Config) loadRecording() error {
+	switch v := env("CORRAL_RECORDING", "off"); v {
+	case "on":
+		c.Recording = true
+	case "off":
+	default:
+		return fmt.Errorf("CORRAL_RECORDING must be on or off, got %q", v)
+	}
+	c.RecordingDays = 30
+	if v := env("CORRAL_RECORDING_DAYS", ""); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > 3650 {
+			return fmt.Errorf("CORRAL_RECORDING_DAYS: a number of days from 1 to 3650, got %q", v)
+		}
+		c.RecordingDays = n
+	}
+	c.RecordingMaxBytes = 200 << 20
+	if v := env("CORRAL_RECORDING_MAX_MB", ""); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > 100000 {
+			return fmt.Errorf("CORRAL_RECORDING_MAX_MB: invalid %q", v)
+		}
+		c.RecordingMaxBytes = int64(n) << 20
+	}
+	return nil
 }

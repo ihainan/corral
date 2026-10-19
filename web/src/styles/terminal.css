@@ -223,3 +223,28 @@ html.term-dark .overlay, html.term-dark .menu, html.term-dark .toast {
 .term-following span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .term-full { height: auto; min-height: 28px; padding: 4px 12px; }
 .term-full span { white-space: normal; }
+
+/* Recording player: the terminal's surface, a fixed-size screen, controls below. */
+.player-title { display: flex; flex-direction: column; min-width: 0; padding: 0 4px; }
+.player-title .term-host-name { font-weight: 600; font-size: 14px; color: var(--term-fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.player-stage {
+  flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 8px;
+  padding: 12px max(8px, env(safe-area-inset-right, 0px)) 12px max(8px, env(safe-area-inset-left, 0px));
+}
+.player-fit { margin: 0 auto; flex: none; overflow: hidden; }
+.player-screen { cursor: pointer; transform-origin: top left; width: max-content; }
+.player-note { color: var(--term-fg-3); font-size: 12px; text-align: center; }
+.player-stage .inline-error { color: var(--term-fg-2); }
+.player-controls {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px max(12px, env(safe-area-inset-right, 0px)) calc(8px + env(safe-area-inset-bottom, 0px)) max(12px, env(safe-area-inset-left, 0px));
+  background: var(--term-chrome); border-top: 1px solid var(--term-line); color: var(--term-fg-2); font-size: 13px;
+}
+.player-time { flex: none; min-width: 92px; }
+.player-seek { flex: 1; min-width: 60px; accent-color: var(--term-accent-text); }
+.player-speed { flex: none; background: var(--term-key); color: var(--term-fg); border: 1px solid var(--term-line); border-radius: 6px; height: 30px; padding: 0 6px; font: inherit; }
+.player-idle { flex: none; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; cursor: pointer; }
+@media (max-width: 520px) {
+  .player-controls { flex-wrap: wrap; row-gap: 6px; }
+  .player-seek { order: 5; flex-basis: 100%; }
+}

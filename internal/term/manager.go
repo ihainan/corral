@@ -34,10 +34,13 @@ type Manager struct {
 	maxPerUser    int
 	OnEnd         func(s *Session, state string, duration time.Duration)
 	OnAlert       func(s *Session, a Alert) // bells and notification escapes in output, called from one worker
-	alerts        chan *Session             // sessions with an alert waiting
-	spillMu       sync.Mutex
-	spilled       []*Session // sessions whose alert did not fit in alerts; each at most once
-	stop          chan struct{}
+	// NewRecorder, when set, is asked for a recorder for each new session
+	// before its output starts; nil means that session is not recorded.
+	NewRecorder func(s *Session) Recorder
+	alerts      chan *Session // sessions with an alert waiting
+	spillMu     sync.Mutex
+	spilled     []*Session // sessions whose alert did not fit in alerts; each at most once
+	stop        chan struct{}
 }
 
 // alertQueue bounds sessions waiting for the alert worker; alertRetry is how
@@ -103,6 +106,15 @@ func (m *Manager) Shutdown() {
 	for _, s := range all {
 		s.Close("server shutting down")
 	}
+}
+
+// Recorder keeps a session's output (see package record). Its methods must
+// not block: they are called while the session's lock is held.
+type Recorder interface {
+	Output(p []byte)
+	Resize(cols, rows int)
+	Close()
+	Active() bool // still keeping output (not stopped at its size limit)
 }
 
 // StartOptions describes what to run once the SSH connection is up.
@@ -223,22 +235,31 @@ func (m *Manager) Start(ctx context.Context, res *Reservation, owner, hostID int
 			cols: cols, rows: rows, ptySize: [2]int{cols, rows}, winch: sess.WindowChange, idleSince: time.Now(), finished: make(chan struct{}), uploads: make(chan struct{}, 2),
 			onAlert: m.OnAlert, alertq: m.alerts, spill: m.spill,
 		}
+		if m.NewRecorder != nil {
+			s.rec = m.NewRecorder(s)
+		}
 		s.pumps.Add(2)
 		go s.pump(stdout)
 		go s.pump(stderr)
 		done <- setup{sess: sess, s: s}
 	}()
 
+	// abandon drops a session set up after we gave up on it, recording included.
+	abandon := func(st setup) {
+		if st.s != nil && st.s.rec != nil {
+			st.s.rec.Close()
+		}
+	}
 	var st setup
 	select {
 	case st = <-done:
 	case <-ctx.Done():
 		client.Close() // unblocks the setup goroutine
-		<-done
+		abandon(<-done)
 		return nil, ctx.Err()
 	case <-time.After(setupTimeout):
 		client.Close()
-		<-done
+		abandon(<-done)
 		return nil, errors.New("the host did not start a terminal in time")
 	}
 	if st.err != nil {

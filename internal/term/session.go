@@ -91,6 +91,7 @@ type Info struct {
 	Cols      int    `json:"cols"`
 	Rows      int    `json:"rows"`
 	Title     string `json:"title"`
+	Recording bool   `json:"recording"` // its output is being recorded
 	// Side information such as the herdr summary, as last published.
 	Meta json.RawMessage `json:"meta,omitempty"`
 }
@@ -137,6 +138,7 @@ type Session struct {
 	finished  chan struct{} // closed when the session reached a final state
 
 	onEnd   func(*Session)
+	rec     Recorder      // nil when the session is not recorded; fixed before output starts
 	uploads chan struct{} // limits concurrent file transfers on this connection
 	meta    []byte        // latest side information, replayed to new viewers
 	alerts  alertScanner
@@ -214,7 +216,7 @@ func (s *Session) Info() Info {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return Info{ID: s.ID, HostID: s.HostID, HostName: s.HostName, State: s.state, CreatedAt: s.Created.Unix(),
-		Viewers: len(s.subs), Cols: s.cols, Rows: s.rows, Title: s.title, Meta: append(json.RawMessage(nil), s.meta...)}
+		Viewers: len(s.subs), Cols: s.cols, Rows: s.rows, Title: s.title, Recording: s.rec != nil && s.rec.Active(), Meta: append(json.RawMessage(nil), s.meta...)}
 }
 
 // Client exposes the SSH connection for side channels (file upload, herdr).
@@ -239,6 +241,9 @@ func (s *Session) pump(r io.Reader) {
 			s.mu.Lock()
 			off := s.buf.end()
 			s.buf.write(buf[:n])
+			if s.rec != nil {
+				s.rec.Output(buf[:n])
+			}
 			s.scanTitle(buf[:n])
 			if s.onAlert != nil {
 				s.alerts.feed(buf[:n], s.noteAlert)
@@ -440,11 +445,26 @@ func (s *Session) ResizeFrom(from *Sub, seq int64, take bool, cols, rows int) er
 
 // sendSize sends a size to the host; called with sizeMu held.
 func (s *Session) sendSize(cols, rows int) error {
+	// Recorded before the host hears of it, so output drawn at the new size
+	// comes after the size in the recording; put back if it was not sent.
+	s.recordSize(cols, rows)
 	if err := s.winch(rows, cols); err != nil {
+		s.recordSize(s.ptySize[0], s.ptySize[1])
 		return err
 	}
 	s.ptySize = [2]int{cols, rows}
 	return nil
+}
+
+// recordSize notes a size in the recording, in order with output (both
+// under mu).
+func (s *Session) recordSize(cols, rows int) {
+	if s.rec == nil {
+		return
+	}
+	s.mu.Lock()
+	s.rec.Resize(cols, rows)
+	s.mu.Unlock()
 }
 
 // Redraw nudges full-screen programs (tmux, vim) to repaint by briefly changing
@@ -485,6 +505,9 @@ func (s *Session) end(state string, code int, reason string) {
 	}
 	s.subs = map[*Sub]struct{}{}
 	close(s.finished)
+	if s.rec != nil {
+		s.rec.Close() // output after this point reaches nobody
+	}
 	s.mu.Unlock()
 	// The connection first: closing it cannot block, and it makes the channel
 	// close below fail fast instead of waiting on a stalled transport.

@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
-import { KeyRound, LogOut, ScrollText, Server, Settings, Users } from 'lucide-react'
+import { Film, KeyRound, LogOut, ScrollText, Server, Settings, Users } from 'lucide-react'
 import { api, ApiError, bumpAuthGen, setUnauthorizedHandler, type Bootstrap, type Me } from './api'
 import { applyDefaultLanguage, t } from './i18n'
 import { freezePrefs, resetPrefsSession, sendPendingPrefs, syncPrefsFromServer } from './prefs'
@@ -12,6 +12,7 @@ import { HostEditPage } from './pages/HostEdit'
 import { KeysPage } from './pages/Keys'
 import { SettingsPage } from './pages/Settings'
 import { AdminUsersPage, AdminAuditPage } from './pages/Admin'
+import { RecordingPlayerPage, RecordingsPage } from './pages/Recordings'
 import { TerminalPage } from './pages/Terminal'
 
 interface Session {
@@ -69,6 +70,15 @@ export function App() {
       .catch(() => setError(true))
   }, [])
 
+  // What the start-up answer says about the user (such as whether there are
+  // recordings to see) is learnt again after signing in.
+  useEffect(() => {
+    if (!booted.current || !me) return
+    api<Bootstrap>('GET', '/api/bootstrap')
+      .then((b) => setBoot((prev) => (prev ? { ...b, user: prev.user } : b)))
+      .catch(() => {})
+  }, [me?.id])
+
   if (error) {
     return (
       <div className="auth-wrap">
@@ -115,6 +125,8 @@ function route(path: string, boot: Bootstrap, me: Me | null): ReactNode {
   if (!me) return <Redirect to={boot.setup_needed ? '/setup' : '/login?next=' + encodeURIComponent(path)} />
 
   if ((m = match('/t/:id', path))) return <TerminalPage key={m.id} id={m.id} />
+  if ((m = match('/recordings/:id', path))) return <RecordingPlayerPage key={m.id} id={m.id} />
+  if (path === '/recordings') return <Shell active="recordings"><RecordingsPage /></Shell>
   if (path === '/' || path === '/hosts') return <Shell active="hosts"><HostsPage /></Shell>
   if (path === '/hosts/new') return <Shell active="hosts"><HostEditPage /></Shell>
   if ((m = match('/hosts/:id/edit', path))) return <Shell active="hosts"><HostEditPage id={Number(m.id)} /></Shell>
@@ -132,7 +144,7 @@ function nextPath(): string {
   return n && n.startsWith('/') && !n.startsWith('//') ? n : '/'
 }
 
-type NavKey = 'hosts' | 'keys' | 'settings' | 'users' | 'audit'
+type NavKey = 'hosts' | 'keys' | 'settings' | 'recordings' | 'users' | 'audit'
 
 // signOut ends the browser session. The push subscription of this device is
 // removed first, so the next person signing in here does not get the previous
@@ -167,13 +179,17 @@ async function signOutOnce(setMe: (m: Me | null) => void, toast: (m: string, e?:
 }
 
 function Shell({ active, children }: { active: NavKey; children: ReactNode }) {
-  const { me, setMe } = useSession()
+  const { me, setMe, boot } = useSession()
   const toast = useToast()
   const main: { key: NavKey; href: string; label: string; icon: ReactNode }[] = [
     { key: 'hosts', href: '/', label: t('nav.hosts'), icon: <Server size={17} strokeWidth={1.75} /> },
     { key: 'keys', href: '/keys', label: t('nav.keys'), icon: <KeyRound size={17} strokeWidth={1.75} /> },
     { key: 'settings', href: '/settings', label: t('nav.settings'), icon: <Settings size={17} strokeWidth={1.75} /> },
   ]
+  // Recordings: only where sessions are recorded; on phones under Settings.
+  const extra: typeof main = boot.recordings
+    ? [{ key: 'recordings', href: '/recordings', label: t('nav.recordings'), icon: <Film size={17} strokeWidth={1.75} /> }]
+    : []
   const admin: typeof main = me?.role === 'admin'
     ? [
         { key: 'users', href: '/admin/users', label: t('nav.users'), icon: <Users size={17} strokeWidth={1.75} /> },
@@ -187,7 +203,7 @@ function Shell({ active, children }: { active: NavKey; children: ReactNode }) {
     </a>
   )
   // On phones the admin pages sit under Settings in the tab bar.
-  const tabActive = active === 'users' || active === 'audit' ? 'settings' : active
+  const tabActive = active === 'users' || active === 'audit' || active === 'recordings' ? 'settings' : active
   return (
     <div className="shell">
       <nav className="sidebar" aria-label={t('nav.main')}>
@@ -196,6 +212,7 @@ function Shell({ active, children }: { active: NavKey; children: ReactNode }) {
           <span className="label">{t('app.name')}</span>
         </a>
         {main.map(item)}
+        {extra.map(item)}
         {admin.length > 0 && <div className="nav-group">{t('nav.admin')}</div>}
         {admin.map(item)}
         <div className="sidebar-foot">

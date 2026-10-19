@@ -218,7 +218,7 @@ export function TerminalPage({ id }: { id: string }) {
   const activeMods = (): Mods => ({ ctrl: mods.current.ctrl !== 'off', alt: mods.current.alt !== 'off', shift: false })
 
   // Session metadata (host name, host id for reconnect).
-  useEffect(() => {
+  const loadInfo = useCallback(() => {
     api<SessionInfo[]>('GET', '/api/sessions')
       .then((list) => {
         const s = list.find((x) => x.id === id)
@@ -229,6 +229,14 @@ export function TerminalPage({ id }: { id: string }) {
       })
       .catch(() => {})
   }, [id])
+  useEffect(loadInfo, [loadInfo])
+  // A recording stops at its size limit: the status then stops saying so.
+  const recordingNow = !!info?.recording
+  useEffect(() => {
+    if (!recordingNow) return
+    const t = setInterval(loadInfo, 30000)
+    return () => clearInterval(t)
+  }, [recordingNow, loadInfo])
 
   // Terminal + connection lifecycle.
   useEffect(() => {
@@ -1222,7 +1230,7 @@ export function TerminalPage({ id }: { id: string }) {
   const slow = status === 'open' && latency !== null && latency > HIGH_LATENCY
   const statusText =
     ended ? t('term.endedShort') :
-    status === 'open' ? (slow ? t('term.latency', { ms: latency }) : t('term.connected')) :
+    status === 'open' ? (slow ? t('term.latency', { ms: latency }) : t('term.connected')) + (info?.recording ? ' · ' + t('term.recording') : '') :
     status === 'connecting' ? t('term.connecting') :
     status === 'reconnecting' ? t('term.reconnecting') :
     status === 'offline' ? t('term.offline') :

@@ -55,6 +55,7 @@ type Server struct {
 
 	herdrSocks herdrSockets
 	files      *sftpPool        // shared SFTP channels of the file panel
+	rec        *recState        // recordings being made, and their pruning
 	notifier   *notify.Notifier // nil disables push
 	fwd        *forwarder
 	code       codeServers
@@ -106,6 +107,11 @@ func New(d Deps) *Server {
 			s.notifier.Revoke(userID)
 		}
 		s.terms.CloseUser(userID, "access revoked")
+	}
+	if s.cfg.DataDir != "" {
+		if err := s.startRecordings(); err != nil {
+			s.log.Error("cannot prepare session recordings; sessions are not recorded", "err", err)
+		}
 	}
 	s.registerRoutes()
 	return s
@@ -172,6 +178,11 @@ func (s *Server) registerRoutes() {
 	s.handle("POST /api/sessions/{id}/files/mkdir", SignedIn, s.apiFilesMkdir)
 	s.handle("POST /api/sessions/{id}/files/rename", SignedIn, s.apiFilesRename)
 	s.handle("POST /api/sessions/{id}/files/delete", SignedIn, s.apiFilesDelete)
+
+	s.handle("GET /api/recordings", SignedIn, s.apiListRecordings)
+	s.handle("GET /api/recordings/{id}", SignedIn, s.apiGetRecording)
+	s.handle("GET /api/recordings/{id}/cast", SignedIn, s.apiRecordingCast)
+	s.handle("DELETE /api/recordings/{id}", AdminOnly, s.apiDeleteRecording)
 
 	s.handle("GET /api/forwards", SignedIn, s.apiListForwards)
 	s.handle("POST /api/forwards", SignedIn, s.apiCreateForward)

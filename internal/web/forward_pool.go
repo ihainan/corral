@@ -567,6 +567,7 @@ func (s *Server) revokeForwardGrants(id string, keepUser int64) {
 // Close stops background work and closes the forwarding connections. Call it
 // once the HTTP server has stopped taking requests.
 func (s *Server) Close() {
+	s.stopRecordings()
 	s.files.shutdown()
 	s.code.shutdown()
 	s.fwd.shutdown()

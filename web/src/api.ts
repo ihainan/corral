@@ -15,6 +15,8 @@ export interface Bootstrap {
   forwarding: boolean
   code: boolean // hosts can be opened in VS Code (code-server)
   upload_max_bytes: number
+  recording: boolean // sessions are recorded
+  recordings?: boolean // there are recordings this user may see (or sessions are recorded)
   user: Me | null
 }
 
@@ -53,6 +55,7 @@ export interface SessionInfo {
   cols: number
   rows: number
   title: string
+  recording?: boolean // its output is being recorded
   meta?: HerdrSummary // last side information published by the session
 }
 
@@ -256,4 +259,17 @@ export interface FileListing {
   path: string
   entries: FileEntry[]
   truncated: boolean
+}
+
+export interface Recording {
+  id: string
+  owner_id: number
+  owner_name: string
+  host_id: number
+  host_name: string
+  started_at: number
+  ended_at: number // 0 while recording
+  bytes: number
+  truncated: boolean
+  gaps: boolean
 }

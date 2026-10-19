@@ -43,10 +43,23 @@ func (s *Server) apiBootstrap(w http.ResponseWriter, r *http.Request) {
 		"forwarding":       s.cfg.ForwardDomain != "",
 		"code":             s.cfg.CodeServer,
 		"upload_max_bytes": s.cfg.UploadMaxBytes,
+		"recording":        s.cfg.Recording,
 		"user":             nil,
 	}
 	if u := currentUser(r); u != nil {
 		out["user"] = viewMe(u)
+		// Recordings stay reachable after recording was turned off.
+		if !s.cfg.Recording {
+			owner := u.ID
+			if u.IsAdmin() {
+				owner = 0
+			}
+			has, _ := s.store.HasRecordings(r.Context(), owner)
+			out["recordings"] = has
+		}
+	}
+	if s.cfg.Recording {
+		out["recordings"] = true
 	}
 	writeJSON(w, http.StatusOK, out)
 }

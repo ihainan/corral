@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
-import { ChevronRight, LogOut, Minus, Plus, ScrollText, Users } from 'lucide-react'
+import { ChevronRight, Film, LogOut, Minus, Plus, ScrollText, Users } from 'lucide-react'
 import { disablePush, enablePush, pushState, syncPush, type PushState } from '../push'
 import { api, errorText, type Me } from '../api'
 import { getLang, setLang, t, type Lang } from '../i18n'
@@ -51,7 +51,7 @@ function Seg<T extends string>(props: { labelledBy: string; value: T; options: [
 }
 
 export function SettingsPage() {
-  const { me, setMe } = useSession()
+  const { me, setMe, boot } = useSession()
   const prefs = usePrefs()
   const toast = useToast()
   const [lang, setLangState] = useState<Lang>(getLang())
@@ -131,6 +131,13 @@ export function SettingsPage() {
       <section className="section phone-only">
         <h2>{t('nav.account')}</h2>
         <div className="settings-group">
+          {boot.recordings && (
+            <a className="setting setting-link" href="/recordings" onClick={linkHandler('/recordings')}>
+              <Film size={18} strokeWidth={1.75} className="row-icon" />
+              <span className="setting-label">{t('nav.recordings')}</span>
+              <ChevronRight size={16} className="chev" />
+            </a>
+          )}
           {me?.role === 'admin' && (
             <>
               <a className="setting setting-link" href="/admin/users" onClick={linkHandler('/admin/users')}>
