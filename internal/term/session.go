@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -122,9 +123,21 @@ type Info struct {
 	// tmux or herdr session it is attached to ("" for herdr's default).
 	Persistence string `json:"persistence"`
 	MuxSession  string `json:"mux_session"`
-	Watching  int    `json:"watching"`  // windows of other users watching, read-only
+	Watching    int    `json:"watching"` // windows of other users watching, read-only
 	// Side information such as the herdr summary, as last published.
 	Meta json.RawMessage `json:"meta,omitempty"`
+	// Counts the previews sent (see Preview); 0 if none yet.
+	PreviewRev int64 `json:"preview_rev,omitempty"`
+}
+
+// Preview is the screen as one of the owner's windows last showed it, as
+// text: for the session list, which shows it in small. It is sent by the
+// browser (the gateway keeps no screen of its own) and kept in memory only.
+type Preview struct {
+	Cols  int      `json:"cols"`
+	Lines []string `json:"lines"`
+	At    int64    `json:"at"`  // unix seconds
+	Rev   int64    `json:"rev"` // as PreviewRev in the list
 }
 
 type Session struct {
@@ -173,6 +186,9 @@ type Session struct {
 	rec     Recorder      // nil when the session is not recorded; fixed before output starts
 	uploads chan struct{} // limits concurrent file transfers on this connection
 	meta    []byte        // latest side information, replayed to new viewers
+	preview *Preview      // what a window last showed; nil until one sent it
+	prevRev int64         // previews kept so far
+	winSeqs []winSeq      // the windows that sent previews (the latest last), and their numbers for them
 	alerts  alertScanner
 	onAlert func(*Session, Alert) // from Manager.OnAlert, fixed before output starts
 	alertq  chan<- *Session       // the manager's alert queue
@@ -258,7 +274,53 @@ func (s *Session) Info() Info {
 	return Info{ID: s.ID, HostID: s.HostID, HostName: s.HostName, State: s.state, CreatedAt: s.Created.Unix(),
 		Viewers: own, Watching: watching, Cols: s.cols, Rows: s.rows, Title: s.title, Recording: s.rec != nil && s.rec.Active(),
 		Persistence: s.Persistence, MuxSession: s.muxSession(),
-		Meta: append(json.RawMessage(nil), s.meta...)}
+		Meta: append(json.RawMessage(nil), s.meta...), PreviewRev: s.prevRev}
+}
+
+type winSeq struct {
+	win string
+	seq int64
+}
+
+// The windows remembered per session for ordering previews.
+const maxPreviewWindows = 16
+
+// SetPreview keeps p (already checked by the caller) as the latest preview,
+// unless its window already sent one after it: a window numbers its
+// previews (seq), and requests can arrive out of order. Previews of
+// different windows are kept in the order they arrive. It reports whether p
+// was kept.
+func (s *Session) SetPreview(p Preview, win string, seq int64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if win != "" {
+		i := slices.IndexFunc(s.winSeqs, func(w winSeq) bool { return w.win == win })
+		if i >= 0 {
+			if seq <= s.winSeqs[i].seq {
+				return false
+			}
+			s.winSeqs = slices.Delete(s.winSeqs, i, i+1)
+		}
+		if len(s.winSeqs) >= maxPreviewWindows {
+			s.winSeqs = slices.Delete(s.winSeqs, 0, 1)
+		}
+		s.winSeqs = append(s.winSeqs, winSeq{win, seq})
+	}
+	s.prevRev++
+	p.At, p.Rev = time.Now().Unix(), s.prevRev
+	s.preview = &p
+	return true
+}
+
+// Preview returns the latest preview, or nil.
+func (s *Session) Preview() *Preview {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.preview == nil {
+		return nil
+	}
+	p := *s.preview
+	return &p
 }
 
 // Client exposes the SSH connection for side channels (file upload, herdr).

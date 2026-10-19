@@ -595,6 +595,8 @@ func TestSettingsPatchOrderingValidationAndAccount(t *testing.T) {
 		mustStatus(t, patch("pageAAAA", 3, map[string]any{k: nil}), 400, "null "+k)
 	}
 	mustStatus(t, patch("pageAAAA", 3, map[string]any{"remoteClipboard": false}), 200, "clipboard off")
+	mustStatus(t, patch("pageAAAA", 3, map[string]any{"tapKeyboard": true}), 200, "tapping opens the keyboard")
+	mustStatus(t, patch("pageAAAA", 3, map[string]any{"tapKeyboard": "yes"}), 400, "tapKeyboard not a boolean")
 	mustStatus(t, patch("pageAAAA", 3, map[string]any{"customKeys": []map[string]string{{"label": "新窗口", "keys": "C-b c"}}}), 200, "custom keys")
 	mustStatus(t, patch("pageAAAA", 3, map[string]any{"customKeys": []any{}}), 200, "no custom keys")
 	for name, v := range map[string]any{

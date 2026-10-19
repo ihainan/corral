@@ -1,12 +1,13 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { CircleStop, Code2, MoreHorizontal, Pencil, Plus, Server, Trash2, X, Eye } from 'lucide-react'
-import { api, type Host, type SessionInfo, type SharedSession } from '../api'
+import { api, type Host, type SessionInfo, type SessionPreview, type SharedSession } from '../api'
 import { relTime, t } from '../i18n'
 import { linkHandler, navigate } from '../router'
 import { Confirm, EmptyState, LoadError, Menu } from '../components/ui'
 import { useConnect } from '../connect'
 import { useSession } from '../app'
 import { useCode } from '../terminal/CodeDialog'
+import { termScheme, usePrefs } from '../prefs'
 
 export function HostsPage() {
   const [hosts, setHosts] = useState<Host[] | null>(null)
@@ -59,8 +60,34 @@ export function HostsPage() {
   useEffect(() => {
     if (boot.code && hosts) refreshCode(hosts.filter((h) => h.auth !== 'ask').map((h) => h.id))
   }, [boot.code, hosts, refreshCode])
-  const running = sessions.filter((s) => s.state === 'running')
-  const byHost = (id: number) => running.filter((s) => s.host_id === id).sort((a, b) => a.created_at - b.created_at)
+  const running = sessions.filter((s) => s.state === 'running').sort((a, b) => a.created_at - b.created_at)
+
+  // Each running session's latest screen, fetched again when the list says
+  // a newer one was sent. Responses may arrive out of order: the newest one
+  // stays. Sessions that are gone are forgotten.
+  const [previews, setPreviews] = useState<Record<string, SessionPreview>>({})
+  const asked = useRef<Record<string, number>>({}) // the newest revision asked for, per session
+  useEffect(() => {
+    const live = new Set(sessions.filter((s) => s.state === 'running').map((s) => s.id))
+    for (const id of Object.keys(asked.current)) if (!live.has(id)) delete asked.current[id]
+    setPreviews((cur) => {
+      const gone = Object.keys(cur).filter((id) => !live.has(id))
+      if (gone.length === 0) return cur
+      const next = { ...cur }
+      for (const id of gone) delete next[id]
+      return next
+    })
+    for (const s of sessions) {
+      const rev = s.preview_rev ?? 0
+      if (!live.has(s.id) || rev === 0 || (asked.current[s.id] ?? 0) >= rev) continue
+      asked.current[s.id] = rev
+      api<SessionPreview>('GET', `/api/sessions/${s.id}/preview`)
+        .then((p) => setPreviews((cur) => (!(s.id in asked.current) || (cur[s.id]?.rev ?? 0) >= p.rev ? cur : { ...cur, [s.id]: p })))
+        .catch(() => {
+          if (asked.current[s.id] === rev) delete asked.current[s.id] // (asked again next time)
+        })
+    }
+  }, [sessions])
 
   // The confirmation names exactly what the row showed, plus when it started,
   // so sessions without a title (or with the same one) can be told apart.
@@ -110,6 +137,16 @@ export function HostsPage() {
         )}
       </div>
 
+      {running.length > 0 && (
+        <section className="section live" aria-labelledby="live-title">
+          <h2 id="live-title">{t('hosts.running')}</h2>
+          <ul className="live-grid">
+            {running.map((s) => (
+              <LiveCard key={s.id} s={s} preview={previews[s.id]} onClose={(label) => closeSession(s, label)} />
+            ))}
+          </ul>
+        </section>
+      )}
       {failed && <LoadError onRetry={load} text={t('hosts.loadFailed')} />}
       {hosts === null && !failed && <p className="loading">{t('common.loading')}</p>}
       {empty && (
@@ -126,10 +163,10 @@ export function HostsPage() {
         />
       )}
       {hosts && hosts.length > 0 && (
-        <ul className="rows">
-          {hosts.map((h) => {
-            const mine = byHost(h.id)
-            return (
+        <section className="section">
+          {running.length > 0 && <h2>{t('hosts.all')}</h2>}
+          <ul className="rows">
+            {hosts.map((h) => (
               <li key={h.id} className="row-group">
                 <div className="row">
                   <button className="row-main" onClick={() => connect(h)} disabled={busyHost === h.id} aria-label={`${t('hosts.connect')} ${h.name}`} aria-describedby={'hs-' + h.id}>
@@ -161,28 +198,10 @@ export function HostsPage() {
                     />
                   </div>
                 </div>
-                {mine.map((s, i) => {
-                  const name = mine.length > 1 ? t('hosts.sessionN', { n: i + 1 }) : t('hosts.session')
-                  return (
-                    <div className="row row-session" key={s.id}>
-                      <a className="row-main" href={'/t/' + s.id} onClick={linkHandler('/t/' + s.id)} aria-label={`${h.name}：${s.title || name}`} aria-describedby={'sd-' + s.id} title={s.title || undefined}>
-                        <span className={'dot ' + (s.meta?.waiting ? 'warn' : 'ok')} aria-hidden="true" />
-                        <span className="row-title">{s.title || name}</span>
-                        <span className="row-meta" title={new Date(s.created_at * 1000).toLocaleString()}>{t('hosts.startedAgo', { when: relTime(s.created_at) })}</span>
-                        <span className="row-sub" id={'sd-' + s.id}>{sessionDetail(s)}</span>
-                      </a>
-                      <div className="row-actions">
-                        <button className="icon-btn" aria-label={t('hosts.closeNamed', { name: `${h.name}：${s.title || name}` })} title={t('hosts.closeSession')} onClick={() => closeSession(s, s.title || name)}>
-                          <X size={16} />
-                        </button>
-                      </div>
-                    </div>
-                  )
-                })}
               </li>
-            )
-          })}
-        </ul>
+            ))}
+          </ul>
+        </section>
       )}
       {(shared.length > 0 || sharedFailed) && (
         <section className="section shared-sessions">
@@ -209,22 +228,40 @@ export function HostsPage() {
   )
 }
 
-// The line under a running session: what herdr reports (where you are, who
-// is waiting), otherwise how it is being used.
-function sessionDetail(s: SessionInfo): string {
-  const parts: string[] = []
-  const m = s.meta
-  if (m && m.t === 'herdr') {
-    const focused = m.workspaces.find((w) => w.focused)
-    if (focused) parts.push(t('hosts.herdrAt', { name: focused.label }))
-    parts.push(t('hosts.herdrSpaces', { n: m.workspaces.length }))
-    const agents = m.workspaces.reduce((n, w) => n + w.agents.length, 0)
-    if (agents > 0) parts.push(t('hosts.herdrAgents', { n: agents }))
-    if (m.waiting > 0) parts.push(t('hosts.herdrWaiting', { n: m.waiting }))
-  } else {
-    parts.push(s.persistence === 'tmux' ? 'tmux · ' + (s.mux_session ?? '') : s.persistence === 'herdr' ? 'herdr' : t('host.persistNone'))
-  }
-  parts.push(s.viewers > 0 ? t('hosts.viewers', { n: s.viewers }) : t('hosts.noViewers'))
-  parts.push(`${s.cols}×${s.rows}`)
-  return parts.join(' · ')
+// A running session: its screen in small (as a window of the owner last
+// showed it), the host, and what it runs in; herdr agents waiting for an
+// answer are named first.
+function LiveCard({ s, preview, onClose }: { s: SessionInfo; preview?: SessionPreview; onClose: (label: string) => void }) {
+  usePrefs() // (the screen follows the terminal colours)
+  const theme = termScheme().theme
+  const kind = s.persistence === 'tmux' ? 'tmux · ' + (s.mux_session ?? '') : s.persistence === 'herdr' ? 'herdr' + (s.mux_session ? ' · ' + s.mux_session : '') : t('host.persistNone')
+  const waiting = s.meta?.t === 'herdr' ? s.meta.waiting : 0
+  const old = preview && Date.now() / 1000 - preview.at > 120
+  const detail = [waiting > 0 ? t('hosts.herdrWaiting', { n: waiting }) : '', kind, old ? t('hosts.previewAge', { when: relTime(preview.at) }) : '']
+    .filter(Boolean)
+    .join(' · ')
+  const label = s.title || kind
+  // Shaped like the terminal (within limits); a tall one shows its bottom.
+  const cols = preview?.cols ?? s.cols
+  const rows = preview?.lines.length || s.rows
+  const ratio = Math.min(2.4, Math.max(1.2, (cols * 0.6) / (rows * 1.2)))
+  return (
+    <li className="live-card">
+      <a className="live-link" href={'/t/' + s.id} onClick={linkHandler('/t/' + s.id)} aria-label={`${s.host_name}：${label}`} aria-describedby={'ld-' + s.id} title={s.title || undefined}>
+        <div className="live-screen" aria-hidden="true" style={{ background: theme.background, color: theme.foreground, aspectRatio: String(ratio), ['--cols' as string]: Math.max(cols, 20) }}>
+          {preview ? <pre>{preview.lines.join('\n')}</pre> : <span className="live-empty">{t('hosts.noPreview')}</span>}
+        </div>
+        <span className="live-info">
+          <span className="live-title">
+            <span className={'dot ' + (waiting > 0 ? 'warn' : 'ok')} aria-hidden="true" />
+            <span className="live-name">{s.host_name}</span>
+          </span>
+          <span className="live-sub" id={'ld-' + s.id}>{detail}</span>
+        </span>
+      </a>
+      <button className="icon-btn live-close" aria-label={t('hosts.closeNamed', { name: `${s.host_name}：${label}` })} title={t('hosts.closeSession')} onClick={() => onClose(label)}>
+        <X size={16} />
+      </button>
+    </li>
+  )
 }

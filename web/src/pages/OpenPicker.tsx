@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Plus, SquareTerminal, Layers, LayoutGrid, CornerDownRight } from 'lucide-react'
+import { CornerDownRight, Layers, LayoutGrid, Plus, SquareTerminal, X } from 'lucide-react'
 import type { Host, HostChoices, OpenChoice } from '../api'
 import { relTime, t } from '../i18n'
 import { navigate } from '../router'
@@ -26,20 +26,27 @@ function lastChoice(hostId: number): OpenChoice | null {
 const same = (a: OpenChoice | null, b: OpenChoice) => !!a && a.kind === b.kind && (a.name ?? '') === (b.name ?? '')
 
 // What to open on a host: its terminals running in Corral, its herdr and tmux
-// sessions, a new tmux session, or a plain shell.
+// sessions, a new tmux session, or a plain shell. Each group is one list;
+// a row is its name, with what else there is to know on the right.
 export function OpenPicker(props: { host: Host; found: HostChoices; busy: boolean; onClose: () => void; onPick: (c: OpenChoice) => void }) {
   const { host, found } = props
   const c = found.choose
   const last = lastChoice(host.id)
   const lastRef = useRef<HTMLButtonElement | null>(null)
   const [picked, setPicked] = useState<OpenChoice | null>(null) // being opened
+  // Focus starts on the remembered choice, else the first one (not on the
+  // close button, which comes first in the dialog). After the dialog's own
+  // initial focus, which runs after this component's effects.
   useEffect(() => {
-    lastRef.current?.focus()
+    const f = requestAnimationFrame(() => (lastRef.current ?? document.querySelector<HTMLButtonElement>('.picker .pick-item:not(:disabled)'))?.focus())
+    return () => cancelAnimationFrame(f)
   }, [])
 
-  const item = (choice: OpenChoice, icon: React.ReactNode, title: string, sub?: string) => {
+  // meta: on the right of the name; sub: a line under it.
+  const item = (choice: OpenChoice, icon: React.ReactNode, title: string, meta?: string, sub?: string) => {
     const isLast = same(last, choice)
     const opening = props.busy && same(picked, choice)
+    const right = opening ? t('hosts.connecting') : isLast ? [meta, t('picker.last')].filter(Boolean).join(' · ') : meta
     return (
       <li key={choice.kind + ':' + (choice.name ?? '')}>
         <button
@@ -53,34 +60,49 @@ export function OpenPicker(props: { host: Host; found: HostChoices; busy: boolea
             props.onPick(choice)
           }}
         >
-          {icon}
+          <span className="pick-icon">{icon}</span>
           <span className="pick-main">
             <span className="pick-title">{title}</span>
-            {opening ? <span className="pick-sub">{t('hosts.connecting')}</span> : sub && <span className="pick-sub">{sub}</span>}
+            {sub && <span className="pick-sub">{sub}</span>}
           </span>
-          {isLast && <span className="pick-last">{t('picker.last')}</span>}
+          {right && <span className="pick-meta">{right}</span>}
         </button>
       </li>
     )
   }
 
   return (
-    <Dialog title={t('picker.title', { name: host.name })} onClose={props.onClose} className="picker">
+    <Dialog title={t('picker.title', { name: host.name })} hideTitle onClose={props.onClose} className="picker">
+      <div className="pick-head">
+        <div className="pick-head-text">
+          <h2>{t('picker.title', { name: host.name })}</h2>
+          <span className="pick-target">
+            {host.username}@{host.address}
+            {host.port !== 22 ? ':' + host.port : ''}
+          </span>
+        </div>
+        <button type="button" className="icon-btn" onClick={props.onClose} aria-label={t('common.cancel')} title={t('common.cancel')}>
+          <X size={18} />
+        </button>
+      </div>
       {found.running.length > 0 && (
         <section className="pick-group" aria-labelledby="pick-running">
           <h3 id="pick-running">{t('picker.running')}</h3>
-          <ul>
+          <ul className="pick-list">
             {found.running.map((r) => {
               const what = r.kind === 'shell' ? t('picker.shell') : r.kind + ' · ' + (r.name || t('picker.herdrDefault'))
-              const when = t('hosts.startedAgo', { when: relTime(r.created_at) })
+              const when = relTime(r.created_at)
               return (
                 <li key={r.id}>
                   <button type="button" className="pick-item" disabled={props.busy} onClick={() => navigate('/t/' + r.id)}>
-                    <CornerDownRight size={18} className="pick-icon" />
+                    <span className="pick-icon">
+                      <CornerDownRight size={16} />
+                    </span>
                     <span className="pick-main">
                       <span className="pick-title">{r.title || what}</span>
-                      <span className="pick-sub">{r.title ? what + ' · ' + when : when}</span>
+                      {r.title && <span className="pick-sub">{what}</span>}
                     </span>
+                    <span className="pick-meta">{when}</span>
                   </button>
                 </li>
               )
@@ -90,33 +112,35 @@ export function OpenPicker(props: { host: Host; found: HostChoices; busy: boolea
       )}
       {c.herdr_sessions.length > 0 && (
         <section className="pick-group" aria-labelledby="pick-herdr">
-          <h3 id="pick-herdr">herdr</h3>
-          <ul>
+          <h3 id="pick-herdr">{t('picker.herdr')}</h3>
+          <ul className="pick-list">
             {c.herdr_sessions.map((s) =>
-              item({ kind: 'herdr', name: s.name }, <LayoutGrid size={18} className="pick-icon" />, s.name, s.default ? t('picker.herdrDefault') : undefined),
+              item({ kind: 'herdr', name: s.name }, <LayoutGrid size={16} />, s.name, s.default ? t('picker.herdrDefault') : undefined),
             )}
           </ul>
         </section>
       )}
-      {(c.tmux || c.unknown) && (
+      {(c.tmux || c.unknown) && c.tmux_sessions.length > 0 && (
         <section className="pick-group" aria-labelledby="pick-tmux">
-          <h3 id="pick-tmux">tmux</h3>
-          <ul>
+          <h3 id="pick-tmux">{t('picker.tmux')}</h3>
+          <ul className="pick-list">
             {c.tmux_sessions.map((s) =>
               item(
                 { kind: 'tmux', name: s.name },
-                <Layers size={18} className="pick-icon" />,
+                <Layers size={16} />,
                 s.name,
-                t('picker.windows', { n: s.windows }) + (s.attached ? ' · ' + t('picker.attached') : ''),
+                t(s.windows === 1 ? 'picker.window' : 'picker.windows', { n: s.windows }) + (s.attached ? ' · ' + t('picker.attached') : ''),
               ),
             )}
-            {item({ kind: 'tmux_new' }, <Plus size={18} className="pick-icon" />, t('picker.tmuxNew'), t('picker.tmuxNewHint'))}
           </ul>
         </section>
       )}
-      <section className="pick-group" aria-labelledby="pick-other">
-        <h3 id="pick-other">{t('picker.other')}</h3>
-        <ul>{item({ kind: 'shell' }, <SquareTerminal size={18} className="pick-icon" />, t('picker.shell'), t('picker.shellHint'))}</ul>
+      <section className="pick-group" aria-labelledby="pick-new">
+        <h3 id="pick-new">{t('picker.new')}</h3>
+        <ul className="pick-list">
+          {(c.tmux || c.unknown) && item({ kind: 'tmux_new' }, <Plus size={16} />, t('picker.tmuxNew'), undefined, t('picker.tmuxNewHint'))}
+          {item({ kind: 'shell' }, <SquareTerminal size={16} />, t('picker.shell'), undefined, t('picker.shellHint'))}
+        </ul>
       </section>
       {c.unknown && <p className="hint">{t('picker.unknown')}</p>}
       {props.busy && (
@@ -124,11 +148,6 @@ export function OpenPicker(props: { host: Host; found: HostChoices; busy: boolea
           {t('hosts.connecting')}
         </p>
       )}
-      <div className="dialog-actions">
-        <button type="button" className="btn" onClick={props.onClose}>
-          {t('common.cancel')}
-        </button>
-      </div>
     </Dialog>
   )
 }

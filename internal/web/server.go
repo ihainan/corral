@@ -172,6 +172,8 @@ func (s *Server) registerRoutes() {
 	s.handle("POST /api/sessions", SignedIn, s.apiOpenSession)
 	s.handle("DELETE /api/sessions/{id}", SignedIn, s.apiCloseSession)
 	s.handle("GET /api/sessions/{id}/ws", SignedIn, s.apiSessionSocket)
+	s.handle("PUT /api/sessions/{id}/preview", SignedIn, s.apiPutPreview)
+	s.handle("GET /api/sessions/{id}/preview", SignedIn, s.apiGetPreview)
 	s.handle("POST /api/sessions/{id}/upload", SignedIn, s.apiUpload)
 	s.handle("POST /api/sessions/{id}/herdr", SignedIn, s.apiHerdrAction)
 	s.handle("GET /api/sessions/{id}/herdr/panes/{pane}/screen", SignedIn, s.apiHerdrScreen)

@@ -14,6 +14,9 @@ keeps running and you pick it up where it was — on the same device or another.
   [herdr](https://herdr.dev) on the host they also survive gateway
   restarts. Opening a host lists its tmux and herdr sessions to pick from,
   along with a new tmux session and a plain shell.
+- The home page shows your running sessions as cards with their screen in
+  small, as one of your windows last showed it; the hosts below open new
+  ones.
 - A key bar with Esc, Ctrl and Alt (tap once or lock), Tab and Shift+Tab,
   arrows, F1–F12 and the symbols that are hard to type on a phone keyboard.
   Add keys of your own that send a sequence, written as for tmux's

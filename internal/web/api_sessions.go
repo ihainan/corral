@@ -19,6 +19,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/coder/websocket"
 	"github.com/pkg/sftp"
@@ -431,6 +432,89 @@ func (s *Server) apiCloseSession(w http.ResponseWriter, r *http.Request) {
 	}
 	s.audit(r, "session.close", id, nil)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// Screen previews -----------------------------------------------------------
+//
+// The session list shows each running session's screen in small. The gateway
+// keeps no screen of its own, so the owner's windows send what they show
+// (text only), now and then and when they are left; the latest is kept in
+// memory with the session.
+
+const (
+	previewMaxLines = 100
+	previewMaxCols  = 500
+	previewMaxBytes = 64 << 10
+)
+
+// PUT /api/sessions/{id}/preview {"cols":N,"lines":["…",…],"win":"…","seq":N}
+// win names the sending window (page) and seq numbers its previews, so an
+// older one arriving late is dropped; both are optional.
+func (s *Server) apiPutPreview(w http.ResponseWriter, r *http.Request) {
+	var b struct {
+		Cols  int      `json:"cols"`
+		Lines []string `json:"lines"`
+		Win   string   `json:"win"`
+		Seq   int64    `json:"seq"`
+	}
+	if err := readJSON(r, &b); err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	lines, ok := cleanPreview(b.Lines)
+	if !ok || b.Cols < 1 || b.Cols > previewMaxCols || len(b.Win) > 64 {
+		writeError(w, http.StatusBadRequest, "bad_request", "a preview is up to 100 lines of text")
+		return
+	}
+	sess, err := s.terms.Get(currentUser(r).ID, r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, "not_found", "no such session")
+		return
+	}
+	if sess.State() != term.StateRunning {
+		writeError(w, http.StatusConflict, "ended", "the session has ended")
+		return
+	}
+	sess.SetPreview(term.Preview{Cols: b.Cols, Lines: lines}, b.Win, b.Seq) // (an older one is dropped quietly)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// GET /api/sessions/{id}/preview
+func (s *Server) apiGetPreview(w http.ResponseWriter, r *http.Request) {
+	sess, err := s.terms.Get(currentUser(r).ID, r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, "not_found", "no such session")
+		return
+	}
+	p := sess.Preview()
+	if p == nil {
+		writeError(w, http.StatusNotFound, "no_preview", "no preview yet")
+		return
+	}
+	writeJSON(w, http.StatusOK, p)
+}
+
+// cleanPreview checks the size of a preview and turns control characters
+// (and invalid UTF-8) into spaces, so it is plain text.
+func cleanPreview(in []string) ([]string, bool) {
+	if len(in) > previewMaxLines {
+		return nil, false
+	}
+	out := make([]string, len(in))
+	total := 0
+	for i, l := range in {
+		total += len(l)
+		if total > previewMaxBytes || utf8.RuneCountInString(l) > 2*previewMaxCols {
+			return nil, false
+		}
+		out[i] = strings.Map(func(c rune) rune {
+			if c < 0x20 || c == 0x7f || (c >= 0x80 && c < 0xa0) || c == utf8.RuneError {
+				return ' '
+			}
+			return c
+		}, l)
+	}
+	return out, true
 }
 
 // Terminal socket ----------------------------------------------------------

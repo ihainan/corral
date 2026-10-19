@@ -61,6 +61,15 @@ export interface SessionInfo {
   meta?: HerdrSummary // last side information published by the session
   persistence?: 'none' | 'tmux' | 'herdr' // what the shell runs in
   mux_session?: string // the tmux or herdr session ('' for herdr's default)
+  preview_rev?: number // counts the screens windows sent (see SessionPreview)
+}
+
+// What one of the owner's windows last showed of a session's screen, as text.
+export interface SessionPreview {
+  cols: number
+  lines: string[]
+  at: number // unix seconds
+  rev: number // as preview_rev
 }
 
 // What to open on a host (see the picker).

@@ -239,6 +239,7 @@ var settingRules = map[string]func(json.RawMessage) bool{
 	"optionIsMeta":    isBool,
 	"webgl":           isBool,
 	"remoteClipboard": isBool,
+	"tapKeyboard":     isBool,
 	"customKeys":      customKeys,
 	"webhook":         webhookURL,
 }

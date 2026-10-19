@@ -20,6 +20,7 @@ import { macroBytes, parseMacro, type Step } from '../terminal/macro'
 import { chromeVars } from '../terminal/themes'
 import { SchemeDialog } from '../terminal/SchemePicker'
 import { HerdrPanel } from '../terminal/HerdrPanel'
+import { startPreviews } from '../terminal/preview'
 import { ReplyDialog } from '../terminal/ReplyDialog'
 import { PortsDialog, openForward } from '../terminal/PortsDialog'
 import { FilesDialog } from '../terminal/FilesDialog'
@@ -31,6 +32,40 @@ import { useSession } from '../app'
 const isTouch = window.matchMedia('(pointer: coarse)').matches || navigator.maxTouchPoints > 0
 const isMac = /Mac|iPhone|iPad/.test(navigator.platform)
 const HIGH_LATENCY = 300 // ms; below this the status just says "connected"
+
+// On a touch screen with the key bar, a tap on the terminal does not bring
+// up the on-screen keyboard unless the user wants that (prefs.tapKeyboard):
+// taps still reach the program (herdr's sidebar, mouse modes), the text field
+// still takes focus, so a hardware keyboard types as before, but it asks for
+// no keyboard (inputmode=none). The key bar's keyboard button shows it.
+const quietTaps = () => isTouch && getPrefs().keybar && !getPrefs().tapKeyboard
+// iOS: a field may keep focus after the system's key put its keyboard away.
+// That is seen when the visual viewport, unzoomed, grows back by the height
+// of a keyboard (its layout viewport does not shrink for the keyboard, as in
+// main.tsx). Only a keyboard seen going down counts: a floating one, or one
+// under pinch zoom, is never taken for gone. (A docked keyboard undocked to
+// float looks the same as one put away: the button then needs a second tap.)
+let keyboardWentDown = false
+if (isMac && isTouch && window.visualViewport) {
+  const vv = window.visualViewport
+  let up = false
+  vv.addEventListener('resize', () => {
+    if ((vv.scale ?? 1) > 1.01) {
+      keyboardWentDown = false // (zoomed: not known, focus decides)
+      return
+    }
+    const now = window.innerHeight - vv.height > 120
+    if (up && !now) keyboardWentDown = true
+    if (now) keyboardWentDown = false
+    up = now
+  })
+  document.addEventListener('focusin', () => (keyboardWentDown = false))
+}
+function quietKeyboard(ta: HTMLTextAreaElement | null | undefined, quiet: boolean) {
+  if (!ta) return
+  if (quiet) ta.setAttribute('inputmode', 'none')
+  else ta.removeAttribute('inputmode')
+}
 
 function useMedia(q: string) {
   const [m, setM] = useState(() => window.matchMedia(q).matches)
@@ -390,6 +425,15 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
     ta?.setAttribute('autocapitalize', 'off')
     ta?.setAttribute('autocorrect', 'off')
     ta?.setAttribute('spellcheck', 'false')
+    quietKeyboard(ta, quietTaps())
+    // Once the keyboard is put away (the field left), taps are quiet again.
+    const onQuietBlur = () => quietKeyboard(ta, quietTaps())
+    ta?.addEventListener('blur', onQuietBlur)
+    // Keys while it asks for no keyboard come from a hardware keyboard (with
+    // one, no on-screen keyboard shows): the field is made ordinary again,
+    // so input methods work as usual.
+    const onQuietKey = () => ta?.getAttribute('inputmode') === 'none' && quietKeyboard(ta, false)
+    el.addEventListener('keydown', onQuietKey, true) // (before xterm's own handling)
 
     // Set while another viewer's size is shown (see onSize); fitting to this
     // window then waits until this viewer takes the terminal over.
@@ -486,6 +530,7 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
     // it (device attributes, cursor position…). Those answers are stale and
     // must not reach the host as typing; they are dropped until the replay ends.
     let replaying = false
+    let settling = true // from a new socket until its backlog was written (for previews)
     // Each socket's replay is numbered: the end of an earlier one, reported
     // late, does not end a later one.
     let replayRun = 0
@@ -605,13 +650,17 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
       onLive: () => {
         const run = replayRun
         term.write(Uint8Array.of(0x18), () => {
-          if (run === replayRun) replaying = false
+          if (run === replayRun) {
+            replaying = false
+            settling = false
+          }
         })
       },
       // Every new socket: the herdr summary is old until this one sends its
       // own, and a replay begins.
       onHello: () => {
         replayRun++
+        settling = true
         setHerdrFresh(false)
         lastSize = { cols: 0, rows: 0 }
         setSized(0)
@@ -951,6 +1000,9 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
       return true
     })
 
+    // What the screen shows, for the session list (the owner's windows only).
+    const stopPreviews = watch ? () => {} : startPreviews(id, term, () => conn.isOpen() && !replaying && !settling)
+
     let fitTimer: number | undefined
     const ro = new ResizeObserver(() => {
       clearTimeout(fitTimer)
@@ -969,6 +1021,8 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
       ta?.removeEventListener('beforeinput', onBeforeInput)
       el.removeEventListener('input', onPrintableInput, true)
       ta?.removeEventListener('blur', dropClaims)
+      ta?.removeEventListener('blur', onQuietBlur)
+      el.removeEventListener('keydown', onQuietKey, true)
       ta?.removeEventListener('paste', onPasteEv, true)
       alive = false
       dataSub.dispose()
@@ -976,6 +1030,7 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
       userSub?.dispose()
       binSub.dispose()
       resizeSub.dispose()
+      stopPreviews()
       conn.dispose()
       term.dispose()
       termRef.current = null
@@ -997,6 +1052,8 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
     // Through the follow check: while another viewer's size is shown the grid
     // stays at that size (only its scale changes).
     safeFitRef.current()
+    const ta = hostEl.current?.querySelector('textarea')
+    if (ta && document.activeElement !== ta) quietKeyboard(ta, quietTaps()) // (an open keyboard stays until put away)
   }, [prefs])
   useEffect(
     () => () => {
@@ -1300,14 +1357,23 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
   }
   const cycle = (m: ModState): ModState => (m === 'off' ? 'once' : m === 'once' ? 'lock' : 'off')
   const toggleKeyboard = () => {
-    // With the composer open the keyboard belongs to it.
-    const target = composerRef.current ?? hostEl.current?.querySelector('textarea')
-    if (target && document.activeElement === target) {
+    // The field in use: the one focused, else the composer when it is open.
+    const field = hostEl.current?.querySelector('textarea')
+    const composer = composerRef.current
+    const target = document.activeElement === field ? field : composer ?? field
+    if (!target) return
+    const focused = document.activeElement === target
+    // A focused field shows its keyboard, unless it asks for none or the
+    // keyboard was seen put away (iOS, see keyboardWentDown).
+    const shown = focused && target.getAttribute('inputmode') !== 'none' && !keyboardWentDown
+    if (focused) {
       settleRef.current() // a composition that just ended is sent, not cleared by the blur
-      target.blur()
-    } else {
-      target?.focus()
+      target.blur() // (which makes the terminal's field quiet again, see quietTaps)
     }
+    if (shown) return
+    // Shown when the field takes focus again, asking for it.
+    if (target === field) quietKeyboard(field, false)
+    target.focus()
   }
 
   // The composer's text and the optional Enter go out as one message, and only
