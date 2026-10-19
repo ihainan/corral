@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
-import { Check, CircleAlert, CircleCheck, Copy } from 'lucide-react'
+import { Check, CircleAlert, CircleCheck, Copy, Info } from 'lucide-react'
 import { t } from '../i18n'
 
 export const isCoarse = () => window.matchMedia('(pointer: coarse)').matches
@@ -294,29 +294,49 @@ function Popover({ anchor, trigger, onClose, label, children }: { anchor: DOMRec
 
 // Toasts ---------------------------------------------------------------------
 
+// A toast's button: what the user can do about it (it stays a while longer).
+export interface ToastAction {
+  label: string
+  run: () => void
+}
+
 interface ToastItem {
   id: number
   text: string
   error?: boolean
+  action?: ToastAction
 }
 
-const ToastCtx = createContext<(text: string, error?: boolean) => void>(() => {})
+const ToastCtx = createContext<(text: string, error?: boolean, action?: ToastAction) => void>(() => {})
 
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [items, setItems] = useState<ToastItem[]>([])
-  const push = useCallback((text: string, error?: boolean) => {
+  const drop = useCallback((id: number) => setItems((xs) => xs.filter((x) => x.id !== id)), [])
+  const push = useCallback((text: string, error?: boolean, action?: ToastAction) => {
     const id = Date.now() + Math.random()
-    setItems((xs) => [...xs.slice(-2), { id, text, error }])
-    setTimeout(() => setItems((xs) => xs.filter((x) => x.id !== id)), error ? 5000 : 2600)
-  }, [])
+    setItems((xs) => [...xs.slice(-2), { id, text, error, action }])
+    setTimeout(() => drop(id), action ? 12000 : error ? 5000 : 2600)
+  }, [drop])
   return (
     <ToastCtx.Provider value={push}>
       {children}
       <div className="toasts" aria-live="polite">
         {items.map((i) => (
-          <div key={i.id} className={'toast' + (i.error ? ' error' : '')} role={i.error ? 'alert' : 'status'}>
-            {i.error ? <CircleAlert size={16} /> : <CircleCheck size={16} />}
+          <div key={i.id} className={'toast' + (i.error ? ' error' : '') + (i.action ? ' has-action' : '')} role={i.error ? 'alert' : 'status'}>
+            {i.error ? <CircleAlert size={16} /> : i.action ? <Info size={16} /> : <CircleCheck size={16} />}
             <span>{i.text}</span>
+            {i.action && (
+              <button
+                type="button"
+                className="btn toast-action"
+                onClick={() => {
+                  drop(i.id)
+                  i.action!.run()
+                }}
+              >
+                {i.action.label}
+              </button>
+            )}
           </div>
         ))}
       </div>

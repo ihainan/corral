@@ -21,6 +21,10 @@ keeps running and you pick it up where it was — on the same device or another.
   terminal size, the others follow it.
 - A copy mode with native text selection, colour schemes, adjustable fonts,
   installable as an app (PWA).
+- Programs on the host can copy to your device's clipboard (OSC 52): tmux's
+  copy mode, Claude Code, editors. Where the browser allows that only on a
+  tap (Safari), Corral offers a button. Inside tmux, programs that send OSC 52
+  themselves (vim, Neovim) also need `set -g set-clipboard on`.
 
 **Made for coding agents**
 - Paste, drop or pick an image: it is uploaded to the host and its path is

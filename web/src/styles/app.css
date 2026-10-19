@@ -365,6 +365,9 @@ html.term-mode .toasts { top: calc(env(safe-area-inset-top, 0px) + 52px); bottom
 .toast { display: flex; gap: 10px; align-items: flex-start; background: var(--surface); color: var(--fg); border-radius: var(--r-lg); padding: 10px 14px; font-size: 14px; line-height: 20px; box-shadow: var(--shadow-pop); animation: rise 0.18s var(--ease); }
 .toast svg { flex: none; margin-top: 2px; color: var(--ok); }
 .toast.error svg { color: var(--danger); }
+.toast.has-action { pointer-events: auto; align-items: center; }
+.toast.has-action svg { margin-top: 0; color: var(--accent-text, var(--accent)); }
+.toast-action { flex: none; margin-left: auto; }
 
 @keyframes fade { from { opacity: 0; } }
 @keyframes rise { from { transform: translateY(10px); opacity: 0; } }

@@ -9,7 +9,7 @@ import { ArrowUp, Check, ChevronDown, ChevronLeft, CircleStop, Code2, Eye, Folde
 import { api, ApiError, errorText, uploadFile, type HerdrSummary, type Host, type SessionInfo } from '../api'
 import { t } from '../i18n'
 import { navigate } from '../router'
-import { getPrefs, setChromeColor, setPrefs, termScheme, usePrefs } from '../prefs'
+import { getPrefs, prefsConfirmed, setChromeColor, setPrefs, termScheme, usePrefs } from '../prefs'
 import { local } from '../storage'
 import { Confirm, Menu, copyText as copyToClipboard, useFocusTrap, useToast, type MenuItem } from '../components/ui'
 import { useConnect } from '../connect'
@@ -116,6 +116,26 @@ function shellPath(p: string): string | null {
   if (/[\x00-\x1f\x7f]/.test(p)) return null
   if (/^[\w@%+=:,./~-]+$/.test(p)) return p
   return "'" + p.replaceAll("'", "'\\''") + "'"
+}
+
+// remoteCopyLimit bounds the text a program on the host may copy (in base64
+// characters: about 750 KB of text).
+const remoteCopyLimit = 1 << 20
+
+// clipboardText is the text of an OSC 52 "set the clipboard" request
+// ("<targets>;<base64>"), or null for anything else: a request to read the
+// clipboard ("?"), to clear it, one too large, or not UTF-8.
+function clipboardText(data: string): string | null {
+  const i = data.indexOf(';')
+  if (i < 0) return null
+  const b64 = data.slice(i + 1)
+  if (b64 === '' || b64 === '?' || b64.length > remoteCopyLimit) return null
+  try {
+    const bin = atob(b64)
+    return new TextDecoder('utf-8', { fatal: true }).decode(Uint8Array.from(bin, (c) => c.charCodeAt(0))) || null
+  } catch {
+    return null
+  }
 }
 
 // geminiPath is a path as Gemini CLI takes a file: @path, where a backslash
@@ -393,6 +413,10 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
     // it (device attributes, cursor position…). Those answers are stale and
     // must not reach the host as typing; they are dropped until the replay ends.
     let replaying = false
+    // Each socket's replay is numbered: the end of an earlier one, reported
+    // late, does not end a later one.
+    let replayRun = 0
+    let alive = true
     let lastDropToast = 0
     const droppedInput = () => {
       const now = Date.now()
@@ -400,6 +424,35 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
       lastDropToast = now
       toast(t('term.inputDropped'), true)
     }
+    // Programs on the host may put text on this device's clipboard (OSC 52:
+    // tmux's copy mode, Claude Code, editors). Only the live output of the
+    // owner's own terminal counts, never replayed output, and nothing is ever
+    // read back. Where the browser allows writing only on a tap (Safari), the
+    // user gets a button to tap.
+    const mayCopy = () => alive && !watch && prefsConfirmed() && getPrefs().remoteClipboard
+    const remoteCopy = async (text: string) => {
+      const n = [...text].length
+      try {
+        await navigator.clipboard.writeText(text)
+        toast(t('term.remoteCopied', { n }))
+      } catch {
+        if (!mayCopy()) return
+        toast(t('term.remoteCopyAsk', { n }), false, {
+          label: t('term.remoteCopyBtn'),
+          // Still this terminal's and still allowed when tapped.
+          run: () =>
+            mayCopy()
+              ? void copyToClipboard(text).then((ok) => toast(ok ? t('term.remoteCopied', { n }) : t('term.remoteCopyFailed'), !ok))
+              : toast(t('term.remoteCopyGone'), true),
+        })
+      }
+    }
+    const clipSub = term.parser.registerOscHandler(52, (data) => {
+      if (replaying || !mayCopy()) return true
+      const text = clipboardText(data)
+      if (text !== null) void remoteCopy(text)
+      return true
+    })
     const conn = new TermConnection(id, {
       // RIS (ESC c) travels in the same write queue as the replay that follows,
       // so output still being parsed cannot land after the reset.
@@ -464,9 +517,24 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
         setHerdr(m as HerdrSummary)
         setHerdrFresh(true)
       },
-      onLive: () => term.write('', () => (replaying = false)),
-      // Every new socket: the herdr summary is old until this one sends its own.
-      onHello: () => setHerdrFresh(false),
+      // Where the replay ends, CAN cancels a sequence it left unfinished
+      // (an OSC 52 whose end would arrive live, though the request was
+      // not): nothing that began in the replay acts as live output. It is
+      // written as a byte, so it also ends a UTF-8 character cut there (the
+      // first half of a C1 introducer). CAN shows nothing; the rest of a
+      // sequence cut there shows as text.
+      onLive: () => {
+        const run = replayRun
+        term.write(Uint8Array.of(0x18), () => {
+          if (run === replayRun) replaying = false
+        })
+      },
+      // Every new socket: the herdr summary is old until this one sends its
+      // own, and a replay begins.
+      onHello: () => {
+        replayRun++
+        setHerdrFresh(false)
+      },
       // Input typed while disconnected is sent once the connection is back,
       // unless there was too much of it or it waited too long.
       onDropped: () => droppedInput(),
@@ -821,7 +889,9 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
       el.removeEventListener('input', onPrintableInput, true)
       ta?.removeEventListener('blur', dropClaims)
       ta?.removeEventListener('paste', onPasteEv, true)
+      alive = false
       dataSub.dispose()
+      clipSub.dispose()
       userSub?.dispose()
       binSub.dispose()
       resizeSub.dispose()

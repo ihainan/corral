@@ -591,6 +591,10 @@ func TestSettingsPatchOrderingValidationAndAccount(t *testing.T) {
 	mustStatus(t, patch("pageAAAA", 3, map[string]any{"fontSize": 99}), 400, "font size out of range")
 	mustStatus(t, patch("pageAAAA", 3, map[string]any{"_w": 1}), 400, "reserved name")
 	mustStatus(t, patch("pageAAAA", 3, map[string]any{"colour": "x"}), 400, "unknown setting")
+	for _, k := range []string{"remoteClipboard", "keybar", "webhook", "theme"} {
+		mustStatus(t, patch("pageAAAA", 3, map[string]any{k: nil}), 400, "null "+k)
+	}
+	mustStatus(t, patch("pageAAAA", 3, map[string]any{"remoteClipboard": false}), 200, "clipboard off")
 	if r := admin.do("PATCH", "/api/me/settings", map[string]any{"user": 99999, "writer": "pageAAAA", "seq": 4, "set": map[string]any{"keybar": true}}); r.code() != "user_mismatch" {
 		t.Fatalf("a request for another account was accepted: %d %s", r.Status, r.Body)
 	}

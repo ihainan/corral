@@ -229,13 +229,21 @@ const (
 
 // settingRules lists the known settings and checks their values.
 var settingRules = map[string]func(json.RawMessage) bool{
-	"theme":        oneOf("system", "light", "dark"),
-	"termTheme":    matches(regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,63}$`)),
-	"fontSize":     intRange(9, 28),
-	"keybar":       isBool,
-	"optionIsMeta": isBool,
-	"webgl":        isBool,
-	"webhook":      webhookURL,
+	"theme":           oneOf("system", "light", "dark"),
+	"termTheme":       matches(regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,63}$`)),
+	"fontSize":        intRange(9, 28),
+	"keybar":          isBool,
+	"optionIsMeta":    isBool,
+	"webgl":           isBool,
+	"remoteClipboard": isBool,
+	"webhook":         webhookURL,
+}
+
+// validSetting is true for a known setting with a valid value. null is no
+// value (JSON decoding would take it as the zero value).
+func validSetting(k string, v json.RawMessage) bool {
+	rule, ok := settingRules[k]
+	return ok && strings.TrimSpace(string(v)) != "null" && rule(v)
 }
 
 func oneOf(vals ...string) func(json.RawMessage) bool {
@@ -294,7 +302,7 @@ func (s *Server) apiGetSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	out := map[string]json.RawMessage{}
 	for k, v := range obj {
-		if rule, ok := settingRules[k]; ok && rule(v) { // stored before validation existed: skip what no longer passes
+		if validSetting(k, v) { // stored before validation existed: skip what no longer passes
 			out[k] = v
 		}
 	}
@@ -322,7 +330,7 @@ func (s *Server) apiPatchSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for k, v := range b.Set {
-		if rule, ok := settingRules[k]; !ok || !rule(v) {
+		if !validSetting(k, v) {
 			writeError(w, http.StatusBadRequest, "bad_setting", "unknown setting or invalid value: "+k)
 			return
 		}

@@ -14,11 +14,12 @@ export interface Prefs {
   keybar: boolean
   optionIsMeta: boolean
   webgl: boolean
+  remoteClipboard: boolean // programs on the host may write this device's clipboard (OSC 52)
 }
 
 // Phones get a slightly smaller default so common output fits without wrapping.
 const phone = window.matchMedia('(pointer: coarse) and (max-width: 599px)').matches
-const defaults: Prefs = { theme: 'system', termTheme: 'corral-dark', fontSize: phone ? 13 : 14, keybar: true, optionIsMeta: true, webgl: false }
+const defaults: Prefs = { theme: 'system', termTheme: 'corral-dark', fontSize: phone ? 13 : 14, keybar: true, optionIsMeta: true, webgl: false, remoteClipboard: true }
 
 // The local copy is kept per account (several people may share a device);
 // until the account is known the last one used here paints the first frame.
@@ -37,6 +38,9 @@ function readCache(uid: number | null): Prefs {
 }
 
 let owner: number | null = null
+// synced is the account whose settings have come from the server on this
+// page; until then the values are the local cache's or the defaults.
+let synced: number | null = null
 let state: Prefs = readCache(null)
 const subs = new Set<() => void>()
 
@@ -198,6 +202,7 @@ window.addEventListener('storage', (e) => {
 
 // Forget the signed-in account's pending work (sign-out).
 export function resetPrefsSession() {
+  synced = null
   generation++
   pending = new Map()
   editedAt.clear()
@@ -215,7 +220,7 @@ function sanitize(raw: unknown): Partial<Prefs> {
   if (o.theme === 'system' || o.theme === 'light' || o.theme === 'dark') out.theme = o.theme
   if (typeof o.termTheme === 'string' && /^[a-z0-9][a-z0-9-]{0,63}$/.test(o.termTheme)) out.termTheme = o.termTheme
   if (Number.isInteger(o.fontSize) && (o.fontSize as number) >= 9 && (o.fontSize as number) <= 28) out.fontSize = o.fontSize as number
-  for (const k of ['keybar', 'optionIsMeta', 'webgl'] as const) if (typeof o[k] === 'boolean') out[k] = o[k] as boolean
+  for (const k of ['keybar', 'optionIsMeta', 'webgl', 'remoteClipboard'] as const) if (typeof o[k] === 'boolean') out[k] = o[k] as boolean
   return out
 }
 
@@ -243,10 +248,17 @@ export async function syncPrefsFromServer(userId: number) {
     for (const k of pending.keys()) delete (remote as Record<string, unknown>)[k] // not saved yet
 
     state = { ...defaults, ...state, ...remote }
+    synced = userId
     emit()
   } catch {
     /* keep local */
   }
+}
+
+// prefsConfirmed is true once the account's own settings are known (a
+// setting that permits something is not taken from the defaults).
+export function prefsConfirmed(): boolean {
+  return synced !== null && synced === owner
 }
 
 export function getPrefs(): Prefs {
