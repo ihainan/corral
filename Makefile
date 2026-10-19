@@ -1,6 +1,6 @@
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
-.PHONY: build web web-deps test check clean
+.PHONY: build web web-deps test check notices clean
 
 build: web
 	CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=$(VERSION)" -o corral ./cmd/corral
@@ -17,6 +17,11 @@ test:
 
 check: test web-deps
 	cd web && pnpm run typecheck
+	python3 scripts/gen-notices.py --check
+
+# Regenerate the third-party notices after changing dependencies.
+notices: web-deps
+	python3 scripts/gen-notices.py
 
 clean:
 	rm -f corral

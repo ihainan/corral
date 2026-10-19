@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react'
 import { ArrowLeft, ChevronRight, KeyRound } from 'lucide-react'
 import { api, ApiError, errorText, type Host, type KeyCred } from '../api'
-import { t } from '../i18n'
+import { hasKey, t } from '../i18n'
 import { linkHandler, navigate } from '../router'
 import { CopyButton, Field, useToast } from '../components/ui'
 
@@ -259,18 +259,8 @@ export function HostEditPage({ id }: { id?: number }) {
   )
 }
 
-// Server field messages are English; map the common ones to the UI language.
+// Server field messages are English; the common ones have a translation.
 function fieldMessage(field: string | undefined, fallback: string): string {
-  const zh = document.documentElement.lang.startsWith('zh')
-  if (!zh) return fallback
-  switch (field) {
-    case 'name': return '请填写名称，最多 64 个字符。'
-    case 'address': return '请填写有效的主机名或 IP 地址。'
-    case 'port': return '端口范围是 1 到 65535。'
-    case 'username': return '请填写用户名，不能包含空格。'
-    case 'password': return '请填写密码。'
-    case 'credential_id': return '请选择一把密钥。'
-    case 'tmux_session': case 'herdr_session': return '只能包含字母、数字、短横线和下划线。'
-    default: return fallback
-  }
+  const key = field === 'herdr_session' ? 'hostField.tmux_session' : 'hostField.' + field
+  return hasKey(key) ? t(key) : fallback
 }

@@ -519,6 +519,13 @@ const zh = {
   'watch.owner': '{owner}的会话',
   'watch.paused': '连接中断，正在重新连接…',
   'watch.sharedFailed': '共享给你的会话没能加载。',
+  'hostField.name': '请填写名称，最多 64 个字符。',
+  'hostField.address': '请填写有效的主机名或 IP 地址。',
+  'hostField.port': '端口范围是 1 到 65535。',
+  'hostField.username': '请填写用户名，不能包含空格。',
+  'hostField.password': '请填写密码。',
+  'hostField.credential_id': '请选择一把密钥。',
+  'hostField.tmux_session': '只能包含字母、数字、短横线和下划线。',
 }
 
 type Key = keyof typeof zh
@@ -1042,6 +1049,13 @@ const en: Record<Key, string> = {
   'watch.owner': '{owner}\'s session',
   'watch.paused': 'Connection lost; reconnecting…',
   'watch.sharedFailed': 'Sessions shared with you could not be loaded.',
+  'hostField.name': 'Enter a name of up to 64 characters.',
+  'hostField.address': 'Enter a valid host name or IP address.',
+  'hostField.port': 'Ports range from 1 to 65535.',
+  'hostField.username': 'Enter a user name without spaces.',
+  'hostField.password': 'Enter the password.',
+  'hostField.credential_id': 'Choose a key.',
+  'hostField.tmux_session': 'Use only letters, digits, dashes and underscores.',
 }
 
 const tables: Record<string, Record<Key, string>> = { 'zh-CN': zh, en }
@@ -1068,11 +1082,12 @@ function pickLanguage(): Lang {
 // applyDefaultLanguage uses the deployment's default unless the user picked a
 // language themselves. Returns true when the language changed.
 export function applyDefaultLanguage(def: string): boolean {
-  if (chosen) return false
+  if (chosen || !def) return false // no default set: the browser's language stays
   const l: Lang = def.toLowerCase().startsWith('zh') ? 'zh-CN' : 'en'
   if (l === current) return false
   current = l
   document.documentElement.lang = l
+  tellServiceWorker(l)
   return true
 }
 
@@ -1089,7 +1104,20 @@ export function setLang(l: Lang) {
     /* ignore */
   }
   document.documentElement.lang = l
+  tellServiceWorker(l)
 }
+
+// The service worker shows notifications in the language picked here; it
+// cannot read localStorage, so the choice is put where it can (see sw.js).
+function tellServiceWorker(l: Lang) {
+  try {
+    void caches?.open('corral-prefs').then((c) => c.put('/lang', new Response(l)))
+  } catch {
+    /* no Cache API (or not allowed): the device language is used */
+  }
+}
+// Whatever language the app ends up in, notifications follow it.
+tellServiceWorker(current)
 
 export function t(key: Key, params?: Record<string, string | number>): string {
   let s = tables[current][key] ?? zh[key] ?? key

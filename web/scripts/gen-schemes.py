@@ -1,4 +1,4 @@
-"""Generate web/src/terminal/schemes.ts and web/public/THIRD-PARTY-NOTICES.txt
+"""Generate web/src/terminal/schemes.ts and web/scripts/schemes-notice.txt
 from iTerm2-Color-Schemes (MIT), pinned to one upstream commit.
 
 Usage (from the repository root):
@@ -81,15 +81,15 @@ if True:
     f.write(']\n')
 write_atomic(out, f.getvalue())
 
-# Shipped next to the built app, so the notice travels with every copy.
-notices = os.path.join(os.path.dirname(out), '..', '..', 'public', 'THIRD-PARTY-NOTICES.txt')
+# The schemes' part of the third-party notices; scripts/gen-notices.py puts
+# it into web/public/THIRD-PARTY-NOTICES.txt with the rest.
+notices = os.path.join(os.path.dirname(__file__), 'schemes-notice.txt')
 n = io.StringIO()
-n.write('Corral bundles the following third-party material in its web interface.\n\n')
 n.write('Terminal colour schemes\n=======================\n\n')
 n.write('From iTerm2-Color-Schemes, https://github.com/mbadolato/iTerm2-Color-Schemes\n')
 n.write(f'(commit {REV}). Each scheme remains the work of its author.\n')
 n.write('Schemes: ' + ', '.join(i[0] for i in items) + '.\n\n')
 n.write(lic + '\n')
-write_atomic(os.path.normpath(notices), n.getvalue())
+write_atomic(notices, n.getvalue())
 print(len(items), 'schemes;', sum(1 for i in items if i[2]), 'dark')
 for disp, sid, dark, t in items: print(('D ' if dark else 'L ') + disp)

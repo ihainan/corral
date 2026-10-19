@@ -1,6 +1,9 @@
 // Minimal service worker: makes the app installable and keeps the shell
 // available offline. API calls and sockets always go to the network.
 const SHELL = 'corral-shell-v2'
+// The language picked in the app (written there, see i18n.ts); kept across
+// shell versions.
+const PREFS = 'corral-prefs'
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(SHELL).then((c) => c.addAll(['/'])).then(() => self.skipWaiting()))
@@ -8,7 +11,7 @@ self.addEventListener('install', (e) => {
 
 self.addEventListener('activate', (e) => {
   e.waitUntil(
-    caches.keys().then((keys) => Promise.all(keys.filter((k) => k !== SHELL).map((k) => caches.delete(k)))).then(() => self.clients.claim()),
+    caches.keys().then((keys) => Promise.all(keys.filter((k) => k !== SHELL && k !== PREFS).map((k) => caches.delete(k)))).then(() => self.clients.claim()),
   )
 })
 
@@ -42,7 +45,19 @@ self.addEventListener('fetch', (e) => {
   }
 })
 
-// Push: "an agent needs you" and similar alerts from the gateway.
+// The language to show alerts in: the one picked in the app, else the device's.
+async function chinese() {
+  try {
+    const r = await (await caches.open(PREFS)).match('/lang')
+    if (r) return (await r.text()).startsWith('zh')
+  } catch {
+    /* fall back to the device language */
+  }
+  return (self.navigator.language || '').toLowerCase().startsWith('zh')
+}
+
+// Push: "an agent needs you" and similar alerts from the gateway, in both
+// languages.
 self.addEventListener('push', (e) => {
   let n = {}
   try {
@@ -51,15 +66,16 @@ self.addEventListener('push', (e) => {
     n = { title: 'Corral', body: e.data ? e.data.text() : '' }
   }
   e.waitUntil(
-    self.registration.showNotification(n.title || 'Corral', {
-      body: n.body || '',
+    chinese().then((zh) =>
+    self.registration.showNotification((zh && n.title_zh) || n.title || 'Corral', {
+      body: (zh && n.body_zh) || n.body || '',
       tag: n.tag || undefined,
       renotify: !!n.tag,
       silent: !!n.quiet,
       icon: '/icons/icon-192.png',
       badge: '/icons/icon-192.png',
       data: { url: n.url || '/' },
-    }),
+    })),
   )
 })
 

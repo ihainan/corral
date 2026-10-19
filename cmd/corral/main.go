@@ -93,6 +93,7 @@ func run(log *slog.Logger) error {
 		ExtraPushHosts:  splitList(os.Getenv("CORRAL_PUSH_HOSTS")),
 		WebhookPrefixes: splitList(os.Getenv("CORRAL_WEBHOOK_PREFIXES")),
 		LoginValid:      authSvc.LoginValid,
+		WebhookChinese:  strings.HasPrefix(cfg.DefaultLanguage, "zh"),
 	})
 	if err != nil {
 		return fmt.Errorf("notifications: %w", err)

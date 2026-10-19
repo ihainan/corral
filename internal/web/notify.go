@@ -54,21 +54,14 @@ func (v *visibility) watched(sessionID string) bool {
 	return false
 }
 
-func (s *Server) lang(zh, en string) string {
-	if strings.HasPrefix(s.cfg.DefaultLanguage, "zh") {
-		return zh
-	}
-	return en
-}
-
 // onHerdrTransition alerts on "needs you" and on finishing work.
 func (s *Server) onHerdrTransition(sess *term.Session, h *store.Host, tr herdr.Transition) {
 	if s.notifier == nil || s.vis.watched(sess.ID) {
 		return
 	}
-	agent := tr.Pane.Agent
+	agent, agentZh := tr.Pane.Agent, tr.Pane.Agent
 	if agent == "" {
-		agent = s.lang("终端", "terminal")
+		agent, agentZh = "terminal", "终端"
 	}
 	where := h.Name
 	if tr.Workspace != "" {
@@ -77,15 +70,16 @@ func (s *Server) onHerdrTransition(sess *term.Session, h *store.Host, tr herdr.T
 	var note notify.Note
 	switch {
 	case tr.To == herdr.StatusBlocked:
-		note = notify.Note{Title: fmt.Sprintf(s.lang("%s 在等你处理", "%s needs you"), agent), Body: where}
+		note = notify.Note{Title: agent + " needs you", TitleZh: agentZh + " 在等你处理", Body: where}
 	case tr.To == herdr.StatusDone && tr.From == herdr.StatusWorking:
-		note = notify.Note{Title: fmt.Sprintf(s.lang("%s 已完成", "%s finished"), agent), Body: where, Quiet: true}
+		note = notify.Note{Title: agent + " finished", TitleZh: agentZh + " 已完成", Body: where, Quiet: true}
 	default:
 		return
 	}
 	if tr.Pane.Title != "" {
 		note.Body += "\n" + truncate(tr.Pane.Title, 120)
 	}
+	note.BodyZh = note.Body
 	note.URL = "/t/" + sess.ID
 	note.Tag = "herdr-" + sess.ID[:8] + "-" + strings.ReplaceAll(tr.Pane.ID, ":", "-")
 	s.notifier.Send(context.Background(), sess.OwnerID, note)
@@ -96,13 +90,12 @@ func (s *Server) onTerminalAlert(sess *term.Session, a term.Alert) {
 	if s.notifier == nil || s.vis.watched(sess.ID) {
 		return
 	}
-	title := sess.HostName
-	body := a.Message
+	body, bodyZh := a.Message, a.Message
 	if body == "" {
-		body = s.lang("终端发出了提醒。", "The terminal rang the bell.")
+		body, bodyZh = "The terminal rang the bell.", "终端发出了提醒。"
 	}
 	s.notifier.Send(context.Background(), sess.OwnerID, notify.Note{
-		Title: title, Body: body, URL: "/t/" + sess.ID, Tag: "term-" + sess.ID[:8],
+		Title: sess.HostName, TitleZh: sess.HostName, Body: body, BodyZh: bodyZh, URL: "/t/" + sess.ID, Tag: "term-" + sess.ID[:8],
 	})
 }
 
@@ -194,7 +187,7 @@ func (s *Server) apiPushTest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.notifier.Send(r.Context(), currentUser(r).ID, notify.Note{
-		Title: "Corral", Body: s.lang("这是一条测试通知。", "This is a test notification."), URL: "/settings",
+		Title: "Corral", Body: "This is a test notification.", TitleZh: "Corral", BodyZh: "这是一条测试通知。", URL: "/settings",
 		Tag: fmt.Sprintf("test-%d", time.Now().Unix()),
 	})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})

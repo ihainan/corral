@@ -161,7 +161,7 @@ func Load() (*Config, error) {
 	c := &Config{
 		Listen:             env("CORRAL_LISTEN", "127.0.0.1:8080"),
 		DataDir:            env("CORRAL_DATA_DIR", "./data"),
-		DefaultLanguage:    env("CORRAL_DEFAULT_LANGUAGE", "zh-CN"),
+		DefaultLanguage:    env("CORRAL_DEFAULT_LANGUAGE", ""), // "": each browser's own language
 		ForwardDomain:      strings.TrimPrefix(strings.ToLower(env("CORRAL_FORWARD_DOMAIN", "")), "."),
 		MaxSessionsPerUser: 20,
 		UploadMaxBytes:     100 << 20,

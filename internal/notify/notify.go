@@ -27,9 +27,12 @@ import (
 type Note struct {
 	Title string `json:"title"`
 	Body  string `json:"body"`
-	URL   string `json:"url"`   // path inside Corral to open on tap
-	Tag   string `json:"tag"`   // same tag replaces the previous alert on the device
-	Quiet bool   `json:"quiet"` // informational: no banner on platforms that support it
+	// The same in Chinese: each device shows the language it uses.
+	TitleZh string `json:"title_zh,omitempty"`
+	BodyZh  string `json:"body_zh,omitempty"`
+	URL     string `json:"url"`   // path inside Corral to open on tap
+	Tag     string `json:"tag"`   // same tag replaces the previous alert on the device
+	Quiet   bool   `json:"quiet"` // informational: no banner on platforms that support it
 }
 
 // Push services browsers hand out endpoints for. The gateway only ever POSTs to
@@ -44,6 +47,7 @@ type Notifier struct {
 	subscriber    string
 	pushHosts     []string
 	webhookPrefix []webhookPrefix
+	webhookZh     bool // webhooks in Chinese (Options.WebhookChinese)
 	http          *http.Client
 	mu            sync.Mutex
 	recent        map[string]time.Time // per user+tag, to collapse bursts
@@ -73,6 +77,9 @@ type Options struct {
 	// is still in force, or an error if that could not be checked; nil
 	// treats every login as ended.
 	LoginValid func(ctx context.Context, loginHash string) (bool, error)
+	// WebhookChinese sends webhooks in Chinese (a webhook has no device
+	// language to go by).
+	WebhookChinese bool
 }
 
 func New(ctx context.Context, st *store.Store, log *slog.Logger, opt Options) (*Notifier, error) {
@@ -85,7 +92,8 @@ func New(ctx context.Context, st *store.Store, log *slog.Logger, opt Options) (*
 		return nil, err
 	}
 	return &Notifier{
-		store: st, log: log, vapidPublic: pub, vapidPrivate: priv, subscriber: opt.Subscriber,
+		webhookZh: opt.WebhookChinese,
+		store:     st, log: log, vapidPublic: pub, vapidPrivate: priv, subscriber: opt.Subscriber,
 		pushHosts: append(append([]string{}, defaultPushHosts...), opt.ExtraPushHosts...), webhookPrefix: prefixes,
 		// Never follow redirects, for push and webhooks alike: an allowed
 		// endpoint must not be able to bounce the gateway to another address.
@@ -406,7 +414,11 @@ func (n *Notifier) sendWebhook(ctx context.Context, userID int64, gen uint64, no
 	if json.Unmarshal([]byte(raw), &prefs) != nil || prefs.Webhook == "" || n.CheckWebhook(prefs.Webhook) != nil {
 		return
 	}
-	body, _ := json.Marshal(map[string]string{"title": note.Title, "body": note.Body, "url": note.URL})
+	title, text := note.Title, note.Body
+	if n.webhookZh && note.TitleZh != "" {
+		title, text = note.TitleZh, note.BodyZh
+	}
+	body, _ := json.Marshal(map[string]string{"title": title, "body": text, "url": note.URL})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, prefs.Webhook, bytes.NewReader(body))
 	if err != nil {
 		return

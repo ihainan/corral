@@ -439,7 +439,7 @@ rm -f "$S"
 setsid nohup "$D/bin/code-server" --socket "$S" --socket-mode 600 --auth none --disable-telemetry \
   --disable-update-check --disable-proxy --disable-getting-started-override \
   --user-data-dir "$DATA" --extensions-dir "$DATA/extensions" \
-  >"$ST/code-server.log" 2>&1 </dev/null 9>&- & # (it must not keep the lock)
+  "$HOME" >"$ST/code-server.log" 2>&1 </dev/null 9>&- & # (it must not keep the lock; opens the home folder unless told another)
 new=$!
 echo "$new $(starttime "$new") $I" >"$P"
 i=0
