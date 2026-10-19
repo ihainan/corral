@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -81,6 +82,9 @@ func (s *Server) onHerdrTransition(sess *term.Session, h *store.Host, tr herdr.T
 	}
 	note.BodyZh = note.Body
 	note.URL = "/t/" + sess.ID
+	if tr.To == herdr.StatusBlocked {
+		note.URL += "?reply=" + url.QueryEscape(tr.Pane.ID) // opens the answer to it
+	}
 	note.Tag = "herdr-" + sess.ID[:8] + "-" + strings.ReplaceAll(tr.Pane.ID, ":", "-")
 	s.notifier.Send(context.Background(), sess.OwnerID, note)
 }

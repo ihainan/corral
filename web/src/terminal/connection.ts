@@ -319,7 +319,7 @@ export class TermConnection {
       if (r.status === 401) {
         this.ended = true
         clearTimeout(this.timer)
-        location.href = '/login?next=' + encodeURIComponent(location.pathname)
+        location.href = '/login?next=' + encodeURIComponent(location.pathname + location.search)
         return
       }
       const gone = this.watch ? r.status === 404 : !((await r.json()) as { id: string }[]).some((s) => s.id === this.id)

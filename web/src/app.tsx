@@ -57,7 +57,7 @@ export function App() {
     setUnauthorizedHandler(() => {
       resetPrefsSession()
       setMe(null)
-      if (!location.pathname.startsWith('/login')) navigate('/login?next=' + encodeURIComponent(location.pathname), true)
+      if (!location.pathname.startsWith('/login')) navigate('/login?next=' + encodeURIComponent(location.pathname + location.search), true)
     })
     api<Bootstrap>('GET', '/api/bootstrap')
       .then((b) => {
@@ -122,7 +122,7 @@ function route(path: string, boot: Bootstrap, me: Me | null): ReactNode {
   let m = match('/invite/:token', path)
   if (m) return <InvitePage token={m.token} />
   if (path === '/login') return me ? <Redirect to={nextPath()} /> : <LoginPage />
-  if (!me) return <Redirect to={boot.setup_needed ? '/setup' : '/login?next=' + encodeURIComponent(path)} />
+  if (!me) return <Redirect to={boot.setup_needed ? '/setup' : '/login?next=' + encodeURIComponent(path + location.search)} />
 
   if ((m = match('/t/:id', path))) return <TerminalPage key={m.id} id={m.id} />
   if ((m = match('/w/:id', path))) return <TerminalPage key={'w' + m.id} id={m.id} watch />

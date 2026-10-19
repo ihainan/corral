@@ -448,6 +448,24 @@ details.adv > .form { margin-top: 16px; }
 .scheme-current .swatch-dots { gap: 2px; }
 .overlay.see-through { background: rgba(0, 0, 0, 0.12); }
 
+/* Answering an agent */
+.reply-dialog { max-width: 640px; }
+.reply-sub { margin-top: -8px; overflow-wrap: anywhere; }
+.reply-screen-wrap { position: relative; }
+.reply-screen {
+  margin: 0; max-height: min(42vh, 360px); overflow: auto; padding: 10px 40px 10px 12px; background: var(--bg-subtle);
+  border-radius: var(--r); font: 12px/1.45 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--fg);
+}
+.reply-refresh { position: absolute; top: 4px; right: 4px; }
+.reply-changed { color: var(--warn); font-size: 13px; line-height: 18px; }
+.reply-choices { display: flex; flex-direction: column; gap: 6px; }
+.reply-choice { justify-content: flex-start; gap: 10px; height: auto; min-height: var(--h-btn); padding-block: 8px; text-align: left; white-space: normal; }
+.reply-key { font: 600 12px var(--font-mono); color: var(--fg-3); flex: none; }
+.reply-label { min-width: 0; overflow-wrap: anywhere; }
+.reply-keys { display: flex; gap: 8px; }
+.reply-text { display: flex; gap: 8px; }
+.reply-text .input { flex: 1; min-width: 0; }
+
 /* Floating layers follow the visual viewport (see main.tsx), so the iOS soft
    keyboard never hides a dialog's buttons. */
 .overlay { top: var(--vv-top, 0px); bottom: auto; height: var(--vv-h, 100%); }

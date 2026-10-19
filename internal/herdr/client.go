@@ -265,6 +265,11 @@ func (c *Client) SendKeys(ctx context.Context, paneID string, keys []string) err
 	return c.Call(ctx, "pane.send_keys", map[string]any{"pane_id": paneID, "keys": keys}, nil)
 }
 
+// SendInput types text into a pane, then presses keys, in one request.
+func (c *Client) SendInput(ctx context.Context, paneID, text string, keys []string) error {
+	return c.Call(ctx, "pane.send_input", map[string]any{"pane_id": paneID, "text": text, "keys": keys}, nil)
+}
+
 func (c *Client) FocusPane(ctx context.Context, paneID string) error {
 	return c.Call(ctx, "pane.focus", map[string]any{"pane_id": paneID}, nil)
 }

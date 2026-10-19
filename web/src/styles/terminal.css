@@ -190,6 +190,14 @@ html.kb-open .keybar { padding-bottom: 6px; }
 .herdr-agent-title { font-size: 12px; color: var(--term-fg-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .herdr-status { font-size: 12px; font-weight: 500; white-space: nowrap; flex: none; }
 .herdr-agent .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--term-fg-3); flex: none; }
+.herdr-agent-row { display: flex; align-items: center; gap: 4px; }
+.herdr-agent-row > .herdr-agent { flex: 1; min-width: 0; }
+.herdr-reply {
+  flex: none; height: 30px; padding: 0 10px; margin-right: 4px; border-radius: 8px; border: 1px solid var(--warn);
+  background: none; color: var(--warn); font-size: 12px; font-weight: 600; cursor: pointer;
+}
+.herdr-reply:hover { background: var(--term-hover); }
+.herdr-reply:disabled { opacity: 0.5; cursor: default; }
 .st-working { color: var(--term-accent-text); } .dot.st-working { background: var(--accent); }
 .st-blocked { color: var(--warn); } .dot.st-blocked { background: var(--warn); }
 .st-done { color: var(--ok); } .dot.st-done { background: var(--ok); }

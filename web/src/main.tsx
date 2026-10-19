@@ -7,6 +7,7 @@ import './styles/app.css'
 import './styles/terminal.css'
 import { getLang } from './i18n'
 import { App } from './app'
+import './notifyopen' // listens from the start (see there)
 
 document.documentElement.lang = getLang()
 

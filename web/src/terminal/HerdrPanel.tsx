@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { X } from 'lucide-react'
-import type { HerdrSummary } from '../api'
+import type { HerdrAgent, HerdrSummary } from '../api'
 import { hasKey, t } from '../i18n'
 import { leaveField, restoreFocus, useFocusTrap } from '../components/ui'
 
@@ -15,6 +15,7 @@ type PanelProps = {
   stale: boolean
   onClose: (viaKeyboard: boolean) => void
   onFocus: (action: 'focus_workspace' | 'focus_pane', target: string) => void
+  onReply: (agent: HerdrAgent) => void // answer an agent that waits for the user
 }
 
 // Workspaces and agents of the attached herdr session. Docked beside the
@@ -88,7 +89,7 @@ function PanelBody(props: PanelProps) {
             {w.agents.length > 0 && (
               <ul className="herdr-agents">
                 {w.agents.map((a) => (
-                  <li key={a.pane_id}>
+                  <li key={a.pane_id} className="herdr-agent-row">
                     <button className="herdr-agent" disabled={props.stale} onClick={() => props.onFocus('focus_pane', a.pane_id)}>
                       <span className={'dot st-' + a.status} aria-hidden="true" />
                       <span className="herdr-agent-main">
@@ -97,6 +98,11 @@ function PanelBody(props: PanelProps) {
                       </span>
                       <span className={'herdr-status st-' + a.status}>{statusKey(a.status)}</span>
                     </button>
+                    {a.status === 'blocked' && (
+                      <button className="herdr-reply" disabled={props.stale} onClick={() => props.onReply(a)} aria-label={t('reply.open', { agent: a.agent })}>
+                        {t('reply.button')}
+                      </button>
+                    )}
                   </li>
                 ))}
               </ul>

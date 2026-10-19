@@ -6,7 +6,7 @@ import { Unicode11Addon } from '@xterm/addon-unicode11'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import { WebglAddon } from '@xterm/addon-webgl'
 import { ArrowUp, Check, ChevronDown, ChevronLeft, CircleStop, Code2, Eye, FolderOpen, Globe, LayoutGrid, ImagePlus, MessageSquareText, MoreVertical, Minus, Palette, Paperclip, Plus, TextSelect, Keyboard as KeyboardIcon, Power, RotateCw, Server, X } from 'lucide-react'
-import { api, ApiError, errorText, uploadFile, type HerdrSummary, type Host, type SessionInfo } from '../api'
+import { api, ApiError, errorText, uploadFile, type HerdrAgent, type HerdrSummary, type Host, type SessionInfo } from '../api'
 import { t } from '../i18n'
 import { navigate } from '../router'
 import { getPrefs, prefsConfirmed, setChromeColor, setPrefs, termScheme, usePrefs } from '../prefs'
@@ -19,10 +19,12 @@ import { KeyBar, type ModState } from '../terminal/KeyBar'
 import { chromeVars } from '../terminal/themes'
 import { SchemeDialog } from '../terminal/SchemePicker'
 import { HerdrPanel } from '../terminal/HerdrPanel'
+import { ReplyDialog } from '../terminal/ReplyDialog'
 import { PortsDialog, openForward } from '../terminal/PortsDialog'
 import { FilesDialog } from '../terminal/FilesDialog'
 import { ShareDialog } from '../terminal/ShareDialog'
 import { useCode } from '../terminal/CodeDialog'
+import { onOpenRequest } from '../notifyopen'
 import { useSession } from '../app'
 
 const isTouch = window.matchMedia('(pointer: coarse)').matches || navigator.maxTouchPoints > 0
@@ -199,6 +201,66 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
   const [sessionsFailed, setSessionsFailed] = useState(false)
   // False from a disconnect until this connection sends a new herdr summary.
   const [herdrFresh, setHerdrFresh] = useState(true)
+  // The agent being answered, and the pane a notification asked to answer
+  // (?reply=<pane>), opened once this connection's summary has come.
+  const [replyTo, setReplyTo] = useState<HerdrAgent | null>(null)
+  const [wantReply, setWantReply] = useState<string | null>(() => (watch ? null : new URLSearchParams(location.search).get('reply')))
+  // The pane stays in the address until it is dealt with (the dialog has
+  // shown its screen, or it no longer waits), so signing in again on the way
+  // (the login may have ended) brings it back here.
+  const forgetReply = (pane: string) => {
+    if (location.pathname === '/t/' + id && new URLSearchParams(location.search).get('reply') === pane) {
+      history.replaceState(history.state, '', location.pathname)
+    }
+  }
+  // A pane not (yet) seen waiting gets a while: the summary shown may be one
+  // from before the connection came back. Each new summary looks again.
+  const replyGiveUp = useRef<{ pane: string; timer: number } | null>(null)
+  const stopGiveUp = () => {
+    clearTimeout(replyGiveUp.current?.timer)
+    replyGiveUp.current = null
+  }
+  useEffect(() => stopGiveUp, [])
+  useEffect(() => {
+    if (!wantReply) return
+    // The address is where the request is kept: gone from there, dropped.
+    if (new URLSearchParams(location.search).get('reply') !== wantReply) {
+      setWantReply(null)
+      return
+    }
+    if (!herdr || !herdrFresh || status !== 'open') {
+      stopGiveUp() // the wait starts again with the next connection's summary
+      return
+    }
+    // Still waiting: answered elsewhere since the notification, it is not.
+    const a = herdr.workspaces.flatMap((w) => w.agents).find((x) => x.pane_id === wantReply && x.status === 'blocked')
+    if (a) {
+      stopGiveUp()
+      setWantReply(null)
+      setReplyTo(a)
+      return
+    }
+    if (replyGiveUp.current?.pane === wantReply) return
+    stopGiveUp()
+    const pane = wantReply
+    const timer = window.setTimeout(() => {
+      replyGiveUp.current = null
+      setWantReply((cur) => (cur === pane ? null : cur))
+      if (new URLSearchParams(location.search).get('reply') !== pane) return
+      forgetReply(pane)
+      toast(t('reply.gone'), true)
+    }, 8000)
+    replyGiveUp.current = { pane, timer }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wantReply, herdr, herdrFresh, status, toast])
+  // A notification tapped while this page is open already.
+  useEffect(() => {
+    if (watch) return
+    return onOpenRequest(() => {
+      const pane = new URLSearchParams(location.search).get('reply')
+      if (location.pathname === '/t/' + id && pane) setWantReply(pane)
+    })
+  }, [id, watch])
   // Crossing the width where the panel turns from docked to a sheet closes it,
   // so it never reappears in another form above a dialog that is open.
   const firstSheet = useRef(sheetPanel)
@@ -1532,6 +1594,10 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
               // A keyboard user (also an iPad with a hardware keyboard) keeps typing.
               if (viaKeyboard) termRef.current?.focus()
             }}
+            onReply={(a) => {
+              if (sheetPanel) setPanel(false)
+              setReplyTo(a)
+            }}
             onFocus={async (action, target) => {
               try {
                 await api('POST', `/api/sessions/${id}/herdr`, { action, target })
@@ -1543,6 +1609,20 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
           />
         )}
         {dragOver && <div className="term-drop">{t('term.dropHint')}</div>}
+        {replyTo && !watch && !ended && (
+          // One dialog per pane (keyed): nothing of another pane's carries over.
+          <ReplyDialog
+            key={replyTo.pane_id}
+            sessionId={id}
+            agent={replyTo}
+            onLoaded={() => forgetReply(replyTo.pane_id)}
+            onClose={() => {
+              forgetReply(replyTo.pane_id)
+              setWantReply((cur) => (cur === replyTo.pane_id ? null : cur))
+              setReplyTo((cur) => (cur?.pane_id === replyTo.pane_id ? null : cur))
+            }}
+          />
+        )}
       </div>
 
       {ended ? (

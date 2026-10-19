@@ -54,6 +54,7 @@ type Server struct {
 	static   fs.FS
 
 	herdrSocks herdrSockets
+	replies    paneReplies      // answers to agents in herdr panes
 	files      *sftpPool        // shared SFTP channels of the file panel
 	rec        *recState        // recordings being made, and their pruning
 	notifier   *notify.Notifier // nil disables push
@@ -171,6 +172,8 @@ func (s *Server) registerRoutes() {
 	s.handle("GET /api/sessions/{id}/ws", SignedIn, s.apiSessionSocket)
 	s.handle("POST /api/sessions/{id}/upload", SignedIn, s.apiUpload)
 	s.handle("POST /api/sessions/{id}/herdr", SignedIn, s.apiHerdrAction)
+	s.handle("GET /api/sessions/{id}/herdr/panes/{pane}/screen", SignedIn, s.apiHerdrScreen)
+	s.handle("POST /api/sessions/{id}/herdr/panes/{pane}/reply", SignedIn, s.apiHerdrReply)
 	s.handle("GET /api/sessions/{id}/shares", SignedIn, s.apiListShares)
 	s.handle("POST /api/sessions/{id}/shares", SignedIn, s.apiAddShare)
 	s.handle("DELETE /api/sessions/{id}/shares/{uid}", SignedIn, s.apiRemoveShare)

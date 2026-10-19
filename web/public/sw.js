@@ -88,7 +88,11 @@ self.addEventListener('notificationclick', (e) => {
       const path = (c) => new URL(c.url).pathname
       // A window already showing it comes to the front as it is.
       const same = list.find((c) => path(c) === url.pathname)
-      if (same) return same.focus()
+      if (same) {
+        // What the address asks for (answering an agent) is passed on.
+        if (url.search) same.postMessage({ t: 'open', url: url.href })
+        return same.focus()
+      }
       // Else a window that is not on a terminal page is reused; a terminal
       // page is never navigated away (its composer draft would be lost).
       const free = list.find((c) => 'navigate' in c && !path(c).startsWith('/t/'))

@@ -35,6 +35,10 @@ keeps running and you pick it up where it was — on the same device or another.
   a newline.
 - With herdr, a panel lists workspaces and agents, shows who is waiting for
   you, and switches between them.
+- Answer an agent that waits in herdr without switching to it — from the
+  panel or straight from its notification: you see its screen, tap one of
+  its choices, Enter or Esc, or type a line. Nothing is typed if the screen
+  changed in the meantime.
 - Push notifications (and optional webhooks) when an agent in herdr needs
   you or finishes, or when a program rings the terminal bell or sends a
   desktop notification (OSC 9 / OSC 777) — unless you are looking at that
@@ -189,6 +193,9 @@ public issue.
   steps; such a folder lets them tamper with anything put there anyway.
 - The file panel shows the first 5000 entries of a folder, in the host's
   order, and says when there are more.
+- Answering an agent checks the pane's screen right before typing, but herdr
+  cannot check and type in one step: an answer given on the host in that
+  very moment is not seen.
 
 ## Develop
 

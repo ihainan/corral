@@ -6,11 +6,17 @@ package web
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
+	"regexp"
+	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/ihainan/corral/internal/herdr"
 	"github.com/ihainan/corral/internal/sshx"
@@ -151,19 +157,62 @@ func (s *Server) onAgentTransition(sess *term.Session, h *store.Host, tr herdr.T
 	s.onHerdrTransition(sess, h, tr)
 }
 
-// POST /api/sessions/{id}/herdr {"action":"focus_workspace"|"focus_pane","target":"…"}
-func (s *Server) apiHerdrAction(w http.ResponseWriter, r *http.Request) {
+// herdrConn connects to the herdr server of one of the user's running
+// sessions, or writes the error and returns nil. The caller closes it.
+// herdr answers one request per connection (subscriptions aside).
+func (s *Server) herdrConn(w http.ResponseWriter, r *http.Request, ctx context.Context) (*herdr.Client, *term.Session) {
+	sess, socket := s.herdrSession(w, r)
+	if sess == nil {
+		return nil, nil
+	}
+	return herdrDial(w, ctx, sess, socket), sess
+}
+
+// herdrSession is one of the user's running sessions with herdr, and its
+// socket; or nil, with the error written.
+func (s *Server) herdrSession(w http.ResponseWriter, r *http.Request) (*term.Session, string) {
 	u := currentUser(r)
 	sess, err := s.terms.Get(u.ID, r.PathValue("id"))
 	if err != nil {
 		writeError(w, http.StatusNotFound, "not_found", "no such session")
-		return
+		return nil, ""
 	}
 	socket := s.herdrSocks.get(sess.ID)
 	if socket == "" || sess.State() != term.StateRunning {
 		writeError(w, http.StatusConflict, "herdr_unavailable", "herdr is not available in this session")
+		return nil, ""
+	}
+	return sess, socket
+}
+
+// herdrDial connects to a session's herdr, or writes the error and returns nil.
+func herdrDial(w http.ResponseWriter, ctx context.Context, sess *term.Session, socket string) *herdr.Client {
+	// herdr traffic is a side operation on the terminal's connection: while
+	// too many earlier ones are unfinished, new ones are refused.
+	c, err := herdr.Dial(ctx, sess.Client(), socket)
+	if errors.Is(err, sshx.ErrBusy) {
+		writeError(w, http.StatusTooManyRequests, "herdr_busy", "herdr is still answering earlier actions")
+		return nil
+	}
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "herdr_unavailable", "cannot reach herdr")
+		return nil
+	}
+	return c
+}
+
+// writeHerdrError reports an error of a herdr request.
+func writeHerdrError(w http.ResponseWriter, err error) {
+	var apiErr *herdr.APIError
+	if errors.As(err, &apiErr) {
+		writeError(w, http.StatusUnprocessableEntity, "herdr_error", apiErr.Message)
 		return
 	}
+	writeError(w, http.StatusBadGateway, "herdr_unavailable", "cannot reach herdr")
+}
+
+// POST /api/sessions/{id}/herdr {"action":"focus_workspace"|"focus_pane","target":"…"}
+func (s *Server) apiHerdrAction(w http.ResponseWriter, r *http.Request) {
 	var b struct {
 		Action string `json:"action"`
 		Target string `json:"target"`
@@ -174,18 +223,12 @@ func (s *Server) apiHerdrAction(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
-	// herdr traffic is a side operation on the terminal's connection: while
-	// too many earlier ones are unfinished, new ones are refused.
-	c, err := herdr.Dial(ctx, sess.Client(), socket)
-	if errors.Is(err, sshx.ErrBusy) {
-		writeError(w, http.StatusTooManyRequests, "herdr_busy", "herdr is still answering earlier actions")
-		return
-	}
-	if err != nil {
-		writeError(w, http.StatusBadGateway, "herdr_unavailable", "cannot reach herdr")
+	c, _ := s.herdrConn(w, r, ctx)
+	if c == nil {
 		return
 	}
 	defer c.Close()
+	var err error
 	switch b.Action {
 	case "focus_workspace":
 		err = c.FocusWorkspace(ctx, b.Target)
@@ -196,12 +239,266 @@ func (s *Server) apiHerdrAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		var apiErr *herdr.APIError
-		if errors.As(err, &apiErr) {
-			writeError(w, http.StatusUnprocessableEntity, "herdr_error", apiErr.Message)
+		writeHerdrError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// Answering an agent from the browser: the user sees a pane's screen, picks
+// an answer, and it is typed into that pane only if the screen is still the
+// one the user saw (the prompt has not moved on or changed meanwhile).
+
+var (
+	herdrPaneID = regexp.MustCompile(`^[A-Za-z0-9:_.-]{1,64}$`)
+	// replyKeys are the keys an answer may press: choices, confirming,
+	// cancelling, moving in a list.
+	replyKeys = map[string]bool{"enter": true, "esc": true, "tab": true, "space": true,
+		"up": true, "down": true, "left": true, "right": true}
+)
+
+const (
+	maxReplyText   = 2000 // characters
+	maxScreenBytes = 16 << 10
+)
+
+func init() {
+	for c := '0'; c <= '9'; c++ {
+		replyKeys[string(c)] = true
+	}
+}
+
+// paneScreen reads a pane's visible text, without trailing blank space, and
+// the digest that names it (of all of it); the text returned is at most
+// maxScreenBytes (its end).
+func paneScreen(ctx context.Context, c *herdr.Client, pane string) (text, digest string, err error) {
+	text, err = c.ReadPane(ctx, pane, 0)
+	if err != nil {
+		return "", "", err
+	}
+	text = strings.TrimRight(strings.ReplaceAll(text, "\r\n", "\n"), " \t\n")
+	sum := sha256.Sum256([]byte(text))
+	if len(text) > maxScreenBytes {
+		cut := len(text) - maxScreenBytes
+		for cut < len(text) && !utf8.RuneStart(text[cut]) {
+			cut++
+		}
+		text = text[cut:]
+	}
+	return text, hex.EncodeToString(sum[:]), nil
+}
+
+// answeredFor is how long an answered screen stays answered: the same
+// screen once more within it is taken for a repeated answer (a double tap,
+// or a program that has not redrawn yet), not a new one.
+const answeredFor = 10 * time.Second
+
+// paneReplies serializes the answers to each pane and remembers the screen
+// last answered there.
+type paneReplies struct {
+	mu sync.Mutex
+	m  map[string]*paneReply
+}
+
+type paneReply struct {
+	turn   chan struct{} // holds a token while an answer is under way
+	users  int           // holding or waiting for the turn
+	digest string
+	at     time.Time
+}
+
+// lock takes a pane's turn, waiting for an answer under way, or gives up
+// with ctx.
+func (p *paneReplies) lock(ctx context.Context, key string) (*paneReply, error) {
+	p.mu.Lock()
+	if p.m == nil {
+		p.m = map[string]*paneReply{}
+	}
+	for k, e := range p.m { // forget panes nobody answers any more
+		if e.users == 0 && time.Since(e.at) > answeredFor {
+			delete(p.m, k)
+		}
+	}
+	e := p.m[key]
+	if e == nil {
+		e = &paneReply{turn: make(chan struct{}, 1)}
+		p.m[key] = e
+	}
+	e.users++
+	p.mu.Unlock()
+	select {
+	case e.turn <- struct{}{}:
+		return e, nil
+	case <-ctx.Done():
+		p.mu.Lock()
+		e.users--
+		p.mu.Unlock()
+		return nil, ctx.Err()
+	}
+}
+
+func (p *paneReplies) unlock(e *paneReply) {
+	<-e.turn
+	p.mu.Lock()
+	e.users--
+	p.mu.Unlock()
+}
+
+// GET /api/sessions/{id}/herdr/panes/{pane}/screen
+func (s *Server) apiHerdrScreen(w http.ResponseWriter, r *http.Request) {
+	pane := r.PathValue("pane")
+	if !herdrPaneID.MatchString(pane) {
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid pane")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	c, _ := s.herdrConn(w, r, ctx)
+	if c == nil {
+		return
+	}
+	defer c.Close()
+	text, digest, err := paneScreen(ctx, c, pane)
+	if err != nil {
+		writeHerdrError(w, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, map[string]any{"text": text, "digest": digest})
+}
+
+// POST /api/sessions/{id}/herdr/panes/{pane}/reply
+// {"digest": "<of the screen the user saw>", "keys": ["1"]} or {"digest": …, "text": "…"}
+// The text is typed and Enter pressed. A screen that changed since, or that
+// was answered moments ago, is answered with 409 and the screen as it is;
+// nothing is typed then.
+//
+// herdr cannot compare and type in one step: what happens on the host
+// between the check and the typing (another terminal answering in that
+// moment) is not seen. The gap is kept short: answers to a pane go one at a
+// time, and the connection that types is open before the screen is read.
+// A pane's turn is taken before connecting, so answers waiting for it hold
+// no connections.
+func (s *Server) apiHerdrReply(w http.ResponseWriter, r *http.Request) {
+	pane := r.PathValue("pane")
+	var b struct {
+		Digest string   `json:"digest"`
+		Keys   []string `json:"keys"`
+		Text   string   `json:"text"`
+	}
+	if err := readJSON(r, &b); err != nil || !herdrPaneID.MatchString(pane) || len(b.Digest) != 64 {
+		writeError(w, http.StatusBadRequest, "bad_request", "pane, digest and an answer are required")
+		return
+	}
+	switch {
+	case b.Text != "" && len(b.Keys) == 0:
+		if utf8.RuneCountInString(b.Text) > maxReplyText || !utf8.ValidString(b.Text) || strings.ContainsFunc(b.Text, unicode.IsControl) {
+			writeError(w, http.StatusBadRequest, "bad_request", "the text is too long or has control characters")
 			return
 		}
-		writeError(w, http.StatusBadGateway, "herdr_unavailable", "cannot reach herdr")
+	case b.Text == "" && len(b.Keys) >= 1 && len(b.Keys) <= 4:
+		for _, k := range b.Keys {
+			if !replyKeys[k] {
+				writeError(w, http.StatusBadRequest, "bad_request", "key not allowed: "+k)
+				return
+			}
+		}
+	default:
+		writeError(w, http.StatusBadRequest, "bad_request", "send either keys or text")
+		return
+	}
+	sess, socket := s.herdrSession(w, r)
+	if sess == nil {
+		return
+	}
+	// Bound to the login: signing out (or being signed out) cancels an
+	// answer still waiting or connecting, and it is checked once more right
+	// before typing.
+	expiry, err := s.auth.LoginExpiry(r.Context(), loginHash(r))
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "please sign in")
+		return
+	}
+	ctx, cancel := context.WithDeadline(r.Context(), expiry)
+	defer cancel()
+	ctx, cancelStep := context.WithTimeout(ctx, 10*time.Second)
+	defer cancelStep()
+	untrack := s.trackPending(currentUser(r).ID, &liveSocket{loginHash: loginHash(r), hostID: sess.HostID, cancel: cancel})
+	defer untrack()
+	lock, err := s.replies.lock(ctx, sess.ID+"\x00"+pane)
+	if err != nil {
+		writeError(w, http.StatusTooManyRequests, "herdr_busy", "an earlier answer to this pane is still under way")
+		return
+	}
+	locked := true
+	release := func() {
+		if locked {
+			locked = false
+			s.replies.unlock(lock)
+		}
+	}
+	defer release()
+	reader := herdrDial(w, ctx, sess, socket)
+	if reader == nil {
+		return
+	}
+	typer := herdrDial(w, ctx, sess, socket)
+	if typer == nil {
+		reader.Close()
+		return
+	}
+	defer typer.Close()
+	text, digest, err := paneScreen(ctx, reader, pane)
+	reader.Close()
+	if err != nil {
+		writeHerdrError(w, err)
+		return
+	}
+	screen := map[string]any{"text": text, "digest": digest}
+	if digest != b.Digest {
+		writeErrorExtra(w, http.StatusConflict, "screen_changed", "the screen changed; look again before answering", screen)
+		return
+	}
+	if lock.digest == digest && time.Since(lock.at) < answeredFor {
+		writeErrorExtra(w, http.StatusConflict, "already_answered", "this screen was just answered; look again before answering", screen)
+		return
+	}
+	if _, err := s.auth.CheckLogin(ctx, loginHash(r)); err != nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "please sign in")
+		return
+	}
+	if b.Text != "" {
+		err = typer.SendInput(ctx, pane, b.Text, []string{"enter"})
+	} else {
+		err = typer.SendKeys(ctx, pane, b.Keys)
+	}
+	// Whether it was typed: herdr said so, herdr refused, or the answer was
+	// lost on the way (then it may have been typed). Every attempt is
+	// audited, also when the browser has gone.
+	var apiErr *herdr.APIError
+	outcome := "typed"
+	switch {
+	case errors.As(err, &apiErr):
+		outcome = "refused"
+	case err != nil:
+		outcome = "unknown"
+	}
+	if outcome != "refused" {
+		lock.digest, lock.at = digest, time.Now()
+	}
+	typer.Close()
+	release() // the pane's next answer need not wait for the audit
+	detail := map[string]any{"session": sess.ID, "pane": pane, "outcome": outcome}
+	if b.Text != "" {
+		detail["text_length"] = utf8.RuneCountInString(b.Text) // what was typed may be private
+	} else {
+		detail["keys"] = strings.Join(b.Keys, " ")
+	}
+	actx, acancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
+	defer acancel()
+	s.audit(r.WithContext(actx), "herdr.reply", sess.HostName, detail)
+	if err != nil {
+		writeHerdrError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
