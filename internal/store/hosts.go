@@ -3,6 +3,8 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"strings"
 )
 
 const (
@@ -24,6 +26,7 @@ type Host struct {
 	Username        string `json:"username"`
 	Auth            string `json:"auth"`
 	CredentialID    *int64 `json:"credential_id"`
+	JumpHostID      *int64 `json:"jump_host_id"` // reached through this host of the same owner
 	Persistence     string `json:"persistence"`
 	TmuxSession     string `json:"tmux_session"`
 	HerdrSession    string `json:"herdr_session"`
@@ -38,18 +41,21 @@ type Host struct {
 	ConnVersion int64 `json:"-"`
 }
 
-const hostCols = `id, owner_id, name, address, port, username, auth, credential_id, persistence, tmux_session, herdr_session, created_at, updated_at, last_connected_at, conn_version, version`
+const hostCols = `id, owner_id, name, address, port, username, auth, credential_id, persistence, tmux_session, herdr_session, created_at, updated_at, last_connected_at, conn_version, version, jump_host_id`
 
 func scanHost(row interface{ Scan(...any) error }) (*Host, error) {
 	h := &Host{}
-	var cred sql.NullInt64
+	var cred, jump sql.NullInt64
 	err := row.Scan(&h.ID, &h.OwnerID, &h.Name, &h.Address, &h.Port, &h.Username, &h.Auth, &cred,
-		&h.Persistence, &h.TmuxSession, &h.HerdrSession, &h.CreatedAt, &h.UpdatedAt, &h.LastConnectedAt, &h.ConnVersion, &h.Version)
+		&h.Persistence, &h.TmuxSession, &h.HerdrSession, &h.CreatedAt, &h.UpdatedAt, &h.LastConnectedAt, &h.ConnVersion, &h.Version, &jump)
 	if err != nil {
 		return nil, notFound(err)
 	}
 	if cred.Valid {
 		h.CredentialID = &cred.Int64
+	}
+	if jump.Valid {
+		h.JumpHostID = &jump.Int64
 	}
 	return h, nil
 }
@@ -75,41 +81,128 @@ func (s *Store) Host(ctx context.Context, ownerID, id int64) (*Host, error) {
 	return scanHost(s.db.QueryRowContext(ctx, `SELECT `+hostCols+` FROM hosts WHERE owner_id = ? AND id = ?`, ownerID, id))
 }
 
+// ErrJumpConflict: the jump host chosen cannot be one (any more): it is
+// itself reached through another host, has no saved credential, or the host
+// saved has others reached through it. Checked in the same statement as the
+// save, so concurrent edits cannot build a chain.
+var ErrJumpConflict = errors.New("the jump host cannot be used")
+
+// jumpOK is the SQL condition (with its arguments) that a host (id; 0 for a
+// new one) with jump host jump and authentication auth keeps jump hosts one
+// level deep, each with a saved credential.
+func jumpOK(ownerID, id int64, jump *int64, auth string) (string, []any) {
+	return `(? IS NULL OR (? != ? AND EXISTS (SELECT 1 FROM hosts j WHERE j.owner_id = ? AND j.id = ? AND j.jump_host_id IS NULL
+		       AND j.auth != 'ask' AND j.credential_id IS NOT NULL)))
+		 AND ((? IS NULL AND ? != 'ask') OR NOT EXISTS (SELECT 1 FROM hosts d WHERE d.owner_id = ? AND d.jump_host_id = ?))`,
+		[]any{jump, jump, id, ownerID, jump, jump, auth, ownerID, id}
+}
+
+// CreateHost saves a new host. On an error, the host returned is non-nil
+// only if it was saved (and reading it back failed).
 func (s *Store) CreateHost(ctx context.Context, h *Host) (*Host, error) {
 	now := s.unix()
+	cond, args := jumpOK(h.OwnerID, 0, h.JumpHostID, h.Auth)
 	res, err := s.db.ExecContext(ctx,
-		`INSERT INTO hosts (owner_id, name, address, port, username, auth, credential_id, persistence, tmux_session, herdr_session, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		h.OwnerID, h.Name, h.Address, h.Port, h.Username, h.Auth, h.CredentialID, h.Persistence, h.TmuxSession, h.HerdrSession, now, now)
+		`INSERT INTO hosts (owner_id, name, address, port, username, auth, credential_id, persistence, tmux_session, herdr_session, created_at, updated_at, jump_host_id)
+		 SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE `+cond,
+		append([]any{h.OwnerID, h.Name, h.Address, h.Port, h.Username, h.Auth, h.CredentialID, h.Persistence, h.TmuxSession, h.HerdrSession, now, now, h.JumpHostID}, args...)...)
 	if err != nil {
 		return nil, err
 	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return nil, ErrJumpConflict
+	}
+	// Saved: from here on a host is returned, also if reading it back fails.
 	id, _ := res.LastInsertId()
-	return s.Host(ctx, h.OwnerID, id)
+	created, err := s.Host(ctx, h.OwnerID, id)
+	if err != nil {
+		saved := *h
+		saved.ID = id
+		return &saved, err
+	}
+	return created, nil
 }
 
 // UpdateHost saves a host if it is still at h.Version (ErrNotFound if not)
-// and bumps that; with newConn it also bumps the connection version.
+// and bumps that; with newConn it also bumps the connection version, its
+// own and that of the hosts reached through it.
 func (s *Store) UpdateHost(ctx context.Context, h *Host, newConn bool) error {
 	bump := 0
 	if newConn {
 		bump = 1
 	}
-	return affectedOrNotFound(s.db.ExecContext(ctx,
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	cond, args := jumpOK(h.OwnerID, h.ID, h.JumpHostID, h.Auth)
+	res, err := tx.ExecContext(ctx,
 		`UPDATE hosts SET name = ?, address = ?, port = ?, username = ?, auth = ?, credential_id = ?, persistence = ?, tmux_session = ?,
-		   herdr_session = ?, updated_at = ?, conn_version = conn_version + ?, version = version + 1
-		 WHERE owner_id = ? AND id = ? AND version = ?`,
-		h.Name, h.Address, h.Port, h.Username, h.Auth, h.CredentialID, h.Persistence, h.TmuxSession, h.HerdrSession, s.unix(), bump,
-		h.OwnerID, h.ID, h.Version))
+		   herdr_session = ?, jump_host_id = ?, updated_at = ?, conn_version = conn_version + ?, version = version + 1
+		 WHERE owner_id = ? AND id = ? AND version = ? AND `+cond,
+		append([]any{h.Name, h.Address, h.Port, h.Username, h.Auth, h.CredentialID, h.Persistence, h.TmuxSession, h.HerdrSession, h.JumpHostID, s.unix(), bump,
+			h.OwnerID, h.ID, h.Version}, args...)...)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		// Changed or gone since (ErrNotFound), or the jump hosts no longer allow it.
+		var v int64
+		if err := tx.QueryRowContext(ctx, `SELECT version FROM hosts WHERE owner_id = ? AND id = ?`, h.OwnerID, h.ID).Scan(&v); err != nil || v != h.Version {
+			return ErrNotFound
+		}
+		return ErrJumpConflict
+	}
+	if newConn {
+		if _, err := tx.ExecContext(ctx, `UPDATE hosts SET conn_version = conn_version + 1 WHERE owner_id = ? AND jump_host_id = ?`, h.OwnerID, h.ID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
-// BumpConnVersion marks every existing connection to the host as outdated.
+// BumpConnVersion marks every existing connection to the host as outdated,
+// and those to the hosts reached through it.
 func (s *Store) BumpConnVersion(ctx context.Context, ownerID, id int64) error {
-	return affectedOrNotFound(s.db.ExecContext(ctx, `UPDATE hosts SET conn_version = conn_version + 1 WHERE owner_id = ? AND id = ?`, ownerID, id))
+	return affectedOrNotFound(s.db.ExecContext(ctx,
+		`UPDATE hosts SET conn_version = conn_version + 1 WHERE owner_id = ? AND (id = ? OR jump_host_id = ?)`, ownerID, id, id))
 }
+
+// ErrInUse: other hosts are reached through this one.
+var ErrInUse = errors.New("other hosts are reached through this host")
 
 func (s *Store) DeleteHost(ctx context.Context, ownerID, id int64) error {
-	return affectedOrNotFound(s.db.ExecContext(ctx, `DELETE FROM hosts WHERE owner_id = ? AND id = ?`, ownerID, id))
+	var n int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM hosts WHERE owner_id = ? AND jump_host_id = ?`, ownerID, id).Scan(&n); err != nil {
+		return err
+	}
+	if n > 0 {
+		return ErrInUse
+	}
+	err := affectedOrNotFound(s.db.ExecContext(ctx, `DELETE FROM hosts WHERE owner_id = ? AND id = ?`, ownerID, id))
+	if err != nil && strings.Contains(err.Error(), "FOREIGN KEY") {
+		return ErrInUse // (one was set to go through it meanwhile)
+	}
+	return err
+}
+
+// HostsThrough lists the names of the owner's hosts reached through a host.
+func (s *Store) HostsThrough(ctx context.Context, ownerID, id int64) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT name FROM hosts WHERE owner_id = ? AND jump_host_id = ? ORDER BY name COLLATE NOCASE`, ownerID, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			return nil, err
+		}
+		out = append(out, n)
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) TouchHostConnected(ctx context.Context, ownerID, id int64) error {

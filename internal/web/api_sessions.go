@@ -173,6 +173,15 @@ func (s *Server) openSession(ctx context.Context, w http.ResponseWriter, r *http
 		}
 		t.Password, t.PrivateKey, t.Passphrase = sec.Password, []byte(sec.PrivateKey), []byte(sec.Passphrase)
 	}
+	var jumpVersion int64
+	if t.Jump, jumpVersion, err = s.jumpTarget(ctx, h); err != nil {
+		if ctx.Err() != nil {
+			writeError(w, http.StatusUnauthorized, "unauthorized", "please sign in")
+			return
+		}
+		writeJumpError(w, err)
+		return
+	}
 	res, err := s.terms.Reserve(u.ID)
 	if err != nil {
 		writeError(w, http.StatusTooManyRequests, "too_many_sessions", "close some sessions first")
@@ -204,6 +213,14 @@ func (s *Server) openSession(ctx context.Context, w http.ResponseWriter, r *http
 	if err != nil {
 		var hk *sshx.HostKeyChangedError
 		switch {
+		case jumpProblem(err) != "":
+			// (Before the host key case: the jump host's key is not this host's.)
+			if ctx.Err() != nil {
+				writeError(w, http.StatusUnauthorized, "unauthorized", "please sign in")
+				break
+			}
+			s.audit(r, "session.connect_failed", hostTarget(h), map[string]any{"reason": "jump host: " + jumpReason(err)})
+			writeJumpError(w, err)
 		case errors.As(err, &hk):
 			s.audit(r, "hostkey.mismatch", hostTarget(h), map[string]any{"expected": hk.Expected, "got": hk.Got})
 			writeErrorExtra(w, http.StatusConflict, "host_key_changed", "the host key has changed",
@@ -229,8 +246,18 @@ func (s *Server) openSession(ctx context.Context, w http.ResponseWriter, r *http
 		_ = s.store.BumpConnVersion(ctx, u.ID, h.ID)
 		s.closeHostForwards(u.ID, h.ID)
 		s.forgetHostCode(u.ID, h.ID)
+		s.forgetThrough(ctx, u.ID, h.ID)
 		if nh, err := s.store.Host(ctx, u.ID, h.ID); err == nil {
 			cfg = hostConfig(nh)
+		}
+		// The new version labels this connection, so it must be one made
+		// with what that version is: not if the jump host changed meanwhile.
+		if h.JumpHostID != nil {
+			if j, err := s.store.Host(ctx, u.ID, *h.JumpHostID); err != nil || j.ConnVersion != jumpVersion {
+				dialed.Client.Close()
+				writeError(w, http.StatusConflict, "host_changed", "the jump host was changed meanwhile; open the host again")
+				return
+			}
 		}
 	}
 	// Last check before anything runs on the host.

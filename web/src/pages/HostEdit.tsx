@@ -23,12 +23,23 @@ export function HostEditPage({ id }: { id?: number }) {
   const [herdrName, setHerdrName] = useState('')
   const [tmuxName, setTmuxName] = useState('')
   const [keys, setKeys] = useState<KeyCred[]>([])
+  const [jumpId, setJumpId] = useState<number | null>(null)
+  const [hosts, setHosts] = useState<Host[] | null>(null) // null until loaded
+  const [hostsFailed, setHostsFailed] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<{ field?: string; text: string } | null>(null)
   // The host's version the form shows; an edit is refused if it was saved
   // elsewhere since (stale), and the form can then be opened again.
   const [version, setVersion] = useState<number | undefined>(undefined)
   const [stale, setStale] = useState(false)
+
+  // The user's hosts, for the jump host choice.
+  const loadHosts = useCallback(() => {
+    setHostsFailed(false)
+    api<Host[]>('GET', '/api/hosts')
+      .then(setHosts)
+      .catch(() => setHostsFailed(true))
+  }, [])
 
   const fill = useCallback((h: Host) => {
     setName(h.name)
@@ -42,12 +53,15 @@ export function HostEditPage({ id }: { id?: number }) {
     setPersist(h.persistence)
     setHerdrName(h.herdr_session ?? '')
     setTmuxName(h.tmux_session)
+    setJumpId(h.jump_host_id ?? null)
+    if (h.jump_host_id) setAdvOpen(true)
     setVersion(h.version)
     setLoaded(true)
   }, [])
 
   useEffect(() => {
     api<KeyCred[]>('GET', '/api/credentials').then(setKeys).catch(() => {})
+    loadHosts()
     if (!editing) return
     api<Host>('GET', '/api/hosts/' + id)
       .then(fill)
@@ -55,7 +69,7 @@ export function HostEditPage({ id }: { id?: number }) {
         toast(errorText(e), true)
         navigate('/', true)
       })
-  }, [editing, id, toast, fill])
+  }, [editing, id, toast, fill, loadHosts])
 
   const reopen = async () => {
     if (busy) return
@@ -116,6 +130,7 @@ export function HostEditPage({ id }: { id?: number }) {
       persistence: persist,
       tmux_session: persist === 'tmux' ? tmuxName : keep(tmuxName),
       herdr_session: persist === 'herdr' ? herdrName : keep(herdrName),
+      jump_host_id: jumpId,
     }
     try {
       if (editing) await api('PUT', '/api/hosts/' + id, { ...body, version })
@@ -125,12 +140,17 @@ export function HostEditPage({ id }: { id?: number }) {
       const field = err instanceof ApiError ? err.field : undefined
       setStale(err instanceof ApiError && err.code === 'host_changed')
       setError({ field, text: err instanceof ApiError && err.code === 'invalid_field' ? fieldMessage(field, err.message) : errorText(err) })
-      if (field === 'tmux_session' || field === 'herdr_session') setAdvOpen(true)
+      if (field === 'tmux_session' || field === 'herdr_session' || field === 'jump_host_id') setAdvOpen(true)
       setBusy(false)
     }
   }
 
   const fe = (f: string) => (error?.field === f ? error.text : undefined)
+  // Hosts this one can go through: the user's others that are reached
+  // directly and have a saved credential (and the one chosen, whatever it is now).
+  const jumpChoices = (hosts ?? []).filter((h) => h.id === jumpId || (h.id !== id && !h.jump_host_id && h.auth !== 'ask'))
+  // The chosen one, when it is not (yet) among them: still shown as chosen.
+  const jumpMissing = jumpId !== null && !jumpChoices.some((h) => h.id === jumpId)
   const selectedKey = keys.find((k) => k.id === credentialId)
   if (!loaded) return <main className="page page-form"><p className="loading">{t('common.loading')}</p></main>
 
@@ -170,6 +190,11 @@ export function HostEditPage({ id }: { id?: number }) {
               </button>
             ))}
           </div>
+          {fe('auth') && (
+            <p className="err" role="alert">
+              {fe('auth')}
+            </p>
+          )}
         </div>
 
         {auth === 'password' && (
@@ -231,6 +256,32 @@ export function HostEditPage({ id }: { id?: number }) {
             {t('host.advanced')}
           </summary>
           <div className="form">
+            <Field label={t('host.jump')} htmlFor="h-jump" hint={t('host.jumpHint')} error={fe('jump_host_id')}>
+              <select
+                id="h-jump"
+                className="select"
+                value={jumpId ?? ''}
+                onChange={(e) => setJumpId(e.target.value ? Number(e.target.value) : null)}
+                aria-invalid={!!fe('jump_host_id')}
+                aria-describedby="h-jump-desc"
+              >
+                <option value="">{t('host.jumpNone')}</option>
+                {jumpMissing && <option value={jumpId!}>{hostsFailed ? t('host.jumpUnknown') : hosts === null ? t('common.loading') : t('host.jumpGone')}</option>}
+                {jumpChoices.map((h) => (
+                  <option key={h.id} value={h.id}>
+                    {t('host.jumpOption', { name: h.name, target: h.username + '@' + h.address })}
+                  </option>
+                ))}
+              </select>
+              {hostsFailed && (
+                <p className="err" role="alert">
+                  {t('host.jumpLoadFailed')}{' '}
+                  <button type="button" className="btn btn-ghost" onClick={loadHosts}>
+                    {t('common.retry')}
+                  </button>
+                </p>
+              )}
+            </Field>
             {persist === 'tmux' && (
               <Field label={t('host.tmuxSession')} htmlFor="h-tmux" optional error={fe('tmux_session')}>
                 <input id="h-tmux" className="input mono" value={tmuxName} onChange={(e) => setTmuxName(e.target.value)} autoCapitalize="none" autoCorrect="off" spellCheck={false} />
@@ -260,7 +311,18 @@ export function HostEditPage({ id }: { id?: number }) {
 }
 
 // Server field messages are English; the common ones have a translation.
+const fieldMessages: Record<string, Parameters<typeof t>[0]> = {
+  'a host cannot be reached through itself': 'hostField.jumpSelf',
+  'choose one of your hosts': 'hostField.jumpChoose',
+  'that host is itself reached through another one': 'hostField.jumpChained',
+  'that host needs a saved password or key to be a jump host': 'hostField.jumpNoCred',
+  'other hosts are reached through this one, so it cannot use a jump host itself': 'hostField.jumpHasDependents',
+  'other hosts are reached through this one: it needs a saved password or key': 'hostField.authJumpNeeds',
+}
+
 function fieldMessage(field: string | undefined, fallback: string): string {
+  const byMessage = fieldMessages[fallback]
+  if (byMessage) return t(byMessage)
   const key = field === 'herdr_session' ? 'hostField.tmux_session' : 'hostField.' + field
   return hasKey(key) ? t(key) : fallback
 }

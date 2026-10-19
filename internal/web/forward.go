@@ -465,20 +465,11 @@ func (s *Server) dialForward(ctx context.Context, ownerID, hostID int64) (*ssh.C
 	if err != nil {
 		return nil, 0, err
 	}
-	if h.Auth == store.AuthAsk || h.CredentialID == nil {
-		return nil, 0, errors.New("no stored credential")
-	}
-	_, sec, err := s.openCredential(ctx, ownerID, *h.CredentialID)
+	t, err := s.storedTarget(ctx, h)
 	if err != nil {
 		return nil, 0, err
 	}
-	k, err := s.store.HostKey(ctx, ownerID, h.ID)
-	if err != nil {
-		return nil, 0, errors.New("connect to this host once from a terminal first")
-	}
-	dialed, err := sshx.Dial(ctx, s.guard, sshx.Target{Address: h.Address, Port: h.Port, User: h.Username,
-		Password: sec.Password, PrivateKey: []byte(sec.PrivateKey), Passphrase: []byte(sec.Passphrase),
-		Pinned: &sshx.Pinned{KeyType: k.KeyType, KeyData: k.KeyData, Fingerprint: k.Fingerprint}})
+	dialed, err := sshx.Dial(ctx, s.guard, *t)
 	if err != nil {
 		return nil, 0, err
 	}

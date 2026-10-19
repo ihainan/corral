@@ -132,16 +132,17 @@ export function HostsPage() {
             return (
               <li key={h.id} className="row-group">
                 <div className="row">
-                  <button className="row-main" onClick={() => connect(h)} disabled={busyHost === h.id} aria-label={`${t('hosts.connect')} ${h.name}`}>
+                  <button className="row-main" onClick={() => connect(h)} disabled={busyHost === h.id} aria-label={`${t('hosts.connect')} ${h.name}`} aria-describedby={'hs-' + h.id}>
                     <Server className="row-icon" size={18} strokeWidth={1.75} />
                     <span className="row-title">{h.name}</span>
                     <span className="row-meta">
                       {busyHost === h.id ? t('hosts.connecting') : h.last_connected_at ? relTime(h.last_connected_at) : ''}
                     </span>
-                    <span className="row-sub">
+                    <span className="row-sub" id={'hs-' + h.id}>
                       {h.username}@{h.address}
                       {h.port !== 22 ? ':' + h.port : ''}
                       {h.persistence !== 'none' ? ' · ' + h.persistence : ''}
+                      {h.jump_host_id ? ' · ' + t('host.via', { name: hosts?.find((x) => x.id === h.jump_host_id)?.name ?? '?' }) : ''}
                     </span>
                   </button>
                   <div className="row-actions">

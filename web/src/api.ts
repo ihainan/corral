@@ -28,6 +28,7 @@ export interface Host {
   username: string
   auth: 'password' | 'key' | 'ask'
   credential_id: number | null
+  jump_host_id: number | null // reached through this host of the user's
   persistence: 'none' | 'tmux' | 'herdr'
   tmux_session: string
   herdr_session: string
@@ -96,6 +97,11 @@ export class ApiError extends Error {
   get human(): string {
     if (this.code === 'locked') return t('error.locked', { s: Number(this.extra.retry_after ?? 60) })
     if (this.code === 'in_use') return t('error.in_use', { hosts: ((this.extra.hosts as string[]) ?? []).join('、') })
+    if (this.code === 'jump_in_use') return t('error.jump_in_use', { hosts: ((this.extra.hosts as string[]) ?? []).join('、') })
+    if (this.code === 'jump_failed') {
+      const why = 'reason.' + String(this.extra.reason ?? '')
+      return t('error.jump_failed') + (hasKey(why) ? t('reason.wrap', { reason: t(why as Parameters<typeof t>[0]) }) : '')
+    }
     const key = 'error.' + this.code
     if (hasKey(key)) return t(key)
     if (this.code === 'network') return t('error.network')

@@ -655,19 +655,7 @@ func (s *Server) probeCode(ctx context.Context, c *ssh.Client) (*codeserver.Prob
 // end is unknown is settled on the machine and account it ran on, also
 // after the host was edited or deleted.
 func (s *Server) codeTarget(ctx context.Context, h *store.Host) (*sshx.Target, error) {
-	if h.CredentialID == nil {
-		return nil, errors.New("no stored credential")
-	}
-	_, sec, err := s.openCredential(ctx, h.OwnerID, *h.CredentialID)
-	if err != nil {
-		return nil, err
-	}
-	k, err := s.store.HostKey(ctx, h.OwnerID, h.ID)
-	if err != nil {
-		return nil, err
-	}
-	return &sshx.Target{Address: h.Address, Port: h.Port, User: h.Username, Password: sec.Password, PrivateKey: []byte(sec.PrivateKey),
-		Passphrase: []byte(sec.Passphrase), Pinned: &sshx.Pinned{KeyType: k.KeyType, KeyData: k.KeyData, Fingerprint: k.Fingerprint}}, nil
+	return s.storedTarget(ctx, h)
 }
 
 // Cleanups ---------------------------------------------------------------------
@@ -1115,8 +1103,7 @@ func (s *Server) stopCode(ctx context.Context, key [2]int64, h *store.Host, f *s
 func (s *Server) codeStopperFor(ctx context.Context, h *store.Host) func() {
 	key := [2]int64{h.OwnerID, h.ID}
 	s.code.mu.Lock()
-	cl := s.code.cleanup[key]
-	delete(s.code.cleanup, key)
+	cl := s.code.cleanup[key] // (taken when the stopper runs: the delete may yet be refused)
 	s.code.mu.Unlock()
 	var t *sshx.Target
 	if s.cfg.CodeServer && h.Auth != store.AuthAsk && h.CredentialID != nil && s.store.HasCodeForward(ctx, h.OwnerID, h.ID) {
@@ -1127,6 +1114,13 @@ func (s *Server) codeStopperFor(ctx context.Context, h *store.Host) func() {
 	}
 	return func() {
 		s.code.mu.Lock()
+		// Settled only if still waiting (not settled elsewhere meanwhile).
+		cl := cl
+		if cl != nil && s.code.cleanup[key] == cl {
+			delete(s.code.cleanup, key)
+		} else {
+			cl = nil
+		}
 		if s.code.closed {
 			s.code.mu.Unlock()
 			return

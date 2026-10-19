@@ -265,10 +265,12 @@ func TestHerdrReplyRacesAndOutcomes(t *testing.T) {
 	wg.Wait()
 	close(statuses)
 	ok := 0
+	// (Refused as already answered, or as too busy: a connection of the
+	// one before may not be given back yet. Either way, typed once.)
 	for st := range statuses {
 		if st == 200 {
 			ok++
-		} else if st != 409 {
+		} else if st != 409 && st != 429 {
 			t.Fatalf("concurrent answer: status %d", st)
 		}
 	}

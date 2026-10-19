@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 
@@ -36,7 +37,8 @@ func (s *Server) saveCredential(ctx context.Context, ownerID int64, name, kind, 
 		return 0, err
 	}
 	if err := s.sealInto(ctx, ownerID, id, sec); err != nil {
-		_ = s.store.DeleteCredential(ctx, ownerID, id)
+		// (Removed also when the request was given up meanwhile.)
+		_ = s.store.DeleteCredential(context.WithoutCancel(ctx), ownerID, id)
 		return 0, err
 	}
 	return id, nil
@@ -80,6 +82,7 @@ type hostBody struct {
 	Auth         string `json:"auth"`
 	Password     string `json:"password"`      // auth=password: new password (empty keeps the stored one)
 	CredentialID *int64 `json:"credential_id"` // auth=key
+	JumpHostID   *int64 `json:"jump_host_id"`  // reached through this host of the user's, or null
 	Persistence  string `json:"persistence"`
 	TmuxSession  string `json:"tmux_session"`
 	HerdrSession string `json:"herdr_session"`
@@ -112,7 +115,9 @@ type fieldError struct{ field, msg string }
 
 func (e *fieldError) Error() string { return e.field + ": " + e.msg }
 
-func (s *Server) validateHost(ctx context.Context, owner *store.User, b *hostBody) error {
+// validateHost checks a host's form; hostID is the host being edited (0 when
+// creating).
+func (s *Server) validateHost(ctx context.Context, owner *store.User, hostID int64, b *hostBody) error {
 	b.Name = strings.TrimSpace(b.Name)
 	b.Address = strings.TrimSpace(b.Address)
 	b.Username = strings.TrimSpace(b.Username)
@@ -162,6 +167,35 @@ func (s *Server) validateHost(ctx context.Context, owner *store.User, b *hostBod
 	}
 	if !tmuxNameRE.MatchString(b.TmuxSession) {
 		return &fieldError{"tmux_session", "letters, digits, dash and underscore only"}
+	}
+	// Hosts reached through this one need it reachable directly, with a
+	// saved credential.
+	var through []string
+	if hostID != 0 {
+		var err error
+		if through, err = s.store.HostsThrough(ctx, owner.ID, hostID); err != nil {
+			return err
+		}
+	}
+	if len(through) > 0 && b.Auth == store.AuthAsk {
+		return &fieldError{"auth", "other hosts are reached through this one: it needs a saved password or key"}
+	}
+	if b.JumpHostID != nil {
+		if *b.JumpHostID == hostID {
+			return &fieldError{"jump_host_id", "a host cannot be reached through itself"}
+		}
+		j, err := s.store.Host(ctx, owner.ID, *b.JumpHostID)
+		if err != nil {
+			return &fieldError{"jump_host_id", "choose one of your hosts"}
+		}
+		switch {
+		case j.JumpHostID != nil:
+			return &fieldError{"jump_host_id", "that host is itself reached through another one"}
+		case j.Auth == store.AuthAsk || j.CredentialID == nil:
+			return &fieldError{"jump_host_id", "that host needs a saved password or key to be a jump host"}
+		case len(through) > 0:
+			return &fieldError{"jump_host_id", "other hosts are reached through this one, so it cannot use a jump host itself"}
+		}
 	}
 	return nil
 }
@@ -213,12 +247,12 @@ func (s *Server) apiCreateHost(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
-	if err := s.validateHost(r.Context(), u, &b); err != nil {
+	if err := s.validateHost(r.Context(), u, 0, &b); err != nil {
 		writeFieldError(w, err)
 		return
 	}
 	h := &store.Host{OwnerID: u.ID, Name: b.Name, Address: b.Address, Port: b.Port, Username: b.Username,
-		Auth: b.Auth, Persistence: b.Persistence, TmuxSession: b.TmuxSession, HerdrSession: b.HerdrSession}
+		Auth: b.Auth, Persistence: b.Persistence, TmuxSession: b.TmuxSession, HerdrSession: b.HerdrSession, JumpHostID: b.JumpHostID}
 	switch b.Auth {
 	case store.AuthKey:
 		h.CredentialID = b.CredentialID
@@ -235,6 +269,14 @@ func (s *Server) apiCreateHost(w http.ResponseWriter, r *http.Request) {
 		h.CredentialID = &id
 	}
 	created, err := s.store.CreateHost(r.Context(), h)
+	if err != nil && created == nil && b.Auth == store.AuthPassword && h.CredentialID != nil {
+		// Not saved: the password made for it goes too.
+		_ = s.store.DeleteCredential(context.WithoutCancel(r.Context()), u.ID, *h.CredentialID)
+	}
+	if errors.Is(err, store.ErrJumpConflict) {
+		writeError(w, http.StatusConflict, "jump_conflict", "the jump host cannot be used; it was changed meanwhile")
+		return
+	}
 	if err != nil {
 		s.internalError(w, r, err)
 		return
@@ -281,11 +323,11 @@ func (s *Server) updateHost(w http.ResponseWriter, r *http.Request, b *hostBody)
 		writeHostChanged(w)
 		return
 	}
-	if err := s.validateHost(r.Context(), u, b); err != nil {
+	if err := s.validateHost(r.Context(), u, h.ID, b); err != nil {
 		writeFieldError(w, err)
 		return
 	}
-	endpointChanged := h.Address != b.Address || h.Port != b.Port
+	endpointChanged := h.Address != b.Address || h.Port != b.Port || !sameID(h.JumpHostID, b.JumpHostID)
 	// Anything that changes what a connection to the host is: connections
 	// made before are then neither reused nor borrowed nor kept in the pool.
 	connChanged := endpointChanged || h.Username != b.Username || h.Auth != b.Auth ||
@@ -295,8 +337,13 @@ func (s *Server) updateHost(w http.ResponseWriter, r *http.Request, b *hostBody)
 	h.Name, h.Address, h.Port, h.Username, h.Persistence, h.TmuxSession = b.Name, b.Address, b.Port, b.Username, b.Persistence, b.TmuxSession
 	h.HerdrSession = b.HerdrSession
 	h.Auth = b.Auth
+	h.JumpHostID = b.JumpHostID
 
 	var dropCred *int64 // a host-private password credential that is no longer used
+	// A new password goes into a credential of its own, which the host is
+	// switched to in the same save: refused, the host keeps its old one and
+	// the new one is removed.
+	var madeCred *int64
 	switch b.Auth {
 	case store.AuthKey:
 		h.CredentialID = b.CredentialID
@@ -309,46 +356,57 @@ func (s *Server) updateHost(w http.ResponseWriter, r *http.Request, b *hostBody)
 			dropCred = oldCred
 		}
 	case store.AuthPassword:
-		if oldAuth == store.AuthPassword && oldCred != nil {
-			if b.Password != "" {
-				if err := s.sealInto(r.Context(), u.ID, *oldCred, secret{Password: b.Password}); err != nil {
-					s.internalError(w, r, err)
-					return
-				}
-			}
-		} else {
-			if b.Password == "" {
-				writeErrorExtra(w, http.StatusUnprocessableEntity, "invalid_field", "enter the password", map[string]string{"field": "password"})
-				return
-			}
+		keep := oldAuth == store.AuthPassword && oldCred != nil
+		if b.Password == "" && !keep {
+			writeErrorExtra(w, http.StatusUnprocessableEntity, "invalid_field", "enter the password", map[string]string{"field": "password"})
+			return
+		}
+		if b.Password != "" {
 			id, err := s.saveCredential(r.Context(), u.ID, "password for "+b.Name, store.CredPassword, "", secret{Password: b.Password})
 			if err != nil {
 				s.internalError(w, r, err)
 				return
 			}
 			h.CredentialID = &id
+			madeCred = &id
+			if keep {
+				dropCred = oldCred
+			}
 		}
 	}
-	if err := s.store.UpdateHost(r.Context(), h, connChanged); errors.Is(err, store.ErrNotFound) {
-		writeHostChanged(w) // changed or deleted since it was read
-		return
-	} else if err != nil {
-		s.internalError(w, r, err)
+	err := s.store.UpdateHost(r.Context(), h, connChanged)
+	// What follows the save is done whatever becomes of the request.
+	bg, cancelBg := context.WithTimeout(context.WithoutCancel(r.Context()), 10*time.Second)
+	defer cancelBg()
+	if err != nil {
+		if madeCred != nil {
+			_ = s.store.DeleteCredential(bg, u.ID, *madeCred)
+		}
+		switch {
+		case errors.Is(err, store.ErrNotFound):
+			writeHostChanged(w) // changed or deleted since it was read
+		case errors.Is(err, store.ErrJumpConflict):
+			writeError(w, http.StatusConflict, "jump_conflict", "the jump hosts were changed meanwhile; check and save again")
+		default:
+			s.internalError(w, r, err)
+		}
 		return
 	}
 	if dropCred != nil {
-		_ = s.store.DeleteCredential(r.Context(), u.ID, *dropCred)
+		_ = s.store.DeleteCredential(bg, u.ID, *dropCred)
 	}
 	if endpointChanged {
-		_ = s.store.ForgetHostKey(r.Context(), u.ID, h.ID) // a different machine is verified afresh
+		_ = s.store.ForgetHostKey(bg, u.ID, h.ID) // a different machine is verified afresh
 	}
 	if connChanged {
-		// Nothing open through the old settings carries on.
+		// Nothing open through the old settings carries on, here or on the
+		// hosts reached through this one.
 		s.closeHostForwards(u.ID, h.ID)
 		s.forgetHostCode(u.ID, h.ID)
+		s.forgetThrough(bg, u.ID, h.ID)
 	}
 	s.audit(r, "host.update", hostTarget(h), map[string]any{"endpoint_changed": endpointChanged, "connection_changed": connChanged})
-	updated, _ := s.store.Host(r.Context(), u.ID, h.ID)
+	updated, _ := s.store.Host(bg, u.ID, h.ID)
 	writeJSON(w, http.StatusOK, updated)
 }
 
@@ -368,10 +426,19 @@ func (s *Server) deleteHost(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// Hosts reached through it keep it.
+	if names, err := s.store.HostsThrough(r.Context(), u.ID, h.ID); err == nil && len(names) > 0 {
+		writeErrorExtra(w, http.StatusConflict, "jump_in_use", "other hosts are reached through this host", map[string]any{"hosts": names})
+		return
+	}
 	// VS Code left running on the host is stopped (best effort, after the
 	// delete, with what is needed to reach the host read now).
 	stopCode := s.codeStopperFor(r.Context(), h)
-	if err := s.store.DeleteHost(r.Context(), u.ID, h.ID); err != nil {
+	if err := s.store.DeleteHost(r.Context(), u.ID, h.ID); errors.Is(err, store.ErrInUse) {
+		names, _ := s.store.HostsThrough(r.Context(), u.ID, h.ID)
+		writeErrorExtra(w, http.StatusConflict, "jump_in_use", "other hosts are reached through this host", map[string]any{"hosts": names})
+		return
+	} else if err != nil {
 		s.internalError(w, r, err)
 		return
 	}

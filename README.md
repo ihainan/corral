@@ -62,6 +62,8 @@ keeps running and you pick it up where it was — on the same device or another.
 - Accounts by invitation, administrators and members, each with their own
   hosts and keys. SSH passwords and keys are encrypted at rest and never sent
   to the browser.
+- Hosts behind another host are reached through it (a jump host, one level):
+  any of your hosts with a saved password or key.
 - Two-step sign-in with an authenticator app, with recovery codes.
 - An audit log of sign-ins, connections, file changes and administration.
 - Optional session recording (asciicast, played back in the browser) and
@@ -182,6 +184,11 @@ All settings are environment variables.
   when you turn recording on — the terminal tells them it is recorded.
 - **Watching** shows the screen, recent output included, to the people the
   owner adds; they cannot type, resize or use anything else.
+- **Jump hosts.** `CORRAL_ALLOWED_NETWORKS` applies to what the gateway
+  connects to itself, the jump host included. The hop from a jump host to the
+  host behind it starts on the jump host, where the user can log in anyway;
+  only addresses that are never a host (link-local, multicast, unspecified)
+  are refused there.
 
 Report security problems privately to the maintainers rather than in a
 public issue.

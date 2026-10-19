@@ -88,3 +88,19 @@ func (g *Guard) DialTCP(ctx context.Context, host string, port int) (net.Conn, e
 	}
 	return nil, lastErr
 }
+
+// CheckLiteral refuses an address that is never a host, whatever the network:
+// unspecified, link-local (cloud metadata lives there) and multicast. It is
+// for destinations the gateway does not dial itself (the second hop through
+// a jump host, which resolves names on its side); names pass.
+func CheckLiteral(host string) error {
+	a, err := netip.ParseAddr(host)
+	if err != nil {
+		return nil
+	}
+	a = a.Unmap()
+	if a.IsUnspecified() || a.IsLinkLocalUnicast() || a.IsLinkLocalMulticast() || a.IsMulticast() || a.IsInterfaceLocalMulticast() {
+		return fmt.Errorf("%w: %s", ErrForbidden, a)
+	}
+	return nil
+}

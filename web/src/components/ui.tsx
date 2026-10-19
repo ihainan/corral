@@ -399,7 +399,15 @@ export function Field(props: { label: string; htmlFor?: string; optional?: boole
         {props.optional && <span className="opt">{t('common.optional')}</span>}
       </label>
       {props.children}
-      {props.error ? <p className="err">{props.error}</p> : props.hint ? <p className="hint">{props.hint}</p> : null}
+      {props.error ? (
+        <p className="err" id={props.htmlFor ? props.htmlFor + '-desc' : undefined}>
+          {props.error}
+        </p>
+      ) : props.hint ? (
+        <p className="hint" id={props.htmlFor ? props.htmlFor + '-desc' : undefined}>
+          {props.hint}
+        </p>
+      ) : null}
     </div>
   )
 }
