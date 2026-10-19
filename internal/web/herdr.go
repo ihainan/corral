@@ -211,13 +211,15 @@ func writeHerdrError(w http.ResponseWriter, err error) {
 	writeError(w, http.StatusBadGateway, "herdr_unavailable", "cannot reach herdr")
 }
 
-// POST /api/sessions/{id}/herdr {"action":"focus_workspace"|"focus_pane","target":"…"}
+// POST /api/sessions/{id}/herdr {"action":"focus_workspace"|"focus_pane"|"zoom_pane"|"unzoom","target":"…"}
+// zoom_pane focuses a pane and has it fill its tab; unzoom (no target) ends
+// that for the focused pane.
 func (s *Server) apiHerdrAction(w http.ResponseWriter, r *http.Request) {
 	var b struct {
 		Action string `json:"action"`
 		Target string `json:"target"`
 	}
-	if err := readJSON(r, &b); err != nil || b.Target == "" || len(b.Target) > 64 {
+	if err := readJSON(r, &b); err != nil || len(b.Target) > 64 || (b.Target == "") != (b.Action == "unzoom") {
 		writeError(w, http.StatusBadRequest, "bad_request", "action and target are required")
 		return
 	}
@@ -234,6 +236,10 @@ func (s *Server) apiHerdrAction(w http.ResponseWriter, r *http.Request) {
 		err = c.FocusWorkspace(ctx, b.Target)
 	case "focus_pane":
 		err = c.FocusPane(ctx, b.Target)
+	case "zoom_pane":
+		err = c.ZoomPane(ctx, b.Target, "on")
+	case "unzoom":
+		err = c.ZoomPane(ctx, "", "off")
 	default:
 		writeError(w, http.StatusBadRequest, "bad_request", "unknown action")
 		return

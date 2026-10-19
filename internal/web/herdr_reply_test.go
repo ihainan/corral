@@ -74,6 +74,9 @@ func (f *fakeHerdr) serve(c net.Conn) {
 			result = map[string]any{"snapshot": map[string]any{"version": "0.9.5", "workspaces": []any{}, "panes": []any{}}}
 		case "pane.read":
 			result = map[string]any{"read": map[string]any{"text": f.screen}}
+		case "pane.zoom":
+			req.Params["method"] = req.Method
+			f.sent = append(f.sent, req.Params)
 		case "pane.send_keys", "pane.send_input":
 			switch f.onSend {
 			case "refuse":
@@ -353,5 +356,22 @@ func TestHerdrReplyEndsWithTheLogin(t *testing.T) {
 	h.srv.replies.unlock(held)
 	if len(hd.typed()) != 0 {
 		t.Fatal("typed after signing out")
+	}
+}
+
+// zoom_pane has a pane fill its tab; unzoom ends that for the focused pane.
+func TestHerdrZoom(t *testing.T) {
+	h := newHarness(t)
+	admin := h.admin()
+	hd := newFakeHerdr(t)
+	_, id := herdrReplyEnv(t, h, admin, hd)
+	path := "/api/sessions/" + id + "/herdr"
+	mustStatus(t, admin.do("POST", path, map[string]any{"action": "zoom_pane", "target": "w1:p2"}), 200, "zoom")
+	mustStatus(t, admin.do("POST", path, map[string]any{"action": "unzoom"}), 200, "unzoom")
+	mustStatus(t, admin.do("POST", path, map[string]any{"action": "zoom_pane"}), 400, "zoom without a pane")
+	mustStatus(t, admin.do("POST", path, map[string]any{"action": "unzoom", "target": "w1:p2"}), 400, "unzoom with a pane")
+	s := hd.typed()
+	if len(s) != 2 || s[0]["pane_id"] != "w1:p2" || s[0]["mode"] != "on" || s[1]["mode"] != "off" || s[1]["pane_id"] != nil {
+		t.Fatalf("zoom requests: %v", s)
 	}
 }

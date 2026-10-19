@@ -270,6 +270,16 @@ func (c *Client) SendInput(ctx context.Context, paneID, text string, keys []stri
 	return c.Call(ctx, "pane.send_input", map[string]any{"pane_id": paneID, "text": text, "keys": keys}, nil)
 }
 
+// ZoomPane zooms a pane (focusing it) or ends the zoom, mode "on" or
+// "off"; paneID "" is the focused pane.
+func (c *Client) ZoomPane(ctx context.Context, paneID, mode string) error {
+	params := map[string]any{"mode": mode}
+	if paneID != "" {
+		params["pane_id"] = paneID
+	}
+	return c.Call(ctx, "pane.zoom", params, nil)
+}
+
 func (c *Client) FocusPane(ctx context.Context, paneID string) error {
 	return c.Call(ctx, "pane.focus", map[string]any{"pane_id": paneID}, nil)
 }

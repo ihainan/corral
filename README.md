@@ -37,7 +37,8 @@ keeps running and you pick it up where it was — on the same device or another.
   takes them. Shift+Enter inserts
   a newline.
 - With herdr, a panel lists workspaces and agents, shows who is waiting for
-  you, and switches between them.
+  you, switches between them, and shows one agent's pane full size (handy
+  on a phone) and back.
 - Answer an agent that waits in herdr without switching to it — from the
   panel or straight from its notification: you see its screen, tap one of
   its choices, Enter or Esc, or type a line. Nothing is typed if the screen

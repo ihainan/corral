@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react'
-import { X } from 'lucide-react'
+import { Maximize2, Minimize2, X } from 'lucide-react'
 import type { HerdrAgent, HerdrSummary } from '../api'
 import { hasKey, t } from '../i18n'
 import { leaveField, restoreFocus, useFocusTrap } from '../components/ui'
@@ -14,7 +14,7 @@ type PanelProps = {
   // While the connection is down the summary is old: shown, but not actionable.
   stale: boolean
   onClose: (viaKeyboard: boolean) => void
-  onFocus: (action: 'focus_workspace' | 'focus_pane', target: string) => void
+  onFocus: (action: 'focus_workspace' | 'focus_pane' | 'zoom_pane' | 'unzoom', target: string) => void
   onReply: (agent: HerdrAgent) => void // answer an agent that waits for the user
 }
 
@@ -76,7 +76,12 @@ function PanelBody(props: PanelProps) {
             s.waiting > 0 && <div className="herdr-waiting st-blocked">{t('herdr.waiting', { n: s.waiting })}</div>
           )}
         </div>
-        <button className="icon-btn" onClick={(e) => props.onClose(e.detail === 0)} aria-label={t('common.close')}><X size={18} /></button>
+        <div className="herdr-head-actions">
+          <button className="icon-btn" disabled={props.stale} onClick={() => props.onFocus('unzoom', '')} aria-label={t('herdr.unzoom')} title={t('herdr.unzoom')}>
+            <Minimize2 size={17} />
+          </button>
+          <button className="icon-btn" onClick={(e) => props.onClose(e.detail === 0)} aria-label={t('common.close')}><X size={18} /></button>
+        </div>
       </div>
       <ul className={'herdr-list' + (props.stale ? ' stale' : '')}>
         {s.workspaces.map((w) => (
@@ -97,6 +102,9 @@ function PanelBody(props: PanelProps) {
                         {a.title && <span className="herdr-agent-title">{a.title}</span>}
                       </span>
                       <span className={'herdr-status st-' + a.status}>{statusKey(a.status)}</span>
+                    </button>
+                    <button className="icon-btn herdr-zoom" disabled={props.stale} onClick={() => props.onFocus('zoom_pane', a.pane_id)} aria-label={t('herdr.zoom', { agent: a.agent })} title={t('herdr.zoom', { agent: a.agent })}>
+                      <Maximize2 size={16} />
                     </button>
                     {a.status === 'blocked' && (
                       <button className="herdr-reply" disabled={props.stale} onClick={() => props.onReply(a)} aria-label={t('reply.open', { agent: a.agent })}>
