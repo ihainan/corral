@@ -201,11 +201,18 @@ func TestTwoStepRaces(t *testing.T) {
 	}
 	_ = c
 
-	// Many wrong codes at once stay within the account's limit.
-	var bad atomic.Int32
-	var wg2 sync.WaitGroup
+	// Many wrong codes at once stay within the account's limit. (The
+	// challenges come first: a wrong code still being checked would count
+	// towards the account's backoff and lock out a later password step.)
+	h.store.ResetLoginFailures(ctx, h.userID(bob)) // the account backoff is tested elsewhere
+	var tokens []string
 	for i := 0; i < 4; i++ {
 		_, tk := loginStep(t, h, "bob", "bob-password-1")
+		tokens = append(tokens, tk)
+	}
+	var bad atomic.Int32
+	var wg2 sync.WaitGroup
+	for _, tk := range tokens {
 		for j := 0; j < 5; j++ {
 			wg2.Add(1)
 			go func() {
@@ -216,7 +223,6 @@ func TestTwoStepRaces(t *testing.T) {
 				}
 			}()
 		}
-		h.store.ResetLoginFailures(ctx, h.userID(bob)) // the account backoff is tested elsewhere
 	}
 	wg2.Wait()
 	if n := bad.Load(); n > 10 {
