@@ -7,9 +7,8 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/setup-go@v6
         with: { go-version-file: go.mod }
-      - uses: pnpm/action-setup@v4
-        with: { version: 10 }
       - uses: actions/setup-node@v5
         with: { node-version: 22 }
+      - run: corepack enable # pnpm at the version in web/package.json
       - run: make check
       - run: make build
