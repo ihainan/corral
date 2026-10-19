@@ -5,6 +5,7 @@ export interface Me {
   username: string
   display_name: string
   role: 'admin' | 'member'
+  totp?: boolean // two-step sign-in is on
 }
 
 export interface Bootstrap {
@@ -61,6 +62,7 @@ export interface AdminUser {
   display_name: string
   role: 'admin' | 'member'
   disabled: boolean
+  totp: boolean
   created_at: number
   open_sessions: number
 }

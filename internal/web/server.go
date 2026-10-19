@@ -91,6 +91,7 @@ func New(d Deps) *Server {
 	s.fwd.wg.Add(1)
 	go s.fwd.reap()
 	s.terms.OnAlert = s.onTerminalAlert
+	s.auth.UseVault(d.Vault) // authenticator secrets are sealed like host credentials
 	prev := s.auth.OnUserGone
 	s.auth.OnUserGone = func(userID int64) {
 		if prev != nil {
@@ -129,6 +130,7 @@ func (s *Server) registerRoutes() {
 	s.handle("GET /api/bootstrap", Public, s.apiBootstrap)
 	s.handle("POST /api/setup", Public, s.apiSetup)
 	s.handle("POST /api/login", Public, s.apiLogin)
+	s.handle("POST /api/login/code", Public, s.apiLoginMFA)
 	s.handle("GET /api/invites/{token}", Public, s.apiInviteInfo)
 	s.handle("POST /api/invites/{token}/redeem", Public, s.apiInviteRedeem)
 
@@ -139,6 +141,11 @@ func (s *Server) registerRoutes() {
 	s.handle("POST /api/me/password", SignedIn, s.apiChangePassword)
 	s.handle("GET /api/me/settings", SignedIn, s.apiGetSettings)
 	s.handle("PATCH /api/me/settings", SignedIn, s.apiPatchSettings)
+	s.handle("GET /api/me/totp", SignedIn, s.apiTOTPStatus)
+	s.handle("POST /api/me/totp/begin", SignedIn, s.apiTOTPBegin)
+	s.handle("POST /api/me/totp/enable", SignedIn, s.apiTOTPEnable)
+	s.handle("POST /api/me/totp/disable", SignedIn, s.apiTOTPDisable)
+	s.handle("POST /api/me/totp/recovery", SignedIn, s.apiTOTPRecovery)
 
 	s.handle("GET /api/hosts", SignedIn, s.apiListHosts)
 	s.handle("POST /api/hosts", SignedIn, s.apiCreateHost)
@@ -186,6 +193,7 @@ func (s *Server) registerRoutes() {
 	s.handle("GET /api/admin/users", AdminOnly, s.apiAdminListUsers)
 	s.handle("PUT /api/admin/users/{id}", AdminOnly, s.apiAdminUpdateUser)
 	s.handle("POST /api/admin/users/{id}/password", AdminOnly, s.apiAdminResetPassword)
+	s.handle("POST /api/admin/users/{id}/totp/reset", AdminOnly, s.apiAdminResetTOTP)
 	s.handle("POST /api/admin/invites", AdminOnly, s.apiAdminCreateInvite)
 	s.handle("GET /api/admin/audit", AdminOnly, s.apiAdminAudit)
 

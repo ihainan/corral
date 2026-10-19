@@ -8,6 +8,7 @@ import { linkHandler } from '../router'
 import { signOut, useSession } from '../app'
 import { Field, useToast } from '../components/ui'
 import { CurrentScheme, SchemeDialog } from '../terminal/SchemePicker'
+import { TwoStepSection } from './TwoStep'
 
 const fontSizes = [11, 12, 13, 14, 15, 16, 18, 20]
 
@@ -124,6 +125,7 @@ export function SettingsPage() {
 
       <ProfileSection />
       <PasswordSection />
+      <TwoStepSection />
 
       {/* Phones have no sidebar: admin pages and sign-out live here. */}
       <section className="section phone-only">

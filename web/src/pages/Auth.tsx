@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from 'react'
+import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { api, ApiError, errorText, type Me } from '../api'
 import { t } from '../i18n'
 import { navigate } from '../router'
@@ -35,19 +35,41 @@ export function LoginPage() {
   const [password, setPassword] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  const [challenge, setChallenge] = useState('') // set once the password was right and a code is due
+  const signedIn = (user: Me) => {
+    setMe(user)
+    syncPrefsFromServer(user.id)
+    navigate(nextPath(), true)
+  }
   const submit = async (e: FormEvent) => {
     e.preventDefault()
     setBusy(true)
     setError('')
     try {
-      const r = await api<{ user: Me }>('POST', '/api/login', { username, password })
-      setMe(r.user)
-      syncPrefsFromServer(r.user.id)
-      navigate(nextPath(), true)
+      const r = await api<{ user?: Me; code_required?: boolean; token?: string }>('POST', '/api/login', { username, password })
+      if (r.code_required && r.token) {
+        setPassword('')
+        setChallenge(r.token)
+        setBusy(false)
+        return
+      }
+      signedIn(r.user!)
     } catch (err) {
       setError(errorText(err))
       setBusy(false)
     }
+  }
+  if (challenge) {
+    return (
+      <CodeStep
+        token={challenge}
+        onSignedIn={signedIn}
+        onRestart={(why) => {
+          setChallenge('')
+          setError(why)
+        }}
+      />
+    )
   }
   return (
     <AuthFrame title={t('login.title')}>
@@ -64,6 +86,68 @@ export function LoginPage() {
         <button className="btn btn-primary btn-block" disabled={busy}>
           {busy ? t('login.submitting') : t('login.submit')}
         </button>
+      </form>
+    </AuthFrame>
+  )
+}
+
+// The second step of signing in: a code from the authenticator app, or a
+// recovery code.
+function CodeStep({ token, onSignedIn, onRestart }: { token: string; onSignedIn: (u: Me) => void; onRestart: (why: string) => void }) {
+  // An answer that arrives after going back (this step is gone) is ignored.
+  const live = useRef(true)
+  useEffect(() => {
+    live.current = true
+    return () => void (live.current = false)
+  }, [])
+  const [code, setCode] = useState('')
+  const [recovery, setRecovery] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const submit = async (e?: FormEvent) => {
+    e?.preventDefault()
+    if (busy) return
+    setBusy(true)
+    setError('')
+    try {
+      const r = await api<{ user: Me }>('POST', '/api/login/code', { token, code: recovery ? code : code.replace(/\s+/g, '') })
+      if (live.current) onSignedIn(r.user)
+    } catch (err) {
+      if (!live.current) return
+      if (err instanceof ApiError && (err.code === 'mfa_expired' || err.code === 'locked')) return onRestart(errorText(err))
+      setError(errorText(err))
+      setCode('')
+      setBusy(false)
+    }
+  }
+  return (
+    <AuthFrame title={t('login.codeTitle')} intro={recovery ? t('login.recoveryIntro') : t('login.codeIntro')}>
+      <form className="form" onSubmit={submit}>
+        {recovery ? (
+          <Field label={t('login.recoveryCode')} htmlFor="login-code">
+            <input id="login-code" key="recovery" className="input mono" autoComplete="off" autoCapitalize="none" autoCorrect="off" spellCheck={false}
+              value={code} onChange={(e) => setCode(e.target.value)} required autoFocus />
+          </Field>
+        ) : (
+          <Field label={t('login.code')} htmlFor="login-code">
+            <input id="login-code" key="totp" className="input mono code-input" inputMode="numeric" autoComplete="one-time-code" pattern="[0-9 ]*"
+              value={code} required autoFocus
+              onChange={(e) => {
+                const v = e.target.value.replace(/\D/g, '').slice(0, 6)
+                setCode(v)
+              }} />
+          </Field>
+        )}
+        {error && <p className="err" role="alert">{error}</p>}
+        <button className="btn btn-primary btn-block" disabled={busy || (!recovery && code.length !== 6) || !code}>
+          {busy ? t('login.submitting') : t('login.verify')}
+        </button>
+        <div className="auth-links">
+          <button type="button" className="link-btn" disabled={busy} onClick={() => { setRecovery(!recovery); setCode(''); setError('') }}>
+            {recovery ? t('login.useApp') : t('login.useRecovery')}
+          </button>
+          <button type="button" className="link-btn" disabled={busy} onClick={() => onRestart('')}>{t('login.back')}</button>
+        </div>
       </form>
     </AuthFrame>
   )

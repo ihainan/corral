@@ -29,6 +29,7 @@ func TestRouteTableIsExplicit(t *testing.T) {
 	h := newHarness(t)
 	public := map[string]bool{
 		"GET /api/bootstrap": true, "POST /api/setup": true, "POST /api/login": true,
+		"POST /api/login/code":     true, // the code step; needs the token the password step returned
 		"GET /api/invites/{token}": true, "POST /api/invites/{token}/redeem": true,
 		"GET /fwd/{id}": true, // checks the sign-in itself and redirects to it
 	}

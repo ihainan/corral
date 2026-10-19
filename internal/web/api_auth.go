@@ -23,10 +23,11 @@ type meView struct {
 	Username    string `json:"username"`
 	DisplayName string `json:"display_name"`
 	Role        string `json:"role"`
+	TOTP        bool   `json:"totp"`
 }
 
 func viewMe(u *store.User) *meView {
-	return &meView{ID: u.ID, Username: u.Username, DisplayName: u.DisplayName, Role: u.Role}
+	return &meView{ID: u.ID, Username: u.Username, DisplayName: u.DisplayName, Role: u.Role, TOTP: u.TOTP}
 }
 
 func (s *Server) apiBootstrap(w http.ResponseWriter, r *http.Request) {
@@ -87,6 +88,13 @@ func (s *Server) apiLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	ip := s.clientIP(r)
 	u, tok, err := s.auth.Login(r.Context(), b.Username, b.Password, ip, r.UserAgent())
+	var needCode *auth.MFARequiredError
+	if errors.As(err, &needCode) {
+		// Password right; the one-time code comes next.
+		s.auditAs(r, u, "login.password_ok", u.Username, nil)
+		writeJSON(w, http.StatusOK, map[string]any{"code_required": true, "token": needCode.Token})
+		return
+	}
 	if err != nil {
 		var locked *auth.LockedError
 		switch {

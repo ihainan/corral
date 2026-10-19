@@ -75,11 +75,11 @@ func TestLoginStartedBeforePasswordChangeCannotComplete(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A login that verified the old hash now tries to create its session.
-	if err := st.CreateLoginSessionIfCurrent(ctx, "h1", u.ID, oldHash, "", ""); !errors.Is(err, store.ErrNotFound) {
+	if err := st.CreateLoginSessionIfCurrent(ctx, "h1", u.ID, oldHash, "", "", true); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("stale login created a session: %v", err)
 	}
 	_ = st.SetDisabled(ctx, u.ID, true)
-	if err := st.CreateLoginSessionIfCurrent(ctx, "h2", u.ID, newHash, "", ""); !errors.Is(err, store.ErrNotFound) {
+	if err := st.CreateLoginSessionIfCurrent(ctx, "h2", u.ID, newHash, "", "", true); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("disabled account got a session: %v", err)
 	}
 }

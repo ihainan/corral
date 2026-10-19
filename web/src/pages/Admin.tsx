@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
-import { KeySquare, MoreHorizontal, ScrollText, Shield, UserCheck, UserPlus, UserRound, UserX } from 'lucide-react'
+import { KeySquare, MoreHorizontal, ScrollText, Shield, Smartphone, UserCheck, UserPlus, UserRound, UserX } from 'lucide-react'
 import { api, errorText, type AdminUser, type AuditEntry } from '../api'
 import { relTime, t } from '../i18n'
 import { useSession } from '../app'
@@ -59,6 +59,7 @@ export function AdminUsersPage() {
                 <span className="row-sub">
                   <span className="mono">{u.username}</span>
                   {u.open_sessions > 0 ? ' · ' + t('admin.openSessions', { n: u.open_sessions }) : ''}
+                  {u.totp ? ' · ' + t('admin.twoStep') : ''}
                   {u.disabled && <span className="state-danger">{' · ' + t('admin.disabled')}</span>}
                 </span>
               </div>
@@ -81,6 +82,25 @@ export function AdminUsersPage() {
                       icon: <KeySquare size={16} />,
                       onSelect: () => setDialog(<ResetDialog user={u} onClose={() => setDialog(null)} />),
                     },
+                    u.totp
+                      ? {
+                          label: t('admin.resetTwoStep'),
+                          icon: <Smartphone size={16} />,
+                          onSelect: () =>
+                            setDialog(
+                              <Confirm
+                                title={t('admin.resetTwoStep')}
+                                body={t('admin.resetTwoStepBody', { name: u.display_name || u.username })}
+                                confirm={t('admin.resetTwoStep')}
+                                onClose={() => setDialog(null)}
+                                onConfirm={async () => {
+                                  await api('POST', '/api/admin/users/' + u.id + '/totp/reset')
+                                  load()
+                                }}
+                              />,
+                            ),
+                        }
+                      : null,
                     u.disabled
                       ? { label: t('admin.enable'), icon: <UserCheck size={16} />, separator: true, onSelect: () => update(u, { disabled: false }) }
                       : {

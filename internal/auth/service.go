@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/ihainan/corral/internal/store"
+	"github.com/ihainan/corral/internal/vault"
 )
 
 var (
@@ -51,6 +52,10 @@ type Service struct {
 	OnUserGone  func(userID int64) // called when a user's access must end now (disable, password change)
 	touchMu     sync.Mutex
 	lastTouched map[string]time.Time
+
+	vault   *vault.Vault // seals authenticator secrets (see UseVault)
+	mfaOnce sync.Once
+	mfaS    *mfaState
 }
 
 type LockedError struct{ RetryAfter time.Duration }
@@ -156,20 +161,21 @@ func (s *Service) Login(ctx context.Context, username, password, ip, ua string) 
 		return nil, "", err // busy: not the user's fault, not counted
 	}
 	if !ok {
-		failures, err := s.store.RecordLoginFailure(ctx, u.ID)
-		if err != nil {
+		if err := s.recordFailure(ctx, u, now); err != nil {
 			return nil, "", err
-		}
-		if failures >= freeAttempts {
-			wait := min(time.Minute<<min(failures-freeAttempts, 4), maxLockout)
-			if err := s.store.ExtendLockout(ctx, u.ID, now.Add(wait).Unix()); err != nil {
-				return nil, "", err
-			}
 		}
 		return nil, "", ErrInvalidLogin
 	}
 	if u.Disabled {
 		return nil, "", ErrInvalidLogin
+	}
+	if u.TOTP {
+		// The failure count is reset once the code is right too.
+		tok, err := s.newChallenge(u)
+		if err != nil {
+			return nil, "", err
+		}
+		return u, "", &MFARequiredError{Token: tok}
 	}
 	if err := s.store.ResetLoginFailures(ctx, u.ID); err != nil {
 		return nil, "", err
@@ -182,13 +188,28 @@ func (s *Service) Login(ctx context.Context, username, password, ip, ua string) 
 		ua = ua[:300]
 	}
 	// Created only if the password we just verified is still the current one.
-	if err := s.store.CreateLoginSessionIfCurrent(ctx, hash, u.ID, u.PasswordHash(), ip, ua); err != nil {
+	// Not if two-step sign-in was turned on since u was read: then a code is due.
+	if err := s.store.CreateLoginSessionIfCurrent(ctx, hash, u.ID, u.PasswordHash(), ip, ua, true); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return nil, "", ErrInvalidLogin
 		}
 		return nil, "", err
 	}
 	return u, tok, nil
+}
+
+// recordFailure counts a failed sign-in (password or code) and makes the
+// account wait once there were too many.
+func (s *Service) recordFailure(ctx context.Context, u *store.User, now time.Time) error {
+	failures, err := s.store.RecordLoginFailure(ctx, u.ID)
+	if err != nil {
+		return err
+	}
+	if failures >= freeAttempts {
+		wait := min(time.Minute<<min(failures-freeAttempts, 4), maxLockout)
+		return s.store.ExtendLockout(ctx, u.ID, now.Add(wait).Unix())
+	}
+	return nil
 }
 
 func (s *Service) startSession(ctx context.Context, userID int64, ip, ua string) (string, error) {

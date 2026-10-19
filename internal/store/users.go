@@ -20,6 +20,7 @@ type User struct {
 	Disabled          bool   `json:"disabled"`
 	CreatedAt         int64  `json:"created_at"`
 	PasswordChangedAt int64  `json:"password_changed_at"`
+	TOTP              bool   `json:"totp"` // two-step sign-in is on
 
 	passwordHash string
 	failedLogins int
@@ -33,13 +34,13 @@ func (u *User) IsAdmin() bool        { return u.Role == RoleAdmin }
 
 var ErrUsernameTaken = errors.New("username taken")
 
-const userCols = `id, username, display_name, password_hash, role, disabled, failed_logins, locked_until, created_at, password_changed_at`
+const userCols = `id, username, display_name, password_hash, role, disabled, failed_logins, locked_until, created_at, password_changed_at, totp_ciphertext IS NOT NULL`
 
 func scanUser(row interface{ Scan(...any) error }) (*User, error) {
 	u := &User{}
 	var disabled int
 	err := row.Scan(&u.ID, &u.Username, &u.DisplayName, &u.passwordHash, &u.Role, &disabled,
-		&u.failedLogins, &u.lockedUntil, &u.CreatedAt, &u.PasswordChangedAt)
+		&u.failedLogins, &u.lockedUntil, &u.CreatedAt, &u.PasswordChangedAt, &u.TOTP)
 	if err != nil {
 		return nil, notFound(err)
 	}
@@ -251,11 +252,17 @@ func (s *Store) CreateLoginSession(ctx context.Context, tokenHash string, userID
 // CreateLoginSessionIfCurrent creates a login only if the account still has the
 // password hash we verified and is not disabled. A sign-in that started before
 // a password change or a disable therefore cannot complete after it.
-func (s *Store) CreateLoginSessionIfCurrent(ctx context.Context, tokenHash string, userID int64, verifiedHash, ip, ua string) error {
+// passwordOnly: also only if two-step sign-in is (still) off, so a password
+// checked just before it was turned on cannot skip the code.
+func (s *Store) CreateLoginSessionIfCurrent(ctx context.Context, tokenHash string, userID int64, verifiedHash, ip, ua string, passwordOnly bool) error {
 	now := s.unix()
+	cond := ""
+	if passwordOnly {
+		cond = " AND totp_ciphertext IS NULL"
+	}
 	return affectedOrNotFound(s.db.ExecContext(ctx,
 		`INSERT INTO login_sessions (token_hash, user_id, created_at, last_seen_at, ip, user_agent)
-		 SELECT ?, id, ?, ?, ?, ? FROM users WHERE id = ? AND password_hash = ? AND disabled = 0`,
+		 SELECT ?, id, ?, ?, ?, ? FROM users WHERE id = ? AND password_hash = ? AND disabled = 0`+cond,
 		tokenHash, now, now, ip, ua, userID, verifiedHash))
 }
 
@@ -392,4 +399,159 @@ func (s *Store) SaveUserSettings(ctx context.Context, userID int64, data string)
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO user_settings (user_id, data) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET data = excluded.data`, userID, data)
 	return err
+}
+
+// Two-step sign-in --------------------------------------------------------
+
+// TOTPSecret is a user's sealed authenticator secret.
+type TOTPSecret struct {
+	Ciphertext, WrappedKey []byte
+	KeyID                  string
+	LastStep               int64
+}
+
+// UserTOTP returns the user's secret, or ErrNotFound when two-step sign-in is off.
+func (s *Store) UserTOTP(ctx context.Context, userID int64) (*TOTPSecret, error) {
+	t := &TOTPSecret{}
+	err := s.db.QueryRowContext(ctx, `SELECT totp_ciphertext, totp_wrapped_key, totp_key_id, totp_last_step FROM users
+		WHERE id = ? AND totp_ciphertext IS NOT NULL`, userID).Scan(&t.Ciphertext, &t.WrappedKey, &t.KeyID, &t.LastStep)
+	if err != nil {
+		return nil, notFound(err)
+	}
+	return t, nil
+}
+
+// Changes a user makes to their own two-step sign-in apply only if, at that
+// moment, the password they confirmed is still theirs and the login they
+// made the request with still exists: an admin reset or sign-out in between
+// stops them.
+const ownChange = ` AND password_hash = ? AND EXISTS (SELECT 1 FROM login_sessions WHERE token_hash = ? AND user_id = users.id)`
+
+// EnableTOTP turns two-step sign-in on with a fresh set of recovery codes;
+// t.LastStep is the step the confirming code used. ErrNotFound: it is on
+// already, or the account changed (see ownChange).
+func (s *Store) EnableTOTP(ctx context.Context, userID int64, t TOTPSecret, codeHashes []string, verifiedHash, sessionHash string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, `UPDATE users SET totp_ciphertext = ?, totp_wrapped_key = ?, totp_key_id = ?, totp_last_step = ?
+		WHERE id = ? AND totp_ciphertext IS NULL`+ownChange,
+		t.Ciphertext, t.WrappedKey, t.KeyID, t.LastStep, userID, verifiedHash, sessionHash)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	if err := replaceRecovery(ctx, tx, userID, codeHashes); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func replaceRecovery(ctx context.Context, tx *sql.Tx, userID int64, hashes []string) error {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM recovery_codes WHERE user_id = ?`, userID); err != nil {
+		return err
+	}
+	for _, h := range hashes {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO recovery_codes (user_id, code_hash) VALUES (?, ?)`, userID, h); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// OwnChange is what a user's own change to their two-step sign-in was
+// authorised with: it applies only while the password, the login and the
+// set-up (the sealed secret the code was checked against) are all unchanged.
+// The zero value is an admin's change.
+type OwnChange struct {
+	PasswordHash, SessionHash string
+	Ciphertext                []byte
+}
+
+func (o OwnChange) cond() (string, []any) {
+	if o.SessionHash == "" {
+		return "", nil
+	}
+	return ownChange + ` AND totp_ciphertext = ?`, []any{o.PasswordHash, o.SessionHash, o.Ciphertext}
+}
+
+// DisableTOTP turns two-step sign-in off and drops the recovery codes;
+// ErrNotFound means the account changed since the user's change was
+// authorised (see OwnChange).
+func (s *Store) DisableTOTP(ctx context.Context, userID int64, own OwnChange) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	cond, args := own.cond()
+	res, err := tx.ExecContext(ctx, `UPDATE users SET totp_ciphertext = NULL, totp_wrapped_key = NULL, totp_key_id = '', totp_last_step = 0
+		WHERE id = ?`+cond, append([]any{userID}, args...)...)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 && own.SessionHash != "" {
+		return ErrNotFound
+	}
+	if err := replaceRecovery(ctx, tx, userID, nil); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// ReplaceRecoveryCodes swaps the recovery codes, if two-step sign-in is on
+// and the account did not change (see OwnChange).
+func (s *Store) ReplaceRecoveryCodes(ctx context.Context, userID int64, hashes []string, own OwnChange) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var n int
+	cond, args := own.cond()
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE id = ? AND totp_ciphertext IS NOT NULL`+cond,
+		append([]any{userID}, args...)...).Scan(&n); err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	if err := replaceRecovery(ctx, tx, userID, hashes); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// UseTOTPStep records step as used if it is newer than the last one used
+// with the same secret; false means it was used already (or the secret
+// changed meanwhile).
+func (s *Store) UseTOTPStep(ctx context.Context, userID int64, ciphertext []byte, step int64) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `UPDATE users SET totp_last_step = ? WHERE id = ? AND totp_last_step < ? AND totp_ciphertext = ?`,
+		step, userID, step, ciphertext)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n == 1, nil
+}
+
+// UseRecoveryCode consumes a recovery code; false if it is not (or no longer) one.
+func (s *Store) UseRecoveryCode(ctx context.Context, userID int64, hash string) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM recovery_codes WHERE user_id = ? AND code_hash = ?
+		AND EXISTS (SELECT 1 FROM users WHERE id = ? AND totp_ciphertext IS NOT NULL)`, userID, hash, userID)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n == 1, nil
+}
+
+func (s *Store) CountRecoveryCodes(ctx context.Context, userID int64) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM recovery_codes WHERE user_id = ?`, userID).Scan(&n)
+	return n, err
 }
