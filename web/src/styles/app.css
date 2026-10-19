@@ -448,6 +448,15 @@ details.adv > .form { margin-top: 16px; }
 .scheme-current .swatch-dots { gap: 2px; }
 .overlay.see-through { background: rgba(0, 0, 0, 0.12); }
 
+/* Custom keys (settings) */
+.ck-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.ck-list li { display: flex; align-items: center; gap: 10px; min-height: var(--row-min); border-bottom: 1px solid var(--line); }
+.ck-list li.editing { background: var(--accent-soft); }
+.ck-label { flex: none; max-width: 40%; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ck-keys { flex: 1; min-width: 0; color: var(--fg-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ck-form { display: flex; flex-direction: column; gap: 12px; margin-top: 4px; }
+.ck-actions { display: flex; gap: 8px; justify-content: flex-end; }
+
 /* Answering an agent */
 .reply-dialog { max-width: 640px; }
 .reply-sub { margin-top: -8px; overflow-wrap: anywhere; }

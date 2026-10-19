@@ -15,6 +15,8 @@ keeps running and you pick it up where it was — on the same device or another.
   survive gateway restarts.
 - A key bar with Esc, Ctrl and Alt (tap once or lock), Tab and Shift+Tab,
   arrows, F1–F12 and the symbols that are hard to type on a phone keyboard.
+  Add keys of your own that send a sequence, written as for tmux's
+  send-keys (`C-b c`, `"git status" Enter`); they follow you to every device.
 - Input methods work: Chinese and other IMEs, dictation, and a composer field
   for writing longer input before sending it.
 - Several devices can have one session open; the one you act on decides the

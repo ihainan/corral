@@ -9,6 +9,7 @@ import { signOut, useSession } from '../app'
 import { Field, useToast } from '../components/ui'
 import { CurrentScheme, SchemeDialog } from '../terminal/SchemePicker'
 import { TwoStepSection } from './TwoStep'
+import { CustomKeysSection } from './CustomKeys'
 
 const fontSizes = [11, 12, 13, 14, 15, 16, 18, 20]
 
@@ -121,6 +122,8 @@ export function SettingsPage() {
       </section>
 
       {schemesOpen && <SchemeDialog onClose={() => setSchemesOpen(false)} />}
+
+      <CustomKeysSection />
 
       <PushSection />
 

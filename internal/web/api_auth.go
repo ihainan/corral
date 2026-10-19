@@ -1,6 +1,7 @@
 package web
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/ihainan/corral/internal/auth"
 	"github.com/ihainan/corral/internal/store"
@@ -236,6 +239,7 @@ var settingRules = map[string]func(json.RawMessage) bool{
 	"optionIsMeta":    isBool,
 	"webgl":           isBool,
 	"remoteClipboard": isBool,
+	"customKeys":      customKeys,
 	"webhook":         webhookURL,
 }
 
@@ -275,6 +279,36 @@ func webhookURL(raw json.RawMessage) bool {
 		return false
 	}
 	return v == "" || (strings.HasPrefix(v, "https://") && len(v) > len("https://") && !strings.ContainsAny(v, " \t\r\n"))
+}
+
+// customKeys are the user's own keys on the key bar: at most maxCustomKeys
+// of {label, keys}, a short label and a sequence (checked in the browser,
+// bounded here), neither with control characters.
+const maxCustomKeys = 24
+
+func customKeys(raw json.RawMessage) bool {
+	if len(raw) > 64<<10 { // (stored escaped, & as \u0026: room for the longest valid list)
+		return false
+	}
+	var v []struct {
+		Label string `json:"label"`
+		Keys  string `json:"keys"`
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if dec.Decode(&v) != nil || v == nil || len(v) > maxCustomKeys {
+		return false
+	}
+	text := func(s string, max int) bool {
+		n := utf8.RuneCountInString(s)
+		return n >= 1 && n <= max && utf8.ValidString(s) && !strings.ContainsFunc(s, unicode.IsControl) && strings.TrimSpace(s) != ""
+	}
+	for _, k := range v {
+		if !text(k.Label, 12) || !text(k.Keys, 200) {
+			return false
+		}
+	}
+	return true
 }
 
 func isBool(raw json.RawMessage) bool {

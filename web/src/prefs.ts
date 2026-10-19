@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from 'react'
 import { api, authGen, unauthorized } from './api'
 import { resolveScheme, type Scheme } from './terminal/themes'
+import { controlChars } from './terminal/macro'
 
 // Per-user preferences. Cached locally for a fast first paint, synced to the
 // server so a phone and a laptop share them.
@@ -15,11 +16,20 @@ export interface Prefs {
   optionIsMeta: boolean
   webgl: boolean
   remoteClipboard: boolean // programs on the host may write this device's clipboard (OSC 52)
+  customKeys: CustomKey[] // the user's own keys on the key bar
 }
+
+// A key of one's own: what it is called on the key bar, and what it sends
+// (see terminal/macro.ts).
+export interface CustomKey {
+  label: string
+  keys: string
+}
+export const maxCustomKeys = 24
 
 // Phones get a slightly smaller default so common output fits without wrapping.
 const phone = window.matchMedia('(pointer: coarse) and (max-width: 599px)').matches
-const defaults: Prefs = { theme: 'system', termTheme: 'corral-dark', fontSize: phone ? 13 : 14, keybar: true, optionIsMeta: true, webgl: false, remoteClipboard: true }
+const defaults: Prefs = { theme: 'system', termTheme: 'corral-dark', fontSize: phone ? 13 : 14, keybar: true, optionIsMeta: true, webgl: false, remoteClipboard: true, customKeys: [] }
 
 // The local copy is kept per account (several people may share a device);
 // until the account is known the last one used here paints the first frame.
@@ -221,6 +231,11 @@ function sanitize(raw: unknown): Partial<Prefs> {
   if (typeof o.termTheme === 'string' && /^[a-z0-9][a-z0-9-]{0,63}$/.test(o.termTheme)) out.termTheme = o.termTheme
   if (Number.isInteger(o.fontSize) && (o.fontSize as number) >= 9 && (o.fontSize as number) <= 28) out.fontSize = o.fontSize as number
   for (const k of ['keybar', 'optionIsMeta', 'webgl', 'remoteClipboard'] as const) if (typeof o[k] === 'boolean') out[k] = o[k] as boolean
+  if (Array.isArray(o.customKeys) && o.customKeys.length <= maxCustomKeys) {
+    const text = (v: unknown, max: number) => typeof v === 'string' && v.trim() !== '' && [...v].length <= max && !controlChars.test(v)
+    const keys = o.customKeys.filter((k): k is CustomKey => !!k && typeof k === 'object' && text(k.label, 12) && text(k.keys, 200))
+    if (keys.length === o.customKeys.length) out.customKeys = keys.map((k) => ({ label: k.label, keys: k.keys }))
+  }
   return out
 }
 

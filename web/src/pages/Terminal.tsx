@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { flushSync } from 'react-dom'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
@@ -16,6 +16,7 @@ import { useConnect } from '../connect'
 import { clampSize, TermConnection, type EndInfo, type Status } from '../terminal/connection'
 import { applyMods, specialKey, type Mods, type SpecialKey } from '../terminal/keys'
 import { KeyBar, type ModState } from '../terminal/KeyBar'
+import { macroBytes, parseMacro, type Step } from '../terminal/macro'
 import { chromeVars } from '../terminal/themes'
 import { SchemeDialog } from '../terminal/SchemePicker'
 import { HerdrPanel } from '../terminal/HerdrPanel'
@@ -1229,6 +1230,22 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
       outRef.current(specialKey(k, activeMods(), term?.modes.applicationCursorKeysMode ?? false))
       releaseOnce()
     })
+  // A custom key sends its own sequence; latched Ctrl/Alt do not apply to it.
+  const sendSteps = (steps: Step[]) =>
+    afterComposition(() => {
+      takeOverRef.current()
+      settleRef.current()
+      outRef.current(macroBytes(steps, termRef.current?.modes.applicationCursorKeysMode ?? false))
+      releaseOnce()
+    })
+  const customKeys = useMemo(
+    () =>
+      prefs.customKeys.flatMap((k) => {
+        const r = parseMacro(k.keys)
+        return 'steps' in r ? [{ label: k.label, steps: r.steps }] : [] // (one that no longer parses is left out)
+      }),
+    [prefs.customKeys],
+  )
   const sendText = (s: string) => {
     // Typing in the composer: symbols go into the draft. Keys (Esc, arrows,
     // Tab, Ctrl…) still go to the terminal, so a running program can be
@@ -1689,6 +1706,7 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
               onKey={sendKey}
               onText={sendText}
               onKeyboard={toggleKeyboard}
+              custom={customKeys.map((k) => ({ label: k.label, onPress: () => sendSteps(k.steps) }))}
             />
           )}
         </>

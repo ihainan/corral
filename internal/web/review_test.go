@@ -595,6 +595,19 @@ func TestSettingsPatchOrderingValidationAndAccount(t *testing.T) {
 		mustStatus(t, patch("pageAAAA", 3, map[string]any{k: nil}), 400, "null "+k)
 	}
 	mustStatus(t, patch("pageAAAA", 3, map[string]any{"remoteClipboard": false}), 200, "clipboard off")
+	mustStatus(t, patch("pageAAAA", 3, map[string]any{"customKeys": []map[string]string{{"label": "新窗口", "keys": "C-b c"}}}), 200, "custom keys")
+	mustStatus(t, patch("pageAAAA", 3, map[string]any{"customKeys": []any{}}), 200, "no custom keys")
+	for name, v := range map[string]any{
+		"not a list":    "C-b c",
+		"long label":    []map[string]string{{"label": strings.Repeat("字", 13), "keys": "x"}},
+		"empty keys":    []map[string]string{{"label": "a", "keys": " "}},
+		"control":       []map[string]string{{"label": "a", "keys": "x\u001b"}},
+		"extra field":   []map[string]any{{"label": "a", "keys": "x", "run": true}},
+		"too many":      make([]map[string]string, 25),
+		"long sequence": []map[string]string{{"label": "a", "keys": strings.Repeat("x", 201)}},
+	} {
+		mustStatus(t, patch("pageAAAA", 3, map[string]any{"customKeys": v}), 400, name)
+	}
 	if r := admin.do("PATCH", "/api/me/settings", map[string]any{"user": 99999, "writer": "pageAAAA", "seq": 4, "set": map[string]any{"keybar": true}}); r.code() != "user_mismatch" {
 		t.Fatalf("a request for another account was accepted: %d %s", r.Status, r.Body)
 	}

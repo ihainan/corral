@@ -100,6 +100,7 @@ export interface KeyBarProps {
   onKey: (k: SpecialKey) => void
   onText: (s: string) => void
   onKeyboard: () => void
+  custom: { label: string; onPress: () => void }[] // the user's own keys
 }
 
 // Layout: Esc/Tab and the modifiers stay put on the left, the keyboard toggle
@@ -130,6 +131,13 @@ export function KeyBar(p: KeyBarProps) {
         <div className="kb-group">
           <Key label="Fn" aria="Fn" mod={p.fn ? 'once' : 'off'} onPress={p.onFn} />
         </div>
+        {!p.fn && p.custom.length > 0 && (
+          <div className="kb-group">
+            {p.custom.map((k, i) => (
+              <Key key={i} label={<span className="kb-text">{k.label}</span>} aria={k.label} wide onPress={k.onPress} />
+            ))}
+          </div>
+        )}
         {p.fn ? (
           <>
             <div className="kb-group">
