@@ -28,6 +28,7 @@ import (
 	"net/http"
 	"os"
 	"path"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -38,6 +39,7 @@ import (
 	"github.com/pkg/sftp"
 
 	"github.com/ihainan/corral/internal/herdr"
+	"github.com/ihainan/corral/internal/sftplite"
 	"github.com/ihainan/corral/internal/sshx"
 	"github.com/ihainan/corral/internal/term"
 )
@@ -53,7 +55,6 @@ const (
 	maxListEntries = 5000 // a listing beyond this is cut (and says so)
 	maxLinkStats   = 256  // symbolic links whose target type is looked up per listing
 	maxSharedUsers = 8    // operations waiting on one session's shared channel
-	maxListings    = 4    // listings at once on the whole gateway
 	maxRemotePath  = 4096
 	maxRemoteName  = 255
 )
@@ -73,9 +74,9 @@ type sftpPool struct {
 }
 
 type sharedSFTP struct {
-	ready  chan struct{} // closed once opening has finished
-	gone   chan struct{} // closed when the channel is given up
-	client *sftp.Client  // set before ready closes; nil if opening failed
+	ready  chan struct{}    // closed once opening has finished
+	gone   chan struct{}    // closed when the channel is given up
+	client *sftplite.Client // set before ready closes; nil if opening failed
 	close  func()
 	err    error
 	users  int
@@ -119,7 +120,7 @@ func (p *sftpPool) get(ctx context.Context, sess *term.Session) (*sharedSFTP, er
 }
 
 func (p *sftpPool) open(sess *term.Session, c *sharedSFTP) {
-	client, closeFn, err := openSFTP(sess.Client())
+	client, closeFn, err := openSFTPLite(sess.Client())
 	p.mu.Lock()
 	if err != nil {
 		c.err = fmt.Errorf("%w: %w", errSFTPUnavailable, err)
@@ -203,7 +204,7 @@ func (p *sftpPool) shutdown() {
 // answered within limit, the channel is closed (which ends f at once) and
 // errFileTimeout is returned. A browser that gives up does not stop f: the
 // operation is short and others may share the channel.
-func (s *Server) withSFTP(ctx context.Context, sess *term.Session, limit time.Duration, f func(*sftp.Client) error) error {
+func (s *Server) withSFTP(ctx context.Context, sess *term.Session, limit time.Duration, f func(*sftplite.Client) error) error {
 	c, err := s.files.get(ctx, sess)
 	if err != nil {
 		return err
@@ -259,6 +260,7 @@ func validName(n string) bool {
 
 func writeFileError(w http.ResponseWriter, err error) {
 	var status *sftp.StatusError
+	var lstatus *sftplite.StatusError
 	switch {
 	case errors.Is(err, errFilesBusy), errors.Is(err, sshx.ErrBusy):
 		writeError(w, http.StatusTooManyRequests, "busy", "too many file operations at once")
@@ -278,7 +280,7 @@ func writeFileError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusConflict, "file_exists", "a file or folder with this name already exists")
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		writeError(w, http.StatusGatewayTimeout, "sftp_timeout", "the host did not answer in time")
-	case errors.As(err, &status):
+	case errors.As(err, &status), errors.As(err, &lstatus):
 		writeError(w, http.StatusBadGateway, "sftp_failed", "the host refused the operation")
 	default:
 		writeError(w, http.StatusBadGateway, "sftp_failed", "the file operation failed")
@@ -306,13 +308,6 @@ func entryType(m fs.FileMode) string {
 	return "other"
 }
 
-// listSlots bounds listings gateway-wide. SFTP (as the library offers it)
-// has no way to read only part of a folder, so a huge one is read whole,
-// for at most fileOpTimeout, before it is cut to maxListEntries; this caps
-// how many are held at once. Known limit: one listing of an enormous folder
-// still costs memory in proportion to what arrives in that time.
-var listSlots = make(chan struct{}, maxListings)
-
 // apiFilesList lists a folder; without a path, the remote home folder.
 func (s *Server) apiFilesList(w http.ResponseWriter, r *http.Request) {
 	sess, ok := s.runningSession(w, r)
@@ -326,19 +321,9 @@ func (s *Server) apiFilesList(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	select {
-	case listSlots <- struct{}{}:
-	default:
-		writeFileError(w, errFilesBusy)
-		return
-	}
-	// Held while the folder is read, not while a slow browser takes the answer.
-	var releaseOnce sync.Once
-	release := func() { releaseOnce.Do(func() { <-listSlots }) }
-	defer release()
 	var entries []fileEntry
 	truncated := false
-	err := s.withSFTP(r.Context(), sess, fileOpTimeout, func(c *sftp.Client) error {
+	err := s.withSFTP(r.Context(), sess, fileOpTimeout, func(c *sftplite.Client) error {
 		if dir == "" {
 			home, err := c.Getwd()
 			if err != nil {
@@ -348,9 +333,9 @@ func (s *Server) apiFilesList(w http.ResponseWriter, r *http.Request) {
 				return errors.New("unusable home folder")
 			}
 		}
-		rctx, cancel := context.WithTimeout(context.Background(), fileOpTimeout)
-		defer cancel()
-		infos, err := c.ReadDirContext(rctx, dir)
+		// At most maxListEntries are read: a huge folder is never read whole
+		// (the entries shown are the first ones the host lists, sorted).
+		infos, more, err := c.ReadDirLimit(dir, maxListEntries)
 		if err != nil {
 			if fi, serr := c.Stat(dir); serr == nil && !fi.IsDir() {
 				return errNotDir
@@ -380,12 +365,9 @@ func (s *Server) apiFilesList(w http.ResponseWriter, r *http.Request) {
 			links = links[:maxLinkStats]
 		}
 		statLinks(c, dir, entries, links)
-		if len(entries) > maxListEntries {
-			entries, truncated = entries[:maxListEntries], true
-		}
+		truncated = more
 		return nil
 	})
-	release()
 	if err != nil {
 		writeFileError(w, err)
 		return
@@ -397,7 +379,7 @@ func (s *Server) apiFilesList(w http.ResponseWriter, r *http.Request) {
 }
 
 // statLinks resolves what the listed links point to, a few at a time.
-func statLinks(c *sftp.Client, dir string, entries []fileEntry, idx []int) {
+func statLinks(c *sftplite.Client, dir string, entries []fileEntry, idx []int) {
 	work := make(chan int)
 	var wg sync.WaitGroup
 	for range min(8, len(idx)) {
@@ -439,7 +421,7 @@ func (s *Server) apiFilesMkdir(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	full := path.Join(dir, b.Name)
-	err := s.withSFTP(r.Context(), sess, fileOpTimeout, func(c *sftp.Client) error {
+	err := s.withSFTP(r.Context(), sess, fileOpTimeout, func(c *sftplite.Client) error {
 		if _, err := c.Lstat(full); err == nil {
 			return fs.ErrExist
 		}
@@ -477,7 +459,7 @@ func (s *Server) apiFilesRename(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"path": to})
 		return
 	}
-	err := s.withSFTP(r.Context(), sess, fileOpTimeout, func(c *sftp.Client) error {
+	err := s.withSFTP(r.Context(), sess, fileOpTimeout, func(c *sftplite.Client) error {
 		if _, err := c.Lstat(from); err != nil {
 			return err
 		}
@@ -521,7 +503,7 @@ func (s *Server) apiFilesDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	var target string
 	folder := false
-	err := s.withSFTP(r.Context(), sess, fileOpTimeout, func(c *sftp.Client) error {
+	err := s.withSFTP(r.Context(), sess, fileOpTimeout, func(c *sftplite.Client) error {
 		home, err := c.Getwd()
 		if err != nil {
 			return err
@@ -656,7 +638,7 @@ func (s *Server) apiFilesCwd(w http.ResponseWriter, r *http.Request) {
 // session. Fixed script; the validated session name is its only argument.
 func tmuxCwdCommand(name string) string {
 	script := `PATH="$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"; ` +
-		`exec tmux display-message -p -t "=$1:" '#{pane_current_path}'`
+		`exec tmux -u display-message -p -t "=$1:" '#{pane_current_path}'`
 	return "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(name)
 }
 
@@ -1066,14 +1048,21 @@ func (s *Server) removeLater(c *sftp.Client, sess *term.Session, st staged) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), fileOpTimeout)
 		defer cancel()
-		_ = s.withSFTP(ctx, sess, fileOpTimeout, func(c *sftp.Client) error { return removeStage(c, st) })
+		_ = s.withSFTP(ctx, sess, fileOpTimeout, func(c *sftplite.Client) error { return removeStage(c, st) })
 	}()
 }
 
 // removeStage deletes a staging folder and the files the upload put there,
 // by their random names. One that is no longer a real folder (someone able
 // to rename in the parent folder swapped it for a link) is left alone.
-func removeStage(c *sftp.Client, st staged) error {
+// stageOps is what removing a staging folder takes, from either client.
+type stageOps interface {
+	Lstat(p string) (os.FileInfo, error)
+	Remove(p string) error
+	RemoveDirectory(p string) error
+}
+
+func removeStage(c stageOps, st staged) error {
 	fi, err := c.Lstat(st.dir)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
@@ -1093,4 +1082,139 @@ func removeStage(c *sftp.Client, st staged) error {
 		return err
 	}
 	return nil
+}
+
+// Coding agents ----------------------------------------------------------------
+
+// geminiTitle matches the terminal titles Gemini CLI sets: "Gemini CLI
+// (<folder>)", or a status symbol and two spaces ("◇  Ready (<folder>)").
+var geminiTitle = regexp.MustCompile(`^(Gemini CLI |[◇✋⏲✦]  )`)
+
+// geminiCommandLine is true for the command line of Gemini CLI: its own
+// program ("gemini"); a JavaScript runtime (node, bun, deno) given a path to
+// its script (".../gemini", ".../gemini.js", or a file of the gemini-cli
+// package) anywhere in its arguments, or, after "x" or "run", its package
+// or program;
+// or a package runner running the package or its program (npx
+// @google/gemini-cli, npm exec gemini, pnpm dlx...). A runtime's options are not parsed (they differ
+// between runtimes and versions): a path to Gemini's script among them is
+// taken as running it. Other mentions do not count (vim gemini.js, node
+// server.js gemini, npm install @google/gemini-cli).
+func geminiCommandLine(args string) bool {
+	f := strings.Fields(strings.ToLower(args))
+	if len(f) == 0 {
+		return false
+	}
+	isPackage := func(a string) bool {
+		a = strings.TrimPrefix(a, "npm:")
+		rest, ok := strings.CutPrefix(a, "@google/gemini-cli")
+		return ok && (rest == "" || strings.HasPrefix(rest, "@"))
+	}
+	isScript := func(a string) bool {
+		b := path.Base(a)
+		return strings.Contains(a, "/") && (b == "gemini" || b == "gemini.js") || strings.Contains(a, "/gemini-cli/")
+	}
+	// runsGemini: what a package runner runs, the package or its program
+	// (npm exec gemini; npm also shows "npm exec --package=... -- gemini" so).
+	runsGemini := func(a string) bool { return isPackage(a) || a == "gemini" }
+	// operand is the first argument after skip words that is no option.
+	operand := func(skip int) string {
+		for _, a := range f[min(1+skip, len(f)):] {
+			if !strings.HasPrefix(a, "-") {
+				return a
+			}
+		}
+		return ""
+	}
+	sub := ""
+	if len(f) > 1 {
+		sub = f[1]
+	}
+	switch path.Base(strings.TrimPrefix(f[0], "-")) {
+	case "gemini":
+		return true
+	case "node", "nodejs", "bun", "deno":
+		runs := false
+		for _, a := range f[1:] {
+			switch {
+			case strings.HasPrefix(a, "-"):
+			case isScript(a):
+				return true
+			case runs: // what "x" or "run" runs; later arguments are its own
+				return runsGemini(a)
+			case a == "x" || a == "run":
+				runs = true
+			}
+		}
+	case "npx", "pnpx", "bunx":
+		return runsGemini(operand(0))
+	case "npm":
+		return (sub == "exec" || sub == "x") && runsGemini(operand(1))
+	case "pnpm":
+		return (sub == "dlx" || sub == "exec") && runsGemini(operand(1))
+	case "yarn":
+		return sub == "dlx" && runsGemini(operand(1))
+	}
+	return false
+}
+
+// pathPrefix is what goes before an uploaded file's path in the terminal:
+// "@" when the program in front is Gemini CLI, which takes files as @path;
+// otherwise nothing. It asks herdr (the agent of the focused pane), or tmux
+// (the active pane's title, which a program that has ended may have left
+// behind, so only together with the command line of the program in front).
+// A session without either cannot tell what runs in front, nor can a host
+// that does not answer quickly: no prefix.
+func (s *Server) pathPrefix(ctx context.Context, sess *term.Session) string {
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	switch sess.Persistence {
+	case "herdr":
+		socket := s.herdrSocks.get(sess.ID)
+		if socket == "" {
+			return ""
+		}
+		c, err := herdr.Dial(ctx, sess.Client(), socket)
+		if err != nil {
+			return ""
+		}
+		defer c.Close()
+		snap, err := c.Snapshot(ctx)
+		if err != nil {
+			return ""
+		}
+		for _, p := range snap.Panes {
+			if p.ID == snap.FocusedPane && strings.Contains(strings.ToLower(p.Agent), "gemini") {
+				return "@"
+			}
+		}
+	case "tmux":
+		out, err := sshx.Output(ctx, sess.Client(), tmuxForegroundCommand(sess.TmuxSession), 4096)
+		if err != nil {
+			return ""
+		}
+		title, args, _ := strings.Cut(string(out), "\n")
+		if geminiTitle.MatchString(strings.TrimSpace(title)) && geminiCommandLine(args) {
+			return "@"
+		}
+	}
+	return ""
+}
+
+// tmuxForegroundCommand prints the title of the active pane of a tmux
+// session and, on the next line, the command line of the program in front
+// there (the terminal's foreground process group, found with ps, or /proc
+// where ps cannot tell).
+func tmuxForegroundCommand(name string) string {
+	script := `PATH="$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+out=$(tmux -u display-message -p -t "=$1:" '#{pane_pid} #{pane_title}') || exit 1
+pid=${out%% *}; title=${out#* }
+case $pid in ''|*[!0-9]*) exit 1;; esac
+fg=$(ps -o tpgid= -p "$pid" 2>/dev/null | tr -d ' ')
+case $fg in ''|*[!0-9]*) fg=$(sed 's/.*) //' "/proc/$pid/stat" 2>/dev/null | cut -d' ' -f6);; esac
+case $fg in ''|0|*[!0-9]*) exit 1;; esac
+args=$(ps -ww -o args= -p "$fg" 2>/dev/null)
+[ -n "$args" ] || args=$(tr '\0' ' ' <"/proc/$fg/cmdline" 2>/dev/null)
+printf '%s\n%s\n' "$title" "$args" | head -c 3000`
+	return "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(name)
 }

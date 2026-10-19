@@ -423,8 +423,9 @@ fi
 // already runs. An earlier instance that runs without its socket, or one
 // recorded in the old pid file format, is stopped first; a recorded process
 // that cannot be verified is not overwritten. op is the operation's id (see
-// SettleCommand).
-func StartCommand(version, socket, instanceID, op string) string {
+// SettleCommand). With locale LangPackLocale, code-server runs in Chinese
+// if the language pack is installed (in English otherwise).
+func StartCommand(version, socket, instanceID, op, locale string) string {
 	return script(layout+lock+claim+procs+instance+`umask 077
 D="$L/code-server-$V"
 mkdir -p "$DATA/extensions" && chmod 700 "$HOME/.local/share/corral" "$DATA" || { echo error=mkdir; exit 1; }
@@ -436,9 +437,14 @@ elif unverifiable; then
 fi
 [ -x "$D/bin/code-server" ] || { echo error=notinstalled; exit 1; }
 rm -f "$S"
+LOCALE=
+if [ "$LOC" = "$LPLOC" ] && [ -d "$DATA/extensions/$LPID-$LPVER" ] &&
+  "$D/lib/node" -e "$LPJS" "$DATA" "$DATA/extensions" "$LPID" "$LPVER" "$LPLOC" >/dev/null 2>&1 9>&- </dev/null; then
+  LOCALE=$LOC
+fi
 setsid nohup "$D/bin/code-server" --socket "$S" --socket-mode 600 --auth none --disable-telemetry \
   --disable-update-check --disable-proxy --disable-getting-started-override \
-  --user-data-dir "$DATA" --extensions-dir "$DATA/extensions" \
+  --user-data-dir "$DATA" --extensions-dir "$DATA/extensions" ${LOCALE:+--locale "$LOCALE"} \
   "$HOME" >"$ST/code-server.log" 2>&1 </dev/null 9>&- & # (it must not keep the lock; opens the home folder unless told another)
 new=$!
 echo "$new $(starttime "$new") $I" >"$P"
@@ -457,7 +463,7 @@ done
 echo error=start
 echo "detail=$(tail -n 5 "$ST/code-server.log" 2>/dev/null | tr '\n' ' ' | cut -c1-300)"
 exit 1
-`, "V", version, "S", socket, "I", instanceID, "T", op)
+`, "V", version, "S", socket, "I", instanceID, "T", op, "LOC", locale, "LPLOC", LangPackLocale, "LPID", LangPackID, "LPVER", LangPackVersion, "LPJS", langPackRegister)
 }
 
 const stopBody = `if [ ! -f "$P" ]; then rm -f "$S"; echo result=ok; exit 0; fi

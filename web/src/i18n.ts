@@ -526,6 +526,7 @@ const zh = {
   'hostField.password': '请填写密码。',
   'hostField.credential_id': '请选择一把密钥。',
   'hostField.tmux_session': '只能包含字母、数字、短横线和下划线。',
+  'code.state.language': '正在安装 VS Code 中文语言包…',
 }
 
 type Key = keyof typeof zh
@@ -1056,6 +1057,7 @@ const en: Record<Key, string> = {
   'hostField.password': 'Enter the password.',
   'hostField.credential_id': 'Choose a key.',
   'hostField.tmux_session': 'Use only letters, digits, dashes and underscores.',
+  'code.state.language': 'Installing the VS Code language pack…',
 }
 
 const tables: Record<string, Record<Key, string>> = { 'zh-CN': zh, en }

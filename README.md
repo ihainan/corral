@@ -25,7 +25,10 @@ keeps running and you pick it up where it was — on the same device or another.
 **Made for coding agents**
 - Paste, drop or pick an image: it is uploaded to the host and its path is
   typed into the terminal, which is how Claude Code and Codex take images
-  (Ctrl+V works as in a local terminal). Shift+Enter inserts a newline.
+  (Ctrl+V works as in a local terminal); when Gemini CLI is in front (in a
+  tmux or herdr session), the path is typed as `@path`, which is how it
+  takes them. Shift+Enter inserts
+  a newline.
 - With herdr, a panel lists workspaces and agents, shows who is waiting for
   you, and switches between them.
 - Push notifications (and optional webhooks) when an agent in herdr needs
@@ -40,7 +43,10 @@ keeps running and you pick it up where it was — on the same device or another.
 - Open web servers running on the host (dev servers, previews) in the
   browser through port forwarding, privately or shared with other users.
 - Open the host in VS Code in the browser ([code-server](https://github.com/coder/code-server),
-  installed on the host on demand; not bundled with Corral).
+  installed on the host on demand; not bundled with Corral). With the
+  Chinese interface it opens in Chinese too: the VS Code language pack is
+  fetched from [Open VSX](https://open-vsx.org) by the host, or uploaded from
+  `CORRAL_CODE_SERVER_DIR`, and checked against a pinned digest.
 
 **Several users**
 - Accounts by invitation, administrators and members, each with their own
@@ -135,7 +141,7 @@ All settings are environment variables.
 | `CORRAL_CODE_SERVER_VERSION` | `4.138.0` | code-server release installed on hosts |
 | `CORRAL_CODE_SERVER_URL` | GitHub release | Download URL template (https) with `{version}` and optionally `{arch}` (`amd64`, `arm64`) |
 | `CORRAL_CODE_SERVER_SHA256` | built in for `4.138.0` | Trusted archive digests, `amd64=<sha256>,arm64=<sha256>`; required for other versions |
-| `CORRAL_CODE_SERVER_DIR` | — | Gateway directory with `code-server-{version}-linux-{arch}.tar.gz`, uploaded to hosts without internet access |
+| `CORRAL_CODE_SERVER_DIR` | — | Gateway directory with `code-server-{version}-linux-{arch}.tar.gz` (and, for the Chinese interface, `MS-CEINTL.vscode-language-pack-zh-hans-1.131.0.vsix`), uploaded to hosts without internet access |
 | `CORRAL_RECORDING` | `off` | `on` records the output of every session |
 | `CORRAL_RECORDING_DAYS` | `30` | How long recordings are kept |
 | `CORRAL_RECORDING_MAX_MB` | `200` | Size limit of one recording |
@@ -177,8 +183,8 @@ public issue.
 - In a folder where other users may rename entries (world-writable without
   the sticky bit), an upload's staging folder can be swapped by them between
   steps; such a folder lets them tamper with anything put there anyway.
-- Listing an enormous folder in the file panel reads it whole (for at most
-  20 seconds) before showing the first 5000 entries.
+- The file panel shows the first 5000 entries of a folder, in the host's
+  order, and says when there are more.
 
 ## Develop
 

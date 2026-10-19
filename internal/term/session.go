@@ -162,7 +162,7 @@ type Session struct {
 	idleSince time.Time // when the last viewer left; zero while viewed
 	endedAt   time.Time
 	title     string
-	finished  chan struct{}  // closed when the session reached a final state
+	finished  chan struct{}    // closed when the session reached a final state
 	grants    map[int64]*grant // users the owner let watch, read-only
 
 	onEnd   func(*Session)

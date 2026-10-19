@@ -118,6 +118,14 @@ function shellPath(p: string): string | null {
   return "'" + p.replaceAll("'", "'\\''") + "'"
 }
 
+// geminiPath is a path as Gemini CLI takes a file: @path, where a backslash
+// keeps a character that would end the path (it does not read shell quotes;
+// tabs and line breaks are control characters, refused before).
+function geminiPath(p: string): string | null {
+  if (/[\x00-\x1f\x7f]/.test(p)) return null
+  return '@' + p.replace(/[ ,;!?()[\]{}"'`\\]/g, '\\$&').replace(/\.$/, '\\.')
+}
+
 // watch: a session someone else owns and lets this user watch, read-only.
 export function TerminalPage({ id, watch = false }: { id: string; watch?: boolean }) {
   const prefs = usePrefs()
@@ -1033,7 +1041,7 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
         toast(t('term.uploading', { name: f.name || 'image' }))
         try {
           const r = await uploadFile(id, f)
-          const quoted = shellPath(r.path)
+          const quoted = r.prefix === '@' ? geminiPath(r.path) : shellPath(r.path)
           if (quoted && toDraft) {
             insertDraft(quoted + ' ')
             toast(t('term.uploaded'))

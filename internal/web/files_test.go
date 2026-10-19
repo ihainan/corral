@@ -10,8 +10,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ihainan/corral/internal/testutil"
 )
@@ -328,7 +330,7 @@ func TestFilesCwdAsksTmuxForTheActivePane(t *testing.T) {
 	bin := filepath.Join(home, ".local", "bin")
 	os.MkdirAll(bin, 0o755)
 	// A stand-in tmux that answers only for the exact session target.
-	os.WriteFile(filepath.Join(bin, "tmux"), []byte("#!/bin/sh\n[ \"$4\" = \"=work:\" ] && echo '/srv/my project'\n"), 0o755)
+	os.WriteFile(filepath.Join(bin, "tmux"), []byte("#!/bin/sh\n[ \"$5\" = \"=work:\" ] && [ \"$1\" = -u ] && echo '/srv/my project'\n"), 0o755)
 	srv.HandleExec(testutil.ShellExec(home, func(cmd string) bool { return strings.Contains(cmd, "display-message") }))
 	r := admin.do("POST", "/api/hosts", map[string]any{"name": "box", "address": "127.0.0.1", "port": srv.Addr.Port,
 		"username": "alice", "auth": "password", "password": "alice-pass", "persistence": "tmux", "tmux_session": "work"})
@@ -405,5 +407,121 @@ func TestRemoveTreeCommandProtectsHome(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(home, "work")); !os.IsNotExist(err) {
 		t.Fatal("work not deleted")
+	}
+}
+
+// A huge folder is not read whole: the listing stops at the limit.
+func TestFilesListStopsAtTheLimit(t *testing.T) {
+	e := newFileEnv(t)
+	big := filepath.Join(e.root, "big")
+	os.Mkdir(big, 0o755)
+	for i := 0; i < maxListEntries+1000; i++ {
+		f, err := os.Create(filepath.Join(big, "f"+strconv.Itoa(i)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.Close()
+	}
+	r := e.c.do("GET", e.url("", url.Values{"path": {big}}), nil)
+	mustStatus(t, r, 200, "list big folder")
+	if n := len(r.json()["entries"].([]any)); n != maxListEntries || r.json()["truncated"] != true {
+		t.Fatalf("%d entries, truncated %v", n, r.json()["truncated"])
+	}
+	small := e.c.do("GET", e.url("", url.Values{"path": {e.root}}), nil)
+	if small.json()["truncated"] != false {
+		t.Fatal("a small folder says it is truncated")
+	}
+}
+
+// An uploaded file's path gets "@" in front when Gemini CLI is the program
+// in front: told by the pane title in tmux, by the session's title otherwise.
+func TestUploadPrefixForGemini(t *testing.T) {
+	png := append([]byte("\x89PNG\r\n\x1a\n"), make([]byte, 64)...)
+	for _, tc := range []struct{ title, args, want string }{
+		{"◇  Ready (proj)", "node /usr/local/bin/gemini", "@"},
+		{"Gemini CLI (proj)", "gemini", "@"},
+		{"✦  Working… (proj)", "npm exec @google/gemini-cli", "@"},
+		{"✳ Claude Code", "claude", ""},
+		{"bash", "-bash", ""},
+		{"Gemini CLI (proj)", "-bash", ""}, // the title Gemini left behind, the shell in front
+		{"◇  Ready (proj)", "node", ""},    // ... or another Node program
+		{"◇  Ready (proj)", "vim notes.txt", ""},
+	} {
+		h := newHarness(t)
+		admin := h.admin()
+		home := t.TempDir()
+		srv := h.sshServer(home)
+		bin := filepath.Join(home, ".local", "bin")
+		os.MkdirAll(bin, 0o755)
+		os.WriteFile(filepath.Join(bin, "tmux"), []byte("#!/bin/sh\n[ \"$5\" = \"=work:\" ] && [ \"$1\" = -u ] && [ \"$6\" = '#{pane_pid} #{pane_title}' ] && printf '%s\\n' '4141 "+tc.title+"'\n"), 0o755)
+		// The shell is 4141; the program in front of it is 4242.
+		os.WriteFile(filepath.Join(bin, "ps"), []byte("#!/bin/sh\ncase \"$*\" in '-o tpgid= -p 4141') echo '  4242';; '-ww -o args= -p 4242') echo '"+tc.args+"';; *) exit 1;; esac\n"), 0o755)
+		srv.HandleExec(testutil.ShellExec(home, func(cmd string) bool { return strings.Contains(cmd, "display-message") }))
+		r := admin.do("POST", "/api/hosts", map[string]any{"name": "box", "address": "127.0.0.1", "port": srv.Addr.Port,
+			"username": "alice", "auth": "password", "password": "alice-pass", "persistence": "tmux", "tmux_session": "work"})
+		r = admin.do("POST", "/api/sessions", map[string]any{"host_id": r.json()["id"]})
+		up := admin.upload(r.json()["id"].(string), png)
+		mustStatus(t, up, 201, "upload")
+		if got, _ := up.json()["prefix"].(string); got != tc.want {
+			t.Errorf("title %q, program %q: prefix %q, want %q", tc.title, tc.args, got, tc.want)
+		}
+	}
+	// A plain shell cannot tell what runs in front: no prefix, whatever the title.
+	h := newHarness(t)
+	admin := h.admin()
+	srv := h.sshServer(t.TempDir())
+	hr := admin.do("POST", "/api/hosts", map[string]any{"name": "plain", "address": "127.0.0.1", "port": srv.Addr.Port,
+		"username": "alice", "auth": "password", "password": "alice-pass", "persistence": "none"})
+	id := admin.do("POST", "/api/sessions", map[string]any{"host_id": hr.json()["id"]}).json()["id"].(string)
+	sess, _ := h.terms.Get(h.userID(admin), id)
+	sess.Write(t.Context(), []byte("\x1b]2;Gemini CLI (x)\x07")) // the test host echoes it back as output
+	for i := 0; i < 50 && sess.Info().Title == ""; i++ {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got, _ := admin.upload(id, png).json()["prefix"].(string); got != "" {
+		t.Fatalf("plain shell with a Gemini title: prefix %q (title %q)", got, sess.Info().Title)
+	}
+}
+
+func TestGeminiCommandLine(t *testing.T) {
+	for args, want := range map[string]bool{
+		"gemini":                     true,
+		"/usr/local/bin/gemini -m x": true,
+		"node /usr/local/bin/gemini": true,
+		"node --max-old-space-size=8192 /usr/lib/node_modules/@google/gemini-cli/dist/index.js": true,
+		"npm exec @google/gemini-cli":                                    true,
+		"npx -y @google/gemini-cli@latest":                               true,
+		"bun x @google/gemini-cli":                                       true,
+		"pnpm dlx @google/gemini-cli@0.64.0":                             true,
+		"node --require ./preload.cjs /usr/local/bin/gemini":             true,
+		"node --conditions gemini server.js":                             false,
+		"bun run /usr/lib/node_modules/@google/gemini-cli/dist/index.js": true,
+		"deno run -a npm:@google/gemini-cli":                             true,
+		"deno run -A -r npm:@google/gemini-cli":                          true,
+		"node --diagnostic-dir /tmp /usr/local/bin/gemini":               true,
+		"bun --smol run /usr/local/bin/gemini":                           true,
+		"bun add @google/gemini-cli":                                     false,
+		"node gemini":                                                    false,
+		"npm exec gemini":                                                true,
+		"npx gemini":                                                     true,
+		"bun x gemini":                                                   true,
+		"deno run -A chat.ts --provider gemini":                          false,
+		"bun run dev gemini":                                             false,
+		"npm exec gemini-helper":                                         false,
+		"npm install -g @google/gemini-cli":                              false,
+		"npx @google/gemini-cli-extension":                               false,
+		"npm exec prettier @google/gemini-cli":                           false,
+		"node":                                                           false,
+		"-bash":                                                          false,
+		"vim gemini.js":                                                  false,
+		"vim /work/gemini-cli/README.md":                                 false,
+		"node server.js gemini":                                          false,
+		"npm run build":                                                  false,
+		"claude --resume":                                                false,
+		"node /home/a/proj/scripts/build.js":                             false,
+	} {
+		if got := geminiCommandLine(args); got != want {
+			t.Errorf("%q: %v, want %v", args, got, want)
+		}
 	}
 }

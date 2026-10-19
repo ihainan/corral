@@ -25,6 +25,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/ihainan/corral/internal/netguard"
+	"github.com/ihainan/corral/internal/sftplite"
 	"github.com/ihainan/corral/internal/sshx"
 	"github.com/ihainan/corral/internal/store"
 	"github.com/ihainan/corral/internal/term"
@@ -721,12 +722,36 @@ func takeSFTPChan(c *ssh.Client) (release func(), ok bool) {
 //     (its request stream closes), not merely until we gave up on it, so a
 //     host that never lets go cannot make us pile up channels.
 func openSFTP(c *ssh.Client) (*sftp.Client, func(), error) {
+	return openSFTPWith(c, func(r io.Reader, w io.WriteCloser, closeAll func()) (*sftp.Client, func(), error) {
+		client, err := sftp.NewClientPipe(r, w)
+		if err != nil {
+			return nil, nil, err
+		}
+		return client, func() { closeAll(); go client.Close() }, nil
+	})
+}
+
+// openSFTPLite is openSFTP for the file panel's quick operations.
+func openSFTPLite(c *ssh.Client) (*sftplite.Client, func(), error) {
+	return openSFTPWith(c, func(r io.Reader, w io.WriteCloser, closeAll func()) (*sftplite.Client, func(), error) {
+		client, err := sftplite.New(r, w, closeAll)
+		if err != nil {
+			return nil, nil, err
+		}
+		return client, func() { client.Close() }, nil
+	})
+}
+
+// openSFTPWith does the work of openSFTP; mk starts the client on the local
+// pipes (r: from the host, w: to it), closeAll ends them and the channel.
+func openSFTPWith[T any](c *ssh.Client, mk func(r io.Reader, w io.WriteCloser, closeAll func()) (T, func(), error)) (T, func(), error) {
+	var zero T
 	releaseChan, ok := takeSFTPChan(c)
 	if !ok {
-		return nil, nil, sshx.ErrBusy
+		return zero, nil, sshx.ErrBusy
 	}
 	type result struct {
-		client *sftp.Client
+		client T
 		close  func()
 		err    error
 	}
@@ -792,13 +817,12 @@ func openSFTP(c *ssh.Client) (*sftp.Client, func(), error) {
 		}
 		go func() { _, err := io.Copy(outW, ch); outW.CloseWithError(err) }()
 		go func() { _, err := io.Copy(ch, inR); inR.CloseWithError(err) }()
-		client, err := sftp.NewClientPipe(outR, inW)
+		client, closer, err := mk(outR, inW, closeAll)
 		if err != nil {
 			closeAll()
 			done <- result{err: err}
 			return
 		}
-		closer := func() { closeAll(); go client.Close() }
 		if !hold(closer) {
 			return
 		}
@@ -809,7 +833,7 @@ func openSFTP(c *ssh.Client) (*sftp.Client, func(), error) {
 	select {
 	case r := <-done:
 		if r.err != nil {
-			return nil, nil, r.err
+			return zero, nil, r.err
 		}
 		return r.client, r.close, nil
 	case <-t.C:
@@ -820,7 +844,7 @@ func openSFTP(c *ssh.Client) (*sftp.Client, func(), error) {
 		if rel != nil {
 			rel()
 		}
-		return nil, nil, errors.New("file transfer did not start in time")
+		return zero, nil, errors.New("file transfer did not start in time")
 	}
 }
 
@@ -956,7 +980,8 @@ func (s *Server) apiUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.audit(r, "file.upload", sess.HostName, map[string]any{"session": sess.ID, "path": full, "bytes": written, "type": ctype})
-	writeJSON(w, http.StatusCreated, map[string]any{"path": full, "bytes": written, "type": ctype})
+	// "prefix": what to type before the path (Gemini CLI takes @path).
+	writeJSON(w, http.StatusCreated, map[string]any{"path": full, "bytes": written, "type": ctype, "prefix": s.pathPrefix(ctx, sess)})
 }
 
 // hostConfig fingerprints the settings a connection is made with.

@@ -110,7 +110,7 @@ func TestCommandsQuoteTheirValues(t *testing.T) {
 		}
 	}
 	for _, c := range []string{ProbeCommand("1.2.3"),
-		InstallCommand(task, "1.2.3", "amd64", FromStdin, "", "h"), CancelInstallCommand(task), StartCommand("1.2.3", "/s", "i", task),
+		InstallCommand(task, "1.2.3", "amd64", FromStdin, "", "h"), CancelInstallCommand(task), StartCommand("1.2.3", "/s", "i", task, ""),
 		StopCommand("/s", "t", task), ForceStopCommand("/s", task), SettleCommand(task), InstanceCommand()} {
 		if !strings.HasPrefix(c, "sh -c '") || !strings.HasSuffix(c, " "+Tag) {
 			t.Errorf("unexpected command shape: %.60s", c)
@@ -448,17 +448,17 @@ func TestStartRefusesUnsafeSocketDirectory(t *testing.T) {
 	os.Chmod(victim, 0o700)
 	linked := filepath.Join(t.TempDir(), "corral-sock")
 	os.Symlink(victim, linked)
-	if r := run(t, home, StartCommand("4.138.0", filepath.Join(linked, "code-server.sock"), "i", op())); r["error"] != "socketdir" {
+	if r := run(t, home, StartCommand("4.138.0", filepath.Join(linked, "code-server.sock"), "i", op(), "")); r["error"] != "socketdir" {
 		t.Fatalf("symlinked socket directory: %v", r)
 	}
 	shared := filepath.Join(t.TempDir(), "shared")
 	os.Mkdir(shared, 0o755)
 	os.Chmod(shared, 0o755)
-	if r := run(t, home, StartCommand("4.138.0", filepath.Join(shared, "code-server.sock"), "i", op())); r["error"] != "socketdir" {
+	if r := run(t, home, StartCommand("4.138.0", filepath.Join(shared, "code-server.sock"), "i", op(), "")); r["error"] != "socketdir" {
 		t.Fatalf("socket directory open to others: %v", r)
 	}
 	fresh := filepath.Join(t.TempDir(), "fresh")
-	r := run(t, home, StartCommand("4.138.0", filepath.Join(fresh, "code-server.sock"), "i", op()))
+	r := run(t, home, StartCommand("4.138.0", filepath.Join(fresh, "code-server.sock"), "i", op(), ""))
 	if r["error"] != "notinstalled" { // past the directory check
 		t.Fatalf("fresh socket directory: %v", r)
 	}
@@ -515,7 +515,7 @@ func TestStopKillsOnlyItsOwnProcess(t *testing.T) {
 }
 
 func TestStartDisablesBuiltInProxies(t *testing.T) {
-	if c := StartCommand("4.138.0", "/s", "i", op()); !strings.Contains(c, "--disable-proxy") || !strings.Contains(c, "--auth none") {
+	if c := StartCommand("4.138.0", "/s", "i", op(), ""); !strings.Contains(c, "--disable-proxy") || !strings.Contains(c, "--auth none") {
 		t.Fatal("code-server started with its own port proxy")
 	}
 }
@@ -601,7 +601,7 @@ func TestOldPidFileIsHonoured(t *testing.T) {
 	_, done = old()
 	sock := filepath.Join(st, "code-server.sock")
 	// Starting (here it then finds no release) stops the old instance first.
-	if f := run(t, home, StartCommand("4.138.0", sock, "fresh", op())); f["error"] != "notinstalled" || !ended(done) {
+	if f := run(t, home, StartCommand("4.138.0", sock, "fresh", op(), "")); f["error"] != "notinstalled" || !ended(done) {
 		t.Fatalf("start over an old instance: %v", f)
 	}
 	// A process that is not one of ours is left alone.
@@ -623,7 +623,7 @@ func TestInstanceWithoutSocketIsReplaced(t *testing.T) {
 	os.MkdirAll(st, 0o700)
 	c, done := sleeper(t, "sleep", "30")
 	os.WriteFile(filepath.Join(st, "code-server.pid"), []byte(fmt.Sprintf("%d %s lost\n", c.Process.Pid, startTime(t, c.Process.Pid))), 0o600)
-	if f := run(t, home, StartCommand("4.138.0", filepath.Join(st, "code-server.sock"), "fresh", op())); f["error"] != "notinstalled" || !ended(done) {
+	if f := run(t, home, StartCommand("4.138.0", filepath.Join(st, "code-server.sock"), "fresh", op(), "")); f["error"] != "notinstalled" || !ended(done) {
 		t.Fatalf("instance without socket: %v", f)
 	}
 }
@@ -916,7 +916,7 @@ func TestSettledOperationsNeverRun(t *testing.T) {
 	if f := run(t, home, SettleCommand(id)); f["result"] != "ok" {
 		t.Fatalf("settle: %v", f)
 	}
-	if f := run(t, home, StartCommand("4.138.0", filepath.Join(home, ".local/state/corral/code-server.sock"), "i", id)); f["error"] != "cancelled" {
+	if f := run(t, home, StartCommand("4.138.0", filepath.Join(home, ".local/state/corral/code-server.sock"), "i", id, "")); f["error"] != "cancelled" {
 		t.Fatalf("start after its settle: %v", f)
 	}
 	if f := run(t, home, StopCommand(filepath.Join(home, ".local/state/corral/code-server.sock"), "i", id)); f["error"] != "cancelled" {

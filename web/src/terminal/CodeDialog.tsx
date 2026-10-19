@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { api, ApiError, errorText } from '../api'
-import { hasKey, t } from '../i18n'
+import { getLang, hasKey, t } from '../i18n'
 import { Dialog, useToast } from '../components/ui'
 
 // VS Code in the browser (code-server on the host). Starting can take minutes
@@ -105,7 +105,8 @@ export function useCode() {
       setJob({ hostId, name, status, failure })
     }
     const run = async () => {
-      let st = await api<CodeStatus>('POST', `/api/hosts/${hostId}/code`, undefined, opts)
+      // The interface language: Chinese gets VS Code in Chinese too.
+      let st = await api<CodeStatus>('POST', `/api/hosts/${hostId}/code`, { lang: getLang() }, opts)
       while (current() && working(st.state)) {
         if (Date.now() - started > OVERALL_LIMIT) return fail(t('code.tooLong'))
         setJob({ hostId, name, status: st })

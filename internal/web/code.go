@@ -53,6 +53,7 @@ const (
 	codeDownloading = "downloading"
 	codeUploading   = "uploading"
 	codeExtracting  = "extracting"
+	codeLanguage    = "language" // installing the language pack
 	codeStarting    = "starting"
 	codeReady       = "ready"
 	codeFailed      = "failed"
@@ -92,6 +93,7 @@ type codeJob struct {
 	cancel   context.CancelFunc
 	userGen  uint64 // the owner's revocation generation when the job was asked for
 	version  int64  // the host's connection version then
+	locale   string // codeserver.LangPackLocale for a user with the Chinese interface, else ""
 }
 
 // codeQueue hands out the turns of one host's starts and stops in order.
@@ -328,6 +330,21 @@ func (s *Server) apiCodeStatus(w http.ResponseWriter, r *http.Request) {
 // needed) in the background: 202 and the state to poll.
 func (s *Server) apiCodeStart(w http.ResponseWriter, r *http.Request) {
 	u := currentUser(r)
+	// The interface language of the user opening it: Chinese gets VS Code
+	// in Chinese (see codeserver.LangPackCommand). An empty body is English.
+	var b struct {
+		Lang string `json:"lang"`
+	}
+	if r.ContentLength != 0 {
+		if err := readJSON(r, &b); err != nil {
+			writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+			return
+		}
+	}
+	locale := ""
+	if strings.HasPrefix(strings.ToLower(b.Lang), "zh") {
+		locale = codeserver.LangPackLocale
+	}
 	h, ok := s.codeHost(w, r)
 	if !ok {
 		return
@@ -376,7 +393,7 @@ func (s *Server) apiCodeStart(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*codeInstallTimeout+3*codeStepTimeout+3*codeCancelTimeout)
 	j := &codeJob{status: codeStatus{State: codeChecking}, running: true, cancel: cancel, userGen: s.code.userGen[h.OwnerID],
-		version: h.ConnVersion}
+		version: h.ConnVersion, locale: locale}
 	if old := s.code.jobs[key]; old != nil && old.status.State == codeReady {
 		j.socket = old.socket // see socket; its instance is known again once the start confirms it
 	}
@@ -554,7 +571,7 @@ func (s *Server) runCode(ctx context.Context, key [2]int64, j *codeJob, h *store
 	var sock, instance string
 	err := s.reconcileCode(key) // an earlier operation's end first
 	if err == nil {
-		sock, instance, err = s.startCode(ctx, key, h, f, step, still)
+		sock, instance, err = s.startCode(ctx, key, h, f, step, still, j.locale)
 	}
 	inherited := false
 	s.code.update(key, j, func(j *codeJob) {
@@ -721,10 +738,49 @@ func (s *Server) reconcileCode(key [2]int64) error {
 	return nil
 }
 
+// installLangPack puts the Chinese language pack on the host if it is not
+// there: uploaded from CORRAL_CODE_SERVER_DIR when the gateway serves
+// releases (and has the pack), else downloaded by the host. It is a
+// convenience: when it cannot be done, VS Code starts in English. Only a
+// revoked job (the error returned) stops the start.
+func (s *Server) installLangPack(ctx context.Context, c *ssh.Client, p *codeserver.Probe, step func(string) error) error {
+	from, url := codeserver.FromDownload, codeserver.LangPackURL
+	var input io.Reader
+	if s.cfg.CodeServerDir != "" {
+		path := filepath.Join(s.cfg.CodeServerDir, codeserver.LangPackFile)
+		if got, err := fileSHA256(path); err != nil || got != codeserver.LangPackSHA256 {
+			s.log.Info("no usable Chinese language pack for VS Code in CORRAL_CODE_SERVER_DIR; starting in English", "file", codeserver.LangPackFile)
+			return nil
+		}
+		src, err := os.Open(path)
+		if err != nil {
+			return nil
+		}
+		defer src.Close()
+		from, url, input = codeserver.FromStdin, "", src
+	} else if !p.Curl && !p.Wget {
+		return nil
+	}
+	if err := step(codeLanguage); err != nil {
+		return err
+	}
+	// (The command bounds its download and installation, so one given up on
+	// here still ends, and lets go of the host's lock, soon after.)
+	fields, ended, err := s.codeRun(ctx, c, codeserver.LangPackCommand(s.cfg.CodeServerVersion, from, url), codeStepTimeout, sshx.ExecOptions{Stdin: input})
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if err != nil || fields["result"] != "ok" {
+		s.log.Info("could not install the Chinese language pack for VS Code; starting in English",
+			"error", fields["error"], "detail", strings.TrimSpace(fields["detail"]), "ended", ended, "err", err)
+	}
+	return nil
+}
+
 // Starting -------------------------------------------------------------------
 
 func (s *Server) startCode(ctx context.Context, key [2]int64, h *store.Host, f *store.Forward, step func(string) error,
-	still func() error) (string, string, error) {
+	still func() error, locale string) (string, string, error) {
 	if err := still(); err != nil {
 		return "", "", err
 	}
@@ -756,11 +812,16 @@ func (s *Server) startCode(ctx context.Context, key [2]int64, h *store.Host, f *
 			return "", "", err
 		}
 	}
+	if locale != "" {
+		if err := s.installLangPack(ctx, fc.client, p, step); err != nil {
+			return "", "", err
+		}
+	}
 	if err := step(codeStarting); err != nil {
 		return "", "", err
 	}
 	instance, op := newTaskID(), newTaskID()
-	fields, ended, err := s.codeRun(ctx, fc.client, codeserver.StartCommand(ver, sock, instance, op), codeStepTimeout, sshx.ExecOptions{})
+	fields, ended, err := s.codeRun(ctx, fc.client, codeserver.StartCommand(ver, sock, instance, op, locale), codeStepTimeout, sshx.ExecOptions{})
 	if !ended {
 		s.settle(key, &codeCleanup{target: target, op: op})
 		if err == nil {
