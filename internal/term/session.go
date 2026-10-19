@@ -103,6 +103,10 @@ type Session struct {
 	Created  time.Time
 	// The host configuration the session was opened with (see StartOptions).
 	HostConfig string
+	// What the shell runs in, as in StartOptions; fixed for the session's life.
+	Persistence  string
+	TmuxSession  string
+	HerdrSession string
 
 	client *ssh.Client
 	ssh    *ssh.Session

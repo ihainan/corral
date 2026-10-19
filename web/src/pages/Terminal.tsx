@@ -5,7 +5,7 @@ import { FitAddon } from '@xterm/addon-fit'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import { WebglAddon } from '@xterm/addon-webgl'
-import { ArrowUp, Check, ChevronDown, ChevronLeft, CircleStop, Code2, Globe, LayoutGrid, ImagePlus, MessageSquareText, MoreVertical, Minus, Palette, Paperclip, Plus, TextSelect, Keyboard as KeyboardIcon, Power, RotateCw, Server, X } from 'lucide-react'
+import { ArrowUp, Check, ChevronDown, ChevronLeft, CircleStop, Code2, FolderOpen, Globe, LayoutGrid, ImagePlus, MessageSquareText, MoreVertical, Minus, Palette, Paperclip, Plus, TextSelect, Keyboard as KeyboardIcon, Power, RotateCw, Server, X } from 'lucide-react'
 import { api, ApiError, errorText, uploadFile, type HerdrSummary, type Host, type SessionInfo } from '../api'
 import { t } from '../i18n'
 import { navigate } from '../router'
@@ -20,6 +20,7 @@ import { chromeVars } from '../terminal/themes'
 import { SchemeDialog } from '../terminal/SchemePicker'
 import { HerdrPanel } from '../terminal/HerdrPanel'
 import { PortsDialog, openForward } from '../terminal/PortsDialog'
+import { FilesDialog } from '../terminal/FilesDialog'
 import { useCode } from '../terminal/CodeDialog'
 import { useSession } from '../app'
 
@@ -181,6 +182,13 @@ export function TerminalPage({ id }: { id: string }) {
   const panelOpen = panel && panelSheet === sheetPanel
   const { boot } = useSession()
   const [portsOpen, setPortsOpen] = useState(false)
+  const [filesOpen, setFilesOpen] = useState(false)
+  const filesPath = useRef<string | null>(null) // where the file panel was, for this page
+  const filesOpens = useRef(-1) // the connection the panel was opened on
+  const openFiles = () => {
+    filesOpens.current = connRef.current?.isOpen() ? connRef.current.opens : -1
+    setFilesOpen(true)
+  }
   const code = useCode()
   const refreshCode = code.refresh
   const codeHost = boot.code ? info?.host_id : undefined
@@ -1070,6 +1078,24 @@ export function TerminalPage({ id }: { id: string }) {
       releaseOnce()
     })
   }
+  // A path picked in the file panel goes where an uploaded file's path would;
+  // after a reconnect since the panel opened, the screen may have changed,
+  // so it is only shown.
+  const insertPath = (p: string) => {
+    setFilesOpen(false)
+    const quoted = shellPath(p)
+    if (!quoted) return toast(p)
+    if (composerRef.current) return insertDraft(quoted + ' ')
+    const c = connRef.current
+    const opens = filesOpens.current
+    if (!c?.isOpen() || c.opens !== opens) return toast(t('term.uploadNotPasted', { path: p }), true)
+    afterComposition(() => {
+      if (!c.isOpen() || c.opens !== opens) return toast(t('term.uploadNotPasted', { path: p }), true)
+      settleRef.current()
+      termRef.current?.paste(quoted + ' ')
+      if (!isTouch) termRef.current?.focus()
+    })
+  }
   const cycle = (m: ModState): ModState => (m === 'off' ? 'once' : m === 'once' ? 'lock' : 'off')
   const toggleKeyboard = () => {
     // With the composer open the keyboard belongs to it.
@@ -1232,6 +1258,7 @@ export function TerminalPage({ id }: { id: string }) {
 
   const moreItems = (): (MenuItem | null)[] => [
     { label: t('term.upload'), icon: <ImagePlus size={16} />, onSelect: () => fileRef.current?.click() },
+    ended ? null : { label: t('files.title'), icon: <FolderOpen size={16} />, onSelect: openFiles },
     { label: t('term.copyMode'), icon: <TextSelect size={16} />, onSelect: openCopyMode },
     boot.forwarding && info ? { label: t('ports.title'), icon: <Globe size={16} />, onSelect: () => setPortsOpen(true) } : null,
     boot.code && info ? { label: t('code.open'), icon: <Code2 size={16} />, onSelect: () => code.open(info.host_id, info.host_name) } : null,
@@ -1475,6 +1502,9 @@ export function TerminalPage({ id }: { id: string }) {
       {copyText !== null && <CopyMode text={copyText} onClose={() => setCopyText(null)} />}
       {schemesOpen && <SchemeDialog onClose={() => setSchemesOpen(false)} />}
       {portsOpen && info && <PortsDialog hostId={info.host_id} onClose={() => setPortsOpen(false)} />}
+      {filesOpen && !ended && (
+        <FilesDialog sessionId={id} start={filesPath.current} onPath={(p) => (filesPath.current = p)} onInsert={insertPath} onClose={() => setFilesOpen(false)} />
+      )}
       {code.dialog}
       {confirm}
       {dialogs}

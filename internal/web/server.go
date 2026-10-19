@@ -54,6 +54,7 @@ type Server struct {
 	static   fs.FS
 
 	herdrSocks herdrSockets
+	files      *sftpPool        // shared SFTP channels of the file panel
 	notifier   *notify.Notifier // nil disables push
 	fwd        *forwarder
 	code       codeServers
@@ -86,7 +87,7 @@ func New(d Deps) *Server {
 	s := &Server{cfg: d.Config, store: d.Store, auth: d.Auth, vault: d.Vault, guard: d.Guard, terms: d.Terms,
 		log: d.Log, mux: http.NewServeMux(), static: d.Static, socks: map[int64]map[*liveSocket]struct{}{},
 		pending: map[int64]map[*liveSocket]struct{}{}, herdrSocks: herdrSockets{path: map[string]string{}},
-		notifier: d.Notifier, vis: visibility{seen: map[string]map[*liveSocket]bool{}}, fwd: newForwarder(), code: codeServers{jobs: map[[2]int64]*codeJob{}}}
+		notifier: d.Notifier, vis: visibility{seen: map[string]map[*liveSocket]bool{}}, fwd: newForwarder(), files: newSFTPPool(), code: codeServers{jobs: map[[2]int64]*codeJob{}}}
 	s.fwd.wg.Add(1)
 	go s.fwd.reap()
 	s.terms.OnAlert = s.onTerminalAlert
@@ -157,6 +158,13 @@ func (s *Server) registerRoutes() {
 	s.handle("GET /api/sessions/{id}/ws", SignedIn, s.apiSessionSocket)
 	s.handle("POST /api/sessions/{id}/upload", SignedIn, s.apiUpload)
 	s.handle("POST /api/sessions/{id}/herdr", SignedIn, s.apiHerdrAction)
+	s.handle("GET /api/sessions/{id}/files", SignedIn, s.apiFilesList)
+	s.handle("GET /api/sessions/{id}/files/cwd", SignedIn, s.apiFilesCwd)
+	s.handle("GET /api/sessions/{id}/files/download", SignedIn, s.apiFilesDownload)
+	s.handle("POST /api/sessions/{id}/files/upload", SignedIn, s.apiFilesUpload)
+	s.handle("POST /api/sessions/{id}/files/mkdir", SignedIn, s.apiFilesMkdir)
+	s.handle("POST /api/sessions/{id}/files/rename", SignedIn, s.apiFilesRename)
+	s.handle("POST /api/sessions/{id}/files/delete", SignedIn, s.apiFilesDelete)
 
 	s.handle("GET /api/forwards", SignedIn, s.apiListForwards)
 	s.handle("POST /api/forwards", SignedIn, s.apiCreateForward)

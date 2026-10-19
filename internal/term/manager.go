@@ -217,6 +217,7 @@ func (m *Manager) Start(ctx context.Context, res *Reservation, owner, hostID int
 		}
 		s := &Session{
 			ID: newID(), OwnerID: owner, HostID: hostID, HostName: hostName, Created: time.Now(), HostConfig: opt.HostConfig,
+			Persistence: opt.Persistence, TmuxSession: opt.TmuxSession, HerdrSession: opt.HerdrSession,
 			client: client, ssh: sess, stdin: stdin, input: make(chan []byte, inputQueue),
 			buf: newRing(ringSize), subs: map[*Sub]struct{}{}, state: StateRunning,
 			cols: cols, rows: rows, ptySize: [2]int{cols, rows}, winch: sess.WindowChange, idleSince: time.Now(), finished: make(chan struct{}), uploads: make(chan struct{}, 2),

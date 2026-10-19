@@ -102,11 +102,11 @@ export function useFocusTrap<T extends HTMLElement>(onClose: () => void) {
 // Dialog ---------------------------------------------------------------------
 
 // seeThrough: a light backdrop, for dialogs whose effect shows behind them.
-export function Dialog(props: { title: string; onClose: () => void; children: ReactNode; sheet?: boolean; hideTitle?: boolean; wide?: boolean; seeThrough?: boolean }) {
+export function Dialog(props: { title: string; onClose: () => void; children: ReactNode; sheet?: boolean; hideTitle?: boolean; wide?: boolean; seeThrough?: boolean; className?: string; dialogProps?: React.HTMLAttributes<HTMLDivElement> }) {
   const ref = useFocusTrap<HTMLDivElement>(props.onClose)
   return createPortal(
     <div className={'overlay' + (props.sheet !== false ? ' sheet-mode' : '') + (props.seeThrough ? ' see-through' : '')} onMouseDown={(e) => e.target === e.currentTarget && props.onClose()}>
-      <div className={'dialog' + (props.wide ? ' dialog-wide' : '')} role="dialog" aria-modal="true" aria-label={props.title} ref={ref}>
+      <div {...props.dialogProps} className={'dialog' + (props.wide ? ' dialog-wide' : '') + (props.className ? ' ' + props.className : '')} role="dialog" aria-modal="true" aria-label={props.title} ref={ref}>
         {props.hideTitle ? null : <h2>{props.title}</h2>}
         {props.children}
       </div>

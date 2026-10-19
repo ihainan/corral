@@ -162,9 +162,16 @@ export async function api<T>(method: string, path: string, body?: unknown, opts:
 }
 
 export async function uploadFile(sessionId: string, file: Blob, onProgress?: (p: number) => void): Promise<{ path: string }> {
+  return postFile(`/api/sessions/${sessionId}/upload`, file, onProgress)
+}
+
+// postFile sends one file as a multipart upload, reporting progress; aborting
+// the signal stops it (and rejects with code 'aborted').
+export async function postFile<T = { path: string }>(url: string, file: Blob, onProgress?: (p: number) => void, signal?: AbortSignal): Promise<T> {
+  const sentAt = authGeneration
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest()
-    xhr.open('POST', `/api/sessions/${sessionId}/upload`)
+    xhr.open('POST', url)
     xhr.withCredentials = true
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable && onProgress) onProgress(e.loaded / e.total)
@@ -176,10 +183,14 @@ export async function uploadFile(sessionId: string, file: Blob, onProgress?: (p:
       } catch {
         /* ignore */
       }
-      if (xhr.status >= 200 && xhr.status < 300) resolve(data)
-      else reject(new ApiError(xhr.status, data?.error ?? 'internal', data?.message ?? '', data?.extra))
+      if (xhr.status >= 200 && xhr.status < 300) return resolve(data)
+      if (xhr.status === 401) unauthorized(sentAt)
+      reject(new ApiError(xhr.status, data?.error ?? 'internal', data?.message ?? '', data?.extra))
     }
     xhr.onerror = () => reject(new ApiError(0, 'network', t('error.network')))
+    xhr.onabort = () => reject(new ApiError(0, 'aborted', ''))
+    if (signal?.aborted) return reject(new ApiError(0, 'aborted', ''))
+    signal?.addEventListener('abort', () => xhr.abort(), { once: true })
     const fd = new FormData()
     fd.append('file', file, 'upload')
     xhr.send(fd)
@@ -228,4 +239,19 @@ export interface Forward {
 export interface ListeningPort {
   port: number
   address: string
+}
+
+export interface FileEntry {
+  name: string
+  type: 'dir' | 'file' | 'other' // for a link, what it points to
+  link: boolean
+  size: number
+  mtime: number
+  mode: string
+}
+
+export interface FileListing {
+  path: string
+  entries: FileEntry[]
+  truncated: boolean
 }

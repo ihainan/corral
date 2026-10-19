@@ -593,14 +593,51 @@ var uploadExt = map[string]string{
 
 var errTooLarge = errors.New("file too large")
 
+// maxSFTPPerConn bounds the SFTP channels of one SSH connection that have
+// not really ended (see sshx/guard.go): the file panel's shared channel,
+// transfers, and channels given up on a host that has not let go of them.
+var maxSFTPPerConn = 4
+
+var sftpChans = struct {
+	sync.Mutex
+	m map[*ssh.Client]int
+}{m: map[*ssh.Client]int{}}
+
+// takeSFTPChan reserves one SFTP channel on c; release is safe to call twice.
+func takeSFTPChan(c *ssh.Client) (release func(), ok bool) {
+	sftpChans.Lock()
+	defer sftpChans.Unlock()
+	if sftpChans.m[c] >= maxSFTPPerConn {
+		return nil, false
+	}
+	sftpChans.m[c]++
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			sftpChans.Lock()
+			defer sftpChans.Unlock()
+			if sftpChans.m[c]--; sftpChans.m[c] <= 0 {
+				delete(sftpChans.m, c)
+			}
+		})
+	}, true
+}
+
 // openSFTP starts the sftp subsystem on its own channel with hard bounds that
 // do not depend on the host cooperating:
 //   - opening the channel and the subsystem handshake share one time limit;
 //     on timeout we return at once and a background goroutine cleans up;
 //   - the sftp client talks through local pipes, so closing them unblocks it
 //     immediately even if the host never answers;
-//   - stderr is read continuously so it cannot fill the channel window.
+//   - stderr is read continuously so it cannot fill the channel window;
+//   - the channel counts against maxSFTPPerConn until it has really ended
+//     (its request stream closes), not merely until we gave up on it, so a
+//     host that never lets go cannot make us pile up channels.
 func openSFTP(c *ssh.Client) (*sftp.Client, func(), error) {
+	releaseChan, ok := takeSFTPChan(c)
+	if !ok {
+		return nil, nil, sshx.ErrBusy
+	}
 	type result struct {
 		client *sftp.Client
 		close  func()
@@ -623,31 +660,24 @@ func openSFTP(c *ssh.Client) (*sftp.Client, func(), error) {
 		return true
 	}
 	go func() {
-		sess, err := c.NewSession()
+		ch, reqs, err := c.OpenChannel("session", nil)
 		if err != nil {
+			releaseChan()
 			done <- result{err: err}
 			return
 		}
-		if !hold(func() { go sess.Close() }) {
+		go func() {
+			for r := range reqs {
+				if r.WantReply {
+					_ = r.Reply(false, nil)
+				}
+			}
+			releaseChan()
+		}()
+		if !hold(func() { go ch.Close() }) {
 			return
 		}
-		fail := func(err error) { sess.Close(); done <- result{err: err} }
-		chIn, err := sess.StdinPipe()
-		if err != nil {
-			fail(err)
-			return
-		}
-		chOut, err := sess.StdoutPipe()
-		if err != nil {
-			fail(err)
-			return
-		}
-		chErr, err := sess.StderrPipe()
-		if err != nil {
-			fail(err)
-			return
-		}
-		go io.Copy(io.Discard, chErr)
+		go io.Copy(io.Discard, ch.Stderr())
 		// Local pipes between the sftp client and the channel.
 		outR, outW := io.Pipe()
 		inR, inW := io.Pipe()
@@ -658,19 +688,23 @@ func openSFTP(c *ssh.Client) (*sftp.Client, func(), error) {
 			once.Do(func() {
 				outR.CloseWithError(io.ErrClosedPipe)
 				inW.CloseWithError(io.ErrClosedPipe)
-				go sess.Close()
+				go ch.Close()
 			})
 		}
 		if !hold(closeAll) {
 			return
 		}
-		if err := sess.RequestSubsystem("sftp"); err != nil {
+		ok, err := ch.SendRequest("subsystem", true, ssh.Marshal(&struct{ Name string }{"sftp"}))
+		if err == nil && !ok {
+			err = errors.New("the host refused the sftp subsystem")
+		}
+		if err != nil {
 			closeAll()
 			done <- result{err: err}
 			return
 		}
-		go func() { _, err := io.Copy(outW, chOut); outW.CloseWithError(err) }()
-		go func() { _, err := io.Copy(chIn, inR); inR.CloseWithError(err) }()
+		go func() { _, err := io.Copy(outW, ch); outW.CloseWithError(err) }()
+		go func() { _, err := io.Copy(ch, inR); inR.CloseWithError(err) }()
 		client, err := sftp.NewClientPipe(outR, inW)
 		if err != nil {
 			closeAll()
@@ -775,6 +809,10 @@ func (s *Server) apiUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	client, closeSFTP, err := openSFTP(sess.Client())
+	if errors.Is(err, sshx.ErrBusy) {
+		writeError(w, http.StatusTooManyRequests, "busy", "earlier file transfers have not ended yet")
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "sftp_unavailable", "the host does not allow file transfer")
 		return
