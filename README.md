@@ -11,8 +11,9 @@ keeps running and you pick it up where it was — on the same device or another.
 
 **A terminal that works on a phone**
 - The gateway keeps sessions alive while nobody looks; with tmux or
-  [herdr](https://herdr.dev) on the host they also
-  survive gateway restarts.
+  [herdr](https://herdr.dev) on the host they also survive gateway
+  restarts. Opening a host lists its tmux and herdr sessions to pick from,
+  along with a new tmux session and a plain shell.
 - A key bar with Esc, Ctrl and Alt (tap once or lock), Tab and Shift+Tab,
   arrows, F1–F12 and the symbols that are hard to type on a phone keyboard.
   Add keys of your own that send a sequence, written as for tmux's
@@ -125,9 +126,10 @@ on every request; subdomains cannot read the main site's sign-in.
 
 ### On the hosts
 
-Nothing needs to be installed. With **tmux** on a host (or **herdr**, chosen
-per host), sessions run inside it, so they survive the gateway restarting and
-can be attached from elsewhere. The file panel and image uploads need the
+Nothing needs to be installed. With **tmux** or **herdr** on a host, opening
+it offers their sessions (and a new tmux session); terminals running in them
+survive the gateway restarting and can be attached from elsewhere. A host
+with neither opens a plain shell. The file panel and image uploads need the
 host's SFTP subsystem (enabled by default in OpenSSH).
 
 ## Configuration

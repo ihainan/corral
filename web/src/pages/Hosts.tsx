@@ -141,7 +141,6 @@ export function HostsPage() {
                     <span className="row-sub" id={'hs-' + h.id}>
                       {h.username}@{h.address}
                       {h.port !== 22 ? ':' + h.port : ''}
-                      {h.persistence !== 'none' ? ' · ' + h.persistence : ''}
                       {h.jump_host_id ? ' · ' + t('host.via', { name: hosts?.find((x) => x.id === h.jump_host_id)?.name ?? '?' }) : ''}
                     </span>
                   </button>
@@ -170,7 +169,7 @@ export function HostsPage() {
                         <span className={'dot ' + (s.meta?.waiting ? 'warn' : 'ok')} aria-hidden="true" />
                         <span className="row-title">{s.title || name}</span>
                         <span className="row-meta" title={new Date(s.created_at * 1000).toLocaleString()}>{t('hosts.startedAgo', { when: relTime(s.created_at) })}</span>
-                        <span className="row-sub" id={'sd-' + s.id}>{sessionDetail(s, h)}</span>
+                        <span className="row-sub" id={'sd-' + s.id}>{sessionDetail(s)}</span>
                       </a>
                       <div className="row-actions">
                         <button className="icon-btn" aria-label={t('hosts.closeNamed', { name: `${h.name}：${s.title || name}` })} title={t('hosts.closeSession')} onClick={() => closeSession(s, s.title || name)}>
@@ -212,7 +211,7 @@ export function HostsPage() {
 
 // The line under a running session: what herdr reports (where you are, who
 // is waiting), otherwise how it is being used.
-function sessionDetail(s: SessionInfo, h: Host): string {
+function sessionDetail(s: SessionInfo): string {
   const parts: string[] = []
   const m = s.meta
   if (m && m.t === 'herdr') {
@@ -223,7 +222,7 @@ function sessionDetail(s: SessionInfo, h: Host): string {
     if (agents > 0) parts.push(t('hosts.herdrAgents', { n: agents }))
     if (m.waiting > 0) parts.push(t('hosts.herdrWaiting', { n: m.waiting }))
   } else {
-    parts.push(h.persistence === 'tmux' ? 'tmux' : h.persistence === 'herdr' ? 'herdr' : t('host.persistNone'))
+    parts.push(s.persistence === 'tmux' ? 'tmux · ' + (s.mux_session ?? '') : s.persistence === 'herdr' ? 'herdr' : t('host.persistNone'))
   }
   parts.push(s.viewers > 0 ? t('hosts.viewers', { n: s.viewers }) : t('hosts.noViewers'))
   parts.push(`${s.cols}×${s.rows}`)

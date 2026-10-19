@@ -43,7 +43,9 @@ export function choices(text: string): { key: string; label: string }[] {
 // it, Enter, Esc, or a line of text. What is sent goes to that pane only if
 // the screen is still the one shown.
 // onLoaded: the screen has been shown (the request to answer has been seen).
-export function ReplyDialog({ sessionId, agent, onLoaded, onClose }: { sessionId: string; agent: HerdrAgent; onLoaded?: () => void; onClose: () => void }) {
+// resizedAt: when the terminal's size last changed; herdr then redraws the
+// pane, so the screen is read again a moment later.
+export function ReplyDialog({ sessionId, agent, onLoaded, onClose, resizedAt }: { sessionId: string; agent: HerdrAgent; onLoaded?: () => void; onClose: () => void; resizedAt?: number }) {
   const toast = useToast()
   const base = `/api/sessions/${sessionId}/herdr/panes/${encodeURIComponent(agent.pane_id)}`
   const [screen, setScreen] = useState<Screen | null>(null)
@@ -83,6 +85,17 @@ export function ReplyDialog({ sessionId, agent, onLoaded, onClose }: { sessionId
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [base])
+  const busyRef = useRef(false)
+  busyRef.current = busy
+  const firstSize = useRef(resizedAt)
+  useEffect(() => {
+    if (!resizedAt || resizedAt === firstSize.current) return
+    const tm = window.setTimeout(() => {
+      if (!busyRef.current) void load()
+    }, 800)
+    return () => clearTimeout(tm)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resizedAt])
   // The end of the screen is where the question is.
   useLayoutEffect(() => {
     if (pre.current) pre.current.scrollTop = pre.current.scrollHeight

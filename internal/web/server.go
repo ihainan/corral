@@ -55,6 +55,8 @@ type Server struct {
 
 	herdrSocks herdrSockets
 	replies    paneReplies      // answers to agents in herdr panes
+	picks      pendingConns     // connections kept while the user picks what to open
+	opening    openSlots        // opens connecting or asking a host, per user
 	files      *sftpPool        // shared SFTP channels of the file panel
 	rec        *recState        // recordings being made, and their pruning
 	notifier   *notify.Notifier // nil disables push
@@ -451,6 +453,7 @@ func (s *Server) closeOtherLogins(userID int64, keep string) {
 		}
 	}
 	s.endForwardOtherLogins(userID, keep)
+	s.picks.dropLogins(userID, func(l string) bool { return l != keep })
 	if s.notifier != nil {
 		s.notifier.RevokeOtherLogins(userID, keep)
 	}
@@ -459,6 +462,7 @@ func (s *Server) closeOtherLogins(userID int64, keep string) {
 // closeSockets closes a user's open terminal sockets and cancels connections
 // being set up; with loginHash set, only those of that browser login.
 func (s *Server) closeSockets(userID int64, loginHash string) {
+	s.picks.dropLogins(userID, func(l string) bool { return loginHash == "" || l == loginHash })
 	s.sockMu.Lock()
 	defer s.sockMu.Unlock()
 	for _, set := range []map[*liveSocket]struct{}{s.socks[userID], s.pending[userID]} {

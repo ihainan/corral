@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
-import { api, ApiError, errorText, type Host, type SessionInfo } from './api'
+import { api, ApiError, choiceOf, errorText, type Host, type HostChoices, type OpenChoice, type SessionInfo } from './api'
 import { hasKey, t } from './i18n'
 import { Dialog, Field, useToast } from './components/ui'
+import { OpenPicker, rememberChoice } from './pages/OpenPicker'
 
 // Rough terminal size for the first frame, before xterm measures the real one.
 function estimateSize() {
@@ -10,15 +11,18 @@ function estimateSize() {
   return { cols, rows }
 }
 
+// choice: what is being opened (none yet: the host is asked what it has).
 type Pending =
-  | { kind: 'password'; host: Host; accept?: string }
-  | { kind: 'hostkey'; host: Host; expected: string; got: string; password?: string }
+  | { kind: 'password'; host: Host; accept?: string; choice?: OpenChoice }
+  | { kind: 'hostkey'; host: Host; expected: string; got: string; password?: string; choice?: OpenChoice }
+  | { kind: 'choose'; host: Host; found: HostChoices }
   | null
 
 // useConnect opens a session to a host and resolves the interactive cases
 // (password prompt, changed host key) with dialogs.
 export function useConnect(onOpen: (s: SessionInfo) => void): {
-  connect: (h: Host) => void
+  // With a choice, it is opened; without, the host is asked what it has.
+  connect: (h: Host, choice?: OpenChoice) => void
   busyHost: number | null
   dialogs: ReactNode
 } {
@@ -41,7 +45,7 @@ export function useConnect(onOpen: (s: SessionInfo) => void): {
     setBusyHost(null)
   }
 
-  const open = async (h: Host, password?: string, accept?: string): Promise<'done' | 'retry-password'> => {
+  const open = async (h: Host, password?: string, accept?: string, choice?: OpenChoice, token?: string): Promise<'done' | 'retry-password'> => {
     if (inflight.current) return 'done' // a second tap while connecting does nothing
     inflight.current = true
     const mine = ++attempt.current
@@ -49,7 +53,15 @@ export function useConnect(onOpen: (s: SessionInfo) => void): {
     try {
       // reused: an already running tmux/herdr session was returned, which
       // other devices may be using.
-      const s = await api<SessionInfo & { reused?: boolean }>('POST', '/api/sessions', { host_id: h.id, ...estimateSize(), password, accept_fingerprint: accept })
+      const s = await api<(SessionInfo & { reused?: boolean }) | HostChoices>('POST', '/api/sessions', {
+        host_id: h.id, ...estimateSize(), password, accept_fingerprint: accept, open: choice ?? null, pending: token,
+      })
+      if ('choose' in s) {
+        // The host was asked what it has: the user picks (the connection is
+        // kept a minute for it). Gone back meanwhile, it simply expires.
+        if (mine === attempt.current) setPending({ kind: 'choose', host: h, found: s })
+        return 'done'
+      }
       if (mine !== attempt.current) {
         // Cancelled while connecting: close what was opened for this (never a
         // reused session). If that fails the session simply shows up in the
@@ -57,6 +69,9 @@ export function useConnect(onOpen: (s: SessionInfo) => void): {
         if (!s.reused) void api('DELETE', '/api/sessions/' + s.id).catch(() => {})
         return 'done'
       }
+      // Remembered as what was opened (a new tmux session by its name).
+      const opened = choiceOf(s) ?? choice
+      if (opened) rememberChoice(h.id, opened)
       setPending(null)
       onOpen(s)
       return 'done'
@@ -64,11 +79,11 @@ export function useConnect(onOpen: (s: SessionInfo) => void): {
       if (mine !== attempt.current) return 'done'
       if (e instanceof ApiError) {
         if (e.code === 'password_required') {
-          setPending({ kind: 'password', host: h, accept })
+          setPending({ kind: 'password', host: h, accept, choice })
           return 'done'
         }
         if (e.code === 'host_key_changed') {
-          setPending({ kind: 'hostkey', host: h, expected: String(e.extra.expected), got: String(e.extra.got), password })
+          setPending({ kind: 'hostkey', host: h, expected: String(e.extra.expected), got: String(e.extra.got), password, choice })
           return 'done'
         }
         if (e.code === 'auth_failed' && h.auth === 'ask') {
@@ -92,7 +107,7 @@ export function useConnect(onOpen: (s: SessionInfo) => void): {
   let dialogs: ReactNode = null
   if (pending?.kind === 'password') {
     const p = pending
-    dialogs = <PasswordDialog host={p.host} onClose={cancel} onSubmit={(pw) => open(p.host, pw, p.accept)} />
+    dialogs = <PasswordDialog host={p.host} onClose={cancel} onSubmit={(pw) => open(p.host, pw, p.accept, p.choice)} />
   } else if (pending?.kind === 'hostkey') {
     const p = pending
     dialogs = (
@@ -114,8 +129,8 @@ export function useConnect(onOpen: (s: SessionInfo) => void): {
             onClick={() => {
               // Retry with the exact fingerprint shown above: the gateway re-pins
               // only if the host presents that very key.
-              if (p.host.auth === 'ask' && !p.password) setPending({ kind: 'password', host: p.host, accept: p.got })
-              else void open(p.host, p.password, p.got)
+              if (p.host.auth === 'ask' && !p.password) setPending({ kind: 'password', host: p.host, accept: p.got, choice: p.choice })
+              else void open(p.host, p.password, p.got, p.choice)
             }}
           >
             {t('hostkey.trust')}
@@ -123,9 +138,20 @@ export function useConnect(onOpen: (s: SessionInfo) => void): {
         </div>
       </Dialog>
     )
+  } else if (pending?.kind === 'choose') {
+    const p = pending
+    dialogs = (
+      <OpenPicker
+        host={p.host}
+        found={p.found}
+        busy={busyHost === p.host.id}
+        onClose={cancel}
+        onPick={(choice) => void open(p.host, undefined, undefined, choice, p.found.pending)}
+      />
+    )
   }
 
-  return { connect: (h) => void open(h), busyHost, dialogs }
+  return { connect: (h, choice) => void open(h, undefined, undefined, choice), busyHost, dialogs }
 }
 
 function PasswordDialog(props: { host: Host; onClose: () => void; onSubmit: (pw: string) => Promise<'done' | 'retry-password'> }) {

@@ -121,7 +121,7 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 			return
 		}
 		for _, si := range list {
-			if si.Running && ((h.HerdrSession == "" && si.Default) || si.Name == h.HerdrSession) {
+			if si.Running && ((sess.HerdrSession == "" && si.Default) || si.Name == sess.HerdrSession) {
 				socket = si.SocketPath
 			}
 		}
@@ -138,7 +138,7 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 		return
 	}
 	s.herdrSocks.set(sess.ID, socket)
-	name := h.HerdrSession
+	name := sess.HerdrSession
 	if name == "" {
 		name = "default"
 	}

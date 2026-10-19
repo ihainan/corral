@@ -6,7 +6,7 @@ import { Unicode11Addon } from '@xterm/addon-unicode11'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import { WebglAddon } from '@xterm/addon-webgl'
 import { ArrowUp, Check, ChevronDown, ChevronLeft, CircleStop, Code2, Eye, FolderOpen, Globe, LayoutGrid, ImagePlus, MessageSquareText, MoreVertical, Minus, Palette, Paperclip, Plus, TextSelect, Keyboard as KeyboardIcon, Power, RotateCw, Server, X } from 'lucide-react'
-import { api, ApiError, errorText, uploadFile, type HerdrAgent, type HerdrSummary, type Host, type SessionInfo } from '../api'
+import { api, ApiError, choiceOf, errorText, uploadFile, type HerdrAgent, type HerdrSummary, type Host, type SessionInfo } from '../api'
 import { t } from '../i18n'
 import { navigate } from '../router'
 import { getPrefs, prefsConfirmed, setChromeColor, setPrefs, termScheme, usePrefs } from '../prefs'
@@ -205,6 +205,9 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
   // The agent being answered, and the pane a notification asked to answer
   // (?reply=<pane>), opened once this connection's summary has come.
   const [replyTo, setReplyTo] = useState<HerdrAgent | null>(null)
+  // When this connection last had the terminal's size set (0: not yet):
+  // herdr redraws its panes for it, so a pane's screen is read after that.
+  const [sized, setSized] = useState(0)
   const [wantReply, setWantReply] = useState<string | null>(() => (watch ? null : new URLSearchParams(location.search).get('reply')))
   // The pane stays in the address until it is dealt with (the dialog has
   // shown its screen, or it no longer waits), so signing in again on the way
@@ -229,7 +232,7 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
       setWantReply(null)
       return
     }
-    if (!herdr || !herdrFresh || status !== 'open') {
+    if (!herdr || !herdrFresh || status !== 'open' || !sized) {
       stopGiveUp() // the wait starts again with the next connection's summary
       return
     }
@@ -237,9 +240,13 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
     const a = herdr.workspaces.flatMap((w) => w.agents).find((x) => x.pane_id === wantReply && x.status === 'blocked')
     if (a) {
       stopGiveUp()
-      setWantReply(null)
-      setReplyTo(a)
-      return
+      // Shortly after the size was set, so the screen read is the redrawn one.
+      const wait = Math.max(0, sized + 800 - Date.now())
+      const tm = window.setTimeout(() => {
+        setWantReply((cur) => (cur === wantReply ? null : cur))
+        setReplyTo(a)
+      }, wait)
+      return () => clearTimeout(tm)
     }
     if (replyGiveUp.current?.pane === wantReply) return
     stopGiveUp()
@@ -253,7 +260,7 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
     }, 8000)
     replyGiveUp.current = { pane, timer }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wantReply, herdr, herdrFresh, status, toast])
+  }, [wantReply, herdr, herdrFresh, status, sized, toast])
   // A notification tapped while this page is open already.
   useEffect(() => {
     if (watch) return
@@ -329,6 +336,9 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
         if (s) {
           setInfo(s)
           local.set('corral.sessHost.' + id, String(s.host_id))
+          // What it was opened as, to open it again after it is gone.
+          const c = choiceOf(s)
+          if (c) local.set('corral.sessOpen.' + id, JSON.stringify(c))
         }
       })
       .catch(() => {})
@@ -479,6 +489,7 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
     // Each socket's replay is numbered: the end of an earlier one, reported
     // late, does not end a later one.
     let replayRun = 0
+    let lastSize = { cols: 0, rows: 0 } // as the gateway last reported it
     let alive = true
     let lastDropToast = 0
     const droppedInput = () => {
@@ -541,6 +552,11 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
       onEnd: setEnd,
       onLatency: setLatency,
       onSize: (cols, rows, own) => {
+        // (Only a change: claims of the same size do not redraw anything.)
+        if (cols !== lastSize.cols || rows !== lastSize.rows) {
+          lastSize = { cols, rows }
+          setSized(Date.now())
+        }
         inCharge = own
         if (!own) {
           // Another window took over after this one's last claim: an action
@@ -597,6 +613,8 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
       onHello: () => {
         replayRun++
         setHerdrFresh(false)
+        lastSize = { cols: 0, rows: 0 }
+        setSized(0)
       },
       // Input typed while disconnected is sent once the connection is back,
       // unless there was too much of it or it waited too long.
@@ -1398,7 +1416,16 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
     if (!hostIdForReconnect) return navigate('/')
     try {
       const h = await api<Host>('GET', '/api/hosts/' + hostIdForReconnect)
-      connect(h)
+      // What this terminal was opened as, again (no choosing).
+      let again = info ? choiceOf(info) : undefined
+      if (!again) {
+        try {
+          again = JSON.parse(local.get('corral.sessOpen.' + id) ?? 'null') ?? undefined
+        } catch {
+          again = undefined
+        }
+      }
+      connect(h, again)
     } catch (e) {
       toast(errorText(e), true)
     }
@@ -1632,6 +1659,7 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
             key={replyTo.pane_id}
             sessionId={id}
             agent={replyTo}
+            resizedAt={sized}
             onLoaded={() => forgetReply(replyTo.pane_id)}
             onClose={() => {
               forgetReply(replyTo.pane_id)

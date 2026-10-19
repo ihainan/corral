@@ -59,6 +59,35 @@ export interface SessionInfo {
   recording?: boolean // its output is being recorded
   watching?: number // windows of others watching it
   meta?: HerdrSummary // last side information published by the session
+  persistence?: 'none' | 'tmux' | 'herdr' // what the shell runs in
+  mux_session?: string // the tmux or herdr session ('' for herdr's default)
+}
+
+// What to open on a host (see the picker).
+export interface OpenChoice {
+  kind: 'shell' | 'tmux' | 'tmux_new' | 'herdr'
+  name?: string
+}
+
+// What a host has to open, as the gateway found it.
+export interface HostChoices {
+  choose: {
+    tmux: boolean
+    tmux_sessions: { name: string; windows: number; attached: boolean }[]
+    herdr: boolean
+    herdr_sessions: { name: string; default: boolean }[]
+    unknown?: boolean
+  }
+  running: { id: string; kind: 'shell' | 'tmux' | 'herdr'; name: string; title: string; created_at: number }[]
+  pending: string
+}
+
+// choiceOf is what a running terminal was opened as.
+export function choiceOf(s: SessionInfo): OpenChoice | undefined {
+  if (s.persistence === 'tmux') return { kind: 'tmux', name: s.mux_session ?? '' }
+  if (s.persistence === 'herdr') return { kind: 'herdr', name: s.mux_session ?? '' }
+  if (s.persistence === 'none') return { kind: 'shell' }
+  return undefined
 }
 
 export interface AdminUser {

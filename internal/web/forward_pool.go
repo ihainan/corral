@@ -571,4 +571,5 @@ func (s *Server) Close() {
 	s.files.shutdown()
 	s.code.shutdown()
 	s.fwd.shutdown()
+	s.picks.shutdown()
 }

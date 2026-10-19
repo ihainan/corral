@@ -19,9 +19,6 @@ export function HostEditPage({ id }: { id?: number }) {
   const [password, setPassword] = useState('')
   const [hadPassword, setHadPassword] = useState(false)
   const [credentialId, setCredentialId] = useState<number | null>(null)
-  const [persist, setPersist] = useState<Host['persistence']>('tmux')
-  const [herdrName, setHerdrName] = useState('')
-  const [tmuxName, setTmuxName] = useState('')
   const [keys, setKeys] = useState<KeyCred[]>([])
   const [jumpId, setJumpId] = useState<number | null>(null)
   const [hosts, setHosts] = useState<Host[] | null>(null) // null until loaded
@@ -50,9 +47,6 @@ export function HostEditPage({ id }: { id?: number }) {
     setPassword('')
     setHadPassword(h.auth === 'password')
     setCredentialId(h.auth === 'key' ? h.credential_id : null)
-    setPersist(h.persistence)
-    setHerdrName(h.herdr_session ?? '')
-    setTmuxName(h.tmux_session)
     setJumpId(h.jump_host_id ?? null)
     if (h.jump_host_id) setAdvOpen(true)
     setVersion(h.version)
@@ -120,16 +114,10 @@ export function HostEditPage({ id }: { id?: number }) {
     setBusy(true)
     setError(null)
     const a = splitAddress()
-    // The session name of the mode not chosen is hidden, so it must never be
-    // the reason a save fails: keep it only when it would pass validation.
-    const keep = (v: string) => (/^[A-Za-z0-9_-]{1,64}$/.test(v.trim()) ? v : '')
     const body = {
       name, address: a.address, port: Number(a.port) || 22, username: a.username, auth,
       password: auth === 'password' ? password : '',
       credential_id: auth === 'key' ? credentialId : null,
-      persistence: persist,
-      tmux_session: persist === 'tmux' ? tmuxName : keep(tmuxName),
-      herdr_session: persist === 'herdr' ? herdrName : keep(herdrName),
       jump_host_id: jumpId,
     }
     try {
@@ -140,7 +128,7 @@ export function HostEditPage({ id }: { id?: number }) {
       const field = err instanceof ApiError ? err.field : undefined
       setStale(err instanceof ApiError && err.code === 'host_changed')
       setError({ field, text: err instanceof ApiError && err.code === 'invalid_field' ? fieldMessage(field, err.message) : errorText(err) })
-      if (field === 'tmux_session' || field === 'herdr_session' || field === 'jump_host_id') setAdvOpen(true)
+      if (field === 'jump_host_id') setAdvOpen(true)
       setBusy(false)
     }
   }
@@ -236,20 +224,6 @@ export function HostEditPage({ id }: { id?: number }) {
           </div>
         )}
 
-        <div className="field">
-          <span className="field-label" id="persist-label">{t('host.persistence')}</span>
-          <div className="seg" role="group" aria-labelledby="persist-label">
-            {(['tmux', 'herdr', 'none'] as const).map((v) => (
-              <button type="button" key={v} aria-pressed={persist === v} onClick={() => setPersist(v)}>
-                {v === 'tmux' ? t('host.persistTmux') : v === 'herdr' ? 'herdr' : t('host.persistNone')}
-              </button>
-            ))}
-          </div>
-          <p className="hint">
-            {persist === 'tmux' ? t('host.persistTmuxHint') : persist === 'herdr' ? t('host.persistHerdrHint') : t('host.persistNoneHint')}
-          </p>
-        </div>
-
         <details className="adv" open={advOpen} onToggle={(e) => setAdvOpen(e.currentTarget.open)}>
           <summary>
             <ChevronRight size={16} />
@@ -282,16 +256,6 @@ export function HostEditPage({ id }: { id?: number }) {
                 </p>
               )}
             </Field>
-            {persist === 'tmux' && (
-              <Field label={t('host.tmuxSession')} htmlFor="h-tmux" optional error={fe('tmux_session')}>
-                <input id="h-tmux" className="input mono" value={tmuxName} onChange={(e) => setTmuxName(e.target.value)} autoCapitalize="none" autoCorrect="off" spellCheck={false} />
-              </Field>
-            )}
-            {persist === 'herdr' && (
-              <Field label={t('host.herdrSession')} htmlFor="h-herdr" optional hint={t('host.herdrSessionHint')} error={fe('herdr_session')}>
-                <input id="h-herdr" className="input mono" value={herdrName} onChange={(e) => setHerdrName(e.target.value)} autoCapitalize="none" autoCorrect="off" spellCheck={false} />
-              </Field>
-            )}
           </div>
         </details>
 

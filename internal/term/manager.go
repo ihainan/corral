@@ -123,6 +123,9 @@ type StartOptions struct {
 	Persistence  string // "none", "tmux" or "herdr"
 	TmuxSession  string // validated by the caller: [A-Za-z0-9_-]{1,64}
 	HerdrSession string // validated by the caller; "" attaches herdr's default session
+	// TmuxNew starts TmuxSession as a new session: it fails if one of that
+	// name exists, instead of attaching it.
+	TmuxNew bool
 	// HostConfig fingerprints the host settings the connection was made with,
 	// so a session is only reused while the host still describes it.
 	HostConfig string
@@ -217,7 +220,11 @@ func (m *Manager) Start(ctx context.Context, res *Reservation, owner, hostID int
 		}
 		switch opt.Persistence {
 		case "tmux":
-			err = sess.Start(TmuxCommand(opt.TmuxSession))
+			if opt.TmuxNew {
+				err = sess.Start(TmuxNewCommand(opt.TmuxSession))
+			} else {
+				err = sess.Start(TmuxCommand(opt.TmuxSession))
+			}
 		case "herdr":
 			err = sess.Start(HerdrCommand(opt.HerdrSession))
 		default:
@@ -317,6 +324,16 @@ func (m *Manager) Start(ctx context.Context, res *Reservation, owner, hostID int
 func TmuxCommand(name string) string {
 	script := `PATH="$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"; ` +
 		`if command -v tmux >/dev/null 2>&1; then exec tmux -u new-session -A -s "$1"; ` +
+		`else printf '\r\n[corral] tmux is not installed on this host; starting a plain shell.\r\n'; exec "${SHELL:-/bin/sh}" -l; fi`
+	return "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(name)
+}
+
+// TmuxNewCommand starts a new tmux session of that name, and fails (saying
+// so) if there is one already rather than attaching it. Fixed script; the
+// only variable part is the validated, quoted session name.
+func TmuxNewCommand(name string) string {
+	script := `PATH="$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"; ` +
+		`if command -v tmux >/dev/null 2>&1; then exec tmux -u new-session -s "$1"; ` +
 		`else printf '\r\n[corral] tmux is not installed on this host; starting a plain shell.\r\n'; exec "${SHELL:-/bin/sh}" -l; fi`
 	return "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(name)
 }

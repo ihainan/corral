@@ -323,6 +323,11 @@ func (s *Server) updateHost(w http.ResponseWriter, r *http.Request, b *hostBody)
 		writeHostChanged(w)
 		return
 	}
+	// What terminals run in is chosen when opening; the old per-host
+	// settings are kept as they are when an edit leaves them out.
+	if b.Persistence == "" {
+		b.Persistence, b.TmuxSession, b.HerdrSession = h.Persistence, h.TmuxSession, h.HerdrSession
+	}
 	if err := s.validateHost(r.Context(), u, h.ID, b); err != nil {
 		writeFieldError(w, err)
 		return
@@ -404,6 +409,7 @@ func (s *Server) updateHost(w http.ResponseWriter, r *http.Request, b *hostBody)
 		s.closeHostForwards(u.ID, h.ID)
 		s.forgetHostCode(u.ID, h.ID)
 		s.forgetThrough(bg, u.ID, h.ID)
+		s.picks.dropHost(u.ID, h.ID)
 	}
 	s.audit(r, "host.update", hostTarget(h), map[string]any{"endpoint_changed": endpointChanged, "connection_changed": connChanged})
 	updated, _ := s.store.Host(bg, u.ID, h.ID)
@@ -444,6 +450,7 @@ func (s *Server) deleteHost(w http.ResponseWriter, r *http.Request) {
 	}
 	// Deleted first, then closed: a connect finishing now fails its host re-check.
 	s.cancelPendingForHost(u.ID, h.ID)
+	s.picks.dropHost(u.ID, h.ID)
 	s.closeHostForwards(u.ID, h.ID)
 	s.forgetHostCode(u.ID, h.ID)
 	s.terms.CloseHost(u.ID, h.ID, "host deleted")

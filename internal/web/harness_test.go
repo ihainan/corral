@@ -99,6 +99,18 @@ func (r resp) code() string {
 
 func (c *client) do(method, path string, body any) resp {
 	c.h.t.Helper()
+	// Opening a terminal without saying what to open asks the host first;
+	// tests made before that (most) open what their host was set up to.
+	// A body with "open" (even null) or "pending" is left as it is.
+	if m, ok := body.(map[string]any); ok && method == "POST" && path == "/api/sessions" {
+		_, hasOpen := m["open"]
+		_, hasPending := m["pending"]
+		if !hasOpen && !hasPending {
+			if o := c.legacyOpen(m["host_id"]); o != nil {
+				m["open"] = o
+			}
+		}
+	}
 	var rd io.Reader
 	if body != nil {
 		b, _ := json.Marshal(body)
@@ -193,3 +205,33 @@ func mustStatus(t *testing.T, r resp, want int, what string) {
 }
 
 func storeAuditQuery() store.AuditQuery { return store.AuditQuery{Limit: 500} }
+
+// legacyOpen is what a host's old per-host setting opened, as a choice.
+func (c *client) legacyOpen(id any) map[string]any {
+	var hostID int64
+	switch v := id.(type) {
+	case float64:
+		hostID = int64(v)
+	case int64:
+		hostID = v
+	case int:
+		hostID = int64(v)
+	default:
+		return nil
+	}
+	uid, ok := c.do("GET", "/api/me", nil).json()["id"].(float64)
+	if !ok {
+		return nil // (signed out: the open is refused anyway)
+	}
+	h, err := c.h.store.Host(c.h.t.Context(), int64(uid), hostID)
+	if err != nil {
+		return nil
+	}
+	switch h.Persistence {
+	case "tmux":
+		return map[string]any{"kind": "tmux", "name": h.TmuxSession}
+	case "herdr":
+		return map[string]any{"kind": "herdr", "name": h.HerdrSession}
+	}
+	return map[string]any{"kind": "shell"}
+}

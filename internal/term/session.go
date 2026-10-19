@@ -118,6 +118,10 @@ type Info struct {
 	Rows      int    `json:"rows"`
 	Title     string `json:"title"`
 	Recording bool   `json:"recording"` // its output is being recorded
+	// What it runs in: "none" (a plain shell), "tmux" or "herdr", and the
+	// tmux or herdr session it is attached to ("" for herdr's default).
+	Persistence string `json:"persistence"`
+	MuxSession  string `json:"mux_session"`
 	Watching  int    `json:"watching"`  // windows of other users watching, read-only
 	// Side information such as the herdr summary, as last published.
 	Meta json.RawMessage `json:"meta,omitempty"`
@@ -253,6 +257,7 @@ func (s *Session) Info() Info {
 	}
 	return Info{ID: s.ID, HostID: s.HostID, HostName: s.HostName, State: s.state, CreatedAt: s.Created.Unix(),
 		Viewers: own, Watching: watching, Cols: s.cols, Rows: s.rows, Title: s.title, Recording: s.rec != nil && s.rec.Active(),
+		Persistence: s.Persistence, MuxSession: s.muxSession(),
 		Meta: append(json.RawMessage(nil), s.meta...)}
 }
 
@@ -681,4 +686,15 @@ func (s *Session) scanTitle(p []byte) {
 		}
 		i = j
 	}
+}
+
+// muxSession is the tmux or herdr session the shell is attached to.
+func (s *Session) muxSession() string {
+	switch s.Persistence {
+	case "tmux":
+		return s.TmuxSession
+	case "herdr":
+		return s.HerdrSession
+	}
+	return ""
 }

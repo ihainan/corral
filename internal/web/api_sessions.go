@@ -107,6 +107,10 @@ type openBody struct {
 	// After a host key change: the fingerprint the user saw and accepted.
 	// The connection only goes ahead if the host presents exactly this key.
 	AcceptFingerprint string `json:"accept_fingerprint"`
+	// What to open; absent, the host is asked what it has and the answer
+	// lists it to choose from (with Pending, the connection kept for that).
+	Open    *openChoice `json:"open"`
+	Pending string      `json:"pending"`
 }
 
 // openSession runs with the host's turn held; ctx ends with the login.
@@ -131,17 +135,24 @@ func (s *Server) openSession(ctx context.Context, w http.ResponseWriter, r *http
 		return
 	}
 	cfg := hostConfig(h)
+	var choice *openChoice
+	if b.Open != nil {
+		if !b.Open.valid() {
+			writeError(w, http.StatusBadRequest, "bad_request", "unknown choice of what to open")
+			return
+		}
+		choice = b.Open
+	}
 
-	// With tmux or herdr every gateway session attaches the same remote
-	// session, so a second one would only mirror the first (and fight it over
-	// the terminal size). Opening such a host again returns the running one,
-	// as long as it was made with the host's current settings; after an edit
-	// a new session is started. (For "ask" hosts this re-attaches without a
-	// password, like opening the session from the list: no new connection is
-	// made and nothing is sent to the host.)
-	if h.Persistence != store.PersistNone {
+	// Every gateway terminal attached to one tmux or herdr session would
+	// only mirror the first (and fight it over the terminal size). Opening
+	// one that a terminal of this host shows returns that terminal, as long
+	// as it was made with the host's current settings. (For "ask" hosts this
+	// re-attaches without a password, like opening the terminal from the
+	// list: no new connection is made and nothing is sent to the host.)
+	if choice != nil && (choice.Kind == openTmux || choice.Kind == openHerdr) {
 		for _, rs := range s.terms.Running(u.ID, h.ID) {
-			if rs.HostConfig == cfg {
+			if rs.HostConfig == cfg && sessionKind(rs.Persistence) == choice.Kind && sameMux(choice.Kind, rs.Info().MuxSession, choice.Name) {
 				// Marked as reused: a client that gave up on this open must
 				// not close it, as other devices may be using it.
 				writeJSON(w, http.StatusOK, struct {
@@ -153,23 +164,139 @@ func (s *Server) openSession(ctx context.Context, w http.ResponseWriter, r *http
 		}
 	}
 
+	if !s.opening.acquire(u.ID) {
+		writeError(w, http.StatusTooManyRequests, "busy", "too many hosts are being opened at once; try again in a moment")
+		return
+	}
+	defer s.opening.release(u.ID)
+	// The connection made when the host was asked what it has, if still
+	// kept for this pick; otherwise a new one.
+	client := s.picks.take(b.Pending, u.ID, h.ID, cfg, loginHash(r))
+	if client == nil {
+		var ok bool
+		if client, cfg, ok = s.dialForOpen(ctx, w, r, h, b, cfg); !ok {
+			return
+		}
+	}
+	if choice == nil {
+		// What the host has. Nothing to choose from: a plain shell.
+		hc := probeHost(ctx, client)
+		if ctx.Err() != nil {
+			client.Close()
+			writeError(w, http.StatusUnauthorized, "unauthorized", "please sign in")
+			return
+		}
+		if !hc.any() {
+			choice = &openChoice{Kind: openShell}
+		} else {
+			running := []runningChoice{}
+			for _, rs := range s.terms.Running(u.ID, h.ID) {
+				in := rs.Info()
+				running = append(running, runningChoice{ID: in.ID, Kind: sessionKind(in.Persistence), Name: in.MuxSession, Title: in.Title, CreatedAt: in.CreatedAt})
+			}
+			token := s.picks.put(u.ID, h.ID, cfg, loginHash(r), client)
+			// Signed out meanwhile (the drop on sign-out may have run before
+			// the put): nothing is kept for it.
+			if _, err := s.auth.CheckLogin(ctx, loginHash(r)); err != nil {
+				if c := s.picks.take(token, u.ID, h.ID, cfg, loginHash(r)); c != nil {
+					c.Close()
+				}
+				writeError(w, http.StatusUnauthorized, "unauthorized", "please sign in")
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"choose": hc, "running": running, "pending": token})
+			return
+		}
+	}
+	opts := term.StartOptions{Cols: b.Cols, Rows: b.Rows, Persistence: store.PersistNone, HostConfig: cfg}
+	switch choice.Kind {
+	case openTmux:
+		opts.Persistence, opts.TmuxSession = store.PersistTmux, choice.Name
+	case openTmuxNew:
+		// Named after all the sessions there are: a name taken would attach
+		// to that session instead of starting a new one.
+		lctx, lcancel := context.WithTimeout(ctx, probeTimeout)
+		_, taken, err := tmuxSessions(lctx, client)
+		lcancel()
+		if err != nil {
+			client.Close()
+			writeError(w, http.StatusBadGateway, "tmux_list_failed", "could not list the tmux sessions on the host; try again")
+			return
+		}
+		// (Started as new: one of that name made meanwhile is not attached.)
+		opts.Persistence, opts.TmuxSession, opts.TmuxNew = store.PersistTmux, newTmuxName(u.Username, taken), true
+	case openHerdr:
+		opts.Persistence, opts.HerdrSession = store.PersistHerdr, choice.Name
+	}
+	// A terminal slot is taken only to start one (choosing needs none).
+	res, err := s.terms.Reserve(u.ID)
+	if err != nil {
+		client.Close()
+		writeError(w, http.StatusTooManyRequests, "too_many_sessions", "close some sessions first")
+		return
+	}
+	defer res.Release() // no-op once Start took it
+	// Last check before anything runs on the host.
+	if _, err := s.auth.CheckLogin(ctx, loginHash(r)); err != nil || ctx.Err() != nil {
+		client.Close()
+		writeError(w, http.StatusUnauthorized, "unauthorized", "please sign in")
+		return
+	}
+	sess, err := s.terms.Start(ctx, res, u.ID, h.ID, h.Name, client, opts)
+	if err != nil {
+		if ctx.Err() != nil {
+			writeError(w, http.StatusUnauthorized, "unauthorized", "please sign in")
+			return
+		}
+		writeError(w, http.StatusBadGateway, "start_failed", "connected, but could not start a shell")
+		return
+	}
+	// Access or the host may have gone while we were starting. The session is
+	// registered first, then checked, so a concurrent revocation or deletion
+	// either sees it (and closes it) or this check sees the change.
+	if _, err := s.auth.CheckLogin(ctx, loginHash(r)); err != nil {
+		sess.Close("access revoked")
+		writeError(w, http.StatusUnauthorized, "unauthorized", "please sign in")
+		return
+	}
+	if _, err := s.store.Host(ctx, u.ID, h.ID); err != nil {
+		sess.Close("host deleted")
+		writeError(w, http.StatusNotFound, "not_found", "no such host")
+		return
+	}
+	if sess.Persistence == store.PersistHerdr {
+		go s.watchHerdr(sess, h)
+	}
+	_ = s.store.TouchHostConnected(r.Context(), u.ID, h.ID)
+	s.audit(r, "session.open", hostTarget(h), map[string]any{"session": sess.ID, "open": choice.Kind})
+	writeJSON(w, http.StatusCreated, sess.Info())
+}
+
+// dialForOpen connects to the host to open a terminal: its credential (or
+// the password typed), its jump host, the trust decision on its key (a
+// changed key only if the user accepted exactly the one presented). On a
+// failure the response is written and ok is false. cfg is returned updated
+// when an accepted key changed the host's connection version.
+func (s *Server) dialForOpen(ctx context.Context, w http.ResponseWriter, r *http.Request, h *store.Host, b *openBody, cfg string) (client *ssh.Client, _ string, ok bool) {
+	u := currentUser(r)
+	var err error
 	t := sshx.Target{Address: h.Address, Port: h.Port, User: h.Username}
 	switch h.Auth {
 	case store.AuthAsk:
 		if b.Password == "" {
 			writeError(w, http.StatusConflict, "password_required", "enter the password for this host")
-			return
+			return nil, cfg, false
 		}
 		t.Password = b.Password
 	case store.AuthPassword, store.AuthKey:
 		if h.CredentialID == nil {
 			writeError(w, http.StatusConflict, "credential_missing", "this host has no saved credential; edit the host")
-			return
+			return nil, cfg, false
 		}
 		_, sec, err := s.openCredential(ctx, u.ID, *h.CredentialID)
 		if err != nil {
 			s.internalError(w, r, err)
-			return
+			return nil, cfg, false
 		}
 		t.Password, t.PrivateKey, t.Passphrase = sec.Password, []byte(sec.PrivateKey), []byte(sec.Passphrase)
 	}
@@ -177,22 +304,16 @@ func (s *Server) openSession(ctx context.Context, w http.ResponseWriter, r *http
 	if t.Jump, jumpVersion, err = s.jumpTarget(ctx, h); err != nil {
 		if ctx.Err() != nil {
 			writeError(w, http.StatusUnauthorized, "unauthorized", "please sign in")
-			return
+			return nil, cfg, false
 		}
 		writeJumpError(w, err)
-		return
+		return nil, cfg, false
 	}
-	res, err := s.terms.Reserve(u.ID)
-	if err != nil {
-		writeError(w, http.StatusTooManyRequests, "too_many_sessions", "close some sessions first")
-		return
-	}
-	defer res.Release() // no-op once Start took it
 	// Registered (by the caller) first, then checked: a revocation in between
 	// is caught either way.
 	if _, err := s.auth.CheckLogin(ctx, loginHash(r)); err != nil {
 		writeError(w, http.StatusUnauthorized, "unauthorized", "please sign in")
-		return
+		return nil, cfg, false
 	}
 
 	// The trust decision runs inside the handshake, before credentials are sent,
@@ -238,7 +359,7 @@ func (s *Server) openSession(ctx context.Context, w http.ResponseWriter, r *http
 			s.audit(r, "session.connect_failed", hostTarget(h), map[string]any{"reason": reason})
 			writeErrorExtra(w, http.StatusBadGateway, "connect_failed", "cannot connect to the host", map[string]any{"reason": reason})
 		}
-		return
+		return nil, cfg, false
 	}
 	if accepted {
 		s.audit(r, "hostkey.accept", hostTarget(h), map[string]any{"fingerprint": dialed.SeenKey.Fingerprint})
@@ -256,47 +377,11 @@ func (s *Server) openSession(ctx context.Context, w http.ResponseWriter, r *http
 			if j, err := s.store.Host(ctx, u.ID, *h.JumpHostID); err != nil || j.ConnVersion != jumpVersion {
 				dialed.Client.Close()
 				writeError(w, http.StatusConflict, "host_changed", "the jump host was changed meanwhile; open the host again")
-				return
+				return nil, cfg, false
 			}
 		}
 	}
-	// Last check before anything runs on the host.
-	if _, err := s.auth.CheckLogin(ctx, loginHash(r)); err != nil || ctx.Err() != nil {
-		dialed.Client.Close()
-		writeError(w, http.StatusUnauthorized, "unauthorized", "please sign in")
-		return
-	}
-	sess, err := s.terms.Start(ctx, res, u.ID, h.ID, h.Name, dialed.Client, term.StartOptions{
-		Cols: b.Cols, Rows: b.Rows, Persistence: h.Persistence, TmuxSession: h.TmuxSession, HerdrSession: h.HerdrSession,
-		HostConfig: cfg,
-	})
-	if err != nil {
-		if ctx.Err() != nil {
-			writeError(w, http.StatusUnauthorized, "unauthorized", "please sign in")
-			return
-		}
-		writeError(w, http.StatusBadGateway, "start_failed", "connected, but could not start a shell")
-		return
-	}
-	// Access or the host may have gone while we were starting. The session is
-	// registered first, then checked, so a concurrent revocation or deletion
-	// either sees it (and closes it) or this check sees the change.
-	if _, err := s.auth.CheckLogin(ctx, loginHash(r)); err != nil {
-		sess.Close("access revoked")
-		writeError(w, http.StatusUnauthorized, "unauthorized", "please sign in")
-		return
-	}
-	if _, err := s.store.Host(ctx, u.ID, h.ID); err != nil {
-		sess.Close("host deleted")
-		writeError(w, http.StatusNotFound, "not_found", "no such host")
-		return
-	}
-	if h.Persistence == store.PersistHerdr {
-		go s.watchHerdr(sess, h)
-	}
-	_ = s.store.TouchHostConnected(r.Context(), u.ID, h.ID)
-	s.audit(r, "session.open", hostTarget(h), map[string]any{"session": sess.ID})
-	writeJSON(w, http.StatusCreated, sess.Info())
+	return dialed.Client, cfg, true
 }
 
 var errHostKeyRejected = errors.New("host key rejected")
@@ -1017,8 +1102,8 @@ func hostConfig(h *store.Host) string {
 	if h.CredentialID != nil {
 		cred = *h.CredentialID
 	}
-	return fmt.Sprintf("%d|%s|%d|%s|%s|%d|%s|%s|%s", h.ConnVersion, h.Address, h.Port, h.Username, h.Auth, cred, h.Persistence,
-		h.TmuxSession, h.HerdrSession)
+	// (What a terminal runs in is chosen when it is opened, not a setting.)
+	return fmt.Sprintf("%d|%s|%d|%s|%s|%d", h.ConnVersion, h.Address, h.Port, h.Username, h.Auth, cred)
 }
 
 // underHostGate runs f with the host's turn held, collecting its response;
