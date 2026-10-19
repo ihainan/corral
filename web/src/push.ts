@@ -22,6 +22,13 @@ function keyBytes(b64: string): Uint8Array {
 }
 
 // enablePush must be called from a tap: iOS only asks for permission then.
+// The fields the gateway keeps (toJSON() also has expirationTime, which
+// older gateways refused).
+function subBody(sub: PushSubscription) {
+  const j = sub.toJSON()
+  return { endpoint: j.endpoint, keys: { p256dh: j.keys?.p256dh, auth: j.keys?.auth } }
+}
+
 export async function enablePush(publicKey: string): Promise<PushState> {
   const perm = await Notification.requestPermission()
   if (perm !== 'granted') return perm === 'denied' ? 'denied' : 'off'
@@ -30,7 +37,7 @@ export async function enablePush(publicKey: string): Promise<PushState> {
   const existing = await reg.pushManager.getSubscription()
   const sub = existing ?? (await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: keyBytes(publicKey) as BufferSource }))
   try {
-    await api('POST', '/api/push/subscriptions', sub.toJSON())
+    await api('POST', '/api/push/subscriptions', subBody(sub))
   } catch (e) {
     // A subscription the server does not know about would read as "on" here
     // while no alert ever arrives, so drop the one we just made.
@@ -50,7 +57,7 @@ export async function syncPush(): Promise<boolean> {
     const reg = await navigator.serviceWorker.getRegistration()
     const sub = await reg?.pushManager.getSubscription()
     if (!sub) return true
-    await api('POST', '/api/push/subscriptions', sub.toJSON())
+    await api('POST', '/api/push/subscriptions', subBody(sub))
     return true
   } catch {
     return false

@@ -384,3 +384,19 @@ func TestLogoutDeletesTheLoginOrFails(t *testing.T) {
 		t.Fatal("cookie cleared although the login was not deleted")
 	}
 }
+
+// Browsers send PushSubscription.toJSON() as it is, with expirationTime
+// (null in Safari and Chrome, sometimes a time).
+func TestPushSubscriptionAcceptsExpirationTime(t *testing.T) {
+	h := newHarness(t)
+	h.withPush()
+	admin := h.admin()
+	for i, exp := range []any{nil, 1.7e12} {
+		ep := fmt.Sprintf("%sexp%d", fcm, i)
+		mustStatus(t, admin.do("POST", "/api/push/subscriptions", map[string]any{"endpoint": ep, "expirationTime": exp,
+			"keys": map[string]string{"p256dh": "BPk", "auth": "a"}}), 200, "subscribe with expirationTime")
+		if !h.endpoints(h.userID(admin))[ep] {
+			t.Fatalf("%s not kept", ep)
+		}
+	}
+}

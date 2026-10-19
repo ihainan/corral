@@ -128,9 +128,12 @@ func (s *Server) apiPushSubscribe(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found", "notifications are not available")
 		return
 	}
+	// A PushSubscription's toJSON(); its expirationTime (usually null) is
+	// accepted and not used.
 	var b struct {
-		Endpoint string `json:"endpoint"`
-		Keys     struct {
+		Endpoint       string   `json:"endpoint"`
+		ExpirationTime *float64 `json:"expirationTime"`
+		Keys           struct {
 			P256dh string `json:"p256dh"`
 			Auth   string `json:"auth"`
 		} `json:"keys"`
