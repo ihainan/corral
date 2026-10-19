@@ -573,12 +573,13 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
       return true
     })
     const conn = new TermConnection(id, {
-      // RIS (ESC c) travels in the same write queue as the replay that follows,
-      // so output still being parsed cannot land after the reset.
-      onReset: () => {
+      // RIS (ESC c), and the modes the replay starts in, travel in the same
+      // write queue as the replay that follows, so output still being parsed
+      // cannot land after the reset.
+      onReset: (modes) => {
         replaying = true
         try {
-          term.write('\x1bc')
+          term.write('\x1bc' + modes)
           return true
         } catch {
           return false
@@ -1356,23 +1357,56 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
     })
   }
   const cycle = (m: ModState): ModState => (m === 'off' ? 'once' : m === 'once' ? 'lock' : 'off')
-  const toggleKeyboard = () => {
+  const keyboardField = () => {
     // The field in use: the one focused, else the composer when it is open.
     const field = hostEl.current?.querySelector('textarea')
     const composer = composerRef.current
     const target = document.activeElement === field ? field : composer ?? field
-    if (!target) return
+    if (!target) return null
     const focused = document.activeElement === target
     // A focused field shows its keyboard, unless it asks for none or the
     // keyboard was seen put away (iOS, see keyboardWentDown).
     const shown = focused && target.getAttribute('inputmode') !== 'none' && !keyboardWentDown
-    if (focused) {
-      settleRef.current() // a composition that just ended is sent, not cleared by the blur
-      target.blur() // (which makes the terminal's field quiet again, see quietTaps)
-    }
-    if (shown) return
+    return { field, target, focused, shown }
+  }
+  const leaveKeyboardField = (target: HTMLElement) => {
+    settleRef.current() // a composition that just ended is sent, not cleared by the blur
+    target.blur() // (which makes the terminal's field quiet again, see quietTaps)
+  }
+  // iOS brings up the keyboard for a field that takes focus on a tap, but
+  // not for one left and focused again within the same event: the terminal's
+  // field, focused without its keyboard, is left as the press starts and
+  // takes focus when it ends (toggleKeyboard). A press that turns into
+  // something else (held for Enter, moved, cancelled) gives the focus back,
+  // still without the keyboard, so a hardware keyboard keeps typing there.
+  const leftOnDown = useRef<{ el: HTMLTextAreaElement; at: number } | null>(null)
+  const keyboardDown = () => {
+    if (leftOnDown.current?.el.isConnected && document.activeElement !== leftOnDown.current.el) return // (a second finger)
+    const k = keyboardField()
+    leftOnDown.current = null
+    if (!k?.focused || k.shown || k.target !== k.field || !k.field) return
+    leaveKeyboardField(k.field)
+    leftOnDown.current = { el: k.field, at: Date.now() }
+  }
+  const keyboardEnd = () => {
+    const left = leftOnDown.current
+    leftOnDown.current = null
+    const a = document.activeElement
+    if (!left?.el.isConnected || (a && a !== document.body)) return
+    quietKeyboard(left.el, true)
+    left.el.focus()
+  }
+  const toggleKeyboard = () => {
+    // The field left as this press started is the one to bring back.
+    const left = leftOnDown.current
+    leftOnDown.current = null
+    const k = keyboardField()
+    if (!k) return
+    const target = left && Date.now() - left.at < 1000 && left.el.isConnected ? left.el : k.target
+    if (target === k.target && k.focused) leaveKeyboardField(target)
+    if (target === k.target && k.shown) return
     // Shown when the field takes focus again, asking for it.
-    if (target === field) quietKeyboard(field, false)
+    if (target === k.field) quietKeyboard(k.field, false)
     target.focus()
   }
 
@@ -1800,6 +1834,8 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
               onKey={sendKey}
               onText={sendText}
               onKeyboard={toggleKeyboard}
+              onKeyboardDown={keyboardDown}
+              onKeyboardEnd={keyboardEnd}
               custom={customKeys.map((k) => ({ label: k.label, onPress: () => sendSteps(k.steps) }))}
             />
           )}

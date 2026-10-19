@@ -74,6 +74,10 @@ type Sub struct {
 	watcher int64
 	leave   *grant // the watcher's leave this Sub was opened under
 	first   bool   // the first Sub opened under it
+
+	// Prelude goes before a full replay that does not start with the
+	// session's first output: the terminal modes set before it.
+	Prelude []byte
 }
 
 // grant is one leave to watch. Taking it back closes done, which every
@@ -434,14 +438,15 @@ func (s *Session) attach(viewer string, watcher int64, fromOffset uint64, haveOf
 	} else {
 		reset = true
 	}
+	var prelude []byte
 	if reset {
-		backlog, start = s.buf.all()
+		backlog, start, prelude = s.buf.all()
 	}
 	if viewer == "" {
 		s.subSeq++
 		viewer = "#" + strconv.Itoa(s.subSeq) // cannot clash with a named one (see the web layer)
 	}
-	sub = &Sub{C: make(chan Chunk, subBuffer), Events: make(chan Event, 4), Meta: make(chan []byte, 1), Size: make(chan SizeNote, 1), done: make(chan struct{}), viewer: viewer, watcher: watcher, leave: g}
+	sub = &Sub{C: make(chan Chunk, subBuffer), Events: make(chan Event, 4), Meta: make(chan []byte, 1), Size: make(chan SizeNote, 1), done: make(chan struct{}), viewer: viewer, watcher: watcher, leave: g, Prelude: prelude}
 	if g != nil {
 		sub.first = !g.watched
 		g.watched = true

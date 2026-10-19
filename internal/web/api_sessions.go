@@ -521,7 +521,10 @@ func cleanPreview(in []string) ([]string, bool) {
 //
 // Server → browser
 //   binary: 8-byte big-endian offset, then raw terminal output
-//   text:   {"t":"hello","offset":N,"reset":bool}  sent first
+//   text:   {"t":"hello","offset":N,"reset":bool,"modes":"…"}  sent first
+//           (modes, on some resets: terminal output to write after clearing
+//           and before the backlog; it restores modes set by output the
+//           backlog no longer holds)
 //           {"t":"live"}  after the backlog: output from here on is new
 //           {"t":"state","state":"exited|lost|closed","code":N,"reason":"…","offset":N}
 //           (sent after every output byte up to offset)
@@ -725,7 +728,11 @@ func (s *Server) serveTerminal(w http.ResponseWriter, r *http.Request, sess *ter
 		}
 	}
 
-	if err := writeText(map[string]any{"t": "hello", "offset": start, "reset": reset, "state": sess.State()}); err != nil {
+	hello := map[string]any{"t": "hello", "offset": start, "reset": reset, "state": sess.State()}
+	if len(sub.Prelude) > 0 {
+		hello["modes"] = string(sub.Prelude)
+	}
+	if err := writeText(hello); err != nil {
 		return
 	}
 	if err := writeData(start, backlog); err != nil {

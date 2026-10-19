@@ -14,7 +14,9 @@ export interface EndInfo {
 }
 
 export interface Handlers {
-  onReset(): boolean // false: could not be taken in (terminal overloaded)
+  // modes: output to write after clearing, before the backlog (the terminal
+  // modes set by output the backlog no longer holds).
+  onReset(modes: string): boolean // false: could not be taken in (terminal overloaded)
   // Return false if the data could not be taken in (terminal overloaded); the
   // connection then resumes from the start of this chunk.
   // backlog is true for replayed output sent before the "live" marker.
@@ -205,7 +207,7 @@ export class TermConnection {
           gotHello = true
           this.attempt = 0
           this.backlog = true
-          if ((m.reset || this.offset === null) && !this.h.onReset()) {
+          if ((m.reset || this.offset === null) && !this.h.onReset(typeof m.modes === 'string' ? m.modes : '')) {
             this.drop()
             this.scheduleReconnect(1000)
             return

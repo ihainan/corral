@@ -28,7 +28,7 @@ func TestRingResume(t *testing.T) {
 func TestRingReplayStartsAtLine(t *testing.T) {
 	r := newRing(8)
 	r.write([]byte("abc\x1b[31mred\nnext line\n"))
-	b, from := r.all()
+	b, from, _ := r.all()
 	if from == 0 || bytes.Contains(b, []byte("\x1b[31m")) && b[0] != 'n' {
 		t.Fatalf("replay should begin after a newline, got %q from %d", b, from)
 	}
