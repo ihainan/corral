@@ -359,13 +359,33 @@ const (
 var loginRecheck = time.Minute
 
 func (s *Server) apiSessionSocket(w http.ResponseWriter, r *http.Request) {
-	u := currentUser(r)
-	hash := loginHash(r)
-	sess, err := s.terms.Get(u.ID, r.PathValue("id"))
+	sess, err := s.terms.Get(currentUser(r).ID, r.PathValue("id"))
 	if err != nil {
 		writeError(w, http.StatusNotFound, "not_found", "no such session")
 		return
 	}
+	s.serveTerminal(w, r, sess, 0)
+}
+
+// apiWatchSocket is the read-only socket of a user the owner let watch.
+func (s *Server) apiWatchSocket(w http.ResponseWriter, r *http.Request) {
+	u := currentUser(r)
+	sess, err := s.terms.GetShared(u.ID, r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, "not_found", "no such session")
+		return
+	}
+	s.serveTerminal(w, r, sess, u.ID)
+}
+
+// statusRevoked closes a watcher's socket once the owner took the leave back.
+const statusRevoked websocket.StatusCode = 4403
+
+// serveTerminal runs a terminal socket: for the owner, or (watcher != 0) for
+// a user watching, whose input, sizes and visibility are all ignored.
+func (s *Server) serveTerminal(w http.ResponseWriter, r *http.Request, sess *term.Session, watcher int64) {
+	u := currentUser(r)
+	hash := loginHash(r)
 	var offset uint64
 	have := false
 	if v := r.URL.Query().Get("offset"); v != "" {
@@ -388,9 +408,12 @@ func (s *Server) apiSessionSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer untrack()
-	// Until the page says otherwise, an open socket counts as someone watching.
-	s.vis.set(sess.ID, me, true)
-	defer s.vis.drop(sess.ID, me)
+	// Until the page says otherwise, an open socket counts as someone watching
+	// (for notifications: the owner's windows only).
+	if watcher == 0 {
+		s.vis.set(sess.ID, me, true)
+		defer s.vis.drop(sess.ID, me)
+	}
 	// Registered before this check, so a sign-out racing with us is caught either way.
 	if _, err := s.auth.CheckLogin(ctx, hash); err != nil {
 		writeError(w, http.StatusUnauthorized, "unauthorized", "please sign in")
@@ -410,7 +433,20 @@ func (s *Server) apiSessionSocket(w http.ResponseWriter, r *http.Request) {
 	if !viewerIDRE.MatchString(viewer) {
 		viewer = ""
 	}
-	sub, backlog, start, reset, ev, err := sess.AttachAs(viewer, offset, have)
+	var sub *term.Sub
+	var backlog []byte
+	var start uint64
+	var reset bool
+	var ev *term.Event
+	if watcher != 0 {
+		sub, backlog, start, reset, ev, err = sess.AttachWatcher(watcher, offset, have)
+		if errors.Is(err, term.ErrNotFound) {
+			c.Close(statusRevoked, "revoked")
+			return
+		}
+	} else {
+		sub, backlog, start, reset, ev, err = sess.AttachAs(viewer, offset, have)
+	}
 	if err != nil {
 		// Said in a frame and a close code of its own, so the browser stops
 		// reconnecting instead of retrying a socket that is refused anyway.
@@ -421,6 +457,35 @@ func (s *Server) apiSessionSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer sess.Detach(sub)
+	if watcher != 0 {
+		// The leave taken back ends the socket at once: what is still being
+		// sent (a replay, queued output) is cut off, not delivered first.
+		go func() {
+			select {
+			case <-sub.Revoked():
+				// Said first: cancelling would drop the connection before
+				// the close frame goes out.
+				c.Close(statusRevoked, "revoked")
+				cancel()
+			case <-ctx.Done():
+			}
+		}()
+		if sub.FirstWatch() {
+			owner := ""
+			if o, err := s.store.UserByID(r.Context(), sess.OwnerID); err == nil {
+				owner = o.Username
+			}
+			s.audit(r, "session.watch", sess.HostName, map[string]any{"session": sess.ID, "owner": owner})
+		}
+	}
+	revoked := func() bool {
+		select {
+		case <-sub.Revoked():
+			return true
+		default:
+			return false
+		}
+	}
 
 	writeText := func(v any) error {
 		b, _ := json.Marshal(v)
@@ -478,7 +543,8 @@ func (s *Server) apiSessionSocket(w http.ResponseWriter, r *http.Request) {
 		sendState(*ev)
 		return
 	}
-	if reset && start > 0 {
+	// Only the owner's windows repaint the host (it briefly changes the size).
+	if reset && start > 0 && watcher == 0 {
 		go sess.Redraw()
 	}
 
@@ -491,6 +557,9 @@ func (s *Server) apiSessionSocket(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if typ == websocket.MessageBinary {
+				if watcher != 0 {
+					continue // read-only
+				}
 				if err := sess.Write(ctx, data); err != nil {
 					if errors.Is(err, term.ErrInputBusy) {
 						c.Close(websocket.StatusTryAgainLater, "the host is not reading input")
@@ -511,6 +580,9 @@ func (s *Server) apiSessionSocket(w http.ResponseWriter, r *http.Request) {
 			if json.Unmarshal(data, &m) != nil {
 				continue
 			}
+			if watcher != 0 && m.T != "ping" {
+				continue // a watcher only follows
+			}
 			switch m.T {
 			case "resize":
 				_ = sess.ResizeFrom(sub, m.Seq, m.Take, m.Cols, m.Rows)
@@ -530,6 +602,10 @@ func (s *Server) apiSessionSocket(w http.ResponseWriter, r *http.Request) {
 	for {
 		select {
 		case <-ctx.Done():
+			if revoked() {
+				c.Close(statusRevoked, "revoked")
+				return
+			}
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 				c.Close(websocket.StatusPolicyViolation, "sign-in expired")
 			} else {
@@ -551,6 +627,10 @@ func (s *Server) apiSessionSocket(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		case <-sub.Done():
+			if revoked() {
+				c.Close(statusRevoked, "revoked")
+				return
+			}
 			if drain() != nil {
 				return
 			}
@@ -558,7 +638,11 @@ func (s *Server) apiSessionSocket(w http.ResponseWriter, r *http.Request) {
 			case e := <-sub.Events:
 				sendState(e)
 			default:
-				c.Close(websocket.StatusTryAgainLater, "reconnect")
+				if watcher != 0 && !sess.Granted(watcher) {
+					c.Close(statusRevoked, "revoked")
+				} else {
+					c.Close(websocket.StatusTryAgainLater, "reconnect")
+				}
 			}
 			return
 		case ts := <-pongs:
@@ -566,6 +650,9 @@ func (s *Server) apiSessionSocket(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		case m := <-sub.Meta:
+			if watcher != 0 {
+				continue // side information (herdr) is the owner's
+			}
 			wctx, wcancel := context.WithTimeout(ctx, 10*time.Second)
 			err := c.Write(wctx, websocket.MessageText, m)
 			wcancel()

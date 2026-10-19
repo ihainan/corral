@@ -5,7 +5,7 @@ import { FitAddon } from '@xterm/addon-fit'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import { WebglAddon } from '@xterm/addon-webgl'
-import { ArrowUp, Check, ChevronDown, ChevronLeft, CircleStop, Code2, FolderOpen, Globe, LayoutGrid, ImagePlus, MessageSquareText, MoreVertical, Minus, Palette, Paperclip, Plus, TextSelect, Keyboard as KeyboardIcon, Power, RotateCw, Server, X } from 'lucide-react'
+import { ArrowUp, Check, ChevronDown, ChevronLeft, CircleStop, Code2, Eye, FolderOpen, Globe, LayoutGrid, ImagePlus, MessageSquareText, MoreVertical, Minus, Palette, Paperclip, Plus, TextSelect, Keyboard as KeyboardIcon, Power, RotateCw, Server, X } from 'lucide-react'
 import { api, ApiError, errorText, uploadFile, type HerdrSummary, type Host, type SessionInfo } from '../api'
 import { t } from '../i18n'
 import { navigate } from '../router'
@@ -21,6 +21,7 @@ import { SchemeDialog } from '../terminal/SchemePicker'
 import { HerdrPanel } from '../terminal/HerdrPanel'
 import { PortsDialog, openForward } from '../terminal/PortsDialog'
 import { FilesDialog } from '../terminal/FilesDialog'
+import { ShareDialog } from '../terminal/ShareDialog'
 import { useCode } from '../terminal/CodeDialog'
 import { useSession } from '../app'
 
@@ -117,7 +118,8 @@ function shellPath(p: string): string | null {
   return "'" + p.replaceAll("'", "'\\''") + "'"
 }
 
-export function TerminalPage({ id }: { id: string }) {
+// watch: a session someone else owns and lets this user watch, read-only.
+export function TerminalPage({ id, watch = false }: { id: string; watch?: boolean }) {
   const prefs = usePrefs()
   const toast = useToast()
   const rootRef = useRef<HTMLDivElement>(null)
@@ -177,12 +179,14 @@ export function TerminalPage({ id }: { id: string }) {
     firstSheet.current = sheetPanel
     setPanelState(false)
   }, [sheetPanel])
-  const ended = status === 'ended' || status === 'gone' || end !== null
-  const showKeybar = isTouch && prefs.keybar && !ended
+  const ended = status === 'ended' || status === 'gone' || status === 'revoked' || end !== null
+  const showKeybar = isTouch && prefs.keybar && !ended && !watch
+  const [owner, setOwner] = useState('') // watching: whose session it is
   const panelOpen = panel && panelSheet === sheetPanel
   const { boot } = useSession()
   const [portsOpen, setPortsOpen] = useState(false)
   const [filesOpen, setFilesOpen] = useState(false)
+  const [shareOpen, setShareOpen] = useState(false)
   const filesPath = useRef<string | null>(null) // where the file panel was, for this page
   const filesOpens = useRef(-1) // the connection the panel was opened on
   const openFiles = () => {
@@ -219,6 +223,15 @@ export function TerminalPage({ id }: { id: string }) {
 
   // Session metadata (host name, host id for reconnect).
   const loadInfo = useCallback(() => {
+    if (watch) {
+      api<SessionInfo & { owner_name: string }>('GET', '/api/shared/' + id)
+        .then((s) => {
+          setInfo(s)
+          setOwner(s.owner_name)
+        })
+        .catch(() => {})
+      return
+    }
     api<SessionInfo[]>('GET', '/api/sessions')
       .then((list) => {
         const s = list.find((x) => x.id === id)
@@ -228,21 +241,21 @@ export function TerminalPage({ id }: { id: string }) {
         }
       })
       .catch(() => {})
-  }, [id])
+  }, [id, watch])
   useEffect(loadInfo, [loadInfo])
-  // A recording stops at its size limit: the status then stops saying so.
-  const recordingNow = !!info?.recording
+  // Kept current: a recording stops at its size limit, and others start or
+  // stop watching; the status says both.
   useEffect(() => {
-    if (!recordingNow) return
-    const t = setInterval(loadInfo, 30000)
+    const t = setInterval(() => document.visibilityState === 'visible' && loadInfo(), 30000)
     return () => clearInterval(t)
-  }, [recordingNow, loadInfo])
+  }, [loadInfo])
 
   // Terminal + connection lifecycle.
   useEffect(() => {
     const el = hostEl.current!
     const p = getPrefs()
     const term = new Terminal({
+      disableStdin: watch, // keys typed while watching go nowhere
       fontFamily: FONT_STACK,
       fontSize: p.fontSize,
       lineHeight: isTouch ? 1.2 : 1.25,
@@ -412,7 +425,9 @@ export function TerminalPage({ id }: { id: string }) {
           claimTimer = undefined
         }
         const mine = fit.proposeDimensions()
-        if (own || !mine || (mine.cols === cols && mine.rows === rows)) {
+        // A watcher always shows the owner's size: it never reports its own,
+        // so fitting to its window could not be put right later.
+        if (!watch && (own || !mine || (mine.cols === cols && mine.rows === rows))) {
           // This window's size (it set it, or it is the same grid anyway):
           // fit to this window, in case another viewer's size was shown
           // until now.
@@ -437,6 +452,7 @@ export function TerminalPage({ id }: { id: string }) {
         requestAnimationFrame(applyScale)
       },
       onMeta: (m) => {
+        if (watch) return // herdr belongs to the owner
         setHerdr(m as HerdrSummary)
         setHerdrFresh(true)
       },
@@ -446,7 +462,7 @@ export function TerminalPage({ id }: { id: string }) {
       // Input typed while disconnected is sent once the connection is back,
       // unless there was too much of it or it waited too long.
       onDropped: () => droppedInput(),
-    })
+    }, watch)
     connRef.current = conn
     conn.resize(term.cols, term.rows) // sent once connected
 
@@ -668,6 +684,9 @@ export function TerminalPage({ id }: { id: string }) {
       F7: 'F7', F8: 'F8', F9: 'F9', F10: 'F10', F11: 'F11', F12: 'F12',
     }
     term.attachCustomKeyEventHandler((e) => {
+      // Watching: no shortcut acts (composer, Ctrl+V upload, takeover);
+      // keys reach nothing, as the terminal takes no input.
+      if (watch) return true
       // The keypress of the claimed key: its input event carries the text.
       if (e.type === 'keypress' && claim !== null && e.code === claim) return false
       if (e.type === 'keyup') {
@@ -1047,14 +1066,14 @@ export function TerminalPage({ id }: { id: string }) {
     const el = hostEl.current!
     const onPaste = (e: ClipboardEvent) => {
       const files = [...(e.clipboardData?.files ?? [])]
-      if (files.length === 0) return
+      if (files.length === 0 || watch) return
       e.preventDefault()
       e.stopPropagation()
       void upload(files, undefined, true)
     }
     el.addEventListener('paste', onPaste, { capture: true })
     return () => el.removeEventListener('paste', onPaste, { capture: true })
-  }, [upload])
+  }, [upload, watch])
 
   // A key-bar key pressed while an input method is still composing goes out
   // once the composition is committed, so the committed text comes first.
@@ -1150,6 +1169,7 @@ export function TerminalPage({ id }: { id: string }) {
   }
 
   const toggleComposer = () => {
+    if (watch) return
     if (composer) {
       setComposer(false)
       if (!isTouch) termRef.current?.focus()
@@ -1161,7 +1181,7 @@ export function TerminalPage({ id }: { id: string }) {
     composerRef.current?.focus()
   }
   openComposerRef.current = () => {
-    if (ended) return
+    if (ended || watch) return
     flushSync(() => setComposer(true))
     composerRef.current?.focus()
   }
@@ -1215,7 +1235,7 @@ export function TerminalPage({ id }: { id: string }) {
     }
   }
 
-  const hostIdForReconnect = info?.host_id ?? Number(local.get('corral.sessHost.' + id) || 0)
+  const hostIdForReconnect = watch ? 0 : info?.host_id ?? Number(local.get('corral.sessHost.' + id) || 0)
   const { connect, dialogs } = useConnect((s) => navigate('/t/' + s.id, true))
   const reconnect = async () => {
     if (!hostIdForReconnect) return navigate('/')
@@ -1230,7 +1250,8 @@ export function TerminalPage({ id }: { id: string }) {
   const slow = status === 'open' && latency !== null && latency > HIGH_LATENCY
   const statusText =
     ended ? t('term.endedShort') :
-    status === 'open' ? (slow ? t('term.latency', { ms: latency }) : t('term.connected')) + (info?.recording ? ' · ' + t('term.recording') : '') :
+    status === 'open' ? (slow ? t('term.latency', { ms: latency }) : t('term.connected')) + (info?.recording ? ' · ' + t('term.recording') : '') +
+      (!watch && info?.watching ? ' · ' + t('term.watchedBy', { n: info.watching }) : '') :
     status === 'connecting' ? t('term.connecting') :
     status === 'reconnecting' ? t('term.reconnecting') :
     status === 'offline' ? t('term.offline') :
@@ -1239,7 +1260,7 @@ export function TerminalPage({ id }: { id: string }) {
   const paused = !ended && (status === 'reconnecting' || status === 'offline')
   const herdrStale = paused || !herdrFresh
 
-  const endText = status === 'gone' ? t('term.ended.gone') :
+  const endText = status === 'revoked' ? t('watch.revoked') : status === 'gone' ? (watch ? t('watch.gone') : t('term.ended.gone')) :
     end ? (end.state === 'exited' ? t('term.ended.exited', { code: end.code }) : end.state === 'lost' ? t('term.ended.lost') : t('term.ended.closed')) :
     ended ? t('term.ended.closed') : ''
 
@@ -1264,9 +1285,17 @@ export function TerminalPage({ id }: { id: string }) {
     ]
   }
 
-  const moreItems = (): (MenuItem | null)[] => [
+  // Watching: only what changes this window's view.
+  const watchItems = (): (MenuItem | null)[] => [
+    { label: t('term.copyMode'), icon: <TextSelect size={16} />, onSelect: openCopyMode },
+    { label: t('settings.termTheme'), icon: <Palette size={16} />, separator: true, onSelect: () => setSchemesOpen(true) },
+    { label: t('term.fontLarger'), icon: <Plus size={16} />, onSelect: () => setPrefs({ fontSize: Math.min(28, getPrefs().fontSize + 1) }) },
+    { label: t('term.fontSmaller'), icon: <Minus size={16} />, onSelect: () => setPrefs({ fontSize: Math.max(9, getPrefs().fontSize - 1) }) },
+  ]
+  const moreItems = (): (MenuItem | null)[] => watch ? watchItems() : [
     { label: t('term.upload'), icon: <ImagePlus size={16} />, onSelect: () => fileRef.current?.click() },
     ended ? null : { label: t('files.title'), icon: <FolderOpen size={16} />, onSelect: openFiles },
+    ended ? null : { label: t('share.title'), icon: <Eye size={16} />, onSelect: () => setShareOpen(true) },
     { label: t('term.copyMode'), icon: <TextSelect size={16} />, onSelect: openCopyMode },
     boot.forwarding && info ? { label: t('ports.title'), icon: <Globe size={16} />, onSelect: () => setPortsOpen(true) } : null,
     boot.code && info ? { label: t('code.open'), icon: <Code2 size={16} />, onSelect: () => code.open(info.host_id, info.host_name) } : null,
@@ -1305,7 +1334,7 @@ export function TerminalPage({ id }: { id: string }) {
       style={chromeVars(scheme) as React.CSSProperties}
       ref={rootRef}
       onDragOver={(e) => {
-        if (e.dataTransfer.types.includes('Files')) {
+        if (!watch && e.dataTransfer.types.includes('Files')) {
           e.preventDefault()
           setDragOver(true)
         }
@@ -1316,7 +1345,7 @@ export function TerminalPage({ id }: { id: string }) {
         // Only files are ours; dragged text keeps the browser's own handling
         // (dropping into the composer inserts it).
         const files = [...e.dataTransfer.files]
-        if (files.length === 0) return
+        if (files.length === 0 || watch) return
         e.preventDefault()
         void upload(files)
       }}
@@ -1325,6 +1354,17 @@ export function TerminalPage({ id }: { id: string }) {
         <button className="icon-btn" onClick={() => navigate('/')} aria-label={t('term.backToHosts')} title={t('term.backToHosts')}>
           <ChevronLeft size={20} />
         </button>
+        {watch ? (
+          <div className="term-title term-title-static">
+            <span className="term-host">
+              <span className="term-host-name">{info?.host_name ?? ''}{owner ? ' · ' + t('watch.owner', { owner }) : ''}</span>
+            </span>
+            <span className={'term-status ' + statusClass} aria-live="polite">
+              <span className="dot" aria-hidden="true" />
+              {t('watch.status', { status: statusText })}
+            </span>
+          </div>
+        ) : (
         <Menu
           label={t('term.switchSession')}
           items={switcherItems}
@@ -1350,14 +1390,15 @@ export function TerminalPage({ id }: { id: string }) {
             </button>
           )}
         />
+        )}
         <div className="spacer" />
-        {herdr && !ended && (
+        {herdr && !ended && !watch && (
           <button className="icon-btn herdr-btn" aria-pressed={panelOpen} onClick={() => setPanel(!panelOpen)} aria-label={t('herdr.title') + (herdr.waiting > 0 && !herdrStale ? ' · ' + t('herdr.waiting', { n: herdr.waiting }) : '')} title={t('herdr.title')}>
             <LayoutGrid size={19} />
             {herdr.waiting > 0 && !herdrStale && <span className="herdr-count">{herdr.waiting}</span>}
           </button>
         )}
-        {!ended && (
+        {!ended && !watch && (
           <button className="icon-btn" aria-pressed={composer} onClick={toggleComposer} aria-label={t('term.composer')} title={t('term.composer') + (isTouch ? '' : isMac ? ' (⇧⌘↩)' : ' (Ctrl+Shift+Enter)')}>
             <MessageSquareText size={19} />
           </button>
@@ -1382,14 +1423,14 @@ export function TerminalPage({ id }: { id: string }) {
         />
       </header>
 
-      {paused && <div className="term-paused" role="status">{t('term.paused')}</div>}
+      {paused && <div className="term-paused" role="status">{watch ? t('watch.paused') : t('term.paused')}</div>}
       {status === 'full' && (
         <div className="term-paused term-following term-full" role="alert">
           <span>{t('term.full')}</span>
           <button className="link-btn" onClick={() => connRef.current?.retry()}>{t('common.retry')}</button>
         </div>
       )}
-      {following && !paused && !ended && (
+      {following && !paused && !ended && !watch && (
         <div className="term-paused term-following" role="status">
           <span>{t('term.following', { cols: following.cols, rows: following.rows })}</span>
           <button className="link-btn" onClick={() => takeOverRef.current()}>{t('term.takeOver')}</button>
@@ -1510,6 +1551,7 @@ export function TerminalPage({ id }: { id: string }) {
       {copyText !== null && <CopyMode text={copyText} onClose={() => setCopyText(null)} />}
       {schemesOpen && <SchemeDialog onClose={() => setSchemesOpen(false)} />}
       {portsOpen && info && <PortsDialog hostId={info.host_id} onClose={() => setPortsOpen(false)} />}
+      {shareOpen && !ended && <ShareDialog sessionId={id} onClose={() => setShareOpen(false)} />}
       {filesOpen && !ended && (
         <FilesDialog sessionId={id} start={filesPath.current} onPath={(p) => (filesPath.current = p)} onInsert={insertPath} onClose={() => setFilesOpen(false)} />
       )}

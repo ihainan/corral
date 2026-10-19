@@ -342,6 +342,35 @@ func (m *Manager) Get(owner int64, id string) (*Session, error) {
 	return s, nil
 }
 
+// GetShared returns a running or ended session another user may watch.
+func (m *Manager) GetShared(user int64, id string) (*Session, error) {
+	m.mu.Lock()
+	s, ok := m.sessions[id]
+	m.mu.Unlock()
+	if !ok || s.OwnerID == user || !s.Granted(user) {
+		return nil, ErrNotFound
+	}
+	return s, nil
+}
+
+// SharedWith lists the running sessions the user may watch.
+func (m *Manager) SharedWith(user int64) []*Session {
+	m.mu.Lock()
+	var all []*Session
+	for _, s := range m.sessions {
+		all = append(all, s)
+	}
+	m.mu.Unlock()
+	var out []*Session
+	for _, s := range all {
+		if s.OwnerID != user && s.Granted(user) && s.State() == StateRunning {
+			out = append(out, s)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Created.After(out[j].Created) })
+	return out
+}
+
 func (m *Manager) List(owner int64) []Info {
 	m.mu.Lock()
 	var mine []*Session

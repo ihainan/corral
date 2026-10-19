@@ -56,6 +56,7 @@ export interface SessionInfo {
   rows: number
   title: string
   recording?: boolean // its output is being recorded
+  watching?: number // windows of others watching it
   meta?: HerdrSummary // last side information published by the session
 }
 
@@ -272,4 +273,22 @@ export interface Recording {
   bytes: number
   truncated: boolean
   gaps: boolean
+}
+
+// A user the owner lets watch a session.
+export interface Share {
+  user_id: number
+  username: string
+  display_name: string
+  watching: boolean
+}
+
+// A session someone else lets this user watch.
+export interface SharedSession {
+  id: string
+  host_name: string
+  owner_name: string
+  state: string
+  created_at: number
+  title: string
 }

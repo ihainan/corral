@@ -248,3 +248,5 @@ html.term-dark .overlay, html.term-dark .menu, html.term-dark .toast {
   .player-controls { flex-wrap: wrap; row-gap: 6px; }
   .player-seek { order: 5; flex-basis: 100%; }
 }
+.term-title.term-title-static { cursor: default; }
+.term-title.term-title-static:hover { background: none; }

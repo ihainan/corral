@@ -125,6 +125,7 @@ function route(path: string, boot: Bootstrap, me: Me | null): ReactNode {
   if (!me) return <Redirect to={boot.setup_needed ? '/setup' : '/login?next=' + encodeURIComponent(path)} />
 
   if ((m = match('/t/:id', path))) return <TerminalPage key={m.id} id={m.id} />
+  if ((m = match('/w/:id', path))) return <TerminalPage key={'w' + m.id} id={m.id} watch />
   if ((m = match('/recordings/:id', path))) return <RecordingPlayerPage key={m.id} id={m.id} />
   if (path === '/recordings') return <Shell active="recordings"><RecordingsPage /></Shell>
   if (path === '/' || path === '/hosts') return <Shell active="hosts"><HostsPage /></Shell>

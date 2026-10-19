@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
-import { CircleStop, Code2, MoreHorizontal, Pencil, Plus, Server, Trash2, X } from 'lucide-react'
-import { api, type Host, type SessionInfo } from '../api'
+import { CircleStop, Code2, MoreHorizontal, Pencil, Plus, Server, Trash2, X, Eye } from 'lucide-react'
+import { api, type Host, type SessionInfo, type SharedSession } from '../api'
 import { relTime, t } from '../i18n'
 import { linkHandler, navigate } from '../router'
 import { Confirm, EmptyState, LoadError, Menu } from '../components/ui'
@@ -12,19 +12,25 @@ export function HostsPage() {
   const [hosts, setHosts] = useState<Host[] | null>(null)
   const [failed, setFailed] = useState(false)
   const [sessions, setSessions] = useState<SessionInfo[]>([])
+  const [shared, setShared] = useState<SharedSession[]>([]) // others' sessions this user may watch
+  const [sharedFailed, setSharedFailed] = useState(false)
   const [sessFailed, setSessFailed] = useState(false)
   const [confirm, setConfirm] = useState<React.ReactNode>(null)
 
-  const refreshSessions = useCallback(
-    () =>
-      api<SessionInfo[]>('GET', '/api/sessions')
-        .then((x) => {
-          setSessions(x)
-          setSessFailed(false)
-        })
-        .catch(() => setSessFailed(true)),
-    [],
-  )
+  const refreshSessions = useCallback(() => {
+    api<SharedSession[]>('GET', '/api/shared')
+      .then((l) => {
+        setShared(l)
+        setSharedFailed(false)
+      })
+      .catch(() => setSharedFailed(true))
+    return api<SessionInfo[]>('GET', '/api/sessions')
+      .then((x) => {
+        setSessions(x)
+        setSessFailed(false)
+      })
+      .catch(() => setSessFailed(true))
+  }, [])
   const load = useCallback(() => {
     api<Host[]>('GET', '/api/hosts')
       .then((h) => {
@@ -177,6 +183,24 @@ export function HostsPage() {
             )
           })}
         </ul>
+      )}
+      {(shared.length > 0 || sharedFailed) && (
+        <section className="section shared-sessions">
+          <h2>{t('watch.sharedTitle')}</h2>
+          {sharedFailed && <LoadError text={t('watch.sharedFailed')} onRetry={() => void refreshSessions()} />}
+          <ul className="rows">
+            {shared.map((s) => (
+              <li className="row row-session" key={s.id}>
+                <a className="row-main" href={'/w/' + s.id} onClick={linkHandler('/w/' + s.id)}>
+                  <Eye className="row-icon" size={18} strokeWidth={1.75} />
+                  <span className="row-title">{s.host_name}{s.title ? ' · ' + s.title : ''}</span>
+                  <span className="row-meta" title={new Date(s.created_at * 1000).toLocaleString()}>{t('hosts.startedAgo', { when: relTime(s.created_at) })}</span>
+                  <span className="row-sub">{t('watch.sharedBy', { owner: s.owner_name })}</span>
+                </a>
+              </li>
+            ))}
+          </ul>
+        </section>
       )}
       {confirm}
       {dialogs}

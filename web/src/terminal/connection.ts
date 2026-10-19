@@ -5,7 +5,7 @@
 // us to reset and replays what it still has. Phones suspend background tabs
 // within seconds, so reconnecting is the normal path, not an edge case.
 
-export type Status = 'connecting' | 'open' | 'reconnecting' | 'offline' | 'ended' | 'gone' | 'full'
+export type Status = 'connecting' | 'open' | 'reconnecting' | 'offline' | 'ended' | 'gone' | 'full' | 'revoked'
 
 export interface EndInfo {
   state: 'exited' | 'lost' | 'closed'
@@ -73,7 +73,9 @@ export class TermConnection {
   opens = 0 // counts accepted sockets; input held elsewhere checks it did not change
   status: Status = 'connecting'
 
-  constructor(private id: string, private h: Handlers) {
+  // watch: a read-only connection of someone the owner let watch. It sends
+  // nothing but pings: no input, no sizes, no visibility.
+  constructor(private id: string, private h: Handlers, private watch = false) {
     window.addEventListener('online', this.onOnline)
     window.addEventListener('offline', this.onOffline)
     document.addEventListener('visibilitychange', this.onVisible)
@@ -98,6 +100,7 @@ export class TermConnection {
   // replayed long after the user stopped expecting it.
   send(data: string | Uint8Array): SendResult {
     const bytes = typeof data === 'string' ? new TextEncoder().encode(data) : data
+    if (this.watch) return 'dropped'
     if (this.full) {
       this.h.onDropped?.()
       return 'dropped'
@@ -123,7 +126,7 @@ export class TermConnection {
   // sendNow sends at once, or not at all (false) when the connection is not
   // usable now or earlier input still waits; nothing is queued.
   sendNow(data: string): boolean {
-    if (!this.isOpen() || this.queue.length > 0) return false
+    if (this.watch || !this.isOpen() || this.queue.length > 0) return false
     const bytes = new TextEncoder().encode(data)
     for (let i = 0; i < bytes.length; i += FRAME_MAX) this.ws!.send(bytes.subarray(i, i + FRAME_MAX))
     return true
@@ -149,6 +152,7 @@ export class TermConnection {
   // sendSize sends this window's size, as a takeover with take or when one
   // is waiting to be sent.
   private sendSize(ws: WebSocket, take: boolean) {
+    if (this.watch) return
     take ||= this.takeUnsent
     ws.send(JSON.stringify({ t: 'resize', ...this.size, seq: ++this.sizeSeq, take }))
     if (take) {
@@ -186,7 +190,8 @@ export class TermConnection {
     const gen = this.gen
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
     const q = `?viewer=${this.viewer}` + (this.offset !== null ? `&offset=${this.offset}` : '')
-    const ws = new WebSocket(`${proto}//${location.host}/api/sessions/${this.id}/ws${q}`)
+    const path = this.watch ? `/api/shared/${this.id}/ws` : `/api/sessions/${this.id}/ws`
+    const ws = new WebSocket(`${proto}//${location.host}${path}${q}`)
     ws.binaryType = 'arraybuffer'
     this.ws = ws
     let gotHello = false
@@ -219,7 +224,7 @@ export class TermConnection {
           this.takeSeq = 0
           if (this.size) this.sendSize(ws, first || resend)
           this.h.onHello?.()
-          ws.send(JSON.stringify({ t: 'visible', v: document.visibilityState === 'visible' }))
+          if (!this.watch) ws.send(JSON.stringify({ t: 'visible', v: document.visibilityState === 'visible' }))
           this.startPing(ws, gen)
         } else if (m.t === 'state') {
           this.ended = true
@@ -287,6 +292,12 @@ export class TermConnection {
       if (gen !== this.gen) return
       this.stopPing()
       this.ws = null
+      if (ev.code === 4403) {
+        // The owner took back the leave to watch.
+        this.ended = true
+        this.setStatus('revoked')
+        return
+      }
       if (ev.code === 4429) {
         this.full = true
         if (this.queue.length > 0) this.h.onDropped?.()
@@ -304,15 +315,15 @@ export class TermConnection {
 
   private async checkGone() {
     try {
-      const r = await fetch('/api/sessions', { credentials: 'same-origin' })
+      const r = await fetch(this.watch ? `/api/shared/${this.id}` : '/api/sessions', { credentials: 'same-origin' })
       if (r.status === 401) {
         this.ended = true
         clearTimeout(this.timer)
         location.href = '/login?next=' + encodeURIComponent(location.pathname)
         return
       }
-      const list: { id: string }[] = await r.json()
-      if (!list.some((s) => s.id === this.id)) {
+      const gone = this.watch ? r.status === 404 : !((await r.json()) as { id: string }[]).some((s) => s.id === this.id)
+      if (gone) {
         this.ended = true
         clearTimeout(this.timer)
         this.drop()
@@ -385,7 +396,7 @@ export class TermConnection {
 
   private onVisible = () => {
     // Tell the gateway whether someone is looking, so it knows when to notify.
-    if (this.isOpen()) this.ws!.send(JSON.stringify({ t: 'visible', v: document.visibilityState === 'visible' }))
+    if (this.isOpen() && !this.watch) this.ws!.send(JSON.stringify({ t: 'visible', v: document.visibilityState === 'visible' }))
     if (document.visibilityState !== 'visible' || this.closed || this.ended) return
     if (this.probe(2500)) return
     if (!this.ws || this.ws.readyState !== WebSocket.CONNECTING) {

@@ -24,7 +24,8 @@ const (
 	inputQueue   = 64       // pending input chunks per session
 	inputChunk   = 32 << 10 // so the queue holds at most ~2 MiB
 	inputWait    = 10 * time.Second
-	maxViewers   = 8 // open sockets per session
+	maxViewers   = 8 // open sockets per session, of its owner
+	maxWatchers  = 4 // and of others watching
 	StateRunning = "running"
 	StateExited  = "exited" // the remote program ended normally
 	StateLost    = "lost"   // the SSH connection dropped
@@ -67,7 +68,32 @@ type Sub struct {
 	// both under Session.mu.
 	viewer string
 	ack    int64
+	// watcher is the user watching through this Sub (read-only, by the
+	// owner's leave), or 0 for one of the owner's own viewers.
+	watcher int64
+	leave   *grant // the watcher's leave this Sub was opened under
+	first   bool   // the first Sub opened under it
 }
+
+// grant is one leave to watch. Taking it back closes done, which every
+// socket opened under it waits on (whether or not its Sub is still attached).
+type grant struct {
+	done    chan struct{}
+	watched bool // a Sub was opened under it
+}
+
+// Revoked is closed once the leave this watcher's Sub was opened under is
+// taken back; nil for the owner's own viewers.
+func (s *Sub) Revoked() <-chan struct{} {
+	if s.leave == nil {
+		return nil
+	}
+	return s.leave.done
+}
+
+// FirstWatch reports whether this Sub is the watcher's first under their
+// current leave (for the audit log: not every reconnect).
+func (s *Sub) FirstWatch() bool { return s.first }
 
 // SizeNote is the terminal size as told to one viewer: whether that viewer
 // set it, and how many of its own resize requests had been applied, so a
@@ -92,6 +118,7 @@ type Info struct {
 	Rows      int    `json:"rows"`
 	Title     string `json:"title"`
 	Recording bool   `json:"recording"` // its output is being recorded
+	Watching  int    `json:"watching"`  // windows of other users watching, read-only
 	// Side information such as the herdr summary, as last published.
 	Meta json.RawMessage `json:"meta,omitempty"`
 }
@@ -135,7 +162,8 @@ type Session struct {
 	idleSince time.Time // when the last viewer left; zero while viewed
 	endedAt   time.Time
 	title     string
-	finished  chan struct{} // closed when the session reached a final state
+	finished  chan struct{}  // closed when the session reached a final state
+	grants    map[int64]*grant // users the owner let watch, read-only
 
 	onEnd   func(*Session)
 	rec     Recorder      // nil when the session is not recorded; fixed before output starts
@@ -215,8 +243,17 @@ func (s *Session) UploadSlot() (release func(), ok bool) {
 func (s *Session) Info() Info {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	own, watching := 0, 0
+	for sub := range s.subs {
+		if sub.watcher == 0 {
+			own++
+		} else {
+			watching++
+		}
+	}
 	return Info{ID: s.ID, HostID: s.HostID, HostName: s.HostName, State: s.state, CreatedAt: s.Created.Unix(),
-		Viewers: len(s.subs), Cols: s.cols, Rows: s.rows, Title: s.title, Recording: s.rec != nil && s.rec.Active(), Meta: append(json.RawMessage(nil), s.meta...)}
+		Viewers: own, Watching: watching, Cols: s.cols, Rows: s.rows, Title: s.title, Recording: s.rec != nil && s.rec.Active(),
+		Meta: append(json.RawMessage(nil), s.meta...)}
 }
 
 // Client exposes the SSH connection for side channels (file upload, herdr).
@@ -290,10 +327,36 @@ func (s *Session) Attach(fromOffset uint64, haveOffset bool) (sub *Sub, backlog 
 // AttachAs is Attach for the browser window named viewer (the same name on
 // each of its connections); "" stands for a viewer of its own.
 func (s *Session) AttachAs(viewer string, fromOffset uint64, haveOffset bool) (sub *Sub, backlog []byte, start uint64, reset bool, ev *Event, err error) {
+	return s.attach(viewer, 0, fromOffset, haveOffset)
+}
+
+// AttachWatcher is Attach for a user the owner let watch. Such a viewer
+// never sets the size and does not keep the session from detaching; the
+// caller passes it no input. It fails once the user may no longer watch.
+func (s *Session) AttachWatcher(user int64, fromOffset uint64, haveOffset bool) (sub *Sub, backlog []byte, start uint64, reset bool, ev *Event, err error) {
+	return s.attach("", user, fromOffset, haveOffset)
+}
+
+func (s *Session) attach(viewer string, watcher int64, fromOffset uint64, haveOffset bool) (sub *Sub, backlog []byte, start uint64, reset bool, ev *Event, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.state == StateRunning && len(s.subs) >= maxViewers {
-		return nil, nil, 0, false, nil, ErrTooManyViewers
+	var g *grant
+	if watcher != 0 {
+		if g = s.grants[watcher]; g == nil {
+			return nil, nil, 0, false, nil, ErrNotFound
+		}
+	}
+	// Watchers have room of their own: they never crowd out the owner.
+	if s.state == StateRunning {
+		n := 0
+		for x := range s.subs {
+			if (x.watcher != 0) == (watcher != 0) {
+				n++
+			}
+		}
+		if (watcher == 0 && n >= maxViewers) || (watcher != 0 && n >= maxWatchers) {
+			return nil, nil, 0, false, nil, ErrTooManyViewers
+		}
 	}
 	if haveOffset {
 		if b, ok := s.buf.since(fromOffset); ok {
@@ -311,7 +374,11 @@ func (s *Session) AttachAs(viewer string, fromOffset uint64, haveOffset bool) (s
 		s.subSeq++
 		viewer = "#" + strconv.Itoa(s.subSeq) // cannot clash with a named one (see the web layer)
 	}
-	sub = &Sub{C: make(chan Chunk, subBuffer), Events: make(chan Event, 4), Meta: make(chan []byte, 1), Size: make(chan SizeNote, 1), done: make(chan struct{}), viewer: viewer}
+	sub = &Sub{C: make(chan Chunk, subBuffer), Events: make(chan Event, 4), Meta: make(chan []byte, 1), Size: make(chan SizeNote, 1), done: make(chan struct{}), viewer: viewer, watcher: watcher, leave: g}
+	if g != nil {
+		sub.first = !g.watched
+		g.watched = true
+	}
 	sub.Size <- SizeNote{Cols: s.cols, Rows: s.rows, Own: s.sizeBy == viewer}
 	if s.meta != nil {
 		sub.Meta <- s.meta
@@ -323,8 +390,61 @@ func (s *Session) AttachAs(viewer string, fromOffset uint64, haveOffset bool) (s
 		return
 	}
 	s.subs[sub] = struct{}{}
-	s.idleSince = time.Time{}
+	if watcher == 0 {
+		s.idleSince = time.Time{}
+	}
 	return
+}
+
+// Grant lets a user watch the session, read-only.
+func (s *Session) Grant(user int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.grants == nil {
+		s.grants = map[int64]*grant{}
+	}
+	if s.grants[user] == nil {
+		s.grants[user] = &grant{done: make(chan struct{})}
+	}
+}
+
+// Revoke ends a user's leave to watch, and closes what they have open.
+func (s *Session) Revoke(user int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if g := s.grants[user]; g != nil {
+		close(g.done)
+		delete(s.grants, user)
+	}
+	for sub := range s.subs {
+		if sub.watcher == user {
+			s.removeSub(sub)
+		}
+	}
+}
+
+// Granted reports whether the user may watch.
+func (s *Session) Granted(user int64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.grants[user] != nil
+}
+
+// Watchers lists the users who may watch, with how many windows each has
+// open on the session.
+func (s *Session) Watchers() map[int64]int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make(map[int64]int, len(s.grants))
+	for u := range s.grants {
+		out[u] = 0
+	}
+	for sub := range s.subs {
+		if sub.watcher != 0 {
+			out[sub.watcher]++
+		}
+	}
+	return out
 }
 
 func (s *Session) Detach(sub *Sub) {
@@ -343,8 +463,15 @@ func (s *Session) Detach(sub *Sub) {
 func (s *Session) removeSub(sub *Sub) {
 	delete(s.subs, sub)
 	sub.close()
-	if len(s.subs) == 0 {
-		s.idleSince = time.Now()
+	// Detached once none of the owner's viewers is left (watchers do not count).
+	if sub.watcher == 0 && s.idleSince.IsZero() {
+		owned := false
+		for other := range s.subs {
+			owned = owned || other.watcher == 0
+		}
+		if !owned {
+			s.idleSince = time.Now()
+		}
 	}
 	if s.sizeBy != sub.viewer {
 		return
