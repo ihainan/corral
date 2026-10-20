@@ -345,3 +345,20 @@ func TestFullLineKeepsReplacements(t *testing.T) {
 		t.Fatalf("line: %d notes, first %+v, second %q", len(line), line[0].note, line[1].note.Tag)
 	}
 }
+
+// Replacements: the same alert's is replaced; past twice the bound even
+// replacements give way.
+func TestReplacementLineBounded(t *testing.T) {
+	var l lines
+	l.add(1, queued{note: Note{Tag: "a", Replace: true, Title: "1"}})
+	l.add(1, queued{note: Note{Tag: "a", Replace: true, Title: "2"}})
+	if len(l[1]) != 1 || l[1][0].note.Title != "2" {
+		t.Fatalf("same alert: %+v", l[1])
+	}
+	for i := 0; i < 5*queueMax; i++ {
+		l.add(1, queued{note: Note{Tag: fmt.Sprint(i), Replace: true}})
+	}
+	if len(l[1]) > 2*queueMax {
+		t.Fatalf("%d replacements waiting", len(l[1]))
+	}
+}

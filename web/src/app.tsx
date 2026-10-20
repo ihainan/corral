@@ -28,12 +28,17 @@ const AUTH_EVENT = 'corral.authEvent'
 export const useSession = () => useContext(SessionCtx)
 
 // The service worker keeps alerts (their text) to put them in order: it is
-// told which account is signed in (null: none), and drops them for any other.
+// told which account is signed in (null: none), and drops them for any other;
+// told again when another worker takes over (an upgrade: the one before may
+// not have understood).
+let alertsAccount: number | null | undefined // (undefined: not known yet)
 function alertsFor(userId: number | null) {
+  alertsAccount = userId
   navigator.serviceWorker?.ready
     .then((r) => r.active?.postMessage({ t: 'account', id: userId }))
     .catch(() => {})
 }
+navigator.serviceWorker?.addEventListener('controllerchange', () => alertsAccount !== undefined && alertsFor(alertsAccount))
 
 export function App() {
   const [boot, setBoot] = useState<Bootstrap | null>(null)
