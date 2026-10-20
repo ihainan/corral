@@ -111,10 +111,36 @@ async function newest(pushed) {
   return n
 }
 
-// The page says the account changed: what is remembered of its alerts goes.
+// The page says which account is signed in (null: none). What is kept of
+// alerts belongs to the account it was kept for: for any other (or when that
+// is not known) it goes. In the same line as the pushes, so a push being
+// handled finishes first and none can bring it back.
 self.addEventListener('message', (e) => {
-  if (e.data && e.data.t === 'forget-alerts') seen.clear()
+  const d = e.data
+  if (!d || d.t !== 'account' || (d.id !== null && typeof d.id !== 'number')) return
+  const run = pushes.then(() => setAccount(d.id))
+  pushes = run.catch(() => {})
+  e.waitUntil?.(run)
 })
+
+async function setAccount(id) {
+  const me = id === null ? '' : String(id)
+  let owner = null
+  try {
+    const r = await (await caches.open(ALERTS)).match('/owner')
+    owner = r ? await r.text() : null
+  } catch {
+    /* unknown: as for another account */
+  }
+  if (owner !== null && owner === me) return
+  seen.clear()
+  try {
+    await caches.delete(ALERTS)
+    if (me) await (await caches.open(ALERTS)).put('/owner', new Response(me))
+  } catch {
+    /* the memory went; storage stays unwritable */
+  }
+}
 
 async function showAlert(pushed) {
   const n = await newest(pushed)

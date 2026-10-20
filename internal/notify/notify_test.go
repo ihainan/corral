@@ -332,3 +332,16 @@ func TestSlowWebhookDoesNotHoldUpPushes(t *testing.T) {
 		t.Fatalf("%d of 3 pushes while the webhook hangs", pushes.Load())
 	}
 }
+
+// A full line lets the oldest plain note go, never a replacement.
+func TestFullLineKeepsReplacements(t *testing.T) {
+	var l lines
+	l.add(1, queued{note: Note{Tag: "r", Replace: true}})
+	for i := 0; i < queueMax; i++ {
+		l.add(1, queued{note: Note{Tag: fmt.Sprint(i)}})
+	}
+	line := l[1]
+	if len(line) != queueMax || !line[0].note.Replace || line[1].note.Tag != "1" {
+		t.Fatalf("line: %d notes, first %+v, second %q", len(line), line[0].note, line[1].note.Tag)
+	}
+}

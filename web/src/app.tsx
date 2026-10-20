@@ -27,25 +27,12 @@ const SessionCtx = createContext<Session>(null!)
 const AUTH_EVENT = 'corral.authEvent'
 export const useSession = () => useContext(SessionCtx)
 
-// The alerts the service worker keeps to put them in order hold their text:
-// they belong to the account signed in when they came, and go when another
-// one (or none) is signed in. Learning at startup that the same account is
-// still signed in keeps them.
-async function alertsFor(userId: number | null) {
-  try {
-    const name = 'corral-alerts'
-    const me = userId === null ? '' : String(userId)
-    const r = await (await caches.open(name)).match('/owner')
-    const owner = r ? await r.text() : null
-    if (owner === me) return
-    if (owner !== null || userId === null) {
-      await caches.delete(name)
-      navigator.serviceWorker?.controller?.postMessage({ t: 'forget-alerts' })
-    }
-    if (userId !== null) await (await caches.open(name)).put('/owner', new Response(me))
-  } catch {
-    /* no Cache Storage: the worker keeps nothing either */
-  }
+// The service worker keeps alerts (their text) to put them in order: it is
+// told which account is signed in (null: none), and drops them for any other.
+function alertsFor(userId: number | null) {
+  navigator.serviceWorker?.ready
+    .then((r) => r.active?.postMessage({ t: 'account', id: userId }))
+    .catch(() => {})
 }
 
 export function App() {
@@ -61,7 +48,7 @@ export function App() {
     if ((m?.id ?? null) !== (meRef.current?.id ?? null)) {
       bumpAuthGen()
       clearDrafts() // (the account's composer drafts end with it, a lapsed sign-in too)
-      void alertsFor(m?.id ?? null)
+      alertsFor(m?.id ?? null)
       try {
         if (booted.current) localStorage.setItem(AUTH_EVENT, String(Date.now()))
       } catch {
@@ -92,7 +79,7 @@ export function App() {
         loadedVersion.current = b.version
         setBoot(b)
         setMe(b.user)
-        if (!b.user) void alertsFor(null) // (signed out while no page was open)
+        alertsFor(b.user?.id ?? null) // (also signed out while no page was open)
         booted.current = true
         if (b.user) syncPrefsFromServer(b.user.id)
       })

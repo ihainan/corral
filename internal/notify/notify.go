@@ -312,7 +312,14 @@ func (l *lines) add(userID int64, q queued) bool {
 	}
 	line, busy := (*l)[userID]
 	if len(line) >= queueMax {
-		line = line[1:] // (this slow: the oldest note waiting gives way)
+		// This slow: the oldest note waiting gives way, unless it replaces
+		// an earlier one (an alert no longer true would stay).
+		for i, w := range line {
+			if !w.note.Replace {
+				line = append(line[:i:i], line[i+1:]...)
+				break
+			}
+		}
 	}
 	(*l)[userID] = append(line, q)
 	return !busy
