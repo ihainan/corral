@@ -57,6 +57,12 @@ func TestModesPrelude(t *testing.T) {
 		{"not a C1 control", "\xc2\xa9[?1003h", ""},
 		{"C0 inside ESC", "\x1b\n[?1003h", "\x1b[?1003h"},
 		{"subparameters", "\x1b[?1003:1h", "\x1b[?1003h"},
+		{"cursor style", "\x1b[5 q", "\x1b[5 q"},
+		{"cursor style back to the default", "\x1b[5 q\x1b[0 q", ""},
+		{"cursor style reset by DECSTR", "\x1b[3 q\x1b[!p", ""},
+		{"not a cursor style", "\x1b[5q\x1b[?5 q", ""},
+		{"cursor blinking off (vim)", "\x1b[?12h\x1b[?12l", "\x1b[?12l"},
+		{"cursor blinking kept by RIS and DECSTR", "\x1b[?12l\x1bc\x1b[!p", "\x1b[?12l"},
 		{"subparameters off", "\x1b[?1003h\x1b[?1003:1l", ""},
 	} {
 		if got := preludeOf(c.in); got != c.want {

@@ -14,8 +14,8 @@ import (
 //
 // Only what the browser's terminal (xterm.js) acts on is kept, as it acts on
 // it: one mouse protocol and one encoding at a time, any of 47/1047/1049 for
-// the alternate screen, DECSTR and RIS resetting what they reset there. The
-// value is plain data, so a copy is a snapshot.
+// the alternate screen, the cursor style and blinking, DECSTR and RIS
+// resetting what they reset there. The value is plain data, so a copy is a snapshot.
 type modes struct {
 	// Parser state, carried across writes (a sequence may be split). A CSI
 	// is collected as xterm.js does: at most 32 parameters (later ones are
@@ -35,6 +35,8 @@ type modes struct {
 	mouse  int    // 9, 1000, 1002, 1003; 0 for none
 	enc    int    // 1006, 1016; 0 for the default
 	keypad bool   // application keypad (DECKPAM, or mode 66)
+	cursor int    // cursor style (DECSCUSR 1-6); 0 for the default
+	blink  int    // mode 12: 1 on, 2 off, 0 never set (a setting: RIS keeps it)
 }
 
 const maxParams = 32
@@ -114,7 +116,7 @@ func (m *modes) feed(p []byte) {
 			case 0x1b:
 				m.st = stEsc
 			case 'c': // RIS
-				*m = modes{}
+				*m = modes{blink: m.blink}
 			case '=':
 				m.keypad = true
 			case '>':
@@ -175,7 +177,13 @@ func (m *modes) csi(final byte) {
 				m.set &^= 1 << i
 			}
 		}
-		m.keypad = false
+		m.keypad, m.cursor = false, 0
+		return
+	}
+	if final == 'q' && m.inter == ' ' && m.prefix == 0 { // DECSCUSR
+		if n := m.params[0]; n <= 6 {
+			m.cursor = n
+		}
 		return
 	}
 	if (final != 'h' && final != 'l') || m.inter != 0 || (m.prefix != 0 && m.prefix != '?') {
@@ -202,6 +210,12 @@ func (m *modes) csi(final byte) {
 				continue
 			case 66:
 				m.keypad = on
+				continue
+			case 12:
+				m.blink = 2
+				if on {
+					m.blink = 1
+				}
 				continue
 			case 47, 1047:
 				n = 1049
@@ -246,6 +260,15 @@ func (m *modes) prelude() []byte {
 	}
 	if m.keypad {
 		b.WriteString("\x1b=")
+	}
+	switch m.blink {
+	case 1:
+		b.WriteString("\x1b[?12h")
+	case 2:
+		b.WriteString("\x1b[?12l")
+	}
+	if m.cursor != 0 {
+		b.WriteString("\x1b[" + strconv.Itoa(m.cursor) + " q")
 	}
 	return []byte(b.String())
 }
