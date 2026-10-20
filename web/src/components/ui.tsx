@@ -12,6 +12,8 @@ if (typeof document !== 'undefined') {
   document.addEventListener('keydown', () => (lastWasKey = true), true)
   document.addEventListener('pointerdown', () => (lastWasKey = false), true)
 }
+// Whether the latest input was a key rather than a press (a hardware keyboard in use).
+export const keysInUse = () => lastWasKey
 const isTextEntry = (el: Element | null) => !!el && (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT' || (el as HTMLElement).isContentEditable)
 
 // A layer opened by a tap on a touch screen puts the on-screen keyboard

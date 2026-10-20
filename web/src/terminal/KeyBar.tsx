@@ -11,7 +11,6 @@ interface KeyProps {
   onPress: () => void
   onLong?: () => void
   onDown?: () => void // as the press starts
-  onEnd?: () => void // as it ends, after onPress if it was a press
   repeat?: boolean
   mod?: ModState
   wide?: boolean
@@ -34,9 +33,7 @@ function Key(p: KeyProps) {
   }
   const cancel = () => {
     clear()
-    const was = st.current
     st.current = null
-    if (was) p.onEnd?.()
   }
   // Stop any repeat if the key disappears mid-press (e.g. the Fn row toggles).
   useEffect(() => cancel, [])
@@ -85,10 +82,8 @@ function Key(p: KeyProps) {
       }}
       onPointerUp={() => {
         const s = st.current
-        clear()
-        st.current = null
+        cancel()
         if (s && !s.fired && !s.moved) p.onPress()
-        if (s) p.onEnd?.()
       }}
       onPointerCancel={cancel}
       onLostPointerCapture={cancel}
@@ -108,7 +103,6 @@ export interface KeyBarProps {
   onText: (s: string) => void
   onKeyboard: () => void
   onKeyboardDown: () => void
-  onKeyboardEnd: () => void
   custom: { label: string; onPress: () => void }[] // the user's own keys
 }
 
@@ -175,7 +169,7 @@ export function KeyBar(p: KeyBarProps) {
         )}
       </div>
       <div className="kb-group kb-fixed">
-        <Key label={<Keyboard size={18} />} aria={t('term.keyboard')} onPress={p.onKeyboard} onDown={p.onKeyboardDown} onEnd={p.onKeyboardEnd} onLong={() => p.onKey('Enter')} />
+        <Key label={<Keyboard size={18} />} aria={t('term.keyboard')} onPress={p.onKeyboard} onDown={p.onKeyboardDown} onLong={() => p.onKey('Enter')} />
       </div>
     </div>
   )

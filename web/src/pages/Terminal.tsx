@@ -11,7 +11,7 @@ import { t } from '../i18n'
 import { navigate } from '../router'
 import { getPrefs, prefsConfirmed, setChromeColor, setPrefs, termScheme, usePrefs } from '../prefs'
 import { local } from '../storage'
-import { Confirm, Menu, copyText as copyToClipboard, useFocusTrap, useToast, type MenuItem } from '../components/ui'
+import { Confirm, Menu, copyText as copyToClipboard, keysInUse, useFocusTrap, useToast, type MenuItem } from '../components/ui'
 import { useConnect } from '../connect'
 import { clampSize, TermConnection, type EndInfo, type Status } from '../terminal/connection'
 import { applyMods, specialKey, type Mods, type SpecialKey } from '../terminal/keys'
@@ -35,10 +35,23 @@ const HIGH_LATENCY = 300 // ms; below this the status just says "connected"
 
 // On a touch screen with the key bar, a tap on the terminal does not bring
 // up the on-screen keyboard unless the user wants that (prefs.tapKeyboard):
-// taps still reach the program (herdr's sidebar, mouse modes), the text field
-// still takes focus, so a hardware keyboard types as before, but it asks for
-// no keyboard (inputmode=none). The key bar's keyboard button shows it.
-const quietTaps = () => isTouch && getPrefs().keybar && !getPrefs().tapKeyboard
+// xterm gives its text field focus on every press, and while taps are quiet
+// that is refused (the press still reaches the program: herdr's sidebar,
+// mouse modes). The field takes focus when asked to (allowFocus): by the key
+// bar's keyboard button, or by a key from a hardware keyboard, after which
+// taps give it focus as usual (with one attached no on-screen keyboard
+// shows) until the field is left or an on-screen keyboard is seen.
+let hardwareKeys = false
+const quietTaps = () => isTouch && getPrefs().keybar && !getPrefs().tapKeyboard && !hardwareKeys
+let focusAsked = false
+function allowFocus(f: () => void) {
+  focusAsked = true
+  try {
+    f()
+  } finally {
+    focusAsked = false
+  }
+}
 // iOS: a field may keep focus after the system's key put its keyboard away.
 // That is seen when the visual viewport, unzoomed, grows back by the height
 // of a keyboard (its layout viewport does not shrink for the keyboard, as in
@@ -56,15 +69,10 @@ if (isMac && isTouch && window.visualViewport) {
     }
     const now = window.innerHeight - vv.height > 120
     if (up && !now) keyboardWentDown = true
-    if (now) keyboardWentDown = false
+    if (now) keyboardWentDown = hardwareKeys = false // (an on-screen keyboard: none attached)
     up = now
   })
   document.addEventListener('focusin', () => (keyboardWentDown = false))
-}
-function quietKeyboard(ta: HTMLTextAreaElement | null | undefined, quiet: boolean) {
-  if (!ta) return
-  if (quiet) ta.setAttribute('inputmode', 'none')
-  else ta.removeAttribute('inputmode')
 }
 
 function useMedia(q: string) {
@@ -425,15 +433,50 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
     ta?.setAttribute('autocapitalize', 'off')
     ta?.setAttribute('autocorrect', 'off')
     ta?.setAttribute('spellcheck', 'false')
-    quietKeyboard(ta, quietTaps())
-    // Once the keyboard is put away (the field left), taps are quiet again.
-    const onQuietBlur = () => quietKeyboard(ta, quietTaps())
-    ta?.addEventListener('blur', onQuietBlur)
-    // Keys while it asks for no keyboard come from a hardware keyboard (with
-    // one, no on-screen keyboard shows): the field is made ordinary again,
-    // so input methods work as usual.
-    const onQuietKey = () => ta?.getAttribute('inputmode') === 'none' && quietKeyboard(ta, false)
-    el.addEventListener('keydown', onQuietKey, true) // (before xterm's own handling)
+    // Quiet taps (see quietTaps): requests for focus that follow a press are
+    // refused (xterm's own on every press), those that follow keys are not.
+    if (ta) {
+      const focus = ta.focus
+      ta.focus = function (this: HTMLTextAreaElement, o?: FocusOptions) {
+        if (focusAsked || !quietTaps() || keysInUse()) focus.call(this, o)
+      }
+    }
+    // A key while nothing has focus comes from a hardware keyboard: the field
+    // in use takes focus (the composer when it is open). A character's text
+    // then arrives there; this keydown itself never reaches xterm, so for the
+    // terminal a key that acts on keydown alone (Enter, arrows, Esc, Ctrl or
+    // a latched modifier with a letter) is sent from here.
+    const onStrayKey = (e: KeyboardEvent) => {
+      const a = document.activeElement
+      if (!ta || !isTouch || (a && a !== document.body) || document.querySelector('[aria-modal="true"]')) return
+      hardwareKeys = true
+      if (composerRef.current) return composerRef.current.focus()
+      allowFocus(() => ta.focus())
+      if (watch || e.metaKey || e.isComposing) return
+      const special = specialFor[e.key]
+      if (!special && !(e.key.length === 1 && (e.ctrlKey || latched()))) return
+      const m = activeMods()
+      const mods = { ctrl: m.ctrl || e.ctrlKey, alt: m.alt || e.altKey }
+      e.preventDefault()
+      takeOverRef.current()
+      settleRef.current()
+      out(special ? specialKey(special, { ...mods, shift: e.shiftKey }, term.modes.applicationCursorKeysMode) : applyMods(e.key, { ...mods, shift: false }))
+      releaseOnce()
+    }
+    // Once the field is left, taps are quiet again until the next key.
+    const onFieldBlur = () => (hardwareKeys = false)
+    ta?.addEventListener('blur', onFieldBlur)
+    // A quiet tap takes focus off a button (one that closed the composer, say)
+    // as a tap that focused the field did, so hardware keys find no focus and
+    // come to the terminal (onStrayKey). A text field keeps it.
+    const onQuietPress = () => {
+      const a = document.activeElement as HTMLElement | null
+      if (!quietTaps() || !a || a === document.body || a === ta) return
+      if (a.tagName === 'TEXTAREA' || a.tagName === 'INPUT' || a.tagName === 'SELECT' || a.isContentEditable) return
+      a.blur()
+    }
+    el.addEventListener('pointerdown', onQuietPress, true)
+    document.addEventListener('keydown', onStrayKey, true)
 
     // Set while another viewer's size is shown (see onSize); fitting to this
     // window then waits until this viewer takes the terminal over.
@@ -1022,8 +1065,9 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
       ta?.removeEventListener('beforeinput', onBeforeInput)
       el.removeEventListener('input', onPrintableInput, true)
       ta?.removeEventListener('blur', dropClaims)
-      ta?.removeEventListener('blur', onQuietBlur)
-      el.removeEventListener('keydown', onQuietKey, true)
+      document.removeEventListener('keydown', onStrayKey, true)
+      ta?.removeEventListener('blur', onFieldBlur)
+      el.removeEventListener('pointerdown', onQuietPress, true)
       ta?.removeEventListener('paste', onPasteEv, true)
       alive = false
       dataSub.dispose()
@@ -1053,8 +1097,6 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
     // Through the follow check: while another viewer's size is shown the grid
     // stays at that size (only its scale changes).
     safeFitRef.current()
-    const ta = hostEl.current?.querySelector('textarea')
-    if (ta && document.activeElement !== ta) quietKeyboard(ta, quietTaps()) // (an open keyboard stays until put away)
   }, [prefs])
   useEffect(
     () => () => {
@@ -1364,37 +1406,27 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
     const target = document.activeElement === field ? field : composer ?? field
     if (!target) return null
     const focused = document.activeElement === target
-    // A focused field shows its keyboard, unless it asks for none or the
-    // keyboard was seen put away (iOS, see keyboardWentDown).
-    const shown = focused && target.getAttribute('inputmode') !== 'none' && !keyboardWentDown
-    return { field, target, focused, shown }
+    // A focused field shows its keyboard, unless the keyboard was seen put
+    // away (iOS, see keyboardWentDown).
+    const shown = focused && !keyboardWentDown
+    return { target, focused, shown }
   }
   const leaveKeyboardField = (target: HTMLElement) => {
     settleRef.current() // a composition that just ended is sent, not cleared by the blur
-    target.blur() // (which makes the terminal's field quiet again, see quietTaps)
+    target.blur()
   }
   // iOS brings up the keyboard for a field that takes focus on a tap, but
-  // not for one left and focused again within the same event: the terminal's
-  // field, focused without its keyboard, is left as the press starts and
-  // takes focus when it ends (toggleKeyboard). A press that turns into
-  // something else (held for Enter, moved, cancelled) gives the focus back,
-  // still without the keyboard, so a hardware keyboard keeps typing there.
-  const leftOnDown = useRef<{ el: HTMLTextAreaElement; at: number } | null>(null)
+  // not reliably for one left and focused again within the same event: a
+  // focused field whose keyboard was put away is left as the press starts
+  // and takes focus when it ends (toggleKeyboard).
+  const leftOnDown = useRef<{ el: HTMLElement; at: number } | null>(null)
   const keyboardDown = () => {
     if (leftOnDown.current?.el.isConnected && document.activeElement !== leftOnDown.current.el) return // (a second finger)
     const k = keyboardField()
     leftOnDown.current = null
-    if (!k?.focused || k.shown || k.target !== k.field || !k.field) return
-    leaveKeyboardField(k.field)
-    leftOnDown.current = { el: k.field, at: Date.now() }
-  }
-  const keyboardEnd = () => {
-    const left = leftOnDown.current
-    leftOnDown.current = null
-    const a = document.activeElement
-    if (!left?.el.isConnected || (a && a !== document.body)) return
-    quietKeyboard(left.el, true)
-    left.el.focus()
+    if (!k?.focused || k.shown) return
+    leaveKeyboardField(k.target)
+    leftOnDown.current = { el: k.target, at: Date.now() }
   }
   const toggleKeyboard = () => {
     // The field left as this press started is the one to bring back.
@@ -1405,9 +1437,7 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
     const target = left && Date.now() - left.at < 1000 && left.el.isConnected ? left.el : k.target
     if (target === k.target && k.focused) leaveKeyboardField(target)
     if (target === k.target && k.shown) return
-    // Shown when the field takes focus again, asking for it.
-    if (target === k.field) quietKeyboard(k.field, false)
-    target.focus()
+    allowFocus(() => target.focus())
   }
 
   // The composer's text and the optional Enter go out as one message, and only
@@ -1736,7 +1766,7 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
             onClose={(viaKeyboard) => {
               setPanel(false)
               // A keyboard user (also an iPad with a hardware keyboard) keeps typing.
-              if (viaKeyboard) termRef.current?.focus()
+              if (viaKeyboard) allowFocus(() => termRef.current?.focus())
             }}
             onReply={(a) => {
               if (sheetPanel) setPanel(false)
@@ -1835,7 +1865,6 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
               onText={sendText}
               onKeyboard={toggleKeyboard}
               onKeyboardDown={keyboardDown}
-              onKeyboardEnd={keyboardEnd}
               custom={customKeys.map((k) => ({ label: k.label, onPress: () => sendSteps(k.steps) }))}
             />
           )}
