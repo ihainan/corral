@@ -21,6 +21,7 @@ import { chromeVars } from '../terminal/themes'
 import { SchemeDialog } from '../terminal/SchemePicker'
 import { HerdrPanel } from '../terminal/HerdrPanel'
 import { startPreviews } from '../terminal/preview'
+import { inPromptBox } from '../terminal/prompt'
 import { ReplyDialog } from '../terminal/ReplyDialog'
 import { PortsDialog, openForward } from '../terminal/PortsDialog'
 import { FilesDialog } from '../terminal/FilesDialog'
@@ -434,11 +435,15 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
     ta?.setAttribute('autocorrect', 'off')
     ta?.setAttribute('spellcheck', 'false')
     // Quiet taps (see quietTaps): requests for focus that follow a press are
-    // refused (xterm's own on every press), those that follow keys are not.
+    // refused (xterm's own on every press), those that follow keys are not,
+    // nor the one that follows a tap in Claude Code's input box (onQuietPress):
+    // the keyboard comes up with that tap, as for a text field.
+    let promptTap: { x: number; y: number; at: number } | null = null // the press, while it is still a tap
+    let promptArmed = false // during the mousedown that tap brings
     if (ta) {
       const focus = ta.focus
       ta.focus = function (this: HTMLTextAreaElement, o?: FocusOptions) {
-        if (focusAsked || !quietTaps() || keysInUse()) focus.call(this, o)
+        if (focusAsked || !quietTaps() || keysInUse() || promptArmed) focus.call(this, o)
       }
     }
     // A key while nothing has focus comes from a hardware keyboard: the field
@@ -469,13 +474,45 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
     // A quiet tap takes focus off a button (one that closed the composer, say)
     // as a tap that focused the field did, so hardware keys find no focus and
     // come to the terminal (onStrayKey). A text field keeps it.
-    const onQuietPress = () => {
+    const onQuietPress = (e: PointerEvent) => {
+      promptTap = null
+      if (!quietTaps()) return
+      // Decided as the press starts, from the screen as it is then, on a
+      // live terminal (promptReady, checked again as it ends).
+      const screenEl = el.querySelector('.xterm-screen')
+      if (e.pointerType !== 'mouse' && e.isPrimary && screenEl && promptReady()) {
+        const r = screenEl.getBoundingClientRect()
+        const col = Math.floor(((e.clientX - r.left) * term.cols) / r.width)
+        const row = Math.floor(((e.clientY - r.top) * term.rows) / r.height)
+        if (inPromptBox(term, col, row)) {
+          promptTap = { x: e.clientX, y: e.clientY, at: Date.now() }
+          // Focused with its keyboard put away (iOS): it takes focus afresh.
+          if (ta && document.activeElement === ta && keyboardWentDown) ta.blur()
+        }
+      }
       const a = document.activeElement as HTMLElement | null
-      if (!quietTaps() || !a || a === document.body || a === ta) return
+      if (!a || a === document.body || a === ta) return
       if (a.tagName === 'TEXTAREA' || a.tagName === 'INPUT' || a.tagName === 'SELECT' || a.isContentEditable) return
       a.blur()
     }
     el.addEventListener('pointerdown', onQuietPress, true)
+    // It stays a tap only without a second finger, movement or cancelling;
+    // it then lets through xterm's request for focus in the mousedown that
+    // follows (and nothing later).
+    const onPromptMove = (e: PointerEvent) => {
+      if (promptTap && (!e.isPrimary || Math.abs(e.clientX - promptTap.x) > 8 || Math.abs(e.clientY - promptTap.y) > 8)) promptTap = null
+    }
+    const onPromptCancel = () => (promptTap = null)
+    // A live terminal, its backlog written, taking this window's input as shown.
+    const promptReady = () => conn.isOpen() && !replaying && !settling && !watch && !composerRef.current && !(following && scale < 1)
+    const onPromptMouse = () => {
+      promptArmed = !!promptTap && Date.now() - promptTap.at < 1000 && promptReady()
+      promptTap = null
+      if (promptArmed) setTimeout(() => (promptArmed = false))
+    }
+    el.addEventListener('pointermove', onPromptMove, true)
+    el.addEventListener('pointercancel', onPromptCancel, true)
+    el.addEventListener('mousedown', onPromptMouse, true)
     document.addEventListener('keydown', onStrayKey, true)
 
     // Set while another viewer's size is shown (see onSize); fitting to this
@@ -1068,6 +1105,9 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
       document.removeEventListener('keydown', onStrayKey, true)
       ta?.removeEventListener('blur', onFieldBlur)
       el.removeEventListener('pointerdown', onQuietPress, true)
+      el.removeEventListener('pointermove', onPromptMove, true)
+      el.removeEventListener('pointercancel', onPromptCancel, true)
+      el.removeEventListener('mousedown', onPromptMouse, true)
       ta?.removeEventListener('paste', onPasteEv, true)
       alive = false
       dataSub.dispose()
