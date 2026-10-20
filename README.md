@@ -13,7 +13,7 @@ keeps running and you pick it up where it was — on the same device or another.
   <img src="docs/screenshots/shortcuts-phone.png" width="250" alt="The shortcut panel over the key bar, on the Claude Code page">
 </p>
 <p align="center">
-  <img src="docs/screenshots/herdr-desktop.png" width="820" alt="herdr in a desktop browser, an agent waiting for an answer">
+  <img src="docs/screenshots/herdr-desktop.png" width="820" alt="A desktop browser with a tab per session; herdr in front, an agent waiting for an answer">
 </p>
 
 ## Features
