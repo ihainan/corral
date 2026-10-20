@@ -1,0 +1,31 @@
+name: Bug report
+description: Something does not work as it should.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what you expected
+    validations: { required: true }
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: "1. Open a host with herdr on a phone\n2. …"
+    validations: { required: true }
+  - type: input
+    id: version
+    attributes:
+      label: Corral version
+      description: "`corral version`, the image tag, or the commit."
+    validations: { required: true }
+  - type: input
+    id: browser
+    attributes:
+      label: Device and browser
+      placeholder: "iPhone 16, iOS 26, installed to the home screen; or Chrome 140 on macOS"
+  - type: textarea
+    id: more
+    attributes:
+      label: Anything else
+      description: What runs on the host (tmux, herdr, the agent), the reverse proxy, relevant `CORRAL_*` settings, logs. Leave out passwords, keys and host names you would rather not share.

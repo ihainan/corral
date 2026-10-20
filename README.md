@@ -7,6 +7,15 @@ Corral is a gateway: it holds the SSH connections and serves a terminal to
 the browser. Your phone can sleep, lose signal or switch apps; the session
 keeps running and you pick it up where it was — on the same device or another.
 
+<p align="center">
+  <img src="docs/screenshots/home-phone.png" width="250" alt="The home page on a phone: running sessions as cards with their screens, the hosts below">
+  <img src="docs/screenshots/terminal-phone.png" width="250" alt="A terminal on a phone with the key bar">
+  <img src="docs/screenshots/shortcuts-phone.png" width="250" alt="The shortcut panel over the key bar, on the Claude Code page">
+</p>
+<p align="center">
+  <img src="docs/screenshots/herdr-desktop.png" width="820" alt="herdr in a desktop browser, with Corral's panel listing its agents and who is waiting">
+</p>
+
 ## Features
 
 **A terminal that works on a phone**
@@ -18,13 +27,26 @@ keeps running and you pick it up where it was — on the same device or another.
   small, as one of your windows last showed it; the hosts below open new
   ones.
 - A key bar with Esc, Ctrl and Alt (tap once or lock), Tab and Shift+Tab,
-  arrows, F1–F12 and the symbols that are hard to type on a phone keyboard.
-  Add keys of your own that send a sequence, written as for tmux's
-  send-keys (`C-b c`, `"git status" Enter`); they follow you to every device.
+  arrows, F1–F12 and the symbols that are hard to type on a phone keyboard,
+  arranged as you like: which keys stay on the left, which scroll, in what
+  order, which are hidden. Add keys of your own that send a sequence,
+  written as for tmux's send-keys (`C-b c`, `"git status" Enter`) or as in
+  Moshi (`C-b, S-t`, `text:/clear, Enter`), or picked from a list with a
+  preview in words; most keys can send another sequence on a long press.
+  It all follows you to every device.
+- A long press on Ctrl opens a shortcut panel: Ctrl combinations, herdr's
+  tabs, splits and panes, tmux's prefix keys, and Claude Code's and Codex's
+  commands, opening on the page of the agent you are looking at.
+- Tapping the terminal reaches the program (herdr's sidebar, mouse modes)
+  without bringing up the on-screen keyboard; tapping where you type — the
+  cursor's line, Claude Code's input box — or the keyboard button does. A
+  hardware keyboard types at once.
 - Input methods work: Chinese and other IMEs, dictation, and a composer field
   for writing longer input before sending it.
 - Several devices can have one session open; the one you act on decides the
-  terminal size, the others follow it.
+  terminal size, the others follow it. A window opened long after a program
+  started still gets the modes it set (mouse reporting, bracketed paste…).
+- After an upgrade, open pages offer to reload into the new version.
 - A copy mode with native text selection, colour schemes, adjustable fonts,
   installable as an app (PWA).
 - Programs on the host can copy to your device's clipboard (OSC 52): tmux's
@@ -37,8 +59,8 @@ keeps running and you pick it up where it was — on the same device or another.
   typed into the terminal, which is how Claude Code and Codex take images
   (Ctrl+V works as in a local terminal); when Gemini CLI is in front (in a
   tmux or herdr session), the path is typed as `@path`, which is how it
-  takes them. Shift+Enter inserts
-  a newline.
+  takes them. Shift+Enter inserts a newline, and Ctrl+Enter reaches the
+  programs that tell it apart (Claude Code's "send now").
 - With herdr, a panel lists workspaces and agents, shows who is waiting for
   you, switches between them, and shows one agent's pane full size (handy
   on a phone) and back.
@@ -81,23 +103,28 @@ Chinese and English user interfaces ship together.
 ## Run
 
 Corral is one binary (or container image) with an embedded web interface and
-a SQLite database. It needs a public URL and a master key:
+a SQLite database. Images for linux/amd64 and linux/arm64 are published as
+`ghcr.io/ihainan/corral` (`latest`, or a version such as `0.1.0`); the
+[releases](https://github.com/ihainan/corral/releases) also have Linux
+binaries. It needs a public URL and a master key:
 
 ```sh
-docker build -t corral .
 docker run -d --name corral -p 127.0.0.1:8080:8080 -v corral-data:/data \
   -e CORRAL_PUBLIC_URL=https://ssh.example.com \
-  -e CORRAL_MASTER_KEY="$(docker run --rm corral genkey)" \
-  corral
+  -e CORRAL_MASTER_KEY="$(docker run --rm ghcr.io/ihainan/corral genkey)" \
+  ghcr.io/ihainan/corral
 docker logs corral   # prints a one-time link for creating the first administrator
 ```
+
+To build the image yourself: `docker build -t corral .` (any platform, e.g.
+`docker buildx build --platform linux/arm64`).
 
 Or with Compose, keeping the key in a file outside the data directory:
 
 ```yaml
 services:
   corral:
-    image: corral
+    image: ghcr.io/ihainan/corral:0.1.0
     restart: unless-stopped
     ports: ["127.0.0.1:8080:8080"]
     environment:
@@ -196,8 +223,8 @@ All settings are environment variables.
   only addresses that are never a host (link-local, multicast, unspecified)
   are refused there.
 
-Report security problems privately to the maintainers rather than in a
-public issue.
+Report security problems privately, not in a public issue: see
+[SECURITY.md](SECURITY.md).
 
 ## Known limitations
 
@@ -223,7 +250,9 @@ make notices                            # after changing dependencies
 
 The test SSH server accepts `alice` / `alice-pass`. Third-party licences are
 listed in [`web/public/THIRD-PARTY-NOTICES.txt`](web/public/THIRD-PARTY-NOTICES.txt),
-which the web interface also serves.
+which the web interface also serves. See [CONTRIBUTING.md](CONTRIBUTING.md)
+before sending a change, and [CHANGELOG.md](CHANGELOG.md) for what changed
+between versions.
 
 ## License
 

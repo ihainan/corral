@@ -1,0 +1,118 @@
+name: release
+# A tag v<major>.<minor>.<patch>[-<pre-release>] (e.g. v0.1.0; v0.2.0-rc.1 is a
+# pre-release) publishes Linux binaries (amd64, arm64) with checksums on a
+# GitHub release, its notes taken from CHANGELOG.md, and a multi-arch image
+# ghcr.io/<owner>/corral:<version>; `latest` moves only to the highest release.
+#
+# The build job holds no write access (dependencies' scripts run there); the
+# publish job only uploads. Order: a draft release with the files, then the
+# version's image, then the release made public, then `latest` - so nothing
+# is public before everything is built, and a failed run can be run again.
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+concurrency:
+  group: release # one at a time (`latest` is decided against the others), none dropped
+  cancel-in-progress: false
+  queue: max
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with: { persist-credentials: false }
+      - name: Version and notes
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          [[ "$TAG" =~ ^v([0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?)$ ]] || { echo "not a release tag: $TAG"; exit 1; }
+          v="${BASH_REMATCH[1]}"
+          # The section of CHANGELOG.md for this version: from its heading to the next one.
+          awk -v v="$v" '/^## /{p = ($2 == "[" v "]" || $2 == v)} p && !/^## /' CHANGELOG.md > notes.md
+          grep -q '[^[:space:]]' notes.md || { echo "CHANGELOG.md has no notes for $v"; exit 1; }
+          echo "$v" > version.txt
+      - uses: actions/setup-go@v6
+        with: { go-version-file: go.mod }
+      - uses: actions/setup-node@v5
+        with: { node-version: 22 }
+      - run: corepack enable # pnpm at the version in web/package.json
+      - run: make check
+      - name: Binaries
+        run: |
+          v="$(cat version.txt)"
+          make web
+          mkdir -p dist
+          for arch in amd64 arm64; do
+            d="corral-$v-linux-$arch"
+            mkdir -p "dist/$d"
+            CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build -trimpath -ldflags "-s -w -X main.version=$v" -o "dist/$d/corral" ./cmd/corral
+            cp LICENSE README.md CHANGELOG.md web/public/THIRD-PARTY-NOTICES.txt "dist/$d/"
+            tar -C dist -czf "dist/$d.tar.gz" "$d"
+          done
+          (cd dist && sha256sum ./*.tar.gz | sed 's| \./| |' > SHA256SUMS)
+          mkdir out && mv dist/*.tar.gz dist/SHA256SUMS notes.md version.txt out/
+      - uses: actions/upload-artifact@v7
+        with: { name: release, path: out/, if-no-files-found: error, retention-days: 7 }
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write # the release
+      packages: write # the image
+    steps:
+      - uses: actions/checkout@v5
+        with: { persist-credentials: false, fetch-depth: 0 } # (all tags, to find the highest)
+      - uses: actions/download-artifact@v8
+        with: { name: release, path: out }
+      - name: Draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          v="$(cat out/version.txt)"
+          pre=""; [[ "$v" == *-* ]] && pre="--prerelease"
+          if state="$(gh release view "$TAG" --json isDraft -q .isDraft 2>/dev/null)"; then
+            if [ "$state" != true ]; then
+              # Published already (a run again after `latest` failed): only `latest` is left to do.
+              echo "$TAG is published: only latest"; echo "PUBLISHED=1" >> "$GITHUB_ENV"; exit 0
+            fi
+            gh release upload "$TAG" out/*.tar.gz out/SHA256SUMS --clobber # (a run again)
+            gh release edit "$TAG" --notes-file out/notes.md
+          else
+            gh release create "$TAG" out/*.tar.gz out/SHA256SUMS --draft --verify-tag \
+              --title "Corral $v" --notes-file out/notes.md $pre
+          fi
+      - name: Image
+        if: env.PUBLISHED != '1'
+        env:
+          TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          v="$(cat out/version.txt)"
+          echo "$TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+          docker buildx create --use --name multiarch
+          # (The Dockerfile builds every architecture on this machine: no emulation.)
+          docker buildx build --platform linux/amd64,linux/arm64 --build-arg VERSION="$v" \
+            -t "ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/corral:$v" --push .
+      - name: Publish release
+        if: env.PUBLISHED != '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release edit "$TAG" --draft=false
+      - name: Latest
+        env:
+          TAG: ${{ github.ref_name }}
+          TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          v="$(cat out/version.txt)"
+          [[ "$v" == *-* ]] && { echo "pre-release: latest stays"; exit 0; }
+          highest="$(git tag -l 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)"
+          [ "$highest" = "$TAG" ] || { echo "$highest is newer: latest stays"; exit 0; }
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/corral"
+          echo "$TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+          docker buildx imagetools create -t "$image:latest" "$image:$v"
