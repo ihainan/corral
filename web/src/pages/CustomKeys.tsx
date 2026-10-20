@@ -143,10 +143,10 @@ export function CustomKeysSection() {
     if (form?.at) {
       if (!sameKey(at(cur, form.at), form.was!)) return setConflict(true)
       const g = form.at.group
-      save({ ...cur, [g]: cur[g].map((x, j) => (j === form.at!.i ? k : x)) } as KeyLayout)
+      if (!save({ ...cur, [g]: cur[g].map((x, j) => (j === form.at!.i ? k : x)) } as KeyLayout)) return // (the draft stays)
     } else {
       if (ownCount(cur) >= maxCustom || cur.row.length >= maxRow) return
-      save({ ...cur, row: [...cur.row, k] })
+      if (!save({ ...cur, row: [...cur.row, k] })) return
     }
     close()
   }
@@ -287,6 +287,7 @@ export function CustomKeysSection() {
         <form className="ck-form" onSubmit={submit} noValidate>
           <h3>{form.was ? t('customKeys.edit', { label: keyName(form.was) }) : t('keybar.new')}</h3>
           {conflict && <p className="err" role="alert">{t('customKeys.conflict')}</p>}
+          {tooBig && <p className="err" role="alert">{t('keybar.tooBig')}</p>}
           {!editingBuiltin && (
             <>
               <Field label={t('customKeys.label')} htmlFor="ck-label">

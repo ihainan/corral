@@ -34,7 +34,14 @@ export function ShortcutPanel(p: { pages: PanelPage[]; open: PanelPage; onPick: 
     }
     // Escape closes it and goes nowhere else (on the window, before the
     // terminal's own listeners on the document).
+    // Tab from outside (the terminal's field) moves into it.
     const esc = (e: KeyboardEvent) => {
+      if (e.key === 'Tab' && !ref.current?.contains(document.activeElement)) {
+        e.preventDefault()
+        e.stopImmediatePropagation()
+        ref.current?.querySelector<HTMLElement>('.sc-tab[aria-selected="true"]')?.focus()
+        return
+      }
       if (e.key !== 'Escape') return
       e.preventDefault()
       e.stopImmediatePropagation()

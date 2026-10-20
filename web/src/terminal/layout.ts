@@ -18,9 +18,10 @@ export const maxPinned = 6
 export const maxRow = 48
 export const maxCustom = 24
 export const maxLabel = 12
-// The gateway's limit for a stored layout, in bytes (it escapes < > & as \u003c…).
+// The gateway's limit for a stored layout, in bytes (it escapes < > & and
+// U+2028, U+2029 as \u003c…).
 export const maxLayoutBytes = 48 << 10
-export const layoutBytes = (l: KeyLayout) => new TextEncoder().encode(JSON.stringify(l).replace(/[<>&]/g, '\\u0000')).length
+export const layoutBytes = (l: KeyLayout) => new TextEncoder().encode(JSON.stringify(l).replace(/[<>&\u2028\u2029]/g, '\\u0000')).length
 
 type Builtin =
   | { label: string; aria: string; key: SpecialKey; repeat?: boolean; long?: string }

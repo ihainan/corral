@@ -33,6 +33,7 @@ func TestKeyLayoutSetting(t *testing.T) {
 		`{"pinned":[],"row":[{"K":"esc"}]}`,                                           // another spelling
 		`{"pinned":[],"row":[{"k":1}]}`,                                               // not a string
 		`{"pinned":[],"row":[],"extra":[]}`,                                           // unknown group
+		`{"pinned":[],"row":[{"label":"\ufeff","keys":"x"}]}`,                         // a BOM only (blank to the browser)
 		`{"pinned":[` + many(7, `{"label":"x","keys":"a"}`) + `],"row":[]}`,           // too many pinned
 		`{"pinned":[],"row":[` + many(25, `{"label":"x","keys":"a"}`) + `]}`,          // too many own keys
 		`{"pinned":[],"row":[` + many(49, `{"k":"up"}`) + `]}`,                        // too many in the row (and repeated)

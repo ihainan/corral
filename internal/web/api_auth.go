@@ -303,7 +303,7 @@ func customKeys(raw json.RawMessage) bool {
 	}
 	text := func(s string, max int) bool {
 		n := utf8.RuneCountInString(s)
-		return n >= 1 && n <= max && utf8.ValidString(s) && !strings.ContainsFunc(s, unicode.IsControl) && strings.TrimSpace(s) != ""
+		return n >= 1 && n <= max && utf8.ValidString(s) && !strings.ContainsFunc(s, unicode.IsControl) && !blank(s)
 	}
 	for _, k := range v {
 		if !text(k.Label, 12) || !text(k.Keys, 200) {
@@ -344,7 +344,7 @@ func keyLayout(raw json.RawMessage) bool {
 	}
 	text := func(s string, max int, empty bool) bool {
 		n := utf8.RuneCountInString(s)
-		return n <= max && utf8.ValidString(s) && !strings.ContainsFunc(s, unicode.IsControl) && (empty || strings.TrimSpace(s) != "")
+		return n <= max && utf8.ValidString(s) && !strings.ContainsFunc(s, unicode.IsControl) && (empty || !blank(s))
 	}
 	seen := map[string]bool{}
 	custom := 0
@@ -378,6 +378,12 @@ func keyLayout(raw json.RawMessage) bool {
 		}
 	}
 	return true
+}
+
+// blank is true for text of white space only, as the browser's trim() sees
+// it (which also takes U+FEFF for space).
+func blank(s string) bool {
+	return strings.TrimFunc(s, func(r rune) bool { return unicode.IsSpace(r) || r == '\uFEFF' }) == ""
 }
 
 func isBool(raw json.RawMessage) bool {
