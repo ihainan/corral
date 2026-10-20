@@ -47,7 +47,7 @@ keeps running and you pick it up where it was — on the same device or another.
   input boxes do: `@` and a file under the folder the terminal is in, `/` and
   a command (built in, or your own in `.claude/commands`, skills, Codex
   prompts), `$` and a Codex skill.
-- On a desktop, every running session is a tab, kept connected so switching
+- On a desktop or a tablet, every running session is a tab, kept connected so switching
   is instant; `+` opens another. Ctrl+Tab and Ctrl+Shift+Tab go to the next
   and previous one in the installed app (a browser keeps those keys for its
   own tabs).

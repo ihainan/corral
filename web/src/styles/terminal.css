@@ -241,6 +241,7 @@ html.kb-open .keybar { padding-bottom: 6px; }
 .term-tab-dot.s-connecting, .term-tab-dot.s-reconnecting, .term-tab-dot.s-slow { background: var(--warn); }
 .term-tab-dot.s-offline, .term-tab-dot.s-full { background: var(--danger); }
 .term-tab-new { flex: none; width: 30px; height: 30px; color: var(--term-fg-2); }
+@media (pointer: coarse) { .term-tab, .term-tab-new { height: 36px; } .term-tab-new { width: 36px; } }
 
 /* "+": a host to open */
 .new-tab { width: min(440px, calc(100vw - 32px)); }

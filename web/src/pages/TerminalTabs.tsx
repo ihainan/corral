@@ -8,9 +8,9 @@ import { Dialog } from '../components/ui'
 import { useConnect } from '../connect'
 import { TerminalPage, type TabInfo } from './Terminal'
 
-// Tabs are for a desktop window: a fine pointer and room for them. Phones
-// and tablets keep the session switcher.
-const TABS_QUERY = '(pointer: fine) and (min-width: 700px)'
+// Tabs where there is room for them: desktops and tablets (an iPad with a
+// keyboard switches with Ctrl+Tab too). Phones keep the session switcher.
+const TABS_QUERY = '(min-width: 700px)'
 export function useTabsMode(): boolean {
   const [m, setM] = useState(() => window.matchMedia(TABS_QUERY).matches)
   useEffect(() => {

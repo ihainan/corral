@@ -6,7 +6,7 @@ before 1.0, a minor version may change configuration or behaviour (said here whe
 ## [Unreleased]
 
 ### Added
-- Desktop session tabs: every running session is a tab in the top bar, kept
+- Session tabs on desktops and tablets: every running session is a tab in the top bar, kept
   connected (up to 8) so switching is instant; `+` opens another; Ctrl+Tab
   and Ctrl+Shift+Tab in the installed app. A tapped notification opens as a
   tab of a window that has them.
