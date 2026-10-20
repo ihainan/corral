@@ -63,12 +63,18 @@ html.term-mode body { position: fixed; inset: 0; }
   position: absolute; inset: 0;
   padding: 8px max(10px, env(safe-area-inset-right, 0px)) 6px max(10px, env(safe-area-inset-left, 0px));
   touch-action: none; transition: opacity 0.2s var(--ease);
+  /* The fit addon reads this box's height as the room for rows: with
+     border-box it would count the padding too and fit a row too many,
+     drawn partly under the key bar. */
+  box-sizing: content-box;
 }
 @media (pointer: fine) { .term-host-el { padding: 12px 16px; } }
 .term-body.is-paused .term-host-el { opacity: 0.55; }
 .term-body.is-ended .term-host-el { opacity: 0.5; }
 .term-host-el .xterm { height: 100%; }
 .term-host-el .xterm-viewport { overscroll-behavior: contain; }
+/* (xterm.css paints it black: it shows in the strip under the last row.) */
+.term-host-el .xterm .xterm-viewport { background-color: transparent; }
 /* Keep iOS from zooming when the hidden input takes focus. */
 .term-host-el .xterm-helper-textarea { font-size: 16px !important; }
 

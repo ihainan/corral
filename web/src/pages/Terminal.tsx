@@ -18,6 +18,7 @@ import { applyMods, specialKey, type KeysApart, type Mods, type SpecialKey } fro
 import { KeyBar, type ModState } from '../terminal/KeyBar'
 import { macroBytes, parseMacro, type Step } from '../terminal/macro'
 import { chromeVars } from '../terminal/themes'
+import { getDraft, keepDraft } from '../terminal/drafts'
 import { SchemeDialog } from '../terminal/SchemePicker'
 import { HerdrPanel } from '../terminal/HerdrPanel'
 import { ShortcutPanel, lastPanelPage } from '../terminal/ShortcutPanel'
@@ -215,7 +216,10 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
   const [alt, setAlt] = useState<ModState>('off')
   const [fn, setFn] = useState(false)
   const [composer, setComposer] = useState(false)
-  const [draft, setDraft] = useState('') // kept in memory only: drafts may hold secrets
+  const [draft, setDraft] = useState(() => (watch ? '' : getDraft(id)))
+  useEffect(() => {
+    if (!watch) keepDraft(id, draft)
+  }, [id, draft, watch])
   // Text from the key bar or an upload goes in at the composer's cursor.
   const insertDraft = useCallback((s: string) => {
     const el = composerRef.current
@@ -359,6 +363,7 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
   const keysApartRef = useRef<() => KeysApart>(() => null) // see the CSI handlers in the terminal's setup
   const heldRef = useRef<() => boolean>(() => false) // input is waiting for a Ctrl+V clipboard check or upload
   const composingRef = useRef<() => boolean>(() => false)
+  const forgetTypedRef = useRef<() => void>(() => {}) // see the key handler
   const mods = useRef<{ ctrl: ModState; alt: ModState }>({ ctrl: 'off', alt: 'off' })
   mods.current = { ctrl, alt }
   const releaseOnce = useCallback(() => {
@@ -894,10 +899,12 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
     // input-method results and the terminal's own replies pass through untouched.
     let typedChar: string | null = null
     let composing = false
+    let typedGen = 0 // bumped by a composition or text going in (see forgetTypedRef)
     const latched = () => mods.current.ctrl !== 'off' || mods.current.alt !== 'off'
     const onCompStart = () => {
       dropClaims() // the key became part of a composition
       composing = true
+      typedGen++
       typedChar = null
     }
     const onCompEnd = () => {
@@ -967,9 +974,22 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
       claim = null
     }
     composingRef.current = () => composing || (internalsOk && !!core!._compositionHelper!.isComposing)
+    forgetTypedRef.current = () => {
+      const gen = typedGen
+      setTimeout(() => {
+        // (Text that went in meanwhile, a whole composition even, may still
+        // be read from the textarea by xterm: the clear is dropped.)
+        if (gen !== typedGen) return
+        // Not while a 229 key's text is pending either (iOS, see claim): xterm
+        // compares the textarea before and after it, and an emptied one reads
+        // as a deletion (a stray DEL).
+        if (ta && !composingRef.current() && imeKeyPending === 0 && claim === null && ta.selectionStart === ta.selectionEnd) ta.value = ''
+      }, 0)
+    }
 
     const onBeforeInput = (e: Event) => {
       const ie = e as InputEvent
+      typedGen++
       typedChar = !lastKeyAlt && !ie.isComposing && ie.inputType === 'insertText' && ie.data && [...ie.data].length === 1 ? ie.data : null
     }
     const onPasteEv = () => (typedChar = null)
@@ -1081,6 +1101,12 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
         claim = null
         lastKeyAlt = e.altKey
       }
+      // A key that moves on (a newline, the cursor, a deletion) empties the
+      // textarea once xterm is done with the key. The text typed so far stays
+      // in it otherwise, and input methods take it as what precedes the
+      // caret: WeType then puts a space between that Chinese and the digits
+      // typed on a new line.
+      if (specialFor[e.key]) forgetTypedRef.current()
       // Ctrl+V with an image on the clipboard uploads it and types its path,
       // as Claude Code and Codex do with a local clipboard (they cannot reach
       // this browser's). With no image, or no clipboard access, ^V goes to
@@ -1474,6 +1500,7 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
       const term = termRef.current
       outRef.current(specialKey(k, activeMods(), term?.modes.applicationCursorKeysMode ?? false, keysApartRef.current()))
       releaseOnce()
+      forgetTypedRef.current()
     })
   // A custom key sends its own sequence; latched Ctrl/Alt do not apply to it.
   const sendSteps = (steps: Step[]) =>
@@ -1956,6 +1983,11 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
                   className="composer-input"
                   value={draft}
                   aria-label={t('term.composer')}
+                  // Commands and code: no capital first letter, corrected
+                  // words or curly quotes (iOS), as in the terminal's field.
+                  autoCapitalize="off"
+                  autoCorrect="off"
+                  spellCheck={false}
                   placeholder={isTouch ? t('term.composerPlaceholder') : t('term.composerPlaceholderKey', { key: isMac ? '⌘↩' : 'Ctrl+Enter' })}
                   rows={1}
                   onChange={(e) => setDraft(e.target.value)}

@@ -14,6 +14,7 @@ import { SettingsPage } from './pages/Settings'
 import { AdminUsersPage, AdminAuditPage } from './pages/Admin'
 import { RecordingPlayerPage, RecordingsPage } from './pages/Recordings'
 import { TerminalPage } from './pages/Terminal'
+import { clearDrafts } from './terminal/drafts'
 
 interface Session {
   boot: Bootstrap
@@ -37,6 +38,7 @@ export function App() {
   const setMe = useCallback((m: Me | null) => {
     if ((m?.id ?? null) !== (meRef.current?.id ?? null)) {
       bumpAuthGen()
+      clearDrafts() // (the account's composer drafts end with it, a lapsed sign-in too)
       try {
         if (booted.current) localStorage.setItem(AUTH_EVENT, String(Date.now()))
       } catch {
