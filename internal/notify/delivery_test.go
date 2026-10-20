@@ -139,7 +139,7 @@ func TestRevokingAUserCancelsItsWebhookInFlight(t *testing.T) {
 		t.Fatal(err)
 	}
 	done := make(chan struct{})
-	go func() { n.deliver(ctx, u.ID, 0, Note{Title: "t"}); close(done) }()
+	go func() { n.sendWebhook(ctx, u.ID, 0, Note{Title: "t"}); close(done) }()
 	<-tr.entered
 	n.Revoke(u.ID)
 	select {
@@ -148,7 +148,7 @@ func TestRevokingAUserCancelsItsWebhookInFlight(t *testing.T) {
 		t.Fatal("webhook in flight was not cancelled")
 	}
 	// A password change elsewhere is not a reason to drop the user's webhook.
-	go func() { n.deliver(ctx, u.ID, 1, Note{Title: "t"}) }()
+	go func() { n.sendWebhook(ctx, u.ID, 1, Note{Title: "t"}) }()
 	<-tr.entered
 	n.RevokeOtherLogins(u.ID, "laptop")
 	n.RevokeLogin(u.ID, "laptop")

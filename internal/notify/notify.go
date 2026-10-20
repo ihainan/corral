@@ -79,8 +79,9 @@ type Notifier struct {
 	lastSeq       int64                 // the last Note.Seq given
 	// Per user, the notes waiting to be delivered, in the order sent: one
 	// at a time, so a push service that keeps only the last note of a
-	// topic for an offline device keeps the newest.
-	queues map[int64][]queued
+	// topic for an offline device keeps the newest. Webhooks have a line of
+	// their own, so a slow one does not hold up the devices.
+	pushes, hooks lines
 	revoked       map[int64]uint64      // per user, bumped when access ends; older queued notes are dropped
 	sending       map[*sending]struct{}
 	loginValid    func(ctx context.Context, loginHash string) (bool, error)
@@ -283,17 +284,42 @@ func (n *Notifier) Send(ctx context.Context, userID int64, note Note) bool {
 		n.lastSeq++
 	}
 	note.Seq = n.lastSeq
-	if n.queues == nil {
-		n.queues = map[int64][]queued{}
-	}
-	q, busy := n.queues[userID]
-	n.queues[userID] = append(q, queued{ctx: context.WithoutCancel(ctx), gen: gen, note: note})
+	item := queued{ctx: context.WithoutCancel(ctx), gen: gen, note: note}
+	pushIdle := n.pushes.add(userID, item)
+	hookIdle := !note.Replace && n.hooks.add(userID, item) // (a replacement is for devices only)
 	n.mu.Unlock()
-	if !busy {
-		go n.drain(userID)
+	if pushIdle {
+		go n.drain(&n.pushes, userID, func(q queued) { n.deliver(q.ctx, userID, q.gen, q.note) })
+	}
+	if hookIdle {
+		go n.drain(&n.hooks, userID, func(q queued) {
+			if !n.stale(userID, q.gen) {
+				n.sendWebhook(q.ctx, userID, q.gen, q.note)
+			}
+		})
 	}
 	return true
 }
+
+// lines are the notes waiting per user, oldest first (guarded by n.mu); a
+// user with a line has a drain running.
+type lines map[int64][]queued
+
+// add puts a note in the user's line and says whether no drain runs for it.
+func (l *lines) add(userID int64, q queued) bool {
+	if *l == nil {
+		*l = lines{}
+	}
+	line, busy := (*l)[userID]
+	if len(line) >= queueMax {
+		line = line[1:] // (this slow: the oldest note waiting gives way)
+	}
+	(*l)[userID] = append(line, q)
+	return !busy
+}
+
+// queueMax is how many of a user's notes may wait to be delivered.
+const queueMax = 30
 
 type queued struct {
 	ctx  context.Context
@@ -301,19 +327,19 @@ type queued struct {
 	note Note
 }
 
-// drain delivers a user's notes in order until none is left.
-func (n *Notifier) drain(userID int64) {
+// drain sends a user's notes of a line in order until none is left.
+func (n *Notifier) drain(l *lines, userID int64, send func(queued)) {
 	for {
 		n.mu.Lock()
-		q := n.queues[userID]
-		if len(q) == 0 {
-			delete(n.queues, userID)
+		line := (*l)[userID]
+		if len(line) == 0 {
+			delete(*l, userID)
 			n.mu.Unlock()
 			return
 		}
-		n.queues[userID] = q[1:]
+		(*l)[userID] = line[1:]
 		n.mu.Unlock()
-		n.deliver(q[0].ctx, userID, q[0].gen, q[0].note)
+		send(line[0])
 	}
 }
 
@@ -396,14 +422,17 @@ func (n *Notifier) deliver(ctx context.Context, userID int64, gen uint64, note N
 	if err != nil {
 		n.log.Error("push: list subscriptions", "err", err)
 	}
+	// The devices at once: a note takes as long as its slowest device, not
+	// their sum. (The webhook goes in its own line, see Send.)
+	var wg sync.WaitGroup
 	for _, s := range subs {
-		if !n.pushOne(ctx, userID, gen, s, payload, note) {
-			return
-		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			n.pushOne(ctx, userID, gen, s, payload, note)
+		}()
 	}
-	if !note.Replace && !n.stale(userID, gen) {
-		n.sendWebhook(ctx, userID, gen, note)
-	}
+	wg.Wait()
 }
 
 // pushOne delivers to one registration of a device; false when the user's

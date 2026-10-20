@@ -289,3 +289,46 @@ func TestNotesLeaveInOrder(t *testing.T) {
 		t.Fatalf("delivered %v, want %v", got, want)
 	}
 }
+
+// A webhook that hangs does not hold up the devices: pushes go on in their
+// own line.
+func TestSlowWebhookDoesNotHoldUpPushes(t *testing.T) {
+	var pushes atomic.Int32
+	release := make(chan struct{})
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/hook") {
+			<-release // (hangs)
+			return
+		}
+		pushes.Add(1)
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer srv.Close()
+	defer close(release) // (first: the server waits for the hung request)
+	n, st := newTestNotifier(t, Options{ExtraPushHosts: []string{"127.0.0.1"}, WebhookPrefixes: []string{srv.URL + "/hook"},
+		LoginValid: func(context.Context, string) (bool, error) { return true, nil }})
+	n.http.Transport = srv.Client().Transport
+	ctx := context.Background()
+	u, _ := st.CreateUser(ctx, "alice", "", "x", store.RoleMember)
+	if err := st.CreateLoginSession(ctx, "live", u.ID, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	s := testSubscription(t, srv.URL+"/push")
+	s.UserID, s.LoginHash = u.ID, "live"
+	if _, err := st.SavePushSubscription(ctx, s, 10); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SaveUserSettings(ctx, u.ID, `{"webhook":"`+srv.URL+`/hook/a"}`); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		n.Send(ctx, u.ID, Note{Title: "t", Tag: fmt.Sprintf("t%d", i)})
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for pushes.Load() < 3 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if pushes.Load() != 3 {
+		t.Fatalf("%d of 3 pushes while the webhook hangs", pushes.Load())
+	}
+}

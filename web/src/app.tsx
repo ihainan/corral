@@ -27,6 +27,27 @@ const SessionCtx = createContext<Session>(null!)
 const AUTH_EVENT = 'corral.authEvent'
 export const useSession = () => useContext(SessionCtx)
 
+// The alerts the service worker keeps to put them in order hold their text:
+// they belong to the account signed in when they came, and go when another
+// one (or none) is signed in. Learning at startup that the same account is
+// still signed in keeps them.
+async function alertsFor(userId: number | null) {
+  try {
+    const name = 'corral-alerts'
+    const me = userId === null ? '' : String(userId)
+    const r = await (await caches.open(name)).match('/owner')
+    const owner = r ? await r.text() : null
+    if (owner === me) return
+    if (owner !== null || userId === null) {
+      await caches.delete(name)
+      navigator.serviceWorker?.controller?.postMessage({ t: 'forget-alerts' })
+    }
+    if (userId !== null) await (await caches.open(name)).put('/owner', new Response(me))
+  } catch {
+    /* no Cache Storage: the worker keeps nothing either */
+  }
+}
+
 export function App() {
   const [boot, setBoot] = useState<Bootstrap | null>(null)
   const [me, setMeState] = useState<Me | null>(null)
@@ -40,8 +61,7 @@ export function App() {
     if ((m?.id ?? null) !== (meRef.current?.id ?? null)) {
       bumpAuthGen()
       clearDrafts() // (the account's composer drafts end with it, a lapsed sign-in too)
-      // And the alerts the service worker keeps to order them (their text).
-      void globalThis.caches?.delete('corral-alerts').catch(() => {})
+      void alertsFor(m?.id ?? null)
       try {
         if (booted.current) localStorage.setItem(AUTH_EVENT, String(Date.now()))
       } catch {
@@ -72,6 +92,7 @@ export function App() {
         loadedVersion.current = b.version
         setBoot(b)
         setMe(b.user)
+        if (!b.user) void alertsFor(null) // (signed out while no page was open)
         booted.current = true
         if (b.user) syncPrefsFromServer(b.user.id)
       })

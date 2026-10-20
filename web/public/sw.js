@@ -80,30 +80,41 @@ self.addEventListener('push', (e) => {
 // buttons; a push must show something. Kept in memory and in Cache Storage
 // (the worker may be stopped between pushes), only what showing it again
 // needs, for a day; the page clears it when the account changes.
-const seen = new Map() // tag → the newest alert, while this worker runs
+const seen = new Map() // tag → the newest alert, while this worker runs (oldest first)
 const KEEP_MS = 24 * 60 * 60 * 1000
-async function newest(n) {
-  if (!n.tag || typeof n.seq !== 'number') return n
+// Numbers from before they were in microseconds (nanoseconds) are scaled.
+const micro = (seq) => (seq > 1e17 ? Math.floor(seq / 1000) : seq)
+async function newest(pushed) {
+  if (!pushed.tag || typeof pushed.seq !== 'number') return pushed
+  const n = { ...pushed, seq: micro(pushed.seq) }
   const keep = { title: n.title, title_zh: n.title_zh, body: n.body, body_zh: n.body_zh, tag: n.tag, url: n.url, seq: n.seq, at: Date.now() }
+  for (const [tag, v] of seen) if (Date.now() - v.at > KEEP_MS) seen.delete(tag)
   let prev = seen.get(n.tag)
   try {
     const c = await caches.open(ALERTS)
     const key = '/tag/' + encodeURIComponent(n.tag)
     const r = await c.match(key)
     const stored = r ? await r.json() : null
-    if (stored && typeof stored.seq === 'number' && Date.now() - (stored.at || 0) < KEEP_MS && (!prev || stored.seq > prev.seq)) prev = stored
+    if (stored && typeof stored.seq === 'number' && Date.now() - (stored.at || 0) < KEEP_MS && (!prev || micro(stored.seq) > prev.seq)) prev = { ...stored, seq: micro(stored.seq) }
     if (!(prev && prev.seq > n.seq)) {
       await c.put(key, new Response(JSON.stringify(keep)))
-      const keys = await c.keys()
+      const keys = (await c.keys()).filter((k) => new URL(k.url, location.origin).pathname.startsWith('/tag/'))
       for (const k of keys.slice(0, Math.max(0, keys.length - ALERTS_KEPT))) await c.delete(k)
     }
   } catch {
     /* no storage: what this worker remembers */
   }
   if (prev && prev.seq > n.seq) return { ...prev, quiet: true }
+  seen.delete(n.tag)
   seen.set(n.tag, keep)
+  if (seen.size > ALERTS_KEPT) seen.delete(seen.keys().next().value)
   return n
 }
+
+// The page says the account changed: what is remembered of its alerts goes.
+self.addEventListener('message', (e) => {
+  if (e.data && e.data.t === 'forget-alerts') seen.clear()
+})
 
 async function showAlert(pushed) {
   const n = await newest(pushed)
