@@ -76,22 +76,32 @@ self.addEventListener('push', (e) => {
 })
 
 // newest keeps the newest alert of a tag and returns what to show: this one,
-// or (an older one, arriving late) the newer one again, quietly; a push must
-// show something.
+// or (an older one, arriving late) the newer one again, quietly and without
+// buttons; a push must show something. Kept in memory and in Cache Storage
+// (the worker may be stopped between pushes), only what showing it again
+// needs, for a day; the page clears it when the account changes.
+const seen = new Map() // tag → the newest alert, while this worker runs
+const KEEP_MS = 24 * 60 * 60 * 1000
 async function newest(n) {
   if (!n.tag || typeof n.seq !== 'number') return n
+  const keep = { title: n.title, title_zh: n.title_zh, body: n.body, body_zh: n.body_zh, tag: n.tag, url: n.url, seq: n.seq, at: Date.now() }
+  let prev = seen.get(n.tag)
   try {
     const c = await caches.open(ALERTS)
     const key = '/tag/' + encodeURIComponent(n.tag)
     const r = await c.match(key)
-    const prev = r ? await r.json() : null
-    if (prev && typeof prev.seq === 'number' && prev.seq > n.seq) return { ...prev, quiet: true }
-    await c.put(key, new Response(JSON.stringify(n)))
-    const keys = await c.keys()
-    for (const k of keys.slice(0, Math.max(0, keys.length - ALERTS_KEPT))) await c.delete(k)
+    const stored = r ? await r.json() : null
+    if (stored && typeof stored.seq === 'number' && Date.now() - (stored.at || 0) < KEEP_MS && (!prev || stored.seq > prev.seq)) prev = stored
+    if (!(prev && prev.seq > n.seq)) {
+      await c.put(key, new Response(JSON.stringify(keep)))
+      const keys = await c.keys()
+      for (const k of keys.slice(0, Math.max(0, keys.length - ALERTS_KEPT))) await c.delete(k)
+    }
   } catch {
-    /* no storage: shown as it comes */
+    /* no storage: what this worker remembers */
   }
+  if (prev && prev.seq > n.seq) return { ...prev, quiet: true }
+  seen.set(n.tag, keep)
   return n
 }
 

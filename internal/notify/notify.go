@@ -77,6 +77,10 @@ type Notifier struct {
 	sent          map[int64][]time.Time // per user, the alerts of the last rateWindow
 	rateMax       int                   // at most this many per user in rateWindow
 	lastSeq       int64                 // the last Note.Seq given
+	// Per user, the notes waiting to be delivered, in the order sent: one
+	// at a time, so a push service that keeps only the last note of a
+	// topic for an offline device keeps the newest.
+	queues map[int64][]queued
 	revoked       map[int64]uint64      // per user, bumped when access ends; older queued notes are dropped
 	sending       map[*sending]struct{}
 	loginValid    func(ctx context.Context, loginHash string) (bool, error)
@@ -271,17 +275,46 @@ func (n *Notifier) Send(ctx context.Context, userID int64, note Note) bool {
 		}
 	}
 	gen := n.revoked[userID]
-	// (Under the lock: the alerts of a tag get increasing numbers.)
-	if t := now.UnixNano(); t > n.lastSeq {
+	// (Under the lock: the alerts get increasing numbers, in microseconds,
+	// which a browser's numbers hold exactly.)
+	if t := now.UnixMicro(); t > n.lastSeq {
 		n.lastSeq = t
 	} else {
 		n.lastSeq++
 	}
 	note.Seq = n.lastSeq
+	if n.queues == nil {
+		n.queues = map[int64][]queued{}
+	}
+	q, busy := n.queues[userID]
+	n.queues[userID] = append(q, queued{ctx: context.WithoutCancel(ctx), gen: gen, note: note})
 	n.mu.Unlock()
-
-	go n.deliver(context.WithoutCancel(ctx), userID, gen, note)
+	if !busy {
+		go n.drain(userID)
+	}
 	return true
+}
+
+type queued struct {
+	ctx  context.Context
+	gen  uint64
+	note Note
+}
+
+// drain delivers a user's notes in order until none is left.
+func (n *Notifier) drain(userID int64) {
+	for {
+		n.mu.Lock()
+		q := n.queues[userID]
+		if len(q) == 0 {
+			delete(n.queues, userID)
+			n.mu.Unlock()
+			return
+		}
+		n.queues[userID] = q[1:]
+		n.mu.Unlock()
+		n.deliver(q[0].ctx, userID, q[0].gen, q[0].note)
+	}
 }
 
 // Revoke drops notes for a user that are queued but not yet sent and cancels

@@ -4,6 +4,11 @@ import (
 	"context"
 	"crypto/ecdh"
 	"crypto/rand"
+	"encoding/json"
+	"fmt"
+	mrand "math/rand"
+	"strings"
+	"sync"
 	"encoding/base64"
 	"errors"
 	"io"
@@ -231,5 +236,56 @@ func TestSendLimitsAlertsPerUser(t *testing.T) {
 	}
 	if !n.Send(ctx, 2, Note{Title: "t", Tag: "x", Distinct: true}) {
 		t.Fatal("a distinct alert was collapsed")
+	}
+}
+
+// A user's notes leave in the order they were sent, one at a time (a push
+// service keeping the last note of a topic then keeps the newest), and carry
+// increasing numbers.
+func TestNotesLeaveInOrder(t *testing.T) {
+	var mu sync.Mutex
+	var got []string
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var b struct{ Title string }
+		_ = json.NewDecoder(r.Body).Decode(&b)
+		time.Sleep(time.Duration(mrand.Intn(15)) * time.Millisecond) // (answers at their own pace)
+		mu.Lock()
+		got = append(got, b.Title)
+		mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	n, st := newTestNotifier(t, Options{WebhookPrefixes: []string{srv.URL + "/"}})
+	n.http.Transport = srv.Client().Transport
+	ctx := context.Background()
+	u, err := st.CreateUser(ctx, "alice", "", "x", store.RoleMember)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SaveUserSettings(ctx, u.ID, `{"webhook":"`+srv.URL+`/hook"}`); err != nil {
+		t.Fatal(err)
+	}
+	var want []string
+	for i := 0; i < 8; i++ {
+		title := fmt.Sprintf("n%d", i)
+		want = append(want, title)
+		if !n.Send(ctx, u.ID, Note{Title: title, Tag: title}) {
+			t.Fatal("held back")
+		}
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		mu.Lock()
+		done := len(got) == len(want)
+		mu.Unlock()
+		if done || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("delivered %v, want %v", got, want)
 	}
 }

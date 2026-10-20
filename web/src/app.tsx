@@ -40,6 +40,8 @@ export function App() {
     if ((m?.id ?? null) !== (meRef.current?.id ?? null)) {
       bumpAuthGen()
       clearDrafts() // (the account's composer drafts end with it, a lapsed sign-in too)
+      // And the alerts the service worker keeps to order them (their text).
+      void globalThis.caches?.delete('corral-alerts').catch(() => {})
       try {
         if (booted.current) localStorage.setItem(AUTH_EVENT, String(Date.now()))
       } catch {
