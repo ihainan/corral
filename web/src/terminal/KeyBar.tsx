@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { Keyboard } from 'lucide-react'
 import type { SpecialKey } from './keys'
 import { t } from '../i18n'
+import { builtins, isBuiltin, longOf, type KeyLayout, type LayoutKey } from './layout'
 
 export type ModState = 'off' | 'once' | 'lock'
 
@@ -14,6 +15,8 @@ interface KeyProps {
   repeat?: boolean
   mod?: ModState
   wide?: boolean
+  hint?: boolean // it has a long press (a mark in its corner)
+  opener?: boolean // it opens the shortcut panel (a press on it is not one outside)
 }
 
 const MOVE_CANCEL = 10 // px: beyond this the gesture is a scroll of the bar, not a key press
@@ -41,8 +44,9 @@ function Key(p: KeyProps) {
     <button
       type="button"
       tabIndex={-1}
-      className={'kb-key' + (p.wide ? ' wide' : '') + (p.mod && p.mod !== 'off' ? ' mod-' + p.mod : '')}
+      className={'kb-key' + (p.wide ? ' wide' : '') + (p.mod && p.mod !== 'off' ? ' mod-' + p.mod : '') + (p.hint ? ' has-long' : '')}
       aria-label={p.aria}
+      data-sc-opener={p.opener ? '' : undefined}
       aria-pressed={p.mod ? p.mod !== 'off' : undefined}
       // Preventing mousedown (not pointerdown, which WebKit treats as cancelling
       // the click) keeps focus in the terminal's hidden input.
@@ -97,52 +101,77 @@ export interface KeyBarProps {
   ctrl: ModState
   alt: ModState
   fn: boolean
+  layout: KeyLayout
   onMod: (m: 'ctrl' | 'alt') => void
   onFn: () => void
   onKey: (k: SpecialKey) => void
   onText: (s: string) => void
+  onSteps: (keys: string) => void // a sequence (a key of one's own, a long press)
+  onPanel: () => void // the shortcut panel (long press on Ctrl, or its key)
   onKeyboard: () => void
   onKeyboardDown: () => void
-  custom: { label: string; onPress: () => void }[] // the user's own keys
+  panel?: ReactNode // shown above the bar
 }
 
-// Layout: Esc/Tab and the modifiers stay put on the left, the keyboard toggle
-// on the right; everything between scrolls sideways. Fn swaps the scrolling
-// part for function and navigation keys.
+// Neighbouring keys of a kind (one's own, arrows, symbols) make a group;
+// groups are set apart by spacing.
+function groups(keys: LayoutKey[]): { at: number; keys: LayoutKey[] }[] {
+  const kind = (k: LayoutKey) => (!isBuiltin(k) ? 'own' : ['up', 'down', 'left', 'right'].includes(k.k) ? 'arrow' : k.k.startsWith('sym:') ? 'sym' : k.k)
+  const out: { at: number; keys: LayoutKey[] }[] = []
+  keys.forEach((k, i) => {
+    const last = out.at(-1)
+    if (last && kind(last.keys[0]) === kind(k)) last.keys.push(k)
+    else out.push({ at: i, keys: [k] })
+  })
+  return out
+}
+
+const fkeys: SpecialKey[] = ['F1', 'F2', 'F3', 'F4', 'F5', 'F6', 'F7', 'F8', 'F9', 'F10', 'F11', 'F12']
+
+// Layout (the user's, see layout.ts): pinned keys stay put on the left, the
+// keyboard toggle on the right; the row between scrolls sideways. Fn swaps
+// the row for function and navigation keys.
 export function KeyBar(p: KeyBarProps) {
-  const arrows: [SpecialKey, string, string][] = [
-    ['Up', '↑', 'Up'], ['Down', '↓', 'Down'], ['Left', '←', 'Left'], ['Right', '→', 'Right'],
-  ]
-  const symbols = ['|', '/', '~', '-', '`', '\\', '_', ':', '*', '&', '$']
-  const fkeys: SpecialKey[] = ['F1', 'F2', 'F3', 'F4', 'F5', 'F6', 'F7', 'F8', 'F9', 'F10', 'F11', 'F12']
   const rowRef = useRef<HTMLDivElement>(null)
   const [atEnd, setAtEnd] = useState(false)
   const onScroll = () => {
     const el = rowRef.current
     if (el) setAtEnd(el.scrollLeft + el.clientWidth >= el.scrollWidth - 2)
   }
-  useEffect(onScroll, [p.fn])
+  useEffect(onScroll, [p.fn, p.layout])
+  const key = (k: LayoutKey, i: number) => {
+    const long = longOf(k)
+    const onLong = long ? () => p.onSteps(long) : undefined
+    if (!isBuiltin(k)) {
+      return <Key key={'c' + i} label={<span className="kb-text">{k.label}</span>} aria={k.label} wide onPress={() => p.onSteps(k.keys)} onLong={onLong} hint={!!long} />
+    }
+    const b = builtins[k.k]
+    if ('mod' in b) {
+      const m = b.mod
+      return <Key key={k.k} label={b.label} aria={b.aria} mod={m === 'ctrl' ? p.ctrl : p.alt} onPress={() => p.onMod(m)} onLong={m === 'ctrl' ? p.onPanel : undefined} hint={m === 'ctrl'} opener={m === 'ctrl'} />
+    }
+    if ('act' in b) {
+      return b.act === 'fn'
+        ? <Key key={k.k} label={b.label} aria={b.aria} mod={p.fn ? 'once' : 'off'} onPress={p.onFn} />
+        : <Key key={k.k} label={<span className="kb-text">{t('keybar.panel')}</span>} aria={t('sc.title')} wide onPress={p.onPanel} opener />
+    }
+    if ('text' in b) return <Key key={k.k} label={b.label} aria={b.aria} onPress={() => p.onText(b.text)} onLong={onLong} hint={!!long} />
+    const newline = b.key === 'AgentNewline'
+    const label = newline ? <span className="kb-text">{t('term.newlineKey')}</span> : b.label
+    const repeat = 'repeat' in b && !!b.repeat
+    return (
+      <Key key={k.k} label={label} aria={newline ? t('term.agentNewline') : b.aria} wide={newline || b.label.length > 3} repeat={repeat} onPress={() => p.onKey(b.key)} onLong={repeat ? undefined : onLong} hint={!repeat && !!long} />
+    )
+  }
+  const fnInRow = p.layout.row.find((k) => isBuiltin(k) && k.k === 'fn')
   return (
     <div className="keybar" role="toolbar" aria-label={t('term.keys')}>
-      <div className="kb-group kb-fixed">
-        <Key label="Esc" aria="Escape" onPress={() => p.onKey('Esc')} onLong={() => { p.onKey('Esc'); p.onKey('Esc') }} />
-        <Key label="Tab" aria="Tab" onPress={() => p.onKey('Tab')} onLong={() => p.onKey('ShiftTab')} />
-        <Key label="Ctrl" aria="Ctrl" mod={p.ctrl} onPress={() => p.onMod('ctrl')} />
-        <Key label="Alt" aria="Alt" mod={p.alt} onPress={() => p.onMod('alt')} />
-      </div>
+      {p.panel}
+      {p.layout.pinned.length > 0 && <div className="kb-group kb-fixed kb-pinned">{p.layout.pinned.map(key)}</div>}
       <div className={'kb-row' + (atEnd ? ' at-end' : '')} ref={rowRef} onScroll={onScroll}>
-        <div className="kb-group">
-          <Key label="Fn" aria="Fn" mod={p.fn ? 'once' : 'off'} onPress={p.onFn} />
-        </div>
-        {!p.fn && p.custom.length > 0 && (
-          <div className="kb-group">
-            {p.custom.map((k, i) => (
-              <Key key={i} label={<span className="kb-text">{k.label}</span>} aria={k.label} wide onPress={k.onPress} />
-            ))}
-          </div>
-        )}
         {p.fn ? (
           <>
+            {fnInRow && <div className="kb-group">{key(fnInRow, -1)}</div>}
             <div className="kb-group">
               {fkeys.map((k) => <Key key={k} label={k} aria={k} onPress={() => p.onKey(k)} />)}
             </div>
@@ -155,17 +184,11 @@ export function KeyBar(p: KeyBarProps) {
             </div>
           </>
         ) : (
-          <>
-            <div className="kb-group">
-              {arrows.map(([k, label, aria]) => <Key key={k} label={label} aria={aria} repeat onPress={() => p.onKey(k)} />)}
+          groups(p.layout.row).map((g) => (
+            <div key={g.at} className="kb-group">
+              {g.keys.map((k, i) => key(k, g.at + i))}
             </div>
-            <div className="kb-group">
-              <Key label={<span className="kb-text">{t('term.newlineKey')}</span>} aria={t('term.agentNewline')} wide onPress={() => p.onKey('AgentNewline')} />
-            </div>
-            <div className="kb-group">
-              {symbols.map((s) => <Key key={s} label={s} aria={s} onPress={() => p.onText(s)} />)}
-            </div>
-          </>
+          ))
         )}
       </div>
       <div className="kb-group kb-fixed">

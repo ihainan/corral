@@ -2,6 +2,7 @@ import { useSyncExternalStore } from 'react'
 import { api, authGen, unauthorized } from './api'
 import { resolveScheme, type Scheme } from './terminal/themes'
 import { controlChars } from './terminal/macro'
+import { sanitizeLayout, type KeyLayout } from './terminal/layout'
 
 // Per-user preferences. Cached locally for a fast first paint, synced to the
 // server so a phone and a laptop share them.
@@ -17,7 +18,8 @@ export interface Prefs {
   webgl: boolean
   remoteClipboard: boolean // programs on the host may write this device's clipboard (OSC 52)
   tapKeyboard: boolean // on touch screens, a tap on the terminal brings up the keyboard
-  customKeys: CustomKey[] // the user's own keys on the key bar
+  customKeys: CustomKey[] // the user's own keys on the key bar, from before layouts (see keyLayout)
+  keyLayout: KeyLayout | null // the key bar's keys, once the user arranged them; null: the default (see terminal/layout.ts)
 }
 
 // A key of one's own: what it is called on the key bar, and what it sends
@@ -30,7 +32,7 @@ export const maxCustomKeys = 24
 
 // Phones get a slightly smaller default so common output fits without wrapping.
 const phone = window.matchMedia('(pointer: coarse) and (max-width: 599px)').matches
-const defaults: Prefs = { theme: 'system', termTheme: 'corral-dark', fontSize: phone ? 13 : 14, keybar: true, optionIsMeta: true, webgl: false, remoteClipboard: true, tapKeyboard: false, customKeys: [] }
+const defaults: Prefs = { theme: 'system', termTheme: 'corral-dark', fontSize: phone ? 13 : 14, keybar: true, optionIsMeta: true, webgl: false, remoteClipboard: true, tapKeyboard: false, customKeys: [], keyLayout: null }
 
 // The local copy is kept per account (several people may share a device);
 // until the account is known the last one used here paints the first frame.
@@ -237,6 +239,8 @@ function sanitize(raw: unknown): Partial<Prefs> {
     const keys = o.customKeys.filter((k): k is CustomKey => !!k && typeof k === 'object' && text(k.label, 12) && text(k.keys, 200))
     if (keys.length === o.customKeys.length) out.customKeys = keys.map((k) => ({ label: k.label, keys: k.keys }))
   }
+  const layout = sanitizeLayout(o.keyLayout)
+  if (layout) out.keyLayout = layout
   return out
 }
 

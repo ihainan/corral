@@ -9,8 +9,14 @@ import { ctrlChar, specialKey, noMods, type KeysApart, type Mods, type SpecialKe
 // step. Steps follow each other directly: "ls -la" is typed "ls-la", as in
 // tmux. Shift+Enter is what the terminal sends for it (a newline that does
 // not submit, for coding agents).
+//
+// Moshi's way is read too: a comma ending a word separates steps ("C-b, S-t"),
+// "text:" makes text of the rest up to such a comma ("text:git status,
+// enter"), and "dash", "plus" and "comma" name those characters.
 
-export type Step = { key: SpecialKey; mods: Mods } | { text: string }
+// chord: the key as written with its modifiers, for a text step that came
+// from one (C-b is the text \x02); see describeMacro.
+export type Step = { key: SpecialKey; mods: Mods } | { text: string; chord?: string }
 
 export const maxMacro = 200 // characters of a sequence
 export const maxSteps = 32
@@ -18,12 +24,14 @@ export const maxSteps = 32
 const named = new Map<string, SpecialKey>(
   Object.entries({
     esc: 'Esc', escape: 'Esc', enter: 'Enter', return: 'Enter', tab: 'Tab', btab: 'ShiftTab',
-    bspace: 'Backspace', backspace: 'Backspace', up: 'Up', down: 'Down', left: 'Left', right: 'Right',
+    bspace: 'Backspace', backspace: 'Backspace', bs: 'Backspace', up: 'Up', down: 'Down', left: 'Left', right: 'Right',
     home: 'Home', end: 'End', pgup: 'PageUp', pageup: 'PageUp', pgdn: 'PageDown', pagedown: 'PageDown',
     ins: 'Insert', insert: 'Insert', del: 'Delete', delete: 'Delete',
   } as Record<string, SpecialKey>),
 )
 for (let i = 1; i <= 12; i++) named.set('f' + i, ('F' + i) as SpecialKey)
+
+const charNames = new Map(Object.entries({ space: ' ', dash: '-', plus: '+', comma: ',' }))
 
 // Control characters, C0, DEL and C1: never part of a sequence or a label.
 export const controlChars = /[\x00-\x1f\x7f-\x9f]/
@@ -37,11 +45,33 @@ type Word = { text: string; literal: boolean }
 function words(spec: string): Word[] | null {
   const out: Word[] = []
   let cur: Word | null = null
+  let textWord = false // after "text:": spaces are part of it, up to a separating comma
+  const end = () => {
+    if (cur && (cur.text || cur.literal)) out.push(cur)
+    cur = null
+    textWord = false
+  }
   for (let i = 0; i < spec.length; i++) {
     const c = spec[i]
-    if (c === ' ' || c === '\t') {
-      if (cur) out.push(cur)
-      cur = null
+    // A comma that ends a word (before a space, or last) separates steps
+    // after a key or a chord, or text: ("hi, there" stays text, as before;
+    // so does M-, which is Alt+comma).
+    if (c === ',' && cur && (i + 1 === spec.length || spec[i + 1] === ' ' || spec[i + 1] === '\t') && (textWord || (!cur.literal && isKeyWord(cur.text)))) {
+      end()
+      continue
+    }
+    if (textWord) {
+      if (cur!.text || (c !== ' ' && c !== '\t')) cur!.text += c // (as it is: quotes and backslashes too)
+      continue
+    }
+    if ((c === ' ' || c === '\t') && !textWord) {
+      end()
+      continue
+    }
+    if (!cur && spec.startsWith('text:', i)) {
+      cur = { text: '', literal: true }
+      textWord = true
+      i += 4
       continue
     }
     cur ??= { text: '', literal: false }
@@ -57,8 +87,16 @@ function words(spec: string): Word[] | null {
       cur.literal = true
     } else cur.text += c
   }
-  if (cur) out.push(cur)
+  if (textWord && cur) cur.text = cur.text.trimEnd()
+  end()
   return out
+}
+
+// A word that names a key or a chord (C-b, Enter, S-Tab), not text.
+function isKeyWord(w: string): boolean {
+  const m = /^((?:[CMS]-)*)(.+)$/s.exec(w)
+  if (!m) return false
+  return !!m[1] || named.has(m[2].toLowerCase()) || charNames.has(m[2].toLowerCase())
 }
 
 function closingDouble(s: string, from: number): number {
@@ -109,7 +147,8 @@ function parseToken(tok: string): Step | null {
     if (key === 'Enter' && mods.shift && !mods.ctrl && !mods.alt) return { key: 'AgentNewline', mods: { ...noMods } }
     return { key, mods }
   }
-  if (rest.toLowerCase() === 'space') rest = ' '
+  const char = charNames.get(rest.toLowerCase())
+  if (char) rest = char
   if (!mods.ctrl && !mods.alt && !mods.shift) return { text: rest }
   // A modifier applies to one character. Ctrl and Shift only to the ASCII
   // ones they have a meaning for; Alt (ESC before it) to any.
@@ -125,7 +164,21 @@ function parseToken(tok: string): Step | null {
     if (c === null) return null
     ch = c
   }
-  return { text: (mods.alt ? '\x1b' : '') + ch }
+  return { text: (mods.alt ? '\x1b' : '') + ch, chord: chordName(mods, rest === ' ' ? 'Space' : rest.length === 1 && /[a-z]/i.test(rest) ? rest.toUpperCase() : rest) }
+}
+
+const keyNames: Partial<Record<SpecialKey, string>> = {
+  Up: '↑', Down: '↓', Left: '←', Right: '→', PageUp: 'PgUp', PageDown: 'PgDn', Delete: 'Del', Insert: 'Ins', Backspace: '⌫', ShiftTab: 'Shift+Tab', AgentNewline: 'Shift+Enter',
+}
+function chordName(m: Mods, key: string): string {
+  return (m.ctrl ? 'Ctrl+' : '') + (m.alt ? 'Alt+' : '') + (m.shift ? 'Shift+' : '') + key
+}
+
+// What a sequence sends, in words: "Ctrl+B, then T" (then is given).
+export function describeMacro(steps: Step[], then: string, text: (s: string) => string): string {
+  return steps
+    .map((s) => ('key' in s ? chordName(s.mods, keyNames[s.key] ?? s.key) : s.chord ?? text(s.text)))
+    .join(then)
 }
 
 // macroBytes is what a parsed sequence sends; appCursor and keysApart as for specialKey.

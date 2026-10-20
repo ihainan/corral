@@ -241,6 +241,7 @@ var settingRules = map[string]func(json.RawMessage) bool{
 	"remoteClipboard": isBool,
 	"tapKeyboard":     isBool,
 	"customKeys":      customKeys,
+	"keyLayout":       keyLayout,
 	"webhook":         webhookURL,
 }
 
@@ -306,6 +307,73 @@ func customKeys(raw json.RawMessage) bool {
 	}
 	for _, k := range v {
 		if !text(k.Label, 12) || !text(k.Keys, 200) {
+			return false
+		}
+	}
+	return true
+}
+
+// keyLayout is the key bar's layout (web/src/terminal/layout.ts): keys pinned
+// on the left and the scrolling row, each a built-in key (once at most) or
+// the user's own {label, keys}, either with an optional long-press sequence
+// ("" for none).
+const (
+	maxPinnedKeys = 6
+	maxRowKeys    = 48
+	maxKeyLayout  = 48 << 10 // bytes, as stored (escaped)
+)
+
+var builtinKeys = map[string]bool{
+	"esc": true, "tab": true, "ctrl": true, "alt": true, "fn": true, "panel": true,
+	"up": true, "down": true, "left": true, "right": true, "newline": true, "enter": true,
+	"home": true, "end": true, "pgup": true, "pgdn": true, "del": true,
+	"sym:|": true, "sym:/": true, "sym:~": true, "sym:-": true, "sym:`": true, "sym:\\": true,
+	"sym:_": true, "sym::": true, "sym:*": true, "sym:&": true, "sym:$": true,
+}
+
+func keyLayout(raw json.RawMessage) bool {
+	// (All settings together stay under the 64 KiB a request may carry.)
+	if len(raw) > maxKeyLayout {
+		return false
+	}
+	// Field names exactly as written, strings only: decoding into a struct
+	// would take "K" for "k" and null for absent, which the browser does not.
+	var v map[string][]map[string]json.RawMessage
+	if json.Unmarshal(raw, &v) != nil || len(v) != 2 || v["pinned"] == nil || v["row"] == nil || len(v["pinned"]) > maxPinnedKeys || len(v["row"]) > maxRowKeys {
+		return false
+	}
+	text := func(s string, max int, empty bool) bool {
+		n := utf8.RuneCountInString(s)
+		return n <= max && utf8.ValidString(s) && !strings.ContainsFunc(s, unicode.IsControl) && (empty || strings.TrimSpace(s) != "")
+	}
+	seen := map[string]bool{}
+	custom := 0
+	for _, k := range append(v["pinned"], v["row"]...) {
+		f := map[string]string{}
+		for name, val := range k {
+			var str string
+			if (name != "k" && name != "label" && name != "keys" && name != "long") || json.Unmarshal(val, &str) != nil || strings.TrimSpace(string(val)) == "null" {
+				return false
+			}
+			f[name] = str
+		}
+		if long, ok := f["long"]; ok && !text(long, 200, true) {
+			return false
+		}
+		id, isBuiltin := f["k"]
+		_, hasLabel := f["label"]
+		_, hasKeys := f["keys"]
+		switch {
+		case isBuiltin:
+			if hasLabel || hasKeys || !builtinKeys[id] || seen[id] {
+				return false
+			}
+			seen[id] = true
+		case hasLabel && hasKeys:
+			if custom++; custom > maxCustomKeys || !text(f["label"], 12, false) || !text(f["keys"], 200, false) {
+				return false
+			}
+		default:
 			return false
 		}
 	}

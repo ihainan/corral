@@ -280,6 +280,35 @@ func (c *Client) ZoomPane(ctx context.Context, paneID, mode string) error {
 	return c.Call(ctx, "pane.zoom", params, nil)
 }
 
+// ToggleZoom zooms the focused pane, or ends its zoom.
+func (c *Client) ToggleZoom(ctx context.Context) error {
+	return c.Call(ctx, "pane.zoom", map[string]any{"mode": "toggle"}, nil)
+}
+
+// NewTab opens a tab in a workspace ("" for the focused one) and focuses it.
+func (c *Client) NewTab(ctx context.Context, workspaceID string) error {
+	params := map[string]any{"focus": true}
+	if workspaceID != "" {
+		params["workspace_id"] = workspaceID
+	}
+	return c.Call(ctx, "tab.create", params, nil)
+}
+
+// Split splits the focused pane, "right" or "down", focusing the new one.
+func (c *Client) Split(ctx context.Context, direction string) error {
+	return c.Call(ctx, "pane.split", map[string]any{"direction": direction, "focus": true}, nil)
+}
+
+// FocusDirection focuses the pane next to the focused one: "left", "right",
+// "up" or "down".
+func (c *Client) FocusDirection(ctx context.Context, direction string) error {
+	return c.Call(ctx, "pane.focus_direction", map[string]any{"direction": direction}, nil)
+}
+
+func (c *Client) FocusTab(ctx context.Context, tabID string) error {
+	return c.Call(ctx, "tab.focus", map[string]any{"tab_id": tabID}, nil)
+}
+
 func (c *Client) FocusPane(ctx context.Context, paneID string) error {
 	return c.Call(ctx, "pane.focus", map[string]any{"pane_id": paneID}, nil)
 }

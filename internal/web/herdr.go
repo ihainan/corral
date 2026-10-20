@@ -12,6 +12,7 @@ import (
 	"errors"
 	"net/http"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -47,6 +48,8 @@ type herdrSummary struct {
 	Version    string           `json:"version"`
 	Workspaces []herdrWorkspace `json:"workspaces"`
 	Waiting    int              `json:"waiting"` // agents blocked on the user
+	// The agent in the focused pane ("claude", "codex"…), if any.
+	FocusedAgent string `json:"focused_agent,omitempty"`
 }
 
 func summarize(session string, s *herdr.Snapshot) herdrSummary {
@@ -74,6 +77,13 @@ func summarize(session string, s *herdr.Snapshot) herdrSummary {
 			herdrAgent{PaneID: p.ID, Agent: p.Agent, Status: p.AgentStatus, Title: truncate(p.Title, 120), Cwd: p.Cwd})
 		if p.AgentStatus == herdr.StatusBlocked {
 			out.Waiting++
+		}
+	}
+	for _, list := range [][]herdr.Pane{s.Panes, agents} {
+		for _, p := range list {
+			if p.Agent != "" && (p.ID == s.FocusedPane || (s.FocusedPane == "" && p.Focused)) {
+				out.FocusedAgent = p.Agent
+			}
 		}
 	}
 	return out
@@ -211,21 +221,30 @@ func writeHerdrError(w http.ResponseWriter, err error) {
 	writeError(w, http.StatusBadGateway, "herdr_unavailable", "cannot reach herdr")
 }
 
-// POST /api/sessions/{id}/herdr {"action":"focus_workspace"|"focus_pane"|"zoom_pane"|"unzoom","target":"…"}
-// zoom_pane focuses a pane and has it fill its tab; unzoom (no target) ends
-// that for the focused pane.
+// POST /api/sessions/{id}/herdr {"action":"focus_workspace"|"focus_pane"|"zoom_pane","target":"…"}
+// zoom_pane focuses a pane and has it fill its tab. Without a target, on the
+// focused pane or tab (the shortcut panel's): unzoom ends a zoom,
+// zoom_toggle starts or ends one, new_tab, split_right, split_down,
+// focus_left/right/up/down (the pane next to it), next_tab, prev_tab.
+var herdrUntargeted = map[string]bool{"unzoom": true, "zoom_toggle": true, "new_tab": true, "split_right": true, "split_down": true,
+	"focus_left": true, "focus_right": true, "focus_up": true, "focus_down": true, "next_tab": true, "prev_tab": true}
+
 func (s *Server) apiHerdrAction(w http.ResponseWriter, r *http.Request) {
 	var b struct {
 		Action string `json:"action"`
 		Target string `json:"target"`
 	}
-	if err := readJSON(r, &b); err != nil || len(b.Target) > 64 || (b.Target == "") != (b.Action == "unzoom") {
+	if err := readJSON(r, &b); err != nil || len(b.Target) > 64 || (b.Target == "") != herdrUntargeted[b.Action] {
 		writeError(w, http.StatusBadRequest, "bad_request", "action and target are required")
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
-	c, _ := s.herdrConn(w, r, ctx)
+	sess, socket := s.herdrSession(w, r)
+	if sess == nil {
+		return
+	}
+	c := herdrDial(w, ctx, sess, socket)
 	if c == nil {
 		return
 	}
@@ -240,6 +259,25 @@ func (s *Server) apiHerdrAction(w http.ResponseWriter, r *http.Request) {
 		err = c.ZoomPane(ctx, b.Target, "on")
 	case "unzoom":
 		err = c.ZoomPane(ctx, "", "off")
+	case "zoom_toggle":
+		err = c.ToggleZoom(ctx)
+	case "new_tab":
+		err = c.NewTab(ctx, "")
+	case "split_right", "split_down":
+		err = c.Split(ctx, strings.TrimPrefix(b.Action, "split_"))
+	case "focus_left", "focus_right", "focus_up", "focus_down":
+		err = c.FocusDirection(ctx, strings.TrimPrefix(b.Action, "focus_"))
+	case "next_tab", "prev_tab":
+		// (herdr answers one request per connection: the snapshot, then a new one.)
+		var tab string
+		if tab, err = stepTab(ctx, c, b.Action == "next_tab"); err == nil && tab != "" {
+			c2 := herdrDial(w, ctx, sess, socket)
+			if c2 == nil {
+				return
+			}
+			defer c2.Close()
+			err = c2.FocusTab(ctx, tab)
+		}
 	default:
 		writeError(w, http.StatusBadRequest, "bad_request", "unknown action")
 		return
@@ -249,6 +287,37 @@ func (s *Server) apiHerdrAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// stepTab is the next (or previous) tab of the focused workspace, by number,
+// wrapping around; "" when there is no other.
+func stepTab(ctx context.Context, c *herdr.Client, next bool) (string, error) {
+	snap, err := c.Snapshot(ctx)
+	if err != nil {
+		return "", err
+	}
+	ws := snap.FocusedWorkspace
+	var tabs []herdr.Tab
+	cur := -1
+	for _, t := range snap.Tabs {
+		if t.WorkspaceID == ws {
+			tabs = append(tabs, t)
+		}
+	}
+	sort.Slice(tabs, func(i, j int) bool { return tabs[i].Number < tabs[j].Number })
+	for i, t := range tabs {
+		if t.Focused {
+			cur = i
+		}
+	}
+	if len(tabs) < 2 || cur < 0 {
+		return "", nil
+	}
+	step := 1
+	if !next {
+		step = len(tabs) - 1
+	}
+	return tabs[(cur+step)%len(tabs)].ID, nil
 }
 
 // Answering an agent from the browser: the user sees a pane's screen, picks

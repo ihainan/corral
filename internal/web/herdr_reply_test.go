@@ -3,6 +3,7 @@ package web
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -28,6 +29,7 @@ type fakeHerdr struct {
 	// onSend: "" answers, "refuse" answers with an error, "drop" types and
 	// closes the connection without answering.
 	onSend string
+	tabs   []any // the snapshot's tabs
 }
 
 func newFakeHerdr(t *testing.T) *fakeHerdr {
@@ -71,10 +73,10 @@ func (f *fakeHerdr) serve(c net.Conn) {
 		f.mu.Lock()
 		switch req.Method {
 		case "session.snapshot":
-			result = map[string]any{"snapshot": map[string]any{"version": "0.9.5", "workspaces": []any{}, "panes": []any{}}}
+			result = map[string]any{"snapshot": map[string]any{"version": "0.9.5", "focused_workspace_id": "w1", "workspaces": []any{}, "panes": []any{}, "tabs": f.tabs}}
 		case "pane.read":
 			result = map[string]any{"read": map[string]any{"text": f.screen}}
-		case "pane.zoom":
+		case "pane.zoom", "tab.create", "pane.split", "pane.focus_direction", "tab.focus":
 			req.Params["method"] = req.Method
 			f.sent = append(f.sent, req.Params)
 		case "pane.send_keys", "pane.send_input":
@@ -373,5 +375,42 @@ func TestHerdrZoom(t *testing.T) {
 	s := hd.typed()
 	if len(s) != 2 || s[0]["pane_id"] != "w1:p2" || s[0]["mode"] != "on" || s[1]["mode"] != "off" || s[1]["pane_id"] != nil {
 		t.Fatalf("zoom requests: %v", s)
+	}
+}
+
+// The shortcut panel's actions act on the focused pane or tab.
+func TestHerdrPanelActions(t *testing.T) {
+	h := newHarness(t)
+	admin := h.admin()
+	hd := newFakeHerdr(t)
+	hd.tabs = []any{
+		map[string]any{"tab_id": "w1:t2", "workspace_id": "w1", "number": 2, "focused": true},
+		map[string]any{"tab_id": "w1:t1", "workspace_id": "w1", "number": 1},
+		map[string]any{"tab_id": "w1:t3", "workspace_id": "w1", "number": 3},
+		map[string]any{"tab_id": "w2:t1", "workspace_id": "w2", "number": 1},
+	}
+	_, id := herdrReplyEnv(t, h, admin, hd)
+	path := "/api/sessions/" + id + "/herdr"
+	for _, a := range []string{"zoom_toggle", "new_tab", "split_right", "split_down", "focus_left", "focus_down", "next_tab", "prev_tab"} {
+		mustStatus(t, admin.do("POST", path, map[string]any{"action": a}), 200, a)
+	}
+	mustStatus(t, admin.do("POST", path, map[string]any{"action": "split_right", "target": "w1:p2"}), 400, "split with a target")
+	mustStatus(t, admin.do("POST", path, map[string]any{"action": "split_left"}), 400, "unknown action")
+	got := []string{}
+	for _, p := range hd.typed() {
+		got = append(got, fmt.Sprintf("%v mode=%v dir=%v focus=%v tab=%v", p["method"], p["mode"], p["direction"], p["focus"], p["tab_id"]))
+	}
+	want := []string{
+		"pane.zoom mode=toggle dir=<nil> focus=<nil> tab=<nil>",
+		"tab.create mode=<nil> dir=<nil> focus=true tab=<nil>",
+		"pane.split mode=<nil> dir=right focus=true tab=<nil>",
+		"pane.split mode=<nil> dir=down focus=true tab=<nil>",
+		"pane.focus_direction mode=<nil> dir=left focus=<nil> tab=<nil>",
+		"pane.focus_direction mode=<nil> dir=down focus=<nil> tab=<nil>",
+		"tab.focus mode=<nil> dir=<nil> focus=<nil> tab=w1:t3", // next after 2 (of 1, 2, 3; w2's aside)
+		"tab.focus mode=<nil> dir=<nil> focus=<nil> tab=w1:t1",
+	}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("requests:\n got %q\nwant %q", got, want)
 	}
 }

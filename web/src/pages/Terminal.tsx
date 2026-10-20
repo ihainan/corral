@@ -20,6 +20,9 @@ import { macroBytes, parseMacro, type Step } from '../terminal/macro'
 import { chromeVars } from '../terminal/themes'
 import { SchemeDialog } from '../terminal/SchemePicker'
 import { HerdrPanel } from '../terminal/HerdrPanel'
+import { ShortcutPanel, lastPanelPage } from '../terminal/ShortcutPanel'
+import { panelPages, type Shortcut } from '../terminal/shortcuts'
+import { layoutIn } from '../terminal/layout'
 import { startPreviews } from '../terminal/preview'
 import { atCursor, inPromptBox } from '../terminal/prompt'
 import { ReplyDialog } from '../terminal/ReplyDialog'
@@ -1480,14 +1483,25 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
       outRef.current(macroBytes(steps, termRef.current?.modes.applicationCursorKeysMode ?? false, keysApartRef.current()))
       releaseOnce()
     })
-  const customKeys = useMemo(
-    () =>
-      prefs.customKeys.flatMap((k) => {
-        const r = parseMacro(k.keys)
-        return 'steps' in r ? [{ label: k.label, steps: r.steps }] : [] // (one that no longer parses is left out)
-      }),
-    [prefs.customKeys],
-  )
+  const keyLayout = useMemo(() => layoutIn(prefs.keyLayout, prefs.customKeys), [prefs.keyLayout, prefs.customKeys])
+  // A key of one's own or a long press (one that no longer parses does nothing).
+  const sendKeys = (keys: string) => {
+    const r = parseMacro(keys)
+    if ('steps' in r) sendSteps(r.steps)
+  }
+  // The shortcut panel, over the key bar.
+  const [shortcutsOpen, setShortcutsOpen] = useState(false)
+  const closeShortcuts = useCallback(() => setShortcutsOpen(false), [])
+  const pickShortcut = async (s: Shortcut) => {
+    setShortcutsOpen(false)
+    if ('keys' in s) return sendKeys(s.keys)
+    if (s.herdr === 'agents') return setPanel(true)
+    try {
+      await api('POST', `/api/sessions/${id}/herdr`, { action: s.herdr })
+    } catch (e) {
+      toast(e instanceof ApiError && e.code === 'herdr_busy' ? t('herdr.busy') : t('sc.herdrFailed'), true)
+    }
+  }
   const sendText = (s: string) => {
     // Typing in the composer: symbols go into the draft. Keys (Esc, arrows,
     // Tab, Ctrl…) still go to the terminal, so a running program can be
@@ -1989,7 +2003,18 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
               onText={sendText}
               onKeyboard={toggleKeyboard}
               onKeyboardDown={keyboardDown}
-              custom={customKeys.map((k) => ({ label: k.label, onPress: () => sendSteps(k.steps) }))}
+              layout={keyLayout}
+              onSteps={sendKeys}
+              onPanel={() => setShortcutsOpen((o) => !o)}
+              panel={
+                shortcutsOpen && (
+                  <ShortcutPanel
+                    {...panelPages(info?.persistence, herdr?.focused_agent, lastPanelPage())}
+                    onPick={(s) => void pickShortcut(s)}
+                    onClose={closeShortcuts}
+                  />
+                )
+              }
             />
           )}
         </>

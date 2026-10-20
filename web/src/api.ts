@@ -277,6 +277,7 @@ export interface HerdrSummary {
   version: string
   workspaces: HerdrWorkspace[]
   waiting: number
+  focused_agent?: string // the agent in the focused pane ("claude", "codex"…)
 }
 
 export interface Forward {
