@@ -79,16 +79,23 @@ export function ShortcutPanel(p: { pages: PanelPage[]; open: PanelPage; onPick: 
           <X size={16} />
         </button>
       </div>
-      <div className="sc-grid" role="tabpanel" aria-label={pageTitles[page]}>
-        {shortcuts[page].map((s, i) => {
-          const Icon = 'herdr' in s ? icons[s.herdr] : undefined
-          return (
-            <button key={i} type="button" className="sc-item" onMouseDown={keep} onClick={() => p.onPick(s)}>
-              <span className="sc-label">{s.label || (Icon && <Icon size={16} aria-hidden="true" />)}</span>
-              <span className="sc-desc">{t(s.desc)}</span>
-            </button>
-          )
-        })}
+      <div className="sc-page" role="tabpanel" aria-label={pageTitles[page]}>
+        {shortcuts[page].map((g) => (
+          <section key={g.title} className="sc-group" aria-label={t(g.title)}>
+            <h3 className="sc-group-title">{t(g.title)}</h3>
+            <div className="sc-grid">
+              {g.items.map((s, i) => {
+                const Icon = 'herdr' in s ? icons[s.herdr] : undefined
+                return (
+                  <button key={i} type="button" className="sc-item" onMouseDown={keep} onClick={() => p.onPick(s)}>
+                    <span className="sc-label">{s.label || (Icon && <Icon size={16} aria-hidden="true" />)}</span>
+                    <span className="sc-desc">{t(s.desc)}</span>
+                  </button>
+                )
+              })}
+            </div>
+          </section>
+        ))}
       </div>
     </div>
   )
