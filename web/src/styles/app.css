@@ -609,16 +609,16 @@ details.adv > .form { margin-top: 16px; }
 .live-link:hover { text-decoration: none; }
 .live-link:hover .live-info { background: var(--bg-hover); }
 .live-link:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: var(--r-lg); }
-/* The text is sized so that the terminal's width fits (--cols, set inline). */
 .live-screen {
-  container-type: inline-size; overflow: hidden; display: flex; flex-direction: column; justify-content: flex-end;
-  padding: 8px 10px; border-bottom: 1px solid var(--line);
+  position: relative; overflow: hidden; display: flex; flex-direction: column; justify-content: flex-end;
+  aspect-ratio: 16 / 10; padding: 8px 10px; border-bottom: 1px solid var(--line);
 }
-.live-screen pre {
-  margin: 0; font-family: var(--font-mono); font-size: calc(100cqw / (var(--cols) * 0.6)); line-height: 1.2;
-  white-space: pre; overflow: hidden; opacity: 0.9;
-  flex: none; /* a screen taller than the card loses its top, not its bottom */
-}
+.live-screen pre { margin: 0; font-family: var(--font-mono); white-space: pre; overflow: hidden; opacity: 0.92; flex: none; }
+.live-probe { position: absolute; visibility: hidden; white-space: pre; font-family: var(--font-mono); font-size: 10px; }
+/* Lines left out above, text cut on the right: faded into the screen's colour. */
+.live-screen.cut-top::before, .live-screen.cut-right::after { content: ''; position: absolute; z-index: 1; pointer-events: none; }
+.live-screen.cut-top::before { left: 0; right: 0; top: 0; height: 28px; background: linear-gradient(var(--live-bg), transparent); }
+.live-screen.cut-right::after { top: 0; bottom: 0; right: 0; width: 24px; background: linear-gradient(to left, var(--live-bg), transparent); }
 .live-empty { margin: auto; font-size: 12px; opacity: 0.6; }
 .live-info { display: flex; flex-direction: column; gap: 2px; padding: 10px 44px 10px 12px; min-width: 0; }
 .live-title { display: flex; align-items: center; gap: 8px; min-width: 0; font-weight: 500; }

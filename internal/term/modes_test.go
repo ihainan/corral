@@ -20,7 +20,7 @@ const herdrStart = "\x1b[?1006l\x1b[?1016l\x1b[?1015l\x1b[?1005l\x1b[?1003l\x1b[
 	"\x1b[?2026h\x1b[?25l\x1b[Hscreen\x1b[?25h\x1b[?2026l"
 
 func TestModesPrelude(t *testing.T) {
-	want := "\x1b[?7l\x1b[?1004h\x1b[?2004h\x1b[?1049h\x1b[?1003h\x1b[?1006h"
+	want := "\x1b[?7l\x1b[?1004h\x1b[?2004h\x1b[?1049h\x1b[?1003h\x1b[?1006h\x1b[>7u"
 	if got := preludeOf(herdrStart); got != want {
 		t.Fatalf("herdr's modes: got %q, want %q", got, want)
 	}
@@ -41,7 +41,7 @@ func TestModesPrelude(t *testing.T) {
 		{"hidden cursor, insert mode, keypad", "\x1b[?25l\x1b[4h\x1b=", "\x1b[?25l\x1b[4h\x1b="},
 		{"keypad by mode 66, then numeric", "\x1b[?66h\x1b>", ""},
 		{"RIS", herdrStart + "\x1bc", ""},
-		{"DECSTR keeps mouse and screen", herdrStart + "\x1b[!p", "\x1b[?1049h\x1b[?1003h\x1b[?1006h"},
+		{"DECSTR keeps mouse, screen and keys", herdrStart + "\x1b[!p", "\x1b[?1049h\x1b[?1003h\x1b[?1006h\x1b[>7u"},
 		{"not SM/RM", "\x1b[?1000$p\x1b[>1000h\x1b[?1000 h", ""},
 		{"inside OSC", "\x1b]2;[?1000h\x07\x1bP+q[?1000h\x1b\\", ""},
 		{"cancelled", "\x1b[?1000\x18h", ""},
@@ -63,6 +63,17 @@ func TestModesPrelude(t *testing.T) {
 		{"not a cursor style", "\x1b[5q\x1b[?5 q", ""},
 		{"cursor blinking off (vim)", "\x1b[?12h\x1b[?12l", "\x1b[?12l"},
 		{"cursor blinking kept by RIS and DECSTR", "\x1b[?12l\x1bc\x1b[!p", "\x1b[?12l"},
+		{"kitty keys pushed (Claude Code)", "\x1b[?u\x1b[>5u\x1b[>4;2m", "\x1b[>5u\x1b[>4;2m"},
+		{"kitty keys popped", "\x1b[>5u\x1b[>1u\x1b[<u", "\x1b[>5u"},
+		{"kitty keys popped twice", "\x1b[>5u\x1b[>1u\x1b[<2u\x1b[>4;0m", ""},
+		{"kitty keys set", "\x1b[>1u\x1b[=4;2u", "\x1b[>5u"},
+		{"kitty keys per screen", "\x1b[>1u\x1b[?1049h\x1b[>5u", "\x1b[>1u\x1b[?1049h\x1b[>5u"},
+		{"kitty keys of the main screen kept on the alternate one", "\x1b[>1u\x1b[?1049h\x1b[<u", "\x1b[>1u\x1b[?1049h"},
+		{"kitty keys: a full stack drops the oldest", strings.Repeat("\x1b[>0u", 16) + "\x1b[>1u", strings.Repeat("\x1b[>0u", 15) + "\x1b[>1u"},
+		{"kitty keys of the alternate screen while not in use", "\x1b[?1049h\x1b[>1u\x1b[?1049l", "\x1b[?47h\x1b[>1u\x1b[?47l"},
+		{"modifyOtherKeys reset", "\x1b[>4;2m\x1b[>m", ""},
+		{"modifyOtherKeys off", "\x1b[>4;2m\x1b[>4n", ""},
+		{"kitty keys reset by RIS", "\x1b[>5u\x1b[>4;2m\x1bc", ""},
 		{"subparameters off", "\x1b[?1003h\x1b[?1003:1l", ""},
 	} {
 		if got := preludeOf(c.in); got != c.want {

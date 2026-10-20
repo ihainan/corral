@@ -14,14 +14,14 @@ import { local } from '../storage'
 import { Confirm, Menu, copyText as copyToClipboard, keysInUse, useFocusTrap, useToast, type MenuItem } from '../components/ui'
 import { useConnect } from '../connect'
 import { clampSize, TermConnection, type EndInfo, type Status } from '../terminal/connection'
-import { applyMods, specialKey, type Mods, type SpecialKey } from '../terminal/keys'
+import { applyMods, specialKey, type KeysApart, type Mods, type SpecialKey } from '../terminal/keys'
 import { KeyBar, type ModState } from '../terminal/KeyBar'
 import { macroBytes, parseMacro, type Step } from '../terminal/macro'
 import { chromeVars } from '../terminal/themes'
 import { SchemeDialog } from '../terminal/SchemePicker'
 import { HerdrPanel } from '../terminal/HerdrPanel'
 import { startPreviews } from '../terminal/preview'
-import { inPromptBox } from '../terminal/prompt'
+import { atCursor, inPromptBox } from '../terminal/prompt'
 import { ReplyDialog } from '../terminal/ReplyDialog'
 import { PortsDialog, openForward } from '../terminal/PortsDialog'
 import { FilesDialog } from '../terminal/FilesDialog'
@@ -353,6 +353,7 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
   const [following, setFollowing] = useState<{ cols: number; rows: number } | null>(null)
   const outRef = useRef<(d: string | Uint8Array) => void>(() => {})
   const safeFitRef = useRef(() => {})
+  const keysApartRef = useRef<() => KeysApart>(() => null) // see the CSI handlers in the terminal's setup
   const heldRef = useRef<() => boolean>(() => false) // input is waiting for a Ctrl+V clipboard check or upload
   const composingRef = useRef<() => boolean>(() => false)
   const mods = useRef<{ ctrl: ModState; alt: ModState }>({ ctrl: 'off', alt: 'off' })
@@ -436,7 +437,8 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
     ta?.setAttribute('spellcheck', 'false')
     // Quiet taps (see quietTaps): requests for focus that follow a press are
     // refused (xterm's own on every press), those that follow keys are not,
-    // nor the one that follows a tap in Claude Code's input box (onQuietPress):
+    // nor the one that follows a tap where the program takes typing (at its
+    // cursor, in Claude Code's input box: terminal/prompt.ts, onQuietPress):
     // the keyboard comes up with that tap, as for a text field.
     let promptTap: { x: number; y: number; at: number } | null = null // the press, while it is still a tap
     let promptArmed = false // during the mousedown that tap brings
@@ -470,7 +472,7 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
       e.preventDefault()
       takeOverRef.current()
       settleRef.current()
-      out(special ? specialKey(special, { ...mods, shift: e.shiftKey }, term.modes.applicationCursorKeysMode) : applyMods(e.key, { ...mods, shift: false }))
+      out(special ? specialKey(special, { ...mods, shift: e.shiftKey }, term.modes.applicationCursorKeysMode, keysApart()) : applyMods(e.key, { ...mods, shift: false }))
       releaseOnce()
     }
     // Once the field is left, taps are quiet again until the next key.
@@ -490,7 +492,7 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
         const r = screenEl.getBoundingClientRect()
         const col = Math.floor(((e.clientX - r.left) * term.cols) / r.width)
         const row = Math.floor(((e.clientY - r.top) * term.rows) / r.height)
-        const hit = inPromptBox(term, col, row)
+        const hit = atCursor(term, col, row) || inPromptBox(term, col, row)
         const b = term.buffer.active
         tapLog?.(`tap ${e.pointerType} at ${col},${row} cursor ${b.cursorX},${b.cursorY} input box: ${hit}`)
         if (hit) {
@@ -662,6 +664,62 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
         })
       }
     }
+    // Programs that ask for keys to be told apart (kitty's keyboard protocol,
+    // xterm's modifyOtherKeys; Claude Code and Codex do, herdr too) get
+    // Ctrl+Enter encoded as they asked, not as a plain Enter ("ctrl+enter to
+    // send now"); see specialKey. xterm implements neither, so only the
+    // requests are noted here, kitty's flags per screen as the protocol has
+    // it (the gateway restores them for a late replay).
+    const kitty = { main: [] as number[], alt: [] as number[] } // pushed flags, latest last
+    const flags = () => kitty[term.buffer.active.type === 'alternate' ? 'alt' : 'main']
+    let otherKeys = 0
+    const num = (p: (number | number[])[], i: number, d: number) => {
+      const v = p[i]
+      return typeof v === 'number' && v > 0 ? v : d
+    }
+    const kbSubs = [
+      term.parser.registerCsiHandler({ prefix: '>', final: 'u' }, (p) => {
+        const f = flags()
+        if (f.length >= 16) f.shift() // (full: the oldest goes)
+        f.push(num(p, 0, 0))
+        return true
+      }),
+      term.parser.registerCsiHandler({ prefix: '<', final: 'u' }, (p) => {
+        const f = flags()
+        f.splice(Math.max(0, f.length - num(p, 0, 1)))
+        return true
+      }),
+      term.parser.registerCsiHandler({ prefix: '=', final: 'u' }, (p) => {
+        const f = flags()
+        const v = num(p, 0, 0)
+        const mode = num(p, 1, 1)
+        const top = f.at(-1) ?? 0
+        const next = mode === 2 ? top | v : mode === 3 ? top & ~v : v
+        if (f.length) f[f.length - 1] = next
+        else f.push(next)
+        return true
+      }),
+      // CSI > 4 ; n m sets it, CSI > 4 m and CSI > m reset it, CSI > 4 n turns it off.
+      term.parser.registerCsiHandler({ prefix: '>', final: 'm' }, (p) => {
+        const r = num(p, 0, 0)
+        if (r === 4) otherKeys = num(p, 1, 0)
+        else if (r === 0) otherKeys = 0
+        return false
+      }),
+      term.parser.registerCsiHandler({ prefix: '>', final: 'n' }, (p) => {
+        if (num(p, 0, 0) === 4) otherKeys = 0
+        return false
+      }),
+      term.parser.registerEscHandler({ final: 'c' }, () => {
+        kitty.main = []
+        kitty.alt = []
+        otherKeys = 0
+        return false // (xterm resets the rest)
+      }),
+    ]
+    // Disambiguate (1) or report all keys (8); else modifyOtherKeys.
+    const keysApart = (): KeysApart => ((flags().at(-1) ?? 0) & 9 ? 'kitty' : otherKeys > 0 ? 'xterm' : null)
+    keysApartRef.current = keysApart
     const clipSub = term.parser.registerOscHandler(52, (data) => {
       if (replaying || !mayCopy()) return true
       const text = clipboardText(data)
@@ -1076,7 +1134,7 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
         const m = activeMods()
         takeOverRef.current()
         settleRef.current()
-        out(specialKey(special, { ctrl: m.ctrl || e.ctrlKey, alt: m.alt || e.altKey, shift: e.shiftKey }, term.modes.applicationCursorKeysMode))
+        out(specialKey(special, { ctrl: m.ctrl || e.ctrlKey, alt: m.alt || e.altKey, shift: e.shiftKey }, term.modes.applicationCursorKeysMode, keysApart()))
         releaseOnce()
         e.preventDefault()
         return false
@@ -1086,6 +1144,14 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
       if (e.key === 'Enter' && e.shiftKey && (isMac ? e.metaKey : e.ctrlKey)) {
         e.preventDefault()
         openComposerRef.current()
+        return false
+      }
+      // Ctrl+Enter, for a program that tells it apart (keysApart).
+      if (e.key === 'Enter' && e.ctrlKey && !e.altKey && !e.metaKey && keysApart() !== null) {
+        e.preventDefault()
+        takeOverRef.current()
+        settleRef.current()
+        out(specialKey('Enter', { ctrl: true, alt: false, shift: e.shiftKey }, false, keysApart()))
         return false
       }
       if (e.key === 'Enter' && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
@@ -1129,6 +1195,7 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
       alive = false
       dataSub.dispose()
       clipSub.dispose()
+      kbSubs.forEach((d) => d.dispose())
       userSub?.dispose()
       binSub.dispose()
       resizeSub.dispose()
@@ -1402,7 +1469,7 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
       takeOverRef.current()
       settleRef.current()
       const term = termRef.current
-      outRef.current(specialKey(k, activeMods(), term?.modes.applicationCursorKeysMode ?? false))
+      outRef.current(specialKey(k, activeMods(), term?.modes.applicationCursorKeysMode ?? false, keysApartRef.current()))
       releaseOnce()
     })
   // A custom key sends its own sequence; latched Ctrl/Alt do not apply to it.
@@ -1410,7 +1477,7 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
     afterComposition(() => {
       takeOverRef.current()
       settleRef.current()
-      outRef.current(macroBytes(steps, termRef.current?.modes.applicationCursorKeysMode ?? false))
+      outRef.current(macroBytes(steps, termRef.current?.modes.applicationCursorKeysMode ?? false, keysApartRef.current()))
       releaseOnce()
     })
   const customKeys = useMemo(

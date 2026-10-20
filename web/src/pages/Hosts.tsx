@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { CircleStop, Code2, MoreHorizontal, Pencil, Plus, Server, Trash2, X, Eye } from 'lucide-react'
 import { api, type Host, type SessionInfo, type SessionPreview, type SharedSession } from '../api'
 import { relTime, t } from '../i18n'
@@ -236,21 +236,23 @@ function LiveCard({ s, preview, onClose }: { s: SessionInfo; preview?: SessionPr
   const theme = termScheme().theme
   const kind = s.persistence === 'tmux' ? 'tmux · ' + (s.mux_session ?? '') : s.persistence === 'herdr' ? 'herdr' + (s.mux_session ? ' · ' + s.mux_session : '') : t('host.persistNone')
   const waiting = s.meta?.t === 'herdr' ? s.meta.waiting : 0
+  const working = s.meta?.t === 'herdr' ? s.meta.workspaces.reduce((n, w) => n + w.agents.filter((a) => a.status === 'working').length, 0) : 0
   const old = preview && Date.now() / 1000 - preview.at > 120
-  const detail = [waiting > 0 ? t('hosts.herdrWaiting', { n: waiting }) : '', kind, old ? t('hosts.previewAge', { when: relTime(preview.at) }) : '']
+  const herdrState = waiting > 0 ? t('hosts.herdrWaiting', { n: waiting }) : working > 0 ? t('hosts.herdrWorking', { n: working }) : ''
+  const detail = [herdrState, kind, old ? t('hosts.previewAge', { when: relTime(preview.at) }) : '']
     .filter(Boolean)
     .join(' · ')
   const label = s.title || kind
-  // Shaped like the terminal (within limits); a tall one shows its bottom.
-  const cols = preview?.cols ?? s.cols
-  const rows = preview?.lines.length || s.rows
-  const ratio = Math.min(2.4, Math.max(1.2, (cols * 0.6) / (rows * 1.2)))
   return (
     <li className="live-card">
       <a className="live-link" href={'/t/' + s.id} onClick={linkHandler('/t/' + s.id)} aria-label={`${s.host_name}：${label}`} aria-describedby={'ld-' + s.id} title={s.title || undefined}>
-        <div className="live-screen" aria-hidden="true" style={{ background: theme.background, color: theme.foreground, aspectRatio: String(ratio), ['--cols' as string]: Math.max(cols, 20) }}>
-          {preview ? <pre>{preview.lines.join('\n')}</pre> : <span className="live-empty">{t('hosts.noPreview')}</span>}
-        </div>
+        {preview ? (
+          <LiveScreen lines={preview.lines} cols={preview.cols} bg={theme.background ?? '#000'} fg={theme.foreground ?? '#fff'} />
+        ) : (
+          <div className="live-screen" aria-hidden="true" style={{ background: theme.background, color: theme.foreground }}>
+            <span className="live-empty">{t('hosts.noPreview')}</span>
+          </div>
+        )}
         <span className="live-info">
           <span className="live-title">
             <span className={'dot ' + (waiting > 0 ? 'warn' : 'ok')} aria-hidden="true" />
@@ -263,5 +265,68 @@ function LiveCard({ s, preview, onClose }: { s: SessionInfo; preview?: SessionPr
         <X size={16} />
       </button>
     </li>
+  )
+}
+
+// The screen in small: its last lines, without blank ones at either end, in
+// whole lines; the text as large as the card's width allows for the
+// terminal's width, but not smaller than legible. What does not fit fades out
+// at the top (older lines) and the right (a wider terminal).
+const PREVIEW_BASE = 10 // px, the size the probe is measured at
+const PREVIEW_MIN = 6 // px
+const PREVIEW_MAX = 11
+const PREVIEW_LINE = 1.25
+function LiveScreen({ lines, cols, bg, fg }: { lines: string[]; cols: number; bg: string; fg: string }) {
+  const box = useRef<HTMLDivElement>(null)
+  const pre = useRef<HTMLPreElement>(null)
+  const probe = useRef<HTMLSpanElement>(null)
+  const [fit, setFit] = useState<{ font: number; rows: number } | null>(null)
+  // Cut on the right: told by the width drawn (wide and combining characters).
+  const [cutRight, setCutRight] = useState(false)
+  let first = 0
+  let last = lines.length
+  while (first < last && !lines[first].trim()) first++
+  while (last > first && !lines[last - 1].trim()) last--
+  const text = lines.slice(first, last)
+  useLayoutEffect(() => {
+    const b = box.current
+    const p = pre.current
+    const m = probe.current
+    if (!b || !p || !m) return
+    const measure = () => {
+      const w = p.clientWidth
+      const h = b.clientHeight - parseFloat(getComputedStyle(b).paddingTop) - parseFloat(getComputedStyle(b).paddingBottom)
+      const cell = m.offsetWidth / Math.max(1, cols) // at the base size
+      if (!w || !cell) return
+      // (A little room: glyphs scaled down round wider than measured.)
+      const font = Math.min(PREVIEW_MAX, Math.max(PREVIEW_MIN, (0.96 * PREVIEW_BASE * w) / (cell * Math.max(cols, 20))))
+      const next = { font, rows: Math.max(1, Math.floor(h / (font * PREVIEW_LINE))) }
+      setFit((f) => (f && f.font === next.font && f.rows === next.rows ? f : next))
+      setCutRight(p.scrollWidth > p.clientWidth + 1) // (again once a new size applies, below)
+    }
+    measure()
+    const ro = new ResizeObserver(measure)
+    ro.observe(b)
+    return () => ro.disconnect()
+  }, [cols])
+  const shown = fit ? text.slice(Math.max(0, text.length - fit.rows)) : text
+  const cutTop = !!fit && text.length > fit.rows
+  const body = shown.join('\n')
+  useLayoutEffect(() => {
+    const p = pre.current
+    if (p && fit) setCutRight(p.scrollWidth > p.clientWidth + 1)
+  }, [fit, body])
+  return (
+    <div
+      ref={box}
+      className={'live-screen' + (cutTop ? ' cut-top' : '') + (cutRight ? ' cut-right' : '')}
+      aria-hidden="true"
+      style={{ background: bg, color: fg, ['--live-bg' as string]: bg }}
+    >
+      <span ref={probe} className="live-probe">{'0'.repeat(Math.max(1, cols))}</span>
+      <pre ref={pre} style={{ fontSize: fit ? fit.font + 'px' : undefined, lineHeight: PREVIEW_LINE, visibility: fit ? undefined : 'hidden' }}>
+        {body}
+      </pre>
+    </div>
   )
 }

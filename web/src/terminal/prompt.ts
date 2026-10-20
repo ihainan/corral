@@ -1,5 +1,36 @@
 import type { Terminal } from '@xterm/xterm'
 
+// Where a tap on the terminal is for typing (see quietTaps in Terminal.tsx):
+// at the terminal's cursor, or in Claude Code's input box.
+
+const BORDERS = new Set(['│', '┃', '║', '▕', '▏', '▐', '▌', '┆', '┊']) // between panes (herdr, tmux)
+
+// Whether a cell is on the cursor's line with no pane border between it and
+// the cursor, the cursor shown. Programs waiting for input keep it there: a
+// shell's prompt, an editor's line, the input of Codex, Claude Code and most
+// agent CLIs once idle (herdr puts it where the focused pane has it). A
+// program that shows no cursor (pagers, dashboards, an agent at work) has
+// none to tap. Only that line: the rows next to it may be a multiplexer's
+// tabs or status line. (Panes side by side without a border between them
+// cannot be told apart.)
+export function atCursor(term: Terminal, col: number, row: number): boolean {
+  const buf = term.buffer.active
+  if (buf.viewportY !== buf.baseY) return false // scrolled back: not the live screen
+  // Whether the program hides it (xterm itself draws none until the terminal
+  // is first used, which says nothing about where typing goes).
+  const hidden = (term as unknown as { _core?: { coreService?: { isCursorHidden?: boolean } } })._core?.coreService?.isCursorHidden
+  if (hidden !== false) return false // (not known: not shown)
+  const cy = buf.cursorY
+  const cx = Math.min(buf.cursorX, term.cols - 1)
+  if (row !== cy || col < 0 || col >= term.cols) return false
+  const line = buf.getLine(buf.baseY + cy)
+  const cell = buf.getNullCell()
+  for (let x = Math.min(col, cx); x <= Math.max(col, cx); x++) {
+    if (BORDERS.has(line?.getCell(x, cell)?.getChars() ?? '')) return false
+  }
+  return true
+}
+
 // Whether a cell of the screen is inside Claude Code's input box: rows
 // between two rules of ─ that start in the same column, the first of them
 // starting with ❯ there (herdr may draw a pane border after the rules). The

@@ -37,7 +37,21 @@ type modes struct {
 	keypad bool   // application keypad (DECKPAM, or mode 66)
 	cursor int    // cursor style (DECSCUSR 1-6); 0 for the default
 	blink  int    // mode 12: 1 on, 2 off, 0 never set (a setting: RIS keeps it)
+
+	// Requests for keys told apart, which the browser notes (see
+	// specialKey): kitty's keyboard protocol flags, pushed (latest last), one
+	// stack per screen (main, alternate) as the protocol has it, and xterm's
+	// modifyOtherKeys level.
+	kitty     [2]kittyStack
+	otherKeys int
 }
+
+type kittyStack struct {
+	f [maxKitty]int
+	n int
+}
+
+const maxKitty = 16 // as many pushes as the browser keeps
 
 const maxParams = 32
 
@@ -186,6 +200,26 @@ func (m *modes) csi(final byte) {
 		}
 		return
 	}
+	if final == 'u' && m.inter == 0 && m.prefix != 0 && m.prefix != '?' { // kitty keyboard
+		m.kittyKeys(m.prefix)
+		return
+	}
+	if final == 'm' && m.inter == 0 && m.prefix == '>' { // modifyOtherKeys: set, or reset (CSI > 4 m, CSI > m)
+		switch m.params[0] {
+		case 4:
+			m.otherKeys = 0
+			if m.np > 1 {
+				m.otherKeys = m.params[1]
+			}
+		case 0:
+			m.otherKeys = 0
+		}
+		return
+	}
+	if final == 'n' && m.inter == 0 && m.prefix == '>' && m.params[0] == 4 { // modifyOtherKeys off
+		m.otherKeys = 0
+		return
+	}
 	if (final != 'h' && final != 'l') || m.inter != 0 || (m.prefix != 0 && m.prefix != '?') {
 		return // not SM/RM
 	}
@@ -233,10 +267,65 @@ func (m *modes) csi(final byte) {
 	}
 }
 
+// kittyKeys follows CSI > flags u (push; when full the oldest goes),
+// CSI < n u (pop) and CSI = flags ; mode u (set the latest), on the screen
+// in use, as the browser does.
+func (m *modes) kittyKeys(prefix byte) {
+	arg := func(i, d int) int {
+		if i < min(m.np, maxParams) && m.params[i] > 0 {
+			return m.params[i]
+		}
+		return d
+	}
+	k := &m.kitty[m.screen()]
+	switch prefix {
+	case '>':
+		if k.n == maxKitty {
+			copy(k.f[:], k.f[1:])
+			k.n--
+		}
+		k.f[k.n] = arg(0, 0)
+		k.n++
+	case '<':
+		k.n = max(0, k.n-arg(0, 1))
+	case '=':
+		f, top := arg(0, 0), 0
+		if k.n > 0 {
+			top = k.f[k.n-1]
+		}
+		switch arg(1, 1) {
+		case 2:
+			f |= top
+		case 3:
+			f = top &^ f
+		}
+		if k.n == 0 {
+			k.n = 1
+		}
+		k.f[k.n-1] = f
+	}
+}
+
+// screen is 1 on the alternate screen, else 0.
+func (m *modes) screen() int {
+	for i, f := range modeFlags {
+		if f.mode == 1049 && m.set&(1<<i) != 0 {
+			return 1
+		}
+	}
+	return 0
+}
+
 // prelude is output that puts a fresh terminal in these modes; empty when
 // it is in them already.
 func (m *modes) prelude() []byte {
 	var b strings.Builder
+	kitty := func(k kittyStack) {
+		for _, f := range k.f[:k.n] {
+			b.WriteString("\x1b[>" + strconv.Itoa(f) + "u")
+		}
+	}
+	kitty(m.kitty[0]) // on the main screen, before the alternate one is entered
 	for i, f := range modeFlags {
 		if m.set&(1<<i) == 0 {
 			continue
@@ -269,6 +358,18 @@ func (m *modes) prelude() []byte {
 	}
 	if m.cursor != 0 {
 		b.WriteString("\x1b[" + strconv.Itoa(m.cursor) + " q")
+	}
+	if m.screen() == 1 {
+		kitty(m.kitty[1])
+	} else if m.kitty[1].n > 0 {
+		// The alternate screen's, while it is not in use: entered and left
+		// again for them (just after a reset, nothing shows).
+		b.WriteString("\x1b[?47h")
+		kitty(m.kitty[1])
+		b.WriteString("\x1b[?47l")
+	}
+	if m.otherKeys != 0 {
+		b.WriteString("\x1b[>4;" + strconv.Itoa(m.otherKeys) + "m")
 	}
 	return []byte(b.String())
 }

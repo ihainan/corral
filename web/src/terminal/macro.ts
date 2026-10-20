@@ -1,4 +1,4 @@
-import { ctrlChar, specialKey, noMods, type Mods, type SpecialKey } from './keys'
+import { ctrlChar, specialKey, noMods, type KeysApart, type Mods, type SpecialKey } from './keys'
 
 // A custom key sends a sequence written the way tmux's send-keys takes it:
 // steps separated by spaces, each a key ("Esc", "Enter", "Up", "F5"…), a key
@@ -128,7 +128,7 @@ function parseToken(tok: string): Step | null {
   return { text: (mods.alt ? '\x1b' : '') + ch }
 }
 
-// macroBytes is what a parsed sequence sends; appCursor as for specialKey.
-export function macroBytes(steps: Step[], appCursor: boolean): string {
-  return steps.map((s) => ('key' in s ? specialKey(s.key, s.mods, appCursor) : s.text)).join('')
+// macroBytes is what a parsed sequence sends; appCursor and keysApart as for specialKey.
+export function macroBytes(steps: Step[], appCursor: boolean, keysApart: KeysApart = null): string {
+  return steps.map((s) => ('key' in s ? specialKey(s.key, s.mods, appCursor, keysApart) : s.text)).join('')
 }

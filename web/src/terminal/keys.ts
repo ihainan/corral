@@ -32,14 +32,21 @@ const tilde: Partial<Record<SpecialKey, number>> = {
 }
 
 // appCursor: the program enabled application cursor keys (DECCKM), e.g. vim, less.
-export function specialKey(key: SpecialKey, m: Mods, appCursor: boolean): string {
+// keysApart: it asked for keys to be told apart, by kitty's keyboard protocol
+// ('kitty': Ctrl+Enter then goes as CSI 13;5u) or xterm's modifyOtherKeys
+// ('xterm': CSI 27;5;13~), as Claude Code and Codex do; not a plain Enter.
+export type KeysApart = 'kitty' | 'xterm' | null
+export function specialKey(key: SpecialKey, m: Mods, appCursor: boolean, keysApart: KeysApart = null): string {
   const p = modParam(m)
   const alt = m.alt ? '\x1b' : ''
   switch (key) {
     case 'Esc': return alt + '\x1b'
     case 'Tab': return m.shift ? '\x1b[Z' : alt + '\t'
     case 'ShiftTab': return '\x1b[Z'
-    case 'Enter': return alt + '\r'
+    case 'Enter':
+      if (m.ctrl && keysApart === 'kitty') return `\x1b[13;${p}u`
+      if (m.ctrl && keysApart === 'xterm') return `\x1b[27;${p};13~`
+      return alt + '\r'
     case 'Backspace': return alt + (m.ctrl ? '\x08' : '\x7f')
     // Esc+CR is what Claude Code's /terminal-setup binds Shift+Enter to; Codex
     // treats it (Alt+Enter) as a newline too.
