@@ -3,6 +3,7 @@ import { RotateCw } from 'lucide-react'
 import { api, ApiError, errorText, type HerdrAgent } from '../api'
 import { t } from '../i18n'
 import { Dialog, LoadError, useToast } from '../components/ui'
+import { getReplyDraft, keepReplyDraft } from './drafts'
 
 interface Screen {
   text: string
@@ -53,7 +54,14 @@ export function ReplyDialog({ sessionId, agent, onLoaded, onClose, resizedAt }: 
   const [changed, setChanged] = useState<'' | 'changed' | 'answered'>('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
-  const [text, setText] = useState('')
+  // What is typed stays with the pane while the dialog is closed or its tab
+  // is in the back (in memory, as the composer's drafts).
+  const draftKey = sessionId + ' ' + agent.pane_id
+  const [text, setTextState] = useState(() => getReplyDraft(draftKey))
+  const setText = (v: string) => {
+    setTextState(v)
+    keepReplyDraft(draftKey, v)
+  }
   const pre = useRef<HTMLPreElement>(null)
   const seq = useRef(0)
   const live = useRef(true) // an answer that comes back after closing is not shown
@@ -108,6 +116,9 @@ export function ReplyDialog({ sessionId, agent, onLoaded, onClose, resizedAt }: 
     seq.current++ // a refresh still on its way must not replace what this answer meets
     try {
       await api('POST', base + '/reply', { digest: screen.digest, ...body })
+      // The text sent goes from what is kept for the pane (not a newer one
+      // typed while this answer was on its way).
+      if ('text' in body && getReplyDraft(draftKey).trim() === body.text) keepReplyDraft(draftKey, '')
       toast(t('reply.sent'))
       if (live.current) onClose()
     } catch (e) {

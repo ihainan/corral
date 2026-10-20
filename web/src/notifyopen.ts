@@ -7,9 +7,21 @@
 
 const listeners = new Set<() => void>()
 
+// A page with terminal tabs takes an address of another terminal as a tab:
+// the service worker asks before it opens a window for it.
+let tabTaker: ((url: URL) => boolean) | null = null
+export function takeTabs(f: ((url: URL) => boolean) | null) {
+  tabTaker = f
+}
+
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.addEventListener('message', (e: MessageEvent) => {
     const d = e.data as { t?: string; url?: string } | null
+    if (d?.t === 'tab' && typeof d.url === 'string') {
+      const u = new URL(d.url, location.origin)
+      e.ports[0]?.postMessage(u.origin === location.origin && !!tabTaker?.(u))
+      return
+    }
     if (d?.t !== 'open' || typeof d.url !== 'string') return
     const u = new URL(d.url, location.origin)
     if (u.origin !== location.origin) return

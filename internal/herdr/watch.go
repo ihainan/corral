@@ -146,9 +146,17 @@ func (w *Watcher) refresh(ctx context.Context) (*Snapshot, error) {
 		for _, ws := range snap.Workspaces {
 			labels[ws.ID] = ws.Label
 		}
+		now := map[string]bool{}
 		for _, p := range snap.Panes {
+			now[p.ID] = true
 			if from, ok := before[p.ID]; ok && from != p.AgentStatus {
 				w.onTrans(Transition{Pane: p, Workspace: labels[p.WorkspaceID], From: from, To: p.AgentStatus})
+			}
+		}
+		// A pane that closed (an agent waiting in it waits no more).
+		for _, p := range prev.Panes {
+			if !now[p.ID] {
+				w.onTrans(Transition{Pane: p, Workspace: labels[p.WorkspaceID], From: p.AgentStatus, To: StatusGone})
 			}
 		}
 	}

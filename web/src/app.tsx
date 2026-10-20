@@ -14,6 +14,7 @@ import { SettingsPage } from './pages/Settings'
 import { AdminUsersPage, AdminAuditPage } from './pages/Admin'
 import { RecordingPlayerPage, RecordingsPage } from './pages/Recordings'
 import { TerminalPage } from './pages/Terminal'
+import { TerminalTabs, useTabsMode } from './pages/TerminalTabs'
 import { clearDrafts } from './terminal/drafts'
 
 interface Session {
@@ -55,6 +56,7 @@ export function App() {
   }, [])
   const [error, setError] = useState(false)
   const path = usePath()
+  const tabs = useTabsMode()
 
   useEffect(() => {
     setUnauthorizedHandler(() => {
@@ -103,7 +105,7 @@ export function App() {
       <ToastProvider>
         <PushSync userId={me?.id} />
         <UpdateNotice loaded={loadedVersion.current} />
-        {route(path, boot, me)}
+        {route(path, boot, me, tabs)}
       </ToastProvider>
     </SessionCtx.Provider>
   )
@@ -125,14 +127,14 @@ function Redirect({ to }: { to: string }) {
   return null
 }
 
-function route(path: string, boot: Bootstrap, me: Me | null): ReactNode {
+function route(path: string, boot: Bootstrap, me: Me | null, tabs: boolean): ReactNode {
   if (path === '/setup') return boot.setup_needed ? <SetupPage /> : <Redirect to="/login" />
   let m = match('/invite/:token', path)
   if (m) return <InvitePage token={m.token} />
   if (path === '/login') return me ? <Redirect to={nextPath()} /> : <LoginPage />
   if (!me) return <Redirect to={boot.setup_needed ? '/setup' : '/login?next=' + encodeURIComponent(path + location.search)} />
 
-  if ((m = match('/t/:id', path))) return <TerminalPage key={m.id} id={m.id} />
+  if ((m = match('/t/:id', path))) return tabs ? <TerminalTabs current={m.id} /> : <TerminalPage key={m.id} id={m.id} />
   if ((m = match('/w/:id', path))) return <TerminalPage key={'w' + m.id} id={m.id} watch />
   if ((m = match('/recordings/:id', path))) return <RecordingPlayerPage key={m.id} id={m.id} />
   if (path === '/recordings') return <Shell active="recordings"><RecordingsPage /></Shell>

@@ -325,6 +325,7 @@ func TestRemoteExecCallSitesAreReviewed(t *testing.T) {
 		"web/files.go: out, err := sshx.Output(ctx, sess.Client(), tmuxForegroundCommand(sess.TmuxSession), 4096)": true, // fixed script, validated and quoted session name
 		"web/files.go: _, err := sshx.Output(ctx, sess.Client(), removeTreeCommand(target), 64<<10)":               true, // fixed script, validated and quoted absolute path
 		"web/picker.go: out, err := sshx.Output(ctx, c, tmuxListCommand, 256<<10)":                                 true, // fixed text, no input
+		"web/complete.go: out, err := sshx.Output(ctx, sess.Client(), completeCommand(cwd), completeOutMax)":       true, // fixed script, the folder quoted as its only argument
 		"term/session.go: s.rec.Output(buf[:n])":                                                                   true, // the session recorder, not a process
 	}
 	re := regexp.MustCompile(`\.(Start|Run|Output|CombinedOutput|Exec)\(|SendRequest\("exec"`)

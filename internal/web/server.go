@@ -63,6 +63,8 @@ type Server struct {
 	fwd        *forwarder
 	code       codeServers
 	vis        visibility
+	waitAlerts waitAlerts  // "needs you" alerts shown, to replace when no longer true
+	complete   completions // the composer's completion listings, per session and folder
 
 	sockMu  sync.Mutex
 	socks   map[int64]map[*liveSocket]struct{} // open WebSockets per user, closed on sign-out
@@ -178,6 +180,8 @@ func (s *Server) registerRoutes() {
 	s.handle("POST /api/sessions/{id}/herdr", SignedIn, s.apiHerdrAction)
 	s.handle("GET /api/sessions/{id}/herdr/panes/{pane}/screen", SignedIn, s.apiHerdrScreen)
 	s.handle("POST /api/sessions/{id}/herdr/panes/{pane}/reply", SignedIn, s.apiHerdrReply)
+	s.handle("POST /api/alerts/answer", SignedIn, s.apiAlertAnswer)
+	s.handle("GET /api/sessions/{id}/complete", SignedIn, s.apiComplete)
 	s.handle("GET /api/sessions/{id}/shares", SignedIn, s.apiListShares)
 	s.handle("POST /api/sessions/{id}/shares", SignedIn, s.apiAddShare)
 	s.handle("DELETE /api/sessions/{id}/shares/{uid}", SignedIn, s.apiRemoveShare)

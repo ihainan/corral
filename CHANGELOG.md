@@ -3,6 +3,34 @@
 Notable changes to Corral. Versions follow [Semantic Versioning](https://semver.org);
 before 1.0, a minor version may change configuration or behaviour (said here when it does).
 
+## [Unreleased]
+
+### Added
+- Desktop session tabs: every running session is a tab in the top bar, kept
+  connected (up to 8) so switching is instant; `+` opens another; Ctrl+Tab
+  and Ctrl+Shift+Tab in the installed app. A tapped notification opens as a
+  tab of a window that has them.
+- The composer completes `@` files, `/` commands (the agents' own and those
+  on the host) and `$` Codex skills, and keeps a history of what was sent.
+- Agent alerts say what the agent asks, answer with its first or last choice
+  from the alert where buttons are shown (once, while nothing changed), and
+  are replaced once the agent no longer waits (also when its pane or session
+  closes). At most 10 alerts a minute per user.
+
+### Changed
+- The herdr panel of workspaces and agents is gone: herdr's own sidebar
+  lists them. A button in the top bar, shown while agents wait for you,
+  answers one at once or picks among several.
+
+### Fixed
+- The terminal fitted one row and a column or two too many: its last row
+  (Claude Code's bottom line) was partly hidden under the key bar or the
+  window's edge.
+- After a newline, input methods that space Chinese from Latin text
+  (WeType) no longer put a space before what is typed next.
+- The composer keeps its draft when you leave the terminal and come back,
+  and no longer capitalises or "corrects" commands on iOS.
+
 ## [0.1.0] - 2026-10-20
 
 The first release.

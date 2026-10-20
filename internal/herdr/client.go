@@ -110,6 +110,9 @@ const (
 	StatusWorking = "working"
 	StatusBlocked = "blocked" // waiting for the user
 	StatusDone    = "done"
+	// StatusGone is not herdr's: a transition to it reports a pane that
+	// closed.
+	StatusGone    = "gone"
 	StatusUnknown = "unknown"
 )
 

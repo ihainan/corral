@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, ChevronLeft, ChevronRight, Columns2, List, Maximize2, Plus, Rows2, X } from 'lucide-react'
+import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, ChevronLeft, ChevronRight, Columns2, Maximize2, Plus, Rows2, X } from 'lucide-react'
 import { t } from '../i18n'
 import { keysInUse } from '../components/ui'
 import { pageTitles, shortcuts, type HerdrAct, type PanelPage, type Shortcut } from './shortcuts'
@@ -7,7 +7,7 @@ import { pageTitles, shortcuts, type HerdrAct, type PanelPage, type Shortcut } f
 const icons: Partial<Record<HerdrAct, typeof Plus>> = {
   new_tab: Plus, split_right: Columns2, split_down: Rows2, zoom_toggle: Maximize2,
   focus_left: ArrowLeft, focus_right: ArrowRight, focus_up: ArrowUp, focus_down: ArrowDown,
-  prev_tab: ChevronLeft, next_tab: ChevronRight, agents: List,
+  prev_tab: ChevronLeft, next_tab: ChevronRight,
 }
 
 const LAST = 'corral.panelPage'

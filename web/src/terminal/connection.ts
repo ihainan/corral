@@ -84,6 +84,17 @@ export class TermConnection {
     this.open()
   }
 
+  // Whether this window shows the terminal (a tab in the back does not): with
+  // the page being visible, that is someone looking, and the gateway does not
+  // notify about a session someone looks at.
+  private shown = true
+  private looking = () => this.shown && document.visibilityState === 'visible'
+  setShown(v: boolean) {
+    if (v === this.shown) return
+    this.shown = v
+    if (this.isOpen() && !this.watch) this.ws!.send(JSON.stringify({ t: 'visible', v: this.looking() }))
+  }
+
   dispose() {
     this.closed = true
     window.removeEventListener('online', this.onOnline)
@@ -226,7 +237,7 @@ export class TermConnection {
           this.takeSeq = 0
           if (this.size) this.sendSize(ws, first || resend)
           this.h.onHello?.(typeof m.version === 'string' ? m.version : '')
-          if (!this.watch) ws.send(JSON.stringify({ t: 'visible', v: document.visibilityState === 'visible' }))
+          if (!this.watch) ws.send(JSON.stringify({ t: 'visible', v: this.looking() }))
           this.startPing(ws, gen)
         } else if (m.t === 'state') {
           this.ended = true
@@ -398,7 +409,7 @@ export class TermConnection {
 
   private onVisible = () => {
     // Tell the gateway whether someone is looking, so it knows when to notify.
-    if (this.isOpen() && !this.watch) this.ws!.send(JSON.stringify({ t: 'visible', v: document.visibilityState === 'visible' }))
+    if (this.isOpen() && !this.watch) this.ws!.send(JSON.stringify({ t: 'visible', v: this.looking() }))
     if (document.visibilityState !== 'visible' || this.closed || this.ended) return
     if (this.probe(2500)) return
     if (!this.ws || this.ws.readyState !== WebSocket.CONNECTING) {

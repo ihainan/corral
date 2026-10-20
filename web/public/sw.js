@@ -4,6 +4,10 @@ const SHELL = 'corral-shell-v2'
 // The language picked in the app (written there, see i18n.ts); kept across
 // shell versions.
 const PREFS = 'corral-prefs'
+// The newest alert shown for each tag: one that arrives late (pushes can
+// overtake each other) does not take its place.
+const ALERTS = 'corral-alerts'
+const ALERTS_KEPT = 200
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(SHELL).then((c) => c.addAll(['/'])).then(() => self.skipWaiting()))
@@ -11,7 +15,7 @@ self.addEventListener('install', (e) => {
 
 self.addEventListener('activate', (e) => {
   e.waitUntil(
-    caches.keys().then((keys) => Promise.all(keys.filter((k) => k !== SHELL && k !== PREFS).map((k) => caches.delete(k)))).then(() => self.clients.claim()),
+    caches.keys().then((keys) => Promise.all(keys.filter((k) => k !== SHELL && k !== PREFS && k !== ALERTS).map((k) => caches.delete(k)))).then(() => self.clients.claim()),
   )
 })
 
@@ -57,7 +61,8 @@ async function chinese() {
 }
 
 // Push: "an agent needs you" and similar alerts from the gateway, in both
-// languages.
+// languages, one at a time in the order they came.
+let pushes = Promise.resolve()
 self.addEventListener('push', (e) => {
   let n = {}
   try {
@@ -65,25 +70,77 @@ self.addEventListener('push', (e) => {
   } catch {
     n = { title: 'Corral', body: e.data ? e.data.text() : '' }
   }
-  e.waitUntil(
-    chinese().then((zh) =>
-    self.registration.showNotification((zh && n.title_zh) || n.title || 'Corral', {
-      body: (zh && n.body_zh) || n.body || '',
-      tag: n.tag || undefined,
-      renotify: !!n.tag,
-      silent: !!n.quiet,
-      icon: '/icons/icon-192.png',
-      badge: '/icons/icon-192.png',
-      data: { url: n.url || '/' },
-    })),
-  )
+  const run = pushes.then(() => showAlert(n))
+  pushes = run.catch(() => {})
+  e.waitUntil(run)
 })
+
+// newest keeps the newest alert of a tag and returns what to show: this one,
+// or (an older one, arriving late) the newer one again, quietly; a push must
+// show something.
+async function newest(n) {
+  if (!n.tag || typeof n.seq !== 'number') return n
+  try {
+    const c = await caches.open(ALERTS)
+    const key = '/tag/' + encodeURIComponent(n.tag)
+    const r = await c.match(key)
+    const prev = r ? await r.json() : null
+    if (prev && typeof prev.seq === 'number' && prev.seq > n.seq) return { ...prev, quiet: true }
+    await c.put(key, new Response(JSON.stringify(n)))
+    const keys = await c.keys()
+    for (const k of keys.slice(0, Math.max(0, keys.length - ALERTS_KEPT))) await c.delete(k)
+  } catch {
+    /* no storage: shown as it comes */
+  }
+  return n
+}
+
+async function showAlert(pushed) {
+  const n = await newest(pushed)
+  const zh = await chinese()
+  return self.registration.showNotification((zh && n.title_zh) || n.title || 'Corral', {
+    body: (zh && n.body_zh) || n.body || '',
+    tag: n.tag || undefined,
+    // A quiet one (an agent that stopped waiting) replaces without a sound.
+    renotify: !!n.tag && !n.quiet,
+    silent: !!n.quiet,
+    icon: '/icons/icon-192.png',
+    badge: '/icons/icon-192.png',
+    // Buttons where the platform shows them (not iOS): an agent's choices.
+    actions: Array.isArray(n.actions) && n.answer ? n.actions.map((a) => ({ action: a.action, title: (zh && a.title_zh) || a.title })) : [],
+    data: { url: n.url || '/', answer: n.answer || null },
+  })
+}
 
 self.addEventListener('notificationclick', (e) => {
   e.notification.close()
-  const url = new URL((e.notification.data && e.notification.data.url) || '/', self.location.origin)
+  const data = e.notification.data || {}
+  const url = new URL(data.url || '/', self.location.origin)
   if (url.origin !== self.location.origin) return
-  e.waitUntil(
+  // A button: the choice is pressed in the pane, once, if the agent still
+  // waits as the alert said and its screen is unchanged (the gateway checks
+  // the alert's token); otherwise (or on any failure) the page opens on that
+  // pane's answer, to look first.
+  if (e.action && data.answer && /^[1-9]$/.test(e.action)) {
+    e.waitUntil(
+      fetch('/api/alerts/answer', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: data.answer, key: e.action }),
+      })
+        .then((res) => (res.ok ? null : openPage(url)))
+        .catch(() => openPage(url)),
+    )
+    return
+  }
+  e.waitUntil(openPage(url))
+})
+
+// openPage shows an address of Corral in a window: one showing it already,
+// one with terminal tabs, one elsewhere in Corral, or a new one.
+function openPage(url) {
+  return (
     self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((list) => {
       const path = (c) => new URL(c.url).pathname
       // A window already showing it comes to the front as it is.
@@ -93,11 +150,35 @@ self.addEventListener('notificationclick', (e) => {
         if (url.search) same.postMessage({ t: 'open', url: url.href })
         return same.focus()
       }
-      // Else a window that is not on a terminal page is reused; a terminal
-      // page is never navigated away (its composer draft would be lost).
-      const free = list.find((c) => 'navigate' in c && !path(c).startsWith('/t/'))
-      if (free) return free.focus().then(() => free.navigate(url.href))
-      return self.clients.openWindow(url.href)
-    }),
+      // A window with terminal tabs switches to it as a tab (asked, as only
+      // the page knows whether it has tabs).
+      const terms = list.filter((c) => path(c).startsWith('/t/'))
+      return firstAccepting(terms, url.href).then((tabs) => {
+        if (tabs) return tabs.focus()
+        // Else a window that is not on a terminal page is reused; a terminal
+        // page is never navigated away (its connection would end).
+        const free = list.find((c) => 'navigate' in c && !path(c).startsWith('/t/'))
+        if (free) return free.focus().then(() => free.navigate(url.href))
+        return self.clients.openWindow(url.href)
+      })
+    })
   )
-})
+}
+
+// The first of these windows that takes the address as a tab, or null. Each
+// is asked in turn and given a moment to answer.
+async function firstAccepting(clients, href) {
+  for (const c of clients) {
+    const ok = await new Promise((resolve) => {
+      const ch = new MessageChannel()
+      const timer = setTimeout(() => resolve(false), 500)
+      ch.port1.onmessage = (e) => {
+        clearTimeout(timer)
+        resolve(e.data === true)
+      }
+      c.postMessage({ t: 'tab', url: href }, [ch.port2])
+    })
+    if (ok) return c
+  }
+  return null
+}

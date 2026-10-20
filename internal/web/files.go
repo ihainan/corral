@@ -592,8 +592,8 @@ func removeTreeCommand(p string) string {
 
 // Terminal folder ----------------------------------------------------------------
 
-// apiFilesCwd reports the folder the terminal is in, where the host can tell:
-// tmux's active pane, or herdr's focused pane. Otherwise the path is empty.
+// apiFilesCwd reports the folder the terminal is in, where the host can tell
+// (see sessionCwd). Otherwise the path is empty.
 func (s *Server) apiFilesCwd(w http.ResponseWriter, r *http.Request) {
 	sess, ok := s.runningSession(w, r)
 	if !ok {
@@ -601,13 +601,24 @@ func (s *Server) apiFilesCwd(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
+	cwd, err := s.sessionCwd(ctx, sess)
+	if errors.Is(err, sshx.ErrBusy) {
+		writeError(w, http.StatusTooManyRequests, "busy", "the host is still answering earlier requests")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"path": cwd})
+}
+
+// sessionCwd is the folder the terminal is in, where the host can tell:
+// tmux's active pane, or herdr's focused pane; else "". The error is
+// sshx.ErrBusy when the host is still answering earlier requests.
+func (s *Server) sessionCwd(ctx context.Context, sess *term.Session) (string, error) {
 	cwd := ""
 	switch sess.Persistence {
 	case "tmux":
 		out, err := sshx.Output(ctx, sess.Client(), tmuxCwdCommand(sess.TmuxSession), 8192)
 		if errors.Is(err, sshx.ErrBusy) {
-			writeError(w, http.StatusTooManyRequests, "busy", "the host is still answering earlier requests")
-			return
+			return "", err
 		}
 		if err == nil {
 			cwd = strings.TrimRight(string(out), "\r\n")
@@ -627,11 +638,9 @@ func (s *Server) apiFilesCwd(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if p, ok := cleanRemotePath(cwd); ok && !strings.ContainsAny(cwd, "\r\n") {
-		cwd = p
-	} else {
-		cwd = ""
+		return p, nil
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"path": cwd})
+	return "", nil
 }
 
 // tmuxCwdCommand prints the current folder of the active pane of a tmux

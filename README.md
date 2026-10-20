@@ -13,7 +13,7 @@ keeps running and you pick it up where it was — on the same device or another.
   <img src="docs/screenshots/shortcuts-phone.png" width="250" alt="The shortcut panel over the key bar, on the Claude Code page">
 </p>
 <p align="center">
-  <img src="docs/screenshots/herdr-desktop.png" width="820" alt="herdr in a desktop browser, with Corral's panel listing its agents and who is waiting">
+  <img src="docs/screenshots/herdr-desktop.png" width="820" alt="herdr in a desktop browser, an agent waiting for an answer">
 </p>
 
 ## Features
@@ -42,7 +42,15 @@ keeps running and you pick it up where it was — on the same device or another.
   cursor's line, Claude Code's input box — or the keyboard button does. A
   hardware keyboard types at once.
 - Input methods work: Chinese and other IMEs, dictation, and a composer field
-  for writing longer input before sending it.
+  for writing longer input before sending it. It keeps its draft and what
+  you sent (Up, or its history button), and completes as the agents' own
+  input boxes do: `@` and a file under the folder the terminal is in, `/` and
+  a command (built in, or your own in `.claude/commands`, skills, Codex
+  prompts), `$` and a Codex skill.
+- On a desktop, every running session is a tab, kept connected so switching
+  is instant; `+` opens another. Ctrl+Tab and Ctrl+Shift+Tab go to the next
+  and previous one in the installed app (a browser keeps those keys for its
+  own tabs).
 - Several devices can have one session open; the one you act on decides the
   terminal size, the others follow it. A window opened long after a program
   started still gets the modes it set (mouse reporting, bracketed paste…).
@@ -61,17 +69,18 @@ keeps running and you pick it up where it was — on the same device or another.
   tmux or herdr session), the path is typed as `@path`, which is how it
   takes them. Shift+Enter inserts a newline, and Ctrl+Enter reaches the
   programs that tell it apart (Claude Code's "send now").
-- With herdr, a panel lists workspaces and agents, shows who is waiting for
-  you, switches between them, and shows one agent's pane full size (handy
-  on a phone) and back.
 - Answer an agent that waits in herdr without switching to it — from the
-  panel or straight from its notification: you see its screen, tap one of
-  its choices, Enter or Esc, or type a line. Nothing is typed if the screen
-  changed in the meantime.
+  top bar's button, shown with how many wait (herdr's own sidebar lists
+  every workspace and agent), or straight from its notification: you see
+  its screen, tap one of its choices, Enter or Esc, or type a line. Nothing
+  is typed if the screen changed in the meantime.
 - Push notifications (and optional webhooks) when an agent in herdr needs
   you or finishes, or when a program rings the terminal bell or sends a
   desktop notification (OSC 9 / OSC 777) — unless you are looking at that
-  session anyway.
+  session anyway. An agent's alert says what it asks; where the platform
+  shows buttons (not iOS), its first and last choices answer it from the
+  alert, once, if nothing changed since. Once the agent no longer waits, its
+  alert is replaced. At most 10 alerts a minute.
 
 **Around the terminal**
 - A file panel: browse the host, upload (with progress, asking before

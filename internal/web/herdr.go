@@ -161,6 +161,7 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 		func(tr herdr.Transition) { s.onAgentTransition(sess, h, tr) },
 	)
 	w.Run(ctx)
+	s.endSessionAlerts(sess) // (its agents wait no more)
 }
 
 func (s *Server) onAgentTransition(sess *term.Session, h *store.Host, tr herdr.Transition) {
@@ -486,6 +487,13 @@ func (s *Server) apiHerdrReply(w http.ResponseWriter, r *http.Request) {
 	if sess == nil {
 		return
 	}
+	s.replyToPane(w, r, sess, socket, pane, b.Digest, b.Keys, b.Text, nil)
+}
+
+// replyToPane types an answer (keys, or text and Enter) into a herdr pane if
+// its screen is still the one named by digest (and, with still, while it
+// says so: checked right before typing), and writes the outcome.
+func (s *Server) replyToPane(w http.ResponseWriter, r *http.Request, sess *term.Session, socket, pane, digest string, keys []string, text string, still func() bool) {
 	// Bound to the login: signing out (or being signed out) cancels an
 	// answer still waiting or connecting, and it is checked once more right
 	// before typing.
@@ -523,14 +531,14 @@ func (s *Server) apiHerdrReply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer typer.Close()
-	text, digest, err := paneScreen(ctx, reader, pane)
+	shown, shownDigest, err := paneScreen(ctx, reader, pane)
 	reader.Close()
 	if err != nil {
 		writeHerdrError(w, err)
 		return
 	}
-	screen := map[string]any{"text": text, "digest": digest}
-	if digest != b.Digest {
+	screen := map[string]any{"text": shown, "digest": shownDigest}
+	if shownDigest != digest {
 		writeErrorExtra(w, http.StatusConflict, "screen_changed", "the screen changed; look again before answering", screen)
 		return
 	}
@@ -542,10 +550,14 @@ func (s *Server) apiHerdrReply(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "unauthorized", "please sign in")
 		return
 	}
-	if b.Text != "" {
-		err = typer.SendInput(ctx, pane, b.Text, []string{"enter"})
+	if still != nil && !still() {
+		writeError(w, http.StatusGone, "alert_gone", "the agent no longer waits as the alert said")
+		return
+	}
+	if text != "" {
+		err = typer.SendInput(ctx, pane, text, []string{"enter"})
 	} else {
-		err = typer.SendKeys(ctx, pane, b.Keys)
+		err = typer.SendKeys(ctx, pane, keys)
 	}
 	// Whether it was typed: herdr said so, herdr refused, or the answer was
 	// lost on the way (then it may have been typed). Every attempt is
@@ -564,10 +576,10 @@ func (s *Server) apiHerdrReply(w http.ResponseWriter, r *http.Request) {
 	typer.Close()
 	release() // the pane's next answer need not wait for the audit
 	detail := map[string]any{"session": sess.ID, "pane": pane, "outcome": outcome}
-	if b.Text != "" {
-		detail["text_length"] = utf8.RuneCountInString(b.Text) // what was typed may be private
+	if text != "" {
+		detail["text_length"] = utf8.RuneCountInString(text) // what was typed may be private
 	} else {
-		detail["keys"] = strings.Join(b.Keys, " ")
+		detail["keys"] = strings.Join(keys, " ")
 	}
 	actx, acancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
 	defer acancel()

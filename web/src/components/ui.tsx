@@ -160,11 +160,21 @@ export interface MenuItem {
   keepOpen?: boolean // e.g. "retry": the menu stays open to show the result
 }
 
-export function Menu(props: { label: string; button: (open: boolean, toggle: (e: React.MouseEvent<HTMLElement>) => void) => ReactNode; items: () => (MenuItem | null)[]; note?: string }) {
+// Sent on the window to close every open menu (a terminal tab sent to the back).
+export const CLOSE_MENUS = 'corral:close-menus'
+
+export function Menu(props: { label: string; button: (open: boolean, toggle: (e: React.MouseEvent<HTMLElement>) => void) => ReactNode; items: () => (MenuItem | null)[]; note?: string; onOpenChange?: (open: boolean) => void }) {
   const [anchor, setAnchor] = useState<DOMRect | null>(null)
   const [sheet, setSheet] = useState(false)
   const trigger = useRef<HTMLElement | null>(null)
   const close = useCallback(() => setAnchor(null), [])
+  const onOpenChange = props.onOpenChange
+  useEffect(() => onOpenChange?.(!!anchor), [anchor, onOpenChange])
+  useEffect(() => {
+    if (!anchor) return
+    window.addEventListener(CLOSE_MENUS, close)
+    return () => window.removeEventListener(CLOSE_MENUS, close)
+  }, [anchor, close])
   const toggle = (e: React.MouseEvent<HTMLElement>) => {
     if (anchor) return close()
     trigger.current = e.currentTarget

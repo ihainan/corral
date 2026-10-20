@@ -5,22 +5,22 @@ import { FitAddon } from '@xterm/addon-fit'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import { WebglAddon } from '@xterm/addon-webgl'
-import { ArrowUp, Check, ChevronDown, ChevronLeft, CircleStop, Code2, Eye, FolderOpen, Globe, LayoutGrid, ImagePlus, MessageSquareText, MoreVertical, Minus, Palette, Paperclip, Plus, TextSelect, Keyboard as KeyboardIcon, Power, RotateCw, Server, X } from 'lucide-react'
+import { ArrowUp, Check, ChevronDown, ChevronLeft, CircleStop, Code2, Eye, FolderOpen, Globe, History, ImagePlus, MessageCircleReply, MessageSquareText, MoreVertical, Minus, Palette, Paperclip, Plus, TextSelect, Keyboard as KeyboardIcon, Power, RotateCw, Server, X } from 'lucide-react'
 import { api, ApiError, choiceOf, errorText, uploadFile, type HerdrAgent, type HerdrSummary, type Host, type SessionInfo } from '../api'
 import { t } from '../i18n'
 import { navigate } from '../router'
 import { getPrefs, prefsConfirmed, setChromeColor, setPrefs, termScheme, usePrefs } from '../prefs'
 import { local } from '../storage'
-import { Confirm, Menu, copyText as copyToClipboard, keysInUse, useFocusTrap, useToast, type MenuItem } from '../components/ui'
+import { CLOSE_MENUS, Confirm, Menu, copyText as copyToClipboard, keysInUse, useFocusTrap, useToast, type MenuItem } from '../components/ui'
 import { useConnect } from '../connect'
 import { clampSize, TermConnection, type EndInfo, type Status } from '../terminal/connection'
 import { applyMods, specialKey, type KeysApart, type Mods, type SpecialKey } from '../terminal/keys'
 import { KeyBar, type ModState } from '../terminal/KeyBar'
 import { macroBytes, parseMacro, type Step } from '../terminal/macro'
 import { chromeVars } from '../terminal/themes'
-import { getDraft, keepDraft } from '../terminal/drafts'
+import { getDraft, keepDraft, remember, sentHistory } from '../terminal/drafts'
+import { useCompletion } from '../terminal/Completion'
 import { SchemeDialog } from '../terminal/SchemePicker'
-import { HerdrPanel } from '../terminal/HerdrPanel'
 import { ShortcutPanel, lastPanelPage } from '../terminal/ShortcutPanel'
 import { panelPages, type Shortcut } from '../terminal/shortcuts'
 import { layoutIn } from '../terminal/layout'
@@ -80,17 +80,13 @@ if (isMac && isTouch && window.visualViewport) {
   document.addEventListener('focusin', () => (keyboardWentDown = false))
 }
 
-function useMedia(q: string) {
-  const [m, setM] = useState(() => window.matchMedia(q).matches)
-  useEffect(() => {
-    const mq = window.matchMedia(q)
-    const on = () => setM(mq.matches)
-    mq.addEventListener('change', on)
-    return () => mq.removeEventListener('change', on)
-  }, [q])
-  return m
-}
 const FONT_STACK = "'JetBrains Mono', 'SFMono-Regular', Menlo, Consolas, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', monospace"
+
+// A sent message as one line of a menu.
+const oneLine = (s: string) => {
+  const flat = s.trim().replace(/\s*\n\s*/g, ' ⏎ ')
+  return [...flat].length > 80 ? [...flat].slice(0, 79).join('') + '…' : flat
+}
 
 // Quote a remote path for a POSIX shell when it contains anything beyond safe
 // characters. Generated upload names are safe; the home directory may not be.
@@ -198,7 +194,23 @@ function geminiPath(p: string): string | null {
 }
 
 // watch: a session someone else owns and lets this user watch, read-only.
-export function TerminalPage({ id, watch = false }: { id: string; watch?: boolean }) {
+// What a tab shows of its terminal (see Tabs.tsx).
+export interface TabInfo {
+  status: string // the status class: s-open, s-slow, s-reconnecting, s-ended…
+  statusText: string
+  waiting: number // herdr agents waiting for an answer
+}
+
+// Pages open at once (tabs keep several mounted): the page-wide classes and
+// colours belong to them all, and go when the last one does.
+let pagesOpen = 0
+
+// active: shown (with tabs, the others stay connected but hidden: they take
+// no focus or keys and show no dialogs). tabs: drawn in the top bar in place
+// of the session switcher.
+export function TerminalPage({ id, watch = false, active = true, tabs, onInfo }: { id: string; watch?: boolean; active?: boolean; tabs?: React.ReactNode; onInfo?: (id: string, i: TabInfo) => void }) {
+  const activeRef = useRef(active)
+  activeRef.current = active
   const prefs = usePrefs()
   const toast = useToast()
   const rootRef = useRef<HTMLDivElement>(null)
@@ -217,11 +229,15 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
   const [fn, setFn] = useState(false)
   const [composer, setComposer] = useState(false)
   const [draft, setDraft] = useState(() => (watch ? '' : getDraft(id)))
+  // Going through the history (Up/Down at the box's start/end): the entry
+  // shown. A draft there when it starts is kept as the newest entry.
+  const histPos = useRef<string | null>(null) // (the entry: other tabs change the list)
   useEffect(() => {
     if (!watch) keepDraft(id, draft)
   }, [id, draft, watch])
   // Text from the key bar or an upload goes in at the composer's cursor.
   const insertDraft = useCallback((s: string) => {
+    histPos.current = null // (an entry added to is a draft of its own)
     const el = composerRef.current
     if (!el) return setDraft((d) => d + s) // closed meanwhile: the draft keeps it
     const a = el.selectionStart ?? el.value.length
@@ -235,19 +251,6 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
   const [dragOver, setDragOver] = useState(false)
   const [confirm, setConfirm] = useState<React.ReactNode>(null)
   const [herdr, setHerdr] = useState<HerdrSummary | null>(null)
-  // Docked on wide screens (remembered, off by default: herdr draws its own
-  // sidebar too), a sheet on narrow ones (always starts closed).
-  const sheetPanel = useMedia('(max-width: 999px)')
-  const [panel, setPanelState] = useState(() => !sheetPanel && local.get('corral.herdrPanel') === '1')
-  // The form the panel was opened in. A panel is only drawn in that form, so
-  // crossing the breakpoint never mounts the other form, even for one render.
-  const [panelSheet, setPanelSheet] = useState(sheetPanel)
-  const setPanel = (v: boolean) => {
-    setPanelState(v)
-    setPanelSheet(sheetPanel)
-    if (!sheetPanel) local.set('corral.herdrPanel', v ? '1' : '0')
-    if (!v && !isTouch) termRef.current?.focus()
-  }
   const [sessions, setSessions] = useState<SessionInfo[] | null>(null)
   const [imeLines, setImeLines] = useState<string[]>([])
   const [sessionsFailed, setSessionsFailed] = useState(false)
@@ -320,18 +323,9 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
       if (location.pathname === '/t/' + id && pane) setWantReply(pane)
     })
   }, [id, watch])
-  // Crossing the width where the panel turns from docked to a sheet closes it,
-  // so it never reappears in another form above a dialog that is open.
-  const firstSheet = useRef(sheetPanel)
-  useEffect(() => {
-    if (firstSheet.current === sheetPanel) return
-    firstSheet.current = sheetPanel
-    setPanelState(false)
-  }, [sheetPanel])
   const ended = status === 'ended' || status === 'gone' || status === 'revoked' || end !== null
   const showKeybar = isTouch && prefs.keybar && !ended && !watch
   const [owner, setOwner] = useState('') // watching: whose session it is
-  const panelOpen = panel && panelSheet === sheetPanel
   const { boot } = useSession()
   const [portsOpen, setPortsOpen] = useState(false)
   const [filesOpen, setFilesOpen] = useState(false)
@@ -468,7 +462,7 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
     // a latched modifier with a letter) is sent from here.
     const onStrayKey = (e: KeyboardEvent) => {
       const a = document.activeElement
-      if (!ta || !isTouch || (a && a !== document.body) || document.querySelector('[aria-modal="true"]')) return
+      if (!activeRef.current || !ta || !isTouch || (a && a !== document.body) || document.querySelector('[aria-modal="true"]')) return
       hardwareKeys = true
       if (composerRef.current) return composerRef.current.focus()
       allowFocus(() => ta.focus())
@@ -654,7 +648,7 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
     // owner's own terminal counts, never replayed output, and nothing is ever
     // read back. Where the browser allows writing only on a tap (Safari), the
     // user gets a button to tap.
-    const mayCopy = () => alive && !watch && prefsConfirmed() && getPrefs().remoteClipboard
+    const mayCopy = () => alive && !watch && activeRef.current && prefsConfirmed() && getPrefs().remoteClipboard // (not a tab in the back)
     const remoteCopy = async (text: string) => {
       const n = [...text].length
       try {
@@ -834,6 +828,7 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
       onDropped: () => droppedInput(),
     }, watch)
     connRef.current = conn
+    conn.setShown(activeRef.current)
     conn.resize(term.cols, term.rows) // sent once connected
 
     // Everything typed goes out through here, so it can wait its turn while
@@ -1202,7 +1197,7 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
       fitTimer = window.setTimeout(safeFit, 60)
     })
     ro.observe(el)
-    if (!isTouch) term.focus()
+    if (!isTouch && activeRef.current) term.focus()
 
     return () => {
       ro.disconnect()
@@ -1251,15 +1246,43 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
     // stays at that size (only its scale changes).
     safeFitRef.current()
   }, [prefs])
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    pagesOpen++
+    document.documentElement.classList.add('term-mode')
+    return () => {
+      if (--pagesOpen > 0) return
       setChromeColor(null)
-      document.documentElement.classList.remove('term-dark')
-    },
-    [],
-  )
+      document.documentElement.classList.remove('term-dark', 'term-mode')
+    }
+  }, [])
+  // A tab brought to the front: its colours, its size (the window may have
+  // changed meanwhile) and, on a desktop, the keyboard. Sent to the back:
+  // open menus close (dialogs are not drawn while hidden, see below).
+  const firstActive = useRef(true)
+  useEffect(() => {
+    connRef.current?.setShown(active) // (a tab in the back is not looked at: its alerts are sent)
+    if (firstActive.current) {
+      firstActive.current = false
+      return
+    }
+    if (!active) {
+      window.dispatchEvent(new Event(CLOSE_MENUS))
+      setShortcutsOpen(false) // (its listeners are on the window)
+      return
+    }
+    const scheme = termScheme()
+    setChromeColor(scheme.theme.background ?? null)
+    document.documentElement.classList.toggle('term-dark', scheme.dark)
+    safeFitRef.current()
+    // (Not under a dialog of this tab's, drawn again and focused just before.)
+    if (!isTouch && !document.querySelector('[aria-modal="true"]')) termRef.current?.focus()
+    // Brought here by a notification asking to answer an agent (?reply=).
+    const pane = new URLSearchParams(location.search).get('reply')
+    if (pane && !watch && location.pathname === '/t/' + id) setWantReply(pane)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active])
 
-  // An ended session: dim it, stop the cursor, close the herdr panel.
+  // An ended session: dim it, stop the cursor, close the composer.
   useEffect(() => {
     if (!ended) return
     const term = termRef.current
@@ -1268,7 +1291,6 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
       term.options.cursorInactiveStyle = 'none'
       term.blur()
     }
-    setPanelState(false)
     setComposer(false)
   }, [ended])
 
@@ -1295,12 +1317,10 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
     vv?.addEventListener('resize', apply)
     vv?.addEventListener('scroll', apply)
     window.addEventListener('resize', apply)
-    document.documentElement.classList.add('term-mode')
     return () => {
       vv?.removeEventListener('resize', apply)
       vv?.removeEventListener('scroll', apply)
       window.removeEventListener('resize', apply)
-      document.documentElement.classList.remove('term-mode')
     }
   }, [])
 
@@ -1522,7 +1542,6 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
   const pickShortcut = async (s: Shortcut) => {
     setShortcutsOpen(false)
     if ('keys' in s) return sendKeys(s.keys)
-    if (s.herdr === 'agents') return setPanel(true)
     try {
       await api('POST', `/api/sessions/${id}/herdr`, { action: s.herdr })
     } catch (e) {
@@ -1634,9 +1653,49 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
       toast(t('term.notConnected'), true)
       return
     }
+    remember(draft)
+    histPos.current = null
     setDraft('')
     composerRef.current?.focus()
   }
+
+  // Up from the start of the box: the entry before the one shown (a draft
+  // there is kept as the newest entry first); Down from its end: the next,
+  // then an empty box.
+  const historyStep = (dir: -1 | 1): boolean => {
+    if (histPos.current === null && dir > 0) return false
+    if (histPos.current === null && draft.trim()) remember(draft)
+    const h = sentHistory()
+    // Where the box is in the list now (an entry gone: past the newest).
+    let pos = histPos.current !== null ? h.lastIndexOf(histPos.current) : draft.trim() ? h.lastIndexOf(draft) : h.length
+    if (pos < 0) pos = h.length
+    if (dir < 0) {
+      if (pos === 0) return true
+      pos--
+    } else {
+      pos++
+    }
+    histPos.current = pos < h.length ? h[pos] : null
+    const text = histPos.current ?? ''
+    setDraft(text)
+    requestAnimationFrame(() => {
+      const el = composerRef.current
+      if (el) el.selectionStart = el.selectionEnd = dir < 0 ? 0 : text.length
+    })
+    return true
+  }
+
+  // "@", "/" and "$" in the composer offer files, commands and skills.
+  const completion = useCompletion({
+    sessionId: id,
+    field: composerRef,
+    draft,
+    setDraft: (s) => {
+      histPos.current = null
+      setDraft(s)
+    },
+    agent: herdr?.focused_agent,
+  })
 
   const toggleComposer = () => {
     if (watch) return
@@ -1738,6 +1797,15 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
   const statusClass = ended ? 's-ended' : slow ? 's-slow' : 's-' + status
   const paused = !ended && (status === 'reconnecting' || status === 'offline')
   const herdrStale = paused || !herdrFresh
+  // Agents waiting for an answer, while what herdr reported is current.
+  const waiting = herdr && !herdrStale && !ended && !watch
+    ? herdr.workspaces.flatMap((w) => w.agents.filter((a) => a.status === 'blocked').map((a) => ({ a, ws: w.label })))
+    : []
+  const waitingShown = useRef(waiting) // the list the waiting menu opened with
+  const [waitingOpen, setWaitingOpen] = useState(false) // (it stays while open, even with none left)
+  useEffect(() => {
+    onInfo?.(id, { status: statusClass, statusText, waiting: waiting.length })
+  }, [onInfo, id, statusClass, statusText, waiting.length])
 
   const endText = status === 'revoked' ? t('watch.revoked') : status === 'gone' ? (watch ? t('watch.gone') : t('term.ended.gone')) :
     end ? (end.state === 'exited' ? t('term.ended.exited', { code: end.code }) : end.state === 'lost' ? t('term.ended.lost') : t('term.ended.closed')) :
@@ -1809,7 +1877,9 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
 
   return (
     <div
-      className={'term-root ' + (scheme.dark ? 'dark' : 'light')}
+      className={'term-root ' + (scheme.dark ? 'dark' : 'light') + (active ? '' : ' inactive')}
+      inert={!active}
+      aria-hidden={active ? undefined : true}
       style={chromeVars(scheme) as React.CSSProperties}
       ref={rootRef}
       onDragOver={(e) => {
@@ -1843,6 +1913,11 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
               {t('watch.status', { status: statusText })}
             </span>
           </div>
+        ) : tabs ? (
+          <>
+            {tabs}
+            <span className="sr-only" aria-live="polite">{statusText}</span>
+          </>
         ) : (
         <Menu
           label={t('term.switchSession')}
@@ -1871,11 +1946,34 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
         />
         )}
         <div className="spacer" />
-        {herdr && !ended && !watch && (
-          <button className="icon-btn herdr-btn" aria-pressed={panelOpen} onClick={() => setPanel(!panelOpen)} aria-label={t('herdr.title') + (herdr.waiting > 0 && !herdrStale ? ' · ' + t('herdr.waiting', { n: herdr.waiting }) : '')} title={t('herdr.title')}>
-            <LayoutGrid size={19} />
-            {herdr.waiting > 0 && !herdrStale && <span className="herdr-count">{herdr.waiting}</span>}
-          </button>
+        {(waiting.length > 0 || waitingOpen) && (
+          // Only while an agent waits (herdr's own sidebar lists them all):
+          // one is answered at once, several are picked from a menu. The
+          // menu keeps the list it opened with, so a summary arriving while
+          // it is open moves nothing under the pointer or the focus.
+          <Menu
+            label={t('herdr.waitingMenu')}
+            onOpenChange={setWaitingOpen}
+            items={() => waitingShown.current.map(({ a, ws }) => ({ label: `${ws} · ${a.agent}${a.title ? ' · ' + a.title : ''}`, onSelect: () => setReplyTo(a) }))}
+            button={(open, toggle) => (
+              <button
+                className="icon-btn herdr-btn"
+                aria-expanded={open || waiting.length > 1 ? open : undefined}
+                onClick={(e) => {
+                  if (open || waiting.length > 1) {
+                    if (!open) waitingShown.current = waiting
+                    return toggle(e)
+                  }
+                  setReplyTo(waiting[0].a)
+                }}
+                aria-label={waiting.length === 1 ? t('reply.open', { agent: waiting[0].a.agent }) : t('herdr.waiting', { n: waiting.length })}
+                title={t('herdr.waiting', { n: waiting.length })}
+              >
+                <MessageCircleReply size={19} />
+                <span className="herdr-count">{waitingOpen ? waitingShown.current.length : waiting.length}</span>
+              </button>
+            )}
+          />
         )}
         {!ended && !watch && (
           <button className="icon-btn" aria-pressed={composer} onClick={toggleComposer} aria-label={t('term.composer')} title={t('term.composer') + (isTouch ? '' : isMac ? ' (⇧⌘↩)' : ' (Ctrl+Shift+Enter)')}>
@@ -1921,34 +2019,10 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
           <pre>{imeLines.join('\n')}</pre>
         </div>
       )}
-      <div className={'term-body' + (herdr && panelOpen && !sheetPanel ? ' with-panel' : '') + (paused ? ' is-paused' : '') + (ended ? ' is-ended' : '')}>
+      <div className={'term-body' + (paused ? ' is-paused' : '') + (ended ? ' is-ended' : '')}>
         <div className="term-host-el" ref={hostEl} />
-        {herdr && panelOpen && !ended && (
-          <HerdrPanel
-            summary={herdr}
-            sheet={sheetPanel}
-            stale={herdrStale}
-            onClose={(viaKeyboard) => {
-              setPanel(false)
-              // A keyboard user (also an iPad with a hardware keyboard) keeps typing.
-              if (viaKeyboard) allowFocus(() => termRef.current?.focus())
-            }}
-            onReply={(a) => {
-              if (sheetPanel) setPanel(false)
-              setReplyTo(a)
-            }}
-            onFocus={async (action, target) => {
-              try {
-                await api('POST', `/api/sessions/${id}/herdr`, { action, target })
-                if (sheetPanel) setPanel(false)
-              } catch (e) {
-                toast(e instanceof ApiError && e.code === 'herdr_busy' ? t('herdr.busy') : t('herdr.focusFailed'), true)
-              }
-            }}
-          />
-        )}
         {dragOver && <div className="term-drop">{t('term.dropHint')}</div>}
-        {replyTo && !watch && !ended && (
+        {replyTo && !watch && !ended && active && (
           // One dialog per pane (keyed): nothing of another pane's carries over.
           <ReplyDialog
             key={replyTo.pane_id}
@@ -1977,6 +2051,7 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
         <>
           {composer && (
             <div className="composer">
+              {completion.list}
               <div className="composer-box">
                 <textarea
                   ref={composerRef}
@@ -1990,7 +2065,13 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
                   spellCheck={false}
                   placeholder={isTouch ? t('term.composerPlaceholder') : t('term.composerPlaceholderKey', { key: isMac ? '⌘↩' : 'Ctrl+Enter' })}
                   rows={1}
-                  onChange={(e) => setDraft(e.target.value)}
+                  onChange={(e) => {
+                    histPos.current = null // (an entry edited is a draft of its own)
+                    setDraft(e.target.value)
+                  }}
+                  onSelect={completion.update}
+                  {...completion.field}
+                  onBlur={() => setTimeout(completion.update)}
                   onPaste={(e) => {
                     const files = [...(e.clipboardData?.files ?? [])]
                     if (files.length === 0) return
@@ -1999,7 +2080,14 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
                   }}
                   onKeyDown={(e) => {
                     if (e.nativeEvent.isComposing || e.keyCode === 229) return
-                    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                    if (completion.onKey(e)) return
+                    const el = e.currentTarget
+                    const plain = !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey && el.selectionStart === el.selectionEnd
+                    if (plain && e.key === 'ArrowUp' && el.selectionStart === 0 && historyStep(-1)) {
+                      e.preventDefault()
+                    } else if (plain && e.key === 'ArrowDown' && el.selectionEnd === el.value.length && historyStep(1)) {
+                      e.preventDefault()
+                    } else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
                       e.preventDefault()
                       sendComposer(true)
                     } else if (e.key === 'Escape') {
@@ -2012,6 +2100,32 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
                   <button type="button" className="icon-btn" onClick={() => fileRef.current?.click()} aria-label={t('term.upload')} title={t('term.upload')}>
                     <Paperclip size={18} />
                   </button>
+                  <Menu
+                    label={t('term.history')}
+                    note={sentHistory().length === 0 && !draft.trim() ? t('term.historyEmpty') : undefined}
+                    items={() =>
+                      [...sentHistory()].reverse().map((h) => ({
+                        label: oneLine(h),
+                        onSelect: () => {
+                          // The draft there is kept among the entries, not lost.
+                          if (draft.trim()) remember(draft)
+                          histPos.current = null
+                          setDraft(h)
+                          requestAnimationFrame(() => {
+                            const el = composerRef.current
+                            if (!el) return
+                            el.focus()
+                            el.selectionStart = el.selectionEnd = h.length
+                          })
+                        },
+                      }))
+                    }
+                    button={(open, toggle) => (
+                      <button type="button" className="icon-btn" aria-expanded={open} onClick={toggle} aria-label={t('term.history')} title={t('term.history') + (isTouch ? '' : ' (↑)')}>
+                        <History size={18} />
+                      </button>
+                    )}
+                  />
                   <button type="button" className="btn btn-ghost composer-insert" onClick={() => sendComposer(false)} disabled={!draft} title={t('term.insertHint')}>
                     {t('term.insert')}
                   </button>
@@ -2039,7 +2153,7 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
               onSteps={sendKeys}
               onPanel={() => setShortcutsOpen((o) => !o)}
               panel={
-                shortcutsOpen && (
+                shortcutsOpen && active && (
                   <ShortcutPanel
                     {...panelPages(info?.persistence, herdr?.focused_agent, lastPanelPage())}
                     onPick={(s) => void pickShortcut(s)}
@@ -2064,16 +2178,22 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
         }}
       />
 
-      {copyText !== null && <CopyMode text={copyText} onClose={() => setCopyText(null)} />}
-      {schemesOpen && <SchemeDialog onClose={() => setSchemesOpen(false)} />}
-      {portsOpen && info && <PortsDialog hostId={info.host_id} onClose={() => setPortsOpen(false)} />}
-      {shareOpen && !ended && <ShareDialog sessionId={id} onClose={() => setShareOpen(false)} />}
-      {filesOpen && !ended && (
-        <FilesDialog sessionId={id} start={filesPath.current} onPath={(p) => (filesPath.current = p)} onInsert={insertPath} onClose={() => setFilesOpen(false)} />
+      {/* Dialogs are drawn above everything (portals) and stack as layers:
+          a hidden tab keeps them open but draws them only when back. */}
+      {active && (
+        <>
+          {copyText !== null && <CopyMode text={copyText} onClose={() => setCopyText(null)} />}
+          {schemesOpen && <SchemeDialog onClose={() => setSchemesOpen(false)} />}
+          {portsOpen && info && <PortsDialog hostId={info.host_id} onClose={() => setPortsOpen(false)} />}
+          {shareOpen && !ended && <ShareDialog sessionId={id} onClose={() => setShareOpen(false)} />}
+          {filesOpen && !ended && (
+            <FilesDialog sessionId={id} start={filesPath.current} onPath={(p) => (filesPath.current = p)} onInsert={insertPath} onClose={() => setFilesOpen(false)} />
+          )}
+          {code.dialog}
+          {confirm}
+          {dialogs}
+        </>
       )}
-      {code.dialog}
-      {confirm}
-      {dialogs}
     </div>
   )
 }

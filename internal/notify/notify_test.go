@@ -205,3 +205,31 @@ func TestDeliverySkipsEndedLoginsAndRevokedUsers(t *testing.T) {
 		t.Fatal("subscription saved for a login that does not exist")
 	}
 }
+
+// A user gets at most rateMax alerts a minute (each tag once per minGap);
+// a note that replaces an earlier one is never held back.
+func TestSendLimitsAlertsPerUser(t *testing.T) {
+	n, _ := newTestNotifier(t, Options{})
+	ctx := context.Background()
+	sent := 0
+	for i := 0; i < 15; i++ {
+		if n.Send(ctx, 1, Note{Title: "t", Tag: "tag-" + string(rune('a'+i))}) {
+			sent++
+		}
+	}
+	if sent != n.rateMax {
+		t.Fatalf("%d of 15 sent, want %d", sent, n.rateMax)
+	}
+	if !n.Send(ctx, 2, Note{Title: "t", Tag: "x"}) {
+		t.Fatal("another user's alert was held back")
+	}
+	if !n.Send(ctx, 1, Note{Title: "t", Tag: "tag-a", Replace: true}) || !n.Send(ctx, 1, Note{Title: "t", Tag: "tag-a", Replace: true}) {
+		t.Fatal("a replacement was held back")
+	}
+	if n.Send(ctx, 2, Note{Title: "t", Tag: "x"}) {
+		t.Fatal("the same tag within minGap was sent twice")
+	}
+	if !n.Send(ctx, 2, Note{Title: "t", Tag: "x", Distinct: true}) {
+		t.Fatal("a distinct alert was collapsed")
+	}
+}

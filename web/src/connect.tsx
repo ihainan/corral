@@ -23,6 +23,7 @@ type Pending =
 export function useConnect(onOpen: (s: SessionInfo) => void): {
   // With a choice, it is opened; without, the host is asked what it has.
   connect: (h: Host, choice?: OpenChoice) => void
+  cancel: () => void // drops an attempt under way and its dialogs
   busyHost: number | null
   dialogs: ReactNode
 } {
@@ -151,7 +152,7 @@ export function useConnect(onOpen: (s: SessionInfo) => void): {
     )
   }
 
-  return { connect: (h, choice) => void open(h, undefined, undefined, choice), busyHost, dialogs }
+  return { connect: (h, choice) => void open(h, undefined, undefined, choice), cancel, busyHost, dialogs }
 }
 
 function PasswordDialog(props: { host: Host; onClose: () => void; onSubmit: (pw: string) => Promise<'done' | 'retry-password'> }) {

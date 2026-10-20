@@ -6,7 +6,7 @@ import type { I18nKey } from '../i18n'
 // custom keys take them (macro.ts); slash commands are typed and sent.
 
 export type PanelPage = 'ctrl' | 'herdr' | 'tmux' | 'claude' | 'codex'
-export type HerdrAct = 'new_tab' | 'split_right' | 'split_down' | 'zoom_toggle' | 'focus_left' | 'focus_right' | 'focus_up' | 'focus_down' | 'prev_tab' | 'next_tab' | 'agents'
+export type HerdrAct = 'new_tab' | 'split_right' | 'split_down' | 'zoom_toggle' | 'focus_left' | 'focus_right' | 'focus_up' | 'focus_down' | 'prev_tab' | 'next_tab'
 // label: shown as it is ('' for an icon, by the herdr action); desc: an i18n key.
 export type Shortcut = { label: string; desc: I18nKey } & ({ keys: string } | { herdr: HerdrAct })
 
@@ -39,7 +39,6 @@ export const shortcuts: Record<PanelPage, ShortcutGroup[]> = {
         { label: '', desc: 'sc.paneRight', herdr: 'focus_right' },
         { label: '', desc: 'sc.paneUp', herdr: 'focus_up' },
         { label: '', desc: 'sc.paneDown', herdr: 'focus_down' },
-        { label: '', desc: 'sc.agents', herdr: 'agents' },
       ],
     },
   ],

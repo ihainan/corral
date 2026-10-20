@@ -33,6 +33,28 @@ type Note struct {
 	URL     string `json:"url"`   // path inside Corral to open on tap
 	Tag     string `json:"tag"`   // same tag replaces the previous alert on the device
 	Quiet   bool   `json:"quiet"` // informational: no banner on platforms that support it
+	// Buttons, on the platforms that show them (not iOS): each answers with
+	// its Action, using Answer.
+	Actions []Action `json:"actions,omitempty"`
+	Answer  string   `json:"answer,omitempty"` // a single-use token the buttons answer with
+	// Replace takes the place of an earlier alert with the same tag that is
+	// no longer true (an agent that stopped waiting): devices only, never
+	// collapsed or limited.
+	Replace bool `json:"-"`
+	// Distinct is not collapsed with the last alert of its tag (another
+	// wait of the same agent); it still counts against the limit.
+	Distinct bool `json:"-"`
+	// Seq orders the alerts of a tag (set by Send): a device that gets an
+	// older one after a newer one (pushes can overtake each other) keeps
+	// showing the newer.
+	Seq int64 `json:"seq"`
+}
+
+// Action is a button on an alert.
+type Action struct {
+	Action  string `json:"action"` // the key it presses (see Reply)
+	Title   string `json:"title"`
+	TitleZh string `json:"title_zh,omitempty"`
 }
 
 // Push services browsers hand out endpoints for. The gateway only ever POSTs to
@@ -52,7 +74,10 @@ type Notifier struct {
 	mu            sync.Mutex
 	recent        map[string]time.Time // per user+tag, to collapse bursts
 	minGap        time.Duration
-	revoked       map[int64]uint64 // per user, bumped when access ends; older queued notes are dropped
+	sent          map[int64][]time.Time // per user, the alerts of the last rateWindow
+	rateMax       int                   // at most this many per user in rateWindow
+	lastSeq       int64                 // the last Note.Seq given
+	revoked       map[int64]uint64      // per user, bumped when access ends; older queued notes are dropped
 	sending       map[*sending]struct{}
 	loginValid    func(ctx context.Context, loginHash string) (bool, error)
 }
@@ -99,7 +124,7 @@ func New(ctx context.Context, st *store.Store, log *slog.Logger, opt Options) (*
 		// endpoint must not be able to bounce the gateway to another address.
 		http: &http.Client{Timeout: 15 * time.Second, Transport: &http.Transport{Proxy: http.ProxyFromEnvironment},
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
-		recent: map[string]time.Time{}, minGap: 20 * time.Second, revoked: map[int64]uint64{}, sending: map[*sending]struct{}{}, loginValid: opt.LoginValid,
+		recent: map[string]time.Time{}, minGap: 20 * time.Second, sent: map[int64][]time.Time{}, rateMax: 10, revoked: map[int64]uint64{}, sending: map[*sending]struct{}{}, loginValid: opt.LoginValid,
 	}, nil
 }
 
@@ -201,28 +226,62 @@ func (n *Notifier) CheckWebhook(raw string) error {
 	return ErrWebhookNotAllowed
 }
 
-// Send delivers a note to every channel the user set up. Bursts with the same
-// tag inside minGap are collapsed so a chatty program cannot flood a phone.
-func (n *Notifier) Send(ctx context.Context, userID int64, note Note) {
+// rateWindow is the window of the per-user limit (rateMax alerts in it).
+const rateWindow = time.Minute
+
+// Send delivers a note to every channel the user set up, and says whether it
+// is on its way: bursts with the same tag inside minGap are collapsed, and a
+// user gets at most rateMax alerts a minute, so chatty programs cannot flood
+// a phone. A note that replaces an earlier one passes both; a distinct one
+// passes the first.
+func (n *Notifier) Send(ctx context.Context, userID int64, note Note) bool {
 	key := fmt.Sprintf("%d|%s", userID, note.Tag)
 	n.mu.Lock()
 	now := time.Now()
-	if last, ok := n.recent[key]; ok && now.Sub(last) < n.minGap {
-		n.mu.Unlock()
-		return
+	if !note.Replace {
+		if last, ok := n.recent[key]; ok && now.Sub(last) < n.minGap && !note.Distinct {
+			n.mu.Unlock()
+			return false
+		}
+		recent := n.sent[userID][:0]
+		for _, t := range n.sent[userID] {
+			if now.Sub(t) < rateWindow {
+				recent = append(recent, t)
+			}
+		}
+		if len(recent) >= n.rateMax {
+			n.sent[userID] = recent
+			n.mu.Unlock()
+			n.log.Info("push: rate limited", "user", userID, "tag", note.Tag)
+			return false
+		}
+		n.sent[userID] = append(recent, now)
+		n.recent[key] = now
 	}
-	n.recent[key] = now
 	if len(n.recent) > 5000 {
 		for k, t := range n.recent {
 			if now.Sub(t) > time.Hour {
 				delete(n.recent, k)
 			}
 		}
+		for u, ts := range n.sent {
+			if len(ts) == 0 || now.Sub(ts[len(ts)-1]) > rateWindow {
+				delete(n.sent, u)
+			}
+		}
 	}
 	gen := n.revoked[userID]
+	// (Under the lock: the alerts of a tag get increasing numbers.)
+	if t := now.UnixNano(); t > n.lastSeq {
+		n.lastSeq = t
+	} else {
+		n.lastSeq++
+	}
+	note.Seq = n.lastSeq
 	n.mu.Unlock()
 
 	go n.deliver(context.WithoutCancel(ctx), userID, gen, note)
+	return true
 }
 
 // Revoke drops notes for a user that are queued but not yet sent and cancels
@@ -309,7 +368,7 @@ func (n *Notifier) deliver(ctx context.Context, userID int64, gen uint64, note N
 			return
 		}
 	}
-	if !n.stale(userID, gen) {
+	if !note.Replace && !n.stale(userID, gen) {
 		n.sendWebhook(ctx, userID, gen, note)
 	}
 }
