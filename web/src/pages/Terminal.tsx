@@ -28,7 +28,7 @@ import { FilesDialog } from '../terminal/FilesDialog'
 import { ShareDialog } from '../terminal/ShareDialog'
 import { useCode } from '../terminal/CodeDialog'
 import { onOpenRequest } from '../notifyopen'
-import { useSession } from '../app'
+import { useSession, VERSION_EVENT } from '../app'
 
 const isTouch = window.matchMedia('(pointer: coarse)').matches || navigator.maxTouchPoints > 0
 const isMac = /Mac|iPhone|iPad/.test(navigator.platform)
@@ -440,11 +440,16 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
     // the keyboard comes up with that tap, as for a text field.
     let promptTap: { x: number; y: number; at: number } | null = null // the press, while it is still a tap
     let promptArmed = false // during the mousedown that tap brings
+    // With #imedebug in the address, how taps were judged (see imeLog).
+    const tapLog = location.hash.includes('imedebug') ? (line: string) => setImeLines((l) => [...l.slice(-29), line]) : null
     if (ta) {
       const focus = ta.focus
       ta.focus = function (this: HTMLTextAreaElement, o?: FocusOptions) {
-        if (focusAsked || !quietTaps() || keysInUse() || promptArmed) focus.call(this, o)
+        const ok = focusAsked || !quietTaps() || keysInUse() || promptArmed
+        tapLog?.(`focus asked: ${ok ? 'allowed' : 'refused'}${promptArmed ? ' (input box)' : ''}`)
+        if (ok) focus.call(this, o)
       }
+      if (tapLog) for (const k of ['focus', 'blur']) ta.addEventListener(k, () => tapLog(k))
     }
     // A key while nothing has focus comes from a hardware keyboard: the field
     // in use takes focus (the composer when it is open). A character's text
@@ -480,11 +485,15 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
       // Decided as the press starts, from the screen as it is then, on a
       // live terminal (promptReady, checked again as it ends).
       const screenEl = el.querySelector('.xterm-screen')
+      if (tapLog && !promptReady()) tapLog(`tap: terminal not ready (open ${conn.isOpen()}, replaying ${replaying}, settling ${settling}, following ${!!following})`)
       if (e.pointerType !== 'mouse' && e.isPrimary && screenEl && promptReady()) {
         const r = screenEl.getBoundingClientRect()
         const col = Math.floor(((e.clientX - r.left) * term.cols) / r.width)
         const row = Math.floor(((e.clientY - r.top) * term.rows) / r.height)
-        if (inPromptBox(term, col, row)) {
+        const hit = inPromptBox(term, col, row)
+        const b = term.buffer.active
+        tapLog?.(`tap ${e.pointerType} at ${col},${row} cursor ${b.cursorX},${b.cursorY} input box: ${hit}`)
+        if (hit) {
           promptTap = { x: e.clientX, y: e.clientY, at: Date.now() }
           // Focused with its keyboard put away (iOS): it takes focus afresh.
           if (ta && document.activeElement === ta && keyboardWentDown) ta.blur()
@@ -500,12 +509,19 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
     // it then lets through xterm's request for focus in the mousedown that
     // follows (and nothing later).
     const onPromptMove = (e: PointerEvent) => {
-      if (promptTap && (!e.isPrimary || Math.abs(e.clientX - promptTap.x) > 8 || Math.abs(e.clientY - promptTap.y) > 8)) promptTap = null
+      if (promptTap && (!e.isPrimary || Math.abs(e.clientX - promptTap.x) > 8 || Math.abs(e.clientY - promptTap.y) > 8)) {
+        tapLog?.('tap moved: not a tap')
+        promptTap = null
+      }
     }
-    const onPromptCancel = () => (promptTap = null)
+    const onPromptCancel = () => {
+      if (promptTap) tapLog?.('tap cancelled')
+      promptTap = null
+    }
     // A live terminal, its backlog written, taking this window's input as shown.
     const promptReady = () => conn.isOpen() && !replaying && !settling && !watch && !composerRef.current && !(following && scale < 1)
     const onPromptMouse = () => {
+      tapLog?.(`mousedown${promptTap ? ' after an input-box tap' : ''}`)
       promptArmed = !!promptTap && Date.now() - promptTap.at < 1000 && promptReady()
       promptTap = null
       if (promptArmed) setTimeout(() => (promptArmed = false))
@@ -739,7 +755,8 @@ export function TerminalPage({ id, watch = false }: { id: string; watch?: boolea
       },
       // Every new socket: the herdr summary is old until this one sends its
       // own, and a replay begins.
-      onHello: () => {
+      onHello: (version) => {
+        window.dispatchEvent(new CustomEvent(VERSION_EVENT, { detail: version })) // (a deploy: this page may be old)
         replayRun++
         settling = true
         setHerdrFresh(false)

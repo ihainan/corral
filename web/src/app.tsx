@@ -33,6 +33,7 @@ export function App() {
   // (Learning who is signed in at startup is not a change and tells no one.)
   const meRef = useRef<Me | null>(null)
   const booted = useRef(false)
+  const loadedVersion = useRef('') // the gateway's version when this page loaded
   const setMe = useCallback((m: Me | null) => {
     if ((m?.id ?? null) !== (meRef.current?.id ?? null)) {
       bumpAuthGen()
@@ -62,6 +63,7 @@ export function App() {
     api<Bootstrap>('GET', '/api/bootstrap')
       .then((b) => {
         applyDefaultLanguage(b.default_language)
+        loadedVersion.current = b.version
         setBoot(b)
         setMe(b.user)
         booted.current = true
@@ -75,7 +77,10 @@ export function App() {
   useEffect(() => {
     if (!booted.current || !me) return
     api<Bootstrap>('GET', '/api/bootstrap')
-      .then((b) => setBoot((prev) => (prev ? { ...b, user: prev.user } : b)))
+      .then((b) => {
+        setBoot((prev) => (prev ? { ...b, user: prev.user } : b))
+        window.dispatchEvent(new CustomEvent(VERSION_EVENT, { detail: b.version }))
+      })
       .catch(() => {})
   }, [me?.id])
 
@@ -95,6 +100,7 @@ export function App() {
     <SessionCtx.Provider value={{ boot, me, setMe }}>
       <ToastProvider>
         <PushSync userId={me?.id} />
+        <UpdateNotice loaded={loadedVersion.current} />
         {route(path, boot, me)}
       </ToastProvider>
     </SessionCtx.Provider>
@@ -234,4 +240,40 @@ function Shell({ active, children }: { active: NavKey; children: ReactNode }) {
       </nav>
     </div>
   )
+}
+
+// A home-screen app comes back from the background without reloading, so
+// after a deploy it keeps running the old code. A newer gateway, seen when
+// the page becomes visible again or a terminal reconnects (VERSION_EVENT),
+// offers a reload, once.
+export const VERSION_EVENT = 'corral.gatewayVersion'
+function UpdateNotice({ loaded }: { loaded: string }) {
+  const toast = useToast()
+  useEffect(() => {
+    let told = false
+    let pending = false // seen while hidden: told once visible
+    const tell = () => {
+      if (told) return
+      if (document.visibilityState !== 'visible') return void (pending = true)
+      told = true
+      toast(t('app.updated'), false, { label: t('app.reload'), run: () => location.reload() })
+    }
+    const seen = (v: string) => {
+      if (loaded && v && v !== loaded) tell()
+    }
+    const onVersion = (e: Event) => seen((e as CustomEvent<string>).detail)
+    const onVisible = () => {
+      if (document.visibilityState !== 'visible') return
+      if (pending) tell()
+      if (told) return
+      api<Bootstrap>('GET', '/api/bootstrap').then((b) => seen(b.version)).catch(() => {})
+    }
+    window.addEventListener(VERSION_EVENT, onVersion)
+    document.addEventListener('visibilitychange', onVisible)
+    return () => {
+      window.removeEventListener(VERSION_EVENT, onVersion)
+      document.removeEventListener('visibilitychange', onVisible)
+    }
+  }, [loaded, toast])
+  return null
 }
