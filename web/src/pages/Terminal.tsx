@@ -33,6 +33,7 @@ import { FilesDialog } from '../terminal/FilesDialog'
 import { ShareDialog } from '../terminal/ShareDialog'
 import { useCode } from '../terminal/CodeDialog'
 import { onOpenRequest, takeTabs } from '../notifyopen'
+import { offerAlerts } from '../push'
 import { useSession, VERSION_EVENT } from '../app'
 
 const isTouch = window.matchMedia('(pointer: coarse)').matches || navigator.maxTouchPoints > 0
@@ -368,6 +369,21 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
     })
     return () => takeTabs(null)
   }, [tabs, watch])
+  // Agents seen here for the first time: alerts are offered for this device
+  // (when the browser has not been asked yet; see offerAlerts).
+  const hasAgents = !!herdr?.workspaces.some((w) => w.agents.length > 0)
+  useEffect(() => {
+    if (!hasAgents || !active || watch) return
+    void offerAlerts((ask) =>
+      toast(t('push.offer'), false, {
+        label: t('push.offerAction'),
+        run: () =>
+          void ask()
+            .then((st) => toast(st === 'on' ? t('push.offerOn') : st === 'denied' ? t('push.denied') : t('push.offerLater'), st === 'denied'))
+            .catch(() => toast(t('push.failed'), true)),
+      }),
+    )
+  }, [hasAgents, active, watch, toast])
   // A notification tapped while this page is open already.
   useEffect(() => {
     if (watch) return
@@ -1090,7 +1106,12 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
       typedGen++
       typedChar = !lastKeyAlt && !ie.isComposing && ie.inputType === 'insertText' && ie.data && [...ie.data].length === 1 ? ie.data : null
     }
-    const onPasteEv = () => (typedChar = null)
+    let pasting = false // a paste being sent (xterm sends it while the event runs)
+    const onPasteEv = () => {
+      typedChar = null
+      pasting = true
+      setTimeout(() => (pasting = false), 0)
+    }
     ta?.addEventListener('compositionstart', onCompStart)
     ta?.addEventListener('compositionend', onCompEnd)
     ta?.addEventListener('beforeinput', onBeforeInput)
@@ -1098,7 +1119,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
     // xterm's own (also capturing) included, so a claimed event stops here.
     el.addEventListener('input', onPrintableInput, true)
     ta?.addEventListener('blur', dropClaims)
-    ta?.addEventListener('paste', onPasteEv, true)
+    el.addEventListener('paste', onPasteEv, true) // (xterm takes pastes on its element too)
     const onUserInput = userInputEvent(term)
     let userData = false
     const userSub = onUserInput?.(() => (userData = true))
@@ -1116,6 +1137,12 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
       for (const t of ['keydown', 'keyup', 'beforeinput', 'input', 'compositionstart', 'compositionupdate', 'compositionend']) ta.addEventListener(t, describe, true)
     }
     const dataSub = term.onData((data) => {
+      // Input methods that space Latin text from Chinese (WeType, Sogou, on
+      // macOS too) still take the last committed Chinese as what precedes,
+      // after a newline: the first text of the new line comes as " 3". Only
+      // then is that space dropped; a space typed on its own comes alone,
+      // and a paste is left as it is.
+      if (conn.newLineAfterCJK && !pasting && /^ \S/.test(data) && !isTerminalReply(data)) data = data.slice(1)
       imeLog?.('→ sent ' + JSON.stringify(data))
       const typed = typedChar !== null && data === typedChar && !composing
       const fromUser = onUserInput ? userData : !isTerminalReply(data)
@@ -1318,7 +1345,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
       el.removeEventListener('pointermove', onPromptMove, true)
       el.removeEventListener('pointercancel', onPromptCancel, true)
       el.removeEventListener('mousedown', onPromptMouse, true)
-      ta?.removeEventListener('paste', onPasteEv, true)
+      el.removeEventListener('paste', onPasteEv, true)
       alive = false
       dataSub.dispose()
       clipSub.dispose()

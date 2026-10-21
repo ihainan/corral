@@ -114,6 +114,7 @@ export class TermConnection {
   send(data: string | Uint8Array): SendResult {
     const bytes = typeof data === 'string' ? new TextEncoder().encode(data) : data
     if (this.watch) return 'dropped'
+    if (typeof data === 'string') this.noteText(data)
     if (this.full) {
       this.h.onDropped?.()
       return 'dropped'
@@ -140,9 +141,29 @@ export class TermConnection {
   // usable now or earlier input still waits; nothing is queued.
   sendNow(data: string): boolean {
     if (this.watch || !this.isOpen() || this.queue.length > 0) return false
+    this.noteText(data)
     const bytes = new TextEncoder().encode(data)
     for (let i = 0; i < bytes.length; i += FRAME_MAX) this.ws!.send(bytes.subarray(i, i + FRAME_MAX))
     return true
+  }
+
+  // Whether the input sent last ended a line that ended in Chinese (or
+  // Japanese, Korean, full-width punctuation): input methods that space such
+  // text from Latin letters then put a space before what comes next, on the
+  // new line (see the terminal's onData). Keys and other sequences that type
+  // nothing leave it as it is.
+  newLineAfterCJK = false
+  private lastCJK = false
+  private noteText(data: string) {
+    // (The text before a newline in the same input counts, as the composer
+    // sends it: its message, then Enter.)
+    const ends = /[\r\n]$/.test(data)
+    const text = data.replace(/[\r\n]+$/, '').replace(/\x1b\[[\x20-\x3f]*[\x40-\x7e]|\x1b.|[\x00-\x1f\x7f]/gs, '')
+    if (text) this.lastCJK = /[\u1100-\u11ff\u2e80-\u9fff\uac00-\ud7af\uf900-\ufaff\ufe30-\ufe4f\uff00-\uffef]$/u.test(text)
+    if (ends) {
+      this.newLineAfterCJK = this.lastCJK
+      this.lastCJK = false
+    } else if (text) this.newLineAfterCJK = false
   }
 
   // retry tries again after the session was full.

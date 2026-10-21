@@ -21,6 +21,9 @@ before 1.0, a minor version may change configuration or behaviour (said here whe
 - Programs that follow the terminal's colours (Claude Code's "Auto" theme,
   herdr for its panes) are told when the terminal scheme turns dark or light
   (mode 2031), so they switch with it.
+- Once agents are seen in a terminal, alerts are offered for the device (a
+  button that asks the browser), when it has not been asked yet; at most three
+  times, a week apart.
 - Uploads from the terminal or the composer show their progress and can be
   stopped; closing the file panel asks first while files are still going up.
 
@@ -41,7 +44,8 @@ before 1.0, a minor version may change configuration or behaviour (said here whe
   (Claude Code's bottom line) was partly hidden under the key bar or the
   window's edge.
 - After a newline, input methods that space Chinese from Latin text
-  (WeType) no longer put a space before what is typed next.
+  (WeType, Sogou; on iOS and macOS) no longer put a space before what is
+  typed next.
 - The composer keeps its draft when you leave the terminal and come back,
   and no longer capitalises or "corrects" commands on iOS.
 - On touch screens the terminal no longer leaves an empty strip on the right

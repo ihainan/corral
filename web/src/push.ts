@@ -1,4 +1,5 @@
 import { api } from './api'
+import { local } from './storage'
 
 export type PushState = 'unsupported' | 'needs-home-screen' | 'denied' | 'off' | 'on'
 
@@ -70,4 +71,29 @@ export async function disablePush(): Promise<void> {
   if (!sub) return
   await api('DELETE', '/api/push/subscriptions', { endpoint: sub.endpoint }).catch(() => {})
   await sub.unsubscribe()
+}
+
+// offerAlerts asks, now and then, whether this device should get alerts:
+// when an agent is first seen here and the browser has not been asked yet
+// (permission neither granted nor refused). The prompt itself must come from
+// a tap (iOS), so what is shown is a toast whose button asks. At most three
+// times, a week apart; the setting stays in the settings page.
+const OFFER_KEY = 'corral.alertOffer' // "<times>:<last ms>"
+const OFFER_EVERY = 7 * 24 * 3600 * 1000
+let offeredNow = false // once per page load
+export async function offerAlerts(show: (ask: () => Promise<PushState>) => void) {
+  if (offeredNow || !('Notification' in window) || Notification.permission !== 'default') return
+  const [times, last] = (local.get(OFFER_KEY) ?? '0:0').split(':').map(Number)
+  if (times >= 3 || Date.now() - last < OFFER_EVERY) return
+  offeredNow = true
+  // Counted before anything is awaited (another tab may be about to offer
+  // too), given back if it turns out not to be offered.
+  const before = local.get(OFFER_KEY)
+  local.set(OFFER_KEY, `${times + 1}:${Date.now()}`)
+  const giveBack = () => (before === null ? local.remove(OFFER_KEY) : local.set(OFFER_KEY, before))
+  const st = await pushState().catch((): PushState => 'unsupported')
+  const info = st === 'off' ? await api<{ enabled: boolean; public_key?: string }>('GET', '/api/push').catch(() => null) : null
+  if (!info?.enabled || !info.public_key) return giveBack()
+  const key = info.public_key
+  show(() => enablePush(key))
 }
