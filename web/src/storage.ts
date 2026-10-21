@@ -24,3 +24,28 @@ export const local = {
     }
   },
 }
+
+// This tab's own storage: kept across a reload, gone when the tab is closed.
+export const session = {
+  get(key: string): string | null {
+    try {
+      return window.sessionStorage.getItem(key)
+    } catch {
+      return null
+    }
+  },
+  set(key: string, value: string) {
+    try {
+      window.sessionStorage.setItem(key, value)
+    } catch {
+      /* unavailable or full */
+    }
+  },
+  remove(key: string) {
+    try {
+      window.sessionStorage.removeItem(key)
+    } catch {
+      /* unavailable */
+    }
+  },
+}

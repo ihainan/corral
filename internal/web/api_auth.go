@@ -27,10 +27,13 @@ type meView struct {
 	DisplayName string `json:"display_name"`
 	Role        string `json:"role"`
 	TOTP        bool   `json:"totp"`
+	// The password was set by an administrator: nothing but changing it (and
+	// signing out) is allowed until then.
+	MustChangePassword bool `json:"must_change_password,omitempty"`
 }
 
 func viewMe(u *store.User) *meView {
-	return &meView{ID: u.ID, Username: u.Username, DisplayName: u.DisplayName, Role: u.Role, TOTP: u.TOTP}
+	return &meView{ID: u.ID, Username: u.Username, DisplayName: u.DisplayName, Role: u.Role, TOTP: u.TOTP, MustChangePassword: u.MustChangePassword}
 }
 
 func (s *Server) apiBootstrap(w http.ResponseWriter, r *http.Request) {
@@ -51,8 +54,9 @@ func (s *Server) apiBootstrap(w http.ResponseWriter, r *http.Request) {
 	}
 	if u := currentUser(r); u != nil {
 		out["user"] = viewMe(u)
-		// Recordings stay reachable after recording was turned off.
-		if !s.cfg.Recording {
+		// Recordings stay reachable after recording was turned off. (Not said
+		// to an account that must choose its password first.)
+		if !s.cfg.Recording && !u.MustChangePassword {
 			owner := u.ID
 			if u.IsAdmin() {
 				owner = 0
@@ -570,6 +574,10 @@ func (s *Server) writeAccountError(w http.ResponseWriter, r *http.Request, err e
 		writeError(w, http.StatusConflict, "setup_done", "setup is already complete")
 	case errors.Is(err, auth.ErrBusy):
 		writeError(w, http.StatusServiceUnavailable, "busy", "the server is busy, try again in a moment")
+	case errors.Is(err, auth.ErrSamePassword):
+		writeError(w, http.StatusUnprocessableEntity, "same_password", err.Error())
+	case errors.Is(err, auth.ErrBadRole):
+		writeError(w, http.StatusBadRequest, "invalid_field", err.Error())
 	default:
 		s.internalError(w, r, err)
 	}
@@ -661,6 +669,8 @@ func (s *Server) apiAdminResetPassword(w http.ResponseWriter, r *http.Request) {
 	}
 	var b struct {
 		Password string `json:"password"`
+		// Whether the user must choose their own at the next sign-in; absent: yes.
+		MustChange *bool `json:"must_change"`
 	}
 	if err := readJSON(r, &b); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
@@ -671,12 +681,42 @@ func (s *Server) apiAdminResetPassword(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found", "no such user")
 		return
 	}
-	if err := s.auth.ResetPassword(r.Context(), id, b.Password); err != nil {
+	mustChange := b.MustChange == nil || *b.MustChange
+	if err := s.auth.ResetPassword(r.Context(), id, b.Password, mustChange); err != nil {
 		s.writeAccountError(w, r, err)
 		return
 	}
-	s.audit(r, "user.password_reset", target.Username, nil)
+	s.audit(r, "user.password_reset", target.Username, map[string]any{"must_change": mustChange})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// POST /api/admin/users: an account made by an administrator, with a first
+// password the user replaces at the first sign-in (unless must_change is false).
+func (s *Server) apiAdminCreateUser(w http.ResponseWriter, r *http.Request) {
+	var b struct {
+		Username    string `json:"username"`
+		DisplayName string `json:"display_name"`
+		Password    string `json:"password"`
+		Role        string `json:"role"`
+		MustChange  *bool  `json:"must_change"`
+	}
+	if err := readJSON(r, &b); err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	name := strings.TrimSpace(b.DisplayName)
+	if len([]rune(name)) > 64 {
+		writeError(w, http.StatusBadRequest, "invalid", "display name is too long")
+		return
+	}
+	mustChange := b.MustChange == nil || *b.MustChange
+	u, err := s.auth.CreateUser(r.Context(), strings.TrimSpace(b.Username), name, b.Password, b.Role, mustChange)
+	if err != nil {
+		s.writeAccountError(w, r, err)
+		return
+	}
+	s.audit(r, "user.create", u.Username, map[string]any{"role": u.Role, "must_change": mustChange})
+	writeJSON(w, http.StatusCreated, adminUserView{User: u})
 }
 
 func (s *Server) apiAdminCreateInvite(w http.ResponseWriter, r *http.Request) {

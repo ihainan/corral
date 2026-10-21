@@ -21,6 +21,9 @@ type User struct {
 	CreatedAt         int64  `json:"created_at"`
 	PasswordChangedAt int64  `json:"password_changed_at"`
 	TOTP              bool   `json:"totp"` // two-step sign-in is on
+	// The password was set by an administrator: the account must choose its
+	// own before anything else (see the web server's request guard).
+	MustChangePassword bool `json:"must_change_password"`
 
 	passwordHash string
 	failedLogins int
@@ -34,17 +37,18 @@ func (u *User) IsAdmin() bool        { return u.Role == RoleAdmin }
 
 var ErrUsernameTaken = errors.New("username taken")
 
-const userCols = `id, username, display_name, password_hash, role, disabled, failed_logins, locked_until, created_at, password_changed_at, totp_ciphertext IS NOT NULL`
+const userCols = `id, username, display_name, password_hash, role, disabled, failed_logins, locked_until, created_at, password_changed_at, totp_ciphertext IS NOT NULL, must_change_password`
 
 func scanUser(row interface{ Scan(...any) error }) (*User, error) {
 	u := &User{}
-	var disabled int
+	var disabled, mustChange int
 	err := row.Scan(&u.ID, &u.Username, &u.DisplayName, &u.passwordHash, &u.Role, &disabled,
-		&u.failedLogins, &u.lockedUntil, &u.CreatedAt, &u.PasswordChangedAt, &u.TOTP)
+		&u.failedLogins, &u.lockedUntil, &u.CreatedAt, &u.PasswordChangedAt, &u.TOTP, &mustChange)
 	if err != nil {
 		return nil, notFound(err)
 	}
 	u.Disabled = disabled != 0
+	u.MustChangePassword = mustChange != 0
 	return u, nil
 }
 
@@ -55,10 +59,16 @@ func (s *Store) CountUsers(ctx context.Context) (int, error) {
 }
 
 func (s *Store) CreateUser(ctx context.Context, username, displayName, passwordHash, role string) (*User, error) {
+	return s.CreateUserWith(ctx, username, displayName, passwordHash, role, false)
+}
+
+// CreateUserWith also says whether the account must choose its own password
+// before anything else (an administrator chose this one).
+func (s *Store) CreateUserWith(ctx context.Context, username, displayName, passwordHash, role string, mustChange bool) (*User, error) {
 	now := s.unix()
 	res, err := s.db.ExecContext(ctx,
-		`INSERT INTO users (username, display_name, password_hash, role, created_at, password_changed_at) VALUES (?, ?, ?, ?, ?, ?)`,
-		username, displayName, passwordHash, role, now, now)
+		`INSERT INTO users (username, display_name, password_hash, role, created_at, password_changed_at, must_change_password) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		username, displayName, passwordHash, role, now, now, boolInt(mustChange))
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE") {
 			return nil, ErrUsernameTaken
@@ -121,7 +131,7 @@ func (s *Store) ResetLoginFailures(ctx context.Context, id int64) error {
 
 func (s *Store) SetPassword(ctx context.Context, id int64, hash string) error {
 	return affectedOrNotFound(s.db.ExecContext(ctx,
-		`UPDATE users SET password_hash = ?, password_changed_at = ?, failed_logins = 0, locked_until = 0 WHERE id = ?`, hash, s.unix(), id))
+		`UPDATE users SET password_hash = ?, password_changed_at = ?, failed_logins = 0, locked_until = 0, must_change_password = 0 WHERE id = ?`, hash, s.unix(), id))
 }
 
 // ChangePasswordIf replaces the password only if it is still the one the
@@ -142,7 +152,7 @@ func (s *Store) ChangePasswordIf(ctx context.Context, userID int64, verifiedHash
 		return ErrNotFound
 	}
 	if err := affectedOrNotFound(tx.ExecContext(ctx,
-		`UPDATE users SET password_hash = ?, password_changed_at = ?, failed_logins = 0, locked_until = 0
+		`UPDATE users SET password_hash = ?, password_changed_at = ?, failed_logins = 0, locked_until = 0, must_change_password = 0
 		 WHERE id = ? AND password_hash = ? AND disabled = 0`, newHash, s.unix(), userID, verifiedHash)); err != nil {
 		return err
 	}
@@ -158,15 +168,16 @@ func (s *Store) ChangePasswordIf(ctx context.Context, userID int64, verifiedHash
 }
 
 // ResetPasswordTx sets a new password and removes every login of the user in
-// one transaction (the admin reset path).
-func (s *Store) ResetPasswordTx(ctx context.Context, userID int64, hash string) error {
+// one transaction (the admin reset path); mustChange: the account must then
+// choose its own.
+func (s *Store) ResetPasswordTx(ctx context.Context, userID int64, hash string, mustChange bool) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 	if err := affectedOrNotFound(tx.ExecContext(ctx,
-		`UPDATE users SET password_hash = ?, password_changed_at = ?, failed_logins = 0, locked_until = 0 WHERE id = ?`, hash, s.unix(), userID)); err != nil {
+		`UPDATE users SET password_hash = ?, password_changed_at = ?, failed_logins = 0, locked_until = 0, must_change_password = ? WHERE id = ?`, hash, s.unix(), boolInt(mustChange), userID)); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM login_sessions WHERE user_id = ?`, userID); err != nil {
@@ -554,4 +565,11 @@ func (s *Store) CountRecoveryCodes(ctx context.Context, userID int64) (int, erro
 	var n int
 	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM recovery_codes WHERE user_id = ?`, userID).Scan(&n)
 	return n, err
+}
+
+func boolInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }

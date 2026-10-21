@@ -6,7 +6,7 @@ import { freezePrefs, resetPrefsSession, sendPendingPrefs, syncPrefsFromServer }
 import { match, navigate, usePath, linkHandler } from './router'
 import { BrandMark, ToastProvider, useToast } from './components/ui'
 import { disablePush, syncPush } from './push'
-import { LoginPage, SetupPage, InvitePage } from './pages/Auth'
+import { LoginPage, NewPasswordPage, SetupPage, InvitePage } from './pages/Auth'
 import { HostsPage } from './pages/Hosts'
 import { HostEditPage } from './pages/HostEdit'
 import { KeysPage } from './pages/Keys'
@@ -15,7 +15,7 @@ import { AdminUsersPage, AdminAuditPage } from './pages/Admin'
 import { RecordingPlayerPage, RecordingsPage } from './pages/Recordings'
 import { TerminalPage } from './pages/Terminal'
 import { TerminalTabs, useTabsMode } from './pages/TerminalTabs'
-import { clearDrafts } from './terminal/drafts'
+import { draftsFor } from './terminal/drafts'
 
 interface Session {
   boot: Bootstrap
@@ -52,7 +52,7 @@ export function App() {
   const setMe = useCallback((m: Me | null) => {
     if ((m?.id ?? null) !== (meRef.current?.id ?? null)) {
       bumpAuthGen()
-      clearDrafts() // (the account's composer drafts end with it, a lapsed sign-in too)
+      draftsFor(m?.id ?? null) // (the account's composer drafts end with it, a lapsed sign-in too; this tab keeps the user's own)
       alertsFor(m?.id ?? null)
       try {
         if (booted.current) localStorage.setItem(AUTH_EVENT, String(Date.now()))
@@ -86,7 +86,7 @@ export function App() {
         setMe(b.user)
         alertsFor(b.user?.id ?? null) // (also signed out while no page was open)
         booted.current = true
-        if (b.user) syncPrefsFromServer(b.user.id)
+        if (b.user && !b.user.must_change_password) syncPrefsFromServer(b.user.id)
       })
       .catch(() => setError(true))
   }, [])
@@ -101,7 +101,7 @@ export function App() {
         window.dispatchEvent(new CustomEvent(VERSION_EVENT, { detail: b.version }))
       })
       .catch(() => {})
-  }, [me?.id])
+  }, [me?.id, me?.must_change_password]) // (also once a required password change is done: it was not told before)
 
   if (error) {
     return (
@@ -118,7 +118,7 @@ export function App() {
   return (
     <SessionCtx.Provider value={{ boot, me, setMe }}>
       <ToastProvider>
-        <PushSync userId={me?.id} />
+        <PushSync userId={me?.must_change_password ? undefined : me?.id} />
         <UpdateNotice loaded={loadedVersion.current} />
         {route(path, boot, me, tabs)}
       </ToastProvider>
@@ -161,6 +161,8 @@ function Redirect({ to }: { to: string }) {
 
 function route(path: string, boot: Bootstrap, me: Me | null, tabs: boolean): ReactNode {
   if (path === '/setup') return boot.setup_needed ? <SetupPage /> : <Redirect to="/login" />
+  // A password an administrator set: the user's own first, wherever they were going.
+  if (me?.must_change_password) return <NewPasswordPage />
   let m = match('/invite/:token', path)
   if (m) return <InvitePage token={m.token} />
   if (path === '/login') return me ? <Redirect to={nextPath()} /> : <LoginPage />

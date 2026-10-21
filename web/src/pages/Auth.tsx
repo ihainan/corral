@@ -38,7 +38,7 @@ export function LoginPage() {
   const [challenge, setChallenge] = useState('') // set once the password was right and a code is due
   const signedIn = (user: Me) => {
     setMe(user)
-    syncPrefsFromServer(user.id)
+    if (!user.must_change_password) syncPrefsFromServer(user.id)
     navigate(nextPath(), true)
   }
   const submit = async (e: FormEvent) => {
@@ -245,6 +245,62 @@ export function InvitePage({ token }: { token: string }) {
           navigate('/', true)
         }}
       />
+    </AuthFrame>
+  )
+}
+
+// An account whose password an administrator set (made directly, or reset):
+// nothing else until the user chooses their own.
+export function NewPasswordPage() {
+  const { me, setMe } = useSession()
+  const [current, setCurrent] = useState('')
+  const [next, setNext] = useState('')
+  const [again, setAgain] = useState('')
+  const [error, setError] = useState<{ field?: string; text: string } | null>(null)
+  const [busy, setBusy] = useState(false)
+  const submit = async (e: FormEvent) => {
+    e.preventDefault()
+    if (busy) return
+    if (next !== again) return setError({ field: 'again', text: t('newpw.mismatch') })
+    setBusy(true)
+    setError(null)
+    try {
+      await api('POST', '/api/me/password', { current, next })
+      const u = await api<Me>('GET', '/api/me')
+      setMe(u)
+      syncPrefsFromServer(u.id)
+    } catch (err) {
+      const code = err instanceof ApiError ? err.code : ''
+      setError({ field: code === 'wrong_password' ? 'current' : code === 'weak_password' || code === 'same_password' ? 'next' : undefined, text: errorText(err) })
+      setBusy(false)
+    }
+  }
+  // (Signed out only once the gateway says so.)
+  const signOut = async () => {
+    try {
+      await api('POST', '/api/logout')
+      setMe(null)
+    } catch (err) {
+      setError({ text: errorText(err) })
+    }
+  }
+  const fe = (f: string) => (error?.field === f ? error.text : undefined)
+  return (
+    <AuthFrame title={t('newpw.title')} intro={t('newpw.intro', { name: me?.display_name || me?.username || '' })}>
+      <form className="form" onSubmit={submit} noValidate>
+        <Field label={t('newpw.current')} htmlFor="np-cur" error={fe('current')}>
+          <input id="np-cur" className="input" type="password" autoComplete="current-password" value={current} onChange={(e) => setCurrent(e.target.value)} required aria-invalid={!!fe('current')} />
+        </Field>
+        <Field label={t('settings.newPassword')} htmlFor="np-new" hint={t('setup.passwordHint')} error={fe('next')}>
+          <input id="np-new" className="input" type="password" autoComplete="new-password" value={next} onChange={(e) => setNext(e.target.value)} required aria-invalid={!!fe('next')} />
+        </Field>
+        <Field label={t('newpw.again')} htmlFor="np-again" error={fe('again')}>
+          <input id="np-again" className="input" type="password" autoComplete="new-password" value={again} onChange={(e) => setAgain(e.target.value)} required aria-invalid={!!fe('again')} />
+        </Field>
+        {error && !error.field && <p className="err" role="alert">{error.text}</p>}
+        <button className="btn btn-primary btn-block" disabled={busy || !current || !next || !again}>{t('newpw.submit')}</button>
+        <button type="button" className="btn btn-ghost btn-block" onClick={() => void signOut()}>{t('newpw.signOut')}</button>
+      </form>
     </AuthFrame>
   )
 }

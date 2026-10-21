@@ -35,8 +35,15 @@ before 1.0, a minor version may change configuration or behaviour (said here whe
   pinched they still size the font.
 - A long paste into the composer shows as a label ("[Pasted text #1, 120
   lines]") and is sent in full.
+- Administrators can create an account directly (Users → Create directly):
+  a user name and a first password to hand over. Such an account, and one
+  whose password an administrator reset, must choose its own password at its
+  next sign-in before anything else (an option of both).
 
 ### Changed
+- The composer stays open or closed per session across reloads (a new session
+  follows the last choice), and its draft survives a reload of the same
+  browser tab (kept in that tab only, gone when it is closed).
 - On a computer, Enter in the composer sends and Shift+Enter starts a new
   line, as in the agents' own input boxes; a setting turns Enter back into a
   new line (⌘/Ctrl+Enter sends). The keys are shown by the send button.

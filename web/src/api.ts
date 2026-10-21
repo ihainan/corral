@@ -6,6 +6,7 @@ export interface Me {
   display_name: string
   role: 'admin' | 'member'
   totp?: boolean // two-step sign-in is on
+  must_change_password?: boolean // an administrator set the password: choose one's own first
 }
 
 export interface Bootstrap {

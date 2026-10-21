@@ -34,6 +34,7 @@ import { ShareDialog } from '../terminal/ShareDialog'
 import { useCode } from '../terminal/CodeDialog'
 import { onOpenRequest, takeTabs } from '../notifyopen'
 import { offerAlerts } from '../push'
+import { adoptComposer, composerWasOpen, rememberComposer } from '../terminal/composerOpen'
 import { useSession, VERSION_EVENT } from '../app'
 
 const isTouch = window.matchMedia('(pointer: coarse)').matches || navigator.maxTouchPoints > 0
@@ -251,7 +252,11 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
   const [ctrl, setCtrl] = useState<ModState>('off')
   const [alt, setAlt] = useState<ModState>('off')
   const [fn, setFn] = useState(false)
-  const [composer, setComposer] = useState(false)
+  // Open again where it was left open (see composerOpen.ts); never for a watcher.
+  const [composer, setComposer] = useState(() => !watch && composerWasOpen(id))
+  useEffect(() => {
+    if (!watch) adoptComposer(id, composerWasOpen(id))
+  }, [id, watch])
   const [draft, setDraft] = useState(() => (watch ? '' : getDraft(id)))
   // Going through the history (Up/Down at the box's start/end): the entry
   // shown, and the draft there when it started (back after the newest entry).
@@ -1927,17 +1932,20 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
     if (watch) return
     if (composer) {
       setComposer(false)
+      rememberComposer(id, false)
       if (!isTouch) termRef.current?.focus()
       return
     }
     // Mount and focus inside the tap itself: iOS only raises the keyboard for a
     // focus that happens during the user's gesture.
     flushSync(() => setComposer(true))
+    rememberComposer(id, true)
     composerRef.current?.focus()
   }
   openComposerRef.current = () => {
     if (ended || watch) return
     flushSync(() => setComposer(true))
+    rememberComposer(id, true)
     composerRef.current?.focus()
   }
 

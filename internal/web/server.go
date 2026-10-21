@@ -222,6 +222,7 @@ func (s *Server) registerRoutes() {
 	s.handle("PUT /api/admin/users/{id}", AdminOnly, s.apiAdminUpdateUser)
 	s.handle("POST /api/admin/users/{id}/password", AdminOnly, s.apiAdminResetPassword)
 	s.handle("POST /api/admin/users/{id}/totp/reset", AdminOnly, s.apiAdminResetTOTP)
+	s.handle("POST /api/admin/users", AdminOnly, s.apiAdminCreateUser)
 	s.handle("POST /api/admin/invites", AdminOnly, s.apiAdminCreateInvite)
 	s.handle("GET /api/admin/audit", AdminOnly, s.apiAdminAudit)
 
@@ -267,6 +268,12 @@ func (s *Server) guardRequest(access Access, h http.HandlerFunc) http.Handler {
 			ctx = context.WithValue(ctx, loginKey, hash)
 			r = r.WithContext(ctx)
 		}
+		// A password someone else set: only changing it, seeing who one is and
+		// signing out, until it is changed.
+		if err == nil && access != Public && u.MustChangePassword && !mustChangeAllowed[r.Pattern] {
+			writeError(w, http.StatusForbidden, "password_change_required", "choose your own password first")
+			return
+		}
 		switch access {
 		case SignedIn:
 			if err != nil {
@@ -285,6 +292,13 @@ func (s *Server) guardRequest(access Access, h http.HandlerFunc) http.Handler {
 		}
 		h(w, r)
 	})
+}
+
+// The routes an account that must change its password may use.
+var mustChangeAllowed = map[string]bool{
+	"GET /api/me":           true,
+	"POST /api/me/password": true,
+	"POST /api/logout":      true,
 }
 
 func (s *Server) bodyLimit(r *http.Request) int64 {

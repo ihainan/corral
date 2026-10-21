@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
-import { KeySquare, MoreHorizontal, ScrollText, Shield, Smartphone, UserCheck, UserPlus, UserRound, UserX } from 'lucide-react'
-import { api, errorText, type AdminUser, type AuditEntry } from '../api'
+import { KeySquare, MoreHorizontal, ScrollText, Send, Shield, Smartphone, UserCheck, UserPlus, UserRound, UserX } from 'lucide-react'
+import { api, ApiError, errorText, type AdminUser, type AuditEntry } from '../api'
 import { relTime, t } from '../i18n'
 import { useSession } from '../app'
 import { Confirm, CopyButton, Dialog, EmptyState, Field, LoadError, Menu, useToast } from '../components/ui'
@@ -37,8 +37,12 @@ export function AdminUsersPage() {
       <div className="page-head">
         <h1>{t('admin.users')}</h1>
         <div className="spacer" />
-        <button className="btn btn-primary" onClick={() => setDialog(<InviteDialog onClose={() => setDialog(null)} />)}>
+        <button className="btn" onClick={() => setDialog(<CreateUserDialog onClose={() => setDialog(null)} onCreated={load} />)}>
           <UserPlus size={16} />
+          {t('admin.create')}
+        </button>
+        <button className="btn btn-primary" onClick={() => setDialog(<InviteDialog onClose={() => setDialog(null)} />)}>
+          <Send size={16} />
           {t('admin.invite')}
         </button>
       </div>
@@ -194,9 +198,91 @@ function InviteDialog({ onClose }: { onClose: () => void }) {
   )
 }
 
+// A first password for an account made here, from an alphabet without look-alikes.
+function newPassword(): string {
+  const abc = 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+  return Array.from(crypto.getRandomValues(new Uint32Array(14)), (n) => abc[n % abc.length]).join('')
+}
+
+// An account made by the administrator, without an invite: its user name, a
+// first password (shown once afterwards, to hand over) which the user
+// replaces at the first sign-in unless that is turned off.
+function CreateUserDialog({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
+  const [username, setUsername] = useState('')
+  const [name, setName] = useState('')
+  const [role, setRole] = useState<'member' | 'admin'>('member')
+  const [pw, setPw] = useState(newPassword)
+  const [mustChange, setMustChange] = useState(true)
+  const [done, setDone] = useState<{ username: string; password: string } | null>(null)
+  const [error, setError] = useState<{ field?: string; text: string } | null>(null)
+  const [busy, setBusy] = useState(false)
+  const submit = async (e: FormEvent) => {
+    e.preventDefault()
+    if (busy) return
+    setBusy(true)
+    setError(null)
+    try {
+      await api('POST', '/api/admin/users', { username: username.trim(), display_name: name.trim(), password: pw, role, must_change: mustChange })
+      setDone({ username: username.trim(), password: pw })
+      onCreated()
+    } catch (err) {
+      const code = err instanceof ApiError ? err.code : ''
+      setError({ field: code === 'bad_username' || code === 'username_taken' ? 'username' : code === 'weak_password' ? 'password' : undefined, text: errorText(err) })
+      setBusy(false)
+    }
+  }
+  const fe = (f: string) => (error?.field === f ? error.text : undefined)
+  if (done) {
+    const text = t('admin.createdText', { username: done.username, password: done.password })
+    return (
+      <Dialog title={t('admin.create')} onClose={onClose}>
+        <p className="lead">{mustChange ? t('admin.createdBody') : t('admin.createdBodyKeep')}</p>
+        <div className="pubkey"><code className="pre-line">{text}</code><CopyButton text={text} /></div>
+        <div className="dialog-actions"><button className="btn btn-primary" onClick={onClose}>{t('common.close')}</button></div>
+      </Dialog>
+    )
+  }
+  return (
+    <Dialog title={t('admin.create')} onClose={onClose}>
+      <form className="form" onSubmit={submit} noValidate>
+        <p className="lead">{t('admin.createLead')}</p>
+        <Field label={t('login.username')} htmlFor="cu-user" hint={t('admin.usernameHint')} error={fe('username')}>
+          <input id="cu-user" className="input" value={username} onChange={(e) => setUsername(e.target.value)} autoCapitalize="none" autoCorrect="off" spellCheck={false} autoComplete="off" required aria-invalid={!!fe('username')} />
+        </Field>
+        <Field label={t('setup.displayName')} htmlFor="cu-name" optional>
+          <input id="cu-name" className="input" value={name} maxLength={64} onChange={(e) => setName(e.target.value)} />
+        </Field>
+        <div className="field">
+          <span className="field-label" id="cu-role">{t('admin.inviteRole')}</span>
+          <div className="seg" role="group" aria-labelledby="cu-role">
+            <button type="button" aria-pressed={role === 'member'} onClick={() => setRole('member')}>{t('admin.roleMember')}</button>
+            <button type="button" aria-pressed={role === 'admin'} onClick={() => setRole('admin')}>{t('admin.roleAdmin')}</button>
+          </div>
+        </div>
+        <Field label={t('admin.firstPassword')} htmlFor="cu-pw" hint={t('setup.passwordHint')} error={fe('password')}>
+          <div className="input-row">
+            <input id="cu-pw" className="input mono" value={pw} onChange={(e) => setPw(e.target.value)} autoComplete="off" autoCapitalize="none" autoCorrect="off" spellCheck={false} required aria-invalid={!!fe('password')} />
+            <button type="button" className="btn" onClick={() => setPw(newPassword())}>{t('admin.generate')}</button>
+          </div>
+        </Field>
+        <label className="check">
+          <input type="checkbox" checked={mustChange} onChange={(e) => setMustChange(e.target.checked)} />
+          <span>{t('admin.mustChange')}</span>
+        </label>
+        {error && !error.field && <p className="err" role="alert">{error.text}</p>}
+        <div className="dialog-actions">
+          <button type="button" className="btn" onClick={onClose}>{t('common.cancel')}</button>
+          <button className="btn btn-primary" disabled={busy || !username.trim() || !pw}>{t('admin.createSubmit')}</button>
+        </div>
+      </form>
+    </Dialog>
+  )
+}
+
 function ResetDialog({ user, onClose }: { user: AdminUser; onClose: () => void }) {
   const toast = useToast()
   const [pw, setPw] = useState('')
+  const [mustChange, setMustChange] = useState(true)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
   const submit = async (e: FormEvent) => {
@@ -204,7 +290,7 @@ function ResetDialog({ user, onClose }: { user: AdminUser; onClose: () => void }
     if (busy) return
     setBusy(true)
     try {
-      await api('POST', `/api/admin/users/${user.id}/password`, { password: pw })
+      await api('POST', `/api/admin/users/${user.id}/password`, { password: pw, must_change: mustChange })
       toast(t('settings.saved'))
       onClose()
     } catch (err) {
@@ -219,6 +305,10 @@ function ResetDialog({ user, onClose }: { user: AdminUser; onClose: () => void }
         <Field label={t('settings.newPassword')} htmlFor="rp-pw" hint={t('setup.passwordHint')} error={error}>
           <input id="rp-pw" className="input" type="password" autoComplete="new-password" minLength={8} value={pw} onChange={(e) => setPw(e.target.value)} required />
         </Field>
+        <label className="check">
+          <input type="checkbox" checked={mustChange} onChange={(e) => setMustChange(e.target.checked)} />
+          <span>{t('admin.mustChange')}</span>
+        </label>
         <div className="dialog-actions">
           <button type="button" className="btn" onClick={onClose}>{t('common.cancel')}</button>
           <button className="btn btn-primary" disabled={busy}>{t('admin.resetPassword')}</button>

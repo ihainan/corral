@@ -1,13 +1,18 @@
+import { session as tabStore } from '../storage'
+
 // The composer's memory: drafts by session, so one survives leaving the
 // terminal page and coming back, and what was sent, to bring back; and the
-// reply dialog's unsent answers. Kept in this page's memory only (any of
-// them may hold secrets): a reload or a change of account ends them.
+// reply dialog's unsent answers. Any of them may hold secrets: drafts (with
+// the pastes they hold) are also kept in this browser tab's own storage, so a
+// reload keeps them and closing the tab ends them; the rest is in this page's
+// memory only. A change of account ends all of it.
 const drafts = new Map<string, string>()
 
 export const getDraft = (session: string) => drafts.get(session) ?? ''
 export function keepDraft(session: string, text: string) {
   if (text) drafts.set(session, text)
   else drafts.delete(session)
+  saveSoon()
 }
 
 // Sent messages, oldest first, across this account's sessions.
@@ -51,6 +56,7 @@ export function keepPaste(text: string, label: (n: number) => string): string {
     if (pastes.size <= PASTES_MAX) break
     if (old !== l && !inUse(old)) pastes.delete(old)
   }
+  saveSoon()
   return l
 }
 // The text with its labels expanded, or null past max characters (counted as
@@ -74,10 +80,49 @@ export function expandPastes(s: string, max: number): string | null {
   return out.length > max ? null : out
 }
 
-export function clearDrafts() {
+// Whose they are: a change of account (also learning who is signed in, at
+// start) ends the memory of the one before, and brings back what this tab
+// kept for this one (nothing for anyone else).
+const STORE = 'corral.drafts'
+const STORE_MAX = 2_000_000 // characters; past it the pastes are not kept
+let owner: number | null = null
+let saveTimer: number | undefined
+export function draftsFor(uid: number | null) {
+  if (uid === owner) return
+  clearTimeout(saveTimer)
+  saveTimer = undefined
   drafts.clear()
   replies.clear()
   pastes.clear()
   shown.clear()
   history = []
+  owner = uid
+  let saved: { uid?: number; drafts?: Record<string, string>; pastes?: [string, string][]; n?: number } | null = null
+  try {
+    saved = JSON.parse(tabStore.get(STORE) ?? 'null')
+  } catch {
+    saved = null
+  }
+  if (uid === null || !saved || saved.uid !== uid) {
+    tabStore.remove(STORE)
+    return
+  }
+  for (const [k, v] of Object.entries(saved.drafts ?? {})) if (typeof v === 'string' && v) drafts.set(k, v)
+  for (const p of saved.pastes ?? []) if (Array.isArray(p) && typeof p[0] === 'string' && typeof p[1] === 'string') pastes.set(p[0], p[1])
+  if (Number.isInteger(saved.n)) pasteN = Math.max(pasteN, saved.n as number)
 }
+function save() {
+  saveTimer = undefined
+  if (owner === null) return
+  if (drafts.size === 0) return tabStore.remove(STORE)
+  const held = [...pastes].filter(([l]) => [...drafts.values()].some((d) => d.includes(l)))
+  let out = JSON.stringify({ uid: owner, drafts: Object.fromEntries(drafts), pastes: held, n: pasteN })
+  if (out.length > STORE_MAX) out = JSON.stringify({ uid: owner, drafts: Object.fromEntries(drafts), pastes: [], n: pasteN })
+  tabStore.set(STORE, out)
+}
+// (A moment after typing stops, and at once as the page goes.)
+function saveSoon() {
+  clearTimeout(saveTimer)
+  saveTimer = window.setTimeout(save, 400)
+}
+window.addEventListener('pagehide', () => saveTimer !== undefined && (clearTimeout(saveTimer), save()))

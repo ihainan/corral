@@ -687,3 +687,10 @@ details.adv > .form { margin-top: 16px; }
 .share-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .share-state { font-size: 12px; color: var(--fg-3); flex: none; }
 .share-state.on { color: var(--ok); }
+
+/* A checkbox and its text on one line (forms). */
+.check { display: flex; align-items: center; gap: 10px; min-height: 32px; color: var(--fg); cursor: pointer; }
+.check input { width: 18px; height: 18px; margin: 0; accent-color: var(--accent); flex: none; }
+.input-row { display: flex; gap: 8px; }
+.input-row .input { flex: 1; min-width: 0; }
+.pre-line { white-space: pre-line; }

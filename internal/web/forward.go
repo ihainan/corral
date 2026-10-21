@@ -157,6 +157,10 @@ func (s *Server) handleForwardOpen(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/login?next="+url.QueryEscape(r.URL.RequestURI()), http.StatusFound)
 		return
 	}
+	if u.MustChangePassword { // (the app asks for the password first)
+		http.Redirect(w, r, "/", http.StatusFound)
+		return
+	}
 	f, err := s.store.ForwardByID(r.Context(), id)
 	if err != nil || !canUseForward(u, f) || !s.ownerActive(r.Context(), f.OwnerID) {
 		http.Error(w, "This forwarded port does not exist or is not shared with you.", http.StatusNotFound)

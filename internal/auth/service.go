@@ -22,6 +22,8 @@ var (
 	ErrBadInvite     = errors.New("invite is invalid, used or expired")
 	ErrBadUsername   = errors.New("username must be 2–32 characters: letters, digits, dot, dash or underscore")
 	ErrUnauthorized  = errors.New("not signed in")
+	ErrSamePassword  = errors.New("choose a password other than the one you were given")
+	ErrBadRole       = errors.New("invalid role")
 )
 
 // Failed logins before the account starts backing off, and the cap on the wait.
@@ -343,6 +345,10 @@ func (s *Service) ChangePassword(ctx context.Context, u *store.User, current, ne
 	if err := CheckPasswordPolicy(next); err != nil {
 		return err
 	}
+	// Told to choose one's own: not the one someone else knows.
+	if u.MustChangePassword && next == current {
+		return ErrSamePassword
+	}
 	hash, err := HashPassword(next)
 	if err != nil {
 		return err
@@ -356,8 +362,9 @@ func (s *Service) ChangePassword(ctx context.Context, u *store.User, current, ne
 	return nil
 }
 
-// ResetPassword is the admin path: new password, all sessions and terminals ended.
-func (s *Service) ResetPassword(ctx context.Context, userID int64, next string) error {
+// ResetPassword is the admin path: new password, all sessions and terminals
+// ended. mustChange: the account must choose its own at its next sign-in.
+func (s *Service) ResetPassword(ctx context.Context, userID int64, next string, mustChange bool) error {
 	if err := CheckPasswordPolicy(next); err != nil {
 		return err
 	}
@@ -365,7 +372,7 @@ func (s *Service) ResetPassword(ctx context.Context, userID int64, next string) 
 	if err != nil {
 		return err
 	}
-	if err := s.store.ResetPasswordTx(ctx, userID, hash); err != nil {
+	if err := s.store.ResetPasswordTx(ctx, userID, hash, mustChange); err != nil {
 		return err
 	}
 	s.CloseConnections(userID)
@@ -387,6 +394,26 @@ func (s *Service) CloseConnections(userID int64) {
 	if s.OnUserGone != nil {
 		s.OnUserGone(userID)
 	}
+}
+
+// CreateUser is the admin path to an account without an invite: the
+// administrator chooses the user name and a first password, which the
+// account is made to replace at its first sign-in when mustChange is set.
+func (s *Service) CreateUser(ctx context.Context, username, displayName, password, role string, mustChange bool) (*store.User, error) {
+	if role != store.RoleAdmin && role != store.RoleMember {
+		return nil, ErrBadRole
+	}
+	if err := CheckUsername(username); err != nil {
+		return nil, err
+	}
+	if err := CheckPasswordPolicy(password); err != nil {
+		return nil, err
+	}
+	hash, err := HashPassword(password)
+	if err != nil {
+		return nil, err
+	}
+	return s.store.CreateUserWith(ctx, username, displayName, hash, role, mustChange)
 }
 
 // CreateInvite returns the raw invite token; only its hash is stored.
