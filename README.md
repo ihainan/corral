@@ -167,7 +167,7 @@ The key in `.env` next to the file, made once with
 ```yaml
 services:
   corral:
-    image: ghcr.io/ihainan/corral:0.1.0
+    image: ghcr.io/ihainan/corral:0.2.0
     restart: unless-stopped
     ports: ["127.0.0.1:8080:8080"]
     environment:

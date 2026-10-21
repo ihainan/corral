@@ -5,6 +5,11 @@ before 1.0, a minor version may change configuration or behaviour (said here whe
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-21
+
+Upgrading from 0.1.0 needs no configuration change; the database is updated
+when the new version starts.
+
 ### Added
 - Session tabs on desktops and tablets: every running session is a tab in the top bar, kept
   connected (up to 8) so switching is instant; `+` opens another; Ctrl+Tab
@@ -52,13 +57,17 @@ before 1.0, a minor version may change configuration or behaviour (said here whe
   browser tab (kept in that tab only, gone when it is closed).
 - On a computer, Enter in the composer sends and Shift+Enter starts a new
   line, as in the agents' own input boxes; a setting turns Enter back into a
-  new line (⌘/Ctrl+Enter sends). The keys are shown by the send button.
+  new line (⌘/Ctrl+Enter sends). On phones and tablets Enter stays a new line.
+  The keys are shown by the send button.
   "Insert" is now "Type in".
 - Text being composed by an input method is shown in the terminal's colours,
   underlined, instead of a black box.
 - The herdr panel of workspaces and agents is gone: herdr's own sidebar
   lists them. A button in the top bar, shown while agents wait for you,
   answers one at once or picks among several.
+- Session cards on the home page show the whole screen, scaled to fit, instead
+  of its bottom left corner (a large herdr screen showed only part of its
+  sidebar).
 - Ending a session from its tab goes to the next tab, not the host list; with
   tabs, recording, watchers and a slow link show next to them.
 - The key bar's default layout puts the arrows before Fn, so all four are in
@@ -142,4 +151,6 @@ The first release.
   owner adds.
 - English and Chinese interface.
 
+[Unreleased]: https://github.com/ihainan/corral/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/ihainan/corral/releases/tag/v0.2.0
 [0.1.0]: https://github.com/ihainan/corral/releases/tag/v0.1.0
