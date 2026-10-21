@@ -112,6 +112,9 @@ const isWheelReport = (data: string) => {
   return b !== null && (b & 0xc0) === 0x40
 }
 
+// The colour scheme as mode 2031 reports it: CSI ? 997 ; 1 n dark, 2 light.
+const schemeReport = (dark: boolean) => `\x1b[?997;${dark ? 1 : 2}n`
+
 export function isTerminalReply(data: string): boolean {
   return REPLY.test(data)
 }
@@ -410,6 +413,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
   const outRef = useRef<(d: string | Uint8Array) => void>(() => {})
   const safeFitRef = useRef(() => {})
   const keysApartRef = useRef<() => KeysApart>(() => null) // see the CSI handlers in the terminal's setup
+  const syncSchemeRef = useRef<(again?: boolean) => void>(() => {}) // tells programs that asked of a dark/light change (mode 2031)
   const heldRef = useRef<() => boolean>(() => false) // input is waiting for a Ctrl+V clipboard check or upload
   const composingRef = useRef<() => boolean>(() => false)
   const forgetTypedRef = useRef<() => void>(() => {}) // see the key handler
@@ -630,6 +634,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
       clearTimeout(claimTimer)
       claimTimer = undefined
       claimedAt = now
+      const tookOver = !inCharge
       inCharge = true
       if (following) {
         following = null
@@ -638,6 +643,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
         safeFit()
       }
       conn.resize(term.cols, term.rows, true) // tell the host even if nothing changed locally
+      syncSchemeRef.current(tookOver)
     }
     const safeFit = () => {
       if (following) return void requestAnimationFrame(applyScale)
@@ -731,6 +737,8 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
     const kitty = { main: [] as number[], alt: [] as number[] } // pushed flags, latest last
     const flags = () => kitty[term.buffer.active.type === 'alternate' ? 'alt' : 'main']
     let otherKeys = 0
+    let schemeReports = false
+    let reportedDark = termScheme().dark // what programs were last told (or found out)
     const num = (p: (number | number[])[], i: number, d: number) => {
       const v = p[i]
       return typeof v === 'number' && v > 0 ? v : d
@@ -772,9 +780,45 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
         kitty.main = []
         kitty.alt = []
         otherKeys = 0
+        schemeReports = false
         return false // (xterm resets the rest)
       }),
+      // Colour scheme reports (mode 2031, as contour and ghostty have them):
+      // a program that turns them on (Claude Code's "Auto" theme, herdr for
+      // its panes) is told when the terminal goes dark or light, and may ask
+      // (CSI ? 996 n). xterm.js answers the background colour itself (OSC 11).
+      term.parser.registerCsiHandler({ prefix: '?', final: 'h' }, (p) => {
+        if (p.includes(2031)) {
+          schemeReports = true
+          if (!replaying) reportedDark = termScheme().dark // (it learns it by asking: OSC 11, CSI ? 996 n)
+        }
+        return false
+      }),
+      term.parser.registerCsiHandler({ prefix: '?', final: 'l' }, (p) => {
+        if (p.includes(2031)) schemeReports = false
+        return false
+      }),
+      term.parser.registerCsiHandler({ prefix: '?', final: 'n' }, (p) => {
+        if (num(p, 0, 0) !== 996) return false
+        // (Answered by the window in charge; in a replay the answer is dropped.)
+        if (replaying || following || !inCharge) return true
+        reportedDark = termScheme().dark
+        term.input(schemeReport(reportedDark), false)
+        return true
+      }),
     ]
+    // A change is told by the window in charge of the terminal (another may
+    // have another scheme), and not while a replay is parsed (the answer
+    // would be dropped). After a replay, or when this window takes over, it
+    // is told again whatever was last told from here (another window may
+    // have told otherwise, or a report been dropped).
+    syncSchemeRef.current = (again = false) => {
+      if (!schemeReports || replaying || following || !inCharge) return
+      const dark = termScheme().dark
+      if (dark === reportedDark && !again) return
+      reportedDark = dark
+      term.input(schemeReport(dark), false)
+    }
     // Disambiguate (1) or report all keys (8); else modifyOtherKeys.
     const keysApart = (): KeysApart => ((flags().at(-1) ?? 0) & 9 ? 'kitty' : otherKeys > 0 ? 'xterm' : null)
     keysApartRef.current = keysApart
@@ -815,6 +859,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
           lastSize = { cols, rows }
           setSized(Date.now())
         }
+        const tookOver = own && !inCharge
         inCharge = own
         if (!own) {
           // Another window took over after this one's last claim: an action
@@ -840,6 +885,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
           // the current one, unless a report is already on its way.
           const shown = clampSize(term.cols, term.rows) // a larger window reports the largest size
           if (own && (shown.cols !== cols || shown.rows !== rows) && resizeTimer === undefined) conn.resize(term.cols, term.rows)
+          syncSchemeRef.current(tookOver)
           return
         }
         // Another viewer set this size: show the terminal at it, so what the
@@ -866,6 +912,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
           if (run === replayRun) {
             replaying = false
             settling = false
+            syncSchemeRef.current(true)
           }
         })
       },
@@ -1295,6 +1342,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
     term.options.macOptionIsMeta = prefs.optionIsMeta
     const scheme = termScheme()
     term.options.theme = scheme.theme
+    syncSchemeRef.current()
     setChromeColor(scheme.theme.background ?? null)
     // Menus and dialogs opened over the terminal follow its colours.
     document.documentElement.classList.toggle('term-dark', scheme.dark)

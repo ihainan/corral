@@ -18,6 +18,9 @@ before 1.0, a minor version may change configuration or behaviour (said here whe
   closes). At most 10 alerts a minute per user.
 - A tapped agent alert brings herdr to that agent's pane (its workspace and
   tab too); on a phone it also leaves another session open in front for it.
+- Programs that follow the terminal's colours (Claude Code's "Auto" theme,
+  herdr for its panes) are told when the terminal scheme turns dark or light
+  (mode 2031), so they switch with it.
 - Uploads from the terminal or the composer show their progress and can be
   stopped; closing the file panel asks first while files are still going up.
 

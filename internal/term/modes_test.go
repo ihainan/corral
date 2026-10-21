@@ -20,7 +20,7 @@ const herdrStart = "\x1b[?1006l\x1b[?1016l\x1b[?1015l\x1b[?1005l\x1b[?1003l\x1b[
 	"\x1b[?2026h\x1b[?25l\x1b[Hscreen\x1b[?25h\x1b[?2026l"
 
 func TestModesPrelude(t *testing.T) {
-	want := "\x1b[?7l\x1b[?1004h\x1b[?2004h\x1b[?1049h\x1b[?1003h\x1b[?1006h\x1b[>7u"
+	want := "\x1b[?7l\x1b[?1004h\x1b[?2004h\x1b[?1049h\x1b[?2031h\x1b[?1003h\x1b[?1006h\x1b[>7u"
 	if got := preludeOf(herdrStart); got != want {
 		t.Fatalf("herdr's modes: got %q, want %q", got, want)
 	}
@@ -41,7 +41,7 @@ func TestModesPrelude(t *testing.T) {
 		{"hidden cursor, insert mode, keypad", "\x1b[?25l\x1b[4h\x1b=", "\x1b[?25l\x1b[4h\x1b="},
 		{"keypad by mode 66, then numeric", "\x1b[?66h\x1b>", ""},
 		{"RIS", herdrStart + "\x1bc", ""},
-		{"DECSTR keeps mouse, screen and keys", herdrStart + "\x1b[!p", "\x1b[?1049h\x1b[?1003h\x1b[?1006h\x1b[>7u"},
+		{"DECSTR keeps mouse, screen, keys and colour reports", herdrStart + "\x1b[!p", "\x1b[?1049h\x1b[?2031h\x1b[?1003h\x1b[?1006h\x1b[>7u"},
 		{"not SM/RM", "\x1b[?1000$p\x1b[>1000h\x1b[?1000 h", ""},
 		{"inside OSC", "\x1b]2;[?1000h\x07\x1bP+q[?1000h\x1b\\", ""},
 		{"cancelled", "\x1b[?1000\x18h", ""},

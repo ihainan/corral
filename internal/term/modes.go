@@ -76,6 +76,7 @@ var modeFlags = []struct {
 	{2004, true, false, true},  // bracketed paste
 	{1049, true, false, false}, // alternate screen (also 47, 1047)
 	{4, false, false, true},    // insert mode
+	{2031, true, false, false}, // colour scheme reports (the browser sends them; xterm.js ignores the mode)
 }
 
 func (m *modes) startCSI() {
