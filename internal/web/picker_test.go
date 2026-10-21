@@ -12,8 +12,9 @@ import (
 )
 
 // pickerHost: a host whose tmux (a stand-in under ~/.local/bin, nothing else
-// on PATH) has the sessions "work" (2 windows, attached) and "other".
-func pickerHost(t *testing.T, h *harness, admin *client, withTmux bool, auth string) (*testutil.SSHServer, float64) {
+// on PATH) has the sessions "work" (2 windows, attached) and "other". With
+// herdrList, a herdr stand-in prints it for any command.
+func pickerHost(t *testing.T, h *harness, admin *client, withTmux bool, auth string, herdrList ...string) (*testutil.SSHServer, float64) {
 	t.Helper()
 	home := t.TempDir()
 	srv := h.sshServer(home)
@@ -21,6 +22,11 @@ func pickerHost(t *testing.T, h *harness, admin *client, withTmux bool, auth str
 		bin := filepath.Join(home, ".local", "bin")
 		os.MkdirAll(bin, 0o755)
 		os.WriteFile(filepath.Join(bin, "tmux"), []byte("#!/bin/sh\nprintf 'work|2|1\\nother|1|0\\nbad.name|1|0\\n'\n"), 0o755)
+	}
+	if len(herdrList) > 0 {
+		bin := filepath.Join(home, ".local", "bin")
+		os.MkdirAll(bin, 0o755)
+		os.WriteFile(filepath.Join(bin, "herdr"), []byte("#!/bin/sh\n[ \"$1\" = --session ] && { read x; exit; }\necho '"+herdrList[0]+"'\n"), 0o755)
 	}
 	// Only sh on PATH: whatever tmux or herdr this machine has is not seen.
 	sys := filepath.Join(t.TempDir(), "sys")
@@ -98,6 +104,38 @@ func TestPickerListsAndOpensOverTheSameConnection(t *testing.T) {
 	for _, o := range []map[string]any{{"kind": "tmux", "name": "bad.name"}, {"kind": "tmux"}, {"kind": "sh"}, {"kind": "shell", "name": "x"}} {
 		mustStatus(t, admin.do("POST", "/api/sessions", map[string]any{"host_id": id, "open": o}), 400, "bad choice")
 	}
+}
+
+// Stopped herdr sessions are offered too (after the running ones), and a
+// new one is named after all of them.
+func TestPickerHerdrStoppedAndNew(t *testing.T) {
+	h := newHarness(t)
+	admin := h.admin()
+	_, id := pickerHost(t, h, admin, false, "password",
+		`{"sessions":[{"name":"corral-root","default":false,"running":false},{"name":"default","default":true,"running":true},{"name":"bad.name","running":false}]}`)
+	r := admin.do("POST", "/api/sessions", map[string]any{"host_id": id, "open": nil})
+	mustStatus(t, r, 200, "asked")
+	choose, _ := r.json()["choose"].(map[string]any)
+	list, _ := choose["herdr_sessions"].([]any)
+	if choose["herdr"] != true || len(list) != 2 {
+		t.Fatalf("choices: %s", r.Body)
+	}
+	if a, b := list[0].(map[string]any), list[1].(map[string]any); a["name"] != "default" || a["running"] != true || b["name"] != "corral-root" || b["running"] != false {
+		t.Fatalf("herdr sessions: %v", list)
+	}
+	r = admin.do("POST", "/api/sessions", map[string]any{"host_id": id, "open": map[string]any{"kind": "herdr_new"}})
+	mustStatus(t, r, 201, "new herdr session")
+	if r.json()["persistence"] != "herdr" || r.json()["mux_session"] != "corral-root-2" {
+		t.Fatalf("new herdr session: %s", r.Body)
+	}
+	// Another at once: herdr's list does not have the first yet (the stand-in
+	// never adds it), the gateway's terminals do.
+	r = admin.do("POST", "/api/sessions", map[string]any{"host_id": id, "open": map[string]any{"kind": "herdr_new"}})
+	mustStatus(t, r, 201, "second new herdr session")
+	if r.json()["mux_session"] != "corral-root-3" {
+		t.Fatalf("second new herdr session: %s", r.Body)
+	}
+	mustStatus(t, admin.do("POST", "/api/sessions", map[string]any{"host_id": id, "open": map[string]any{"kind": "herdr_new", "name": "x"}}), 400, "named new")
 }
 
 func TestPickerSkippedWithoutTmuxOrHerdr(t *testing.T) {

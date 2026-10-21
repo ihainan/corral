@@ -29,6 +29,9 @@ const (
 	openTmux    = "tmux"     // an existing tmux session (Name)
 	openTmuxNew = "tmux_new" // a new tmux session, named by the gateway
 	openHerdr   = "herdr"    // a herdr session (Name; "" is herdr's default)
+	// A new herdr session, named by the gateway. herdr has no way to start
+	// only a new one: a session of that name made meanwhile is attached.
+	openHerdrNew = "herdr_new"
 )
 
 type openChoice struct {
@@ -38,7 +41,7 @@ type openChoice struct {
 
 func (c *openChoice) valid() bool {
 	switch c.Kind {
-	case openShell, openTmuxNew:
+	case openShell, openTmuxNew, openHerdrNew:
 		return c.Name == ""
 	case openTmux:
 		return tmuxNameRE.MatchString(c.Name)
@@ -58,6 +61,7 @@ type tmuxSession struct {
 type herdrChoice struct {
 	Name    string `json:"name"`
 	Default bool   `json:"default"`
+	Running bool   `json:"running"` // a stopped one starts again when opened
 }
 
 type hostChoices struct {
@@ -124,9 +128,12 @@ func probeHost(ctx context.Context, c *ssh.Client) hostChoices {
 	switch {
 	case err == nil:
 		out.Herdr = true
-		for _, si := range list {
-			if si.Running && tmuxNameRE.MatchString(si.Name) {
-				out.HerdrList = append(out.HerdrList, herdrChoice{Name: si.Name, Default: si.Default})
+		// Running ones first (herdr's own order within each).
+		for _, running := range []bool{true, false} {
+			for _, si := range list {
+				if si.Running == running && tmuxNameRE.MatchString(si.Name) && len(out.HerdrList) < maxListed {
+					out.HerdrList = append(out.HerdrList, herdrChoice{Name: si.Name, Default: si.Default, Running: si.Running})
+				}
 			}
 		}
 	case errors.Is(err, herdr.ErrNotInstalled):
@@ -141,11 +148,25 @@ func (c hostChoices) any() bool { return c.Tmux || c.Herdr || c.Unknown }
 // newTmuxName is a session name for a new tmux session: "corral-<user>",
 // then with -2, -3… after it, the first not taken.
 func newTmuxName(username string, taken []tmuxSession) string {
-	base := defaultTmuxSession(username)
 	used := map[string]bool{}
 	for _, t := range taken {
 		used[t.Name] = true
 	}
+	return newMuxName(username, used)
+}
+
+// newHerdrName is the same for herdr, after all its sessions, stopped ones
+// included (a stopped one of the name would be started instead).
+func newHerdrName(username string, taken []herdr.SessionInfo) string {
+	used := map[string]bool{}
+	for _, t := range taken {
+		used[t.Name] = true
+	}
+	return newMuxName(username, used)
+}
+
+func newMuxName(username string, used map[string]bool) string {
+	base := defaultTmuxSession(username)
 	if !used[base] {
 		return base
 	}

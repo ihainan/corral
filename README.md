@@ -100,14 +100,16 @@ Chinese and English interfaces ship together.
 <details>
 <summary><b>More about the features</b></summary>
 
-- Opening a host lists its tmux and herdr sessions to pick from, along with a
-  new tmux session and a plain shell. The home page shows running sessions as
+- Opening a host lists its tmux and herdr sessions to pick from (a stopped
+  herdr session starts again), along with a new tmux or herdr session and a
+  plain shell. The home page shows running sessions as
   cards with their screen in small.
 - Keys of your own send a sequence written as for tmux's send-keys
   (`C-b c`, `"git status" Enter`) or as in Moshi (`C-b, S-t`,
   `text:/clear, Enter`), or picked from a list. A dot in a key's corner means
   it has a long press; a long press on Ctrl opens a shortcut panel (Ctrl
-  combinations, herdr, tmux, Claude Code and Codex commands). The layout
+  combinations, herdr's workspaces, tabs and panes, tmux, Claude Code and
+  Codex keys and commands). The layout
   follows you to every device.
 - The composer keeps its draft across a reload of the tab, shows a long paste
   as a label it sends in full, and completes as the agents' own input boxes do
@@ -216,7 +218,7 @@ every request; subdomains cannot read the main site's sign-in.
 <summary><b>On the hosts</b></summary>
 
 Nothing needs to be installed. With **tmux** or **herdr** on a host, opening it
-offers their sessions (and a new tmux session); terminals running in them
+offers their sessions (and a new one); terminals running in them
 survive the gateway restarting and can be attached from elsewhere. A host with
 neither opens a plain shell. The file panel and image uploads need the host's
 SFTP subsystem (enabled by default in OpenSSH).

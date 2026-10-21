@@ -25,6 +25,7 @@ import (
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
 
+	"github.com/ihainan/corral/internal/herdr"
 	"github.com/ihainan/corral/internal/netguard"
 	"github.com/ihainan/corral/internal/sftplite"
 	"github.com/ihainan/corral/internal/sshx"
@@ -228,6 +229,25 @@ func (s *Server) openSession(ctx context.Context, w http.ResponseWriter, r *http
 		opts.Persistence, opts.TmuxSession, opts.TmuxNew = store.PersistTmux, newTmuxName(u.Username, taken), true
 	case openHerdr:
 		opts.Persistence, opts.HerdrSession = store.PersistHerdr, choice.Name
+	case openHerdrNew:
+		// Named after all its sessions, as for tmux. Without herdr on the
+		// host, the command falls back to a plain shell (as tmux's does).
+		lctx, lcancel := context.WithTimeout(ctx, probeTimeout)
+		taken, err := herdr.Discover(lctx, client)
+		lcancel()
+		if err != nil && !errors.Is(err, herdr.ErrNotInstalled) {
+			client.Close()
+			writeError(w, http.StatusBadGateway, "herdr_list_failed", "could not list the herdr sessions on the host; try again")
+			return
+		}
+		// Also the names of this host's terminals here: one just started may
+		// not be in herdr's list yet.
+		for _, rs := range s.terms.Running(u.ID, h.ID) {
+			if rs.Persistence == store.PersistHerdr {
+				taken = append(taken, herdr.SessionInfo{Name: rs.Info().MuxSession})
+			}
+		}
+		opts.Persistence, opts.HerdrSession = store.PersistHerdr, newHerdrName(u.Username, taken)
 	}
 	// A terminal slot is taken only to start one (choosing needs none).
 	res, err := s.terms.Reserve(u.ID)

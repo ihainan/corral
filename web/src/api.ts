@@ -76,7 +76,7 @@ export interface SessionPreview {
 
 // What to open on a host (see the picker).
 export interface OpenChoice {
-  kind: 'shell' | 'tmux' | 'tmux_new' | 'herdr'
+  kind: 'shell' | 'tmux' | 'tmux_new' | 'herdr' | 'herdr_new'
   name?: string
 }
 
@@ -86,7 +86,7 @@ export interface HostChoices {
     tmux: boolean
     tmux_sessions: { name: string; windows: number; attached: boolean }[]
     herdr: boolean
-    herdr_sessions: { name: string; default: boolean }[]
+    herdr_sessions: { name: string; default: boolean; running: boolean }[]
     unknown?: boolean
   }
   running: { id: string; kind: 'shell' | 'tmux' | 'herdr'; name: string; title: string; created_at: number }[]
@@ -280,6 +280,7 @@ export interface HerdrSummary {
   workspaces: HerdrWorkspace[]
   waiting: number
   focused_agent?: string // the agent in the focused pane ("claude", "codex"…)
+  focused_pane?: string
 }
 
 export interface Forward {

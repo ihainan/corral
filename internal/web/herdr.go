@@ -50,6 +50,7 @@ type herdrSummary struct {
 	Waiting    int              `json:"waiting"` // agents blocked on the user
 	// The agent in the focused pane ("claude", "codex"…), if any.
 	FocusedAgent string `json:"focused_agent,omitempty"`
+	FocusedPane  string `json:"focused_pane,omitempty"` // (what closing a pane closes)
 }
 
 func summarize(session string, s *herdr.Snapshot) herdrSummary {
@@ -77,6 +78,12 @@ func summarize(session string, s *herdr.Snapshot) herdrSummary {
 			herdrAgent{PaneID: p.ID, Agent: p.Agent, Status: p.AgentStatus, Title: truncate(p.Title, 120), Cwd: p.Cwd})
 		if p.AgentStatus == herdr.StatusBlocked {
 			out.Waiting++
+		}
+	}
+	out.FocusedPane = s.FocusedPane
+	for _, p := range s.Panes {
+		if out.FocusedPane == "" && p.Focused {
+			out.FocusedPane = p.ID
 		}
 	}
 	for _, list := range [][]herdr.Pane{s.Panes, agents} {
@@ -226,9 +233,11 @@ func writeHerdrError(w http.ResponseWriter, err error) {
 // zoom_pane focuses a pane and has it fill its tab. Without a target, on the
 // focused pane or tab (the shortcut panel's): unzoom ends a zoom,
 // zoom_toggle starts or ends one, new_tab, split_right, split_down,
-// focus_left/right/up/down (the pane next to it), next_tab, prev_tab.
+// focus_left/right/up/down (the pane next to it), next_tab, prev_tab,
+// new_workspace. close_pane closes the pane given (the one the browser was
+// told is focused, which the user confirmed), not whichever is focused by then.
 var herdrUntargeted = map[string]bool{"unzoom": true, "zoom_toggle": true, "new_tab": true, "split_right": true, "split_down": true,
-	"focus_left": true, "focus_right": true, "focus_up": true, "focus_down": true, "next_tab": true, "prev_tab": true}
+	"focus_left": true, "focus_right": true, "focus_up": true, "focus_down": true, "next_tab": true, "prev_tab": true, "new_workspace": true}
 
 func (s *Server) apiHerdrAction(w http.ResponseWriter, r *http.Request) {
 	var b struct {
@@ -266,6 +275,24 @@ func (s *Server) apiHerdrAction(w http.ResponseWriter, r *http.Request) {
 		err = c.NewTab(ctx, "")
 	case "split_right", "split_down":
 		err = c.Split(ctx, strings.TrimPrefix(b.Action, "split_"))
+	case "close_pane":
+		if !herdrPaneID.MatchString(b.Target) {
+			writeError(w, http.StatusBadRequest, "bad_request", "bad pane")
+			return
+		}
+		err = c.ClosePane(ctx, b.Target)
+	case "new_workspace":
+		// (One request per connection: the snapshot for the focused
+		// workspace, whose folder the new one follows, then a new one.)
+		var snap *herdr.Snapshot
+		if snap, err = c.Snapshot(ctx); err == nil {
+			c2 := herdrDial(w, ctx, sess, socket)
+			if c2 == nil {
+				return
+			}
+			defer c2.Close()
+			err = c2.NewWorkspace(ctx, snap.FocusedWorkspace)
+		}
 	case "focus_left", "focus_right", "focus_up", "focus_down":
 		err = c.FocusDirection(ctx, strings.TrimPrefix(b.Action, "focus_"))
 	case "next_tab", "prev_tab":

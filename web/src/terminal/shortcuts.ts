@@ -6,7 +6,7 @@ import type { I18nKey } from '../i18n'
 // custom keys take them (macro.ts); slash commands are typed and sent.
 
 export type PanelPage = 'ctrl' | 'herdr' | 'tmux' | 'claude' | 'codex'
-export type HerdrAct = 'new_tab' | 'split_right' | 'split_down' | 'zoom_toggle' | 'focus_left' | 'focus_right' | 'focus_up' | 'focus_down' | 'prev_tab' | 'next_tab'
+export type HerdrAct = 'new_workspace' | 'new_tab' | 'split_right' | 'split_down' | 'zoom_toggle' | 'focus_left' | 'focus_right' | 'focus_up' | 'focus_down' | 'prev_tab' | 'next_tab' | 'close_pane'
 // label: shown as it is ('' for an icon, by the herdr action); desc: an i18n key.
 export type Shortcut = { label: string; desc: I18nKey } & ({ keys: string } | { herdr: HerdrAct })
 
@@ -17,24 +17,26 @@ const slash = (cmd: string, desc: I18nKey): Shortcut => ({ label: '/' + cmd, des
 export type ShortcutGroup = { title: I18nKey; items: Shortcut[] }
 export const shortcuts: Record<PanelPage, ShortcutGroup[]> = {
   ctrl: [
-    { title: 'sc.gProgram', items: [ctrl('c', 'sc.interrupt'), ctrl('d', 'sc.eof'), ctrl('z', 'sc.suspend'), ctrl('l', 'sc.clear'), ctrl('r', 'sc.history'), ctrl('g', 'sc.cancel')] },
+    { title: 'sc.gProgram', items: [ctrl('c', 'sc.interrupt'), ctrl('d', 'sc.eof'), ctrl('z', 'sc.suspend'), ctrl('l', 'sc.clear'), ctrl('r', 'sc.history'), ctrl('g', 'sc.cancel'), ctrl('\\', 'sc.quit')] },
     { title: 'sc.gLine', items: [ctrl('a', 'sc.lineStart'), ctrl('e', 'sc.lineEnd'), ctrl('u', 'sc.killStart'), ctrl('k', 'sc.killEnd'), ctrl('w', 'sc.killWord'), ctrl('y', 'sc.yank')] },
   ],
   herdr: [
     {
-      title: 'sc.gTabs',
+      title: 'sc.gArrange',
       items: [
+        { label: '', desc: 'sc.newWorkspace', herdr: 'new_workspace' },
         { label: '', desc: 'sc.newTab', herdr: 'new_tab' },
         { label: '', desc: 'sc.splitRight', herdr: 'split_right' },
         { label: '', desc: 'sc.splitDown', herdr: 'split_down' },
         { label: '', desc: 'sc.zoom', herdr: 'zoom_toggle' },
-        { label: '', desc: 'sc.prevTab', herdr: 'prev_tab' },
-        { label: '', desc: 'sc.nextTab', herdr: 'next_tab' },
+        { label: '', desc: 'sc.closePane', herdr: 'close_pane' },
       ],
     },
     {
-      title: 'sc.gPanes',
+      title: 'sc.gMove',
       items: [
+        { label: '', desc: 'sc.prevTab', herdr: 'prev_tab' },
+        { label: '', desc: 'sc.nextTab', herdr: 'next_tab' },
         { label: '', desc: 'sc.paneLeft', herdr: 'focus_left' },
         { label: '', desc: 'sc.paneRight', herdr: 'focus_right' },
         { label: '', desc: 'sc.paneUp', herdr: 'focus_up' },
@@ -74,6 +76,7 @@ export const shortcuts: Record<PanelPage, ShortcutGroup[]> = {
         { label: '^↵', desc: 'sc.sendNow', keys: 'C-Enter' },
         { label: '^O', desc: 'sc.expand', keys: 'C-o' },
         { label: '^B', desc: 'sc.background', keys: 'C-b' },
+        { label: '^T', desc: 'sc.tasks', keys: 'C-t' },
       ],
     },
     {
@@ -82,7 +85,15 @@ export const shortcuts: Record<PanelPage, ShortcutGroup[]> = {
     },
   ],
   codex: [
-    { title: 'sc.gKeys', items: [{ label: 'Esc', desc: 'sc.stop', keys: 'Esc' }] },
+    {
+      title: 'sc.gKeys',
+      items: [
+        { label: '⇧Tab', desc: 'sc.mode', keys: 'BTab' },
+        { label: 'Esc', desc: 'sc.stop', keys: 'Esc' },
+        { label: 'Esc Esc', desc: 'sc.editLast', keys: 'Esc Esc' },
+        { label: '^T', desc: 'sc.transcript', keys: 'C-t' },
+      ],
+    },
     {
       title: 'sc.gCommands',
       items: [slash('new', 'sc.newChat'), slash('compact', 'sc.compact'), slash('resume', 'sc.resume'), slash('model', 'sc.model'), slash('status', 'sc.status'), slash('diff', 'sc.diff'), slash('review', 'sc.review')],

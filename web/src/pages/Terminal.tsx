@@ -567,6 +567,35 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
       }
     }
     termRef.current = term
+    // Trackpads, in programs that take the mouse (Claude Code's fullscreen
+    // view, herdr, tmux): xterm sends one wheel report per event however far
+    // it moved, and scales small moves by 0.3, so a swipe scrolls a fraction
+    // of its length. Here it sends a report per line moved, as native
+    // terminals do. A mouse wheel's notch stays one report (Chrome and Safari
+    // give 120 a notch in wheelDeltaY, and 3× deltaY for a trackpad). The
+    // reports are untrusted line events, one report each (as for touch).
+    let wheelRest = 0
+    term.attachCustomWheelEventHandler((e) => {
+      const mode = term.modes.mouseTrackingMode // (x10 reports presses only, not the wheel)
+      if (!e.isTrusted || mode === 'none' || mode === 'x10' || e.deltaMode !== WheelEvent.DOM_DELTA_PIXEL || e.shiftKey || e.deltaY === 0) return true
+      const legacy = (e as WheelEvent & { wheelDeltaY?: number }).wheelDeltaY
+      if (legacy && legacy % 120 === 0 && Math.abs(legacy) !== Math.abs(e.deltaY) * 3) return true
+      if (Math.sign(wheelRest) !== Math.sign(e.deltaY)) wheelRest = 0
+      wheelRest += e.deltaY / (el.clientHeight / Math.max(1, term.rows))
+      // At most 20 at once; the rest is kept for the next event.
+      const n = Math.sign(wheelRest) * Math.min(Math.trunc(Math.abs(wheelRest)), 20)
+      wheelRest -= n
+      const target = el.querySelector('.xterm-screen') ?? el
+      for (let i = 0; i < Math.abs(n); i++) {
+        target.dispatchEvent(
+          new WheelEvent('wheel', {
+            deltaY: Math.sign(n), deltaMode: WheelEvent.DOM_DELTA_LINE, bubbles: true, cancelable: true, clientX: e.clientX, clientY: e.clientY,
+            ctrlKey: e.ctrlKey, altKey: e.altKey, metaKey: e.metaKey,
+          }),
+        )
+      }
+      return false
+    })
     const ta = el.querySelector('textarea')
     ta?.setAttribute('autocapitalize', 'off')
     ta?.setAttribute('autocorrect', 'off')
@@ -1524,11 +1553,12 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
   useEffect(() => {
     const el = hostEl.current!
     let lastY = 0
-    let lastT = 0
     let startY = 0
+    let at = { x: 0, y: 0 } // where reports point (herdr scrolls the pane there)
     let acc = 0
     let moved = false
-    let velocity = 0
+    // The finger's last 100 ms, for the speed it leaves with.
+    let trail: { y: number; t: number }[] = []
     let pinch: { dist: number; size: number } | null = null
     // Two fingers: a pinch (the font size) or, moved together, a swipe (the
     // next session sideways, herdr's next workspace up or down); which one
@@ -1548,13 +1578,12 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
     // stays in the caller's accumulator for the next frame).
     const wheel = (lines: number): number => {
       const target = el.querySelector('.xterm-screen') ?? el
-      const r = target.getBoundingClientRect()
       const n = Math.min(Math.abs(lines), 10)
       for (let i = 0; i < n; i++) {
         target.dispatchEvent(
           new WheelEvent('wheel', {
             deltaY: Math.sign(lines), deltaMode: WheelEvent.DOM_DELTA_LINE, bubbles: true, cancelable: true,
-            clientX: r.left + r.width / 2, clientY: r.top + r.height / 2,
+            clientX: at.x, clientY: at.y,
           }),
         )
       }
@@ -1565,12 +1594,13 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
     const rebase = (e: TouchEvent) => {
       cancelAnimationFrame(inertia)
       acc = 0
-      velocity = 0
+      trail = []
       pinch = e.touches.length === 2 ? { dist: dist(e.touches), size: getPrefs().fontSize } : null
       two = e.touches.length === 2 ? (() => { const c = centre(e.touches); return { ...c, cx: c.x, cy: c.y, dist: dist(e.touches), mode: 'undecided' as const } })() : null
       if (e.touches.length === 1) {
         startY = lastY = e.touches[0].clientY
-        lastT = performance.now()
+        at = { x: e.touches[0].clientX, y: e.touches[0].clientY }
+        trail = [{ y: lastY, t: performance.now() }]
       }
     }
 
@@ -1607,9 +1637,9 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
       e.stopPropagation()
       const now = performance.now()
       const dy = y - lastY
-      velocity = dy / Math.max(1, now - lastT)
+      trail.push({ y, t: now })
+      while (trail.length > 2 && now - trail[0].t > 100) trail.shift()
       lastY = y
-      lastT = now
       acc -= dy
       const ch = cellHeight()
       const lines = Math.trunc(acc / ch)
@@ -1642,16 +1672,25 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
         two = null
         return
       }
-      let v = -velocity * 16 // px per frame
+      // The speed the finger left with (px per ms) over its last 100 ms;
+      // none if it rested before lifting. It slows as iOS lists do, by time
+      // (not frames: iPads draw 120 a second).
+      const first = trail[0]
+      const last = trail[trail.length - 1]
+      const now = performance.now()
+      let v = first && last && last.t > first.t && now - last.t < 60 ? -(last.y - first.y) / (last.t - first.t) : 0
       const ch = cellHeight()
       // Lines owed from the drag itself carry over into the fling.
       let rest = acc
       acc = 0
-      if (Math.abs(v) <= 2) v = 0
-      const step = () => {
-        v *= 0.94
-        if (Math.abs(v) < 0.6) v = 0
-        rest += v
+      if (Math.abs(v) < 0.15) v = 0
+      let prev = now
+      const step = (ts: number) => {
+        const dt = Math.min(32, Math.max(0, ts - prev))
+        prev = ts
+        v *= Math.pow(0.998, dt) // (UIScrollView's normal rate)
+        if (Math.abs(v) < 0.03) v = 0
+        rest += v * dt
         const lines = Math.trunc(rest / ch)
         if (lines !== 0) rest -= wheel(lines) * ch
         // Keep going until the speed is gone and no whole line is owed.
@@ -1803,13 +1842,23 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
   // The shortcut panel, over the key bar.
   const [shortcutsOpen, setShortcutsOpen] = useState(false)
   const closeShortcuts = useCallback(() => setShortcutsOpen(false), [])
+  // Closing a pane is asked first, for the pane focused when it was picked.
+  const [closingPane, setClosingPane] = useState<string | null>(null)
+  const herdrFailed = (e: unknown) => (e instanceof ApiError && e.code === 'herdr_busy' ? t('herdr.busy') : t('sc.herdrFailed'))
   const pickShortcut = async (s: Shortcut) => {
     setShortcutsOpen(false)
     if ('keys' in s) return sendKeys(s.keys)
+    if (s.herdr === 'close_pane') {
+      // Only from a summary known to be current (not one kept from before a
+      // reconnect, where focus may have moved elsewhere meanwhile).
+      if (herdr?.focused_pane && herdrFresh && status === 'open') setClosingPane(herdr.focused_pane)
+      else toast(t('sc.herdrFailed'), true)
+      return
+    }
     try {
       await api('POST', `/api/sessions/${id}/herdr`, { action: s.herdr })
     } catch (e) {
-      toast(e instanceof ApiError && e.code === 'herdr_busy' ? t('herdr.busy') : t('sc.herdrFailed'), true)
+      toast(herdrFailed(e), true)
     }
   }
   const sendText = (s: string) => {
@@ -2655,6 +2704,22 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
         <>
           {copyText !== null && <CopyMode text={copyText} onClose={() => setCopyText(null)} />}
           {schemesOpen && <SchemeDialog onClose={() => setSchemesOpen(false)} />}
+          {closingPane && !ended && (
+            <Confirm
+              title={t('sc.closePaneTitle')}
+              body={t('sc.closePaneBody')}
+              confirm={t('sc.closePane')}
+              danger
+              onConfirm={async () => {
+                try {
+                  await api('POST', `/api/sessions/${id}/herdr`, { action: 'close_pane', target: closingPane })
+                } catch (e) {
+                  throw { human: herdrFailed(e) }
+                }
+              }}
+              onClose={() => setClosingPane(null)}
+            />
+          )}
           {portsOpen && info && <PortsDialog hostId={info.host_id} onClose={() => setPortsOpen(false)} />}
           {shareOpen && !ended && <ShareDialog sessionId={id} onClose={() => setShareOpen(false)} />}
           {filesOpen && !ended && (

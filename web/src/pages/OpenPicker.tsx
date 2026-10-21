@@ -25,8 +25,9 @@ function lastChoice(hostId: number): OpenChoice | null {
 
 const same = (a: OpenChoice | null, b: OpenChoice) => !!a && a.kind === b.kind && (a.name ?? '') === (b.name ?? '')
 
-// What to open on a host: its terminals running in Corral, its herdr and tmux
-// sessions, a new tmux session, or a plain shell. Each group is one list;
+// What to open on a host: its terminals running in Corral, its herdr (stopped
+// ones too: opening one starts it) and tmux sessions, a new tmux or herdr
+// session, or a plain shell. Each group is one list;
 // a row is its name, with what else there is to know on the right.
 export function OpenPicker(props: { host: Host; found: HostChoices; busy: boolean; onClose: () => void; onPick: (c: OpenChoice) => void }) {
   const { host, found } = props
@@ -115,7 +116,12 @@ export function OpenPicker(props: { host: Host; found: HostChoices; busy: boolea
           <h3 id="pick-herdr">{t('picker.herdr')}</h3>
           <ul className="pick-list">
             {c.herdr_sessions.map((s) =>
-              item({ kind: 'herdr', name: s.name }, <LayoutGrid size={16} />, s.name, s.default ? t('picker.herdrDefault') : undefined),
+              item(
+                { kind: 'herdr', name: s.name },
+                <LayoutGrid size={16} />,
+                s.name,
+                [s.default ? t('picker.herdrDefault') : '', s.running ? '' : t('picker.herdrStopped')].filter(Boolean).join(' · ') || undefined,
+              ),
             )}
           </ul>
         </section>
@@ -139,6 +145,7 @@ export function OpenPicker(props: { host: Host; found: HostChoices; busy: boolea
         <h3 id="pick-new">{t('picker.new')}</h3>
         <ul className="pick-list">
           {(c.tmux || c.unknown) && item({ kind: 'tmux_new' }, <Plus size={16} />, t('picker.tmuxNew'), undefined, t('picker.tmuxNewHint'))}
+          {c.herdr && item({ kind: 'herdr_new' }, <Plus size={16} />, t('picker.herdrNew'), undefined, t('picker.herdrNewHint'))}
           {item({ kind: 'shell' }, <SquareTerminal size={16} />, t('picker.shell'), undefined, t('picker.shellHint'))}
         </ul>
       </section>

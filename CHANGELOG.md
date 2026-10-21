@@ -11,6 +11,12 @@ before 1.0, a minor version may change configuration or behaviour (said here whe
   a tab by its place, ⌘9 the last, ⌘⇧[ and ⌘⇧] the previous and next. No key
   closes a tab, as that ends its session. In a browser tab these stay the
   browser's.
+- Opening a host offers a new herdr session (named by the gateway, as a new
+  tmux session is) and lists stopped herdr sessions too, which start again
+  when opened; before, herdr was offered only while a session of it ran.
+- The shortcut panel: herdr's new workspace and close pane (asked first, for
+  the pane focused then), Ctrl+\ (quit), Claude Code's task list (^T), Codex's
+  mode (⇧Tab), transcript (^T) and editing the last message (Esc Esc).
 
 ### Changed
 - The settings page is grouped by what a setting is about: terminal, keyboard
@@ -18,6 +24,12 @@ before 1.0, a minor version may change configuration or behaviour (said here whe
   account. Display name, password and two-step sign-in are rows like the
   others; the password is changed in a dialog. The page is a little wider on
   large screens, and on phones the Enter key's choice fills the row.
+- Scrolling with a trackpad, in a program that takes the mouse (Claude Code's
+  fullscreen view, herdr, tmux, vim), goes as far as the fingers move: a
+  report per line, as native terminals send, instead of one per event at a
+  third of the distance. A mouse wheel's notch is one report as before. On
+  touch screens a flick slows as iOS lists do and carries further, and the
+  scroll goes to the pane under the finger (herdr's split panes).
 
 ## [0.2.0] - 2026-10-21
 

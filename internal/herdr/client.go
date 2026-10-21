@@ -297,6 +297,21 @@ func (c *Client) NewTab(ctx context.Context, workspaceID string) error {
 	return c.Call(ctx, "tab.create", params, nil)
 }
 
+// NewWorkspace opens a workspace and focuses it; its folder follows the
+// focused pane of sourceWS ("" for none) as herdr's settings say.
+func (c *Client) NewWorkspace(ctx context.Context, sourceWS string) error {
+	params := map[string]any{"focus": true}
+	if sourceWS != "" {
+		params["source_workspace_id"] = sourceWS
+	}
+	return c.Call(ctx, "workspace.create", params, nil)
+}
+
+// ClosePane closes a pane, ending what runs in it.
+func (c *Client) ClosePane(ctx context.Context, paneID string) error {
+	return c.Call(ctx, "pane.close", map[string]any{"pane_id": paneID}, nil)
+}
+
 // Split splits the focused pane, "right" or "down", focusing the new one.
 func (c *Client) Split(ctx context.Context, direction string) error {
 	return c.Call(ctx, "pane.split", map[string]any{"direction": direction, "focus": true}, nil)
