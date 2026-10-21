@@ -6,9 +6,9 @@ import { getLang, setLang, t, type Lang } from '../i18n'
 import { setPrefs, usePrefs } from '../prefs'
 import { linkHandler } from '../router'
 import { signOut, useSession } from '../app'
-import { Field, useToast } from '../components/ui'
+import { Dialog, Field, useToast } from '../components/ui'
 import { CurrentScheme, SchemeDialog } from '../terminal/SchemePicker'
-import { TwoStepSection } from './TwoStep'
+import { TwoStepSetting } from './TwoStep'
 import { CustomKeysSection } from './CustomKeys'
 
 // As the terminal's menu sets it (one point at a time).
@@ -63,7 +63,7 @@ export function SettingsPage() {
   const stepFont = (d: number) => setPrefs({ fontSize: Math.min(FONT_MAX, Math.max(FONT_MIN, prefs.fontSize + d)) })
 
   return (
-    <main className="page page-form">
+    <main className="page page-form page-settings">
       <div className="page-head"><h1>{t('settings.title')}</h1></div>
 
       <section className="section">
@@ -112,6 +112,16 @@ export function SettingsPage() {
               </button>
             </div>
           </Setting>
+          <Switch label={t('settings.webgl')} hint={t('settings.webglHint')} checked={prefs.webgl} onChange={(v) => setPrefs({ webgl: v })} />
+          <Switch label={t('settings.remoteClipboard')} hint={t('settings.remoteClipboardHint')} checked={prefs.remoteClipboard} onChange={(v) => setPrefs({ remoteClipboard: v })} />
+        </div>
+      </section>
+
+      {schemesOpen && <SchemeDialog onClose={() => setSchemesOpen(false)} />}
+
+      <section className="section">
+        <h2>{t('settings.keyboard')}</h2>
+        <div className="settings-group">
           <Setting label={t('settings.composerEnter')} hint={t('settings.composerEnterHint', { mod: isMac ? '⌘↩' : 'Ctrl+Enter' })} id="ce-l">
             <Seg
               labelledBy="ce-l"
@@ -120,27 +130,34 @@ export function SettingsPage() {
               onChange={(v) => setPrefs({ composerEnter: v })}
             />
           </Setting>
-          <Switch label={t('settings.keybar')} checked={prefs.keybar} onChange={(v) => setPrefs({ keybar: v })} />
-          {prefs.keybar && <Switch label={t('settings.tapKeyboard')} hint={t('settings.tapKeyboardHint')} checked={prefs.tapKeyboard} onChange={(v) => setPrefs({ tapKeyboard: v })} />}
           <Switch label={t('settings.optionIsMeta')} checked={prefs.optionIsMeta} onChange={(v) => setPrefs({ optionIsMeta: v })} />
-          <Switch label={t('settings.webgl')} hint={t('settings.webglHint')} checked={prefs.webgl} onChange={(v) => setPrefs({ webgl: v })} />
-          <Switch label={t('settings.remoteClipboard')} hint={t('settings.remoteClipboardHint')} checked={prefs.remoteClipboard} onChange={(v) => setPrefs({ remoteClipboard: v })} />
         </div>
       </section>
 
-      {schemesOpen && <SchemeDialog onClose={() => setSchemesOpen(false)} />}
+      <section className="section">
+        <h2>{t('settings.touch')}</h2>
+        <div className="settings-group">
+          <Switch label={t('settings.keybar')} checked={prefs.keybar} onChange={(v) => setPrefs({ keybar: v })} />
+          {prefs.keybar && <Switch label={t('settings.tapKeyboard')} hint={t('settings.tapKeyboardHint')} checked={prefs.tapKeyboard} onChange={(v) => setPrefs({ tapKeyboard: v })} />}
+        </div>
+      </section>
 
       <CustomKeysSection />
 
       <PushSection />
 
-      <ProfileSection />
-      <PasswordSection />
-      <TwoStepSection />
+      <section className="section">
+        <h2>{t('settings.account')}</h2>
+        <div className="settings-group">
+          <ProfileSetting />
+          <PasswordSetting />
+          <TwoStepSetting />
+        </div>
+      </section>
 
       {/* Phones have no sidebar: admin pages and sign-out live here. */}
       <section className="section phone-only">
-        <h2>{t('nav.account')}</h2>
+        <h2>{t('settings.more')}</h2>
         <div className="settings-group">
           {boot.recordings && (
             <a className="setting setting-link" href="/recordings" onClick={linkHandler('/recordings')}>
@@ -179,7 +196,8 @@ export function SettingsPage() {
   )
 }
 
-function ProfileSection() {
+// The display name, edited in place; Save shows once it differs.
+function ProfileSetting() {
   const { me, setMe } = useSession()
   const toast = useToast()
   const [display, setDisplay] = useState(me?.display_name ?? '')
@@ -187,7 +205,7 @@ function ProfileSection() {
   const dirty = display !== (me?.display_name ?? '')
   const save = async (e: FormEvent) => {
     e.preventDefault()
-    if (busy) return
+    if (busy || !dirty) return
     setBusy(true)
     try {
       const m = await api<Me>('PUT', '/api/me', { display_name: display })
@@ -200,26 +218,36 @@ function ProfileSection() {
     }
   }
   return (
-    <section className="section">
-      <h2>{t('settings.profile')}</h2>
-      <form className="form" onSubmit={save}>
-        <Field label={t('settings.displayName')} htmlFor="s-display" hint={t('settings.username', { name: me?.username ?? '' })}>
-          <input id="s-display" className="input" value={display} onChange={(e) => setDisplay(e.target.value)} />
-        </Field>
-        <div>
-          <button className="btn" disabled={busy || !dirty}>{t('common.save')}</button>
-        </div>
-      </form>
-    </section>
+    <form className="setting setting-wide" onSubmit={save}>
+      <div className="setting-label">
+        <label htmlFor="s-display">{t('settings.displayName')}</label>
+        <span className="hint">{t('settings.username', { name: me?.username ?? '' })}</span>
+      </div>
+      <div className="setting-control">
+        <input id="s-display" className="input" value={display} onChange={(e) => setDisplay(e.target.value)} />
+        {dirty && <button className="btn" disabled={busy}>{t('common.save')}</button>}
+      </div>
+    </form>
   )
 }
 
-function PasswordSection() {
+function PasswordSetting() {
+  const [open, setOpen] = useState(false)
+  return (
+    <Setting label={t('settings.passwordRow')}>
+      <button type="button" className="btn" onClick={() => setOpen(true)}>{t('settings.password')}</button>
+      {open && <PasswordDialog onClose={() => setOpen(false)} />}
+    </Setting>
+  )
+}
+
+function PasswordDialog({ onClose }: { onClose: () => void }) {
   const toast = useToast()
   const [cur, setCur] = useState('')
   const [next, setNext] = useState('')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+  const close = () => !busy && onClose()
   const submit = async (e: FormEvent) => {
     e.preventDefault()
     if (busy) return
@@ -227,31 +255,30 @@ function PasswordSection() {
     setError('')
     try {
       await api('POST', '/api/me/password', { current: cur, next })
-      setCur('')
-      setNext('')
       toast(t('settings.passwordChanged'))
+      setBusy(false)
+      onClose()
     } catch (err) {
       setError(errorText(err))
-    } finally {
       setBusy(false)
     }
   }
   return (
-    <section className="section">
-      <h2>{t('settings.password')}</h2>
+    <Dialog title={t('settings.password')} onClose={close}>
       <form className="form" onSubmit={submit}>
         <Field label={t('settings.currentPassword')} htmlFor="s-cur">
-          <input id="s-cur" className="input" type="password" autoComplete="current-password" value={cur} onChange={(e) => setCur(e.target.value)} required />
+          <input id="s-cur" className="input" type="password" autoComplete="current-password" value={cur} onChange={(e) => setCur(e.target.value)} required autoFocus />
         </Field>
         <Field label={t('settings.newPassword')} htmlFor="s-next" hint={t('setup.passwordHint')}>
           <input id="s-next" className="input" type="password" autoComplete="new-password" minLength={8} value={next} onChange={(e) => setNext(e.target.value)} required />
         </Field>
         {error && <p className="err" role="alert">{error}</p>}
-        <div>
-          <button className="btn" disabled={busy || !cur || next.length < 8}>{t('settings.password')}</button>
+        <div className="dialog-actions">
+          <button type="button" className="btn" onClick={close} disabled={busy}>{t('common.cancel')}</button>
+          <button className="btn btn-primary" disabled={busy || !cur || next.length < 8}>{t('settings.password')}</button>
         </div>
       </form>
-    </section>
+    </Dialog>
   )
 }
 

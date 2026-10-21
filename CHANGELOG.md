@@ -5,6 +5,13 @@ before 1.0, a minor version may change configuration or behaviour (said here whe
 
 ## [Unreleased]
 
+### Changed
+- The settings page is grouped by what a setting is about: terminal, keyboard
+  and composer, touch screens (the key bar and taps), notifications and the
+  account. Display name, password and two-step sign-in are rows like the
+  others; the password is changed in a dialog. The page is a little wider on
+  large screens, and on phones the Enter key's choice fills the row.
+
 ## [0.2.0] - 2026-10-21
 
 Upgrading from 0.1.0 needs no configuration change; the database is updated

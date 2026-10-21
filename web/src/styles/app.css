@@ -410,9 +410,21 @@ label.setting { cursor: pointer; }
 .setting-link.danger, .setting-link.danger .row-icon { color: var(--danger); }
 .setting .seg button { height: 30px; padding: 0 10px; font-size: 13px; }
 @media (pointer: coarse) { .setting .seg button { height: 34px; } }
+/* The settings page: a little wider than a form, sections further apart. */
+.page-settings { max-width: calc(680px + 2 * var(--pad-x)); }
+.page-settings .section + .section { margin-top: 16px; }
+/* The font size stepper framed as the segmented controls beside it. */
+.setting .stepper { gap: 2px; padding: 2px; border-radius: var(--r); background: var(--bg-subtle); box-shadow: inset 0 0 0 1px var(--line); }
+.setting .stepper .icon-btn { width: 30px; height: 30px; color: var(--fg-2); }
+@media (pointer: coarse) { .setting .stepper .icon-btn { width: 34px; height: 34px; } }
+.setting-wide .setting-control .input { width: 220px; }
 @media (max-width: 479.98px) {
   .setting:has(.seg) { flex-direction: column; align-items: stretch; gap: 8px; }
+  .setting:has(.seg) > .setting-control { align-self: stretch; }
   .setting:has(.seg) .seg { width: 100%; }
+  .setting-wide { flex-direction: column; align-items: stretch; gap: 8px; }
+  .setting-wide > .setting-control { align-self: stretch; flex-wrap: wrap; }
+  .setting-wide .setting-control .input { flex: 1; width: auto; min-width: 0; }
 }
 .stepper .icon-btn:disabled { opacity: 0.4; cursor: default; }
 

@@ -27,9 +27,9 @@ function useStepFocus(step: unknown) {
   return ref
 }
 
-// Two-step sign-in in the settings: turn it on with an authenticator app,
-// replace the recovery codes, or turn it off.
-export function TwoStepSection() {
+// Two-step sign-in, a row of the settings' account group: turn it on with
+// an authenticator app, replace the recovery codes, or turn it off.
+export function TwoStepSetting() {
   const { me, setMe } = useSession()
   const [status, setStatus] = useState<Status | null>(null)
   const [failed, setFailed] = useState(false)
@@ -46,35 +46,38 @@ export function TwoStepSection() {
     load()
   }
   return (
-    <section className="section">
-      <h2>{t('totp.title')}</h2>
-      {failed ? (
-        <LoadError onRetry={load} />
-      ) : status === null ? (
-        <p className="hint">{t('common.loading')}</p>
-      ) : status.on ? (
-        <div className="form">
-          <p className="lead">
+    <div className="setting setting-wide">
+      <div className="setting-label">
+        <span>{t('totp.title')}</span>
+        {failed ? (
+          <LoadError onRetry={load} />
+        ) : status === null ? (
+          <span className="hint">{t('common.loading')}</span>
+        ) : status.on ? (
+          <span className="hint">
             {t('totp.onLead')}
             {status.recovery_left <= 3 ? <span className="warn-text">{t('totp.fewLeft', { n: status.recovery_left })}</span> : t('totp.left', { n: status.recovery_left })}
-          </p>
-          <div className="btn-row">
-            <button className="btn" onClick={() => setDialog('recovery')}>{t('totp.newCodes')}</button>
-            <button className="btn btn-ghost danger-text" onClick={() => setDialog('disable')}>{t('totp.turnOff')}</button>
-          </div>
-        </div>
-      ) : (
-        <div className="form">
-          <p className="lead">{t('totp.offLead')}</p>
-          <div>
-            <button className="btn btn-primary" onClick={() => setDialog('enrol')}>{t('totp.turnOn')}</button>
-          </div>
+          </span>
+        ) : (
+          <span className="hint">{t('totp.offLead')}</span>
+        )}
+      </div>
+      {status && (
+        <div className="setting-control">
+          {status.on ? (
+            <>
+              <button className="btn" onClick={() => setDialog('recovery')}>{t('totp.newCodes')}</button>
+              <button className="btn btn-ghost danger-text" onClick={() => setDialog('disable')}>{t('totp.off')}</button>
+            </>
+          ) : (
+            <button className="btn" onClick={() => setDialog('enrol')}>{t('totp.on')}</button>
+          )}
         </div>
       )}
       {dialog === 'enrol' && <EnrolDialog onClose={() => setDialog(null)} onDone={() => changed(true)} />}
       {dialog === 'recovery' && <ConfirmDialog kind="recovery" onClose={() => setDialog(null)} onDone={() => changed(true)} />}
       {dialog === 'disable' && <ConfirmDialog kind="disable" onClose={() => setDialog(null)} onDone={() => changed(false)} />}
-    </section>
+    </div>
   )
 }
 
