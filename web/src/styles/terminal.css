@@ -163,7 +163,7 @@ html.term-mode body { position: fixed; inset: 0; }
   background: none; color: var(--term-fg); text-align: left; cursor: pointer; font: 13px/1.3 var(--font-mono);
 }
 .complete-item:hover { background: var(--term-hover); }
-.complete-item[aria-selected="true"] { background: var(--term-accent-soft); box-shadow: inset 2px 0 0 var(--accent); }
+.complete-item[aria-selected="true"] { background: var(--term-accent-soft); }
 .complete-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .complete-hint { flex: none; color: var(--term-fg-3); font: 12px var(--font-ui); }
 .complete-note { padding: 6px 10px; color: var(--term-fg-3); font-size: 12px; }
