@@ -18,10 +18,11 @@ Docker for the test server.
 - Behaviour is covered by a test where one is practical (Go tests under
   `internal/…`); a change to how the browser behaves says in the pull request
   how it was tried.
-- Interface changes are tried on a phone-sized screen and a desktop one, in
+- Interface changes are tried on a phone, a tablet and a desktop window, in
   the light and the dark theme, with real-looking data (long names, many
-  items). Phones matter most here: if you can, try iOS Safari, whose keyboard
-  and focus rules differ from desktop browsers'.
+  items). Corral is used on all three alike. If you can, try Safari on an
+  iPhone and an iPad, whose keyboard and focus rules differ from desktop
+  browsers'.
 - Text shown to users is in both languages, in `web/src/i18n.ts` (the type
   check fails when a key is missing in one). Write the English as plainly as
   you can.

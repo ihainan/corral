@@ -22,6 +22,10 @@
 </p>
 
 <p align="center">
+  <img src="docs/screenshots/tablet.png" width="640" alt="Corral on an iPad: the running sessions as cards showing their screens, one with an agent waiting, and the hosts below">
+</p>
+
+<p align="center">
   <img src="docs/screenshots/phone-terminal.png" width="260" alt="A terminal on a phone, with the key bar">
   <img src="docs/screenshots/phone-reply.png" width="260" alt="Answering an agent from a phone: its question and its choices as buttons">
   <img src="docs/screenshots/phone-composer.png" width="260" alt="The composer completing a file after @">
@@ -37,44 +41,55 @@ another: start it at your desk, check on it from your phone, carry on on a table
 ### Desktop, tablet and phone
 
 - **Sessions that follow you** — They keep running while nobody looks and open
-  on whichever device you sign in from. tmux and [herdr](https://herdr.dev)
-  sessions also outlive a gateway restart, and open pages reattach them by
-  themselves.
-- **Tabs** — On a desktop or tablet every session is a tab, with how many agents
-  wait or are done. Ctrl+Tab in the installed app.
-- **Typing** — A hardware keyboard types straight in, on a computer or an iPad.
-  On a touch screen, tap where you type for the keyboard; Chinese and other
-  input methods and dictation work.
-- **A key bar** — For touch screens: Esc, Ctrl, Alt, Tab, arrows, F1–F12 and
-  hard-to-type symbols. Arrange it, add keys of your own, give keys a long press.
+  on whichever device you sign in from; the home page shows each one's screen
+  in small. tmux and [herdr](https://herdr.dev) sessions also outlive a gateway
+  restart, and open pages reattach them by themselves.
+- **Tabs** — In a wide window (a computer, a tablet, a phone on its side) every
+  session is a tab, with how many agents wait or are done; up to 8 stay
+  connected, so switching is instant. `+` searches your hosts. Ctrl+Tab and
+  Ctrl+Shift+Tab in the installed app.
+- **A hardware keyboard** — On a computer or an iPad, keys go straight to the
+  terminal and Option works as Alt. Paste an image to upload it.
+- **A touch screen** — Tap where you type for the keyboard; Chinese and other
+  input methods and dictation work. A key bar holds Esc, Ctrl, Alt, Tab,
+  arrows, F1–F12 and hard-to-type symbols: arrange it, add keys of your own,
+  give keys a long press.
 - **Gestures** — Two fingers sideways go to the next session, up or down to
   herdr's next workspace; pinch to size the font.
+- **Settings follow you too** — Theme, font size, colour schemes, the key bar
+  and the rest are kept with your account.
 
 ### Made for coding agents
 
 - **Answer an agent** — When an agent in herdr waits, answer from the top bar or
   straight from its notification: its question, its choices as buttons.
 - **Notifications** — When an agent waits or finishes, or a program rings the
-  bell. Tapping one opens that agent's pane.
+  bell or sends one. Tapping one opens that agent's pane. On an iPhone or iPad,
+  add Corral to the Home Screen first: Safari notifies only from there.
 - **A composer** — Write longer prompts: `@` files, `/` commands, `$` skills,
-  history, Claude Code's suggested prompt with Tab. Enter sends.
-- **Images** — Paste, drop or pick one: it is uploaded to the host and its path
-  typed in, as Claude Code and Codex take images.
+  history, Claude Code's suggested prompt with Tab. Ctrl+Shift+Enter
+  (⇧⌘↩ on a Mac) opens it from the terminal.
+- **Images and files** — Paste, drop or pick an image, a PDF or a text file: it
+  is uploaded to the host and its path typed in for the agent to read.
 
 ### Around the terminal
 
-- **Files** — Browse the host, upload, download, rename, delete, insert a path.
-- **Web previews** — Open servers running on the host through port forwarding;
-  VS Code in the browser ([code-server](https://github.com/coder/code-server)).
-- **Looks** — Colour schemes (one for light, one for dark), copy mode, clipboard
-  from the host (OSC 52), installable as an app.
+- **Files** — Browse the host, upload (or drop files in), download, rename,
+  delete, insert a path, jump to the terminal's folder.
+- **Web previews** — Open servers running on the host through port forwarding
+  (click a localhost address in the terminal), for yourself or everyone signed
+  in; VS Code in the browser ([code-server](https://github.com/coder/code-server)).
+- **Looks** — Light and dark, a colour scheme for the terminal (or one each for
+  light and dark), copy mode, clipboard from the host (OSC 52), installable as
+  an app.
 
 ### For a team
 
 - **Accounts** — By invitation or created by an administrator; each user has
   their own hosts and keys.
-- **Safety** — Credentials encrypted at rest, two-step sign-in, an audit log,
-  only the networks you allow.
+- **Safety** — Credentials encrypted at rest (or a password asked for each
+  time), host keys checked, two-step sign-in, an audit log, only the networks
+  you allow.
 - **Sharing** — Jump hosts, optional session recording, read-only watching of a
   session.
 
@@ -95,8 +110,9 @@ Chinese and English interfaces ship together.
 - The composer keeps its draft across a reload of the tab, shows a long paste
   as a label it sends in full, and completes as the agents' own input boxes do
   (`/` also offers your own commands in `.claude/commands`, skills, Codex
-  prompts). On a computer Enter sends and Shift+Enter starts a new line; a
-  setting swaps them.
+  prompts). On a computer Enter sends and Shift+Enter starts a new line, or
+  (as set) Enter starts a new line and ⌘/Ctrl+Enter sends. On a phone or
+  tablet Enter always starts a new line; the button or ⌘/Ctrl+Enter sends.
 - When Gemini CLI is in front (in tmux or herdr), an uploaded image's path is
   typed as `@path`. Shift+Enter inserts a newline and Ctrl+Enter reaches the
   programs that tell it apart (Claude Code's "send now").
@@ -105,6 +121,8 @@ Chinese and English interfaces ship together.
   changed since. Once the agent no longer waits, its alert is replaced. At
   most 10 alerts a minute; webhooks too, if enabled. The terminal offers to
   turn alerts on once agents show up.
+- Tabs show in windows at least 700 pixels wide; narrower ones switch sessions
+  from a list.
 - Several devices can have one session open; the one you act on decides the
   terminal size, the others follow it.
 - Programs that follow the terminal's colours are told when it turns light or
@@ -116,8 +134,8 @@ Chinese and English interfaces ship together.
 - VS Code opens in Chinese with the Chinese interface: the language pack is
   fetched from [Open VSX](https://open-vsx.org) by the host, or uploaded from
   `CORRAL_CODE_SERVER_DIR`, and checked against a pinned digest.
-- A password an administrator set (a new account, a reset) must be changed at
-  the next sign-in before anything else.
+- A password an administrator sets (a new account, a reset) is changed at the
+  next sign-in before anything else, unless the administrator unticks that.
 
 </details>
 
@@ -129,9 +147,10 @@ a SQLite database. Images for linux/amd64 and linux/arm64 are published as
 also have Linux binaries.
 
 ```sh
+(umask 077; docker run --rm ghcr.io/ihainan/corral genkey > corral.key)   # keep it: it decrypts what is stored
 docker run -d --name corral -p 127.0.0.1:8080:8080 -v corral-data:/data \
   -e CORRAL_PUBLIC_URL=https://ssh.example.com \
-  -e CORRAL_MASTER_KEY="$(docker run --rm ghcr.io/ihainan/corral genkey)" \
+  -e CORRAL_MASTER_KEY="$(cat corral.key)" \
   ghcr.io/ihainan/corral
 docker logs corral   # a one-time link to create the first administrator
 ```
@@ -142,7 +161,8 @@ from **Users** (an invitation link, or an account you create).
 <details>
 <summary><b>With Compose</b></summary>
 
-Keeping the key in a file outside the data directory:
+The key in `.env` next to the file, made once with
+`(umask 077; echo "CORRAL_MASTER_KEY=$(docker run --rm ghcr.io/ihainan/corral genkey)" > .env)`:
 
 ```yaml
 services:
@@ -152,12 +172,16 @@ services:
     ports: ["127.0.0.1:8080:8080"]
     environment:
       CORRAL_PUBLIC_URL: https://ssh.example.com
-      CORRAL_MASTER_KEY_FILE: /run/secrets/corral-master-key
-      CORRAL_TRUSTED_PROXIES: 172.16.0.0/12   # the reverse proxy, as the container sees it
+      CORRAL_MASTER_KEY: ${CORRAL_MASTER_KEY:?}  # from .env
+      CORRAL_TRUSTED_PROXIES: 172.16.0.0/12      # the reverse proxy, as the container sees it
     volumes:
-      - ./data:/data
-      - ./master.key:/run/secrets/corral-master-key:ro
+      - corral-data:/data
+volumes:
+  corral-data:
 ```
+
+A folder instead of the volume (`./data:/data`) must be writable by the
+image's user, uid 10001: `mkdir data && sudo chown 10001 data`.
 
 To build the image yourself: `docker build -t corral .` (any platform, e.g.
 `docker buildx build --platform linux/arm64`).
@@ -207,17 +231,17 @@ All settings are environment variables. Only the first two are required.
 | Variable | Default | Meaning |
 |---|---|---|
 | `CORRAL_PUBLIC_URL` | (required) | The URL users open; used for origin checks and cookies |
-| `CORRAL_MASTER_KEY` / `CORRAL_MASTER_KEY_FILE` | (required) | 32 random bytes, base64 (`corral genkey`); encrypts stored credentials |
+| `CORRAL_MASTER_KEY` / `CORRAL_MASTER_KEY_FILE` | (required) | 32 random bytes, base64 (`corral genkey`); encrypts stored credentials. The file wins if both are set |
 | `CORRAL_LISTEN` | `127.0.0.1:8080` (`0.0.0.0:8080` in the image) | Listen address |
 | `CORRAL_DATA_DIR` | `./data` (`/data` in the image) | Database and recordings |
 | `CORRAL_ALLOWED_NETWORKS` | private ranges | Networks SSH targets may resolve to |
-| `CORRAL_DENIED_NETWORKS` | — | Extra networks to refuse (link-local, multicast and unspecified are always refused) |
+| `CORRAL_DENIED_NETWORKS` | — | Extra networks to refuse (`0.0.0.0/8`, link-local, multicast and reserved ranges are always refused) |
 | `CORRAL_TRUSTED_PROXIES` | — | Proxies whose `X-Forwarded-For` is believed |
 | `CORRAL_DETACH_TIMEOUT` | `24h` | How long a session runs with nobody viewing it |
 | `CORRAL_MAX_SESSIONS_PER_USER` | `20` | Open sessions per user |
 | `CORRAL_UPLOAD_MAX_MB` | `100` | Upload size limit |
 | `CORRAL_LOGIN_IDLE_TIMEOUT` / `CORRAL_LOGIN_MAX_AGE` | `168h` / `720h` | Browser sign-in lifetime |
-| `CORRAL_DEFAULT_LANGUAGE` | each browser's language | `zh-CN` or `en` for everyone who has not picked one (and for webhooks) |
+| `CORRAL_DEFAULT_LANGUAGE` | each browser's language (English for webhooks) | `zh-CN` or `en` for everyone who has not picked one, and for webhooks |
 | `CORRAL_FORWARD_DOMAIN` | — | Parent domain for forwarded ports and VS Code; needs an `https://` public URL |
 | `CORRAL_CODE_SERVER` | `on` with a forward domain | `on` / `off`: VS Code in the browser |
 | `CORRAL_CODE_SERVER_VERSION` | `4.138.0` | code-server release installed on hosts |
@@ -227,7 +251,7 @@ All settings are environment variables. Only the first two are required.
 | `CORRAL_RECORDING` | `off` | `on` records the output of every session |
 | `CORRAL_RECORDING_DAYS` | `30` | How long recordings are kept |
 | `CORRAL_RECORDING_MAX_MB` | `200` | Size limit of one recording |
-| `CORRAL_PUSH_HOSTS` | — | Extra push service host suffixes (besides Apple, Google, Mozilla, Microsoft) |
+| `CORRAL_PUSH_HOSTS` | — | Extra push services (besides Apple, Google, Mozilla, Microsoft): a host name, or `.example.com` for any below it |
 | `CORRAL_WEBHOOK_PREFIXES` | — (webhooks off) | URL prefixes users may send alert webhooks to |
 | `CORRAL_STATIC_DIR` | — (embedded) | Serve the web interface from this directory instead (front-end development) |
 
@@ -255,7 +279,8 @@ All settings are environment variables. Only the first two are required.
   terminals and forwards at once; changing your own password signs out your
   other browsers; signing out ends that browser's login. Terminals otherwise
   keep running until closed or detached for `CORRAL_DETACH_TIMEOUT`.
-- **Recordings** contain whatever the screen showed (not what was typed).
+- **Recordings** contain whatever the screen showed: typing that the terminal
+  echoes, but not a password typed at a prompt that hides it.
   Owners see their own, administrators everyone's; watching one is audited.
   The terminal tells users it is recorded.
 - **Watching** shows the screen, recent output included, to the people the
@@ -264,7 +289,8 @@ All settings are environment variables. Only the first two are required.
   connects to itself, the jump host included. The hop from a jump host to the
   host behind it starts on the jump host, where the user can log in anyway;
   only addresses that are never a host (link-local, multicast, unspecified)
-  are refused there.
+  are refused there, and only when written as an address: a name is resolved
+  by the jump host.
 
 </details>
 
@@ -280,8 +306,8 @@ Report security problems privately, not in a public issue: see [SECURITY.md](SEC
 - In a folder where other users may rename entries (world-writable without the
   sticky bit), an upload's staging folder can be swapped by them between steps;
   such a folder lets them tamper with anything put there anyway.
-- The file panel shows the first 5000 entries of a folder, in the host's order,
-  and says when there are more.
+- The file panel shows the first 5000 entries the host lists in a folder
+  (folders first, by name) and says when there are more.
 - Answering an agent checks the pane's screen right before typing, but herdr
   cannot check and type in one step: an answer given on the host in that very
   moment is not seen.
@@ -298,12 +324,16 @@ Report security problems privately, not in a public issue: see [SECURITY.md](SEC
 
 ```sh
 docker build -t corral-test-sshd test/sshd && docker run -d -p 127.0.0.1:2222:22 corral-test-sshd
-make web && go run ./cmd/corral serve   # with the variables above
-make check                              # Go tests (incl. the security suite), type check, notices
-make notices                            # after changing dependencies
+make web
+export CORRAL_PUBLIC_URL=http://127.0.0.1:8080 CORRAL_ALLOWED_NETWORKS=127.0.0.1/32 \
+  CORRAL_MASTER_KEY=$(go run ./cmd/corral genkey)
+go run ./cmd/corral serve   # the log has the link to create the first account
+make check                  # Go tests (incl. the security suite), type check, notices
+make notices                # after changing dependencies
 ```
 
-The test SSH server accepts `alice` / `alice-pass`. Third-party licences are
+Add the test SSH server as host `127.0.0.1`, port `2222`, user `alice`,
+password `alice-pass`. Third-party licences are
 listed in [`web/public/THIRD-PARTY-NOTICES.txt`](web/public/THIRD-PARTY-NOTICES.txt),
 which the web interface also serves. See [CONTRIBUTING.md](CONTRIBUTING.md)
 before sending a change, and [CHANGELOG.md](CHANGELOG.md) for what changed
