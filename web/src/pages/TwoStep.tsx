@@ -62,15 +62,15 @@ export function TwoStepSetting() {
           <span className="hint">{t('totp.offLead')}</span>
         )}
       </div>
-      {status && (
+      {status && !failed && (
         <div className="setting-control">
           {status.on ? (
             <>
               <button className="btn" onClick={() => setDialog('recovery')}>{t('totp.newCodes')}</button>
-              <button className="btn btn-ghost danger-text" onClick={() => setDialog('disable')}>{t('totp.off')}</button>
+              <button className="btn btn-ghost danger-text" aria-label={t('totp.turnOff')} onClick={() => setDialog('disable')}>{t('totp.off')}</button>
             </>
           ) : (
-            <button className="btn" onClick={() => setDialog('enrol')}>{t('totp.on')}</button>
+            <button className="btn" aria-label={t('totp.turnOn')} onClick={() => setDialog('enrol')}>{t('totp.on')}</button>
           )}
         </div>
       )}

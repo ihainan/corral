@@ -221,10 +221,10 @@ function ProfileSetting() {
     <form className="setting setting-wide" onSubmit={save}>
       <div className="setting-label">
         <label htmlFor="s-display">{t('settings.displayName')}</label>
-        <span className="hint">{t('settings.username', { name: me?.username ?? '' })}</span>
+        <span className="hint" id="s-display-hint">{t('settings.username', { name: me?.username ?? '' })}</span>
       </div>
       <div className="setting-control">
-        <input id="s-display" className="input" value={display} onChange={(e) => setDisplay(e.target.value)} />
+        <input id="s-display" className="input" aria-describedby="s-display-hint" value={display} onChange={(e) => setDisplay(e.target.value)} />
         {dirty && <button className="btn" disabled={busy}>{t('common.save')}</button>}
       </div>
     </form>
@@ -267,7 +267,7 @@ function PasswordDialog({ onClose }: { onClose: () => void }) {
     <Dialog title={t('settings.password')} onClose={close}>
       <form className="form" onSubmit={submit}>
         <Field label={t('settings.currentPassword')} htmlFor="s-cur">
-          <input id="s-cur" className="input" type="password" autoComplete="current-password" value={cur} onChange={(e) => setCur(e.target.value)} required autoFocus />
+          <input id="s-cur" className="input" type="password" autoComplete="current-password" value={cur} onChange={(e) => setCur(e.target.value)} required />
         </Field>
         <Field label={t('settings.newPassword')} htmlFor="s-next" hint={t('setup.passwordHint')}>
           <input id="s-next" className="input" type="password" autoComplete="new-password" minLength={8} value={next} onChange={(e) => setNext(e.target.value)} required />
