@@ -5,6 +5,13 @@ before 1.0, a minor version may change configuration or behaviour (said here whe
 
 ## [Unreleased]
 
+### Added
+- Tab keys in the installed app: ⌘T opens a new tab (Ctrl+Shift+T off a Mac,
+  where Ctrl+letters stay with the programs); on a Mac or an iPad ⌘1–⌘8 pick
+  a tab by its place, ⌘9 the last, ⌘⇧[ and ⌘⇧] the previous and next. No key
+  closes a tab, as that ends its session. In a browser tab these stay the
+  browser's.
+
 ### Changed
 - The settings page is grouped by what a setting is about: terminal, keyboard
   and composer, touch screens (the key bar and taps), notifications and the

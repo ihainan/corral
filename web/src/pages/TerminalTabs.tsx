@@ -26,10 +26,22 @@ export function useTabsMode(): boolean {
 const MAX_MOUNTED = 8
 const POLL_MS = 5000
 
+// An installed app's window (no tabs of the browser's) passes on the keys a
+// terminal app uses for its tabs; a browser keeps them for its own, and some
+// of them a page could take from it, so they are taken only there.
+const standalone = window.matchMedia('(display-mode: standalone)').matches || (navigator as { standalone?: boolean }).standalone === true
+// (iPads say Mac too: their keyboards have ⌘.)
+const isMac = /Mac|iPhone|iPad/.test(navigator.platform)
+const newTabKey = isMac ? '⌘T' : 'Ctrl+Shift+T'
+
 // The user's running sessions as tabs, like a terminal app's: a tab once
 // opened stays connected in the back (up to MAX_MOUNTED), so switching is
 // instant. Ctrl+Tab and Ctrl+Shift+Tab go to the next and previous tab; a
 // browser keeps them for its own tabs, an installed app passes them on.
+// The installed app also has a new tab (⌘T; Ctrl+Shift+T elsewhere, as
+// Ctrl+letters belong to the programs) and, on a Mac, ⌘1…⌘8 for a tab by
+// its place, ⌘9 for the last and ⌘⇧[ ⌘⇧] for the previous and next. No key
+// closes a tab: that ends its session.
 export function TerminalTabs({ current }: { current: string }) {
   const [sessions, setSessions] = useState<SessionInfo[] | null>(null)
   const [mounted, setMounted] = useState<string[]>([current])
@@ -122,15 +134,28 @@ export function TerminalTabs({ current }: { current: string }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       // (Not under a dialog: it keeps the keys and the focus.)
-      if (e.key !== 'Tab' || !e.ctrlKey || e.altKey || e.metaKey || tabs.length < 2 || document.querySelector('[aria-modal="true"]')) return
+      if (e.altKey || document.querySelector('[aria-modal="true"]')) return
+      let act: (() => void) | null = null
+      if (e.key === 'Tab' && e.ctrlKey && !e.metaKey) {
+        if (tabs.length >= 2) act = () => go(e.shiftKey ? -1 : 1)
+      } else if (standalone && isMac && e.metaKey && !e.ctrlKey) {
+        const digit = /^Digit([1-9])$/.exec(e.code)
+        if (e.code === 'KeyT' && !e.shiftKey) act = () => setNewOpen(true)
+        else if (digit && !e.shiftKey) {
+          const n = Number(digit[1])
+          const to = n === 9 ? tabs[tabs.length - 1] : tabs[n - 1]
+          act = () => to && to.id !== current && navigate('/t/' + to.id, true)
+        } else if ((e.code === 'BracketLeft' || e.code === 'BracketRight') && e.shiftKey) act = () => go(e.code === 'BracketLeft' ? -1 : 1)
+      } else if (standalone && !isMac && e.ctrlKey && e.shiftKey && !e.metaKey && e.code === 'KeyT') act = () => setNewOpen(true)
+      if (!act) return
       // Before the terminal's own listeners: the program never sees it.
       e.preventDefault()
       e.stopPropagation()
-      go(e.shiftKey ? -1 : 1)
+      act()
     }
     window.addEventListener('keydown', onKey, true)
     return () => window.removeEventListener('keydown', onKey, true)
-  }, [go, tabs.length])
+  }, [go, tabs, current])
 
   // A notification of another session (tapped while this window shows
   // tabs) opens as its tab here, with what its address asks for (?reply=).
@@ -226,7 +251,7 @@ function TabBar(p: { tabs: SessionInfo[]; current: string; infos: Record<string,
           </button>
         )
       })}
-      <button type="button" className="icon-btn term-tab-new" onClick={p.onNew} aria-label={t('tabs.new')} title={t('tabs.new')}>
+      <button type="button" className="icon-btn term-tab-new" onClick={p.onNew} aria-label={t('tabs.new')} aria-keyshortcuts={standalone ? (isMac ? 'Meta+T' : 'Control+Shift+T') : undefined} title={standalone ? `${t('tabs.new')} (${newTabKey})` : t('tabs.new')}>
         <Plus size={17} />
       </button>
     </nav>

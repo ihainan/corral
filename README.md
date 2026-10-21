@@ -46,8 +46,10 @@ another: start it at your desk, check on it from your phone, carry on on a table
   restart, and open pages reattach them by themselves.
 - **Tabs** — In a wide window (a computer, a tablet, a phone on its side) every
   session is a tab, with how many agents wait or are done; up to 8 stay
-  connected, so switching is instant. `+` searches your hosts. Ctrl+Tab and
-  Ctrl+Shift+Tab in the installed app.
+  connected, so switching is instant. `+` searches your hosts. In the
+  installed app: Ctrl+Tab and Ctrl+Shift+Tab switch, ⌘T (Ctrl+Shift+T off a
+  Mac) opens a new one, and on a Mac or an iPad ⌘1–⌘8 pick a tab by its place,
+  ⌘9 the last, ⌘⇧[ and ⌘⇧] the previous and next.
 - **A hardware keyboard** — On a computer or an iPad, keys go straight to the
   terminal and Option works as Alt. Paste an image to upload it.
 - **A touch screen** — Tap where you type for the keyboard; Chinese and other
