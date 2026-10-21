@@ -12,12 +12,16 @@ export interface Prefs {
   // Terminal colours are separate from the page theme: most people want a
   // dark terminal even in a light UI. A scheme id, or "ui" (see resolveScheme).
   termTheme: string
+  // With termTheme "ui": the schemes for a dark and for a light page.
+  termThemeDark: string
+  termThemeLight: string
   fontSize: number
   keybar: boolean
   optionIsMeta: boolean
   webgl: boolean
   remoteClipboard: boolean // programs on the host may write this device's clipboard (OSC 52)
   tapKeyboard: boolean // on touch screens, a tap on the terminal brings up the keyboard
+  composerEnter: 'send' | 'newline' // what Enter does in the composer, on a computer (Shift+Enter, ⌘/Ctrl+Enter the other)
   customKeys: CustomKey[] // the user's own keys on the key bar, from before layouts (see keyLayout)
   keyLayout: KeyLayout | null // the key bar's keys, once the user arranged them; null: the default (see terminal/layout.ts)
 }
@@ -32,7 +36,7 @@ export const maxCustomKeys = 24
 
 // Phones get a slightly smaller default so common output fits without wrapping.
 const phone = window.matchMedia('(pointer: coarse) and (max-width: 599px)').matches
-const defaults: Prefs = { theme: 'system', termTheme: 'corral-dark', fontSize: phone ? 13 : 14, keybar: true, optionIsMeta: true, webgl: false, remoteClipboard: true, tapKeyboard: false, customKeys: [], keyLayout: null }
+const defaults: Prefs = { theme: 'system', termTheme: 'corral-dark', termThemeDark: 'corral-dark', termThemeLight: 'corral-light', fontSize: phone ? 13 : 14, keybar: true, optionIsMeta: true, webgl: false, remoteClipboard: true, tapKeyboard: false, composerEnter: 'send', customKeys: [], keyLayout: null }
 
 // The local copy is kept per account (several people may share a device);
 // until the account is known the last one used here paints the first frame.
@@ -231,8 +235,9 @@ function sanitize(raw: unknown): Partial<Prefs> {
   const o = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>
   const out: Partial<Prefs> = {}
   if (o.theme === 'system' || o.theme === 'light' || o.theme === 'dark') out.theme = o.theme
-  if (typeof o.termTheme === 'string' && /^[a-z0-9][a-z0-9-]{0,63}$/.test(o.termTheme)) out.termTheme = o.termTheme
+  for (const k of ['termTheme', 'termThemeDark', 'termThemeLight'] as const) if (typeof o[k] === 'string' && /^[a-z0-9][a-z0-9-]{0,63}$/.test(o[k] as string)) out[k] = o[k] as string
   if (Number.isInteger(o.fontSize) && (o.fontSize as number) >= 9 && (o.fontSize as number) <= 28) out.fontSize = o.fontSize as number
+  if (o.composerEnter === 'send' || o.composerEnter === 'newline') out.composerEnter = o.composerEnter
   for (const k of ['keybar', 'optionIsMeta', 'webgl', 'remoteClipboard', 'tapKeyboard'] as const) if (typeof o[k] === 'boolean') out[k] = o[k] as boolean
   if (Array.isArray(o.customKeys) && o.customKeys.length <= maxCustomKeys) {
     const text = (v: unknown, max: number) => typeof v === 'string' && v.trim() !== '' && [...v].length <= max && !controlChars.test(v)
@@ -308,7 +313,9 @@ export function isDark(): boolean {
 }
 
 export function termScheme(): Scheme {
-  return resolveScheme(state.termTheme, isDark())
+  const dark = isDark()
+  if (state.termTheme === 'ui') return resolveScheme(dark ? state.termThemeDark : state.termThemeLight, dark)
+  return resolveScheme(state.termTheme, dark)
 }
 
 export function isTermDark(): boolean {

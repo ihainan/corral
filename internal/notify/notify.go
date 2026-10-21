@@ -82,7 +82,7 @@ type Notifier struct {
 	// topic for an offline device keeps the newest. Webhooks have a line of
 	// their own, so a slow one does not hold up the devices.
 	pushes, hooks lines
-	revoked       map[int64]uint64      // per user, bumped when access ends; older queued notes are dropped
+	revoked       map[int64]uint64 // per user, bumped when access ends; older queued notes are dropped
 	sending       map[*sending]struct{}
 	loginValid    func(ctx context.Context, loginHash string) (bool, error)
 }

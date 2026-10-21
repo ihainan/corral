@@ -225,6 +225,8 @@ code, .mono { font-family: var(--font-mono); font-size: 0.9em; }
   font-size: 14px; font-weight: 500; cursor: pointer; padding: 0 8px; white-space: nowrap;
 }
 .seg button:hover { color: var(--fg); }
+.scheme-slot { margin: 12px 0 4px; }
+.scheme-slot button { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .seg button[aria-pressed='true'] { background: var(--bg); color: var(--fg); box-shadow: 0 0 0 1px var(--line), 0 1px 2px rgba(16, 18, 24, 0.06); }
 :root[data-theme='dark'] .seg button[aria-pressed='true'] { background: var(--bg-active); }
 @media (prefers-color-scheme: dark) { :root:not([data-theme='light']) .seg button[aria-pressed='true'] { background: var(--bg-active); } }
@@ -670,6 +672,7 @@ details.adv > .form { margin-top: 16px; }
 .live-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .live-sub { font-size: 12px; line-height: 16px; color: var(--fg-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .live-wait { color: var(--warn); font-weight: 600; }
+.live-done { color: var(--ok); font-weight: 600; }
 .live-close { position: absolute; right: 6px; bottom: 9px; }
 @media (max-width: 599px) {
   .live-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }

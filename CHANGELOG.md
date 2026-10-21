@@ -26,8 +26,23 @@ before 1.0, a minor version may change configuration or behaviour (said here whe
   times, a week apart.
 - Uploads from the terminal or the composer show their progress and can be
   stopped; closing the file panel asks first while files are still going up.
+- Terminal schemes can follow the app's appearance with a scheme of your
+  choice for each (Match app: one for dark, one for light).
+- Agents that finished and were not looked at since (herdr's "done") show on
+  their session's tab and card.
+- Two fingers moved together on a touch screen switch to the next or
+  previous session (sideways) or herdr workspace (up and down); spread or
+  pinched they still size the font.
+- A long paste into the composer shows as a label ("[Pasted text #1, 120
+  lines]") and is sent in full.
 
 ### Changed
+- On a computer, Enter in the composer sends and Shift+Enter starts a new
+  line, as in the agents' own input boxes; a setting turns Enter back into a
+  new line (⌘/Ctrl+Enter sends). The keys are shown by the send button.
+  "Insert" is now "Type in".
+- Text being composed by an input method is shown in the terminal's colours,
+  underlined, instead of a black box.
 - The herdr panel of workspaces and agents is gone: herdr's own sidebar
   lists them. A button in the top bar, shown while agents wait for you,
   answers one at once or picks among several.

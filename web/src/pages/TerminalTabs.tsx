@@ -88,10 +88,18 @@ export function TerminalTabs({ current }: { current: string }) {
     })
   }, [sessions, listAt, current])
 
+  // A tab let go of tells no more: what its page last said goes (the session
+  // list's word stands for it again).
+  useEffect(() => {
+    setInfos((all) => {
+      const keys = Object.keys(all).filter((k) => mounted.includes(k))
+      return keys.length === Object.keys(all).length ? all : Object.fromEntries(keys.map((k) => [k, all[k]]))
+    })
+  }, [mounted])
   const onInfo = useCallback((id: string, i: TabInfo) => {
     setInfos((all) => {
       const old = all[id]
-      return old && old.status === i.status && old.statusText === i.statusText && old.waiting === i.waiting ? all : { ...all, [id]: i }
+      return old && old.status === i.status && old.statusText === i.statusText && old.waiting === i.waiting && old.done === i.done ? all : { ...all, [id]: i }
     })
   }, [])
 
@@ -193,7 +201,12 @@ function TabBar(p: { tabs: SessionInfo[]; current: string; infos: Record<string,
         const info = p.infos[s.id]
         const name = s.host_name ? s.host_name + (several(s) ? ' · ' + nth(s) : '') : t('term.connecting')
         const quiet = !info || info.status === 's-open'
-        const tip = [s.host_name, s.host_name && t('hosts.sessionN', { n: nth(s) }), s.title, info?.statusText].filter(Boolean).join(' · ')
+        // Agents: as the tab's page tells (mounted), else as the session list last said.
+        const count = (st: string) => (s.meta?.t === 'herdr' ? s.meta.workspaces.reduce((n, w) => n + w.agents.filter((a) => a.status === st).length, 0) : 0)
+        const waiting = info ? info.waiting : count('blocked')
+        const done = info ? info.done : count('done')
+        const agents = waiting ? t('herdr.waiting', { n: waiting }) : done ? t('herdr.done', { n: done }) : ''
+        const tip = [s.host_name, s.host_name && t('hosts.sessionN', { n: nth(s) }), s.title, info?.statusText, agents].filter(Boolean).join(' · ')
         return (
           <button
             key={s.id}
@@ -206,7 +219,9 @@ function TabBar(p: { tabs: SessionInfo[]; current: string; infos: Record<string,
             {!quiet && <span className={'term-tab-dot ' + info.status} aria-hidden="true" />}
             <span className="term-tab-name">{name}</span>
             {s.title && <span className="term-tab-title">{s.title}</span>}
-            {info && info.waiting > 0 && <span className="term-tab-wait" aria-label={t('herdr.waiting', { n: info.waiting })}>{info.waiting}</span>}
+            {waiting > 0 && <span className="term-tab-wait" aria-label={t('herdr.waiting', { n: waiting })}>{waiting}</span>}
+            {/* (Finished and not looked at yet, when none waits.) */}
+            {waiting === 0 && done > 0 && <span className="term-tab-done" aria-label={t('herdr.done', { n: done })}>{done}</span>}
           </button>
         )
       })}

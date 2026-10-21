@@ -236,11 +236,14 @@ function LiveCard({ s, preview, onClose }: { s: SessionInfo; preview?: SessionPr
   const theme = termScheme().theme
   const kind = s.persistence === 'tmux' ? 'tmux · ' + (s.mux_session ?? '') : s.persistence === 'herdr' ? 'herdr' + (s.mux_session ? ' · ' + s.mux_session : '') : t('host.persistNone')
   const waiting = s.meta?.t === 'herdr' ? s.meta.waiting : 0
-  const working = s.meta?.t === 'herdr' ? s.meta.workspaces.reduce((n, w) => n + w.agents.filter((a) => a.status === 'working').length, 0) : 0
+  const count = (st: string) => (s.meta?.t === 'herdr' ? s.meta.workspaces.reduce((n, w) => n + w.agents.filter((a) => a.status === st).length, 0) : 0)
+  const working = count('working')
+  const done = count('done') // finished, not looked at since
   const old = preview && Date.now() / 1000 - preview.at > 120
-  const herdrState = waiting > 0 ? t('hosts.herdrWaiting', { n: waiting }) : working > 0 ? t('hosts.herdrWorking', { n: working }) : ''
-  // (Agents waiting come first, in the colour that asks for attention.)
-  const detail = [waiting > 0 ? '' : herdrState, kind, old ? t('hosts.previewAge', { when: relTime(preview.at) }) : '']
+  const herdrState = waiting > 0 ? t('hosts.herdrWaiting', { n: waiting }) : done > 0 ? t('hosts.herdrDone', { n: done }) : working > 0 ? t('hosts.herdrWorking', { n: working }) : ''
+  const marked = waiting > 0 || done > 0
+  // (Agents waiting, or done and not seen, come first, in their colour.)
+  const detail = [marked ? '' : herdrState, kind, old ? t('hosts.previewAge', { when: relTime(preview.at) }) : '']
     .filter(Boolean)
     .join(' · ')
   const label = s.title || kind
@@ -260,8 +263,8 @@ function LiveCard({ s, preview, onClose }: { s: SessionInfo; preview?: SessionPr
             <span className="live-name">{s.host_name}</span>
           </span>
           <span className="live-sub" id={'ld-' + s.id}>
-            {waiting > 0 && <span className="live-wait">{herdrState}</span>}
-            {waiting > 0 && detail ? ' · ' : ''}
+            {marked && <span className={waiting > 0 ? 'live-wait' : 'live-done'}>{herdrState}</span>}
+            {marked && detail ? ' · ' : ''}
             {detail}
           </span>
         </span>

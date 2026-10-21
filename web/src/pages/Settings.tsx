@@ -13,6 +13,7 @@ import { CustomKeysSection } from './CustomKeys'
 
 // As the terminal's menu sets it (one point at a time).
 const FONT_MIN = 9
+const isMac = /Mac|iPhone|iPad/.test(navigator.platform)
 const FONT_MAX = 28
 
 function Setting(props: { label: string; hint?: ReactNode; id?: string; children: ReactNode }) {
@@ -110,6 +111,14 @@ export function SettingsPage() {
                 <Plus size={16} />
               </button>
             </div>
+          </Setting>
+          <Setting label={t('settings.composerEnter')} hint={t('settings.composerEnterHint', { mod: isMac ? '⌘↩' : 'Ctrl+Enter' })} id="ce-l">
+            <Seg
+              labelledBy="ce-l"
+              value={prefs.composerEnter}
+              options={[['send', t('settings.composerEnterSend')], ['newline', t('settings.composerEnterNewline')]]}
+              onChange={(v) => setPrefs({ composerEnter: v })}
+            />
           </Setting>
           <Switch label={t('settings.keybar')} checked={prefs.keybar} onChange={(v) => setPrefs({ keybar: v })} />
           {prefs.keybar && <Switch label={t('settings.tapKeyboard')} hint={t('settings.tapKeyboardHint')} checked={prefs.tapKeyboard} onChange={(v) => setPrefs({ tapKeyboard: v })} />}

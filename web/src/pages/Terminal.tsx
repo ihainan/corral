@@ -19,7 +19,7 @@ import { applyMods, specialKey, type KeysApart, type Mods, type SpecialKey } fro
 import { KeyBar, type ModState } from '../terminal/KeyBar'
 import { macroBytes, parseMacro, type Step } from '../terminal/macro'
 import { chromeVars } from '../terminal/themes'
-import { getDraft, keepDraft, remember, sentHistory } from '../terminal/drafts'
+import { expandPastes, getDraft, keepDraft, keepPaste, remember, sentHistory, showDraft } from '../terminal/drafts'
 import { useCompletion } from '../terminal/Completion'
 import { SchemeDialog } from '../terminal/SchemePicker'
 import { ShortcutPanel, lastPanelPage } from '../terminal/ShortcutPanel'
@@ -98,7 +98,13 @@ const oneLine = (s: string) => {
 // colour and DCS reports. This is only the fallback for telling them apart
 // from typing, see userInputEvent.
 const REPLY = /^(?:\x1b\[[?>]?[\d;]*[cnRt]|\x1b\[\??[\d;]*\$y|\x1b\[[IO]|\x1bP[\s\S]*?\x1b\\|\x1b\][\s\S]*?(?:\x07|\x1b\\))+$/
+// A computer (a mouse or trackpad first), touch screen or not: Enter in the
+// composer acts as set there. Phones and tablets keep Enter for new lines.
+const hasKeyboardPointer = () => !window.matchMedia('(pointer: coarse)').matches
 const CLAIM_GAP = 100 // ms between two takeover claims of one window while it types
+// A paste into the composer longer than this shows as a label (see keepPaste).
+const PASTE_LINES = 12
+const PASTE_CHARS = 1000
 
 // The button code of a mouse report (SGR or X10/default encoding), or null.
 // A wheel is buttons 64-67, with any modifier bits.
@@ -204,6 +210,7 @@ export interface TabInfo {
   status: string // the status class: s-open, s-slow, s-reconnecting, s-ended…
   statusText: string
   waiting: number // herdr agents waiting for an answer
+  done: number // herdr agents that finished and were not looked at since (herdr's "done")
 }
 
 // Pages open at once (tabs keep several mounted): the page-wide classes and
@@ -254,6 +261,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
   // (for when the page is left, or drawn again, meanwhile).
   useEffect(() => {
     if (!watch) keepDraft(id, histPos.current !== null ? histStash.current : draft)
+    if (!watch) showDraft(id, draft)
   }, [id, draft, watch])
   // Text from the key bar or an upload goes in at the composer's cursor.
   const insertDraft = useCallback((s: string) => {
@@ -429,6 +437,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
   const outRef = useRef<(d: string | Uint8Array) => void>(() => {})
   const safeFitRef = useRef(() => {})
   const keysApartRef = useRef<() => KeysApart>(() => null) // see the CSI handlers in the terminal's setup
+  const swipeRef = useRef<(dir: 1 | -1, what: 'session' | 'workspace') => void>(() => {}) // two fingers moved together (see the touch handler)
   const syncSchemeRef = useRef<(again?: boolean) => void>(() => {}) // tells programs that asked of a dark/light change (mode 2031)
   const heldRef = useRef<() => boolean>(() => false) // input is waiting for a Ctrl+V clipboard check or upload
   const composingRef = useRef<() => boolean>(() => false)
@@ -1471,7 +1480,13 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
     let moved = false
     let velocity = 0
     let pinch: { dist: number; size: number } | null = null
+    // Two fingers: a pinch (the font size) or, moved together, a swipe (the
+    // next session sideways, herdr's next workspace up or down); which one
+    // is decided by their first movement.
+    let two: { x: number; y: number; cx: number; cy: number; dist: number; mode: 'undecided' | 'pinch' | 'swipe' } | null = null
+    let swiped = false // a swipe ended: the finger still down moves nothing
     let inertia = 0
+    const centre = (t: TouchList) => ({ x: (t[0].clientX + t[1].clientX) / 2, y: (t[0].clientY + t[1].clientY) / 2 })
 
     const cellHeight = () => {
       const term = termRef.current
@@ -1502,6 +1517,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
       acc = 0
       velocity = 0
       pinch = e.touches.length === 2 ? { dist: dist(e.touches), size: getPrefs().fontSize } : null
+      two = e.touches.length === 2 ? (() => { const c = centre(e.touches); return { ...c, cx: c.x, cy: c.y, dist: dist(e.touches), mode: 'undecided' as const } })() : null
       if (e.touches.length === 1) {
         startY = lastY = e.touches[0].clientY
         lastT = performance.now()
@@ -1509,18 +1525,31 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
     }
 
     const onStart = (e: TouchEvent) => {
-      if (e.touches.length === 1) moved = false
+      if (e.touches.length === 1) {
+        moved = false
+        swiped = false
+      }
       rebase(e)
     }
     const onMove = (e: TouchEvent) => {
-      if (pinch && e.touches.length === 2) {
+      if (pinch && two && e.touches.length === 2) {
         e.preventDefault()
         moved = true
+        const c = centre(e.touches)
+        two.cx = c.x
+        two.cy = c.y
+        if (two.mode === 'undecided') {
+          const along = Math.hypot(c.x - two.x, c.y - two.y)
+          const apart = Math.abs(dist(e.touches) - two.dist)
+          if (along > 24 && apart < along / 2) two.mode = 'swipe'
+          else if (apart > 16) two.mode = 'pinch'
+        }
+        if (two.mode !== 'pinch') return
         const size = Math.round(Math.min(28, Math.max(9, pinch.size * (dist(e.touches) / pinch.dist))))
         if (size !== getPrefs().fontSize) setPrefs({ fontSize: size })
         return
       }
-      if (e.touches.length !== 1) return
+      if (e.touches.length !== 1 || swiped) return
       const y = e.touches[0].clientY
       if (!moved && Math.abs(y - startY) < 8) return
       moved = true
@@ -1537,6 +1566,21 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
       if (lines !== 0) acc -= wheel(lines) * ch
     }
     const onEnd = (e: TouchEvent) => {
+      // A swipe is over when its first finger lifts: how far the two moved,
+      // between them, while both were down.
+      if (two?.mode === 'swipe') {
+        const dx = two.cx - two.x
+        const dy = two.cy - two.y
+        if (Math.abs(dx) > 60 && Math.abs(dx) > 1.5 * Math.abs(dy)) swipeRef.current(dx < 0 ? 1 : -1, 'session')
+        else if (Math.abs(dy) > 60 && Math.abs(dy) > 1.5 * Math.abs(dx)) swipeRef.current(dy < 0 ? 1 : -1, 'workspace')
+        two = null
+        pinch = null
+        swiped = true
+      }
+      if (swiped) {
+        e.preventDefault()
+        return
+      }
       if (e.touches.length > 0) {
         rebase(e)
         return
@@ -1545,6 +1589,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
       e.preventDefault()
       if (pinch) {
         pinch = null
+        two = null
         return
       }
       let v = -velocity * 16 // px per frame
@@ -1567,6 +1612,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
     const onCancel = () => {
       cancelAnimationFrame(inertia)
       pinch = null
+      two = null
       moved = false
     }
     el.addEventListener('touchstart', onStart, { passive: true, capture: true })
@@ -1805,7 +1851,12 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
       toast(t('term.notConnected'), true)
       return
     }
-    let payload = draft.replace(/\r?\n/g, '\r')
+    const text = expandPastes(draft, 4 << 20)
+    if (text === null) {
+      toast(t('term.tooLong'), true)
+      return
+    }
+    let payload = text.replace(/\r?\n/g, '\r')
     if (payload && term.modes.bracketedPasteMode) payload = '\x1b[200~' + payload + '\x1b[201~'
     if (submit) payload += '\r'
     if (new TextEncoder().encode(payload).length > 4 << 20) {
@@ -1864,6 +1915,14 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
     agent: herdr?.focused_agent,
   })
 
+  // What the keys do in the composer, shown by the send button on a computer.
+  const enterKey = isMac ? '↩' : 'Enter'
+  const modEnter = isMac ? '⌘↩' : 'Ctrl+Enter'
+  const composerSendKey = prefs.composerEnter === 'send' ? enterKey : modEnter
+  const composerKeys =
+    prefs.composerEnter === 'send'
+      ? t('term.composerKeysSend', { send: enterKey, newline: isMac ? '⇧↩' : 'Shift+Enter' })
+      : t('term.composerKeysNewline', { send: modEnter })
   const toggleComposer = () => {
     if (watch) return
     if (composer) {
@@ -1974,10 +2033,37 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
     ? herdr.workspaces.flatMap((w) => w.agents.filter((a) => a.status === 'blocked').map((a) => ({ a, ws: w.label })))
     : []
   const waitingShown = useRef(waiting) // the list the waiting menu opened with
+  // Two fingers moved together (touch screens): sideways the next or previous
+  // running session, in the order of the tabs; up or down herdr's next or
+  // previous workspace. Where it went is said briefly.
+  swipeRef.current = (dir, what) => {
+    if (watch || ended) return
+    if (what === 'workspace') {
+      const ws = herdr && !herdrStale ? herdr.workspaces : []
+      const i = ws.findIndex((w) => w.focused)
+      if (ws.length < 2 || i < 0) return
+      const next = ws[(i + dir + ws.length) % ws.length]
+      api('POST', `/api/sessions/${id}/herdr`, { action: 'focus_workspace', target: next.id })
+        .then(() => toast(t('swipe.workspace', { name: next.label || String(next.number) })))
+        .catch((e) => toast(e instanceof ApiError && e.code === 'herdr_busy' ? t('herdr.busy') : t('sc.herdrFailed'), true))
+      return
+    }
+    api<SessionInfo[]>('GET', '/api/sessions')
+      .then((all) => {
+        const list = all.filter((x) => x.state === 'running').sort((a, b) => a.created_at - b.created_at)
+        const i = list.findIndex((x) => x.id === id)
+        if (list.length < 2 || i < 0) return toast(t('swipe.only'))
+        const next = list[(i + dir + list.length) % list.length]
+        navigate('/t/' + next.id, true)
+        toast(t('swipe.session', { name: next.host_name + (next.title ? ' · ' + next.title : '') }))
+      })
+      .catch(() => toast(t('term.sessionsFailed'), true))
+  }
   const [waitingOpen, setWaitingOpen] = useState(false) // (it stays while open, even with none left)
+  const doneCount = herdr && !herdrStale && !ended && !watch ? herdr.workspaces.reduce((n, w) => n + w.agents.filter((a) => a.status === 'done').length, 0) : 0
   useEffect(() => {
-    onInfo?.(id, { status: statusClass, statusText, waiting: waiting.length })
-  }, [onInfo, id, statusClass, statusText, waiting.length])
+    onInfo?.(id, { status: statusClass, statusText, waiting: waiting.length, done: doneCount })
+  }, [onInfo, id, statusClass, statusText, waiting.length, doneCount])
 
   const endText = status === 'revoked' ? t('watch.revoked') : status === 'gone' ? (watch ? t('watch.gone') : t('term.ended.gone')) :
     end ? (end.state === 'exited' ? t('term.ended.exited', { code: end.code }) : end.state === 'lost' ? t('term.ended.lost') : t('term.ended.closed')) :
@@ -2249,7 +2335,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
                   autoCapitalize="off"
                   autoCorrect="off"
                   spellCheck={false}
-                  placeholder={isTouch ? t('term.composerPlaceholder') : t('term.composerPlaceholderKey', { key: isMac ? '⌘↩' : 'Ctrl+Enter' })}
+                  placeholder={t('term.composerPlaceholder')}
                   rows={1}
                   onChange={(e) => {
                     histPos.current = null // (an entry edited is a draft of its own)
@@ -2260,9 +2346,18 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
                   onBlur={() => setTimeout(completion.update)}
                   onPaste={(e) => {
                     const files = [...(e.clipboardData?.files ?? [])]
-                    if (files.length === 0) return
+                    if (files.length > 0) {
+                      e.preventDefault()
+                      void upload(files)
+                      return
+                    }
+                    // A long paste goes in as a label, to keep the box readable; it is sent as
+                    // the text (deleting the label drops it).
+                    const text = e.clipboardData?.getData('text/plain') ?? ''
+                    const lines = text.split('\n').length
+                    if (lines <= PASTE_LINES && text.length <= PASTE_CHARS) return
                     e.preventDefault()
-                    void upload(files)
+                    insertDraft(keepPaste(text, (n) => t('term.pasteLabel', { n, lines })))
                   }}
                   onKeyDown={(e) => {
                     if (e.nativeEvent.isComposing || e.keyCode === 229) return
@@ -2274,6 +2369,11 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
                     } else if (plain && e.key === 'ArrowDown' && el.selectionEnd === el.value.length && historyStep(1)) {
                       e.preventDefault()
                     } else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                      e.preventDefault()
+                      sendComposer(true)
+                    } else if (e.key === 'Enter' && hasKeyboardPointer() && prefs.composerEnter === 'send' && !e.shiftKey && !e.altKey) {
+                      // On a computer Enter sends, as in the agents' own input boxes and chat apps;
+                      // Shift+Enter is a new line (or the other way round, as set).
                       e.preventDefault()
                       sendComposer(true)
                     } else if (e.key === 'Escape') {
@@ -2316,7 +2416,8 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
                     {t('term.insert')}
                   </button>
                   <div className="spacer" />
-                  <button type="button" className="composer-send" onClick={() => sendComposer(true)} aria-label={t('term.send')} title={t('term.send')}>
+                  {hasKeyboardPointer() && <span className="composer-keys" aria-hidden="true">{composerKeys}</span>}
+                  <button type="button" className="composer-send" onClick={() => sendComposer(true)} aria-label={t('term.send')} title={t('term.send') + (isTouch ? '' : ' (' + composerSendKey + ')')}>
                     <ArrowUp size={18} strokeWidth={2.25} />
                   </button>
                 </div>

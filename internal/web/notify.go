@@ -79,15 +79,15 @@ func (a *waitAlerts) current(tag string, wait uint64) bool {
 
 // waitAlert is a "needs you" alert sent for one wait.
 type waitAlert struct {
-	tag       string
-	wait      uint64
-	user      int64
-	session   string
-	pane      string
-	digest    string          // of the screen the alert was made from
-	keys      map[string]bool // the choices its buttons press
-	token     string
-	at        time.Time
+	tag     string
+	wait    uint64
+	user    int64
+	session string
+	pane    string
+	digest  string          // of the screen the alert was made from
+	keys    map[string]bool // the choices its buttons press
+	token   string
+	at      time.Time
 }
 
 // tokenTTL is how long an alert's buttons answer.

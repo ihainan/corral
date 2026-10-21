@@ -74,8 +74,14 @@ export function SchemeDialog({ onClose }: { onClose: () => void }) {
   const [q, setQ] = useState('')
   const needle = q.trim().toLowerCase()
   const match = (s: Scheme) => !needle || s.name.toLowerCase().includes(needle)
-  const pick = (id: string) => setPrefs({ termTheme: id })
-  const current = prefs.termTheme === 'dark' ? corralDark.id : prefs.termTheme === 'light' ? corralLight.id : prefs.termTheme
+  // Following the page: a scheme picked is the one for the appearance chosen
+  // above the lists (at first the page's own now).
+  const follow = prefs.termTheme === 'ui'
+  const [slot, setSlot] = useState<'dark' | 'light'>(() => (isDark() ? 'dark' : 'light'))
+  const pick = (id: string) => setPrefs(follow ? (slot === 'dark' ? { termThemeDark: id } : { termThemeLight: id }) : { termTheme: id })
+  const own = follow ? (slot === 'dark' ? prefs.termThemeDark : prefs.termThemeLight) : prefs.termTheme
+  const current = own === 'dark' ? corralDark.id : own === 'light' ? corralLight.id : own
+  const nameOf = (id: string) => allSchemes.find((x) => x.id === id)?.name ?? id
   const group = (dark: boolean) => allSchemes.filter((s) => s.dark === dark && match(s))
   const dark = group(true)
   const light = group(false)
@@ -103,13 +109,23 @@ export function SchemeDialog({ onClose }: { onClose: () => void }) {
         {!needle && (
           <div className="scheme-grid">
             <Option
-              scheme={isDark() ? corralDark : corralLight}
+              scheme={termScheme()}
               label={t('settings.termThemeUi')}
-              hint={t('schemes.followHint')}
-              selected={current === 'ui'}
+              hint={t(follow ? 'schemes.followOffHint' : 'schemes.followHint')}
+              selected={follow}
               tabStop={tabStop === 'ui'}
-              onPick={() => pick('ui')}
+              // (Again: back to one scheme, the one shown now.)
+              onPick={() => setPrefs({ termTheme: follow ? termScheme().id : 'ui' })}
             />
+          </div>
+        )}
+        {follow && (
+          <div className="seg scheme-slot" role="group" aria-label={t('schemes.slotLabel')}>
+            {(['dark', 'light'] as const).map((k) => (
+              <button key={k} type="button" aria-pressed={slot === k} onClick={() => setSlot(k)}>
+                {t(k === 'dark' ? 'schemes.forDark' : 'schemes.forLight', { name: nameOf(k === 'dark' ? prefs.termThemeDark : prefs.termThemeLight) })}
+              </button>
+            ))}
           </div>
         )}
         {dark.length > 0 && <h3 className="scheme-group">{t('schemes.dark')}</h3>}
@@ -133,11 +149,13 @@ export function SchemeDialog({ onClose }: { onClose: () => void }) {
 export function CurrentScheme() {
   usePrefs()
   const s = termScheme()
-  const follow = usePrefs().termTheme === 'ui'
+  const p = usePrefs()
+  const follow = p.termTheme === 'ui'
+  const nameOf = (id: string) => allSchemes.find((x) => x.id === id)?.name ?? id
   return (
     <span className="scheme-current">
       <Swatch scheme={s} />
-      <span>{follow ? t('settings.termThemeUi') : s.name}</span>
+      <span>{follow ? t('schemes.followPair', { dark: nameOf(p.termThemeDark), light: nameOf(p.termThemeLight) }) : s.name}</span>
     </span>
   )
 }

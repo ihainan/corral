@@ -27,8 +27,57 @@ export function keepReplyDraft(key: string, text: string) {
   else replies.delete(key)
 }
 
+// Long pastes into the composer: shown there as a label ("[Pasted text #1,
+// 120 lines]"), sent as the text itself. Kept with the drafts (sent ones too,
+// so an entry brought back from the history still expands); past a few the
+// oldest that no draft (one put aside while going through the history is
+// kept as the draft) or history entry holds goes.
+const PASTES_MAX = 50
+const pastes = new Map<string, string>()
+let pasteN = 0
+// What each composer shows now (an entry brought back from the history is
+// shown while the draft kept is the one put aside).
+const shown = new Map<string, string>()
+export function showDraft(session: string, text: string) {
+  if (text) shown.set(session, text)
+  else shown.delete(session)
+}
+const inUse = (l: string) =>
+  history.some((h) => h.includes(l)) || [...drafts.values()].some((d) => d.includes(l)) || [...shown.values()].some((d) => d.includes(l))
+export function keepPaste(text: string, label: (n: number) => string): string {
+  const l = label(++pasteN)
+  pastes.set(l, text)
+  for (const old of pastes.keys()) {
+    if (pastes.size <= PASTES_MAX) break
+    if (old !== l && !inUse(old)) pastes.delete(old)
+  }
+  return l
+}
+// The text with its labels expanded, or null past max characters (counted as
+// it goes, so a label repeated many times is not expanded first).
+export function expandPastes(s: string, max: number): string | null {
+  let out = ''
+  let rest = s
+  for (;;) {
+    let at = -1
+    let label = ''
+    for (const l of pastes.keys()) {
+      const i = rest.indexOf(l)
+      if (i >= 0 && (at < 0 || i < at)) [at, label] = [i, l]
+    }
+    if (at < 0) break
+    out += rest.slice(0, at) + pastes.get(label)!
+    rest = rest.slice(at + label.length)
+    if (out.length > max) return null
+  }
+  out += rest
+  return out.length > max ? null : out
+}
+
 export function clearDrafts() {
   drafts.clear()
   replies.clear()
+  pastes.clear()
+  shown.clear()
   history = []
 }

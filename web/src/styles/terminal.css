@@ -91,6 +91,15 @@ html.term-mode body { position: fixed; inset: 0; }
    Spacing that depends on neighbours is turned off here: every character is
    as wide as its cells. */
 .xterm { text-spacing-trim: space-all; text-autospace: no-autospace; }
+/* Text an input method is composing (pinyin before it is committed), shown
+   at the cursor as input methods mark it elsewhere: the terminal's own
+   colours, underlined, over whatever follows the cursor (xterm's default is
+   a black box whatever the scheme). */
+.term-host-el .xterm .composition-view {
+  background: var(--term-bg); color: var(--term-fg);
+  text-decoration: underline; text-decoration-color: var(--term-accent-text); text-underline-offset: 3px;
+  box-shadow: 0 0 0 2px var(--term-bg);
+}
 .term-host-el .xterm-viewport { overscroll-behavior: contain; }
 /* (xterm.css paints it black: it shows in the strip under the last row.) */
 .term-host-el .xterm .xterm-viewport { background-color: transparent; }
@@ -133,6 +142,8 @@ html.term-mode body { position: fixed; inset: 0; }
 .term-root .composer-insert { height: 32px; color: var(--term-fg-2); font-weight: 500; }
 .term-root .composer-insert:hover { background: var(--term-hover); color: var(--term-fg); }
 .term-root .composer-insert:disabled { opacity: 0.4; }
+.composer-keys { margin-right: 8px; color: var(--term-fg-3); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+@media (max-width: 560px) { .composer-keys { display: none; } }
 .composer-send {
   width: 32px; height: 32px; border-radius: 50%; border: 0; display: grid; place-items: center; cursor: pointer;
   background: var(--accent); color: #fff; flex: none;
@@ -258,6 +269,7 @@ html.kb-open .keybar { padding-bottom: 6px; }
 .term-tab-name { white-space: nowrap; }
 .term-tab-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--term-fg-3); font-weight: 400; }
 .term-tab-wait { flex: none; color: var(--warn); font: 600 11px/1 var(--font-ui); }
+.term-tab-done { flex: none; color: var(--ok); font: 600 11px/1 var(--font-ui); }
 .term-tab-dot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--term-fg-3); }
 .term-tab-dot.s-connecting, .term-tab-dot.s-reconnecting, .term-tab-dot.s-slow { background: var(--warn); }
 .term-tab-dot.s-offline, .term-tab-dot.s-full { background: var(--danger); }
