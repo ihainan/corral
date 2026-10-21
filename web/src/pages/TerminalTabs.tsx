@@ -134,19 +134,27 @@ export function TerminalTabs({ current }: { current: string }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       // (Not under a dialog: it keeps the keys and the focus.)
-      if (e.altKey || document.querySelector('[aria-modal="true"]')) return
+      // (Nor while an input method composes: the key is its.)
+      if (e.altKey || e.isComposing || e.keyCode === 229 || document.querySelector('[aria-modal="true"]')) return
+      // T and the brackets by the character the layout gives (Dvorak's T is
+      // where QWERTY has K), by the key's place only where it gives none
+      // (Cyrillic). The digits by place: a French keyboard's ⌘1 is ⌘&, as in
+      // the Mac's own apps.
+      const plain = /^[\x21-\x7e]$/.test(e.key)
+      const isT = e.key.toLowerCase() === 't' || (!plain && e.code === 'KeyT')
+      const bracket = e.key === '{' || (!plain && e.code === 'BracketLeft') ? -1 : e.key === '}' || (!plain && e.code === 'BracketRight') ? 1 : 0
       let act: (() => void) | null = null
       if (e.key === 'Tab' && e.ctrlKey && !e.metaKey) {
         if (tabs.length >= 2) act = () => go(e.shiftKey ? -1 : 1)
       } else if (standalone && isMac && e.metaKey && !e.ctrlKey) {
         const digit = /^Digit([1-9])$/.exec(e.code)
-        if (e.code === 'KeyT' && !e.shiftKey) act = () => setNewOpen(true)
+        if (isT && !e.shiftKey) act = () => setNewOpen(true)
         else if (digit && !e.shiftKey) {
           const n = Number(digit[1])
           const to = n === 9 ? tabs[tabs.length - 1] : tabs[n - 1]
           act = () => to && to.id !== current && navigate('/t/' + to.id, true)
-        } else if ((e.code === 'BracketLeft' || e.code === 'BracketRight') && e.shiftKey) act = () => go(e.code === 'BracketLeft' ? -1 : 1)
-      } else if (standalone && !isMac && e.ctrlKey && e.shiftKey && !e.metaKey && e.code === 'KeyT') act = () => setNewOpen(true)
+        } else if (bracket && e.shiftKey) act = () => go(bracket as 1 | -1)
+      } else if (standalone && !isMac && e.ctrlKey && e.shiftKey && !e.metaKey && isT) act = () => setNewOpen(true)
       if (!act) return
       // Before the terminal's own listeners: the program never sees it.
       e.preventDefault()
