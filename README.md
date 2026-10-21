@@ -13,7 +13,14 @@ keeps running and you pick it up where it was — on the same device or another.
   <img src="docs/screenshots/shortcuts-phone.png" width="250" alt="The shortcut panel over the key bar, on the Claude Code page">
 </p>
 <p align="center">
+  <img src="docs/screenshots/reply-phone.png" width="250" alt="Answering an agent that waits in herdr: its screen, its choices as buttons, Enter, Esc or a line of text">
+  <img src="docs/screenshots/files-phone.png" width="250" alt="The file panel on a phone: the host's folders, upload and the folder tools">
+</p>
+<p align="center">
   <img src="docs/screenshots/herdr-desktop.png" width="820" alt="A desktop browser with a tab per session; herdr in front, an agent waiting for an answer">
+</p>
+<p align="center">
+  <img src="docs/screenshots/composer-desktop.png" width="820" alt="The composer under the terminal completing a file after @, with its keys shown by the send button">
 </p>
 
 ## Features
@@ -21,8 +28,10 @@ keeps running and you pick it up where it was — on the same device or another.
 **A terminal that works on a phone**
 - The gateway keeps sessions alive while nobody looks; with tmux or
   [herdr](https://herdr.dev) on the host they also survive gateway
-  restarts. Opening a host lists its tmux and herdr sessions to pick from,
-  along with a new tmux session and a plain shell.
+  restarts, and the open pages reattach them by themselves after one (an
+  update) or after the connection to the host dropped. Opening a host lists
+  its tmux and herdr sessions to pick from, along with a new tmux session
+  and a plain shell.
 - The home page shows your running sessions as cards with their screen in
   small, as one of your windows last showed it; the hosts below open new
   ones.
@@ -42,21 +51,30 @@ keeps running and you pick it up where it was — on the same device or another.
   cursor's line, Claude Code's input box — or the keyboard button does. A
   hardware keyboard types at once.
 - Input methods work: Chinese and other IMEs, dictation, and a composer field
-  for writing longer input before sending it. It keeps its draft and what
-  you sent (Up, or its history button), and completes as the agents' own
-  input boxes do: `@` and a file under the folder the terminal is in, `/` and
-  a command (built in, or your own in `.claude/commands`, skills, Codex
-  prompts), `$` and a Codex skill.
+  for writing longer input before sending it. On a computer Enter sends and
+  Shift+Enter starts a new line, as in the agents' own input boxes (a
+  setting swaps them). It keeps its draft (across a reload of the tab) and
+  what you sent (Up, or its history button), shows a long paste as a label
+  it sends in full, offers Claude Code's suggested next prompt (Tab), and
+  completes as the agents' own input boxes do: `@` and a file under the
+  folder the terminal is in, `/` and a command (built in, or your own in
+  `.claude/commands`, skills, Codex prompts), `$` and a Codex skill.
 - On a desktop or a tablet, every running session is a tab, kept connected so switching
-  is instant; `+` opens another. Ctrl+Tab and Ctrl+Shift+Tab go to the next
-  and previous one in the installed app (a browser keeps those keys for its
-  own tabs).
+  is instant; `+` opens another. A tab shows how many agents wait for you,
+  or finished and were not looked at yet. Ctrl+Tab and Ctrl+Shift+Tab go to
+  the next and previous one in the installed app (a browser keeps those keys
+  for its own tabs); on a touch screen, two fingers swiped sideways go to
+  the next session, up or down to herdr's next workspace.
 - Several devices can have one session open; the one you act on decides the
   terminal size, the others follow it. A window opened long after a program
   started still gets the modes it set (mouse reporting, bracketed paste…).
 - After an upgrade, open pages offer to reload into the new version.
-- A copy mode with native text selection, colour schemes, adjustable fonts,
-  installable as an app (PWA).
+- A copy mode with native text selection, colour schemes (one for a light
+  and one for a dark appearance, if you like), adjustable fonts, installable
+  as an app (PWA). Programs that follow the terminal's colours are told when
+  it turns light or dark (mode 2031): Claude Code with its theme set to
+  "Auto (match terminal)", herdr with `auto_switch = true` under `[theme]`
+  in its config.
 - Programs on the host can copy to your device's clipboard (OSC 52): tmux's
   copy mode, Claude Code, editors. Where the browser allows that only on a
   tap (Safari), Corral offers a button. Inside tmux, programs that send OSC 52
@@ -79,8 +97,10 @@ keeps running and you pick it up where it was — on the same device or another.
   desktop notification (OSC 9 / OSC 777) — unless you are looking at that
   session anyway. An agent's alert says what it asks; where the platform
   shows buttons (not iOS), its first and last choices answer it from the
-  alert, once, if nothing changed since. Once the agent no longer waits, its
-  alert is replaced. At most 10 alerts a minute.
+  alert, once, if nothing changed since. Tapping it opens the session on
+  that agent's pane (herdr switches to its workspace). Once the agent no
+  longer waits, its alert is replaced. At most 10 alerts a minute. The
+  terminal offers to turn alerts on once agents show up.
 
 **Around the terminal**
 - A file panel: browse the host, upload (with progress, asking before
@@ -95,9 +115,11 @@ keeps running and you pick it up where it was — on the same device or another.
   `CORRAL_CODE_SERVER_DIR`, and checked against a pinned digest.
 
 **Several users**
-- Accounts by invitation, administrators and members, each with their own
-  hosts and keys. SSH passwords and keys are encrypted at rest and never sent
-  to the browser.
+- Accounts by invitation, or created directly by an administrator with a
+  first password to hand over; administrators and members, each with their
+  own hosts and keys. A password an administrator set (a new account, a
+  reset) must be changed at the next sign-in before anything else. SSH
+  passwords and keys are encrypted at rest and never sent to the browser.
 - Hosts behind another host are reached through it (a jump host, one level):
   any of your hosts with a saved password or key.
 - Two-step sign-in with an authenticator app, with recovery codes.
@@ -247,6 +269,12 @@ Report security problems privately, not in a public issue: see
 - Answering an agent checks the pane's screen right before typing, but herdr
   cannot check and type in one step: an answer given on the host in that
   very moment is not seen.
+- After a gateway restart, the tabs reattached by themselves are those
+  opened in that window since it loaded; other sessions are opened again
+  from `+` or the host list.
+- Claude Code's suggested prompt is read off the screen (greyed text in its
+  input box): another program drawing the same box would be offered too,
+  though only typed into the composer, never sent.
 
 ## Develop
 
