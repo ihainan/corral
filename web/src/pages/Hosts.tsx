@@ -251,7 +251,7 @@ function LiveCard({ s, preview, onClose }: { s: SessionInfo; preview?: SessionPr
     <li className="live-card">
       <a className="live-link" href={'/t/' + s.id} onClick={linkHandler('/t/' + s.id)} aria-label={`${s.host_name}：${label}`} aria-describedby={'ld-' + s.id} title={s.title || undefined}>
         {preview ? (
-          <LiveScreen lines={preview.lines} cols={preview.cols} bg={theme.background ?? '#000'} fg={theme.foreground ?? '#fff'} />
+          <LiveScreen lines={preview.lines} bg={theme.background ?? '#000'} fg={theme.foreground ?? '#fff'} />
         ) : (
           <div className="live-screen" aria-hidden="true" style={{ background: theme.background, color: theme.foreground }}>
             <span className="live-empty">{t('hosts.noPreview')}</span>
@@ -276,63 +276,58 @@ function LiveCard({ s, preview, onClose }: { s: SessionInfo; preview?: SessionPr
   )
 }
 
-// The screen in small: its last lines, without blank ones at either end, in
-// whole lines; the text as large as the card's width allows for the
-// terminal's width, but not smaller than legible. What does not fit fades out
-// at the top (older lines) and the right (a wider terminal).
-const PREVIEW_BASE = 10 // px, the size the probe is measured at
-const PREVIEW_MIN = 6 // px
-const PREVIEW_MAX = 11
+// The screen in small: the whole of it, without blank lines at either end,
+// scaled down to fit the card, however small (laid out at a fixed size, then shrunk, so the
+// browser's smallest font size does not apply and wide characters measure as
+// drawn); a few lines stay at a readable size rather than grow. Only a screen
+// too big even at the smallest scale is cut: what does not fit fades out at
+// the top (older lines) and the right.
+const PREVIEW_BASE = 10 // px, the size it is laid out at
+const PREVIEW_MAX = 11 / PREVIEW_BASE // the largest scale
+const PREVIEW_MIN = 1.5 / PREVIEW_BASE // the smallest (on a phone a card is an outline of the screen)
 const PREVIEW_LINE = 1.25
-function LiveScreen({ lines, cols, bg, fg }: { lines: string[]; cols: number; bg: string; fg: string }) {
+function LiveScreen({ lines, bg, fg }: { lines: string[]; bg: string; fg: string }) {
   const box = useRef<HTMLDivElement>(null)
   const pre = useRef<HTMLPreElement>(null)
-  const probe = useRef<HTMLSpanElement>(null)
-  const [fit, setFit] = useState<{ font: number; rows: number } | null>(null)
-  // Cut on the right: told by the width drawn (wide and combining characters).
-  const [cutRight, setCutRight] = useState(false)
+  const [fit, setFit] = useState<{ scale: number; cutTop: boolean; cutRight: boolean } | null>(null)
   let first = 0
   let last = lines.length
   while (first < last && !lines[first].trim()) first++
   while (last > first && !lines[last - 1].trim()) last--
-  const text = lines.slice(first, last)
+  const body = lines.slice(first, last).join('\n')
   useLayoutEffect(() => {
     const b = box.current
     const p = pre.current
-    const m = probe.current
-    if (!b || !p || !m) return
+    if (!b || !p) return
     const measure = () => {
-      const w = p.clientWidth
-      const h = b.clientHeight - parseFloat(getComputedStyle(b).paddingTop) - parseFloat(getComputedStyle(b).paddingBottom)
-      const cell = m.offsetWidth / Math.max(1, cols) // at the base size
-      if (!w || !cell) return
+      const cs = getComputedStyle(b)
+      const w = b.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight)
+      const h = b.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom)
+      // (The size as laid out: a transform does not change it.)
+      const tw = p.scrollWidth
+      const th = p.scrollHeight
+      if (!w || !h || !tw || !th) return
       // (A little room: glyphs scaled down round wider than measured.)
-      const font = Math.min(PREVIEW_MAX, Math.max(PREVIEW_MIN, (0.96 * PREVIEW_BASE * w) / (cell * Math.max(cols, 20))))
-      const next = { font, rows: Math.max(1, Math.floor(h / (font * PREVIEW_LINE))) }
-      setFit((f) => (f && f.font === next.font && f.rows === next.rows ? f : next))
-      setCutRight(p.scrollWidth > p.clientWidth + 1) // (again once a new size applies, below)
+      const scale = Math.min(PREVIEW_MAX, Math.max(PREVIEW_MIN, Math.min((0.98 * w) / tw, h / th)))
+      const next = { scale, cutTop: th * scale > h + 1, cutRight: tw * scale > w + 1 }
+      setFit((f) => (f && f.scale === next.scale && f.cutTop === next.cutTop && f.cutRight === next.cutRight ? f : next))
     }
     measure()
     const ro = new ResizeObserver(measure)
     ro.observe(b)
     return () => ro.disconnect()
-  }, [cols])
-  const shown = fit ? text.slice(Math.max(0, text.length - fit.rows)) : text
-  const cutTop = !!fit && text.length > fit.rows
-  const body = shown.join('\n')
-  useLayoutEffect(() => {
-    const p = pre.current
-    if (p && fit) setCutRight(p.scrollWidth > p.clientWidth + 1)
-  }, [fit, body])
+  }, [body])
   return (
     <div
       ref={box}
-      className={'live-screen' + (cutTop ? ' cut-top' : '') + (cutRight ? ' cut-right' : '')}
+      className={'live-screen' + (fit?.cutTop ? ' cut-top' : '') + (fit?.cutRight ? ' cut-right' : '')}
       aria-hidden="true"
       style={{ background: bg, color: fg, ['--live-bg' as string]: bg }}
     >
-      <span ref={probe} className="live-probe">{'0'.repeat(Math.max(1, cols))}</span>
-      <pre ref={pre} style={{ fontSize: fit ? fit.font + 'px' : undefined, lineHeight: PREVIEW_LINE, visibility: fit ? undefined : 'hidden' }}>
+      <pre
+        ref={pre}
+        style={{ fontSize: PREVIEW_BASE + 'px', lineHeight: PREVIEW_LINE, transform: fit ? `scale(${fit.scale})` : undefined, visibility: fit ? undefined : 'hidden' }}
+      >
         {body}
       </pre>
     </div>
