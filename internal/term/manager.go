@@ -104,7 +104,7 @@ func (m *Manager) Shutdown() {
 	}
 	m.mu.Unlock()
 	for _, s := range all {
-		s.Close("server shutting down")
+		s.Close(ReasonShutdown)
 	}
 }
 

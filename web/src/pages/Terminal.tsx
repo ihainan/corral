@@ -7,7 +7,7 @@ import { Unicode11Addon } from '@xterm/addon-unicode11'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import { WebglAddon } from '@xterm/addon-webgl'
 import { ArrowUp, Check, ChevronDown, ChevronLeft, CircleStop, Code2, Eye, FolderOpen, Globe, History, ImagePlus, MessageCircleReply, MoreVertical, Minus, Palette, Paperclip, Plus, TextSelect, Keyboard as KeyboardIcon, Power, RotateCw, Server, TextCursorInput, X } from 'lucide-react'
-import { api, ApiError, choiceOf, errorText, uploadFile, type HerdrAgent, type HerdrSummary, type Host, type SessionInfo } from '../api'
+import { api, ApiError, choiceOf, errorText, uploadFile, type HerdrAgent, type HerdrSummary, type Host, type OpenChoice, type SessionInfo } from '../api'
 import { t } from '../i18n'
 import { navigate } from '../router'
 import { getPrefs, prefsConfirmed, setChromeColor, setPrefs, termScheme, usePrefs } from '../prefs'
@@ -35,6 +35,7 @@ import { useCode } from '../terminal/CodeDialog'
 import { onOpenRequest, takeTabs } from '../notifyopen'
 import { offerAlerts } from '../push'
 import { adoptComposer, composerWasOpen, rememberComposer } from '../terminal/composerOpen'
+import { promptSuggestion } from '../terminal/suggestion'
 import { useSession, VERSION_EVENT } from '../app'
 
 const isTouch = window.matchMedia('(pointer: coarse)').matches || navigator.maxTouchPoints > 0
@@ -102,6 +103,20 @@ const REPLY = /^(?:\x1b\[[?>]?[\d;]*[cnRt]|\x1b\[\??[\d;]*\$y|\x1b\[[IO]|\x1bP[\
 // A computer (a mouse or trackpad first), touch screen or not: Enter in the
 // composer acts as set there. Phones and tablets keep Enter for new lines.
 const hasKeyboardPointer = () => !window.matchMedia('(pointer: coarse)').matches
+// The start-up answer, or null when the gateway does not answer (within 5 s).
+async function probeBootstrap(): Promise<{ instance?: string } | null> {
+  const ctl = new AbortController()
+  const tm = setTimeout(() => ctl.abort(), 5000)
+  try {
+    const r = await fetch('/api/bootstrap', { credentials: 'same-origin', cache: 'no-store', signal: ctl.signal })
+    return r.ok ? await r.json() : null
+  } catch {
+    return null
+  } finally {
+    clearTimeout(tm)
+  }
+}
+const AUTO_RECONNECT_S = 3 // seconds before a tmux/herdr session gone with the gateway is opened again
 const CLAIM_GAP = 100 // ms between two takeover claims of one window while it types
 // A paste into the composer longer than this shows as a label (see keepPaste).
 const PASTE_LINES = 12
@@ -212,6 +227,7 @@ export interface TabInfo {
   statusText: string
   waiting: number // herdr agents waiting for an answer
   done: number // herdr agents that finished and were not looked at since (herdr's "done")
+  reopening?: boolean // being opened again by itself (see autoAgain): kept mounted meanwhile
 }
 
 // Pages open at once (tabs keep several mounted): the page-wide classes and
@@ -268,6 +284,32 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
     if (!watch) keepDraft(id, histPos.current !== null ? histStash.current : draft)
     if (!watch) showDraft(id, draft)
   }, [id, draft, watch])
+  // Claude Code's suggested next prompt, offered while the composer is open
+  // and empty (see suggestion.ts): read again a moment after the screen changes.
+  const [suggestion, setSuggestion] = useState<string | null>(null)
+  const draftEmpty = draft === ''
+  useEffect(() => {
+    const term = termRef.current
+    if (!composer || !draftEmpty || !active || watch || !term) {
+      setSuggestion(null)
+      return
+    }
+    let timer: number | undefined
+    // (Not while the browser tab is in the back: read again once it is back.)
+    const read = () => document.visibilityState === 'visible' && setSuggestion(promptSuggestion(term))
+    const soon = () => {
+      clearTimeout(timer)
+      timer = window.setTimeout(read, 250)
+    }
+    read()
+    const subs = [term.onWriteParsed(soon), term.onScroll(soon)] // (scrolled back to the live screen too)
+    document.addEventListener('visibilitychange', soon)
+    return () => {
+      clearTimeout(timer)
+      subs.forEach((x) => x.dispose())
+      document.removeEventListener('visibilitychange', soon)
+    }
+  }, [composer, draftEmpty, active, watch, status]) // (status: the terminal exists once it connects)
   // Text from the key bar or an upload goes in at the composer's cursor.
   const insertDraft = useCallback((s: string) => {
     histPos.current = null // (an entry added to is a draft of its own)
@@ -442,6 +484,8 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
   const outRef = useRef<(d: string | Uint8Array) => void>(() => {})
   const safeFitRef = useRef(() => {})
   const keysApartRef = useRef<() => KeysApart>(() => null) // see the CSI handlers in the terminal's setup
+  const helloInstance = useRef('') // the run of the gateway this window last connected to
+  const pageGone = useRef(false) // (waits and reconnects stop with the page)
   const swipeRef = useRef<(dir: 1 | -1, what: 'session' | 'workspace') => void>(() => {}) // two fingers moved together (see the touch handler)
   const syncSchemeRef = useRef<(again?: boolean) => void>(() => {}) // tells programs that asked of a dark/light change (mode 2031)
   const heldRef = useRef<() => boolean>(() => false) // input is waiting for a Ctrl+V clipboard check or upload
@@ -948,8 +992,9 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
       },
       // Every new socket: the herdr summary is old until this one sends its
       // own, and a replay begins.
-      onHello: (version) => {
+      onHello: (version, instance) => {
         window.dispatchEvent(new CustomEvent(VERSION_EVENT, { detail: version })) // (a deploy: this page may be old)
+        helloInstance.current = instance
         replayRun++
         settling = true
         setHerdrFresh(false)
@@ -1928,6 +1973,19 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
     prefs.composerEnter === 'send'
       ? t('term.composerKeysSend', { send: enterKey, newline: isMac ? '⇧↩' : 'Shift+Enter' })
       : t('term.composerKeysNewline', { send: modEnter })
+  // The suggestion goes into the box, to be edited or sent.
+  const takeSuggestion = () => {
+    if (!suggestion) return
+    const s = suggestion
+    histPos.current = null
+    setDraft(s)
+    requestAnimationFrame(() => {
+      const el = composerRef.current
+      if (!el) return
+      el.focus()
+      el.selectionStart = el.selectionEnd = s.length
+    })
+  }
   const toggleComposer = () => {
     if (watch) return
     if (composer) {
@@ -1999,24 +2057,123 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
   }
 
   const hostIdForReconnect = watch ? 0 : info?.host_id ?? Number(local.get('corral.sessHost.' + id) || 0)
-  const { connect, dialogs } = useConnect((s) => navigate('/t/' + s.id, true))
+  // (A tab in the back opened again stays in the back: its new session shows up as a tab.)
+  const { connect, busyHost, dialogs } = useConnect((s) => activeRef.current && navigate('/t/' + s.id, true))
+  // Closed as the gateway stopped (internal/term: ReasonShutdown).
+  const gatewayStopped = end?.state === 'closed' && end.reason === 'server shutting down'
+  // What this terminal was opened as, again (no choosing).
+  const againChoice = (): OpenChoice | undefined => {
+    const c = info ? choiceOf(info) : undefined
+    if (c) return c
+    try {
+      return JSON.parse(local.get('corral.sessOpen.' + id) ?? 'null') ?? undefined
+    } catch {
+      return undefined
+    }
+  }
+  // (connecting: from asking for the host until the attempt is over, a
+  // question it asked included; see reopening.)
   const reconnect = async () => {
     if (!hostIdForReconnect) return navigate('/')
+    setConnecting(true)
     try {
       const h = await api<Host>('GET', '/api/hosts/' + hostIdForReconnect)
-      // What this terminal was opened as, again (no choosing).
-      let again = info ? choiceOf(info) : undefined
-      if (!again) {
-        try {
-          again = JSON.parse(local.get('corral.sessOpen.' + id) ?? 'null') ?? undefined
-        } catch {
-          again = undefined
-        }
-      }
-      connect(h, again)
+      if (pageGone.current) return // (left meanwhile)
+      connect(h, againChoice())
+      setAsked(true)
     } catch (e) {
+      if (pageGone.current) return
+      setConnecting(false)
       toast(errorText(e), true)
     }
+  }
+  const [connecting, setConnecting] = useState(false)
+  const [asked, setAsked] = useState(false) // connect() was called (its busyHost shows the attempt)
+  useEffect(() => {
+    if (connecting && asked && busyHost === null && !dialogs) {
+      setConnecting(false)
+      setAsked(false)
+    }
+  }, [connecting, asked, busyHost, dialogs])
+  // Gone with the gateway (restarted: an update) or with the connection to
+  // the host, a tmux or herdr session is still there on the host: it is
+  // opened again by itself after a short countdown, in the tab in front, once
+  // (a failure leaves the button). A plain shell is not: what ran in it ended,
+  // and a new one is the user's choice.
+  const againKind = againChoice()?.kind
+  // Gone: by itself, also what someone ended elsewhere meanwhile; only when
+  // the gateway has restarted since this window last connected (another run
+  // answers) was it not ended by anyone.
+  const [goneByRestart, setGoneByRestart] = useState(false)
+  const [probing, setProbing] = useState(false)
+  useEffect(() => {
+    if (status !== 'gone' || watch || !helloInstance.current) return
+    const was = helloInstance.current
+    let live = true
+    setProbing(true)
+    void (async () => {
+      // (The gateway may still be starting: for a minute.)
+      const until = Date.now() + 60_000
+      while (live && Date.now() < until) {
+        const b = await probeBootstrap()
+        if (b) {
+          if (live) setGoneByRestart(!!b.instance && b.instance !== was)
+          break
+        }
+        await new Promise((r) => setTimeout(r, 2000))
+      }
+      if (live) setProbing(false)
+    })()
+    return () => {
+      live = false
+    }
+  }, [status, watch])
+  const autoAgain = ended && !watch && hostIdForReconnect > 0 && (goneByRestart || end?.state === 'lost' || gatewayStopped) && (againKind === 'tmux' || againKind === 'herdr')
+  const [autoIn, setAutoIn] = useState<number | null>(null)
+  const autoTried = useRef(false)
+  // In front, after a countdown; a tab in the back (with tabs) at once, so
+  // its session is back as a tab too.
+  useEffect(() => {
+    if (!autoAgain || autoTried.current) return
+    setAutoIn((n) => n ?? (activeRef.current ? AUTO_RECONNECT_S : 0))
+  }, [autoAgain])
+  // The gateway may still be starting: it is asked every 2 s, for a minute,
+  // before the session is opened.
+  const [autoWaiting, setAutoWaiting] = useState(false)
+  useEffect(() => {
+    pageGone.current = false // (mounted again: React's development mode does)
+    return () => {
+      pageGone.current = true
+    }
+  }, [])
+  useEffect(() => {
+    if (autoIn === null) return
+    if (autoIn <= 0) {
+      autoTried.current = true
+      setAutoIn(null)
+      void (async () => {
+        setAutoWaiting(true)
+        const until = Date.now() + 60_000
+        while (Date.now() < until && !pageGone.current && autoWaitingRef.current !== 'stopped') {
+          if (await probeBootstrap()) break
+          await new Promise((r) => setTimeout(r, 2000))
+        }
+        if (pageGone.current) return
+        setAutoWaiting(false)
+        if (autoWaitingRef.current !== 'stopped') void reconnect()
+      })()
+      return
+    }
+    const tm = window.setTimeout(() => setAutoIn((n) => (n === null ? null : n - 1)), 1000)
+    return () => clearTimeout(tm)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoIn])
+  const autoWaitingRef = useRef<'' | 'stopped'>('')
+  const stopAuto = () => {
+    autoTried.current = true
+    autoWaitingRef.current = 'stopped'
+    setAutoIn(null)
+    setAutoWaiting(false)
   }
 
   const slow = status === 'open' && latency !== null && latency > HIGH_LATENCY
@@ -2070,11 +2227,11 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
   const [waitingOpen, setWaitingOpen] = useState(false) // (it stays while open, even with none left)
   const doneCount = herdr && !herdrStale && !ended && !watch ? herdr.workspaces.reduce((n, w) => n + w.agents.filter((a) => a.status === 'done').length, 0) : 0
   useEffect(() => {
-    onInfo?.(id, { status: statusClass, statusText, waiting: waiting.length, done: doneCount })
-  }, [onInfo, id, statusClass, statusText, waiting.length, doneCount])
+    onInfo?.(id, { status: statusClass, statusText, waiting: waiting.length, done: doneCount, reopening: probing || autoIn !== null || autoWaiting || connecting })
+  }, [onInfo, id, statusClass, statusText, waiting.length, doneCount, probing, autoIn, autoWaiting, connecting])
 
   const endText = status === 'revoked' ? t('watch.revoked') : status === 'gone' ? (watch ? t('watch.gone') : t('term.ended.gone')) :
-    end ? (end.state === 'exited' ? t('term.ended.exited', { code: end.code }) : end.state === 'lost' ? t('term.ended.lost') : t('term.ended.closed')) :
+    end ? (end.state === 'exited' ? t('term.ended.exited', { code: end.code }) : end.state === 'lost' ? t('term.ended.lost') : gatewayStopped ? t('term.ended.restart') : t('term.ended.closed')) :
     ended ? t('term.ended.closed') : ''
 
   const loadSessions = () => {
@@ -2322,9 +2479,18 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
       {ended ? (
         <div className="term-ended" role="alert">
           <p>{endText}</p>
+          {(autoIn !== null || autoWaiting) && <p className="hint" aria-live="polite">{autoWaiting ? t('term.autoWaiting') : t('term.autoReopen', { n: autoIn ?? 0 })}</p>}
           <div className="term-ended-actions">
-            <button className="btn btn-ghost" onClick={() => navigate('/')}>{t('common.back')}</button>
-            {hostIdForReconnect > 0 && <button className="btn btn-primary" onClick={reconnect}>{t('term.reopen')}</button>}
+            {autoIn !== null || autoWaiting ? (
+              <button className="btn btn-ghost" onClick={stopAuto}>{t('common.cancel')}</button>
+            ) : (
+              <button className="btn btn-ghost" onClick={() => navigate('/')}>{t('common.back')}</button>
+            )}
+            {hostIdForReconnect > 0 && (
+              <button className="btn btn-primary" onClick={() => { stopAuto(); void reconnect() }}>
+                {autoIn !== null || autoWaiting ? t('term.reopenNow') : t('term.reopen')}
+              </button>
+            )}
           </div>
         </div>
       ) : (
@@ -2343,7 +2509,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
                   autoCapitalize="off"
                   autoCorrect="off"
                   spellCheck={false}
-                  placeholder={t('term.composerPlaceholder')}
+                  placeholder={suggestion ?? t('term.composerPlaceholder')}
                   rows={1}
                   onChange={(e) => {
                     histPos.current = null // (an entry edited is a draft of its own)
@@ -2370,6 +2536,11 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
                   onKeyDown={(e) => {
                     if (e.nativeEvent.isComposing || e.keyCode === 229) return
                     if (completion.onKey(e)) return
+                    if (e.key === 'Tab' && !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey && !draft && suggestion) {
+                      e.preventDefault()
+                      takeSuggestion()
+                      return
+                    }
                     const el = e.currentTarget
                     const plain = !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey && el.selectionStart === el.selectionEnd
                     if (plain && e.key === 'ArrowUp' && el.selectionStart === 0 && historyStep(-1)) {
@@ -2424,7 +2595,12 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
                     {t('term.insert')}
                   </button>
                   <div className="spacer" />
-                  {hasKeyboardPointer() && <span className="composer-keys" aria-hidden="true">{composerKeys}</span>}
+                  {suggestion && !draft && !hasKeyboardPointer() && (
+                    <button type="button" className="btn btn-ghost composer-insert" onClick={takeSuggestion} title={suggestion}>
+                      {t('term.useSuggestion')}
+                    </button>
+                  )}
+                  {hasKeyboardPointer() && <span className="composer-keys" aria-hidden="true">{suggestion && !draft ? t('term.suggestionKey') + ' · ' : ''}{composerKeys}</span>}
                   <button type="button" className="composer-send" onClick={() => sendComposer(true)} aria-label={t('term.send')} title={t('term.send') + (isTouch ? '' : ' (' + composerSendKey + ')')}>
                     <ArrowUp size={18} strokeWidth={2.25} />
                   </button>

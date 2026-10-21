@@ -82,11 +82,12 @@ export function TerminalTabs({ current }: { current: string }) {
   useEffect(() => {
     if (!sessions) return
     setMounted((m) => {
-      const next = m.filter((x) => x === current || sessions.some((s) => s.id === x) || (mountedAt.current.get(x) ?? 0) >= listAt)
+      // (One being opened again by itself stays until that is done.)
+      const next = m.filter((x) => x === current || sessions.some((s) => s.id === x) || (mountedAt.current.get(x) ?? 0) >= listAt || infos[x]?.reopening)
       for (const id of m) if (!next.includes(id)) mountedAt.current.delete(id)
       return next.length === m.length ? m : next
     })
-  }, [sessions, listAt, current])
+  }, [sessions, listAt, current, infos])
 
   // A tab let go of tells no more: what its page last said goes (the session
   // list's word stands for it again).
@@ -99,7 +100,7 @@ export function TerminalTabs({ current }: { current: string }) {
   const onInfo = useCallback((id: string, i: TabInfo) => {
     setInfos((all) => {
       const old = all[id]
-      return old && old.status === i.status && old.statusText === i.statusText && old.waiting === i.waiting && old.done === i.done ? all : { ...all, [id]: i }
+      return old && old.status === i.status && old.statusText === i.statusText && old.waiting === i.waiting && old.done === i.done && old.reopening === i.reopening ? all : { ...all, [id]: i }
     })
   }, [])
 

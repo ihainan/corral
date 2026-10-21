@@ -11,6 +11,7 @@ export interface Me {
 
 export interface Bootstrap {
   version: string
+  instance?: string // this run of the gateway (a restart changes it)
   setup_needed: boolean
   default_language: string
   forwarding: boolean

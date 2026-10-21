@@ -3,6 +3,8 @@ package web
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -20,6 +22,15 @@ import (
 )
 
 var Version = "dev"
+
+// instance tells this run of the gateway from the one before (a restart, an
+// update): a session the browser finds gone after one was not ended by anyone,
+// and a tmux or herdr session is opened again by itself.
+var instance = func() string {
+	b := make([]byte, 8)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}()
 
 type meView struct {
 	ID          int64  `json:"id"`
@@ -44,6 +55,7 @@ func (s *Server) apiBootstrap(w http.ResponseWriter, r *http.Request) {
 	}
 	out := map[string]any{
 		"version":          Version,
+		"instance":         instance,
 		"setup_needed":     needed,
 		"default_language": s.cfg.DefaultLanguage,
 		"forwarding":       s.cfg.ForwardDomain != "",

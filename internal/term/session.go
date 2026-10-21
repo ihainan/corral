@@ -31,6 +31,9 @@ const (
 	StateExited  = "exited" // the remote program ended normally
 	StateLost    = "lost"   // the SSH connection dropped
 	StateClosed  = "closed" // closed by the user or an administrator
+	// The reason of sessions closed because the gateway is stopping (an
+	// update): the browser opens tmux and herdr sessions again by itself.
+	ReasonShutdown = "server shutting down"
 )
 
 var (

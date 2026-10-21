@@ -29,7 +29,7 @@ export interface Handlers {
   // this window's latest size request are left out (they predate it).
   onSize?(cols: number, rows: number, own: boolean): void
   onLive?(): void // the replayed backlog has been delivered
-  onHello?(version: string): void // a new socket was accepted (by a gateway of this version); state from the old one is stale
+  onHello?(version: string, instance: string): void // a new socket was accepted (by a gateway of this version and run); state from the old one is stale
   onDropped?(): void // input typed while disconnected was discarded (too much, or too old)
 }
 
@@ -257,7 +257,7 @@ export class TermConnection {
           this.sizeSeq = 0
           this.takeSeq = 0
           if (this.size) this.sendSize(ws, first || resend)
-          this.h.onHello?.(typeof m.version === 'string' ? m.version : '')
+          this.h.onHello?.(typeof m.version === 'string' ? m.version : '', typeof m.instance === 'string' ? m.instance : '')
           if (!this.watch) ws.send(JSON.stringify({ t: 'visible', v: this.looking() }))
           this.startPing(ws, gen)
         } else if (m.t === 'state') {

@@ -39,6 +39,12 @@ before 1.0, a minor version may change configuration or behaviour (said here whe
   a user name and a first password to hand over. Such an account, and one
   whose password an administrator reset, must choose its own password at its
   next sign-in before anything else (an option of both).
+- The composer offers Claude Code's suggested next prompt (the greyed text in
+  its input box): as its placeholder, taken with Tab (a button on touch screens).
+- A tmux or herdr session the gateway's restart (an update) or a lost host
+  connection ended is opened again by itself, after a 3-second countdown in
+  the tab in front (at once in the tabs behind it), once the gateway answers
+  again. A session someone ended, or a plain shell, is not.
 
 ### Changed
 - The composer stays open or closed per session across reloads (a new session

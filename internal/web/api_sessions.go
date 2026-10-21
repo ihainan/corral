@@ -521,7 +521,7 @@ func cleanPreview(in []string) ([]string, bool) {
 //
 // Server → browser
 //   binary: 8-byte big-endian offset, then raw terminal output
-//   text:   {"t":"hello","offset":N,"reset":bool,"modes":"…","version":"…"}  sent first
+//   text:   {"t":"hello","offset":N,"reset":bool,"modes":"…","version":"…","instance":"…"}  sent first
 //           (modes, on some resets: terminal output to write after clearing
 //           and before the backlog; it restores modes set by output the
 //           backlog no longer holds)
@@ -728,7 +728,7 @@ func (s *Server) serveTerminal(w http.ResponseWriter, r *http.Request, sess *ter
 		}
 	}
 
-	hello := map[string]any{"t": "hello", "offset": start, "reset": reset, "state": sess.State(), "version": Version}
+	hello := map[string]any{"t": "hello", "offset": start, "reset": reset, "state": sess.State(), "version": Version, "instance": instance}
 	if len(sub.Prelude) > 0 {
 		hello["modes"] = string(sub.Prelude)
 	}
