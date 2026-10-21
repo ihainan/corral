@@ -1,4 +1,8 @@
-# Corral
+<p align="center">
+  <img src="web/public/icons/icon.svg" width="96" height="96" alt="Corral logo: a terminal prompt on a blue square">
+</p>
+
+<h1 align="center">Corral</h1>
 
 A self-hosted web SSH client built for phones and tablets first, and for
 running terminal coding agents (Claude Code, Codex, Gemini CLI…) from anywhere.
