@@ -48,6 +48,9 @@ before 1.0, a minor version may change configuration or behaviour (said here whe
   typed next.
 - The composer keeps its draft when you leave the terminal and come back,
   and no longer capitalises or "corrects" commands on iOS.
+- Chinese full-width punctuation no longer gets half an em of extra space
+  after it, which could push the end of a line under the next column (Chrome
+  on macOS with PingFang trims such punctuation when it is measured).
 - On touch screens the terminal no longer leaves an empty strip on the right
   (room kept for a scrollbar that only shows while scrolling).
 - The settings page's font size steps one point at a time (it could jump the

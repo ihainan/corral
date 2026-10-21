@@ -83,6 +83,14 @@ html.term-mode body { position: fixed; inset: 0; }
 }
 .term-sending-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .term-host-el .xterm { height: 100%; }
+/* xterm sizes each character by measuring 32 of it in a row; browsers that
+   trim the spacing of full-width punctuation set side by side (Chrome's
+   text-spacing-trim, with fonts that support it, as PingFang does) then
+   measure "，" at about half its width, so it is drawn with half an em of
+   extra spacing after it and a line of Chinese runs past its last column.
+   Spacing that depends on neighbours is turned off here: every character is
+   as wide as its cells. */
+.xterm { text-spacing-trim: space-all; text-autospace: no-autospace; }
 .term-host-el .xterm-viewport { overscroll-behavior: contain; }
 /* (xterm.css paints it black: it shows in the strip under the last row.) */
 .term-host-el .xterm .xterm-viewport { background-color: transparent; }
