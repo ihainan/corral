@@ -81,6 +81,7 @@ export function FilesDialog({ sessionId, start, onPath, onInsert, onClose }: Pro
   const seq = useRef(0) // numbers navigations; only the latest one's answer is shown
   const settled = useRef(0) // the latest navigation that has finished
   const want = useRef<string | null>(null) // the folder the latest navigation is for (null: not known yet)
+  const failedAt = useRef<string | null>(null) // the folder that did not open (what "retry" opens)
   const refreshAfter = useRef(false) // a change landed while a navigation was under way
   const fileInput = useRef<HTMLInputElement>(null)
   const listRef = useRef<HTMLUListElement>(null)
@@ -120,6 +121,7 @@ export function FilesDialog({ sessionId, start, onPath, onInsert, onClose }: Pro
     } catch (e) {
       if (n !== seq.current) return
       if (fallbackHome && e instanceof ApiError && (e.code === 'file_not_found' || e.code === 'not_a_folder' || e.code === 'permission_denied')) return load('', false, n)
+      failedAt.current = p
       setError(errorText(e))
     } finally {
       if (n === seq.current) {
@@ -313,7 +315,7 @@ export function FilesDialog({ sessionId, start, onPath, onInsert, onClose }: Pro
         : e.type === 'file'
           ? { label: t('files.download'), icon: <Download size={16} />, onSelect: () => download(e) }
           : null,
-      { label: t('files.insertPath'), icon: <SquareTerminal size={16} />, onSelect: () => onInsert(full) },
+      { label: t('files.insertPath'), icon: <SquareTerminal size={16} />, onSelect: () => leave(() => onInsert(full)) },
       {
         label: t('files.copyPath'),
         icon: <Copy size={16} />,
@@ -361,18 +363,35 @@ export function FilesDialog({ sessionId, start, onPath, onInsert, onClose }: Pro
     },
   }
 
+  // Leaving the panel stops the uploads still running: asked first.
+  const leave = (go: () => void) => {
+    const running = uploadsRef.current.filter((u) => !u.error).length
+    if (running === 0) return go()
+    showDialog((close) => (
+      <Confirm
+        title={t('files.leaveTitle')}
+        body={t('files.leaveBody', { n: running })}
+        confirm={t('files.leaveConfirm')}
+        danger
+        onClose={close}
+        onConfirm={go}
+      />
+    ))
+  }
+  const closePanel = () => leave(onClose)
+
   return (
     <div className="files-root" {...dragHandlers}>
     <Dialog
       title={t('files.title')}
-      onClose={onClose}
+      onClose={closePanel}
       wide
       hideTitle
       className="files-dialog"
     >
       <div className="files-head">
         <h2>{t('files.title')}</h2>
-        <button className="icon-btn" onClick={onClose} aria-label={t('common.close')}><X size={18} /></button>
+        <button className="icon-btn" onClick={closePanel} aria-label={t('common.close')}><X size={18} /></button>
       </div>
 
       {editing !== null ? (
@@ -470,7 +489,7 @@ export function FilesDialog({ sessionId, start, onPath, onInsert, onClose }: Pro
 
       <div className="files-body">
         {error ? (
-          <LoadError text={error} onRetry={() => void (path === null ? load('') : load(path))} />
+          <LoadError text={error} onRetry={() => void load(failedAt.current ?? path ?? '')} />
         ) : listing === null ? (
           <p className="hint files-note">{t('common.loading')}</p>
         ) : (

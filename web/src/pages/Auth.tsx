@@ -213,18 +213,27 @@ export function SetupPage() {
 
 export function InvitePage({ token }: { token: string }) {
   const { setMe } = useSession()
-  const [state, setState] = useState<'checking' | 'ok' | 'bad'>('checking')
+  // failed: not answered (the link may be fine), unlike bad.
+  const [state, setState] = useState<'checking' | 'ok' | 'bad' | 'failed'>('checking')
   const [role, setRole] = useState('')
+  const [tries, setTries] = useState(0)
   useEffect(() => {
-    api<{ role: string }>('GET', '/api/invites/' + encodeURIComponent(token))
+    setState('checking')
+    api<{ role: string }>('GET', '/api/invites/' + encodeURIComponent(token), undefined, { timeoutMs: 20000 })
       .then((r) => {
         setRole(r.role)
         setState('ok')
       })
-      .catch(() => setState('bad'))
-  }, [token])
+      .catch((e) => setState(e instanceof ApiError && e.code === 'bad_invite' ? 'bad' : 'failed'))
+  }, [token, tries])
   if (state === 'checking') return <AuthFrame title={t('invite.title')} intro={t('invite.checking')}>{null}</AuthFrame>
   if (state === 'bad') return <AuthFrame title={t('invite.title')} intro={t('error.bad_invite')}>{null}</AuthFrame>
+  if (state === 'failed')
+    return (
+      <AuthFrame title={t('invite.title')} intro={t('error.network')}>
+        <button className="btn" onClick={() => setTries((n) => n + 1)}>{t('common.retry')}</button>
+      </AuthFrame>
+    )
   return (
     <AuthFrame title={t('invite.title')} intro={t('invite.intro') + (role === 'admin' ? ' ' + t('invite.roleAdmin') : '')}>
       <AccountForm

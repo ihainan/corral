@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
+import { cloneElement, createContext, isValidElement, useCallback, useContext, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { Check, CircleAlert, CircleCheck, Copy, Info } from 'lucide-react'
 import { t } from '../i18n'
@@ -120,12 +120,15 @@ export function Dialog(props: { title: string; onClose: () => void; children: Re
 export function Confirm(props: { title: string; body: string; confirm: string; danger?: boolean; onConfirm: () => Promise<void> | void; onClose: () => void }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  // Once confirmed, the request cannot be called back: the dialog stays
+  // until it is answered (closing it would look like cancelling).
+  const close = () => !busy && props.onClose()
   return (
-    <Dialog title={props.title} onClose={props.onClose}>
+    <Dialog title={props.title} onClose={close}>
       <p className="lead">{props.body}</p>
       {error && <p className="err">{error}</p>}
       <div className="dialog-actions">
-        <button className="btn" onClick={props.onClose}>{t('common.cancel')}</button>
+        <button className="btn" onClick={close} disabled={busy}>{t('common.cancel')}</button>
         <button
           className={'btn ' + (props.danger ? 'btn-danger' : 'btn-primary')}
           disabled={busy}
@@ -404,13 +407,17 @@ export function CopyButton({ text, label }: { text: string; label?: string }) {
 }
 
 export function Field(props: { label: string; htmlFor?: string; optional?: boolean; hint?: ReactNode; error?: string; children: ReactNode }) {
+  // The field's input is told where its hint or error is (read out with it).
+  const desc = props.htmlFor && (props.error || props.hint) ? props.htmlFor + '-desc' : undefined
+  const c = props.children
+  const child = desc && isValidElement<{ id?: string; 'aria-describedby'?: string }>(c) && c.props.id === props.htmlFor && !c.props['aria-describedby'] ? cloneElement(c, { 'aria-describedby': desc }) : c
   return (
     <div className="field">
       <label htmlFor={props.htmlFor}>
         {props.label}
         {props.optional && <span className="opt">{t('common.optional')}</span>}
       </label>
-      {props.children}
+      {child}
       {props.error ? (
         <p className="err" id={props.htmlFor ? props.htmlFor + '-desc' : undefined}>
           {props.error}
@@ -441,7 +448,7 @@ export function LoadError({ onRetry, text }: { onRetry: () => void; text?: strin
   return (
     <p className="inline-error" role="alert">
       <span>{text ?? t('common.loadFailed')}</span>
-      <button className="link-btn" onClick={onRetry}>{t('common.retry')}</button>
+      <button type="button" className="link-btn" onClick={onRetry}>{t('common.retry')}</button>
     </p>
   )
 }

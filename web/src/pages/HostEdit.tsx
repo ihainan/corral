@@ -3,7 +3,7 @@ import { ArrowLeft, ChevronRight, KeyRound } from 'lucide-react'
 import { api, ApiError, errorText, type Host, type KeyCred } from '../api'
 import { hasKey, t } from '../i18n'
 import { linkHandler, navigate } from '../router'
-import { CopyButton, Field, useToast } from '../components/ui'
+import { CopyButton, Field, LoadError, useToast } from '../components/ui'
 
 type Auth = Host['auth']
 
@@ -20,6 +20,7 @@ export function HostEditPage({ id }: { id?: number }) {
   const [hadPassword, setHadPassword] = useState(false)
   const [credentialId, setCredentialId] = useState<number | null>(null)
   const [keys, setKeys] = useState<KeyCred[]>([])
+  const [keysFailed, setKeysFailed] = useState(false)
   const [jumpId, setJumpId] = useState<number | null>(null)
   const [hosts, setHosts] = useState<Host[] | null>(null) // null until loaded
   const [hostsFailed, setHostsFailed] = useState(false)
@@ -53,8 +54,14 @@ export function HostEditPage({ id }: { id?: number }) {
     setLoaded(true)
   }, [])
 
+  const loadKeys = () => {
+    setKeysFailed(false)
+    api<KeyCred[]>('GET', '/api/credentials')
+      .then(setKeys)
+      .catch(() => setKeysFailed(true))
+  }
   useEffect(() => {
-    api<KeyCred[]>('GET', '/api/credentials').then(setKeys).catch(() => {})
+    loadKeys()
     loadHosts()
     if (!editing) return
     api<Host>('GET', '/api/hosts/' + id)
@@ -114,8 +121,16 @@ export function HostEditPage({ id }: { id?: number }) {
     setBusy(true)
     setError(null)
     const a = splitAddress()
+    // Left empty, the usual SSH port; anything else must be a port.
+    const portN = a.port === '' ? 22 : Number(a.port)
+    if (!(portN >= 1 && portN <= 65535)) {
+      setError({ field: 'port', text: t('host.portInvalid') })
+      setBusy(false)
+      document.getElementById('h-port')?.focus()
+      return
+    }
     const body = {
-      name, address: a.address, port: Number(a.port) || 22, username: a.username, auth,
+      name, address: a.address, port: portN, username: a.username, auth,
       password: auth === 'password' ? password : '',
       credential_id: auth === 'key' ? credentialId : null,
       jump_host_id: jumpId,
@@ -161,10 +176,10 @@ export function HostEditPage({ id }: { id?: number }) {
           </Field>
           <div className="field port">
             <label htmlFor="h-port">{t('host.port')}</label>
-            <input id="h-port" className="input" value={port} onChange={(e) => setPort(e.target.value.replace(/\D/g, ''))} inputMode="numeric" aria-invalid={!!fe('port')} />
+            <input id="h-port" className="input" value={port} onChange={(e) => setPort(e.target.value.replace(/\D/g, ''))} inputMode="numeric" placeholder="22" aria-invalid={!!fe('port')} aria-describedby={fe('port') ? 'h-port-desc' : undefined} />
           </div>
         </div>
-        {fe('port') && <p className="err">{fe('port')}</p>}
+        {fe('port') && <p className="err" id="h-port-desc">{fe('port')}</p>}
         <Field label={t('host.username')} htmlFor="h-user" error={fe('username')}>
           <input id="h-user" className="input" value={username} onChange={(e) => setUsername(e.target.value)} autoCapitalize="none" autoCorrect="off" spellCheck={false} required aria-invalid={!!fe('username')} />
         </Field>
@@ -202,6 +217,8 @@ export function HostEditPage({ id }: { id?: number }) {
                   <option key={k.id} value={k.id}>{k.name}</option>
                 ))}
               </select>
+            ) : keysFailed ? (
+              <LoadError text={t('host.keysFailed')} onRetry={loadKeys} />
             ) : (
               <p className="hint">{t('host.keyNone')}</p>
             )}

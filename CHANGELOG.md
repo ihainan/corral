@@ -16,11 +16,22 @@ before 1.0, a minor version may change configuration or behaviour (said here whe
   from the alert where buttons are shown (once, while nothing changed), and
   are replaced once the agent no longer waits (also when its pane or session
   closes). At most 10 alerts a minute per user.
+- A tapped agent alert brings herdr to that agent's pane (its workspace and
+  tab too); on a phone it also leaves another session open in front for it.
+- Uploads from the terminal or the composer show their progress and can be
+  stopped; closing the file panel asks first while files are still going up.
 
 ### Changed
 - The herdr panel of workspaces and agents is gone: herdr's own sidebar
   lists them. A button in the top bar, shown while agents wait for you,
   answers one at once or picks among several.
+- Ending a session from its tab goes to the next tab, not the host list; with
+  tabs, recording, watchers and a slow link show next to them.
+- The key bar's default layout puts the arrows before Fn, so all four are in
+  sight on a phone. Secondary text, placeholders and the dark theme's buttons
+  meet a 4.5:1 contrast; touch targets in the composer and file panel are larger.
+- Clearer wording in menus and forms ("Browse files", "Port forwarding",
+  "Password each time"); the composer's history no longer lists unsent drafts.
 
 ### Fixed
 - The terminal fitted one row and a column or two too many: its last row
@@ -30,6 +41,11 @@ before 1.0, a minor version may change configuration or behaviour (said here whe
   (WeType) no longer put a space before what is typed next.
 - The composer keeps its draft when you leave the terminal and come back,
   and no longer capitalises or "corrects" commands on iOS.
+- On touch screens the terminal no longer leaves an empty strip on the right
+  (room kept for a scrollbar that only shows while scrolling).
+- The settings page's font size steps one point at a time (it could jump the
+  other way); a port of 0 is refused instead of becoming 22; an invite link
+  that could not be checked offers to retry instead of saying it is invalid.
 
 ## [0.1.0] - 2026-10-20
 

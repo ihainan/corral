@@ -9,10 +9,10 @@
   --surface: #ffffff;
   --fg: #16181d;
   --fg-2: #5a606c;
-  --fg-3: #8a909b;
+  --fg-3: #6b717d;
   --fg-4: #b5bac3;
   --line: #e7e9ed;
-  --line-strong: #d5d9df;
+  --line-strong: #c6cbd3;
   --accent: #2c5fcc;
   --accent-hover: #244fb0;
   --accent-text: #2c5fcc;
@@ -48,8 +48,8 @@
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme='light']) {
     --bg: #0f1115; --bg-subtle: #15181d; --bg-hover: #1c2026; --bg-active: #242830; --surface: #1a1d23;
-    --fg: #e6e8ec; --fg-2: #a1a7b2; --fg-3: #747b87; --fg-4: #4e545e; --line: #23272e; --line-strong: #323741;
-    --accent: #4a78ec; --accent-hover: #5b86f0; --accent-text: #8fadf7; --accent-fg: #ffffff; --accent-soft: rgba(74, 120, 236, 0.16);
+    --fg: #e6e8ec; --fg-2: #a1a7b2; --fg-3: #858c98; --fg-4: #4e545e; --line: #23272e; --line-strong: #3d4350;
+    --accent: #3b68dc; --accent-hover: #4470e0; --accent-text: #8fadf7; --accent-fg: #ffffff; --accent-soft: rgba(74, 120, 236, 0.16);
     --ok: #5cc28a; --warn: #e0a24a; --danger: #f07c73; --danger-soft: rgba(240, 124, 115, 0.12);
     --focus: 0 0 0 3px rgba(74, 120, 236, 0.35);
     --shadow-pop: 0 0 0 1px #2c313a, 0 12px 32px rgba(0, 0, 0, 0.55); --overlay: rgba(0, 0, 0, 0.6);
@@ -58,8 +58,8 @@
 }
 :root[data-theme='dark'] {
   --bg: #0f1115; --bg-subtle: #15181d; --bg-hover: #1c2026; --bg-active: #242830; --surface: #1a1d23;
-  --fg: #e6e8ec; --fg-2: #a1a7b2; --fg-3: #747b87; --fg-4: #4e545e; --line: #23272e; --line-strong: #323741;
-  --accent: #4a78ec; --accent-hover: #5b86f0; --accent-text: #8fadf7; --accent-fg: #ffffff; --accent-soft: rgba(74, 120, 236, 0.16);
+  --fg: #e6e8ec; --fg-2: #a1a7b2; --fg-3: #858c98; --fg-4: #4e545e; --line: #23272e; --line-strong: #3d4350;
+  --accent: #3b68dc; --accent-hover: #4470e0; --accent-text: #8fadf7; --accent-fg: #ffffff; --accent-soft: rgba(74, 120, 236, 0.16);
   --ok: #5cc28a; --warn: #e0a24a; --danger: #f07c73; --danger-soft: rgba(240, 124, 115, 0.12);
   --focus: 0 0 0 3px rgba(74, 120, 236, 0.35);
   --shadow-pop: 0 0 0 1px #2c313a, 0 12px 32px rgba(0, 0, 0, 0.55); --overlay: rgba(0, 0, 0, 0.6);
@@ -143,10 +143,10 @@ code, .mono { font-family: var(--font-mono); font-size: 0.9em; }
   }
   .tab {
     flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
-    height: 49px; color: var(--fg-3); font-size: 10px; font-weight: 500;
+    height: 49px; color: var(--fg-2); font-size: 11px; font-weight: 500;
   }
   .tab:hover { text-decoration: none; }
-  .tab[aria-current='page'] { color: var(--fg); }
+  .tab[aria-current='page'] { color: var(--accent-text); }
   .content { padding-bottom: calc(49px + env(safe-area-inset-bottom, 0px)); }
 }
 
@@ -211,7 +211,7 @@ code, .mono { font-family: var(--font-mono); font-size: 0.9em; }
 }
 /* 14px only where no touch pointer exists at all, so iOS never zooms on focus. */
 @media not all and (any-pointer: coarse) { .input, .select, .textarea { font-size: 14px; } }
-.input::placeholder, .textarea::placeholder { color: var(--fg-4); }
+.input::placeholder, .textarea::placeholder { color: var(--fg-3); }
 .input:focus, .select:focus, .textarea:focus { border-color: var(--accent); box-shadow: var(--focus); }
 .input[aria-invalid='true'] { border-color: var(--danger); }
 .textarea { height: auto; min-height: 120px; padding: 10px 12px; resize: vertical; font-family: var(--font-mono); font-size: 13px; line-height: 1.5; }
@@ -243,6 +243,7 @@ code, .mono { font-family: var(--font-mono); font-size: 0.9em; }
 .switch::after { content: ''; position: absolute; top: 2px; left: 2px; width: 18px; height: 18px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2); transition: transform 0.15s var(--ease); }
 .switch:checked { background: var(--accent); }
 .switch:checked::after { transform: translateX(14px); }
+@media (pointer: coarse) { .switch { width: 44px; height: 26px; border-radius: 13px; } .switch::after { width: 22px; height: 22px; } .switch:checked::after { transform: translateX(18px); } }
 
 /* Stepper */
 .stepper { display: inline-flex; align-items: center; gap: 4px; }
@@ -297,6 +298,9 @@ div.row-main:hover { background: none; }
 .setting-label .hint { max-width: 52ch; }
 .setting-control { flex: none; display: flex; align-items: center; gap: 8px; }
 .setting-control .seg { width: auto; }
+/* With a hint under its name, the control sits by the name, not halfway down the hint. */
+.setting:has(.setting-label .hint) { align-items: flex-start; }
+.setting:has(.setting-label .hint) > .setting-control { min-height: 20px; }
 .settings-group { border-top: 1px solid var(--line); }
 a.setting { color: inherit; }
 a.setting:hover { text-decoration: none; background: var(--bg-hover); }
@@ -530,6 +534,9 @@ details.adv > .form { margin-top: 16px; }
   border-radius: var(--r); font: 12px/1.45 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--fg);
 }
 .reply-refresh { position: absolute; top: 4px; right: 4px; }
+.reply-refresh.reading svg { animation: spin 0.9s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .reply-refresh.reading svg { animation: none; } }
 .reply-changed { color: var(--warn); font-size: 13px; line-height: 18px; }
 .reply-choices { display: flex; flex-direction: column; gap: 6px; }
 .reply-choice { justify-content: flex-start; gap: 10px; height: auto; min-height: var(--h-btn); padding-block: 8px; text-align: left; white-space: normal; }
@@ -563,6 +570,7 @@ details.adv > .form { margin-top: 16px; }
 .crumb[aria-current] { color: var(--fg); }
 .crumb-sep { color: var(--fg-4); font: 13px/20px var(--font-mono); }
 .crumb-edit { flex: none; width: 28px; height: 28px; margin-left: 2px; color: var(--fg-3); }
+@media (pointer: coarse) { .crumb-edit { width: 40px; height: 40px; } }
 .files-path-edit { display: flex; gap: 8px; padding: 6px 20px 0; }
 .files-root { display: contents; }
 .files-path-edit .input { flex: 1; min-width: 0; font-family: var(--font-mono); }
@@ -661,6 +669,7 @@ details.adv > .form { margin-top: 16px; }
 .live-title { display: flex; align-items: center; gap: 8px; min-width: 0; font-weight: 500; }
 .live-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .live-sub { font-size: 12px; line-height: 16px; color: var(--fg-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.live-wait { color: var(--warn); font-weight: 600; }
 .live-close { position: absolute; right: 6px; bottom: 9px; }
 @media (max-width: 599px) {
   .live-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }

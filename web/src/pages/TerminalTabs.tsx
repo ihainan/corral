@@ -143,11 +143,26 @@ export function TerminalTabs({ current }: { current: string }) {
     if (dialogs) setNewOpen(false)
   }, [dialogs])
 
+  // A session the user ended: its neighbour (the next tab, else the one
+  // before) comes to the front, or the host list when it was the last.
+  // (Read when it happens: the confirmation holds an older copy of this.)
+  const tabsRef = useRef(tabs)
+  tabsRef.current = tabs
+  const endTab = (id: string) => {
+    const tabs = tabsRef.current
+    const i = tabs.findIndex((s) => s.id === id)
+    const rest = tabs.filter((s) => s.id !== id && s.host_id !== 0)
+    const next = rest[Math.min(Math.max(i, 0), rest.length - 1)]
+    setSessions((l) => l && l.filter((s) => s.id !== id))
+    navigate(next ? '/t/' + next.id : '/', true)
+    load()
+  }
+
   const bar = <TabBar tabs={tabs} current={current} infos={infos} onNew={() => setNewOpen(true)} />
   return (
     <>
       {mounted.map((id) => (
-        <TerminalPage key={id} id={id} active={id === current} tabs={bar} onInfo={onInfo} />
+        <TerminalPage key={id} id={id} active={id === current} tabs={bar} onInfo={onInfo} onEnd={() => endTab(id)} />
       ))}
       {newOpen && (
         <NewTabDialog

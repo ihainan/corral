@@ -41,7 +41,7 @@ export function KeysPage() {
       <p className="lead">{t('keys.intro')}</p>
       {failed && <LoadError onRetry={load} />}
       {keys === null && !failed && <p className="loading">{t('common.loading')}</p>}
-      {keys && keys.length === 0 && <EmptyState icon={<KeyRound size={20} strokeWidth={1.75} />} title={t('keys.empty')} />}
+      {keys && keys.length === 0 && <EmptyState icon={<KeyRound size={20} strokeWidth={1.75} />} title={t('keys.empty')} body={t('keys.emptyBody')} />}
       {keys && keys.length > 0 && (
         <ul className="rows">
           {keys.map((k) => (

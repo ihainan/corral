@@ -78,7 +78,7 @@ export function App() {
       setMe(null)
       if (!location.pathname.startsWith('/login')) navigate('/login?next=' + encodeURIComponent(location.pathname + location.search), true)
     })
-    api<Bootstrap>('GET', '/api/bootstrap')
+    api<Bootstrap>('GET', '/api/bootstrap', undefined, { timeoutMs: 20000 })
       .then((b) => {
         applyDefaultLanguage(b.default_language)
         loadedVersion.current = b.version
@@ -113,7 +113,7 @@ export function App() {
       </div>
     )
   }
-  if (!boot) return null
+  if (!boot) return <Booting />
 
   return (
     <SessionCtx.Provider value={{ boot, me, setMe }}>
@@ -135,6 +135,23 @@ function PushSync({ userId }: { userId?: number }) {
     void syncPush().then((ok) => ok || toast(t('push.syncFailed'), true))
   }, [userId, toast])
   return null
+}
+
+// Before the start-up answer: nothing for a moment (it is usually there at
+// once), then a word that the app is loading.
+function Booting() {
+  const [slow, setSlow] = useState(false)
+  useEffect(() => {
+    const tm = window.setTimeout(() => setSlow(true), 800)
+    return () => clearTimeout(tm)
+  }, [])
+  return slow ? (
+    <div className="auth-wrap">
+      <div className="auth">
+        <p className="hint">{t('common.loading')}</p>
+      </div>
+    </div>
+  ) : null
 }
 
 function Redirect({ to }: { to: string }) {

@@ -154,7 +154,8 @@ export function CustomKeysSection() {
     // Built-in keys as they were at first; one's own keys stay, in their order.
     const own = [...layout.pinned, ...layout.row].filter((k): k is { label: string; keys: string; long?: string } => !isBuiltin(k))
     const d = defaultLayout()
-    save({ pinned: d.pinned, row: [d.row[0], ...own, ...d.row.slice(1)] })
+    const at = d.row.findIndex((k) => isBuiltin(k) && k.k === 'fn') + 1 // (after Fn, as defaultLayout puts them)
+    save({ pinned: d.pinned, row: [...d.row.slice(0, at), ...own, ...d.row.slice(at)] })
   }
   const addToken = (tok: string) => {
     const [get, set, ref] = target === 'long' && longAllowed ? [long, setLong, longRef] : [keys, setKeys, keysRef]

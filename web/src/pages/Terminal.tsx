@@ -2,10 +2,11 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { flushSync } from 'react-dom'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
+import { fitToEdge } from '../terminal/fit'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import { WebglAddon } from '@xterm/addon-webgl'
-import { ArrowUp, Check, ChevronDown, ChevronLeft, CircleStop, Code2, Eye, FolderOpen, Globe, History, ImagePlus, MessageCircleReply, MessageSquareText, MoreVertical, Minus, Palette, Paperclip, Plus, TextSelect, Keyboard as KeyboardIcon, Power, RotateCw, Server, X } from 'lucide-react'
+import { ArrowUp, Check, ChevronDown, ChevronLeft, CircleStop, Code2, Eye, FolderOpen, Globe, History, ImagePlus, MessageCircleReply, MoreVertical, Minus, Palette, Paperclip, Plus, TextSelect, Keyboard as KeyboardIcon, Power, RotateCw, Server, TextCursorInput, X } from 'lucide-react'
 import { api, ApiError, choiceOf, errorText, uploadFile, type HerdrAgent, type HerdrSummary, type Host, type SessionInfo } from '../api'
 import { t } from '../i18n'
 import { navigate } from '../router'
@@ -31,7 +32,7 @@ import { PortsDialog, openForward } from '../terminal/PortsDialog'
 import { FilesDialog } from '../terminal/FilesDialog'
 import { ShareDialog } from '../terminal/ShareDialog'
 import { useCode } from '../terminal/CodeDialog'
-import { onOpenRequest } from '../notifyopen'
+import { onOpenRequest, takeTabs } from '../notifyopen'
 import { useSession, VERSION_EVENT } from '../app'
 
 const isTouch = window.matchMedia('(pointer: coarse)').matches || navigator.maxTouchPoints > 0
@@ -208,7 +209,19 @@ let pagesOpen = 0
 // active: shown (with tabs, the others stay connected but hidden: they take
 // no focus or keys and show no dialogs). tabs: drawn in the top bar in place
 // of the session switcher.
-export function TerminalPage({ id, watch = false, active = true, tabs, onInfo }: { id: string; watch?: boolean; active?: boolean; tabs?: React.ReactNode; onInfo?: (id: string, i: TabInfo) => void }) {
+// dropParam takes what a notification asked for (?name=value) out of the
+// address of this session's page once it is dealt with.
+function dropParam(id: string, name: string, value: string) {
+  const q = new URLSearchParams(location.search)
+  if (location.pathname !== '/t/' + id || q.get(name) !== value) return
+  q.delete(name)
+  const rest = q.toString()
+  history.replaceState(history.state, '', location.pathname + (rest ? '?' + rest : ''))
+}
+
+// onEnd: where to go once the user has ended this session (with tabs, the
+// next one), else the host list.
+export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, onEnd }: { id: string; watch?: boolean; active?: boolean; tabs?: React.ReactNode; onInfo?: (id: string, i: TabInfo) => void; onEnd?: () => void }) {
   const activeRef = useRef(active)
   activeRef.current = active
   const prefs = usePrefs()
@@ -230,10 +243,13 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo }:
   const [composer, setComposer] = useState(false)
   const [draft, setDraft] = useState(() => (watch ? '' : getDraft(id)))
   // Going through the history (Up/Down at the box's start/end): the entry
-  // shown. A draft there when it starts is kept as the newest entry.
+  // shown, and the draft there when it started (back after the newest entry).
   const histPos = useRef<string | null>(null) // (the entry: other tabs change the list)
+  const histStash = useRef('')
+  // While going through the history, the draft put aside is what is kept
+  // (for when the page is left, or drawn again, meanwhile).
   useEffect(() => {
-    if (!watch) keepDraft(id, draft)
+    if (!watch) keepDraft(id, histPos.current !== null ? histStash.current : draft)
   }, [id, draft, watch])
   // Text from the key bar or an upload goes in at the composer's cursor.
   const insertDraft = useCallback((s: string) => {
@@ -266,11 +282,32 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo }:
   // The pane stays in the address until it is dealt with (the dialog has
   // shown its screen, or it no longer waits), so signing in again on the way
   // (the login may have ended) brings it back here.
-  const forgetReply = (pane: string) => {
-    if (location.pathname === '/t/' + id && new URLSearchParams(location.search).get('reply') === pane) {
-      history.replaceState(history.state, '', location.pathname)
+  const forgetReply = (pane: string) => dropParam(id, 'reply', pane)
+  // The pane a notification is about (?pane=): herdr is asked to focus it
+  // (its workspace and tab too) once this connection's summary has come.
+  const [wantPane, setWantPane] = useState<string | null>(() => (watch ? null : new URLSearchParams(location.search).get('pane')))
+  // Tried again with the next summary if herdr did not take it (busy, the
+  // connection gone meanwhile), a few times.
+  const paneTries = useRef<{ pane: string; n: number; busy: boolean }>({ pane: '', n: 0, busy: false })
+  useEffect(() => {
+    if (!wantPane || !herdr || !herdrFresh || status !== 'open') return
+    const pane = wantPane
+    const tr = paneTries.current.pane === pane ? paneTries.current : (paneTries.current = { pane, n: 0, busy: false })
+    if (tr.busy) return
+    const done = () => {
+      setWantPane((cur) => (cur === pane ? null : cur))
+      dropParam(id, 'pane', pane)
     }
-  }
+    // (Closed since: nothing to go to.)
+    if (!herdr.workspaces.some((w) => w.agents.some((a) => a.pane_id === pane))) return done()
+    // Given up for now; the address keeps it (a reload tries again).
+    if (tr.n >= 3) return setWantPane((cur) => (cur === pane ? null : cur))
+    tr.n++
+    tr.busy = true
+    api('POST', `/api/sessions/${id}/herdr`, { action: 'focus_pane', target: pane })
+      .then(done, () => {})
+      .finally(() => (tr.busy = false))
+  }, [wantPane, herdr, herdrFresh, status, id])
   // A pane not (yet) seen waiting gets a while: the summary shown may be one
   // from before the connection came back. Each new summary looks again.
   const replyGiveUp = useRef<{ pane: string; timer: number } | null>(null)
@@ -315,12 +352,30 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo }:
     replyGiveUp.current = { pane, timer }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wantReply, herdr, herdrFresh, status, sized, toast])
+  // Without tabs (a phone), a notification of another session tapped while
+  // this page is in front goes there: this session keeps running, the
+  // window shows the one asked for (an app on a phone's home screen may not
+  // open a window of its own for it). Not while a dialog of this page is up.
+  useEffect(() => {
+    if (tabs || watch) return
+    takeTabs((u) => {
+      if (!/^\/t\/[0-9a-f]+$/.test(u.pathname) || document.querySelector('[aria-modal="true"]')) return false
+      navigate(u.pathname + u.search)
+      return true
+    })
+    return () => takeTabs(null)
+  }, [tabs, watch])
   // A notification tapped while this page is open already.
   useEffect(() => {
     if (watch) return
     return onOpenRequest(() => {
-      const pane = new URLSearchParams(location.search).get('reply')
-      if (location.pathname === '/t/' + id && pane) setWantReply(pane)
+      const q = new URLSearchParams(location.search)
+      if (location.pathname !== '/t/' + id) return
+      if (q.get('pane')) {
+        paneTries.current = { pane: '', n: 0, busy: false }
+        setWantPane(q.get('pane'))
+      }
+      if (q.get('reply')) setWantReply(q.get('reply'))
     })
   }, [id, watch])
   const ended = status === 'ended' || status === 'gone' || status === 'revoked' || end !== null
@@ -419,6 +474,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo }:
     term.unicode.activeVersion = '11'
     const fit = new FitAddon()
     term.loadAddon(fit)
+    fitToEdge(fit, term)
     term.loadAddon(new WebLinksAddon((_e, uri) => linkTarget.current(uri)))
     term.open(el)
     // The DOM renderer is the default: it is correct at every pixel ratio.
@@ -1276,9 +1332,13 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo }:
     safeFitRef.current()
     // (Not under a dialog of this tab's, drawn again and focused just before.)
     if (!isTouch && !document.querySelector('[aria-modal="true"]')) termRef.current?.focus()
-    // Brought here by a notification asking to answer an agent (?reply=).
-    const pane = new URLSearchParams(location.search).get('reply')
-    if (pane && !watch && location.pathname === '/t/' + id) setWantReply(pane)
+    // Brought here by a notification about an agent (?pane=), asking to
+    // answer it (?reply=).
+    const q = new URLSearchParams(location.search)
+    if (!watch && location.pathname === '/t/' + id) {
+      if (q.get('pane')) setWantPane(q.get('pane'))
+      if (q.get('reply')) setWantReply(q.get('reply'))
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active])
 
@@ -1454,6 +1514,20 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo }:
   // (file picker, drop, the composer) go into the composer's draft when it
   // is open.
   const uploadRef = useRef<(files: File[], paste?: (s: string) => void, toTerm?: boolean) => Promise<void>>(async () => {})
+  // The file going up now, shown over the terminal until it is there.
+  const [sending, setSending] = useState<{ name: string; p: number; abort: AbortController } | null>(null)
+  // One upload at a time, in the order asked for; leaving the page stops the
+  // one going up and those waiting.
+  const uploadTurn = useRef<Promise<void>>(Promise.resolve())
+  const uploadAbort = useRef<AbortController | null>(null)
+  const uploadsLive = useRef(true)
+  useEffect(() => {
+    uploadsLive.current = true
+    return () => {
+      uploadsLive.current = false
+      uploadAbort.current?.abort()
+    }
+  }, [])
   const upload = useCallback(
     async (files: File[], paste?: (s: string) => void, toTerm = false) => {
       // Decided when the upload starts, not when it ends: the target, and
@@ -1461,33 +1535,52 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo }:
       // have changed, so the path is shown instead of pasted).
       const toDraft = !paste && !toTerm && !!composerRef.current
       const opens = connRef.current?.opens
-      for (const f of files) {
-        toast(t('term.uploading', { name: f.name || 'image' }))
-        try {
-          const r = await uploadFile(id, f)
-          const quoted = r.prefix === '@' ? geminiPath(r.path) : shellPath(r.path)
-          if (quoted && toDraft) {
-            insertDraft(quoted + ' ')
-            toast(t('term.uploaded'))
-          } else if (quoted) {
-            // Never paste into a composition in progress: wait for it to end.
-            await untilNotComposing(composingRef.current, hostEl.current?.querySelector('textarea') ?? null)
-            settleRef.current()
-            const s = quoted + ' '
-            const c = connRef.current
-            if (paste) paste(s)
-            else if (!c?.isOpen() || c.opens !== opens) {
-              toast(t('term.uploadNotPasted', { path: r.path }), true)
-              continue
-            } else termRef.current?.paste(s)
-            toast(t('term.uploaded'))
-          } else {
-            toast(r.path)
+      const before = uploadTurn.current
+      let done = () => {}
+      uploadTurn.current = new Promise<void>((r) => (done = r))
+      await before
+      try {
+        for (const f of files) {
+          if (!uploadsLive.current) break
+          const abort = new AbortController()
+          uploadAbort.current = abort
+          const clear = () => setSending((u) => (u?.abort === abort ? null : u))
+          setSending({ name: f.name || 'image', p: 0, abort })
+          try {
+            const r = await uploadFile(id, f, (p) => setSending((u) => (u?.abort === abort ? { ...u, p } : u)), abort.signal)
+            clear()
+            const quoted = r.prefix === '@' ? geminiPath(r.path) : shellPath(r.path)
+            if (quoted && toDraft) {
+              insertDraft(quoted + ' ')
+              toast(t('term.uploaded'))
+            } else if (quoted) {
+              // Never paste into a composition in progress: wait for it to end.
+              await untilNotComposing(composingRef.current, hostEl.current?.querySelector('textarea') ?? null)
+              settleRef.current()
+              const s = quoted + ' '
+              const c = connRef.current
+              if (paste) paste(s)
+              else if (!c?.isOpen() || c.opens !== opens) {
+                toast(t('term.uploadNotPasted', { path: r.path }), true)
+                continue
+              } else termRef.current?.paste(s)
+              toast(t('term.uploaded'))
+            } else {
+              toast(r.path)
+            }
+          } catch (e) {
+            clear()
+            if (e instanceof ApiError && e.code === 'aborted') {
+              if (uploadsLive.current) toast(t('term.uploadStopped', { name: f.name || 'image' }))
+              break
+            }
+            toast(errorText(e), true)
           }
-        } catch (e) {
-          toast(errorText(e), true)
         }
+      } finally {
+        done()
       }
+      if (!uploadsLive.current) return
       if (!isTouch && !document.querySelector('[aria-modal="true"]')) (composerRef.current ?? termRef.current)?.focus()
     },
     [id, toast, insertDraft],
@@ -1659,15 +1752,14 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo }:
     composerRef.current?.focus()
   }
 
-  // Up from the start of the box: the entry before the one shown (a draft
-  // there is kept as the newest entry first); Down from its end: the next,
-  // then an empty box.
+  // Up from the start of the box: the entry before the one shown (the draft
+  // there is put aside); Down from its end: the next, then the draft again.
   const historyStep = (dir: -1 | 1): boolean => {
     if (histPos.current === null && dir > 0) return false
-    if (histPos.current === null && draft.trim()) remember(draft)
     const h = sentHistory()
+    if (histPos.current === null) histStash.current = draft
     // Where the box is in the list now (an entry gone: past the newest).
-    let pos = histPos.current !== null ? h.lastIndexOf(histPos.current) : draft.trim() ? h.lastIndexOf(draft) : h.length
+    let pos = histPos.current !== null ? h.lastIndexOf(histPos.current) : h.length
     if (pos < 0) pos = h.length
     if (dir < 0) {
       if (pos === 0) return true
@@ -1676,7 +1768,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo }:
       pos++
     }
     histPos.current = pos < h.length ? h[pos] : null
-    const text = histPos.current ?? ''
+    const text = histPos.current ?? histStash.current
     setDraft(text)
     requestAnimationFrame(() => {
       const el = composerRef.current
@@ -1795,6 +1887,11 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo }:
     status === 'offline' ? t('term.offline') :
     status === 'full' ? t('term.fullShort') : ''
   const statusClass = ended ? 's-ended' : slow ? 's-slow' : 's-' + status
+  // With tabs, the open session's state beyond "connected": slow, recorded, watched.
+  const tabNote =
+    status === 'open' && !ended
+      ? [slow && t('term.latency', { ms: latency }), info?.recording && t('term.recording'), !watch && info?.watching && t('term.watchedBy', { n: info.watching })].filter(Boolean).join(' · ')
+      : ''
   const paused = !ended && (status === 'reconnecting' || status === 'offline')
   const herdrStale = paused || !herdrFresh
   // Agents waiting for an answer, while what herdr reported is current.
@@ -1841,7 +1938,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo }:
   ]
   const moreItems = (): (MenuItem | null)[] => watch ? watchItems() : [
     { label: t('term.upload'), icon: <ImagePlus size={16} />, onSelect: () => fileRef.current?.click() },
-    ended ? null : { label: t('files.title'), icon: <FolderOpen size={16} />, onSelect: openFiles },
+    ended ? null : { label: t('files.menu'), icon: <FolderOpen size={16} />, onSelect: openFiles },
     ended ? null : { label: t('share.title'), icon: <Eye size={16} />, onSelect: () => setShareOpen(true) },
     { label: t('term.copyMode'), icon: <TextSelect size={16} />, onSelect: openCopyMode },
     boot.forwarding && info ? { label: t('ports.title'), icon: <Globe size={16} />, onSelect: () => setPortsOpen(true) } : null,
@@ -1868,7 +1965,8 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo }:
                 onClose={() => setConfirm(null)}
                 onConfirm={async () => {
                   await api('DELETE', '/api/sessions/' + id)
-                  navigate('/', true)
+                  if (onEnd) onEnd()
+                  else navigate('/', true)
                 }}
               />,
             ),
@@ -1916,7 +2014,12 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo }:
         ) : tabs ? (
           <>
             {tabs}
-            <span className="sr-only" aria-live="polite">{statusText}</span>
+            {/* (Connection trouble shows on the tab; what else the bar would say, here.) */}
+            {tabNote ? (
+              <span className={'term-status term-tab-note ' + statusClass} aria-live="polite">{tabNote}</span>
+            ) : (
+              <span className="sr-only" aria-live="polite">{statusText}</span>
+            )}
           </>
         ) : (
         <Menu
@@ -1977,7 +2080,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo }:
         )}
         {!ended && !watch && (
           <button className="icon-btn" aria-pressed={composer} onClick={toggleComposer} aria-label={t('term.composer')} title={t('term.composer') + (isTouch ? '' : isMac ? ' (⇧⌘↩)' : ' (Ctrl+Shift+Enter)')}>
-            <MessageSquareText size={19} />
+            <TextCursorInput size={19} />
           </button>
         )}
         <Menu
@@ -2022,6 +2125,14 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo }:
       <div className={'term-body' + (paused ? ' is-paused' : '') + (ended ? ' is-ended' : '')}>
         <div className="term-host-el" ref={hostEl} />
         {dragOver && <div className="term-drop">{t('term.dropHint')}</div>}
+        {sending && (
+          <div className="term-sending" role="status">
+            <span className="term-sending-text">{t('term.uploading', { name: sending.name })} {Math.round(sending.p * 100)}%</span>
+            <button type="button" className="icon-btn" onClick={() => sending.abort.abort()} aria-label={t('term.uploadStop')} title={t('term.uploadStop')}>
+              <X size={16} />
+            </button>
+          </div>
+        )}
         {replyTo && !watch && !ended && active && (
           // One dialog per pane (keyed): nothing of another pane's carries over.
           <ReplyDialog
@@ -2102,14 +2213,14 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo }:
                   </button>
                   <Menu
                     label={t('term.history')}
-                    note={sentHistory().length === 0 && !draft.trim() ? t('term.historyEmpty') : undefined}
+                    note={sentHistory().length === 0 ? t('term.historyEmpty') : undefined}
                     items={() =>
                       [...sentHistory()].reverse().map((h) => ({
                         label: oneLine(h),
                         onSelect: () => {
-                          // The draft there is kept among the entries, not lost.
-                          if (draft.trim()) remember(draft)
-                          histPos.current = null
+                          // The draft there comes back with Down after the newest entry.
+                          if (histPos.current === null) histStash.current = draft
+                          histPos.current = h
                           setDraft(h)
                           requestAnimationFrame(() => {
                             const el = composerRef.current

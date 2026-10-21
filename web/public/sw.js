@@ -197,8 +197,8 @@ function openPage(url) {
         if (url.search) same.postMessage({ t: 'open', url: url.href })
         return same.focus()
       }
-      // A window with terminal tabs switches to it as a tab (asked, as only
-      // the page knows whether it has tabs).
+      // A window on a terminal page switches to it (as a tab where it has
+      // tabs; asked, as only the page knows whether it can).
       const terms = list.filter((c) => path(c).startsWith('/t/'))
       return firstAccepting(terms, url.href).then((tabs) => {
         if (tabs) return tabs.focus()

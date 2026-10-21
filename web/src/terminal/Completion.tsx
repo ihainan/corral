@@ -4,6 +4,7 @@ import { t } from '../i18n'
 import { apply, suggest, tokenAt, type Agent, type Completions, type Suggestion, type Token } from './complete'
 
 const FRESH_MS = 30_000 // a listing is asked for again after this
+const NEW_AT_MS = 3_000 // or after this, at a new "@" (the terminal may be in another folder now)
 
 // useCompletion offers, in the composer, what follows "@", "/" or "$" at the
 // caret (see complete.ts). The host's listing is asked for when first needed
@@ -18,20 +19,24 @@ export function useCompletion(p: {
   const [data, setData] = useState<Completions | null>(null)
   const loadedAt = useRef(0)
   const loading = useRef(false)
+  const [failed, setFailed] = useState(false)
+  const lastAt = useRef<number | null>(null) // where the last "@" being completed started
   const [tok, setTok] = useState<Token | null>(null)
   const [sel, setSel] = useState(0)
   const [dismissed, setDismissed] = useState<number | null>(null) // the token start Escape closed it at
 
-  const load = useCallback(() => {
-    if (loading.current || Date.now() - loadedAt.current < FRESH_MS) return
+  const load = useCallback((fresh: number) => {
+    if (loading.current || Date.now() - loadedAt.current < fresh) return
     loading.current = true
     api<Completions>('GET', `/api/sessions/${p.sessionId}/complete`)
       .then((d) => {
         loadedAt.current = Date.now()
         setData(d)
+        setFailed(false)
       })
       .catch(() => {
         loadedAt.current = Date.now() - FRESH_MS + 5000 // (tried again in a while)
+        setFailed(true)
       })
       .finally(() => (loading.current = false))
   }, [p.sessionId])
@@ -42,7 +47,9 @@ export function useCompletion(p: {
     if (!el || el.selectionStart !== el.selectionEnd || document.activeElement !== el) return setTok(null)
     const next = tokenAt(el.value, el.selectionStart)
     setTok((cur) => (cur && next && cur.start === next.start && cur.query === next.query && cur.kind === next.kind ? cur : next))
-    if (next) load()
+    const newAt = next?.kind === '@' && next.start !== lastAt.current
+    lastAt.current = next?.kind === '@' ? next.start : null
+    if (next) load(newAt ? NEW_AT_MS : FRESH_MS)
   }, [p.field, load])
   useEffect(update, [p.draft, update])
   useEffect(() => setSel(0), [tok?.start, tok?.query])
@@ -54,7 +61,9 @@ export function useCompletion(p: {
   const a: Agent | null = p.agent === 'claude' || p.agent === 'codex' ? p.agent : null
   const items: Suggestion[] = tok && dismissed !== tok.start ? suggest(tok, data, a) : []
   const cur = Math.min(sel, Math.max(0, items.length - 1)) // (the list may have shrunk under it)
-  const waitingFiles = !!tok && tok.kind === '@' && !data
+  const waitingFiles = !!tok && tok.kind === '@' && dismissed !== tok.start && !data
+  // Asked again and not answered: what is offered is from before (another folder, maybe).
+  const staleFiles = !!tok && tok.kind === '@' && dismissed !== tok.start && failed && !!data
 
   const pick = (i: number) => {
     const el = p.field.current
@@ -94,9 +103,10 @@ export function useCompletion(p: {
     'aria-activedescendant': items.length > 0 ? `${listId}-${cur}` : undefined,
   }
   const list =
-    items.length > 0 || waitingFiles ? (
+    items.length > 0 || waitingFiles || staleFiles ? (
       <div className="composer-complete" role="listbox" id={listId} aria-label={t('complete.label')}>
-        {waitingFiles && <div className="complete-note">{t('common.loading')}</div>}
+        {waitingFiles && <div className="complete-note">{failed ? t('complete.failed') : t('common.loading')}</div>}
+        {staleFiles && <div className="complete-note">{t('complete.failed')}</div>}
         {items.map((s, i) => (
           <button
             key={s.insert}

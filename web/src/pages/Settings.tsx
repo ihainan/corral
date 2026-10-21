@@ -11,7 +11,9 @@ import { CurrentScheme, SchemeDialog } from '../terminal/SchemePicker'
 import { TwoStepSection } from './TwoStep'
 import { CustomKeysSection } from './CustomKeys'
 
-const fontSizes = [11, 12, 13, 14, 15, 16, 18, 20]
+// As the terminal's menu sets it (one point at a time).
+const FONT_MIN = 9
+const FONT_MAX = 28
 
 function Setting(props: { label: string; hint?: ReactNode; id?: string; children: ReactNode }) {
   return (
@@ -57,12 +59,7 @@ export function SettingsPage() {
   const toast = useToast()
   const [lang, setLangState] = useState<Lang>(getLang())
   const [schemesOpen, setSchemesOpen] = useState(false)
-  const fontIdx = fontSizes.indexOf(prefs.fontSize)
-  const stepFont = (d: number) => {
-    const i = fontIdx === -1 ? fontSizes.indexOf(14) : fontIdx
-    const n = fontSizes[Math.min(fontSizes.length - 1, Math.max(0, i + d))]
-    setPrefs({ fontSize: n })
-  }
+  const stepFont = (d: number) => setPrefs({ fontSize: Math.min(FONT_MAX, Math.max(FONT_MIN, prefs.fontSize + d)) })
 
   return (
     <main className="page page-form">
@@ -105,11 +102,11 @@ export function SettingsPage() {
           </Setting>
           <Setting label={t('settings.fontSize')} id="fs-l">
             <div className="stepper" role="group" aria-labelledby="fs-l">
-              <button type="button" className="icon-btn" aria-label={t('settings.fontSmaller')} disabled={fontIdx === 0} onClick={() => stepFont(-1)}>
+              <button type="button" className="icon-btn" aria-label={t('settings.fontSmaller')} disabled={prefs.fontSize <= FONT_MIN} onClick={() => stepFont(-1)}>
                 <Minus size={16} />
               </button>
               <span className="value" aria-live="polite">{prefs.fontSize}</span>
-              <button type="button" className="icon-btn" aria-label={t('settings.fontLarger')} disabled={fontIdx === fontSizes.length - 1} onClick={() => stepFont(1)}>
+              <button type="button" className="icon-btn" aria-label={t('settings.fontLarger')} disabled={prefs.fontSize >= FONT_MAX} onClick={() => stepFont(1)}>
                 <Plus size={16} />
               </button>
             </div>

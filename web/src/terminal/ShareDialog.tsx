@@ -111,7 +111,7 @@ export function ShareDialog({ sessionId, onClose }: { sessionId: string; onClose
           ))}
         </ul>
       ) : (
-        shares && <p className="hint">{t('share.none')}</p>
+        <p className="hint">{shares ? t('share.none') : t('common.loading')}</p>
       )}
       <div className="dialog-actions">
         <button className="btn" onClick={onClose}>{t('common.close')}</button>

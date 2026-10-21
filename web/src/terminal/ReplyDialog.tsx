@@ -51,6 +51,7 @@ export function ReplyDialog({ sessionId, agent, onLoaded, onClose, resizedAt }: 
   const base = `/api/sessions/${sessionId}/herdr/panes/${encodeURIComponent(agent.pane_id)}`
   const [screen, setScreen] = useState<Screen | null>(null)
   const [failed, setFailed] = useState(false)
+  const [reading, setReading] = useState(false) // the screen is being read (again)
   const [changed, setChanged] = useState<'' | 'changed' | 'answered'>('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -75,6 +76,7 @@ export function ReplyDialog({ sessionId, agent, onLoaded, onClose, resizedAt }: 
   const load = async () => {
     const n = ++seq.current
     setFailed(false)
+    setReading(true)
     try {
       const s = await api<Screen>('GET', base + '/screen')
       if (n !== seq.current) return
@@ -84,6 +86,8 @@ export function ReplyDialog({ sessionId, agent, onLoaded, onClose, resizedAt }: 
       setError('')
     } catch {
       if (n === seq.current) setFailed(true)
+    } finally {
+      if (n === seq.current && live.current) setReading(false)
     }
   }
   useEffect(() => {
@@ -114,6 +118,7 @@ export function ReplyDialog({ sessionId, agent, onLoaded, onClose, resizedAt }: 
     setBusy(true)
     setError('')
     seq.current++ // a refresh still on its way must not replace what this answer meets
+    setReading(false)
     try {
       await api('POST', base + '/reply', { digest: screen.digest, ...body })
       // The text sent goes from what is kept for the pane (not a newer one
@@ -148,10 +153,10 @@ export function ReplyDialog({ sessionId, agent, onLoaded, onClose, resizedAt }: 
       ) : (
         <>
           <div className="reply-screen-wrap">
-            <pre className="reply-screen" ref={pre} tabIndex={0} aria-label={t('reply.screen')}>
+            <pre className="reply-screen" ref={pre} tabIndex={0} aria-label={t('reply.screen')} aria-busy={reading}>
               {screen ? shown || t('reply.blank') : t('common.loading')}
             </pre>
-            <button type="button" className="icon-btn reply-refresh" onClick={() => void load()} disabled={busy} aria-label={t('reply.refresh')} title={t('reply.refresh')}>
+            <button type="button" className={'icon-btn reply-refresh' + (reading ? ' reading' : '')} onClick={() => void load()} disabled={busy || reading} aria-label={t('reply.refresh')} title={t('reply.refresh')}>
               <RotateCw size={16} />
             </button>
           </div>

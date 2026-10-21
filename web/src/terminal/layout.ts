@@ -85,10 +85,12 @@ const symbols: BuiltinId[] = ['sym:|', 'sym:/', 'sym:~', 'sym:-', 'sym:`', 'sym:
 export function defaultLayout(custom: { label: string; keys: string }[] = []): KeyLayout {
   return {
     pinned: [{ k: 'esc' }, { k: 'tab' }, { k: 'ctrl' }, { k: 'alt' }],
+    // (The arrows first: on a phone the four of them are in sight with the
+    // pinned keys; Fn and the rest scroll in.)
     row: [
+      { k: 'up' }, { k: 'down' }, { k: 'left' }, { k: 'right' },
       { k: 'fn' },
       ...custom.map((c) => ({ label: c.label, keys: c.keys })),
-      { k: 'up' }, { k: 'down' }, { k: 'left' }, { k: 'right' },
       { k: 'newline' },
       ...symbols.map((k) => ({ k })),
     ],

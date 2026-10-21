@@ -56,12 +56,15 @@ export function AdminUsersPage() {
                   {u.id === me?.id && <span className="you">{t('admin.you')}</span>}
                 </span>
                 <span className="row-meta">{u.role === 'admin' ? t('admin.roleAdmin') : t('admin.roleMember')}</span>
-                <span className="row-sub">
-                  <span className="mono">{u.username}</span>
-                  {u.open_sessions > 0 ? ' · ' + t('admin.openSessions', { n: u.open_sessions }) : ''}
-                  {u.totp ? ' · ' + t('admin.twoStep') : ''}
-                  {u.disabled && <span className="state-danger">{' · ' + t('admin.disabled')}</span>}
-                </span>
+                {(() => {
+                  // The user name again only when the title is another name.
+                  const parts: React.ReactNode[] = []
+                  if (u.display_name && u.display_name !== u.username) parts.push(<span key="u" className="mono">{u.username}</span>)
+                  if (u.open_sessions > 0) parts.push(t('admin.openSessions', { n: u.open_sessions }))
+                  if (u.totp) parts.push(t('admin.twoStep'))
+                  if (u.disabled) parts.push(<span key="d" className="state-danger">{t('admin.disabled')}</span>)
+                  return parts.length > 0 && <span className="row-sub">{parts.flatMap((x, i) => (i ? [' · ', x] : [x]))}</span>
+                })()}
               </div>
               <div className="row-actions">
                 <Menu

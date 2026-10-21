@@ -213,8 +213,8 @@ export async function api<T>(method: string, path: string, body?: unknown, opts:
 
 // prefix: what to type before the path for the program in front ("@" for
 // Gemini CLI), as the gateway saw it.
-export async function uploadFile(sessionId: string, file: Blob, onProgress?: (p: number) => void): Promise<{ path: string; prefix?: string }> {
-  return postFile(`/api/sessions/${sessionId}/upload`, file, onProgress)
+export async function uploadFile(sessionId: string, file: Blob, onProgress?: (p: number) => void, signal?: AbortSignal): Promise<{ path: string; prefix?: string }> {
+  return postFile(`/api/sessions/${sessionId}/upload`, file, onProgress, signal)
 }
 
 // postFile sends one file as a multipart upload, reporting progress; aborting

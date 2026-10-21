@@ -231,7 +231,8 @@ func (s *Server) onHerdrTransition(sess *term.Session, h *store.Host, tr herdr.T
 		where += " · " + tr.Workspace
 	}
 	tag := waitTagPrefix(sess.ID) + strings.ReplaceAll(tr.Pane.ID, ":", "-")
-	note := notify.Note{Body: where, BodyZh: where, URL: "/t/" + sess.ID, Tag: tag}
+	// Opened, the alert brings the session to this pane (herdr focuses it).
+	note := notify.Note{Body: where, BodyZh: where, URL: "/t/" + sess.ID + "?pane=" + url.QueryEscape(tr.Pane.ID), Tag: tag}
 	// Waiting no more: the alert on the devices is replaced, also while the
 	// session is looked at (that is often where it was answered).
 	if tr.From == herdr.StatusBlocked && tr.To != herdr.StatusBlocked {
@@ -289,7 +290,7 @@ func (s *Server) endSessionAlerts(sess *term.Session) {
 // Without the screen (herdr slow or gone) the alert goes as it is.
 func (s *Server) alertWaiting(sess *term.Session, tr herdr.Transition, wait uint64, note notify.Note, agent, agentZh string) {
 	note.Title, note.TitleZh = agent+" needs you", agentZh+" 在等你处理"
-	note.URL += "?reply=" + url.QueryEscape(tr.Pane.ID) // opens the answer to it
+	note.URL += "&reply=" + url.QueryEscape(tr.Pane.ID) // opens the answer to it
 	note.Distinct = true                                // (another wait than the last alert of this pane)
 	al := &waitAlert{tag: note.Tag, wait: wait, user: sess.OwnerID, session: sess.ID, pane: tr.Pane.ID}
 	if text, digest, ok := s.waitingScreen(sess, tr.Pane.ID); ok {

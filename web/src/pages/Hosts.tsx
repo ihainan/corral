@@ -239,7 +239,8 @@ function LiveCard({ s, preview, onClose }: { s: SessionInfo; preview?: SessionPr
   const working = s.meta?.t === 'herdr' ? s.meta.workspaces.reduce((n, w) => n + w.agents.filter((a) => a.status === 'working').length, 0) : 0
   const old = preview && Date.now() / 1000 - preview.at > 120
   const herdrState = waiting > 0 ? t('hosts.herdrWaiting', { n: waiting }) : working > 0 ? t('hosts.herdrWorking', { n: working }) : ''
-  const detail = [herdrState, kind, old ? t('hosts.previewAge', { when: relTime(preview.at) }) : '']
+  // (Agents waiting come first, in the colour that asks for attention.)
+  const detail = [waiting > 0 ? '' : herdrState, kind, old ? t('hosts.previewAge', { when: relTime(preview.at) }) : '']
     .filter(Boolean)
     .join(' · ')
   const label = s.title || kind
@@ -258,7 +259,11 @@ function LiveCard({ s, preview, onClose }: { s: SessionInfo; preview?: SessionPr
             <span className={'dot ' + (waiting > 0 ? 'warn' : 'ok')} aria-hidden="true" />
             <span className="live-name">{s.host_name}</span>
           </span>
-          <span className="live-sub" id={'ld-' + s.id}>{detail}</span>
+          <span className="live-sub" id={'ld-' + s.id}>
+            {waiting > 0 && <span className="live-wait">{herdrState}</span>}
+            {waiting > 0 && detail ? ' · ' : ''}
+            {detail}
+          </span>
         </span>
       </a>
       <button className="icon-btn live-close" aria-label={t('hosts.closeNamed', { name: `${s.host_name}：${label}` })} title={t('hosts.closeSession')} onClick={() => onClose(label)}>
