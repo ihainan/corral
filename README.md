@@ -5,8 +5,8 @@
 <h1 align="center">Corral</h1>
 
 <p align="center">
-  A self-hosted SSH client in the browser, made for phones first<br>
-  and for running coding agents — Claude Code, Codex, Gemini CLI — from anywhere.
+  A self-hosted SSH client in the browser — on a desktop, a tablet or a phone —<br>
+  made for running coding agents (Claude Code, Codex, Gemini CLI) from anywhere.
 </p>
 
 <p align="center">
@@ -28,20 +28,25 @@
 </p>
 
 Corral is a gateway: it holds the SSH connections and serves the terminal to
-the browser. Your phone can sleep, lose signal or switch apps — the session
-keeps running, and you pick it up where it was, on the same device or another.
+the browser. Close the laptop, lose signal on the phone, switch apps — the
+session keeps running, and you pick it up where it was, on the same device or
+another: start it at your desk, check on it from your phone, carry on on a tablet.
 
 ## Features
 
-### A terminal that works on a phone
+### Desktop, tablet and phone
 
-- **Sessions that wait for you** — They keep running while nobody looks. tmux
-  and [herdr](https://herdr.dev) sessions also outlive a gateway restart, and
-  open pages reattach them by themselves.
-- **A key bar** — Esc, Ctrl, Alt, Tab, arrows, F1–F12 and hard-to-type symbols.
-  Arrange it, add keys of your own, give keys a long press.
-- **Typing** — Tap where you type for the keyboard; Chinese and other input
-  methods and dictation work. A hardware keyboard types at once.
+- **Sessions that follow you** — They keep running while nobody looks and open
+  on whichever device you sign in from. tmux and [herdr](https://herdr.dev)
+  sessions also outlive a gateway restart, and open pages reattach them by
+  themselves.
+- **Tabs** — On a desktop or tablet every session is a tab, with how many agents
+  wait or are done. Ctrl+Tab in the installed app.
+- **Typing** — A hardware keyboard types straight in, on a computer or an iPad.
+  On a touch screen, tap where you type for the keyboard; Chinese and other
+  input methods and dictation work.
+- **A key bar** — For touch screens: Esc, Ctrl, Alt, Tab, arrows, F1–F12 and
+  hard-to-type symbols. Arrange it, add keys of your own, give keys a long press.
 - **Gestures** — Two fingers sideways go to the next session, up or down to
   herdr's next workspace; pinch to size the font.
 
@@ -58,8 +63,6 @@ keeps running, and you pick it up where it was, on the same device or another.
 
 ### Around the terminal
 
-- **Tabs** — On a desktop or tablet every session is a tab, with how many agents
-  wait or are done. Ctrl+Tab in the installed app.
 - **Files** — Browse the host, upload, download, rename, delete, insert a path.
 - **Web previews** — Open servers running on the host through port forwarding;
   VS Code in the browser ([code-server](https://github.com/coder/code-server)).
