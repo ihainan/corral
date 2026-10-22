@@ -34,6 +34,8 @@ before 1.0, a minor version may change configuration or behaviour (said here whe
 ### Fixed
 - On iOS with WeType (and input methods like it), the letter typed after
   another no longer comes up capitalised.
+- The "drop to upload" hint goes away when a file dragged over the terminal
+  is taken away again or the drag is given up (it stayed until a reload).
 
 ## [0.2.0] - 2026-10-21
 

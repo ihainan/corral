@@ -2422,7 +2422,13 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
           setDragOver(true)
         }
       }}
-      onDragLeave={(e) => e.currentTarget === e.target && setDragOver(false)}
+      // Leaving the page or the window, or a drag given up (Esc): the
+      // element left is often one inside it, and relatedTarget is then
+      // outside or null. (Moving between elements inside brings a dragover
+      // in the same task, so the hint does not flicker.)
+      onDragLeave={(e) => {
+        if (!(e.relatedTarget instanceof Node) || !e.currentTarget.contains(e.relatedTarget)) setDragOver(false)
+      }}
       onDrop={(e) => {
         setDragOver(false)
         // Only files are ours; dragged text keeps the browser's own handling
