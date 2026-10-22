@@ -2076,12 +2076,14 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
   })
 
   // What the keys do in the composer, shown by the send button on a computer.
-  const enterKey = isMac ? '↩' : 'Enter'
-  const modEnter = isMac ? '⌘↩' : 'Ctrl+Enter'
+  // Return and Shift as words on a Mac: ↩ and ⇧ are not in every UI font,
+  // and the one they fall back to sets them small and low beside the text.
+  const enterKey = isMac ? 'Return' : 'Enter'
+  const modEnter = isMac ? '⌘Return' : 'Ctrl+Enter'
   const composerSendKey = prefs.composerEnter === 'send' ? enterKey : modEnter
   const composerKeys =
     prefs.composerEnter === 'send'
-      ? t('term.composerKeysSend', { send: enterKey, newline: isMac ? '⇧↩' : 'Shift+Enter' })
+      ? t('term.composerKeysSend', { send: enterKey, newline: isMac ? 'Shift+Return' : 'Shift+Enter' })
       : t('term.composerKeysNewline', { send: modEnter })
   // The suggestion goes into the box, to be edited or sent.
   const takeSuggestion = () => {

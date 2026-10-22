@@ -36,6 +36,8 @@ before 1.0, a minor version may change configuration or behaviour (said here whe
   another no longer comes up capitalised.
 - The "drop to upload" hint goes away when a file dragged over the terminal
   is taken away again or the drag is given up (it stayed until a reload).
+- On a Mac the composer's key hints read Return and Shift+Return: the ↩ and
+  ⇧ symbols came out small and low beside the text.
 
 ## [0.2.0] - 2026-10-21
 

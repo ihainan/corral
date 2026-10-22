@@ -122,7 +122,7 @@ export function SettingsPage() {
       <section className="section">
         <h2>{t('settings.keyboard')}</h2>
         <div className="settings-group">
-          <Setting label={t('settings.composerEnter')} hint={t('settings.composerEnterHint', { mod: isMac ? '⌘↩' : 'Ctrl+Enter' })} id="ce-l">
+          <Setting label={t('settings.composerEnter')} hint={t('settings.composerEnterHint', { mod: isMac ? '⌘Return' : 'Ctrl+Enter' })} id="ce-l">
             <Seg
               labelledBy="ce-l"
               value={prefs.composerEnter}
