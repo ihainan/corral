@@ -159,7 +159,9 @@ export function TerminalTabs({ current }: { current: string }) {
       // Before the terminal's own listeners: the program never sees it.
       e.preventDefault()
       e.stopPropagation()
-      act()
+      // One step per press: a key held a little long repeats (after the
+      // system's delay, which can be short), and each repeat went one tab on.
+      if (!e.repeat) act()
     }
     window.addEventListener('keydown', onKey, true)
     return () => window.removeEventListener('keydown', onKey, true)
