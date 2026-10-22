@@ -31,6 +31,10 @@ before 1.0, a minor version may change configuration or behaviour (said here whe
   touch screens a flick slows as iOS lists do and carries further, and the
   scroll goes to the pane under the finger (herdr's split panes).
 
+### Fixed
+- On iOS with WeType (and input methods like it), the letter typed after
+  another no longer comes up capitalised.
+
 ## [0.2.0] - 2026-10-21
 
 Upgrading from 0.1.0 needs no configuration change; the database is updated

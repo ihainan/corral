@@ -490,7 +490,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
   const syncSchemeRef = useRef<(again?: boolean) => void>(() => {}) // tells programs that asked of a dark/light change (mode 2031)
   const heldRef = useRef<() => boolean>(() => false) // input is waiting for a Ctrl+V clipboard check or upload
   const composingRef = useRef<() => boolean>(() => false)
-  const forgetTypedRef = useRef<() => void>(() => {}) // see the key handler
+  const forgetTypedRef = useRef<(one?: boolean) => void>(() => {}) // see the key handler
   const mods = useRef<{ ctrl: ModState; alt: ModState }>({ ctrl: 'off', alt: 'off' })
   mods.current = { ctrl, alt }
   const releaseOnce = useCallback(() => {
@@ -1105,6 +1105,8 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
     const latched = () => mods.current.ctrl !== 'off' || mods.current.alt !== 'off'
     const onCompStart = () => {
       dropClaims() // the key became part of a composition
+      ctx = '' // (what follows the composition's text, which stays in the field)
+      ctxInField = false
       composing = true
       typedGen++
       typedChar = null
@@ -1127,7 +1129,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
     // xterm internals this relies on (checked against @xterm/xterm 6.0.0): the
     // composition helper, so a finished composition is sent before the next
     // key, and the dead-key flag, so xterm keeps handling the key after one.
-    type Core = { _compositionHelper?: { keydown(e: KeyboardEvent): boolean; isComposing?: boolean }; _unprocessedDeadKey?: boolean }
+    type Core = { _compositionHelper?: { keydown(e: KeyboardEvent): boolean; isComposing?: boolean; _isSendingComposition?: boolean }; _unprocessedDeadKey?: boolean }
     const core = (term as unknown as { _core?: Core })._core
     const internalsOk = !!core && typeof core._compositionHelper?.keydown === 'function' && typeof core._unprocessedDeadKey === 'boolean'
     // The key left to the browser, identified by its physical code, until its
@@ -1142,6 +1144,35 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
     // our own zero-delay timer runs after xterm's (timers of equal delay run in
     // order), which is the completion signal.
     let imeKeyPending = 0
+    let keySeq = 0 // keydowns seen (see onPrintableInput)
+    // The plain ASCII typed on this line, kept in the textarea as what
+    // precedes the caret. An emptied field reads to iOS input methods
+    // (WeType) as a sentence start: each next letter came up capitalised,
+    // autocapitalize="off" notwithstanding. While a claimed key is in flight
+    // the field is empty and this holds it: xterm's comparison then sees no
+    // change, whatever clears the field meanwhile (Enter, a paste). Chinese
+    // is not kept: as what precedes, it made WeType space the Latin text
+    // after it.
+    let ctx = ''
+    let ctxInField = false // the field holds ctx (put there by us)
+    // At a claimed key: empty the field before xterm takes it as the baseline
+    // of its comparison; ctx is put back with the key's text (see
+    // onPrintableInput). Anything else in it (a composition's text, what a
+    // key like ^U left) is dropped from the context. Not while a composition
+    // that ended waits to be sent: xterm reads it from the field once the
+    // input method is done with it, and the field is left as it is.
+    const stashCtx = () => {
+      if (!ta) return
+      if (core!._compositionHelper!._isSendingComposition !== false) {
+        ctx = ''
+        ctxInField = false
+        return
+      }
+      // (An empty field: a key is still in flight, or xterm emptied it.)
+      if (!(ctxInField && ta.value === ctx) && ta.value !== '') ctx = ''
+      ta.value = ''
+      ctxInField = false
+    }
     let lastKeyAlt = false // the last key was pressed with Option/Alt
     const onPrintableInput = (e: Event) => {
       const ie = e as InputEvent
@@ -1157,6 +1188,22 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
       if (start >= 0 && t.value.slice(start, end) === ie.data) {
         t.value = t.value.slice(0, start) + t.value.slice(end)
         t.selectionStart = t.selectionEnd = start
+        // The context goes back in, with plain ASCII added to it, once
+        // xterm's comparison for the key has run (its zero-delay timer was
+        // queued at keydown, before this one), unless a key, text or a
+        // composition came meanwhile (the next key's own puts it back).
+        if (t.value === '') {
+          if (latched()) ctx = '' // sent as a control key (^U, ^W…)
+          else if (/^[ -~]+$/.test(ie.data)) ctx += ie.data
+          const seq = keySeq
+          const gen = typedGen
+          setTimeout(() => {
+            if (seq !== keySeq || gen !== typedGen || composingRef.current() || t.value !== '') return
+            t.value = ctx
+            t.selectionStart = t.selectionEnd = ctx.length
+            ctxInField = true
+          }, 0)
+        }
       }
       term.input(ie.data, true)
     }
@@ -1176,7 +1223,8 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
       claim = null
     }
     composingRef.current = () => composing || (internalsOk && !!core!._compositionHelper!.isComposing)
-    forgetTypedRef.current = () => {
+    forgetTypedRef.current = (one) => {
+      ctx = one ? [...ctx].slice(0, -1).join('') : ''
       const gen = typedGen
       setTimeout(() => {
         // (Text that went in meanwhile, a whole composition even, may still
@@ -1185,7 +1233,13 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
         // Not while a 229 key's text is pending either (iOS, see claim): xterm
         // compares the textarea before and after it, and an emptied one reads
         // as a deletion (a stray DEL).
-        if (ta && !composingRef.current() && imeKeyPending === 0 && claim === null && ta.selectionStart === ta.selectionEnd) ta.value = ''
+        if (!ta || composingRef.current() || imeKeyPending !== 0 || claim !== null || ta.selectionStart !== ta.selectionEnd) return
+        // Backspace takes only the last character (from ctx, above, so a
+        // restore that ran meanwhile is not trimmed twice): an emptied field
+        // brings the next letter up capitalised (see ctx).
+        ta.value = ctx
+        ta.selectionStart = ta.selectionEnd = ctx.length
+        ctxInField = true
       }, 0)
     }
 
@@ -1196,6 +1250,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
     }
     let pasting = false // a paste being sent (xterm sends it while the event runs)
     const onPasteEv = () => {
+      ctx = '' // (xterm empties the field)
       typedChar = null
       pasting = true
       setTimeout(() => (pasting = false), 0)
@@ -1293,6 +1348,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
         return true
       }
       if (e.type !== 'keydown') return true
+      keySeq++
       if (e.isComposing || e.keyCode === 229) {
         claim = null
         lastKeyAlt = false
@@ -1304,6 +1360,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
         // taken back out of the textarea, so xterm's comparison finds nothing.
         if (!e.isComposing && !composing && internalsOk && !core!._compositionHelper!.isComposing && !term.options.screenReaderMode) {
           claim = IME_KEY
+          stashCtx() // before xterm takes the field's contents to compare
         }
         imeKeyPending++
         setTimeout(() => setTimeout(() => imeKeyPending--, 0), 0)
@@ -1314,12 +1371,14 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
         claim = null
         lastKeyAlt = e.altKey
       }
-      // A key that moves on (a newline, the cursor, a deletion) empties the
-      // textarea once xterm is done with the key. The text typed so far stays
-      // in it otherwise, and input methods take it as what precedes the
-      // caret: WeType then puts a space between that Chinese and the digits
-      // typed on a new line.
-      if (specialFor[e.key]) forgetTypedRef.current()
+      // A key that moves on (a newline, the cursor) empties the textarea once
+      // xterm is done with the key; Backspace takes its last character. The
+      // text typed so far stays in it otherwise, and input methods take it as
+      // what precedes the caret: WeType then puts a space between that
+      // Chinese and the digits typed on a new line.
+      // (With a modifier Backspace may take a word: the field is emptied.)
+      if (specialFor[e.key]) forgetTypedRef.current(e.key === 'Backspace' && !e.altKey && !e.ctrlKey && !e.metaKey && !latched())
+      else if ((e.ctrlKey || e.metaKey) && !modifierOnly) forgetTypedRef.current() // ^C, ^U…
       // Ctrl+V with an image on the clipboard uploads it and types its path,
       // as Claude Code and Codex do with a local clipboard (they cannot reach
       // this browser's). With no image, or no clipboard access, ^V goes to
@@ -1351,6 +1410,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
         // ended. If it says the key belongs to a composition, leave it to xterm.
         if (core!._compositionHelper!.keydown(e)) {
           claim = e.code
+          stashCtx()
           return false // no preventDefault: the browser (and input method) insert the text
         }
         return true
@@ -1821,9 +1881,10 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
       takeOverRef.current()
       settleRef.current()
       const term = termRef.current
-      outRef.current(specialKey(k, activeMods(), term?.modes.applicationCursorKeysMode ?? false, keysApartRef.current()))
+      const m = activeMods()
+      outRef.current(specialKey(k, m, term?.modes.applicationCursorKeysMode ?? false, keysApartRef.current()))
       releaseOnce()
-      forgetTypedRef.current()
+      forgetTypedRef.current(k === 'Backspace' && !m.ctrl && !m.alt)
     })
   // A custom key sends its own sequence; latched Ctrl/Alt do not apply to it.
   const sendSteps = (steps: Step[]) =>
