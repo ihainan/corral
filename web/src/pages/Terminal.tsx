@@ -38,7 +38,7 @@ import { adoptComposer, composerWasOpen, rememberComposer } from '../terminal/co
 import { promptSuggestion } from '../terminal/suggestion'
 import { agentKey, sessionWhich } from '../terminal/sessionName'
 import { ConversationView, type ConvoAgent, type ConvoListRow, type ConvoPending } from '../terminal/Conversation'
-import { isClaude, listAgents, paneTitle, useRunningSessions } from '../terminal/agents'
+import { isClaude, knownSession, listAgents, paneTitle, useRunningSessions } from '../terminal/agents'
 import { asking, convoWasOpen, rememberConvo, useConversation, type ConvoEntry } from '../terminal/conversation'
 import { useSession, VERSION_EVENT } from '../app'
 
@@ -289,7 +289,8 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
   const fileRef = useRef<HTMLInputElement>(null)
   const composerRef = useRef<HTMLTextAreaElement>(null)
 
-  const [info, setInfo] = useState<SessionInfo | null>(null)
+  // (Known at once when the list of agents had it: the conversation view shows without the terminal first.)
+  const [info, setInfo] = useState<SessionInfo | null>(() => (watch ? null : knownSession(id)))
   const [status, setStatus] = useState<Status>('connecting')
   const [latency, setLatency] = useState<number | null>(null)
   const [end, setEnd] = useState<EndInfo | null>(null)

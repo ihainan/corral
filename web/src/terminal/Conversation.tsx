@@ -337,6 +337,13 @@ export function ConversationView({
     return 0
   }, [convo.entries])
 
+  // Another conversation in front (another pane, another tab's): from its end.
+  useLayoutEffect(() => {
+    stuck.current = true
+    setAway(false)
+    const el = box.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [convo.of])
   // Before the new content is laid out, note whether the end was in view;
   // after, keep it there.
   useLayoutEffect(() => {

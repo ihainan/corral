@@ -85,9 +85,30 @@ export interface Convo {
   failing: boolean
   okAt: number
   changedAt: number // (ms) when an entry was last added or changed
+  of?: string // (the session and pane it is of: see kept)
 }
 
-const initial = (): Convo => ({ status: 'loading', entries: [], older: false, gen: 0, failing: false, okAt: 0, changedAt: Date.now() })
+const initial = (of?: string): Convo => ({ status: 'loading', entries: [], older: false, gen: 0, failing: false, okAt: 0, changedAt: Date.now(), of })
+
+// What was last read of a session's pane, for this page's life: shown at
+// once when it is in front again (its tab back to the front, the pane
+// focused again, a tab of it opened again), then brought up to date from
+// where it was. Without it, each switch drew "reading…" first: a flash.
+interface Kept {
+  gen: number
+  rev: number
+  byseq: Map<number, ConvoEntry>
+  convo?: Convo
+}
+const kept = new Map<string, Kept>()
+const KEEP = 12
+const keyOf = (session: string, pane?: string) => session + ' ' + (pane ?? '')
+function remember(key: string, gen: number, rev: number, byseq: Map<number, ConvoEntry>) {
+  const was = kept.get(key)
+  kept.delete(key) // (the latest last: the map keeps its order of use)
+  kept.set(key, { gen, rev, byseq, convo: was?.convo })
+  while (kept.size > KEEP) kept.delete(kept.keys().next().value!)
+}
 
 const sameBind = (a?: ConvoBind, b?: ConvoBind) =>
   a === b || (!!a && !!b && a.pane === b.pane && a.pid === b.pid && a.start === b.start && a.session === b.session && a.title === b.title)
@@ -97,7 +118,14 @@ const RETRY = 5000
 const MAX = 2000
 
 export function useConversation(sessionId: string, enabled: boolean, pane: string | undefined): Convo {
-  const [convo, setConvo] = useState<Convo>(initial)
+  const [convo, setConvo] = useState<Convo>(() => initial())
+  // (What shows is kept with where it was read up to.)
+  useEffect(() => {
+    if (convo.of && (convo.status === 'ready' || convo.status === 'none')) {
+      const k = kept.get(convo.of)
+      if (k) k.convo = convo
+    }
+  }, [convo])
   const paneRef = useRef(pane)
   paneRef.current = pane
   const poke = useRef<() => void>(() => {})
@@ -118,6 +146,7 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
       const mine = new AbortController()
       ctl = mine
       const pane = paneRef.current
+      const key = keyOf(sessionId, pane)
       const q = new URLSearchParams({ gen: String(gen), rev: String(rev) })
       if (pane) q.set('pane', pane)
       let next = POLL
@@ -133,10 +162,11 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
           rev = 0
           byseq = new Map()
           setConvo((c) =>
-            c.status === 'none' && c.reason === a.reason && c.gen === a.gen && sameBind(c.bind, a.bind) && !c.failing
+            c.of === key && c.status === 'none' && c.reason === a.reason && c.gen === a.gen && sameBind(c.bind, a.bind) && !c.failing
               ? c
-              : { ...initial(), status: 'none', reason: a.reason, gen: a.gen, bind: a.bind, okAt: now, changedAt: now },
+              : { ...initial(key), status: 'none', reason: a.reason, gen: a.gen, bind: a.bind, okAt: now, changedAt: now },
           )
+          remember(key, gen, rev, byseq)
         } else {
           const fresh = a.reset || a.gen !== gen
           if (fresh) byseq = new Map()
@@ -156,9 +186,10 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
           setConvo((c) => {
             const older = !!a.older || (entries ?? c.entries).length === MAX
             const tasks = a.tasks?.length ? (JSON.stringify(a.tasks) === JSON.stringify(c.tasks) ? c.tasks : a.tasks) : undefined
-            if (!entries && c.status === 'ready' && c.gen === a.gen && c.older === older && sameBind(c.bind, a.bind) && c.agentStatus === a.agent_status && c.title === a.title && c.tasks === tasks && !c.failing) return c
-            return { status: 'ready', entries: entries ?? c.entries, older, gen: a.gen, bind: a.bind, agentStatus: a.agent_status, title: a.title || undefined, tasks, failing: false, okAt: now, changedAt: entries ? now : c.changedAt }
+            if (!entries && c.of === key && c.status === 'ready' && c.gen === a.gen && c.older === older && sameBind(c.bind, a.bind) && c.agentStatus === a.agent_status && c.title === a.title && c.tasks === tasks && !c.failing) return c
+            return { status: 'ready', entries: entries ?? c.entries, older, gen: a.gen, bind: a.bind, agentStatus: a.agent_status, title: a.title || undefined, tasks, failing: false, okAt: now, changedAt: entries ? now : c.changedAt, of: key }
           })
+          remember(key, gen, rev, byseq)
           if (a.more) next = 300
         }
       } catch (e) {
@@ -173,21 +204,36 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
     const onVisible = () => {
       if (!document.hidden && !timer && !ctl) void run()
     }
+    // What shows first of the pane in front: what was last read of it, if
+    // anything (its entries as read up to where reading goes on from), else
+    // "reading". Nothing of another pane shows meanwhile.
+    const begin = () => {
+      const key = keyOf(sessionId, paneRef.current)
+      const was = kept.get(key)
+      if (was?.convo) {
+        gen = was.gen
+        rev = was.rev
+        byseq = new Map(was.byseq)
+        const entries = was.convo.status === 'ready' ? [...byseq.values()].sort((x, y) => x.seq - y.seq) : []
+        setConvo({ ...was.convo, entries, gen, failing: false, of: key, changedAt: Date.now() })
+      } else {
+        gen = 0
+        rev = 0
+        byseq = new Map()
+        setConvo(initial(key))
+      }
+    }
     // Another pane in front: what is on its way is for the old one.
     poke.current = () => {
       clearTimeout(timer)
       timer = undefined
       ctl?.abort()
       ctl = null
-      // (Nothing of the pane that was in front shows meanwhile.)
-      gen = 0
-      rev = 0
-      byseq = new Map()
-      setConvo(initial())
+      begin()
       void run()
     }
     document.addEventListener('visibilitychange', onVisible)
-    setConvo(initial())
+    begin()
     void run()
     return () => {
       stopped = true

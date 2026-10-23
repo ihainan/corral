@@ -53,8 +53,15 @@ export function listAgents(sessions: SessionInfo[]): { rows: AgentRow[]; others:
 
 // The running sessions, polled while on and the page is visible (one
 // request at a time). null until the first answer.
+// (The last list read, for this page's life: a tab opened later starts from
+// it rather than from nothing, so its list does not appear a moment later.)
+let lastList: SessionInfo[] | null = null
+
+// A session as the last list read has it (null when it has none).
+export const knownSession = (id: string): SessionInfo | null => lastList?.find((x) => x.id === id) ?? null
+
 export function useRunningSessions(on: boolean, every = 3000): { sessions: SessionInfo[] | null; failed: boolean } {
-  const [sessions, setSessions] = useState<SessionInfo[] | null>(null)
+  const [sessions, setSessions] = useState<SessionInfo[] | null>(() => lastList)
   const [failed, setFailed] = useState(false)
   useEffect(() => {
     if (!on) return
@@ -68,7 +75,8 @@ export function useRunningSessions(on: boolean, every = 3000): { sessions: Sessi
       api<SessionInfo[]>('GET', '/api/sessions')
         .then((l) => {
           if (stopped) return
-          setSessions(l.filter((x) => x.state === 'running'))
+          lastList = l.filter((x) => x.state === 'running')
+          setSessions(lastList)
           setFailed(false)
         })
         .catch(() => !stopped && setFailed(true))
