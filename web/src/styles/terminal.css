@@ -402,39 +402,89 @@ html.term-dark .overlay, html.term-dark .menu, html.term-dark .toast {
 .md-code { position: relative; background: var(--term-chrome); border: 1px solid var(--term-line); border-radius: 8px; }
 .md-code pre { margin: 0; padding: 10px 12px; overflow-x: auto; font-family: var(--font-mono); font-size: 13px; line-height: 1.55; }
 .convo-md .md-code code { background: none; padding: 0; font-size: inherit; }
-.md-code-copy {
-  position: absolute; top: 4px; right: 4px; border: 0; border-radius: 5px; padding: 2px 7px; cursor: pointer;
-  background: var(--term-chrome); color: var(--term-fg-3); font: 12px/18px var(--font-ui);
+.md-code-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 28px;
+  padding: 2px 4px 2px 12px; border-bottom: 1px solid var(--term-line); font: 12px/18px var(--font-ui); color: var(--term-fg-3);
 }
+.md-code-lang { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.md-code-copy {
+  border: 0; border-radius: 5px; padding: 2px 7px; cursor: pointer;
+  background: none; color: var(--term-fg-3); font: 12px/18px var(--font-ui);
+}
+.convo-pre-wrap .md-code-copy { position: absolute; top: 4px; right: 4px; background: var(--term-chrome); }
 .md-code-copy:hover { color: var(--term-fg); background: var(--term-hover); }
 .md-table { overflow-x: auto; }
 .md-table table { border-collapse: collapse; font-size: 14px; line-height: 1.5; }
 .md-table th, .md-table td { text-align: left; padding: 6px 12px 6px 0; border-bottom: 1px solid var(--term-line); vertical-align: top; }
 .md-table th { font-weight: 600; color: var(--term-fg-2); white-space: nowrap; }
 
-.convo-steps { border: 1px solid var(--term-line); border-radius: 10px; min-width: 0; }
-.convo-steps-head, .convo-tool-head {
-  width: 100%; display: flex; align-items: flex-start; gap: 8px; border: 0; background: none; color: inherit;
-  text-align: left; cursor: pointer; font: inherit;
+/* A turn's work: one grey line, opened to a line a step (no cards) */
+.convo-work { display: flex; flex-direction: column; min-width: 0; }
+.convo-work-head, .convo-step-head {
+  display: flex; align-items: baseline; gap: 6px; max-width: 100%; border: 0; background: none; padding: 2px 0;
+  color: var(--term-fg-3); text-align: left; cursor: pointer; font: inherit; font-size: 14px; line-height: 1.55;
 }
-.convo-steps-head { padding: 8px 12px; border-radius: 10px; }
-.convo-steps-head:hover, .convo-tool-head:hover { background: var(--term-hover); }
-.convo-steps-head:focus-visible, .convo-tool-head:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: -2px; }
-.convo-chev { flex: none; margin-top: 4px; color: var(--term-fg-3); transition: transform 0.15s var(--ease); }
+.convo-work-head { align-self: flex-start; }
+.convo-work-head:hover, .convo-step-head:hover { color: var(--term-fg); }
+.convo-work-head:focus-visible, .convo-step-head:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: 2px; border-radius: 4px; }
+.convo-chev { flex: none; align-self: center; color: inherit; transition: transform 0.15s var(--ease); }
 [aria-expanded='true'] > .convo-chev { transform: rotate(90deg); }
-.convo-steps-text { min-width: 0; display: flex; flex-direction: column; }
-.convo-steps-label { font-size: 14px; font-weight: 500; }
-.convo-steps-sub { font-size: 13px; color: var(--term-fg-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.convo-work-text { min-width: 0; }
 .convo-failed { margin-left: 8px; font-size: 12.5px; font-weight: 500; color: var(--term-danger-text); }
 .convo-running { margin-left: 8px; font-size: 12.5px; color: var(--term-fg-3); }
-.convo-steps-body { border-top: 1px solid var(--term-line); padding: 4px 0; }
-.convo-tool-head { padding: 6px 12px; font-size: 13.5px; line-height: 1.5; align-items: baseline; }
-.convo-tool-icon { flex: none; align-self: center; color: var(--term-fg-3); }
-.convo-tool-name { flex: none; font-family: var(--font-mono); font-size: 12.5px; color: var(--term-fg); }
-.convo-tool-sub { min-width: 0; flex: 1; color: var(--term-fg-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.convo-tool.is-error .convo-tool-name { color: var(--term-danger-text); }
-.convo-tool-body, .convo-thinking { padding: 2px 12px 10px 34px; }
+.convo-work-body { display: flex; flex-direction: column; gap: 1px; padding: 4px 0 2px 21px; }
+.convo-step { display: flex; flex-direction: column; min-width: 0; }
+.convo-step-head { width: 100%; color: var(--term-fg-2); }
+.convo-step-verb { flex: none; color: var(--term-fg); font-weight: 500; }
+.convo-step-obj { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.convo-step-obj.is-code { font-family: var(--font-mono); font-size: 12.5px; }
+.convo-step.is-error .convo-step-verb { color: var(--term-danger-text); }
+.convo-step-body, .convo-thinking { padding: 4px 0 10px; }
 .convo-thinking { white-space: pre-wrap; font-size: 13.5px; color: var(--term-fg-2); }
+.convo-mid { margin: 4px 0 6px; font-size: 14px; color: var(--term-fg-2); }
+.convo-work-body > .convo-note { margin: 4px 0; }
+.convo-lines { flex: none; display: inline-flex; gap: 5px; font-family: var(--font-mono); font-size: 12.5px; }
+.convo-lines-add { color: var(--term-ok-text); }
+.convo-lines-del { color: var(--term-danger-text); }
+.convo-live { display: flex; align-items: baseline; gap: 8px; margin: 4px 0 0 21px; font-size: 14px; min-width: 0; }
+.convo-shimmer {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  background: linear-gradient(90deg, var(--term-fg-3) 0%, var(--term-fg) 50%, var(--term-fg-3) 100%) 0 0 / 200% 100%;
+  -webkit-background-clip: text; background-clip: text; color: transparent; animation: convo-shimmer 1.8s linear infinite;
+}
+@keyframes convo-shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+.convo-live-time { flex: none; color: var(--term-fg-3); font-size: 13px; font-variant-numeric: tabular-nums; }
+.convo-spin {
+  display: inline-block; width: 11px; height: 11px; margin-right: 6px; vertical-align: -1px; border-radius: 50%;
+  border: 1.5px solid var(--term-line); border-top-color: var(--term-accent-text); animation: convo-spin 0.9s linear infinite;
+}
+@keyframes convo-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .convo-shimmer { animation: none; background: none; color: var(--term-fg-2); }
+  .convo-spin { animation: none; }
+}
+
+/* The answer: what changed, copy and when */
+.convo-answer { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.convo-changes {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 40px;
+  padding: 4px 6px 4px 12px; border: 1px solid var(--term-line); border-radius: 10px; font-size: 14px;
+}
+.convo-changes .convo-lines { margin-left: 4px; }
+.convo-changes-see { flex: none; height: 30px; padding: 0 10px; font-size: 13px; }
+
+/* The task list, over the composer */
+.convo-tasks {
+  flex: none; margin: 0 auto 8px; width: min(780px, calc(100% - 24px)); padding: 6px 12px; font-size: 13.5px;
+  border: 1px solid var(--term-line); border-radius: 10px; background: var(--term-chrome);
+}
+.convo-tasks-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; width: 100%; border: 0; background: none; padding: 2px 0; color: var(--term-fg-2); font: inherit; text-align: left; cursor: pointer; }
+.convo-tasks-head:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: 2px; border-radius: 4px; }
+.convo-tasks-sum { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.convo-tasks-toggle { flex: none; color: var(--term-fg-3); }
+.convo-tasks-list { margin: 4px 0 2px; padding-left: 1.5em; max-height: 30vh; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
+.convo-tasks-list .is-completed { color: var(--term-fg-3); text-decoration: line-through; }
+.convo-tasks-list .is-in_progress { color: var(--term-fg); font-weight: 500; }
 .convo-pre-wrap { position: relative; }
 .convo-pre {
   margin: 0; padding: 8px 10px; border-radius: 6px; background: var(--term-chrome); border: 1px solid var(--term-line);
@@ -448,7 +498,7 @@ html.term-dark .overlay, html.term-dark .menu, html.term-dark .toast {
 .convo-del { background: color-mix(in srgb, #e5534b 16%, transparent); }
 .convo-add { background: color-mix(in srgb, #3fa45b 16%, transparent); }
 .convo-more { color: var(--term-fg-3); }
-.convo-tool-body .link-btn { margin-top: 4px; font-size: 13px; }
+.convo-step-body .link-btn { margin-top: 4px; font-size: 13px; }
 .convo-summary summary { cursor: pointer; font-size: 13.5px; color: var(--term-fg-2); }
 .convo-summary .convo-md { margin-top: 8px; color: var(--term-fg-2); font-size: 14px; }
 
@@ -459,12 +509,14 @@ html.term-dark .overlay, html.term-dark .menu, html.term-dark .toast {
   box-shadow: 0 6px 18px rgba(0, 0, 0, 0.16); font: 13px/18px var(--font-ui);
 }
 @media (prefers-reduced-motion: reduce) { .convo-chev { transition: none; } }
+.convo-bar-where { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--term-fg-3); margin-left: 6px; }
+@media (max-width: 640px) { .convo-bar-where { display: none; } }
 .convo-bar {
   flex: none; display: flex; align-items: baseline; gap: 12px; min-width: 0;
   padding: 7px max(16px, env(safe-area-inset-right, 0px)) 7px max(16px, env(safe-area-inset-left, 0px));
   border-bottom: 1px solid var(--term-line); background: var(--term-bg); font-size: 13px; line-height: 18px;
 }
-.convo-bar-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--term-fg-2); }
+.convo-bar-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--term-fg); font-weight: 600; }
 .convo-bar-status { flex: none; color: var(--term-fg-3); font-variant-numeric: tabular-nums; }
 .convo-bar-status.is-blocked { color: var(--term-accent-text); font-weight: 600; }
 .convo-waiting {

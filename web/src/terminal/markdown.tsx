@@ -76,10 +76,16 @@ function blocks(lines: string[], copy: Copy, depth: number): ReactNode[] {
       const body = code.join('\n')
       out.push(
         <div className="md-code" key={out.length}>
-          {copy && (
-            <button type="button" className="md-code-copy" onClick={() => copy.fn(body)} aria-label={lang ? `${copy.label} (${lang})` : copy.label}>
-              {copy.label}
-            </button>
+          {/* (A bar of its own: the button covers none of the code.) */}
+          {(copy || lang) && (
+            <div className="md-code-head">
+              <span className="md-code-lang">{lang}</span>
+              {copy && (
+                <button type="button" className="md-code-copy" onClick={() => copy.fn(body)} aria-label={lang ? `${copy.label} (${lang})` : copy.label}>
+                  {copy.label}
+                </button>
+              )}
+            </div>
           )}
           <pre>
             <code>{body}</code>

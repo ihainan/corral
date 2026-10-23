@@ -56,6 +56,11 @@ type Tool struct {
 	Old    string `json:"old,omitempty"`
 	New    string `json:"new,omitempty"`
 
+	// Add and Del count the lines an edit added and removed: from what
+	// Claude Code reported of the edit made, else from its input.
+	Add int `json:"add,omitempty"`
+	Del int `json:"del,omitempty"`
+
 	Done        bool   `json:"done,omitempty"`
 	Error       bool   `json:"error,omitempty"`
 	Result      string `json:"result,omitempty"`
@@ -70,4 +75,13 @@ const (
 	maxResult = 6 << 10  // a tool's result
 	maxParts  = 64       // parts of one entry
 	maxID     = 128
+	maxTasks  = 50  // tasks of a task list
+	maxTitle  = 300 // the session's title, a task's subject
 )
+
+// Task is one item of the agent's task list (TodoWrite, or TaskCreate and
+// TaskUpdate), as it stands.
+type Task struct {
+	Subject string `json:"subject"`
+	Status  string `json:"status"` // pending, in_progress, completed
+}

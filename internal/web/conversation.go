@@ -318,8 +318,12 @@ type convoAnswer struct {
 	Bind      *convoBind `json:"bind,omitempty"`
 	// AgentStatus (tmux, where herdr does not say): "busy" or "idle" as
 	// Claude Code's file for the process says; absent when not known.
-	AgentStatus string        `json:"agent_status,omitempty"`
-	Entries     []convo.Entry `json:"entries"`
+	AgentStatus string `json:"agent_status,omitempty"`
+	// Title is the session's own (Claude Code's, or the person's);
+	// Tasks the agent's task list as the log has it.
+	Title   string        `json:"title,omitempty"`
+	Tasks   []convo.Task  `json:"tasks,omitempty"`
+	Entries []convo.Entry `json:"entries"`
 }
 
 // GET /api/sessions/{id}/conversation?pane=<herdr pane>&gen=<n>&rev=<n>
@@ -385,6 +389,7 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 		rev = 0
 	}
 	ans.Entries = st.parser.Since(rev)
+	ans.Title, ans.Tasks = st.parser.Title(), st.parser.Tasks()
 	writeJSON(w, http.StatusOK, ans)
 }
 

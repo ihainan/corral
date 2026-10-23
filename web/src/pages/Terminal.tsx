@@ -528,7 +528,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
     if (info?.persistence !== 'herdr') {
       if (!convo.bind) return null
       const st = status === 'open' && !convo.failing && convo.agentStatus
-      return { title: convo.bind.title, status: st === 'busy' ? 'working' : st === 'idle' ? 'idle' : 'unknown' }
+      return { title: convo.title || convo.bind.title, status: st === 'busy' ? 'working' : st === 'idle' ? 'idle' : 'unknown' }
     }
     const claude = (name?: string) => !!name && /claude/i.test(name)
     if (!convoHit) {
@@ -537,8 +537,10 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
     }
     const st = convoHit.a.status
     const known = herdrCurrent && (st === 'working' || st === 'blocked' || st === 'done' || st === 'idle')
-    return { where: convoHit.ws, title: convoHit.a.title, status: known ? st : 'unknown', other: claude(convoHit.a.agent) ? undefined : convoHit.a.agent }
-  }, [info?.persistence, convo.bind, convo.agentStatus, convo.failing, status, convoHit, herdrCurrent, herdr?.focused_agent])
+    // (The session's own title, when the log read is of this pane's agent.)
+    const title = (convo.bind?.pane === convoHit.a.pane_id && convo.title) || convoHit.a.title
+    return { where: convoHit.ws, title, status: known ? st : 'unknown', other: claude(convoHit.a.agent) ? undefined : convoHit.a.agent }
+  }, [info?.persistence, convo.bind, convo.agentStatus, convo.failing, convo.title, status, convoHit, herdrCurrent, herdr?.focused_agent])
   // Waiting for an answer, in the pane the conversation is of and in front.
   const convoWaits =
     convo.status === 'ready' && !!convo.bind && !!convoHit && convoHit.a.pane_id === convo.bind.pane && convoHit.a.pane_id === herdr?.focused_pane &&
@@ -2852,7 +2854,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
             <div className="composer">
               {showConvo && convoAgent && (convoAgent.title || convoAgent.where) && (
                 // (Where a message goes: the pane in front, which the conversation follows.)
-                <div className="composer-to">{t('convo.to', { name: [convoAgent.where, convoAgent.title].filter(Boolean).join(' · ') })}</div>
+                <div className="composer-to">{t('convo.to', { name: [convoAgent.title, convoAgent.where].filter(Boolean).join(' · ') })}</div>
               )}
               {completion.list}
               <div className="composer-box">

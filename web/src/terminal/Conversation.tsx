@@ -1,46 +1,105 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { ArrowDown, Bot, ChevronDown, ChevronRight, FilePen, FileText, Globe, Search, SquareTerminal, Wrench } from 'lucide-react'
+import { ArrowDown, ChevronDown, ChevronRight } from 'lucide-react'
 import { t, getLang, type I18nKey } from '../i18n'
 import { copyText, Menu, type MenuItem } from '../components/ui'
 import { Markdown } from './markdown'
-import type { Convo, ConvoEntry, ConvoPart, ConvoTool } from './conversation'
+import type { Convo, ConvoEntry, ConvoPart, ConvoTask, ConvoTool } from './conversation'
 
 // The conversation view: the agent's log as turns, over the terminal (which
-// stays mounted under it). What the person wrote, the agent's answers as
-// formatted text, and the tools it ran between them folded into one line
-// per run of calls, opened on demand. Messages are still typed in the
-// composer or the terminal: the view only reads.
+// stays mounted under it). Each turn is what the person wrote, then one line
+// for all the agent did meanwhile ("worked for 2m 14s", opened on demand:
+// a grey line a step), then its answer with what it changed. While it
+// works, the turn's steps show as they come, the one under way last.
+// Messages are still typed in the composer or the terminal: the view only
+// reads.
+
+// What a turn's work holds: its steps, the text it wrote between them, the
+// notes that came meanwhile.
+type Step = ConvoPart | ConvoEntry
 
 type Item =
   | { kind: 'user'; e: ConvoEntry }
   | { kind: 'note'; e: ConvoEntry }
   | { kind: 'summary'; e: ConvoEntry }
-  | { kind: 'text'; key: string; text: string; truncated?: boolean }
-  | { kind: 'steps'; key: string; parts: ConvoPart[] }
+  | { kind: 'work'; key: string; steps: Step[]; from?: string; to?: string; live: boolean }
+  | { kind: 'answer'; key: string; text: string; truncated?: boolean; ts?: string; work?: string; edits: Edits | null }
 
-function items(entries: ConvoEntry[]): Item[] {
+interface Edits {
+  files: number
+  add: number
+  del: number
+}
+
+// When each part was written (its entry's time).
+const partTime = new WeakMap<ConvoPart, string>()
+
+// items groups the entries by turn. live: the agent is at work on the last
+// turn, so all of it is work (its answer is the text it ends with).
+function items(entries: ConvoEntry[], live: boolean): Item[] {
   const out: Item[] = []
-  let steps: ConvoPart[] | null = null
+  let turn: { from?: string; steps: Step[]; to?: string; key: string } | null = null
+  const end = (last: boolean) => {
+    if (!turn) return
+    const steps = turn.steps
+    turn.steps = []
+    let answer = -1
+    if (!(last && live)) for (let i = steps.length - 1; i >= 0 && answer < 0; i--) if (isText(steps[i])) answer = i
+    const work = steps.filter((s, i) => i !== answer && !isTaskCall(s))
+    const doing = work.some((s) => !isNote(s))
+    const key = turn.key
+    if (doing) out.push({ kind: 'work', key, steps: work, from: turn.from, to: turn.to, live: last && live })
+    else for (const s of work) out.push(isNote(s) ? { kind: 'note', e: s } : { kind: 'answer', key: key + '.' + out.length, text: (s as ConvoPart).text ?? '', edits: null })
+    if (answer >= 0) {
+      const p = steps[answer] as ConvoPart
+      out.push({ kind: 'answer', key: key + '.a', text: p.text ?? '', truncated: p.truncated, ts: partTime.get(p), work: doing ? key : undefined, edits: edits(work) })
+    }
+    turn = null
+  }
+  const start = (key: string, from?: string) => {
+    turn = { key, from, steps: [] }
+  }
   for (const e of entries) {
-    if (e.role !== 'assistant') {
-      steps = null
+    if (e.role === 'user' || e.role === 'summary') {
+      end(false)
       out.push({ kind: e.role, e } as Item)
+      start('t' + e.seq, e.role === 'user' ? e.ts : undefined)
       continue
     }
-    e.parts.forEach((p, i) => {
-      if (p.kind === 'text') {
-        steps = null
-        out.push({ kind: 'text', key: `${e.seq}.${i}`, text: p.text ?? '', truncated: p.truncated })
-      } else if (p.kind === 'tool' || p.kind === 'thinking') {
-        if (!steps) {
-          steps = []
-          out.push({ kind: 'steps', key: `${e.seq}.${i}`, parts: steps })
-        }
-        steps.push(p)
-      }
-    })
+    if (!turn) start('t' + e.seq) // (the log read begins mid-turn)
+    const tr = turn!
+    if (e.ts) tr.to = e.ts
+    if (e.role === 'note') {
+      tr.steps.push(e)
+      continue
+    }
+    for (const p of e.parts) {
+      if (p.kind === 'image') continue
+      if (e.ts) partTime.set(p, e.ts)
+      tr.steps.push(p)
+    }
   }
+  end(true)
   return out
+}
+
+const isNote = (s: Step): s is ConvoEntry => 'role' in s
+// The task list's own calls: it shows over the composer, not as steps.
+const isTaskCall = (s: Step) => !isNote(s) && !!s.tool && verbOf(s.tool.name) === 'task'
+
+const isText = (s: Step) => !isNote(s) && s.kind === 'text'
+
+function edits(steps: Step[]): Edits | null {
+  const files = new Set<string>()
+  let add = 0
+  let del = 0
+  for (const s of steps) {
+    const tl = !isNote(s) ? s.tool : undefined
+    if (!tl || tl.error || category(tl.name) !== 'edit') continue
+    files.add(tl.detail ?? '')
+    add += tl.add ?? 0
+    del += tl.del ?? 0
+  }
+  return files.size ? { files: files.size, add, del } : null
 }
 
 type Category = 'cmd' | 'read' | 'edit' | 'search' | 'web' | 'agent' | 'other'
@@ -71,7 +130,15 @@ function category(name: string): Category {
   return 'other'
 }
 
-const icons: Record<Category, typeof Wrench> = { cmd: SquareTerminal, read: FileText, edit: FilePen, search: Search, web: Globe, agent: Bot, other: Wrench }
+// The word a step's line starts with: what it did, or (live) does.
+type Verb = Category | 'write' | 'task' | 'ask'
+function verbOf(name: string): Verb | null {
+  if (name === 'Write') return 'write'
+  if (name === 'TaskCreate' || name === 'TaskUpdate' || name === 'TodoWrite') return 'task'
+  if (name === 'AskUserQuestion') return 'ask'
+  const c = category(name)
+  return c === 'other' ? null : c
+}
 
 function count(cat: Category, n: number): string {
   return t(`convo.n.${cat}${n === 1 ? '1' : ''}` as I18nKey, { n })
@@ -81,7 +148,7 @@ function count(cat: Category, n: number): string {
 // it is doing (unknown when that cannot be trusted now).
 export interface ConvoAgent {
   where?: string // herdr: the workspace
-  title?: string // the pane's title (Claude Code sets it to the task)
+  title?: string // the session's title (Claude Code's own), else the pane's
   status: 'working' | 'blocked' | 'done' | 'idle' | 'unknown'
   other?: string // the program in the pane, when it is not Claude Code
 }
@@ -96,6 +163,31 @@ export interface ConvoPending {
 }
 
 const HINT_AFTER = 20000 // working with nothing new this long: say why
+
+// A duration as the view says it: 45 s, 2 min 14 s, 1 h 5 min.
+export function duration(ms: number): string {
+  const s = Math.max(0, Math.round(ms / 1000))
+  if (s < 60) return t('convo.dur.s', { s })
+  if (s < 3600) return t('convo.dur.ms', { m: Math.floor(s / 60), s: s % 60 })
+  return t('convo.dur.hm', { h: Math.floor(s / 3600), m: Math.floor((s % 3600) / 60) })
+}
+
+const ms = (ts?: string) => {
+  const v = ts ? Date.parse(ts) : NaN
+  return isNaN(v) ? 0 : v
+}
+
+// Now, every second while on: for what counts up.
+function useTick(on: boolean): number {
+  const [now, setNow] = useState(Date.now())
+  useEffect(() => {
+    if (!on) return
+    setNow(Date.now())
+    const timer = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(timer)
+  }, [on])
+  return now
+}
 
 export function ConversationView({
   convo,
@@ -120,42 +212,52 @@ export function ConversationView({
   onShowTerminal: () => void
   onCopied: () => void
 }) {
-  const list = useMemo(() => items(convo.entries), [convo.entries])
+  const working = agent?.status === 'working'
+  const list = useMemo(() => items(convo.entries, working), [convo.entries, working])
   const box = useRef<HTMLDivElement>(null)
   const stuck = useRef(true) // following the end
   const [away, setAway] = useState(false)
   const copiedRef = useRef(onCopied)
   copiedRef.current = onCopied
   const copy = useCallback((s: string) => void copyText(s).then((ok) => ok && copiedRef.current()), [])
-  const working = agent?.status === 'working'
+  // A turn's work opened or closed by hand (else: open while it goes on).
+  const [opened, setOpened] = useState<Record<string, boolean>>({})
+  const toggle = useCallback((key: string, open: boolean) => setOpened((o) => ({ ...o, [key]: open })), [])
+  const show = useCallback(
+    (key: string) => {
+      toggle(key, true)
+      requestAnimationFrame(() => box.current?.querySelector(`[data-work="${key}"]`)?.scrollIntoView({ block: 'start', behavior: 'smooth' }))
+    },
+    [toggle],
+  )
 
   // While it works, look again now and then whether nothing came for long:
   // counted from the last change, the start of this work, or coming back to
   // the page, whichever is latest.
-  const [now, setNow] = useState(Date.now())
   const [since, setSince] = useState(Date.now())
   useEffect(() => {
     if (!working) return
     setSince(Date.now())
-    setNow(Date.now())
-    const timer = setInterval(() => setNow(Date.now()), 5000)
     const onVisible = () => {
       if (!document.hidden) setSince(Date.now())
     }
     document.addEventListener('visibilitychange', onVisible)
-    return () => {
-      clearInterval(timer)
-      document.removeEventListener('visibilitychange', onVisible)
-    }
+    return () => document.removeEventListener('visibilitychange', onVisible)
   }, [working])
+  const now = useTick(working)
   const quiet = working && now - Math.max(convo.changedAt, since) > HINT_AFTER
+  // How long this turn has gone on: from the last thing the person wrote.
+  const lastUser = useMemo(() => {
+    for (let i = convo.entries.length - 1; i >= 0; i--) if (convo.entries[i].role === 'user') return ms(convo.entries[i].ts)
+    return 0
+  }, [convo.entries])
 
   // Before the new content is laid out, note whether the end was in view;
   // after, keep it there.
   useLayoutEffect(() => {
     const el = box.current
     if (el && stuck.current) el.scrollTop = el.scrollHeight
-  }, [list, pending, working, quiet])
+  }, [list, pending, working, quiet, convo.tasks])
   useEffect(() => {
     const el = box.current
     if (!el) return
@@ -193,7 +295,14 @@ export function ConversationView({
       <>
         {convo.older && <p className="convo-older">{t('convo.older')}</p>}
         {list.map((it) => (
-          <ListItem key={it.kind === 'text' || it.kind === 'steps' ? it.key : it.e.seq} it={it} copy={copy} />
+          <ListItem
+            key={it.kind === 'work' || it.kind === 'answer' ? it.key : it.e.seq}
+            it={it}
+            copy={copy}
+            open={it.kind === 'work' ? (opened[it.key] ?? it.live) : false}
+            onToggle={toggle}
+            onShow={show}
+          />
         ))}
         {pending.map((p) => (
           <div key={p.id} className="convo-user convo-pending">
@@ -206,29 +315,26 @@ export function ConversationView({
             </div>
           </div>
         ))}
-        {working && (
-          <p className="convo-working">
-            {t('convo.working')}
-            {quiet && <> {t('convo.quiet')}</>}
-          </p>
-        )}
+        {working && quiet && <p className="convo-working">{t('convo.quiet')}</p>}
       </>
     )
 
-  const status = agent ? t(`convo.status.${agent.status}` as I18nKey) : ''
-  const name = agent ? [agent.where, agent.title].filter(Boolean).join(' · ') : ''
+  let status = agent ? t(`convo.status.${agent.status}` as I18nKey) : ''
+  if (working && lastUser && now >= lastUser) status = t('convo.workingFor', { d: duration(now - lastUser) })
+  const name = agent ? [agent.title, agent.where].filter(Boolean) : []
   // The list to go to is taken when it opens: statuses changing meanwhile
   // do not move its rows under the finger.
   const listed = useRef<MenuItem[]>([])
   const label = (
     <>
-      <span className="convo-bar-name">{name || t('convo.title')}</span>
+      <span className="convo-bar-name">{name[0] || t('convo.title')}</span>
+      {name[1] && <span className="convo-bar-where">{name[1]}</span>}
       {agents && <ChevronDown size={14} className="convo-bar-chev" aria-hidden="true" />}
     </>
   )
   return (
     <div className="convo" role="region" aria-label={t('convo.title')}>
-      {(name || status || convo.failing || agents) && (
+      {(name.length > 0 || status || convo.failing || agents) && (
         <div className="convo-bar">
           {agents ? (
             <Menu
@@ -253,6 +359,7 @@ export function ConversationView({
             <span className="convo-bar-pick is-static">{label}</span>
           )}
           <span className={'convo-bar-status' + (agent?.status === 'blocked' ? ' is-blocked' : '')}>
+            {working && !convo.failing && !stop && <span className="convo-spin" aria-hidden="true" />}
             {convo.failing ? t('convo.paused', { time: clockMs(convo.okAt) }) : stop || status}
           </span>
           {onStop && (
@@ -278,6 +385,7 @@ export function ConversationView({
           {t('convo.latest')}
         </button>
       )}
+      {convo.status === 'ready' && convo.tasks && <Tasks tasks={convo.tasks} />}
       {onReply && (
         <div className="convo-waiting" role="status">
           <span>{t('convo.waiting')}</span>
@@ -288,48 +396,79 @@ export function ConversationView({
   )
 }
 
+// The agent's task list, over the composer while some of it is left: one
+// line (how far, what now) that opens to all of it. Folded at first on a
+// small screen, where the thread needs the room.
+function Tasks({ tasks }: { tasks: ConvoTask[] }) {
+  const [open, setOpen] = useState(() => !matchMedia('(max-width: 640px)').matches)
+  const done = tasks.filter((x) => x.status === 'completed').length
+  if (done === tasks.length) return null
+  const now = tasks.find((x) => x.status === 'in_progress')
+  const next = now ?? tasks.find((x) => x.status !== 'completed')
+  return (
+    <div className="convo-tasks">
+      <button type="button" className="convo-tasks-head" aria-expanded={open} onClick={() => setOpen(!open)}>
+        <span className="convo-tasks-sum">
+          {t('convo.tasks', { done, n: tasks.length })}
+          {!open && next && <> · {t(now ? 'convo.taskNow' : 'convo.taskNext', { s: next.subject })}</>}
+        </span>
+        <span className="convo-tasks-toggle">{t(open ? 'convo.tasksHide' : 'convo.tasksShow')}</span>
+      </button>
+      {open && (
+        <ol className="convo-tasks-list">
+          {tasks.map((x, i) => (
+            <li key={i} className={'is-' + x.status}>{x.subject}</li>
+          ))}
+        </ol>
+      )}
+    </div>
+  )
+}
+
 // One item of the list. Memoised: a poll that changed one entry renders
 // that one (the others keep their objects, see conversation.ts).
-const ListItem = memo(function ListItem({ it, copy }: { it: Item; copy: (s: string) => void }) {
-  switch (it.kind) {
-    case 'user':
-      return <UserTurn e={it.e} onCopy={copy} />
-    case 'note':
-      return <p className="convo-note">{it.e.parts.map((p) => p.text).join(' ')}</p>
-    case 'summary':
-      return (
-        <details className="convo-summary">
-          <summary>{t('convo.summary')}</summary>
-          <div className="convo-md">
-            <Markdown text={it.e.parts[0]?.text ?? ''} />
-          </div>
-        </details>
-      )
-    case 'text':
-      return (
-        <div className="convo-md">
-          <Markdown text={it.text} onCopyCode={copy} copyLabel={t('common.copy')} />
-          {it.truncated && <p className="convo-cut">{t('convo.cut')}</p>}
-        </div>
-      )
-    case 'steps':
-      return <Steps parts={it.parts} onCopy={copy} />
-  }
-}, (a, b) => a.copy === b.copy && sameItem(a.it, b.it))
+const ListItem = memo(
+  function ListItem({ it, copy, open, onToggle, onShow }: { it: Item; copy: (s: string) => void; open: boolean; onToggle: (key: string, open: boolean) => void; onShow: (key: string) => void }) {
+    switch (it.kind) {
+      case 'user':
+        return <UserTurn e={it.e} onCopy={copy} />
+      case 'note':
+        return <p className="convo-note">{noteText(it.e)}</p>
+      case 'summary':
+        return (
+          <details className="convo-summary">
+            <summary>{t('convo.summary')}</summary>
+            <div className="convo-md">
+              <Markdown text={it.e.parts[0]?.text ?? ''} />
+            </div>
+          </details>
+        )
+      case 'answer':
+        return <Answer it={it} onCopy={copy} onShow={onShow} />
+      case 'work':
+        return <Work it={it} open={open} onToggle={onToggle} onCopy={copy} />
+    }
+  },
+  (a, b) => a.copy === b.copy && a.open === b.open && a.onToggle === b.onToggle && a.onShow === b.onShow && sameItem(a.it, b.it),
+)
 
 function sameItem(a: Item, b: Item): boolean {
   if (a.kind !== b.kind) return false
   switch (a.kind) {
-    case 'text':
-      return a.text === (b as typeof a).text && a.truncated === (b as typeof a).truncated
-    case 'steps': {
-      const bp = (b as typeof a).parts
-      return a.parts.length === bp.length && a.parts.every((p, i) => p === bp[i])
+    case 'answer': {
+      const o = b as typeof a
+      return a.text === o.text && a.truncated === o.truncated && a.ts === o.ts && a.work === o.work && JSON.stringify(a.edits) === JSON.stringify(o.edits)
+    }
+    case 'work': {
+      const o = b as typeof a
+      return a.live === o.live && a.from === o.from && a.to === o.to && a.steps.length === o.steps.length && a.steps.every((p, i) => p === o.steps[i])
     }
     default:
       return a.e === (b as typeof a).e
   }
 }
+
+const noteText = (e: ConvoEntry) => e.parts.map((p) => p.text).join(' ')
 
 function clockMs(ms: number): string {
   return ms ? new Date(ms).toLocaleTimeString(getLang(), { hour: '2-digit', minute: '2-digit' }) : '—'
@@ -366,38 +505,98 @@ function UserTurn({ e, onCopy }: { e: ConvoEntry; onCopy: (s: string) => void })
   )
 }
 
-function Steps({ parts, onCopy }: { parts: ConvoPart[]; onCopy: (s: string) => void }) {
-  const [open, setOpen] = useState(false)
-  const tools = parts.filter((p) => p.tool).map((p) => p.tool!)
+// The agent's answer: its text, what the turn changed, copy and when.
+function Answer({ it, onCopy, onShow }: { it: Extract<Item, { kind: 'answer' }>; onCopy: (s: string) => void; onShow: (key: string) => void }) {
+  return (
+    <div className="convo-answer">
+      <div className="convo-md">
+        <Markdown text={it.text} onCopyCode={onCopy} copyLabel={t('common.copy')} />
+        {it.truncated && <p className="convo-cut">{t('convo.cut')}</p>}
+      </div>
+      {it.edits && (
+        <div className="convo-changes">
+          <span>
+            {t(it.edits.files === 1 ? 'convo.changes1' : 'convo.changes', { n: it.edits.files })}{' '}
+            <LineCounts add={it.edits.add} del={it.edits.del} />
+          </span>
+          {it.work && (
+            <button type="button" className="btn btn-ghost convo-changes-see" onClick={() => onShow(it.work!)}>
+              {t('convo.seeChanges')}
+            </button>
+          )}
+        </div>
+      )}
+      <div className="convo-meta">
+        <button type="button" className="link-btn" onClick={() => onCopy(it.text)}>
+          {t('common.copy')}
+        </button>
+        <span>{clock(it.ts)}</span>
+      </div>
+    </div>
+  )
+}
+
+function LineCounts({ add, del }: { add: number; del: number }) {
+  if (!add && !del) return null
+  return (
+    <span className="convo-lines">
+      {add > 0 && <span className="convo-lines-add">+{add}</span>}
+      {del > 0 && <span className="convo-lines-del">−{del}</span>}
+    </span>
+  )
+}
+
+// A turn's work: one line (how long, what it did), open while it goes on;
+// opened, a grey line a step, the one under way last.
+function Work({ it, open, onToggle, onCopy }: { it: Extract<Item, { kind: 'work' }>; open: boolean; onToggle: (key: string, open: boolean) => void; onCopy: (s: string) => void }) {
+  const tools = it.steps.flatMap((s) => (!isNote(s) && s.tool ? [s.tool] : []))
   const counts = new Map<Category, number>()
   for (const tl of tools) counts.set(category(tl.name), (counts.get(category(tl.name)) ?? 0) + 1)
-  const order: Category[] = ['cmd', 'read', 'edit', 'search', 'web', 'agent', 'other']
-  let label = order
+  const order: Category[] = ['edit', 'cmd', 'read', 'search', 'web', 'agent', 'other']
+  const sum = order
     .filter((c) => counts.has(c))
     .map((c) => count(c, counts.get(c)!))
     .join(t('convo.sep'))
-  if (!label) label = t('convo.thinking')
   const failed = tools.filter((tl) => tl.error).length
-  const running = tools.some((tl) => !tl.done)
-  const last = [...tools].reverse().find((tl) => tl.title || tl.detail)
-  const sub = last ? (last.title || firstLine(last.detail ?? '')) : ''
+  // The step under way: the last call not come back, while the turn goes on.
+  const lastStep = it.steps[it.steps.length - 1]
+  const under = it.live && lastStep && !isNote(lastStep) ? lastStep : undefined
+  const busy = under && (under.kind === 'thinking' || (under.tool && !under.tool.done)) ? under : undefined
+  const now = useTick(!!busy)
+  const span = ms(it.to) - ms(it.from)
+  const head = it.live ? t('convo.workingNow') : it.from && span >= 0 && ms(it.to) ? t('convo.worked', { d: duration(span) }) : t('convo.steps')
   return (
-    <div className="convo-steps">
-      <button type="button" className="convo-steps-head" aria-expanded={open} onClick={() => setOpen(!open)}>
+    <div className="convo-work" data-work={it.key}>
+      <button type="button" className="convo-work-head" aria-expanded={open} onClick={() => onToggle(it.key, !open)}>
         <ChevronRight size={15} className="convo-chev" aria-hidden="true" />
-        <span className="convo-steps-text">
-          <span className="convo-steps-label">
-            {label}
-            {failed > 0 && <span className="convo-failed">{t('convo.failed', { n: failed })}</span>}
-            {running && <span className="convo-running">{t('convo.running')}</span>}
-          </span>
-          {sub && !open && <span className="convo-steps-sub">{sub}</span>}
+        <span className="convo-work-text">
+          {head}
+          {sum && <span className="convo-work-sum"> · {sum}</span>}
+          {failed > 0 && <span className="convo-failed">{t('convo.failed', { n: failed })}</span>}
         </span>
       </button>
       {open && (
-        <div className="convo-steps-body">
-          {parts.map((p, i) => (p.tool ? <ToolRow key={i} tool={p.tool} onCopy={onCopy} /> : <Thinking key={i} text={p.text ?? ''} />))}
+        <div className="convo-work-body">
+          {it.steps.map((s, i) =>
+            isNote(s) ? (
+              <p key={i} className="convo-note">{noteText(s)}</p>
+            ) : s.tool ? (
+              <ToolRow key={i} tool={s.tool} onCopy={onCopy} live={s === busy} />
+            ) : s.kind === 'thinking' ? (
+              <Thinking key={i} text={s.text ?? ''} live={s === busy} />
+            ) : (
+              <div key={i} className="convo-md convo-mid">
+                <Markdown text={s.text ?? ''} onCopyCode={onCopy} copyLabel={t('common.copy')} />
+              </div>
+            ),
+          )}
         </div>
+      )}
+      {busy && (
+        <p className="convo-live">
+          <span className="convo-shimmer">{busy.tool ? liveText(busy.tool) : t('convo.live.thinking')}</span>
+          {partTime.has(busy) && now >= ms(partTime.get(busy)) && <span className="convo-live-time">{duration(now - ms(partTime.get(busy)))}</span>}
+        </p>
       )}
     </div>
   )
@@ -408,36 +607,60 @@ function firstLine(s: string): string {
   return l.length > 160 ? l.slice(0, 160) + '…' : l
 }
 
-function Thinking({ text }: { text: string }) {
+// A file's path as a step shows it: its last few parts.
+function shortPath(p: string): string {
+  const parts = p.split('/').filter(Boolean)
+  return parts.length > 3 ? '…/' + parts.slice(-3).join('/') : p
+}
+
+// What a step's line says it acted on, and whether that is code (a
+// command, a path, a pattern) to show as such.
+function object(tool: ConvoTool): { text: string; code: boolean } {
+  const v = verbOf(tool.name)
+  const d = firstLine(tool.detail ?? '')
+  if (v === 'cmd' && d) return { text: d, code: true } // (the command itself; what it is for, on hover)
+  if (tool.title) return { text: tool.title, code: false }
+  if (v === 'read' || v === 'edit' || v === 'write') return { text: shortPath(d), code: true }
+  return { text: d, code: v === 'cmd' || v === 'search' || v === 'web' }
+}
+
+function liveText(tool: ConvoTool): string {
+  const v = verbOf(tool.name)
+  const o = object(tool).text
+  return v ? t(`convo.live.${v}` as I18nKey, { s: o }) : t('convo.live.other', { s: tool.name })
+}
+
+function Thinking({ text, live }: { text: string; live?: boolean }) {
   const [open, setOpen] = useState(false)
+  if (live) return null // (said under the steps, as the step under way)
   return (
-    <div className="convo-tool">
-      <button type="button" className="convo-tool-head" aria-expanded={open} onClick={() => setOpen(!open)}>
-        <ChevronRight size={14} className="convo-chev" aria-hidden="true" />
-        <span className="convo-tool-name">{t('convo.thinking')}</span>
-        {!open && <span className="convo-tool-sub">{firstLine(text)}</span>}
+    <div className="convo-step">
+      <button type="button" className="convo-step-head" aria-expanded={open} onClick={() => setOpen(!open)}>
+        <span className="convo-step-verb">{t('convo.thinking')}</span>
+        {!open && <span className="convo-step-obj">{firstLine(text)}</span>}
       </button>
       {open && <div className="convo-thinking">{text}</div>}
     </div>
   )
 }
 
-function ToolRow({ tool, onCopy }: { tool: ConvoTool; onCopy: (s: string) => void }) {
+function ToolRow({ tool, onCopy, live }: { tool: ConvoTool; onCopy: (s: string) => void; live?: boolean }) {
   const [open, setOpen] = useState(false)
   const [full, setFull] = useState(false)
-  const Icon = icons[category(tool.name)]
-  const sub = tool.title || firstLine(tool.detail ?? '')
+  if (live) return null // (said under the steps, as the step under way)
+  const v = verbOf(tool.name)
+  const obj = object(tool)
   const isEdit = tool.old !== undefined || tool.new !== undefined
   return (
-    <div className={'convo-tool' + (tool.error ? ' is-error' : '')}>
-      <button type="button" className="convo-tool-head" aria-expanded={open} onClick={() => setOpen(!open)}>
-        <Icon size={14} className="convo-tool-icon" aria-hidden="true" />
-        <span className="convo-tool-name">{tool.name}</span>
-        <span className="convo-tool-sub">{sub}</span>
+    <div className={'convo-step' + (tool.error ? ' is-error' : '')}>
+      <button type="button" className="convo-step-head" aria-expanded={open} onClick={() => setOpen(!open)} title={tool.title || (tool.detail ? firstLine(tool.detail) : undefined)}>
+        <span className="convo-step-verb">{v ? t(`convo.v.${v}` as I18nKey) : tool.name}</span>
+        <span className={'convo-step-obj' + (obj.code ? ' is-code' : '')}>{obj.text}</span>
+        {category(tool.name) === 'edit' && <LineCounts add={tool.add ?? 0} del={tool.del ?? 0} />}
         {tool.error && <span className="convo-failed">{t('convo.toolFailed')}</span>}
       </button>
       {open && (
-        <div className="convo-tool-body">
+        <div className="convo-step-body">
           {tool.detail && (tool.title || tool.detail.includes('\n') || tool.detail.length > 60) && (
             <div className="convo-pre-wrap">
               <pre className="convo-pre">{tool.detail}</pre>
@@ -453,7 +676,7 @@ function ToolRow({ tool, onCopy }: { tool: ConvoTool; onCopy: (s: string) => voi
                   {tool.truncated && <span> · {t('convo.cut')}</span>}
                 </div>
                 <pre className={'convo-pre convo-result' + (full ? ' is-full' : '')}>{tool.result}</pre>
-                {!full && (tool.result.split('\n').length > 12) && (
+                {!full && tool.result.split('\n').length > 12 && (
                   <button type="button" className="link-btn" onClick={() => setFull(true)}>{t('convo.showAll')}</button>
                 )}
               </>

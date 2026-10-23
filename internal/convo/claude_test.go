@@ -237,3 +237,69 @@ func TestClaudeTrimKeepsReusedToolID(t *testing.T) {
 		t.Fatalf("the kept call lost its result: %+v", last)
 	}
 }
+
+func TestClaudeTitle(t *testing.T) {
+	c := NewClaude()
+	c.Feed(lines(
+		`{"type":"ai-title","aiTitle":"Fix the login","sessionId":"s"}`,
+		`{"type":"ai-title","aiTitle":"Rate-limit the login","sessionId":"s"}`,
+	))
+	if c.Title() != "Rate-limit the login" || c.Skipped != 0 {
+		t.Fatalf("title %q, skipped %d", c.Title(), c.Skipped)
+	}
+	c.Feed(lines(`{"type":"custom-title","customTitle":"login limits"}`, `{"type":"ai-title","aiTitle":"Later"}`))
+	if c.Title() != "login limits" {
+		t.Fatalf("the person's title: %q", c.Title())
+	}
+}
+
+func TestClaudeEditLines(t *testing.T) {
+	c := NewClaude()
+	c.Feed(lines(
+		// From the patch Claude Code reports.
+		`{"type":"assistant","uuid":"a1","message":{"content":[{"type":"tool_use","id":"e1","name":"Edit","input":{"file_path":"/w/a.go","old_string":"x\ny","new_string":"x\nz\nw"}}]}}`,
+		`{"type":"user","uuid":"r1","toolUseResult":{"structuredPatch":[{"lines":[" x","-y","+z","+w"," q"]},{"lines":["-k"]}]},"message":{"content":[{"type":"tool_result","tool_use_id":"e1","content":"ok"}]}}`,
+		// A file created: all its lines.
+		`{"type":"assistant","uuid":"a2","message":{"content":[{"type":"tool_use","id":"w1","name":"Write","input":{"file_path":"/w/b.go","content":"1\n2\n3\n"}}]}}`,
+		`{"type":"user","uuid":"r2","toolUseResult":{"type":"create","content":"1\n2\n3\n","structuredPatch":[]},"message":{"content":[{"type":"tool_result","tool_use_id":"w1","content":"ok"}]}}`,
+		// No account of it: from the input, without the lines both share.
+		`{"type":"assistant","uuid":"a3","message":{"content":[{"type":"tool_use","id":"e2","name":"Edit","input":{"file_path":"/w/c.go","old_string":"a\nb\nc","new_string":"a\nB\nB2\nc"}}]}}`,
+		`{"type":"user","uuid":"r3","message":{"content":[{"type":"tool_result","tool_use_id":"e2","content":"ok"}]}}`,
+	))
+	got := c.Since(0)
+	want := [][2]int{{2, 2}, {3, 0}, {2, 1}}
+	for i, w := range want {
+		tl := got[i].Parts[0].Tool
+		if tl.Add != w[0] || tl.Del != w[1] {
+			t.Errorf("%s: +%d -%d, want +%d -%d", tl.Detail, tl.Add, tl.Del, w[0], w[1])
+		}
+	}
+}
+
+func TestClaudeTasks(t *testing.T) {
+	c := NewClaude()
+	c.Feed(lines(
+		`{"type":"assistant","uuid":"a1","message":{"content":[{"type":"tool_use","id":"c1","name":"TaskCreate","input":{"subject":"Read the config"}}]}}`,
+		`{"type":"user","uuid":"r1","toolUseResult":{"task":{"id":"1","subject":"Read the config"}},"message":{"content":[{"type":"tool_result","tool_use_id":"c1","content":"Task #1 created successfully: Read the config"}]}}`,
+		`{"type":"assistant","uuid":"a2","message":{"content":[{"type":"tool_use","id":"c2","name":"TaskCreate","input":{"subject":"Run the tests"}}]}}`,
+		`{"type":"user","uuid":"r2","message":{"content":[{"type":"tool_result","tool_use_id":"c2","content":"Task #2 created successfully: Run the tests"}]}}`,
+		`{"type":"assistant","uuid":"a3","message":{"content":[{"type":"tool_use","id":"u1","name":"TaskUpdate","input":{"taskId":"1","status":"completed"}}]}}`,
+		`{"type":"user","uuid":"r3","message":{"content":[{"type":"tool_result","tool_use_id":"u1","content":"Updated task #1 status"}]}}`,
+		// A call that failed changes nothing.
+		`{"type":"assistant","uuid":"a4","message":{"content":[{"type":"tool_use","id":"u2","name":"TaskUpdate","input":{"taskId":"2","status":"completed"}}]}}`,
+		`{"type":"user","uuid":"r4","message":{"content":[{"type":"tool_result","tool_use_id":"u2","is_error":true,"content":"no"}]}}`,
+		`{"type":"assistant","uuid":"a5","message":{"content":[{"type":"tool_use","id":"u3","name":"TaskUpdate","input":{"taskId":"2","status":"in_progress"}}]}}`,
+		`{"type":"user","uuid":"r5","message":{"content":[{"type":"tool_result","tool_use_id":"u3","content":"ok"}]}}`,
+	))
+	got := c.Tasks()
+	if len(got) != 2 || got[0] != (Task{"Read the config", "completed"}) || got[1] != (Task{"Run the tests", "in_progress"}) {
+		t.Fatalf("tasks: %+v", got)
+	}
+	c.Feed(lines(
+		`{"type":"assistant","uuid":"a6","message":{"content":[{"type":"tool_use","id":"t1","name":"TodoWrite","input":{"todos":[{"content":"One","status":"completed"},{"content":"Two","status":"weird"}]}}]}}`,
+		`{"type":"user","uuid":"r6","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}}`,
+	))
+	if got := c.Tasks(); len(got) != 2 || got[0] != (Task{"One", "completed"}) || got[1] != (Task{"Two", "pending"}) {
+		t.Fatalf("todo list: %+v", got)
+	}
+}

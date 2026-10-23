@@ -28,14 +28,21 @@ import (
 //     agent worked, which it took in during its turn (since 2.1.291 these
 //     are not written as user rows).
 //   - isSidechain rows are a subagent's own conversation: not shown.
+//   - "ai-title" rows hold the title Claude Code gave the session (written
+//     again and again), "custom-title" rows the one the person gave it.
+//   - A tool result's row also has Claude Code's own account of the call
+//     (toolUseResult): the edit it made, the task it created.
 //
-// Everything else (modes, titles, file snapshots, API bookkeeping) is
-// skipped. Feed it whole lines in order.
+// Everything else (modes, file snapshots, API bookkeeping) is skipped.
+// Feed it whole lines in order.
 type Claude struct {
 	entries []*Entry
 	tools   map[string]toolRef
 	rev     int
 	seq     int
+	aiTitle string
+	myTitle string     // (the person's, over Claude Code's)
+	tasks   []taskItem // the task list as it stands
 	// Skipped counts lines that were not JSON or of no use to the view.
 	Skipped int
 }
@@ -43,6 +50,14 @@ type Claude struct {
 type toolRef struct {
 	e *Entry
 	t *Tool
+	// task changes the task list, once the call has come back without an
+	// error (TodoWrite, TaskUpdate; TaskCreate from its result).
+	task func(c *Claude)
+}
+
+type taskItem struct {
+	id string // (TaskCreate's; none for TodoWrite's)
+	Task
 }
 
 // maxEntries is how many entries are kept; older ones are dropped.
@@ -52,6 +67,28 @@ func NewClaude() *Claude { return &Claude{tools: map[string]toolRef{}} }
 
 // Rev is the revision after the last Feed.
 func (c *Claude) Rev() int { return c.rev }
+
+// Title is the session's title: the one the person gave it, else Claude
+// Code's; "" when the log read has none.
+func (c *Claude) Title() string {
+	if c.myTitle != "" {
+		return c.myTitle
+	}
+	return c.aiTitle
+}
+
+// Tasks is the agent's task list as the log read has it (a task created
+// before the part read is not known). Nil when there is none.
+func (c *Claude) Tasks() []Task {
+	if len(c.tasks) == 0 {
+		return nil
+	}
+	out := make([]Task, len(c.tasks))
+	for i, t := range c.tasks {
+		out[i] = t.Task
+	}
+	return out
+}
 
 // Feed reads a batch of whole lines (each ending in "\n"; a last line
 // without one is ignored). Entries it adds or changes get the next revision.
@@ -118,6 +155,9 @@ type claudeRow struct {
 	IsSidechain      bool            `json:"isSidechain"`
 	IsCompactSummary bool            `json:"isCompactSummary"`
 	PromptSource     string          `json:"promptSource"`
+	AITitle          string          `json:"aiTitle"`
+	CustomTitle      string          `json:"customTitle"`
+	ToolUseResult    json.RawMessage `json:"toolUseResult"`
 	Subtype          string          `json:"subtype"`
 	Content          json.RawMessage `json:"content"` // (system rows)
 	Message          *struct {
@@ -165,6 +205,14 @@ func (c *Claude) line(b []byte) {
 			c.queued(&r)
 			return
 		}
+	case "ai-title":
+		if t := strings.TrimSpace(clip(r.AITitle, maxTitle)); t != "" {
+			c.aiTitle = t
+		}
+		return
+	case "custom-title":
+		c.myTitle = strings.TrimSpace(clip(r.CustomTitle, maxTitle))
+		return
 	case "system":
 		if r.Subtype == "local_command" {
 			var s string
@@ -191,7 +239,7 @@ func (c *Claude) add(r *claudeRow, role string, parts []Part) {
 	e := c.entries[len(c.entries)-1]
 	for i := range e.Parts {
 		if t := e.Parts[i].Tool; t != nil && t.ID != "" {
-			c.tools[t.ID] = toolRef{e, t}
+			c.tools[t.ID] = toolRef{e: e, t: t}
 		}
 	}
 }
@@ -220,11 +268,22 @@ func (c *Claude) user(r *claudeRow) {
 	if json.Unmarshal(r.Message.Content, &blocks) != nil {
 		return
 	}
+	// (Claude Code's account of the call is the row's: of its one result.)
+	results := 0
+	for _, b := range blocks {
+		if b.Type == "tool_result" {
+			results++
+		}
+	}
 	var parts []Part
 	for _, b := range blocks {
 		switch b.Type {
 		case "tool_result":
-			c.result(b)
+			if results == 1 {
+				c.result(b, r.ToolUseResult)
+			} else {
+				c.result(b, nil)
+			}
 		case "text":
 			if role, text := classifyUserText(b.Text); role == RoleUser {
 				parts = append(parts, textPart(KindText, text))
@@ -294,20 +353,38 @@ func (c *Claude) assistant(r *claudeRow) {
 		case "tool_use", "server_tool_use":
 			t := &Tool{ID: clip(b.ID, maxID), Name: clip(b.Name, 128)}
 			t.Title, t.Detail, t.Old, t.New = toolInput(b.Name, b.Input)
+			t.Add, t.Del = editLines(b.Name, b.Input)
 			parts = append(parts, Part{Kind: KindTool, Tool: t})
 		}
 	}
 	c.add(r, RoleAssistant, parts)
+	for _, b := range blocks {
+		if f := taskChange(b.Name, b.Input); f != nil && b.Type == "tool_use" {
+			if ref, ok := c.tools[clip(b.ID, maxID)]; ok {
+				ref.task = f
+				c.tools[clip(b.ID, maxID)] = ref
+			}
+		}
+	}
 }
 
-// result fills in the call a tool_result answers. A result for a call not
-// kept (dropped as old, or never seen) is ignored.
-func (c *Claude) result(b claudeBlock) {
+// result fills in the call a tool_result answers, with Claude Code's
+// account of it (account: the row's toolUseResult, or nil). A result for a
+// call not kept (dropped as old, or never seen) is ignored.
+func (c *Claude) result(b claudeBlock, account json.RawMessage) {
 	ref, ok := c.tools[b.ToolUseID]
 	if !ok {
 		return
 	}
 	text := resultText(b.Content)
+	if !b.IsError {
+		ref.t.Add, ref.t.Del = madeLines(ref.t.Name, account, ref.t.Add, ref.t.Del)
+		if ref.task != nil {
+			ref.task(c)
+		} else if ref.t.Name == "TaskCreate" {
+			c.created(account, text)
+		}
+	}
 	ref.t.Done = true
 	ref.t.Error = b.IsError
 	ref.t.ResultLines = strings.Count(strings.TrimRight(text, "\n"), "\n") + 1
@@ -317,6 +394,187 @@ func (c *Claude) result(b claudeBlock) {
 	ref.t.Result, ref.t.Truncated = cut(text, maxResult)
 	ref.e.Rev = c.rev
 	delete(c.tools, b.ToolUseID)
+}
+
+// lineCount is how many lines s has ("" none; a last newline ends a line).
+func lineCount(s string) int {
+	if s == "" {
+		return 0
+	}
+	return strings.Count(strings.TrimSuffix(s, "\n"), "\n") + 1
+}
+
+// replaced counts the lines a replacement of old by new adds and removes,
+// leaving out the lines both begin and end with.
+func replaced(old, new string) (add, del int) {
+	a, b := strings.Split(old, "\n"), strings.Split(new, "\n")
+	if old == "" {
+		a = nil
+	}
+	if new == "" {
+		b = nil
+	}
+	for len(a) > 0 && len(b) > 0 && a[0] == b[0] {
+		a, b = a[1:], b[1:]
+	}
+	for len(a) > 0 && len(b) > 0 && a[len(a)-1] == b[len(b)-1] {
+		a, b = a[:len(a)-1], b[:len(b)-1]
+	}
+	return len(b), len(a)
+}
+
+// editLines is what an edit's input says it changes: a guess (a file
+// written over may have had lines), until its result says.
+func editLines(name string, raw json.RawMessage) (add, del int) {
+	var in struct {
+		OldString string `json:"old_string"`
+		NewString string `json:"new_string"`
+		Content   string `json:"content"`
+		Edits     []struct {
+			OldString string `json:"old_string"`
+			NewString string `json:"new_string"`
+		} `json:"edits"`
+	}
+	if json.Unmarshal(raw, &in) != nil {
+		return 0, 0
+	}
+	switch name {
+	case "Edit":
+		return replaced(in.OldString, in.NewString)
+	case "MultiEdit":
+		for _, e := range in.Edits {
+			a, d := replaced(e.OldString, e.NewString)
+			add, del = add+a, del+d
+		}
+		return add, del
+	case "Write":
+		return lineCount(in.Content), 0
+	}
+	return 0, 0
+}
+
+// madeLines is what Claude Code says an edit changed: the lines of its
+// patch, or all of a file it created; else what was guessed.
+func madeLines(name string, account json.RawMessage, add, del int) (int, int) {
+	if len(account) == 0 || (name != "Edit" && name != "MultiEdit" && name != "Write") {
+		return add, del
+	}
+	var a struct {
+		Type    string `json:"type"`
+		Content string `json:"content"`
+		Patch   []struct {
+			Lines []string `json:"lines"`
+		} `json:"structuredPatch"`
+	}
+	if json.Unmarshal(account, &a) != nil {
+		return add, del
+	}
+	if len(a.Patch) > 0 {
+		add, del = 0, 0
+		for _, h := range a.Patch {
+			for _, l := range h.Lines {
+				switch {
+				case strings.HasPrefix(l, "+"):
+					add++
+				case strings.HasPrefix(l, "-"):
+					del++
+				}
+			}
+		}
+		return add, del
+	}
+	if a.Type == "create" {
+		return lineCount(a.Content), 0
+	}
+	return add, del
+}
+
+// The task list. TodoWrite gives all of it; TaskCreate adds one (its id is
+// in its result), TaskUpdate changes one by its id.
+var taskCreated = regexp.MustCompile(`^Task #(\w{1,32}) created successfully: (.*)`)
+
+func taskState(s string) string {
+	switch s {
+	case "pending", "in_progress", "completed":
+		return s
+	}
+	return "pending"
+}
+
+func taskChange(name string, raw json.RawMessage) func(c *Claude) {
+	switch name {
+	case "TodoWrite":
+		var in struct {
+			Todos []struct {
+				Content string `json:"content"`
+				Status  string `json:"status"`
+			} `json:"todos"`
+		}
+		if json.Unmarshal(raw, &in) != nil {
+			return nil
+		}
+		var list []taskItem
+		for _, t := range in.Todos {
+			list = append(list, taskItem{Task: Task{Subject: clip(t.Content, maxTitle), Status: taskState(t.Status)}})
+		}
+		return func(c *Claude) { c.tasks = list; c.trimTasks() }
+	case "TaskUpdate":
+		var in struct {
+			TaskID  string `json:"taskId"`
+			Status  string `json:"status"`
+			Subject string `json:"subject"`
+		}
+		if json.Unmarshal(raw, &in) != nil || in.TaskID == "" {
+			return nil
+		}
+		return func(c *Claude) {
+			for i := range c.tasks {
+				if c.tasks[i].id != in.TaskID {
+					continue
+				}
+				if in.Status == "deleted" {
+					c.tasks = append(c.tasks[:i:i], c.tasks[i+1:]...)
+					return
+				}
+				if in.Status != "" {
+					c.tasks[i].Status = taskState(in.Status)
+				}
+				if in.Subject != "" {
+					c.tasks[i].Subject = clip(in.Subject, maxTitle)
+				}
+				return
+			}
+		}
+	}
+	return nil
+}
+
+// created adds the task a TaskCreate made, from Claude Code's account of it
+// or, without one, its result's text.
+func (c *Claude) created(account json.RawMessage, text string) {
+	var a struct {
+		Task struct {
+			ID      string `json:"id"`
+			Subject string `json:"subject"`
+		} `json:"task"`
+	}
+	id, subject := "", ""
+	if json.Unmarshal(account, &a) == nil && a.Task.ID != "" {
+		id, subject = a.Task.ID, a.Task.Subject
+	} else if m := taskCreated.FindStringSubmatch(text); m != nil {
+		id, subject = m[1], m[2]
+	}
+	if id == "" {
+		return
+	}
+	c.tasks = append(c.tasks, taskItem{id: clip(id, maxID), Task: Task{Subject: clip(subject, maxTitle), Status: "pending"}})
+	c.trimTasks()
+}
+
+func (c *Claude) trimTasks() {
+	if n := len(c.tasks) - maxTasks; n > 0 {
+		c.tasks = append([]taskItem(nil), c.tasks[n:]...)
+	}
 }
 
 func resultText(raw json.RawMessage) string {
@@ -462,6 +720,12 @@ func toolInput(name string, raw json.RawMessage) (title, detail, old, new string
 		return d(str("description")), d(str("prompt")), "", ""
 	case "Skill":
 		return "", d(str("skill")), "", ""
+	case "TaskCreate", "TaskUpdate":
+		s := str("subject")
+		if name == "TaskUpdate" {
+			s = strings.TrimSpace("#" + str("taskId") + " " + str("status") + " " + s)
+		}
+		return "", d(s), "", ""
 	case "TodoWrite":
 		var lines []string
 		if todos, ok := in["todos"].([]any); ok {

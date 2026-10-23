@@ -14,6 +14,8 @@ export interface ConvoTool {
   detail?: string
   old?: string
   new?: string
+  add?: number // (an edit) lines added and removed
+  del?: number
   done?: boolean
   error?: boolean
   result?: string
@@ -37,6 +39,12 @@ export interface ConvoEntry {
   parts: ConvoPart[]
 }
 
+// An item of the agent's task list.
+export interface ConvoTask {
+  subject: string
+  status: 'pending' | 'in_progress' | 'completed'
+}
+
 // What the entries are of (internal/web/conversation.go convoBind).
 export interface ConvoBind {
   pane: string
@@ -51,6 +59,8 @@ interface Answer {
   reason?: string
   bind?: ConvoBind
   agent_status?: 'busy' | 'idle'
+  title?: string
+  tasks?: ConvoTask[]
   gen: number
   rev: number
   reset?: boolean
@@ -69,6 +79,8 @@ export interface Convo {
   gen: number
   bind?: ConvoBind
   agentStatus?: 'busy' | 'idle' // (tmux) as Claude Code's file for the process says
+  title?: string // the session's own title (Claude Code's, or the person's)
+  tasks?: ConvoTask[] // the agent's task list (the same array while it did not change)
   // Reading has failed since okAt (ms): what shows may be out of date.
   failing: boolean
   okAt: number
@@ -143,8 +155,9 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
           // Nothing new: the same state (no rendering), unless its facts changed.
           setConvo((c) => {
             const older = !!a.older || (entries ?? c.entries).length === MAX
-            if (!entries && c.status === 'ready' && c.gen === a.gen && c.older === older && sameBind(c.bind, a.bind) && c.agentStatus === a.agent_status && !c.failing) return c
-            return { status: 'ready', entries: entries ?? c.entries, older, gen: a.gen, bind: a.bind, agentStatus: a.agent_status, failing: false, okAt: now, changedAt: entries ? now : c.changedAt }
+            const tasks = a.tasks?.length ? (JSON.stringify(a.tasks) === JSON.stringify(c.tasks) ? c.tasks : a.tasks) : undefined
+            if (!entries && c.status === 'ready' && c.gen === a.gen && c.older === older && sameBind(c.bind, a.bind) && c.agentStatus === a.agent_status && c.title === a.title && c.tasks === tasks && !c.failing) return c
+            return { status: 'ready', entries: entries ?? c.entries, older, gen: a.gen, bind: a.bind, agentStatus: a.agent_status, title: a.title || undefined, tasks, failing: false, okAt: now, changedAt: entries ? now : c.changedAt }
           })
           if (a.more) next = 300
         }
