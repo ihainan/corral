@@ -10,3 +10,10 @@ export function sessionWhich(s: SessionInfo, all: SessionInfo[]): string {
   const shells = all.filter((x) => x.host_id === s.host_id && x.persistence !== 'tmux' && x.persistence !== 'herdr')
   return shells.length > 1 ? t('tabs.shellN', { n: shells.indexOf(s) + 1 }) : t('tabs.shell')
 }
+
+// One agent of one herdr session on a host, whichever of the gateway's
+// sessions (tabs) shows it.
+export function agentKey(s: SessionInfo, pane: string): string {
+  const name = !s.mux_session || s.mux_session === 'default' ? '' : s.mux_session
+  return `${s.host_id}|${name}|${pane}`
+}

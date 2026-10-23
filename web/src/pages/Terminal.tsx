@@ -547,42 +547,54 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
   // process it shows (internal/web/conversation.go). What became of it shows
   // in the bar until the agent stops working, or for a while.
   // (Of the process it was pressed for: another agent in front shows none of it.)
-  const [convoStop, setConvoStop] = useState<{ text: string; key: string; busy: boolean } | null>(null)
+  // Each stop pressed is of a process: its state shows, and blocks a second
+  // press, for that process only.
+  const [convoStops, setConvoStops] = useState<Record<string, { text: string; busy: boolean }>>({})
   const convoWorking = convoAgent?.status === 'working'
   const stopKey = convo.bind ? `${convo.bind.pane} ${convo.bind.pid} ${convo.bind.start}` : ''
+  const myStop = stopKey ? convoStops[stopKey] : undefined
   useEffect(() => {
-    if (!convoStop || convoStop.busy) return // (the request decides while it is on its way)
-    if (!convoWorking || convoStop.key !== stopKey) return setConvoStop(null)
-    const timer = setTimeout(() => setConvoStop(null), 15000)
+    if (!myStop || myStop.busy) return // (the request decides while it is on its way)
+    const drop = () => setConvoStops(({ [stopKey]: _gone, ...rest }) => rest)
+    if (!convoWorking) return drop()
+    const timer = setTimeout(drop, 15000)
     return () => clearTimeout(timer)
-  }, [convoStop, convoWorking, stopKey])
+  }, [myStop, convoWorking, stopKey])
   const stopAgent = () => {
     const b = convo.bind
-    if (!b || convoStop?.busy) return
     const key = stopKey
-    setConvoStop({ text: t('convo.stopping'), key, busy: true })
+    if (!b || convoStops[key]?.busy) return
+    const set = (text: string, busy: boolean) => setConvoStops((all) => ({ ...all, [key]: { text, busy } }))
+    set(t('convo.stopping'), true)
     api('POST', `/api/sessions/${id}/conversation/interrupt`, { pane: b.pane, pid: b.pid, start: b.start, session: b.session })
-      .then(() => setConvoStop({ text: t('convo.stopped'), key, busy: false }))
-      .catch((e) => setConvoStop({ text: e instanceof ApiError && e.code === 'agent_changed' ? t('convo.stopChanged') : errorText(e), key, busy: false }))
+      .then(() => set(t('convo.stopped'), false))
+      .catch((e) => set(e instanceof ApiError && e.code === 'agent_changed' ? t('convo.stopChanged') : errorText(e), false))
   }
-  const shownStop = convoStop && convoStop.key === stopKey ? convoStop.text : undefined
+  const shownStop = myStop?.text
   // Going to another agent from the bar (herdr): sending waits until herdr
   // has that pane in front and the conversation is of it, so what is typed
-  // meanwhile does not reach the pane left.
-  const [convoSwitch, setConvoSwitch] = useState<string | null>(null)
+  // meanwhile does not reach the pane left. A switch not done in 10 seconds
+  // keeps waiting (said once): choosing an agent again, or leaving the
+  // conversation, ends it. Each choice is numbered: what becomes of an
+  // earlier one does not end a later one.
+  const [convoSwitch, setConvoSwitch] = useState<{ pane: string; n: number; slow?: boolean } | null>(null)
+  const switchN = useRef(0)
   const herdrNow = useRef(herdr)
   herdrNow.current = herdr
   useEffect(() => {
     if (!convoSwitch) return
-    if (herdr?.focused_pane === convoSwitch && (convo.bind?.pane === convoSwitch || convo.status === 'none')) return setConvoSwitch(null)
-    // Not done in 10 seconds: sending goes on, to the pane in front, which
-    // the composer's line names.
+    if (herdr?.focused_pane === convoSwitch.pane && (convo.bind?.pane === convoSwitch.pane || convo.status === 'none')) return setConvoSwitch(null)
+    if (convoSwitch.slow) return
+    const n = convoSwitch.n
     const timer = setTimeout(() => {
-      setConvoSwitch(null)
+      setConvoSwitch((cur) => (cur && cur.n === n ? { ...cur, slow: true } : cur))
       toast(t('convo.switchSlow'), true)
     }, 10000)
     return () => clearTimeout(timer)
   }, [convoSwitch, herdr?.focused_pane, convo.bind?.pane, convo.status, toast])
+  useEffect(() => {
+    if (!showConvo && !convoPeek) setConvoSwitch(null) // (the conversation left: so is the switch)
+  }, [showConvo, convoPeek])
   const convoAgents = (): MenuItem[] => {
     const rank: Record<string, number> = { blocked: 0, working: 1, done: 2, idle: 3 }
     const all = (herdr?.workspaces ?? []).flatMap((w) => w.agents.map((a) => ({ a, ws: w.label })))
@@ -591,11 +603,12 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
       label: [ws, a.title || a.agent].filter(Boolean).join(' · ') + (herdrCurrent && rank[a.status] !== undefined ? ' — ' + t(`convo.status.${a.status}` as I18nKey) : ''),
       icon: a.pane_id === herdr?.focused_pane ? <Check size={16} /> : <span className="menu-icon-space" />,
       onSelect: () => {
-        // (What is in front now, not when the list opened.)
-        if (a.pane_id === herdrNow.current?.focused_pane) return
-        setConvoSwitch(a.pane_id)
+        // (What is in front now, not when the list opened. Choosing it ends a switch still waiting.)
+        if (a.pane_id === herdrNow.current?.focused_pane) return setConvoSwitch(null)
+        const n = ++switchN.current
+        setConvoSwitch({ pane: a.pane_id, n })
         api('POST', `/api/sessions/${id}/herdr`, { action: 'focus_pane', target: a.pane_id }).catch((e) => {
-          setConvoSwitch((cur) => (cur === a.pane_id ? null : cur)) // (a later choice is not undone)
+          setConvoSwitch((cur) => (cur && cur.n === n ? null : cur))
           toast(errorText(e), true)
         })
       },
@@ -2207,7 +2220,8 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
     }
     // Sent at once or not at all: the draft stays until it surely went out.
     if (convoSwitch) {
-      toast(t('convo.switching'), true) // (the draft stays: sent once the other agent is in front)
+      // (The draft stays: sent once the other agent is in front.)
+      toast(t(convoSwitch.slow ? 'convo.switchStuck' : 'convo.switching'), true)
       return
     }
     if (heldRef.current()) {
@@ -2774,7 +2788,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
             pending={shownPending}
             onReply={convoWaits ? () => setReplyTo(convoHit!.a) : undefined}
             onStop={convoWorking && convo.bind && status === 'open' ? stopAgent : undefined}
-            stop={convoSwitch ? t('convo.switching') : shownStop}
+            stop={convoSwitch ? t(convoSwitch.slow ? 'convo.switchSlow' : 'convo.switching') : shownStop}
             agents={info?.persistence === 'herdr' && herdr ? convoAgents : undefined}
             onDismiss={(pid) => setConvoPending((ps) => ps.filter((p) => p.id !== pid))}
             onShowTerminal={() => setConvoPeek(true)}

@@ -218,6 +218,7 @@ var convoGens atomic.Int64
 // convoState is what the gateway knows of one session's conversation.
 type convoState struct {
 	used     atomic.Int64 // unix nanoseconds of the last request
+	inUse    atomic.Int32 // requests holding it now: it is not let go meanwhile
 	mu       sync.Mutex
 	located  time.Time
 	pane     string // (herdr) the pane it was located for
@@ -255,12 +256,17 @@ func (c *convoStates) get(id string) *convoState {
 	if !ok {
 		// At most convoStatesMax, across sessions and users: the one used
 		// longest ago gives way (its reader starts over if it asks again).
+		// (One a request holds stays: dropping it would make a second state
+		// read the same log beside it.)
 		for len(c.m) >= convoStatesMax {
 			old, at := "", int64(0)
 			for k, s := range c.m {
-				if u := s.used.Load(); old == "" || u < at {
+				if u := s.used.Load(); s.inUse.Load() == 0 && (old == "" || u < at) {
 					old, at = k, u
 				}
+			}
+			if old == "" {
+				break // (all in use: as many as requests under way, for a moment)
 			}
 			delete(c.m, old)
 		}
@@ -268,8 +274,11 @@ func (c *convoStates) get(id string) *convoState {
 		c.m[id] = st
 	}
 	st.used.Store(time.Now().UnixNano())
+	st.inUse.Add(1) // (the caller lets go with done)
 	return st
 }
+
+func (st *convoState) done() { st.inUse.Add(-1) }
 
 func (st *convoState) idle() bool {
 	return time.Since(time.Unix(0, st.used.Load())) > convoIdle
@@ -338,6 +347,7 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 		key += pane
 	}
 	st := s.convos.get(key)
+	defer st.done()
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
@@ -608,6 +618,9 @@ func (s *Server) apiConversationInterrupt(w http.ResponseWriter, r *http.Request
 		}
 	}
 	if front == nil || front.pid != b.PID || front.start != b.Start || front.sid != b.Session {
+		if err != nil && signedOut() { // (cut short by the login ending: not a change of agent)
+			return
+		}
 		reason = "agent_changed"
 		writeError(w, http.StatusConflict, "agent_changed", "that pane no longer runs this agent")
 		return
@@ -618,6 +631,9 @@ func (s *Server) apiConversationInterrupt(w http.ResponseWriter, r *http.Request
 	if sess.Persistence == "herdr" {
 		c, derr := herdr.Dial(ctx, sess.Client(), socket)
 		if derr != nil {
+			if signedOut() {
+				return
+			}
 			reason = "herdr_error"
 			writeHerdrError(w, derr)
 			return
@@ -629,7 +645,7 @@ func (s *Server) apiConversationInterrupt(w http.ResponseWriter, r *http.Request
 		case err == nil:
 			outcome = "typed"
 		case errors.As(err, &apiErr):
-			outcome = "refused"
+			outcome, reason = "refused", "herdr_refused"
 		default:
 			outcome = "unknown"
 		}
@@ -642,8 +658,10 @@ func (s *Server) apiConversationInterrupt(w http.ResponseWriter, r *http.Request
 			outcome = "typed"
 		case errors.Is(err, sshx.ErrBusy):
 			reason = "busy" // (not started: nothing was pressed)
-		case errors.As(err, &exitErr):
+		case errors.As(err, &exitErr) && exitErr.ExitStatus() == 3:
 			reason = "not_in_session"
+		case errors.As(err, &exitErr):
+			reason = "send_failed" // (tmux said no: the pane went, say)
 		default:
 			outcome = "unknown"
 		}

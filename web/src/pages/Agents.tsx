@@ -7,7 +7,7 @@ import { Dialog, useToast } from '../components/ui'
 import { ReplyDialog } from '../terminal/ReplyDialog'
 import { ConversationView, type ConvoAgent } from '../terminal/Conversation'
 import { useConversation } from '../terminal/conversation'
-import { sessionWhich } from '../terminal/sessionName'
+import { agentKey, sessionWhich } from '../terminal/sessionName'
 
 // Every agent of the sessions the gateway has open, in one list: the ones
 // waiting for you first. It holds what herdr reports for the herdr
@@ -34,14 +34,17 @@ export function AgentsPage() {
   const [sessions, setSessions] = useState<SessionInfo[] | null>(null)
   const [failed, setFailed] = useState(false)
   const [reply, setReply] = useState<{ s: SessionInfo; a: HerdrAgent } | null>(null)
-  const [convo, setConvo] = useState<Row | null>(null)
+  // (By its pane: the row shown is the latest the list has of it.)
+  const [convoOf, setConvoOf] = useState<{ id: string; pane: string } | null>(null)
 
   useEffect(() => {
     let stopped = false
     let timer: ReturnType<typeof setTimeout> | undefined
+    let asking = false // (one request at a time: one chain of polls)
     const load = () => {
       timer = undefined
-      if (document.hidden) return
+      if (document.hidden || asking) return
+      asking = true
       api<SessionInfo[]>('GET', '/api/sessions')
         .then((l) => {
           if (stopped) return
@@ -50,11 +53,12 @@ export function AgentsPage() {
         })
         .catch(() => !stopped && setFailed(true))
         .finally(() => {
-          if (!stopped) timer = setTimeout(load, POLL_MS)
+          asking = false
+          if (!stopped && !timer) timer = setTimeout(load, POLL_MS)
         })
     }
     const onVisible = () => {
-      if (!document.hidden && !timer) load()
+      if (!document.hidden && !timer && !asking) load()
     }
     document.addEventListener('visibilitychange', onVisible)
     load()
@@ -68,6 +72,7 @@ export function AgentsPage() {
   const { rows, others } = useMemo(() => {
     const rows: Row[] = []
     const others: SessionInfo[] = []
+    const seen = new Set<string>() // (an agent once, however many tabs show its herdr session)
     for (const s of sessions ?? []) {
       const m = s.meta
       if (s.persistence !== 'herdr' || !m || m.t !== 'herdr') {
@@ -76,6 +81,9 @@ export function AgentsPage() {
       }
       for (const w of m.workspaces) {
         for (const a of w.agents) {
+          const k = agentKey(s, a.pane_id)
+          if (seen.has(k)) continue
+          seen.add(k)
           const known = (ORDER as string[]).includes(a.status) ? (a.status as Status) : 'unknown'
           rows.push(m.lost ? { s, a, ws: w.label, status: 'unknown', last: known === 'unknown' ? undefined : known } : { s, a, ws: w.label, status: known })
         }
@@ -86,6 +94,15 @@ export function AgentsPage() {
   }, [sessions])
 
   const all = sessions ?? []
+  // The conversation open: its row as the list has it now; gone from the
+  // list, what was last known, with nothing to answer.
+  const [lastConvo, setLastConvo] = useState<Row | null>(null)
+  const current = convoOf ? rows.find((r) => r.s.id === convoOf.id && r.a.pane_id === convoOf.pane) : undefined
+  useEffect(() => {
+    if (current) setLastConvo(current)
+    if (!convoOf) setLastConvo(null)
+  }, [current, convoOf])
+  const convo = convoOf ? (current ?? (lastConvo ? { ...lastConvo, status: 'unknown' as Status } : null)) : null
   const groups = ORDER.map((st) => ({ st, rows: rows.filter((r) => r.status === st) })).filter((g) => g.rows.length > 0)
 
   return (
@@ -96,7 +113,7 @@ export function AgentsPage() {
       <p className="hint agents-scope">{t('agents.scope')}</p>
       {failed && <p className="hint agents-failed" role="status">{t('agents.failed')}</p>}
       {sessions === null ? (
-        <p className="hint">{t('common.loading')}</p>
+        !failed && <p className="hint">{t('common.loading')}</p>
       ) : rows.length === 0 ? (
         <p className="agents-empty">{t('agents.none')}</p>
       ) : (
@@ -124,7 +141,7 @@ export function AgentsPage() {
                       </button>
                     )}
                     {claude(r.a.agent) && (
-                      <button type="button" className="btn" onClick={() => setConvo(r)}>
+                      <button type="button" className="btn" onClick={() => setConvoOf({ id: r.s.id, pane: r.a.pane_id })}>
                         <MessagesSquare size={16} aria-hidden="true" />
                         {t('agents.read')}
                       </button>
@@ -166,9 +183,9 @@ export function AgentsPage() {
       {convo && (
         <ConvoDialog
           row={convo}
-          onClose={() => setConvo(null)}
+          onClose={() => setConvoOf(null)}
           onReply={() => {
-            setConvo(null)
+            setConvoOf(null)
             setReply({ s: convo.s, a: convo.a })
           }}
         />

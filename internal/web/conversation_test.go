@@ -108,12 +108,17 @@ func TestParseConvoLocateTmuxTitle(t *testing.T) {
 
 func TestConvoStatesAreBounded(t *testing.T) {
 	var c convoStates
+	held := c.get("held") // a request under way keeps its state
 	for i := 0; i < convoStatesMax+20; i++ {
-		c.get("s\x00w1:p" + strings.Repeat("x", i%7) + string(rune('a'+i%26)) + string(rune('0'+i/26)))
+		c.get("s\x00w1:p" + strings.Repeat("x", i%7) + string(rune('a'+i%26)) + string(rune('0'+i/26))).done()
 	}
 	if len(c.m) > convoStatesMax {
 		t.Fatalf("%d states kept", len(c.m))
 	}
+	if c.m["held"] != held {
+		t.Fatal("a state in use was let go")
+	}
+	held.done()
 }
 
 func TestTmuxEscapeCommandQuotes(t *testing.T) {

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Bot, Check, MessageCircleReply, Plus, Search } from 'lucide-react'
 import { api, type Host, type SessionInfo } from '../api'
-import { sessionWhich } from '../terminal/sessionName'
+import { agentKey, sessionWhich } from '../terminal/sessionName'
 import { t } from '../i18n'
 import { local } from '../storage'
 import { navigate } from '../router'
@@ -50,7 +50,7 @@ const newTabKey = isMac ? '⌘T' : 'Ctrl+Shift+T'
 // plain shell itself. Places are kept on this device; a new tab goes last.
 // A tab gone for longer than a reconnection takes loses its place: opened
 // again later, it goes last.
-const ORDER_KEY = 'corral.tabOrder'
+const ORDER_KEY = 'corral.tabOrder2' // (corral.tabOrder held when each was last seen: another meaning)
 const KEEP_GONE_MS = 10 * 60 * 1000
 // The session a tab shows (herdr's default session, named or not, is one).
 // Several tabs of one tmux or herdr session are told apart by when they were
@@ -97,6 +97,17 @@ function inPlace(list: SessionInfo[]): SessionInfo[] {
   local.set(ORDER_KEY, JSON.stringify(order))
   const at = new Map(order.map(([k], i) => [k, i]))
   return [...list].sort((a, b) => at.get(keyOf.get(a.id)!)! - at.get(keyOf.get(b.id)!)!)
+}
+
+// The agents waiting for an answer in these sessions, each counted once
+// (several tabs may show one herdr session), as herdr's summaries say.
+function waitingAgents(list: SessionInfo[]): number {
+  const seen = new Set<string>()
+  for (const s of list) {
+    if (s.meta?.t !== 'herdr' || s.meta.lost) continue
+    for (const w of s.meta.workspaces) for (const a of w.agents) if (a.status === 'blocked') seen.add(agentKey(s, a.pane_id))
+  }
+  return seen.size
 }
 
 export function TerminalTabs({ current }: { current: string }) {
@@ -288,11 +299,8 @@ function TabBar(p: { tabs: SessionInfo[]; current: string; infos: Record<string,
   }, [p.current, p.tabs])
   const which = (s: SessionInfo) => sessionWhich(s, p.tabs)
   // Agents waiting in all tabs' sessions: the way to the agents page says so.
-  const waitingAll = p.tabs.reduce((n, s) => {
-    const info = p.infos[s.id]
-    if (info) return n + info.waiting
-    return n + (s.meta?.t === 'herdr' && !s.meta.lost ? s.meta.workspaces.reduce((k, w) => k + w.agents.filter((a) => a.status === 'blocked').length, 0) : 0)
-  }, 0)
+  // (Each agent once: two tabs of one herdr session list its agents twice.)
+  const waitingAll = waitingAgents(p.tabs)
   return (
     <nav className="term-tabs" aria-label={t('tabs.label')} ref={ref}>
       <button
