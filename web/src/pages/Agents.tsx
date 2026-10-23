@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { MessageCircleReply, MessagesSquare, SquareTerminal } from 'lucide-react'
-import { api, type HerdrAgent, type SessionInfo } from '../api'
+import { type HerdrAgent, type SessionInfo } from '../api'
+import { isClaude, listAgents, paneTitle, STATUS_ORDER, useRunningSessions, type AgentRow, type AgentStatus } from '../terminal/agents'
 import { t, type I18nKey } from '../i18n'
 import { navigate } from '../router'
 import { Dialog, useToast } from '../components/ui'
@@ -16,84 +17,18 @@ import { agentKey, sessionWhich } from '../terminal/sessionName'
 // state is all there is to go by. From a row: answer an agent waiting,
 // read its conversation (Claude Code), or open its terminal at its pane.
 
-const POLL_MS = 3000
-const ORDER: Status[] = ['blocked', 'working', 'done', 'idle', 'unknown']
-type Status = 'blocked' | 'working' | 'done' | 'idle' | 'unknown'
-
-interface Row {
-  s: SessionInfo
-  a: HerdrAgent
-  ws: string
-  status: Status
-  last?: string // (herdr lost: what it said last)
-  lost?: boolean // (the gateway lost herdr after this summary)
-}
-
-const claude = (name?: string) => !!name && /claude/i.test(name)
+const ORDER = STATUS_ORDER
+type Status = AgentStatus
+type Row = AgentRow
+const claude = isClaude
 
 export function AgentsPage() {
-  const [sessions, setSessions] = useState<SessionInfo[] | null>(null)
-  const [failed, setFailed] = useState(false)
+  const { sessions, failed } = useRunningSessions(true)
   const [reply, setReply] = useState<{ s: SessionInfo; a: HerdrAgent } | null>(null)
   // (By its pane: the row shown is the latest the list has of it.)
   const [convoOf, setConvoOf] = useState<string | null>(null) // (the agent's key: whichever tab now shows it)
 
-  useEffect(() => {
-    let stopped = false
-    let timer: ReturnType<typeof setTimeout> | undefined
-    let asking = false // (one request at a time: one chain of polls)
-    const load = () => {
-      timer = undefined
-      if (document.hidden || asking) return
-      asking = true
-      api<SessionInfo[]>('GET', '/api/sessions')
-        .then((l) => {
-          if (stopped) return
-          setSessions(l.filter((x) => x.state === 'running'))
-          setFailed(false)
-        })
-        .catch(() => !stopped && setFailed(true))
-        .finally(() => {
-          asking = false
-          if (!stopped && !timer) timer = setTimeout(load, POLL_MS)
-        })
-    }
-    const onVisible = () => {
-      if (!document.hidden && !timer && !asking) load()
-    }
-    document.addEventListener('visibilitychange', onVisible)
-    load()
-    return () => {
-      stopped = true
-      clearTimeout(timer)
-      document.removeEventListener('visibilitychange', onVisible)
-    }
-  }, [])
-
-  const { rows, others } = useMemo(() => {
-    const byKey = new Map<string, Row>() // (an agent once, however many tabs show its herdr session)
-    const others: SessionInfo[] = []
-    for (const s of sessions ?? []) {
-      const m = s.meta
-      if (s.persistence !== 'herdr' || !m || m.t !== 'herdr') {
-        if (s.persistence === 'tmux' || s.persistence === 'herdr') others.push(s)
-        continue
-      }
-      for (const w of m.workspaces) {
-        for (const a of w.agents) {
-          const k = agentKey(s, a.pane_id)
-          const had = byKey.get(k)
-          // (Of two tabs' word, a current summary's over one the gateway lost.)
-          if (had && !(had.lost && !m.lost)) continue
-          const known = (ORDER as string[]).includes(a.status) ? (a.status as Status) : 'unknown'
-          byKey.set(k, m.lost ? { s, a, ws: w.label, status: 'unknown', lost: true, last: known === 'unknown' ? undefined : known } : { s, a, ws: w.label, status: known })
-        }
-      }
-    }
-    const rows = [...byKey.values()]
-    rows.sort((x, y) => ORDER.indexOf(x.status) - ORDER.indexOf(y.status) || x.s.host_name.localeCompare(y.s.host_name) || x.ws.localeCompare(y.ws))
-    return { rows, others }
-  }, [sessions])
+  const { rows, others } = useMemo(() => listAgents(sessions ?? []), [sessions])
 
   const all = sessions ?? []
   // The conversation open: its row as the list has it now; gone from the
@@ -129,7 +64,7 @@ export function AgentsPage() {
               {g.rows.map((r) => (
                 <li key={r.s.id + ' ' + r.a.pane_id} className="agents-row">
                   <div className="agents-row-text">
-                    <span className="agents-row-title">{r.a.title || r.a.agent}</span>
+                    <span className="agents-row-title">{paneTitle(r.a.title) || r.a.agent}</span>
                     <span className="agents-row-where">
                       {[r.s.host_name, sessionWhich(r.s, all), r.ws, claude(r.a.agent) ? '' : r.a.agent].filter(Boolean).join(' · ')}
                       {r.last && ' · ' + t('agents.last', { status: t(`convo.status.${r.last}` as I18nKey) })}

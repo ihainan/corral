@@ -1,7 +1,8 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { ArrowDown, ChevronDown, ChevronRight } from 'lucide-react'
+import { ArrowDown, ChevronDown, ChevronRight, PanelLeft } from 'lucide-react'
 import { t, getLang, type I18nKey } from '../i18n'
-import { copyText, Menu, type MenuItem } from '../components/ui'
+import { copyText, isCoarse } from '../components/ui'
+import { local } from '../storage'
 import { Markdown } from './markdown'
 import type { Convo, ConvoEntry, ConvoPart, ConvoTask, ConvoTool } from './conversation'
 
@@ -189,6 +190,9 @@ export interface ConvoPending {
 }
 
 const HINT_AFTER = 20000 // working with nothing new this long: say why
+const SIDE_KEY = 'corral.convoSide'
+const SIDE_MIN = 900 // (px) the view's width from which the list goes beside the thread
+const isTouchOnly = isCoarse()
 
 // A duration as the view says it: 45 s, 2 min 14 s, 1 h 5 min.
 export function duration(ms: number): string {
@@ -223,7 +227,8 @@ export function ConversationView({
   ask,
   onStop,
   stop,
-  agents,
+  side,
+  active = true,
   onDismiss,
   onShowTerminal,
   onCopied,
@@ -235,13 +240,57 @@ export function ConversationView({
   ask?: ReactNode // (it waits, and is answered here: at the end of the thread, over the bar)
   onStop?: () => void // (it works: press Esc in its pane)
   stop?: string // what became of the last stop pressed, to say
-  agents?: () => MenuItem[] // (herdr) the agents to go to, from the bar
+  side?: { rows: ConvoListRow[] } // the agents to go to: beside the thread where there is room, else from the bar
+  active?: boolean // (its tab is the one shown: keys are for it)
   onDismiss: (id: number) => void
   onShowTerminal: () => void
   onCopied: () => void
 }) {
   const working = agent?.status === 'working'
   const waits = agent?.status === 'blocked'
+  // The list beside the thread: where the view is wide enough, unless folded away (kept on this device).
+  const root = useRef<HTMLDivElement>(null)
+  const [wide, setWide] = useState(false)
+  const [folded, setFoldedState] = useState(() => local.get(SIDE_KEY) === '0')
+  const setFolded = (v: boolean) => {
+    setFoldedState(v)
+    local.set(SIDE_KEY, v ? '0' : '1')
+  }
+  useLayoutEffect(() => {
+    const el = root.current
+    if (!el) return
+    const look = () => setWide(el.clientWidth >= SIDE_MIN)
+    look()
+    const ro = new ResizeObserver(look)
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+  const sideShown = !!side && wide && !folded
+  const [picking, setPicking] = useState(false)
+  useEffect(() => {
+    if (sideShown) setPicking(false)
+  }, [sideShown])
+  // Alt+Up and Alt+Down: the agent before and after on the list (not while
+  // a field with text in it has the keys).
+  const sideRef = useRef(side)
+  sideRef.current = side
+  useEffect(() => {
+    if (!active) return
+    const onKey = (e: KeyboardEvent) => {
+      if (!e.altKey || e.ctrlKey || e.metaKey || e.shiftKey || (e.key !== 'ArrowUp' && e.key !== 'ArrowDown')) return
+      const el = e.target as HTMLInputElement | null
+      if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') && !el.classList.contains('xterm-helper-textarea') && el.value) return
+      const list = listOrder(sideRef.current?.rows ?? [])
+      if (list.length < 2) return
+      e.preventDefault()
+      e.stopPropagation()
+      const at = list.findIndex((r) => r.current)
+      const next = list[(at + (e.key === 'ArrowDown' ? 1 : list.length - 1) + (at < 0 ? 1 : 0)) % list.length]
+      if (!next.current) next.onPick()
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [active])
   const list = useMemo(() => items(convo.entries, working || waits, working), [convo.entries, working, waits])
   const box = useRef<HTMLDivElement>(null)
   const col = useRef<HTMLDivElement>(null)
@@ -367,39 +416,35 @@ export function ConversationView({
   let status = agent ? t(`convo.status.${agent.status}` as I18nKey) : ''
   if (working && lastUser && now >= lastUser) status = t('convo.workingFor', { d: duration(now - lastUser) })
   const name = agent ? [agent.title, agent.where].filter(Boolean) : []
-  // The list to go to is taken when it opens: statuses changing meanwhile
-  // do not move its rows under the finger.
-  const listed = useRef<MenuItem[]>([])
+  const rows = side?.rows ?? []
+  const others = rows.filter((r) => r.status === 'blocked' && !r.current)
   const label = (
     <>
       <span className="convo-bar-name">{name[0] || t('convo.title')}</span>
       {name[1] && <span className="convo-bar-where">{name[1]}</span>}
-      {agents && <ChevronDown size={14} className="convo-bar-chev" aria-hidden="true" />}
+      {side && !sideShown && <ChevronDown size={14} className="convo-bar-chev" aria-hidden="true" />}
     </>
   )
   return (
-    <div className="convo" role="region" aria-label={t('convo.title')}>
-      {(name.length > 0 || status || convo.failing || agents) && (
+    <div className="convo" role="region" aria-label={t('convo.title')} ref={root}>
+      {sideShown && (
+        <nav className="convo-side" aria-label={t('convo.agents')}>
+          <AgentList rows={rows} />
+          {!isTouchOnly && <p className="convo-side-keys">{t('convo.switchKeys')}</p>}
+        </nav>
+      )}
+      <div className="convo-main">
+      {(name.length > 0 || status || convo.failing || side) && (
         <div className="convo-bar">
-          {agents ? (
-            <Menu
-              label={t('convo.pick')}
-              items={() => listed.current}
-              button={(open, toggle) => (
-                <button
-                  type="button"
-                  className="convo-bar-pick"
-                  aria-expanded={open}
-                  aria-label={t('convo.pick')}
-                  onClick={(e) => {
-                    if (!open) listed.current = agents()
-                    toggle(e)
-                  }}
-                >
-                  {label}
-                </button>
-              )}
-            />
+          {side && wide && (
+            <button type="button" className="icon-btn convo-side-btn" aria-pressed={sideShown} onClick={() => setFolded(!folded)} aria-label={t('convo.agents')} title={t('convo.agents')}>
+              <PanelLeft size={17} aria-hidden="true" />
+            </button>
+          )}
+          {side && !sideShown ? (
+            <button type="button" className="convo-bar-pick" aria-haspopup="dialog" aria-expanded={picking} aria-label={t('convo.pick')} onClick={() => setPicking(true)}>
+              {label}
+            </button>
           ) : (
             <span className="convo-bar-pick is-static">{label}</span>
           )}
@@ -413,6 +458,13 @@ export function ConversationView({
             </button>
           )}
         </div>
+      )}
+      {!sideShown && others.length > 0 && (
+        // (Another agent waits: one tap to it, where the list is not in view.)
+        <button type="button" className="convo-nudge" onClick={others[0].onPick}>
+          <span className="convo-nudge-text">{t('convo.othersWaiting', { n: others.length, title: others[0].title })}</span>
+          <ChevronRight size={15} aria-hidden="true" />
+        </button>
       )}
       <div className="convo-scroll" ref={box}>
         <div className="convo-col" ref={col}>
@@ -440,7 +492,101 @@ export function ConversationView({
           <button type="button" className="btn btn-primary" onClick={onReply ?? onShowTerminal}>{t(onReply ? 'convo.answer' : 'convo.answerThere')}</button>
         </div>
       )}
+      </div>
+      {picking && side && <Picker rows={rows} onClose={() => setPicking(false)} />}
     </div>
+  )
+}
+
+// A row of the list of agents to go to (see Terminal.tsx).
+export interface ConvoListRow {
+  key: string
+  title: string
+  where: string // its host, and its workspace or session
+  status: 'working' | 'blocked' | 'done' | 'idle' | 'unknown'
+  current: boolean
+  onPick: () => void
+}
+
+const GROUPS: { name: I18nKey; of: (r: ConvoListRow) => boolean }[] = [
+  { name: 'convo.group.blocked', of: (r) => r.status === 'blocked' },
+  { name: 'convo.group.working', of: (r) => r.status === 'working' },
+  { name: 'convo.group.rest', of: (r) => r.status !== 'blocked' && r.status !== 'working' },
+]
+
+// The agents in their order on the list: waiting first, then at work.
+export function listOrder(rows: ConvoListRow[]): ConvoListRow[] {
+  return GROUPS.flatMap((g) => rows.filter(g.of))
+}
+
+function AgentList({ rows, onPicked }: { rows: ConvoListRow[]; onPicked?: () => void }) {
+  return (
+    <>
+      {GROUPS.map((g) => {
+        const of = rows.filter(g.of)
+        if (!of.length) return null
+        return (
+          <div key={g.name} className="convo-list-group" role="group" aria-label={t(g.name)}>
+            <div className="convo-list-head">
+              {t(g.name)}
+              <span>{of.length}</span>
+            </div>
+            {of.map((r) => (
+              <button
+                key={r.key}
+                type="button"
+                className="convo-list-row"
+                aria-current={r.current || undefined}
+                onClick={() => {
+                  onPicked?.()
+                  if (!r.current) r.onPick()
+                }}
+              >
+                <span className="convo-list-title">{r.title}</span>
+                <span className="convo-list-sub">
+                  {r.status === 'working' && <span className="convo-spin is-small" aria-hidden="true" />}
+                  {r.status !== 'unknown' && <span className={r.status === 'blocked' ? 'is-blocked' : ''}>{t(`convo.status.${r.status}` as I18nKey)}</span>}
+                  <span className="convo-list-where">{r.where}</span>
+                </span>
+              </button>
+            ))}
+          </div>
+        )
+      })}
+    </>
+  )
+}
+
+// The list over the conversation: under the bar on a wide screen, from the
+// bottom on a phone. Its rows are those of when it opened: statuses
+// changing meanwhile do not move them under the finger.
+function Picker({ rows, onClose }: { rows: ConvoListRow[]; onClose: () => void }) {
+  const [shown] = useState(rows)
+  const box = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    const prev = document.activeElement as HTMLElement | null
+    ;(box.current?.querySelector<HTMLElement>('[aria-current="true"]') ?? box.current?.querySelector<HTMLElement>('button'))?.focus()
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        e.stopPropagation()
+        onClose()
+      }
+    }
+    document.addEventListener('keydown', onKey, true)
+    return () => {
+      document.removeEventListener('keydown', onKey, true)
+      prev?.focus?.()
+    }
+  }, [onClose])
+  return (
+    <>
+      <div className="convo-picker-back" onClick={onClose} />
+      <div className="convo-picker" role="dialog" aria-modal="true" aria-label={t('convo.pick')} ref={box}>
+        <div className="convo-picker-title">{t('convo.pick')}</div>
+        <AgentList rows={shown} onPicked={onClose} />
+      </div>
+    </>
   )
 }
 

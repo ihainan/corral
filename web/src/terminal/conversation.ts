@@ -207,11 +207,15 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
 }
 
 // Whether the agent is asking the person something (AskUserQuestion, not
-// come back): the last thing in the log.
+// come back): the last thing it did (notes may have come since).
 export function asking(entries: ConvoEntry[]): boolean {
-  const e = entries[entries.length - 1]
-  const p = e?.role === 'assistant' ? e.parts[e.parts.length - 1] : undefined
-  return !!p?.tool && p.tool.name === 'AskUserQuestion' && !p.tool.done
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const e = entries[i]
+    if (e.role === 'note') continue
+    const p = e.role === 'assistant' ? e.parts[e.parts.length - 1] : undefined
+    return !!p?.tool && p.tool.name === 'AskUserQuestion' && !p.tool.done
+  }
+  return false
 }
 
 // Whether the conversation view was shown, by session, on this device.

@@ -11,17 +11,29 @@ const menuLine = /^[\s│|]*([❯›>▶→●◉])?\s*([1-9])[.)]\s+(\S.*?)\s*[
 const hintLine = /^[\s│|╭╮╰╯─━┌┐└┘]*$|\b(esc|cancel|confirm)\b/i
 const maxLabel = 120
 
-// A choice too long for the pane's width goes on in lines indented past its
-// number (a narrow pane, a phone's).
+// A choice too long for the pane's width goes on in lines that begin where
+// its text does (a narrow pane, a phone's). A key hint is none of them.
 const moreLine = /^[\s│|]{3,}(\S.*?)\s*[│|]?\s*$/
+const keyHint = /^[\s│|]*(esc|enter|tab|ctrl|shift|↑|↓|←|→)\b/i
+const choiceHead = /^[\s│|]*(?:[❯›>▶→●◉])?\s*[1-9][.)]\s+/
+const lead = (l: string) => /^[\s│|]*/.exec(l)![0].length
+
+// Whether line i goes on with the choice above it.
+function goesOn(lines: string[], i: number): boolean {
+  if (!moreLine.test(lines[i]) || keyHint.test(lines[i])) return false
+  for (let j = i - 1; j >= 0 && i - j <= 4; j--) {
+    const head = choiceHead.exec(lines[j])
+    if (head && menuLine.test(lines[j])) return lead(lines[i]) === head[0].length
+    if (!moreLine.test(lines[j])) return false
+  }
+  return false
+}
 
 // The menu at the end of the screen's lines: its choices and the line it
 // begins on.
 function menuAt(lines: string[]): { out: { key: string; label: string }[]; top: number } {
   let end = lines.length
-  // (A hint after the menu, but not a choice's last line that says "esc".)
-  const goesOn = (i: number) => i > 0 && moreLine.test(lines[i]) && (menuLine.test(lines[i - 1]) || moreLine.test(lines[i - 1]))
-  while (end > 0 && !menuLine.test(lines[end - 1]) && hintLine.test(lines[end - 1]) && !goesOn(end - 1) && lines.length - end < 3) end--
+  while (end > 0 && !menuLine.test(lines[end - 1]) && hintLine.test(lines[end - 1]) && !goesOn(lines, end - 1) && lines.length - end < 3) end--
   const out: { key: string; label: string }[] = []
   let marked = 0
   let top = -1
@@ -29,9 +41,8 @@ function menuAt(lines: string[]): { out: { key: string; label: string }[]; top: 
   for (let i = end - 1; i >= 0; i--) {
     const m = menuLine.exec(lines[i])
     if (!m) {
-      const c = moreLine.exec(lines[i])
-      if (!c || more.length >= 3) break
-      more.unshift(c[1])
+      if (!goesOn(lines, i)) break
+      more.unshift(moreLine.exec(lines[i])![1])
       continue
     }
     const label = [m[3], ...more].join(' ')

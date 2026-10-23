@@ -8,7 +8,7 @@ import { WebLinksAddon } from '@xterm/addon-web-links'
 import { WebglAddon } from '@xterm/addon-webgl'
 import { ArrowUp, Check, Square, MessagesSquare, ChevronDown, ChevronLeft, CircleStop, Code2, Eye, FolderOpen, Globe, History, ImagePlus, MessageCircleReply, MoreVertical, Minus, Palette, Paperclip, Plus, TextSelect, Keyboard as KeyboardIcon, Power, RotateCw, Server, TextCursorInput, X } from 'lucide-react'
 import { api, ApiError, choiceOf, errorText, uploadFile, type HerdrAgent, type HerdrSummary, type Host, type OpenChoice, type SessionInfo } from '../api'
-import { t, type I18nKey } from '../i18n'
+import { t } from '../i18n'
 import { navigate } from '../router'
 import { getPrefs, prefsConfirmed, setChromeColor, setPrefs, termScheme, usePrefs } from '../prefs'
 import { local } from '../storage'
@@ -37,7 +37,8 @@ import { offerAlerts } from '../push'
 import { adoptComposer, composerWasOpen, rememberComposer } from '../terminal/composerOpen'
 import { promptSuggestion } from '../terminal/suggestion'
 import { sessionWhich } from '../terminal/sessionName'
-import { ConversationView, type ConvoAgent, type ConvoPending } from '../terminal/Conversation'
+import { ConversationView, type ConvoAgent, type ConvoListRow, type ConvoPending } from '../terminal/Conversation'
+import { isClaude, listAgents, paneTitle, useRunningSessions } from '../terminal/agents'
 import { asking, convoWasOpen, rememberConvo, useConversation, type ConvoEntry } from '../terminal/conversation'
 import { useSession, VERSION_EVENT } from '../app'
 
@@ -295,7 +296,18 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
   // Open again where it was left open (see composerOpen.ts); never for a watcher.
   const [composer, setComposer] = useState(() => !watch && composerWasOpen(id))
   // The conversation view over the terminal (only Claude Code's, in tmux or herdr).
-  const [convoOpen, setConvoOpen] = useState(() => !watch && convoWasOpen(id))
+  // (?convo=1: brought here from another tab's list of agents, to see one in it.)
+  const [convoOpen, setConvoOpen] = useState(() => !watch && (convoWasOpen(id) || new URLSearchParams(location.search).get('convo') === '1'))
+  useEffect(() => {
+    if (watch || new URLSearchParams(location.search).get('convo') !== '1') return
+    rememberConvo(id, true)
+    dropParam(id, 'convo', '1') // (taken: a reload goes by what is remembered)
+    // (With the composer, as when the view is turned on here, unless it was put away in the view.)
+    if (local.get(CONVO_NO_COMPOSER) !== '1') {
+      setComposer(true)
+      rememberComposer(id, true)
+    }
+  }, [id, watch])
   useEffect(() => {
     if (!watch) adoptComposer(id, composerWasOpen(id))
   }, [id, watch])
@@ -540,7 +552,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
     const st = convoHit.a.status
     const known = herdrCurrent && (st === 'working' || st === 'blocked' || st === 'done' || st === 'idle')
     // (The session's own title, when the log read is of this pane's agent.)
-    const title = (convo.bind?.pane === convoHit.a.pane_id && convo.title) || convoHit.a.title
+    const title = (convo.bind?.pane === convoHit.a.pane_id && convo.title) || paneTitle(convoHit.a.title)
     return { where: convoHit.ws, title, status: known ? st : 'unknown', other: claude(convoHit.a.agent) ? undefined : convoHit.a.agent }
   }, [info?.persistence, convo.bind, convo.agentStatus, convo.failing, convo.title, convo.entries, status, convoHit, herdrCurrent, herdr?.focused_agent])
   // Waiting for an answer, in the pane the conversation is of and in front.
@@ -608,25 +620,62 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
   useEffect(() => {
     if (!showConvo && !convoPeek) setConvoSwitch(null) // (the conversation left: so is the switch)
   }, [showConvo, convoPeek])
-  const convoAgents = (): MenuItem[] => {
-    const rank: Record<string, number> = { blocked: 0, working: 1, done: 2, idle: 3 }
-    const all = (herdr?.workspaces ?? []).flatMap((w) => w.agents.map((a) => ({ a, ws: w.label })))
-    all.sort((x, y) => (rank[x.a.status] ?? 4) - (rank[y.a.status] ?? 4))
-    return all.map(({ a, ws }) => ({
-      label: [ws, a.title || a.agent].filter(Boolean).join(' · ') + (herdrCurrent && rank[a.status] !== undefined ? ' — ' + t(`convo.status.${a.status}` as I18nKey) : ''),
-      icon: a.pane_id === herdr?.focused_pane ? <Check size={16} /> : <span className="menu-icon-space" />,
-      onSelect: () => {
-        // (What is in front now, not when the list opened. Choosing it ends a switch still waiting.)
-        if (a.pane_id === herdrNow.current?.focused_pane) return setConvoSwitch(null)
-        const n = ++switchN.current
-        setConvoSwitch({ pane: a.pane_id, n })
-        api('POST', `/api/sessions/${id}/herdr`, { action: 'focus_pane', target: a.pane_id }).catch((e) => {
-          setConvoSwitch((cur) => (cur && cur.n === n ? null : cur))
-          toast(errorText(e), true)
-        })
-      },
-    }))
+  // Another agent of this herdr session in front.
+  const focusAgent = (pane: string) => {
+    // (What is in front now, not when the list was drawn. Choosing it ends a switch still waiting.)
+    if (pane === herdrNow.current?.focused_pane) return setConvoSwitch(null)
+    const n = ++switchN.current
+    setConvoSwitch({ pane, n })
+    api('POST', `/api/sessions/${id}/herdr`, { action: 'focus_pane', target: pane }).catch((e) => {
+      setConvoSwitch((cur) => (cur && cur.n === n ? null : cur))
+      toast(errorText(e), true)
+    })
   }
+  const focusRef = useRef(focusAgent)
+  focusRef.current = focusAgent
+  // The agents to go to from the conversation: of all the sessions open,
+  // this one's as its own connection has them (fresher than the list). One
+  // of another session opens its tab, at its pane, in the conversation view.
+  const running = useRunningSessions(showConvo && active && !ended)
+  // The titles of agents read here (Claude Code's own), for their rows once another is shown.
+  const seenTitles = useRef(new Map<string, string>())
+  const convoRows = useMemo((): ConvoListRow[] | undefined => {
+    if (!info || (info.persistence !== 'herdr' && info.persistence !== 'tmux')) return undefined
+    const mine: SessionInfo = { ...info, meta: info.persistence === 'herdr' && herdr ? { ...herdr, lost: herdr.lost || !herdrCurrent } : info.meta }
+    // (This one first: of tabs showing the same session, this tab is where its agents are.)
+    const all = [mine, ...(running.sessions ?? []).filter((x) => x.id !== id)]
+    const { rows, others } = listAgents(all)
+    const here = convo.bind?.pane ?? herdr?.focused_pane
+    const go = (s: SessionInfo, pane?: string) => () => {
+      if (s.id === id) {
+        if (pane) focusRef.current(pane)
+        return
+      }
+      rememberConvo(s.id, true)
+      navigate(`/t/${s.id}?convo=1` + (pane ? '&pane=' + encodeURIComponent(pane) : ''))
+    }
+    const out: ConvoListRow[] = rows.map((r) => {
+      const current = r.s.id === id && r.a.pane_id === here
+      if (current && convo.title) {
+        seenTitles.current.delete(r.key) // (the latest last: the map keeps its order of use)
+        seenTitles.current.set(r.key, convo.title)
+        if (seenTitles.current.size > 100) seenTitles.current.delete(seenTitles.current.keys().next().value!)
+      }
+      const title = (current && convoAgent?.title) || seenTitles.current.get(r.key) || paneTitle(r.a.title) || r.a.agent
+      return { key: r.key, title, where: [r.s.host_name, r.ws, isClaude(r.a.agent) ? '' : r.a.agent].filter(Boolean).join(' · '), status: current && convoAgent ? convoAgent.status : r.status, current, onPick: go(r.s, r.a.pane_id) }
+    })
+    const seen = new Set<string>()
+    for (const s of others) {
+      if (s.persistence !== 'tmux') continue
+      const key = `${s.host_id}|tmux|${s.mux_session ?? ''}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      const current = s.id === id
+      // (Of a tmux session, what is known is of the one shown here: its conversation.)
+      out.push({ key, title: (current && convoAgent?.title) || `${s.host_name} · ${sessionWhich(s, all)}`, where: s.host_name + ' · tmux', status: current && convoAgent ? convoAgent.status : 'unknown', current, onPick: go(s) })
+    }
+    return out
+  }, [info, herdr, herdrCurrent, running.sessions, id, convo.bind?.pane, convo.title, convoAgent])
   // What the composer sent while the conversation shows, until a user turn
   // with its text appears in the same log of the same process, after it
   // (by the log's position and its time), each turn answering one.
@@ -1769,6 +1818,16 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
     if (!watch && location.pathname === '/t/' + id) {
       if (q.get('pane')) setWantPane(q.get('pane'))
       if (q.get('reply')) setWantReply(q.get('reply'))
+      if (q.get('convo') === '1') {
+        rememberConvo(id, true)
+        setConvoOpen(true)
+        setConvoPeek(false)
+        dropParam(id, 'convo', '1')
+        if (!convoNoComposer.current) {
+          setComposer(true)
+          rememberComposer(id, true)
+        }
+      }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active])
@@ -2807,7 +2866,8 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
             }
             onStop={convoStopsHere ? stopAgent : undefined}
             stop={convoSwitch ? t(convoSwitch.slow ? 'convo.switchSlow' : 'convo.switching') : shownStop}
-            agents={info?.persistence === 'herdr' && herdr ? convoAgents : undefined}
+            side={convoRows && convoRows.length > 1 ? { rows: convoRows } : undefined}
+            active={active}
             onDismiss={(pid) => setConvoPending((ps) => ps.filter((p) => p.id !== pid))}
             onShowTerminal={() => setConvoPeek(true)}
             onCopied={() => toast(t('common.copied'))}

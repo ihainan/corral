@@ -364,7 +364,8 @@ html.term-dark .overlay, html.term-dark .menu, html.term-dark .toast {
 .term-title.term-title-static:hover { background: none; }
 
 /* Conversation view: over the terminal, in the terminal's colours */
-.convo { position: absolute; inset: 0; z-index: 5; display: flex; flex-direction: column; background: var(--term-bg); color: var(--term-fg); }
+.convo { position: absolute; inset: 0; z-index: 5; display: flex; background: var(--term-bg); color: var(--term-fg); }
+.convo-main { flex: 1; min-width: 0; display: flex; flex-direction: column; position: relative; }
 .convo-scroll { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
 .convo-col {
   max-width: 780px; margin: 0 auto; display: flex; flex-direction: column; gap: 14px;
@@ -561,3 +562,47 @@ html.term-dark .overlay, html.term-dark .menu, html.term-dark .toast {
 .convo-ask-more .link-btn { font-size: 13px; color: var(--term-fg-2); }
 .convo-ask .reply-screen { max-height: 260px; }
 .convo-ask-sent { margin: 0; font-size: 13px; color: var(--term-fg-3); }
+
+/* The agents to go to: beside the thread (wide), over it (narrow, or folded away) */
+.convo-side {
+  flex: none; width: 264px; display: flex; flex-direction: column; overflow-y: auto; overscroll-behavior: contain;
+  padding: 8px; border-right: 1px solid var(--term-line); background: var(--term-chrome); font-family: var(--font-ui);
+}
+.convo-side-keys { margin: auto 0 0; padding: 8px 10px 4px; font-size: 12px; color: var(--term-fg-3); }
+.convo-side-btn { flex: none; align-self: center; width: 28px; height: 28px; margin: -4px 0 -4px -6px; }
+.convo-list-group { display: flex; flex-direction: column; gap: 1px; margin-bottom: 10px; }
+.convo-list-head { display: flex; gap: 6px; padding: 4px 10px; font-size: 12px; color: var(--term-fg-3); font-variant-numeric: tabular-nums; }
+.convo-list-row {
+  display: flex; flex-direction: column; gap: 1px; width: 100%; padding: 7px 10px; border: 0; border-radius: 8px;
+  background: none; color: var(--term-fg); font: inherit; text-align: left; cursor: pointer;
+}
+.convo-list-row:hover { background: var(--term-hover); }
+.convo-list-row:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: -2px; }
+.convo-list-row[aria-current='true'] { background: var(--term-accent-soft); }
+.convo-list-title { font-size: 14px; font-weight: 500; line-height: 20px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.convo-list-row[aria-current='true'] .convo-list-title { color: var(--term-accent-text); font-weight: 600; }
+.convo-list-sub { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 12px; line-height: 18px; color: var(--term-fg-3); white-space: nowrap; overflow: hidden; }
+.convo-list-sub .is-blocked { color: var(--term-accent-text); font-weight: 600; }
+.convo-list-where { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.convo-spin.is-small { width: 9px; height: 9px; margin: 0; border-width: 1.5px; flex: none; }
+@media (pointer: coarse) { .convo-list-row { padding: 10px 12px; } }
+.convo-nudge {
+  flex: none; display: flex; align-items: center; gap: 8px; width: 100%; border: 0; border-bottom: 1px solid var(--term-line);
+  padding: 7px max(16px, env(safe-area-inset-right, 0px)) 7px max(16px, env(safe-area-inset-left, 0px));
+  background: var(--term-accent-soft); color: var(--term-accent-text); font: 500 13px/18px var(--font-ui); text-align: left; cursor: pointer;
+}
+.convo-nudge:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: -2px; }
+.convo-nudge-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.convo-picker-back { position: absolute; inset: 0; z-index: 6; background: rgba(0, 0, 0, 0.28); }
+.convo-picker {
+  position: absolute; z-index: 7; top: 40px; left: 12px; width: min(360px, calc(100% - 24px)); max-height: 72%; overflow-y: auto;
+  padding: 8px; border: 1px solid var(--term-line); border-radius: 12px; background: var(--term-bg);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.22); font-family: var(--font-ui); overscroll-behavior: contain;
+}
+.convo-picker-title { padding: 4px 10px 8px; font-weight: 600; font-size: 15px; }
+@media (max-width: 640px) {
+  .convo-picker {
+    top: auto; bottom: 0; left: 0; width: 100%; max-height: 78%; border-radius: 14px 14px 0 0; border-bottom: 0;
+    padding-bottom: max(12px, env(safe-area-inset-bottom, 0px));
+  }
+}

@@ -204,14 +204,29 @@ export function ReplyDialog({ sessionId, agent, onLoaded, onClose, resizedAt }: 
 // The same, in the conversation: the question and its choices at the end of
 // the thread, a line of text, and the screen itself on demand.
 export function InlineReply({ sessionId, agent, onLoaded, resizedAt }: { sessionId: string; agent: HerdrAgent; onLoaded?: () => void; resizedAt?: number }) {
-  const [sent, setSent] = useState(false)
+  const [sent, setSent] = useState<string | null>(null) // (the screen answered)
   const [shown, setShown] = useState(false)
-  const { screen, failed, reading, changed, busy, error, text, setText, load, send, submit, opts } = useReply(sessionId, agent, { onLoaded, resizedAt, onSent: () => setSent(true) })
+  const answered = useRef('')
+  const { screen, failed, reading, changed, busy, error, text, setText, load, send, submit, opts } = useReply(sessionId, agent, { onLoaded, resizedAt, onSent: () => setSent(answered.current) })
+  if (screen) answered.current = screen.digest
+  // Answered, it is read again now and then while the agent still waits:
+  // another question in the same pane (before the wait was seen to end)
+  // shows instead of the note.
+  const loadRef = useRef(load)
+  loadRef.current = load
+  useEffect(() => {
+    if (sent === null) return
+    const timer = setInterval(() => void loadRef.current(), 2000)
+    return () => clearInterval(timer)
+  }, [sent])
+  useEffect(() => {
+    if (sent !== null && screen && screen.digest !== sent && opts.length > 0) setSent(null)
+  }, [sent, screen, opts.length])
   const pre = useRef<HTMLPreElement>(null)
   useLayoutEffect(() => {
     if (pre.current) pre.current.scrollTop = pre.current.scrollHeight
   }, [screen, shown])
-  if (sent) return <p className="convo-ask-sent" role="status">{t('convo.answeredHere')}</p>
+  if (sent !== null) return <p className="convo-ask-sent" role="status">{t('convo.answeredHere')}</p>
   const q = screen ? question(screen.text) : ''
   return (
     <div className="convo-ask" role="group" aria-label={t('convo.waiting')}>
