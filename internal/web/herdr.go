@@ -88,10 +88,18 @@ func (a *agentTimes) changed(pane, to string) {
 
 // of says when pane's agent came to status: now, for one not seen before
 // or found in another status than noted (it changed while no one watched).
-func (a *agentTimes) of(pane, status string) int64 {
+// old: the status is of a snapshot no longer current (its watcher lost
+// herdr): it notes nothing, another watcher may know better.
+func (a *agentTimes) of(pane, status string, old bool) int64 {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	r, ok := a.at[pane]
+	if old {
+		if ok && r.status == status {
+			return r.t.UnixMilli()
+		}
+		return 0
+	}
 	if !ok || r.status != status {
 		r = agentTime{status, time.Now()}
 		a.at[pane] = r
@@ -114,7 +122,11 @@ func (h *herdrServers) of(host *store.Host, socket string) *agentTimes {
 		h.m = map[string]*agentTimes{}
 	}
 	// (Where it is, not only which record: a record edited to another machine is another server.)
-	k := fmt.Sprint(host.ID, "\x00", host.Username, "@", host.Address, ":", host.Port, "\x00", socket)
+	jump := int64(0)
+	if host.JumpHostID != nil {
+		jump = *host.JumpHostID
+	}
+	k := fmt.Sprint(host.ID, "\x00", host.Username, "@", host.Address, ":", host.Port, "\x00", jump, "\x00", socket)
 	t := h.m[k]
 	if t == nil {
 		t = &agentTimes{at: map[string]agentTime{}}
@@ -123,7 +135,7 @@ func (h *herdrServers) of(host *store.Host, socket string) *agentTimes {
 	return t
 }
 
-func summarize(session string, s *herdr.Snapshot, times *agentTimes) herdrSummary {
+func summarize(session string, s *herdr.Snapshot, times *agentTimes, old bool) herdrSummary {
 	out := herdrSummary{T: "herdr", Session: session, Version: s.Version, Workspaces: []herdrWorkspace{}}
 	idx := map[string]int{}
 	for _, w := range s.Workspaces {
@@ -145,7 +157,7 @@ func summarize(session string, s *herdr.Snapshot, times *agentTimes) herdrSummar
 			continue
 		}
 		out.Workspaces[i].Agents = append(out.Workspaces[i].Agents,
-			herdrAgent{PaneID: p.ID, Agent: p.Agent, Status: p.AgentStatus, Title: truncate(p.Title, 120), Cwd: p.Cwd, Since: times.of(p.ID, p.AgentStatus)})
+			herdrAgent{PaneID: p.ID, Agent: p.Agent, Status: p.AgentStatus, Title: truncate(p.Title, 120), Cwd: p.Cwd, Since: times.of(p.ID, p.AgentStatus, old)})
 		if p.AgentStatus == herdr.StatusBlocked {
 			out.Waiting++
 		}
@@ -232,7 +244,7 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 	times := s.herdrTimes.of(h, socket)
 	w := herdr.NewWatcher(sess.Client(), socket,
 		func(snap *herdr.Snapshot) {
-			if b, err := json.Marshal(summarize(name, snap, times)); err == nil {
+			if b, err := json.Marshal(summarize(name, snap, times, false)); err == nil {
 				sess.PublishMeta(b)
 			}
 		},
@@ -249,7 +261,7 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 		if snap == nil {
 			return
 		}
-		sum := summarize(name, snap, times)
+		sum := summarize(name, snap, times, true)
 		sum.Lost = true
 		if b, err := json.Marshal(sum); err == nil {
 			sess.PublishMeta(b)
