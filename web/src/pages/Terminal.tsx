@@ -650,7 +650,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
     const { rows, others } = listAgents(all)
     const here = convo.bind?.pane ?? herdr?.focused_pane
     // (Of this session: its agents by what they are, whichever tab's summary the list kept for them.)
-    const ours = (key: string, pane?: string) => (pane ? key === agentKey(info, pane) : key === tmuxKey(info))
+    const ours = (key: string, pane?: string) => (pane ? info.persistence === 'herdr' && key === agentKey(info, pane) : info.persistence === 'tmux' && key === tmuxKey(info))
     const go = (s: SessionInfo, key: string, pane?: string) => () => {
       if (s.id === id || ours(key, pane)) {
         if (pane) focusRef.current(pane)

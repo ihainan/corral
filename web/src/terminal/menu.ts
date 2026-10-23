@@ -12,9 +12,10 @@ const hintLine = /^[\s│|╭╮╰╯─━┌┐└┘]*$|\b(esc|cancel|confir
 const maxLabel = 120
 
 // A choice too long for the pane's width goes on in lines that begin where
-// its text does (a narrow pane, a phone's). A key hint is none of them.
+// its text does (a narrow pane, a phone's). A key hint ("Esc to cancel") is
+// none of them; a key's name alone may be.
 const moreLine = /^[\s│|]{3,}(\S.*?)\s*[│|]?\s*$/
-const keyHint = /^[\s│|]*(?:(?:esc|enter|tab|ctrl|shift|space)\b|[↑↓←→]+)(?:\s+to\b|\s*[·•]|\s*$)/i // ("Esc to cancel", "↑↓ to navigate · …")
+const keyHint = /^[\s│|]*(?:(?:esc|enter|tab|ctrl|shift|space)\b|[↑↓←→]+)(?:\s+to\b|\s*[·•])/i // ("Esc to cancel", "↑↓ to navigate · …")
 const choiceHead = /^[\s│|]*(?:[❯›>▶→●◉])?\s*[1-9][.)]\s+/
 const lead = (l: string) => /^[\s│|]*/.exec(l)![0].length
 
