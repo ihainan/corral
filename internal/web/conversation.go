@@ -43,8 +43,8 @@ const (
 // start time (/proc/<pid>/stat field 22) and the one its session file
 // records (a file left by a process that ended, whose pid was then reused,
 // does not match), the session id, the log found for it, and the herdr or
-// tmux pane it runs in. With mode "tmux" a first record gives the active
-// pane of the named tmux session and its server's pid. Linux only (/proc):
+// tmux pane it runs in. With mode "tmux" the first records give the active
+// pane of the named tmux session, its server's pid and the pane's title. Linux only (/proc):
 // elsewhere it prints the record "noproc". Fixed script; the mode and the
 // validated tmux session name are its only arguments.
 func convoLocateCommand(mode, tmuxName string) string {
@@ -52,6 +52,8 @@ func convoLocateCommand(mode, tmuxName string) string {
 if [ "$1" = tmux ]; then
   t=$(tmux -u display-message -p -t "=$2:" '#{pane_id} #{pid}' 2>/dev/null)
   printf 'tmux=%s\0' "$t"
+  t=$(tmux -u display-message -p -t "=$2:" '#{pane_title}' 2>/dev/null | head -c 512 | tr -d '\n')
+  printf 'tmuxtitle=%s\0' "$t"
 fi
 [ -r /proc/self/stat ] || { printf 'noproc\0'; exit 0; }
 nl=$(printf '\nx'); nl=${nl%x}
@@ -99,10 +101,19 @@ var (
 // parseConvoLocate reads convoLocateCommand's output: the processes whose
 // start time matches their session file, the tmux pane and server pid if
 // asked, and whether the host has /proc at all.
-func parseConvoLocate(out string) (procs []convoProc, tmuxActive, tmuxPID string, noProc bool) {
+func parseConvoLocate(out string) (procs []convoProc, tmuxActive, tmuxPID, tmuxTitle string, noProc bool) {
 	for _, rec := range strings.Split(out, "\x00") {
 		if rec == "noproc" {
 			noProc = true
+			continue
+		}
+		if v, ok := strings.CutPrefix(rec, "tmuxtitle="); ok {
+			tmuxTitle = truncate(strings.Map(func(r rune) rune {
+				if r < 0x20 || r == 0x7f || (r >= 0x202a && r <= 0x202e) || (r >= 0x2066 && r <= 0x2069) {
+					return -1
+				}
+				return r
+			}, strings.ToValidUTF8(v, "")), 120)
 			continue
 		}
 		if v, ok := strings.CutPrefix(rec, "tmux="); ok {
@@ -154,7 +165,7 @@ func parseConvoLocate(out string) (procs []convoProc, tmuxActive, tmuxPID string
 		}
 		procs = append(procs, p)
 	}
-	return procs, tmuxActive, tmuxPID, noProc
+	return procs, tmuxActive, tmuxPID, tmuxTitle, noProc
 }
 
 func isDigits(s string) bool {
@@ -209,7 +220,8 @@ type convoState struct {
 	pane     string // (herdr) the pane it was located for
 	reason   string // why there is nothing to read, when there is not
 	sid, log string
-	gen      int64 // changes when another log is read: what was shown does not apply
+	gen      int64      // changes when another log is read: what was shown does not apply
+	bind     *convoBind // the process the log is of, while there is one
 	parser   *convo.Claude
 	offset   int64 // read up to here
 	size     int64 // the log's size when last looked at
@@ -255,6 +267,17 @@ const (
 	convoUnsupported = "unsupported" // the host has no /proc, or the session is a plain shell
 )
 
+// convoBind says what the entries are of: the pane, the Claude Code process
+// in it (its pid and start time) and its session, so the browser can tell
+// whether what it shows, and what it would act on, is still that.
+type convoBind struct {
+	Pane    string `json:"pane"`
+	PID     int64  `json:"pid"`
+	Start   int64  `json:"start"`
+	Session string `json:"session"`
+	Title   string `json:"title,omitempty"` // (tmux: the pane's title)
+}
+
 type convoAnswer struct {
 	Available bool          `json:"available"`
 	Reason    string        `json:"reason,omitempty"`
@@ -263,6 +286,7 @@ type convoAnswer struct {
 	Reset     bool          `json:"reset,omitempty"` // drop what was shown: these are all the entries
 	Older     bool          `json:"older,omitempty"` // the conversation began before the first entry
 	More      bool          `json:"more,omitempty"`  // more of the log is to be read: ask again soon
+	Bind      *convoBind    `json:"bind,omitempty"`
 	Entries   []convo.Entry `json:"entries"`
 }
 
@@ -304,7 +328,7 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	ans := convoAnswer{Gen: st.gen, Entries: []convo.Entry{}}
+	ans := convoAnswer{Gen: st.gen, Bind: st.bind, Entries: []convo.Entry{}}
 	if st.reason != "" {
 		ans.Reason = st.reason
 		writeJSON(w, http.StatusOK, ans)
@@ -331,7 +355,7 @@ func (s *Server) locateConvo(ctx context.Context, sess *term.Session, st *convoS
 	if err != nil && (errors.Is(err, sshx.ErrBusy) || len(out) == 0) {
 		return err
 	}
-	procs, tmuxActive, tmuxPID, noProc := parseConvoLocate(string(out))
+	procs, tmuxActive, tmuxPID, tmuxTitle, noProc := parseConvoLocate(string(out))
 	st.located, st.pane = time.Now(), pane
 	sid, log, reason := "", "", ""
 	switch {
@@ -339,6 +363,14 @@ func (s *Server) locateConvo(ctx context.Context, sess *term.Session, st *convoS
 		reason = convoUnsupported
 	default:
 		p := pickConvoProc(procs, sess.Persistence, pane, s.herdrSocks.get(sess.ID), tmuxActive, tmuxPID)
+		st.bind = nil
+		if p != nil {
+			b := &convoBind{PID: p.pid, Start: p.start, Session: p.sid, Pane: p.herdrPane}
+			if sess.Persistence == "tmux" {
+				b.Pane, b.Title = p.tmuxPane, tmuxTitle
+			}
+			st.bind = b
+		}
 		switch {
 		case p == nil:
 			reason = convoNoAgent

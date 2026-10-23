@@ -13,7 +13,12 @@ before 1.0, a minor version may change configuration or behaviour (said here whe
   change. It reads the whole history, which herdr's panes do not keep for a
   program on the alternate screen, and follows the pane in front. It is off
   until turned on, per session; messages are still typed in the composer.
-  Only the session's owner sees it.
+  Only the session's owner sees it. A bar over it names the agent (herdr's
+  workspace and the pane's title) and what it is doing; when it waits for
+  an answer a strip at the bottom opens the reply dialog. What the
+  composer sends shows until the log has it, and on touch screens the
+  composer opens with the view. When the gateway loses herdr, its last
+  statuses are no longer shown as current.
 - Tab keys in the installed app: ⌘T opens a new tab (Ctrl+Shift+T off a Mac,
   where Ctrl+letters stay with the programs); on a Mac or an iPad ⌘1–⌘8 pick
   a tab by its place, ⌘9 the last, ⌘⇧[ and ⌘⇧] the previous and next. No key

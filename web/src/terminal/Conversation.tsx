@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { ArrowDown, Bot, ChevronRight, FilePen, FileText, Globe, Search, SquareTerminal, Wrench } from 'lucide-react'
 import { t, getLang, type I18nKey } from '../i18n'
 import { copyText } from '../components/ui'
@@ -77,16 +77,40 @@ function count(cat: Category, n: number): string {
   return t(`convo.n.${cat}${n === 1 ? '1' : ''}` as I18nKey, { n })
 }
 
+// What the bar over the conversation says of the agent: where it is, what
+// it is doing (unknown when that cannot be trusted now).
+export interface ConvoAgent {
+  where?: string // herdr: the workspace
+  title?: string // the pane's title (Claude Code sets it to the task)
+  status: 'working' | 'blocked' | 'done' | 'idle' | 'unknown'
+  other?: string // the program in the pane, when it is not Claude Code
+}
+
+// A message sent from the composer while the conversation shows: "waiting"
+// until the log has it (then it is dropped), "unseen" when that took too
+// long, "sent" when it can no longer be told (another log came in front).
+export interface ConvoPending {
+  id: number
+  text: string
+  state: 'waiting' | 'unseen' | 'sent'
+}
+
+const HINT_AFTER = 20000 // working with nothing new this long: say why
+
 export function ConversationView({
   convo,
-  working,
+  agent,
   pending,
+  onReply,
+  onDismiss,
   onShowTerminal,
   onCopied,
 }: {
   convo: Convo
-  working: boolean
-  pending: string | null
+  agent: ConvoAgent | null
+  pending: ConvoPending[]
+  onReply?: () => void // (the agent waits for an answer)
+  onDismiss: (id: number) => void
   onShowTerminal: () => void
   onCopied: () => void
 }) {
@@ -94,14 +118,26 @@ export function ConversationView({
   const box = useRef<HTMLDivElement>(null)
   const stuck = useRef(true) // following the end
   const [away, setAway] = useState(false)
-  const copy = (s: string) => void copyText(s).then((ok) => ok && onCopied())
+  const copiedRef = useRef(onCopied)
+  copiedRef.current = onCopied
+  const copy = useCallback((s: string) => void copyText(s).then((ok) => ok && copiedRef.current()), [])
+  const working = agent?.status === 'working'
+
+  // While it works, look again now and then whether nothing came for long.
+  const [now, setNow] = useState(Date.now())
+  useEffect(() => {
+    if (!working) return
+    const timer = setInterval(() => setNow(Date.now()), 5000)
+    return () => clearInterval(timer)
+  }, [working])
+  const quiet = working && now - convo.changedAt > HINT_AFTER
 
   // Before the new content is laid out, note whether the end was in view;
   // after, keep it there.
   useLayoutEffect(() => {
     const el = box.current
     if (el && stuck.current) el.scrollTop = el.scrollHeight
-  }, [list, pending, working])
+  }, [list, pending, working, quiet])
   useEffect(() => {
     const el = box.current
     if (!el) return
@@ -120,63 +156,66 @@ export function ConversationView({
   else if (convo.status === 'none')
     body = (
       <div className="convo-state">
-        <p>{t(convo.reason === 'no_log' ? 'convo.noLog' : convo.reason === 'unsupported' ? 'convo.unsupported' : 'convo.noAgent')}</p>
-        <button type="button" className="btn btn-ghost" onClick={onShowTerminal}>{t('convo.showTerminal')}</button>
+        <p>
+          {convo.reason === 'no_log'
+            ? t('convo.noLog')
+            : convo.reason === 'unsupported'
+              ? t('convo.unsupported')
+              : agent?.other
+                ? t('convo.otherAgent', { agent: agent.other })
+                : t('convo.noAgent')}
+        </p>
+        {convo.reason !== 'no_log' && (
+          <button type="button" className="btn btn-ghost" onClick={onShowTerminal}>{t('convo.showTerminal')}</button>
+        )}
       </div>
     )
   else
     body = (
       <>
         {convo.older && <p className="convo-older">{t('convo.older')}</p>}
-        {list.map((it) => {
-          switch (it.kind) {
-            case 'user':
-              return <UserTurn key={it.e.seq} e={it.e} onCopy={copy} />
-            case 'note':
-              return (
-                <p key={it.e.seq} className="convo-note">
-                  {it.e.parts.map((p) => p.text).join(' ')}
-                </p>
-              )
-            case 'summary':
-              return (
-                <details key={it.e.seq} className="convo-summary">
-                  <summary>{t('convo.summary')}</summary>
-                  <div className="convo-md">
-                    <Markdown text={it.e.parts[0]?.text ?? ''} />
-                  </div>
-                </details>
-              )
-            case 'text':
-              return (
-                <div key={it.key} className="convo-md">
-                  <Markdown text={it.text} onCopyCode={copy} copyLabel={t('common.copy')} />
-                  {it.truncated && <p className="convo-cut">{t('convo.cut')}</p>}
-                </div>
-              )
-            case 'steps':
-              return <Steps key={it.key} parts={it.parts} onCopy={copy} />
-          }
-        })}
-        {pending && (
-          <div className="convo-user convo-pending">
-            <div className="convo-user-text">{pending}</div>
-            <div className="convo-meta">{t('convo.sent')}</div>
+        {list.map((it) => (
+          <ListItem key={it.kind === 'text' || it.kind === 'steps' ? it.key : it.e.seq} it={it} copy={copy} />
+        ))}
+        {pending.map((p) => (
+          <div key={p.id} className="convo-user convo-pending">
+            <div className="convo-user-text">{p.text}</div>
+            <div className="convo-meta">
+              <span>{t(p.state === 'waiting' ? 'convo.sent' : p.state === 'unseen' ? 'convo.unseen' : 'convo.sentOnly')}</span>
+              {p.state !== 'waiting' && (
+                <button type="button" className="link-btn" onClick={() => onDismiss(p.id)}>{t('common.close')}</button>
+              )}
+            </div>
           </div>
+        ))}
+        {working && (
+          <p className="convo-working">
+            {t('convo.working')}
+            {quiet && <> {t('convo.quiet')}</>}
+          </p>
         )}
-        {working && <p className="convo-working">{t('convo.working')}</p>}
       </>
     )
 
+  const status = agent ? t(`convo.status.${agent.status}` as I18nKey) : ''
+  const name = agent ? [agent.where, agent.title].filter(Boolean).join(' · ') : ''
   return (
     <div className="convo" role="region" aria-label={t('convo.title')}>
+      {(name || status || convo.failing) && (
+        <div className="convo-bar">
+          <span className="convo-bar-name">{name || t('convo.title')}</span>
+          <span className={'convo-bar-status' + (agent?.status === 'blocked' ? ' is-blocked' : '')}>
+            {convo.failing ? t('convo.paused', { time: clockMs(convo.okAt) }) : status}
+          </span>
+        </div>
+      )}
       <div className="convo-scroll" ref={box}>
         <div className="convo-col">{body}</div>
       </div>
       {away && convo.status === 'ready' && (
         <button
           type="button"
-          className="convo-latest"
+          className={'convo-latest' + (onReply ? ' is-raised' : '')}
           onClick={() => {
             const el = box.current
             if (el) el.scrollTo({ top: el.scrollHeight, behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' })
@@ -186,8 +225,61 @@ export function ConversationView({
           {t('convo.latest')}
         </button>
       )}
+      {onReply && (
+        <div className="convo-waiting" role="status">
+          <span>{t('convo.waiting')}</span>
+          <button type="button" className="btn btn-primary" onClick={onReply}>{t('convo.answer')}</button>
+        </div>
+      )}
     </div>
   )
+}
+
+// One item of the list. Memoised: a poll that changed one entry renders
+// that one (the others keep their objects, see conversation.ts).
+const ListItem = memo(function ListItem({ it, copy }: { it: Item; copy: (s: string) => void }) {
+  switch (it.kind) {
+    case 'user':
+      return <UserTurn e={it.e} onCopy={copy} />
+    case 'note':
+      return <p className="convo-note">{it.e.parts.map((p) => p.text).join(' ')}</p>
+    case 'summary':
+      return (
+        <details className="convo-summary">
+          <summary>{t('convo.summary')}</summary>
+          <div className="convo-md">
+            <Markdown text={it.e.parts[0]?.text ?? ''} />
+          </div>
+        </details>
+      )
+    case 'text':
+      return (
+        <div className="convo-md">
+          <Markdown text={it.text} onCopyCode={copy} copyLabel={t('common.copy')} />
+          {it.truncated && <p className="convo-cut">{t('convo.cut')}</p>}
+        </div>
+      )
+    case 'steps':
+      return <Steps parts={it.parts} onCopy={copy} />
+  }
+}, (a, b) => a.copy === b.copy && sameItem(a.it, b.it))
+
+function sameItem(a: Item, b: Item): boolean {
+  if (a.kind !== b.kind) return false
+  switch (a.kind) {
+    case 'text':
+      return a.text === (b as typeof a).text && a.truncated === (b as typeof a).truncated
+    case 'steps': {
+      const bp = (b as typeof a).parts
+      return a.parts.length === bp.length && a.parts.every((p, i) => p === bp[i])
+    }
+    default:
+      return a.e === (b as typeof a).e
+  }
+}
+
+function clockMs(ms: number): string {
+  return ms ? new Date(ms).toLocaleTimeString(getLang(), { hour: '2-digit', minute: '2-digit' }) : '—'
 }
 
 function clock(ts?: string): string {

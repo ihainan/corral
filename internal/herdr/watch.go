@@ -26,6 +26,9 @@ type Watcher struct {
 	socketPath string
 	onChange   func(*Snapshot)
 	onTrans    func(Transition)
+	// OnLost, if set, is called when the connection to herdr fails: what was
+	// reported last may no longer be so until the next snapshot.
+	OnLost func()
 
 	mu   sync.Mutex
 	last *Snapshot
@@ -52,6 +55,8 @@ func (w *Watcher) Run(ctx context.Context) {
 		}
 		if err == nil {
 			backoff = time.Second
+		} else if w.OnLost != nil {
+			w.OnLost()
 		}
 		select {
 		case <-ctx.Done():

@@ -36,11 +36,22 @@ import { onOpenRequest, takeTabs } from '../notifyopen'
 import { offerAlerts } from '../push'
 import { adoptComposer, composerWasOpen, rememberComposer } from '../terminal/composerOpen'
 import { promptSuggestion } from '../terminal/suggestion'
-import { ConversationView } from '../terminal/Conversation'
-import { convoWasOpen, rememberConvo, useConversation } from '../terminal/conversation'
+import { ConversationView, type ConvoAgent, type ConvoPending } from '../terminal/Conversation'
+import { convoWasOpen, rememberConvo, useConversation, type ConvoEntry } from '../terminal/conversation'
 import { useSession, VERSION_EVENT } from '../app'
 
 const isTouch = window.matchMedia('(pointer: coarse)').matches || navigator.maxTouchPoints > 0
+
+// The conversation view's composer was put away while it showed: it no longer opens with it.
+const CONVO_NO_COMPOSER = 'corral.convoNoComposer'
+const PENDING_MS = 30000 // a message sent from the conversation not seen in the log by then: say so
+
+const turnText = (e: ConvoEntry) => e.parts.filter((p) => p.kind === 'text').map((p) => p.text).join('\n')
+// The log may hold it a little differently (whitespace, a cut): the start, spaced alike.
+const sameText = (a: string, b: string) => {
+  const n = (s: string) => s.replace(/\s+/g, ' ').trim().slice(0, 2000)
+  return n(a) === n(b)
+}
 const isMac = /Mac|iPhone|iPad/.test(navigator.platform)
 const HIGH_LATENCY = 300 // ms; below this the status just says "connected"
 
@@ -486,29 +497,79 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
   const takeOverRef = useRef<() => void>(() => {})
   const [following, setFollowing] = useState<{ cols: number; rows: number } | null>(null)
   const canConvo = !watch && (info?.persistence === 'tmux' || info?.persistence === 'herdr')
-  const showConvo = convoOpen && canConvo
+  // "Show the terminal" from the conversation is a look, not a change of the
+  // choice: it ends when another pane comes in front or the button is used.
+  const [convoPeek, setConvoPeek] = useState(false)
+  useEffect(() => setConvoPeek(false), [herdr?.focused_pane])
+  const showConvo = convoOpen && canConvo && !convoPeek
   const convo = useConversation(id, showConvo && active, herdr?.focused_pane)
-  const focusedStatus = useMemo(() => {
-    const pane = herdr?.focused_pane
-    for (const w of herdr?.workspaces ?? []) for (const a of w.agents) if (a.pane_id === pane) return a.status
-    return undefined
-  }, [herdr])
-  // What the composer sent while the conversation shows, until the agent's
-  // log has it (it is written once the agent takes the message in).
-  const [convoPending, setConvoPending] = useState<{ text: string; users: number } | null>(null)
-  const convoUsers = convo.entries.filter((e) => e.role === 'user').length
+  // The agent the conversation is of, as herdr's summary has it.
+  const convoHit = useMemo(() => {
+    if (!herdr) return null
+    const pane = convo.bind?.pane ?? herdr.focused_pane
+    for (const w of herdr.workspaces) for (const a of w.agents) if (a.pane_id === pane) return { a, ws: w.label }
+    return null
+  }, [herdr, convo.bind?.pane])
+  const herdrCurrent = herdrFresh && !!herdr
+  const convoAgent = useMemo((): ConvoAgent | null => {
+    if (info?.persistence !== 'herdr') return convo.bind?.title ? { title: convo.bind.title, status: 'unknown' } : null
+    const claude = (name?: string) => !!name && /claude/i.test(name)
+    if (!convoHit) {
+      const other = herdrCurrent && herdr?.focused_agent && !claude(herdr.focused_agent) ? herdr.focused_agent : undefined
+      return other ? { status: 'unknown', other } : null
+    }
+    const st = convoHit.a.status
+    const known = herdrCurrent && (st === 'working' || st === 'blocked' || st === 'done' || st === 'idle')
+    return { where: convoHit.ws, title: convoHit.a.title, status: known ? st : 'unknown', other: claude(convoHit.a.agent) ? undefined : convoHit.a.agent }
+  }, [info?.persistence, convo.bind?.title, convoHit, herdrCurrent, herdr?.focused_agent])
+  // Waiting for an answer, in the pane the conversation is of and in front.
+  const convoWaits = !!convoHit && convoAgent?.status === 'blocked' && convoHit.a.pane_id === herdr?.focused_pane && status === 'open'
+  // What the composer sent while the conversation shows, until a user turn
+  // with its text appears after it in the same log (each turn answers one).
+  const [convoPending, setConvoPending] = useState<(ConvoPending & { pane: string; after: number; gen: number; at: number })[]>([])
+  const pendingId = useRef(0)
+  const pendingUsed = useRef<{ gen: number; seqs: Set<number> }>({ gen: 0, seqs: new Set() })
   useEffect(() => {
-    if (!convoPending) return
-    if (convoUsers > convoPending.users) {
-      setConvoPending(null)
+    if (!convoPending.some((p) => p.state === 'waiting') || convo.status !== 'ready') return
+    if (pendingUsed.current.gen !== convo.gen) pendingUsed.current = { gen: convo.gen, seqs: new Set() }
+    const used = pendingUsed.current.seqs
+    const users = convo.entries.filter((e) => e.role === 'user')
+    let changed = false
+    const next = convoPending.flatMap((p) => {
+      if (p.state !== 'waiting') return [p]
+      if (p.gen !== convo.gen) {
+        changed = true
+        return [{ ...p, state: 'sent' as const }] // (another reading of the log: it cannot be told any more)
+      }
+      const hit = users.find((e) => e.seq > p.after && !used.has(e.seq) && sameText(turnText(e), p.text))
+      if (!hit) return [p]
+      used.add(hit.seq)
+      changed = true
+      return []
+    })
+    if (changed) setConvoPending(next)
+  }, [convo.entries, convo.gen, convo.status, convoPending])
+  useEffect(() => {
+    const waiting = convoPending.filter((p) => p.state === 'waiting')
+    if (!waiting.length) return
+    const due = Math.min(...waiting.map((p) => p.at)) + PENDING_MS - Date.now()
+    const timer = setTimeout(() => setConvoPending((ps) => ps.map((p) => (p.state === 'waiting' && Date.now() - p.at >= PENDING_MS ? { ...p, state: 'unseen' } : p))), Math.max(0, due) + 50)
+    return () => clearTimeout(timer)
+  }, [convoPending])
+  const shownPending = convoPending.filter((p) => p.pane === (convo.bind?.pane ?? ''))
+  // On a touch screen, taps on the conversation bring up no keyboard: the
+  // composer is how to type there. It opens with the view, unless it was put
+  // away while the view showed.
+  const convoNoComposer = useRef(local.get(CONVO_NO_COMPOSER) === '1')
+  const toggleConvo = () => {
+    if (convoPeek) {
+      setConvoPeek(false)
       return
     }
-    const timer = setTimeout(() => setConvoPending(null), 30000)
-    return () => clearTimeout(timer)
-  }, [convoPending, convoUsers])
-  const toggleConvo = () => {
-    rememberConvo(id, !convoOpen)
-    setConvoOpen(!convoOpen)
+    const open = !convoOpen
+    rememberConvo(id, open)
+    setConvoOpen(open)
+    if (open && isTouch && !composer && !convoNoComposer.current) openComposerRef.current()
   }
   const outRef = useRef<(d: string | Uint8Array) => void>(() => {})
   const safeFitRef = useRef(() => {})
@@ -1029,6 +1090,10 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
       },
       onMeta: (m) => {
         if (watch) return // herdr belongs to the owner
+        if ((m as { t?: string }).t === 'herdr-lost') {
+          setHerdrFresh(false) // (the gateway lost herdr: what it said last may no longer hold)
+          return
+        }
         setHerdr(m as HerdrSummary)
         setHerdrFresh(true)
       },
@@ -2062,7 +2127,11 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
       return
     }
     remember(draft)
-    if (showConvo && submit && text.trim()) setConvoPending({ text, users: convoUsers })
+    if (showConvo && submit && text.trim() && convo.status === 'ready') {
+      const after = convo.entries.length ? convo.entries[convo.entries.length - 1].seq : 0
+      const item = { id: ++pendingId.current, text, state: 'waiting' as const, pane: convo.bind?.pane ?? '', after, gen: convo.gen, at: Date.now() }
+      setConvoPending((ps) => [...ps, item].slice(-5))
+    }
     histPos.current = null
     setDraft('')
     composerRef.current?.focus()
@@ -2130,6 +2199,10 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
   }
   const toggleComposer = () => {
     if (watch) return
+    if (showConvo) {
+      convoNoComposer.current = composer
+      local.set(CONVO_NO_COMPOSER, composer ? '1' : '0')
+    }
     if (composer) {
       setComposer(false)
       rememberComposer(id, false)
@@ -2553,7 +2626,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
           />
         )}
         {!ended && canConvo && (
-          <button className="icon-btn convo-btn" aria-pressed={convoOpen} onClick={toggleConvo} aria-label={t('convo.toggle')} title={t('convo.toggle')}>
+          <button className="icon-btn convo-btn" aria-pressed={convoOpen && !convoPeek} onClick={toggleConvo} aria-label={t('convo.toggle')} title={t('convo.toggle')}>
             <MessagesSquare size={19} />
           </button>
         )}
@@ -2606,9 +2679,11 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
         {showConvo && !ended && (
           <ConversationView
             convo={convo}
-            working={focusedStatus === 'working'}
-            pending={convoPending?.text ?? null}
-            onShowTerminal={toggleConvo}
+            agent={convoAgent}
+            pending={shownPending}
+            onReply={convoWaits ? () => setReplyTo(convoHit!.a) : undefined}
+            onDismiss={(pid) => setConvoPending((ps) => ps.filter((p) => p.id !== pid))}
+            onShowTerminal={() => setConvoPeek(true)}
             onCopied={() => toast(t('common.copied'))}
           />
         )}

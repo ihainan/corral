@@ -167,6 +167,8 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 		},
 		func(tr herdr.Transition) { s.onAgentTransition(sess, h, tr) },
 	)
+	// The browser holds the last summary as current until told otherwise.
+	w.OnLost = func() { sess.PublishMeta([]byte(`{"t":"herdr-lost"}`)) }
 	w.Run(ctx)
 	s.endSessionAlerts(sess) // (its agents wait no more)
 }

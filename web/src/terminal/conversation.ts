@@ -37,9 +37,19 @@ export interface ConvoEntry {
   parts: ConvoPart[]
 }
 
+// What the entries are of (internal/web/conversation.go convoBind).
+export interface ConvoBind {
+  pane: string
+  pid: number
+  start: number
+  session: string
+  title?: string
+}
+
 interface Answer {
   available: boolean
   reason?: string
+  bind?: ConvoBind
   gen: number
   rev: number
   reset?: boolean
@@ -53,16 +63,27 @@ export type ConvoStatus = 'loading' | 'ready' | 'none' | 'error'
 export interface Convo {
   status: ConvoStatus
   reason?: string // with 'none': no_agent, no_log, unsupported
-  entries: ConvoEntry[]
+  entries: ConvoEntry[] // (the same array while nothing in it changed)
   older: boolean
+  gen: number
+  bind?: ConvoBind
+  // Reading has failed since okAt (ms): what shows may be out of date.
+  failing: boolean
+  okAt: number
+  changedAt: number // (ms) when an entry was last added or changed
 }
+
+const initial = (): Convo => ({ status: 'loading', entries: [], older: false, gen: 0, failing: false, okAt: 0, changedAt: Date.now() })
+
+const sameBind = (a?: ConvoBind, b?: ConvoBind) =>
+  a === b || (!!a && !!b && a.pane === b.pane && a.pid === b.pid && a.start === b.start && a.session === b.session && a.title === b.title)
 
 const POLL = 2000
 const RETRY = 5000
 const MAX = 2000
 
 export function useConversation(sessionId: string, enabled: boolean, pane: string | undefined): Convo {
-  const [convo, setConvo] = useState<Convo>({ status: 'loading', entries: [], older: false })
+  const [convo, setConvo] = useState<Convo>(initial)
   const paneRef = useRef(pane)
   paneRef.current = pane
   const poke = useRef<() => void>(() => {})
@@ -89,29 +110,44 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
         const a = await api<Answer>('GET', `/api/sessions/${sessionId}/conversation?${q}`, undefined, { signal: mine.signal, timeoutMs: 25000 })
         if (stopped || mine.signal.aborted) return
         // (An answer for the pane that was in front: ask again for this one.)
+        const now = Date.now()
         if (pane !== paneRef.current) next = 0
         else if (!a.available) {
           gen = a.gen
           rev = 0
           byseq = new Map()
-          setConvo({ status: 'none', reason: a.reason, entries: [], older: false })
+          setConvo((c) =>
+            c.status === 'none' && c.reason === a.reason && c.gen === a.gen && sameBind(c.bind, a.bind) && !c.failing
+              ? c
+              : { ...initial(), status: 'none', reason: a.reason, gen: a.gen, bind: a.bind, okAt: now, changedAt: now },
+          )
         } else {
-          if (a.reset || a.gen !== gen) byseq = new Map()
+          const fresh = a.reset || a.gen !== gen
+          if (fresh) byseq = new Map()
           gen = a.gen
           rev = a.rev
           for (const e of a.entries) byseq.set(e.seq, e)
-          let entries = [...byseq.values()].sort((x, y) => x.seq - y.seq)
-          if (entries.length > MAX) {
-            entries = entries.slice(-MAX)
-            byseq = new Map(entries.map((e) => [e.seq, e]))
+          const changed = fresh || a.entries.length > 0
+          let entries: ConvoEntry[] | null = null
+          if (changed) {
+            entries = [...byseq.values()].sort((x, y) => x.seq - y.seq)
+            if (entries.length > MAX) {
+              entries = entries.slice(-MAX)
+              byseq = new Map(entries.map((e) => [e.seq, e]))
+            }
           }
-          setConvo({ status: 'ready', entries, older: !!a.older || entries.length === MAX })
+          // Nothing new: the same state (no rendering), unless its facts changed.
+          setConvo((c) => {
+            const older = !!a.older || (entries ?? c.entries).length === MAX
+            if (!entries && c.status === 'ready' && c.gen === a.gen && c.older === older && sameBind(c.bind, a.bind) && !c.failing) return c
+            return { status: 'ready', entries: entries ?? c.entries, older, gen: a.gen, bind: a.bind, failing: false, okAt: now, changedAt: entries ? now : c.changedAt }
+          })
           if (a.more) next = 300
         }
       } catch (e) {
         if (stopped || mine.signal.aborted || (e instanceof ApiError && e.code === 'aborted')) return
         next = RETRY
-        setConvo((c) => ({ ...c, status: c.entries.length ? c.status : 'error' }))
+        setConvo((c) => (c.entries.length ? (c.failing ? c : { ...c, failing: true }) : { ...c, status: 'error', failing: true }))
       } finally {
         if (ctl === mine) ctl = null
       }
@@ -126,10 +162,15 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
       timer = undefined
       ctl?.abort()
       ctl = null
+      // (Nothing of the pane that was in front shows meanwhile.)
+      gen = 0
+      rev = 0
+      byseq = new Map()
+      setConvo(initial())
       void run()
     }
     document.addEventListener('visibilitychange', onVisible)
-    setConvo({ status: 'loading', entries: [], older: false })
+    setConvo(initial())
     void run()
     return () => {
       stopped = true

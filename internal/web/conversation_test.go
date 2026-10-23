@@ -21,7 +21,7 @@ func TestParseConvoLocate(t *testing.T) {
 		convoRec("pid=103", "start=800", "procstart=800", "sid="+sidB, "log=/etc/passwd") +
 		convoRec("pid=104", "start=800", "procstart=800", "sid=../../x", "log=") +
 		convoRec("garbage")
-	procs, active, serverPID, noProc := parseConvoLocate(out)
+	procs, active, serverPID, _, noProc := parseConvoLocate(out)
 	if active != "%3" || serverPID != "4242" || noProc {
 		t.Fatalf("tmux %q %q noproc %v", active, serverPID, noProc)
 	}
@@ -37,10 +37,10 @@ func TestParseConvoLocate(t *testing.T) {
 	if p := procs[2]; p.pid != 103 || p.log != "" {
 		t.Errorf("foreign log kept: %+v", p)
 	}
-	if _, _, _, noProc := parseConvoLocate("noproc\x00"); !noProc {
+	if _, _, _, _, noProc := parseConvoLocate("noproc\x00"); !noProc {
 		t.Error("noproc not seen")
 	}
-	if _, active, _, _ := parseConvoLocate("tmux=%3; rm -rf / 1\x00"); active != "" {
+	if _, active, _, _, _ := parseConvoLocate("tmux=%3; rm -rf / 1\x00"); active != "" {
 		t.Errorf("bad tmux answer accepted: %q", active)
 	}
 }
@@ -81,11 +81,11 @@ func TestConvoLocateCommandQuotesArguments(t *testing.T) {
 func TestParseConvoLocateFirstValueCounts(t *testing.T) {
 	// A later line (a value that held a newline) cannot replace a field.
 	out := convoRec("pid=100", "start=500", "procstart=1", "sid="+sidA, "log=", "start=1", "HERDR_PANE_ID=w1:p1", "HERDR_PANE_ID=w9:p9")
-	if procs, _, _, _ := parseConvoLocate(out); len(procs) != 0 {
+	if procs, _, _, _, _ := parseConvoLocate(out); len(procs) != 0 {
 		t.Fatalf("start time replaced: %+v", procs)
 	}
 	out = convoRec("pid=100", "start=500", "procstart=500", "sid="+sidA, "log=", "HERDR_PANE_ID=w1:p1", "HERDR_PANE_ID=w9:p9")
-	if procs, _, _, _ := parseConvoLocate(out); len(procs) != 1 || procs[0].herdrPane != "w1:p1" {
+	if procs, _, _, _, _ := parseConvoLocate(out); len(procs) != 1 || procs[0].herdrPane != "w1:p1" {
 		t.Fatalf("pane replaced: %+v", procs)
 	}
 }
@@ -96,5 +96,12 @@ func TestConvoGenerationsAreNotReused(t *testing.T) {
 	c.m = nil // (as if every state had been forgotten)
 	if b := c.get("s1").gen; b == a {
 		t.Fatalf("generation %d given again", b)
+	}
+}
+
+func TestParseConvoLocateTmuxTitle(t *testing.T) {
+	_, _, _, title, _ := parseConvoLocate("tmux=%1 9\x00tmuxtitle=\u2733 fix\u0007 the tests\x00")
+	if title != "\u2733 fix the tests" {
+		t.Fatalf("title %q", title)
 	}
 }
