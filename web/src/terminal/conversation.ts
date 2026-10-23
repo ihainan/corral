@@ -50,6 +50,7 @@ interface Answer {
   available: boolean
   reason?: string
   bind?: ConvoBind
+  agent_status?: 'busy' | 'idle'
   gen: number
   rev: number
   reset?: boolean
@@ -67,6 +68,7 @@ export interface Convo {
   older: boolean
   gen: number
   bind?: ConvoBind
+  agentStatus?: 'busy' | 'idle' // (tmux) as Claude Code's file for the process says
   // Reading has failed since okAt (ms): what shows may be out of date.
   failing: boolean
   okAt: number
@@ -141,8 +143,8 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
           // Nothing new: the same state (no rendering), unless its facts changed.
           setConvo((c) => {
             const older = !!a.older || (entries ?? c.entries).length === MAX
-            if (!entries && c.status === 'ready' && c.gen === a.gen && c.older === older && sameBind(c.bind, a.bind) && !c.failing) return c
-            return { status: 'ready', entries: entries ?? c.entries, older, gen: a.gen, bind: a.bind, failing: false, okAt: now, changedAt: entries ? now : c.changedAt }
+            if (!entries && c.status === 'ready' && c.gen === a.gen && c.older === older && sameBind(c.bind, a.bind) && c.agentStatus === a.agent_status && !c.failing) return c
+            return { status: 'ready', entries: entries ?? c.entries, older, gen: a.gen, bind: a.bind, agentStatus: a.agent_status, failing: false, okAt: now, changedAt: entries ? now : c.changedAt }
           })
           if (a.more) next = 300
         }

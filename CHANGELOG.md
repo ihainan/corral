@@ -18,7 +18,12 @@ before 1.0, a minor version may change configuration or behaviour (said here whe
   an answer a strip at the bottom opens the reply dialog. What the
   composer sends shows until the log has it, and on touch screens the
   composer opens with the view. When the gateway loses herdr, its last
-  statuses are no longer shown as current.
+  statuses are no longer shown as current. With herdr the bar lists the session's
+  agents, waiting ones first, to go to one (sending waits until it is in
+  front, and the composer says where a message goes); in tmux it shows
+  whether Claude Code is working, from its own file. While the agent works,
+  Stop presses Escape in its pane, sent by the gateway to that pane only
+  after it checked the same Claude Code process still runs there.
 - Tab keys in the installed app: ⌘T opens a new tab (Ctrl+Shift+T off a Mac,
   where Ctrl+letters stay with the programs); on a Mac or an iPad ⌘1–⌘8 pick
   a tab by its place, ⌘9 the last, ⌘⇧[ and ⌘⇧] the previous and next. No key

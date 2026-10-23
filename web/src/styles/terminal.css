@@ -468,3 +468,14 @@ html.term-dark .overlay, html.term-dark .menu, html.term-dark .toast {
   border-top: 1px solid var(--term-line); background: var(--term-chrome); font-size: 14px; font-weight: 500;
 }
 .convo-latest.is-raised { bottom: 72px; }
+.convo-bar-pick {
+  flex: 1; min-width: 0; display: flex; align-items: center; gap: 4px; border: 0; background: none; padding: 0;
+  color: inherit; font: inherit; text-align: left; cursor: pointer;
+}
+.convo-bar-pick.is-static { cursor: default; }
+.convo-bar-pick:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: 2px; border-radius: 4px; }
+.convo-bar-chev { flex: none; color: var(--term-fg-3); }
+.convo-stop { flex: none; height: 26px; padding: 0 10px; font-size: 13px; }
+@media (pointer: coarse) { .convo-stop { height: 34px; } }
+.composer-to { padding: 0 6px 6px; font-size: 12px; color: var(--term-fg-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.convo-bar-pick .convo-bar-name { flex: 0 1 auto; }

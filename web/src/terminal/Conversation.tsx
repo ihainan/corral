@@ -1,7 +1,7 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { ArrowDown, Bot, ChevronRight, FilePen, FileText, Globe, Search, SquareTerminal, Wrench } from 'lucide-react'
+import { ArrowDown, Bot, ChevronDown, ChevronRight, FilePen, FileText, Globe, Search, SquareTerminal, Wrench } from 'lucide-react'
 import { t, getLang, type I18nKey } from '../i18n'
-import { copyText } from '../components/ui'
+import { copyText, Menu, type MenuItem } from '../components/ui'
 import { Markdown } from './markdown'
 import type { Convo, ConvoEntry, ConvoPart, ConvoTool } from './conversation'
 
@@ -102,6 +102,9 @@ export function ConversationView({
   agent,
   pending,
   onReply,
+  onStop,
+  stop,
+  agents,
   onDismiss,
   onShowTerminal,
   onCopied,
@@ -110,6 +113,9 @@ export function ConversationView({
   agent: ConvoAgent | null
   pending: ConvoPending[]
   onReply?: () => void // (the agent waits for an answer)
+  onStop?: () => void // (it works: press Esc in its pane)
+  stop?: string // what became of the last stop pressed, to say
+  agents?: () => MenuItem[] // (herdr) the agents to go to, from the bar
   onDismiss: (id: number) => void
   onShowTerminal: () => void
   onCopied: () => void
@@ -211,14 +217,49 @@ export function ConversationView({
 
   const status = agent ? t(`convo.status.${agent.status}` as I18nKey) : ''
   const name = agent ? [agent.where, agent.title].filter(Boolean).join(' · ') : ''
+  // The list to go to is taken when it opens: statuses changing meanwhile
+  // do not move its rows under the finger.
+  const listed = useRef<MenuItem[]>([])
+  const label = (
+    <>
+      <span className="convo-bar-name">{name || t('convo.title')}</span>
+      {agents && <ChevronDown size={14} className="convo-bar-chev" aria-hidden="true" />}
+    </>
+  )
   return (
     <div className="convo" role="region" aria-label={t('convo.title')}>
-      {(name || status || convo.failing) && (
+      {(name || status || convo.failing || agents) && (
         <div className="convo-bar">
-          <span className="convo-bar-name">{name || t('convo.title')}</span>
+          {agents ? (
+            <Menu
+              label={t('convo.pick')}
+              items={() => listed.current}
+              button={(open, toggle) => (
+                <button
+                  type="button"
+                  className="convo-bar-pick"
+                  aria-expanded={open}
+                  aria-label={t('convo.pick')}
+                  onClick={(e) => {
+                    if (!open) listed.current = agents()
+                    toggle(e)
+                  }}
+                >
+                  {label}
+                </button>
+              )}
+            />
+          ) : (
+            <span className="convo-bar-pick is-static">{label}</span>
+          )}
           <span className={'convo-bar-status' + (agent?.status === 'blocked' ? ' is-blocked' : '')}>
-            {convo.failing ? t('convo.paused', { time: clockMs(convo.okAt) }) : status}
+            {convo.failing ? t('convo.paused', { time: clockMs(convo.okAt) }) : stop || status}
           </span>
+          {onStop && (
+            <button type="button" className="btn btn-ghost convo-stop" onClick={onStop}>
+              {t('convo.stop')}
+            </button>
+          )}
         </div>
       )}
       <div className="convo-scroll" ref={box}>

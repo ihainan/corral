@@ -8,7 +8,7 @@ import { WebLinksAddon } from '@xterm/addon-web-links'
 import { WebglAddon } from '@xterm/addon-webgl'
 import { ArrowUp, Check, MessagesSquare, ChevronDown, ChevronLeft, CircleStop, Code2, Eye, FolderOpen, Globe, History, ImagePlus, MessageCircleReply, MoreVertical, Minus, Palette, Paperclip, Plus, TextSelect, Keyboard as KeyboardIcon, Power, RotateCw, Server, TextCursorInput, X } from 'lucide-react'
 import { api, ApiError, choiceOf, errorText, uploadFile, type HerdrAgent, type HerdrSummary, type Host, type OpenChoice, type SessionInfo } from '../api'
-import { t } from '../i18n'
+import { t, type I18nKey } from '../i18n'
 import { navigate } from '../router'
 import { getPrefs, prefsConfirmed, setChromeColor, setPrefs, termScheme, usePrefs } from '../prefs'
 import { local } from '../storage'
@@ -525,7 +525,11 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
   // still has herdr.
   const herdrCurrent = herdrFresh && !!herdr && !herdr.lost && status === 'open'
   const convoAgent = useMemo((): ConvoAgent | null => {
-    if (info?.persistence !== 'herdr') return convo.bind?.title ? { title: convo.bind.title, status: 'unknown' } : null
+    if (info?.persistence !== 'herdr') {
+      if (!convo.bind) return null
+      const st = status === 'open' && !convo.failing && convo.agentStatus
+      return { title: convo.bind.title, status: st === 'busy' ? 'working' : st === 'idle' ? 'idle' : 'unknown' }
+    }
     const claude = (name?: string) => !!name && /claude/i.test(name)
     if (!convoHit) {
       const other = herdrCurrent && herdr?.focused_agent && !claude(herdr.focused_agent) ? herdr.focused_agent : undefined
@@ -534,11 +538,60 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
     const st = convoHit.a.status
     const known = herdrCurrent && (st === 'working' || st === 'blocked' || st === 'done' || st === 'idle')
     return { where: convoHit.ws, title: convoHit.a.title, status: known ? st : 'unknown', other: claude(convoHit.a.agent) ? undefined : convoHit.a.agent }
-  }, [info?.persistence, convo.bind?.title, convoHit, herdrCurrent, herdr?.focused_agent])
+  }, [info?.persistence, convo.bind, convo.agentStatus, convo.failing, status, convoHit, herdrCurrent, herdr?.focused_agent])
   // Waiting for an answer, in the pane the conversation is of and in front.
   const convoWaits =
     convo.status === 'ready' && !!convo.bind && !!convoHit && convoHit.a.pane_id === convo.bind.pane && convoHit.a.pane_id === herdr?.focused_pane &&
     convoAgent?.status === 'blocked' && !convoAgent.other
+  // Stop: Escape pressed in the conversation's pane by the gateway, for the
+  // process it shows (internal/web/conversation.go). What became of it shows
+  // in the bar until the agent stops working, or for a while.
+  const [convoStop, setConvoStop] = useState<{ text: string; at: number } | null>(null)
+  const convoWorking = convoAgent?.status === 'working'
+  useEffect(() => {
+    if (!convoStop) return
+    if (!convoWorking) return setConvoStop(null)
+    const timer = setTimeout(() => setConvoStop(null), 15000)
+    return () => clearTimeout(timer)
+  }, [convoStop, convoWorking])
+  const stopAgent = () => {
+    const b = convo.bind
+    if (!b || convoStop?.text === t('convo.stopping')) return
+    setConvoStop({ text: t('convo.stopping'), at: Date.now() })
+    api('POST', `/api/sessions/${id}/conversation/interrupt`, { pane: b.pane, pid: b.pid, start: b.start, session: b.session })
+      .then(() => setConvoStop({ text: t('convo.stopped'), at: Date.now() }))
+      .catch((e) => setConvoStop({ text: e instanceof ApiError && e.code === 'agent_changed' ? t('convo.stopChanged') : errorText(e), at: Date.now() }))
+  }
+  // Going to another agent from the bar (herdr): sending waits until herdr
+  // has that pane in front and the conversation is of it, so what is typed
+  // meanwhile does not reach the pane left.
+  const [convoSwitch, setConvoSwitch] = useState<string | null>(null)
+  useEffect(() => {
+    if (!convoSwitch) return
+    if (herdr?.focused_pane === convoSwitch && (convo.bind?.pane === convoSwitch || convo.status === 'none')) return setConvoSwitch(null)
+    const timer = setTimeout(() => {
+      setConvoSwitch(null)
+      toast(t('convo.switchSlow'), true)
+    }, 10000)
+    return () => clearTimeout(timer)
+  }, [convoSwitch, herdr?.focused_pane, convo.bind?.pane, convo.status, toast])
+  const convoAgents = (): MenuItem[] => {
+    const rank: Record<string, number> = { blocked: 0, working: 1, done: 2, idle: 3 }
+    const all = (herdr?.workspaces ?? []).flatMap((w) => w.agents.map((a) => ({ a, ws: w.label })))
+    all.sort((x, y) => (rank[x.a.status] ?? 4) - (rank[y.a.status] ?? 4))
+    return all.map(({ a, ws }) => ({
+      label: [ws, a.title || a.agent].filter(Boolean).join(' · ') + (herdrCurrent && rank[a.status] !== undefined ? ' — ' + t(`convo.status.${a.status}` as I18nKey) : ''),
+      icon: a.pane_id === herdr?.focused_pane ? <Check size={16} /> : <span className="menu-icon-space" />,
+      onSelect: () => {
+        if (a.pane_id === herdr?.focused_pane) return
+        setConvoSwitch(a.pane_id)
+        api('POST', `/api/sessions/${id}/herdr`, { action: 'focus_pane', target: a.pane_id }).catch((e) => {
+          setConvoSwitch(null)
+          toast(errorText(e), true)
+        })
+      },
+    }))
+  }
   // What the composer sent while the conversation shows, until a user turn
   // with its text appears in the same log of the same process, after it
   // (by the log's position and its time), each turn answering one.
@@ -2144,6 +2197,10 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
       return
     }
     // Sent at once or not at all: the draft stays until it surely went out.
+    if (showConvo && convoSwitch) {
+      toast(t('convo.switching'), true) // (the draft stays: sent once the other agent is in front)
+      return
+    }
     if (heldRef.current()) {
       toast(t('term.waitUpload'), true) // a clipboard image is still being uploaded
       return
@@ -2707,6 +2764,9 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
             agent={convoAgent}
             pending={shownPending}
             onReply={convoWaits ? () => setReplyTo(convoHit!.a) : undefined}
+            onStop={convoWorking && convo.bind && status === 'open' ? stopAgent : undefined}
+            stop={convoSwitch ? t('convo.switching') : convoStop?.text}
+            agents={info?.persistence === 'herdr' && herdr ? convoAgents : undefined}
             onDismiss={(pid) => setConvoPending((ps) => ps.filter((p) => p.id !== pid))}
             onShowTerminal={() => setConvoPeek(true)}
             onCopied={() => toast(t('common.copied'))}
@@ -2759,6 +2819,10 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
         <>
           {composer && (
             <div className="composer">
+              {showConvo && convoAgent && (convoAgent.title || convoAgent.where) && (
+                // (Where a message goes: the pane in front, which the conversation follows.)
+                <div className="composer-to">{t('convo.to', { name: [convoAgent.where, convoAgent.title].filter(Boolean).join(' · ') })}</div>
+              )}
               {completion.list}
               <div className="composer-box">
                 <textarea
