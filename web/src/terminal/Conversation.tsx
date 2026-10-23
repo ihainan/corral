@@ -267,9 +267,10 @@ export function ConversationView({
   }, [])
   const sideShown = !!side && wide && !folded
   const [picking, setPicking] = useState(false)
+  const unpick = useCallback(() => setPicking(false), [])
   useEffect(() => {
-    if (sideShown) setPicking(false)
-  }, [sideShown])
+    if (sideShown || !active) setPicking(false) // (a tab sent to the back keeps no dialog open)
+  }, [sideShown, active])
   // Alt+Up and Alt+Down: the agent before and after on the list (not while
   // a field with text in it has the keys).
   const sideRef = useRef(side)
@@ -493,7 +494,7 @@ export function ConversationView({
         </div>
       )}
       </div>
-      {picking && side && <Picker rows={rows} onClose={() => setPicking(false)} />}
+      {picking && side && <Picker rows={rows} onClose={unpick} />}
     </div>
   )
 }
@@ -539,7 +540,7 @@ function AgentList({ rows, onPicked }: { rows: ConvoListRow[]; onPicked?: () => 
                 aria-current={r.current || undefined}
                 onClick={() => {
                   onPicked?.()
-                  if (!r.current) r.onPick()
+                  r.onPick() // (of the one shown: nothing, or the end of a switch to another; the list may be of before)
                 }}
               >
                 <span className="convo-list-title">{r.title}</span>
@@ -563,6 +564,7 @@ function AgentList({ rows, onPicked }: { rows: ConvoListRow[]; onPicked?: () => 
 function Picker({ rows, onClose }: { rows: ConvoListRow[]; onClose: () => void }) {
   const [shown] = useState(rows)
   const box = useRef<HTMLDivElement>(null)
+  // (Once, when it opens: focus moved on in it stays where it was moved.)
   useEffect(() => {
     const prev = document.activeElement as HTMLElement | null
     ;(box.current?.querySelector<HTMLElement>('[aria-current="true"]') ?? box.current?.querySelector<HTMLElement>('button'))?.focus()

@@ -71,10 +71,15 @@ another: start it at your desk, check on it from your phone, carry on on a table
 - **Agents page** — Every agent of your open herdr sessions on one page,
   those waiting for you first: answer one, read its conversation or open
   its terminal from there.
-- **Conversation view** — Read Claude Code's session as a conversation:
-  its answers formatted, the commands and edits between them folded into one
-  line each run, the whole history even where the terminal keeps none. The
-  terminal is a tap away; you keep typing in the composer.
+- **Conversation view** — Read Claude Code's session as a conversation, by
+  its own title: each answer formatted, with what the turn changed (files,
+  lines added and removed) and copy; all the agent did between your messages
+  in one line ("worked for 2m 14s"), opened to a line a step, the step under
+  way shown with its seconds; its task list over the composer. Answer a
+  question it asks right there, stop it from the send button, and go to
+  another agent of any open session from the list beside it (Alt+↑/↓), the
+  ones waiting for you first. The whole history shows even where the
+  terminal keeps none; the terminal is a tap away.
 - **A composer** — Write longer prompts: `@` files, `/` commands, `$` skills,
   history, Claude Code's suggested prompt with Tab. Ctrl+Shift+Enter
   (⇧⌘↩ on a Mac) opens it from the terminal.
@@ -334,6 +339,12 @@ Report security problems privately, not in a public issue: see [SECURITY.md](SEC
   `~/.claude` (not a `CLAUDE_CONFIG_DIR` of its own). Only the session's
   owner sees it: someone watching a shared session sees the screen, and the
   log holds more than that.
+- A question is answered in the conversation in herdr panes, as from the
+  reply dialog; in tmux, a question Claude Code asks with its own tool shows
+  as waiting and is answered in the terminal (a permission prompt is not in
+  its log, so tmux shows that as working). The list beside it has the status
+  of herdr's agents and of the tmux session shown; other tmux sessions are
+  listed without one.
 - Stop in a tmux session checks that the pane is in the session and then
   presses Escape, two tmux commands: a window moved to another session in
   between would still be pressed.

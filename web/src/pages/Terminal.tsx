@@ -36,7 +36,7 @@ import { onOpenRequest, takeTabs } from '../notifyopen'
 import { offerAlerts } from '../push'
 import { adoptComposer, composerWasOpen, rememberComposer } from '../terminal/composerOpen'
 import { promptSuggestion } from '../terminal/suggestion'
-import { sessionWhich } from '../terminal/sessionName'
+import { agentKey, sessionWhich } from '../terminal/sessionName'
 import { ConversationView, type ConvoAgent, type ConvoListRow, type ConvoPending } from '../terminal/Conversation'
 import { isClaude, listAgents, paneTitle, useRunningSessions } from '../terminal/agents'
 import { asking, convoWasOpen, rememberConvo, useConversation, type ConvoEntry } from '../terminal/conversation'
@@ -264,6 +264,9 @@ let pagesOpen = 0
 // of the session switcher.
 // dropParam takes what a notification asked for (?name=value) out of the
 // address of this session's page once it is dealt with.
+// A tmux session on its host, whichever tab shows it.
+const tmuxKey = (s: SessionInfo) => `${s.host_id}|tmux|${s.mux_session ?? ''}`
+
 function dropParam(id: string, name: string, value: string) {
   const q = new URLSearchParams(location.search)
   if (location.pathname !== '/t/' + id || q.get(name) !== value) return
@@ -646,8 +649,10 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
     const all = [mine, ...(running.sessions ?? []).filter((x) => x.id !== id)]
     const { rows, others } = listAgents(all)
     const here = convo.bind?.pane ?? herdr?.focused_pane
-    const go = (s: SessionInfo, pane?: string) => () => {
-      if (s.id === id) {
+    // (Of this session: its agents by what they are, whichever tab's summary the list kept for them.)
+    const ours = (key: string, pane?: string) => (pane ? key === agentKey(info, pane) : key === tmuxKey(info))
+    const go = (s: SessionInfo, key: string, pane?: string) => () => {
+      if (s.id === id || ours(key, pane)) {
         if (pane) focusRef.current(pane)
         return
       }
@@ -655,24 +660,24 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
       navigate(`/t/${s.id}?convo=1` + (pane ? '&pane=' + encodeURIComponent(pane) : ''))
     }
     const out: ConvoListRow[] = rows.map((r) => {
-      const current = r.s.id === id && r.a.pane_id === here
+      const current = ours(r.key, r.a.pane_id) && r.a.pane_id === here
       if (current && convo.title) {
         seenTitles.current.delete(r.key) // (the latest last: the map keeps its order of use)
         seenTitles.current.set(r.key, convo.title)
         if (seenTitles.current.size > 100) seenTitles.current.delete(seenTitles.current.keys().next().value!)
       }
       const title = (current && convoAgent?.title) || seenTitles.current.get(r.key) || paneTitle(r.a.title) || r.a.agent
-      return { key: r.key, title, where: [r.s.host_name, r.ws, isClaude(r.a.agent) ? '' : r.a.agent].filter(Boolean).join(' · '), status: current && convoAgent ? convoAgent.status : r.status, current, onPick: go(r.s, r.a.pane_id) }
+      return { key: r.key, title, where: [r.s.host_name, r.ws, isClaude(r.a.agent) ? '' : r.a.agent].filter(Boolean).join(' · '), status: current && convoAgent ? convoAgent.status : r.status, current, onPick: go(r.s, r.key, r.a.pane_id) }
     })
     const seen = new Set<string>()
     for (const s of others) {
       if (s.persistence !== 'tmux') continue
-      const key = `${s.host_id}|tmux|${s.mux_session ?? ''}`
+      const key = tmuxKey(s)
       if (seen.has(key)) continue
       seen.add(key)
-      const current = s.id === id
+      const current = ours(key)
       // (Of a tmux session, what is known is of the one shown here: its conversation.)
-      out.push({ key, title: (current && convoAgent?.title) || `${s.host_name} · ${sessionWhich(s, all)}`, where: s.host_name + ' · tmux', status: current && convoAgent ? convoAgent.status : 'unknown', current, onPick: go(s) })
+      out.push({ key, title: (current && convoAgent?.title) || `${s.host_name} · ${sessionWhich(s, all)}`, where: s.host_name + ' · tmux', status: current && convoAgent ? convoAgent.status : 'unknown', current, onPick: go(s, key) })
     }
     return out
   }, [info, herdr, herdrCurrent, running.sessions, id, convo.bind?.pane, convo.title, convoAgent])

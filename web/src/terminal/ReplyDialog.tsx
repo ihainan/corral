@@ -209,18 +209,34 @@ export function InlineReply({ sessionId, agent, onLoaded, resizedAt }: { session
   const answered = useRef('')
   const { screen, failed, reading, changed, busy, error, text, setText, load, send, submit, opts } = useReply(sessionId, agent, { onLoaded, resizedAt, onSent: () => setSent(answered.current) })
   if (screen) answered.current = screen.digest
-  // Answered, it is read again now and then while the agent still waits:
-  // another question in the same pane (before the wait was seen to end)
-  // shows instead of the note.
+  // Answered, it is read again now and then (each read after the last came
+  // back) while the agent still waits: another question in the same pane,
+  // before the wait was seen to end, shows instead of the note: at once with
+  // choices, else once the screen has stayed other than the one answered
+  // (an agent going on is seen to work before that).
   const loadRef = useRef(load)
   loadRef.current = load
   useEffect(() => {
     if (sent === null) return
-    const timer = setInterval(() => void loadRef.current(), 2000)
-    return () => clearInterval(timer)
+    let stopped = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const next = () => {
+      timer = setTimeout(() => void loadRef.current().finally(() => !stopped && next()), 2000)
+    }
+    next()
+    return () => {
+      stopped = true
+      clearTimeout(timer)
+    }
   }, [sent])
+  const otherReads = useRef(0)
   useEffect(() => {
-    if (sent !== null && screen && screen.digest !== sent && opts.length > 0) setSent(null)
+    if (sent === null || !screen) return
+    otherReads.current = screen.digest === sent ? 0 : otherReads.current + 1
+    if (otherReads.current > 0 && (opts.length > 0 || otherReads.current >= 2)) {
+      otherReads.current = 0
+      setSent(null)
+    }
   }, [sent, screen, opts.length])
   const pre = useRef<HTMLPreElement>(null)
   useLayoutEffect(() => {
