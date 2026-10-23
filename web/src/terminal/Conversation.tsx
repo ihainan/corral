@@ -449,7 +449,7 @@ export function ConversationView({
           ) : (
             <span className="convo-bar-pick is-static">{label}</span>
           )}
-          <span className={'convo-bar-status' + (agent?.status === 'blocked' ? ' is-blocked' : '')}>
+          <span className={'convo-bar-status' + (agent && !convo.failing && !stop ? ' is-' + agent.status : '')}>
             {working && !convo.failing && !stop && <span className="convo-spin" aria-hidden="true" />}
             {convo.failing ? t('convo.paused', { time: clockMs(convo.okAt) }) : stop || status}
           </span>
@@ -546,7 +546,7 @@ function AgentList({ rows, onPicked }: { rows: ConvoListRow[]; onPicked?: () => 
                 <span className="convo-list-title">{r.title}</span>
                 <span className="convo-list-sub">
                   {r.status === 'working' && <span className="convo-spin is-small" aria-hidden="true" />}
-                  {r.status !== 'unknown' && <span className={r.status === 'blocked' ? 'is-blocked' : ''}>{t(`convo.status.${r.status}` as I18nKey)}</span>}
+                  {r.status !== 'unknown' && <span className={'is-' + r.status}>{t(`convo.status.${r.status}` as I18nKey)}</span>}
                   <span className="convo-list-where">{r.where}</span>
                 </span>
               </button>

@@ -379,7 +379,7 @@ html.term-dark .overlay, html.term-dark .menu, html.term-dark .toast {
 .convo-older { text-align: center; }
 
 .convo-user { align-self: flex-end; max-width: min(88%, 620px); display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
-.convo-user-text { background: var(--term-key-active); border-radius: 14px; padding: 8px 13px; white-space: pre-wrap; }
+.convo-user-text { background: var(--term-accent-soft); border-radius: 14px; padding: 8px 13px; white-space: pre-wrap; }
 .convo-image { color: var(--term-fg-3); }
 .convo-meta { display: flex; gap: 12px; font-size: 12px; color: var(--term-fg-3); font-variant-numeric: tabular-nums; }
 .convo-meta .link-btn { font-size: 12px; color: var(--term-fg-3); }
@@ -400,10 +400,10 @@ html.term-dark .overlay, html.term-dark .menu, html.term-dark .toast {
 .convo-md a { color: var(--term-accent-text); text-underline-offset: 2px; }
 .convo-md hr { border: 0; border-top: 1px solid var(--term-line); margin: 14px 0; }
 .convo-md blockquote { padding-left: 14px; color: var(--term-fg-2); }
-.convo-md code { font-family: var(--font-mono); font-size: 0.88em; background: var(--term-hover); border-radius: 4px; padding: 1px 5px; }
+.convo-md code { font-family: var(--font-mono); font-size: 0.88em; background: var(--term-hover); color: var(--term-accent-text); border-radius: 4px; padding: 1px 5px; }
 .md-code { position: relative; background: var(--term-chrome); border: 1px solid var(--term-line); border-radius: 8px; }
 .md-code pre { margin: 0; padding: 10px 12px; overflow-x: auto; font-family: var(--font-mono); font-size: 13px; line-height: 1.55; }
-.convo-md .md-code code { background: none; padding: 0; font-size: inherit; }
+.convo-md .md-code code { background: none; padding: 0; font-size: inherit; color: inherit; }
 .md-code-head {
   display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 28px;
   padding: 2px 4px 2px 12px; border-bottom: 1px solid var(--term-line); font: 12px/18px var(--font-ui); color: var(--term-fg-3);
@@ -520,7 +520,10 @@ html.term-dark .overlay, html.term-dark .menu, html.term-dark .toast {
 }
 .convo-bar-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--term-fg); font-weight: 600; }
 .convo-bar-status { flex: none; color: var(--term-fg-3); font-variant-numeric: tabular-nums; }
-.convo-bar-status.is-blocked { color: var(--term-accent-text); font-weight: 600; }
+/* The status, in one colour each wherever it shows: at work, waiting for you (as the tabs' count), done */
+.convo-bar-status.is-working, .convo-list-sub .is-working { color: var(--term-accent-text); }
+.convo-bar-status.is-blocked, .convo-list-sub .is-blocked { color: var(--term-warn-text); font-weight: 600; }
+.convo-bar-status.is-done, .convo-list-sub .is-done { color: var(--term-ok-text); }
 .convo-waiting {
   flex: none; display: flex; align-items: center; gap: 12px; justify-content: space-between;
   padding: 10px max(16px, env(safe-area-inset-right, 0px)) 10px max(16px, env(safe-area-inset-left, 0px));
@@ -544,7 +547,7 @@ html.term-dark .overlay, html.term-dark .menu, html.term-dark .toast {
 /* Answering in the thread: the question, its choices, a line of text */
 .convo-ask {
   display: flex; flex-direction: column; gap: 8px; padding: 12px; border-radius: 12px;
-  border: 1px solid var(--term-accent-text); background: var(--term-bg);
+  border: 1px solid var(--term-warn-text); background: var(--term-bg);
 }
 .convo-ask-q { font-weight: 600; }
 .convo-ask-opts { display: flex; flex-direction: column; gap: 6px; }
@@ -582,14 +585,13 @@ html.term-dark .overlay, html.term-dark .menu, html.term-dark .toast {
 .convo-list-title { font-size: 14px; font-weight: 500; line-height: 20px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .convo-list-row[aria-current='true'] .convo-list-title { color: var(--term-accent-text); font-weight: 600; }
 .convo-list-sub { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 12px; line-height: 18px; color: var(--term-fg-3); white-space: nowrap; overflow: hidden; }
-.convo-list-sub .is-blocked { color: var(--term-accent-text); font-weight: 600; }
 .convo-list-where { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .convo-spin.is-small { width: 9px; height: 9px; margin: 0; border-width: 1.5px; flex: none; }
 @media (pointer: coarse) { .convo-list-row { padding: 10px 12px; } }
 .convo-nudge {
   flex: none; display: flex; align-items: center; gap: 8px; width: 100%; border: 0; border-bottom: 1px solid var(--term-line);
   padding: 7px max(16px, env(safe-area-inset-right, 0px)) 7px max(16px, env(safe-area-inset-left, 0px));
-  background: var(--term-accent-soft); color: var(--term-accent-text); font: 500 13px/18px var(--font-ui); text-align: left; cursor: pointer;
+  background: color-mix(in srgb, var(--term-warn-text) 13%, var(--term-bg)); color: var(--term-warn-text); font: 500 13px/18px var(--font-ui); text-align: left; cursor: pointer;
 }
 .convo-nudge:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: -2px; }
 .convo-nudge-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
