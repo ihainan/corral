@@ -19,6 +19,10 @@ const fence = /^\s{0,3}(`{3,}|~{3,})\s*([^`\s]*)/
 const heading = /^ {0,3}(#{1,6})[ \t]+(.*)$/
 // Quotes and lists nest this deep at most; deeper is shown as text.
 const maxDepth = 8
+// A table shows at most this many columns and cells; the rows past that are
+// shown as text (a few bytes a row could otherwise make millions of cells).
+const maxCols = 32
+const maxCells = 4000
 const rule = /^\s{0,3}([-*_])(\s*\1){2,}\s*$/
 const quote = /^\s{0,3}>\s?/
 const listItem = /^(\s*)([-*+]|\d{1,9}[.)])\s+(.*)$/
@@ -112,11 +116,12 @@ function blocks(lines: string[], copy: Copy, depth: number): ReactNode[] {
     }
     if (line.includes('|') && i + 1 < lines.length && isTableSep(lines[i + 1])) {
       flush()
-      const head = cells(line)
-      const align = cells(lines[i + 1]).map((c) => (c.startsWith(':') && c.endsWith(':') ? 'center' : c.endsWith(':') ? 'right' : undefined))
+      const head = cells(line).slice(0, maxCols)
+      const align = cells(lines[i + 1]).slice(0, maxCols).map((c) => (c.startsWith(':') && c.endsWith(':') ? 'center' : c.endsWith(':') ? 'right' : undefined))
       i += 2
       const rows: string[][] = []
-      while (i < lines.length && lines[i].includes('|') && lines[i].trim()) rows.push(cells(lines[i++]))
+      const maxRows = Math.floor(maxCells / head.length) - 1
+      while (i < lines.length && rows.length < maxRows && lines[i].includes('|') && lines[i].trim()) rows.push(cells(lines[i++]).slice(0, maxCols))
       out.push(
         <div className="md-table" key={out.length}>
           <table>
@@ -233,7 +238,7 @@ const spans: { re: RegExp; make: (m: RegExpExecArray, key: number) => ReactNode 
   { re: /`([^`]+)`/g, make: (m, k) => <code key={k}>{m[1]}</code> },
   { re: /\[([^\]]{1,500})\]\((https?:\/\/[^\s)]{1,2000})\)/g, make: (m, k) => link(m[2], inline(m[1]), k) },
   { re: new RegExp(`https?://[^\\s<>()${wide}"']{0,2000}[^\\s<>()${wide}"'.,;:!?]`, 'g'), make: (m, k) => link(m[0], m[0], k) },
-  { re: /\*\*(?=\S)([^*]{0,2000}?\S)\*\*/g, make: (m, k) => <strong key={k}>{inline(m[1])}</strong> },
+  { re: /\*\*(?=\S)((?:`[^`]{0,500}`|[^`]){0,1000}?\S)\*\*/g, make: (m, k) => <strong key={k}>{inline(m[1])}</strong> },
   { re: /~~(?=\S)([^~]{0,2000}?\S)~~/g, make: (m, k) => <del key={k}>{inline(m[1])}</del> },
   { re: /(?<![*\w])\*(?=\S)([^*]{0,2000}?\S)\*(?![*\w])/g, make: (m, k) => <em key={k}>{inline(m[1])}</em> },
 ]
