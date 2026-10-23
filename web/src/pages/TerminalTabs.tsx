@@ -52,33 +52,51 @@ const newTabKey = isMac ? '⌘T' : 'Ctrl+Shift+T'
 // again later, it goes last.
 const ORDER_KEY = 'corral.tabOrder'
 const KEEP_GONE_MS = 10 * 60 * 1000
-const placeKey = (s: SessionInfo) =>
-  s.persistence === 'tmux' || s.persistence === 'herdr' ? `${s.host_id}|${s.persistence}|${s.mux_session ?? ''}` : 'id|' + s.id
+// The session a tab shows (herdr's default session, named or not, is one).
+// Several tabs of one tmux or herdr session are told apart by when they were
+// opened, so a new one goes last.
+const baseKey = (s: SessionInfo) =>
+  s.persistence === 'tmux' || s.persistence === 'herdr'
+    ? `${s.host_id}|${s.persistence}|${s.persistence === 'herdr' && (s.mux_session ?? '') === 'default' ? '' : (s.mux_session ?? '')}`
+    : 'id|' + s.id
 
 function inPlace(list: SessionInfo[]): SessionInfo[] {
   const now = Date.now()
-  let order: [string, number][] = [] // place key, last seen
+  // Place keys in order, each with when a list first lacked it (0: it was there).
+  let order: [string, number][] = []
   try {
     const v = JSON.parse(local.get(ORDER_KEY) ?? '[]')
     if (Array.isArray(v)) order = v.filter((x) => Array.isArray(x) && typeof x[0] === 'string' && typeof x[1] === 'number')
   } catch {
     /* not ours */
   }
-  const open = new Set(list.map(placeKey))
-  order = order.filter(([k, seen]) => open.has(k) || now - seen < KEEP_GONE_MS)
+  const byAge = [...list].sort((a, b) => a.created_at - b.created_at)
+  const seen = new Map<string, number>()
+  const keyOf = new Map<string, string>()
+  for (const s of byAge) {
+    const base = baseKey(s)
+    const n = (seen.get(base) ?? 0) + 1
+    seen.set(base, n)
+    keyOf.set(s.id, n === 1 ? base : base + '#' + n)
+  }
+  const open = new Set(keyOf.values())
+  // Gone longer than a reconnection takes (counted from when a list lacked
+  // it, not from the last list: a page in the background asks none): its
+  // place is let go, and back later it goes last.
+  order = order
+    .filter(([, gone]) => !(gone && now - gone >= KEEP_GONE_MS))
+    .map(([k, gone]) => [k, open.has(k) ? 0 : gone || now])
   const known = new Set(order.map(([k]) => k))
-  for (const s of [...list].sort((a, b) => a.created_at - b.created_at)) {
-    const k = placeKey(s)
+  for (const s of byAge) {
+    const k = keyOf.get(s.id)!
     if (!known.has(k)) {
-      order.push([k, now])
+      order.push([k, 0])
       known.add(k)
     }
   }
-  order = order.map(([k, seen]) => [k, open.has(k) ? now : seen])
   local.set(ORDER_KEY, JSON.stringify(order))
-  const keys = order.map(([k]) => k)
-  const at = (s: SessionInfo) => keys.indexOf(placeKey(s))
-  return [...list].sort((a, b) => at(a) - at(b) || a.created_at - b.created_at)
+  const at = new Map(order.map(([k], i) => [k, i]))
+  return [...list].sort((a, b) => at.get(keyOf.get(a.id)!)! - at.get(keyOf.get(b.id)!)!)
 }
 
 export function TerminalTabs({ current }: { current: string }) {

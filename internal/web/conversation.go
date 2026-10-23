@@ -38,6 +38,7 @@ const (
 	convoTail      = 4 << 20          // bytes read from the end of a log when it is first opened
 	convoStep      = 2 << 20          // bytes read at most by one request after that
 	convoLocateMax = 256 << 10        // output of the locating script
+	convoStatesMax = 64               // conversation states kept at once
 	convoReadLimit = 15 * time.Second // a read the host has not answered by then is given up
 )
 
@@ -252,6 +253,17 @@ func (c *convoStates) get(id string) *convoState {
 	}
 	st, ok := c.m[id]
 	if !ok {
+		// At most convoStatesMax, across sessions and users: the one used
+		// longest ago gives way (its reader starts over if it asks again).
+		for len(c.m) >= convoStatesMax {
+			old, at := "", int64(0)
+			for k, s := range c.m {
+				if u := s.used.Load(); old == "" || u < at {
+					old, at = k, u
+				}
+			}
+			delete(c.m, old)
+		}
 		st = &convoState{gen: convoGens.Add(1)}
 		c.m[id] = st
 	}
@@ -321,7 +333,11 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 	// One state per pane read (herdr's pane asked for; tmux has its active
 	// one): a tab and another page reading other panes do not take turns
 	// rebuilding a single one.
-	st := s.convos.get(sess.ID + "\x00" + pane)
+	key := sess.ID + "\x00" // (tmux reads its active pane: the pane asked for does not matter)
+	if sess.Persistence == "herdr" {
+		key += pane
+	}
+	st := s.convos.get(key)
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
@@ -467,10 +483,11 @@ func convoProcStatus(c *sftplite.Client, st *convoState) string {
 	if st.bind == nil {
 		return ""
 	}
-	base, _, ok := strings.Cut(st.log, "/.claude/projects/")
-	if !ok {
+	i := strings.LastIndex(st.log, "/.claude/projects/")
+	if i < 0 {
 		return ""
 	}
+	base := st.log[:i]
 	b, err := c.ReadRange(base+"/.claude/sessions/"+strconv.FormatInt(st.bind.PID, 10)+".json", 0, 64<<10)
 	if err != nil {
 		return ""
@@ -490,11 +507,15 @@ func convoProcStatus(c *sftplite.Client, st *convoState) string {
 	return ""
 }
 
-// tmuxEscapeCommand presses Escape in one tmux pane (by its id, "%N").
-// Fixed script; the validated pane id is its only argument.
-func tmuxEscapeCommand(pane string) string {
-	script := `PATH="$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"; exec tmux send-keys -t "$1" Escape`
-	return "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(pane)
+// tmuxEscapeCommand presses Escape in one tmux pane (by its id, "%N"), only
+// if that pane is in the named tmux session: else it exits 3, pressing
+// nothing. Fixed script; the validated session name and pane id are its
+// only arguments.
+func tmuxEscapeCommand(session, pane string) string {
+	script := `PATH="$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+[ "$(tmux -u display-message -p -t "$2" '#{session_name}' 2>/dev/null)" = "$1" ] || exit 3
+exec tmux send-keys -t "$2" Escape`
+	return "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(session) + " " + sshx.QuoteShell(pane)
 }
 
 // POST /api/sessions/{id}/conversation/interrupt {"pane","pid","start","session"}
@@ -524,8 +545,21 @@ func (s *Server) apiConversationInterrupt(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusConflict, "unsupported", "only in tmux and herdr sessions")
 		return
 	}
+	// Every attempt is audited, with what it was for and what became of it
+	// ("typed", "refused" or "unknown"; why, when nothing was pressed).
+	outcome, reason := "refused", ""
+	defer func() {
+		actx, acancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
+		defer acancel()
+		detail := map[string]any{"session": sess.ID, "pane": b.Pane, "pid": b.PID, "start": b.Start, "claude_session": b.Session, "outcome": outcome}
+		if reason != "" {
+			detail["reason"] = reason
+		}
+		s.audit(r.WithContext(actx), "convo.interrupt", sess.HostName, detail)
+	}()
 	expiry, err := s.auth.LoginExpiry(r.Context(), loginHash(r))
 	if err != nil {
+		reason = "signed_out"
 		writeError(w, http.StatusUnauthorized, "unauthorized", "please sign in")
 		return
 	}
@@ -535,42 +569,56 @@ func (s *Server) apiConversationInterrupt(w http.ResponseWriter, r *http.Request
 	defer cancelStep()
 	untrack := s.trackPending(currentUser(r).ID, &liveSocket{loginHash: loginHash(r), hostID: sess.HostID, cancel: cancel})
 	defer untrack()
+	// A login ended meanwhile cancels the request: say that, not "the host".
+	signedOut := func() bool {
+		if _, err := s.auth.CheckLogin(context.WithoutCancel(r.Context()), loginHash(r)); err != nil {
+			reason = "signed_out"
+			writeError(w, http.StatusUnauthorized, "unauthorized", "please sign in")
+			return true
+		}
+		return false
+	}
 
 	out, err := sshx.Output(ctx, sess.Client(), convoLocateCommand(sess.Persistence, sess.TmuxSession), convoLocateMax)
 	if errors.Is(err, sshx.ErrBusy) {
+		reason = "busy"
 		writeError(w, http.StatusTooManyRequests, "busy", "the host is still answering earlier requests")
 		return
 	}
 	if err != nil && len(out) == 0 {
+		if signedOut() {
+			return
+		}
+		reason = "host_error"
 		writeError(w, http.StatusBadGateway, "host_error", "the host did not answer")
 		return
 	}
+	// The process must be the one in front in that pane now, the one the
+	// pane's conversation shows (the latest started there): a Claude Code
+	// started inside it since is not the one the stop was asked for.
 	procs, _, tmuxPID, _, _ := parseConvoLocate(string(out))
 	socket := s.herdrSocks.get(sess.ID)
-	found := false
-	for _, p := range procs {
-		if p.pid != b.PID || p.start != b.Start || p.sid != b.Session {
-			continue
-		}
-		switch sess.Persistence {
-		case "herdr":
-			found = socket != "" && p.herdrPane == b.Pane && p.herdrSocket == socket
-		case "tmux":
-			found = tmuxPID != "" && p.tmuxPane == b.Pane && p.tmuxServerPID == tmuxPID
+	var front *convoProc
+	for i := range procs {
+		p := &procs[i]
+		inPane := (sess.Persistence == "herdr" && socket != "" && p.herdrPane == b.Pane && p.herdrSocket == socket) ||
+			(sess.Persistence == "tmux" && tmuxPID != "" && p.tmuxPane == b.Pane && p.tmuxServerPID == tmuxPID)
+		if inPane && (front == nil || p.start > front.start) {
+			front = p
 		}
 	}
-	if !found {
+	if front == nil || front.pid != b.PID || front.start != b.Start || front.sid != b.Session {
+		reason = "agent_changed"
 		writeError(w, http.StatusConflict, "agent_changed", "that pane no longer runs this agent")
 		return
 	}
-	if _, err := s.auth.CheckLogin(ctx, loginHash(r)); err != nil {
-		writeError(w, http.StatusUnauthorized, "unauthorized", "please sign in")
+	if signedOut() {
 		return
 	}
-	outcome := "typed"
 	if sess.Persistence == "herdr" {
 		c, derr := herdr.Dial(ctx, sess.Client(), socket)
 		if derr != nil {
+			reason = "herdr_error"
 			writeHerdrError(w, derr)
 			return
 		}
@@ -578,30 +626,39 @@ func (s *Server) apiConversationInterrupt(w http.ResponseWriter, r *http.Request
 		c.Close()
 		var apiErr *herdr.APIError
 		switch {
+		case err == nil:
+			outcome = "typed"
 		case errors.As(err, &apiErr):
 			outcome = "refused"
-		case err != nil:
+		default:
 			outcome = "unknown"
 		}
 	} else {
-		_, err = sshx.Output(ctx, sess.Client(), tmuxEscapeCommand(b.Pane), 4096)
+		// (The script checks the pane is in this session's tmux session, and presses.)
+		_, err = sshx.Output(ctx, sess.Client(), tmuxEscapeCommand(sess.TmuxSession, b.Pane), 4096)
 		var exitErr *ssh.ExitError
 		switch {
+		case err == nil:
+			outcome = "typed"
+		case errors.Is(err, sshx.ErrBusy):
+			reason = "busy" // (not started: nothing was pressed)
 		case errors.As(err, &exitErr):
-			outcome = "refused"
-		case err != nil:
+			reason = "not_in_session"
+		default:
 			outcome = "unknown"
 		}
 	}
-	actx, acancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
-	defer acancel()
-	s.audit(r.WithContext(actx), "convo.interrupt", sess.HostName, map[string]any{"session": sess.ID, "pane": b.Pane, "outcome": outcome})
-	switch outcome {
-	case "refused":
-		writeError(w, http.StatusConflict, "refused", "the pane did not take the key")
-	case "unknown":
-		writeError(w, http.StatusBadGateway, "unknown", "it is not known whether the key arrived")
-	default:
+	switch {
+	case outcome == "typed":
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	case reason == "busy":
+		writeError(w, http.StatusTooManyRequests, "busy", "the host is still answering earlier requests")
+	case outcome == "refused":
+		writeError(w, http.StatusConflict, "refused", "the pane did not take the key")
+	default:
+		if signedOut() {
+			return
+		}
+		writeError(w, http.StatusBadGateway, "unknown", "it is not known whether the key arrived")
 	}
 }

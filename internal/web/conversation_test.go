@@ -105,3 +105,20 @@ func TestParseConvoLocateTmuxTitle(t *testing.T) {
 		t.Fatalf("title %q", title)
 	}
 }
+
+func TestConvoStatesAreBounded(t *testing.T) {
+	var c convoStates
+	for i := 0; i < convoStatesMax+20; i++ {
+		c.get("s\x00w1:p" + strings.Repeat("x", i%7) + string(rune('a'+i%26)) + string(rune('0'+i/26)))
+	}
+	if len(c.m) > convoStatesMax {
+		t.Fatalf("%d states kept", len(c.m))
+	}
+}
+
+func TestTmuxEscapeCommandQuotes(t *testing.T) {
+	cmd := tmuxEscapeCommand("a'b", "%3")
+	if !strings.HasSuffix(cmd, ` corral 'a'\''b' '%3'`) {
+		t.Fatalf("arguments not quoted: %s", cmd[len(cmd)-40:])
+	}
+}
