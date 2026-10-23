@@ -262,6 +262,7 @@ export interface HerdrAgent {
   status: string
   title: string
   cwd: string
+  since?: number // (unix ms) when its status last changed, as the gateway saw it
 }
 
 export interface HerdrWorkspace {

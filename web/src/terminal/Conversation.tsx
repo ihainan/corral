@@ -513,26 +513,48 @@ export interface ConvoListRow {
   title: string
   where: string // its host, and its workspace or session
   status: 'working' | 'blocked' | 'done' | 'idle' | 'unknown'
+  since?: number // (unix ms) when its status last changed
   current: boolean
   onPick: () => void
 }
 
 const GROUPS: { name: I18nKey; of: (r: ConvoListRow) => boolean }[] = [
   { name: 'convo.group.blocked', of: (r) => r.status === 'blocked' },
-  { name: 'convo.group.working', of: (r) => r.status === 'working' },
-  { name: 'convo.group.rest', of: (r) => r.status !== 'blocked' && r.status !== 'working' },
+  { name: 'convo.group.recent', of: (r) => r.status !== 'blocked' },
 ]
 
-// The agents in their order on the list: waiting first, then at work.
+// The latest to change first; those of no known time last, as they were.
+const byRecent = (rows: ConvoListRow[]) => rows.map((r, i) => [r, i] as const).sort(([a, i], [b, j]) => (b.since ?? 0) - (a.since ?? 0) || i - j).map(([r]) => r)
+
+// The agents in their order on the list: waiting first, then the rest, the
+// latest to change first in each.
 export function listOrder(rows: ConvoListRow[]): ConvoListRow[] {
-  return GROUPS.flatMap((g) => rows.filter(g.of))
+  return GROUPS.flatMap((g) => byRecent(rows.filter(g.of)))
+}
+
+// How long a status has lasted (at work, waiting), or how long ago it came
+// (done, idle), in minutes at least.
+function when(r: ConvoListRow, now: number): string {
+  if (!r.since || now < r.since) return ''
+  const m = Math.floor((now - r.since) / 60000)
+  const going = r.status === 'working' || r.status === 'blocked'
+  if (m < 1) return t(going ? 'convo.for.now' : 'convo.ago.now')
+  if (m < 60) return t(going ? 'convo.for.m' : 'convo.ago.m', { n: m })
+  if (m < 48 * 60) return t(going ? 'convo.for.h' : 'convo.ago.h', { n: Math.floor(m / 60) })
+  return t('convo.ago.d', { n: Math.floor(m / 1440) })
 }
 
 function AgentList({ rows, onPicked }: { rows: ConvoListRow[]; onPicked?: () => void }) {
+  // (The times move on: drawn again every half minute.)
+  const [now, setNow] = useState(Date.now())
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 30000)
+    return () => clearInterval(timer)
+  }, [])
   return (
     <>
       {GROUPS.map((g) => {
-        const of = rows.filter(g.of)
+        const of = byRecent(rows.filter(g.of))
         if (!of.length) return null
         return (
           <div key={g.name} className="convo-list-group" role="group" aria-label={t(g.name)}>
@@ -554,7 +576,12 @@ function AgentList({ rows, onPicked }: { rows: ConvoListRow[]; onPicked?: () => 
                 <span className="convo-list-title">{r.title}</span>
                 <span className="convo-list-sub">
                   {r.status === 'working' && <span className="convo-spin is-small" aria-hidden="true" />}
-                  {r.status !== 'unknown' && <span className={'is-' + r.status}>{t(`convo.status.${r.status}` as I18nKey)}</span>}
+                  {r.status !== 'unknown' && (
+                    <span className={'is-' + r.status}>
+                      {t(`convo.status.${r.status}` as I18nKey)}
+                      {when(r, now) && ' · ' + when(r, now)}
+                    </span>
+                  )}
                   <span className="convo-list-where">{r.where}</span>
                 </span>
               </button>

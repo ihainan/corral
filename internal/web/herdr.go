@@ -31,6 +31,10 @@ type herdrAgent struct {
 	Status string `json:"status"`
 	Title  string `json:"title"`
 	Cwd    string `json:"cwd"`
+	// Since is when its status last changed, as this gateway saw it (unix
+	// milliseconds): when it was first seen, for one that has not changed
+	// since the gateway began watching.
+	Since int64 `json:"since,omitempty"`
 }
 
 type herdrWorkspace struct {
@@ -56,7 +60,36 @@ type herdrSummary struct {
 	Lost bool `json:"lost,omitempty"`
 }
 
-func summarize(session string, s *herdr.Snapshot) herdrSummary {
+// agentTimes holds when each pane's agent last changed status, as seen by
+// one watcher (see herdrAgent.Since).
+type agentTimes struct {
+	mu sync.Mutex
+	at map[string]time.Time
+}
+
+func (a *agentTimes) changed(pane string, gone bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if gone {
+		delete(a.at, pane)
+	} else {
+		a.at[pane] = time.Now()
+	}
+}
+
+// of says when pane last changed, from now on for one not seen before.
+func (a *agentTimes) of(pane string) int64 {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	t, ok := a.at[pane]
+	if !ok {
+		t = time.Now()
+		a.at[pane] = t
+	}
+	return t.UnixMilli()
+}
+
+func summarize(session string, s *herdr.Snapshot, times *agentTimes) herdrSummary {
 	out := herdrSummary{T: "herdr", Session: session, Version: s.Version, Workspaces: []herdrWorkspace{}}
 	idx := map[string]int{}
 	for _, w := range s.Workspaces {
@@ -78,7 +111,7 @@ func summarize(session string, s *herdr.Snapshot) herdrSummary {
 			continue
 		}
 		out.Workspaces[i].Agents = append(out.Workspaces[i].Agents,
-			herdrAgent{PaneID: p.ID, Agent: p.Agent, Status: p.AgentStatus, Title: truncate(p.Title, 120), Cwd: p.Cwd})
+			herdrAgent{PaneID: p.ID, Agent: p.Agent, Status: p.AgentStatus, Title: truncate(p.Title, 120), Cwd: p.Cwd, Since: times.of(p.ID)})
 		if p.AgentStatus == herdr.StatusBlocked {
 			out.Waiting++
 		}
@@ -162,13 +195,18 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 	if name == "" {
 		name = "default"
 	}
+	times := &agentTimes{at: map[string]time.Time{}}
 	w := herdr.NewWatcher(sess.Client(), socket,
 		func(snap *herdr.Snapshot) {
-			if b, err := json.Marshal(summarize(name, snap)); err == nil {
+			if b, err := json.Marshal(summarize(name, snap, times)); err == nil {
 				sess.PublishMeta(b)
 			}
 		},
-		func(tr herdr.Transition) { s.onAgentTransition(sess, h, tr) },
+		// (A change is told before the snapshot that has it.)
+		func(tr herdr.Transition) {
+			times.changed(tr.Pane.ID, tr.To == herdr.StatusGone)
+			s.onAgentTransition(sess, h, tr)
+		},
 	)
 	// The browser holds the last summary as current until told otherwise;
 	// it keeps it (a page opened meanwhile gets it too), marked as old.
@@ -177,7 +215,7 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 		if snap == nil {
 			return
 		}
-		sum := summarize(name, snap)
+		sum := summarize(name, snap, times)
 		sum.Lost = true
 		if b, err := json.Marshal(sum); err == nil {
 			sess.PublishMeta(b)

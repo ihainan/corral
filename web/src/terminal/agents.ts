@@ -23,8 +23,8 @@ export interface AgentRow {
 export const isClaude = (name?: string) => !!name && /claude/i.test(name)
 
 // A pane's title without the mark Claude Code puts before it (its spinner's
-// frames, ✳ when idle).
-export const paneTitle = (s: string) => s.replace(/^[\s·✢✳✶✻✽*⠀-⣿]+/u, '').trim()
+// frames, ◐ and the like while it works, ✳ when idle).
+export const paneTitle = (s: string) => s.replace(/^[\s·✢✳✶✻✽*⠀-⣿◐◑◒◓○●◌]+/u, '').trim()
 
 export function listAgents(sessions: SessionInfo[]): { rows: AgentRow[]; others: SessionInfo[] } {
   const byKey = new Map<string, AgentRow>()
@@ -47,7 +47,8 @@ export function listAgents(sessions: SessionInfo[]): { rows: AgentRow[]; others:
     }
   }
   const rows = [...byKey.values()]
-  rows.sort((x, y) => STATUS_ORDER.indexOf(x.status) - STATUS_ORDER.indexOf(y.status) || x.s.host_name.localeCompare(y.s.host_name) || x.ws.localeCompare(y.ws))
+  // (Of one status, the latest to change first.)
+  rows.sort((x, y) => STATUS_ORDER.indexOf(x.status) - STATUS_ORDER.indexOf(y.status) || (y.a.since ?? 0) - (x.a.since ?? 0) || x.s.host_name.localeCompare(y.s.host_name) || x.ws.localeCompare(y.ws))
   return { rows, others }
 }
 

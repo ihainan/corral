@@ -650,6 +650,8 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
     const all = [mine, ...(running.sessions ?? []).filter((x) => x.id !== id)]
     const { rows, others } = listAgents(all)
     const here = convo.bind?.pane ?? herdr?.focused_pane
+    // (Of the tmux session shown, the time of the last thing in its log.)
+    const lastTs = convo.entries.length ? Date.parse(convo.entries[convo.entries.length - 1].ts ?? '') || undefined : undefined
     // (Of this session: its agents by what they are, whichever tab's summary the list kept for them.)
     const ours = (key: string, pane?: string) => (pane ? info.persistence === 'herdr' && key === agentKey(info, pane) : info.persistence === 'tmux' && key === tmuxKey(info))
     const go = (s: SessionInfo, key: string, pane?: string) => () => {
@@ -668,7 +670,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
         if (seenTitles.current.size > 100) seenTitles.current.delete(seenTitles.current.keys().next().value!)
       }
       const title = (current && convoAgent?.title) || seenTitles.current.get(r.key) || paneTitle(r.a.title) || r.a.agent
-      return { key: r.key, title, where: [r.s.host_name, r.ws, isClaude(r.a.agent) ? '' : r.a.agent].filter(Boolean).join(' · '), status: current && convoAgent ? convoAgent.status : r.status, current, onPick: go(r.s, r.key, r.a.pane_id) }
+      return { key: r.key, title, where: [r.s.host_name, r.ws, isClaude(r.a.agent) ? '' : r.a.agent].filter(Boolean).join(' · '), status: current && convoAgent ? convoAgent.status : r.status, since: r.lost ? undefined : r.a.since, current, onPick: go(r.s, r.key, r.a.pane_id) }
     })
     const seen = new Set<string>()
     for (const s of others) {
@@ -678,10 +680,10 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
       seen.add(key)
       const current = ours(key)
       // (Of a tmux session, what is known is of the one shown here: its conversation.)
-      out.push({ key, title: (current && convoAgent?.title) || `${s.host_name} · ${sessionWhich(s, all)}`, where: s.host_name + ' · tmux', status: current && convoAgent ? convoAgent.status : 'unknown', current, onPick: go(s, key) })
+      out.push({ key, title: (current && convoAgent?.title) || `${s.host_name} · ${sessionWhich(s, all)}`, where: s.host_name + ' · tmux', status: current && convoAgent ? convoAgent.status : 'unknown', since: current ? lastTs : undefined, current, onPick: go(s, key) })
     }
     return out
-  }, [info, herdr, herdrCurrent, running.sessions, id, convo.bind?.pane, convo.title, convoAgent])
+  }, [info, herdr, herdrCurrent, running.sessions, id, convo.bind?.pane, convo.title, convo.entries, convoAgent])
   // What the composer sent while the conversation shows, until a user turn
   // with its text appears in the same log of the same process, after it
   // (by the log's position and its time), each turn answering one.
