@@ -4,6 +4,7 @@ import { t, getLang, type I18nKey } from '../i18n'
 import { copyText, isCoarse } from '../components/ui'
 import { local } from '../storage'
 import { Markdown } from './markdown'
+import { Code } from './Code'
 import type { Convo, ConvoEntry, ConvoPart, ConvoTask, ConvoTool } from './conversation'
 
 // The conversation view: the agent's log as turns, over the terminal (which
@@ -865,7 +866,7 @@ function ToolRow({ tool, onCopy, live }: { tool: ConvoTool; onCopy: (s: string) 
     <div className={'convo-step' + (tool.error ? ' is-error' : '')}>
       <button type="button" className="convo-step-head" aria-expanded={open} onClick={() => setOpen(!open)} title={tool.title || (tool.detail ? firstLine(tool.detail) : undefined)}>
         <span className="convo-step-verb">{v ? t(`convo.v.${v}` as I18nKey) : tool.name}</span>
-        <span className={'convo-step-obj' + (obj.code ? ' is-code' : '')}>{obj.text}</span>
+        <span className={'convo-step-obj' + (obj.code ? ' is-code' : '')}>{v === 'cmd' ? <Code text={obj.text} lang="bash" /> : obj.text}</span>
         {category(tool.name) === 'edit' && <LineCounts add={tool.add ?? 0} del={tool.del ?? 0} />}
         {tool.error && <span className="convo-failed">{t('convo.toolFailed')}</span>}
       </button>
@@ -873,7 +874,7 @@ function ToolRow({ tool, onCopy, live }: { tool: ConvoTool; onCopy: (s: string) 
         <div className="convo-step-body">
           {tool.detail && (tool.title || tool.detail.includes('\n') || tool.detail.length > 60) && (
             <div className="convo-pre-wrap">
-              <pre className="convo-pre">{tool.detail}</pre>
+              <pre className="convo-pre">{v === 'cmd' ? <Code text={tool.detail} lang="bash" /> : tool.detail}</pre>
               <button type="button" className="md-code-copy" onClick={() => onCopy(tool.detail!)}>{t('common.copy')}</button>
             </div>
           )}

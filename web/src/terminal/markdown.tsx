@@ -1,4 +1,5 @@
 import { Fragment, type ReactNode } from 'react'
+import { Code } from './Code'
 
 // A small Markdown renderer for an agent's answers in the conversation view:
 // headings, paragraphs, lists (nested by indent), fenced code, quotes, GFM
@@ -88,7 +89,7 @@ function blocks(lines: string[], copy: Copy, depth: number): ReactNode[] {
             </div>
           )}
           <pre>
-            <code>{body}</code>
+            <Code text={body} lang={lang || undefined} />
           </pre>
         </div>,
       )

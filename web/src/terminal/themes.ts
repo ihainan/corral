@@ -88,6 +88,7 @@ export function chromeVars(s: Scheme): Record<string, string> {
   // Every surface chrome text sits on, including the highlighted row
   // (current herdr workspace, latched modifier keys).
   const surfaces = [bg, chrome, key, hover, accentSoft]
+  const code = [bg, chrome] // (a code block's, a step's line)
   return {
     '--term-bg': bg,
     '--term-chrome': chrome,
@@ -103,5 +104,13 @@ export function chromeVars(s: Scheme): Record<string, string> {
     '--term-danger-text': readable(s.theme.red ?? '#d0453e', surfaces, 4.5, d),
     '--term-warn-text': readable(s.theme.yellow ?? '#e0a24a', surfaces, 4.5, d),
     '--term-ok-text': readable(s.theme.green ?? '#3fa45b', surfaces, 4.5, d),
+    // Code coloured by its language, on the code's own surface (the chrome colour).
+    '--term-syn-keyword': readable(s.theme.magenta ?? '#c678dd', code, 4.5, d),
+    '--term-syn-string': readable(s.theme.green ?? '#3fa45b', code, 4.5, d),
+    '--term-syn-number': readable(s.theme.cyan ?? '#2aa1b3', code, 4.5, d),
+    '--term-syn-title': readable(s.theme.blue ?? '#4a78ec', code, 4.5, d),
+    '--term-syn-type': readable(s.theme.yellow ?? '#e0a24a', code, 4.5, d),
+    '--term-syn-attr': readable(s.theme.brightCyan ?? s.theme.cyan ?? '#2aa1b3', code, 4.5, d),
+    '--term-syn-comment': readable(s.theme.brightBlack ?? mix(fg, bg, 0.45), code, 4.5, d),
   }
 }
