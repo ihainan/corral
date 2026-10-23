@@ -547,12 +547,15 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
   const bindKey = convo.bind ? `${convo.bind.pane} ${convo.bind.pid} ${convo.bind.start} ${convo.bind.session}` : ''
   useEffect(() => {
     if (!convoPending.some((p) => p.state !== 'sent') || convo.status !== 'ready') return
+    if (!convoPending.some((p) => p.state !== 'sent' && p.bind === bindKey)) return
     const key = bindKey + ' ' + convo.gen
     let used = pendingUsed.current.get(key)
     if (!used) {
       used = new Set()
       pendingUsed.current.set(key, used)
-      if (pendingUsed.current.size > 20) pendingUsed.current.delete(pendingUsed.current.keys().next().value!)
+      // (Forgotten only where nothing waits: a turn must not confirm twice.)
+      const live = new Set(convoPending.filter((p) => p.state !== 'sent').map((p) => p.bind + ' ' + p.gen))
+      for (const k of pendingUsed.current.keys()) if (pendingUsed.current.size > 20 && !live.has(k) && k !== key) pendingUsed.current.delete(k)
     }
     const users = convo.entries.filter((e) => e.role === 'user')
     let changed = false
