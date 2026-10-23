@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Check, MessageCircleReply, Plus, Search } from 'lucide-react'
+import { Bot, Check, MessageCircleReply, Plus, Search } from 'lucide-react'
 import { api, type Host, type SessionInfo } from '../api'
 import { sessionWhich } from '../terminal/sessionName'
 import { t } from '../i18n'
@@ -269,8 +269,24 @@ function TabBar(p: { tabs: SessionInfo[]; current: string; infos: Record<string,
     ref.current?.querySelector<HTMLElement>('.term-tab[aria-current="page"]')?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
   }, [p.current, p.tabs])
   const which = (s: SessionInfo) => sessionWhich(s, p.tabs)
+  // Agents waiting in all tabs' sessions: the way to the agents page says so.
+  const waitingAll = p.tabs.reduce((n, s) => {
+    const info = p.infos[s.id]
+    if (info) return n + info.waiting
+    return n + (s.meta?.t === 'herdr' && !s.meta.lost ? s.meta.workspaces.reduce((k, w) => k + w.agents.filter((a) => a.status === 'blocked').length, 0) : 0)
+  }, 0)
   return (
     <nav className="term-tabs" aria-label={t('tabs.label')} ref={ref}>
+      <button
+        type="button"
+        className="icon-btn term-tab-agents"
+        onClick={() => navigate('/agents')}
+        aria-label={waitingAll ? `${t('nav.agents')}，${t('herdr.waiting', { n: waitingAll })}` : t('nav.agents')}
+        title={t('nav.agents')}
+      >
+        <Bot size={17} />
+        {waitingAll > 0 && <span className="term-tab-count term-tab-wait">{waitingAll}</span>}
+      </button>
       {p.tabs.map((s) => {
         const info = p.infos[s.id]
         const name = s.host_name ? s.host_name + ' · ' + which(s) : t('term.connecting')

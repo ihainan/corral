@@ -6,6 +6,14 @@ before 1.0, a minor version may change configuration or behaviour (said here whe
 ## [Unreleased]
 
 ### Added
+- An Agents page (in the menu, and first in the tab bar with the number of
+  agents waiting): every agent of the herdr sessions open on the gateway,
+  those waiting for you first, then working, finished and idle, each with
+  its host, session and workspace. From a row: answer one waiting (the
+  reply dialog), read a Claude Code agent's conversation, or open its
+  terminal at its pane. When the gateway has lost herdr, its agents show as
+  unknown with what was last seen. Agents in tmux sessions show no status;
+  those sessions are listed apart.
 - A conversation view (the speech-bubbles button) for Claude Code in tmux or
   herdr on Linux hosts: the session's own log as turns, the agent's answers
   formatted (lists, tables, code to copy), the tool calls between them folded

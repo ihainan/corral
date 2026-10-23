@@ -484,3 +484,5 @@ html.term-dark .overlay, html.term-dark .menu, html.term-dark .toast {
 @media (pointer: coarse) { .convo-stop { height: 34px; } }
 .composer-to { padding: 0 6px 6px; font-size: 12px; color: var(--term-fg-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .convo-bar-pick .convo-bar-name { flex: 0 1 auto; }
+.term-tab-agents { flex: none; width: auto; min-width: 30px; height: 30px; padding: 0 6px; gap: 3px; display: inline-flex; align-items: center; color: var(--term-fg-2); }
+@media (pointer: coarse) { .term-tab-agents { height: 36px; min-width: 36px; } }

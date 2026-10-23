@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
-import { Film, KeyRound, LogOut, ScrollText, Server, Settings, Users } from 'lucide-react'
+import { Bot, Film, KeyRound, LogOut, ScrollText, Server, Settings, Users } from 'lucide-react'
 import { api, ApiError, bumpAuthGen, setUnauthorizedHandler, type Bootstrap, type Me } from './api'
 import { applyDefaultLanguage, t } from './i18n'
 import { freezePrefs, resetPrefsSession, sendPendingPrefs, syncPrefsFromServer } from './prefs'
@@ -7,6 +7,7 @@ import { match, navigate, usePath, linkHandler } from './router'
 import { BrandMark, ToastProvider, useToast } from './components/ui'
 import { disablePush, syncPush } from './push'
 import { LoginPage, NewPasswordPage, SetupPage, InvitePage } from './pages/Auth'
+import { AgentsPage } from './pages/Agents'
 import { HostsPage } from './pages/Hosts'
 import { HostEditPage } from './pages/HostEdit'
 import { KeysPage } from './pages/Keys'
@@ -172,6 +173,7 @@ function route(path: string, boot: Bootstrap, me: Me | null, tabs: boolean): Rea
   if ((m = match('/w/:id', path))) return <TerminalPage key={'w' + m.id} id={m.id} watch />
   if ((m = match('/recordings/:id', path))) return <RecordingPlayerPage key={m.id} id={m.id} />
   if (path === '/recordings') return <Shell active="recordings"><RecordingsPage /></Shell>
+  if (path === '/agents') return <Shell active="agents"><AgentsPage /></Shell>
   if (path === '/' || path === '/hosts') return <Shell active="hosts"><HostsPage /></Shell>
   if (path === '/hosts/new') return <Shell active="hosts"><HostEditPage /></Shell>
   if ((m = match('/hosts/:id/edit', path))) return <Shell active="hosts"><HostEditPage id={Number(m.id)} /></Shell>
@@ -189,7 +191,7 @@ function nextPath(): string {
   return n && n.startsWith('/') && !n.startsWith('//') ? n : '/'
 }
 
-type NavKey = 'hosts' | 'keys' | 'settings' | 'recordings' | 'users' | 'audit'
+type NavKey = 'hosts' | 'agents' | 'keys' | 'settings' | 'recordings' | 'users' | 'audit'
 
 // signOut ends the browser session. The push subscription of this device is
 // removed first, so the next person signing in here does not get the previous
@@ -228,6 +230,7 @@ function Shell({ active, children }: { active: NavKey; children: ReactNode }) {
   const toast = useToast()
   const main: { key: NavKey; href: string; label: string; icon: ReactNode }[] = [
     { key: 'hosts', href: '/', label: t('nav.hosts'), icon: <Server size={17} strokeWidth={1.75} /> },
+    { key: 'agents', href: '/agents', label: t('nav.agents'), icon: <Bot size={17} strokeWidth={1.75} /> },
     { key: 'keys', href: '/keys', label: t('nav.keys'), icon: <KeyRound size={17} strokeWidth={1.75} /> },
     { key: 'settings', href: '/settings', label: t('nav.settings'), icon: <Settings size={17} strokeWidth={1.75} /> },
   ]

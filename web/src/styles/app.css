@@ -706,3 +706,33 @@ details.adv > .form { margin-top: 16px; }
 .input-row { display: flex; gap: 8px; }
 .input-row .input { flex: 1; min-width: 0; }
 .pre-line { white-space: pre-line; }
+
+/* Agents: every agent of the open sessions, waiting ones first */
+.agents-scope { max-width: 64ch; margin-top: 4px; }
+.agents-failed { color: var(--warn); margin-top: 8px; }
+.agents-empty { margin-top: 24px; color: var(--fg-2); max-width: 52ch; }
+.agents-group { margin-top: 24px; display: flex; flex-direction: column; gap: 8px; }
+.agents-group-title { display: flex; align-items: baseline; gap: 8px; font-size: 14px; line-height: 20px; font-weight: 600; color: var(--fg-2); }
+.agents-group-title.is-blocked { color: var(--accent-text); }
+.agents-group-n { font-weight: 500; color: var(--fg-3); font-variant-numeric: tabular-nums; }
+.agents-list { list-style: none; margin: 0; padding: 0; border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--surface); }
+.agents-row { display: flex; align-items: center; gap: 12px; padding: 10px 14px; min-height: var(--row-min); }
+.agents-row + .agents-row { border-top: 1px solid var(--line); }
+.agents-row-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.agents-row-title { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agents-row-where { font-size: 13px; color: var(--fg-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agents-row-actions { flex: none; display: flex; gap: 6px; }
+.agents-row-actions .btn { display: inline-flex; align-items: center; gap: 6px; }
+@media (max-width: 640px) {
+  .agents-row { flex-direction: column; align-items: stretch; gap: 8px; }
+  .agents-row-actions .btn { flex: 1; justify-content: center; }
+}
+/* A conversation read from the list: the conversation view in the app's colours */
+.dialog.agents-convo { max-width: 900px; height: min(85dvh, 900px); overflow: hidden; }
+.convo-host {
+  flex: 1; min-height: 0; position: relative; border: 1px solid var(--line); border-radius: var(--r);  overflow: hidden;
+  --term-bg: var(--bg); --term-fg: var(--fg); --term-fg-2: var(--fg-2); --term-fg-3: var(--fg-3); --term-line: var(--line);
+  --term-key: var(--bg-subtle); --term-key-active: var(--bg-active); --term-hover: var(--bg-hover); --term-chrome: var(--bg-subtle);
+  --term-accent-soft: var(--accent-soft); --term-accent-text: var(--accent-text); --term-danger-text: var(--danger);
+  --term-warn-text: var(--warn); --term-ok-text: var(--ok);
+}

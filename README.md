@@ -68,6 +68,9 @@ another: start it at your desk, check on it from your phone, carry on on a table
 - **Notifications** — When an agent waits or finishes, or a program rings the
   bell or sends one. Tapping one opens that agent's pane. On an iPhone or iPad,
   add Corral to the Home Screen first: Safari notifies only from there.
+- **Agents page** — Every agent of your open herdr sessions on one page,
+  those waiting for you first: answer one, read its conversation or open
+  its terminal from there.
 - **Conversation view** — Read Claude Code's session as a conversation:
   its answers formatted, the commands and edits between them folded into one
   line each run, the whole history even where the terminal keeps none. The
