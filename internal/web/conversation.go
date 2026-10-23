@@ -253,23 +253,28 @@ func (c *convoStates) get(id string) *convoState {
 		}
 	}
 	st, ok := c.m[id]
-	if !ok {
-		// At most convoStatesMax, across sessions and users: the one used
-		// longest ago gives way (its reader starts over if it asks again).
-		// (One a request holds stays: dropping it would make a second state
-		// read the same log beside it.)
-		for len(c.m) >= convoStatesMax {
-			old, at := "", int64(0)
-			for k, s := range c.m {
-				if u := s.used.Load(); s.inUse.Load() == 0 && (old == "" || u < at) {
-					old, at = k, u
-				}
+	// At most convoStatesMax, across sessions and users: the one used
+	// longest ago gives way (its reader starts over if it asks again). One a
+	// request holds stays (dropping it would make a second state read the
+	// same log beside it); past the limit while all were in use, every later
+	// request brings the count back down.
+	room := convoStatesMax
+	if ok {
+		room++ // (this one stays)
+	}
+	for len(c.m) >= room {
+		old, at := "", int64(0)
+		for k, s := range c.m {
+			if u := s.used.Load(); k != id && s.inUse.Load() == 0 && (old == "" || u < at) {
+				old, at = k, u
 			}
-			if old == "" {
-				break // (all in use: as many as requests under way, for a moment)
-			}
-			delete(c.m, old)
 		}
+		if old == "" {
+			break // (all in use: as many as requests under way, for a moment)
+		}
+		delete(c.m, old)
+	}
+	if !ok {
 		st = &convoState{gen: convoGens.Add(1)}
 		c.m[id] = st
 	}

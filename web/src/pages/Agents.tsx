@@ -26,6 +26,7 @@ interface Row {
   ws: string
   status: Status
   last?: string // (herdr lost: what it said last)
+  lost?: boolean // (the gateway lost herdr after this summary)
 }
 
 const claude = (name?: string) => !!name && /claude/i.test(name)
@@ -35,7 +36,7 @@ export function AgentsPage() {
   const [failed, setFailed] = useState(false)
   const [reply, setReply] = useState<{ s: SessionInfo; a: HerdrAgent } | null>(null)
   // (By its pane: the row shown is the latest the list has of it.)
-  const [convoOf, setConvoOf] = useState<{ id: string; pane: string } | null>(null)
+  const [convoOf, setConvoOf] = useState<string | null>(null) // (the agent's key: whichever tab now shows it)
 
   useEffect(() => {
     let stopped = false
@@ -70,9 +71,8 @@ export function AgentsPage() {
   }, [])
 
   const { rows, others } = useMemo(() => {
-    const rows: Row[] = []
+    const byKey = new Map<string, Row>() // (an agent once, however many tabs show its herdr session)
     const others: SessionInfo[] = []
-    const seen = new Set<string>() // (an agent once, however many tabs show its herdr session)
     for (const s of sessions ?? []) {
       const m = s.meta
       if (s.persistence !== 'herdr' || !m || m.t !== 'herdr') {
@@ -82,13 +82,15 @@ export function AgentsPage() {
       for (const w of m.workspaces) {
         for (const a of w.agents) {
           const k = agentKey(s, a.pane_id)
-          if (seen.has(k)) continue
-          seen.add(k)
+          const had = byKey.get(k)
+          // (Of two tabs' word, a current summary's over one the gateway lost.)
+          if (had && !(had.lost && !m.lost)) continue
           const known = (ORDER as string[]).includes(a.status) ? (a.status as Status) : 'unknown'
-          rows.push(m.lost ? { s, a, ws: w.label, status: 'unknown', last: known === 'unknown' ? undefined : known } : { s, a, ws: w.label, status: known })
+          byKey.set(k, m.lost ? { s, a, ws: w.label, status: 'unknown', lost: true, last: known === 'unknown' ? undefined : known } : { s, a, ws: w.label, status: known })
         }
       }
     }
+    const rows = [...byKey.values()]
     rows.sort((x, y) => ORDER.indexOf(x.status) - ORDER.indexOf(y.status) || x.s.host_name.localeCompare(y.s.host_name) || x.ws.localeCompare(y.ws))
     return { rows, others }
   }, [sessions])
@@ -97,7 +99,7 @@ export function AgentsPage() {
   // The conversation open: its row as the list has it now; gone from the
   // list, what was last known, with nothing to answer.
   const [lastConvo, setLastConvo] = useState<Row | null>(null)
-  const current = convoOf ? rows.find((r) => r.s.id === convoOf.id && r.a.pane_id === convoOf.pane) : undefined
+  const current = convoOf ? rows.find((r) => agentKey(r.s, r.a.pane_id) === convoOf) : undefined
   useEffect(() => {
     if (current) setLastConvo(current)
     if (!convoOf) setLastConvo(null)
@@ -141,7 +143,7 @@ export function AgentsPage() {
                       </button>
                     )}
                     {claude(r.a.agent) && (
-                      <button type="button" className="btn" onClick={() => setConvoOf({ id: r.s.id, pane: r.a.pane_id })}>
+                      <button type="button" className="btn" onClick={() => setConvoOf(agentKey(r.s, r.a.pane_id))}>
                         <MessagesSquare size={16} aria-hidden="true" />
                         {t('agents.read')}
                       </button>

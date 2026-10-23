@@ -334,6 +334,11 @@ Report security problems privately, not in a public issue: see [SECURITY.md](SEC
   `~/.claude` (not a `CLAUDE_CONFIG_DIR` of its own). Only the session's
   owner sees it: someone watching a shared session sees the screen, and the
   log holds more than that.
+- Stop in a tmux session checks that the pane is in the session and then
+  presses Escape, two tmux commands: a window moved to another session in
+  between would still be pressed.
+- Several tabs of one tmux or herdr session keep places by when they were
+  opened; closing one can move the others of that session.
 - Claude Code's suggested prompt is read off the screen (greyed text in its
   input box): another program drawing the same box would be offered too, though
   only typed into the composer, never sent.

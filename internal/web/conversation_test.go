@@ -1,6 +1,7 @@
 package web
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -125,5 +126,23 @@ func TestTmuxEscapeCommandQuotes(t *testing.T) {
 	cmd := tmuxEscapeCommand("a'b", "%3")
 	if !strings.HasSuffix(cmd, ` corral 'a'\''b' '%3'`) {
 		t.Fatalf("arguments not quoted: %s", cmd[len(cmd)-40:])
+	}
+}
+
+func TestConvoStatesComeBackUnderTheLimit(t *testing.T) {
+	var c convoStates
+	var held []*convoState
+	for i := 0; i < convoStatesMax+10; i++ { // all in use: past the limit for a moment
+		held = append(held, c.get(fmt.Sprint("k", i)))
+	}
+	for _, st := range held {
+		st.done()
+	}
+	c.get("k0").done() // a later request, of one that is kept
+	if len(c.m) > convoStatesMax {
+		t.Fatalf("%d states kept", len(c.m))
+	}
+	if _, ok := c.m["k0"]; !ok {
+		t.Fatal("the state asked for was let go")
 	}
 }

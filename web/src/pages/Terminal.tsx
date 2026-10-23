@@ -565,10 +565,16 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
     const key = stopKey
     if (!b || convoStops[key]?.busy) return
     const set = (text: string, busy: boolean) => setConvoStops((all) => ({ ...all, [key]: { text, busy } }))
+    // What became of it is said for 15 seconds at most, also of a process no
+    // longer shown (then it is simply let go).
+    const settle = (text: string) => {
+      set(text, false)
+      setTimeout(() => setConvoStops((all) => (all[key] && !all[key].busy ? Object.fromEntries(Object.entries(all).filter(([k]) => k !== key)) : all)), 15000)
+    }
     set(t('convo.stopping'), true)
     api('POST', `/api/sessions/${id}/conversation/interrupt`, { pane: b.pane, pid: b.pid, start: b.start, session: b.session })
-      .then(() => set(t('convo.stopped'), false))
-      .catch((e) => set(e instanceof ApiError && e.code === 'agent_changed' ? t('convo.stopChanged') : errorText(e), false))
+      .then(() => settle(t('convo.stopped')))
+      .catch((e) => settle(e instanceof ApiError && e.code === 'agent_changed' ? t('convo.stopChanged') : errorText(e)))
   }
   const shownStop = myStop?.text
   // Going to another agent from the bar (herdr): sending waits until herdr
