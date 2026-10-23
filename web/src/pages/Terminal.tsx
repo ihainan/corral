@@ -6,7 +6,7 @@ import { fitToEdge } from '../terminal/fit'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import { WebglAddon } from '@xterm/addon-webgl'
-import { ArrowUp, Check, MessagesSquare, ChevronDown, ChevronLeft, CircleStop, Code2, Eye, FolderOpen, Globe, History, ImagePlus, MessageCircleReply, MoreVertical, Minus, Palette, Paperclip, Plus, TextSelect, Keyboard as KeyboardIcon, Power, RotateCw, Server, TextCursorInput, X } from 'lucide-react'
+import { ArrowUp, Check, Square, MessagesSquare, ChevronDown, ChevronLeft, CircleStop, Code2, Eye, FolderOpen, Globe, History, ImagePlus, MessageCircleReply, MoreVertical, Minus, Palette, Paperclip, Plus, TextSelect, Keyboard as KeyboardIcon, Power, RotateCw, Server, TextCursorInput, X } from 'lucide-react'
 import { api, ApiError, choiceOf, errorText, uploadFile, type HerdrAgent, type HerdrSummary, type Host, type OpenChoice, type SessionInfo } from '../api'
 import { t, type I18nKey } from '../i18n'
 import { navigate } from '../router'
@@ -27,7 +27,7 @@ import { panelPages, type Shortcut } from '../terminal/shortcuts'
 import { layoutIn } from '../terminal/layout'
 import { startPreviews } from '../terminal/preview'
 import { atCursor, inPromptBox } from '../terminal/prompt'
-import { ReplyDialog } from '../terminal/ReplyDialog'
+import { InlineReply, ReplyDialog } from '../terminal/ReplyDialog'
 import { PortsDialog, openForward } from '../terminal/PortsDialog'
 import { FilesDialog } from '../terminal/FilesDialog'
 import { ShareDialog } from '../terminal/ShareDialog'
@@ -38,7 +38,7 @@ import { adoptComposer, composerWasOpen, rememberComposer } from '../terminal/co
 import { promptSuggestion } from '../terminal/suggestion'
 import { sessionWhich } from '../terminal/sessionName'
 import { ConversationView, type ConvoAgent, type ConvoPending } from '../terminal/Conversation'
-import { convoWasOpen, rememberConvo, useConversation, type ConvoEntry } from '../terminal/conversation'
+import { asking, convoWasOpen, rememberConvo, useConversation, type ConvoEntry } from '../terminal/conversation'
 import { useSession, VERSION_EVENT } from '../app'
 
 const isTouch = window.matchMedia('(pointer: coarse)').matches || navigator.maxTouchPoints > 0
@@ -528,7 +528,9 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
     if (info?.persistence !== 'herdr') {
       if (!convo.bind) return null
       const st = status === 'open' && !convo.failing && convo.agentStatus
-      return { title: convo.title || convo.bind.title, status: st === 'busy' ? 'working' : st === 'idle' ? 'idle' : 'unknown' }
+      // (Asking with AskUserQuestion is the one wait the log shows; a permission prompt is not in it.)
+      const asks = !!st && asking(convo.entries)
+      return { title: convo.title || convo.bind.title, status: asks ? 'blocked' : st === 'busy' ? 'working' : st === 'idle' ? 'idle' : 'unknown' }
     }
     const claude = (name?: string) => !!name && /claude/i.test(name)
     if (!convoHit) {
@@ -540,7 +542,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
     // (The session's own title, when the log read is of this pane's agent.)
     const title = (convo.bind?.pane === convoHit.a.pane_id && convo.title) || convoHit.a.title
     return { where: convoHit.ws, title, status: known ? st : 'unknown', other: claude(convoHit.a.agent) ? undefined : convoHit.a.agent }
-  }, [info?.persistence, convo.bind, convo.agentStatus, convo.failing, convo.title, status, convoHit, herdrCurrent, herdr?.focused_agent])
+  }, [info?.persistence, convo.bind, convo.agentStatus, convo.failing, convo.title, convo.entries, status, convoHit, herdrCurrent, herdr?.focused_agent])
   // Waiting for an answer, in the pane the conversation is of and in front.
   const convoWaits =
     convo.status === 'ready' && !!convo.bind && !!convoHit && convoHit.a.pane_id === convo.bind.pane && convoHit.a.pane_id === herdr?.focused_pane &&
@@ -581,6 +583,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
       .catch((e) => settle(e instanceof ApiError && e.code === 'agent_changed' ? t('convo.stopChanged') : errorText(e)))
   }
   const shownStop = myStop?.text
+  const convoStopsHere = showConvo && convoWorking && !!convo.bind && status === 'open'
   // Going to another agent from the bar (herdr): sending waits until herdr
   // has that pane in front and the conversation is of it, so what is typed
   // meanwhile does not reach the pane left. A switch not done in 10 seconds
@@ -667,9 +670,9 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
     return () => clearTimeout(timer)
   }, [convoPending])
   const shownPending = convoPending.filter((p) => p.bind === bindKey)
-  // On a touch screen, taps on the conversation bring up no keyboard: the
-  // composer is how to type there. It opens with the view, unless it was put
-  // away while the view showed.
+  // The conversation covers the terminal: the composer is how to type there
+  // (and, on a touch screen, taps on it bring up no keyboard). It opens with
+  // the view, unless it was put away while the view showed.
   const convoNoComposer = useRef(local.get(CONVO_NO_COMPOSER) === '1')
   const toggleConvo = () => {
     if (convoPeek) {
@@ -679,8 +682,8 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
     const open = !convoOpen
     rememberConvo(id, open)
     setConvoOpen(open)
-    // (In the tap itself, so iOS raises the keyboard; not with a keyboard attached.)
-    if (open && isTouch && !hardwareKeys && !convoNoComposer.current) {
+    // (In the tap itself, so iOS raises the keyboard.)
+    if (open && !convoNoComposer.current) {
       if (composer) composerRef.current?.focus()
       else openComposerRef.current()
     }
@@ -2796,8 +2799,13 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
             convo={convo}
             agent={convoAgent}
             pending={shownPending}
-            onReply={convoWaits ? () => setReplyTo(convoHit!.a) : undefined}
-            onStop={convoWorking && convo.bind && status === 'open' ? stopAgent : undefined}
+            ask={
+              convoWaits && convoHit ? (
+                // (One a pane, as the dialog: nothing of another pane's carries over.)
+                <InlineReply key={convoHit.a.pane_id} sessionId={id} agent={convoHit.a} resizedAt={sized} onLoaded={() => forgetReply(convoHit.a.pane_id)} />
+              ) : undefined
+            }
+            onStop={convoStopsHere ? stopAgent : undefined}
             stop={convoSwitch ? t(convoSwitch.slow ? 'convo.switchSlow' : 'convo.switching') : shownStop}
             agents={info?.persistence === 'herdr' && herdr ? convoAgents : undefined}
             onDismiss={(pid) => setConvoPending((ps) => ps.filter((p) => p.id !== pid))}
@@ -2960,9 +2968,16 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
                     </button>
                   )}
                   {hasKeyboardPointer() && <span className="composer-keys" aria-hidden="true">{suggestion && !draft ? t('term.suggestionKey') + ' · ' : ''}{composerKeys}</span>}
-                  <button type="button" className="composer-send" onClick={() => sendComposer(true)} aria-label={t('term.send')} title={t('term.send') + (isTouch ? '' : ' (' + composerSendKey + ')')}>
-                    <ArrowUp size={18} strokeWidth={2.25} />
-                  </button>
+                  {convoStopsHere && !draft.trim() ? (
+                    // (While the agent works and nothing is typed: send becomes stop, as in chat apps.)
+                    <button type="button" className="composer-send is-stop" onClick={stopAgent} aria-label={t('convo.stop')} title={t('convo.stop')}>
+                      <Square size={14} fill="currentColor" strokeWidth={0} />
+                    </button>
+                  ) : (
+                    <button type="button" className="composer-send" onClick={() => sendComposer(true)} aria-label={t('term.send')} title={t('term.send') + (isTouch ? '' : ' (' + composerSendKey + ')')}>
+                      <ArrowUp size={18} strokeWidth={2.25} />
+                    </button>
+                  )}
                 </div>
               </div>
             </div>

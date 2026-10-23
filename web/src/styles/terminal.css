@@ -151,6 +151,7 @@ html.term-mode body { position: fixed; inset: 0; }
   background: var(--accent); color: #fff; flex: none;
 }
 .composer-send:hover { background: var(--accent-hover); }
+.composer-send.is-stop, .composer-send.is-stop:hover { background: var(--term-fg); color: var(--term-bg); }
 @media (pointer: coarse) { .composer-tools { height: 44px; } .composer-send { width: 38px; height: 38px; margin-right: 1px; } }
 /* "@", "/", "$": suggestions over the terminal, right above the composer */
 .composer-complete {
@@ -538,3 +539,25 @@ html.term-dark .overlay, html.term-dark .menu, html.term-dark .toast {
 .convo-bar-pick .convo-bar-name { flex: 0 1 auto; }
 .term-tab-agents { flex: none; width: auto; min-width: 30px; height: 30px; padding: 0 6px; gap: 3px; display: inline-flex; align-items: center; color: var(--term-fg-2); }
 @media (pointer: coarse) { .term-tab-agents { height: 36px; min-width: 36px; } }
+
+/* Answering in the thread: the question, its choices, a line of text */
+.convo-ask {
+  display: flex; flex-direction: column; gap: 8px; padding: 12px; border-radius: 12px;
+  border: 1px solid var(--term-accent-text); background: var(--term-bg);
+}
+.convo-ask-q { font-weight: 600; }
+.convo-ask-opts { display: flex; flex-direction: column; gap: 6px; }
+.convo-ask-opt {
+  display: flex; align-items: baseline; gap: 10px; width: 100%; padding: 8px 12px; border-radius: 8px; cursor: pointer;
+  border: 1px solid var(--term-line); background: var(--term-bg); color: var(--term-fg); font: inherit; text-align: left;
+}
+.convo-ask-opt:hover:not(:disabled) { background: var(--term-hover); }
+.convo-ask-opt:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: 2px; }
+.convo-ask-opt:disabled { opacity: 0.6; cursor: default; }
+.convo-ask-key { flex: none; font-family: var(--font-mono); font-size: 13px; color: var(--term-fg-3); }
+.convo-ask-text { display: flex; gap: 8px; }
+.convo-ask-text .input { flex: 1; min-width: 0; }
+.convo-ask-more { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 13px; }
+.convo-ask-more .link-btn { font-size: 13px; color: var(--term-fg-2); }
+.convo-ask .reply-screen { max-height: 260px; }
+.convo-ask-sent { margin: 0; font-size: 13px; color: var(--term-fg-3); }

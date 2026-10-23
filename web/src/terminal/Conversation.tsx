@@ -21,7 +21,7 @@ type Item =
   | { kind: 'user'; e: ConvoEntry }
   | { kind: 'note'; e: ConvoEntry }
   | { kind: 'summary'; e: ConvoEntry }
-  | { kind: 'work'; key: string; steps: Step[]; from?: string; to?: string; live: boolean }
+  | { kind: 'work'; key: string; steps: Step[]; from?: string; to?: string; live: boolean; moving: boolean; busy?: ConvoPart }
   | { kind: 'answer'; key: string; text: string; truncated?: boolean; ts?: string; work?: string; edits: Edits | null }
 
 interface Edits {
@@ -33,45 +33,56 @@ interface Edits {
 // When each part was written (its entry's time).
 const partTime = new WeakMap<ConvoPart, string>()
 
-// items groups the entries by turn. live: the agent is at work on the last
-// turn, so all of it is work (its answer is the text it ends with).
-function items(entries: ConvoEntry[], live: boolean): Item[] {
+// items groups the entries by turn. live: the last turn goes on (the agent
+// works, or waits for an answer), so all of it is work; moving: it works
+// (a step is under way). A turn's answer is the text it ends with (notes
+// after it come after it); a turn that ends in a step has none.
+function items(entries: ConvoEntry[], live: boolean, moving: boolean): Item[] {
   const out: Item[] = []
   let turn: { from?: string; steps: Step[]; to?: string; key: string } | null = null
   const end = (last: boolean) => {
     if (!turn) return
-    const steps = turn.steps
-    turn.steps = []
-    let answer = -1
-    if (!(last && live)) for (let i = steps.length - 1; i >= 0 && answer < 0; i--) if (isText(steps[i])) answer = i
-    const work = steps.filter((s, i) => i !== answer && !isTaskCall(s))
-    const doing = work.some((s) => !isNote(s))
-    const key = turn.key
-    if (doing) out.push({ kind: 'work', key, steps: work, from: turn.from, to: turn.to, live: last && live })
-    else for (const s of work) out.push(isNote(s) ? { kind: 'note', e: s } : { kind: 'answer', key: key + '.' + out.length, text: (s as ConvoPart).text ?? '', edits: null })
-    if (answer >= 0) {
-      const p = steps[answer] as ConvoPart
-      out.push({ kind: 'answer', key: key + '.a', text: p.text ?? '', truncated: p.truncated, ts: partTime.get(p), work: doing ? key : undefined, edits: edits(work) })
-    }
+    const { steps, key, from, to } = turn
     turn = null
-  }
-  const start = (key: string, from?: string) => {
-    turn = { key, from, steps: [] }
+    let a = steps.length
+    let tail = steps.length
+    if (!(last && live)) {
+      while (tail > 0 && isNote(steps[tail - 1])) tail--
+      a = tail
+      while (a > 0 && isText(steps[a - 1])) a--
+    }
+    const answer = steps.slice(a, tail) as ConvoPart[]
+    // (A task call that failed stays: its error is to be seen.)
+    const work = steps.slice(0, a).filter((s) => !isTaskCall(s) || (s as ConvoPart).tool!.error)
+    const doing = work.some((s) => !isNote(s))
+    if (doing) out.push({ kind: 'work', key, steps: work, from, to, live: last && live, moving: last && moving, busy: last && moving ? underWay(steps) : undefined })
+    else for (const s of work) out.push(isNote(s) ? noteItem(s) : { kind: 'answer', key: key + '.' + out.length, text: s.text ?? '', truncated: s.truncated, ts: partTime.get(s), edits: null })
+    if (answer.length)
+      out.push({
+        kind: 'answer',
+        key: key + '.a',
+        text: answer.map((p) => p.text ?? '').join('\n\n'),
+        truncated: answer.some((p) => p.truncated),
+        ts: partTime.get(answer[answer.length - 1]),
+        work: doing ? key : undefined,
+        edits: edits(work),
+      })
+    for (const s of steps.slice(tail)) out.push(noteItem(s as ConvoEntry))
   }
   for (const e of entries) {
-    if (e.role === 'user' || e.role === 'summary') {
+    if (e.role === 'user' || (e.role === 'summary' && !turn)) {
       end(false)
       out.push({ kind: e.role, e } as Item)
-      start('t' + e.seq, e.role === 'user' ? e.ts : undefined)
+      turn = { key: 't' + e.seq, from: e.role === 'user' ? e.ts : undefined, steps: [] }
       continue
     }
-    if (!turn) start('t' + e.seq) // (the log read begins mid-turn)
-    const tr = turn!
+    if (!turn) turn = { key: 't' + e.seq, steps: [] } // (the log read begins mid-turn)
+    const tr: { steps: Step[]; to?: string } = turn
+    if (e.role !== 'assistant') {
+      tr.steps.push(e) // (a note, or the summary of a compaction in the middle of the turn)
+      continue
+    }
     if (e.ts) tr.to = e.ts
-    if (e.role === 'note') {
-      tr.steps.push(e)
-      continue
-    }
     for (const p of e.parts) {
       if (p.kind === 'image') continue
       if (e.ts) partTime.set(p, e.ts)
@@ -80,6 +91,21 @@ function items(entries: ConvoEntry[], live: boolean): Item[] {
   }
   end(true)
   return out
+}
+
+const noteItem = (e: ConvoEntry): Item => (e.role === 'summary' ? { kind: 'summary', e } : { kind: 'note', e })
+
+// The step under way: the latest call not come back (of several run at
+// once, any), else thinking when that is the last thing.
+function underWay(steps: Step[]): ConvoPart | undefined {
+  let last: ConvoPart | undefined
+  for (let i = steps.length - 1; i >= 0; i--) {
+    const s = steps[i]
+    if (isNote(s) || isTaskCall(s)) continue
+    if (s.tool && !s.tool.done) return s
+    last ??= s
+  }
+  return last?.kind === 'thinking' ? last : undefined
 }
 
 const isNote = (s: Step): s is ConvoEntry => 'role' in s
@@ -194,6 +220,7 @@ export function ConversationView({
   agent,
   pending,
   onReply,
+  ask,
   onStop,
   stop,
   agents,
@@ -204,7 +231,8 @@ export function ConversationView({
   convo: Convo
   agent: ConvoAgent | null
   pending: ConvoPending[]
-  onReply?: () => void // (the agent waits for an answer)
+  onReply?: () => void // (the agent waits for an answer: a bar to open the reply)
+  ask?: ReactNode // (it waits, and is answered here: at the end of the thread, over the bar)
   onStop?: () => void // (it works: press Esc in its pane)
   stop?: string // what became of the last stop pressed, to say
   agents?: () => MenuItem[] // (herdr) the agents to go to, from the bar
@@ -213,8 +241,10 @@ export function ConversationView({
   onCopied: () => void
 }) {
   const working = agent?.status === 'working'
-  const list = useMemo(() => items(convo.entries, working), [convo.entries, working])
+  const waits = agent?.status === 'blocked'
+  const list = useMemo(() => items(convo.entries, working || waits, working), [convo.entries, working, waits])
   const box = useRef<HTMLDivElement>(null)
+  const col = useRef<HTMLDivElement>(null)
   const stuck = useRef(true) // following the end
   const [away, setAway] = useState(false)
   const copiedRef = useRef(onCopied)
@@ -223,6 +253,11 @@ export function ConversationView({
   // A turn's work opened or closed by hand (else: open while it goes on).
   const [opened, setOpened] = useState<Record<string, boolean>>({})
   const toggle = useCallback((key: string, open: boolean) => setOpened((o) => ({ ...o, [key]: open })), [])
+  // (Of turns no longer kept, nothing is.)
+  useEffect(() => {
+    const keys = new Set(list.flatMap((it) => (it.kind === 'work' ? [it.key] : [])))
+    setOpened((o) => (Object.keys(o).every((k) => keys.has(k)) ? o : Object.fromEntries(Object.entries(o).filter(([k]) => keys.has(k)))))
+  }, [list])
   const show = useCallback(
     (key: string) => {
       toggle(key, true)
@@ -257,7 +292,7 @@ export function ConversationView({
   useLayoutEffect(() => {
     const el = box.current
     if (el && stuck.current) el.scrollTop = el.scrollHeight
-  }, [list, pending, working, quiet, convo.tasks])
+  }, [list, pending, working, quiet, convo.tasks, !!ask])
   useEffect(() => {
     const el = box.current
     if (!el) return
@@ -267,7 +302,16 @@ export function ConversationView({
       setAway(!atEnd)
     }
     el.addEventListener('scroll', onScroll, { passive: true })
-    return () => el.removeEventListener('scroll', onScroll)
+    // (What grows after it is laid out, as the answer card once the screen is read, keeps the end in view too.)
+    const grows = new ResizeObserver(() => {
+      if (stuck.current) el.scrollTop = el.scrollHeight
+    })
+    if (col.current) grows.observe(col.current)
+    grows.observe(el)
+    return () => {
+      el.removeEventListener('scroll', onScroll)
+      grows.disconnect()
+    }
   }, [])
 
   let body: ReactNode
@@ -316,6 +360,7 @@ export function ConversationView({
           </div>
         ))}
         {working && quiet && <p className="convo-working">{t('convo.quiet')}</p>}
+        {ask}
       </>
     )
 
@@ -370,12 +415,14 @@ export function ConversationView({
         </div>
       )}
       <div className="convo-scroll" ref={box}>
-        <div className="convo-col">{body}</div>
+        <div className="convo-col" ref={col}>
+          {body}
+        </div>
       </div>
       {away && convo.status === 'ready' && (
         <button
           type="button"
-          className={'convo-latest' + (onReply ? ' is-raised' : '')}
+          className={'convo-latest' + (waits && !ask ? ' is-raised' : '')}
           onClick={() => {
             const el = box.current
             if (el) el.scrollTo({ top: el.scrollHeight, behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' })
@@ -385,11 +432,12 @@ export function ConversationView({
           {t('convo.latest')}
         </button>
       )}
-      {convo.status === 'ready' && convo.tasks && <Tasks tasks={convo.tasks} />}
-      {onReply && (
+      {convo.status === 'ready' && convo.tasks && <Tasks tasks={convo.tasks} fold={!!ask} />}
+      {waits && !ask && convo.status === 'ready' && (
+        // (Where it cannot be answered here: in its terminal.)
         <div className="convo-waiting" role="status">
           <span>{t('convo.waiting')}</span>
-          <button type="button" className="btn btn-primary" onClick={onReply}>{t('convo.answer')}</button>
+          <button type="button" className="btn btn-primary" onClick={onReply ?? onShowTerminal}>{t(onReply ? 'convo.answer' : 'convo.answerThere')}</button>
         </div>
       )}
     </div>
@@ -399,8 +447,13 @@ export function ConversationView({
 // The agent's task list, over the composer while some of it is left: one
 // line (how far, what now) that opens to all of it. Folded at first on a
 // small screen, where the thread needs the room.
-function Tasks({ tasks }: { tasks: ConvoTask[] }) {
-  const [open, setOpen] = useState(() => !matchMedia('(max-width: 640px)').matches)
+// fold: a question is being answered over it: one line, unless opened then.
+function Tasks({ tasks, fold }: { tasks: ConvoTask[]; fold?: boolean }) {
+  const [opened, setOpened] = useState(() => !matchMedia('(max-width: 640px)').matches)
+  const [asked, setAsked] = useState<boolean | null>(null) // (chosen while folded for a question)
+  useEffect(() => setAsked(null), [fold])
+  const open = fold ? (asked ?? false) : opened
+  const setOpen = (v: boolean) => (fold ? setAsked(v) : setOpened(v))
   const done = tasks.filter((x) => x.status === 'completed').length
   if (done === tasks.length) return null
   const now = tasks.find((x) => x.status === 'in_progress')
@@ -461,13 +514,14 @@ function sameItem(a: Item, b: Item): boolean {
     }
     case 'work': {
       const o = b as typeof a
-      return a.live === o.live && a.from === o.from && a.to === o.to && a.steps.length === o.steps.length && a.steps.every((p, i) => p === o.steps[i])
+      return a.live === o.live && a.moving === o.moving && a.busy === o.busy && a.from === o.from && a.to === o.to && a.steps.length === o.steps.length && a.steps.every((p, i) => p === o.steps[i])
     }
     default:
       return a.e === (b as typeof a).e
   }
 }
 
+const noShow = () => {}
 const noteText = (e: ConvoEntry) => e.parts.map((p) => p.text).join(' ')
 
 function clockMs(ms: number): string {
@@ -558,10 +612,7 @@ function Work({ it, open, onToggle, onCopy }: { it: Extract<Item, { kind: 'work'
     .map((c) => count(c, counts.get(c)!))
     .join(t('convo.sep'))
   const failed = tools.filter((tl) => tl.error).length
-  // The step under way: the last call not come back, while the turn goes on.
-  const lastStep = it.steps[it.steps.length - 1]
-  const under = it.live && lastStep && !isNote(lastStep) ? lastStep : undefined
-  const busy = under && (under.kind === 'thinking' || (under.tool && !under.tool.done)) ? under : undefined
+  const busy = it.busy
   const now = useTick(!!busy)
   const span = ms(it.to) - ms(it.from)
   const head = it.live ? t('convo.workingNow') : it.from && span >= 0 && ms(it.to) ? t('convo.worked', { d: duration(span) }) : t('convo.steps')
@@ -579,7 +630,11 @@ function Work({ it, open, onToggle, onCopy }: { it: Extract<Item, { kind: 'work'
         <div className="convo-work-body">
           {it.steps.map((s, i) =>
             isNote(s) ? (
-              <p key={i} className="convo-note">{noteText(s)}</p>
+              s.role === 'summary' ? (
+                <ListItem key={i} it={{ kind: 'summary', e: s }} copy={onCopy} open={false} onToggle={onToggle} onShow={noShow} />
+              ) : (
+                <p key={i} className="convo-note">{noteText(s)}</p>
+              )
             ) : s.tool ? (
               <ToolRow key={i} tool={s.tool} onCopy={onCopy} live={s === busy} />
             ) : s.kind === 'thinking' ? (

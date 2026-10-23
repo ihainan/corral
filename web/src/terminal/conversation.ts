@@ -206,6 +206,14 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
   return convo
 }
 
+// Whether the agent is asking the person something (AskUserQuestion, not
+// come back): the last thing in the log.
+export function asking(entries: ConvoEntry[]): boolean {
+  const e = entries[entries.length - 1]
+  const p = e?.role === 'assistant' ? e.parts[e.parts.length - 1] : undefined
+  return !!p?.tool && p.tool.name === 'AskUserQuestion' && !p.tool.done
+}
+
 // Whether the conversation view was shown, by session, on this device.
 const KEY = 'corral.convoOpen'
 

@@ -265,9 +265,14 @@ func TestClaudeEditLines(t *testing.T) {
 		// No account of it: from the input, without the lines both share.
 		`{"type":"assistant","uuid":"a3","message":{"content":[{"type":"tool_use","id":"e2","name":"Edit","input":{"file_path":"/w/c.go","old_string":"a\nb\nc","new_string":"a\nB\nB2\nc"}}]}}`,
 		`{"type":"user","uuid":"r3","message":{"content":[{"type":"tool_result","tool_use_id":"e2","content":"ok"}]}}`,
+		// A last newline is no line of its own; an empty patch is no change.
+		`{"type":"assistant","uuid":"a4","message":{"content":[{"type":"tool_use","id":"e3","name":"Edit","input":{"file_path":"/w/d.go","old_string":"a\n","new_string":""}}]}}`,
+		`{"type":"user","uuid":"r4","message":{"content":[{"type":"tool_result","tool_use_id":"e3","content":"ok"}]}}`,
+		`{"type":"assistant","uuid":"a5","message":{"content":[{"type":"tool_use","id":"w2","name":"Write","input":{"file_path":"/w/e.go","content":"a\n"}}]}}`,
+		`{"type":"user","uuid":"r5","toolUseResult":{"type":"update","content":"a\n","structuredPatch":[]},"message":{"content":[{"type":"tool_result","tool_use_id":"w2","content":"ok"}]}}`,
 	))
 	got := c.Since(0)
-	want := [][2]int{{2, 2}, {3, 0}, {2, 1}}
+	want := [][2]int{{2, 2}, {3, 0}, {2, 1}, {0, 1}, {0, 0}}
 	for i, w := range want {
 		tl := got[i].Parts[0].Tool
 		if tl.Add != w[0] || tl.Del != w[1] {

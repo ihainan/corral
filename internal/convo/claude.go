@@ -405,15 +405,16 @@ func lineCount(s string) int {
 }
 
 // replaced counts the lines a replacement of old by new adds and removes,
-// leaving out the lines both begin and end with.
+// leaving out the lines both begin and end with (a last newline ends a line,
+// it does not begin one).
 func replaced(old, new string) (add, del int) {
-	a, b := strings.Split(old, "\n"), strings.Split(new, "\n")
-	if old == "" {
-		a = nil
+	split := func(s string) []string {
+		if s == "" {
+			return nil
+		}
+		return strings.Split(strings.TrimSuffix(s, "\n"), "\n")
 	}
-	if new == "" {
-		b = nil
-	}
+	a, b := split(old), split(new)
 	for len(a) > 0 && len(b) > 0 && a[0] == b[0] {
 		a, b = a[1:], b[1:]
 	}
@@ -462,16 +463,20 @@ func madeLines(name string, account json.RawMessage, add, del int) (int, int) {
 	var a struct {
 		Type    string `json:"type"`
 		Content string `json:"content"`
-		Patch   []struct {
+		Patch   *[]struct {
 			Lines []string `json:"lines"`
 		} `json:"structuredPatch"`
 	}
 	if json.Unmarshal(account, &a) != nil {
 		return add, del
 	}
-	if len(a.Patch) > 0 {
+	if a.Type == "create" {
+		return lineCount(a.Content), 0
+	}
+	// (A patch, even an empty one: a file written over with what it held.)
+	if a.Patch != nil {
 		add, del = 0, 0
-		for _, h := range a.Patch {
+		for _, h := range *a.Patch {
 			for _, l := range h.Lines {
 				switch {
 				case strings.HasPrefix(l, "+"):
@@ -482,9 +487,6 @@ func madeLines(name string, account json.RawMessage, add, del int) (int, int) {
 			}
 		}
 		return add, del
-	}
-	if a.Type == "create" {
-		return lineCount(a.Content), 0
 	}
 	return add, del
 }
