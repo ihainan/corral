@@ -43,7 +43,12 @@ before 1.0, a minor version may change configuration or behaviour (said here whe
   showed a number for every tab of a host, which said nothing of which
   session it was. Tabs are wider (up to 320 pixels), and the tab in front is
   marked as a pressed button is, which shows in every colour scheme (in a
-  light one it was the bar's own colour).
+  light one it was the bar's own colour). Tabs keep their places: a tmux or herdr
+  session opened again after a gateway restart or a lost connection stays
+  where it was (it went last, so tabs moved after every restart); a new
+  tab goes last. The counts on a tab, and on the top bar's button, say
+  with an icon what they count (waiting for you, or finished), in colours
+  that read on every scheme.
 - The settings page is grouped by what a setting is about: terminal, keyboard
   and composer, touch screens (the key bar and taps), notifications and the
   account. Display name, password and two-step sign-in are rows like the

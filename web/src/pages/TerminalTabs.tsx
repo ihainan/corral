@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Plus, Search } from 'lucide-react'
+import { Check, MessageCircleReply, Plus, Search } from 'lucide-react'
 import { api, type Host, type SessionInfo } from '../api'
 import { sessionWhich } from '../terminal/sessionName'
 import { t } from '../i18n'
+import { local } from '../storage'
 import { navigate } from '../router'
 import { takeTabs } from '../notifyopen'
 import { Dialog } from '../components/ui'
@@ -43,6 +44,43 @@ const newTabKey = isMac ? '⌘T' : 'Ctrl+Shift+T'
 // Ctrl+letters belong to the programs) and, on a Mac, ⌘1…⌘8 for a tab by
 // its place, ⌘9 for the last and ⌘⇧[ ⌘⇧] for the previous and next. No key
 // closes a tab: that ends its session.
+// Tabs keep their places. A tab is the session it shows: tmux's or herdr's
+// session on its host (opened again after a gateway restart or a lost
+// connection, it is a new session of the gateway's, in the same place), a
+// plain shell itself. Places are kept on this device; a new tab goes last.
+// A tab gone for longer than a reconnection takes loses its place: opened
+// again later, it goes last.
+const ORDER_KEY = 'corral.tabOrder'
+const KEEP_GONE_MS = 10 * 60 * 1000
+const placeKey = (s: SessionInfo) =>
+  s.persistence === 'tmux' || s.persistence === 'herdr' ? `${s.host_id}|${s.persistence}|${s.mux_session ?? ''}` : 'id|' + s.id
+
+function inPlace(list: SessionInfo[]): SessionInfo[] {
+  const now = Date.now()
+  let order: [string, number][] = [] // place key, last seen
+  try {
+    const v = JSON.parse(local.get(ORDER_KEY) ?? '[]')
+    if (Array.isArray(v)) order = v.filter((x) => Array.isArray(x) && typeof x[0] === 'string' && typeof x[1] === 'number')
+  } catch {
+    /* not ours */
+  }
+  const open = new Set(list.map(placeKey))
+  order = order.filter(([k, seen]) => open.has(k) || now - seen < KEEP_GONE_MS)
+  const known = new Set(order.map(([k]) => k))
+  for (const s of [...list].sort((a, b) => a.created_at - b.created_at)) {
+    const k = placeKey(s)
+    if (!known.has(k)) {
+      order.push([k, now])
+      known.add(k)
+    }
+  }
+  order = order.map(([k, seen]) => [k, open.has(k) ? now : seen])
+  local.set(ORDER_KEY, JSON.stringify(order))
+  const keys = order.map(([k]) => k)
+  const at = (s: SessionInfo) => keys.indexOf(placeKey(s))
+  return [...list].sort((a, b) => at(a) - at(b) || a.created_at - b.created_at)
+}
+
 export function TerminalTabs({ current }: { current: string }) {
   const [sessions, setSessions] = useState<SessionInfo[] | null>(null)
   const [mounted, setMounted] = useState<string[]>([current])
@@ -62,7 +100,7 @@ export function TerminalTabs({ current }: { current: string }) {
     const at = Date.now()
     api<SessionInfo[]>('GET', '/api/sessions')
       .then((l) => {
-        setSessions(l.filter((x) => x.state === 'running').sort((a, b) => a.created_at - b.created_at))
+        setSessions(inPlace(l.filter((x) => x.state === 'running')))
         setListAt(at)
       })
       .catch(() => {}) // (the tabs stay as they were; the next poll tries again)
@@ -255,9 +293,19 @@ function TabBar(p: { tabs: SessionInfo[]; current: string; infos: Record<string,
             {!quiet && <span className={'term-tab-dot ' + info.status} aria-hidden="true" />}
             <span className="term-tab-name">{name}</span>
             {s.title && <span className="term-tab-title">{s.title}</span>}
-            {waiting > 0 && <span className="term-tab-wait" aria-label={t('herdr.waiting', { n: waiting })}>{waiting}</span>}
+            {waiting > 0 && (
+              <span className="term-tab-count term-tab-wait" aria-label={t('herdr.waiting', { n: waiting })}>
+                <MessageCircleReply size={13} strokeWidth={2.25} aria-hidden="true" />
+                {waiting}
+              </span>
+            )}
             {/* (Finished and not looked at yet, when none waits.) */}
-            {waiting === 0 && done > 0 && <span className="term-tab-done" aria-label={t('herdr.done', { n: done })}>{done}</span>}
+            {waiting === 0 && done > 0 && (
+              <span className="term-tab-count term-tab-done" aria-label={t('herdr.done', { n: done })}>
+                <Check size={13} strokeWidth={2.5} aria-hidden="true" />
+                {done}
+              </span>
+            )}
           </button>
         )
       })}

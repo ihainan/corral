@@ -19,6 +19,7 @@ html.term-mode body { position: fixed; inset: 0; }
   --term-key: #23272e; --term-key-active: #323741; --term-fg: #e6e8ec; --term-fg-2: #a1a7b2; --term-fg-3: #808794;
   --term-hover: rgba(255, 255, 255, 0.07);
   --term-accent-soft: rgba(74, 120, 236, 0.22); --term-accent-text: #8fadf7; --term-danger-text: #f07c73;
+  --term-warn-text: #e8ac55; --term-ok-text: #63cc93;
   color-scheme: dark;
 }
 .term-root.light {
@@ -26,6 +27,7 @@ html.term-mode body { position: fixed; inset: 0; }
   --term-key: #ffffff; --term-key-active: #e7eaef; --term-fg: #16181d; --term-fg-2: #5a606c; --term-fg-3: #6b717d;
   --term-hover: #f0f2f5;
   --term-accent-soft: #edf2fc; --term-accent-text: #2c5fcc; --term-danger-text: #c2352f;
+  --term-warn-text: #9a5f00; --term-ok-text: #1d7a45;
   color-scheme: light;
 }
 .term-root .icon-btn { color: var(--term-fg-2); }
@@ -271,8 +273,11 @@ html.kb-open .keybar { padding-bottom: 6px; }
 .term-tab[aria-current="page"] .term-tab-title { color: var(--term-fg-2); }
 .term-tab-name { white-space: nowrap; }
 .term-tab-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--term-fg-3); font-weight: 400; }
-.term-tab-wait { flex: none; color: var(--warn); font: 600 11px/1 var(--font-ui); }
-.term-tab-done { flex: none; color: var(--ok); font: 600 11px/1 var(--font-ui); }
+/* Agents waiting for you, and finished ones not looked at yet: an icon says
+   which, in colours read at 4.5:1 on the bar of any scheme. */
+.term-tab-count { flex: none; display: inline-flex; align-items: center; gap: 2px; font: 600 12px/1 var(--font-ui); font-variant-numeric: tabular-nums; }
+.term-tab-wait { color: var(--term-warn-text); }
+.term-tab-done { color: var(--term-ok-text); }
 .term-tab-dot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--term-fg-3); }
 .term-tab-dot.s-connecting, .term-tab-dot.s-reconnecting, .term-tab-dot.s-slow { background: var(--warn); }
 .term-tab-dot.s-offline, .term-tab-dot.s-full { background: var(--danger); }
@@ -304,8 +309,8 @@ html.kb-open .keybar { padding-bottom: 6px; }
 .new-tab-busy { flex: none; color: var(--fg-3); font-size: 12px; }
 
 /* Agents waiting for an answer (herdr) */
-.herdr-btn { position: relative; color: var(--warn); }
-.herdr-count { position: absolute; top: 3px; right: 2px; color: var(--warn); font: 600 11px/1 var(--font-ui); }
+.herdr-btn { position: relative; color: var(--term-warn-text); }
+.herdr-count { position: absolute; top: 3px; right: 2px; color: var(--term-warn-text); font: 600 11px/1 var(--font-ui); }
 
 .menu-icon-space { width: 16px; flex: none; }
 
