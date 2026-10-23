@@ -65,48 +65,59 @@ type herdrSummary struct {
 // one watcher (see herdrAgent.Since).
 type agentTimes struct {
 	mu sync.Mutex
-	at map[string]time.Time
+	at map[string]agentTime
 }
 
-func (a *agentTimes) changed(pane string, gone bool) {
+type agentTime struct {
+	status string
+	t      time.Time
+}
+
+// changed notes a pane's agent going to status to (gone: forgotten). The
+// same status told again (by another watcher of the server, or late) moves
+// nothing.
+func (a *agentTimes) changed(pane, to string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if gone {
+	if to == herdr.StatusGone {
 		delete(a.at, pane)
-	} else {
-		a.at[pane] = time.Now()
+	} else if r, ok := a.at[pane]; !ok || r.status != to {
+		a.at[pane] = agentTime{to, time.Now()}
 	}
 }
 
-// of says when pane last changed, from now on for one not seen before.
-func (a *agentTimes) of(pane string) int64 {
+// of says when pane's agent came to status: now, for one not seen before
+// or found in another status than noted (it changed while no one watched).
+func (a *agentTimes) of(pane, status string) int64 {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	t, ok := a.at[pane]
-	if !ok {
-		t = time.Now()
-		a.at[pane] = t
+	r, ok := a.at[pane]
+	if !ok || r.status != status {
+		r = agentTime{status, time.Now()}
+		a.at[pane] = r
 	}
-	return t.UnixMilli()
+	return r.t.UnixMilli()
 }
 
-// herdrServers holds the agentTimes of each herdr server (by host and
-// socket), so a second session watching one goes by what the first saw.
+// herdrServers holds the agentTimes of each herdr server (by where the host
+// is and the socket), so a second session watching one goes by what the
+// first saw.
 type herdrServers struct {
 	mu sync.Mutex
 	m  map[string]*agentTimes
 }
 
-func (h *herdrServers) of(hostID int64, socket string) *agentTimes {
+func (h *herdrServers) of(host *store.Host, socket string) *agentTimes {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.m == nil {
 		h.m = map[string]*agentTimes{}
 	}
-	k := fmt.Sprint(hostID, "\x00", socket)
+	// (Where it is, not only which record: a record edited to another machine is another server.)
+	k := fmt.Sprint(host.ID, "\x00", host.Username, "@", host.Address, ":", host.Port, "\x00", socket)
 	t := h.m[k]
 	if t == nil {
-		t = &agentTimes{at: map[string]time.Time{}}
+		t = &agentTimes{at: map[string]agentTime{}}
 		h.m[k] = t
 	}
 	return t
@@ -134,7 +145,7 @@ func summarize(session string, s *herdr.Snapshot, times *agentTimes) herdrSummar
 			continue
 		}
 		out.Workspaces[i].Agents = append(out.Workspaces[i].Agents,
-			herdrAgent{PaneID: p.ID, Agent: p.Agent, Status: p.AgentStatus, Title: truncate(p.Title, 120), Cwd: p.Cwd, Since: times.of(p.ID)})
+			herdrAgent{PaneID: p.ID, Agent: p.Agent, Status: p.AgentStatus, Title: truncate(p.Title, 120), Cwd: p.Cwd, Since: times.of(p.ID, p.AgentStatus)})
 		if p.AgentStatus == herdr.StatusBlocked {
 			out.Waiting++
 		}
@@ -218,7 +229,7 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 	if name == "" {
 		name = "default"
 	}
-	times := s.herdrTimes.of(h.ID, socket)
+	times := s.herdrTimes.of(h, socket)
 	w := herdr.NewWatcher(sess.Client(), socket,
 		func(snap *herdr.Snapshot) {
 			if b, err := json.Marshal(summarize(name, snap, times)); err == nil {
@@ -227,7 +238,7 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 		},
 		// (A change is told before the snapshot that has it.)
 		func(tr herdr.Transition) {
-			times.changed(tr.Pane.ID, tr.To == herdr.StatusGone)
+			times.changed(tr.Pane.ID, tr.To)
 			s.onAgentTransition(sess, h, tr)
 		},
 	)

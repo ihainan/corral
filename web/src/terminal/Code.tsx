@@ -7,15 +7,20 @@ import type { Element, Root, RootContent } from 'hast'
 // A language none of them knows stays text.
 
 type Tokens = (code: string, lang: string) => Root | null
-let loading: Promise<Tokens> | null = null
+let loading: Promise<void> | null = null
 let ready: Tokens | null = null
-// (A load that failed is tried again by the next code shown.)
+// Every code shown waits for the same load; one that failed is tried
+// again by the next code shown, and its success colours all of them.
+const waiting = new Set<() => void>()
 const load = () =>
   (loading ??= import('./highlight').then(
-    (m) => (ready = m.tokens),
-    (e) => {
-      loading = null
-      throw e
+    (m) => {
+      ready = m.tokens
+      for (const w of waiting) w()
+      waiting.clear()
+    },
+    () => {
+      loading = null // (shown as text meanwhile)
     },
   ))
 
@@ -54,13 +59,11 @@ export function useColoured(code: string, lang: string | undefined): ReactNode |
   const [, setReady] = useState(!!ready)
   useEffect(() => {
     if (!lang || ready) return
-    let on = true
-    load().then(
-      () => on && setReady(true),
-      () => {}, // (shown as text)
-    )
+    const done = () => setReady(true)
+    waiting.add(done)
+    void load()
     return () => {
-      on = false
+      waiting.delete(done)
     }
   }, [lang])
   return lang && ready ? colour(code, lang, ready) : null
