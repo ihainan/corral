@@ -549,7 +549,8 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
   // (Of the process it was pressed for: another agent in front shows none of it.)
   // Each stop pressed is of a process: its state shows, and blocks a second
   // press, for that process only.
-  const [convoStops, setConvoStops] = useState<Record<string, { text: string; busy: boolean }>>({})
+  const [convoStops, setConvoStops] = useState<Record<string, { text: string; busy: boolean; n: number }>>({})
+  const stopN = useRef(0)
   const convoWorking = convoAgent?.status === 'working'
   const stopKey = convo.bind ? `${convo.bind.pane} ${convo.bind.pid} ${convo.bind.start}` : ''
   const myStop = stopKey ? convoStops[stopKey] : undefined
@@ -564,12 +565,13 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
     const b = convo.bind
     const key = stopKey
     if (!b || convoStops[key]?.busy) return
-    const set = (text: string, busy: boolean) => setConvoStops((all) => ({ ...all, [key]: { text, busy } }))
+    const n = ++stopN.current
+    const set = (text: string, busy: boolean) => setConvoStops((all) => ({ ...all, [key]: { text, busy, n } }))
     // What became of it is said for 15 seconds at most, also of a process no
-    // longer shown (then it is simply let go).
+    // longer shown (then it is simply let go); a later stop's is its own.
     const settle = (text: string) => {
       set(text, false)
-      setTimeout(() => setConvoStops((all) => (all[key] && !all[key].busy ? Object.fromEntries(Object.entries(all).filter(([k]) => k !== key)) : all)), 15000)
+      setTimeout(() => setConvoStops((all) => (all[key]?.n === n ? Object.fromEntries(Object.entries(all).filter(([k]) => k !== key)) : all)), 15000)
     }
     set(t('convo.stopping'), true)
     api('POST', `/api/sessions/${id}/conversation/interrupt`, { pane: b.pane, pid: b.pid, start: b.start, session: b.session })
