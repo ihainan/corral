@@ -641,6 +641,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
   // this one's as its own connection has them (fresher than the list). One
   // of another session opens its tab, at its pane, in the conversation view.
   const running = useRunningSessions(showConvo && active && !ended)
+  const tmuxSince = useRef<{ key: string; status: string; at: number } | null>(null)
   // The titles of agents read here (Claude Code's own), for their rows once another is shown.
   const seenTitles = useRef(new Map<string, string>())
   const convoRows = useMemo((): ConvoListRow[] | undefined => {
@@ -650,8 +651,22 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
     const all = [mine, ...(running.sessions ?? []).filter((x) => x.id !== id)]
     const { rows, others } = listAgents(all)
     const here = convo.bind?.pane ?? herdr?.focused_pane
-    // (Of the tmux session shown, the time of the last thing in its log.)
-    const lastTs = convo.entries.length ? Date.parse(convo.entries[convo.entries.length - 1].ts ?? '') || undefined : undefined
+    // Of the tmux session shown, when its status last changed: from when this
+    // page saw it change; first seen, from its log (its last entry when idle,
+    // the last message to it when at work).
+    let tmuxAt: number | undefined
+    const bound = convo.bind ? `${convo.bind.pane} ${convo.bind.pid} ${convo.bind.start}` : ''
+    if (info.persistence === 'tmux' && convoAgent && convoAgent.status !== 'unknown') {
+      const was = tmuxSince.current
+      if (was && was.key === bound && was.status === convoAgent.status) tmuxAt = was.at
+      else {
+        const ts = (e?: ConvoEntry) => (e?.ts ? Date.parse(e.ts) || undefined : undefined)
+        const first = !was || was.key !== bound
+        const lastUser = [...convo.entries].reverse().find((e) => e.role === 'user')
+        tmuxAt = first ? (convoAgent.status === 'working' ? ts(lastUser) : ts(convo.entries[convo.entries.length - 1])) ?? Date.now() : Date.now()
+        tmuxSince.current = { key: bound, status: convoAgent.status, at: tmuxAt }
+      }
+    }
     // (Of this session: its agents by what they are, whichever tab's summary the list kept for them.)
     const ours = (key: string, pane?: string) => (pane ? info.persistence === 'herdr' && key === agentKey(info, pane) : info.persistence === 'tmux' && key === tmuxKey(info))
     const go = (s: SessionInfo, key: string, pane?: string) => () => {
@@ -680,10 +695,10 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
       seen.add(key)
       const current = ours(key)
       // (Of a tmux session, what is known is of the one shown here: its conversation.)
-      out.push({ key, title: (current && convoAgent?.title) || `${s.host_name} · ${sessionWhich(s, all)}`, where: s.host_name + ' · tmux', status: current && convoAgent ? convoAgent.status : 'unknown', since: current ? lastTs : undefined, current, onPick: go(s, key) })
+      out.push({ key, title: (current && convoAgent?.title) || `${s.host_name} · ${sessionWhich(s, all)}`, where: s.host_name + ' · tmux', status: current && convoAgent ? convoAgent.status : 'unknown', since: current ? tmuxAt : undefined, current, onPick: go(s, key) })
     }
     return out
-  }, [info, herdr, herdrCurrent, running.sessions, id, convo.bind?.pane, convo.title, convo.entries, convoAgent])
+  }, [info, herdr, herdrCurrent, running.sessions, id, convo.bind?.pane, convo.title, convo.entries, convoAgent, convo.bind])
   // What the composer sent while the conversation shows, until a user turn
   // with its text appears in the same log of the same process, after it
   // (by the log's position and its time), each turn answering one.

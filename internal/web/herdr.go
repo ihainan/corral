@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"regexp"
 	"sort"
@@ -87,6 +88,28 @@ func (a *agentTimes) of(pane string) int64 {
 		a.at[pane] = t
 	}
 	return t.UnixMilli()
+}
+
+// herdrServers holds the agentTimes of each herdr server (by host and
+// socket), so a second session watching one goes by what the first saw.
+type herdrServers struct {
+	mu sync.Mutex
+	m  map[string]*agentTimes
+}
+
+func (h *herdrServers) of(hostID int64, socket string) *agentTimes {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.m == nil {
+		h.m = map[string]*agentTimes{}
+	}
+	k := fmt.Sprint(hostID, "\x00", socket)
+	t := h.m[k]
+	if t == nil {
+		t = &agentTimes{at: map[string]time.Time{}}
+		h.m[k] = t
+	}
+	return t
 }
 
 func summarize(session string, s *herdr.Snapshot, times *agentTimes) herdrSummary {
@@ -195,7 +218,7 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 	if name == "" {
 		name = "default"
 	}
-	times := &agentTimes{at: map[string]time.Time{}}
+	times := s.herdrTimes.of(h.ID, socket)
 	w := herdr.NewWatcher(sess.Client(), socket,
 		func(snap *herdr.Snapshot) {
 			if b, err := json.Marshal(summarize(name, snap, times)); err == nil {

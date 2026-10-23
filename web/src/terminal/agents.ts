@@ -58,6 +58,11 @@ export function listAgents(sessions: SessionInfo[]): { rows: AgentRow[]; others:
 // it rather than from nothing, so its list does not appear a moment later.)
 let lastList: SessionInfo[] | null = null
 
+// (Another account signed in, or none: nothing of the one before stays.)
+export function forgetSessions() {
+  lastList = null
+}
+
 // A session as the last list read has it (null when it has none).
 export const knownSession = (id: string): SessionInfo | null => lastList?.find((x) => x.id === id) ?? null
 

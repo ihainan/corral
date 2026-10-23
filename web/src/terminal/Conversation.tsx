@@ -541,7 +541,7 @@ function when(r: ConvoListRow, now: number): string {
   if (m < 1) return t(going ? 'convo.for.now' : 'convo.ago.now')
   if (m < 60) return t(going ? 'convo.for.m' : 'convo.ago.m', { n: m })
   if (m < 48 * 60) return t(going ? 'convo.for.h' : 'convo.ago.h', { n: Math.floor(m / 60) })
-  return t('convo.ago.d', { n: Math.floor(m / 1440) })
+  return t(going ? 'convo.for.d' : 'convo.ago.d', { n: Math.floor(m / 1440) })
 }
 
 function AgentList({ rows, onPicked }: { rows: ConvoListRow[]; onPicked?: () => void }) {

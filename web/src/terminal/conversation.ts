@@ -94,20 +94,27 @@ const initial = (of?: string): Convo => ({ status: 'loading', entries: [], older
 // once when it is in front again (its tab back to the front, the pane
 // focused again, a tab of it opened again), then brought up to date from
 // where it was. Without it, each switch drew "reading…" first: a flash.
+// (All of it from the same answer, kept when it is read: what shows from it
+// is made from it again, never from a state not yet drawn.)
 interface Kept {
   gen: number
   rev: number
   byseq: Map<number, ConvoEntry>
-  convo?: Convo
+  a: Omit<Answer, 'entries' | 'gen' | 'rev' | 'reset' | 'more'>
 }
 const kept = new Map<string, Kept>()
 const KEEP = 12
 const keyOf = (session: string, pane?: string) => session + ' ' + (pane ?? '')
-function remember(key: string, gen: number, rev: number, byseq: Map<number, ConvoEntry>) {
-  const was = kept.get(key)
+function remember(key: string, gen: number, rev: number, byseq: Map<number, ConvoEntry>, a: Answer) {
+  const { entries: _e, gen: _g, rev: _r, reset: _x, more: _m, ...facts } = a
   kept.delete(key) // (the latest last: the map keeps its order of use)
-  kept.set(key, { gen, rev, byseq, convo: was?.convo })
+  kept.set(key, { gen, rev, byseq, a: facts })
   while (kept.size > KEEP) kept.delete(kept.keys().next().value!)
+}
+
+// (Another account signed in, or none: nothing of the one before stays.)
+export function forgetConversations() {
+  kept.clear()
 }
 
 const sameBind = (a?: ConvoBind, b?: ConvoBind) =>
@@ -119,13 +126,6 @@ const MAX = 2000
 
 export function useConversation(sessionId: string, enabled: boolean, pane: string | undefined): Convo {
   const [convo, setConvo] = useState<Convo>(() => initial())
-  // (What shows is kept with where it was read up to.)
-  useEffect(() => {
-    if (convo.of && (convo.status === 'ready' || convo.status === 'none')) {
-      const k = kept.get(convo.of)
-      if (k) k.convo = convo
-    }
-  }, [convo])
   const paneRef = useRef(pane)
   paneRef.current = pane
   const poke = useRef<() => void>(() => {})
@@ -166,7 +166,7 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
               ? c
               : { ...initial(key), status: 'none', reason: a.reason, gen: a.gen, bind: a.bind, okAt: now, changedAt: now },
           )
-          remember(key, gen, rev, byseq)
+          remember(key, gen, rev, byseq, a)
         } else {
           const fresh = a.reset || a.gen !== gen
           if (fresh) byseq = new Map()
@@ -189,7 +189,7 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
             if (!entries && c.of === key && c.status === 'ready' && c.gen === a.gen && c.older === older && sameBind(c.bind, a.bind) && c.agentStatus === a.agent_status && c.title === a.title && c.tasks === tasks && !c.failing) return c
             return { status: 'ready', entries: entries ?? c.entries, older, gen: a.gen, bind: a.bind, agentStatus: a.agent_status, title: a.title || undefined, tasks, failing: false, okAt: now, changedAt: entries ? now : c.changedAt, of: key }
           })
-          remember(key, gen, rev, byseq)
+          remember(key, gen, rev, byseq, a)
           if (a.more) next = 300
         }
       } catch (e) {
@@ -210,12 +210,18 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
     const begin = () => {
       const key = keyOf(sessionId, paneRef.current)
       const was = kept.get(key)
-      if (was?.convo) {
+      if (was) {
         gen = was.gen
         rev = was.rev
         byseq = new Map(was.byseq)
-        const entries = was.convo.status === 'ready' ? [...byseq.values()].sort((x, y) => x.seq - y.seq) : []
-        setConvo({ ...was.convo, entries, gen, failing: false, of: key, changedAt: Date.now() })
+        const now = Date.now()
+        const k = was.a
+        if (!k.available) setConvo({ ...initial(key), status: 'none', reason: k.reason, gen, bind: k.bind, okAt: now, changedAt: now })
+        else {
+          const entries = [...byseq.values()].sort((x, y) => x.seq - y.seq)
+          const older = !!k.older || entries.length === MAX
+          setConvo({ status: 'ready', entries, older, gen, bind: k.bind, agentStatus: k.agent_status, title: k.title || undefined, tasks: k.tasks?.length ? k.tasks : undefined, failing: false, okAt: now, changedAt: now, of: key })
+        }
       } else {
         gen = 0
         rev = 0

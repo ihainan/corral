@@ -9,11 +9,24 @@ import type { Element, Root, RootContent } from 'hast'
 type Tokens = (code: string, lang: string) => Root | null
 let loading: Promise<Tokens> | null = null
 let ready: Tokens | null = null
-const load = () => (loading ??= import('./highlight').then((m) => (ready = m.tokens)))
+// (A load that failed is tried again by the next code shown.)
+const load = () =>
+  (loading ??= import('./highlight').then(
+    (m) => (ready = m.tokens),
+    (e) => {
+      loading = null
+      throw e
+    },
+  ))
 
 // (The same code is coloured once: a poll draws its turn again.)
 const done = new Map<string, ReactNode>()
 const KEEP = 300
+
+// (Another account signed in: none of the code it saw stays in memory.)
+export function forgetColours() {
+  done.clear()
+}
 
 function colour(code: string, lang: string, tokens: Tokens): ReactNode | null {
   const key = lang + '\u0000' + code
@@ -42,7 +55,10 @@ export function useColoured(code: string, lang: string | undefined): ReactNode |
   useEffect(() => {
     if (!lang || ready) return
     let on = true
-    void load().then(() => on && setReady(true))
+    load().then(
+      () => on && setReady(true),
+      () => {}, // (shown as text)
+    )
     return () => {
       on = false
     }

@@ -1,4 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
+import { forgetConversations } from './terminal/conversation'
+import { forgetSessions } from './terminal/agents'
+import { forgetColours } from './terminal/Code'
 import { Bot, Film, KeyRound, LogOut, ScrollText, Server, Settings, Users } from 'lucide-react'
 import { api, ApiError, bumpAuthGen, setUnauthorizedHandler, type Bootstrap, type Me } from './api'
 import { applyDefaultLanguage, t } from './i18n'
@@ -91,6 +94,14 @@ export function App() {
       })
       .catch(() => setError(true))
   }, [])
+
+  // What was kept of one account's sessions and conversations (to switch
+  // without a flash) goes when another signs in, or none is.
+  useEffect(() => {
+    forgetConversations()
+    forgetSessions()
+    forgetColours()
+  }, [me?.id])
 
   // What the start-up answer says about the user (such as whether there are
   // recordings to see) is learnt again after signing in.

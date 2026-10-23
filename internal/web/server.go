@@ -54,6 +54,7 @@ type Server struct {
 	static   fs.FS
 
 	herdrSocks herdrSockets
+	herdrTimes herdrServers     // when each herdr server's agents last changed (shared by its watchers)
 	replies    paneReplies      // answers to agents in herdr panes
 	picks      pendingConns     // connections kept while the user picks what to open
 	opening    openSlots        // opens connecting or asking a host, per user
