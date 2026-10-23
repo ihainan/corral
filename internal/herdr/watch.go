@@ -52,13 +52,16 @@ func (w *Watcher) Latest() *Snapshot {
 func (w *Watcher) Run(ctx context.Context) {
 	backoff := time.Second
 	for ctx.Err() == nil {
+		began := time.Now()
 		err := w.once(ctx)
 		if ctx.Err() != nil {
 			return
 		}
-		if err == nil {
+		// A connection that ran a while before it ended starts the waits over.
+		if err == nil || time.Since(began) > 30*time.Second {
 			backoff = time.Second
-		} else if w.OnLost != nil {
+		}
+		if err != nil && w.OnLost != nil {
 			w.OnLost()
 		}
 		select {

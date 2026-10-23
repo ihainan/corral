@@ -543,13 +543,17 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
   // (by the log's position and its time), each turn answering one.
   const [convoPending, setConvoPending] = useState<(ConvoPending & { bind: string; after: number; gen: number; at: number })[]>([])
   const pendingId = useRef(0)
-  const pendingUsed = useRef<{ key: string; seqs: Set<number> }>({ key: '', seqs: new Set() })
+  const pendingUsed = useRef(new Map<string, Set<number>>()) // per binding and reading: the turns that confirmed one
   const bindKey = convo.bind ? `${convo.bind.pane} ${convo.bind.pid} ${convo.bind.start} ${convo.bind.session}` : ''
   useEffect(() => {
     if (!convoPending.some((p) => p.state !== 'sent') || convo.status !== 'ready') return
     const key = bindKey + ' ' + convo.gen
-    if (pendingUsed.current.key !== key) pendingUsed.current = { key, seqs: new Set() }
-    const used = pendingUsed.current.seqs
+    let used = pendingUsed.current.get(key)
+    if (!used) {
+      used = new Set()
+      pendingUsed.current.set(key, used)
+      if (pendingUsed.current.size > 20) pendingUsed.current.delete(pendingUsed.current.keys().next().value!)
+    }
     const users = convo.entries.filter((e) => e.role === 'user')
     let changed = false
     const next = convoPending.flatMap((p) => {
@@ -1111,8 +1115,9 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
       },
       onMeta: (m) => {
         if (watch) return // herdr belongs to the owner
-        setHerdr(m as HerdrSummary) // (lost set: the gateway lost herdr; it was so then)
-        setHerdrFresh(true)
+        setHerdr(m as HerdrSummary)
+        // (lost: the gateway lost herdr; kept for the pane in front, but what it says was so then)
+        setHerdrFresh(!(m as HerdrSummary).lost)
       },
       // Where the replay ends, CAN cancels a sequence it left unfinished
       // (an OSC 52 whose end would arrive live, though the request was
