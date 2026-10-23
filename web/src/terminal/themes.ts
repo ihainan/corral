@@ -100,5 +100,6 @@ export function chromeVars(s: Scheme): Record<string, string> {
     '--term-fg-3': readable(mix(fg, bg, 0.45), surfaces, 4.5, d),
     '--term-accent-soft': accentSoft,
     '--term-accent-text': readable(s.theme.blue ?? '#4a78ec', surfaces, 4.5, d),
+    '--term-danger-text': readable(s.theme.red ?? '#d0453e', surfaces, 4.5, d),
   }
 }

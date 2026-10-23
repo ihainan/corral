@@ -6,6 +6,14 @@ before 1.0, a minor version may change configuration or behaviour (said here whe
 ## [Unreleased]
 
 ### Added
+- A conversation view (the speech-bubbles button) for Claude Code in tmux or
+  herdr on Linux hosts: the session's own log as turns, the agent's answers
+  formatted (lists, tables, code to copy), the tool calls between them folded
+  into one line per run and opened on demand, edits shown as the lines they
+  change. It reads the whole history, which herdr's panes do not keep for a
+  program on the alternate screen, and follows the pane in front. It is off
+  until turned on, per session; messages are still typed in the composer.
+  Only the session's owner sees it.
 - Tab keys in the installed app: ⌘T opens a new tab (Ctrl+Shift+T off a Mac,
   where Ctrl+letters stay with the programs); on a Mac or an iPad ⌘1–⌘8 pick
   a tab by its place, ⌘9 the last, ⌘⇧[ and ⌘⇧] the previous and next. No key

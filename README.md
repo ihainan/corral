@@ -68,6 +68,10 @@ another: start it at your desk, check on it from your phone, carry on on a table
 - **Notifications** — When an agent waits or finishes, or a program rings the
   bell or sends one. Tapping one opens that agent's pane. On an iPhone or iPad,
   add Corral to the Home Screen first: Safari notifies only from there.
+- **Conversation view** — Read Claude Code's session as a conversation:
+  its answers formatted, the commands and edits between them folded into one
+  line each run, the whole history even where the terminal keeps none. The
+  terminal is a tap away; you keep typing in the composer.
 - **A composer** — Write longer prompts: `@` files, `/` commands, `$` skills,
   history, Claude Code's suggested prompt with Tab. Ctrl+Shift+Enter
   (⇧⌘↩ on a Mac) opens it from the terminal.
@@ -125,6 +129,10 @@ Chinese and English interfaces ship together.
   changed since. Once the agent no longer waits, its alert is replaced. At
   most 10 alerts a minute; webhooks too, if enabled. The terminal offers to
   turn alerts on once agents show up.
+- The conversation view reads Claude Code's own log of the session in the
+  focused herdr pane or the active tmux pane, over the session's SSH
+  connection; nothing is installed on the host. It shows the last 4 MB of a
+  long log, and follows a `/clear` or `/resume` in the pane.
 - Tabs show in windows at least 700 pixels wide; narrower ones switch sessions
   from a list.
 - Several devices can have one session open; the one you act on decides the
@@ -318,6 +326,11 @@ Report security problems privately, not in a public issue: see [SECURITY.md](SEC
 - After a gateway restart, the tabs reattached by themselves are those opened
   in that window since it loaded; others are opened again from `+` or the host
   list.
+- The conversation view supports Claude Code only, in tmux or herdr on Linux
+  hosts (it finds the process through `/proc`), with its settings in
+  `~/.claude` (not a `CLAUDE_CONFIG_DIR` of its own). Only the session's
+  owner sees it: someone watching a shared session sees the screen, and the
+  log holds more than that.
 - Claude Code's suggested prompt is read off the screen (greyed text in its
   input box): another program drawing the same box would be offered too, though
   only typed into the composer, never sent.

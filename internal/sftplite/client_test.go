@@ -338,3 +338,57 @@ func TestBadAnswerEndsBlockedWriter(t *testing.T) {
 		t.Fatal("request still blocked")
 	}
 }
+
+func TestReadRange(t *testing.T) {
+	dir := t.TempDir()
+	data := make([]byte, 3*readChunk+1234) // more than one read's worth
+	for i := range data {
+		data[i] = byte(i * 7)
+	}
+	p := filepath.Join(dir, "log.jsonl")
+	os.WriteFile(p, data, 0o600)
+	c := serve(t, dir)
+
+	for _, tc := range []struct {
+		off int64
+		n   int
+	}{{0, len(data)}, {0, 10}, {readChunk - 3, readChunk + 9}, {int64(len(data)) - 5, 100}, {int64(len(data)), 10}, {int64(len(data)) + 50, 10}, {5, 0}} {
+		got, err := c.ReadRange(p, tc.off, tc.n)
+		if err != nil {
+			t.Fatalf("read %d+%d: %v", tc.off, tc.n, err)
+		}
+		end := min(int(tc.off)+tc.n, len(data))
+		want := []byte{}
+		if int(tc.off) < len(data) {
+			want = data[tc.off:end]
+		}
+		if string(got) != string(want) {
+			t.Fatalf("read %d+%d: got %d bytes, want %d", tc.off, tc.n, len(got), len(want))
+		}
+	}
+	if _, err := c.ReadRange(filepath.Join(dir, "missing"), 0, 10); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("missing file: %v", err)
+	}
+	if _, err := c.ReadRange(p, -1, 10); err == nil {
+		t.Fatal("negative offset accepted")
+	}
+	// Each read's handle is closed: many reads do not run the host out of them.
+	for i := 0; i < 300; i++ {
+		if _, err := c.ReadRange(p, 0, 1); err != nil {
+			t.Fatalf("read %d: %v", i, err)
+		}
+	}
+}
+
+func TestReadRangeRefusesOversizedData(t *testing.T) {
+	handle := cat([]byte{fxpHandle}, sstr("h"))
+	tooMuch := cat([]byte{fxpData}, sstr("abcdef")) // asked for 4
+	closed := cat([]byte{fxpStatus}, u32(StatusOK))
+	c, err := scripted(t, 3, handle, tooMuch, closed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.ReadRange("/f", 0, 4); !errors.Is(err, errBadPacket) {
+		t.Fatalf("oversized data: %v", err)
+	}
+}

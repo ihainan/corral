@@ -318,15 +318,16 @@ func TestRemoteExecCallSitesAreReviewed(t *testing.T) {
 		"web/api_sessions.go: sess, err := s.terms.Start(ctx, res, u.ID, h.ID, h.Name, client, opts)": true,
 		"herdr/client.go: out, err := sshx.Output(ctx, c, DiscoverCommand, sshx.MaxOutput)":           true,
 		"web/herdr.go: w.Run(ctx)": true, // watcher loop, runs no remote command itself
-		"web/ports.go: out, err := sshx.Output(ctx, c, listenCommand, sshx.MaxOutput)":                             true,
-		`sshx/exec.go: ok, err := ch.SendRequest("exec", true, ssh.Marshal(&struct{ Command string }{cmd}))`:       true, // Output's and Exec's own exec; their callers are listed here
-		"web/code.go: r, err := sshx.Exec(ctx, c, cmd, sshx.MaxOutput, opt)":                                       true, // codeRun: only codeserver commands, checked below
-		"web/files.go: out, err := sshx.Output(ctx, sess.Client(), tmuxCwdCommand(sess.TmuxSession), 8192)":        true, // fixed script, validated and quoted session name
-		"web/files.go: out, err := sshx.Output(ctx, sess.Client(), tmuxForegroundCommand(sess.TmuxSession), 4096)": true, // fixed script, validated and quoted session name
-		"web/files.go: _, err := sshx.Output(ctx, sess.Client(), removeTreeCommand(target), 64<<10)":               true, // fixed script, validated and quoted absolute path
-		"web/picker.go: out, err := sshx.Output(ctx, c, tmuxListCommand, 256<<10)":                                 true, // fixed text, no input
-		"web/complete.go: out, err := sshx.Output(ctx, sess.Client(), completeCommand(cwd), completeOutMax)":       true, // fixed script, the folder quoted as its only argument
-		"term/session.go: s.rec.Output(buf[:n])":                                                                   true, // the session recorder, not a process
+		"web/ports.go: out, err := sshx.Output(ctx, c, listenCommand, sshx.MaxOutput)":                                                             true,
+		`sshx/exec.go: ok, err := ch.SendRequest("exec", true, ssh.Marshal(&struct{ Command string }{cmd}))`:                                       true, // Output's and Exec's own exec; their callers are listed here
+		"web/code.go: r, err := sshx.Exec(ctx, c, cmd, sshx.MaxOutput, opt)":                                                                       true, // codeRun: only codeserver commands, checked below
+		"web/files.go: out, err := sshx.Output(ctx, sess.Client(), tmuxCwdCommand(sess.TmuxSession), 8192)":                                        true, // fixed script, validated and quoted session name
+		"web/files.go: out, err := sshx.Output(ctx, sess.Client(), tmuxForegroundCommand(sess.TmuxSession), 4096)":                                 true, // fixed script, validated and quoted session name
+		"web/files.go: _, err := sshx.Output(ctx, sess.Client(), removeTreeCommand(target), 64<<10)":                                               true, // fixed script, validated and quoted absolute path
+		"web/picker.go: out, err := sshx.Output(ctx, c, tmuxListCommand, 256<<10)":                                                                 true, // fixed text, no input
+		"web/complete.go: out, err := sshx.Output(ctx, sess.Client(), completeCommand(cwd), completeOutMax)":                                       true, // fixed script, the folder quoted as its only argument
+		"web/conversation.go: out, err := sshx.Output(ctx, sess.Client(), convoLocateCommand(sess.Persistence, sess.TmuxSession), convoLocateMax)": true, // fixed script, the mode and the validated tmux name quoted
+		"term/session.go: s.rec.Output(buf[:n])":                                                                                                   true, // the session recorder, not a process
 	}
 	re := regexp.MustCompile(`\.(Start|Run|Output|CombinedOutput|Exec)\(|SendRequest\("exec"`)
 	root, _ := filepath.Abs("..")

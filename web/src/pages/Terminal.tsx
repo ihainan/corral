@@ -6,7 +6,7 @@ import { fitToEdge } from '../terminal/fit'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import { WebglAddon } from '@xterm/addon-webgl'
-import { ArrowUp, Check, ChevronDown, ChevronLeft, CircleStop, Code2, Eye, FolderOpen, Globe, History, ImagePlus, MessageCircleReply, MoreVertical, Minus, Palette, Paperclip, Plus, TextSelect, Keyboard as KeyboardIcon, Power, RotateCw, Server, TextCursorInput, X } from 'lucide-react'
+import { ArrowUp, Check, MessagesSquare, ChevronDown, ChevronLeft, CircleStop, Code2, Eye, FolderOpen, Globe, History, ImagePlus, MessageCircleReply, MoreVertical, Minus, Palette, Paperclip, Plus, TextSelect, Keyboard as KeyboardIcon, Power, RotateCw, Server, TextCursorInput, X } from 'lucide-react'
 import { api, ApiError, choiceOf, errorText, uploadFile, type HerdrAgent, type HerdrSummary, type Host, type OpenChoice, type SessionInfo } from '../api'
 import { t } from '../i18n'
 import { navigate } from '../router'
@@ -36,6 +36,8 @@ import { onOpenRequest, takeTabs } from '../notifyopen'
 import { offerAlerts } from '../push'
 import { adoptComposer, composerWasOpen, rememberComposer } from '../terminal/composerOpen'
 import { promptSuggestion } from '../terminal/suggestion'
+import { ConversationView } from '../terminal/Conversation'
+import { convoWasOpen, rememberConvo, useConversation } from '../terminal/conversation'
 import { useSession, VERSION_EVENT } from '../app'
 
 const isTouch = window.matchMedia('(pointer: coarse)').matches || navigator.maxTouchPoints > 0
@@ -270,6 +272,8 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
   const [fn, setFn] = useState(false)
   // Open again where it was left open (see composerOpen.ts); never for a watcher.
   const [composer, setComposer] = useState(() => !watch && composerWasOpen(id))
+  // The conversation view over the terminal (only Claude Code's, in tmux or herdr).
+  const [convoOpen, setConvoOpen] = useState(() => !watch && convoWasOpen(id))
   useEffect(() => {
     if (!watch) adoptComposer(id, composerWasOpen(id))
   }, [id, watch])
@@ -481,6 +485,31 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
   const settleRef = useRef<() => void>(() => {})
   const takeOverRef = useRef<() => void>(() => {})
   const [following, setFollowing] = useState<{ cols: number; rows: number } | null>(null)
+  const canConvo = !watch && (info?.persistence === 'tmux' || info?.persistence === 'herdr')
+  const showConvo = convoOpen && canConvo
+  const convo = useConversation(id, showConvo && active, herdr?.focused_pane)
+  const focusedStatus = useMemo(() => {
+    const pane = herdr?.focused_pane
+    for (const w of herdr?.workspaces ?? []) for (const a of w.agents) if (a.pane_id === pane) return a.status
+    return undefined
+  }, [herdr])
+  // What the composer sent while the conversation shows, until the agent's
+  // log has it (it is written once the agent takes the message in).
+  const [convoPending, setConvoPending] = useState<{ text: string; users: number } | null>(null)
+  const convoUsers = convo.entries.filter((e) => e.role === 'user').length
+  useEffect(() => {
+    if (!convoPending) return
+    if (convoUsers > convoPending.users) {
+      setConvoPending(null)
+      return
+    }
+    const timer = setTimeout(() => setConvoPending(null), 30000)
+    return () => clearTimeout(timer)
+  }, [convoPending, convoUsers])
+  const toggleConvo = () => {
+    rememberConvo(id, !convoOpen)
+    setConvoOpen(!convoOpen)
+  }
   const outRef = useRef<(d: string | Uint8Array) => void>(() => {})
   const safeFitRef = useRef(() => {})
   const keysApartRef = useRef<() => KeysApart>(() => null) // see the CSI handlers in the terminal's setup
@@ -2033,6 +2062,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
       return
     }
     remember(draft)
+    if (showConvo && submit && text.trim()) setConvoPending({ text, users: convoUsers })
     histPos.current = null
     setDraft('')
     composerRef.current?.focus()
@@ -2522,6 +2552,11 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
             )}
           />
         )}
+        {!ended && canConvo && (
+          <button className="icon-btn convo-btn" aria-pressed={convoOpen} onClick={toggleConvo} aria-label={t('convo.toggle')} title={t('convo.toggle')}>
+            <MessagesSquare size={19} />
+          </button>
+        )}
         {!ended && !watch && (
           <button className="icon-btn" aria-pressed={composer} onClick={toggleComposer} aria-label={t('term.composer')} title={t('term.composer') + (isTouch ? '' : isMac ? ' (⇧⌘↩)' : ' (Ctrl+Shift+Enter)')}>
             <TextCursorInput size={19} />
@@ -2568,6 +2603,15 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
       )}
       <div className={'term-body' + (paused ? ' is-paused' : '') + (ended ? ' is-ended' : '')}>
         <div className="term-host-el" ref={hostEl} />
+        {showConvo && !ended && (
+          <ConversationView
+            convo={convo}
+            working={focusedStatus === 'working'}
+            pending={convoPending?.text ?? null}
+            onShowTerminal={toggleConvo}
+            onCopied={() => toast(t('common.copied'))}
+          />
+        )}
         {dragOver && <div className="term-drop">{t('term.dropHint')}</div>}
         {sending && (
           <div className="term-sending" role="status">

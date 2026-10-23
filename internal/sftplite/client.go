@@ -1,7 +1,7 @@
 // Package sftplite is a small SFTP (version 3) client for the file panel's
 // quick operations: listing a folder (and stopping after a given number of
 // entries, so a huge folder is never read whole), stat, mkdir, rename and
-// remove. Requests are multiplexed on one channel; closing the client ends
+// remove; and reading part of a file (an agent's conversation log). Requests are multiplexed on one channel; closing the client ends
 // every request still waiting at once. Transfers use github.com/pkg/sftp.
 package sftplite
 
@@ -21,7 +21,9 @@ import (
 const (
 	fxpInit     = 1
 	fxpVersion  = 2
+	fxpOpen     = 3
 	fxpClose    = 4
+	fxpRead     = 5
 	fxpLstat    = 7
 	fxpOpendir  = 11
 	fxpReaddir  = 12
@@ -33,6 +35,7 @@ const (
 	fxpRename   = 18
 	fxpStatus   = 101
 	fxpHandle   = 102
+	fxpData     = 103
 	fxpName     = 104
 	fxpAttrs    = 105
 )
@@ -450,6 +453,65 @@ func (c *Client) Remove(p string) error          { return c.simple(fxpRemove, pa
 func (c *Client) RemoveDirectory(p string) error { return c.simple(fxpRmdir, pathReq(p)) }
 func (c *Client) Rename(from, to string) error {
 	return c.simple(fxpRename, func(pk packet) packet { return pk.str(from).str(to) })
+}
+
+// readChunk is what one read asks for; hosts commonly answer less.
+const readChunk = 128 << 10
+
+// ReadRange reads up to n bytes of a file from offset off, fewer when the
+// file ends first. The file is opened for reading only, and closed again.
+func (c *Client) ReadRange(p string, off int64, n int) (data []byte, err error) {
+	if off < 0 || n < 0 {
+		return nil, errors.New("sftplite: negative offset or length")
+	}
+	rp, err := c.call(fxpOpen, func(pk packet) packet { return pk.str(p).u32(1).u32(0) }) // READ, no attributes
+	r, err := expect(rp, err, fxpHandle)
+	if err != nil {
+		return nil, err
+	}
+	handle := r.str()
+	if r.bad {
+		return nil, errBadPacket
+	}
+	defer func() {
+		if cerr := c.simple(fxpClose, pathReq(handle)); errors.Is(cerr, io.ErrUnexpectedEOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+			data, err = nil, cerr
+		}
+	}()
+	for len(data) < n {
+		want := min(n-len(data), readChunk)
+		at := off + int64(len(data))
+		rp, err := c.call(fxpRead, func(pk packet) packet {
+			return binary.BigEndian.AppendUint32(binary.BigEndian.AppendUint64(pk.str(handle), uint64(at)), uint32(want))
+		})
+		if err != nil {
+			return nil, err
+		}
+		if rp.typ == fxpStatus {
+			serr := status(rp)
+			var st *StatusError
+			if errors.As(serr, &st) && st.Code == StatusEOF {
+				return data, nil
+			}
+			if serr == nil {
+				serr = errBadPacket
+			}
+			return nil, serr
+		}
+		if rp.typ != fxpData {
+			return nil, errBadPacket
+		}
+		r := &reader{b: rp.data}
+		chunk := r.str()
+		if r.bad || len(chunk) > want {
+			return nil, errBadPacket
+		}
+		if len(chunk) == 0 {
+			return data, nil // (a host that answers nothing would loop forever)
+		}
+		data = append(data, chunk...)
+	}
+	return data, nil
 }
 
 // ReadDirLimit lists a folder, without "." and "..", in the host's order. It
