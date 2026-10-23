@@ -10,24 +10,47 @@ import { Fragment, type ReactNode } from 'react'
 
 export function Markdown({ text, onCopyCode, copyLabel = 'Copy' }: { text: string; onCopyCode?: (code: string) => void; copyLabel?: string }) {
   const copy = onCopyCode ? { fn: onCopyCode, label: copyLabel } : undefined
-  return <>{blocks(text.replace(/\r\n?/g, '\n').split('\n'), copy)}</>
+  return <>{blocks(text.replace(/\r\n?/g, '\n').split('\n'), copy, 0)}</>
 }
 
 type Copy = { fn: (code: string) => void; label: string } | undefined
 
 const fence = /^\s{0,3}(`{3,}|~{3,})\s*([^`\s]*)/
-const heading = /^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$/
+const heading = /^ {0,3}(#{1,6})[ \t]+(.*)$/
+// Quotes and lists nest this deep at most; deeper is shown as text.
+const maxDepth = 8
 const rule = /^\s{0,3}([-*_])(\s*\1){2,}\s*$/
 const quote = /^\s{0,3}>\s?/
 const listItem = /^(\s*)([-*+]|\d{1,9}[.)])\s+(.*)$/
-const tableSep = /^\s*\|?\s*:?-{1,}:?\s*(\|\s*:?-{1,}:?\s*)*\|?\s*$/
+
+// A table's line under its header ("| --- | :-: |"), checked cell by cell (a
+// single pattern for it backtracks badly on a long run of spaces).
+function isTableSep(line: string): boolean {
+  let t = line.trim()
+  if (t.startsWith('|')) t = t.slice(1)
+  if (t.endsWith('|')) t = t.slice(0, -1)
+  const cells = t.split('|')
+  return cells.length > 0 && cells.every((c) => /^:?-+:?$/.test(c.trim()))
+}
 
 function indentOf(s: string) {
   const m = /^\s*/.exec(s)![0]
   return m.replace(/\t/g, '    ').length
 }
 
-function blocks(lines: string[], copy: Copy): ReactNode[] {
+// A heading's closing hashes ("## Title ##"), found by scanning: a pattern
+// for them backtracks badly on a long run of spaces.
+function headingText(s: string): string {
+  let end = s.length
+  while (end > 0 && (s[end - 1] === ' ' || s[end - 1] === '\t')) end--
+  let h = end
+  while (h > 0 && s[h - 1] === '#') h--
+  if (h < end && (h === 0 || s[h - 1] === ' ' || s[h - 1] === '\t')) end = h
+  while (end > 0 && (s[end - 1] === ' ' || s[end - 1] === '\t')) end--
+  return s.slice(0, end)
+}
+
+function blocks(lines: string[], copy: Copy, depth: number): ReactNode[] {
   const out: ReactNode[] = []
   let i = 0
   let para: string[] = []
@@ -70,7 +93,7 @@ function blocks(lines: string[], copy: Copy): ReactNode[] {
       flush()
       const level = Math.min(m[1].length + 2, 6)
       const H = `h${level}` as 'h3'
-      out.push(<H key={out.length}>{inline(m[2])}</H>)
+      out.push(<H key={out.length}>{inline(headingText(m[2]))}</H>)
       i++
       continue
     }
@@ -80,14 +103,14 @@ function blocks(lines: string[], copy: Copy): ReactNode[] {
       i++
       continue
     }
-    if (quote.test(line)) {
+    if (quote.test(line) && depth < maxDepth) {
       flush()
       const q: string[] = []
       while (i < lines.length && quote.test(lines[i])) q.push(lines[i++].replace(quote, ''))
-      out.push(<blockquote key={out.length}>{blocks(q, copy)}</blockquote>)
+      out.push(<blockquote key={out.length}>{blocks(q, copy, depth + 1)}</blockquote>)
       continue
     }
-    if (line.includes('|') && i + 1 < lines.length && tableSep.test(lines[i + 1]) && lines[i + 1].includes('-')) {
+    if (line.includes('|') && i + 1 < lines.length && isTableSep(lines[i + 1])) {
       flush()
       const head = cells(line)
       const align = cells(lines[i + 1]).map((c) => (c.startsWith(':') && c.endsWith(':') ? 'center' : c.endsWith(':') ? 'right' : undefined))
@@ -110,7 +133,7 @@ function blocks(lines: string[], copy: Copy): ReactNode[] {
       )
       continue
     }
-    if ((m = listItem.exec(line))) {
+    if (depth < maxDepth && (m = listItem.exec(line))) {
       flush()
       const base = indentOf(line)
       const ordered = /\d/.test(m[2])
@@ -147,7 +170,7 @@ function blocks(lines: string[], copy: Copy): ReactNode[] {
             return (
               <li key={k}>
                 {inline(it.first)}
-                {sub.some((s) => s.trim()) && blocks(sub, copy)}
+                {sub.some((s) => s.trim()) && blocks(sub, copy, depth + 1)}
               </li>
             )
           })}
@@ -202,13 +225,17 @@ function inlineLines(lines: string[]): ReactNode {
 }
 
 // Inline spans, left to right; the first match at the earliest place wins.
+// Text reaches here a line at a time (no newlines). Each pattern is searched
+// forward from where the text has got to, and its next match kept, so a long
+// line is not searched again from the start for every span on it.
+const wide = '\\u3000-\\u303f\\uff00-\\uffef' // full-width punctuation ends a bare address
 const spans: { re: RegExp; make: (m: RegExpExecArray, key: number) => ReactNode }[] = [
-  { re: /`([^`\n]+)`/, make: (m, k) => <code key={k}>{m[1]}</code> },
-  { re: /\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/, make: (m, k) => link(m[2], inline(m[1]), k) },
-  { re: /https?:\/\/[^\s<>()　-〿＀-￯"']+[^\s<>()　-〿＀-￯"'.,;:!?]/, make: (m, k) => link(m[0], m[0], k) },
-  { re: /\*\*(?=\S)([^\n]*?\S)\*\*/, make: (m, k) => <strong key={k}>{inline(m[1])}</strong> },
-  { re: /~~(?=\S)([^\n]*?\S)~~/, make: (m, k) => <del key={k}>{inline(m[1])}</del> },
-  { re: /(?<![*\w])\*(?=\S)([^*\n]*?\S)\*(?![*\w])/, make: (m, k) => <em key={k}>{inline(m[1])}</em> },
+  { re: /`([^`]+)`/g, make: (m, k) => <code key={k}>{m[1]}</code> },
+  { re: /\[([^\]]{1,500})\]\((https?:\/\/[^\s)]{1,2000})\)/g, make: (m, k) => link(m[2], inline(m[1]), k) },
+  { re: new RegExp(`https?://[^\\s<>()${wide}"']{0,2000}[^\\s<>()${wide}"'.,;:!?]`, 'g'), make: (m, k) => link(m[0], m[0], k) },
+  { re: /\*\*(?=\S)([^*]{0,2000}?\S)\*\*/g, make: (m, k) => <strong key={k}>{inline(m[1])}</strong> },
+  { re: /~~(?=\S)([^~]{0,2000}?\S)~~/g, make: (m, k) => <del key={k}>{inline(m[1])}</del> },
+  { re: /(?<![*\w])\*(?=\S)([^*]{0,2000}?\S)\*(?![*\w])/g, make: (m, k) => <em key={k}>{inline(m[1])}</em> },
 ]
 
 function link(href: string, children: ReactNode, key: number) {
@@ -221,20 +248,25 @@ function link(href: string, children: ReactNode, key: number) {
 
 function inline(s: string): ReactNode[] {
   const out: ReactNode[] = []
-  let rest = s
-  while (rest) {
-    let best: { at: number; m: RegExpExecArray; make: (m: RegExpExecArray, key: number) => ReactNode } | null = null
-    for (const sp of spans) {
-      const m = sp.re.exec(rest)
-      if (m && (!best || m.index < best.at)) best = { at: m.index, m, make: sp.make }
+  const next: (RegExpExecArray | null | undefined)[] = spans.map(() => undefined) // undefined: not searched yet
+  let pos = 0
+  while (pos < s.length) {
+    let best = -1
+    for (let k = 0; k < spans.length; k++) {
+      let m = next[k]
+      if (m === undefined || (m && m.index < pos)) {
+        const re = spans[k].re
+        re.lastIndex = pos
+        m = next[k] = re.exec(s)
+      }
+      if (m && (best < 0 || m.index < next[best]!.index)) best = k
     }
-    if (!best) {
-      out.push(rest)
-      break
-    }
-    if (best.at > 0) out.push(rest.slice(0, best.at))
-    out.push(best.make(best.m, out.length))
-    rest = rest.slice(best.at + best.m[0].length)
+    if (best < 0) break
+    const m = next[best]!
+    if (m.index > pos) out.push(s.slice(pos, m.index))
+    out.push(spans[best].make(m, out.length))
+    pos = m.index + m[0].length
   }
+  if (pos < s.length) out.push(s.slice(pos))
   return out
 }

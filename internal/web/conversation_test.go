@@ -77,3 +77,24 @@ func TestConvoLocateCommandQuotesArguments(t *testing.T) {
 		t.Fatalf("arguments not quoted: %s", cmd[len(cmd)-60:])
 	}
 }
+
+func TestParseConvoLocateFirstValueCounts(t *testing.T) {
+	// A later line (a value that held a newline) cannot replace a field.
+	out := convoRec("pid=100", "start=500", "procstart=1", "sid="+sidA, "log=", "start=1", "HERDR_PANE_ID=w1:p1", "HERDR_PANE_ID=w9:p9")
+	if procs, _, _, _ := parseConvoLocate(out); len(procs) != 0 {
+		t.Fatalf("start time replaced: %+v", procs)
+	}
+	out = convoRec("pid=100", "start=500", "procstart=500", "sid="+sidA, "log=", "HERDR_PANE_ID=w1:p1", "HERDR_PANE_ID=w9:p9")
+	if procs, _, _, _ := parseConvoLocate(out); len(procs) != 1 || procs[0].herdrPane != "w1:p1" {
+		t.Fatalf("pane replaced: %+v", procs)
+	}
+}
+
+func TestConvoGenerationsAreNotReused(t *testing.T) {
+	var c convoStates
+	a := c.get("s1").gen
+	c.m = nil // (as if every state had been forgotten)
+	if b := c.get("s1").gen; b == a {
+		t.Fatalf("generation %d given again", b)
+	}
+}

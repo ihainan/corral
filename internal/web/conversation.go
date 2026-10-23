@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ihainan/corral/internal/convo"
@@ -53,18 +54,25 @@ if [ "$1" = tmux ]; then
   printf 'tmux=%s\0' "$t"
 fi
 [ -r /proc/self/stat ] || { printf 'noproc\0'; exit 0; }
+nl=$(printf '\nx'); nl=${nl%x}
 for f in "$HOME"/.claude/sessions/*.json; do
   [ -f "$f" ] || continue
   pid=${f##*/}; pid=${pid%.json}
   case $pid in ''|*[!0-9]*) continue;; esac
   [ -r "/proc/$pid/environ" ] || continue
-  start=$(sed 's/.*) //' "/proc/$pid/stat" 2>/dev/null | cut -d' ' -f20)
+  stat=$(tr '\n' ' ' <"/proc/$pid/stat" 2>/dev/null)
+  start=$(printf '%s' "${stat##*) }" | cut -d' ' -f20)
+  case $start in ''|*[!0-9]*) continue;; esac
   c=$(head -c 65536 "$f" 2>/dev/null | tr -d '\n')
   sid=$(printf '%s' "$c" | grep -o '"sessionId" *: *"[0-9a-fA-F-]*"' | head -n 1 | sed 's/.*"\([0-9a-fA-F-]*\)"$/\1/')
   ps=$(printf '%s' "$c" | grep -o '"procStart" *: *"*[0-9]*' | head -n 1 | sed 's/[^0-9]*\([0-9]*\)$/\1/')
-  case $sid in ????????-????-????-????-????????????) ;; *) continue;; esac
+  case $ps in ''|*[!0-9]*) continue;; esac
+  case $sid in *[!0-9a-fA-F-]*) continue;; ????????-????-????-????-????????????) ;; *) continue;; esac
   log=
-  for l in "$HOME"/.claude/projects/*/"$sid".jsonl; do [ -f "$l" ] && { log=$l; break; }; done
+  for l in "$HOME"/.claude/projects/*/"$sid".jsonl; do
+    case $l in *"$nl"*) continue;; esac
+    [ -f "$l" ] && { log=$l; break; }
+  done
   env=$(tr '\0' '\n' <"/proc/$pid/environ" 2>/dev/null | grep -E '^(HERDR_PANE_ID|HERDR_SOCKET_PATH|TMUX|TMUX_PANE)=' | head -c 4096)
   printf 'pid=%s\nstart=%s\nprocstart=%s\nsid=%s\nlog=%s\n%s\0' "$pid" "$start" "$ps" "$sid" "$log" "$env"
 done
@@ -105,11 +113,13 @@ func parseConvoLocate(out string) (procs []convoProc, tmuxActive, tmuxPID string
 		}
 		var p convoProc
 		var procStart int64 = -1
+		seen := map[string]bool{}
 		for _, line := range strings.Split(rec, "\n") {
 			k, v, ok := strings.Cut(line, "=")
-			if !ok {
-				continue
+			if !ok || seen[k] {
+				continue // (the first value of a key counts: a later line cannot replace it)
 			}
+			seen[k] = true
 			switch k {
 			case "pid":
 				p.pid, _ = strconv.ParseInt(v, 10, 64)
@@ -186,15 +196,20 @@ func pickConvoProc(procs []convoProc, persistence, pane, herdrSocket, tmuxActive
 	return best
 }
 
+// convoGens numbers generations across all states, so a state made anew
+// (the old one forgotten while a browser still held its numbers) never
+// repeats one.
+var convoGens atomic.Int64
+
 // convoState is what the gateway knows of one session's conversation.
 type convoState struct {
+	used     atomic.Int64 // unix nanoseconds of the last request
 	mu       sync.Mutex
-	used     time.Time
 	located  time.Time
 	pane     string // (herdr) the pane it was located for
 	reason   string // why there is nothing to read, when there is not
 	sid, log string
-	gen      int // changes when another log is read: what was shown does not apply
+	gen      int64 // changes when another log is read: what was shown does not apply
 	parser   *convo.Claude
 	offset   int64 // read up to here
 	size     int64 // the log's size when last looked at
@@ -222,24 +237,15 @@ func (c *convoStates) get(id string) *convoState {
 	}
 	st, ok := c.m[id]
 	if !ok {
-		st = &convoState{}
+		st = &convoState{gen: convoGens.Add(1)}
 		c.m[id] = st
 	}
+	st.used.Store(time.Now().UnixNano())
 	return st
 }
 
 func (st *convoState) idle() bool {
-	if !st.mu.TryLock() {
-		return false
-	}
-	defer st.mu.Unlock()
-	return time.Since(st.used) > convoIdle
-}
-
-func (c *convoStates) forget(id string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	delete(c.m, id)
+	return time.Since(time.Unix(0, st.used.Load())) > convoIdle
 }
 
 // Reasons there is nothing to show.
@@ -252,7 +258,7 @@ const (
 type convoAnswer struct {
 	Available bool          `json:"available"`
 	Reason    string        `json:"reason,omitempty"`
-	Gen       int           `json:"gen"`
+	Gen       int64         `json:"gen"`
 	Rev       int           `json:"rev"`
 	Reset     bool          `json:"reset,omitempty"` // drop what was shown: these are all the entries
 	Older     bool          `json:"older,omitempty"` // the conversation began before the first entry
@@ -275,7 +281,7 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", "bad pane")
 		return
 	}
-	gen, _ := strconv.Atoi(q.Get("gen"))
+	gen, _ := strconv.ParseInt(q.Get("gen"), 10, 64)
 	rev, _ := strconv.Atoi(q.Get("rev"))
 	w.Header().Set("Cache-Control", "no-store")
 	if sess.Persistence != "herdr" && sess.Persistence != "tmux" {
@@ -285,7 +291,6 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 	st := s.convos.get(sess.ID)
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	st.used = time.Now()
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 	defer cancel()
 
@@ -344,7 +349,7 @@ func (s *Server) locateConvo(ctx context.Context, sess *term.Session, st *convoS
 		}
 	}
 	if sid != st.sid || log != st.log {
-		st.gen++
+		st.gen = convoGens.Add(1)
 		st.sid, st.log = sid, log
 		st.parser = convo.NewClaude()
 		st.offset, st.size, st.mtime, st.older, st.skipping = 0, -1, time.Time{}, false, false
@@ -366,8 +371,8 @@ func (s *Server) readConvo(sess *term.Session, st *convoState) (more bool, err e
 		if size == st.size && fi.ModTime().Equal(st.mtime) && !st.more {
 			return nil
 		}
-		if size < st.offset {
-			st.gen++
+		if size < st.offset || size < st.size {
+			st.gen = convoGens.Add(1)
 			st.parser = convo.NewClaude()
 			st.offset, st.older, st.skipping = 0, false, false
 		}

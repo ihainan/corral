@@ -100,7 +100,8 @@ func (c *Claude) trim() {
 	if n := len(c.entries) - maxEntries; n > 0 {
 		for _, e := range c.entries[:n] {
 			for _, p := range e.Parts {
-				if p.Tool != nil && p.Tool.ID != "" {
+				// (A log that reuses an id has the map point at the later call.)
+				if p.Tool != nil && c.tools[p.Tool.ID].t == p.Tool {
 					delete(c.tools, p.Tool.ID)
 				}
 			}
@@ -183,7 +184,7 @@ func (c *Claude) add(r *claudeRow, role string, parts []Part) {
 		return
 	}
 	if len(parts) > maxParts {
-		parts = parts[:maxParts]
+		parts = append([]Part(nil), parts[:maxParts]...)
 	}
 	c.seq++
 	c.entries = append(c.entries, &Entry{Seq: c.seq, Rev: c.rev, ID: clip(r.UUID, maxID), Role: role, Time: clip(r.Timestamp, 64), Parts: parts})
@@ -532,15 +533,16 @@ func clean(s string) string {
 	}, s)
 }
 
-// cut shortens s to at most n bytes, at a character boundary.
+// cut shortens s to at most n bytes, at a character boundary. What it keeps
+// is a copy: a slice of a long line would keep the whole line in memory.
 func cut(s string, n int) (string, bool) {
 	if len(s) <= n {
-		return s, false
+		return strings.Clone(s), false
 	}
 	for n > 0 && !utf8.RuneStart(s[n]) {
 		n--
 	}
-	return s[:n], true
+	return strings.Clone(s[:n]), true
 }
 
 func clip(s string, n int) string {

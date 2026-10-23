@@ -79,14 +79,18 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
       timer = undefined
       if (stopped) return
       if (document.hidden) return // (visibilitychange starts it again)
-      ctl = new AbortController()
+      const mine = new AbortController()
+      ctl = mine
+      const pane = paneRef.current
       const q = new URLSearchParams({ gen: String(gen), rev: String(rev) })
-      if (paneRef.current) q.set('pane', paneRef.current)
+      if (pane) q.set('pane', pane)
       let next = POLL
       try {
-        const a = await api<Answer>('GET', `/api/sessions/${sessionId}/conversation?${q}`, undefined, { signal: ctl.signal, timeoutMs: 25000 })
-        if (stopped) return
-        if (!a.available) {
+        const a = await api<Answer>('GET', `/api/sessions/${sessionId}/conversation?${q}`, undefined, { signal: mine.signal, timeoutMs: 25000 })
+        if (stopped || mine.signal.aborted) return
+        // (An answer for the pane that was in front: ask again for this one.)
+        if (pane !== paneRef.current) next = 0
+        else if (!a.available) {
           gen = a.gen
           rev = 0
           byseq = new Map()
@@ -105,23 +109,24 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
           if (a.more) next = 300
         }
       } catch (e) {
-        if (stopped || (e instanceof ApiError && e.code === 'aborted')) return
+        if (stopped || mine.signal.aborted || (e instanceof ApiError && e.code === 'aborted')) return
         next = RETRY
         setConvo((c) => ({ ...c, status: c.entries.length ? c.status : 'error' }))
       } finally {
-        ctl = null
+        if (ctl === mine) ctl = null
       }
       if (!stopped) timer = setTimeout(run, next)
     }
     const onVisible = () => {
       if (!document.hidden && !timer && !ctl) void run()
     }
+    // Another pane in front: what is on its way is for the old one.
     poke.current = () => {
-      if (timer) {
-        clearTimeout(timer)
-        timer = undefined
-        void run()
-      }
+      clearTimeout(timer)
+      timer = undefined
+      ctl?.abort()
+      ctl = null
+      void run()
     }
     document.addEventListener('visibilitychange', onVisible)
     setConvo({ status: 'loading', entries: [], older: false })

@@ -219,3 +219,21 @@ func TestClaudeRealLogs(t *testing.T) {
 	}
 	t.Logf("%d files: %d entries %v, %d tool calls (%d with results), %d lines skipped", len(files), entries, roles, tools, done, skipped)
 }
+
+func TestClaudeTrimKeepsReusedToolID(t *testing.T) {
+	c := NewClaude()
+	var b strings.Builder
+	call := `{"type":"assistant","uuid":"a","message":{"content":[{"type":"tool_use","id":"same","name":"Bash","input":{}}]}}` + "\n"
+	b.WriteString(call)
+	for i := 0; i < maxEntries-1; i++ {
+		b.WriteString(`{"type":"user","uuid":"x","message":{"content":"hi"}}` + "\n")
+	}
+	b.WriteString(call) // the id again: the first call is dropped as old after this
+	c.Feed([]byte(b.String()))
+	c.Feed(lines(`{"type":"user","uuid":"r","message":{"content":[{"type":"tool_result","tool_use_id":"same","content":"done"}]}}`))
+	got := c.Since(0)
+	last := got[len(got)-1].Parts[0].Tool
+	if last == nil || !last.Done || last.Result != "done" {
+		t.Fatalf("the kept call lost its result: %+v", last)
+	}
+}
