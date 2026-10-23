@@ -281,6 +281,7 @@ export interface HerdrSummary {
   waiting: number
   focused_agent?: string // the agent in the focused pane ("claude", "codex"…)
   focused_pane?: string
+  lost?: boolean // the gateway lost herdr after this: it is what was so then
 }
 
 export interface Forward {

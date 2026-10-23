@@ -43,17 +43,15 @@ const (
 // start time (/proc/<pid>/stat field 22) and the one its session file
 // records (a file left by a process that ended, whose pid was then reused,
 // does not match), the session id, the log found for it, and the herdr or
-// tmux pane it runs in. With mode "tmux" the first records give the active
+// tmux pane it runs in. With mode "tmux" a first record gives the active
 // pane of the named tmux session, its server's pid and the pane's title. Linux only (/proc):
 // elsewhere it prints the record "noproc". Fixed script; the mode and the
 // validated tmux session name are its only arguments.
 func convoLocateCommand(mode, tmuxName string) string {
 	script := `PATH="$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 if [ "$1" = tmux ]; then
-  t=$(tmux -u display-message -p -t "=$2:" '#{pane_id} #{pid}' 2>/dev/null)
+  t=$(tmux -u display-message -p -t "=$2:" '#{pane_id} #{pid} #{pane_title}' 2>/dev/null | head -c 600 | tr -d '\n')
   printf 'tmux=%s\0' "$t"
-  t=$(tmux -u display-message -p -t "=$2:" '#{pane_title}' 2>/dev/null | head -c 512 | tr -d '\n')
-  printf 'tmuxtitle=%s\0' "$t"
 fi
 [ -r /proc/self/stat ] || { printf 'noproc\0'; exit 0; }
 nl=$(printf '\nx'); nl=${nl%x}
@@ -107,18 +105,19 @@ func parseConvoLocate(out string) (procs []convoProc, tmuxActive, tmuxPID, tmuxT
 			noProc = true
 			continue
 		}
-		if v, ok := strings.CutPrefix(rec, "tmuxtitle="); ok {
-			tmuxTitle = truncate(strings.Map(func(r rune) rune {
-				if r < 0x20 || r == 0x7f || (r >= 0x202a && r <= 0x202e) || (r >= 0x2066 && r <= 0x2069) {
-					return -1
-				}
-				return r
-			}, strings.ToValidUTF8(v, "")), 120)
-			continue
-		}
 		if v, ok := strings.CutPrefix(rec, "tmux="); ok {
-			if pane, pid, ok := strings.Cut(strings.TrimSpace(v), " "); ok && tmuxPane.MatchString(pane) && isDigits(pid) {
-				tmuxActive, tmuxPID = pane, pid
+			// One query, so the pane, its server and its title go together.
+			f := strings.SplitN(v, " ", 3)
+			if len(f) >= 2 && tmuxPane.MatchString(f[0]) && isDigits(f[1]) {
+				tmuxActive, tmuxPID = f[0], f[1]
+				if len(f) == 3 {
+					tmuxTitle = truncate(strings.Map(func(r rune) rune {
+						if r < 0x20 || r == 0x7f || (r >= 0x202a && r <= 0x202e) || (r >= 0x2066 && r <= 0x2069) {
+							return -1
+						}
+						return r
+					}, strings.ToValidUTF8(f[2], "")), 120)
+				}
 			}
 			continue
 		}

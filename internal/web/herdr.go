@@ -51,6 +51,9 @@ type herdrSummary struct {
 	// The agent in the focused pane ("claude", "codex"…), if any.
 	FocusedAgent string `json:"focused_agent,omitempty"`
 	FocusedPane  string `json:"focused_pane,omitempty"` // (what closing a pane closes)
+	// Lost: the gateway lost herdr after this summary; it is what was so
+	// then, not now, until the next one.
+	Lost bool `json:"lost,omitempty"`
 }
 
 func summarize(session string, s *herdr.Snapshot) herdrSummary {
@@ -167,8 +170,19 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 		},
 		func(tr herdr.Transition) { s.onAgentTransition(sess, h, tr) },
 	)
-	// The browser holds the last summary as current until told otherwise.
-	w.OnLost = func() { sess.PublishMeta([]byte(`{"t":"herdr-lost"}`)) }
+	// The browser holds the last summary as current until told otherwise;
+	// it keeps it (a page opened meanwhile gets it too), marked as old.
+	w.OnLost = func() {
+		snap := w.Latest()
+		if snap == nil {
+			return
+		}
+		sum := summarize(name, snap)
+		sum.Lost = true
+		if b, err := json.Marshal(sum); err == nil {
+			sess.PublishMeta(b)
+		}
+	}
 	w.Run(ctx)
 	s.endSessionAlerts(sess) // (its agents wait no more)
 }

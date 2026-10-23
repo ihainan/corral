@@ -87,6 +87,7 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
   const paneRef = useRef(pane)
   paneRef.current = pane
   const poke = useRef<() => void>(() => {})
+  const lastOk = useRef(0) // (ms) the last answer, whatever it brought
 
   useEffect(() => {
     if (!enabled) return
@@ -111,6 +112,7 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
         if (stopped || mine.signal.aborted) return
         // (An answer for the pane that was in front: ask again for this one.)
         const now = Date.now()
+        lastOk.current = now
         if (pane !== paneRef.current) next = 0
         else if (!a.available) {
           gen = a.gen
@@ -147,7 +149,7 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
       } catch (e) {
         if (stopped || mine.signal.aborted || (e instanceof ApiError && e.code === 'aborted')) return
         next = RETRY
-        setConvo((c) => (c.entries.length ? (c.failing ? c : { ...c, failing: true }) : { ...c, status: 'error', failing: true }))
+        setConvo((c) => (c.failing ? c : { ...c, status: c.entries.length ? c.status : 'error', failing: true, okAt: lastOk.current }))
       } finally {
         if (ctl === mine) ctl = null
       }

@@ -100,7 +100,7 @@ func TestConvoGenerationsAreNotReused(t *testing.T) {
 }
 
 func TestParseConvoLocateTmuxTitle(t *testing.T) {
-	_, _, _, title, _ := parseConvoLocate("tmux=%1 9\x00tmuxtitle=\u2733 fix\u0007 the tests\x00")
+	_, _, _, title, _ := parseConvoLocate("tmux=%1 9 \u2733 fix\u0007 the tests\x00")
 	if title != "\u2733 fix the tests" {
 		t.Fatalf("title %q", title)
 	}

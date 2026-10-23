@@ -3,6 +3,7 @@ package herdr
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"sort"
 	"strings"
 	"sync"
@@ -17,6 +18,8 @@ type Transition struct {
 	Workspace string // workspace label, for messages
 	From, To  string
 }
+
+var errStreamEnded = errors.New("herdr event stream ended")
 
 // Watcher keeps a fresh snapshot of a herdr session and reports agent status
 // changes. Following herdr's guidance, events are only a signal to re-read the
@@ -110,6 +113,9 @@ func (w *Watcher) once(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		case err := <-errc:
+			if err == nil {
+				err = errStreamEnded // (an ended stream is a lost one: the state is old until the next snapshot)
+			}
 			return err
 		case <-kick:
 			time.Sleep(250 * time.Millisecond) // let bursts settle

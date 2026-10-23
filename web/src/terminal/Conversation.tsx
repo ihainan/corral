@@ -123,14 +123,26 @@ export function ConversationView({
   const copy = useCallback((s: string) => void copyText(s).then((ok) => ok && copiedRef.current()), [])
   const working = agent?.status === 'working'
 
-  // While it works, look again now and then whether nothing came for long.
+  // While it works, look again now and then whether nothing came for long:
+  // counted from the last change, the start of this work, or coming back to
+  // the page, whichever is latest.
   const [now, setNow] = useState(Date.now())
+  const [since, setSince] = useState(Date.now())
   useEffect(() => {
     if (!working) return
+    setSince(Date.now())
+    setNow(Date.now())
     const timer = setInterval(() => setNow(Date.now()), 5000)
-    return () => clearInterval(timer)
+    const onVisible = () => {
+      if (!document.hidden) setSince(Date.now())
+    }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => {
+      clearInterval(timer)
+      document.removeEventListener('visibilitychange', onVisible)
+    }
   }, [working])
-  const quiet = working && now - convo.changedAt > HINT_AFTER
+  const quiet = working && now - Math.max(convo.changedAt, since) > HINT_AFTER
 
   // Before the new content is laid out, note whether the end was in view;
   // after, keep it there.
