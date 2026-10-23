@@ -32,6 +32,13 @@ before 1.0, a minor version may change configuration or behaviour (said here whe
   mode (⇧Tab), transcript (^T) and editing the last message (Esc Esc).
 
 ### Changed
+- Session tabs (and the phone's session list) name the session after the
+  host: tmux's session, herdr (or herdr's session when it is not the
+  default), or a plain shell, numbered only when the host has several. They
+  showed a number for every tab of a host, which said nothing of which
+  session it was. Tabs are wider (up to 320 pixels), and the tab in front is
+  marked as a pressed button is, which shows in every colour scheme (in a
+  light one it was the bar's own colour).
 - The settings page is grouped by what a setting is about: terminal, keyboard
   and composer, touch screens (the key bar and taps), notifications and the
   account. Display name, password and two-step sign-in are rows like the

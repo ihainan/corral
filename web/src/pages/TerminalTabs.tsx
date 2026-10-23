@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Plus, Search } from 'lucide-react'
 import { api, type Host, type SessionInfo } from '../api'
+import { sessionWhich } from '../terminal/sessionName'
 import { t } from '../i18n'
 import { navigate } from '../router'
 import { takeTabs } from '../notifyopen'
@@ -229,20 +230,19 @@ function TabBar(p: { tabs: SessionInfo[]; current: string; infos: Record<string,
   useEffect(() => {
     ref.current?.querySelector<HTMLElement>('.term-tab[aria-current="page"]')?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
   }, [p.current, p.tabs])
-  const nth = (s: SessionInfo) => p.tabs.filter((x) => x.host_id === s.host_id).indexOf(s) + 1
-  const several = (s: SessionInfo) => p.tabs.filter((x) => x.host_id === s.host_id).length > 1
+  const which = (s: SessionInfo) => sessionWhich(s, p.tabs)
   return (
     <nav className="term-tabs" aria-label={t('tabs.label')} ref={ref}>
       {p.tabs.map((s) => {
         const info = p.infos[s.id]
-        const name = s.host_name ? s.host_name + (several(s) ? ' · ' + nth(s) : '') : t('term.connecting')
+        const name = s.host_name ? s.host_name + ' · ' + which(s) : t('term.connecting')
         const quiet = !info || info.status === 's-open'
         // Agents: as the tab's page tells (mounted), else as the session list last said.
         const count = (st: string) => (s.meta?.t === 'herdr' ? s.meta.workspaces.reduce((n, w) => n + w.agents.filter((a) => a.status === st).length, 0) : 0)
         const waiting = info ? info.waiting : count('blocked')
         const done = info ? info.done : count('done')
         const agents = waiting ? t('herdr.waiting', { n: waiting }) : done ? t('herdr.done', { n: done }) : ''
-        const tip = [s.host_name, s.host_name && t('hosts.sessionN', { n: nth(s) }), s.title, info?.statusText, agents].filter(Boolean).join(' · ')
+        const tip = [s.host_name, s.host_name && which(s), s.title, info?.statusText, agents].filter(Boolean).join(' · ')
         return (
           <button
             key={s.id}

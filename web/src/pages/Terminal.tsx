@@ -36,6 +36,7 @@ import { onOpenRequest, takeTabs } from '../notifyopen'
 import { offerAlerts } from '../push'
 import { adoptComposer, composerWasOpen, rememberComposer } from '../terminal/composerOpen'
 import { promptSuggestion } from '../terminal/suggestion'
+import { sessionWhich } from '../terminal/sessionName'
 import { ConversationView, type ConvoAgent, type ConvoPending } from '../terminal/Conversation'
 import { convoWasOpen, rememberConvo, useConversation, type ConvoEntry } from '../terminal/conversation'
 import { useSession, VERSION_EVENT } from '../app'
@@ -2483,11 +2484,10 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
   }
   const switcherItems = (): (MenuItem | null)[] => {
     const list = sessions ?? []
-    const nth = (x: SessionInfo) => list.filter((y) => y.host_id === x.host_id).indexOf(x) + 1
     return [
       sessionsFailed ? { label: t('common.retry'), icon: <RotateCw size={16} />, keepOpen: true, onSelect: loadSessions } : null,
       ...list.map((x) => ({
-        label: `${x.host_name} · ${t('hosts.sessionN', { n: nth(x) })}${x.title ? ' · ' + x.title : ''}`,
+        label: `${x.host_name} · ${sessionWhich(x, list)}${x.title ? ' · ' + x.title : ''}`,
         icon: x.id === id ? <Check size={16} /> : <span className="menu-icon-space" />,
         onSelect: () => x.id !== id && navigate('/t/' + x.id),
       })),

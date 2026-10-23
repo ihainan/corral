@@ -261,11 +261,14 @@ html.kb-open .keybar { padding-bottom: 6px; }
 .term-tabs::-webkit-scrollbar { display: none; }
 .term-tab-note { flex: 0 1 auto; min-width: 0; margin: 0 4px 0 8px; }
 .term-tab {
-  display: flex; align-items: center; gap: 6px; flex: none; max-width: 240px; height: 30px; padding: 0 10px;
-  border: 0; border-radius: 8px; background: none; color: var(--term-fg-2); font: 500 13px/1 var(--font-ui); cursor: pointer;
+  display: flex; align-items: center; gap: 6px; flex: none; max-width: 320px; height: 30px; padding: 0 12px;
+  border: 0; border-radius: 8px; background: none; color: var(--term-fg-3); font: 500 13px/1 var(--font-ui); cursor: pointer;
 }
 .term-tab:hover { background: var(--term-hover); color: var(--term-fg); }
-.term-tab[aria-current="page"] { background: var(--term-key); color: var(--term-fg); font-weight: 600; }
+/* The tab in front: as a pressed button of the bar is, so it stands apart in
+   every scheme (the key colour can be the bar's own in a light one). */
+.term-tab[aria-current="page"] { background: var(--term-accent-soft); color: var(--term-accent-text); font-weight: 600; }
+.term-tab[aria-current="page"] .term-tab-title { color: var(--term-fg-2); }
 .term-tab-name { white-space: nowrap; }
 .term-tab-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--term-fg-3); font-weight: 400; }
 .term-tab-wait { flex: none; color: var(--warn); font: 600 11px/1 var(--font-ui); }
