@@ -2,8 +2,10 @@ package web
 
 import (
 	"fmt"
+	"github.com/ihainan/corral/internal/convo"
 	"strings"
 	"testing"
+	"time"
 )
 
 const sidA = "194b7874-ce3d-46b3-b901-f53bd5747ce0"
@@ -144,5 +146,21 @@ func TestConvoStatesComeBackUnderTheLimit(t *testing.T) {
 	}
 	if _, ok := c.m["k0"]; !ok {
 		t.Fatal("the state asked for was let go")
+	}
+}
+
+func TestQueuedSinceTheProcessStarted(t *testing.T) {
+	q := []convo.Queued{{Text: "old", Time: "2026-10-24T09:00:00Z"}, {Text: "new", Time: "2026-10-24T09:10:00Z"}, {Text: "no time"}}
+	started := time.Date(2026, 10, 24, 9, 5, 0, 0, time.UTC).Unix()
+	got := queuedSince(q, &convoBind{started: started})
+	if len(got) != 1 || got[0].Text != "new" {
+		t.Fatalf("since: %+v", got)
+	}
+	if len(queuedSince(q, &convoBind{})) != 3 || len(queuedSince(q, nil)) != 3 {
+		t.Fatal("not known: all")
+	}
+	procs, _, _, _, _ := parseConvoLocate(convoRec("pid=100", "start=500", "started=1792832000", "fg=1", "procstart=500", "sid="+sidA, "log="))
+	if len(procs) != 1 || procs[0].started != 1792832000 {
+		t.Fatalf("started: %+v", procs)
 	}
 }

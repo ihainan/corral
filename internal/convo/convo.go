@@ -75,6 +75,7 @@ type Tool struct {
 	// PatchCut: there was more of it than is kept.
 	Patch    []Hunk `json:"patch,omitempty"`
 	PatchCut bool   `json:"patch_cut,omitempty"`
+	Same     bool   `json:"same,omitempty"` // (an edit that changed nothing)
 
 	Done        bool   `json:"done,omitempty"`
 	Error       bool   `json:"error,omitempty"`

@@ -1082,7 +1082,7 @@ function ToolRow({ tool, onCopy, live }: { tool: ConvoTool; onCopy: (s: string) 
   const v = verbOf(tool.name)
   const obj = object(tool)
   const cat = category(tool.name)
-  const isEdit = !!tool.patch || tool.old !== undefined || tool.new !== undefined
+  const isEdit = !!tool.patch || !!tool.same || tool.old !== undefined || tool.new !== undefined
   const code = exitCode(tool)
   // What the line does not show of what it acted on: a command of more
   // lines or longer than a line holds (it shows the first), a subagent's
@@ -1122,7 +1122,7 @@ function ToolRow({ tool, onCopy, live }: { tool: ConvoTool; onCopy: (s: string) 
               <button type="button" className="md-code-copy" onClick={() => onCopy(d)}>{t('common.copy')}</button>
             </div>
           )}
-          {tool.patch ? <Hunks hunks={tool.patch} cut={tool.patch_cut} /> : isEdit && <Diff old={tool.old ?? ''} new={tool.new ?? ''} />}
+          {tool.same ? <div className="convo-result-head">{t('convo.noChange')}</div> : tool.patch ? <Hunks hunks={tool.patch} cut={tool.patch_cut} /> : isEdit && <Diff old={tool.old ?? ''} new={tool.new ?? ''} />}
           {!tool.done ? (
             <div className="convo-result-head">{t('convo.running')}</div>
           ) : result ? (
@@ -1178,7 +1178,7 @@ function Hunks({ hunks, cut }: { hunks: ConvoHunk[]; cut?: boolean }) {
 
 // A file a turn made anew: all of it, as added lines.
 const created = (tool: ConvoTool): ConvoHunk[] | undefined => {
-  if (tool.name !== 'Write' || tool.patch || !tool.new) return undefined
+  if (tool.name !== 'Write' || tool.patch || tool.same || !tool.new) return undefined
   const lines = tool.new.replace(/\n$/, '').split('\n')
   return [{ old_start: 0, new_start: 1, lines: lines.map((l) => '+' + l) }]
 }
@@ -1233,7 +1233,7 @@ function ChangesPanel({ edits, focus, onClose }: { edits: Edits; focus?: string;
               return (
                 <div key={i} className="convo-panel-edit">
                   {f.tools.length > 1 && <div className="convo-hunk-gap">{t('convo.editN', { n: i + 1 })}</div>}
-                  {h ? <Hunks hunks={h} cut={tl.patch_cut} /> : <Diff old={tl.old ?? ''} new={tl.new ?? ''} />}
+                  {tl.same ? <div className="convo-hunk-gap">{t('convo.noChange')}</div> : h ? <Hunks hunks={h} cut={tl.patch_cut} /> : <Diff old={tl.old ?? ''} new={tl.new ?? ''} />}
                 </div>
               )
             })}

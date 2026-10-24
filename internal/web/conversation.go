@@ -60,6 +60,8 @@ if [ "$1" = tmux ]; then
 fi
 [ -r /proc/self/stat ] || { printf 'noproc\0'; exit 0; }
 nl=$(printf '\nx'); nl=${nl%x}
+btime=$(sed -n 's/^btime \([0-9]*\)$/\1/p' /proc/stat 2>/dev/null); hz=$(getconf CLK_TCK 2>/dev/null)
+case $hz in ''|*[!0-9]*|0) hz=;; esac
 for f in "$HOME"/.claude/sessions/*.json; do
   [ -f "$f" ] || continue
   pid=${f##*/}; pid=${pid%.json}
@@ -70,6 +72,7 @@ for f in "$HOME"/.claude/sessions/*.json; do
   case $start in ''|*[!0-9]*) continue;; esac
   pgrp=$(printf '%s' "${stat##*) }" | cut -d' ' -f3); tpgid=$(printf '%s' "${stat##*) }" | cut -d' ' -f6)
   fg=0; [ -n "$pgrp" ] && [ "$pgrp" = "$tpgid" ] && fg=1
+  started=; [ -n "$btime" ] && [ -n "$hz" ] && started=$((btime + start / hz))
   c=$(head -c 65536 "$f" 2>/dev/null | tr -d '\n')
   sid=$(printf '%s' "$c" | grep -o '"sessionId" *: *"[0-9a-fA-F-]*"' | head -n 1 | sed 's/.*"\([0-9a-fA-F-]*\)"$/\1/')
   ps=$(printf '%s' "$c" | grep -o '"procStart" *: *"*[0-9]*' | head -n 1 | sed 's/[^0-9]*\([0-9]*\)$/\1/')
@@ -81,7 +84,7 @@ for f in "$HOME"/.claude/sessions/*.json; do
     [ -f "$l" ] && { log=$l; break; }
   done
   env=$(tr '\0' '\n' <"/proc/$pid/environ" 2>/dev/null | grep -E '^(HERDR_PANE_ID|HERDR_SOCKET_PATH|TMUX|TMUX_PANE)=' | head -c 4096)
-  printf 'pid=%s\nstart=%s\nfg=%s\nprocstart=%s\nsid=%s\nlog=%s\n%s\0' "$pid" "$start" "$fg" "$ps" "$sid" "$log" "$env"
+  printf 'pid=%s\nstart=%s\nstarted=%s\nfg=%s\nprocstart=%s\nsid=%s\nlog=%s\n%s\0' "$pid" "$start" "$started" "$fg" "$ps" "$sid" "$log" "$env"
 done
 exit 0`
 	return "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(mode) + " " + sshx.QuoteShell(tmuxName)
@@ -89,7 +92,8 @@ exit 0`
 
 type convoProc struct {
 	pid, start    int64
-	fg            bool // in front on its terminal: what is typed there reaches it
+	fg            bool  // in front on its terminal: what is typed there reaches it
+	started       int64 // when it started, unix seconds (0 when not known)
 	sid, log      string
 	herdrPane     string
 	herdrSocket   string
@@ -145,6 +149,8 @@ func parseConvoLocate(out string) (procs []convoProc, tmuxActive, tmuxPID, tmuxT
 				p.start, _ = strconv.ParseInt(v, 10, 64)
 			case "fg":
 				p.fg = v == "1"
+			case "started":
+				p.started, _ = strconv.ParseInt(v, 10, 64)
 			case "procstart":
 				if n, err := strconv.ParseInt(v, 10, 64); err == nil {
 					procStart = n
@@ -311,6 +317,9 @@ type convoBind struct {
 	Start   int64  `json:"start"`
 	Session string `json:"session"`
 	Title   string `json:"title,omitempty"` // (tmux: the pane's title)
+	// started is when the process started (unix seconds; 0 when not
+	// known): what was queued before was another process's.
+	started int64
 }
 
 type convoAnswer struct {
@@ -402,8 +411,24 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 	if m := st.parser.Meta(); m != (convo.Meta{}) {
 		ans.Meta = &m
 	}
-	ans.Queued = st.parser.Queued()
+	ans.Queued = queuedSince(st.parser.Queued(), st.bind)
 	writeJSON(w, http.StatusOK, ans)
+}
+
+// queuedSince is what waits of what the bound process was sent: a message
+// queued before it started was to another process of the same session
+// (one gone, and resumed), and went with it.
+func queuedSince(q []convo.Queued, b *convoBind) []convo.Queued {
+	if b == nil || b.started <= 0 {
+		return q
+	}
+	var out []convo.Queued
+	for _, m := range q {
+		if at, err := time.Parse(time.RFC3339Nano, m.Time); err == nil && at.Unix() >= b.started-2 {
+			out = append(out, m)
+		}
+	}
+	return out
 }
 
 // locateConvo finds the log of the Claude Code session in the pane; a
@@ -421,7 +446,6 @@ func (s *Server) locateConvo(ctx context.Context, sess *term.Session, st *convoS
 		reason = convoUnsupported
 	default:
 		p := pickConvoProc(procs, sess.Persistence, pane, s.herdrSocks.get(sess.ID), tmuxActive, tmuxPID)
-		was := st.bind
 		st.bind = nil
 		if p != nil {
 			b := &convoBind{PID: p.pid, Start: p.start, Session: p.sid, Pane: p.herdrPane}
@@ -430,9 +454,7 @@ func (s *Server) locateConvo(ctx context.Context, sess *term.Session, st *convoS
 			}
 			// (Another process of the same session, resumed: what the one
 			// before had queued is not this one's.)
-			if was != nil && (was.PID != b.PID || was.Start != b.Start) && st.parser != nil {
-				st.parser.ClearQueue()
-			}
+			b.started = p.started
 			st.bind = b
 		}
 		switch {

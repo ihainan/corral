@@ -18,6 +18,7 @@ export interface ConvoTool {
   del?: number
   patch?: ConvoHunk[] // (an edit) as Claude Code reported making it; then old and new are not sent
   patch_cut?: boolean
+  same?: boolean // (an edit that changed nothing: a file written over with what it held)
   done?: boolean
   error?: boolean
   result?: string

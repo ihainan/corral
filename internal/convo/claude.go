@@ -53,6 +53,7 @@ type Claude struct {
 	tasks   []taskItem // the task list as it stands
 	meta    Meta
 	queue   []queuedItem // what waits to be taken in, oldest first
+	gone    []string     // removed from it, to arrive still (as queued_command): that arrival is of these
 	// Skipped counts lines that were not JSON or of no use to the view.
 	Skipped int
 }
@@ -105,9 +106,8 @@ func (c *Claude) Queued() []Queued {
 	return out
 }
 
-// ClearQueue forgets what waits (another process now runs the session: what
-// was queued to the one before went with it).
-func (c *Claude) ClearQueue() { c.queue = nil }
+// ClearQueue forgets what waits.
+func (c *Claude) ClearQueue() { c.queue, c.gone = nil, nil }
 
 // Tasks is the agent's task list as the log read has it (a task created
 // before the part read is not known). Nil when there is none.
@@ -354,6 +354,9 @@ func (c *Claude) user(r *claudeRow) {
 		role = RoleNote
 	}
 	c.add(r, role, parts)
+	if role == RoleUser && len(c.queue) > 0 {
+		c.arrived(partsText(parts))
+	}
 	c.add(r, RoleNote, notes) // (Claude Code's own word that it was stopped, say)
 }
 
@@ -376,6 +379,10 @@ func (c *Claude) queueOp(r *claudeRow) {
 		for i, q := range c.queue {
 			if q.raw == s {
 				c.queue = append(c.queue[:i:i], c.queue[i+1:]...)
+				c.gone = append(c.gone, squashed(q.Text))
+				if n := len(c.gone) - maxQueue; n > 0 {
+					c.gone = append([]string(nil), c.gone[n:]...)
+				}
 				break
 			}
 		}
@@ -390,16 +397,25 @@ func (c *Claude) queueOp(r *claudeRow) {
 
 // arrived: the person's message with this text came in (as a turn, or taken
 // in during one): it waits no more.
+// (One removed already, by its text, is the one arriving: not another of
+// the same text that still waits.)
 func (c *Claude) arrived(text string) {
-	n := func(s string) string { return strings.Join(strings.Fields(s), " ") }
-	t := n(text)
+	t := squashed(text)
+	for i, g := range c.gone {
+		if g == t {
+			c.gone = append(c.gone[:i:i], c.gone[i+1:]...)
+			return
+		}
+	}
 	for i, q := range c.queue {
-		if n(q.Text) == t {
+		if squashed(q.Text) == t {
 			c.queue = append(c.queue[:i:i], c.queue[i+1:]...)
 			return
 		}
 	}
 }
+
+func squashed(s string) string { return strings.Join(strings.Fields(s), " ") }
 
 // mid marks the entry just added as taken in during the agent's turn.
 func (c *Claude) mid() {
@@ -449,7 +465,19 @@ func (c *Claude) queued(r *claudeRow) {
 	c.add(r, RoleUser, parts)
 	if len(c.entries) > n {
 		c.mid()
+		c.arrived(partsText(parts))
 	}
+}
+
+// partsText is a message's text, its parts' joined (as it was queued).
+func partsText(parts []Part) string {
+	var t []string
+	for _, p := range parts {
+		if p.Kind == KindText {
+			t = append(t, p.Text)
+		}
+	}
+	return strings.Join(t, "\n")
 }
 
 func (c *Claude) assistant(r *claudeRow) {
@@ -513,8 +541,10 @@ func (c *Claude) result(b claudeBlock, account json.RawMessage) {
 	if !b.IsError {
 		ref.t.Add, ref.t.Del = madeLines(ref.t.Name, account, ref.t.Add, ref.t.Del)
 		if ref.t.Name == "Edit" || ref.t.Name == "MultiEdit" || ref.t.Name == "Write" {
-			if h, cut := patchOf(account); h != nil {
+			if h, cut, said := patchOf(account); said {
+				// (An empty patch: a file written over with what it held.)
 				ref.t.Patch, ref.t.PatchCut, ref.t.Old, ref.t.New = h, cut, "", ""
+				ref.t.Same = len(h) == 0
 			}
 		}
 		if ref.task != nil {
@@ -630,25 +660,26 @@ func madeLines(name string, account json.RawMessage, add, del int) (int, int) {
 }
 
 // patchOf is the edit Claude Code reports having made (toolUseResult's
-// structuredPatch), within maxPatch; nil when it reports none (a file it
-// created has its content instead, which New already holds). short: some
-// of it was left out.
-func patchOf(account json.RawMessage) (hunks []Hunk, short bool) {
+// structuredPatch), within maxPatch; said: it reports one (even empty: a
+// file written over with what it held), not for a file it created (whose
+// content New already holds). short: some of it was left out.
+func patchOf(account json.RawMessage) (hunks []Hunk, short, said bool) {
 	if len(account) == 0 {
-		return nil, false
+		return nil, false, false
 	}
 	var a struct {
-		Patch []struct {
+		Type  string `json:"type"`
+		Patch *[]struct {
 			OldStart int      `json:"oldStart"`
 			NewStart int      `json:"newStart"`
 			Lines    []string `json:"lines"`
 		} `json:"structuredPatch"`
 	}
-	if json.Unmarshal(account, &a) != nil || len(a.Patch) == 0 {
-		return nil, false
+	if json.Unmarshal(account, &a) != nil || a.Patch == nil || (a.Type == "create" && len(*a.Patch) == 0) {
+		return nil, false, false
 	}
 	size := 0
-	for _, h := range a.Patch {
+	for _, h := range *a.Patch {
 		out := Hunk{OldStart: max(h.OldStart, 0), NewStart: max(h.NewStart, 0)}
 		for _, l := range h.Lines {
 			if l == "" || (l[0] != ' ' && l[0] != '-' && l[0] != '+') {
@@ -659,7 +690,7 @@ func patchOf(account json.RawMessage) (hunks []Hunk, short bool) {
 				if len(out.Lines) > 0 {
 					hunks = append(hunks, out)
 				}
-				return hunks, true
+				return hunks, true, true
 			}
 			size += len(l)
 			out.Lines = append(out.Lines, l)
@@ -669,7 +700,7 @@ func patchOf(account json.RawMessage) (hunks []Hunk, short bool) {
 			hunks = append(hunks, out)
 		}
 	}
-	return hunks, short
+	return hunks, short, true
 }
 
 // The task list. TodoWrite gives all of it; TaskCreate adds one (its id is

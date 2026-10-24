@@ -247,7 +247,8 @@ function useAnswerKeys(on: boolean, ready: boolean, keys: string[], held: (() =>
       if (e.ctrlKey || e.metaKey || e.altKey || e.isComposing || e.keyCode === 229 || heldRef.current?.()) return
       const el = e.target as HTMLElement | null
       const typing = !!el && !el.classList.contains('xterm-helper-textarea') && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || el.isContentEditable)
-      if (typing || document.querySelector('[aria-modal="true"], [role="menu"], [role="dialog"]')) return
+      // (The changes panel open: it may cover the card, and Esc is its.)
+      if (typing || document.querySelector('[aria-modal="true"], [role="menu"], [role="dialog"], .convo-panel')) return
       const k = e.key === 'Escape' ? 'esc' : e.key
       if (!ks.includes(k) && !/^[0-9]$/.test(k)) return
       e.preventDefault()
@@ -311,7 +312,7 @@ export function InlineReply({ sessionId, agent, onLoaded, resizedAt, active = tr
     <div className="convo-ask" role="group" aria-label={t('convo.waiting')}>
       <div className="convo-ask-q">{shownQ || t('convo.waiting')}</div>
       {block && <Asked lines={block.lines} />}
-      {!block && opts.length > 0 && !failed && <p className="convo-ask-unread">{t('convo.askUnread')}</p>}
+      {screen && !block && !failed && <p className="convo-ask-unread">{t('convo.askUnread')}</p>}
       {failed ? (
         <LoadError onRetry={() => void load()} />
       ) : (
@@ -356,7 +357,7 @@ export function InlineReply({ sessionId, agent, onLoaded, resizedAt, active = tr
                 {opts.length > 0 ? t('convo.askKeys', { n: opts.length }) : t('convo.askEsc')}
               </span>
             )}
-            <button type="button" className="link-btn" aria-expanded={shown || (!block && opts.length > 0)} disabled={!block && opts.length > 0} onClick={() => setShown(!shown)}>
+            <button type="button" className="link-btn" aria-expanded={shown || (!!screen && !block)} disabled={!!screen && !block} onClick={() => setShown(!shown)}>
               {t(shown ? 'convo.hideScreen' : 'convo.showScreen')}
             </button>
             {opts.length === 0 && (
@@ -371,7 +372,7 @@ export function InlineReply({ sessionId, agent, onLoaded, resizedAt, active = tr
               </button>
             )}
           </div>
-          {(shown || (!block && opts.length > 0)) && (
+          {(shown || (!!screen && !block)) && (
             // (What is asked could not be told apart on the screen: the screen itself.)
             <div className="reply-screen-wrap">
               <pre className="reply-screen" ref={pre} tabIndex={0} aria-label={t('reply.screen')} aria-busy={reading}>

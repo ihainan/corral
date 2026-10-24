@@ -84,7 +84,9 @@ export function question(text: string): string {
 // what follows the rule is no head: then the screen itself is to be shown.
 const solidRule = /^[\s─━]*[─━]{8,}[\s─━]*$/
 export const dashedRule = /^[\s╌┄┈]*[╌┄┈]{8,}[\s╌┄┈]*$/
-const promptHead = /^[A-Z][A-Za-z]*(?: [A-Za-z]+){0,3}$/ // ("Bash command", "Edit file", "Fetch")
+// The heads Claude Code puts on its permission prompts (any other line after
+// a rule may be a command's own).
+const promptHead = /^(?:Bash command|Edit file|Create file|Write file|Overwrite file|Read file|Edit notebook|Fetch|Web fetch|Web search)$/i
 export function promptBlock(text: string): { head: string; lines: string[] } | null {
   const lines = text.split('\n')
   const { top } = menuAt(lines)

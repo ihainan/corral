@@ -439,3 +439,35 @@ func TestClaudePatch(t *testing.T) {
 		t.Fatalf("bounded: cut %v size %d", b.PatchCut, size)
 	}
 }
+
+func TestClaudeQueueArrivals(t *testing.T) {
+	c := NewClaude()
+	// Two alike: one removed and taken in mid-turn; the other still waits.
+	c.Feed(lines(
+		`{"type":"queue-operation","operation":"enqueue","content":"same"}`,
+		`{"type":"queue-operation","operation":"enqueue","content":"same"}`,
+		`{"type":"queue-operation","operation":"remove","content":"same"}`,
+		`{"type":"attachment","uuid":"q1","attachment":{"type":"queued_command","commandMode":"prompt","prompt":"same"}}`,
+	))
+	if q := c.Queued(); len(q) != 1 {
+		t.Fatalf("the other still waits: %+v", q)
+	}
+	// A message with a picture arrives as a list.
+	c.Feed(lines(
+		`{"type":"queue-operation","operation":"enqueue","content":"look"}`,
+		`{"type":"user","uuid":"u1","message":{"content":[{"type":"text","text":"look"},{"type":"image","source":{"data":"AA"}}]}}`,
+	))
+	if q := c.Queued(); len(q) != 1 || q[0].Text != "same" {
+		t.Fatalf("the list arrival: %+v", q)
+	}
+	// A file written over with what it held: nothing changed, nothing to show.
+	c.Feed(lines(
+		`{"type":"assistant","uuid":"a1","message":{"content":[{"type":"tool_use","id":"w1","name":"Write","input":{"file_path":"/p/x","content":"a\nb\n"}}]}}`,
+		`{"type":"user","uuid":"r1","message":{"content":[{"type":"tool_result","tool_use_id":"w1","content":"ok"}]},"toolUseResult":{"type":"update","content":"a\nb\n","structuredPatch":[]}}`,
+	))
+	all := c.Since(0)
+	w := all[len(all)-1].Parts[0].Tool
+	if !w.Same || w.New != "" || w.Patch != nil || w.Add != 0 {
+		t.Fatalf("unchanged write: %+v", w)
+	}
+}
