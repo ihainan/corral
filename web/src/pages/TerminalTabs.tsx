@@ -74,11 +74,13 @@ function readOrder(): [string, number][] {
 }
 
 // Each session's place key: the oldest of a session's tabs has its base key,
-// the later ones a number after it.
+// the later ones a number after it. (Opened in one second, by their ids: not
+// by the list's order, which a move changes.)
+const byOpened = (a: SessionInfo, b: SessionInfo) => a.created_at - b.created_at || a.id.localeCompare(b.id)
 function placeKeys(list: SessionInfo[]): Map<string, string> {
   const seen = new Map<string, number>()
   const keyOf = new Map<string, string>()
-  for (const s of [...list].sort((a, b) => a.created_at - b.created_at)) {
+  for (const s of [...list].sort(byOpened)) {
     const base = baseKey(s)
     const n = (seen.get(base) ?? 0) + 1
     seen.set(base, n)
@@ -98,7 +100,7 @@ function inPlace(list: SessionInfo[]): SessionInfo[] {
     .filter(([, gone]) => !(gone && now - gone >= KEEP_GONE_MS))
     .map(([k, gone]): [string, number] => [k, open.has(k) ? 0 : gone || now])
   const known = new Set(order.map(([k]) => k))
-  for (const s of [...list].sort((a, b) => a.created_at - b.created_at)) {
+  for (const s of [...list].sort(byOpened)) {
     const k = keyOf.get(s.id)!
     if (!known.has(k)) {
       order.push([k, 0])
@@ -110,14 +112,16 @@ function inPlace(list: SessionInfo[]): SessionInfo[] {
   return [...list].sort((a, b) => at.get(keyOf.get(a.id)!)! - at.get(keyOf.get(b.id)!)!)
 }
 
-// The user moved the tab of session id to place `to` among the tabs of list:
-// the open tabs take the places they held, in their new order; the places
+// The user moved the tab of session id to place `to` among the tabs as shown
+// (list, in their places as this window last read them: another window may
+// have moved some since, and the move is the one the user saw): the open tabs
+// take the places they hold, in the order shown with the move; the places
 // kept for gone ones stay where they were (back soon, a tab goes back there).
 function moveTab(list: SessionInfo[], id: string, to: number) {
-  const placed = inPlace(list)
+  inPlace(list) // (every open tab has a place)
   const keyOf = placeKeys(list)
-  const keys = placed.map((s) => keyOf.get(s.id)!)
-  const from = placed.findIndex((s) => s.id === id)
+  const keys = list.map((s) => keyOf.get(s.id)!)
+  const from = list.findIndex((s) => s.id === id)
   if (from < 0 || to < 0 || to >= keys.length || from === to) return
   keys.splice(to, 0, keys.splice(from, 1)[0])
   const open = new Set(keys)
@@ -350,7 +354,7 @@ const DRAG_HOLD_MS = 300
 const DRAG_SLOP_PX = 8 // (a finger that moves more before then is scrolling)
 const DRAG_EDGE_PX = 32
 
-function useTabDrag(nav: React.RefObject<HTMLElement | null>, ids: string[], onMove: (id: string, to: number) => void) {
+function useTabDrag(nav: React.RefObject<HTMLElement | null>, ids: string[], current: string, onMove: (id: string, to: number) => void) {
   const [drag, setDrag] = useState<Drag | null>(null)
   const cur = useRef<{
     id: string
@@ -365,7 +369,9 @@ function useTabDrag(nav: React.RefObject<HTMLElement | null>, ids: string[], onM
     to?: number
     hold?: number
     frame?: number
+    dead?: boolean // let go of before the release (see drop)
     stop: () => void
+    drop: () => void
   } | null>(null)
   const endedAt = useRef(0)
 
@@ -377,13 +383,14 @@ function useTabDrag(nav: React.RefObject<HTMLElement | null>, ids: string[], onM
     const me = d.tabs[d.from]
     const first = d.tabs[0]
     const last = d.tabs[d.tabs.length - 1]
-    // Drawn within the row; placed by where the pointer is (a tab wider than
-    // the first one, held at the start, goes before it all the same).
-    const by = d.x - box.left + el.scrollLeft - d.at
-    const dx = Math.min(Math.max(by, first.left - me.left), last.left + last.width - me.left - me.width)
-    const mid = me.left + me.width / 2 + by
+    // Drawn within the row; placed by where the pointer is: past another
+    // tab's middle, it goes beyond that one (whatever the widths: a wide tab
+    // held at the start goes before a narrow first one). Within its own place
+    // it is past none it was not past before.
+    const px = d.x - box.left + el.scrollLeft
+    const dx = Math.min(Math.max(px - d.at, first.left - me.left), last.left + last.width - me.left - me.width)
     let to = 0
-    d.tabs.forEach((r, j) => j !== d.from && r.left + r.width / 2 < mid && to++)
+    d.tabs.forEach((r, j) => j !== d.from && r.left + r.width / 2 < px && to++)
     d.to = to
     setDrag({ id: d.id, from: d.from, to, dx, w: me.width + (d.gap ?? 0) })
   }
@@ -426,7 +433,7 @@ function useTabDrag(nav: React.RefObject<HTMLElement | null>, ids: string[], onM
     const pointer = e.pointerId
     const move = (ev: PointerEvent) => {
       const d = cur.current
-      if (!d || ev.pointerId !== pointer) return
+      if (!d || d.dead || ev.pointerId !== pointer) return
       d.x = ev.clientX
       if (d.on) update()
       else if (mouse && Math.abs(d.x - d.x0) > DRAG_MOUSE_PX) begin()
@@ -435,10 +442,8 @@ function useTabDrag(nav: React.RefObject<HTMLElement | null>, ids: string[], onM
     const up = (ev: PointerEvent) => {
       const d = cur.current
       if (!d || ev.pointerId !== pointer) return
-      if (d.on) {
-        endedAt.current = performance.now()
-        if (d.to !== undefined && d.to !== d.from) onMove(d.id, d.to)
-      }
+      if (d.on || d.dead) endedAt.current = performance.now()
+      if (d.on && d.to !== undefined && d.to !== d.from) onMove(d.id, d.to)
       d.stop()
     }
     const cancel = (ev: PointerEvent) => ev.pointerId === pointer && cur.current?.stop()
@@ -446,11 +451,9 @@ function useTabDrag(nav: React.RefObject<HTMLElement | null>, ids: string[], onM
       if (ev.key !== 'Escape' || !cur.current?.on) return
       ev.preventDefault()
       ev.stopPropagation()
-      endedAt.current = performance.now()
-      cur.current.stop()
+      cur.current.drop()
     }
-    // (A finger held still: not scrolling, nor asking for the page's menu.)
-    const touchMove = (ev: TouchEvent) => cur.current?.on && ev.cancelable && ev.preventDefault()
+    // (A finger held still is not asking for the page's menu.)
     const menu = (ev: Event) => ev.preventDefault()
     const stop = () => {
       const d = cur.current
@@ -461,25 +464,49 @@ function useTabDrag(nav: React.RefObject<HTMLElement | null>, ids: string[], onM
       window.removeEventListener('pointerup', up)
       window.removeEventListener('pointercancel', cancel)
       window.removeEventListener('keydown', key, true)
-      window.removeEventListener('touchmove', touchMove)
       window.removeEventListener('contextmenu', menu, true)
       setDrag(null)
     }
-    cur.current = { id, from, pointer, x0: e.clientX, x: e.clientX, on: false, stop }
+    // Let go of with no move (Esc, the tabs changed, another one in front):
+    // the rest of the press is still the drag's, and its release no click.
+    const drop = () => {
+      const d = cur.current
+      if (!d?.on) return stop()
+      d.on = false
+      d.dead = true
+      if (d.frame) cancelAnimationFrame(d.frame)
+      setDrag(null)
+    }
+    cur.current = { id, from, pointer, x0: e.clientX, x: e.clientX, on: false, stop, drop }
     window.addEventListener('pointermove', move)
     window.addEventListener('pointerup', up)
     window.addEventListener('pointercancel', cancel)
     window.addEventListener('keydown', key, true)
     if (!mouse) {
-      window.addEventListener('touchmove', touchMove, { passive: false })
       window.addEventListener('contextmenu', menu, true)
       cur.current.hold = window.setTimeout(begin, DRAG_HOLD_MS)
     }
   }
 
-  // The tabs changed under a drag (one opened or ended): it is let go.
+  // A finger holding a tab does not scroll the bar. (The bar's own listener,
+  // there from the start: whether a touch may be held back from scrolling is
+  // settled when it begins, so one added once the drag starts comes too late.)
+  useEffect(() => {
+    const el = nav.current
+    if (!el) return
+    const touchMove = (ev: TouchEvent) => {
+      if (cur.current?.on && ev.cancelable) ev.preventDefault()
+    }
+    el.addEventListener('touchmove', touchMove, { passive: false })
+    return () => el.removeEventListener('touchmove', touchMove)
+  }, [nav])
+
+  // The tabs changed under a drag (one opened or ended, or moved by another
+  // window), or another tab came to the front (this bar is hidden then): the
+  // drag is let go of.
   const idsKey = ids.join()
-  useEffect(() => () => cur.current?.stop(), [idsKey])
+  useEffect(() => () => cur.current?.drop(), [idsKey, current])
+  useEffect(() => () => cur.current?.stop(), [])
 
   // Where tab j of the draggable ones is drawn meanwhile.
   const offset = (j: number): number => {
@@ -489,26 +516,29 @@ function useTabDrag(nav: React.RefObject<HTMLElement | null>, ids: string[], onM
     if (drag.to < drag.from && j >= drag.to && j < drag.from) return drag.w
     return 0
   }
-  // A click that ends a drag is not one.
-  const clicked = () => performance.now() - endedAt.current > 400
-  return { drag, onPointerDown, offset, clicked }
+  // A click that ends a drag is not one; a change of order just after a drag
+  // is the drag's.
+  const dragged = () => performance.now() - endedAt.current < 400
+  return { drag, onPointerDown, offset, dragged }
 }
 
 function TabBar(p: { tabs: SessionInfo[]; current: string; infos: Record<string, TabInfo>; onNew: () => void; onMove: (id: string, to: number) => void }) {
   const ref = useRef<HTMLElement>(null)
+  // (The tab of a session just opened, not in the list yet, stays last.)
+  const movable = p.tabs.filter((s) => s.host_id !== 0).map((s) => s.id)
+  const { drag, onPointerDown, offset, dragged } = useTabDrag(ref, movable, p.current, p.onMove)
   // The current tab is scrolled into view when it changes, or the tabs do
-  // (not when they only change places: a tab dragged elsewhere stays in view).
-  const members = p.tabs.map((s) => s.id).sort().join()
+  // (moved by a key too; not by a drag: the tab dragged is where it was let go).
+  const order = p.tabs.map((s) => s.id).join()
   useEffect(() => {
+    if (dragged()) return
     ref.current?.querySelector<HTMLElement>('.term-tab[aria-current="page"]')?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
-  }, [p.current, members])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [p.current, order])
   const which = (s: SessionInfo) => sessionWhich(s, p.tabs)
   // Agents waiting in all tabs' sessions: the way to the agents page says so.
   // (Each agent once: two tabs of one herdr session list its agents twice.)
   const waitingAll = waitingAgents(p.tabs)
-  // (The tab of a session just opened, not in the list yet, stays last.)
-  const movable = p.tabs.filter((s) => s.host_id !== 0).map((s) => s.id)
-  const { drag, onPointerDown, offset, clicked } = useTabDrag(ref, movable, p.onMove)
   return (
     <nav className={'term-tabs' + (drag ? ' dragging' : '')} aria-label={t('tabs.label')} ref={ref}>
       <button
@@ -544,7 +574,7 @@ function TabBar(p: { tabs: SessionInfo[]; current: string; infos: Record<string,
             aria-current={s.id === p.current ? 'page' : undefined}
             title={tip}
             onPointerDown={j < 0 ? undefined : (e) => onPointerDown(e, s.id, j)}
-            onClick={() => clicked() && s.id !== p.current && navigate('/t/' + s.id, true)}
+            onClick={() => !dragged() && s.id !== p.current && navigate('/t/' + s.id, true)}
           >
             {/* (A connection's trouble before agents at work: it is the one to see to.) */}
             {!quiet ? <span className={'term-tab-dot ' + info.status} aria-hidden="true" /> : working > 0 && <span className="term-tab-working" role="img" aria-label={t('herdr.working', { n: working })} />}
