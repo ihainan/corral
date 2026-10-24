@@ -308,3 +308,25 @@ func TestClaudeTasks(t *testing.T) {
 		t.Fatalf("todo list: %+v", got)
 	}
 }
+
+func TestClaudeMeta(t *testing.T) {
+	c := NewClaude()
+	if c.Meta() != (Meta{}) {
+		t.Fatalf("empty: %+v", c.Meta())
+	}
+	c.Feed(lines(
+		`{"type":"permission-mode","permissionMode":"auto"}`,
+		`{"type":"user","uuid":"u1","gitBranch":"main","permissionMode":"default","message":{"content":"go"}}`,
+		`{"type":"assistant","uuid":"a1","gitBranch":"main","message":{"model":"claude-opus-5-5","usage":{"input_tokens":2,"cache_creation_input_tokens":100,"cache_read_input_tokens":1000,"output_tokens":5},"content":[{"type":"text","text":"ok"}]}}`,
+		`{"type":"assistant","uuid":"a2","isSidechain":true,"message":{"model":"claude-haiku-5-5","usage":{"input_tokens":9},"content":[{"type":"text","text":"sub"}]}}`,
+		`{"type":"assistant","uuid":"a3","message":{"model":"<synthetic>","usage":{"input_tokens":0},"content":[{"type":"text","text":"API Error"}]}}`,
+	))
+	m := c.Meta()
+	if m.Model != "claude-opus-5-5" || m.Mode != "default" || m.Branch != "main" || m.Context != 1102 {
+		t.Fatalf("meta: %+v", m)
+	}
+	c.Feed(lines(`{"type":"permission-mode","permissionMode":"plan"}`, `{"type":"system","subtype":"turn_duration","gitBranch":"feat/x"}`))
+	if m := c.Meta(); m.Mode != "plan" || m.Branch != "feat/x" {
+		t.Fatalf("later rows: %+v", m)
+	}
+}

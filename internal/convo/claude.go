@@ -32,8 +32,11 @@ import (
 //     again and again), "custom-title" rows the one the person gave it.
 //   - A tool result's row also has Claude Code's own account of the call
 //     (toolUseResult): the edit it made, the task it created.
+//   - What the session runs with (see Meta): the model and the context's
+//     size from the latest assistant row, the permission mode from
+//     "permission-mode" rows and the person's rows, the branch from any row.
 //
-// Everything else (modes, file snapshots, API bookkeeping) is skipped.
+// Everything else (file snapshots, API bookkeeping) is skipped.
 // Feed it whole lines in order.
 type Claude struct {
 	entries []*Entry
@@ -43,6 +46,7 @@ type Claude struct {
 	aiTitle string
 	myTitle string     // (the person's, over Claude Code's)
 	tasks   []taskItem // the task list as it stands
+	meta    Meta
 	// Skipped counts lines that were not JSON or of no use to the view.
 	Skipped int
 }
@@ -76,6 +80,9 @@ func (c *Claude) Title() string {
 	}
 	return c.aiTitle
 }
+
+// Meta is what the session runs with, as the log read last said it.
+func (c *Claude) Meta() Meta { return c.meta }
 
 // Tasks is the agent's task list as the log read has it (a task created
 // before the part read is not known). Nil when there is none.
@@ -160,8 +167,16 @@ type claudeRow struct {
 	ToolUseResult    json.RawMessage `json:"toolUseResult"`
 	Subtype          string          `json:"subtype"`
 	Content          json.RawMessage `json:"content"` // (system rows)
+	GitBranch        string          `json:"gitBranch"`
+	PermissionMode   string          `json:"permissionMode"`
 	Message          *struct {
 		Content json.RawMessage `json:"content"`
+		Model   string          `json:"model"`
+		Usage   *struct {
+			Input      int64 `json:"input_tokens"`
+			CacheWrite int64 `json:"cache_creation_input_tokens"`
+			CacheRead  int64 `json:"cache_read_input_tokens"`
+		} `json:"usage"`
 	} `json:"message"`
 	Attachment *struct {
 		Type        string          `json:"type"`
@@ -189,6 +204,9 @@ func (c *Claude) line(b []byte) {
 		c.Skipped++
 		return
 	}
+	if r.GitBranch != "" {
+		c.meta.Branch = clip(r.GitBranch, maxMeta)
+	}
 	switch r.Type {
 	case "user":
 		if r.Message != nil {
@@ -212,6 +230,9 @@ func (c *Claude) line(b []byte) {
 		return
 	case "custom-title":
 		c.myTitle = strings.TrimSpace(clip(r.CustomTitle, maxTitle))
+		return
+	case "permission-mode":
+		c.setMode(r.PermissionMode)
 		return
 	case "system":
 		if r.Subtype == "local_command" {
@@ -248,6 +269,7 @@ func (c *Claude) user(r *claudeRow) {
 	if r.IsMeta {
 		return
 	}
+	c.setMode(r.PermissionMode)
 	var s string
 	if json.Unmarshal(r.Message.Content, &s) == nil {
 		if r.IsCompactSummary {
@@ -335,6 +357,15 @@ func (c *Claude) queued(r *claudeRow) {
 }
 
 func (c *Claude) assistant(r *claudeRow) {
+	// (A row Claude Code made up itself, an error say, is of no model.)
+	if m := r.Message.Model; m != "" && m != "<synthetic>" {
+		c.meta.Model = clip(m, maxMeta)
+	}
+	if u := r.Message.Usage; u != nil && r.Message.Model != "<synthetic>" {
+		if n := u.Input + u.CacheWrite + u.CacheRead; n > 0 {
+			c.meta.Context = n
+		}
+	}
 	var blocks []claudeBlock
 	if json.Unmarshal(r.Message.Content, &blocks) != nil {
 		return
@@ -365,6 +396,12 @@ func (c *Claude) assistant(r *claudeRow) {
 				c.tools[clip(b.ID, maxID)] = ref
 			}
 		}
+	}
+}
+
+func (c *Claude) setMode(m string) {
+	if m = strings.TrimSpace(clip(m, maxMeta)); m != "" {
+		c.meta.Mode = m
 	}
 }
 

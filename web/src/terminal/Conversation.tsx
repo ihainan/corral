@@ -1,11 +1,11 @@
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { ArrowDown, ChevronDown, ChevronRight, PanelLeft } from 'lucide-react'
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
+import { ArrowDown, ChevronDown, ChevronRight, GitBranch, PanelLeft } from 'lucide-react'
 import { t, getLang, type I18nKey } from '../i18n'
 import { copyText, isCoarse } from '../components/ui'
 import { local } from '../storage'
 import { Markdown } from './markdown'
 import { Code } from './Code'
-import type { Convo, ConvoEntry, ConvoPart, ConvoTask, ConvoTool } from './conversation'
+import type { Convo, ConvoEntry, ConvoMeta, ConvoPart, ConvoTask, ConvoTool } from './conversation'
 
 // The conversation view: the agent's log as turns, over the terminal (which
 // stays mounted under it). Each turn is what the person wrote, then one line
@@ -13,7 +13,8 @@ import type { Convo, ConvoEntry, ConvoPart, ConvoTask, ConvoTool } from './conve
 // a grey line a step), then its answer with what it changed. While it
 // works, the turn's steps show as they come, the one under way last.
 // Messages are still typed in the composer or the terminal: the view only
-// reads.
+// reads. The composer (Terminal.tsx's) sits under the thread, in its column,
+// with what the session runs with under it.
 
 // What a turn's work holds: its steps, the text it wrote between them, the
 // notes that came meanwhile.
@@ -233,6 +234,7 @@ export function ConversationView({
   onDismiss,
   onShowTerminal,
   onCopied,
+  composer,
 }: {
   convo: Convo
   agent: ConvoAgent | null
@@ -246,6 +248,7 @@ export function ConversationView({
   onDismiss: (id: number) => void
   onShowTerminal: () => void
   onCopied: () => void
+  composer?: ReactNode // (the terminal's composer, while it is open)
 }) {
   const working = agent?.status === 'working'
   const waits = agent?.status === 'blocked'
@@ -475,34 +478,131 @@ export function ConversationView({
           <ChevronRight size={15} aria-hidden="true" />
         </button>
       )}
-      <div className="convo-scroll" ref={box}>
-        <div className="convo-col" ref={col}>
-          {body}
+      <div className="convo-scroll-wrap">
+        <div className="convo-scroll" ref={box}>
+          <div className="convo-col" ref={col}>
+            {body}
+          </div>
         </div>
+        {away && convo.status === 'ready' && (
+          <button
+            type="button"
+            className="convo-latest"
+            onClick={() => {
+              const el = box.current
+              if (el) el.scrollTo({ top: el.scrollHeight, behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' })
+            }}
+          >
+            <ArrowDown size={15} aria-hidden="true" />
+            {t('convo.latest')}
+          </button>
+        )}
       </div>
-      {away && convo.status === 'ready' && (
-        <button
-          type="button"
-          className={'convo-latest' + (waits && !ask ? ' is-raised' : '')}
-          onClick={() => {
-            const el = box.current
-            if (el) el.scrollTo({ top: el.scrollHeight, behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' })
-          }}
-        >
-          <ArrowDown size={15} aria-hidden="true" />
-          {t('convo.latest')}
-        </button>
-      )}
-      {convo.status === 'ready' && convo.tasks && <Tasks tasks={convo.tasks} fold={!!ask} />}
-      {waits && !ask && convo.status === 'ready' && (
-        // (Where it cannot be answered here: in its terminal.)
-        <div className="convo-waiting" role="status">
-          <span>{t('convo.waiting')}</span>
-          <button type="button" className="btn btn-primary" onClick={onReply ?? onShowTerminal}>{t(onReply ? 'convo.answer' : 'convo.answerThere')}</button>
-        </div>
-      )}
+      <div className="convo-dock">
+        {convo.status === 'ready' && convo.tasks && <Tasks tasks={convo.tasks} fold={!!ask} />}
+        {waits && !ask && convo.status === 'ready' && (
+          // (Where it cannot be answered here: in its terminal.)
+          <div className="convo-waiting" role="status">
+            <span>{t('convo.waiting')}</span>
+            <button type="button" className="btn btn-primary" onClick={onReply ?? onShowTerminal}>{t(onReply ? 'convo.answer' : 'convo.answerThere')}</button>
+          </div>
+        )}
+        {composer}
+        {convo.status === 'ready' && convo.meta && <Runs meta={convo.meta} />}
+      </div>
       </div>
       {picking && side && <Picker rows={rows} onClose={unpick} />}
+    </div>
+  )
+}
+
+// A model's id as people call it: claude-opus-5-5 is Opus 5.5.
+export function modelName(id: string): string {
+  const m = /^claude-(opus|sonnet|haiku|fable)-(\d+)(?:-(\d{1,2}))?(?:-\d{8})?(?:\[.*\])?$/.exec(id)
+  if (!m) return id
+  return m[1][0].toUpperCase() + m[1].slice(1) + ' ' + m[2] + (m[3] ? '.' + m[3] : '')
+}
+
+// The window a conversation fills: Claude Code's usual one, unless what it
+// sent is already more (then it has the larger one).
+const WINDOW = 200_000
+const BIG_WINDOW = 1_000_000
+const windowOf = (used: number) => (used > WINDOW ? BIG_WINDOW : WINDOW)
+
+function tokens(n: number): string {
+  if (n >= 1_000_000) return (Math.round(n / 100_000) / 10).toString() + 'M'
+  if (n >= 1000) return (Math.round(n / 100) / 10).toString() + 'K'
+  return String(n)
+}
+
+const MODES = ['default', 'acceptEdits', 'plan', 'auto', 'bypassPermissions'] as const
+const modeName = (m: string) => ((MODES as readonly string[]).includes(m) ? t(`convo.mode.${m}` as I18nKey) : m)
+
+// What the session runs with, under the composer: its permission mode on
+// the left; its branch, model and how full its context is on the right
+// (the numbers on a tap).
+function Runs({ meta }: { meta: ConvoMeta }) {
+  const [open, setOpen] = useState(false)
+  const box = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!open) return
+    const away = (e: PointerEvent) => {
+      if (!box.current?.contains(e.target as Node)) setOpen(false)
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        e.stopPropagation()
+        setOpen(false)
+      }
+    }
+    document.addEventListener('pointerdown', away, true)
+    document.addEventListener('keydown', onKey, true)
+    return () => {
+      document.removeEventListener('pointerdown', away, true)
+      document.removeEventListener('keydown', onKey, true)
+    }
+  }, [open])
+  const used = meta.context ?? 0
+  const all = windowOf(used)
+  const pct = Math.min(100, Math.round((used / all) * 100))
+  return (
+    <div className="convo-runs" ref={box}>
+      {meta.mode && (
+        <span className="convo-runs-item" title={t('convo.modeHint')}>
+          {modeName(meta.mode)}
+        </span>
+      )}
+      <span className="spacer" />
+      {meta.branch && (
+        <span className="convo-runs-item convo-runs-branch" title={t('convo.branch', { b: meta.branch })}>
+          <GitBranch size={13} aria-hidden="true" />
+          <span className="convo-runs-branch-name">{meta.branch}</span>
+        </span>
+      )}
+      {meta.model && <span className="convo-runs-item" title={meta.model}>{modelName(meta.model)}</span>}
+      {used > 0 && (
+        <button type="button" className="convo-runs-item convo-runs-ctx" aria-expanded={open} aria-label={t('convo.ctxLabel', { p: pct })} onClick={() => setOpen(!open)}>
+          <span className="convo-ring" style={{ '--p': pct } as CSSProperties} aria-hidden="true" />
+          {pct}%
+        </button>
+      )}
+      {open && (
+        <div className="convo-runs-pop" role="dialog" aria-label={t('convo.ctxTitle')}>
+          <div className="convo-runs-row">
+            <span>{t('convo.ctxTitle')}</span>
+            <span>{t('convo.ctx', { used: tokens(used), all: tokens(all), p: pct })}</span>
+          </div>
+          <div className="convo-runs-bar"><i style={{ width: pct + '%' }} /></div>
+          {meta.model && (
+            <div className="convo-runs-row">
+              <span>{t('convo.model')}</span>
+              <span>{meta.model}</span>
+            </div>
+          )}
+          <p className="convo-runs-note">{t('convo.ctxNote', { all: tokens(all) })}</p>
+        </div>
+      )}
     </div>
   )
 }

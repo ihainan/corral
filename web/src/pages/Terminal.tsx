@@ -747,6 +747,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
   // (and, on a touch screen, taps on it bring up no keyboard). It opens with
   // the view, unless it was put away while the view showed.
   const convoNoComposer = useRef(local.get(CONVO_NO_COMPOSER) === '1')
+  const composerLeftAt = useRef(0) // (ms) when the composer last lost focus
   const toggleConvo = () => {
     if (convoPeek) {
       setConvoPeek(false)
@@ -754,12 +755,15 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
     }
     const open = !convoOpen
     rememberConvo(id, open)
-    setConvoOpen(open)
+    // (The composer moves into the conversation and back: a new field, to focus once it is there.)
+    // (The press on the button itself took focus off it, a moment ago.)
+    const hadFocus = !!composerRef.current && (document.activeElement === composerRef.current || Date.now() - composerLeftAt.current < 500)
+    flushSync(() => setConvoOpen(open))
     // (In the tap itself, so iOS raises the keyboard.)
     if (open && !convoNoComposer.current) {
       if (composer) composerRef.current?.focus()
       else openComposerRef.current()
-    }
+    } else if (hadFocus) composerRef.current?.focus()
   }
   const outRef = useRef<(d: string | Uint8Array) => void>(() => {})
   const safeFitRef = useRef(() => {})
@@ -2717,6 +2721,133 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
         },
   ]
 
+  // The composer: under the terminal, or (the conversation showing) in the
+  // conversation's column, where a message goes to the pane it is of.
+  const convoTo = showConvo && convoAgent ? [convoAgent.title, convoAgent.where].filter((x) => x && x !== '~').join(' · ') : '' // (herdr's "~": no workspace name)
+  const composerEl = (
+    <div className="composer">
+      {completion.list}
+      <div className="composer-box">
+        <textarea
+          ref={composerRef}
+          className="composer-input"
+          value={draft}
+          aria-label={t('term.composer')}
+          // Commands and code: no capital first letter, corrected
+          // words or curly quotes (iOS), as in the terminal's field.
+          autoCapitalize="off"
+          autoCorrect="off"
+          spellCheck={false}
+          placeholder={suggestion ?? (convoTo ? t('convo.toPlaceholder', { name: convoTo }) : t('term.composerPlaceholder'))}
+          rows={1}
+          onChange={(e) => {
+            histPos.current = null // (an entry edited is a draft of its own)
+            setDraft(e.target.value)
+          }}
+          onSelect={completion.update}
+          {...completion.field}
+          onBlur={() => {
+            composerLeftAt.current = Date.now()
+            setTimeout(completion.update)
+          }}
+          onPaste={(e) => {
+            const files = [...(e.clipboardData?.files ?? [])]
+            if (files.length > 0) {
+              e.preventDefault()
+              void upload(files)
+              return
+            }
+            // A long paste goes in as a label, to keep the box readable; it is sent as
+            // the text (deleting the label drops it).
+            const text = e.clipboardData?.getData('text/plain') ?? ''
+            const lines = text.split('\n').length
+            if (lines <= PASTE_LINES && text.length <= PASTE_CHARS) return
+            e.preventDefault()
+            insertDraft(keepPaste(text, (n) => t('term.pasteLabel', { n, lines })))
+          }}
+          onKeyDown={(e) => {
+            if (e.nativeEvent.isComposing || e.keyCode === 229) return
+            if (completion.onKey(e)) return
+            if (e.key === 'Tab' && !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey && !draft && suggestion) {
+              e.preventDefault()
+              takeSuggestion()
+              return
+            }
+            const el = e.currentTarget
+            const plain = !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey && el.selectionStart === el.selectionEnd
+            if (plain && e.key === 'ArrowUp' && el.selectionStart === 0 && historyStep(-1)) {
+              e.preventDefault()
+            } else if (plain && e.key === 'ArrowDown' && el.selectionEnd === el.value.length && historyStep(1)) {
+              e.preventDefault()
+            } else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+              e.preventDefault()
+              sendComposer(true)
+            } else if (e.key === 'Enter' && hasKeyboardPointer() && prefs.composerEnter === 'send' && !e.shiftKey && !e.altKey) {
+              // On a computer Enter sends, as in the agents' own input boxes and chat apps;
+              // Shift+Enter is a new line (or the other way round, as set).
+              e.preventDefault()
+              sendComposer(true)
+            } else if (e.key === 'Escape') {
+              e.preventDefault()
+              toggleComposer()
+            }
+          }}
+        />
+        <div className="composer-tools">
+          <button type="button" className="icon-btn" onClick={() => fileRef.current?.click()} aria-label={t('term.upload')} title={t('term.upload')}>
+            <Paperclip size={18} />
+          </button>
+          <Menu
+            label={t('term.history')}
+            note={sentHistory().length === 0 ? t('term.historyEmpty') : undefined}
+            items={() =>
+              [...sentHistory()].reverse().map((h) => ({
+                label: oneLine(h),
+                onSelect: () => {
+                  // The draft there comes back with Down after the newest entry.
+                  if (histPos.current === null) histStash.current = draft
+                  histPos.current = h
+                  setDraft(h)
+                  requestAnimationFrame(() => {
+                    const el = composerRef.current
+                    if (!el) return
+                    el.focus()
+                    el.selectionStart = el.selectionEnd = h.length
+                  })
+                },
+              }))
+            }
+            button={(open, toggle) => (
+              <button type="button" className="icon-btn" aria-expanded={open} onClick={toggle} aria-label={t('term.history')} title={t('term.history') + (isTouch ? '' : ' (↑)')}>
+                <History size={18} />
+              </button>
+            )}
+          />
+          <button type="button" className="btn btn-ghost composer-insert" onClick={() => sendComposer(false)} disabled={!draft} title={t('term.insertHint')}>
+            {t('term.insert')}
+          </button>
+          <div className="spacer" />
+          {suggestion && !draft && !hasKeyboardPointer() && (
+            <button type="button" className="btn btn-ghost composer-insert" onClick={takeSuggestion} title={suggestion}>
+              {t('term.useSuggestion')}
+            </button>
+          )}
+          {hasKeyboardPointer() && <span className="composer-keys" aria-hidden="true">{suggestion && !draft ? t('term.suggestionKey') + ' · ' : ''}{composerKeys}</span>}
+          {convoStopsHere && !draft.trim() ? (
+            // (While the agent works and nothing is typed: send becomes stop, as in chat apps.)
+            <button type="button" className="composer-send is-stop" onClick={stopAgent} aria-label={t('convo.stop')} title={t('convo.stop')}>
+              <Square size={14} fill="currentColor" strokeWidth={0} />
+            </button>
+          ) : (
+            <button type="button" className="composer-send" onClick={() => sendComposer(true)} aria-label={t('term.send')} title={t('term.send') + (isTouch ? '' : ' (' + composerSendKey + ')')}>
+              <ArrowUp size={18} strokeWidth={2.25} />
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+
   return (
     <div
       className={'term-root ' + (scheme.dark ? 'dark' : 'light') + (active ? '' : ' inactive')}
@@ -2897,6 +3028,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
             onDismiss={(pid) => setConvoPending((ps) => ps.filter((p) => p.id !== pid))}
             onShowTerminal={() => setConvoPeek(true)}
             onCopied={() => toast(t('common.copied'))}
+            composer={composer ? composerEl : undefined}
           />
         )}
         {dragOver && <div className="term-drop">{t('term.dropHint')}</div>}
@@ -2944,130 +3076,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
         </div>
       ) : (
         <>
-          {composer && (
-            <div className="composer">
-              {showConvo && convoAgent && (convoAgent.title || convoAgent.where) && (
-                // (Where a message goes: the pane in front, which the conversation follows.)
-                <div className="composer-to">{t('convo.to', { name: [convoAgent.title, convoAgent.where].filter(Boolean).join(' · ') })}</div>
-              )}
-              {completion.list}
-              <div className="composer-box">
-                <textarea
-                  ref={composerRef}
-                  className="composer-input"
-                  value={draft}
-                  aria-label={t('term.composer')}
-                  // Commands and code: no capital first letter, corrected
-                  // words or curly quotes (iOS), as in the terminal's field.
-                  autoCapitalize="off"
-                  autoCorrect="off"
-                  spellCheck={false}
-                  placeholder={suggestion ?? t('term.composerPlaceholder')}
-                  rows={1}
-                  onChange={(e) => {
-                    histPos.current = null // (an entry edited is a draft of its own)
-                    setDraft(e.target.value)
-                  }}
-                  onSelect={completion.update}
-                  {...completion.field}
-                  onBlur={() => setTimeout(completion.update)}
-                  onPaste={(e) => {
-                    const files = [...(e.clipboardData?.files ?? [])]
-                    if (files.length > 0) {
-                      e.preventDefault()
-                      void upload(files)
-                      return
-                    }
-                    // A long paste goes in as a label, to keep the box readable; it is sent as
-                    // the text (deleting the label drops it).
-                    const text = e.clipboardData?.getData('text/plain') ?? ''
-                    const lines = text.split('\n').length
-                    if (lines <= PASTE_LINES && text.length <= PASTE_CHARS) return
-                    e.preventDefault()
-                    insertDraft(keepPaste(text, (n) => t('term.pasteLabel', { n, lines })))
-                  }}
-                  onKeyDown={(e) => {
-                    if (e.nativeEvent.isComposing || e.keyCode === 229) return
-                    if (completion.onKey(e)) return
-                    if (e.key === 'Tab' && !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey && !draft && suggestion) {
-                      e.preventDefault()
-                      takeSuggestion()
-                      return
-                    }
-                    const el = e.currentTarget
-                    const plain = !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey && el.selectionStart === el.selectionEnd
-                    if (plain && e.key === 'ArrowUp' && el.selectionStart === 0 && historyStep(-1)) {
-                      e.preventDefault()
-                    } else if (plain && e.key === 'ArrowDown' && el.selectionEnd === el.value.length && historyStep(1)) {
-                      e.preventDefault()
-                    } else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-                      e.preventDefault()
-                      sendComposer(true)
-                    } else if (e.key === 'Enter' && hasKeyboardPointer() && prefs.composerEnter === 'send' && !e.shiftKey && !e.altKey) {
-                      // On a computer Enter sends, as in the agents' own input boxes and chat apps;
-                      // Shift+Enter is a new line (or the other way round, as set).
-                      e.preventDefault()
-                      sendComposer(true)
-                    } else if (e.key === 'Escape') {
-                      e.preventDefault()
-                      toggleComposer()
-                    }
-                  }}
-                />
-                <div className="composer-tools">
-                  <button type="button" className="icon-btn" onClick={() => fileRef.current?.click()} aria-label={t('term.upload')} title={t('term.upload')}>
-                    <Paperclip size={18} />
-                  </button>
-                  <Menu
-                    label={t('term.history')}
-                    note={sentHistory().length === 0 ? t('term.historyEmpty') : undefined}
-                    items={() =>
-                      [...sentHistory()].reverse().map((h) => ({
-                        label: oneLine(h),
-                        onSelect: () => {
-                          // The draft there comes back with Down after the newest entry.
-                          if (histPos.current === null) histStash.current = draft
-                          histPos.current = h
-                          setDraft(h)
-                          requestAnimationFrame(() => {
-                            const el = composerRef.current
-                            if (!el) return
-                            el.focus()
-                            el.selectionStart = el.selectionEnd = h.length
-                          })
-                        },
-                      }))
-                    }
-                    button={(open, toggle) => (
-                      <button type="button" className="icon-btn" aria-expanded={open} onClick={toggle} aria-label={t('term.history')} title={t('term.history') + (isTouch ? '' : ' (↑)')}>
-                        <History size={18} />
-                      </button>
-                    )}
-                  />
-                  <button type="button" className="btn btn-ghost composer-insert" onClick={() => sendComposer(false)} disabled={!draft} title={t('term.insertHint')}>
-                    {t('term.insert')}
-                  </button>
-                  <div className="spacer" />
-                  {suggestion && !draft && !hasKeyboardPointer() && (
-                    <button type="button" className="btn btn-ghost composer-insert" onClick={takeSuggestion} title={suggestion}>
-                      {t('term.useSuggestion')}
-                    </button>
-                  )}
-                  {hasKeyboardPointer() && <span className="composer-keys" aria-hidden="true">{suggestion && !draft ? t('term.suggestionKey') + ' · ' : ''}{composerKeys}</span>}
-                  {convoStopsHere && !draft.trim() ? (
-                    // (While the agent works and nothing is typed: send becomes stop, as in chat apps.)
-                    <button type="button" className="composer-send is-stop" onClick={stopAgent} aria-label={t('convo.stop')} title={t('convo.stop')}>
-                      <Square size={14} fill="currentColor" strokeWidth={0} />
-                    </button>
-                  ) : (
-                    <button type="button" className="composer-send" onClick={() => sendComposer(true)} aria-label={t('term.send')} title={t('term.send') + (isTouch ? '' : ' (' + composerSendKey + ')')}>
-                      <ArrowUp size={18} strokeWidth={2.25} />
-                    </button>
-                  )}
-                </div>
-              </div>
-            </div>
-          )}
+          {composer && !showConvo && composerEl}
 
           {showKeybar && (
             <KeyBar

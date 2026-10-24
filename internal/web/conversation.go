@@ -323,6 +323,7 @@ type convoAnswer struct {
 	// Tasks the agent's task list as the log has it.
 	Title   string        `json:"title,omitempty"`
 	Tasks   []convo.Task  `json:"tasks,omitempty"`
+	Meta    *convo.Meta   `json:"meta,omitempty"` // what it runs with, as the log says
 	Entries []convo.Entry `json:"entries"`
 }
 
@@ -390,6 +391,9 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 	}
 	ans.Entries = st.parser.Since(rev)
 	ans.Title, ans.Tasks = st.parser.Title(), st.parser.Tasks()
+	if m := st.parser.Meta(); m != (convo.Meta{}) {
+		ans.Meta = &m
+	}
 	writeJSON(w, http.StatusOK, ans)
 }
 

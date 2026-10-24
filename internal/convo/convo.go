@@ -77,7 +77,19 @@ const (
 	maxID     = 128
 	maxTasks  = 50  // tasks of a task list
 	maxTitle  = 300 // the session's title, a task's subject
+	maxMeta   = 120 // a model's, a mode's, a branch's name
 )
+
+// Meta is what a session runs with, as its log last said it: each field
+// empty (zero) until a row says it.
+type Meta struct {
+	Model  string `json:"model,omitempty"`  // the model's id, as the API named it
+	Mode   string `json:"mode,omitempty"`   // the permission mode: default, acceptEdits, plan, auto, ...
+	Branch string `json:"branch,omitempty"` // the git branch it ran on
+	// Context is how many tokens the latest request sent: what the
+	// conversation fills of the model's window.
+	Context int64 `json:"context,omitempty"`
+}
 
 // Task is one item of the agent's task list (TodoWrite, or TaskCreate and
 // TaskUpdate), as it stands.

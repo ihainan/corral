@@ -386,7 +386,47 @@ html.term-dark .overlay, html.term-dark .menu, html.term-dark .toast {
 /* Conversation view: over the terminal, in the terminal's colours */
 .convo { position: absolute; inset: 0; z-index: 5; display: flex; background: var(--term-bg); color: var(--term-fg); }
 .convo-main { flex: 1; min-width: 0; display: flex; flex-direction: column; position: relative; }
+.convo-scroll-wrap { flex: 1; min-height: 0; display: flex; flex-direction: column; position: relative; }
 .convo-scroll { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+/* Under the thread, in its column: the task list, the wait, the composer, what the session runs with */
+.convo-dock {
+  flex: none; width: 100%; max-width: 780px; margin: 0 auto; display: flex; flex-direction: column; gap: 8px;
+  padding: 0 max(16px, env(safe-area-inset-right, 0px)) 6px max(16px, env(safe-area-inset-left, 0px)); font-family: var(--font-ui);
+}
+.convo-dock:empty { display: none; }
+.convo-dock .composer { padding: 0; background: none; border-top: 0; }
+.convo-dock .composer-box { border: 1px solid var(--term-line); }
+.term-root.light .convo-dock .composer-box { box-shadow: none; }
+.convo-dock .composer-box:focus-within { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+@media (max-width: 640px) { .convo-dock { padding-left: max(8px, env(safe-area-inset-left, 0px)); padding-right: max(8px, env(safe-area-inset-right, 0px)); } }
+.convo-runs { position: relative; display: flex; align-items: center; gap: 2px; min-width: 0; min-height: 24px; margin-top: -4px; font-size: 12.5px; line-height: 18px; color: var(--term-fg-3); font-variant-numeric: tabular-nums; }
+.convo-runs-item {
+  flex: none; display: inline-flex; align-items: center; gap: 5px; padding: 2px 6px; border: 0; border-radius: 6px;
+  background: none; color: inherit; font: inherit; white-space: nowrap;
+}
+.convo-runs-branch { flex: 0 1 auto; min-width: 0; overflow: hidden; }
+.convo-runs-branch svg { flex: none; }
+.convo-runs-branch-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.convo-runs-ctx { cursor: pointer; }
+.convo-runs-ctx:hover, .convo-runs-ctx[aria-expanded='true'] { background: var(--term-hover); color: var(--term-fg); }
+.convo-runs-ctx:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: 1px; }
+.convo-ring {
+  width: 13px; height: 13px; border-radius: 50%; flex: none;
+  background: conic-gradient(var(--term-accent-text) calc(var(--p) * 1%), var(--term-line) 0);
+  -webkit-mask: radial-gradient(circle, transparent 3.5px, #000 4px); mask: radial-gradient(circle, transparent 3.5px, #000 4px);
+}
+.convo-runs-pop {
+  position: absolute; right: 0; bottom: calc(100% + 6px); z-index: 3; width: min(320px, 100%); padding: 8px 10px;
+  border: 1px solid var(--term-line); border-radius: 10px; background: var(--term-bg); color: var(--term-fg);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.22); font-size: 13px;
+}
+.convo-runs-row { display: flex; justify-content: space-between; gap: 16px; padding: 3px 0; }
+.convo-runs-row > :first-child { color: var(--term-fg-3); flex: none; }
+.convo-runs-row > :last-child { min-width: 0; overflow-wrap: anywhere; text-align: right; }
+.convo-runs-bar { height: 5px; margin: 2px 0 6px; border-radius: 3px; background: var(--term-line); overflow: hidden; }
+.convo-runs-bar i { display: block; height: 100%; background: var(--term-accent-text); }
+.convo-runs-note { margin: 4px 0 0; font-size: 12px; color: var(--term-fg-3); }
+@media (max-width: 420px) { .convo-runs-branch { display: none; } }
 .convo-col {
   max-width: 780px; margin: 0 auto; display: flex; flex-direction: column; gap: 14px;
   padding: 16px max(16px, env(safe-area-inset-right, 0px)) 28px max(16px, env(safe-area-inset-left, 0px));
@@ -497,7 +537,7 @@ html.term-dark .overlay, html.term-dark .menu, html.term-dark .toast {
 
 /* The task list, over the composer */
 .convo-tasks {
-  flex: none; margin: 0 auto 8px; width: min(780px, calc(100% - 24px)); padding: 6px 12px; font-size: 13.5px;
+  flex: none; padding: 6px 12px; font-size: 13.5px;
   border: 1px solid var(--term-line); border-radius: 10px; background: var(--term-chrome);
 }
 .convo-tasks-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; width: 100%; border: 0; background: none; padding: 2px 0; color: var(--term-fg-2); font: inherit; text-align: left; cursor: pointer; }
@@ -545,11 +585,9 @@ html.term-dark .overlay, html.term-dark .menu, html.term-dark .toast {
 .convo-bar-status.is-blocked, .convo-list-sub .is-blocked { color: var(--term-warn-text); font-weight: 600; }
 .convo-bar-status.is-done, .convo-list-sub .is-done { color: var(--term-ok-text); }
 .convo-waiting {
-  flex: none; display: flex; align-items: center; gap: 12px; justify-content: space-between;
-  padding: 10px max(16px, env(safe-area-inset-right, 0px)) 10px max(16px, env(safe-area-inset-left, 0px));
-  border-top: 1px solid var(--term-line); background: var(--term-chrome); font-size: 14px; font-weight: 500;
+  flex: none; display: flex; align-items: center; gap: 12px; justify-content: space-between; padding: 8px 8px 8px 14px;
+  border: 1px solid var(--term-warn-text); border-radius: 10px; background: var(--term-bg); font-size: 14px; font-weight: 500;
 }
-.convo-latest.is-raised { bottom: 72px; }
 .convo-bar-pick {
   flex: 1; min-width: 0; display: flex; align-items: center; gap: 4px; border: 0; background: none; padding: 0;
   color: inherit; font: inherit; text-align: left; cursor: pointer;
@@ -559,7 +597,6 @@ html.term-dark .overlay, html.term-dark .menu, html.term-dark .toast {
 .convo-bar-chev { flex: none; color: var(--term-fg-3); }
 .convo-stop { flex: none; height: 26px; padding: 0 10px; font-size: 13px; }
 @media (pointer: coarse) { .convo-stop { height: 34px; } }
-.composer-to { padding: 0 6px 6px; font-size: 12px; color: var(--term-fg-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .convo-bar-pick .convo-bar-name { flex: 0 1 auto; }
 .term-tab-agents { flex: none; width: auto; min-width: 30px; height: 30px; padding: 0 6px; gap: 3px; display: inline-flex; align-items: center; color: var(--term-fg-2); }
 @media (pointer: coarse) { .term-tab-agents { height: 36px; min-width: 36px; } }
