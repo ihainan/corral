@@ -62,10 +62,19 @@ const baseKey = (s: SessionInfo) =>
     ? `${s.host_id}|${s.persistence}|${s.persistence === 'herdr' && (s.mux_session ?? '') === 'default' ? '' : (s.mux_session ?? '')}`
     : 'id|' + s.id
 
+// The places as written last where storage would not keep them (blocked or
+// full): they hold for this page's life (else the next list undid a move).
+let unstored: string | null = null
+function writeOrder(order: [string, number][]) {
+  const v = JSON.stringify(order)
+  local.set(ORDER_KEY, v)
+  unstored = local.get(ORDER_KEY) === v ? null : v
+}
+
 // The places, in order, each with when a list first lacked it (0: it was there).
 function readOrder(): [string, number][] {
   try {
-    const v = JSON.parse(local.get(ORDER_KEY) ?? '[]')
+    const v = JSON.parse(unstored ?? local.get(ORDER_KEY) ?? '[]')
     if (Array.isArray(v)) return v.filter((x) => Array.isArray(x) && typeof x[0] === 'string' && typeof x[1] === 'number')
   } catch {
     /* not ours */
@@ -107,7 +116,7 @@ function inPlace(list: SessionInfo[]): SessionInfo[] {
       known.add(k)
     }
   }
-  local.set(ORDER_KEY, JSON.stringify(order))
+  writeOrder(order)
   const at = new Map(order.map(([k], i) => [k, i]))
   return [...list].sort((a, b) => at.get(keyOf.get(a.id)!)! - at.get(keyOf.get(b.id)!)!)
 }
@@ -127,7 +136,7 @@ function moveTab(list: SessionInfo[], id: string, to: number) {
   const open = new Set(keys)
   let i = 0
   const order = readOrder().map(([k, gone]): [string, number] => (open.has(k) ? [keys[i++], 0] : [k, gone]))
-  local.set(ORDER_KEY, JSON.stringify(order))
+  writeOrder(order)
 }
 
 // The agents waiting for an answer in these sessions, each counted once
