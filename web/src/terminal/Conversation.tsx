@@ -344,6 +344,7 @@ export function ConversationView({
       if (!e.ctrlKey || e.metaKey || e.altKey || e.shiftKey || e.key.toLowerCase() !== 'o' || e.isComposing) return
       e.preventDefault()
       e.stopPropagation()
+      if (e.repeat) return // (held: once)
       setOpened({})
       setAllOpen((v) => !v)
     }

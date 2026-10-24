@@ -484,6 +484,9 @@ func (s *Server) readConvo(sess *term.Session, st *convoState) (more bool, err e
 			st.gen = convoGens.Add(1)
 			st.parser = convo.NewClaude()
 			st.offset, st.older, st.skipping = 0, false, false
+			if st.bind != nil {
+				st.parser.QueueSince(st.bind.started) // (as locateConvo says it)
+			}
 		}
 		limit := int64(convoStep)
 		if st.size < 0 { // first read: the end of a long log

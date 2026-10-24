@@ -477,9 +477,15 @@ func TestClaudeQueueSince(t *testing.T) {
 	c := NewClaude()
 	c.Feed(lines(`{"type":"queue-operation","operation":"enqueue","timestamp":"2026-10-24T09:09:58.500Z","content":"X"}`))
 	started := time.Date(2026, 10, 24, 9, 10, 0, 0, time.UTC).Unix()
+	c.Feed(lines(`{"type":"queue-operation","operation":"enqueue","timestamp":"2026-10-24T09:09:58.600Z","content":"Z"}`, `{"type":"queue-operation","operation":"remove","timestamp":"2026-10-24T09:09:58.700Z","content":"Z"}`))
 	c.QueueSince(started)
 	if q := c.Queued(); len(q) != 0 {
 		t.Fatalf("the process before's: %+v", q)
+	}
+	// The new process queues Z: its arrival is of it, not of the old one's removal.
+	c.Feed(lines(`{"type":"queue-operation","operation":"enqueue","timestamp":"2026-10-24T09:10:01Z","content":"Z"}`, `{"type":"user","uuid":"uz","message":{"content":"Z"}}`))
+	if q := c.Queued(); len(q) != 0 {
+		t.Fatalf("Z arrived: %+v", q)
 	}
 	// The new process queues the same text: removed and taken in, it waits no more.
 	c.Feed(lines(

@@ -120,6 +120,7 @@ func (c *Claude) QueueSince(started int64) {
 		return
 	}
 	c.since = started
+	c.gone = nil // (removals of the process before: their arrivals are not this one's)
 	keep := c.queue[:0:0]
 	for _, q := range c.queue {
 		if c.ofNow(q.Time) {
