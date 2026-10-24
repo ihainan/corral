@@ -252,6 +252,7 @@ export interface TabInfo {
   statusText: string
   waiting: number // herdr agents waiting for an answer
   done: number // herdr agents that finished and were not looked at since (herdr's "done")
+  working: number // herdr agents at work
   reopening?: boolean // being opened again by itself (see autoAgain): kept mounted meanwhile
 }
 
@@ -2641,10 +2642,12 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
       .catch(() => toast(t('term.sessionsFailed'), true))
   }
   const [waitingOpen, setWaitingOpen] = useState(false) // (it stays while open, even with none left)
-  const doneCount = herdr && !herdrStale && !ended && !watch ? herdr.workspaces.reduce((n, w) => n + w.agents.filter((a) => a.status === 'done').length, 0) : 0
+  const countOf = (st: string) => (herdr && !herdrStale && !ended && !watch ? herdr.workspaces.reduce((n, w) => n + w.agents.filter((a) => a.status === st).length, 0) : 0)
+  const doneCount = countOf('done')
+  const workingCount = countOf('working')
   useEffect(() => {
-    onInfo?.(id, { status: statusClass, statusText, waiting: waiting.length, done: doneCount, reopening: probing || autoIn !== null || autoWaiting || connecting })
-  }, [onInfo, id, statusClass, statusText, waiting.length, doneCount, probing, autoIn, autoWaiting, connecting])
+    onInfo?.(id, { status: statusClass, statusText, waiting: waiting.length, done: doneCount, working: workingCount, reopening: probing || autoIn !== null || autoWaiting || connecting })
+  }, [onInfo, id, statusClass, statusText, waiting.length, doneCount, workingCount, probing, autoIn, autoWaiting, connecting])
 
   const endText = status === 'revoked' ? t('watch.revoked') : status === 'gone' ? (watch ? t('watch.gone') : t('term.ended.gone')) :
     end ? (end.state === 'exited' ? t('term.ended.exited', { code: end.code }) : end.state === 'lost' ? t('term.ended.lost') : gatewayStopped ? t('term.ended.restart') : t('term.ended.closed')) :

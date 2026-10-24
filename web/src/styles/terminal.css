@@ -270,8 +270,16 @@ html.kb-open .keybar { padding-bottom: 6px; }
 .term-tab {
   display: flex; align-items: center; gap: 6px; flex: none; max-width: 320px; height: 30px; padding: 0 12px;
   border: 0; border-radius: 8px; background: none; color: var(--term-fg-3); font: 500 13px/1 var(--font-ui); cursor: pointer;
+  user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
 }
 .term-tab:hover { background: var(--term-hover); color: var(--term-fg); }
+/* A tab dragged to another place: it is lifted (over the others, which make
+   room for it as it passes), and keeps its own colour on them. */
+.term-tabs.dragging, .term-tabs.dragging .term-tab { cursor: grabbing; }
+.term-tabs.dragging .term-tab:not(.held) { transition: transform 0.15s ease; }
+.term-tabs.dragging .term-tab:not(.held):hover:not([aria-current="page"]) { background: none; color: var(--term-fg-3); }
+.term-tab.held { position: relative; z-index: 1; color: var(--term-fg); box-shadow: 0 2px 8px rgb(0 0 0 / 0.28); }
+.term-tab.held:not([aria-current="page"]) { background: var(--term-hover); }
 /* The tab in front: as a pressed button of the bar is, so it stands apart in
    every scheme (the key colour can be the bar's own in a light one). */
 .term-tab[aria-current="page"] { background: var(--term-accent-soft); color: var(--term-accent-text); font-weight: 600; }
@@ -286,6 +294,14 @@ html.kb-open .keybar { padding-bottom: 6px; }
 .term-tab-dot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--term-fg-3); }
 .term-tab-dot.s-connecting, .term-tab-dot.s-reconnecting, .term-tab-dot.s-slow { background: var(--warn); }
 .term-tab-dot.s-offline, .term-tab-dot.s-full { background: var(--danger); }
+/* Agents at work in the tab's session: a ring that turns, in the colour the
+   conversation view gives working. */
+.term-tab-working {
+  flex: none; width: 11px; height: 11px; border-radius: 50%; box-sizing: border-box;
+  border: 2px solid color-mix(in srgb, var(--term-fg-3) 45%, transparent);
+  border-top-color: var(--term-accent-text); border-right-color: var(--term-accent-text); animation: convo-spin 0.9s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) { .term-tab-working { animation: none; border-color: var(--term-accent-text); } }
 .term-tab-new { flex: none; width: 30px; height: 30px; color: var(--term-fg-2); }
 @media (pointer: coarse) { .term-tab, .term-tab-new { height: 36px; } .term-tab-new { width: 36px; } }
 

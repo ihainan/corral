@@ -42,12 +42,14 @@ const newTabKey = isMac ? '⌘T' : 'Ctrl+Shift+T'
 // browser keeps them for its own tabs, an installed app passes them on.
 // The installed app also has a new tab (⌘T; Ctrl+Shift+T elsewhere, as
 // Ctrl+letters belong to the programs) and, on a Mac, ⌘1…⌘8 for a tab by
-// its place, ⌘9 for the last and ⌘⇧[ ⌘⇧] for the previous and next. No key
-// closes a tab: that ends its session.
+// its place, ⌘9 for the last and ⌘⇧[ ⌘⇧] for the previous and next;
+// Ctrl+Shift+PageUp and PageDown move the tab in front (as in Chrome). No
+// key closes a tab: that ends its session.
 // Tabs keep their places. A tab is the session it shows: tmux's or herdr's
 // session on its host (opened again after a gateway restart or a lost
 // connection, it is a new session of the gateway's, in the same place), a
-// plain shell itself. Places are kept on this device; a new tab goes last.
+// plain shell itself. Places are kept on this device; a new tab goes last,
+// and the user drags a tab to another place (see useTabDrag).
 // A tab gone for longer than a reconnection takes loses its place: opened
 // again later, it goes last.
 const ORDER_KEY = 'corral.tabOrder2' // (corral.tabOrder held when each was last seen: another meaning)
@@ -60,34 +62,43 @@ const baseKey = (s: SessionInfo) =>
     ? `${s.host_id}|${s.persistence}|${s.persistence === 'herdr' && (s.mux_session ?? '') === 'default' ? '' : (s.mux_session ?? '')}`
     : 'id|' + s.id
 
-function inPlace(list: SessionInfo[]): SessionInfo[] {
-  const now = Date.now()
-  // Place keys in order, each with when a list first lacked it (0: it was there).
-  let order: [string, number][] = []
+// The places, in order, each with when a list first lacked it (0: it was there).
+function readOrder(): [string, number][] {
   try {
     const v = JSON.parse(local.get(ORDER_KEY) ?? '[]')
-    if (Array.isArray(v)) order = v.filter((x) => Array.isArray(x) && typeof x[0] === 'string' && typeof x[1] === 'number')
+    if (Array.isArray(v)) return v.filter((x) => Array.isArray(x) && typeof x[0] === 'string' && typeof x[1] === 'number')
   } catch {
     /* not ours */
   }
-  const byAge = [...list].sort((a, b) => a.created_at - b.created_at)
+  return []
+}
+
+// Each session's place key: the oldest of a session's tabs has its base key,
+// the later ones a number after it.
+function placeKeys(list: SessionInfo[]): Map<string, string> {
   const seen = new Map<string, number>()
   const keyOf = new Map<string, string>()
-  for (const s of byAge) {
+  for (const s of [...list].sort((a, b) => a.created_at - b.created_at)) {
     const base = baseKey(s)
     const n = (seen.get(base) ?? 0) + 1
     seen.set(base, n)
     keyOf.set(s.id, n === 1 ? base : base + '#' + n)
   }
+  return keyOf
+}
+
+function inPlace(list: SessionInfo[]): SessionInfo[] {
+  const now = Date.now()
+  const keyOf = placeKeys(list)
   const open = new Set(keyOf.values())
   // Gone longer than a reconnection takes (counted from when a list lacked
   // it, not from the last list: a page in the background asks none): its
   // place is let go, and back later it goes last.
-  order = order
+  const order = readOrder()
     .filter(([, gone]) => !(gone && now - gone >= KEEP_GONE_MS))
-    .map(([k, gone]) => [k, open.has(k) ? 0 : gone || now])
+    .map(([k, gone]): [string, number] => [k, open.has(k) ? 0 : gone || now])
   const known = new Set(order.map(([k]) => k))
-  for (const s of byAge) {
+  for (const s of [...list].sort((a, b) => a.created_at - b.created_at)) {
     const k = keyOf.get(s.id)!
     if (!known.has(k)) {
       order.push([k, 0])
@@ -97,6 +108,22 @@ function inPlace(list: SessionInfo[]): SessionInfo[] {
   local.set(ORDER_KEY, JSON.stringify(order))
   const at = new Map(order.map(([k], i) => [k, i]))
   return [...list].sort((a, b) => at.get(keyOf.get(a.id)!)! - at.get(keyOf.get(b.id)!)!)
+}
+
+// The user moved the tab of session id to place `to` among the tabs of list:
+// the open tabs take the places they held, in their new order; the places
+// kept for gone ones stay where they were (back soon, a tab goes back there).
+function moveTab(list: SessionInfo[], id: string, to: number) {
+  const placed = inPlace(list)
+  const keyOf = placeKeys(list)
+  const keys = placed.map((s) => keyOf.get(s.id)!)
+  const from = placed.findIndex((s) => s.id === id)
+  if (from < 0 || to < 0 || to >= keys.length || from === to) return
+  keys.splice(to, 0, keys.splice(from, 1)[0])
+  const open = new Set(keys)
+  let i = 0
+  const order = readOrder().map(([k, gone]): [string, number] => (open.has(k) ? [keys[i++], 0] : [k, gone]))
+  local.set(ORDER_KEY, JSON.stringify(order))
 }
 
 // The agents waiting for an answer in these sessions, each counted once
@@ -180,7 +207,7 @@ export function TerminalTabs({ current }: { current: string }) {
   const onInfo = useCallback((id: string, i: TabInfo) => {
     setInfos((all) => {
       const old = all[id]
-      return old && old.status === i.status && old.statusText === i.statusText && old.waiting === i.waiting && old.done === i.done && old.reopening === i.reopening ? all : { ...all, [id]: i }
+      return old && old.status === i.status && old.statusText === i.statusText && old.waiting === i.waiting && old.done === i.done && old.working === i.working && old.reopening === i.reopening ? all : { ...all, [id]: i }
     })
   }, [])
 
@@ -190,6 +217,16 @@ export function TerminalTabs({ current }: { current: string }) {
     const list = sessions ?? []
     return list.some((s) => s.id === current) ? list : [...list, { id: current, host_id: 0, host_name: '', title: '' } as SessionInfo]
   }, [sessions, current])
+
+  // A tab moved by the user: its place is kept, and the bar shows it there now.
+  const sessionsRef = useRef(sessions)
+  sessionsRef.current = sessions
+  const move = useCallback((id: string, to: number) => {
+    const l = sessionsRef.current
+    if (!l) return
+    moveTab(l, id, to)
+    setSessions(inPlace(l))
+  }, [])
 
   const go = useCallback(
     (dir: 1 | -1) => {
@@ -214,6 +251,11 @@ export function TerminalTabs({ current }: { current: string }) {
       let act: (() => void) | null = null
       if (e.key === 'Tab' && e.ctrlKey && !e.metaKey) {
         if (tabs.length >= 2) act = () => go(e.shiftKey ? -1 : 1)
+      } else if (standalone && e.ctrlKey && e.shiftKey && !e.metaKey && (e.key === 'PageUp' || e.key === 'PageDown')) {
+        // (At either end it goes nowhere, and the program does not get it either.)
+        const i = tabs.findIndex((s) => s.id === current && s.host_id !== 0)
+        const to = i + (e.key === 'PageUp' ? -1 : 1)
+        act = () => i >= 0 && to >= 0 && to < tabs.filter((s) => s.host_id !== 0).length && move(current, to)
       } else if (standalone && isMac && e.metaKey && !e.ctrlKey) {
         const digit = /^Digit([1-9])$/.exec(e.code)
         if (isT && !e.shiftKey) act = () => setNewOpen(true)
@@ -233,7 +275,7 @@ export function TerminalTabs({ current }: { current: string }) {
     }
     window.addEventListener('keydown', onKey, true)
     return () => window.removeEventListener('keydown', onKey, true)
-  }, [go, tabs, current])
+  }, [go, move, tabs, current])
 
   // A notification of another session (tapped while this window shows
   // tabs) opens as its tab here, with what its address asks for (?reply=).
@@ -270,7 +312,7 @@ export function TerminalTabs({ current }: { current: string }) {
     load()
   }
 
-  const bar = <TabBar tabs={tabs} current={current} infos={infos} onNew={() => setNewOpen(true)} />
+  const bar = <TabBar tabs={tabs} current={current} infos={infos} onNew={() => setNewOpen(true)} onMove={move} />
   return (
     <>
       {mounted.map((id) => (
@@ -291,18 +333,184 @@ export function TerminalTabs({ current }: { current: string }) {
   )
 }
 
-function TabBar(p: { tabs: SessionInfo[]; current: string; infos: Record<string, TabInfo>; onNew: () => void }) {
+// Dragging a tab to another place. A mouse drags once it moves a few
+// pixels (a click stays a click); a finger holds still a moment first, as
+// moving at once scrolls the bar. The others make room as it passes, the bar
+// scrolls by itself at its ends, and Esc (or the browser taking the touch)
+// leaves the tabs as they were.
+interface Drag {
+  id: string
+  from: number
+  to: number
+  dx: number
+  w: number // the dragged tab's width and the gap after it: what the others move by
+}
+const DRAG_MOUSE_PX = 4
+const DRAG_HOLD_MS = 300
+const DRAG_SLOP_PX = 8 // (a finger that moves more before then is scrolling)
+const DRAG_EDGE_PX = 32
+
+function useTabDrag(nav: React.RefObject<HTMLElement | null>, ids: string[], onMove: (id: string, to: number) => void) {
+  const [drag, setDrag] = useState<Drag | null>(null)
+  const cur = useRef<{
+    id: string
+    from: number
+    pointer: number
+    x0: number // where the pointer went down (client)
+    x: number // where it is
+    on: boolean
+    at?: number // where it went down in the bar's content, once dragging
+    tabs?: { left: number; width: number }[] // the draggable tabs, in the bar's content
+    gap?: number
+    to?: number
+    hold?: number
+    frame?: number
+    stop: () => void
+  } | null>(null)
+  const endedAt = useRef(0)
+
+  const update = () => {
+    const d = cur.current
+    const el = nav.current
+    if (!d?.on || !el || !d.tabs || d.at === undefined) return
+    const box = el.getBoundingClientRect()
+    const me = d.tabs[d.from]
+    const first = d.tabs[0]
+    const last = d.tabs[d.tabs.length - 1]
+    // Drawn within the row; placed by where the pointer is (a tab wider than
+    // the first one, held at the start, goes before it all the same).
+    const by = d.x - box.left + el.scrollLeft - d.at
+    const dx = Math.min(Math.max(by, first.left - me.left), last.left + last.width - me.left - me.width)
+    const mid = me.left + me.width / 2 + by
+    let to = 0
+    d.tabs.forEach((r, j) => j !== d.from && r.left + r.width / 2 < mid && to++)
+    d.to = to
+    setDrag({ id: d.id, from: d.from, to, dx, w: me.width + (d.gap ?? 0) })
+  }
+
+  // The bar scrolls while the pointer is near either end of it.
+  const scrollAtEnds = () => {
+    const d = cur.current
+    const el = nav.current
+    if (!d?.on || !el) return
+    const box = el.getBoundingClientRect()
+    const by = d.x < box.left + DRAG_EDGE_PX ? -8 : d.x > box.right - DRAG_EDGE_PX ? 8 : 0
+    if (by && el.scrollWidth > el.clientWidth) {
+      el.scrollLeft += by
+      update()
+    }
+    d.frame = requestAnimationFrame(scrollAtEnds)
+  }
+
+  const begin = () => {
+    const d = cur.current
+    const el = nav.current
+    if (!d || !el) return
+    const box = el.getBoundingClientRect()
+    const tabs = [...el.querySelectorAll<HTMLElement>('.term-tab[data-place]')].map((t) => {
+      const r = t.getBoundingClientRect()
+      return { left: r.left - box.left + el.scrollLeft, width: r.width }
+    })
+    if (tabs.length < 2 || !tabs[d.from]) return d.stop()
+    d.on = true
+    d.tabs = tabs
+    d.gap = parseFloat(getComputedStyle(el).columnGap) || 0
+    d.at = d.x0 - box.left + el.scrollLeft
+    update()
+    d.frame = requestAnimationFrame(scrollAtEnds)
+  }
+
+  const onPointerDown = (e: React.PointerEvent, id: string, from: number) => {
+    if (e.button !== 0 || cur.current || ids.length < 2) return
+    const mouse = e.pointerType === 'mouse'
+    const pointer = e.pointerId
+    const move = (ev: PointerEvent) => {
+      const d = cur.current
+      if (!d || ev.pointerId !== pointer) return
+      d.x = ev.clientX
+      if (d.on) update()
+      else if (mouse && Math.abs(d.x - d.x0) > DRAG_MOUSE_PX) begin()
+      else if (!mouse && Math.abs(d.x - d.x0) > DRAG_SLOP_PX) d.stop()
+    }
+    const up = (ev: PointerEvent) => {
+      const d = cur.current
+      if (!d || ev.pointerId !== pointer) return
+      if (d.on) {
+        endedAt.current = performance.now()
+        if (d.to !== undefined && d.to !== d.from) onMove(d.id, d.to)
+      }
+      d.stop()
+    }
+    const cancel = (ev: PointerEvent) => ev.pointerId === pointer && cur.current?.stop()
+    const key = (ev: KeyboardEvent) => {
+      if (ev.key !== 'Escape' || !cur.current?.on) return
+      ev.preventDefault()
+      ev.stopPropagation()
+      endedAt.current = performance.now()
+      cur.current.stop()
+    }
+    // (A finger held still: not scrolling, nor asking for the page's menu.)
+    const touchMove = (ev: TouchEvent) => cur.current?.on && ev.cancelable && ev.preventDefault()
+    const menu = (ev: Event) => ev.preventDefault()
+    const stop = () => {
+      const d = cur.current
+      if (d?.hold) clearTimeout(d.hold)
+      if (d?.frame) cancelAnimationFrame(d.frame)
+      cur.current = null
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', up)
+      window.removeEventListener('pointercancel', cancel)
+      window.removeEventListener('keydown', key, true)
+      window.removeEventListener('touchmove', touchMove)
+      window.removeEventListener('contextmenu', menu, true)
+      setDrag(null)
+    }
+    cur.current = { id, from, pointer, x0: e.clientX, x: e.clientX, on: false, stop }
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', up)
+    window.addEventListener('pointercancel', cancel)
+    window.addEventListener('keydown', key, true)
+    if (!mouse) {
+      window.addEventListener('touchmove', touchMove, { passive: false })
+      window.addEventListener('contextmenu', menu, true)
+      cur.current.hold = window.setTimeout(begin, DRAG_HOLD_MS)
+    }
+  }
+
+  // The tabs changed under a drag (one opened or ended): it is let go.
+  const idsKey = ids.join()
+  useEffect(() => () => cur.current?.stop(), [idsKey])
+
+  // Where tab j of the draggable ones is drawn meanwhile.
+  const offset = (j: number): number => {
+    if (!drag) return 0
+    if (j === drag.from) return drag.dx
+    if (drag.from < drag.to && j > drag.from && j <= drag.to) return -drag.w
+    if (drag.to < drag.from && j >= drag.to && j < drag.from) return drag.w
+    return 0
+  }
+  // A click that ends a drag is not one.
+  const clicked = () => performance.now() - endedAt.current > 400
+  return { drag, onPointerDown, offset, clicked }
+}
+
+function TabBar(p: { tabs: SessionInfo[]; current: string; infos: Record<string, TabInfo>; onNew: () => void; onMove: (id: string, to: number) => void }) {
   const ref = useRef<HTMLElement>(null)
-  // The current tab is scrolled into view when it changes.
+  // The current tab is scrolled into view when it changes, or the tabs do
+  // (not when they only change places: a tab dragged elsewhere stays in view).
+  const members = p.tabs.map((s) => s.id).sort().join()
   useEffect(() => {
     ref.current?.querySelector<HTMLElement>('.term-tab[aria-current="page"]')?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
-  }, [p.current, p.tabs])
+  }, [p.current, members])
   const which = (s: SessionInfo) => sessionWhich(s, p.tabs)
   // Agents waiting in all tabs' sessions: the way to the agents page says so.
   // (Each agent once: two tabs of one herdr session list its agents twice.)
   const waitingAll = waitingAgents(p.tabs)
+  // (The tab of a session just opened, not in the list yet, stays last.)
+  const movable = p.tabs.filter((s) => s.host_id !== 0).map((s) => s.id)
+  const { drag, onPointerDown, offset, clicked } = useTabDrag(ref, movable, p.onMove)
   return (
-    <nav className="term-tabs" aria-label={t('tabs.label')} ref={ref}>
+    <nav className={'term-tabs' + (drag ? ' dragging' : '')} aria-label={t('tabs.label')} ref={ref}>
       <button
         type="button"
         className="icon-btn term-tab-agents"
@@ -318,21 +526,28 @@ function TabBar(p: { tabs: SessionInfo[]; current: string; infos: Record<string,
         const name = s.host_name ? s.host_name + ' · ' + which(s) : t('term.connecting')
         const quiet = !info || info.status === 's-open'
         // Agents: as the tab's page tells (mounted), else as the session list last said.
-        const count = (st: string) => (s.meta?.t === 'herdr' ? s.meta.workspaces.reduce((n, w) => n + w.agents.filter((a) => a.status === st).length, 0) : 0)
+        const count = (st: string) => (s.meta?.t === 'herdr' && !s.meta.lost ? s.meta.workspaces.reduce((n, w) => n + w.agents.filter((a) => a.status === st).length, 0) : 0)
         const waiting = info ? info.waiting : count('blocked')
         const done = info ? info.done : count('done')
-        const agents = waiting ? t('herdr.waiting', { n: waiting }) : done ? t('herdr.done', { n: done }) : ''
+        const working = info ? info.working : count('working')
+        const agents = [waiting && t('herdr.waiting', { n: waiting }), working && t('herdr.working', { n: working }), !waiting && done && t('herdr.done', { n: done })].filter(Boolean).join(' · ')
         const tip = [s.host_name, s.host_name && which(s), s.title, info?.statusText, agents].filter(Boolean).join(' · ')
+        const j = movable.indexOf(s.id)
+        const dx = j < 0 ? 0 : offset(j)
         return (
           <button
             key={s.id}
             type="button"
-            className="term-tab"
+            className={'term-tab' + (drag?.id === s.id ? ' held' : '')}
+            data-place={j < 0 ? undefined : j}
+            style={dx ? { transform: `translateX(${dx}px)` } : undefined}
             aria-current={s.id === p.current ? 'page' : undefined}
             title={tip}
-            onClick={() => s.id !== p.current && navigate('/t/' + s.id, true)}
+            onPointerDown={j < 0 ? undefined : (e) => onPointerDown(e, s.id, j)}
+            onClick={() => clicked() && s.id !== p.current && navigate('/t/' + s.id, true)}
           >
-            {!quiet && <span className={'term-tab-dot ' + info.status} aria-hidden="true" />}
+            {/* (A connection's trouble before agents at work: it is the one to see to.) */}
+            {!quiet ? <span className={'term-tab-dot ' + info.status} aria-hidden="true" /> : working > 0 && <span className="term-tab-working" role="img" aria-label={t('herdr.working', { n: working })} />}
             <span className="term-tab-name">{name}</span>
             {s.title && <span className="term-tab-title">{s.title}</span>}
             {waiting > 0 && (
@@ -358,8 +573,6 @@ function TabBar(p: { tabs: SessionInfo[]; current: string; infos: Record<string,
   )
 }
 
-// "+": a host to open something on; what to open is then asked as from the
-// host list (the session picker).
 function NewTabDialog(p: { busyHost: number | null; onPick: (h: Host) => void; onClose: () => void }) {
   const [hosts, setHosts] = useState<Host[] | null>(null)
   const [failed, setFailed] = useState(false)
