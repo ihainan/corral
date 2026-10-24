@@ -2,6 +2,7 @@ package convo
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -358,19 +359,83 @@ func TestClaudeQueue(t *testing.T) {
 	if last := all[len(all)-1]; last.Role != RoleUser || !last.Mid || all[0].Mid {
 		t.Fatalf("mid: %+v", all)
 	}
-	// The turn ends: the rest go one by one, in order (the notice first).
+	// The turn ends: what waits is dequeued (which, the log does not say) and
+	// arrives as the next turn: then it waits no more.
 	c.Feed(lines(`{"type":"queue-operation","operation":"dequeue"}`))
 	if q := c.Queued(); len(q) != 1 {
-		t.Fatalf("the notice went first: %+v", q)
+		t.Fatalf("a dequeue alone says nothing: %+v", q)
 	}
-	c.Feed(lines(`{"type":"queue-operation","operation":"dequeue"}`, `{"type":"queue-operation","operation":"dequeue"}`))
+	c.Feed(lines(`{"type":"user","uuid":"u3","message":{"content":"and  commit"}}`))
 	if q := c.Queued(); len(q) != 0 {
-		t.Fatalf("all gone: %+v", q)
+		t.Fatalf("arrived: %+v", q)
+	}
+	// Put back in the draft (Esc): the latest first.
+	c.Feed(lines(
+		`{"type":"queue-operation","operation":"enqueue","content":"one"}`,
+		`{"type":"queue-operation","operation":"enqueue","content":"two"}`,
+		`{"type":"queue-operation","operation":"popOne"}`,
+	))
+	if q := c.Queued(); len(q) != 1 || q[0].Text != "one" {
+		t.Fatalf("popOne: %+v", q)
+	}
+	c.Feed(lines(`{"type":"queue-operation","operation":"popAll"}`))
+	if q := c.Queued(); len(q) != 0 {
+		t.Fatalf("popAll: %+v", q)
+	}
+	// The same text twice: one arrives, one still waits.
+	c.Feed(lines(
+		`{"type":"queue-operation","operation":"enqueue","content":"again"}`,
+		`{"type":"queue-operation","operation":"enqueue","content":"again"}`,
+		`{"type":"user","uuid":"u4","message":{"content":"again"}}`,
+	))
+	if q := c.Queued(); len(q) != 1 {
+		t.Fatalf("twice: %+v", q)
+	}
+	c.ClearQueue()
+	// More than are kept: the latest stay.
+	for i := 0; i < maxQueue+3; i++ {
+		c.Feed(lines(fmt.Sprintf(`{"type":"queue-operation","operation":"enqueue","content":"m%d"}`, i)))
+	}
+	if q := c.Queued(); len(q) != maxQueue || q[0].Text != "m3" {
+		t.Fatalf("bounded: %d %+v", len(q), q[0])
 	}
 	// Claude Code's word that it was stopped is a note.
 	c.Feed(lines(`{"type":"user","uuid":"x","message":{"content":[{"type":"text","text":"[Request interrupted by user]"}]}}`))
 	all = c.Since(0)
 	if last := all[len(all)-1]; last.Role != RoleNote || last.Parts[0].Text != "[Request interrupted by user]" {
 		t.Fatalf("interrupted: %+v", last)
+	}
+}
+
+func TestClaudePatch(t *testing.T) {
+	c := NewClaude()
+	long := strings.Repeat("x", 2000)
+	c.Feed(lines(
+		`{"type":"assistant","uuid":"a1","message":{"content":[{"type":"tool_use","id":"e1","name":"Edit","input":{"file_path":"/p/a.py","old_string":"300","new_string":"600"}}]}}`,
+		`{"type":"user","uuid":"r1","message":{"content":[{"type":"tool_result","tool_use_id":"e1","content":"The file /p/a.py has been updated successfully."}]},"toolUseResult":{"structuredPatch":[{"oldStart":7,"oldLines":3,"newStart":7,"newLines":3,"lines":[" keep","-WINDOW = 300","+WINDOW = 600","\\ No newline at end of file"]}]}}`,
+		`{"type":"assistant","uuid":"a2","message":{"content":[{"type":"tool_use","id":"w1","name":"Write","input":{"file_path":"/p/new.py","content":"a\nb\n"}}]}}`,
+		`{"type":"user","uuid":"r2","message":{"content":[{"type":"tool_result","tool_use_id":"w1","content":"File created"}]},"toolUseResult":{"type":"create","content":"a\nb\n","structuredPatch":[]}}`,
+		`{"type":"assistant","uuid":"a3","message":{"content":[{"type":"tool_use","id":"e2","name":"Edit","input":{"file_path":"/p/b.py","old_string":"a","new_string":"b"}}]}}`,
+		`{"type":"user","uuid":"r3","message":{"content":[{"type":"tool_result","tool_use_id":"e2","content":"ok"}]},"toolUseResult":{"structuredPatch":[{"oldStart":1,"newStart":1,"lines":[`+strings.Repeat(`"+`+long+`",`, 20)+`"+end"]}]}}`,
+	))
+	got := c.Since(0)
+	e := got[0].Parts[0].Tool
+	if len(e.Patch) != 1 || e.Patch[0].OldStart != 7 || len(e.Patch[0].Lines) != 3 || e.Patch[0].Lines[2] != "+WINDOW = 600" || e.Old != "" || e.New != "" || e.Add != 1 || e.Del != 1 {
+		t.Fatalf("edit: %+v", e)
+	}
+	w := got[1].Parts[0].Tool
+	if w.Patch != nil || w.New != "a\nb\n" || w.Add != 2 {
+		t.Fatalf("created: %+v", w)
+	}
+	b := got[2].Parts[0].Tool
+	size := 0
+	for _, l := range b.Patch[0].Lines {
+		size += len(l)
+		if len(l) > maxPatchLine {
+			t.Fatalf("a line kept whole: %d", len(l))
+		}
+	}
+	if !b.PatchCut || size > maxPatch {
+		t.Fatalf("bounded: cut %v size %d", b.PatchCut, size)
 	}
 }

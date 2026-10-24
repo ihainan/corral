@@ -27,8 +27,11 @@ import (
 //   - "attachment" rows of type queued_command are messages typed while the
 //     agent worked, which it took in during its turn (since 2.1.291 these
 //     are not written as user rows). "queue-operation" rows say what waits
-//     meanwhile: enqueue (with the text), dequeue (the first goes, to be
-//     the next turn's), remove (taken in, with its text).
+//     meanwhile: enqueue (with the text); the rest say less than what went
+//     (dequeue names nothing, and takes what Claude Code puts first, which
+//     is not always what came first), so a message stops waiting when it is
+//     seen arrive (a person's row with its text), when removed by its text,
+//     or put back in the draft (popOne: the latest; popAll, clear).
 //   - isSidechain rows are a subagent's own conversation: not shown.
 //   - "ai-title" rows hold the title Claude Code gave the session (written
 //     again and again), "custom-title" rows the one the person gave it.
@@ -63,8 +66,7 @@ type toolRef struct {
 }
 
 type queuedItem struct {
-	raw   string // as the log wrote it (a remove names it so)
-	shown bool   // the person's (a background task's notice waits there too)
+	raw string // as the log wrote it (a remove names it so)
 	Queued
 }
 
@@ -98,12 +100,14 @@ func (c *Claude) Meta() Meta { return c.meta }
 func (c *Claude) Queued() []Queued {
 	var out []Queued
 	for _, q := range c.queue {
-		if q.shown {
-			out = append(out, q.Queued)
-		}
+		out = append(out, q.Queued)
 	}
 	return out
 }
+
+// ClearQueue forgets what waits (another process now runs the session: what
+// was queued to the one before went with it).
+func (c *Claude) ClearQueue() { c.queue = nil }
 
 // Tasks is the agent's task list as the log read has it (a task created
 // before the part read is not known). Nil when there is none.
@@ -309,6 +313,9 @@ func (c *Claude) user(r *claudeRow) {
 			role = RoleNote
 		}
 		c.add(r, role, []Part{textPart(KindText, text)})
+		if role == RoleUser && len(c.queue) > 0 {
+			c.arrived(text)
+		}
 		return
 	}
 	var blocks []claudeBlock
@@ -355,27 +362,42 @@ func (c *Claude) queueOp(r *claudeRow) {
 	_ = json.Unmarshal(r.Content, &s)
 	switch r.Operation {
 	case "enqueue":
-		role, text := classifyUserText(s)
-		q := queuedItem{raw: s, shown: role == RoleUser}
-		q.Text, _ = cut(clean(text), maxText)
-		q.Time = clip(r.Timestamp, 64)
-		c.queue = append(c.queue, q)
-		if n := len(c.queue) - maxQueue; n > 0 {
-			c.queue = append([]queuedItem(nil), c.queue[n:]...)
-		}
-	case "dequeue":
-		if len(c.queue) > 0 {
-			c.queue = c.queue[1:]
+		// (Only the person's: a background task's notice waits there too.)
+		if role, text := classifyUserText(s); role == RoleUser {
+			q := queuedItem{raw: s}
+			q.Text, _ = cut(clean(text), maxText)
+			q.Time = clip(r.Timestamp, 64)
+			c.queue = append(c.queue, q)
+			if n := len(c.queue) - maxQueue; n > 0 {
+				c.queue = append([]queuedItem(nil), c.queue[n:]...)
+			}
 		}
 	case "remove":
 		for i, q := range c.queue {
-			if q.raw == s || s == "" {
+			if q.raw == s {
 				c.queue = append(c.queue[:i:i], c.queue[i+1:]...)
 				break
 			}
 		}
+	case "popOne":
+		if n := len(c.queue); n > 0 {
+			c.queue = c.queue[:n-1]
+		}
 	case "popAll", "clear":
 		c.queue = nil
+	}
+}
+
+// arrived: the person's message with this text came in (as a turn, or taken
+// in during one): it waits no more.
+func (c *Claude) arrived(text string) {
+	n := func(s string) string { return strings.Join(strings.Fields(s), " ") }
+	t := n(text)
+	for i, q := range c.queue {
+		if n(q.Text) == t {
+			c.queue = append(c.queue[:i:i], c.queue[i+1:]...)
+			return
+		}
 	}
 }
 
@@ -402,6 +424,7 @@ func (c *Claude) queued(r *claudeRow) {
 				c.add(r, role, []Part{textPart(KindText, text)})
 				if role == RoleUser && len(c.entries) > n {
 					c.mid()
+					c.arrived(text)
 				}
 			}
 		}
@@ -489,6 +512,11 @@ func (c *Claude) result(b claudeBlock, account json.RawMessage) {
 	text := resultText(b.Content)
 	if !b.IsError {
 		ref.t.Add, ref.t.Del = madeLines(ref.t.Name, account, ref.t.Add, ref.t.Del)
+		if ref.t.Name == "Edit" || ref.t.Name == "MultiEdit" || ref.t.Name == "Write" {
+			if h, cut := patchOf(account); h != nil {
+				ref.t.Patch, ref.t.PatchCut, ref.t.Old, ref.t.New = h, cut, "", ""
+			}
+		}
 		if ref.task != nil {
 			ref.task(c)
 		} else if ref.t.Name == "TaskCreate" {
@@ -599,6 +627,49 @@ func madeLines(name string, account json.RawMessage, add, del int) (int, int) {
 		return add, del
 	}
 	return add, del
+}
+
+// patchOf is the edit Claude Code reports having made (toolUseResult's
+// structuredPatch), within maxPatch; nil when it reports none (a file it
+// created has its content instead, which New already holds). short: some
+// of it was left out.
+func patchOf(account json.RawMessage) (hunks []Hunk, short bool) {
+	if len(account) == 0 {
+		return nil, false
+	}
+	var a struct {
+		Patch []struct {
+			OldStart int      `json:"oldStart"`
+			NewStart int      `json:"newStart"`
+			Lines    []string `json:"lines"`
+		} `json:"structuredPatch"`
+	}
+	if json.Unmarshal(account, &a) != nil || len(a.Patch) == 0 {
+		return nil, false
+	}
+	size := 0
+	for _, h := range a.Patch {
+		out := Hunk{OldStart: max(h.OldStart, 0), NewStart: max(h.NewStart, 0)}
+		for _, l := range h.Lines {
+			if l == "" || (l[0] != ' ' && l[0] != '-' && l[0] != '+') {
+				continue // ("\\ No newline at end of file", and the like)
+			}
+			l, c := cut(clean(l), maxPatchLine)
+			if size+len(l) > maxPatch {
+				if len(out.Lines) > 0 {
+					hunks = append(hunks, out)
+				}
+				return hunks, true
+			}
+			size += len(l)
+			out.Lines = append(out.Lines, l)
+			short = short || c
+		}
+		if len(out.Lines) > 0 {
+			hunks = append(hunks, out)
+		}
+	}
+	return hunks, short
 }
 
 // The task list. TodoWrite gives all of it; TaskCreate adds one (its id is

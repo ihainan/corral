@@ -13,7 +13,7 @@ func convoRec(fields ...string) string { return strings.Join(fields, "\n") + "\x
 
 func TestParseConvoLocate(t *testing.T) {
 	out := "tmux=%3 4242\x00" +
-		convoRec("pid=100", "start=500", "procstart=500", "sid="+sidA, "log=/home/u/.claude/projects/-w/"+sidA+".jsonl",
+		convoRec("pid=100", "start=500", "fg=1", "procstart=500", "sid="+sidA, "log=/home/u/.claude/projects/-w/"+sidA+".jsonl",
 			"HERDR_PANE_ID=w7:p1", "HERDR_SOCKET_PATH=/home/u/.config/herdr/herdr.sock") +
 		// The pid was reused: the session file is a dead process's.
 		convoRec("pid=101", "start=900", "procstart=600", "sid="+sidB, "log=") +
@@ -26,7 +26,7 @@ func TestParseConvoLocate(t *testing.T) {
 	if active != "%3" || serverPID != "4242" || noProc {
 		t.Fatalf("tmux %q %q noproc %v", active, serverPID, noProc)
 	}
-	if len(procs) != 3 {
+	if len(procs) != 3 || !procs[0].fg || procs[1].fg {
 		t.Fatalf("procs: %+v", procs)
 	}
 	if p := procs[0]; p.pid != 100 || p.sid != sidA || p.herdrPane != "w7:p1" || !strings.HasSuffix(p.log, sidA+".jsonl") {

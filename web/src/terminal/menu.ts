@@ -74,14 +74,17 @@ export function question(text: string): string {
 }
 
 // What a permission prompt asks to be allowed, as the screen shows it: the
-// lines between the rule Claude Code draws over the prompt and its question
-// (its head, "Bash command" or "Edit file", first), without the dashed rules
-// inside it and the hints. Only the screen says what is being approved: the
-// agent's log may be behind it, or of another call. Null when there is no
-// menu, or no rule over its question near enough.
+// lines between the rule Claude Code draws over the prompt and its question,
+// its head ("Bash command", "Edit file") first. Only the screen says what is
+// being approved (the agent's log may be behind it, or of another call), and
+// it is kept as it is: the dashed rules too (dimmed when shown), with only
+// the hint over the content ("Tip: ...", before the first dashed rule) and
+// the line under it ("This command requires approval", after the last) left
+// out. Null when there is no menu, no rule over its question near enough, or
+// what follows the rule is no head: then the screen itself is to be shown.
 const solidRule = /^[\s─━]*[─━]{8,}[\s─━]*$/
-const dashedRule = /^[\s╌┄┈]*[╌┄┈]{8,}[\s╌┄┈]*$/
-const promptNoise = /^\s*(?:Tip:|This command requires approval\s*$)/
+export const dashedRule = /^[\s╌┄┈]*[╌┄┈]{8,}[\s╌┄┈]*$/
+const promptHead = /^[A-Z][A-Za-z]*(?: [A-Za-z]+){0,3}$/ // ("Bash command", "Edit file", "Fetch")
 export function promptBlock(text: string): { head: string; lines: string[] } | null {
   const lines = text.split('\n')
   const { top } = menuAt(lines)
@@ -97,11 +100,16 @@ export function promptBlock(text: string): { head: string; lines: string[] } | n
     }
   }
   if (start < 0) return null
-  let body = lines.slice(start, q).filter((l) => !dashedRule.test(l) && !promptNoise.test(l)).map((l) => l.replace(/\s+$/, ''))
+  let body = lines.slice(start, q).map((l) => l.replace(/\s+$/, ''))
   while (body.length && !body[0].trim()) body.shift()
   while (body.length && !body[body.length - 1].trim()) body.pop()
-  if (body.length < 2) return null
-  const indent = Math.min(...body.filter((l) => l.trim()).map((l) => /^ */.exec(l)![0].length))
-  body = body.map((l) => l.slice(indent))
+  if (body.length < 2 || !promptHead.test(body[0].trim())) return null
+  const firstRule = body.findIndex((l) => dashedRule.test(l))
+  let lastRule = -1
+  body.forEach((l, i) => dashedRule.test(l) && (lastRule = i))
+  body = body.filter((l, i) => !(firstRule > 0 && i < firstRule && /^\s*Tip:/.test(l)) && !(lastRule >= 0 && i > lastRule && /^\s*This command requires approval\s*$/.test(l)))
+  const words = body.filter((l) => l.trim() && !dashedRule.test(l))
+  const indent = Math.min(...words.map((l) => /^ */.exec(l)![0].length))
+  body = body.map((l) => (dashedRule.test(l) ? l.trim() : l.slice(indent)))
   return { head: body[0].trim(), lines: body.slice(1) }
 }

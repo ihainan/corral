@@ -70,6 +70,11 @@ type Tool struct {
 	// Claude Code reported of the edit made, else from its input.
 	Add int `json:"add,omitempty"`
 	Del int `json:"del,omitempty"`
+	// Patch is the edit as Claude Code reported making it: its hunks, with
+	// line numbers and the lines around (then Old and New are dropped).
+	// PatchCut: there was more of it than is kept.
+	Patch    []Hunk `json:"patch,omitempty"`
+	PatchCut bool   `json:"patch_cut,omitempty"`
 
 	Done        bool   `json:"done,omitempty"`
 	Error       bool   `json:"error,omitempty"`
@@ -78,17 +83,28 @@ type Tool struct {
 	Truncated   bool   `json:"truncated,omitempty"`    // (Result is the start of it)
 }
 
+// Hunk is a run of an edit's lines: each begins with " " (kept), "-"
+// (removed) or "+" (added); OldStart and NewStart are the first line's
+// numbers before and after.
+type Hunk struct {
+	OldStart int      `json:"old_start"`
+	NewStart int      `json:"new_start"`
+	Lines    []string `json:"lines"`
+}
+
 // Bounds on what one entry keeps.
 const (
-	maxText   = 64 << 10 // a text or thinking part
-	maxDetail = 4 << 10  // a tool's detail, old and new text
-	maxResult = 6 << 10  // a tool's result
-	maxParts  = 64       // parts of one entry
-	maxID     = 128
-	maxTasks  = 50  // tasks of a task list
-	maxTitle  = 300 // the session's title, a task's subject
-	maxMeta   = 120 // a model's, a mode's, a branch's name
-	maxQueue  = 20  // messages waiting to be taken in
+	maxText      = 64 << 10 // a text or thinking part
+	maxDetail    = 4 << 10  // a tool's detail, old and new text
+	maxResult    = 6 << 10  // a tool's result
+	maxParts     = 64       // parts of one entry
+	maxID        = 128
+	maxTasks     = 50       // tasks of a task list
+	maxTitle     = 300      // the session's title, a task's subject
+	maxMeta      = 120      // a model's, a mode's, a branch's name
+	maxQueue     = 20       // messages waiting to be taken in
+	maxPatch     = 12 << 10 // an edit's patch, all its lines
+	maxPatchLine = 400      // one line of it
 )
 
 // Meta is what a session runs with, as its log last said it: each field

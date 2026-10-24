@@ -1,11 +1,11 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { ArrowDown, ChevronDown, ChevronRight, GitBranch, PanelLeft } from 'lucide-react'
+import { ArrowDown, ChevronDown, ChevronRight, GitBranch, PanelLeft, X } from 'lucide-react'
 import { t, getLang, type I18nKey } from '../i18n'
 import { copyText, isCoarse } from '../components/ui'
 import { local } from '../storage'
 import { Markdown } from './markdown'
 import { Code } from './Code'
-import type { Convo, ConvoEntry, ConvoMeta, ConvoPart, ConvoQueued, ConvoTask, ConvoTool } from './conversation'
+import type { Convo, ConvoEntry, ConvoHunk, ConvoMeta, ConvoPart, ConvoQueued, ConvoTask, ConvoTool } from './conversation'
 
 // The conversation view: the agent's log as turns, over the terminal (which
 // stays mounted under it). Each turn is what the person wrote, then one line
@@ -27,10 +27,18 @@ type Item =
   | { kind: 'work'; key: string; steps: Step[]; from?: string; to?: string; live: boolean; moving: boolean; busy?: ConvoPart }
   | { kind: 'answer'; key: string; text: string; truncated?: boolean; ts?: string; work?: string; edits: Edits | null }
 
+// What a turn changed: its files in the order it first changed them, each
+// with its edits.
 interface Edits {
-  files: number
+  files: FileEdits[]
   add: number
   del: number
+}
+interface FileEdits {
+  path: string
+  add: number
+  del: number
+  tools: ConvoTool[]
 }
 
 // When each part was written (its entry's time).
@@ -126,18 +134,26 @@ const isTaskCall = (s: Step) => !isNote(s) && !!s.tool && verbOf(s.tool.name) ==
 const isText = (s: Step) => !isNote(s) && s.kind === 'text'
 
 function edits(steps: Step[]): Edits | null {
-  const files = new Set<string>()
+  const files = new Map<string, FileEdits>()
   let add = 0
   let del = 0
   for (const s of steps) {
     const tl = !isNote(s) ? s.tool : undefined
     if (!tl || tl.error || category(tl.name) !== 'edit') continue
-    files.add(tl.detail ?? '')
+    const path = tl.detail ?? ''
+    let f = files.get(path)
+    if (!f) files.set(path, (f = { path, add: 0, del: 0, tools: [] }))
+    f.add += tl.add ?? 0
+    f.del += tl.del ?? 0
+    f.tools.push(tl)
     add += tl.add ?? 0
     del += tl.del ?? 0
   }
-  return files.size ? { files: files.size, add, del } : null
+  return files.size ? { files: [...files.values()], add, del } : null
 }
+
+const sameEdits = (a: Edits | null, b: Edits | null) =>
+  a === b || (!!a && !!b && a.add === b.add && a.del === b.del && a.files.length === b.files.length && a.files.every((f, i) => f.path === b.files[i].path && f.tools.length === b.files[i].tools.length && f.tools.every((t, j) => t === b.files[i].tools[j])))
 
 type Category = 'cmd' | 'read' | 'edit' | 'search' | 'web' | 'agent' | 'other'
 
@@ -324,13 +340,14 @@ export function ConversationView({
     const keys = new Set(list.flatMap((it) => (it.kind === 'work' ? [it.key] : [])))
     setOpened((o) => (Object.keys(o).every((k) => keys.has(k)) ? o : Object.fromEntries(Object.entries(o).filter(([k]) => keys.has(k)))))
   }, [list])
-  const show = useCallback(
-    (key: string) => {
-      toggle(key, true)
-      requestAnimationFrame(() => box.current?.querySelector(`[data-work="${key}"]`)?.scrollIntoView({ block: 'start', behavior: 'smooth' }))
-    },
-    [toggle],
-  )
+  // The changes of a turn (by its answer's key), beside the thread.
+  const [changes, setChanges] = useState<{ key: string; path?: string } | null>(null)
+  const show = useCallback((key: string, path?: string) => setChanges({ key, path }), [])
+  const unshow = useCallback(() => setChanges(null), [])
+  const shownEdits = changes ? (list.find((it) => it.kind === 'answer' && it.key === changes.key) as Extract<Item, { kind: 'answer' }> | undefined)?.edits : null
+  useEffect(() => {
+    if (changes && !shownEdits) setChanges(null) // (the turn is no longer kept, or another conversation shows)
+  }, [changes, shownEdits])
 
   // While it works, look again now and then whether nothing came for long:
   // counted from the last change, the start of this work, or coming back to
@@ -512,7 +529,7 @@ export function ConversationView({
       <div className="convo-dock">
         {convo.status === 'ready' && convo.tasks && <Tasks tasks={convo.tasks} fold={!!ask} />}
         {convo.status === 'ready' && ask && <div className="convo-dock-ask">{ask}</div>}
-        {convo.status === 'ready' && working && convo.queued && <Queue items={convo.queued} onSendNow={onSendNow} said={sendNow} />}
+        {convo.status === 'ready' && (working || waits) && convo.queued && <Queue items={convo.queued} onSendNow={working ? onSendNow : undefined} said={sendNow} />}
         {waits && !ask && convo.status === 'ready' && (
           // (Where it cannot be answered here: in its terminal.)
           <div className="convo-waiting" role="status">
@@ -524,6 +541,7 @@ export function ConversationView({
         {convo.status === 'ready' && convo.meta && <Runs meta={convo.meta} />}
       </div>
       </div>
+      {changes && shownEdits && <ChangesPanel key={changes.key} edits={shownEdits} focus={changes.path} onClose={unshow} />}
       {picking && side && <Picker rows={rows} onClose={unpick} />}
     </div>
   )
@@ -809,7 +827,7 @@ function Tasks({ tasks, fold }: { tasks: ConvoTask[]; fold?: boolean }) {
 // One item of the list. Memoised: a poll that changed one entry renders
 // that one (the others keep their objects, see conversation.ts).
 const ListItem = memo(
-  function ListItem({ it, copy, open, onToggle, onShow }: { it: Item; copy: (s: string) => void; open: boolean; onToggle: (key: string, open: boolean) => void; onShow: (key: string) => void }) {
+  function ListItem({ it, copy, open, onToggle, onShow }: { it: Item; copy: (s: string) => void; open: boolean; onToggle: (key: string, open: boolean) => void; onShow: (key: string, path?: string) => void }) {
     switch (it.kind) {
       case 'user':
         return <UserTurn e={it.e} onCopy={copy} />
@@ -838,7 +856,7 @@ function sameItem(a: Item, b: Item): boolean {
   switch (a.kind) {
     case 'answer': {
       const o = b as typeof a
-      return a.text === o.text && a.truncated === o.truncated && a.ts === o.ts && a.work === o.work && JSON.stringify(a.edits) === JSON.stringify(o.edits)
+      return a.text === o.text && a.truncated === o.truncated && a.ts === o.ts && a.work === o.work && sameEdits(a.edits, o.edits)
     }
     case 'work': {
       const o = b as typeof a
@@ -895,7 +913,9 @@ function UserTurn({ e, onCopy }: { e: ConvoEntry; onCopy: (s: string) => void })
 }
 
 // The agent's answer: its text, what the turn changed, copy and when.
-function Answer({ it, onCopy, onShow }: { it: Extract<Item, { kind: 'answer' }>; onCopy: (s: string) => void; onShow: (key: string) => void }) {
+const CARD_FILES = 6 // files listed on a turn's card; the rest in the panel
+
+function Answer({ it, onCopy, onShow }: { it: Extract<Item, { kind: 'answer' }>; onCopy: (s: string) => void; onShow: (key: string, path?: string) => void }) {
   return (
     <div className="convo-answer">
       <div className="convo-md">
@@ -904,13 +924,25 @@ function Answer({ it, onCopy, onShow }: { it: Extract<Item, { kind: 'answer' }>;
       </div>
       {it.edits && (
         <div className="convo-changes">
-          <span>
-            {t(it.edits.files === 1 ? 'convo.changes1' : 'convo.changes', { n: it.edits.files })}{' '}
-            <LineCounts add={it.edits.add} del={it.edits.del} />
-          </span>
-          {it.work && (
-            <button type="button" className="btn btn-ghost convo-changes-see" onClick={() => onShow(it.work!)}>
+          <div className="convo-changes-head">
+            <span>
+              {t(it.edits.files.length === 1 ? 'convo.changes1' : 'convo.changes', { n: it.edits.files.length })}{' '}
+              <LineCounts add={it.edits.add} del={it.edits.del} />
+            </span>
+            <button type="button" className="btn btn-ghost convo-changes-see" onClick={() => onShow(it.key)}>
               {t('convo.seeChanges')}
+            </button>
+          </div>
+          {it.edits.files.slice(0, CARD_FILES).map((f) => (
+            <button key={f.path} type="button" className="convo-changes-file" onClick={() => onShow(it.key, f.path)} title={f.path}>
+              <span className="convo-changes-path">{shortPath(f.path)}</span>
+              <LineCounts add={f.add} del={f.del} />
+              <ChevronRight size={14} aria-hidden="true" />
+            </button>
+          ))}
+          {it.edits.files.length > CARD_FILES && (
+            <button type="button" className="convo-changes-file convo-changes-more" onClick={() => onShow(it.key)}>
+              {t('convo.moreFiles', { n: it.edits.files.length - CARD_FILES })}
             </button>
           )}
         </div>
@@ -1050,7 +1082,7 @@ function ToolRow({ tool, onCopy, live }: { tool: ConvoTool; onCopy: (s: string) 
   const v = verbOf(tool.name)
   const obj = object(tool)
   const cat = category(tool.name)
-  const isEdit = tool.old !== undefined || tool.new !== undefined
+  const isEdit = !!tool.patch || tool.old !== undefined || tool.new !== undefined
   const code = exitCode(tool)
   // What the line does not show of what it acted on: a command of more
   // lines or longer than a line holds (it shows the first), a subagent's
@@ -1090,7 +1122,7 @@ function ToolRow({ tool, onCopy, live }: { tool: ConvoTool; onCopy: (s: string) 
               <button type="button" className="md-code-copy" onClick={() => onCopy(d)}>{t('common.copy')}</button>
             </div>
           )}
-          {isEdit && <Diff old={tool.old ?? ''} new={tool.new ?? ''} />}
+          {tool.patch ? <Hunks hunks={tool.patch} cut={tool.patch_cut} /> : isEdit && <Diff old={tool.old ?? ''} new={tool.new ?? ''} />}
           {!tool.done ? (
             <div className="convo-result-head">{t('convo.running')}</div>
           ) : result ? (
@@ -1110,6 +1142,105 @@ function ToolRow({ tool, onCopy, live }: { tool: ConvoTool; onCopy: (s: string) 
         </div>
       )}
     </div>
+  )
+}
+
+// An edit as Claude Code reported making it: its hunks with the lines'
+// numbers (after the edit; before it, for a line removed), the lines left
+// out between them said.
+function Hunks({ hunks, cut }: { hunks: ConvoHunk[]; cut?: boolean }) {
+  const rows: ReactNode[] = []
+  let end = 0 // (the new numbering just past the hunk before)
+  hunks.forEach((h, hi) => {
+    if (hi > 0 && h.new_start > end) rows.push(<div key={'g' + hi} className="convo-hunk-gap">{t('convo.unchanged', { n: h.new_start - end })}</div>)
+    let o = h.old_start
+    let n = h.new_start
+    h.lines.forEach((l, li) => {
+      const k = l[0]
+      const no = k === '-' ? o++ : k === '+' ? n++ : (o++, n++)
+      rows.push(
+        <div key={hi + '.' + li} className={'convo-hunk-line' + (k === '+' ? ' is-add' : k === '-' ? ' is-del' : '')}>
+          <span className="convo-hunk-no">{no}</span>
+          <span className="convo-hunk-sign">{k === ' ' ? '' : k === '-' ? '−' : '+'}</span>
+          <span className="convo-hunk-text">{l.slice(1)}</span>
+        </div>,
+      )
+    })
+    end = n
+  })
+  return (
+    <div className="convo-hunks">
+      {rows}
+      {cut && <div className="convo-hunk-gap">{t('convo.patchCut')}</div>}
+    </div>
+  )
+}
+
+// A file a turn made anew: all of it, as added lines.
+const created = (tool: ConvoTool): ConvoHunk[] | undefined => {
+  if (tool.name !== 'Write' || tool.patch || !tool.new) return undefined
+  const lines = tool.new.replace(/\n$/, '').split('\n')
+  return [{ old_start: 0, new_start: 1, lines: lines.map((l) => '+' + l) }]
+}
+
+// The changes a turn made, beside the thread (over it, where narrow): its
+// files, each with its edits in order.
+function ChangesPanel({ edits, focus, onClose }: { edits: Edits; focus?: string; onClose: () => void }) {
+  const box = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    const el = focus ? box.current?.querySelector(`[data-file="${CSS.escape(focus)}"]`) : null
+    el?.scrollIntoView({ block: 'start' })
+  }, [focus])
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const el = e.target as HTMLElement | null
+      if (e.key !== 'Escape' || (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') && !el.classList.contains('xterm-helper-textarea'))) return
+      if (document.querySelector('[aria-modal="true"], [role="menu"]')) return
+      e.preventDefault()
+      e.stopPropagation()
+      onClose()
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [onClose])
+  return (
+    <aside className="convo-panel" aria-label={t('convo.changesTitle')}>
+      <div className="convo-panel-head">
+        <span className="convo-panel-title">{t('convo.changesTitle')}</span>
+        <LineCounts add={edits.add} del={edits.del} />
+        <span className="spacer" />
+        <button type="button" className="icon-btn" onClick={onClose} aria-label={t('common.close')} title={t('common.close') + ' (Esc)'}>
+          <X size={16} />
+        </button>
+      </div>
+      <div className="convo-panel-files">
+        {edits.files.map((f) => (
+          <button key={f.path} type="button" className="convo-changes-file" onClick={() => box.current?.querySelector(`[data-file="${CSS.escape(f.path)}"]`)?.scrollIntoView({ block: 'start', behavior: 'smooth' })} title={f.path}>
+            <span className="convo-changes-path">{shortPath(f.path)}</span>
+            <LineCounts add={f.add} del={f.del} />
+          </button>
+        ))}
+      </div>
+      <div className="convo-panel-body" ref={box}>
+        {edits.files.map((f) => (
+          <section key={f.path} className="convo-panel-file" data-file={f.path}>
+            <div className="convo-panel-file-head" title={f.path}>
+              <span className="convo-changes-path">{shortPath(f.path)}</span>
+              <LineCounts add={f.add} del={f.del} />
+            </div>
+            {f.tools.map((tl, i) => {
+              const h = tl.patch ?? created(tl)
+              return (
+                <div key={i} className="convo-panel-edit">
+                  {f.tools.length > 1 && <div className="convo-hunk-gap">{t('convo.editN', { n: i + 1 })}</div>}
+                  {h ? <Hunks hunks={h} cut={tl.patch_cut} /> : <Diff old={tl.old ?? ''} new={tl.new ?? ''} />}
+                </div>
+              )
+            })}
+          </section>
+        ))}
+      </div>
+    </aside>
   )
 }
 

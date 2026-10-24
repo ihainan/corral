@@ -4,7 +4,7 @@ import { api, ApiError, errorText, type HerdrAgent } from '../api'
 import { t } from '../i18n'
 import { Dialog, isCoarse, LoadError, useToast } from '../components/ui'
 import { getReplyDraft, keepReplyDraft } from './drafts'
-import { choices, promptBlock, question } from './menu'
+import { choices, dashedRule, promptBlock, question } from './menu'
 import { choiceText, questionText } from './askText'
 
 interface Screen {
@@ -216,7 +216,7 @@ function Asked({ lines }: { lines: string[] }) {
         if (m) sign = m[1] === '+' ? 'add' : 'del'
         else if (!(sign && /^\s+[-+]/.test(l))) sign = ''
         return (
-          <span key={i} className={sign ? 'convo-' + sign : undefined}>
+          <span key={i} className={sign ? 'convo-' + sign : dashedRule.test(l) ? 'convo-ask-rule' : undefined}>
             {l + '\n'}
           </span>
         )
@@ -298,10 +298,10 @@ export function InlineReply({ sessionId, agent, onLoaded, resizedAt, active = tr
     }
   }, [sent, screen, opts.length])
   const pre = useRef<HTMLPreElement>(null)
+  const block = screen ? promptBlock(screen.text) : null
   useLayoutEffect(() => {
     if (pre.current) pre.current.scrollTop = pre.current.scrollHeight
-  }, [screen, shown])
-  const block = screen ? promptBlock(screen.text) : null
+  }, [screen, shown, !block])
   const ready = sent === null && !!screen && !busy && !failed
   useAnswerKeys(active, ready, [...opts.map((o) => o.key), 'esc'], held, (k) => void send({ keys: [k] }))
   if (sent !== null) return <p className="convo-ask-sent" role="status">{t('convo.answeredHere')}</p>
@@ -311,6 +311,7 @@ export function InlineReply({ sessionId, agent, onLoaded, resizedAt, active = tr
     <div className="convo-ask" role="group" aria-label={t('convo.waiting')}>
       <div className="convo-ask-q">{shownQ || t('convo.waiting')}</div>
       {block && <Asked lines={block.lines} />}
+      {!block && opts.length > 0 && !failed && <p className="convo-ask-unread">{t('convo.askUnread')}</p>}
       {failed ? (
         <LoadError onRetry={() => void load()} />
       ) : (
@@ -355,7 +356,7 @@ export function InlineReply({ sessionId, agent, onLoaded, resizedAt, active = tr
                 {opts.length > 0 ? t('convo.askKeys', { n: opts.length }) : t('convo.askEsc')}
               </span>
             )}
-            <button type="button" className="link-btn" aria-expanded={shown} onClick={() => setShown(!shown)}>
+            <button type="button" className="link-btn" aria-expanded={shown || (!block && opts.length > 0)} disabled={!block && opts.length > 0} onClick={() => setShown(!shown)}>
               {t(shown ? 'convo.hideScreen' : 'convo.showScreen')}
             </button>
             {opts.length === 0 && (
@@ -370,7 +371,8 @@ export function InlineReply({ sessionId, agent, onLoaded, resizedAt, active = tr
               </button>
             )}
           </div>
-          {shown && (
+          {(shown || (!block && opts.length > 0)) && (
+            // (What is asked could not be told apart on the screen: the screen itself.)
             <div className="reply-screen-wrap">
               <pre className="reply-screen" ref={pre} tabIndex={0} aria-label={t('reply.screen')} aria-busy={reading}>
                 {screen ? screen.text.split('\n').slice(-shownLines).join('\n') || t('reply.blank') : t('common.loading')}

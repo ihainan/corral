@@ -16,11 +16,20 @@ export interface ConvoTool {
   new?: string
   add?: number // (an edit) lines added and removed
   del?: number
+  patch?: ConvoHunk[] // (an edit) as Claude Code reported making it; then old and new are not sent
+  patch_cut?: boolean
   done?: boolean
   error?: boolean
   result?: string
   result_lines?: number
   truncated?: boolean
+}
+
+// A run of an edit's lines (" " kept, "-" removed, "+" added), from these line numbers.
+export interface ConvoHunk {
+  old_start: number
+  new_start: number
+  lines: string[]
 }
 
 export interface ConvoPart {

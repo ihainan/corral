@@ -597,7 +597,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
     set(t('convo.stopping'), true)
     api('POST', `/api/sessions/${id}/conversation/interrupt`, { pane: b.pane, pid: b.pid, start: b.start, session: b.session })
       .then(() => settle(t('convo.stopped')))
-      .catch((e) => settle(e instanceof ApiError && e.code === 'agent_changed' ? t('convo.stopChanged') : errorText(e)))
+      .catch((e) => settle(e instanceof ApiError && e.code === 'agent_changed' ? t('convo.stopChanged') : e instanceof ApiError && e.code === 'not_in_front' ? t('convo.notFront') : errorText(e)))
   }
   const shownStop = myStop?.text
   const convoStopsHere = showConvo && convoWorking && !!convo.bind && status === 'open'
@@ -617,7 +617,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
     }
     api('POST', `/api/sessions/${id}/conversation/send-now`, { pane: b.pane, pid: b.pid, start: b.start, session: b.session })
       .then(() => settle(t('convo.sentNow')))
-      .catch((e) => settle(e instanceof ApiError && e.code === 'agent_changed' ? t('convo.stopChanged') : errorText(e)))
+      .catch((e) => settle(e instanceof ApiError && e.code === 'agent_changed' ? t('convo.stopChanged') : e instanceof ApiError && e.code === 'not_in_front' ? t('convo.notFront') : errorText(e)))
   }
   // Going to another agent from the bar (herdr): sending waits until herdr
   // has that pane in front and the conversation is of it, so what is typed
@@ -721,6 +721,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
   // What the composer sent while the conversation shows, until a user turn
   // with its text appears in the same log of the same process, after it
   // (by the log's position and its time), each turn answering one.
+  const queuedRef = useRef<Set<string>>(new Set())
   const [convoPending, setConvoPending] = useState<(ConvoPending & { bind: string; after: number; gen: number; at: number })[]>([])
   const pendingId = useRef(0)
   const pendingUsed = useRef(new Map<string, Set<number>>()) // per binding and reading: the turns that confirmed one
@@ -757,12 +758,14 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
     const waiting = convoPending.filter((p) => p.state === 'waiting')
     if (!waiting.length) return
     const due = Math.min(...waiting.map((p) => p.at)) + PENDING_MS - Date.now()
-    const timer = setTimeout(() => setConvoPending((ps) => ps.map((p) => (p.state === 'waiting' && Date.now() - p.at >= PENDING_MS ? { ...p, state: 'unseen' } : p))), Math.max(0, due) + 50)
+    // (One the agent has queued is seen: it waits there, however long.)
+    const timer = setTimeout(() => setConvoPending((ps) => ps.map((p) => (p.state === 'waiting' && Date.now() - p.at >= PENDING_MS && !queuedRef.current.has(p.text.replace(/\s+/g, ' ').trim()) ? { ...p, state: 'unseen' } : p))), Math.max(0, due) + 50)
     return () => clearTimeout(timer)
   }, [convoPending])
   // (One the agent has queued shows in its queue, over the composer, not here as well.)
-  const queuedTexts = new Set((convo.queued ?? []).map((q) => q.text.replace(/\s+/g, ' ').trim()))
-  const shownPending = convoPending.filter((p) => p.bind === bindKey && !(p.state === 'waiting' && queuedTexts.has(p.text.replace(/\s+/g, ' ').trim())))
+  const queuedTexts = useMemo(() => new Set((convo.queued ?? []).map((q) => q.text.replace(/\s+/g, ' ').trim())), [convo.queued])
+  queuedRef.current = queuedTexts
+  const shownPending = convoPending.filter((p) => p.bind === bindKey && !(p.state !== 'sent' && queuedTexts.has(p.text.replace(/\s+/g, ' ').trim())))
   // The conversation covers the terminal: the composer is how to type there
   // (and, on a touch screen, taps on it bring up no keyboard). It opens with
   // the view, unless it was put away while the view showed.

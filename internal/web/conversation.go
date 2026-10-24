@@ -29,7 +29,6 @@ import (
 	"github.com/ihainan/corral/internal/sftplite"
 	"github.com/ihainan/corral/internal/sshx"
 	"github.com/ihainan/corral/internal/term"
-	"golang.org/x/crypto/ssh"
 )
 
 const (
@@ -44,7 +43,9 @@ const (
 
 // convoLocateCommand prints, for each Claude Code process of the user that
 // is still running, a NUL-terminated record of key=value lines: its pid, its
-// start time (/proc/<pid>/stat field 22) and the one its session file
+// start time (/proc/<pid>/stat field 22), whether it is in front on its
+// terminal (its process group is the terminal's foreground one), the start
+// time its session file
 // records (a file left by a process that ended, whose pid was then reused,
 // does not match), the session id, the log found for it, and the herdr or
 // tmux pane it runs in. With mode "tmux" a first record gives the active
@@ -67,6 +68,8 @@ for f in "$HOME"/.claude/sessions/*.json; do
   stat=$(tr '\n' ' ' <"/proc/$pid/stat" 2>/dev/null)
   start=$(printf '%s' "${stat##*) }" | cut -d' ' -f20)
   case $start in ''|*[!0-9]*) continue;; esac
+  pgrp=$(printf '%s' "${stat##*) }" | cut -d' ' -f3); tpgid=$(printf '%s' "${stat##*) }" | cut -d' ' -f6)
+  fg=0; [ -n "$pgrp" ] && [ "$pgrp" = "$tpgid" ] && fg=1
   c=$(head -c 65536 "$f" 2>/dev/null | tr -d '\n')
   sid=$(printf '%s' "$c" | grep -o '"sessionId" *: *"[0-9a-fA-F-]*"' | head -n 1 | sed 's/.*"\([0-9a-fA-F-]*\)"$/\1/')
   ps=$(printf '%s' "$c" | grep -o '"procStart" *: *"*[0-9]*' | head -n 1 | sed 's/[^0-9]*\([0-9]*\)$/\1/')
@@ -78,7 +81,7 @@ for f in "$HOME"/.claude/sessions/*.json; do
     [ -f "$l" ] && { log=$l; break; }
   done
   env=$(tr '\0' '\n' <"/proc/$pid/environ" 2>/dev/null | grep -E '^(HERDR_PANE_ID|HERDR_SOCKET_PATH|TMUX|TMUX_PANE)=' | head -c 4096)
-  printf 'pid=%s\nstart=%s\nprocstart=%s\nsid=%s\nlog=%s\n%s\0' "$pid" "$start" "$ps" "$sid" "$log" "$env"
+  printf 'pid=%s\nstart=%s\nfg=%s\nprocstart=%s\nsid=%s\nlog=%s\n%s\0' "$pid" "$start" "$fg" "$ps" "$sid" "$log" "$env"
 done
 exit 0`
 	return "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(mode) + " " + sshx.QuoteShell(tmuxName)
@@ -86,6 +89,7 @@ exit 0`
 
 type convoProc struct {
 	pid, start    int64
+	fg            bool // in front on its terminal: what is typed there reaches it
 	sid, log      string
 	herdrPane     string
 	herdrSocket   string
@@ -139,6 +143,8 @@ func parseConvoLocate(out string) (procs []convoProc, tmuxActive, tmuxPID, tmuxT
 				p.pid, _ = strconv.ParseInt(v, 10, 64)
 			case "start":
 				p.start, _ = strconv.ParseInt(v, 10, 64)
+			case "fg":
+				p.fg = v == "1"
 			case "procstart":
 				if n, err := strconv.ParseInt(v, 10, 64); err == nil {
 					procStart = n
@@ -415,11 +421,17 @@ func (s *Server) locateConvo(ctx context.Context, sess *term.Session, st *convoS
 		reason = convoUnsupported
 	default:
 		p := pickConvoProc(procs, sess.Persistence, pane, s.herdrSocks.get(sess.ID), tmuxActive, tmuxPID)
+		was := st.bind
 		st.bind = nil
 		if p != nil {
 			b := &convoBind{PID: p.pid, Start: p.start, Session: p.sid, Pane: p.herdrPane}
 			if sess.Persistence == "tmux" {
 				b.Pane, b.Title = p.tmuxPane, tmuxTitle
+			}
+			// (Another process of the same session, resumed: what the one
+			// before had queued is not this one's.)
+			if was != nil && (was.PID != b.PID || was.Start != b.Start) && st.parser != nil {
+				st.parser.ClearQueue()
 			}
 			st.bind = b
 		}
@@ -640,7 +652,9 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		writeError(w, http.StatusTooManyRequests, "busy", "the host is still answering earlier requests")
 		return
 	}
-	if err != nil && len(out) == 0 {
+	// (A scan cut short, by its size or a failure, may leave out the agent
+	// started last: what it found does not decide where keys go.)
+	if err != nil {
 		if signedOut() {
 			return
 		}
@@ -663,11 +677,15 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		}
 	}
 	if front == nil || front.pid != b.PID || front.start != b.Start || front.sid != b.Session {
-		if err != nil && signedOut() { // (cut short by the login ending: not a change of agent)
-			return
-		}
 		reason = "agent_changed"
 		writeError(w, http.StatusConflict, "agent_changed", "that pane no longer runs this agent")
+		return
+	}
+	// (Stopped with Ctrl+Z, or another program in front of it: keys typed
+	// there would go to that.)
+	if !front.fg {
+		reason = "not_in_front"
+		writeError(w, http.StatusConflict, "not_in_front", "the agent is not in front in its pane")
 		return
 	}
 	if signedOut() {
@@ -697,13 +715,13 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	} else {
 		// (The script checks the pane is in this session's tmux session, and presses.)
 		_, err = sshx.Output(ctx, sess.Client(), tmuxKeysCommand(sess.TmuxSession, b.Pane, keys.tmux), 4096)
-		var exitErr *ssh.ExitError
+		var exitErr *sshx.ExitError
 		switch {
 		case err == nil:
 			outcome = "typed"
 		case errors.Is(err, sshx.ErrBusy):
 			reason = "busy" // (not started: nothing was pressed)
-		case errors.As(err, &exitErr) && exitErr.ExitStatus() == 3:
+		case errors.As(err, &exitErr) && exitErr.Status == 3:
 			reason = "not_in_session"
 		case errors.As(err, &exitErr):
 			reason = "send_failed" // (tmux said no: the pane went, say)

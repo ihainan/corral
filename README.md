@@ -74,13 +74,17 @@ another: start it at your desk, check on it from your phone, carry on on a table
   those waiting for you first: answer one, read its conversation or open
   its terminal from there.
 - **Conversation view** — Read Claude Code's session as a conversation, by
-  its own title: each answer formatted, with what the turn changed (files,
-  lines added and removed) and copy; all the agent did between your messages
-  in one line ("worked for 2m 14s"), opened to a line a step, the step under
-  way shown with its seconds; its task list over the composer. Answer a
-  question it asks right there, stop it from the send button, and go to
-  another agent of any open session from the list beside it (Alt+↑/↓), the
-  ones waiting for you first. The whole history shows even where the
+  its own title: each answer formatted, with the files the turn changed (lines
+  added and removed; one opens the turn's changes beside it, with line
+  numbers and the lines around) and copy; all the agent did between your
+  messages in one line ("worked for 2m 14s"; while it works, what it is doing
+  and for how long), opened to a line a step. The composer sits under the
+  thread, with the permission mode, branch, model and context size under it;
+  over it, its task list, what you sent that waits to be taken in (send it
+  now), and a permission prompt to answer with its own keys (1–9, Esc),
+  showing what it asks as the screen does. Stop it from the send button, and
+  go to another agent of any open session from the list beside it (Alt+↑/↓),
+  the ones waiting for you first. The whole history shows even where the
   terminal keeps none; the terminal is a tap away.
 - **A composer** — Write longer prompts: `@` files, `/` commands, `$` skills,
   history, Claude Code's suggested prompt with Tab. Ctrl+Shift+Enter
@@ -347,9 +351,19 @@ Report security problems privately, not in a public issue: see [SECURITY.md](SEC
   its log, so tmux shows that as working). The list beside it has the status
   of herdr's agents and of the tmux session shown; other tmux sessions are
   listed without one.
-- Stop in a tmux session checks that the pane is in the session and then
-  presses Escape, two tmux commands: a window moved to another session in
-  between would still be pressed.
+- Stop and send now press keys only for the Claude Code process the
+  conversation shows, in front of its terminal, as found just before: a
+  process that ends, or a pane taken over, in the moment between is still
+  pressed. In a tmux session they check that the pane is in the session
+  and then press, two tmux commands: a window moved to another session in
+  between would still be pressed. Keys from the key bar go to the terminal
+  as typed, not through the prompt's card.
+- The permission card shows what the prompt asks as Claude Code draws it on
+  the screen (from the rule over it to its question); where it cannot tell
+  that apart, it shows the screen itself. The context size under the
+  composer is what the latest request carried; the log does not say how
+  large the session's window is. The permission mode is the one of the
+  latest message (a change since shows with the next).
 - Several tabs of one tmux or herdr session keep places by when they were
   opened; closing one can move the others of that session.
 - Claude Code's suggested prompt is read off the screen (greyed text in its
