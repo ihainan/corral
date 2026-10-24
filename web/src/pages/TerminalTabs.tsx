@@ -228,8 +228,13 @@ export function TerminalTabs({ current }: { current: string }) {
   const move = useCallback((id: string, to: number) => {
     const l = sessionsRef.current
     if (!l) return
+    const from = l.findIndex((s) => s.id === id)
+    if (from < 0 || to < 0 || to >= l.length || from === to) return
     moveTab(l, id, to)
-    setSessions(inPlace(l))
+    // (Shown moved whether or not the place could be kept: storage may be blocked.)
+    const next = [...l]
+    next.splice(to, 0, next.splice(from, 1)[0])
+    setSessions(next)
   }, [])
 
   const go = useCallback(
@@ -374,6 +379,7 @@ function useTabDrag(nav: React.RefObject<HTMLElement | null>, ids: string[], cur
     drop: () => void
   } | null>(null)
   const endedAt = useRef(0)
+  const moved = useRef(false) // a drop changed the order (and the bar is not to scroll for it)
 
   const update = () => {
     const d = cur.current
@@ -443,7 +449,10 @@ function useTabDrag(nav: React.RefObject<HTMLElement | null>, ids: string[], cur
       const d = cur.current
       if (!d || ev.pointerId !== pointer) return
       if (d.on || d.dead) endedAt.current = performance.now()
-      if (d.on && d.to !== undefined && d.to !== d.from) onMove(d.id, d.to)
+      if (d.on && d.to !== undefined && d.to !== d.from) {
+        moved.current = true
+        onMove(d.id, d.to)
+      }
       d.stop()
     }
     const cancel = (ev: PointerEvent) => ev.pointerId === pointer && cur.current?.stop()
@@ -471,6 +480,7 @@ function useTabDrag(nav: React.RefObject<HTMLElement | null>, ids: string[], cur
     // the rest of the press is still the drag's, and its release no click.
     const drop = () => {
       const d = cur.current
+      if (d?.dead) return // (let go of already: the release is still awaited)
       if (!d?.on) return stop()
       d.on = false
       d.dead = true
@@ -516,22 +526,24 @@ function useTabDrag(nav: React.RefObject<HTMLElement | null>, ids: string[], cur
     if (drag.to < drag.from && j >= drag.to && j < drag.from) return drag.w
     return 0
   }
-  // A click that ends a drag is not one; a change of order just after a drag
-  // is the drag's.
+  // A click that ends a drag is not one.
   const dragged = () => performance.now() - endedAt.current < 400
-  return { drag, onPointerDown, offset, dragged }
+  return { drag, onPointerDown, offset, dragged, moved }
 }
 
 function TabBar(p: { tabs: SessionInfo[]; current: string; infos: Record<string, TabInfo>; onNew: () => void; onMove: (id: string, to: number) => void }) {
   const ref = useRef<HTMLElement>(null)
   // (The tab of a session just opened, not in the list yet, stays last.)
   const movable = p.tabs.filter((s) => s.host_id !== 0).map((s) => s.id)
-  const { drag, onPointerDown, offset, dragged } = useTabDrag(ref, movable, p.current, p.onMove)
+  const { drag, onPointerDown, offset, dragged, moved } = useTabDrag(ref, movable, p.current, p.onMove)
   // The current tab is scrolled into view when it changes, or the tabs do
   // (moved by a key too; not by a drag: the tab dragged is where it was let go).
   const order = p.tabs.map((s) => s.id).join()
   useEffect(() => {
-    if (dragged()) return
+    if (moved.current) {
+      moved.current = false
+      return
+    }
     ref.current?.querySelector<HTMLElement>('.term-tab[aria-current="page"]')?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [p.current, order])
