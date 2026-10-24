@@ -334,3 +334,43 @@ func TestClaudeMeta(t *testing.T) {
 		t.Fatalf("no branch any more: %+v", m)
 	}
 }
+
+func TestClaudeQueue(t *testing.T) {
+	c := NewClaude()
+	c.Feed(lines(
+		`{"type":"user","uuid":"u1","timestamp":"2026-10-24T09:00:00Z","message":{"content":"go"}}`,
+		`{"type":"queue-operation","operation":"enqueue","timestamp":"2026-10-24T09:00:05Z","content":"also the README"}`,
+		`{"type":"queue-operation","operation":"enqueue","timestamp":"2026-10-24T09:00:06Z","content":"<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n</task-notification>"}`,
+		`{"type":"queue-operation","operation":"enqueue","timestamp":"2026-10-24T09:00:07Z","content":"and commit"}`,
+	))
+	if q := c.Queued(); len(q) != 2 || q[0].Text != "also the README" || q[1].Text != "and commit" || q[0].Time == "" {
+		t.Fatalf("queued: %+v", q)
+	}
+	// Taken in during the turn: no longer queued, and marked so.
+	c.Feed(lines(
+		`{"type":"queue-operation","operation":"remove","content":"also the README"}`,
+		`{"type":"attachment","uuid":"q1","attachment":{"type":"queued_command","commandMode":"prompt","prompt":"also the README"}}`,
+	))
+	if q := c.Queued(); len(q) != 1 || q[0].Text != "and commit" {
+		t.Fatalf("after remove: %+v", q)
+	}
+	all := c.Since(0)
+	if last := all[len(all)-1]; last.Role != RoleUser || !last.Mid || all[0].Mid {
+		t.Fatalf("mid: %+v", all)
+	}
+	// The turn ends: the rest go one by one, in order (the notice first).
+	c.Feed(lines(`{"type":"queue-operation","operation":"dequeue"}`))
+	if q := c.Queued(); len(q) != 1 {
+		t.Fatalf("the notice went first: %+v", q)
+	}
+	c.Feed(lines(`{"type":"queue-operation","operation":"dequeue"}`, `{"type":"queue-operation","operation":"dequeue"}`))
+	if q := c.Queued(); len(q) != 0 {
+		t.Fatalf("all gone: %+v", q)
+	}
+	// Claude Code's word that it was stopped is a note.
+	c.Feed(lines(`{"type":"user","uuid":"x","message":{"content":[{"type":"text","text":"[Request interrupted by user]"}]}}`))
+	all = c.Since(0)
+	if last := all[len(all)-1]; last.Role != RoleNote || last.Parts[0].Text != "[Request interrupted by user]" {
+		t.Fatalf("interrupted: %+v", last)
+	}
+}

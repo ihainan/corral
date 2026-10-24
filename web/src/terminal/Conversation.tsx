@@ -5,7 +5,7 @@ import { copyText, isCoarse } from '../components/ui'
 import { local } from '../storage'
 import { Markdown } from './markdown'
 import { Code } from './Code'
-import type { Convo, ConvoEntry, ConvoMeta, ConvoPart, ConvoTask, ConvoTool } from './conversation'
+import type { Convo, ConvoEntry, ConvoMeta, ConvoPart, ConvoQueued, ConvoTask, ConvoTool } from './conversation'
 
 // The conversation view: the agent's log as turns, over the terminal (which
 // stays mounted under it). Each turn is what the person wrote, then one line
@@ -40,12 +40,15 @@ const partTime = new WeakMap<ConvoPart, string>()
 // works, or waits for an answer), so all of it is work; moving: it works
 // (a step is under way). A turn's answer is the text it ends with (notes
 // after it come after it); a turn that ends in a step has none.
+// A message the person sent while the agent worked, taken in during the
+// turn (mid), is the turn's: it shows after the turn's work, before its
+// answer, and does not end the turn.
 function items(entries: ConvoEntry[], live: boolean, moving: boolean): Item[] {
   const out: Item[] = []
-  let turn: { from?: string; steps: Step[]; to?: string; key: string } | null = null
+  let turn: { from?: string; steps: Step[]; to?: string; key: string; mids: ConvoEntry[] } | null = null
   const end = (last: boolean) => {
     if (!turn) return
-    const { steps, key, from, to } = turn
+    const { steps, key, from, to, mids } = turn
     turn = null
     let a = steps.length
     let tail = steps.length
@@ -60,6 +63,7 @@ function items(entries: ConvoEntry[], live: boolean, moving: boolean): Item[] {
     const doing = work.some((s) => !isNote(s))
     if (doing) out.push({ kind: 'work', key, steps: work, from, to, live: last && live, moving: last && moving, busy: last && moving ? underWay(steps) : undefined })
     else for (const s of work) out.push(isNote(s) ? noteItem(s) : { kind: 'answer', key: key + '.' + out.length, text: s.text ?? '', truncated: s.truncated, ts: partTime.get(s), edits: null })
+    for (const e of mids) out.push({ kind: 'user', e })
     if (answer.length)
       out.push({
         kind: 'answer',
@@ -73,13 +77,17 @@ function items(entries: ConvoEntry[], live: boolean, moving: boolean): Item[] {
     for (const s of steps.slice(tail)) out.push(noteItem(s as ConvoEntry))
   }
   for (const e of entries) {
+    if (e.role === 'user' && e.mid && turn) {
+      turn.mids.push(e)
+      continue
+    }
     if (e.role === 'user' || (e.role === 'summary' && !turn)) {
       end(false)
       out.push({ kind: e.role, e } as Item)
-      turn = { key: 't' + e.seq, from: e.role === 'user' ? e.ts : undefined, steps: [] }
+      turn = { key: 't' + e.seq, from: e.role === 'user' ? e.ts : undefined, steps: [], mids: [] }
       continue
     }
-    if (!turn) turn = { key: 't' + e.seq, steps: [] } // (the log read begins mid-turn)
+    if (!turn) turn = { key: 't' + e.seq, steps: [], mids: [] } // (the log read begins mid-turn)
     const tr: { steps: Step[]; to?: string } = turn
     if (e.role !== 'assistant') {
       tr.steps.push(e) // (a note, or the summary of a compaction in the middle of the turn)
@@ -235,6 +243,8 @@ export function ConversationView({
   onShowTerminal,
   onCopied,
   composer,
+  onSendNow,
+  sendNow,
 }: {
   convo: Convo
   agent: ConvoAgent | null
@@ -249,6 +259,8 @@ export function ConversationView({
   onShowTerminal: () => void
   onCopied: () => void
   composer?: ReactNode // (the terminal's composer, while it is open)
+  onSendNow?: () => void // (messages wait to be taken in: Claude Code's "send now")
+  sendNow?: string // what became of the last "send now", to say
 }) {
   const working = agent?.status === 'working'
   const waits = agent?.status === 'blocked'
@@ -337,7 +349,7 @@ export function ConversationView({
   const quiet = working && now - Math.max(convo.changedAt, since) > HINT_AFTER
   // How long this turn has gone on: from the last thing the person wrote.
   const lastUser = useMemo(() => {
-    for (let i = convo.entries.length - 1; i >= 0; i--) if (convo.entries[i].role === 'user') return ms(convo.entries[i].ts)
+    for (let i = convo.entries.length - 1; i >= 0; i--) if (convo.entries[i].role === 'user' && !convo.entries[i].mid) return ms(convo.entries[i].ts)
     return 0
   }, [convo.entries])
 
@@ -500,6 +512,7 @@ export function ConversationView({
       <div className="convo-dock">
         {convo.status === 'ready' && convo.tasks && <Tasks tasks={convo.tasks} fold={!!ask} />}
         {convo.status === 'ready' && ask && <div className="convo-dock-ask">{ask}</div>}
+        {convo.status === 'ready' && working && convo.queued && <Queue items={convo.queued} onSendNow={onSendNow} said={sendNow} />}
         {waits && !ask && convo.status === 'ready' && (
           // (Where it cannot be answered here: in its terminal.)
           <div className="convo-waiting" role="status">
@@ -512,6 +525,32 @@ export function ConversationView({
       </div>
       </div>
       {picking && side && <Picker rows={rows} onClose={unpick} />}
+    </div>
+  )
+}
+
+// What the person sent while the agent works, not taken in yet: over the
+// composer, with Claude Code's "send now" (which stops the step under way).
+function Queue({ items, onSendNow, said }: { items: ConvoQueued[]; onSendNow?: () => void; said?: string }) {
+  return (
+    <div className="convo-queue" role="status">
+      <div className="convo-queue-head">
+        <span className="convo-queue-sum">{t('convo.queued', { n: items.length })}</span>
+        {said ? (
+          <span className="convo-queue-said">{said}</span>
+        ) : (
+          onSendNow && (
+            <button type="button" className="btn btn-ghost convo-queue-now" onClick={onSendNow} title={t('convo.sendNowHint')}>
+              {t('convo.sendNow')}
+            </button>
+          )
+        )}
+      </div>
+      {items.map((q, i) => (
+        <div key={i} className="convo-queue-row">
+          {q.text}
+        </div>
+      ))}
     </div>
   )
 }
@@ -811,7 +850,13 @@ function sameItem(a: Item, b: Item): boolean {
 }
 
 const noShow = () => {}
-const noteText = (e: ConvoEntry) => e.parts.map((p) => p.text).join(' ')
+// (Claude Code's own words that it was stopped, in the person's language.)
+const noteText = (e: ConvoEntry) => {
+  const s = e.parts.map((p) => p.text).join(' ')
+  if (s === '[Request interrupted by user]') return t('convo.interrupted')
+  if (s === '[Request interrupted by user for tool use]') return t('convo.interruptedTool')
+  return s
+}
 
 function clockMs(ms: number): string {
   return ms ? new Date(ms).toLocaleTimeString(getLang(), { hour: '2-digit', minute: '2-digit' }) : '—'
@@ -831,12 +876,13 @@ function UserTurn({ e, onCopy }: { e: ConvoEntry; onCopy: (s: string) => void })
     .join('\n')
   const images = e.parts.filter((p) => p.kind === 'image').length
   return (
-    <div className="convo-user">
+    <div className={'convo-user' + (e.mid ? ' is-mid' : '')}>
       <div className="convo-user-text">
         {text}
         {images > 0 && !/\[Image #\d+\]/.test(text) && <span className="convo-image">{t(images === 1 ? 'convo.images1' : 'convo.images', { n: images })}</span>}
       </div>
       <div className="convo-meta">
+        {e.mid && <span>{t('convo.midSent')}</span>}
         <span>{clock(e.ts)}</span>
         {text && (
           <button type="button" className="link-btn" onClick={() => onCopy(text)}>
@@ -1067,7 +1113,7 @@ function ToolRow({ tool, onCopy, live }: { tool: ConvoTool; onCopy: (s: string) 
   )
 }
 
-export function Diff({ old, new: nw }: { old: string; new: string }) {
+function Diff({ old, new: nw }: { old: string; new: string }) {
   const rows: [string, string][] = []
   if (old) for (const l of old.split('\n')) rows.push(['del', l])
   if (nw) for (const l of nw.split('\n')) rows.push(['add', l])

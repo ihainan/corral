@@ -26,7 +26,9 @@ import (
 //     block a row.
 //   - "attachment" rows of type queued_command are messages typed while the
 //     agent worked, which it took in during its turn (since 2.1.291 these
-//     are not written as user rows).
+//     are not written as user rows). "queue-operation" rows say what waits
+//     meanwhile: enqueue (with the text), dequeue (the first goes, to be
+//     the next turn's), remove (taken in, with its text).
 //   - isSidechain rows are a subagent's own conversation: not shown.
 //   - "ai-title" rows hold the title Claude Code gave the session (written
 //     again and again), "custom-title" rows the one the person gave it.
@@ -47,6 +49,7 @@ type Claude struct {
 	myTitle string     // (the person's, over Claude Code's)
 	tasks   []taskItem // the task list as it stands
 	meta    Meta
+	queue   []queuedItem // what waits to be taken in, oldest first
 	// Skipped counts lines that were not JSON or of no use to the view.
 	Skipped int
 }
@@ -57,6 +60,12 @@ type toolRef struct {
 	// task changes the task list, once the call has come back without an
 	// error (TodoWrite, TaskUpdate; TaskCreate from its result).
 	task func(c *Claude)
+}
+
+type queuedItem struct {
+	raw   string // as the log wrote it (a remove names it so)
+	shown bool   // the person's (a background task's notice waits there too)
+	Queued
 }
 
 type taskItem struct {
@@ -83,6 +92,18 @@ func (c *Claude) Title() string {
 
 // Meta is what the session runs with, as the log read last said it.
 func (c *Claude) Meta() Meta { return c.meta }
+
+// Queued is what the person sent that waits to be taken in, oldest first.
+// (Of the log read: what was queued before the part read is not known.)
+func (c *Claude) Queued() []Queued {
+	var out []Queued
+	for _, q := range c.queue {
+		if q.shown {
+			out = append(out, q.Queued)
+		}
+	}
+	return out
+}
 
 // Tasks is the agent's task list as the log read has it (a task created
 // before the part read is not known). Nil when there is none.
@@ -166,6 +187,7 @@ type claudeRow struct {
 	CustomTitle      string          `json:"customTitle"`
 	ToolUseResult    json.RawMessage `json:"toolUseResult"`
 	Subtype          string          `json:"subtype"`
+	Operation        string          `json:"operation"` // (queue-operation rows)
 	Content          json.RawMessage `json:"content"`   // (system rows)
 	GitBranch        *string         `json:"gitBranch"` // (present and empty: not on a branch)
 	PermissionMode   string          `json:"permissionMode"`
@@ -234,6 +256,9 @@ func (c *Claude) line(b []byte) {
 	case "permission-mode":
 		c.setMode(r.PermissionMode)
 		return
+	case "queue-operation":
+		c.queueOp(&r)
+		return
 	case "system":
 		if r.Subtype == "local_command" {
 			var s string
@@ -297,7 +322,7 @@ func (c *Claude) user(r *claudeRow) {
 			results++
 		}
 	}
-	var parts []Part
+	var parts, notes []Part
 	for _, b := range blocks {
 		switch b.Type {
 		case "tool_result":
@@ -307,8 +332,11 @@ func (c *Claude) user(r *claudeRow) {
 				c.result(b, nil)
 			}
 		case "text":
-			if role, text := classifyUserText(b.Text); role == RoleUser {
+			switch role, text := classifyUserText(b.Text); role {
+			case RoleUser:
 				parts = append(parts, textPart(KindText, text))
+			case RoleNote:
+				notes = append(notes, textPart(KindText, text))
 			}
 		case "image":
 			parts = append(parts, Part{Kind: KindImage})
@@ -319,6 +347,43 @@ func (c *Claude) user(r *claudeRow) {
 		role = RoleNote
 	}
 	c.add(r, role, parts)
+	c.add(r, RoleNote, notes) // (Claude Code's own word that it was stopped, say)
+}
+
+func (c *Claude) queueOp(r *claudeRow) {
+	var s string
+	_ = json.Unmarshal(r.Content, &s)
+	switch r.Operation {
+	case "enqueue":
+		role, text := classifyUserText(s)
+		q := queuedItem{raw: s, shown: role == RoleUser}
+		q.Text, _ = cut(clean(text), maxText)
+		q.Time = clip(r.Timestamp, 64)
+		c.queue = append(c.queue, q)
+		if n := len(c.queue) - maxQueue; n > 0 {
+			c.queue = append([]queuedItem(nil), c.queue[n:]...)
+		}
+	case "dequeue":
+		if len(c.queue) > 0 {
+			c.queue = c.queue[1:]
+		}
+	case "remove":
+		for i, q := range c.queue {
+			if q.raw == s || s == "" {
+				c.queue = append(c.queue[:i:i], c.queue[i+1:]...)
+				break
+			}
+		}
+	case "popAll", "clear":
+		c.queue = nil
+	}
+}
+
+// mid marks the entry just added as taken in during the agent's turn.
+func (c *Claude) mid() {
+	if n := len(c.entries); n > 0 && c.entries[n-1].Rev == c.rev {
+		c.entries[n-1].Mid = true
+	}
 }
 
 func (c *Claude) queued(r *claudeRow) {
@@ -333,7 +398,11 @@ func (c *Claude) queued(r *claudeRow) {
 		}
 		if a.CommandMode == "prompt" {
 			if role, text := classifyUserText(s); role != "" {
+				n := len(c.entries)
 				c.add(r, role, []Part{textPart(KindText, text)})
+				if role == RoleUser && len(c.entries) > n {
+					c.mid()
+				}
 			}
 		}
 		return
@@ -353,7 +422,11 @@ func (c *Claude) queued(r *claudeRow) {
 			parts = append(parts, Part{Kind: KindImage})
 		}
 	}
+	n := len(c.entries)
 	c.add(r, RoleUser, parts)
+	if len(c.entries) > n {
+		c.mid()
+	}
 }
 
 func (c *Claude) assistant(r *claudeRow) {
@@ -650,6 +723,10 @@ var (
 // classifyUserText says what a user row's text is: the person's ("user"),
 // a note, or nothing to show (""), and the text to show for it.
 func classifyUserText(s string) (role, text string) {
+	// (What Claude Code writes when it was stopped: a note, not the person's.)
+	if t := strings.TrimSpace(s); strings.HasPrefix(t, "[Request interrupted by user") && strings.HasSuffix(t, "]") && len(t) < 80 {
+		return RoleNote, t
+	}
 	m := envelopeTag.FindStringSubmatch(s)
 	if m == nil {
 		if strings.TrimSpace(s) == "" {

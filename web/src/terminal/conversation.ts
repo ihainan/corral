@@ -37,6 +37,13 @@ export interface ConvoEntry {
   role: 'user' | 'assistant' | 'summary' | 'note'
   ts?: string
   parts: ConvoPart[]
+  mid?: boolean // (a message sent while the agent worked, taken in during its turn)
+}
+
+// A message the person sent while the agent worked, not taken in yet.
+export interface ConvoQueued {
+  text: string
+  ts?: string
 }
 
 // An item of the agent's task list.
@@ -70,6 +77,7 @@ interface Answer {
   title?: string
   tasks?: ConvoTask[]
   meta?: ConvoMeta
+  queued?: ConvoQueued[]
   gen: number
   rev: number
   reset?: boolean
@@ -91,6 +99,7 @@ export interface Convo {
   title?: string // the session's own title (Claude Code's, or the person's)
   tasks?: ConvoTask[] // the agent's task list (the same array while it did not change)
   meta?: ConvoMeta // (the same object while it did not change)
+  queued?: ConvoQueued[] // (likewise)
   // Reading has failed since okAt (ms): what shows may be out of date.
   failing: boolean
   okAt: number
@@ -200,8 +209,9 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
             const older = !!a.older || (entries ?? c.entries).length === MAX
             const tasks = a.tasks?.length ? (JSON.stringify(a.tasks) === JSON.stringify(c.tasks) ? c.tasks : a.tasks) : undefined
             const meta = a.meta ? (sameMeta(a.meta, c.meta) ? c.meta : a.meta) : undefined
-            if (!entries && c.of === key && c.status === 'ready' && c.gen === a.gen && c.older === older && sameBind(c.bind, a.bind) && c.agentStatus === a.agent_status && c.title === a.title && c.tasks === tasks && c.meta === meta && !c.failing) return c
-            return { status: 'ready', entries: entries ?? c.entries, older, gen: a.gen, bind: a.bind, agentStatus: a.agent_status, title: a.title || undefined, tasks, meta, failing: false, okAt: now, changedAt: entries ? now : c.changedAt, of: key }
+            const queued = a.queued?.length ? (JSON.stringify(a.queued) === JSON.stringify(c.queued) ? c.queued : a.queued) : undefined
+            if (!entries && c.of === key && c.status === 'ready' && c.gen === a.gen && c.older === older && sameBind(c.bind, a.bind) && c.agentStatus === a.agent_status && c.title === a.title && c.tasks === tasks && c.meta === meta && c.queued === queued && !c.failing) return c
+            return { status: 'ready', entries: entries ?? c.entries, older, gen: a.gen, bind: a.bind, agentStatus: a.agent_status, title: a.title || undefined, tasks, meta, queued, failing: false, okAt: now, changedAt: entries ? now : c.changedAt, of: key }
           })
           remember(key, gen, rev, byseq, a)
           if (a.more) next = 300
@@ -234,7 +244,7 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
         else {
           const entries = [...byseq.values()].sort((x, y) => x.seq - y.seq)
           const older = !!k.older || entries.length === MAX
-          setConvo({ status: 'ready', entries, older, gen, bind: k.bind, agentStatus: k.agent_status, title: k.title || undefined, tasks: k.tasks?.length ? k.tasks : undefined, meta: k.meta, failing: false, okAt: now, changedAt: now, of: key })
+          setConvo({ status: 'ready', entries, older, gen, bind: k.bind, agentStatus: k.agent_status, title: k.title || undefined, tasks: k.tasks?.length ? k.tasks : undefined, meta: k.meta, queued: k.queued?.length ? k.queued : undefined, failing: false, okAt: now, changedAt: now, of: key })
         }
       } else {
         gen = 0

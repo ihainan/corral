@@ -321,10 +321,12 @@ type convoAnswer struct {
 	AgentStatus string `json:"agent_status,omitempty"`
 	// Title is the session's own (Claude Code's, or the person's);
 	// Tasks the agent's task list as the log has it.
-	Title   string        `json:"title,omitempty"`
-	Tasks   []convo.Task  `json:"tasks,omitempty"`
-	Meta    *convo.Meta   `json:"meta,omitempty"` // what it runs with, as the log says
-	Entries []convo.Entry `json:"entries"`
+	Title string       `json:"title,omitempty"`
+	Tasks []convo.Task `json:"tasks,omitempty"`
+	Meta  *convo.Meta  `json:"meta,omitempty"` // what it runs with, as the log says
+	// Queued is what the person sent that the agent has not taken in yet.
+	Queued  []convo.Queued `json:"queued,omitempty"`
+	Entries []convo.Entry  `json:"entries"`
 }
 
 // GET /api/sessions/{id}/conversation?pane=<herdr pane>&gen=<n>&rev=<n>
@@ -394,6 +396,7 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 	if m := st.parser.Meta(); m != (convo.Meta{}) {
 		ans.Meta = &m
 	}
+	ans.Queued = st.parser.Queued()
 	writeJSON(w, http.StatusOK, ans)
 }
 
@@ -531,25 +534,53 @@ func convoProcStatus(c *sftplite.Client, st *convoState) string {
 	return ""
 }
 
-// tmuxEscapeCommand presses Escape in one tmux pane (by its id, "%N"), only
-// if that pane is in the named tmux session: else it exits 3, pressing
-// nothing. Fixed script; the validated session name and pane id are its
-// only arguments.
-func tmuxEscapeCommand(session, pane string) string {
+// tmuxKeysCommand presses keys in one tmux pane (by its id, "%N"), only if
+// that pane is in the named tmux session: else it exits 3, pressing
+// nothing. Fixed script; the validated session name, the pane id and keys
+// of a fixed set (convoKeys) are its only arguments.
+func tmuxKeysCommand(session, pane string, keys []string) string {
 	script := `PATH="$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 [ "$(tmux -u display-message -p -t "$2" '#{session_name}' 2>/dev/null)" = "$1" ] || exit 3
-exec tmux send-keys -t "$2" Escape`
-	return "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(session) + " " + sshx.QuoteShell(pane)
+p=$2; shift 2
+exec tmux send-keys -t "$p" "$@"`
+	cmd := "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(session) + " " + sshx.QuoteShell(pane)
+	for _, k := range keys {
+		cmd += " " + sshx.QuoteShell(k)
+	}
+	return cmd
+}
+
+// What the conversation presses in the agent's pane, in herdr's names and
+// tmux's: stop (Escape), and send a queued message now (Claude Code's
+// Ctrl+X Ctrl+S, which stops what it was doing to take the message in).
+var convoKeys = map[string]struct {
+	audit string
+	herdr []string
+	tmux  []string
+}{
+	"interrupt": {"convo.interrupt", []string{"esc"}, []string{"Escape"}},
+	"send_now":  {"convo.send_now", []string{"ctrl+x", "ctrl+s"}, []string{"C-x", "C-s"}},
 }
 
 // POST /api/sessions/{id}/conversation/interrupt {"pane","pid","start","session"}
+// POST /api/sessions/{id}/conversation/send-now (the same)
 //
-// Presses Escape in the pane, for the Claude Code process the conversation
-// shows (what Claude Code takes as "stop"). The process is looked for again
-// first: if that pane no longer runs it (another program, a restart), nothing
-// is pressed and the answer is 409. Not with the terminal's own input: that
-// goes to whatever pane is in front by the time it arrives.
+// Presses Escape in the pane (what Claude Code takes as "stop"), or Ctrl+X
+// Ctrl+S (send the messages queued now), for the Claude Code process the
+// conversation shows. The process is looked for again first: if that pane
+// no longer runs it (another program, a restart), nothing is pressed and
+// the answer is 409. Not with the terminal's own input: that goes to
+// whatever pane is in front by the time it arrives.
 func (s *Server) apiConversationInterrupt(w http.ResponseWriter, r *http.Request) {
+	s.convoPress(w, r, "interrupt")
+}
+
+func (s *Server) apiConversationSendNow(w http.ResponseWriter, r *http.Request) {
+	s.convoPress(w, r, "send_now")
+}
+
+func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string) {
+	keys := convoKeys[what]
 	sess, ok := s.runningSession(w, r)
 	if !ok {
 		return
@@ -579,7 +610,7 @@ func (s *Server) apiConversationInterrupt(w http.ResponseWriter, r *http.Request
 		if reason != "" {
 			detail["reason"] = reason
 		}
-		s.audit(r.WithContext(actx), "convo.interrupt", sess.HostName, detail)
+		s.audit(r.WithContext(actx), keys.audit, sess.HostName, detail)
 	}()
 	expiry, err := s.auth.LoginExpiry(r.Context(), loginHash(r))
 	if err != nil {
@@ -652,7 +683,7 @@ func (s *Server) apiConversationInterrupt(w http.ResponseWriter, r *http.Request
 			writeHerdrError(w, derr)
 			return
 		}
-		err = c.SendKeys(ctx, b.Pane, []string{"esc"})
+		err = c.SendKeys(ctx, b.Pane, keys.herdr)
 		c.Close()
 		var apiErr *herdr.APIError
 		switch {
@@ -665,7 +696,7 @@ func (s *Server) apiConversationInterrupt(w http.ResponseWriter, r *http.Request
 		}
 	} else {
 		// (The script checks the pane is in this session's tmux session, and presses.)
-		_, err = sshx.Output(ctx, sess.Client(), tmuxEscapeCommand(sess.TmuxSession, b.Pane), 4096)
+		_, err = sshx.Output(ctx, sess.Client(), tmuxKeysCommand(sess.TmuxSession, b.Pane, keys.tmux), 4096)
 		var exitErr *ssh.ExitError
 		switch {
 		case err == nil:

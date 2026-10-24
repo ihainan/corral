@@ -122,10 +122,10 @@ func TestConvoStatesAreBounded(t *testing.T) {
 	held.done()
 }
 
-func TestTmuxEscapeCommandQuotes(t *testing.T) {
-	cmd := tmuxEscapeCommand("a'b", "%3")
-	if !strings.HasSuffix(cmd, ` corral 'a'\''b' '%3'`) {
-		t.Fatalf("arguments not quoted: %s", cmd[len(cmd)-40:])
+func TestTmuxKeysCommandQuotes(t *testing.T) {
+	cmd := tmuxKeysCommand("a'b", "%3", convoKeys["send_now"].tmux)
+	if !strings.HasSuffix(cmd, ` corral 'a'\''b' '%3' 'C-x' 'C-s'`) {
+		t.Fatalf("arguments not quoted: %s", cmd[len(cmd)-50:])
 	}
 }
 

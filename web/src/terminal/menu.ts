@@ -72,3 +72,36 @@ export function question(text: string): string {
   }
   return ''
 }
+
+// What a permission prompt asks to be allowed, as the screen shows it: the
+// lines between the rule Claude Code draws over the prompt and its question
+// (its head, "Bash command" or "Edit file", first), without the dashed rules
+// inside it and the hints. Only the screen says what is being approved: the
+// agent's log may be behind it, or of another call. Null when there is no
+// menu, or no rule over its question near enough.
+const solidRule = /^[\s─━]*[─━]{8,}[\s─━]*$/
+const dashedRule = /^[\s╌┄┈]*[╌┄┈]{8,}[\s╌┄┈]*$/
+const promptNoise = /^\s*(?:Tip:|This command requires approval\s*$)/
+export function promptBlock(text: string): { head: string; lines: string[] } | null {
+  const lines = text.split('\n')
+  const { top } = menuAt(lines)
+  if (top < 0) return null
+  let q = top - 1
+  while (q >= 0 && !lines[q].trim()) q--
+  if (q < 1 || !/[?？]\s*$/.test(lines[q])) return null
+  let start = -1
+  for (let i = q - 1; i >= 0 && q - i <= 40; i--) {
+    if (solidRule.test(lines[i])) {
+      start = i + 1
+      break
+    }
+  }
+  if (start < 0) return null
+  let body = lines.slice(start, q).filter((l) => !dashedRule.test(l) && !promptNoise.test(l)).map((l) => l.replace(/\s+$/, ''))
+  while (body.length && !body[0].trim()) body.shift()
+  while (body.length && !body[body.length - 1].trim()) body.pop()
+  if (body.length < 2) return null
+  const indent = Math.min(...body.filter((l) => l.trim()).map((l) => /^ */.exec(l)![0].length))
+  body = body.map((l) => l.slice(indent))
+  return { head: body[0].trim(), lines: body.slice(1) }
+}

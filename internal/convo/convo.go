@@ -34,6 +34,16 @@ type Entry struct {
 	Role  string `json:"role"`
 	Time  string `json:"ts,omitempty"`
 	Parts []Part `json:"parts"`
+	// Mid marks a message the person sent while the agent worked, which it
+	// took in during its turn (the turn goes on).
+	Mid bool `json:"mid,omitempty"`
+}
+
+// Queued is a message the person sent while the agent worked, which it has
+// not taken in yet.
+type Queued struct {
+	Text string `json:"text"`
+	Time string `json:"ts,omitempty"`
 }
 
 type Part struct {
@@ -78,6 +88,7 @@ const (
 	maxTasks  = 50  // tasks of a task list
 	maxTitle  = 300 // the session's title, a task's subject
 	maxMeta   = 120 // a model's, a mode's, a branch's name
+	maxQueue  = 20  // messages waiting to be taken in
 )
 
 // Meta is what a session runs with, as its log last said it: each field

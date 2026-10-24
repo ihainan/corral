@@ -621,14 +621,21 @@ html.term-dark .overlay, html.term-dark .menu, html.term-dark .toast {
 /* The card over the composer, its own scroll where the screen is short */
 .convo-dock-ask { display: flex; flex-direction: column; max-height: min(58vh, 520px); overflow-y: auto; overscroll-behavior: contain; border-radius: 12px; }
 .convo-dock-ask .convo-ask { box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18); }
-.convo-ask-what { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
-.convo-ask-why { margin: 0; font-size: 13px; color: var(--term-fg-2); }
-.convo-ask-path { font-family: var(--font-mono); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.convo-ask-cmd { max-height: 180px; }
+.convo-ask-block { max-height: min(34vh, 300px); white-space: pre; overflow: auto; }
+.convo-ask-block > span { display: block; min-width: max-content; }
 .convo-ask-label { min-width: 0; }
 .convo-ask-orig { flex: 0 10000 auto; min-width: 0; margin-left: auto; padding-left: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--term-fg-3); }
 @media (max-width: 640px) { .convo-ask-orig { display: none; } }
 .convo-ask-keys { color: var(--term-fg-3); font-size: 12.5px; }
+/* What waits to be taken in, over the composer */
+.convo-queue { display: flex; flex-direction: column; border: 1px solid var(--term-line); border-radius: 10px; background: var(--term-chrome); font-size: 13.5px; }
+.convo-queue-head { display: flex; align-items: center; gap: 10px; min-height: 36px; padding: 2px 6px 2px 12px; color: var(--term-fg-2); }
+.convo-queue-sum { flex: 1; min-width: 0; }
+.term-root .convo-queue-now { flex: none; height: 28px; padding: 0 10px; font-size: 13px; color: var(--term-fg); border: 1px solid var(--term-line); background: var(--term-bg); }
+.term-root .convo-queue-now:hover { background: var(--term-hover); }
+.convo-queue-said { flex: none; font-size: 12.5px; color: var(--term-fg-3); }
+.convo-queue-row { padding: 6px 12px; border-top: 1px solid var(--term-line); color: var(--term-fg); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 5.2em; overflow: hidden; }
+.convo-user.is-mid .convo-user-text { background: color-mix(in srgb, var(--term-accent-soft) 70%, transparent); }
 
 /* The agents to go to: beside the thread (wide), over it (narrow, or folded away) */
 .convo-side {

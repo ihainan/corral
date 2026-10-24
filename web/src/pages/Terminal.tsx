@@ -28,7 +28,6 @@ import { layoutIn } from '../terminal/layout'
 import { startPreviews } from '../terminal/preview'
 import { atCursor, inPromptBox } from '../terminal/prompt'
 import { InlineReply, ReplyDialog } from '../terminal/ReplyDialog'
-import { pendingTools } from '../terminal/pendingTool'
 import { PortsDialog, openForward } from '../terminal/PortsDialog'
 import { FilesDialog } from '../terminal/FilesDialog'
 import { ShareDialog } from '../terminal/ShareDialog'
@@ -565,8 +564,6 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
   const convoWaits =
     convo.status === 'ready' && !!convo.bind && !!convoHit && convoHit.a.pane_id === convo.bind.pane && convoHit.a.pane_id === herdr?.focused_pane &&
     convoAgent?.status === 'blocked' && !convoAgent.other
-  // What it waits to be allowed, as its log has it (the card shows it when the screen is of it too).
-  const convoAsked = useMemo(() => (convoWaits ? pendingTools(convo.entries) : undefined), [convoWaits, convo.entries])
   // Stop: Escape pressed in the conversation's pane by the gateway, for the
   // process it shows (internal/web/conversation.go). What became of it shows
   // in the bar until the agent stops working, or for a while.
@@ -604,6 +601,24 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
   }
   const shownStop = myStop?.text
   const convoStopsHere = showConvo && convoWorking && !!convo.bind && status === 'open'
+  // Send what is queued now (Claude Code's Ctrl+X Ctrl+S), pressed by the
+  // gateway as a stop is, for the process shown. What became of it shows
+  // over the queue for a while.
+  const [nowSent, setNowSent] = useState<{ key: string; text: string; busy: boolean; n: number } | null>(null)
+  const sendNow = () => {
+    const b = convo.bind
+    const key = stopKey
+    if (!b || (nowSent?.key === key && nowSent.busy)) return
+    const n = ++stopN.current
+    setNowSent({ key, text: t('convo.sendingNow'), busy: true, n })
+    const settle = (text: string) => {
+      setNowSent({ key, text, busy: false, n })
+      setTimeout(() => setNowSent((cur) => (cur?.n === n ? null : cur)), 8000)
+    }
+    api('POST', `/api/sessions/${id}/conversation/send-now`, { pane: b.pane, pid: b.pid, start: b.start, session: b.session })
+      .then(() => settle(t('convo.sentNow')))
+      .catch((e) => settle(e instanceof ApiError && e.code === 'agent_changed' ? t('convo.stopChanged') : errorText(e)))
+  }
   // Going to another agent from the bar (herdr): sending waits until herdr
   // has that pane in front and the conversation is of it, so what is typed
   // meanwhile does not reach the pane left. A switch not done in 10 seconds
@@ -745,7 +760,9 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
     const timer = setTimeout(() => setConvoPending((ps) => ps.map((p) => (p.state === 'waiting' && Date.now() - p.at >= PENDING_MS ? { ...p, state: 'unseen' } : p))), Math.max(0, due) + 50)
     return () => clearTimeout(timer)
   }, [convoPending])
-  const shownPending = convoPending.filter((p) => p.bind === bindKey)
+  // (One the agent has queued shows in its queue, over the composer, not here as well.)
+  const queuedTexts = new Set((convo.queued ?? []).map((q) => q.text.replace(/\s+/g, ' ').trim()))
+  const shownPending = convoPending.filter((p) => p.bind === bindKey && !(p.state === 'waiting' && queuedTexts.has(p.text.replace(/\s+/g, ' ').trim())))
   // The conversation covers the terminal: the composer is how to type there
   // (and, on a touch screen, taps on it bring up no keyboard). It opens with
   // the view, unless it was put away while the view showed.
@@ -3044,7 +3061,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
             ask={
               convoWaits && convoHit ? (
                 // (One a pane, as the dialog: nothing of another pane's carries over.)
-                <InlineReply key={convoHit.a.pane_id} sessionId={id} agent={convoHit.a} resizedAt={sized} onLoaded={() => forgetReply(convoHit.a.pane_id)} pending={convoAsked} active={active} />
+                <InlineReply key={convoHit.a.pane_id} sessionId={id} agent={convoHit.a} resizedAt={sized} onLoaded={() => forgetReply(convoHit.a.pane_id)} active={active} held={() => mods.current.ctrl !== 'off' || mods.current.alt !== 'off'} />
               ) : undefined
             }
             onStop={convoStopsHere ? stopAgent : undefined}
@@ -3055,6 +3072,8 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
             onShowTerminal={() => setConvoPeek(true)}
             onCopied={() => toast(t('common.copied'))}
             composer={composer ? composerEl : undefined}
+            onSendNow={convoStopsHere ? sendNow : undefined}
+            sendNow={nowSent?.key === stopKey ? nowSent.text : undefined}
           />
         )}
         {dragOver && <div className="term-drop">{t('term.dropHint')}</div>}
