@@ -55,7 +55,7 @@ type Claude struct {
 	meta    Meta
 	queue   []queuedItem // what waits to be taken in, oldest first
 	gone    []goneItem   // removed from it, to arrive still (as queued_command): that arrival is of these
-	since   int64        // (unix seconds) what was queued before was to another process: not kept
+	since   int64        // (unix milliseconds) what was queued before was to another process: not kept
 	// Skipped counts lines that were not JSON or of no use to the view.
 	Skipped int
 }
@@ -117,7 +117,7 @@ func (c *Claude) Queued() []Queued {
 func (c *Claude) ClearQueue() { c.queue, c.gone = nil, nil }
 
 // QueueSince says when the process the log is read for started (unix
-// seconds; 0 when not known): what was queued before was to another process
+// milliseconds; 0 when not known): what was queued before was to another process
 // of the same session (one gone, and resumed) and went with it, so it is
 // dropped, and not kept when read.
 func (c *Claude) QueueSince(started int64) {
@@ -147,7 +147,7 @@ func (c *Claude) ofNow(ts string) bool {
 		return true
 	}
 	at, err := time.Parse(time.RFC3339Nano, ts)
-	return err == nil && at.Unix() >= c.since
+	return err == nil && at.UnixMilli() >= c.since
 }
 
 // Tasks is the agent's task list as the log read has it (a task created

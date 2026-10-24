@@ -72,7 +72,7 @@ for f in "$HOME"/.claude/sessions/*.json; do
   case $start in ''|*[!0-9]*) continue;; esac
   pgrp=$(printf '%s' "${stat##*) }" | cut -d' ' -f3); tpgid=$(printf '%s' "${stat##*) }" | cut -d' ' -f6)
   fg=0; [ -n "$pgrp" ] && [ "$pgrp" = "$tpgid" ] && fg=1
-  started=; [ -n "$btime" ] && [ -n "$hz" ] && started=$((btime + start / hz))
+  started=; [ -n "$btime" ] && [ -n "$hz" ] && started=$((btime * 1000 + start * 1000 / hz))
   c=$(head -c 65536 "$f" 2>/dev/null | tr -d '\n')
   sid=$(printf '%s' "$c" | grep -o '"sessionId" *: *"[0-9a-fA-F-]*"' | head -n 1 | sed 's/.*"\([0-9a-fA-F-]*\)"$/\1/')
   ps=$(printf '%s' "$c" | grep -o '"procStart" *: *"*[0-9]*' | head -n 1 | sed 's/[^0-9]*\([0-9]*\)$/\1/')
@@ -93,7 +93,7 @@ exit 0`
 type convoProc struct {
 	pid, start    int64
 	fg            bool  // in front on its terminal: what is typed there reaches it
-	started       int64 // when it started, unix seconds (0 when not known)
+	started       int64 // when it started, unix milliseconds (to the clock's tick; 0 when not known)
 	sid, log      string
 	herdrPane     string
 	herdrSocket   string
@@ -317,7 +317,7 @@ type convoBind struct {
 	Start   int64  `json:"start"`
 	Session string `json:"session"`
 	Title   string `json:"title,omitempty"` // (tmux: the pane's title)
-	// started is when the process started (unix seconds; 0 when not
+	// started is when the process started (unix milliseconds; 0 when not
 	// known): what was queued before was another process's.
 	started int64
 }

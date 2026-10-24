@@ -476,7 +476,7 @@ func TestClaudeQueueArrivals(t *testing.T) {
 func TestClaudeQueueSince(t *testing.T) {
 	c := NewClaude()
 	c.Feed(lines(`{"type":"queue-operation","operation":"enqueue","timestamp":"2026-10-24T09:09:58.500Z","content":"X"}`))
-	started := time.Date(2026, 10, 24, 9, 10, 0, 0, time.UTC).Unix()
+	started := time.Date(2026, 10, 24, 9, 10, 0, 0, time.UTC).UnixMilli()
 	c.Feed(lines(`{"type":"queue-operation","operation":"enqueue","timestamp":"2026-10-24T09:09:58.600Z","content":"Z"}`, `{"type":"queue-operation","operation":"remove","timestamp":"2026-10-24T09:09:58.700Z","content":"Z"}`))
 	c.QueueSince(started)
 	if q := c.Queued(); len(q) != 0 {
@@ -517,9 +517,19 @@ func TestClaudeQueueSinceKeepsTheNewProcessRemovals(t *testing.T) {
 		`{"type":"queue-operation","operation":"enqueue","timestamp":"2026-10-24T09:10:02Z","content":"X"}`,
 		`{"type":"queue-operation","operation":"remove","timestamp":"2026-10-24T09:10:03Z","content":"X"}`,
 	))
-	c.QueueSince(time.Date(2026, 10, 24, 9, 10, 0, 0, time.UTC).Unix()) // (found only now)
+	c.QueueSince(time.Date(2026, 10, 24, 9, 10, 0, 0, time.UTC).UnixMilli()) // (found only now)
 	c.Feed(lines(`{"type":"attachment","uuid":"q1","attachment":{"type":"queued_command","commandMode":"prompt","prompt":"X"}}`))
 	if q := c.Queued(); len(q) != 1 {
 		t.Fatalf("the second X still waits: %+v", q)
+	}
+}
+
+func TestClaudeQueueSinceToTheMillisecond(t *testing.T) {
+	c := NewClaude()
+	c.Feed(lines(`{"type":"queue-operation","operation":"enqueue","timestamp":"2026-10-24T09:10:00.050Z","content":"X"}`, `{"type":"queue-operation","operation":"remove","timestamp":"2026-10-24T09:10:00.100Z","content":"X"}`))
+	c.QueueSince(time.Date(2026, 10, 24, 9, 10, 0, 800e6, time.UTC).UnixMilli())
+	c.Feed(lines(`{"type":"queue-operation","operation":"enqueue","timestamp":"2026-10-24T09:10:01Z","content":"X"}`, `{"type":"user","uuid":"u","message":{"content":"X"}}`))
+	if q := c.Queued(); len(q) != 0 {
+		t.Fatalf("the old removal was dropped, the new X arrived: %+v", q)
 	}
 }
