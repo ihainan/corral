@@ -364,6 +364,10 @@ Report security problems privately, not in a public issue: see [SECURITY.md](SEC
   composer is what the latest request carried; the log does not say how
   large the session's window is. The permission mode is the one of the
   latest message (a change since shows with the next).
+- What waits to be taken in is what Claude Code's log says was queued to the
+  process shown since it started; a process of the same session started
+  again within a second of the one before is not told apart from it (the
+  host's boot time is known to the second).
 - Several tabs of one tmux or herdr session keep places by when they were
   opened; closing one can move the others of that session.
 - Claude Code's suggested prompt is read off the screen (greyed text in its

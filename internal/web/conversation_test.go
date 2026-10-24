@@ -148,8 +148,8 @@ func TestConvoStatesComeBackUnderTheLimit(t *testing.T) {
 }
 
 func TestParseConvoLocateStarted(t *testing.T) {
-	procs, _, _, _, _ := parseConvoLocate(convoRec("pid=100", "start=500", "started=1792832000123", "fg=1", "procstart=500", "sid="+sidA, "log="))
-	if len(procs) != 1 || procs[0].started != 1792832000123 {
+	procs, _, _, _, _ := parseConvoLocate(convoRec("pid=100", "start=500", "btime=1792832000", "hz=100", "fg=1", "procstart=500", "sid="+sidA, "log="))
+	if len(procs) != 1 || procs[0].started != 1792832005000 {
 		t.Fatalf("started: %+v", procs)
 	}
 }

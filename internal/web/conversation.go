@@ -16,6 +16,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -72,7 +73,6 @@ for f in "$HOME"/.claude/sessions/*.json; do
   case $start in ''|*[!0-9]*) continue;; esac
   pgrp=$(printf '%s' "${stat##*) }" | cut -d' ' -f3); tpgid=$(printf '%s' "${stat##*) }" | cut -d' ' -f6)
   fg=0; [ -n "$pgrp" ] && [ "$pgrp" = "$tpgid" ] && fg=1
-  started=; [ -n "$btime" ] && [ -n "$hz" ] && started=$((btime * 1000 + start * 1000 / hz))
   c=$(head -c 65536 "$f" 2>/dev/null | tr -d '\n')
   sid=$(printf '%s' "$c" | grep -o '"sessionId" *: *"[0-9a-fA-F-]*"' | head -n 1 | sed 's/.*"\([0-9a-fA-F-]*\)"$/\1/')
   ps=$(printf '%s' "$c" | grep -o '"procStart" *: *"*[0-9]*' | head -n 1 | sed 's/[^0-9]*\([0-9]*\)$/\1/')
@@ -84,7 +84,7 @@ for f in "$HOME"/.claude/sessions/*.json; do
     [ -f "$l" ] && { log=$l; break; }
   done
   env=$(tr '\0' '\n' <"/proc/$pid/environ" 2>/dev/null | grep -E '^(HERDR_PANE_ID|HERDR_SOCKET_PATH|TMUX|TMUX_PANE)=' | head -c 4096)
-  printf 'pid=%s\nstart=%s\nstarted=%s\nfg=%s\nprocstart=%s\nsid=%s\nlog=%s\n%s\0' "$pid" "$start" "$started" "$fg" "$ps" "$sid" "$log" "$env"
+  printf 'pid=%s\nstart=%s\nbtime=%s\nhz=%s\nfg=%s\nprocstart=%s\nsid=%s\nlog=%s\n%s\0' "$pid" "$start" "$btime" "$hz" "$fg" "$ps" "$sid" "$log" "$env"
 done
 exit 0`
 	return "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(mode) + " " + sshx.QuoteShell(tmuxName)
@@ -93,7 +93,7 @@ exit 0`
 type convoProc struct {
 	pid, start    int64
 	fg            bool  // in front on its terminal: what is typed there reaches it
-	started       int64 // when it started, unix milliseconds (to the clock's tick; 0 when not known)
+	started       int64 // when it started, unix milliseconds (0 when not known; within the second the host's boot time is known to)
 	sid, log      string
 	herdrPane     string
 	herdrSocket   string
@@ -135,6 +135,7 @@ func parseConvoLocate(out string) (procs []convoProc, tmuxActive, tmuxPID, tmuxT
 		}
 		var p convoProc
 		var procStart int64 = -1
+		var btime, hz int64 // (when the host booted, unix seconds; its clock's ticks a second)
 		seen := map[string]bool{}
 		for _, line := range strings.Split(rec, "\n") {
 			k, v, ok := strings.Cut(line, "=")
@@ -149,8 +150,10 @@ func parseConvoLocate(out string) (procs []convoProc, tmuxActive, tmuxPID, tmuxT
 				p.start, _ = strconv.ParseInt(v, 10, 64)
 			case "fg":
 				p.fg = v == "1"
-			case "started":
-				p.started, _ = strconv.ParseInt(v, 10, 64)
+			case "btime":
+				btime, _ = strconv.ParseInt(v, 10, 64)
+			case "hz":
+				hz, _ = strconv.ParseInt(v, 10, 64)
 			case "procstart":
 				if n, err := strconv.ParseInt(v, 10, 64); err == nil {
 					procStart = n
@@ -174,6 +177,10 @@ func parseConvoLocate(out string) (procs []convoProc, tmuxActive, tmuxPID, tmuxT
 		}
 		if p.pid <= 0 || p.start <= 0 || procStart != p.start || !convoUUID.MatchString(p.sid) {
 			continue
+		}
+		// (Here, not in the host's shell, whose numbers may be 32 bits.)
+		if btime > 0 && hz > 0 && hz <= 100000 && p.start < math.MaxInt64/1000 {
+			p.started = btime*1000 + p.start*1000/hz
 		}
 		if l, ok := cleanRemotePath(p.log); !ok || !strings.HasSuffix(l, "/"+p.sid+".jsonl") {
 			p.log = ""
