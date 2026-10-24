@@ -603,9 +603,9 @@ html.term-dark .overlay, html.term-dark .menu, html.term-dark .toast {
   border: 1px solid var(--term-warn-text); background: var(--term-bg);
 }
 .convo-ask-q { font-weight: 600; }
-.convo-ask-opts { display: flex; flex-direction: column; gap: 6px; }
+.convo-ask-opts { display: flex; flex-direction: column; gap: 4px; }
 .convo-ask-opt {
-  display: flex; align-items: baseline; gap: 10px; width: 100%; padding: 8px 12px; border-radius: 8px; cursor: pointer;
+  display: flex; align-items: baseline; gap: 10px; width: 100%; padding: 6px 12px; border-radius: 8px; cursor: pointer;
   border: 1px solid var(--term-line); background: var(--term-bg); color: var(--term-fg); font: inherit; text-align: left;
 }
 .convo-ask-opt:hover:not(:disabled) { background: var(--term-hover); }
@@ -618,6 +618,17 @@ html.term-dark .overlay, html.term-dark .menu, html.term-dark .toast {
 .convo-ask-more .link-btn { font-size: 13px; color: var(--term-fg-2); }
 .convo-ask .reply-screen { max-height: 260px; }
 .convo-ask-sent { margin: 0; font-size: 13px; color: var(--term-fg-3); }
+/* The card over the composer, its own scroll where the screen is short */
+.convo-dock-ask { display: flex; flex-direction: column; max-height: min(58vh, 520px); overflow-y: auto; overscroll-behavior: contain; border-radius: 12px; }
+.convo-dock-ask .convo-ask { box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18); }
+.convo-ask-what { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.convo-ask-why { margin: 0; font-size: 13px; color: var(--term-fg-2); }
+.convo-ask-path { font-family: var(--font-mono); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.convo-ask-cmd { max-height: 180px; }
+.convo-ask-label { min-width: 0; }
+.convo-ask-orig { flex: 0 10000 auto; min-width: 0; margin-left: auto; padding-left: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--term-fg-3); }
+@media (max-width: 640px) { .convo-ask-orig { display: none; } }
+.convo-ask-keys { color: var(--term-fg-3); font-size: 12.5px; }
 
 /* The agents to go to: beside the thread (wide), over it (narrow, or folded away) */
 .convo-side {

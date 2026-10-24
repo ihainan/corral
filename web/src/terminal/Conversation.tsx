@@ -240,7 +240,7 @@ export function ConversationView({
   agent: ConvoAgent | null
   pending: ConvoPending[]
   onReply?: () => void // (the agent waits for an answer: a bar to open the reply)
-  ask?: ReactNode // (it waits, and is answered here: at the end of the thread, over the bar)
+  ask?: ReactNode // (it waits, and is answered here: over the composer)
   onStop?: () => void // (it works: press Esc in its pane)
   stop?: string // what became of the last stop pressed, to say
   side?: { rows: ConvoListRow[] } // the agents to go to: beside the thread where there is room, else from the bar
@@ -421,7 +421,6 @@ export function ConversationView({
           </div>
         ))}
         {working && quiet && <p className="convo-working">{t('convo.quiet')}</p>}
-        {ask}
       </>
     )
 
@@ -500,6 +499,7 @@ export function ConversationView({
       </div>
       <div className="convo-dock">
         {convo.status === 'ready' && convo.tasks && <Tasks tasks={convo.tasks} fold={!!ask} />}
+        {convo.status === 'ready' && ask && <div className="convo-dock-ask">{ask}</div>}
         {waits && !ask && convo.status === 'ready' && (
           // (Where it cannot be answered here: in its terminal.)
           <div className="convo-waiting" role="status">
@@ -998,6 +998,8 @@ const exitCode = (tool: ConvoTool) => (tool.error ? /^Exit code (\d{1,3})\b/.exe
 function ToolRow({ tool, onCopy, live }: { tool: ConvoTool; onCopy: (s: string) => void; live?: boolean }) {
   const [open, setOpen] = useState(false)
   const [full, setFull] = useState(false)
+  const objRef = useRef<HTMLSpanElement>(null)
+  const [clipped, setClipped] = useState(false) // (opened while the line cut its object short)
   if (live) return null // (said on the turn's line, as the step under way)
   const v = verbOf(tool.name)
   const obj = object(tool)
@@ -1008,16 +1010,28 @@ function ToolRow({ tool, onCopy, live }: { tool: ConvoTool; onCopy: (s: string) 
   // lines or longer than a line holds (it shows the first), a subagent's
   // prompt. A file's path is on the line and in its tooltip.
   const d = tool.detail ?? ''
-  const more = cat === 'cmd' ? d.includes('\n') || d.length > 80 : cat !== 'edit' && cat !== 'read' && !!d && (!!tool.title || d.includes('\n') || d.length > 60)
+  const more = cat === 'cmd' ? clipped || d.includes('\n') || d.length > 80 : cat !== 'edit' && cat !== 'read' && !!d && (!!tool.title || d.includes('\n') || d.length > 60)
   // An edit that went through says so to the model ("The file … has been
-  // updated"): nothing for the person. What it changed shows instead.
+  // updated"): nothing for the person. What it changed shows instead (not
+  // for a notebook's: its result is all there is of it).
   // (A failed command's exit code is on the line: its output goes without it.)
-  const result = tool.done && !(cat === 'edit' && !tool.error) ? (code ? tool.result?.replace(/^Exit code \d+\n?/, '') : tool.result) : undefined
+  const receipt = isEdit && !tool.error && tool.name !== 'NotebookEdit'
+  const result = tool.done && !receipt ? (code ? tool.result?.replace(/^Exit code \d+\n?/, '') : tool.result) : undefined
   return (
     <div className={'convo-step' + (tool.error ? ' is-error' : '')}>
-      <button type="button" className="convo-step-head" aria-expanded={open} onClick={() => setOpen(!open)} title={cat === 'cmd' ? firstLine(d) : d || tool.title}>
+      <button
+        type="button"
+        className="convo-step-head"
+        aria-expanded={open}
+        onClick={() => {
+          const el = objRef.current
+          if (!open) setClipped(!!el && el.scrollWidth > el.clientWidth + 1)
+          setOpen(!open)
+        }}
+        title={cat === 'cmd' ? firstLine(d) : d || tool.title}
+      >
         <span className="convo-step-verb">{v ? t(`convo.v.${v}` as I18nKey) : tool.name}</span>
-        <span className={'convo-step-obj' + (obj.code ? ' is-code' : '')}>{v === 'cmd' ? <Code text={obj.text} lang="bash" /> : obj.text}</span>
+        <span ref={objRef} className={'convo-step-obj' + (obj.code ? ' is-code' : '')}>{v === 'cmd' ? <Code text={obj.text} lang="bash" /> : obj.text}</span>
         {cat === 'cmd' && tool.title && <span className="convo-step-desc">{tool.title}</span>}
         {cat === 'edit' && <LineCounts add={tool.add ?? 0} del={tool.del ?? 0} />}
         {tool.error && <span className="convo-failed">{code ? t('convo.exitCode', { n: code }) : t('convo.toolFailed')}</span>}
@@ -1045,7 +1059,7 @@ function ToolRow({ tool, onCopy, live }: { tool: ConvoTool; onCopy: (s: string) 
               )}
             </>
           ) : (
-            !(cat === 'edit' && !tool.error) && <div className="convo-result-head">{t('convo.noOutput')}</div>
+            !receipt && <div className="convo-result-head">{t('convo.noOutput')}</div>
           )}
         </div>
       )}
@@ -1053,7 +1067,7 @@ function ToolRow({ tool, onCopy, live }: { tool: ConvoTool; onCopy: (s: string) 
   )
 }
 
-function Diff({ old, new: nw }: { old: string; new: string }) {
+export function Diff({ old, new: nw }: { old: string; new: string }) {
   const rows: [string, string][] = []
   if (old) for (const l of old.split('\n')) rows.push(['del', l])
   if (nw) for (const l of nw.split('\n')) rows.push(['add', l])

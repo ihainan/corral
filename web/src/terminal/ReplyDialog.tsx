@@ -2,14 +2,20 @@ import { useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 're
 import { RotateCw } from 'lucide-react'
 import { api, ApiError, errorText, type HerdrAgent } from '../api'
 import { t } from '../i18n'
-import { Dialog, LoadError, useToast } from '../components/ui'
+import { Dialog, isCoarse, LoadError, useToast } from '../components/ui'
 import { getReplyDraft, keepReplyDraft } from './drafts'
 import { choices, question } from './menu'
+import { Code } from './Code'
+import { Diff } from './Conversation'
+import type { ConvoTool } from './conversation'
+import { askedTool, choiceText, questionText } from './pendingTool'
 
 interface Screen {
   text: string
   digest: string
 }
+
+const isTouchOnly = isCoarse()
 
 // The last lines of a pane's screen are what the user needs to answer.
 const shownLines = 40
@@ -201,9 +207,61 @@ export function ReplyDialog({ sessionId, agent, onLoaded, onClose, resizedAt }: 
   )
 }
 
-// The same, in the conversation: the question and its choices at the end of
-// the thread, a line of text, and the screen itself on demand.
-export function InlineReply({ sessionId, agent, onLoaded, resizedAt }: { sessionId: string; agent: HerdrAgent; onLoaded?: () => void; resizedAt?: number }) {
+// What the agent asks to be allowed, as its log has it: the command and what
+// it is for, the edit, the address. (Shown only when the screen is of it.)
+function Asked({ tool }: { tool: ConvoTool }) {
+  const d = tool.detail ?? ''
+  if (tool.name === 'Bash')
+    return (
+      <div className="convo-ask-what">
+        {tool.title && <p className="convo-ask-why">{t('convo.askWhy', { s: tool.title })}</p>}
+        <pre className="convo-pre convo-ask-cmd"><Code text={d} lang="bash" /></pre>
+      </div>
+    )
+  if (tool.old !== undefined || tool.new !== undefined)
+    return (
+      <div className="convo-ask-what">
+        <p className="convo-ask-why convo-ask-path" title={d}>{d}</p>
+        <Diff old={tool.old ?? ''} new={tool.new ?? ''} />
+      </div>
+    )
+  return (
+    <div className="convo-ask-what">
+      <pre className="convo-pre convo-ask-cmd">{d}</pre>
+    </div>
+  )
+}
+
+// Keys that answer the card while it shows and no field has them: a
+// choice's number, Esc for no. (The terminal's own field counts as none:
+// the key is the card's, not the pane's.)
+function useAnswerKeys(on: boolean, keys: string[], onKey: (k: string) => void) {
+  const ref = useRef(onKey)
+  ref.current = onKey
+  const list = keys.join(' ')
+  useEffect(() => {
+    if (!on) return
+    const ks = list.split(' ')
+    const handle = (e: KeyboardEvent) => {
+      if (e.ctrlKey || e.metaKey || e.altKey || e.isComposing || e.repeat) return
+      const el = e.target as HTMLElement | null
+      const typing = !!el && !el.classList.contains('xterm-helper-textarea') && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || el.isContentEditable)
+      if (typing || document.querySelector('[aria-modal="true"]')) return
+      const k = e.key === 'Escape' ? 'esc' : e.key
+      if (!ks.includes(k)) return
+      e.preventDefault()
+      e.stopPropagation()
+      ref.current(k)
+    }
+    window.addEventListener('keydown', handle, true)
+    return () => window.removeEventListener('keydown', handle, true)
+  }, [on, list])
+}
+
+// The same, in the conversation, over the composer: the question, what it is
+// of (from the log), its choices (keys 1–9, Esc), a line of text, and the
+// screen itself on demand.
+export function InlineReply({ sessionId, agent, onLoaded, resizedAt, pending, active = true }: { sessionId: string; agent: HerdrAgent; onLoaded?: () => void; resizedAt?: number; pending?: ConvoTool[]; active?: boolean }) {
   const [sent, setSent] = useState<string | null>(null) // (the screen answered)
   const [shown, setShown] = useState(false)
   const answered = useRef('')
@@ -242,11 +300,16 @@ export function InlineReply({ sessionId, agent, onLoaded, resizedAt }: { session
   useLayoutEffect(() => {
     if (pre.current) pre.current.scrollTop = pre.current.scrollHeight
   }, [screen, shown])
+  const asked = pending?.length && screen ? askedTool(pending, screen.text) : undefined
+  const ready = sent === null && !!screen && !busy && !failed
+  useAnswerKeys(active && ready, [...opts.map((o) => o.key), 'esc'], (k) => void send({ keys: [k] }))
   if (sent !== null) return <p className="convo-ask-sent" role="status">{t('convo.answeredHere')}</p>
   const q = screen ? question(screen.text) : ''
+  const shownQ = asked?.name === 'Bash' && /proceed/i.test(q) ? t('convo.askRun') : questionText(q)
   return (
     <div className="convo-ask" role="group" aria-label={t('convo.waiting')}>
-      <div className="convo-ask-q">{q || t('convo.waiting')}</div>
+      <div className="convo-ask-q">{shownQ || t('convo.waiting')}</div>
+      {asked && <Asked tool={asked} />}
       {failed ? (
         <LoadError onRetry={() => void load()} />
       ) : (
@@ -258,12 +321,16 @@ export function InlineReply({ sessionId, agent, onLoaded, resizedAt }: { session
           )}
           {opts.length > 0 && (
             <div className="convo-ask-opts" role="group" aria-label={t('reply.choices')}>
-              {opts.map((o) => (
-                <button key={o.key} type="button" className="convo-ask-opt" disabled={!screen || busy} onClick={() => void send({ keys: [o.key] })}>
-                  <span className="convo-ask-key">{o.key}</span>
-                  <span>{o.label}</span>
-                </button>
-              ))}
+              {opts.map((o) => {
+                const c = choiceText(o.label)
+                return (
+                  <button key={o.key} type="button" className="convo-ask-opt" disabled={!screen || busy} onClick={() => void send({ keys: [o.key] })}>
+                    <span className="convo-ask-key">{o.key}</span>
+                    <span className="convo-ask-label">{c.text}</span>
+                    {c.original && <span className="convo-ask-orig">{c.original}</span>}
+                  </button>
+                )
+              })}
             </div>
           )}
           <form className="convo-ask-text" onSubmit={submit}>
@@ -282,6 +349,11 @@ export function InlineReply({ sessionId, agent, onLoaded, resizedAt }: { session
             </button>
           </form>
           <div className="convo-ask-more">
+            {!isTouchOnly && (
+              <span className="convo-ask-keys">
+                {opts.length > 0 ? t('convo.askKeys', { n: opts.length }) : t('convo.askEsc')}
+              </span>
+            )}
             <button type="button" className="link-btn" aria-expanded={shown} onClick={() => setShown(!shown)}>
               {t(shown ? 'convo.hideScreen' : 'convo.showScreen')}
             </button>
@@ -290,9 +362,12 @@ export function InlineReply({ sessionId, agent, onLoaded, resizedAt }: { session
                 {t('reply.enter')}
               </button>
             )}
-            <button type="button" className="link-btn" disabled={!screen || busy} onClick={() => void send({ keys: ['esc'] })}>
-              {t('reply.esc')}
-            </button>
+            {opts.length === 0 && (
+              // (With choices, the last one says no, and Esc does too.)
+              <button type="button" className="link-btn" disabled={!screen || busy} onClick={() => void send({ keys: ['esc'] })}>
+                {t('reply.esc')}
+              </button>
+            )}
           </div>
           {shown && (
             <div className="reply-screen-wrap">

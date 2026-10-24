@@ -28,6 +28,7 @@ import { layoutIn } from '../terminal/layout'
 import { startPreviews } from '../terminal/preview'
 import { atCursor, inPromptBox } from '../terminal/prompt'
 import { InlineReply, ReplyDialog } from '../terminal/ReplyDialog'
+import { pendingTools } from '../terminal/pendingTool'
 import { PortsDialog, openForward } from '../terminal/PortsDialog'
 import { FilesDialog } from '../terminal/FilesDialog'
 import { ShareDialog } from '../terminal/ShareDialog'
@@ -564,6 +565,8 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
   const convoWaits =
     convo.status === 'ready' && !!convo.bind && !!convoHit && convoHit.a.pane_id === convo.bind.pane && convoHit.a.pane_id === herdr?.focused_pane &&
     convoAgent?.status === 'blocked' && !convoAgent.other
+  // What it waits to be allowed, as its log has it (the card shows it when the screen is of it too).
+  const convoAsked = useMemo(() => (convoWaits ? pendingTools(convo.entries) : undefined), [convoWaits, convo.entries])
   // Stop: Escape pressed in the conversation's pane by the gateway, for the
   // process it shows (internal/web/conversation.go). What became of it shows
   // in the bar until the agent stops working, or for a while.
@@ -750,10 +753,11 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
   // The composer's field as it was: a field that takes its place (the
   // composer moved into the conversation or out of it) goes on from there,
   // focused if it was (or lost focus a moment ago, to the button pressed).
-  const composerWas = useRef<{ el: HTMLTextAreaElement | null; focused: boolean; leftAt: number; start: number; end: number }>({ el: null, focused: false, leftAt: 0, start: 0, end: 0 })
+  const composerWas = useRef<{ el: HTMLTextAreaElement | null; focused: boolean; leftAt: number; start: number; end: number; dir: 'forward' | 'backward' | 'none' }>({ el: null, focused: false, leftAt: 0, start: 0, end: 0, dir: 'none' })
   const keepComposerSel = (el: HTMLTextAreaElement) => {
     composerWas.current.start = el.selectionStart
     composerWas.current.end = el.selectionEnd
+    composerWas.current.dir = el.selectionDirection ?? 'none'
   }
   useLayoutEffect(() => {
     const el = composerRef.current
@@ -763,7 +767,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
     was.el = el
     if (first) return
     const n = el.value.length
-    el.setSelectionRange(Math.min(was.start, n), Math.min(was.end, n))
+    el.setSelectionRange(Math.min(was.start, n), Math.min(was.end, n), was.dir)
     if (was.focused || Date.now() - was.leftAt < 500) el.focus()
   }, [showConvo, composer])
   const toggleConvo = () => {
@@ -3040,7 +3044,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
             ask={
               convoWaits && convoHit ? (
                 // (One a pane, as the dialog: nothing of another pane's carries over.)
-                <InlineReply key={convoHit.a.pane_id} sessionId={id} agent={convoHit.a} resizedAt={sized} onLoaded={() => forgetReply(convoHit.a.pane_id)} />
+                <InlineReply key={convoHit.a.pane_id} sessionId={id} agent={convoHit.a} resizedAt={sized} onLoaded={() => forgetReply(convoHit.a.pane_id)} pending={convoAsked} active={active} />
               ) : undefined
             }
             onStop={convoStopsHere ? stopAgent : undefined}
