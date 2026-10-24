@@ -78,7 +78,7 @@ another: start it at your desk, check on it from your phone, carry on on a table
   added and removed; one opens the turn's changes beside it, with line
   numbers and the lines around) and copy; all the agent did between your
   messages in one line ("worked for 2m 14s"; while it works, what it is doing
-  and for how long), opened to a line a step. The composer sits under the
+  and for how long), folded until you open it (a tap, or Ctrl+O for all). The composer sits under the
   thread, with the permission mode, branch, model and context size under it;
   over it, its task list, what you sent that waits to be taken in (send it
   now), and a permission prompt to answer with its own keys (1–9, Esc),

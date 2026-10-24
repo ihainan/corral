@@ -232,7 +232,7 @@ function Asked({ lines }: { lines: string[] }) {
 // they would answer what comes next without the screen being checked.
 // Not with a modifier (the key bar's latched ones too: held), while an input
 // method composes, or while a menu or dialog is open (Esc is its).
-function useAnswerKeys(on: boolean, ready: boolean, keys: string[], held: (() => boolean) | undefined, onKey: (k: string) => void) {
+function useAnswerKeys(on: boolean, ready: boolean, keys: string[], held: (() => boolean) | undefined, card: { current: HTMLElement | null }, onKey: (k: string) => void) {
   const ref = useRef(onKey)
   ref.current = onKey
   const heldRef = useRef(held)
@@ -247,8 +247,8 @@ function useAnswerKeys(on: boolean, ready: boolean, keys: string[], held: (() =>
       if (e.ctrlKey || e.metaKey || e.altKey || e.isComposing || e.keyCode === 229 || heldRef.current?.()) return
       const el = e.target as HTMLElement | null
       const typing = !!el && !el.classList.contains('xterm-helper-textarea') && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || el.isContentEditable)
-      // (The changes panel open: it may cover the card, and Esc is its.)
-      if (typing || document.querySelector('[aria-modal="true"], [role="menu"], [role="dialog"], .convo-panel')) return
+      // (The changes panel open over this conversation: it may cover the card, and Esc is its.)
+      if (typing || document.querySelector('[aria-modal="true"], [role="menu"], [role="dialog"]') || card.current?.closest('.convo')?.querySelector('.convo-panel')) return
       const k = e.key === 'Escape' ? 'esc' : e.key
       if (!ks.includes(k) && !/^[0-9]$/.test(k)) return
       e.preventDefault()
@@ -304,12 +304,13 @@ export function InlineReply({ sessionId, agent, onLoaded, resizedAt, active = tr
     if (pre.current) pre.current.scrollTop = pre.current.scrollHeight
   }, [screen, shown, !block])
   const ready = sent === null && !!screen && !busy && !failed
-  useAnswerKeys(active, ready, [...opts.map((o) => o.key), 'esc'], held, (k) => void send({ keys: [k] }))
+  const cardRef = useRef<HTMLDivElement>(null)
+  useAnswerKeys(active, ready, [...opts.map((o) => o.key), 'esc'], held, cardRef, (k) => void send({ keys: [k] }))
   if (sent !== null) return <p className="convo-ask-sent" role="status">{t('convo.answeredHere')}</p>
   const q = screen ? question(screen.text) : ''
   const shownQ = block && /^Bash command$/i.test(block.head) && /^Do you want to proceed\?$/i.test(q) ? t('convo.askRun') : questionText(q)
   return (
-    <div className="convo-ask" role="group" aria-label={t('convo.waiting')}>
+    <div className="convo-ask" role="group" aria-label={t('convo.waiting')} ref={cardRef}>
       <div className="convo-ask-q">{shownQ || t('convo.waiting')}</div>
       {block && <Asked lines={block.lines} />}
       {screen && !block && !failed && <p className="convo-ask-unread">{t('convo.askUnread')}</p>}

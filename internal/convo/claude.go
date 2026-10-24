@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -54,6 +55,7 @@ type Claude struct {
 	meta    Meta
 	queue   []queuedItem // what waits to be taken in, oldest first
 	gone    []string     // removed from it, to arrive still (as queued_command): that arrival is of these
+	since   int64        // (unix seconds) what was queued before was to another process: not kept
 	// Skipped counts lines that were not JSON or of no use to the view.
 	Skipped int
 }
@@ -108,6 +110,32 @@ func (c *Claude) Queued() []Queued {
 
 // ClearQueue forgets what waits.
 func (c *Claude) ClearQueue() { c.queue, c.gone = nil, nil }
+
+// QueueSince says when the process the log is read for started (unix
+// seconds; 0 when not known): what was queued before was to another process
+// of the same session (one gone, and resumed) and went with it, so it is
+// dropped, and not kept when read.
+func (c *Claude) QueueSince(started int64) {
+	if started == c.since {
+		return
+	}
+	c.since = started
+	keep := c.queue[:0:0]
+	for _, q := range c.queue {
+		if c.ofNow(q.Time) {
+			keep = append(keep, q)
+		}
+	}
+	c.queue = keep
+}
+
+func (c *Claude) ofNow(ts string) bool {
+	if c.since <= 0 {
+		return true
+	}
+	at, err := time.Parse(time.RFC3339Nano, ts)
+	return err == nil && at.Unix() >= c.since
+}
 
 // Tasks is the agent's task list as the log read has it (a task created
 // before the part read is not known). Nil when there is none.
@@ -313,7 +341,7 @@ func (c *Claude) user(r *claudeRow) {
 			role = RoleNote
 		}
 		c.add(r, role, []Part{textPart(KindText, text)})
-		if role == RoleUser && len(c.queue) > 0 {
+		if role == RoleUser {
 			c.arrived(text)
 		}
 		return
@@ -354,7 +382,7 @@ func (c *Claude) user(r *claudeRow) {
 		role = RoleNote
 	}
 	c.add(r, role, parts)
-	if role == RoleUser && len(c.queue) > 0 {
+	if role == RoleUser && len(parts) > 0 {
 		c.arrived(partsText(parts))
 	}
 	c.add(r, RoleNote, notes) // (Claude Code's own word that it was stopped, say)
@@ -366,7 +394,7 @@ func (c *Claude) queueOp(r *claudeRow) {
 	switch r.Operation {
 	case "enqueue":
 		// (Only the person's: a background task's notice waits there too.)
-		if role, text := classifyUserText(s); role == RoleUser {
+		if role, text := classifyUserText(s); role == RoleUser && c.ofNow(r.Timestamp) {
 			q := queuedItem{raw: s}
 			q.Text, _ = cut(clean(text), maxText)
 			q.Time = clip(r.Timestamp, 64)

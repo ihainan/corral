@@ -333,8 +333,23 @@ export function ConversationView({
   copiedRef.current = onCopied
   const copy = useCallback((s: string) => void copyText(s).then((ok) => ok && copiedRef.current()), [])
   // A turn's work opened or closed by hand (else: open while it goes on).
+  // Folded, also while it goes on (its line says what it does now): one opened
+  // by a tap, or all with Ctrl+O, as in Claude Code.
   const [opened, setOpened] = useState<Record<string, boolean>>({})
   const toggle = useCallback((key: string, open: boolean) => setOpened((o) => ({ ...o, [key]: open })), [])
+  const [allOpen, setAllOpen] = useState(false)
+  useEffect(() => {
+    if (!active) return
+    const onKey = (e: KeyboardEvent) => {
+      if (!e.ctrlKey || e.metaKey || e.altKey || e.shiftKey || e.key.toLowerCase() !== 'o' || e.isComposing) return
+      e.preventDefault()
+      e.stopPropagation()
+      setOpened({})
+      setAllOpen((v) => !v)
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [active])
   // (Of turns no longer kept, nothing is.)
   useEffect(() => {
     const keys = new Set(list.flatMap((it) => (it.kind === 'work' ? [it.key] : [])))
@@ -433,7 +448,7 @@ export function ConversationView({
             key={it.kind === 'work' || it.kind === 'answer' ? it.key : it.e.seq}
             it={it}
             copy={copy}
-            open={it.kind === 'work' ? (opened[it.key] ?? it.live) : false}
+            open={it.kind === 'work' ? (opened[it.key] ?? allOpen) : false}
             onToggle={toggle}
             onShow={show}
           />
@@ -470,7 +485,7 @@ export function ConversationView({
       {sideShown && (
         <nav className="convo-side" aria-label={t('convo.agents')}>
           <AgentList rows={rows} />
-          {!isTouchOnly && <p className="convo-side-keys">{t('convo.switchKeys')}</p>}
+          {!isTouchOnly && <p className="convo-side-keys">{t('convo.switchKeys')}<br />{t(allOpen ? 'convo.foldKeys' : 'convo.openKeys')}</p>}
         </nav>
       )}
       <div className="convo-main">
@@ -988,7 +1003,7 @@ function Work({ it, open, onToggle, onCopy }: { it: Extract<Item, { kind: 'work'
   const since = busy && partTime.has(busy) ? ms(partTime.get(busy)) : 0
   return (
     <div className="convo-work" data-work={it.key}>
-      <button type="button" className="convo-work-head" aria-expanded={open} onClick={() => onToggle(it.key, !open)}>
+      <button type="button" className="convo-work-head" aria-expanded={open} onClick={() => onToggle(it.key, !open)} title={isTouchOnly ? undefined : t(open ? 'convo.foldHint' : 'convo.openHint')}>
         <ChevronRight size={15} className="convo-chev" aria-hidden="true" />
         {busy ? (
           <span className="convo-work-text is-live">

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func lines(rows ...string) []byte { return []byte(strings.Join(rows, "\n") + "\n") }
@@ -469,5 +470,36 @@ func TestClaudeQueueArrivals(t *testing.T) {
 	w := all[len(all)-1].Parts[0].Tool
 	if !w.Same || w.New != "" || w.Patch != nil || w.Add != 0 {
 		t.Fatalf("unchanged write: %+v", w)
+	}
+}
+
+func TestClaudeQueueSince(t *testing.T) {
+	c := NewClaude()
+	c.Feed(lines(`{"type":"queue-operation","operation":"enqueue","timestamp":"2026-10-24T09:09:58.500Z","content":"X"}`))
+	started := time.Date(2026, 10, 24, 9, 10, 0, 0, time.UTC).Unix()
+	c.QueueSince(started)
+	if q := c.Queued(); len(q) != 0 {
+		t.Fatalf("the process before's: %+v", q)
+	}
+	// The new process queues the same text: removed and taken in, it waits no more.
+	c.Feed(lines(
+		`{"type":"queue-operation","operation":"enqueue","timestamp":"2026-10-24T09:09:59Z","content":"late row of the old one"}`,
+		`{"type":"queue-operation","operation":"enqueue","timestamp":"2026-10-24T09:10:05Z","content":"X"}`,
+		`{"type":"queue-operation","operation":"remove","timestamp":"2026-10-24T09:10:06Z","content":"X"}`,
+		`{"type":"attachment","uuid":"q1","attachment":{"type":"queued_command","commandMode":"prompt","prompt":"X"}}`,
+	))
+	if q := c.Queued(); len(q) != 0 {
+		t.Fatalf("after: %+v", q)
+	}
+	// A removal whose arrival came while nothing waited leaves nothing behind.
+	c.Feed(lines(
+		`{"type":"queue-operation","operation":"enqueue","timestamp":"2026-10-24T09:11:00Z","content":"Y"}`,
+		`{"type":"queue-operation","operation":"remove","timestamp":"2026-10-24T09:11:01Z","content":"Y"}`,
+		`{"type":"user","uuid":"u1","message":{"content":[{"type":"text","text":"Y"}]}}`,
+		`{"type":"queue-operation","operation":"enqueue","timestamp":"2026-10-24T09:12:00Z","content":"Y"}`,
+		`{"type":"user","uuid":"u2","message":{"content":"Y"}}`,
+	))
+	if q := c.Queued(); len(q) != 0 {
+		t.Fatalf("second Y arrived: %+v", q)
 	}
 }

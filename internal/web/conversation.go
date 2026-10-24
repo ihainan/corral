@@ -411,24 +411,8 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 	if m := st.parser.Meta(); m != (convo.Meta{}) {
 		ans.Meta = &m
 	}
-	ans.Queued = queuedSince(st.parser.Queued(), st.bind)
+	ans.Queued = st.parser.Queued()
 	writeJSON(w, http.StatusOK, ans)
-}
-
-// queuedSince is what waits of what the bound process was sent: a message
-// queued before it started was to another process of the same session
-// (one gone, and resumed), and went with it.
-func queuedSince(q []convo.Queued, b *convoBind) []convo.Queued {
-	if b == nil || b.started <= 0 {
-		return q
-	}
-	var out []convo.Queued
-	for _, m := range q {
-		if at, err := time.Parse(time.RFC3339Nano, m.Time); err == nil && at.Unix() >= b.started-2 {
-			out = append(out, m)
-		}
-	}
-	return out
 }
 
 // locateConvo finds the log of the Claude Code session in the pane; a
@@ -473,6 +457,10 @@ func (s *Server) locateConvo(ctx context.Context, sess *term.Session, st *convoS
 		st.offset, st.size, st.mtime, st.older, st.skipping = 0, -1, time.Time{}, false, false
 	}
 	st.reason = reason
+	// (What was queued to a process of the same session before this one: not this one's.)
+	if st.parser != nil && st.bind != nil {
+		st.parser.QueueSince(st.bind.started)
+	}
 	return nil
 }
 
