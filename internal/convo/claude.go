@@ -54,7 +54,7 @@ type Claude struct {
 	tasks   []taskItem // the task list as it stands
 	meta    Meta
 	queue   []queuedItem // what waits to be taken in, oldest first
-	gone    []string     // removed from it, to arrive still (as queued_command): that arrival is of these
+	gone    []goneItem   // removed from it, to arrive still (as queued_command): that arrival is of these
 	since   int64        // (unix seconds) what was queued before was to another process: not kept
 	// Skipped counts lines that were not JSON or of no use to the view.
 	Skipped int
@@ -66,6 +66,11 @@ type toolRef struct {
 	// task changes the task list, once the call has come back without an
 	// error (TodoWrite, TaskUpdate; TaskCreate from its result).
 	task func(c *Claude)
+}
+
+type goneItem struct {
+	text string // (squashed)
+	at   string // when it was removed
 }
 
 type queuedItem struct {
@@ -120,7 +125,14 @@ func (c *Claude) QueueSince(started int64) {
 		return
 	}
 	c.since = started
-	c.gone = nil // (removals of the process before: their arrivals are not this one's)
+	// (Removals of the process before: their arrivals are not this one's.)
+	gone := c.gone[:0:0]
+	for _, g := range c.gone {
+		if c.ofNow(g.at) {
+			gone = append(gone, g)
+		}
+	}
+	c.gone = gone
 	keep := c.queue[:0:0]
 	for _, q := range c.queue {
 		if c.ofNow(q.Time) {
@@ -408,9 +420,9 @@ func (c *Claude) queueOp(r *claudeRow) {
 		for i, q := range c.queue {
 			if q.raw == s {
 				c.queue = append(c.queue[:i:i], c.queue[i+1:]...)
-				c.gone = append(c.gone, squashed(q.Text))
+				c.gone = append(c.gone, goneItem{squashed(q.Text), clip(r.Timestamp, 64)})
 				if n := len(c.gone) - maxQueue; n > 0 {
-					c.gone = append([]string(nil), c.gone[n:]...)
+					c.gone = append([]goneItem(nil), c.gone[n:]...)
 				}
 				break
 			}
@@ -431,7 +443,7 @@ func (c *Claude) queueOp(r *claudeRow) {
 func (c *Claude) arrived(text string) {
 	t := squashed(text)
 	for i, g := range c.gone {
-		if g == t {
+		if g.text == t {
 			c.gone = append(c.gone[:i:i], c.gone[i+1:]...)
 			return
 		}

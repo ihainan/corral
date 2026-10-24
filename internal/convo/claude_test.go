@@ -509,3 +509,17 @@ func TestClaudeQueueSince(t *testing.T) {
 		t.Fatalf("second Y arrived: %+v", q)
 	}
 }
+
+func TestClaudeQueueSinceKeepsTheNewProcessRemovals(t *testing.T) {
+	c := NewClaude()
+	c.Feed(lines(
+		`{"type":"queue-operation","operation":"enqueue","timestamp":"2026-10-24T09:10:01Z","content":"X"}`,
+		`{"type":"queue-operation","operation":"enqueue","timestamp":"2026-10-24T09:10:02Z","content":"X"}`,
+		`{"type":"queue-operation","operation":"remove","timestamp":"2026-10-24T09:10:03Z","content":"X"}`,
+	))
+	c.QueueSince(time.Date(2026, 10, 24, 9, 10, 0, 0, time.UTC).Unix()) // (found only now)
+	c.Feed(lines(`{"type":"attachment","uuid":"q1","attachment":{"type":"queued_command","commandMode":"prompt","prompt":"X"}}`))
+	if q := c.Queued(); len(q) != 1 {
+		t.Fatalf("the second X still waits: %+v", q)
+	}
+}
