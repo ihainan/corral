@@ -166,8 +166,8 @@ type claudeRow struct {
 	CustomTitle      string          `json:"customTitle"`
 	ToolUseResult    json.RawMessage `json:"toolUseResult"`
 	Subtype          string          `json:"subtype"`
-	Content          json.RawMessage `json:"content"` // (system rows)
-	GitBranch        string          `json:"gitBranch"`
+	Content          json.RawMessage `json:"content"`   // (system rows)
+	GitBranch        *string         `json:"gitBranch"` // (present and empty: not on a branch)
 	PermissionMode   string          `json:"permissionMode"`
 	Message          *struct {
 		Content json.RawMessage `json:"content"`
@@ -204,8 +204,8 @@ func (c *Claude) line(b []byte) {
 		c.Skipped++
 		return
 	}
-	if r.GitBranch != "" {
-		c.meta.Branch = clip(r.GitBranch, maxMeta)
+	if r.GitBranch != nil {
+		c.meta.Branch = clip(*r.GitBranch, maxMeta)
 	}
 	switch r.Type {
 	case "user":

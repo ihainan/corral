@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { ArrowDown, ChevronDown, ChevronRight, GitBranch, PanelLeft } from 'lucide-react'
 import { t, getLang, type I18nKey } from '../i18n'
 import { copyText, isCoarse } from '../components/ui'
@@ -523,11 +523,9 @@ export function modelName(id: string): string {
   return m[1][0].toUpperCase() + m[1].slice(1) + ' ' + m[2] + (m[3] ? '.' + m[3] : '')
 }
 
-// The window a conversation fills: Claude Code's usual one, unless what it
-// sent is already more (then it has the larger one).
-const WINDOW = 200_000
-const BIG_WINDOW = 1_000_000
-const windowOf = (used: number) => (used > WINDOW ? BIG_WINDOW : WINDOW)
+// The windows a conversation may fill: the log does not say which a session
+// has, so how full it is is said of both.
+const WINDOWS = [200_000, 1_000_000]
 
 function tokens(n: number): string {
   if (n >= 1_000_000) return (Math.round(n / 100_000) / 10).toString() + 'M'
@@ -535,7 +533,7 @@ function tokens(n: number): string {
   return String(n)
 }
 
-const MODES = ['default', 'acceptEdits', 'plan', 'auto', 'bypassPermissions'] as const
+const MODES = ['default', 'acceptEdits', 'plan', 'auto', 'bypassPermissions', 'dontAsk'] as const
 const modeName = (m: string) => ((MODES as readonly string[]).includes(m) ? t(`convo.mode.${m}` as I18nKey) : m)
 
 // What the session runs with, under the composer: its permission mode on
@@ -564,12 +562,10 @@ function Runs({ meta }: { meta: ConvoMeta }) {
     }
   }, [open])
   const used = meta.context ?? 0
-  const all = windowOf(used)
-  const pct = Math.min(100, Math.round((used / all) * 100))
   return (
     <div className="convo-runs" ref={box}>
       {meta.mode && (
-        <span className="convo-runs-item" title={t('convo.modeHint')}>
+        <span className="convo-runs-item convo-runs-mode" title={t('convo.modeHint')}>
           {modeName(meta.mode)}
         </span>
       )}
@@ -580,27 +576,37 @@ function Runs({ meta }: { meta: ConvoMeta }) {
           <span className="convo-runs-branch-name">{meta.branch}</span>
         </span>
       )}
-      {meta.model && <span className="convo-runs-item" title={meta.model}>{modelName(meta.model)}</span>}
+      {meta.model && <span className="convo-runs-item convo-runs-model" title={meta.model}>{modelName(meta.model)}</span>}
       {used > 0 && (
-        <button type="button" className="convo-runs-item convo-runs-ctx" aria-expanded={open} aria-label={t('convo.ctxLabel', { p: pct })} onClick={() => setOpen(!open)}>
-          <span className="convo-ring" style={{ '--p': pct } as CSSProperties} aria-hidden="true" />
-          {pct}%
+        <button type="button" className="convo-runs-item convo-runs-ctx" aria-expanded={open} aria-label={t('convo.ctxLabel', { n: tokens(used) })} onClick={() => setOpen(!open)}>
+          {t('convo.ctxShort', { n: tokens(used) })}
         </button>
       )}
       {open && (
         <div className="convo-runs-pop" role="dialog" aria-label={t('convo.ctxTitle')}>
           <div className="convo-runs-row">
             <span>{t('convo.ctxTitle')}</span>
-            <span>{t('convo.ctx', { used: tokens(used), all: tokens(all), p: pct })}</span>
+            <span>{t('convo.ctxTokens', { n: used.toLocaleString(getLang()) })}</span>
           </div>
-          <div className="convo-runs-bar"><i style={{ width: pct + '%' }} /></div>
+          {WINDOWS.map((w) => {
+            const p = Math.min(100, Math.round((used / w) * 100))
+            return (
+              <div key={w} className="convo-runs-win">
+                <div className="convo-runs-row">
+                  <span>{t('convo.ctxOf', { w: tokens(w) })}</span>
+                  <span>{p}%</span>
+                </div>
+                <div className="convo-runs-bar"><i style={{ width: p + '%' }} /></div>
+              </div>
+            )
+          })}
           {meta.model && (
             <div className="convo-runs-row">
               <span>{t('convo.model')}</span>
               <span>{meta.model}</span>
             </div>
           )}
-          <p className="convo-runs-note">{t('convo.ctxNote', { all: tokens(all) })}</p>
+          <p className="convo-runs-note">{t('convo.ctxNote')}</p>
         </div>
       )}
     </div>
@@ -899,15 +905,25 @@ function Work({ it, open, onToggle, onCopy }: { it: Extract<Item, { kind: 'work'
   const now = useTick(!!busy)
   const span = ms(it.to) - ms(it.from)
   const head = it.live ? t('convo.workingNow') : it.from && span >= 0 && ms(it.to) ? t('convo.worked', { d: duration(span) }) : t('convo.steps')
+  // While a step is under way, the line says it (what it runs, for how long);
+  // the counts come back once it is done.
+  const since = busy && partTime.has(busy) ? ms(partTime.get(busy)) : 0
   return (
     <div className="convo-work" data-work={it.key}>
       <button type="button" className="convo-work-head" aria-expanded={open} onClick={() => onToggle(it.key, !open)}>
         <ChevronRight size={15} className="convo-chev" aria-hidden="true" />
-        <span className="convo-work-text">
-          {head}
-          {sum && <span className="convo-work-sum"> · {sum}</span>}
-          {failed > 0 && <span className="convo-failed">{t('convo.failed', { n: failed })}</span>}
-        </span>
+        {busy ? (
+          <span className="convo-work-text is-live">
+            <span className="convo-shimmer">{busy.tool ? liveText(busy.tool) : t('convo.live.thinking')}</span>
+            {since > 0 && now >= since && <span className="convo-live-time">{duration(now - since)}</span>}
+          </span>
+        ) : (
+          <span className="convo-work-text">
+            {head}
+            {sum && <span className="convo-work-sum"> · {sum}</span>}
+            {failed > 0 && <span className="convo-failed">{t('convo.failed', { n: failed })}</span>}
+          </span>
+        )}
       </button>
       {open && (
         <div className="convo-work-body">
@@ -929,12 +945,6 @@ function Work({ it, open, onToggle, onCopy }: { it: Extract<Item, { kind: 'work'
             ),
           )}
         </div>
-      )}
-      {busy && (
-        <p className="convo-live">
-          <span className="convo-shimmer">{busy.tool ? liveText(busy.tool) : t('convo.live.thinking')}</span>
-          {partTime.has(busy) && now >= ms(partTime.get(busy)) && <span className="convo-live-time">{duration(now - ms(partTime.get(busy)))}</span>}
-        </p>
       )}
     </div>
   )
@@ -982,47 +992,60 @@ function Thinking({ text, live }: { text: string; live?: boolean }) {
   )
 }
 
+// Of a command that failed, its exit code (Claude Code's result begins so).
+const exitCode = (tool: ConvoTool) => (tool.error ? /^Exit code (\d{1,3})\b/.exec(tool.result ?? '')?.[1] : undefined)
+
 function ToolRow({ tool, onCopy, live }: { tool: ConvoTool; onCopy: (s: string) => void; live?: boolean }) {
   const [open, setOpen] = useState(false)
   const [full, setFull] = useState(false)
-  if (live) return null // (said under the steps, as the step under way)
+  if (live) return null // (said on the turn's line, as the step under way)
   const v = verbOf(tool.name)
   const obj = object(tool)
+  const cat = category(tool.name)
   const isEdit = tool.old !== undefined || tool.new !== undefined
+  const code = exitCode(tool)
+  // What the line does not show of what it acted on: a command of more
+  // lines or longer than a line holds (it shows the first), a subagent's
+  // prompt. A file's path is on the line and in its tooltip.
+  const d = tool.detail ?? ''
+  const more = cat === 'cmd' ? d.includes('\n') || d.length > 80 : cat !== 'edit' && cat !== 'read' && !!d && (!!tool.title || d.includes('\n') || d.length > 60)
+  // An edit that went through says so to the model ("The file … has been
+  // updated"): nothing for the person. What it changed shows instead.
+  // (A failed command's exit code is on the line: its output goes without it.)
+  const result = tool.done && !(cat === 'edit' && !tool.error) ? (code ? tool.result?.replace(/^Exit code \d+\n?/, '') : tool.result) : undefined
   return (
     <div className={'convo-step' + (tool.error ? ' is-error' : '')}>
-      <button type="button" className="convo-step-head" aria-expanded={open} onClick={() => setOpen(!open)} title={tool.title || (tool.detail ? firstLine(tool.detail) : undefined)}>
+      <button type="button" className="convo-step-head" aria-expanded={open} onClick={() => setOpen(!open)} title={cat === 'cmd' ? firstLine(d) : d || tool.title}>
         <span className="convo-step-verb">{v ? t(`convo.v.${v}` as I18nKey) : tool.name}</span>
         <span className={'convo-step-obj' + (obj.code ? ' is-code' : '')}>{v === 'cmd' ? <Code text={obj.text} lang="bash" /> : obj.text}</span>
-        {category(tool.name) === 'edit' && <LineCounts add={tool.add ?? 0} del={tool.del ?? 0} />}
-        {tool.error && <span className="convo-failed">{t('convo.toolFailed')}</span>}
+        {cat === 'cmd' && tool.title && <span className="convo-step-desc">{tool.title}</span>}
+        {cat === 'edit' && <LineCounts add={tool.add ?? 0} del={tool.del ?? 0} />}
+        {tool.error && <span className="convo-failed">{code ? t('convo.exitCode', { n: code }) : t('convo.toolFailed')}</span>}
       </button>
       {open && (
         <div className="convo-step-body">
-          {tool.detail && (tool.title || tool.detail.includes('\n') || tool.detail.length > 60) && (
+          {more && (
             <div className="convo-pre-wrap">
-              <pre className="convo-pre">{v === 'cmd' ? <Code text={tool.detail} lang="bash" /> : tool.detail}</pre>
-              <button type="button" className="md-code-copy" onClick={() => onCopy(tool.detail!)}>{t('common.copy')}</button>
+              <pre className="convo-pre">{v === 'cmd' ? <Code text={d} lang="bash" /> : d}</pre>
+              <button type="button" className="md-code-copy" onClick={() => onCopy(d)}>{t('common.copy')}</button>
             </div>
           )}
           {isEdit && <Diff old={tool.old ?? ''} new={tool.new ?? ''} />}
-          {tool.done ? (
-            tool.result ? (
-              <>
-                <div className="convo-result-head">
-                  {t('convo.output', { n: tool.result_lines ?? 0 })}
-                  {tool.truncated && <span> · {t('convo.cut')}</span>}
-                </div>
-                <pre className={'convo-pre convo-result' + (full ? ' is-full' : '')}>{tool.result}</pre>
-                {!full && tool.result.split('\n').length > 12 && (
-                  <button type="button" className="link-btn" onClick={() => setFull(true)}>{t('convo.showAll')}</button>
-                )}
-              </>
-            ) : (
-              <div className="convo-result-head">{t('convo.noOutput')}</div>
-            )
-          ) : (
+          {!tool.done ? (
             <div className="convo-result-head">{t('convo.running')}</div>
+          ) : result ? (
+            <>
+              <div className="convo-result-head">
+                {t('convo.output', { n: Math.max(0, (tool.result_lines ?? 0) - (code && result !== tool.result ? 1 : 0)) })}
+                {tool.truncated && <span> · {t('convo.cut')}</span>}
+              </div>
+              <pre className={'convo-pre convo-result' + (full ? ' is-full' : '')}>{result}</pre>
+              {!full && result.split('\n').length > 12 && (
+                <button type="button" className="link-btn" onClick={() => setFull(true)}>{t('convo.showAll')}</button>
+              )}
+            </>
+          ) : (
+            !(cat === 'edit' && !tool.error) && <div className="convo-result-head">{t('convo.noOutput')}</div>
           )}
         </div>
       )}

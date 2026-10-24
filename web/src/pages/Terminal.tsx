@@ -747,23 +747,39 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
   // (and, on a touch screen, taps on it bring up no keyboard). It opens with
   // the view, unless it was put away while the view showed.
   const convoNoComposer = useRef(local.get(CONVO_NO_COMPOSER) === '1')
-  const composerLeftAt = useRef(0) // (ms) when the composer last lost focus
+  // The composer's field as it was: a field that takes its place (the
+  // composer moved into the conversation or out of it) goes on from there,
+  // focused if it was (or lost focus a moment ago, to the button pressed).
+  const composerWas = useRef<{ el: HTMLTextAreaElement | null; focused: boolean; leftAt: number; start: number; end: number }>({ el: null, focused: false, leftAt: 0, start: 0, end: 0 })
+  const keepComposerSel = (el: HTMLTextAreaElement) => {
+    composerWas.current.start = el.selectionStart
+    composerWas.current.end = el.selectionEnd
+  }
+  useLayoutEffect(() => {
+    const el = composerRef.current
+    const was = composerWas.current
+    if (!el || el === was.el) return
+    const first = !was.el
+    was.el = el
+    if (first) return
+    const n = el.value.length
+    el.setSelectionRange(Math.min(was.start, n), Math.min(was.end, n))
+    if (was.focused || Date.now() - was.leftAt < 500) el.focus()
+  }, [showConvo, composer])
   const toggleConvo = () => {
+    // (In the tap itself, so iOS raises the keyboard: the composer moves into
+    // the conversation or out of it, and the new field takes over, see below.)
     if (convoPeek) {
-      setConvoPeek(false)
+      flushSync(() => setConvoPeek(false))
       return
     }
     const open = !convoOpen
     rememberConvo(id, open)
-    // (The composer moves into the conversation and back: a new field, to focus once it is there.)
-    // (The press on the button itself took focus off it, a moment ago.)
-    const hadFocus = !!composerRef.current && (document.activeElement === composerRef.current || Date.now() - composerLeftAt.current < 500)
     flushSync(() => setConvoOpen(open))
-    // (In the tap itself, so iOS raises the keyboard.)
     if (open && !convoNoComposer.current) {
       if (composer) composerRef.current?.focus()
       else openComposerRef.current()
-    } else if (hadFocus) composerRef.current?.focus()
+    }
   }
   const outRef = useRef<(d: string | Uint8Array) => void>(() => {})
   const safeFitRef = useRef(() => {})
@@ -2443,7 +2459,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
     const vv = window.visualViewport
     vv?.addEventListener('resize', fit)
     return () => vv?.removeEventListener('resize', fit)
-  }, [draft, composer])
+  }, [draft, composer, showConvo]) // (showConvo: the field moved, a new one)
 
   const openCopyMode = () => {
     const term = termRef.current
@@ -2744,10 +2760,16 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
             histPos.current = null // (an entry edited is a draft of its own)
             setDraft(e.target.value)
           }}
-          onSelect={completion.update}
+          onSelect={(e) => {
+            keepComposerSel(e.currentTarget)
+            completion.update()
+          }}
           {...completion.field}
-          onBlur={() => {
-            composerLeftAt.current = Date.now()
+          onFocus={() => (composerWas.current.focused = true)}
+          onBlur={(e) => {
+            composerWas.current.focused = false
+            composerWas.current.leftAt = Date.now()
+            keepComposerSel(e.currentTarget)
             setTimeout(completion.update)
           }}
           onPaste={(e) => {

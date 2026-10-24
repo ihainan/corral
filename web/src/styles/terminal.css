@@ -399,22 +399,18 @@ html.term-dark .overlay, html.term-dark .menu, html.term-dark .toast {
 .term-root.light .convo-dock .composer-box { box-shadow: none; }
 .convo-dock .composer-box:focus-within { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
 @media (max-width: 640px) { .convo-dock { padding-left: max(8px, env(safe-area-inset-left, 0px)); padding-right: max(8px, env(safe-area-inset-right, 0px)); } }
-.convo-runs { position: relative; display: flex; align-items: center; gap: 2px; min-width: 0; min-height: 24px; margin-top: -4px; font-size: 12.5px; line-height: 18px; color: var(--term-fg-3); font-variant-numeric: tabular-nums; }
+.convo-runs { position: relative; display: flex; align-items: center; gap: 2px; min-width: 0; overflow: visible; min-height: 24px; margin-top: -4px; font-size: 12.5px; line-height: 18px; color: var(--term-fg-3); font-variant-numeric: tabular-nums; }
 .convo-runs-item {
   flex: none; display: inline-flex; align-items: center; gap: 5px; padding: 2px 6px; border: 0; border-radius: 6px;
   background: none; color: inherit; font: inherit; white-space: nowrap;
 }
 .convo-runs-branch { flex: 0 1 auto; min-width: 0; overflow: hidden; }
+.convo-runs-model, .convo-runs-mode { flex: 0 1 auto; min-width: 2em; display: block; overflow: hidden; text-overflow: ellipsis; }
 .convo-runs-branch svg { flex: none; }
 .convo-runs-branch-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .convo-runs-ctx { cursor: pointer; }
 .convo-runs-ctx:hover, .convo-runs-ctx[aria-expanded='true'] { background: var(--term-hover); color: var(--term-fg); }
 .convo-runs-ctx:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: 1px; }
-.convo-ring {
-  width: 13px; height: 13px; border-radius: 50%; flex: none;
-  background: conic-gradient(var(--term-accent-text) calc(var(--p) * 1%), var(--term-line) 0);
-  -webkit-mask: radial-gradient(circle, transparent 3.5px, #000 4px); mask: radial-gradient(circle, transparent 3.5px, #000 4px);
-}
 .convo-runs-pop {
   position: absolute; right: 0; bottom: calc(100% + 6px); z-index: 3; width: min(320px, 100%); padding: 8px 10px;
   border: 1px solid var(--term-line); border-radius: 10px; background: var(--term-bg); color: var(--term-fg);
@@ -423,7 +419,7 @@ html.term-dark .overlay, html.term-dark .menu, html.term-dark .toast {
 .convo-runs-row { display: flex; justify-content: space-between; gap: 16px; padding: 3px 0; }
 .convo-runs-row > :first-child { color: var(--term-fg-3); flex: none; }
 .convo-runs-row > :last-child { min-width: 0; overflow-wrap: anywhere; text-align: right; }
-.convo-runs-bar { height: 5px; margin: 2px 0 6px; border-radius: 3px; background: var(--term-line); overflow: hidden; }
+.convo-runs-bar { height: 4px; margin: 1px 0 6px; border-radius: 3px; background: var(--term-line); overflow: hidden; }
 .convo-runs-bar i { display: block; height: 100%; background: var(--term-accent-text); }
 .convo-runs-note { margin: 4px 0 0; font-size: 12px; color: var(--term-fg-3); }
 @media (max-width: 420px) { .convo-runs-branch { display: none; } }
@@ -492,7 +488,7 @@ html.term-dark .overlay, html.term-dark .menu, html.term-dark .toast {
 .convo-chev { flex: none; align-self: center; color: inherit; transition: transform 0.15s var(--ease); }
 [aria-expanded='true'] > .convo-chev { transform: rotate(90deg); }
 .convo-work-text { min-width: 0; }
-.convo-failed { margin-left: 8px; font-size: 12.5px; font-weight: 500; color: var(--term-danger-text); }
+.convo-failed { flex: none; margin-left: 8px; font-size: 12.5px; font-weight: 500; color: var(--term-danger-text); white-space: nowrap; }
 .convo-running { margin-left: 8px; font-size: 12.5px; color: var(--term-fg-3); }
 .convo-work-body { display: flex; flex-direction: column; gap: 1px; padding: 4px 0 2px 21px; }
 .convo-step { display: flex; flex-direction: column; min-width: 0; }
@@ -500,7 +496,8 @@ html.term-dark .overlay, html.term-dark .menu, html.term-dark .toast {
 .convo-step-verb { flex: none; color: var(--term-fg); font-weight: 500; }
 .convo-step-obj { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .convo-step-obj.is-code { font-family: var(--font-mono); font-size: 12.5px; }
-.convo-step.is-error .convo-step-verb { color: var(--term-danger-text); }
+.convo-step-desc { flex: 0 10000 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--term-fg-3); font-size: 13px; }
+.convo-work-text.is-live { display: flex; align-items: baseline; gap: 8px; min-width: 0; color: var(--term-fg-2); }
 .convo-step-body, .convo-thinking { padding: 4px 0 10px; }
 .convo-thinking { white-space: pre-wrap; font-size: 13.5px; color: var(--term-fg-2); }
 .convo-mid { margin: 4px 0 6px; font-size: 14px; color: var(--term-fg-2); }
@@ -508,7 +505,6 @@ html.term-dark .overlay, html.term-dark .menu, html.term-dark .toast {
 .convo-lines { flex: none; display: inline-flex; gap: 5px; font-family: var(--font-mono); font-size: 12.5px; }
 .convo-lines-add { color: var(--term-ok-text); }
 .convo-lines-del { color: var(--term-danger-text); }
-.convo-live { display: flex; align-items: baseline; gap: 8px; margin: 4px 0 0 21px; font-size: 14px; min-width: 0; }
 .convo-shimmer {
   min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   background: linear-gradient(90deg, var(--term-fg-3) 0%, var(--term-fg) 50%, var(--term-fg-3) 100%) 0 0 / 200% 100%;

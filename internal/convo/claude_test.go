@@ -329,4 +329,8 @@ func TestClaudeMeta(t *testing.T) {
 	if m := c.Meta(); m.Mode != "plan" || m.Branch != "feat/x" {
 		t.Fatalf("later rows: %+v", m)
 	}
+	c.Feed(lines(`{"type":"user","uuid":"u2","gitBranch":"","message":{"content":"elsewhere"}}`, `{"type":"system","subtype":"turn_duration"}`))
+	if m := c.Meta(); m.Branch != "" {
+		t.Fatalf("no branch any more: %+v", m)
+	}
 }
