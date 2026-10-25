@@ -16,9 +16,10 @@ import (
 // [keys] table, so the panel presses what this host's herdr expects.
 
 // KeysCommand prints herdr's config.toml, at most 64 KiB of it (nothing,
-// and success, when there is none; a file that cannot be read fails).
+// and success, when there is none; a file, or a folder of it, that cannot
+// be read fails).
 // Fixed text.
-const KeysCommand = `sh -c 'f="${HERDR_CONFIG_PATH:-${XDG_CONFIG_HOME:-$HOME/.config}/herdr/config.toml}"; [ -e "$f" ] || exit 0; exec head -c 65536 "$f"'`
+const KeysCommand = `sh -c 'f="${HERDR_CONFIG_PATH:-${XDG_CONFIG_HOME:-$HOME/.config}/herdr/config.toml}"; [ -e "$f" ] && exec head -c 65536 "$f"; d=$(dirname "$f"); [ -d "$d" ] && [ ! -x "$d" ] && exit 1; exit 0'`
 
 const keysLimit = 64 << 10
 

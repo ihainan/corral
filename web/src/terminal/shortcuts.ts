@@ -118,18 +118,17 @@ const herdrDefaults: Record<HerdrKey | 'prefix', string> = {
   edit_scrollback: 'prefix+e', copy_mode: '', cycle_pane_next: 'prefix+tab', cycle_pane_previous: 'prefix+shift+tab', last_pane: '', resize_mode: 'prefix+r',
 }
 
+// The key names herdr's config takes (as its own "config check" reads them:
+// no home, end, page keys or delete), and single characters.
 const keyNames: Record<string, { key: string; label: string }> = {
-  tab: { key: 'Tab', label: 'Tab' }, enter: { key: 'Enter', label: '↵' }, esc: { key: 'Esc', label: 'Esc' }, escape: { key: 'Esc', label: 'Esc' },
+  tab: { key: 'Tab', label: 'Tab' }, enter: { key: 'Enter', label: '↵' }, return: { key: 'Enter', label: '↵' },
+  esc: { key: 'Esc', label: 'Esc' }, escape: { key: 'Esc', label: 'Esc' }, backspace: { key: 'BSpace', label: '⌫' }, bs: { key: 'BSpace', label: '⌫' },
   up: { key: 'Up', label: '↑' }, down: { key: 'Down', label: '↓' }, left: { key: 'Left', label: '←' }, right: { key: 'Right', label: '→' },
-  backspace: { key: 'BSpace', label: '⌫' }, delete: { key: 'Delete', label: 'Del' }, home: { key: 'Home', label: 'Home' }, end: { key: 'End', label: 'End' },
-  pageup: { key: 'PageUp', label: 'PgUp' }, pagedown: { key: 'PageDown', label: 'PgDn' },
-  return: { key: 'Enter', label: '↵' }, bs: { key: 'BSpace', label: '⌫' }, del: { key: 'Delete', label: 'Del' }, insert: { key: 'Insert', label: 'Ins' },
 }
 for (let i = 1; i <= 12; i++) keyNames['f' + i] = { key: 'F' + i, label: 'F' + i }
 const charNames: Record<string, string> = {
-  minus: '-', plus: '+', space: ' ', equal: '=', comma: ',', period: '.', dot: '.', slash: '/', backslash: '\\', quote: "'", double_quote: '"',
-  semicolon: ';', colon: ':', percent: '%', hash: '#', dollar: '$', ampersand: '&', asterisk: '*', question: '?', exclamation: '!', at: '@',
-  caret: '^', tilde: '~', backtick: '`', pipe: '|', underscore: '_', less: '<', greater: '>',
+  space: ' ', minus: '-', plus: '+', comma: ',', period: '.', slash: '/', backslash: '\\', backtick: '`', quote: "'",
+  double_quote: '"', 'double-quote': '"', semicolon: ';', colon: ':', percent: '%', ampersand: '&',
 }
 
 // One chord of a herdr binding ("ctrl+b", "shift+t", "T", "?") as keys the
