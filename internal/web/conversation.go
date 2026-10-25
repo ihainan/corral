@@ -619,8 +619,8 @@ if [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -d "$XDG_RUNTIME_DIR" ] && [ ! -L "$l" ] &
   exec 9>>"$l"
   n=0
   until flock -n 9; do
-    n=$((n + 1)); [ "$n" -ge 100 ] && exit 4
-    sleep 0.1
+    [ "$n" -ge 100 ] && exit 4
+    if sleep 0.1 2>/dev/null; then n=$((n + 1)); else sleep 1; n=$((n + 10)); fi
   done
 fi
 [ "$(wc -c <"$f" | tr -d ' ')" = "$len" ] || exit 4
