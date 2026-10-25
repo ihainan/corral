@@ -24,6 +24,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/ihainan/corral/internal/convo"
 	"github.com/ihainan/corral/internal/herdr"
@@ -582,9 +583,27 @@ exec tmux send-keys -t "$p" "$@"`
 	return cmd
 }
 
+// tmuxSendCommand types the text on its input into one tmux pane, as a
+// paste (bracketed if the program asked for it, its newlines kept: a
+// coding agent takes them as new lines, not as sending), then presses
+// Enter. As tmuxKeysCommand, only if that pane is in the named session:
+// else it exits 3. 4: the text did not go in; 5: it did, Enter did not.
+// Fixed script; the validated session name and pane id are its only
+// arguments, the text comes on its input.
+func tmuxSendCommand(session, pane string) string {
+	script := `PATH="$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+[ "$(tmux -u display-message -p -t "$2" '#{session_name}' 2>/dev/null)" = "$1" ] || exit 3
+b=corral-send-$$
+tmux load-buffer -b "$b" - || exit 4
+tmux paste-buffer -p -r -d -b "$b" -t "$2" || { tmux delete-buffer -b "$b" 2>/dev/null; exit 4; }
+tmux send-keys -t "$2" Enter || exit 5`
+	return "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(session) + " " + sshx.QuoteShell(pane)
+}
+
 // What the conversation presses in the agent's pane, in herdr's names and
-// tmux's: stop (Escape), and send a queued message now (Claude Code's
-// Ctrl+X Ctrl+S, which stops what it was doing to take the message in).
+// tmux's: stop (Escape), send a queued message now (Claude Code's Ctrl+X
+// Ctrl+S, which stops what it was doing to take the message in), and send
+// a message (its text, then Enter: see sendText).
 var convoKeys = map[string]struct {
 	audit string
 	herdr []string
@@ -592,10 +611,35 @@ var convoKeys = map[string]struct {
 }{
 	"interrupt": {"convo.interrupt", []string{"esc"}, []string{"Escape"}},
 	"send_now":  {"convo.send_now", []string{"ctrl+x", "ctrl+s"}, []string{"C-x", "C-s"}},
+	"send":      {"convo.send", []string{"enter"}, nil},
+}
+
+// maxSendText is the most a message sent from the agents page may hold (in
+// bytes): herdr takes far more in one request (120 KB tried).
+const maxSendText = 100 << 10
+
+// sendText is a message as it may be typed into a pane: valid UTF-8, its
+// line ends as "\n", and no other control character than a tab (an Escape
+// or a Ctrl+B in it would be pressed, not typed). ok false: not so.
+func sendText(s string) (string, bool) {
+	if s == "" || len(s) > maxSendText || !utf8.ValidString(s) {
+		return "", false
+	}
+	s = strings.ReplaceAll(strings.ReplaceAll(s, "\r\n", "\n"), "\r", "\n")
+	if strings.TrimSpace(s) == "" {
+		return "", false
+	}
+	for _, r := range s {
+		if (r < 0x20 && r != '\n' && r != '\t') || (r >= 0x7f && r <= 0x9f) || r == 0x2028 || r == 0x2029 {
+			return "", false
+		}
+	}
+	return s, true
 }
 
 // POST /api/sessions/{id}/conversation/interrupt {"pane","pid","start","session"}
 // POST /api/sessions/{id}/conversation/send-now (the same)
+// POST /api/sessions/{id}/conversation/send (the same, and "text")
 //
 // Presses Escape in the pane (what Claude Code takes as "stop"), or Ctrl+X
 // Ctrl+S (send the messages queued now), for the Claude Code process the
@@ -611,6 +655,13 @@ func (s *Server) apiConversationSendNow(w http.ResponseWriter, r *http.Request) 
 	s.convoPress(w, r, "send_now")
 }
 
+// Send types a message into the agent's pane and presses Enter (Claude Code
+// queues it while it works), as the terminal's composer would, but into that
+// pane only: what herdr has in front, or the terminal shows, is not changed.
+func (s *Server) apiConversationSend(w http.ResponseWriter, r *http.Request) {
+	s.convoPress(w, r, "send")
+}
+
 func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string) {
 	keys := convoKeys[what]
 	sess, ok := s.runningSession(w, r)
@@ -622,8 +673,18 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		PID     int64  `json:"pid"`
 		Start   int64  `json:"start"`
 		Session string `json:"session"`
+		Text    string `json:"text"` // (send)
 	}
-	if err := readJSON(r, &b); err != nil || b.PID <= 0 || b.Start <= 0 || !convoUUID.MatchString(b.Session) ||
+	err := readJSON(r, &b)
+	text, textOK := sendText(b.Text)
+	if what != "send" {
+		textOK = b.Text == ""
+	}
+	if err != nil || !textOK {
+		writeError(w, http.StatusBadRequest, "bad_request", "the pane, the process (and, to send, a message) are required")
+		return
+	}
+	if b.PID <= 0 || b.Start <= 0 || !convoUUID.MatchString(b.Session) ||
 		(sess.Persistence == "herdr" && !herdrPane.MatchString(b.Pane)) || (sess.Persistence == "tmux" && !tmuxPane.MatchString(b.Pane)) {
 		writeError(w, http.StatusBadRequest, "bad_request", "the pane and the process are required")
 		return
@@ -639,6 +700,9 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		actx, acancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
 		defer acancel()
 		detail := map[string]any{"session": sess.ID, "pane": b.Pane, "pid": b.PID, "start": b.Start, "claude_session": b.Session, "outcome": outcome}
+		if what == "send" {
+			detail["length"] = len(text) // (what was said is not kept)
+		}
 		if reason != "" {
 			detail["reason"] = reason
 		}
@@ -721,7 +785,11 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 			writeHerdrError(w, derr)
 			return
 		}
-		err = c.SendKeys(ctx, b.Pane, keys.herdr)
+		if what == "send" {
+			err = c.SendInput(ctx, b.Pane, text, keys.herdr)
+		} else {
+			err = c.SendKeys(ctx, b.Pane, keys.herdr)
+		}
 		c.Close()
 		var apiErr *herdr.APIError
 		switch {
@@ -734,11 +802,17 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		}
 	} else {
 		// (The script checks the pane is in this session's tmux session, and presses.)
-		_, err = sshx.Output(ctx, sess.Client(), tmuxKeysCommand(sess.TmuxSession, b.Pane, keys.tmux), 4096)
+		if what == "send" {
+			_, err = sshx.Exec(ctx, sess.Client(), tmuxSendCommand(sess.TmuxSession, b.Pane), 4096, sshx.ExecOptions{Stdin: strings.NewReader(text)})
+		} else {
+			_, err = sshx.Output(ctx, sess.Client(), tmuxKeysCommand(sess.TmuxSession, b.Pane, keys.tmux), 4096)
+		}
 		var exitErr *sshx.ExitError
 		switch {
 		case err == nil:
 			outcome = "typed"
+		case errors.As(err, &exitErr) && exitErr.Status == 5:
+			outcome = "unknown" // (typed, but not sent: the composer shows it, Enter there sends it)
 		case errors.Is(err, sshx.ErrBusy):
 			reason = "busy" // (not started: nothing was pressed)
 		case errors.As(err, &exitErr) && exitErr.Status == 3:
