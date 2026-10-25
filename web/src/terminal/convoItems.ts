@@ -1,0 +1,230 @@
+import type { ConvoEntry, ConvoPart, ConvoTool } from './conversation'
+
+// The conversation view's list, from the log's entries: no React, no DOM
+// (convoItems.test.mts runs it as it is).
+
+// What a turn holds: its steps, the text it wrote between them, the notes
+// that came meanwhile.
+export type Step = ConvoPart | ConvoEntry
+
+export type Item =
+  | { kind: 'user'; e: ConvoEntry }
+  | { kind: 'note'; e: ConvoEntry }
+  | { kind: 'summary'; e: ConvoEntry }
+  // A run of steps (calls and thinking) between what the agent wrote: one line, opened on demand.
+  | { kind: 'work'; key: string; steps: Step[]; live: boolean; moving: boolean; busy?: ConvoPart }
+  // What the agent wrote between its steps: shown as it is, as its answer is.
+  | { kind: 'text'; key: string; text: string; truncated?: boolean }
+  | { kind: 'answer'; key: string; text: string; truncated?: boolean; ts?: string; span?: number; edits: Edits | null }
+
+// What a turn changed: its files in the order it first changed them, each
+// with its edits.
+export interface Edits {
+  files: FileEdits[]
+  add: number
+  del: number
+}
+export interface FileEdits {
+  path: string
+  add: number
+  del: number
+  tools: ConvoTool[]
+}
+
+// When each part was written (its entry's time).
+export const partTime = new WeakMap<ConvoPart, string>()
+
+// items groups the entries by turn, and a turn into what the agent wrote
+// (shown) and the runs of steps between (a line each). live: the last turn
+// goes on (the agent works, or waits for an answer): it has no answer yet,
+// its last run is the one going on; moving: it works (a step is under way).
+// A turn's answer is the text it ends with (notes after it come after it);
+// a turn that ends in a step has none.
+// A message the person sent while the agent worked, taken in during the
+// turn (mid), is the turn's: it shows after the turn's work, before its
+// answer, and does not end the turn.
+export function items(entries: ConvoEntry[], live: boolean, moving: boolean): Item[] {
+  const out: Item[] = []
+  let turn: { from?: string; steps: Step[]; to?: string; key: string; mids: ConvoEntry[] } | null = null
+  const end = (last: boolean) => {
+    if (!turn) return
+    const { steps, key, from, to, mids } = turn
+    turn = null
+    const goesOn = last && live
+    // (Thinking with nothing in it, as Claude Code mostly logs it, is not a
+    // step: it neither shows nor ends what the turn ends with.)
+    const blank = (s: Step) => !isNote(s) && s.kind === 'thinking' && !s.text?.trim()
+    let a = steps.length
+    let tail = steps.length
+    if (!goesOn) {
+      while (tail > 0 && (isNote(steps[tail - 1]) || blank(steps[tail - 1]))) tail--
+      a = tail
+      while (a > 0 && (isText(steps[a - 1]) || blank(steps[a - 1]))) a--
+    }
+    const answer = steps.slice(a, tail).filter(isText) as ConvoPart[]
+    // Each step by where it is in the turn (a key that stays as steps come,
+    // or as one left out comes back); a task call that failed stays, its
+    // error is to be seen.
+    const work = steps
+      .slice(0, a)
+      .map((s, i) => [s, i] as const)
+      .filter(([s]) => (!isTaskCall(s) || (s as ConvoPart).tool!.error) && !blank(s))
+    let run: Step[] = []
+    let at = 0
+    let live1 = false // (a run going on was shown)
+    const flush = (final: boolean) => {
+      if (!run.length) return
+      // Going on: one with a call not come back, or the turn's last while it works.
+      const on = goesOn && (run.some((x) => !isNote(x) && !!x.tool && !x.tool.done) || (final && moving))
+      if (on) live1 = true
+      out.push({ kind: 'work', key: key + '.g' + at, steps: run, live: on, moving: on && moving, busy: on && moving ? underWay(run) : undefined })
+      run = []
+    }
+    for (const [s, i] of work) {
+      if (isNote(s)) {
+        flush(false)
+        out.push(noteItem(s))
+      } else if (s.kind === 'text') {
+        flush(false)
+        out.push({ kind: 'text', key: key + '.x' + i, text: s.text ?? '', truncated: s.truncated })
+      } else {
+        if (!run.length) at = i
+        run.push(s)
+      }
+    }
+    const endsInRun = run.length > 0
+    flush(true)
+    // Working on after what it wrote last (thinking, say): a line says so.
+    if (goesOn && moving && !endsInRun && !live1) {
+      let k = steps.length
+      while (k > 0 && !isText(steps[k - 1]) && !isNote(steps[k - 1])) k--
+      out.push({ kind: 'work', key: key + '.g' + steps.length, steps: [], live: true, moving, busy: underWay(steps.slice(k)) })
+    }
+    for (const e of mids) out.push({ kind: 'user', e })
+    // (How long it worked, where it did any work: thinking counts, shown or not.)
+    const worked = steps.slice(0, tail).some((x) => !isNote(x) && x.kind !== 'text')
+    if (answer.length)
+      out.push({
+        kind: 'answer',
+        key: key + '.a',
+        text: answer.map((p) => p.text ?? '').join('\n\n'),
+        truncated: answer.some((p) => p.truncated),
+        ts: partTime.get(answer[answer.length - 1]),
+        span: worked && from && to && ms(to) >= ms(from) ? ms(to) - ms(from) : undefined,
+        edits: edits(work.map(([x]) => x)),
+      })
+    for (const s of steps.slice(tail)) if (isNote(s)) out.push(noteItem(s))
+  }
+  for (const e of entries) {
+    if (e.role === 'user' && e.mid && turn) {
+      turn.mids.push(e)
+      continue
+    }
+    if (e.role === 'user' || (e.role === 'summary' && !turn)) {
+      end(false)
+      out.push({ kind: e.role, e } as Item)
+      turn = { key: 't' + e.seq, from: e.role === 'user' ? e.ts : undefined, steps: [], mids: [] }
+      continue
+    }
+    if (!turn) turn = { key: 't' + e.seq, steps: [], mids: [] } // (the log read begins mid-turn)
+    const tr: { steps: Step[]; to?: string } = turn
+    if (e.role !== 'assistant') {
+      tr.steps.push(e) // (a note, or the summary of a compaction in the middle of the turn)
+      continue
+    }
+    if (e.ts) tr.to = e.ts
+    for (const p of e.parts) {
+      if (p.kind === 'image') continue
+      if (e.ts) partTime.set(p, e.ts)
+      tr.steps.push(p)
+    }
+  }
+  end(true)
+  return out
+}
+
+export const noteItem = (e: ConvoEntry): Item => (e.role === 'summary' ? { kind: 'summary', e } : { kind: 'note', e })
+
+// The step under way: the latest call not come back (of several run at
+// once, any), else thinking when that is the last thing.
+export function underWay(steps: Step[]): ConvoPart | undefined {
+  let last: ConvoPart | undefined
+  for (let i = steps.length - 1; i >= 0; i--) {
+    const s = steps[i]
+    if (isNote(s) || isTaskCall(s)) continue
+    if (s.tool && !s.tool.done) return s
+    last ??= s
+  }
+  return last?.kind === 'thinking' ? last : undefined
+}
+
+export const isNote = (s: Step): s is ConvoEntry => 'role' in s
+// The task list's own calls: it shows over the composer, not as steps.
+export const isTaskCall = (s: Step) => !isNote(s) && !!s.tool && verbOf(s.tool.name) === 'task'
+
+export const isText = (s: Step) => !isNote(s) && s.kind === 'text'
+
+export function edits(steps: Step[]): Edits | null {
+  const files = new Map<string, FileEdits>()
+  let add = 0
+  let del = 0
+  for (const s of steps) {
+    const tl = !isNote(s) ? s.tool : undefined
+    if (!tl || tl.error || category(tl.name) !== 'edit') continue
+    const path = tl.detail ?? ''
+    let f = files.get(path)
+    if (!f) files.set(path, (f = { path, add: 0, del: 0, tools: [] }))
+    f.add += tl.add ?? 0
+    f.del += tl.del ?? 0
+    f.tools.push(tl)
+    add += tl.add ?? 0
+    del += tl.del ?? 0
+  }
+  return files.size ? { files: [...files.values()], add, del } : null
+}
+
+export const sameEdits = (a: Edits | null, b: Edits | null) =>
+  a === b || (!!a && !!b && a.add === b.add && a.del === b.del && a.files.length === b.files.length && a.files.every((f, i) => f.path === b.files[i].path && f.tools.length === b.files[i].tools.length && f.tools.every((t, j) => t === b.files[i].tools[j])))
+
+export type Category = 'cmd' | 'read' | 'edit' | 'search' | 'web' | 'agent' | 'other'
+
+export function category(name: string): Category {
+  switch (name) {
+    case 'Bash':
+    case 'BashOutput':
+      return 'cmd'
+    case 'Read':
+      return 'read'
+    case 'Edit':
+    case 'MultiEdit':
+    case 'Write':
+    case 'NotebookEdit':
+      return 'edit'
+    case 'Grep':
+    case 'Glob':
+    case 'WebSearch':
+    case 'ToolSearch':
+      return 'search'
+    case 'WebFetch':
+      return 'web'
+    case 'Agent':
+    case 'Task':
+      return 'agent'
+  }
+  return 'other'
+}
+
+// The word a step's line starts with: what it did, or (live) does.
+export type Verb = Category | 'write' | 'task' | 'ask'
+export function verbOf(name: string): Verb | null {
+  if (name === 'Write') return 'write'
+  if (name === 'TaskCreate' || name === 'TaskUpdate' || name === 'TodoWrite') return 'task'
+  if (name === 'AskUserQuestion') return 'ask'
+  const c = category(name)
+  return c === 'other' ? null : c
+}
+
+export const ms = (ts?: string) => {
+  const v = ts ? Date.parse(ts) : NaN
+  return isNaN(v) ? 0 : v
+}

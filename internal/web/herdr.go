@@ -71,6 +71,11 @@ type herdrSummary struct {
 type agentTimes struct {
 	mu sync.Mutex
 	at map[string]agentTime
+	// primed: the first summary was made. What it found was so since a time
+	// not known (the gateway began watching then, say after a restart): no
+	// time is given for it until it changes. An agent that shows up later
+	// came then.
+	primed bool
 }
 
 type agentTime struct {
@@ -100,16 +105,30 @@ func (a *agentTimes) of(pane, status string, old bool) int64 {
 	defer a.mu.Unlock()
 	r, ok := a.at[pane]
 	if old {
-		if ok && r.status == status {
+		if ok && r.status == status && !r.t.IsZero() {
 			return r.t.UnixMilli()
 		}
+		return 0
+	}
+	if !ok && !a.primed {
+		a.at[pane] = agentTime{status: status} // (since a time not known)
 		return 0
 	}
 	if !ok || r.status != status {
 		r = agentTime{status, time.Now()}
 		a.at[pane] = r
 	}
+	if r.t.IsZero() {
+		return 0
+	}
 	return r.t.UnixMilli()
+}
+
+// prime says the first summary is made (see agentTimes.primed).
+func (a *agentTimes) prime() {
+	a.mu.Lock()
+	a.primed = true
+	a.mu.Unlock()
 }
 
 // herdrServers holds the agentTimes of each herdr server (by where the host
@@ -166,6 +185,9 @@ func summarize(session string, s *herdr.Snapshot, times *agentTimes, old bool) h
 		if p.AgentStatus == herdr.StatusBlocked {
 			out.Waiting++
 		}
+	}
+	if !old {
+		times.prime()
 	}
 	out.FocusedPane = s.FocusedPane
 	for _, p := range s.Panes {

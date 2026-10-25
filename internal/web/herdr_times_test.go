@@ -9,8 +9,8 @@ import (
 )
 
 func TestAgentTimes(t *testing.T) {
-	a := &agentTimes{at: map[string]agentTime{}}
-	first := a.of("w1:p1", "idle", false) // (first seen: now, and kept)
+	a := &agentTimes{at: map[string]agentTime{}, primed: true}
+	first := a.of("w1:p1", "idle", false) // (first seen after the first summary: now, and kept)
 	time.Sleep(5 * time.Millisecond)
 	if got := a.of("w1:p1", "idle", false); got != first {
 		t.Fatalf("first-seen time moved: %d then %d", first, got)
@@ -39,6 +39,29 @@ func TestAgentTimes(t *testing.T) {
 	a.changed("w1:p1", herdr.StatusGone)
 	if _, ok := a.at["w1:p1"]; ok {
 		t.Fatal("a pane gone is still kept")
+	}
+}
+
+// What the first summary finds has no time (it was so since a time not
+// known, as after a restart) until it changes; one that comes later has.
+func TestAgentTimesFirstSummary(t *testing.T) {
+	a := &agentTimes{at: map[string]agentTime{}}
+	if got := a.of("w1:p1", "idle", false); got != 0 {
+		t.Fatalf("found by the first summary: %d, want none", got)
+	}
+	a.prime()
+	if got := a.of("w1:p1", "idle", false); got != 0 {
+		t.Fatalf("still unchanged: %d, want none", got)
+	}
+	if got := a.of("w1:p1", "idle", true); got != 0 {
+		t.Fatalf("an old snapshot: %d, want none", got)
+	}
+	a.changed("w1:p1", "working")
+	if got := a.of("w1:p1", "working", false); got == 0 {
+		t.Fatal("changed: no time")
+	}
+	if got := a.of("w1:p2", "idle", false); got == 0 {
+		t.Fatal("come after the first summary: no time")
 	}
 }
 
