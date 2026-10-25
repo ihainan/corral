@@ -15,9 +15,10 @@ import (
 // rebind them, and the prefix too, in config.toml: the gateway reads its
 // [keys] table, so the panel presses what this host's herdr expects.
 
-// KeysCommand prints herdr's config.toml, at most 64 KiB of it (nothing when
-// there is none). Fixed text.
-const KeysCommand = `sh -c 'f="${HERDR_CONFIG_PATH:-${XDG_CONFIG_HOME:-$HOME/.config}/herdr/config.toml}"; [ -f "$f" ] && head -c 65536 "$f"; exit 0'`
+// KeysCommand prints herdr's config.toml, at most 64 KiB of it (nothing,
+// and success, when there is none; a file that cannot be read fails).
+// Fixed text.
+const KeysCommand = `sh -c 'f="${HERDR_CONFIG_PATH:-${XDG_CONFIG_HOME:-$HOME/.config}/herdr/config.toml}"; [ -e "$f" ] || exit 0; exec head -c 65536 "$f"'`
 
 const keysLimit = 64 << 10
 

@@ -3148,7 +3148,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
                   <ShortcutPanel
                     {...panelPages(info?.persistence, herdr?.focused_agent, lastPanelPage())}
                     herdrKeys={herdr?.keys}
-                    keysUnknown={herdr?.keys_unknown}
+                    keysUnknown={!herdr || herdr.keys_unknown} // (no summary yet: not known either)
                     onPick={(s) => void pickShortcut(s)}
                     onClose={closeShortcuts}
                   />

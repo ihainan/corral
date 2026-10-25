@@ -123,9 +123,14 @@ const keyNames: Record<string, { key: string; label: string }> = {
   up: { key: 'Up', label: '↑' }, down: { key: 'Down', label: '↓' }, left: { key: 'Left', label: '←' }, right: { key: 'Right', label: '→' },
   backspace: { key: 'BSpace', label: '⌫' }, delete: { key: 'Delete', label: 'Del' }, home: { key: 'Home', label: 'Home' }, end: { key: 'End', label: 'End' },
   pageup: { key: 'PageUp', label: 'PgUp' }, pagedown: { key: 'PageDown', label: 'PgDn' },
+  return: { key: 'Enter', label: '↵' }, bs: { key: 'BSpace', label: '⌫' }, del: { key: 'Delete', label: 'Del' }, insert: { key: 'Insert', label: 'Ins' },
 }
 for (let i = 1; i <= 12; i++) keyNames['f' + i] = { key: 'F' + i, label: 'F' + i }
-const charNames: Record<string, string> = { minus: '-', plus: '+', space: ' ', equal: '=', comma: ',', period: '.', slash: '/', backslash: '\\' }
+const charNames: Record<string, string> = {
+  minus: '-', plus: '+', space: ' ', equal: '=', comma: ',', period: '.', dot: '.', slash: '/', backslash: '\\', quote: "'", double_quote: '"',
+  semicolon: ';', colon: ':', percent: '%', hash: '#', dollar: '$', ampersand: '&', asterisk: '*', question: '?', exclamation: '!', at: '@',
+  caret: '^', tilde: '~', backtick: '`', pipe: '|', underscore: '_', less: '<', greater: '>',
+}
 
 // One chord of a herdr binding ("ctrl+b", "shift+t", "T", "?") as keys the
 // way macro.ts takes them, and as shown; null for one that cannot be sent
@@ -170,6 +175,7 @@ function herdrChord(b: string): { keys: string; label: string } | null {
 // herdr would read as a range, as "prefix+1..9").
 export function herdrBinding(b: string, prefix: string): { keys: string; label: string } | null {
   if (!b || b.includes('..')) return null
+  if (b.startsWith('prefix+') && !prefix) return null
   const steps = b.startsWith('prefix+') ? [prefix, b.slice(7)] : [b]
   const out = steps.map(herdrChord)
   if (out.some((x) => !x)) return null
@@ -181,7 +187,7 @@ export function herdrBinding(b: string, prefix: string): { keys: string; label: 
 export function herdrGroups(set?: Record<string, string>, unknown?: boolean): ShortcutGroup[] {
   // (Bindings not known, as the host's config could not be read: only the API's actions.)
   const bound = (k: HerdrKey | 'prefix') => (unknown ? '' : set && k in set ? set[k] : herdrDefaults[k])
-  const prefix = bound('prefix') || herdrDefaults.prefix
+  const prefix = bound('prefix') // ("": not known, or none: what needs it is left out)
   const key = (k: HerdrKey, desc: I18nKey): Shortcut[] => {
     const b = herdrBinding(bound(k), prefix)
     return b ? [{ id: k, label: b.label, desc, keys: b.keys }] : []
