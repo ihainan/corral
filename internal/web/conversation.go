@@ -38,6 +38,7 @@ const (
 	convoIdle      = 10 * time.Minute // a log nobody reads is forgotten after this
 	convoTail      = 4 << 20          // bytes read from the end of a log when it is first opened
 	convoStep      = 2 << 20          // bytes read at most by one request after that
+	convoOlderStep = 4 << 20          // bytes read from before what was read, when asked for (?older=1)
 	convoLocateMax = 256 << 10        // output of the locating script
 	convoStatesMax = 64               // conversation states kept at once
 	convoReadLimit = 15 * time.Second // a read the host has not answered by then is given up
@@ -251,6 +252,7 @@ type convoState struct {
 	size     int64 // the log's size when last looked at
 	mtime    time.Time
 	older    bool   // the log has more before what was read
+	from     int64  // where in the log the first line read begins (-1 until a first line is whole)
 	more     bool   // the last read stopped before the end
 	status   string // (tmux) the process's own word: "busy", "idle", or "" when not known
 	skipping bool   // in a line too long to keep, until its end
@@ -331,14 +333,17 @@ type convoBind struct {
 }
 
 type convoAnswer struct {
-	Available bool       `json:"available"`
-	Reason    string     `json:"reason,omitempty"`
-	Gen       int64      `json:"gen"`
-	Rev       int        `json:"rev"`
-	Reset     bool       `json:"reset,omitempty"` // drop what was shown: these are all the entries
-	Older     bool       `json:"older,omitempty"` // the conversation began before the first entry
-	More      bool       `json:"more,omitempty"`  // more of the log is to be read: ask again soon
-	Bind      *convoBind `json:"bind,omitempty"`
+	Available bool   `json:"available"`
+	Reason    string `json:"reason,omitempty"`
+	Gen       int64  `json:"gen"`
+	Rev       int    `json:"rev"`
+	Reset     bool   `json:"reset,omitempty"` // drop what was shown: these are all the entries
+	Older     bool   `json:"older,omitempty"` // the conversation began before the first entry
+	// OlderCut: what is before cannot be read in as well (as many entries
+	// are kept as there may be); older=1 brings nothing more.
+	OlderCut bool       `json:"older_cut,omitempty"`
+	More     bool       `json:"more,omitempty"` // more of the log is to be read: ask again soon
+	Bind     *convoBind `json:"bind,omitempty"`
 	// AgentStatus (tmux, where herdr does not say): "busy" or "idle" as
 	// Claude Code's file for the process says; absent when not known.
 	AgentStatus string `json:"agent_status,omitempty"`
@@ -352,10 +357,12 @@ type convoAnswer struct {
 	Entries []convo.Entry  `json:"entries"`
 }
 
-// GET /api/sessions/{id}/conversation?pane=<herdr pane>&gen=<n>&rev=<n>
+// GET /api/sessions/{id}/conversation?pane=<herdr pane>&gen=<n>&rev=<n>[&older=1]
 //
 // The entries changed since revision rev of generation gen; all of them when
-// gen is not the current one (then reset is set).
+// gen is not the current one (then reset is set). older=1 reads in the part
+// of the log before what was read (convoOlderStep of it): its entries come
+// as changed ones, before the others (lower seqs).
 func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 	sess, ok := s.runningSession(w, r)
 	if !ok {
@@ -369,6 +376,7 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 	}
 	gen, _ := strconv.ParseInt(q.Get("gen"), 10, 64)
 	rev, _ := strconv.Atoi(q.Get("rev"))
+	older := q.Get("older") == "1"
 	w.Header().Set("Cache-Control", "no-store")
 	if sess.Persistence != "herdr" && sess.Persistence != "tmux" {
 		writeJSON(w, http.StatusOK, convoAnswer{Reason: convoUnsupported, Entries: []convo.Entry{}})
@@ -405,11 +413,15 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	more, err := s.readConvo(sess, st)
+	if err == nil && older && gen == st.gen {
+		err = s.readOlder(sess, st)
+	}
 	if err != nil {
 		writeFileError(w, err)
 		return
 	}
 	ans.Available, ans.Gen, ans.Rev, ans.Older, ans.More, ans.AgentStatus = true, st.gen, st.parser.Rev(), st.older, more, st.status
+	ans.OlderCut = st.older && (st.parser.Trimmed() || st.from < 0)
 	if gen != st.gen {
 		ans.Reset = true
 		rev = 0
@@ -462,7 +474,7 @@ func (s *Server) locateConvo(ctx context.Context, sess *term.Session, st *convoS
 		st.gen = convoGens.Add(1)
 		st.sid, st.log = sid, log
 		st.parser = convo.NewClaude()
-		st.offset, st.size, st.mtime, st.older, st.skipping = 0, -1, time.Time{}, false, false
+		st.offset, st.size, st.mtime, st.older, st.skipping, st.from = 0, -1, time.Time{}, false, false, 0
 	}
 	st.reason = reason
 	// (What was queued to a process of the same session before this one: not this one's.)
@@ -491,7 +503,7 @@ func (s *Server) readConvo(sess *term.Session, st *convoState) (more bool, err e
 		if size < st.offset || size < st.size {
 			st.gen = convoGens.Add(1)
 			st.parser = convo.NewClaude()
-			st.offset, st.older, st.skipping = 0, false, false
+			st.offset, st.older, st.skipping, st.from = 0, false, false, 0
 			if st.bind != nil {
 				st.parser.QueueSince(st.bind.started) // (as locateConvo says it)
 			}
@@ -500,7 +512,7 @@ func (s *Server) readConvo(sess *term.Session, st *convoState) (more bool, err e
 		if st.size < 0 { // first read: the end of a long log
 			limit = convoTail
 			if size > convoTail {
-				st.offset, st.older, st.skipping = size-convoTail, true, true
+				st.offset, st.older, st.skipping, st.from = size-convoTail, true, true, -1
 			}
 		}
 		n := min(size-st.offset, limit)
@@ -518,6 +530,9 @@ func (s *Server) readConvo(sess *term.Session, st *convoState) (more bool, err e
 				return nil
 			}
 			pos, st.skipping = i+1, false
+			if st.from < 0 {
+				st.from = st.offset + int64(pos) // (the first whole line read)
+			}
 		}
 		end := bytes.LastIndexByte(data[pos:], '\n')
 		switch {
@@ -534,6 +549,42 @@ func (s *Server) readConvo(sess *term.Session, st *convoState) (more bool, err e
 		return nil
 	})
 	return st.more, err
+}
+
+// readOlder reads in the part of the log before what was read: up to
+// convoOlderStep of it, from its first whole line (all of it, at the log's
+// start), parsed on its own and put before (convo.Claude.Prepend). A part
+// that is all one line (a pasted image) is passed over, the next request
+// goes on before it. Nothing once entries were dropped as too many.
+func (s *Server) readOlder(sess *term.Session, st *convoState) error {
+	if !st.older || st.from <= 0 || st.parser.Trimmed() {
+		return nil
+	}
+	return s.withSFTP(context.Background(), sess, convoReadLimit, func(c *sftplite.Client) error {
+		start := max(0, st.from-convoOlderStep)
+		data, err := c.ReadRange(st.log, start, int(st.from-start))
+		if err != nil {
+			return err
+		}
+		if int64(len(data)) != st.from-start {
+			return errors.New("the log changed under the read") // (shortened: read again from the end next)
+		}
+		pos := 0
+		if start > 0 {
+			i := bytes.IndexByte(data, '\n')
+			if i < 0 {
+				st.from = start // (one line, longer than the part: left out)
+				return nil
+			}
+			pos = i + 1
+		}
+		o := convo.NewClaude()
+		o.Feed(data[pos:])
+		st.parser.Prepend(o)
+		st.from = start + int64(pos)
+		st.older = st.from > 0
+		return nil
+	})
 }
 
 // convoProcStatus reads what Claude Code's file for the bound process says it

@@ -58,6 +58,13 @@ type Claude struct {
 	since   int64        // (unix milliseconds) what was queued before was to another process: not kept
 	// Skipped counts lines that were not JSON or of no use to the view.
 	Skipped int
+	orphans map[string]orphan // results whose call is not in what was read (see Prepend)
+	trimmed bool              // entries were dropped as old
+}
+
+type orphan struct {
+	b       claudeBlock
+	account json.RawMessage
 }
 
 type toolRef struct {
@@ -83,8 +90,14 @@ type taskItem struct {
 	Task
 }
 
-// maxEntries is how many entries are kept; older ones are dropped.
-const maxEntries = 2000
+// maxEntries is how many entries are kept; older ones are dropped (and,
+// once some are, no earlier part is put before them: see Prepend).
+const maxEntries = 6000
+
+// maxOrphans is how many results of calls not seen are kept, for a part of
+// the log read later from before (see Prepend): those at the start of the
+// part read first.
+const maxOrphans = 256
 
 func NewClaude() *Claude { return &Claude{tools: map[string]toolRef{}} }
 
@@ -198,6 +211,59 @@ func (c *Claude) Since(rev int) []Entry {
 	return out
 }
 
+// Trimmed says entries were dropped as old: nothing more is put before.
+func (c *Claude) Trimmed() bool { return c.trimmed }
+
+// Prepend puts before c's entries those of o, a parser fed the part of the
+// log just before the part c was fed: they take Seqs below c's first (as
+// low as it takes: they may be negative) and this revision, so a reader
+// of Since gets them as changed. A call of o answered in c's part gets its
+// result (kept by c, see maxOrphans); one never answered in what is read is
+// done, its result not known. Past maxEntries, the oldest of o are left
+// out, and Trimmed says so. Of o's state only a title c has none of is
+// taken: the rest of c's is the later word.
+func (c *Claude) Prepend(o *Claude) {
+	for id, r := range c.orphans {
+		if _, ok := o.tools[id]; ok {
+			o.result(r.b, r.account)
+			delete(c.orphans, id)
+		}
+	}
+	for id, ref := range o.tools {
+		ref.t.Done = true
+		delete(o.tools, id)
+	}
+	if c.aiTitle == "" {
+		c.aiTitle = o.aiTitle
+	}
+	if c.myTitle == "" {
+		c.myTitle = o.myTitle
+	}
+	if len(o.entries) == 0 {
+		return
+	}
+	room := maxEntries - len(c.entries)
+	if room <= 0 {
+		c.trimmed = true
+		return
+	}
+	add := o.entries
+	if len(add) > room {
+		add = add[len(add)-room:]
+		c.trimmed = true
+	}
+	c.rev++
+	first := c.seq + 1
+	if len(c.entries) > 0 {
+		first = c.entries[0].Seq
+	}
+	for i, e := range add {
+		e.Seq = first - len(add) + i
+		e.Rev = c.rev
+	}
+	c.entries = append(append([]*Entry(nil), add...), c.entries...)
+}
+
 // First is the Seq of the oldest entry kept (0 when there are none).
 func (c *Claude) First() int {
 	if len(c.entries) == 0 {
@@ -208,6 +274,7 @@ func (c *Claude) First() int {
 
 func (c *Claude) trim() {
 	if n := len(c.entries) - maxEntries; n > 0 {
+		c.trimmed = true
 		for _, e := range c.entries[:n] {
 			for _, p := range e.Parts {
 				// (A log that reuses an id has the map point at the later call.)
@@ -576,6 +643,12 @@ func (c *Claude) setMode(m string) {
 func (c *Claude) result(b claudeBlock, account json.RawMessage) {
 	ref, ok := c.tools[b.ToolUseID]
 	if !ok {
+		if c.orphans == nil {
+			c.orphans = map[string]orphan{}
+		}
+		if len(c.orphans) < maxOrphans && b.ToolUseID != "" {
+			c.orphans[b.ToolUseID] = orphan{b, append(json.RawMessage(nil), account...)}
+		}
 		return
 	}
 	text := resultText(b.Content)

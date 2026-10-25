@@ -220,6 +220,35 @@ export function ConversationView({
     const el = box.current
     if (el) el.scrollTop = el.scrollHeight
   }, [convo.of])
+  // The part before, read in when its line comes near (as the top is
+  // scrolled to): what was in view stays where it was as it goes in above.
+  const olderRef = useRef<HTMLParagraphElement>(null)
+  const convoNow = useRef(convo)
+  convoNow.current = convo
+  useEffect(() => {
+    const el = olderRef.current
+    const root = box.current
+    if (!el || !root || !convo.older || convo.olderCut) return
+    const io = new IntersectionObserver(
+      (es) => {
+        const c = convoNow.current
+        if (es.some((e) => e.isIntersecting) && c.older && !c.olderCut && !c.loadingOlder) c.loadOlder()
+      },
+      { root, rootMargin: '600px 0px 0px 0px' },
+    )
+    io.observe(el)
+    return () => io.disconnect()
+  }, [convo.older, convo.olderCut, convo.loadingOlder, convo.of])
+  const firstKey = list.length ? itemKey(list[0]) : ''
+  const anchor = useRef<{ first: string; height: number } | null>(null)
+  useLayoutEffect(() => {
+    const el = box.current
+    if (!el) return
+    const was = anchor.current
+    // (Items came in before the first one there was: as high above.)
+    if (was && was.first && was.first !== firstKey && list.some((it, i) => i > 0 && itemKey(it) === was.first)) el.scrollTop += el.scrollHeight - was.height
+    anchor.current = { first: firstKey, height: el.scrollHeight }
+  })
   // Before the new content is laid out, note whether the end was in view;
   // after, keep it there.
   useLayoutEffect(() => {
@@ -268,10 +297,17 @@ export function ConversationView({
   else
     body = (
       <>
-        {convo.older && <p className="convo-older">{t('convo.older')}</p>}
+        {convo.older ? (
+          // (Near the top, the part before is read in: see the observer.)
+          <p className="convo-older" ref={olderRef} role="status">
+            {convo.olderCut ? t('convo.olderCut') : convo.loadingOlder ? t('convo.loadingOlder') : t('convo.older')}
+          </p>
+        ) : (
+          convo.entries.length > 0 && <p className="convo-older">{t('convo.atStart')}</p>
+        )}
         {list.map((it) => (
           <ListItem
-            key={it.kind === 'work' || it.kind === 'answer' || it.kind === 'text' ? it.key : it.e.seq}
+            key={itemKey(it)}
             it={it}
             copy={copy}
             open={it.kind === 'work' ? (opened[it.key] ?? allOpen) : false}
@@ -723,6 +759,7 @@ function sameItem(a: Item, b: Item): boolean {
 }
 
 const noShow = () => {}
+const itemKey = (it: Item) => (it.kind === 'work' || it.kind === 'answer' || it.kind === 'text' ? it.key : 'e' + it.e.seq)
 // (Claude Code's own words that it was stopped, in the person's language.)
 const noteText = (e: ConvoEntry) => {
   const s = e.parts.map((p) => p.text).join(' ')

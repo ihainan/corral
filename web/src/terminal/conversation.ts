@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api, ApiError } from '../api'
 
 // The conversation view's data: the agent's own log of the session in the
@@ -91,6 +91,7 @@ interface Answer {
   rev: number
   reset?: boolean
   older?: boolean
+  older_cut?: boolean // (what is before cannot be read in as well)
   more?: boolean
   entries: ConvoEntry[]
 }
@@ -101,7 +102,12 @@ export interface Convo {
   status: ConvoStatus
   reason?: string // with 'none': no_agent, no_log, unsupported
   entries: ConvoEntry[] // (the same array while nothing in it changed)
-  older: boolean
+  older: boolean // the conversation began before the first entry
+  olderCut: boolean // and what is before cannot be read in as well
+  loadingOlder: boolean // the part before is being read in (see loadOlder)
+  // Reads in the part of the log before the first entry (its entries come
+  // first, with lower seqs); while one is on its way, nothing more.
+  loadOlder: () => void
   gen: number
   bind?: ConvoBind
   agentStatus?: 'busy' | 'idle' // (tmux) as Claude Code's file for the process says
@@ -116,7 +122,8 @@ export interface Convo {
   of?: string // (the session and pane it is of: see kept)
 }
 
-const initial = (of?: string): Convo => ({ status: 'loading', entries: [], older: false, gen: 0, failing: false, okAt: 0, changedAt: Date.now(), of })
+const noop = () => {}
+const initial = (of?: string): Convo => ({ status: 'loading', entries: [], older: false, olderCut: false, loadingOlder: false, loadOlder: noop, gen: 0, failing: false, okAt: 0, changedAt: Date.now(), of })
 
 // What was last read of a session's pane, for this page's life: shown at
 // once when it is in front again (its tab back to the front, the pane
@@ -153,7 +160,7 @@ const sameMeta = (a?: ConvoMeta, b?: ConvoMeta) =>
 
 const POLL = 2000
 const RETRY = 5000
-const MAX = 2000
+const MAX = 6000 // (entries kept, as the gateway keeps at most)
 
 export function useConversation(sessionId: string, enabled: boolean, pane: string | undefined): Convo {
   const [convo, setConvo] = useState<Convo>(() => initial())
@@ -161,6 +168,9 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
   paneRef.current = pane
   const poke = useRef<() => void>(() => {})
   const lastOk = useRef(0) // (ms) the last answer, whatever it brought
+  // The part before asked for (by the reading of its gen), until an answer to that came.
+  const wantOlder = useRef<number | null>(null)
+  const pokeOlder = useRef<() => void>(() => {})
 
   useEffect(() => {
     if (!enabled) return
@@ -180,6 +190,8 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
       const key = keyOf(sessionId, pane)
       const q = new URLSearchParams({ gen: String(gen), rev: String(rev) })
       if (pane) q.set('pane', pane)
+      const asksOlder = wantOlder.current !== null && wantOlder.current === gen
+      if (asksOlder) q.set('older', '1')
       let next = POLL
       try {
         const a = await api<Answer>('GET', `/api/sessions/${sessionId}/conversation?${q}`, undefined, { signal: mine.signal, timeoutMs: 25000 })
@@ -200,6 +212,7 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
           remember(key, gen, rev, byseq, a)
         } else {
           const fresh = a.reset || a.gen !== gen
+          if (asksOlder || fresh) wantOlder.current = null // (answered, or another reading: asked of that no more)
           if (fresh) byseq = new Map()
           gen = a.gen
           rev = a.rev
@@ -216,14 +229,17 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
           // Nothing new: the same state (no rendering), unless its facts changed.
           setConvo((c) => {
             const older = !!a.older || (entries ?? c.entries).length === MAX
+            const olderCut = older && (!!a.older_cut || (entries ?? c.entries).length === MAX)
+            const loadingOlder = wantOlder.current !== null
             const tasks = a.tasks?.length ? (JSON.stringify(a.tasks) === JSON.stringify(c.tasks) ? c.tasks : a.tasks) : undefined
             const meta = a.meta ? (sameMeta(a.meta, c.meta) ? c.meta : a.meta) : undefined
             const queued = a.queued?.length ? (JSON.stringify(a.queued) === JSON.stringify(c.queued) ? c.queued : a.queued) : undefined
-            if (!entries && c.of === key && c.status === 'ready' && c.gen === a.gen && c.older === older && sameBind(c.bind, a.bind) && c.agentStatus === a.agent_status && c.title === a.title && c.tasks === tasks && c.meta === meta && c.queued === queued && !c.failing) return c
-            return { status: 'ready', entries: entries ?? c.entries, older, gen: a.gen, bind: a.bind, agentStatus: a.agent_status, title: a.title || undefined, tasks, meta, queued, failing: false, okAt: now, changedAt: entries ? now : c.changedAt, of: key }
+            if (!entries && c.of === key && c.status === 'ready' && c.gen === a.gen && c.older === older && c.olderCut === olderCut && c.loadingOlder === loadingOlder && sameBind(c.bind, a.bind) && c.agentStatus === a.agent_status && c.title === a.title && c.tasks === tasks && c.meta === meta && c.queued === queued && !c.failing) return c
+            return { ...initial(key), status: 'ready', entries: entries ?? c.entries, older, olderCut, loadingOlder, gen: a.gen, bind: a.bind, agentStatus: a.agent_status, title: a.title || undefined, tasks, meta, queued, failing: false, okAt: now, changedAt: entries ? now : c.changedAt, of: key }
           })
           remember(key, gen, rev, byseq, a)
           if (a.more) next = 300
+          if (wantOlder.current !== null) next = 0 // (asked for meanwhile)
         }
       } catch (e) {
         if (stopped || mine.signal.aborted || (e instanceof ApiError && e.code === 'aborted')) return
@@ -241,6 +257,7 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
     // anything (its entries as read up to where reading goes on from), else
     // "reading". Nothing of another pane shows meanwhile.
     const begin = () => {
+      wantOlder.current = null // (of the pane before)
       const key = keyOf(sessionId, paneRef.current)
       const was = kept.get(key)
       if (was) {
@@ -253,7 +270,7 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
         else {
           const entries = [...byseq.values()].sort((x, y) => x.seq - y.seq)
           const older = !!k.older || entries.length === MAX
-          setConvo({ status: 'ready', entries, older, gen, bind: k.bind, agentStatus: k.agent_status, title: k.title || undefined, tasks: k.tasks?.length ? k.tasks : undefined, meta: k.meta, queued: k.queued?.length ? k.queued : undefined, failing: false, okAt: now, changedAt: now, of: key })
+          setConvo({ ...initial(key), status: 'ready', entries, older, olderCut: older && (!!k.older_cut || entries.length === MAX), gen, bind: k.bind, agentStatus: k.agent_status, title: k.title || undefined, tasks: k.tasks?.length ? k.tasks : undefined, meta: k.meta, queued: k.queued?.length ? k.queued : undefined, failing: false, okAt: now, changedAt: now, of: key })
         }
       } else {
         gen = 0
@@ -261,6 +278,13 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
         byseq = new Map()
         setConvo(initial(key))
       }
+    }
+    // The part before, asked for: read now, or once what is on its way is answered.
+    pokeOlder.current = () => {
+      if (ctl || stopped) return
+      clearTimeout(timer)
+      timer = undefined
+      void run()
     }
     // Another pane in front: what is on its way is for the old one.
     poke.current = () => {
@@ -280,6 +304,7 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
       ctl?.abort()
       document.removeEventListener('visibilitychange', onVisible)
       poke.current = () => {}
+      pokeOlder.current = () => {}
     }
   }, [sessionId, enabled])
 
@@ -288,7 +313,17 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
     poke.current()
   }, [pane])
 
-  return convo
+  const loadOlder = useCallback(() => {
+    if (wantOlder.current !== null) return
+    setConvo((c) => {
+      if (c.status !== 'ready' || !c.older || c.olderCut || c.loadingOlder) return c
+      wantOlder.current = c.gen
+      return { ...c, loadingOlder: true }
+    })
+    // (After the state above: the request goes with what it asks for.)
+    setTimeout(() => pokeOlder.current())
+  }, [])
+  return useMemo(() => ({ ...convo, loadOlder }), [convo, loadOlder])
 }
 
 // Whether the agent is asking the person something (AskUserQuestion, not

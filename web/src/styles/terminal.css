@@ -408,7 +408,7 @@ html.term-dark .overlay, html.term-dark .menu, html.term-dark .toast {
 .term-root .convo .btn-ghost:hover { background: var(--term-hover); }
 .convo-main { flex: 1; min-width: 0; display: flex; flex-direction: column; position: relative; }
 .convo-scroll-wrap { flex: 1; min-height: 0; display: flex; flex-direction: column; position: relative; }
-.convo-scroll { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+.convo-scroll { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; overflow-anchor: none; /* (what goes in above is made up for by hand: Safari has no anchoring) */ }
 /* Under the thread, in its column: the task list, the wait, the composer, what the session runs with */
 .convo-dock {
   flex: none; width: 100%; max-width: 780px; margin: 0 auto; display: flex; flex-direction: column; gap: 8px;
