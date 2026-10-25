@@ -595,9 +595,11 @@ exec tmux send-keys -t "$p" "$@"`
 // program in front, which asked for them), tmux wraps it when the program
 // asked (paste-buffer -p, its newlines kept with -r).
 //
-// One message at a time to a pane on the host too, where flock is there (a
-// lock the kernel lets go of with the script: the gateway may give up on a
-// send whose script goes on), on a file in XDG_RUNTIME_DIR or /tmp.
+// One message at a time to a pane on the host too, where flock and the
+// user's own XDG_RUNTIME_DIR are there (a lock the kernel lets go of with
+// the script: the gateway may give up on a send whose script goes on; not
+// in a folder others can write to, as /tmp), tried for 10 seconds (-n:
+// BusyBox's has no -w). Without them, the gateway's turn is what there is.
 //
 // Exits 3: not that agent in front in that pane now (or, tmux, the pane is
 // not in this session); 4: nothing typed; 5: the text typed, not Enter; 6:
@@ -609,16 +611,16 @@ func convoSendCommand(mode, session, pane, socket string, pid, start int64, leng
 mode=$1 sess=$2 p=$3 pid=$4 start=$5 len=$6 sock=$7
 b=corral-send-$$ typing=0
 f=$(mktemp) || exit 4
-trap 'rm -f "$f"; [ "$mode" = tmux ] && tmux delete-buffer -b "$b" 2>/dev/null' EXIT
+trap 'rm -f "$f"; [ "$mode" = tmux ] && tmux delete-buffer -b "$b" 2>/dev/null 9>&-' EXIT
 trap '[ "$typing" = 1 ] && exit 6; exit 4' HUP INT TERM
 cat >"$f" || exit 4
-if command -v flock >/dev/null 2>&1; then
-  for dir in "${XDG_RUNTIME_DIR:-}" /tmp; do
-    l=$dir/corral-send-$(id -u)-$(printf '%s' "$mode-$p" | tr -c 'A-Za-z0-9-' _)
-    [ -n "$dir" ] && [ -d "$dir" ] && [ -w "$dir" ] && { [ ! -e "$l" ] || [ -w "$l" ]; } || continue
-    exec 9>>"$l"
-    flock -w 10 9 || exit 4
-    break
+l=${XDG_RUNTIME_DIR:-}/corral-send-$(printf '%s' "$mode-$p" | tr -c 'A-Za-z0-9-' _)
+if [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -d "$XDG_RUNTIME_DIR" ] && [ ! -L "$l" ] && command -v flock >/dev/null 2>&1 && (exec 9>>"$l") 2>/dev/null; then
+  exec 9>>"$l"
+  n=0
+  until flock -n 9; do
+    n=$((n + 1)); [ "$n" -ge 100 ] && exit 4
+    sleep 0.1
   done
 fi
 [ "$(wc -c <"$f" | tr -d ' ')" = "$len" ] || exit 4
@@ -633,7 +635,7 @@ front() {
 }
 front || exit 3
 if [ "$mode" = tmux ]; then
-  [ "$(tmux -u display-message -p -t "$p" '#{session_name}' 2>/dev/null)" = "$sess" ] || exit 3
+  [ "$(tmux -u display-message -p -t "$p" '#{session_name}' 2>/dev/null 9>&-)" = "$sess" ] || exit 3
   tmux load-buffer -b "$b" "$f" 9>&- || exit 4
   front || exit 3
   typing=1
