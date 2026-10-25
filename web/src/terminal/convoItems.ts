@@ -33,6 +33,11 @@ export interface FileEdits {
 
 // When each part was written (its entry's time).
 export const partTime = new WeakMap<ConvoPart, string>()
+// Where each part is in the log (its entry's seq, its place in it): what an
+// item is known by, whatever turn it is found in (a turn read from its middle
+// takes in its start as the part before is read in, and keeps its items).
+const partKey = new WeakMap<ConvoPart, string>()
+const stepKey = (s: Step) => (isNote(s) ? 'e' + s.seq : (partKey.get(s) ?? '?'))
 
 // items groups the entries by turn, and a turn into what the agent wrote
 // (shown) and the runs of steps between (a line each). live: the last turn
@@ -62,35 +67,27 @@ export function items(entries: ConvoEntry[], live: boolean, moving: boolean): It
       while (a > 0 && (isText(steps[a - 1]) || blank(steps[a - 1]))) a--
     }
     const answer = steps.slice(a, tail).filter(isText) as ConvoPart[]
-    // Each step by where it is in the turn (a key that stays as steps come,
-    // or as one left out comes back); a task call that failed stays, its
-    // error is to be seen.
-    const work = steps
-      .slice(0, a)
-      .map((s, i) => [s, i] as const)
-      .filter(([s]) => (!isTaskCall(s) || (s as ConvoPart).tool!.error) && !blank(s))
+    // (A task call that failed stays: its error is to be seen. A run is
+    // known by its first step, a text by itself: see partKey.)
+    const work = steps.slice(0, a).filter((s) => (!isTaskCall(s) || (s as ConvoPart).tool!.error) && !blank(s))
     let run: Step[] = []
-    let at = 0
     let live1 = false // (a run going on was shown)
     const flush = (final: boolean) => {
       if (!run.length) return
       // Going on: one with a call not come back, or the turn's last while it works.
       const on = goesOn && (run.some((x) => !isNote(x) && !!x.tool && !x.tool.done) || (final && moving))
       if (on) live1 = true
-      out.push({ kind: 'work', key: key + '.g' + at, steps: run, live: on, moving: on && moving, busy: on && moving ? underWay(run) : undefined })
+      out.push({ kind: 'work', key: 'g' + stepKey(run[0]), steps: run, live: on, moving: on && moving, busy: on && moving ? underWay(run) : undefined })
       run = []
     }
-    for (const [s, i] of work) {
+    for (const s of work) {
       if (isNote(s)) {
         flush(false)
         out.push(noteItem(s))
       } else if (s.kind === 'text') {
         flush(false)
-        out.push({ kind: 'text', key: key + '.x' + i, text: s.text ?? '', truncated: s.truncated })
-      } else {
-        if (!run.length) at = i
-        run.push(s)
-      }
+        out.push({ kind: 'text', key: 'x' + stepKey(s), text: s.text ?? '', truncated: s.truncated })
+      } else run.push(s)
     }
     const endsInRun = run.length > 0
     flush(true)
@@ -98,7 +95,7 @@ export function items(entries: ConvoEntry[], live: boolean, moving: boolean): It
     if (goesOn && moving && !endsInRun && !live1) {
       let k = steps.length
       while (k > 0 && !isText(steps[k - 1]) && !isNote(steps[k - 1])) k--
-      out.push({ kind: 'work', key: key + '.g' + steps.length, steps: [], live: true, moving, busy: underWay(steps.slice(k)) })
+      out.push({ kind: 'work', key: 'g' + key + '.on', steps: [], live: true, moving, busy: underWay(steps.slice(k)) })
     }
     for (const e of mids) out.push({ kind: 'user', e })
     // (How long it worked, where it did any work: thinking counts, shown or not.)
@@ -106,12 +103,12 @@ export function items(entries: ConvoEntry[], live: boolean, moving: boolean): It
     if (answer.length)
       out.push({
         kind: 'answer',
-        key: key + '.a',
+        key: 'a' + stepKey(answer[0]),
         text: answer.map((p) => p.text ?? '').join('\n\n'),
         truncated: answer.some((p) => p.truncated),
         ts: partTime.get(answer[answer.length - 1]),
         span: worked && from && to && ms(to) >= ms(from) ? ms(to) - ms(from) : undefined,
-        edits: edits(work.map(([x]) => x)),
+        edits: edits(work),
       })
     for (const s of steps.slice(tail)) if (isNote(s)) out.push(noteItem(s))
   }
@@ -133,11 +130,12 @@ export function items(entries: ConvoEntry[], live: boolean, moving: boolean): It
       continue
     }
     if (e.ts) tr.to = e.ts
-    for (const p of e.parts) {
-      if (p.kind === 'image') continue
+    e.parts.forEach((p, i) => {
+      if (p.kind === 'image') return
       if (e.ts) partTime.set(p, e.ts)
+      partKey.set(p, e.seq + '.' + i)
       tr.steps.push(p)
-    }
+    })
   }
   end(true)
   return out

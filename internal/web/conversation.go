@@ -572,8 +572,9 @@ func (s *Server) readOlder(sess *term.Session, st *convoState) error {
 		pos := 0
 		if start > 0 {
 			i := bytes.IndexByte(data, '\n')
-			if i < 0 {
-				st.from = start // (one line, longer than the part: left out)
+			if i < 0 || i+1 == len(data) {
+				st.from = start // (all one line, longer than the part, to its end: left out, on before it)
+				st.older = st.from > 0
 				return nil
 			}
 			pos = i + 1

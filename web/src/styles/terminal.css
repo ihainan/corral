@@ -762,3 +762,46 @@ html.term-dark .overlay, html.term-dark .menu, html.term-dark .toast {
 }
 .agents-chat-empty p { margin: 0; }
 .term-root .agents-chat-why { color: var(--term-fg-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+
+/* A phone's agents list: one row an agent (what, where, how it is); waiting is the one loud colour. */
+.agents-list { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 0 0 calc(16px + env(safe-area-inset-bottom, 0px)); }
+.agents-list-top {
+  position: sticky; top: 0; z-index: 1; display: flex; align-items: center; gap: 8px;
+  padding: 10px max(16px, env(safe-area-inset-right, 0px)) 10px max(16px, env(safe-area-inset-left, 0px));
+  background: var(--term-bg); border-bottom: 1px solid var(--term-line);
+}
+.agents-list-sum {
+  flex: 1; min-width: 0; display: flex; flex-wrap: wrap; gap: 4px 12px; padding: 6px 0; border: 0; background: none;
+  color: var(--term-fg-2); font: 500 14px/20px var(--font-ui); text-align: left; cursor: pointer;
+}
+.agents-list-sum .is-blocked { color: var(--term-warn-text); font-weight: 600; }
+.agents-list-sum .is-working { color: var(--term-accent-text); }
+.agents-list-sum .is-done { color: var(--term-ok-text); }
+.term-root .agents-list-mine { flex: none; height: 32px; padding: 0 10px; color: var(--term-fg-2); font-size: 13px; }
+.term-root .agents-list-mine[aria-pressed='true'] { background: var(--term-accent-soft); color: var(--term-accent-text); }
+.agents-list-none { margin: 24px 16px; color: var(--term-fg-3); font: 14px/22px var(--font-ui); text-align: center; }
+.agents-list-rows { list-style: none; margin: 0; padding: 0; }
+.agents-list-row {
+  width: 100%; min-height: 64px; display: flex; align-items: center; gap: 12px;
+  padding: 10px max(16px, env(safe-area-inset-right, 0px)) 10px max(16px, env(safe-area-inset-left, 0px));
+  border: 0; border-bottom: 1px solid var(--term-line); background: none; color: var(--term-fg); text-align: left; cursor: pointer;
+  font-family: var(--font-ui); -webkit-tap-highlight-color: transparent;
+}
+.agents-list-row:active { background: var(--term-hover); }
+.agents-list-row.is-blocked { background: color-mix(in srgb, var(--term-warn-text) 10%, var(--term-bg)); }
+.agents-list-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.agents-list-title { font-size: 15.5px; line-height: 22px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agents-list-where { font-size: 13px; line-height: 18px; color: var(--term-fg-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agents-list-side { flex: none; max-width: 40%; font-size: 13px; color: var(--term-fg-3); text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.agents-list-side.is-blocked { color: var(--term-warn-text); font-weight: 600; }
+.agents-list-side.is-working { color: var(--term-accent-text); }
+.agents-list-side.is-done { color: var(--term-ok-text); }
+/* The mark: a triangle waiting, turning working, a dot done (not seen), a ring idle. */
+.agents-mark { flex: none; width: 12px; height: 12px; display: inline-flex; align-items: center; justify-content: center; }
+.agents-mark.is-blocked { background: var(--term-warn-text); clip-path: polygon(50% 4%, 100% 96%, 0 96%); }
+.agents-mark.is-done { border-radius: 50%; background: var(--term-ok-text); width: 9px; height: 9px; margin: 0 1.5px; }
+.agents-mark.is-idle, .agents-mark.is-unknown { border-radius: 50%; border: 1.5px solid var(--term-fg-3); width: 10px; height: 10px; margin: 0 1px; }
+.agents-mark.is-unknown { opacity: 0.5; }
+/* A phone's conversation: its own bar, with the way back, under the status bar. */
+.agents-chat.is-stack.is-chat .convo-bar { padding-top: calc(env(safe-area-inset-top, 0px) + 6px); }
+.term-root .agents-chat-back { flex: none; margin-left: -6px; }

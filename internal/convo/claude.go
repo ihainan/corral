@@ -60,6 +60,9 @@ type Claude struct {
 	Skipped int
 	orphans map[string]orphan // results whose call is not in what was read (see Prepend)
 	trimmed bool              // entries were dropped as old
+	// What the part read said itself (a part before it, put before, says
+	// only what this one did not): a custom title (even cleared), the task list.
+	myTitleSaid, tasksSaid bool
 }
 
 type orphan struct {
@@ -218,10 +221,11 @@ func (c *Claude) Trimmed() bool { return c.trimmed }
 // log just before the part c was fed: they take Seqs below c's first (as
 // low as it takes: they may be negative) and this revision, so a reader
 // of Since gets them as changed. A call of o answered in c's part gets its
-// result (kept by c, see maxOrphans); one never answered in what is read is
-// done, its result not known. Past maxEntries, the oldest of o are left
-// out, and Trimmed says so. Of o's state only a title c has none of is
-// taken: the rest of c's is the later word.
+// result (kept by c, see maxOrphans); one not answered yet is c's to
+// answer, as the log goes on. o's own results of calls further back are
+// kept for the part before it. Past maxEntries, the oldest of o are left
+// out, and Trimmed says so. Of o's state, what c's part did not say itself
+// (a title, a custom one, the task list) is taken: the rest is c's later word.
 func (c *Claude) Prepend(o *Claude) {
 	for id, r := range c.orphans {
 		if _, ok := o.tools[id]; ok {
@@ -229,15 +233,30 @@ func (c *Claude) Prepend(o *Claude) {
 			delete(c.orphans, id)
 		}
 	}
+	for id, r := range o.orphans {
+		if c.orphans == nil {
+			c.orphans = map[string]orphan{}
+		}
+		if len(c.orphans) < maxOrphans {
+			c.orphans[id] = r
+		}
+	}
+	if c.tools == nil {
+		c.tools = map[string]toolRef{}
+	}
 	for id, ref := range o.tools {
-		ref.t.Done = true
-		delete(o.tools, id)
+		if _, ok := c.tools[id]; !ok {
+			c.tools[id] = ref
+		}
 	}
 	if c.aiTitle == "" {
 		c.aiTitle = o.aiTitle
 	}
-	if c.myTitle == "" {
-		c.myTitle = o.myTitle
+	if !c.myTitleSaid {
+		c.myTitle, c.myTitleSaid = o.myTitle, o.myTitleSaid
+	}
+	if !c.tasksSaid {
+		c.tasks, c.tasksSaid = o.tasks, o.tasksSaid
 	}
 	if len(o.entries) == 0 {
 		return
@@ -364,6 +383,7 @@ func (c *Claude) line(b []byte) {
 		return
 	case "custom-title":
 		c.myTitle = strings.TrimSpace(clip(r.CustomTitle, maxTitle))
+		c.myTitleSaid = true
 		return
 	case "permission-mode":
 		c.setMode(r.PermissionMode)
@@ -663,8 +683,10 @@ func (c *Claude) result(b claudeBlock, account json.RawMessage) {
 		}
 		if ref.task != nil {
 			ref.task(c)
+			c.tasksSaid = true
 		} else if ref.t.Name == "TaskCreate" {
 			c.created(account, text)
+			c.tasksSaid = true
 		}
 	}
 	ref.t.Done = true

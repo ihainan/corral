@@ -10,7 +10,7 @@ import { chromeVars } from '../terminal/themes'
 import { expandPastes, getDraft, keepDraft, keepPaste, remember } from '../terminal/drafts'
 import { useCompletion } from '../terminal/Completion'
 import { InlineReply } from '../terminal/ReplyDialog'
-import { ConversationView, type ConvoAgent, type ConvoListRow, type ConvoPending } from '../terminal/Conversation'
+import { ConversationView, when, type ConvoAgent, type ConvoListRow, type ConvoPending } from '../terminal/Conversation'
 import { asking, useConversation, type ConvoEntry } from '../terminal/conversation'
 import { isClaude, listAgents, paneTitle, useRunningSessions, type AgentRow } from '../terminal/agents'
 import { afterSend, holdTermMode, PENDING_MS, sameTurn, tmuxKey } from '../terminal/chatSend'
@@ -21,9 +21,25 @@ import { sessionWhich } from '../terminal/sessionName'
 // talks to each agent's pane directly (POST …/conversation/send, interrupt,
 // send-now): what herdr has in front, or a terminal tab shows, is not
 // changed. With tabs it is a tab of its own (the terminals stay open behind
-// it); on a phone a page of its own.
+// it), the list beside the conversation. Without (a phone), two screens: the
+// list, and an agent's conversation opened from it.
+//
+// On a phone, the history is a ladder (as Collie's, after iOS's edge swipe
+// went back through conversations seen rather than to the list): the list,
+// then one conversation over it. Opening one from the list adds an entry
+// (marked FROM_LIST); going to another from inside it replaces that entry;
+// back goes back to the list, never adds one. One opened straight from an
+// address (a notification, a bookmark) gets the list put under it first.
 
 const LAST = 'corral.agentsPick'
+const ONLY_MINE = 'corral.agentsOnlyMine'
+const FROM_LIST = { agentsFromList: true }
+const fromList = () => !!(history.state as { agentsFromList?: boolean } | null)?.agentsFromList
+const chatAddress = (e: { s: SessionInfo; pane?: string }) => {
+  const q = new URLSearchParams({ s: e.s.id })
+  if (e.pane) q.set('pane', e.pane)
+  return '/agents?' + q
+}
 const PASTE_LINES = 12
 const PASTE_CHARS = 2000
 const isTouch = window.matchMedia('(pointer: coarse)').matches || navigator.maxTouchPoints > 0
@@ -56,6 +72,17 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
   const scheme = termScheme()
   const { sessions, failed } = useRunningSessions(active, 3000)
   const [pick, setPick] = useState<Pick | null>(readPick)
+  // (A phone's two screens: the address says which.)
+  const stack = !bar
+  const [screen, setScreen] = useState<'list' | 'chat'>(() => (stack && !new URLSearchParams(location.search).get('s') ? 'list' : 'chat'))
+  // Opened straight at a conversation: the list goes under it, once.
+  useEffect(() => {
+    if (!stack || screen !== 'chat' || fromList()) return
+    const at = location.pathname + location.search
+    history.replaceState(null, '', '/agents')
+    history.pushState(FROM_LIST, '', at)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
   // The titles of agents read here (Claude Code's own), for their rows once another is shown.
   const titles = useRef(new Map<string, string>())
 
@@ -98,15 +125,22 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
     } catch {
       /* not kept */
     }
-    const q = new URLSearchParams({ s: e.s.id })
-    if (e.pane) q.set('pane', e.pane)
-    navigate('/agents?' + q, true)
+    if (stack && screen === 'list') {
+      setScreen('chat')
+      navigate(chatAddress(e), false, FROM_LIST) // (down the ladder: an entry)
+    } else navigate(chatAddress(e), true, stack ? history.state : null) // (another, in its place)
+  }
+  // Back to the list: back the ladder where it came from it, else in place.
+  const toList = () => {
+    if (fromList()) return history.back()
+    setScreen('list')
+    navigate('/agents', true)
   }
   // Shown without being picked (none was, its session ended, an address
   // named one gone): it is the pick from now on, so the list's order
   // changing does not move the view. One shown is remembered, however picked.
   useEffect(() => {
-    if (!cur) return
+    if (!cur || (stack && screen === 'list')) return
     if (!(pick && pick.s === cur.s.id && (pick.pane ?? '') === (cur.pane ?? ''))) return choose(cur)
     try {
       local.set(LAST, JSON.stringify({ s: cur.s.id, pane: cur.pane }))
@@ -114,13 +148,18 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
       /* not kept */
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cur?.key, cur?.s.id, pick?.s, pick?.pane])
-  // Back and forward between agents: the address says which.
+  }, [cur?.key, cur?.s.id, pick?.s, pick?.pane, screen])
+  // Back and forward between agents: the address says which (and, on a
+  // phone, which screen).
   useEffect(() => {
-    const onPop = () => location.pathname === '/agents' && setPick(readPick())
+    const onPop = () => {
+      if (location.pathname !== '/agents') return
+      setPick(readPick())
+      if (stack) setScreen(new URLSearchParams(location.search).get('s') ? 'chat' : 'list')
+    }
     window.addEventListener('popstate', onPop)
     return () => window.removeEventListener('popstate', onPop)
-  }, [])
+  }, [stack])
   // What was sent to each agent and is not in its log yet, and whether a
   // message to it is on its way: kept here, so going to another agent and
   // back loses neither (a second send of the same could follow).
@@ -175,7 +214,9 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
   }, [])
 
   let body: ReactNode
-  if (!cur)
+  if (stack && screen === 'list' && sessions !== null && entries.length)
+    body = <PhoneList entries={entries} all={sessions} titles={titles.current} onPick={choose} />
+  else if (!cur || (stack && screen === 'list'))
     body = (
       <div className="agents-chat-empty">
         <p>{sessions === null ? (failed ? t('agents.failed') : t('common.loading')) : t('agents.chatNone')}</p>
@@ -206,20 +247,28 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
         draft={draftBy[k]}
         setDraftShown={(f) => setDraftBy((all) => ({ ...all, [k]: f(all[k]) }))}
         used={usedBy.current.get(k) ?? usedBy.current.set(k, new Map()).get(k)!}
+        lead={
+          stack ? (
+            <button type="button" className="icon-btn agents-chat-back" onClick={toList} aria-label={t('agents.backToList')} title={t('agents.backToList')}>
+              <ChevronLeft size={20} />
+            </button>
+          ) : undefined
+        }
       />
     )
   }
 
   return (
-    <div className={'term-root agents-chat ' + (scheme.dark ? 'dark' : 'light') + (active ? '' : ' inactive')} inert={!active} aria-hidden={active ? undefined : true} style={chromeVars(scheme) as React.CSSProperties} ref={rootRef}>
-      {bar ?? (
+    <div className={'term-root agents-chat ' + (scheme.dark ? 'dark' : 'light') + (active ? '' : ' inactive') + (stack ? ' is-stack is-' + screen : '')} inert={!active} aria-hidden={active ? undefined : true} style={chromeVars(scheme) as React.CSSProperties} ref={rootRef}>
+      {/* (A phone's conversation has its way back in its own bar.) */}
+      {bar ?? (stack && screen === 'chat' && cur ? null : (
         <header className="term-bar">
           <button type="button" className="icon-btn" onClick={() => navigate('/')} aria-label={t('common.back')} title={t('common.back')}>
             <ChevronLeft size={20} />
           </button>
           <span className="agents-chat-title">{t('nav.agents')}</span>
         </header>
-      )}
+      ))}
       <div className="term-body">{body}</div>
     </div>
   )
@@ -229,7 +278,7 @@ type Sent = ConvoPending & { bind: string; after: number; gen: number; at: numbe
 
 // The conversation of one agent, and what is sent to it. Keyed by the
 // agent: nothing of another's (its draft, what was sent, a stop) carries over.
-function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerEnter, sent, setSent, sending, setSending, draft: shownDraft, setDraftShown, used }: {
+function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerEnter, sent, setSent, sending, setSending, draft: shownDraft, setDraftShown, used, lead }: {
   cur: Entry
   entries: Entry[]
   all: SessionInfo[]
@@ -241,6 +290,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   draft: string | undefined // (undefined: as kept in drafts.ts)
   setDraftShown: (f: (d: string | undefined) => string) => void
   used: Map<string, Set<number>> // per reading: the turns that confirmed one
+  lead?: ReactNode
   onPick: (e: Entry) => void
   active: boolean
   toast: (s: string, error?: boolean) => void
@@ -485,7 +535,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
           <InlineReply key={row.a.pane_id} sessionId={sid} agent={row.a} resizedAt={0} active={active} held={() => false} />
         ) : undefined
       }
-      onStop={canPress ? () => press('stop') : undefined}
+      onStop={canPress && !lead ? () => press('stop') : undefined} // (a phone: the composer's button stops it, the bar keeps the room for the name)
       stop={said?.what === 'stop' && said.bind === bindKey ? said.text : undefined}
       side={{ rows }}
       active={active}
@@ -495,6 +545,93 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       composer={composer}
       onSendNow={canPress ? () => press('now') : undefined}
       sendNow={said?.what === 'now' && said.bind === bindKey ? said.text : undefined}
+      lead={lead}
     />
+  )
+}
+
+// A phone's list of the agents: waiting for you first, then working, then the
+// rest, the latest to change first in each, as it was when the list showed
+// (statuses change in place; rows do not move under the finger; one new comes
+// last). Its summary line puts them in order again and goes to the first
+// waiting; "only mine" keeps those waiting, and those done since.
+function PhoneList({ entries, all, titles, onPick }: { entries: Entry[]; all: SessionInfo[]; titles: Map<string, string>; onPick: (e: Entry) => void }) {
+  const [now, setNow] = useState(Date.now())
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 30000)
+    return () => clearInterval(timer)
+  }, [])
+  const [mine, setMineState] = useState(() => local.get(ONLY_MINE) === '1')
+  const setMine = (v: boolean) => {
+    setMineState(v)
+    try {
+      local.set(ONLY_MINE, v ? '1' : '0')
+    } catch {
+      /* not kept */
+    }
+  }
+  const rank = (e: Entry) => ['blocked', 'working'].indexOf(e.row?.status ?? '') + 1 || 3
+  const sorted = (list: Entry[]) => list.map((e, i) => [e, i] as const).sort(([a, i], [b, j]) => rank(a) - rank(b) || (b.row?.a.since ?? 0) - (a.row?.a.since ?? 0) || i - j).map(([e]) => e.key + ' ' + e.s.id)
+  const [order, setOrder] = useState<string[]>(() => sorted(entries))
+  useEffect(() => {
+    setOrder((o) => {
+      const have = new Set(entries.map((e) => e.key + ' ' + e.s.id))
+      const kept = o.filter((k) => have.has(k))
+      const added = entries.filter((e) => !kept.includes(e.key + ' ' + e.s.id)).map((e) => e.key + ' ' + e.s.id)
+      return kept.length === o.length && !added.length ? o : [...kept, ...added]
+    })
+  }, [entries])
+  const byKey = new Map(entries.map((e) => [e.key + ' ' + e.s.id, e]))
+  const list = order.flatMap((k) => (byKey.has(k) ? [byKey.get(k)!] : []))
+  const n = (st: string) => entries.filter((e) => e.row?.status === st).length
+  const waiting = n('blocked')
+  const working = n('working')
+  const done = n('done')
+  const box = useRef<HTMLDivElement>(null)
+  const regroup = () => {
+    setOrder(sorted(entries))
+    requestAnimationFrame(() => box.current?.scrollTo({ top: 0, behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' }))
+  }
+  const shown = mine ? list.filter((e) => e.row?.status === 'blocked' || e.row?.status === 'done') : list
+  return (
+    <div className="agents-list" ref={box}>
+      <div className="agents-list-top">
+        <button type="button" className="agents-list-sum" onClick={regroup} title={t('agents.sumHint')}>
+          {waiting > 0 && <span className="is-blocked">{t('agents.sumWaiting', { n: waiting })}</span>}
+          {working > 0 && <span className="is-working">{t('agents.sumWorking', { n: working })}</span>}
+          {done > 0 && <span className="is-done">{t('agents.sumDone', { n: done })}</span>}
+          {!waiting && !working && !done && <span>{t('agents.sumAll', { n: entries.length })}</span>}
+        </button>
+        <button type="button" className="btn btn-ghost agents-list-mine" aria-pressed={mine} onClick={() => setMine(!mine)}>
+          {t('agents.onlyMine')}
+        </button>
+      </div>
+      {shown.length === 0 && <p className="agents-list-none">{t('agents.noneMine')}</p>}
+      <ul className="agents-list-rows">
+        {shown.map((e) => {
+          const r = e.row
+          const status = r?.lost ? 'unknown' : (r?.status ?? 'unknown')
+          const title = titles.get(e.key) || (r ? paneTitle(r.a.title) || r.a.agent : `${e.s.host_name} · ${sessionWhich(e.s, all)}`)
+          const where = r ? [r.s.host_name, r.ws && r.ws !== '~' ? r.ws : '', isClaude(r.a.agent) ? '' : r.a.agent].filter(Boolean).join(' · ') : e.s.host_name + ' · tmux'
+          const since = r && !r.lost ? when({ since: r.a.since, status }, now) : ''
+          return (
+            <li key={e.key + ' ' + e.s.id}>
+              <button type="button" className={'agents-list-row is-' + status} onClick={() => onPick(e)}>
+                <span className={'agents-mark is-' + status} aria-hidden="true">
+                  {status === 'working' ? <span className="convo-spin is-small" /> : null}
+                </span>
+                <span className="agents-list-text">
+                  <span className="agents-list-title">{title}</span>
+                  <span className="agents-list-where">{where}</span>
+                </span>
+                <span className={'agents-list-side is-' + status}>
+                  {status === 'blocked' ? t('convo.status.blocked') : status === 'done' ? t('agents.unseen') : since || (status === 'working' ? t('convo.status.working') : '')}
+                </span>
+              </button>
+            </li>
+          )
+        })}
+      </ul>
+    </div>
   )
 }

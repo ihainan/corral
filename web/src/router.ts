@@ -4,10 +4,12 @@ import { useEffect, useState } from 'react'
 
 const listeners = new Set<() => void>()
 
-export function navigate(to: string, replace = false) {
+// state: kept with the history entry (history.state), as the agents page
+// marks a conversation opened from its list.
+export function navigate(to: string, replace = false, state: unknown = null) {
   if (to === location.pathname + location.search) return
-  if (replace) history.replaceState(null, '', to)
-  else history.pushState(null, '', to)
+  if (replace) history.replaceState(state, '', to)
+  else history.pushState(state, '', to)
   listeners.forEach((l) => l())
 }
 

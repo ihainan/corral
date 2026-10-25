@@ -88,6 +88,7 @@ export function ConversationView({
   composer,
   onSendNow,
   sendNow,
+  lead,
 }: {
   convo: Convo
   agent: ConvoAgent | null
@@ -104,6 +105,7 @@ export function ConversationView({
   composer?: ReactNode // (the terminal's composer, while it is open)
   onSendNow?: () => void // (messages wait to be taken in: Claude Code's "send now")
   sendNow?: string // what became of the last "send now", to say
+  lead?: ReactNode // (first in the bar: the agents page's way back to its list, on a phone)
 }) {
   const working = agent?.status === 'working'
   const waits = agent?.status === 'blocked'
@@ -220,6 +222,25 @@ export function ConversationView({
     const el = box.current
     if (el) el.scrollTop = el.scrollHeight
   }, [convo.of])
+  // Reads in that bring nothing (parts all of one long line): after three
+  // in a row it goes on only when asked (the note becomes a button).
+  const [olderPaused, setOlderPaused] = useState(false)
+  const olderPausedNow = useRef(false)
+  olderPausedNow.current = olderPaused
+  const emptyReads = useRef({ n: 0, len: 0, was: false })
+  useEffect(() => {
+    const r = emptyReads.current
+    if (convo.loadingOlder && !r.was) r.len = convo.entries.length
+    if (!convo.loadingOlder && r.was) {
+      r.n = convo.entries.length > r.len ? 0 : r.n + 1
+      setOlderPaused(r.n >= 3)
+    }
+    r.was = convo.loadingOlder
+  }, [convo.loadingOlder, convo.entries.length])
+  useEffect(() => {
+    emptyReads.current = { n: 0, len: 0, was: false }
+    setOlderPaused(false)
+  }, [convo.of, convo.gen])
   // The part before, read in when its line comes near (as the top is
   // scrolled to): what was in view stays where it was as it goes in above.
   const olderRef = useRef<HTMLParagraphElement>(null)
@@ -232,22 +253,61 @@ export function ConversationView({
     const io = new IntersectionObserver(
       (es) => {
         const c = convoNow.current
-        if (es.some((e) => e.isIntersecting) && c.older && !c.olderCut && !c.loadingOlder) c.loadOlder()
+        if (es.some((e) => e.isIntersecting) && c.older && !c.olderCut && !c.loadingOlder && !olderPausedNow.current) c.loadOlder()
       },
       { root, rootMargin: '600px 0px 0px 0px' },
     )
     io.observe(el)
     return () => io.disconnect()
-  }, [convo.older, convo.olderCut, convo.loadingOlder, convo.of])
-  const firstKey = list.length ? itemKey(list[0]) : ''
-  const anchor = useRef<{ first: string; height: number } | null>(null)
+  }, [convo.older, convo.olderCut, convo.loadingOlder, convo.of, olderPaused])
+  // What is in view stays where it is as items come in or change above it
+  // (the part before read in, a turn opened higher up), unless the end is
+  // kept in view: a few items in view are noted with where they are, and
+  // after each change the first still there is put back. (By hand: Safari
+  // has no scroll anchoring. The column's children, past its first note,
+  // are the list's items in order.)
+  const anchors = useRef<{ key: string; top: number }[]>([])
+  const listNow = useRef(list)
+  listNow.current = list
+  const note = useCallback(() => {
+    const el = box.current
+    const c = col.current
+    if (!el || !c) return
+    const view = el.getBoundingClientRect()
+    const kids = [...c.children].filter((k) => !k.classList.contains('convo-older'))
+    const out: { key: string; top: number }[] = []
+    // (The first in view by halving: a long conversation has thousands.)
+    let lo = 0
+    let hi = kids.length
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1
+      if (kids[mid].getBoundingClientRect().bottom <= view.top) lo = mid + 1
+      else hi = mid
+    }
+    for (let i = lo; i < kids.length && out.length < 5; i++) {
+      const it = listNow.current[i]
+      const r = kids[i].getBoundingClientRect()
+      if (!it || r.top >= view.bottom) break
+      out.push({ key: itemKey(it), top: r.top - view.top })
+    }
+    anchors.current = out
+  }, [])
   useLayoutEffect(() => {
     const el = box.current
-    if (!el) return
-    const was = anchor.current
-    // (Items came in before the first one there was: as high above.)
-    if (was && was.first && was.first !== firstKey && list.some((it, i) => i > 0 && itemKey(it) === was.first)) el.scrollTop += el.scrollHeight - was.height
-    anchor.current = { first: firstKey, height: el.scrollHeight }
+    const c = col.current
+    if (el && c && !stuck.current && anchors.current.length) {
+      const view = el.getBoundingClientRect()
+      const kids = [...c.children].filter((k) => !k.classList.contains('convo-older'))
+      const at = new Map(list.map((it, i) => [itemKey(it), i]))
+      for (const a of anchors.current) {
+        const k = kids[at.get(a.key) ?? -1]
+        if (!k) continue
+        const d = k.getBoundingClientRect().top - view.top - a.top
+        if (Math.abs(d) >= 1) el.scrollTop += d
+        break
+      }
+    }
+    note()
   })
   // Before the new content is laid out, note whether the end was in view;
   // after, keep it there.
@@ -262,6 +322,7 @@ export function ConversationView({
       const atEnd = el.scrollHeight - el.scrollTop - el.clientHeight < 48
       stuck.current = atEnd
       setAway(!atEnd)
+      note()
     }
     el.addEventListener('scroll', onScroll, { passive: true })
     // (What grows after it is laid out, as the answer card once the screen is read, keeps the end in view too.)
@@ -300,7 +361,25 @@ export function ConversationView({
         {convo.older ? (
           // (Near the top, the part before is read in: see the observer.)
           <p className="convo-older" ref={olderRef} role="status">
-            {convo.olderCut ? t('convo.olderCut') : convo.loadingOlder ? t('convo.loadingOlder') : t('convo.older')}
+            {convo.olderCut ? (
+              t('convo.olderCut')
+            ) : convo.loadingOlder ? (
+              t('convo.loadingOlder')
+            ) : olderPaused ? (
+              <button
+                type="button"
+                className="link-btn"
+                onClick={() => {
+                  emptyReads.current.n = 0
+                  setOlderPaused(false)
+                  convo.loadOlder()
+                }}
+              >
+                {t('convo.olderMore')}
+              </button>
+            ) : (
+              t('convo.older')
+            )}
           </p>
         ) : (
           convo.entries.length > 0 && <p className="convo-older">{t('convo.atStart')}</p>
@@ -351,8 +430,9 @@ export function ConversationView({
         </nav>
       )}
       <div className="convo-main">
-      {(name.length > 0 || status || convo.failing || side) && (
+      {(name.length > 0 || status || convo.failing || side || lead) && (
         <div className="convo-bar">
+          {lead}
           {side && wide && (
             <button type="button" className="icon-btn convo-side-btn" aria-pressed={sideShown} onClick={() => setFolded(!folded)} aria-label={t('convo.agents')} title={t('convo.agents')}>
               <PanelLeft size={17} aria-hidden="true" />
@@ -577,7 +657,7 @@ export function listOrder(rows: ConvoListRow[]): ConvoListRow[] {
 
 // How long a status has lasted (at work, waiting), or how long ago it came
 // (done, idle), in minutes at least.
-function when(r: ConvoListRow, now: number): string {
+export function when(r: { since?: number; status: string }, now: number): string {
   if (!r.since || now < r.since) return ''
   const m = Math.floor((now - r.since) / 60000)
   const going = r.status === 'working' || r.status === 'blocked'
