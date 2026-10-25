@@ -66,8 +66,22 @@ type Claude struct {
 	// it (one task added, one updated) are kept, to be made again over the
 	// list a part before gives.
 	myTitleSaid, tasksSaid bool
-	taskOps                []func(c *Claude)
+	taskOps                []taskOp
+	taskOpsFull            bool              // more were made than are kept: the list is not made again (see Prepend)
+	late                   map[string]taskOp // (while Prepend pairs results: their changes, to be made in their turn)
 }
+
+// taskOp is a change made to the task list; or (orphan: the result's call
+// id), the place of one its call, not read yet, may make, made there once
+// the call is read (see Prepend).
+type taskOp struct {
+	f      func(c *Claude)
+	whole  bool // (TodoWrite: the whole list)
+	orphan string
+}
+
+// maxTaskOps is how many changes to the task list are kept to be made again.
+const maxTaskOps = 500
 
 type orphan struct {
 	b       claudeBlock
@@ -220,14 +234,20 @@ func (c *Claude) Since(rev int) []Entry {
 
 // taskSaid notes a change made to the task list: all of it (whole), or one
 // change kept to be made again (see taskOps), while no whole list is known.
-func (c *Claude) taskSaid(whole bool, op func(c *Claude)) {
-	if whole {
-		c.tasksSaid, c.taskOps = true, nil
+// Past maxTaskOps, the changes before are not all known any more: none are.
+func (c *Claude) taskSaid(op taskOp) {
+	if op.whole {
+		c.tasksSaid, c.taskOps, c.taskOpsFull = true, nil, false
 		return
 	}
-	if !c.tasksSaid && len(c.taskOps) < 500 {
-		c.taskOps = append(c.taskOps, op)
+	if c.tasksSaid || c.taskOpsFull {
+		return
 	}
+	if len(c.taskOps) >= maxTaskOps {
+		c.taskOps, c.taskOpsFull = nil, true
+		return
+	}
+	c.taskOps = append(c.taskOps, op)
 }
 
 // Trimmed says entries were dropped as old: nothing more is put before.
@@ -243,12 +263,17 @@ func (c *Claude) Trimmed() bool { return c.trimmed }
 // out, and Trimmed says so. Of o's state, what c's part did not say itself
 // (a title, a custom one, the task list) is taken: the rest is c's later word.
 func (c *Claude) Prepend(o *Claude) {
+	// (The changes to the task list those results make are made where c
+	// read them, among its own: below.)
+	late := map[string]taskOp{}
+	o.late = late
 	for id, r := range c.orphans {
 		if _, ok := o.tools[id]; ok {
 			o.result(r.b, r.account)
 			delete(c.orphans, id)
 		}
 	}
+	o.late = nil
 	for id, r := range o.orphans {
 		if c.orphans == nil {
 			c.orphans = map[string]orphan{}
@@ -271,13 +296,18 @@ func (c *Claude) Prepend(o *Claude) {
 	if !c.myTitleSaid {
 		c.myTitle, c.myTitleSaid = o.myTitle, o.myTitleSaid
 	}
-	if !c.tasksSaid {
+	if !c.tasksSaid && !c.taskOpsFull {
 		// (Over the list before, the changes made since, in order.)
 		ops := c.taskOps
-		c.tasks, c.tasksSaid, c.taskOps = o.tasks, o.tasksSaid, o.taskOps
+		c.tasks, c.tasksSaid, c.taskOps, c.taskOpsFull = o.tasks, o.tasksSaid, o.taskOps, o.taskOpsFull
 		for _, op := range ops {
-			op(c)
-			c.taskSaid(false, op)
+			if l, ok := late[op.orphan]; ok && op.orphan != "" {
+				op = l
+			}
+			if op.f != nil {
+				op.f(c)
+			}
+			c.taskSaid(op)
 		}
 	}
 	if len(o.entries) == 0 {
@@ -690,6 +720,9 @@ func (c *Claude) result(b claudeBlock, account json.RawMessage) {
 		}
 		if len(c.orphans) < maxOrphans && b.ToolUseID != "" {
 			c.orphans[b.ToolUseID] = orphan{b, append(json.RawMessage(nil), account...)}
+			if !b.IsError {
+				c.taskSaid(taskOp{orphan: b.ToolUseID})
+			}
 		}
 		return
 	}
@@ -703,13 +736,18 @@ func (c *Claude) result(b claudeBlock, account json.RawMessage) {
 				ref.t.Same = len(h) == 0
 			}
 		}
+		var op taskOp
 		if ref.task != nil {
-			ref.task(c)
-			c.taskSaid(ref.t.Name == "TodoWrite", ref.task)
+			op = taskOp{f: ref.task, whole: ref.t.Name == "TodoWrite"}
 		} else if ref.t.Name == "TaskCreate" {
-			c.created(account, text)
 			acc, txt := append(json.RawMessage(nil), account...), text
-			c.taskSaid(false, func(c *Claude) { c.created(acc, txt) })
+			op = taskOp{f: func(c *Claude) { c.created(acc, txt) }}
+		}
+		if op.f != nil && c.late != nil {
+			c.late[b.ToolUseID] = op
+		} else if op.f != nil {
+			op.f(c)
+			c.taskSaid(op)
 		}
 	}
 	ref.t.Done = true

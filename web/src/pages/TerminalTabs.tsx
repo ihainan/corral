@@ -179,7 +179,6 @@ export function TerminalTabs({ current }: { current: string }) {
   const [infos, setInfos] = useState<Record<string, TabInfo>>({})
   const [newOpen, setNewOpen] = useState(false)
   const toast = useToast()
-  const mountedRef = useRef<string[]>([])
 
   // A list counts from when it was asked for. One request at a time: asked
   // again meanwhile, it is asked once more when the first one is done.
@@ -192,12 +191,13 @@ export function TerminalTabs({ current }: { current: string }) {
     }
     loading.current = 'yes'
     const at = Date.now()
+    const inst = instanceRef.current // (the gateway's run as known when the list was asked for: see keepTabs)
     api<SessionInfo[]>('GET', '/api/sessions')
       .then((l) => {
         const running = l.filter((x) => x.state === 'running')
         setSessions(inPlace(running))
         setListAt(at)
-        void keepTabs(running)
+        void keepTabs(running, inst)
       })
       .catch(() => {}) // (the tabs stay as they were; the next poll tries again)
       .finally(() => {
@@ -207,11 +207,12 @@ export function TerminalTabs({ current }: { current: string }) {
       })
   }, [])
   // What the tabs are, kept with the gateway's run; tabs gone with a restart
-  // opened again (those not shown since the page loaded: the others do it
-  // themselves). Ones that need a password are said to, not asked for.
+  // opened again (each asked for, shown or not: one shown may not have gone
+  // to open itself again yet, and the gateway gives the same tab to both).
+  // Ones that need a password are said to, not asked for.
   const reopening = useRef(false)
   const instanceRef = useRef<string | null>(null)
-  const keepTabs = async (running: SessionInfo[]) => {
+  const keepTabs = async (running: SessionInfo[], inst: string | null) => {
     if (reopening.current) return
     const kept = readKept()
     const missing = kept ? kept.tabs.filter((k) => !running.some((s) => s.id === k.id)) : []
@@ -221,10 +222,14 @@ export function TerminalTabs({ current }: { current: string }) {
       const b = missing.length || !instanceRef.current ? await probeBootstrap() : { instance: instanceRef.current }
       if (!b?.instance) return
       instanceRef.current = b.instance
+      // (A list of the run before, or of one not known: asked for again, so it is not kept as this run's.)
+      if (b.instance !== inst) {
+        loadRef.current()
+        return
+      }
       if (kept && missing.length && kept.instance !== b.instance) {
         let failed = 0
         for (const k of missing) {
-          if (mountedRef.current.includes(k.id)) continue
           try {
             const r = await api<SessionInfo | { choices?: unknown }>('POST', '/api/sessions', { host_id: k.host_id, ...estimateSize(), open: k.open })
             if (!('id' in r)) failed++
@@ -233,7 +238,8 @@ export function TerminalTabs({ current }: { current: string }) {
           }
         }
         if (failed) toast(t('tabs.reopenFailed', { n: failed }), true)
-        tabStore.set(KEPT_KEY, JSON.stringify({ instance: b.instance, tabs: kept.tabs.filter((k) => mountedRef.current.includes(k.id)) }))
+        // (Opened once: what the tabs are now is the next list's.)
+        tabStore.set(KEPT_KEY, JSON.stringify({ instance: b.instance, tabs: [] }))
         loadRef.current()
         return
       }
@@ -255,7 +261,6 @@ export function TerminalTabs({ current }: { current: string }) {
   }, [load])
   useEffect(load, [current, load]) // a session just opened shows its tab with its name
 
-  mountedRef.current = mounted
   // The current one moves to the end of the mounted list; the oldest is let go.
   const mountedAt = useRef(new Map<string, number>())
   useEffect(() => {

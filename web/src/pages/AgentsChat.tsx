@@ -411,10 +411,32 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   // The composer: its draft kept per agent (as the terminal's per session).
   const draftKey = 'agents ' + cur.key
   const draft = shownDraft ?? getDraft(draftKey)
+  // What is typed or put in (a path, a completion, a long paste) is the
+  // draft, kept; an entry of what was sent, shown while going through them,
+  // is not: the draft put aside stays kept, and comes back.
+  const histPos = useRef<string | null>(null)
+  const histStash = useRef('')
   const setDraft = (s: string) => {
+    histPos.current = null
     setDraftShown(() => s)
     keepDraft(draftKey, s)
   }
+  const showSent = (h: string | null) => {
+    if (h === null) return setDraft(histStash.current)
+    if (histPos.current === null) histStash.current = draft
+    histPos.current = h
+    setDraftShown(() => h)
+    keepDraft(draftKey, histStash.current)
+  }
+  useEffect(
+    () => () => {
+      // (Another agent shown: this one's draft is as it was put aside.)
+      if (histPos.current !== null) setDraftShown(() => histStash.current)
+      histPos.current = null
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  )
   const field = useRef<HTMLTextAreaElement>(null)
   const completion = useCompletion({ sessionId: sid, field, draft, setDraft, agent: row?.a.agent ?? 'claude' })
   // Text put in where the cursor is (or at the end, the field away).
@@ -436,15 +458,22 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   // more to say, as a rule). Sending waits for them.
   const [up, setUp] = useState<{ name: string; p: number; abort: AbortController } | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
+  // (Another agent shown, or the page left: what goes up is stopped, its path having nowhere to go.)
   const alive = useRef(true)
-  useEffect(() => () => {
-    alive.current = false
+  const upAbort = useRef<AbortController | null>(null)
+  useEffect(() => {
+    alive.current = true
+    return () => {
+      alive.current = false
+      upAbort.current?.abort()
+    }
   }, [])
   const upload = async (files: File[]) => {
     if (up) return toast(t('term.waitUpload'), true)
     for (const f of files) {
       if (!alive.current) break
       const abort = new AbortController()
+      upAbort.current = abort
       const name = f.name || 'image'
       setUp({ name, p: 0, abort })
       try {
@@ -465,23 +494,18 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     }
   }
   const [dragOver, setDragOver] = useState(false)
-  // Going through what was sent (Up at the box's start, Down at its end):
-  // the entry shown, and the draft there when it started.
-  const histPos = useRef<string | null>(null)
-  const histStash = useRef('')
+  // Going through what was sent (Up at the box's start, Down at its end).
   const historyStep = (dir: -1 | 1): boolean => {
     if (histPos.current === null && dir > 0) return false
     const h = sentHistory()
-    if (histPos.current === null) histStash.current = draft
     let pos = histPos.current !== null ? h.lastIndexOf(histPos.current) : h.length
     if (pos < 0) pos = h.length
     if (dir < 0) {
       if (pos === 0) return true
       pos--
     } else pos++
-    histPos.current = pos < h.length ? h[pos] : null
-    const text = histPos.current ?? histStash.current
-    setDraft(text)
+    showSent(pos < h.length ? h[pos] : null)
+    const text = pos < h.length ? h[pos] : histStash.current
     requestAnimationFrame(() => {
       const el = field.current
       if (el) el.selectionStart = el.selectionEnd = dir < 0 ? 0 : text.length
@@ -517,8 +541,8 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     api('POST', `/api/sessions/${sid}/conversation/send`, { pane: b.pane, pid: b.pid, start: b.start, session: b.session, text })
       .then(() => {
         remember(was)
-        histPos.current = null
-        if (getDraft(draftKey) === was) {
+        if (histPos.current === was) showSent(null) // (an entry sent again: the draft put aside is back)
+        else if (getDraft(draftKey) === was) {
           keepDraft(draftKey, '')
           setDraftShown((d) => (d === undefined || d === was ? '' : d))
         }
@@ -556,10 +580,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
           spellCheck={false}
           placeholder={to ? t('convo.toPlaceholder', { name: to }) : t('term.composerPlaceholder')}
           rows={1}
-          onChange={(e) => {
-            histPos.current = null // (an entry edited is a draft of its own)
-            setDraft(e.target.value)
-          }}
+          onChange={(e) => setDraft(e.target.value)} // (an entry edited is a draft of its own)
           onSelect={() => completion.update()}
           {...completion.field}
           onBlur={() => setTimeout(completion.update)}
@@ -609,9 +630,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
               [...sentHistory()].reverse().map((h) => ({
                 label: h.trim().replace(/\s*\n\s*/g, ' ⏎ ').slice(0, 80),
                 onSelect: () => {
-                  if (histPos.current === null) histStash.current = draft
-                  histPos.current = h
-                  setDraft(h)
+                  showSent(h)
                   requestAnimationFrame(() => {
                     const el = field.current
                     if (!el) return

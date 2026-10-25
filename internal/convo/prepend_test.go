@@ -1,6 +1,9 @@
 package convo
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
 
 // A part of the log read later from before goes before what was read: its
 // entries first, with lower Seqs, as changed; a call there answered in the
@@ -119,6 +122,59 @@ func TestPrependTasks(t *testing.T) {
 	c.Prepend(o)
 	ts := c.Tasks()
 	if len(ts) != 1 || ts[0].Subject != "Write tests" || ts[0].Status != "in_progress" {
+		t.Fatalf("tasks: %+v", ts)
+	}
+}
+
+// Results read in the later part are made in the order they came, the
+// part before's calls among them: B answered first, A last, A's word stands.
+func TestPrependTaskResultOrder(t *testing.T) {
+	upd := func(id, status string) string {
+		return `{"type":"assistant","uuid":"a` + id + `","message":{"content":[{"type":"tool_use","id":"` + id + `","name":"TaskUpdate","input":{"taskId":"1","status":"` + status + `"}}]}}`
+	}
+	res := func(id string) string {
+		return `{"type":"user","uuid":"r` + id + `","message":{"content":[{"type":"tool_result","tool_use_id":"` + id + `","content":"Updated task #1 status"}]}}`
+	}
+	c := NewClaude()
+	c.Feed(lines(upd("B", "in_progress"), res("B"), res("A")))
+	o := NewClaude()
+	o.Feed(lines(
+		`{"type":"assistant","uuid":"a1","message":{"content":[{"type":"tool_use","id":"c1","name":"TaskCreate","input":{"subject":"Write tests","description":"d"}}]}}`,
+		`{"type":"user","uuid":"r1","message":{"content":[{"type":"tool_result","tool_use_id":"c1","content":"Task #1 created successfully: Write tests"}]},"toolUseResult":{"task":{"id":"1","subject":"Write tests"}}}`,
+		upd("A", "completed"),
+	))
+	c.Prepend(o)
+	if ts := c.Tasks(); len(ts) != 1 || ts[0].Status != "completed" {
+		t.Fatalf("tasks: %+v", ts)
+	}
+	// (Once more from further back: the change stays made where it was.)
+	c.Prepend(NewClaude())
+	if ts := c.Tasks(); len(ts) != 1 || ts[0].Status != "completed" {
+		t.Fatalf("tasks after another part: %+v", ts)
+	}
+}
+
+// Past maxTaskOps changes, the list is not made again from the part before
+// (it would miss the later ones).
+func TestPrependTaskOpsFull(t *testing.T) {
+	c := NewClaude()
+	c.Feed(lines(
+		`{"type":"assistant","uuid":"a1","message":{"content":[{"type":"tool_use","id":"c1","name":"TaskCreate","input":{"subject":"Write tests","description":"d"}}]}}`,
+		`{"type":"user","uuid":"r1","message":{"content":[{"type":"tool_result","tool_use_id":"c1","content":"Task #1 created successfully: Write tests"}]},"toolUseResult":{"task":{"id":"1","subject":"Write tests"}}}`,
+	))
+	for i := 0; i <= maxTaskOps; i++ {
+		id := fmt.Sprint("u", i)
+		status := "in_progress"
+		if i == maxTaskOps {
+			status = "completed"
+		}
+		c.Feed(lines(
+			`{"type":"assistant","uuid":"a`+id+`","message":{"content":[{"type":"tool_use","id":"`+id+`","name":"TaskUpdate","input":{"taskId":"1","status":"`+status+`"}}]}}`,
+			`{"type":"user","uuid":"r`+id+`","message":{"content":[{"type":"tool_result","tool_use_id":"`+id+`","content":"Updated task #1 status"}]}}`,
+		))
+	}
+	c.Prepend(NewClaude())
+	if ts := c.Tasks(); len(ts) != 1 || ts[0].Status != "completed" {
 		t.Fatalf("tasks: %+v", ts)
 	}
 }

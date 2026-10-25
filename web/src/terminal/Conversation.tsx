@@ -271,6 +271,7 @@ export function ConversationView({
   // (Each also by its place from the end: kept when only what was before
   // changed, as a run read from its middle takes in its start, and its key.)
   const anchors = useRef<{ key: string; top: number; fromEnd: number; last: string }[]>([])
+  const notedList = useRef<typeof list>([]) // (the list they were noted in)
   const listNow = useRef(list)
   listNow.current = list
   const note = useCallback(() => {
@@ -296,6 +297,7 @@ export function ConversationView({
       out.push({ key: itemKey(it), top: r.top - view.top, fromEnd: listNow.current.length - i, last })
     }
     anchors.current = out
+    notedList.current = listNow.current
   }, [])
   useLayoutEffect(() => {
     const el = box.current
@@ -305,10 +307,16 @@ export function ConversationView({
       const kids = [...c.children].filter((k) => !k.classList.contains('convo-older'))
       const at = new Map(list.map((it, i) => [itemKey(it), i]))
       const lastNow = list.length ? itemKey(list[list.length - 1]) : ''
-      const hit =
-        anchors.current.find((a) => at.has(a.key)) ??
-        // (None there by its key, the end as it was: by its place from the end.)
-        anchors.current.find((a) => a.last === lastNow && list.length - a.fromEnd >= 0)
+      // (None there by its key, the end as it was: by its place from the end,
+      // if what is there now is new: one there before is another item, moved.)
+      const byPlace = () => {
+        const before = new Set(notedList.current.map(itemKey))
+        return anchors.current.find((a) => {
+          const j = list.length - a.fromEnd
+          return a.last === lastNow && j >= 0 && j < list.length && !before.has(itemKey(list[j]))
+        })
+      }
+      const hit = anchors.current.find((a) => at.has(a.key)) ?? byPlace()
       const i = hit ? (at.get(hit.key) ?? list.length - hit.fromEnd) : -1
       const k = hit ? kids[i] : undefined
       if (hit && k) {
