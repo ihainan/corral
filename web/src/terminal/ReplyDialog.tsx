@@ -280,8 +280,9 @@ export function InlineReply({ sessionId, agent, onLoaded, resizedAt, active = tr
     if (sent === null) return
     let stopped = false
     let timer: ReturnType<typeof setTimeout> | undefined
+    // (Hidden, it is not read: once shown again, it is, at the next turn.)
     const next = () => {
-      timer = setTimeout(() => void loadRef.current().finally(() => !stopped && next()), 2000)
+      timer = setTimeout(() => (document.hidden ? next() : void loadRef.current().finally(() => !stopped && next())), 2000)
     }
     next()
     return () => {

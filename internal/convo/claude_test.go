@@ -548,3 +548,54 @@ func TestUserPasteWithImage(t *testing.T) {
 		t.Fatalf("unpasted: %q", s)
 	}
 }
+
+// Review 228's cases: each as the log would have it.
+func TestReview228Parser(t *testing.T) {
+	// A slash command's envelope that begins with its message.
+	c := NewClaude()
+	c.Feed(lines(`{"type":"user","uuid":"u1","message":{"content":"<command-message>review</command-message>\n<command-name>/review</command-name>\n<command-args>HEAD</command-args>"}}`))
+	if es := c.Since(0); len(es) != 1 || es[0].Parts[0].Text != "/review HEAD" {
+		t.Errorf("command-message first: %+v", es)
+	}
+	// A last line without its newline does not keep a batch from being trimmed.
+	c = NewClaude()
+	c.Feed([]byte(strings.Repeat(`{"type":"user","message":{"content":"x"}}`+"\n", maxEntries+1) + "{"))
+	if n := len(c.Since(0)); n != maxEntries || !c.Trimmed() {
+		t.Errorf("trim with a last half line: %d kept, trimmed %v", n, c.Trimmed())
+	}
+	// A summary written as blocks is a summary, not the person's.
+	c = NewClaude()
+	c.Feed(lines(`{"type":"user","uuid":"s","isCompactSummary":true,"message":{"content":[{"type":"text","text":"Session summary"}]}}`))
+	if es := c.Since(0); len(es) != 1 || es[0].Role != RoleSummary {
+		t.Errorf("summary as blocks: %+v", es)
+	}
+	// A queued message with a picture arrives as typed: its queue entry goes.
+	c = NewClaude()
+	c.Feed(lines(
+		`{"type":"queue-operation","operation":"enqueue","timestamp":"2026-10-25T09:00:00Z","content":"look"}`,
+		`{"type":"attachment","uuid":"q","attachment":{"type":"queued_command","commandMode":"prompt","prompt":[{"type":"text","text":"[Image #1] look"},{"type":"image"}]}}`,
+	))
+	if es := c.Since(0); len(es) != 1 || es[0].Parts[0].Text != "look" || len(c.Queued()) != 0 {
+		t.Errorf("queued with a picture: %+v, queue %+v", es, c.Queued())
+	}
+	// A long queued message arrives: the queue's shortened copy goes too.
+	long := strings.Repeat("x", maxText+1)
+	c = NewClaude()
+	c.Feed(lines(
+		`{"type":"queue-operation","operation":"enqueue","timestamp":"2026-10-25T09:00:00Z","content":"`+long+`"}`,
+		`{"type":"user","uuid":"u","message":{"content":"`+long+`"}}`,
+	))
+	if len(c.Queued()) != 0 {
+		t.Errorf("a long one stays queued")
+	}
+	// A call id longer than kept: its result still finds it.
+	id := strings.Repeat("i", maxID+5)
+	c = NewClaude()
+	c.Feed(lines(
+		`{"type":"assistant","uuid":"a","message":{"content":[{"type":"tool_use","id":"`+id+`","name":"Bash","input":{"command":"ls"}}]}}`,
+		`{"type":"user","uuid":"r","message":{"content":[{"type":"tool_result","tool_use_id":"`+id+`","content":"out"}]}}`,
+	))
+	if es := c.Since(0); len(es) == 0 || es[0].Parts[0].Tool == nil || !es[0].Parts[0].Tool.Done {
+		t.Errorf("long id: %+v", es)
+	}
+}

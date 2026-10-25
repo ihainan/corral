@@ -176,6 +176,8 @@ export function TerminalTabs({ current }: { current: string }) {
   const agents = current === AGENTS
   const [sessions, setSessions] = useState<SessionInfo[] | null>(null)
   const [mounted, setMounted] = useState<string[]>(current === AGENTS ? [] : [current])
+  const [agentsSeen, setAgentsSeen] = useState(agents)
+  if (agents && !agentsSeen) setAgentsSeen(true)
   const [infos, setInfos] = useState<Record<string, TabInfo>>({})
   const [newOpen, setNewOpen] = useState(false)
   const toast = useToast()
@@ -322,11 +324,14 @@ export function TerminalTabs({ current }: { current: string }) {
     setSessions(next)
   }, [])
 
+  // (The agents page first, as the bar shows it.)
   const go = useCallback(
     (dir: 1 | -1) => {
-      const i = tabs.findIndex((s) => s.id === current)
-      if (tabs.length < 2 || i < 0) return
-      navigate('/t/' + tabs[(i + dir + tabs.length) % tabs.length].id, true)
+      const ids = [AGENTS, ...tabs.map((s) => s.id)]
+      const i = ids.indexOf(current)
+      if (ids.length < 2 || i < 0) return
+      const to = ids[(i + dir + ids.length) % ids.length]
+      navigate(to === AGENTS ? '/agents' : '/t/' + to, true)
     },
     [tabs, current],
   )
@@ -344,7 +349,7 @@ export function TerminalTabs({ current }: { current: string }) {
       const bracket = e.key === '{' || (!plain && e.code === 'BracketLeft') ? -1 : e.key === '}' || (!plain && e.code === 'BracketRight') ? 1 : 0
       let act: (() => void) | null = null
       if (e.key === 'Tab' && e.ctrlKey && !e.metaKey) {
-        if (tabs.length >= 2) act = () => go(e.shiftKey ? -1 : 1)
+        if (tabs.length >= 1) act = () => go(e.shiftKey ? -1 : 1)
       } else if (standalone && e.ctrlKey && e.shiftKey && !e.metaKey && (e.key === 'PageUp' || e.key === 'PageDown')) {
         // (At either end it goes nowhere, and the program does not get it either.)
         const i = tabs.findIndex((s) => s.id === current && s.host_id !== 0)
@@ -419,7 +424,8 @@ export function TerminalTabs({ current }: { current: string }) {
       {mounted.map((id) => (
         <TerminalPage key={id} id={id} active={id === current} tabs={bar} onInfo={onInfo} onEnd={() => endTab(id)} />
       ))}
-      {agents && <AgentsChat bar={bar} />}
+      {/* (Kept once shown, as the terminals are: what it is sending, and what was sent, stay.) */}
+      {agentsSeen && <AgentsChat bar={bar} active={agents} />}
       {newOpen && (
         <NewTabDialog
           busyHost={busyHost}
@@ -637,7 +643,7 @@ function TabBar(p: { tabs: SessionInfo[]; current: string; infos: Record<string,
       moved.current = false
       return
     }
-    ref.current?.querySelector<HTMLElement>('.term-tab[aria-current="page"]')?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+    ref.current?.querySelector<HTMLElement>('[aria-current="page"]')?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [p.current, order])
   const which = (s: SessionInfo) => sessionWhich(s, p.tabs)

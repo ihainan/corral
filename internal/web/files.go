@@ -613,6 +613,12 @@ func (s *Server) apiFilesCwd(w http.ResponseWriter, r *http.Request) {
 // tmux's active pane, or herdr's focused pane; else "". The error is
 // sshx.ErrBusy when the host is still answering earlier requests.
 func (s *Server) sessionCwd(ctx context.Context, sess *term.Session) (string, error) {
+	return s.paneCwd(ctx, sess, "")
+}
+
+// paneCwd is sessionCwd of one herdr pane (pane: its id; "" the focused one,
+// as for a tmux session, whose active pane it always is).
+func (s *Server) paneCwd(ctx context.Context, sess *term.Session, pane string) (string, error) {
 	cwd := ""
 	switch sess.Persistence {
 	case "tmux":
@@ -627,8 +633,12 @@ func (s *Server) sessionCwd(ctx context.Context, sess *term.Session) (string, er
 		if socket := s.herdrSocks.get(sess.ID); socket != "" {
 			if c, err := herdr.Dial(ctx, sess.Client(), socket); err == nil {
 				if snap, err := c.Snapshot(ctx); err == nil {
+					want := snap.FocusedPane
+					if pane != "" {
+						want = pane
+					}
 					for _, p := range snap.Panes {
-						if p.ID == snap.FocusedPane {
+						if p.ID == want {
 							cwd = p.Cwd
 						}
 					}

@@ -198,3 +198,39 @@ func TestPrependTaskAfterWhole(t *testing.T) {
 		t.Fatalf("tasks: %+v", ts)
 	}
 }
+
+// Results of other tools, their calls not read yet, do not use up what is
+// kept of the task list's changes.
+func TestPrependPlacesApart(t *testing.T) {
+	c := NewClaude()
+	var ls []string
+	for i := 0; i < maxOrphans; i++ {
+		ls = append(ls, fmt.Sprintf(`{"type":"user","uuid":"b%d","message":{"content":[{"type":"tool_result","tool_use_id":"b%d","content":"ok"}]}}`, i, i))
+	}
+	for i := 0; i < maxTaskOps-10; i++ {
+		ls = append(ls, fmt.Sprintf(`{"type":"assistant","uuid":"u%d","message":{"content":[{"type":"tool_use","id":"u%d","name":"TaskUpdate","input":{"taskId":"1","status":"completed"}}]}}`, i, i),
+			fmt.Sprintf(`{"type":"user","uuid":"r%d","message":{"content":[{"type":"tool_result","tool_use_id":"u%d","content":"Updated task #1 status"}]}}`, i, i))
+	}
+	c.Feed(lines(ls...))
+	o := NewClaude()
+	o.Feed(lines(
+		`{"type":"assistant","uuid":"a1","message":{"content":[{"type":"tool_use","id":"c1","name":"TaskCreate","input":{"subject":"Write tests","description":"d"}}]}}`,
+		`{"type":"user","uuid":"r1","message":{"content":[{"type":"tool_result","tool_use_id":"c1","content":"Task #1 created successfully: Write tests"}]},"toolUseResult":{"task":{"id":"1","subject":"Write tests"}}}`,
+	))
+	c.Prepend(o)
+	if ts := c.Tasks(); len(ts) != 1 || ts[0].Status != "completed" {
+		t.Fatalf("tasks: %+v", ts)
+	}
+}
+
+// What the session ran with comes from before when the part read first did not say.
+func TestPrependMeta(t *testing.T) {
+	c := NewClaude()
+	c.Feed(lines(`{"type":"user","uuid":"u","message":{"content":"hi"}}`))
+	o := NewClaude()
+	o.Feed(lines(`{"type":"assistant","uuid":"a","gitBranch":"main","message":{"model":"claude-x","usage":{"input_tokens":100},"content":[{"type":"text","text":"old"}]}}`))
+	c.Prepend(o)
+	if m := c.Meta(); m.Model != "claude-x" || m.Branch != "main" || m.Context != 100 {
+		t.Fatalf("meta: %+v", m)
+	}
+}

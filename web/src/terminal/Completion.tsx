@@ -15,6 +15,7 @@ export function useCompletion(p: {
   draft: string
   setDraft: (s: string) => void
   agent: string | undefined // herdr's focused pane's agent, when known
+  pane?: string // (a herdr pane not in front, as the agents page's agent: its folder)
 }) {
   const [data, setData] = useState<Completions | null>(null)
   const loadedAt = useRef(0)
@@ -28,7 +29,7 @@ export function useCompletion(p: {
   const load = useCallback((fresh: number) => {
     if (loading.current || Date.now() - loadedAt.current < fresh) return
     loading.current = true
-    api<Completions>('GET', `/api/sessions/${p.sessionId}/complete`)
+    api<Completions>('GET', `/api/sessions/${p.sessionId}/complete` + (p.pane ? '?pane=' + encodeURIComponent(p.pane) : ''), undefined, { timeoutMs: 20000 })
       .then((d) => {
         loadedAt.current = Date.now()
         setData(d)
@@ -39,7 +40,7 @@ export function useCompletion(p: {
         setFailed(true)
       })
       .finally(() => (loading.current = false))
-  }, [p.sessionId])
+  }, [p.sessionId, p.pane])
 
   // The token at the caret, after each change of the text or the caret.
   const update = useCallback(() => {
@@ -96,6 +97,10 @@ export function useCompletion(p: {
 
   // The field names the list and the option chosen, for screen readers.
   const listId = 'complete-' + p.sessionId
+  // (The one chosen with the keys stays in view: a short window shows only some.)
+  useEffect(() => {
+    if (items.length > 0) document.getElementById(`${listId}-${cur}`)?.scrollIntoView({ block: 'nearest' })
+  }, [cur, items.length, listId])
   const field = {
     'aria-autocomplete': 'list' as const,
     'aria-controls': items.length > 0 ? listId : undefined,

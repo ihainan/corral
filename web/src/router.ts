@@ -15,6 +15,14 @@ export function navigate(to: string, replace = false, state: unknown = null) {
 
 window.addEventListener('popstate', () => listeners.forEach((l) => l()))
 
+// onNavigate calls f after each change of the address (navigate, back and forward).
+export function onNavigate(f: () => void): () => void {
+  listeners.add(f)
+  return () => {
+    listeners.delete(f)
+  }
+}
+
 export function usePath(): string {
   const [path, setPath] = useState(location.pathname)
   useEffect(() => {

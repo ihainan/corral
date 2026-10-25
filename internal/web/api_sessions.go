@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"os"
@@ -1082,36 +1083,15 @@ func (s *Server) apiUpload(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "session_ended", "this session has ended")
 		return
 	}
-	releaseSlot, ok := sess.UploadSlot()
+	// Bound to the login like a terminal socket (sign-out, password change,
+	// disable or the login's expiry stop it), as the file panel's transfers
+	// are; so is a client or host that makes no progress for transferStall.
+	t, ok := s.beginTransfer(w, r, sess)
 	if !ok {
-		writeError(w, http.StatusTooManyRequests, "busy", "another upload is in progress")
 		return
 	}
-	defer releaseSlot()
-	// Bound to the login like a terminal socket: sign-out, password change,
-	// disable or the login's expiry stop the transfer.
-	expiry, err := s.auth.LoginExpiry(r.Context(), loginHash(r))
-	if err != nil {
-		writeError(w, http.StatusUnauthorized, "unauthorized", "please sign in")
-		return
-	}
-	ctx, cancel := context.WithDeadline(r.Context(), expiry)
-	defer cancel()
-	untrack := s.trackPending(u.ID, &liveSocket{loginHash: loginHash(r), hostID: sess.HostID, cancel: cancel})
-	defer untrack()
-	if _, err := s.auth.CheckLogin(ctx, loginHash(r)); err != nil {
-		writeError(w, http.StatusUnauthorized, "unauthorized", "please sign in")
-		return
-	}
-	// Reading the body ends with the login at the latest; cancelling also
-	// interrupts a read that is blocked on a client that stopped sending.
-	rc := http.NewResponseController(w)
-	_ = rc.SetReadDeadline(expiry)
-	stopBody := context.AfterFunc(ctx, func() {
-		_ = rc.SetReadDeadline(time.Now())
-		r.Body.Close()
-	})
-	defer stopBody()
+	defer t.end()
+	ctx := t.ctx
 	mr, err := r.MultipartReader()
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", "expected a multipart upload")
@@ -1125,7 +1105,7 @@ func (s *Server) apiUpload(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if p.FormName() == "file" {
-			part = p
+			part = &progressReader{r: p, t: t}
 			break
 		}
 	}
@@ -1142,7 +1122,7 @@ func (s *Server) apiUpload(w http.ResponseWriter, r *http.Request) {
 		ext = ".bin"
 	}
 
-	client, closeSFTP, err := openSFTP(sess.Client())
+	client, err := s.openTransferSFTP(t, sess)
 	if errors.Is(err, sshx.ErrBusy) {
 		writeError(w, http.StatusTooManyRequests, "busy", "earlier file transfers have not ended yet")
 		return
@@ -1151,13 +1131,6 @@ func (s *Server) apiUpload(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, "sftp_unavailable", "the host does not allow file transfer")
 		return
 	}
-	defer closeSFTP()
-	// A cancelled request (browser gone) stops the transfer; so does a host
-	// that stops answering for too long.
-	stop := context.AfterFunc(ctx, closeSFTP)
-	defer stop()
-	watchdog := time.AfterFunc(30*time.Minute, closeSFTP)
-	defer watchdog.Stop()
 
 	home, err := client.Getwd()
 	if err != nil {
@@ -1193,7 +1166,7 @@ func (s *Server) apiUpload(w http.ResponseWriter, r *http.Request) {
 		err = closeErr
 	}
 	if err != nil {
-		_ = client.Remove(full)
+		s.removeFileLater(client, sess, full)
 		var tooBig *http.MaxBytesError
 		if errors.Is(err, errTooLarge) || errors.As(err, &tooBig) {
 			writeError(w, http.StatusRequestEntityTooLarge, "too_large", fmt.Sprintf("files are limited to %d MB", limit>>20))
@@ -1205,6 +1178,25 @@ func (s *Server) apiUpload(w http.ResponseWriter, r *http.Request) {
 	s.audit(r, "file.upload", sess.HostName, map[string]any{"session": sess.ID, "path": full, "bytes": written, "type": ctype})
 	// "prefix": what to type before the path (Gemini CLI takes @path).
 	writeJSON(w, http.StatusCreated, map[string]any{"path": full, "bytes": written, "type": ctype, "prefix": s.pathPrefix(ctx, sess)})
+}
+
+// removeFileLater deletes a file an upload left half written: with the
+// upload's own channel while it works, otherwise (the upload was stopped,
+// which closes it) with the session's shared one.
+func (s *Server) removeFileLater(c *sftp.Client, sess *term.Session, full string) {
+	if err := c.Remove(full); err == nil || errors.Is(err, fs.ErrNotExist) {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), fileOpTimeout)
+		defer cancel()
+		_ = s.withSFTP(ctx, sess, fileOpTimeout, func(c *sftplite.Client) error {
+			if err := c.Remove(full); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				return err
+			}
+			return nil
+		})
+	}()
 }
 
 // hostConfig fingerprints the settings a connection is made with.

@@ -15,7 +15,10 @@ export const sameTurn = (e: ConvoEntry, sent: string) => {
   const n = (s: string) => s.replace(/\s+/g, ' ').trim()
   const parts = e.parts.filter((p) => p.kind === 'text')
   const got = n(parts.map((p) => p.text).join('\n'))
-  const want = n(e.parts.some((p) => p.kind === 'image') ? sent.replace(PICTURE, ' ') : sent)
+  // (As many pictures as paths: another message's picture, of the same words, is not this one.)
+  const images = e.parts.filter((p) => p.kind === 'image').length
+  if (images && (sent.match(PICTURE)?.length ?? 0) !== images) return false
+  const want = n(images ? sent.replace(PICTURE, ' ') : sent)
   return parts.some((p) => p.truncated) ? got.length >= 1000 && want.startsWith(got) : got === want
 }
 // Written after it was sent, by the host's clock where the log has one (a

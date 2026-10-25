@@ -27,7 +27,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/ihainan/corral/internal/convo"
-	"github.com/ihainan/corral/internal/herdr"
 	"github.com/ihainan/corral/internal/sftplite"
 	"github.com/ihainan/corral/internal/sshx"
 	"github.com/ihainan/corral/internal/term"
@@ -270,7 +269,7 @@ func (c *convoStates) get(id string) *convoState {
 		c.m = map[string]*convoState{}
 	}
 	for k, st := range c.m {
-		if k != id && st.idle() {
+		if k != id && st.idle() && st.inUse.Load() == 0 {
 			delete(c.m, k)
 		}
 	}
@@ -439,7 +438,10 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 // different one from before starts a new generation.
 func (s *Server) locateConvo(ctx context.Context, sess *term.Session, st *convoState, pane string) error {
 	out, err := sshx.Output(ctx, sess.Client(), convoLocateCommand(sess.Persistence, sess.TmuxSession), convoLocateMax)
-	if err != nil && (errors.Is(err, sshx.ErrBusy) || len(out) == 0) {
+	// (The script ends with exit 0: an error is a scan cut short, by its size
+	// or a failure, which may leave out the agent started last. What was
+	// found before stays, rather than a part of it.)
+	if err != nil {
 		return err
 	}
 	procs, tmuxActive, tmuxPID, tmuxTitle, noProc := parseConvoLocate(string(out))
@@ -619,63 +621,53 @@ func convoProcStatus(c *sftplite.Client, st *convoState) string {
 	return ""
 }
 
-// tmuxKeysCommand presses keys in one tmux pane (by its id, "%N"), only if
-// that pane is in the named tmux session: else it exits 3, pressing
-// nothing. Fixed script; the validated session name, the pane id and keys
-// of a fixed set (convoKeys) are its only arguments.
-func tmuxKeysCommand(session, pane string, keys []string) string {
-	script := `PATH="$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
-[ "$(tmux -u display-message -p -t "$2" '#{session_name}' 2>/dev/null)" = "$1" ] || exit 3
-p=$2; shift 2
-exec tmux send-keys -t "$p" "$@"`
-	cmd := "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(session) + " " + sshx.QuoteShell(pane)
-	for _, k := range keys {
-		cmd += " " + sshx.QuoteShell(k)
-	}
-	return cmd
-}
-
-// convoSendCommand types the text on its input into the agent's pane and
-// presses Enter, on the host, in one go: just before typing it checks again
-// that the process asked for (pid, its start in clock ticks) is still the
-// one in front on its terminal, and in that pane (its HERDR_PANE_ID or
-// TMUX_PANE): the gateway's own check came a moment before, and text and
-// Enter reaching a shell would run as a command. The text is read whole
-// first (its length in bytes must be as said: a cut short input types
+// convoSendCommand types a message into a pane, or presses keys there
+// (keys: herdr's names or tmux's, by mode; then no text is read), checking
+// right before that the process asked for (pid, its start in clock ticks) is
+// still the one in front on its terminal, in that pane (its HERDR_PANE_ID or
+// TMUX_PANE; in tmux also on that pane's terminal: an environment inherited
+// by a program on another terminal is not enough), and still in the Claude
+// Code session asked for (its session file: /clear or /resume start another
+// in the same process). The gateway's own check came a moment before, and
+// text and Enter reaching a shell would run as a command. The text is read
+// whole first (its length in bytes must be as said: a cut short input types
 // nothing) and goes in as one bracketed paste, so its newlines and tabs are
 // text, not keys: herdr types it as given (the markers included, for the
 // program in front, which asked for them), tmux wraps it when the program
 // asked (paste-buffer -p, its newlines kept with -r).
 //
-// One message at a time to a pane on the host too, where flock and the
-// user's own XDG_RUNTIME_DIR are there (a lock the kernel lets go of with
-// the script: the gateway may give up on a send whose script goes on; not
-// in a folder others can write to, as /tmp), tried for 10 seconds (-n:
-// BusyBox's has no -w). Without them, the gateway's turn is what there is.
+// One at a time to a pane on the host too (messages and keys alike), where
+// flock and the user's own XDG_RUNTIME_DIR are there (a lock the kernel lets
+// go of with the script: the gateway may give up on a send whose script goes
+// on; not in a folder others can write to, as /tmp), tried for 10 seconds
+// (-n: BusyBox's has no -w). Without them, the gateway's turn is what there is.
 //
 // Exits 3: not that agent in front in that pane now (or, tmux, the pane is
 // not in this session); 4: nothing typed; 5: the text typed, not Enter; 6:
-// typing it failed part way, or may have (so does a signal once typing began). Fixed script; the mode, the
-// validated tmux session name, pane id, pid, start, length and the herdr
-// socket (from discovery) are its arguments, the text its input.
-func convoSendCommand(mode, session, pane, socket string, pid, start int64, length int) string {
+// typing failed part way, or may have (so does a signal once typing began);
+// 7: the pane's lock was not had in time (nothing typed). Fixed script; the
+// mode, the validated tmux session name, pane id, pid, start, Claude session
+// id, length, the herdr socket (from discovery) and keys of a fixed set
+// (convoKeys) are its arguments, the text its input.
+func convoSendCommand(mode, session, pane, socket string, pid, start int64, sid string, length int, keys []string) string {
 	script := `PATH="$HOME/.local/bin:$HOME/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
-mode=$1 sess=$2 p=$3 pid=$4 start=$5 len=$6 sock=$7
+mode=$1 sess=$2 p=$3 pid=$4 start=$5 len=$6 sock=$7 sid=$8
+shift 8
 b=corral-send-$$ typing=0
 f=$(mktemp) || exit 4
 trap 'rm -f "$f"; [ "$mode" = tmux ] && tmux delete-buffer -b "$b" 2>/dev/null 9>&-' EXIT
 trap '[ "$typing" = 1 ] && exit 6; exit 4' HUP INT TERM
-cat >"$f" || exit 4
+if [ "$len" != keys ]; then cat >"$f" || exit 4; fi
 l=${XDG_RUNTIME_DIR:-}/corral-send-$(printf '%s' "$mode-$p" | tr -c 'A-Za-z0-9-' _)
 if [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -d "$XDG_RUNTIME_DIR" ] && [ ! -L "$l" ] && command -v flock >/dev/null 2>&1 && (exec 9>>"$l") 2>/dev/null; then
   exec 9>>"$l"
   n=0
   until flock -n 9; do
-    [ "$n" -ge 100 ] && exit 4
+    [ "$n" -ge 100 ] && exit 7
     if sleep 0.1 2>/dev/null; then n=$((n + 1)); else sleep 1; n=$((n + 10)); fi
   done
 fi
-[ "$(wc -c <"$f" | tr -d ' ')" = "$len" ] || exit 4
+[ "$len" = keys ] || [ "$(wc -c <"$f" | tr -d ' ')" = "$len" ] || exit 4
 front() {
   stat=$(tr '\n' ' ' <"/proc/$pid/stat" 2>/dev/null) || return 1
   rest=${stat##*) }
@@ -683,17 +675,37 @@ front() {
   pgrp=$(printf '%s' "$rest" | cut -d' ' -f3); tpgid=$(printf '%s' "$rest" | cut -d' ' -f6)
   [ -n "$pgrp" ] && [ "$pgrp" = "$tpgid" ] || return 1
   if [ "$mode" = tmux ]; then k=TMUX_PANE; else k=HERDR_PANE_ID; fi
-  tr '\0' '\n' <"/proc/$pid/environ" 2>/dev/null | grep -qxF "$k=$p"
+  tr '\0' '\n' <"/proc/$pid/environ" 2>/dev/null | grep -qxF "$k=$p" || return 1
+  c=$(head -c 65536 "$HOME/.claude/sessions/$pid.json" 2>/dev/null | tr -d '\n')
+  [ "$(printf '%s' "$c" | grep -o '"sessionId" *: *"[0-9a-fA-F-]*"' | head -n 1 | sed 's/.*"\([0-9a-fA-F-]*\)"$/\1/')" = "$sid" ] || return 1
+  if [ "$mode" = tmux ]; then
+    tty=$(tmux -u display-message -p -t "$p" '#{pane_tty}' 2>/dev/null 9>&-)
+    [ -n "$tty" ] && [ "$(readlink "/proc/$pid/fd/0" 2>/dev/null)" = "$tty" ] || return 1
+  fi
 }
 front || exit 3
 if [ "$mode" = tmux ]; then
   [ "$(tmux -u display-message -p -t "$p" '#{session_name}' 2>/dev/null 9>&-)" = "$sess" ] || exit 3
+  if [ "$len" = keys ]; then
+    front || exit 3
+    typing=1
+    tmux send-keys -t "$p" "$@" 9>&- || exit 6
+    exit 0
+  fi
   tmux load-buffer -b "$b" "$f" 9>&- || exit 4
   front || exit 3
   typing=1
   tmux paste-buffer -p -r -d -b "$b" -t "$p" 9>&- || exit 6
   tmux send-keys -t "$p" Enter 9>&- || exit 5
 else
+  if [ "$len" = keys ]; then
+    front || exit 3
+    typing=1
+    for k in "$@"; do
+      HERDR_SOCKET_PATH=$sock herdr pane send-keys "$p" "$k" >/dev/null 2>&1 9>&- || exit 6
+    done
+    exit 0
+  fi
   t=$(cat "$f" && printf x) || exit 4
   [ "${t%x}" != "$t" ] || exit 4
   t=${t%x}
@@ -703,8 +715,16 @@ else
   HERDR_SOCKET_PATH=$sock herdr pane send-text "$p" "$e[200~$t$e[201~" >/dev/null 2>&1 9>&- || exit 6
   HERDR_SOCKET_PATH=$sock herdr pane send-keys "$p" enter >/dev/null 2>&1 9>&- || exit 5
 fi`
-	return "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(mode) + " " + sshx.QuoteShell(session) + " " + sshx.QuoteShell(pane) + " " +
-		strconv.FormatInt(pid, 10) + " " + strconv.FormatInt(start, 10) + " " + strconv.Itoa(length) + " " + sshx.QuoteShell(socket)
+	n := strconv.Itoa(length)
+	if keys != nil {
+		n = "keys"
+	}
+	cmd := "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(mode) + " " + sshx.QuoteShell(session) + " " + sshx.QuoteShell(pane) + " " +
+		strconv.FormatInt(pid, 10) + " " + strconv.FormatInt(start, 10) + " " + n + " " + sshx.QuoteShell(socket) + " " + sshx.QuoteShell(sid)
+	for _, k := range keys {
+		cmd += " " + sshx.QuoteShell(k)
+	}
+	return cmd
 }
 
 // convoSending lets one message at a time go to a pane: two typed at once
@@ -712,6 +732,9 @@ fi`
 // A turn is given back once the host's command has really ended, not when
 // the request gives up; a pane no one is sending to is forgotten.
 var convoSending = paneTurns{m: map[string]*paneTurn{}}
+
+// convoTurnKey names a pane's turn: its session's, and the pane.
+func convoTurnKey(session, pane string) string { return session + "\x00" + pane }
 
 type paneTurns struct {
 	mu sync.Mutex
@@ -878,17 +901,14 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		}
 		return false
 	}
-	// (A message: one at a time to a pane, from the check to its Enter;
-	// once its command is on its way, given back when that has ended.)
-	turn := func() {}
-	if what == "send" {
-		release, ok := convoSending.take(ctx, sess.ID+"\x00"+b.Pane)
-		if !ok {
-			reason = "busy"
-			writeError(w, http.StatusTooManyRequests, "busy", "another message to this agent is still being sent")
-			return
-		}
-		turn = release
+	// (One thing at a time to a pane, a message or keys (and an answer, see
+	// replyToPane), from the check to its last key; once its command is on
+	// its way, given back when that has ended.)
+	turn, ok := convoSending.take(ctx, convoTurnKey(sess.ID, b.Pane))
+	if !ok {
+		reason = "busy"
+		writeError(w, http.StatusTooManyRequests, "busy", "another message to this agent is still being sent")
+		return
 	}
 	defer func() { turn() }()
 
@@ -937,64 +957,34 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	if signedOut() {
 		return
 	}
-	if what == "send" {
-		// The check again and the typing, on the host in one go (see convoSendCommand).
-		release := turn
-		turn = func() {} // (Exec gives it back, once the channel has ended)
-		_, err = sshx.Exec(ctx, sess.Client(), convoSendCommand(sess.Persistence, sess.TmuxSession, b.Pane, socket, b.PID, b.Start, len(text)), 4096,
-			sshx.ExecOptions{Stdin: strings.NewReader(text), Release: release})
-		var exitErr *sshx.ExitError
-		switch {
-		case err == nil:
-			outcome = "typed"
-		case errors.Is(err, sshx.ErrBusy):
-			reason = "busy" // (not started: nothing was typed)
-		case errors.As(err, &exitErr) && exitErr.Status == 3:
-			reason = "agent_changed"
-			writeError(w, http.StatusConflict, "agent_changed", "that pane no longer runs this agent")
-			return
-		case errors.As(err, &exitErr) && exitErr.Status == 4:
-			reason = "send_failed" // (nothing typed)
-		default:
-			outcome = "unknown" // (typed in part, or all of it but Enter, or it is not known)
+	// The check again and the typing or pressing, on the host in one go (see convoSendCommand).
+	var press []string
+	if what != "send" {
+		press = keys.tmux
+		if sess.Persistence == "herdr" {
+			press = keys.herdr
 		}
-	} else if sess.Persistence == "herdr" {
-		c, derr := herdr.Dial(ctx, sess.Client(), socket)
-		if derr != nil {
-			if signedOut() {
-				return
-			}
-			reason = "herdr_error"
-			writeHerdrError(w, derr)
-			return
-		}
-		err = c.SendKeys(ctx, b.Pane, keys.herdr)
-		c.Close()
-		var apiErr *herdr.APIError
-		switch {
-		case err == nil:
-			outcome = "typed"
-		case errors.As(err, &apiErr):
-			outcome, reason = "refused", "herdr_refused"
-		default:
-			outcome = "unknown"
-		}
-	} else {
-		// (The script checks the pane is in this session's tmux session, and presses.)
-		_, err = sshx.Output(ctx, sess.Client(), tmuxKeysCommand(sess.TmuxSession, b.Pane, keys.tmux), 4096)
-		var exitErr *sshx.ExitError
-		switch {
-		case err == nil:
-			outcome = "typed"
-		case errors.Is(err, sshx.ErrBusy):
-			reason = "busy" // (not started: nothing was pressed)
-		case errors.As(err, &exitErr) && exitErr.Status == 3:
-			reason = "not_in_session"
-		case errors.As(err, &exitErr):
-			reason = "send_failed" // (tmux said no: the pane went, say)
-		default:
-			outcome = "unknown"
-		}
+	}
+	release := turn
+	turn = func() {} // (Exec gives it back, once the channel has ended)
+	_, err = sshx.Exec(ctx, sess.Client(), convoSendCommand(sess.Persistence, sess.TmuxSession, b.Pane, socket, b.PID, b.Start, b.Session, len(text), press), 4096,
+		sshx.ExecOptions{Stdin: strings.NewReader(text), Release: release})
+	var exitErr *sshx.ExitError
+	switch {
+	case err == nil:
+		outcome = "typed"
+	case errors.Is(err, sshx.ErrBusy):
+		reason = "busy" // (not started: nothing was typed)
+	case errors.As(err, &exitErr) && exitErr.Status == 3:
+		reason = "agent_changed"
+		writeError(w, http.StatusConflict, "agent_changed", "that pane no longer runs this agent")
+		return
+	case errors.As(err, &exitErr) && exitErr.Status == 7:
+		reason = "busy" // (another to the pane on the host still: nothing typed)
+	case errors.As(err, &exitErr) && exitErr.Status == 4:
+		reason = "send_failed" // (nothing typed)
+	default:
+		outcome = "unknown" // (typed in part, or all of it but Enter, or it is not known)
 	}
 	switch {
 	case outcome == "typed":

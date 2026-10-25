@@ -574,6 +574,7 @@ html.term-dark .overlay, html.term-dark .menu, html.term-dark .toast {
 .convo-hunk-gap { padding: 2px 10px; background: var(--term-hover); color: var(--term-fg-3); font: 12px/18px var(--font-ui); }
 /* The changes of a turn, beside the thread (over it where narrow) */
 .convo-panel { flex: none; width: min(46%, 620px); min-width: 0; display: flex; flex-direction: column; border-left: 1px solid var(--term-line); background: var(--term-bg); font-family: var(--font-ui); }
+.convo-panel:focus { outline: none; } /* (focused on opening, for the keys: the panel itself is no control) */
 .convo-panel-head { flex: none; display: flex; align-items: center; gap: 8px; min-height: 40px; padding: 4px 8px 4px 14px; border-bottom: 1px solid var(--term-line); font-size: 13.5px; }
 .convo-panel-title { font-weight: 600; }
 .convo-panel-files { flex: none; max-height: 30%; overflow-y: auto; padding: 4px; border-bottom: 1px solid var(--term-line); }
@@ -732,7 +733,7 @@ html.term-dark .overlay, html.term-dark .menu, html.term-dark .toast {
   padding: 8px; border: 1px solid var(--term-line); border-radius: 12px; background: var(--term-bg);
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.22); font-family: var(--font-ui); overscroll-behavior: contain;
 }
-.convo-picker-title { padding: 4px 10px 8px; font-weight: 600; font-size: 15px; }
+.convo-picker-title { padding: 4px 4px 8px 10px; font-weight: 600; font-size: 15px; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 @media (max-width: 640px) {
   .convo-picker {
     top: auto; bottom: 0; left: 0; width: 100%; max-height: 78%; border-radius: 14px 14px 0 0; border-bottom: 0;
@@ -761,6 +762,11 @@ html.term-dark .overlay, html.term-dark .menu, html.term-dark .toast {
   text-align: center; color: var(--term-fg-2); font: 14px/22px var(--font-ui);
 }
 .agents-chat-empty p { margin: 0; }
+/* A list not refreshed: said in one quiet line over the page, not over the conversation. */
+.agents-chat-stale {
+  margin: 0; padding: 6px 16px; flex: none; color: var(--term-fg-2); background: var(--term-chrome);
+  border-bottom: 1px solid var(--term-line); font: 13px/20px var(--font-ui); text-align: center;
+}
 .term-root .agents-chat-why { color: var(--term-fg-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 
 /* A phone's agents list: one row an agent (what, where, how it is); waiting is the one loud colour. */

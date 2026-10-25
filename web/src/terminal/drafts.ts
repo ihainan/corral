@@ -120,9 +120,11 @@ function save() {
   if (out.length > STORE_MAX) out = JSON.stringify({ uid: owner, drafts: Object.fromEntries(drafts), pastes: [], n: pasteN })
   tabStore.set(STORE, out)
 }
-// (A moment after typing stops, and at once as the page goes.)
+// (A moment after typing stops, and at once as the page goes or is hidden.)
 function saveSoon() {
   clearTimeout(saveTimer)
   saveTimer = window.setTimeout(save, 400)
 }
 window.addEventListener('pagehide', () => saveTimer !== undefined && (clearTimeout(saveTimer), save()))
+// (A phone may stop a page in the background without a pagehide: kept as it goes there.)
+document.addEventListener('visibilitychange', () => document.hidden && saveTimer !== undefined && (clearTimeout(saveTimer), save()))

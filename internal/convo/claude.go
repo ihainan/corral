@@ -82,8 +82,12 @@ type taskOp struct {
 	orphan string
 }
 
-// maxTaskOps is how many changes to the task list are kept to be made again.
-const maxTaskOps = 500
+// maxTaskOps is how many changes to the task list are kept to be made again;
+// maxTaskPlaces how many places of results whose call is not read yet.
+const (
+	maxTaskOps    = 500
+	maxTaskPlaces = 4 * maxOrphans
+)
 
 type orphan struct {
 	b       claudeBlock
@@ -206,7 +210,7 @@ func (c *Claude) Feed(lines []byte) {
 	for len(lines) > 0 {
 		i := bytes.IndexByte(lines, '\n')
 		if i < 0 {
-			return
+			break
 		}
 		c.line(lines[:i])
 		lines = lines[i+1:]
@@ -246,7 +250,14 @@ func (c *Claude) taskSaid(op taskOp) {
 	if c.taskOpsFull {
 		return
 	}
-	if len(c.taskOps) >= maxTaskOps {
+	// (A place for a result (op.orphan) counts apart: most are of other tools.)
+	n := 0
+	for _, o := range c.taskOps {
+		if (o.orphan == "") == (op.orphan == "") {
+			n++
+		}
+	}
+	if (op.orphan == "" && n >= maxTaskOps) || (op.orphan != "" && n >= maxTaskPlaces) {
 		c.taskOps, c.taskOpsFull = nil, true
 		return
 	}
@@ -285,14 +296,6 @@ func (c *Claude) Prepend(o *Claude) {
 			c.orphans[id] = r
 		}
 	}
-	if c.tools == nil {
-		c.tools = map[string]toolRef{}
-	}
-	for id, ref := range o.tools {
-		if _, ok := c.tools[id]; !ok {
-			c.tools[id] = ref
-		}
-	}
 	if c.aiTitle == "" {
 		c.aiTitle = o.aiTitle
 	}
@@ -325,18 +328,41 @@ func (c *Claude) Prepend(o *Claude) {
 			c.taskSaid(op)
 		}
 	}
-	if len(o.entries) == 0 {
-		return
+	// (What the session ran with, as the part before last said it, where
+	// c's part did not say.)
+	if c.meta.Model == "" {
+		c.meta.Model = o.meta.Model
 	}
-	room := maxEntries - len(c.entries)
-	if room <= 0 {
-		c.trimmed = true
-		return
+	if c.meta.Mode == "" {
+		c.meta.Mode = o.meta.Mode
+	}
+	if c.meta.Branch == "" {
+		c.meta.Branch = o.meta.Branch
+	}
+	if c.meta.Context == 0 {
+		c.meta.Context = o.meta.Context
 	}
 	add := o.entries
-	if len(add) > room {
+	if room := max(0, maxEntries-len(c.entries)); len(add) > room {
 		add = add[len(add)-room:]
 		c.trimmed = true
+	}
+	// o's calls still to be answered: of the entries put before (and, as in
+	// trim, those that change the task list, whose entry was left out).
+	kept := make(map[*Entry]bool, len(add))
+	for _, e := range add {
+		kept[e] = true
+	}
+	if c.tools == nil {
+		c.tools = map[string]toolRef{}
+	}
+	for id, ref := range o.tools {
+		if _, ok := c.tools[id]; !ok && (kept[ref.e] || ref.task != nil || ref.t.Name == "TaskCreate") {
+			c.tools[id] = ref
+		}
+	}
+	if len(add) == 0 {
+		return
 	}
 	c.rev++
 	first := c.seq + 1
@@ -363,8 +389,13 @@ func (c *Claude) trim() {
 		c.trimmed = true
 		for _, e := range c.entries[:n] {
 			for _, p := range e.Parts {
-				// (A log that reuses an id has the map point at the later call.)
-				if p.Tool != nil && c.tools[p.Tool.ID].t == p.Tool {
+				// (A log that reuses an id has the map point at the later call.
+				// One that changes the task list stays, to be answered: the
+				// list is not the entries'.)
+				if p.Tool == nil {
+					continue
+				}
+				if ref, ok := c.tools[p.Tool.ID]; ok && ref.t == p.Tool && ref.task == nil && p.Tool.Name != "TaskCreate" {
 					delete(c.tools, p.Tool.ID)
 				}
 			}
@@ -553,6 +584,10 @@ func (c *Claude) user(r *claudeRow) {
 			parts = append(parts, Part{Kind: KindImage})
 		}
 	}
+	if r.IsCompactSummary { // (the summary written as a session was compacted, as blocks)
+		c.add(r, RoleSummary, parts)
+		return
+	}
 	role := RoleUser
 	if r.PromptSource == "system" {
 		role = RoleNote
@@ -611,8 +646,10 @@ func (c *Claude) arrived(text string) {
 			return
 		}
 	}
+	kept, _ := cut(clean(text), maxText) // (as the queue keeps a long one)
+	k := squashed(kept)
 	for i, q := range c.queue {
-		if squashed(q.Text) == t {
+		if q := squashed(q.Text); q == t || q == k {
 			c.queue = append(c.queue[:i:i], c.queue[i+1:]...)
 			return
 		}
@@ -654,12 +691,21 @@ func (c *Claude) queued(r *claudeRow) {
 	if a.CommandMode != "prompt" || json.Unmarshal(a.Prompt, &blocks) != nil {
 		return
 	}
+	images := false
+	for _, b := range blocks {
+		images = images || b.Type == "image"
+	}
 	var parts []Part
 	for _, b := range blocks {
 		switch b.Type {
 		case "text":
 			if role, text := classifyUserText(b.Text); role == RoleUser {
-				parts = append(parts, textPart(KindText, text))
+				if images {
+					text = noImageTokens(text)
+				}
+				if text != "" {
+					parts = append(parts, textPart(KindText, text))
+				}
 			}
 		case "image":
 			parts = append(parts, Part{Kind: KindImage})
@@ -737,6 +783,7 @@ func (c *Claude) setMode(m string) {
 // account of it (account: the row's toolUseResult, or nil). A result for a
 // call not kept (dropped as old, or never seen) is ignored.
 func (c *Claude) result(b claudeBlock, account json.RawMessage) {
+	b.ToolUseID = clip(b.ToolUseID, maxID) // (as its call's is kept)
 	ref, ok := c.tools[b.ToolUseID]
 	if !ok {
 		if c.orphans == nil {
@@ -1060,7 +1107,13 @@ func classifyUserText(s string) (role, text string) {
 		return RoleUser, unpasted(s)
 	}
 	switch m[1] {
-	case "system-reminder", "local-command-caveat", "command-message", "user-memory-input":
+	case "command-message":
+		// (Its name may follow: the command, as when the name comes first.)
+		if text, ok := slashCommand(s); ok {
+			return RoleUser, text
+		}
+		return "", ""
+	case "system-reminder", "local-command-caveat", "user-memory-input":
 		return "", ""
 	case "command-name":
 		if text, ok := slashCommand(s); ok {

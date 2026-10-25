@@ -140,7 +140,7 @@ func (c *completions) put(key string, l completeList) {
 	c.m[key] = completeEntry{at: time.Now(), list: l}
 }
 
-// GET /api/sessions/{id}/complete
+// GET /api/sessions/{id}/complete[?pane=]
 func (s *Server) apiComplete(w http.ResponseWriter, r *http.Request) {
 	sess, ok := s.runningSession(w, r)
 	if !ok {
@@ -148,7 +148,8 @@ func (s *Server) apiComplete(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
-	cwd, err := s.sessionCwd(ctx, sess)
+	// (pane: the agents page's agent, a herdr pane maybe not in front.)
+	cwd, err := s.paneCwd(ctx, sess, r.URL.Query().Get("pane"))
 	if errors.Is(err, sshx.ErrBusy) {
 		writeError(w, http.StatusTooManyRequests, "busy", "the host is still answering earlier requests")
 		return

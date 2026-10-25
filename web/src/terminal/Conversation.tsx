@@ -139,7 +139,7 @@ export function ConversationView({
   useEffect(() => {
     if (!active) return
     const onKey = (e: KeyboardEvent) => {
-      if (!e.altKey || e.ctrlKey || e.metaKey || e.shiftKey || (e.key !== 'ArrowUp' && e.key !== 'ArrowDown')) return
+      if (!e.altKey || e.ctrlKey || e.metaKey || e.shiftKey || (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') || underDialog(e)) return
       const el = e.target as HTMLInputElement | null
       if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') && !el.classList.contains('xterm-helper-textarea') && el.value) return
       const list = listOrder(sideRef.current?.rows ?? [])
@@ -170,7 +170,7 @@ export function ConversationView({
   useEffect(() => {
     if (!active) return
     const onKey = (e: KeyboardEvent) => {
-      if (!e.ctrlKey || e.metaKey || e.altKey || e.shiftKey || e.key.toLowerCase() !== 'o' || e.isComposing) return
+      if (!e.ctrlKey || e.metaKey || e.altKey || e.shiftKey || e.key.toLowerCase() !== 'o' || e.isComposing || underDialog(e)) return
       e.preventDefault()
       e.stopPropagation()
       if (e.repeat) return // (held: once)
@@ -215,13 +215,19 @@ export function ConversationView({
     return 0
   }, [convo.entries])
 
-  // Another conversation in front (another pane, another tab's): from its end.
+  // Another conversation in front (another pane, another tab's, or another
+  // log of the same pane: /clear, /resume): from its end, nothing of the one
+  // before opened or shown (its items' keys may come again in this one).
   useLayoutEffect(() => {
     stuck.current = true
     setAway(false)
+    setOpened({})
+    setAllOpen(false)
+    setChanges(null)
+    anchors.current = []
     const el = box.current
     if (el) el.scrollTop = el.scrollHeight
-  }, [convo.of])
+  }, [convo.of, convo.gen])
   // Reads in that bring nothing (parts all of one long line): after three
   // in a row it goes on only when asked (the note becomes a button).
   const [olderPaused, setOlderPaused] = useState(false)
@@ -415,7 +421,7 @@ export function ConversationView({
           <div key={p.id} className="convo-user convo-pending">
             <div className="convo-user-text">{p.text}</div>
             <div className="convo-meta">
-              <span>{t(p.state === 'waiting' ? 'convo.sent' : p.state === 'unseen' ? 'convo.unseen' : 'convo.sentOnly')}</span>
+              <span role="status">{t(p.state === 'waiting' ? 'convo.sent' : p.state === 'unseen' ? 'convo.unseen' : 'convo.sentOnly')}</span>
               {p.state !== 'waiting' && (
                 <button type="button" className="link-btn" onClick={() => onDismiss(p.id)}>{t('common.close')}</button>
               )}
@@ -555,6 +561,9 @@ export function modelName(id: string): string {
   return m[1][0].toUpperCase() + m[1].slice(1) + ' ' + m[2] + (m[3] ? '.' + m[3] : '')
 }
 
+// A key for a dialog open over the page (or already taken): not the page's.
+const underDialog = (e: KeyboardEvent) => e.defaultPrevented || !!document.querySelector('[aria-modal="true"]')
+
 // The windows a conversation may fill: the log does not say which a session
 // has, so how full it is is said of both.
 const WINDOWS = [200_000, 1_000_000]
@@ -594,6 +603,8 @@ function Runs({ meta }: { meta: ConvoMeta }) {
     }
   }, [open])
   const used = meta.context ?? 0
+  // (Past the smaller window, the session has the larger one.)
+  const windows = WINDOWS.filter((w) => w >= used || w === WINDOWS[WINDOWS.length - 1])
   return (
     <div className="convo-runs" ref={box}>
       {meta.mode && (
@@ -620,7 +631,7 @@ function Runs({ meta }: { meta: ConvoMeta }) {
             <span>{t('convo.ctxTitle')}</span>
             <span>{t('convo.ctxTokens', { n: used.toLocaleString(getLang()) })}</span>
           </div>
-          {WINDOWS.map((w) => {
+          {windows.map((w) => {
             const p = Math.min(100, Math.round((used / w) * 100))
             return (
               <div key={w} className="convo-runs-win">
@@ -638,7 +649,7 @@ function Runs({ meta }: { meta: ConvoMeta }) {
               <span>{meta.model}</span>
             </div>
           )}
-          <p className="convo-runs-note">{t('convo.ctxNote')}</p>
+          <p className="convo-runs-note">{t(windows.length > 1 ? 'convo.ctxNote' : 'convo.ctxNoteBig')}</p>
         </div>
       )}
     </div>
@@ -748,6 +759,14 @@ function Picker({ rows, onClose }: { rows: ConvoListRow[]; onClose: () => void }
         e.preventDefault()
         e.stopPropagation()
         onClose()
+      } else if (e.key === 'Tab' && box.current) {
+        // (Tab goes round in it: what is behind is not to be reached.)
+        const all = [...box.current.querySelectorAll<HTMLElement>('button')]
+        if (!all.length) return
+        const at = all.indexOf(document.activeElement as HTMLElement)
+        const to = e.shiftKey ? (at <= 0 ? all.length - 1 : at - 1) : at < 0 || at === all.length - 1 ? 0 : at + 1
+        e.preventDefault()
+        all[to].focus()
       }
     }
     document.addEventListener('keydown', onKey, true)
@@ -760,7 +779,12 @@ function Picker({ rows, onClose }: { rows: ConvoListRow[]; onClose: () => void }
     <>
       <div className="convo-picker-back" onClick={onClose} />
       <div className="convo-picker" role="dialog" aria-modal="true" aria-label={t('convo.pick')} ref={box}>
-        <div className="convo-picker-title">{t('convo.pick')}</div>
+        <div className="convo-picker-title">
+          <span>{t('convo.pick')}</span>
+          <button type="button" className="icon-btn convo-picker-close" onClick={onClose} aria-label={t('common.close')} title={t('common.close')}>
+            <X size={16} />
+          </button>
+        </div>
         <AgentList rows={shown} onPicked={onClose} />
       </div>
     </>
@@ -793,7 +817,11 @@ function Tasks({ tasks, fold }: { tasks: ConvoTask[]; fold?: boolean }) {
       {open && (
         <ol className="convo-tasks-list">
           {tasks.map((x, i) => (
-            <li key={i} className={'is-' + x.status}>{x.subject}</li>
+            <li key={i} className={'is-' + x.status}>
+              {x.subject}
+              {/* (Its state is in its look: said in words too.) */}
+              <span className="sr-only">{' · ' + t(x.status === 'completed' ? 'convo.taskDone' : x.status === 'in_progress' ? 'convo.taskDoing' : 'convo.taskTodo')}</span>
+            </li>
           ))}
         </ol>
       )}
@@ -887,6 +915,7 @@ function UserTurn({ e, onCopy }: { e: ConvoEntry; onCopy: (s: string) => void })
       <div className="convo-user-text">
         {text}
         {images > 0 && !/\[Image #\d+\]/.test(text) && <span className="convo-image">{t(images === 1 ? 'convo.images1' : 'convo.images', { n: images })}</span>}
+        {e.parts.some((p) => p.truncated) && <p className="convo-cut">{t('convo.cut')}</p>}
       </div>
       <div className="convo-meta">
         {e.mid && <span>{t('convo.midSent')}</span>}
@@ -1177,6 +1206,15 @@ const created = (tool: ConvoTool): ConvoHunk[] | undefined => {
 // files, each with its edits in order.
 function ChangesPanel({ edits, focus, onClose }: { edits: Edits; focus?: string; onClose: () => void }) {
   const box = useRef<HTMLDivElement>(null)
+  const panel = useRef<HTMLElement>(null)
+  // (Opened, the keys go to it; closed, back where they were.)
+  useEffect(() => {
+    const prev = document.activeElement as HTMLElement | null
+    panel.current?.focus({ preventScroll: true })
+    return () => {
+      if (prev?.isConnected) prev.focus({ preventScroll: true })
+    }
+  }, [])
   useEffect(() => {
     const el = focus ? box.current?.querySelector(`[data-file="${CSS.escape(focus)}"]`) : null
     el?.scrollIntoView({ block: 'start' })
@@ -1194,7 +1232,7 @@ function ChangesPanel({ edits, focus, onClose }: { edits: Edits; focus?: string;
     return () => window.removeEventListener('keydown', onKey, true)
   }, [onClose])
   return (
-    <aside className="convo-panel" aria-label={t('convo.changesTitle')}>
+    <aside className="convo-panel" aria-label={t('convo.changesTitle')} tabIndex={-1} ref={panel}>
       <div className="convo-panel-head">
         <span className="convo-panel-title">{t('convo.changesTitle')}</span>
         <LineCounts add={edits.add} del={edits.del} />

@@ -711,6 +711,15 @@ func (s *Server) replyToPane(w http.ResponseWriter, r *http.Request, sess *term.
 		}
 	}
 	defer release()
+	// (One thing at a time to a pane: a message from the agents page, its
+	// keys, or an answer. Two at once would interleave: a message's text, an
+	// answer's Enter.)
+	turn, ok := convoSending.take(ctx, convoTurnKey(sess.ID, pane))
+	if !ok {
+		writeError(w, http.StatusTooManyRequests, "herdr_busy", "an earlier answer to this pane is still under way")
+		return
+	}
+	defer turn()
 	reader := herdrDial(w, ctx, sess, socket)
 	if reader == nil {
 		return
@@ -764,6 +773,7 @@ func (s *Server) replyToPane(w http.ResponseWriter, r *http.Request, sess *term.
 		lock.digest, lock.at = digest, time.Now()
 	}
 	typer.Close()
+	turn()
 	release() // the pane's next answer need not wait for the audit
 	detail := map[string]any{"session": sess.ID, "pane": pane, "outcome": outcome}
 	if text != "" {
