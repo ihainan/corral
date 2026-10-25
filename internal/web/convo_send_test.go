@@ -83,9 +83,6 @@ func TestConvoSendCommandChecksFirst(t *testing.T) {
 	if _, err := os.Stat(typed); err == nil {
 		t.Error("something was typed")
 	}
-	if locks, _ := filepath.Glob(filepath.Join(dir, "corral-send-*")); len(locks) > 0 {
-		t.Errorf("lock folders left: %v", locks)
-	}
 }
 
 // One message at a time to a pane; a pane given back by all is forgotten,

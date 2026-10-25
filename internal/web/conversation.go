@@ -595,8 +595,9 @@ exec tmux send-keys -t "$p" "$@"`
 // program in front, which asked for them), tmux wraps it when the program
 // asked (paste-buffer -p, its newlines kept with -r).
 //
-// One message at a time to a pane on the host too (a lock folder: the
-// gateway may give up on a send whose script goes on).
+// One message at a time to a pane on the host too, where flock is there (a
+// lock the kernel lets go of with the script: the gateway may give up on a
+// send whose script goes on), on a file in XDG_RUNTIME_DIR or /tmp.
 //
 // Exits 3: not that agent in front in that pane now (or, tmux, the pane is
 // not in this session); 4: nothing typed; 5: the text typed, not Enter; 6:
@@ -606,19 +607,20 @@ exec tmux send-keys -t "$p" "$@"`
 func convoSendCommand(mode, session, pane, socket string, pid, start int64, length int) string {
 	script := `PATH="$HOME/.local/bin:$HOME/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 mode=$1 sess=$2 p=$3 pid=$4 start=$5 len=$6 sock=$7
-b=corral-send-$$ typing=0 locked=0
-d=${XDG_RUNTIME_DIR:-/tmp}/corral-send-$(id -u)-$(printf '%s' "$mode-$p" | tr -c 'A-Za-z0-9-' _)
+b=corral-send-$$ typing=0
 f=$(mktemp) || exit 4
-trap 'rm -f "$f"; [ "$locked" = 1 ] && rmdir "$d" 2>/dev/null; [ "$mode" = tmux ] && tmux delete-buffer -b "$b" 2>/dev/null' EXIT
+trap 'rm -f "$f"; [ "$mode" = tmux ] && tmux delete-buffer -b "$b" 2>/dev/null' EXIT
 trap '[ "$typing" = 1 ] && exit 6; exit 4' HUP INT TERM
 cat >"$f" || exit 4
-n=0
-until mkdir "$d" 2>/dev/null; do
-  [ -n "$(find "$d" -maxdepth 0 -mmin +1 2>/dev/null)" ] && { rmdir "$d" 2>/dev/null; continue; }
-  n=$((n + 1)); [ "$n" -ge 100 ] && exit 4
-  sleep 0.1
-done
-locked=1
+if command -v flock >/dev/null 2>&1; then
+  for dir in "${XDG_RUNTIME_DIR:-}" /tmp; do
+    l=$dir/corral-send-$(id -u)-$(printf '%s' "$mode-$p" | tr -c 'A-Za-z0-9-' _)
+    [ -n "$dir" ] && [ -d "$dir" ] && [ -w "$dir" ] && { [ ! -e "$l" ] || [ -w "$l" ]; } || continue
+    exec 9>>"$l"
+    flock -w 10 9 || exit 4
+    break
+  done
+fi
 [ "$(wc -c <"$f" | tr -d ' ')" = "$len" ] || exit 4
 front() {
   stat=$(tr '\n' ' ' <"/proc/$pid/stat" 2>/dev/null) || return 1
@@ -632,11 +634,11 @@ front() {
 front || exit 3
 if [ "$mode" = tmux ]; then
   [ "$(tmux -u display-message -p -t "$p" '#{session_name}' 2>/dev/null)" = "$sess" ] || exit 3
-  tmux load-buffer -b "$b" "$f" || exit 4
+  tmux load-buffer -b "$b" "$f" 9>&- || exit 4
   front || exit 3
   typing=1
-  tmux paste-buffer -p -r -d -b "$b" -t "$p" || exit 6
-  tmux send-keys -t "$p" Enter || exit 5
+  tmux paste-buffer -p -r -d -b "$b" -t "$p" 9>&- || exit 6
+  tmux send-keys -t "$p" Enter 9>&- || exit 5
 else
   t=$(cat "$f" && printf x) || exit 4
   [ "${t%x}" != "$t" ] || exit 4
@@ -644,8 +646,8 @@ else
   e=$(printf '\033')
   front || exit 3
   typing=1
-  HERDR_SOCKET_PATH=$sock herdr pane send-text "$p" "$e[200~$t$e[201~" >/dev/null 2>&1 || exit 6
-  HERDR_SOCKET_PATH=$sock herdr pane send-keys "$p" enter >/dev/null 2>&1 || exit 5
+  HERDR_SOCKET_PATH=$sock herdr pane send-text "$p" "$e[200~$t$e[201~" >/dev/null 2>&1 9>&- || exit 6
+  HERDR_SOCKET_PATH=$sock herdr pane send-keys "$p" enter >/dev/null 2>&1 9>&- || exit 5
 fi`
 	return "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(mode) + " " + sshx.QuoteShell(session) + " " + sshx.QuoteShell(pane) + " " +
 		strconv.FormatInt(pid, 10) + " " + strconv.FormatInt(start, 10) + " " + strconv.Itoa(length) + " " + sshx.QuoteShell(socket)
