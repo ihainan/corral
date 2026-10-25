@@ -1,15 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Bot, Check, MessageCircleReply, Plus, Search } from 'lucide-react'
 import { AgentsChat } from './AgentsChat'
-import { api, type Host, type SessionInfo } from '../api'
+import { api, choiceOf, type Host, type OpenChoice, type SessionInfo } from '../api'
 import { agentKey, sessionWhich } from '../terminal/sessionName'
 import { t } from '../i18n'
-import { local } from '../storage'
+import { local, session as tabStore } from '../storage'
 import { navigate } from '../router'
 import { takeTabs } from '../notifyopen'
-import { Dialog } from '../components/ui'
-import { useConnect } from '../connect'
-import { TerminalPage, type TabInfo } from './Terminal'
+import { Dialog, useToast } from '../components/ui'
+import { estimateSize, useConnect } from '../connect'
+import { probeBootstrap, TerminalPage, type TabInfo } from './Terminal'
 
 // Tabs where there is room for them: desktops and tablets (an iPad with a
 // keyboard switches with Ctrl+Tab too). Phones keep the session switcher.
@@ -54,6 +54,25 @@ const newTabKey = isMac ? '⌘T' : 'Ctrl+Shift+T'
 // and the user drags a tab to another place (see useTabDrag).
 // A tab gone for longer than a reconnection takes loses its place: opened
 // again later, it goes last.
+// The tmux and herdr tabs of this window, with the gateway's run they were
+// of: when it restarts (an update), its sessions end, but what ran in them
+// goes on on the host. A tab shown since the page loaded opens itself again
+// (see the terminal page); one never shown is opened again from here, so all
+// the tabs come back, in their places (kept by host, kind and name).
+const KEPT_KEY = 'corral.tabsKept'
+interface KeptTabs {
+  instance: string
+  tabs: { id: string; host_id: number; open: OpenChoice }[]
+}
+function readKept(): KeptTabs | null {
+  try {
+    const k = JSON.parse(tabStore.get(KEPT_KEY) ?? 'null')
+    return k && typeof k.instance === 'string' && Array.isArray(k.tabs) ? k : null
+  } catch {
+    return null
+  }
+}
+
 const ORDER_KEY = 'corral.tabOrder2' // (corral.tabOrder held when each was last seen: another meaning)
 const KEEP_GONE_MS = 10 * 60 * 1000
 // The session a tab shows (herdr's default session, named or not, is one).
@@ -159,6 +178,8 @@ export function TerminalTabs({ current }: { current: string }) {
   const [mounted, setMounted] = useState<string[]>(current === AGENTS ? [] : [current])
   const [infos, setInfos] = useState<Record<string, TabInfo>>({})
   const [newOpen, setNewOpen] = useState(false)
+  const toast = useToast()
+  const mountedRef = useRef<string[]>([])
 
   // A list counts from when it was asked for. One request at a time: asked
   // again meanwhile, it is asked once more when the first one is done.
@@ -173,8 +194,10 @@ export function TerminalTabs({ current }: { current: string }) {
     const at = Date.now()
     api<SessionInfo[]>('GET', '/api/sessions')
       .then((l) => {
-        setSessions(inPlace(l.filter((x) => x.state === 'running')))
+        const running = l.filter((x) => x.state === 'running')
+        setSessions(inPlace(running))
         setListAt(at)
+        void keepTabs(running)
       })
       .catch(() => {}) // (the tabs stay as they were; the next poll tries again)
       .finally(() => {
@@ -183,6 +206,48 @@ export function TerminalTabs({ current }: { current: string }) {
         if (again) load()
       })
   }, [])
+  // What the tabs are, kept with the gateway's run; tabs gone with a restart
+  // opened again (those not shown since the page loaded: the others do it
+  // themselves). Ones that need a password are said to, not asked for.
+  const reopening = useRef(false)
+  const instanceRef = useRef<string | null>(null)
+  const keepTabs = async (running: SessionInfo[]) => {
+    if (reopening.current) return
+    const kept = readKept()
+    const missing = kept ? kept.tabs.filter((k) => !running.some((s) => s.id === k.id)) : []
+    reopening.current = true
+    try {
+      // (The gateway's run asked again only when tabs went: a restart, or closed.)
+      const b = missing.length || !instanceRef.current ? await probeBootstrap() : { instance: instanceRef.current }
+      if (!b?.instance) return
+      instanceRef.current = b.instance
+      if (kept && missing.length && kept.instance !== b.instance) {
+        let failed = 0
+        for (const k of missing) {
+          if (mountedRef.current.includes(k.id)) continue
+          try {
+            const r = await api<SessionInfo | { choices?: unknown }>('POST', '/api/sessions', { host_id: k.host_id, ...estimateSize(), open: k.open })
+            if (!('id' in r)) failed++
+          } catch {
+            failed++
+          }
+        }
+        if (failed) toast(t('tabs.reopenFailed', { n: failed }), true)
+        tabStore.set(KEPT_KEY, JSON.stringify({ instance: b.instance, tabs: kept.tabs.filter((k) => mountedRef.current.includes(k.id)) }))
+        loadRef.current()
+        return
+      }
+      const tabs = running.flatMap((s) => {
+        const open = choiceOf(s)
+        return open && (open.kind === 'tmux' || open.kind === 'herdr') ? [{ id: s.id, host_id: s.host_id, open }] : []
+      })
+      tabStore.set(KEPT_KEY, JSON.stringify({ instance: b.instance, tabs }))
+    } finally {
+      reopening.current = false
+    }
+  }
+  const loadRef = useRef(load)
+  loadRef.current = load
   useEffect(() => {
     load()
     const timer = window.setInterval(() => document.visibilityState === 'visible' && load(), POLL_MS)
@@ -190,6 +255,7 @@ export function TerminalTabs({ current }: { current: string }) {
   }, [load])
   useEffect(load, [current, load]) // a session just opened shows its tab with its name
 
+  mountedRef.current = mounted
   // The current one moves to the end of the mounted list; the oldest is let go.
   const mountedAt = useRef(new Map<string, number>())
   useEffect(() => {

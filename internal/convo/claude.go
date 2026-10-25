@@ -61,8 +61,12 @@ type Claude struct {
 	orphans map[string]orphan // results whose call is not in what was read (see Prepend)
 	trimmed bool              // entries were dropped as old
 	// What the part read said itself (a part before it, put before, says
-	// only what this one did not): a custom title (even cleared), the task list.
+	// only what this one did not): a custom title (even cleared), the whole
+	// task list (TodoWrite). Until a whole list is said, the changes made to
+	// it (one task added, one updated) are kept, to be made again over the
+	// list a part before gives.
 	myTitleSaid, tasksSaid bool
+	taskOps                []func(c *Claude)
 }
 
 type orphan struct {
@@ -214,6 +218,18 @@ func (c *Claude) Since(rev int) []Entry {
 	return out
 }
 
+// taskSaid notes a change made to the task list: all of it (whole), or one
+// change kept to be made again (see taskOps), while no whole list is known.
+func (c *Claude) taskSaid(whole bool, op func(c *Claude)) {
+	if whole {
+		c.tasksSaid, c.taskOps = true, nil
+		return
+	}
+	if !c.tasksSaid && len(c.taskOps) < 500 {
+		c.taskOps = append(c.taskOps, op)
+	}
+}
+
 // Trimmed says entries were dropped as old: nothing more is put before.
 func (c *Claude) Trimmed() bool { return c.trimmed }
 
@@ -256,7 +272,13 @@ func (c *Claude) Prepend(o *Claude) {
 		c.myTitle, c.myTitleSaid = o.myTitle, o.myTitleSaid
 	}
 	if !c.tasksSaid {
-		c.tasks, c.tasksSaid = o.tasks, o.tasksSaid
+		// (Over the list before, the changes made since, in order.)
+		ops := c.taskOps
+		c.tasks, c.tasksSaid, c.taskOps = o.tasks, o.tasksSaid, o.taskOps
+		for _, op := range ops {
+			op(c)
+			c.taskSaid(false, op)
+		}
 	}
 	if len(o.entries) == 0 {
 		return
@@ -683,10 +705,11 @@ func (c *Claude) result(b claudeBlock, account json.RawMessage) {
 		}
 		if ref.task != nil {
 			ref.task(c)
-			c.tasksSaid = true
+			c.taskSaid(ref.t.Name == "TodoWrite", ref.task)
 		} else if ref.t.Name == "TaskCreate" {
 			c.created(account, text)
-			c.tasksSaid = true
+			acc, txt := append(json.RawMessage(nil), account...), text
+			c.taskSaid(false, func(c *Claude) { c.created(acc, txt) })
 		}
 	}
 	ref.t.Done = true

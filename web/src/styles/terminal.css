@@ -805,3 +805,9 @@ html.term-dark .overlay, html.term-dark .menu, html.term-dark .toast {
 /* A phone's conversation: its own bar, with the way back, under the status bar. */
 .agents-chat.is-stack.is-chat .convo-bar { padding-top: calc(env(safe-area-inset-top, 0px) + 6px); }
 .term-root .agents-chat-back { flex: none; margin-left: -6px; }
+
+/* The agents page's conversation takes files dropped on it; one going up shows over the composer. */
+.agents-chat-drop { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.agents-chat-up { display: flex; align-items: center; gap: 8px; padding: 0 4px 6px 8px; color: var(--term-fg-2); font: 13px/18px var(--font-ui); }
+.agents-chat-up span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agents-chat-drop > .term-drop { z-index: 6; }

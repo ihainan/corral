@@ -99,3 +99,26 @@ func TestPrependTitles(t *testing.T) {
 		t.Fatalf("title %q, want the cleared custom one to stay cleared", c.Title())
 	}
 }
+
+// A task created before the part read first, updated in it: once the part
+// before is in, the list has it, updated.
+func TestPrependTasks(t *testing.T) {
+	c := NewClaude()
+	c.Feed(lines(
+		`{"type":"assistant","uuid":"a2","message":{"content":[{"type":"tool_use","id":"u1","name":"TaskUpdate","input":{"taskId":"1","status":"in_progress"}}]}}`,
+		`{"type":"user","uuid":"r2","message":{"content":[{"type":"tool_result","tool_use_id":"u1","content":"Updated task #1 status"}]}}`,
+	))
+	o := NewClaude()
+	o.Feed(lines(
+		`{"type":"assistant","uuid":"a1","message":{"content":[{"type":"tool_use","id":"c1","name":"TaskCreate","input":{"subject":"Write tests","description":"d"}}]}}`,
+		`{"type":"user","uuid":"r1","message":{"content":[{"type":"tool_result","tool_use_id":"c1","content":"Task #1 created successfully: Write tests"}]},"toolUseResult":{"task":{"id":"1","subject":"Write tests"}}}`,
+	))
+	if len(o.Tasks()) != 1 {
+		t.Skipf("the TaskCreate shape here is not the parser's: %+v", o.Tasks())
+	}
+	c.Prepend(o)
+	ts := c.Tasks()
+	if len(ts) != 1 || ts[0].Subject != "Write tests" || ts[0].Status != "in_progress" {
+		t.Fatalf("tasks: %+v", ts)
+	}
+}

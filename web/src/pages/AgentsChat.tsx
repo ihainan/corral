@@ -1,13 +1,14 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { ArrowUp, ChevronLeft, Square } from 'lucide-react'
-import { api, ApiError, errorText, type SessionInfo } from '../api'
+import { ArrowUp, ChevronLeft, History, Paperclip, Square, X } from 'lucide-react'
+import { api, ApiError, errorText, uploadFile, type SessionInfo } from '../api'
 import { t } from '../i18n'
 import { navigate } from '../router'
 import { setChromeColor, termScheme, usePrefs } from '../prefs'
 import { local } from '../storage'
-import { useToast } from '../components/ui'
+import { Menu, useToast } from '../components/ui'
 import { chromeVars } from '../terminal/themes'
-import { expandPastes, getDraft, keepDraft, keepPaste, remember } from '../terminal/drafts'
+import { expandPastes, getDraft, keepDraft, keepPaste, remember, sentHistory } from '../terminal/drafts'
+import { geminiPath, shellPath } from '../terminal/paths'
 import { useCompletion } from '../terminal/Completion'
 import { InlineReply } from '../terminal/ReplyDialog'
 import { ConversationView, when, type ConvoAgent, type ConvoListRow, type ConvoPending } from '../terminal/Conversation'
@@ -128,7 +129,7 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
     if (stack && screen === 'list') {
       setScreen('chat')
       navigate(chatAddress(e), false, FROM_LIST) // (down the ladder: an entry)
-    } else navigate(chatAddress(e), true, stack ? history.state : null) // (another, in its place)
+    } else navigate(chatAddress(e), true, history.state) // (another, in its place: its mark kept, wide or not)
   }
   // Back to the list: back the ladder where it came from it, else in place.
   const toList = () => {
@@ -416,6 +417,77 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   }
   const field = useRef<HTMLTextAreaElement>(null)
   const completion = useCompletion({ sessionId: sid, field, draft, setDraft, agent: row?.a.agent ?? 'claude' })
+  // Text put in where the cursor is (or at the end, the field away).
+  const insert = (text: string) => {
+    const el = field.current
+    const d = el ? el.value : draft
+    const a = el?.selectionStart ?? d.length
+    const b = el?.selectionEnd ?? a
+    setDraft(d.slice(0, a) + text + d.slice(b))
+    requestAnimationFrame(() => {
+      const f = field.current
+      if (!f) return
+      f.focus()
+      f.setSelectionRange(a + text.length, a + text.length)
+    })
+  }
+  // Files (picked, pasted, dropped) go up to the host one at a time, each
+  // path then put in the draft for the agent to read (not sent: there is
+  // more to say, as a rule). Sending waits for them.
+  const [up, setUp] = useState<{ name: string; p: number; abort: AbortController } | null>(null)
+  const fileRef = useRef<HTMLInputElement>(null)
+  const alive = useRef(true)
+  useEffect(() => () => {
+    alive.current = false
+  }, [])
+  const upload = async (files: File[]) => {
+    if (up) return toast(t('term.waitUpload'), true)
+    for (const f of files) {
+      if (!alive.current) break
+      const abort = new AbortController()
+      const name = f.name || 'image'
+      setUp({ name, p: 0, abort })
+      try {
+        const r = await uploadFile(sid, f, (p) => setUp((u) => (u?.abort === abort ? { ...u, p } : u)), abort.signal)
+        setUp((u) => (u?.abort === abort ? null : u))
+        const quoted = r.prefix === '@' ? geminiPath(r.path) : shellPath(r.path)
+        if (!alive.current) break
+        if (quoted) insert(quoted + ' ')
+        else toast(r.path)
+      } catch (e) {
+        setUp((u) => (u?.abort === abort ? null : u))
+        if (e instanceof ApiError && e.code === 'aborted') {
+          if (alive.current) toast(t('term.uploadStopped', { name }))
+          break
+        }
+        toast(errorText(e), true)
+      }
+    }
+  }
+  const [dragOver, setDragOver] = useState(false)
+  // Going through what was sent (Up at the box's start, Down at its end):
+  // the entry shown, and the draft there when it started.
+  const histPos = useRef<string | null>(null)
+  const histStash = useRef('')
+  const historyStep = (dir: -1 | 1): boolean => {
+    if (histPos.current === null && dir > 0) return false
+    const h = sentHistory()
+    if (histPos.current === null) histStash.current = draft
+    let pos = histPos.current !== null ? h.lastIndexOf(histPos.current) : h.length
+    if (pos < 0) pos = h.length
+    if (dir < 0) {
+      if (pos === 0) return true
+      pos--
+    } else pos++
+    histPos.current = pos < h.length ? h[pos] : null
+    const text = histPos.current ?? histStash.current
+    setDraft(text)
+    requestAnimationFrame(() => {
+      const el = field.current
+      if (el) el.selectionStart = el.selectionEnd = dir < 0 ? 0 : text.length
+    })
+    return true
+  }
   useEffect(() => {
     const el = field.current
     if (!el) return
@@ -435,6 +507,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     const b = convo.bind
     if (sending || !draft.trim()) return
     if (blocked || !b) return toast(blocked ?? t('agents.cannotSend'), true)
+    if (up) return toast(t('term.waitUpload'), true) // (its path is not in the draft yet)
     const text = expandPastes(draft, 100 << 10)
     if (text === null || new TextEncoder().encode(text).length > 100 << 10) return toast(t('agents.tooLong'), true)
     const was = draft // (what is typed meanwhile is a new draft: it stays)
@@ -444,6 +517,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     api('POST', `/api/sessions/${sid}/conversation/send`, { pane: b.pane, pid: b.pid, start: b.start, session: b.session, text })
       .then(() => {
         remember(was)
+        histPos.current = null
         if (getDraft(draftKey) === was) {
           keepDraft(draftKey, '')
           setDraftShown((d) => (d === undefined || d === was ? '' : d))
@@ -463,6 +537,14 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   const composer = (
     <div className="composer">
       {completion.list}
+      {up && (
+        <div className="agents-chat-up" role="status">
+          <span>{t('term.uploading', { name: up.name })} {Math.round(up.p * 100)}%</span>
+          <button type="button" className="icon-btn" onClick={() => up.abort.abort()} aria-label={t('term.uploadStop')} title={t('term.uploadStop')}>
+            <X size={15} />
+          </button>
+        </div>
+      )}
       <div className="composer-box">
         <textarea
           ref={field}
@@ -474,11 +556,20 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
           spellCheck={false}
           placeholder={to ? t('convo.toPlaceholder', { name: to }) : t('term.composerPlaceholder')}
           rows={1}
-          onChange={(e) => setDraft(e.target.value)}
+          onChange={(e) => {
+            histPos.current = null // (an entry edited is a draft of its own)
+            setDraft(e.target.value)
+          }}
           onSelect={() => completion.update()}
           {...completion.field}
           onBlur={() => setTimeout(completion.update)}
           onPaste={(e) => {
+            const files = [...(e.clipboardData?.files ?? [])]
+            if (files.length > 0) {
+              e.preventDefault()
+              void upload(files)
+              return
+            }
             // A long paste goes in as a label, as in the terminal's composer; it is sent as the text.
             const text = e.clipboardData?.getData('text/plain') ?? ''
             if (text.split('\n').length <= PASTE_LINES && text.length <= PASTE_CHARS) return
@@ -492,7 +583,13 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
           onKeyDown={(e) => {
             if (e.nativeEvent.isComposing || e.keyCode === 229) return
             if (completion.onKey(e)) return
-            if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+            const el = e.currentTarget
+            const plain = !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey && el.selectionStart === el.selectionEnd
+            if (plain && e.key === 'ArrowUp' && el.selectionStart === 0 && historyStep(-1)) {
+              e.preventDefault()
+            } else if (plain && e.key === 'ArrowDown' && el.selectionEnd === el.value.length && historyStep(1)) {
+              e.preventDefault()
+            } else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
               e.preventDefault()
               send()
             } else if (e.key === 'Enter' && hasKeyboardPointer() && composerEnter === 'send' && !e.shiftKey && !e.altKey) {
@@ -502,6 +599,45 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
           }}
         />
         <div className="composer-tools">
+          <button type="button" className="icon-btn" onClick={() => fileRef.current?.click()} aria-label={t('term.upload')} title={t('term.upload')}>
+            <Paperclip size={18} />
+          </button>
+          <Menu
+            label={t('term.history')}
+            note={sentHistory().length === 0 ? t('term.historyEmpty') : undefined}
+            items={() =>
+              [...sentHistory()].reverse().map((h) => ({
+                label: h.trim().replace(/\s*\n\s*/g, ' ⏎ ').slice(0, 80),
+                onSelect: () => {
+                  if (histPos.current === null) histStash.current = draft
+                  histPos.current = h
+                  setDraft(h)
+                  requestAnimationFrame(() => {
+                    const el = field.current
+                    if (!el) return
+                    el.focus()
+                    el.selectionStart = el.selectionEnd = h.length
+                  })
+                },
+              }))
+            }
+            button={(open, toggle) => (
+              <button type="button" className="icon-btn" aria-expanded={open} onClick={toggle} aria-label={t('term.history')} title={t('term.history') + (isTouch ? '' : ' (↑)')}>
+                <History size={18} />
+              </button>
+            )}
+          />
+          <input
+            ref={fileRef}
+            type="file"
+            multiple
+            hidden
+            onChange={(e) => {
+              const files = [...(e.target.files ?? [])]
+              e.target.value = ''
+              if (files.length) void upload(files)
+            }}
+          />
           <div className="spacer" />
           {blocked && <span className="composer-keys agents-chat-why">{blocked}</span>}
           {!blocked && hasKeyboardPointer() && (
@@ -524,7 +660,28 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   )
 
   const openTerminal = () => navigate(`/t/${sid}` + (cur.pane ? '?pane=' + encodeURIComponent(cur.pane) : ''))
+  // (Files dropped on the conversation go up as picked ones do.)
+  const dropping = (e: React.DragEvent) => e.dataTransfer.types.includes('Files')
   return (
+    <div
+      className="agents-chat-drop"
+      onDragOver={(e) => {
+        if (!dropping(e)) return
+        e.preventDefault()
+        setDragOver(true)
+      }}
+      onDragLeave={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDragOver(false)
+      }}
+      onDrop={(e) => {
+        if (!dropping(e)) return
+        e.preventDefault()
+        setDragOver(false)
+        const files = [...e.dataTransfer.files]
+        if (files.length) void upload(files)
+      }}
+    >
+    {dragOver && <div className="term-drop">{t('term.dropHint')}</div>}
     <ConversationView
       convo={convo}
       agent={agent}
@@ -547,6 +704,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       sendNow={said?.what === 'now' && said.bind === bindKey ? said.text : undefined}
       lead={lead}
     />
+    </div>
   )
 }
 

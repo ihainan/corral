@@ -5,7 +5,7 @@ import { Dialog, Field, useToast } from './components/ui'
 import { OpenPicker, rememberChoice } from './pages/OpenPicker'
 
 // Rough terminal size for the first frame, before xterm measures the real one.
-function estimateSize() {
+export function estimateSize() {
   const cols = Math.max(40, Math.min(240, Math.floor(window.innerWidth / 8.4)))
   const rows = Math.max(12, Math.min(90, Math.floor((window.innerHeight - 100) / 17)))
   return { cols, rows }

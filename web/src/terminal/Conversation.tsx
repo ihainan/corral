@@ -227,18 +227,20 @@ export function ConversationView({
   const [olderPaused, setOlderPaused] = useState(false)
   const olderPausedNow = useRef(false)
   olderPausedNow.current = olderPaused
-  const emptyReads = useRef({ n: 0, len: 0, was: false })
+  // (Brought something: the first entry is an earlier one. What came at the end meanwhile does not count.)
+  const firstSeq = convo.entries.length ? convo.entries[0].seq : 0
+  const emptyReads = useRef({ n: 0, first: 0, was: false })
   useEffect(() => {
     const r = emptyReads.current
-    if (convo.loadingOlder && !r.was) r.len = convo.entries.length
+    if (convo.loadingOlder && !r.was) r.first = firstSeq
     if (!convo.loadingOlder && r.was) {
-      r.n = convo.entries.length > r.len ? 0 : r.n + 1
+      r.n = firstSeq < r.first ? 0 : r.n + 1
       setOlderPaused(r.n >= 3)
     }
     r.was = convo.loadingOlder
-  }, [convo.loadingOlder, convo.entries.length])
+  }, [convo.loadingOlder, firstSeq])
   useEffect(() => {
-    emptyReads.current = { n: 0, len: 0, was: false }
+    emptyReads.current = { n: 0, first: 0, was: false }
     setOlderPaused(false)
   }, [convo.of, convo.gen])
   // The part before, read in when its line comes near (as the top is
@@ -266,7 +268,9 @@ export function ConversationView({
   // after each change the first still there is put back. (By hand: Safari
   // has no scroll anchoring. The column's children, past its first note,
   // are the list's items in order.)
-  const anchors = useRef<{ key: string; top: number }[]>([])
+  // (Each also by its place from the end: kept when only what was before
+  // changed, as a run read from its middle takes in its start, and its key.)
+  const anchors = useRef<{ key: string; top: number; fromEnd: number; last: string }[]>([])
   const listNow = useRef(list)
   listNow.current = list
   const note = useCallback(() => {
@@ -275,7 +279,8 @@ export function ConversationView({
     if (!el || !c) return
     const view = el.getBoundingClientRect()
     const kids = [...c.children].filter((k) => !k.classList.contains('convo-older'))
-    const out: { key: string; top: number }[] = []
+    const out: { key: string; top: number; fromEnd: number; last: string }[] = []
+    const last = listNow.current.length ? itemKey(listNow.current[listNow.current.length - 1]) : ''
     // (The first in view by halving: a long conversation has thousands.)
     let lo = 0
     let hi = kids.length
@@ -288,7 +293,7 @@ export function ConversationView({
       const it = listNow.current[i]
       const r = kids[i].getBoundingClientRect()
       if (!it || r.top >= view.bottom) break
-      out.push({ key: itemKey(it), top: r.top - view.top })
+      out.push({ key: itemKey(it), top: r.top - view.top, fromEnd: listNow.current.length - i, last })
     }
     anchors.current = out
   }, [])
@@ -299,12 +304,16 @@ export function ConversationView({
       const view = el.getBoundingClientRect()
       const kids = [...c.children].filter((k) => !k.classList.contains('convo-older'))
       const at = new Map(list.map((it, i) => [itemKey(it), i]))
-      for (const a of anchors.current) {
-        const k = kids[at.get(a.key) ?? -1]
-        if (!k) continue
-        const d = k.getBoundingClientRect().top - view.top - a.top
+      const lastNow = list.length ? itemKey(list[list.length - 1]) : ''
+      const hit =
+        anchors.current.find((a) => at.has(a.key)) ??
+        // (None there by its key, the end as it was: by its place from the end.)
+        anchors.current.find((a) => a.last === lastNow && list.length - a.fromEnd >= 0)
+      const i = hit ? (at.get(hit.key) ?? list.length - hit.fromEnd) : -1
+      const k = hit ? kids[i] : undefined
+      if (hit && k) {
+        const d = k.getBoundingClientRect().top - view.top - hit.top
         if (Math.abs(d) >= 1) el.scrollTop += d
-        break
       }
     }
     note()

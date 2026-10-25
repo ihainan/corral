@@ -40,6 +40,7 @@ import { sessionWhich } from '../terminal/sessionName'
 import { knownSession } from '../terminal/agents'
 import { holdTermMode } from '../terminal/chatSend'
 import { useSession, VERSION_EVENT } from '../app'
+import { geminiPath, shellPath } from '../terminal/paths'
 
 const isTouch = window.matchMedia('(pointer: coarse)').matches || navigator.maxTouchPoints > 0
 
@@ -96,8 +97,6 @@ const oneLine = (s: string) => {
   return [...flat].length > 80 ? [...flat].slice(0, 79).join('') + '…' : flat
 }
 
-// Quote a remote path for a POSIX shell when it contains anything beyond safe
-// characters. Generated upload names are safe; the home directory may not be.
 // While replayed output is parsed, xterm answers the old queries in it. The
 // answers have fixed shapes: device attributes and status (CSI … c / n / R),
 // mode reports (CSI … $ y), window reports (CSI … t), focus (CSI I / O),
@@ -108,7 +107,7 @@ const REPLY = /^(?:\x1b\[[?>]?[\d;]*[cnRt]|\x1b\[\??[\d;]*\$y|\x1b\[[IO]|\x1bP[\
 // composer acts as set there. Phones and tablets keep Enter for new lines.
 const hasKeyboardPointer = () => !window.matchMedia('(pointer: coarse)').matches
 // The start-up answer, or null when the gateway does not answer (within 5 s).
-async function probeBootstrap(): Promise<{ instance?: string } | null> {
+export async function probeBootstrap(): Promise<{ instance?: string } | null> {
   const ctl = new AbortController()
   const tm = setTimeout(() => ctl.abort(), 5000)
   try {
@@ -190,12 +189,6 @@ async function clipboardImage(): Promise<File | null> {
   return null
 }
 
-function shellPath(p: string): string | null {
-  if (/[\x00-\x1f\x7f]/.test(p)) return null
-  if (/^[\w@%+=:,./~-]+$/.test(p)) return p
-  return "'" + p.replaceAll("'", "'\\''") + "'"
-}
-
 // remoteCopyLimit bounds the text a program on the host may copy (in base64
 // characters: about 750 KB of text).
 const remoteCopyLimit = 1 << 20
@@ -216,13 +209,6 @@ function clipboardText(data: string): string | null {
   }
 }
 
-// geminiPath is a path as Gemini CLI takes a file: @path, where a backslash
-// keeps a character that would end the path (it does not read shell quotes;
-// tabs and line breaks are control characters, refused before).
-function geminiPath(p: string): string | null {
-  if (/[\x00-\x1f\x7f]/.test(p)) return null
-  return '@' + p.replace(/[ ,;!?()[\]{}"'`\\]/g, '\\$&').replace(/\.$/, '\\.')
-}
 
 // watch: a session someone else owns and lets this user watch, read-only.
 // What a tab shows of its terminal (see Tabs.tsx).

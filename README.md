@@ -338,9 +338,9 @@ Report security problems privately, not in a public issue: see [SECURITY.md](SEC
 - Answering an agent checks the pane's screen right before typing, but herdr
   cannot check and type in one step: an answer given on the host in that very
   moment is not seen.
-- After a gateway restart, the tabs reattached by themselves are those opened
-  in that window since it loaded; others are opened again from `+` or the host
-  list.
+- After a gateway restart, a window's tmux and herdr tabs open again by
+  themselves, in their places; one whose host asks for a password each time
+  is not (the window says so), and plain shells end with the gateway.
 - The agents page talks to Claude Code only, in tmux or herdr on Linux
   hosts (it finds the process through `/proc`), with its settings in
   `~/.claude` (not a `CLAUDE_CONFIG_DIR` of its own). Only the session's
