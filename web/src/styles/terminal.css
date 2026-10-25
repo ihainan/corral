@@ -748,3 +748,13 @@ html.term-dark .overlay, html.term-dark .menu, html.term-dark .toast {
 .convo .hljs-deletion { color: var(--term-danger-text); }
 .convo .hljs-emphasis { font-style: italic; }
 .convo .hljs-strong { font-weight: 650; }
+
+/* The agents page: the conversation view on the whole page (a tab of its own with tabs) */
+.agents-chat-title { padding: 0 6px; font: 600 15px/20px var(--font-ui); color: var(--term-fg); }
+.agents-chat .term-body { display: flex; flex-direction: column; }
+.agents-chat-empty {
+  margin: auto; max-width: 44ch; padding: 24px 16px; display: flex; flex-direction: column; align-items: center; gap: 12px;
+  text-align: center; color: var(--term-fg-2); font: 14px/22px var(--font-ui);
+}
+.agents-chat-empty p { margin: 0; }
+.term-root .agents-chat-why { color: var(--term-fg-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }

@@ -39,6 +39,7 @@ import { promptSuggestion } from '../terminal/suggestion'
 import { agentKey, sessionWhich } from '../terminal/sessionName'
 import { ConversationView, type ConvoAgent, type ConvoListRow, type ConvoPending } from '../terminal/Conversation'
 import { isClaude, knownSession, listAgents, paneTitle, useRunningSessions } from '../terminal/agents'
+import { afterSend, holdTermMode, PENDING_MS, sameTurn, tmuxKey } from '../terminal/chatSend'
 import { asking, convoWasOpen, rememberConvo, useConversation, type ConvoEntry } from '../terminal/conversation'
 import { useSession, VERSION_EVENT } from '../app'
 
@@ -46,24 +47,6 @@ const isTouch = window.matchMedia('(pointer: coarse)').matches || navigator.maxT
 
 // The conversation view's composer was put away while it showed: it no longer opens with it.
 const CONVO_NO_COMPOSER = 'corral.convoNoComposer'
-const PENDING_MS = 30000 // a message sent from the conversation not seen in the log by then: say so
-
-// A user turn is the text sent: alike but for spacing; where the log cut it
-// short, the start of a long text.
-const sameTurn = (e: ConvoEntry, sent: string) => {
-  const n = (s: string) => s.replace(/\s+/g, ' ').trim()
-  const parts = e.parts.filter((p) => p.kind === 'text')
-  const got = n(parts.map((p) => p.text).join('\n'))
-  const want = n(sent)
-  return parts.some((p) => p.truncated) ? got.length >= 1000 && want.startsWith(got) : got === want
-}
-// Written after it was sent, by the host's clock where the log has one (a
-// minute's leeway for clocks that differ): an older turn of the same text,
-// read only now, is not it.
-const afterSend = (e: ConvoEntry, at: number) => {
-  const ts = e.ts ? Date.parse(e.ts) : NaN
-  return isNaN(ts) || ts >= at - 60000
-}
 const isMac = /Mac|iPhone|iPad/.test(navigator.platform)
 const HIGH_LATENCY = 300 // ms; below this the status just says "connected"
 
@@ -256,18 +239,11 @@ export interface TabInfo {
   reopening?: boolean // being opened again by itself (see autoAgain): kept mounted meanwhile
 }
 
-// Pages open at once (tabs keep several mounted): the page-wide classes and
-// colours belong to them all, and go when the last one does.
-let pagesOpen = 0
-
 // active: shown (with tabs, the others stay connected but hidden: they take
 // no focus or keys and show no dialogs). tabs: drawn in the top bar in place
 // of the session switcher.
 // dropParam takes what a notification asked for (?name=value) out of the
 // address of this session's page once it is dealt with.
-// A tmux session on its host, whichever tab shows it.
-const tmuxKey = (s: SessionInfo) => `${s.host_id}|tmux|${s.mux_session ?? ''}`
-
 function dropParam(id: string, name: string, value: string) {
   const q = new URLSearchParams(location.search)
   if (location.pathname !== '/t/' + id || q.get(name) !== value) return
@@ -1854,12 +1830,10 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
     safeFitRef.current()
   }, [prefs])
   useEffect(() => {
-    pagesOpen++
-    document.documentElement.classList.add('term-mode')
+    const release = holdTermMode()
     return () => {
-      if (--pagesOpen > 0) return
-      setChromeColor(null)
-      document.documentElement.classList.remove('term-dark', 'term-mode')
+      release()
+      if (!document.documentElement.classList.contains('term-mode')) setChromeColor(null)
     }
   }, [])
   // A tab brought to the front: its colours, its size (the window may have

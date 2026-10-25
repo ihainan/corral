@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Bot, Check, MessageCircleReply, Plus, Search } from 'lucide-react'
+import { AgentsChat } from './AgentsChat'
 import { api, type Host, type SessionInfo } from '../api'
 import { agentKey, sessionWhich } from '../terminal/sessionName'
 import { t } from '../i18n'
@@ -13,6 +14,7 @@ import { TerminalPage, type TabInfo } from './Terminal'
 // Tabs where there is room for them: desktops and tablets (an iPad with a
 // keyboard switches with Ctrl+Tab too). Phones keep the session switcher.
 const TABS_QUERY = '(min-width: 700px)'
+export const AGENTS = 'agents' // (TerminalTabs' current for the agents page)
 export function useTabsMode(): boolean {
   const [m, setM] = useState(() => window.matchMedia(TABS_QUERY).matches)
   useEffect(() => {
@@ -150,7 +152,9 @@ function waitingAgents(list: SessionInfo[]): number {
   return seen.size
 }
 
+// current: the session in front, or "agents" (the agents page, a tab of its own).
 export function TerminalTabs({ current }: { current: string }) {
+  const agents = current === AGENTS
   const [sessions, setSessions] = useState<SessionInfo[] | null>(null)
   const [mounted, setMounted] = useState<string[]>([current])
   const [infos, setInfos] = useState<Record<string, TabInfo>>({})
@@ -189,6 +193,7 @@ export function TerminalTabs({ current }: { current: string }) {
   // The current one moves to the end of the mounted list; the oldest is let go.
   const mountedAt = useRef(new Map<string, number>())
   useEffect(() => {
+    if (current === AGENTS) return // (no terminal of its own: the others stay as they are)
     if (!mountedAt.current.has(current)) mountedAt.current.set(current, Date.now())
     setMounted((m) => {
       const next = [...m.filter((x) => x !== current), current]
@@ -228,7 +233,7 @@ export function TerminalTabs({ current }: { current: string }) {
   // has it (just opened) or after it ended (its end is shown).
   const tabs = useMemo(() => {
     const list = sessions ?? []
-    return list.some((s) => s.id === current) ? list : [...list, { id: current, host_id: 0, host_name: '', title: '' } as SessionInfo]
+    return current === AGENTS || list.some((s) => s.id === current) ? list : [...list, { id: current, host_id: 0, host_name: '', title: '' } as SessionInfo]
   }, [sessions, current])
 
   // A tab moved by the user: its place is kept, and the bar shows it there now.
@@ -336,6 +341,7 @@ export function TerminalTabs({ current }: { current: string }) {
       {mounted.map((id) => (
         <TerminalPage key={id} id={id} active={id === current} tabs={bar} onInfo={onInfo} onEnd={() => endTab(id)} />
       ))}
+      {agents && <AgentsChat bar={bar} />}
       {newOpen && (
         <NewTabDialog
           busyHost={busyHost}
@@ -565,6 +571,8 @@ function TabBar(p: { tabs: SessionInfo[]; current: string; infos: Record<string,
       <button
         type="button"
         className="icon-btn term-tab-agents"
+        aria-current={p.current === AGENTS ? 'page' : undefined}
+        aria-pressed={p.current === AGENTS}
         onClick={() => navigate('/agents')}
         aria-label={waitingAll ? `${t('nav.agents')}，${t('herdr.waiting', { n: waitingAll })}` : t('nav.agents')}
         title={t('nav.agents')}
