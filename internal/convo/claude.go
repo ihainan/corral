@@ -640,14 +640,14 @@ func (c *Claude) queueOp(r *claudeRow) {
 // the same text that still waits.)
 func (c *Claude) arrived(text string) {
 	t := squashed(text)
+	kept, _ := cut(clean(text), maxText) // (as the queue keeps a long one, and its removals)
+	k := squashed(kept)
 	for i, g := range c.gone {
-		if g.text == t {
+		if g.text == t || g.text == k {
 			c.gone = append(c.gone[:i:i], c.gone[i+1:]...)
 			return
 		}
 	}
-	kept, _ := cut(clean(text), maxText) // (as the queue keeps a long one)
-	k := squashed(kept)
 	for i, q := range c.queue {
 		if q := squashed(q.Text); q == t || q == k {
 			c.queue = append(c.queue[:i:i], c.queue[i+1:]...)

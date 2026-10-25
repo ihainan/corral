@@ -1151,6 +1151,10 @@ func (s *Server) apiUpload(w http.ResponseWriter, r *http.Request) {
 	full := path.Join(dir, name)
 	f, err := client.OpenFile(full, os.O_WRONLY|os.O_CREATE|os.O_EXCL)
 	if err != nil {
+		// (Made, maybe, the answer lost on the way: by its random name, ours.)
+		if !errors.Is(err, fs.ErrExist) {
+			s.removeFileLater(client, sess, full)
+		}
 		writeError(w, http.StatusBadGateway, "sftp_failed", "cannot create the file")
 		return
 	}

@@ -680,6 +680,10 @@ func (s *Server) apiHerdrReply(w http.ResponseWriter, r *http.Request) {
 	s.replyToPane(w, r, sess, socket, pane, b.Digest, b.Keys, b.Text, nil)
 }
 
+// answerSettle is how long a pane's turn is held after an answer that may
+// still reach it (see replyToPane).
+const answerSettle = 3 * time.Second
+
 // replyToPane types an answer (keys, or text and Enter) into a herdr pane if
 // its screen is still the one named by digest (and, with still, while it
 // says so: checked right before typing), and writes the outcome.
@@ -719,7 +723,7 @@ func (s *Server) replyToPane(w http.ResponseWriter, r *http.Request, sess *term.
 		writeError(w, http.StatusTooManyRequests, "herdr_busy", "an earlier answer to this pane is still under way")
 		return
 	}
-	defer turn()
+	defer func() { turn() }() // (once only: given back below, as soon as it may be)
 	reader := herdrDial(w, ctx, sess, socket)
 	if reader == nil {
 		return
@@ -773,7 +777,15 @@ func (s *Server) replyToPane(w http.ResponseWriter, r *http.Request, sess *term.
 		lock.digest, lock.at = digest, time.Now()
 	}
 	typer.Close()
-	turn()
+	if err == nil {
+		turn()
+	} else {
+		// (Not known to have been typed: closing does not wait for herdr to
+		// be done with what reached it. A while, before the pane's next.)
+		hold := turn
+		turn = func() {}
+		time.AfterFunc(answerSettle, hold)
+	}
 	release() // the pane's next answer need not wait for the audit
 	detail := map[string]any{"session": sess.ID, "pane": pane, "outcome": outcome}
 	if text != "" {

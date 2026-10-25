@@ -599,3 +599,19 @@ func TestReview228Parser(t *testing.T) {
 		t.Errorf("long id: %+v", es)
 	}
 }
+
+// A long message removed from the queue, queued again, then the first
+// arrives: the removal is what it matches, the second stays queued.
+func TestLongArrivalMatchesRemoval(t *testing.T) {
+	long := strings.Repeat("x", maxText+1)
+	c := NewClaude()
+	c.Feed(lines(
+		`{"type":"queue-operation","operation":"enqueue","timestamp":"2026-10-25T09:00:00Z","content":"`+long+`"}`,
+		`{"type":"queue-operation","operation":"remove","timestamp":"2026-10-25T09:00:01Z","content":"`+long+`"}`,
+		`{"type":"queue-operation","operation":"enqueue","timestamp":"2026-10-25T09:00:02Z","content":"`+long+`"}`,
+		`{"type":"attachment","uuid":"q","attachment":{"type":"queued_command","commandMode":"prompt","prompt":"`+long+`"}}`,
+	))
+	if n := len(c.Queued()); n != 1 {
+		t.Fatalf("queued %d, want 1", n)
+	}
+}

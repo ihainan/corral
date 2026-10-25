@@ -276,13 +276,15 @@ export function InlineReply({ sessionId, agent, onLoaded, resizedAt, active = tr
   // (an agent going on is seen to work before that).
   const loadRef = useRef(load)
   loadRef.current = load
+  const activeRef = useRef(active)
+  activeRef.current = active
   useEffect(() => {
     if (sent === null) return
     let stopped = false
     let timer: ReturnType<typeof setTimeout> | undefined
-    // (Hidden, it is not read: once shown again, it is, at the next turn.)
+    // (Hidden, or behind a terminal tab, it is not read: once shown again, it is, at the next turn.)
     const next = () => {
-      timer = setTimeout(() => (document.hidden ? next() : void loadRef.current().finally(() => !stopped && next())), 2000)
+      timer = setTimeout(() => (document.hidden || !activeRef.current ? next() : void loadRef.current().finally(() => !stopped && next())), 2000)
     }
     next()
     return () => {

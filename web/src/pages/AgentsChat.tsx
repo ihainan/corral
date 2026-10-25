@@ -6,7 +6,7 @@ import { navigate, onNavigate } from '../router'
 import { onOpenRequest } from '../notifyopen'
 import { setChromeColor, termScheme, usePrefs } from '../prefs'
 import { local } from '../storage'
-import { Menu, useToast } from '../components/ui'
+import { CLOSE_MENUS, Menu, useToast } from '../components/ui'
 import { chromeVars } from '../terminal/themes'
 import { expandPastes, getDraft, keepDraft, keepPaste, remember, sentHistory } from '../terminal/drafts'
 import { geminiPath, shellPath } from '../terminal/paths'
@@ -127,7 +127,7 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
     if (!waiting) return
     const timer = setTimeout(() => setGaveUp(true), 15000)
     return () => clearTimeout(timer)
-  }, [waiting])
+  }, [waiting, pick?.s, pick?.pane]) // (another waited for: its own while)
   const cur = picked ?? kept ?? (sessions && !waiting ? entries[0] : undefined)
   useEffect(() => {
     lastCur.current = cur
@@ -206,6 +206,10 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
   // the window (the soft keyboard does not shrink the layout viewport on iOS).
   const rootRef = useRef<HTMLDivElement>(null)
   useEffect(() => holdTermMode(), [])
+  // (Sent behind a terminal tab: a menu of its own, put over the page, goes.)
+  useEffect(() => {
+    if (!active) window.dispatchEvent(new Event(CLOSE_MENUS))
+  }, [active])
   useEffect(() => {
     if (!active) return
     setChromeColor(scheme.theme.background ?? null)
@@ -300,8 +304,9 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
   )
 }
 
-// (was: the draft it went from, when whether it went is not known: seen in the log, that draft goes.)
-type Sent = ConvoPending & { bind: string; after: number; gen: number; at: number; was?: string }
+// (was: the draft it went from, when whether it went is not known: seen in the log, that draft goes.
+// fresh: sent before the conversation had a log, which comes as another reading.)
+type Sent = ConvoPending & { bind: string; after: number; gen: number; at: number; was?: string; fresh?: boolean }
 
 // The conversation of one agent, and what is sent to it. Keyed by the
 // agent: nothing of another's (its draft, what was sent, a stop) carries over.
@@ -418,7 +423,10 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     let changed = false
     const next = sent.flatMap((p) => {
       if (p.state === 'sent' || p.bind !== bindKey) return [p]
-      if (p.gen !== convo.gen) {
+      if (p.gen !== convo.gen && p.fresh) {
+        changed = true // (the log it went to, now written: looked for in all of it)
+        p = { ...p, gen: convo.gen, after: -Infinity, fresh: false }
+      } else if (p.gen !== convo.gen) {
         changed = true
         return [{ ...p, state: 'sent' as const }]
       }
@@ -592,8 +600,9 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     const at = Date.now()
     const account = authGen() // (signed out meanwhile: nothing of it is kept for the next account)
     const focused = document.activeElement === field.current
+    const fresh = convo.status === 'none' // (a new conversation: no log yet)
     const pending = (extra?: Partial<Sent>) =>
-      setSent((ps) => [...ps, { id: Date.now() * 100 + (++sentN.current % 100), text, state: 'waiting' as const, bind: bindKey, after, gen: convo.gen, at, ...extra }].slice(-5))
+      setSent((ps) => [...ps, { id: Date.now() * 100 + (++sentN.current % 100), text, state: 'waiting' as const, bind: bindKey, after, gen: convo.gen, at, fresh, ...extra }].slice(-5))
     api('POST', `/api/sessions/${sid}/conversation/send`, { pane: b.pane, pid: b.pid, start: b.start, session: b.session, text }, { timeoutMs: SEND_MS })
       .then(() => {
         if (authGen() !== account) return

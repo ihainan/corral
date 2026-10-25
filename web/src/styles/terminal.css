@@ -451,6 +451,8 @@ html.term-dark .overlay, html.term-dark .menu, html.term-dark .toast {
 }
 .convo-state { display: flex; flex-direction: column; align-items: center; gap: 14px; padding: 48px 8px; color: var(--term-fg-2); text-align: center; }
 .convo-state p { margin: 0; max-width: 32em; }
+/* (A new conversation: what was sent waits under its note, as it would in the thread.) */
+.convo-state-pending { align-self: stretch; display: flex; flex-direction: column; gap: 14px; text-align: start; color: var(--term-fg); margin-top: 12px; }
 .convo-older, .convo-working, .convo-note, .convo-cut { margin: 0; font-size: 13px; color: var(--term-fg-3); }
 .convo-note { white-space: pre-wrap; }
 .convo-older { text-align: center; }

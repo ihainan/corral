@@ -360,6 +360,18 @@ export function ConversationView({
     }
   }, [])
 
+  // What was sent, not in the log yet (also before a new conversation's log is written).
+  const pendingList = pending.map((p) => (
+    <div key={p.id} className="convo-user convo-pending">
+      <div className="convo-user-text">{p.text}</div>
+      <div className="convo-meta">
+        <span role="status">{t(p.state === 'waiting' ? 'convo.sent' : p.state === 'unseen' ? 'convo.unseen' : 'convo.sentOnly')}</span>
+        {p.state !== 'waiting' && (
+          <button type="button" className="link-btn" onClick={() => onDismiss(p.id)}>{t('common.close')}</button>
+        )}
+      </div>
+    </div>
+  ))
   let body: ReactNode
   if (convo.status === 'loading') body = <p className="convo-state">{t('convo.loading')}</p>
   else if (convo.status === 'error') body = <p className="convo-state">{t('convo.error')}</p>
@@ -376,6 +388,7 @@ export function ConversationView({
                 : t('convo.noAgent')}
         </p>
         <button type="button" className="btn btn-ghost" onClick={onShowTerminal}>{t('convo.showTerminal')}</button>
+        {convo.reason === 'no_log' && pending.length > 0 && <div className="convo-state-pending">{pendingList}</div>}
       </div>
     )
   else
@@ -417,17 +430,7 @@ export function ConversationView({
             onShow={show}
           />
         ))}
-        {pending.map((p) => (
-          <div key={p.id} className="convo-user convo-pending">
-            <div className="convo-user-text">{p.text}</div>
-            <div className="convo-meta">
-              <span role="status">{t(p.state === 'waiting' ? 'convo.sent' : p.state === 'unseen' ? 'convo.unseen' : 'convo.sentOnly')}</span>
-              {p.state !== 'waiting' && (
-                <button type="button" className="link-btn" onClick={() => onDismiss(p.id)}>{t('common.close')}</button>
-              )}
-            </div>
-          </div>
-        ))}
+        {pendingList}
         {working && quiet && <p className="convo-working">{t('convo.quiet')}</p>}
       </>
     )
@@ -522,7 +525,7 @@ export function ConversationView({
         {convo.status === 'ready' && convo.meta && <Runs meta={convo.meta} />}
       </div>
       </div>
-      {changes && shownEdits && <ChangesPanel key={changes.key} edits={shownEdits} focus={changes.path} onClose={unshow} />}
+      {changes && shownEdits && <ChangesPanel key={changes.key} edits={shownEdits} focus={changes.path} onClose={unshow} active={active} />}
       {picking && side && <Picker rows={rows} onClose={unpick} />}
     </div>
   )
@@ -1204,7 +1207,7 @@ const created = (tool: ConvoTool): ConvoHunk[] | undefined => {
 
 // The changes a turn made, beside the thread (over it, where narrow): its
 // files, each with its edits in order.
-function ChangesPanel({ edits, focus, onClose }: { edits: Edits; focus?: string; onClose: () => void }) {
+function ChangesPanel({ edits, focus, onClose, active }: { edits: Edits; focus?: string; onClose: () => void; active: boolean }) {
   const box = useRef<HTMLDivElement>(null)
   const panel = useRef<HTMLElement>(null)
   // (Opened, the keys go to it; closed, back where they were.)
@@ -1220,6 +1223,7 @@ function ChangesPanel({ edits, focus, onClose }: { edits: Edits; focus?: string;
     el?.scrollIntoView({ block: 'start' })
   }, [focus])
   useEffect(() => {
+    if (!active) return // (behind a terminal tab: its Escape is the terminal's)
     const onKey = (e: KeyboardEvent) => {
       const el = e.target as HTMLElement | null
       if (e.key !== 'Escape' || (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') && !el.classList.contains('xterm-helper-textarea'))) return
@@ -1230,7 +1234,7 @@ function ChangesPanel({ edits, focus, onClose }: { edits: Edits; focus?: string;
     }
     window.addEventListener('keydown', onKey, true)
     return () => window.removeEventListener('keydown', onKey, true)
-  }, [onClose])
+  }, [onClose, active])
   return (
     <aside className="convo-panel" aria-label={t('convo.changesTitle')} tabIndex={-1} ref={panel}>
       <div className="convo-panel-head">
