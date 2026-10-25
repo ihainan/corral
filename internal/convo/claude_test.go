@@ -533,3 +533,18 @@ func TestClaudeQueueSinceToTheMillisecond(t *testing.T) {
 		t.Fatalf("the old removal was dropped, the new X arrived: %+v", q)
 	}
 }
+
+// A message Claude Code took as a paste, a picture's path in it: shown as it
+// was typed (the wrapper and the "[Image #N]" taken off), the picture a part.
+func TestUserPasteWithImage(t *testing.T) {
+	c := NewClaude()
+	c.Feed(lines(`{"type":"user","uuid":"u1","promptSource":"typed","message":{"content":[{"type":"text","text":"[Image #6]\n\n<pasted_content id=\"4cde\">\n1. one\n2. two\n</pasted_content id=\"4cde\">\n"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AA=="}}]}}`))
+	es := c.Since(0)
+	if len(es) != 1 || len(es[0].Parts) != 2 || es[0].Parts[0].Text != "1. one\n2. two" || es[0].Parts[1].Kind != KindImage {
+		t.Fatalf("got %+v", es)
+	}
+	// (Ids that differ: not a wrapper of Claude Code's, left as it is.)
+	if s := unpasted(`<pasted_content id="a">x</pasted_content id="b">`); s != `<pasted_content id="a">x</pasted_content id="b">` {
+		t.Fatalf("unpasted: %q", s)
+	}
+}

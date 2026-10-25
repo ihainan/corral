@@ -7,12 +7,15 @@ import type { ConvoEntry } from './conversation'
 export const PENDING_MS = 30000 // a message sent from the conversation not seen in the log by then: say so
 
 // The user turn the log has for a message sent: the same text, however its
-// white space came out (a long one, cut short in the log: what was kept of it).
+// white space came out (a long one, cut short in the log: what was kept of
+// it), and without the paths of pictures in it (Claude Code takes those out
+// and carries the pictures themselves).
+const PICTURE = /'[^']*\.(?:png|jpe?g|gif|webp)'|"[^"]*\.(?:png|jpe?g|gif|webp)"|(?:~|\/)[^\s'"]*\.(?:png|jpe?g|gif|webp)\b/gi
 export const sameTurn = (e: ConvoEntry, sent: string) => {
   const n = (s: string) => s.replace(/\s+/g, ' ').trim()
   const parts = e.parts.filter((p) => p.kind === 'text')
   const got = n(parts.map((p) => p.text).join('\n'))
-  const want = n(sent)
+  const want = n(e.parts.some((p) => p.kind === 'image') ? sent.replace(PICTURE, ' ') : sent)
   return parts.some((p) => p.truncated) ? got.length >= 1000 && want.startsWith(got) : got === want
 }
 // Written after it was sent, by the host's clock where the log has one (a

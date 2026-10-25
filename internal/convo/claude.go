@@ -524,6 +524,10 @@ func (c *Claude) user(r *claudeRow) {
 			results++
 		}
 	}
+	images := false
+	for _, b := range blocks {
+		images = images || b.Type == "image"
+	}
 	var parts, notes []Part
 	for _, b := range blocks {
 		switch b.Type {
@@ -536,7 +540,12 @@ func (c *Claude) user(r *claudeRow) {
 		case "text":
 			switch role, text := classifyUserText(b.Text); role {
 			case RoleUser:
-				parts = append(parts, textPart(KindText, text))
+				if images {
+					text = noImageTokens(text)
+				}
+				if text != "" {
+					parts = append(parts, textPart(KindText, text))
+				}
 			case RoleNote:
 				notes = append(notes, textPart(KindText, text))
 			}
@@ -1025,13 +1034,15 @@ func resultText(raw json.RawMessage) string {
 // purposes in tags; the person's own text that happens to start with "<" is
 // kept as it is.
 var (
-	envelopeTag  = regexp.MustCompile(`^\s*<([a-z][a-z0-9-]*)[\s>]`)
-	taskSummary  = regexp.MustCompile(`(?s)<summary>(.*?)</summary>`)
-	taskStatus   = regexp.MustCompile(`(?s)<status>(.*?)</status>`)
-	commandName  = regexp.MustCompile(`(?s)<command-name>(.*?)</command-name>`)
-	commandArgs  = regexp.MustCompile(`(?s)<command-args>(.*?)</command-args>`)
-	tagContent   = regexp.MustCompile(`(?s)^\s*<([a-z-]+)>(.*?)</[a-z-]+>\s*$`)
-	ansiSequence = regexp.MustCompile("\x1b\\[[0-9;?]*[ -/]*[@-~]|\x1b\\][^\x07\x1b]*(\x07|\x1b\\\\)|\x1b[@-_]")
+	envelopeTag   = regexp.MustCompile(`^\s*<([a-z][a-z0-9-]*)[\s>]`)
+	taskSummary   = regexp.MustCompile(`(?s)<summary>(.*?)</summary>`)
+	taskStatus    = regexp.MustCompile(`(?s)<status>(.*?)</status>`)
+	commandName   = regexp.MustCompile(`(?s)<command-name>(.*?)</command-name>`)
+	commandArgs   = regexp.MustCompile(`(?s)<command-args>(.*?)</command-args>`)
+	tagContent    = regexp.MustCompile(`(?s)^\s*<([a-z-]+)>(.*?)</[a-z-]+>\s*$`)
+	pastedContent = regexp.MustCompile(`(?s)<pasted_content id="([^"]*)">\n?(.*?)\n?</pasted_content id="([^"]*)">`)
+	imageToken    = regexp.MustCompile(`\[Image #\d+\]`)
+	ansiSequence  = regexp.MustCompile("\x1b\\[[0-9;?]*[ -/]*[@-~]|\x1b\\][^\x07\x1b]*(\x07|\x1b\\\\)|\x1b[@-_]")
 )
 
 // classifyUserText says what a user row's text is: the person's ("user"),
@@ -1046,7 +1057,7 @@ func classifyUserText(s string) (role, text string) {
 		if strings.TrimSpace(s) == "" {
 			return "", ""
 		}
-		return RoleUser, s
+		return RoleUser, unpasted(s)
 	}
 	switch m[1] {
 	case "system-reminder", "local-command-caveat", "command-message", "user-memory-input":
@@ -1072,7 +1083,33 @@ func classifyUserText(s string) (role, text string) {
 		}
 		return "", ""
 	}
-	return RoleUser, s
+	return RoleUser, unpasted(s)
+}
+
+// unpasted is the text with what Claude Code wraps a paste in taken off
+// (<pasted_content id="…">…</pasted_content id="…">, the same id at both
+// ends): as it was typed.
+func unpasted(s string) string {
+	if !strings.Contains(s, "<pasted_content id=") {
+		return s
+	}
+	return pastedContent.ReplaceAllStringFunc(s, func(w string) string {
+		m := pastedContent.FindStringSubmatch(w)
+		if m[1] != m[3] {
+			return w
+		}
+		return m[2]
+	})
+}
+
+// noImageTokens is a message's text without the "[Image #N]" Claude Code
+// puts in for each picture it carries (the pictures are parts of their own).
+func noImageTokens(s string) string {
+	t := imageToken.ReplaceAllString(s, "")
+	if t == s {
+		return s
+	}
+	return strings.TrimSpace(t)
 }
 
 func slashCommand(s string) (string, bool) {
