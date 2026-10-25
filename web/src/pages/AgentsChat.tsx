@@ -73,15 +73,18 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
   // The one shown: the one picked while it is there (a session without a
   // pane, from an older address: the agent herdr has in front there, else
   // its first), else the first (one waiting for an answer comes first).
+  // (A tmux session open in several connections is listed once, by one of
+  // them: picked by another, it is that entry.)
+  const pickedSession = pick ? sessions?.find((x) => x.id === pick.s) : undefined
   const picked = pick
     ? entries.find((e) => e.s.id === pick.s && (e.pane ?? '') === (pick.pane ?? '')) ??
+      (pickedSession?.persistence === 'tmux' && !pick.pane ? entries.find((e) => !e.pane && e.key === tmuxKey(pickedSession)) : undefined) ??
       (pick.pane === undefined ? entries.find((e) => e.s.id === pick.s && e.s.meta?.t === 'herdr' && e.pane === e.s.meta.focused_pane) ?? entries.find((e) => e.s.id === pick.s) : undefined)
     : undefined
   // One picked that is not in the list for a moment, as herdr's summary of
   // its session is not there or not current, stays shown as last seen; one
   // a current summary no longer has (its pane closed) does not.
   const lastCur = useRef<Entry | undefined>(undefined)
-  const pickedSession = pick ? sessions?.find((x) => x.id === pick.s) : undefined
   const unsure = !!pickedSession && pickedSession.persistence === 'herdr' && (pickedSession.meta?.t !== 'herdr' || !!pickedSession.meta.lost)
   const kept = !picked && pick && unsure && lastCur.current?.s.id === pick.s && (lastCur.current.pane ?? '') === (pick.pane ?? '') ? lastCur.current : undefined
   const cur = picked ?? kept ?? (sessions ? entries[0] : undefined)
@@ -126,16 +129,19 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
   const [sendingBy, setSendingBy] = useState<Record<string, boolean>>({})
   const [draftBy, setDraftBy] = useState<Record<string, string>>({})
   const usedBy = useRef(new Map<string, Map<string, Set<number>>>())
-  // (Of sessions that ended: forgotten. A draft stays in drafts.ts's keeping.)
+  // (Of agents gone: forgotten. A draft stays in drafts.ts's keeping.)
   useEffect(() => {
     if (!sessions) return
-    const live = (k: string) => sessions.some((x) => k.endsWith(' ' + x.id))
+    // (Kept while a herdr summary is missing or lost: its agents may only be out of the list for now.)
+    if (sessions.some((x) => x.persistence === 'herdr' && (x.meta?.t !== 'herdr' || x.meta.lost))) return
+    const keys = new Set(entries.map((e) => e.key))
+    const live = (k: string) => keys.has(k)
     const prune = <T,>(all: Record<string, T>) => (Object.keys(all).every(live) ? all : Object.fromEntries(Object.entries(all).filter(([k]) => live(k))))
     setSentBy(prune)
     setSendingBy(prune)
     setDraftBy(prune)
     for (const k of usedBy.current.keys()) if (!live(k)) usedBy.current.delete(k)
-  }, [sessions])
+  }, [sessions, entries])
 
   // The page's colours and size: the terminal's, and the visible part of
   // the window (the soft keyboard does not shrink the layout viewport on iOS).
@@ -181,10 +187,10 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
       </div>
     )
   else {
-    const k = cur.key + ' ' + cur.s.id
+    const k = cur.key // (its state by the agent, whichever connection shows it)
     body = (
       <AgentChat
-        key={k}
+        key={k + ' ' + cur.s.id}
         cur={cur}
         entries={entries}
         all={sessions ?? []}

@@ -305,6 +305,13 @@ export function TerminalTabs({ current }: { current: string }) {
   useEffect(() => {
     takeTabs((u) => {
       if (!/^\/t\/[0-9a-f]+$/.test(u.pathname) || document.querySelector('[aria-modal="true"]')) return false
+      if (u.searchParams.get('convo') === '1') {
+        // (An address from before the agents page: there, at that agent.)
+        const to = new URLSearchParams({ s: u.pathname.slice(3) })
+        if (u.searchParams.get('pane')) to.set('pane', u.searchParams.get('pane')!)
+        navigate('/agents?' + to)
+        return true
+      }
       navigate(u.pathname + u.search)
       return true
     })
