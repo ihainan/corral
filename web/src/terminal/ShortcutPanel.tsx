@@ -22,7 +22,7 @@ export function lastPanelPage(): string | null {
 // Above the key bar, over the terminal. A press on its buttons takes no
 // focus, so an on-screen keyboard that is up stays up (keys still reach
 // them: Tab, Enter); a pick closes it, as do Escape and a press outside.
-export function ShortcutPanel(p: { pages: PanelPage[]; open: PanelPage; herdrKeys?: Record<string, string>; onPick: (s: Shortcut) => void; onClose: () => void }) {
+export function ShortcutPanel(p: { pages: PanelPage[]; open: PanelPage; herdrKeys?: Record<string, string>; keysUnknown?: boolean; onPick: (s: Shortcut) => void; onClose: () => void }) {
   const [page, setPage] = useState<PanelPage>(p.open)
   const ref = useRef<HTMLDivElement>(null)
   const { onClose } = p
@@ -65,7 +65,7 @@ export function ShortcutPanel(p: { pages: PanelPage[]; open: PanelPage; herdrKey
     }
   }
   const keep = (e: React.MouseEvent) => e.preventDefault() // (focus stays where it is)
-  const groups = pageGroups(page, p.herdrKeys)
+  const groups = pageGroups(page, p.herdrKeys, p.keysUnknown)
   const foot = pageCommon(groups, page)
   const item = (s: Shortcut, i: number) => {
     const Icon = 'herdr' in s ? icons[s.herdr] : undefined

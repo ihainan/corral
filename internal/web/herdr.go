@@ -60,8 +60,10 @@ type herdrSummary struct {
 	// then, not now, until the next one.
 	Lost bool `json:"lost,omitempty"`
 	// Keys: the bindings of herdr.KeyNames the host's config.toml sets
-	// (read when the watch began), for the shortcut panel's keys.
-	Keys map[string]string `json:"keys,omitempty"`
+	// (read when the watch began), for the shortcut panel's keys; until
+	// read, or if it could not be, KeysUnknown (none are pressed then).
+	Keys        map[string]string `json:"keys,omitempty"`
+	KeysUnknown bool              `json:"keys_unknown,omitempty"`
 }
 
 // agentTimes holds when each pane's agent last changed status, as seen by
@@ -245,17 +247,49 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 		name = "default"
 	}
 	times := s.herdrTimes.of(h, socket)
-	// (Not read: herdr's defaults, as when the file sets none.)
-	kctx, kcancel := context.WithTimeout(ctx, 10*time.Second)
-	keys, _ := herdr.ReadKeys(kctx, sess.Client())
-	kcancel()
+	// The bindings are read beside the watch, not before it: a slow host
+	// holds up no summary. The last summary sent goes again with them.
+	var (
+		mu       sync.Mutex
+		last     *herdrSummary
+		keys     map[string]string
+		keysRead bool
+	)
+	send := func(sum herdrSummary) { // (with mu held: none goes out of order)
+		sum.Keys, sum.KeysUnknown = keys, !keysRead
+		last = &sum
+		if b, err := json.Marshal(sum); err == nil {
+			sess.PublishMeta(b)
+		}
+	}
+	publish := func(sum herdrSummary) {
+		mu.Lock()
+		defer mu.Unlock()
+		send(sum)
+	}
+	go func() {
+		for attempt := 0; attempt < 3 && ctx.Err() == nil; attempt++ {
+			kctx, kcancel := context.WithTimeout(ctx, 10*time.Second)
+			k, err := herdr.ReadKeys(kctx, sess.Client())
+			kcancel()
+			if err == nil {
+				mu.Lock()
+				keys, keysRead = k, true
+				if last != nil {
+					send(*last)
+				}
+				mu.Unlock()
+				return
+			}
+			select {
+			case <-ctx.Done():
+			case <-time.After(time.Duration(attempt+1) * 5 * time.Second):
+			}
+		}
+	}()
 	w := herdr.NewWatcher(sess.Client(), socket,
 		func(snap *herdr.Snapshot) {
-			sum := summarize(name, snap, times, false)
-			sum.Keys = keys
-			if b, err := json.Marshal(sum); err == nil {
-				sess.PublishMeta(b)
-			}
+			publish(summarize(name, snap, times, false))
 		},
 		// (A change is told before the snapshot that has it.)
 		func(tr herdr.Transition) {
@@ -272,10 +306,7 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 		}
 		sum := summarize(name, snap, times, true)
 		sum.Lost = true
-		sum.Keys = keys
-		if b, err := json.Marshal(sum); err == nil {
-			sess.PublishMeta(b)
-		}
+		publish(sum)
 	}
 	w.Run(ctx)
 	s.endSessionAlerts(sess) // (its agents wait no more)

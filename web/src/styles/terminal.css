@@ -224,6 +224,7 @@ html.kb-open .keybar { padding-bottom: 6px; }
   position: absolute; z-index: 30; bottom: calc(100% + 6px);
   left: max(8px, env(safe-area-inset-left, 0px)); right: max(8px, env(safe-area-inset-right, 0px));
   display: flex; flex-direction: column; max-height: min(calc(var(--vv-h, 100dvh) * 0.62), 480px);
+  overflow-y: auto; overscroll-behavior: contain; /* (when even the head and foot do not fit: all of it scrolls) */
   padding: 8px; border-radius: 12px; border: 1px solid var(--term-line);
   background: var(--term-chrome); color: var(--term-fg); box-shadow: var(--shadow-pop);
 }
@@ -238,7 +239,7 @@ html.kb-open .keybar { padding-bottom: 6px; }
 .sc-tab[aria-selected='true'] { background: var(--term-accent-soft); color: var(--term-accent-text); }
 .sc-close { flex: none; }
 /* The groups scroll; the row of the most used stays at the foot, by the key bar. */
-.sc-page { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+.sc-page { flex: 1 1 auto; min-height: 96px; overflow-y: auto; overscroll-behavior: contain; }
 .sc-foot { flex: none; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--term-line); }
 .sc-row {
   display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; touch-action: pan-x;

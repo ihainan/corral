@@ -127,34 +127,43 @@ const keyNames: Record<string, { key: string; label: string }> = {
 for (let i = 1; i <= 12; i++) keyNames['f' + i] = { key: 'F' + i, label: 'F' + i }
 const charNames: Record<string, string> = { minus: '-', plus: '+', space: ' ', equal: '=', comma: ',', period: '.', slash: '/', backslash: '\\' }
 
-// One chord of a herdr binding ("ctrl+b", "shift+t", "?") as keys the way
-// macro.ts takes them, and as shown; null for one it cannot say for sure
-// (shift on a symbol: what it types depends on the keyboard).
+// One chord of a herdr binding ("ctrl+b", "shift+t", "T", "?") as keys the
+// way macro.ts takes them, and as shown; null for one that cannot be sent
+// as herdr reads it: shift on a symbol (what it types depends on the
+// keyboard), or one whose bytes are another key's (Ctrl+I is Tab, Ctrl+Tab
+// is Tab, Shift+Enter would go as Alt+Enter).
 function herdrChord(b: string): { keys: string; label: string } | null {
   const parts = b.split('+')
   let name = parts.pop() ?? ''
   if (name === '' && parts.length && parts[parts.length - 1] === '') (parts.pop(), (name = '+')) // ("ctrl++")
   let ctrl = false, alt = false, shift = false
-  for (const m of parts) {
+  for (const m of parts.map((x) => x.toLowerCase())) {
     if (m === 'ctrl' || m === 'control') ctrl = true
     else if (m === 'alt' || m === 'meta' || m === 'option') alt = true
     else if (m === 'shift') shift = true
     else return null
   }
+  // (herdr reads "T" as Shift+t.)
+  if (/^[A-Z]$/.test(name)) (shift = true), (name = name.toLowerCase())
   const mods = (ctrl ? 'C-' : '') + (alt ? 'M-' : '')
   const shown = (ctrl ? '^' : '') + (alt ? '⌥' : '')
-  const named = keyNames[name]
+  const named = keyNames[name.toLowerCase()]
   if (named) {
-    if (shift && !ctrl && !alt && named.key === 'Tab') return { keys: 'BTab', label: '⇧Tab' }
+    if (named.key === 'Tab') return ctrl || alt ? null : shift ? { keys: 'BTab', label: '⇧Tab' } : { keys: 'Tab', label: 'Tab' }
+    if (named.key === 'Enter' || named.key === 'Esc' || named.key === 'BSpace') return ctrl || alt || shift ? null : { keys: named.key, label: named.label }
     return { keys: mods + (shift ? 'S-' : '') + named.key, label: shown + (shift ? '⇧' : '') + named.label }
   }
-  const ch = charNames[name] ?? name
-  if ([...ch].length !== 1 || /[\x00-\x1f\x7f]/.test(ch)) return null
+  const ch = charNames[name.toLowerCase()] ?? name
+  if ([...ch].length !== 1 || /[\x00-\x20\x7f]/.test(ch)) return ch === ' ' && !ctrl && !alt && !shift ? { keys: '\\ ', label: '␣' } : null
   if (shift && !/^[a-z]$/.test(ch)) return null
   const c = shift ? ch.toUpperCase() : ch
-  if (ctrl) return /^[a-z]$/.test(ch) && !shift ? { keys: mods + ch, label: shown + ch.toUpperCase() } : null
+  // Ctrl: a letter, not one whose control character is another key's (Tab,
+  // Enter, Backspace, newline), nor with Shift; Alt: not the characters
+  // macro.ts reads as its own (quotes, a backslash).
+  if (ctrl && (!/^[a-z]$/.test(ch) || shift || 'ihjm'.includes(ch))) return null
+  if (mods && /["'\\]/.test(c)) return null
   // (Text, a backslash before anything but a letter or digit: see macro.ts.)
-  return { keys: mods ? mods + c : /^[A-Za-z0-9]$/.test(c) ? c : '\\' + c, label: shown + (shift ? '⇧' : '') + (c === ' ' ? '␣' : c) }
+  return { keys: mods ? mods + c : /^[A-Za-z0-9]$/.test(c) ? c : '\\' + c, label: shown + (shift ? '⇧' : '') + (ctrl ? c.toUpperCase() : c) }
 }
 
 // A binding as keys to press and its label; null when unbound (or one
@@ -169,8 +178,9 @@ export function herdrBinding(b: string, prefix: string): { keys: string; label: 
 
 // The herdr page, by this host's bindings: its own actions through its API
 // (the same whatever the keys), the rest as herdr's keys.
-export function herdrGroups(set?: Record<string, string>): ShortcutGroup[] {
-  const bound = (k: HerdrKey | 'prefix') => (set && k in set ? set[k] : herdrDefaults[k])
+export function herdrGroups(set?: Record<string, string>, unknown?: boolean): ShortcutGroup[] {
+  // (Bindings not known, as the host's config could not be read: only the API's actions.)
+  const bound = (k: HerdrKey | 'prefix') => (unknown ? '' : set && k in set ? set[k] : herdrDefaults[k])
   const prefix = bound('prefix') || herdrDefaults.prefix
   const key = (k: HerdrKey, desc: I18nKey): Shortcut[] => {
     const b = herdrBinding(bound(k), prefix)
@@ -208,8 +218,8 @@ export function herdrGroups(set?: Record<string, string>): ShortcutGroup[] {
 }
 
 // A page's groups, and its foot row.
-export function pageGroups(page: PanelPage, herdrKeys?: Record<string, string>): ShortcutGroup[] {
-  return page === 'herdr' ? herdrGroups(herdrKeys) : shortcuts[page]
+export function pageGroups(page: PanelPage, herdrKeys?: Record<string, string>, keysUnknown?: boolean): ShortcutGroup[] {
+  return page === 'herdr' ? herdrGroups(herdrKeys, keysUnknown) : shortcuts[page]
 }
 export function pageCommon(groups: ShortcutGroup[], page: PanelPage): Shortcut[] {
   const all = groups.flatMap((g) => g.items)

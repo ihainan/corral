@@ -17,7 +17,7 @@ import (
 
 // KeysCommand prints herdr's config.toml, at most 64 KiB of it (nothing when
 // there is none). Fixed text.
-const KeysCommand = `sh -c 'f="${XDG_CONFIG_HOME:-$HOME/.config}/herdr/config.toml"; [ -f "$f" ] && head -c 65536 "$f"; exit 0'`
+const KeysCommand = `sh -c 'f="${HERDR_CONFIG_PATH:-${XDG_CONFIG_HOME:-$HOME/.config}/herdr/config.toml}"; [ -f "$f" ] && head -c 65536 "$f"; exit 0'`
 
 const keysLimit = 64 << 10
 
@@ -30,9 +30,9 @@ var KeyNames = map[string]bool{
 	"cycle_pane_previous": true, "last_pane": true, "resize_mode": true,
 }
 
-// A binding as herdr writes them ("prefix+shift+t", "ctrl+b", "prefix+1..9");
-// "" is a binding taken away.
-var keyValue = regexp.MustCompile(`^[a-z0-9+.?\-]{0,40}$`)
+// A binding as herdr writes them ("prefix+shift+t", "prefix+T", "ctrl+b",
+// "prefix+1..9"): printable, no spaces; "" is a binding taken away.
+var keyValue = regexp.MustCompile(`^[!-~]{0,40}$`)
 
 // ReadKeys reads the bindings of KeyNames set in the host's config.toml:
 // none set (or no file) is an empty map, herdr's defaults then apply.
@@ -44,9 +44,10 @@ func ReadKeys(ctx context.Context, c *ssh.Client) (map[string]string, error) {
 	return ParseKeys(string(out)), nil
 }
 
-// ParseKeys takes the [keys] table's string values of KeyNames from a
-// config.toml (an array's first string, if herdr takes several). It reads
-// only that much of TOML; anything else is passed over.
+// ParseKeys takes the [keys] table's values of KeyNames from a config.toml:
+// a string, or an array's first string (herdr takes several). It reads only
+// that much of TOML. A binding it cannot read (a multi-line array, say) is
+// "", left out like one taken away: never herdr's default in its place.
 func ParseKeys(toml string) map[string]string {
 	out := map[string]string{}
 	section := ""
@@ -55,12 +56,14 @@ func ParseKeys(toml string) map[string]string {
 		if line == "" || line[0] == '#' {
 			continue
 		}
+		if line[0] == '[' && !strings.HasPrefix(line, "[[") {
+			// ([keys], [ "keys" ]; not [keys.indexed] or [[keys.command]].)
+			name, _, _ := strings.Cut(line[1:], "]")
+			section = strings.Trim(strings.TrimSpace(name), `"'`)
+			continue
+		}
 		if line[0] == '[' {
-			// ([[keys.command]] and [keys.indexed] are other tables.)
 			section = ""
-			if strings.HasPrefix(line, "[keys]") {
-				section = "keys"
-			}
 			continue
 		}
 		if section != "keys" {
@@ -70,23 +73,30 @@ func ParseKeys(toml string) map[string]string {
 		if !ok {
 			continue
 		}
-		k = strings.Trim(strings.TrimSpace(k), `"`)
+		k = strings.Trim(strings.TrimSpace(k), `"'`)
 		if !KeyNames[k] {
 			continue
 		}
-		v = strings.TrimSpace(v)
-		v = strings.TrimPrefix(v, "[")
-		v = strings.TrimSpace(v)
-		if !strings.HasPrefix(v, `"`) {
-			continue
-		}
-		end := strings.IndexByte(v[1:], '"')
-		if end < 0 {
-			continue
-		}
-		if b := strings.ToLower(v[1 : 1+end]); keyValue.MatchString(b) {
-			out[k] = b
-		}
+		out[k] = firstString(strings.TrimSpace(v))
 	}
 	return out
+}
+
+// firstString is the string a value starts with (after an array's "["),
+// basic or literal; "" for anything else, an empty array too. herdr's
+// bindings never need escapes: one with a backslash is not read either.
+func firstString(v string) string {
+	v = strings.TrimSpace(strings.TrimPrefix(v, "["))
+	if v == "" || (v[0] != '"' && v[0] != '\'') {
+		return ""
+	}
+	end := strings.IndexByte(v[1:], v[0])
+	if end < 0 {
+		return ""
+	}
+	b := v[1 : 1+end]
+	if strings.Contains(b, `\`) || !keyValue.MatchString(b) {
+		return ""
+	}
+	return b
 }
