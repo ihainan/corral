@@ -595,19 +595,30 @@ exec tmux send-keys -t "$p" "$@"`
 // program in front, which asked for them), tmux wraps it when the program
 // asked (paste-buffer -p, its newlines kept with -r).
 //
+// One message at a time to a pane on the host too (a lock folder: the
+// gateway may give up on a send whose script goes on).
+//
 // Exits 3: not that agent in front in that pane now (or, tmux, the pane is
 // not in this session); 4: nothing typed; 5: the text typed, not Enter; 6:
-// typing it failed part way, or may have. Fixed script; the mode, the
+// typing it failed part way, or may have (so does a signal once typing began). Fixed script; the mode, the
 // validated tmux session name, pane id, pid, start, length and the herdr
 // socket (from discovery) are its arguments, the text its input.
 func convoSendCommand(mode, session, pane, socket string, pid, start int64, length int) string {
 	script := `PATH="$HOME/.local/bin:$HOME/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 mode=$1 sess=$2 p=$3 pid=$4 start=$5 len=$6 sock=$7
-b=corral-send-$$
+b=corral-send-$$ typing=0 locked=0
+d=${XDG_RUNTIME_DIR:-/tmp}/corral-send-$(id -u)-$(printf '%s' "$mode-$p" | tr -c 'A-Za-z0-9-' _)
 f=$(mktemp) || exit 4
-trap 'rm -f "$f"; [ "$mode" = tmux ] && tmux delete-buffer -b "$b" 2>/dev/null' EXIT
-trap 'exit 4' HUP INT TERM
+trap 'rm -f "$f"; [ "$locked" = 1 ] && rmdir "$d" 2>/dev/null; [ "$mode" = tmux ] && tmux delete-buffer -b "$b" 2>/dev/null' EXIT
+trap '[ "$typing" = 1 ] && exit 6; exit 4' HUP INT TERM
 cat >"$f" || exit 4
+n=0
+until mkdir "$d" 2>/dev/null; do
+  [ -n "$(find "$d" -maxdepth 0 -mmin +1 2>/dev/null)" ] && { rmdir "$d" 2>/dev/null; continue; }
+  n=$((n + 1)); [ "$n" -ge 100 ] && exit 4
+  sleep 0.1
+done
+locked=1
 [ "$(wc -c <"$f" | tr -d ' ')" = "$len" ] || exit 4
 front() {
   stat=$(tr '\n' ' ' <"/proc/$pid/stat" 2>/dev/null) || return 1
@@ -623,12 +634,16 @@ if [ "$mode" = tmux ]; then
   [ "$(tmux -u display-message -p -t "$p" '#{session_name}' 2>/dev/null)" = "$sess" ] || exit 3
   tmux load-buffer -b "$b" "$f" || exit 4
   front || exit 3
+  typing=1
   tmux paste-buffer -p -r -d -b "$b" -t "$p" || exit 6
   tmux send-keys -t "$p" Enter || exit 5
 else
-  t=$(cat "$f"; printf x); t=${t%x}
+  t=$(cat "$f" && printf x) || exit 4
+  [ "${t%x}" != "$t" ] || exit 4
+  t=${t%x}
   e=$(printf '\033')
   front || exit 3
+  typing=1
   HERDR_SOCKET_PATH=$sock herdr pane send-text "$p" "$e[200~$t$e[201~" >/dev/null 2>&1 || exit 6
   HERDR_SOCKET_PATH=$sock herdr pane send-keys "$p" enter >/dev/null 2>&1 || exit 5
 fi`
@@ -638,14 +653,42 @@ fi`
 
 // convoSending lets one message at a time go to a pane: two typed at once
 // would interleave (one's text, the other's, then both Enters: one message).
-var convoSending sync.Map // session id + pane → chan struct{} (of one)
+// A turn is given back once the host's command has really ended, not when
+// the request gives up; a pane no one is sending to is forgotten.
+var convoSending = paneTurns{m: map[string]*paneTurn{}}
 
-func sendTurn(ctx context.Context, key string) (release func(), ok bool) {
-	ch, _ := convoSending.LoadOrStore(key, make(chan struct{}, 1))
+type paneTurns struct {
+	mu sync.Mutex
+	m  map[string]*paneTurn
+}
+
+type paneTurn struct {
+	ch chan struct{} // (of one: whose turn it is)
+	n  int           // having it or waiting for it
+}
+
+func (p *paneTurns) take(ctx context.Context, key string) (release func(), ok bool) {
+	p.mu.Lock()
+	t := p.m[key]
+	if t == nil {
+		t = &paneTurn{ch: make(chan struct{}, 1)}
+		p.m[key] = t
+	}
+	t.n++
+	p.mu.Unlock()
+	leave := func() {
+		p.mu.Lock()
+		if t.n--; t.n == 0 {
+			delete(p.m, key)
+		}
+		p.mu.Unlock()
+	}
 	select {
-	case ch.(chan struct{}) <- struct{}{}:
-		return func() { <-ch.(chan struct{}) }, true
+	case t.ch <- struct{}{}:
+		var once sync.Once
+		return func() { once.Do(func() { <-t.ch; leave() }) }, true
 	case <-ctx.Done():
+		leave()
 		return nil, false
 	}
 }
@@ -779,16 +822,19 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		}
 		return false
 	}
-	// (A message: one at a time to a pane, from the check to its Enter.)
+	// (A message: one at a time to a pane, from the check to its Enter;
+	// once its command is on its way, given back when that has ended.)
+	turn := func() {}
 	if what == "send" {
-		release, ok := sendTurn(ctx, sess.ID+"\x00"+b.Pane)
+		release, ok := convoSending.take(ctx, sess.ID+"\x00"+b.Pane)
 		if !ok {
 			reason = "busy"
 			writeError(w, http.StatusTooManyRequests, "busy", "another message to this agent is still being sent")
 			return
 		}
-		defer release()
+		turn = release
 	}
+	defer func() { turn() }()
 
 	out, err := sshx.Output(ctx, sess.Client(), convoLocateCommand(sess.Persistence, sess.TmuxSession), convoLocateMax)
 	if errors.Is(err, sshx.ErrBusy) {
@@ -837,8 +883,10 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	}
 	if what == "send" {
 		// The check again and the typing, on the host in one go (see convoSendCommand).
+		release := turn
+		turn = func() {} // (Exec gives it back, once the channel has ended)
 		_, err = sshx.Exec(ctx, sess.Client(), convoSendCommand(sess.Persistence, sess.TmuxSession, b.Pane, socket, b.PID, b.Start, len(text)), 4096,
-			sshx.ExecOptions{Stdin: strings.NewReader(text)})
+			sshx.ExecOptions{Stdin: strings.NewReader(text), Release: release})
 		var exitErr *sshx.ExitError
 		switch {
 		case err == nil:

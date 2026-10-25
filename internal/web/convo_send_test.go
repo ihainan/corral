@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // What may be typed into a pane: text, its line ends made "\n"; never a
@@ -60,7 +62,7 @@ func TestConvoSendCommandChecksFirst(t *testing.T) {
 	run := func(text string, length int, pid, st int64) int {
 		cmd := convoSendCommand("herdr", "", "p1", "/run/x.sock", pid, st, length)
 		c := exec.Command("sh", "-c", cmd) // (as the host runs it)
-		c.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"))
+		c.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"), "XDG_RUNTIME_DIR="+dir)
 		c.Stdin = strings.NewReader(text)
 		err := c.Run()
 		var ee *exec.ExitError
@@ -80,5 +82,40 @@ func TestConvoSendCommandChecksFirst(t *testing.T) {
 	}
 	if _, err := os.Stat(typed); err == nil {
 		t.Error("something was typed")
+	}
+	if locks, _ := filepath.Glob(filepath.Join(dir, "corral-send-*")); len(locks) > 0 {
+		t.Errorf("lock folders left: %v", locks)
+	}
+}
+
+// One message at a time to a pane; a pane given back by all is forgotten,
+// one waited for in vain too.
+func TestPaneTurns(t *testing.T) {
+	p := paneTurns{m: map[string]*paneTurn{}}
+	r1, ok := p.take(context.Background(), "a")
+	if !ok {
+		t.Fatal("first: no turn")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if _, ok := p.take(ctx, "a"); ok {
+		t.Fatal("second while the first has it: a turn")
+	}
+	got := make(chan bool)
+	go func() {
+		_, ok := p.take(context.Background(), "a")
+		got <- ok
+	}()
+	time.Sleep(20 * time.Millisecond)
+	r1()
+	r1() // (once only)
+	if !<-got {
+		t.Fatal("after the first: no turn")
+	}
+	p.mu.Lock()
+	n := p.m["a"].n
+	p.mu.Unlock()
+	if n != 1 {
+		t.Fatalf("holders %d, want 1", n)
 	}
 }
