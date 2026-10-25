@@ -77,7 +77,12 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
     ? entries.find((e) => e.s.id === pick.s && (e.pane ?? '') === (pick.pane ?? '')) ??
       (pick.pane === undefined ? entries.find((e) => e.s.id === pick.s && e.s.meta?.t === 'herdr' && e.pane === e.s.meta.focused_pane) ?? entries.find((e) => e.s.id === pick.s) : undefined)
     : undefined
-  const cur = picked ?? (sessions ? entries[0] : undefined)
+  // One picked that is not in the list for a moment (its session still
+  // running: herdr's summary lost, say) stays shown as last seen.
+  const lastCur = useRef<Entry | undefined>(undefined)
+  const kept = !picked && pick && lastCur.current?.s.id === pick.s && (lastCur.current.pane ?? '') === (pick.pane ?? '') && sessions?.some((x) => x.id === pick.s) ? lastCur.current : undefined
+  const cur = picked ?? kept ?? (sessions ? entries[0] : undefined)
+  lastCur.current = cur
   const choose = (e: Entry) => {
     setPick({ s: e.s.id, pane: e.pane })
     try {
@@ -89,6 +94,23 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
     if (e.pane) q.set('pane', e.pane)
     navigate('/agents?' + q, true)
   }
+  // Shown without being picked (none was, or its session ended): it is the
+  // pick from now on, so the list's order changing does not move the view.
+  useEffect(() => {
+    if (cur && !(pick && pick.s === cur.s.id && (pick.pane ?? '') === (cur.pane ?? ''))) choose(cur)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cur?.key, cur?.s.id])
+  // Back and forward between agents: the address says which.
+  useEffect(() => {
+    const onPop = () => location.pathname === '/agents' && setPick(readPick())
+    window.addEventListener('popstate', onPop)
+    return () => window.removeEventListener('popstate', onPop)
+  }, [])
+  // What was sent to each agent and is not in its log yet, and whether a
+  // message to it is on its way: kept here, so going to another agent and
+  // back loses neither (a second send of the same could follow).
+  const [sentBy, setSentBy] = useState<Record<string, Sent[]>>({})
+  const [sendingBy, setSendingBy] = useState<Record<string, boolean>>({})
 
   // The page's colours and size: the terminal's, and the visible part of
   // the window (the soft keyboard does not shrink the layout viewport on iOS).
@@ -133,7 +155,26 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
         )}
       </div>
     )
-  else body = <AgentChat key={cur.key + ' ' + cur.s.id} cur={cur} entries={entries} all={sessions ?? []} titles={titles.current} onPick={choose} active={active} toast={toast} composerEnter={prefs.composerEnter} />
+  else {
+    const k = cur.key + ' ' + cur.s.id
+    body = (
+      <AgentChat
+        key={k}
+        cur={cur}
+        entries={entries}
+        all={sessions ?? []}
+        titles={titles.current}
+        onPick={choose}
+        active={active}
+        toast={toast}
+        composerEnter={prefs.composerEnter}
+        sent={sentBy[k] ?? []}
+        setSent={(f) => setSentBy((all) => ({ ...all, [k]: f(all[k] ?? []) }))}
+        sending={!!sendingBy[k]}
+        setSending={(v) => setSendingBy((all) => ({ ...all, [k]: v }))}
+      />
+    )
+  }
 
   return (
     <div className={'term-root agents-chat ' + (scheme.dark ? 'dark' : 'light') + (active ? '' : ' inactive')} inert={!active} aria-hidden={active ? undefined : true} style={chromeVars(scheme) as React.CSSProperties} ref={rootRef}>
@@ -154,11 +195,15 @@ type Sent = ConvoPending & { bind: string; after: number; gen: number; at: numbe
 
 // The conversation of one agent, and what is sent to it. Keyed by the
 // agent: nothing of another's (its draft, what was sent, a stop) carries over.
-function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerEnter }: {
+function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerEnter, sent, setSent, sending, setSending }: {
   cur: Entry
   entries: Entry[]
   all: SessionInfo[]
   titles: Map<string, string>
+  sent: Sent[]
+  setSent: (f: (ps: Sent[]) => Sent[]) => void
+  sending: boolean
+  setSending: (v: boolean) => void
   onPick: (e: Entry) => void
   active: boolean
   toast: (s: string, error?: boolean) => void
@@ -182,7 +227,8 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     return { where: row.ws, title, status: row.lost ? 'unknown' : row.status, other: isClaude(row.a.agent) ? undefined : row.a.agent }
   }, [herdr, row, convo.bind, convo.agentStatus, convo.failing, convo.title, convo.entries])
   const bound = convo.status === 'ready' && !!convo.bind && (!herdr || convo.bind.pane === cur.pane)
-  const waits = bound && herdr && !!row && agent?.status === 'blocked' && !agent.other
+  // (The answer card reads the pane's screen: it needs no log read.)
+  const waits = herdr && !!row && agent?.status === 'blocked' && !agent.other
   const working = agent?.status === 'working'
   const bindKey = convo.bind ? `${convo.bind.pane} ${convo.bind.pid} ${convo.bind.start} ${convo.bind.session}` : ''
 
@@ -207,7 +253,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
 
   // Stop and "send now": pressed by the gateway in the agent's pane, for the
   // process the conversation shows; what became of it is said for a while.
-  const [said, setSaid] = useState<{ what: 'stop' | 'now'; text: string; busy: boolean; n: number } | null>(null)
+  const [said, setSaid] = useState<{ what: 'stop' | 'now'; text: string; busy: boolean; n: number; bind: string } | null>(null)
   const saidN = useRef(0)
   useEffect(() => {
     if (!said || said.busy) return
@@ -218,10 +264,11 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     e instanceof ApiError && e.code === 'agent_changed' ? t('convo.stopChanged') : e instanceof ApiError && e.code === 'not_in_front' ? t('convo.notFront') : errorText(e)
   const press = (what: 'stop' | 'now') => {
     const b = convo.bind
-    if (!b || said?.busy) return
+    if (!b || (said?.busy && said.bind === bindKey)) return
     const n = ++saidN.current
-    setSaid({ what, text: t(what === 'stop' ? 'convo.stopping' : 'convo.sendingNow'), busy: true, n })
-    const settle = (text: string) => setSaid({ what, text, busy: false, n })
+    const bind = bindKey // (what becomes of it is of that process: another in the pane shows none of it)
+    setSaid({ what, text: t(what === 'stop' ? 'convo.stopping' : 'convo.sendingNow'), busy: true, n, bind })
+    const settle = (text: string) => setSaid((cur) => (cur?.n === n ? { what, text, busy: false, n, bind } : cur))
     api('POST', `/api/sessions/${sid}/conversation/${what === 'stop' ? 'interrupt' : 'send-now'}`, { pane: b.pane, pid: b.pid, start: b.start, session: b.session })
       .then(() => settle(t(what === 'stop' ? 'convo.stopped' : 'convo.sentNow')))
       .catch((e) => settle(refusal(e)))
@@ -235,14 +282,16 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   const queued = useMemo(() => new Set((convo.queued ?? []).map((q) => norm(q.text))), [convo.queued])
   const queuedRef = useRef(queued)
   queuedRef.current = queued
-  const [sent, setSent] = useState<Sent[]>([])
   const sentN = useRef(0)
   const used = useRef(new Map<string, Set<number>>())
   useEffect(() => {
     if (convo.status !== 'ready' || !sent.some((p) => p.state !== 'sent' && p.bind === bindKey)) return
     const key = bindKey + ' ' + convo.gen
     let u = used.current.get(key)
-    if (!u) used.current.set(key, (u = new Set()))
+    if (!u) {
+      used.current.clear() // (only this reading's turns can confirm one)
+      used.current.set(key, (u = new Set()))
+    }
     const users = convo.entries.filter((e: ConvoEntry) => e.role === 'user')
     let changed = false
     const next = sent.flatMap((p) => {
@@ -254,10 +303,11 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       const hit = users.find((e) => e.seq > p.after && !u.has(e.seq) && afterSend(e, p.at) && sameTurn(e, p.text))
       if (!hit) return [p]
       u.add(hit.seq)
+      if (u.size > 200) for (const q of [...u].sort((a, b) => a - b).slice(0, 100)) u.delete(q)
       changed = true
       return []
     })
-    if (changed) setSent(next)
+    if (changed) setSent(() => next)
   }, [convo.entries, convo.gen, convo.status, sent, bindKey])
   useEffect(() => {
     const waiting = sent.filter((p) => p.state === 'waiting' && !queued.has(norm(p.text)))
@@ -279,7 +329,6 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     keepDraft(draftKey, s)
   }
   const field = useRef<HTMLTextAreaElement>(null)
-  const [sending, setSending] = useState(false)
   const completion = useCompletion({ sessionId: sid, field, draft, setDraft, agent: row?.a.agent ?? 'claude' })
   useEffect(() => {
     const el = field.current
@@ -302,19 +351,23 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     if (blocked || !b) return toast(blocked ?? t('agents.cannotSend'), true)
     const text = expandPastes(draft, 100 << 10)
     if (text === null || new TextEncoder().encode(text).length > 100 << 10) return toast(t('agents.tooLong'), true)
+    const was = draft // (what is typed meanwhile is a new draft: it stays)
     setSending(true)
     const after = convo.entries.length ? convo.entries[convo.entries.length - 1].seq : 0
     const at = Date.now()
     api('POST', `/api/sessions/${sid}/conversation/send`, { pane: b.pane, pid: b.pid, start: b.start, session: b.session, text })
       .then(() => {
-        remember(draft)
-        setDraft('')
-        setSent((ps) => [...ps, { id: ++sentN.current, text, state: 'waiting' as const, bind: bindKey, after, gen: convo.gen, at }].slice(-5))
+        remember(was)
+        if (getDraft(draftKey) === was) {
+          keepDraft(draftKey, '')
+          setDraftState((d) => (d === was ? '' : d))
+        }
+        setSent((ps) => [...ps, { id: Date.now() * 100 + (++sentN.current % 100), text, state: 'waiting' as const, bind: bindKey, after, gen: convo.gen, at }].slice(-5))
       })
       .catch((e) => toast(e instanceof ApiError && e.code === 'unknown' ? t('agents.sendUnknown') : refusal(e), true)) // (the draft stays)
       .finally(() => {
         setSending(false)
-        field.current?.focus()
+        field.current?.focus() // (null once another agent is shown)
       })
   }
   const enterKey = isMac ? 'Return' : 'Enter'
@@ -397,7 +450,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
         ) : undefined
       }
       onStop={canPress ? () => press('stop') : undefined}
-      stop={said?.what === 'stop' ? said.text : undefined}
+      stop={said?.what === 'stop' && said.bind === bindKey ? said.text : undefined}
       side={{ rows }}
       active={active}
       onDismiss={(id) => setSent((ps) => ps.filter((p) => p.id !== id))}
@@ -405,7 +458,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       onCopied={() => toast(t('common.copied'))}
       composer={composer}
       onSendNow={canPress ? () => press('now') : undefined}
-      sendNow={said?.what === 'now' ? said.text : undefined}
+      sendNow={said?.what === 'now' && said.bind === bindKey ? said.text : undefined}
     />
   )
 }

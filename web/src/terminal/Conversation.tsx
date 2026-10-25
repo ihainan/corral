@@ -435,9 +435,7 @@ export function ConversationView({
                 ? t('convo.otherAgent', { agent: agent.other })
                 : t('convo.noAgent')}
         </p>
-        {convo.reason !== 'no_log' && (
-          <button type="button" className="btn btn-ghost" onClick={onShowTerminal}>{t('convo.showTerminal')}</button>
-        )}
+        <button type="button" className="btn btn-ghost" onClick={onShowTerminal}>{t('convo.showTerminal')}</button>
       </div>
     )
   else
@@ -544,7 +542,8 @@ export function ConversationView({
       </div>
       <div className="convo-dock">
         {convo.status === 'ready' && convo.tasks && <Tasks tasks={convo.tasks} fold={!!ask} />}
-        {convo.status === 'ready' && ask && <div className="convo-dock-ask">{ask}</div>}
+        {/* (Asked from the screen: also where its log is not read.) */}
+        {(convo.status === 'ready' || convo.status === 'none') && ask && <div className="convo-dock-ask">{ask}</div>}
         {convo.status === 'ready' && (working || waits) && convo.queued && <Queue items={convo.queued} onSendNow={working ? onSendNow : undefined} said={sendNow} />}
         {waits && !ask && convo.status === 'ready' && (
           // (Where it cannot be answered here: in its terminal.)

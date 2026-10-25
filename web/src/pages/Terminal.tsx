@@ -355,7 +355,11 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
   const forgetReply = (pane: string) => dropParam(id, 'reply', pane)
   // The pane a notification is about (?pane=): herdr is asked to focus it
   // (its workspace and tab too) once this connection's summary has come.
-  const [wantPane, setWantPane] = useState<string | null>(() => (watch ? null : new URLSearchParams(location.search).get('pane')))
+  // (An address from before the agents page, ?convo=1&pane=, is that page's: see below.)
+  const [wantPane, setWantPane] = useState<string | null>(() => {
+    const q = new URLSearchParams(location.search)
+    return watch || q.get('convo') === '1' ? null : q.get('pane')
+  })
   // Tried again with the next summary if herdr did not take it (busy, the
   // connection gone meanwhile), a few times.
   const paneTries = useRef<{ pane: string; n: number; busy: boolean }>({ pane: '', n: 0, busy: false })
@@ -1569,7 +1573,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
     // answer it (?reply=).
     const q = new URLSearchParams(location.search)
     if (!watch && location.pathname === '/t/' + id) {
-      if (q.get('pane')) setWantPane(q.get('pane'))
+      if (q.get('pane') && q.get('convo') !== '1') setWantPane(q.get('pane'))
       if (q.get('reply')) setWantReply(q.get('reply'))
       if (q.get('convo') === '1') {
         // (From before the agents page: there, at that agent.)
