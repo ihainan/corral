@@ -340,7 +340,9 @@ Report security problems privately, not in a public issue: see [SECURITY.md](SEC
   moment is not seen.
 - After a gateway restart, a window's tmux and herdr tabs open again by
   themselves, in their places; one whose host asks for a password each time
-  is not (the window says so), and plain shells end with the gateway.
+  is not (the window says so), and plain shells end with the gateway. Each
+  window keeps its own list: a tab closed in one window while another was
+  hidden or on another page may be opened again there after a restart.
 - The agents page talks to Claude Code only, in tmux or herdr on Linux
   hosts (it finds the process through `/proc`), with its settings in
   `~/.claude` (not a `CLAUDE_CONFIG_DIR` of its own). Only the session's

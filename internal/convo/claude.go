@@ -62,10 +62,12 @@ type Claude struct {
 	trimmed bool              // entries were dropped as old
 	// What the part read said itself (a part before it, put before, says
 	// only what this one did not): a custom title (even cleared), the whole
-	// task list (TodoWrite). Until a whole list is said, the changes made to
-	// it (one task added, one updated) are kept, to be made again over the
-	// list a part before gives.
+	// task list (TodoWrite). The changes made to the list since the last
+	// whole one (one task added, one updated) are kept, to be made again: over
+	// the list a part before gives, until a whole one is said; over that one
+	// (taskBase) once a part before answers a call whose result came after it.
 	myTitleSaid, tasksSaid bool
+	taskBase               []taskItem
 	taskOps                []taskOp
 	taskOpsFull            bool              // more were made than are kept: the list is not made again (see Prepend)
 	late                   map[string]taskOp // (while Prepend pairs results: their changes, to be made in their turn)
@@ -233,14 +235,15 @@ func (c *Claude) Since(rev int) []Entry {
 }
 
 // taskSaid notes a change made to the task list: all of it (whole), or one
-// change kept to be made again (see taskOps), while no whole list is known.
+// change kept to be made again (see taskOps, taskBase).
 // Past maxTaskOps, the changes before are not all known any more: none are.
 func (c *Claude) taskSaid(op taskOp) {
 	if op.whole {
 		c.tasksSaid, c.taskOps, c.taskOpsFull = true, nil, false
+		c.taskBase = append([]taskItem(nil), c.tasks...)
 		return
 	}
-	if c.tasksSaid || c.taskOpsFull {
+	if c.taskOpsFull {
 		return
 	}
 	if len(c.taskOps) >= maxTaskOps {
@@ -296,10 +299,22 @@ func (c *Claude) Prepend(o *Claude) {
 	if !c.myTitleSaid {
 		c.myTitle, c.myTitleSaid = o.myTitle, o.myTitleSaid
 	}
-	if !c.tasksSaid && !c.taskOpsFull {
-		// (Over the list before, the changes made since, in order.)
+	answered := false
+	for _, op := range c.taskOps {
+		if _, ok := late[op.orphan]; ok && op.orphan != "" {
+			answered = true
+			break
+		}
+	}
+	if !c.taskOpsFull && (!c.tasksSaid || answered) {
+		// (Over the list before, or the whole one c's part said, the changes
+		// made since, in order.)
 		ops := c.taskOps
-		c.tasks, c.tasksSaid, c.taskOps, c.taskOpsFull = o.tasks, o.tasksSaid, o.taskOps, o.taskOpsFull
+		if c.tasksSaid {
+			c.tasks, c.taskOps = append([]taskItem(nil), c.taskBase...), nil
+		} else {
+			c.tasks, c.tasksSaid, c.taskBase, c.taskOps, c.taskOpsFull = o.tasks, o.tasksSaid, o.taskBase, o.taskOps, o.taskOpsFull
+		}
 		for _, op := range ops {
 			if l, ok := late[op.orphan]; ok && op.orphan != "" {
 				op = l

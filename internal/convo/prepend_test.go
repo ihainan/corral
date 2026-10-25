@@ -178,3 +178,23 @@ func TestPrependTaskOpsFull(t *testing.T) {
 		t.Fatalf("tasks: %+v", ts)
 	}
 }
+
+// A whole list said in the part between, its result and then a created
+// task's in the part read first: the task created stays, after the list.
+func TestPrependTaskAfterWhole(t *testing.T) {
+	c := NewClaude()
+	c.Feed(lines(
+		`{"type":"user","uuid":"rW","message":{"content":[{"type":"tool_result","tool_use_id":"W","content":"ok"}]}}`,
+		`{"type":"user","uuid":"rX","message":{"content":[{"type":"tool_result","tool_use_id":"X","content":"Task #1 created successfully: Later"}]},"toolUseResult":{"task":{"id":"1","subject":"Later"}}}`,
+	))
+	b := NewClaude()
+	b.Feed(lines(`{"type":"assistant","uuid":"aW","message":{"content":[{"type":"tool_use","id":"W","name":"TodoWrite","input":{"todos":[{"content":"One","status":"completed"}]}}]}}`))
+	c.Prepend(b)
+	a := NewClaude()
+	a.Feed(lines(`{"type":"assistant","uuid":"aX","message":{"content":[{"type":"tool_use","id":"X","name":"TaskCreate","input":{"subject":"Later","description":"d"}}]}}`))
+	c.Prepend(a)
+	ts := c.Tasks()
+	if len(ts) != 2 || ts[0].Subject != "One" || ts[1].Subject != "Later" {
+		t.Fatalf("tasks: %+v", ts)
+	}
+}

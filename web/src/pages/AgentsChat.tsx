@@ -543,6 +543,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
         remember(was)
         if (histPos.current === was) showSent(null) // (an entry sent again: the draft put aside is back)
         else if (getDraft(draftKey) === was) {
+          if (histPos.current !== null) histStash.current = '' // (put aside while it went: it went)
           keepDraft(draftKey, '')
           setDraftShown((d) => (d === undefined || d === was ? '' : d))
         }
