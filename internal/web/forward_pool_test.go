@@ -236,6 +236,9 @@ func TestHerdrSessionIsDiscovered(t *testing.T) {
 	admin := h.admin()
 	srv := h.sshServer(t.TempDir())
 	srv.HandleExec(func(cmd string) func(ssh.Channel) {
+		if cmd == herdr.KeysCommand {
+			return noHerdrConfig // (none: herdr's default keys)
+		}
 		if cmd != herdr.DiscoverCommand {
 			return nil // the terminal itself: the default echoing shell
 		}

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, ChevronLeft, ChevronRight, Columns2, LayoutGrid, Maximize2, Plus, Rows2, SquareX, X } from 'lucide-react'
 import { t } from '../i18n'
 import { keysInUse } from '../components/ui'
-import { pageTitles, shortcuts, type HerdrAct, type PanelPage, type Shortcut } from './shortcuts'
+import { pageCommon, pageGroups, pageTitles, type HerdrAct, type PanelPage, type Shortcut } from './shortcuts'
 
 const icons: Partial<Record<HerdrAct, typeof Plus>> = {
   new_workspace: LayoutGrid, new_tab: Plus, split_right: Columns2, split_down: Rows2, zoom_toggle: Maximize2,
@@ -22,7 +22,7 @@ export function lastPanelPage(): string | null {
 // Above the key bar, over the terminal. A press on its buttons takes no
 // focus, so an on-screen keyboard that is up stays up (keys still reach
 // them: Tab, Enter); a pick closes it, as do Escape and a press outside.
-export function ShortcutPanel(p: { pages: PanelPage[]; open: PanelPage; onPick: (s: Shortcut) => void; onClose: () => void }) {
+export function ShortcutPanel(p: { pages: PanelPage[]; open: PanelPage; herdrKeys?: Record<string, string>; onPick: (s: Shortcut) => void; onClose: () => void }) {
   const [page, setPage] = useState<PanelPage>(p.open)
   const ref = useRef<HTMLDivElement>(null)
   const { onClose } = p
@@ -65,6 +65,17 @@ export function ShortcutPanel(p: { pages: PanelPage[]; open: PanelPage; onPick: 
     }
   }
   const keep = (e: React.MouseEvent) => e.preventDefault() // (focus stays where it is)
+  const groups = pageGroups(page, p.herdrKeys)
+  const foot = pageCommon(groups, page)
+  const item = (s: Shortcut, i: number) => {
+    const Icon = 'herdr' in s ? icons[s.herdr] : undefined
+    return (
+      <button key={i} type="button" className="sc-item" onMouseDown={keep} onClick={() => p.onPick(s)}>
+        <span className="sc-label">{s.label || (Icon && <Icon size={16} aria-hidden="true" />)}</span>
+        <span className="sc-desc">{t(s.desc)}</span>
+      </button>
+    )
+  }
   return (
     <div ref={ref} className="sc-panel" role="dialog" aria-label={t('sc.title')}>
       <div className="sc-head">
@@ -80,23 +91,19 @@ export function ShortcutPanel(p: { pages: PanelPage[]; open: PanelPage; onPick: 
         </button>
       </div>
       <div className="sc-page" role="tabpanel" aria-label={pageTitles[page]}>
-        {shortcuts[page].map((g) => (
+        {groups.map((g) => (
           <section key={g.title} className="sc-group" aria-label={t(g.title)}>
             <h3 className="sc-group-title">{t(g.title)}</h3>
-            <div className="sc-grid">
-              {g.items.map((s, i) => {
-                const Icon = 'herdr' in s ? icons[s.herdr] : undefined
-                return (
-                  <button key={i} type="button" className="sc-item" onMouseDown={keep} onClick={() => p.onPick(s)}>
-                    <span className="sc-label">{s.label || (Icon && <Icon size={16} aria-hidden="true" />)}</span>
-                    <span className="sc-desc">{t(s.desc)}</span>
-                  </button>
-                )
-              })}
-            </div>
+            <div className="sc-grid">{g.items.map(item)}</div>
           </section>
         ))}
       </div>
+      {foot.length > 0 && (
+        <section className="sc-foot" aria-label={t('sc.gCommon')}>
+          <h3 className="sc-group-title">{t('sc.gCommon')}</h3>
+          <div className="sc-row">{foot.map(item)}</div>
+        </section>
+      )}
     </div>
   )
 }

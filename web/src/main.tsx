@@ -39,6 +39,8 @@ if ('serviceWorker' in navigator && location.protocol === 'https:') {
     const de = document.documentElement.style
     de.setProperty('--vv-h', `${Math.round(h)}px`)
     de.setProperty('--vv-top', keyboardUp && vv ? `${Math.round(vv.offsetTop)}px` : '0px')
+    // (The key bar then sits on the keyboard: no room kept for the home indicator.)
+    document.documentElement.classList.toggle('kb-open', keyboardUp)
   }
   apply()
   vv?.addEventListener('resize', apply)

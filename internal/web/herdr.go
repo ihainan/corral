@@ -59,6 +59,9 @@ type herdrSummary struct {
 	// Lost: the gateway lost herdr after this summary; it is what was so
 	// then, not now, until the next one.
 	Lost bool `json:"lost,omitempty"`
+	// Keys: the bindings of herdr.KeyNames the host's config.toml sets
+	// (read when the watch began), for the shortcut panel's keys.
+	Keys map[string]string `json:"keys,omitempty"`
 }
 
 // agentTimes holds when each pane's agent last changed status, as seen by
@@ -242,9 +245,15 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 		name = "default"
 	}
 	times := s.herdrTimes.of(h, socket)
+	// (Not read: herdr's defaults, as when the file sets none.)
+	kctx, kcancel := context.WithTimeout(ctx, 10*time.Second)
+	keys, _ := herdr.ReadKeys(kctx, sess.Client())
+	kcancel()
 	w := herdr.NewWatcher(sess.Client(), socket,
 		func(snap *herdr.Snapshot) {
-			if b, err := json.Marshal(summarize(name, snap, times, false)); err == nil {
+			sum := summarize(name, snap, times, false)
+			sum.Keys = keys
+			if b, err := json.Marshal(sum); err == nil {
 				sess.PublishMeta(b)
 			}
 		},
@@ -263,6 +272,7 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 		}
 		sum := summarize(name, snap, times, true)
 		sum.Lost = true
+		sum.Keys = keys
 		if b, err := json.Marshal(sum); err == nil {
 			sess.PublishMeta(b)
 		}

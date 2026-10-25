@@ -116,12 +116,21 @@ func (f *fakeHerdr) typed() []map[string]any {
 	return append([]map[string]any(nil), f.sent...)
 }
 
+// noHerdrConfig answers the read of herdr's config.toml on a host that has none.
+func noHerdrConfig(ch ssh.Channel) {
+	ch.CloseWrite()
+	ch.SendRequest("exit-status", false, []byte{0, 0, 0, 0})
+}
+
 // herdrReplyEnv opens a herdr session of admin's on a host whose herdr is
 // hd, and returns the base path of pane w1:p1's endpoints and the session.
 func herdrReplyEnv(t *testing.T, h *harness, admin *client, hd *fakeHerdr) (base, id string) {
 	t.Helper()
 	srv := h.sshServer(t.TempDir())
 	srv.HandleExec(func(cmd string) func(ssh.Channel) {
+		if cmd == herdr.KeysCommand {
+			return noHerdrConfig // (none: herdr's default keys)
+		}
 		if cmd != herdr.DiscoverCommand {
 			return nil
 		}

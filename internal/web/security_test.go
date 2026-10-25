@@ -317,6 +317,7 @@ func TestRemoteExecCallSitesAreReviewed(t *testing.T) {
 		"term/manager.go: err = sess.Start(HerdrCommand(opt.HerdrSession))":                           true,
 		"web/api_sessions.go: sess, err := s.terms.Start(ctx, res, u.ID, h.ID, h.Name, client, opts)": true,
 		"herdr/client.go: out, err := sshx.Output(ctx, c, DiscoverCommand, sshx.MaxOutput)":           true,
+		"herdr/keys.go: out, err := sshx.Output(ctx, c, KeysCommand, keysLimit)":                      true, // fixed text, no input
 		"web/herdr.go: w.Run(ctx)": true, // watcher loop, runs no remote command itself
 		"web/ports.go: out, err := sshx.Output(ctx, c, listenCommand, sshx.MaxOutput)":                                                             true,
 		`sshx/exec.go: ok, err := ch.SendRequest("exec", true, ssh.Marshal(&struct{ Command string }{cmd}))`:                                       true, // Output's and Exec's own exec; their callers are listed here

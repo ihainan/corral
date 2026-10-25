@@ -283,6 +283,7 @@ export interface HerdrSummary {
   focused_agent?: string // the agent in the focused pane ("claude", "codex"…)
   focused_pane?: string
   lost?: boolean // the gateway lost herdr after this: it is what was so then
+  keys?: Record<string, string> // bindings the host's herdr config sets (the shortcut panel's)
 }
 
 export interface Forward {

@@ -46,6 +46,13 @@ html.term-mode body { position: fixed; inset: 0; }
   background: var(--term-bg); border-bottom: 1px solid var(--term-line);
 }
 @media (pointer: fine) { .term-bar { height: calc(40px + env(safe-area-inset-top, 0px)); } }
+/* A phone with its keyboard up and the terminal in front: the top bar folds
+   away, its rows go to the terminal (a TUI's input box needs them: Claude
+   Code in ten rows shows two lines of what is typed). */
+@media (max-width: 599.98px) and (pointer: coarse) {
+  html.kb-open .term-root:not(.is-convo) .term-bar { height: env(safe-area-inset-top, 0px); border-bottom: 0; overflow: hidden; }
+  html.kb-open .term-root:not(.is-convo) .term-bar > * { display: none; }
+}
 .term-title {
   min-width: 0; max-width: 60%; display: flex; flex-direction: column; align-items: flex-start; gap: 1px;
   padding: 3px 8px; border: 0; border-radius: var(--r); background: none; color: inherit; cursor: pointer; text-align: left;
@@ -216,11 +223,11 @@ html.kb-open .keybar { padding-bottom: 6px; }
 .sc-panel {
   position: absolute; z-index: 30; bottom: calc(100% + 6px);
   left: max(8px, env(safe-area-inset-left, 0px)); right: max(8px, env(safe-area-inset-right, 0px));
-  max-height: min(52vh, 380px); overflow-y: auto; overscroll-behavior: contain;
+  display: flex; flex-direction: column; max-height: min(calc(var(--vv-h, 100dvh) * 0.62), 480px);
   padding: 8px; border-radius: 12px; border: 1px solid var(--term-line);
   background: var(--term-chrome); color: var(--term-fg); box-shadow: var(--shadow-pop);
 }
-.sc-head { display: flex; align-items: center; gap: 8px; padding-bottom: 8px; margin-bottom: 10px; border-bottom: 1px solid var(--term-line); }
+.sc-head { flex: none; display: flex; align-items: center; gap: 8px; padding-bottom: 8px; margin-bottom: 10px; border-bottom: 1px solid var(--term-line); }
 .sc-tabs { flex: 1; min-width: 0; display: flex; gap: 2px; overflow-x: auto; scrollbar-width: none; }
 .sc-tabs::-webkit-scrollbar { display: none; }
 .sc-tab {
@@ -230,6 +237,16 @@ html.kb-open .keybar { padding-bottom: 6px; }
 .sc-tab:hover { color: var(--term-fg); }
 .sc-tab[aria-selected='true'] { background: var(--term-accent-soft); color: var(--term-accent-text); }
 .sc-close { flex: none; }
+/* The groups scroll; the row of the most used stays at the foot, by the key bar. */
+.sc-page { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+.sc-foot { flex: none; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--term-line); }
+.sc-row {
+  display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; touch-action: pan-x;
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 16px), transparent);
+  mask-image: linear-gradient(to right, #000 calc(100% - 16px), transparent);
+}
+.sc-row::-webkit-scrollbar { display: none; }
+.sc-row .sc-item { flex: 1 0 96px; }
 .sc-group + .sc-group { margin-top: 12px; }
 .sc-group-title { margin: 0 0 6px 2px; font: 600 12px/16px var(--font-ui); color: var(--term-fg-3); }
 .sc-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(100px, 1fr)); gap: 6px; }

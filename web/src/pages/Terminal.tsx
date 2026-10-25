@@ -2899,7 +2899,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
 
   return (
     <div
-      className={'term-root ' + (scheme.dark ? 'dark' : 'light') + (active ? '' : ' inactive')}
+      className={'term-root ' + (scheme.dark ? 'dark' : 'light') + (active ? '' : ' inactive') + (showConvo ? ' is-convo' : '')}
       inert={!active}
       aria-hidden={active ? undefined : true}
       style={chromeVars(scheme) as React.CSSProperties}
@@ -3147,6 +3147,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
                 shortcutsOpen && active && (
                   <ShortcutPanel
                     {...panelPages(info?.persistence, herdr?.focused_agent, lastPanelPage())}
+                    herdrKeys={herdr?.keys}
                     onPick={(s) => void pickShortcut(s)}
                     onClose={closeShortcuts}
                   />
