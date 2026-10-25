@@ -16,16 +16,19 @@ import type { Convo, ConvoEntry, ConvoHunk, ConvoMeta, ConvoPart, ConvoQueued, C
 // reads. The composer (Terminal.tsx's) sits under the thread, in its column,
 // with what the session runs with under it.
 
-// What a turn's work holds: its steps, the text it wrote between them, the
-// notes that came meanwhile.
+// What a turn holds: its steps, the text it wrote between them, the notes
+// that came meanwhile.
 type Step = ConvoPart | ConvoEntry
 
 type Item =
   | { kind: 'user'; e: ConvoEntry }
   | { kind: 'note'; e: ConvoEntry }
   | { kind: 'summary'; e: ConvoEntry }
-  | { kind: 'work'; key: string; steps: Step[]; from?: string; to?: string; live: boolean; moving: boolean; busy?: ConvoPart }
-  | { kind: 'answer'; key: string; text: string; truncated?: boolean; ts?: string; work?: string; edits: Edits | null }
+  // A run of steps (calls and thinking) between what the agent wrote: one line, opened on demand.
+  | { kind: 'work'; key: string; steps: Step[]; live: boolean; moving: boolean; busy?: ConvoPart }
+  // What the agent wrote between its steps: shown as it is, as its answer is.
+  | { kind: 'text'; key: string; text: string; truncated?: boolean }
+  | { kind: 'answer'; key: string; text: string; truncated?: boolean; ts?: string; span?: number; edits: Edits | null }
 
 // What a turn changed: its files in the order it first changed them, each
 // with its edits.
@@ -44,10 +47,12 @@ interface FileEdits {
 // When each part was written (its entry's time).
 const partTime = new WeakMap<ConvoPart, string>()
 
-// items groups the entries by turn. live: the last turn goes on (the agent
-// works, or waits for an answer), so all of it is work; moving: it works
-// (a step is under way). A turn's answer is the text it ends with (notes
-// after it come after it); a turn that ends in a step has none.
+// items groups the entries by turn, and a turn into what the agent wrote
+// (shown) and the runs of steps between (a line each). live: the last turn
+// goes on (the agent works, or waits for an answer): it has no answer yet,
+// its last run is the one going on; moving: it works (a step is under way).
+// A turn's answer is the text it ends with (notes after it come after it);
+// a turn that ends in a step has none.
 // A message the person sent while the agent worked, taken in during the
 // turn (mid), is the turn's: it shows after the turn's work, before its
 // answer, and does not end the turn.
@@ -66,11 +71,38 @@ function items(entries: ConvoEntry[], live: boolean, moving: boolean): Item[] {
       while (a > 0 && isText(steps[a - 1])) a--
     }
     const answer = steps.slice(a, tail) as ConvoPart[]
-    // (A task call that failed stays: its error is to be seen.)
-    const work = steps.slice(0, a).filter((s) => !isTaskCall(s) || (s as ConvoPart).tool!.error)
-    const doing = work.some((s) => !isNote(s))
-    if (doing) out.push({ kind: 'work', key, steps: work, from, to, live: last && live, moving: last && moving, busy: last && moving ? underWay(steps) : undefined })
-    else for (const s of work) out.push(isNote(s) ? noteItem(s) : { kind: 'answer', key: key + '.' + out.length, text: s.text ?? '', truncated: s.truncated, ts: partTime.get(s), edits: null })
+    // (A task call that failed stays: its error is to be seen. Thinking
+    // with nothing in it, as Claude Code mostly logs it, is not a step.)
+    const work = steps.slice(0, a).filter((s) => (!isTaskCall(s) || (s as ConvoPart).tool!.error) && !(!isNote(s) && s.kind === 'thinking' && !s.text?.trim()))
+    const doing = work.some((s) => !isNote(s) && s.kind !== 'text')
+    const goesOn = last && live
+    if (doing || (goesOn && moving)) {
+      let run: Step[] = []
+      let at = 0
+      const flush = () => {
+        if (run.length) out.push({ kind: 'work', key: key + '.g' + at, steps: run, live: false, moving: false })
+        run = []
+      }
+      work.forEach((s, i) => {
+        if (isNote(s)) {
+          flush()
+          out.push(noteItem(s))
+        } else if (s.kind === 'text') {
+          flush()
+          out.push({ kind: 'text', key: key + '.x' + i, text: s.text ?? '', truncated: s.truncated })
+        } else {
+          if (!run.length) at = i
+          run.push(s)
+        }
+      })
+      // The run going on: the last, or (what it wrote last, and it works on) a new one.
+      if (goesOn && (run.length || moving)) {
+        if (!run.length) at = work.length
+        out.push({ kind: 'work', key: key + '.g' + at, steps: run, live: true, moving, busy: moving ? underWay(steps) : undefined })
+        run = []
+      }
+      flush()
+    } else for (const s of work) out.push(isNote(s) ? noteItem(s) : { kind: 'answer', key: key + '.' + out.length, text: s.text ?? '', truncated: s.truncated, ts: partTime.get(s), edits: null })
     for (const e of mids) out.push({ kind: 'user', e })
     if (answer.length)
       out.push({
@@ -79,7 +111,7 @@ function items(entries: ConvoEntry[], live: boolean, moving: boolean): Item[] {
         text: answer.map((p) => p.text ?? '').join('\n\n'),
         truncated: answer.some((p) => p.truncated),
         ts: partTime.get(answer[answer.length - 1]),
-        work: doing ? key : undefined,
+        span: doing && from && to && ms(to) >= ms(from) ? ms(to) - ms(from) : undefined,
         edits: edits(work),
       })
     for (const s of steps.slice(tail)) out.push(noteItem(s as ConvoEntry))
@@ -444,7 +476,7 @@ export function ConversationView({
         {convo.older && <p className="convo-older">{t('convo.older')}</p>}
         {list.map((it) => (
           <ListItem
-            key={it.kind === 'work' || it.kind === 'answer' ? it.key : it.e.seq}
+            key={it.kind === 'work' || it.kind === 'answer' || it.kind === 'text' ? it.key : it.e.seq}
             it={it}
             copy={copy}
             open={it.kind === 'work' ? (opened[it.key] ?? allOpen) : false}
@@ -859,6 +891,13 @@ const ListItem = memo(
         )
       case 'answer':
         return <Answer it={it} onCopy={copy} onShow={onShow} />
+      case 'text':
+        return (
+          <div className="convo-md convo-mid">
+            <Markdown text={it.text} onCopyCode={copy} copyLabel={t('common.copy')} />
+            {it.truncated && <p className="convo-cut">{t('convo.cut')}</p>}
+          </div>
+        )
       case 'work':
         return <Work it={it} open={open} onToggle={onToggle} onCopy={copy} />
     }
@@ -871,11 +910,15 @@ function sameItem(a: Item, b: Item): boolean {
   switch (a.kind) {
     case 'answer': {
       const o = b as typeof a
-      return a.text === o.text && a.truncated === o.truncated && a.ts === o.ts && a.work === o.work && sameEdits(a.edits, o.edits)
+      return a.text === o.text && a.truncated === o.truncated && a.ts === o.ts && a.span === o.span && sameEdits(a.edits, o.edits)
+    }
+    case 'text': {
+      const o = b as typeof a
+      return a.text === o.text && a.truncated === o.truncated
     }
     case 'work': {
       const o = b as typeof a
-      return a.live === o.live && a.moving === o.moving && a.busy === o.busy && a.from === o.from && a.to === o.to && a.steps.length === o.steps.length && a.steps.every((p, i) => p === o.steps[i])
+      return a.live === o.live && a.moving === o.moving && a.busy === o.busy && a.steps.length === o.steps.length && a.steps.every((p, i) => p === o.steps[i])
     }
     default:
       return a.e === (b as typeof a).e
@@ -966,6 +1009,7 @@ function Answer({ it, onCopy, onShow }: { it: Extract<Item, { kind: 'answer' }>;
         <button type="button" className="link-btn" onClick={() => onCopy(it.text)}>
           {t('common.copy')}
         </button>
+        {it.span !== undefined && <span>{t('convo.worked', { d: duration(it.span) })}</span>}
         <span>{clock(it.ts)}</span>
       </div>
     </div>
@@ -982,8 +1026,9 @@ function LineCounts({ add, del }: { add: number; del: number }) {
   )
 }
 
-// A turn's work: one line (how long, what it did), open while it goes on;
-// opened, a grey line a step, the one under way last.
+// A run of steps between what the agent wrote: one line (what it did; while
+// it goes on, the step under way and for how long); opened, a line a step,
+// each opened on its own (a call's command, output and changes, a thought).
 function Work({ it, open, onToggle, onCopy }: { it: Extract<Item, { kind: 'work' }>; open: boolean; onToggle: (key: string, open: boolean) => void; onCopy: (s: string) => void }) {
   const tools = it.steps.flatMap((s) => (!isNote(s) && s.tool ? [s.tool] : []))
   const counts = new Map<Category, number>()
@@ -996,8 +1041,9 @@ function Work({ it, open, onToggle, onCopy }: { it: Extract<Item, { kind: 'work'
   const failed = tools.filter((tl) => tl.error).length
   const busy = it.busy
   const now = useTick(!!busy)
-  const span = ms(it.to) - ms(it.from)
-  const head = it.live ? t('convo.workingNow') : it.from && span >= 0 && ms(it.to) ? t('convo.worked', { d: duration(span) }) : t('convo.steps')
+  // (Of thinking only: that it thought, and the start of it.)
+  const thought = !tools.length ? it.steps.find((x): x is ConvoPart => !isNote(x) && x.kind === 'thinking') : undefined
+  const head = sum ? '' : thought ? t('convo.thinking') : it.live ? t('convo.workingNow') : t('convo.steps')
   // While a step is under way, the line says it (what it runs, for how long);
   // the counts come back once it is done.
   const since = busy && partTime.has(busy) ? ms(partTime.get(busy)) : 0
@@ -1011,9 +1057,9 @@ function Work({ it, open, onToggle, onCopy }: { it: Extract<Item, { kind: 'work'
             {since > 0 && now >= since && <span className="convo-live-time">{duration(now - since)}</span>}
           </span>
         ) : (
-          <span className="convo-work-text">
-            {head}
-            {sum && <span className="convo-work-sum"> · {sum}</span>}
+          <span className={'convo-work-text' + (thought ? ' is-thought' : '')}>
+            {head || sum}
+            {thought && <span className="convo-work-sum"> · {firstLine(thought.text ?? '')}</span>}
             {failed > 0 && <span className="convo-failed">{t('convo.failed', { n: failed })}</span>}
           </span>
         )}
@@ -1031,11 +1077,7 @@ function Work({ it, open, onToggle, onCopy }: { it: Extract<Item, { kind: 'work'
               <ToolRow key={i} tool={s.tool} onCopy={onCopy} live={s === busy} />
             ) : s.kind === 'thinking' ? (
               <Thinking key={i} text={s.text ?? ''} live={s === busy} />
-            ) : (
-              <div key={i} className="convo-md convo-mid">
-                <Markdown text={s.text ?? ''} onCopyCode={onCopy} copyLabel={t('common.copy')} />
-              </div>
-            ),
+            ) : null,
           )}
         </div>
       )}
@@ -1059,7 +1101,10 @@ function shortPath(p: string): string {
 function object(tool: ConvoTool): { text: string; code: boolean } {
   const v = verbOf(tool.name)
   const d = firstLine(tool.detail ?? '')
-  if (v === 'cmd' && d) return { text: d, code: true } // (the command itself; what it is for, on hover)
+  // A command: what it is for, as Claude Code says it; else the command,
+  // without the "cd <folder> &&" that begins many alike (all of it opened).
+  if (v === 'cmd' && tool.title) return { text: tool.title, code: false }
+  if (v === 'cmd' && d) return { text: d.replace(/^cd\s+(?:"[^"]*"|'[^']*'|\S+)\s*&&\s*/, ''), code: true }
   if (tool.title) return { text: tool.title, code: false }
   if (v === 'read' || v === 'edit' || v === 'write') return { text: shortPath(d), code: true }
   return { text: d, code: v === 'cmd' || v === 'search' || v === 'web' }
@@ -1075,7 +1120,7 @@ function Thinking({ text, live }: { text: string; live?: boolean }) {
   const [open, setOpen] = useState(false)
   if (live) return null // (said under the steps, as the step under way)
   return (
-    <div className="convo-step">
+    <div className="convo-step is-thought">
       <button type="button" className="convo-step-head" aria-expanded={open} onClick={() => setOpen(!open)}>
         <span className="convo-step-verb">{t('convo.thinking')}</span>
         {!open && <span className="convo-step-obj">{firstLine(text)}</span>}
@@ -1103,7 +1148,7 @@ function ToolRow({ tool, onCopy, live }: { tool: ConvoTool; onCopy: (s: string) 
   // lines or longer than a line holds (it shows the first), a subagent's
   // prompt. A file's path is on the line and in its tooltip.
   const d = tool.detail ?? ''
-  const more = cat === 'cmd' ? clipped || d.includes('\n') || d.length > 80 : cat !== 'edit' && cat !== 'read' && !!d && (!!tool.title || d.includes('\n') || d.length > 60)
+  const more = cat === 'cmd' ? !!tool.title || clipped || d.includes('\n') || d.length > 80 || obj.text !== d : cat !== 'edit' && cat !== 'read' && !!d && (!!tool.title || d.includes('\n') || d.length > 60)
   // An edit that went through says so to the model ("The file … has been
   // updated"): nothing for the person. What it changed shows instead (not
   // for a notebook's: its result is all there is of it).
@@ -1124,8 +1169,7 @@ function ToolRow({ tool, onCopy, live }: { tool: ConvoTool; onCopy: (s: string) 
         title={cat === 'cmd' ? firstLine(d) : d || tool.title}
       >
         <span className="convo-step-verb">{v ? t(`convo.v.${v}` as I18nKey) : tool.name}</span>
-        <span ref={objRef} className={'convo-step-obj' + (obj.code ? ' is-code' : '')}>{v === 'cmd' ? <Code text={obj.text} lang="bash" /> : obj.text}</span>
-        {cat === 'cmd' && tool.title && <span className="convo-step-desc">{tool.title}</span>}
+        <span ref={objRef} className={'convo-step-obj' + (obj.code ? ' is-code' : '')}>{v === 'cmd' && obj.code ? <Code text={obj.text} lang="bash" /> : obj.text}</span>
         {cat === 'edit' && <LineCounts add={tool.add ?? 0} del={tool.del ?? 0} />}
         {tool.error && <span className="convo-failed">{code ? t('convo.exitCode', { n: code }) : t('convo.toolFailed')}</span>}
       </button>

@@ -517,11 +517,15 @@ html.term-dark .overlay, html.term-dark .menu, html.term-dark .toast {
 .convo-step-verb { flex: none; color: var(--term-fg); font-weight: 500; }
 .convo-step-obj { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .convo-step-obj.is-code { font-family: var(--font-mono); font-size: 12.5px; }
-.convo-step-desc { flex: 0 10000 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--term-fg-3); font-size: 13px; }
 .convo-work-text.is-live { display: flex; align-items: baseline; gap: 8px; min-width: 0; color: var(--term-fg-2); }
 .convo-step-body, .convo-thinking { padding: 4px 0 10px; }
 .convo-thinking { white-space: pre-wrap; font-size: 13.5px; color: var(--term-fg-2); }
-.convo-mid { margin: 4px 0 6px; font-size: 14px; color: var(--term-fg-2); }
+/* What the agent wrote between its steps: as its answer is. */
+.convo-mid { margin: 0; }
+/* Thinking: told apart from calls (lighter, slanted), in a run's line and as a step. */
+.convo-work-text.is-thought, .convo-step.is-thought .convo-step-head { font-style: italic; color: var(--term-fg-3); }
+.convo-step.is-thought .convo-step-verb { color: var(--term-fg-3); font-weight: 400; }
+.convo-thinking { font-style: italic; color: var(--term-fg-3); }
 .convo-work-body > .convo-note { margin: 4px 0; }
 .convo-lines { flex: none; display: inline-flex; gap: 5px; font-family: var(--font-mono); font-size: 12.5px; }
 .convo-lines-add { color: var(--term-ok-text); }

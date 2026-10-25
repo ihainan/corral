@@ -560,7 +560,9 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
       disableStdin: watch, // keys typed while watching go nowhere
       fontFamily: FONT_STACK,
       fontSize: p.fontSize,
-      lineHeight: isTouch ? 1.2 : 1.25,
+      // (JetBrains Mono's own line is 1.32 of its size, more than most
+      // terminal fonts: little is added, or a phone shows a fifth fewer rows.)
+      lineHeight: isTouch ? 1.0 : 1.1,
       cursorBlink: true,
       scrollback: 10000,
       allowProposedApi: true,
