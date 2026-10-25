@@ -583,21 +583,71 @@ exec tmux send-keys -t "$p" "$@"`
 	return cmd
 }
 
-// tmuxSendCommand types the text on its input into one tmux pane, as a
-// paste (bracketed if the program asked for it, its newlines kept: a
-// coding agent takes them as new lines, not as sending), then presses
-// Enter. As tmuxKeysCommand, only if that pane is in the named session:
-// else it exits 3. 4: the text did not go in; 5: it did, Enter did not.
-// Fixed script; the validated session name and pane id are its only
-// arguments, the text comes on its input.
-func tmuxSendCommand(session, pane string) string {
-	script := `PATH="$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
-[ "$(tmux -u display-message -p -t "$2" '#{session_name}' 2>/dev/null)" = "$1" ] || exit 3
+// convoSendCommand types the text on its input into the agent's pane and
+// presses Enter, on the host, in one go: just before typing it checks again
+// that the process asked for (pid, its start in clock ticks) is still the
+// one in front on its terminal, and in that pane (its HERDR_PANE_ID or
+// TMUX_PANE): the gateway's own check came a moment before, and text and
+// Enter reaching a shell would run as a command. The text is read whole
+// first (its length in bytes must be as said: a cut short input types
+// nothing) and goes in as one bracketed paste, so its newlines and tabs are
+// text, not keys: herdr types it as given (the markers included, for the
+// program in front, which asked for them), tmux wraps it when the program
+// asked (paste-buffer -p, its newlines kept with -r).
+//
+// Exits 3: not that agent in front in that pane now (or, tmux, the pane is
+// not in this session); 4: nothing typed; 5: the text typed, not Enter; 6:
+// typing it failed part way, or may have. Fixed script; the mode, the
+// validated tmux session name, pane id, pid, start, length and the herdr
+// socket (from discovery) are its arguments, the text its input.
+func convoSendCommand(mode, session, pane, socket string, pid, start int64, length int) string {
+	script := `PATH="$HOME/.local/bin:$HOME/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+mode=$1 sess=$2 p=$3 pid=$4 start=$5 len=$6 sock=$7
 b=corral-send-$$
-tmux load-buffer -b "$b" - || exit 4
-tmux paste-buffer -p -r -d -b "$b" -t "$2" || { tmux delete-buffer -b "$b" 2>/dev/null; exit 4; }
-tmux send-keys -t "$2" Enter || exit 5`
-	return "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(session) + " " + sshx.QuoteShell(pane)
+f=$(mktemp) || exit 4
+trap 'rm -f "$f"; [ "$mode" = tmux ] && tmux delete-buffer -b "$b" 2>/dev/null' EXIT
+trap 'exit 4' HUP INT TERM
+cat >"$f" || exit 4
+[ "$(wc -c <"$f" | tr -d ' ')" = "$len" ] || exit 4
+front() {
+  stat=$(tr '\n' ' ' <"/proc/$pid/stat" 2>/dev/null) || return 1
+  rest=${stat##*) }
+  [ "$(printf '%s' "$rest" | cut -d' ' -f20)" = "$start" ] || return 1
+  pgrp=$(printf '%s' "$rest" | cut -d' ' -f3); tpgid=$(printf '%s' "$rest" | cut -d' ' -f6)
+  [ -n "$pgrp" ] && [ "$pgrp" = "$tpgid" ] || return 1
+  if [ "$mode" = tmux ]; then k=TMUX_PANE; else k=HERDR_PANE_ID; fi
+  tr '\0' '\n' <"/proc/$pid/environ" 2>/dev/null | grep -qxF "$k=$p"
+}
+front || exit 3
+if [ "$mode" = tmux ]; then
+  [ "$(tmux -u display-message -p -t "$p" '#{session_name}' 2>/dev/null)" = "$sess" ] || exit 3
+  tmux load-buffer -b "$b" "$f" || exit 4
+  front || exit 3
+  tmux paste-buffer -p -r -d -b "$b" -t "$p" || exit 6
+  tmux send-keys -t "$p" Enter || exit 5
+else
+  t=$(cat "$f"; printf x); t=${t%x}
+  e=$(printf '\033')
+  front || exit 3
+  HERDR_SOCKET_PATH=$sock herdr pane send-text "$p" "$e[200~$t$e[201~" >/dev/null 2>&1 || exit 6
+  HERDR_SOCKET_PATH=$sock herdr pane send-keys "$p" enter >/dev/null 2>&1 || exit 5
+fi`
+	return "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(mode) + " " + sshx.QuoteShell(session) + " " + sshx.QuoteShell(pane) + " " +
+		strconv.FormatInt(pid, 10) + " " + strconv.FormatInt(start, 10) + " " + strconv.Itoa(length) + " " + sshx.QuoteShell(socket)
+}
+
+// convoSending lets one message at a time go to a pane: two typed at once
+// would interleave (one's text, the other's, then both Enters: one message).
+var convoSending sync.Map // session id + pane → chan struct{} (of one)
+
+func sendTurn(ctx context.Context, key string) (release func(), ok bool) {
+	ch, _ := convoSending.LoadOrStore(key, make(chan struct{}, 1))
+	select {
+	case ch.(chan struct{}) <- struct{}{}:
+		return func() { <-ch.(chan struct{}) }, true
+	case <-ctx.Done():
+		return nil, false
+	}
 }
 
 // What the conversation presses in the agent's pane, in herdr's names and
@@ -611,7 +661,7 @@ var convoKeys = map[string]struct {
 }{
 	"interrupt": {"convo.interrupt", []string{"esc"}, []string{"Escape"}},
 	"send_now":  {"convo.send_now", []string{"ctrl+x", "ctrl+s"}, []string{"C-x", "C-s"}},
-	"send":      {"convo.send", []string{"enter"}, nil},
+	"send":      {"convo.send", nil, nil}, // (typed by convoSendCommand)
 }
 
 // maxSendText is the most a message sent from the agents page may hold (in
@@ -729,6 +779,16 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		}
 		return false
 	}
+	// (A message: one at a time to a pane, from the check to its Enter.)
+	if what == "send" {
+		release, ok := sendTurn(ctx, sess.ID+"\x00"+b.Pane)
+		if !ok {
+			reason = "busy"
+			writeError(w, http.StatusTooManyRequests, "busy", "another message to this agent is still being sent")
+			return
+		}
+		defer release()
+	}
 
 	out, err := sshx.Output(ctx, sess.Client(), convoLocateCommand(sess.Persistence, sess.TmuxSession), convoLocateMax)
 	if errors.Is(err, sshx.ErrBusy) {
@@ -775,7 +835,26 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	if signedOut() {
 		return
 	}
-	if sess.Persistence == "herdr" {
+	if what == "send" {
+		// The check again and the typing, on the host in one go (see convoSendCommand).
+		_, err = sshx.Exec(ctx, sess.Client(), convoSendCommand(sess.Persistence, sess.TmuxSession, b.Pane, socket, b.PID, b.Start, len(text)), 4096,
+			sshx.ExecOptions{Stdin: strings.NewReader(text)})
+		var exitErr *sshx.ExitError
+		switch {
+		case err == nil:
+			outcome = "typed"
+		case errors.Is(err, sshx.ErrBusy):
+			reason = "busy" // (not started: nothing was typed)
+		case errors.As(err, &exitErr) && exitErr.Status == 3:
+			reason = "agent_changed"
+			writeError(w, http.StatusConflict, "agent_changed", "that pane no longer runs this agent")
+			return
+		case errors.As(err, &exitErr) && exitErr.Status == 4:
+			reason = "send_failed" // (nothing typed)
+		default:
+			outcome = "unknown" // (typed in part, or all of it but Enter, or it is not known)
+		}
+	} else if sess.Persistence == "herdr" {
 		c, derr := herdr.Dial(ctx, sess.Client(), socket)
 		if derr != nil {
 			if signedOut() {
@@ -785,11 +864,7 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 			writeHerdrError(w, derr)
 			return
 		}
-		if what == "send" {
-			err = c.SendInput(ctx, b.Pane, text, keys.herdr)
-		} else {
-			err = c.SendKeys(ctx, b.Pane, keys.herdr)
-		}
+		err = c.SendKeys(ctx, b.Pane, keys.herdr)
 		c.Close()
 		var apiErr *herdr.APIError
 		switch {
@@ -802,17 +877,11 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		}
 	} else {
 		// (The script checks the pane is in this session's tmux session, and presses.)
-		if what == "send" {
-			_, err = sshx.Exec(ctx, sess.Client(), tmuxSendCommand(sess.TmuxSession, b.Pane), 4096, sshx.ExecOptions{Stdin: strings.NewReader(text)})
-		} else {
-			_, err = sshx.Output(ctx, sess.Client(), tmuxKeysCommand(sess.TmuxSession, b.Pane, keys.tmux), 4096)
-		}
+		_, err = sshx.Output(ctx, sess.Client(), tmuxKeysCommand(sess.TmuxSession, b.Pane, keys.tmux), 4096)
 		var exitErr *sshx.ExitError
 		switch {
 		case err == nil:
 			outcome = "typed"
-		case errors.As(err, &exitErr) && exitErr.Status == 5:
-			outcome = "unknown" // (typed, but not sent: the composer shows it, Enter there sends it)
 		case errors.Is(err, sshx.ErrBusy):
 			reason = "busy" // (not started: nothing was pressed)
 		case errors.As(err, &exitErr) && exitErr.Status == 3:

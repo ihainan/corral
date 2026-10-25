@@ -1,6 +1,15 @@
 package web
 
-import "testing"
+import (
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"testing"
+)
 
 // What may be typed into a pane: text, its line ends made "\n"; never a
 // control character that would be pressed rather than typed.
@@ -22,5 +31,54 @@ func TestSendText(t *testing.T) {
 		if _, good := sendText(bad); good {
 			t.Errorf("sendText(%q) accepted", bad)
 		}
+	}
+}
+
+// convoSendCommand types nothing unless the process is still the one in
+// front in that pane, and the text came whole: run here with a stand-in
+// herdr that notes what it was asked to type.
+func TestConvoSendCommandChecksFirst(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no sh")
+	}
+	if _, err := os.Stat("/proc/self/stat"); err != nil {
+		t.Skip("no /proc")
+	}
+	dir := t.TempDir()
+	typed := filepath.Join(dir, "typed")
+	os.WriteFile(filepath.Join(dir, "herdr"), []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >>"+typed+"\n"), 0o755)
+	// The agent: a process whose pane is p1 (not in front of any terminal: a test has none).
+	agent := exec.Command("sleep", "30")
+	agent.Env = append(os.Environ(), "HERDR_PANE_ID=p1")
+	if err := agent.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer agent.Process.Kill()
+	stat, _ := os.ReadFile(fmt.Sprintf("/proc/%d/stat", agent.Process.Pid))
+	rest := strings.Fields(string(stat[strings.LastIndexByte(string(stat), ')')+2:]))
+	start, _ := strconv.ParseInt(rest[19], 10, 64)
+	run := func(text string, length int, pid, st int64) int {
+		cmd := convoSendCommand("herdr", "", "p1", "/run/x.sock", pid, st, length)
+		c := exec.Command("sh", "-c", cmd) // (as the host runs it)
+		c.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"))
+		c.Stdin = strings.NewReader(text)
+		err := c.Run()
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			return ee.ExitCode()
+		}
+		return 0
+	}
+	if got := run("hi", 2, int64(agent.Process.Pid), start); got != 3 {
+		t.Errorf("not in front: exit %d, want 3", got)
+	}
+	if got := run("hi", 2, int64(agent.Process.Pid), start+1); got != 3 {
+		t.Errorf("another start: exit %d, want 3", got)
+	}
+	if got := run("h", 2, int64(agent.Process.Pid), start); got != 4 {
+		t.Errorf("cut short: exit %d, want 4", got)
+	}
+	if _, err := os.Stat(typed); err == nil {
+		t.Error("something was typed")
 	}
 }
