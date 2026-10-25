@@ -413,25 +413,24 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   const draft = shownDraft ?? getDraft(draftKey)
   // What is typed or put in (a path, a completion, a long paste) is the
   // draft, kept; an entry of what was sent, shown while going through them,
-  // is not: the draft put aside stays kept, and comes back.
+  // is not: the draft put aside stays kept (and only there, so that a send
+  // of it, from here or from before, takes it), and comes back.
   const histPos = useRef<string | null>(null)
-  const histStash = useRef('')
   const setDraft = (s: string) => {
     histPos.current = null
     setDraftShown(() => s)
     keepDraft(draftKey, s)
   }
   const showSent = (h: string | null) => {
-    if (h === null) return setDraft(histStash.current)
-    if (histPos.current === null) histStash.current = draft
+    if (h === null) return setDraft(getDraft(draftKey))
+    if (histPos.current === null) keepDraft(draftKey, draft)
     histPos.current = h
     setDraftShown(() => h)
-    keepDraft(draftKey, histStash.current)
   }
   useEffect(
     () => () => {
       // (Another agent shown: this one's draft is as it was put aside.)
-      if (histPos.current !== null) setDraftShown(() => histStash.current)
+      if (histPos.current !== null) setDraftShown(() => getDraft(draftKey))
       histPos.current = null
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -505,7 +504,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       pos--
     } else pos++
     showSent(pos < h.length ? h[pos] : null)
-    const text = pos < h.length ? h[pos] : histStash.current
+    const text = pos < h.length ? h[pos] : getDraft(draftKey)
     requestAnimationFrame(() => {
       const el = field.current
       if (el) el.selectionStart = el.selectionEnd = dir < 0 ? 0 : text.length
@@ -541,12 +540,11 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     api('POST', `/api/sessions/${sid}/conversation/send`, { pane: b.pane, pid: b.pid, start: b.start, session: b.session, text })
       .then(() => {
         remember(was)
+        // (The draft kept went, even if put aside meanwhile, or shown by another of this page since.)
+        const went = getDraft(draftKey) === was
+        if (went) keepDraft(draftKey, '')
         if (histPos.current === was) showSent(null) // (an entry sent again: the draft put aside is back)
-        else if (getDraft(draftKey) === was) {
-          if (histPos.current !== null) histStash.current = '' // (put aside while it went: it went)
-          keepDraft(draftKey, '')
-          setDraftShown((d) => (d === undefined || d === was ? '' : d))
-        }
+        else if (went) setDraftShown((d) => (d === undefined || d === was ? '' : d))
         setSent((ps) => [...ps, { id: Date.now() * 100 + (++sentN.current % 100), text, state: 'waiting' as const, bind: bindKey, after, gen: convo.gen, at }].slice(-5))
       })
       .catch((e) => toast(e instanceof ApiError && e.code === 'unknown' ? t('agents.sendUnknown') : refusal(e), true)) // (the draft stays)
