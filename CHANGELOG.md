@@ -6,32 +6,23 @@ before 1.0, a minor version may change configuration or behaviour (said here whe
 ## [Unreleased]
 
 ### Added
-- An Agents page (in the menu, and first in the tab bar with the number of
-  agents waiting): every agent of the herdr sessions open on the gateway,
-  those waiting for you first, then working, finished and idle, each with
-  its host, session and workspace. From a row: answer one waiting (the
-  reply dialog), read a Claude Code agent's conversation, or open its
-  terminal at its pane. When the gateway has lost herdr, its agents show as
-  unknown with what was last seen. Agents in tmux sessions show no status;
-  those sessions are listed apart.
-- A conversation view (the speech-bubbles button) for Claude Code in tmux or
-  herdr on Linux hosts: the session's own log as turns, the agent's answers
+- An Agents page (in the menu; with tabs, its own tab from the bot button,
+  which counts the agents waiting, the terminal tabs staying open behind it):
+  every agent of the tmux and herdr sessions open on the gateway, waiting ones
+  first, and the conversation of the one picked, for Claude Code on Linux
+  hosts. The conversation is the session's own log as turns: answers
   formatted (lists, tables, code to copy), the tool calls between them folded
-  into one line per run and opened on demand, edits shown as the lines they
-  change. It reads the whole history, which herdr's panes do not keep for a
-  program on the alternate screen, and follows the pane in front. It is off
-  until turned on, per session; messages are still typed in the composer.
-  Only the session's owner sees it. A bar over it names the agent (herdr's
-  workspace and the pane's title) and what it is doing; when it waits for
-  an answer a strip at the bottom opens the reply dialog. What the
-  composer sends shows until the log has it, and on touch screens the
-  composer opens with the view. When the gateway loses herdr, its last
-  statuses are no longer shown as current. With herdr the bar lists the session's
-  agents, waiting ones first, to go to one (sending waits until it is in
-  front, and the composer says where a message goes); in tmux it shows
-  whether Claude Code is working, from its own file. While the agent works,
-  Stop presses Escape in its pane, sent by the gateway to that pane only
-  after it checked the same Claude Code process still runs there.
+  into one line per turn and opened on demand, edits shown as the lines they
+  change, the whole history even where herdr's panes keep none. The composer
+  under it sends to that agent's pane only (POST
+  `/api/sessions/{id}/conversation/send`), never moving what herdr has in
+  front: the host checks just before typing that the same Claude Code
+  process is in front in that pane, and types the message as one paste and
+  Enter. While the agent works, Stop presses Escape and "send now" the keys
+  to take a queued message in, both after the gateway checked that process.
+  A permission prompt is answered on a card over the composer. What was sent
+  shows until the log has it. Only the session's owner sees it. When the
+  gateway loses herdr, its last statuses are no longer shown as current.
 - Tab keys in the installed app: ⌘T opens a new tab (Ctrl+Shift+T off a Mac,
   where Ctrl+letters stay with the programs); on a Mac or an iPad ⌘1–⌘8 pick
   a tab by its place, ⌘9 the last, ⌘⇧[ and ⌘⇧] the previous and next. No key

@@ -156,7 +156,7 @@ function waitingAgents(list: SessionInfo[]): number {
 export function TerminalTabs({ current }: { current: string }) {
   const agents = current === AGENTS
   const [sessions, setSessions] = useState<SessionInfo[] | null>(null)
-  const [mounted, setMounted] = useState<string[]>([current])
+  const [mounted, setMounted] = useState<string[]>(current === AGENTS ? [] : [current])
   const [infos, setInfos] = useState<Record<string, TabInfo>>({})
   const [newOpen, setNewOpen] = useState(false)
 

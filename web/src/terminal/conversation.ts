@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
 import { api, ApiError } from '../api'
-import { local } from '../storage'
 
 // The conversation view's data: the agent's own log of the session in the
 // focused (herdr) or active (tmux) pane, as the gateway reads it
@@ -302,29 +301,4 @@ export function asking(entries: ConvoEntry[]): boolean {
     return !!p?.tool && p.tool.name === 'AskUserQuestion' && !p.tool.done
   }
   return false
-}
-
-// Whether the conversation view was shown, by session, on this device.
-const KEY = 'corral.convoOpen'
-
-export function convoWasOpen(session: string): boolean {
-  try {
-    const v = JSON.parse(local.get(KEY) ?? '[]')
-    return Array.isArray(v) && v.includes(session)
-  } catch {
-    return false
-  }
-}
-
-export function rememberConvo(session: string, open: boolean) {
-  let v: string[] = []
-  try {
-    const got = JSON.parse(local.get(KEY) ?? '[]')
-    if (Array.isArray(got)) v = got.filter((x) => typeof x === 'string')
-  } catch {
-    /* not ours */
-  }
-  v = v.filter((x) => x !== session)
-  if (open) v.push(session)
-  local.set(KEY, JSON.stringify(v.slice(-50)))
 }

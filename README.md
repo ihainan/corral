@@ -70,10 +70,12 @@ another: start it at your desk, check on it from your phone, carry on on a table
 - **Notifications** — When an agent waits or finishes, or a program rings the
   bell or sends one. Tapping one opens that agent's pane. On an iPhone or iPad,
   add Corral to the Home Screen first: Safari notifies only from there.
-- **Agents page** — Every agent of your open herdr sessions on one page,
-  those waiting for you first: answer one, read its conversation or open
-  its terminal from there.
-- **Conversation view** — Read Claude Code's session as a conversation, by
+- **Agents page** — Every agent of your open tmux and herdr sessions in one
+  place, those waiting for you first, and the one you pick as a
+  conversation you write to; its own tab beside the terminals (the bot
+  button), a page of its own on a phone. A message goes to that agent's pane
+  only: what herdr has in front, or a terminal shows, does not change. Its
+  conversation is Claude Code's session read as such, by
   its own title: each answer formatted, with the files the turn changed (lines
   added and removed; one opens the turn's changes beside it, with line
   numbers and the lines around) and copy; all the agent did between your
@@ -83,9 +85,8 @@ another: start it at your desk, check on it from your phone, carry on on a table
   over it, its task list, what you sent that waits to be taken in (send it
   now), and a permission prompt to answer with its own keys (1–9, Esc),
   showing what it asks as the screen does. Stop it from the send button, and
-  go to another agent of any open session from the list beside it (Alt+↑/↓),
-  the ones waiting for you first. The whole history shows even where the
-  terminal keeps none; the terminal is a tap away.
+  go to another agent from the list beside it (Alt+↑/↓). The whole history
+  shows even where the terminal keeps none; its terminal is a tap away.
 - **A composer** — Write longer prompts: `@` files, `/` commands, `$` skills,
   history, Claude Code's suggested prompt with Tab. Ctrl+Shift+Enter
   (⇧⌘↩ on a Mac) opens it from the terminal.
@@ -143,8 +144,8 @@ Chinese and English interfaces ship together.
   changed since. Once the agent no longer waits, its alert is replaced. At
   most 10 alerts a minute; webhooks too, if enabled. The terminal offers to
   turn alerts on once agents show up.
-- The conversation view reads Claude Code's own log of the session in the
-  focused herdr pane or the active tmux pane, over the session's SSH
+- The agents page reads Claude Code's own log of the session in each herdr
+  pane, or in a tmux session's active pane, over the session's SSH
   connection; nothing is installed on the host. It shows the last 4 MB of a
   long log, and follows a `/clear` or `/resume` in the pane.
 - Tabs show in windows at least 700 pixels wide; narrower ones switch sessions
@@ -340,7 +341,7 @@ Report security problems privately, not in a public issue: see [SECURITY.md](SEC
 - After a gateway restart, the tabs reattached by themselves are those opened
   in that window since it loaded; others are opened again from `+` or the host
   list.
-- The conversation view supports Claude Code only, in tmux or herdr on Linux
+- The agents page talks to Claude Code only, in tmux or herdr on Linux
   hosts (it finds the process through `/proc`), with its settings in
   `~/.claude` (not a `CLAUDE_CONFIG_DIR` of its own). Only the session's
   owner sees it: someone watching a shared session sees the screen, and the
@@ -351,10 +352,13 @@ Report security problems privately, not in a public issue: see [SECURITY.md](SEC
   its log, so tmux shows that as working). The list beside it has the status
   of herdr's agents and of the tmux session shown; other tmux sessions are
   listed without one.
-- Stop and send now press keys only for the Claude Code process the
-  conversation shows, in front of its terminal, as found just before: a
-  process that ends, or a pane taken over, in the moment between is still
-  pressed. In a tmux session they check that the pane is in the session
+- A message is typed only for the Claude Code process the conversation
+  shows, in front of its terminal in that pane: the host checks that again
+  just before typing, but cannot check and type in one step, so a process
+  ending in that very moment (a few milliseconds) leaves the message to the
+  shell. Stop and send now press their keys after the gateway's own check,
+  a moment before: a process that ends, or a pane taken over, in between is
+  still pressed. In a tmux session they check that the pane is in the session
   and then press, two tmux commands: a window moved to another session in
   between would still be pressed. Keys from the key bar go to the terminal
   as typed, not through the prompt's card.

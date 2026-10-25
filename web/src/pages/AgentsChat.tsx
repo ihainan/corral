@@ -70,9 +70,13 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
     }
     return out
   }, [sessions])
-  // The one shown: the one picked while it is there, else the first (one
-  // waiting for an answer comes first).
-  const picked = pick ? entries.find((e) => e.s.id === pick.s && (e.pane ?? '') === (pick.pane ?? '')) : undefined
+  // The one shown: the one picked while it is there (a session without a
+  // pane, from an older address: the agent herdr has in front there, else
+  // its first), else the first (one waiting for an answer comes first).
+  const picked = pick
+    ? entries.find((e) => e.s.id === pick.s && (e.pane ?? '') === (pick.pane ?? '')) ??
+      (pick.pane === undefined ? entries.find((e) => e.s.id === pick.s && e.s.meta?.t === 'herdr' && e.pane === e.s.meta.focused_pane) ?? entries.find((e) => e.s.id === pick.s) : undefined)
+    : undefined
   const cur = picked ?? (sessions ? entries[0] : undefined)
   const choose = (e: Entry) => {
     setPick({ s: e.s.id, pane: e.pane })

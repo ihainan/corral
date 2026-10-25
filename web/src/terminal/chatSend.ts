@@ -1,8 +1,8 @@
 import type { SessionInfo } from '../api'
 import type { ConvoEntry } from './conversation'
 
-// What the terminal's conversation and the agents page share about a
-// message sent to an agent: when its log shows it, and how long to wait.
+// The agents page's message sent to an agent: when its log shows it, and
+// how long to wait.
 
 export const PENDING_MS = 30000 // a message sent from the conversation not seen in the log by then: say so
 
