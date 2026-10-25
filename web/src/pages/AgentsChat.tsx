@@ -77,12 +77,17 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
     ? entries.find((e) => e.s.id === pick.s && (e.pane ?? '') === (pick.pane ?? '')) ??
       (pick.pane === undefined ? entries.find((e) => e.s.id === pick.s && e.s.meta?.t === 'herdr' && e.pane === e.s.meta.focused_pane) ?? entries.find((e) => e.s.id === pick.s) : undefined)
     : undefined
-  // One picked that is not in the list for a moment (its session still
-  // running: herdr's summary lost, say) stays shown as last seen.
+  // One picked that is not in the list for a moment, as herdr's summary of
+  // its session is not there or not current, stays shown as last seen; one
+  // a current summary no longer has (its pane closed) does not.
   const lastCur = useRef<Entry | undefined>(undefined)
-  const kept = !picked && pick && lastCur.current?.s.id === pick.s && (lastCur.current.pane ?? '') === (pick.pane ?? '') && sessions?.some((x) => x.id === pick.s) ? lastCur.current : undefined
+  const pickedSession = pick ? sessions?.find((x) => x.id === pick.s) : undefined
+  const unsure = !!pickedSession && pickedSession.persistence === 'herdr' && (pickedSession.meta?.t !== 'herdr' || !!pickedSession.meta.lost)
+  const kept = !picked && pick && unsure && lastCur.current?.s.id === pick.s && (lastCur.current.pane ?? '') === (pick.pane ?? '') ? lastCur.current : undefined
   const cur = picked ?? kept ?? (sessions ? entries[0] : undefined)
-  lastCur.current = cur
+  useEffect(() => {
+    lastCur.current = cur
+  })
   const choose = (e: Entry) => {
     setPick({ s: e.s.id, pane: e.pane })
     try {
@@ -94,12 +99,19 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
     if (e.pane) q.set('pane', e.pane)
     navigate('/agents?' + q, true)
   }
-  // Shown without being picked (none was, or its session ended): it is the
-  // pick from now on, so the list's order changing does not move the view.
+  // Shown without being picked (none was, its session ended, an address
+  // named one gone): it is the pick from now on, so the list's order
+  // changing does not move the view. One shown is remembered, however picked.
   useEffect(() => {
-    if (cur && !(pick && pick.s === cur.s.id && (pick.pane ?? '') === (cur.pane ?? ''))) choose(cur)
+    if (!cur) return
+    if (!(pick && pick.s === cur.s.id && (pick.pane ?? '') === (cur.pane ?? ''))) return choose(cur)
+    try {
+      local.set(LAST, JSON.stringify({ s: cur.s.id, pane: cur.pane }))
+    } catch {
+      /* not kept */
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cur?.key, cur?.s.id])
+  }, [cur?.key, cur?.s.id, pick?.s, pick?.pane])
   // Back and forward between agents: the address says which.
   useEffect(() => {
     const onPop = () => location.pathname === '/agents' && setPick(readPick())
@@ -109,8 +121,21 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
   // What was sent to each agent and is not in its log yet, and whether a
   // message to it is on its way: kept here, so going to another agent and
   // back loses neither (a second send of the same could follow).
+  // So are its draft as shown, and the log's turns that confirmed one.
   const [sentBy, setSentBy] = useState<Record<string, Sent[]>>({})
   const [sendingBy, setSendingBy] = useState<Record<string, boolean>>({})
+  const [draftBy, setDraftBy] = useState<Record<string, string>>({})
+  const usedBy = useRef(new Map<string, Map<string, Set<number>>>())
+  // (Of sessions that ended: forgotten. A draft stays in drafts.ts's keeping.)
+  useEffect(() => {
+    if (!sessions) return
+    const live = (k: string) => sessions.some((x) => k.endsWith(' ' + x.id))
+    const prune = <T,>(all: Record<string, T>) => (Object.keys(all).every(live) ? all : Object.fromEntries(Object.entries(all).filter(([k]) => live(k))))
+    setSentBy(prune)
+    setSendingBy(prune)
+    setDraftBy(prune)
+    for (const k of usedBy.current.keys()) if (!live(k)) usedBy.current.delete(k)
+  }, [sessions])
 
   // The page's colours and size: the terminal's, and the visible part of
   // the window (the soft keyboard does not shrink the layout viewport on iOS).
@@ -172,6 +197,9 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
         setSent={(f) => setSentBy((all) => ({ ...all, [k]: f(all[k] ?? []) }))}
         sending={!!sendingBy[k]}
         setSending={(v) => setSendingBy((all) => ({ ...all, [k]: v }))}
+        draft={draftBy[k]}
+        setDraftShown={(f) => setDraftBy((all) => ({ ...all, [k]: f(all[k]) }))}
+        used={usedBy.current.get(k) ?? usedBy.current.set(k, new Map()).get(k)!}
       />
     )
   }
@@ -195,7 +223,7 @@ type Sent = ConvoPending & { bind: string; after: number; gen: number; at: numbe
 
 // The conversation of one agent, and what is sent to it. Keyed by the
 // agent: nothing of another's (its draft, what was sent, a stop) carries over.
-function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerEnter, sent, setSent, sending, setSending }: {
+function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerEnter, sent, setSent, sending, setSending, draft: shownDraft, setDraftShown, used }: {
   cur: Entry
   entries: Entry[]
   all: SessionInfo[]
@@ -204,6 +232,9 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   setSent: (f: (ps: Sent[]) => Sent[]) => void
   sending: boolean
   setSending: (v: boolean) => void
+  draft: string | undefined // (undefined: as kept in drafts.ts)
+  setDraftShown: (f: (d: string | undefined) => string) => void
+  used: Map<string, Set<number>> // per reading: the turns that confirmed one
   onPick: (e: Entry) => void
   active: boolean
   toast: (s: string, error?: boolean) => void
@@ -283,14 +314,13 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   const queuedRef = useRef(queued)
   queuedRef.current = queued
   const sentN = useRef(0)
-  const used = useRef(new Map<string, Set<number>>())
   useEffect(() => {
     if (convo.status !== 'ready' || !sent.some((p) => p.state !== 'sent' && p.bind === bindKey)) return
     const key = bindKey + ' ' + convo.gen
-    let u = used.current.get(key)
+    let u = used.get(key)
     if (!u) {
-      used.current.clear() // (only this reading's turns can confirm one)
-      used.current.set(key, (u = new Set()))
+      used.clear() // (only this reading's turns can confirm one)
+      used.set(key, (u = new Set()))
     }
     const users = convo.entries.filter((e: ConvoEntry) => e.role === 'user')
     let changed = false
@@ -323,9 +353,9 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
 
   // The composer: its draft kept per agent (as the terminal's per session).
   const draftKey = 'agents ' + cur.key
-  const [draft, setDraftState] = useState(() => getDraft(draftKey))
+  const draft = shownDraft ?? getDraft(draftKey)
   const setDraft = (s: string) => {
-    setDraftState(s)
+    setDraftShown(() => s)
     keepDraft(draftKey, s)
   }
   const field = useRef<HTMLTextAreaElement>(null)
@@ -360,7 +390,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
         remember(was)
         if (getDraft(draftKey) === was) {
           keepDraft(draftKey, '')
-          setDraftState((d) => (d === was ? '' : d))
+          setDraftShown((d) => (d === undefined || d === was ? '' : d))
         }
         setSent((ps) => [...ps, { id: Date.now() * 100 + (++sentN.current % 100), text, state: 'waiting' as const, bind: bindKey, after, gen: convo.gen, at }].slice(-5))
       })

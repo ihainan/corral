@@ -460,6 +460,12 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
     return onOpenRequest(() => {
       const q = new URLSearchParams(location.search)
       if (location.pathname !== '/t/' + id) return
+      if (q.get('convo') === '1') {
+        // (From before the agents page: there, at that agent.)
+        const to = new URLSearchParams({ s: id })
+        if (q.get('pane')) to.set('pane', q.get('pane')!)
+        return navigate('/agents?' + to, true)
+      }
       if (q.get('pane')) {
         paneTries.current = { pane: '', n: 0, busy: false }
         setWantPane(q.get('pane'))
