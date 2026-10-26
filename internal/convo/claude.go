@@ -1156,6 +1156,10 @@ func classifyUserText(s string) (role, text string) {
 		return "", ""
 	case "system-reminder", "local-command-caveat", "user-memory-input":
 		return "", ""
+	// (A subagent handing its report back to the session that sent it: the
+	// agent's own, not the person's, though it waits in the queue as one.)
+	case "agent-message":
+		return "", ""
 	case "command-name":
 		if text, ok := slashCommand(s); ok {
 			return RoleUser, text

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 const sidA = "194b7874-ce3d-46b3-b901-f53bd5747ce0"
@@ -249,5 +250,148 @@ func TestParseConvoLocateCodexNoLog(t *testing.T) {
 		convoRec("pid=8", "start=80", "procstart=80", "sid="+convoNoSession, "log=", "agent=claude", "HERDR_PANE_ID=w1:p2")).procs
 	if len(procs) != 1 || procs[0].pid != 7 || procs[0].agent != "codex" || procs[0].log != "" {
 		t.Fatalf("procs: %+v", procs)
+	}
+}
+
+// A Codex whose log its app-server daemon keeps is given the conversation
+// begun where it runs as it started and written since; not one a Codex that
+// has ended left behind, nor one begun before it, and not when another Codex
+// runs in the same place.
+func TestDaemonLogPicksTheCodexOwn(t *testing.T) {
+	const sec = 1000
+	proc := func(pid int64, cwd string, startedAgo int64) convoProc {
+		return convoProc{pid: pid, start: 70, agent: "codex", cwd: cwd, started: 1_700_000_000_000 - startedAgo*sec, herdrPane: "w1:p1"}
+	}
+	cand := func(sid, cwd string, beganAgo, wroteAgo int64) convoCand {
+		return convoCand{log: "/home/u/.codex/sessions/2026/10/26/rollout-2026-10-26T10-00-00-" + sid + ".jsonl", cwd: cwd, began: 1_700_000_000_000 - beganAgo*sec, wrote: 1_700_000_000_000 - wroteAgo*sec}
+	}
+	mine, old, other := "01a17600-0000-7000-8000-000000000001", "01a17600-0000-7000-8000-000000000002", "01a17600-0000-7000-8000-000000000003"
+	srv := &Server{}
+	for _, c := range []struct {
+		name  string
+		procs []convoProc
+		cands []convoCand
+		which int // (which of the processes is asked after)
+		want  string
+	}{
+		{"its own", []convoProc{proc(7, "/w", 60)}, []convoCand{cand(mine, "/w", 59, 1)}, 0, mine},
+		{"left by one that ended", []convoProc{proc(7, "/w", 60)}, []convoCand{cand(old, "/w", 65, 61)}, 0, ""},
+		{"begun before it started", []convoProc{proc(7, "/w", 60)}, []convoCand{cand(old, "/w", 600, 1)}, 0, ""},
+		{"another place", []convoProc{proc(7, "/w", 60)}, []convoCand{cand(other, "/elsewhere", 59, 1)}, 0, ""},
+		// Two in one place: one begun while only the first was there is
+		// the first's; one begun once both were could be either's, so it
+		// is shown for neither.
+		{"two in one place: begun before the second started", []convoProc{proc(7, "/w", 60), proc(8, "/w", 50)}, []convoCand{cand(mine, "/w", 59, 2)}, 0, mine},
+		{"two in one place: begun once both were there", []convoProc{proc(7, "/w", 60), proc(8, "/w", 50)}, []convoCand{cand(other, "/w", 40, 1)}, 0, ""},
+		{"two in one place: the later one claims neither", []convoProc{proc(7, "/w", 60), proc(8, "/w", 50)}, []convoCand{cand(mine, "/w", 59, 2)}, 1, ""},
+		{"one begun before any of them started", []convoProc{proc(7, "/w", 60), proc(8, "/w", 50)}, []convoCand{cand(old, "/w", 70, 1)}, 0, ""},
+		{"the one written last (a new conversation in it)", []convoProc{proc(7, "/w", 60)}, []convoCand{cand(old, "/w", 59, 30), cand(mine, "/w", 40, 1)}, 0, mine},
+	} {
+		p := &c.procs[c.which]
+		srv.daemonLog(p, convoLocated{procs: c.procs, cands: c.cands})
+		if p.sid != c.want || (c.want == "" && p.log != "") {
+			t.Errorf("%s: sid %q log %q, want %q", c.name, p.sid, p.log, c.want)
+		}
+	}
+}
+
+// A conversation found to be one Codex's is not taken for another's once
+// that Codex has ended (its daemon keeps the log a while longer).
+func TestDaemonLogKeepsWhoseItWas(t *testing.T) {
+	srv := &Server{}
+	const sec = 1000
+	now := int64(1_700_000_000_000)
+	sid := "01a17600-0000-7000-8000-00000000000b"
+	log := "/home/u/.codex/sessions/2026/10/26/rollout-2026-10-26T10-00-00-" + sid + ".jsonl"
+	// Two Codexes in one place: a conversation begun once both were there
+	// could be either's, so neither shows it.
+	first := convoProc{pid: 7, start: 70, agent: "codex", cwd: "/w", started: now - 600*sec}
+	second := convoProc{pid: 8, start: 80, agent: "codex", cwd: "/w", started: now - 300*sec}
+	c := convoCand{log: log, cwd: "/w", began: now - 299*sec, wrote: now - 10*sec}
+	both := convoLocated{procs: []convoProc{first, second}, cands: []convoCand{c}}
+	for _, p := range []*convoProc{&both.procs[0], &both.procs[1]} {
+		srv.daemonLog(p, both)
+		if p.sid != "" {
+			t.Fatalf("taken while it could be either's: %d has %q", p.pid, p.sid)
+		}
+	}
+	// The second ends; the one left does not take it either.
+	q := &convoProc{pid: 7, start: 70, agent: "codex", cwd: "/w", started: now - 600*sec}
+	srv.daemonLog(q, convoLocated{procs: []convoProc{*q}, cands: []convoCand{c}})
+	if q.sid != "" || q.log != "" {
+		t.Errorf("taken once the other had ended: sid %q log %q", q.sid, q.log)
+	}
+}
+
+func TestUnescapeJSON(t *testing.T) {
+	for in, want := range map[string]string{`/tmp/a`: `/tmp/a`, `/tmp/a\"b`: `/tmp/a"b`, `/tmp/a\\b`: `/tmp/a\b`, `/tmp/a\nb`: "/tmp/a\nb", `/tmp/a\q`: `/tmp/a\q`} {
+		if got := unescapeJSON(in); got != want {
+			t.Errorf("%q: %q, want %q", in, got, want)
+		}
+	}
+}
+
+// Full: what was said of which conversation is whose is no longer whole, so
+// none is taken any more (rather than one contested being opened up again).
+func TestConvoClaimsFull(t *testing.T) {
+	var c convoClaims
+	none := map[int64]bool{}
+	c.contest("contested")
+	for i := range maxConvoClaims + 10 {
+		c.take(fmt.Sprintf("s%d", i), int64(i+1), 0, nil)
+	}
+	later := time.Now().UnixMilli() + 60_000
+	if c.take("contested", 7, later, none) || c.take("s1", 2, later, none) || c.take("new-one", 3, later, none) {
+		t.Error("taken although what is whose is no longer whole")
+	}
+}
+
+// A conversation of a Codex that is gone may be taken by one started since
+// (resumed in it); not by one that was already running beside it.
+func TestConvoClaimsHandsOnWhenGone(t *testing.T) {
+	var c convoClaims
+	now := time.Now().UnixMilli()
+	if !c.take("s", 7, now, map[int64]bool{7: true}) {
+		t.Error("not taken by the one it is of")
+	}
+	if c.take("s", 9, now-60_000, map[int64]bool{}) {
+		t.Error("taken by one that ran beside it")
+	}
+	if c.take("s", 9, now+60_000, map[int64]bool{7: true}) {
+		t.Error("taken although the Codex it is of is still there")
+	}
+	if !c.take("s", 9, now+60_000, map[int64]bool{}) {
+		t.Error("not taken by one started since it was gone")
+	}
+}
+
+// What a screen holds of a text: no colours, and none of the breaks and
+// spaces wrapping puts in it.
+func TestFlattenAndMiddle(t *testing.T) {
+	if got := flatten("\x1b[1m你好\x1b[0m，世\n界 — ok\r\n"); got != "你好，世界—ok" {
+		t.Errorf("flatten: %q", got)
+	}
+	if flatten("中文连续文本") != flatten("中文连续\n文本") {
+		t.Error("a line wrapped in the middle of the words")
+	}
+	if got := middle("0123456789", 4); got != "3456" {
+		t.Errorf("middle: %q", got)
+	}
+	if got := middle("abc", 4); got != "abc" {
+		t.Errorf("middle, short: %q", got)
+	}
+}
+
+// There is no room for another: nothing is taken (rather than taken and
+// not kept, to be taken by another next time).
+func TestConvoClaimsNoRoom(t *testing.T) {
+	var c convoClaims
+	for i := range maxConvoClaims {
+		if !c.take(fmt.Sprintf("s%d", i), 1, 0, nil) {
+			t.Fatalf("not taken at %d", i)
+		}
+	}
+	if c.take("one-more", 2, 0, nil) {
+		t.Error("taken although there was no room for it")
 	}
 }

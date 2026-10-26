@@ -103,7 +103,7 @@ export type ConvoStatus = 'loading' | 'ready' | 'none' | 'error'
 
 export interface Convo {
   status: ConvoStatus
-  reason?: string // with 'none': no_agent, no_log, unsupported
+  reason?: string // with 'none': no_agent, no_log, not_told, unsupported
   entries: ConvoEntry[] // (the same array while nothing in it changed)
   older: boolean // the conversation began before the first entry
   olderCut: boolean // and what is before cannot be read in as well

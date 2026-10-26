@@ -545,6 +545,9 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   const queuedRef = useRef(queued)
   queuedRef.current = queued
   const sentN = useRef(0)
+  // What was sent and has since been seen in the log: a request of its own
+  // that ends badly is no reason to type it again.
+  const arrived = useRef(new Set<number>())
   useEffect(() => {
     if (convo.status !== 'ready' || !sent.some((p) => p.state !== 'sent' && ofThis(p.bind))) return
     const key = bindKey + ' ' + convo.gen
@@ -570,6 +573,8 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       const hit = users.find((e) => e.seq > p.after && !u.has(e.seq) && afterSend(e, p.at) && !(p.afterTs && e.ts && Date.parse(e.ts) <= Date.parse(p.afterTs)) && sameTurn(e, p.text))
       if (!hit) return [p]
       u.add(hit.seq)
+      arrived.current.add(p.id)
+      if (arrived.current.size > 200) arrived.current = new Set([...arrived.current].slice(-100))
       if (p.was !== undefined && getDraft(draftKey) === p.was) {
         keepDraft(draftKey, '')
         setDraftShown((d) => (d === undefined || d === p.was ? '' : d))
@@ -596,6 +601,9 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   // a tmux session's per pane: another pane in front is another agent).
   const baseKey = 'agents ' + cur.key
   const draftKey = baseKey + (!herdr && convo.bind ? ' ' + convo.bind.pane : '')
+  // (The box in front: what another agent's send puts back is not shown over this one's.)
+  const draftKeyNow = useRef(draftKey)
+  draftKeyNow.current = draftKey
   const draft = shownDraft ?? getDraft(draftKey)
   // What is typed or put in (a path, a completion, a long paste) is the
   // draft, kept; an entry of what was sent, shown while going through them,
@@ -764,28 +772,55 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     const at = Date.now()
     const account = authGen() // (signed out meanwhile: nothing of it is kept for the next account)
     const focused = document.activeElement === field.current
-    const pending = (extra?: Partial<Sent>) =>
-      setSent((ps) => [...ps, { id: Date.now() * 100 + (++sentN.current % 100), text, state: 'waiting' as const, bind: bindKey, after, afterTs, gen: convo.gen, at, ...extra }].slice(-5))
+    // It shows at once, as sending, so the box emptying is not all there is
+    // to see while the gateway types it on the host; what became of it is
+    // said when the answer comes.
+    const id = Date.now() * 100 + (++sentN.current % 100)
+    const mark = (extra: Partial<Sent>) => setSent((ps) => ps.map((p) => (p.id === id ? { ...p, ...extra } : p)))
+    const drop = () => setSent((ps) => ps.filter((p) => p.id !== id))
+    setSent((ps) => [...ps, { id, text, state: 'sending' as const, bind: bindKey, after, afterTs, gen: convo.gen, at }].slice(-5))
+    // The box is emptied with it (the draft kept too, even if put aside
+    // meanwhile, or shown by another of this page since); what it held comes
+    // back if the message is refused.
+    const went = getDraft(draftKey) === was
+    if (went) keepDraft(draftKey, '')
+    if (histPos.current === was) showSent(null) // (an entry sent again: the draft put aside is back)
+    else if (went) setDraftShown((d) => (d === undefined || d === was ? '' : d))
+    // What was typed comes back to the box it was typed in, if nothing was
+    // typed there since; shown again only while that box is the one in
+    // front (another agent's is its own).
+    const key = draftKey
+    const putBack = () => {
+      // (Seen in the log since, whatever the request then said: it went.)
+      if (!went || arrived.current.has(id) || getDraft(key).trim()) return
+      keepDraft(key, was)
+      if (draftKeyNow.current === key) setDraftShown((d) => (d === undefined || !d.trim() ? was : d))
+    }
+
     api('POST', `/api/sessions/${sid}/conversation/send`, { pane: b.pane, pid: b.pid, start: b.start, session: b.session, text }, { timeoutMs: SEND_MS })
       .then(() => {
-        if (authGen() !== account) return
+        if (authGen() !== account) return drop()
         remember(was)
-        // (The draft kept went, even if put aside meanwhile, or shown by another of this page since.)
-        const went = getDraft(draftKey) === was
-        if (went) keepDraft(draftKey, '')
-        if (histPos.current === was) showSent(null) // (an entry sent again: the draft put aside is back)
-        else if (went) setDraftShown((d) => (d === undefined || d === was ? '' : d))
-        pending()
+        mark({ state: 'waiting' })
       })
       .catch((e) => {
-        if (authGen() !== account) return
+        if (authGen() !== account) {
+          drop()
+          return
+        }
         // Whether it went is not known (the gateway lost the host on the way,
         // or the answer was lost on its way here): it is looked for as one
         // sent, the draft staying until it is seen.
         if (e instanceof ApiError && (e.code === 'unknown' || e.code === 'network')) {
+          // (It is looked for as one sent; the draft comes back until it is seen.)
           toast(t('agents.sendUnknown'), true)
-          pending({ was })
-        } else toast(refusal(e), true) // (the draft stays)
+          putBack()
+          mark({ state: 'waiting', was })
+        } else {
+          putBack() // (it never went: what was typed comes back, to be sent again)
+          drop()
+          toast(refusal(e), true)
+        }
       })
       .finally(() => {
         setSending(false)

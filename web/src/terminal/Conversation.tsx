@@ -45,7 +45,7 @@ export interface ConvoAgent {
 export interface ConvoPending {
   id: number
   text: string
-  state: 'waiting' | 'unseen' | 'sent'
+  state: 'sending' | 'waiting' | 'unseen' | 'sent'
 }
 
 const HINT_AFTER = 20000 // working with nothing new this long: say why
@@ -368,11 +368,11 @@ export function ConversationView({
 
   // What was sent, not in the log yet (also before a new conversation's log is written).
   const pendingList = pending.map((p) => (
-    <div key={p.id} className="convo-user convo-pending">
+    <div key={p.id} className={'convo-user convo-pending' + (p.state === 'sending' ? ' is-sending' : '')}>
       <div className="convo-user-text">{p.text}</div>
       <div className="convo-meta">
-        <span role="status">{t(p.state === 'waiting' ? 'convo.sent' : p.state === 'unseen' ? 'convo.unseen' : 'convo.sentOnly')}</span>
-        {p.state !== 'waiting' && (
+        <span role="status">{t(p.state === 'sending' ? 'convo.sending' : p.state === 'waiting' ? 'convo.sent' : p.state === 'unseen' ? 'convo.unseen' : 'convo.sentOnly')}</span>
+        {(p.state === 'unseen' || p.state === 'sent') && (
           <button type="button" className="link-btn" onClick={() => onDismiss(p.id)}>{t('common.close')}</button>
         )}
       </div>
@@ -385,13 +385,15 @@ export function ConversationView({
     body = (
       <div className="convo-state">
         <p>
-          {convo.reason === 'no_log'
-            ? t('convo.noLog')
-            : convo.reason === 'unsupported'
-              ? t('convo.unsupported')
-              : agent?.other
-                ? t('convo.otherAgent', { agent: agent.other })
-                : t('convo.noAgent')}
+          {convo.reason === 'not_told'
+            ? t('convo.notTold')
+            : convo.reason === 'no_log'
+              ? t('convo.noLog')
+              : convo.reason === 'unsupported'
+                ? t('convo.unsupported')
+                : agent?.other
+                  ? t('convo.otherAgent', { agent: agent.other })
+                  : t('convo.noAgent')}
         </p>
         <button type="button" className="btn btn-ghost" onClick={onShowTerminal}>{t('convo.showTerminal')}</button>
         {convo.reason === 'no_log' && pending.length > 0 && <div className="convo-state-pending">{pendingList}</div>}

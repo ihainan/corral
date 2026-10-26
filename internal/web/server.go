@@ -53,20 +53,21 @@ type Server struct {
 	routes   []Route
 	static   fs.FS
 
-	herdrSocks herdrSockets
-	herdrTimes herdrServers     // when each herdr server's agents last changed (shared by its watchers)
-	replies    paneReplies      // answers to agents in herdr panes
-	picks      pendingConns     // connections kept while the user picks what to open
-	opening    openSlots        // opens connecting or asking a host, per user
-	files      *sftpPool        // shared SFTP channels of the file panel
-	rec        *recState        // recordings being made, and their pruning
-	notifier   *notify.Notifier // nil disables push
-	fwd        *forwarder
-	code       codeServers
-	vis        visibility
-	waitAlerts waitAlerts  // "needs you" alerts shown, to replace when no longer true
-	complete   completions // the composer's completion listings, per session and folder
-	convos     convoStates // the conversation view's logs being read, per session
+	herdrSocks   herdrSockets
+	convoClaimed convoClaims      // (which Codex each conversation was found to be of)
+	herdrTimes   herdrServers     // when each herdr server's agents last changed (shared by its watchers)
+	replies      paneReplies      // answers to agents in herdr panes
+	picks        pendingConns     // connections kept while the user picks what to open
+	opening      openSlots        // opens connecting or asking a host, per user
+	files        *sftpPool        // shared SFTP channels of the file panel
+	rec          *recState        // recordings being made, and their pruning
+	notifier     *notify.Notifier // nil disables push
+	fwd          *forwarder
+	code         codeServers
+	vis          visibility
+	waitAlerts   waitAlerts  // "needs you" alerts shown, to replace when no longer true
+	complete     completions // the composer's completion listings, per session and folder
+	convos       convoStates // the conversation view's logs being read, per session
 
 	sockMu  sync.Mutex
 	socks   map[int64]map[*liveSocket]struct{} // open WebSockets per user, closed on sign-out

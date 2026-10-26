@@ -507,6 +507,8 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-meta { display: flex; gap: 12px; font-size: 12px; color: var(--term-fg-3); font-variant-numeric: tabular-nums; }
 .convo-meta .link-btn { font-size: 12px; color: var(--term-fg-3); }
 .convo-pending { opacity: 0.72; }
+/* (While it is being typed on the host: fainter still, so the wait shows) */
+.convo-pending.is-sending { opacity: 0.5; }
 
 .convo-md { min-width: 0; }
 .convo-md > :first-child { margin-top: 0; }

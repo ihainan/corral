@@ -344,6 +344,8 @@ func TestClaudeQueue(t *testing.T) {
 		`{"type":"queue-operation","operation":"enqueue","timestamp":"2026-10-24T09:00:05Z","content":"also the README"}`,
 		`{"type":"queue-operation","operation":"enqueue","timestamp":"2026-10-24T09:00:06Z","content":"<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n</task-notification>"}`,
 		`{"type":"queue-operation","operation":"enqueue","timestamp":"2026-10-24T09:00:07Z","content":"and commit"}`,
+		// (A subagent's report handed back to the session waits in the queue too: the agent's own, not the person's.)
+		`{"type":"queue-operation","operation":"enqueue","timestamp":"2026-10-24T09:00:08Z","content":"<agent-message from=\"a1\">\n[Subagent hand-back] The text below is the final report of a subagent...\n</agent-message>"}`,
 	))
 	if q := c.Queued(); len(q) != 2 || q[0].Text != "also the README" || q[1].Text != "and commit" || q[0].Time == "" {
 		t.Fatalf("queued: %+v", q)

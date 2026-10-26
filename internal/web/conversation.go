@@ -19,11 +19,13 @@ import (
 	"math"
 	"net/http"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/ihainan/corral/internal/convo"
@@ -179,7 +181,8 @@ rec() { # pid start fg procstart sid log agent
     anc="$anc$a:$(head -c 32 "/proc/$a/comm" 2>/dev/null | tr -d '\n' | tr -c 'A-Za-z0-9._+-' _),"
     i=$((i + 1))
   done
-  printf 'pid=%s\nstart=%s\nbtime=%s\nhz=%s\nfg=%s\nprocstart=%s\nsid=%s\nlog=%s\ntty=%s\nanc=%s\nagent=%s\n%s\0' "$1" "$2" "$btime" "$hz" "$3" "$4" "$5" "$6" "$tty" "$anc" "$7" "$env"
+  cwd=$(readlink "/proc/$1/cwd" 2>/dev/null | head -c 1024 | tr -d '\n')
+  printf 'pid=%s\nstart=%s\nbtime=%s\nhz=%s\nfg=%s\nprocstart=%s\nsid=%s\nlog=%s\ntty=%s\ncwd=%s\nanc=%s\nagent=%s\n%s\0' "$1" "$2" "$btime" "$hz" "$3" "$4" "$5" "$6" "$tty" "$cwd" "$anc" "$7" "$env"
 }
 # (Its start time and whether it is in front on its terminal: st, fg.)
 stat_of() {
@@ -207,6 +210,23 @@ for f in "$HOME"/.claude/sessions/*.json; do
     [ -f "$l" ] && { log=$l; break; }
   done
   rec "$pid" "$st" "$fg" "$ps" "$sid" "$log" claude
+done
+# What a log says of itself, from its head: where it was begun and when.
+# (What it says of itself is in its first line's payload: the line's own
+# timestamp is of when it was written, which a rewrite moves on.)
+meta_of() { head -n 1 "$1" 2>/dev/null | head -c 8192 | awk 'match($0, /"payload"[ ]*:[ ]*\{/) { print substr($0, RSTART + RLENGTH) }' | grep -o "\"$2\" *: *\"[^\"]*\"" | head -n 1 | sed 's/.*"\([^"]*\)"$/\1/'; }
+# Codex's app-server daemon keeps the logs of the conversations it runs (a
+# Codex begun by the npm package talks to it and keeps none open of its
+# own): each log it holds, with where that conversation was begun and when,
+# so that the Codex in a pane can be told which of them is its own.
+for d in /proc/[0-9]*; do
+  [ -O "$d" ] && [ "$(head -c 16 "$d/comm" 2>/dev/null)" = codex ] || continue
+  case $(codex_sub "${d#/proc/}") in app-server) ;; *) continue;; esac
+  for fd in "$d"/fd/*; do
+    l=$(readlink "$fd" 2>/dev/null) || continue
+    case $l in *"$nl"*) continue;; "$HOME"/.codex/sessions/*/rollout-*.jsonl) ;; *) continue;; esac
+    printf 'cand=%s\ncandcwd=%s\ncandts=%s\ncandmtime=%s\0' "$l" "$(meta_of "$l" cwd)" "$(meta_of "$l" timestamp)" "$(stat -c %Y "$l" 2>/dev/null)"
+  done
 done
 # Codex: a process of the user's named codex, its log the session file it
 # has open (rollout-<time>-<session id>.jsonl).
@@ -243,6 +263,32 @@ exit 0`
 	return "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(mode) + " " + sshx.QuoteShell(tmuxName) + " " + sshx.QuoteShell(tmuxPane)
 }
 
+// convoScreenCommand prints the pane's screen as it is now. Fixed script;
+// the mode, the validated pane and the herdr socket are its arguments.
+func convoScreenCommand(mode, pane, socket string) string {
+	script := `PATH="$HOME/.local/bin:$HOME/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+if [ "$1" = tmux ]; then tmux -u capture-pane -p -t "$2" 2>/dev/null 9>&-
+else HERDR_SOCKET_PATH=$3 herdr pane read "$2" --source visible 2>/dev/null 9>&-; fi`
+	return "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(mode) + " " + sshx.QuoteShell(pane) + " " + sshx.QuoteShell(socket)
+}
+
+// convoTailsCommand prints the end of each log, as "<path>\n<bytes>\n<the
+// end of it>" NUL-terminated records. Fixed script; the paths, already
+// matched against what a daemon keeps, are its arguments.
+func convoTailsCommand(logs []string) string {
+	script := `for l in "$@"; do
+  [ -f "$l" ] || continue
+  t=$(tail -c 16384 "$l" 2>/dev/null) || continue
+  printf '%s\n%s\0' "$l" "$t"
+done
+exit 0`
+	cmd := "sh -c " + sshx.QuoteShell(script) + " corral"
+	for _, l := range logs {
+		cmd += " " + sshx.QuoteShell(l)
+	}
+	return cmd
+}
+
 type convoProc struct {
 	pid, start    int64
 	fg            bool  // in front on its terminal: what is typed there reaches it
@@ -255,6 +301,7 @@ type convoProc struct {
 	tmuxServerPID string
 	tmuxPane      string
 	tty           string     // what its input is ("/dev/pts/3"; a pipe, or "", when it has no terminal)
+	cwd           string     // where it runs
 	anc           []convoAnc // its parent, the parent's parent… (to 40, not init)
 }
 
@@ -263,9 +310,31 @@ type convoAnc struct {
 	comm string
 }
 
+// convoCand is a log Codex's app-server daemon holds: a conversation it
+// runs for some Codex of the user's, which keeps none open itself.
+type convoCand struct {
+	log, cwd string
+	began    int64 // (unix milliseconds; 0 when its head did not say)
+	wrote    int64 // when it was last written to (unix milliseconds; 0 when not known)
+}
+
+// unescapeJSON reads a string as JSON wrote it (a path with a quote, a
+// backslash or a newline in it); what is no JSON string is kept as it is.
+func unescapeJSON(s string) string {
+	if !strings.Contains(s, `\`) {
+		return s
+	}
+	var out string
+	if json.Unmarshal([]byte(`"`+s+`"`), &out) == nil {
+		return out
+	}
+	return s
+}
+
 // convoLocated is what convoLocateCommand found.
 type convoLocated struct {
 	procs                          []convoProc
+	cands                          []convoCand
 	tmuxActive, tmuxPID, tmuxTitle string
 	tmuxTTY                        string // (the active pane's terminal)
 	paneTTY                        string // (the terminal of the pane asked of)
@@ -285,6 +354,36 @@ func parseConvoLocate(out string) (l convoLocated) {
 	for _, rec := range strings.Split(out, "\x00") {
 		if rec == "noproc" {
 			l.noProc = true
+			continue
+		}
+		if strings.HasPrefix(rec, "cand=") {
+			var c convoCand
+			var ts string
+			for _, line := range strings.Split(rec, "\n") {
+				k, v, ok := strings.Cut(line, "=")
+				if !ok {
+					continue
+				}
+				switch k {
+				case "cand":
+					c.log = v
+				case "candcwd":
+					c.cwd = v
+				case "candts":
+					ts = v
+				case "candmtime":
+					if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+						c.wrote = n * 1000
+					}
+				}
+			}
+			if t, err := time.Parse(time.RFC3339, ts); err == nil {
+				c.began = t.UnixMilli()
+			}
+			c.cwd = unescapeJSON(c.cwd)
+			if _, ok := cleanRemotePath(c.log); ok && c.cwd != "" {
+				l.cands = append(l.cands, c)
+			}
 			continue
 		}
 		if v, ok := strings.CutPrefix(rec, "panetty="); ok {
@@ -356,6 +455,8 @@ func parseConvoLocate(out string) (l convoLocated) {
 				p.tmuxPane = v
 			case "tty":
 				p.tty = v
+			case "cwd":
+				p.cwd = v
 			case "anc":
 				for _, a := range strings.Split(v, ",") {
 					pid, comm, ok := strings.Cut(a, ":")
@@ -410,6 +511,340 @@ func isDigits(s string) bool {
 		}
 	}
 	return true
+}
+
+// convoBound: the log and session this gateway found for that process when
+// it last read the pane's conversation, if it is still the one it reads.
+func (s *Server) convoBound(sess *term.Session, pane string, pid, start int64) (string, string) {
+	key := sess.ID + "\x00"
+	if sess.Persistence == "herdr" {
+		key += pane
+	}
+	st := s.convos.get(key)
+	defer st.done()
+	// (Not waited for: a read holds it while it asks the host, and what is
+	// to be typed is not to wait on that. Unheld, it is read anew.)
+	if !st.mu.TryLock() {
+		return "", ""
+	}
+	defer st.mu.Unlock()
+	if st.bind == nil || st.bind.PID != pid || st.bind.Start != start || st.log == "" || st.sid == "" {
+		return "", ""
+	}
+	return st.log, st.sid
+}
+
+// convoScreenTTL: how long what the pane shows is taken to still hold.
+const convoScreenTTL = 20 * time.Second
+
+// screenSays: which of the conversations a daemon keeps the Codex in the
+// pane is at, by what its screen shows of them — the one whose words are
+// on it. "" when its screen shows none of them (it may have scrolled, or
+// be showing only what is being typed): then what was told by where and
+// when the conversations began stands.
+//
+// This is what tells a Codex that has begun another conversation (/new):
+// its screen then shows that one's words, and the view follows it.
+func (s *Server) screenSays(ctx context.Context, sess *term.Session, pane string, p *convoProc, l convoLocated) (log, sid string) {
+	// (The ones written last, where there are many: what a screen shows is
+	// of one being written, or lately was.)
+	var cands []*convoCand
+	for i := range l.cands {
+		if l.cands[i].cwd == p.cwd {
+			cands = append(cands, &l.cands[i])
+		}
+	}
+	if len(cands) == 0 {
+		return "", ""
+	}
+	slices.SortFunc(cands, func(a, b *convoCand) int { return int(min(max(b.wrote-a.wrote, -1), 1)) })
+	if len(cands) > maxScreenLogs {
+		cands = cands[:maxScreenLogs]
+	}
+	wrote := map[string]int64{}
+	logs := make([]string, 0, len(cands))
+	for _, c := range cands {
+		logs = append(logs, c.log)
+		wrote[c.log] = c.wrote
+	}
+	target := pane
+	if sess.Persistence == "tmux" {
+		target = p.tmuxPane
+	}
+	out, err := sshx.Output(ctx, sess.Client(), convoScreenCommand(sess.Persistence, target, s.herdrSocks.get(sess.ID)), 256<<10)
+	if err != nil {
+		return "", "" // (no screen to go by)
+	}
+	screen := flatten(string(out))
+	if screen == "" {
+		return "", ""
+	}
+	tails, err := sshx.Output(ctx, sess.Client(), convoTailsCommand(logs), maxScreenLogs*(32<<10))
+	if err != nil {
+		return "", ""
+	}
+	best, bestOn := "", 0
+	for _, rec := range strings.Split(string(tails), "\x00") {
+		path, tail, ok := strings.Cut(rec, "\n")
+		if !ok || !slices.Contains(logs, path) {
+			continue
+		}
+		// (Its end: what came before the first line read whole is a line's
+		// middle, no JSON of its own, and is left out.)
+		if len(tail) >= convoTailBytes {
+			if i := strings.IndexByte(tail, '\n'); i >= 0 {
+				tail = tail[i+1:]
+			}
+		}
+		c := convo.NewCodex()
+		c.Feed([]byte(tail))
+		on := 0
+		seen := map[string]bool{}
+		for _, t := range lastSaid(c.Since(0), 8) {
+			if seen[t] { // (the same words again: one thing on the screen)
+				continue
+			}
+			seen[t] = true
+			if strings.Contains(screen, t) {
+				on++
+			}
+		}
+		// (As many of its words on the screen as another's: the one it is
+		// at now stays it, else the one written last.)
+		if on > bestOn || (on == bestOn && on > 0 && (path == p.log || (best != p.log && wrote[path] > wrote[best]))) {
+			best, bestOn = path, on
+		}
+	}
+	if bestOn == 0 {
+		return "", ""
+	}
+	return best, convoSessionOf(best)
+}
+
+// maxScreenLogs: how many of a daemon's conversations are held against one
+// screen; convoTailBytes: how much of the end of each is read (as the
+// script reads it).
+const (
+	maxScreenLogs  = 6
+	convoTailBytes = 16384
+)
+
+// lastSaid: up to n pieces of what was said lately in the conversation, as
+// a screen would hold them (what is long enough to tell one from another).
+func lastSaid(entries []convo.Entry, n int) []string {
+	var out []string
+	for i := len(entries) - 1; i >= 0 && len(out) < n; i-- {
+		e := entries[i]
+		if e.Role != convo.RoleUser && e.Role != convo.RoleAssistant {
+			continue
+		}
+		for _, p := range e.Parts {
+			if p.Kind != convo.KindText || p.Tool != nil {
+				continue
+			}
+			if t := flatten(p.Text); len([]rune(t)) >= 10 {
+				out = append(out, middle(t, 30))
+				break
+			}
+		}
+	}
+	return out
+}
+
+// middle: n runes from the middle of s (its start and end may be drawn
+// with other words around them).
+func middle(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	from := (len(r) - n) / 2
+	return string(r[from : from+n])
+}
+
+// flatten: a text as a screen holds it, without what the screen may have
+// put in it — colours, and the breaks and spaces of wrapping, anywhere in
+// it (a line wrapped in the middle of a word, or of a word in Chinese).
+func flatten(s string) string {
+	s = ansi.ReplaceAllString(s, "")
+	return strings.Map(func(r rune) rune {
+		if unicode.IsSpace(r) || r == 0xa0 || r == 0x200b {
+			return -1
+		}
+		return r
+	}, s)
+}
+
+var ansi = regexp.MustCompile(`\x1b\[[0-9;:?]*[A-Za-z]|\x1b\][^\x07\x1b]*(\x07|\x1b\\)?|\x1b[()][B0]`)
+
+// daemonLog gives a Codex that keeps no log of its own the one its
+// app-server daemon keeps for it (the npm package's Codex talks to such a
+// daemon, and keeps nothing open itself).
+//
+// A daemon keeps the logs of conversations long over as well, so which is
+// whose is told by where and when: a conversation is of the Codex that
+// started last before it began, where it began. Of several so told (a
+// Codex beginning another conversation, /new), the one written last. One
+// whose Codex is no longer there is of none; nor is one begun before every
+// Codex there started. Then nothing is shown rather than another's.
+func (s *Server) daemonLog(p *convoProc, l convoLocated) (took, refused bool) {
+	if p == nil || p.agent != "codex" || p.log != "" || p.cwd == "" || p.started <= 0 {
+		return false, false
+	}
+	alive := aliveCodex(l)
+	var best *convoCand
+	var bestSID string
+	for i := range l.cands {
+		c := &l.cands[i]
+		// Begun where this Codex runs, and after it started: one begun
+		// before it is another's.
+		if c.cwd != p.cwd || c.began <= 0 || c.began+convoBeganSlack < p.started {
+			continue
+		}
+		sid := convoSessionOf(c.log)
+		if sid == "" {
+			continue
+		}
+		// Another Codex there it could be of as well (one started before
+		// it began too): which is whose cannot be told. Neither takes it,
+		// then or later: once that other has ended, the one left is no
+		// more its owner than it was.
+		rival := false
+		for j := range l.procs {
+			q := &l.procs[j]
+			if q.pid != p.pid && q.agent == "codex" && q.cwd == c.cwd && q.started > 0 && c.began+convoBeganSlack >= q.started {
+				s.convoClaimed.contest(sid)
+				rival = true
+				break
+			}
+		}
+		if rival {
+			refused = true
+			continue
+		}
+		if best == nil || c.wrote > best.wrote || (c.wrote == best.wrote && c.began > best.began) {
+			best, bestSID = c, sid
+		}
+	}
+	if best == nil {
+		return false, refused
+	}
+	if !s.convoClaimed.take(bestSID, p.pid, p.started, alive) {
+		return false, true // (there is one, but it is another Codex's)
+	}
+	p.log, p.sid = best.log, bestSID
+	return true, refused
+}
+
+// convoClaims remembers which Codex each conversation was found to be of,
+// so that one left behind by a Codex that has ended is not taken for
+// another's, and that one which could be either of two is of neither ever
+// after. Bounded: when it is full, the conversations of Codexes long gone
+// are forgotten first, and what is left is forgotten rather than any of it
+// being opened up again — nothing more is taken then.
+type convoClaims struct {
+	mu   sync.Mutex
+	by   map[string]convoClaim
+	in   []string // (in the order they were claimed)
+	full bool     // it has been full: nothing is taken any more
+}
+
+// convoClaim: the Codex a conversation was found to be of (pid 0: of none,
+// it could be either of two), and when that Codex was last seen running.
+type convoClaim struct {
+	pid  int64
+	seen int64 // unix milliseconds
+}
+
+const maxConvoClaims = 4096
+
+// aliveCodex: the Codexes running now.
+func aliveCodex(l convoLocated) map[int64]bool {
+	alive := map[int64]bool{}
+	for i := range l.procs {
+		if l.procs[i].agent == "codex" {
+			alive[l.procs[i].pid] = true
+		}
+	}
+	return alive
+}
+
+// take: the conversation is taken as that process's own, if it may be — it
+// is of no other Codex, or of one that was already gone when this one
+// started (as a conversation resumed in a new Codex is). alive: the Codexes
+// running now, of which the one it is of, if there, is seen again. Looking
+// and taking are one, so that two readings cannot take the same one.
+func (c *convoClaims) take(sid string, pid, started int64, alive map[int64]bool) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	was, ok := c.by[sid]
+	if ok && was.pid != 0 && alive[was.pid] {
+		was.seen = time.Now().UnixMilli()
+		c.by[sid] = was
+	}
+	switch {
+	case c.full:
+		return false
+	case ok && was.pid == pid:
+		was.seen = time.Now().UnixMilli()
+		c.by[sid] = was
+		return true
+	case ok && was.pid == 0:
+		return false // (it could be either of two: of neither, ever after)
+	case ok && alive[was.pid]:
+		return false // (the Codex it is of is still at it)
+	case ok && started <= was.seen:
+		return false // (it was there beside the one it is of)
+	}
+	return c.set(sid, convoClaim{pid: pid, seen: time.Now().UnixMilli()})
+}
+
+// contest: it could be either of two Codexes, so it is of neither, ever
+// after (one of them ending makes the other no more its owner).
+func (c *convoClaims) contest(sid string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if was, ok := c.by[sid]; ok {
+		was.pid = 0
+		c.by[sid] = was
+		return
+	}
+	c.set(sid, convoClaim{})
+}
+
+// set keeps it, within what it holds; false when there is no room for
+// another and it was not kept. (Held: c.mu.)
+func (c *convoClaims) set(sid string, cl convoClaim) bool {
+	if c.by == nil {
+		c.by = map[string]convoClaim{}
+	}
+	if _, ok := c.by[sid]; !ok {
+		if len(c.in) >= maxConvoClaims {
+			c.full = true // (what was said of which is whose is no longer whole)
+			return false
+		}
+		c.in = append(c.in, sid)
+	}
+	c.by[sid] = cl
+	return true
+}
+
+// convoBeganSlack: how much before a Codex started its conversation may
+// seem to have begun. Both times come from the host's own clock, but when
+// a process started is known only to the second (the host's boot time is).
+const convoBeganSlack = 1_500
+
+// convoSessionOf: the session a Codex log is of, by its name.
+func convoSessionOf(log string) string {
+	name := strings.TrimSuffix(log[strings.LastIndexByte(log, '/')+1:], ".jsonl")
+	const n = len("00000000-0000-0000-0000-000000000000")
+	if len(name) < n+len("rollout-") || !strings.HasPrefix(name, "rollout-") {
+		return ""
+	}
+	if sid := name[len(name)-n:]; convoUUID.MatchString(sid) {
+		return sid
+	}
+	return ""
 }
 
 // pickConvoProc chooses the process running in the pane: for herdr, the
@@ -494,27 +929,38 @@ var convoGens atomic.Int64
 
 // convoState is what the gateway knows of one session's conversation.
 type convoState struct {
-	used     atomic.Int64 // unix nanoseconds of the last request
-	inUse    atomic.Int32 // requests holding it now: it is not let go meanwhile
-	mu       sync.Mutex
-	located  time.Time
-	pane     string // (herdr) the pane it was located for
-	reason   string // why there is nothing to read, when there is not
-	sid, log string
-	gen      int64      // changes when another log is read: what was shown does not apply
-	bind     *convoBind // the process the log is of, while there is one
-	parser   convo.Parser
-	agent    string // whose log: "claude" or "codex"
-	offset   int64  // read up to here
-	size     int64  // the log's size when last looked at
-	mtime    time.Time
-	older    bool   // the log has more before what was read
-	from     int64  // where in the log the first line read begins (-1 until a first line is whole)
-	more     bool   // the last read stopped before the end
-	status   string // (tmux) the process's own word: "busy", "idle", or "" when not known
-	skipping bool   // in a line too long to keep, until its end
-	long     []byte // a line longer than a read, so far, its images' data left out (nil when not in one)
-	strip    b64Strip
+	used    atomic.Int64 // unix nanoseconds of the last request
+	inUse   atomic.Int32 // requests holding it now: it is not let go meanwhile
+	mu      sync.Mutex
+	located time.Time
+	// guessed: whose conversation this is was told by where and when it
+	// began (a Codex whose log its daemon keeps), and by what the pane's
+	// screen showed of it: screenSID, of the process screenPID/screenStart,
+	// as it was at screenAt.
+	guessed     bool
+	screenAt    time.Time
+	screenPID   int64
+	screenStart int64
+	screenSID   string
+	screenLog   string
+	screenFrom  string // (the conversation it was taken for when the screen was asked)
+	pane        string // (herdr) the pane it was located for
+	reason      string // why there is nothing to read, when there is not
+	sid, log    string
+	gen         int64      // changes when another log is read: what was shown does not apply
+	bind        *convoBind // the process the log is of, while there is one
+	parser      convo.Parser
+	agent       string // whose log: "claude" or "codex"
+	offset      int64  // read up to here
+	size        int64  // the log's size when last looked at
+	mtime       time.Time
+	older       bool   // the log has more before what was read
+	from        int64  // where in the log the first line read begins (-1 until a first line is whole)
+	more        bool   // the last read stopped before the end
+	status      string // (tmux) the process's own word: "busy", "idle", or "" when not known
+	skipping    bool   // in a line too long to keep, until its end
+	long        []byte // a line longer than a read, so far, its images' data left out (nil when not in one)
+	strip       b64Strip
 }
 
 type convoStates struct {
@@ -576,8 +1022,12 @@ const convoNoSession = "00000000-0000-0000-0000-000000000000"
 
 // Reasons there is nothing to show.
 const (
-	convoNoAgent     = "no_agent"    // no Claude Code in the pane
-	convoNoLog       = "no_log"      // it has not written its log yet (a new conversation)
+	convoNoAgent = "no_agent" // no Claude Code in the pane
+	convoNoLog   = "no_log"   // it has not written its log yet (a new conversation)
+	// convoNotTold: which conversation the Codex in the pane is at cannot
+	// be told (its log is its daemon's, and what was taken for it is not
+	// what the pane shows).
+	convoNotTold     = "not_told"
 	convoUnsupported = "unsupported" // the host has no /proc, or the session is a plain shell
 )
 
@@ -718,6 +1168,7 @@ func (s *Server) locateConvo(ctx context.Context, sess *term.Session, st *convoS
 	l := parseConvoLocate(string(out))
 	st.located, st.pane = time.Now(), pane
 	sid, log, reason, agent := "", "", "", ""
+	guessed := false
 	switch {
 	case l.noProc:
 		reason = convoUnsupported
@@ -727,6 +1178,28 @@ func (s *Server) locateConvo(ctx context.Context, sess *term.Session, st *convoS
 			in = l.tmuxActive
 		}
 		p := pickConvoProc(l.procs, sess.Persistence, in, s.herdrSocks.get(sess.ID), l.tmuxPID, l.tmuxTTY, s.herdrSocks.sid(sess.ID, pane))
+		var refused bool
+		guessed, refused = s.daemonLog(p, l)
+		// What the pane shows has the last word on which conversation it
+		// is at: a Codex that has begun another (/new) shows that one's
+		// words. Asked of the host only now and then (what a screen shows
+		// changes slowly), and what it said stands until then — else what
+		// was told by where and when they began would take it back.
+		if guessed || refused {
+			// (Another process, or another conversation told by where and
+			// when they began — it has begun one since: what the screen
+			// said was of how things were, and is asked again.)
+			if st.screenPID != p.pid || st.screenStart != p.start || st.screenFrom != p.sid {
+				st.screenPID, st.screenStart, st.screenSID, st.screenLog, st.screenAt = p.pid, p.start, "", "", time.Time{}
+			}
+			if time.Since(st.screenAt) > convoScreenTTL {
+				st.screenAt, st.screenFrom = time.Now(), p.sid
+				st.screenLog, st.screenSID = s.screenSays(ctx, sess, pane, p, l)
+			}
+			if st.screenSID != "" && st.screenSID != p.sid && s.convoClaimed.take(st.screenSID, p.pid, p.started, aliveCodex(l)) {
+				p.log, p.sid, guessed = st.screenLog, st.screenSID, true
+			}
+		}
 		st.bind = nil
 		if p != nil {
 			b := &convoBind{PID: p.pid, Start: p.start, Session: p.sid, Agent: p.agent, Pane: p.herdrPane}
@@ -741,12 +1214,16 @@ func (s *Server) locateConvo(ctx context.Context, sess *term.Session, st *convoS
 		switch {
 		case p == nil:
 			reason = convoNoAgent
+		case p.log == "" && refused:
+			// (It has one: which of the ones its daemon keeps cannot be told.)
+			reason, sid, agent = convoNotTold, p.sid, p.agent
 		case p.log == "":
 			reason, sid, agent = convoNoLog, p.sid, p.agent
 		default:
 			sid, log, agent = p.sid, p.log, p.agent
 		}
 	}
+	st.guessed = guessed && log != ""
 	if sid != st.sid || log != st.log || agent != st.agent {
 		st.gen = convoGens.Add(1)
 		st.sid, st.log, st.agent = sid, log, agent
@@ -1058,6 +1535,23 @@ front() {
     # subcommand, as it was located.)
     if [ "$sid" = 00000000-0000-0000-0000-000000000000 ]; then
       [ -z "$cs" ] && [ -z "$any" ] || return 1
+    elif [ -z "$lg" ]; then
+      # (None of its own: its app-server daemon keeps it. That log is of
+      # this session and was begun where this process runs, as locating
+      # found it.)
+      # (Whose conversation it is was told when it was read, by where and
+      # when it began; here only that it is still one a Codex of ours runs.)
+      [ -z "$cs" ] || return 1
+      held=
+      for dd in /proc/[0-9]*; do
+        [ -O "$dd" ] && [ "$(head -c 16 "$dd/comm" 2>/dev/null)" = codex ] || continue
+        for fd in "$dd"/fd/*; do
+          l=$(readlink "$fd" 2>/dev/null) || continue
+          case $l in "$HOME"/.codex/sessions/*/rollout-*-"$sid".jsonl) held=1; break;; esac
+        done
+        [ -n "$held" ] && break
+      done
+      [ -n "$held" ] || return 1
     else
       case $lg in *-"$sid".jsonl) ;; *) return 1;; esac
       [ -z "$cs" ] && head -c 4096 "$lg" 2>/dev/null | grep -q '"originator": *"codex_exec"' && return 1
@@ -1411,6 +1905,16 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	socket := s.herdrSocks.get(sess.ID)
 	tty := l.paneTTY // (tmux: the pane's terminal, active or not)
 	front := pickConvoProc(l.procs, sess.Persistence, b.Pane, socket, l.tmuxPID, tty, s.herdrSocks.sid(sess.ID, b.Pane))
+	// A Codex whose log its daemon keeps: the session this gateway gave
+	// that very process when it read its conversation (not the one asked
+	// of it, which is no word on what the pane runs).
+	if front != nil && front.agent == "codex" && front.log == "" {
+		if log, sid := s.convoBound(sess, b.Pane, front.pid, front.start); sid != "" {
+			front.log, front.sid = log, sid
+		} else {
+			s.daemonLog(front, l)
+		}
+	}
 	if front == nil || front.pid != b.PID || front.start != b.Start || front.sid != b.Session {
 		reason = "agent_changed"
 		writeError(w, http.StatusConflict, "agent_changed", "that pane no longer runs this agent")
