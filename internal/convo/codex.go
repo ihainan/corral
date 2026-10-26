@@ -36,7 +36,10 @@ type Codex struct {
 	Skipped int
 }
 
-type codexOut struct{ text string }
+type codexOut struct {
+	text   string
+	failed bool
+}
 
 func NewCodex() *Codex { return &Codex{tools: map[string][]*Tool{}} }
 
@@ -95,7 +98,7 @@ func (c *Codex) Prepend(other Parser) {
 	}
 	for id, out := range c.orphans {
 		if ts, ok := o.tools[id]; ok {
-			o.answer(ts, out.text)
+			o.answer(ts, out.text, out.failed)
 			delete(c.orphans, id)
 		}
 	}
@@ -125,6 +128,15 @@ func (c *Codex) Prepend(other Parser) {
 	for id, ts := range o.tools {
 		if _, ok := c.tools[id]; !ok {
 			c.tools[id] = ts
+		}
+	}
+	// (What came back in o's part of calls before it: kept, for a part read before o.)
+	for id, out := range o.orphans {
+		if c.orphans == nil {
+			c.orphans = map[string]codexOut{}
+		}
+		if _, ok := c.orphans[id]; !ok && len(c.orphans) < maxOrphans {
+			c.orphans[id] = out
 		}
 	}
 	if len(add) == 0 {
@@ -359,20 +371,20 @@ func (c *Codex) item(r *codexRow, p *codexPayload) {
 			c.tools[id] = tools
 		}
 		if out, ok := c.orphans[id]; ok {
-			c.answer(tools, out.text)
+			c.answer(tools, out.text, out.failed)
 			delete(c.orphans, id)
 		}
 	case "custom_tool_call_output", "function_call_output":
-		text := codexOutput(p.Output)
+		text, failed := codexOutput(p.Output)
 		id := clip(p.CallID, maxID)
 		if ts, ok := c.tools[id]; ok {
-			c.answer(ts, text)
+			c.answer(ts, text, failed)
 			c.touch(ts) // (the call's entry changed)
 		} else if id != "" && len(c.orphans) < maxOrphans {
 			if c.orphans == nil {
 				c.orphans = map[string]codexOut{}
 			}
-			c.orphans[id] = codexOut{text}
+			c.orphans[id] = codexOut{text, failed}
 		}
 	}
 }
@@ -390,41 +402,54 @@ func (c *Codex) touch(ts []*Tool) {
 	}
 }
 
-func (c *Codex) answer(ts []*Tool, text string) {
-	for _, t := range ts {
+// answer: what came back of a call, on its first tool (a call's tools are
+// its file edits, or its one command): the rest only done.
+func (c *Codex) answer(ts []*Tool, text string, failed bool) {
+	for i, t := range ts {
 		t.Done = true
-		if t.Name == "Bash" || t.Name == "exec" || len(ts) == 1 {
+		if i == 0 {
 			t.Result, t.Truncated = cut(clean(text), maxResult)
 			t.ResultLines = lineCount(text)
 		}
-		if codexFailed.MatchString(text) {
-			t.Error = true
-		}
+		t.Error = failed || codexExit.MatchString(text)
 	}
 }
 
 var (
-	codexFailed = regexp.MustCompile(`^Script (failed|error)|(?m)^Process exited with code [1-9]`)
+	codexFailed = regexp.MustCompile(`^Script (failed|error)`)
+	codexExit   = regexp.MustCompile(`(?m)^Process exited with code [1-9]`)
 	codexHead   = regexp.MustCompile(`^Script (completed|failed)\nWall time [^\n]*\n(Output:\n)?`)
 )
 
 // codexOutput: what came back, as text (its "Script completed / Wall time"
-// lines left out).
-func codexOutput(raw json.RawMessage) string {
+// lines left out), and whether the script failed (as those lines said).
+func codexOutput(raw json.RawMessage) (string, bool) {
 	var parts []string
 	for _, b := range codexContent(raw) {
 		parts = append(parts, b.Text)
 	}
-	return codexHead.ReplaceAllString(strings.Join(parts, ""), "")
+	all := strings.Join(parts, "")
+	return codexHead.ReplaceAllString(all, ""), codexFailed.MatchString(all)
 }
 
 var (
 	jsString   = `"((?:[^"\\]|\\.)*)"`
 	execCmd    = regexp.MustCompile(`tools\.exec_command\(\{\s*"?cmd"?\s*:\s*` + jsString)
 	patchStr   = regexp.MustCompile(`"\*\*\* Begin Patch(?:[^"\\]|\\.)*"`)
+	patchTmpl  = regexp.MustCompile("`\\*\\*\\* Begin Patch(?:[^`\\\\]|\\\\.)*`")
 	patchFile  = regexp.MustCompile(`(?m)^\*\*\* (Update|Add|Delete) File: (.+)$`)
 	toolCalled = regexp.MustCompile(`tools\.([A-Za-z0-9_]+)\(`)
 )
+
+// jsTemplate reads a template literal without substitutions as its text.
+func jsTemplate(lit string) (string, bool) {
+	s := lit[1 : len(lit)-1]
+	if strings.Contains(s, "${") {
+		return "", false
+	}
+	r := strings.NewReplacer("\\`", "`", "\\\\", "\\", "\\$", "$")
+	return r.Replace(s), true
+}
 
 // jsUnquote reads a JavaScript string literal in double quotes as its text
 // (JSON's escapes, and \' for a quote).
@@ -442,15 +467,31 @@ func jsUnquote(lit string) (string, bool) {
 // for each file; anything else by its name.
 func codexTools(name, src string) []*Tool {
 	var out []*Tool
-	if lit := patchStr.FindString(src); lit != "" {
+	// (apply_patch called on its own: its input the patch.)
+	if name == "apply_patch" && strings.Contains(src, "*** Begin Patch") {
+		if out = patchTools(src); len(out) > 0 {
+			return out
+		}
+	}
+	for _, lit := range patchStr.FindAllString(src, 8) {
 		if patch, ok := jsUnquote(lit); ok {
 			out = append(out, patchTools(patch)...)
 		}
 	}
-	for _, m := range execCmd.FindAllStringSubmatch(src, 4) {
-		if cmd, ok := jsUnquote(`"` + m[1] + `"`); ok {
-			out = append(out, &Tool{Name: "Bash", Detail: clip(cmd, maxDetail)})
+	for _, lit := range patchTmpl.FindAllString(src, 8) {
+		if patch, ok := jsTemplate(lit); ok {
+			out = append(out, patchTools(patch)...)
 		}
+	}
+	// (Its commands, one line each, as one: what came back is of them all.)
+	var cmds []string
+	for _, m := range execCmd.FindAllStringSubmatch(src, 16) {
+		if cmd, ok := jsUnquote(`"` + m[1] + `"`); ok {
+			cmds = append(cmds, cmd)
+		}
+	}
+	if len(cmds) > 0 {
+		out = append(out, &Tool{Name: "Bash", Detail: clip(strings.Join(cmds, "\n"), maxDetail)})
 	}
 	if len(out) > 0 {
 		return out

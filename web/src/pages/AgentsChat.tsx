@@ -422,6 +422,9 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     // (Of these the gateway says only in English: said here.)
     if (e.code === 'refused') return t('convo.err.refused')
     if (e.code === 'picker') return t('convo.err.picker')
+    if (e.code === 'default_changed') return t('convo.err.defaultChanged')
+    if (e.code === 'draft') return t('convo.err.draft')
+    if (e.code === 'working') return t('convo.err.working')
     if (e.code === 'unknown') return t('convo.err.unknown')
     if (e.code === 'host_error' || e.code === 'unsupported' || e.code === 'bad_request') return t('convo.err.other')
     return errorText(e)
@@ -601,7 +604,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     [],
   )
   const field = useRef<HTMLTextAreaElement>(null)
-  const completion = useCompletion({ sessionId: sid, field, draft, setDraft, agent: row?.a.agent ?? 'claude', pane: herdr ? cur.pane : undefined })
+  const completion = useCompletion({ sessionId: sid, field, draft, setDraft, agent: row?.a.agent ?? (codex ? 'codex' : 'claude'), pane: herdr ? cur.pane : undefined })
   // (Another agent picked with the keyboard, or the page back in front: its
   // box takes the keys, as the terminal's does. Not from a dialog over it.)
   useEffect(() => {

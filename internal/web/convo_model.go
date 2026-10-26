@@ -3,6 +3,8 @@ package web
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -320,48 +322,62 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 	var running sync.WaitGroup // (steps whose command may still run on the host)
 	// The default model as it is now, put back after if changed (see withModel).
 	sctx, scancel := context.WithTimeout(ctx, 10*time.Second)
-	saved, err := sshx.Output(sctx, sess.Client(), settingsReadCommand, 1<<20+1)
+	saved, none, err := readSettings(sctx, sess)
 	scancel()
-	var was json.RawMessage
-	had := false
-	if err == nil && len(bytes.TrimSpace(saved)) > 0 {
-		was, _, _, had, err = topValue(saved, "model")
-	}
-	if err != nil || len(saved) > 1<<20 {
+	was, had, perr := settingsModel(saved, none)
+	if err != nil || perr != nil {
 		release()
 		*reason = "settings"
 		writeError(w, http.StatusBadGateway, "settings", "Claude Code's settings could not be read: nothing done")
 		return
 	}
 	checked := false
-	restore := func() bool {
-		rctx, rcancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	// restore: changed says it had changed; err that it could not be put back.
+	restore := func() (changed bool, err error) {
+		rctx, rcancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
 		defer rcancel()
-		now, err := sshx.Output(rctx, sess.Client(), settingsReadCommand, 1<<20+1)
-		if err != nil || len(bytes.TrimSpace(now)) == 0 {
-			return false
+		for try := 0; try < 2; try++ { // (changed again meanwhile: read once more)
+			now, none, err := readSettings(rctx, sess)
+			if err != nil {
+				return true, err // (not known: said so, not taken for unchanged)
+			}
+			cur, has, err := settingsModel(now, none)
+			if err != nil {
+				return true, err
+			}
+			if has == had && (!has || jsonSame(cur, was)) {
+				return changed, nil
+			}
+			changed = true
+			if none {
+				return true, errors.New("the settings are gone")
+			}
+			fixed, err := withModel(now, was, had)
+			if err != nil {
+				return true, err
+			}
+			running.Add(1)
+			_, err = sshx.Exec(rctx, sess.Client(), settingsWriteCommand(now, fixed), 4096, sshx.ExecOptions{Stdin: bytes.NewReader(fixed), Release: running.Done})
+			var exitErr *sshx.ExitError
+			if errors.As(err, &exitErr) && exitErr.Status == 9 {
+				continue
+			}
+			if err != nil {
+				return true, err
+			}
+			slog.Warn("model switch: the default model had changed; put back", "session", sess.ID)
+			return true, nil
 		}
-		cur, _, _, has, err := topValue(now, "model")
-		if err != nil || has == had && (!has || jsonSame(cur, was)) {
-			return false
-		}
-		fixed, err := withModel(now, was, had)
-		if err != nil {
-			slog.Warn("model switch: the default model changed and could not be put back", "session", sess.ID, "err", err)
-			return false
-		}
-		if _, err := sshx.Exec(rctx, sess.Client(), settingsWriteCommand, 4096, sshx.ExecOptions{Stdin: bytes.NewReader(fixed)}); err != nil {
-			slog.Warn("model switch: putting back the default model failed", "session", sess.ID, "err", err)
-			return false
-		}
-		slog.Warn("model switch: the default model had changed; put back", "session", sess.ID)
-		return true
+		return true, errors.New("the settings kept changing")
 	}
 	defer func() {
 		go func() {
 			running.Wait()
 			if !checked {
-				restore() // (given up: once its steps have ended)
+				if changed, err := restore(); changed && err != nil { // (given up: once its steps have ended)
+					slog.Error("model switch: the default model changed and could not be put back", "session", sess.ID, "err", err)
+				}
+				running.Wait()
 			}
 			release()
 		}()
@@ -399,22 +415,35 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 		return run(lctx, keys, text, read)
 	}
 	opts, err := modelFlow(step, leave, target)
-	restored := false
+	restored, restoreFailed := false, false
 	if ctx.Err() == nil {
 		running.Wait()
-		restored, checked = restore(), true
+		changed, rerr := restore()
+		running.Wait()
+		checked = true
+		restored, restoreFailed = changed && rerr == nil, changed && rerr != nil
+		if restoreFailed {
+			slog.Error("model switch: the default model changed and could not be put back", "session", sess.ID, "err", rerr)
+		}
 	}
-	if restored {
+	switch {
+	case restoreFailed:
+		*reason = "default_not_restored"
+	case restored:
 		*reason = "default_restored"
 	}
 	var exitErr *sshx.ExitError
 	switch {
+	case restoreFailed:
+		// (Above all else: the person is to know, and put it back.)
+		*outcome = "unknown"
+		writeError(w, http.StatusInternalServerError, "default_changed", "the default model of new sessions changed and could not be put back")
 	case err == nil:
 		*outcome = "typed"
 		if target == "" {
-			writeJSON(w, http.StatusOK, map[string]any{"models": opts, "restored": restored})
+			writeJSON(w, http.StatusOK, map[string]any{"models": opts, "restored": restored, "restore_failed": restoreFailed})
 		} else {
-			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "model": target, "restored": restored})
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "model": target, "restored": restored, "restore_failed": restoreFailed})
 		}
 	case errors.As(err, &exitErr) && exitErr.Status == 3:
 		*reason = "agent_changed"
@@ -448,16 +477,63 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 // was before: read before the flow, again after, and if it changed, that
 // one value restored, the rest of the file as it is then.
 
-// settingsReadCommand prints Claude Code's settings (nothing when there are none).
-const settingsReadCommand = `f="$HOME/.claude/settings.json"; [ -f "$f" ] && head -c 1048576 "$f"; exit 0`
+// settingsReadCommand prints Claude Code's settings ("none" when there are
+// none; through a link, the file it names); not read, it exits 5.
+const settingsReadCommand = `f="$HOME/.claude/settings.json"; [ -L "$f" ] && f=$(readlink -f "$f"); [ -e "$f" ] || { printf none; exit 0; }; head -c 1048577 "$f" || exit 5`
 
-// settingsWriteCommand replaces them with its input, in one step (its mode kept).
-const settingsWriteCommand = `f="$HOME/.claude/settings.json"; t="$f.corral.$$"; cp -p "$f" "$t" 2>/dev/null; cat >"$t" && mv -f "$t" "$f" || { rm -f "$t"; exit 4; }`
+// settingsWriteCommand replaces them with its input, in one step (its mode
+// kept), only if they are still those read ($1: their SHA-256; else exit
+// 9) and the input came whole ($2 its length, $3 its SHA-256; else 4).
+// Fixed; its arguments are hex digests and a number.
+func settingsWriteCommand(was []byte, now []byte) string {
+	script := `f="$HOME/.claude/settings.json"; [ -L "$f" ] && f=$(readlink -f "$f"); [ -f "$f" ] || exit 4
+sum() { sha256sum <"$1" | cut -d' ' -f1; }
+[ "$(sum "$f")" = "$1" ] || exit 9
+t="$f.corral.$$"
+cp -p "$f" "$t" || exit 4
+cat >"$t" || { rm -f "$t"; exit 4; }
+[ "$(wc -c <"$t" | tr -d ' ')" = "$2" ] && [ "$(sum "$t")" = "$3" ] || { rm -f "$t"; exit 4; }
+[ "$(sum "$f")" = "$1" ] || { rm -f "$t"; exit 9; }
+mv -f "$t" "$f" || { rm -f "$t"; exit 4; }`
+	a, b := sha256.Sum256(was), sha256.Sum256(now)
+	return "sh -c " + sshx.QuoteShell(script) + " corral " + hex.EncodeToString(a[:]) + " " + strconv.Itoa(len(now)) + " " + hex.EncodeToString(b[:])
+}
+
+const maxSettings = 1 << 20
+
+// readSettings: Claude Code's settings as they are (none: there are none).
+func readSettings(ctx context.Context, sess *term.Session) (doc []byte, none bool, err error) {
+	out, err := sshx.Output(ctx, sess.Client(), settingsReadCommand, maxSettings+16)
+	switch {
+	case err != nil:
+		return nil, false, err
+	case string(out) == "none":
+		return nil, true, nil
+	case len(out) > maxSettings:
+		return nil, false, errors.New("settings too long")
+	}
+	return out, false, nil
+}
+
+// settingsModel: the settings' top-level "model" (had false: none), or an
+// error when they are not one JSON object with at most one.
+func settingsModel(doc []byte, none bool) (json.RawMessage, bool, error) {
+	if none || len(bytes.TrimSpace(doc)) == 0 {
+		return nil, false, nil
+	}
+	v, _, _, had, err := topValue(doc, "model")
+	return v, had, err
+}
 
 // topValue finds a top-level key of a JSON object: its value as written,
 // and the span of the key and its value (from just after what comes before
 // it), or found false.
+//
+// doc must be one whole JSON object, the key in it at most once.
 func topValue(doc []byte, key string) (val json.RawMessage, from, to int, found bool, err error) {
+	if !json.Valid(doc) {
+		return nil, 0, 0, false, errors.New("not JSON")
+	}
 	dec := json.NewDecoder(bytes.NewReader(doc))
 	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
 		return nil, 0, 0, false, errors.New("not an object")
@@ -474,10 +550,13 @@ func topValue(doc []byte, key string) (val json.RawMessage, from, to int, found 
 			return nil, 0, 0, false, err
 		}
 		if k == key {
-			return v, start, int(dec.InputOffset()), true, nil
+			if found {
+				return nil, 0, 0, false, errors.New("the key twice")
+			}
+			val, from, to, found = v, start, int(dec.InputOffset()), true
 		}
 	}
-	return nil, 0, 0, false, nil
+	return val, from, to, found, nil
 }
 
 // withModel is doc with its top-level "model" as before (absent when absent
@@ -497,10 +576,10 @@ func withModel(doc []byte, before json.RawMessage, had bool) ([]byte, error) {
 		}
 		out = append(append(append([]byte{}, doc[:from+i+1]...), append([]byte(" "), before...)...), doc[to:]...)
 	case found:
-		// (Its key and value out, with the comma before it, or the one after when it is first.)
-		head := bytes.TrimRight(doc[:from], " \t\r\n")
-		if bytes.HasSuffix(head, []byte(",")) {
-			out = append(append([]byte{}, doc[:len(head)-1]...), doc[to:]...)
+		// (Its key and value out, with the comma before it (in its span, from
+		// just after the member before), or the one after when it is first.)
+		if bytes.HasPrefix(bytes.TrimLeft(doc[from:to], " \t\r\n"), []byte(",")) {
+			out = append(append([]byte{}, doc[:from]...), doc[to:]...)
 		} else {
 			rest := bytes.TrimLeft(doc[to:], " \t\r\n")
 			rest = bytes.TrimPrefix(rest, []byte(","))
@@ -508,7 +587,11 @@ func withModel(doc []byte, before json.RawMessage, had bool) ([]byte, error) {
 		}
 	case had:
 		i := bytes.IndexByte(doc, '{')
-		out = append(append(append([]byte{}, doc[:i+1]...), []byte("\n  \"model\": "+string(before)+",")...), doc[i+1:]...)
+		member := "\n  \"model\": " + string(before)
+		if !bytes.HasPrefix(bytes.TrimLeft(doc[i+1:], " \t\r\n"), []byte("}")) {
+			member += ","
+		}
+		out = append(append(append([]byte{}, doc[:i+1]...), member...), doc[i+1:]...)
 	default:
 		return doc, nil
 	}

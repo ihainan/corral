@@ -643,7 +643,8 @@ function Runs({ meta, active, mode, model }: { meta: ConvoMeta; active: boolean;
   // (Past the smaller window, the session has the larger one.)
   const windows = WINDOWS.filter((w) => w >= used || w === WINDOWS[WINDOWS.length - 1])
   return (
-    <div className="convo-runs" ref={box}>
+    // (The focus gone elsewhere, as by Tab, while the model menu is open, the list read or not: closed.)
+    <div className="convo-runs" ref={box} onBlur={(e) => open === 'model' && !box.current?.contains(e.relatedTarget as Node | null) && setOpen(false)}>
       {(mode?.now || meta.mode) &&
         (mode?.onNext ? (
           <button type="button" className="convo-runs-item convo-runs-mode is-switch" onClick={mode.onNext} disabled={mode.busy} aria-busy={mode.busy || undefined} title={t('convo.modeSwitch')}>

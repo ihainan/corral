@@ -337,7 +337,8 @@ export function asking(entries: ConvoEntry[]): boolean {
     const e = entries[i]
     if (e.role === 'note') continue
     const p = e.role === 'assistant' ? e.parts[e.parts.length - 1] : undefined
-    return !!p?.tool && p.tool.name === 'AskUserQuestion' && !p.tool.done
+    // (Claude Code's question; Codex's request for the person's input.)
+    return !!p?.tool && (p.tool.name === 'AskUserQuestion' || p.tool.name.startsWith('request_user_input')) && !p.tool.done
   }
   return false
 }

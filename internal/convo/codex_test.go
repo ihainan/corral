@@ -113,3 +113,42 @@ func TestCodexCompacted(t *testing.T) {
 		t.Fatalf("entries %+v meta %+v", es, c.Meta())
 	}
 }
+
+// review 236: a template literal's patch, apply_patch on its own, two
+// commands in one script (one tool, the output of both), a failed script.
+func TestCodexTools(t *testing.T) {
+	tmpl := "const p = `*** Begin Patch\n*** Update File: /p/t.go\n@@\n-a\n+b\n*** End Patch`; await tools.apply_patch(p);"
+	if ts := codexTools("exec", tmpl); len(ts) != 1 || ts[0].Name != "Edit" || ts[0].Detail != "/p/t.go" || ts[0].Add != 1 || ts[0].Del != 1 {
+		t.Errorf("template: %+v", ts)
+	}
+	raw := "*** Begin Patch\n*** Add File: /p/n.go\n+package p\n*** End Patch"
+	if ts := codexTools("apply_patch", raw); len(ts) != 1 || ts[0].Name != "Write" || ts[0].Detail != "/p/n.go" {
+		t.Errorf("apply_patch: %+v", ts)
+	}
+	two := `await tools.exec_command({cmd:"make a"}); await tools.exec_command({cmd:"make b"});`
+	if ts := codexTools("exec", two); len(ts) != 1 || ts[0].Detail != "make a\nmake b" {
+		t.Errorf("two commands: %+v", ts)
+	}
+	c := NewCodex()
+	c.Feed([]byte(codexLine(t, "response_item", map[string]any{"type": "custom_tool_call", "call_id": "k", "name": "exec", "input": two}) +
+		codexLine(t, "response_item", map[string]any{"type": "custom_tool_call_output", "call_id": "k", "output": []any{map[string]any{"type": "input_text", "text": "Script failed\nWall time 0 seconds\nOutput:\nReferenceError: x"}}})))
+	if tool := c.Since(0)[0].Parts[0].Tool; !tool.Done || !tool.Error || tool.Result != "ReferenceError: x" {
+		t.Errorf("failed: %+v", tool)
+	}
+}
+
+// Three parts read newest first: a call in the oldest, its output in the middle one.
+func TestCodexPrependTwice(t *testing.T) {
+	call := codexLine(t, "response_item", map[string]any{"type": "custom_tool_call", "call_id": "z", "name": "exec", "input": `await tools.exec_command({cmd:"ls"})`})
+	out := codexLine(t, "response_item", map[string]any{"type": "custom_tool_call_output", "call_id": "z", "output": []any{map[string]any{"type": "input_text", "text": "a b"}}})
+	last := codexLine(t, "response_item", map[string]any{"type": "message", "id": "m", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": "done"}}})
+	c, mid, old := NewCodex(), NewCodex(), NewCodex()
+	c.Feed([]byte(last))
+	mid.Feed([]byte(out))
+	c.Prepend(mid)
+	old.Feed([]byte(call))
+	c.Prepend(old)
+	if tool := c.Since(0)[0].Parts[0].Tool; !tool.Done || tool.Result != "a b" {
+		t.Errorf("not filled in: %+v", tool)
+	}
+}

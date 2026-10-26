@@ -46,18 +46,23 @@ const (
 
 // b64Strip leaves out of a line, written to it in parts, the base64 an
 // image carries: a "data" string longer than b64Run that is base64 alone
-// (an image block's source, a tool result's), emptied. Any other "data"
-// string is kept as it was, so what is left stays the JSON it was: only
-// base64 characters, which need no escaping, are ever left out.
+// (Claude Code's image blocks and tool results), or the base64 of an
+// "image_url" data address ("data:image/png;base64,…": Codex's), emptied of
+// it. Any other string is kept as it was, so what is left stays the JSON it
+// was: only base64 characters, which need no escaping, are ever left out.
 type b64Strip struct {
-	inData   bool   // in a "data" string, while it may be base64
+	inData   bool   // in such a string, while it may be base64
+	url      bool   // (an image_url: its "data:…;base64," first)
 	held     []byte // what of it is held, until it is known whether it is
 	dropping bool   // it is: left out, to its closing quote
 }
 
 const b64Run = 4096
 
-var dataKey = []byte(`"data":"`)
+var (
+	dataKey = []byte(`"data":"`)
+	urlKey  = []byte(`"image_url":"`)
+)
 
 func isB64(c byte) bool {
 	return c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '+' || c == '/' || c == '='
@@ -65,6 +70,22 @@ func isB64(c byte) bool {
 
 func (b *b64Strip) write(dst, src []byte) []byte {
 	for len(src) > 0 {
+		if b.inData && b.url {
+			// (Its address's head, kept, to ";base64,"; not that, a string kept as it is.)
+			c := src[0]
+			if c == '"' || c == '\\' || len(b.held) > 100 {
+				dst = append(dst, b.held...)
+				b.inData, b.url, b.held = false, false, b.held[:0]
+				continue
+			}
+			b.held = append(b.held, c)
+			src = src[1:]
+			if bytes.HasSuffix(b.held, []byte(";base64,")) && bytes.HasPrefix(b.held, []byte("data:")) {
+				dst = append(dst, b.held...)
+				b.url, b.held = false, b.held[:0]
+			}
+			continue
+		}
 		if b.inData {
 			n := 0
 			for n < len(src) && isB64(src[n]) {
@@ -93,8 +114,10 @@ func (b *b64Strip) write(dst, src []byte) []byte {
 		}
 		dst = append(dst, src[:i+1]...)
 		src = src[i+1:]
-		if bytes.HasSuffix(dst, dataKey) && (len(dst) == len(dataKey) || dst[len(dst)-len(dataKey)-1] != '\\') {
-			b.inData = true
+		for _, k := range [][]byte{dataKey, urlKey} {
+			if bytes.HasSuffix(dst, k) && (len(dst) == len(k) || dst[len(dst)-len(k)-1] != '\\') {
+				b.inData, b.url = true, bytes.Equal(k, urlKey)
+			}
 		}
 	}
 	return dst
@@ -105,7 +128,7 @@ func (b *b64Strip) end(dst []byte) []byte {
 	if b.inData && !b.dropping {
 		dst = append(dst, b.held...)
 	}
-	b.inData, b.dropping, b.held = false, false, b.held[:0]
+	b.inData, b.url, b.dropping, b.held = false, false, false, b.held[:0]
 	return dst
 }
 
@@ -179,13 +202,16 @@ for f in "$HOME"/.claude/sessions/*.json; do
 done
 # Codex: a process of the user's named codex, its log the session file it
 # has open (rollout-<time>-<session id>.jsonl).
+# (Not one run with exec: no conversation to type into. Of several logs
+# open, the one written last.)
 for d in /proc/[0-9]*; do
   [ -O "$d" ] && [ "$(head -c 16 "$d/comm" 2>/dev/null)" = codex ] || continue
+  case $(tr '\0' '\n' <"$d/cmdline" 2>/dev/null | sed -n 2p) in exec|e) continue;; esac
   pid=${d#/proc/}
   log=
   for fd in "$d"/fd/*; do
     l=$(readlink "$fd" 2>/dev/null) || continue
-    case $l in *"$nl"*) continue;; "$HOME"/.codex/sessions/*/rollout-*.jsonl) log=$l; break;; esac
+    case $l in *"$nl"*) continue;; "$HOME"/.codex/sessions/*/rollout-*.jsonl) { [ -z "$log" ] || [ "$l" -nt "$log" ]; } && log=$l;; esac
   done
   [ -n "$log" ] || continue
   sid=$(printf '%s' "${log%.jsonl}" | grep -o '[0-9a-fA-F]\{8\}-[0-9a-fA-F]\{4\}-[0-9a-fA-F]\{4\}-[0-9a-fA-F]\{4\}-[0-9a-fA-F]\{12\}$')
@@ -982,17 +1008,19 @@ front() {
   [ -n "$pgrp" ] && [ "$pgrp" = "$tpgid" ] || return 1
   if [ "$mode" = tmux ]; then k=TMUX_PANE; else k=HERDR_PANE_ID; fi
   tr '\0' '\n' <"/proc/$pid/environ" 2>/dev/null | grep -qxF "$k=$p" || return 1
-  if [ -f "$HOME/.claude/sessions/$pid.json" ]; then
+  if [ "$(head -c 16 "/proc/$pid/comm" 2>/dev/null)" = codex ]; then
+    # (Codex, not run with exec: the session's log is the one it has open
+    # and wrote last, as locating chose it.)
+    case $(tr '\0' '\n' <"/proc/$pid/cmdline" 2>/dev/null | sed -n 2p) in exec|e) return 1;; esac
+    lg=
+    for fd in /proc/$pid/fd/*; do
+      l=$(readlink "$fd" 2>/dev/null) || continue
+      case $l in "$HOME"/.codex/sessions/*/rollout-*.jsonl) { [ -z "$lg" ] || [ "$l" -nt "$lg" ]; } && lg=$l;; esac
+    done
+    case $lg in *-"$sid".jsonl) ;; *) return 1;; esac
+  else
     c=$(head -c 65536 "$HOME/.claude/sessions/$pid.json" 2>/dev/null | tr -d '\n')
     [ "$(printf '%s' "$c" | grep -o '"sessionId" *: *"[0-9a-fA-F-]*"' | head -n 1 | sed 's/.*"\([0-9a-fA-F-]*\)"$/\1/')" = "$sid" ] || return 1
-  else
-    # (Codex: the session's log is open in it.)
-    [ "$(head -c 16 "/proc/$pid/comm" 2>/dev/null)" = codex ] || return 1
-    o=0
-    for fd in /proc/$pid/fd/*; do
-      case $(readlink "$fd" 2>/dev/null) in "$HOME"/.codex/sessions/*/rollout-*-"$sid".jsonl) o=1; break;; esac
-    done
-    [ "$o" = 1 ] || return 1
   fi
   if [ "$mode" = tmux ]; then
     tty=$(tmux -u display-message -p -t "$p" '#{pane_tty}' 2>/dev/null 9>&-)

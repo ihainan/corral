@@ -89,3 +89,19 @@ func TestB64StripKeepsOtherData(t *testing.T) {
 		}
 	}
 }
+
+// Codex's images: an image_url data address, its base64 out, its head kept.
+func TestB64StripImageURL(t *testing.T) {
+	data := strings.Repeat("iVBORw0KGgo", 3000)
+	line := `{"type":"input_image","image_url":"data:image/png;base64,` + data + `"},{"type":"input_text","text":"look","image_url":"https://example.com/a.png"}`
+	var b b64Strip
+	var out []byte
+	for i := 0; i < len(line); i += 4096 {
+		out = b.write(out, []byte(line[i:min(len(line), i+4096)]))
+	}
+	out = b.end(out)
+	want := `{"type":"input_image","image_url":"data:image/png;base64,"},{"type":"input_text","text":"look","image_url":"https://example.com/a.png"}`
+	if string(out) != want {
+		t.Fatalf("got %.300s", out)
+	}
+}
