@@ -107,6 +107,14 @@ func TestPickConvoProcStartedInside(t *testing.T) {
 	if p := pickConvoProc([]convoProc{tAgent, tOther}, "tmux", "%3", "", "42", "/dev/pts/3", ""); p == nil || p.pid != 100 {
 		t.Errorf("tmux: %+v", p)
 	}
+	// Only one there, and not the pane's own (the agent gone, what it ran
+	// left): none, herdr or tmux.
+	if p := pickConvoProc([]convoProc{inTmux}, "herdr", "w1:p1", sock, "", "", "00000000-0000-0000-0000-000000000000"); p != nil {
+		t.Errorf("herdr, only one not under herdr: %+v", p)
+	}
+	if p := pickConvoProc([]convoProc{tOther}, "tmux", "%3", "", "42", "/dev/pts/3", ""); p != nil {
+		t.Errorf("tmux, only one on another terminal: %+v", p)
+	}
 	// (Its terminal not known: the one started last, as before.)
 	if p := pickConvoProc([]convoProc{tAgent, tOther}, "tmux", "%3", "", "42", "", ""); p == nil || p.pid != 300 {
 		t.Errorf("tmux, no terminal known: %+v", p)
@@ -114,8 +122,8 @@ func TestPickConvoProcStartedInside(t *testing.T) {
 }
 
 func TestConvoLocateCommandQuotesArguments(t *testing.T) {
-	cmd := convoLocateCommand("tmux", "a'b; rm -rf ~")
-	if !strings.HasSuffix(cmd, ` corral 'tmux' 'a'\''b; rm -rf ~'`) {
+	cmd := convoLocateCommand("tmux", "a'b; rm -rf ~", "")
+	if !strings.HasSuffix(cmd, ` corral 'tmux' 'a'\''b; rm -rf ~' ''`) {
 		t.Fatalf("arguments not quoted: %s", cmd[len(cmd)-60:])
 	}
 }

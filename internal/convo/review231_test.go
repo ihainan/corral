@@ -69,3 +69,21 @@ func TestReview231BranchCleared(t *testing.T) {
 		t.Fatalf("not filled in: %q", b)
 	}
 }
+
+// Compacted, as a part read before says: the part before that does not bring the old number back.
+func TestReview232ContextThroughPrepend(t *testing.T) {
+	c := NewClaude()
+	c.Feed([]byte(`{"type":"user","uuid":"u9","message":{"role":"user","content":"now"}}
+`))
+	mid := NewClaude()
+	mid.Feed([]byte(`{"type":"user","uuid":"u5","isCompactSummary":true,"message":{"role":"user","content":"summary"}}
+`))
+	c.Prepend(mid)
+	old := NewClaude()
+	old.Feed([]byte(`{"type":"assistant","uuid":"a1","message":{"role":"assistant","model":"m","content":[{"type":"text","text":"x"}],"usage":{"input_tokens":100000}}}
+`))
+	c.Prepend(old)
+	if n := c.Meta().Context; n != 0 {
+		t.Fatalf("context %d", n)
+	}
+}

@@ -44,46 +44,44 @@ const (
 	convoLongMax   = 1 << 20          // a line longer than a read, once its images' data is left out, kept up to this
 )
 
-// b64Strip leaves out of a line, written to it in parts, every run of
-// base64 characters longer than b64Run (an image's data: text has spaces
-// and punctuation far more often). What is left of a JSON line stays JSON:
-// the run is all inside one string.
+// b64Strip leaves out of a line, written to it in parts, what the "data"
+// strings hold (an image's base64: an image block's source, and a tool
+// result's). What is left of a JSON line stays JSON: the string is there,
+// empty. Base64 has no quote or backslash, so the string ends at the next
+// quote.
 type b64Strip struct {
-	run      []byte // the run so far, while it may still be short enough to keep
-	dropping bool   // in a run too long, until its end
+	inData bool // in a "data" string, until its closing quote
 }
 
-const b64Run = 4096
-
-func isB64(c byte) bool {
-	return c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '+' || c == '/' || c == '='
-}
+var dataKey = []byte(`"data":"`)
 
 func (b *b64Strip) write(dst, src []byte) []byte {
-	for _, c := range src {
-		if isB64(c) {
-			if !b.dropping {
-				if b.run = append(b.run, c); len(b.run) > b64Run {
-					b.run, b.dropping = b.run[:0], true
-				}
+	for len(src) > 0 {
+		if b.inData {
+			i := bytes.IndexByte(src, '"')
+			if i < 0 {
+				return dst
 			}
+			b.inData = false
+			src = src[i:] // (its closing quote is kept)
 			continue
 		}
-		if !b.dropping {
-			dst = append(dst, b.run...)
+		i := bytes.IndexByte(src, '"')
+		if i < 0 {
+			return append(dst, src...)
 		}
-		b.run, b.dropping = b.run[:0], false
-		dst = append(dst, c)
+		dst = append(dst, src[:i+1]...)
+		src = src[i+1:]
+		if bytes.HasSuffix(dst, dataKey) {
+			b.inData = true
+		}
 	}
 	return dst
 }
 
-// end gives what is held of a run at the line's end.
+// end: the line has ended.
 func (b *b64Strip) end(dst []byte) []byte {
-	if !b.dropping {
-		dst = append(dst, b.run...)
-	}
-	b.run, b.dropping = b.run[:0], false
+	b.inData = false
 	return dst
 }
 
@@ -97,16 +95,21 @@ func (b *b64Strip) end(dst []byte) []byte {
 // tmux pane it runs in, the terminal its input is (/proc/<pid>/fd/0) and
 // its ancestors (pid and name, nearest first). With mode "tmux" a first
 // record gives the active pane of the named tmux session, its server's pid
-// and the pane's title, a second the pane's terminal. Linux only (/proc):
+// and the pane's title, a second the pane's terminal; given a pane
+// (tmuxPane, validated), a third that pane's terminal. Linux only (/proc):
 // elsewhere it prints the record "noproc". Fixed script; the mode and the
 // validated tmux session name are its only arguments.
-func convoLocateCommand(mode, tmuxName string) string {
+func convoLocateCommand(mode, tmuxName, tmuxPane string) string {
 	script := `PATH="$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 if [ "$1" = tmux ]; then
   t=$(tmux -u display-message -p -t "=$2:" '#{pane_id} #{pid} #{pane_title}' 2>/dev/null | head -c 600 | tr -d '\n')
   printf 'tmux=%s\0' "$t"
   t=$(tmux -u display-message -p -t "=$2:" '#{pane_tty}' 2>/dev/null | head -c 200 | tr -d '\n')
   printf 'tmuxtty=%s\0' "$t"
+  if [ -n "$3" ]; then
+    t=$(tmux -u display-message -p -t "$3" '#{pane_tty}' 2>/dev/null | head -c 200 | tr -d '\n')
+    printf 'panetty=%s\0' "$t"
+  fi
 fi
 [ -r /proc/self/stat ] || { printf 'noproc\0'; exit 0; }
 nl=$(printf '\nx'); nl=${nl%x}
@@ -144,7 +147,7 @@ for f in "$HOME"/.claude/sessions/*.json; do
   printf 'pid=%s\nstart=%s\nbtime=%s\nhz=%s\nfg=%s\nprocstart=%s\nsid=%s\nlog=%s\ntty=%s\nanc=%s\n%s\0' "$pid" "$start" "$btime" "$hz" "$fg" "$ps" "$sid" "$log" "$tty" "$anc" "$env"
 done
 exit 0`
-	return "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(mode) + " " + sshx.QuoteShell(tmuxName)
+	return "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(mode) + " " + sshx.QuoteShell(tmuxName) + " " + sshx.QuoteShell(tmuxPane)
 }
 
 type convoProc struct {
@@ -171,6 +174,7 @@ type convoLocated struct {
 	procs                          []convoProc
 	tmuxActive, tmuxPID, tmuxTitle string
 	tmuxTTY                        string // (the active pane's terminal)
+	paneTTY                        string // (the terminal of the pane asked of)
 	noProc                         bool   // the host has no /proc
 }
 
@@ -192,6 +196,12 @@ func parseConvoLocate(out string) (l convoLocated) {
 		if v, ok := strings.CutPrefix(rec, "tmuxtty="); ok {
 			if strings.HasPrefix(v, "/dev/") && !strings.ContainsAny(v, " \n") {
 				l.tmuxTTY = v
+			}
+			continue
+		}
+		if v, ok := strings.CutPrefix(rec, "panetty="); ok {
+			if strings.HasPrefix(v, "/dev/") && !strings.ContainsAny(v, " \n") {
+				l.paneTTY = v
 			}
 			continue
 		}
@@ -293,16 +303,26 @@ func isDigits(s string) bool {
 // pane (pane) of the herdr server the session is attached to; for tmux,
 // the pane (pane: the active one, or the one asked of) of the session's
 // tmux server. A Claude Code started from inside the pane (by the agent, as
-// a command or in a terminal of its own) has the pane's variables too; of
-// several, by this order:
+// a command or in a terminal of its own) has the pane's variables too, so
+// only one that is the pane's own counts: under herdr (a herdr process
+// among its ancestors), or (tmux) with the pane's terminal (paneTTY) as its
+// input, where that is known. Of several, by this order:
 //   - the one whose session is want (what herdr says the pane runs; "" when
 //     it says none);
-//   - one that is the pane's own: under herdr (a herdr process among its
-//     ancestors), or (tmux) with the pane's terminal (paneTTY, when known)
-//     as its input;
 //   - one not started under another of them (the agent, not what it ran);
 //   - the one started last.
 func pickConvoProc(procs []convoProc, persistence, pane, herdrSocket, tmuxPID, paneTTY, want string) *convoProc {
+	own := func(p *convoProc) bool {
+		if persistence == "tmux" {
+			return paneTTY == "" || p.tty == paneTTY
+		}
+		for _, a := range p.anc {
+			if a.comm == "herdr" {
+				return true
+			}
+		}
+		return false
+	}
 	var in []*convoProc
 	for i := range procs {
 		p := &procs[i]
@@ -318,18 +338,9 @@ func pickConvoProc(procs []convoProc, persistence, pane, herdrSocket, tmuxPID, p
 		default:
 			continue
 		}
-		in = append(in, p)
-	}
-	own := func(p *convoProc) bool {
-		if persistence == "tmux" {
-			return paneTTY != "" && p.tty == paneTTY
+		if own(p) {
+			in = append(in, p)
 		}
-		for _, a := range p.anc {
-			if a.comm == "herdr" {
-				return true
-			}
-		}
-		return false
 	}
 	under := func(p *convoProc) bool {
 		for _, q := range in {
@@ -342,10 +353,10 @@ func pickConvoProc(procs []convoProc, persistence, pane, herdrSocket, tmuxPID, p
 		return false
 	}
 	// (Higher first, in that order.)
-	rank := func(p *convoProc) [3]bool {
-		return [3]bool{want != "" && p.sid == want, own(p), !under(p)}
+	rank := func(p *convoProc) [2]bool {
+		return [2]bool{want != "" && p.sid == want, !under(p)}
 	}
-	ahead := func(a, b [3]bool) bool {
+	ahead := func(a, b [2]bool) bool {
 		for k := range a {
 			if a[k] != b[k] {
 				return a[k]
@@ -354,7 +365,7 @@ func pickConvoProc(procs []convoProc, persistence, pane, herdrSocket, tmuxPID, p
 		return false
 	}
 	var best *convoProc
-	var bestRank [3]bool
+	var bestRank [2]bool
 	for _, p := range in {
 		if r := rank(p); best == nil || ahead(r, bestRank) || r == bestRank && p.start > best.start {
 			best, bestRank = p, r
@@ -572,7 +583,7 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 // locateConvo finds the log of the Claude Code session in the pane; a
 // different one from before starts a new generation.
 func (s *Server) locateConvo(ctx context.Context, sess *term.Session, st *convoState, pane string) error {
-	out, err := sshx.Output(ctx, sess.Client(), convoLocateCommand(sess.Persistence, sess.TmuxSession), convoLocateMax)
+	out, err := sshx.Output(ctx, sess.Client(), convoLocateCommand(sess.Persistence, sess.TmuxSession, ""), convoLocateMax)
 	// (The script ends with exit 0: an error is a scan cut short, by its size
 	// or a failure, which may leave out the agent started last. What was
 	// found before stays, rather than a part of it.)
@@ -658,7 +669,7 @@ func (s *Server) readConvo(sess *term.Session, st *convoState) (more bool, err e
 				st.offset, st.older, st.skipping, st.from = size-convoTail, true, true, -1
 				// The name the person gave it may be further back than what
 				// is read: its latest, looked for in all of it, first.
-				if line := convoCustomTitle(sess, st.log); line != nil {
+				if line := convoCustomTitle(sess, st.log, st.sid); line != nil {
 					st.parser.Feed(line)
 				}
 			}
@@ -719,24 +730,42 @@ func (s *Server) readConvo(sess *term.Session, st *convoState) (more bool, err e
 }
 
 // convoCustomTitle finds the last "custom-title" row of a log (the name
-// given with /rename), with its line end; nil when there is none or it
-// cannot be told. grep goes through a log of hundreds of MB in well under a
-// second.
-func convoCustomTitle(sess *term.Session, log string) []byte {
+// given with /rename) of session sid, as a line to feed the parser; nil
+// when there is none or it cannot be told. grep goes through a log of
+// hundreds of MB in well under a second.
+func convoCustomTitle(sess *term.Session, log, sid string) []byte {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	out, err := sshx.Output(ctx, sess.Client(), convoTitleCommand(log), 65536)
-	line := bytes.TrimSpace(out)
-	if err != nil || !bytes.HasPrefix(line, []byte("{")) || !bytes.HasSuffix(line, []byte("}")) {
+	if err != nil {
+		return nil
+	}
+	return customTitleLine(out, sid)
+}
+
+// customTitleLine: the row, if it is one (a row of its own, not the words
+// inside another's), of that session.
+func customTitleLine(out []byte, sid string) []byte {
+	var r struct {
+		Type        string `json:"type"`
+		CustomTitle string `json:"customTitle"`
+		SessionID   string `json:"sessionId"`
+	}
+	if json.Unmarshal(bytes.TrimSpace(out), &r) != nil || r.Type != "custom-title" || (r.SessionID != "" && r.SessionID != sid) {
+		return nil
+	}
+	line, err := json.Marshal(map[string]string{"type": r.Type, "customTitle": r.CustomTitle})
+	if err != nil {
 		return nil
 	}
 	return append(line, '\n')
 }
 
 // convoTitleCommand: fixed, the log's path (one locateConvo found, under
-// .claude/projects/) its only argument.
+// .claude/projects/) its only argument. Rows Claude Code writes for a name
+// begin so; a tool's input that holds the words does not.
 func convoTitleCommand(log string) string {
-	return "LC_ALL=C grep -a -F '\"type\":\"custom-title\"' " + sshx.QuoteShell(log) + " 2>/dev/null | tail -n 1 | head -c 65536"
+	return "LC_ALL=C grep -a '^{\"type\":\"custom-title\"' " + sshx.QuoteShell(log) + " 2>/dev/null | tail -n 1 | head -c 65536"
 }
 
 // readOlder reads in the part of the log before what was read: up to
@@ -1098,7 +1127,11 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	}
 	defer func() { turn() }()
 
-	out, err := sshx.Output(ctx, sess.Client(), convoLocateCommand(sess.Persistence, sess.TmuxSession), convoLocateMax)
+	tmuxTarget := "" // (the pane's own terminal, for whether a process is the pane's)
+	if sess.Persistence == "tmux" {
+		tmuxTarget = b.Pane
+	}
+	out, err := sshx.Output(ctx, sess.Client(), convoLocateCommand(sess.Persistence, sess.TmuxSession, tmuxTarget), convoLocateMax)
 	if errors.Is(err, sshx.ErrBusy) {
 		reason = "busy"
 		writeError(w, http.StatusTooManyRequests, "busy", "the host is still answering earlier requests")
@@ -1119,10 +1152,7 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	// restart, is not the one the press was asked for.
 	l := parseConvoLocate(string(out))
 	socket := s.herdrSocks.get(sess.ID)
-	tty := "" // (the pane's terminal: known of the active pane only)
-	if l.tmuxActive == b.Pane {
-		tty = l.tmuxTTY
-	}
+	tty := l.paneTTY // (tmux: the pane's terminal, active or not)
 	front := pickConvoProc(l.procs, sess.Persistence, b.Pane, socket, l.tmuxPID, tty, s.herdrSocks.sid(sess.ID, b.Pane))
 	if front == nil || front.pid != b.PID || front.start != b.Start || front.sid != b.Session {
 		reason = "agent_changed"

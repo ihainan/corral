@@ -32,6 +32,9 @@ type herdrAgent struct {
 	Status string `json:"status"`
 	Title  string `json:"title"`
 	Cwd    string `json:"cwd"`
+	// Session is the agent's own id of what runs there (Claude Code's
+	// session id), as herdr's integration reports it, when it does.
+	Session string `json:"session,omitempty"`
 	// Since is when its status last changed, as this gateway saw it (unix
 	// milliseconds): when it was first seen, for one that has not changed
 	// since the gateway began watching.
@@ -181,7 +184,7 @@ func summarize(session string, s *herdr.Snapshot, times *agentTimes, old bool) h
 			continue
 		}
 		out.Workspaces[i].Agents = append(out.Workspaces[i].Agents,
-			herdrAgent{PaneID: p.ID, Agent: p.Agent, Status: p.AgentStatus, Title: truncate(p.Title, 120), Cwd: p.Cwd, Since: times.of(p.ID, p.AgentStatus, old)})
+			herdrAgent{PaneID: p.ID, Agent: p.Agent, Status: p.AgentStatus, Title: truncate(p.Title, 120), Cwd: p.Cwd, Session: agentSession(p), Since: times.of(p.ID, p.AgentStatus, old)})
 		if p.AgentStatus == herdr.StatusBlocked {
 			out.Waiting++
 		}
@@ -203,6 +206,13 @@ func summarize(session string, s *herdr.Snapshot, times *agentTimes, old bool) h
 		}
 	}
 	return out
+}
+
+func agentSession(p herdr.Pane) string {
+	if p.AgentSession == nil || len(p.AgentSession.Value) > 128 {
+		return ""
+	}
+	return p.AgentSession.Value
 }
 
 // herdrSockets remembers which herdr socket each terminal session is
@@ -229,8 +239,8 @@ func (h *herdrSockets) setSids(id string, snap *herdr.Snapshot) {
 	m := map[string]string{}
 	for _, list := range [][]herdr.Pane{snap.Panes, snap.Agents} {
 		for _, p := range list {
-			if p.AgentSession != nil && p.AgentSession.Value != "" {
-				m[p.ID] = p.AgentSession.Value
+			if v := agentSession(p); v != "" {
+				m[p.ID] = v
 			}
 		}
 	}

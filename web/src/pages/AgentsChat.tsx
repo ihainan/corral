@@ -124,18 +124,22 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
   // a current summary no longer has (its pane closed) does not.
   const lastCur = useRef<Entry | undefined>(undefined)
   const summaryMissing = (x: SessionInfo) => x.persistence === 'herdr' && (x.meta?.t !== 'herdr' || !!x.meta.lost)
-  // (Its session gone, its agent maybe in one whose summary has not come yet: as after a restart.)
-  const unsure = pickedSession ? summaryMissing(pickedSession) : !!pick && !!keyOf(pick) && !!sessions?.some(summaryMissing)
+  const unsure = !!pickedSession && summaryMissing(pickedSession)
   const kept = !picked && pick && unsure && lastCur.current?.s.id === pick.s && (lastCur.current.pane ?? '') === (pick.pane ?? '') ? lastCur.current : undefined
   // (None seen yet, as opened from an address while the summary is missing:
   // waited for a while, rather than another shown in its place, and made the pick.)
   const [gaveUp, setGaveUp] = useState(false)
+  if (picked && gaveUp) setGaveUp(false) // (found: the next time, waited for again)
   const waiting = !picked && !kept && !!pick && unsure && !gaveUp
+  // Its session gone, its agent maybe coming back in another (a gateway
+  // restarted, its sessions opened again one by one): for a while the pick
+  // stays, the first shown meanwhile; back, it is shown again.
+  const holding = !picked && !!pick && !pickedSession && !!keyOf(pick) && !gaveUp
   useEffect(() => {
-    if (!waiting) return
+    if (!waiting && !holding) return
     const timer = setTimeout(() => setGaveUp(true), 15000)
     return () => clearTimeout(timer)
-  }, [waiting, pick?.s, pick?.pane]) // (another waited for: its own while)
+  }, [waiting, holding, pick?.s, pick?.pane]) // (another waited for: its own while)
   const cur = picked ?? kept ?? (sessions && !waiting ? entries[0] : undefined)
   useEffect(() => {
     lastCur.current = cur
@@ -163,7 +167,7 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
   // named one gone): it is the pick from now on, so the list's order
   // changing does not move the view. One shown is remembered, however picked.
   useEffect(() => {
-    if (!active || !cur || (stack && screen === 'list')) return // (behind a terminal tab: its address is not ours)
+    if (!active || !cur || (stack && screen === 'list') || holding) return // (behind a terminal tab: its address is not ours)
     if (!(pick && pick.s === cur.s.id && (pick.pane ?? '') === (cur.pane ?? ''))) return choose(cur)
     try {
       local.set(LAST, JSON.stringify({ s: cur.s.id, pane: cur.pane, key: cur.key }))
@@ -172,7 +176,7 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
       /* not kept */
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cur?.key, cur?.s.id, pick?.s, pick?.pane, screen, active])
+  }, [cur?.key, cur?.s.id, pick?.s, pick?.pane, screen, active, holding])
   // The address says which (and, on a phone, which screen): back and
   // forward, a link within the app, a notification tapped.
   useEffect(() => {
@@ -322,17 +326,21 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
   )
 }
 
-// A title read of an agent's log, with what its pane's title was then: a
-// pane whose title has changed since (renamed, cleared, another session)
-// is named by that, not by what was read before.
-type Titles = Map<string, { title: string; pane: string }>
+// A title read of an agent's log, with what its pane's title was then and
+// its session: a pane whose title has changed since (renamed, cleared), or
+// that herdr says runs another session, is named by that, not by what was
+// read before.
+type Titles = Map<string, { title: string; pane: string; session: string }>
 const keptTitle = (titles: Titles, e: Entry): string | undefined => {
   const k = titles.get(e.key)
-  return k && (!e.row || paneTitle(e.row.a.title) === k.pane) ? k.title : undefined // (its spinner aside)
+  if (!k || (e.row && paneTitle(e.row.a.title) !== k.pane)) return undefined // (its spinner aside)
+  return e.row?.a.session && k.session && e.row.a.session !== k.session ? undefined : k.title
 }
 
-// (was: the draft it went from, when whether it went is not known: seen in the log, that draft goes.)
-type Sent = ConvoPending & { bind: string; after: number; gen: number; at: number; was?: string }
+// (was: the draft it went from, when whether it went is not known: seen in the log, that draft goes.
+// afterTs: the time of the log's last entry when it went; read anew (other
+// seqs), only a turn after that can be it.)
+type Sent = ConvoPending & { bind: string; after: number; gen: number; at: number; was?: string; afterTs?: string }
 
 // The conversation of one agent, and what is sent to it. Keyed by the
 // agent: nothing of another's (its draft, what was sent, a stop) carries over.
@@ -384,7 +392,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       const current = e.key === cur.key && e.s.id === cur.s.id
       if (current && convo.title) {
         titles.delete(e.key) // (the latest last: the map keeps its order of use)
-        titles.set(e.key, { title: convo.title, pane: paneTitle(e.row?.a.title ?? '') })
+        titles.set(e.key, { title: convo.title, pane: paneTitle(e.row?.a.title ?? ''), session: convo.bind?.session ?? '' })
         if (titles.size > 100) titles.delete(titles.keys().next().value!)
       }
       if (e.row) {
@@ -433,7 +441,9 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   // turn answers one); not seen in time, it says so. One the agent queued
   // shows in its queue instead.
   const norm = (s: string) => s.replace(/\s+/g, ' ').trim()
-  const queued = useMemo(() => new Set((convo.queued ?? []).map((q) => norm(q.text))), [convo.queued])
+  // (Only while the queue shows, not of one at rest: else the message would show nowhere.)
+  const queueShown = agent?.status !== 'idle' && agent?.status !== 'done'
+  const queued = useMemo(() => new Set((queueShown ? (convo.queued ?? []) : []).map((q) => norm(q.text))), [convo.queued, queueShown])
   const queuedRef = useRef(queued)
   queuedRef.current = queued
   const sentN = useRef(0)
@@ -455,7 +465,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
         changed = true
         p = { ...p, gen: convo.gen, after: -Infinity }
       }
-      const hit = users.find((e) => e.seq > p.after && !u.has(e.seq) && afterSend(e, p.at) && sameTurn(e, p.text))
+      const hit = users.find((e) => e.seq > p.after && !u.has(e.seq) && afterSend(e, p.at) && !(p.afterTs && e.ts && Date.parse(e.ts) <= Date.parse(p.afterTs)) && sameTurn(e, p.text))
       if (!hit) return [p]
       u.add(hit.seq)
       if (p.was !== undefined && getDraft(draftKey) === p.was) {
@@ -507,6 +517,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     if (was === draftKey) return
     lastKey.current = draftKey
     histPos.current = null
+    upAbort.current?.abort() // (what goes up has its path for the agent before)
     // (Its pane first known: what was typed before was for it.)
     if (was === baseKey && !getDraft(draftKey)) {
       keepDraft(draftKey, getDraft(was))
@@ -570,8 +581,9 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   }, [])
   const upload = async (files: File[]) => {
     if (up) return toast(t('term.waitUpload'), true)
+    const forKey = draftKey // (its path is for this agent's draft only)
     for (const f of files) {
-      if (!alive.current) break
+      if (!alive.current || lastKey.current !== forKey) break
       const abort = new AbortController()
       upAbort.current = abort
       const name = f.name || 'image'
@@ -580,7 +592,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
         const r = await uploadFile(sid, f, (p) => setUp((u) => (u?.abort === abort ? { ...u, p } : u)), abort.signal)
         setUp((u) => (u?.abort === abort ? null : u))
         const quoted = r.prefix === '@' ? geminiPath(r.path) : shellPath(r.path)
-        if (!alive.current) break
+        if (!alive.current || lastKey.current !== forKey) break
         if (quoted) insert(quoted + ' ')
         else toast(r.path)
       } catch (e) {
@@ -644,12 +656,14 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     if (text === null || new TextEncoder().encode(text).length > 100 << 10) return toast(t('agents.tooLong'), true)
     const was = draft // (what is typed meanwhile is a new draft: it stays)
     setSending(true)
-    const after = convo.entries.length ? convo.entries[convo.entries.length - 1].seq : 0
+    const last = convo.entries.length ? convo.entries[convo.entries.length - 1] : undefined
+    const after = last ? last.seq : 0
+    const afterTs = last?.ts
     const at = Date.now()
     const account = authGen() // (signed out meanwhile: nothing of it is kept for the next account)
     const focused = document.activeElement === field.current
     const pending = (extra?: Partial<Sent>) =>
-      setSent((ps) => [...ps, { id: Date.now() * 100 + (++sentN.current % 100), text, state: 'waiting' as const, bind: bindKey, after, gen: convo.gen, at, ...extra }].slice(-5))
+      setSent((ps) => [...ps, { id: Date.now() * 100 + (++sentN.current % 100), text, state: 'waiting' as const, bind: bindKey, after, afterTs, gen: convo.gen, at, ...extra }].slice(-5))
     api('POST', `/api/sessions/${sid}/conversation/send`, { pane: b.pane, pid: b.pid, start: b.start, session: b.session, text }, { timeoutMs: SEND_MS })
       .then(() => {
         if (authGen() !== account) return

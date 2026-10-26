@@ -327,10 +327,11 @@ func TestRemoteExecCallSitesAreReviewed(t *testing.T) {
 		"web/files.go: _, err := sshx.Output(ctx, sess.Client(), removeTreeCommand(target), 64<<10)":                                                                                           true, // fixed script, validated and quoted absolute path
 		"web/picker.go: out, err := sshx.Output(ctx, c, tmuxListCommand, 256<<10)":                                                                                                             true, // fixed text, no input
 		"web/complete.go: out, err := sshx.Output(ctx, sess.Client(), completeCommand(cwd), completeOutMax)":                                                                                   true, // fixed script, the folder quoted as its only argument
-		"web/conversation.go: out, err := sshx.Output(ctx, sess.Client(), convoLocateCommand(sess.Persistence, sess.TmuxSession), convoLocateMax)":                                             true, // fixed script, the mode and the validated tmux name quoted
+		"web/conversation.go: out, err := sshx.Output(ctx, sess.Client(), convoLocateCommand(sess.Persistence, sess.TmuxSession, \"\"), convoLocateMax)":                                       true, // fixed script, the mode and the validated tmux name quoted
+		"web/conversation.go: out, err := sshx.Output(ctx, sess.Client(), convoLocateCommand(sess.Persistence, sess.TmuxSession, tmuxTarget), convoLocateMax)":                                 true, // fixed script, the mode and the validated tmux name and pane quoted
 		"web/conversation.go: out, err := sshx.Output(ctx, sess.Client(), convoTitleCommand(log), 65536)":                                                                                      true, // fixed grep, the log path found by locateConvo quoted
 		"web/conversation.go: _, err = sshx.Exec(ctx, sess.Client(), convoSendCommand(sess.Persistence, sess.TmuxSession, b.Pane, socket, b.PID, b.Start, b.Session, len(text), press), 4096,": true, // fixed script; mode, validated session name and pane id, the socket from discovery and the validated Claude session id quoted, numbers, keys of a fixed set (convoKeys) quoted; the checked text (sendText) on its input
-		"term/session.go: s.rec.Output(buf[:n])":                                                                                                                                               true, // the session recorder, not a process
+		"term/session.go: s.rec.Output(buf[:n])": true, // the session recorder, not a process
 	}
 	re := regexp.MustCompile(`\.(Start|Run|Output|CombinedOutput|Exec)\(|SendRequest\("exec"`)
 	root, _ := filepath.Abs("..")

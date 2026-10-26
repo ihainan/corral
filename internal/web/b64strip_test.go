@@ -36,11 +36,36 @@ func TestB64StripKeepsTheMessage(t *testing.T) {
 	}
 }
 
-// Short runs (words, ids, a hash) stay.
+// Text stays, however long its runs of letters (an encoded string to look
+// at, say); only "data" strings are emptied, across the parts' bounds.
 func TestB64StripLeavesText(t *testing.T) {
-	s := `{"text":"` + strings.Repeat("a", b64Run) + ` and sha 0123456789abcdef"}`
+	long := strings.Repeat("QUJD", 2000)
+	s := `{"text":"` + long + ` and sha 0123456789abcdef","note":"say \"data\":\"x\"","source":{"data":"` + long + `"},"after":1}`
 	var b b64Strip
-	if out := string(b.end(b.write(nil, []byte(s)))); out != s {
-		t.Fatalf("changed: %.80s", out)
+	var out []byte
+	for i := 0; i < len(s); i += 7 {
+		out = b.write(out, []byte(s[i:min(len(s), i+7)]))
+	}
+	out = b.end(out)
+	want := `{"text":"` + long + ` and sha 0123456789abcdef","note":"say \"data\":\"x\"","source":{"data":""},"after":1}`
+	if string(out) != want {
+		t.Fatalf("got %.200s", out)
+	}
+}
+
+// The name looked up with grep: a row of its own, of this session.
+func TestCustomTitleLine(t *testing.T) {
+	if l := customTitleLine([]byte(`{"type":"custom-title","customTitle":"fix it","sessionId":"`+sidA+`"}`+"\n"), sidA); !strings.Contains(string(l), `"fix it"`) {
+		t.Errorf("its own: %q", l)
+	}
+	for _, bad := range []string{
+		`{"type":"custom-title","customTitle":"x","sessionId":"` + sidB + `"}`,
+		`{"type":"assistant","message":{"content":[{"type":"tool_use","input":{"type":"custom-title","customTitle":"x"}}]}}`,
+		`{"type":"custom-title","customTitle":"x"`,
+		``,
+	} {
+		if l := customTitleLine([]byte(bad), sidA); l != nil {
+			t.Errorf("taken: %s -> %s", bad, l)
+		}
 	}
 }

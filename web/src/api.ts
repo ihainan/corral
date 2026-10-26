@@ -262,6 +262,7 @@ export interface HerdrAgent {
   status: string
   title: string
   cwd: string
+  session?: string // what runs there, as herdr says (Claude Code's session id)
   since?: number // (unix ms) when its status last changed, as the gateway saw it
 }
 

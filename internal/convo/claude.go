@@ -341,8 +341,8 @@ func (c *Claude) Prepend(o *Claude) {
 	if !c.branchSaid {
 		c.meta.Branch, c.branchSaid = o.meta.Branch, o.branchSaid
 	}
-	if c.meta.Context == 0 && !c.ctxSaid {
-		c.meta.Context = o.meta.Context
+	if !c.ctxSaid {
+		c.meta.Context, c.ctxSaid = o.meta.Context, o.ctxSaid
 	}
 	add := o.entries
 	if room := max(0, maxEntries-len(c.entries)); len(add) > room {

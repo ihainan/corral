@@ -713,7 +713,11 @@ function AgentList({ rows, onPicked, placed }: { rows: ConvoListRow[]; onPicked?
     <>
       {GROUPS.map((g) => {
         const at = (r: ConvoListRow) => placed?.get(r.key) ?? r
-        const of = byRecent(rows.map(at).filter(g.of)).map((p) => rows.find((r) => r.key === p.key)!)
+        // (Placed: in their order then, ties too; new ones after.)
+        const first = placed ? [...placed.keys()] : []
+        const place = (r: ConvoListRow) => (first.includes(r.key) ? first.indexOf(r.key) : first.length)
+        const inOrder = placed ? [...rows].sort((a, b) => place(a) - place(b)) : rows
+        const of = byRecent(inOrder.map(at).filter(g.of)).map((p) => rows.find((r) => r.key === p.key)!)
         if (!of.length) return null
         return (
           <div key={g.name} className="convo-list-group" role="group" aria-label={t(g.name)}>
