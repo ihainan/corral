@@ -161,10 +161,11 @@ nl=$(printf '\nx'); nl=${nl%x}
 btime=$(sed -n 's/^btime \([0-9]*\)$/\1/p' /proc/stat 2>/dev/null); hz=$(getconf CLK_TCK 2>/dev/null)
 case $hz in ''|*[!0-9]*|0) hz=;; esac
 # Codex's subcommand ($1 its pid): its first word after options and their
-# values ("codex -p exec" is no exec; "codex -c x=1 exec" is).
+# values ("codex -p exec" is no exec; "codex -c x=1 exec" is), none after
+# "--". Those that do not converse (exec, review, …) are no agent to type to.
 codex_sub() {
   tr '\0' '\001' <"/proc/$1/cmdline" 2>/dev/null | awk 'BEGIN { RS = "\001" } NR == 1 { next } skip { skip = 0; next }
-    /^-/ { if ($0 ~ /^(-[cmpsaCi]|--(config|model|profile|sandbox|ask-for-approval|cd|image|add-dir|local-provider|remote|remote-auth-token-env|enable|disable))$/) skip = 1; next }
+    /^--$/ { exit } /^-/ { if ($0 ~ /^(-[cmpsaCi]|--(config|model|profile|sandbox|ask-for-approval|cd|image|add-dir|local-provider|remote|remote-auth-token-env|enable|disable))$/) skip = 1; next }
     { print; exit }'
 }
 # A process's record: what it is, where its log is, and where it runs.
@@ -215,7 +216,7 @@ for d in /proc/[0-9]*; do
   [ -O "$d" ] && [ "$(head -c 16 "$d/comm" 2>/dev/null)" = codex ] || continue
   pid=${d#/proc/}
   sub=$(codex_sub "$pid")
-  case $sub in exec|e) continue;; esac
+  case $sub in exec|e|review|apply|a|login|logout|mcp|mcp-server|app-server|completion|sandbox|debug|cloud|features) continue;; esac
   log=
   for fd in "$d"/fd/*; do
     l=$(readlink "$fd" 2>/dev/null) || continue
@@ -1025,9 +1026,9 @@ front() {
     # (Codex, not run with exec (its arguments, its log's head): the
     # session's log is the one it has open and wrote last, as locating chose it.)
     cs=$(tr '\0' '\001' <"/proc/$pid/cmdline" 2>/dev/null | awk 'BEGIN { RS = "\001" } NR == 1 { next } skip { skip = 0; next }
-      /^-/ { if ($0 ~ /^(-[cmpsaCi]|--(config|model|profile|sandbox|ask-for-approval|cd|image|add-dir|local-provider|remote|remote-auth-token-env|enable|disable))$/) skip = 1; next }
+      /^--$/ { exit } /^-/ { if ($0 ~ /^(-[cmpsaCi]|--(config|model|profile|sandbox|ask-for-approval|cd|image|add-dir|local-provider|remote|remote-auth-token-env|enable|disable))$/) skip = 1; next }
       { print; exit }')
-    case $cs in exec|e) return 1;; esac
+    case $cs in exec|e|review|apply|a|login|logout|mcp|mcp-server|app-server|completion|sandbox|debug|cloud|features) return 1;; esac
     lg=
     for fd in /proc/$pid/fd/*; do
       l=$(readlink "$fd" 2>/dev/null) || continue

@@ -783,13 +783,13 @@ func (s *Server) replyToPane(w http.ResponseWriter, r *http.Request, sess *term.
 		return
 	}
 	defer typer.Close()
-	shown, shownDigest, err := paneScreen(ctx, reader, pane)
+	shown, shownDigest, shownCut, err := paneScreenCut(ctx, reader, pane)
 	reader.Close()
 	if err != nil {
 		writeHerdrError(w, err)
 		return
 	}
-	screen := map[string]any{"text": shown, "digest": shownDigest}
+	screen := map[string]any{"text": shown, "digest": shownDigest, "cut": shownCut}
 	if shownDigest != digest {
 		writeErrorExtra(w, http.StatusConflict, "screen_changed", "the screen changed; look again before answering", screen)
 		return

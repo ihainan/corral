@@ -19,7 +19,9 @@ interface Screen {
 function folds(screen: Screen): boolean {
   if (screen.cut || !asksQuestion(screen.text)) return false
   const q = question(screen.text)
-  return !!q && !q.startsWith('…')
+  // (A choice, or what it is, too long to be shown whole: the screen too.)
+  const cutShort = choices(screen.text).some((c) => c.label.endsWith('…') || !!c.desc?.endsWith('…'))
+  return !!q && !q.startsWith('…') && !cutShort
 }
 
 const isTouchOnly = isCoarse()
@@ -119,7 +121,7 @@ export function useReply(sessionId: string, agent: HerdrAgent, { onLoaded, resiz
     } catch (e) {
       if (!live.current) return
       if (e instanceof ApiError && (e.code === 'screen_changed' || e.code === 'already_answered')) {
-        setScreen({ text: String(e.extra.text ?? ''), digest: String(e.extra.digest ?? '') })
+        setScreen({ text: String(e.extra.text ?? ''), digest: String(e.extra.digest ?? ''), cut: e.extra.cut === true })
         setChanged(e.code === 'already_answered' ? 'answered' : 'changed')
       } else setError(e instanceof ApiError && e.code === 'herdr_busy' ? t('herdr.busy') : errorText(e))
     } finally {
@@ -375,7 +377,7 @@ export function InlineReply({ sessionId, agent, onLoaded, resizedAt, active = tr
     <div className="convo-ask" role="group" aria-label={t('convo.waiting')} ref={cardRef}>
       <div className="convo-ask-q">{shownQ || t('convo.waiting')}</div>
       {block && <Asked lines={block.lines} />}
-      {needScreen && !failed && <p className="convo-ask-unread">{t(screen?.cut ? 'reply.cut' : 'convo.askUnread')}</p>}
+      {(needScreen || !!screen?.cut) && !failed && <p className="convo-ask-unread">{t(screen?.cut ? 'reply.cut' : 'convo.askUnread')}</p>}
       {failed ? (
         <LoadError onRetry={() => void load()} />
       ) : (

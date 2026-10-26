@@ -379,7 +379,8 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     }
     if (!row) return null
     const title = (convo.bind?.pane === row.a.pane_id && convo.title) || paneTitle(row.a.title)
-    return { where: row.ws, title, status: row.lost ? 'unknown' : row.status, other: readsLog(row.a.agent) ? undefined : row.a.agent }
+    // (herdr's name for a workspace at home, "~": nothing to tell)
+    return { where: row.ws === '~' ? '' : row.ws, title, status: row.lost ? 'unknown' : row.status, other: readsLog(row.a.agent) ? undefined : row.a.agent }
   }, [herdr, row, convo.bind, convo.agentStatus, convo.failing, convo.title, convo.entries])
   // (A new conversation, its log not written yet, takes its first message.)
   const bound = (convo.status === 'ready' || (convo.status === 'none' && convo.reason === 'no_log')) && !!convo.bind && (!herdr || convo.bind.pane === cur.pane)
