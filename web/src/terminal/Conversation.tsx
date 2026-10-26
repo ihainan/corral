@@ -582,7 +582,8 @@ function tokens(n: number): string {
   return String(n)
 }
 
-const MODES = ['default', 'acceptEdits', 'plan', 'auto', 'bypassPermissions', 'dontAsk'] as const
+// (Claude Code's permission modes; Codex's approval policies.)
+const MODES = ['default', 'acceptEdits', 'plan', 'auto', 'bypassPermissions', 'dontAsk', 'untrusted', 'on-failure', 'on-request', 'never'] as const
 const modeName = (m: string) => ((MODES as readonly string[]).includes(m) ? t(`convo.mode.${m}` as I18nKey) : m)
 
 // Switching the permission mode from the page: now, what the last switch

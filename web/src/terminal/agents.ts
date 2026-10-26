@@ -21,6 +21,9 @@ export interface AgentRow {
 }
 
 export const isClaude = (name?: string) => !!name && /claude/i.test(name)
+export const isCodex = (name?: string) => !!name && /codex/i.test(name)
+// (Whose log the conversation reads: Claude Code's and Codex's.)
+export const readsLog = (name?: string) => isClaude(name) || isCodex(name)
 
 // A pane's title without the mark Claude Code puts before it (its spinner's
 // frames, ◐ and the like while it works, ✳ when idle).

@@ -221,9 +221,12 @@ func (c *Claude) Feed(lines []byte) {
 }
 
 // Since copies the entries changed after revision rev, in order.
-func (c *Claude) Since(rev int) []Entry {
+func (c *Claude) Since(rev int) []Entry { return since(c.entries, rev) }
+
+// since copies the entries changed after revision rev, in order.
+func since(entries []*Entry, rev int) []Entry {
 	out := []Entry{}
-	for _, e := range c.entries {
+	for _, e := range entries {
 		if e.Rev > rev {
 			cp := *e
 			cp.Parts = make([]Part, len(e.Parts))
@@ -278,7 +281,11 @@ func (c *Claude) Trimmed() bool { return c.trimmed }
 // kept for the part before it. Past maxEntries, the oldest of o are left
 // out, and Trimmed says so. Of o's state, what c's part did not say itself
 // (a title, a custom one, the task list) is taken: the rest is c's later word.
-func (c *Claude) Prepend(o *Claude) {
+func (c *Claude) Prepend(other Parser) {
+	o, ok := other.(*Claude)
+	if !ok {
+		return
+	}
 	// (The changes to the task list those results make are made where c
 	// read them, among its own: below.)
 	late := map[string]taskOp{}

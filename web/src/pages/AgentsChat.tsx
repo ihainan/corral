@@ -14,7 +14,7 @@ import { useCompletion } from '../terminal/Completion'
 import { InlineReply } from '../terminal/ReplyDialog'
 import { ConversationView, when, type ConvoAgent, type ConvoListRow, type ConvoPending, type ModelOpt } from '../terminal/Conversation'
 import { asking, useConversation, type ConvoEntry } from '../terminal/conversation'
-import { isClaude, listAgents, paneTitle, useRunningSessions, type AgentRow } from '../terminal/agents'
+import { isClaude, isCodex, listAgents, paneTitle, readsLog, useRunningSessions, type AgentRow } from '../terminal/agents'
 import { afterSend, holdTermMode, PENDING_MS, sameTurn, tmuxKey } from '../terminal/chatSend'
 import { agentKey, sessionWhich } from '../terminal/sessionName'
 
@@ -378,7 +378,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     }
     if (!row) return null
     const title = (convo.bind?.pane === row.a.pane_id && convo.title) || paneTitle(row.a.title)
-    return { where: row.ws, title, status: row.lost ? 'unknown' : row.status, other: isClaude(row.a.agent) ? undefined : row.a.agent }
+    return { where: row.ws, title, status: row.lost ? 'unknown' : row.status, other: readsLog(row.a.agent) ? undefined : row.a.agent }
   }, [herdr, row, convo.bind, convo.agentStatus, convo.failing, convo.title, convo.entries])
   // (A new conversation, its log not written yet, takes its first message.)
   const bound = (convo.status === 'ready' || (convo.status === 'none' && convo.reason === 'no_log')) && !!convo.bind && (!herdr || convo.bind.pane === cur.pane)
@@ -438,6 +438,8 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       .catch((e) => settle(refusal(e)))
   }
   const canPress = bound && working
+  // (What Claude Code alone has: its permission modes, its model picker, its "send now".)
+  const codex = convo.bind?.agent === 'codex' || (!!row && isCodex(row.a.agent))
 
   // The permission mode, switched from here: Shift+Tab pressed in its pane,
   // the mode it went to read off its screen (the log says it only with the
@@ -446,7 +448,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   const [modeNow, setModeNow] = useState<{ mode: string; bind: string; was?: string } | null>(null)
   const [modeBusy, setModeBusy] = useState(false)
   if (modeNow && (modeNow.bind !== bindKey || convo.meta?.mode !== modeNow.was)) setModeNow(null)
-  const canMode = bound && convo.status === 'ready' && !!convo.meta && agent?.status !== 'blocked' && !agent?.other
+  const canMode = bound && !codex && convo.status === 'ready' && !!convo.meta && agent?.status !== 'blocked' && !agent?.other
   const nextMode = () => {
     const b = convo.bind
     if (!b || modeBusy) return
@@ -464,7 +466,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   // only. Only while it is at rest: the picker takes over its input.
   const [models, setModels] = useState<{ list: ModelOpt[] | null; bind: string } | null>(null)
   const [modelBusy, setModelBusy] = useState(false)
-  const canModel = bound && convo.status === 'ready' && !!convo.meta?.model && (agent?.status === 'idle' || agent?.status === 'done') && !agent?.other
+  const canModel = bound && !codex && convo.status === 'ready' && !!convo.meta?.model && (agent?.status === 'idle' || agent?.status === 'done') && !agent?.other
   const pressBody = () => {
     const b = convo.bind!
     return { pane: b.pane, pid: b.pid, start: b.start, session: b.session }
@@ -913,7 +915,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       onShowTerminal={openTerminal}
       onCopied={() => toast(t('common.copied'))}
       composer={composer}
-      onSendNow={canPress ? () => press('now') : undefined}
+      onSendNow={canPress && !codex ? () => press('now') : undefined}
       sendNow={said?.what === 'now' && said.bind === bindKey ? said.text : undefined}
       mode={{ now: modeNow?.bind === bindKey ? modeNow.mode : undefined, busy: modeBusy, onNext: canMode ? nextMode : undefined }}
       model={canModel || modelBusy ? { list: models?.bind === bindKey ? models.list : null, busy: modelBusy, onOpen: openModels, onPick: pickModel } : undefined}

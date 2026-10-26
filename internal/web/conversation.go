@@ -137,16 +137,34 @@ fi
 nl=$(printf '\nx'); nl=${nl%x}
 btime=$(sed -n 's/^btime \([0-9]*\)$/\1/p' /proc/stat 2>/dev/null); hz=$(getconf CLK_TCK 2>/dev/null)
 case $hz in ''|*[!0-9]*|0) hz=;; esac
+# A process's record: what it is, where its log is, and where it runs.
+rec() { # pid start fg procstart sid log agent
+  env=$(tr '\0' '\n' <"/proc/$1/environ" 2>/dev/null | grep -E '^(HERDR_PANE_ID|HERDR_SOCKET_PATH|TMUX|TMUX_PANE)=' | head -c 4096)
+  tty=$(readlink "/proc/$1/fd/0" 2>/dev/null | head -c 200 | tr -d '\n')
+  anc= a=$1 i=0
+  while [ "$i" -lt 40 ]; do
+    a=$(sed -n 's/^PPid:[[:space:]]*\([0-9]*\)$/\1/p' "/proc/$a/status" 2>/dev/null)
+    case $a in ''|0|1) break;; esac
+    anc="$anc$a:$(head -c 32 "/proc/$a/comm" 2>/dev/null | tr -d '\n' | tr -c 'A-Za-z0-9._+-' _),"
+    i=$((i + 1))
+  done
+  printf 'pid=%s\nstart=%s\nbtime=%s\nhz=%s\nfg=%s\nprocstart=%s\nsid=%s\nlog=%s\ntty=%s\nanc=%s\nagent=%s\n%s\0' "$1" "$2" "$btime" "$hz" "$3" "$4" "$5" "$6" "$tty" "$anc" "$7" "$env"
+}
+# (Its start time and whether it is in front on its terminal: st, fg.)
+stat_of() {
+  stat=$(tr '\n' ' ' <"/proc/$1/stat" 2>/dev/null)
+  st=$(printf '%s' "${stat##*) }" | cut -d' ' -f20)
+  pgrp=$(printf '%s' "${stat##*) }" | cut -d' ' -f3); tpgid=$(printf '%s' "${stat##*) }" | cut -d' ' -f6)
+  fg=0; [ -n "$pgrp" ] && [ "$pgrp" = "$tpgid" ] && fg=1
+  case $st in ''|*[!0-9]*) return 1;; esac
+}
+# Claude Code: each process's session file names its session.
 for f in "$HOME"/.claude/sessions/*.json; do
   [ -f "$f" ] || continue
   pid=${f##*/}; pid=${pid%.json}
   case $pid in ''|*[!0-9]*) continue;; esac
   [ -r "/proc/$pid/environ" ] || continue
-  stat=$(tr '\n' ' ' <"/proc/$pid/stat" 2>/dev/null)
-  start=$(printf '%s' "${stat##*) }" | cut -d' ' -f20)
-  case $start in ''|*[!0-9]*) continue;; esac
-  pgrp=$(printf '%s' "${stat##*) }" | cut -d' ' -f3); tpgid=$(printf '%s' "${stat##*) }" | cut -d' ' -f6)
-  fg=0; [ -n "$pgrp" ] && [ "$pgrp" = "$tpgid" ] && fg=1
+  stat_of "$pid" || continue
   c=$(head -c 65536 "$f" 2>/dev/null | tr -d '\n')
   sid=$(printf '%s' "$c" | grep -o '"sessionId" *: *"[0-9a-fA-F-]*"' | head -n 1 | sed 's/.*"\([0-9a-fA-F-]*\)"$/\1/')
   ps=$(printf '%s' "$c" | grep -o '"procStart" *: *"*[0-9]*' | head -n 1 | sed 's/[^0-9]*\([0-9]*\)$/\1/')
@@ -157,16 +175,23 @@ for f in "$HOME"/.claude/sessions/*.json; do
     case $l in *"$nl"*) continue;; esac
     [ -f "$l" ] && { log=$l; break; }
   done
-  env=$(tr '\0' '\n' <"/proc/$pid/environ" 2>/dev/null | grep -E '^(HERDR_PANE_ID|HERDR_SOCKET_PATH|TMUX|TMUX_PANE)=' | head -c 4096)
-  tty=$(readlink "/proc/$pid/fd/0" 2>/dev/null | head -c 200 | tr -d '\n')
-  anc= a=$pid i=0
-  while [ "$i" -lt 40 ]; do
-    a=$(sed -n 's/^PPid:[[:space:]]*\([0-9]*\)$/\1/p' "/proc/$a/status" 2>/dev/null)
-    case $a in ''|0|1) break;; esac
-    anc="$anc$a:$(head -c 32 "/proc/$a/comm" 2>/dev/null | tr -d '\n' | tr -c 'A-Za-z0-9._+-' _),"
-    i=$((i + 1))
+  rec "$pid" "$st" "$fg" "$ps" "$sid" "$log" claude
+done
+# Codex: a process of the user's named codex, its log the session file it
+# has open (rollout-<time>-<session id>.jsonl).
+for d in /proc/[0-9]*; do
+  [ -O "$d" ] && [ "$(head -c 16 "$d/comm" 2>/dev/null)" = codex ] || continue
+  pid=${d#/proc/}
+  log=
+  for fd in "$d"/fd/*; do
+    l=$(readlink "$fd" 2>/dev/null) || continue
+    case $l in *"$nl"*) continue;; "$HOME"/.codex/sessions/*/rollout-*.jsonl) log=$l; break;; esac
   done
-  printf 'pid=%s\nstart=%s\nbtime=%s\nhz=%s\nfg=%s\nprocstart=%s\nsid=%s\nlog=%s\ntty=%s\nanc=%s\n%s\0' "$pid" "$start" "$btime" "$hz" "$fg" "$ps" "$sid" "$log" "$tty" "$anc" "$env"
+  [ -n "$log" ] || continue
+  sid=$(printf '%s' "${log%.jsonl}" | grep -o '[0-9a-fA-F]\{8\}-[0-9a-fA-F]\{4\}-[0-9a-fA-F]\{4\}-[0-9a-fA-F]\{4\}-[0-9a-fA-F]\{12\}$')
+  [ -n "$sid" ] || continue
+  stat_of "$pid" || continue
+  rec "$pid" "$st" "$fg" "$st" "$sid" "$log" codex
 done
 exit 0`
 	return "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(mode) + " " + sshx.QuoteShell(tmuxName) + " " + sshx.QuoteShell(tmuxPane)
@@ -177,6 +202,7 @@ type convoProc struct {
 	fg            bool  // in front on its terminal: what is typed there reaches it
 	started       int64 // when it started, unix milliseconds (0 when not known; within the second the host's boot time is known to)
 	sid, log      string
+	agent         string // "claude" (Claude Code) or "codex"
 	herdrPane     string
 	herdrSocket   string
 	tmuxSocket    string // (TMUX is "<socket>,<server pid>,<session index>")
@@ -269,6 +295,8 @@ func parseConvoLocate(out string) (l convoLocated) {
 				p.sid = v
 			case "log":
 				p.log = v
+			case "agent":
+				p.agent = v
 			case "HERDR_PANE_ID":
 				p.herdrPane = v
 			case "HERDR_SOCKET_PATH":
@@ -298,12 +326,29 @@ func parseConvoLocate(out string) (l convoLocated) {
 		if btime > 0 && hz > 0 && hz <= 100000 && p.start < math.MaxInt64/1000 {
 			p.started = btime*1000 + p.start*1000/hz
 		}
-		if l, ok := cleanRemotePath(p.log); !ok || !strings.HasSuffix(l, "/"+p.sid+".jsonl") {
+		if p.agent != "codex" {
+			p.agent = "claude"
+		}
+		if !convoLogOf(p.agent, p.log, p.sid) {
 			p.log = ""
 		}
 		l.procs = append(l.procs, p)
 	}
 	return l
+}
+
+// convoLogOf: log is where that agent keeps session sid's (Claude Code:
+// …/.claude/projects/<dir>/<sid>.jsonl; Codex: …/.codex/sessions/…/rollout-…-<sid>.jsonl).
+func convoLogOf(agent, log, sid string) bool {
+	l, ok := cleanRemotePath(log)
+	if !ok {
+		return false
+	}
+	if agent == "codex" {
+		i := strings.LastIndexByte(l, '/')
+		return strings.Contains(l, "/.codex/sessions/") && strings.HasPrefix(l[i+1:], "rollout-") && strings.HasSuffix(l, "-"+sid+".jsonl")
+	}
+	return strings.HasSuffix(l, "/"+sid+".jsonl")
 }
 
 func isDigits(s string) bool {
@@ -409,9 +454,10 @@ type convoState struct {
 	sid, log string
 	gen      int64      // changes when another log is read: what was shown does not apply
 	bind     *convoBind // the process the log is of, while there is one
-	parser   *convo.Claude
-	offset   int64 // read up to here
-	size     int64 // the log's size when last looked at
+	parser   convo.Parser
+	agent    string // whose log: "claude" or "codex"
+	offset   int64  // read up to here
+	size     int64  // the log's size when last looked at
 	mtime    time.Time
 	older    bool   // the log has more before what was read
 	from     int64  // where in the log the first line read begins (-1 until a first line is whole)
@@ -490,6 +536,7 @@ type convoBind struct {
 	PID     int64  `json:"pid"`
 	Start   int64  `json:"start"`
 	Session string `json:"session"`
+	Agent   string `json:"agent"`           // "claude" or "codex"
 	Title   string `json:"title,omitempty"` // (tmux: the pane's title)
 	// started is when the process started (unix milliseconds; 0 when not
 	// known): what was queued before was another process's.
@@ -611,7 +658,7 @@ func (s *Server) locateConvo(ctx context.Context, sess *term.Session, st *convoS
 	}
 	l := parseConvoLocate(string(out))
 	st.located, st.pane = time.Now(), pane
-	sid, log, reason := "", "", ""
+	sid, log, reason, agent := "", "", "", ""
 	switch {
 	case l.noProc:
 		reason = convoUnsupported
@@ -623,7 +670,7 @@ func (s *Server) locateConvo(ctx context.Context, sess *term.Session, st *convoS
 		p := pickConvoProc(l.procs, sess.Persistence, in, s.herdrSocks.get(sess.ID), l.tmuxPID, l.tmuxTTY, s.herdrSocks.sid(sess.ID, pane))
 		st.bind = nil
 		if p != nil {
-			b := &convoBind{PID: p.pid, Start: p.start, Session: p.sid, Pane: p.herdrPane}
+			b := &convoBind{PID: p.pid, Start: p.start, Session: p.sid, Agent: p.agent, Pane: p.herdrPane}
 			if sess.Persistence == "tmux" {
 				b.Pane, b.Title = p.tmuxPane, l.tmuxTitle
 			}
@@ -636,15 +683,15 @@ func (s *Server) locateConvo(ctx context.Context, sess *term.Session, st *convoS
 		case p == nil:
 			reason = convoNoAgent
 		case p.log == "":
-			reason, sid = convoNoLog, p.sid
+			reason, sid, agent = convoNoLog, p.sid, p.agent
 		default:
-			sid, log = p.sid, p.log
+			sid, log, agent = p.sid, p.log, p.agent
 		}
 	}
-	if sid != st.sid || log != st.log {
+	if sid != st.sid || log != st.log || agent != st.agent {
 		st.gen = convoGens.Add(1)
-		st.sid, st.log = sid, log
-		st.parser = convo.NewClaude()
+		st.sid, st.log, st.agent = sid, log, agent
+		st.parser = convo.New(agent)
 		st.offset, st.size, st.mtime, st.older, st.skipping, st.from = 0, -1, time.Time{}, false, false, 0
 		st.long, st.strip = nil, b64Strip{}
 	}
@@ -661,9 +708,15 @@ func (s *Server) locateConvo(ctx context.Context, sess *term.Session, st *convoS
 // again. more says one request did not take all there is.
 func (s *Server) readConvo(sess *term.Session, st *convoState) (more bool, err error) {
 	err = s.withSFTP(context.Background(), sess, convoReadLimit, func(c *sftplite.Client) error {
-		if sess.Persistence == "tmux" {
+		if sess.Persistence == "tmux" && st.agent != "codex" {
 			st.status = convoProcStatus(c, st)
 		}
+		// (Codex's log says whether it works.)
+		defer func() {
+			if cx, ok := st.parser.(*convo.Codex); ok && sess.Persistence == "tmux" {
+				st.status = cx.Status()
+			}
+		}()
 		fi, err := c.Stat(st.log)
 		if err != nil {
 			return err
@@ -674,7 +727,7 @@ func (s *Server) readConvo(sess *term.Session, st *convoState) (more bool, err e
 		}
 		if size < st.offset || size < st.size {
 			st.gen = convoGens.Add(1)
-			st.parser = convo.NewClaude()
+			st.parser = convo.New(st.agent)
 			st.offset, st.older, st.skipping, st.from = 0, false, false, 0
 			st.long, st.strip = nil, b64Strip{}
 			if st.bind != nil {
@@ -688,8 +741,10 @@ func (s *Server) readConvo(sess *term.Session, st *convoState) (more bool, err e
 				st.offset, st.older, st.skipping, st.from = size-convoTail, true, true, -1
 				// The name the person gave it may be further back than what
 				// is read: its latest, looked for in all of it, first.
-				if line := convoCustomTitle(sess, st.log, st.sid); line != nil {
-					st.parser.Feed(line)
+				if st.agent != "codex" {
+					if line := convoCustomTitle(sess, st.log, st.sid); line != nil {
+						st.parser.Feed(line)
+					}
 				}
 			}
 		}
@@ -819,7 +874,7 @@ func (s *Server) readOlder(sess *term.Session, st *convoState) error {
 			}
 			pos = i + 1
 		}
-		o := convo.NewClaude()
+		o := convo.New(st.agent)
 		o.Feed(data[pos:])
 		st.parser.Prepend(o)
 		st.from = start + int64(pos)
@@ -925,8 +980,18 @@ front() {
   [ -n "$pgrp" ] && [ "$pgrp" = "$tpgid" ] || return 1
   if [ "$mode" = tmux ]; then k=TMUX_PANE; else k=HERDR_PANE_ID; fi
   tr '\0' '\n' <"/proc/$pid/environ" 2>/dev/null | grep -qxF "$k=$p" || return 1
-  c=$(head -c 65536 "$HOME/.claude/sessions/$pid.json" 2>/dev/null | tr -d '\n')
-  [ "$(printf '%s' "$c" | grep -o '"sessionId" *: *"[0-9a-fA-F-]*"' | head -n 1 | sed 's/.*"\([0-9a-fA-F-]*\)"$/\1/')" = "$sid" ] || return 1
+  if [ -f "$HOME/.claude/sessions/$pid.json" ]; then
+    c=$(head -c 65536 "$HOME/.claude/sessions/$pid.json" 2>/dev/null | tr -d '\n')
+    [ "$(printf '%s' "$c" | grep -o '"sessionId" *: *"[0-9a-fA-F-]*"' | head -n 1 | sed 's/.*"\([0-9a-fA-F-]*\)"$/\1/')" = "$sid" ] || return 1
+  else
+    # (Codex: the session's log is open in it.)
+    [ "$(head -c 16 "/proc/$pid/comm" 2>/dev/null)" = codex ] || return 1
+    o=0
+    for fd in /proc/$pid/fd/*; do
+      case $(readlink "$fd" 2>/dev/null) in "$HOME"/.codex/sessions/*/rollout-*-"$sid".jsonl) o=1; break;; esac
+    done
+    [ "$o" = 1 ] || return 1
+  fi
   if [ "$mode" = tmux ]; then
     tty=$(tmux -u display-message -p -t "$p" '#{pane_tty}' 2>/dev/null 9>&-)
     [ -n "$tty" ] && [ "$(readlink "/proc/$pid/fd/0" 2>/dev/null)" = "$tty" ] || return 1

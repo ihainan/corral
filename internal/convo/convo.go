@@ -7,6 +7,29 @@
 // here interprets text as markup; the browser renders it as text.
 package convo
 
+// Parser reads one agent's log: Claude Code's (Claude) or Codex's (Codex).
+type Parser interface {
+	Feed(lines []byte)     // whole lines, in order
+	Since(rev int) []Entry // the entries changed after revision rev
+	Prepend(older Parser)  // a part read before what was read, parsed on its own (of the same kind)
+	Rev() int
+	First() int // the Seq of the oldest entry kept
+	Trimmed() bool
+	Title() string
+	Meta() Meta
+	Tasks() []Task
+	Queued() []Queued
+	QueueSince(started int64)
+}
+
+// New is the parser for an agent's log: "codex", else Claude Code's.
+func New(agent string) Parser {
+	if agent == "codex" {
+		return NewCodex()
+	}
+	return NewClaude()
+}
+
 // Roles of an entry.
 const (
 	RoleUser      = "user"      // what the person wrote (or queued)
