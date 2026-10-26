@@ -4,7 +4,7 @@ import { api, ApiError, errorText, type HerdrAgent } from '../api'
 import { t } from '../i18n'
 import { Dialog, isCoarse, LoadError, useToast } from '../components/ui'
 import { getReplyDraft, keepReplyDraft } from './drafts'
-import { choices, dashedRule, promptBlock, question } from './menu'
+import { asksQuestion, choices, dashedRule, promptBlock, question } from './menu'
 import { choiceText, questionText } from './askText'
 
 interface Screen {
@@ -131,13 +131,15 @@ export function useReply(sessionId: string, agent: HerdrAgent, { onLoaded, resiz
 export function ReplyDialog({ sessionId, agent, onLoaded, onClose, resizedAt }: { sessionId: string; agent: HerdrAgent; onLoaded?: () => void; onClose: () => void; resizedAt?: number }) {
   const { screen, failed, reading, changed, busy, error, text, setText, load, send, submit, opts } = useReply(sessionId, agent, { onLoaded, resizedAt, onSent: onClose })
   const pre = useRef<HTMLPreElement>(null)
+  const [screenOpen, setScreenOpen] = useState(false) // (a menu read off it: the screen behind a button)
   // The end of the screen is where the question is.
   useLayoutEffect(() => {
     if (pre.current) pre.current.scrollTop = pre.current.scrollHeight
-  }, [screen])
+  }, [screen, screenOpen])
 
   const shown = screen ? screen.text.split('\n').slice(-shownLines).join('\n') : ''
   const title = agent.agent || t('reply.terminal')
+  const q = screen ? question(screen.text) : ''
   return (
     <Dialog title={t('reply.title', { agent: title })} onClose={onClose} className="reply-dialog">
       {agent.title && <p className="hint reply-sub">{agent.title}</p>}
@@ -145,14 +147,19 @@ export function ReplyDialog({ sessionId, agent, onLoaded, onClose, resizedAt }: 
         <LoadError onRetry={() => void load()} />
       ) : (
         <>
-          <div className="reply-screen-wrap">
-            <pre className="reply-screen" ref={pre} tabIndex={0} aria-label={t('reply.screen')} aria-busy={reading}>
-              {screen ? shown || t('reply.blank') : t('common.loading')}
-            </pre>
-            <button type="button" className={'icon-btn reply-refresh' + (reading ? ' reading' : '')} onClick={() => void load()} disabled={busy || reading} aria-label={t('reply.refresh')} title={t('reply.refresh')}>
-              <RotateCw size={16} />
-            </button>
-          </div>
+          {/* (A menu read off it: its question and choices first, the screen
+              behind a button; else the screen, to answer from.) */}
+          {opts.length > 0 && q && <p className="reply-q">{questionText(q)}</p>}
+          {(opts.length === 0 || screenOpen) && (
+            <div className="reply-screen-wrap">
+              <pre className="reply-screen" ref={pre} tabIndex={0} aria-label={t('reply.screen')} aria-busy={reading}>
+                {screen ? shown || t('reply.blank') : t('common.loading')}
+              </pre>
+              <button type="button" className={'icon-btn reply-refresh' + (reading ? ' reading' : '')} onClick={() => void load()} disabled={busy || reading} aria-label={t('reply.refresh')} title={t('reply.refresh')}>
+                <RotateCw size={16} />
+              </button>
+            </div>
+          )}
           {changed && (
             <p className="reply-changed" role="alert">
               {t(changed === 'answered' ? 'reply.answered' : 'reply.changed')}
@@ -160,29 +167,28 @@ export function ReplyDialog({ sessionId, agent, onLoaded, onClose, resizedAt }: 
           )}
           {opts.length > 0 && (
             <div className="reply-choices" role="group" aria-label={t('reply.choices')}>
-              {opts.map((o) => (
-                <button key={o.key} type="button" className="btn reply-choice" disabled={!screen || busy} onClick={() => void send({ keys: [o.key] })}>
-                  <span className="reply-key">{o.key}</span>
-                  <span className="reply-label">{o.label}</span>
-                </button>
-              ))}
+              {opts.map((o) => {
+                const c = choiceText(o.label)
+                return (
+                  <button key={o.key} type="button" className="reply-choice" disabled={!screen || busy} onClick={() => void send({ keys: [o.key] })}>
+                    <span className="reply-key" aria-hidden="true">{o.key}</span>
+                    <span className="reply-what">
+                      <span className="reply-label">{c.text}</span>
+                      {o.desc && <span className="reply-desc">{o.desc}</span>}
+                      {c.original && <span className="reply-desc">{c.original}</span>}
+                    </span>
+                  </button>
+                )
+              })}
             </div>
           )}
-          <div className="reply-keys">
-            <button type="button" className="btn" disabled={!screen || busy} onClick={() => void send({ keys: ['enter'] })}>
-              {t('reply.enter')}
-            </button>
-            <button type="button" className="btn" disabled={!screen || busy} onClick={() => void send({ keys: ['esc'] })}>
-              {t('reply.esc')}
-            </button>
-          </div>
           <form className="reply-text" onSubmit={submit}>
             <input
               className="input"
               value={text}
               maxLength={2000}
-              placeholder={t('reply.placeholder')}
-              aria-label={t('reply.placeholder')}
+              placeholder={t(opts.length > 0 ? 'reply.other' : 'reply.placeholder')}
+              aria-label={t(opts.length > 0 ? 'reply.other' : 'reply.placeholder')}
               autoCapitalize="none"
               autoCorrect="off"
               onChange={(e) => setText(e.target.value)}
@@ -192,6 +198,19 @@ export function ReplyDialog({ sessionId, agent, onLoaded, onClose, resizedAt }: 
               {t('reply.send')}
             </button>
           </form>
+          <div className="reply-keys">
+            <button type="button" className="btn btn-ghost btn-sm" disabled={!screen || busy} onClick={() => void send({ keys: ['enter'] })}>
+              {t('reply.enter')}
+            </button>
+            <button type="button" className="btn btn-ghost btn-sm" disabled={!screen || busy} onClick={() => void send({ keys: ['esc'] })}>
+              {t('reply.esc')}
+            </button>
+            {opts.length > 0 && (
+              <button type="button" className="btn btn-ghost btn-sm reply-show" aria-expanded={screenOpen} onClick={() => setScreenOpen((v) => !v)}>
+                {t(screenOpen ? 'reply.hideScreen' : 'reply.showScreen')}
+              </button>
+            )}
+          </div>
           {error && (
             <p className="err" role="alert">
               {error}
@@ -307,6 +326,9 @@ export function InlineReply({ sessionId, agent, onLoaded, resizedAt, active = tr
   }, [sent, screen, opts.length])
   const pre = useRef<HTMLPreElement>(null)
   const block = screen ? promptBlock(screen.text) : null
+  // (What is asked not told apart on the screen, the screen itself shows; a
+  // question of Claude Code's is all its choices.)
+  const needScreen = !!screen && !block && !asksQuestion(screen.text)
   useLayoutEffect(() => {
     if (pre.current) pre.current.scrollTop = pre.current.scrollHeight
   }, [screen, shown, !block])
@@ -320,7 +342,7 @@ export function InlineReply({ sessionId, agent, onLoaded, resizedAt, active = tr
     <div className="convo-ask" role="group" aria-label={t('convo.waiting')} ref={cardRef}>
       <div className="convo-ask-q">{shownQ || t('convo.waiting')}</div>
       {block && <Asked lines={block.lines} />}
-      {screen && !block && !failed && <p className="convo-ask-unread">{t('convo.askUnread')}</p>}
+      {needScreen && !failed && <p className="convo-ask-unread">{t('convo.askUnread')}</p>}
       {failed ? (
         <LoadError onRetry={() => void load()} />
       ) : (
@@ -337,8 +359,11 @@ export function InlineReply({ sessionId, agent, onLoaded, resizedAt, active = tr
                 return (
                   <button key={o.key} type="button" className="convo-ask-opt" disabled={!screen || busy} onClick={() => void send({ keys: [o.key] })}>
                     <span className="convo-ask-key">{o.key}</span>
-                    <span className="convo-ask-label">{c.text}</span>
-                    {c.original && <span className="convo-ask-orig">{c.original}</span>}
+                    {/* (Its words as Claude Code wrote them, where shown in Chinese: on a pointer's rest.) */}
+                    <span className="convo-ask-what" title={c.original || undefined}>
+                      <span className="convo-ask-label">{c.text}</span>
+                      {o.desc && <span className="convo-ask-desc">{o.desc}</span>}
+                    </span>
                   </button>
                 )
               })}
@@ -365,7 +390,7 @@ export function InlineReply({ sessionId, agent, onLoaded, resizedAt, active = tr
                 {opts.length > 0 ? t('convo.askKeys', { n: opts.length }) : t('convo.askEsc')}
               </span>
             )}
-            <button type="button" className="link-btn" aria-expanded={shown || (!!screen && !block)} disabled={!!screen && !block} onClick={() => setShown(!shown)}>
+            <button type="button" className="link-btn" aria-expanded={shown || needScreen} disabled={needScreen} onClick={() => setShown(!shown)}>
               {t(shown ? 'convo.hideScreen' : 'convo.showScreen')}
             </button>
             {opts.length === 0 && (
@@ -380,7 +405,7 @@ export function InlineReply({ sessionId, agent, onLoaded, resizedAt, active = tr
               </button>
             )}
           </div>
-          {(shown || (!!screen && !block)) && (
+          {(shown || needScreen) && (
             // (What is asked could not be told apart on the screen: the screen itself.)
             <div className="reply-screen-wrap">
               <pre className="reply-screen" ref={pre} tabIndex={0} aria-label={t('reply.screen')} aria-busy={reading}>

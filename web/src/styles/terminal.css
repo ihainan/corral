@@ -682,15 +682,22 @@ html.term-dark .overlay, html.term-dark .menu, html.term-dark .toast {
   border: 1px solid var(--term-warn-text); background: var(--term-bg);
 }
 .convo-ask-q { font-weight: 600; }
-.convo-ask-opts { display: flex; flex-direction: column; gap: 4px; }
+.convo-ask-opts { display: flex; flex-direction: column; gap: 6px; }
+/* Each choice a card: its key, its words and what it is (as the terminal's answer dialog) */
 .convo-ask-opt {
-  display: flex; align-items: baseline; gap: 10px; width: 100%; padding: 6px 12px; border-radius: 8px; cursor: pointer;
+  display: flex; align-items: flex-start; gap: 12px; width: 100%; padding: 10px 12px; border-radius: 10px; cursor: pointer;
   border: 1px solid var(--term-line); background: var(--term-bg); color: var(--term-fg); font: inherit; text-align: left;
+  transition: border-color 0.12s ease, background 0.12s ease;
 }
-.convo-ask-opt:hover:not(:disabled) { background: var(--term-hover); }
+.convo-ask-opt:hover:not(:disabled) { border-color: var(--term-accent-text); background: var(--term-accent-soft); }
 .convo-ask-opt:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: 2px; }
 .convo-ask-opt:disabled { opacity: 0.6; cursor: default; }
-.convo-ask-key { flex: none; font-family: var(--font-mono); font-size: 13px; color: var(--term-fg-3); }
+.convo-ask-key {
+  flex: none; display: grid; place-items: center; width: 22px; height: 22px; border-radius: 6px; background: color-mix(in srgb, var(--term-fg) 9%, transparent);
+  font: 600 12px/1 var(--font-mono); color: var(--term-fg-2);
+}
+.convo-ask-what { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.convo-ask-desc { font-size: 13px; line-height: 18px; color: var(--term-fg-3); overflow-wrap: anywhere; }
 .convo-ask-text { display: flex; gap: 8px; }
 .convo-ask-text .input { flex: 1; min-width: 0; }
 /* (In the terminal's colours, as the composer is, whatever the app's are) */
@@ -714,9 +721,7 @@ html.term-dark .overlay, html.term-dark .menu, html.term-dark .toast {
 .convo-ask-block > span { display: block; min-width: max-content; }
 .convo-ask-block > .convo-ask-rule { color: var(--term-fg-3); opacity: 0.6; }
 .convo-ask-unread { margin: 0; font-size: 13px; color: var(--term-warn-text); }
-.convo-ask-label { min-width: 0; }
-.convo-ask-orig { flex: 0 10000 auto; min-width: 0; margin-left: auto; padding-left: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--term-fg-3); }
-@media (max-width: 640px) { .convo-ask-orig { display: none; } }
+.convo-ask-label { min-width: 0; line-height: 22px; font-weight: 500; overflow-wrap: anywhere; }
 .convo-ask-keys { color: var(--term-fg-3); font-size: 12.5px; }
 /* What waits to be taken in, over the composer */
 .convo-queue { display: flex; flex-direction: column; border: 1px solid var(--term-line); border-radius: 10px; background: var(--term-chrome); font-size: 13.5px; }

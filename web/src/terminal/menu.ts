@@ -30,33 +30,65 @@ function goesOn(lines: string[], i: number): boolean {
   return false
 }
 
+// A line between choices: blank, or a rule (Claude Code's questions put
+// their last choices under one: "4. Chat about this").
+const between = /^[\s│|]*(?:[─━]{4,}[\s─━]*)?$/
+
+// Claude Code's questions (AskUserQuestion) say how to go through them, and
+// put a line under each choice that tells of it: there, a choice's further
+// lines are that, not the rest of its words wrapped.
+const describes = /to navigate/i
+
+export type Choice = { key: string; label: string; desc?: string }
+
 // The menu at the end of the screen's lines: its choices and the line it
 // begins on.
-function menuAt(lines: string[]): { out: { key: string; label: string }[]; top: number } {
+function menuAt(lines: string[]): { out: Choice[]; top: number } {
+  const told = lines.slice(-6).some((l) => describes.test(l))
   let end = lines.length
   while (end > 0 && !menuLine.test(lines[end - 1]) && hintLine.test(lines[end - 1]) && !goesOn(lines, end - 1) && lines.length - end < 3) end--
-  const out: { key: string; label: string }[] = []
+  const out: Choice[] = []
   let marked = 0
   let top = -1
   let more: string[] = [] // (lines going on from the choice above them)
   for (let i = end - 1; i >= 0; i--) {
     const m = menuLine.exec(lines[i])
     if (!m) {
-      if (!goesOn(lines, i)) break
-      more.unshift(moreLine.exec(lines[i])![1])
-      continue
+      if (goesOn(lines, i)) {
+        more.unshift(moreLine.exec(lines[i])![1])
+        continue
+      }
+      // (A blank or a rule with more choices above it: still the menu.)
+      if (out.length && !more.length && between.test(lines[i])) {
+        let j = i - 1
+        while (j >= 0 && i - j <= 3 && between.test(lines[j])) j--
+        if (j >= 0 && i - j <= 3 && (menuLine.test(lines[j]) || goesOn(lines, j))) {
+          i = j + 1
+          continue
+        }
+      }
+      break
     }
-    const label = [m[3], ...more].join(' ')
+    const clipped = (s: string) => (s.length > maxLabel ? s.slice(0, maxLabel - 1) + '…' : s)
+    const label = told ? m[3] : [m[3], ...more].join(' ')
+    const desc = told && more.length ? clipped(more.join(' ')) : undefined
     more = []
     top = i
-    out.unshift({ key: m[2], label: label.length > maxLabel ? label.slice(0, maxLabel - 1) + '…' : label })
+    out.unshift({ key: m[2], label: clipped(label), ...(desc ? { desc } : {}) })
     if (m[1]) marked++
   }
   const inOrder = out.every((c, i) => c.key === String(i + 1))
   return out.length >= 2 && inOrder && marked === 1 ? { out, top } : { out: [], top: -1 }
 }
 
-export function choices(text: string): { key: string; label: string }[] {
+// asksQuestion: the menu is a question of Claude Code's (AskUserQuestion),
+// its choices all there is to it: no command or edit to be shown first.
+export function asksQuestion(text: string): boolean {
+  const lines = text.split('\n')
+  return menuAt(lines).top >= 0 && lines.slice(-6).some((l) => describes.test(l))
+}
+
+export function choices(text: string): Choice[] {
   return menuAt(text.split('\n')).out
 }
 

@@ -552,11 +552,29 @@ details.adv > .form { margin-top: 16px; }
 @keyframes spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .reply-refresh.reading svg { animation: none; } }
 .reply-changed { color: var(--warn); font-size: 13px; line-height: 18px; }
-.reply-choices { display: flex; flex-direction: column; gap: 6px; }
-.reply-choice { justify-content: flex-start; gap: 10px; height: auto; min-height: var(--h-btn); padding-block: 8px; text-align: left; white-space: normal; }
-.reply-key { font: 600 12px var(--font-mono); color: var(--fg-3); flex: none; }
-.reply-label { min-width: 0; overflow-wrap: anywhere; }
-.reply-keys { display: flex; gap: 8px; }
+/* A question read off the screen: it, then its choices as cards (each its
+   key, its words, what it is), an answer of one's own, the keys. */
+.reply-q { margin: 0; font-size: 15px; font-weight: 600; line-height: 22px; overflow-wrap: anywhere; }
+.reply-choices { display: flex; flex-direction: column; gap: 8px; }
+.reply-choice {
+  display: grid; grid-template-columns: 24px minmax(0, 1fr); align-items: start; column-gap: 12px; width: 100%;
+  padding: 10px 12px; border: 1px solid var(--line-strong); border-radius: var(--r-lg); background: var(--surface);
+  color: var(--fg); font: inherit; text-align: left; cursor: pointer; transition: border-color 0.12s var(--ease), background 0.12s var(--ease);
+}
+.reply-choice:hover:not(:disabled) { border-color: var(--accent); background: var(--accent-soft); }
+.reply-choice:focus-visible { outline: none; border-color: var(--accent); box-shadow: var(--focus); }
+.reply-choice:disabled { opacity: 0.55; cursor: default; }
+.reply-key {
+  display: grid; place-items: center; width: 24px; height: 24px; border-radius: var(--r-sm); background: var(--bg-active);
+  font: 600 12px/1 var(--font-mono); color: var(--fg-2);
+}
+.reply-what { display: flex; flex-direction: column; gap: 2px; min-width: 0; padding-top: 2px; }
+.reply-label { font-weight: 500; line-height: 20px; overflow-wrap: anywhere; }
+.reply-desc { font-size: 13px; line-height: 18px; color: var(--fg-3); overflow-wrap: anywhere; }
+.reply-keys { display: flex; flex-wrap: wrap; gap: 4px; margin-top: -4px; }
+.reply-keys .btn { height: 28px; padding: 0 10px; font-size: 13px; color: var(--fg-2); }
+.reply-keys .btn:hover:not(:disabled) { color: var(--fg); background: var(--bg-hover); }
+.reply-show { margin-left: auto; }
 .reply-text { display: flex; gap: 8px; }
 .reply-text .input { flex: 1; min-width: 0; }
 

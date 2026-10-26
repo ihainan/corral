@@ -4,10 +4,10 @@ import { api, ApiError, authGen, errorText, uploadFile, type SessionInfo } from 
 import { t } from '../i18n'
 import { navigate, onNavigate } from '../router'
 import { onOpenRequest } from '../notifyopen'
-import { setChromeColor, termScheme, usePrefs } from '../prefs'
+import { isDark, setChromeColor, usePrefs } from '../prefs'
 import { local } from '../storage'
 import { CLOSE_MENUS, Menu, useToast } from '../components/ui'
-import { chromeVars } from '../terminal/themes'
+import { chromeVars, corralDark, corralLight } from '../terminal/themes'
 import { expandPastes, getDraft, keepDraft, keepPaste, remember, sentHistory } from '../terminal/drafts'
 import { geminiPath, shellPath } from '../terminal/paths'
 import { useCompletion } from '../terminal/Completion'
@@ -76,7 +76,8 @@ type Entry = { key: string; s: SessionInfo; pane?: string; row?: AgentRow }
 export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: boolean }) {
   const toast = useToast()
   const prefs = usePrefs()
-  const scheme = termScheme()
+  // (Its own two looks, light and dark as the app is: not the terminal's colours.)
+  const scheme = isDark() ? corralDark : corralLight
   const { sessions, failed } = useRunningSessions(active, 3000)
   const [pick, setPick] = useState<Pick | null>(readPick)
   // The entry key of the one picked last (an address names only its session and pane).
