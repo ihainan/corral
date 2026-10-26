@@ -285,7 +285,15 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
   return (
     <div className={'term-root agents-chat ' + (scheme.dark ? 'dark' : 'light') + (active ? '' : ' inactive') + (stack ? ' is-stack is-' + screen : '')} inert={!active} aria-hidden={active ? undefined : true} style={chromeVars(scheme) as React.CSSProperties} ref={rootRef}>
       {/* (A phone's conversation has its way back in its own bar.) */}
-      {bar ?? (stack && screen === 'chat' && cur ? null : (
+      {/* (The tabs in the bar the terminals have, with its way back to the hosts.) */}
+      {bar ? (
+        <header className="term-bar">
+          <button type="button" className="icon-btn" onClick={() => navigate('/')} aria-label={t('term.backToHosts')} title={t('term.backToHosts')}>
+            <ChevronLeft size={20} />
+          </button>
+          {bar}
+        </header>
+      ) : (stack && screen === 'chat' && cur ? null : (
         <header className="term-bar">
           <button type="button" className="icon-btn" onClick={() => navigate('/')} aria-label={t('common.back')} title={t('common.back')}>
             <ChevronLeft size={20} />
