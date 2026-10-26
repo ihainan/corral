@@ -69,3 +69,23 @@ func TestCustomTitleLine(t *testing.T) {
 		}
 	}
 }
+
+// Other "data" strings stay as they were: short, with escaped quotes in
+// them, letters then words, a field whose name ends in "data".
+func TestB64StripKeepsOtherData(t *testing.T) {
+	long := strings.Repeat("QUJD", 2000)
+	for _, kept := range []string{
+		`{"input":{"data":"say \"hello\" now"},"metadata":"` + long + `"}`,
+		`{"data":"` + strings.Repeat("ab", 100) + ` and then words"}`,
+		`{"data":""}`,
+	} {
+		var b b64Strip
+		var got []byte
+		for i := 0; i < len(kept); i += 5 {
+			got = b.write(got, []byte(kept[i:min(len(kept), i+5)]))
+		}
+		if got = b.end(got); string(got) != kept {
+			t.Errorf("changed: %.120s -> %.120s", kept, got)
+		}
+	}
+}

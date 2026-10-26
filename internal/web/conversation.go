@@ -44,26 +44,47 @@ const (
 	convoLongMax   = 1 << 20          // a line longer than a read, once its images' data is left out, kept up to this
 )
 
-// b64Strip leaves out of a line, written to it in parts, what the "data"
-// strings hold (an image's base64: an image block's source, and a tool
-// result's). What is left of a JSON line stays JSON: the string is there,
-// empty. Base64 has no quote or backslash, so the string ends at the next
-// quote.
+// b64Strip leaves out of a line, written to it in parts, the base64 an
+// image carries: a "data" string longer than b64Run that is base64 alone
+// (an image block's source, a tool result's), emptied. Any other "data"
+// string is kept as it was, so what is left stays the JSON it was: only
+// base64 characters, which need no escaping, are ever left out.
 type b64Strip struct {
-	inData bool // in a "data" string, until its closing quote
+	inData   bool   // in a "data" string, while it may be base64
+	held     []byte // what of it is held, until it is known whether it is
+	dropping bool   // it is: left out, to its closing quote
 }
 
+const b64Run = 4096
+
 var dataKey = []byte(`"data":"`)
+
+func isB64(c byte) bool {
+	return c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '+' || c == '/' || c == '='
+}
 
 func (b *b64Strip) write(dst, src []byte) []byte {
 	for len(src) > 0 {
 		if b.inData {
-			i := bytes.IndexByte(src, '"')
-			if i < 0 {
+			n := 0
+			for n < len(src) && isB64(src[n]) {
+				n++
+			}
+			if !b.dropping {
+				b.held = append(b.held, src[:n]...)
+				if len(b.held) > b64Run {
+					b.held, b.dropping = b.held[:0], true
+				}
+			}
+			src = src[n:]
+			if len(src) == 0 {
 				return dst
 			}
-			b.inData = false
-			src = src[i:] // (its closing quote is kept)
+			// (Another character: the string's end, or not base64 after all.)
+			if !b.dropping {
+				dst = append(dst, b.held...)
+			}
+			b.inData, b.dropping, b.held = false, false, b.held[:0]
 			continue
 		}
 		i := bytes.IndexByte(src, '"')
@@ -72,7 +93,7 @@ func (b *b64Strip) write(dst, src []byte) []byte {
 		}
 		dst = append(dst, src[:i+1]...)
 		src = src[i+1:]
-		if bytes.HasSuffix(dst, dataKey) {
+		if bytes.HasSuffix(dst, dataKey) && (len(dst) == len(dataKey) || dst[len(dst)-len(dataKey)-1] != '\\') {
 			b.inData = true
 		}
 	}
@@ -81,7 +102,10 @@ func (b *b64Strip) write(dst, src []byte) []byte {
 
 // end: the line has ended.
 func (b *b64Strip) end(dst []byte) []byte {
-	b.inData = false
+	if b.inData && !b.dropping {
+		dst = append(dst, b.held...)
+	}
+	b.inData, b.dropping, b.held = false, false, b.held[:0]
 	return dst
 }
 
@@ -94,18 +118,16 @@ func (b *b64Strip) end(dst []byte) []byte {
 // does not match), the session id, the log found for it, and the herdr or
 // tmux pane it runs in, the terminal its input is (/proc/<pid>/fd/0) and
 // its ancestors (pid and name, nearest first). With mode "tmux" a first
-// record gives the active pane of the named tmux session, its server's pid
-// and the pane's title, a second the pane's terminal; given a pane
-// (tmuxPane, validated), a third that pane's terminal. Linux only (/proc):
+// record gives the active pane of the named tmux session, its server's pid,
+// the pane's terminal and its title (in one query: they go together); given
+// a pane (tmuxPane, validated), a second that pane's terminal. Linux only (/proc):
 // elsewhere it prints the record "noproc". Fixed script; the mode and the
 // validated tmux session name are its only arguments.
 func convoLocateCommand(mode, tmuxName, tmuxPane string) string {
 	script := `PATH="$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 if [ "$1" = tmux ]; then
-  t=$(tmux -u display-message -p -t "=$2:" '#{pane_id} #{pid} #{pane_title}' 2>/dev/null | head -c 600 | tr -d '\n')
+  t=$(tmux -u display-message -p -t "=$2:" '#{pane_id} #{pid} #{pane_tty} #{pane_title}' 2>/dev/null | head -c 800 | tr -d '\n')
   printf 'tmux=%s\0' "$t"
-  t=$(tmux -u display-message -p -t "=$2:" '#{pane_tty}' 2>/dev/null | head -c 200 | tr -d '\n')
-  printf 'tmuxtty=%s\0' "$t"
   if [ -n "$3" ]; then
     t=$(tmux -u display-message -p -t "$3" '#{pane_tty}' 2>/dev/null | head -c 200 | tr -d '\n')
     printf 'panetty=%s\0' "$t"
@@ -193,12 +215,6 @@ func parseConvoLocate(out string) (l convoLocated) {
 			l.noProc = true
 			continue
 		}
-		if v, ok := strings.CutPrefix(rec, "tmuxtty="); ok {
-			if strings.HasPrefix(v, "/dev/") && !strings.ContainsAny(v, " \n") {
-				l.tmuxTTY = v
-			}
-			continue
-		}
 		if v, ok := strings.CutPrefix(rec, "panetty="); ok {
 			if strings.HasPrefix(v, "/dev/") && !strings.ContainsAny(v, " \n") {
 				l.paneTTY = v
@@ -206,17 +222,20 @@ func parseConvoLocate(out string) (l convoLocated) {
 			continue
 		}
 		if v, ok := strings.CutPrefix(rec, "tmux="); ok {
-			// One query, so the pane, its server and its title go together.
-			f := strings.SplitN(v, " ", 3)
-			if len(f) >= 2 && tmuxPane.MatchString(f[0]) && isDigits(f[1]) {
+			// One query, so the pane, its server, its terminal and its title go together.
+			f := strings.SplitN(v, " ", 4)
+			if len(f) >= 3 && tmuxPane.MatchString(f[0]) && isDigits(f[1]) {
 				l.tmuxActive, l.tmuxPID = f[0], f[1]
-				if len(f) == 3 {
+				if strings.HasPrefix(f[2], "/dev/") {
+					l.tmuxTTY = f[2]
+				}
+				if len(f) == 4 {
 					l.tmuxTitle = truncate(strings.Map(func(r rune) rune {
 						if r < 0x20 || r == 0x7f || (r >= 0x202a && r <= 0x202e) || (r >= 0x2066 && r <= 0x2069) {
 							return -1
 						}
 						return r
-					}, strings.ToValidUTF8(f[2], "")), 120)
+					}, strings.ToValidUTF8(f[3], "")), 120)
 				}
 			}
 			continue
@@ -736,7 +755,10 @@ func (s *Server) readConvo(sess *term.Session, st *convoState) (more bool, err e
 func convoCustomTitle(sess *term.Session, log, sid string) []byte {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	out, err := sshx.Output(ctx, sess.Client(), convoTitleCommand(log), 65536)
+	if !convoUUID.MatchString(sid) {
+		return nil
+	}
+	out, err := sshx.Output(ctx, sess.Client(), convoTitleCommand(log, sid), 65536)
 	if err != nil {
 		return nil
 	}
@@ -762,10 +784,11 @@ func customTitleLine(out []byte, sid string) []byte {
 }
 
 // convoTitleCommand: fixed, the log's path (one locateConvo found, under
-// .claude/projects/) its only argument. Rows Claude Code writes for a name
-// begin so; a tool's input that holds the words does not.
-func convoTitleCommand(log string) string {
-	return "LC_ALL=C grep -a '^{\"type\":\"custom-title\"' " + sshx.QuoteShell(log) + " 2>/dev/null | tail -n 1 | head -c 65536"
+// .claude/projects/) and the session id (validated) its arguments. Rows
+// Claude Code writes for a name begin so; a tool's input that holds the
+// words does not. Of this session's only (a log may hold another's).
+func convoTitleCommand(log, sid string) string {
+	return "LC_ALL=C grep -a '^{\"type\":\"custom-title\"' " + sshx.QuoteShell(log) + " 2>/dev/null | grep -F " + sshx.QuoteShell(`"sessionId":"`+sid+`"`) + " | tail -n 1 | head -c 65536"
 }
 
 // readOlder reads in the part of the log before what was read: up to

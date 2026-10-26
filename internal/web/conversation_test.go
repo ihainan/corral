@@ -12,7 +12,7 @@ const sidB = "607ffb6d-81da-4b8d-9d09-cad35b7a2ab4"
 func convoRec(fields ...string) string { return strings.Join(fields, "\n") + "\x00" }
 
 func TestParseConvoLocate(t *testing.T) {
-	out := "tmux=%3 4242\x00tmuxtty=/dev/pts/7\x00" +
+	out := "tmux=%3 4242 /dev/pts/7 \x00" +
 		convoRec("pid=100", "start=500", "fg=1", "procstart=500", "sid="+sidA, "log=/home/u/.claude/projects/-w/"+sidA+".jsonl",
 			"tty=/dev/pts/4", "anc=90:zsh,80:herdr,", "HERDR_PANE_ID=w7:p1", "HERDR_SOCKET_PATH=/home/u/.config/herdr/herdr.sock") +
 		// The pid was reused: the session file is a dead process's.
@@ -43,7 +43,7 @@ func TestParseConvoLocate(t *testing.T) {
 	if !parseConvoLocate("noproc\x00").noProc {
 		t.Error("noproc not seen")
 	}
-	if l := parseConvoLocate("tmux=%3; rm -rf / 1\x00tmuxtty=/dev/x y\x00"); l.tmuxActive != "" || l.tmuxTTY != "" {
+	if l := parseConvoLocate("tmux=%3; rm -rf / 1 /dev/x\x00panetty=/dev/x y\x00"); l.tmuxActive != "" || l.tmuxTTY != "" || l.paneTTY != "" {
 		t.Errorf("bad tmux answer accepted: %+v", l)
 	}
 }
@@ -150,7 +150,7 @@ func TestConvoGenerationsAreNotReused(t *testing.T) {
 }
 
 func TestParseConvoLocateTmuxTitle(t *testing.T) {
-	title := parseConvoLocate("tmux=%1 9 \u2733 fix\u0007 the tests\x00").tmuxTitle
+	title := parseConvoLocate("tmux=%1 9 /dev/pts/2 \u2733 fix\u0007 the tests\x00").tmuxTitle
 	if title != "\u2733 fix the tests" {
 		t.Fatalf("title %q", title)
 	}
