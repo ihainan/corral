@@ -14,9 +14,10 @@ import { useCompletion } from '../terminal/Completion'
 import { InlineReply } from '../terminal/ReplyDialog'
 import { ConversationView, when, type ConvoAgent, type ConvoListRow, type ConvoPending, type ModelOpt } from '../terminal/Conversation'
 import { asking, useConversation, type ConvoEntry } from '../terminal/conversation'
-import { isClaude, isCodex, listAgents, paneTitle, readsLog, useRunningSessions, type AgentRow } from '../terminal/agents'
+import { isCodex, listAgents, paneTitle, readsLog, useRunningSessions, type AgentRow } from '../terminal/agents'
 import { afterSend, holdTermMode, PENDING_MS, sameTurn, tmuxKey } from '../terminal/chatSend'
 import { agentKey, sessionWhich } from '../terminal/sessionName'
+import { AgentIcon, agentMark } from '../terminal/agentIcons'
 
 // The agents page: every agent of the sessions the gateway has open, and the
 // conversation of the one picked, with a composer that sends to it. It
@@ -72,6 +73,17 @@ function readPick(): Pick | null {
 // One entry of the list: a herdr agent, or a tmux session (whose agent is
 // whatever runs in it; only the one shown has a known state).
 type Entry = { key: string; s: SessionInfo; pane?: string; row?: AgentRow }
+
+// Where an entry is, as its row says it: its host only where the list has
+// more than one; its workspace (herdr's "~" at home says nothing), or tmux.
+// Which program runs in it, its icon says (one without an icon of its own: its name).
+const whereOf = (e: Entry, hosts: number) => {
+  const host = hosts > 1 ? e.s.host_name : ''
+  const r = e.row
+  if (!r) return [host, 'tmux'].filter(Boolean).join(' · ')
+  return [host, r.ws && r.ws !== '~' ? r.ws : '', agentMark(r.a.agent) ? '' : r.a.agent].filter(Boolean).join(' · ')
+}
+const hostCount = (entries: Entry[]) => new Set(entries.map((e) => e.s.host_name)).size
 
 export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: boolean }) {
   const toast = useToast()
@@ -375,12 +387,12 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       if (!convo.bind) return null
       const st = !convo.failing && convo.agentStatus
       const asks = !!st && asking(convo.entries)
-      return { title: convo.title || convo.bind.title, status: asks ? 'blocked' : st === 'busy' ? 'working' : st === 'idle' ? 'idle' : 'unknown' }
+      return { title: convo.title || convo.bind.title, status: asks ? 'blocked' : st === 'busy' ? 'working' : st === 'idle' ? 'idle' : 'unknown', program: convo.bind.agent }
     }
     if (!row) return null
     const title = (convo.bind?.pane === row.a.pane_id && convo.title) || paneTitle(row.a.title)
     // (herdr's name for a workspace at home, "~": nothing to tell)
-    return { where: row.ws === '~' ? '' : row.ws, title, status: row.lost ? 'unknown' : row.status, other: readsLog(row.a.agent) ? undefined : row.a.agent }
+    return { where: row.ws === '~' ? '' : row.ws, title, status: row.lost ? 'unknown' : row.status, other: readsLog(row.a.agent) ? undefined : row.a.agent, program: row.a.agent }
   }, [herdr, row, convo.bind, convo.agentStatus, convo.failing, convo.title, convo.entries])
   // (A new conversation, its log not written yet, takes its first message.)
   const bound = (convo.status === 'ready' || (convo.status === 'none' && convo.reason === 'no_log')) && !!convo.bind && (!herdr || convo.bind.pane === cur.pane)
@@ -391,6 +403,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
 
   // The list beside the thread (or from the bar on a narrow screen).
   const rows = useMemo((): ConvoListRow[] => {
+    const hosts = hostCount(entries)
     return entries.map((e) => {
       const current = e.key === cur.key && e.s.id === cur.s.id
       if (current && convo.title) {
@@ -401,10 +414,10 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       if (e.row) {
         const r = e.row
         const title = (current && agent?.title) || keptTitle(titles, e) || paneTitle(r.a.title) || r.a.agent
-        return { key: e.key, title, where: [r.s.host_name, r.ws, isClaude(r.a.agent) ? '' : r.a.agent].filter(Boolean).join(' · '), status: current && agent ? agent.status : r.status, since: r.lost ? undefined : r.a.since, current, onPick: () => onPick(e) }
+        return { key: e.key, title, where: whereOf(e, hosts), program: r.a.agent, status: current && agent ? agent.status : r.status, since: r.lost ? undefined : r.a.since, current, onPick: () => onPick(e) }
       }
       const title = (current && agent?.title) || keptTitle(titles, e) || `${e.s.host_name} · ${sessionWhich(e.s, all)}`
-      return { key: e.key, title, where: e.s.host_name + ' · tmux', status: current && agent ? agent.status : 'unknown', current, onPick: () => onPick(e) }
+      return { key: e.key, title, where: whereOf(e, hosts), program: current ? agent?.program : undefined, status: current && agent ? agent.status : 'unknown', current, onPick: () => onPick(e) }
     })
   }, [entries, cur, agent, convo.title, all, titles, onPick])
 
@@ -999,6 +1012,7 @@ function PhoneList({ entries, all, titles, onPick }: { entries: Entry[]; all: Se
     requestAnimationFrame(() => box.current?.scrollTo({ top: 0, behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' }))
   }
   const shown = mine ? list.filter((e) => e.row?.status === 'blocked' || e.row?.status === 'done') : list
+  const hosts = hostCount(entries)
   return (
     <div className="agents-list" ref={box}>
       <div className="agents-list-top">
@@ -1018,14 +1032,12 @@ function PhoneList({ entries, all, titles, onPick }: { entries: Entry[]; all: Se
           const r = e.row
           const status = r?.lost ? 'unknown' : (r?.status ?? 'unknown')
           const title = keptTitle(titles, e) || (r ? paneTitle(r.a.title) || r.a.agent : `${e.s.host_name} · ${sessionWhich(e.s, all)}`)
-          const where = r ? [r.s.host_name, r.ws && r.ws !== '~' ? r.ws : '', isClaude(r.a.agent) ? '' : r.a.agent].filter(Boolean).join(' · ') : e.s.host_name + ' · tmux'
+          const where = whereOf(e, hosts)
           const since = r && !r.lost ? when({ since: r.a.since, status }, now) : ''
           return (
             <li key={e.key + ' ' + e.s.id}>
               <button type="button" className={'agents-list-row is-' + status} onClick={() => onPick(e)}>
-                <span className={'agents-mark is-' + status} aria-hidden="true">
-                  {status === 'working' ? <span className="convo-spin is-small" /> : null}
-                </span>
+                <AgentIcon program={r?.a.agent} size={36} dot={status === 'blocked' || status === 'working' || status === 'done' ? status : undefined} />
                 <span className="agents-list-text">
                   <span className="agents-list-title">{title}</span>
                   <span className="agents-list-where">{where}</span>

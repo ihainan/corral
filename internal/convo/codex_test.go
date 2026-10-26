@@ -29,7 +29,7 @@ func codexSession(t *testing.T) []string {
 		codexLine(t, "response_item", map[string]any{"type": "custom_tool_call", "id": "c1", "call_id": "call_1", "name": "exec", "input": `const r = await tools.exec_command({cmd:"go test ./... -run \"A|B\"","workdir":"/p"}); text(r.output);`}),
 		codexLine(t, "response_item", map[string]any{"type": "custom_tool_call_output", "call_id": "call_1", "output": []any{map[string]any{"type": "input_text", "text": "Script completed\nWall time 1 seconds\nOutput:\n"}, map[string]any{"type": "input_text", "text": "ok p 0.1s\n"}}}),
 		codexLine(t, "response_item", map[string]any{"type": "custom_tool_call", "id": "c2", "call_id": "call_2", "name": "exec", "input": "const patch = " + string(lit) + "; await tools.apply_patch(patch);"}),
-		codexLine(t, "event_msg", map[string]any{"type": "token_count", "info": map[string]any{"last_token_usage": map[string]any{"input_tokens": 12345}}}),
+		codexLine(t, "event_msg", map[string]any{"type": "token_count", "info": map[string]any{"last_token_usage": map[string]any{"input_tokens": 12345}, "model_context_window": 258400}}),
 	}
 }
 
@@ -93,7 +93,7 @@ func TestCodexPrepend(t *testing.T) {
 	if !es[4].Parts[0].Tool.Done {
 		t.Errorf("the patch's output not filled in: %+v", es[4].Parts[0].Tool)
 	}
-	if newer.Title() != "跑一下测试" || newer.Meta().Model != "gpt-6.1-sol" || newer.Status() != "idle" {
+	if newer.Title() != "跑一下测试" || newer.Meta().Model != "gpt-6.1-sol" || newer.Meta().Window != 258400 || newer.Status() != "idle" {
 		t.Errorf("title %q meta %+v status %q", newer.Title(), newer.Meta(), newer.Status())
 	}
 	for i := 1; i < len(es); i++ {

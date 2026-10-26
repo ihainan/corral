@@ -5,6 +5,7 @@ import { copyText, isCoarse } from '../components/ui'
 import { local } from '../storage'
 import { Markdown } from './markdown'
 import { Code } from './Code'
+import { AgentIcon } from './agentIcons'
 import type { Convo, ConvoEntry, ConvoHunk, ConvoMeta, ConvoPart, ConvoQueued, ConvoTask, ConvoTool } from './conversation'
 import { category, isNote, items, ms, partTime, sameEdits, verbOf, type Category, type Edits, type Item } from './convoItems'
 
@@ -35,6 +36,7 @@ export interface ConvoAgent {
   title?: string // the session's title (Claude Code's own), else the pane's
   status: 'working' | 'blocked' | 'done' | 'idle' | 'unknown'
   other?: string // the program in the pane, when it is not Claude Code
+  program?: string // the program in the pane, for its icon
 }
 
 // A message sent from the composer while the conversation shows: "waiting"
@@ -446,6 +448,7 @@ export function ConversationView({
   const others = rows.filter((r) => r.status === 'blocked' && !r.current)
   const label = (
     <>
+      {agent && <AgentIcon program={agent.program} size={22} />}
       <span className="convo-bar-name">{name[0] || t('convo.title')}</span>
       {name[1] && <span className="convo-bar-where">{name[1]}</span>}
       {side && !sideShown && <ChevronDown size={14} className="convo-bar-chev" aria-hidden="true" />}
@@ -640,8 +643,10 @@ function Runs({ meta, active, mode, model }: { meta: ConvoMeta; active: boolean;
     }
   }, [open])
   const used = meta.context ?? 0
-  // (Past the smaller window, the session has the larger one.)
-  const windows = WINDOWS.filter((w) => w >= used || w === WINDOWS[WINDOWS.length - 1])
+  // (Where the log does not say it: past the smaller window, the session has the larger one.)
+  const windows = meta.window ? [meta.window] : WINDOWS.filter((w) => w >= used || w === WINDOWS[WINDOWS.length - 1])
+  // (The gauge: of its window, else of the smaller it may be.)
+  const full = Math.min(1, used / windows[0])
   return (
     // (The focus gone elsewhere, as by Tab, while the model menu is open, the list read or not: closed.)
     <div className="convo-runs" ref={box} onBlur={(e) => open === 'model' && !box.current?.contains(e.relatedTarget as Node | null) && setOpen(false)}>
@@ -686,8 +691,9 @@ function Runs({ meta, active, mode, model }: { meta: ConvoMeta; active: boolean;
           <span className="convo-runs-item convo-runs-model" title={meta.model}>{modelName(meta.model)}</span>
         ))}
       {used > 0 && (
-        <button type="button" className="convo-runs-item convo-runs-ctx" aria-expanded={open === 'ctx'} aria-label={t('convo.ctxLabel', { n: tokens(used) })} onClick={() => setOpen(open === 'ctx' ? false : 'ctx')}>
-          {t('convo.ctxShort', { n: tokens(used) })}
+        <button type="button" className="convo-runs-item convo-runs-ctx" aria-expanded={open === 'ctx'} aria-label={t('convo.ctxLabel', { n: tokens(used) })} title={t('convo.ctxLabel', { n: tokens(used) })} onClick={() => setOpen(open === 'ctx' ? false : 'ctx')}>
+          <Gauge part={full} />
+          {tokens(used)}
         </button>
       )}
       {open === 'model' && model && (
@@ -751,18 +757,31 @@ function Runs({ meta, active, mode, model }: { meta: ConvoMeta; active: boolean;
               <span>{meta.model}</span>
             </div>
           )}
-          <p className="convo-runs-note">{t(windows.length > 1 ? 'convo.ctxNote' : 'convo.ctxNoteBig')}</p>
+          <p className="convo-runs-note">{t(meta.window ? 'convo.ctxNoteSaid' : windows.length > 1 ? 'convo.ctxNote' : 'convo.ctxNoteBig')}</p>
         </div>
       )}
     </div>
   )
 }
 
-// A row of the list of agents to go to (see Terminal.tsx).
+// How full the context is, as a ring: past 80%, in the warning colour.
+function Gauge({ part }: { part: number }) {
+  const r = 5.5
+  const c = 2 * Math.PI * r
+  return (
+    <svg className={'convo-gauge' + (part >= 0.8 ? ' is-full' : '')} viewBox="0 0 14 14" width="14" height="14" aria-hidden="true">
+      <circle cx="7" cy="7" r={r} className="convo-gauge-track" />
+      <circle cx="7" cy="7" r={r} className="convo-gauge-fill" strokeDasharray={`${(part * c).toFixed(2)} ${c.toFixed(2)}`} transform="rotate(-90 7 7)" />
+    </svg>
+  )
+}
+
+// A row of the list of agents to go to (see AgentsChat.tsx).
 export interface ConvoListRow {
   key: string
   title: string
-  where: string // its host, and its workspace or session
+  where: string // its workspace or session (its host too, where there are several)
+  program?: string // the program in it, for its icon
   status: 'working' | 'blocked' | 'done' | 'idle' | 'unknown'
   since?: number // (unix ms) when its status last changed
   current: boolean
@@ -774,6 +793,34 @@ const GROUPS: { name: I18nKey; of: (r: ConvoListRow) => boolean }[] = [
   { name: 'convo.group.working', of: (r) => r.status === 'working' },
   { name: 'convo.group.recent', of: (r) => r.status !== 'blocked' && r.status !== 'working' },
 ]
+
+// The rest, as the list shows them: by the day their status last changed;
+// those of no known time (a tmux session, the gateway restarted) last.
+// (today, yesterday: the starts of the two calendar days, a day of a clock
+// change being 23 or 25 hours long.)
+const DAYS: { name: I18nKey; of: (since: number, today: number, yesterday: number) => boolean }[] = [
+  { name: 'convo.group.today', of: (since, today) => since >= today },
+  { name: 'convo.group.yesterday', of: (since, today, yesterday) => since >= yesterday && since < today },
+  { name: 'convo.group.earlier', of: (since, _, yesterday) => since > 0 && since < yesterday },
+  { name: 'convo.group.other', of: (since) => since <= 0 },
+]
+const dayStart = (now: number) => new Date(now).setHours(0, 0, 0, 0)
+const dayBefore = (start: number) => {
+  const d = new Date(start)
+  d.setDate(d.getDate() - 1)
+  return d.setHours(0, 0, 0, 0) // (a midnight skipped by a clock change: its first hour)
+}
+
+// The time on a row of the list: how long it has waited or worked; else
+// when it came to rest, the clock's time (its day said by its group), or
+// the date before yesterday.
+function stamp(r: ConvoListRow, now: number, yesterday: number): string {
+  if (r.status === 'working' || r.status === 'blocked') return r.since && now >= r.since && now - r.since < 60000 ? t('convo.ago.now') : when(r, now)
+  if (!r.since || now < r.since) return ''
+  const d = new Date(r.since)
+  if (r.since >= yesterday) return d.toLocaleTimeString(getLang(), { hour: '2-digit', minute: '2-digit', hour12: false })
+  return d.toLocaleDateString(getLang(), { month: 'numeric', day: 'numeric' })
+}
 
 // The latest to change first; those of no known time last, as they were.
 const byRecent = (rows: ConvoListRow[]) => rows.map((r, i) => [r, i] as const).sort(([a, i], [b, j]) => (b.since ?? 0) - (a.since ?? 0) || i - j).map(([r]) => r)
@@ -806,15 +853,22 @@ function AgentList({ rows, onPicked, placed }: { rows: ConvoListRow[]; onPicked?
     const timer = setInterval(() => setNow(Date.now()), 30000)
     return () => clearInterval(timer)
   }, [])
+  const at = (r: ConvoListRow) => placed?.get(r.key) ?? r
+  // (Placed: in their order then, ties too; new ones after.)
+  const first = placed ? [...placed.keys()] : []
+  const place = (r: ConvoListRow) => (first.includes(r.key) ? first.indexOf(r.key) : first.length)
+  const inOrder = placed ? [...rows].sort((a, b) => place(a) - place(b)) : rows
+  const today = dayStart(now)
+  const yesterday = dayBefore(today)
+  const groups = GROUPS.flatMap((g) => {
+    const of = byRecent(inOrder.map(at).filter(g.of))
+    if (g.name !== 'convo.group.recent') return [{ name: g.name, of }]
+    return DAYS.map((d) => ({ name: d.name, of: of.filter((p) => d.of(p.since ?? 0, today, yesterday)) }))
+  })
   return (
     <>
-      {GROUPS.map((g) => {
-        const at = (r: ConvoListRow) => placed?.get(r.key) ?? r
-        // (Placed: in their order then, ties too; new ones after.)
-        const first = placed ? [...placed.keys()] : []
-        const place = (r: ConvoListRow) => (first.includes(r.key) ? first.indexOf(r.key) : first.length)
-        const inOrder = placed ? [...rows].sort((a, b) => place(a) - place(b)) : rows
-        const of = byRecent(inOrder.map(at).filter(g.of)).map((p) => rows.find((r) => r.key === p.key)!)
+      {groups.map((g) => {
+        const of = g.of.map((p) => rows.find((r) => r.key === p.key)!)
         if (!of.length) return null
         return (
           <div key={g.name} className="convo-list-group" role="group" aria-label={t(g.name)}>
@@ -822,30 +876,35 @@ function AgentList({ rows, onPicked, placed }: { rows: ConvoListRow[]; onPicked?
               {t(g.name)}
               <span>{of.length}</span>
             </div>
-            {of.map((r) => (
-              <button
-                key={r.key}
-                type="button"
-                className="convo-list-row"
-                aria-current={r.current || undefined}
-                onClick={() => {
-                  onPicked?.()
-                  r.onPick() // (of the one shown: nothing, or the end of a switch to another; the list may be of before)
-                }}
-              >
-                <span className="convo-list-title">{r.title}</span>
-                <span className="convo-list-sub">
-                  {r.status === 'working' && <span className="convo-spin is-small" aria-hidden="true" />}
-                  {r.status !== 'unknown' && (
-                    <span className={'is-' + r.status}>
-                      {t(`convo.status.${r.status}` as I18nKey)}
-                      {when(r, now) && ' · ' + when(r, now)}
+            {of.map((r) => {
+              // (At rest, nothing to say of it but when.)
+              const said = r.status === 'blocked' || r.status === 'working' || r.status === 'done'
+              const since = stamp(r, now, yesterday)
+              return (
+                <button
+                  key={r.key}
+                  type="button"
+                  className={'convo-list-row is-' + r.status}
+                  aria-current={r.current || undefined}
+                  onClick={() => {
+                    onPicked?.()
+                    r.onPick() // (of the one shown: nothing, or the end of a switch to another; the list may be of before)
+                  }}
+                >
+                  <AgentIcon program={r.program} size={30} dot={said ? (r.status as 'blocked' | 'working' | 'done') : undefined} />
+                  <span className="convo-list-text">
+                    <span className="convo-list-line">
+                      <span className="convo-list-title">{r.title}</span>
+                      {since && <span className="convo-list-when">{since}</span>}
                     </span>
-                  )}
-                  <span className="convo-list-where">{r.where}</span>
-                </span>
-              </button>
-            ))}
+                    <span className="convo-list-sub">
+                      {said && <span className={'is-' + r.status}>{t(`convo.status.${r.status}` as I18nKey)}</span>}
+                      {r.where && <span className="convo-list-where">{r.where}</span>}
+                    </span>
+                  </span>
+                </button>
+              )
+            })}
           </div>
         )
       })}

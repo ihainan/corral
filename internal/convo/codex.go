@@ -117,6 +117,9 @@ func (c *Codex) Prepend(other Parser) {
 	if !c.ctxSaid {
 		c.meta.Context, c.ctxSaid = o.meta.Context, o.ctxSaid
 	}
+	if c.meta.Window == 0 {
+		c.meta.Window = o.meta.Window
+	}
 	if !c.known {
 		c.working, c.known = o.working, o.known
 	}
@@ -209,6 +212,7 @@ type codexPayload struct {
 		Last *struct {
 			Input int64 `json:"input_tokens"`
 		} `json:"last_token_usage"`
+		Window int64 `json:"model_context_window"`
 	} `json:"info"`
 	Reason string `json:"reason"`
 	// turn_context, thread_settings_applied
@@ -281,6 +285,9 @@ func (c *Codex) event(r *codexRow, p *codexPayload) {
 	case "token_count":
 		if p.Info != nil && p.Info.Last != nil && p.Info.Last.Input > 0 {
 			c.meta.Context, c.ctxSaid = p.Info.Last.Input, true
+		}
+		if p.Info != nil && p.Info.Window > 0 {
+			c.meta.Window = p.Info.Window
 		}
 	case "item_completed":
 		if p.Item == nil || p.Item.Type != "UserMessage" {

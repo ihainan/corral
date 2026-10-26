@@ -431,6 +431,14 @@ html.term-dark .overlay, html.term-dark .menu, html.term-dark .toast {
 .convo-runs-branch svg { flex: none; }
 .convo-runs-branch-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .convo-runs-ctx { cursor: pointer; }
+.convo-gauge { flex: none; }
+.convo-gauge circle { fill: none; stroke-width: 2.2; }
+.convo-gauge-track { stroke: var(--term-line); }
+.convo-gauge-fill { stroke: var(--term-fg-3); stroke-linecap: round; }
+.convo-gauge.is-full .convo-gauge-fill { stroke: var(--term-warn-text); }
+/* The composer's keys: said while one types, not over a box at rest. */
+.convo-dock .composer-keys:not(.agents-chat-why) { opacity: 0; transition: opacity 0.15s; }
+.convo-dock .composer-box:focus-within .composer-keys { opacity: 1; }
 .convo-runs-item.is-switch { display: inline-flex; gap: 3px; cursor: pointer; }
 .convo-runs-item.is-switch svg { flex: none; opacity: 0.7; }
 .convo-runs-item.is-switch:hover:not(:disabled), .convo-runs-item.is-switch[aria-expanded='true'] { background: var(--term-hover); color: var(--term-fg); }
@@ -675,6 +683,7 @@ html.term-dark .overlay, html.term-dark .menu, html.term-dark .toast {
 .term-root .convo .convo-stop.btn-ghost:hover { border-color: var(--term-fg-3); background: var(--term-hover); }
 @media (pointer: coarse) { .convo-stop { height: 34px; } }
 .convo-bar-pick .convo-bar-name { flex: 0 1 auto; }
+.convo-bar-pick .agent-icon { margin-right: 4px; --dot-ring: var(--term-bg); }
 /* The agents page: a tab as the sessions' are, first, never dragged. */
 .term-tab-agents { padding: 0 10px; }
 .term-tab-agents svg { flex: none; }
@@ -738,7 +747,7 @@ html.term-dark .overlay, html.term-dark .menu, html.term-dark .toast {
 
 /* The agents to go to: beside the thread (wide), over it (narrow, or folded away) */
 .convo-side {
-  flex: none; width: 264px; display: flex; flex-direction: column; overflow-y: auto; overscroll-behavior: contain;
+  flex: none; width: 288px; display: flex; flex-direction: column; overflow-y: auto; overscroll-behavior: contain;
   padding: 8px; border-right: 1px solid var(--term-line); background: var(--term-chrome); font-family: var(--font-ui);
 }
 .convo-side-keys { margin: auto 0 0; padding: 8px 10px 4px; font-size: 12px; color: var(--term-fg-3); }
@@ -746,16 +755,20 @@ html.term-dark .overlay, html.term-dark .menu, html.term-dark .toast {
 .convo-list-group { display: flex; flex-direction: column; gap: 1px; margin-bottom: 10px; }
 .convo-list-head { display: flex; gap: 6px; padding: 4px 10px; font-size: 12px; color: var(--term-fg-3); font-variant-numeric: tabular-nums; }
 .convo-list-row {
-  display: flex; flex-direction: column; gap: 1px; width: 100%; padding: 7px 10px; border: 0; border-radius: 8px;
+  display: flex; align-items: center; gap: 10px; width: 100%; padding: 7px 10px; border: 0; border-radius: 8px;
   background: none; color: var(--term-fg); font: inherit; text-align: left; cursor: pointer;
 }
-.convo-list-row:hover { background: var(--term-hover); }
+.convo-list-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.convo-list-row:hover { background: var(--term-hover); --dot-ring: var(--term-hover); }
 .convo-list-row:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: -2px; }
-.convo-list-row[aria-current='true'] { background: var(--term-accent-soft); }
-.convo-list-title { font-size: 14px; font-weight: 500; line-height: 20px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.convo-list-row[aria-current='true'] { background: var(--term-accent-soft); --dot-ring: var(--term-accent-soft); }
+.convo-list-line { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.convo-list-title { flex: 1; min-width: 0; font-size: 14px; font-weight: 500; line-height: 20px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.convo-list-when { flex: none; font-size: 11.5px; color: var(--term-fg-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .convo-list-row[aria-current='true'] .convo-list-title { color: var(--term-accent-text); font-weight: 600; }
 .convo-list-sub { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 12px; line-height: 18px; color: var(--term-fg-3); white-space: nowrap; overflow: hidden; }
-.convo-list-where { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.convo-list-where { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--term-fg-2); }
+.convo-list-sub > span + .convo-list-where::before { content: '·'; margin-right: 6px; }
 .convo-spin.is-small { width: 9px; height: 9px; margin: 0; border-width: 1.5px; flex: none; }
 @media (pointer: coarse) { .convo-list-row { padding: 10px 12px; } }
 .convo-nudge {
@@ -840,12 +853,29 @@ html.term-dark .overlay, html.term-dark .menu, html.term-dark .toast {
 .agents-list-side.is-blocked { color: var(--term-warn-text); font-weight: 600; }
 .agents-list-side.is-working { color: var(--term-accent-text); }
 .agents-list-side.is-done { color: var(--term-ok-text); }
-/* The mark: a triangle waiting, turning working, a dot done (not seen), a ring idle. */
-.agents-mark { flex: none; width: 12px; height: 12px; display: inline-flex; align-items: center; justify-content: center; }
-.agents-mark.is-blocked { background: var(--term-warn-text); clip-path: polygon(50% 4%, 100% 96%, 0 96%); }
-.agents-mark.is-done { border-radius: 50%; background: var(--term-ok-text); width: 9px; height: 9px; margin: 0 1.5px; }
-.agents-mark.is-idle, .agents-mark.is-unknown { border-radius: 50%; border: 1.5px solid var(--term-fg-3); width: 10px; height: 10px; margin: 0 1px; }
-.agents-mark.is-unknown { opacity: 0.5; }
+/* An agent's icon: its program's mark on a tile tinted with its colour; a
+   dot on its corner says it waits for you, works, or is done (none at rest),
+   ringed in the colour of what it sits on. */
+.agent-icon {
+  --agent-tint: var(--agent-color, var(--term-fg));
+  position: relative; flex: none; display: inline-flex; align-items: center; justify-content: center; border-radius: 28%;
+  color: var(--agent-tint); background: color-mix(in srgb, var(--agent-tint) 13%, var(--term-bg));
+}
+.agent-icon.is-plain { color: var(--term-fg-2); background: var(--term-key-active); }
+.agent-icon svg { display: block; }
+.agent-icon-dot {
+  position: absolute; right: -3px; bottom: -3px; width: 10px; height: 10px; border-radius: 50%;
+  box-shadow: 0 0 0 2px var(--dot-ring, var(--term-chrome));
+}
+.agent-icon-dot.is-blocked { background: var(--term-warn-text); }
+.agent-icon-dot.is-working { background: var(--term-accent-text); animation: agent-dot 1.6s ease-in-out infinite; }
+.agent-icon-dot.is-done { background: var(--term-ok-text); }
+@keyframes agent-dot { 50% { opacity: 0.35; } }
+@media (prefers-reduced-motion: reduce) { .agent-icon-dot.is-working { animation: none; } }
+.convo-list-row.is-unknown .agent-icon { opacity: 0.55; }
+.agents-list-row { --dot-ring: var(--term-bg); }
+.agents-list-row.is-blocked { --dot-ring: color-mix(in srgb, var(--term-warn-text) 10%, var(--term-bg)); }
+.agents-list-row.is-unknown .agent-icon { opacity: 0.55; }
 /* A phone's conversation: its own bar, with the way back, under the status bar. */
 .agents-chat.is-stack.is-chat .convo-bar { padding-top: calc(env(safe-area-inset-top, 0px) + 6px); }
 .term-root .agents-chat-back { flex: none; margin-left: -6px; }

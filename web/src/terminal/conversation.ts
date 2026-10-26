@@ -67,6 +67,7 @@ export interface ConvoMeta {
   mode?: string // the permission mode: default, acceptEdits, plan, auto, ...
   branch?: string
   context?: number // tokens the latest request sent
+  window?: number // the model's context window, where the log says it (Codex's)
 }
 
 // What the entries are of (internal/web/conversation.go convoBind).
@@ -159,7 +160,7 @@ const sameBind = (a?: ConvoBind, b?: ConvoBind) =>
   a === b || (!!a && !!b && a.pane === b.pane && a.pid === b.pid && a.start === b.start && a.session === b.session && a.title === b.title)
 
 const sameMeta = (a?: ConvoMeta, b?: ConvoMeta) =>
-  a === b || (!!a && !!b && a.model === b.model && a.mode === b.mode && a.branch === b.branch && a.context === b.context)
+  a === b || (!!a && !!b && a.model === b.model && a.mode === b.mode && a.branch === b.branch && a.context === b.context && a.window === b.window)
 
 const POLL = 2000
 const RETRY = 5000
