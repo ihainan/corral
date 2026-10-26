@@ -591,7 +591,7 @@ export type ModeSwitch = { now?: string; busy: boolean; onNext?: () => void }
 
 // Switching the model, from a menu of what Claude Code's picker offers
 // (list: null while it is read), for the session only.
-export type ModelOpt = { label: string; desc?: string }
+export type ModelOpt = { label: string; desc?: string; current?: boolean }
 export type ModelSwitch = { list: ModelOpt[] | null; busy: boolean; onOpen: () => void; onPick: (label: string) => void }
 
 // What the session runs with, under the composer: its permission mode on
@@ -600,7 +600,17 @@ export type ModelSwitch = { list: ModelOpt[] | null; busy: boolean; onOpen: () =
 function Runs({ meta, active, mode, model }: { meta: ConvoMeta; active: boolean; mode?: ModeSwitch; model?: ModelSwitch }) {
   const [open, setOpen] = useState<false | 'ctx' | 'model'>(false) // (which of its two pop-ups)
   const box = useRef<HTMLDivElement>(null)
+  const modelBtn = useRef<HTMLButtonElement>(null)
   if (open && !active) setOpen(false) // (behind a terminal tab: its Escape is the terminal's)
+  if (open === 'model' && !model) setOpen(false) // (it works now: no switching)
+  // The model menu: its current one (else its first) takes the focus once
+  // read; Up and Down go through it; closed by Escape, back to its button.
+  const menu = useRef<HTMLDivElement>(null)
+  const listed = open === 'model' && !!model?.list
+  useEffect(() => {
+    if (!listed) return
+    ;(menu.current?.querySelector<HTMLElement>('[aria-checked="true"]') ?? menu.current?.querySelector<HTMLElement>('button'))?.focus()
+  }, [listed])
   useEffect(() => {
     if (!open) return
     const away = (e: PointerEvent) => {
@@ -610,7 +620,13 @@ function Runs({ meta, active, mode, model }: { meta: ConvoMeta; active: boolean;
       if (e.key === 'Escape') {
         e.preventDefault()
         e.stopPropagation()
+        if (open === 'model' && box.current?.contains(document.activeElement)) modelBtn.current?.focus()
         setOpen(false)
+      } else if (open === 'model' && (e.key === 'ArrowDown' || e.key === 'ArrowUp') && menu.current?.contains(document.activeElement)) {
+        const all = [...menu.current.querySelectorAll<HTMLElement>('button')]
+        const at = all.indexOf(document.activeElement as HTMLElement)
+        e.preventDefault()
+        all[(at + (e.key === 'ArrowDown' ? 1 : all.length - 1)) % all.length]?.focus()
       }
     }
     document.addEventListener('pointerdown', away, true)
@@ -646,6 +662,7 @@ function Runs({ meta, active, mode, model }: { meta: ConvoMeta; active: boolean;
       {meta.model &&
         (model ? (
           <button
+            ref={modelBtn}
             type="button"
             className="convo-runs-item convo-runs-model is-switch"
             aria-expanded={open === 'model'}
@@ -670,12 +687,13 @@ function Runs({ meta, active, mode, model }: { meta: ConvoMeta; active: boolean;
         </button>
       )}
       {open === 'model' && model && (
-        <div className="convo-runs-pop convo-models" role="menu" aria-label={t('convo.model')}>
+        <div className="convo-runs-pop convo-models" role="menu" aria-label={t('convo.model')} ref={menu}>
           {model.list === null ? (
             <p className="convo-runs-note" role="status">{t('convo.modelReading')}</p>
           ) : (
             model.list.map((o) => {
-              const now = modelName(meta.model!) === o.label
+              // (As its picker last said, which the log may not yet.)
+              const now = model.list!.some((x) => x.current) ? !!o.current : modelName(meta.model!) === o.label
               return (
                 <button
                   key={o.label}
@@ -685,6 +703,7 @@ function Runs({ meta, active, mode, model }: { meta: ConvoMeta; active: boolean;
                   className="convo-models-item"
                   onClick={() => {
                     setOpen(false)
+                    modelBtn.current?.focus()
                     if (!now) model.onPick(o.label)
                   }}
                 >

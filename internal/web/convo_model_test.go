@@ -19,12 +19,21 @@ type fakePicker struct {
 	pressed []string
 	saved   bool // the default of new sessions was changed (a digit, Enter on the picker, /model NAME)
 	session string
+	said    []string // the thread above the input ("Set model to …", words quoted)
+	draft   string   // in its input
+	busy    bool
 }
 
 func (f *fakePicker) screen() string {
 	var b strings.Builder
-	b.WriteString("❯ \n  Opus 5.5·H │ Ctx 0\n")
-	if f.open {
+	for _, l := range f.said {
+		b.WriteString(l + "\n")
+	}
+	if f.busy {
+		b.WriteString("✻ Crunching… (12s · esc to interrupt)\n")
+	}
+	b.WriteString("────────────────────────\n❯ " + f.draft + "\n────────────────────────\n  Opus 5.5·H │ Ctx 0\n")
+	if f.open && !f.asking { // (its question takes the picker's place)
 		b.WriteString("   Select model\n   Switch between Claude models. Your pick becomes the default for new sessions.\n")
 		for i, m := range f.models {
 			mark, check := "  ", ""
@@ -53,6 +62,7 @@ func (f *fakePicker) step(keys []string, text string, read int) (string, error) 
 		switch {
 		case f.asking && k == "yes":
 			f.asking, f.open, f.current, f.session = false, false, f.cursor, f.models[f.cursor]
+			f.said = append(f.said, "  ⎿  Set model to "+f.session+" for this session only")
 		case f.asking && k == "esc":
 			f.asking = false
 		case f.open && k == "down" && f.cursor < len(f.models)-1:
@@ -64,6 +74,7 @@ func (f *fakePicker) step(keys []string, text string, read int) (string, error) 
 				f.asking = true
 			} else {
 				f.open, f.current, f.session = false, f.cursor, f.models[f.cursor]
+				f.said = append(f.said, "  ⎿  Set model to "+f.session+" for this session only")
 			}
 		case f.open && k == "yes":
 			f.saved = true
@@ -73,10 +84,14 @@ func (f *fakePicker) step(keys []string, text string, read int) (string, error) 
 	}
 	if text != "" {
 		f.pressed = append(f.pressed, "text:"+text)
-		if strings.TrimSpace(text) == "/model" {
-			f.open, f.cursor = true, f.current
-		} else if strings.HasPrefix(text, "/model ") || strings.ContainsAny(text, "0123456789") && f.open {
-			f.saved = true
+		switch {
+		case f.open:
+			f.saved = true // (Enter on the picker, after the text: the default saved)
+		case strings.TrimSpace(f.draft+text) == "/model":
+			f.open, f.cursor, f.draft = true, f.current, ""
+		default:
+			f.saved = f.saved || strings.HasPrefix(strings.TrimSpace(f.draft+text), "/model ")
+			f.draft = ""
 		}
 	}
 	return f.screen(), nil
@@ -88,7 +103,7 @@ func newFake(history bool) *fakePicker {
 
 func TestModelFlowLists(t *testing.T) {
 	f := newFake(false)
-	opts, err := modelFlow(f.step, "")
+	opts, err := modelFlow(f.step, f.step, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +124,7 @@ func TestModelFlowSwitches(t *testing.T) {
 		for _, target := range []string{"Haiku 5.5", "Opus 5.5", "Fable 5.1"} {
 			f := newFake(history)
 			f.current, f.cursor = 3, 3 // (Sonnet now: up as well as down)
-			if _, err := modelFlow(f.step, target); err != nil {
+			if _, err := modelFlow(f.step, f.step, target); err != nil {
 				t.Fatalf("%v %s: %v", history, target, err)
 			}
 			if f.session != target || f.saved || f.open || f.asking {
@@ -131,7 +146,7 @@ func TestModelFlowRefuses(t *testing.T) {
 			continue
 		}
 		f := newFake(true)
-		if _, err := modelFlow(f.step, target); !errors.Is(err, errNoModel) {
+		if _, err := modelFlow(f.step, f.step, target); !errors.Is(err, errNoModel) {
 			t.Errorf("%q: %v", target, err)
 		}
 		if f.open || f.saved || f.session != "" {
@@ -144,10 +159,66 @@ func TestModelFlowRefuses(t *testing.T) {
 		f.pressed = append(f.pressed, strings.Join(keys, "+")+"|"+text)
 		return "$ ", nil
 	}
-	if _, err := modelFlow(none, "Haiku 5.5"); !errors.Is(err, errNoPicker) {
-		t.Fatalf("no picker: %v", err)
+	if _, err := modelFlow(none, none, "Haiku 5.5"); !errors.Is(err, errScreen) {
+		t.Fatalf("no input on the screen: %v", err)
 	}
-	if got := strings.Join(f.pressed, " "); got != "clear| |/model esc|" {
+	if got := strings.Join(f.pressed, " "); got != "|" {
 		t.Fatalf("pressed %q", got)
+	}
+}
+
+// What review 234 found: none of these presses a key that could save the
+// default, nor says it switched when it is not known.
+func TestModelFlowCareful(t *testing.T) {
+	// The picker left open: closed with Escape first, then opened anew.
+	f := newFake(true)
+	f.open, f.cursor = true, 3
+	if _, err := modelFlow(f.step, f.step, "Haiku 5.5"); err != nil || f.saved || f.session != "Haiku 5.5" {
+		t.Errorf("picker left open: %v saved %v session %q %v", err, f.saved, f.session, f.pressed)
+	}
+	// Its question left open too.
+	f = newFake(true)
+	f.open, f.asking, f.cursor = true, true, 2
+	if _, err := modelFlow(f.step, f.step, "Haiku 5.5"); err != nil || f.saved || f.session != "Haiku 5.5" {
+		t.Errorf("question left open: %v saved %v session %q %v", err, f.saved, f.session, f.pressed)
+	}
+	// Words of the thread like its question, the picker still up after "s": no Enter.
+	f = newFake(false)
+	f.said = []string{"● Switch model?", "  ❯ 1. Yes, switch to Haiku 5.5"}
+	stuck := func(keys []string, text string, read int) (string, error) {
+		scr, err := f.step(keys, text, read)
+		if len(keys) == 1 && keys[0] == "this" { // (it does not take "s")
+			f.open, f.session, f.current = true, "", 1
+			f.said = f.said[:2]
+			return f.screen(), err
+		}
+		return scr, err
+	}
+	if _, err := modelFlow(stuck, f.step, "Haiku 5.5"); !errors.Is(err, errNotTaken) || f.saved {
+		t.Errorf("quoted question: %v saved %v %v", err, f.saved, f.pressed)
+	}
+	for _, k := range f.pressed {
+		if k == "yes" {
+			t.Errorf("Enter pressed: %v", f.pressed)
+		}
+	}
+	// Text in its input, or at work: nothing pressed at all.
+	for name, set := range map[string]func(*fakePicker){"draft": func(f *fakePicker) { f.draft = "half a thought" }, "busy": func(f *fakePicker) { f.busy = true }} {
+		f := newFake(false)
+		set(f)
+		_, err := modelFlow(f.step, f.step, "Haiku 5.5")
+		if err == nil || len(f.pressed) != 0 {
+			t.Errorf("%s: %v, pressed %v", name, err, f.pressed)
+		}
+	}
+	// The picker gone, nothing said: not known (not "switched").
+	f = newFake(false)
+	silent := func(keys []string, text string, read int) (string, error) {
+		f.step(keys, text, read)
+		f.said = nil
+		return f.screen(), nil
+	}
+	if _, err := modelFlow(silent, f.step, "Haiku 5.5"); !errors.Is(err, errUnsure) {
+		t.Errorf("nothing said: %v", err)
 	}
 }

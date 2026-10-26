@@ -883,9 +883,10 @@ func convoProcStatus(c *sftplite.Client, st *convoState) string {
 // Exits 3: not that agent in front in that pane now (or, tmux, the pane is
 // not in this session); 4: nothing typed; 5: the text typed, not Enter; 6:
 // typing failed part way, or may have (so does a signal once typing began);
-// 7: the pane's lock was not had in time (nothing typed). With read (lines,
-// to 60), the last lines of the pane's screen are printed a moment after the
-// keys or the text (what they changed). Fixed script; the
+// 7: the pane's lock was not had in time (nothing typed); 8: the screen
+// asked for could not be read. With read (lines, to 60), the last lines of
+// the pane's screen are printed a moment after the keys or the text (what
+// they changed); keys none (not nil): the screen only. Fixed script; the
 // mode, the validated tmux session name, pane id, pid, start, Claude session
 // id, length, the herdr socket (from discovery) and keys of a fixed set
 // (convoKeys) are its arguments, the text its input.
@@ -895,12 +896,13 @@ mode=$1 sess=$2 p=$3 pid=$4 start=$5 len=$6 sock=$7 sid=$8 rd=$9
 shift 9
 case $rd in ''|*[!0-9]*) rd=0;; esac
 # (What the pane shows after, its last rd lines but blank ones at the end.)
+# (Not read, it exits 8: no screen is not an empty one.)
 screen() {
   [ "$rd" -gt 0 ] || return 0
   sleep 0.7
-  if [ "$mode" = tmux ]; then tmux -u capture-pane -p -t "$p" 2>/dev/null 9>&-
-  else HERDR_SOCKET_PATH=$sock herdr pane read "$p" --source visible 2>/dev/null 9>&-; fi |
-    awk -v n="$rd" '{ a[NR] = $0 } NF { last = NR } END { for (i = last - n + 1; i <= last; i++) if (i > 0) print a[i] }'
+  if [ "$mode" = tmux ]; then s=$(tmux -u capture-pane -p -t "$p" 2>/dev/null 9>&-) || exit 8
+  else s=$(HERDR_SOCKET_PATH=$sock herdr pane read "$p" --source visible 2>/dev/null 9>&-) || exit 8; fi
+  printf '%s\n' "$s" | awk -v n="$rd" '{ a[NR] = $0 } NF { last = NR } END { for (i = last - n + 1; i <= last; i++) if (i > 0) print a[i] }'
 }
 b=corral-send-$$ typing=0
 f=$(mktemp) || exit 4
@@ -937,8 +939,7 @@ if [ "$mode" = tmux ]; then
   [ "$(tmux -u display-message -p -t "$p" '#{session_name}' 2>/dev/null 9>&-)" = "$sess" ] || exit 3
   if [ "$len" = keys ]; then
     front || exit 3
-    typing=1
-    tmux send-keys -t "$p" "$@" 9>&- || exit 6
+    [ $# -gt 0 ] && { typing=1; tmux send-keys -t "$p" "$@" 9>&- || exit 6; }
     screen
     exit 0
   fi
@@ -951,7 +952,7 @@ if [ "$mode" = tmux ]; then
 else
   if [ "$len" = keys ]; then
     front || exit 3
-    typing=1
+    [ $# -gt 0 ] && typing=1
     for k in "$@"; do
       HERDR_SOCKET_PATH=$sock herdr pane send-keys "$p" "$k" >/dev/null 2>&1 9>&- || exit 6
     done
@@ -1049,7 +1050,12 @@ var convoKeys = map[string]struct {
 func screenMode(screen string) string {
 	lines := strings.Split(screen, "\n")
 	for i := len(lines) - 1; i >= 0; i-- {
-		l := strings.ToLower(lines[i])
+		// (Its own line, under the input, begins with its mark: not words of the thread.)
+		t := strings.TrimSpace(lines[i])
+		if !strings.HasPrefix(t, "⏵") && !strings.HasPrefix(t, "⏸") {
+			continue
+		}
+		l := strings.ToLower(t)
 		for _, m := range screenModes {
 			if strings.Contains(l, m.on) {
 				return m.mode
@@ -1277,7 +1283,9 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		return
 	}
 	if what == "models" || what == "model" {
-		s.convoModel(w, ctx, sess, b.Pane, socket, b.PID, b.Start, b.Session, b.Model, &outcome, &reason)
+		release := turn
+		turn = func() {} // (convoModel gives it back, once its steps have ended on the host)
+		s.convoModel(w, ctx, sess, b.Pane, socket, b.PID, b.Start, b.Session, b.Model, &outcome, &reason, release)
 		return
 	}
 	// The check again and the typing or pressing, on the host in one go (see convoSendCommand).

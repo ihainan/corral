@@ -443,18 +443,21 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   // the mode it went to read off its screen (the log says it only with the
   // next message: from then on, that is what shows). Not while it waits for
   // an answer: the key would be the question's.
-  const [modeNow, setModeNow] = useState<{ mode: string; bind: string; was?: string } | null>(null)
+  // (last: the log's last entry then; one after it, the log has said the mode since.)
+  const [modeNow, setModeNow] = useState<{ mode: string; bind: string; was?: string; last: number } | null>(null)
   const [modeBusy, setModeBusy] = useState(false)
-  if (modeNow && (modeNow.bind !== bindKey || convo.meta?.mode !== modeNow.was)) setModeNow(null)
+  const lastSeq = convo.entries.length ? convo.entries[convo.entries.length - 1].seq : 0
+  if (modeNow && (modeNow.bind !== bindKey || convo.meta?.mode !== modeNow.was || lastSeq > modeNow.last)) setModeNow(null)
   const canMode = bound && convo.status === 'ready' && !!convo.meta && agent?.status !== 'blocked' && !agent?.other
   const nextMode = () => {
     const b = convo.bind
     if (!b || modeBusy) return
     const bind = bindKey
     const was = convo.meta?.mode
+    const last = lastSeq
     setModeBusy(true)
     api<{ ok: boolean; mode?: string }>('POST', `/api/sessions/${sid}/conversation/mode`, { pane: b.pane, pid: b.pid, start: b.start, session: b.session }, { timeoutMs: PRESS_MS })
-      .then((r) => (r.mode ? setModeNow({ mode: r.mode, bind, was }) : toast(t('convo.modeUnknown'))))
+      .then((r) => (r.mode ? setModeNow({ mode: r.mode, bind, was, last }) : toast(t('convo.modeUnknown'))))
       .catch((e) => toast(refusal(e), true))
       .finally(() => setModeBusy(false))
   }
@@ -462,7 +465,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   // The model, switched from a menu of what Claude Code's picker offers (read
   // when it opens, through the picker: see convo_model.go), for this session
   // only. Only while it is at rest: the picker takes over its input.
-  const [models, setModels] = useState<{ list: ModelOpt[] | null; bind: string } | null>(null)
+  const [models, setModels] = useState<{ list: ModelOpt[] | null; bind: string; at?: number } | null>(null)
   const [modelBusy, setModelBusy] = useState(false)
   const canModel = bound && convo.status === 'ready' && !!convo.meta?.model && (agent?.status === 'idle' || agent?.status === 'done') && !agent?.other
   const pressBody = () => {
@@ -470,12 +473,13 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     return { pane: b.pane, pid: b.pid, start: b.start, session: b.session }
   }
   const openModels = () => {
-    if (!convo.bind || modelBusy || (models && models.bind === bindKey && models.list)) return
+    // (Read again after a minute: what it offers and which it has now may have changed.)
+    if (!convo.bind || modelBusy || (models && models.bind === bindKey && models.list && Date.now() - (models.at ?? 0) < 60000)) return
     const bind = bindKey
     setModels({ list: null, bind })
     setModelBusy(true)
     api<{ models: ModelOpt[] }>('POST', `/api/sessions/${sid}/conversation/models`, pressBody(), { timeoutMs: MODEL_MS })
-      .then((r) => setModels((m) => (m?.bind === bind ? { list: r.models, bind } : m)))
+      .then((r) => setModels((m) => (m?.bind === bind ? { list: r.models, bind, at: Date.now() } : m)))
       .catch((e) => {
         setModels(null)
         toast(refusal(e), true)
@@ -486,7 +490,10 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     if (!convo.bind || modelBusy) return
     setModelBusy(true)
     api('POST', `/api/sessions/${sid}/conversation/model`, { ...pressBody(), model: label }, { timeoutMs: MODEL_MS })
-      .then(() => toast(t('convo.modelSet', { m: label })))
+      .then(() => {
+        toast(t('convo.modelSet', { m: label }))
+        setModels((m) => m && { ...m, list: m.list && m.list.map((o) => ({ ...o, current: o.label === label })) })
+      })
       .catch((e) => toast(refusal(e), true))
       .finally(() => setModelBusy(false))
   }

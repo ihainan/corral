@@ -206,13 +206,14 @@ func TestParseConvoLocateStarted(t *testing.T) {
 // The mode as Claude Code's last lines say it (what Shift+Tab went on to).
 func TestScreenMode(t *testing.T) {
 	cases := map[string]string{
-		"❯ \n  Opus 5.5·H │ Ctx 48.0K\n  ⏸ manual mode on\n":                                        "default",
-		"  ⏵⏵ accept edits on (shift+tab to cycle)\n":                                              "acceptEdits",
-		"  ⏸ plan mode on (shift+tab to cycle)":                                                    "plan",
-		"  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents\n":                                 "auto",
-		"  ⏵⏵ bypass permissions on (shift+tab to cycle)\n":                                       "bypassPermissions",
-		"❯ \n  ? for shortcuts\n":                                                                   "",
-		"● I said plan mode on earlier\n  ⏵⏵ accept edits on (shift+tab to cycle)\n":              "acceptEdits",
+		"❯ \n  Opus 5.5·H │ Ctx 48.0K\n  ⏸ manual mode on\n":                         "default",
+		"  ⏵⏵ accept edits on (shift+tab to cycle)\n":                                "acceptEdits",
+		"  ⏸ plan mode on (shift+tab to cycle)":                                      "plan",
+		"  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents\n":                    "auto",
+		"  ⏵⏵ bypass permissions on (shift+tab to cycle)\n":                          "bypassPermissions",
+		"❯ \n  ? for shortcuts\n":                                                    "",
+		"● I said plan mode on earlier\n  ⏵⏵ accept edits on (shift+tab to cycle)\n": "acceptEdits",
+		"● plan mode on is what I would use\n❯ \n":                                   "",
 	}
 	for in, want := range cases {
 		if got := screenMode(in); got != want {
