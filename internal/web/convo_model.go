@@ -1,8 +1,11 @@
 package web
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -237,14 +240,21 @@ func modelFlow(step, leave modelStep, target string) (opts []modelOpt, err error
 		return nil, err
 	}
 	before := taken(screen, target)
-	if screen, err = step(nil, "/model", pickerLines); err != nil {
-		return nil, err
-	}
-	pk := parseModelPicker(screen)
+	opened, err := step(nil, "/model", pickerLines)
+	// (Escape, read, again while the picker or its question still shows: twice at most.)
 	out := func(e error) ([]modelOpt, error) {
-		leave([]string{"esc"}, "", pickerLines)
+		for i := 0; i < 2; i++ {
+			if scr, err := leave([]string{"esc"}, "", pickerLines); err != nil || !pickerShows(scr) && !askShows(scr, "") {
+				break
+			}
+		}
 		return nil, e
 	}
+	if err != nil {
+		return out(err)
+	}
+	screen = opened
+	pk := parseModelPicker(screen)
 	if !pk.ok {
 		return out(errNoPicker)
 	}
@@ -290,7 +300,7 @@ func modelFlow(step, leave modelStep, target string) (opts []modelOpt, err error
 	}
 	if !pickerShows(screen) && askShows(screen, target) {
 		if screen, err = step([]string{"yes"}, "", pickerLines); err != nil {
-			return nil, err
+			return out(err)
 		}
 	}
 	switch {
@@ -308,9 +318,51 @@ func modelFlow(step, leave modelStep, target string) (opts []modelOpt, err error
 // ended on the host, if one was given up before. target "": the list.
 func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *term.Session, pane, socket string, pid, start int64, sid, target string, outcome, reason *string, release func()) {
 	var running sync.WaitGroup // (steps whose command may still run on the host)
+	// The default model as it is now, put back after if changed (see withModel).
+	sctx, scancel := context.WithTimeout(ctx, 10*time.Second)
+	saved, err := sshx.Output(sctx, sess.Client(), settingsReadCommand, 1<<20+1)
+	scancel()
+	var was json.RawMessage
+	had := false
+	if err == nil && len(bytes.TrimSpace(saved)) > 0 {
+		was, _, _, had, err = topValue(saved, "model")
+	}
+	if err != nil || len(saved) > 1<<20 {
+		release()
+		*reason = "settings"
+		writeError(w, http.StatusBadGateway, "settings", "Claude Code's settings could not be read: nothing done")
+		return
+	}
+	checked := false
+	restore := func() bool {
+		rctx, rcancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer rcancel()
+		now, err := sshx.Output(rctx, sess.Client(), settingsReadCommand, 1<<20+1)
+		if err != nil || len(bytes.TrimSpace(now)) == 0 {
+			return false
+		}
+		cur, _, _, has, err := topValue(now, "model")
+		if err != nil || has == had && (!has || jsonSame(cur, was)) {
+			return false
+		}
+		fixed, err := withModel(now, was, had)
+		if err != nil {
+			slog.Warn("model switch: the default model changed and could not be put back", "session", sess.ID, "err", err)
+			return false
+		}
+		if _, err := sshx.Exec(rctx, sess.Client(), settingsWriteCommand, 4096, sshx.ExecOptions{Stdin: bytes.NewReader(fixed)}); err != nil {
+			slog.Warn("model switch: putting back the default model failed", "session", sess.ID, "err", err)
+			return false
+		}
+		slog.Warn("model switch: the default model had changed; put back", "session", sess.ID)
+		return true
+	}
 	defer func() {
 		go func() {
 			running.Wait()
+			if !checked {
+				restore() // (given up: once its steps have ended)
+			}
 			release()
 		}()
 	}()
@@ -338,21 +390,31 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 		return string(res.Out), err
 	}
 	step := func(keys []string, text string, read int) (string, error) { return run(ctx, keys, text, read) }
-	// (Leaving the picker after a failure: on its own short while, the request's may be over.)
+	// (Leaving the picker after a failure: once a step given up has ended,
+	// on its own short while, the request's may be over.)
 	leave := func(keys []string, text string, read int) (string, error) {
+		running.Wait()
 		lctx, lcancel := context.WithTimeout(context.WithoutCancel(ctx), 8*time.Second)
 		defer lcancel()
 		return run(lctx, keys, text, read)
 	}
 	opts, err := modelFlow(step, leave, target)
+	restored := false
+	if ctx.Err() == nil {
+		running.Wait()
+		restored, checked = restore(), true
+	}
+	if restored {
+		*reason = "default_restored"
+	}
 	var exitErr *sshx.ExitError
 	switch {
 	case err == nil:
 		*outcome = "typed"
 		if target == "" {
-			writeJSON(w, http.StatusOK, map[string]any{"models": opts})
+			writeJSON(w, http.StatusOK, map[string]any{"models": opts, "restored": restored})
 		} else {
-			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "model": target})
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "model": target, "restored": restored})
 		}
 	case errors.As(err, &exitErr) && exitErr.Status == 3:
 		*reason = "agent_changed"
@@ -378,4 +440,98 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 		}
 		writeError(w, http.StatusBadGateway, "unknown", "it is not known what the picker took")
 	}
+}
+
+// The default model of new sessions is the top-level "model" of Claude
+// Code's settings. Whatever a switch did (a key taken by the picker it was
+// not meant for, the person's own keys in between), it is put back as it
+// was before: read before the flow, again after, and if it changed, that
+// one value restored, the rest of the file as it is then.
+
+// settingsReadCommand prints Claude Code's settings (nothing when there are none).
+const settingsReadCommand = `f="$HOME/.claude/settings.json"; [ -f "$f" ] && head -c 1048576 "$f"; exit 0`
+
+// settingsWriteCommand replaces them with its input, in one step (its mode kept).
+const settingsWriteCommand = `f="$HOME/.claude/settings.json"; t="$f.corral.$$"; cp -p "$f" "$t" 2>/dev/null; cat >"$t" && mv -f "$t" "$f" || { rm -f "$t"; exit 4; }`
+
+// topValue finds a top-level key of a JSON object: its value as written,
+// and the span of the key and its value (from just after what comes before
+// it), or found false.
+func topValue(doc []byte, key string) (val json.RawMessage, from, to int, found bool, err error) {
+	dec := json.NewDecoder(bytes.NewReader(doc))
+	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
+		return nil, 0, 0, false, errors.New("not an object")
+	}
+	for dec.More() {
+		start := int(dec.InputOffset())
+		t, err := dec.Token()
+		if err != nil {
+			return nil, 0, 0, false, err
+		}
+		k, _ := t.(string)
+		var v json.RawMessage
+		if err := dec.Decode(&v); err != nil {
+			return nil, 0, 0, false, err
+		}
+		if k == key {
+			return v, start, int(dec.InputOffset()), true, nil
+		}
+	}
+	return nil, 0, 0, false, nil
+}
+
+// withModel is doc with its top-level "model" as before (absent when absent
+// before), the rest as in doc; checked to be so.
+func withModel(doc []byte, before json.RawMessage, had bool) ([]byte, error) {
+	_, from, to, found, err := topValue(doc, "model")
+	if err != nil {
+		return nil, err
+	}
+	var out []byte
+	switch {
+	case found && had:
+		span := doc[from:to]
+		i := bytes.IndexByte(span, ':')
+		if i < 0 {
+			return nil, errors.New("no colon")
+		}
+		out = append(append(append([]byte{}, doc[:from+i+1]...), append([]byte(" "), before...)...), doc[to:]...)
+	case found:
+		// (Its key and value out, with the comma before it, or the one after when it is first.)
+		head := bytes.TrimRight(doc[:from], " \t\r\n")
+		if bytes.HasSuffix(head, []byte(",")) {
+			out = append(append([]byte{}, doc[:len(head)-1]...), doc[to:]...)
+		} else {
+			rest := bytes.TrimLeft(doc[to:], " \t\r\n")
+			rest = bytes.TrimPrefix(rest, []byte(","))
+			out = append(append([]byte{}, doc[:from]...), rest...)
+		}
+	case had:
+		i := bytes.IndexByte(doc, '{')
+		out = append(append(append([]byte{}, doc[:i+1]...), []byte("\n  \"model\": "+string(before)+",")...), doc[i+1:]...)
+	default:
+		return doc, nil
+	}
+	// (Checked: all else as in doc, the model as before.)
+	var a, b map[string]json.RawMessage
+	if json.Unmarshal(doc, &a) != nil || json.Unmarshal(out, &b) != nil {
+		return nil, errors.New("not JSON once changed")
+	}
+	delete(a, "model")
+	m, ok := b["model"]
+	delete(b, "model")
+	if ok != had || (had && !jsonSame(m, before)) || len(a) != len(b) {
+		return nil, errors.New("the model not as before")
+	}
+	for k, v := range a {
+		if !jsonSame(v, b[k]) {
+			return nil, errors.New("another setting changed: " + k)
+		}
+	}
+	return out, nil
+}
+
+func jsonSame(a, b json.RawMessage) bool {
+	var x, y bytes.Buffer
+	return json.Compact(&x, a) == nil && json.Compact(&y, b) == nil && bytes.Equal(x.Bytes(), y.Bytes())
 }
