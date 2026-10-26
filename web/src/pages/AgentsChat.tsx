@@ -445,11 +445,12 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   // the mode it went to read off its screen (the log says it only with the
   // next message: from then on, that is what shows). Not while it waits for
   // an answer: the key would be the question's.
-  // (last: the log's last entry then; one after it, the log has said the mode since.)
-  const [modeNow, setModeNow] = useState<{ mode: string; bind: string; was?: string; last: number } | null>(null)
+  // (last: the log's last message of the person's then, of that reading; one
+  // after it, or another reading, the log has said the mode since.)
+  const [modeNow, setModeNow] = useState<{ mode: string; bind: string; was?: string; last: number; gen: number } | null>(null)
   const [modeBusy, setModeBusy] = useState(false)
-  const lastSeq = convo.entries.length ? convo.entries[convo.entries.length - 1].seq : 0
-  if (modeNow && (modeNow.bind !== bindKey || convo.meta?.mode !== modeNow.was || lastSeq > modeNow.last)) setModeNow(null)
+  const lastSeq = convo.entries.findLast((e: ConvoEntry) => e.role === 'user')?.seq ?? 0
+  if (modeNow && (modeNow.bind !== bindKey || convo.meta?.mode !== modeNow.was || lastSeq > modeNow.last || convo.gen !== modeNow.gen)) setModeNow(null)
   const canMode = bound && !codex && convo.status === 'ready' && !!convo.meta && agent?.status !== 'blocked' && !agent?.other
   const nextMode = () => {
     const b = convo.bind
@@ -457,9 +458,10 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     const bind = bindKey
     const was = convo.meta?.mode
     const last = lastSeq
+    const gen = convo.gen
     setModeBusy(true)
     api<{ ok: boolean; mode?: string }>('POST', `/api/sessions/${sid}/conversation/mode`, { pane: b.pane, pid: b.pid, start: b.start, session: b.session }, { timeoutMs: PRESS_MS })
-      .then((r) => (r.mode ? setModeNow({ mode: r.mode, bind, was, last }) : toast(t('convo.modeUnknown'))))
+      .then((r) => (r.mode ? setModeNow({ mode: r.mode, bind, was, last, gen }) : toast(t('convo.modeUnknown'))))
       .catch((e) => toast(refusal(e), true))
       .finally(() => setModeBusy(false))
   }
@@ -491,9 +493,9 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   const pickModel = (label: string) => {
     if (!convo.bind || modelBusy) return
     setModelBusy(true)
-    api('POST', `/api/sessions/${sid}/conversation/model`, { ...pressBody(), model: label }, { timeoutMs: MODEL_MS })
-      .then(() => {
-        toast(t('convo.modelSet', { m: label }))
+    api<{ restored?: boolean }>('POST', `/api/sessions/${sid}/conversation/model`, { ...pressBody(), model: label }, { timeoutMs: MODEL_MS })
+      .then((r) => {
+        toast(t('convo.modelSet', { m: label }) + (r.restored ? t('convo.modelRestored') : ''))
         setModels((m) => m && { ...m, list: m.list && m.list.map((o) => ({ ...o, current: o.label === label })) })
       })
       .catch((e) => toast(refusal(e), true))
@@ -925,7 +927,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       onSendNow={canPress && !codex ? () => press('now') : undefined}
       sendNow={said?.what === 'now' && said.bind === bindKey ? said.text : undefined}
       mode={{ now: modeNow?.bind === bindKey ? modeNow.mode : undefined, busy: modeBusy, onNext: canMode ? nextMode : undefined }}
-      model={canModel || modelBusy ? { list: models?.bind === bindKey ? models.list : null, busy: modelBusy, onOpen: openModels, onPick: pickModel } : undefined}
+      model={canModel || modelBusy ? { list: models?.bind === bindKey ? models.list : null, fresh: !!models?.at && Date.now() - models.at < 60000, busy: modelBusy, can: canModel, onOpen: openModels, onPick: pickModel } : undefined}
       lead={lead}
     />
     </div>

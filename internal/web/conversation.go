@@ -1114,8 +1114,15 @@ var convoKeys = map[string]struct {
 // in the log's names; "" when it does not say.
 func screenMode(screen string) string {
 	lines := strings.Split(screen, "\n")
+	// (Under the input's box, below its last rule: not the thread above.)
 	for i := len(lines) - 1; i >= 0; i-- {
-		// (Its own line, under the input, begins with its mark: not words of the thread.)
+		if strings.HasPrefix(strings.TrimSpace(lines[i]), "────") {
+			lines = lines[i+1:]
+			break
+		}
+	}
+	for i := len(lines) - 1; i >= 0; i-- {
+		// (Its own line begins with its mark.)
 		t := strings.TrimSpace(lines[i])
 		if !strings.HasPrefix(t, "⏵") && !strings.HasPrefix(t, "⏸") {
 			continue

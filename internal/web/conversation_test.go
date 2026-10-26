@@ -221,3 +221,23 @@ func TestScreenMode(t *testing.T) {
 		}
 	}
 }
+
+// A Codex process: its log the session file it has open; a path not of
+// Codex's sessions, or not of that session, is not read.
+func TestParseConvoLocateCodex(t *testing.T) {
+	sid := "01a17600-0000-7000-8000-000000000004"
+	good := "/home/u/.codex/sessions/2026/10/26/rollout-2026-10-26T10-00-00-" + sid + ".jsonl"
+	procs := parseConvoLocate(convoRec("pid=7", "start=70", "procstart=70", "sid="+sid, "log="+good, "agent=codex", "HERDR_PANE_ID=w1:p1") +
+		convoRec("pid=8", "start=80", "procstart=80", "sid="+sid, "log=/home/u/.codex/sessions/x/rollout-other.jsonl", "agent=codex") +
+		convoRec("pid=9", "start=90", "procstart=90", "sid="+sid, "log=/home/u/.claude/projects/-w/"+sid+".jsonl", "agent=codex") +
+		convoRec("pid=10", "start=100", "procstart=100", "sid="+sidA, "log=/home/u/.claude/projects/-w/"+sidA+".jsonl", "agent=other")).procs
+	if len(procs) != 4 || procs[0].agent != "codex" || procs[0].log != good {
+		t.Fatalf("codex: %+v", procs)
+	}
+	if procs[1].log != "" || procs[2].log != "" {
+		t.Errorf("foreign logs kept: %q %q", procs[1].log, procs[2].log)
+	}
+	if procs[3].agent != "claude" || procs[3].log == "" {
+		t.Errorf("an unknown agent is Claude Code's: %+v", procs[3])
+	}
+}
