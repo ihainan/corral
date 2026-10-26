@@ -19,6 +19,9 @@ import { afterSend, holdTermMode, PENDING_MS, sameTurn, tmuxKey } from '../termi
 import { agentKey, sessionWhich } from '../terminal/sessionName'
 import { AgentIcon, agentMark } from '../terminal/agentIcons'
 
+// The session a Codex not yet begun on its log is sent to (the gateway's convoNoSession).
+const NO_SESSION = '00000000-0000-0000-0000-000000000000'
+
 // The agents page: every agent of the sessions the gateway has open, and the
 // conversation of the one picked, with a composer that sends to it. It
 // talks to each agent's pane directly (POST …/conversation/send, interrupt,
@@ -400,6 +403,10 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   const waits = herdr && !!row && agent?.status === 'blocked' && !agent.other
   const working = agent?.status === 'working'
   const bindKey = convo.bind ? `${convo.bind.pane} ${convo.bind.pid} ${convo.bind.start} ${convo.bind.session}` : ''
+  // (A Codex's first message goes before its session is known: sent to the
+  // zero one, it is of the session the same process then has.)
+  const zeroKey = convo.bind ? `${convo.bind.pane} ${convo.bind.pid} ${convo.bind.start} ${NO_SESSION}` : ''
+  const ofThis = (bind: string) => bind === bindKey || (!!zeroKey && bind === zeroKey)
 
   // The list beside the thread (or from the bar on a narrow screen).
   const rows = useMemo((): ConvoListRow[] => {
@@ -539,7 +546,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   queuedRef.current = queued
   const sentN = useRef(0)
   useEffect(() => {
-    if (convo.status !== 'ready' || !sent.some((p) => p.state !== 'sent' && p.bind === bindKey)) return
+    if (convo.status !== 'ready' || !sent.some((p) => p.state !== 'sent' && ofThis(p.bind))) return
     const key = bindKey + ' ' + convo.gen
     let u = used.get(key)
     if (!u) {
@@ -549,7 +556,11 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     const users = convo.entries.filter((e: ConvoEntry) => e.role === 'user')
     let changed = false
     const next = sent.flatMap((p) => {
-      if (p.state === 'sent' || p.bind !== bindKey) return [p]
+      if (p.state === 'sent' || !ofThis(p.bind)) return [p]
+      if (p.bind !== bindKey) {
+        changed = true
+        p = { ...p, bind: bindKey }
+      }
       if (p.gen !== convo.gen) {
         // (The log it went to, now written, or read anew: looked for in all
         // of it, by its time as well as its text.)
@@ -579,7 +590,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     }, Math.max(0, due) + 50)
     return () => clearTimeout(timer)
   }, [sent, queued])
-  const shownSent = sent.filter((p) => p.bind === bindKey && !(p.state !== 'sent' && queued.has(norm(p.text))))
+  const shownSent = sent.filter((p) => ofThis(p.bind) && !(p.state !== 'sent' && queued.has(norm(p.text))))
 
   // The composer: its draft kept per agent (as the terminal's per session;
   // a tmux session's per pane: another pane in front is another agent).
@@ -731,10 +742,10 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   // Why it cannot send now, if it cannot.
   // (Waiting for an answer, a message's Enter could take an option of its
   // question, or of a permission it asks: the answer first.)
-  const blocked = !bound
-    ? t('agents.cannotSend')
-    : agent?.other
-      ? t('convo.otherAgent', { agent: agent.other })
+  const blocked = agent?.other
+    ? t('convo.otherAgent', { agent: agent.other })
+    : !bound
+      ? t(convo.status === 'loading' ? 'agents.loadingSend' : convo.status === 'none' && convo.reason === 'no_agent' ? 'agents.noAgentSend' : 'agents.cannotSend')
       : agent?.status === 'blocked'
         ? t('agents.answerFirst')
         : null

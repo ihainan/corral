@@ -241,3 +241,13 @@ func TestParseConvoLocateCodex(t *testing.T) {
 		t.Errorf("an unknown agent is Claude Code's: %+v", procs[3])
 	}
 }
+
+// A Codex not yet begun on its log (a new conversation) is there, its
+// session the zero one; a Claude Code never is with that.
+func TestParseConvoLocateCodexNoLog(t *testing.T) {
+	procs := parseConvoLocate(convoRec("pid=7", "start=70", "procstart=70", "sid="+convoNoSession, "log=", "agent=codex", "HERDR_PANE_ID=w1:p1") +
+		convoRec("pid=8", "start=80", "procstart=80", "sid="+convoNoSession, "log=", "agent=claude", "HERDR_PANE_ID=w1:p2")).procs
+	if len(procs) != 1 || procs[0].pid != 7 || procs[0].agent != "codex" || procs[0].log != "" {
+		t.Fatalf("procs: %+v", procs)
+	}
+}

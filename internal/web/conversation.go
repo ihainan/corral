@@ -216,17 +216,26 @@ for d in /proc/[0-9]*; do
   [ -O "$d" ] && [ "$(head -c 16 "$d/comm" 2>/dev/null)" = codex ] || continue
   pid=${d#/proc/}
   sub=$(codex_sub "$pid")
-  case $sub in exec|e|review|apply|a|login|logout|mcp|mcp-server|app-server|completion|sandbox|debug|cloud|features) continue;; esac
-  log=
+  case $sub in exec|e|exec-server|review|apply|a|login|logout|mcp|mcp-server|app-server|completion|sandbox|debug|cloud|features) continue;; esac
+  log= any=
   for fd in "$d"/fd/*; do
     l=$(readlink "$fd" 2>/dev/null) || continue
-    case $l in *"$nl"*) continue;; "$HOME"/.codex/sessions/*/rollout-*.jsonl) { [ -z "$log" ] || [ "$l" -nt "$log" ]; } && log=$l;; esac
+    case $l in *"$nl"*) continue;; */rollout-*.jsonl) any=1;; esac
+    case $l in "$HOME"/.codex/sessions/*/rollout-*.jsonl) { [ -z "$log" ] || [ "$l" -nt "$log" ]; } && log=$l;; esac
   done
-  [ -n "$log" ] || continue
-  # (No subcommand to go by: its log's head says how it was begun.)
-  [ -z "$sub" ] && head -c 4096 "$log" 2>/dev/null | grep -q '"originator": *"codex_exec"' && continue
-  sid=$(printf '%s' "${log%.jsonl}" | grep -o '[0-9a-fA-F]\{8\}-[0-9a-fA-F]\{4\}-[0-9a-fA-F]\{4\}-[0-9a-fA-F]\{4\}-[0-9a-fA-F]\{12\}$')
-  [ -n "$sid" ] || continue
+  if [ -n "$log" ]; then
+    # (No subcommand to go by: its log's head says how it was begun.)
+    [ -z "$sub" ] && head -c 4096 "$log" 2>/dev/null | grep -q '"originator": *"codex_exec"' && continue
+    sid=$(printf '%s' "${log%.jsonl}" | grep -o '[0-9a-fA-F]\{8\}-[0-9a-fA-F]\{4\}-[0-9a-fA-F]\{4\}-[0-9a-fA-F]\{4\}-[0-9a-fA-F]\{12\}$')
+    [ -n "$sid" ] || continue
+  else
+    # (None open: a new conversation, Codex beginning its log with the
+    # first message. Its session is not known till then: the zero id
+    # stands for it. Only the conversing one, run with no subcommand; not
+    # one with a log elsewhere, CODEX_HOME say.)
+    [ -z "$sub" ] && [ -z "$any" ] || continue
+    sid=00000000-0000-0000-0000-000000000000
+  fi
   stat_of "$pid" || continue
   rec "$pid" "$st" "$fg" "$st" "$sid" "$log" codex
 done
@@ -365,6 +374,9 @@ func parseConvoLocate(out string) (l convoLocated) {
 		}
 		if p.agent != "codex" {
 			p.agent = "claude"
+			if p.sid == convoNoSession {
+				continue // (only a Codex goes without its session known)
+			}
 		}
 		if !convoLogOf(p.agent, p.log, p.sid) {
 			p.log = ""
@@ -558,6 +570,10 @@ func (st *convoState) idle() bool {
 	return time.Since(time.Unix(0, st.used.Load())) > convoIdle
 }
 
+// convoNoSession stands for the session of a Codex that has none open yet
+// (it begins its log with the first message).
+const convoNoSession = "00000000-0000-0000-0000-000000000000"
+
 // Reasons there is nothing to show.
 const (
 	convoNoAgent     = "no_agent"    // no Claude Code in the pane
@@ -647,7 +663,10 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 	defer cancel()
 
-	if time.Since(st.located) > convoLocateTTL || (sess.Persistence == "herdr" && pane != st.pane) {
+	// (A Codex not yet begun on its log is looked for again each time: its
+	// first message begins it, and what is sent next goes to that session.)
+	fresh := st.bind != nil && st.bind.Session == convoNoSession
+	if fresh || time.Since(st.located) > convoLocateTTL || (sess.Persistence == "herdr" && pane != st.pane) {
 		if err := s.locateConvo(ctx, sess, st, pane); err != nil {
 			if errors.Is(err, sshx.ErrBusy) {
 				writeError(w, http.StatusTooManyRequests, "busy", "the host is still answering earlier requests")
@@ -1028,14 +1047,21 @@ front() {
     cs=$(tr '\0' '\001' <"/proc/$pid/cmdline" 2>/dev/null | awk 'BEGIN { RS = "\001" } NR == 1 { next } skip { skip = 0; next }
       /^--$/ { exit } /^-/ { if ($0 ~ /^(-[cmpsaCi]|--(config|model|profile|sandbox|ask-for-approval|cd|image|add-dir|local-provider|remote|remote-auth-token-env|enable|disable))$/) skip = 1; next }
       { print; exit }')
-    case $cs in exec|e|review|apply|a|login|logout|mcp|mcp-server|app-server|completion|sandbox|debug|cloud|features) return 1;; esac
-    lg=
+    case $cs in exec|e|exec-server|review|apply|a|login|logout|mcp|mcp-server|app-server|completion|sandbox|debug|cloud|features) return 1;; esac
+    lg= any=
     for fd in /proc/$pid/fd/*; do
       l=$(readlink "$fd" 2>/dev/null) || continue
+      case $l in */rollout-*.jsonl) any=1;; esac
       case $l in "$HOME"/.codex/sessions/*/rollout-*.jsonl) { [ -z "$lg" ] || [ "$l" -nt "$lg" ]; } && lg=$l;; esac
     done
-    case $lg in *-"$sid".jsonl) ;; *) return 1;; esac
-    [ -z "$cs" ] && head -c 4096 "$lg" 2>/dev/null | grep -q '"originator": *"codex_exec"' && return 1
+    # (The zero id: one with no log open yet, anywhere, run with no
+    # subcommand, as it was located.)
+    if [ "$sid" = 00000000-0000-0000-0000-000000000000 ]; then
+      [ -z "$cs" ] && [ -z "$any" ] || return 1
+    else
+      case $lg in *-"$sid".jsonl) ;; *) return 1;; esac
+      [ -z "$cs" ] && head -c 4096 "$lg" 2>/dev/null | grep -q '"originator": *"codex_exec"' && return 1
+    fi
   else
     c=$(head -c 65536 "$HOME/.claude/sessions/$pid.json" 2>/dev/null | tr -d '\n')
     [ "$(printf '%s' "$c" | grep -o '"sessionId" *: *"[0-9a-fA-F-]*"' | head -n 1 | sed 's/.*"\([0-9a-fA-F-]*\)"$/\1/')" = "$sid" ] || return 1

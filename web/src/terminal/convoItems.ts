@@ -46,14 +46,14 @@ const stepKey = (s: Step) => (isNote(s) ? 'e' + s.seq : (partKey.get(s) ?? '?'))
 // A turn's answer is the text it ends with (notes after it come after it);
 // a turn that ends in a step has none.
 // A message the person sent while the agent worked, taken in during the
-// turn (mid), is the turn's: it shows after the turn's work, before its
-// answer, and does not end the turn.
+// turn (mid), is the turn's: it shows where it was taken in (the work before
+// it one run, the work after another), and does not end the turn.
 export function items(entries: ConvoEntry[], live: boolean, moving: boolean): Item[] {
   const out: Item[] = []
-  let turn: { from?: string; steps: Step[]; to?: string; key: string; mids: ConvoEntry[] } | null = null
+  let turn: { from?: string; steps: Step[]; to?: string; key: string } | null = null
   const end = (last: boolean) => {
     if (!turn) return
-    const { steps, key, from, to, mids } = turn
+    const { steps, key, from, to } = turn
     turn = null
     const goesOn = last && live
     // (Thinking with nothing in it, as Claude Code mostly logs it, is not a
@@ -97,7 +97,6 @@ export function items(entries: ConvoEntry[], live: boolean, moving: boolean): It
       while (k > 0 && !isText(steps[k - 1]) && !isNote(steps[k - 1])) k--
       out.push({ kind: 'work', key: 'g' + key + '.on', steps: [], live: true, moving, busy: underWay(steps.slice(k)) })
     }
-    for (const e of mids) out.push({ kind: 'user', e })
     // (How long it worked, where it did any work: thinking counts, shown or not.)
     const worked = steps.slice(0, tail).some((x) => !isNote(x) && x.kind !== 'text')
     if (answer.length)
@@ -114,16 +113,16 @@ export function items(entries: ConvoEntry[], live: boolean, moving: boolean): It
   }
   for (const e of entries) {
     if (e.role === 'user' && e.mid && turn) {
-      turn.mids.push(e)
+      turn.steps.push(e) // (as a note is: in its place)
       continue
     }
     if (e.role === 'user' || (e.role === 'summary' && !turn)) {
       end(false)
       out.push({ kind: e.role, e } as Item)
-      turn = { key: 't' + e.seq, from: e.role === 'user' ? e.ts : undefined, steps: [], mids: [] }
+      turn = { key: 't' + e.seq, from: e.role === 'user' ? e.ts : undefined, steps: [] }
       continue
     }
-    if (!turn) turn = { key: 't' + e.seq, steps: [], mids: [] } // (the log read begins mid-turn)
+    if (!turn) turn = { key: 't' + e.seq, steps: [] } // (the log read begins mid-turn)
     const tr: { steps: Step[]; to?: string } = turn
     if (e.role !== 'assistant') {
       tr.steps.push(e) // (a note, or the summary of a compaction in the middle of the turn)
@@ -141,7 +140,7 @@ export function items(entries: ConvoEntry[], live: boolean, moving: boolean): It
   return out
 }
 
-export const noteItem = (e: ConvoEntry): Item => (e.role === 'summary' ? { kind: 'summary', e } : { kind: 'note', e })
+export const noteItem = (e: ConvoEntry): Item => (e.role === 'summary' ? { kind: 'summary', e } : e.role === 'user' ? { kind: 'user', e } : { kind: 'note', e })
 
 // The step under way: the latest call not come back (of several run at
 // once, any), else thinking when that is the last thing.
