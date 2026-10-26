@@ -160,6 +160,13 @@ fi
 nl=$(printf '\nx'); nl=${nl%x}
 btime=$(sed -n 's/^btime \([0-9]*\)$/\1/p' /proc/stat 2>/dev/null); hz=$(getconf CLK_TCK 2>/dev/null)
 case $hz in ''|*[!0-9]*|0) hz=;; esac
+# Codex's subcommand ($1 its pid): its first word after options and their
+# values ("codex -p exec" is no exec; "codex -c x=1 exec" is).
+codex_sub() {
+  tr '\0' '\n' <"/proc/$1/cmdline" 2>/dev/null | awk 'NR == 1 { next } skip { skip = 0; next }
+    /^-/ { if ($0 ~ /^(-[cmpsaCi]|--(config|model|profile|sandbox|ask-for-approval|cd|image|add-dir|local-provider|remote))$/) skip = 1; next }
+    { print; exit }'
+}
 # A process's record: what it is, where its log is, and where it runs.
 rec() { # pid start fg procstart sid log agent
   env=$(tr '\0' '\n' <"/proc/$1/environ" 2>/dev/null | grep -E '^(HERDR_PANE_ID|HERDR_SOCKET_PATH|TMUX|TMUX_PANE)=' | head -c 4096)
@@ -202,11 +209,12 @@ for f in "$HOME"/.claude/sessions/*.json; do
 done
 # Codex: a process of the user's named codex, its log the session file it
 # has open (rollout-<time>-<session id>.jsonl).
-# (Not one run with exec, as its log's head says: no conversation to type
-# into. Of several logs open, the one written last.)
+# (Not one run with exec, as its arguments or its log's head say: no
+# conversation to type into. Of several logs open, the one written last.)
 for d in /proc/[0-9]*; do
   [ -O "$d" ] && [ "$(head -c 16 "$d/comm" 2>/dev/null)" = codex ] || continue
   pid=${d#/proc/}
+  case $(codex_sub "$pid") in exec|e) continue;; esac
   log=
   for fd in "$d"/fd/*; do
     l=$(readlink "$fd" 2>/dev/null) || continue
@@ -1012,8 +1020,11 @@ front() {
   if [ "$mode" = tmux ]; then k=TMUX_PANE; else k=HERDR_PANE_ID; fi
   tr '\0' '\n' <"/proc/$pid/environ" 2>/dev/null | grep -qxF "$k=$p" || return 1
   if [ "$(head -c 16 "/proc/$pid/comm" 2>/dev/null)" = codex ]; then
-    # (Codex, not run with exec (its log's head says): the session's log is
-    # the one it has open and wrote last, as locating chose it.)
+    # (Codex, not run with exec (its arguments, its log's head): the
+    # session's log is the one it has open and wrote last, as locating chose it.)
+    case $(tr '\0' '\n' <"/proc/$pid/cmdline" 2>/dev/null | awk 'NR == 1 { next } skip { skip = 0; next }
+      /^-/ { if ($0 ~ /^(-[cmpsaCi]|--(config|model|profile|sandbox|ask-for-approval|cd|image|add-dir|local-provider|remote))$/) skip = 1; next }
+      { print; exit }') in exec|e) return 1;; esac
     lg=
     for fd in /proc/$pid/fd/*; do
       l=$(readlink "$fd" 2>/dev/null) || continue

@@ -39,15 +39,24 @@ const between = /^[\s│|]*[─━]{4,}[\s─━]*$/
 // under each choice that tells of it: there, a choice's further lines are
 // that, not the rest of its words wrapped. A permission prompt has neither.
 const describes = /to navigate/i
-const ownAnswer = /^[\s│|]*(?:[❯›>▶→●◉])?\s*[1-9][.)]\s+(?:Type something\.?|Chat about this)\s*$/
-const isQuestionScreen = (lines: string[]) => lines.slice(-6).some((l) => describes.test(l)) && lines.slice(-30).some((l) => ownAnswer.test(l))
+const ownAnswer = /^(?:Type something\.?|Chat about this)$/
 
 export type Choice = { key: string; label: string; desc?: string }
 
+// The menu at the end of the screen's lines, read as a question of Claude
+// Code's when it is one (its hint there, and one of its own choices an
+// answer of one's own), else as any other menu.
+function menuAt(lines: string[]): { out: Choice[]; top: number; asks: boolean } {
+  if (lines.slice(-6).some((l) => describes.test(l))) {
+    const q = readMenu(lines, true)
+    if (q.out.some((c) => ownAnswer.test(c.label))) return { ...q, asks: true }
+  }
+  return { ...readMenu(lines, false), asks: false }
+}
+
 // The menu at the end of the screen's lines: its choices and the line it
-// begins on.
-function menuAt(lines: string[]): { out: Choice[]; top: number } {
-  const told = isQuestionScreen(lines)
+// begins on (told: read as a question of Claude Code's).
+function readMenu(lines: string[], told: boolean): { out: Choice[]; top: number } {
   let end = lines.length
   while (end > 0 && !menuLine.test(lines[end - 1]) && hintLine.test(lines[end - 1]) && !goesOn(lines, end - 1) && lines.length - end < 3) end--
   const out: Choice[] = []
@@ -87,8 +96,8 @@ function menuAt(lines: string[]): { out: Choice[]; top: number } {
 // asksQuestion: the menu is a question of Claude Code's (AskUserQuestion),
 // its choices all there is to it: no command or edit to be shown first.
 export function asksQuestion(text: string): boolean {
-  const lines = text.split('\n')
-  return menuAt(lines).top >= 0 && isQuestionScreen(lines)
+  const m = menuAt(text.split('\n'))
+  return m.top >= 0 && m.asks
 }
 
 export function choices(text: string): Choice[] {
@@ -98,29 +107,32 @@ export function choices(text: string): Choice[] {
 // The question asked over a menu on the screen: the line above it that
 // asks (ends in a question mark), else "".
 //
-// A question of Claude Code's is its quoted block ("│ …" lines) whole, its
-// context with it; a question's line wrapped goes on from the line before.
+// A question of Claude Code's is its quoted block ("│ …" lines, a blank
+// one among them too) whole, its context with it (its end, if very long);
+// such a question's line wrapped is taken with the lines it goes on from.
+// Another menu's question is its own line and what it goes on from wrapped
+// (not a permission's words above it).
 export function question(text: string): string {
   const lines = text.split('\n')
-  const { top } = menuAt(lines)
+  const { top, asks } = menuAt(lines)
   const strip = (l: string) => l.replace(/^[\s│|╭╮╰╯─━┌┐└┘]+|[\s│|╭╮╰╯─━┌┐└┘]+$/g, '')
   for (let i = top - 1, n = 0; top > 0 && i >= 0 && n < 4; i--, n++) {
     const l = strip(lines[i])
     if (!l) continue
     if (!/[?？]$/.test(l)) return ''
-    // (Its lines above, to a blank one: a quoted block's; else only those
-    // it goes on from, wrapped: one not ended, the next going on in lower
-    // case or in Chinese.)
-    const quoted = /^\s*│/.test(lines[i])
+    const quoted = asks && /^\s*│/.test(lines[i])
     const parts = [l]
-    for (let j = i - 1; j >= 0 && i - j <= (quoted ? 8 : 2); j--) {
+    for (let j = i - 1; j >= 0 && i - j <= (quoted ? 24 : 3); j--) {
+      if (quoted ? !/^\s*│/.test(lines[j]) : !strip(lines[j]) || dashedRule.test(lines[j])) break
       const above = strip(lines[j])
-      if (!above || (quoted && !/^\s*│/.test(lines[j]))) break
-      if (!quoted && (/[.。!！?？:：]$/.test(above) || !/^[a-z\u3000-\u9fff]/.test(parts[0]) || dashedRule.test(lines[j]))) break
-      parts.unshift(above)
+      // (Another menu's: only what it goes on from, wrapped: a line not
+      // ended, the next going on in lower case or in Chinese.)
+      if (!asks && (/[.。!！?？:：]$/.test(above) || !/^[a-z\u3000-\u9fff]/.test(parts[0]))) break
+      if (above) parts.unshift(above)
     }
-    const all = parts.reduce((a, b) => (/[\u3000-\u9fff\uff00-\uffef]$/.test(a) || /^[\u3000-\u9fff\uff00-\uffef]/.test(b) ? a + b : a + ' ' + b))
-    return all.length <= 600 ? all : l
+    const cjk = /[\u3000-\u9fff\uff00-\uffef]/
+    const all = parts.reduce((a, b) => (cjk.test(a.slice(-1)) || cjk.test(b[0]) ? a + b : a + ' ' + b))
+    return all.length <= 600 ? all : '…' + all.slice(-599)
   }
   return ''
 }
@@ -147,7 +159,7 @@ export function promptBlock(text: string): { head: string; lines: string[] } | n
   while (q >= 0 && !lines[q].trim()) q--
   if (q < 1 || !/[?？]\s*$/.test(lines[q])) return null
   let start = -1
-  for (let i = q - 1; i >= 0 && q - i <= 40; i--) {
+  for (let i = q - 1; i >= 0 && q - i <= 200; i--) {
     if (solidRule.test(lines[i])) {
       start = i + 1
       break

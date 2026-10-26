@@ -137,7 +137,9 @@ export function ReplyDialog({ sessionId, agent, onLoaded, onClose, resizedAt }: 
     if (pre.current) pre.current.scrollTop = pre.current.scrollHeight
   }, [screen, screenOpen])
 
-  const shown = screen ? screen.text.split('\n').slice(-shownLines).join('\n') : ''
+  // (What is asked not read off it, all of it: a long patch's start is above its last lines.)
+  const whole = !!screen && opts.length > 0 && !promptBlock(screen.text) && !asksQuestion(screen.text)
+  const shown = screen ? (whole ? screen.text : screen.text.split('\n').slice(-shownLines).join('\n')) : ''
   const title = agent.agent || t('reply.terminal')
   const q = screen ? question(screen.text) : ''
   // (Only a question of Claude Code's is all its choices: anything else, what
@@ -335,6 +337,19 @@ export function InlineReply({ sessionId, agent, onLoaded, resizedAt, active = tr
   // (What is asked not told apart on the screen, the screen itself shows; a
   // question of Claude Code's is all its choices.)
   const needScreen = !!screen && !block && !asksQuestion(screen.text)
+  // (Not told apart, the whole screen, before the choices; else behind its button.)
+  const screenLines = screen ? screen.text.split('\n') : []
+  const screenBox = (
+            // (What is asked could not be told apart on the screen: the screen itself.)
+            <div className="reply-screen-wrap">
+              <pre className="reply-screen" ref={pre} tabIndex={0} aria-label={t('reply.screen')} aria-busy={reading}>
+                {screen ? (needScreen ? screenLines : screenLines.slice(-shownLines)).join('\n') || t('reply.blank') : t('common.loading')}
+              </pre>
+              <button type="button" className={'icon-btn reply-refresh' + (reading ? ' reading' : '')} onClick={() => void load()} disabled={busy || reading} aria-label={t('reply.refresh')} title={t('reply.refresh')}>
+                <RotateCw size={16} />
+              </button>
+            </div>
+  )
   useLayoutEffect(() => {
     if (pre.current) pre.current.scrollTop = pre.current.scrollHeight
   }, [screen, shown, !block])
@@ -358,6 +373,7 @@ export function InlineReply({ sessionId, agent, onLoaded, resizedAt, active = tr
               {t(changed === 'answered' ? 'reply.answered' : 'reply.changed')}
             </p>
           )}
+          {needScreen && screenBox}
           {opts.length > 0 && (
             <div className="convo-ask-opts" role="group" aria-label={t('reply.choices')}>
               {opts.map((o) => {
@@ -411,17 +427,7 @@ export function InlineReply({ sessionId, agent, onLoaded, resizedAt, active = tr
               </button>
             )}
           </div>
-          {(shown || needScreen) && (
-            // (What is asked could not be told apart on the screen: the screen itself.)
-            <div className="reply-screen-wrap">
-              <pre className="reply-screen" ref={pre} tabIndex={0} aria-label={t('reply.screen')} aria-busy={reading}>
-                {screen ? screen.text.split('\n').slice(-shownLines).join('\n') || t('reply.blank') : t('common.loading')}
-              </pre>
-              <button type="button" className={'icon-btn reply-refresh' + (reading ? ' reading' : '')} onClick={() => void load()} disabled={busy || reading} aria-label={t('reply.refresh')} title={t('reply.refresh')}>
-                <RotateCw size={16} />
-              </button>
-            </div>
-          )}
+          {shown && !needScreen && screenBox}
           {error && (
             <p className="err" role="alert">
               {error}
