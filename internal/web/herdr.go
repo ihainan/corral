@@ -205,10 +205,12 @@ func summarize(session string, s *herdr.Snapshot, times *agentTimes, old bool) h
 	return out
 }
 
-// herdrSockets remembers which herdr socket each terminal session is watching.
+// herdrSockets remembers which herdr socket each terminal session is
+// watching, and the agent sessions its panes run, as herdr last said.
 type herdrSockets struct {
 	mu   sync.Mutex
 	path map[string]string
+	sids map[string]map[string]string // terminal session → pane → the agent's session id
 }
 
 func (h *herdrSockets) set(id, path string) {
@@ -216,9 +218,38 @@ func (h *herdrSockets) set(id, path string) {
 	defer h.mu.Unlock()
 	if path == "" {
 		delete(h.path, id)
+		delete(h.sids, id)
 	} else {
 		h.path[id] = path
 	}
+}
+
+// setSids keeps the agent session ids of a snapshot's panes.
+func (h *herdrSockets) setSids(id string, snap *herdr.Snapshot) {
+	m := map[string]string{}
+	for _, list := range [][]herdr.Pane{snap.Panes, snap.Agents} {
+		for _, p := range list {
+			if p.AgentSession != nil && p.AgentSession.Value != "" {
+				m[p.ID] = p.AgentSession.Value
+			}
+		}
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if _, ok := h.path[id]; !ok {
+		return // (the watch is over)
+	}
+	if h.sids == nil {
+		h.sids = map[string]map[string]string{}
+	}
+	h.sids[id] = m
+}
+
+// sid is the agent session id herdr gives the pane ("" when it gives none).
+func (h *herdrSockets) sid(id, pane string) string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.sids[id][pane]
 }
 
 func (h *herdrSockets) get(id string) string {
@@ -311,6 +342,7 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 	}()
 	w := herdr.NewWatcher(sess.Client(), socket,
 		func(snap *herdr.Snapshot) {
+			s.herdrSocks.setSids(sess.ID, snap)
 			publish(summarize(name, snap, times, false))
 		},
 		// (A change is told before the snapshot that has it.)

@@ -102,6 +102,11 @@ type Pane struct {
 	Cwd         string `json:"cwd"`
 	Focused     bool   `json:"focused"`
 	Title       string `json:"terminal_title_stripped,omitempty"`
+	// AgentSession is the agent's own id for what runs there, as herdr's
+	// integration reports it (Claude Code's session id), when it does.
+	AgentSession *struct {
+		Value string `json:"value"`
+	} `json:"agent_session,omitempty"`
 }
 
 // Status values herdr reports for agents.

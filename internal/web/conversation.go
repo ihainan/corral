@@ -206,8 +206,11 @@ func isDigits(s string) bool {
 // pickConvoProc chooses the process running in the pane: for herdr, the
 // focused pane of the herdr server the session is attached to; for tmux,
 // the active pane of the session's tmux server. Of several (an agent
-// started from another's shell), the one started last.
-func pickConvoProc(procs []convoProc, persistence, pane, herdrSocket, tmuxActive, tmuxPID string) *convoProc {
+// started from another's shell, or from the pane's shell in a terminal of
+// its own, which has the pane's variables too): the one whose session is
+// want (the one herdr says the pane runs; "" when it says none), else the
+// one started last.
+func pickConvoProc(procs []convoProc, persistence, pane, herdrSocket, tmuxActive, tmuxPID, want string) *convoProc {
 	var best *convoProc
 	for i := range procs {
 		p := &procs[i]
@@ -223,7 +226,8 @@ func pickConvoProc(procs []convoProc, persistence, pane, herdrSocket, tmuxActive
 		default:
 			continue
 		}
-		if best == nil || p.start > best.start {
+		named, bestNamed := want != "" && p.sid == want, best != nil && want != "" && best.sid == want
+		if best == nil || named && !bestNamed || named == bestNamed && p.start > best.start {
 			best = p
 		}
 	}
@@ -451,7 +455,7 @@ func (s *Server) locateConvo(ctx context.Context, sess *term.Session, st *convoS
 	case noProc:
 		reason = convoUnsupported
 	default:
-		p := pickConvoProc(procs, sess.Persistence, pane, s.herdrSocks.get(sess.ID), tmuxActive, tmuxPID)
+		p := pickConvoProc(procs, sess.Persistence, pane, s.herdrSocks.get(sess.ID), tmuxActive, tmuxPID, s.herdrSocks.sid(sess.ID, pane))
 		st.bind = nil
 		if p != nil {
 			b := &convoBind{PID: p.pid, Start: p.start, Session: p.sid, Pane: p.herdrPane}

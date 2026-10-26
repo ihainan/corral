@@ -55,19 +55,26 @@ func TestPickConvoProc(t *testing.T) {
 		{pid: 4, start: 40, sid: sidA, tmuxPane: "%3", tmuxServerPID: "4242"},
 		{pid: 5, start: 50, sid: sidB, tmuxPane: "%3", tmuxServerPID: "9999"}, // another tmux server
 	}
-	if p := pickConvoProc(procs, "herdr", "w1:p1", sock, "", ""); p == nil || p.pid != 2 {
+	if p := pickConvoProc(procs, "herdr", "w1:p1", sock, "", "", ""); p == nil || p.pid != 2 {
 		t.Errorf("herdr: %+v", p)
 	}
-	if p := pickConvoProc(procs, "herdr", "w2:p1", sock, "", ""); p != nil {
+	// (herdr names the pane's session: that one, though another started later.)
+	if p := pickConvoProc(procs, "herdr", "w1:p1", sock, "", "", sidA); p == nil || p.pid != 1 {
+		t.Errorf("herdr, its session named: %+v", p)
+	}
+	if p := pickConvoProc(procs, "herdr", "w1:p1", sock, "", "", "00000000-0000-0000-0000-000000000000"); p == nil || p.pid != 2 {
+		t.Errorf("herdr, a session named that none runs: %+v", p)
+	}
+	if p := pickConvoProc(procs, "herdr", "w2:p1", sock, "", "", ""); p != nil {
 		t.Errorf("another herdr server's pane matched: %+v", p)
 	}
-	if p := pickConvoProc(procs, "herdr", "", sock, "", ""); p != nil {
+	if p := pickConvoProc(procs, "herdr", "", sock, "", "", ""); p != nil {
 		t.Errorf("no pane matched: %+v", p)
 	}
-	if p := pickConvoProc(procs, "tmux", "", "", "%3", "4242"); p == nil || p.pid != 4 {
+	if p := pickConvoProc(procs, "tmux", "", "", "%3", "4242", ""); p == nil || p.pid != 4 {
 		t.Errorf("tmux: %+v", p)
 	}
-	if p := pickConvoProc(procs, "none", "w1:p1", sock, "%3", "4242"); p != nil {
+	if p := pickConvoProc(procs, "none", "w1:p1", sock, "%3", "4242", ""); p != nil {
 		t.Errorf("plain shell matched: %+v", p)
 	}
 }
