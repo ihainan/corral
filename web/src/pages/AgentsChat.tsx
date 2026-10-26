@@ -474,6 +474,14 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   // only. Only while it is at rest: the picker takes over its input.
   const [models, setModels] = useState<{ list: ModelOpt[] | null; bind: string; at?: number } | null>(null)
   const [modelBusy, setModelBusy] = useState(false)
+  // (Said once: a switch here left the default of new sessions changed, as
+  // where its request was given up and it was found after.)
+  const warnedDefault = useRef(false)
+  useEffect(() => {
+    if (!convo.defaultChanged || warnedDefault.current) return
+    warnedDefault.current = true
+    toast(t('convo.err.defaultChanged'), true)
+  }, [convo.defaultChanged, toast])
   const canModel = bound && !codex && convo.status === 'ready' && !!convo.meta?.model && (agent?.status === 'idle' || agent?.status === 'done') && !agent?.other
   const pressBody = () => {
     const b = convo.bind!

@@ -206,7 +206,7 @@ done
 # open, the one written last.)
 for d in /proc/[0-9]*; do
   [ -O "$d" ] && [ "$(head -c 16 "$d/comm" 2>/dev/null)" = codex ] || continue
-  case $(tr '\0' '\n' <"$d/cmdline" 2>/dev/null | sed -n 2p) in exec|e) continue;; esac
+  tr '\0' '\n' <"$d/cmdline" 2>/dev/null | sed 1d | grep -qxE 'exec|e' && continue
   pid=${d#/proc/}
   log=
   for fd in "$d"/fd/*; do
@@ -214,6 +214,7 @@ for d in /proc/[0-9]*; do
     case $l in *"$nl"*) continue;; "$HOME"/.codex/sessions/*/rollout-*.jsonl) { [ -z "$log" ] || [ "$l" -nt "$log" ]; } && log=$l;; esac
   done
   [ -n "$log" ] || continue
+  head -c 4096 "$log" 2>/dev/null | grep -q '"originator": *"codex_exec"' && continue
   sid=$(printf '%s' "${log%.jsonl}" | grep -o '[0-9a-fA-F]\{8\}-[0-9a-fA-F]\{4\}-[0-9a-fA-F]\{4\}-[0-9a-fA-F]\{4\}-[0-9a-fA-F]\{12\}$')
   [ -n "$sid" ] || continue
   stat_of "$pid" || continue
@@ -590,8 +591,11 @@ type convoAnswer struct {
 	Tasks []convo.Task `json:"tasks,omitempty"`
 	Meta  *convo.Meta  `json:"meta,omitempty"` // what it runs with, as the log says
 	// Queued is what the person sent that the agent has not taken in yet.
-	Queued  []convo.Queued `json:"queued,omitempty"`
-	Entries []convo.Entry  `json:"entries"`
+	Queued []convo.Queued `json:"queued,omitempty"`
+	// DefaultChanged: a model switch here left the default model of new
+	// sessions changed (not put back), lately.
+	DefaultChanged bool          `json:"default_changed,omitempty"`
+	Entries        []convo.Entry `json:"entries"`
 }
 
 // GET /api/sessions/{id}/conversation?pane=<herdr pane>&gen=<n>&rev=<n>[&older=1]
@@ -643,7 +647,7 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	ans := convoAnswer{Gen: st.gen, Bind: st.bind, Entries: []convo.Entry{}}
+	ans := convoAnswer{Gen: st.gen, Bind: st.bind, Entries: []convo.Entry{}, DefaultChanged: defaultChangedOf(sess.ID)}
 	if st.reason != "" {
 		ans.Reason = st.reason
 		writeJSON(w, http.StatusOK, ans)
@@ -1011,13 +1015,14 @@ front() {
   if [ "$(head -c 16 "/proc/$pid/comm" 2>/dev/null)" = codex ]; then
     # (Codex, not run with exec: the session's log is the one it has open
     # and wrote last, as locating chose it.)
-    case $(tr '\0' '\n' <"/proc/$pid/cmdline" 2>/dev/null | sed -n 2p) in exec|e) return 1;; esac
+    tr '\0' '\n' <"/proc/$pid/cmdline" 2>/dev/null | sed 1d | grep -qxE 'exec|e' && return 1
     lg=
     for fd in /proc/$pid/fd/*; do
       l=$(readlink "$fd" 2>/dev/null) || continue
       case $l in "$HOME"/.codex/sessions/*/rollout-*.jsonl) { [ -z "$lg" ] || [ "$l" -nt "$lg" ]; } && lg=$l;; esac
     done
     case $lg in *-"$sid".jsonl) ;; *) return 1;; esac
+    head -c 4096 "$lg" 2>/dev/null | grep -q '"originator": *"codex_exec"' && return 1
   else
     c=$(head -c 65536 "$HOME/.claude/sessions/$pid.json" 2>/dev/null | tr -d '\n')
     [ "$(printf '%s' "$c" | grep -o '"sessionId" *: *"[0-9a-fA-F-]*"' | head -n 1 | sed 's/.*"\([0-9a-fA-F-]*\)"$/\1/')" = "$sid" ] || return 1

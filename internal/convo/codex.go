@@ -405,9 +405,16 @@ func (c *Codex) touch(ts []*Tool) {
 // answer: what came back of a call, on its first tool (a call's tools are
 // its file edits, or its one command): the rest only done.
 func (c *Codex) answer(ts []*Tool, text string, failed bool) {
+	at := 0 // (its command's, if it ran one; else its first file's)
+	for i, t := range ts {
+		if t.Name == "Bash" {
+			at = i
+			break
+		}
+	}
 	for i, t := range ts {
 		t.Done = true
-		if i == 0 {
+		if i == at {
 			t.Result, t.Truncated = cut(clean(text), maxResult)
 			t.ResultLines = lineCount(text)
 		}
@@ -444,11 +451,28 @@ var (
 // jsTemplate reads a template literal without substitutions as its text.
 func jsTemplate(lit string) (string, bool) {
 	s := lit[1 : len(lit)-1]
-	if strings.Contains(s, "${") {
-		return "", false
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; {
+		case c == '$' && i+1 < len(s) && s[i+1] == '{':
+			return "", false // (a substitution: not known here)
+		case c == '\\' && i+1 < len(s):
+			i++
+			switch s[i] {
+			case 'n':
+				b.WriteByte('\n')
+			case 't':
+				b.WriteByte('\t')
+			case 'r':
+				b.WriteByte('\r')
+			default:
+				b.WriteByte(s[i]) // (\` \$ \\ \' \": the character)
+			}
+		default:
+			b.WriteByte(c)
+		}
 	}
-	r := strings.NewReplacer("\\`", "`", "\\\\", "\\", "\\$", "$")
-	return r.Replace(s), true
+	return b.String(), true
 }
 
 // jsUnquote reads a JavaScript string literal in double quotes as its text
@@ -492,6 +516,10 @@ func codexTools(name, src string) []*Tool {
 	}
 	if len(cmds) > 0 {
 		out = append(out, &Tool{Name: "Bash", Detail: clip(strings.Join(cmds, "\n"), maxDetail)})
+	}
+	// (It asks the person, last: what it waits on.)
+	if len(out) > 0 && strings.Contains(src, "tools.request_user_input") {
+		out = append(out, &Tool{Name: "request_user_input"})
 	}
 	if len(out) > 0 {
 		return out

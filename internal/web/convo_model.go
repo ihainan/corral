@@ -376,6 +376,7 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 			if !checked {
 				if changed, err := restore(); changed && err != nil { // (given up: once its steps have ended)
 					slog.Error("model switch: the default model changed and could not be put back", "session", sess.ID, "err", err)
+					defaultChanged.Store(sess.ID, time.Now()) // (said in the conversation's next answers)
 				}
 				running.Wait()
 			}
@@ -424,6 +425,7 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 		restored, restoreFailed = changed && rerr == nil, changed && rerr != nil
 		if restoreFailed {
 			slog.Error("model switch: the default model changed and could not be put back", "session", sess.ID, "err", rerr)
+			defaultChanged.Store(sess.ID, time.Now())
 		}
 	}
 	switch {
@@ -471,26 +473,49 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 	}
 }
 
+// defaultChanged: the sessions (by id) where a switch left the default model
+// changed, not put back, and when: said in their conversation's answers
+// for a while, also where the request that did it was given up.
+var defaultChanged sync.Map
+
+func defaultChangedOf(id string) bool {
+	v, ok := defaultChanged.Load(id)
+	if !ok {
+		return false
+	}
+	if time.Since(v.(time.Time)) > 10*time.Minute {
+		defaultChanged.Delete(id)
+		return false
+	}
+	return true
+}
+
 // The default model of new sessions is the top-level "model" of Claude
 // Code's settings. Whatever a switch did (a key taken by the picker it was
 // not meant for, the person's own keys in between), it is put back as it
 // was before: read before the flow, again after, and if it changed, that
 // one value restored, the rest of the file as it is then.
 
-// settingsReadCommand prints Claude Code's settings ("none" when there are
-// none; through a link, the file it names); not read, it exits 5.
-const settingsReadCommand = `f="$HOME/.claude/settings.json"; [ -L "$f" ] && f=$(readlink -f "$f"); [ -e "$f" ] || { printf none; exit 0; }; head -c 1048577 "$f" || exit 5`
+// settingsReadCommand prints Claude Code's settings (through a link, the
+// file it names); exits 3 when there are none (its folder readable, the
+// file not there), 5 when they could not be read (or it cannot be told).
+const settingsReadCommand = `f="$HOME/.claude/settings.json"
+if [ -L "$f" ]; then f=$(readlink -f "$f") && [ -n "$f" ] || exit 5; fi
+if [ ! -e "$f" ]; then d=${f%/*}; { [ ! -e "$d" ] || { [ -r "$d" ] && [ -x "$d" ]; }; } && exit 3; exit 5; fi
+head -c 1048577 "$f" || exit 5`
 
 // settingsWriteCommand replaces them with its input, in one step (its mode
 // kept), only if they are still those read ($1: their SHA-256; else exit
 // 9) and the input came whole ($2 its length, $3 its SHA-256; else 4).
 // Fixed; its arguments are hex digests and a number.
 func settingsWriteCommand(was []byte, now []byte) string {
-	script := `f="$HOME/.claude/settings.json"; [ -L "$f" ] && f=$(readlink -f "$f"); [ -f "$f" ] || exit 4
+	script := `f="$HOME/.claude/settings.json"
+if [ -L "$f" ]; then f=$(readlink -f "$f") && [ -n "$f" ] || exit 4; fi
+[ -f "$f" ] || exit 4
 sum() { sha256sum <"$1" | cut -d' ' -f1; }
 [ "$(sum "$f")" = "$1" ] || exit 9
-t="$f.corral.$$"
-cp -p "$f" "$t" || exit 4
+t=$(mktemp "$f.corral.XXXXXX") || exit 4
+cp -p "$f" "$t" || { rm -f "$t"; exit 4; }
 cat >"$t" || { rm -f "$t"; exit 4; }
 [ "$(wc -c <"$t" | tr -d ' ')" = "$2" ] && [ "$(sum "$t")" = "$3" ] || { rm -f "$t"; exit 4; }
 [ "$(sum "$f")" = "$1" ] || { rm -f "$t"; exit 9; }
@@ -504,11 +529,12 @@ const maxSettings = 1 << 20
 // readSettings: Claude Code's settings as they are (none: there are none).
 func readSettings(ctx context.Context, sess *term.Session) (doc []byte, none bool, err error) {
 	out, err := sshx.Output(ctx, sess.Client(), settingsReadCommand, maxSettings+16)
+	var exitErr *sshx.ExitError
 	switch {
+	case errors.As(err, &exitErr) && exitErr.Status == 3:
+		return nil, true, nil
 	case err != nil:
 		return nil, false, err
-	case string(out) == "none":
-		return nil, true, nil
 	case len(out) > maxSettings:
 		return nil, false, errors.New("settings too long")
 	}
@@ -518,7 +544,7 @@ func readSettings(ctx context.Context, sess *term.Session) (doc []byte, none boo
 // settingsModel: the settings' top-level "model" (had false: none), or an
 // error when they are not one JSON object with at most one.
 func settingsModel(doc []byte, none bool) (json.RawMessage, bool, error) {
-	if none || len(bytes.TrimSpace(doc)) == 0 {
+	if none {
 		return nil, false, nil
 	}
 	v, _, _, had, err := topValue(doc, "model")

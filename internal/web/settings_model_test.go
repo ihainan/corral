@@ -2,6 +2,7 @@ package web
 
 import (
 	"bytes"
+	"errors"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -125,7 +126,16 @@ func TestSettingsWriteCommand(t *testing.T) {
 	os.Remove(link)
 	c = exec.Command("sh", "-c", settingsReadCommand)
 	c.Env = append(os.Environ(), "HOME="+home)
-	if out, _ := c.Output(); string(out) != "none" {
-		t.Errorf("none: %q", out)
+	var exitErr *exec.ExitError
+	if out, err := c.Output(); len(out) != 0 || !errors.As(err, &exitErr) || exitErr.ExitCode() != 3 {
+		t.Errorf("none: %q %v", out, err)
+	}
+	// (Its folder not to be read: not "none", it cannot be told.)
+	os.Chmod(filepath.Join(home, ".claude"), 0o000)
+	defer os.Chmod(filepath.Join(home, ".claude"), 0o755)
+	c = exec.Command("sh", "-c", settingsReadCommand)
+	c.Env = append(os.Environ(), "HOME="+home)
+	if _, err := c.Output(); !errors.As(err, &exitErr) || exitErr.ExitCode() != 5 {
+		t.Errorf("unreadable folder: %v", err)
 	}
 }

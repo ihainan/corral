@@ -152,3 +152,24 @@ func TestCodexPrependTwice(t *testing.T) {
 		t.Errorf("not filled in: %+v", tool)
 	}
 }
+
+// review 237: a patch and a command in one script (what came back on the
+// command); a script that asks last (asking); a template's escapes.
+func TestCodexMixed(t *testing.T) {
+	src := "const p = `*** Begin Patch\n*** Update File: /p/x.go\n@@\n-a\n+b\n*** End Patch`; await tools.apply_patch(p); await tools.exec_command({cmd:\"go test\"}); await tools.request_user_input({q:1});"
+	ts := codexTools("exec", src)
+	if len(ts) != 3 || ts[0].Name != "Edit" || ts[1].Name != "Bash" || ts[2].Name != "request_user_input" {
+		t.Fatalf("tools %+v", ts)
+	}
+	c := NewCodex()
+	c.answer(ts, "ok", false)
+	if ts[1].Result != "ok" || ts[0].Result != "" {
+		t.Errorf("result on %q / %q", ts[0].Result, ts[1].Result)
+	}
+	if s, ok := jsTemplate("`a\\nb \\${x} \\`q\\``"); !ok || s != "a\nb ${x} `q`" {
+		t.Errorf("template %q %v", s, ok)
+	}
+	if _, ok := jsTemplate("`a ${x}`"); ok {
+		t.Error("a substitution taken")
+	}
+}

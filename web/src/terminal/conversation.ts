@@ -88,6 +88,7 @@ interface Answer {
   tasks?: ConvoTask[]
   meta?: ConvoMeta
   queued?: ConvoQueued[]
+  default_changed?: boolean // (a model switch here left the default of new sessions changed)
   gen: number
   rev: number
   reset?: boolean
@@ -116,6 +117,7 @@ export interface Convo {
   tasks?: ConvoTask[] // the agent's task list (the same array while it did not change)
   meta?: ConvoMeta // (the same object while it did not change)
   queued?: ConvoQueued[] // (likewise)
+  defaultChanged?: boolean // (a model switch here left the default of new sessions changed, lately)
   // Reading has failed since okAt (ms): what shows may be out of date.
   failing: boolean
   okAt: number
@@ -207,9 +209,9 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
           rev = 0
           byseq = new Map()
           setConvo((c) =>
-            c.of === key && c.status === 'none' && c.reason === a.reason && c.gen === a.gen && sameBind(c.bind, a.bind) && !c.failing
+            c.of === key && c.status === 'none' && c.reason === a.reason && c.gen === a.gen && sameBind(c.bind, a.bind) && !c.failing && c.defaultChanged === a.default_changed
               ? c
-              : { ...initial(key), status: 'none', reason: a.reason, gen: a.gen, bind: a.bind, okAt: now, changedAt: now },
+              : { ...initial(key), status: 'none', reason: a.reason, gen: a.gen, bind: a.bind, okAt: now, changedAt: now, defaultChanged: a.default_changed },
           )
           remember(key, gen, rev, byseq, a)
         } else {
@@ -238,8 +240,8 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
             const tasks = a.tasks?.length ? (JSON.stringify(a.tasks) === JSON.stringify(c.tasks) ? c.tasks : a.tasks) : undefined
             const meta = a.meta ? (sameMeta(a.meta, c.meta) ? c.meta : a.meta) : undefined
             const queued = a.queued?.length ? (JSON.stringify(a.queued) === JSON.stringify(c.queued) ? c.queued : a.queued) : undefined
-            if (!entries && c.of === key && c.status === 'ready' && c.gen === a.gen && c.older === older && c.olderCut === olderCut && c.loadingOlder === loadingOlder && sameBind(c.bind, a.bind) && c.agentStatus === a.agent_status && c.title === a.title && c.tasks === tasks && c.meta === meta && c.queued === queued && !c.failing) return c
-            return { ...initial(key), status: 'ready', entries: entries ?? c.entries, older, olderCut, loadingOlder, gen: a.gen, bind: a.bind, agentStatus: a.agent_status, title: a.title || undefined, tasks, meta, queued, failing: false, okAt: now, changedAt: entries ? now : c.changedAt, of: key }
+            if (!entries && c.of === key && c.status === 'ready' && c.gen === a.gen && c.older === older && c.olderCut === olderCut && c.loadingOlder === loadingOlder && sameBind(c.bind, a.bind) && c.agentStatus === a.agent_status && c.title === a.title && c.tasks === tasks && c.meta === meta && c.queued === queued && !c.failing && c.defaultChanged === a.default_changed) return c
+            return { ...initial(key), status: 'ready', entries: entries ?? c.entries, older, olderCut, loadingOlder, gen: a.gen, bind: a.bind, agentStatus: a.agent_status, title: a.title || undefined, tasks, meta, queued, failing: false, okAt: now, changedAt: entries ? now : c.changedAt, of: key, defaultChanged: a.default_changed }
           })
           remember(key, gen, rev, byseq, a)
           if (a.more) next = 300
