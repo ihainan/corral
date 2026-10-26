@@ -430,6 +430,11 @@ html.term-dark .overlay, html.term-dark .menu, html.term-dark .toast {
 .convo-runs-branch svg { flex: none; }
 .convo-runs-branch-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .convo-runs-ctx { cursor: pointer; }
+.convo-runs-mode.is-switch { display: inline-flex; gap: 3px; cursor: pointer; }
+.convo-runs-mode.is-switch svg { flex: none; opacity: 0.7; }
+.convo-runs-mode.is-switch:hover:not(:disabled) { background: var(--term-hover); color: var(--term-fg); }
+.convo-runs-mode.is-switch:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: 1px; }
+.convo-runs-mode.is-switch:disabled { cursor: progress; }
 .convo-runs-ctx:hover, .convo-runs-ctx[aria-expanded='true'] { background: var(--term-hover); color: var(--term-fg); }
 .convo-runs-ctx:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: 1px; }
 .convo-runs-pop {

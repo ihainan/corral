@@ -172,7 +172,7 @@ func TestConvoStatesAreBounded(t *testing.T) {
 }
 
 func TestConvoKeysCommandQuotes(t *testing.T) {
-	cmd := convoSendCommand("tmux", "a'b", "%3", "", 7, 9, sidA, 0, convoKeys["send_now"].tmux)
+	cmd := convoSendCommand("tmux", "a'b", "%3", "", 7, 9, sidA, 0, convoKeys["send_now"].tmux, false)
 	if !strings.HasSuffix(cmd, ` corral 'tmux' 'a'\''b' '%3' 7 9 keys '' '`+sidA+`' 'C-x' 'C-s'`) {
 		t.Fatalf("arguments not quoted: %s", cmd[len(cmd)-90:])
 	}
@@ -200,5 +200,23 @@ func TestParseConvoLocateStarted(t *testing.T) {
 	procs := parseConvoLocate(convoRec("pid=100", "start=500", "btime=1792832000", "hz=100", "fg=1", "procstart=500", "sid="+sidA, "log=")).procs
 	if len(procs) != 1 || procs[0].started != 1792832005000 {
 		t.Fatalf("started: %+v", procs)
+	}
+}
+
+// The mode as Claude Code's last lines say it (what Shift+Tab went on to).
+func TestScreenMode(t *testing.T) {
+	cases := map[string]string{
+		"❯ \n  Opus 5.5·H │ Ctx 48.0K\n  ⏸ manual mode on\n":                                        "default",
+		"  ⏵⏵ accept edits on (shift+tab to cycle)\n":                                              "acceptEdits",
+		"  ⏸ plan mode on (shift+tab to cycle)":                                                    "plan",
+		"  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents\n":                                 "auto",
+		"  ⏵⏵ bypass permissions on (shift+tab to cycle)\n":                                       "bypassPermissions",
+		"❯ \n  ? for shortcuts\n":                                                                   "",
+		"● I said plan mode on earlier\n  ⏵⏵ accept edits on (shift+tab to cycle)\n":              "acceptEdits",
+	}
+	for in, want := range cases {
+		if got := screenMode(in); got != want {
+			t.Errorf("screenMode(%q) = %q, want %q", in, got, want)
+		}
 	}
 }

@@ -60,7 +60,7 @@ func TestConvoSendCommandChecksFirst(t *testing.T) {
 	rest := strings.Fields(string(stat[strings.LastIndexByte(string(stat), ')')+2:]))
 	start, _ := strconv.ParseInt(rest[19], 10, 64)
 	run := func(text string, length int, pid, st int64) int {
-		cmd := convoSendCommand("herdr", "", "p1", "/run/x.sock", pid, st, sidA, length, nil)
+		cmd := convoSendCommand("herdr", "", "p1", "/run/x.sock", pid, st, sidA, length, nil, false)
 		c := exec.Command("sh", "-c", cmd) // (as the host runs it)
 		c.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"), "XDG_RUNTIME_DIR="+dir)
 		c.Stdin = strings.NewReader(text)
