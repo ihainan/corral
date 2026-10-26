@@ -556,8 +556,9 @@ function RunningWork({ items }: { items: ConvoRunning[] }) {
   const shown = open ? items : items.slice(0, 1)
   return (
     <div className="convo-running" role="status">
+      <Loader size={13} className="convo-running-spin" aria-hidden="true" />
+      <div className="convo-running-body">
       <div className="convo-running-head">
-        <Loader size={13} className="convo-running-spin" aria-hidden="true" />
         <span className="convo-running-sum">{t('convo.bg', { n: items.length })}</span>
         {items.length > 1 && (
           <button type="button" className="link-btn convo-running-more" aria-expanded={open} onClick={() => setOpen(!open)}>
@@ -572,6 +573,7 @@ function RunningWork({ items }: { items: ConvoRunning[] }) {
           <span className="convo-running-since">{since(r.ts)}</span>
         </div>
       ))}
+      </div>
     </div>
   )
 }

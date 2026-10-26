@@ -772,9 +772,11 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-ask-label { min-width: 0; line-height: 22px; font-weight: 500; overflow-wrap: anywhere; }
 .convo-ask-keys { color: var(--term-fg-3); font-size: 12.5px; }
 /* What the agent set going and left to itself, over the composer */
-.convo-running { display: flex; flex-direction: column; gap: 2px; border: 1px solid var(--term-line); border-radius: 10px; background: var(--term-chrome); padding: 6px 12px; font-size: 13px; }
+/* (The mark in a column of its own, so that the head and the rows under it start at one edge) */
+.convo-running { display: flex; align-items: flex-start; gap: 8px; border: 1px solid var(--term-line); border-radius: 10px; background: var(--term-chrome); padding: 6px 12px; font-size: 13px; }
+.convo-running-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .convo-running-head { display: flex; align-items: center; gap: 8px; min-width: 0; color: var(--term-fg-2); }
-.convo-running-spin { flex: none; color: var(--term-accent-text); animation: convo-spin 1.4s linear infinite; }
+.convo-running-spin { flex: none; margin-top: 3px; color: var(--term-accent-text); animation: convo-spin 1.4s linear infinite; }
 @keyframes convo-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .convo-running-spin { animation: none; } }
 .convo-running-sum { flex: 1; min-width: 0; }

@@ -3,6 +3,7 @@ package convo
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
@@ -26,14 +27,22 @@ type Codex struct {
 	seq     int
 	rev     int
 	tools   map[string][]*Tool // by call_id (an apply_patch of several files is one call)
-	orphans map[string]codexOut
-	meta    Meta
-	title   string // (its first message: Codex names no session)
-	working bool
-	known   bool // (a row said whether it works)
-	trimmed bool
-	ctxSaid bool
-	Skipped int
+	// seen: the things Codex tells of on their own (a command it ran, a
+	// search it made), by the id it gives them, so that one told of again
+	// (as it goes on, then as it ends) is the one line throughout.
+	seen map[string]*Tool
+	// itemCmds: it tells of each command on its own in this conversation,
+	// so the lines of the calls that run them are not shown (they would be
+	// the same commands again).
+	itemCmds bool
+	orphans  map[string]codexOut
+	meta     Meta
+	title    string // (its first message: Codex names no session)
+	working  bool
+	known    bool // (a row said whether it works)
+	trimmed  bool
+	ctxSaid  bool
+	Skipped  int
 }
 
 type codexOut struct {
@@ -101,6 +110,23 @@ func (c *Codex) Prepend(other Parser) {
 		if ts, ok := o.tools[id]; ok {
 			o.answer(ts, out.text, out.failed)
 			delete(c.orphans, id)
+		}
+	}
+	// (Each command told of on its own in either part: the lines of the
+	// calls that run them go, in the part before this one too.)
+	if c.itemCmds || o.itemCmds {
+		c.itemCmds, o.itemCmds = true, false
+		o.itemsTell()
+	}
+	for id, t := range o.seen {
+		if len(c.seen) >= maxSeenItems {
+			break
+		}
+		if c.seen == nil {
+			c.seen = map[string]*Tool{}
+		}
+		if _, there := c.seen[id]; !there {
+			c.seen[id] = t
 		}
 	}
 	if o.title != "" { // (its first message is the session's first)
@@ -204,12 +230,8 @@ type codexPayload struct {
 	Input     string          `json:"input"`
 	Arguments string          `json:"arguments"`
 	Output    json.RawMessage `json:"output"`
-	Item      *struct {
-		Type    string          `json:"type"`
-		ID      string          `json:"id"`
-		Content json.RawMessage `json:"content"`
-	} `json:"item"`
-	Info *struct {
+	Item      *codexItem      `json:"item"`
+	Info      *struct {
 		Last *struct {
 			Input int64 `json:"input_tokens"`
 		} `json:"last_token_usage"`
@@ -291,7 +313,21 @@ func (c *Codex) event(r *codexRow, p *codexPayload) {
 			c.meta.Window = p.Info.Window
 		}
 	case "item_completed":
-		if p.Item == nil || p.Item.Type != "UserMessage" {
+		if p.Item == nil {
+			return
+		}
+		// (A command it ran, a search it made: told of only here, where it
+		// ran them as one process of its own. What it said and thought is
+		// told of again as response_item rows, and is read from those.)
+		switch p.Item.Type {
+		case "CommandExecution":
+			c.ranCommand(r, p.Item)
+			return
+		case "WebSearch":
+			c.searched(r, p.Item)
+			return
+		}
+		if p.Item.Type != "UserMessage" {
 			return
 		}
 		var parts []Part
@@ -318,6 +354,109 @@ func (c *Codex) event(r *codexRow, p *codexPayload) {
 		}
 		c.add(r, p.Item.ID, RoleUser, parts)
 	}
+}
+
+// codexItem is a thing the agent did, as Codex tells of it when it is done
+// (its newer account: a command it ran, a search it made).
+// ranCommand: a command the agent ran, with what it printed and how it
+// ended. Where the same one was told of as a call (an older Codex, or a
+// tool of its own), that one holds it and this is let be.
+func (c *Codex) ranCommand(r *codexRow, it *codexItem) {
+	id := clip(it.ID, maxID)
+	if id == "" {
+		return
+	}
+	c.itemsTell()
+	cmd := strings.Join(it.Command, " ")
+	if len(it.Parsed) > 0 && it.Parsed[0].Cmd != "" {
+		cmd = it.Parsed[0].Cmd // (what it means to run, without the shell it runs it in)
+	}
+	if strings.TrimSpace(cmd) == "" {
+		return
+	}
+	t := &Tool{ID: id, Name: "Bash", Detail: clip(clean(cmd), maxDetail)}
+	failed := it.Status == "failed" || (it.ExitCode != nil && *it.ExitCode != 0)
+	out := it.Output
+	if it.ExitCode != nil && *it.ExitCode != 0 {
+		out = fmt.Sprintf("Exit code %d\n%s", *it.ExitCode, out)
+	}
+	// (Told of again as it ends: the line it had is the one that changes.)
+	if was, ok := c.seen[id]; ok {
+		t = was
+		t.Detail = clip(clean(cmd), maxDetail)
+	}
+	t.Done, t.Error = it.Status != "in_progress", failed
+	t.Result, t.Truncated = cut(clean(out), maxResult)
+	t.ResultLines = lineCount(out)
+	if _, ok := c.seen[id]; ok {
+		c.touch([]*Tool{t})
+		return
+	}
+	c.add(r, id, RoleAssistant, []Part{{Kind: KindTool, Tool: t}})
+	c.mark(id, t)
+}
+
+// itemsTell: Codex tells of each command on its own in this conversation.
+// What the calls that run them showed of those commands goes: the same
+// commands, told twice, with less of them in the line of the call.
+func (c *Codex) itemsTell() {
+	if c.itemCmds {
+		return
+	}
+	c.itemCmds = true
+	for _, e := range c.entries {
+		kept, dropped := e.Parts[:0], false
+		for _, p := range e.Parts {
+			if p.Kind == KindTool && p.Tool != nil && p.Tool.fromCall {
+				dropped = true
+				continue
+			}
+			kept = append(kept, p)
+		}
+		if dropped {
+			e.Parts, e.Rev = kept, c.rev
+		}
+	}
+}
+
+// searched: a search the agent made on the web.
+func (c *Codex) searched(r *codexRow, it *codexItem) {
+	id := clip(it.ID, maxID)
+	if id == "" || c.seen[id] != nil || strings.TrimSpace(it.Query) == "" {
+		return
+	}
+	t := &Tool{ID: id, Name: "WebSearch", Detail: clip(clean(it.Query), maxDetail), Done: true}
+	c.add(r, id, RoleAssistant, []Part{{Kind: KindTool, Tool: t}})
+	c.mark(id, t)
+}
+
+// mark keeps the line a thing told of on its own was given, so that it is
+// the one line throughout. (Bounded: beyond that, what comes again is not
+// matched to its line and is let be rather than shown twice.)
+func (c *Codex) mark(id string, t *Tool) {
+	if c.seen == nil {
+		c.seen = map[string]*Tool{}
+	}
+	if len(c.seen) < maxSeenItems {
+		c.seen[id] = t
+	}
+}
+
+type codexItem struct {
+	Type     string          `json:"type"`
+	ID       string          `json:"id"`
+	Content  json.RawMessage `json:"content"`
+	Command  []string        `json:"command"`
+	Cwd      string          `json:"cwd"`
+	Parsed   []codexParsed   `json:"parsed_cmd"`
+	Status   string          `json:"status"`
+	Output   string          `json:"aggregated_output"`
+	ExitCode *int            `json:"exit_code"`
+	Query    string          `json:"query"`
+}
+
+type codexParsed struct {
+	Cmd string `json:"cmd"`
 }
 
 type codexBlock struct {
@@ -372,6 +511,12 @@ func (c *Codex) item(r *codexRow, p *codexPayload) {
 		}
 		var parts []Part
 		for _, t := range tools {
+			if t.Name == "Bash" {
+				t.fromCall = true
+				if c.itemCmds {
+					continue // (each of its commands is told of on its own)
+				}
+			}
 			parts = append(parts, Part{Kind: KindTool, Tool: t})
 		}
 		c.add(r, p.ID, RoleAssistant, parts)

@@ -132,6 +132,11 @@ type Tool struct {
 	// PDF's pages), tools a search found.
 	Images int `json:"images,omitempty"`
 	Refs   int `json:"refs,omitempty"`
+
+	// fromCall: (Codex) this line is of a call the agent made, which tells
+	// of the commands it means to run; where it tells of each command on
+	// its own as well, those are what is shown and this goes.
+	fromCall bool
 }
 
 // Hunk is a run of an edit's lines: each begins with " " (kept), "-"
@@ -166,6 +171,7 @@ const (
 	maxPatch     = 12 << 10 // an edit's patch, all its lines
 	maxFiles     = 20       // the files of one call whose patches are kept
 	maxRunning   = 50       // work set going that is kept
+	maxSeenItems = 4096     // (Codex) the things told of as done that are remembered
 	maxPatchLine = 400      // one line of it
 )
 

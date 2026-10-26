@@ -173,3 +173,73 @@ func TestCodexMixed(t *testing.T) {
 		t.Error("a substitution taken")
 	}
 }
+
+// A command Codex ran that it tells of only as a thing done (its newer
+// account) shows with what it printed; one it already shows as part of a
+// call of its own is not shown twice.
+func TestCodexCommandItems(t *testing.T) {
+	c := NewCodex()
+	c.Feed([]byte(`{"timestamp":"2026-10-26T10:00:00.000Z","type":"response_item","payload":{"type":"custom_tool_call","id":"c1","call_id":"call_1","name":"exec","input":"const r = await tools.exec_command({cmd:\"git status\"}); text(r.output);"}}
+{"timestamp":"2026-10-26T10:00:01.000Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"CommandExecution","id":"exec-1","command":["/usr/bin/zsh","-lc","git status"],"parsed_cmd":[{"cmd":"git status"}],"status":"completed","aggregated_output":"nothing to commit","exit_code":0}}}
+{"timestamp":"2026-10-26T10:00:02.000Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"CommandExecution","id":"exec-2","command":["/usr/bin/zsh","-lc","go test ./..."],"parsed_cmd":[{"cmd":"go test ./..."}],"status":"completed","aggregated_output":"FAIL\n","exit_code":1}}}
+{"timestamp":"2026-10-26T10:00:03.000Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"WebSearch","id":"ws-1","query":"codex rollout format"}}}
+` + "\n"))
+	var tools []*Tool
+	for _, e := range c.Since(0) {
+		for _, p := range e.Parts {
+			if p.Tool != nil {
+				tools = append(tools, p.Tool)
+			}
+		}
+	}
+	if len(tools) != 3 {
+		for _, x := range tools {
+			t.Logf("%s %q", x.Name, x.Detail)
+		}
+		t.Fatalf("tools: %d", len(tools))
+	}
+	// (Each command told of on its own: the call's line of them goes.)
+	if tools[0].Detail != "git status" || !tools[0].Done || !strings.Contains(tools[0].Result, "nothing to commit") {
+		t.Errorf("the first command: %+v", tools[0])
+	}
+	if tools[1].Detail != "go test ./..." || !tools[1].Error || !strings.Contains(tools[1].Result, "FAIL") {
+		t.Errorf("the one that failed: %+v", tools[1])
+	}
+	if tools[2].Name != "WebSearch" || tools[2].Detail != "codex rollout format" {
+		t.Errorf("the search: %+v", tools[2])
+	}
+}
+
+// A command still running, told of again as it ends: the one line, with
+// what it printed and how it ended.
+func TestCodexCommandGoesOn(t *testing.T) {
+	c := NewCodex()
+	c.Feed([]byte(`{"timestamp":"2026-10-26T10:00:00.000Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"CommandExecution","id":"exec-7","command":["/usr/bin/zsh","-lc","go build ./..."],"parsed_cmd":[{"cmd":"go build ./..."}],"status":"in_progress"}}}
+`))
+	tool := func() *Tool {
+		for _, e := range c.Since(0) {
+			for _, p := range e.Parts {
+				if p.Tool != nil {
+					return p.Tool
+				}
+			}
+		}
+		return nil
+	}
+	if x := tool(); x == nil || x.Done {
+		t.Fatalf("while it runs: %+v", x)
+	}
+	c.Feed([]byte(`{"timestamp":"2026-10-26T10:00:09.000Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"CommandExecution","id":"exec-7","command":["/usr/bin/zsh","-lc","go build ./..."],"parsed_cmd":[{"cmd":"go build ./..."}],"status":"completed","aggregated_output":"ok","exit_code":0}}}
+`))
+	n := 0
+	for _, e := range c.Since(0) {
+		for _, p := range e.Parts {
+			if p.Tool != nil {
+				n++
+			}
+		}
+	}
+	if x := tool(); n != 1 || x == nil || !x.Done || x.Result != "ok" {
+		t.Errorf("once it ended: %d lines, %+v", n, x)
+	}
+}
