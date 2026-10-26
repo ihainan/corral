@@ -12,7 +12,7 @@ import { expandPastes, getDraft, keepDraft, keepPaste, remember, sentHistory } f
 import { geminiPath, shellPath } from '../terminal/paths'
 import { useCompletion } from '../terminal/Completion'
 import { InlineReply } from '../terminal/ReplyDialog'
-import { ConversationView, when, type ConvoAgent, type ConvoListRow, type ConvoPending } from '../terminal/Conversation'
+import { ConversationView, when, type ConvoAgent, type ConvoListRow, type ConvoPending, type ModelOpt } from '../terminal/Conversation'
 import { asking, useConversation, type ConvoEntry } from '../terminal/conversation'
 import { isClaude, listAgents, paneTitle, useRunningSessions, type AgentRow } from '../terminal/agents'
 import { afterSend, holdTermMode, PENDING_MS, sameTurn, tmuxKey } from '../terminal/chatSend'
@@ -45,6 +45,7 @@ const chatAddress = (e: { s: SessionInfo; pane?: string }) => {
 const PASTE_LINES = 12
 const SEND_MS = 45000 // (the host may wait for another message to the pane to go first)
 const PRESS_MS = 20000
+const MODEL_MS = 50000 // (the picker, step by step: see convo_model.go)
 const PASTE_CHARS = 2000
 const isTouch = window.matchMedia('(pointer: coarse)').matches || navigator.maxTouchPoints > 0
 const hasKeyboardPointer = () => !window.matchMedia('(pointer: coarse)').matches
@@ -420,6 +421,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     if (e.code === 'not_in_front') return t('convo.notFront')
     // (Of these the gateway says only in English: said here.)
     if (e.code === 'refused') return t('convo.err.refused')
+    if (e.code === 'picker') return t('convo.err.picker')
     if (e.code === 'unknown') return t('convo.err.unknown')
     if (e.code === 'host_error' || e.code === 'unsupported' || e.code === 'bad_request') return t('convo.err.other')
     return errorText(e)
@@ -455,6 +457,38 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       .then((r) => (r.mode ? setModeNow({ mode: r.mode, bind, was }) : toast(t('convo.modeUnknown'))))
       .catch((e) => toast(refusal(e), true))
       .finally(() => setModeBusy(false))
+  }
+
+  // The model, switched from a menu of what Claude Code's picker offers (read
+  // when it opens, through the picker: see convo_model.go), for this session
+  // only. Only while it is at rest: the picker takes over its input.
+  const [models, setModels] = useState<{ list: ModelOpt[] | null; bind: string } | null>(null)
+  const [modelBusy, setModelBusy] = useState(false)
+  const canModel = bound && convo.status === 'ready' && !!convo.meta?.model && (agent?.status === 'idle' || agent?.status === 'done') && !agent?.other
+  const pressBody = () => {
+    const b = convo.bind!
+    return { pane: b.pane, pid: b.pid, start: b.start, session: b.session }
+  }
+  const openModels = () => {
+    if (!convo.bind || modelBusy || (models && models.bind === bindKey && models.list)) return
+    const bind = bindKey
+    setModels({ list: null, bind })
+    setModelBusy(true)
+    api<{ models: ModelOpt[] }>('POST', `/api/sessions/${sid}/conversation/models`, pressBody(), { timeoutMs: MODEL_MS })
+      .then((r) => setModels((m) => (m?.bind === bind ? { list: r.models, bind } : m)))
+      .catch((e) => {
+        setModels(null)
+        toast(refusal(e), true)
+      })
+      .finally(() => setModelBusy(false))
+  }
+  const pickModel = (label: string) => {
+    if (!convo.bind || modelBusy) return
+    setModelBusy(true)
+    api('POST', `/api/sessions/${sid}/conversation/model`, { ...pressBody(), model: label }, { timeoutMs: MODEL_MS })
+      .then(() => toast(t('convo.modelSet', { m: label })))
+      .catch((e) => toast(refusal(e), true))
+      .finally(() => setModelBusy(false))
   }
 
   // What was sent, until the log has a user turn of its text after it (each
@@ -882,6 +916,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       onSendNow={canPress ? () => press('now') : undefined}
       sendNow={said?.what === 'now' && said.bind === bindKey ? said.text : undefined}
       mode={{ now: modeNow?.bind === bindKey ? modeNow.mode : undefined, busy: modeBusy, onNext: canMode ? nextMode : undefined }}
+      model={canModel || modelBusy ? { list: models?.bind === bindKey ? models.list : null, busy: modelBusy, onOpen: openModels, onPick: pickModel } : undefined}
       lead={lead}
     />
     </div>

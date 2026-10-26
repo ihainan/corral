@@ -188,6 +188,8 @@ func (s *Server) registerRoutes() {
 	s.handle("POST /api/sessions/{id}/conversation/interrupt", SignedIn, s.apiConversationInterrupt)
 	s.handle("POST /api/sessions/{id}/conversation/send-now", SignedIn, s.apiConversationSendNow)
 	s.handle("POST /api/sessions/{id}/conversation/mode", SignedIn, s.apiConversationMode)
+	s.handle("POST /api/sessions/{id}/conversation/models", SignedIn, s.apiConversationModels)
+	s.handle("POST /api/sessions/{id}/conversation/model", SignedIn, s.apiConversationModel)
 	s.handle("POST /api/sessions/{id}/conversation/send", SignedIn, s.apiConversationSend)
 	s.handle("GET /api/sessions/{id}/shares", SignedIn, s.apiListShares)
 	s.handle("POST /api/sessions/{id}/shares", SignedIn, s.apiAddShare)

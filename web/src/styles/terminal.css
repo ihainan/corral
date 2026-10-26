@@ -430,11 +430,23 @@ html.term-dark .overlay, html.term-dark .menu, html.term-dark .toast {
 .convo-runs-branch svg { flex: none; }
 .convo-runs-branch-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .convo-runs-ctx { cursor: pointer; }
-.convo-runs-mode.is-switch { display: inline-flex; gap: 3px; cursor: pointer; }
-.convo-runs-mode.is-switch svg { flex: none; opacity: 0.7; }
-.convo-runs-mode.is-switch:hover:not(:disabled) { background: var(--term-hover); color: var(--term-fg); }
-.convo-runs-mode.is-switch:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: 1px; }
-.convo-runs-mode.is-switch:disabled { cursor: progress; }
+.convo-runs-item.is-switch { display: inline-flex; gap: 3px; cursor: pointer; }
+.convo-runs-item.is-switch svg { flex: none; opacity: 0.7; }
+.convo-runs-item.is-switch:hover:not(:disabled), .convo-runs-item.is-switch[aria-expanded='true'] { background: var(--term-hover); color: var(--term-fg); }
+.convo-runs-item.is-switch:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: 1px; }
+.convo-runs-item.is-switch:disabled { cursor: progress; }
+/* The models to switch to: as the picker lists them, the session's ticked */
+.convo-models { display: flex; flex-direction: column; gap: 1px; padding: 6px; }
+.convo-models-item {
+  display: grid; grid-template-columns: 1fr auto; align-items: center; column-gap: 8px; width: 100%; padding: 6px 8px;
+  border: 0; border-radius: 6px; background: none; color: var(--term-fg); font: inherit; text-align: left; cursor: pointer;
+}
+.convo-models-item:hover, .convo-models-item:focus-visible { background: var(--term-hover); outline: none; }
+.convo-models-item[aria-checked='true'] { color: var(--term-accent-text); cursor: default; }
+.convo-models-label { grid-column: 1; font-weight: 500; }
+.convo-models-desc { grid-column: 1; font-size: 12px; color: var(--term-fg-3); }
+.convo-models-item svg { grid-column: 2; grid-row: 1 / span 2; }
+.convo-models .convo-runs-note { margin: 4px 8px 2px; }
 .convo-runs-ctx:hover, .convo-runs-ctx[aria-expanded='true'] { background: var(--term-hover); color: var(--term-fg); }
 .convo-runs-ctx:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: 1px; }
 .convo-runs-pop {

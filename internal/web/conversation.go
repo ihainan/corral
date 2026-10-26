@@ -883,17 +883,25 @@ func convoProcStatus(c *sftplite.Client, st *convoState) string {
 // Exits 3: not that agent in front in that pane now (or, tmux, the pane is
 // not in this session); 4: nothing typed; 5: the text typed, not Enter; 6:
 // typing failed part way, or may have (so does a signal once typing began);
-// 7: the pane's lock was not had in time (nothing typed). With read, the
-// keys pressed, the last lines of the pane's screen are printed a moment
-// after (what the keys changed). Fixed script; the
+// 7: the pane's lock was not had in time (nothing typed). With read (lines,
+// to 60), the last lines of the pane's screen are printed a moment after the
+// keys or the text (what they changed). Fixed script; the
 // mode, the validated tmux session name, pane id, pid, start, Claude session
 // id, length, the herdr socket (from discovery) and keys of a fixed set
 // (convoKeys) are its arguments, the text its input.
-func convoSendCommand(mode, session, pane, socket string, pid, start int64, sid string, length int, keys []string, read bool) string {
+func convoSendCommand(mode, session, pane, socket string, pid, start int64, sid string, length int, keys []string, read int) string {
 	script := `PATH="$HOME/.local/bin:$HOME/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
-mode=$1 sess=$2 p=$3 pid=$4 start=$5 len=$6 sock=$7 sid=$8
-shift 8
-seen=0; [ "$len" = keysread ] && { len=keys; seen=1; }
+mode=$1 sess=$2 p=$3 pid=$4 start=$5 len=$6 sock=$7 sid=$8 rd=$9
+shift 9
+case $rd in ''|*[!0-9]*) rd=0;; esac
+# (What the pane shows after, its last rd lines but blank ones at the end.)
+screen() {
+  [ "$rd" -gt 0 ] || return 0
+  sleep 0.7
+  if [ "$mode" = tmux ]; then tmux -u capture-pane -p -t "$p" 2>/dev/null 9>&-
+  else HERDR_SOCKET_PATH=$sock herdr pane read "$p" --source visible 2>/dev/null 9>&-; fi |
+    awk -v n="$rd" '{ a[NR] = $0 } NF { last = NR } END { for (i = last - n + 1; i <= last; i++) if (i > 0) print a[i] }'
+}
 b=corral-send-$$ typing=0
 f=$(mktemp) || exit 4
 trap 'rm -f "$f"; [ "$mode" = tmux ] && tmux delete-buffer -b "$b" 2>/dev/null 9>&-' EXIT
@@ -931,7 +939,7 @@ if [ "$mode" = tmux ]; then
     front || exit 3
     typing=1
     tmux send-keys -t "$p" "$@" 9>&- || exit 6
-    [ "$seen" = 1 ] && { sleep 0.6; tmux -u capture-pane -p -t "$p" 2>/dev/null 9>&- | tail -n 8; }
+    screen
     exit 0
   fi
   tmux load-buffer -b "$b" "$f" 9>&- || exit 4
@@ -939,6 +947,7 @@ if [ "$mode" = tmux ]; then
   typing=1
   tmux paste-buffer -p -r -d -b "$b" -t "$p" 9>&- || exit 6
   tmux send-keys -t "$p" Enter 9>&- || exit 5
+  screen
 else
   if [ "$len" = keys ]; then
     front || exit 3
@@ -946,7 +955,7 @@ else
     for k in "$@"; do
       HERDR_SOCKET_PATH=$sock herdr pane send-keys "$p" "$k" >/dev/null 2>&1 9>&- || exit 6
     done
-    [ "$seen" = 1 ] && { sleep 0.6; HERDR_SOCKET_PATH=$sock herdr pane read "$p" --lines 8 2>/dev/null 9>&-; }
+    screen
     exit 0
   fi
   t=$(cat "$f" && printf x) || exit 4
@@ -957,16 +966,14 @@ else
   typing=1
   HERDR_SOCKET_PATH=$sock herdr pane send-text "$p" "$e[200~$t$e[201~" >/dev/null 2>&1 9>&- || exit 6
   HERDR_SOCKET_PATH=$sock herdr pane send-keys "$p" enter >/dev/null 2>&1 9>&- || exit 5
+  screen
 fi`
 	n := strconv.Itoa(length)
 	if keys != nil {
 		n = "keys"
-		if read {
-			n = "keysread"
-		}
 	}
 	cmd := "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(mode) + " " + sshx.QuoteShell(session) + " " + sshx.QuoteShell(pane) + " " +
-		strconv.FormatInt(pid, 10) + " " + strconv.FormatInt(start, 10) + " " + n + " " + sshx.QuoteShell(socket) + " " + sshx.QuoteShell(sid)
+		strconv.FormatInt(pid, 10) + " " + strconv.FormatInt(start, 10) + " " + n + " " + sshx.QuoteShell(socket) + " " + sshx.QuoteShell(sid) + " " + strconv.Itoa(max(0, min(read, 60)))
 	for _, k := range keys {
 		cmd += " " + sshx.QuoteShell(k)
 	}
@@ -1031,6 +1038,8 @@ var convoKeys = map[string]struct {
 	"interrupt": {"convo.interrupt", []string{"esc"}, []string{"Escape"}},
 	"send_now":  {"convo.send_now", []string{"ctrl+x", "ctrl+s"}, []string{"C-x", "C-s"}},
 	"mode":      {"convo.mode", []string{"shift+tab"}, []string{"BTab"}}, // (Claude Code's next permission mode)
+	"models":    {"convo.models", nil, nil},                              // (its picker read: see convo_model.go)
+	"model":     {"convo.model", nil, nil},
 	"send":      {"convo.send", nil, nil}, // (typed by convoSendCommand)
 }
 
@@ -1110,6 +1119,28 @@ func (s *Server) apiConversationMode(w http.ResponseWriter, r *http.Request) {
 	s.convoPress(w, r, "mode")
 }
 
+// POST /api/sessions/{id}/conversation/models (the same as interrupt)
+// POST /api/sessions/{id}/conversation/model (the same, and "model")
+//
+// The models Claude Code's picker offers ({"models":[{"label","desc",
+// "current"}]}), or the session switched to one of them for this session
+// only ({"ok":true,"model":…}): see modelFlow. Its log then says so.
+func (s *Server) apiConversationModels(w http.ResponseWriter, r *http.Request) {
+	s.convoPress(w, r, "models")
+}
+
+func (s *Server) apiConversationModel(w http.ResponseWriter, r *http.Request) {
+	s.convoPress(w, r, "model")
+}
+
+// modeLines: the screen read after a key, for what (the mode's line).
+func modeLines(what string) int {
+	if what == "mode" {
+		return 8
+	}
+	return 0
+}
+
 // Send types a message into the agent's pane and presses Enter (Claude Code
 // queues it while it works), as the terminal's composer would, but into that
 // pane only: what herdr has in front, or the terminal shows, is not changed.
@@ -1128,12 +1159,16 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		PID     int64  `json:"pid"`
 		Start   int64  `json:"start"`
 		Session string `json:"session"`
-		Text    string `json:"text"` // (send)
+		Text    string `json:"text"`  // (send)
+		Model   string `json:"model"` // (model: as the picker names it)
 	}
 	err := readJSON(r, &b)
 	text, textOK := sendText(b.Text)
 	if what != "send" {
 		textOK = b.Text == ""
+	}
+	if what == "model" && (b.Model == "" || len(b.Model) > 64 || strings.ContainsFunc(b.Model, func(r rune) bool { return r < 0x20 || r == 0x7f })) {
+		textOK = false
 	}
 	if err != nil || !textOK {
 		writeError(w, http.StatusBadRequest, "bad_request", "the pane, the process (and, to send, a message) are required")
@@ -1171,7 +1206,11 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	}
 	ctx, cancel := context.WithDeadline(r.Context(), expiry)
 	defer cancel()
-	ctx, cancelStep := context.WithTimeout(ctx, 15*time.Second)
+	step := 15 * time.Second
+	if what == "models" || what == "model" {
+		step = 45 * time.Second // (several steps on the host: see modelFlow)
+	}
+	ctx, cancelStep := context.WithTimeout(ctx, step)
 	defer cancelStep()
 	untrack := s.trackPending(currentUser(r).ID, &liveSocket{loginHash: loginHash(r), hostID: sess.HostID, cancel: cancel})
 	defer untrack()
@@ -1237,6 +1276,10 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	if signedOut() {
 		return
 	}
+	if what == "models" || what == "model" {
+		s.convoModel(w, ctx, sess, b.Pane, socket, b.PID, b.Start, b.Session, b.Model, &outcome, &reason)
+		return
+	}
 	// The check again and the typing or pressing, on the host in one go (see convoSendCommand).
 	var press []string
 	if what != "send" {
@@ -1247,7 +1290,7 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	}
 	release := turn
 	turn = func() {} // (Exec gives it back, once the channel has ended)
-	res, err := sshx.Exec(ctx, sess.Client(), convoSendCommand(sess.Persistence, sess.TmuxSession, b.Pane, socket, b.PID, b.Start, b.Session, len(text), press, what == "mode"), 16<<10,
+	res, err := sshx.Exec(ctx, sess.Client(), convoSendCommand(sess.Persistence, sess.TmuxSession, b.Pane, socket, b.PID, b.Start, b.Session, len(text), press, modeLines(what)), 16<<10,
 		sshx.ExecOptions{Stdin: strings.NewReader(text), Release: release})
 	var exitErr *sshx.ExitError
 	switch {

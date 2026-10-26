@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { ArrowDown, ChevronDown, ChevronRight, ChevronsUpDown, GitBranch, PanelLeft, X } from 'lucide-react'
+import { ArrowDown, Check, ChevronDown, ChevronRight, ChevronsUpDown, GitBranch, PanelLeft, X } from 'lucide-react'
 import { t, getLang, type I18nKey } from '../i18n'
 import { copyText, isCoarse } from '../components/ui'
 import { local } from '../storage'
@@ -89,6 +89,7 @@ export function ConversationView({
   onSendNow,
   sendNow,
   mode,
+  model,
   lead,
 }: {
   convo: Convo
@@ -107,6 +108,7 @@ export function ConversationView({
   onSendNow?: () => void // (messages wait to be taken in: Claude Code's "send now")
   sendNow?: string // what became of the last "send now", to say
   mode?: ModeSwitch // (its permission mode can be switched from here)
+  model?: ModelSwitch // (so can its model)
   lead?: ReactNode // (first in the bar: the agents page's way back to its list, on a phone)
 }) {
   const working = agent?.status === 'working'
@@ -525,7 +527,7 @@ export function ConversationView({
           </div>
         )}
         {composer}
-        {convo.status === 'ready' && convo.meta && <Runs meta={convo.meta} active={active} mode={mode} />}
+        {convo.status === 'ready' && convo.meta && <Runs meta={convo.meta} active={active} mode={mode} model={model} />}
       </div>
       </div>
       {changes && shownEdits && <ChangesPanel key={changes.key} edits={shownEdits} focus={changes.path} onClose={unshow} active={active} />}
@@ -587,11 +589,16 @@ const modeName = (m: string) => ((MODES as readonly string[]).includes(m) ? t(`c
 // went to (the log says it only with the next message); busy, one on its way.
 export type ModeSwitch = { now?: string; busy: boolean; onNext?: () => void }
 
+// Switching the model, from a menu of what Claude Code's picker offers
+// (list: null while it is read), for the session only.
+export type ModelOpt = { label: string; desc?: string }
+export type ModelSwitch = { list: ModelOpt[] | null; busy: boolean; onOpen: () => void; onPick: (label: string) => void }
+
 // What the session runs with, under the composer: its permission mode on
 // the left (a tap: the next one, as Shift+Tab); its branch, model and how
 // full its context is on the right (the numbers on a tap).
-function Runs({ meta, active, mode }: { meta: ConvoMeta; active: boolean; mode?: ModeSwitch }) {
-  const [open, setOpen] = useState(false)
+function Runs({ meta, active, mode, model }: { meta: ConvoMeta; active: boolean; mode?: ModeSwitch; model?: ModelSwitch }) {
+  const [open, setOpen] = useState<false | 'ctx' | 'model'>(false) // (which of its two pop-ups)
   const box = useRef<HTMLDivElement>(null)
   if (open && !active) setOpen(false) // (behind a terminal tab: its Escape is the terminal's)
   useEffect(() => {
@@ -636,13 +643,62 @@ function Runs({ meta, active, mode }: { meta: ConvoMeta; active: boolean; mode?:
           <span className="convo-runs-branch-name">{meta.branch}</span>
         </span>
       )}
-      {meta.model && <span className="convo-runs-item convo-runs-model" title={meta.model}>{modelName(meta.model)}</span>}
+      {meta.model &&
+        (model ? (
+          <button
+            type="button"
+            className="convo-runs-item convo-runs-model is-switch"
+            aria-expanded={open === 'model'}
+            aria-haspopup="menu"
+            disabled={model.busy}
+            aria-busy={model.busy || undefined}
+            title={t('convo.modelSwitch')}
+            onClick={() => {
+              if (open !== 'model') model.onOpen()
+              setOpen(open === 'model' ? false : 'model')
+            }}
+          >
+            {modelName(meta.model)}
+            <ChevronsUpDown size={12} aria-hidden="true" />
+          </button>
+        ) : (
+          <span className="convo-runs-item convo-runs-model" title={meta.model}>{modelName(meta.model)}</span>
+        ))}
       {used > 0 && (
-        <button type="button" className="convo-runs-item convo-runs-ctx" aria-expanded={open} aria-label={t('convo.ctxLabel', { n: tokens(used) })} onClick={() => setOpen(!open)}>
+        <button type="button" className="convo-runs-item convo-runs-ctx" aria-expanded={open === 'ctx'} aria-label={t('convo.ctxLabel', { n: tokens(used) })} onClick={() => setOpen(open === 'ctx' ? false : 'ctx')}>
           {t('convo.ctxShort', { n: tokens(used) })}
         </button>
       )}
-      {open && (
+      {open === 'model' && model && (
+        <div className="convo-runs-pop convo-models" role="menu" aria-label={t('convo.model')}>
+          {model.list === null ? (
+            <p className="convo-runs-note" role="status">{t('convo.modelReading')}</p>
+          ) : (
+            model.list.map((o) => {
+              const now = modelName(meta.model!) === o.label
+              return (
+                <button
+                  key={o.label}
+                  type="button"
+                  role="menuitemradio"
+                  aria-checked={now}
+                  className="convo-models-item"
+                  onClick={() => {
+                    setOpen(false)
+                    if (!now) model.onPick(o.label)
+                  }}
+                >
+                  <span className="convo-models-label">{o.label}</span>
+                  {o.desc && <span className="convo-models-desc">{o.desc}</span>}
+                  {now && <Check size={14} aria-hidden="true" />}
+                </button>
+              )
+            })
+          )}
+          <p className="convo-runs-note">{t('convo.modelOnly')}</p>
+        </div>
+      )}
+      {open === 'ctx' && (
         <div className="convo-runs-pop" role="dialog" aria-label={t('convo.ctxTitle')}>
           <div className="convo-runs-row">
             <span>{t('convo.ctxTitle')}</span>
