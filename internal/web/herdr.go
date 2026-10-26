@@ -567,7 +567,7 @@ var (
 
 const (
 	maxReplyText   = 2000 // characters
-	maxScreenBytes = 16 << 10
+	maxScreenBytes = 64 << 10
 )
 
 func init() {
@@ -580,20 +580,27 @@ func init() {
 // the digest that names it (of all of it); the text returned is at most
 // maxScreenBytes (its end).
 func paneScreen(ctx context.Context, c *herdr.Client, pane string) (text, digest string, err error) {
+	text, digest, _, err = paneScreenCut(ctx, c, pane)
+	return text, digest, err
+}
+
+// paneScreenCut is paneScreen, and whether its start was cut (longer than
+// maxScreenBytes): then what is asked may not all be in it.
+func paneScreenCut(ctx context.Context, c *herdr.Client, pane string) (text, digest string, cut bool, err error) {
 	text, err = c.ReadPane(ctx, pane, 0)
 	if err != nil {
-		return "", "", err
+		return "", "", false, err
 	}
 	text = strings.TrimRight(strings.ReplaceAll(text, "\r\n", "\n"), " \t\n")
 	sum := sha256.Sum256([]byte(text))
 	if len(text) > maxScreenBytes {
-		cut := len(text) - maxScreenBytes
-		for cut < len(text) && !utf8.RuneStart(text[cut]) {
-			cut++
+		at := len(text) - maxScreenBytes
+		for at < len(text) && !utf8.RuneStart(text[at]) {
+			at++
 		}
-		text = text[cut:]
+		text, cut = text[at:], true
 	}
-	return text, hex.EncodeToString(sum[:]), nil
+	return text, hex.EncodeToString(sum[:]), cut, nil
 }
 
 // answeredFor is how long an answered screen stays answered: the same
@@ -666,13 +673,13 @@ func (s *Server) apiHerdrScreen(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer c.Close()
-	text, digest, err := paneScreen(ctx, c, pane)
+	text, digest, cut, err := paneScreenCut(ctx, c, pane)
 	if err != nil {
 		writeHerdrError(w, err)
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	writeJSON(w, http.StatusOK, map[string]any{"text": text, "digest": digest})
+	writeJSON(w, http.StatusOK, map[string]any{"text": text, "digest": digest, "cut": cut})
 }
 
 // POST /api/sessions/{id}/herdr/panes/{pane}/reply

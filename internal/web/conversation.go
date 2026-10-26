@@ -163,8 +163,8 @@ case $hz in ''|*[!0-9]*|0) hz=;; esac
 # Codex's subcommand ($1 its pid): its first word after options and their
 # values ("codex -p exec" is no exec; "codex -c x=1 exec" is).
 codex_sub() {
-  tr '\0' '\n' <"/proc/$1/cmdline" 2>/dev/null | awk 'NR == 1 { next } skip { skip = 0; next }
-    /^-/ { if ($0 ~ /^(-[cmpsaCi]|--(config|model|profile|sandbox|ask-for-approval|cd|image|add-dir|local-provider|remote))$/) skip = 1; next }
+  tr '\0' '\001' <"/proc/$1/cmdline" 2>/dev/null | awk 'BEGIN { RS = "\001" } NR == 1 { next } skip { skip = 0; next }
+    /^-/ { if ($0 ~ /^(-[cmpsaCi]|--(config|model|profile|sandbox|ask-for-approval|cd|image|add-dir|local-provider|remote|remote-auth-token-env|enable|disable))$/) skip = 1; next }
     { print; exit }'
 }
 # A process's record: what it is, where its log is, and where it runs.
@@ -214,14 +214,16 @@ done
 for d in /proc/[0-9]*; do
   [ -O "$d" ] && [ "$(head -c 16 "$d/comm" 2>/dev/null)" = codex ] || continue
   pid=${d#/proc/}
-  case $(codex_sub "$pid") in exec|e) continue;; esac
+  sub=$(codex_sub "$pid")
+  case $sub in exec|e) continue;; esac
   log=
   for fd in "$d"/fd/*; do
     l=$(readlink "$fd" 2>/dev/null) || continue
     case $l in *"$nl"*) continue;; "$HOME"/.codex/sessions/*/rollout-*.jsonl) { [ -z "$log" ] || [ "$l" -nt "$log" ]; } && log=$l;; esac
   done
   [ -n "$log" ] || continue
-  head -c 4096 "$log" 2>/dev/null | grep -q '"originator": *"codex_exec"' && continue
+  # (No subcommand to go by: its log's head says how it was begun.)
+  [ -z "$sub" ] && head -c 4096 "$log" 2>/dev/null | grep -q '"originator": *"codex_exec"' && continue
   sid=$(printf '%s' "${log%.jsonl}" | grep -o '[0-9a-fA-F]\{8\}-[0-9a-fA-F]\{4\}-[0-9a-fA-F]\{4\}-[0-9a-fA-F]\{4\}-[0-9a-fA-F]\{12\}$')
   [ -n "$sid" ] || continue
   stat_of "$pid" || continue
@@ -1022,16 +1024,17 @@ front() {
   if [ "$(head -c 16 "/proc/$pid/comm" 2>/dev/null)" = codex ]; then
     # (Codex, not run with exec (its arguments, its log's head): the
     # session's log is the one it has open and wrote last, as locating chose it.)
-    case $(tr '\0' '\n' <"/proc/$pid/cmdline" 2>/dev/null | awk 'NR == 1 { next } skip { skip = 0; next }
-      /^-/ { if ($0 ~ /^(-[cmpsaCi]|--(config|model|profile|sandbox|ask-for-approval|cd|image|add-dir|local-provider|remote))$/) skip = 1; next }
-      { print; exit }') in exec|e) return 1;; esac
+    cs=$(tr '\0' '\001' <"/proc/$pid/cmdline" 2>/dev/null | awk 'BEGIN { RS = "\001" } NR == 1 { next } skip { skip = 0; next }
+      /^-/ { if ($0 ~ /^(-[cmpsaCi]|--(config|model|profile|sandbox|ask-for-approval|cd|image|add-dir|local-provider|remote|remote-auth-token-env|enable|disable))$/) skip = 1; next }
+      { print; exit }')
+    case $cs in exec|e) return 1;; esac
     lg=
     for fd in /proc/$pid/fd/*; do
       l=$(readlink "$fd" 2>/dev/null) || continue
       case $l in "$HOME"/.codex/sessions/*/rollout-*.jsonl) { [ -z "$lg" ] || [ "$l" -nt "$lg" ]; } && lg=$l;; esac
     done
     case $lg in *-"$sid".jsonl) ;; *) return 1;; esac
-    head -c 4096 "$lg" 2>/dev/null | grep -q '"originator": *"codex_exec"' && return 1
+    [ -z "$cs" ] && head -c 4096 "$lg" 2>/dev/null | grep -q '"originator": *"codex_exec"' && return 1
   else
     c=$(head -c 65536 "$HOME/.claude/sessions/$pid.json" 2>/dev/null | tr -d '\n')
     [ "$(printf '%s' "$c" | grep -o '"sessionId" *: *"[0-9a-fA-F-]*"' | head -n 1 | sed 's/.*"\([0-9a-fA-F-]*\)"$/\1/')" = "$sid" ] || return 1

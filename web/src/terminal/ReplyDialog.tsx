@@ -10,6 +10,16 @@ import { choiceText, questionText } from './askText'
 interface Screen {
   text: string
   digest: string
+  cut?: boolean // (its start was cut: longer than the gateway keeps)
+}
+
+// folds: the screen may go behind a button, its choices all there is to
+// it: a question of Claude Code's, its question read whole, the screen not
+// cut. Anything else, what it asks shows (as read, else the screen itself).
+function folds(screen: Screen): boolean {
+  if (screen.cut || !asksQuestion(screen.text)) return false
+  const q = question(screen.text)
+  return !!q && !q.startsWith('…')
 }
 
 const isTouchOnly = isCoarse()
@@ -132,20 +142,21 @@ export function ReplyDialog({ sessionId, agent, onLoaded, onClose, resizedAt }: 
   const { screen, failed, reading, changed, busy, error, text, setText, load, send, submit, opts } = useReply(sessionId, agent, { onLoaded, resizedAt, onSent: onClose })
   const pre = useRef<HTMLPreElement>(null)
   const [screenOpen, setScreenOpen] = useState(false) // (a menu read off it: the screen behind a button)
-  // The end of the screen is where the question is.
+  // The end of the screen is where the question is; where the screen is
+  // all that says what is asked, its start is where that begins.
   useLayoutEffect(() => {
-    if (pre.current) pre.current.scrollTop = pre.current.scrollHeight
+    if (pre.current) pre.current.scrollTop = whole ? 0 : pre.current.scrollHeight
   }, [screen, screenOpen])
 
   // (What is asked not read off it, all of it: a long patch's start is above its last lines.)
-  const whole = !!screen && opts.length > 0 && !promptBlock(screen.text) && !asksQuestion(screen.text)
+  const whole = !!screen && !promptBlock(screen.text) && !folds(screen)
   const shown = screen ? (whole ? screen.text : screen.text.split('\n').slice(-shownLines).join('\n')) : ''
   const title = agent.agent || t('reply.terminal')
   const q = screen ? question(screen.text) : ''
   // (Only a question of Claude Code's is all its choices: anything else, what
   // it asks to be allowed shows first, as read, else the screen.)
   const block = screen ? promptBlock(screen.text) : null
-  const questionOnly = !!screen && asksQuestion(screen.text)
+  const questionOnly = !!screen && folds(screen)
   return (
     <Dialog title={t('reply.title', { agent: title })} onClose={onClose} className="reply-dialog">
       {agent.title && <p className="hint reply-sub">{agent.title}</p>}
@@ -155,6 +166,7 @@ export function ReplyDialog({ sessionId, agent, onLoaded, onClose, resizedAt }: 
         <>
           {/* (A menu read off it: its question and choices first, the screen
               behind a button; else the screen, to answer from.) */}
+          {screen?.cut && <p className="reply-changed" role="alert">{t('reply.cut')}</p>}
           {opts.length > 0 && q && <p className="reply-q">{block && /^Bash command$/i.test(block.head) && /^Do you want to proceed\?$/i.test(q) ? t('convo.askRun') : questionText(q)}</p>}
           {/* (What a permission asks to be allowed, before its choices.) */}
           {opts.length > 0 && block && <Asked lines={block.lines} />}
@@ -336,7 +348,7 @@ export function InlineReply({ sessionId, agent, onLoaded, resizedAt, active = tr
   const block = screen ? promptBlock(screen.text) : null
   // (What is asked not told apart on the screen, the screen itself shows; a
   // question of Claude Code's is all its choices.)
-  const needScreen = !!screen && !block && !asksQuestion(screen.text)
+  const needScreen = !!screen && !block && !folds(screen)
   // (Not told apart, the whole screen, before the choices; else behind its button.)
   const screenLines = screen ? screen.text.split('\n') : []
   const screenBox = (
@@ -351,7 +363,7 @@ export function InlineReply({ sessionId, agent, onLoaded, resizedAt, active = tr
             </div>
   )
   useLayoutEffect(() => {
-    if (pre.current) pre.current.scrollTop = pre.current.scrollHeight
+    if (pre.current) pre.current.scrollTop = needScreen ? 0 : pre.current.scrollHeight
   }, [screen, shown, !block])
   const ready = sent === null && !!screen && !busy && !failed
   const cardRef = useRef<HTMLDivElement>(null)
@@ -363,7 +375,7 @@ export function InlineReply({ sessionId, agent, onLoaded, resizedAt, active = tr
     <div className="convo-ask" role="group" aria-label={t('convo.waiting')} ref={cardRef}>
       <div className="convo-ask-q">{shownQ || t('convo.waiting')}</div>
       {block && <Asked lines={block.lines} />}
-      {needScreen && !failed && <p className="convo-ask-unread">{t('convo.askUnread')}</p>}
+      {needScreen && !failed && <p className="convo-ask-unread">{t(screen?.cut ? 'reply.cut' : 'convo.askUnread')}</p>}
       {failed ? (
         <LoadError onRetry={() => void load()} />
       ) : (

@@ -118,11 +118,13 @@ export function question(text: string): string {
   const strip = (l: string) => l.replace(/^[\s│|╭╮╰╯─━┌┐└┘]+|[\s│|╭╮╰╯─━┌┐└┘]+$/g, '')
   for (let i = top - 1, n = 0; top > 0 && i >= 0 && n < 4; i--, n++) {
     const l = strip(lines[i])
-    if (!l) continue
+    if (!l || (asks && /^[(（].*[)）]$/.test(l))) continue // (a question's "(Choose one)" under it)
     if (!/[?？]$/.test(l)) return ''
     const quoted = asks && /^\s*│/.test(lines[i])
     const parts = [l]
-    for (let j = i - 1; j >= 0 && i - j <= (quoted ? 24 : 3); j--) {
+    // (cut: the lines it may take taken, and more of it above them.)
+    let j = i - 1
+    for (; j >= 0 && i - j <= (quoted ? 24 : 3); j--) {
       if (quoted ? !/^\s*│/.test(lines[j]) : !strip(lines[j]) || dashedRule.test(lines[j])) break
       const above = strip(lines[j])
       // (Another menu's: only what it goes on from, wrapped: a line not
@@ -130,8 +132,10 @@ export function question(text: string): string {
       if (!asks && (/[.。!！?？:：]$/.test(above) || !/^[a-z\u3000-\u9fff]/.test(parts[0]))) break
       if (above) parts.unshift(above)
     }
+    const cut = asks && j >= 0 && i - j > (quoted ? 24 : 3) && (quoted ? /^\s*│/.test(lines[j]) : !!strip(lines[j]))
     const cjk = /[\u3000-\u9fff\uff00-\uffef]/
     const all = parts.reduce((a, b) => (cjk.test(a.slice(-1)) || cjk.test(b[0]) ? a + b : a + ' ' + b))
+    if (cut) return '…' + (all.length <= 599 ? all : all.slice(-598))
     return all.length <= 600 ? all : '…' + all.slice(-599)
   }
   return ''
