@@ -201,6 +201,7 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
         lastOk.current = now
         if (pane !== paneRef.current) next = 0
         else if (!a.available) {
+          wantOlder.current = null // (nothing to read before: what was asked of is gone)
           gen = a.gen
           rev = 0
           byseq = new Map()
@@ -212,7 +213,9 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
           remember(key, gen, rev, byseq, a)
         } else {
           const fresh = a.reset || a.gen !== gen
-          if (asksOlder || fresh) wantOlder.current = null // (answered, or another reading: asked of that no more)
+          // (Answered, or another reading: asked of that no more. Asked of a
+          // reading before this one, though it is still this gen: that too.)
+          if (asksOlder || fresh || (wantOlder.current !== null && wantOlder.current !== a.gen)) wantOlder.current = null
           if (fresh) byseq = new Map()
           gen = a.gen
           rev = a.rev

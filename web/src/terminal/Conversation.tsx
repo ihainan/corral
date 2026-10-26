@@ -513,7 +513,8 @@ export function ConversationView({
         {convo.status === 'ready' && convo.tasks && <Tasks tasks={convo.tasks} fold={!!ask} />}
         {/* (Asked from the screen: also where its log is not read.) */}
         {(convo.status === 'ready' || convo.status === 'none') && ask && <div className="convo-dock-ask">{ask}</div>}
-        {convo.status === 'ready' && (working || waits) && convo.queued && <Queue items={convo.queued} onSendNow={working ? onSendNow : undefined} said={sendNow} />}
+        {/* (Not of one at rest, which would have taken them in: not when its state is not known.) */}
+        {convo.status === 'ready' && agent?.status !== 'idle' && agent?.status !== 'done' && convo.queued && <Queue items={convo.queued} onSendNow={working ? onSendNow : undefined} said={sendNow} />}
         {waits && !ask && convo.status === 'ready' && (
           // (Where it cannot be answered here: in its terminal.)
           <div className="convo-waiting" role="status">
@@ -522,7 +523,7 @@ export function ConversationView({
           </div>
         )}
         {composer}
-        {convo.status === 'ready' && convo.meta && <Runs meta={convo.meta} />}
+        {convo.status === 'ready' && convo.meta && <Runs meta={convo.meta} active={active} />}
       </div>
       </div>
       {changes && shownEdits && <ChangesPanel key={changes.key} edits={shownEdits} focus={changes.path} onClose={unshow} active={active} />}
@@ -583,9 +584,10 @@ const modeName = (m: string) => ((MODES as readonly string[]).includes(m) ? t(`c
 // What the session runs with, under the composer: its permission mode on
 // the left; its branch, model and how full its context is on the right
 // (the numbers on a tap).
-function Runs({ meta }: { meta: ConvoMeta }) {
+function Runs({ meta, active }: { meta: ConvoMeta; active: boolean }) {
   const [open, setOpen] = useState(false)
   const box = useRef<HTMLDivElement>(null)
+  if (open && !active) setOpen(false) // (behind a terminal tab: its Escape is the terminal's)
   useEffect(() => {
     if (!open) return
     const away = (e: PointerEvent) => {
@@ -698,7 +700,9 @@ export function when(r: { since?: number; status: string }, now: number): string
   return t(going ? 'convo.for.d' : 'convo.ago.d', { n: Math.floor(m / 1440) })
 }
 
-function AgentList({ rows, onPicked }: { rows: ConvoListRow[]; onPicked?: () => void }) {
+// placed: where rows go (their group, their order) by another status than
+// their own, by key (the picker's: as when it opened).
+function AgentList({ rows, onPicked, placed }: { rows: ConvoListRow[]; onPicked?: () => void; placed?: Map<string, ConvoListRow> }) {
   // (The times move on: drawn again every half minute.)
   const [now, setNow] = useState(Date.now())
   useEffect(() => {
@@ -708,7 +712,8 @@ function AgentList({ rows, onPicked }: { rows: ConvoListRow[]; onPicked?: () => 
   return (
     <>
       {GROUPS.map((g) => {
-        const of = byRecent(rows.filter(g.of))
+        const at = (r: ConvoListRow) => placed?.get(r.key) ?? r
+        const of = byRecent(rows.map(at).filter(g.of)).map((p) => rows.find((r) => r.key === p.key)!)
         if (!of.length) return null
         return (
           <div key={g.name} className="convo-list-group" role="group" aria-label={t(g.name)}>
@@ -748,10 +753,11 @@ function AgentList({ rows, onPicked }: { rows: ConvoListRow[]; onPicked?: () => 
 }
 
 // The list over the conversation: under the bar on a wide screen, from the
-// bottom on a phone. Its rows are those of when it opened: statuses
-// changing meanwhile do not move them under the finger.
+// bottom on a phone. Its rows stay where they were when it opened: statuses
+// changing meanwhile do not move them under the finger (what they say is
+// current; one gone goes, one new comes in).
 function Picker({ rows, onClose }: { rows: ConvoListRow[]; onClose: () => void }) {
-  const [shown] = useState(rows)
+  const [first] = useState(() => new Map(rows.map((r) => [r.key, r])))
   const box = useRef<HTMLDivElement>(null)
   // (Once, when it opens: focus moved on in it stays where it was moved.)
   useEffect(() => {
@@ -788,7 +794,7 @@ function Picker({ rows, onClose }: { rows: ConvoListRow[]; onClose: () => void }
             <X size={16} />
           </button>
         </div>
-        <AgentList rows={shown} onPicked={onClose} />
+        <AgentList rows={rows} placed={first} onPicked={onClose} />
       </div>
     </>
   )

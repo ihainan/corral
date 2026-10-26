@@ -99,7 +99,11 @@ export function useReply(sessionId: string, agent: HerdrAgent, { onLoaded, resiz
       await api('POST', base + '/reply', { digest: screen.digest, ...body })
       // The text sent goes from what is kept for the pane (not a newer one
       // typed while this answer was on its way).
-      if ('text' in body && getReplyDraft(draftKey).trim() === body.text) keepReplyDraft(draftKey, '')
+      if ('text' in body && getReplyDraft(draftKey).trim() === body.text) {
+        keepReplyDraft(draftKey, '')
+        // (Shown too, not only kept: the next question here starts empty.)
+        if (live.current) setTextState((v) => (v.trim() === body.text ? '' : v))
+      }
       toast(t('reply.sent'))
       if (live.current) onSent()
     } catch (e) {

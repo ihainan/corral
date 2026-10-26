@@ -78,7 +78,8 @@ export function useRunningSessions(on: boolean, every = 3000): { sessions: Sessi
       timer = undefined
       if (document.hidden || asking) return
       asking = true
-      api<SessionInfo[]>('GET', '/api/sessions')
+      // (One that never comes back, as after a network change, is given up: the next goes.)
+      api<SessionInfo[]>('GET', '/api/sessions', undefined, { timeoutMs: 15000 })
         .then((l) => {
           if (stopped) return
           lastList = l.filter((x) => x.state === 'running')

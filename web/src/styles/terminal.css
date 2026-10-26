@@ -411,7 +411,7 @@ html.term-dark .overlay, html.term-dark .menu, html.term-dark .toast {
 .convo-scroll { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; overflow-anchor: none; /* (what goes in above is made up for by hand: Safari has no anchoring) */ }
 /* Under the thread, in its column: the task list, the wait, the composer, what the session runs with */
 .convo-dock {
-  flex: none; width: 100%; max-width: 780px; margin: 0 auto; display: flex; flex-direction: column; gap: 8px;
+  flex: 0 1 auto; min-height: 0; width: 100%; max-width: 780px; margin: 0 auto; display: flex; flex-direction: column; gap: 8px;
   padding: 0 max(16px, env(safe-area-inset-right, 0px)) 6px max(16px, env(safe-area-inset-left, 0px)); font-family: var(--font-ui);
 }
 .convo-dock:empty { display: none; }
@@ -676,12 +676,22 @@ html.term-dark .overlay, html.term-dark .menu, html.term-dark .toast {
 .convo-ask-key { flex: none; font-family: var(--font-mono); font-size: 13px; color: var(--term-fg-3); }
 .convo-ask-text { display: flex; gap: 8px; }
 .convo-ask-text .input { flex: 1; min-width: 0; }
+/* (In the terminal's colours, as the composer is, whatever the app's are) */
+.convo-ask-text .input, .convo-ask-text .btn { background: var(--term-key); color: var(--term-fg); border-color: var(--term-line); }
+.convo-ask-text .input::placeholder { color: var(--term-fg-3); }
+.convo-ask-text .input:focus { border-color: var(--term-accent-text); }
+.convo-ask-text .btn:hover:not(:disabled) { background: var(--term-hover); }
 .convo-ask-more { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 13px; }
 .convo-ask-more .link-btn { font-size: 13px; color: var(--term-fg-2); }
 .convo-ask .reply-screen { max-height: 260px; }
 .convo-ask-sent { margin: 0; font-size: 13px; color: var(--term-fg-3); }
 /* The card over the composer, its own scroll where the screen is short */
 .convo-dock-ask { display: flex; flex-direction: column; max-height: min(58vh, 520px); overflow-y: auto; overscroll-behavior: contain; border-radius: 12px; }
+/* Short of room (a phone's keyboard up): the question gives way, scrolled
+   in itself, and the composer stays in view; the thread above has gone to
+   nothing first. */
+.convo-dock > * { flex: none; }
+.convo-dock > .convo-dock-ask { flex: 0 1 auto; min-height: 96px; }
 .convo-dock-ask .convo-ask { box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18); }
 .convo-ask-block { max-height: min(34vh, 300px); white-space: pre; overflow: auto; }
 .convo-ask-block > span { display: block; min-width: max-content; }

@@ -359,9 +359,11 @@ export function TerminalTabs({ current }: { current: string }) {
         const digit = /^Digit([1-9])$/.exec(e.code)
         if (isT && !e.shiftKey) act = () => setNewOpen(true)
         else if (digit && !e.shiftKey) {
+          // (As the bar shows them, the agents page first.)
+          const ids = [AGENTS, ...tabs.map((s) => s.id)]
           const n = Number(digit[1])
-          const to = n === 9 ? tabs[tabs.length - 1] : tabs[n - 1]
-          act = () => to && to.id !== current && navigate('/t/' + to.id, true)
+          const to = n === 9 ? ids[ids.length - 1] : ids[n - 1]
+          act = () => to && to !== current && navigate(to === AGENTS ? '/agents' : '/t/' + to, true)
         } else if (bracket && e.shiftKey) act = () => go(bracket as 1 | -1)
       } else if (standalone && !isMac && e.ctrlKey && e.shiftKey && !e.metaKey && isT) act = () => setNewOpen(true)
       if (!act) return
