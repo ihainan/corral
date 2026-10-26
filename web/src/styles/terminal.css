@@ -771,6 +771,19 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-ask-unread { margin: 0; font-size: 13px; color: var(--term-warn-text); }
 .convo-ask-label { min-width: 0; line-height: 22px; font-weight: 500; overflow-wrap: anywhere; }
 .convo-ask-keys { color: var(--term-fg-3); font-size: 12.5px; }
+/* What the agent set going and left to itself, over the composer */
+.convo-running { display: flex; flex-direction: column; gap: 2px; border: 1px solid var(--term-line); border-radius: 10px; background: var(--term-chrome); padding: 6px 12px; font-size: 13px; }
+.convo-running-head { display: flex; align-items: center; gap: 8px; min-width: 0; color: var(--term-fg-2); }
+.convo-running-spin { flex: none; color: var(--term-accent-text); animation: convo-spin 1.4s linear infinite; }
+@keyframes convo-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .convo-running-spin { animation: none; } }
+.convo-running-sum { flex: 1; min-width: 0; }
+.term-root .convo-running-more { flex: none; font-size: 13px; color: var(--term-fg-2); }
+.convo-running-row { display: flex; align-items: baseline; gap: 10px; min-width: 0; color: var(--term-fg-3); font-size: 12.5px; }
+.convo-running-what { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); }
+.convo-running-note { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.convo-running-since { flex: none; margin-left: auto; font-variant-numeric: tabular-nums; }
+
 /* What waits to be taken in, over the composer */
 .convo-queue { display: flex; flex-direction: column; border: 1px solid var(--term-line); border-radius: 10px; background: var(--term-chrome); font-size: 13.5px; }
 .convo-queue-head { display: flex; align-items: center; gap: 10px; min-height: 36px; padding: 2px 6px 2px 12px; color: var(--term-fg-2); }
@@ -779,6 +792,9 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .term-root .convo-queue-now:hover { background: var(--term-hover); }
 .convo-queue-said { flex: none; font-size: 12.5px; color: var(--term-fg-3); }
 .convo-queue-row { padding: 6px 12px; border-top: 1px solid var(--term-line); color: var(--term-fg); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 5.2em; overflow: hidden; }
+/* Not the person's own: another session's agent, or a notice */
+.convo-queue-row.is-note { color: var(--term-fg-3); }
+.convo-queue-from { margin-right: 6px; color: var(--term-fg-2); font-weight: 500; }
 .convo-user.is-mid .convo-user-text { background: color-mix(in srgb, var(--term-accent-soft) 70%, transparent); }
 
 /* The agents to go to: beside the thread (wide), over it (narrow, or folded away) */

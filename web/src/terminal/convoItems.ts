@@ -23,6 +23,7 @@ export interface Edits {
   files: FileEdits[]
   add: number
   del: number
+  more?: number // (files a command changed beyond those kept)
 }
 export interface FileEdits {
   path: string
@@ -165,23 +166,44 @@ export function edits(steps: Step[]): Edits | null {
   const files = new Map<string, FileEdits>()
   let add = 0
   let del = 0
-  for (const s of steps) {
-    const tl = !isNote(s) ? s.tool : undefined
-    if (!tl || tl.error || category(tl.name) !== 'edit') continue
-    const path = tl.detail ?? ''
+  let more = 0
+  const put = (path: string, a: number, d: number, tl: ConvoTool) => {
     let f = files.get(path)
     if (!f) files.set(path, (f = { path, add: 0, del: 0, tools: [] }))
-    f.add += tl.add ?? 0
-    f.del += tl.del ?? 0
+    f.add += a
+    f.del += d
     f.tools.push(tl)
-    add += tl.add ?? 0
-    del += tl.del ?? 0
+    add += a
+    del += d
   }
-  return files.size ? { files: [...files.values()], add, del } : null
+  for (const s of steps) {
+    const tl = !isNote(s) ? s.tool : undefined
+    if (!tl || tl.error) continue
+    // A command that changed files (its own patch for each) counts as an
+    // edit does; its line stays a command's.
+    if (tl.files?.length) {
+      more += tl.more_files ?? 0
+      const each = perFile(tl)
+      tl.files.forEach((f, i) => put(f.path, f.add ?? 0, f.del ?? 0, each[i]))
+      continue
+    }
+    if (category(tl.name) !== 'edit') continue
+    put(tl.detail ?? '', tl.add ?? 0, tl.del ?? 0, tl)
+  }
+  return files.size ? { files: [...files.values()], add, del, more } : null
+}
+
+// A command's files, each as an edit of its own (the same ones each time,
+// so that what shows of them is not made anew on every reading).
+const files = new WeakMap<ConvoTool, ConvoTool[]>()
+function perFile(tl: ConvoTool): ConvoTool[] {
+  let out = files.get(tl)
+  if (!out) files.set(tl, (out = (tl.files ?? []).map((f) => ({ ...tl, detail: f.path, add: f.add, del: f.del, patch: f.patch, patch_cut: f.patch_cut, old: undefined, new: undefined, same: false }))))
+  return out
 }
 
 export const sameEdits = (a: Edits | null, b: Edits | null) =>
-  a === b || (!!a && !!b && a.add === b.add && a.del === b.del && a.files.length === b.files.length && a.files.every((f, i) => f.path === b.files[i].path && f.tools.length === b.files[i].tools.length && f.tools.every((t, j) => t === b.files[i].tools[j])))
+  a === b || (!!a && !!b && a.add === b.add && a.del === b.del && a.more === b.more && a.files.length === b.files.length && a.files.every((f, i) => f.path === b.files[i].path && f.tools.length === b.files[i].tools.length && f.tools.every((t, j) => t === b.files[i].tools[j])))
 
 export type Category = 'cmd' | 'read' | 'edit' | 'search' | 'web' | 'agent' | 'other'
 

@@ -617,3 +617,230 @@ func TestLongArrivalMatchesRemoval(t *testing.T) {
 		t.Fatalf("queued %d, want 1", n)
 	}
 }
+
+// A shell command that changed files: each with its patch, counted as the
+// turn's changes (Claude Code reports them in toolUseResult.bashEditDiff).
+func TestClaudeBashEditDiff(t *testing.T) {
+	c := NewClaude()
+	c.Feed(lines(
+		`{"type":"assistant","uuid":"a1","message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"sed -i s/a/b/ x.py y.py","description":"fix it"}}]}}`,
+		`{"type":"user","uuid":"r1","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":""}]},"toolUseResult":{"stdout":"","stderr":"","bashEditDiff":{"files":[`+
+			`{"filePath":"/home/u/p/x.py","hunks":[{"oldStart":1,"oldLines":2,"newStart":1,"newLines":2,"lines":[" import os","-a = 1","+a = 2"]}]},`+
+			`{"filePath":"/home/u/p/y.py","hunks":[{"oldStart":9,"oldLines":1,"newStart":9,"newLines":2,"lines":["-b = 1","+b = 2","+c = 3"]}]}],`+
+			`"changedFiles":["/home/u/p/x.py","/home/u/p/y.py"],"moreFiles":3}}}`,
+	))
+	all := c.Since(0)
+	var tool *Tool
+	for _, e := range all {
+		for _, p := range e.Parts {
+			if p.Tool != nil {
+				tool = p.Tool
+			}
+		}
+	}
+	if tool == nil || len(tool.Files) != 2 {
+		t.Fatalf("files: %+v", tool)
+	}
+	if tool.Files[0].Path != "/home/u/p/x.py" || tool.Files[0].Add != 1 || tool.Files[0].Del != 1 || len(tool.Files[0].Patch) != 1 {
+		t.Errorf("the first file: %+v", tool.Files[0])
+	}
+	if tool.Files[1].Add != 2 || tool.Files[1].Del != 1 {
+		t.Errorf("the second file: %+v", tool.Files[1])
+	}
+	if tool.Add != 3 || tool.Del != 2 || tool.MoreFiles != 3 {
+		t.Errorf("the call: +%d -%d, %d more", tool.Add, tool.Del, tool.MoreFiles)
+	}
+}
+
+// A call that came back with a picture (a screenshot read, a PDF's pages)
+// or with tools a search found: not nothing, though it is not words.
+func TestClaudeResultNotWords(t *testing.T) {
+	c := NewClaude()
+	c.Feed(lines(
+		`{"type":"assistant","uuid":"a1","message":{"content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"/p/shot.png"}}]}}`,
+		`{"type":"user","uuid":"r1","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}}]}]},"toolUseResult":{"type":"image"}}`,
+		`{"type":"assistant","uuid":"a2","message":{"content":[{"type":"tool_use","id":"t2","name":"ToolSearch","input":{"query":"slack"}}]}}`,
+		`{"type":"user","uuid":"r2","message":{"content":[{"type":"tool_result","tool_use_id":"t2","content":[{"type":"tool_reference","name":"a"},{"type":"tool_reference","name":"b"}]}]}}`,
+	))
+	var got []*Tool
+	for _, e := range c.Since(0) {
+		for _, p := range e.Parts {
+			if p.Tool != nil {
+				got = append(got, p.Tool)
+			}
+		}
+	}
+	if len(got) != 2 {
+		t.Fatalf("tools: %d", len(got))
+	}
+	if got[0].Images != 1 || got[0].Refs != 0 || !got[0].Done {
+		t.Errorf("the picture: %+v", got[0])
+	}
+	if got[1].Refs != 2 || got[1].Images != 0 {
+		t.Errorf("the tools found: %+v", got[1])
+	}
+}
+
+// A tool of the model's own (the advisor) answers in a row of its own: the
+// call it answers is done, with what it said.
+func TestClaudeModelToolResult(t *testing.T) {
+	c := NewClaude()
+	c.Feed(lines(
+		`{"type":"assistant","uuid":"a1","message":{"content":[{"type":"server_tool_use","id":"t1","name":"advisor","input":{}}]}}`,
+		`{"type":"assistant","uuid":"a2","message":{"content":[{"type":"advisor_tool_result","tool_use_id":"t1","content":"先把测试跑一遍。"}]}}`,
+	))
+	var tool *Tool
+	for _, e := range c.Since(0) {
+		for _, p := range e.Parts {
+			if p.Tool != nil {
+				tool = p.Tool
+			}
+		}
+	}
+	if tool == nil || !tool.Done || tool.Result != "先把测试跑一遍。" {
+		t.Fatalf("the advisor's answer: %+v", tool)
+	}
+}
+
+// A subagent sent off to work on its own: its report, where Claude Code
+// keeps it with the call, is what the call came back with (not the word
+// that it was sent off).
+func TestClaudeSubagentHandback(t *testing.T) {
+	c := NewClaude()
+	c.Feed(lines(
+		`{"type":"assistant","uuid":"a1","message":{"content":[{"type":"tool_use","id":"t1","name":"Agent","input":{"description":"查一下","prompt":"去查"}}]}}`,
+		`{"type":"user","uuid":"r1","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"Async agent launched successfully."}]},"toolUseResult":{"isAsync":true,"status":"completed","handbackReport":"查完了：三个来源都对得上。"}}`,
+	))
+	var tool *Tool
+	for _, e := range c.Since(0) {
+		for _, p := range e.Parts {
+			if p.Tool != nil {
+				tool = p.Tool
+			}
+		}
+	}
+	if tool == nil || tool.Result != "查完了：三个来源都对得上。" {
+		t.Fatalf("the report: %+v", tool)
+	}
+}
+
+// Work set going and left to itself (a command in the background, a
+// subagent on its own) is there until the agent is told it has ended; what
+// it says of itself meanwhile shows with it.
+func TestClaudeRunning(t *testing.T) {
+	c := NewClaude()
+	c.Feed(lines(
+		`{"type":"assistant","uuid":"a1","message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"go test ./...","description":"跑测试"}}]}}`,
+		`{"type":"user","uuid":"r1","timestamp":"2026-10-26T10:00:00Z","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"running in background"}]},"toolUseResult":{"stdout":"","backgroundTaskId":"b1"}}`,
+		`{"type":"assistant","uuid":"a2","message":{"content":[{"type":"tool_use","id":"t2","name":"Agent","input":{"description":"查资料","prompt":"去查"}}]}}`,
+		`{"type":"user","uuid":"r2","timestamp":"2026-10-26T10:00:05Z","message":{"content":[{"type":"tool_result","tool_use_id":"t2","content":"Async agent launched"}]},"toolUseResult":{"isAsync":true,"agentId":"ag1","status":"async_launched"}}`,
+	))
+	if r := c.Running(); len(r) != 2 || r[0].ID != "b1" || r[0].What != "跑测试" || r[0].Kind != "cmd" || r[1].Kind != "agent" {
+		t.Fatalf("running: %+v", c.Running())
+	}
+	// It says something of itself: still at it, with that said.
+	c.Feed(lines(`{"type":"attachment","uuid":"n1","attachment":{"type":"queued_command","commandMode":"task-notification","prompt":"<task-notification>\n<task-id>b1</task-id>\n<event>3 passed</event>\n</task-notification>"}}`))
+	if r := c.Running(); len(r) != 2 || r[0].Note != "3 passed" {
+		t.Errorf("what it said: %+v", c.Running())
+	}
+	// It has ended: no longer there.
+	c.Feed(lines(`{"type":"attachment","uuid":"n2","attachment":{"type":"queued_command","commandMode":"task-notification","prompt":"<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n<summary>Background command \"tests\" completed</summary>\n</task-notification>"}}`))
+	if r := c.Running(); len(r) != 1 || r[0].ID != "ag1" {
+		t.Errorf("after it ended: %+v", c.Running())
+	}
+}
+
+// A command that changed more than there is room to keep: the lines it
+// changed are still counted whole, and the files left without a patch say
+// there was more of it.
+func TestClaudeBashEditDiffBudget(t *testing.T) {
+	big := func(n int) string {
+		out := make([]string, 0, n)
+		for i := range n {
+			out = append(out, fmt.Sprintf(`"+%d %s"`, i, strings.Repeat("x", 300)))
+		}
+		return strings.Join(out, ",")
+	}
+	c := NewClaude()
+	c.Feed(lines(
+		`{"type":"assistant","uuid":"a1","message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"sed -i …","description":"改"}}]}}`,
+		`{"type":"user","uuid":"r1","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":""}]},"toolUseResult":{"bashEditDiff":{"files":[`+
+			`{"filePath":"/p/a","hunks":[{"oldStart":1,"newStart":1,"lines":[`+big(60)+`]}]},`+
+			`{"filePath":"/p/b","hunks":[{"oldStart":1,"newStart":1,"lines":[`+big(2)+`]}]}],"moreFiles":0}}}`,
+	))
+	var tool *Tool
+	for _, e := range c.Since(0) {
+		for _, p := range e.Parts {
+			if p.Tool != nil {
+				tool = p.Tool
+			}
+		}
+	}
+	if tool == nil || len(tool.Files) != 2 {
+		t.Fatalf("files: %+v", tool)
+	}
+	if tool.Files[0].Add != 60 || tool.Files[1].Add != 2 || tool.Add != 62 {
+		t.Errorf("lines counted: %d, %d, %d", tool.Files[0].Add, tool.Files[1].Add, tool.Add)
+	}
+	if len(tool.Files[1].Patch) != 0 || !tool.Files[1].PatchCut {
+		t.Errorf("the file left without a patch: %+v", tool.Files[1])
+	}
+}
+
+// Told it had ended before what set it going was read (the notice first,
+// or the log read from its middle): it is not taken for going.
+func TestClaudeRunningOutOfOrder(t *testing.T) {
+	c := NewClaude()
+	c.Feed(lines(
+		`{"type":"user","uuid":"n1","message":{"content":"<task-notification>\n<task-id>b7</task-id>\n<status>completed</status>\n<summary>done</summary>\n</task-notification>"}}`,
+		`{"type":"assistant","uuid":"a1","message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"sleep 9","description":"等着"}}]}}`,
+		`{"type":"user","uuid":"r1","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"running in background"}]},"toolUseResult":{"backgroundTaskId":"b7"}}`,
+	))
+	if r := c.Running(); len(r) != 0 {
+		t.Errorf("taken for going after it had ended: %+v", r)
+	}
+	// Read on: what the part before set going is kept when the newer part
+	// was never told it ended.
+	old := NewClaude()
+	old.Feed(lines(
+		`{"type":"assistant","uuid":"o1","message":{"content":[{"type":"tool_use","id":"o-t","name":"Bash","input":{"command":"make","description":"编译"}}]}}`,
+		`{"type":"user","uuid":"o2","message":{"content":[{"type":"tool_result","tool_use_id":"o-t","content":"running in background"}]},"toolUseResult":{"backgroundTaskId":"b8"}}`,
+	))
+	c.Prepend(old)
+	if r := c.Running(); len(r) != 1 || r[0].ID != "b8" || r[0].What != "编译" {
+		t.Errorf("what the part before set going: %+v", c.Running())
+	}
+}
+
+// Another session's agent writing to this one, and a notice from the
+// harness: what waits says who it is from and reads as it was written, not
+// as the envelope the harness put round it.
+func TestClaudeQueuedNotTheirs(t *testing.T) {
+	c := NewClaude()
+	c.Feed(lines(
+		`{"type":"user","uuid":"u1","timestamp":"2026-10-26T15:00:00Z","message":{"content":"go"}}`,
+		`{"type":"queue-operation","operation":"enqueue","timestamp":"2026-10-26T15:00:05Z","content":"<cross-session-message from=\"uds:/tmp/cc-socks/18530.sock\" hop-chain=\"9d934e8f\" from-name=\"ai-a8\" from-mode=\"prompting\">\n席位空出来了，你可以开测。"}`,
+		`{"type":"queue-operation","operation":"enqueue","timestamp":"2026-10-26T15:00:06Z","content":"[Cross-session idle notice] \"ai-a8\" is idle now."}`,
+		`{"type":"queue-operation","operation":"enqueue","timestamp":"2026-10-26T15:00:07Z","content":"顺便把日志级别调低"}`,
+	))
+	q := c.Queued()
+	if len(q) != 3 {
+		t.Fatalf("queued: %+v", q)
+	}
+	if q[0].From != "ai-a8" || !q[0].Note || q[0].Text != "席位空出来了，你可以开测。" {
+		t.Errorf("from another session: %+v", q[0])
+	}
+	if q[1].From != "" || !q[1].Note || !strings.HasPrefix(q[1].Text, "[Cross-session idle notice]") {
+		t.Errorf("a notice: %+v", q[1])
+	}
+	if q[2].Note || q[2].Text != "顺便把日志级别调低" {
+		t.Errorf("the person's own: %+v", q[2])
+	}
+	// Taken in, it is a note in the thread, with its words and no envelope.
+	c.Feed(lines(`{"type":"user","uuid":"u2","message":{"content":"<cross-session-message from=\"uds:/x.sock\" from-name=\"ai-a8\">\n席位空出来了，你可以开测。"}}`))
+	all := c.Since(0)
+	last := all[len(all)-1]
+	if last.Role != RoleNote || last.Parts[0].Text != "席位空出来了，你可以开测。" {
+		t.Errorf("taken in: %s %+v", last.Role, last.Parts)
+	}
+}

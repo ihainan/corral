@@ -1,12 +1,12 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { ArrowDown, Check, ChevronDown, ChevronRight, ChevronsUpDown, GitBranch, PanelLeft, X } from 'lucide-react'
+import { ArrowDown, Check, ChevronDown, ChevronRight, ChevronsUpDown, GitBranch, Loader, PanelLeft, X } from 'lucide-react'
 import { t, getLang, type I18nKey } from '../i18n'
 import { copyText, isCoarse } from '../components/ui'
 import { local } from '../storage'
 import { Markdown } from './markdown'
 import { Code } from './Code'
 import { AgentIcon } from './agentIcons'
-import type { Convo, ConvoEntry, ConvoHunk, ConvoMeta, ConvoPart, ConvoQueued, ConvoTask, ConvoTool } from './conversation'
+import type { Convo, ConvoEntry, ConvoHunk, ConvoMeta, ConvoPart, ConvoQueued, ConvoRunning, ConvoTask, ConvoTool } from './conversation'
 import { category, isNote, items, ms, partTime, sameEdits, verbOf, type Category, type Edits, type Item } from './convoItems'
 
 // The conversation view: the agent's log as turns, over the terminal (which
@@ -519,6 +519,7 @@ export function ConversationView({
         )}
       </div>
       <div className="convo-dock">
+        {convo.status === 'ready' && convo.running && <RunningWork items={convo.running} />}
         {convo.status === 'ready' && convo.tasks && <Tasks tasks={convo.tasks} fold={!!ask} />}
         {/* (Asked from the screen: also where its log is not read.) */}
         {(convo.status === 'ready' || convo.status === 'none') && ask && <div className="convo-dock-ask">{ask}</div>}
@@ -543,6 +544,45 @@ export function ConversationView({
 
 // What the person sent while the agent works, not taken in yet: over the
 // composer, with Claude Code's "send now" (which stops the step under way).
+// What the agent set going and left to itself: a command in the
+// background, a subagent on its own. It stays here until the agent is told
+// it has ended.
+function RunningWork({ items }: { items: ConvoRunning[] }) {
+  const [open, setOpen] = useState(false)
+  // (Down to one: opened again later, it starts folded as it did at first.)
+  useEffect(() => {
+    if (items.length < 2) setOpen(false)
+  }, [items.length])
+  const shown = open ? items : items.slice(0, 1)
+  return (
+    <div className="convo-running" role="status">
+      <div className="convo-running-head">
+        <Loader size={13} className="convo-running-spin" aria-hidden="true" />
+        <span className="convo-running-sum">{t('convo.bg', { n: items.length })}</span>
+        {items.length > 1 && (
+          <button type="button" className="link-btn convo-running-more" aria-expanded={open} onClick={() => setOpen(!open)}>
+            {t(open ? 'convo.bgLess' : 'convo.bgAll', { n: items.length })}
+          </button>
+        )}
+      </div>
+      {shown.map((r) => (
+        <div key={r.id} className="convo-running-row">
+          <span className="convo-running-what" title={r.what}>{r.what || t(r.kind === 'agent' ? 'convo.bgAgent' : 'convo.bgCmd')}</span>
+          {r.note && <span className="convo-running-note" title={r.note}>{r.note}</span>}
+          <span className="convo-running-since">{since(r.ts)}</span>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+// How long ago, as the view says it elsewhere ("6 分 25 秒").
+function since(ts?: string): string {
+  const v = ts ? Date.parse(ts) : NaN
+  if (!Number.isFinite(v)) return ''
+  return duration(Math.max(Date.now() - v, 0))
+}
+
 function Queue({ items, onSendNow, said }: { items: ConvoQueued[]; onSendNow?: () => void; said?: string }) {
   return (
     <div className="convo-queue" role="status">
@@ -559,7 +599,8 @@ function Queue({ items, onSendNow, said }: { items: ConvoQueued[]; onSendNow?: (
         )}
       </div>
       {items.map((q, i) => (
-        <div key={i} className="convo-queue-row">
+        <div key={i} className={'convo-queue-row' + (q.note ? ' is-note' : '')}>
+          {q.note && <span className="convo-queue-from">{q.from ? t('convo.queuedFrom', { name: q.from }) : t('convo.queuedNotice')}</span>}
           {q.text}
         </div>
       ))}
@@ -1129,9 +1170,9 @@ function Answer({ it, onCopy, onShow }: { it: Extract<Item, { kind: 'answer' }>;
               <ChevronRight size={14} aria-hidden="true" />
             </button>
           ))}
-          {it.edits.files.length > CARD_FILES && (
+          {Math.max(it.edits.files.length - CARD_FILES, 0) + (it.edits.more ?? 0) > 0 && (
             <button type="button" className="convo-changes-file convo-changes-more" onClick={() => onShow(it.key)}>
-              {t('convo.moreFiles', { n: it.edits.files.length - CARD_FILES })}
+              {t('convo.moreFiles', { n: Math.max(it.edits.files.length - CARD_FILES, 0) + (it.edits.more ?? 0) })}
             </button>
           )}
         </div>
@@ -1327,7 +1368,11 @@ function ToolRow({ tool, onCopy, live }: { tool: ConvoTool; onCopy: (s: string) 
               )}
             </>
           ) : (
-            !receipt && <div className="convo-result-head">{t('convo.noOutput')}</div>
+            !receipt && (
+              <div className="convo-result-head">
+                {tool.images ? t('convo.gotImages', { n: tool.images }) : tool.refs ? t('convo.gotTools', { n: tool.refs }) : t('convo.noOutput')}
+              </div>
+            )
           )}
         </div>
       )}
@@ -1433,7 +1478,15 @@ function ChangesPanel({ edits, focus, onClose, active }: { edits: Edits; focus?:
               return (
                 <div key={i} className="convo-panel-edit">
                   {f.tools.length > 1 && <div className="convo-hunk-gap">{t('convo.editN', { n: i + 1 })}</div>}
-                  {tl.same ? <div className="convo-hunk-gap">{t('convo.noChange')}</div> : h ? <Hunks hunks={h} cut={tl.patch_cut} /> : <Diff old={tl.old ?? ''} new={tl.new ?? ''} />}
+                  {tl.same ? (
+                    <div className="convo-hunk-gap">{t('convo.noChange')}</div>
+                  ) : h?.length ? (
+                    <Hunks hunks={h} cut={tl.patch_cut} />
+                  ) : tl.patch_cut ? (
+                    <div className="convo-hunk-gap">{t('convo.patchCut')}</div>
+                  ) : (
+                    <Diff old={tl.old ?? ''} new={tl.new ?? ''} />
+                  )}
                 </div>
               )
             })}

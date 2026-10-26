@@ -43,12 +43,13 @@ type codexOut struct {
 
 func NewCodex() *Codex { return &Codex{tools: map[string][]*Tool{}} }
 
-func (c *Codex) Rev() int         { return c.rev }
-func (c *Codex) Title() string    { return c.title }
-func (c *Codex) Meta() Meta       { return c.meta }
-func (c *Codex) Trimmed() bool    { return c.trimmed }
-func (c *Codex) Tasks() []Task    { return nil }
-func (c *Codex) Queued() []Queued { return nil }
+func (c *Codex) Rev() int           { return c.rev }
+func (c *Codex) Title() string      { return c.title }
+func (c *Codex) Meta() Meta         { return c.meta }
+func (c *Codex) Trimmed() bool      { return c.trimmed }
+func (c *Codex) Tasks() []Task      { return nil }
+func (c *Codex) Queued() []Queued   { return nil }
+func (c *Codex) Running() []Running { return nil }
 
 // (Codex's queue is not in its log.)
 func (c *Codex) ClearQueue()      {}

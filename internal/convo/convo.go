@@ -19,6 +19,7 @@ type Parser interface {
 	Meta() Meta
 	Tasks() []Task
 	Queued() []Queued
+	Running() []Running
 	QueueSince(started int64)
 }
 
@@ -67,6 +68,21 @@ type Entry struct {
 type Queued struct {
 	Text string `json:"text"`
 	Time string `json:"ts,omitempty"`
+	// From: another session whose agent sent it, where it is not the
+	// person's own message; Note: it is a notice, not anyone's message.
+	From string `json:"from,omitempty"`
+	Note bool   `json:"note,omitempty"`
+}
+
+// Running is work the agent set going and left to itself: a command in the
+// background, a subagent sent off on its own. It is there until the agent
+// is told it has ended.
+type Running struct {
+	ID   string `json:"id"`
+	What string `json:"what"`           // the command, or what the subagent was sent for
+	Kind string `json:"kind"`           // "cmd" or "agent"
+	Time string `json:"ts,omitempty"`   // when it was set going
+	Note string `json:"note,omitempty"` // the latest it has said of itself, if any
 }
 
 type Part struct {
@@ -100,16 +116,36 @@ type Tool struct {
 	PatchCut bool   `json:"patch_cut,omitempty"`
 	Same     bool   `json:"same,omitempty"` // (an edit that changed nothing)
 
+	// Files are the files a command changed, as Claude Code reports them
+	// (a shell command that edits, since 2.1.274): each with its own
+	// patch, as an edit's. MoreFiles: it changed that many more than are
+	// here.
+	Files     []ToolFile `json:"files,omitempty"`
+	MoreFiles int        `json:"more_files,omitempty"`
+
 	Done        bool   `json:"done,omitempty"`
 	Error       bool   `json:"error,omitempty"`
 	Result      string `json:"result,omitempty"`
 	ResultLines int    `json:"result_lines,omitempty"` // of the whole result, before it was cut
 	Truncated   bool   `json:"truncated,omitempty"`    // (Result is the start of it)
+	// What came back that is not words: pictures read (a screenshot, a
+	// PDF's pages), tools a search found.
+	Images int `json:"images,omitempty"`
+	Refs   int `json:"refs,omitempty"`
 }
 
 // Hunk is a run of an edit's lines: each begins with " " (kept), "-"
 // (removed) or "+" (added); OldStart and NewStart are the first line's
 // numbers before and after.
+// ToolFile is one file a call changed.
+type ToolFile struct {
+	Path     string `json:"path"`
+	Add      int    `json:"add,omitempty"`
+	Del      int    `json:"del,omitempty"`
+	Patch    []Hunk `json:"patch,omitempty"`
+	PatchCut bool   `json:"patch_cut,omitempty"`
+}
+
 type Hunk struct {
 	OldStart int      `json:"old_start"`
 	NewStart int      `json:"new_start"`
@@ -128,6 +164,8 @@ const (
 	maxMeta      = 120      // a model's, a mode's, a branch's name
 	maxQueue     = 20       // messages waiting to be taken in
 	maxPatch     = 12 << 10 // an edit's patch, all its lines
+	maxFiles     = 20       // the files of one call whose patches are kept
+	maxRunning   = 50       // work set going that is kept
 	maxPatchLine = 400      // one line of it
 )
 

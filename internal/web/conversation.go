@@ -1068,6 +1068,9 @@ type convoAnswer struct {
 	Meta  *convo.Meta  `json:"meta,omitempty"` // what it runs with, as the log says
 	// Queued is what the person sent that the agent has not taken in yet.
 	Queued []convo.Queued `json:"queued,omitempty"`
+	// Running is what the agent set going and left to itself: a command in
+	// the background, a subagent on its own.
+	Running []convo.Running `json:"running,omitempty"`
 	// DefaultChanged: a model switch here left the default model of new
 	// sessions changed (not put back), lately.
 	DefaultChanged bool          `json:"default_changed,omitempty"`
@@ -1152,6 +1155,7 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 		ans.Meta = &m
 	}
 	ans.Queued = st.parser.Queued()
+	ans.Running = st.parser.Running()
 	writeJSON(w, http.StatusOK, ans)
 }
 

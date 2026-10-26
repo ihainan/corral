@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -54,8 +55,16 @@ type Claude struct {
 	tasks   []taskItem // the task list as it stands
 	meta    Meta
 	queue   []queuedItem // what waits to be taken in, oldest first
-	gone    []goneItem   // removed from it, to arrive still (as queued_command): that arrival is of these
-	since   int64        // (unix milliseconds) what was queued before was to another process: not kept
+	// running: work set going and left to itself (a command in the
+	// background, a subagent on its own), until it is told to have ended;
+	// runOrder keeps them as they were set going.
+	running  map[string]Running
+	runOrder []string
+	// ranOut: told to have ended before what set it going was read (the
+	// log read from its middle, or a notice that came first).
+	ranOut map[string]bool
+	gone   []goneItem // removed from it, to arrive still (as queued_command): that arrival is of these
+	since  int64      // (unix milliseconds) what was queued before was to another process: not kept
 	// Skipped counts lines that were not JSON or of no use to the view.
 	Skipped int
 	orphans map[string]orphan // results whose call is not in what was read (see Prepend)
@@ -110,7 +119,9 @@ type goneItem struct {
 }
 
 type queuedItem struct {
-	raw string // as the log wrote it (a remove names it so)
+	from string
+	note bool
+	raw  string // as the log wrote it (a remove names it so)
 	Queued
 }
 
@@ -128,7 +139,9 @@ const maxEntries = 6000
 // part read first.
 const maxOrphans = 256
 
-func NewClaude() *Claude { return &Claude{tools: map[string]toolRef{}} }
+func NewClaude() *Claude {
+	return &Claude{tools: map[string]toolRef{}, running: map[string]Running{}, ranOut: map[string]bool{}}
+}
 
 // Rev is the revision after the last Feed.
 func (c *Claude) Rev() int { return c.rev }
@@ -147,10 +160,23 @@ func (c *Claude) Meta() Meta { return c.meta }
 
 // Queued is what the person sent that waits to be taken in, oldest first.
 // (Of the log read: what was queued before the part read is not known.)
+// Running is what the agent set going and has not been told has ended.
+func (c *Claude) Running() []Running {
+	out := make([]Running, 0, len(c.running))
+	for _, id := range c.runOrder {
+		if r, ok := c.running[id]; ok {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
 func (c *Claude) Queued() []Queued {
 	var out []Queued
 	for _, q := range c.queue {
-		out = append(out, q.Queued)
+		x := q.Queued
+		x.From, x.Note = q.from, q.note
+		out = append(out, x)
 	}
 	return out
 }
@@ -304,6 +330,20 @@ func (c *Claude) Prepend(other Parser) {
 		if len(c.orphans) < maxOrphans {
 			c.orphans[id] = r
 		}
+	}
+	// What the part before set going and was never told had ended: its own,
+	// unless what was read since says it has ended (or set it going again).
+	for _, id := range o.runOrder {
+		r, there := o.running[id]
+		if !there || c.ranOut[id] {
+			delete(c.ranOut, id)
+			continue
+		}
+		if _, 已 := c.running[id]; 已 || len(c.running) >= maxRunning {
+			continue
+		}
+		c.running[id] = r
+		c.runOrder = append([]string{id}, c.runOrder...)
 	}
 	if c.aiTitle == "" {
 		c.aiTitle = o.aiTitle
@@ -536,6 +576,9 @@ func (c *Claude) user(r *claudeRow) {
 	c.setMode(r.PermissionMode)
 	var s string
 	if json.Unmarshal(r.Message.Content, &s) == nil {
+		if strings.Contains(s, "<task-notification>") {
+			c.ended(s)
+		}
 		if r.IsCompactSummary {
 			c.compacted()
 			c.add(r, RoleSummary, []Part{textPart(KindText, s)})
@@ -582,6 +625,9 @@ func (c *Claude) user(r *claudeRow) {
 				c.result(b, nil)
 			}
 		case "text":
+			if strings.Contains(b.Text, "<task-notification>") {
+				c.ended(b.Text)
+			}
 			switch role, text := classifyUserText(b.Text); role {
 			case RoleUser:
 				if images {
@@ -619,9 +665,13 @@ func (c *Claude) queueOp(r *claudeRow) {
 	_ = json.Unmarshal(r.Content, &s)
 	switch r.Operation {
 	case "enqueue":
-		// (Only the person's: a background task's notice waits there too.)
-		if role, text := classifyUserText(s); role == RoleUser && c.ofNow(r.Timestamp) {
-			q := queuedItem{raw: s}
+		// What waits there is the person's message, another session's
+		// agent writing to this one, or a notice from the harness; what
+		// belongs to no one of these (a background task's notice) is not
+		// shown at all.
+		text, from, note := queuedText(s)
+		if text != "" && c.ofNow(r.Timestamp) {
+			q := queuedItem{raw: s, from: from, note: note}
 			q.Text, _ = cut(clean(text), maxText)
 			q.Time = clip(r.Timestamp, 64)
 			c.queue = append(c.queue, q)
@@ -647,6 +697,43 @@ func (c *Claude) queueOp(r *claudeRow) {
 	case "popAll", "clear":
 		c.queue = nil
 	}
+}
+
+// bodyAfterTag: what follows an opening tag, without the tag and its
+// attributes, and without its closing tag where there is one (the harness
+// writes some of these open-ended).
+func bodyAfterTag(s, tag string) string {
+	i := strings.Index(s, "<"+tag)
+	if i < 0 {
+		return strings.TrimSpace(s)
+	}
+	j := strings.IndexByte(s[i:], '>')
+	if j < 0 {
+		return strings.TrimSpace(s)
+	}
+	body := s[i+j+1:]
+	if k := strings.LastIndex(body, "</"+tag+">"); k >= 0 {
+		body = body[:k]
+	}
+	return strings.TrimSpace(body)
+}
+
+// queuedText: what a message waiting to be taken in says, who it is from
+// (another session's agent) and whether it is a notice rather than anyone's
+// message. "" when it is of none of these.
+func queuedText(s string) (text, from string, note bool) {
+	if m := crossSession.FindStringSubmatch(s); m != nil {
+		// (The envelope says where it came from, down to a socket and the
+		// hops it took: of that, only which session it was.)
+		return bodyAfterTag(s, "cross-session-message"), clip(m[1], maxMeta), true
+	}
+	if strings.HasPrefix(strings.TrimSpace(s), "[Cross-session idle notice]") {
+		return strings.TrimSpace(s), "", true
+	}
+	if role, t := classifyUserText(s); role == RoleUser {
+		return t, "", false
+	}
+	return "", "", false
 }
 
 // arrived: the person's message with this text came in (as a turn, or taken
@@ -689,6 +776,7 @@ func (c *Claude) queued(r *claudeRow) {
 	var s string
 	if json.Unmarshal(a.Prompt, &s) == nil {
 		if a.CommandMode == "task-notification" {
+			c.ended(s) // (what it says of work set going: ended, or at it still)
 			if _, text := classifyUserText(s); text != "" {
 				c.add(r, RoleNote, []Part{textPart(KindText, text)})
 			}
@@ -764,6 +852,7 @@ func (c *Claude) assistant(r *claudeRow) {
 		return
 	}
 	var parts []Part
+	var results []claudeBlock
 	for _, b := range blocks {
 		switch b.Type {
 		case "text":
@@ -779,9 +868,19 @@ func (c *Claude) assistant(r *claudeRow) {
 			t.Title, t.Detail, t.Old, t.New = toolInput(b.Name, b.Input)
 			t.Add, t.Del = editLines(b.Name, b.Input)
 			parts = append(parts, Part{Kind: KindTool, Tool: t})
+		default:
+			// What a tool of the model's own answered comes back in a row
+			// of its own ("…_tool_result": the advisor's, say): the call it
+			// answers is done.
+			if strings.HasSuffix(b.Type, "_tool_result") && b.ToolUseID != "" {
+				results = append(results, b)
+			}
 		}
 	}
 	c.add(r, RoleAssistant, parts)
+	for _, b := range results {
+		c.result(b, nil)
+	}
 	for _, b := range blocks {
 		if f := taskChange(b.Name, b.Input); f != nil && b.Type == "tool_use" {
 			if ref, ok := c.tools[clip(b.ID, maxID)]; ok {
@@ -838,7 +937,7 @@ func (c *Claude) result(b claudeBlock, account json.RawMessage) {
 		}
 		return
 	}
-	text := resultText(b.Content)
+	text, images, refs := resultText(b.Content)
 	if !b.IsError {
 		ref.t.Add, ref.t.Del = madeLines(ref.t.Name, account, ref.t.Add, ref.t.Del)
 		if ref.t.Name == "Edit" || ref.t.Name == "MultiEdit" || ref.t.Name == "Write" {
@@ -846,6 +945,21 @@ func (c *Claude) result(b claudeBlock, account json.RawMessage) {
 				// (An empty patch: a file written over with what it held.)
 				ref.t.Patch, ref.t.PatchCut, ref.t.Old, ref.t.New = h, cut, "", ""
 				ref.t.Same = len(h) == 0
+			}
+		}
+		// A subagent's report, where it came back later: what the call
+		// answered then is only that it was sent off (it is sent again, to
+		// the one waiting for it, as an agent-message).
+		if rep := handbackReport(account); rep != "" {
+			text = rep
+		}
+		c.setGoing(ref.t, account, ref.e.Time)
+		// What a command changed, as Claude Code reports it: the files, each
+		// with its patch. The lines of the turn's changes count them too.
+		if files, more := bashFiles(account); len(files) > 0 {
+			ref.t.Files, ref.t.MoreFiles = files, more
+			for _, f := range files {
+				ref.t.Add, ref.t.Del = ref.t.Add+f.Add, ref.t.Del+f.Del
 			}
 		}
 		var op taskOp
@@ -869,6 +983,7 @@ func (c *Claude) result(b claudeBlock, account json.RawMessage) {
 		ref.t.ResultLines = 0
 	}
 	ref.t.Result, ref.t.Truncated = cut(text, maxResult)
+	ref.t.Images, ref.t.Refs = images, refs
 	ref.e.Rev = c.rev
 	delete(c.tools, b.ToolUseID)
 }
@@ -968,6 +1083,183 @@ func madeLines(name string, account json.RawMessage, add, del int) (int, int) {
 	return add, del
 }
 
+// rawHunk is a patch's hunk as Claude Code writes it.
+type rawHunk struct {
+	OldStart int      `json:"oldStart"`
+	NewStart int      `json:"newStart"`
+	Lines    []string `json:"lines"`
+}
+
+// hunksOf reads them, within what is left of a budget (size, counted up):
+// short says some of it was left out.
+func hunksOf(in []rawHunk, size *int) (hunks []Hunk, short bool) {
+	for _, h := range in {
+		out := Hunk{OldStart: max(h.OldStart, 0), NewStart: max(h.NewStart, 0)}
+		for _, l := range h.Lines {
+			if l == "" || (l[0] != ' ' && l[0] != '-' && l[0] != '+') {
+				continue // ("\\ No newline at end of file", and the like)
+			}
+			l, c := cut(clean(l), maxPatchLine)
+			if *size+len(l) > maxPatch {
+				if len(out.Lines) > 0 {
+					hunks = append(hunks, out)
+				}
+				return hunks, true
+			}
+			*size += len(l)
+			out.Lines = append(out.Lines, l)
+			short = short || c
+		}
+		if len(out.Lines) > 0 {
+			hunks = append(hunks, out)
+		}
+	}
+	return hunks, short
+}
+
+// countLines: what the hunks added and removed, whole (the patch kept may
+// be less of it, where there was no room for all of it).
+func countLines(hunks []rawHunk) (add, del int) {
+	for _, h := range hunks {
+		for _, l := range h.Lines {
+			switch {
+			case strings.HasPrefix(l, "+"):
+				add++
+			case strings.HasPrefix(l, "-"):
+				del++
+			}
+		}
+	}
+	return add, del
+}
+
+// setGoing: the call set work going that is left to itself (a command in
+// the background, a subagent sent off on its own). It stays there until
+// the agent is told it has ended.
+func (c *Claude) setGoing(t *Tool, account json.RawMessage, at string) {
+	if len(account) == 0 {
+		return
+	}
+	var a struct {
+		Background string `json:"backgroundTaskId"`
+		Agent      string `json:"agentId"`
+		Async      bool   `json:"isAsync"`
+		Status     string `json:"status"`
+	}
+	if json.Unmarshal(account, &a) != nil {
+		return
+	}
+	id, kind := "", "cmd"
+	switch {
+	case a.Background != "":
+		id = a.Background
+	case a.Async && a.Agent != "" && a.Status != "completed":
+		id, kind = a.Agent, "agent"
+	}
+	id = clip(id, maxID)
+	if id == "" {
+		return
+	}
+	// (Told it had ended before this came: it is over, not going.)
+	if c.ranOut[id] {
+		delete(c.ranOut, id)
+		return
+	}
+	if _, there := c.running[id]; there || len(c.running) >= maxRunning {
+		return
+	}
+	what := t.Title
+	if what == "" {
+		what = t.Detail
+	}
+	c.running[id] = Running{ID: id, What: clip(clean(what), maxTitle), Kind: kind, Time: at}
+	c.runOrder = append(c.runOrder, id)
+}
+
+// ended: what the agent was told of work it set going — that it has ended
+// (a status), or what it said of itself meanwhile (an event).
+func (c *Claude) ended(s string) {
+	m := taskID.FindStringSubmatch(s)
+	if m == nil {
+		return
+	}
+	id := clip(strings.TrimSpace(m[1]), maxID)
+	r, ok := c.running[id]
+	if !ok {
+		// (Before what set it going was read: it is over by the time that
+		// is, and is not taken for going then.)
+		if taskStatus.MatchString(s) && len(c.ranOut) < maxRunning {
+			if c.ranOut == nil {
+				c.ranOut = map[string]bool{}
+			}
+			c.ranOut[id] = true
+		}
+		return
+	}
+	if taskStatus.MatchString(s) {
+		delete(c.running, id)
+		c.runOrder = slices.DeleteFunc(c.runOrder, func(x string) bool { return x == id })
+		return
+	}
+	if ev := taskEvent.FindStringSubmatch(s); ev != nil {
+		r.Note = clip(clean(strings.TrimSpace(ev[1])), maxTitle)
+		c.running[id] = r
+	}
+}
+
+// handbackReport: the report a subagent handed back, as Claude Code keeps
+// it with the call that sent it off (since 2.1.300). "" when there is none.
+func handbackReport(account json.RawMessage) string {
+	if len(account) == 0 {
+		return ""
+	}
+	var a struct {
+		Report string `json:"handbackReport"`
+	}
+	if json.Unmarshal(account, &a) != nil {
+		return ""
+	}
+	return clean(a.Report)
+}
+
+// bashFiles are the files a command changed, as Claude Code reports them
+// (toolUseResult's bashEditDiff): each with its patch, within maxPatch for
+// all of them together; more: it changed that many more than are kept.
+func bashFiles(account json.RawMessage) (files []ToolFile, more int) {
+	if len(account) == 0 {
+		return nil, 0
+	}
+	var a struct {
+		Diff *struct {
+			Files []struct {
+				Path  string    `json:"filePath"`
+				Hunks []rawHunk `json:"hunks"`
+			} `json:"files"`
+			More int `json:"moreFiles"`
+		} `json:"bashEditDiff"`
+	}
+	if json.Unmarshal(account, &a) != nil || a.Diff == nil {
+		return nil, 0
+	}
+	size := 0
+	for _, f := range a.Diff.Files {
+		path, _ := cut(clean(f.Path), maxDetail)
+		if path == "" {
+			continue
+		}
+		if len(files) >= maxFiles {
+			more++
+			continue
+		}
+		out := ToolFile{Path: path}
+		out.Patch, out.PatchCut = hunksOf(f.Hunks, &size)
+		out.Add, out.Del = countLines(f.Hunks)
+		out.PatchCut = out.PatchCut || len(out.Patch) == 0
+		files = append(files, out)
+	}
+	return files, more + max(a.Diff.More, 0)
+}
+
 // patchOf is the edit Claude Code reports having made (toolUseResult's
 // structuredPatch), within maxPatch; said: it reports one (even empty: a
 // file written over with what it held), not for a file it created (whose
@@ -977,12 +1269,8 @@ func patchOf(account json.RawMessage) (hunks []Hunk, short, said bool) {
 		return nil, false, false
 	}
 	var a struct {
-		Type  string `json:"type"`
-		Patch *[]struct {
-			OldStart int      `json:"oldStart"`
-			NewStart int      `json:"newStart"`
-			Lines    []string `json:"lines"`
-		} `json:"structuredPatch"`
+		Type  string     `json:"type"`
+		Patch *[]rawHunk `json:"structuredPatch"`
 	}
 	if json.Unmarshal(account, &a) != nil || a.Patch == nil || (a.Type == "create" && len(*a.Patch) == 0) {
 		return nil, false, false
@@ -1100,22 +1388,30 @@ func (c *Claude) trimTasks() {
 	}
 }
 
-func resultText(raw json.RawMessage) string {
+// resultText: what came back from a call, as words; images and refs count
+// what came back that is not words (pictures read, tools found), for the
+// view to say in the language it is read in.
+func resultText(raw json.RawMessage) (text string, images, refs int) {
 	var s string
 	if json.Unmarshal(raw, &s) == nil {
-		return clean(s)
+		return clean(s), 0, 0
 	}
 	var blocks []claudeBlock
 	if json.Unmarshal(raw, &blocks) != nil {
-		return ""
+		return "", 0, 0
 	}
 	var parts []string
 	for _, b := range blocks {
-		if b.Type == "text" {
+		switch b.Type {
+		case "text":
 			parts = append(parts, b.Text)
+		case "image":
+			images++ // (a picture read: not shown here, but that it came back is)
+		case "tool_reference":
+			refs++ // (tools found by a search)
 		}
 	}
-	return clean(strings.Join(parts, "\n"))
+	return clean(strings.Join(parts, "\n")), images, refs
 }
 
 // Envelopes in user rows. Claude Code wraps what it writes there for its own
@@ -1125,6 +1421,9 @@ var (
 	envelopeTag   = regexp.MustCompile(`^\s*<([a-z][a-z0-9-]*)[\s>]`)
 	taskSummary   = regexp.MustCompile(`(?s)<summary>(.*?)</summary>`)
 	taskStatus    = regexp.MustCompile(`(?s)<status>(.*?)</status>`)
+	taskID        = regexp.MustCompile(`(?s)<task-id>(.*?)</task-id>`)
+	crossSession  = regexp.MustCompile(`^\s*<cross-session-message[^>]*\bfrom-name="([^"]*)"`)
+	taskEvent     = regexp.MustCompile(`(?s)<event>(.*?)</event>`)
 	commandName   = regexp.MustCompile(`(?s)<command-name>(.*?)</command-name>`)
 	commandArgs   = regexp.MustCompile(`(?s)<command-args>(.*?)</command-args>`)
 	tagContent    = regexp.MustCompile(`(?s)^\s*<([a-z-]+)>(.*?)</[a-z-]+>\s*$`)
@@ -1155,6 +1454,14 @@ func classifyUserText(s string) (role, text string) {
 		}
 		return "", ""
 	case "system-reminder", "local-command-caveat", "user-memory-input":
+		return "", ""
+	// Another session's agent writing to this one: its words, not the
+	// person's (the envelope says the socket it came by and the hops it
+	// took, which is nothing to read).
+	case "cross-session-message":
+		if t := clean(bodyAfterTag(s, "cross-session-message")); t != "" {
+			return RoleNote, t
+		}
 		return "", ""
 	// (A subagent handing its report back to the session that sent it: the
 	// agent's own, not the person's, though it waits in the queue as one.)

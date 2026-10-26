@@ -18,11 +18,26 @@ export interface ConvoTool {
   patch?: ConvoHunk[] // (an edit) as Claude Code reported making it; then old and new are not sent
   patch_cut?: boolean
   same?: boolean // (an edit that changed nothing: a file written over with what it held)
+  // The files a command changed, each with its own patch (a shell command
+  // that edits); more_files: it changed that many more than are here.
+  files?: ConvoToolFile[]
+  more_files?: number
   done?: boolean
   error?: boolean
   result?: string
   result_lines?: number
   truncated?: boolean
+  images?: number // (pictures read: a screenshot, a PDF's pages)
+  refs?: number // (tools a search found)
+}
+
+// One file a call changed.
+export interface ConvoToolFile {
+  path: string
+  add?: number
+  del?: number
+  patch?: ConvoHunk[]
+  patch_cut?: boolean
 }
 
 // A run of an edit's lines (" " kept, "-" removed, "+" added), from these line numbers.
@@ -53,6 +68,18 @@ export interface ConvoEntry {
 export interface ConvoQueued {
   text: string
   ts?: string
+  from?: string // (another session's agent, where it is not the person's own)
+  note?: boolean // (a notice, not anyone's message)
+}
+
+// Work the agent set going and left to itself: a command in the
+// background, a subagent on its own.
+export interface ConvoRunning {
+  id: string
+  what: string
+  kind: string // 'cmd' | 'agent'
+  ts?: string
+  note?: string // (the latest it has said of itself)
 }
 
 // An item of the agent's task list.
@@ -89,6 +116,7 @@ interface Answer {
   tasks?: ConvoTask[]
   meta?: ConvoMeta
   queued?: ConvoQueued[]
+  running?: ConvoRunning[]
   default_changed?: boolean // (a model switch here left the default of new sessions changed)
   gen: number
   rev: number
@@ -118,6 +146,7 @@ export interface Convo {
   tasks?: ConvoTask[] // the agent's task list (the same array while it did not change)
   meta?: ConvoMeta // (the same object while it did not change)
   queued?: ConvoQueued[] // (likewise)
+  running?: ConvoRunning[] // (likewise)
   defaultChanged?: boolean // (a model switch here left the default of new sessions changed, lately)
   // Reading has failed since okAt (ms): what shows may be out of date.
   failing: boolean
@@ -241,8 +270,9 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
             const tasks = a.tasks?.length ? (JSON.stringify(a.tasks) === JSON.stringify(c.tasks) ? c.tasks : a.tasks) : undefined
             const meta = a.meta ? (sameMeta(a.meta, c.meta) ? c.meta : a.meta) : undefined
             const queued = a.queued?.length ? (JSON.stringify(a.queued) === JSON.stringify(c.queued) ? c.queued : a.queued) : undefined
-            if (!entries && c.of === key && c.status === 'ready' && c.gen === a.gen && c.older === older && c.olderCut === olderCut && c.loadingOlder === loadingOlder && sameBind(c.bind, a.bind) && c.agentStatus === a.agent_status && c.title === a.title && c.tasks === tasks && c.meta === meta && c.queued === queued && !c.failing && c.defaultChanged === a.default_changed) return c
-            return { ...initial(key), status: 'ready', entries: entries ?? c.entries, older, olderCut, loadingOlder, gen: a.gen, bind: a.bind, agentStatus: a.agent_status, title: a.title || undefined, tasks, meta, queued, failing: false, okAt: now, changedAt: entries ? now : c.changedAt, of: key, defaultChanged: a.default_changed }
+            const running = a.running?.length ? (JSON.stringify(a.running) === JSON.stringify(c.running) ? c.running : a.running) : undefined
+            if (!entries && c.of === key && c.status === 'ready' && c.gen === a.gen && c.older === older && c.olderCut === olderCut && c.loadingOlder === loadingOlder && sameBind(c.bind, a.bind) && c.agentStatus === a.agent_status && c.title === a.title && c.tasks === tasks && c.meta === meta && c.queued === queued && c.running === running && !c.failing && c.defaultChanged === a.default_changed) return c
+            return { ...initial(key), status: 'ready', entries: entries ?? c.entries, older, olderCut, loadingOlder, gen: a.gen, bind: a.bind, agentStatus: a.agent_status, title: a.title || undefined, tasks, meta, queued, running, failing: false, okAt: now, changedAt: entries ? now : c.changedAt, of: key, defaultChanged: a.default_changed }
           })
           remember(key, gen, rev, byseq, a)
           if (a.more) next = 300
@@ -277,7 +307,7 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
         else {
           const entries = [...byseq.values()].sort((x, y) => x.seq - y.seq)
           const older = !!k.older || entries.length === MAX
-          setConvo({ ...initial(key), status: 'ready', entries, older, olderCut: older && (!!k.older_cut || entries.length === MAX), gen, bind: k.bind, agentStatus: k.agent_status, title: k.title || undefined, tasks: k.tasks?.length ? k.tasks : undefined, meta: k.meta, queued: k.queued?.length ? k.queued : undefined, failing: false, okAt: now, changedAt: now, of: key })
+          setConvo({ ...initial(key), status: 'ready', entries, older, olderCut: older && (!!k.older_cut || entries.length === MAX), gen, bind: k.bind, agentStatus: k.agent_status, title: k.title || undefined, tasks: k.tasks?.length ? k.tasks : undefined, meta: k.meta, queued: k.queued?.length ? k.queued : undefined, running: k.running?.length ? k.running : undefined, failing: false, okAt: now, changedAt: now, of: key })
         }
       } else {
         gen = 0
