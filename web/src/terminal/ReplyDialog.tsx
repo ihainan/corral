@@ -5,7 +5,7 @@ import { t } from '../i18n'
 import { Dialog, isCoarse, LoadError, useToast } from '../components/ui'
 import { getReplyDraft, keepReplyDraft } from './drafts'
 import { asksQuestion, choices, dashedRule, promptBlock, question } from './menu'
-import { choiceText, questionText } from './askText'
+import { choiceText, lasting, questionText } from './askText'
 
 interface Screen {
   text: string
@@ -191,6 +191,7 @@ export function ReplyDialog({ sessionId, agent, onLoaded, onClose, resizedAt }: 
             <div className="reply-choices" role="group" aria-label={t('reply.choices')}>
               {opts.map((o) => {
                 const c = choiceText(o.label)
+                const lasts = lasting(o.label)
                 return (
                   <button key={o.key} type="button" className="reply-choice" disabled={!screen || busy} onClick={() => void send({ keys: [o.key] })}>
                     <span className="reply-key" aria-hidden="true">{o.key}</span>
@@ -198,6 +199,7 @@ export function ReplyDialog({ sessionId, agent, onLoaded, onClose, resizedAt }: 
                     <span className="reply-what" title={c.original || undefined}>
                       <span className="reply-label">{c.text}</span>
                       {o.desc && <span className="reply-desc">{o.desc}</span>}
+                      {lasts && <span className="reply-desc is-lasting">{t(lasts === 'rule' ? 'convo.askRule' : 'convo.askMode')}</span>}
                     </span>
                   </button>
                 )
@@ -392,6 +394,7 @@ export function InlineReply({ sessionId, agent, onLoaded, resizedAt, active = tr
             <div className="convo-ask-opts" role="group" aria-label={t('reply.choices')}>
               {opts.map((o) => {
                 const c = choiceText(o.label)
+                const lasts = lasting(o.label)
                 return (
                   <button key={o.key} type="button" className="convo-ask-opt" disabled={!screen || busy} onClick={() => void send({ keys: [o.key] })}>
                     <span className="convo-ask-key">{o.key}</span>
@@ -399,6 +402,7 @@ export function InlineReply({ sessionId, agent, onLoaded, resizedAt, active = tr
                     <span className="convo-ask-what" title={c.original || undefined}>
                       <span className="convo-ask-label">{c.text}</span>
                       {o.desc && <span className="convo-ask-desc">{o.desc}</span>}
+                      {lasts && <span className="convo-ask-desc is-lasting">{t(lasts === 'rule' ? 'convo.askRule' : 'convo.askMode')}</span>}
                     </span>
                   </button>
                 )

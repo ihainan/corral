@@ -6,7 +6,7 @@ import { getLang } from '../i18n'
 // ones, with the rest of the line kept as it is (a command, a folder); else
 // as on the screen.
 const zhChoices: [RegExp, (m: RegExpExecArray) => string][] = [
-  [/^Yes$/i, () => '允许'],
+  [/^Yes$/i, () => '允许这一次'],
   [/^No$/i, () => '拒绝'],
   [/^No,? and tell Claude what to do differently(?: \(esc\))?$/i, () => '拒绝，并告诉 Claude 怎么做'],
   [/^Yes,? and don['’]t ask again for:?\s+(.+?) commands in (.+)$/i, (m) => `允许，以后在 ${m[2]} 里运行 ${m[1]} 不再问`],
@@ -15,6 +15,16 @@ const zhChoices: [RegExp, (m: RegExpExecArray) => string][] = [
   [/^Yes,? allow all edits (?:during|in) this session\b.*$/i, () => '允许，这个会话里改文件都不再问'],
   [/^Yes,? and switch to auto mode\b.*$/i, () => '允许，并切到自动模式'],
 ]
+
+// What a choice does beyond this once, by Claude Code's words (whatever the
+// language shown): a rule kept (not asked again), or the session's
+// permission mode changed.
+export function lasting(label: string): 'rule' | 'mode' | undefined {
+  const l = label.trim()
+  if (/^Yes,? and switch to (?:accept edits|auto mode)\b|^Yes,? allow all edits (?:during|in) this session\b/i.test(l)) return 'mode'
+  if (/^Yes,? and don['’]t ask again\b/i.test(l)) return 'rule'
+  return undefined
+}
 
 export function choiceText(label: string): { text: string; original?: string } {
   if (getLang() !== 'zh-CN') return { text: label }

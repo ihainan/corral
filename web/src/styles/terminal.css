@@ -163,7 +163,18 @@ html.term-mode body { position: fixed; inset: 0; }
 }
 .composer-send:hover { background: var(--accent-hover); }
 .composer-send.is-stop, .composer-send.is-stop:hover { background: var(--term-fg); color: var(--term-bg); }
-@media (pointer: coarse) { .composer-tools { height: 44px; } .composer-send { width: 38px; height: 38px; margin-right: 1px; } }
+/* Nothing to send, or not now: a grey circle, not the accent's */
+.composer-send:disabled, .composer-send:disabled:hover { background: var(--term-line); color: var(--term-fg-3); cursor: default; }
+.composer-send.is-stop + .composer-send { margin-left: 6px; }
+/* (A touch screen: 44 to touch, the circle 38 inside it, drawn by its shadow) */
+@media (pointer: coarse) {
+  .composer-tools { height: 48px; }
+  .composer-send { width: 44px; height: 44px; margin: 0 -2px 0 0; background: none; box-shadow: inset 0 0 0 3px var(--term-key), inset 0 0 0 22px var(--accent); }
+  .composer-send:hover { background: none; }
+  .composer-send.is-stop, .composer-send.is-stop:hover { background: none; box-shadow: inset 0 0 0 3px var(--term-key), inset 0 0 0 22px var(--term-fg); }
+  .composer-send:disabled, .composer-send:disabled:hover { background: none; box-shadow: inset 0 0 0 3px var(--term-key), inset 0 0 0 22px var(--term-line); }
+  .composer-send.is-stop + .composer-send { margin-left: 2px; }
+}
 /* "@", "/", "$": suggestions over the terminal, right above the composer */
 .composer-complete {
   position: absolute; z-index: 5; bottom: calc(100% - 4px); left: max(8px, env(safe-area-inset-left, 0px));
@@ -433,13 +444,18 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-runs-branch svg { flex: none; }
 .convo-runs-branch-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .convo-runs-ctx { cursor: pointer; }
+/* (A touch screen: each 44 high to touch, the row as low as it looks, into the gaps around it) */
+@media (pointer: coarse) {
+  .convo-runs { gap: 6px; margin: -8px 0 -6px; } /* (up to the box, not into it; down to the safe area) */
+  .convo-runs-item { padding-top: 13px; padding-bottom: 13px; }
+}
 .convo-gauge { flex: none; }
 .convo-gauge circle { fill: none; stroke-width: 2.2; }
 .convo-gauge-track { stroke: var(--term-line); }
 .convo-gauge-fill { stroke: var(--term-fg-3); stroke-linecap: round; }
 .convo-gauge.is-full .convo-gauge-fill { stroke: var(--term-warn-text); }
 /* The composer's keys: said while one types, not over a box at rest. */
-.convo-dock .composer-keys:not(.agents-chat-why) { opacity: 0; transition: opacity 0.15s; }
+.convo-dock .composer-keys { opacity: 0; transition: opacity 0.15s; }
 .convo-dock .composer-box:focus-within .composer-keys { opacity: 1; }
 .convo-runs-item.is-switch { display: inline-flex; gap: 3px; cursor: pointer; }
 .convo-runs-item.is-switch svg { flex: none; opacity: 0.7; }
@@ -521,6 +537,13 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
   background: none; color: var(--term-fg-3); font: 12px/18px var(--font-ui);
 }
 .convo-pre-wrap .md-code-copy { position: absolute; top: 4px; right: 4px; background: var(--term-chrome); }
+/* (A touch screen: more to touch than shows, over the space around) */
+@media (pointer: coarse) {
+  .md-code-copy:not(.convo-pre-wrap .md-code-copy), .convo-meta .link-btn { position: relative; }
+  /* (Less up than down: what is over them is close) */
+  .md-code-copy::after { content: ''; position: absolute; inset: -4px -6px -12px; }
+  .convo-meta .link-btn::after { content: ''; position: absolute; inset: -6px -6px -14px; }
+}
 .md-code-copy:hover { color: var(--term-fg); background: var(--term-hover); }
 .md-table { overflow-x: auto; }
 .md-table table { border-collapse: collapse; font-size: 14px; line-height: 1.5; }
@@ -534,6 +557,7 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
   color: var(--term-fg-3); text-align: left; cursor: pointer; font: inherit; font-size: 14px; line-height: 1.55;
 }
 .convo-work-head { align-self: flex-start; }
+@media (pointer: coarse) { .convo-work-head, .convo-step-head { padding: 7px 0; } }
 .convo-work-head:hover, .convo-step-head:hover { color: var(--term-fg); }
 .convo-work-head:focus-visible, .convo-step-head:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: 2px; border-radius: 4px; }
 .convo-chev { flex: none; align-self: center; color: inherit; transition: transform 0.15s var(--ease); }
@@ -587,6 +611,7 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
   background: none; color: var(--term-fg); font: inherit; font-size: 13.5px; text-align: left; cursor: pointer;
 }
 .convo-changes-file:hover { background: var(--term-hover); }
+@media (pointer: coarse) { .convo-changes-file { min-height: 44px; } }
 .convo-changes-file:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: -2px; }
 .convo-changes-file svg { flex: none; color: var(--term-fg-3); }
 .convo-changes-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: 12.5px; }
@@ -627,6 +652,7 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 }
 .convo-tasks-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; width: 100%; border: 0; background: none; padding: 2px 0; color: var(--term-fg-2); font: inherit; text-align: left; cursor: pointer; }
 .convo-tasks-head:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: 2px; border-radius: 4px; }
+@media (pointer: coarse) { .convo-tasks { padding-top: 2px; padding-bottom: 2px; } .convo-tasks-head { min-height: 40px; align-items: center; } }
 .convo-tasks-sum { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .convo-tasks-toggle { flex: none; color: var(--term-fg-3); }
 .convo-tasks-list { margin: 4px 0 2px; padding-left: 1.5em; max-height: 30vh; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
@@ -655,6 +681,7 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
   background: var(--term-chrome); color: var(--term-fg); border: 1px solid var(--term-line);
   box-shadow: 0 6px 18px rgba(0, 0, 0, 0.16); font: 13px/18px var(--font-ui);
 }
+@media (pointer: coarse) { .convo-latest { padding: 11px 18px; } }
 @media (prefers-reduced-motion: reduce) { .convo-chev { transition: none; } }
 .convo-bar-where { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--term-fg-3); margin-left: 6px; }
 @media (max-width: 640px) { .convo-bar-where { display: none; } }
@@ -678,6 +705,7 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
   color: inherit; font: inherit; text-align: left; cursor: pointer;
 }
 .convo-bar-pick.is-static { cursor: default; }
+@media (pointer: coarse) { .convo-bar-pick { min-height: 44px; margin: -11px 0; } }
 .convo-bar-pick:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: 2px; border-radius: 4px; }
 .convo-bar-chev { flex: none; color: var(--term-fg-3); }
 /* Stop: a button that looks it, quiet until hovered */
@@ -712,6 +740,9 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 }
 .convo-ask-what { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
 .convo-ask-desc { font-size: 13px; line-height: 18px; color: var(--term-fg-3); overflow-wrap: anywhere; }
+/* (A choice that lasts beyond this once: said in the warning's colour, under its words) */
+.convo-ask-desc.is-lasting { color: var(--term-warn-text); }
+.reply-desc.is-lasting { color: var(--warn); }
 .convo-ask-text { display: flex; gap: 8px; }
 .convo-ask-text .input { flex: 1; min-width: 0; }
 /* (In the terminal's colours, as the composer is, whatever the app's are) */
@@ -721,6 +752,7 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-ask-text .btn:hover:not(:disabled) { background: var(--term-hover); }
 .convo-ask-more { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 13px; }
 .convo-ask-more .link-btn { font-size: 13px; color: var(--term-fg-2); }
+@media (pointer: coarse) { .convo-ask-more { gap: 0 20px; margin: -6px 0; } .convo-ask-more .link-btn { min-height: 44px; } }
 .convo-ask .reply-screen { max-height: 260px; }
 .convo-ask-sent { margin: 0; font-size: 13px; color: var(--term-fg-3); }
 /* The card over the composer, its own scroll where the screen is short */
@@ -820,7 +852,7 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
   margin: 0; padding: 6px 16px; flex: none; color: var(--term-fg-2); background: var(--term-chrome);
   border-bottom: 1px solid var(--term-line); font: 13px/20px var(--font-ui); text-align: center;
 }
-.term-root .agents-chat-why { color: var(--term-fg-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.term-root .agents-chat-why { margin: 0 0 6px; padding: 0 4px; color: var(--term-fg-2); font: 13px/18px var(--font-ui); }
 
 /* A phone's agents list: one row an agent (what, where, how it is); waiting is the one loud colour. */
 .agents-list { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 0 0 calc(16px + env(safe-area-inset-bottom, 0px)); }
@@ -837,6 +869,7 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .agents-list-sum .is-working { color: var(--term-accent-text); }
 .agents-list-sum .is-done { color: var(--term-ok-text); }
 .term-root .agents-list-mine { flex: none; height: 32px; padding: 0 10px; color: var(--term-fg-2); font-size: 13px; }
+@media (pointer: coarse) { .term-root .agents-list-mine { height: 40px; margin: -4px -4px -4px 0; } }
 .term-root .agents-list-mine[aria-pressed='true'] { background: var(--term-accent-soft); color: var(--term-accent-text); }
 .agents-list-none { margin: 24px 16px; color: var(--term-fg-3); font: 14px/22px var(--font-ui); text-align: center; }
 .agents-list-rows { list-style: none; margin: 0; padding: 0; }

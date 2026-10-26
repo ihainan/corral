@@ -747,13 +747,13 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     : !bound
       ? t(convo.status === 'loading' ? 'agents.loadingSend' : convo.status === 'none' && convo.reason === 'no_agent' ? 'agents.noAgentSend' : 'agents.cannotSend')
       : agent?.status === 'blocked'
-        ? t('agents.answerFirst')
+        ? t(waits ? 'agents.answerAbove' : 'agents.answerFirst') // (its card over the composer, or the terminal only)
         : null
   const send = () => {
     const b = convo.bind
-    if (sending || !draft.trim()) return
+    if (sending || (!draft.trim() && !up)) return
     if (blocked || !b) return toast(blocked ?? t('agents.cannotSend'), true)
-    if (up) return toast(t('term.waitUpload'), true) // (its path is not in the draft yet)
+    if (up) return toast(t('term.waitUpload'), true) // (its path is not in the draft yet; nor, while it goes up, in an empty one)
     const text = expandPastes(draft, 100 << 10)
     if (text === null || new TextEncoder().encode(text).length > 100 << 10) return toast(t('agents.tooLong'), true)
     const was = draft // (what is typed meanwhile is a new draft: it stays)
@@ -809,6 +809,8 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
           </button>
         </div>
       )}
+      {/* (Why nothing can be sent now: over the box, where a phone shows it too) */}
+      {blocked && <p className="agents-chat-why">{blocked}</p>}
       <div className="composer-box">
         <textarea
           ref={field}
@@ -898,23 +900,23 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
             }}
           />
           <div className="spacer" />
-          {blocked && <span className="composer-keys agents-chat-why">{blocked}</span>}
           {!blocked && hasKeyboardPointer() && (
             <span className="composer-keys" aria-hidden="true">
               {composerEnter === 'send' ? t('term.composerKeysSend', { send: enterKey, newline: isMac ? 'Shift+Return' : 'Shift+Enter' }) : t('term.composerKeysNewline', { send: modEnter })}
             </span>
           )}
-          {/* (With a draft, on a phone: stop beside send, its bar having none.) */}
-          {canPress && (lead || !draft.trim()) && (
+          {/* (Each in its place, whatever the draft: what was send a moment
+              ago is never stop. Stop while it works, beside send. Send
+              with nothing in the box is grey, but while a file goes up:
+              pressed, it says to wait.) */}
+          {canPress && (
             <button type="button" className="composer-send is-stop" onClick={() => press('stop')} aria-label={t('convo.stop')} title={t('convo.stop')}>
               <Square size={14} fill="currentColor" strokeWidth={0} />
             </button>
           )}
-          {!(canPress && !draft.trim()) && (
-            <button type="button" className="composer-send" onClick={send} disabled={sending || !!blocked} aria-label={t('term.send')} title={t('term.send') + (isTouch ? '' : ' (' + sendKey + ')')}>
-              <ArrowUp size={18} strokeWidth={2.25} />
-            </button>
-          )}
+          <button type="button" className="composer-send" onClick={send} disabled={sending || !!blocked || (!draft.trim() && !up)} aria-label={t('term.send')} title={t('term.send') + (isTouch ? '' : ' (' + sendKey + ')')}>
+            <ArrowUp size={18} strokeWidth={2.25} />
+          </button>
         </div>
       </div>
     </div>
