@@ -860,14 +860,17 @@ func convoProcStatus(c *sftplite.Client, st *convoState) string {
 // Exits 3: not that agent in front in that pane now (or, tmux, the pane is
 // not in this session); 4: nothing typed; 5: the text typed, not Enter; 6:
 // typing failed part way, or may have (so does a signal once typing began);
-// 7: the pane's lock was not had in time (nothing typed). Fixed script; the
+// 7: the pane's lock was not had in time (nothing typed). With read, the
+// keys pressed, the last lines of the pane's screen are printed a moment
+// after (what the keys changed). Fixed script; the
 // mode, the validated tmux session name, pane id, pid, start, Claude session
 // id, length, the herdr socket (from discovery) and keys of a fixed set
 // (convoKeys) are its arguments, the text its input.
-func convoSendCommand(mode, session, pane, socket string, pid, start int64, sid string, length int, keys []string) string {
+func convoSendCommand(mode, session, pane, socket string, pid, start int64, sid string, length int, keys []string, read bool) string {
 	script := `PATH="$HOME/.local/bin:$HOME/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 mode=$1 sess=$2 p=$3 pid=$4 start=$5 len=$6 sock=$7 sid=$8
 shift 8
+seen=0; [ "$len" = keysread ] && { len=keys; seen=1; }
 b=corral-send-$$ typing=0
 f=$(mktemp) || exit 4
 trap 'rm -f "$f"; [ "$mode" = tmux ] && tmux delete-buffer -b "$b" 2>/dev/null 9>&-' EXIT
@@ -905,6 +908,7 @@ if [ "$mode" = tmux ]; then
     front || exit 3
     typing=1
     tmux send-keys -t "$p" "$@" 9>&- || exit 6
+    [ "$seen" = 1 ] && { sleep 0.6; tmux -u capture-pane -p -t "$p" 2>/dev/null 9>&- | tail -n 8; }
     exit 0
   fi
   tmux load-buffer -b "$b" "$f" 9>&- || exit 4
@@ -919,6 +923,7 @@ else
     for k in "$@"; do
       HERDR_SOCKET_PATH=$sock herdr pane send-keys "$p" "$k" >/dev/null 2>&1 9>&- || exit 6
     done
+    [ "$seen" = 1 ] && { sleep 0.6; HERDR_SOCKET_PATH=$sock herdr pane read "$p" --lines 8 2>/dev/null 9>&-; }
     exit 0
   fi
   t=$(cat "$f" && printf x) || exit 4
@@ -933,6 +938,9 @@ fi`
 	n := strconv.Itoa(length)
 	if keys != nil {
 		n = "keys"
+		if read {
+			n = "keysread"
+		}
 	}
 	cmd := "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(mode) + " " + sshx.QuoteShell(session) + " " + sshx.QuoteShell(pane) + " " +
 		strconv.FormatInt(pid, 10) + " " + strconv.FormatInt(start, 10) + " " + n + " " + sshx.QuoteShell(socket) + " " + sshx.QuoteShell(sid)
@@ -989,8 +997,9 @@ func (p *paneTurns) take(ctx context.Context, key string) (release func(), ok bo
 
 // What the conversation presses in the agent's pane, in herdr's names and
 // tmux's: stop (Escape), send a queued message now (Claude Code's Ctrl+X
-// Ctrl+S, which stops what it was doing to take the message in), and send
-// a message (its text, then Enter: see sendText).
+// Ctrl+S, which stops what it was doing to take the message in), the next
+// permission mode (Shift+Tab), and send a message (its text, then Enter:
+// see sendText).
 var convoKeys = map[string]struct {
 	audit string
 	herdr []string
@@ -998,7 +1007,33 @@ var convoKeys = map[string]struct {
 }{
 	"interrupt": {"convo.interrupt", []string{"esc"}, []string{"Escape"}},
 	"send_now":  {"convo.send_now", []string{"ctrl+x", "ctrl+s"}, []string{"C-x", "C-s"}},
+	"mode":      {"convo.mode", []string{"shift+tab"}, []string{"BTab"}}, // (Claude Code's next permission mode)
 	"send":      {"convo.send", nil, nil}, // (typed by convoSendCommand)
+}
+
+// screenMode reads the permission mode off the bottom of Claude Code's
+// screen ("⏵⏵ accept edits on (shift+tab to cycle)", "⏸ plan mode on"…),
+// in the log's names; "" when it does not say.
+func screenMode(screen string) string {
+	lines := strings.Split(screen, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		l := strings.ToLower(lines[i])
+		for _, m := range screenModes {
+			if strings.Contains(l, m.on) {
+				return m.mode
+			}
+		}
+	}
+	return ""
+}
+
+var screenModes = []struct{ on, mode string }{
+	{"accept edits on", "acceptEdits"},
+	{"plan mode on", "plan"},
+	{"auto mode on", "auto"},
+	{"bypass permissions on", "bypassPermissions"},
+	{"don't ask on", "dontAsk"},
+	{"manual mode on", "default"},
 }
 
 // maxSendText is the most a message sent from the agents page may hold (in
@@ -1040,6 +1075,16 @@ func (s *Server) apiConversationInterrupt(w http.ResponseWriter, r *http.Request
 
 func (s *Server) apiConversationSendNow(w http.ResponseWriter, r *http.Request) {
 	s.convoPress(w, r, "send_now")
+}
+
+// POST /api/sessions/{id}/conversation/mode (the same as interrupt)
+//
+// Presses Shift+Tab: Claude Code goes on to its next permission mode. It
+// writes the mode to its log only with the next message, so the answer
+// says it as the screen shows it ({"ok":true,"mode":"plan"}; "" when the
+// screen does not say).
+func (s *Server) apiConversationMode(w http.ResponseWriter, r *http.Request) {
+	s.convoPress(w, r, "mode")
 }
 
 // Send types a message into the agent's pane and presses Enter (Claude Code
@@ -1179,7 +1224,7 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	}
 	release := turn
 	turn = func() {} // (Exec gives it back, once the channel has ended)
-	_, err = sshx.Exec(ctx, sess.Client(), convoSendCommand(sess.Persistence, sess.TmuxSession, b.Pane, socket, b.PID, b.Start, b.Session, len(text), press), 4096,
+	res, err := sshx.Exec(ctx, sess.Client(), convoSendCommand(sess.Persistence, sess.TmuxSession, b.Pane, socket, b.PID, b.Start, b.Session, len(text), press, what == "mode"), 16<<10,
 		sshx.ExecOptions{Stdin: strings.NewReader(text), Release: release})
 	var exitErr *sshx.ExitError
 	switch {
@@ -1199,6 +1244,8 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		outcome = "unknown" // (typed in part, or all of it but Enter, or it is not known)
 	}
 	switch {
+	case outcome == "typed" && what == "mode":
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "mode": screenMode(string(res.Out))})
 	case outcome == "typed":
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	case reason == "busy":

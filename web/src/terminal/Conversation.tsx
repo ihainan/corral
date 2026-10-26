@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { ArrowDown, ChevronDown, ChevronRight, GitBranch, PanelLeft, X } from 'lucide-react'
+import { ArrowDown, ChevronDown, ChevronRight, ChevronsUpDown, GitBranch, PanelLeft, X } from 'lucide-react'
 import { t, getLang, type I18nKey } from '../i18n'
 import { copyText, isCoarse } from '../components/ui'
 import { local } from '../storage'
@@ -88,6 +88,7 @@ export function ConversationView({
   composer,
   onSendNow,
   sendNow,
+  mode,
   lead,
 }: {
   convo: Convo
@@ -105,6 +106,7 @@ export function ConversationView({
   composer?: ReactNode // (the terminal's composer, while it is open)
   onSendNow?: () => void // (messages wait to be taken in: Claude Code's "send now")
   sendNow?: string // what became of the last "send now", to say
+  mode?: ModeSwitch // (its permission mode can be switched from here)
   lead?: ReactNode // (first in the bar: the agents page's way back to its list, on a phone)
 }) {
   const working = agent?.status === 'working'
@@ -523,7 +525,7 @@ export function ConversationView({
           </div>
         )}
         {composer}
-        {convo.status === 'ready' && convo.meta && <Runs meta={convo.meta} active={active} />}
+        {convo.status === 'ready' && convo.meta && <Runs meta={convo.meta} active={active} mode={mode} />}
       </div>
       </div>
       {changes && shownEdits && <ChangesPanel key={changes.key} edits={shownEdits} focus={changes.path} onClose={unshow} active={active} />}
@@ -581,10 +583,14 @@ function tokens(n: number): string {
 const MODES = ['default', 'acceptEdits', 'plan', 'auto', 'bypassPermissions', 'dontAsk'] as const
 const modeName = (m: string) => ((MODES as readonly string[]).includes(m) ? t(`convo.mode.${m}` as I18nKey) : m)
 
+// Switching the permission mode from the page: now, what the last switch
+// went to (the log says it only with the next message); busy, one on its way.
+export type ModeSwitch = { now?: string; busy: boolean; onNext?: () => void }
+
 // What the session runs with, under the composer: its permission mode on
-// the left; its branch, model and how full its context is on the right
-// (the numbers on a tap).
-function Runs({ meta, active }: { meta: ConvoMeta; active: boolean }) {
+// the left (a tap: the next one, as Shift+Tab); its branch, model and how
+// full its context is on the right (the numbers on a tap).
+function Runs({ meta, active, mode }: { meta: ConvoMeta; active: boolean; mode?: ModeSwitch }) {
   const [open, setOpen] = useState(false)
   const box = useRef<HTMLDivElement>(null)
   if (open && !active) setOpen(false) // (behind a terminal tab: its Escape is the terminal's)
@@ -612,11 +618,17 @@ function Runs({ meta, active }: { meta: ConvoMeta; active: boolean }) {
   const windows = WINDOWS.filter((w) => w >= used || w === WINDOWS[WINDOWS.length - 1])
   return (
     <div className="convo-runs" ref={box}>
-      {meta.mode && (
-        <span className="convo-runs-item convo-runs-mode" title={t('convo.modeHint')}>
-          {modeName(meta.mode)}
-        </span>
-      )}
+      {(mode?.now || meta.mode) &&
+        (mode?.onNext ? (
+          <button type="button" className="convo-runs-item convo-runs-mode is-switch" onClick={mode.onNext} disabled={mode.busy} aria-busy={mode.busy || undefined} title={t('convo.modeSwitch')}>
+            {modeName(mode.now || meta.mode!)}
+            <ChevronsUpDown size={12} aria-hidden="true" />
+          </button>
+        ) : (
+          <span className="convo-runs-item convo-runs-mode" title={t('convo.modeHint')}>
+            {modeName(mode?.now || meta.mode!)}
+          </span>
+        ))}
       <span className="spacer" />
       {meta.branch && (
         <span className="convo-runs-item convo-runs-branch" title={t('convo.branch', { b: meta.branch })}>

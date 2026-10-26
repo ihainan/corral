@@ -437,6 +437,26 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   }
   const canPress = bound && working
 
+  // The permission mode, switched from here: Shift+Tab pressed in its pane,
+  // the mode it went to read off its screen (the log says it only with the
+  // next message: from then on, that is what shows). Not while it waits for
+  // an answer: the key would be the question's.
+  const [modeNow, setModeNow] = useState<{ mode: string; bind: string; was?: string } | null>(null)
+  const [modeBusy, setModeBusy] = useState(false)
+  if (modeNow && (modeNow.bind !== bindKey || convo.meta?.mode !== modeNow.was)) setModeNow(null)
+  const canMode = bound && convo.status === 'ready' && !!convo.meta && agent?.status !== 'blocked' && !agent?.other
+  const nextMode = () => {
+    const b = convo.bind
+    if (!b || modeBusy) return
+    const bind = bindKey
+    const was = convo.meta?.mode
+    setModeBusy(true)
+    api<{ ok: boolean; mode?: string }>('POST', `/api/sessions/${sid}/conversation/mode`, { pane: b.pane, pid: b.pid, start: b.start, session: b.session }, { timeoutMs: PRESS_MS })
+      .then((r) => (r.mode ? setModeNow({ mode: r.mode, bind, was }) : toast(t('convo.modeUnknown'))))
+      .catch((e) => toast(refusal(e), true))
+      .finally(() => setModeBusy(false))
+  }
+
   // What was sent, until the log has a user turn of its text after it (each
   // turn answers one); not seen in time, it says so. One the agent queued
   // shows in its queue instead.
@@ -861,6 +881,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       composer={composer}
       onSendNow={canPress ? () => press('now') : undefined}
       sendNow={said?.what === 'now' && said.bind === bindKey ? said.text : undefined}
+      mode={{ now: modeNow?.bind === bindKey ? modeNow.mode : undefined, busy: modeBusy, onNext: canMode ? nextMode : undefined }}
       lead={lead}
     />
     </div>
