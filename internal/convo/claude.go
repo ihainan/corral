@@ -67,6 +67,8 @@ type Claude struct {
 	// the list a part before gives, until a whole one is said; over that one
 	// (taskBase) once a part before answers a call whose result came after it.
 	myTitleSaid, tasksSaid bool
+	branchSaid             bool // (a row said the branch, if only that there is none)
+	ctxSaid                bool // (the context was said or, by a compaction, made unknown: the part before has no say)
 	taskBase               []taskItem
 	taskOps                []taskOp
 	taskOpsFull            bool              // more were made than are kept: the list is not made again (see Prepend)
@@ -336,10 +338,10 @@ func (c *Claude) Prepend(o *Claude) {
 	if c.meta.Mode == "" {
 		c.meta.Mode = o.meta.Mode
 	}
-	if c.meta.Branch == "" {
-		c.meta.Branch = o.meta.Branch
+	if !c.branchSaid {
+		c.meta.Branch, c.branchSaid = o.meta.Branch, o.branchSaid
 	}
-	if c.meta.Context == 0 {
+	if c.meta.Context == 0 && !c.ctxSaid {
 		c.meta.Context = o.meta.Context
 	}
 	add := o.entries
@@ -456,7 +458,7 @@ func (c *Claude) line(b []byte) {
 		return
 	}
 	if r.GitBranch != nil {
-		c.meta.Branch = clip(*r.GitBranch, maxMeta)
+		c.meta.Branch, c.branchSaid = clip(*r.GitBranch, maxMeta), true
 	}
 	switch r.Type {
 	case "user":
@@ -528,12 +530,16 @@ func (c *Claude) user(r *claudeRow) {
 	var s string
 	if json.Unmarshal(r.Message.Content, &s) == nil {
 		if r.IsCompactSummary {
+			c.compacted()
 			c.add(r, RoleSummary, []Part{textPart(KindText, s)})
 			return
 		}
 		role, text := classifyUserText(s)
 		if role == "" {
 			return
+		}
+		if role == RoleNote {
+			c.modelSet(text)
 		}
 		if role == RoleUser && r.PromptSource == "system" {
 			role = RoleNote
@@ -578,6 +584,7 @@ func (c *Claude) user(r *claudeRow) {
 					parts = append(parts, textPart(KindText, text))
 				}
 			case RoleNote:
+				c.modelSet(text)
 				notes = append(notes, textPart(KindText, text))
 			}
 		case "image":
@@ -585,6 +592,7 @@ func (c *Claude) user(r *claudeRow) {
 		}
 	}
 	if r.IsCompactSummary { // (the summary written as a session was compacted, as blocks)
+		c.compacted()
 		c.add(r, RoleSummary, parts)
 		return
 	}
@@ -618,7 +626,7 @@ func (c *Claude) queueOp(r *claudeRow) {
 		for i, q := range c.queue {
 			if q.raw == s {
 				c.queue = append(c.queue[:i:i], c.queue[i+1:]...)
-				c.gone = append(c.gone, goneItem{squashed(q.Text), clip(r.Timestamp, 64)})
+				c.gone = append(c.gone, goneItem{queueKey(q.Text), clip(r.Timestamp, 64)})
 				if n := len(c.gone) - maxQueue; n > 0 {
 					c.gone = append([]goneItem(nil), c.gone[n:]...)
 				}
@@ -639,9 +647,9 @@ func (c *Claude) queueOp(r *claudeRow) {
 // (One removed already, by its text, is the one arriving: not another of
 // the same text that still waits.)
 func (c *Claude) arrived(text string) {
-	t := squashed(text)
+	t := queueKey(text)
 	kept, _ := cut(clean(text), maxText) // (as the queue keeps a long one, and its removals)
-	k := squashed(kept)
+	k := queueKey(kept)
 	for i, g := range c.gone {
 		if g.text == t || g.text == k {
 			c.gone = append(c.gone[:i:i], c.gone[i+1:]...)
@@ -649,7 +657,7 @@ func (c *Claude) arrived(text string) {
 		}
 	}
 	for i, q := range c.queue {
-		if q := squashed(q.Text); q == t || q == k {
+		if q := queueKey(q.Text); q == t || q == k {
 			c.queue = append(c.queue[:i:i], c.queue[i+1:]...)
 			return
 		}
@@ -657,6 +665,10 @@ func (c *Claude) arrived(text string) {
 }
 
 func squashed(s string) string { return strings.Join(strings.Fields(s), " ") }
+
+// queueKey is what a queued message and its arrival are matched by: its
+// words, without the "[Image #N]" a queued one has and one taken in may not.
+func queueKey(s string) string { return squashed(imageToken.ReplaceAllString(s, " ")) }
 
 // mid marks the entry just added as taken in during the agent's turn.
 func (c *Claude) mid() {
@@ -737,7 +749,7 @@ func (c *Claude) assistant(r *claudeRow) {
 	}
 	if u := r.Message.Usage; u != nil && r.Message.Model != "<synthetic>" {
 		if n := u.Input + u.CacheWrite + u.CacheRead; n > 0 {
-			c.meta.Context = n
+			c.meta.Context, c.ctxSaid = n, true
 		}
 	}
 	var blocks []claudeBlock
@@ -770,6 +782,28 @@ func (c *Claude) assistant(r *claudeRow) {
 				c.tools[clip(b.ID, maxID)] = ref
 			}
 		}
+	}
+}
+
+// compacted: what filled the context before is gone; how full it is now is
+// not known until the next answer says.
+func (c *Claude) compacted() {
+	c.meta.Context, c.ctxSaid = 0, true
+}
+
+// modelSet takes in what /model said it switched to ("Set model to
+// `Sonnet 5.5` and saved as…", "Set model to opus"): the model shown until
+// the next answer names its id.
+var modelSetText = regexp.MustCompile("^Set model to (?:`([^`]+)`|(.+?)(?:\\s+and saved\\b.*)?$)")
+
+func (c *Claude) modelSet(text string) {
+	m := modelSetText.FindStringSubmatch(text)
+	if m == nil {
+		return
+	}
+	name := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(m[1]+m[2]), "(default)"))
+	if name != "" {
+		c.meta.Model = clip(name, maxMeta)
 	}
 }
 
