@@ -655,8 +655,9 @@ html.term-dark .overlay, html.term-dark .menu, html.term-dark .toast {
 .convo-stop { flex: none; height: 26px; padding: 0 10px; font-size: 13px; }
 @media (pointer: coarse) { .convo-stop { height: 34px; } }
 .convo-bar-pick .convo-bar-name { flex: 0 1 auto; }
-.term-tab-agents { flex: none; width: auto; min-width: 30px; height: 30px; padding: 0 6px; gap: 3px; display: inline-flex; align-items: center; color: var(--term-fg-2); }
-@media (pointer: coarse) { .term-tab-agents { height: 36px; min-width: 36px; } }
+/* The agents page: a tab as the sessions' are, first, never dragged. */
+.term-tab-agents { padding: 0 10px; }
+.term-tab-agents svg { flex: none; }
 
 /* Answering in the thread: the question, its choices, a line of text */
 .convo-ask {

@@ -654,15 +654,19 @@ function TabBar(p: { tabs: SessionInfo[]; current: string; infos: Record<string,
     <nav className={'term-tabs' + (drag ? ' dragging' : '')} aria-label={t('tabs.label')} ref={ref}>
       <button
         type="button"
-        className="icon-btn term-tab-agents"
+        className="term-tab term-tab-agents"
         aria-current={p.current === AGENTS ? 'page' : undefined}
-        aria-pressed={p.current === AGENTS}
-        onClick={() => navigate('/agents')}
-        aria-label={waitingAll ? `${t('nav.agents')}，${t('herdr.waiting', { n: waitingAll })}` : t('nav.agents')}
+        onClick={() => p.current !== AGENTS && navigate('/agents')}
         title={t('nav.agents')}
       >
-        <Bot size={17} />
-        {waitingAll > 0 && <span className="term-tab-count term-tab-wait">{waitingAll}</span>}
+        <Bot size={15} aria-hidden="true" />
+        <span className="term-tab-name">{t('nav.agents')}</span>
+        {waitingAll > 0 && (
+          <span className="term-tab-count term-tab-wait" aria-label={t('herdr.waiting', { n: waitingAll })}>
+            <MessageCircleReply size={13} strokeWidth={2.25} aria-hidden="true" />
+            {waitingAll}
+          </span>
+        )}
       </button>
       {p.tabs.map((s) => {
         const info = p.infos[s.id]
