@@ -418,7 +418,8 @@ html.term-dark .overlay, html.term-dark .menu, html.term-dark .toast {
 .convo-dock .composer { padding: 0; background: none; border-top: 0; }
 .convo-dock .composer-box { border: 1px solid var(--term-line); }
 .term-root.light .convo-dock .composer-box { box-shadow: none; }
-.convo-dock .composer-box:focus-within { border-color: color-mix(in srgb, var(--term-accent-text) 70%, var(--term-line)); box-shadow: 0 0 0 3px color-mix(in srgb, var(--term-accent-text) 14%, transparent); }
+.convo-dock .composer-box:focus-within,
+.term-root.light .convo-dock .composer-box:focus-within { border-color: color-mix(in srgb, var(--term-accent-text) 70%, var(--term-line)); box-shadow: 0 0 0 3px color-mix(in srgb, var(--term-accent-text) 14%, transparent); }
 @media (max-width: 640px) { .convo-dock { padding-left: max(8px, env(safe-area-inset-left, 0px)); padding-right: max(8px, env(safe-area-inset-right, 0px)); } }
 .convo-runs { position: relative; display: flex; align-items: center; gap: 2px; min-width: 0; overflow: visible; min-height: 24px; margin-top: -4px; font-size: 12.5px; line-height: 18px; color: var(--term-fg-3); font-variant-numeric: tabular-nums; }
 .convo-runs-item {
