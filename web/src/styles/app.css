@@ -575,6 +575,11 @@ details.adv > .form { margin-top: 16px; }
 .reply-keys .btn { height: 28px; padding: 0 10px; font-size: 13px; color: var(--fg-2); }
 .reply-keys .btn:hover:not(:disabled) { color: var(--fg); background: var(--bg-hover); }
 .reply-show { margin-left: auto; }
+.reply-dialog .convo-ask-block {
+  margin: 0; max-height: min(34vh, 300px); overflow: auto; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--r);
+  background: var(--bg-subtle); color: var(--fg); font: 13px/1.5 var(--font-mono); white-space: pre;
+}
+.reply-dialog .convo-ask-rule { color: var(--fg-3); opacity: 0.6; }
 .reply-text { display: flex; gap: 8px; }
 .reply-text .input { flex: 1; min-width: 0; }
 

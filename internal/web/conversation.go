@@ -202,11 +202,10 @@ for f in "$HOME"/.claude/sessions/*.json; do
 done
 # Codex: a process of the user's named codex, its log the session file it
 # has open (rollout-<time>-<session id>.jsonl).
-# (Not one run with exec: no conversation to type into. Of several logs
-# open, the one written last.)
+# (Not one run with exec, as its log's head says: no conversation to type
+# into. Of several logs open, the one written last.)
 for d in /proc/[0-9]*; do
   [ -O "$d" ] && [ "$(head -c 16 "$d/comm" 2>/dev/null)" = codex ] || continue
-  tr '\0' '\n' <"$d/cmdline" 2>/dev/null | sed 1d | grep -qxE 'exec|e' && continue
   pid=${d#/proc/}
   log=
   for fd in "$d"/fd/*; do
@@ -1013,9 +1012,8 @@ front() {
   if [ "$mode" = tmux ]; then k=TMUX_PANE; else k=HERDR_PANE_ID; fi
   tr '\0' '\n' <"/proc/$pid/environ" 2>/dev/null | grep -qxF "$k=$p" || return 1
   if [ "$(head -c 16 "/proc/$pid/comm" 2>/dev/null)" = codex ]; then
-    # (Codex, not run with exec: the session's log is the one it has open
-    # and wrote last, as locating chose it.)
-    tr '\0' '\n' <"/proc/$pid/cmdline" 2>/dev/null | sed 1d | grep -qxE 'exec|e' && return 1
+    # (Codex, not run with exec (its log's head says): the session's log is
+    # the one it has open and wrote last, as locating chose it.)
     lg=
     for fd in /proc/$pid/fd/*; do
       l=$(readlink "$fd" 2>/dev/null) || continue

@@ -140,6 +140,10 @@ export function ReplyDialog({ sessionId, agent, onLoaded, onClose, resizedAt }: 
   const shown = screen ? screen.text.split('\n').slice(-shownLines).join('\n') : ''
   const title = agent.agent || t('reply.terminal')
   const q = screen ? question(screen.text) : ''
+  // (Only a question of Claude Code's is all its choices: anything else, what
+  // it asks to be allowed shows first, as read, else the screen.)
+  const block = screen ? promptBlock(screen.text) : null
+  const questionOnly = !!screen && asksQuestion(screen.text)
   return (
     <Dialog title={t('reply.title', { agent: title })} onClose={onClose} className="reply-dialog">
       {agent.title && <p className="hint reply-sub">{agent.title}</p>}
@@ -149,8 +153,10 @@ export function ReplyDialog({ sessionId, agent, onLoaded, onClose, resizedAt }: 
         <>
           {/* (A menu read off it: its question and choices first, the screen
               behind a button; else the screen, to answer from.) */}
-          {opts.length > 0 && q && <p className="reply-q">{questionText(q)}</p>}
-          {(opts.length === 0 || screenOpen) && (
+          {opts.length > 0 && q && <p className="reply-q">{block && /^Bash command$/i.test(block.head) && /^Do you want to proceed\?$/i.test(q) ? t('convo.askRun') : questionText(q)}</p>}
+          {/* (What a permission asks to be allowed, before its choices.) */}
+          {opts.length > 0 && block && <Asked lines={block.lines} />}
+          {(opts.length === 0 || screenOpen || (!block && !questionOnly)) && (
             <div className="reply-screen-wrap">
               <pre className="reply-screen" ref={pre} tabIndex={0} aria-label={t('reply.screen')} aria-busy={reading}>
                 {screen ? shown || t('reply.blank') : t('common.loading')}
@@ -172,10 +178,10 @@ export function ReplyDialog({ sessionId, agent, onLoaded, onClose, resizedAt }: 
                 return (
                   <button key={o.key} type="button" className="reply-choice" disabled={!screen || busy} onClick={() => void send({ keys: [o.key] })}>
                     <span className="reply-key" aria-hidden="true">{o.key}</span>
-                    <span className="reply-what">
+                    {/* (Its words as Claude Code wrote them, where shown in Chinese: on a pointer's rest.) */}
+                    <span className="reply-what" title={c.original || undefined}>
                       <span className="reply-label">{c.text}</span>
                       {o.desc && <span className="reply-desc">{o.desc}</span>}
-                      {c.original && <span className="reply-desc">{c.original}</span>}
                     </span>
                   </button>
                 )
@@ -205,7 +211,7 @@ export function ReplyDialog({ sessionId, agent, onLoaded, onClose, resizedAt }: 
             <button type="button" className="btn btn-ghost btn-sm" disabled={!screen || busy} onClick={() => void send({ keys: ['esc'] })}>
               {t('reply.esc')}
             </button>
-            {opts.length > 0 && (
+            {opts.length > 0 && (block || questionOnly) && (
               <button type="button" className="btn btn-ghost btn-sm reply-show" aria-expanded={screenOpen} onClick={() => setScreenOpen((v) => !v)}>
                 {t(screenOpen ? 'reply.hideScreen' : 'reply.showScreen')}
               </button>
