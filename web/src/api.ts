@@ -264,6 +264,7 @@ export interface HerdrAgent {
   cwd: string
   session?: string // what runs there, as herdr says (Claude Code's session id)
   since?: number // (unix ms) when its status last changed, as the gateway saw it
+  round?: number // which round of its status (what marking it seen names)
 }
 
 export interface HerdrWorkspace {

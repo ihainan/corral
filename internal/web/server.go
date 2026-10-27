@@ -183,6 +183,7 @@ func (s *Server) registerRoutes() {
 	s.handle("POST /api/sessions/{id}/herdr", SignedIn, s.apiHerdrAction)
 	s.handle("GET /api/sessions/{id}/herdr/panes/{pane}/screen", SignedIn, s.apiHerdrScreen)
 	s.handle("POST /api/sessions/{id}/herdr/panes/{pane}/reply", SignedIn, s.apiHerdrReply)
+	s.handle("POST /api/sessions/{id}/herdr/panes/{pane}/seen", SignedIn, s.apiHerdrSeen)
 	s.handle("POST /api/alerts/answer", SignedIn, s.apiAlertAnswer)
 	s.handle("GET /api/sessions/{id}/complete", SignedIn, s.apiComplete)
 	s.handle("GET /api/sessions/{id}/conversation", SignedIn, s.apiConversation)

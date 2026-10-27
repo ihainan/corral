@@ -449,6 +449,23 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     // (herdr's name for a workspace at home, "~": nothing to tell)
     return { where: row.ws === '~' ? '' : row.ws, title, status: row.lost ? 'unknown' : row.status, other: readsLog(row.a.agent) ? undefined : row.a.agent, program: row.a.agent }
   }, [herdr, row, convo.bind, convo.agentStatus, convo.failing, convo.title, convo.entries])
+  // A finished one looked at here is seen: the gateway keeps it, so it is
+  // no longer "done" in any browser (herdr's own word goes only with its
+  // pane focused in herdr). Not while the page is behind another.
+  // (Of the round it is done in, as told: a word that comes late, after
+  // another round, marks nothing; a round after it is marked in its turn.)
+  const doneHere = herdr && active && row && !row.lost && row.status === 'done' ? { pane: row.a.pane_id, round: row.a.round ?? 0, session: row.a.session ?? '' } : undefined
+  const doneKey = doneHere && JSON.stringify(doneHere)
+  useEffect(() => {
+    if (!doneKey) return
+    const { pane, round, session } = JSON.parse(doneKey) as { pane: string; round: number; session: string }
+    const mark = () => {
+      if (!document.hidden) api('POST', `/api/sessions/${sid}/herdr/panes/${encodeURIComponent(pane)}/seen`, { round, session }).catch(() => {})
+    }
+    mark()
+    document.addEventListener('visibilitychange', mark)
+    return () => document.removeEventListener('visibilitychange', mark)
+  }, [sid, doneKey])
   // (A new conversation, its log not written yet, takes its first message.)
   const bound = (convo.status === 'ready' || (convo.status === 'none' && convo.reason === 'no_log')) && !!convo.bind && (!herdr || convo.bind.pane === cur.pane)
   // (The answer card reads the pane's screen: it needs no log read.)

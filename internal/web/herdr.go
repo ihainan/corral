@@ -39,6 +39,10 @@ type herdrAgent struct {
 	// milliseconds): when it was first seen, for one that has not changed
 	// since the gateway began watching.
 	Since int64 `json:"since,omitempty"`
+	// Round: which round of its status it is in, as this watcher numbers
+	// them (see seenRounds): what the browser names when it marks one
+	// "done" seen.
+	Round int64 `json:"round,omitempty"`
 }
 
 type herdrWorkspace struct {
@@ -280,9 +284,25 @@ func agentSession(p herdr.Pane) string {
 // herdrSockets remembers which herdr socket each terminal session is
 // watching, and the agent sessions its panes run, as herdr last said.
 type herdrSockets struct {
-	mu   sync.Mutex
-	path map[string]string
-	sids map[string]map[string]string // terminal session → pane → the agent's session id
+	mu     sync.Mutex
+	path   map[string]string
+	sids   map[string]map[string]string // terminal session → pane → the agent's session id
+	rounds map[string]*seenRounds       // terminal session → its watcher's rounds
+}
+
+func (h *herdrSockets) setRounds(id string, r *seenRounds) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.rounds == nil {
+		h.rounds = map[string]*seenRounds{}
+	}
+	h.rounds[id] = r
+}
+
+func (h *herdrSockets) roundsOf(id string) *seenRounds {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.rounds[id]
 }
 
 func (h *herdrSockets) set(id, path string) {
@@ -291,6 +311,7 @@ func (h *herdrSockets) set(id, path string) {
 	if path == "" {
 		delete(h.path, id)
 		delete(h.sids, id)
+		delete(h.rounds, id)
 	} else {
 		h.path[id] = path
 	}
@@ -372,6 +393,8 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 		name = "default"
 	}
 	times := s.herdrTimes.of(h, socket)
+	rounds := &seenRounds{}
+	s.herdrSocks.setRounds(sess.ID, rounds)
 	// When each agent last wrote to its log: what the panes the gateway
 	// never saw change are shown by (see paneSince). Looked for beside the
 	// watch, only while a pane needs it, and at most once a minute: a slow
@@ -420,7 +443,7 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 	send := func(sum herdrSummary) { // (with mu held: none goes out of order)
 		sum.Keys, sum.KeysUnknown = keys, !keysRead
 		last = &sum
-		if b, err := json.Marshal(sum); err == nil {
+		if b, err := json.Marshal(rounds.withSeen(sum)); err == nil {
 			sess.PublishMeta(b)
 		}
 	}
@@ -452,14 +475,25 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 	w := herdr.NewWatcher(sess.Client(), socket,
 		func(snap *herdr.Snapshot) {
 			s.herdrSocks.setSids(sess.ID, snap)
-			publish(summarize(name, snap, times, false))
+			sum := summarize(name, snap, times, false)
+			rounds.number(&sum, false)
+			publish(sum)
 		},
 		// (A change is told before the snapshot that has it.)
 		func(tr herdr.Transition) {
 			times.changed(tr.Pane.ID, tr.To)
+			rounds.changed(tr.Pane.ID, tr.To, agentSession(tr.Pane))
 			s.onAgentTransition(sess, h, tr)
 		},
 	)
+	// An agent looked at: the last summary goes again, with it no longer "done".
+	rounds.setPoke(func() {
+		mu.Lock()
+		defer mu.Unlock()
+		if last != nil && ctx.Err() == nil {
+			send(*last)
+		}
+	})
 	// The browser holds the last summary as current until told otherwise;
 	// it keeps it (a page opened meanwhile gets it too), marked as old.
 	w.OnLost = func() {
@@ -468,6 +502,7 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 			return
 		}
 		sum := summarize(name, snap, times, true)
+		rounds.number(&sum, true)
 		sum.Lost = true
 		publish(sum)
 	}
@@ -793,6 +828,33 @@ func (s *Server) apiHerdrScreen(w http.ResponseWriter, r *http.Request) {
 // time, and the connection that types is open before the screen is read.
 // A pane's turn is taken before connecting, so answers waiting for it hold
 // no connections.
+// POST /api/sessions/{id}/herdr/panes/{pane}/seen {"round":…,"session":…}
+// — the pane's agent, "done" in that round of that agent session (as the
+// summary said), was looked at on the agents page: no longer "done" on any
+// screen of Corral's (herdr's own badge is untouched: see seenRounds).
+// {"seen":false}: that round is over, and nothing changed.
+func (s *Server) apiHerdrSeen(w http.ResponseWriter, r *http.Request) {
+	pane := r.PathValue("pane")
+	var b struct {
+		Round   int64  `json:"round"`
+		Session string `json:"session"`
+	}
+	if err := readJSON(r, &b); err != nil || !herdrPaneID.MatchString(pane) || b.Round <= 0 || len(b.Session) > 128 {
+		writeError(w, http.StatusBadRequest, "bad_request", "pane and round are required")
+		return
+	}
+	sess, _ := s.herdrSession(w, r)
+	if sess == nil {
+		return
+	}
+	rs := s.herdrSocks.roundsOf(sess.ID)
+	if rs == nil {
+		writeError(w, http.StatusConflict, "herdr_unavailable", "herdr is not available in this session")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"seen": rs.markSeen(pane, b.Round, b.Session)})
+}
+
 func (s *Server) apiHerdrReply(w http.ResponseWriter, r *http.Request) {
 	pane := r.PathValue("pane")
 	var b struct {
