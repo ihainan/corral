@@ -45,6 +45,7 @@ const (
 	KindThinking = "thinking"
 	KindTool     = "tool"
 	KindImage    = "image" // an image was attached (its bytes are not kept)
+	KindNoted    = "noted" // files the turn was given without anyone saying so
 )
 
 // Entry is one row of the log that the view shows. Seq orders entries;
@@ -90,6 +91,19 @@ type Part struct {
 	Text      string `json:"text,omitempty"`
 	Truncated bool   `json:"truncated,omitempty"`
 	Tool      *Tool  `json:"tool,omitempty"`
+	Noted     *Noted `json:"noted,omitempty"`
+}
+
+// Noted is a file the turn was given without it being said in the
+// conversation: one that changed while the agent worked (Claude Code tells
+// it so), or the ones the person referred to in what they wrote. Without
+// it, the agent is seen acting on a change nobody mentioned.
+type Noted struct {
+	// Kind: "changed" (a file changed, by whom cannot be told) or
+	// "brought" (the person referred to it).
+	Kind  string   `json:"kind"`
+	Paths []string `json:"paths"`
+	More  int      `json:"more,omitempty"` // (there were that many more)
 }
 
 // Tool is one tool call and, once it has come back, its result.
@@ -173,6 +187,9 @@ const (
 	maxRunning   = 50       // work set going that is kept
 	maxSeenItems = 4096     // (Codex) the things told of as done that are remembered
 	maxPatchLine = 400      // one line of it
+	maxNoted     = 8        // files one note of them names (the rest are counted)
+	maxWrote     = 4096     // the files written that are remembered (see Noted)
+	maxSaid      = 16 << 10 // of the person's last message, what is read for the files it names
 )
 
 // Meta is what a session runs with, as its log last said it: each field

@@ -233,12 +233,58 @@ export function category(name: string): Category {
   return 'other'
 }
 
+// An MCP server's tool name (mcp__<server>__<tool>), split: the whole one
+// is too long for a line, and most of it is the server's. The same split
+// the log's reader makes (internal/convo: mcpTool).
+export function mcpTool(name: string): { server: string; tool: string } | null {
+  if (!name.startsWith('mcp__')) return null
+  const rest = name.slice(5)
+  const i = rest.lastIndexOf('__')
+  if (i <= 0 || i + 2 >= rest.length) return rest ? { server: '', tool: rest } : null
+  return { server: rest.slice(0, i), tool: rest.slice(i + 2) }
+}
+
+// The name a step's line shows for a tool nothing here knows: an MCP
+// server's tool without the server, else the name as it is.
+export const toolName = (name: string) => mcpTool(name)?.tool ?? name
+
 // The word a step's line starts with: what it did, or (live) does.
-export type Verb = Category | 'write' | 'task' | 'ask'
+export type Verb = Category | 'write' | 'task' | 'ask' | 'wait' | 'stop' | 'page' | 'send' | 'skill' | 'agents' | 'cron' | 'advisor' | 'browser' | 'doc' | 'mcp'
 export function verbOf(name: string): Verb | null {
-  if (name === 'Write') return 'write'
-  if (name === 'TaskCreate' || name === 'TaskUpdate' || name === 'TodoWrite') return 'task'
-  if (name === 'AskUserQuestion') return 'ask'
+  switch (name) {
+    case 'Write':
+      return 'write'
+    case 'TaskCreate':
+    case 'TaskUpdate':
+    case 'TodoWrite':
+      return 'task'
+    case 'AskUserQuestion':
+      return 'ask'
+    case 'Monitor':
+      return 'wait'
+    case 'TaskStop':
+      return 'stop'
+    case 'Artifact':
+    case 'ArtifactData':
+      return 'page'
+    case 'SendMessage':
+      return 'send'
+    case 'Skill':
+      return 'skill'
+    case 'ListAgents':
+      return 'agents'
+    case 'CronCreate':
+    case 'CronDelete':
+    case 'CronList':
+    case 'ScheduleWakeup':
+      return 'cron'
+    case 'advisor':
+      return 'advisor'
+  }
+  const m = mcpTool(name)
+  // (The browser's doings are its own word; a documents server's are a
+  // document's. Any other server: a tool was called, and which.)
+  if (m) return m.tool.startsWith('browser_') ? 'browser' : /notion|docs/i.test(m.server) ? 'doc' : 'mcp'
   const c = category(name)
   return c === 'other' ? null : c
 }

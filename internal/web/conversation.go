@@ -140,7 +140,8 @@ func (b *b64Strip) end(dst []byte) []byte {
 // terminal (its process group is the terminal's foreground one), the start
 // time its session file
 // records (a file left by a process that ended, whose pid was then reused,
-// does not match), the session id, the log found for it, and the herdr or
+// does not match), the session id, the log found for it and when that log
+// was last written, and the herdr or
 // tmux pane it runs in, the terminal its input is (/proc/<pid>/fd/0) and
 // its ancestors (pid and name, nearest first). With mode "tmux" a first
 // record gives the active pane of the named tmux session, its server's pid,
@@ -182,7 +183,8 @@ rec() { # pid start fg procstart sid log agent
     i=$((i + 1))
   done
   cwd=$(readlink "/proc/$1/cwd" 2>/dev/null | head -c 1024 | tr -d '\n')
-  printf 'pid=%s\nstart=%s\nbtime=%s\nhz=%s\nfg=%s\nprocstart=%s\nsid=%s\nlog=%s\ntty=%s\ncwd=%s\nanc=%s\nagent=%s\n%s\0' "$1" "$2" "$btime" "$hz" "$3" "$4" "$5" "$6" "$tty" "$cwd" "$anc" "$7" "$env"
+  lw=; [ -n "$6" ] && lw=$(stat -c %Y "$6" 2>/dev/null)
+  printf 'pid=%s\nstart=%s\nbtime=%s\nhz=%s\nfg=%s\nprocstart=%s\nsid=%s\nlog=%s\nlogmtime=%s\ntty=%s\ncwd=%s\nanc=%s\nagent=%s\n%s\0' "$1" "$2" "$btime" "$hz" "$3" "$4" "$5" "$6" "$lw" "$tty" "$cwd" "$anc" "$7" "$env"
 }
 # (Its start time and whether it is in front on its terminal: st, fg.)
 stat_of() {
@@ -293,6 +295,7 @@ type convoProc struct {
 	pid, start    int64
 	fg            bool  // in front on its terminal: what is typed there reaches it
 	started       int64 // when it started, unix milliseconds (0 when not known; within the second the host's boot time is known to)
+	wrote         int64 // when its log was last written, unix milliseconds (0: not known)
 	sid, log      string
 	agent         string // "claude" (Claude Code) or "codex"
 	herdrPane     string
@@ -440,6 +443,12 @@ func parseConvoLocate(out string) (l convoLocated) {
 				p.sid = v
 			case "log":
 				p.log = v
+			case "logmtime":
+				// When its log was last written: what the agent last said
+				// or was told, for a pane the gateway never saw change.
+				if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+					p.wrote = n * 1000
+				}
 			case "agent":
 				p.agent = v
 			case "HERDR_PANE_ID":

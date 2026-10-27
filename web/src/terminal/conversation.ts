@@ -48,10 +48,20 @@ export interface ConvoHunk {
 }
 
 export interface ConvoPart {
-  kind: 'text' | 'thinking' | 'tool' | 'image'
+  kind: 'text' | 'thinking' | 'tool' | 'image' | 'noted'
   text?: string
   truncated?: boolean
   tool?: ConvoTool
+  noted?: ConvoNoted
+}
+
+// Files the turn was given without the conversation saying so: ones that
+// changed while the agent worked ('changed': by whom cannot be told), or
+// the ones the person referred to in what they wrote ('brought').
+export interface ConvoNoted {
+  kind: 'changed' | 'brought'
+  paths: string[]
+  more?: number
 }
 
 export interface ConvoEntry {

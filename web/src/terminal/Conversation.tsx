@@ -7,7 +7,7 @@ import { Markdown } from './markdown'
 import { Code } from './Code'
 import { AgentIcon } from './agentIcons'
 import type { Convo, ConvoEntry, ConvoHunk, ConvoMeta, ConvoPart, ConvoQueued, ConvoRunning, ConvoTask, ConvoTool } from './conversation'
-import { category, isNote, items, ms, partTime, sameEdits, verbOf, type Category, type Edits, type Item } from './convoItems'
+import { category, isNote, items, ms, partTime, sameEdits, toolName, verbOf, type Category, type Edits, type Item, type Verb } from './convoItems'
 
 // The conversation view: the agent's log as turns, over the terminal (which
 // stays mounted under it). Each turn is what the person wrote, then one line
@@ -1101,6 +1101,11 @@ const noShow = () => {}
 const itemKey = (it: Item) => (it.kind === 'work' || it.kind === 'answer' || it.kind === 'text' ? it.key : 'e' + it.e.seq)
 // (Claude Code's own words that it was stopped, in the person's language.)
 const noteText = (e: ConvoEntry) => {
+  const n = e.parts[0]?.noted
+  if (n) {
+    const list = n.paths.map(shortPath).join(t('convo.noted.sep'))
+    return t(`convo.noted.${n.kind}` as I18nKey, { s: n.more ? list + t('convo.noted.more', { n: n.more }) : list })
+  }
   const s = e.parts.map((p) => p.text).join(' ')
   if (s === '[Request interrupted by user]') return t('convo.interrupted')
   if (s === '[Request interrupted by user for tool use]') return t('convo.interruptedTool')
@@ -1281,13 +1286,39 @@ function object(tool: ConvoTool): { text: string; code: boolean } {
   if (v === 'cmd' && d) return { text: d.replace(/^cd\s+(?:"[^"]*"|'[^']*'|[^\s&;|]+)\s*&&\s*/, ''), code: true }
   if (tool.title) return { text: tool.title, code: false }
   if (v === 'read' || v === 'edit' || v === 'write') return { text: shortPath(d), code: true }
-  return { text: d, code: v === 'cmd' || v === 'search' || v === 'web' }
+  return { text: d, code: v === 'cmd' || v === 'search' || v === 'web' || v === 'browser' || v === 'mcp' || v === 'doc' || v === 'page' || v === 'stop' }
+}
+
+// The word each verb says, done and under way. A table, not a name put
+// together: a verb without words of its own does not compile.
+const VERB_SAID: Record<Verb, { v: I18nKey; live: I18nKey }> = {
+  cmd: { v: 'convo.v.cmd', live: 'convo.live.cmd' },
+  read: { v: 'convo.v.read', live: 'convo.live.read' },
+  edit: { v: 'convo.v.edit', live: 'convo.live.edit' },
+  write: { v: 'convo.v.write', live: 'convo.live.write' },
+  search: { v: 'convo.v.search', live: 'convo.live.search' },
+  web: { v: 'convo.v.web', live: 'convo.live.web' },
+  agent: { v: 'convo.v.agent', live: 'convo.live.agent' },
+  task: { v: 'convo.v.task', live: 'convo.live.task' },
+  ask: { v: 'convo.v.ask', live: 'convo.live.ask' },
+  wait: { v: 'convo.v.wait', live: 'convo.live.wait' },
+  stop: { v: 'convo.v.stop', live: 'convo.live.stop' },
+  page: { v: 'convo.v.page', live: 'convo.live.page' },
+  send: { v: 'convo.v.send', live: 'convo.live.send' },
+  skill: { v: 'convo.v.skill', live: 'convo.live.skill' },
+  agents: { v: 'convo.v.agents', live: 'convo.live.agents' },
+  cron: { v: 'convo.v.cron', live: 'convo.live.cron' },
+  advisor: { v: 'convo.v.advisor', live: 'convo.live.advisor' },
+  browser: { v: 'convo.v.browser', live: 'convo.live.browser' },
+  doc: { v: 'convo.v.doc', live: 'convo.live.doc' },
+  mcp: { v: 'convo.v.mcp', live: 'convo.live.mcp' },
+  other: { v: 'convo.v.cmd', live: 'convo.live.other' }, // (verbOf gives no "other")
 }
 
 function liveText(tool: ConvoTool): string {
   const v = verbOf(tool.name)
   const o = object(tool).text
-  return v ? t(`convo.live.${v}` as I18nKey, { s: o }) : t('convo.live.other', { s: tool.name })
+  return v ? t(VERB_SAID[v].live, { s: o }) : t('convo.live.other', { s: toolName(tool.name) })
 }
 
 function Thinking({ text, live }: { text: string; live?: boolean }) {
@@ -1342,7 +1373,7 @@ function ToolRow({ tool, onCopy, live }: { tool: ConvoTool; onCopy: (s: string) 
         }}
         title={cat === 'cmd' ? firstLine(d) : d || tool.title}
       >
-        <span className="convo-step-verb">{v ? t(`convo.v.${v}` as I18nKey) : tool.name}</span>
+        <span className="convo-step-verb">{v ? t(VERB_SAID[v].v) : toolName(tool.name)}</span>
         <span ref={objRef} className={'convo-step-obj' + (obj.code ? ' is-code' : '')}>{v === 'cmd' && obj.code ? <Code text={obj.text} lang="bash" /> : obj.text}</span>
         {cat === 'edit' && <LineCounts add={tool.add ?? 0} del={tool.del ?? 0} />}
         {tool.error && <span className="convo-failed">{code ? t('convo.exitCode', { n: code }) : t('convo.toolFailed')}</span>}

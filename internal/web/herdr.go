@@ -79,6 +79,53 @@ type agentTimes struct {
 	// time is given for it until it changes. An agent that shows up later
 	// came then.
 	primed bool
+	// wrote: when each pane's agent last wrote to its log, as the last
+	// look over the host found it (unix milliseconds). It is what a pane
+	// the gateway never saw change is shown by, so that a restart does not
+	// leave every agent without a time; missing counts the panes that
+	// needed one, looking that a look is under way, and lookedAt when the
+	// last one was.
+	wrote    map[string]int64
+	missing  int
+	looking  bool
+	lookedAt time.Time
+}
+
+// lookEvery is how often the gateway looks over a host for when each
+// agent last wrote to its log (only while some pane has no time of its own).
+const lookEvery = 60 * time.Second
+
+// lastWrote is when the pane's agent last wrote to its log, 0 when that is
+// not known. Asking says a look is wanted, whether or not there is a time
+// already: a log goes on being written, so one found before goes stale.
+func (a *agentTimes) lastWrote(pane string) int64 {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.missing++
+	return a.wrote[pane]
+}
+
+// due: some pane has no time of its own and no look is under way or was
+// made just now. It marks the look as begun.
+func (a *agentTimes) due(now time.Time) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.missing == 0 || a.looking || now.Sub(a.lookedAt) < lookEvery {
+		return false
+	}
+	a.looking, a.missing = true, 0
+	return true
+}
+
+// found takes in what a look over the host found, by pane; nil: the look
+// failed, and what was found before stands.
+func (a *agentTimes) found(at map[string]int64, now time.Time) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.looking, a.lookedAt = false, now
+	if at != nil {
+		a.wrote = at
+	}
 }
 
 type agentTime struct {
@@ -162,6 +209,21 @@ func (h *herdrServers) of(host *store.Host, socket string) *agentTimes {
 	return t
 }
 
+// paneSince is when a pane's agent last changed, as the gateway saw it;
+// where it never saw it change (it began watching after, as a restart
+// does), when that agent last wrote to its log instead, which is when it
+// last said anything or was told anything.
+func paneSince(p herdr.Pane, times *agentTimes, old bool) int64 {
+	t := times.of(p.ID, p.AgentStatus, old)
+	if t > 0 || old {
+		// (Lost: the status is of a snapshot no longer current. A time of
+		// its own is all it may be shown by; a log's would be of what the
+		// pane does now, which this status is not.)
+		return t
+	}
+	return times.lastWrote(p.ID)
+}
+
 func summarize(session string, s *herdr.Snapshot, times *agentTimes, old bool) herdrSummary {
 	out := herdrSummary{T: "herdr", Session: session, Version: s.Version, Workspaces: []herdrWorkspace{}}
 	idx := map[string]int{}
@@ -184,7 +246,7 @@ func summarize(session string, s *herdr.Snapshot, times *agentTimes, old bool) h
 			continue
 		}
 		out.Workspaces[i].Agents = append(out.Workspaces[i].Agents,
-			herdrAgent{PaneID: p.ID, Agent: p.Agent, Status: p.AgentStatus, Title: truncate(p.Title, 120), Cwd: p.Cwd, Session: agentSession(p), Since: times.of(p.ID, p.AgentStatus, old)})
+			herdrAgent{PaneID: p.ID, Agent: p.Agent, Status: p.AgentStatus, Title: truncate(p.Title, 120), Cwd: p.Cwd, Session: agentSession(p), Since: paneSince(p, times, old)})
 		if p.AgentStatus == herdr.StatusBlocked {
 			out.Waiting++
 		}
@@ -310,6 +372,42 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 		name = "default"
 	}
 	times := s.herdrTimes.of(h, socket)
+	// When each agent last wrote to its log: what the panes the gateway
+	// never saw change are shown by (see paneSince). Looked for beside the
+	// watch, only while a pane needs it, and at most once a minute: a slow
+	// host holds up no summary.
+	go func() {
+		tick := time.NewTicker(5 * time.Second)
+		defer tick.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case now := <-tick.C:
+				if !times.due(now) {
+					continue
+				}
+				lctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+				out, err := sshx.Output(lctx, sess.Client(), convoLocateCommand(sess.Persistence, sess.TmuxSession, ""), convoLocateMax)
+				cancel()
+				var at map[string]int64
+				if err == nil {
+					at = map[string]int64{}
+					for _, p := range parseConvoLocate(string(out)).procs {
+						// (Of this herdr server: another on the host names
+						// its panes as this one does.)
+						if p.herdrSocket != socket || !herdrPane.MatchString(p.herdrPane) {
+							continue
+						}
+						if p.wrote > at[p.herdrPane] {
+							at[p.herdrPane] = p.wrote
+						}
+					}
+				}
+				times.found(at, time.Now())
+			}
+		}
+	}()
 	// The bindings are read beside the watch, not before it: a slow host
 	// holds up no summary. The last summary sent goes again with them.
 	var (

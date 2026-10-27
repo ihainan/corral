@@ -131,7 +131,9 @@ func TestClaudeToolInputs(t *testing.T) {
 	if td := p[3].Tool; td.Detail != "[x] one\n[ ] two" {
 		t.Errorf("todos: %q", td.Detail)
 	}
-	if m := p[4].Tool; m.Detail != "https://example.com" {
+	// (An MCP server's tool says which of its tools it was: the whole name
+	// is too long for the line, and the server's part of it says nothing.)
+	if m := p[4].Tool; m.Detail != "fetch https://example.com" {
 		t.Errorf("mcp: %+v", m)
 	}
 	if b := p[5].Tool; b.Detail != "" || b.Name != "Bash" {
@@ -842,5 +844,244 @@ func TestClaudeQueuedNotTheirs(t *testing.T) {
 	last := all[len(all)-1]
 	if last.Role != RoleNote || last.Parts[0].Text != "席位空出来了，你可以开测。" {
 		t.Errorf("taken in: %s %+v", last.Role, last.Parts)
+	}
+}
+
+// A tool nothing here knows says what it acted on: the field that tells
+// most of it, not the first one by name (which used to put "engine" or
+// "colorScheme" on the line).
+func TestClaudeUnknownToolObject(t *testing.T) {
+	c := NewClaude()
+	c.Feed(lines(
+		`{"type":"assistant","uuid":"a","message":{"content":[` +
+			`{"type":"tool_use","id":"1","name":"Monitor","input":{"command":"tail -f log","description":"wait for the build","timeout":600}},` +
+			`{"type":"tool_use","id":"2","name":"TaskStop","input":{"task_id":"b12"}},` +
+			`{"type":"tool_use","id":"3","name":"Artifact","input":{"url":"https://claude.ai/artifact/x","action":"read"}},` +
+			`{"type":"tool_use","id":"4","name":"Artifact","input":{"file_path":"page.html","icon":"chart","description":"a chart"}},` +
+			`{"type":"tool_use","id":"5","name":"SendMessage","input":{"to":"review-agent","message":"look at line 20","summary":"a review"}},` +
+			`{"type":"tool_use","id":"6","name":"mcp__plugin_playwright_playwright__browser_click","input":{"element":"Send button","target":"page"}},` +
+			`{"type":"tool_use","id":"7","name":"mcp__claude_ai_Claude_Docs__update","input":{"engine":"markdown"}},` +
+			`{"type":"tool_use","id":"8","name":"mcp__plugin_playwright_playwright__browser_resize","input":{"width":390,"height":844}},` +
+			`{"type":"tool_use","id":"9","name":"advisor","input":{}},` +
+			`{"type":"tool_use","id":"10","name":"mcp__notion__notion-fetch","input":{"id":"abc"}}]}}`,
+	))
+	p := c.Since(0)[0].Parts
+	if len(p) != 10 {
+		t.Fatalf("parts: %d", len(p))
+	}
+	want := []struct{ title, detail string }{
+		{"wait for the build", "tail -f log"},
+		{"", "b12"},
+		{"", "read https://claude.ai/artifact/x"},
+		{"", "publish page.html"},
+		{"review-agent", "a review"},
+		{"", "click Send button"},
+		{"", "update markdown"},
+		{"", "resize"},
+		{"", ""},
+		{"", "notion-fetch abc"},
+	}
+	for i, w := range want {
+		got := p[i].Tool
+		if got.Title != w.title || got.Detail != w.detail {
+			t.Errorf("%s: title %q detail %q, want %q %q", got.Name, got.Title, got.Detail, w.title, w.detail)
+		}
+	}
+}
+
+func TestMcpToolName(t *testing.T) {
+	for _, x := range []struct{ name, server, tool string }{
+		{"mcp__plugin_playwright_playwright__browser_click", "plugin_playwright_playwright", "browser_click"},
+		{"mcp__notion__notion-fetch", "notion", "notion-fetch"},
+		{"mcp__claude_ai_Claude_Docs__update", "claude_ai_Claude_Docs", "update"},
+		{"mcp__x", "", "x"},
+	} {
+		s, tl, ok := mcpTool(x.name)
+		if !ok || s != x.server || tl != x.tool {
+			t.Errorf("%s: %q %q %v", x.name, s, tl, ok)
+		}
+	}
+	if _, _, ok := mcpTool("Bash"); ok {
+		t.Error("Bash read as an MCP tool")
+	}
+}
+
+// A file Claude Code says changed shows only where the agent did not write
+// it itself, and the files the person referred to only where they said so.
+// The notice comes while the turn goes on: it stays where it was read, with
+// the work that came after it below.
+func TestClaudeNotedFiles(t *testing.T) {
+	c := NewClaude()
+	c.Feed(lines(
+		`{"type":"user","uuid":"u1","timestamp":"2026-10-27T01:00:00Z","message":{"role":"user","content":"look at @web/src/app.tsx and @web/src/prefs.ts"}}`,
+		`{"type":"attachment","uuid":"f1","attachment":{"type":"file","filename":"/w/web/src/app.tsx","displayPath":"web/src/app.tsx","content":"…"}}`,
+		`{"type":"attachment","uuid":"f2","attachment":{"type":"file","filename":"/w/web/src/prefs.ts","displayPath":"web/src/prefs.ts","content":"…"}}`,
+		`{"type":"attachment","uuid":"f3","attachment":{"type":"file","filename":"/w/web/src/i18n.ts","displayPath":"web/src/i18n.ts","content":"…"}}`,
+		`{"type":"assistant","uuid":"a1","timestamp":"2026-10-27T01:00:05Z","message":{"content":[{"type":"tool_use","id":"1","name":"Edit","input":{"file_path":"/w/web/src/app.tsx","old_string":"a","new_string":"b"}}]}}`,
+		`{"type":"user","uuid":"r1","message":{"content":[{"type":"tool_result","tool_use_id":"1","content":"ok"}]}}`,
+		`{"type":"attachment","uuid":"e1","attachment":{"type":"edited_text_file","filename":"/w/web/src/app.tsx","snippet":""}}`,
+		`{"type":"attachment","uuid":"e2","attachment":{"type":"edited_text_file","filename":"/w/notes.md","snippet":""}}`,
+		`{"type":"attachment","uuid":"e3","attachment":{"type":"edited_text_file","filename":"/w/other.md","snippet":""}}`,
+		`{"type":"assistant","uuid":"a2","timestamp":"2026-10-27T01:00:09Z","message":{"content":[{"type":"tool_use","id":"2","name":"Read","input":{"file_path":"/w/notes.md"}}]}}`,
+	))
+	es := c.Since(0)
+	var got []string
+	for _, e := range es {
+		if len(e.Parts) == 1 && e.Parts[0].Kind == KindNoted {
+			n := e.Parts[0].Noted
+			got = append(got, e.Role+" "+n.Kind+" "+strings.Join(n.Paths, ","))
+			continue
+		}
+		got = append(got, e.Role)
+	}
+	want := []string{
+		"user",
+		"note brought web/src/app.tsx,web/src/prefs.ts", // (i18n.ts was not asked for: a compaction's doing)
+		"assistant",
+		"note changed /w/notes.md,/w/other.md", // (app.tsx is the agent's own writing)
+		"assistant",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("entries: %q", got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("entry %d: %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// A file a shell command wrote is the agent's own doing too.
+func TestClaudeNotedAfterShellEdit(t *testing.T) {
+	c := NewClaude()
+	c.Feed(lines(
+		`{"type":"assistant","uuid":"a1","message":{"content":[{"type":"tool_use","id":"1","name":"Bash","input":{"command":"sed -i s/a/b/ x.go","description":"patch x"}}]}}`,
+		`{"type":"user","uuid":"r1","toolUseResult":{"stdout":"","bashEditDiff":{"files":[{"filePath":"/w/x.go","hunks":[{"oldStart":1,"oldLines":1,"newStart":1,"newLines":1,"lines":["-a","+b"]}]}],"changedFiles":["/w/x.go"]}},"message":{"content":[{"type":"tool_result","tool_use_id":"1","content":"ok"}]}}`,
+		`{"type":"attachment","uuid":"e1","attachment":{"type":"edited_text_file","filename":"/w/x.go","snippet":""}}`,
+		`{"type":"attachment","uuid":"e2","attachment":{"type":"edited_text_file","filename":"/w/y.go","snippet":""}}`,
+	))
+	var notes []*Noted
+	for _, e := range c.Since(0) {
+		for _, p := range e.Parts {
+			if p.Noted != nil {
+				notes = append(notes, p.Noted)
+			}
+		}
+	}
+	if len(notes) != 1 {
+		t.Fatalf("notes: %d", len(notes))
+	}
+	if len(notes[0].Paths) != 1 || notes[0].Paths[0] != "/w/y.go" {
+		t.Errorf("noted %+v: the file the command wrote is not news", notes[0])
+	}
+}
+
+// What the review of 2026-10-27 found: a file named by the start of a
+// longer name is not that file; a message sent while the agent works names
+// files too; an edit that failed wrote nothing; a command's own list of the
+// files it changed counts, beyond those whose patch is kept; and what Since
+// gives does not change under its reader.
+func TestClaudeNotedEdges(t *testing.T) {
+	c := NewClaude()
+	c.Feed(lines(
+		`{"type":"user","uuid":"u1","message":{"role":"user","content":"compare @web/a.ts.bak with the old one"}}`,
+		`{"type":"attachment","uuid":"f1","attachment":{"type":"file","filename":"/w/web/a.ts","displayPath":"web/a.ts","content":"…"}}`,
+		`{"type":"attachment","uuid":"f2","attachment":{"type":"file","filename":"/w/web/a.ts.bak","displayPath":"web/a.ts.bak","content":"…"}}`,
+	))
+	var paths []string
+	for _, e := range c.Since(0) {
+		for _, p := range e.Parts {
+			if p.Noted != nil {
+				paths = append(paths, p.Noted.Paths...)
+			}
+		}
+	}
+	if len(paths) != 1 || paths[0] != "web/a.ts.bak" {
+		t.Errorf("brought %q: only the file named is brought in", paths)
+	}
+
+	// A message sent while the agent works names files as any other does.
+	c2 := NewClaude()
+	c2.Feed(lines(
+		`{"type":"assistant","uuid":"a1","message":{"content":[{"type":"text","text":"working"}]}}`,
+		`{"type":"attachment","uuid":"q1","attachment":{"type":"queued_command","commandMode":"prompt","prompt":"also read @notes.md"}}`,
+		`{"type":"attachment","uuid":"f1","attachment":{"type":"file","filename":"/w/notes.md","displayPath":"notes.md","content":"…"}}`,
+	))
+	found := false
+	for _, e := range c2.Since(0) {
+		for _, p := range e.Parts {
+			if p.Noted != nil && p.Noted.Kind == "brought" && len(p.Noted.Paths) == 1 && p.Noted.Paths[0] == "notes.md" {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Error("a file named in a message sent mid-turn is not brought in")
+	}
+
+	// An edit that failed wrote nothing; a command's changedFiles count.
+	c3 := NewClaude()
+	c3.Feed(lines(
+		`{"type":"assistant","uuid":"a1","message":{"content":[{"type":"tool_use","id":"1","name":"Edit","input":{"file_path":"/w/x.go","old_string":"a","new_string":"b"}},{"type":"tool_use","id":"2","name":"Bash","input":{"command":"./fix.sh","description":"fix"}}]}}`,
+		`{"type":"user","uuid":"r1","message":{"content":[{"type":"tool_result","tool_use_id":"1","is_error":true,"content":"String not found"}]}}`,
+		`{"type":"user","uuid":"r2","toolUseResult":{"stdout":"","bashEditDiff":{"files":[],"changedFiles":["/w/y.go"],"moreFiles":0}},"message":{"content":[{"type":"tool_result","tool_use_id":"2","content":"ok"}]}}`,
+		`{"type":"attachment","uuid":"e1","attachment":{"type":"edited_text_file","filename":"/w/x.go","snippet":""}}`,
+		`{"type":"attachment","uuid":"e2","attachment":{"type":"edited_text_file","filename":"/w/y.go","snippet":""}}`,
+	))
+	var changed []string
+	for _, e := range c3.Since(0) {
+		for _, p := range e.Parts {
+			if p.Noted != nil {
+				changed = append(changed, p.Noted.Paths...)
+			}
+		}
+	}
+	if len(changed) != 1 || changed[0] != "/w/x.go" {
+		t.Errorf("changed %q: the edit that failed wrote nothing, the command wrote y.go", changed)
+	}
+
+	// What Since gave stays as it was given.
+	c4 := NewClaude()
+	c4.Feed(lines(`{"type":"attachment","uuid":"e1","attachment":{"type":"edited_text_file","filename":"/w/a.md","snippet":""}}`))
+	first := c4.Since(0)
+	c4.Feed(lines(`{"type":"attachment","uuid":"e2","attachment":{"type":"edited_text_file","filename":"/w/b.md","snippet":""}}`))
+	if len(first) != 1 || first[0].Parts[0].Noted == nil || len(first[0].Parts[0].Noted.Paths) != 1 {
+		t.Errorf("what Since gave changed under its reader: %+v", first[0].Parts[0].Noted)
+	}
+}
+
+// A reference ends where the sentence goes on, in Chinese as in English;
+// a command that wrote files and then failed wrote them all the same.
+func TestClaudeNotedSentenceAndFailedCommand(t *testing.T) {
+	c := NewClaude()
+	c.Feed(lines(
+		`{"type":"user","uuid":"u1","message":{"role":"user","content":"请读 @web/a.ts，然后说说 @b.md。"}}`,
+		`{"type":"attachment","uuid":"f1","attachment":{"type":"file","filename":"/w/web/a.ts","displayPath":"web/a.ts","content":"…"}}`,
+		`{"type":"attachment","uuid":"f2","attachment":{"type":"file","filename":"/w/b.md","displayPath":"b.md","content":"…"}}`,
+	))
+	var brought []string
+	for _, e := range c.Since(0) {
+		for _, p := range e.Parts {
+			if p.Noted != nil {
+				brought = append(brought, p.Noted.Paths...)
+			}
+		}
+	}
+	if len(brought) != 2 || brought[0] != "web/a.ts" || brought[1] != "b.md" {
+		t.Errorf("brought %q: a name ends where the sentence goes on", brought)
+	}
+
+	c2 := NewClaude()
+	c2.Feed(lines(
+		`{"type":"assistant","uuid":"a1","message":{"content":[{"type":"tool_use","id":"1","name":"Bash","input":{"command":"./build.sh","description":"build"}}]}}`,
+		`{"type":"user","uuid":"r1","toolUseResult":{"stdout":"","bashEditDiff":{"files":[],"changedFiles":["/w/gen.go"]}},"message":{"content":[{"type":"tool_result","tool_use_id":"1","is_error":true,"content":"exit 1"}]}}`,
+		`{"type":"attachment","uuid":"e1","attachment":{"type":"edited_text_file","filename":"/w/gen.go","snippet":""}}`,
+	))
+	for _, e := range c2.Since(0) {
+		for _, p := range e.Parts {
+			if p.Noted != nil {
+				t.Errorf("noted %+v: the command wrote it before it failed", p.Noted)
+			}
+		}
 	}
 }

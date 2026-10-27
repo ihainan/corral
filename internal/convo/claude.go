@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -63,8 +64,19 @@ type Claude struct {
 	// ranOut: told to have ended before what set it going was read (the
 	// log read from its middle, or a notice that came first).
 	ranOut map[string]bool
-	gone   []goneItem // removed from it, to arrive still (as queued_command): that arrival is of these
-	since  int64      // (unix milliseconds) what was queued before was to another process: not kept
+	// wrote: the files the agent itself wrote, a shell command's counted.
+	// Claude Code says a file changed whenever its modification time did,
+	// which is mostly the agent's own doing: only a change it did not
+	// make is news (see attached). said: the person's last message, read
+	// to tell the files they referred to from the ones a compaction
+	// brought back by itself.
+	wrote map[string]bool
+	said  string
+	// notedLast: the file the latest note of them named last, so that one
+	// reported twice running is named once even past maxNoted.
+	notedLast string
+	gone      []goneItem // removed from it, to arrive still (as queued_command): that arrival is of these
+	since     int64      // (unix milliseconds) what was queued before was to another process: not kept
 	// Skipped counts lines that were not JSON or of no use to the view.
 	Skipped int
 	orphans map[string]orphan // results whose call is not in what was read (see Prepend)
@@ -262,6 +274,11 @@ func since(entries []*Entry, rev int) []Entry {
 					t := *p.Tool
 					cp.Parts[i].Tool = &t
 				}
+				if p.Noted != nil {
+					n := *p.Noted
+					n.Paths = append([]string(nil), p.Noted.Paths...)
+					cp.Parts[i].Noted = &n
+				}
 			}
 			out = append(out, cp)
 		}
@@ -344,6 +361,15 @@ func (c *Claude) Prepend(other Parser) {
 		}
 		c.running[id] = r
 		c.runOrder = append([]string{id}, c.runOrder...)
+	}
+	// What the part before wrote is the agent's own doing as much (see
+	// attached). What it says of files already read stands: an attachment
+	// read then was answered by what was known then.
+	for p := range o.wrote {
+		c.wroteFile(p)
+	}
+	if len(c.entries) == 0 {
+		c.notedLast = o.notedLast // (its last note is the one to go on from)
 	}
 	if c.aiTitle == "" {
 		c.aiTitle = o.aiTitle
@@ -483,6 +509,12 @@ type claudeRow struct {
 		Prompt      json.RawMessage `json:"prompt"`
 		CommandMode string          `json:"commandMode"`
 		IsMeta      bool            `json:"isMeta"`
+		// A file this one is about: its whole path (Filename for a file
+		// that changed or was referred to, Path for a folder) and the
+		// path as Claude Code shows it.
+		Filename    string `json:"filename"`
+		Path        string `json:"path"`
+		DisplayPath string `json:"displayPath"`
 	} `json:"attachment"`
 }
 
@@ -519,9 +551,14 @@ func (c *Claude) line(b []byte) {
 			return
 		}
 	case "attachment":
-		if a := r.Attachment; a != nil && a.Type == "queued_command" && !a.IsMeta {
-			c.queued(&r)
-			return
+		if a := r.Attachment; a != nil {
+			if a.Type == "queued_command" && !a.IsMeta {
+				c.queued(&r)
+				return
+			}
+			if c.attached(&r) {
+				return
+			}
 		}
 	case "ai-title":
 		if t := strings.TrimSpace(clip(r.AITitle, maxTitle)); t != "" {
@@ -597,6 +634,7 @@ func (c *Claude) user(r *claudeRow) {
 		c.add(r, role, []Part{textPart(KindText, text)})
 		if role == RoleUser {
 			c.arrived(text)
+			c.wasSaid(text)
 		}
 		return
 	}
@@ -656,6 +694,7 @@ func (c *Claude) user(r *claudeRow) {
 	c.add(r, role, parts)
 	if role == RoleUser && len(parts) > 0 {
 		c.arrived(partsText(parts))
+		c.wasSaid(partsText(parts))
 	}
 	c.add(r, RoleNote, notes) // (Claude Code's own word that it was stopped, say)
 }
@@ -789,6 +828,7 @@ func (c *Claude) queued(r *claudeRow) {
 				if role == RoleUser && len(c.entries) > n {
 					c.mid()
 					c.arrived(text)
+					c.wasSaid(text)
 				}
 			}
 		}
@@ -823,6 +863,7 @@ func (c *Claude) queued(r *claudeRow) {
 	if len(c.entries) > n {
 		c.mid()
 		c.arrived(partsText(parts))
+		c.wasSaid(partsText(parts))
 	}
 }
 
@@ -835,6 +876,148 @@ func partsText(parts []Part) string {
 		}
 	}
 	return strings.Join(t, "\n")
+}
+
+// attached takes in an attachment row that is about a file: one Claude Code
+// found changed, or one the person referred to in what they wrote. It
+// answers whether the row was of use.
+//
+// Both come without being said in the conversation, so without them the
+// agent is seen acting on something nobody mentioned. Both are also
+// written for reasons no one would want to read:
+//   - Claude Code reports a file as changed whenever its modification time
+//     did, which is mostly the agent's own writing (a shell command's, which
+//     the turn already shows as its own edit): only a change it did not make
+//     is kept, and whose it is cannot be told (the person's, another
+//     session's, a formatter's).
+//   - It attaches a file for each one the person referred to, but also for
+//     every file a turn had read before a compaction, which nobody asked
+//     for: only those the person's last message names are kept.
+func (c *Claude) attached(r *claudeRow) bool {
+	a := r.Attachment
+	switch a.Type {
+	case "edited_text_file":
+		p, _ := cut(clean(a.Filename), maxDetail)
+		if p == "" || c.wrote[p] {
+			return false
+		}
+		return c.noted(r, "changed", p, "")
+	case "file", "directory":
+		whole := a.Filename
+		if whole == "" {
+			whole = a.Path
+		}
+		p, _ := cut(clean(whole), maxDetail)
+		show, _ := cut(clean(a.DisplayPath), maxDetail)
+		if p == "" && show == "" {
+			return false
+		}
+		if !c.referred(show) && !c.referred(p) {
+			return false
+		}
+		return c.noted(r, "brought", p, show)
+	}
+	return false
+}
+
+// referred: the person's last message named this file (as "@" and its path,
+// which is how Claude Code puts one in), the whole of it and not the start
+// of a longer name ("@x.go.bak" is not "x.go").
+func (c *Claude) referred(path string) bool {
+	if path == "" {
+		return false
+	}
+	for rest := c.said; ; {
+		i := strings.Index(rest, "@"+path)
+		if i < 0 {
+			return false
+		}
+		rest = rest[i+1+len(path):]
+		if rest == "" {
+			return true
+		}
+		if r, _ := utf8.DecodeRuneInString(rest); !isPathRune(r) {
+			return true
+		}
+	}
+}
+
+// isPathRune: a character a file's name goes on with (so that a match
+// ending in one is of a longer name). A letter or a digit of any script,
+// or one of the marks a path is written with: what follows a reference in
+// a sentence ("@x.go，再说" or "@x.go.") ends it.
+func isPathRune(r rune) bool {
+	switch r {
+	case '.', '/', '-', '_', '~', '+', '#', '@', '%', '=', '&':
+		return true
+	}
+	return unicode.IsLetter(r) || unicode.IsDigit(r)
+}
+
+// noted puts a file beside the ones a note before it named, where that note
+// is the latest thing read and of the same kind; else it makes the note.
+func (c *Claude) noted(r *claudeRow, kind, path, show string) bool {
+	if show == "" {
+		show = path
+	}
+	if n := c.lastNoted(kind); n != nil {
+		if c.notedLast == show {
+			return true
+		}
+		for _, had := range n.Paths {
+			if had == show {
+				return true
+			}
+		}
+		c.notedLast = show
+		if len(n.Paths) >= maxNoted {
+			n.More++
+		} else {
+			n.Paths = append(n.Paths, show)
+		}
+		c.entries[len(c.entries)-1].Rev = c.rev
+		return true
+	}
+	c.notedLast = show
+	c.add(r, RoleNote, []Part{{Kind: KindNoted, Noted: &Noted{Kind: kind, Paths: []string{show}}}})
+	return true
+}
+
+// lastNoted is the note of these files the log last gave, where it is the
+// latest entry and names files of the same kind.
+func (c *Claude) lastNoted(kind string) *Noted {
+	if len(c.entries) == 0 {
+		return nil
+	}
+	e := c.entries[len(c.entries)-1]
+	if e.Role != RoleNote || len(e.Parts) != 1 || e.Parts[0].Kind != KindNoted {
+		return nil
+	}
+	if n := e.Parts[0].Noted; n != nil && n.Kind == kind {
+		return n
+	}
+	return nil
+}
+
+// wasSaid keeps the person's message, to read the files it refers to from
+// (see attached). Only its start: a reference is typed, not pasted in bulk.
+func (c *Claude) wasSaid(text string) {
+	c.said, _ = cut(text, maxSaid)
+}
+
+// wroteFile remembers that the agent itself wrote a file (see attached).
+func (c *Claude) wroteFile(path string) {
+	if path == "" {
+		return
+	}
+	if c.wrote == nil {
+		c.wrote = map[string]bool{}
+	}
+	// (Full: a file written long ago may be reported as changed by someone
+	// else. One note too many beats dropping what the agent did.)
+	if len(c.wrote) < maxWrote {
+		c.wrote[path] = true
+	}
 }
 
 func (c *Claude) assistant(r *claudeRow) {
@@ -938,6 +1121,14 @@ func (c *Claude) result(b claudeBlock, account json.RawMessage) {
 		return
 	}
 	text, images, refs := resultText(b.Content)
+	// Every file the call wrote is the agent's own doing, whatever Claude
+	// Code reports later of that file having changed (see attached): the
+	// ones a command named as changed, beyond those whose patch is kept
+	// (a command that failed may have written them all the same), and the
+	// file an edit went through on.
+	for _, p := range wroteFiles(ref.t.Name, account, ref.t.Detail, b.IsError) {
+		c.wroteFile(p)
+	}
 	if !b.IsError {
 		ref.t.Add, ref.t.Del = madeLines(ref.t.Name, account, ref.t.Add, ref.t.Del)
 		if ref.t.Name == "Edit" || ref.t.Name == "MultiEdit" || ref.t.Name == "Write" {
@@ -1179,6 +1370,13 @@ func (c *Claude) setGoing(t *Tool, account json.RawMessage, at string) {
 // ended: what the agent was told of work it set going — that it has ended
 // (a status), or what it said of itself meanwhile (an event).
 func (c *Claude) ended(s string) {
+	// The file the work writes as it goes is the agent's own, however
+	// Claude Code later reports that file as changed (see attached).
+	if f := taskOutFile.FindStringSubmatch(s); f != nil {
+		if p, _ := cut(clean(strings.TrimSpace(f[1])), maxDetail); p != "" {
+			c.wroteFile(p)
+		}
+	}
 	m := taskID.FindStringSubmatch(s)
 	if m == nil {
 		return
@@ -1220,6 +1418,54 @@ func handbackReport(account json.RawMessage) string {
 		return ""
 	}
 	return clean(a.Report)
+}
+
+// wroteFiles are the files a call wrote, as Claude Code's account of it
+// says: the ones a command changed (all that it names, beyond those whose
+// patch is kept) and, for an edit that went through, the file it was of.
+func wroteFiles(name string, account json.RawMessage, path string, failed bool) []string {
+	var out []string
+	if !failed {
+		switch name {
+		case "Edit", "Write", "MultiEdit", "NotebookEdit":
+			if path != "" {
+				out = append(out, path)
+			}
+		}
+	}
+	if len(account) == 0 {
+		return out
+	}
+	var a struct {
+		Diff *struct {
+			Files []struct {
+				Path string `json:"filePath"`
+			} `json:"files"`
+			Changed []string `json:"changedFiles"`
+		} `json:"bashEditDiff"`
+	}
+	if json.Unmarshal(account, &a) != nil || a.Diff == nil {
+		return out
+	}
+	had := make(map[string]bool, len(a.Diff.Files)+len(a.Diff.Changed))
+	for _, p := range out {
+		had[p] = true
+	}
+	add := func(p string) {
+		p, _ = cut(clean(p), maxDetail)
+		if p == "" || had[p] || len(out) >= maxWrote {
+			return
+		}
+		had[p] = true
+		out = append(out, p)
+	}
+	for _, f := range a.Diff.Files {
+		add(f.Path)
+	}
+	for _, p := range a.Diff.Changed {
+		add(p)
+	}
+	return out
 }
 
 // bashFiles are the files a command changed, as Claude Code reports them
@@ -1424,6 +1670,7 @@ var (
 	taskID        = regexp.MustCompile(`(?s)<task-id>(.*?)</task-id>`)
 	crossSession  = regexp.MustCompile(`^\s*<cross-session-message[^>]*\bfrom-name="([^"]*)"`)
 	taskEvent     = regexp.MustCompile(`(?s)<event>(.*?)</event>`)
+	taskOutFile   = regexp.MustCompile(`(?s)<output-file>(.*?)</output-file>`)
 	commandName   = regexp.MustCompile(`(?s)<command-name>(.*?)</command-name>`)
 	commandArgs   = regexp.MustCompile(`(?s)<command-args>(.*?)</command-args>`)
 	tagContent    = regexp.MustCompile(`(?s)^\s*<([a-z-]+)>(.*?)</[a-z-]+>\s*$`)
@@ -1592,6 +1839,27 @@ func toolInput(name string, raw json.RawMessage) (title, detail, old, new string
 		return d(str("description")), d(str("prompt")), "", ""
 	case "Skill":
 		return "", d(str("skill")), "", ""
+	case "Monitor":
+		return d(str("description")), d(str("command")), "", ""
+	case "TaskStop":
+		return "", d(str("task_id")), "", ""
+	case "Artifact":
+		// Which of the tool's doings it is (publishing, when it does not say).
+		act := str("action")
+		if act == "" {
+			act = "publish"
+		}
+		return "", d(strings.TrimSpace(act + " " + told(in, "title", "file_path", "url", "type_url", "intent"))), "", ""
+	case "ArtifactData":
+		return "", d(strings.TrimSpace(str("action") + " " + told(in, "collection", "doc_id", "url"))), "", ""
+	case "SendMessage":
+		return d(str("to")), d(told(in, "summary", "message", "content")), "", ""
+	case "ScheduleWakeup":
+		return "", d(told(in, "reason", "prompt")), "", ""
+	case "CronCreate", "CronDelete", "CronList":
+		return "", d(strings.TrimSpace(str("cron") + " " + told(in, "prompt", "id"))), "", ""
+	case "ListAgents", "advisor":
+		return "", "", "", "" // (nothing of its own to say: its line is the verb)
 	case "TaskCreate", "TaskUpdate":
 		s := str("subject")
 		if name == "TaskUpdate" {
@@ -1628,7 +1896,59 @@ func toolInput(name string, raw json.RawMessage) (title, detail, old, new string
 		}
 		return "", d(strings.Join(qs, "\n")), "", ""
 	}
-	// Another tool (an MCP server's): its first text field, by name.
+	// An MCP server's tool: its own name (most of the whole one is the
+	// server's) and what it acts on. A browser's doing says "browser" on
+	// its line already, so its name keeps only the doing.
+	if _, tool, ok := mcpTool(name); ok {
+		tool = strings.TrimPrefix(tool, "browser_")
+		return "", d(strings.TrimSpace(tool + " " + anyText(in))), "", ""
+	}
+	// Another tool nothing here knows: what it acts on, if its input says.
+	return "", d(anyText(in)), "", ""
+}
+
+// mcpTool splits an MCP server's tool name (mcp__<server>__<tool>) into the
+// server and the tool's own name.
+func mcpTool(name string) (server, tool string, ok bool) {
+	rest, ok := strings.CutPrefix(name, "mcp__")
+	if !ok {
+		return "", "", false
+	}
+	i := strings.LastIndex(rest, "__")
+	if i <= 0 || i+2 >= len(rest) {
+		return "", rest, rest != ""
+	}
+	return rest[:i], rest[i+2:], true
+}
+
+// toldFirst are the fields that say what a call acts on, most telling
+// first: a tool nothing here knows is read by them before anything else
+// its input holds (which is how "engine", "level" or "colorScheme" used to
+// end up on the line).
+var toldFirst = []string{
+	"url", "path", "file_path", "filename", "file", "dir", "query", "q", "sql",
+	"command", "cmd", "text", "prompt", "message", "content", "summary", "name",
+	"app", "page_id", "doc_id", "id", "element", "key", "pattern", "regex",
+	"code", "function", "collection", "skill", "reason", "cron", "task_id",
+	"action", "kind", "intent",
+}
+
+// told is the first of the given fields the input holds.
+func told(in map[string]any, keys ...string) string {
+	for _, k := range keys {
+		if s, ok := in[k].(string); ok && strings.TrimSpace(s) != "" {
+			return s
+		}
+	}
+	return ""
+}
+
+// anyText is what an unknown tool's input says it acts on: the most telling
+// field it holds, else its first text field by name.
+func anyText(in map[string]any) string {
+	if s := told(in, toldFirst...); s != "" {
+		return s
+	}
 	keys := make([]string, 0, len(in))
 	for k := range in {
 		keys = append(keys, k)
@@ -1636,10 +1956,10 @@ func toolInput(name string, raw json.RawMessage) (title, detail, old, new string
 	sort.Strings(keys)
 	for _, k := range keys {
 		if s, ok := in[k].(string); ok && strings.TrimSpace(s) != "" {
-			return "", d(s), "", ""
+			return s
 		}
 	}
-	return "", "", "", ""
+	return ""
 }
 
 func textPart(kind, s string) Part {
