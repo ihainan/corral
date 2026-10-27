@@ -31,18 +31,16 @@ export function agentMark(program?: string): Mark | undefined {
 
 // The tile: size, its side in px. dot: a status to mark on its corner
 // (waiting for you, working, done), none at rest. Named for a screen
-// reader as the program (the rows say it nowhere else). quiet: what holds
-// it says what it is, so the tile says nothing of its own (its tooltip
-// would be the program's name over that).
-export function AgentIcon({ program, size = 28, dot, quiet }: { program?: string; size?: number; dot?: 'blocked' | 'working' | 'done'; quiet?: boolean }) {
+// reader as the program (the rows say it nowhere else).
+export function AgentIcon({ program, size = 28, dot }: { program?: string; size?: number; dot?: 'blocked' | 'working' | 'done' }) {
   const m = agentMark(program)
   const glyph = Math.round(size * 0.58)
   return (
     <span
       className={'agent-icon' + (m?.color ? '' : ' is-plain')}
       style={{ width: size, height: size, ['--agent-color' as string]: m?.color }}
-      title={quiet ? undefined : (m?.name ?? program)}
-      {...(program && !quiet ? { role: 'img', 'aria-label': m?.name ?? program } : { 'aria-hidden': true })}
+      title={m?.name ?? program}
+      {...(program ? { role: 'img', 'aria-label': m?.name ?? program } : { 'aria-hidden': true })}
     >
       {m ? (
         <svg viewBox="0 0 24 24" width={glyph} height={glyph} fill="currentColor" fillRule={m.even ? 'evenodd' : undefined} clipRule={m.even ? 'evenodd' : undefined} aria-hidden="true">

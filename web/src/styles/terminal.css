@@ -805,24 +805,6 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
   padding: 8px; border-right: 1px solid var(--term-line); background: var(--term-chrome); font-family: var(--font-ui);
 }
 .convo-side-keys { margin: auto 0 0; padding: 8px 10px 4px; font-size: 12px; color: var(--term-fg-3); }
-/* Folded: a rail of the agents' icons, to go to one without opening the list */
-/* (Wide enough that a scrollbar taking room of its own, with many agents,
-   still leaves the tiles their width; the rows take what there is.) */
-.convo-side.is-rail { width: 56px; padding: 8px 4px; align-items: center; scrollbar-width: thin; }
-.convo-side.is-rail::-webkit-scrollbar { width: 6px; }
-.convo-rail { display: flex; flex-direction: column; gap: 2px; width: 100%; }
-.convo-rail-row {
-  display: flex; align-items: center; justify-content: center; width: 100%; min-width: 0; height: 40px;
-  padding: 0; border: 0; border-radius: 8px; background: none; cursor: pointer;
-}
-/* (A finger wants 44px each way; where the scrollbar takes room of its own
-   the rail must be wider still to leave the row that much.) */
-@media (pointer: coarse) { .convo-side.is-rail { width: 64px; } .convo-rail-row { height: 44px; } }
-.convo-rail-row:hover { background: var(--term-hover); --dot-ring: var(--term-hover); }
-.convo-rail-row:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: -2px; }
-.convo-rail-row[aria-current='true'] { background: var(--term-accent-soft); --dot-ring: var(--term-accent-soft); }
-.convo-rail-row.is-unknown .agent-icon { opacity: 0.55; }
-.convo-side-btn { flex: none; align-self: center; width: 28px; height: 28px; margin: -4px 0 -4px -6px; }
 .convo-list-group { display: flex; flex-direction: column; gap: 1px; margin-bottom: 10px; }
 .convo-list-head { display: flex; gap: 6px; padding: 4px 10px; font-size: 12px; color: var(--term-fg-3); font-variant-numeric: tabular-nums; }
 .convo-list-row {
