@@ -3,9 +3,10 @@ import { session as tabStore } from '../storage'
 // The composer's memory: drafts by session, so one survives leaving the
 // terminal page and coming back, and what was sent, to bring back; and the
 // reply dialog's unsent answers. Any of them may hold secrets: drafts (with
-// the pastes they hold) are also kept in this browser tab's own storage, so a
-// reload keeps them and closing the tab ends them; the rest is in this page's
-// memory only. A change of account ends all of it.
+// the pastes they hold), and messages sent whose fate is not known yet, are
+// also kept in this browser tab's own storage, so a reload keeps them and
+// closing the tab ends them; the rest is in this page's memory only. A change
+// of account ends all of it.
 const drafts = new Map<string, string>()
 
 export const getDraft = (session: string) => drafts.get(session) ?? ''
@@ -22,6 +23,16 @@ export const sentHistory = (): readonly string[] => history
 export function remember(text: string) {
   if (!text.trim()) return
   history = [...history.filter((h) => h !== text), text].slice(-HISTORY_MAX)
+}
+
+// Messages sent from the agents page whose fate is not known yet (not seen
+// in the agent's log), by agent: kept with the drafts, so a reload does not
+// forget one that may never have gone. What each holds is the page's to say.
+let sent: Record<string, unknown[]> = {}
+export const keptSent = (): Readonly<Record<string, unknown[]>> => sent
+export function keepSent(all: Record<string, unknown[]>) {
+  sent = Object.fromEntries(Object.entries(all).filter(([, v]) => v.length))
+  saveSoon()
 }
 
 // Answers being typed to agents (the reply dialog), by session and pane.
@@ -96,8 +107,9 @@ export function draftsFor(uid: number | null) {
   pastes.clear()
   shown.clear()
   history = []
+  sent = {}
   owner = uid
-  let saved: { uid?: number; drafts?: Record<string, string>; pastes?: [string, string][]; n?: number } | null = null
+  let saved: { uid?: number; drafts?: Record<string, string>; pastes?: [string, string][]; n?: number; sent?: Record<string, unknown> } | null = null
   try {
     saved = JSON.parse(tabStore.get(STORE) ?? 'null')
   } catch {
@@ -110,13 +122,16 @@ export function draftsFor(uid: number | null) {
   for (const [k, v] of Object.entries(saved.drafts ?? {})) if (typeof v === 'string' && v) drafts.set(k, v)
   for (const p of saved.pastes ?? []) if (Array.isArray(p) && typeof p[0] === 'string' && typeof p[1] === 'string') pastes.set(p[0], p[1])
   if (Number.isInteger(saved.n)) pasteN = Math.max(pasteN, saved.n as number)
+  for (const [k, v] of Object.entries(saved.sent ?? {})) if (Array.isArray(v) && v.length) sent[k] = v
 }
 function save() {
   saveTimer = undefined
   if (owner === null) return
-  if (drafts.size === 0) return tabStore.remove(STORE)
+  if (drafts.size === 0 && Object.keys(sent).length === 0) return tabStore.remove(STORE)
   const held = [...pastes].filter(([l]) => [...drafts.values()].some((d) => d.includes(l)))
-  let out = JSON.stringify({ uid: owner, drafts: Object.fromEntries(drafts), pastes: held, n: pasteN })
+  // (Too much for it: what was sent goes first, then the pastes.)
+  let out = JSON.stringify({ uid: owner, drafts: Object.fromEntries(drafts), pastes: held, n: pasteN, sent })
+  if (out.length > STORE_MAX) out = JSON.stringify({ uid: owner, drafts: Object.fromEntries(drafts), pastes: held, n: pasteN })
   if (out.length > STORE_MAX) out = JSON.stringify({ uid: owner, drafts: Object.fromEntries(drafts), pastes: [], n: pasteN })
   tabStore.set(STORE, out)
 }

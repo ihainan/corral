@@ -8,7 +8,7 @@ import { isDark, setChromeColor, usePrefs } from '../prefs'
 import { local } from '../storage'
 import { CLOSE_MENUS, Menu, useToast } from '../components/ui'
 import { chromeVars, corralDark, corralLight } from '../terminal/themes'
-import { expandPastes, getDraft, keepDraft, keepPaste, remember, sentHistory } from '../terminal/drafts'
+import { expandPastes, getDraft, keepDraft, keepPaste, keepSent, keptSent, remember, sentHistory } from '../terminal/drafts'
 import { geminiPath, shellPath } from '../terminal/paths'
 import { useCompletion } from '../terminal/Completion'
 import { InlineReply } from '../terminal/ReplyDialog'
@@ -150,16 +150,21 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
   const waiting = !picked && !kept && !!pick && unsure && !gaveUp
   // Its session gone, its agent maybe coming back in another (a gateway
   // restarted, its sessions opened again one by one): for a while the pick
-  // stays, the first shown meanwhile; back, it is shown again.
-  const holding = !picked && !!pick && !pickedSession && !!keyOf(pick) && !gaveUp
+  // stays and nothing is shown in its place (another put there would be
+  // written to as if it were this one); back, it is shown again. Only one
+  // that was in front of the person: one remembered from before, never
+  // shown since, is given up at once, and the first is the pick.
+  const shownKey = useRef<string | undefined>(undefined) // (the last one shown: kept while none is)
+  const holding = !picked && !!pick && !pickedSession && !!keyOf(pick) && !gaveUp && shownKey.current === keyOf(pick)
   useEffect(() => {
     if (!waiting && !holding) return
     const timer = setTimeout(() => setGaveUp(true), 15000)
     return () => clearTimeout(timer)
   }, [waiting, holding, pick?.s, pick?.pane]) // (another waited for: its own while)
-  const cur = picked ?? kept ?? (sessions && !waiting ? entries[0] : undefined)
+  const cur = picked ?? kept ?? (sessions && !waiting && !holding ? entries[0] : undefined)
   useEffect(() => {
     lastCur.current = cur
+    if (cur && !(stack && screen === 'list')) shownKey.current = cur.key // (a phone's list: none of them is in front)
   })
   const choose = (e: Entry) => {
     setPick({ s: e.s.id, pane: e.pane, key: e.key })
@@ -215,11 +220,15 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
   // message to it is on its way: kept here, so going to another agent and
   // back loses neither (a second send of the same could follow).
   // So are its draft as shown, and the log's turns that confirmed one.
-  const [sentBy, setSentBy] = useState<Record<string, Sent[]>>({})
+  const [sentBy, setSentBy] = useState<Record<string, Sent[]>>(restoreSent)
+  useEffect(() => keepSent(sentBy), [sentBy])
   const [sendingBy, setSendingBy] = useState<Record<string, boolean>>({})
   const [draftBy, setDraftBy] = useState<Record<string, string>>({})
   const usedBy = useRef(new Map<string, Map<string, Set<number>>>())
-  // (Of agents gone: forgotten. A draft stays in drafts.ts's keeping.)
+  // (Of agents gone: forgotten. A draft stays in drafts.ts's keeping. What
+  // was sent and not seen yet is not: an agent out of the list may be back
+  // (a gateway restarted), and only its own process is shown what was sent
+  // to it; it goes a day on.)
   useEffect(() => {
     if (!sessions) return
     // (Kept while a herdr summary is missing or lost: its agents may only be out of the list for now.)
@@ -227,7 +236,10 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
     const keys = new Set(entries.map((e) => e.key))
     const live = (k: string) => keys.has(k)
     const prune = <T,>(all: Record<string, T>) => (Object.keys(all).every(live) ? all : Object.fromEntries(Object.entries(all).filter(([k]) => live(k))))
-    setSentBy(prune)
+    setSentBy((all) => {
+      const old = (p: Sent) => Date.now() - p.at >= SENT_KEPT_MS
+      return Object.values(all).some((ps) => ps.some(old)) ? Object.fromEntries(Object.entries(all).map(([k, ps]) => [k, ps.filter((p) => !old(p))]).filter(([, ps]) => ps.length)) : all
+    })
     setSendingBy(prune)
     setDraftBy(prune)
     for (const k of usedBy.current.keys()) if (!live(k)) usedBy.current.delete(k)
@@ -271,18 +283,24 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
   let body: ReactNode
   if (stack && screen === 'list' && sessions !== null && entries.length)
     body = <PhoneList entries={entries} all={sessions} titles={titles.current} onPick={choose} />
-  else if (!cur || (stack && screen === 'list'))
+  else if (!cur || (stack && screen === 'list')) {
+    const held = holding && !(stack && screen === 'list') // (a phone's list waits for none)
     body = (
       <div className="agents-chat-empty">
-        <p>{sessions === null ? (failed ? t('agents.failed') : t('common.loading')) : waiting ? t('common.loading') : t('agents.chatNone')}</p>
-        {sessions !== null && !waiting && (
+        <p>{sessions === null ? (failed ? t('agents.failed') : t('common.loading')) : waiting ? t('common.loading') : held ? t('agents.holding') : t('agents.chatNone')}</p>
+        {sessions !== null && held && (
+          <button type="button" className="btn btn-ghost" onClick={() => setGaveUp(true)}>
+            {t('agents.holdStop')}
+          </button>
+        )}
+        {sessions !== null && !waiting && !held && (
           <button type="button" className="btn btn-ghost" onClick={() => navigate('/')}>
             {t('agents.toHosts')}
           </button>
         )}
       </div>
     )
-  else {
+  } else {
     const k = cur.key // (its state by the agent, whichever connection shows it)
     body = (
       <AgentChat
@@ -324,14 +342,22 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
           </button>
           {bar}
         </header>
-      ) : (stack && screen === 'chat' && cur ? null : (
+      ) : stack && screen === 'chat' && cur ? null : stack && screen === 'chat' ? (
+        // (A phone's conversation, none shown in it: back to the list, as from one.)
+        <header className="term-bar">
+          <button type="button" className="icon-btn" onClick={toList} aria-label={t('agents.backToList')} title={t('agents.backToList')}>
+            <ChevronLeft size={20} />
+          </button>
+          <span className="agents-chat-title">{t('nav.agents')}</span>
+        </header>
+      ) : (
         <header className="term-bar">
           <button type="button" className="icon-btn" onClick={() => navigate('/')} aria-label={t('common.back')} title={t('common.back')}>
             <ChevronLeft size={20} />
           </button>
           <span className="agents-chat-title">{t('nav.agents')}</span>
         </header>
-      ))}
+      )}
       {/* (A list read before, not refreshed since: what it says may be past.) */}
       {failed && sessions !== null && (
         <p className="agents-chat-stale" role="status">
@@ -357,7 +383,28 @@ const keptTitle = (titles: Titles, e: Entry): string | undefined => {
 // (was: the draft it went from, when whether it went is not known: seen in the log, that draft goes.
 // afterTs: the time of the log's last entry when it went; read anew (other
 // seqs), only a turn after that can be it.)
-type Sent = ConvoPending & { bind: string; after: number; gen: number; at: number; was?: string; afterTs?: string }
+// (not: the log's turns another of the same words was found as, which are
+// not this one: kept with it, so a reload does not find this one there.)
+type Sent = ConvoPending & { bind: string; after: number; gen: number; at: number; was?: string; afterTs?: string; not?: string[] }
+
+// What was sent and not seen in the log yet, as this tab kept it (the page
+// reloaded meanwhile): looked for again in all of the log, by its time as
+// well as its text. One on its way when the page went is not known to have
+// gone: it is waited for as any other. (A day on, it is let go.)
+const SENT_KEPT_MS = 24 * 3600 * 1000
+const SENT_STATES: readonly string[] = ['sending', 'waiting', 'unseen', 'sent']
+function restoreSent(): Record<string, Sent[]> {
+  const out: Record<string, Sent[]> = {}
+  for (const [k, v] of Object.entries(keptSent())) {
+    const ps = (v as Partial<Sent>[])
+      .filter((p) => !!p && typeof p.id === 'number' && typeof p.text === 'string' && typeof p.bind === 'string' && typeof p.at === 'number' && Date.now() - p.at < SENT_KEPT_MS && SENT_STATES.includes(p.state as string))
+      // (A look at the screen under way when the page went is not asked again: the
+      // screen of a later moment says nothing of that one.)
+      .map((p) => ({ ...(p as Sent), state: p.state === 'sending' ? ('waiting' as const) : p.state!, look: p.look === 'looking' ? undefined : p.look, gen: -1, after: -Infinity }))
+    if (ps.length) out[k] = ps
+  }
+  return out
+}
 
 // Which messages the pane was already looked at for, by their id: kept for
 // the page's life, not the view's, so that leaving an agent and coming
@@ -596,6 +643,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     }
     const users = convo.entries.filter((e: ConvoEntry) => e.role === 'user')
     let changed = false
+    const taken: ConvoEntry[] = []
     const next = sent.flatMap((p) => {
       if (p.state === 'sent' || !ofThis(p.bind)) return [p]
       if (p.bind !== bindKey) {
@@ -608,9 +656,10 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
         changed = true
         p = { ...p, gen: convo.gen, after: -Infinity }
       }
-      const hit = users.find((e) => e.seq > p.after && !u.has(e.seq) && afterSend(e, p.at) && !(p.afterTs && e.ts && Date.parse(e.ts) <= Date.parse(p.afterTs)) && sameTurn(e, p.text))
+      const hit = users.find((e) => e.seq > p.after && !u.has(e.seq) && !p.not?.includes(e.id) && afterSend(e, p.at) && !(p.afterTs && e.ts && Date.parse(e.ts) <= Date.parse(p.afterTs)) && sameTurn(e, p.text))
       if (!hit) return [p]
       u.add(hit.seq)
+      if (hit.id) taken.push(hit)
       arrived.current.add(p.id)
       if (arrived.current.size > 200) arrived.current = new Set([...arrived.current].slice(-100))
       if (p.was !== undefined && getDraft(draftKey) === p.was) {
@@ -621,7 +670,14 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       changed = true
       return []
     })
-    if (changed) setSent(() => next)
+    // (Any other it would be found as is not that turn, after a reload too.)
+    const marked = taken.length
+      ? next.map((q) => {
+          const add = taken.filter((x) => !q.not?.includes(x.id) && sameTurn(x, q.text)).map((x) => x.id)
+          return add.length ? { ...q, not: [...(q.not ?? []), ...add].slice(-20) } : q
+        })
+      : next
+    if (changed) setSent(() => marked)
   }, [convo.entries, convo.gen, convo.status, sent, bindKey])
   useEffect(() => {
     const waiting = sent.filter((p) => p.state === 'waiting' && !queued.has(norm(p.text)))

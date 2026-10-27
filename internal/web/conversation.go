@@ -44,6 +44,7 @@ const (
 	convoStatesMax = 64               // conversation states kept at once
 	convoReadLimit = 15 * time.Second // a read the host has not answered by then is given up
 	convoLongMax   = 1 << 20          // a line longer than a read, once its images' data is left out, kept up to this
+	convoLongScan  = 32 << 20         // a line longer than an older part is read whole up to this (Codex's messages with images run to 11 MB)
 )
 
 // b64Strip leaves out of a line, written to it in parts, the base64 an
@@ -1426,8 +1427,11 @@ func convoTitleCommand(log, sid string) string {
 // readOlder reads in the part of the log before what was read: up to
 // convoOlderStep of it, from its first whole line (all of it, at the log's
 // start), parsed on its own and put before (convo.Claude.Prepend). A part
-// that is all one line (a pasted image) is passed over, the next request
-// goes on before it. Nothing once entries were dropped as too many.
+// that is all one line (a message with images, their data in it) is read
+// whole from where it begins, its images' data left out; one longer than
+// convoLongScan, or still too long without it, is passed over, and the
+// next request goes on before it. Nothing once entries were dropped as too
+// many.
 func (s *Server) readOlder(sess *term.Session, st *convoState) error {
 	if !st.older || st.from <= 0 || st.parser.Trimmed() {
 		return nil
@@ -1445,7 +1449,32 @@ func (s *Server) readOlder(sess *term.Session, st *convoState) error {
 		if start > 0 {
 			i := bytes.IndexByte(data, '\n')
 			if i < 0 || i+1 == len(data) {
-				st.from = start // (all one line, longer than the part, to its end: left out, on before it)
+				// (All one line, longer than the part. Its end, where what was
+				// read begins: read whole. Not that, the rest of one passed
+				// over as too long before: on before it.)
+				line, from := []byte(nil), start
+				if data[len(data)-1] == '\n' {
+					line, from, err = longLineBefore(c, st.log, start, data)
+					switch {
+					case errors.Is(err, errLogChanged):
+						return err
+					case err != nil:
+						// (Not read in time, say over a slow link: passed over as
+						// before, rather than the conversation failing with it.)
+						line, from = nil, start
+					default:
+						// (Shortened while it was read: what was read is not it.)
+						if fi, err := c.Stat(st.log); err != nil || fi.Size() < st.from {
+							return errLogChanged
+						}
+					}
+				}
+				if line != nil {
+					o := convo.New(st.agent)
+					o.Feed(line)
+					st.parser.Prepend(o)
+				}
+				st.from = from
 				st.older = st.from > 0
 				return nil
 			}
@@ -1458,6 +1487,59 @@ func (s *Server) readOlder(sess *term.Session, st *convoState) error {
 		st.older = st.from > 0
 		return nil
 	})
+}
+
+var errLogChanged = errors.New("the log changed under the read")
+
+// rangeReader reads part of a file (sftplite.Client's).
+type rangeReader interface {
+	ReadRange(p string, off int64, n int) ([]byte, error)
+}
+
+// longLineBefore reads in whole a line longer than an older part: tail is
+// its end, read from start, to its newline. Where it begins is looked for
+// before start (up to convoLongScan of the line), and it is put through
+// b64Strip from there. line nil where it is too long either way: from is
+// then where the look gave up, inside it (what is before that is read as
+// any older part is, the rest of this line not taken for one).
+func longLineBefore(c rangeReader, log string, start int64, tail []byte) (line []byte, from int64, err error) {
+	var parts [][]byte // (from where it begins, backwards: read once)
+	pos, size := start, int64(len(tail))
+	for pos > 0 {
+		if size >= convoLongScan {
+			return nil, pos, nil
+		}
+		n := min(pos, convoOlderStep, convoLongScan-size)
+		b, err := c.ReadRange(log, pos-n, int(n))
+		if err != nil {
+			return nil, 0, err
+		}
+		if int64(len(b)) != n {
+			return nil, 0, errLogChanged
+		}
+		pos -= n
+		size += n
+		if j := bytes.LastIndexByte(b, '\n'); j >= 0 {
+			parts = append(parts, b[j+1:])
+			pos += int64(j + 1)
+			break
+		}
+		parts = append(parts, b)
+	}
+	var strip b64Strip
+	out := make([]byte, 0, 64<<10)
+	for k := len(parts) - 1; k >= 0; k-- {
+		out = strip.write(out, parts[k])
+		parts[k] = nil
+		if len(out) > convoLongMax {
+			return nil, pos, nil
+		}
+	}
+	out = strip.end(strip.write(out, tail[:len(tail)-1]))
+	if len(out) > convoLongMax {
+		return nil, pos, nil
+	}
+	return append(out, '\n'), pos, nil
 }
 
 // convoProcStatus reads what Claude Code's file for the bound process says it
