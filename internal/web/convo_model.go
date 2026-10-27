@@ -123,7 +123,7 @@ func (p modelPicker) offered() []modelOpt {
 var modelKeys = map[string][2]string{
 	"down":  {"down", "Down"},
 	"up":    {"up", "Up"},
-	"left":  {"left", "Left"},  // (the effort slider: see convo_effort.go)
+	"left":  {"left", "Left"}, // (the effort slider: see convo_effort.go)
 	"right": {"right", "Right"},
 	"this":  {"s", "s"},
 	"esc":   {"esc", "Escape"},

@@ -722,6 +722,16 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .term-tab-agents { padding: 0 10px; }
 .term-tab-agents svg { flex: none; }
 
+/* A message typed into the pane that has not turned up in the log: what
+   its screen said when it did not */
+.convo-missing { margin: 6px 0 0; font-size: 12.5px; line-height: 18px; color: var(--term-fg-2); }
+.convo-missing p { margin: 0; }
+.convo-missing .link-btn { margin-top: 2px; font-size: 12.5px; }
+.convo-missing-screen {
+  margin: 6px 0 0; padding: 8px 10px; border-radius: 8px; max-height: 320px; overflow: auto;
+  background: var(--term-bg); color: var(--term-fg-2); font: 12px/17px var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere;
+}
+
 /* What went wrong: why the agent fell silent, or stopped mid-sentence */
 .convo-trouble {
   display: flex; align-items: flex-start; gap: 8px; margin: 6px 0; padding: 8px 10px; border-radius: 10px;

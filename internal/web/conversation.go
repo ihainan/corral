@@ -1721,7 +1721,10 @@ var convoKeys = map[string]struct {
 	"models":    {"convo.models", nil, nil},                              // (its picker read: see convo_model.go)
 	"model":     {"convo.model", nil, nil},
 	"effort":    {"convo.effort", nil, nil}, // (its slider: see convo_effort.go)
-	"send":      {"convo.send", nil, nil}, // (typed by convoSendCommand)
+	// Looking for a message that was typed and has not turned up in the
+	// log: nothing is pressed, the screen is read (see convo_sent.go).
+	"sent_missing": {"convo.sent_missing", nil, nil},
+	"send":         {"convo.send", nil, nil}, // (typed by convoSendCommand)
 }
 
 // screenMode reads the permission mode off the bottom of Claude Code's
@@ -1852,13 +1855,13 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		PID     int64  `json:"pid"`
 		Start   int64  `json:"start"`
 		Session string `json:"session"`
-		Text    string `json:"text"`  // (send)
+		Text    string `json:"text"`   // (send)
 		Model   string `json:"model"`  // (model: as the picker names it)
 		Effort  string `json:"effort"` // (effort: a level of effortLevels)
 	}
 	err := readJSON(r, &b)
 	text, textOK := sendText(b.Text)
-	if what != "send" {
+	if what != "send" && what != "sent_missing" {
 		textOK = b.Text == ""
 	}
 	if what == "model" && (b.Model == "" || len(b.Model) > 64 || strings.ContainsFunc(b.Model, func(r rune) bool { return r < 0x20 || r == 0x7f })) {
@@ -1999,6 +2002,12 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		release := turn
 		turn = func() {} // (convoEffort gives it back, once its steps have ended on the host)
 		s.convoEffort(w, ctx, sess, b.Pane, socket, b.PID, b.Start, b.Session, b.Effort, &outcome, &reason, release)
+		return
+	}
+	if what == "sent_missing" {
+		release := turn
+		turn = func() {} // (the screen read gives it back, once it has ended on the host)
+		s.sentMissing(w, ctx, sess, b.Pane, socket, text, &outcome, &reason, release)
 		return
 	}
 	// The check again and the typing or pressing, on the host in one go (see convoSendCommand).

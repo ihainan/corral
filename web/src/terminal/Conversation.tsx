@@ -46,6 +46,12 @@ export interface ConvoPending {
   id: number
   text: string
   state: 'sending' | 'waiting' | 'unseen' | 'sent'
+  // What the pane's screen said when the message had not turned up in the
+  // log: waiting (the words are in its input, so it was typed and not
+  // taken in), taken (the input no longer holds them), or neither, where
+  // the screen does not say. Undefined while it is still being looked at,
+  // or where it could not be read.
+  look?: { waiting: boolean; known: boolean; screen: string } | 'looking' | 'failed'
 }
 
 const HINT_AFTER = 20000 // working with nothing new this long: say why
@@ -378,6 +384,7 @@ export function ConversationView({
           <button type="button" className="link-btn" onClick={() => onDismiss(p.id)}>{t('common.close')}</button>
         )}
       </div>
+      {p.state === 'unseen' && <Missing look={p.look} />}
     </div>
   ))
   let body: ReactNode
@@ -1240,6 +1247,26 @@ function TroubleNote({ t: tr }: { t: ConvoTrouble }) {
           </button>
         )}
       </div>
+    </div>
+  )
+}
+
+// What became of a message that was typed and has not turned up in the
+// log, read off the pane's own screen when it did not: it settles whether
+// the words are still sitting in the input, which nothing else can say
+// afterwards. The screen is shown on a tap, since it is what was looked at.
+function Missing({ look }: { look?: ConvoPending['look'] }) {
+  const [open, setOpen] = useState(false)
+  if (!look) return null
+  if (look === 'looking') return <p className="convo-missing" role="status">{t('convo.missing.looking')}</p>
+  if (look === 'failed') return <p className="convo-missing">{t('convo.missing.failed')}</p>
+  return (
+    <div className="convo-missing">
+      <p>{t(!look.known ? 'convo.missing.unsure' : look.waiting ? 'convo.missing.waiting' : 'convo.missing.taken')}</p>
+      <button type="button" className="link-btn" aria-expanded={open} onClick={() => setOpen(!open)}>
+        {t(open ? 'convo.missing.hide' : 'convo.missing.show')}
+      </button>
+      {open && <pre className="convo-missing-screen">{look.screen}</pre>}
     </div>
   )
 }

@@ -359,6 +359,11 @@ const keptTitle = (titles: Titles, e: Entry): string | undefined => {
 // seqs), only a turn after that can be it.)
 type Sent = ConvoPending & { bind: string; after: number; gen: number; at: number; was?: string; afterTs?: string }
 
+// Which messages the pane was already looked at for, by their id: kept for
+// the page's life, not the view's, so that leaving an agent and coming
+// back does not ask the host the same thing again.
+const lookedAt = new Set<number>()
+
 // The conversation of one agent, and what is sent to it. Keyed by the
 // agent: nothing of another's (its draft, what was sent, a stop) carries over.
 function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerEnter, sent, setSent, sending, setSending, draft: shownDraft, setDraftShown, used, lead }: {
@@ -624,10 +629,28 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     const due = Math.min(...waiting.map((p) => p.at)) + PENDING_MS - Date.now()
     const timer = setTimeout(() => {
       const late = (p: Sent) => p.state === 'waiting' && Date.now() - p.at >= PENDING_MS && !queuedRef.current.has(norm(p.text))
-      setSent((ps) => (ps.some(late) ? ps.map((p) => (late(p) ? { ...p, state: 'unseen' as const } : p)) : ps))
+      setSent((ps) => (ps.some(late) ? ps.map((p) => (late(p) ? { ...p, state: 'unseen' as const, look: 'looking' as const } : p)) : ps))
     }, Math.max(0, due) + 50)
     return () => clearTimeout(timer)
   }, [sent, queued])
+  // A message that has not turned up in the log: the pane's screen is read
+  // once, there and then, which is the only moment that can say whether the
+  // words are still sitting in its input. (Afterwards nothing can.)
+  // (Which were asked after is kept outside this page: going to another
+  // agent and back builds it anew, and the same read must not go twice.)
+  useEffect(() => {
+    for (const p of sent) {
+      if (p.look !== 'looking' || lookedAt.has(p.id) || !convo.bind || !ofThis(p.bind)) continue
+      lookedAt.add(p.id)
+      if (lookedAt.size > 200) for (const q of [...lookedAt].slice(0, 100)) lookedAt.delete(q)
+      const bind = bindKey // (the answer is of that conversation, not of whichever is open when it comes)
+      const at = (look: ConvoPending['look']) => setSent((ps) => ps.map((q) => (q.id === p.id && q.bind === bind ? { ...q, look } : q)))
+      api<{ screen: string; waiting: boolean; known: boolean }>('POST', `/api/sessions/${sid}/conversation/sent-missing`, { ...pressBody(), text: p.text }, { timeoutMs: PRESS_MS })
+        .then((r) => at({ waiting: r.waiting, known: r.known, screen: r.screen }))
+        .catch(() => at('failed'))
+    }
+  }, [sent, convo.bind, sid, bindKey])
+
   const shownSent = sent.filter((p) => ofThis(p.bind) && !(p.state !== 'sent' && queued.has(norm(p.text))))
 
   // The composer: its draft kept per agent (as the terminal's per session;
