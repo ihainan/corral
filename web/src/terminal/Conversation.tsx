@@ -856,6 +856,12 @@ const DAYS: { name: I18nKey; of: (since: number, today: number, yesterday: numbe
   { name: 'convo.group.earlier', of: (since, _, yesterday) => since > 0 && since < yesterday },
   { name: 'convo.group.other', of: (since) => since <= 0 },
 ]
+// The groups of old ones that are folded when long, and how many of such
+// a group are shown unfolded. (Today's and yesterday's are not: they are
+// what the person is at, and are short.)
+const FOLDED: I18nKey[] = ['convo.group.earlier', 'convo.group.other']
+const foldAt = 5
+
 const dayStart = (now: number) => new Date(now).setHours(0, 0, 0, 0)
 const dayBefore = (start: number) => {
   const d = new Date(start)
@@ -905,6 +911,9 @@ function AgentList({ rows, onPicked, placed }: { rows: ConvoListRow[]; onPicked?
     const timer = setInterval(() => setNow(Date.now()), 30000)
     return () => clearInterval(timer)
   }, [])
+  // Which of the long groups are opened out (by their name; shut again at
+  // a tap, and shut when the list is drawn anew).
+  const [open, setOpen] = useState<string[]>([])
   const at = (r: ConvoListRow) => placed?.get(r.key) ?? r
   // (Placed: in their order then, ties too; new ones after.)
   const first = placed ? [...placed.keys()] : []
@@ -920,13 +929,22 @@ function AgentList({ rows, onPicked, placed }: { rows: ConvoListRow[]; onPicked?
   return (
     <>
       {groups.map((g) => {
-        const of = g.of.map((p) => rows.find((r) => r.key === p.key)!)
-        if (!of.length) return null
+        const all = g.of.map((p) => rows.find((r) => r.key === p.key)!)
+        if (!all.length) return null
+        // The old ones are many and seldom wanted: a few of them are shown
+        // and the rest wait behind a tap. The one being read stays shown
+        // wherever in the group it is, so going to it never hides it, and
+        // the group can still be shut around it.
+        const long = FOLDED.includes(g.name) && all.length > foldAt
+        const shut = long && !open.includes(g.name)
+        const of = shut ? all.filter((r, i) => i < foldAt || r.current) : all
+        const rest = all.length - of.length
+        const folds = shut && rest > 0
         return (
           <div key={g.name} className="convo-list-group" role="group" aria-label={t(g.name)}>
             <div className="convo-list-head">
               {t(g.name)}
-              <span>{of.length}</span>
+              <span>{all.length}</span>
             </div>
             {of.map((r) => {
               // (At rest, nothing to say of it but when.)
@@ -957,6 +975,16 @@ function AgentList({ rows, onPicked, placed }: { rows: ConvoListRow[]; onPicked?
                 </button>
               )
             })}
+            {(folds || (long && !shut)) && (
+              <button
+                type="button"
+                className="convo-list-more"
+                aria-expanded={!folds}
+                onClick={() => setOpen((o) => (folds ? [...o, g.name] : o.filter((n) => n !== g.name)))}
+              >
+                {folds ? t('convo.group.more', { n: rest }) : t('convo.group.less')}
+              </button>
+            )}
           </div>
         )
       })}

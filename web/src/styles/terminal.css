@@ -808,7 +808,7 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-list-group { display: flex; flex-direction: column; gap: 1px; margin-bottom: 10px; }
 .convo-list-head { display: flex; gap: 6px; padding: 4px 10px; font-size: 12px; color: var(--term-fg-3); font-variant-numeric: tabular-nums; }
 .convo-list-row {
-  display: flex; align-items: center; gap: 10px; width: 100%; padding: 7px 10px; border: 0; border-radius: 8px;
+  display: flex; align-items: flex-start; gap: 10px; width: 100%; padding: 7px 10px; border: 0; border-radius: 8px;
   background: none; color: var(--term-fg); font: inherit; text-align: left; cursor: pointer;
 }
 .convo-list-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
@@ -825,15 +825,34 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
   overflow: hidden; overflow-wrap: anywhere;
 }
 .convo-list-when { flex: none; min-width: 4.6em; text-align: end; font-size: 11.5px; color: var(--term-fg-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
-.convo-list-row[aria-current='true'] .convo-list-title { color: var(--term-accent-text); font-weight: 600; }
-.convo-list-sub { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 12px; line-height: 18px; color: var(--term-fg-3); overflow: hidden; }
-.convo-list-sub > span:not(.convo-list-where) { flex: none; white-space: nowrap; }
-.convo-list-where {
-  min-width: 0; color: var(--term-fg-2);
+/* The one being read is marked by its colour alone: heavier letters take
+   more room, and a name that just fitted one line would wrap on going to
+   it, growing the row under the finger. */
+.convo-list-row[aria-current='true'] .convo-list-title { color: var(--term-accent-text); }
+/* Where the system paints the colours instead (high contrast), both the
+   tint and those letters are gone: an outline marks it there, taking no
+   room of its own and so moving nothing. */
+@media (forced-colors: active) {
+  .convo-list-row[aria-current='true'] { outline: 2px solid Highlight; outline-offset: -2px; }
+}
+/* One paragraph, not a row of boxes: how it is going and what the agent
+   called it read on together, and a second line begins where the first
+   did instead of under the middle of the line above. */
+.convo-list-sub {
+  min-width: 0; font-size: 12px; line-height: 18px; color: var(--term-fg-3);
   display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2;
   overflow: hidden; overflow-wrap: anywhere;
 }
-.convo-list-sub > span + .convo-list-where::before { content: '·'; margin-right: 6px; }
+.convo-list-sub > span:not(.convo-list-where) { white-space: nowrap; }
+.convo-list-where { color: var(--term-fg-2); }
+.convo-list-sub > span + .convo-list-where::before { content: '·'; margin: 0 6px; }
+/* The rest of a long group of old ones, behind a tap */
+.convo-list-more {
+  align-self: flex-start; padding: 4px 10px; margin-top: 1px; border: 0; border-radius: 8px;
+  background: none; color: var(--term-fg-3); font: 12px/18px var(--font-ui); text-align: left; cursor: pointer;
+}
+.convo-list-more:hover { background: var(--term-hover); color: var(--term-fg-2); }
+.convo-list-more:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: -2px; }
 .convo-spin.is-small { width: 9px; height: 9px; margin: 0; border-width: 1.5px; flex: none; }
 @media (pointer: coarse) { .convo-list-row { padding: 10px 12px; } }
 .convo-nudge {

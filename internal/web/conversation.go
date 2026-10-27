@@ -321,6 +321,34 @@ type convoCand struct {
 	wrote    int64 // when it was last written to (unix milliseconds; 0 when not known)
 }
 
+// procWrote is when the process last wrote to its log, as the list of
+// agents is told when each was last at work (see agentTimes.wrote).
+//
+// A Codex begun by the npm package keeps no log open: its app-server
+// daemon holds the logs of the conversations it runs, so the process
+// itself has none to go by. It is told instead by the last written of the
+// conversations that daemon holds which were begun where this Codex runs
+// and after it started — as its own conversation is picked out (see
+// daemonLog). A daemon holds the logs of conversations long over as well,
+// and one of those says nothing of what this Codex has been at. Where
+// several Codex run in one place this is one time for all of them: enough
+// to say what day they were last at, which is all the list asks of it.
+func procWrote(p convoProc, cands []convoCand) int64 {
+	if p.wrote > 0 || p.agent != "codex" || p.cwd == "" || p.started <= 0 {
+		return p.wrote
+	}
+	var wrote int64
+	for _, c := range cands {
+		if c.cwd != p.cwd || c.began <= 0 || c.began+convoBeganSlack < p.started {
+			continue
+		}
+		if c.wrote > wrote {
+			wrote = c.wrote
+		}
+	}
+	return wrote
+}
+
 // unescapeJSON reads a string as JSON wrote it (a path with a quote, a
 // backslash or a newline in it); what is no JSON string is kept as it is.
 func unescapeJSON(s string) string {

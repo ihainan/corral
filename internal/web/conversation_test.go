@@ -395,3 +395,45 @@ func TestConvoClaimsNoRoom(t *testing.T) {
 		t.Error("taken although there was no room for it")
 	}
 }
+
+// A Codex whose log its app-server daemon keeps is still told when it was
+// last at work: by the conversations the daemon holds that were begun
+// where it runs and after it started. One left there by a Codex that has
+// ended says nothing of this one, another place's does not count, and no
+// other agent is told this way.
+func TestProcWroteFromDaemonLogs(t *testing.T) {
+	const started = 1_700_000_000_000
+	cands := []convoCand{
+		{log: "/home/u/.codex/sessions/a.jsonl", cwd: "/w", began: started + 10_000, wrote: started + 100_000},
+		{log: "/home/u/.codex/sessions/b.jsonl", cwd: "/w", began: started + 20_000, wrote: started + 900_000},
+		{log: "/home/u/.codex/sessions/old.jsonl", cwd: "/w", began: started - 600_000, wrote: started + 5_000_000},
+		{log: "/home/u/.codex/sessions/c.jsonl", cwd: "/elsewhere", began: started + 10_000, wrote: started + 9_000_000},
+	}
+	codex := func(cwd string) convoProc { return convoProc{agent: "codex", cwd: cwd, started: started} }
+	own := codex("/w")
+	own.wrote = started + 500_000
+	none := codex("/w")
+	none.started = 0
+	for _, c := range []struct {
+		name string
+		proc convoProc
+		want int64
+	}{
+		{"its own log's time stands", own, started + 500_000},
+		{"none of its own: the last written since it started", codex("/w"), started + 900_000},
+		{"none begun where it runs", codex("/nowhere"), 0},
+		{"where it runs is not known", codex(""), 0},
+		{"when it started is not known", none, 0},
+		{"Claude Code keeps its own log", convoProc{agent: "claude", cwd: "/w", started: started}, 0},
+	} {
+		if got := procWrote(c.proc, cands); got != c.want {
+			t.Errorf("%s: wrote %d, want %d", c.name, got, c.want)
+		}
+	}
+	// One begun before it started was left by a Codex that has ended: it
+	// is no word on this one, however lately it was written.
+	late := codex("/w")
+	if got := procWrote(late, cands[2:3]); got != 0 {
+		t.Errorf("a log left by one that ended: wrote %d, want 0", got)
+	}
+}
