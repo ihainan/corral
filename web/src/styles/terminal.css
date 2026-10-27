@@ -834,11 +834,23 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-list-row:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: -2px; }
 .convo-list-row[aria-current='true'] { background: var(--term-accent-soft); --dot-ring: var(--term-accent-soft); }
 .convo-list-line { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
-.convo-list-title { flex: 1; min-width: 0; font-size: 14px; font-weight: 500; line-height: 20px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.convo-list-when { flex: none; font-size: 11.5px; color: var(--term-fg-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* Two lines: a title's telling part is mostly its end (the project it is
+   of comes first), and one line holds about 14 characters of Chinese
+   against a median title of 20. */
+.convo-list-title {
+  flex: 1; min-width: 0; font-size: 14px; font-weight: 500; line-height: 20px;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2;
+  overflow: hidden; overflow-wrap: anywhere;
+}
+.convo-list-when { flex: none; min-width: 4.6em; text-align: end; font-size: 11.5px; color: var(--term-fg-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .convo-list-row[aria-current='true'] .convo-list-title { color: var(--term-accent-text); font-weight: 600; }
-.convo-list-sub { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 12px; line-height: 18px; color: var(--term-fg-3); white-space: nowrap; overflow: hidden; }
-.convo-list-where { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--term-fg-2); }
+.convo-list-sub { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 12px; line-height: 18px; color: var(--term-fg-3); overflow: hidden; }
+.convo-list-sub > span:not(.convo-list-where) { flex: none; white-space: nowrap; }
+.convo-list-where {
+  min-width: 0; color: var(--term-fg-2);
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2;
+  overflow: hidden; overflow-wrap: anywhere;
+}
 .convo-list-sub > span + .convo-list-where::before { content: '·'; margin-right: 6px; }
 .convo-spin.is-small { width: 9px; height: 9px; margin: 0; border-width: 1.5px; flex: none; }
 @media (pointer: coarse) { .convo-list-row { padding: 10px 12px; } }

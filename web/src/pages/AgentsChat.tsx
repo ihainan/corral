@@ -420,8 +420,16 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       }
       if (e.row) {
         const r = e.row
-        const title = (current && agent?.title) || keptTitle(titles, e) || paneTitle(r.a.title) || r.a.agent
-        return { key: e.key, title, where: whereOf(e, hosts), program: r.a.agent, status: current && agent ? agent.status : r.status, since: r.lost ? undefined : r.a.since, current, onPick: () => onPick(e) }
+        const said = (current && agent?.title) || keptTitle(titles, e) || paneTitle(r.a.title) || r.a.agent
+        // The person's own name for it goes first, where there is one: a
+        // workspace they named says what the work is better than the name
+        // the agent gave the session, and it does not change under them.
+        // What the agent called it goes under it. (A session that is not
+        // in a workspace of its own has no such name: see whereOf.)
+        const ws = r.ws && r.ws !== '~' ? r.ws : ''
+        const host = hosts > 1 ? e.s.host_name : ''
+        const under = [host, said !== ws ? said : '', agentMark(r.a.agent) ? '' : r.a.agent].filter(Boolean).join(' · ')
+        return { key: e.key, title: ws || said, where: ws ? under : whereOf(e, hosts), program: r.a.agent, status: current && agent ? agent.status : r.status, since: r.lost ? undefined : r.a.since, current, onPick: () => onPick(e) }
       }
       const title = (current && agent?.title) || keptTitle(titles, e) || `${e.s.host_name} · ${sessionWhich(e.s, all)}`
       return { key: e.key, title, where: whereOf(e, hosts), program: current ? agent?.program : undefined, status: current && agent ? agent.status : 'unknown', current, onPick: () => onPick(e) }

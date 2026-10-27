@@ -959,7 +959,7 @@ function AgentList({ rows, onPicked, placed }: { rows: ConvoListRow[]; onPicked?
                   }}
                 >
                   <AgentIcon program={r.program} size={30} dot={said ? (r.status as 'blocked' | 'working' | 'done') : undefined} />
-                  <span className="convo-list-text">
+                  <span className="convo-list-text" title={[r.title, r.where].filter(Boolean).join(' · ')}>
                     <span className="convo-list-line">
                       <span className="convo-list-title">{r.title}</span>
                       {since && <span className="convo-list-when">{since}</span>}
