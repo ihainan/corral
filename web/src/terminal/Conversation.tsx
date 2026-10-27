@@ -1,12 +1,12 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { ArrowDown, Check, ChevronDown, ChevronRight, ChevronsUpDown, GitBranch, Loader, PanelLeft, X } from 'lucide-react'
+import { ArrowDown, Check, ChevronDown, ChevronRight, ChevronsUpDown, GitBranch, Loader, PanelLeft, TriangleAlert, X } from 'lucide-react'
 import { t, getLang, type I18nKey } from '../i18n'
 import { copyText, isCoarse } from '../components/ui'
 import { local } from '../storage'
 import { Markdown } from './markdown'
 import { Code } from './Code'
 import { AgentIcon } from './agentIcons'
-import type { Convo, ConvoEntry, ConvoHunk, ConvoMeta, ConvoPart, ConvoQueued, ConvoRunning, ConvoTask, ConvoTool } from './conversation'
+import type { Convo, ConvoEntry, ConvoHunk, ConvoMeta, ConvoPart, ConvoQueued, ConvoRunning, ConvoTask, ConvoTool, ConvoTrouble } from './conversation'
 import { category, isNote, items, ms, partTime, sameEdits, toolName, verbOf, type Category, type Edits, type Item, type Verb } from './convoItems'
 
 // The conversation view: the agent's log as turns, over the terminal (which
@@ -1150,7 +1150,7 @@ const ListItem = memo(
       case 'user':
         return <UserTurn e={it.e} onCopy={copy} />
       case 'note':
-        return <p className="convo-note">{noteText(it.e)}</p>
+        return it.e.parts[0]?.trouble ? <TroubleNote key={troubleKey(it.e.parts[0].trouble!)} t={it.e.parts[0].trouble!} /> : <p className="convo-note">{noteText(it.e)}</p>
       case 'summary':
         return (
           <details className="convo-summary">
@@ -1194,6 +1194,54 @@ function sameItem(a: Item, b: Item): boolean {
     default:
       return a.e === (b as typeof a).e
   }
+}
+
+// What went wrong, where the thread would otherwise show nothing: why the
+// agent fell silent, or stopped mid-sentence. Its own words, where it had
+// any, are behind a tap: they can run long and are often in English.
+// (A trouble is told from another by what it is of, so that a log read
+// anew does not leave the one in its place opened out.)
+const troubleKey = (tr: ConvoTrouble) => [tr.kind, tr.name ?? '', tr.status ?? '', (tr.text ?? '').slice(0, 40)].join('|')
+
+function TroubleNote({ t: tr }: { t: ConvoTrouble }) {
+  const [open, setOpen] = useState(false)
+  const said = (tr.text ?? '').trim()
+  let head: string
+  switch (tr.kind) {
+    case 'refused':
+      head = tr.again && tr.name ? t('convo.trouble.refusedAgain', { m: modelName(tr.name) }) : t('convo.trouble.refused')
+      break
+    case 'api':
+      head = tr.status ? t('convo.trouble.apiStatus', { n: tr.status }) : t('convo.trouble.api')
+      break
+    case 'cut':
+      head = t('convo.trouble.cut')
+      break
+    default: {
+      const why = tr.secs ? t('convo.trouble.hookTimedOut', { n: tr.secs }) : tr.status ? t('convo.trouble.hookExit', { n: tr.status }) : ''
+      head = tr.name ? t('convo.trouble.hook', { h: tr.name + (why ? ' · ' + why : '') }) : why ? t('convo.trouble.hook', { h: why }) : t('convo.trouble.hookPlain')
+      if (tr.again && !tr.name) head = t('convo.trouble.hookStopped')
+    }
+  }
+  return (
+    <div className={'convo-trouble is-' + tr.kind}>
+      <TriangleAlert size={14} aria-hidden="true" />
+      <div className="convo-trouble-body">
+        <p className="convo-trouble-head">{head}</p>
+        {said && open && (
+          <p className="convo-trouble-said">
+            {said}
+            {tr.cut && <span className="convo-trouble-cut">{t('convo.trouble.cut.more')}</span>}
+          </p>
+        )}
+        {said && (
+          <button type="button" className="link-btn" aria-expanded={open} onClick={() => setOpen(!open)}>
+            {t(open ? 'convo.trouble.less' : 'convo.trouble.more')}
+          </button>
+        )}
+      </div>
+    </div>
+  )
 }
 
 const noShow = () => {}
@@ -1349,7 +1397,7 @@ function Work({ it, open, onToggle, onCopy }: { it: Extract<Item, { kind: 'work'
               s.role === 'summary' ? (
                 <ListItem key={i} it={{ kind: 'summary', e: s }} copy={onCopy} open={false} onToggle={onToggle} onShow={noShow} />
               ) : (
-                <p key={i} className="convo-note">{noteText(s)}</p>
+                s.parts[0]?.trouble ? <TroubleNote key={i + ':' + troubleKey(s.parts[0].trouble!)} t={s.parts[0].trouble!} /> : <p key={i} className="convo-note">{noteText(s)}</p>
               )
             ) : s.tool ? (
               <ToolRow key={i} tool={s.tool} onCopy={onCopy} live={s === busy} />

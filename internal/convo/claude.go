@@ -511,10 +511,21 @@ type claudeRow struct {
 	GitBranch        *string         `json:"gitBranch"` // (present and empty: not on a branch)
 	PermissionMode   string          `json:"permissionMode"`
 	Effort           string          `json:"effort"` // (assistant rows: how hard it was asked to think)
-	Message          *struct {
-		Content json.RawMessage `json:"content"`
-		Model   string          `json:"model"`
-		Usage   *struct {
+	// What went wrong, on the rows that say so (see trouble).
+	OriginalModel         string   `json:"originalModel"`
+	FallbackModel         string   `json:"fallbackModel"`
+	APIRefusalExplanation string   `json:"apiRefusalExplanation"`
+	HookErrors            []string `json:"hookErrors"`
+	PreventedContinuation bool     `json:"preventedContinuation"`
+	// Error is an object on the rows that carry one, and a word on others
+	// ("error":"rate_limit", with what was said in the message): read as
+	// it comes, so neither kind costs the row it is on.
+	Error   json.RawMessage `json:"error"`
+	Message *struct {
+		Content    json.RawMessage `json:"content"`
+		Model      string          `json:"model"`
+		StopReason string          `json:"stop_reason"`
+		Usage      *struct {
 			Input      int64 `json:"input_tokens"`
 			CacheWrite int64 `json:"cache_creation_input_tokens"`
 			CacheRead  int64 `json:"cache_read_input_tokens"`
@@ -531,6 +542,15 @@ type claudeRow struct {
 		Filename    string `json:"filename"`
 		Path        string `json:"path"`
 		DisplayPath string `json:"displayPath"`
+		// A hook of the person's this one is about: which it is, what it
+		// said, and what became of it.
+		HookName   string `json:"hookName"`
+		HookEvent  string `json:"hookEvent"`
+		Stderr     string `json:"stderr"`
+		ExitCode   int    `json:"exitCode"`
+		TimedOut   bool   `json:"timedOut"`
+		TimeoutMs  int64  `json:"timeoutMs"`
+		DurationMs int64  `json:"durationMs"`
 		// Background work this one is about (a "task_status" row): which,
 		// how it stands, and the latest it has said of itself.
 		TaskID       string `json:"taskId"`
@@ -604,6 +624,10 @@ func (c *Claude) line(b []byte) {
 					c.add(&r, RoleUser, []Part{textPart(KindText, text)})
 				}
 			}
+			return
+		}
+		if t := c.systemTrouble(&r); t != nil {
+			c.add(&r, RoleNote, []Part{{Kind: KindTrouble, Trouble: t}})
 			return
 		}
 	}
@@ -916,6 +940,10 @@ func partsText(parts []Part) string {
 //     for: only those the person's last message names are kept.
 func (c *Claude) attached(r *claudeRow) bool {
 	a := r.Attachment
+	if t := hookTrouble(a.Type, a.HookName, a.HookEvent, a.Stderr, a.ExitCode, a.TimedOut, a.TimeoutMs); t != nil {
+		c.add(r, RoleNote, []Part{{Kind: KindTrouble, Trouble: t}})
+		return true
+	}
 	switch a.Type {
 	case "edited_text_file":
 		p, _ := cut(clean(a.Filename), maxDetail)
@@ -1089,6 +1117,12 @@ func (c *Claude) assistant(r *claudeRow) {
 		}
 	}
 	c.add(r, RoleAssistant, parts)
+	// An answer that ran into the model's limit stops mid-sentence with
+	// nothing said of why: a note after it says so. (One stopped by the
+	// model's safeguards has a row of its own: see systemTrouble.)
+	if r.Message.StopReason == "max_tokens" {
+		c.add(r, RoleNote, []Part{{Kind: KindTrouble, Trouble: &Trouble{Kind: TroubleCut}}})
+	}
 	for _, b := range results {
 		c.result(b, nil)
 	}
@@ -2082,4 +2116,90 @@ func cut(s string, n int) (string, bool) {
 func clip(s string, n int) string {
 	s, _ = cut(clean(s), n)
 	return s
+}
+
+// What went wrong that the thread would otherwise not show at all. Claude
+// Code writes each of these as a row of its own and says it on the screen;
+// without them the agent is seen falling silent, or answering half a
+// sentence, with nothing said of why.
+//
+// (An answer stopped by the model's safeguards also has stop_reason
+// "refusal" and no words in it; of 13 sessions where that happened, every
+// one had the system row too, so that row alone is shown.)
+func (c *Claude) systemTrouble(r *claudeRow) *Trouble {
+	switch r.Subtype {
+	case "model_refusal_fallback", "model_refusal_no_fallback":
+		// (Its own words first, as Claude Code shows them; else what the
+		// interface said of it.)
+		text := ""
+		var said string
+		if json.Unmarshal(r.Content, &said) == nil {
+			text = strings.TrimSpace(said)
+		}
+		if text == "" {
+			text = strings.TrimSpace(r.APIRefusalExplanation)
+		}
+		said, cutOff := cut(text, maxTrouble)
+		t := &Trouble{Kind: TroubleRefused, Text: said, Cut: cutOff}
+		if m := strings.TrimSpace(r.FallbackModel); m != "" && r.Subtype == "model_refusal_fallback" {
+			t.Name, t.Again = clip(m, maxMeta), true
+		}
+		return t
+	case "api_error":
+		var e struct {
+			Message   string `json:"message"`
+			Formatted string `json:"formatted"`
+			Status    int    `json:"status"`
+		}
+		if len(r.Error) == 0 || json.Unmarshal(r.Error, &e) != nil {
+			return nil
+		}
+		text := strings.TrimSpace(e.Formatted)
+		if text == "" {
+			text = strings.TrimSpace(e.Message)
+		}
+		if text == "" && e.Status == 0 {
+			return nil
+		}
+		said, cutOff := cut(text, maxTrouble)
+		return &Trouble{Kind: TroubleAPI, Text: said, Status: e.Status, Cut: cutOff}
+	case "stop_hook_summary":
+		// (Written after every turn, almost always with nothing to say:
+		// only one that failed or held the agent back is shown.)
+		text := ""
+		for _, e := range r.HookErrors {
+			if e = strings.TrimSpace(e); e != "" {
+				text = e
+				break
+			}
+		}
+		if text == "" && !r.PreventedContinuation {
+			return nil
+		}
+		said, cutOff := cut(text, maxTrouble)
+		return &Trouble{Kind: TroubleHook, Text: said, Cut: cutOff, Again: r.PreventedContinuation}
+	}
+	return nil
+}
+
+// hookTrouble: a hook of the person's that failed, by the kind of row
+// Claude Code wrote for it. nil for anything else (a hook that worked, or
+// one with something to say, is no trouble of theirs).
+func hookTrouble(kind, name, event, stderr string, exit int, timedOut bool, timeout int64) *Trouble {
+	which := strings.TrimSpace(name)
+	if which == "" {
+		which = strings.TrimSpace(event)
+	}
+	switch kind {
+	case "hook_cancelled":
+		t := &Trouble{Kind: TroubleHook, Name: clip(which, maxMeta)}
+		if timedOut && timeout > 0 {
+			t.Secs = int(min((timeout+999)/1000, 1<<20)) // (what it was given, in whole seconds)
+		}
+		return t
+	case "hook_non_blocking_error":
+		said, cutOff := cut(strings.TrimSpace(stderr), maxTrouble)
+		return &Trouble{Kind: TroubleHook, Name: clip(which, maxMeta), Text: said, Cut: cutOff, Status: exit}
+	}
+	return nil
 }

@@ -44,8 +44,17 @@ const (
 	KindText     = "text"
 	KindThinking = "thinking"
 	KindTool     = "tool"
-	KindImage    = "image" // an image was attached (its bytes are not kept)
-	KindNoted    = "noted" // files the turn was given without anyone saying so
+	KindImage    = "image"   // an image was attached (its bytes are not kept)
+	KindNoted    = "noted"   // files the turn was given without anyone saying so
+	KindTrouble  = "trouble" // something went wrong that the thread would otherwise not show
+)
+
+// What a Trouble is of.
+const (
+	TroubleRefused = "refused" // the model's safeguards stopped the message
+	TroubleAPI     = "api"     // the interface answered with an error
+	TroubleCut     = "cut"     // the answer ran into the model's limit
+	TroubleHook    = "hook"    // a hook of the person's failed
 )
 
 // Entry is one row of the log that the view shows. Seq orders entries;
@@ -87,11 +96,36 @@ type Running struct {
 }
 
 type Part struct {
-	Kind      string `json:"kind"`
-	Text      string `json:"text,omitempty"`
-	Truncated bool   `json:"truncated,omitempty"`
-	Tool      *Tool  `json:"tool,omitempty"`
-	Noted     *Noted `json:"noted,omitempty"`
+	Kind      string   `json:"kind"`
+	Text      string   `json:"text,omitempty"`
+	Truncated bool     `json:"truncated,omitempty"`
+	Tool      *Tool    `json:"tool,omitempty"`
+	Noted     *Noted   `json:"noted,omitempty"`
+	Trouble   *Trouble `json:"trouble,omitempty"`
+}
+
+// Trouble is something that went wrong which the thread would otherwise
+// not show at all: the agent is seen falling silent, or answering half a
+// sentence, with nothing said of why.
+type Trouble struct {
+	// Kind: "refused" (the model's safeguards stopped the message),
+	// "api" (the interface answered with an error), "cut" (the answer ran
+	// into the model's limit), "hook" (a hook of the person's failed).
+	Kind string `json:"kind"`
+	// Text: what was said of it, in the words it was said in.
+	Text string `json:"text,omitempty"`
+	// Name: whose it is — the model it went on with, the hook that failed.
+	Name string `json:"name,omitempty"`
+	// Status: the interface's status code, or the hook's exit code.
+	Status int `json:"status,omitempty"`
+	// Secs: how long a hook was given before it was cut off, in seconds.
+	Secs int `json:"secs,omitempty"`
+	// Cut: Text is only the start of what was said; the rest is in the
+	// pane. (What an interface says of an error can run very long.)
+	Cut bool `json:"cut,omitempty"`
+	// Again: it was tried again, by the model in Name; without it, the
+	// turn was left unanswered.
+	Again bool `json:"again,omitempty"`
 }
 
 // Noted is a file the turn was given without it being said in the
@@ -187,6 +221,7 @@ const (
 	maxRunning   = 50       // work set going that is kept
 	maxSeenItems = 4096     // (Codex) the things told of as done that are remembered
 	maxPatchLine = 400      // one line of it
+	maxTrouble   = 600      // of what was said of something that went wrong
 	maxNoted     = 8        // files one note of them names (the rest are counted)
 	maxWrote     = 4096     // the files written that are remembered (see Noted)
 	maxSaid      = 16 << 10 // of the person's last message, what is read for the files it names
@@ -195,8 +230,8 @@ const (
 // Meta is what a session runs with, as its log last said it: each field
 // empty (zero) until a row says it.
 type Meta struct {
-	Model  string `json:"model,omitempty"`  // the model's id, as the API named it
-	Mode   string `json:"mode,omitempty"`   // the permission mode: default, acceptEdits, plan, auto, ...
+	Model string `json:"model,omitempty"` // the model's id, as the API named it
+	Mode  string `json:"mode,omitempty"`  // the permission mode: default, acceptEdits, plan, auto, ...
 	// Effort is how hard the model is asked to think (Claude Code's
 	// /effort, its status line's "·H"): low, medium, high, xhigh, max.
 	Effort string `json:"effort,omitempty"`

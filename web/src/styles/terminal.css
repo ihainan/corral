@@ -722,6 +722,20 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .term-tab-agents { padding: 0 10px; }
 .term-tab-agents svg { flex: none; }
 
+/* What went wrong: why the agent fell silent, or stopped mid-sentence */
+.convo-trouble {
+  display: flex; align-items: flex-start; gap: 8px; margin: 6px 0; padding: 8px 10px; border-radius: 10px;
+  background: color-mix(in srgb, var(--term-warn-text) 9%, var(--term-bg)); color: var(--term-fg-2); font-size: 13px; line-height: 19px;
+}
+.convo-trouble svg { flex: none; margin-top: 2px; color: var(--term-warn-text); }
+.convo-trouble.is-cut svg { color: var(--term-fg-3); }
+.convo-trouble.is-cut { background: var(--term-key-active); }
+.convo-trouble-body { min-width: 0; flex: 1; }
+.convo-trouble-head { margin: 0; color: var(--term-fg); }
+.convo-trouble-said { margin: 4px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--term-fg-2); font-size: 12.5px; }
+.convo-trouble-cut { color: var(--term-fg-3); }
+.convo-trouble .link-btn { margin-top: 2px; font-size: 12.5px; }
+
 /* Answering in the thread: the question, its choices, a line of text */
 .convo-ask {
   display: flex; flex-direction: column; gap: 8px; padding: 12px; border-radius: 12px;

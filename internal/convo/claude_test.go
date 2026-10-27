@@ -1158,3 +1158,90 @@ func TestClaudeEffort(t *testing.T) {
 		t.Errorf("effort %q, want none", m.Effort)
 	}
 }
+
+// What went wrong, where the thread would otherwise show nothing: the row
+// shapes are real ones off this machine's logs.
+func TestClaudeTrouble(t *testing.T) {
+	c := NewClaude()
+	c.Feed(lines(
+		`{"type":"system","subtype":"model_refusal_fallback","uuid":"s1","content":"Opus 5's safeguards flagged this message. Switched to Opus 4.8.","level":"warning","originalModel":"claude-opus-5[1m]","fallbackModel":"claude-opus-4-8","apiRefusalCategory":"cyber","apiRefusalExplanation":"blocked under the usage policy"}`,
+		`{"type":"system","subtype":"model_refusal_no_fallback","uuid":"s2","content":"","level":"warning","originalModel":"claude-opus-5-5","apiRefusalExplanation":"This request was blocked as it seems to violate the terms."}`,
+		`{"type":"system","subtype":"api_error","uuid":"s3","level":"error","error":{"message":"500 {\"type\":\"error\"}","formatted":"500 the model's maximum context length is 32768 tokens","status":500}}`,
+		// (Written after every turn: only one that failed or held the agent back is shown.)
+		`{"type":"system","subtype":"stop_hook_summary","uuid":"s4","hookCount":1,"hookErrors":[],"preventedContinuation":false,"stopReason":""}`,
+		`{"type":"system","subtype":"stop_hook_summary","uuid":"s5","hookCount":1,"hookErrors":["Failed with non-blocking status code: node: not found"],"preventedContinuation":false}`,
+		`{"type":"attachment","uuid":"a1","attachment":{"type":"hook_cancelled","hookName":"SessionStart:resume","hookEvent":"SessionStart","durationMs":6430,"timedOut":true,"timeoutMs":5000}}`,
+		`{"type":"attachment","uuid":"a2","attachment":{"type":"hook_non_blocking_error","hookName":"SessionStart:startup","stderr":"/bin/sh: 1: node: not found","exitCode":127,"durationMs":109}}`,
+		// (A hook that worked, or one with something to say, is no trouble.)
+		`{"type":"attachment","uuid":"a3","attachment":{"type":"hook_success","hookName":"PostToolUse:Bash"}}`,
+	))
+	var got []Trouble
+	for _, e := range c.Since(0) {
+		for _, p := range e.Parts {
+			if p.Trouble != nil {
+				if e.Role != RoleNote {
+					t.Errorf("a trouble came as %q, want a note", e.Role)
+				}
+				got = append(got, *p.Trouble)
+			}
+		}
+	}
+	want := []Trouble{
+		{Kind: TroubleRefused, Text: "Opus 5's safeguards flagged this message. Switched to Opus 4.8.", Name: "claude-opus-4-8", Again: true},
+		{Kind: TroubleRefused, Text: "This request was blocked as it seems to violate the terms."},
+		{Kind: TroubleAPI, Text: "500 the model's maximum context length is 32768 tokens", Status: 500},
+		{Kind: TroubleHook, Text: "Failed with non-blocking status code: node: not found"},
+		{Kind: TroubleHook, Name: "SessionStart:resume", Secs: 5},
+		{Kind: TroubleHook, Name: "SessionStart:startup", Text: "/bin/sh: 1: node: not found", Status: 127},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("%d troubles, want %d: %+v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("trouble %d:\n got %+v\nwant %+v", i, got[i], want[i])
+		}
+	}
+}
+
+// An answer that ran into the model's limit says so after it; one stopped
+// by the model's safeguards has a row of its own, so it says nothing twice.
+func TestClaudeAnswerCutOff(t *testing.T) {
+	c := NewClaude()
+	c.Feed(lines(
+		`{"type":"assistant","uuid":"a1","message":{"model":"claude-opus-5-5","stop_reason":"max_tokens","content":[{"type":"text","text":"half a sen"}]}}`,
+		`{"type":"assistant","uuid":"a2","message":{"model":"claude-opus-5-5","stop_reason":"end_turn","content":[{"type":"text","text":"all of it"}]}}`,
+		`{"type":"assistant","uuid":"a3","message":{"model":"claude-opus-5-5","stop_reason":"refusal","content":[{"type":"thinking","thinking":""}]}}`,
+	))
+	var kinds []string
+	for _, e := range c.Since(0) {
+		for _, p := range e.Parts {
+			if p.Trouble != nil {
+				kinds = append(kinds, e.Role+"/"+p.Trouble.Kind)
+			}
+		}
+	}
+	if len(kinds) != 1 || kinds[0] != RoleNote+"/"+TroubleCut {
+		t.Fatalf("troubles %v, want one cut note", kinds)
+	}
+	// (After the answer it is of, not before it.)
+	es := c.Since(0)
+	if len(es) < 2 || es[0].Role != RoleAssistant || es[1].Role != RoleNote {
+		t.Errorf("the note is not after the answer: %+v", es)
+	}
+}
+
+// A row whose "error" is a word, not an object: Claude Code writes those
+// when a limit is hit, and what it says ("You've hit your session limit")
+// is the only word the person gets. Reading the rows that carry an error
+// object must not make these fall out of the log altogether.
+func TestClaudeKeepsRowsWhoseErrorIsAWord(t *testing.T) {
+	c := NewClaude()
+	c.Feed(lines(
+		`{"type":"assistant","uuid":"a1","error":"rate_limit","isApiErrorMessage":true,"apiErrorStatus":429,"message":{"model":"<synthetic>","role":"assistant","stop_reason":"stop_sequence","content":[{"type":"text","text":"You've hit your session limit · resets 5:40pm"}]}}`,
+	))
+	es := c.Since(0)
+	if len(es) != 1 || len(es[0].Parts) == 0 || !strings.Contains(es[0].Parts[0].Text, "session limit") {
+		t.Fatalf("the limit was not shown (skipped %d): %+v", c.Skipped, es)
+	}
+}

@@ -48,11 +48,25 @@ export interface ConvoHunk {
 }
 
 export interface ConvoPart {
-  kind: 'text' | 'thinking' | 'tool' | 'image' | 'noted'
+  kind: 'text' | 'thinking' | 'tool' | 'image' | 'noted' | 'trouble'
   text?: string
   truncated?: boolean
   tool?: ConvoTool
   noted?: ConvoNoted
+  trouble?: ConvoTrouble
+}
+
+// Something that went wrong which the thread would otherwise not show: the
+// agent is seen falling silent, or answering half a sentence, with nothing
+// said of why (internal/convo/convo.go Trouble).
+export interface ConvoTrouble {
+  kind: 'refused' | 'api' | 'cut' | 'hook'
+  text?: string // what was said of it, in the words it was said in
+  name?: string // the model it went on with, or the hook that failed
+  status?: number // the interface's status code, or the hook's exit code
+  secs?: number // how long a hook was given before it was cut off
+  again?: boolean // it was tried again (by name), or the hook held the agent back
+  cut?: boolean // text is only the start of what was said
 }
 
 // Files the turn was given without the conversation saying so: ones that
