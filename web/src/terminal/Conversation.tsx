@@ -1462,9 +1462,15 @@ const VERB_SAID: Record<Verb, { v: I18nKey; live: I18nKey }> = {
   other: { v: 'convo.v.cmd', live: 'convo.live.other' }, // (verbOf gives no "other")
 }
 
+// What a step under way says. A command says the command itself, not what
+// Claude Code says it is for: while it runs, what is running is the thing
+// wanted; the line goes back to saying what it was for once it is done.
 function liveText(tool: ConvoTool): string {
   const v = verbOf(tool.name)
-  const o = object(tool).text
+  // (The folder it goes to first comes off before the first line is taken:
+  //  a command of several lines begins "cd … &&" on a line of its own.)
+  const cmd = firstLine((tool.detail ?? '').replace(/^cd\s+(?:"[^"]*"|'[^']*'|[^\s&;|]+)\s*&&\s*/, ''))
+  const o = v === 'cmd' && cmd ? cmd : object(tool).text
   return v ? t(VERB_SAID[v].live, { s: o }) : t('convo.live.other', { s: toolName(tool.name) })
 }
 

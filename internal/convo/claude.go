@@ -542,6 +542,12 @@ type claudeRow struct {
 		Filename    string `json:"filename"`
 		Path        string `json:"path"`
 		DisplayPath string `json:"displayPath"`
+		// The model the session runs with, as Claude Code tells the agent
+		// at its start (before any answer has named one).
+		Identity *struct {
+			ModelID       string `json:"modelId"`
+			MarketingName string `json:"marketingName"`
+		} `json:"identity"`
 		// A hook of the person's this one is about: which it is, what it
 		// said, and what became of it.
 		HookName   string `json:"hookName"`
@@ -945,6 +951,18 @@ func (c *Claude) attached(r *claudeRow) bool {
 		return true
 	}
 	switch a.Type {
+	case "model":
+		// Which model the session runs with, said at its start: until this
+		// was read, nothing named one before the first answer came, so a
+		// session not yet answered showed none and could not be switched.
+		if a.Identity != nil {
+			if id := strings.TrimSpace(a.Identity.ModelID); id != "" {
+				c.meta.Model = clip(id, maxMeta)
+			} else if name := strings.TrimSpace(a.Identity.MarketingName); name != "" {
+				c.meta.Model = clip(name, maxMeta)
+			}
+		}
+		return true // (read; nothing of it to show in the thread, the bar says it)
 	case "edited_text_file":
 		p, _ := cut(clean(a.Filename), maxDetail)
 		if p == "" || c.wrote[p] {
@@ -954,7 +972,7 @@ func (c *Claude) attached(r *claudeRow) bool {
 	case "task_status":
 		// What Claude Code says of background work of its own accord.
 		c.taskStatusSaid(a.TaskID, a.Status, a.DeltaSummary)
-		return false // (nothing of it to show in the thread: the bar says it)
+		return true // (read; nothing of it to show in the thread, the bar says it)
 	case "file", "directory":
 		whole := a.Filename
 		if whole == "" {

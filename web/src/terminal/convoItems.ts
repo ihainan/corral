@@ -75,10 +75,18 @@ export function items(entries: ConvoEntry[], live: boolean, moving: boolean): It
     let live1 = false // (a run going on was shown)
     const flush = (final: boolean) => {
       if (!run.length) return
-      // Going on: one with a call not come back, or the turn's last while it works.
-      const on = goesOn && (run.some((x) => !isNote(x) && !!x.tool && !x.tool.done) || (final && moving))
+      // Going on: the turn's last run, with a call not come back or while
+      // it works. Only the last: a run something came after (a notice that
+      // the person stopped it, say) is over, and a call of its own that
+      // never came back is not still running.
+      const on = goesOn && final && (run.some((x) => !isNote(x) && !!x.tool && !x.tool.done) || moving)
       if (on) live1 = true
-      out.push({ kind: 'work', key: 'g' + stepKey(run[0]), steps: run, live: on, moving: on && moving, busy: on && moving ? underWay(run) : undefined })
+      // What is under way is said whenever there is one, not only while the
+      // agent is known to be working: a call that has not come back is
+      // running whatever its pane last reported (it is "waiting for you",
+      // not "working", while it asks leave to run a command), and a line
+      // saying only "3 commands" says nothing of which one that is.
+      out.push({ kind: 'work', key: 'g' + stepKey(run[0]), steps: run, live: on, moving: on && moving, busy: on ? underWay(run) : undefined })
       run = []
     }
     for (const s of work) {

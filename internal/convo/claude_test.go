@@ -1245,3 +1245,48 @@ func TestClaudeKeepsRowsWhoseErrorIsAWord(t *testing.T) {
 		t.Fatalf("the limit was not shown (skipped %d): %+v", c.Skipped, es)
 	}
 }
+
+// Which model a session runs with is known from its start: Claude Code
+// tells the agent so before any answer has named one (225 of 247 logs on
+// this machine carry it, 220 of them before the first answer). Until it
+// was read, a session not yet answered showed no model and could not be
+// switched from the page.
+func TestClaudeModelFromItsStart(t *testing.T) {
+	c := NewClaude()
+	c.Feed(lines(`{"type":"attachment","uuid":"a1","attachment":{"type":"model","identity":{"modelId":"claude-opus-5-5","marketingName":"Opus 5.5","knowledgeCutoff":"June 2026"},"text":"You are powered by the model named Opus 5.5."}}`))
+	if m := c.Meta(); m.Model != "claude-opus-5-5" {
+		t.Errorf("model %q before any answer, want claude-opus-5-5", m.Model)
+	}
+	if es := c.Since(0); len(es) != 0 {
+		t.Errorf("it is for the bar, not the thread: %+v", es)
+	}
+	// (An answer after it names the model itself, and that stands.)
+	c.Feed(lines(`{"type":"assistant","uuid":"a2","message":{"model":"claude-opus-4-8","content":[{"type":"text","text":"ok"}]}}`))
+	if m := c.Meta(); m.Model != "claude-opus-4-8" {
+		t.Errorf("model %q after an answer, want claude-opus-4-8", m.Model)
+	}
+	// (Nothing of its own to go by: nothing is made up.)
+	none := NewClaude()
+	none.Feed(lines(`{"type":"attachment","uuid":"a1","attachment":{"type":"model","text":"You are powered by a model."}}`))
+	if m := none.Meta(); m.Model != "" {
+		t.Errorf("model %q, want none", m.Model)
+	}
+}
+
+// A row read for the bar and not for the thread is read, not skipped:
+// Skipped counts what the reader did not understand.
+func TestClaudeRowsReadForTheBarAreNotSkipped(t *testing.T) {
+	c := NewClaude()
+	c.Feed(lines(
+		`{"type":"attachment","uuid":"a1","attachment":{"type":"model","identity":{"modelId":"claude-opus-5-5"}}}`,
+		`{"type":"attachment","uuid":"a2","attachment":{"type":"task_status","taskId":"t1","status":"completed"}}`,
+	))
+	if c.Skipped != 0 {
+		t.Errorf("skipped %d rows that were read", c.Skipped)
+	}
+	// (One it really does not understand still counts.)
+	c.Feed(lines(`{"type":"attachment","uuid":"a3","attachment":{"type":"something-new"}}`))
+	if c.Skipped != 1 {
+		t.Errorf("skipped %d, want 1", c.Skipped)
+	}
+}
