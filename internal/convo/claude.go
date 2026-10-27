@@ -146,6 +146,11 @@ type taskItem struct {
 // once some are, no earlier part is put before them: see Prepend).
 const maxEntries = 6000
 
+// maxTaskIDs is how many task ids one notice is read for: markers and ones
+// already over are among them, so it is not the count of what may be
+// taken off the list (maxRunning).
+const maxTaskIDs = 8 * maxRunning
+
 // maxOrphans is how many results of calls not seen are kept, for a part of
 // the log read later from before (see Prepend): those at the start of the
 // part read first.
@@ -350,6 +355,13 @@ func (c *Claude) Prepend(other Parser) {
 	}
 	// What the part before set going and was never told had ended: its own,
 	// unless what was read since says it has ended (or set it going again).
+	// What the part before was told had ended, whose start is older still:
+	// kept, so that reading that start later does not set it going again.
+	for id := range o.ranOut {
+		if _, there := o.running[id]; !there {
+			c.endRun(id)
+		}
+	}
 	for _, id := range o.runOrder {
 		r, there := o.running[id]
 		if !there || c.ranOut[id] {
@@ -515,6 +527,11 @@ type claudeRow struct {
 		Filename    string `json:"filename"`
 		Path        string `json:"path"`
 		DisplayPath string `json:"displayPath"`
+		// Background work this one is about (a "task_status" row): which,
+		// how it stands, and the latest it has said of itself.
+		TaskID       string `json:"taskId"`
+		Status       string `json:"status"`
+		DeltaSummary string `json:"deltaSummary"`
 	} `json:"attachment"`
 }
 
@@ -902,6 +919,10 @@ func (c *Claude) attached(r *claudeRow) bool {
 			return false
 		}
 		return c.noted(r, "changed", p, "")
+	case "task_status":
+		// What Claude Code says of background work of its own accord.
+		c.taskStatusSaid(a.TaskID, a.Status, a.DeltaSummary)
+		return false // (nothing of it to show in the thread: the bar says it)
 	case "file", "directory":
 		whole := a.Filename
 		if whole == "" {
@@ -1128,6 +1149,11 @@ func (c *Claude) result(b claudeBlock, account json.RawMessage) {
 	// file an edit went through on.
 	for _, p := range wroteFiles(ref.t.Name, account, ref.t.Detail, b.IsError) {
 		c.wroteFile(p)
+	}
+	// Work the agent stopped itself has ended, though nothing is sent to
+	// say so (the notice only comes for work that ends of its own accord).
+	if ref.t.Name == "TaskStop" && !b.IsError {
+		c.endRun(clip(ref.t.Detail, maxID))
 	}
 	if !b.IsError {
 		ref.t.Add, ref.t.Del = madeLines(ref.t.Name, account, ref.t.Add, ref.t.Del)
@@ -1377,30 +1403,75 @@ func (c *Claude) ended(s string) {
 			c.wroteFile(p)
 		}
 	}
-	m := taskID.FindStringSubmatch(s)
-	if m == nil {
+	// One notice may be of several at once: a session that ended with work
+	// still going says so of all of it in one ("marked stopped"), with a
+	// marker among them that is no task of its own.
+	ids := taskID.FindAllStringSubmatch(s, maxTaskIDs)
+	if ids == nil {
 		return
 	}
-	id := clip(strings.TrimSpace(m[1]), maxID)
-	r, ok := c.running[id]
-	if !ok {
-		// (Before what set it going was read: it is over by the time that
-		// is, and is not taken for going then.)
-		if taskStatus.MatchString(s) && len(c.ranOut) < maxRunning {
-			if c.ranOut == nil {
-				c.ranOut = map[string]bool{}
-			}
-			c.ranOut[id] = true
-		}
-		return
-	}
-	if taskStatus.MatchString(s) {
-		delete(c.running, id)
-		c.runOrder = slices.DeleteFunc(c.runOrder, func(x string) bool { return x == id })
-		return
-	}
+	over := taskStatus.MatchString(s)
+	var note string
 	if ev := taskEvent.FindStringSubmatch(s); ev != nil {
-		r.Note = clip(clean(strings.TrimSpace(ev[1])), maxTitle)
+		note = clip(clean(strings.TrimSpace(ev[1])), maxTitle)
+	}
+	for _, m := range ids {
+		id := clip(strings.TrimSpace(m[1]), maxID)
+		if id == "" || strings.HasPrefix(id, "__orphan_summary") {
+			continue
+		}
+		if over {
+			c.endRun(id)
+			continue
+		}
+		if r, ok := c.running[id]; ok && note != "" {
+			r.Note = note
+			c.running[id] = r
+		}
+	}
+}
+
+// endRun takes work off the list of what is still going. Where what set it
+// going has not been read (the log read from its middle), it is noted as
+// over, so that reading the start later does not set it going again.
+func (c *Claude) endRun(id string) {
+	if id == "" {
+		return
+	}
+	if _, ok := c.running[id]; !ok {
+		if c.ranOut == nil {
+			c.ranOut = map[string]bool{}
+		}
+		// (Full: the newest word is the one worth keeping, so one makes
+		// way. Work told of as over twice takes one place, not two.)
+		for len(c.ranOut) >= maxRunning && !c.ranOut[id] {
+			for k := range c.ranOut {
+				delete(c.ranOut, k)
+				break
+			}
+		}
+		c.ranOut[id] = true
+		return
+	}
+	delete(c.running, id)
+	c.runOrder = slices.DeleteFunc(c.runOrder, func(x string) bool { return x == id })
+}
+
+// taskSaid takes in what Claude Code says of a background task of its own
+// accord (a "task_status" attachment): that it has ended, or what it has
+// said of itself since. Without this, work the agent stopped itself stays
+// on the list as going for as long as the conversation is read.
+func (c *Claude) taskStatusSaid(id, status, note string) {
+	id = clip(id, maxID)
+	if id == "" {
+		return
+	}
+	if status != "" && status != "running" && status != "pending" {
+		c.endRun(id)
+		return
+	}
+	if r, ok := c.running[id]; ok && note != "" {
+		r.Note = clip(clean(strings.TrimSpace(note)), maxTitle)
 		c.running[id] = r
 	}
 }

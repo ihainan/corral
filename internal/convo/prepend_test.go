@@ -234,3 +234,59 @@ func TestPrependMeta(t *testing.T) {
 		t.Fatalf("meta: %+v", m)
 	}
 }
+
+// What a part read before was told had ended stays ended, though what set
+// it going is in a part read later still (review 266).
+func TestPrependKeepsWhatEnded(t *testing.T) {
+	start := []string{
+		`{"type":"assistant","uuid":"a1","message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"./run.sh","description":"serve"}}]}}`,
+		`{"type":"user","uuid":"r1","toolUseResult":{"backgroundTaskId":"b1","stdout":""},"message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}}`,
+	}
+	// Newest: nothing of it. Middle: the agent stopped it. Oldest: it began.
+	c := NewClaude()
+	c.Feed(lines(`{"type":"assistant","uuid":"a9","message":{"content":[{"type":"text","text":"on"}]}}`))
+	mid := NewClaude()
+	mid.Feed(lines(
+		`{"type":"assistant","uuid":"a2","message":{"content":[{"type":"tool_use","id":"t2","name":"TaskStop","input":{"task_id":"b1"}}]}}`,
+		`{"type":"user","uuid":"r2","message":{"content":[{"type":"tool_result","tool_use_id":"t2","content":"stopped"}]}}`,
+	))
+	old := NewClaude()
+	old.Feed(lines(start...))
+	c.Prepend(mid)
+	c.Prepend(old)
+	if r := c.Running(); len(r) != 0 {
+		t.Errorf("after reading back to its start: %+v", r)
+	}
+}
+
+// Work told of as over again and again does not crowd out the word that
+// other work has ended (review 266).
+func TestEndedTwiceKeepsRoom(t *testing.T) {
+	c := NewClaude()
+	var rows []string
+	for i := 0; i < maxRunning; i++ {
+		id := fmt.Sprintf("b%02d", i)
+		rows = append(rows,
+			`{"type":"assistant","uuid":"a`+id+`","message":{"content":[{"type":"tool_use","id":"t`+id+`","name":"Bash","input":{"command":"./run.sh","description":"`+id+`"}}]}}`,
+			`{"type":"user","uuid":"r`+id+`","toolUseResult":{"backgroundTaskId":"`+id+`","stdout":""},"message":{"content":[{"type":"tool_result","tool_use_id":"t`+id+`","content":"ok"}]}}`,
+			// ended, then told of as ended twice more
+			`{"type":"user","uuid":"n1`+id+`","message":{"role":"user","content":"<task-notification>\n<task-id>`+id+`</task-id>\n<status>completed</status>\n<summary>done</summary>\n</task-notification>"}}`,
+			`{"type":"user","uuid":"n2`+id+`","message":{"role":"user","content":"<task-notification>\n<task-id>`+id+`</task-id>\n<status>completed</status>\n<summary>done</summary>\n</task-notification>"}}`,
+		)
+	}
+	c.Feed(lines(rows...))
+	if r := c.Running(); len(r) != 0 {
+		t.Fatalf("all of them ended: %+v", r)
+	}
+	// Now one more, whose start is only in the part read before.
+	c.Feed(lines(`{"type":"user","uuid":"nz","message":{"role":"user","content":"<task-notification>\n<task-id>bzz</task-id>\n<status>completed</status>\n<summary>done</summary>\n</task-notification>"}}`))
+	o := NewClaude()
+	o.Feed(lines(
+		`{"type":"assistant","uuid":"az","message":{"content":[{"type":"tool_use","id":"tz","name":"Bash","input":{"command":"./run.sh","description":"last"}}]}}`,
+		`{"type":"user","uuid":"rz","toolUseResult":{"backgroundTaskId":"bzz","stdout":""},"message":{"content":[{"type":"tool_result","tool_use_id":"tz","content":"ok"}]}}`,
+	))
+	c.Prepend(o)
+	if r := c.Running(); len(r) != 0 {
+		t.Errorf("the newest word that it ended was crowded out: %+v", r)
+	}
+}

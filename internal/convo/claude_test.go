@@ -1085,3 +1085,55 @@ func TestClaudeNotedSentenceAndFailedCommand(t *testing.T) {
 		}
 	}
 }
+
+// Work the agent stopped itself, or that Claude Code says of its own
+// accord has ended, is no longer said to be going; and one notice may be
+// of several at once (a session that ended with work still going).
+func TestClaudeRunningEnds(t *testing.T) {
+	going := func(rows ...string) []Running {
+		c := NewClaude()
+		c.Feed(lines(rows...))
+		return c.Running()
+	}
+	start := func(id, call, what string) []string {
+		return []string{
+			`{"type":"assistant","uuid":"a` + id + `","message":{"content":[{"type":"tool_use","id":"` + call + `","name":"Bash","input":{"command":"./run.sh","description":"` + what + `"}}]}}`,
+			`{"type":"user","uuid":"r` + id + `","toolUseResult":{"backgroundTaskId":"` + id + `","stdout":""},"message":{"content":[{"type":"tool_result","tool_use_id":"` + call + `","content":"Command running in background with ID: ` + id + `"}]}}`,
+		}
+	}
+	if r := going(start("b1", "t1", "serve")...); len(r) != 1 || r[0].ID != "b1" {
+		t.Fatalf("set going: %+v", r)
+	}
+	// Stopped by the agent: nothing is sent to say it ended.
+	stop := append(start("b1", "t1", "serve"),
+		`{"type":"assistant","uuid":"a2","message":{"content":[{"type":"tool_use","id":"t2","name":"TaskStop","input":{"task_id":"b1"}}]}}`,
+		`{"type":"user","uuid":"r2","message":{"content":[{"type":"tool_result","tool_use_id":"t2","content":"stopped"}]}}`)
+	if r := going(stop...); len(r) != 0 {
+		t.Errorf("after it was stopped: %+v", r)
+	}
+	// Claude Code says of its own accord that it ended.
+	done := append(start("b2", "t1", "serve"),
+		`{"type":"attachment","uuid":"s1","attachment":{"type":"task_status","taskId":"b2","status":"completed","description":"serve"}}`)
+	if r := going(done...); len(r) != 0 {
+		t.Errorf("after it was said to be done: %+v", r)
+	}
+	// Still going, with the latest it has said of itself.
+	on := append(start("b3", "t1", "serve"),
+		`{"type":"attachment","uuid":"s1","attachment":{"type":"task_status","taskId":"b3","status":"running","deltaSummary":"4 of 9 done"}}`)
+	if r := going(on...); len(r) != 1 || r[0].Note != "4 of 9 done" {
+		t.Errorf("while it goes on: %+v", r)
+	}
+	// One notice of three at once, with a marker among them.
+	var many []string
+	many = append(many, start("b4", "t1", "one")...)
+	many = append(many, start("b5", "t2", "two")...)
+	many = append(many, start("b6", "t3", "three")...)
+	if r := going(many...); len(r) != 3 {
+		t.Fatalf("three going: %+v", r)
+	}
+	many = append(many, `{"type":"user","uuid":"n1","message":{"role":"user","content":"<task-notification>\n<task-id>b4</task-id>\n<task-id>b5</task-id>\n<task-id>__orphan_summary__:shell</task-id>\n<status>stopped</status>\n<summary>2 background shell command tasks didn't finish before the previous session ended.</summary>\n</task-notification>"}`+`}`)
+	r := going(many...)
+	if len(r) != 1 || r[0].ID != "b6" {
+		t.Errorf("after a notice of several: %+v", r)
+	}
+}
