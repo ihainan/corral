@@ -5,7 +5,7 @@ import { copyText, isCoarse } from '../components/ui'
 import { local } from '../storage'
 import { Markdown } from './markdown'
 import { Code } from './Code'
-import { AgentIcon } from './agentIcons'
+import { AgentIcon, agentMark } from './agentIcons'
 import type { Convo, ConvoEntry, ConvoHunk, ConvoMeta, ConvoPart, ConvoQueued, ConvoRunning, ConvoTask, ConvoTool } from './conversation'
 import { category, isNote, items, ms, partTime, sameEdits, toolName, verbOf, type Category, type Edits, type Item, type Verb } from './convoItems'
 
@@ -51,6 +51,11 @@ export interface ConvoPending {
 const HINT_AFTER = 20000 // working with nothing new this long: say why
 const SIDE_KEY = 'corral.convoSide'
 const SIDE_MIN = 900 // (px) the view's width from which the list goes beside the thread
+// (px) the width from which the agents' icons go beside it as a rail: the
+// thread's words are held to 780px anyway, so on a tablet held upright the
+// rail costs them nothing. Narrower than this (a phone, a small tablet) it
+// would take from the words themselves.
+const RAIL_MIN = 768
 const isTouchOnly = isCoarse()
 
 // A duration as the view says it: 45 s, 2 min 14 s, 1 h 5 min.
@@ -118,6 +123,7 @@ export function ConversationView({
   // The list beside the thread: where the view is wide enough, unless folded away (kept on this device).
   const root = useRef<HTMLDivElement>(null)
   const [wide, setWide] = useState(false)
+  const [room, setRoom] = useState(false) // (room for the rail, if not for the list)
   const [folded, setFoldedState] = useState(() => local.get(SIDE_KEY) === '0')
   const setFolded = (v: boolean) => {
     setFoldedState(v)
@@ -126,7 +132,10 @@ export function ConversationView({
   useLayoutEffect(() => {
     const el = root.current
     if (!el) return
-    const look = () => setWide(el.clientWidth >= SIDE_MIN)
+    const look = () => {
+      setWide(el.clientWidth >= SIDE_MIN)
+      setRoom(el.clientWidth >= RAIL_MIN)
+    }
     look()
     const ro = new ResizeObserver(look)
     ro.observe(el)
@@ -458,10 +467,16 @@ export function ConversationView({
   )
   return (
     <div className="convo" role="region" aria-label={t('convo.title')} ref={root}>
-      {sideShown && (
-        <nav className="convo-side" aria-label={t('convo.agents')}>
-          <AgentList rows={rows} />
-          {!isTouchOnly && <p className="convo-side-keys">{t('convo.switchKeys')}<br />{t(allOpen ? 'convo.foldKeys' : 'convo.openKeys')}</p>}
+      {side && room && (
+        <nav className={'convo-side' + (sideShown ? '' : ' is-rail')} aria-label={t('convo.agents')}>
+          {!sideShown ? (
+            <AgentRail rows={rows} onOpen={() => setFolded(false)} />
+          ) : (
+            <>
+              <AgentList rows={rows} />
+              {!isTouchOnly && <p className="convo-side-keys">{t('convo.switchKeys')}<br />{t(allOpen ? 'convo.foldKeys' : 'convo.openKeys')}</p>}
+            </>
+          )}
         </nav>
       )}
       <div className="convo-main">
@@ -469,7 +484,14 @@ export function ConversationView({
         <div className="convo-bar">
           {lead}
           {side && wide && (
-            <button type="button" className="icon-btn convo-side-btn" aria-pressed={sideShown} onClick={() => setFolded(!folded)} aria-label={t('convo.agents')} title={t('convo.agents')}>
+            <button
+              type="button"
+              className="icon-btn convo-side-btn"
+              aria-pressed={sideShown}
+              onClick={() => setFolded(!folded)}
+              aria-label={t(sideShown ? 'convo.foldSide' : 'convo.openSide')}
+              title={t(sideShown ? 'convo.foldSide' : 'convo.openSide')}
+            >
               <PanelLeft size={17} aria-hidden="true" />
             </button>
           )}
@@ -954,6 +976,34 @@ function AgentList({ rows, onPicked, placed }: { rows: ConvoListRow[]; onPicked?
         )
       })}
     </>
+  )
+}
+
+// The agents as a rail of icons: what the list beside the thread folds to,
+// so that one can still be gone to without opening it. In the list's own
+// order (waiting first, then working, then the latest to change).
+function AgentRail({ rows, onOpen }: { rows: ConvoListRow[]; onOpen: () => void }) {
+  return (
+    <div className="convo-rail" role="group" aria-label={t('convo.agents')}>
+      {listOrder(rows).map((r) => {
+        const said = r.status === 'blocked' || r.status === 'working' || r.status === 'done'
+        const what = [r.title, agentMark(r.program)?.name ?? r.program, r.where, said ? t(`convo.status.${r.status}` as I18nKey) : ''].filter(Boolean).join(' · ')
+        return (
+          <button
+            key={r.key}
+            type="button"
+            className={'convo-rail-row is-' + r.status}
+            aria-current={r.current || undefined}
+            aria-label={what}
+            title={what}
+            onDoubleClick={onOpen}
+            onClick={r.onPick}
+          >
+            <AgentIcon program={r.program} size={30} dot={said ? (r.status as 'blocked' | 'working' | 'done') : undefined} quiet />
+          </button>
+        )
+      })}
+    </div>
   )
 }
 
