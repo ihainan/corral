@@ -400,6 +400,8 @@ export function ConversationView({
               ? t('convo.noLog')
               : convo.reason === 'unsupported'
                 ? t('convo.unsupported')
+                : convo.reason === 'no_reader'
+                  ? t('convo.noReader')
                 : agent?.other
                   ? t('convo.otherAgent', { agent: agent.other })
                   : t('convo.noAgent')}

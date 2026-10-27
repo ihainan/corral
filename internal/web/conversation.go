@@ -262,6 +262,26 @@ for d in /proc/[0-9]*; do
   stat_of "$pid" || continue
   rec "$pid" "$st" "$fg" "$st" "$sid" "$log" codex
 done
+# OpenCode: a process of the user's named opencode, its log the database it
+# has open (…/opencode/opencode.db: all its sessions; which is this one's is
+# told by herdr, or by where it runs). Not one that does not converse
+# (opencode run, serve, …): its first word that is no option.
+for d in /proc/[0-9]*; do
+  [ -O "$d" ] && [ "$(head -c 16 "$d/comm" 2>/dev/null)" = opencode ] || continue
+  pid=${d#/proc/}
+  sub=$(tr '\0' '\001' <"$d/cmdline" 2>/dev/null | awk 'BEGIN { RS = "\001" } NR == 1 { next } skip { skip = 0; next } /^--$/ { exit }
+      /^(-[msp]|--(model|session|prompt|agent|port|hostname|log-level|mdns-domain|cors))$/ { skip = 1; next }
+      /^(run|serve|web|acp|mcp|auth|agent|upgrade|uninstall|models|stats|export|import|github|pr|debug|session|completion|generate|attach)$/ { print; exit }')
+  case $sub in run|serve|web|acp|mcp|auth|agent|upgrade|uninstall|models|stats|export|import|github|pr|debug|session|completion|generate|attach) continue;; esac
+  log=
+  for fd in "$d"/fd/*; do
+    l=$(readlink "$fd" 2>/dev/null) || continue
+    case $l in *"$nl"*) continue;; */opencode/opencode.db) log=$l; break;; esac
+  done
+  [ -n "$log" ] || continue
+  stat_of "$pid" || continue
+  rec "$pid" "$st" "$fg" "$st" 00000000-0000-0000-0000-000000000000 "$log" opencode
+done
 exit 0`
 	return "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(mode) + " " + sshx.QuoteShell(tmuxName) + " " + sshx.QuoteShell(tmuxPane)
 }
@@ -511,7 +531,14 @@ func parseConvoLocate(out string) (l convoLocated) {
 		if btime > 0 && hz > 0 && hz <= 100000 && p.start < math.MaxInt64/1000 {
 			p.started = btime*1000 + p.start*1000/hz
 		}
-		if p.agent != "codex" {
+		switch p.agent {
+		case "codex":
+		case "opencode":
+			// (Its session is told after: by herdr, or by where it runs.)
+			if p.sid != convoNoSession {
+				continue
+			}
+		default:
 			p.agent = "claude"
 			if p.sid == convoNoSession {
 				continue // (only a Codex goes without its session known)
@@ -531,6 +558,9 @@ func convoLogOf(agent, log, sid string) bool {
 	l, ok := cleanRemotePath(log)
 	if !ok {
 		return false
+	}
+	if agent == "opencode" {
+		return strings.HasSuffix(l, "/opencode/opencode.db")
 	}
 	if agent == "codex" {
 		i := strings.LastIndexByte(l, '/')
@@ -988,7 +1018,7 @@ type convoState struct {
 	gen         int64      // changes when another log is read: what was shown does not apply
 	bind        *convoBind // the process the log is of, while there is one
 	parser      convo.Parser
-	agent       string // whose log: "claude" or "codex"
+	agent       string // whose log: "claude", "codex" or "opencode"
 	offset      int64  // read up to here
 	size        int64  // the log's size when last looked at
 	mtime       time.Time
@@ -999,6 +1029,10 @@ type convoState struct {
 	skipping    bool   // in a line too long to keep, until its end
 	long        []byte // a line longer than a read, so far, its images' data left out (nil when not in one)
 	strip       b64Strip
+	ocCursor    int64 // (OpenCode) rows written since this are read next (unix ms)
+	ocCursorK   int   // (OpenCode) and, stopped within its millisecond, the last row read in it
+	ocCursorID  string
+	noReaderAt  time.Time // (OpenCode) when reading found no python3
 }
 
 type convoStates struct {
@@ -1067,6 +1101,7 @@ const (
 	// what the pane shows).
 	convoNotTold     = "not_told"
 	convoUnsupported = "unsupported" // the host has no /proc, or the session is a plain shell
+	// (and convoNoReader: see convo_opencode.go)
 )
 
 // convoBind says what the entries are of: the pane, the Claude Code process
@@ -1181,6 +1216,11 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 		writeFileError(w, err)
 		return
 	}
+	if st.reason != "" { // (found reading: OpenCode's, with no python3)
+		ans.Reason = st.reason
+		writeJSON(w, http.StatusOK, ans)
+		return
+	}
 	ans.Available, ans.Gen, ans.Rev, ans.Older, ans.More, ans.AgentStatus = true, st.gen, st.parser.Rev(), st.older, more, st.status
 	ans.OlderCut = st.older && (st.parser.Trimmed() || st.from < 0)
 	if gen != st.gen {
@@ -1220,6 +1260,13 @@ func (s *Server) locateConvo(ctx context.Context, sess *term.Session, st *convoS
 			in = l.tmuxActive
 		}
 		p := pickConvoProc(l.procs, sess.Persistence, in, s.herdrSocks.get(sess.ID), l.tmuxPID, l.tmuxTTY, s.herdrSocks.sid(sess.ID, pane))
+		// (OpenCode: which of its database's sessions it is at.)
+		ocWhy := ""
+		if p != nil && p.agent == "opencode" {
+			if p.sid, ocWhy = s.ocSessionOf(ctx, sess, p, pane, l); p.sid == convoNoSession {
+				p.log = ""
+			}
+		}
 		var refused bool
 		guessed, refused = s.daemonLog(p, l)
 		// What the pane shows has the last word on which conversation it
@@ -1256,6 +1303,8 @@ func (s *Server) locateConvo(ctx context.Context, sess *term.Session, st *convoS
 		switch {
 		case p == nil:
 			reason = convoNoAgent
+		case ocWhy != "":
+			reason, sid, agent = ocWhy, p.sid, p.agent
 		case p.log == "" && refused:
 			// (It has one: which of the ones its daemon keeps cannot be told.)
 			reason, sid, agent = convoNotTold, p.sid, p.agent
@@ -1266,12 +1315,17 @@ func (s *Server) locateConvo(ctx context.Context, sess *term.Session, st *convoS
 		}
 	}
 	st.guessed = guessed && log != ""
+	// (No python3 to read OpenCode's with, found reading: said a minute,
+	// then tried again.)
+	if reason == "" && agent == "opencode" && st.reason == convoNoReader && sid == st.sid && log == st.log && time.Since(st.noReaderAt) < time.Minute {
+		reason = convoNoReader
+	}
 	if sid != st.sid || log != st.log || agent != st.agent {
 		st.gen = convoGens.Add(1)
 		st.sid, st.log, st.agent = sid, log, agent
 		st.parser = convo.New(agent)
 		st.offset, st.size, st.mtime, st.older, st.skipping, st.from = 0, -1, time.Time{}, false, false, 0
-		st.long, st.strip = nil, b64Strip{}
+		st.long, st.strip, st.ocCursor, st.ocCursorK, st.ocCursorID = nil, b64Strip{}, 0, 0, ""
 	}
 	st.reason = reason
 	// (What was queued to a process of the same session before this one: not this one's.)
@@ -1285,6 +1339,9 @@ func (s *Server) locateConvo(ctx context.Context, sess *term.Session, st *convoS
 // first, then forward. A log that got shorter was replaced and is read
 // again. more says one request did not take all there is.
 func (s *Server) readConvo(sess *term.Session, st *convoState) (more bool, err error) {
+	if st.agent == "opencode" {
+		return false, s.readOpenCode(sess, st)
+	}
 	err = s.withSFTP(context.Background(), sess, convoReadLimit, func(c *sftplite.Client) error {
 		if sess.Persistence == "tmux" && st.agent != "codex" {
 			st.status = convoProcStatus(c, st)
@@ -1433,6 +1490,9 @@ func convoTitleCommand(log, sid string) string {
 // next request goes on before it. Nothing once entries were dropped as too
 // many.
 func (s *Server) readOlder(sess *term.Session, st *convoState) error {
+	if st.agent == "opencode" {
+		return s.readOlderOpenCode(sess, st)
+	}
 	if !st.older || st.from <= 0 || st.parser.Trimmed() {
 		return nil
 	}
@@ -1679,6 +1739,13 @@ front() {
       case $lg in *-"$sid".jsonl) ;; *) return 1;; esac
       [ -z "$cs" ] && head -c 4096 "$lg" 2>/dev/null | grep -q '"originator": *"codex_exec"' && return 1
     fi
+  elif [ "$(head -c 16 "/proc/$pid/comm" 2>/dev/null)" = opencode ]; then
+    # (OpenCode, not one that does not converse. Which of its sessions it
+    # is at was told when it was read: it keeps no file to ask here.)
+    cs=$(tr '\0' '\001' <"/proc/$pid/cmdline" 2>/dev/null | awk 'BEGIN { RS = "\001" } NR == 1 { next } skip { skip = 0; next } /^--$/ { exit }
+      /^(-[msp]|--(model|session|prompt|agent|port|hostname|log-level|mdns-domain|cors))$/ { skip = 1; next }
+      /^(run|serve|web|acp|mcp|auth|agent|upgrade|uninstall|models|stats|export|import|github|pr|debug|session|completion|generate|attach)$/ { print; exit }')
+    case $cs in run|serve|web|acp|mcp|auth|agent|upgrade|uninstall|models|stats|export|import|github|pr|debug|session|completion|generate|attach) return 1;; esac
   else
     c=$(head -c 65536 "$HOME/.claude/sessions/$pid.json" 2>/dev/null | tr -d '\n')
     [ "$(printf '%s' "$c" | grep -o '"sessionId" *: *"[0-9a-fA-F-]*"' | head -n 1 | sed 's/.*"\([0-9a-fA-F-]*\)"$/\1/')" = "$sid" ] || return 1
@@ -1693,7 +1760,10 @@ if [ "$mode" = tmux ]; then
   [ "$(tmux -u display-message -p -t "$p" '#{session_name}' 2>/dev/null 9>&-)" = "$sess" ] || exit 3
   if [ "$len" = keys ]; then
     front || exit 3
-    [ $# -gt 0 ] && { typing=1; tmux send-keys -t "$p" "$@" 9>&- || exit 6; }
+    [ $# -gt 0 ] && typing=1
+    for k in "$@"; do
+      if [ "$k" = pause ]; then sleep 0.3; else tmux send-keys -t "$p" "$k" 9>&- || exit 6; fi
+    done
     screen
     exit 0
   fi
@@ -1712,7 +1782,9 @@ else
       # Shift+Tab as the bytes themselves: herdr before 0.9.5 sends a
       # plain Tab for that name, which Claude Code does nothing with, so
       # the permission mode never changed.
-      if [ "$k" = shift+tab ]; then
+      if [ "$k" = pause ]; then
+        sleep 0.3
+      elif [ "$k" = shift+tab ]; then
         HERDR_SOCKET_PATH=$sock herdr pane send-text "$p" "$e[Z" >/dev/null 2>&1 9>&- || exit 6
       else
         HERDR_SOCKET_PATH=$sock herdr pane send-keys "$p" "$k" >/dev/null 2>&1 9>&- || exit 6
@@ -1956,7 +2028,7 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		writeError(w, http.StatusBadRequest, "bad_request", "the pane, the process (and, to send, a message) are required")
 		return
 	}
-	if b.PID <= 0 || b.Start <= 0 || !convoUUID.MatchString(b.Session) ||
+	if b.PID <= 0 || b.Start <= 0 || !(convoUUID.MatchString(b.Session) || ocSessionID.MatchString(b.Session)) ||
 		(sess.Persistence == "herdr" && !herdrPane.MatchString(b.Pane)) || (sess.Persistence == "tmux" && !tmuxPane.MatchString(b.Pane)) {
 		writeError(w, http.StatusBadRequest, "bad_request", "the pane and the process are required")
 		return
@@ -2053,13 +2125,21 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 			s.daemonLog(front, l)
 		}
 	}
+	// An OpenCode: the session it is at now, asked anew (it may have gone to
+	// another since it was read; one that cannot be told is not typed to).
+	if front != nil && front.agent == "opencode" {
+		var why string
+		if front.sid, why = s.ocSessionOf(ctx, sess, front, b.Pane, l); why != "" {
+			front.sid = ""
+		}
+	}
 	if front == nil || front.pid != b.PID || front.start != b.Start || front.sid != b.Session {
 		reason = "agent_changed"
 		writeError(w, http.StatusConflict, "agent_changed", "that pane no longer runs this agent")
 		return
 	}
-	// (Claude Code's own keys and picker: not for Codex.)
-	if front.agent == "codex" && what != "send" && what != "interrupt" {
+	// (Claude Code's own keys and picker: not for Codex or OpenCode.)
+	if (front.agent == "codex" || front.agent == "opencode") && what != "send" && what != "interrupt" {
 		reason = "unsupported"
 		writeError(w, http.StatusConflict, "unsupported", "not for this agent")
 		return
@@ -2098,6 +2178,11 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		press = keys.tmux
 		if sess.Persistence == "herdr" {
 			press = keys.herdr
+		}
+		// (OpenCode stops at a second Esc, "esc again to interrupt": not one
+		// right on the other, which reaches it as one key.)
+		if what == "interrupt" && front.agent == "opencode" {
+			press = append(append(append([]string(nil), press...), "pause"), press...)
 		}
 	}
 	release := turn

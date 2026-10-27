@@ -14,7 +14,7 @@ import { useCompletion } from '../terminal/Completion'
 import { InlineReply } from '../terminal/ReplyDialog'
 import { ConversationView, when, type ConvoAgent, type ConvoListRow, type ConvoPending, type ModelOpt } from '../terminal/Conversation'
 import { asking, useConversation, type ConvoEntry } from '../terminal/conversation'
-import { isCodex, listAgents, paneTitle, readsLog, useRunningSessions, type AgentRow } from '../terminal/agents'
+import { isCodex, isOpenCode, listAgents, paneTitle, readsLog, useRunningSessions, type AgentRow } from '../terminal/agents'
 import { afterSend, holdTermMode, PENDING_MS, sameTurn, tmuxKey } from '../terminal/chatSend'
 import { agentKey, sessionWhich } from '../terminal/sessionName'
 import { AgentIcon, agentMark } from '../terminal/agentIcons'
@@ -542,6 +542,8 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   const canPress = bound && working
   // (What Claude Code alone has: its permission modes, its model picker, its "send now".)
   const codex = convo.bind?.agent === 'codex' || (!!row && isCodex(row.a.agent))
+  // (Claude Code's own keys and pickers: not Codex's, nor OpenCode's.)
+  const notClaude = codex || convo.bind?.agent === 'opencode' || (!!row && isOpenCode(row.a.agent))
 
   // The permission mode, switched from here: Shift+Tab pressed in its pane,
   // the mode it went to read off its screen (the log says it only with the
@@ -553,7 +555,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   const [modeBusy, setModeBusy] = useState(false)
   const lastSeq = convo.entries.findLast((e: ConvoEntry) => e.role === 'user')?.seq ?? 0
   if (modeNow && (modeNow.bind !== bindKey || convo.meta?.mode !== modeNow.was || lastSeq > modeNow.last || convo.gen !== modeNow.gen)) setModeNow(null)
-  const canMode = bound && !codex && convo.status === 'ready' && !!convo.meta && agent?.status !== 'blocked' && !agent?.other
+  const canMode = bound && !notClaude && convo.status === 'ready' && !!convo.meta && agent?.status !== 'blocked' && !agent?.other
   const nextMode = () => {
     const b = convo.bind
     if (!b || modeBusy) return
@@ -581,7 +583,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     warnedDefault.current = true
     toast(t('convo.err.defaultChanged'), true)
   }, [convo.defaultChanged, toast])
-  const canModel = bound && !codex && convo.status === 'ready' && !!convo.meta?.model && (agent?.status === 'idle' || agent?.status === 'done') && !agent?.other
+  const canModel = bound && !notClaude && convo.status === 'ready' && !!convo.meta?.model && (agent?.status === 'idle' || agent?.status === 'done') && !agent?.other
   // How hard it is asked to think, set through Claude Code's /effort, for
   // this session only. Offered only where its log has said one: a Claude
   // Code without /effort never does, and nothing is typed to find out.
@@ -591,7 +593,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   const [effortNow, setEffortNow] = useState<{ effort: string; bind: string; was?: string } | null>(null)
   const [effortBusy, setEffortBusy] = useState(false)
   if (effortNow && (effortNow.bind !== bindKey || convo.meta?.effort !== effortNow.was)) setEffortNow(null)
-  const canEffort = bound && !codex && convo.status === 'ready' && !!convo.meta?.effort && (agent?.status === 'idle' || agent?.status === 'done') && !agent?.other
+  const canEffort = bound && !notClaude && convo.status === 'ready' && !!convo.meta?.effort && (agent?.status === 'idle' || agent?.status === 'done') && !agent?.other
   const pressBody = () => {
     const b = convo.bind!
     return { pane: b.pane, pid: b.pid, start: b.start, session: b.session }
@@ -1127,7 +1129,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       onShowTerminal={openTerminal}
       onCopied={() => toast(t('common.copied'))}
       composer={composer}
-      onSendNow={canPress && !codex ? () => press('now') : undefined}
+      onSendNow={canPress && !notClaude ? () => press('now') : undefined}
       sendNow={said?.what === 'now' && said.bind === bindKey ? said.text : undefined}
       mode={{ now: modeNow?.bind === bindKey ? modeNow.mode : undefined, busy: modeBusy, onNext: canMode ? nextMode : undefined }}
       model={canModel || modelBusy ? { list: models?.bind === bindKey ? models.list : null, fresh: !!models?.at && Date.now() - models.at < 60000, busy: modelBusy, can: canModel, onOpen: openModels, onPick: pickModel } : undefined}

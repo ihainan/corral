@@ -83,3 +83,24 @@ func TestSeenRounds(t *testing.T) {
 		t.Fatal("a pane gone is still kept")
 	}
 }
+
+// A contest seen again while the end of the last was being read: that end
+// is not this one's.
+func TestOcContests(t *testing.T) {
+	var c ocContests
+	c.note("h\x00/p", true)
+	_, open, seen := c.note("h\x00/p", false)
+	if !open {
+		t.Fatal("its end not to be read")
+	}
+	c.note("h\x00/p", true) // (contested again meanwhile)
+	c.ended("h\x00/p", 100, seen)
+	if e, o, _ := c.note("h\x00/p", false); e != 0 || !o {
+		t.Fatalf("closed by an old end: %d %v", e, o)
+	}
+	_, _, seen = c.note("h\x00/p", false)
+	c.ended("h\x00/p", 200, seen)
+	if e, o, _ := c.note("h\x00/p", false); e != 200 || o {
+		t.Fatalf("its own end: %d %v", e, o)
+	}
+}

@@ -23,10 +23,14 @@ type Parser interface {
 	QueueSince(started int64)
 }
 
-// New is the parser for an agent's log: "codex", else Claude Code's.
+// New is the parser for an agent's log: "codex", "opencode" (its session's
+// rows, see OpenCode), else Claude Code's.
 func New(agent string) Parser {
-	if agent == "codex" {
+	switch agent {
+	case "codex":
 		return NewCodex()
+	case "opencode":
+		return NewOpenCode()
 	}
 	return NewClaude()
 }
