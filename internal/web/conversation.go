@@ -1622,11 +1622,19 @@ if [ "$mode" = tmux ]; then
   tmux send-keys -t "$p" Enter 9>&- || exit 5
   screen
 else
+  e=$(printf '\033')
   if [ "$len" = keys ]; then
     front || exit 3
     [ $# -gt 0 ] && typing=1
     for k in "$@"; do
-      HERDR_SOCKET_PATH=$sock herdr pane send-keys "$p" "$k" >/dev/null 2>&1 9>&- || exit 6
+      # Shift+Tab as the bytes themselves: herdr before 0.9.5 sends a
+      # plain Tab for that name, which Claude Code does nothing with, so
+      # the permission mode never changed.
+      if [ "$k" = shift+tab ]; then
+        HERDR_SOCKET_PATH=$sock herdr pane send-text "$p" "$e[Z" >/dev/null 2>&1 9>&- || exit 6
+      else
+        HERDR_SOCKET_PATH=$sock herdr pane send-keys "$p" "$k" >/dev/null 2>&1 9>&- || exit 6
+      fi
     done
     screen
     exit 0
@@ -1634,7 +1642,6 @@ else
   t=$(cat "$f" && printf x) || exit 4
   [ "${t%x}" != "$t" ] || exit 4
   t=${t%x}
-  e=$(printf '\033')
   front || exit 3
   typing=1
   HERDR_SOCKET_PATH=$sock herdr pane send-text "$p" "$e[200~$t$e[201~" >/dev/null 2>&1 9>&- || exit 6
@@ -1713,6 +1720,7 @@ var convoKeys = map[string]struct {
 	"mode":      {"convo.mode", []string{"shift+tab"}, []string{"BTab"}}, // (Claude Code's next permission mode)
 	"models":    {"convo.models", nil, nil},                              // (its picker read: see convo_model.go)
 	"model":     {"convo.model", nil, nil},
+	"effort":    {"convo.effort", nil, nil}, // (its slider: see convo_effort.go)
 	"send":      {"convo.send", nil, nil}, // (typed by convoSendCommand)
 }
 
@@ -1845,7 +1853,8 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		Start   int64  `json:"start"`
 		Session string `json:"session"`
 		Text    string `json:"text"`  // (send)
-		Model   string `json:"model"` // (model: as the picker names it)
+		Model   string `json:"model"`  // (model: as the picker names it)
+		Effort  string `json:"effort"` // (effort: a level of effortLevels)
 	}
 	err := readJSON(r, &b)
 	text, textOK := sendText(b.Text)
@@ -1853,6 +1862,9 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		textOK = b.Text == ""
 	}
 	if what == "model" && (b.Model == "" || len(b.Model) > 64 || strings.ContainsFunc(b.Model, func(r rune) bool { return r < 0x20 || r == 0x7f })) {
+		textOK = false
+	}
+	if what == "effort" && effortLevel(b.Effort) < 0 {
 		textOK = false
 	}
 	if err != nil || !textOK {
@@ -1892,7 +1904,7 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	ctx, cancel := context.WithDeadline(r.Context(), expiry)
 	defer cancel()
 	step := 15 * time.Second
-	if what == "models" || what == "model" {
+	if what == "models" || what == "model" || what == "effort" {
 		step = 45 * time.Second // (several steps on the host: see modelFlow)
 	}
 	ctx, cancelStep := context.WithTimeout(ctx, step)
@@ -1981,6 +1993,12 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		release := turn
 		turn = func() {} // (convoModel gives it back, once its steps have ended on the host)
 		s.convoModel(w, ctx, sess, b.Pane, socket, b.PID, b.Start, b.Session, b.Model, &outcome, &reason, release)
+		return
+	}
+	if what == "effort" {
+		release := turn
+		turn = func() {} // (convoEffort gives it back, once its steps have ended on the host)
+		s.convoEffort(w, ctx, sess, b.Pane, socket, b.PID, b.Start, b.Session, b.Effort, &outcome, &reason, release)
 		return
 	}
 	// The check again and the typing or pressing, on the host in one go (see convoSendCommand).

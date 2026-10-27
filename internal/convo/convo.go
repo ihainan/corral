@@ -197,6 +197,9 @@ const (
 type Meta struct {
 	Model  string `json:"model,omitempty"`  // the model's id, as the API named it
 	Mode   string `json:"mode,omitempty"`   // the permission mode: default, acceptEdits, plan, auto, ...
+	// Effort is how hard the model is asked to think (Claude Code's
+	// /effort, its status line's "·H"): low, medium, high, xhigh, max.
+	Effort string `json:"effort,omitempty"`
 	Branch string `json:"branch,omitempty"` // the git branch it ran on
 	// Context is how many tokens the latest request sent: what the
 	// conversation fills of the model's window.

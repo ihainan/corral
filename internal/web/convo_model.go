@@ -121,11 +121,13 @@ func (p modelPicker) offered() []modelOpt {
 // The keys the model flow may press, by what they are for (herdr's name,
 // tmux's). No digit, and Enter only for the question after "s".
 var modelKeys = map[string][2]string{
-	"down": {"down", "Down"},
-	"up":   {"up", "Up"},
-	"this": {"s", "s"},
-	"esc":  {"esc", "Escape"},
-	"yes":  {"enter", "Enter"},
+	"down":  {"down", "Down"},
+	"up":    {"up", "Up"},
+	"left":  {"left", "Left"},  // (the effort slider: see convo_effort.go)
+	"right": {"right", "Right"},
+	"this":  {"s", "s"},
+	"esc":   {"esc", "Escape"},
+	"yes":   {"enter", "Enter"},
 }
 
 // modelStep runs one step on the host: keys (names of modelKeys; none:

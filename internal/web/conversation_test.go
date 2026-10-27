@@ -437,3 +437,24 @@ func TestProcWroteFromDaemonLogs(t *testing.T) {
 		t.Errorf("a log left by one that ended: wrote %d, want 0", got)
 	}
 }
+
+// The next permission mode is Shift+Tab, and on a herdr host it goes as
+// the bytes themselves: herdr before 0.9.5 sends a plain Tab for that key
+// name, which Claude Code does nothing with (0.8.0 seen doing it). On
+// tmux the name stands, which tmux spells out itself.
+func TestModeKeyGoesAsItsOwnBytesOnHerdr(t *testing.T) {
+	herdr := convoSendCommand("herdr", "", "w1:p1", "/run/x.sock", 7, 9, sidA, 0, convoKeys["mode"].herdr, 8)
+	if !strings.Contains(herdr, `herdr pane send-text "$p" "$e[Z"`) {
+		t.Error("herdr: Shift+Tab does not go as its own bytes")
+	}
+	if !strings.Contains(herdr, `[ "$k" = shift+tab ]`) {
+		t.Error("herdr: the key it is sent for is not named")
+	}
+	// (Every other key still goes by name, Escape and "send now" among them.)
+	if !strings.Contains(herdr, `herdr pane send-keys "$p" "$k"`) {
+		t.Error("herdr: other keys no longer go by name")
+	}
+	if tmux := convoSendCommand("tmux", "s", "%3", "", 7, 9, sidA, 0, convoKeys["mode"].tmux, 8); !strings.HasSuffix(tmux, " 'BTab'") {
+		t.Errorf("tmux: %s", tmux[len(tmux)-40:])
+	}
+}

@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { ArrowUp, ChevronLeft, History, Paperclip, Square, X } from 'lucide-react'
 import { api, ApiError, authGen, errorText, uploadFile, type SessionInfo } from '../api'
-import { t } from '../i18n'
+import { t, type I18nKey } from '../i18n'
 import { navigate, onNavigate } from '../router'
 import { onOpenRequest } from '../notifyopen'
 import { isDark, setChromeColor, usePrefs } from '../prefs'
@@ -513,10 +513,35 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     toast(t('convo.err.defaultChanged'), true)
   }, [convo.defaultChanged, toast])
   const canModel = bound && !codex && convo.status === 'ready' && !!convo.meta?.model && (agent?.status === 'idle' || agent?.status === 'done') && !agent?.other
+  // How hard it is asked to think, set through Claude Code's /effort, for
+  // this session only. Offered only where its log has said one: a Claude
+  // Code without /effort never does, and nothing is typed to find out.
+  // (effortNow: what a switch took, until the log says it — an answer
+  // names the level, and /effort writes no row of its own. Dropped when
+  // the conversation changes under it, or the log says another.)
+  const [effortNow, setEffortNow] = useState<{ effort: string; bind: string; was?: string } | null>(null)
+  const [effortBusy, setEffortBusy] = useState(false)
+  if (effortNow && (effortNow.bind !== bindKey || convo.meta?.effort !== effortNow.was)) setEffortNow(null)
+  const canEffort = bound && !codex && convo.status === 'ready' && !!convo.meta?.effort && (agent?.status === 'idle' || agent?.status === 'done') && !agent?.other
   const pressBody = () => {
     const b = convo.bind!
     return { pane: b.pane, pid: b.pid, start: b.start, session: b.session }
   }
+  const pickEffort = (level: string) => {
+    if (!convo.bind || effortBusy) return
+    const bind = bindKey
+    const was = convo.meta?.effort
+    setEffortBusy(true)
+    api<{ effort?: string }>('POST', `/api/sessions/${sid}/conversation/effort`, { ...pressBody(), effort: level }, { timeoutMs: MODEL_MS })
+      .then((r) => {
+        const took = r.effort || level
+        setEffortNow({ effort: took, bind, was })
+        toast(t('convo.effortSet', { e: t(`convo.effort.${took}` as I18nKey) }))
+      })
+      .catch((e) => toast(refusal(e), true))
+      .finally(() => setEffortBusy(false))
+  }
+
   const openModels = () => {
     // (Read again after a minute: what it offers and which it has now may have changed.)
     if (!convo.bind || modelBusy || (models && models.bind === bindKey && models.list && Date.now() - (models.at ?? 0) < 60000)) return
@@ -1010,6 +1035,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       sendNow={said?.what === 'now' && said.bind === bindKey ? said.text : undefined}
       mode={{ now: modeNow?.bind === bindKey ? modeNow.mode : undefined, busy: modeBusy, onNext: canMode ? nextMode : undefined }}
       model={canModel || modelBusy ? { list: models?.bind === bindKey ? models.list : null, fresh: !!models?.at && Date.now() - models.at < 60000, busy: modelBusy, can: canModel, onOpen: openModels, onPick: pickModel } : undefined}
+      effort={{ now: effortNow?.bind === bindKey ? effortNow.effort : undefined, busy: effortBusy, can: canEffort, onPick: pickEffort }}
       lead={lead}
     />
     </div>

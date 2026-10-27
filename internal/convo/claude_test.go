@@ -1137,3 +1137,24 @@ func TestClaudeRunningEnds(t *testing.T) {
 		t.Errorf("after a notice of several: %+v", r)
 	}
 }
+
+// How hard the model was asked to think, as the log says it on each answer
+// (Claude Code's /effort, its status line's "·XH"): the latest stands, and
+// a row Claude Code made up itself says nothing.
+func TestClaudeEffort(t *testing.T) {
+	c := NewClaude()
+	c.Feed(lines(
+		`{"type":"assistant","uuid":"a1","effort":"high","message":{"model":"claude-opus-5-5","content":[{"type":"text","text":"one"}]}}`,
+		`{"type":"assistant","uuid":"a2","effort":"xhigh","message":{"model":"claude-opus-5-5","content":[{"type":"text","text":"two"}]}}`,
+		`{"type":"assistant","uuid":"a3","effort":"max","message":{"model":"<synthetic>","content":[{"type":"text","text":"API Error"}]}}`,
+	))
+	if m := c.Meta(); m.Effort != "xhigh" {
+		t.Errorf("effort %q, want xhigh", m.Effort)
+	}
+	// (Said nowhere: nothing, not a guess.)
+	plain := NewClaude()
+	plain.Feed(lines(`{"type":"assistant","uuid":"a1","message":{"model":"claude-opus-5-5","content":[{"type":"text","text":"one"}]}}`))
+	if m := plain.Meta(); m.Effort != "" {
+		t.Errorf("effort %q, want none", m.Effort)
+	}
+}

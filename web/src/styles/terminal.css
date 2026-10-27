@@ -441,6 +441,8 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 }
 .convo-runs-branch { flex: 0 1 auto; min-width: 0; overflow: hidden; }
 .convo-runs-model, .convo-runs-mode { flex: 0 1 auto; min-width: 2em; display: block; overflow: hidden; text-overflow: ellipsis; }
+/* How hard it thinks, beside the model as Claude Code's own line has it */
+.convo-runs-effort { flex: none; }
 .convo-runs-branch svg { flex: none; }
 .convo-runs-branch-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .convo-runs-ctx { cursor: pointer; }

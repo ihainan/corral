@@ -423,6 +423,9 @@ func (c *Claude) Prepend(other Parser) {
 	if c.meta.Mode == "" {
 		c.meta.Mode = o.meta.Mode
 	}
+	if c.meta.Effort == "" {
+		c.meta.Effort = o.meta.Effort
+	}
 	if !c.branchSaid {
 		c.meta.Branch, c.branchSaid = o.meta.Branch, o.branchSaid
 	}
@@ -507,6 +510,7 @@ type claudeRow struct {
 	Content          json.RawMessage `json:"content"`   // (system rows)
 	GitBranch        *string         `json:"gitBranch"` // (present and empty: not on a branch)
 	PermissionMode   string          `json:"permissionMode"`
+	Effort           string          `json:"effort"` // (assistant rows: how hard it was asked to think)
 	Message          *struct {
 		Content json.RawMessage `json:"content"`
 		Model   string          `json:"model"`
@@ -1045,6 +1049,9 @@ func (c *Claude) assistant(r *claudeRow) {
 	// (A row Claude Code made up itself, an error say, is of no model.)
 	if m := r.Message.Model; m != "" && m != "<synthetic>" {
 		c.meta.Model = clip(m, maxMeta)
+		if e := r.Effort; e != "" {
+			c.meta.Effort = clip(e, maxMeta)
+		}
 	}
 	if u := r.Message.Usage; u != nil && r.Message.Model != "<synthetic>" {
 		if n := u.Input + u.CacheWrite + u.CacheRead; n > 0 {
