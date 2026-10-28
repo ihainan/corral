@@ -39,6 +39,7 @@ import { promptSuggestion } from '../terminal/suggestion'
 import { sessionWhich } from '../terminal/sessionName'
 import { knownSession } from '../terminal/agents'
 import { holdTermMode } from '../terminal/chatSend'
+import { useComposerFit } from '../terminal/autosize'
 import { useSession, VERSION_EVENT } from '../app'
 import { geminiPath, shellPath } from '../terminal/paths'
 
@@ -2144,22 +2145,8 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
     composerRef.current?.focus()
   }
 
-  // The composer grows with its text up to 40% of what is visible, and less
-  // on very short screens (a phone on its side with the keyboard up), so the
-  // terminal and the key bar keep some room.
-  useEffect(() => {
-    const el = composerRef.current
-    if (!el) return
-    const fit = () => {
-      const vh = window.visualViewport?.height ?? window.innerHeight
-      el.style.height = 'auto'
-      el.style.height = Math.min(el.scrollHeight, Math.max(40, Math.min(vh * 0.4, vh - 260))) + 'px'
-    }
-    fit()
-    const vv = window.visualViewport
-    vv?.addEventListener('resize', fit)
-    return () => vv?.removeEventListener('resize', fit)
-  }, [draft, composer])
+  // (Fitted to its text up to a part of what is visible: the terminal and the key bar keep some room.)
+  useComposerFit(composerRef, draft, suggestion ?? t('term.composerPlaceholder'), composer)
 
   const openCopyMode = () => {
     const term = termRef.current

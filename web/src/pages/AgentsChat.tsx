@@ -19,6 +19,7 @@ import { prefetchConversation } from '../terminal/conversation'
 import { afterSend, holdTermMode, PENDING_MS, sameTurn, tmuxKey } from '../terminal/chatSend'
 import { agentKey, sessionWhich } from '../terminal/sessionName'
 import { AgentIcon, agentMark } from '../terminal/agentIcons'
+import { useComposerFit } from '../terminal/autosize'
 
 // The session a Codex not yet begun on its log is sent to (the gateway's convoNoSession).
 const NO_SESSION = '00000000-0000-0000-0000-000000000000'
@@ -970,19 +971,9 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     })
     return true
   }
-  useEffect(() => {
-    const el = field.current
-    if (!el) return
-    const fit = () => {
-      const vh = window.visualViewport?.height ?? window.innerHeight
-      el.style.height = 'auto'
-      el.style.height = Math.min(el.scrollHeight, Math.max(40, Math.min(vh * 0.4, vh - 260))) + 'px'
-    }
-    fit()
-    const vv = window.visualViewport
-    vv?.addEventListener('resize', fit)
-    return () => vv?.removeEventListener('resize', fit)
-  }, [draft])
+  const to = agent ? [agent.title, agent.where].filter((x) => x && x !== '~').join(' · ') : ''
+  const placeholder = to ? t('convo.toPlaceholder', { name: to }) : t('term.composerPlaceholder')
+  useComposerFit(field, draft, placeholder)
   // Why it cannot send now, if it cannot.
   // (Waiting for an answer, a message's Enter could take an option of its
   // question, or of a permission it asks: the answer first.)
@@ -1088,7 +1079,6 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   const enterKey = isMac ? 'Return' : 'Enter'
   const modEnter = isMac ? '⌘Return' : 'Ctrl+Enter'
   const sendKey = composerEnter === 'send' ? enterKey : modEnter
-  const to = agent ? [agent.title, agent.where].filter((x) => x && x !== '~').join(' · ') : ''
   const composer = (
     <div className="composer">
       {completion.list}
@@ -1111,7 +1101,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
           autoCapitalize="off"
           autoCorrect="off"
           spellCheck={false}
-          placeholder={to ? t('convo.toPlaceholder', { name: to }) : t('term.composerPlaceholder')}
+          placeholder={placeholder}
           rows={1}
           onChange={(e) => setDraft(e.target.value)} // (an entry edited is a draft of its own)
           onSelect={() => completion.update()}

@@ -590,12 +590,17 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-lines { flex: none; display: inline-flex; gap: 5px; font-family: var(--font-mono); font-size: 12.5px; }
 .convo-lines-add { color: var(--term-ok-text); }
 .convo-lines-del { color: var(--term-danger-text); }
+/* A band of light crosses the words of what runs, left to right, then a
+   pause: the image is 2.5 lines wide, the band in its middle fifth, so at
+   either end of the sweep it is off the line. */
 .convo-shimmer {
   min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  background: linear-gradient(90deg, var(--term-fg-3) 0%, var(--term-fg) 50%, var(--term-fg-3) 100%) 0 0 / 200% 100%;
-  -webkit-background-clip: text; background-clip: text; color: transparent; animation: convo-shimmer 1.8s linear infinite;
+  background: linear-gradient(90deg, var(--term-fg-3) 0% 40%, var(--term-fg) 50%, var(--term-fg-3) 60% 100%) 100% 0 / 250% 100% no-repeat;
+  -webkit-background-clip: text; background-clip: text; color: transparent; animation: convo-shimmer 2.2s ease-in-out infinite;
 }
-@keyframes convo-shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+@keyframes convo-shimmer { 0% { background-position: 100% 0; } 75%, 100% { background-position: 0% 0; } }
+/* (Less motion asked for: no band moving, the words dim and come back in place.) */
+@keyframes convo-pulse { from { opacity: 1; } to { opacity: 0.45; } }
 .convo-live-time { flex: none; color: var(--term-fg-3); font-size: 13px; font-variant-numeric: tabular-nums; }
 .convo-spin {
   display: inline-block; width: 11px; height: 11px; margin-right: 6px; vertical-align: -1px; border-radius: 50%;
@@ -603,7 +608,8 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 }
 @keyframes convo-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) {
-  .convo-shimmer { animation: none; background: none; color: var(--term-fg-2); }
+  /* (Kept against app.css's stop to all animation: a fade in place moves nothing, and without it nothing says it runs.) */
+  .convo-shimmer { animation: convo-pulse 1.2s ease-in-out infinite alternate !important; background: none; color: var(--term-fg-2); }
   .convo-spin { animation: none; }
 }
 
