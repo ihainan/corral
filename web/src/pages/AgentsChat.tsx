@@ -15,6 +15,7 @@ import { InlineReply } from '../terminal/ReplyDialog'
 import { ConversationView, ListSearch, SEARCH_FROM, when, type ConvoAgent, type ConvoListRow, type ConvoPending, type ModelOpt } from '../terminal/Conversation'
 import { asking, useConversation, type ConvoEntry } from '../terminal/conversation'
 import { isCodex, isOpenCode, listAgents, matchQuery, paneTitle, readsLog, useRunningSessions, type AgentRow } from '../terminal/agents'
+import { prefetchConversation } from '../terminal/conversation'
 import { afterSend, holdTermMode, PENDING_MS, sameTurn, tmuxKey } from '../terminal/chatSend'
 import { agentKey, sessionWhich } from '../terminal/sessionName'
 import { AgentIcon, agentMark } from '../terminal/agentIcons'
@@ -261,6 +262,47 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
     for (const k of usedBy.current.keys()) if (!live(k)) usedBy.current.delete(k)
   }, [sessions, entries])
 
+  // The ones likely to be gone to next (waiting for an answer, done and not
+  // seen: a few, in the list's order) read beforehand, one at a time, into
+  // what is kept: opened, each shows at once. Once the one in front has had
+  // its turn (a phone's list: none is in front). Each once a status: not
+  // again while it stays so. Not a view of it: nothing is marked seen.
+  const prefetched = useRef(new Set<string>())
+  const curKey = cur?.key
+  const listing = stack && screen === 'list'
+  const mark = (e: Entry) => `${e.key} ${e.s.id} ${e.row?.status} ${e.row?.a.round ?? 0}`
+  const want = active && sessions !== null
+    ? entries.filter((e) => {
+        const r = e.row
+        return !!r && !r.lost && (r.status === 'blocked' || r.status === 'done') && readsLog(r.a.agent) && (listing || e.key !== curKey) && !prefetched.current.has(mark(e))
+      }).slice(0, PREFETCH_MOST)
+    : []
+  const wantRef = useRef(want)
+  wantRef.current = want
+  // (By who they are: the list asked for again with the same ones goes on as it was.)
+  const wantKey = want.map(mark).join('\n')
+  useEffect(() => {
+    if (!wantKey) return
+    const ctl = new AbortController()
+    const timer = setTimeout(async () => {
+      for (const e of wantRef.current) {
+        if (ctl.signal.aborted || document.hidden) return
+        try {
+          await prefetchConversation(e.s.id, e.pane, ctl.signal)
+          prefetched.current.add(mark(e)) // (read, or not to be: once)
+        } catch {
+          if (ctl.signal.aborted) return // (asked again, with the next list)
+          prefetched.current.add(mark(e)) // (failed: not tried again and again)
+        }
+      }
+    }, listing ? 300 : PREFETCH_AFTER_MS)
+    return () => {
+      clearTimeout(timer)
+      ctl.abort()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wantKey, listing])
+
   // The page's colours and size: the terminal's, and the visible part of
   // the window (the soft keyboard does not shrink the layout viewport on iOS).
   const rootRef = useRef<HTMLDivElement>(null)
@@ -414,6 +456,11 @@ type Sent = ConvoPending & { bind: string; after: number; gen: number; at: numbe
 // reloaded meanwhile): looked for again in all of the log, by its time as
 // well as its text. One on its way when the page went is not known to have
 // gone: it is waited for as any other. (A day on, it is let go.)
+// Read beforehand (see above): at most so many at a time, and so long
+// after the one in front was opened (its own read goes first).
+const PREFETCH_MOST = 3
+const PREFETCH_AFTER_MS = 1500
+
 const SENT_KEPT_MS = 24 * 3600 * 1000
 const SENT_STATES: readonly string[] = ['sending', 'waiting', 'unseen', 'sent']
 function restoreSent(): Record<string, Sent[]> {

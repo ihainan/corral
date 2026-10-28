@@ -261,7 +261,13 @@ export function TerminalTabs({ current }: { current: string }) {
     const timer = window.setInterval(() => document.visibilityState === 'visible' && load(), POLL_MS)
     return () => clearInterval(timer)
   }, [load])
-  useEffect(load, [current, load]) // a session just opened shows its tab with its name
+  // A session just opened shows its tab with its name. (Not when mounted:
+  // the effect above has asked already, and a second ask would be queued.)
+  const currentSeen = useRef(false)
+  useEffect(() => {
+    if (!currentSeen.current) return void (currentSeen.current = true)
+    load()
+  }, [current, load])
 
   // The current one moves to the end of the mounted list; the oldest is let go.
   const mountedAt = useRef(new Map<string, number>())
@@ -421,9 +427,13 @@ export function TerminalTabs({ current }: { current: string }) {
   }
 
   const bar = <TabBar tabs={tabs} current={current} infos={infos} onNew={() => setNewOpen(true)} onMove={move} />
+  // (The tab shown is drawn in the same frame as the one left goes: not a
+  // frame later, once the effect above has mounted it — a frame of neither,
+  // the page's own background, flashed between them.)
+  const drawn = current !== AGENTS && !mounted.includes(current) ? [...mounted, current] : mounted
   return (
     <>
-      {mounted.map((id) => (
+      {drawn.map((id) => (
         <TerminalPage key={id} id={id} active={id === current} tabs={bar} onInfo={onInfo} onEnd={() => endTab(id)} />
       ))}
       {/* (Kept once shown, as the terminals are: what it is sending, and what was sent, stay.) */}

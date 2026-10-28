@@ -75,6 +75,7 @@ export function App() {
   const [error, setError] = useState(false)
   const path = usePath()
   const tabs = useTabsMode()
+  const bootUser = useRef('') // (who the start-up answer was for: not asked again for them)
 
   useEffect(() => {
     setUnauthorizedHandler(() => {
@@ -90,6 +91,7 @@ export function App() {
         setMe(b.user)
         alertsFor(b.user?.id ?? null) // (also signed out while no page was open)
         booted.current = true
+        bootUser.current = b.user ? `${b.user.id} ${!!b.user.must_change_password}` : ''
         if (b.user && !b.user.must_change_password) syncPrefsFromServer(b.user.id)
       })
       .catch(() => setError(true))
@@ -107,6 +109,10 @@ export function App() {
   // recordings to see) is learnt again after signing in.
   useEffect(() => {
     if (!booted.current || !me) return
+    // (The user the start-up answer came with: known already, once.)
+    const who = `${me.id} ${!!me.must_change_password}`
+    if (who === bootUser.current) return void (bootUser.current = '')
+    bootUser.current = ''
     api<Bootstrap>('GET', '/api/bootstrap')
       .then((b) => {
         setBoot((prev) => (prev ? { ...b, user: prev.user } : b))

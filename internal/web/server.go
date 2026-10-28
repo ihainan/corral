@@ -3,6 +3,8 @@
 package web
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -69,6 +71,7 @@ type Server struct {
 	waitAlerts   waitAlerts  // "needs you" alerts shown, to replace when no longer true
 	complete     completions // the composer's completion listings, per session and folder
 	convos       convoStates // the conversation view's logs being read, per session
+	convoScans   convoScans  // scans of a host's processes, shared by its panes for a moment
 
 	sockMu  sync.Mutex
 	socks   map[int64]map[*liveSocket]struct{} // open WebSockets per user, closed on sign-out
@@ -528,6 +531,33 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
 }
+
+// writeJSONCompressed is writeJSON, gzipped where the answer is long and
+// the browser takes gzip (a conversation, the list of sessions asked for
+// every few seconds: on a phone's network, what they weigh shows). Fast
+// rather than small: it is done on every request.
+func writeJSONCompressed(w http.ResponseWriter, r *http.Request, status int, v any) {
+	var buf bytes.Buffer
+	_ = json.NewEncoder(&buf).Encode(v)
+	h := w.Header()
+	h.Set("Content-Type", "application/json; charset=utf-8")
+	h.Set("Cache-Control", "no-store")
+	h.Add("Vary", "Accept-Encoding")
+	if buf.Len() < compressFrom || !acceptsEncoding(r.Header.Get("Accept-Encoding"), "gzip") {
+		w.WriteHeader(status)
+		_, _ = w.Write(buf.Bytes())
+		return
+	}
+	h.Set("Content-Encoding", "gzip")
+	w.WriteHeader(status)
+	zw, _ := gzip.NewWriterLevel(w, gzip.BestSpeed)
+	_, _ = zw.Write(buf.Bytes())
+	_ = zw.Close()
+}
+
+// compressFrom: an answer shorter than this goes as it is (gzip's own
+// bytes and the time are not worth it).
+const compressFrom = 4096
 
 func writeError(w http.ResponseWriter, status int, code, msg string) {
 	writeJSON(w, status, apiError{Error: code, Message: msg})

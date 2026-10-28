@@ -128,6 +128,7 @@ type toolRef struct {
 type goneItem struct {
 	text string // (squashed)
 	at   string // when it was removed
+	from string // another session's, which: its arrival is told by that too
 }
 
 type queuedItem struct {
@@ -649,6 +650,9 @@ func (c *Claude) line(b []byte) {
 			}
 			return
 		}
+		if r.Subtype == "turn_duration" {
+			c.turnOver(r.Timestamp)
+		}
 		if t := c.systemTrouble(&r); t != nil {
 			c.add(&r, RoleNote, []Part{{Kind: KindTrouble, Trouble: t}})
 			return
@@ -676,6 +680,15 @@ func (c *Claude) add(r *claudeRow, role string, parts []Part) {
 
 func (c *Claude) user(r *claudeRow) {
 	if r.IsMeta {
+		// (Not shown. But one Claude Code sent on its own may be what waited:
+		// another session's message, a scheduled task's prompt, which it
+		// writes so when it takes them in — the waiting is over.)
+		if r.PromptSource == "system" {
+			var s string
+			if json.Unmarshal(r.Message.Content, &s) == nil {
+				c.metaArrived(s)
+			}
+		}
 		return
 	}
 	c.setMode(r.PermissionMode)
@@ -701,7 +714,13 @@ func (c *Claude) user(r *claudeRow) {
 		}
 		c.add(r, role, []Part{textPart(KindText, text)})
 		if role == RoleUser {
-			c.arrived(text)
+			// (A shell command the person typed with "!": shown so, it waited
+			// as the command alone.)
+			if strings.Contains(s, "<bash-input>") {
+				c.arrived(strings.TrimPrefix(text, "! "))
+			} else {
+				c.arrived(text)
+			}
 			c.wasSaid(text)
 		}
 		return
@@ -788,9 +807,9 @@ func (c *Claude) queueOp(r *claudeRow) {
 		}
 	case "remove":
 		for i, q := range c.queue {
-			if q.raw == s {
+			if q.raw == s || sameCrossSession(q, s) {
 				c.queue = append(c.queue[:i:i], c.queue[i+1:]...)
-				c.gone = append(c.gone, goneItem{queueKey(q.Text), clip(r.Timestamp, 64)})
+				c.gone = append(c.gone, goneItem{queueKey(q.Text), clip(r.Timestamp, 64), q.from})
 				if n := len(c.gone) - maxQueue; n > 0 {
 					c.gone = append([]goneItem(nil), c.gone[n:]...)
 				}
@@ -848,21 +867,93 @@ func queuedText(s string) (text, from string, note bool) {
 // (One removed already, by its text, is the one arriving: not another of
 // the same text that still waits.)
 func (c *Claude) arrived(text string) {
+	if c.goneArrived(text, "") {
+		return
+	}
 	t := queueKey(text)
 	kept, _ := cut(clean(text), maxText) // (as the queue keeps a long one, and its removals)
 	k := queueKey(kept)
-	for i, g := range c.gone {
-		if g.text == t || g.text == k {
-			c.gone = append(c.gone[:i:i], c.gone[i+1:]...)
-			return
-		}
-	}
 	for i, q := range c.queue {
-		if q := queueKey(q.Text); q == t || q == k {
+		// (The person's: not another session's that has the same words.)
+		if key := queueKey(q.Text); q.from == "" && (key == t || key == k) {
 			c.queue = append(c.queue[:i:i], c.queue[i+1:]...)
 			return
 		}
 	}
+}
+
+// metaArrived: a message Claude Code sent on its own (not shown): another
+// session's (by who and its words) or one of its own making (a scheduled
+// task's prompt: its words whole). What waited and is that, by the same
+// sender and the same words, stops waiting — the first such, as they are
+// taken in; one removed meanwhile (and queued again since) is that one.
+func (c *Claude) metaArrived(s string) {
+	text, from := s, ""
+	if i := strings.Index(s, "<cross-session-message"); i >= 0 {
+		m := crossSession.FindStringSubmatch(s[i:])
+		if m == nil {
+			return
+		}
+		text, from = bodyAfterTag(s[i:], "cross-session-message"), clip(m[1], maxMeta)
+	}
+	if text == "" || c.goneArrived(text, from) {
+		return
+	}
+	for i, q := range c.queue {
+		words := q.raw
+		if q.from != "" {
+			words = bodyAfterTag(q.raw, "cross-session-message")
+		}
+		if q.from == from && words == text {
+			c.queue = append(c.queue[:i:i], c.queue[i+1:]...)
+			return
+		}
+	}
+}
+
+// sameCrossSession: s is another session's message q waits as, by who and
+// its words (its envelope's attributes are not always written alike: a
+// hop-chain, in older versions, on its enqueue and not its removal).
+func sameCrossSession(q queuedItem, s string) bool {
+	if q.from == "" {
+		return false
+	}
+	m := crossSession.FindStringSubmatch(s)
+	return m != nil && clip(m[1], maxMeta) == q.from && bodyAfterTag(s, "cross-session-message") == bodyAfterTag(q.raw, "cross-session-message")
+}
+
+// turnOver: a turn has ended (its "turn_duration" row). A slash command
+// that waited is not waiting now: Claude Code runs it itself as the turn
+// ends, writing nothing of it. (Messages are told gone by their arrival.)
+func (c *Claude) turnOver(at string) {
+	end, err := time.Parse(time.RFC3339Nano, at)
+	if err != nil {
+		return
+	}
+	keep := c.queue[:0:0]
+	for _, q := range c.queue {
+		// (Queued before it ended, as times, not as text; when not known, kept.)
+		t, err := time.Parse(time.RFC3339Nano, q.Time)
+		if err != nil || !t.Before(end) || q.from != "" || !strings.HasPrefix(q.raw, "/") {
+			keep = append(keep, q)
+		}
+	}
+	c.queue = keep
+}
+
+// goneArrived: the message arriving is one removed from what waited (to
+// arrive still): that is what it is, and it is forgotten. True if so.
+func (c *Claude) goneArrived(text, from string) bool {
+	t := queueKey(text)
+	kept, _ := cut(clean(text), maxText) // (as the queue keeps a long one, and its removals)
+	k := queueKey(kept)
+	for i, g := range c.gone {
+		if g.from == from && (g.text == t || g.text == k) {
+			c.gone = append(c.gone[:i:i], c.gone[i+1:]...)
+			return true
+		}
+	}
+	return false
 }
 
 func squashed(s string) string { return strings.Join(strings.Fields(s), " ") }

@@ -1311,3 +1311,112 @@ func TestEarlierTitle(t *testing.T) {
 		t.Fatal("not a name row, taken")
 	}
 }
+
+// What waited and was taken in by Claude Code on its own (another session's
+// message, a scheduled task's prompt: rows it writes as meta, not shown), or
+// at a turn's end (a slash command, which writes nothing), waits no more.
+func TestQueueTakenInOnItsOwn(t *testing.T) {
+	rows := []string{
+		`{"type":"queue-operation","operation":"enqueue","timestamp":"2026-10-27T07:22:46.424Z","content":"<cross-session-message from=\"uds:/tmp/cc-socks/1.sock\" hop-chain=\"e2a8\" from-name=\"ai-27\" from-mode=\"prompting\">\n部署好了。\n</cross-session-message>"}`,
+		`{"type":"queue-operation","operation":"dequeue","timestamp":"2026-10-27T07:22:46.445Z"}`,
+		`{"type":"user","isMeta":true,"promptSource":"system","timestamp":"2026-10-27T07:22:46.478Z","message":{"role":"user","content":"Another Claude session sent a message:\n<cross-session-message from=\"uds:/tmp/cc-socks/1.sock\" from-name=\"ai-27\" from-mode=\"prompting\">\n部署好了。\n</cross-session-message>"}}`,
+		`{"type":"queue-operation","operation":"enqueue","timestamp":"2026-10-27T13:07:00.717Z","content":"晚高峰测速：重复下午的测试。"}`,
+		`{"type":"queue-operation","operation":"dequeue","timestamp":"2026-10-27T13:07:00.739Z"}`,
+		`{"type":"user","isMeta":true,"promptSource":"system","timestamp":"2026-10-27T13:07:00.758Z","message":{"role":"user","content":"晚高峰测速：重复下午的测试。"}}`,
+	}
+	c := New("claude").(*Claude)
+	for _, r := range rows {
+		c.Feed([]byte(r + "\n"))
+	}
+	if q := c.Queued(); len(q) != 0 {
+		t.Fatalf("taken in, still waiting: %+v", q)
+	}
+	// A slash command queued: run by Claude Code itself, nothing written of
+	// it; the turn it waited in ends, and it waits no more. One queued
+	// after that turn's end still does.
+	for _, r := range []string{
+		`{"type":"queue-operation","operation":"enqueue","timestamp":"2026-10-28T01:00:00.000Z","content":"/tui fullscreen"}`,
+		`{"type":"system","subtype":"turn_duration","timestamp":"2026-10-28T01:00:05.000Z"}`,
+		`{"type":"queue-operation","operation":"enqueue","timestamp":"2026-10-28T01:00:06.000Z","content":"还有一句"}`,
+	} {
+		c.Feed([]byte(r + "\n"))
+	}
+	if q := c.Queued(); len(q) != 1 || q[0].Text != "还有一句" {
+		t.Fatalf("after the turn: %+v", q)
+	}
+}
+
+// Taken in on its own: only the message it is (by sender and words whole),
+// not another whose words are in it, nor one queued again after the same
+// words were removed; a shell command typed with "!" arrives as it waited;
+// a turn's end lets go of slash commands only.
+func TestQueueArrivalsExact(t *testing.T) {
+	feed := func(c *Claude, rows ...string) {
+		for _, r := range rows {
+			c.Feed([]byte(r + "\n"))
+		}
+	}
+	texts := func(c *Claude) (out []string) {
+		for _, q := range c.Queued() {
+			out = append(out, q.Text)
+		}
+		return
+	}
+	c := New("claude").(*Claude)
+	feed(c,
+		`{"type":"queue-operation","operation":"enqueue","timestamp":"2026-10-28T01:00:00.000Z","content":"好了"}`,
+		`{"type":"queue-operation","operation":"enqueue","timestamp":"2026-10-28T01:00:01.000Z","content":"<cross-session-message from=\"uds:/x.sock\" from-name=\"ai-27\" from-mode=\"prompting\">\n部署好了。\n</cross-session-message>"}`,
+		`{"type":"user","isMeta":true,"promptSource":"system","timestamp":"2026-10-28T01:00:02.000Z","message":{"role":"user","content":"Another Claude session sent a message:\n<cross-session-message from=\"uds:/x.sock\" from-name=\"ai-27\" from-mode=\"prompting\">\n部署好了。\n</cross-session-message>"}}`,
+	)
+	if got := texts(c); len(got) != 1 || got[0] != "好了" {
+		t.Fatalf("another's words in it: %v", got)
+	}
+	d := New("claude").(*Claude)
+	feed(d,
+		`{"type":"queue-operation","operation":"enqueue","timestamp":"2026-10-28T01:00:00.000Z","content":"晚高峰测速"}`,
+		`{"type":"queue-operation","operation":"remove","timestamp":"2026-10-28T01:00:01.000Z","content":"晚高峰测速"}`,
+		`{"type":"queue-operation","operation":"enqueue","timestamp":"2026-10-28T01:00:02.000Z","content":"晚高峰测速"}`,
+		`{"type":"user","isMeta":true,"promptSource":"system","timestamp":"2026-10-28T01:00:03.000Z","message":{"role":"user","content":"晚高峰测速"}}`,
+	)
+	if got := texts(d); len(got) != 1 {
+		t.Fatalf("the one queued again, gone with the removed one's arrival: %v", got)
+	}
+	e := New("claude").(*Claude)
+	feed(e,
+		`{"type":"queue-operation","operation":"enqueue","timestamp":"2026-10-28T01:00:00.000Z","content":"echo hi"}`,
+		`{"type":"queue-operation","operation":"enqueue","timestamp":"2026-10-28T01:00:01.000Z","content":"再看一下"}`,
+		`{"type":"user","timestamp":"2026-10-28T01:00:02.000Z","message":{"role":"user","content":"<bash-input>echo hi</bash-input>"}}`,
+		`{"type":"system","subtype":"turn_duration","timestamp":"2026-10-28T01:00:03.000Z"}`,
+	)
+	if got := texts(e); len(got) != 1 || got[0] != "再看一下" {
+		t.Fatalf("a shell command, a turn's end: %v", got)
+	}
+	// An older version's removal of another session's message, its envelope written without the hop-chain.
+	f := New("claude").(*Claude)
+	feed(f,
+		`{"type":"queue-operation","operation":"enqueue","timestamp":"2026-10-28T01:00:00.000Z","content":"<cross-session-message from=\"uds:/x.sock\" hop-chain=\"ab12\" from-name=\"ai-97\" from-mode=\"prompting\">\n回复\n</cross-session-message>"}`,
+		`{"type":"queue-operation","operation":"remove","timestamp":"2026-10-28T01:00:01.000Z","content":"<cross-session-message from=\"uds:/x.sock\" from-name=\"ai-97\" from-mode=\"prompting\">\n回复\n</cross-session-message>"}`,
+	)
+	if got := texts(f); len(got) != 0 {
+		t.Fatalf("removed, still waiting: %v", got)
+	}
+}
+
+// A person's arrival is not another session's message with the same
+// words; a slash command at the turn's very end, or of no known time, waits.
+func TestQueueArrivalsBySender(t *testing.T) {
+	c := New("claude").(*Claude)
+	for _, r := range []string{
+		`{"type":"queue-operation","operation":"enqueue","timestamp":"2026-10-28T01:00:00.000Z","content":"<cross-session-message from=\"uds:/x.sock\" from-name=\"ai-27\" from-mode=\"prompting\">\nsame\n</cross-session-message>"}`,
+		`{"type":"queue-operation","operation":"enqueue","timestamp":"2026-10-28T01:00:01.000Z","content":"same"}`,
+		`{"type":"user","timestamp":"2026-10-28T01:00:02.000Z","message":{"role":"user","content":"same"}}`,
+		`{"type":"queue-operation","operation":"enqueue","timestamp":"2026-10-28T01:00:05.000Z","content":"/compact"}`,
+		`{"type":"system","subtype":"turn_duration","timestamp":"2026-10-28T01:00:05Z"}`,
+	} {
+		c.Feed([]byte(r + "\n"))
+	}
+	q := c.Queued()
+	if len(q) != 2 || q[0].From != "ai-27" || q[1].Text != "/compact" {
+		t.Fatalf("%+v", q)
+	}
+}

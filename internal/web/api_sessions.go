@@ -65,7 +65,7 @@ func failureReason(err error) string {
 }
 
 func (s *Server) apiListSessions(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.terms.List(currentUser(r).ID))
+	writeJSONCompressed(w, r, http.StatusOK, s.terms.List(currentUser(r).ID))
 }
 
 func (s *Server) apiOpenSession(w http.ResponseWriter, r *http.Request) {

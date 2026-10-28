@@ -1351,7 +1351,78 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 	}
 	ans.Queued = st.parser.Queued()
 	ans.Running = st.parser.Running()
-	writeJSON(w, http.StatusOK, ans)
+	writeJSONCompressed(w, r, http.StatusOK, ans)
+}
+
+// convoScans: the scans of a host's processes (the locate script) that
+// reading conversations asks for, shared by the panes of one connection for
+// a few seconds (each the same scan of the whole host), and one under way
+// shared by all who ask meanwhile. By connection and the command whole (its
+// mode and tmux session in it). Keys are not pressed by one: sending
+// scans again, on its own.
+type convoScans struct {
+	mu sync.Mutex
+	m  map[string]*convoScan
+}
+
+type convoScan struct {
+	done chan struct{} // closed once made
+	out  []byte
+	err  error
+	at   time.Time // when it was made
+}
+
+// convoScanShared: how long a scan stands for the other panes.
+const convoScanShared = 5 * time.Second
+
+// run gives the output of the scan cmd on sess's host, and when it was
+// made: one made within convoScanShared, or the one under way, else a new
+// one (not bound to the asking request: others may be waiting on it).
+func (c *convoScans) run(ctx context.Context, sess *term.Session, cmd string) ([]byte, time.Time, error) {
+	key := sess.ID + "\x00" + cmd
+	c.mu.Lock()
+	if c.m == nil {
+		c.m = map[string]*convoScan{}
+	}
+	for k, e := range c.m {
+		select {
+		case <-e.done:
+			if time.Since(e.at) > convoScanShared {
+				delete(c.m, k)
+			}
+		default:
+		}
+	}
+	e, ok := c.m[key]
+	if ok {
+		select {
+		case <-e.done:
+			if e.err != nil {
+				ok = false // (failed: made again)
+			}
+		default:
+		}
+	}
+	if !ok {
+		// (Made beside: the one who asked first, gone, does not wait on it
+		// either; it is there for the next.)
+		e = &convoScan{done: make(chan struct{})}
+		c.m[key] = e
+		go func() {
+			sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
+			defer cancel()
+			e.out, e.err = sshx.Output(sctx, sess.Client(), cmd, convoLocateMax)
+			e.at = time.Now()
+			close(e.done)
+		}()
+	}
+	c.mu.Unlock()
+	select {
+	case <-e.done:
+		return e.out, e.at, e.err
+	case <-ctx.Done():
+		return nil, time.Time{}, ctx.Err()
+	}
 }
 
 // relocateLater checks again what the pane runs (locateConvo), beside the
@@ -1383,7 +1454,7 @@ func (s *Server) relocateLater(sess *term.Session, key string, st *convoState, p
 // locateConvo finds the log of the Claude Code session in the pane; a
 // different one from before starts a new generation.
 func (s *Server) locateConvo(ctx context.Context, sess *term.Session, st *convoState, pane string) error {
-	out, err := sshx.Output(ctx, sess.Client(), convoLocateCommand(sess.Persistence, sess.TmuxSession, ""), convoLocateMax)
+	out, at, err := s.convoScans.run(ctx, sess, convoLocateCommand(sess.Persistence, sess.TmuxSession, ""))
 	// (The script ends with exit 0: an error is a scan cut short, by its size
 	// or a failure, which may leave out the agent started last. What was
 	// found before stays, rather than a part of it.)
@@ -1391,7 +1462,7 @@ func (s *Server) locateConvo(ctx context.Context, sess *term.Session, st *convoS
 		return err
 	}
 	l := parseConvoLocate(string(out))
-	st.located, st.pane = time.Now(), pane
+	st.located, st.pane = at, pane // (when the scan was made: one shared may be a little older)
 	sid, log, reason, agent := "", "", "", ""
 	guessed := false
 	switch {

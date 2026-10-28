@@ -7,6 +7,7 @@ package web
 // audited.
 
 import (
+	"compress/gzip"
 	"context"
 	"errors"
 	"io"
@@ -257,6 +258,16 @@ func (s *Server) apiRecordingCast(w http.ResponseWriter, r *http.Request) {
 		if d := mime.FormatMediaType("attachment", map[string]string{"filename": name}); d != "" {
 			h.Set("Content-Disposition", d)
 		}
+	}
+	// (Text, often long: gzipped as it goes, where the browser takes it.)
+	h.Add("Vary", "Accept-Encoding")
+	if acceptsEncoding(r.Header.Get("Accept-Encoding"), "gzip") {
+		h.Set("Content-Encoding", "gzip")
+		w.WriteHeader(http.StatusOK)
+		zw, _ := gzip.NewWriterLevel(w, gzip.BestSpeed)
+		_, _ = io.Copy(zw, rc)
+		_ = zw.Close()
+		return
 	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.Copy(w, rc)

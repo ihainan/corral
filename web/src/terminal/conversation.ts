@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { api, ApiError } from '../api'
+import { api, ApiError, authGen } from '../api'
 
 // The conversation view's data: the agent's own log of the session in the
 // focused (herdr) or active (tmux) pane, as the gateway reads it
@@ -204,6 +204,28 @@ function remember(key: string, gen: number, rev: number, byseq: Map<number, Conv
   kept.delete(key) // (the latest last: the map keeps its order of use)
   kept.set(key, { gen, rev, byseq, a: facts })
   while (kept.size > KEEP) kept.delete(kept.keys().next().value!)
+}
+
+// prefetchConversation reads a pane's conversation into what is kept, as a
+// view of it reads it first, so that a view of it opened next shows it at
+// once (and goes on from there). Not one kept already, nor where a view
+// read it meanwhile (its own is the newer), nor across a change of account.
+// True when it was read.
+export async function prefetchConversation(sessionId: string, pane: string | undefined, signal?: AbortSignal): Promise<boolean> {
+  const key = keyOf(sessionId, pane)
+  if (kept.has(key)) return false
+  const account = authGen()
+  const q = new URLSearchParams({ gen: '0', rev: '0' })
+  if (pane) q.set('pane', pane)
+  const a = await api<Answer>('GET', `/api/sessions/${sessionId}/conversation?${q}`, undefined, { signal, timeoutMs: 25000 })
+  if (kept.has(key) || authGen() !== account) return false
+  if (!a.available) {
+    remember(key, a.gen, 0, new Map(), a)
+    return true
+  }
+  const entries = a.entries.slice(-MAX)
+  remember(key, a.gen, a.rev, new Map(entries.map((e) => [e.seq, e])), a)
+  return true
 }
 
 // (Another account signed in, or none: nothing of the one before stays.)
