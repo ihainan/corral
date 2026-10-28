@@ -1030,7 +1030,9 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   // again, Claude Code taking a while to think of it), shown in the box
   // while it is empty, taken with Tab or its button. Of that turn's end only.
   const endSeq = convo.entries.length ? convo.entries[convo.entries.length - 1].seq : 0
-  const askKey = bound && !notClaude && active && (agent?.status === 'idle' || agent?.status === 'done') && !agent?.other ? `${bindKey} ${convo.gen} ${endSeq}` : ''
+  // (A rewind takes back what is there with nothing new, at times: another turn's end too.)
+  const goneN = useMemo(() => convo.entries.reduce((n: number, e: ConvoEntry) => n + (e.gone ? 1 : 0), 0), [convo.entries])
+  const askKey = bound && !notClaude && active && (agent?.status === 'idle' || agent?.status === 'done') && !agent?.other ? `${bindKey} ${convo.gen} ${endSeq} ${goneN}` : ''
   // (The page come to the front again: what was left to ask for, asked.)
   const [inFront, setInFront] = useState(0)
   useEffect(() => {

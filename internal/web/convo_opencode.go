@@ -41,12 +41,17 @@ const (
 // order they were written, so one left out for want of room is read next
 // time). With tail and older, {"k":"floor","c":…,"id":…}, the first message
 // printed (what is before it is read next, by older), and {"k":"older","n":…},
-// how many messages are before it. All in one read of the database (a
+// how many messages are before it. The session's line ("s") says what /undo
+// went back to, if anything; with since, where fewer messages from the
+// first read (fc, fid) and made at or before cursor are there than the
+// gateway knows of (known; -1: name them whatever their count),
+// {"k":"ids","u":cursor,"ids":[…]} names those there (the rest were deleted). All in one read of the database (a
 // snapshot: a row written meanwhile is in the next look). Long fields are
 // cut and a file's data left out, and no more than ocBudget is printed:
 // what is read goes over the wire.
 //
-//	since <sid> <cursor> <k> <id>      rows written at or after cursor (unix ms); with an id,
+//	since <sid> <cursor> <k> <id> <fc> <fid> <known>
+//	                                   rows written at or after cursor (unix ms); with an id,
 //	                                   in its millisecond only those after (k, id)
 //	tail  <sid> <n>                    the last n messages, with their parts
 //	older <sid> <c> <id> <n>           the n messages before (c, id), with theirs
@@ -115,10 +120,21 @@ if mode == 'find':
     out.write(line({'k': 'sid', 'id': r[0] if r else '', 'now': int(time.time() * 1000)}))
     sys.exit()
 sid = sys.argv[3]
-r = c.execute('select title from session where id = ?', (sid,)).fetchone()
+try:
+    r = c.execute('select title, revert from session where id = ?', (sid,)).fetchone()
+except sqlite3.OperationalError:  # (an OpenCode without /undo's column)
+    r = c.execute('select title, null from session where id = ?', (sid,)).fetchone()
 if not r:
     out.write(line({'k': 'none'})); sys.exit()
-out.write(line({'k': 's', 'title': r[0]}))
+s = {'k': 's', 'title': r[0]}
+try:
+    rv = json.loads(r[1]) if r[1] else None
+except ValueError:
+    rv = None
+if isinstance(rv, dict) and isinstance(rv.get('messageID'), str):
+    s['rv'] = rv['messageID'][:200]
+    s['rvp'] = bool(rv.get('partID'))
+out.write(line(s))
 def mrow(m):
     return line({'k': 'm', 'id': m[0], 'c': m[1], 'u': m[2], 'd': slim_msg(m[3])})
 def prow(p):
@@ -129,6 +145,15 @@ if mode == 'since':
     # the last look stopped for want of room in one millisecond (ck, cid),
     # those after the last it printed.)
     cur, ck, cid = int(sys.argv[4]), int(sys.argv[5]), sys.argv[6]
+    if len(sys.argv) > 9 and sys.argv[8]:
+        # (Messages deleted since the last look: what /undo took back, once
+        # the next was sent. Counted, and named where the count is not the
+        # one known, or always while /undo's state is on: known is -1.)
+        fc, fid, known = int(sys.argv[7]), sys.argv[8], int(sys.argv[9])
+        w = 'session_id = ? and (time_created > ? or (time_created = ? and id >= ?)) and time_created <= ?'
+        a = (sid, fc, fc, fid, cur)
+        if known < 0 or c.execute('select count(*) from message where ' + w, a).fetchone()[0] != known:
+            out.write(line({'k': 'ids', 'u': cur, 'ids': [m[0] for m in c.execute('select id from message where ' + w, a)]}))
     rows = [(m[2], 0, m[0], mrow(m)) for m in c.execute('select id, time_created, time_updated, data from message where session_id = ? and time_updated >= ?', (sid, cur))]
     rows += [(p[3], 1, p[0], prow(p)) for p in c.execute('select id, message_id, time_created, time_updated, data from part where session_id = ? and time_updated >= ?', (sid, cur))]
     rows.sort()
@@ -310,7 +335,15 @@ func (s *Server) readOpenCode(sess *term.Session, st *convoState) error {
 	if st.size < 0 {
 		return s.ocRead(sess, st, "tail", strconv.Itoa(ocTail))
 	}
-	return s.ocRead(sess, st, "since", strconv.FormatInt(st.ocCursor, 10), strconv.Itoa(st.ocCursorK), st.ocCursorID)
+	args := []string{strconv.FormatInt(st.ocCursor, 10), strconv.Itoa(st.ocCursorK), st.ocCursorID}
+	// (With the first message read and how many of those read are made
+	// before the cursor: what was deleted since is told.)
+	if oc, ok := st.parser.(*convo.OpenCode); ok {
+		if fc, fid, ok := oc.Floor(); ok && ocMessageID.MatchString(fid) {
+			args = append(args, strconv.FormatInt(fc, 10), fid, strconv.Itoa(oc.KnownBefore(st.ocCursor)))
+		}
+	}
+	return s.ocRead(sess, st, "since", args...)
 }
 
 // readOlderOpenCode reads in the messages before the first read.
@@ -370,7 +403,7 @@ func (s *Server) ocRead(sess *term.Session, st *convoState, mode string, args ..
 			floorC, floorID = r.C, r.ID
 		case "older":
 			st.older = r.N > 0
-		case "s", "m", "p":
+		case "s", "m", "p", "ids":
 			rows.Write(line)
 			rows.WriteByte('\n')
 		}

@@ -41,6 +41,12 @@ type OpenCode struct {
 	known    bool
 	trimmed  bool
 	Skipped  int
+	// What /undo took back (see gone): the message it went back to
+	// (revertAt, "" for none) and whether it went back to a part of that
+	// message (revertPart). OpenCode hides what came after; when the next
+	// message is sent it deletes it (that message too, without a part).
+	revertAt   string
+	revertPart bool
 }
 
 // OpenCodeRow is one line fed: K "m" a message, "p" a part (of message M),
@@ -54,6 +60,14 @@ type OpenCodeRow struct {
 	U     int64  `json:"u,omitempty"`
 	D     string `json:"d,omitempty"`
 	Title string `json:"title,omitempty"`
+	// "s": what /undo went back to (Revert: a message's id; RevertPart: to
+	// a part of it), "" for none.
+	Revert     string `json:"rv,omitempty"`
+	RevertPart bool   `json:"rvp,omitempty"`
+	// "ids": the messages there are now, of those made before U (the
+	// last look's cursor) from the first read (sent when fewer are there
+	// than were read: some were deleted).
+	IDs []string `json:"ids,omitempty"`
 }
 
 type ocMsg struct {
@@ -61,6 +75,7 @@ type ocMsg struct {
 	created int64
 	updated int64
 	raw     string // (the row as last fed: one written over in the same millisecond is told by it)
+	deleted bool   // (no longer in the database: taken back by /undo, then deleted)
 	data    ocMessage
 	parts   map[string]ocPart
 	e       *Entry // (nil until it has something to show)
@@ -223,8 +238,11 @@ func (c *OpenCode) take(rows []OpenCodeRow) {
 	touched := map[*ocMsg]bool{}
 	for _, r := range rows {
 		switch r.K {
+		case "ids":
+			c.present(r.IDs, r.U)
 		case "s":
 			c.title = ocTitle(r.Title)
+			c.revertAt, c.revertPart = clip(r.Revert, maxID), r.RevertPart
 		case "m":
 			if m := c.message(r); m != nil {
 				touched[m] = true
@@ -237,6 +255,66 @@ func (c *OpenCode) take(rows []OpenCodeRow) {
 	}
 	for _, m := range c.inOrder(touched) {
 		c.show(m)
+	}
+	c.goneNow(c.entries)
+}
+
+// present: of the messages read that were made at or before cursor (unix
+// ms), these are the ones in the database still; the rest were deleted
+// (what /undo took back, once the next message was sent). One made since
+// is not of them: it may be read in the same look.
+func (c *OpenCode) present(ids []string, cursor int64) {
+	there := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		there[id] = true
+	}
+	for id, m := range c.msgs {
+		if !there[id] && m.created <= cursor && (!c.hasFloor || !ocBefore(m.created, m.id, c.floorC, c.floorID)) {
+			m.deleted = true
+		}
+	}
+}
+
+// KnownBefore counts the messages read that were made at or before cursor
+// (unix ms), from the first read on: as many as the database has, unless
+// some were deleted since (see present). -1 while /undo's state is on: the
+// messages there are named at every look then, so that the state cleared
+// (/redo, or the next message sent and what was taken back deleted) is
+// told apart in the same look, not one shown again meanwhile.
+func (c *OpenCode) KnownBefore(cursor int64) int {
+	if c.revertAt != "" {
+		return -1
+	}
+	n := 0
+	for _, m := range c.msgs {
+		if m.created <= cursor && !m.deleted && (!c.hasFloor || !ocBefore(m.created, m.id, c.floorC, c.floorID)) {
+			n++
+		}
+	}
+	return n
+}
+
+// gone: what /undo took back: the messages after the one it went back
+// to, and that one unless it went back to a part of it (OpenCode's ids are
+// in the order they were made); and what was deleted.
+func (c *OpenCode) gone(m *ocMsg) bool {
+	if m.deleted {
+		return true
+	}
+	if c.revertAt == "" {
+		return false
+	}
+	return m.id > c.revertAt || (m.id == c.revertAt && !c.revertPart)
+}
+
+// goneNow marks these entries gone, or not (a /redo), as it is now.
+func (c *OpenCode) goneNow(entries []*Entry) {
+	for _, e := range entries {
+		if m := c.msgs[e.ID]; m != nil && m.e == e {
+			if g := c.gone(m); g != e.Gone {
+				e.Gone, e.Rev = g, c.rev
+			}
+		}
 	}
 }
 
@@ -657,6 +735,9 @@ func (c *OpenCode) Prepend(other Parser) {
 	for i, e := range add {
 		e.Seq = first - len(add) + i
 		e.Rev = c.rev
+		if m := c.msgs[e.ID]; m != nil {
+			e.Gone = c.gone(m) // (what /undo took back, as c knows it now)
+		}
 	}
 	c.entries = append(append([]*Entry(nil), add...), c.entries...)
 }

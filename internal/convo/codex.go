@@ -43,7 +43,19 @@ type Codex struct {
 	trimmed  bool
 	ctxSaid  bool
 	Skipped  int
+	// Turns, to tell what a backtrack takes back: the first entry of each
+	// turn not taken back (a turn starts at task_started; its first entry is
+	// the person's message), the latest last. turnOpen: a turn has started
+	// and has no entry yet. backPending: turns a backtrack took back that
+	// began in the part before (told when it is put before).
+	turns       []*Entry
+	turnOpen    bool
+	backPending int
 }
+
+// maxTurns is how many turns' starts are kept (a backtrack goes back one
+// or two).
+const maxTurns = 1000
 
 type codexOut struct {
 	text   string
@@ -156,10 +168,48 @@ func (c *Codex) Prepend(other Parser) {
 	if !c.known {
 		c.working, c.known = o.working, o.known
 	}
+	// What c's backtracks took back of o's part: its last turns. (A turn o
+	// began with nothing in it yet is the one c's entries start, already
+	// counted as of the part before: one fewer of o's.)
+	if k := c.backPending; k > 0 {
+		if o.turnOpen && len(c.entries) > 0 {
+			k--
+		}
+		c.backPending = 0
+		if k > 0 {
+			if k <= len(o.turns) {
+				from := o.turns[len(o.turns)-k].Seq
+				o.turns = o.turns[:len(o.turns)-k]
+				goneFrom(o.entries, from)
+			} else {
+				c.backPending = min(k-len(o.turns), maxTurns)
+				o.turns = nil
+				goneFrom(o.entries, minSeq)
+			}
+		}
+	}
+	c.backPending = min(c.backPending+o.backPending, maxTurns)
+	// (A turn o began with nothing in it yet begins with c's first entry;
+	// with none, with c's next.)
+	if o.turnOpen && len(c.entries) == 0 {
+		c.turnOpen = true
+	}
+	if o.turnOpen && len(c.entries) > 0 && !c.entries[0].Gone && (len(c.turns) == 0 || c.turns[0] != c.entries[0]) {
+		c.turns = append([]*Entry{c.entries[0]}, c.turns...)
+	}
+	if len(o.turns) > 0 {
+		c.turns = append(append([]*Entry(nil), o.turns...), c.turns...)
+		if n := len(c.turns) - maxTurns; n > 0 {
+			c.turns = c.turns[n:]
+		}
+	}
 	add := o.entries
 	if room := max(0, maxEntries-len(c.entries)); len(add) > room {
 		add = add[len(add)-room:]
 		c.trimmed = true
+		// (Turns begun in what is left out: the first of them kept begins
+		// with the first entry kept.)
+		c.turns = keptTurns(c.turns, append(append([]*Entry(nil), add...), c.entries...))
 	}
 	for id, ts := range o.tools {
 		if _, ok := c.tools[id]; !ok {
@@ -214,7 +264,28 @@ func (c *Codex) trim() {
 			}
 		}
 		c.entries = append([]*Entry(nil), c.entries[n:]...)
+		c.turns = keptTurns(c.turns, c.entries)
 	}
+}
+
+// keptTurns: of turns' starts, those among entries (what is left after
+// some were left out); a turn begun in what was left out begins with the
+// first entry kept.
+func keptTurns(turns, entries []*Entry) []*Entry {
+	in := make(map[*Entry]bool, len(entries))
+	for _, e := range entries {
+		in[e] = true
+	}
+	var out []*Entry
+	for _, e := range turns {
+		if in[e] {
+			out = append(out, e)
+		}
+	}
+	if len(out) < len(turns) && len(entries) > 0 && !entries[0].Gone && (len(out) == 0 || out[0] != entries[0]) {
+		out = append([]*Entry{entries[0]}, out...)
+	}
+	return out
 }
 
 type codexRow struct {
@@ -243,7 +314,8 @@ type codexPayload struct {
 		} `json:"last_token_usage"`
 		Window int64 `json:"model_context_window"`
 	} `json:"info"`
-	Reason string `json:"reason"`
+	Reason   string `json:"reason"`
+	NumTurns int    `json:"num_turns"` // (thread_rolled_back)
 	// turn_context, thread_settings_applied
 	Model          string `json:"model"`
 	ApprovalPolicy string `json:"approval_policy"`
@@ -300,6 +372,12 @@ func (c *Codex) event(r *codexRow, p *codexPayload) {
 	switch p.Type {
 	case "task_started":
 		c.working, c.known = true, true
+		c.turnOpen = true
+	case "thread_rolled_back":
+		// Codex's backtrack (Esc Esc, then a message edited and sent
+		// again): the last turns go, the person's message with all that
+		// came of it and the turn's interruption.
+		c.backtrack(p.NumTurns)
 	case "task_complete":
 		c.working, c.known = false, true
 	case "turn_aborted":
@@ -757,4 +835,51 @@ func (c *Codex) add(r *codexRow, id, role string, parts []Part) {
 		id = "c" + strconv.Itoa(c.seq)
 	}
 	c.entries = append(c.entries, &Entry{Seq: c.seq, Rev: c.rev, ID: clip(id, maxID), Role: role, Time: clip(r.Timestamp, 64), Parts: parts})
+	if c.turnOpen {
+		c.turnOpen = false
+		c.turns = append(c.turns, c.entries[len(c.entries)-1])
+		if n := len(c.turns) - maxTurns; n > 0 {
+			c.turns = append([]*Entry(nil), c.turns[n:]...)
+		}
+	}
+}
+
+// backtrack takes back the last n turns not taken back. Where fewer began
+// in what was read, all of it goes, and the rest are of the part before
+// (the entries before the first turn here are of its last turn).
+func (c *Codex) backtrack(n int) {
+	if n <= 0 {
+		return
+	}
+	if n <= len(c.turns) {
+		from := c.turns[len(c.turns)-n].Seq
+		c.turns = c.turns[:len(c.turns)-n]
+		c.takeBack(c.entries, from)
+		return
+	}
+	c.backPending = min(c.backPending+n-len(c.turns), maxTurns)
+	c.turns = nil
+	c.takeBack(c.entries, minSeq)
+}
+
+// minSeq is below any Seq (they go below 0 as parts are put before).
+const minSeq = -1 << 62
+
+// takeBack marks gone, as of this revision, the entries from Seq from on.
+func (c *Codex) takeBack(entries []*Entry, from int) {
+	for _, e := range entries {
+		if e.Seq >= from && !e.Gone {
+			e.Gone, e.Rev = true, c.rev
+		}
+	}
+}
+
+// goneFrom marks gone the entries from Seq from on (their Rev is the
+// caller's to set: Prepend's, as it puts them before).
+func goneFrom(entries []*Entry, from int) {
+	for _, e := range entries {
+		if e.Seq >= from {
+			e.Gone = true
+		}
+	}
 }

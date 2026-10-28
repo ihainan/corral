@@ -16,6 +16,8 @@ export type Item =
   // What the agent wrote between its steps: shown as it is, as its answer is.
   | { kind: 'text'; key: string; text: string; truncated?: boolean }
   | { kind: 'answer'; key: string; text: string; truncated?: boolean; ts?: string; span?: number; edits: Edits | null }
+  // What a rewind took back (the agent no longer has it): one line, in its place.
+  | { kind: 'gone'; key: string; entries: ConvoEntry[] }
 
 // What a turn changed: its files in the order it first changed them, each
 // with its edits.
@@ -120,7 +122,28 @@ export function items(entries: ConvoEntry[], live: boolean, moving: boolean): It
       })
     for (const s of steps.slice(tail)) if (isNote(s)) out.push(noteItem(s))
   }
-  for (const e of entries) {
+  for (let i = 0; i < entries.length; i++) {
+    const e = entries[i]
+    // What was taken back is of no turn: it neither starts one nor counts in
+    // one (its time, its edits, its answer). One line in its place: between
+    // turns where it begins with a message of the person's (a rewind), else
+    // among the steps of the turn it is in, where that goes on after it (an
+    // answer withdrawn and given again).
+    if (e.gone) {
+      let j = i + 1
+      while (j < entries.length && entries[j].gone) j++
+      const it: Item = { kind: 'gone', key: 'r' + e.seq, entries: entries.slice(i, j) }
+      i = j - 1
+      if (turn && e.role !== 'user' && j < entries.length && entries[j].role !== 'user') {
+        const mark: ConvoEntry = { seq: e.seq, rev: e.rev, id: it.key, role: 'note', parts: [] }
+        goneMark.set(mark, it)
+        turn.steps.push(mark)
+      } else {
+        end(false)
+        out.push(it)
+      }
+      continue
+    }
     if (e.role === 'user' && e.mid && turn) {
       turn.steps.push(e) // (as a note is: in its place)
       continue
@@ -149,7 +172,10 @@ export function items(entries: ConvoEntry[], live: boolean, moving: boolean): It
   return out
 }
 
-export const noteItem = (e: ConvoEntry): Item => (e.role === 'summary' ? { kind: 'summary', e } : e.role === 'user' ? { kind: 'user', e } : { kind: 'note', e })
+export const noteItem = (e: ConvoEntry): Item => goneMark.get(e) ?? (e.role === 'summary' ? { kind: 'summary', e } : e.role === 'user' ? { kind: 'user', e } : { kind: 'note', e })
+
+// (What was taken back within a turn, as a step of it: the line it shows as.)
+const goneMark = new WeakMap<ConvoEntry, Item>()
 
 // The step under way: the latest call not come back (of several run at
 // once, any), else thinking when that is the last thing.

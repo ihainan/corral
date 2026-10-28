@@ -242,7 +242,7 @@ export function ConversationView({
   const quiet = working && now - Math.max(convo.changedAt, since) > HINT_AFTER
   // How long this turn has gone on: from the last thing the person wrote.
   const lastUser = useMemo(() => {
-    for (let i = convo.entries.length - 1; i >= 0; i--) if (convo.entries[i].role === 'user' && !convo.entries[i].mid) return ms(convo.entries[i].ts)
+    for (let i = convo.entries.length - 1; i >= 0; i--) if (convo.entries[i].role === 'user' && !convo.entries[i].mid && !convo.entries[i].gone) return ms(convo.entries[i].ts)
     return 0
   }, [convo.entries])
 
@@ -1373,6 +1373,8 @@ const ListItem = memo(
         )
       case 'work':
         return <Work it={it} open={open} onToggle={onToggle} onCopy={copy} />
+      case 'gone':
+        return <Gone it={it} copy={copy} />
     }
   },
   (a, b) => a.copy === b.copy && a.open === b.open && a.onToggle === b.onToggle && a.onShow === b.onShow && sameItem(a.it, b.it),
@@ -1392,6 +1394,10 @@ function sameItem(a: Item, b: Item): boolean {
     case 'work': {
       const o = b as typeof a
       return a.live === o.live && a.moving === o.moving && a.busy === o.busy && a.steps.length === o.steps.length && a.steps.every((p, i) => p === o.steps[i])
+    }
+    case 'gone': {
+      const o = b as typeof a
+      return a.entries.length === o.entries.length && a.entries.every((e, i) => e === o.entries[i])
     }
     default:
       return a.e === (b as typeof a).e
@@ -1467,7 +1473,33 @@ function Missing({ look }: { look?: ConvoPending['look'] }) {
 }
 
 const noShow = () => {}
-const itemKey = (it: Item) => (it.kind === 'work' || it.kind === 'answer' || it.kind === 'text' ? it.key : 'e' + it.e.seq)
+const itemKey = (it: Item) => (it.kind === 'work' || it.kind === 'answer' || it.kind === 'text' || it.kind === 'gone' ? it.key : 'e' + it.e.seq)
+
+// What a rewind took back: a line saying so, what it was behind a tap (as
+// it showed, faded: the agent no longer has it).
+function Gone({ it, copy }: { it: Extract<Item, { kind: 'gone' }>; copy: (s: string) => void }) {
+  const [open, setOpen] = useState(false)
+  const [opened, setOpened] = useState<Record<string, boolean>>({})
+  const toggle = useCallback((key: string, o: boolean) => setOpened((m) => ({ ...m, [key]: o })), [])
+  // (Shown as they showed: as entries not taken back, or they would fold into this line again.)
+  const inner = useMemo(() => (open ? items(it.entries.map((e) => ({ ...e, gone: false })), false, false) : []), [open, it.entries])
+  const said = it.entries.filter((e) => e.role === 'user').length
+  return (
+    <div className="convo-gone">
+      <button type="button" className="convo-work-head convo-gone-head" aria-expanded={open} onClick={() => setOpen(!open)}>
+        <ChevronRight size={15} className="convo-chev" aria-hidden="true" />
+        <span className="convo-work-text">{t(said ? 'convo.gone.said' : 'convo.gone.plain', { n: said })}</span>
+      </button>
+      {open && (
+        <div className="convo-gone-body">
+          {inner.map((x) => (
+            <ListItem key={itemKey(x)} it={x} copy={copy} open={!!opened[itemKey(x)]} onToggle={toggle} onShow={noShow} />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
 // (Claude Code's own words that it was stopped, in the person's language.)
 const noteText = (e: ConvoEntry) => {
   const n = e.parts[0]?.noted

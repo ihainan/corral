@@ -102,6 +102,7 @@ type Claude struct {
 	taskOps     []taskOp
 	taskOpsFull bool              // more were made than are kept: the list is not made again (see Prepend)
 	late        map[string]taskOp // (while Prepend pairs results: their changes, to be made in their turn)
+	tree        rowTree           // what each row hangs on, to tell what a rewind took back (see rewound)
 }
 
 // taskOp is a change made to the task list; or (orphan: the result's call
@@ -520,6 +521,8 @@ func (c *Claude) Prepend(other Parser) {
 	if c.lastReq.model == "" {
 		c.lastReq = o.lastReq
 	}
+	// (What c's rewinds into o's part took back, there and here.)
+	mine := c.treeBefore(o)
 	add := o.entries
 	if room := max(0, maxEntries-len(c.entries)); len(add) > room {
 		add = add[len(add)-room:]
@@ -539,10 +542,15 @@ func (c *Claude) Prepend(other Parser) {
 			c.tools[id] = ref
 		}
 	}
+	if len(add) > 0 || len(mine) > 0 {
+		c.rev++
+	}
+	for _, e := range mine {
+		e.Rev = c.rev
+	}
 	if len(add) == 0 {
 		return
 	}
-	c.rev++
 	first := c.seq + 1
 	if len(c.entries) > 0 {
 		first = c.entries[0].Seq
@@ -585,6 +593,9 @@ func (c *Claude) trim() {
 type claudeRow struct {
 	Type             string          `json:"type"`
 	UUID             string          `json:"uuid"`
+	ParentUUID       json.RawMessage `json:"parentUuid"` // (null on a row hanging on none; absent in logs that keep no tree)
+	LogicalParent    string          `json:"logicalParentUuid"` // (across a compaction, where parentUuid is empty)
+	Retracted        []string        `json:"retractedMessageUuids"`
 	Timestamp        string          `json:"timestamp"`
 	IsMeta           bool            `json:"isMeta"`
 	IsSidechain      bool            `json:"isSidechain"`
@@ -681,6 +692,18 @@ func (c *Claude) line(b []byte) {
 		c.meta.Branch, c.branchSaid = clip(*r.GitBranch, maxMeta), true
 	}
 	switch r.Type {
+	case "user", "assistant", "attachment", "system":
+		var parent string
+		_ = json.Unmarshal(r.ParentUUID, &parent)
+		if parent == "" {
+			parent = r.LogicalParent
+		}
+		c.tree.add(clip(r.UUID, maxID), clip(parent, maxID))
+		c.tree.curRoot = parent == "" && string(r.ParentUUID) == "null"
+	default:
+		c.tree.cur = -1
+	}
+	switch r.Type {
 	case "user":
 		if r.Message != nil {
 			c.user(&r)
@@ -732,6 +755,9 @@ func (c *Claude) line(b []byte) {
 		if r.Subtype == "turn_duration" {
 			c.turnOver(r.Timestamp)
 		}
+		if len(r.Retracted) > 0 { // (an answer the model's safeguards stopped, withdrawn as another model answers)
+			c.withdraw(r.Retracted)
+		}
 		if t := c.systemTrouble(&r); t != nil {
 			c.add(&r, RoleNote, []Part{{Kind: KindTrouble, Trouble: t}})
 			return
@@ -748,7 +774,9 @@ func (c *Claude) add(r *claudeRow, role string, parts []Part) {
 		parts = append([]Part(nil), parts[:maxParts]...)
 	}
 	c.seq++
-	c.entries = append(c.entries, &Entry{Seq: c.seq, Rev: c.rev, ID: clip(r.UUID, maxID), Role: role, Time: clip(r.Timestamp, 64), Parts: parts})
+	id := clip(r.UUID, maxID)
+	// (Gone as it comes: it hangs on a row taken back.)
+	c.entries = append(c.entries, &Entry{Seq: c.seq, Rev: c.rev, ID: id, Role: role, Time: clip(r.Timestamp, 64), Parts: parts, Gone: id != "" && c.tree.dead[id]})
 	e := c.entries[len(c.entries)-1]
 	for i := range e.Parts {
 		if t := e.Parts[i].Tool; t != nil && t.ID != "" {
@@ -758,6 +786,10 @@ func (c *Claude) add(r *claudeRow, role string, parts []Part) {
 }
 
 func (c *Claude) user(r *claudeRow) {
+	// (A message of the person's, not a tool's result, tells by where it
+	// hangs of a rewind. Not one Claude Code wrote itself (isMeta): /exit's
+	// caveat hangs where the message before the last does, and the session
+	// resumed goes on from that last one.)
 	if r.IsMeta {
 		// (Not shown. But one Claude Code sent on its own may be what waited:
 		// another session's message, a scheduled task's prompt, which it
@@ -773,6 +805,7 @@ func (c *Claude) user(r *claudeRow) {
 	c.setMode(r.PermissionMode)
 	var s string
 	if json.Unmarshal(r.Message.Content, &s) == nil {
+		c.rewound()
 		if strings.Contains(s, "<task-notification>") {
 			c.ended(s)
 		}
@@ -814,6 +847,9 @@ func (c *Claude) user(r *claudeRow) {
 		if b.Type == "tool_result" {
 			results++
 		}
+	}
+	if results == 0 {
+		c.rewound()
 	}
 	images := false
 	for _, b := range blocks {

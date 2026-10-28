@@ -75,6 +75,13 @@ type Entry struct {
 	// Mid marks a message the person sent while the agent worked, which it
 	// took in during its turn (the turn goes on).
 	Mid bool `json:"mid,omitempty"`
+	// Gone marks what was taken back: the conversation was rewound to
+	// before it (Claude Code's Esc Esc or /rewind, a message taken back as
+	// it went, Codex's backtrack, OpenCode's /undo), or the model's answer
+	// was withdrawn. The agent no longer has it; the log still does. An
+	// entry becomes gone later than it came (with a new Rev), never back,
+	// but for OpenCode's /redo.
+	Gone bool `json:"gone,omitempty"`
 }
 
 // Queued is a message the person sent while the agent worked, which it has

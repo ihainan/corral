@@ -86,6 +86,7 @@ export interface ConvoEntry {
   ts?: string
   parts: ConvoPart[]
   mid?: boolean // (a message sent while the agent worked, taken in during its turn)
+  gone?: boolean // (taken back: the conversation was rewound to before it; the agent no longer has it)
 }
 
 // A message the person sent while the agent worked, not taken in yet.
@@ -435,7 +436,7 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
 export function asking(entries: ConvoEntry[]): boolean {
   for (let i = entries.length - 1; i >= 0; i--) {
     const e = entries[i]
-    if (e.role === 'note') continue
+    if (e.role === 'note' || e.gone) continue
     const p = e.role === 'assistant' ? e.parts[e.parts.length - 1] : undefined
     // (Claude Code's question; Codex's request for the person's input.)
     return !!p?.tool && (p.tool.name === 'AskUserQuestion' || p.tool.name.startsWith('request_user_input')) && !p.tool.done

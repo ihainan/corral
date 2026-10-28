@@ -587,6 +587,10 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-step.is-thought .convo-step-verb { color: var(--term-fg-3); font-weight: 400; }
 .convo-thinking { font-style: italic; color: var(--term-fg-3); }
 .convo-work-body > .convo-note { margin: 4px 0; }
+/* What a rewind took back: a quiet line; what it was, faded, behind it. */
+.convo-gone { display: flex; flex-direction: column; min-width: 0; }
+.convo-gone-head { font-size: 13.5px; }
+.convo-gone-body { display: flex; flex-direction: column; gap: 14px; margin: 6px 0 2px 6px; padding: 2px 0 2px 14px; border-left: 2px solid var(--term-line); opacity: 0.62; }
 .convo-lines { flex: none; display: inline-flex; gap: 5px; font-family: var(--font-mono); font-size: 12.5px; }
 .convo-lines-add { color: var(--term-ok-text); }
 .convo-lines-del { color: var(--term-danger-text); }
