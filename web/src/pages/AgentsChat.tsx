@@ -16,7 +16,7 @@ import { ConversationView, ListSearch, SEARCH_FROM, when, type ConvoAgent, type 
 import { asking, useConversation, type ConvoEntry } from '../terminal/conversation'
 import { isCodex, isOpenCode, listAgents, matchQuery, paneTitle, readsLog, useRunningSessions, type AgentRow } from '../terminal/agents'
 import { prefetchConversation } from '../terminal/conversation'
-import { afterSend, holdTermMode, PENDING_MS, sameRun, sameTurn, tmuxKey } from '../terminal/chatSend'
+import { afterSend, holdsWords, holdTermMode, PENDING_MS, sameRun, sameTurn, tmuxKey } from '../terminal/chatSend'
 import { agentKey, sessionWhich } from '../terminal/sessionName'
 import { AgentIcon, agentMark } from '../terminal/agentIcons'
 import { useComposerFit } from '../terminal/autosize'
@@ -465,6 +465,8 @@ const keptTitle = (titles: Titles, e: Entry): string | undefined => {
 // seqs), only a turn after that can be it.)
 // (not: the log's turns another of the same words was found as, which are
 // not this one: kept with it, so a reload does not find this one there.)
+// (How many turns a message waiting is kept not to be: see marked.)
+const NOT_KEPT = 100
 type Sent = ConvoPending & { bind: string; after: number; gen: number; at: number; was?: string; afterTs?: string; not?: string[] }
 
 // What was sent and not seen in the log yet, as this tab kept it (the page
@@ -570,10 +572,14 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   const zeroKey = convo.bind ? `${convo.bind.pane} ${convo.bind.pid} ${convo.bind.start} ${NO_SESSION}` : ''
   const ofThis = (bind: string) => bind === bindKey || (!!zeroKey && bind === zeroKey)
 
+  // Where the one shown is placed on the lists while it is (see asHeld): as
+  // it was when it was gone to, or the page came back to, once its state is
+  // known. (Not again till then: looked at or answered, it would move.)
+  const [placedAs, setPlacedAs] = useState<ConvoListRow['placeAs']>(undefined)
   // The list beside the thread (or from the bar on a narrow screen).
   const rows = useMemo((): ConvoListRow[] => {
     const hosts = hostCount(entries)
-    return entries.map((e) => {
+    const out = entries.map((e): ConvoListRow => {
       const current = e.key === cur.key && e.s.id === cur.s.id
       if (current && convo.title) {
         titles.delete(e.key) // (the latest last: the map keeps its order of use)
@@ -588,7 +594,15 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       const title = (current && agent?.title) || keptTitle(titles, e) || `${e.s.host_name} · ${sessionWhich(e.s, all)}`
       return { key: e.key, title, where: whereOf(e, hosts), program: current ? agent?.program : undefined, status: current && agent ? agent.status : 'unknown', current, onPick: () => onPick(e) }
     })
-  }, [entries, cur, agent, convo.title, all, titles, onPick])
+    return placedAs ? out.map((r) => (r.current ? { ...r, placeAs: placedAs } : r)) : out
+  }, [entries, cur, agent, convo.title, all, titles, onPick, placedAs])
+  const shown = rows.find((r) => r.current)
+  const known = !!shown && shown.status !== 'unknown'
+  useEffect(() => {
+    if (!active) return setPlacedAs(undefined)
+    if (known && shown) setPlacedAs((p) => p ?? { status: shown.status, since: shown.since })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, known])
 
   // Stop and "send now": pressed by the gateway in the agent's pane, for the
   // process the conversation shows; what became of it is said for a while.
@@ -800,6 +814,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       changed = true
       return []
     })
+    const merged: ConvoEntry[] = [] // (turns found as several: no other's, after a reload too)
     // Two or more sent one after another, not found each as its own turn,
     // and taken in as one (the first's Enter let go of): all of them arrived.
     for (let i = 0; i < next.length; i++) {
@@ -807,9 +822,11 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       const n = at.findIndex((q) => q.state === 'sent' || !ofThis(q.bind))
       const run = n < 0 ? at.slice(0, 5) : at.slice(0, Math.min(n, 5))
       for (let k = run.length; k >= 2; k--) {
-        const hit = users.find((e) => after(e, run[0]) && sameRun(e, run.slice(0, k).map((q) => q.text)))
+        // (Written after each of them went, and not a turn any of them was found not to be.)
+        const hit = users.find((e) => run.slice(0, k).every((q) => after(e, q) && !q.not?.includes(e.id)) && sameRun(e, run.slice(0, k).map((q) => q.text)))
         if (!hit) continue
         u.add(hit.seq)
+        if (hit.id) merged.push(hit)
         const gone = new Set(run.slice(0, k).map((q) => q.id))
         run.slice(0, k).forEach(got)
         next = next.filter((q) => !gone.has(q.id))
@@ -819,12 +836,16 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       }
     }
     // (Any other it would be found as is not that turn, after a reload too.)
-    const marked = taken.length
-      ? next.map((q) => {
-          const add = taken.filter((x) => !q.not?.includes(x.id) && sameTurn(x, q.text)).map((x) => x.id)
-          return add.length ? { ...q, not: [...(q.not ?? []), ...add].slice(-20) } : q
-        })
-      : next
+    // (Of each still waiting, those of its words: it could be found as them,
+    // alone or with others, and is not. Kept for long: one let go of could
+    // be found again, after a reload.)
+    const marked =
+      taken.length || merged.length
+        ? next.map((q) => {
+            const add = [...taken, ...merged].filter((x) => !q.not?.includes(x.id) && (sameTurn(x, q.text) || holdsWords(x, q.text))).map((x) => x.id)
+            return add.length ? { ...q, not: [...(q.not ?? []), ...add].slice(-NOT_KEPT) } : q
+          })
+        : next
     if (changed) setSent(() => marked)
   }, [convo.entries, convo.gen, convo.status, sent, bindKey])
   useEffect(() => {
@@ -1307,7 +1328,8 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   )
 }
 
-// A phone's list of the agents: waiting for you first, then working, then the
+// A phone's list of the agents: those for you first (waiting, then done and
+// not looked at, as the side list's first group), then working, then the
 // rest, the latest to change first in each, as it was when the list showed
 // (statuses change in place; rows do not move under the finger; one new comes
 // last). Its summary line puts them in order again and goes to the first
@@ -1330,7 +1352,7 @@ function PhoneList({ entries, all, titles, query, onQuery, onPick }: { entries: 
       /* not kept */
     }
   }
-  const rank = (e: Entry) => ['blocked', 'working'].indexOf(e.row?.status ?? '') + 1 || 3
+  const rank = (e: Entry) => ['blocked', 'done', 'working'].indexOf(e.row?.status ?? '') + 1 || 4
   const sorted = (list: Entry[]) => list.map((e, i) => [e, i] as const).sort(([a, i], [b, j]) => rank(a) - rank(b) || (b.row?.a.since ?? 0) - (a.row?.a.since ?? 0) || i - j).map(([e]) => e.key + ' ' + e.s.id)
   const [order, setOrder] = useState<string[]>(() => sorted(entries))
   useEffect(() => {

@@ -1030,14 +1030,25 @@ export interface ConvoListRow {
   status: 'working' | 'blocked' | 'done' | 'idle' | 'unknown'
   since?: number // (unix ms) when its status last changed
   current: boolean
+  placeAs?: { status: ConvoListRow['status']; since?: number } // (the one shown: where it is placed meanwhile, see asHeld)
   onPick: () => void
 }
 
+// What is for the person to do: one waiting for an answer, one done and not
+// looked at since. Above the rest, those waiting first: working ones are
+// not, nothing being for the person there yet (and coming and going often).
+const forYou = (r: ConvoListRow) => r.status === 'blocked' || r.status === 'done'
 const GROUPS: { name: I18nKey; of: (r: ConvoListRow) => boolean }[] = [
-  { name: 'convo.group.blocked', of: (r) => r.status === 'blocked' },
+  { name: 'convo.group.todo', of: forYou },
   { name: 'convo.group.working', of: (r) => r.status === 'working' },
-  { name: 'convo.group.recent', of: (r) => r.status !== 'blocked' && r.status !== 'working' },
+  { name: 'convo.group.recent', of: (r) => !forYou(r) && r.status !== 'working' },
 ]
+// A group's rows in their order: the latest to change first (those waiting
+// before those done, in the first).
+const inGroup = (g: (typeof GROUPS)[number], rows: ConvoListRow[]) => {
+  const of = byRecent(rows.filter(g.of))
+  return g.name === 'convo.group.todo' ? [...of.filter((r) => r.status === 'blocked'), ...of.filter((r) => r.status !== 'blocked')] : of
+}
 
 // The rest, as the list shows them: by the day their status last changed;
 // those of no known time (a tmux session, the gateway restarted) last.
@@ -1076,12 +1087,21 @@ function stamp(r: ConvoListRow, now: number, yesterday: number): string {
 // The latest to change first; those of no known time last, as they were.
 const byRecent = (rows: ConvoListRow[]) => rows.map((r, i) => [r, i] as const).sort(([a, i], [b, j]) => (b.since ?? 0) - (a.since ?? 0) || i - j).map(([r]) => r)
 
-// The agents in their order on the list: waiting first, then working, then
-// the rest, the latest to change first in each (those of no known time, as
-// after the gateway restarted, last).
+// The agents in their order on the list: those for the person (waiting,
+// then done and not looked at), then working, then the rest, the latest to
+// change first in each (those of no known time, as after the gateway
+// restarted, last).
 export function listOrder(rows: ConvoListRow[]): ConvoListRow[] {
-  return GROUPS.flatMap((g) => byRecent(rows.filter(g.of)))
+  return GROUPS.flatMap((g) => inGroup(g, rows.map(asHeld)))
 }
+
+// The one being read stays where it was when it was gone to, whatever
+// becomes of it meanwhile (looked at, a done one is no longer for the
+// person; answered, a waiting one works): it goes to its place once another
+// is (else it would move from under the pointer as it is read). Placed so
+// by the lists and by Alt+Up/Down alike (placeAs, which its page sets);
+// what its row says is as it is.
+const asHeld = (r: ConvoListRow): ConvoListRow => (r.placeAs && r.current ? { ...r, status: r.placeAs.status, since: r.placeAs.since } : r)
 
 // How long a status has lasted (at work, waiting), or how long ago it came
 // (done, idle), in minutes at least.
@@ -1114,7 +1134,7 @@ function AgentList({ rows, onPicked, placed, query: given, onQuery }: { rows: Co
   const [own, setOwn] = useState('')
   const query = given ?? own
   const setQuery = onQuery ?? setOwn
-  const at = (r: ConvoListRow) => placed?.get(r.key) ?? r
+  const at = (r: ConvoListRow) => placed?.get(r.key) ?? asHeld(r)
   // (Placed: in their order then, ties too; new ones after.)
   const first = placed ? [...placed.keys()] : []
   const place = (r: ConvoListRow) => (first.includes(r.key) ? first.indexOf(r.key) : first.length)
@@ -1123,7 +1143,7 @@ function AgentList({ rows, onPicked, placed, query: given, onQuery }: { rows: Co
   const today = dayStart(now)
   const yesterday = dayBefore(today)
   const groups = GROUPS.flatMap((g) => {
-    const of = byRecent(inOrder.map(at).filter(g.of))
+    const of = inGroup(g, inOrder.map(at))
     if (g.name !== 'convo.group.recent') return [{ name: g.name, of }]
     return DAYS.map((d) => ({ name: d.name, of: of.filter((p) => d.of(p.since ?? 0, today, yesterday)) }))
   })
@@ -1240,7 +1260,7 @@ export function ListSearch({ value, onChange }: { value: string; onChange: (v: s
 // changing meanwhile do not move them under the finger (what they say is
 // current; one gone goes, one new comes in).
 function Picker({ rows, onClose }: { rows: ConvoListRow[]; onClose: () => void }) {
-  const [first] = useState(() => new Map(rows.map((r) => [r.key, r])))
+  const [first] = useState(() => new Map(rows.map((r) => [r.key, asHeld(r)])))
   const box = useRef<HTMLDivElement>(null)
   // (Once, when it opens: focus moved on in it stays where it was moved.)
   useEffect(() => {

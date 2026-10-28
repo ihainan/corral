@@ -29,6 +29,12 @@ export const sameRun = (e: ConvoEntry, sent: string[]) => {
   const n = (s: string) => s.replace(/\s+/g, '')
   return n(e.parts.filter((p) => p.kind === 'text').map((p) => p.text).join('')) === n(sent.join(''))
 }
+// A turn with these words in it, alone or with others (spaces aside).
+export const holdsWords = (e: ConvoEntry, sent: string) => {
+  const n = (s: string) => s.replace(/\s+/g, '')
+  const want = n(sent)
+  return !!want && n(e.parts.filter((p) => p.kind === 'text').map((p) => p.text).join('')).includes(want)
+}
 // Written after it was sent, by the host's clock where the log has one (a
 // minute's leeway for clocks that differ): an older turn of the same text,
 // say one sent again, is not taken for it.

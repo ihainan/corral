@@ -70,3 +70,63 @@ func TestAnchorsAreWholeCharacters(t *testing.T) {
 		}
 	}
 }
+
+// Enter is pressed again on a message only where the box in front holds it
+// from its start: not on a box of the thread above while a permission
+// dialog is in front, not on the box's placeholder, not on a box holding
+// only some of it.
+func TestStillTyped(t *testing.T) {
+	rule := strings.Repeat("─", 40)
+	msg := "提交所有的代码并 push。下一个问题，右下角的 context 为什么是 200K /home/u/shot.png"
+	foot := "  Opus 5.5·H │ Ctx 0\n  ⏵⏵ auto mode on (shift+tab to cycle)"
+	box := func(in string) string { return rule + "\n❯ " + in + "\n" + rule + "\n" + foot }
+	for _, c := range []struct {
+		name   string
+		screen string
+		want   bool
+	}{
+		{"still in the box", "● 在。\n\n" + box("提交所有的代码并 push。下一个问题，右下角的\n  context 为什么是 200K [Image #1]"), true},
+		{"taken in: the box empty", "> " + msg + "\n\n" + box(""), false},
+		{"the placeholder only", box(`Try "edit <filepath> to..."`), false},
+		{"queued while it works: the box empty", "✢ Working…\n  ⎿ queued: " + msg + "\n" + box(""), false},
+		{"a dialog in front, a box in the thread above", "● output:\n" + box(msg) + "\n\n" + strings.Repeat("x\n", 3) +
+			" Bash command\n   rm -rf build\n Do you want to proceed?\n ❯ 1. Yes\n   2. No\n\n Esc to cancel\n", false},
+		{"only its end in the box", box("context 为什么是 200K /home/u/shot.png"), false},
+		{"no box at all", "$ ls\nREADME.md\n", false},
+		{"a short dialog under an old box", box(msg)[:len(box(msg))-len(foot)] + "\n Do you want to proceed?\n ❯ 1. Yes\n   2. No\n Esc to cancel", false},
+		{"a dialog's numbered choice under it", box(msg) + "\n 1. Yes", false},
+	} {
+		if got := stillTyped(c.screen, msg); got != c.want {
+			t.Errorf("%s: %v, want %v", c.name, got, c.want)
+		}
+	}
+	// What Claude Code shows of a paste at its start: a long one folded, a
+	// picture's path as [Image #N].
+	long := "第一行很长的说明文字\n第二行\n第三行\n第四行"
+	if !stillTyped(box("[Pasted text #1 +3 lines]"), long) {
+		t.Error("a long paste folded, still in the box: not pressed for")
+	}
+	if stillTyped(box("[Pasted text #1 +9 lines]"), long) {
+		t.Error("another paste's fold taken for it")
+	}
+	pic := "/home/u/shot.png 这张图里右下角为什么是 200K"
+	if !stillTyped(box("[Image #1] 这张图里右下角为什么是 200K"), pic) {
+		t.Error("a picture at its start, still in the box: not pressed for")
+	}
+	if !stillTyped(box("[Image #1] 请分析这张图"), "'/home/user name/shot.png' 请分析这张图") {
+		t.Error("a quoted path to a picture at its start: not pressed for")
+	}
+	if !stillTyped(box(`[Image #1] "请分析这张图"`), `/home/u/shot.png "请分析这张图"`) {
+		t.Error("words in quotes after a path: their quote taken for the path's")
+	}
+	if stillTyped(box("[Image #1] 请分析这张图"), `'/home/u/shot.png" 请分析这张图`) {
+		t.Error("quotes of two kinds taken for a pair")
+	}
+	if stillTyped(box("[Image #1] 别的话"), pic) {
+		t.Error("another message after a picture taken for it")
+	}
+	// (Too short a message to tell its start from anything: never pressed for.)
+	if stillTyped(box("ok"), "ok") {
+		t.Error("a short message pressed for")
+	}
+}

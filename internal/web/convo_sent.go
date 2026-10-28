@@ -4,6 +4,8 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -81,12 +83,12 @@ func (s *Server) enterAgain(ctx context.Context, sess *term.Session, pane, socke
 		enter = []string{"Enter"}
 	}
 	for range 2 {
-		if waiting, known := inInput(screen, text); !known || !waiting {
+		if !stillTyped(screen, text) {
 			return
 		}
 		slog.Info("conversation: message still in the input, Enter again", "session", sess.ID, "pane", pane)
 		ended.Add(1)
-		res, err := sshx.Exec(ctx, sess.Client(), convoSendCommand(sess.Persistence, sess.TmuxSession, pane, socket, pid, start, sid, 0, enter, sendLines), 64<<10,
+		res, err := sshx.Exec(ctx, sess.Client(), convoSendCommand(sess.Persistence, sess.TmuxSession, pane, socket, pid, start, sid, 0, enter, sendLines), sendOut,
 			sshx.ExecOptions{Stdin: strings.NewReader(""), Release: ended.Done})
 		if err != nil {
 			return
@@ -94,6 +96,94 @@ func (s *Server) enterAgain(ctx context.Context, sess *term.Session, pane, socke
 		screen = string(res.Out)
 	}
 }
+
+// stillTyped: what Enter would now be pressed on is the message itself —
+// stricter than inInput, which says what became of a message, as Enter is
+// to be pressed on it: the input box is the one in front (at the foot of
+// the screen, only the status lines under it: not one of the thread above,
+// as when a permission dialog has taken the box's place) and holds the
+// message from its start (not a part of it, nor the box's placeholder).
+func stillTyped(screen, text string) bool {
+	lines := strings.Split(strings.TrimRight(screen, "\n"), "\n")
+	for i := len(lines) - 1; i >= 1; i-- {
+		if !strings.HasPrefix(strings.TrimSpace(lines[i]), "\u276f") || !pickerRule.MatchString(lines[i-1]) {
+			continue
+		}
+		end := -1
+		for j := i + 1; j < len(lines); j++ {
+			if pickerRule.MatchString(lines[j]) {
+				end = j
+				break
+			}
+		}
+		if end < 0 || len(lines)-end-1 > typedFoot {
+			return false
+		}
+		// (Under it, status lines only: a choice there, a dialog's, is in front.)
+		for _, l := range lines[end+1:] {
+			if strings.Contains(l, "\u276f") || typedChoice.MatchString(l) {
+				return false
+			}
+		}
+		box := strings.TrimPrefix(squeeze(strings.Join(lines[i:end], "\n")), "\u276f")
+		want := squeeze(text)
+		if len([]rune(want)) < sentMark {
+			return false
+		}
+		// What Claude Code shows of a paste at its start: a long one folded to
+		// "[Pasted text #1 +40 lines]" (as many lines as the message has); a
+		// path to a picture to "[Image #1]", the rest after it.
+		if m := typedPasted.FindStringSubmatch(box); m != nil {
+			// (Its newlines or its lines, as Claude Code counts them.)
+			n, _ := strconv.Atoi(m[1])
+			nl := strings.Count(strings.TrimRight(text, "\n"), "\n")
+			return nl > 0 && (n == nl || n == nl+1)
+		}
+		if m := typedImage.FindStringIndex(box); m != nil {
+			if p := picturePath(want); p != nil {
+				box, want = box[m[1]:], want[p[1]:]
+				if want == "" {
+					return box == ""
+				}
+			}
+		}
+		head := []rune(want)
+		return strings.HasPrefix(box, string(head[:min(len(head), typedHead)]))
+	}
+	return false
+}
+
+// (A dialog's choice, "1. Yes"; Claude Code's placeholders for a long paste
+// and a picture at the box's start, spaces squeezed out; a path to a picture
+// at the message's start.)
+var (
+	typedChoice = regexp.MustCompile(`^\s*\d+\.\s`)
+	typedPasted = regexp.MustCompile(`^\[Pastedtext#\d+\+(\d+)lines\]$`)
+	typedImage  = regexp.MustCompile(`^\[Image#\d+\]`)
+	typedPath   = []*regexp.Regexp{
+		regexp.MustCompile(`(?i)^'[^']*?\.(?:png|jpe?g|gif|webp)'`),
+		regexp.MustCompile(`(?i)^"[^"]*?\.(?:png|jpe?g|gif|webp)"`),
+		regexp.MustCompile(`(?i)^[^'"\s]*?\.(?:png|jpe?g|gif|webp)`),
+	}
+)
+
+// picturePath: where a path to a picture at a message's start ends (its
+// quotes, a pair of the one kind, with it; one not quoted has none in it).
+func picturePath(s string) []int {
+	for _, re := range typedPath {
+		if m := re.FindStringIndex(s); m != nil {
+			return m
+		}
+	}
+	return nil
+}
+
+// typedFoot: the lines under Claude Code's input box (its status lines);
+// typedHead: how much of a message's start its box must show.
+const (
+	typedFoot = 10
+	typedHead = 24
+)
 
 // inInput: the message is in the pane's input box, as the pane shows it.
 //

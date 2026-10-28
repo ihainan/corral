@@ -2273,6 +2273,11 @@ func modeLines(what string) int {
 // follows it, a long message wrapped over many lines in it).
 const sendLines = 60
 
+// sendOut: what a send's command may print (its screen, wide lines and
+// all): more than that fails the command, and a message typed was then
+// said not known to have gone.
+const sendOut = 256 << 10
+
 // Send types a message into the agent's pane and presses Enter (Claude Code
 // queues it while it works), as the terminal's composer would, but into that
 // pane only: what herdr has in front, or the terminal shows, is not changed.
@@ -2487,7 +2492,7 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		}()
 	}()
 	ended.Add(1)
-	res, err := sshx.Exec(ctx, sess.Client(), convoSendCommand(sess.Persistence, sess.TmuxSession, b.Pane, socket, b.PID, b.Start, b.Session, len(text), press, modeLines(what)), 16<<10,
+	res, err := sshx.Exec(ctx, sess.Client(), convoSendCommand(sess.Persistence, sess.TmuxSession, b.Pane, socket, b.PID, b.Start, b.Session, len(text), press, modeLines(what)), sendOut,
 		sshx.ExecOptions{Stdin: strings.NewReader(text), Release: ended.Done})
 	var exitErr *sshx.ExitError
 	switch {
