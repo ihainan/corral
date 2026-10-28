@@ -162,8 +162,34 @@ export function setUnauthorizedHandler(fn: () => void) {
 // answer to a request of an earlier sign-in must not end the current one.
 let authGeneration = 0
 export const authGen = () => authGeneration
-export function bumpAuthGen() {
+// startup: who is signed in learnt as the page starts, which changes no
+// one: what was asked for early was asked as them, and is kept.
+export function bumpAuthGen(startup = false) {
   authGeneration++
+  if (!startup) early.clear() // (asked for as another sign-in, or none)
+  else for (const e of early.values()) e.gen = authGeneration
+}
+
+// What every page asks for first, asked for as the page starts (askEarly),
+// all at once, rather than each once the app is up and the one before has
+// answered. The first ask of each takes that answer, while it is fresh and
+// of the same sign-in. (Not a preload link: WebKit asks again for those.)
+type Early = { at: number; gen: number; res: Promise<Response>; ctl: AbortController }
+const early = new Map<string, Early>()
+const EARLY_MS = 5000
+export function askEarly(paths: string[]) {
+  for (const p of paths) {
+    const ctl = new AbortController()
+    const res = fetch(p, { credentials: 'same-origin', signal: ctl.signal })
+    res.catch(() => {}) // (one never taken may fail unseen; the one taking it asks again)
+    early.set(p, { at: Date.now(), gen: authGeneration, res, ctl })
+  }
+}
+function takeEarly(path: string): Early | undefined {
+  const e = early.get(path)
+  if (!e) return undefined
+  early.delete(path)
+  return e.gen === authGeneration && Date.now() - e.at <= EARLY_MS ? e : undefined
 }
 export function unauthorized(sentAt: number) {
   if (sentAt === authGeneration && onUnauthorized) onUnauthorized()
@@ -179,18 +205,26 @@ export async function api<T>(method: string, path: string, body?: unknown, opts:
   const sentAt = authGeneration
   const ctl = new AbortController()
   const onAbort = () => ctl.abort()
+  if (opts.signal?.aborted) ctl.abort() // (cancelled before it was asked: not asked at all)
   opts.signal?.addEventListener('abort', onAbort)
   const timer = opts.timeoutMs ? setTimeout(() => ctl.abort(), opts.timeoutMs) : undefined
   let data: any = null
   try {
     try {
-      res = await fetch(path, {
-        method,
-        credentials: 'same-origin',
-        signal: ctl.signal,
-        headers: body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
-        body: body !== undefined ? JSON.stringify(body) : undefined,
-      })
+      const asked = method === 'GET' && body === undefined ? takeEarly(path) : undefined
+      // (Its time out and its cancelling are this request's, as if asked now.)
+      if (asked) ctl.signal.addEventListener('abort', () => asked.ctl.abort())
+      const fresh = () =>
+        fetch(path, {
+          method,
+          credentials: 'same-origin',
+          signal: ctl.signal,
+          headers: body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
+          body: body !== undefined ? JSON.stringify(body) : undefined,
+        })
+      // (One answered with a refusal is asked again: it may be of a moment
+      // before — a password changed since, say.)
+      res = asked ? await asked.res.then((r) => (r.ok ? r : fresh()), fresh) : await fresh()
       // The timeout and cancellation cover reading the body too.
       const text = await res.text()
       try {
@@ -347,4 +381,18 @@ export interface SharedSession {
   state: string
   created_at: number
   title: string
+}
+
+// The start-up answer, or null when the gateway does not answer (within 5 s).
+export async function probeBootstrap(): Promise<{ instance?: string } | null> {
+  const ctl = new AbortController()
+  const tm = setTimeout(() => ctl.abort(), 5000)
+  try {
+    const r = await fetch('/api/bootstrap', { credentials: 'same-origin', cache: 'no-store', signal: ctl.signal })
+    return r.ok ? await r.json() : null
+  } catch {
+    return null
+  } finally {
+    clearTimeout(tm)
+  }
 }

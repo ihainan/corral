@@ -16,8 +16,7 @@ import { HostEditPage } from './pages/HostEdit'
 import { KeysPage } from './pages/Keys'
 import { SettingsPage } from './pages/Settings'
 import { AdminUsersPage, AdminAuditPage } from './pages/Admin'
-import { RecordingPlayerPage, RecordingsPage } from './pages/Recordings'
-import { TerminalPage } from './pages/Terminal'
+import { preloadTerminal, RecordingPlayerPage, RecordingsPage, TerminalPage } from './pages/lazyPages'
 import { TerminalTabs, useTabsMode } from './pages/TerminalTabs'
 import { draftsFor } from './terminal/drafts'
 
@@ -55,7 +54,7 @@ export function App() {
   const loadedVersion = useRef('') // the gateway's version when this page loaded
   const setMe = useCallback((m: Me | null) => {
     if ((m?.id ?? null) !== (meRef.current?.id ?? null)) {
-      bumpAuthGen()
+      bumpAuthGen(!booted.current)
       draftsFor(m?.id ?? null) // (the account's composer drafts end with it, a lapsed sign-in too; this tab keeps the user's own)
       alertsFor(m?.id ?? null)
       try {
@@ -91,6 +90,13 @@ export function App() {
         setMe(b.user)
         alertsFor(b.user?.id ?? null) // (also signed out while no page was open)
         booted.current = true
+        // (The terminal's code, loaded beside once the page is up: a terminal
+        // opened later comes up at once.)
+        if (b.user) {
+          const idle = (window as { requestIdleCallback?: (f: () => void, o?: { timeout: number }) => void }).requestIdleCallback
+          if (idle) idle(() => void preloadTerminal().catch(() => {}), { timeout: 3000 })
+          else setTimeout(() => void preloadTerminal().catch(() => {}), 1500)
+        }
         bootUser.current = b.user ? `${b.user.id} ${!!b.user.must_change_password}` : ''
         if (b.user && !b.user.must_change_password) syncPrefsFromServer(b.user.id)
       })

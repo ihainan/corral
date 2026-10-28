@@ -7,9 +7,17 @@ import './styles/app.css'
 import './styles/terminal.css'
 import { getLang } from './i18n'
 import { App } from './app'
+import { askEarly } from './api'
+import { preloadTerminal } from './pages/lazyPages'
 import './notifyopen' // listens from the start (see there)
 
 document.documentElement.lang = getLang()
+
+// The start-up answer and the lists a first page shows, asked for all at
+// once now (see askEarly): not one after another as the app comes up.
+// (A terminal's address: its code, loaded at once, beside the app's.)
+if (/^\/[tw]\//.test(location.pathname)) void preloadTerminal().catch(() => {})
+askEarly(['/api/bootstrap', '/api/sessions', ...(location.pathname === '/' ? ['/api/hosts', '/api/shared'] : [])])
 
 // Older versions kept composer drafts in sessionStorage; drafts can hold secrets.
 try {

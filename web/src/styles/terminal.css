@@ -1019,3 +1019,7 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .agents-chat-up { display: flex; align-items: center; gap: 8px; padding: 0 4px 6px 8px; color: var(--term-fg-2); font: 13px/18px var(--font-ui); }
 .agents-chat-up span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .agents-chat-drop > .term-drop { z-index: 6; }
+
+/* A part of the app that did not load (see pages/lazyPages.tsx). */
+.lazy-failed { margin: auto; max-width: 360px; padding: 24px 16px; text-align: center; color: var(--term-fg-2, inherit); font: 14px/22px var(--font-ui); }
+.lazy-failed .btn { margin-top: 12px; }

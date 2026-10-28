@@ -7,7 +7,7 @@ import { Unicode11Addon } from '@xterm/addon-unicode11'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import { WebglAddon } from '@xterm/addon-webgl'
 import { ArrowUp, Check, ChevronDown, ChevronLeft, CircleStop, Code2, Eye, FolderOpen, Globe, History, ImagePlus, MessageCircleReply, MoreVertical, Minus, Palette, Paperclip, Plus, TextSelect, Keyboard as KeyboardIcon, Power, RotateCw, Server, TextCursorInput, X } from 'lucide-react'
-import { api, ApiError, choiceOf, errorText, uploadFile, type HerdrAgent, type HerdrSummary, type Host, type OpenChoice, type SessionInfo } from '../api'
+import { api, ApiError, choiceOf, errorText, uploadFile, type HerdrAgent, type HerdrSummary, type Host, type OpenChoice, type SessionInfo, probeBootstrap } from '../api'
 import { t } from '../i18n'
 import { navigate } from '../router'
 import { getPrefs, prefsConfirmed, setChromeColor, setPrefs, termScheme, usePrefs } from '../prefs'
@@ -106,19 +106,6 @@ const REPLY = /^(?:\x1b\[[?>]?[\d;]*[cnRt]|\x1b\[\??[\d;]*\$y|\x1b\[[IO]|\x1bP[\
 // A computer (a mouse or trackpad first), touch screen or not: Enter in the
 // composer acts as set there. Phones and tablets keep Enter for new lines.
 const hasKeyboardPointer = () => !window.matchMedia('(pointer: coarse)').matches
-// The start-up answer, or null when the gateway does not answer (within 5 s).
-export async function probeBootstrap(): Promise<{ instance?: string } | null> {
-  const ctl = new AbortController()
-  const tm = setTimeout(() => ctl.abort(), 5000)
-  try {
-    const r = await fetch('/api/bootstrap', { credentials: 'same-origin', cache: 'no-store', signal: ctl.signal })
-    return r.ok ? await r.json() : null
-  } catch {
-    return null
-  } finally {
-    clearTimeout(tm)
-  }
-}
 const AUTO_RECONNECT_S = 3 // seconds before a tmux/herdr session gone with the gateway is opened again
 const CLAIM_GAP = 100 // ms between two takeover claims of one window while it types
 // A paste into the composer longer than this shows as a label (see keepPaste).

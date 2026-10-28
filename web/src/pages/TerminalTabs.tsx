@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Bot, Check, MessageCircleReply, Plus, Search } from 'lucide-react'
 import { AgentsChat } from './AgentsChat'
-import { api, choiceOf, type Host, type OpenChoice, type SessionInfo } from '../api'
+import { api, choiceOf, probeBootstrap, type Host, type OpenChoice, type SessionInfo } from '../api'
 import { agentKey, sessionWhich } from '../terminal/sessionName'
 import { t } from '../i18n'
 import { local, session as tabStore } from '../storage'
@@ -9,7 +9,8 @@ import { navigate } from '../router'
 import { takeTabs } from '../notifyopen'
 import { Dialog, useToast } from '../components/ui'
 import { estimateSize, useConnect } from '../connect'
-import { probeBootstrap, TerminalPage, type TabInfo } from './Terminal'
+import type { TabInfo } from './Terminal'
+import { TerminalPage } from './lazyPages'
 
 // Tabs where there is room for them: desktops and tablets (an iPad with a
 // keyboard switches with Ctrl+Tab too). Phones keep the session switcher.
