@@ -338,18 +338,33 @@ func (s *Server) bgSession(sess *term.Session, pane, said string) string {
 	if said != "" {
 		return said
 	}
-	if sid := s.convos.sidOf(sess.ID + "\x00" + pane); sid != "" {
+	if sid := s.herdrSocks.locatedOf(sess.ID, pane); sid != "" {
 		return sid
 	}
 	socket := s.herdrSocks.get(sess.ID)
 	for _, o := range s.terms.Running(sess.OwnerID, sess.HostID) {
 		if o.ID != sess.ID && socket != "" && s.herdrSocks.get(o.ID) == socket {
-			if sid := s.convos.sidOf(o.ID + "\x00" + pane); sid != "" {
+			if sid := s.herdrSocks.locatedOf(o.ID, pane); sid != "" {
 				return sid
 			}
 		}
 	}
 	return ""
+}
+
+// locatedEverywhere notes what a herdr pane runs (sid; "" none) for each
+// of the owner's connections to that herdr server: the pane is one.
+func (s *Server) locatedEverywhere(sess *term.Session, pane, sid string, at time.Time) {
+	s.herdrSocks.setLocated(sess.ID, pane, sid, at)
+	socket := s.herdrSocks.get(sess.ID)
+	if socket == "" {
+		return
+	}
+	for _, o := range s.terms.Running(sess.OwnerID, sess.HostID) {
+		if o.ID != sess.ID && s.herdrSocks.get(o.ID) == socket {
+			s.herdrSocks.setLocated(o.ID, pane, sid, at)
+		}
+	}
 }
 
 // bgTailCommand prints, for each Claude Code session id given (validated),

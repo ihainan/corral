@@ -84,7 +84,8 @@ func (s *Server) convoModeTo(w http.ResponseWriter, ctx context.Context, sess *t
 	now := from
 	for i := 0; i < convoModeMost; i++ {
 		ended.Add(1)
-		res, err := sshx.Exec(ctx, sess.Client(), convoSendCommand(sess.Persistence, sess.TmuxSession, pane, socket, pid, start, sid, 0, press, convoModeLines), 16<<10,
+		// (Not while it waits: Shift+Tab is a question's then. Exit 9.)
+		res, err := sshx.Exec(ctx, sess.Client(), convoGatedCommand("free", sess.Persistence, sess.TmuxSession, pane, socket, pid, start, sid, 0, press, convoModeLines), 16<<10,
 			sshx.ExecOptions{Stdin: strings.NewReader(""), Release: ended.Done})
 		var exitErr *sshx.ExitError
 		switch {
@@ -102,6 +103,10 @@ func (s *Server) convoModeTo(w http.ResponseWriter, ctx context.Context, sess *t
 		case errors.As(err, &exitErr) && exitErr.Status == 3:
 			*reason = "agent_changed"
 			writeError(w, http.StatusConflict, "agent_changed", "that pane no longer runs this agent")
+			return
+		case errors.As(err, &exitErr) && exitErr.Status == 9:
+			*reason = "agent_waiting"
+			writeError(w, http.StatusConflict, "agent_waiting", "it waits for an answer, or has a dialog open: answer it first")
 			return
 		case errors.As(err, &exitErr) && exitErr.Status == 4:
 			*reason = "send_failed"

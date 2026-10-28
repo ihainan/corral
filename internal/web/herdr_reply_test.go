@@ -341,7 +341,12 @@ func TestHerdrReplyEndsWithTheLogin(t *testing.T) {
 	base, id := herdrReplyEnv(t, h, admin, hd)
 	digest, _ := admin.do("GET", base+"screen", nil).json()["digest"].(string)
 
-	held, err := h.srv.replies.lock(t.Context(), id+"\x00w1:p1") // another answer under way
+	sess, err := h.srv.terms.Get(1, id) // (the admin, the first account)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := h.srv.convoReplyKey(sess, "w1:p1")         // (the pane's, whichever connection)
+	held, err := h.srv.replies.lock(t.Context(), key) // another answer under way
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -352,7 +357,7 @@ func TestHerdrReplyEndsWithTheLogin(t *testing.T) {
 	eventually(t, "answer never started waiting", func() bool {
 		h.srv.replies.mu.Lock()
 		defer h.srv.replies.mu.Unlock()
-		e := h.srv.replies.m[id+"\x00w1:p1"]
+		e := h.srv.replies.m[key]
 		return e != nil && e.users == 2
 	})
 	mustStatus(t, admin.do("POST", "/api/logout", nil), 200, "sign out")

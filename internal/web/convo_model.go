@@ -254,6 +254,9 @@ func modelFlow(step, leave modelStep, target string) (opts []modelOpt, err error
 		}
 		return nil, e
 	}
+	if gateRefused(err) {
+		return nil, err // (it came to wait: no picker was opened, nor anything to close; an Escape would answer it)
+	}
 	if err != nil {
 		return out(err)
 	}
@@ -400,8 +403,15 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 				press = append(press, modelKeys[k][1])
 			}
 		}
+		// (A text — the command that opens its picker — not while it waits:
+		// its Enter would be a question's. Keys within the picker go: it is
+		// itself a dialog Claude Code waits on.)
+		gate := ""
+		if text != "" {
+			gate = "free"
+		}
 		running.Add(1)
-		res, err := sshx.Exec(ctx, sess.Client(), convoSendCommand(sess.Persistence, sess.TmuxSession, pane, socket, pid, start, sid, len(text), press, read), 64<<10,
+		res, err := sshx.Exec(ctx, sess.Client(), convoGatedCommand(gate, sess.Persistence, sess.TmuxSession, pane, socket, pid, start, sid, len(text), press, read), 64<<10,
 			sshx.ExecOptions{Stdin: strings.NewReader(text), Release: running.Done})
 		if err == nil && (len(press) > 0 || text != "") {
 			typed = true
@@ -452,6 +462,10 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 	case errors.As(err, &exitErr) && exitErr.Status == 3:
 		*reason = "agent_changed"
 		writeError(w, http.StatusConflict, "agent_changed", "that pane no longer runs this agent")
+	case errors.As(err, &exitErr) && (exitErr.Status == 9 || exitErr.Status == 5):
+		// (Its picker's command not sent, or typed and not sent: it waits for an answer.)
+		*outcome, *reason = said(typed || exitErr.Status == 5), "agent_waiting"
+		writeError(w, http.StatusConflict, "agent_waiting", "it waits for an answer, or has a dialog open: answer it first")
 	case errors.Is(err, sshx.ErrBusy) || errors.As(err, &exitErr) && exitErr.Status == 7:
 		*reason = "busy"
 		writeError(w, http.StatusTooManyRequests, "busy", "the host is still answering earlier requests")

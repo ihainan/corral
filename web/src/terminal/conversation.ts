@@ -138,7 +138,8 @@ interface Answer {
   available: boolean
   reason?: string
   bind?: ConvoBind
-  agent_status?: 'busy' | 'idle'
+  agent_status?: 'busy' | 'idle' | 'waiting'
+  waiting_for?: string // (with waiting: "permission prompt", "input needed", "sandbox request", "worker request", "dialog open", "other")
   quiet_ms?: number // (how long since its log last grew, by the gateway's clock)
   title?: string
   tasks?: ConvoTask[]
@@ -170,7 +171,8 @@ export interface Convo {
   refresh: () => void // read now (a message sent: what it brings, at once)
   gen: number
   bind?: ConvoBind
-  agentStatus?: 'busy' | 'idle' // (tmux) as Claude Code's file for the process says
+  agentStatus?: 'busy' | 'idle' | 'waiting' // (tmux) as Claude Code's file for the process says
+  waitingFor?: string // (with waiting) what for
   // When its log last grew (ms, this page's clock: told as how long since,
   // so no clocks are compared); kept while it moves by less than a few
   // seconds, so a poll that brings nothing new changes nothing.
@@ -331,8 +333,8 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
             const running = a.running?.length ? (JSON.stringify(a.running) === JSON.stringify(c.running) ? c.running : a.running) : undefined
             const told = a.quiet_ms !== undefined ? now - a.quiet_ms : undefined
             const quietAt = told !== undefined && c.quietAt !== undefined && Math.abs(told - c.quietAt) < 3000 ? c.quietAt : told
-            if (!entries && c.of === key && c.status === 'ready' && c.quietAt === quietAt && c.gen === a.gen && c.older === older && c.olderCut === olderCut && c.loadingOlder === loadingOlder && sameBind(c.bind, a.bind) && c.agentStatus === a.agent_status && c.title === a.title && c.tasks === tasks && c.meta === meta && c.queued === queued && c.running === running && !c.failing && c.defaultChanged === a.default_changed) return c
-            return { ...initial(key), status: 'ready', entries: entries ?? c.entries, older, olderCut, loadingOlder, gen: a.gen, bind: a.bind, agentStatus: a.agent_status, quietAt, title: a.title || undefined, tasks, meta, queued, running, failing: false, okAt: now, changedAt: entries ? now : c.changedAt, of: key, defaultChanged: a.default_changed }
+            if (!entries && c.of === key && c.status === 'ready' && c.quietAt === quietAt && c.gen === a.gen && c.older === older && c.olderCut === olderCut && c.loadingOlder === loadingOlder && sameBind(c.bind, a.bind) && c.agentStatus === a.agent_status && c.waitingFor === a.waiting_for && c.title === a.title && c.tasks === tasks && c.meta === meta && c.queued === queued && c.running === running && !c.failing && c.defaultChanged === a.default_changed) return c
+            return { ...initial(key), status: 'ready', entries: entries ?? c.entries, older, olderCut, loadingOlder, gen: a.gen, bind: a.bind, agentStatus: a.agent_status, waitingFor: a.waiting_for, quietAt, title: a.title || undefined, tasks, meta, queued, running, failing: false, okAt: now, changedAt: entries ? now : c.changedAt, of: key, defaultChanged: a.default_changed }
           })
           remember(key, gen, rev, byseq, a)
           if (a.entries.length > 0 && !fresh) next = ACTIVE
@@ -369,7 +371,7 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
         else {
           const entries = [...byseq.values()].sort((x, y) => x.seq - y.seq)
           const older = !!k.older || entries.length === MAX
-          setConvo({ ...initial(key), status: 'ready', entries, older, olderCut: older && (!!k.older_cut || entries.length === MAX), gen, bind: k.bind, agentStatus: k.agent_status, title: k.title || undefined, tasks: k.tasks?.length ? k.tasks : undefined, meta: k.meta, queued: k.queued?.length ? k.queued : undefined, running: k.running?.length ? k.running : undefined, failing: false, okAt: now, changedAt: now, of: key })
+          setConvo({ ...initial(key), status: 'ready', entries, older, olderCut: older && (!!k.older_cut || entries.length === MAX), gen, bind: k.bind, agentStatus: k.agent_status, waitingFor: k.waiting_for, title: k.title || undefined, tasks: k.tasks?.length ? k.tasks : undefined, meta: k.meta, queued: k.queued?.length ? k.queued : undefined, running: k.running?.length ? k.running : undefined, failing: false, okAt: now, changedAt: now, of: key })
         }
       } else {
         gen = 0
@@ -440,6 +442,12 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
 
 // Whether the agent is asking the person something (AskUserQuestion, not
 // come back): the last thing it did (notes may have come since).
+// answerable: what Claude Code waits for (its session file's waitingFor)
+// is answered with the card: a permission, a question, a request of its
+// sandbox or of a worker's; not a dialog of its own (a picker), nor one
+// not known.
+export const answerable = (w?: string) => w === 'permission prompt' || w === 'input needed' || w === 'sandbox request' || w === 'worker request'
+
 export function asking(entries: ConvoEntry[]): boolean {
   for (let i = entries.length - 1; i >= 0; i--) {
     const e = entries[i]

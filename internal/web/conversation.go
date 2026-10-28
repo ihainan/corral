@@ -1163,23 +1163,6 @@ type convoStates struct {
 	m  map[string]*convoState
 }
 
-// sidOf: the Claude Code session a pane's conversation was last read as
-// (key as apiConversation's), "" where none is kept or it is being read
-// just now (not waited for).
-func (c *convoStates) sidOf(id string) string {
-	c.mu.Lock()
-	st := c.m[id]
-	c.mu.Unlock()
-	if st == nil || !st.mu.TryLock() {
-		return ""
-	}
-	defer st.mu.Unlock()
-	if st.agent != "claude" {
-		return ""
-	}
-	return st.sid
-}
-
 func (c *convoStates) get(id string) *convoState {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -1262,13 +1245,16 @@ type convoBind struct {
 type convoAnswer struct {
 	// QuietMs: how long since the log last grew (what was read of it; for
 	// OpenCode, its rows), in milliseconds.
-	QuietMs   int64  `json:"quiet_ms,omitempty"`
-	Available bool   `json:"available"`
-	Reason    string `json:"reason,omitempty"`
-	Gen       int64  `json:"gen"`
-	Rev       int    `json:"rev"`
-	Reset     bool   `json:"reset,omitempty"` // drop what was shown: these are all the entries
-	Older     bool   `json:"older,omitempty"` // the conversation began before the first entry
+	QuietMs int64 `json:"quiet_ms,omitempty"`
+	// WaitingFor: with AgentStatus "waiting" (tmux), what Claude Code waits
+	// for (see convoProcStatus).
+	WaitingFor string `json:"waiting_for,omitempty"`
+	Available  bool   `json:"available"`
+	Reason     string `json:"reason,omitempty"`
+	Gen        int64  `json:"gen"`
+	Rev        int    `json:"rev"`
+	Reset      bool   `json:"reset,omitempty"` // drop what was shown: these are all the entries
+	Older      bool   `json:"older,omitempty"` // the conversation began before the first entry
 	// OlderCut: what is before cannot be read in as well (as many entries
 	// are kept as there may be); older=1 brings nothing more.
 	OlderCut bool       `json:"older_cut,omitempty"`
@@ -1380,6 +1366,9 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ans.Available, ans.Gen, ans.Rev, ans.Older, ans.More, ans.AgentStatus = true, st.gen, st.parser.Rev(), st.older, more, st.status
+	if w, ok := strings.CutPrefix(st.status, "waiting:"); ok {
+		ans.AgentStatus, ans.WaitingFor = "waiting", w
+	}
 	ans.OlderCut = st.older && (st.parser.Trimmed() || st.from < 0)
 	if gen != st.gen {
 		ans.Reset = true
@@ -1411,19 +1400,21 @@ type convoScans struct {
 }
 
 type convoScan struct {
-	done chan struct{} // closed once made
-	out  []byte
-	err  error
-	at   time.Time // when it was made
+	done  chan struct{} // closed once made
+	out   []byte
+	err   error
+	at    time.Time // when it was made
+	began time.Time // when it began: what it found is of then or after
 }
 
 // convoScanShared: how long a scan stands for the other panes.
 const convoScanShared = 5 * time.Second
 
-// run gives the output of the scan cmd on sess's host, and when it was
-// made: one made within convoScanShared, or the one under way, else a new
-// one (not bound to the asking request: others may be waiting on it).
-func (c *convoScans) run(ctx context.Context, sess *term.Session, cmd string) ([]byte, time.Time, error) {
+// run gives the output of the scan cmd on sess's host, when it was made
+// and when it began: one made within convoScanShared, or the one under
+// way, else a new one (not bound to the asking request: others may be
+// waiting on it).
+func (c *convoScans) run(ctx context.Context, sess *term.Session, cmd string) ([]byte, time.Time, time.Time, error) {
 	key := sess.ID + "\x00" + cmd
 	c.mu.Lock()
 	if c.m == nil {
@@ -1451,7 +1442,7 @@ func (c *convoScans) run(ctx context.Context, sess *term.Session, cmd string) ([
 	if !ok {
 		// (Made beside: the one who asked first, gone, does not wait on it
 		// either; it is there for the next.)
-		e = &convoScan{done: make(chan struct{})}
+		e = &convoScan{done: make(chan struct{}), began: time.Now()}
 		c.m[key] = e
 		go func() {
 			sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
@@ -1464,9 +1455,9 @@ func (c *convoScans) run(ctx context.Context, sess *term.Session, cmd string) ([
 	c.mu.Unlock()
 	select {
 	case <-e.done:
-		return e.out, e.at, e.err
+		return e.out, e.at, e.began, e.err
 	case <-ctx.Done():
-		return nil, time.Time{}, ctx.Err()
+		return nil, time.Time{}, time.Time{}, ctx.Err()
 	}
 }
 
@@ -1499,7 +1490,9 @@ func (s *Server) relocateLater(sess *term.Session, key string, st *convoState, p
 // locateConvo finds the log of the Claude Code session in the pane; a
 // different one from before starts a new generation.
 func (s *Server) locateConvo(ctx context.Context, sess *term.Session, st *convoState, pane string) error {
-	out, at, err := s.convoScans.run(ctx, sess, convoLocateCommand(sess.Persistence, sess.TmuxSession, ""))
+	// (looked: when the scan read began, shared or not: what it found is of
+	// then or after, and a look begun later says more.)
+	out, at, looked, err := s.convoScans.run(ctx, sess, convoLocateCommand(sess.Persistence, sess.TmuxSession, ""))
 	// (The script ends with exit 0: an error is a scan cut short, by its size
 	// or a failure, which may leave out the agent started last. What was
 	// found before stays, rather than a part of it.)
@@ -1574,6 +1567,15 @@ func (s *Server) locateConvo(ctx context.Context, sess *term.Session, st *convoS
 		}
 	}
 	st.guessed = guessed && log != ""
+	// (A herdr pane's Claude Code session, as found: what herdr does not say
+	// of it, in some versions, for what its turns left running, see bgSession.)
+	if sess.Persistence == "herdr" && pane != "" {
+		found := ""
+		if agent == "claude" {
+			found = sid // (else none there now, or another: not that one's)
+		}
+		s.locatedEverywhere(sess, pane, found, looked)
+	}
 	// (No python3 to read OpenCode's with, found reading: said a minute,
 	// then tried again.)
 	if reason == "" && agent == "opencode" && st.reason == convoNoReader && sid == st.sid && log == st.log && time.Since(st.noReaderAt) < time.Minute {
@@ -1922,9 +1924,10 @@ func convoProcStatus(c *sftplite.Client, st *convoState) string {
 		return ""
 	}
 	var f struct {
-		Status    string          `json:"status"`
-		SessionID string          `json:"sessionId"`
-		ProcStart json.RawMessage `json:"procStart"`
+		Status     string          `json:"status"`
+		WaitingFor string          `json:"waitingFor"`
+		SessionID  string          `json:"sessionId"`
+		ProcStart  json.RawMessage `json:"procStart"`
 	}
 	if json.Unmarshal(b, &f) != nil || f.SessionID != st.bind.Session || strings.Trim(string(f.ProcStart), `"`) != strconv.FormatInt(st.bind.Start, 10) {
 		return ""
@@ -1932,6 +1935,17 @@ func convoProcStatus(c *sftplite.Client, st *convoState) string {
 	switch f.Status {
 	case "busy", "idle":
 		return f.Status
+	case "shell":
+		return "busy" // (a command typed with "!" runs)
+	case "waiting":
+		// What for, as Claude Code 2.1.312 says it: "permission prompt",
+		// "input needed" (a question), "sandbox request", "worker request",
+		// "dialog open" (a picker, a dialog of its own); another, "other".
+		switch f.WaitingFor {
+		case "permission prompt", "input needed", "sandbox request", "worker request", "dialog open":
+			return "waiting:" + f.WaitingFor
+		}
+		return "waiting:other"
 	}
 	return ""
 }
@@ -1972,9 +1986,18 @@ func convoProcStatus(c *sftplite.Client, st *convoState) string {
 // id, length, the herdr socket (from discovery) and keys of a fixed set
 // (convoKeys) are its arguments, the text its input.
 func convoSendCommand(mode, session, pane, socket string, pid, start int64, sid string, length int, keys []string, read int) string {
+	return convoGatedCommand("", mode, session, pane, socket, pid, start, sid, length, keys, read)
+}
+
+// convoGatedCommand is convoSendCommand with a gate (see the script): ""
+// none; "free", not while Claude Code waits; "reply:<sha256 of the screen
+// answered>", only while it waits for an answer, on that screen.
+func convoGatedCommand(gate, mode, session, pane, socket string, pid, start int64, sid string, length int, keys []string, read int) string {
 	script := `PATH="$HOME/.local/bin:$HOME/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 mode=$1 sess=$2 p=$3 pid=$4 start=$5 len=$6 sock=$7 sid=$8 rd=$9
 shift 9
+gate=$1
+shift
 case $rd in ''|*[!0-9]*) rd=0;; esac
 # (What the pane shows after, its last rd lines but blank ones at the end.)
 # (Not read, it exits 8: no screen is not an empty one.)
@@ -2063,6 +2086,42 @@ front() {
   fi
 }
 front || exit 3
+# The gate, by what Claude Code's session file says: a message not while it
+# waits (for an answer, or with a dialog open: the message's Enter would go
+# there), exit 9; an answer only while it waits for one (exit 9) and the
+# pane's screen is still the one answered (its SHA-256 as the gateway read
+# it; 10 where it is not, 11 where it cannot be told).
+# (waiting: what the file says now, its status and what for.)
+waiting() {
+  c=$(head -c 65536 "$HOME/.claude/sessions/$pid.json" 2>/dev/null | tr -d '\n')
+  st=$(printf '%s' "$c" | grep -o '"status" *: *"[a-z]*"' | head -n 1 | sed 's/.*"\([a-z]*\)"$/\1/')
+  wf=$(printf '%s' "$c" | grep -o '"waitingFor" *: *"[a-z ]*"' | head -n 1 | sed 's/.*"\([a-z ]*\)"$/\1/')
+}
+# (Right before the Enter that sends a text: it may have come to wait
+# meanwhile, the text typed. Exit 5: typed, not sent.)
+gate_enter() {
+  [ -n "$gate" ] || return 0
+  waiting
+  case $gate in
+  free) [ "$st" = waiting ] && exit 5 ;;
+  reply:*) [ "$st" = waiting ] || exit 5 ;;
+  esac
+  return 0
+}
+if [ -n "$gate" ]; then
+  waiting
+  case $gate in
+  free) [ "$st" = waiting ] && exit 9 ;;
+  reply:*)
+    [ "$st" = waiting ] || exit 9
+    case $wf in "permission prompt"|"input needed"|"sandbox request"|"worker request") ;; *) exit 9;; esac
+    command -v sha256sum >/dev/null 2>&1 || exit 11
+    if [ "$mode" = tmux ]; then d=$(tmux -u capture-pane -p -t "$p" 2>/dev/null 9>&- | sha256sum)
+    else d=$(HERDR_SOCKET_PATH=$sock herdr pane read "$p" --source visible 2>/dev/null 9>&- | sha256sum); fi
+    [ "${d%% *}" = "${gate#reply:}" ] || exit 10 ;;
+  *) exit 4 ;;
+  esac
+fi
 if [ "$mode" = tmux ]; then
   [ "$(tmux -u display-message -p -t "$p" '#{session_name}' 2>/dev/null 9>&-)" = "$sess" ] || exit 3
   if [ "$len" = keys ]; then
@@ -2079,6 +2138,7 @@ if [ "$mode" = tmux ]; then
   typing=1
   tmux paste-buffer -p -r -d -b "$b" -t "$p" 9>&- || exit 6
   sleep 0.3
+  gate_enter
   tmux send-keys -t "$p" Enter 9>&- || exit 5
   screen
 else
@@ -2108,6 +2168,7 @@ else
   typing=1
   HERDR_SOCKET_PATH=$sock herdr pane send-text "$p" "$e[200~$t$e[201~" >/dev/null 2>&1 9>&- || exit 6
   sleep 0.3
+  gate_enter
   HERDR_SOCKET_PATH=$sock herdr pane send-keys "$p" enter >/dev/null 2>&1 9>&- || exit 5
   screen
 fi`
@@ -2116,7 +2177,7 @@ fi`
 		n = "keys"
 	}
 	cmd := "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(mode) + " " + sshx.QuoteShell(session) + " " + sshx.QuoteShell(pane) + " " +
-		strconv.FormatInt(pid, 10) + " " + strconv.FormatInt(start, 10) + " " + n + " " + sshx.QuoteShell(socket) + " " + sshx.QuoteShell(sid) + " " + strconv.Itoa(max(0, min(read, 60)))
+		strconv.FormatInt(pid, 10) + " " + strconv.FormatInt(start, 10) + " " + n + " " + sshx.QuoteShell(socket) + " " + sshx.QuoteShell(sid) + " " + strconv.Itoa(max(0, min(read, 60))) + " " + sshx.QuoteShell(gate)
 	for _, k := range keys {
 		cmd += " " + sshx.QuoteShell(k)
 	}
@@ -2191,6 +2252,10 @@ var convoKeys = map[string]struct {
 	// screen is read with its colours (see convo_suggest.go).
 	"suggest": {"convo.suggest", nil, nil},
 	"send":    {"convo.send", nil, nil}, // (typed by convoSendCommand)
+	// An answer to what Claude Code asks: its screen read, then keys or a
+	// line (see convo_reply.go).
+	"screen": {"convo.screen", nil, nil},
+	"reply":  {"convo.reply", nil, nil},
 }
 
 // screenMode reads the permission mode off the bottom of Claude Code's
@@ -2339,11 +2404,22 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		Model   string `json:"model"`  // (model: as the picker names it)
 		Effort  string `json:"effort"` // (effort: a level of effortLevels)
 		Mode    string `json:"mode"`   // (mode: the one to go to, of convoModes; none: the next)
+		// (reply: the screen answered, as screen gave it, and the keys
+		// pressed (of replyKeys, up to 4) or the text typed and Enter.)
+		Digest string   `json:"digest"`
+		Keys   []string `json:"keys"`
 	}
 	err := readJSON(r, &b)
 	text, textOK := sendText(b.Text)
-	if what != "send" && what != "sent_missing" {
+	if what != "send" && what != "sent_missing" && what != "reply" {
 		textOK = b.Text == ""
+	}
+	if what == "reply" {
+		textOK = replyOK(b.Digest, b.Keys, b.Text) // (keys, or a line: its own rules)
+		text = b.Text
+	}
+	if what != "reply" && (b.Digest != "" || len(b.Keys) > 0) {
+		textOK = false
 	}
 	if what == "model" && (b.Model == "" || len(b.Model) > 64 || strings.ContainsFunc(b.Model, func(r rune) bool { return r < 0x20 || r == 0x7f })) {
 		textOK = false
@@ -2416,6 +2492,32 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	// (One thing at a time to a pane, a message or keys (and an answer, see
 	// replyToPane), from the check to its last key; once its command is on
 	// its way, given back when that has ended.)
+	// (An answer's lock first, then the pane's turn: as herdr's own answer takes them, see replyToPane.)
+	var answer *paneReply
+	// (Given back once the host's command has ended, not when this request
+	// gives up on it: an answer still on its way there holds the pane.)
+	unlockAnswer, answerHeld := func() {}, false
+	defer func() {
+		if !answerHeld {
+			unlockAnswer()
+		}
+	}()
+	if what == "reply" {
+		lock, err := s.replies.lock(ctx, s.convoReplyKey(sess, b.Pane))
+		if err != nil {
+			reason = "busy"
+			writeError(w, http.StatusTooManyRequests, "busy", "an earlier answer to this pane is still under way")
+			return
+		}
+		var once sync.Once
+		unlockAnswer = func() { once.Do(func() { s.replies.unlock(lock) }) }
+		if lock.digest == b.Digest && time.Since(lock.at) < answeredFor {
+			reason = "already_answered"
+			writeError(w, http.StatusConflict, "already_answered", "this screen was just answered; look again before answering")
+			return
+		}
+		answer = lock
+	}
 	turn, ok := convoSending.take(ctx, convoTurnKey(sess.ID, b.Pane))
 	if !ok {
 		reason = "busy"
@@ -2514,9 +2616,20 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		s.sentMissing(w, ctx, sess, b.Pane, socket, text, &outcome, &reason, release)
 		return
 	}
+	if what == "screen" {
+		release := turn
+		turn = func() {} // (the screen read gives it back, once it has ended on the host)
+		s.convoScreen(w, ctx, sess, b.Pane, socket, &outcome, &reason, release)
+		return
+	}
+	// (An answer goes one at a time to the pane, whichever connection of
+	// the person's it comes from; the same screen answered moments ago is
+	// not answered again: a double tap.)
 	// The check again and the typing or pressing, on the host in one go (see convoSendCommand).
 	var press []string
-	if what != "send" {
+	if what == "reply" && len(b.Keys) > 0 {
+		press = replyPress(sess.Persistence, b.Keys)
+	} else if what != "send" && what != "reply" {
 		press = keys.tmux
 		if sess.Persistence == "herdr" {
 			press = keys.herdr
@@ -2536,14 +2649,23 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	release := turn
 	turn = func() {} // (given back once its commands have ended on the host: an Enter again too, see enterAgain)
 	var ended sync.WaitGroup
+	answerHeld = true
 	defer func() {
 		go func() {
 			ended.Wait()
 			release()
+			unlockAnswer()
 		}()
 	}()
 	ended.Add(1)
-	res, err := sshx.Exec(ctx, sess.Client(), convoSendCommand(sess.Persistence, sess.TmuxSession, b.Pane, socket, b.PID, b.Start, b.Session, len(text), press, modeLines(what)), sendOut,
+	gate := ""
+	switch {
+	case what == "reply":
+		gate = "reply:" + b.Digest
+	case front.agent == "claude" && (what == "send" || what == "send_now" || what == "mode"):
+		gate = "free" // (not while it waits: what is typed would go to its question)
+	}
+	res, err := sshx.Exec(ctx, sess.Client(), convoGatedCommand(gate, sess.Persistence, sess.TmuxSession, b.Pane, socket, b.PID, b.Start, b.Session, len(text), press, modeLines(what)), sendOut,
 		sshx.ExecOptions{Stdin: strings.NewReader(text), Release: ended.Done})
 	var exitErr *sshx.ExitError
 	switch {
@@ -2559,8 +2681,31 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		reason = "busy" // (another to the pane on the host still: nothing typed)
 	case errors.As(err, &exitErr) && exitErr.Status == 4:
 		reason = "send_failed" // (nothing typed)
+	case errors.As(err, &exitErr) && exitErr.Status == 9 && what == "reply":
+		reason = "not_waiting"
+		writeError(w, http.StatusConflict, "not_waiting", "it no longer waits for an answer")
+		return
+	case errors.As(err, &exitErr) && exitErr.Status == 9:
+		reason = "agent_waiting"
+		writeError(w, http.StatusConflict, "agent_waiting", "it waits for an answer, or has a dialog open: answer it first")
+		return
+	case errors.As(err, &exitErr) && exitErr.Status == 5 && gate != "":
+		reason = "typed_not_sent"
+		writeError(w, http.StatusConflict, "typed_not_sent", "the text is in its input, not sent: it came to wait for an answer first")
+		return
+	case errors.As(err, &exitErr) && exitErr.Status == 10:
+		reason = "screen_changed"
+		writeError(w, http.StatusConflict, "screen_changed", "the screen changed; look again before answering")
+		return
+	case errors.As(err, &exitErr) && exitErr.Status == 11:
+		reason = "cannot_verify"
+		writeError(w, http.StatusConflict, "cannot_verify", "the host cannot check the screen (no sha256sum): answer in the terminal")
+		return
 	default:
 		outcome = "unknown" // (typed in part, or all of it but Enter, or it is not known)
+	}
+	if answer != nil && outcome != "refused" {
+		answer.digest, answer.at = b.Digest, time.Now()
 	}
 	if outcome == "typed" && what == "send" && front.agent == "claude" {
 		s.enterAgain(ctx, sess, b.Pane, socket, b.PID, b.Start, b.Session, text, string(res.Out), &ended)

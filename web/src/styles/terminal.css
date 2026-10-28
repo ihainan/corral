@@ -783,6 +783,8 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-ask-desc { font-size: 13px; line-height: 18px; color: var(--term-fg-3); overflow-wrap: anywhere; }
 /* (A choice that lasts beyond this once: said in the warning's colour, under its words) */
 .convo-ask-desc.is-lasting { color: var(--term-warn-text); }
+/* A lasting choice tapped once: waiting for its second, outlined. */
+.convo-ask-opt.is-confirm { box-shadow: inset 0 0 0 2px var(--term-warn-text); }
 .reply-desc.is-lasting { color: var(--warn); }
 .convo-ask-text { display: flex; gap: 8px; }
 .convo-ask-text .input { flex: 1; min-width: 0; }

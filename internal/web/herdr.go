@@ -295,6 +295,47 @@ type herdrSockets struct {
 	sids   map[string]map[string]string // terminal session → pane → the agent's session id
 	rounds map[string]*seenRounds       // terminal session → its watcher's rounds
 	bg     map[string]*bgProber         // terminal session → what its Claude panes left running
+	// located: terminal session → pane → the Claude Code session reading
+	// its conversation found it at, and when that was looked for (kept for
+	// the session's life, bounded; "" none found there).
+	located map[string]map[string]locatedAt
+}
+
+type locatedAt struct {
+	sid string
+	at  time.Time
+}
+
+// setLocated notes what a pane was found to run (sid, "" none) by a look
+// begun at: one begun before the one noted says less, and is not taken.
+func (h *herdrSockets) setLocated(id, pane, sid string, at time.Time) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if _, ok := h.path[id]; !ok {
+		return // (not watched: nothing reads it)
+	}
+	if h.located == nil {
+		h.located = map[string]map[string]locatedAt{}
+	}
+	m := h.located[id]
+	if m == nil {
+		m = map[string]locatedAt{}
+		h.located[id] = m
+	}
+	was, had := m[pane]
+	if had && at.Before(was.at) {
+		return
+	}
+	if !had && len(m) >= 256 {
+		return
+	}
+	m[pane] = locatedAt{sid, at}
+}
+
+func (h *herdrSockets) locatedOf(id, pane string) string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.located[id][pane].sid
 }
 
 func (h *herdrSockets) setBg(id string, p *bgProber) {
@@ -335,6 +376,7 @@ func (h *herdrSockets) set(id, path string) {
 		delete(h.sids, id)
 		delete(h.rounds, id)
 		delete(h.bg, id)
+		delete(h.located, id)
 	} else {
 		h.path[id] = path
 	}
@@ -978,7 +1020,7 @@ func (s *Server) replyToPane(w http.ResponseWriter, r *http.Request, sess *term.
 	defer cancelStep()
 	untrack := s.trackPending(currentUser(r).ID, &liveSocket{loginHash: loginHash(r), hostID: sess.HostID, cancel: cancel})
 	defer untrack()
-	lock, err := s.replies.lock(ctx, sess.ID+"\x00"+pane)
+	lock, err := s.replies.lock(ctx, s.convoReplyKey(sess, pane)) // (the pane's, whichever connection: as the conversation's answer)
 	if err != nil {
 		writeError(w, http.StatusTooManyRequests, "herdr_busy", "an earlier answer to this pane is still under way")
 		return
@@ -1062,7 +1104,14 @@ func (s *Server) replyToPane(w http.ResponseWriter, r *http.Request, sess *term.
 		turn = func() {}
 		time.AfterFunc(answerSettle, hold)
 	}
-	release() // the pane's next answer need not wait for the audit
+	// (The pane's next answer need not wait for the audit; not known to have
+	// been typed, it waits as the pane's turn does, from any connection.)
+	if err != nil && locked {
+		locked = false // (the deferred release then does nothing: this one gives it back)
+		time.AfterFunc(answerSettle, func() { s.replies.unlock(lock) })
+	} else {
+		release()
+	}
 	detail := map[string]any{"session": sess.ID, "pane": pane, "outcome": outcome}
 	if text != "" {
 		detail["text_length"] = utf8.RuneCountInString(text) // what was typed may be private

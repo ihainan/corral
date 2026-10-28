@@ -199,6 +199,8 @@ func (s *Server) registerRoutes() {
 	s.handle("POST /api/sessions/{id}/conversation/effort", SignedIn, s.apiConversationEffort)
 	s.handle("POST /api/sessions/{id}/conversation/sent-missing", SignedIn, s.apiConversationSentMissing)
 	s.handle("POST /api/sessions/{id}/conversation/suggestion", SignedIn, s.apiConversationSuggestion)
+	s.handle("POST /api/sessions/{id}/conversation/screen", SignedIn, s.apiConversationScreen)
+	s.handle("POST /api/sessions/{id}/conversation/reply", SignedIn, s.apiConversationReply)
 	s.handle("POST /api/sessions/{id}/conversation/send", SignedIn, s.apiConversationSend)
 	s.handle("GET /api/sessions/{id}/shares", SignedIn, s.apiListShares)
 	s.handle("POST /api/sessions/{id}/shares", SignedIn, s.apiAddShare)

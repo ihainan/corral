@@ -169,6 +169,9 @@ func effortFlow(step, leave modelStep, target string) (string, error) {
 		return "", err
 	}
 	if screen, err = step(nil, "/effort", effortLines); err != nil {
+		if gateRefused(err) {
+			return "", err // (it came to wait: no picker opened; an Escape would answer it)
+		}
 		return out(err)
 	}
 	if !effortShows(screen) {
@@ -236,8 +239,15 @@ func (s *Server) convoEffort(w http.ResponseWriter, ctx context.Context, sess *t
 				press = append(press, modelKeys[k][1])
 			}
 		}
+		// (A text — the command that opens its picker — not while it waits:
+		// its Enter would be a question's. Keys within the picker go: it is
+		// itself a dialog Claude Code waits on.)
+		gate := ""
+		if text != "" {
+			gate = "free"
+		}
 		running.Add(1)
-		res, err := sshx.Exec(ctx, sess.Client(), convoSendCommand(sess.Persistence, sess.TmuxSession, pane, socket, pid, start, sid, len(text), press, read), 64<<10,
+		res, err := sshx.Exec(ctx, sess.Client(), convoGatedCommand(gate, sess.Persistence, sess.TmuxSession, pane, socket, pid, start, sid, len(text), press, read), 64<<10,
 			sshx.ExecOptions{Stdin: strings.NewReader(text), Release: running.Done})
 		if err == nil && (len(press) > 0 || text != "") {
 			typed = true
@@ -277,6 +287,9 @@ func (s *Server) convoEffort(w http.ResponseWriter, ctx context.Context, sess *t
 	case errors.As(err, &exitErr) && exitErr.Status == 3:
 		*outcome, *reason = "refused", "agent_changed"
 		writeError(w, http.StatusConflict, "agent_changed", "that pane no longer runs this agent")
+	case errors.As(err, &exitErr) && (exitErr.Status == 9 || exitErr.Status == 5):
+		*outcome, *reason = said(typed || exitErr.Status == 5), "agent_waiting"
+		writeError(w, http.StatusConflict, "agent_waiting", "it waits for an answer, or has a dialog open: answer it first")
 	case ctx.Err() != nil:
 		*outcome, *reason = said(typed), "timeout"
 		writeError(w, http.StatusGatewayTimeout, "timeout", "the agent did not answer in time")

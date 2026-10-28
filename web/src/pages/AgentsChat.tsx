@@ -11,9 +11,9 @@ import { chromeVars, corralDark, corralLight } from '../terminal/themes'
 import { expandPastes, getDraft, keepDraft, keepPaste, keepSent, keptSent, remember, sentHistory } from '../terminal/drafts'
 import { geminiPath, shellPath } from '../terminal/paths'
 import { useCompletion } from '../terminal/Completion'
-import { InlineReply } from '../terminal/ReplyDialog'
+import { convoTarget, herdrTarget, InlineReply } from '../terminal/ReplyDialog'
 import { ConversationView, ListSearch, SEARCH_FROM, when, type ConvoAgent, type ConvoListRow, type ConvoPending, type ModelOpt } from '../terminal/Conversation'
-import { asking, useConversation, type ConvoEntry } from '../terminal/conversation'
+import { answerable, asking, useConversation, type ConvoEntry } from '../terminal/conversation'
 import { ackBg, waitingTitle, isCodex, isOpenCode, listAgents, matchQuery, paneTitle, readsLog, useRunningSessions, type AgentRow } from '../terminal/agents'
 import { prefetchConversation } from '../terminal/conversation'
 import { afterSend, holdsWords, holdTermMode, PENDING_MS, sameRun, sameTurn, tmuxKey } from '../terminal/chatSend'
@@ -551,8 +551,11 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     if (!herdr) {
       if (!convo.bind) return null
       const st = !convo.failing && convo.agentStatus
-      const asks = !!st && asking(convo.entries)
-      return { title: convo.title || convo.bind.title, status: asks ? 'blocked' : st === 'busy' ? 'working' : st === 'idle' ? 'idle' : 'unknown', program: convo.bind.agent }
+      // (Claude Code's session file: what it waits for. A question of the
+      // log's not answered yet, where that file says nothing.)
+      const asks = st === 'waiting' ? answerable(convo.waitingFor) : !!st && asking(convo.entries)
+      const dialog = st === 'waiting' && !asks
+      return { title: convo.title || convo.bind.title, status: asks ? 'blocked' : st === 'busy' ? 'working' : st === 'idle' || dialog ? 'idle' : 'unknown', dialog, program: convo.bind.agent }
     }
     if (!row) return null
     const title = (convo.bind?.pane === row.a.pane_id && convo.title) || paneTitle(row.a.title)
@@ -561,17 +564,16 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     // is of a turn that ended, whatever the list says of the agent.)
     const ended = !row.lost && (row.a.bg === 'running' || row.a.bg === 'checking') && (row.a.status === 'done' || row.a.status === 'idle')
     const status = row.lost ? 'unknown' : ended && row.bg !== 'stale' ? (row.a.status as 'done' | 'idle') : row.status
-    // (While that is read for, the bar says it works, as the list does.)
-    const bg = row.lost ? undefined : (row.bg ?? (ended && row.a.bg === 'checking' ? 'checking' : undefined))
+    const bg = row.lost ? undefined : row.bg
     return { where: row.ws === '~' ? '' : row.ws, title, status, bg, other: readsLog(row.a.agent) ? undefined : row.a.agent, program: row.a.agent }
-  }, [herdr, row, convo.bind, convo.agentStatus, convo.failing, convo.title, convo.entries])
+  }, [herdr, row, convo.bind, convo.agentStatus, convo.waitingFor, convo.failing, convo.title, convo.entries])
   // A finished one looked at here is seen: the gateway keeps it, so it is
   // no longer "done" in any browser (herdr's own word goes only with its
   // pane focused in herdr). Not while the page is behind another.
   // (Of the round it is done in, as told: a word that comes late, after
   // another round, marks nothing; a round after it is marked in its turn.)
   // (Not while what it left running is read for, nor while it is out.)
-  const doneHere = herdr && active && row && !row.lost && row.status === 'done' && row.a.status === 'done' && !row.bg ? { pane: row.a.pane_id, round: row.a.round ?? 0, session: row.a.session ?? '' } : undefined
+  const doneHere = herdr && active && row && !row.lost && row.status === 'done' && row.a.status === 'done' && !row.bg && row.a.bg !== 'checking' ? { pane: row.a.pane_id, round: row.a.round ?? 0, session: row.a.session ?? '' } : undefined
   const doneKey = doneHere && JSON.stringify(doneHere)
   useEffect(() => {
     if (!doneKey) return
@@ -597,7 +599,17 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   // (A new conversation, its log not written yet, takes its first message.)
   const bound = (convo.status === 'ready' || (convo.status === 'none' && convo.reason === 'no_log')) && !!convo.bind && (!herdr || convo.bind.pane === cur.pane)
   // (The answer card reads the pane's screen: it needs no log read.)
-  const waits = herdr && !!row && agent?.status === 'blocked' && !agent.other
+  // (An answer card: herdr's, or, where Claude Code's file says it waits for an answer, the conversation's.)
+  const waits = herdr ? !!row && agent?.status === 'blocked' && !agent.other : !!convo.bind && convo.agentStatus === 'waiting' && answerable(convo.waitingFor)
+  // (Claude Code's, its process known: through the conversation, which
+  // checks on the host, right before the keys, that this process still
+  // waits for an answer on the screen shown. Another agent in herdr: herdr's.)
+  const viaConvo = !!convo.bind && convo.bind.agent === 'claude' && (!herdr || convo.bind.pane === row?.a.pane_id)
+  const replyTo = useMemo(
+    () => (viaConvo && convo.bind ? convoTarget(sid, convo.bind) : herdr && row ? herdrTarget(sid, row.a) : null),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [viaConvo, herdr, sid, row?.a.pane_id, convo.bind?.pane, convo.bind?.pid, convo.bind?.start, convo.bind?.session],
+  )
   const working = agent?.status === 'working'
   const bindKey = convo.bind ? `${convo.bind.pane} ${convo.bind.pid} ${convo.bind.start} ${convo.bind.session}` : ''
   // (A Codex's first message goes before its session is known: sent to the
@@ -622,7 +634,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       if (e.row) {
         const r = e.row
         const said = (current && agent?.title) || keptTitle(titles, e) || paneTitle(r.a.title) || r.a.agent
-        return { key: e.key, ...labelOf(e, said, hosts), program: r.a.agent, status: current && agent && !r.bg && r.a.bg !== 'checking' ? agent.status : r.status, bg: r.lost ? undefined : r.bg, since: r.lost ? undefined : r.bg ? r.a.bg_since : r.a.since, current, onPick: () => onPick(e) }
+        return { key: e.key, ...labelOf(e, said, hosts), program: r.a.agent, status: current && agent && !r.bg ? agent.status : r.status, bg: r.lost ? undefined : r.bg, since: r.lost ? undefined : r.bg ? r.a.bg_since : r.a.since, current, onPick: () => onPick(e) }
       }
       const title = (current && agent?.title) || keptTitle(titles, e) || `${e.s.host_name} · ${sessionWhich(e.s, all)}`
       return { key: e.key, title, where: whereOf(e, hosts), program: current ? agent?.program : undefined, status: current && agent ? agent.status : 'unknown', current, onPick: () => onPick(e) }
@@ -1148,7 +1160,9 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       ? t(convo.status === 'loading' ? 'agents.loadingSend' : convo.status === 'none' && convo.reason === 'no_agent' ? 'agents.noAgentSend' : 'agents.cannotSend')
       : agent?.status === 'blocked'
         ? t(waits ? 'agents.answerAbove' : 'agents.answerFirst') // (its card over the composer, or the terminal only)
-        : null
+        : agent?.dialog
+          ? t('agents.dialogOpen') // (a message's Enter would go to it: the host refuses it too)
+          : null
   // Send and stop are one button while it works: send with something to
   // send, else stop. Not stop for a moment after a send, though: the box
   // empties as it goes, and a second tap meant as send would stop it.
@@ -1223,6 +1237,14 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
         // Whether it went is not known (the gateway lost the host on the way,
         // or the answer was lost on its way here): it is looked for as one
         // sent, the draft staying until it is seen.
+        if (e instanceof ApiError && e.code === 'typed_not_sent') {
+          // (In its input, not sent: it came to ask first. Not typed again from
+          // here — sent again, it would be there twice: Enter, in the terminal,
+          // once it is answered. Looked for as one sent meanwhile.)
+          toast(t('agents.typedNotSent'), true)
+          mark({ state: 'waiting', was })
+          return
+        }
         if (e instanceof ApiError && (e.code === 'unknown' || e.code === 'network')) {
           // (It is looked for as one sent; the draft comes back until it is seen.)
           toast(t('agents.sendUnknown'), true)
@@ -1416,9 +1438,9 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       agent={agent}
       pending={shownSent}
       ask={
-        waits && row ? (
-          // (One a pane: nothing of another's carries over. Not tied to a terminal: no size to wait for.)
-          <InlineReply key={row.a.pane_id} sessionId={sid} agent={row.a} resizedAt={0} active={active} held={() => false} />
+        waits && replyTo ? (
+          // (One a pane, and a process in it: nothing of another's carries over. Not tied to a terminal: no size to wait for.)
+          <InlineReply key={replyTo.key} target={replyTo} resizedAt={0} active={active} held={() => false} />
         ) : undefined
       }
       onStop={canPress && !lead ? () => press('stop') : undefined} // (a phone: the composer's button stops it, the bar keeps the room for the name)

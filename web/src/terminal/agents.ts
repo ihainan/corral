@@ -53,12 +53,11 @@ export function ackBg(key: string, since: number) {
 }
 
 // What a herdr agent's status is told as, with what it left running: done
-// or idle with subagents out works on (and while that is read for, so
-// that it is not marked seen meanwhile); out for over BG_STALE, done, until
-// looked at here.
+// or idle with subagents out works on; out for over BG_STALE, done, until
+// looked at here. (While that is read for, as it is: not marked seen
+// meanwhile, see AgentsChat; it moves only if it works on.)
 function withBg(key: string, a: HerdrAgent, known: AgentStatus, now: number): { status: AgentStatus; bg?: AgentRow['bg'] } {
   if (known !== 'done' && known !== 'idle') return { status: known }
-  if (a.bg === 'checking') return { status: 'working' }
   if (a.bg !== 'running') return { status: known }
   if (a.bg_since && now - a.bg_since > BG_STALE) return bgAcks()[key] === a.bg_since ? { status: 'idle', bg: 'stale' } : { status: 'done', bg: 'stale' }
   return { status: 'working', bg: 'running' }

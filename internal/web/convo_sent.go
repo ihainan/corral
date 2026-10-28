@@ -88,7 +88,8 @@ func (s *Server) enterAgain(ctx context.Context, sess *term.Session, pane, socke
 		}
 		slog.Info("conversation: message still in the input, Enter again", "session", sess.ID, "pane", pane)
 		ended.Add(1)
-		res, err := sshx.Exec(ctx, sess.Client(), convoSendCommand(sess.Persistence, sess.TmuxSession, pane, socket, pid, start, sid, 0, enter, sendLines), sendOut,
+		// (Not while it waits: the Enter would be a question's.)
+		res, err := sshx.Exec(ctx, sess.Client(), convoGatedCommand("free", sess.Persistence, sess.TmuxSession, pane, socket, pid, start, sid, 0, enter, sendLines), sendOut,
 			sshx.ExecOptions{Stdin: strings.NewReader(""), Release: ended.Done})
 		if err != nil {
 			return
