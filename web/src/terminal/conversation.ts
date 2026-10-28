@@ -82,7 +82,7 @@ export interface ConvoPart {
 // and after; how long it took), a notice that that was while it sat idle,
 // a scheduled task (or a loop's) set a turn going with its prompt.
 export interface ConvoEvent {
-  kind: 'compact' | 'idle_compact' | 'scheduled'
+  kind: 'compact' | 'idle_compact' | 'scheduled' | 'limit' | 'limit_wait' | 'limit_reset' | 'limit_cancelled'
   trigger?: string
   pre?: number
   post?: number
@@ -91,6 +91,8 @@ export interface ConvoEvent {
   cut?: boolean
   loop?: boolean
   echo?: boolean // (scheduled) told by the turn's own row: right after its firing, the same turn
+  resets_at?: number // (limit) when it resets, Unix seconds
+  limit_kind?: string // (limit) "five_hour", "seven_day"…
 }
 
 // Something that went wrong which the thread would otherwise not show: the

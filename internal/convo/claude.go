@@ -623,9 +623,12 @@ type claudeRow struct {
 	Prompt          json.RawMessage `json:"prompt"`
 	TaskKind        json.RawMessage `json:"taskKind"`
 	TurnOrigin      json.RawMessage `json:"turnOrigin"`
-	RetryAttempt    json.RawMessage `json:"retryAttempt"`
-	MaxRetries      json.RawMessage `json:"maxRetries"`
-	RetryInMs       json.RawMessage `json:"retryInMs"`
+	// (an assistant row Claude Code wrote of an error: the plan's usage limit reached)
+	IsAPIErrorMessage bool            `json:"isApiErrorMessage"`
+	QuotaLimits       json.RawMessage `json:"quotaLimits"`
+	RetryAttempt      json.RawMessage `json:"retryAttempt"`
+	MaxRetries        json.RawMessage `json:"maxRetries"`
+	RetryInMs         json.RawMessage `json:"retryInMs"`
 
 	OriginalModel         string   `json:"originalModel"`
 	FallbackModel         string   `json:"fallbackModel"`
@@ -1338,6 +1341,10 @@ func (c *Claude) wroteFile(path string) {
 }
 
 func (c *Claude) assistant(r *claudeRow) {
+	if ev := limitOf(r); ev != nil {
+		c.add(r, RoleNote, []Part{{Kind: KindEvent, Event: ev}})
+		return
+	}
 	// (A row Claude Code made up itself, an error say, is of no model.)
 	if m := r.Message.Model; m != "" && m != "<synthetic>" {
 		c.meta.Model = clip(m, maxMeta)
@@ -2500,8 +2507,19 @@ func systemEvent(r *claudeRow) *Event {
 		return &Event{Kind: EventCompact, Trigger: trigger, Pre: count(m.PreTokens), Post: count(m.PostTokens), Ms: count(m.DurationMs)}
 	case "informational":
 		var s string
-		if json.Unmarshal(r.Content, &s) == nil && strings.HasPrefix(s, "Compacted while idle") {
+		if json.Unmarshal(r.Content, &s) != nil {
+			return nil
+		}
+		switch {
+		case strings.HasPrefix(s, "Compacted while idle"):
 			return &Event{Kind: EventIdleCompact}
+		case strings.HasPrefix(s, "Usage limit reached") && strings.Contains(s, "continuing automatically"):
+			return &Event{Kind: EventLimitWait}
+		case strings.HasPrefix(s, "Usage limit reset"):
+			return &Event{Kind: EventLimitReset}
+		case strings.HasPrefix(s, "Automatic continue cancelled"):
+			said, cutOff := cut(clean(s), maxTrouble)
+			return &Event{Kind: EventLimitCancelled, Text: said, Cut: cutOff}
 		}
 	case "scheduled_task_fire":
 		var s string
@@ -2510,6 +2528,39 @@ func systemEvent(r *claudeRow) *Event {
 		return &Event{Kind: EventScheduled, Text: said, Cut: cutOff, Loop: word(r.TaskKind) == "loop"}
 	}
 	return nil
+}
+
+// limitOf: an error row of Claude Code's that says the plan's usage limit
+// was reached ({status: "rejected", resetsAt}), as an event; else nil (any
+// other error, a rate limit of the interface's own, shows as it is).
+func limitOf(r *claudeRow) *Event {
+	if !r.IsAPIErrorMessage || word(r.Error) != "rate_limit" || len(r.QuotaLimits) == 0 {
+		return nil
+	}
+	var q struct {
+		Status        json.RawMessage `json:"status"`
+		ResetsAt      json.RawMessage `json:"resetsAt"`
+		RateLimitType json.RawMessage `json:"rateLimitType"`
+	}
+	if json.Unmarshal(r.QuotaLimits, &q) != nil || word(q.Status) != "rejected" {
+		return nil
+	}
+	at := count(q.ResetsAt)
+	if at == 0 {
+		return nil
+	}
+	var text string
+	var blocks []claudeBlock
+	if json.Unmarshal(r.Message.Content, &blocks) == nil {
+		for _, b := range blocks {
+			if b.Type == "text" {
+				text = b.Text
+				break
+			}
+		}
+	}
+	said, cutOff := cut(clean(strings.TrimSpace(text)), maxTrouble)
+	return &Event{Kind: EventLimit, ResetsAt: at, LimitKind: word(q.RateLimitType), Text: said, Cut: cutOff}
 }
 
 // count: a number a row says of something counted (0 for none, or one

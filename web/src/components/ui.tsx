@@ -161,6 +161,8 @@ export interface MenuItem {
   danger?: boolean
   separator?: boolean // draw a divider before this item
   keepOpen?: boolean // e.g. "retry": the menu stays open to show the result
+  disabled?: boolean // shown, not to be picked now (title: why)
+  title?: string
 }
 
 // Sent on the window to close every open menu (a terminal tab sent to the back).
@@ -222,7 +224,7 @@ function MenuEntry({ item, close }: { item: MenuItem; close: () => void }) {
       {item.href ? (
         <a className={cls} role="menuitem" href={item.href} onClick={(e) => { close(); if (item.onSelect) { e.preventDefault(); item.onSelect() } }}>{body}</a>
       ) : (
-        <button className={cls} role="menuitem" onClick={() => { if (!item.keepOpen) close(); item.onSelect?.() }}>{body}</button>
+        <button className={cls} role="menuitem" disabled={item.disabled} title={item.title} onClick={() => { if (!item.keepOpen) close(); item.onSelect?.() }}>{body}</button>
       )}
     </>
   )

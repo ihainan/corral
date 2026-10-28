@@ -73,3 +73,37 @@ func TestClaudeEvents(t *testing.T) {
 		}
 	}
 }
+
+// The plan's usage limit, as Claude Code 2.1.312 logs it: reached (its
+// error row, with when it resets), the wait to go on, reset, called off.
+// A rate limit of the interface's own stays an answer as it was.
+func TestClaudeLimitEvents(t *testing.T) {
+	c := NewClaude()
+	c.Feed(lines(
+		`{"type":"assistant","uuid":"a1","isApiErrorMessage":true,"error":"rate_limit","apiErrorStatus":429,"quotaLimits":{"status":"rejected","resetsAt":1788601200,"rateLimitType":"five_hour"},"message":{"model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"You've hit your session limit · resets 5:40pm (Asia/Shanghai)"}]}}`,
+		`{"type":"system","subtype":"informational","uuid":"s1","content":"Usage limit reached · continuing automatically at 5:40pm · esc or type to cancel","level":"notice"}`,
+		`{"type":"system","subtype":"informational","uuid":"s2","content":"Usage limit reset · continuing automatically","level":"notice"}`,
+		`{"type":"system","subtype":"informational","uuid":"s3","content":"Automatic continue cancelled · Claude Code exited during the wait","level":"warning"}`,
+		`{"type":"assistant","uuid":"a2","isApiErrorMessage":true,"error":"rate_limit","message":{"model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"Rate limited, retry later"}]}}`,
+	))
+	var kinds []string
+	var first Event
+	for _, e := range c.Since(0) {
+		p := e.Parts[0]
+		if p.Event != nil {
+			kinds = append(kinds, p.Event.Kind)
+			if p.Event.Kind == EventLimit {
+				first = *p.Event
+			}
+		} else {
+			kinds = append(kinds, e.Role+":"+p.Text)
+		}
+	}
+	want := []string{EventLimit, EventLimitWait, EventLimitReset, EventLimitCancelled, "assistant:Rate limited, retry later"}
+	if !reflect.DeepEqual(kinds, want) {
+		t.Fatalf("got %q", kinds)
+	}
+	if first.ResetsAt != 1788601200 || first.LimitKind != "five_hour" || first.Text == "" {
+		t.Fatalf("limit %+v", first)
+	}
+}

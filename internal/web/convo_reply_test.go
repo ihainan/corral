@@ -157,4 +157,25 @@ time.sleep(30)`)
 	if got := run("free", []string{"ctrl+x", "ctrl+s"}); got != 0 || wrote() != "pane send-keys p1 ctrl+x\npane send-keys p1 ctrl+s" {
 		t.Fatalf("not waiting, keys go: exit %d, typed %q", got, wrote())
 	}
+	// A command on the session: only while it is idle.
+	if got := run("idle", []string{"enter"}); got != 0 || wrote() != "pane send-keys p1 enter" {
+		t.Fatalf("idle, a command goes: exit %d, typed %q", got, wrote())
+	}
+	for _, st := range []string{"busy", "waiting", "shell"} {
+		state(st, "")
+		if got := run("idle", []string{"enter"}); got != 12 || wrote() != "" {
+			t.Fatalf("%s, a command waits: exit %d, typed %q", st, got, wrote())
+		}
+	}
+}
+
+func TestCommandText(t *testing.T) {
+	for in, ok := range map[string]bool{
+		"/compact": true, "/compact keep the plan": true, "/clear": true, "/rename 部署排查": true,
+		"/rename ": false, "/rename": false, "/compact\n/clear": false, "/model opus": false, "hello": false, "/clear now": false,
+	} {
+		if _, got := commandText(in); got != ok {
+			t.Errorf("%q: %v", in, got)
+		}
+	}
 }

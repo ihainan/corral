@@ -12,6 +12,7 @@ import { expandPastes, getDraft, keepDraft, keepPaste, keepSent, keptSent, remem
 import { geminiPath, shellPath } from '../terminal/paths'
 import { useCompletion } from '../terminal/Completion'
 import { convoTarget, herdrTarget, InlineReply } from '../terminal/ReplyDialog'
+import { SessionOpDialog, type SessionOp } from '../terminal/sessionOps'
 import { ConversationView, ListSearch, SEARCH_FROM, when, type ConvoAgent, type ConvoListRow, type ConvoPending, type ModelOpt } from '../terminal/Conversation'
 import { answerable, asking, useConversation, type ConvoEntry } from '../terminal/conversation'
 import { ackBg, waitingTitle, isCodex, isOpenCode, listAgents, matchQuery, paneTitle, readsLog, useRunningSessions, type AgentRow } from '../terminal/agents'
@@ -1420,8 +1421,24 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   // Not a tmux one's: its entry is the whole tmux session, other windows too.
   const [closing, setClosing] = useState(false)
   const canClose = herdr && !!row && !row.lost
+  // Claude Code's own commands on its session: only while it is idle.
+  // (Of the process it was opened on: another one there meanwhile, it goes.)
+  const [op, setOp] = useState<{ op: SessionOp; bind: NonNullable<typeof convo.bind>; key: string } | null>(null)
+  useEffect(() => {
+    if (op && op.key !== bindKey) setOp(null)
+  }, [op, bindKey])
+  const canOps = canModel || canEffort || (bound && !notClaude && convo.status === 'ready' && (agent?.status === 'idle' || agent?.status === 'done') && !agent?.other)
+  const runOp = (b: NonNullable<typeof convo.bind>, text: string) => {
+    return api('POST', `/api/sessions/${sid}/conversation/command`, { pane: b.pane, pid: b.pid, start: b.start, session: b.session, text }, { timeoutMs: PRESS_MS }).then(() => {
+      toast(t('ops.sent'))
+      convo.refresh()
+    })
+  }
   const more = (): (MenuItem | null)[] => [
     { label: t('convo.showTerminal'), onSelect: openTerminal },
+    ...(['compact', 'rename', 'clear'] as const).map((o, i): MenuItem | null =>
+      !notClaude && bound ? { label: t(`ops.${o}.item`), separator: i === 0, disabled: !canOps, title: canOps ? undefined : t('ops.onlyIdle'), onSelect: () => convo.bind && setOp({ op: o, bind: convo.bind, key: bindKey }) } : null,
+    ),
     canClose ? { label: t('agents.close'), danger: true, separator: true, onSelect: () => setClosing(true) } : null,
   ]
   // (Files dropped on the conversation go up as picked ones do.)
@@ -1474,6 +1491,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       query={query}
       onQuery={onQuery}
     />
+    {op && <SessionOpDialog op={op.op} name={convo.title} onSend={(text) => runOp(op.bind, text)} onClose={() => setOp(null)} onShowTerminal={openTerminal} />}
     {closing && row && (
       <Confirm
         title={t('agents.closeTitle')}

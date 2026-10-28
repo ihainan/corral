@@ -1066,3 +1066,13 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-ask-answers dt { color: var(--term-fg-3); }
 .convo-ask-answers dd { margin: 0; color: var(--term-fg); }
 .convo-ask-plan { max-height: 50vh; overflow: auto; margin: 6px 0 8px; padding: 8px 12px; border-radius: 8px; border: 1px solid var(--term-line); background: var(--term-chrome); }
+
+/* What came since it was last read; the way to one's own messages */
+.convo-unread { display: flex; align-items: center; gap: 10px; margin: 8px 0; font-size: 12px; color: var(--term-accent-text); }
+.convo-unread::before, .convo-unread::after { content: ''; flex: 1 1 24px; border-top: 1px solid color-mix(in srgb, var(--term-accent-text) 45%, transparent); }
+.convo-jump { position: absolute; right: 16px; bottom: 12px; display: flex; flex-direction: column; gap: 4px; z-index: 2; }
+.convo-jump .icon-btn { background: var(--term-chrome); border: 1px solid var(--term-line); box-shadow: 0 1px 4px rgb(0 0 0 / 10%); }
+.convo-event.is-limit { display: flex; gap: 8px; align-items: flex-start; margin: 0; font-size: 13px; color: var(--term-fg-2); }
+.convo-event.is-limit svg { flex: none; margin-top: 3px; color: var(--term-fg-3); }
+.convo-event.is-limit .convo-trouble-head { color: var(--term-fg-2); }
+.convo-event.is-limit.is-warn svg, .convo-event.is-limit.is-warn .convo-trouble-head { color: var(--term-warn-text); }

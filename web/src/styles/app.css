@@ -357,6 +357,8 @@ a.setting:hover { text-decoration: none; background: var(--bg-hover); }
   border: 0; background: none; border-radius: var(--r-sm); cursor: pointer; text-align: left; color: var(--fg); font-size: 14px; font-weight: 400;
 }
 .menu-item svg { color: var(--fg-3); flex: none; }
+.menu-item:disabled { color: var(--fg-3); cursor: default; }
+.menu-item:disabled:hover { background: none; }
 .menu-item:hover { background: var(--bg-hover); text-decoration: none; }
 .menu-item.danger, .menu-item.danger svg { color: var(--danger); }
 .menu hr, .sheet-list hr { border: 0; border-top: 1px solid var(--line); margin: 4px 6px; }

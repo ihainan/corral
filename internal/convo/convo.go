@@ -64,6 +64,13 @@ const (
 	EventCompact     = "compact"      // the conversation was compacted
 	EventIdleCompact = "idle_compact" // (said after it) it was so while the session sat idle
 	EventScheduled   = "scheduled"    // a scheduled task (or /loop) set a turn going
+	// The plan's usage limit (Claude Code's subscription): reached (until
+	// ResetsAt, of Kind), to go on of itself once it resets, reset, the
+	// going on called off.
+	EventLimit          = "limit"
+	EventLimitWait      = "limit_wait"
+	EventLimitReset     = "limit_reset"
+	EventLimitCancelled = "limit_cancelled"
 )
 
 // What a Trouble is of.
@@ -148,6 +155,9 @@ type Event struct {
 	// Echo: (scheduled) told by the turn's own row, not its firing; right
 	// after its firing, the same turn told again.
 	Echo bool `json:"echo,omitempty"`
+	// (limit) when it resets (Unix seconds), and of what: "five_hour", …
+	ResetsAt  int64  `json:"resets_at,omitempty"`
+	LimitKind string `json:"limit_kind,omitempty"`
 }
 
 // Trouble is something that went wrong which the thread would otherwise

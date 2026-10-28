@@ -1990,8 +1990,9 @@ func convoSendCommand(mode, session, pane, socket string, pid, start int64, sid 
 }
 
 // convoGatedCommand is convoSendCommand with a gate (see the script): ""
-// none; "free", not while Claude Code waits; "reply:<sha256 of the screen
-// answered>", only while it waits for an answer, on that screen.
+// none; "free", not while Claude Code waits; "idle", only while it is idle
+// (exit 12 where it is not); "reply:<sha256 of the screen answered>", only
+// while it waits for an answer, on that screen.
 func convoGatedCommand(gate, mode, session, pane, socket string, pid, start int64, sid string, length int, keys []string, read int) string {
 	script := `PATH="$HOME/.local/bin:$HOME/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 mode=$1 sess=$2 p=$3 pid=$4 start=$5 len=$6 sock=$7 sid=$8 rd=$9
@@ -2104,6 +2105,7 @@ gate_enter() {
   waiting
   case $gate in
   free) [ "$st" = waiting ] && exit 5 ;;
+  idle) [ "$st" = idle ] || exit 5 ;;
   reply:*) [ "$st" = waiting ] || exit 5 ;;
   esac
   return 0
@@ -2112,6 +2114,7 @@ if [ -n "$gate" ]; then
   waiting
   case $gate in
   free) [ "$st" = waiting ] && exit 9 ;;
+  idle) [ "$st" = idle ] || exit 12 ;;
   reply:*)
     [ "$st" = waiting ] || exit 9
     case $wf in "permission prompt"|"input needed"|"sandbox request"|"worker request") ;; *) exit 9;; esac
@@ -2256,6 +2259,25 @@ var convoKeys = map[string]struct {
 	// line (see convo_reply.go).
 	"screen": {"convo.screen", nil, nil},
 	"reply":  {"convo.reply", nil, nil},
+	// One of Claude Code's own commands on the session (see commandText),
+	// only while it is idle.
+	"command": {"convo.command", nil, nil},
+}
+
+// commandText: a command on the session the page may send, one line:
+// /compact (with what to keep, if said), /rename with the name, /clear.
+func commandText(s string) (string, bool) {
+	t, ok := sendText(s)
+	if !ok || strings.ContainsAny(t, "\n\t") || len(t) > 2000 {
+		return "", false
+	}
+	switch {
+	case t == "/compact" || t == "/clear" || strings.HasPrefix(t, "/compact "):
+	case strings.HasPrefix(t, "/rename ") && strings.TrimSpace(t[len("/rename "):]) != "":
+	default:
+		return "", false
+	}
+	return t, true
 }
 
 // screenMode reads the permission mode off the bottom of Claude Code's
@@ -2385,6 +2407,12 @@ const sendOut = 256 << 10
 // Send types a message into the agent's pane and presses Enter (Claude Code
 // queues it while it works), as the terminal's composer would, but into that
 // pane only: what herdr has in front, or the terminal shows, is not changed.
+// POST /api/sessions/{id}/conversation/command (as a send, the text one of
+// commandText's) → {"ok": true}; 409 agent_busy where it is not idle.
+func (s *Server) apiConversationCommand(w http.ResponseWriter, r *http.Request) {
+	s.convoPress(w, r, "command")
+}
+
 func (s *Server) apiConversationSend(w http.ResponseWriter, r *http.Request) {
 	s.convoPress(w, r, "send")
 }
@@ -2411,7 +2439,9 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	}
 	err := readJSON(r, &b)
 	text, textOK := sendText(b.Text)
-	if what != "send" && what != "sent_missing" && what != "reply" {
+	if what == "command" {
+		text, textOK = commandText(b.Text)
+	} else if what != "send" && what != "sent_missing" && what != "reply" {
 		textOK = b.Text == ""
 	}
 	if what == "reply" {
@@ -2458,6 +2488,9 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		detail := map[string]any{"session": sess.ID, "pane": b.Pane, "pid": b.PID, "start": b.Start, "claude_session": b.Session, "outcome": outcome}
 		if what == "send" {
 			detail["length"] = len(text) // (what was said is not kept)
+		}
+		if what == "command" {
+			detail["command"] = strings.Fields(text)[0] // (its words, a name say, are not kept)
 		}
 		if reason != "" {
 			detail["reason"] = reason
@@ -2629,7 +2662,7 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	var press []string
 	if what == "reply" && len(b.Keys) > 0 {
 		press = replyPress(sess.Persistence, b.Keys)
-	} else if what != "send" && what != "reply" {
+	} else if what != "send" && what != "reply" && what != "command" {
 		press = keys.tmux
 		if sess.Persistence == "herdr" {
 			press = keys.herdr
@@ -2664,6 +2697,8 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		gate = "reply:" + b.Digest
 	case front.agent == "claude" && (what == "send" || what == "send_now" || what == "mode"):
 		gate = "free" // (not while it waits: what is typed would go to its question)
+	case what == "command":
+		gate = "idle" // (not while it works either: it would wait in its queue, and run when no one looks)
 	}
 	res, err := sshx.Exec(ctx, sess.Client(), convoGatedCommand(gate, sess.Persistence, sess.TmuxSession, b.Pane, socket, b.PID, b.Start, b.Session, len(text), press, modeLines(what)), sendOut,
 		sshx.ExecOptions{Stdin: strings.NewReader(text), Release: ended.Done})
@@ -2696,6 +2731,10 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	case errors.As(err, &exitErr) && exitErr.Status == 10:
 		reason = "screen_changed"
 		writeError(w, http.StatusConflict, "screen_changed", "the screen changed; look again before answering")
+		return
+	case errors.As(err, &exitErr) && exitErr.Status == 12:
+		reason = "agent_busy"
+		writeError(w, http.StatusConflict, "agent_busy", "it is not idle: a command waits until it is")
 		return
 	case errors.As(err, &exitErr) && exitErr.Status == 11:
 		reason = "cannot_verify"

@@ -1,5 +1,5 @@
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { ArrowDown, Check, ChevronDown, ChevronRight, ChevronsUpDown, Clock, GitBranch, Loader, MoreVertical, PanelLeft, Search, TriangleAlert, X } from 'lucide-react'
+import { createContext, Fragment, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { ArrowDown, Check, ChevronDown, ChevronRight, ChevronUp, ChevronsUpDown, Clock, GitBranch, Loader, MoreVertical, PanelLeft, Search, TriangleAlert, X } from 'lucide-react'
 import { t, getLang, type I18nKey } from '../i18n'
 import { copyText, isCoarse, Menu, type MenuItem } from '../components/ui'
 import { local } from '../storage'
@@ -265,6 +265,23 @@ export function ConversationView({
   // Another conversation in front (another pane, another tab's, or another
   // log of the same pane: /clear, /resume): from its end, nothing of the one
   // before opened or shown (its items' keys may come again in this one).
+  // What was read of each conversation (the last entry in view at its end,
+  // shown in front): coming back, what came after it is marked so (one
+  // line before the first item that begins after it), for this visit.
+  const [unreadAfter, setUnreadAfter] = useState<number | null>(null)
+  const unreadAt = unreadAfter === null ? -1 : list.findIndex((it) => startSeq(it) > unreadAfter)
+  // (Coming back to it while following: shown from that line, if there is
+  // more than a screen of it; once, as soon as the line is known.)
+  const toUnread = useRef<{ after: number; until: number } | null>(null)
+  const lastSeq = convo.entries.length ? convo.entries[convo.entries.length - 1].seq : 0
+  const ofNow = useRef({ of: convo.of, gen: convo.gen, last: lastSeq })
+  ofNow.current = { of: convo.of, gen: convo.gen, last: lastSeq }
+  const markRead = useCallback(() => {
+    const el = box.current
+    const o = ofNow.current
+    if (!el || !o.of || !o.last || !activeNow.current || document.hidden) return
+    if (el.scrollHeight - el.scrollTop - el.clientHeight < 48) readUpTo(o.of, o.gen, o.last)
+  }, [])
   // Back to one read before (its entries kept, of the same reading of its
   // log): where it was left, followed or read at (its items opened as they were).
   const shownOf = useRef<{ of?: string; gen: number } | null>(null)
@@ -274,12 +291,17 @@ export function ConversationView({
   const allOpenNow = useRef(allOpen)
   allOpenNow.current = allOpen
   const keepPlace = useCallback(() => {
+    markRead()
     const was = shownOf.current
     if (was?.of) keepAt(was.of, { gen: was.gen, stuck: stuck.current, anchors: anchors.current, noted: notedList.current, opened: openedNow.current, allOpen: allOpenNow.current })
   }, [])
   useLayoutEffect(() => {
     if (shownOf.current?.of !== convo.of) keepPlace()
     shownOf.current = { of: convo.of, gen: convo.gen }
+    const seen = convo.of ? reads.get(convo.of) : undefined
+    // (What is new may come with the next read, after what was kept shows.)
+    const after = seen && seen.gen === convo.gen ? seen.seq : null
+    setUnreadAfter(after)
     const p = convo.of ? places.get(convo.of) : undefined
     const back = !!p && p.gen === convo.gen && !p.stuck && p.anchors.length > 0 && convo.entries.length > 0
     if (back) {
@@ -296,9 +318,28 @@ export function ConversationView({
     anchors.current = back ? p.anchors : []
     notedList.current = back ? p.noted : []
     restoring.current = back ? p : null
+    toUnread.current = !back && after !== null ? { after, until: Date.now() + 8000 } : null
     if (!back) pin()
   }, [convo.of, convo.gen])
   useEffect(() => keepPlace, [keepPlace]) // (and as the view goes)
+  // (And as it goes to the back: another tab, the page hidden; coming to
+  // the front again, what came meanwhile is marked as on coming back to it.)
+  const comeBack = useCallback(() => {
+    const o = ofNow.current
+    const seen = o.of ? reads.get(o.of) : undefined
+    if (!seen || seen.gen !== o.gen) return
+    setUnreadAfter(seen.seq)
+    if (stuck.current) toUnread.current = { after: seen.seq, until: Date.now() + 8000 }
+  }, [])
+  const wasActive = useRef(active)
+  useEffect(() => {
+    if (!active) keepPlace()
+    else if (!wasActive.current) comeBack()
+    wasActive.current = active
+    const onSeen = () => (document.hidden ? keepPlace() : activeNow.current && comeBack())
+    document.addEventListener('visibilitychange', onSeen)
+    return () => document.removeEventListener('visibilitychange', onSeen)
+  }, [active, keepPlace, comeBack])
   // Reads in that bring nothing (parts all of one long line): after three
   // in a row it goes on only when asked (the note becomes a button).
   const [olderPaused, setOlderPaused] = useState(false)
@@ -356,7 +397,7 @@ export function ConversationView({
     const c = col.current
     if (!el || !c) return
     const view = el.getBoundingClientRect()
-    const kids = [...c.children].filter((k) => !k.classList.contains('convo-older'))
+    const kids = [...c.children].filter((k) => !k.hasAttribute('data-aside'))
     const out: Anchor[] = []
     const last = listNow.current.length ? placeKey(listNow.current[listNow.current.length - 1]) : ''
     // (The first in view by halving: a long conversation has thousands.)
@@ -384,7 +425,7 @@ export function ConversationView({
     if (r && (opened !== r.opened || allOpen !== r.allOpen)) return
     if (el && c && !stuck.current && anchors.current.length) {
       const view = el.getBoundingClientRect()
-      const kids = [...c.children].filter((k) => !k.classList.contains('convo-older'))
+      const kids = [...c.children].filter((k) => !k.hasAttribute('data-aside'))
       const at = new Map(list.map((it, i) => [placeKey(it), i]))
       const lastNow = list.length ? placeKey(list[list.length - 1]) : ''
       // (None there by its key, the end as it was: by its place from the end,
@@ -413,12 +454,26 @@ export function ConversationView({
       }
     }
     restoring.current = null
+    const tu = toUnread.current
+    if (tu && Date.now() > tu.until) toUnread.current = null // (too late: what comes now is followed as it comes)
+    else if (tu && tu.after === unreadAfter && el && c && unreadAt >= 0) {
+      toUnread.current = null
+      const line = stuck.current ? c.querySelector<HTMLElement>(':scope > .convo-unread') : null
+      if (line && el.scrollHeight - (line.offsetTop - c.offsetTop) > el.clientHeight) {
+        stuck.current = false
+        setAway(true)
+        el.scrollTop += line.getBoundingClientRect().top - el.getBoundingClientRect().top - 8
+        did.current.set = el.scrollTop
+      }
+    }
     note()
+    markRead()
   })
   // Before the new content is laid out, note whether the end was in view;
   // after, keep it there.
   useLayoutEffect(() => {
     if (stuck.current) pin()
+    markRead()
   }, [list, pending, working, quiet, convo.tasks, !!ask])
   // Following the end is left by any move the page did not make itself:
   // the person's scrolling, or the browser's own jump (finding in the page,
@@ -463,6 +518,10 @@ export function ConversationView({
       // (To the end, by the person: a wheel, keys, a finger and the glide of
       // its fling once it is off, the bar; not pressed there.)
       const down = !ours && !pressed && (g.drag || now - g.downAt < SOON || (!g.touch && g.fling < 0 && now - g.touchEndAt < 3000))
+      if (!ours) {
+        jumpedTo.current = null
+        upAfterOlder.current = null
+      }
       if (stuck.current) {
         if (end) g.glide = false
         else if (g.glide && !back) {
@@ -477,6 +536,7 @@ export function ConversationView({
         noting = requestAnimationFrame(() => {
           noting = 0
           note()
+          markRead()
         })
       }
     }
@@ -548,6 +608,70 @@ export function ConversationView({
     }
   }, [])
 
+  // The person's own messages, up and down from what is in view (of those
+  // read in: past the first, the part before is read in, to go on from).
+  // (From the one last gone to, while the person has not scrolled since;
+  // else from what is in view: going up while following the end, first to
+  // the latest one on the screen; reading higher up, the one above.)
+  const jumpedTo = useRef<HTMLElement | null>(null)
+  // (Going up past what was read in: the first entry then, of that log; any
+  // other doing of the person's meanwhile calls it off.)
+  const upAfterOlder = useRef<{ seq: number; of?: string; gen: number } | null>(null)
+  const jump = useCallback((dir: 1 | -1) => {
+    upAfterOlder.current = null
+    const el = box.current
+    const c = col.current
+    if (!el || !c) return
+    const kids = [...c.children].filter((k) => !k.hasAttribute('data-aside'))
+    const top = el.getBoundingClientRect().top
+    const mine = listNow.current.flatMap((it, i) => (it.kind === 'user' && !it.e.mid && kids[i] ? [kids[i] as HTMLElement] : []))
+    const at = (k: HTMLElement) => k.getBoundingClientRect().top - top
+    const from = jumpedTo.current && jumpedTo.current.isConnected ? mine.indexOf(jumpedTo.current) : -1
+    let to: HTMLElement | undefined
+    if (from >= 0) to = mine[from + dir]
+    // (Following the end: the latest one on the screen; reading higher up: the one above.)
+    else if (dir < 0) to = mine.filter((k) => (stuck.current ? at(k) < el.clientHeight - 24 && Math.abs(at(k) - 8) > 4 : at(k) < 4)).pop()
+    else to = mine.find((k) => at(k) > 12)
+    if (!to) {
+      const cv = convoNow.current
+      if (dir < 0 && cv.older && !cv.olderCut && !cv.loadingOlder && !olderPausedNow.current) {
+        upAfterOlder.current = { seq: cv.entries[0]?.seq ?? 0, of: cv.of, gen: cv.gen }
+        cv.loadOlder()
+      }
+      return
+    }
+    stuck.current = false
+    did.current.glide = false
+    setAway(true)
+    el.scrollTop += at(to) - 8
+    did.current.set = el.scrollTop
+    jumpedTo.current = to
+    note()
+  }, [note])
+  // (The part before read in, with something in it: on up, once.)
+  useEffect(() => {
+    const was = upAfterOlder.current
+    if (was === null) return
+    // (Another log in front meanwhile: called off, whatever is still read in.)
+    if (was.of !== convo.of || was.gen !== convo.gen) {
+      upAfterOlder.current = null
+      return
+    }
+    if (convo.loadingOlder) return
+    upAfterOlder.current = null
+    if (firstSeq < was.seq) jump(-1)
+  }, [convo.loadingOlder, firstSeq, jump, convo.of, convo.gen])
+  useEffect(() => {
+    if (!active) return
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.key !== '[' && e.key !== ']') || e.ctrlKey || e.metaKey || e.altKey || e.isComposing || editable(e.target) || underDialog(e)) return
+      e.preventDefault()
+      jump(e.key === '[' ? -1 : 1)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [active, jump])
+
   // What was sent, not in the log yet (also before a new conversation's log is written).
   const pendingList = pending.map((p) => (
     <div key={p.id} className={'convo-user convo-pending' + (p.state === 'sending' ? ' is-sending' : '')}>
@@ -589,7 +713,7 @@ export function ConversationView({
       <>
         {convo.older ? (
           // (Near the top, the part before is read in: see the observer.)
-          <p className="convo-older" ref={olderRef} role="status">
+          <p className="convo-older" data-aside="" ref={olderRef} role="status">
             {convo.olderCut ? (
               t('convo.olderCut')
             ) : convo.loadingOlder ? (
@@ -611,17 +735,21 @@ export function ConversationView({
             )}
           </p>
         ) : (
-          convo.entries.length > 0 && <p className="convo-older">{t('convo.atStart')}</p>
+          convo.entries.length > 0 && (
+            <p className="convo-older" data-aside="">
+              {t('convo.atStart')}
+            </p>
+          )
         )}
-        {list.map((it) => (
-          <ListItem
-            key={itemKey(it)}
-            it={it}
-            copy={copy}
-            open={it.kind === 'work' ? (opened[it.key] ?? allOpen) : false}
-            onToggle={toggle}
-            onShow={show}
-          />
+        {list.map((it, i) => (
+          <Fragment key={itemKey(it)}>
+            {i === unreadAt && (
+              <p className="convo-unread" data-aside="" role="separator">
+                <span>{t('convo.unread')}</span>
+              </p>
+            )}
+            <ListItem it={it} copy={copy} open={it.kind === 'work' ? (opened[it.key] ?? allOpen) : false} onToggle={toggle} onShow={show} />
+          </Fragment>
         ))}
         {pendingList}
         {working && (quiet || quietLong > 0) && <p className="convo-working">{quietLong ? t('convo.quietLong', { d: quietLong < 3600000 ? t('convo.for.m', { n: Math.floor(quietLong / 60000) }) : t('convo.for.h', { n: Math.floor(quietLong / 3600000) }) }) : t('convo.quiet')}</p>}
@@ -705,9 +833,19 @@ export function ConversationView({
       <div className="convo-scroll-wrap">
         <div className="convo-scroll" ref={box}>
           <div className="convo-col" ref={col}>
-            {body}
+            <ShowTerminal.Provider value={onShowTerminal}>{body}</ShowTerminal.Provider>
           </div>
         </div>
+        {away && convo.status === 'ready' && (
+          <div className="convo-jump" role="group" aria-label={t('convo.jump')}>
+            <button type="button" className="icon-btn" onClick={() => jump(-1)} aria-label={t('convo.jumpPrev')} title={t('convo.jumpPrev') + (isTouchOnly ? '' : ' ([)')}>
+              <ChevronUp size={16} aria-hidden="true" />
+            </button>
+            <button type="button" className="icon-btn" onClick={() => jump(1)} aria-label={t('convo.jumpNext')} title={t('convo.jumpNext') + (isTouchOnly ? '' : ' (])')}>
+              <ChevronDown size={16} aria-hidden="true" />
+            </button>
+          </div>
+        )}
         {away && convo.status === 'ready' && (
           <button
             type="button"
@@ -716,6 +854,7 @@ export function ConversationView({
               const el = box.current
               if (!el) return
               // (Following again: the end is glided to, not jumped to, on the way.)
+              upAfterOlder.current = null
               stuck.current = true
               did.current.glide = true
               setAway(false)
@@ -1631,6 +1770,29 @@ function TroubleNote({ t: tr }: { t: ConvoTrouble }) {
 // folded), or a turn a scheduled task set going, its prompt behind a tap.
 function EventNote({ ev, idle }: { ev: ConvoEvent; idle?: boolean }) {
   const [open, setOpen] = useState(false)
+  const showTerminal = useContext(ShowTerminal)
+  // The plan's usage limit: reached (until when), to go on of itself, reset, called off.
+  if (ev.kind === 'limit' || ev.kind === 'limit_wait' || ev.kind === 'limit_reset' || ev.kind === 'limit_cancelled') {
+    let head: string
+    if (ev.kind === 'limit') {
+      const which = ev.limit_kind === 'five_hour' ? t('convo.limit.fiveHour') : ev.limit_kind?.startsWith('seven_day') ? t('convo.limit.week') : ''
+      head = t('convo.limit.reached', { which: which ? t('convo.limit.which', { w: which }) : '', at: ev.resets_at ? resetsAt(ev.resets_at) : '?' })
+    } else head = t(ev.kind === 'limit_wait' ? 'convo.limit.wait' : ev.kind === 'limit_reset' ? 'convo.limit.reset' : 'convo.limit.cancelled')
+    return (
+      <div className={'convo-event is-limit' + (ev.kind === 'limit' ? ' is-warn' : '')}>
+        <Clock size={14} aria-hidden="true" />
+        <div className="convo-trouble-body">
+          <p className="convo-trouble-head">{head}</p>
+          {ev.kind === 'limit_cancelled' && ev.text && <p className="convo-trouble-said">{ev.text}</p>}
+          {ev.kind === 'limit_wait' && showTerminal && (
+            <button type="button" className="link-btn" onClick={showTerminal}>
+              {t('convo.showTerminal')}
+            </button>
+          )}
+        </div>
+      </div>
+    )
+  }
   if (ev.kind === 'scheduled') {
     const said = (ev.text ?? '').trim()
     return (
@@ -1672,6 +1834,16 @@ function EventNote({ ev, idle }: { ev: ConvoEvent; idle?: boolean }) {
   )
 }
 
+// (The conversation's terminal, for a line that sends one there.)
+const ShowTerminal = createContext<(() => void) | undefined>(undefined)
+
+// When a usage limit resets, in the page's time: the day too, when not today.
+function resetsAt(sec: number): string {
+  const d = new Date(sec * 1000)
+  const time = d.toLocaleTimeString(getLang(), { hour: '2-digit', minute: '2-digit' })
+  return d.toDateString() === new Date().toDateString() ? time : d.toLocaleDateString(getLang(), { month: 'short', day: 'numeric' }) + ' ' + time
+}
+
 // What became of a message that was typed and has not turned up in the
 // log, read off the pane's own screen when it did not: it settles whether
 // the words are still sitting in the input, which nothing else can say
@@ -1709,6 +1881,20 @@ function keepAt(of: string, p: Place) {
   places.delete(of)
   places.set(of, p)
   while (places.size > 12) places.delete(places.keys().next().value!)
+}
+
+// Where an item begins in the log (its first entry's seq).
+const startSeq = (it: Item): number => (it.kind === 'gone' ? it.entries[0].seq : 'e' in it ? it.e.seq : Number(/\d+/.exec(it.key)?.[0] ?? 0))
+
+// What was read of each conversation, for this page's life: the last entry
+// seen at its end (of that reading of its log).
+const reads = new Map<string, { gen: number; seq: number }>()
+function readUpTo(of: string, gen: number, seq: number) {
+  const was = reads.get(of)
+  if (was && was.gen === gen && was.seq >= seq) return
+  reads.delete(of)
+  reads.set(of, { gen, seq })
+  while (reads.size > 50) reads.delete(reads.keys().next().value!)
 }
 
 // How the tool calls opened by hand are shown (by call id), the latest last.
