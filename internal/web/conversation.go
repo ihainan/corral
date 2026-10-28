@@ -2151,7 +2151,10 @@ var convoKeys = map[string]struct {
 	// Looking for a message that was typed and has not turned up in the
 	// log: nothing is pressed, the screen is read (see convo_sent.go).
 	"sent_missing": {"convo.sent_missing", nil, nil},
-	"send":         {"convo.send", nil, nil}, // (typed by convoSendCommand)
+	// Claude Code's suggestion of the next message: nothing is pressed, the
+	// screen is read with its colours (see convo_suggest.go).
+	"suggest": {"convo.suggest", nil, nil},
+	"send":    {"convo.send", nil, nil}, // (typed by convoSendCommand)
 }
 
 // screenMode reads the permission mode off the bottom of Claude Code's
@@ -2332,6 +2335,12 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	// ("typed", "refused" or "unknown"; why, when nothing was pressed).
 	outcome, reason := "refused", ""
 	defer func() {
+		// (The suggestion is looked for by the page itself, at each turn's end:
+		// only a screen that could not be read is noted, not each look, nor
+		// one not made, the agent gone from the pane say.)
+		if what == "suggest" && reason != "no_screen" {
+			return
+		}
 		actx, acancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
 		defer acancel()
 		detail := map[string]any{"session": sess.ID, "pane": b.Pane, "pid": b.PID, "start": b.Start, "claude_session": b.Session, "outcome": outcome}
@@ -2455,6 +2464,12 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		release := turn
 		turn = func() {} // (convoEffort gives it back, once its steps have ended on the host)
 		s.convoEffort(w, ctx, sess, b.Pane, socket, b.PID, b.Start, b.Session, b.Effort, &outcome, &reason, release)
+		return
+	}
+	if what == "suggest" {
+		release := turn
+		turn = func() {} // (the screen read gives it back, once it has ended on the host)
+		s.suggestion(w, ctx, sess, b.Pane, socket, &outcome, &reason, release)
 		return
 	}
 	if what == "sent_missing" {

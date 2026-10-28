@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type ReactNode } from 'react'
 import { ArrowUp, ChevronLeft, History, Paperclip, Square, X } from 'lucide-react'
 import { api, ApiError, authGen, errorText, uploadFile, type SessionInfo } from '../api'
 import { t, type I18nKey } from '../i18n'
@@ -51,6 +51,15 @@ const chatAddress = (e: { s: SessionInfo; pane?: string }) => {
 const PASTE_LINES = 12
 const SEND_MS = 45000 // (the host may wait for another message to the pane to go first)
 const PRESS_MS = 20000
+// When Claude Code's suggestion is looked for after a turn ends (ms): it
+// comes a moment after, at times a while after.
+const SUGGEST_AT = [1500, 4000, 9000]
+// Of each turn's end asked about (by its key): the looks left, what was
+// found, the latest look (only its answer is taken), whether one is on its
+// way, and the views showing it. Kept beyond a view, so that going to
+// another agent and back does not look all over again.
+type SuggestAsk = { left: number; text: string; seq: number; busy: boolean; views: Set<{ told: () => void; next: () => void }> }
+const suggestAsks = new Map<string, SuggestAsk>()
 // Refusals of a switch made before any key was pressed (see convoPress, convoModeTo).
 const NOTHING_PRESSED = ['bad_request', 'unauthorized', 'unsupported', 'busy', 'host_error', 'agent_changed', 'not_in_front', 'refused', 'no_screen', 'not_found', 'forbidden']
 const MODE_MS = 50000 // (to a mode picked: several presses, each read back; the gateway gives up at 45 s)
@@ -1015,8 +1024,94 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     })
     return true
   }
+  // Claude Code's suggestion of the next message, greyed in its input once
+  // a turn ends (the terminal's composer reads it off its screen): read off
+  // the pane's screen by the gateway a moment after the turn ended (then
+  // again, Claude Code taking a while to think of it), shown in the box
+  // while it is empty, taken with Tab or its button. Of that turn's end only.
+  const endSeq = convo.entries.length ? convo.entries[convo.entries.length - 1].seq : 0
+  const askKey = bound && !notClaude && active && (agent?.status === 'idle' || agent?.status === 'done') && !agent?.other ? `${bindKey} ${convo.gen} ${endSeq}` : ''
+  // (The page come to the front again: what was left to ask for, asked.)
+  const [inFront, setInFront] = useState(0)
+  useEffect(() => {
+    const on = () => !document.hidden && setInFront((n) => n + 1)
+    document.addEventListener('visibilitychange', on)
+    return () => document.removeEventListener('visibilitychange', on)
+  }, [])
+  // What is shown is what the turn's end's record says (told: drawn anew
+  // when it changes, whichever view asked).
+  const [, told] = useReducer((n: number) => n + 1, 0)
+  useEffect(() => {
+    if (!askKey) return
+    let a = suggestAsks.get(askKey)
+    if (!a) {
+      a = { left: SUGGEST_AT.length, text: '', seq: 0, busy: false, views: new Set() }
+      suggestAsks.set(askKey, a)
+      if (suggestAsks.size > 50) suggestAsks.delete(suggestAsks.keys().next().value!)
+    } else if (a.text && !a.busy) {
+      a.left = 1 // (found before: looked at once more, as it may be gone, taken or typed over in the terminal meanwhile)
+    }
+    const at = a
+    let live = true
+    let timer: ReturnType<typeof setTimeout> | undefined
+    // The next look, if any is left and none is on its way (that one, back,
+    // goes on from here: see view.next).
+    const next = (wait?: number) => {
+      clearTimeout(timer)
+      if (at.left <= 0 || at.busy) return
+      const i = SUGGEST_AT.length - at.left
+      timer = setTimeout(
+        () => {
+          // (Behind: left for when it is in front again, none used up.)
+          if (!live || document.hidden || at.left <= 0 || at.busy) return
+          at.left--
+          at.busy = true
+          const mine = ++at.seq
+          const had = at.text
+          const done = (found: string | null) => {
+            if (at.seq !== mine) return // (one asked since says, not this)
+            at.busy = false
+            if (found !== null) {
+              at.text = found
+              if (had && !found) at.left = 0 // (gone: not looked for again this turn)
+            }
+            for (const v of at.views) v.told()
+            if (!at.text) [...at.views][0]?.next() // (any left: looked for again, by a view still there)
+          }
+          api<{ suggestion: string }>('POST', `/api/sessions/${sid}/conversation/suggestion`, pressBody(), { timeoutMs: PRESS_MS }).then(
+            (r) => done(r.suggestion),
+            () => done(null),
+          )
+        },
+        wait ?? (at.text ? 300 : SUGGEST_AT[i] - (i ? SUGGEST_AT[i - 1] : 0)),
+      )
+    }
+    const view = { told, next: () => next() }
+    at.views.add(view)
+    told()
+    next()
+    return () => {
+      live = false
+      clearTimeout(timer)
+      at.views.delete(view)
+      if (!at.text) [...at.views][0]?.next() // (a look of this view's to come: another view still there takes it on)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [askKey, inFront])
+  const suggestion = (askKey && suggestAsks.get(askKey)?.text) || null // (askKey: nothing in the way of sending)
+  const takeSuggestion = () => {
+    if (!suggestion) return
+    const s = suggestion
+    setDraft(s)
+    requestAnimationFrame(() => {
+      const el = field.current
+      if (!el) return
+      el.focus()
+      el.selectionStart = el.selectionEnd = s.length
+    })
+  }
   const to = agent ? [agent.title, agent.where].filter((x) => x && x !== '~').join(' · ') : ''
-  const placeholder = to ? t('convo.toPlaceholder', { name: to }) : t('term.composerPlaceholder')
+  const placeholder = suggestion ?? (to ? t('convo.toPlaceholder', { name: to }) : t('term.composerPlaceholder'))
   useComposerFit(field, draft, placeholder)
   // Why it cannot send now, if it cannot.
   // (Waiting for an answer, a message's Enter could take an option of its
@@ -1170,6 +1265,11 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
           }}
           onKeyDown={(e) => {
             if (e.nativeEvent.isComposing || e.keyCode === 229) return
+            if (e.key === 'Tab' && !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey && !draft && suggestion) {
+              e.preventDefault()
+              takeSuggestion()
+              return
+            }
             if (completion.onKey(e)) return
             const el = e.currentTarget
             const plain = !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey && el.selectionStart === el.selectionEnd
@@ -1225,8 +1325,14 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
             }}
           />
           <div className="spacer" />
+          {suggestion && !draft && !hasKeyboardPointer() && (
+            <button type="button" className="btn btn-ghost composer-insert" onClick={takeSuggestion} title={suggestion}>
+              {t('term.useSuggestion')}
+            </button>
+          )}
           {!blocked && hasKeyboardPointer() && (
             <span className="composer-keys" aria-hidden="true">
+              {suggestion && !draft ? t('term.suggestionKey') + ' · ' : ''}
               {composerEnter === 'send' ? t('term.composerKeysSend', { send: enterKey, newline: isMac ? 'Shift+Return' : 'Shift+Enter' }) : t('term.composerKeysNewline', { send: modEnter })}
             </span>
           )}
