@@ -1126,10 +1126,14 @@ function AgentList({ rows, onPicked, placed, query: given, onQuery }: { rows: Co
                       <span className="convo-list-title">{r.title}</span>
                       {since && <span className="convo-list-when">{since}</span>}
                     </span>
-                    <span className="convo-list-sub">
-                      {said && <span className={'is-' + r.status}>{t(`convo.status.${r.status}` as I18nKey)}</span>}
-                      {r.where && <span className="convo-list-where">{r.where}</span>}
-                    </span>
+                    {/* (Its status by its dot only, and its group: in words for a screen
+                        reader, and shown where the system's colours take the dot's away.) */}
+                    {said && <span className={'convo-list-status is-' + r.status}>{t(`convo.status.${r.status}` as I18nKey)}</span>}
+                    {r.where && (
+                      <span className="convo-list-sub">
+                        <span className="convo-list-where">{r.where}</span>
+                      </span>
+                    )}
                   </span>
                 </button>
               )

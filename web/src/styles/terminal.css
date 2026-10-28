@@ -699,9 +699,9 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-bar-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--term-fg); font-weight: 600; }
 .convo-bar-status { flex: none; color: var(--term-fg-3); font-variant-numeric: tabular-nums; }
 /* The status, in one colour each wherever it shows: at work, waiting for you (as the tabs' count), done */
-.convo-bar-status.is-working, .convo-list-sub .is-working { color: var(--term-accent-text); }
-.convo-bar-status.is-blocked, .convo-list-sub .is-blocked { color: var(--term-warn-text); font-weight: 600; }
-.convo-bar-status.is-done, .convo-list-sub .is-done { color: var(--term-ok-text); }
+.convo-bar-status.is-working { color: var(--term-accent-text); }
+.convo-bar-status.is-blocked { color: var(--term-warn-text); font-weight: 600; }
+.convo-bar-status.is-done { color: var(--term-ok-text); }
 .convo-waiting {
   flex: none; display: flex; align-items: center; gap: 12px; justify-content: space-between; padding: 8px 8px 8px 14px;
   border: 1px solid var(--term-warn-text); border-radius: 10px; background: var(--term-bg); font-size: 14px; font-weight: 500;
@@ -881,17 +881,20 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 @media (forced-colors: active) {
   .convo-list-row[aria-current='true'] { outline: 2px solid Highlight; outline-offset: -2px; }
 }
-/* One paragraph, not a row of boxes: how it is going and what the agent
-   called it read on together, and a second line begins where the first
-   did instead of under the middle of the line above. */
+/* Its status in words: for a screen reader only, but where the system's
+   colours (forced colours) leave its dot no colour of its own. */
+.convo-list-status { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+@media (forced-colors: active) {
+  .convo-list-status { position: static; width: auto; height: auto; margin: 0; overflow: visible; clip: auto; font-size: 12px; line-height: 18px; }
+}
+/* Where it is (its workspace, what the agent called it): up to two lines.
+   How it is going is said by its dot (and its group). */
 .convo-list-sub {
   min-width: 0; font-size: 12px; line-height: 18px; color: var(--term-fg-3);
   display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2;
   overflow: hidden; overflow-wrap: anywhere;
 }
-.convo-list-sub > span:not(.convo-list-where) { white-space: nowrap; }
 .convo-list-where { color: var(--term-fg-2); }
-.convo-list-sub > span + .convo-list-where::before { content: '·'; margin: 0 6px; }
 /* The rest of a long group of old ones, behind a tap */
 .convo-list-more {
   align-self: flex-start; padding: 4px 10px; margin-top: 1px; border: 0; border-radius: 8px;
