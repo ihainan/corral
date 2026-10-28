@@ -48,6 +48,7 @@ import (
 // Everything else (file snapshots, API bookkeeping) is skipped.
 // Feed it whole lines in order.
 type Claude struct {
+	sub     bool // (a subagent's own log: its side-chain rows are its own)
 	entries []*Entry
 	tools   map[string]toolRef
 	rev     int
@@ -168,6 +169,14 @@ const maxOrphans = 256
 
 func NewClaude() *Claude {
 	return &Claude{tools: map[string]toolRef{}, running: map[string]Running{}, ranOut: map[string]bool{}}
+}
+
+// NewClaudeSub reads a subagent's own log (subagents/agent-<id>.jsonl):
+// all of its rows are of its side chain, which a session's log leaves out.
+func NewClaudeSub() *Claude {
+	c := NewClaude()
+	c.sub = true
+	return c
 }
 
 // Rev is the revision after the last Feed.
@@ -625,6 +634,7 @@ type claudeRow struct {
 	TurnOrigin      json.RawMessage `json:"turnOrigin"`
 	// (an assistant row Claude Code wrote of an error: the plan's usage limit reached)
 	IsAPIErrorMessage bool            `json:"isApiErrorMessage"`
+	Level             json.RawMessage `json:"level"` // (an informational's: notice, warning)
 	QuotaLimits       json.RawMessage `json:"quotaLimits"`
 	RetryAttempt      json.RawMessage `json:"retryAttempt"`
 	MaxRetries        json.RawMessage `json:"maxRetries"`
@@ -680,6 +690,11 @@ type claudeRow struct {
 		TaskID       string `json:"taskId"`
 		Status       string `json:"status"`
 		DeltaSummary string `json:"deltaSummary"`
+		// (goal_status: /goal's condition set, or judged)
+		Met       json.RawMessage `json:"met"`
+		Sentinel  json.RawMessage `json:"sentinel"`
+		Condition json.RawMessage `json:"condition"`
+		Reason    json.RawMessage `json:"reason"`
 	} `json:"attachment"`
 }
 
@@ -697,7 +712,7 @@ type claudeBlock struct {
 
 func (c *Claude) line(b []byte) {
 	var r claudeRow
-	if json.Unmarshal(b, &r) != nil || r.IsSidechain {
+	if json.Unmarshal(b, &r) != nil || (r.IsSidechain && !c.sub) {
 		c.Skipped++
 		return
 	}
@@ -731,6 +746,12 @@ func (c *Claude) line(b []byte) {
 		if a := r.Attachment; a != nil {
 			if a.Type == "queued_command" && !a.IsMeta {
 				c.queued(&r)
+				return
+			}
+			if a.Type == "goal_status" {
+				if ev := goalOf(a.Met, a.Sentinel, a.Condition, a.Reason); ev != nil {
+					c.add(&r, RoleNote, []Part{{Kind: KindEvent, Event: ev}})
+				}
 				return
 			}
 			if c.attached(&r) {
@@ -1526,6 +1547,9 @@ func (c *Claude) result(b claudeBlock, account json.RawMessage) {
 	}
 	if len(ref.t.Asks) > 0 && !b.IsError {
 		ref.t.Answers = answersOf(ref.t.Asks, account)
+	}
+	if id := subagentOf(account); id != "" {
+		ref.t.AgentID = id
 	}
 	ref.t.Done = true
 	ref.t.Error = b.IsError
@@ -2521,6 +2545,21 @@ func systemEvent(r *claudeRow) *Event {
 			said, cutOff := cut(clean(s), maxTrouble)
 			return &Event{Kind: EventLimitCancelled, Text: said, Cut: cutOff}
 		}
+		// (Any other: as it was said, how loud it was.)
+		if t := strings.TrimSpace(s); t != "" {
+			said, cutOff := cut(clean(t), maxNotice)
+			level := word(r.Level)
+			if level != "warning" {
+				level = "notice"
+			}
+			return &Event{Kind: EventNotice, Text: said, Cut: cutOff, Level: level}
+		}
+	case "away_summary":
+		var s string
+		if json.Unmarshal(r.Content, &s) == nil && strings.TrimSpace(s) != "" {
+			said, cutOff := cut(clean(strings.TrimSpace(s)), maxRecap)
+			return &Event{Kind: EventRecap, Text: said, Cut: cutOff}
+		}
 	case "scheduled_task_fire":
 		var s string
 		_ = json.Unmarshal(r.Prompt, &s)
@@ -2563,6 +2602,23 @@ func limitOf(r *claudeRow) *Event {
 	return &Event{Kind: EventLimit, ResetsAt: at, LimitKind: word(q.RateLimitType), Text: said, Cut: cutOff}
 }
 
+// goalOf: a goal_status attachment as an event: the goal set (sentinel),
+// or judged met or not, with why; nil without a condition.
+func goalOf(met, sentinel, condition, reason json.RawMessage) *Event {
+	var cond, why string
+	_ = json.Unmarshal(condition, &cond)
+	_ = json.Unmarshal(reason, &why)
+	if strings.TrimSpace(cond) == "" {
+		return nil
+	}
+	var m, s bool
+	_ = json.Unmarshal(met, &m)
+	_ = json.Unmarshal(sentinel, &s)
+	g, cutG := cut(clean(strings.TrimSpace(cond)), maxRecap)
+	w, cutW := cut(clean(strings.TrimSpace(why)), maxRecap)
+	return &Event{Kind: EventGoal, Goal: g, Set: s && !m, Met: m, Why: w, Cut: cutG || cutW}
+}
+
 // count: a number a row says of something counted (0 for none, or one
 // that cannot be a count: not a number, below 0, past any real count).
 func count(raw json.RawMessage) int64 {
@@ -2602,6 +2658,38 @@ func hookTrouble(kind, name, event, stderr string, exit int, timedOut bool, time
 		return &Trouble{Kind: TroubleHook, Name: clip(which, maxMeta), Text: said, Cut: cutOff, Status: exit}
 	}
 	return nil
+}
+
+// subagentOf: the subagent a call sent off (Agent, Task), by its id as
+// Claude Code's account of the call gives it; "" for none, or one not of
+// the form of its log's name.
+func subagentOf(account json.RawMessage) string {
+	if len(account) == 0 {
+		return ""
+	}
+	var a struct {
+		Agent json.RawMessage `json:"agentId"`
+	}
+	if json.Unmarshal(account, &a) != nil {
+		return ""
+	}
+	if id := word(a.Agent); SubagentID(id) {
+		return id
+	}
+	return ""
+}
+
+// SubagentID: an id of a subagent, as its log is named (agent-<id>.jsonl).
+func SubagentID(id string) bool {
+	if len(id) < 6 || len(id) > 40 {
+		return false
+	}
+	for _, r := range id {
+		if !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9') {
+			return false
+		}
+	}
+	return true
 }
 
 // asksOf: the questions of an AskUserQuestion's input, within bounds.

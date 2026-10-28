@@ -219,6 +219,15 @@ function mergeNotes(entries: ConvoEntry[]): Set<ConvoEntry> {
       merged.add(e)
       compact = null
     }
+    // (A notice said again next to itself: once.)
+    const n = e.parts[0]?.event
+    if (n?.kind === 'notice' && !e.gone && i > 0) {
+      const p = entries[i - 1].parts[0]?.event
+      if (p?.kind === 'notice' && !entries[i - 1].gone && p.text === n.text && p.level === n.level) {
+        merged.add(e)
+        continue
+      }
+    }
     if (retryOf(e)) {
       if (retry && retryOf(entries[i - 1])) {
         told.set(retry, { ...told.get(retry), last: e })

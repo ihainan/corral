@@ -49,6 +49,7 @@ func TestClaudeEvents(t *testing.T) {
 		{Role: RoleSummary, Text: "This session is being continued…"},
 		{Role: RoleNote, Ev: Event{Kind: EventIdleCompact}},
 		{Role: RoleNote, Ev: Event{Kind: EventCompact, Trigger: "manual", Ms: 900}}, // (what cannot be read of it is left out)
+		{Role: RoleNote, Ev: Event{Kind: EventNotice, Text: "Unknown command: /restart", Level: "warning"}},
 		{Role: RoleNote, Ev: Event{Kind: EventScheduled, Text: "check the deploy", Loop: true}},
 		{Role: RoleNote, Ev: Event{Kind: EventScheduled, Text: "check the deploy", Echo: true}}, // (u4: the view shows its firing's)
 		{Role: RoleAssistant, Text: "done"},
@@ -105,5 +106,32 @@ func TestClaudeLimitEvents(t *testing.T) {
 	}
 	if first.ResetsAt != 1788601200 || first.LimitKind != "five_hour" || first.Text == "" {
 		t.Fatalf("limit %+v", first)
+	}
+}
+
+// What else Claude Code says of the session: a recap of what went on while
+// the person was away, a goal set and judged, any other notice.
+func TestClaudeRecapGoalNotice(t *testing.T) {
+	c := NewClaude()
+	c.Feed(lines(
+		`{"type":"system","subtype":"away_summary","uuid":"s1","content":"Goal is a slimmer subscription; the DNS is done."}`,
+		`{"type":"attachment","uuid":"g1","attachment":{"type":"goal_status","met":false,"sentinel":true,"condition":"make the report"}}`,
+		`{"type":"attachment","uuid":"g2","attachment":{"type":"goal_status","met":true,"condition":"make the report","reason":"The report is written."}}`,
+		`{"type":"system","subtype":"informational","uuid":"s2","content":"Unknown command: /restart","level":"warning"}`,
+		`{"type":"system","subtype":"informational","uuid":"s3","content":"Fable 5's safeguards stopped the response above · continuing once with that noted","level":"notice"}`,
+	))
+	var got []Event
+	for _, e := range c.Since(0) {
+		got = append(got, *e.Parts[0].Event)
+	}
+	want := []Event{
+		{Kind: EventRecap, Text: "Goal is a slimmer subscription; the DNS is done."},
+		{Kind: EventGoal, Goal: "make the report", Set: true},
+		{Kind: EventGoal, Goal: "make the report", Met: true, Why: "The report is written."},
+		{Kind: EventNotice, Text: "Unknown command: /restart", Level: "warning"},
+		{Kind: EventNotice, Text: "Fable 5's safeguards stopped the response above · continuing once with that noted", Level: "notice"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %+v", got)
 	}
 }

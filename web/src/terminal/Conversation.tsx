@@ -4,6 +4,7 @@ import { t, getLang, type I18nKey } from '../i18n'
 import { copyText, isCoarse, Menu, type MenuItem } from '../components/ui'
 import { local } from '../storage'
 import { Markdown } from './markdown'
+import { useSubConvo } from './subagent'
 import { Code } from './Code'
 import { AgentIcon } from './agentIcons'
 import { matchQuery } from './agents'
@@ -214,7 +215,7 @@ export function ConversationView({
   useEffect(() => {
     if (!active) return
     const onKey = (e: KeyboardEvent) => {
-      if (!e.ctrlKey || e.metaKey || e.altKey || e.shiftKey || e.key.toLowerCase() !== 'o' || e.isComposing || underDialog(e)) return
+      if (!e.ctrlKey || e.metaKey || e.altKey || e.shiftKey || e.key.toLowerCase() !== 'o' || e.isComposing || underDialog(e) || subsNow.current) return
       e.preventDefault()
       e.stopPropagation()
       if (e.repeat) return // (held: once)
@@ -229,10 +230,22 @@ export function ConversationView({
     const keys = new Set(list.flatMap((it) => (it.kind === 'work' ? [it.key] : [])))
     setOpened((o) => (Object.keys(o).every((k) => keys.has(k)) ? o : Object.fromEntries(Object.entries(o).filter(([k]) => keys.has(k)))))
   }, [list])
-  // The changes of a turn (by its answer's key), beside the thread.
+  // The changes of a turn (by its answer's key), beside the thread; or a
+  // subagent's own conversation (those it sent off in turn, gone into and
+  // back out of), in the same place: one at a time.
   const [changes, setChanges] = useState<{ key: string; path?: string } | null>(null)
-  const show = useCallback((key: string, path?: string) => setChanges({ key, path }), [])
+  const [subs, setSubs] = useState<Sub[] | null>(null)
+  const subsNow = useRef(subs) // (a subagent's conversation in front: the thread's keys are not the thread's)
+  subsNow.current = subs
+  const show = useCallback((key: string, path?: string) => {
+    setSubs(null)
+    setChanges({ key, path })
+  }, [])
   const unshow = useCallback(() => setChanges(null), [])
+  const openSub = useCallback((s: Sub) => {
+    setChanges(null)
+    setSubs([s])
+  }, [])
   const shownEdits = changes ? (list.find((it) => it.kind === 'answer' && it.key === changes.key) as Extract<Item, { kind: 'answer' }> | undefined)?.edits : null
   useEffect(() => {
     if (changes && !shownEdits) setChanges(null) // (the turn is no longer kept, or another conversation shows)
@@ -315,6 +328,7 @@ export function ConversationView({
     setOpened(back ? p.opened : {})
     setAllOpen(back ? p.allOpen : false)
     setChanges(null)
+    setSubs(null)
     anchors.current = back ? p.anchors : []
     notedList.current = back ? p.noted : []
     restoring.current = back ? p : null
@@ -664,7 +678,7 @@ export function ConversationView({
   useEffect(() => {
     if (!active) return
     const onKey = (e: KeyboardEvent) => {
-      if ((e.key !== '[' && e.key !== ']') || e.ctrlKey || e.metaKey || e.altKey || e.isComposing || editable(e.target) || underDialog(e)) return
+      if ((e.key !== '[' && e.key !== ']') || e.ctrlKey || e.metaKey || e.altKey || e.isComposing || editable(e.target) || underDialog(e) || subsNow.current) return
       e.preventDefault()
       jump(e.key === '[' ? -1 : 1)
     }
@@ -833,7 +847,9 @@ export function ConversationView({
       <div className="convo-scroll-wrap">
         <div className="convo-scroll" ref={box}>
           <div className="convo-col" ref={col}>
-            <ShowTerminal.Provider value={onShowTerminal}>{body}</ShowTerminal.Provider>
+            <ShowTerminal.Provider value={onShowTerminal}>
+              <OpenSub.Provider value={openSub}>{body}</OpenSub.Provider>
+            </ShowTerminal.Provider>
           </div>
         </div>
         {away && convo.status === 'ready' && (
@@ -867,7 +883,7 @@ export function ConversationView({
         )}
       </div>
       <div className="convo-dock">
-        {convo.status === 'ready' && convo.running && <RunningWork items={convo.running} />}
+        {convo.status === 'ready' && convo.running && <RunningWork items={convo.running} openSub={!convo.bind?.agent || convo.bind.agent === 'claude' ? openSub : undefined} />}
         {convo.status === 'ready' && convo.tasks && <Tasks tasks={convo.tasks} fold={!!ask} />}
         {/* (Asked from the screen: also where its log is not read.) */}
         {(convo.status === 'ready' || convo.status === 'none') && ask && <AskDock>{ask}</AskDock>}
@@ -885,6 +901,20 @@ export function ConversationView({
       </div>
       </div>
       {changes && shownEdits && <ChangesPanel key={changes.key} edits={shownEdits} focus={changes.path} onClose={unshow} active={active} />}
+      {subs && subs.length > 0 && convo.of && (
+        <SubPanel
+          key={subs[subs.length - 1].agent}
+          of={convo.of}
+          sub={subs[subs.length - 1]}
+          depth={subs.length}
+          live={(a) => !!convo.running?.some((r) => r.kind === 'agent' && r.id === a)}
+          onOpen={(s) => setSubs((cur) => [...(cur ?? []), s])}
+          onBack={() => setSubs((cur) => (cur && cur.length > 1 ? cur.slice(0, -1) : null))}
+          onClose={() => setSubs(null)}
+          active={active}
+          copy={copy}
+        />
+      )}
       {picking && side && <Picker rows={rows} onClose={unpick} />}
     </div>
   )
@@ -933,7 +963,7 @@ function AskDock({ children }: { children: ReactNode }) {
   )
 }
 
-function RunningWork({ items }: { items: ConvoRunning[] }) {
+function RunningWork({ items, openSub }: { items: ConvoRunning[]; openSub?: (s: Sub) => void }) {
   const [open, setOpen] = useState(false)
   // (Down to one: opened again later, it starts folded as it did at first.)
   useEffect(() => {
@@ -954,7 +984,13 @@ function RunningWork({ items }: { items: ConvoRunning[] }) {
       </div>
       {shown.map((r) => (
         <div key={r.id} className="convo-running-row">
-          <span className="convo-running-what" title={r.what}>{r.what || t(r.kind === 'agent' ? 'convo.bgAgent' : 'convo.bgCmd')}</span>
+          {r.kind === 'agent' && openSub && isSubId(r.id) ? (
+            <button type="button" className="link-btn convo-running-what" title={t('sub.open')} onClick={() => openSub({ agent: r.id, title: r.what })}>
+              {r.what || t('convo.bgAgent')}
+            </button>
+          ) : (
+            <span className="convo-running-what" title={r.what}>{r.what || t(r.kind === 'agent' ? 'convo.bgAgent' : 'convo.bgCmd')}</span>
+          )}
           {r.note && <span className="convo-running-note" title={r.note}>{r.note}</span>}
           <span className="convo-running-since">{since(r.ts)}</span>
         </div>
@@ -1771,6 +1807,25 @@ function TroubleNote({ t: tr }: { t: ConvoTrouble }) {
 function EventNote({ ev, idle }: { ev: ConvoEvent; idle?: boolean }) {
   const [open, setOpen] = useState(false)
   const showTerminal = useContext(ShowTerminal)
+  // What went on while the person was away; a goal set or judged; any other notice.
+  if (ev.kind === 'recap' || ev.kind === 'goal' || ev.kind === 'notice') {
+    const head = ev.kind === 'recap' ? t('convo.recap') : ev.kind === 'goal' ? t(ev.set ? 'convo.goal.set' : ev.met ? 'convo.goal.met' : 'convo.goal.unmet') : ev.text ?? ''
+    const said = ev.kind === 'recap' ? (ev.text ?? '') : ev.kind === 'goal' ? (ev.goal ?? '') : ''
+    return (
+      <div className={'convo-event is-' + ev.kind + (ev.level === 'warning' ? ' is-warn' : '') + (ev.kind === 'goal' && ev.met ? ' is-met' : '')}>
+        <div className="convo-trouble-body">
+          <p className="convo-trouble-head">{head}</p>
+          {said && <p className="convo-trouble-said">{said}</p>}
+          {ev.kind === 'goal' && ev.why && open && <p className="convo-trouble-said">{ev.why}</p>}
+          {ev.kind === 'goal' && ev.why && (
+            <button type="button" className="link-btn" aria-expanded={open} onClick={() => setOpen(!open)}>
+              {t(open ? 'convo.trouble.less' : 'convo.goal.why')}
+            </button>
+          )}
+        </div>
+      </div>
+    )
+  }
   // The plan's usage limit: reached (until when), to go on of itself, reset, called off.
   if (ev.kind === 'limit' || ev.kind === 'limit_wait' || ev.kind === 'limit_reset' || ev.kind === 'limit_cancelled') {
     let head: string
@@ -1836,6 +1891,102 @@ function EventNote({ ev, idle }: { ev: ConvoEvent; idle?: boolean }) {
 
 // (The conversation's terminal, for a line that sends one there.)
 const ShowTerminal = createContext<(() => void) | undefined>(undefined)
+
+// A subagent sent off, whose own conversation can be shown: by its id.
+type Sub = { agent: string; title?: string }
+const OpenSub = createContext<((s: Sub) => void) | undefined>(undefined)
+const isSubId = (id: string) => /^[a-z0-9]{6,40}$/.test(id)
+
+// A subagent's own conversation, beside the thread (over it, where narrow),
+// read only: what it was asked, what it did and answered. Read when shown;
+// again while it is known to go on. One sent off by it opens here in turn
+// (back: to the one that sent it).
+function SubPanel({ of, sub, depth, live, onOpen, onBack, onClose, active, copy }: { of: string; sub: Sub; depth: number; live: (agent: string) => boolean; onOpen: (s: Sub) => void; onBack: () => void; onClose: () => void; active: boolean; copy: (s: string) => void }) {
+  const [sessionId, pane = ''] = of.split(' ')
+  // (Of one sent off by the session's agent, as its running list says; of
+  // one sent off by a subagent, while its log keeps growing.)
+  const told = depth === 1 && live(sub.agent)
+  const c = useSubConvo(sessionId, pane, sub.agent, told, active, depth > 1)
+  const going = depth === 1 ? told : c.growing
+  const panel = useRef<HTMLElement>(null)
+  const [opened, setOpened] = useState<Record<string, boolean>>({})
+  const toggle = useCallback((key: string, open: boolean) => setOpened((o) => ({ ...o, [key]: open })), [])
+  const list = useMemo(() => items(c.entries, going, going), [c.entries, going])
+  useEffect(() => {
+    const prev = document.activeElement as HTMLElement | null
+    panel.current?.focus({ preventScroll: true })
+    return () => {
+      if (prev?.isConnected) prev.focus({ preventScroll: true })
+    }
+  }, [])
+  useEffect(() => {
+    if (!active) return
+    const onKey = (e: KeyboardEvent) => {
+      const el = e.target as HTMLElement | null
+      if (e.key !== 'Escape' || (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') && !el.classList.contains('xterm-helper-textarea'))) return
+      if (document.querySelector('[aria-modal="true"], [role="menu"]')) return
+      e.preventDefault()
+      e.stopPropagation()
+      if (depth > 1) onBack()
+      else onClose()
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [onBack, onClose, active, depth])
+  return (
+    <aside className="convo-panel convo-sub" aria-label={t('sub.title')} tabIndex={-1} ref={panel}>
+      <div className="convo-panel-head">
+        {depth > 1 && (
+          <button type="button" className="icon-btn" onClick={onBack} aria-label={t('common.back')} title={t('common.back')}>
+            <ChevronRight size={16} className="is-back" />
+          </button>
+        )}
+        <span className="convo-panel-title" title={sub.title}>
+          {sub.title || t('sub.title')}
+        </span>
+        <span className="convo-sub-state">{going ? t('sub.going') : ''}</span>
+        <span className="spacer" />
+        <button type="button" className="icon-btn" onClick={c.read} disabled={c.loading} aria-label={t('sub.refresh')} title={t('sub.refresh')}>
+          <Loader size={15} className={c.loading ? 'convo-running-spin' : ''} />
+        </button>
+        <button type="button" className="icon-btn" onClick={onClose} aria-label={t('common.close')} title={t('common.close') + ' (Esc)'}>
+          <X size={16} />
+        </button>
+      </div>
+      <div className="convo-panel-body convo-sub-body">
+        {c.older && (
+          <p className="convo-older">
+            {c.olderCut ? (
+              t('convo.olderCut')
+            ) : (
+              <button type="button" className="link-btn" onClick={c.readOlder} disabled={c.loading}>
+                {t('sub.older')}
+              </button>
+            )}
+          </p>
+        )}
+        {c.failed && <LoadErrorLine onRetry={c.read} />}
+        {!c.failed && !c.loading && list.length === 0 && <p className="convo-older">{t('sub.empty')}</p>}
+        <OpenSub.Provider value={onOpen}>
+          {list.map((it) => (
+            <ListItem key={itemKey(it)} it={it} copy={copy} open={it.kind === 'work' ? !!opened[it.key] : false} onToggle={toggle} onShow={noShow} />
+          ))}
+        </OpenSub.Provider>
+      </div>
+    </aside>
+  )
+}
+
+function LoadErrorLine({ onRetry }: { onRetry: () => void }) {
+  return (
+    <p className="convo-older">
+      {t('sub.failed')}{' '}
+      <button type="button" className="link-btn" onClick={onRetry}>
+        {t('common.retry')}
+      </button>
+    </p>
+  )
+}
 
 // When a usage limit resets, in the page's time: the day too, when not today.
 function resetsAt(sec: number): string {
@@ -2186,6 +2337,7 @@ function Thinking({ text, live }: { text: string; live?: boolean }) {
 const exitCode = (tool: ConvoTool) => (tool.error ? /^Exit code (\d{1,3})\b/.exec(tool.result ?? '')?.[1] : undefined)
 
 function ToolRow({ tool, onCopy, live }: { tool: ConvoTool; onCopy: (s: string) => void; live?: boolean }) {
+  const openSub = useContext(OpenSub)
   // (Opened or shown in full: kept by the call, so it is so when its
   // conversation is shown again, as where it was read is.)
   const [open, setOpenNow] = useState(() => toolShown.get(tool.id ?? '')?.open ?? false)
@@ -2247,6 +2399,11 @@ function ToolRow({ tool, onCopy, live }: { tool: ConvoTool; onCopy: (s: string) 
               <pre className="convo-pre">{v === 'cmd' ? <Code text={d} lang="bash" /> : d}</pre>
               <button type="button" className="md-code-copy" onClick={() => onCopy(d)}>{t('common.copy')}</button>
             </div>
+          )}
+          {tool.agent_id && openSub && (
+            <button type="button" className="link-btn convo-sub-open" onClick={() => openSub({ agent: tool.agent_id!, title: tool.title || firstLine(tool.detail ?? '') })}>
+              {t('sub.open')}
+            </button>
           )}
           {tool.asks && tool.answers && (
             // (A question of Claude Code's, answered: what was asked, what was answered.)

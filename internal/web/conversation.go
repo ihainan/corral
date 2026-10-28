@@ -18,6 +18,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"math"
 	"net/http"
 	"regexp"
@@ -1156,6 +1157,16 @@ type convoState struct {
 	ocCursorK   int   // (OpenCode) and, stopped within its millisecond, the last row read in it
 	ocCursorID  string
 	noReaderAt  time.Time // (OpenCode) when reading found no python3
+	sub         bool      // a subagent's own log (see apiConversationSubagent)
+}
+
+// newParser: a parser for the log read, a subagent's own as such (its
+// side-chain rows its own); every reader made anew is made by it.
+func (st *convoState) newParser() convo.Parser {
+	if st.sub {
+		return convo.NewClaudeSub()
+	}
+	return convo.New(st.agent)
 }
 
 type convoStates struct {
@@ -1206,6 +1217,14 @@ func (c *convoStates) get(id string) *convoState {
 }
 
 func (st *convoState) done() { st.inUse.Add(-1) }
+
+// peek: the state of id, if there is one; nil else. Nothing is made, nor
+// let go to make room (see get).
+func (c *convoStates) peek(id string) *convoState {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.m[id]
+}
 
 func (st *convoState) idle() bool {
 	return time.Since(time.Unix(0, st.used.Load())) > convoIdle
@@ -1605,7 +1624,7 @@ func (s *Server) readConvo(sess *term.Session, st *convoState) (more bool, err e
 		return false, s.readOpenCode(sess, st)
 	}
 	err = s.withSFTP(context.Background(), sess, convoReadLimit, func(c *sftplite.Client) error {
-		if sess.Persistence == "tmux" && st.agent != "codex" {
+		if sess.Persistence == "tmux" && st.agent != "codex" && !st.sub {
 			st.status = convoProcStatus(c, st)
 		}
 		// (Codex's log says whether it works.)
@@ -1624,7 +1643,7 @@ func (s *Server) readConvo(sess *term.Session, st *convoState) (more bool, err e
 		}
 		if size < st.offset || size < st.size {
 			st.gen = convoGens.Add(1)
-			st.parser = convo.New(st.agent)
+			st.parser = st.newParser()
 			st.offset, st.older, st.skipping, st.from = 0, false, false, 0
 			st.long, st.strip = nil, b64Strip{}
 			if st.bind != nil {
@@ -1640,7 +1659,7 @@ func (s *Server) readConvo(sess *term.Session, st *convoState) (more bool, err e
 				// is read: its latest there, looked for beside (a long log
 				// takes the host a while to go through, and what is read is
 				// shown meanwhile), taken in by a later request.
-				if st.agent != "codex" {
+				if st.agent != "codex" && !st.sub {
 					st.lookEarlierTitle(sess, st.offset+convoTitleSlack)
 				}
 			}
@@ -1835,7 +1854,7 @@ func (s *Server) readOlder(sess *term.Session, st *convoState) error {
 					}
 				}
 				if line != nil {
-					o := convo.New(st.agent)
+					o := st.newParser()
 					o.Feed(line)
 					st.parser.Prepend(o)
 				}
@@ -1845,7 +1864,7 @@ func (s *Server) readOlder(sess *term.Session, st *convoState) error {
 			}
 			pos = i + 1
 		}
-		o := convo.New(st.agent)
+		o := st.newParser()
 		o.Feed(data[pos:])
 		st.parser.Prepend(o)
 		st.from = start + int64(pos)
@@ -2765,3 +2784,106 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		writeError(w, http.StatusBadGateway, "unknown", "it is not known whether the key arrived")
 	}
 }
+
+// GET /api/sessions/{id}/conversation/subagent?pane=&agent=<id>&gen=&rev=&older=
+// → as /conversation (its entries, gen, rev, more, older), of a subagent
+// the conversation's agent (Claude Code) sent off: its own log, beside the
+// session's (<session>/subagents/agent-<id>.jsonl), read as the session's
+// is, a part at a time. Only of the log the conversation reads now, by the
+// id its calls gave: no other file, and not through a link.
+func (s *Server) apiConversationSubagent(w http.ResponseWriter, r *http.Request) {
+	sess, ok := s.runningSession(w, r)
+	if !ok {
+		return
+	}
+	q := r.URL.Query()
+	pane, agent := q.Get("pane"), q.Get("agent")
+	if (pane != "" && !herdrPane.MatchString(pane)) || !convo.SubagentID(agent) {
+		writeError(w, http.StatusBadRequest, "bad_request", "bad pane or subagent")
+		return
+	}
+	gen, _ := strconv.ParseInt(q.Get("gen"), 10, 64)
+	rev, _ := strconv.Atoi(q.Get("rev"))
+	older := q.Get("older") == "1"
+	w.Header().Set("Cache-Control", "no-store")
+	// (The conversation's own reading, as it stands: whose log it is.)
+	key := sess.ID + "\x00"
+	if sess.Persistence == "herdr" {
+		key += pane
+	}
+	main := s.convos.peek(key)
+	if main == nil {
+		writeError(w, http.StatusConflict, "not_located", "the conversation is not read yet")
+		return
+	}
+	main.mu.Lock()
+	root, agentKind, reason := main.log, main.agent, main.reason
+	main.mu.Unlock()
+	if root == "" || reason != "" || agentKind != "claude" || main.sub || !strings.HasSuffix(root, ".jsonl") {
+		writeError(w, http.StatusConflict, "not_located", "the conversation is not read yet")
+		return
+	}
+	home := strings.TrimSuffix(root, ".jsonl") // (the session's own folder, beside its log)
+	dir := home + "/subagents"
+	file := dir + "/agent-" + agent + ".jsonl"
+	st := s.subConvos.get(key + "\x00" + root + "\x00" + agent)
+	defer st.done()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.log != file {
+		st.sub, st.agent, st.log, st.sid = true, "claude", file, agent
+		st.gen = convoGens.Add(1)
+		st.parser = st.newParser()
+		st.offset, st.size, st.mtime, st.older, st.skipping, st.from = 0, -1, time.Time{}, false, false, 0
+		st.long, st.strip = nil, b64Strip{}
+	}
+	// (The session's folder, its subagents' and the log: none a link (to
+	// another session's, or out of them), the log a plain file (not a pipe
+	// a read would wait on). Looked at, then opened: between the two, only
+	// the account itself could change them, which can read all it reaches
+	// in its terminal anyway; this keeps a log from being taken for
+	// another, not a boundary.)
+	err := s.withSFTP(r.Context(), sess, convoReadLimit, func(c *sftplite.Client) error {
+		for _, p := range []string{home, dir, file} {
+			fi, err := c.Lstat(p)
+			if err != nil {
+				return err
+			}
+			if fi.Mode()&fs.ModeSymlink != 0 || (p == file && !fi.Mode().IsRegular()) || (p != file && !fi.IsDir()) {
+				return errSubagentFile
+			}
+		}
+		return nil
+	})
+	if errors.Is(err, errSubagentFile) {
+		writeError(w, http.StatusForbidden, "not_allowed", "not a subagent's log")
+		return
+	}
+	if err != nil {
+		writeFileError(w, err)
+		return
+	}
+	more, err := s.readConvo(sess, st)
+	if err == nil && older && gen == st.gen {
+		err = s.readOlder(sess, st)
+	}
+	if err != nil {
+		writeFileError(w, err)
+		return
+	}
+	ans := convoAnswer{Available: true, Gen: st.gen, Rev: st.parser.Rev(), Older: st.older, More: more}
+	ans.OlderCut = st.older && (st.parser.Trimmed() || st.from < 0)
+	if gen != st.gen {
+		ans.Reset = true
+		rev = 0
+	}
+	ans.Entries = st.parser.Since(rev)
+	ans.Tasks = st.parser.Tasks()
+	ans.Running = st.parser.Running() // (what it set going in turn)
+	if m := st.parser.Meta(); m != (convo.Meta{}) {
+		ans.Meta = &m
+	}
+	writeJSONCompressed(w, r, http.StatusOK, ans)
+}
+
+var errSubagentFile = errors.New("not a subagent's log")

@@ -71,6 +71,9 @@ const (
 	EventLimitWait      = "limit_wait"
 	EventLimitReset     = "limit_reset"
 	EventLimitCancelled = "limit_cancelled"
+	EventRecap          = "recap"  // Claude Code's line of what went on while the person was away
+	EventGoal           = "goal"   // (/goal) a goal set, or judged met or not (Met, Text: why)
+	EventNotice         = "notice" // a notice of Claude Code's of any other kind (Level: notice, warning)
 )
 
 // What a Trouble is of.
@@ -155,6 +158,13 @@ type Event struct {
 	// Echo: (scheduled) told by the turn's own row, not its firing; right
 	// after its firing, the same turn told again.
 	Echo bool `json:"echo,omitempty"`
+	// (goal) the goal's condition, set (Set) or judged (Met, and Why).
+	Goal string `json:"goal,omitempty"`
+	Set  bool   `json:"set,omitempty"`
+	Met  bool   `json:"met,omitempty"`
+	Why  string `json:"why,omitempty"`
+	// (notice) how loud: "notice", "warning".
+	Level string `json:"level,omitempty"`
 	// (limit) when it resets (Unix seconds), and of what: "five_hour", …
 	ResetsAt  int64  `json:"resets_at,omitempty"`
 	LimitKind string `json:"limit_kind,omitempty"`
@@ -247,6 +257,9 @@ type Tool struct {
 	// one not answered).
 	Asks    []Ask    `json:"asks,omitempty"`
 	Answers []string `json:"answers,omitempty"`
+	// AgentID: (Agent, Task) the subagent it sent off, whose own log can be
+	// read (see NewClaudeSub).
+	AgentID string `json:"agent_id,omitempty"`
 	// Plan: (ExitPlanMode) the plan put to the person, as Claude Code
 	// wrote it in the call (PlanCut: only its start), and its file.
 	Plan     string `json:"plan,omitempty"`
@@ -327,6 +340,8 @@ const (
 	maxOptions   = 8        // choices of one question
 	maxPreview   = 2 << 10  // a choice's preview
 	maxPlan      = 32 << 10 // a plan put to the person
+	maxRecap     = 1200     // a recap of what went on, a goal and why
+	maxNotice    = 300      // a notice of Claude Code's
 )
 
 // Meta is what a session runs with, as its log last said it: each field

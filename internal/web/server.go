@@ -71,6 +71,7 @@ type Server struct {
 	waitAlerts   waitAlerts  // "needs you" alerts shown, to replace when no longer true
 	complete     completions // the composer's completion listings, per session and folder
 	convos       convoStates // the conversation view's logs being read, per session
+	subConvos    convoStates // and the logs of subagents opened from them
 	convoScans   convoScans  // scans of a host's processes, shared by its panes for a moment
 
 	sockMu  sync.Mutex
@@ -203,6 +204,7 @@ func (s *Server) registerRoutes() {
 	s.handle("POST /api/sessions/{id}/conversation/reply", SignedIn, s.apiConversationReply)
 	s.handle("POST /api/sessions/{id}/conversation/send", SignedIn, s.apiConversationSend)
 	s.handle("POST /api/sessions/{id}/conversation/command", SignedIn, s.apiConversationCommand)
+	s.handle("GET /api/sessions/{id}/conversation/subagent", SignedIn, s.apiConversationSubagent)
 	s.handle("GET /api/sessions/{id}/shares", SignedIn, s.apiListShares)
 	s.handle("POST /api/sessions/{id}/shares", SignedIn, s.apiAddShare)
 	s.handle("DELETE /api/sessions/{id}/shares/{uid}", SignedIn, s.apiRemoveShare)
