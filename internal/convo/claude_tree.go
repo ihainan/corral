@@ -33,7 +33,7 @@ type rowTree struct {
 	// curRoot: it says it hangs on none (parentUuid null, not absent: a
 	// log written without them says nothing of where a row hangs).
 	curRoot bool
-	lost bool           // rows were dropped as old: one not here may be among them
+	lost    bool // rows were dropped as old: one not here may be among them
 	// cuts: rewinds to a row in a part of the log before the one read,
 	// to be told once that part is put before (see Prepend).
 	cuts []treeCut

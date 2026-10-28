@@ -593,7 +593,7 @@ func (c *Claude) trim() {
 type claudeRow struct {
 	Type             string          `json:"type"`
 	UUID             string          `json:"uuid"`
-	ParentUUID       json.RawMessage `json:"parentUuid"` // (null on a row hanging on none; absent in logs that keep no tree)
+	ParentUUID       json.RawMessage `json:"parentUuid"`        // (null on a row hanging on none; absent in logs that keep no tree)
 	LogicalParent    string          `json:"logicalParentUuid"` // (across a compaction, where parentUuid is empty)
 	Retracted        []string        `json:"retractedMessageUuids"`
 	Timestamp        string          `json:"timestamp"`
