@@ -704,8 +704,8 @@ export function modelName(id: string): string {
 // A key for a dialog open over the page (or already taken): not the page's.
 const underDialog = (e: KeyboardEvent) => e.defaultPrevented || !!document.querySelector('[aria-modal="true"]')
 
-// The windows a conversation may fill: the log does not say which a session
-// has, so how full it is is said of both.
+// The windows a conversation may fill, where which one is not known (a
+// model the gateway does not know): how full it is is said of both.
 const WINDOWS = [200_000, 1_000_000]
 
 function tokens(n: number): string {
@@ -789,8 +789,10 @@ function Runs({ meta, active, mode, model, effort }: { meta: ConvoMeta; active: 
     }
   }, [open])
   const used = meta.context ?? 0
-  // (Where the log does not say it: past the smaller window, the session has the larger one.)
-  const windows = meta.window ? [meta.window] : WINDOWS.filter((w) => w >= used || w === WINDOWS[WINDOWS.length - 1])
+  // (Where it is not known: past the smaller window, the session has the
+  // larger one. Known and filled past, it was not that one after all.)
+  const known = meta.window && used <= meta.window ? meta.window : 0
+  const windows = known ? [known] : WINDOWS.filter((w) => w >= used || w === WINDOWS[WINDOWS.length - 1])
   // (The gauge: of its window, else of the smaller it may be.)
   const full = Math.min(1, used / windows[0])
   return (
@@ -996,7 +998,11 @@ function Runs({ meta, active, mode, model, effort }: { meta: ConvoMeta; active: 
               <span>{meta.model}</span>
             </div>
           )}
-          <p className="convo-runs-note">{t(meta.window ? 'convo.ctxNoteSaid' : windows.length > 1 ? 'convo.ctxNote' : 'convo.ctxNoteBig')}</p>
+          <p className="convo-runs-note">
+            {known
+              ? t(meta.window_by === 'model' ? 'convo.ctxNoteModel' : meta.window_by === 'request' ? 'convo.ctxNoteWide' : 'convo.ctxNoteSaid', { w: tokens(known) })
+              : t(windows.length > 1 ? 'convo.ctxNote' : 'convo.ctxNoteBig')}
+          </p>
         </div>
       )}
     </div>

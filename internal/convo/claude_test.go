@@ -1420,3 +1420,95 @@ func TestQueueArrivalsBySender(t *testing.T) {
 		t.Fatalf("%+v", q)
 	}
 }
+
+// Claude Code's log does not say the window: it is known of the model (1M
+// from Opus and Sonnet 4.6, Haiku 5, Fable and Mythos; 200K before) or of
+// what its requests asked for (the context-1m beta, a [1m] id), not shown
+// as both 200K and 1M when it can be told.
+func TestClaudeWindow(t *testing.T) {
+	for _, c := range []struct {
+		model string
+		wide  bool
+		want  int64
+		by    string
+	}{
+		{"claude-opus-5-5", false, 1_000_000, "model"},
+		{"claude-sonnet-5-5", false, 1_000_000, "model"},
+		{"claude-haiku-5-5", false, 1_000_000, "model"},
+		{"claude-fable-5-1", false, 1_000_000, "model"},
+		{"claude-opus-4-6", false, 1_000_000, "model"},
+		{"claude-opus-4-8", false, 1_000_000, "model"},
+		{"claude-sonnet-4-6", false, 1_000_000, "model"},
+		{"claude-haiku-4-5-20251001", false, 200_000, "model"},
+		{"claude-sonnet-4-5-20250929", false, 200_000, "model"},
+		{"claude-sonnet-4-5-20250929", true, 1_000_000, "request"},
+		{"claude-opus-4-5-20251101", false, 200_000, "model"},
+		{"claude-3-7-sonnet-20250219", false, 200_000, "model"},
+		{"claude-sonnet-4-5[1m]", false, 1_000_000, "request"},
+		{"Opus 5.5", false, 1_000_000, "model"}, // (as /model says it switched)
+		{"Sonnet 4.5", false, 200_000, "model"},
+		{"Opus 5 (1M context)", false, 1_000_000, "request"},
+		{"Sonnet 4.5 (1M context)", false, 1_000_000, "request"},
+		{"anthropic.claude-opus-4-5-20251101-v1:0", false, 200_000, "model"}, // (Bedrock)
+		{"us.anthropic.claude-sonnet-4-6", false, 1_000_000, "model"},
+		{"global.anthropic.claude-opus-5-5-v1:0", false, 1_000_000, "model"},
+		{"claude-opus-4-5@20251101", false, 200_000, "model"}, // (Vertex)
+		{"claude-mythos-preview", false, 1_000_000, "model"},
+		{"Mythos Preview", false, 1_000_000, "model"},
+		{"opus", false, 0, ""}, // (an alias: which model, not known until it answers)
+		{"gpt-6", false, 0, ""},
+		{"", false, 0, ""},
+	} {
+		if w, by := claudeWindow(c.model, c.wide); w != c.want || by != c.by {
+			t.Errorf("%q wide=%v: %d %q, want %d %q", c.model, c.wide, w, by, c.want, c.by)
+		}
+	}
+	// From the log: the latest request of the conversation itself says
+	// whether its model has the 1M window; one made beside it does not.
+	cl := NewClaude()
+	cl.Feed(lines(
+		`{"type":"api-request","querySource":"repl_main_thread","params":{"model":"claude-sonnet-4-5-20250929","betas":["claude-code-20250219","context-1m-2025-08-07"]}}`,
+		`{"type":"api-request","querySource":"generate_session_title","params":{"model":"claude-sonnet-4-5-20250929","betas":[]}}`,
+		`{"type":"assistant","uuid":"a1","message":{"model":"claude-sonnet-4-5-20250929","usage":{"input_tokens":250000},"content":[{"type":"text","text":"ok"}]}}`,
+	))
+	if m := cl.Meta(); m.Window != 1_000_000 || m.WindowBy != "request" {
+		t.Fatalf("asked for 1M: %+v", m)
+	}
+	cl.Feed(lines(`{"type":"api-request","querySource":"repl_main_thread","params":{"model":"claude-sonnet-4-5-20250929","betas":["claude-code-20250219"]}}`))
+	if m := cl.Meta(); m.Window != 200_000 || m.WindowBy != "model" {
+		t.Fatalf("no longer asked for: %+v", m)
+	}
+	// The request names the model as an alias, its answer by the dated id: one model.
+	al := NewClaude()
+	al.Feed(lines(
+		`{"type":"api-request","querySource":"repl_main_thread","params":{"model":"claude-sonnet-4-5","betas":["context-1m-2025-08-07"]}}`,
+		`{"type":"assistant","uuid":"a1","message":{"model":"claude-sonnet-4-5-20250929","usage":{"input_tokens":100000},"content":[{"type":"text","text":"ok"}]}}`,
+	))
+	if m := al.Meta(); m.Window != 1_000_000 {
+		t.Fatalf("alias and dated id: %+v", m)
+	}
+	// Another model's request after: of the model now in use, not the one before.
+	al.Feed(lines(`{"type":"api-request","querySource":"repl_main_thread","params":{"model":"claude-haiku-4-5","betas":["context-1m-2025-08-07"]}}`))
+	if m := al.Meta(); m.Window != 200_000 {
+		t.Fatalf("a request to another model: %+v", m)
+	}
+	// (Betas that are not a list, or none: not the 1M window, nothing broken.)
+	odd := NewClaude()
+	odd.Feed(lines(
+		`{"type":"api-request","params":{"model":"claude-sonnet-4-5","betas":"context-1m"}}`,
+		`{"type":"api-request","params":"x"}`,
+		`{"type":"assistant","uuid":"a1","message":{"model":"claude-sonnet-4-5","usage":{"input_tokens":5},"content":[{"type":"text","text":"ok"}]}}`,
+	))
+	if m := odd.Meta(); m.Window != 200_000 {
+		t.Fatalf("odd betas: %+v", m)
+	}
+	// (Of the part before, where the part after has no request of it.)
+	before := NewClaude()
+	before.Feed(lines(`{"type":"api-request","querySource":"repl_main_thread","params":{"model":"claude-sonnet-4-5-20250929","betas":["context-1m-2025-08-07"]}}`))
+	after := NewClaude()
+	after.Feed(lines(`{"type":"assistant","uuid":"a9","message":{"model":"claude-sonnet-4-5-20250929","usage":{"input_tokens":5},"content":[{"type":"text","text":"later"}]}}`))
+	after.Prepend(before)
+	if m := after.Meta(); m.Window != 1_000_000 {
+		t.Fatalf("of the part before: %+v", m)
+	}
+}

@@ -119,7 +119,8 @@ export interface ConvoMeta {
   effort?: string // how hard it is asked to think: low, medium, high, xhigh, max
   branch?: string
   context?: number // tokens the latest request sent
-  window?: number // the model's context window, where the log says it (Codex's)
+  window?: number // the model's context window, where it is known: as the log says it (Codex's), or of the model (Claude's)
+  window_by?: 'log' | 'model' | 'request' // how: said by the log, the model's own, the 1M its requests asked for
 }
 
 // What the entries are of (internal/web/conversation.go convoBind).
@@ -237,7 +238,7 @@ const sameBind = (a?: ConvoBind, b?: ConvoBind) =>
   a === b || (!!a && !!b && a.pane === b.pane && a.pid === b.pid && a.start === b.start && a.session === b.session && a.title === b.title)
 
 const sameMeta = (a?: ConvoMeta, b?: ConvoMeta) =>
-  a === b || (!!a && !!b && a.model === b.model && a.mode === b.mode && a.effort === b.effort && a.branch === b.branch && a.context === b.context && a.window === b.window)
+  a === b || (!!a && !!b && a.model === b.model && a.mode === b.mode && a.effort === b.effort && a.branch === b.branch && a.context === b.context && a.window === b.window && a.window_by === b.window_by)
 
 const POLL = 2000
 const ACTIVE = 1000 // (after an answer that brought something: more is likely coming)

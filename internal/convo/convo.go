@@ -243,9 +243,13 @@ type Meta struct {
 	// Context is how many tokens the latest request sent: what the
 	// conversation fills of the model's window.
 	Context int64 `json:"context,omitempty"`
-	// Window is the model's context window, where the log says it (Codex's
-	// does; Claude Code's does not).
+	// Window is the model's context window, where it is known: as the log
+	// says it (Codex's), or of the model and what its requests asked for
+	// (Claude Code's, whose log does not say it).
 	Window int64 `json:"window,omitempty"`
+	// WindowBy says how Window is known: "log", "model" (its model's
+	// window), "request" (its requests asked for the 1M window).
+	WindowBy string `json:"window_by,omitempty"`
 }
 
 // Task is one item of the agent's task list (TodoWrite, or TaskCreate and

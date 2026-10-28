@@ -2,8 +2,10 @@ package web
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ihainan/corral/internal/sshx"
@@ -61,6 +63,36 @@ func (s *Server) sentMissing(w http.ResponseWriter, ctx context.Context, sess *t
 	// (Its end, where the input is: a screen longer than that is cut at
 	// the front, not the back.)
 	writeJSON(w, http.StatusOK, map[string]any{"screen": lastOf(screen, sentLook), "waiting": waiting, "known": known})
+}
+
+// enterAgain: a message just typed into Claude Code (screen: its pane a
+// moment after the Enter) still in its input box, Enter let go of: Enter
+// again, at most twice, the screen read anew after each. Not where the
+// screen does not say (nothing is pressed on a guess), and not once the
+// box no longer holds it: taken in, or queued while the agent works. Left
+// there, the words stayed in the box, and the next message typed went in
+// after them, the two then sent as one. (ended: the send's turn, held until
+// these have ended on the host too.)
+func (s *Server) enterAgain(ctx context.Context, sess *term.Session, pane, socket string, pid, start int64, sid, text, screen string, ended *sync.WaitGroup) {
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	enter := []string{"enter"}
+	if sess.Persistence == "tmux" {
+		enter = []string{"Enter"}
+	}
+	for range 2 {
+		if waiting, known := inInput(screen, text); !known || !waiting {
+			return
+		}
+		slog.Info("conversation: message still in the input, Enter again", "session", sess.ID, "pane", pane)
+		ended.Add(1)
+		res, err := sshx.Exec(ctx, sess.Client(), convoSendCommand(sess.Persistence, sess.TmuxSession, pane, socket, pid, start, sid, 0, enter, sendLines), 64<<10,
+			sshx.ExecOptions{Stdin: strings.NewReader(""), Release: ended.Done})
+		if err != nil {
+			return
+		}
+		screen = string(res.Out)
+	}
 }
 
 // inInput: the message is in the pane's input box, as the pane shows it.

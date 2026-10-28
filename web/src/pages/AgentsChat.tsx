@@ -16,7 +16,7 @@ import { ConversationView, ListSearch, SEARCH_FROM, when, type ConvoAgent, type 
 import { asking, useConversation, type ConvoEntry } from '../terminal/conversation'
 import { isCodex, isOpenCode, listAgents, matchQuery, paneTitle, readsLog, useRunningSessions, type AgentRow } from '../terminal/agents'
 import { prefetchConversation } from '../terminal/conversation'
-import { afterSend, holdTermMode, PENDING_MS, sameTurn, tmuxKey } from '../terminal/chatSend'
+import { afterSend, holdTermMode, PENDING_MS, sameRun, sameTurn, tmuxKey } from '../terminal/chatSend'
 import { agentKey, sessionWhich } from '../terminal/sessionName'
 import { AgentIcon, agentMark } from '../terminal/agentIcons'
 import { useComposerFit } from '../terminal/autosize'
@@ -769,7 +769,17 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     const users = convo.entries.filter((e: ConvoEntry) => e.role === 'user')
     let changed = false
     const taken: ConvoEntry[] = []
-    const next = sent.flatMap((p) => {
+    // (Found: arrived, and its draft, still in the box, let go of.)
+    const got = (p: Sent) => {
+      arrived.current.add(p.id)
+      if (arrived.current.size > 200) arrived.current = new Set([...arrived.current].slice(-100))
+      if (p.was !== undefined && getDraft(draftKey) === p.was) {
+        keepDraft(draftKey, '')
+        setDraftShown((d) => (d === undefined || d === p.was ? '' : d))
+      }
+    }
+    const after = (e: ConvoEntry, p: Sent) => e.seq > p.after && !u.has(e.seq) && afterSend(e, p.at) && !(p.afterTs && e.ts && Date.parse(e.ts) <= Date.parse(p.afterTs))
+    let next = sent.flatMap((p) => {
       if (p.state === 'sent' || !ofThis(p.bind)) return [p]
       if (p.bind !== bindKey) {
         changed = true
@@ -781,20 +791,33 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
         changed = true
         p = { ...p, gen: convo.gen, after: -Infinity }
       }
-      const hit = users.find((e) => e.seq > p.after && !u.has(e.seq) && !p.not?.includes(e.id) && afterSend(e, p.at) && !(p.afterTs && e.ts && Date.parse(e.ts) <= Date.parse(p.afterTs)) && sameTurn(e, p.text))
+      const hit = users.find((e) => after(e, p) && !p.not?.includes(e.id) && sameTurn(e, p.text))
       if (!hit) return [p]
       u.add(hit.seq)
       if (hit.id) taken.push(hit)
-      arrived.current.add(p.id)
-      if (arrived.current.size > 200) arrived.current = new Set([...arrived.current].slice(-100))
-      if (p.was !== undefined && getDraft(draftKey) === p.was) {
-        keepDraft(draftKey, '')
-        setDraftShown((d) => (d === undefined || d === p.was ? '' : d))
-      }
+      got(p)
       if (u.size > 200) for (const q of [...u].sort((a, b) => a - b).slice(0, 100)) u.delete(q)
       changed = true
       return []
     })
+    // Two or more sent one after another, not found each as its own turn,
+    // and taken in as one (the first's Enter let go of): all of them arrived.
+    for (let i = 0; i < next.length; i++) {
+      const at = next.slice(i)
+      const n = at.findIndex((q) => q.state === 'sent' || !ofThis(q.bind))
+      const run = n < 0 ? at.slice(0, 5) : at.slice(0, Math.min(n, 5))
+      for (let k = run.length; k >= 2; k--) {
+        const hit = users.find((e) => after(e, run[0]) && sameRun(e, run.slice(0, k).map((q) => q.text)))
+        if (!hit) continue
+        u.add(hit.seq)
+        const gone = new Set(run.slice(0, k).map((q) => q.id))
+        run.slice(0, k).forEach(got)
+        next = next.filter((q) => !gone.has(q.id))
+        changed = true
+        i--
+        break
+      }
+    }
     // (Any other it would be found as is not that turn, after a reload too.)
     const marked = taken.length
       ? next.map((q) => {

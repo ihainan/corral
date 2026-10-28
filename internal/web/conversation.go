@@ -1915,6 +1915,10 @@ func convoProcStatus(c *sftplite.Client, st *convoState) string {
 // program in front, which asked for them), tmux wraps it when the program
 // asked (paste-buffer -p, its newlines kept with -r).
 //
+// Enter goes a moment after the paste: one right on it was let go by Claude
+// Code at times (a pasted path to a picture, being looked at), the words left
+// in its input and the next message typed on after them, the two sent as one.
+//
 // One at a time to a pane on the host too (messages and keys alike), where
 // flock and the user's own XDG_RUNTIME_DIR are there (a lock the kernel lets
 // go of with the script: the gateway may give up on a send whose script goes
@@ -2038,6 +2042,7 @@ if [ "$mode" = tmux ]; then
   front || exit 3
   typing=1
   tmux paste-buffer -p -r -d -b "$b" -t "$p" 9>&- || exit 6
+  sleep 0.3
   tmux send-keys -t "$p" Enter 9>&- || exit 5
   screen
 else
@@ -2066,6 +2071,7 @@ else
   front || exit 3
   typing=1
   HERDR_SOCKET_PATH=$sock herdr pane send-text "$p" "$e[200~$t$e[201~" >/dev/null 2>&1 9>&- || exit 6
+  sleep 0.3
   HERDR_SOCKET_PATH=$sock herdr pane send-keys "$p" enter >/dev/null 2>&1 9>&- || exit 5
   screen
 fi`
@@ -2253,11 +2259,19 @@ func (s *Server) apiConversationModel(w http.ResponseWriter, r *http.Request) {
 
 // modeLines: the screen read after a key, for what (the mode's line).
 func modeLines(what string) int {
-	if what == "mode" {
+	switch what {
+	case "mode":
 		return 8
+	case "send":
+		return sendLines
 	}
 	return 0
 }
+
+// sendLines: of the screen after a send, how much is read to see whether the
+// words are still in Claude Code's input box (its end: the box and what
+// follows it, a long message wrapped over many lines in it).
+const sendLines = 60
 
 // Send types a message into the agent's pane and presses Enter (Claude Code
 // queues it while it works), as the terminal's composer would, but into that
@@ -2464,9 +2478,17 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		return
 	}
 	release := turn
-	turn = func() {} // (Exec gives it back, once the channel has ended)
+	turn = func() {} // (given back once its commands have ended on the host: an Enter again too, see enterAgain)
+	var ended sync.WaitGroup
+	defer func() {
+		go func() {
+			ended.Wait()
+			release()
+		}()
+	}()
+	ended.Add(1)
 	res, err := sshx.Exec(ctx, sess.Client(), convoSendCommand(sess.Persistence, sess.TmuxSession, b.Pane, socket, b.PID, b.Start, b.Session, len(text), press, modeLines(what)), 16<<10,
-		sshx.ExecOptions{Stdin: strings.NewReader(text), Release: release})
+		sshx.ExecOptions{Stdin: strings.NewReader(text), Release: ended.Done})
 	var exitErr *sshx.ExitError
 	switch {
 	case err == nil:
@@ -2483,6 +2505,9 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		reason = "send_failed" // (nothing typed)
 	default:
 		outcome = "unknown" // (typed in part, or all of it but Enter, or it is not known)
+	}
+	if outcome == "typed" && what == "send" && front.agent == "claude" {
+		s.enterAgain(ctx, sess, b.Pane, socket, b.PID, b.Start, b.Session, text, string(res.Out), &ended)
 	}
 	switch {
 	case outcome == "typed" && what == "mode":

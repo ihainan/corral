@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -90,10 +91,17 @@ type Claude struct {
 	myTitleSaid, tasksSaid bool
 	branchSaid             bool // (a row said the branch, if only that there is none)
 	ctxSaid                bool // (the context was said or, by a compaction, made unknown: the part before has no say)
-	taskBase               []taskItem
-	taskOps                []taskOp
-	taskOpsFull            bool              // more were made than are kept: the list is not made again (see Prepend)
-	late                   map[string]taskOp // (while Prepend pairs results: their changes, to be made in their turn)
+	// lastReq: the model the conversation's latest request went to, and
+	// whether it asked for the 1M window (the context-1m beta): read from
+	// Claude Code's api-request rows, for Meta's window.
+	lastReq struct {
+		model string // (as claudeKey has it)
+		wide  bool
+	}
+	taskBase    []taskItem
+	taskOps     []taskOp
+	taskOpsFull bool              // more were made than are kept: the list is not made again (see Prepend)
+	late        map[string]taskOp // (while Prepend pairs results: their changes, to be made in their turn)
 }
 
 // taskOp is a change made to the task list; or (orphan: the result's call
@@ -191,7 +199,66 @@ func (c *Claude) EarlierTitle(line []byte) {
 }
 
 // Meta is what the session runs with, as the log read last said it.
-func (c *Claude) Meta() Meta { return c.meta }
+func (c *Claude) Meta() Meta {
+	m := c.meta
+	wide := c.lastReq.model != "" && c.lastReq.model == claudeKey(m.Model) && c.lastReq.wide
+	m.Window, m.WindowBy = claudeWindow(m.Model, wide)
+	return m
+}
+
+// claudeWindow: the context window of a Claude model (by its id, or the
+// name /model said it switched to), which Claude Code's log does not say:
+// 1M where its requests asked for it (wide: the context-1m beta; the [1m]
+// Claude Code puts after an id, "(1M context)" after a name), else the
+// model's own. Every model from Opus and Sonnet 4.6 on has 1M (Haiku from
+// 5, Fable and Mythos all), older ones 200K; one not known, nothing.
+func claudeWindow(model string, wide bool) (int64, string) {
+	low := strings.ToLower(strings.TrimSpace(model))
+	if wide || strings.HasSuffix(low, "[1m]") || strings.HasSuffix(low, "(1m context)") {
+		return 1_000_000, "request"
+	}
+	key := claudeKey(model)
+	if claudeOld.MatchString(key) {
+		return 200_000, "model"
+	}
+	m := claudeModelID.FindStringSubmatch(key)
+	if m == nil {
+		return 0, ""
+	}
+	family := m[1] + m[4] + m[7]
+	major, _ := strconv.Atoi(m[2] + m[5])
+	minor, _ := strconv.Atoi(m[3] + m[6])
+	switch {
+	case family == "fable" || family == "mythos":
+	case family == "haiku" && major < 5:
+		return 200_000, "model"
+	case (family == "opus" || family == "sonnet") && (major < 4 || major == 4 && minor < 6):
+		return 200_000, "model"
+	}
+	return 1_000_000, "model"
+}
+
+// claudeKey: a Claude model's id as one, however it is written: without a
+// platform's prefix or suffix (Bedrock's anthropic. and us./eu./global.,
+// -v1:0; Vertex's @date), a date, or what Claude Code puts after it ([1m],
+// " (1M context)"): what a request named and what its answer did are then
+// the same model. (A name as /model says it, lowered.)
+func claudeKey(model string) string {
+	k := strings.ToLower(strings.TrimSpace(model))
+	k = claudeAfter.ReplaceAllString(k, "")
+	k = claudePlatform.ReplaceAllString(k, "")
+	return claudeDated.ReplaceAllString(k, "")
+}
+
+// (claude-opus-5-5, claude-mythos-preview; "opus 5.5", "mythos preview" as
+// /model says them. claudeOld: the 3.x ids, family last.)
+var (
+	claudeModelID  = regexp.MustCompile(`^(?:claude-(opus|sonnet|haiku|fable|mythos)-(\d+)(?:-(\d{1,2}))?|(opus|sonnet|haiku|fable|mythos) (\d+)(?:\.(\d+))?)$|^(?:claude-|)(fable|mythos)\b`)
+	claudeOld      = regexp.MustCompile(`^claude-3(?:-[57])?-(?:opus|sonnet|haiku)`)
+	claudeAfter    = regexp.MustCompile(`(?:\[[^\]]*\]| \([^)]*\))$`)
+	claudePlatform = regexp.MustCompile(`^(?:[a-z]{2,6}\.)?anthropic\.`)
+	claudeDated    = regexp.MustCompile(`(?:-\d{8})?(?:-v\d+(?::\d+)?)?(?:@\d{8})?$`)
+)
 
 // Queued is what the person sent that waits to be taken in, oldest first.
 // (Of the log read: what was queued before the part read is not known.)
@@ -450,6 +517,9 @@ func (c *Claude) Prepend(other Parser) {
 	if !c.ctxSaid {
 		c.meta.Context, c.ctxSaid = o.meta.Context, o.ctxSaid
 	}
+	if c.lastReq.model == "" {
+		c.lastReq = o.lastReq
+	}
 	add := o.entries
 	if room := max(0, maxEntries-len(c.entries)); len(add) > room {
 		add = add[len(add)-room:]
@@ -529,6 +599,12 @@ type claudeRow struct {
 	GitBranch        *string         `json:"gitBranch"` // (present and empty: not on a branch)
 	PermissionMode   string          `json:"permissionMode"`
 	Effort           string          `json:"effort"` // (assistant rows: how hard it was asked to think)
+	// (api-request rows: what a request to the model asked for.)
+	QuerySource string `json:"querySource"`
+	Params      *struct {
+		Model string          `json:"model"`
+		Betas json.RawMessage `json:"betas"` // (looked through, not read into a list: it may be long)
+	} `json:"params"`
 	// What went wrong, on the rows that say so (see trouble).
 	OriginalModel         string   `json:"originalModel"`
 	FallbackModel         string   `json:"fallbackModel"`
@@ -625,6 +701,9 @@ func (c *Claude) line(b []byte) {
 				return
 			}
 		}
+	case "api-request":
+		c.request(&r)
+		return
 	case "ai-title":
 		if t := strings.TrimSpace(clip(r.AITitle, maxTitle)); t != "" {
 			c.aiTitle = t
@@ -1260,6 +1339,19 @@ func (c *Claude) assistant(r *claudeRow) {
 			}
 		}
 	}
+}
+
+// request takes in what a request of the conversation itself asked for
+// (not one made beside it, as for a title): its model, and whether it was
+// given the 1M window. (The latest says: a session switched back drops it.)
+func (c *Claude) request(r *claudeRow) {
+	p := r.Params
+	if p == nil || p.Model == "" || (r.QuerySource != "" && r.QuerySource != "repl_main_thread") {
+		return
+	}
+	c.lastReq.model = claudeKey(clip(p.Model, maxMeta))
+	betas := bytes.TrimSpace(p.Betas)
+	c.lastReq.wide = len(betas) > 0 && betas[0] == '[' && bytes.Contains(betas, []byte(`"context-1m`))
 }
 
 // compacted: what filled the context before is gone; how full it is now is
