@@ -92,6 +92,20 @@ const whereOf = (e: Entry, hosts: number) => {
 }
 const hostCount = (entries: Entry[]) => new Set(entries.map((e) => e.s.host_name)).size
 
+// What a row says of an entry, on either list (said: its title, as the log
+// or its pane has it). The person's own name for it goes first, where there
+// is one: a workspace they named says what the work is better than the name
+// the agent gave the session, and it does not change under them. What the
+// agent called it goes under it. (A session that is not in a workspace of
+// its own has no such name: see whereOf.)
+const labelOf = (e: Entry, said: string, hosts: number): { title: string; where: string } => {
+  const r = e.row
+  const ws = r && r.ws !== '~' ? r.ws : ''
+  if (!r || !ws) return { title: said, where: whereOf(e, hosts) }
+  const host = hosts > 1 ? e.s.host_name : ''
+  return { title: ws, where: [host, said !== ws ? said : '', agentMark(r.a.agent) ? '' : r.a.agent].filter(Boolean).join(' · ') }
+}
+
 export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: boolean }) {
   const toast = useToast()
   const prefs = usePrefs()
@@ -340,7 +354,7 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
 
   let body: ReactNode
   if (stack && screen === 'list' && sessions !== null && entries.length)
-    body = <PhoneList entries={entries} all={sessions} titles={titles.current} onPick={choose} />
+    body = <PhoneList entries={entries} all={sessions} titles={titles.current} query={sideQuery} onQuery={setSideQuery} onPick={choose} />
   else if (!cur || (stack && screen === 'list')) {
     const held = holding && !(stack && screen === 'list') // (a phone's list waits for none)
     body = (
@@ -568,15 +582,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       if (e.row) {
         const r = e.row
         const said = (current && agent?.title) || keptTitle(titles, e) || paneTitle(r.a.title) || r.a.agent
-        // The person's own name for it goes first, where there is one: a
-        // workspace they named says what the work is better than the name
-        // the agent gave the session, and it does not change under them.
-        // What the agent called it goes under it. (A session that is not
-        // in a workspace of its own has no such name: see whereOf.)
-        const ws = r.ws && r.ws !== '~' ? r.ws : ''
-        const host = hosts > 1 ? e.s.host_name : ''
-        const under = [host, said !== ws ? said : '', agentMark(r.a.agent) ? '' : r.a.agent].filter(Boolean).join(' · ')
-        return { key: e.key, title: ws || said, where: ws ? under : whereOf(e, hosts), program: r.a.agent, status: current && agent ? agent.status : r.status, since: r.lost ? undefined : r.a.since, current, onPick: () => onPick(e) }
+        return { key: e.key, ...labelOf(e, said, hosts), program: r.a.agent, status: current && agent ? agent.status : r.status, since: r.lost ? undefined : r.a.since, current, onPick: () => onPick(e) }
       }
       const title = (current && agent?.title) || keptTitle(titles, e) || `${e.s.host_name} · ${sessionWhich(e.s, all)}`
       return { key: e.key, title, where: whereOf(e, hosts), program: current ? agent?.program : undefined, status: current && agent ? agent.status : 'unknown', current, onPick: () => onPick(e) }
@@ -1294,7 +1300,9 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
 // last). Its summary line puts them in order again and goes to the first
 // waiting; "only mine" keeps those waiting, and those done since.
 let listScroll = 0
-function PhoneList({ entries, all, titles, onPick }: { entries: Entry[]; all: SessionInfo[]; titles: Titles; onPick: (e: Entry) => void }) {
+// query, onQuery: what it is searched for, kept by the page (as the side
+// list's is): still searched, back from a conversation.
+function PhoneList({ entries, all, titles, query, onQuery, onPick }: { entries: Entry[]; all: SessionInfo[]; titles: Titles; query: string; onQuery: (q: string) => void; onPick: (e: Entry) => void }) {
   const [now, setNow] = useState(Date.now())
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 30000)
@@ -1341,9 +1349,12 @@ function PhoneList({ entries, all, titles, onPick }: { entries: Entry[]; all: Se
   }
   const hosts = hostCount(entries)
   // (Searched: by its title, where it is, its program; "only mine" still holds.)
-  const [query, setQuery] = useState('')
-  const titleOf = (e: Entry) => keptTitle(titles, e) || (e.row ? paneTitle(e.row.a.title) || e.row.a.agent : `${e.s.host_name} · ${sessionWhich(e.s, all)}`)
-  const shown = (mine ? list.filter((e) => e.row?.status === 'blocked' || e.row?.status === 'done') : list).filter((e) => !query.trim() || matchQuery(query, titleOf(e), whereOf(e, hosts), e.row?.a.agent))
+  const labelled = (e: Entry) => labelOf(e, keptTitle(titles, e) || (e.row ? paneTitle(e.row.a.title) || e.row.a.agent : `${e.s.host_name} · ${sessionWhich(e.s, all)}`), hosts)
+  const shown = (mine ? list.filter((e) => e.row?.status === 'blocked' || e.row?.status === 'done') : list).filter((e) => {
+    if (!query.trim()) return true
+    const { title, where } = labelled(e)
+    return matchQuery(query, title, where, e.row?.a.agent)
+  })
   return (
     <div className="agents-list" ref={box}>
       <div className="agents-list-top">
@@ -1357,14 +1368,13 @@ function PhoneList({ entries, all, titles, onPick }: { entries: Entry[]; all: Se
           {t('agents.onlyMine')}
         </button>
       </div>
-      {(entries.length > SEARCH_FROM || query) && <ListSearch value={query} onChange={setQuery} />}
+      {(entries.length > SEARCH_FROM || query) && <ListSearch value={query} onChange={onQuery} />}
       {shown.length === 0 && <p className="agents-list-none">{t(query.trim() ? 'convo.searchNone' : 'agents.noneMine')}</p>}
       <ul className="agents-list-rows">
         {shown.map((e) => {
           const r = e.row
           const status = r?.lost ? 'unknown' : (r?.status ?? 'unknown')
-          const title = titleOf(e)
-          const where = whereOf(e, hosts)
+          const { title, where } = labelled(e)
           const since = r && !r.lost ? when({ since: r.a.since, status }, now) : ''
           return (
             <li key={e.key + ' ' + e.s.id}>
@@ -1372,9 +1382,10 @@ function PhoneList({ entries, all, titles, onPick }: { entries: Entry[]; all: Se
                 <AgentIcon program={r?.a.agent} size={36} dot={status === 'blocked' || status === 'working' || status === 'done' ? status : undefined} />
                 <span className="agents-list-text">
                   <span className="agents-list-title">{title}</span>
-                  {/* (Done and not seen: said by its dot, its time beside it, as the side list
-                      does; in words for a screen reader, and where forced colours take the dot's.) */}
+                  {/* (Done and not seen, or at work: said by its dot, its time beside it, as the
+                      side list does; in words for a screen reader, and where forced colours take the dot's.) */}
                   {status === 'done' && since && <span className="convo-list-status">{t('agents.unseen')}</span>}
+                  {status === 'working' && since && <span className="convo-list-status">{t('convo.status.working')}</span>}
                   <span className="agents-list-where">{where}</span>
                 </span>
                 {/* (Waiting for you, in words: no group heading says it here.) */}
