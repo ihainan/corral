@@ -49,6 +49,9 @@ const chatAddress = (e: { s: SessionInfo; pane?: string }) => {
 const PASTE_LINES = 12
 const SEND_MS = 45000 // (the host may wait for another message to the pane to go first)
 const PRESS_MS = 20000
+// Refusals of a switch made before any key was pressed (see convoPress, convoModeTo).
+const NOTHING_PRESSED = ['bad_request', 'unauthorized', 'unsupported', 'busy', 'host_error', 'agent_changed', 'not_in_front', 'refused', 'no_screen', 'not_found', 'forbidden']
+const MODE_MS = 50000 // (to a mode picked: several presses, each read back; the gateway gives up at 45 s)
 const MODEL_MS = 50000 // (the picker, step by step: see convo_model.go)
 const PASTE_CHARS = 2000
 const isTouch = window.matchMedia('(pointer: coarse)').matches || navigator.maxTouchPoints > 0
@@ -584,17 +587,38 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   const lastSeq = convo.entries.findLast((e: ConvoEntry) => e.role === 'user')?.seq ?? 0
   if (modeNow && (modeNow.bind !== bindKey || convo.meta?.mode !== modeNow.was || lastSeq > modeNow.last || convo.gen !== modeNow.gen)) setModeNow(null)
   const canMode = bound && !notClaude && convo.status === 'ready' && !!convo.meta && agent?.status !== 'blocked' && !agent?.other
-  const nextMode = () => {
+  // To the mode picked: Shift+Tab on the host until its screen shows it
+  // (one it was not started with is not there: it is left as it was).
+  // (The log as it is when a switch is answered: what it says by then is
+  // of before the switch, and goes over it only once it changes again.)
+  const logNow = useRef({ bind: bindKey, was: convo.meta?.mode, last: lastSeq, gen: convo.gen })
+  logNow.current = { bind: bindKey, was: convo.meta?.mode, last: lastSeq, gen: convo.gen }
+  const pickMode = (target: string) => {
     const b = convo.bind
     if (!b || modeBusy) return
     const bind = bindKey
-    const was = convo.meta?.mode
-    const last = lastSeq
-    const gen = convo.gen
     setModeBusy(true)
-    api<{ ok: boolean; mode?: string }>('POST', `/api/sessions/${sid}/conversation/mode`, { pane: b.pane, pid: b.pid, start: b.start, session: b.session }, { timeoutMs: PRESS_MS })
-      .then((r) => (r.mode ? setModeNow({ mode: r.mode, bind, was, last, gen }) : toast(t('convo.modeUnknown'))))
-      .catch((e) => toast(refusal(e), true))
+    const name = (m: string) => t(`convo.mode.${m}` as I18nKey)
+    const shown = (mode: string) => {
+      const n = logNow.current
+      if (n.bind === bind) setModeNow({ mode, bind, was: n.was, last: n.last, gen: n.gen })
+    }
+    // (Pressed, and where it went not known: not shown as the mode it was.)
+    const unknown = () => shown('unknown')
+    api<{ ok: boolean; mode?: string; pressed?: boolean; missing?: boolean; incomplete?: boolean }>('POST', `/api/sessions/${sid}/conversation/mode`, { pane: b.pane, pid: b.pid, start: b.start, session: b.session, mode: target }, { timeoutMs: MODE_MS })
+      .then((r) => {
+        if (!r.pressed && !r.mode) return toast(t('convo.modeUnread'), true)
+        if (r.mode) shown(r.mode)
+        else unknown()
+        if (r.missing) toast(t('convo.modeMissing', { mode: name(target) }), true)
+        else if (r.incomplete) toast(t('convo.modeIncomplete', { mode: name(target), now: r.mode ? name(r.mode) : name('unknown') }), true)
+        else if (!r.mode) toast(t('convo.modeUnknown'))
+      })
+      .catch((e) => {
+        // (Unless it was refused before any key went, where it is is not known.)
+        if (!(e instanceof ApiError && NOTHING_PRESSED.includes(e.code))) unknown()
+        toast(refusal(e), true)
+      })
       .finally(() => setModeBusy(false))
   }
 
@@ -1187,7 +1211,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       composer={composer}
       onSendNow={canPress && !notClaude ? () => press('now') : undefined}
       sendNow={said?.what === 'now' && said.bind === bindKey ? said.text : undefined}
-      mode={{ now: modeNow?.bind === bindKey ? modeNow.mode : undefined, busy: modeBusy, onNext: canMode ? nextMode : undefined }}
+      mode={{ now: modeNow?.bind === bindKey ? modeNow.mode : undefined, busy: modeBusy, onPick: canMode ? pickMode : undefined }}
       model={canModel || modelBusy ? { list: models?.bind === bindKey ? models.list : null, fresh: !!models?.at && Date.now() - models.at < 60000, busy: modelBusy, can: canModel, onOpen: openModels, onPick: pickModel } : undefined}
       effort={{ now: effortNow?.bind === bindKey ? effortNow.effort : undefined, busy: effortBusy, can: canEffort, onPick: pickEffort }}
       lead={lead}

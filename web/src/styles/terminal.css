@@ -466,6 +466,8 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-runs-item.is-switch:disabled { cursor: progress; }
 /* The models to switch to: as the picker lists them, the session's ticked */
 .convo-models { display: flex; flex-direction: column; gap: 1px; padding: 6px; }
+/* (The mode's, under its name on the left.) */
+.convo-runs-pop.convo-modes { right: auto; left: 0; width: min(240px, 100%); }
 .convo-models-item {
   display: grid; grid-template-columns: 1fr auto; align-items: center; column-gap: 8px; width: 100%; padding: 6px 8px;
   border: 0; border-radius: 6px; background: none; color: var(--term-fg); font: inherit; text-align: left; cursor: pointer;

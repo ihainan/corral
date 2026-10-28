@@ -480,3 +480,23 @@ func TestModeKeyGoesAsItsOwnBytesOnHerdr(t *testing.T) {
 		t.Errorf("tmux: %s", tmux[len(tmux)-40:])
 	}
 }
+
+// The mode a screen shows, for a switch to one picked: its mode line's;
+// an older Claude Code's default, which has none, by its input box; else
+// not known.
+func TestModeOnScreen(t *testing.T) {
+	cases := map[string]string{
+		"──────────\n❯ \n──────────\n  ⏵⏵ auto mode on (shift+tab to cycle)\n": "auto",
+		"──────────\n❯ \n──────────\n  ⏸ manual mode on\n":                     "default",
+		"──────────\n❯ \n──────────\n  ? for shortcuts\n":                      "default",
+		"Do you want to proceed?\n❯ 1. Yes\n  2. No\n":                         "",
+		// (An input box and a mode quoted in the thread, a question in front now: not told.)
+		"──────────\n❯ \n──────────\n  ⏵⏵ auto mode on\n" + strings.Repeat("│ line of the question\n", 12) + "Do you want to proceed?\n❯ 1. Yes\n  2. No\n": "",
+		"": "",
+	}
+	for in, want := range cases {
+		if got := modeOnScreen(in); got != want {
+			t.Errorf("modeOnScreen(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

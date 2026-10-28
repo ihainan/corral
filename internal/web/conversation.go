@@ -1978,12 +1978,13 @@ func (s *Server) apiConversationSendNow(w http.ResponseWriter, r *http.Request) 
 	s.convoPress(w, r, "send_now")
 }
 
-// POST /api/sessions/{id}/conversation/mode (the same as interrupt)
+// POST /api/sessions/{id}/conversation/mode (the same as interrupt, and "mode")
 //
 // Presses Shift+Tab: Claude Code goes on to its next permission mode. It
 // writes the mode to its log only with the next message, so the answer
 // says it as the screen shows it ({"ok":true,"mode":"plan"}; "" when the
-// screen does not say).
+// screen does not say). With "mode", Shift+Tab until the screen shows that
+// one (see convoModeTo).
 func (s *Server) apiConversationMode(w http.ResponseWriter, r *http.Request) {
 	s.convoPress(w, r, "mode")
 }
@@ -2031,6 +2032,7 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		Text    string `json:"text"`   // (send)
 		Model   string `json:"model"`  // (model: as the picker names it)
 		Effort  string `json:"effort"` // (effort: a level of effortLevels)
+		Mode    string `json:"mode"`   // (mode: the one to go to, of convoModes; none: the next)
 	}
 	err := readJSON(r, &b)
 	text, textOK := sendText(b.Text)
@@ -2041,6 +2043,9 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		textOK = false
 	}
 	if what == "effort" && effortLevel(b.Effort) < 0 {
+		textOK = false
+	}
+	if b.Mode != "" && (what != "mode" || !convoModes[b.Mode]) {
 		textOK = false
 	}
 	if err != nil || !textOK {
@@ -2080,8 +2085,8 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	ctx, cancel := context.WithDeadline(r.Context(), expiry)
 	defer cancel()
 	step := 15 * time.Second
-	if what == "models" || what == "model" || what == "effort" {
-		step = 45 * time.Second // (several steps on the host: see modelFlow)
+	if what == "models" || what == "model" || what == "effort" || (what == "mode" && b.Mode != "") {
+		step = 45 * time.Second // (several steps on the host: see modelFlow, convoModeTo)
 	}
 	ctx, cancelStep := context.WithTimeout(ctx, step)
 	defer cancelStep()
@@ -2203,6 +2208,12 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		if what == "interrupt" && front.agent == "opencode" {
 			press = append(append(append([]string(nil), press...), "pause"), press...)
 		}
+	}
+	if what == "mode" && b.Mode != "" {
+		release := turn
+		turn = func() {} // (convoModeTo gives it back, once its last command has ended on the host)
+		s.convoModeTo(w, ctx, sess, b.Pane, socket, b.PID, b.Start, b.Session, press, b.Mode, &outcome, &reason, release)
+		return
 	}
 	release := turn
 	turn = func() {} // (Exec gives it back, once the channel has ended)

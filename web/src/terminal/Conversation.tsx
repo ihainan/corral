@@ -677,12 +677,15 @@ function tokens(n: number): string {
 }
 
 // (Claude Code's permission modes; Codex's approval policies.)
-const MODES = ['default', 'acceptEdits', 'plan', 'auto', 'bypassPermissions', 'dontAsk', 'untrusted', 'on-failure', 'on-request', 'never'] as const
+const MODES = ['default', 'acceptEdits', 'plan', 'auto', 'bypassPermissions', 'dontAsk', 'untrusted', 'on-failure', 'on-request', 'never', 'unknown'] as const
 const modeName = (m: string) => ((MODES as readonly string[]).includes(m) ? t(`convo.mode.${m}` as I18nKey) : m)
 
-// Switching the permission mode from the page: now, what the last switch
-// went to (the log says it only with the next message); busy, one on its way.
-export type ModeSwitch = { now?: string; busy: boolean; onNext?: () => void }
+// Switching the permission mode from the page, to one picked from a menu
+// (Shift+Tab until it is there, on the host): now, what the last switch went
+// to (the log says it only with the next message); busy, one on its way.
+export type ModeSwitch = { now?: string; busy: boolean; onPick?: (mode: string) => void }
+// (Those Shift+Tab goes through, in its order; which a session has depends on how it was started.)
+const PICKED_MODES = ['default', 'acceptEdits', 'plan', 'auto', 'bypassPermissions'] as const
 
 // Switching the model, from a menu of what Claude Code's picker offers
 // (list: null while it is read), for the session only.
@@ -699,20 +702,22 @@ export type EffortSwitch = { now?: string; busy: boolean; can: boolean; onPick: 
 const effortName = (e: string) => ((EFFORTS as readonly string[]).includes(e) ? t(`convo.effort.${e}` as I18nKey) : e)
 
 // What the session runs with, under the composer: its permission mode on
-// the left (a tap: the next one, as Shift+Tab); its branch, model and how
+// the left (a tap: a menu of them); its branch, model and how
 // full its context is on the right (the numbers on a tap).
 function Runs({ meta, active, mode, model, effort }: { meta: ConvoMeta; active: boolean; mode?: ModeSwitch; model?: ModelSwitch; effort?: EffortSwitch }) {
-  const [open, setOpen] = useState<false | 'ctx' | 'model' | 'effort'>(false) // (which of its pop-ups)
+  const [open, setOpen] = useState<false | 'ctx' | 'model' | 'effort' | 'mode'>(false) // (which of its pop-ups)
   const box = useRef<HTMLDivElement>(null)
   const modelBtn = useRef<HTMLButtonElement>(null)
   const effortBtn = useRef<HTMLButtonElement>(null)
+  const modeBtn = useRef<HTMLButtonElement>(null)
   if (open && !active) setOpen(false) // (behind a terminal tab: its Escape is the terminal's)
   if (open === 'model' && !model?.can) setOpen(false) // (it works now: no switching)
   if (open === 'effort' && !effort?.can) setOpen(false)
+  if (open === 'mode' && !mode?.onPick) setOpen(false)
   // The model menu: its current one (else its first) takes the focus once
   // read; Up and Down go through it; closed by Escape, back to its button.
   const menu = useRef<HTMLDivElement>(null)
-  const listed = (open === 'model' && !!model?.list) || open === 'effort'
+  const listed = (open === 'model' && !!model?.list) || open === 'effort' || open === 'mode'
   useEffect(() => {
     // (Only where the focus still is with it: not taken back from where it went meanwhile.)
     if (!listed || !box.current?.contains(document.activeElement)) return
@@ -729,8 +734,9 @@ function Runs({ meta, active, mode, model, effort }: { meta: ConvoMeta; active: 
         e.stopPropagation()
         if (open === 'model' && box.current?.contains(document.activeElement)) modelBtn.current?.focus()
         if (open === 'effort' && box.current?.contains(document.activeElement)) effortBtn.current?.focus()
+        if (open === 'mode' && box.current?.contains(document.activeElement)) modeBtn.current?.focus()
         setOpen(false)
-      } else if ((open === 'model' || open === 'effort') && (e.key === 'ArrowDown' || e.key === 'ArrowUp') && menu.current?.contains(document.activeElement)) {
+      } else if ((open === 'model' || open === 'effort' || open === 'mode') && (e.key === 'ArrowDown' || e.key === 'ArrowUp') && menu.current?.contains(document.activeElement)) {
         const all = [...menu.current.querySelectorAll<HTMLElement>('button')]
         const at = all.indexOf(document.activeElement as HTMLElement)
         e.preventDefault()
@@ -751,12 +757,23 @@ function Runs({ meta, active, mode, model, effort }: { meta: ConvoMeta; active: 
   const full = Math.min(1, used / windows[0])
   return (
     // (The focus gone elsewhere, as by Tab, while the model menu is open, the list read or not: closed.)
-    <div className="convo-runs" ref={box} onBlur={(e) => (open === 'model' || open === 'effort') && !box.current?.contains(e.relatedTarget as Node | null) && setOpen(false)}>
+    <div className="convo-runs" ref={box} onBlur={(e) => (open === 'model' || open === 'effort' || open === 'mode') && !box.current?.contains(e.relatedTarget as Node | null) && setOpen(false)}>
       {(mode?.now || meta.mode) &&
-        (mode?.onNext ? (
-          <button type="button" className="convo-runs-item convo-runs-mode is-switch" onClick={mode.onNext} disabled={mode.busy} aria-busy={mode.busy || undefined} title={t('convo.modeSwitch')}>
-            {modeName(mode.now || meta.mode!)}
-            <ChevronsUpDown size={12} aria-hidden="true" />
+        (mode?.onPick || mode?.busy ? (
+          <button
+            ref={modeBtn}
+            type="button"
+            className="convo-runs-item convo-runs-mode is-switch"
+            aria-expanded={open === 'mode'}
+            aria-haspopup="menu"
+            aria-disabled={mode.busy || undefined}
+            aria-busy={mode.busy || undefined}
+            title={t('convo.modeSwitch')}
+            onClick={() => !mode.busy && setOpen(open === 'mode' ? false : 'mode')} // (not disabled while busy: the focus it has stays)
+          >
+            {mode.busy ? <span className="convo-spin" aria-hidden="true" /> : null}
+            {mode.busy ? t('convo.modeSwitching') : modeName(mode.now || meta.mode!)}
+            {!mode.busy && <ChevronsUpDown size={12} aria-hidden="true" />}
           </button>
         ) : (
           <span className="convo-runs-item convo-runs-mode" title={t('convo.modeHint')}>
@@ -856,6 +873,37 @@ function Runs({ meta, active, mode, model, effort }: { meta: ConvoMeta; active: 
             })
           )}
           <p className="convo-runs-note">{t('convo.modelOnly')}</p>
+        </div>
+      )}
+      {open === 'mode' && mode?.onPick && (
+        <div
+          className="convo-runs-pop convo-models convo-modes"
+          role="menu"
+          aria-label={t('convo.modeTitle')}
+          ref={menu}
+          onBlur={(e) => !box.current?.contains(e.relatedTarget as Node | null) && setOpen(false)} // (Tab out of it: closed)
+        >
+          {PICKED_MODES.map((m) => {
+            const now = (mode.now || meta.mode) === m
+            return (
+              <button
+                key={m}
+                type="button"
+                role="menuitemradio"
+                aria-checked={now}
+                className="convo-models-item"
+                onClick={() => {
+                  setOpen(false)
+                  modeBtn.current?.focus()
+                  mode.onPick!(m) // (the one ticked too: what is ticked may be past; there already, nothing is pressed)
+                }}
+              >
+                <span className="convo-models-label">{modeName(m)}</span>
+                {now && <Check size={14} aria-hidden="true" />}
+              </button>
+            )
+          })}
+          <p className="convo-runs-note">{t('convo.modeNote')}</p>
         </div>
       )}
       {open === 'effort' && effort && (
