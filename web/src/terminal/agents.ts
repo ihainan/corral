@@ -109,3 +109,12 @@ export function useRunningSessions(on: boolean, every = 3000): { sessions: Sessi
   }, [on, every])
   return { sessions, failed }
 }
+
+// matchQuery: every word of what was typed is in one of the fields (case
+// aside), as the agents' lists are searched.
+export function matchQuery(q: string, ...fields: (string | undefined)[]): boolean {
+  const words = q.toLowerCase().split(/\s+/).filter(Boolean)
+  if (!words.length) return true
+  const hay = fields.filter(Boolean).join('\n').toLowerCase()
+  return words.every((w) => hay.includes(w))
+}

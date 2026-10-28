@@ -59,7 +59,7 @@ export function useCompletion(p: {
     if (!tok || tok.start !== dismissed) setDismissed(null)
   }, [tok, dismissed])
 
-  const a: Agent | null = p.agent === 'claude' || p.agent === 'codex' ? p.agent : null
+  const a: Agent | null = p.agent === 'claude' || p.agent === 'codex' || p.agent === 'opencode' ? p.agent : null
   const items: Suggestion[] = tok && dismissed !== tok.start ? suggest(tok, data, a) : []
   const cur = Math.min(sel, Math.max(0, items.length - 1)) // (the list may have shrunk under it)
   const waitingFiles = !!tok && tok.kind === '@' && dismissed !== tok.start && !data

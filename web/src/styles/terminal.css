@@ -716,6 +716,7 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-stop { flex: none; height: 26px; padding: 0 10px; font-size: 13px; border: 1px solid var(--term-line); color: var(--term-fg); }
 .term-root .convo .convo-stop.btn-ghost:hover { border-color: var(--term-fg-3); background: var(--term-hover); }
 @media (pointer: coarse) { .convo-stop { height: 34px; } }
+.convo-bar-more { flex: none; align-self: center; margin: -4px -6px -4px 0; color: var(--term-fg-2); }
 .convo-bar-pick .convo-bar-name { flex: 0 1 auto; }
 .convo-bar-pick .agent-icon { margin-right: 4px; --dot-ring: var(--term-bg); }
 /* The agents page: a tab as the sessions' are, first, never dragged. */
@@ -831,6 +832,23 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
   padding: 8px; border-right: 1px solid var(--term-line); background: var(--term-chrome); font-family: var(--font-ui);
 }
 .convo-side-keys { margin: auto 0 0; padding: 8px 10px 4px; font-size: 12px; color: var(--term-fg-3); }
+/* An agents' list's search box (side, picker, a phone's list). 16px on a
+   touch screen: iOS zooms into a smaller field. */
+.list-search {
+  display: flex; align-items: center; gap: 6px; margin: 2px 2px 10px; padding: 0 4px 0 10px; height: 34px;
+  border: 1px solid var(--term-line); border-radius: 8px; background: var(--term-bg); color: var(--term-fg-3);
+}
+.list-search:focus-within { border-color: var(--term-accent-text); }
+.list-search input {
+  flex: 1; min-width: 0; height: 100%; padding: 0; border: 0; outline: 0; background: none;
+  color: var(--term-fg); font: 14px var(--font-ui);
+}
+.list-search input::placeholder { color: var(--term-fg-3); }
+.list-search input:focus, .list-search input:focus-visible { outline: none; box-shadow: none; } /* (the box shows it) */
+.list-search-clear { width: 26px; height: 26px; }
+@media (pointer: coarse) { .list-search input { font-size: 16px; } }
+.list-search-none { margin: 4px 10px 12px; font-size: 13px; color: var(--term-fg-3); }
+.agents-list > .list-search { margin: 10px max(16px, env(safe-area-inset-right, 0px)) 4px max(16px, env(safe-area-inset-left, 0px)); height: 40px; }
 .convo-list-group { display: flex; flex-direction: column; gap: 1px; margin-bottom: 10px; }
 .convo-list-head { display: flex; gap: 6px; padding: 4px 10px; font-size: 12px; color: var(--term-fg-3); font-variant-numeric: tabular-nums; }
 .convo-list-row {

@@ -3,7 +3,7 @@
 // the message (the agents' commands, and those found on the host) and "$" (a
 // Codex skill).
 
-export type Agent = 'claude' | 'codex'
+export type Agent = 'claude' | 'codex' | 'opencode'
 
 export interface Completions {
   cwd: string
@@ -13,7 +13,8 @@ export interface Completions {
 }
 
 // The agents' built-in commands, as their own input boxes list them
-// (Claude Code 2.1, Codex 0.16x; a command a version lacks is refused there).
+// (Claude Code 2.1, Codex 0.16x, OpenCode 1.19; a command a version lacks is
+// refused there).
 const builtin: Record<Agent, string[]> = {
   claude: [
     '/add-dir', '/advisor', '/agents', '/auto-mode-setup', '/autocompact', '/batch', '/branch', '/btw', '/bug',
@@ -33,6 +34,11 @@ const builtin: Record<Agent, string[]> = {
     '/plugins', '/ps', '/pwd', '/quit', '/raw', '/recap', '/rename', '/resume', '/review', '/side', '/skills',
     '/status', '/statusline', '/stop', '/subagents', '/theme', '/title', '/tui', '/vim', '/voice', '/warnings',
     '/worktree',
+  ],
+  opencode: [
+    '/agents', '/compact', '/connect', '/copy', '/debug', '/diff', '/editor', '/exit', '/export', '/fork', '/help',
+    '/init', '/mcps', '/models', '/move', '/new', '/redo', '/rename', '/review', '/sessions', '/share', '/skills',
+    '/status', '/themes', '/thinking', '/timeline', '/timestamps', '/undo', '/unshare', '/update',
   ],
 }
 
@@ -93,7 +99,8 @@ export interface Suggestion {
 const MAX_SHOWN = 8
 
 // suggest lists what to offer for a token. agent: the agent known to be in
-// front (herdr's focused pane), else both agents' commands are offered.
+// front (herdr's focused pane), else Claude Code's and Codex's commands are
+// offered.
 export function suggest(tok: Token, data: Completions | null, agent: Agent | null): Suggestion[] {
   // Scattered letters only count when nothing has the query as it is typed.
   const rank = <T>(items: T[], key: (x: T) => string) => {

@@ -184,8 +184,18 @@ rec() { # pid start fg procstart sid log agent
     i=$((i + 1))
   done
   cwd=$(readlink "/proc/$1/cwd" 2>/dev/null | head -c 1024 | tr -d '\n')
-  lw=; [ -n "$6" ] && lw=$(stat -c %Y "$6" 2>/dev/null)
-  printf 'pid=%s\nstart=%s\nbtime=%s\nhz=%s\nfg=%s\nprocstart=%s\nsid=%s\nlog=%s\nlogmtime=%s\ntty=%s\ncwd=%s\nanc=%s\nagent=%s\n%s\0' "$1" "$2" "$btime" "$hz" "$3" "$4" "$5" "$6" "$lw" "$tty" "$cwd" "$anc" "$7" "$env"
+  # (When it was last written: a JSON log by its records' own times, as
+  # Claude Code touches its log every hour it runs, nothing written. The
+  # latest of them near its end that is not ahead of now: a record's own
+  # comes after the older ones of what it holds, and is never ahead. Their
+  # fractions made nine digits long, to be compared as text.)
+  lw= lt=; [ -n "$6" ] && lw=$(stat -c %Y "$6" 2>/dev/null)
+  if [ -n "$6" ] && [ "${6%.jsonl}" != "$6" ]; then
+    lt=$(tail -c 262144 "$6" 2>/dev/null | grep -ao '"timestamp":"20[0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9:.]*Z"' | cut -d'"' -f4 |
+      awk -v now="$(date -u +%Y-%m-%dT%H:%M:%S).999999999" '{ t = $0; sub(/Z$/, "", t); if (t !~ /\./) t = t "."; i = index(t, "."); t = substr(t, 1, i) substr(substr(t, i + 1) "000000000", 1, 9) }
+        t <= now && t > k { k = t; m = $0 } END { print m }')
+  fi
+  printf 'pid=%s\nstart=%s\nbtime=%s\nhz=%s\nfg=%s\nprocstart=%s\nsid=%s\nlog=%s\nlogmtime=%s\nlogts=%s\ntty=%s\ncwd=%s\nanc=%s\nagent=%s\n%s\0' "$1" "$2" "$btime" "$hz" "$3" "$4" "$5" "$6" "$lw" "$lt" "$tty" "$cwd" "$anc" "$7" "$env"
 }
 # (Its start time and whether it is in front on its terminal: st, fg.)
 stat_of() {
@@ -317,6 +327,7 @@ type convoProc struct {
 	fg            bool  // in front on its terminal: what is typed there reaches it
 	started       int64 // when it started, unix milliseconds (0 when not known; within the second the host's boot time is known to)
 	wrote         int64 // when its log was last written, unix milliseconds (0: not known)
+	wroteTold     bool  // wrote is its last record's time (not the file's)
 	sid, log      string
 	agent         string // "claude" (Claude Code) or "codex"
 	herdrPane     string
@@ -495,8 +506,16 @@ func parseConvoLocate(out string) (l convoLocated) {
 			case "logmtime":
 				// When its log was last written: what the agent last said
 				// or was told, for a pane the gateway never saw change.
-				if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+				// (Its last record's time, where it has one: see logts.)
+				if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 && !p.wroteTold {
 					p.wrote = n * 1000
+				}
+			case "logts":
+				// The time its last record says (a JSON log's): the file's
+				// own is moved on with nothing written (Claude Code touches
+				// its log every hour it runs).
+				if t, err := time.Parse(time.RFC3339Nano, v); err == nil && t.UnixMilli() > 0 {
+					p.wrote, p.wroteTold = t.UnixMilli(), true
 				}
 			case "agent":
 				p.agent = v

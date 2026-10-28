@@ -6,15 +6,15 @@ import { navigate, onNavigate } from '../router'
 import { onOpenRequest } from '../notifyopen'
 import { isDark, setChromeColor, usePrefs } from '../prefs'
 import { local } from '../storage'
-import { CLOSE_MENUS, Menu, useToast } from '../components/ui'
+import { CLOSE_MENUS, Confirm, Menu, useToast, type MenuItem } from '../components/ui'
 import { chromeVars, corralDark, corralLight } from '../terminal/themes'
 import { expandPastes, getDraft, keepDraft, keepPaste, keepSent, keptSent, remember, sentHistory } from '../terminal/drafts'
 import { geminiPath, shellPath } from '../terminal/paths'
 import { useCompletion } from '../terminal/Completion'
 import { InlineReply } from '../terminal/ReplyDialog'
-import { ConversationView, when, type ConvoAgent, type ConvoListRow, type ConvoPending, type ModelOpt } from '../terminal/Conversation'
+import { ConversationView, ListSearch, SEARCH_FROM, when, type ConvoAgent, type ConvoListRow, type ConvoPending, type ModelOpt } from '../terminal/Conversation'
 import { asking, useConversation, type ConvoEntry } from '../terminal/conversation'
-import { isCodex, isOpenCode, listAgents, paneTitle, readsLog, useRunningSessions, type AgentRow } from '../terminal/agents'
+import { isCodex, isOpenCode, listAgents, matchQuery, paneTitle, readsLog, useRunningSessions, type AgentRow } from '../terminal/agents'
 import { afterSend, holdTermMode, PENDING_MS, sameTurn, tmuxKey } from '../terminal/chatSend'
 import { agentKey, sessionWhich } from '../terminal/sessionName'
 import { AgentIcon, agentMark } from '../terminal/agentIcons'
@@ -112,9 +112,22 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
   // The titles of agents read here (Claude Code's own), for their rows once another is shown.
   const titles = useRef<Titles>(new Map())
 
+  // Agents closed from here: out of the list at once, before herdr's
+  // summary says so (else the one shown would be waited for, or picked
+  // again). (A pane's id is not used again.)
+  const [gone, setGone] = useState<ReadonlySet<string>>(() => new Set())
+  // (Once herdr no longer has it, it is let go: a pane's id may come again
+  // in a herdr session made anew, another agent's then.)
+  useEffect(() => {
+    if (!sessions || !gone.size) return
+    const live = new Set(listAgents(sessions).rows.map((r) => r.key))
+    if ([...gone].some((k) => !live.has(k))) setGone((g) => new Set([...g].filter((k) => live.has(k))))
+  }, [sessions, gone])
+  // What the side list is searched for: the page's, as each agent's view is its own.
+  const [sideQuery, setSideQuery] = useState('')
   const entries = useMemo((): Entry[] => {
     const { rows, others } = listAgents(sessions ?? [])
-    const out: Entry[] = rows.map((r) => ({ key: r.key, s: r.s, pane: r.a.pane_id, row: r }))
+    const out: Entry[] = rows.filter((r) => !gone.has(r.key)).map((r) => ({ key: r.key, s: r.s, pane: r.a.pane_id, row: r }))
     const seen = new Set<string>()
     for (const s of others) {
       if (s.persistence !== 'tmux' || seen.has(tmuxKey(s))) continue
@@ -122,7 +135,7 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
       out.push({ key: tmuxKey(s), s })
     }
     return out
-  }, [sessions])
+  }, [sessions, gone])
   // The one shown: the one picked while it is there (a session without a
   // pane, from an older address: the agent herdr has in front there, else
   // its first), else the first (one waiting for an answer comes first).
@@ -142,12 +155,12 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
   const lastCur = useRef<Entry | undefined>(undefined)
   const summaryMissing = (x: SessionInfo) => x.persistence === 'herdr' && (x.meta?.t !== 'herdr' || !!x.meta.lost)
   const unsure = !!pickedSession && summaryMissing(pickedSession)
-  const kept = !picked && pick && unsure && lastCur.current?.s.id === pick.s && (lastCur.current.pane ?? '') === (pick.pane ?? '') ? lastCur.current : undefined
+  const kept = !picked && pick && unsure && lastCur.current?.s.id === pick.s && (lastCur.current.pane ?? '') === (pick.pane ?? '') && !gone.has(lastCur.current.key) ? lastCur.current : undefined
   // (None seen yet, as opened from an address while the summary is missing:
   // waited for a while, rather than another shown in its place, and made the pick.)
   const [gaveUp, setGaveUp] = useState(false)
   if (picked && gaveUp) setGaveUp(false) // (found: the next time, waited for again)
-  const waiting = !picked && !kept && !!pick && unsure && !gaveUp
+  const waiting = !picked && !kept && !!pick && unsure && !gaveUp && !gone.has(keyOf(pick) ?? '') // (closed from here: not waited for)
   // Its session gone, its agent maybe coming back in another (a gateway
   // restarted, its sessions opened again one by one): for a while the pick
   // stays and nothing is shown in its place (another put there would be
@@ -155,7 +168,7 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
   // that was in front of the person: one remembered from before, never
   // shown since, is given up at once, and the first is the pick.
   const shownKey = useRef<string | undefined>(undefined) // (the last one shown: kept while none is)
-  const holding = !picked && !!pick && !pickedSession && !!keyOf(pick) && !gaveUp && shownKey.current === keyOf(pick)
+  const holding = !picked && !!pick && !pickedSession && !!keyOf(pick) && !gaveUp && shownKey.current === keyOf(pick) && !gone.has(keyOf(pick)!) // (closed from here: not coming back)
   useEffect(() => {
     if (!waiting && !holding) return
     const timer = setTimeout(() => setGaveUp(true), 15000)
@@ -320,6 +333,13 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
         draft={draftBy[k]}
         setDraftShown={(f) => setDraftBy((all) => ({ ...all, [k]: f(all[k]) }))}
         used={usedBy.current.get(k) ?? usedBy.current.set(k, new Map()).get(k)!}
+        query={sideQuery}
+        onQuery={setSideQuery}
+        onClosed={() => {
+          setGone((g) => new Set(g).add(k))
+          // (A phone: back to the list, if it is still the one in front; else the next is shown.)
+          if (stack && lastCur.current?.key === k) toList()
+        }}
         lead={
           stack ? (
             <button type="button" className="icon-btn agents-chat-back" onClick={toList} aria-label={t('agents.backToList')} title={t('agents.backToList')}>
@@ -406,6 +426,11 @@ function restoreSent(): Record<string, Sent[]> {
   return out
 }
 
+// When a message last went to each agent (by its entry key), for the while
+// its one button is not stop (see stopShown).
+const lastSends = new Map<string, number>()
+const STOP_AFTER_SEND_MS = 1500
+
 // Which messages the pane was already looked at for, by their id: kept for
 // the page's life, not the view's, so that leaving an agent and coming
 // back does not ask the host the same thing again.
@@ -413,7 +438,7 @@ const lookedAt = new Set<number>()
 
 // The conversation of one agent, and what is sent to it. Keyed by the
 // agent: nothing of another's (its draft, what was sent, a stop) carries over.
-function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerEnter, sent, setSent, sending, setSending, draft: shownDraft, setDraftShown, used, lead }: {
+function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerEnter, sent, setSent, sending, setSending, draft: shownDraft, setDraftShown, used, lead, onClosed, query, onQuery }: {
   cur: Entry
   entries: Entry[]
   all: SessionInfo[]
@@ -426,6 +451,9 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   setDraftShown: (f: (d: string | undefined) => string) => void
   used: Map<string, Set<number>> // per reading: the turns that confirmed one
   lead?: ReactNode
+  onClosed: () => void // (its pane closed from here)
+  query: string // the side list's search
+  onQuery: (q: string) => void
   onPick: (e: Entry) => void
   active: boolean
   toast: (s: string, error?: boolean) => void
@@ -777,7 +805,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     [],
   )
   const field = useRef<HTMLTextAreaElement>(null)
-  const completion = useCompletion({ sessionId: sid, field, draft, setDraft, agent: row?.a.agent ?? (codex ? 'codex' : 'claude'), pane: herdr ? cur.pane : undefined })
+  const completion = useCompletion({ sessionId: sid, field, draft, setDraft, agent: row?.a.agent ?? convo.bind?.agent ?? (codex ? 'codex' : 'claude'), pane: herdr ? cur.pane : undefined })
   // (Another agent picked with the keyboard, or the page back in front: its
   // box takes the keys, as the terminal's does. Not from a dialog over it.)
   useEffect(() => {
@@ -888,6 +916,24 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       : agent?.status === 'blocked'
         ? t(waits ? 'agents.answerAbove' : 'agents.answerFirst') // (its card over the composer, or the terminal only)
         : null
+  // Send and stop are one button while it works: send with something to
+  // send, else stop. Not stop for a moment after a send, though: the box
+  // empties as it goes, and a second tap meant as send would stop it.
+  // (When, kept by the agent: this view goes with another shown, and comes back.)
+  const [sentAt, setSentAtState] = useState(() => {
+    const at = lastSends.get(cur.key) ?? 0
+    return Date.now() - at < STOP_AFTER_SEND_MS ? at : 0
+  })
+  const setSentAt = (at: number) => {
+    lastSends.set(cur.key, at)
+    setSentAtState(at)
+  }
+  useEffect(() => {
+    if (!sentAt) return
+    const timer = setTimeout(() => setSentAtState(0), Math.max(0, sentAt + STOP_AFTER_SEND_MS - Date.now()))
+    return () => clearTimeout(timer)
+  }, [sentAt])
+  const stopShown = canPress && !draft.trim() && !up && !sending && !sentAt
   const send = () => {
     const b = convo.bind
     if (sending || (!draft.trim() && !up)) return
@@ -897,6 +943,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     if (text === null || new TextEncoder().encode(text).length > 100 << 10) return toast(t('agents.tooLong'), true)
     const was = draft // (what is typed meanwhile is a new draft: it stays)
     setSending(true)
+    setSentAt(Date.now())
     const last = convo.entries.length ? convo.entries[convo.entries.length - 1] : undefined
     const after = last ? last.seq : 0
     const afterTs = last?.ts
@@ -1071,24 +1118,33 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
               {composerEnter === 'send' ? t('term.composerKeysSend', { send: enterKey, newline: isMac ? 'Shift+Return' : 'Shift+Enter' }) : t('term.composerKeysNewline', { send: modEnter })}
             </span>
           )}
-          {/* (Each in its place, whatever the draft: what was send a moment
-              ago is never stop. Stop while it works, beside send. Send
-              with nothing in the box is grey, but while a file goes up:
-              pressed, it says to wait.) */}
-          {canPress && (
+          {/* (One in its place: stop while it works and nothing is to be
+              sent, see stopShown; else send. Send with nothing in the box
+              is grey, but while a file goes up: pressed, it says to wait.) */}
+          {stopShown ? (
             <button type="button" className="composer-send is-stop" onClick={() => press('stop')} aria-label={t('convo.stop')} title={t('convo.stop')}>
               <Square size={14} fill="currentColor" strokeWidth={0} />
             </button>
+          ) : (
+            <button type="button" className="composer-send" onClick={send} disabled={sending || !!blocked || (!draft.trim() && !up)} aria-label={t('term.send')} title={t('term.send') + (isTouch ? '' : ' (' + sendKey + ')')}>
+              <ArrowUp size={18} strokeWidth={2.25} />
+            </button>
           )}
-          <button type="button" className="composer-send" onClick={send} disabled={sending || !!blocked || (!draft.trim() && !up)} aria-label={t('term.send')} title={t('term.send') + (isTouch ? '' : ' (' + sendKey + ')')}>
-            <ArrowUp size={18} strokeWidth={2.25} />
-          </button>
         </div>
       </div>
     </div>
   )
 
   const openTerminal = () => navigate(`/t/${sid}` + (cur.pane ? '?pane=' + encodeURIComponent(cur.pane) : ''))
+  // Closing it: its herdr pane, asked first (what runs there ends; its
+  // conversation stays on the host, to be taken up again in a terminal).
+  // Not a tmux one's: its entry is the whole tmux session, other windows too.
+  const [closing, setClosing] = useState(false)
+  const canClose = herdr && !!row && !row.lost
+  const more = (): (MenuItem | null)[] => [
+    { label: t('convo.showTerminal'), onSelect: openTerminal },
+    canClose ? { label: t('agents.close'), danger: true, separator: true, onSelect: () => setClosing(true) } : null,
+  ]
   // (Files dropped on the conversation go up as picked ones do.)
   const dropping = (e: React.DragEvent) => e.dataTransfer.types.includes('Files')
   return (
@@ -1135,7 +1191,27 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       model={canModel || modelBusy ? { list: models?.bind === bindKey ? models.list : null, fresh: !!models?.at && Date.now() - models.at < 60000, busy: modelBusy, can: canModel, onOpen: openModels, onPick: pickModel } : undefined}
       effort={{ now: effortNow?.bind === bindKey ? effortNow.effort : undefined, busy: effortBusy, can: canEffort, onPick: pickEffort }}
       lead={lead}
+      more={more}
+      query={query}
+      onQuery={onQuery}
     />
+    {closing && row && (
+      <Confirm
+        title={t('agents.closeTitle')}
+        body={t(working ? 'agents.closeBodyWorking' : 'agents.closeBody')}
+        confirm={t('agents.closeConfirm')}
+        danger
+        onConfirm={async () => {
+          try {
+            await api('POST', `/api/sessions/${sid}/herdr`, { action: 'close_pane', target: row.a.pane_id })
+          } catch (e) {
+            throw { human: e instanceof ApiError && e.code === 'herdr_busy' ? t('herdr.busy') : t('sc.herdrFailed') }
+          }
+          onClosed()
+        }}
+        onClose={() => setClosing(false)}
+      />
+    )}
     </div>
   )
 }
@@ -1191,8 +1267,11 @@ function PhoneList({ entries, all, titles, onPick }: { entries: Entry[]; all: Se
     setOrder(sorted(entries))
     requestAnimationFrame(() => box.current?.scrollTo({ top: 0, behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' }))
   }
-  const shown = mine ? list.filter((e) => e.row?.status === 'blocked' || e.row?.status === 'done') : list
   const hosts = hostCount(entries)
+  // (Searched: by its title, where it is, its program; "only mine" still holds.)
+  const [query, setQuery] = useState('')
+  const titleOf = (e: Entry) => keptTitle(titles, e) || (e.row ? paneTitle(e.row.a.title) || e.row.a.agent : `${e.s.host_name} · ${sessionWhich(e.s, all)}`)
+  const shown = (mine ? list.filter((e) => e.row?.status === 'blocked' || e.row?.status === 'done') : list).filter((e) => !query.trim() || matchQuery(query, titleOf(e), whereOf(e, hosts), e.row?.a.agent))
   return (
     <div className="agents-list" ref={box}>
       <div className="agents-list-top">
@@ -1206,12 +1285,13 @@ function PhoneList({ entries, all, titles, onPick }: { entries: Entry[]; all: Se
           {t('agents.onlyMine')}
         </button>
       </div>
-      {shown.length === 0 && <p className="agents-list-none">{t('agents.noneMine')}</p>}
+      {(entries.length > SEARCH_FROM || query) && <ListSearch value={query} onChange={setQuery} />}
+      {shown.length === 0 && <p className="agents-list-none">{t(query.trim() ? 'convo.searchNone' : 'agents.noneMine')}</p>}
       <ul className="agents-list-rows">
         {shown.map((e) => {
           const r = e.row
           const status = r?.lost ? 'unknown' : (r?.status ?? 'unknown')
-          const title = keptTitle(titles, e) || (r ? paneTitle(r.a.title) || r.a.agent : `${e.s.host_name} · ${sessionWhich(e.s, all)}`)
+          const title = titleOf(e)
           const where = whereOf(e, hosts)
           const since = r && !r.lost ? when({ since: r.a.since, status }, now) : ''
           return (

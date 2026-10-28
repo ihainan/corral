@@ -1901,19 +1901,29 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
       forgetTypedRef.current(k === 'Backspace' && !m.ctrl && !m.alt)
     })
   // A custom key sends its own sequence; latched Ctrl/Alt do not apply to it.
-  const sendSteps = (steps: Step[]) =>
+  // then: once it has gone (after a composition it waited for); ok: whether
+  // it is still to go, asked then.
+  const sendSteps = (steps: Step[], then?: () => void, ok?: () => boolean) =>
     afterComposition(() => {
+      if (ok && !ok()) return
       takeOverRef.current()
       settleRef.current()
       outRef.current(macroBytes(steps, termRef.current?.modes.applicationCursorKeysMode ?? false, keysApartRef.current()))
       releaseOnce()
+      then?.()
     })
   const keyLayout = useMemo(() => layoutIn(prefs.keyLayout, prefs.customKeys), [prefs.keyLayout, prefs.customKeys])
   // A key of one's own or a long press (one that no longer parses does nothing).
-  const sendKeys = (keys: string) => {
+  const sendKeys = (keys: string, then?: () => void, ok?: () => boolean) => {
     const r = parseMacro(keys)
-    if ('steps' in r) sendSteps(r.steps)
+    if ('steps' in r) sendSteps(r.steps, then, ok)
   }
+  // A shortcut's keys sent again a moment after they went (OpenCode stops
+  // on a second Esc, not on two at once): not once the focused pane, the
+  // connection or the page has changed meanwhile (they would go elsewhere),
+  // nor another such pick made. (Each pick's own number.)
+  const againGen = useRef(0)
+  useEffect(() => () => void againGen.current++, [herdr?.focused_pane, status, active])
   // The shortcut panel, over the key bar.
   const [shortcutsOpen, setShortcutsOpen] = useState(false)
   const closeShortcuts = useCallback(() => setShortcutsOpen(false), [])
@@ -1922,7 +1932,21 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
   const herdrFailed = (e: unknown) => (e instanceof ApiError && e.code === 'herdr_busy' ? t('herdr.busy') : t('sc.herdrFailed'))
   const pickShortcut = async (s: Shortcut) => {
     setShortcutsOpen(false)
-    if ('keys' in s) return sendKeys(s.keys)
+    const gen = ++againGen.current // (another pick: an Esc still to follow goes no more)
+    if ('keys' in s) {
+      if (!s.again) return sendKeys(s.keys)
+      const live = () => gen === againGen.current
+      // (Sent with the next at once, it is read as one key: OpenCode's Esc.
+      // So the first must go out then, not be held in a queue, and the
+      // second goes over the same connection, nothing held before it.)
+      const conn = connRef.current
+      const opens = conn?.opens
+      const straight = () => live() && !!conn && conn === connRef.current && conn.goesAtOnce() && conn.opens === opens && !heldRef.current()
+      let first = false
+      const go = () => live() && ((first = straight()), true)
+      sendKeys(s.keys, () => void (first && window.setTimeout(() => sendKeys(s.keys, undefined, straight), 300)), go)
+      return
+    }
     if (s.herdr === 'close_pane') {
       // Only from a summary known to be current (not one kept from before a
       // reconnect, where focus may have moved elsewhere meanwhile).

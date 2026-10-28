@@ -167,14 +167,14 @@ func TestAlertAnswer(t *testing.T) {
 // the agents' commands and skills with names that are names.
 func TestParseComplete(t *testing.T) {
 	rec := func(r ...string) string { return strings.Join(r, "\x00") + "\x00" }
-	out := rec("/home/a/proj", "claude /deploy", "codex /prompts:fix", "codex $lint", "claude /bad name", "other /x", "claude /$(rm)",
+	out := rec("/home/a/proj", "claude /deploy", "codex /prompts:fix", "codex $lint", "opencode /ship", "claude /bad name", "other /x", "claude /$(rm)",
 		"claude /evil\n-- corral files --\nphantom", completeMarker,
 		"src/main.go", "./my notes.md", `a"b\c.md`, "/etc/passwd", "../up", "bad\x1bname", completeMarker, strings.Repeat("d/", 40)+"x") + "cut-sh"
 	l := parseComplete(out)
 	if l.Cwd != "/home/a/proj" || strings.Join(l.Files, "|") != `src/main.go|my notes.md|a"b\c.md|`+completeMarker || !l.More {
 		t.Fatalf("files %q more %v", l.Files, l.More)
 	}
-	if len(l.Commands) != 3 || l.Commands[0] != (completeCmd{"claude", "/deploy"}) || l.Commands[2] != (completeCmd{"codex", "$lint"}) {
+	if len(l.Commands) != 4 || l.Commands[0] != (completeCmd{"claude", "/deploy"}) || l.Commands[2] != (completeCmd{"codex", "$lint"}) || l.Commands[3] != (completeCmd{"opencode", "/ship"}) {
 		t.Fatalf("commands %+v", l.Commands)
 	}
 	if l := parseComplete(rec("/x", completeMarker, "a")); l.More || len(l.Files) != 1 {

@@ -56,6 +56,16 @@ export function ShortcutPanel(p: { pages: PanelPage[]; open: PanelPage; herdrKey
       window.removeEventListener('keydown', esc, true)
     }
   }, [onClose])
+  // The page shown has its tab in sight (a phone's width does not hold them all).
+  useEffect(() => {
+    const tab = ref.current?.querySelector<HTMLElement>('.sc-tab[aria-selected="true"]')
+    const bar = tab?.parentElement
+    if (!tab || !bar) return
+    const t = tab.getBoundingClientRect()
+    const b = bar.getBoundingClientRect()
+    if (t.right > b.right) bar.scrollLeft += t.right - b.right
+    else if (t.left < b.left) bar.scrollLeft -= b.left - t.left
+  }, [page])
   const choose = (pg: PanelPage) => {
     setPage(pg)
     try {

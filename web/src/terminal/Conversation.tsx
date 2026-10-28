@@ -1,11 +1,12 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { ArrowDown, Check, ChevronDown, ChevronRight, ChevronsUpDown, GitBranch, Loader, PanelLeft, TriangleAlert, X } from 'lucide-react'
+import { ArrowDown, Check, ChevronDown, ChevronRight, ChevronsUpDown, GitBranch, Loader, MoreVertical, PanelLeft, Search, TriangleAlert, X } from 'lucide-react'
 import { t, getLang, type I18nKey } from '../i18n'
-import { copyText, isCoarse } from '../components/ui'
+import { copyText, isCoarse, Menu, type MenuItem } from '../components/ui'
 import { local } from '../storage'
 import { Markdown } from './markdown'
 import { Code } from './Code'
 import { AgentIcon } from './agentIcons'
+import { matchQuery } from './agents'
 import type { Convo, ConvoEntry, ConvoHunk, ConvoMeta, ConvoPart, ConvoQueued, ConvoRunning, ConvoTask, ConvoTool, ConvoTrouble } from './conversation'
 import { category, isNote, items, ms, partTime, sameEdits, toolName, verbOf, type Category, type Edits, type Item, type Verb } from './convoItems'
 
@@ -100,6 +101,9 @@ export function ConversationView({
   model,
   effort,
   lead,
+  more,
+  query,
+  onQuery,
 }: {
   convo: Convo
   agent: ConvoAgent | null
@@ -117,6 +121,9 @@ export function ConversationView({
   onSendNow?: () => void // (messages wait to be taken in: Claude Code's "send now")
   sendNow?: string // what became of the last "send now", to say
   mode?: ModeSwitch // (its permission mode can be switched from here)
+  more?: () => (MenuItem | null)[] // (a menu at the bar's end: what else is done with it)
+  query?: string // what the side list is searched for, kept by the page (it outlives this view)
+  onQuery?: (q: string) => void
   model?: ModelSwitch // (so can its model)
   effort?: EffortSwitch // (and how hard it is asked to think)
   lead?: ReactNode // (first in the bar: the agents page's way back to its list, on a phone)
@@ -146,8 +153,15 @@ export function ConversationView({
   useEffect(() => {
     if (sideShown || !active) setPicking(false) // (a tab sent to the back keeps no dialog open)
   }, [sideShown, active])
-  // Alt+Up and Alt+Down: the agent before and after on the list (not while
-  // a field with text in it has the keys).
+  // What the side list is searched for (the page's, else kept here: the keys below go by it).
+  const [ownQuery, setOwnQuery] = useState('')
+  const sideQuery = query ?? ownQuery
+  const setSideQuery = onQuery ?? setOwnQuery
+  const shownQuery = useRef('')
+  shownQuery.current = sideShown ? sideQuery : ''
+  // Alt+Up and Alt+Down: the agent before and after on the list, of those
+  // it shows when searched (not while a field with text in it has the keys,
+  // but for its search box).
   const sideRef = useRef(side)
   sideRef.current = side
   useEffect(() => {
@@ -155,13 +169,16 @@ export function ConversationView({
     const onKey = (e: KeyboardEvent) => {
       if (!e.altKey || e.ctrlKey || e.metaKey || e.shiftKey || (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') || underDialog(e)) return
       const el = e.target as HTMLInputElement | null
-      if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') && !el.classList.contains('xterm-helper-textarea') && el.value) return
-      const list = listOrder(sideRef.current?.rows ?? [])
-      if (list.length < 2) return
+      if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') && !el.classList.contains('xterm-helper-textarea') && el.value && !el.closest('.list-search')) return
+      const q = shownQuery.current
+      const list = listOrder((sideRef.current?.rows ?? []).filter((r) => !q.trim() || matchQuery(q, r.title, r.where, r.program)))
+      // (Searched, the one shown may not be among them: one found is gone to.)
+      if (!list.length || (list.length === 1 && list[0].current)) return
       e.preventDefault()
       e.stopPropagation()
       const at = list.findIndex((r) => r.current)
-      const next = list[(at + (e.key === 'ArrowDown' ? 1 : list.length - 1) + (at < 0 ? 1 : 0)) % list.length]
+      // (The one shown not among them: from the first down, the last up.)
+      const next = at < 0 ? list[e.key === 'ArrowDown' ? 0 : list.length - 1] : list[(at + (e.key === 'ArrowDown' ? 1 : list.length - 1)) % list.length]
       if (!next.current) next.onPick()
     }
     window.addEventListener('keydown', onKey, true)
@@ -471,7 +488,7 @@ export function ConversationView({
     <div className="convo" role="region" aria-label={t('convo.title')} ref={root}>
       {sideShown && (
         <nav className="convo-side" aria-label={t('convo.agents')}>
-          <AgentList rows={rows} />
+          <AgentList rows={rows} query={sideQuery} onQuery={setSideQuery} />
           {!isTouchOnly && <p className="convo-side-keys">{t('convo.switchKeys')}<br />{t(allOpen ? 'convo.foldKeys' : 'convo.openKeys')}</p>}
         </nav>
       )}
@@ -506,6 +523,17 @@ export function ConversationView({
             <button type="button" className="btn btn-ghost convo-stop" onClick={onStop}>
               {t('convo.stop')}
             </button>
+          )}
+          {more && (
+            <Menu
+              label={t('common.more')}
+              items={more}
+              button={(open, toggle) => (
+                <button type="button" className="icon-btn convo-bar-more" aria-expanded={open} onClick={toggle} aria-label={t('common.more')} title={t('common.more')}>
+                  <MoreVertical size={18} />
+                </button>
+              )}
+            />
           )}
         </div>
       )}
@@ -977,7 +1005,9 @@ export function when(r: { since?: number; status: string }, now: number): string
 
 // placed: where rows go (their group, their order) by another status than
 // their own, by key (the picker's: as when it opened).
-function AgentList({ rows, onPicked, placed }: { rows: ConvoListRow[]; onPicked?: () => void; placed?: Map<string, ConvoListRow> }) {
+// query, onQuery: what it is searched for, where that is kept outside it
+// (else its own).
+function AgentList({ rows, onPicked, placed, query: given, onQuery }: { rows: ConvoListRow[]; onPicked?: () => void; placed?: Map<string, ConvoListRow>; query?: string; onQuery?: (q: string) => void }) {
   // (The times move on: drawn again every half minute.)
   const [now, setNow] = useState(Date.now())
   useEffect(() => {
@@ -987,11 +1017,17 @@ function AgentList({ rows, onPicked, placed }: { rows: ConvoListRow[]; onPicked?
   // Which of the long groups are opened out (by their name; shut again at
   // a tap, and shut when the list is drawn anew).
   const [open, setOpen] = useState<string[]>([])
+  // What it is searched for (by its title, where it is, its program): the
+  // rest goes, and no group is folded.
+  const [own, setOwn] = useState('')
+  const query = given ?? own
+  const setQuery = onQuery ?? setOwn
   const at = (r: ConvoListRow) => placed?.get(r.key) ?? r
   // (Placed: in their order then, ties too; new ones after.)
   const first = placed ? [...placed.keys()] : []
   const place = (r: ConvoListRow) => (first.includes(r.key) ? first.indexOf(r.key) : first.length)
-  const inOrder = placed ? [...rows].sort((a, b) => place(a) - place(b)) : rows
+  const found = query.trim() ? rows.filter((r) => matchQuery(query, r.title, r.where, r.program)) : rows
+  const inOrder = placed ? [...found].sort((a, b) => place(a) - place(b)) : found
   const today = dayStart(now)
   const yesterday = dayBefore(today)
   const groups = GROUPS.flatMap((g) => {
@@ -1001,6 +1037,8 @@ function AgentList({ rows, onPicked, placed }: { rows: ConvoListRow[]; onPicked?
   })
   return (
     <>
+      {(rows.length > SEARCH_FROM || query) && <ListSearch value={query} onChange={setQuery} />}
+      {query.trim() && !found.length && <p className="list-search-none">{t('convo.searchNone')}</p>}
       {groups.map((g) => {
         const all = g.of.map((p) => rows.find((r) => r.key === p.key)!)
         if (!all.length) return null
@@ -1008,7 +1046,7 @@ function AgentList({ rows, onPicked, placed }: { rows: ConvoListRow[]; onPicked?
         // and the rest wait behind a tap. The one being read stays shown
         // wherever in the group it is, so going to it never hides it, and
         // the group can still be shut around it.
-        const long = FOLDED.includes(g.name) && all.length > foldAt
+        const long = FOLDED.includes(g.name) && all.length > foldAt && !query.trim()
         const shut = long && !open.includes(g.name)
         const of = shut ? all.filter((r, i) => i < foldAt || r.current) : all
         const rest = all.length - of.length
@@ -1065,6 +1103,42 @@ function AgentList({ rows, onPicked, placed }: { rows: ConvoListRow[]; onPicked?
   )
 }
 
+// A list of agents longer than this has a search box over it.
+export const SEARCH_FROM = 5
+
+// The box an agents' list is searched with (see matchQuery). Escape in it
+// empties it first.
+export function ListSearch({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  return (
+    <div className="list-search" role="search">
+      <Search size={15} aria-hidden="true" />
+      <input
+        type="text"
+        enterKeyHint="search"
+        value={value}
+        placeholder={t('convo.search')}
+        aria-label={t('convo.search')}
+        autoCapitalize="none"
+        autoCorrect="off"
+        spellCheck={false}
+        onChange={(e) => onChange(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key !== 'Escape' || !value) return
+          e.preventDefault()
+          e.stopPropagation()
+          e.nativeEvent.stopImmediatePropagation()
+          onChange('')
+        }}
+      />
+      {value && (
+        <button type="button" className="icon-btn list-search-clear" onClick={() => onChange('')} aria-label={t('convo.searchClear')} title={t('convo.searchClear')}>
+          <X size={14} />
+        </button>
+      )}
+    </div>
+  )
+}
+
 // The list over the conversation: under the bar on a wide screen, from the
 // bottom on a phone. Its rows stay where they were when it opened: statuses
 // changing meanwhile do not move them under the finger (what they say is
@@ -1077,13 +1151,16 @@ function Picker({ rows, onClose }: { rows: ConvoListRow[]; onClose: () => void }
     const prev = document.activeElement as HTMLElement | null
     ;(box.current?.querySelector<HTMLElement>('[aria-current="true"]') ?? box.current?.querySelector<HTMLElement>('button'))?.focus()
     const onKey = (e: KeyboardEvent) => {
+      // (Its search box with words in it: emptied first, see ListSearch.)
+      const field = e.target as HTMLInputElement | null
+      if (e.key === 'Escape' && field?.tagName === 'INPUT' && field.value && box.current?.contains(field)) return
       if (e.key === 'Escape') {
         e.preventDefault()
         e.stopPropagation()
         onClose()
       } else if (e.key === 'Tab' && box.current) {
         // (Tab goes round in it: what is behind is not to be reached.)
-        const all = [...box.current.querySelectorAll<HTMLElement>('button')]
+        const all = [...box.current.querySelectorAll<HTMLElement>('button, input')]
         if (!all.length) return
         const at = all.indexOf(document.activeElement as HTMLElement)
         const to = e.shiftKey ? (at <= 0 ? all.length - 1 : at - 1) : at < 0 || at === all.length - 1 ? 0 : at + 1

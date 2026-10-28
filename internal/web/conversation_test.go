@@ -41,6 +41,28 @@ func TestParseConvoLocate(t *testing.T) {
 	if p := procs[2]; p.pid != 103 || p.log != "" {
 		t.Errorf("foreign log kept: %+v", p)
 	}
+	// When its log was last written: its last record's time over the
+	// file's (Claude Code touches its log every hour, nothing written);
+	// the file's where no record said, or what it said is no time.
+	rec := func(f ...string) convoProc {
+		r := parseConvoLocate(convoRec(append([]string{"pid=100", "start=500", "procstart=500", "sid=" + sidA, "log=/home/u/.claude/projects/-w/" + sidA + ".jsonl"}, f...)...)).procs
+		if len(r) != 1 {
+			t.Fatalf("no proc: %v", f)
+		}
+		return r[0]
+	}
+	if w := rec("logmtime=1761640746", "logts=2026-10-27T13:44:10.013Z").wrote; w != 1793108650013 {
+		t.Errorf("by its last record: %d", w)
+	}
+	if w := rec("logts=2026-10-27T13:44:10.013Z", "logmtime=1761640746").wrote; w != 1793108650013 {
+		t.Errorf("by its last record, told first: %d", w)
+	}
+	if w := rec("logmtime=1761640746", "logts=").wrote; w != 1761640746000 {
+		t.Errorf("by the file: %d", w)
+	}
+	if w := rec("logmtime=1761640746", "logts=yesterday").wrote; w != 1761640746000 {
+		t.Errorf("no time: %d", w)
+	}
 	if !parseConvoLocate("noproc\x00").noProc {
 		t.Error("noproc not seen")
 	}

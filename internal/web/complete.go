@@ -27,8 +27,9 @@ const (
 // completeCommand lists, from the folder given as its argument (else the
 // home folder), as NUL-terminated records (no name can fake one): the
 // folder; the agents' own commands and skills ("claude /name", "codex
-// /prompts:name", "codex $name": Claude Code's in the home folder and the
-// project, Codex's prompts and skills); a marker record; the files there
+// /prompts:name", "codex $name", "opencode /name": Claude Code's in the home
+// folder and the project, Codex's prompts and skills, OpenCode's commands in
+// its config folder and the project); a marker record; the files there
 // (git's, else a bounded walk that skips hidden and dependency folders and
 // files). Fixed script; the folder is its only argument.
 func completeCommand(dir string) string {
@@ -38,6 +39,7 @@ func completeCommand(dir string) string {
 		`for d in "$HOME"/.claude/skills/*/ .claude/skills/*/; do [ -f "$d/SKILL.md" ] && { d=${d%/}; printf 'claude /%s\0' "${d##*/}"; }; done; ` +
 		`for f in "$HOME"/.codex/prompts/*.md; do [ -f "$f" ] && { b=${f##*/}; printf 'codex /prompts:%s\0' "${b%.md}"; }; done; ` +
 		`for d in "$HOME"/.codex/skills/*/ "$HOME"/.agents/skills/*/ .agents/skills/*/; do [ -f "$d/SKILL.md" ] && { d=${d%/}; printf 'codex $%s\0' "${d##*/}"; }; done; ` +
+		`for f in "${XDG_CONFIG_HOME:-$HOME/.config}"/opencode/command/*.md "${XDG_CONFIG_HOME:-$HOME/.config}"/opencode/commands/*.md .opencode/command/*.md .opencode/commands/*.md; do [ -f "$f" ] && { b=${f##*/}; printf 'opencode /%s\0' "${b%.md}"; }; done; ` +
 		`printf '%s\0' '` + completeMarker + `'; ` +
 		`git ls-files -z -co --exclude-standard 2>/dev/null || ` +
 		`find . -maxdepth 6 \( -name '.?*' -o -name node_modules -o -name venv -o -name __pycache__ -o -name target -o -name dist \) -prune -o -type f -print0 2>/dev/null; ` +
@@ -57,7 +59,7 @@ const (
 )
 
 type completeCmd struct {
-	Agent string `json:"agent"` // claude or codex
+	Agent string `json:"agent"` // claude, codex or opencode
 	Name  string `json:"name"`
 }
 
@@ -86,7 +88,7 @@ func parseComplete(out string) completeList {
 	i := 1
 	for ; i < len(recs) && recs[i] != completeMarker; i++ {
 		agent, name, ok := strings.Cut(recs[i], " ")
-		if ok && (agent == "claude" || agent == "codex") && completeName.MatchString(name) {
+		if ok && (agent == "claude" || agent == "codex" || agent == "opencode") && completeName.MatchString(name) {
 			l.Commands = append(l.Commands, completeCmd{Agent: agent, Name: name})
 		}
 	}

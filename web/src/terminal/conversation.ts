@@ -128,7 +128,7 @@ export interface ConvoBind {
   pid: number
   start: number
   session: string
-  agent?: string // "claude" or "codex": whose process it is
+  agent?: string // "claude", "codex" or "opencode": whose process it is
   title?: string
 }
 

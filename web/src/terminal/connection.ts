@@ -108,6 +108,11 @@ export class TermConnection {
     return this.status === 'open' && this.ws?.readyState === WebSocket.OPEN
   }
 
+  // goesAtOnce: input sent now would go out at once (not held, not dropped).
+  goesAtOnce() {
+    return !this.watch && !this.full && this.isOpen() && this.queue.length === 0
+  }
+
   // send delivers keyboard input. While reconnecting, a little input is held
   // for a few seconds; anything larger or older is dropped instead of being
   // replayed long after the user stopped expecting it.
