@@ -9,7 +9,9 @@ export type Step = ConvoPart | ConvoEntry
 
 export type Item =
   | { kind: 'user'; e: ConvoEntry }
-  | { kind: 'note'; e: ConvoEntry }
+  // (idle: a compaction said so by a notice after it; last: of retries
+  // next to each other, the last, told on the first's line)
+  | { kind: 'note'; e: ConvoEntry; idle?: boolean; last?: ConvoEntry }
   | { kind: 'summary'; e: ConvoEntry }
   // A run of steps (calls and thinking) between what the agent wrote: one line, opened on demand.
   | { kind: 'work'; key: string; steps: Step[]; live: boolean; moving: boolean; busy?: ConvoPart }
@@ -53,6 +55,7 @@ const stepKey = (s: Step) => (isNote(s) ? 'e' + s.seq : (partKey.get(s) ?? '?'))
 // it one run, the work after another), and does not end the turn.
 export function items(entries: ConvoEntry[], live: boolean, moving: boolean): Item[] {
   const out: Item[] = []
+  const merged = mergeNotes(entries)
   let turn: { from?: string; steps: Step[]; to?: string; key: string } | null = null
   const end = (last: boolean) => {
     if (!turn) return
@@ -124,6 +127,7 @@ export function items(entries: ConvoEntry[], live: boolean, moving: boolean): It
   }
   for (let i = 0; i < entries.length; i++) {
     const e = entries[i]
+    if (merged.has(e)) continue
     // What was taken back is of no turn: it neither starts one nor counts in
     // one (its time, its edits, its answer). One line in its place: between
     // turns where it begins with a message of the person's (a rewind), else
@@ -148,10 +152,12 @@ export function items(entries: ConvoEntry[], live: boolean, moving: boolean): It
       turn.steps.push(e) // (as a note is: in its place)
       continue
     }
-    if (e.role === 'user' || (e.role === 'summary' && !turn)) {
+    // (A scheduled task's turn is a turn of its own, as one the person
+    // asked for: its line shows where the person's message would.)
+    if (e.role === 'user' || (e.role === 'summary' && !turn) || eventOf(e) === 'scheduled') {
       end(false)
-      out.push({ kind: e.role, e } as Item)
-      turn = { key: 't' + e.seq, from: e.role === 'user' ? e.ts : undefined, steps: [] }
+      out.push(e.role === 'note' ? noteItem(e) : ({ kind: e.role, e } as Item))
+      turn = { key: 't' + e.seq, from: e.role !== 'summary' ? e.ts : undefined, steps: [] }
       continue
     }
     if (!turn) turn = { key: 't' + e.seq, steps: [] } // (the log read begins mid-turn)
@@ -172,7 +178,59 @@ export function items(entries: ConvoEntry[], live: boolean, moving: boolean): It
   return out
 }
 
-export const noteItem = (e: ConvoEntry): Item => goneMark.get(e) ?? (e.role === 'summary' ? { kind: 'summary', e } : e.role === 'user' ? { kind: 'user', e } : { kind: 'note', e })
+export const noteItem = (e: ConvoEntry): Item => {
+  const m = goneMark.get(e)
+  if (m) return m
+  if (e.role === 'summary' || e.role === 'user') return { kind: e.role, e }
+  const x = told.get(e)
+  return x ? { kind: 'note', e, ...x } : { kind: 'note', e }
+}
+
+const eventOf = (e: ConvoEntry) => (e.role === 'note' ? e.parts[0]?.event?.kind : undefined)
+const retryOf = (e: ConvoEntry) => (e.role === 'note' && !e.gone && e.parts[0]?.trouble?.kind === 'api' && e.parts[0].trouble.attempt ? e.parts[0].trouble : undefined)
+
+// What a note's line tells of the notes after it (see mergeNotes).
+const told = new WeakMap<ConvoEntry, { idle?: boolean; last?: ConvoEntry }>()
+
+// The notes said on another's line, not on their own: the notice that a
+// compaction was made while the session sat idle (on that compaction's,
+// where it comes after it with no turn begun between), and retries of a
+// request next to each other (on the first's: the last of them told).
+// Among the entries read only: one whose fellow is not read in shows alone.
+function mergeNotes(entries: ConvoEntry[]): Set<ConvoEntry> {
+  const merged = new Set<ConvoEntry>()
+  let compact: ConvoEntry | null = null
+  let retry: ConvoEntry | null = null // (the first of a run of them)
+  for (let i = 0; i < entries.length; i++) {
+    const e = entries[i]
+    const ev = eventOf(e)
+    // (A scheduled turn told twice, by its firing and its own row: once.)
+    // (Its firing just before it: not another turn's own row, told so too.)
+    if (ev === 'scheduled' && e.parts[0].event!.echo && !e.gone && i > 0 && eventOf(entries[i - 1]) === 'scheduled' && !entries[i - 1].parts[0].event!.echo && !entries[i - 1].gone) {
+      merged.add(e)
+      continue
+    }
+    if (e.role === 'user' || ev === 'scheduled') compact = null
+    if (ev === 'compact' && !e.gone) {
+      compact = e
+      told.delete(e)
+    } else if (ev === 'idle_compact' && compact && !e.gone) {
+      told.set(compact, { ...told.get(compact), idle: true })
+      merged.add(e)
+      compact = null
+    }
+    if (retryOf(e)) {
+      if (retry && retryOf(entries[i - 1])) {
+        told.set(retry, { ...told.get(retry), last: e })
+        merged.add(e)
+      } else {
+        retry = e
+        told.delete(e)
+      }
+    } else retry = null
+  }
+  return merged
+}
 
 // (What was taken back within a turn, as a step of it: the line it shows as.)
 const goneMark = new WeakMap<ConvoEntry, Item>()

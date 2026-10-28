@@ -170,7 +170,8 @@ func TestClaudeRewindAcrossCompaction(t *testing.T) {
 		treeRow("text", "a2", "b1", "after the compaction"),
 		treeRow("user", "u2", "a1", "back to before it"),
 	))
-	if g := strings.Join(goneIDs(entriesOf(c)), " "); g != "a2" {
+	// (The compaction too, now shown: rewound to before it, it is undone.)
+	if g := strings.Join(goneIDs(entriesOf(c)), " "); g != "a2 b1" {
 		t.Fatalf("gone %q", g)
 	}
 }

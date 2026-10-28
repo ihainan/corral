@@ -617,6 +617,16 @@ type claudeRow struct {
 		Betas json.RawMessage `json:"betas"` // (looked through, not read into a list: it may be long)
 	} `json:"params"`
 	// What went wrong, on the rows that say so (see trouble).
+	// (system rows of a compaction, a scheduled task's turn, a retry: each
+	// read on its own, so one of an unlooked-for kind costs only itself)
+	CompactMetadata json.RawMessage `json:"compactMetadata"`
+	Prompt          json.RawMessage `json:"prompt"`
+	TaskKind        json.RawMessage `json:"taskKind"`
+	TurnOrigin      json.RawMessage `json:"turnOrigin"`
+	RetryAttempt    json.RawMessage `json:"retryAttempt"`
+	MaxRetries      json.RawMessage `json:"maxRetries"`
+	RetryInMs       json.RawMessage `json:"retryInMs"`
+
 	OriginalModel         string   `json:"originalModel"`
 	FallbackModel         string   `json:"fallbackModel"`
 	APIRefusalExplanation string   `json:"apiRefusalExplanation"`
@@ -762,6 +772,10 @@ func (c *Claude) line(b []byte) {
 			c.add(&r, RoleNote, []Part{{Kind: KindTrouble, Trouble: t}})
 			return
 		}
+		if ev := systemEvent(&r); ev != nil {
+			c.add(&r, RoleNote, []Part{{Kind: KindEvent, Event: ev}})
+			return
+		}
 	}
 	c.Skipped++
 }
@@ -820,6 +834,10 @@ func (c *Claude) user(r *claudeRow) {
 		}
 		if role == RoleNote {
 			c.modelSet(text)
+		}
+		if role == RoleUser && word(r.TurnOrigin) == "scheduled" {
+			c.scheduledTurn(r, text)
+			return
 		}
 		if role == RoleUser && r.PromptSource == "system" {
 			role = RoleNote
@@ -890,6 +908,11 @@ func (c *Claude) user(r *claudeRow) {
 		return
 	}
 	role := RoleUser
+	if results == 0 && len(parts) > 0 && word(r.TurnOrigin) == "scheduled" {
+		c.scheduledTurn(r, partsText(parts))
+		c.add(r, RoleNote, notes)
+		return
+	}
 	if r.PromptSource == "system" {
 		role = RoleNote
 	}
@@ -1494,7 +1517,7 @@ func (c *Claude) result(b claudeBlock, account json.RawMessage) {
 	if text == "" {
 		ref.t.ResultLines = 0
 	}
-	ref.t.Result, ref.t.Truncated = cut(text, maxResult)
+	ref.t.setResult(text)
 	ref.t.Images, ref.t.Refs = images, refs
 	ref.e.Rev = c.rev
 	delete(c.tools, b.ToolUseID)
@@ -2416,7 +2439,11 @@ func (c *Claude) systemTrouble(r *claudeRow) *Trouble {
 			return nil
 		}
 		said, cutOff := cut(text, maxTrouble)
-		return &Trouble{Kind: TroubleAPI, Text: said, Status: e.Status, Cut: cutOff}
+		t := &Trouble{Kind: TroubleAPI, Text: said, Status: e.Status, Cut: cutOff}
+		if a, m := count(r.RetryAttempt), count(r.MaxRetries); a > 0 && m >= a && m < 1000 {
+			t.Attempt, t.Max, t.RetryMs = int(a), int(m), count(r.RetryInMs)
+		}
+		return t
 	case "stop_hook_summary":
 		// (Written after every turn, almost always with nothing to say:
 		// only one that failed or held the agent back is shown.)
@@ -2434,6 +2461,65 @@ func (c *Claude) systemTrouble(r *claudeRow) *Trouble {
 		return &Trouble{Kind: TroubleHook, Text: said, Cut: cutOff, Again: r.PreventedContinuation}
 	}
 	return nil
+}
+
+// scheduledTurn: a scheduled task's prompt, written as a message of the
+// person's (not as Claude Code's own, as it mostly is): not theirs, but its
+// firing, told as such (Echo: where its firing was written just before it,
+// the view shows one of the two, whatever part of the log each was read in).
+func (c *Claude) scheduledTurn(r *claudeRow, text string) {
+	said, cutOff := cut(text, maxTrouble)
+	c.add(r, RoleNote, []Part{{Kind: KindEvent, Event: &Event{Kind: EventScheduled, Text: said, Cut: cutOff, Echo: true}}})
+}
+
+// systemEvent: what a system row tells of the session itself (see Event),
+// else nil.
+func systemEvent(r *claudeRow) *Event {
+	switch r.Subtype {
+	case "compact_boundary":
+		var m struct {
+			Trigger    json.RawMessage `json:"trigger"`
+			PreTokens  json.RawMessage `json:"preTokens"`
+			PostTokens json.RawMessage `json:"postTokens"`
+			DurationMs json.RawMessage `json:"durationMs"`
+		}
+		_ = json.Unmarshal(r.CompactMetadata, &m)
+		trigger := word(m.Trigger)
+		if trigger != "auto" && trigger != "manual" {
+			trigger = ""
+		}
+		return &Event{Kind: EventCompact, Trigger: trigger, Pre: count(m.PreTokens), Post: count(m.PostTokens), Ms: count(m.DurationMs)}
+	case "informational":
+		var s string
+		if json.Unmarshal(r.Content, &s) == nil && strings.HasPrefix(s, "Compacted while idle") {
+			return &Event{Kind: EventIdleCompact}
+		}
+	case "scheduled_task_fire":
+		var s string
+		_ = json.Unmarshal(r.Prompt, &s)
+		said, cutOff := cut(clean(strings.TrimSpace(s)), maxTrouble)
+		return &Event{Kind: EventScheduled, Text: said, Cut: cutOff, Loop: word(r.TaskKind) == "loop"}
+	}
+	return nil
+}
+
+// count: a number a row says of something counted (0 for none, or one
+// that cannot be a count: not a number, below 0, past any real count).
+func count(raw json.RawMessage) int64 {
+	var f float64
+	if json.Unmarshal(raw, &f) != nil || f < 0 || f > 1<<50 {
+		return 0
+	}
+	return int64(f)
+}
+
+// word: a short string a row says ("" for none, or one not a string).
+func word(raw json.RawMessage) string {
+	var s string
+	if json.Unmarshal(raw, &s) != nil {
+		return ""
+	}
+	return clip(s, maxMeta)
 }
 
 // hookTrouble: a hook of the person's that failed, by the kind of row

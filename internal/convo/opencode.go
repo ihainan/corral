@@ -565,14 +565,14 @@ func (c *OpenCode) done(t *Tool, st *ocToolState) {
 	switch st.Status {
 	case "completed":
 		t.Done = true
-		t.Result, t.Truncated = cut(clean(st.Output), maxResult)
+		t.setResult(clean(st.Output))
 		t.ResultLines = lineCount(st.Output)
 		if md := st.Metadata; md != nil && md.Exit != nil && *md.Exit != 0 {
 			t.Error = true
 		}
 	case "error":
 		t.Done, t.Error = true, true
-		t.Result, t.Truncated = cut(clean(st.Error), maxResult)
+		t.setResult(clean(st.Error))
 		t.ResultLines = lineCount(st.Error)
 	}
 }

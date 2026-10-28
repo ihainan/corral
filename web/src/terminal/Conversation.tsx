@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { ArrowDown, Check, ChevronDown, ChevronRight, ChevronsUpDown, GitBranch, Loader, MoreVertical, PanelLeft, Search, TriangleAlert, X } from 'lucide-react'
+import { ArrowDown, Check, ChevronDown, ChevronRight, ChevronsUpDown, Clock, GitBranch, Loader, MoreVertical, PanelLeft, Search, TriangleAlert, X } from 'lucide-react'
 import { t, getLang, type I18nKey } from '../i18n'
 import { copyText, isCoarse, Menu, type MenuItem } from '../components/ui'
 import { local } from '../storage'
@@ -7,7 +7,7 @@ import { Markdown } from './markdown'
 import { Code } from './Code'
 import { AgentIcon } from './agentIcons'
 import { matchQuery } from './agents'
-import type { Convo, ConvoEntry, ConvoHunk, ConvoMeta, ConvoPart, ConvoQueued, ConvoRunning, ConvoTask, ConvoTool, ConvoTrouble } from './conversation'
+import type { Convo, ConvoEntry, ConvoHunk, ConvoMeta, ConvoPart, ConvoQueued, ConvoRunning, ConvoTask, ConvoTool, ConvoTrouble, ConvoEvent } from './conversation'
 import { category, isNote, items, ms, partTime, sameEdits, toolName, verbOf, type Category, type Edits, type Item, type Verb } from './convoItems'
 
 // The conversation view: the agent's log as turns, over the terminal (which
@@ -191,7 +191,17 @@ export function ConversationView({
   const box = useRef<HTMLDivElement>(null)
   const col = useRef<HTMLDivElement>(null)
   const stuck = useRef(true) // following the end
-  const [away, setAway] = useState(false)
+  const [away, setAway] = useState(false) // (not following, the end out of view: the button to it shows)
+  // What the person did to the scroll lately (see the listeners below):
+  // only that leaves the end, or comes back to following it.
+  const did = useRef({ pressed: false, downAt: -1e9, drag: false, touch: false, touchY: 0, fling: 0, touchEndAt: -1e9, top: 0, h: 0, ch: 0, set: -1, glide: false })
+  // The end put in view (its place noted: the scroll it makes is not theirs).
+  const pin = useCallback(() => {
+    const el = box.current
+    if (!el) return
+    el.scrollTop = el.scrollHeight
+    did.current.set = el.scrollTop
+  }, [])
   const copiedRef = useRef(onCopied)
   copiedRef.current = onCopied
   const copy = useCallback((s: string) => void copyText(s).then((ok) => ok && copiedRef.current()), [])
@@ -255,16 +265,40 @@ export function ConversationView({
   // Another conversation in front (another pane, another tab's, or another
   // log of the same pane: /clear, /resume): from its end, nothing of the one
   // before opened or shown (its items' keys may come again in this one).
+  // Back to one read before (its entries kept, of the same reading of its
+  // log): where it was left, followed or read at (its items opened as they were).
+  const shownOf = useRef<{ of?: string; gen: number } | null>(null)
+  const restoring = useRef<Place | null>(null) // (until its items are opened as they were: put back then)
+  const openedNow = useRef(opened)
+  openedNow.current = opened
+  const allOpenNow = useRef(allOpen)
+  allOpenNow.current = allOpen
+  const keepPlace = useCallback(() => {
+    const was = shownOf.current
+    if (was?.of) keepAt(was.of, { gen: was.gen, stuck: stuck.current, anchors: anchors.current, noted: notedList.current, opened: openedNow.current, allOpen: allOpenNow.current })
+  }, [])
   useLayoutEffect(() => {
-    stuck.current = true
-    setAway(false)
-    setOpened({})
-    setAllOpen(false)
+    if (shownOf.current?.of !== convo.of) keepPlace()
+    shownOf.current = { of: convo.of, gen: convo.gen }
+    const p = convo.of ? places.get(convo.of) : undefined
+    const back = !!p && p.gen === convo.gen && !p.stuck && p.anchors.length > 0 && convo.entries.length > 0
+    if (back) {
+      // (Of its runs opened, those still there: as the list keeps them, so
+      // what is put back is what will be drawn.)
+      const keys = new Set(list.flatMap((it) => (it.kind === 'work' ? [it.key] : [])))
+      if (!Object.keys(p.opened).every((k) => keys.has(k))) p.opened = Object.fromEntries(Object.entries(p.opened).filter(([k]) => keys.has(k)))
+    }
+    stuck.current = !back
+    setAway(back)
+    setOpened(back ? p.opened : {})
+    setAllOpen(back ? p.allOpen : false)
     setChanges(null)
-    anchors.current = []
-    const el = box.current
-    if (el) el.scrollTop = el.scrollHeight
+    anchors.current = back ? p.anchors : []
+    notedList.current = back ? p.noted : []
+    restoring.current = back ? p : null
+    if (!back) pin()
   }, [convo.of, convo.gen])
+  useEffect(() => keepPlace, [keepPlace]) // (and as the view goes)
   // Reads in that bring nothing (parts all of one long line): after three
   // in a row it goes on only when asked (the note becomes a button).
   const [olderPaused, setOlderPaused] = useState(false)
@@ -313,7 +347,7 @@ export function ConversationView({
   // are the list's items in order.)
   // (Each also by its place from the end: kept when only what was before
   // changed, as a run read from its middle takes in its start, and its key.)
-  const anchors = useRef<{ key: string; top: number; fromEnd: number; last: string }[]>([])
+  const anchors = useRef<Anchor[]>([])
   const notedList = useRef<typeof list>([]) // (the list they were noted in)
   const listNow = useRef(list)
   listNow.current = list
@@ -323,8 +357,8 @@ export function ConversationView({
     if (!el || !c) return
     const view = el.getBoundingClientRect()
     const kids = [...c.children].filter((k) => !k.classList.contains('convo-older'))
-    const out: { key: string; top: number; fromEnd: number; last: string }[] = []
-    const last = listNow.current.length ? itemKey(listNow.current[listNow.current.length - 1]) : ''
+    const out: Anchor[] = []
+    const last = listNow.current.length ? placeKey(listNow.current[listNow.current.length - 1]) : ''
     // (The first in view by halving: a long conversation has thousands.)
     let lo = 0
     let hi = kids.length
@@ -337,7 +371,7 @@ export function ConversationView({
       const it = listNow.current[i]
       const r = kids[i].getBoundingClientRect()
       if (!it || r.top >= view.bottom) break
-      out.push({ key: itemKey(it), top: r.top - view.top, fromEnd: listNow.current.length - i, last })
+      out.push({ key: placeKey(it), top: r.top - view.top, fromEnd: listNow.current.length - i, last })
     }
     anchors.current = out
     notedList.current = listNow.current
@@ -345,18 +379,21 @@ export function ConversationView({
   useLayoutEffect(() => {
     const el = box.current
     const c = col.current
+    // (Being put back: not before its items are opened as they were, nor noted till then.)
+    const r = restoring.current
+    if (r && (opened !== r.opened || allOpen !== r.allOpen)) return
     if (el && c && !stuck.current && anchors.current.length) {
       const view = el.getBoundingClientRect()
       const kids = [...c.children].filter((k) => !k.classList.contains('convo-older'))
-      const at = new Map(list.map((it, i) => [itemKey(it), i]))
-      const lastNow = list.length ? itemKey(list[list.length - 1]) : ''
+      const at = new Map(list.map((it, i) => [placeKey(it), i]))
+      const lastNow = list.length ? placeKey(list[list.length - 1]) : ''
       // (None there by its key, the end as it was: by its place from the end,
       // if what is there now is new: one there before is another item, moved.)
       const byPlace = () => {
-        const before = new Set(notedList.current.map(itemKey))
+        const before = new Set(notedList.current.map(placeKey))
         return anchors.current.find((a) => {
           const j = list.length - a.fromEnd
-          return a.last === lastNow && j >= 0 && j < list.length && !before.has(itemKey(list[j]))
+          return a.last === lastNow && j >= 0 && j < list.length && !before.has(placeKey(list[j]))
         })
       }
       const hit = anchors.current.find((a) => at.has(a.key)) ?? byPlace()
@@ -364,36 +401,150 @@ export function ConversationView({
       const k = hit ? kids[i] : undefined
       if (hit && k) {
         const d = k.getBoundingClientRect().top - view.top - hit.top
-        if (Math.abs(d) >= 1) el.scrollTop += d
+        if (Math.abs(d) >= 1) {
+          el.scrollTop += d
+          did.current.set = el.scrollTop
+        }
+      } else if (restoring.current) {
+        // (Where it was left is not among what is read: its end, followed.)
+        stuck.current = true
+        setAway(false)
+        pin()
       }
     }
+    restoring.current = null
     note()
   })
   // Before the new content is laid out, note whether the end was in view;
   // after, keep it there.
   useLayoutEffect(() => {
-    const el = box.current
-    if (el && stuck.current) el.scrollTop = el.scrollHeight
+    if (stuck.current) pin()
   }, [list, pending, working, quiet, convo.tasks, !!ask])
+  // Following the end is left by any move the page did not make itself:
+  // the person's scrolling, or the browser's own jump (finding in the page,
+  // a screen reader); a move made by the list laid out anew (a card opened
+  // or shut, the keyboard come or gone, what is above read in) puts the end
+  // back in view. It is taken up again only by the person's own scrolling
+  // to the end (a wheel, a finger, a key, the scroll bar), or the button: a
+  // layout that presses the view to the end does not.
+  const activeNow = useRef(active)
+  activeNow.current = active
   useEffect(() => {
     const el = box.current
     if (!el) return
+    const g = did.current
+    const SOON = 300
+    const atEnd = () => el.scrollHeight - el.scrollTop - el.clientHeight < 48
+    const follow = () => {
+      stuck.current = true
+      g.glide = false
+      setAway(false)
+    }
+    let noting = 0
     const onScroll = () => {
-      const atEnd = el.scrollHeight - el.scrollTop - el.clientHeight < 48
-      stuck.current = atEnd
-      setAway(!atEnd)
-      note()
+      const now = performance.now()
+      const top = el.scrollTop
+      const back = top < g.top - 0.5
+      const laidOut = el.scrollHeight !== g.h || el.clientHeight !== g.ch
+      // (Pressed to the end by the list shrinking: where it was is past
+      // where it can be now.)
+      const pressed = g.top > el.scrollHeight - el.clientHeight + 0.5
+      const ours = Math.abs(top - g.set) < 1
+      g.top = top
+      g.h = el.scrollHeight
+      g.ch = el.clientHeight
+      g.pressed = pressed
+      if (ours) g.set = -1
+      const end = atEnd()
+      // (Away from the end while following: not where the list was laid out
+      // anew since the last move, that move the layout's, whatever the
+      // person did just before.)
+      const theirs = !ours && !laidOut
+      // (To the end, by the person: a wheel, keys, a finger and the glide of
+      // its fling once it is off, the bar; not pressed there.)
+      const down = !ours && !pressed && (g.drag || now - g.downAt < SOON || (!g.touch && g.fling < 0 && now - g.touchEndAt < 3000))
+      if (stuck.current) {
+        if (end) g.glide = false
+        else if (g.glide && !back) {
+          // (on its way to the end, as the button asked)
+        } else if (theirs) {
+          stuck.current = false
+          g.glide = false
+        } else if (!ours) pin()
+      } else if (end && down) follow()
+      setAway(!stuck.current && !atEnd())
+      if (!noting) {
+        noting = requestAnimationFrame(() => {
+          noting = 0
+          note()
+        })
+      }
+    }
+    const onWheel = (e: WheelEvent) => {
+      if (e.deltaY > 0) g.downAt = performance.now()
+    }
+    const onTouchStart = (e: TouchEvent) => {
+      g.touch = true
+      g.fling = 0
+      g.touchY = e.touches[0]?.clientY ?? 0
+    }
+    const onTouchMove = (e: TouchEvent) => {
+      const y = e.touches[0]?.clientY ?? g.touchY
+      const dy = y - g.touchY
+      if (Math.abs(dy) < 4) return
+      g.touchY = y
+      g.fling = dy
+      if (dy < 0) g.downAt = performance.now()
+    }
+    const onTouchEnd = () => {
+      g.touch = false
+      g.touchEndAt = performance.now()
+      if (!stuck.current && g.fling < 0 && atEnd() && !g.pressed) follow()
+    }
+    // (The bar: a press on the box itself, past its content's width.)
+    const onPointerDown = (e: PointerEvent) => {
+      if (e.target === el && e.offsetX >= el.clientWidth) g.drag = true
+    }
+    const onPointerUp = () => {
+      if (!g.drag) return
+      g.drag = false
+      if (!stuck.current && atEnd() && !g.pressed) follow()
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (!activeNow.current || e.ctrlKey || e.metaKey || e.altKey || editable(e.target)) return
+      const k = e.key
+      if (k === 'PageDown' || k === 'ArrowDown' || k === 'End' || (k === ' ' && !e.shiftKey)) g.downAt = performance.now()
     }
     el.addEventListener('scroll', onScroll, { passive: true })
+    el.addEventListener('wheel', onWheel, { passive: true })
+    el.addEventListener('touchstart', onTouchStart, { passive: true })
+    el.addEventListener('touchmove', onTouchMove, { passive: true })
+    el.addEventListener('touchend', onTouchEnd, { passive: true })
+    el.addEventListener('touchcancel', onTouchEnd, { passive: true })
+    el.addEventListener('pointerdown', onPointerDown)
+    window.addEventListener('pointerup', onPointerUp)
+    window.addEventListener('pointercancel', onPointerUp)
+    window.addEventListener('keydown', onKey)
     // (What grows after it is laid out, as the answer card once the screen is read, keeps the end in view too.)
     const grows = new ResizeObserver(() => {
-      if (stuck.current) el.scrollTop = el.scrollHeight
+      if (stuck.current) pin()
+      else setAway(!atEnd())
     })
     if (col.current) grows.observe(col.current)
     grows.observe(el)
     return () => {
       el.removeEventListener('scroll', onScroll)
+      el.removeEventListener('wheel', onWheel)
+      el.removeEventListener('touchstart', onTouchStart)
+      el.removeEventListener('touchmove', onTouchMove)
+      el.removeEventListener('touchend', onTouchEnd)
+      el.removeEventListener('touchcancel', onTouchEnd)
+      el.removeEventListener('pointerdown', onPointerDown)
+      window.removeEventListener('pointerup', onPointerUp)
+      window.removeEventListener('pointercancel', onPointerUp)
+      window.removeEventListener('keydown', onKey)
       grows.disconnect()
+      cancelAnimationFrame(noting)
     }
   }, [])
 
@@ -563,7 +714,12 @@ export function ConversationView({
             className="convo-latest"
             onClick={() => {
               const el = box.current
-              if (el) el.scrollTo({ top: el.scrollHeight, behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' })
+              if (!el) return
+              // (Following again: the end is glided to, not jumped to, on the way.)
+              stuck.current = true
+              did.current.glide = true
+              setAway(false)
+              el.scrollTo({ top: el.scrollHeight, behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' })
             }}
           >
             <ArrowDown size={15} aria-hidden="true" />
@@ -1359,8 +1515,13 @@ const ListItem = memo(
     switch (it.kind) {
       case 'user':
         return <UserTurn e={it.e} onCopy={copy} />
-      case 'note':
-        return it.e.parts[0]?.trouble ? <TroubleNote key={troubleKey(it.e.parts[0].trouble!)} t={it.e.parts[0].trouble!} /> : <p className="convo-note">{noteText(it.e)}</p>
+      case 'note': {
+        const p = it.e.parts[0]
+        if (p?.event) return <EventNote ev={p.event} idle={it.idle} />
+        // (Retries next to each other: on the first's line, the last's.)
+        if (p?.trouble) return <TroubleNote key={troubleKey(p.trouble)} t={(it.last ?? it.e).parts[0]?.trouble ?? p.trouble} />
+        return <p className="convo-note">{noteText(it.e)}</p>
+      }
       case 'summary':
         return (
           <details className="convo-summary">
@@ -1407,6 +1568,10 @@ function sameItem(a: Item, b: Item): boolean {
       const o = b as typeof a
       return a.entries.length === o.entries.length && a.entries.every((e, i) => e === o.entries[i])
     }
+    case 'note': {
+      const o = b as typeof a
+      return a.e === o.e && a.idle === o.idle && a.last === o.last
+    }
     default:
       return a.e === (b as typeof a).e
   }
@@ -1429,6 +1594,7 @@ function TroubleNote({ t: tr }: { t: ConvoTrouble }) {
       break
     case 'api':
       head = tr.status ? t('convo.trouble.apiStatus', { n: tr.status }) : t('convo.trouble.api')
+      if (tr.attempt && tr.max) head += t('convo.trouble.retry', { a: tr.attempt, m: tr.max })
       break
     case 'cut':
       head = t('convo.trouble.cut')
@@ -1460,6 +1626,40 @@ function TroubleNote({ t: tr }: { t: ConvoTrouble }) {
   )
 }
 
+// Something that happened to the session itself: a compaction, as a line
+// across (what it came to, how long it took: the summary it wrote follows,
+// folded), or a turn a scheduled task set going, its prompt behind a tap.
+function EventNote({ ev, idle }: { ev: ConvoEvent; idle?: boolean }) {
+  const [open, setOpen] = useState(false)
+  if (ev.kind === 'scheduled') {
+    const said = (ev.text ?? '').trim()
+    return (
+      <div className="convo-event is-scheduled">
+        <Clock size={14} aria-hidden="true" />
+        <div className="convo-trouble-body">
+          <p className="convo-trouble-head">{t(ev.loop ? 'convo.event.loop' : 'convo.event.scheduled')}</p>
+          {said && open && (
+            <p className="convo-trouble-said">
+              {said}
+              {ev.cut && '…'}
+            </p>
+          )}
+          {said && (
+            <button type="button" className="link-btn" aria-expanded={open} onClick={() => setOpen(!open)}>
+              {t(open ? 'convo.trouble.less' : 'convo.event.prompt')}
+            </button>
+          )}
+        </div>
+      </div>
+    )
+  }
+  const how = ev.kind === 'idle_compact' || idle ? t('convo.event.idle') : ev.trigger === 'manual' ? t('convo.event.manual') : ev.trigger === 'auto' ? t('convo.event.auto') : ''
+  const said = [how ? t('convo.event.compactHow', { how }) : t('convo.event.compact')]
+  if (ev.pre && ev.post) said.push(t('convo.event.sizes', { a: tokens(ev.pre), b: tokens(ev.post) }))
+  if (ev.ms) said.push(t('convo.event.took', { n: Math.max(1, Math.round(ev.ms / 1000)) }))
+  return <p className="convo-event is-compact">{said.join(' · ')}</p>
+}
+
 // What became of a message that was typed and has not turned up in the
 // log, read off the pane's own screen when it did not: it settles whether
 // the words are still sitting in the input, which nothing else can say
@@ -1482,6 +1682,34 @@ function Missing({ look }: { look?: ConvoPending['look'] }) {
 
 const noShow = () => {}
 const itemKey = (it: Item) => (it.kind === 'work' || it.kind === 'answer' || it.kind === 'text' || it.kind === 'gone' ? it.key : 'e' + it.e.seq)
+// (An item where it is: what the agent writes is the same text written
+// and, its turn over, its answer.)
+const placeKey = (it: Item) => itemKey(it).replace(/^[xa](?=\d)/, 'p')
+
+// An item noted in view, where it was (see note).
+type Anchor = { key: string; top: number; fromEnd: number; last: string }
+
+// Where each conversation was left, for this page's life: as many as are
+// kept to be shown at once (conversation.ts), the latest last.
+type Place = { gen: number; stuck: boolean; anchors: Anchor[]; noted: Item[]; opened: Record<string, boolean>; allOpen: boolean }
+const places = new Map<string, Place>()
+function keepAt(of: string, p: Place) {
+  places.delete(of)
+  places.set(of, p)
+  while (places.size > 12) places.delete(places.keys().next().value!)
+}
+
+// How the tool calls opened by hand are shown (by call id), the latest last.
+const toolShown = new Map<string, { open: boolean; full: boolean }>()
+function keepShown(id: string | undefined, v: { open: boolean; full: boolean }) {
+  if (!id) return
+  toolShown.delete(id)
+  if (v.open || v.full) toolShown.set(id, v)
+  while (toolShown.size > 500) toolShown.delete(toolShown.keys().next().value!)
+}
+
+// (Keys typed there are for what is typed in: a box, the terminal.)
+const editable = (t: EventTarget | null) => t instanceof HTMLElement && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName) || !!t.closest('.xterm'))
 
 // What a rewind took back: a line saying so, what it was behind a tap (as
 // it showed, faded: the agent no longer has it).
@@ -1659,7 +1887,13 @@ function Work({ it, open, onToggle, onCopy }: { it: Extract<Item, { kind: 'work'
               s.role === 'summary' ? (
                 <ListItem key={i} it={{ kind: 'summary', e: s }} copy={onCopy} open={false} onToggle={onToggle} onShow={noShow} />
               ) : (
-                s.parts[0]?.trouble ? <TroubleNote key={i + ':' + troubleKey(s.parts[0].trouble!)} t={s.parts[0].trouble!} /> : <p key={i} className="convo-note">{noteText(s)}</p>
+                s.parts[0]?.event ? (
+                  <EventNote key={i} ev={s.parts[0].event} />
+                ) : s.parts[0]?.trouble ? (
+                  <TroubleNote key={i + ':' + troubleKey(s.parts[0].trouble!)} t={s.parts[0].trouble!} />
+                ) : (
+                  <p key={i} className="convo-note">{noteText(s)}</p>
+                )
               )
             ) : s.tool ? (
               <ToolRow key={i} tool={s.tool} onCopy={onCopy} live={s === busy} />
@@ -1754,8 +1988,18 @@ function Thinking({ text, live }: { text: string; live?: boolean }) {
 const exitCode = (tool: ConvoTool) => (tool.error ? /^Exit code (\d{1,3})\b/.exec(tool.result ?? '')?.[1] : undefined)
 
 function ToolRow({ tool, onCopy, live }: { tool: ConvoTool; onCopy: (s: string) => void; live?: boolean }) {
-  const [open, setOpen] = useState(false)
-  const [full, setFull] = useState(false)
+  // (Opened or shown in full: kept by the call, so it is so when its
+  // conversation is shown again, as where it was read is.)
+  const [open, setOpenNow] = useState(() => toolShown.get(tool.id ?? '')?.open ?? false)
+  const [full, setFullNow] = useState(() => toolShown.get(tool.id ?? '')?.full ?? false)
+  const setOpen = (v: boolean) => {
+    setOpenNow(v)
+    keepShown(tool.id, { open: v, full })
+  }
+  const setFull = (v: boolean) => {
+    setFullNow(v)
+    keepShown(tool.id, { open, full: v })
+  }
   const objRef = useRef<HTMLSpanElement>(null)
   const [clipped, setClipped] = useState(false) // (opened while the line cut its object short)
   if (live) return null // (said on the turn's line, as the step under way)
@@ -1774,7 +2018,12 @@ function ToolRow({ tool, onCopy, live }: { tool: ConvoTool; onCopy: (s: string) 
   // for a notebook's: its result is all there is of it).
   // (A failed command's exit code is on the line: its output goes without it.)
   const receipt = isEdit && !tool.error && tool.name !== 'NotebookEdit'
-  const result = tool.done && !receipt ? (code ? tool.result?.replace(/^Exit code \d+\n?/, '') : tool.result) : undefined
+  const head = tool.done && !receipt ? (code ? tool.result?.replace(/^Exit code \d+\n?/, '') : tool.result) : undefined
+  // (A long result: its start and its end, what was left out between said
+  // on a line of its own; all of it is what shows, is counted, is copied.)
+  const tail = head !== undefined ? tool.result_tail : undefined
+  const gap = tail ? (tool.omitted ? t('convo.omittedLines', { n: tool.omitted }) : t('convo.omitted')) : ''
+  const result = tail ? (head ?? '') + (head && !head.endsWith('\n') ? '\n' : '') + gap + '\n' + tail : head
   return (
     <div className={'convo-step' + (tool.error ? ' is-error' : '')}>
       <button
@@ -1807,10 +2056,23 @@ function ToolRow({ tool, onCopy, live }: { tool: ConvoTool; onCopy: (s: string) 
           ) : result ? (
             <>
               <div className="convo-result-head">
-                {t('convo.output', { n: Math.max(0, (tool.result_lines ?? 0) - (code && result !== tool.result ? 1 : 0)) })}
-                {tool.truncated && <span> · {t('convo.cut')}</span>}
+                {t('convo.output', { n: Math.max(0, (tool.result_lines ?? 0) - (code && head !== tool.result ? 1 : 0)) })}
+                {tool.truncated && <span> · {t(tail ? 'convo.cutMiddle' : 'convo.cut')}</span>}
               </div>
-              <pre className={'convo-pre convo-result' + (full ? ' is-full' : '')}>{result}</pre>
+              <div className="convo-pre-wrap">
+                <pre className={'convo-pre convo-result' + (full ? ' is-full' : '')}>
+                  {tail ? (
+                    <>
+                      {head && !head.endsWith('\n') ? head + '\n' : head}
+                      <span className="convo-omitted">{gap}</span>
+                      {'\n' + tail}
+                    </>
+                  ) : (
+                    result
+                  )}
+                </pre>
+                <button type="button" className="md-code-copy" onClick={() => onCopy(result)}>{t('common.copy')}</button>
+              </div>
               {!full && result.split('\n').length > 12 && (
                 <button type="button" className="link-btn" onClick={() => setFull(true)}>{t('convo.showAll')}</button>
               )}

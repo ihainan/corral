@@ -682,6 +682,7 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 }
 .convo-pre-wrap .convo-pre { padding-right: 52px; }
 .convo-result.is-full { max-height: none; }
+.convo-omitted { color: var(--term-fg-3); font-size: 12px; }
 .convo-result-head { margin: 8px 0 4px; font-size: 12px; color: var(--term-fg-3); }
 .convo-diff > span { display: block; }
 .convo-del { background: color-mix(in srgb, #e5534b 16%, transparent); }
@@ -751,6 +752,11 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
   background: color-mix(in srgb, var(--term-warn-text) 9%, var(--term-bg)); color: var(--term-fg-2); font-size: 13px; line-height: 19px;
 }
 .convo-trouble svg { flex: none; margin-top: 2px; color: var(--term-warn-text); }
+.convo-event.is-scheduled { display: flex; gap: 8px; align-items: flex-start; margin: 0; font-size: 13px; color: var(--term-fg-2); }
+.convo-event.is-scheduled svg { flex: none; margin-top: 3px; color: var(--term-fg-3); }
+.convo-event.is-scheduled .convo-trouble-head { color: var(--term-fg-2); }
+.convo-event.is-compact { display: flex; align-items: center; gap: 10px; margin: 4px 0; font-size: 12px; color: var(--term-fg-3); text-align: center; }
+.convo-event.is-compact::before, .convo-event.is-compact::after { content: ''; flex: 1 1 24px; border-top: 1px solid var(--term-line); }
 .convo-trouble.is-cut svg { color: var(--term-fg-3); }
 .convo-trouble.is-cut { background: var(--term-key-active); }
 .convo-trouble-body { min-width: 0; flex: 1; }

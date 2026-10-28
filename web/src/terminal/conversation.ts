@@ -26,7 +26,11 @@ export interface ConvoTool {
   error?: boolean
   result?: string
   result_lines?: number
+  // truncated: result is the start of it; result_tail, its end (where kept),
+  // with omitted whole lines left out between (0: not told in lines).
   truncated?: boolean
+  result_tail?: string
+  omitted?: number
   images?: number // (pictures read: a screenshot, a PDF's pages)
   refs?: number // (tools a search found)
 }
@@ -48,12 +52,29 @@ export interface ConvoHunk {
 }
 
 export interface ConvoPart {
-  kind: 'text' | 'thinking' | 'tool' | 'image' | 'noted' | 'trouble'
+  kind: 'text' | 'thinking' | 'tool' | 'image' | 'noted' | 'trouble' | 'event'
   text?: string
   truncated?: boolean
   tool?: ConvoTool
   noted?: ConvoNoted
   trouble?: ConvoTrouble
+  event?: ConvoEvent
+}
+
+// Something that happened to the session itself (internal/convo/convo.go
+// Event): it was compacted (trigger "auto" or "manual"; the tokens before
+// and after; how long it took), a notice that that was while it sat idle,
+// a scheduled task (or a loop's) set a turn going with its prompt.
+export interface ConvoEvent {
+  kind: 'compact' | 'idle_compact' | 'scheduled'
+  trigger?: string
+  pre?: number
+  post?: number
+  ms?: number
+  text?: string
+  cut?: boolean
+  loop?: boolean
+  echo?: boolean // (scheduled) told by the turn's own row: right after its firing, the same turn
 }
 
 // Something that went wrong which the thread would otherwise not show: the
@@ -67,6 +88,9 @@ export interface ConvoTrouble {
   secs?: number // how long a hook was given before it was cut off
   again?: boolean // it was tried again (by name), or the hook held the agent back
   cut?: boolean // text is only the start of what was said
+  attempt?: number // (api) it is tried again: this time, of max
+  max?: number
+  retry_ms?: number
 }
 
 // Files the turn was given without the conversation saying so: ones that

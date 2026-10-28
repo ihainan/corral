@@ -7,6 +7,11 @@
 // here interprets text as markup; the browser renders it as text.
 package convo
 
+import (
+	"strings"
+	"unicode/utf8"
+)
+
 // Parser reads one agent's log: Claude Code's (Claude) or Codex's (Codex).
 type Parser interface {
 	Feed(lines []byte)     // whole lines, in order
@@ -51,6 +56,14 @@ const (
 	KindImage    = "image"   // an image was attached (its bytes are not kept)
 	KindNoted    = "noted"   // files the turn was given without anyone saying so
 	KindTrouble  = "trouble" // something went wrong that the thread would otherwise not show
+	KindEvent    = "event"   // something that happened to the session itself (see Event)
+)
+
+// What an Event is of.
+const (
+	EventCompact     = "compact"      // the conversation was compacted
+	EventIdleCompact = "idle_compact" // (said after it) it was so while the session sat idle
+	EventScheduled   = "scheduled"    // a scheduled task (or /loop) set a turn going
 )
 
 // What a Trouble is of.
@@ -113,6 +126,28 @@ type Part struct {
 	Tool      *Tool    `json:"tool,omitempty"`
 	Noted     *Noted   `json:"noted,omitempty"`
 	Trouble   *Trouble `json:"trouble,omitempty"`
+	Event     *Event   `json:"event,omitempty"`
+}
+
+// Event is something that happened to the session itself, not said by
+// anyone: without it, the view shows the conversation shrink to a summary
+// for no reason, or the agent start a turn nobody asked for.
+type Event struct {
+	Kind string `json:"kind"` // EventCompact, EventIdleCompact, EventScheduled
+	// Compact: by whom ("auto", "manual"), the tokens of the conversation
+	// before and after, how long it took.
+	Trigger string `json:"trigger,omitempty"`
+	Pre     int64  `json:"pre,omitempty"`
+	Post    int64  `json:"post,omitempty"`
+	Ms      int64  `json:"ms,omitempty"`
+	// Scheduled: the task's prompt (Cut: only its start), and whether it is
+	// a loop's (/loop) rather than a task set for a time.
+	Text string `json:"text,omitempty"`
+	Cut  bool   `json:"cut,omitempty"`
+	Loop bool   `json:"loop,omitempty"`
+	// Echo: (scheduled) told by the turn's own row, not its firing; right
+	// after its firing, the same turn told again.
+	Echo bool `json:"echo,omitempty"`
 }
 
 // Trouble is something that went wrong which the thread would otherwise
@@ -137,6 +172,11 @@ type Trouble struct {
 	// Again: it was tried again, by the model in Name; without it, the
 	// turn was left unanswered.
 	Again bool `json:"again,omitempty"`
+	// (api) Attempt of Max: it is tried again, that time of as many, in
+	// RetryMs.
+	Attempt int   `json:"attempt,omitempty"`
+	Max     int   `json:"max,omitempty"`
+	RetryMs int64 `json:"retry_ms,omitempty"`
 }
 
 // Noted is a file the turn was given without it being said in the
@@ -186,7 +226,12 @@ type Tool struct {
 	Error       bool   `json:"error,omitempty"`
 	Result      string `json:"result,omitempty"`
 	ResultLines int    `json:"result_lines,omitempty"` // of the whole result, before it was cut
-	Truncated   bool   `json:"truncated,omitempty"`    // (Result is the start of it)
+	// Truncated: Result is the start of it; ResultTail, when there is one,
+	// its end (what a command ends on: its failure, a test run's tally),
+	// with Omitted lines left out between, where whole lines are (else 0).
+	Truncated  bool   `json:"truncated,omitempty"`
+	ResultTail string `json:"result_tail,omitempty"`
+	Omitted    int    `json:"omitted,omitempty"`
 	// What came back that is not words: pictures read (a screenshot, a
 	// PDF's pages), tools a search found.
 	Images int `json:"images,omitempty"`
@@ -220,7 +265,8 @@ type Hunk struct {
 const (
 	maxText      = 64 << 10 // a text or thinking part
 	maxDetail    = 4 << 10  // a tool's detail, old and new text
-	maxResult    = 6 << 10  // a tool's result
+	maxResult    = 6 << 10  // a tool's result (its start and end)
+	maxHead      = 2 << 10  // of which its start
 	maxParts     = 64       // parts of one entry
 	maxID        = 128
 	maxTasks     = 50       // tasks of a task list
@@ -264,4 +310,37 @@ type Meta struct {
 type Task struct {
 	Subject string `json:"subject"`
 	Status  string `json:"status"` // pending, in_progress, completed
+}
+
+// setResult keeps what a tool gave back within maxResult: all of it, else
+// its start (maxHead) and its end (the rest), each cut at a line where one
+// ends in the latter half of its share, else within a line.
+func (t *Tool) setResult(text string) {
+	t.Result, t.ResultTail, t.Omitted, t.Truncated = "", "", 0, false
+	if len(text) <= maxResult {
+		t.Result = strings.Clone(text)
+		return
+	}
+	head, headLine := maxHead, false
+	if i := strings.LastIndexByte(text[:head], '\n'); i >= head/2 {
+		head, headLine = i+1, true
+	} else {
+		for head > 0 && !utf8.RuneStart(text[head]) {
+			head--
+		}
+	}
+	from, tailLine := len(text)-(maxResult-maxHead), false
+	if text[from-1] == '\n' {
+		tailLine = true // (at a line's start already)
+	} else if j := strings.IndexByte(text[from:], '\n'); j >= 0 && j < (maxResult-maxHead)/2 && from+j+1 < len(text) {
+		from, tailLine = from+j+1, true
+	} else {
+		for from < len(text) && !utf8.RuneStart(text[from]) {
+			from++
+		}
+	}
+	t.Result, t.ResultTail, t.Truncated = strings.Clone(text[:head]), strings.Clone(text[from:]), true
+	if headLine && tailLine {
+		t.Omitted = strings.Count(text[head:from], "\n")
+	}
 }

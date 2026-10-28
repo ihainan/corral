@@ -470,7 +470,7 @@ func (c *Codex) ranCommand(r *codexRow, it *codexItem) {
 		t.Detail = clip(clean(cmd), maxDetail)
 	}
 	t.Done, t.Error = it.Status != "in_progress", failed
-	t.Result, t.Truncated = cut(clean(out), maxResult)
+	t.setResult(clean(out))
 	t.ResultLines = lineCount(out)
 	if _, ok := c.seen[id]; ok {
 		c.touch([]*Tool{t})
@@ -652,7 +652,7 @@ func (c *Codex) answer(ts []*Tool, text string, failed bool) {
 	for i, t := range ts {
 		t.Done = true
 		if i == at {
-			t.Result, t.Truncated = cut(clean(text), maxResult)
+			t.setResult(clean(text))
 			t.ResultLines = lineCount(text)
 		}
 		t.Error = failed || codexExit.MatchString(text)

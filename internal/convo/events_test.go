@@ -1,0 +1,75 @@
+package convo
+
+import (
+	"reflect"
+	"testing"
+)
+
+func TestClaudeEvents(t *testing.T) {
+	c := NewClaude()
+	c.Feed(lines(
+		`{"type":"user","uuid":"u1","message":{"role":"user","content":"hello"}}`,
+		`{"type":"system","subtype":"compact_boundary","uuid":"s1","content":"Conversation compacted","compactMetadata":{"trigger":"auto","preTokens":213270,"postTokens":6621,"durationMs":72583,"preservedMessages":{"uuids":["x"]}}}`,
+		`{"type":"user","uuid":"u2","isCompactSummary":true,"message":{"role":"user","content":"This session is being continued…"}}`,
+		`{"type":"system","subtype":"informational","uuid":"s2","content":"Compacted while idle, before the prompt cache expired","level":"notice"}`,
+		`{"type":"system","subtype":"compact_boundary","uuid":"s3","compactMetadata":{"trigger":"manual","preTokens":-5,"postTokens":"many","durationMs":900}}`,
+		`{"type":"system","subtype":"informational","uuid":"s4","content":"Unknown command: /restart","level":"warning"}`,
+		`{"type":"system","subtype":"scheduled_task_fire","uuid":"s5","content":"Running scheduled task (Oct 27 9:07pm)","taskId":"e9dd925d","cron":"7 21 27 10 *","prompt":"check the deploy","taskKind":"loop"}`,
+		`{"type":"user","uuid":"u3","isMeta":true,"promptSource":"system","turnOrigin":"scheduled","scheduledTaskId":"e9dd925d","message":{"role":"user","content":"check the deploy"}}`,
+		`{"type":"user","uuid":"u4","turnOrigin":"scheduled","message":{"role":"user","content":"check the deploy"}}`,
+		`{"type":"assistant","uuid":"a1","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}`,
+		`{"type":"user","uuid":"u5","turnOrigin":"scheduled","message":{"role":"user","content":"check again"}}`,
+		`{"type":"user","uuid":"u6","turnOrigin":"scheduled","message":{"role":"user","content":[{"type":"text","text":"as blocks"}]}}`,
+		`{"type":"user","uuid":"u7","turnOrigin":"scheduled","promptSource":"system","message":{"role":"user","content":[{"type":"text","text":"sent by it"}]}}`,
+		`{"type":"system","subtype":"api_error","uuid":"s6","level":"error","retryInMs":570,"retryAttempt":1,"maxRetries":2,"error":{"formatted":"Internal server error","status":500}}`,
+		`{"type":"system","subtype":"api_error","uuid":"s7","level":"error","retryAttempt":3,"maxRetries":2,"error":{"formatted":"Internal server error","status":500}}`,
+	))
+	type got struct {
+		Role string
+		Ev   Event
+		Tr   Trouble
+		Text string
+	}
+	var all []got
+	for _, e := range c.Since(0) {
+		for _, p := range e.Parts {
+			g := got{Role: e.Role, Text: p.Text}
+			if p.Event != nil {
+				g.Ev = *p.Event
+			}
+			if p.Trouble != nil {
+				g.Tr = *p.Trouble
+			}
+			all = append(all, g)
+		}
+	}
+	want := []got{
+		{Role: RoleUser, Text: "hello"},
+		{Role: RoleNote, Ev: Event{Kind: EventCompact, Trigger: "auto", Pre: 213270, Post: 6621, Ms: 72583}},
+		{Role: RoleSummary, Text: "This session is being continued…"},
+		{Role: RoleNote, Ev: Event{Kind: EventIdleCompact}},
+		{Role: RoleNote, Ev: Event{Kind: EventCompact, Trigger: "manual", Ms: 900}}, // (what cannot be read of it is left out)
+		{Role: RoleNote, Ev: Event{Kind: EventScheduled, Text: "check the deploy", Loop: true}},
+		{Role: RoleNote, Ev: Event{Kind: EventScheduled, Text: "check the deploy", Echo: true}}, // (u4: the view shows its firing's)
+		{Role: RoleAssistant, Text: "done"},
+		{Role: RoleNote, Ev: Event{Kind: EventScheduled, Text: "check again", Echo: true}}, // (no firing: said as one)
+		{Role: RoleNote, Ev: Event{Kind: EventScheduled, Text: "as blocks", Echo: true}},   // (its text in blocks)
+		{Role: RoleNote, Ev: Event{Kind: EventScheduled, Text: "sent by it", Echo: true}},
+		{Role: RoleNote, Tr: Trouble{Kind: TroubleAPI, Text: "Internal server error", Status: 500, Attempt: 1, Max: 2, RetryMs: 570}},
+		{Role: RoleNote, Tr: Trouble{Kind: TroubleAPI, Text: "Internal server error", Status: 500}}, // (an attempt past the most: not told)
+	}
+	if !reflect.DeepEqual(all, want) {
+		for i := range max(len(all), len(want)) {
+			var a, w got
+			if i < len(all) {
+				a = all[i]
+			}
+			if i < len(want) {
+				w = want[i]
+			}
+			if !reflect.DeepEqual(a, w) {
+				t.Errorf("%d: got %+v\nwant %+v", i, a, w)
+			}
+		}
+	}
+}
