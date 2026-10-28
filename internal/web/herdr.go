@@ -411,7 +411,7 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 					continue
 				}
 				lctx, cancel := context.WithTimeout(ctx, 20*time.Second)
-				out, err := sshx.Output(lctx, sess.Client(), convoLocateCommand(sess.Persistence, sess.TmuxSession, ""), convoLocateMax)
+				out, err := sshx.Output(lctx, sess.Client(), convoLocateTimesCommand(sess.Persistence, sess.TmuxSession), convoLocateMax)
 				cancel()
 				var at map[string]int64
 				if err == nil {

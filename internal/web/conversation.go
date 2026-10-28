@@ -35,16 +35,17 @@ import (
 )
 
 const (
-	convoLocateTTL = 10 * time.Second // a pane's binding to a log is checked again after this
-	convoIdle      = 10 * time.Minute // a log nobody reads is forgotten after this
-	convoTail      = 4 << 20          // bytes read from the end of a log when it is first opened
-	convoStep      = 2 << 20          // bytes read at most by one request after that
-	convoOlderStep = 4 << 20          // bytes read from before what was read, when asked for (?older=1)
-	convoLocateMax = 256 << 10        // output of the locating script
-	convoStatesMax = 64               // conversation states kept at once
-	convoReadLimit = 15 * time.Second // a read the host has not answered by then is given up
-	convoLongMax   = 1 << 20          // a line longer than a read, once its images' data is left out, kept up to this
-	convoLongScan  = 32 << 20         // a line longer than an older part is read whole up to this (Codex's messages with images run to 11 MB)
+	convoLocateTTL  = 10 * time.Second // a pane's binding to a log is checked again after this
+	convoTitleSlack = 64 << 10         // the name is looked for this far into what is read too: a row of it the read's start cuts is whole there
+	convoIdle       = 10 * time.Minute // a log nobody reads is forgotten after this
+	convoTail       = 4 << 20          // bytes read from the end of a log when it is first opened
+	convoStep       = 2 << 20          // bytes read at most by one request after that
+	convoOlderStep  = 4 << 20          // bytes read from before what was read, when asked for (?older=1)
+	convoLocateMax  = 256 << 10        // output of the locating script
+	convoStatesMax  = 64               // conversation states kept at once
+	convoReadLimit  = 15 * time.Second // a read the host has not answered by then is given up
+	convoLongMax    = 1 << 20          // a line longer than a read, once its images' data is left out, kept up to this
+	convoLongScan   = 32 << 20         // a line longer than an older part is read whole up to this (Codex's messages with images run to 11 MB)
 )
 
 // b64Strip leaves out of a line, written to it in parts, the base64 an
@@ -151,7 +152,19 @@ func (b *b64Strip) end(dst []byte) []byte {
 // elsewhere it prints the record "noproc". Fixed script; the mode and the
 // validated tmux session name are its only arguments.
 func convoLocateCommand(mode, tmuxName, tmuxPane string) string {
+	return convoLocateWith(mode, tmuxName, tmuxPane, "")
+}
+
+// convoLocateTimesCommand is convoLocateCommand that also says when each
+// JSON log was last written by its records (logts): reading their ends,
+// which the list's times ask for now and then, and nothing else does.
+func convoLocateTimesCommand(mode, tmuxName string) string {
+	return convoLocateWith(mode, tmuxName, "", "times")
+}
+
+func convoLocateWith(mode, tmuxName, tmuxPane, times string) string {
 	script := `PATH="$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+times=$4
 if [ "$1" = tmux ]; then
   t=$(tmux -u display-message -p -t "=$2:" '#{pane_id} #{pid} #{pane_tty} #{pane_title}' 2>/dev/null | head -c 800 | tr -d '\n')
   printf 'tmux=%s\0' "$t"
@@ -175,35 +188,86 @@ codex_sub() {
 # A process's record: what it is, where its log is, and where it runs.
 rec() { # pid start fg procstart sid log agent
   env=$(tr '\0' '\n' <"/proc/$1/environ" 2>/dev/null | grep -E '^(HERDR_PANE_ID|HERDR_SOCKET_PATH|TMUX|TMUX_PANE)=' | head -c 4096)
-  tty=$(readlink "/proc/$1/fd/0" 2>/dev/null | head -c 200 | tr -d '\n')
+  link_of "/proc/$1/fd/0" 200; tty=$l
+  # (Read with the shell's own read: a process started for each step of
+  # each of them, as many as there are, is most of what this takes.)
   anc= a=$1 i=0
   while [ "$i" -lt 40 ]; do
-    a=$(sed -n 's/^PPid:[[:space:]]*\([0-9]*\)$/\1/p' "/proc/$a/status" 2>/dev/null)
+    ppid_of "$a"; a=$pp
     case $a in ''|0|1) break;; esac
-    anc="$anc$a:$(head -c 32 "/proc/$a/comm" 2>/dev/null | tr -d '\n' | tr -c 'A-Za-z0-9._+-' _),"
+    read_all "/proc/$a/comm" ''; c=$x
+    case $c in *[!A-Za-z0-9._+-]*) c=$(printf '%s' "$c" | head -c 32 | tr -c 'A-Za-z0-9._+-' _);; esac
+    anc="$anc$a:$c,"
     i=$((i + 1))
   done
-  cwd=$(readlink "/proc/$1/cwd" 2>/dev/null | head -c 1024 | tr -d '\n')
-  # (When it was last written: a JSON log by its records' own times, as
-  # Claude Code touches its log every hour it runs, nothing written. The
-  # latest of them near its end that is not ahead of now: a record's own
-  # comes after the older ones of what it holds, and is never ahead. Their
-  # fractions made nine digits long, to be compared as text.)
+  link_of "/proc/$1/cwd" 1024; cwd=$l
+  # (When it was last written, asked for ("times": the list's, now and
+  # then): a JSON log by its records' own times, as Claude Code touches its
+  # log every hour it runs, nothing written. The latest of them near its
+  # end that is not ahead of now: a record's own comes after the older ones
+  # of what it holds, and is never ahead. Their fractions made nine digits
+  # long, to be compared as text.)
   lw= lt=; [ -n "$6" ] && lw=$(stat -c %Y "$6" 2>/dev/null)
-  if [ -n "$6" ] && [ "${6%.jsonl}" != "$6" ]; then
+  if [ "$times" = times ] && [ -n "$6" ] && [ "${6%.jsonl}" != "$6" ]; then
     lt=$(tail -c 262144 "$6" 2>/dev/null | grep -ao '"timestamp":"20[0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9:.]*Z"' | cut -d'"' -f4 |
       awk -v now="$(date -u +%Y-%m-%dT%H:%M:%S).999999999" '{ t = $0; sub(/Z$/, "", t); if (t !~ /\./) t = t "."; i = index(t, "."); t = substr(t, 1, i) substr(substr(t, i + 1) "000000000", 1, 9) }
         t <= now && t > k { k = t; m = $0 } END { print m }')
   fi
   printf 'pid=%s\nstart=%s\nbtime=%s\nhz=%s\nfg=%s\nprocstart=%s\nsid=%s\nlog=%s\nlogmtime=%s\nlogts=%s\ntty=%s\ncwd=%s\nanc=%s\nagent=%s\n%s\0' "$1" "$2" "$btime" "$hz" "$3" "$4" "$5" "$6" "$lw" "$lt" "$tty" "$cwd" "$anc" "$7" "$env"
 }
-# (Its start time and whether it is in front on its terminal: st, fg.)
+# (A file's lines joined by $2, as tr would put it in place of each
+# newline, the last one's left out: x. The shell's own: a name of a
+# process may have a newline in it.)
+read_all() {
+  x= y=
+  { while IFS= read -r y; do x=$x$y$2; done; x=$x$y; } <"$1" 2>/dev/null
+}
+# (Its start time and whether it is in front on its terminal: st, fg. The
+# fields after its name, which may have spaces and parentheses in it, read
+# from after the last ") ".)
 stat_of() {
-  stat=$(tr '\n' ' ' <"/proc/$1/stat" 2>/dev/null)
-  st=$(printf '%s' "${stat##*) }" | cut -d' ' -f20)
-  pgrp=$(printf '%s' "${stat##*) }" | cut -d' ' -f3); tpgid=$(printf '%s' "${stat##*) }" | cut -d' ' -f6)
+  read_all "/proc/$1/stat" ' '; stat=$x
+  set -f; set -- ${stat##*) }; set +f
+  st=${20-}; pgrp=${3-}; tpgid=${6-}
+  [ "${stat##*) }" != "$stat" ] || st=
   fg=0; [ -n "$pgrp" ] && [ "$pgrp" = "$tpgid" ] && fg=1
   case $st in ''|*[!0-9]*) return 1;; esac
+}
+# (A process's parent, from the same file: pp.)
+ppid_of() {
+  pp=; read_all "/proc/$1/stat" ' '; s=$x
+  case $s in *') '*) ;; *) return 0;; esac
+  set -f; set -- ${s##*) }; set +f
+  pp=${2-}
+}
+# (Where a link points, as one line of at most $2 bytes: l. The shell's
+# own where it is one line and short enough to be within that however its
+# characters are counted; else cut and joined as head and tr would.)
+link_of() {
+  l=$(readlink "$1" 2>/dev/null)
+  case $l in
+  *"$nl"*) l=$(printf '%s' "$l" | head -c "$2" | tr -d '\n');;
+  *) [ "${#l}" -le $(($2 / 4)) ] || l=$(printf '%s' "$l" | head -c "$2");;
+  esac
+}
+# (A JSON field of the session file's text c, as grep would find its first:
+# "key" *: *, then the value up to its closing quote (str) or its digits
+# after any quotes (num): v.)
+json_after() {
+  v=; r=${c#*\"$1\"}
+  [ "$r" != "$c" ] || return 0
+  while :; do case $r in ' '*) r=${r# };; *) break;; esac; done
+  case $r in :*) r=${r#:};; *) return 0;; esac
+  while :; do case $r in ' '*) r=${r# };; *) break;; esac; done
+}
+json_str() {
+  json_after "$1"; [ -n "$r" ] || return 0
+  case $r in '"'*) r=${r#\"}; case $r in *'"'*) v=${r%%\"*};; esac;; esac
+}
+json_num() {
+  json_after "$1"; [ -n "$r" ] || return 0
+  while :; do case $r in '"'*) r=${r#\"};; *) break;; esac; done
+  v=${r%%[!0-9]*}
 }
 # Claude Code: each process's session file names its session.
 for f in "$HOME"/.claude/sessions/*.json; do
@@ -213,8 +277,8 @@ for f in "$HOME"/.claude/sessions/*.json; do
   [ -r "/proc/$pid/environ" ] || continue
   stat_of "$pid" || continue
   c=$(head -c 65536 "$f" 2>/dev/null | tr -d '\n')
-  sid=$(printf '%s' "$c" | grep -o '"sessionId" *: *"[0-9a-fA-F-]*"' | head -n 1 | sed 's/.*"\([0-9a-fA-F-]*\)"$/\1/')
-  ps=$(printf '%s' "$c" | grep -o '"procStart" *: *"*[0-9]*' | head -n 1 | sed 's/[^0-9]*\([0-9]*\)$/\1/')
+  json_str sessionId; sid=$v
+  json_num procStart; ps=$v
   case $ps in ''|*[!0-9]*) continue;; esac
   case $sid in *[!0-9a-fA-F-]*) continue;; ????????-????-????-????-????????????) ;; *) continue;; esac
   log=
@@ -224,6 +288,15 @@ for f in "$HOME"/.claude/sessions/*.json; do
   done
   rec "$pid" "$st" "$fg" "$ps" "$sid" "$log" claude
 done
+# The user's codex and opencode processes, in one pass over /proc (by
+# their names, read with the shell's own read; each kind then as before).
+codexes= opencodes=
+for d in /proc/[0-9]*; do
+  [ -O "$d" ] || continue
+  read_all "$d/comm" "$nl"
+  while :; do case $x in *"$nl") x=${x%"$nl"};; *) break;; esac; done # (as $(…) would leave it)
+  case $x in codex) codexes="$codexes $d";; opencode) opencodes="$opencodes $d";; esac
+done
 # What a log says of itself, from its head: where it was begun and when.
 # (What it says of itself is in its first line's payload: the line's own
 # timestamp is of when it was written, which a rewrite moves on.)
@@ -232,8 +305,7 @@ meta_of() { head -n 1 "$1" 2>/dev/null | head -c 8192 | awk 'match($0, /"payload
 # Codex begun by the npm package talks to it and keeps none open of its
 # own): each log it holds, with where that conversation was begun and when,
 # so that the Codex in a pane can be told which of them is its own.
-for d in /proc/[0-9]*; do
-  [ -O "$d" ] && [ "$(head -c 16 "$d/comm" 2>/dev/null)" = codex ] || continue
+for d in $codexes; do
   case $(codex_sub "${d#/proc/}") in app-server) ;; *) continue;; esac
   for fd in "$d"/fd/*; do
     l=$(readlink "$fd" 2>/dev/null) || continue
@@ -245,8 +317,7 @@ done
 # has open (rollout-<time>-<session id>.jsonl).
 # (Not one run with exec, as its arguments or its log's head say: no
 # conversation to type into. Of several logs open, the one written last.)
-for d in /proc/[0-9]*; do
-  [ -O "$d" ] && [ "$(head -c 16 "$d/comm" 2>/dev/null)" = codex ] || continue
+for d in $codexes; do
   pid=${d#/proc/}
   sub=$(codex_sub "$pid")
   case $sub in exec|e|exec-server|review|apply|a|login|logout|mcp|mcp-server|app-server|completion|sandbox|debug|cloud|features) continue;; esac
@@ -276,8 +347,7 @@ done
 # has open (…/opencode/opencode.db: all its sessions; which is this one's is
 # told by herdr, or by where it runs). Not one that does not converse
 # (opencode run, serve, …): its first word that is no option.
-for d in /proc/[0-9]*; do
-  [ -O "$d" ] && [ "$(head -c 16 "$d/comm" 2>/dev/null)" = opencode ] || continue
+for d in $opencodes; do
   pid=${d#/proc/}
   sub=$(tr '\0' '\001' <"$d/cmdline" 2>/dev/null | awk 'BEGIN { RS = "\001" } NR == 1 { next } skip { skip = 0; next } /^--$/ { exit }
       /^(-[msp]|--(model|session|prompt|agent|port|hostname|log-level|mdns-domain|cors))$/ { skip = 1; next }
@@ -293,7 +363,7 @@ for d in /proc/[0-9]*; do
   rec "$pid" "$st" "$fg" "$st" 00000000-0000-0000-0000-000000000000 "$log" opencode
 done
 exit 0`
-	return "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(mode) + " " + sshx.QuoteShell(tmuxName) + " " + sshx.QuoteShell(tmuxPane)
+	return "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(mode) + " " + sshx.QuoteShell(tmuxName) + " " + sshx.QuoteShell(tmuxPane) + " " + sshx.QuoteShell(times)
 }
 
 // convoScreenCommand prints the pane's screen as it is now. Fixed script;
@@ -1015,11 +1085,22 @@ func pickConvoProc(procs []convoProc, persistence, pane, herdrSocket, tmuxPID, p
 var convoGens atomic.Int64
 
 // convoState is what the gateway knows of one session's conversation.
+// earlyTitle: the name the person gave a session further back in its log
+// than was read, looked for beside reading (see lookEarlierTitle).
+type earlyTitle struct {
+	mu   sync.Mutex
+	gen  int64  // the reading it was looked for in
+	line []byte // its row, once found; taken in once
+	done bool
+}
+
 type convoState struct {
-	used    atomic.Int64 // unix nanoseconds of the last request
-	inUse   atomic.Int32 // requests holding it now: it is not let go meanwhile
-	mu      sync.Mutex
-	located time.Time
+	used        atomic.Int64 // unix nanoseconds of the last request
+	inUse       atomic.Int32 // requests holding it now: it is not let go meanwhile
+	relocating  atomic.Bool  // a check of what the pane runs is under way beside (see relocateLater)
+	relocFailed atomic.Bool  // the last such check failed: the next is made before answering
+	mu          sync.Mutex
+	located     time.Time
 	// guessed: whose conversation this is was told by where and when it
 	// began (a Codex whose log its daemon keeps), and by what the pane's
 	// screen showed of it: screenSID, of the process screenPID/screenStart,
@@ -1037,9 +1118,10 @@ type convoState struct {
 	gen         int64      // changes when another log is read: what was shown does not apply
 	bind        *convoBind // the process the log is of, while there is one
 	parser      convo.Parser
-	agent       string // whose log: "claude", "codex" or "opencode"
-	offset      int64  // read up to here
-	size        int64  // the log's size when last looked at
+	early       earlyTitle // (see lookEarlierTitle)
+	agent       string     // whose log: "claude", "codex" or "opencode"
+	offset      int64      // read up to here
+	size        int64      // the log's size when last looked at
 	mtime       time.Time
 	older       bool   // the log has more before what was read
 	from        int64  // where in the log the first line read begins (-1 until a first line is whole)
@@ -1211,8 +1293,23 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 	// (A Codex not yet begun on its log is looked for again each time: its
 	// first message begins it, and what is sent next goes to that session.)
 	fresh := st.bind != nil && st.bind.Session == convoNoSession
-	if fresh || time.Since(st.located) > convoLocateTTL || (sess.Persistence == "herdr" && pane != st.pane) {
-		if err := s.locateConvo(ctx, sess, st, pane); err != nil {
+	// What the pane runs, checked again now and then: where a log is read
+	// already, beside this request rather than before it (the scan of the
+	// host's processes takes a while; what is read meanwhile is of the
+	// process it was, and a change shows on the next request). Sending and
+	// keys check it themselves, on the host, before they type.
+	// (Not once one beside has failed: checks that keep failing would leave
+	// what was found shown on and on, as if current. Before answering, a
+	// failure is said.)
+	due := time.Since(st.located) > convoLocateTTL
+	if due && !st.relocFailed.Load() && !fresh && st.bind != nil && st.reason == "" && !(sess.Persistence == "herdr" && pane != st.pane) {
+		s.relocateLater(sess, key, st, pane)
+		due = false
+	}
+	if fresh || due || (sess.Persistence == "herdr" && pane != st.pane) {
+		err := s.locateConvo(ctx, sess, st, pane)
+		st.relocFailed.Store(err != nil) // (made before answering till one succeeds)
+		if err != nil {
 			if errors.Is(err, sshx.ErrBusy) {
 				writeError(w, http.StatusTooManyRequests, "busy", "the host is still answering earlier requests")
 			} else {
@@ -1247,6 +1344,7 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 		rev = 0
 	}
 	ans.Entries = st.parser.Since(rev)
+	st.takeEarlierTitle()
 	ans.Title, ans.Tasks = st.parser.Title(), st.parser.Tasks()
 	if m := st.parser.Meta(); m != (convo.Meta{}) {
 		ans.Meta = &m
@@ -1254,6 +1352,32 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 	ans.Queued = st.parser.Queued()
 	ans.Running = st.parser.Running()
 	writeJSON(w, http.StatusOK, ans)
+}
+
+// relocateLater checks again what the pane runs (locateConvo), beside the
+// request that found it due: one at a time, with the state held (taken
+// again by key: one let go meanwhile is not checked).
+func (s *Server) relocateLater(sess *term.Session, key string, st *convoState, pane string) {
+	if !st.relocating.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer st.relocating.Store(false)
+		held := s.convos.get(key)
+		defer held.done()
+		if held != st {
+			return
+		}
+		st.mu.Lock()
+		defer st.mu.Unlock()
+		if time.Since(st.located) <= convoLocateTTL || (sess.Persistence == "herdr" && pane != st.pane) {
+			return // (checked meanwhile)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		// (Failed: what was found stands, and the next check is made before answering.)
+		st.relocFailed.Store(s.locateConvo(ctx, sess, st, pane) != nil)
+	}()
 }
 
 // locateConvo finds the log of the Claude Code session in the pane; a
@@ -1394,11 +1518,11 @@ func (s *Server) readConvo(sess *term.Session, st *convoState) (more bool, err e
 			if size > convoTail {
 				st.offset, st.older, st.skipping, st.from = size-convoTail, true, true, -1
 				// The name the person gave it may be further back than what
-				// is read: its latest, looked for in all of it, first.
+				// is read: its latest there, looked for beside (a long log
+				// takes the host a while to go through, and what is read is
+				// shown meanwhile), taken in by a later request.
 				if st.agent != "codex" {
-					if line := convoCustomTitle(sess, st.log, st.sid); line != nil {
-						st.parser.Feed(line)
-					}
+					st.lookEarlierTitle(sess, st.offset+convoTitleSlack)
 				}
 			}
 		}
@@ -1457,17 +1581,49 @@ func (s *Server) readConvo(sess *term.Session, st *convoState) (more bool, err e
 	return st.more, err
 }
 
+// lookEarlierTitle looks for the name the person gave the session in the
+// log's first upto bytes (the part before what is read), beside the
+// reading: its answer is not waited for. takeEarlierTitle gives it to the
+// parser in a later request (st.mu held), if the reading is still that one.
+func (st *convoState) lookEarlierTitle(sess *term.Session, upto int64) {
+	gen, log, sid := st.gen, st.log, st.sid
+	st.early.mu.Lock()
+	st.early.gen, st.early.line, st.early.done = gen, nil, false
+	st.early.mu.Unlock()
+	go func() {
+		line := convoCustomTitle(sess, log, sid, upto)
+		st.early.mu.Lock()
+		defer st.early.mu.Unlock()
+		if st.early.gen == gen {
+			st.early.line, st.early.done = line, true
+		}
+	}()
+}
+
+func (st *convoState) takeEarlierTitle() {
+	st.early.mu.Lock()
+	line := st.early.line
+	ok := st.early.done && st.early.gen == st.gen && line != nil
+	if ok {
+		st.early.line = nil
+	}
+	st.early.mu.Unlock()
+	if c, isClaude := st.parser.(*convo.Claude); ok && isClaude {
+		c.EarlierTitle(line)
+	}
+}
+
 // convoCustomTitle finds the last "custom-title" row of a log (the name
 // given with /rename) of session sid, as a line to feed the parser; nil
 // when there is none or it cannot be told. grep goes through a log of
 // hundreds of MB in well under a second.
-func convoCustomTitle(sess *term.Session, log, sid string) []byte {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+func convoCustomTitle(sess *term.Session, log, sid string, upto int64) []byte {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	if !convoUUID.MatchString(sid) {
 		return nil
 	}
-	out, err := sshx.Output(ctx, sess.Client(), convoTitleCommand(log, sid), 65536)
+	out, err := sshx.Output(ctx, sess.Client(), convoTitleCommand(log, sid, upto), 65536)
 	if err != nil {
 		return nil
 	}
@@ -1492,12 +1648,12 @@ func customTitleLine(out []byte, sid string) []byte {
 	return append(line, '\n')
 }
 
-// convoTitleCommand: fixed, the log's path (one locateConvo found, under
+// convoTitleCommand: fixed, its first upto bytes only, the log's path (one locateConvo found, under
 // .claude/projects/) and the session id (validated) its arguments. Rows
 // Claude Code writes for a name begin so; a tool's input that holds the
 // words does not. Of this session's only (a log may hold another's).
-func convoTitleCommand(log, sid string) string {
-	return "LC_ALL=C grep -a '^{\"type\":\"custom-title\"' " + sshx.QuoteShell(log) + " 2>/dev/null | grep -F " + sshx.QuoteShell(`"sessionId":"`+sid+`"`) + " | tail -n 1 | head -c 65536"
+func convoTitleCommand(log, sid string, upto int64) string {
+	return "head -c " + strconv.FormatInt(max(upto, 0), 10) + " " + sshx.QuoteShell(log) + " 2>/dev/null | LC_ALL=C grep -a '^{\"type\":\"custom-title\"' | grep -F " + sshx.QuoteShell(`"sessionId":"`+sid+`"`) + " | tail -n 1 | head -c 65536"
 }
 
 // readOlder reads in the part of the log before what was read: up to

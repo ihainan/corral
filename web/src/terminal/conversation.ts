@@ -164,6 +164,7 @@ export interface Convo {
   // Reads in the part of the log before the first entry (its entries come
   // first, with lower seqs); while one is on its way, nothing more.
   loadOlder: () => void
+  refresh: () => void // read now (a message sent: what it brings, at once)
   gen: number
   bind?: ConvoBind
   agentStatus?: 'busy' | 'idle' // (tmux) as Claude Code's file for the process says
@@ -181,7 +182,7 @@ export interface Convo {
 }
 
 const noop = () => {}
-const initial = (of?: string): Convo => ({ status: 'loading', entries: [], older: false, olderCut: false, loadingOlder: false, loadOlder: noop, gen: 0, failing: false, okAt: 0, changedAt: Date.now(), of })
+const initial = (of?: string): Convo => ({ status: 'loading', entries: [], older: false, olderCut: false, loadingOlder: false, loadOlder: noop, refresh: noop, gen: 0, failing: false, okAt: 0, changedAt: Date.now(), of })
 
 // What was last read of a session's pane, for this page's life: shown at
 // once when it is in front again (its tab back to the front, the pane
@@ -217,6 +218,7 @@ const sameMeta = (a?: ConvoMeta, b?: ConvoMeta) =>
   a === b || (!!a && !!b && a.model === b.model && a.mode === b.mode && a.effort === b.effort && a.branch === b.branch && a.context === b.context && a.window === b.window)
 
 const POLL = 2000
+const ACTIVE = 1000 // (after an answer that brought something: more is likely coming)
 const RETRY = 5000
 const MAX = 6000 // (entries kept, as the gateway keeps at most)
 
@@ -229,6 +231,7 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
   // The part before asked for (by the reading of its gen), until an answer to that came.
   const wantOlder = useRef<number | null>(null)
   const pokeOlder = useRef<() => void>(() => {})
+  const pokeNow = useRef<() => void>(() => {})
 
   useEffect(() => {
     if (!enabled) return
@@ -238,6 +241,7 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
     let gen = 0
     let rev = 0
     let byseq = new Map<number, ConvoEntry>()
+    let again = false // (asked for while one was on its way: once it is answered)
     const run = async () => {
       timer = undefined
       if (stopped) return
@@ -300,6 +304,7 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
             return { ...initial(key), status: 'ready', entries: entries ?? c.entries, older, olderCut, loadingOlder, gen: a.gen, bind: a.bind, agentStatus: a.agent_status, title: a.title || undefined, tasks, meta, queued, running, failing: false, okAt: now, changedAt: entries ? now : c.changedAt, of: key, defaultChanged: a.default_changed }
           })
           remember(key, gen, rev, byseq, a)
+          if (a.entries.length > 0 && !fresh) next = ACTIVE
           if (a.more) next = 300
           if (wantOlder.current !== null) next = 0 // (asked for meanwhile)
         }
@@ -310,6 +315,7 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
       } finally {
         if (ctl === mine) ctl = null
       }
+      if (again) (again = false), (next = 0)
       if (!stopped) timer = setTimeout(run, next)
     }
     const onVisible = () => {
@@ -348,6 +354,14 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
       timer = undefined
       void run()
     }
+    // Read now: at once, or as soon as what is on its way is answered.
+    pokeNow.current = () => {
+      if (stopped) return
+      if (ctl) return void (again = true)
+      clearTimeout(timer)
+      timer = undefined
+      void run()
+    }
     // Another pane in front: what is on its way is for the old one.
     poke.current = () => {
       clearTimeout(timer)
@@ -367,11 +381,15 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
       document.removeEventListener('visibilitychange', onVisible)
       poke.current = () => {}
       pokeOlder.current = () => {}
+      pokeNow.current = () => {}
     }
   }, [sessionId, enabled])
 
   // Another pane in front: read at once rather than at the next tick.
+  // (Not on the first: the reading begun above is for it already.)
+  const paneSeen = useRef(false)
   useEffect(() => {
+    if (!paneSeen.current) return void (paneSeen.current = true)
     poke.current()
   }, [pane])
 
@@ -385,7 +403,8 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
     // (After the state above: the request goes with what it asks for.)
     setTimeout(() => pokeOlder.current())
   }, [])
-  return useMemo(() => ({ ...convo, loadOlder }), [convo, loadOlder])
+  const refresh = useCallback(() => pokeNow.current(), [])
+  return useMemo(() => ({ ...convo, loadOlder, refresh }), [convo, loadOlder, refresh])
 }
 
 // Whether the agent is asking the person something (AskUserQuestion, not

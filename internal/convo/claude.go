@@ -172,6 +172,23 @@ func (c *Claude) Title() string {
 	return c.aiTitle
 }
 
+// EarlierTitle takes the name the person gave the session in a part of its
+// log before what was read (its "custom-title" row), unless what was read
+// gives one: that is later, as with Prepend.
+func (c *Claude) EarlierTitle(line []byte) {
+	if c.myTitleSaid {
+		return
+	}
+	var r struct {
+		Type        string `json:"type"`
+		CustomTitle string `json:"customTitle"`
+	}
+	if json.Unmarshal(line, &r) != nil || r.Type != "custom-title" {
+		return
+	}
+	c.myTitle, c.myTitleSaid = strings.TrimSpace(clip(r.CustomTitle, maxTitle)), true
+}
+
 // Meta is what the session runs with, as the log read last said it.
 func (c *Claude) Meta() Meta { return c.meta }
 

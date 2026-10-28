@@ -38,9 +38,9 @@ type OpenCode struct {
 	floorID  string
 	hasFloor bool
 	working  bool
-	known   bool
-	trimmed bool
-	Skipped int
+	known    bool
+	trimmed  bool
+	Skipped  int
 }
 
 // OpenCodeRow is one line fed: K "m" a message, "p" a part (of message M),

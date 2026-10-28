@@ -1290,3 +1290,24 @@ func TestClaudeRowsReadForTheBarAreNotSkipped(t *testing.T) {
 		t.Errorf("skipped %d, want 1", c.Skipped)
 	}
 }
+
+// A name given further back than was read is taken, unless what was read
+// gives one: that is later.
+func TestEarlierTitle(t *testing.T) {
+	c := New("claude").(*Claude)
+	c.Feed([]byte(`{"type":"ai-title","aiTitle":"its own"}` + "\n"))
+	c.EarlierTitle([]byte(`{"type":"custom-title","customTitle":"mine"}`))
+	if c.Title() != "mine" {
+		t.Fatalf("earlier name not taken: %q", c.Title())
+	}
+	d := New("claude").(*Claude)
+	d.Feed([]byte(`{"type":"custom-title","customTitle":"newer"}` + "\n"))
+	d.EarlierTitle([]byte(`{"type":"custom-title","customTitle":"older"}`))
+	if d.Title() != "newer" {
+		t.Fatalf("a later name lost: %q", d.Title())
+	}
+	d.EarlierTitle([]byte(`{"type":"user","message":{}}`))
+	if d.Title() != "newer" {
+		t.Fatal("not a name row, taken")
+	}
+}

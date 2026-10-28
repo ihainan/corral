@@ -19,7 +19,7 @@ func TestHostScriptsParse(t *testing.T) {
 		"locate tmux":   convoLocateCommand("tmux", "main", "%1"),
 		"screen":        convoScreenCommand("herdr", "w1:p1", "/tmp/herdr.sock"),
 		"tails":         convoTailsCommand([]string{"/home/u/.claude/projects/-w/a.jsonl"}),
-		"title":         convoTitleCommand("/home/u/.claude/projects/-w/a.jsonl", "11111111-2222-4333-8444-555555555501"),
+		"title":         convoTitleCommand("/home/u/.claude/projects/-w/a.jsonl", "11111111-2222-4333-8444-555555555501", 4096),
 		"complete":      completeCommand("/home/u/proj"),
 		"opencode read": ocQueryCommand("/home/u/.local/share/opencode/opencode.db", "tail", "ses_x"),
 	}

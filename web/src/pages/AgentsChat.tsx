@@ -1004,6 +1004,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
         if (authGen() !== account) return drop()
         remember(was)
         mark({ state: 'waiting' })
+        convo.refresh() // (it is in its log in a moment: read now, not at the next tick)
       })
       .catch((e) => {
         if (authGen() !== account) {

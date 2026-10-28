@@ -146,8 +146,11 @@ func TestPickConvoProcStartedInside(t *testing.T) {
 
 func TestConvoLocateCommandQuotesArguments(t *testing.T) {
 	cmd := convoLocateCommand("tmux", "a'b; rm -rf ~", "")
-	if !strings.HasSuffix(cmd, ` corral 'tmux' 'a'\''b; rm -rf ~' ''`) {
+	if !strings.HasSuffix(cmd, ` corral 'tmux' 'a'\''b; rm -rf ~' '' ''`) {
 		t.Fatalf("arguments not quoted: %s", cmd[len(cmd)-60:])
+	}
+	if cmd := convoLocateTimesCommand("herdr", ""); !strings.HasSuffix(cmd, ` corral 'herdr' '' '' 'times'`) {
+		t.Fatalf("times not asked: %s", cmd[len(cmd)-60:])
 	}
 }
 
