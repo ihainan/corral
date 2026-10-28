@@ -1324,10 +1324,14 @@ function PhoneList({ entries, all, titles, onPick }: { entries: Entry[]; all: Se
                 <AgentIcon program={r?.a.agent} size={36} dot={status === 'blocked' || status === 'working' || status === 'done' ? status : undefined} />
                 <span className="agents-list-text">
                   <span className="agents-list-title">{title}</span>
+                  {/* (Done and not seen: said by its dot, its time beside it, as the side list
+                      does; in words for a screen reader, and where forced colours take the dot's.) */}
+                  {status === 'done' && since && <span className="convo-list-status">{t('agents.unseen')}</span>}
                   <span className="agents-list-where">{where}</span>
                 </span>
-                <span className={'agents-list-side is-' + status}>
-                  {status === 'blocked' ? t('convo.status.blocked') : status === 'done' ? t('agents.unseen') : since || (status === 'working' ? t('convo.status.working') : '')}
+                {/* (Waiting for you, in words: no group heading says it here.) */}
+                <span className={'agents-list-side is-' + (status === 'done' && since ? 'idle' : status)}>
+                  {status === 'blocked' ? t('convo.status.blocked') : status === 'done' && !since ? t('agents.unseen') : since || (status === 'working' ? t('convo.status.working') : '')}
                 </span>
               </button>
             </li>
