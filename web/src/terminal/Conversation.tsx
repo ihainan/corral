@@ -568,7 +568,7 @@ export function ConversationView({
         {convo.status === 'ready' && convo.running && <RunningWork items={convo.running} />}
         {convo.status === 'ready' && convo.tasks && <Tasks tasks={convo.tasks} fold={!!ask} />}
         {/* (Asked from the screen: also where its log is not read.) */}
-        {(convo.status === 'ready' || convo.status === 'none') && ask && <div className="convo-dock-ask">{ask}</div>}
+        {(convo.status === 'ready' || convo.status === 'none') && ask && <AskDock>{ask}</AskDock>}
         {/* (Not of one at rest, which would have taken them in: not when its state is not known.) */}
         {convo.status === 'ready' && agent?.status !== 'idle' && agent?.status !== 'done' && convo.queued && <Queue items={convo.queued} onSendNow={working ? onSendNow : undefined} said={sendNow} />}
         {waits && !ask && convo.status === 'ready' && (
@@ -593,6 +593,44 @@ export function ConversationView({
 // What the agent set going and left to itself: a command in the
 // background, a subagent on its own. It stays here until the agent is told
 // it has ended.
+// The question over the composer, scrolled in itself where the screen is
+// short (a small phone): where more of it is below, its foot fades out, so
+// that it is not taken for cut off (not while it is being typed in: what
+// is typed, at its foot with the keyboard up, is not faded).
+function AskDock({ children }: { children: ReactNode }) {
+  const ref = useRef<HTMLDivElement>(null)
+  const [more, setMore] = useState(false)
+  useEffect(() => {
+    const el = ref.current
+    if (!el) return
+    const look = () => setMore(el.scrollHeight - el.scrollTop - el.clientHeight > 2)
+    look()
+    el.addEventListener('scroll', look, { passive: true })
+    const ro = new ResizeObserver(look)
+    // (What is in it is watched as it grows; a question answered gives way
+    // to another, then that one is.)
+    const watch = () => {
+      ro.disconnect()
+      ro.observe(el)
+      for (const c of el.children) ro.observe(c)
+      look()
+    }
+    watch()
+    const mo = new MutationObserver(watch)
+    mo.observe(el, { childList: true })
+    return () => {
+      el.removeEventListener('scroll', look)
+      ro.disconnect()
+      mo.disconnect()
+    }
+  }, [])
+  return (
+    <div className={'convo-dock-ask' + (more ? ' has-more' : '')} ref={ref}>
+      {children}
+    </div>
+  )
+}
+
 function RunningWork({ items }: { items: ConvoRunning[] }) {
   const [open, setOpen] = useState(false)
   // (Down to one: opened again later, it starts folded as it did at first.)

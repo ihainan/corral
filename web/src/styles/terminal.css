@@ -794,6 +794,7 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-ask-sent { margin: 0; font-size: 13px; color: var(--term-fg-3); }
 /* The card over the composer, its own scroll where the screen is short */
 .convo-dock-ask { display: flex; flex-direction: column; max-height: min(58vh, 520px); overflow-y: auto; overscroll-behavior: contain; border-radius: 12px; }
+.convo-dock-ask.has-more:not(:focus-within) { -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 36px), transparent); mask-image: linear-gradient(to bottom, #000 calc(100% - 36px), transparent); }
 /* Short of room (a phone's keyboard up): the question gives way, scrolled
    in itself, and the composer stays in view; the thread above has gone to
    nothing first. */
@@ -839,6 +840,9 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
   flex: none; width: 288px; display: flex; flex-direction: column; overflow-y: auto; overscroll-behavior: contain;
   padding: 8px; border-right: 1px solid var(--term-line); background: var(--term-chrome); font-family: var(--font-ui);
 }
+/* (Longer than the window, it scrolls: what is in it keeps its height, not
+   squeezed to fit, the search box to a line of its text.) */
+.convo-side > * { flex-shrink: 0; }
 .convo-side-keys { margin: auto 0 0; padding: 8px 10px 4px; font-size: 12px; color: var(--term-fg-3); }
 /* An agents' list's search box (side, picker, a phone's list). 16px on a
    touch screen: iOS zooms into a smaller field. */

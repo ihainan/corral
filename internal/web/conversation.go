@@ -14,6 +14,8 @@ package web
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"math"
@@ -1081,8 +1083,27 @@ func pickConvoProc(procs []convoProc, persistence, pane, herdrSocket, tmuxPID, p
 
 // convoGens numbers generations across all states, so a state made anew
 // (the old one forgotten while a browser still held its numbers) never
-// repeats one.
-var convoGens atomic.Int64
+// repeats one. Nor across restarts: counted from a random start (as
+// instance tells runs apart), not from zero. From zero, a browser that had
+// followed a log before a restart met the same generation again for another
+// reading, and asked it only for what changed since a revision the new
+// reading had not reached: nothing more of the conversation showed, nor
+// its own message sent just before. (Random rather than the clock's time:
+// a clock put back would repeat that.)
+var convoGens = func() *atomic.Int64 {
+	var g atomic.Int64
+	g.Store(genStart())
+	return &g
+}()
+
+// genStart: where a run's generations begin, at random in [2^50, 2^52):
+// two runs meet only by a chance of their counts over 2^51, and the numbers
+// stay well within those a browser holds exactly (2^53).
+func genStart() int64 {
+	b := make([]byte, 8)
+	_, _ = rand.Read(b)
+	return 1<<50 + int64(binary.BigEndian.Uint64(b)%(3<<50))
+}
 
 // convoState is what the gateway knows of one session's conversation.
 // earlyTitle: the name the person gave a session further back in its log

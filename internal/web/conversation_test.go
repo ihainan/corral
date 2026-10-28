@@ -2,6 +2,9 @@ package web
 
 import (
 	"fmt"
+	"os"
+	"os/exec"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -502,4 +505,57 @@ func TestModeOnScreen(t *testing.T) {
 			t.Errorf("modeOnScreen(%q) = %q, want %q", in, got, want)
 		}
 	}
+}
+
+// A browser that followed a log before the gateway restarted holds that
+// reading's generation: a reading after the restart must never be numbered
+// the same (it was, counted from zero again, and the browser then asked it
+// only for what came after a revision it had not reached: the conversation
+// stopped showing anything new). Each run begins its count apart from any
+// other's (genStart, as each start of the gateway calls it), from zero or
+// from the same number no more, and within what a browser holds exactly.
+func TestConvoGensAcrossRestarts(t *testing.T) {
+	seen := map[int64]bool{}
+	for range 64 {
+		g := genStart()
+		if g < 1<<50 || g >= 1<<52 {
+			t.Fatalf("a run's generations begin at %d: out of [2^50, 2^52)", g)
+		}
+		if seen[g] {
+			t.Fatalf("two starts of the gateway begin at the same generation %d", g)
+		}
+		seen[g] = true
+	}
+	// Two runs of the gateway, as two processes: each numbers from its own
+	// start (its count as it began, whatever began it).
+	run := func() int64 {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestConvoGensOfThisRun$")
+		cmd.Env = append(os.Environ(), "CORRAL_SAY_GEN=1")
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("a second run: %v", err)
+		}
+		g, err := strconv.ParseInt(strings.TrimSpace(strings.SplitN(string(out), "\n", 2)[0]), 10, 64)
+		if err != nil {
+			t.Fatalf("a second run said %q", out)
+		}
+		return g
+	}
+	a, b := run(), run()
+	if a == b {
+		t.Fatalf("two runs of the gateway begin at the same generation %d", a)
+	}
+	for _, g := range []int64{a, b} {
+		if g < 1<<50 || g >= 1<<53 {
+			t.Fatalf("a run's generations at %d, not of a start apart from others", g)
+		}
+	}
+}
+
+// (Run by the test above in a process of its own: says where its count is.)
+func TestConvoGensOfThisRun(t *testing.T) {
+	if os.Getenv("CORRAL_SAY_GEN") != "1" {
+		t.Skip("run by TestConvoGensAcrossRestarts")
+	}
+	fmt.Println(convoGens.Load())
 }
