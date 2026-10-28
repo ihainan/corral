@@ -56,8 +56,8 @@ func TestClaudeAsksBounded(t *testing.T) {
 	}
 	c := NewClaude()
 	c.Feed(lines(
-		`{"type":"assistant","uuid":"a1","message":{"role":"assistant","content":[{"type":"tool_use","id":"q1","name":"AskUserQuestion","input":{"questions":[{"question":"q","options":[` + strings.Join(opts, ",") + `]}]}}]}}`,
-		`{"type":"assistant","uuid":"a2","message":{"role":"assistant","content":[{"type":"tool_use","id":"p1","name":"ExitPlanMode","input":{"plan":"` + strings.Repeat("x", 40000) + `"}}]}}`,
+		`{"type":"assistant","uuid":"a1","message":{"role":"assistant","content":[{"type":"tool_use","id":"q1","name":"AskUserQuestion","input":{"questions":[{"question":"q","options":[`+strings.Join(opts, ",")+`]}]}}]}}`,
+		`{"type":"assistant","uuid":"a2","message":{"role":"assistant","content":[{"type":"tool_use","id":"p1","name":"ExitPlanMode","input":{"plan":"`+strings.Repeat("x", 40000)+`"}}]}}`,
 	))
 	es := c.Since(0)
 	a, p := es[0].Parts[0].Tool, es[1].Parts[0].Tool
