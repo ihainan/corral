@@ -6,6 +6,9 @@ import { Dialog, isCoarse, LoadError, useToast } from '../components/ui'
 import { getReplyDraft, keepReplyDraft } from './drafts'
 import { asksQuestion, choices, dashedRule, promptBlock, question } from './menu'
 import { choiceText, lasting, questionText } from './askText'
+import { readAskScreen } from './askScreen'
+import { askOn, AskPanel, planOn, PlanPanel, ReviewPanel, useDrive } from './askCard'
+import type { ConvoTool } from './conversation'
 
 interface Screen {
   text: string
@@ -165,7 +168,7 @@ export function useReply(target: ReplyTarget, { onLoaded, resizedAt, onSent }: {
     if (v) void send({ text: v })
   }
   const opts = screen ? choices(screen.text) : []
-  return { screen, failed, reading, changed, busy, error, text, setText, load, send, submit, opts }
+  return { screen, setScreen, failed, reading, changed, busy, error, text, setText, load, send, submit, opts }
 }
 
 
@@ -380,11 +383,24 @@ function useAnswerKeys(on: boolean, ready: boolean, keys: string[], held: (() =>
 // The same, in the conversation, over the composer: the question, what it is
 // of (from the log), its choices (keys 1–9, Esc), a line of text, and the
 // screen itself on demand.
-export function InlineReply({ target, onLoaded, resizedAt, active = true, held }: { target: ReplyTarget; onLoaded?: () => void; resizedAt?: number; active?: boolean; held?: () => boolean }) {
+// call: what the log says is asked (the last call of the agent's, not
+// come back): a question of Claude Code's or a plan, drawn from it where
+// the screen shows that very one (see askCard).
+export function InlineReply({ target, onLoaded, resizedAt, active = true, held, call }: { target: ReplyTarget; onLoaded?: () => void; resizedAt?: number; active?: boolean; held?: () => boolean; call?: ConvoTool }) {
   const [sent, setSent] = useState<string | null>(null) // (the screen answered)
   const [shown, setShown] = useState(false)
   const answered = useRef('')
-  const { screen, failed, reading, changed, busy, error, text, setText, load, send, submit, opts } = useReply(target, { onLoaded, resizedAt, onSent: () => setSent(answered.current) })
+  const { screen, setScreen, failed, reading, changed, busy: sending, error: sendError, text, setText, load, send, submit, opts } = useReply(target, { onLoaded, resizedAt, onSent: () => setSent(answered.current) })
+  const driven = useDrive(screen, setScreen, load, () => setSent(answered.current), call?.id ?? '')
+  const busy = sending || driven.busy
+  const error = sendError || driven.error
+  const state = screen && !driven.unsure ? readAskScreen(screen.text) : ({ kind: 'unknown' } as const)
+  const askAt = askOn(call, state)
+  const structured = !!screen && (askAt >= 0 || (state.kind === 'review' && call?.name === 'AskUserQuestion' && !call.done) || planOn(call, state, screen.text))
+  // (Not known what a key did: the screen, for the person to look at.)
+  useEffect(() => {
+    if (driven.unsure) setShown(true)
+  }, [driven.unsure])
   if (screen) answered.current = screen.digest
   // Answered, it is read again now and then (each read after the last came
   // back) while the agent still waits: another question in the same pane,
@@ -445,15 +461,49 @@ export function InlineReply({ target, onLoaded, resizedAt, active = true, held }
   const [armedFor, setArmedFor] = useState('')
   const arm = () => setArmedFor(screen?.digest ?? '')
   const confirm = useConfirm(screen, opts, (keys) => void send({ keys }))
-  const ready = sent === null && !!screen && !busy && !failed && armedFor === screen.digest
+  // (The card drawn from the log answers by its own steps: no keys here.)
+  const ready = sent === null && !!screen && !busy && !failed && armedFor === screen.digest && !structured
   const cardRef = useRef<HTMLDivElement>(null)
-  useAnswerKeys(active, ready, [...opts.map((o) => o.key), 'esc'], held, cardRef, (k) => (k === 'esc' ? void send({ keys: [k] }) : confirm.choose(k)))
+  useAnswerKeys(active && !structured, ready, [...opts.map((o) => o.key), 'esc'], held, cardRef, (k) => (k === 'esc' ? void send({ keys: [k] }) : confirm.choose(k)))
   if (sent !== null) return <p className="convo-ask-sent" role="status">{t('convo.answeredHere')}</p>
+  if (structured && screen && call) {
+    return (
+      <div className="convo-ask" role="group" aria-label={t('convo.waiting')} aria-busy={busy}>
+        {state.kind === 'question' ? (
+          <AskPanel key={(call.id ?? '') + ':' + askAt} call={call} index={askAt} shown={state} target={target} drive={driven.drive} busy={busy} />
+        ) : state.kind === 'review' ? (
+          <ReviewPanel shown={state} digest={screen.digest} target={target} drive={driven.drive} busy={busy} />
+        ) : state.kind === 'plan' ? (
+          <PlanPanel call={call} shown={state} digest={screen.digest} target={target} drive={driven.drive} busy={busy} onScreen={() => setShown(true)} />
+        ) : null}
+        {changed && (
+          <p className="reply-changed" role="alert">
+            {t(changed === 'answered' ? 'reply.answered' : 'reply.changed')}
+          </p>
+        )}
+        <div className="convo-ask-more">
+          <button type="button" className="link-btn" aria-expanded={shown} onClick={() => setShown(!shown)}>
+            {t(shown ? 'convo.hideScreen' : 'convo.showScreen')}
+          </button>
+          <button type="button" className="link-btn" disabled={busy} onClick={() => void send({ keys: ['esc'] })}>
+            {t('reply.esc')}
+          </button>
+        </div>
+        {shown && screenBox}
+        {error && (
+          <p className="err" role="alert">
+            {error}
+          </p>
+        )}
+      </div>
+    )
+  }
   const q = screen ? question(screen.text) : ''
   const shownQ = block && /^Bash command$/i.test(block.head) && /^Do you want to proceed\?$/i.test(q) ? t('convo.askRun') : questionText(q)
   return (
     <div className="convo-ask" role="group" aria-label={t('convo.waiting')} ref={cardRef} onPointerDown={arm} onFocus={arm}>
       <div className="convo-ask-q">{shownQ || t('convo.waiting')}</div>
+      {driven.unsure && <p className="reply-changed" role="alert">{t('ask.unsure')}</p>}
       {block && <Asked lines={block.lines} />}
       {(needScreen || !!screen?.cut) && !failed && <p className="convo-ask-unread">{t(screen?.cut ? 'reply.cut' : 'convo.askUnread')}</p>}
       {failed ? (

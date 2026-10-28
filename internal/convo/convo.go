@@ -232,6 +232,17 @@ type Tool struct {
 	Truncated  bool   `json:"truncated,omitempty"`
 	ResultTail string `json:"result_tail,omitempty"`
 	Omitted    int    `json:"omitted,omitempty"`
+	// Asks: an AskUserQuestion's questions, as it asked them; Answers,
+	// once answered, what was answered to each (in the same order; "" for
+	// one not answered).
+	Asks    []Ask    `json:"asks,omitempty"`
+	Answers []string `json:"answers,omitempty"`
+	// Plan: (ExitPlanMode) the plan put to the person, as Claude Code
+	// wrote it in the call (PlanCut: only its start), and its file.
+	Plan     string `json:"plan,omitempty"`
+	PlanCut  bool   `json:"plan_cut,omitempty"`
+	PlanPath string `json:"plan_path,omitempty"`
+
 	// What came back that is not words: pictures read (a screenshot, a
 	// PDF's pages), tools a search found.
 	Images int `json:"images,omitempty"`
@@ -241,6 +252,26 @@ type Tool struct {
 	// of the commands it means to run; where it tells of each command on
 	// its own as well, those are what is shown and this goes.
 	fromCall bool
+}
+
+// Ask is one question of an AskUserQuestion: its tab's header, the
+// question, whether more than one choice may be ticked, its choices. Cut:
+// more of it than is kept (the view then reads it off the screen).
+type Ask struct {
+	Header   string      `json:"header,omitempty"`
+	Question string      `json:"question"`
+	Multi    bool        `json:"multi,omitempty"`
+	Options  []AskOption `json:"options"`
+	Cut      bool        `json:"cut,omitempty"`
+}
+
+// AskOption is a choice of a question: its label, what it means, and what
+// it shows beside (a preview: code, a sketch).
+type AskOption struct {
+	Label       string `json:"label"`
+	Description string `json:"description,omitempty"`
+	Preview     string `json:"preview,omitempty"`
+	PreviewCut  bool   `json:"preview_cut,omitempty"`
 }
 
 // Hunk is a run of an edit's lines: each begins with " " (kept), "-"
@@ -282,6 +313,10 @@ const (
 	maxNoted     = 8        // files one note of them names (the rest are counted)
 	maxWrote     = 4096     // the files written that are remembered (see Noted)
 	maxSaid      = 16 << 10 // of the person's last message, what is read for the files it names
+	maxAsks      = 4        // questions of one AskUserQuestion
+	maxOptions   = 8        // choices of one question
+	maxPreview   = 2 << 10  // a choice's preview
+	maxPlan      = 32 << 10 // a plan put to the person
 )
 
 // Meta is what a session runs with, as its log last said it: each field

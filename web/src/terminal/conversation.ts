@@ -31,8 +31,24 @@ export interface ConvoTool {
   truncated?: boolean
   result_tail?: string
   omitted?: number
+  // (AskUserQuestion) its questions as asked, and once answered, what to each
+  asks?: ConvoAsk[]
+  answers?: string[]
+  // (ExitPlanMode) the plan put to the person (plan_cut: only its start), its file
+  plan?: string
+  plan_cut?: boolean
+  plan_path?: string
   images?: number // (pictures read: a screenshot, a PDF's pages)
   refs?: number // (tools a search found)
+}
+
+// A question of an AskUserQuestion (cut: more of it than is kept).
+export interface ConvoAsk {
+  header?: string
+  question: string
+  multi?: boolean
+  options: { label: string; description?: string; preview?: string; preview_cut?: boolean }[]
+  cut?: boolean
 }
 
 // One file a call changed.

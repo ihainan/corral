@@ -605,6 +605,19 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   // checks on the host, right before the keys, that this process still
   // waits for an answer on the screen shown. Another agent in herdr: herdr's.)
   const viaConvo = !!convo.bind && convo.bind.agent === 'claude' && (!herdr || convo.bind.pane === row?.a.pane_id)
+  // What the log says it asks: the agent's last row, where that is a
+  // question of Claude Code's or a plan not come back (anything after it,
+  // a message of the person's above all: none).
+  const asked = useMemo(() => {
+    for (let i = convo.entries.length - 1; i >= 0; i--) {
+      const e = convo.entries[i]
+      if (e.gone || (e.role === 'note' && !e.parts.some((p) => p.text))) continue // (a notice: troubles, events)
+      if (e.role !== 'assistant') return undefined
+      const last = e.parts[e.parts.length - 1]?.tool
+      return last && !last.done && (last.name === 'AskUserQuestion' || last.name === 'ExitPlanMode') ? last : undefined
+    }
+    return undefined
+  }, [convo.entries])
   const replyTo = useMemo(
     () => (viaConvo && convo.bind ? convoTarget(sid, convo.bind) : herdr && row ? herdrTarget(sid, row.a) : null),
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1440,7 +1453,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       ask={
         waits && replyTo ? (
           // (One a pane, and a process in it: nothing of another's carries over. Not tied to a terminal: no size to wait for.)
-          <InlineReply key={replyTo.key} target={replyTo} resizedAt={0} active={active} held={() => false} />
+          <InlineReply key={replyTo.key} target={replyTo} resizedAt={0} active={active} held={() => false} call={asked} />
         ) : undefined
       }
       onStop={canPress && !lead ? () => press('stop') : undefined} // (a phone: the composer's button stops it, the bar keeps the room for the name)

@@ -757,6 +757,8 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-event.is-scheduled .convo-trouble-head { color: var(--term-fg-2); }
 .convo-event.is-compact { display: flex; align-items: center; gap: 10px; margin: 4px 0; font-size: 12px; color: var(--term-fg-3); text-align: center; }
 .convo-event.is-compact::before, .convo-event.is-compact::after { content: ''; flex: 1 1 24px; border-top: 1px solid var(--term-line); }
+.convo-event-said { flex: 0 1 auto; min-width: 0; }
+.convo-event-part { white-space: nowrap; }
 .convo-trouble.is-cut svg { color: var(--term-fg-3); }
 .convo-trouble.is-cut { background: var(--term-key-active); }
 .convo-trouble-body { min-width: 0; flex: 1; }
@@ -1047,3 +1049,20 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 /* A part of the app that did not load (see pages/lazyPages.tsx). */
 .lazy-failed { margin: auto; max-width: 360px; padding: 24px 16px; text-align: center; color: var(--term-fg-2, inherit); font: 14px/22px var(--font-ui); }
 .lazy-failed .btn { margin-top: 12px; }
+
+/* A question or plan of Claude Code's, drawn from its log */
+.convo-ask-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 8px; padding: 0; list-style: none; font-size: 12px; color: var(--term-fg-3); }
+.convo-ask-tabs li { padding: 2px 8px; border-radius: 999px; border: 1px solid var(--term-line); }
+.convo-ask-tabs li.is-now { color: var(--term-fg); border-color: var(--term-accent-text); }
+.convo-ask-tabs li.is-done::after { content: ' ✓'; }
+.convo-ask-hint { margin: 4px 0; font-size: 12.5px; color: var(--term-fg-3); }
+.convo-ask-hint.is-warn { color: var(--term-warn-text); }
+.convo-ask-opt.is-ticked { border-color: var(--term-accent-text); background: var(--term-accent-soft); }
+.convo-ask-opt-wrap { display: flex; flex-direction: column; gap: 4px; }
+.convo-ask-preview-btn { align-self: flex-start; margin-left: 4px; font-size: 12.5px; }
+.convo-ask-preview { max-height: 240px; }
+.convo-ask-go { margin-top: 8px; }
+.convo-ask-answers { margin: 6px 0 8px; display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
+.convo-ask-answers dt { color: var(--term-fg-3); }
+.convo-ask-answers dd { margin: 0; color: var(--term-fg); }
+.convo-ask-plan { max-height: 50vh; overflow: auto; margin: 6px 0 8px; padding: 8px 12px; border-radius: 8px; border: 1px solid var(--term-line); background: var(--term-chrome); }

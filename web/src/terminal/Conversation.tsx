@@ -1657,7 +1657,19 @@ function EventNote({ ev, idle }: { ev: ConvoEvent; idle?: boolean }) {
   const said = [how ? t('convo.event.compactHow', { how }) : t('convo.event.compact')]
   if (ev.pre && ev.post) said.push(t('convo.event.sizes', { a: tokens(ev.pre), b: tokens(ev.post) }))
   if (ev.ms) said.push(t('convo.event.took', { n: Math.max(1, Math.round(ev.ms / 1000)) }))
-  return <p className="convo-event is-compact">{said.join(' · ')}</p>
+  // (Each part whole on a line: a narrow screen breaks between them.)
+  return (
+    <p className="convo-event is-compact">
+      <span className="convo-event-said">
+        {said.map((x, i) => (
+          <span key={i} className="convo-event-part">
+            {i > 0 && ' · '}
+            {x}
+          </span>
+        ))}
+      </span>
+    </p>
+  )
 }
 
 // What became of a message that was typed and has not turned up in the
@@ -2017,7 +2029,7 @@ function ToolRow({ tool, onCopy, live }: { tool: ConvoTool; onCopy: (s: string) 
   // updated"): nothing for the person. What it changed shows instead (not
   // for a notebook's: its result is all there is of it).
   // (A failed command's exit code is on the line: its output goes without it.)
-  const receipt = isEdit && !tool.error && tool.name !== 'NotebookEdit'
+  const receipt = (isEdit && !tool.error && tool.name !== 'NotebookEdit') || (!!tool.answers && !tool.error)
   const head = tool.done && !receipt ? (code ? tool.result?.replace(/^Exit code \d+\n?/, '') : tool.result) : undefined
   // (A long result: its start and its end, what was left out between said
   // on a line of its own; all of it is what shows, is counted, is copied.)
@@ -2049,6 +2061,17 @@ function ToolRow({ tool, onCopy, live }: { tool: ConvoTool; onCopy: (s: string) 
               <pre className="convo-pre">{v === 'cmd' ? <Code text={d} lang="bash" /> : d}</pre>
               <button type="button" className="md-code-copy" onClick={() => onCopy(d)}>{t('common.copy')}</button>
             </div>
+          )}
+          {tool.asks && tool.answers && (
+            // (A question of Claude Code's, answered: what was asked, what was answered.)
+            <dl className="convo-ask-answers">
+              {tool.asks.map((a, i) => (
+                <div key={i}>
+                  <dt>{a.question}</dt>
+                  <dd>{tool.answers![i] || t('ask.notAnswered')}</dd>
+                </div>
+              ))}
+            </dl>
           )}
           {tool.same ? <div className="convo-result-head">{t('convo.noChange')}</div> : tool.patch ? <Hunks hunks={tool.patch} cut={tool.patch_cut} /> : isEdit && <Diff old={tool.old ?? ''} new={tool.new ?? ''} />}
           {!tool.done ? (

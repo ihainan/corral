@@ -14,6 +14,11 @@ const zhChoices: [RegExp, (m: RegExpExecArray) => string][] = [
   [/^Yes,? and switch to accept edits\b.*$/i, () => '允许，并在这个会话里自动接受修改'],
   [/^Yes,? allow all edits (?:during|in) this session\b.*$/i, () => '允许，这个会话里改文件都不再问'],
   [/^Yes,? and switch to auto mode\b.*$/i, () => '允许，并切到自动模式'],
+  [/^Yes,? and always allow access to (.+?) from this project$/i, (m) => `允许，以后在这个项目里访问 ${m[1]} 不再问`],
+  // (A plan put to the person.)
+  [/^Yes,? and use auto mode$/i, () => '批准，并切到自动模式'],
+  [/^Yes,? manually approve edits$/i, () => '批准，修改仍逐个确认'],
+  [/^Tell Claude what to change$/i, () => '告诉 Claude 要改什么'],
 ]
 
 // What a choice does beyond this once, by Claude Code's words (whatever the
@@ -21,8 +26,8 @@ const zhChoices: [RegExp, (m: RegExpExecArray) => string][] = [
 // permission mode changed.
 export function lasting(label: string): 'rule' | 'mode' | undefined {
   const l = label.trim()
-  if (/^Yes,? and switch to (?:accept edits|auto mode)\b|^Yes,? allow all edits (?:during|in) this session\b/i.test(l)) return 'mode'
-  if (/^Yes,? and don['’]t ask again\b/i.test(l)) return 'rule'
+  if (/^Yes,? and (?:switch to|use) (?:accept edits|auto mode)\b|^Yes,? allow all edits (?:during|in) this session\b/i.test(l)) return 'mode'
+  if (/^Yes,? and (?:don['’]t ask again|always allow)\b/i.test(l)) return 'rule'
   return undefined
 }
 

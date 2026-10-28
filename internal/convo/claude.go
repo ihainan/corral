@@ -1370,6 +1370,12 @@ func (c *Claude) assistant(r *claudeRow) {
 			t := &Tool{ID: clip(b.ID, maxID), Name: clip(b.Name, 128)}
 			t.Title, t.Detail, t.Old, t.New = toolInput(b.Name, b.Input)
 			t.Add, t.Del = editLines(b.Name, b.Input)
+			switch b.Name {
+			case "AskUserQuestion":
+				t.Asks = asksOf(b.Input)
+			case "ExitPlanMode":
+				t.Plan, t.PlanCut, t.PlanPath = planOf(b.Input)
+			}
 			parts = append(parts, Part{Kind: KindTool, Tool: t})
 		default:
 			// What a tool of the model's own answered comes back in a row
@@ -1510,6 +1516,9 @@ func (c *Claude) result(b claudeBlock, account json.RawMessage) {
 			op.f(c)
 			c.taskSaid(op)
 		}
+	}
+	if len(ref.t.Asks) > 0 && !b.IsError {
+		ref.t.Answers = answersOf(ref.t.Asks, account)
 	}
 	ref.t.Done = true
 	ref.t.Error = b.IsError
@@ -2542,4 +2551,97 @@ func hookTrouble(kind, name, event, stderr string, exit int, timedOut bool, time
 		return &Trouble{Kind: TroubleHook, Name: clip(which, maxMeta), Text: said, Cut: cutOff, Status: exit}
 	}
 	return nil
+}
+
+// asksOf: the questions of an AskUserQuestion's input, within bounds.
+func asksOf(input json.RawMessage) []Ask {
+	var in struct {
+		Questions []struct {
+			Header      string `json:"header"`
+			Question    string `json:"question"`
+			MultiSelect bool   `json:"multiSelect"`
+			Options     []struct {
+				Label       string `json:"label"`
+				Description string `json:"description"`
+				Preview     string `json:"preview"`
+			} `json:"options"`
+		} `json:"questions"`
+	}
+	if json.Unmarshal(input, &in) != nil {
+		return nil
+	}
+	var out []Ask
+	for i, q := range in.Questions {
+		if i == maxAsks {
+			for j := range out { // (more than are kept: none of them is drawn from here)
+				out[j].Cut = true
+			}
+			break
+		}
+		a := Ask{Header: clip(q.Header, maxMeta), Multi: q.MultiSelect}
+		var cutQ bool
+		a.Question, cutQ = cut(clean(q.Question), maxTitle)
+		a.Cut = cutQ || len(q.Options) > maxOptions
+		for j, o := range q.Options {
+			if j == maxOptions {
+				break
+			}
+			label, cutL := cut(clean(o.Label), maxTitle)
+			p, cutP := cut(clean(o.Preview), maxPreview)
+			a.Cut = a.Cut || cutL
+			a.Options = append(a.Options, AskOption{Label: label, Description: clip(o.Description, maxTitle), Preview: p, PreviewCut: cutP})
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
+// answersOf: what was answered to each question, as Claude Code's account
+// of the call says it ({answers: {question: answer}}).
+func answersOf(asks []Ask, account json.RawMessage) []string {
+	var acc struct {
+		Answers map[string]string `json:"answers"`
+	}
+	if json.Unmarshal(account, &acc) != nil || len(acc.Answers) == 0 {
+		return nil
+	}
+	// (By the question as it is kept: cut and cleaned as it was; two that
+	// are kept alike are told by neither.)
+	got := make(map[string]string, len(acc.Answers))
+	alike := map[string]bool{}
+	for q, v := range acc.Answers {
+		k, _ := cut(clean(q), maxTitle)
+		if _, ok := got[k]; ok {
+			alike[k] = true
+		}
+		got[k] = v
+	}
+	for k := range alike {
+		delete(got, k)
+	}
+	kept := map[string]int{}
+	for _, a := range asks {
+		kept[a.Question]++
+	}
+	out := make([]string, len(asks))
+	for i, a := range asks {
+		if kept[a.Question] == 1 {
+			out[i] = clip(got[a.Question], maxTitle)
+		}
+	}
+	return out
+}
+
+// planOf: the plan an ExitPlanMode puts to the person (Claude Code writes
+// it into the call's input, from the plan's file), and that file.
+func planOf(input json.RawMessage) (string, bool, string) {
+	var in struct {
+		Plan         string `json:"plan"`
+		PlanFilePath string `json:"planFilePath"`
+	}
+	if json.Unmarshal(input, &in) != nil {
+		return "", false, ""
+	}
+	p, cutP := cut(clean(in.Plan), maxPlan)
+	return p, cutP, clip(in.PlanFilePath, maxDetail)
 }
