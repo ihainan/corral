@@ -14,7 +14,7 @@ import { useCompletion } from '../terminal/Completion'
 import { InlineReply } from '../terminal/ReplyDialog'
 import { ConversationView, ListSearch, SEARCH_FROM, when, type ConvoAgent, type ConvoListRow, type ConvoPending, type ModelOpt } from '../terminal/Conversation'
 import { asking, useConversation, type ConvoEntry } from '../terminal/conversation'
-import { isCodex, isOpenCode, listAgents, matchQuery, paneTitle, readsLog, useRunningSessions, type AgentRow } from '../terminal/agents'
+import { ackBg, waitingTitle, isCodex, isOpenCode, listAgents, matchQuery, paneTitle, readsLog, useRunningSessions, type AgentRow } from '../terminal/agents'
 import { prefetchConversation } from '../terminal/conversation'
 import { afterSend, holdsWords, holdTermMode, PENDING_MS, sameRun, sameTurn, tmuxKey } from '../terminal/chatSend'
 import { agentKey, sessionWhich } from '../terminal/sessionName'
@@ -122,6 +122,12 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
   // (Its own two looks, light and dark as the app is: not the terminal's colours.)
   const scheme = isDark() ? corralDark : corralLight
   const { sessions, failed } = useRunningSessions(active, 3000)
+  // (On its own, not a tab: the title tells how many wait for an answer.)
+  const waitingN = useMemo(() => (sessions ? listAgents(sessions).rows.filter((r) => r.status === 'blocked').length : 0), [sessions])
+  useEffect(() => {
+    if (!bar) waitingTitle(waitingN)
+  }, [bar, waitingN])
+  useEffect(() => () => void (!bar && waitingTitle(0)), [bar])
   const [pick, setPick] = useState<Pick | null>(readPick)
   // The entry key of the one picked last (an address names only its session and pane).
   const pickKey = useRef<Pick | null>(pick?.key ? pick : null)
@@ -551,14 +557,21 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     if (!row) return null
     const title = (convo.bind?.pane === row.a.pane_id && convo.title) || paneTitle(row.a.title)
     // (herdr's name for a workspace at home, "~": nothing to tell)
-    return { where: row.ws === '~' ? '' : row.ws, title, status: row.lost ? 'unknown' : row.status, other: readsLog(row.a.agent) ? undefined : row.a.agent, program: row.a.agent }
+    // (Its turn over, with subagents out or that being read for: the thread
+    // is of a turn that ended, whatever the list says of the agent.)
+    const ended = !row.lost && (row.a.bg === 'running' || row.a.bg === 'checking') && (row.a.status === 'done' || row.a.status === 'idle')
+    const status = row.lost ? 'unknown' : ended && row.bg !== 'stale' ? (row.a.status as 'done' | 'idle') : row.status
+    // (While that is read for, the bar says it works, as the list does.)
+    const bg = row.lost ? undefined : (row.bg ?? (ended && row.a.bg === 'checking' ? 'checking' : undefined))
+    return { where: row.ws === '~' ? '' : row.ws, title, status, bg, other: readsLog(row.a.agent) ? undefined : row.a.agent, program: row.a.agent }
   }, [herdr, row, convo.bind, convo.agentStatus, convo.failing, convo.title, convo.entries])
   // A finished one looked at here is seen: the gateway keeps it, so it is
   // no longer "done" in any browser (herdr's own word goes only with its
   // pane focused in herdr). Not while the page is behind another.
   // (Of the round it is done in, as told: a word that comes late, after
   // another round, marks nothing; a round after it is marked in its turn.)
-  const doneHere = herdr && active && row && !row.lost && row.status === 'done' ? { pane: row.a.pane_id, round: row.a.round ?? 0, session: row.a.session ?? '' } : undefined
+  // (Not while what it left running is read for, nor while it is out.)
+  const doneHere = herdr && active && row && !row.lost && row.status === 'done' && row.a.status === 'done' && !row.bg ? { pane: row.a.pane_id, round: row.a.round ?? 0, session: row.a.session ?? '' } : undefined
   const doneKey = doneHere && JSON.stringify(doneHere)
   useEffect(() => {
     if (!doneKey) return
@@ -570,6 +583,17 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     document.addEventListener('visibilitychange', mark)
     return () => document.removeEventListener('visibilitychange', mark)
   }, [sid, doneKey])
+  // Looked at while its subagents have been out too long: no longer among
+  // those to look at, on this device (see agents.ts withBg).
+  const staleAt = herdr && active && row && !row.lost && row.bg === 'stale' ? (row.a.bg_since ?? 0) : 0
+  const staleOf = row?.key ?? ''
+  useEffect(() => {
+    if (!staleAt) return
+    const mark = () => !document.hidden && ackBg(staleOf, staleAt)
+    mark()
+    document.addEventListener('visibilitychange', mark)
+    return () => document.removeEventListener('visibilitychange', mark)
+  }, [staleOf, staleAt])
   // (A new conversation, its log not written yet, takes its first message.)
   const bound = (convo.status === 'ready' || (convo.status === 'none' && convo.reason === 'no_log')) && !!convo.bind && (!herdr || convo.bind.pane === cur.pane)
   // (The answer card reads the pane's screen: it needs no log read.)
@@ -598,7 +622,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       if (e.row) {
         const r = e.row
         const said = (current && agent?.title) || keptTitle(titles, e) || paneTitle(r.a.title) || r.a.agent
-        return { key: e.key, ...labelOf(e, said, hosts), program: r.a.agent, status: current && agent ? agent.status : r.status, since: r.lost ? undefined : r.a.since, current, onPick: () => onPick(e) }
+        return { key: e.key, ...labelOf(e, said, hosts), program: r.a.agent, status: current && agent && !r.bg && r.a.bg !== 'checking' ? agent.status : r.status, bg: r.lost ? undefined : r.bg, since: r.lost ? undefined : r.bg ? r.a.bg_since : r.a.since, current, onPick: () => onPick(e) }
       }
       const title = (current && agent?.title) || keptTitle(titles, e) || `${e.s.host_name} · ${sessionWhich(e.s, all)}`
       return { key: e.key, title, where: whereOf(e, hosts), program: current ? agent?.program : undefined, status: current && agent ? agent.status : 'unknown', current, onPick: () => onPick(e) }
@@ -1522,7 +1546,7 @@ function PhoneList({ entries, all, titles, query, onQuery, onPick }: { entries: 
           return (
             <li key={e.key + ' ' + e.s.id}>
               <button type="button" className={'agents-list-row is-' + status} onClick={() => onPick(e)}>
-                <AgentIcon program={r?.a.agent} size={36} dot={status === 'blocked' || status === 'working' || status === 'done' ? status : undefined} />
+                <AgentIcon program={r?.a.agent} size={36} dot={r?.bg === 'running' && !r.lost ? 'bg' : status === 'blocked' || status === 'working' || status === 'done' ? status : undefined} />
                 <span className="agents-list-text">
                   <span className="agents-list-title">{title}</span>
                   {/* (Done and not seen, or at work: said by its dot, its time beside it, as the
@@ -1533,7 +1557,13 @@ function PhoneList({ entries, all, titles, query, onQuery, onPick }: { entries: 
                 </span>
                 {/* (Waiting for you, in words: no group heading says it here.) */}
                 <span className={'agents-list-side is-' + (status === 'done' && since ? 'idle' : status)}>
-                  {status === 'blocked' ? t('convo.status.blocked') : status === 'done' && !since ? t('agents.unseen') : since || (status === 'working' ? t('convo.status.working') : '')}
+                  {r?.bg && !r.lost
+                    ? t(r.bg === 'running' ? 'convo.status.bg' : 'convo.status.bgStale')
+                    : status === 'blocked'
+                      ? t('convo.status.blocked')
+                      : status === 'done' && !since
+                        ? t('agents.unseen')
+                        : since || (status === 'working' ? t('convo.status.working') : '')}
                 </span>
               </button>
             </li>

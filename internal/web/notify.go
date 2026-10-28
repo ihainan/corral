@@ -231,6 +231,31 @@ func (s *Server) onHerdrTransition(sess *term.Session, h *store.Host, tr herdr.T
 		where += " · " + tr.Workspace
 	}
 	tag := waitTagPrefix(sess.ID) + strings.ReplaceAll(tr.Pane.ID, ":", "-")
+	// The round this change began (see seenRounds): a "finished" that waits
+	// to know what was left running goes only if it is the round still.
+	var round int64
+	if rs := s.herdrSocks.roundsOf(sess.ID); rs != nil {
+		if x, ok := rs.current(tr.Pane.ID); ok {
+			round = x.n
+		}
+	}
+	still := func() bool {
+		rs := s.herdrSocks.roundsOf(sess.ID)
+		if rs == nil || round == 0 {
+			return true // (no rounds kept: as before, at once)
+		}
+		x, ok := rs.current(tr.Pane.ID)
+		return ok && x.n == round && x.status == herdr.StatusDone
+	}
+	// moved: the pane is in another round now.
+	moved := func() bool {
+		rs := s.herdrSocks.roundsOf(sess.ID)
+		if rs == nil || round == 0 {
+			return false
+		}
+		x, ok := rs.current(tr.Pane.ID)
+		return !ok || x.n != round
+	}
 	// Opened, the alert brings the session to this pane (herdr focuses it).
 	note := notify.Note{Body: where, BodyZh: where, URL: "/t/" + sess.ID + "?pane=" + url.QueryEscape(tr.Pane.ID), Tag: tag}
 	// Waiting no more: the alert on the devices is replaced, also while the
@@ -238,12 +263,26 @@ func (s *Server) onHerdrTransition(sess *term.Session, h *store.Host, tr herdr.T
 	if tr.From == herdr.StatusBlocked && tr.To != herdr.StatusBlocked {
 		if al := s.waitAlerts.end(tag); al != nil {
 			note.Replace, note.Quiet = true, true
-			if tr.To == herdr.StatusDone {
-				note.Title, note.TitleZh = agent+" finished", agentZh+" 已完成"
-			} else {
-				note.Title, note.TitleZh = agent+" no longer waits for you", agentZh+" 不再等你了"
+			note.Title, note.TitleZh = agent+" no longer waits for you", agentZh+" 不再等你了"
+			if tr.To != herdr.StatusDone {
+				s.replaceAlert(sess.OwnerID, al, note)
+				return
 			}
-			s.replaceAlert(sess.OwnerID, al, note)
+			// (Finished, unless subagents it sent off are still out.)
+			go func() {
+				st := s.bgAwait(sess.ID, tr.Pane.ID, round)
+				if moved() {
+					// (Another round since, which tells of itself: this one's
+					// replacement would cover what it says. The alert stays
+					// till then.)
+					return
+				}
+				// (Not known in time: finished, as before there was any reading.)
+				if st != bgRunning && st != bgMoved && still() {
+					note.Title, note.TitleZh = agent+" finished", agentZh+" 已完成"
+				}
+				s.replaceAlert(sess.OwnerID, al, note)
+			}()
 			return
 		}
 	}
@@ -263,8 +302,34 @@ func (s *Server) onHerdrTransition(sess *term.Session, h *store.Host, tr herdr.T
 			note.Body += "\n" + truncate(tr.Pane.Title, 120)
 			note.BodyZh = note.Body
 		}
-		s.notifier.Send(context.Background(), sess.OwnerID, note)
+		// Not while subagents it sent off are out (it works on once they
+		// are back); and only if, once that is known, it is done still, in
+		// the same round, with no one looking.
+		go func() {
+			// (Not known in time — a slow host — it goes, as before there was
+			// any reading: one too many over one never sent.)
+			if st := s.bgAwait(sess.ID, tr.Pane.ID, round); st == bgRunning || st == bgMoved {
+				return
+			}
+			if !still() || s.vis.watched(sess.ID) {
+				return
+			}
+			s.notifier.Send(context.Background(), sess.OwnerID, note)
+		}()
 	}
+}
+
+// bgAwait: what a Claude pane left running at the end of the turn of
+// round, as soon as it is known (bgWait at most); bgNone for one not read
+// for, bgMoved for another round's.
+func (s *Server) bgAwait(session, pane string, round int64) string {
+	p := s.herdrSocks.bgOf(session)
+	if p == nil {
+		return bgNone
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), bgWait)
+	defer cancel()
+	return p.await(ctx, pane, round)
 }
 
 // replaceAlert replaces an alert, unless the agent waits again meanwhile.

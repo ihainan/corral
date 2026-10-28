@@ -139,6 +139,7 @@ interface Answer {
   reason?: string
   bind?: ConvoBind
   agent_status?: 'busy' | 'idle'
+  quiet_ms?: number // (how long since its log last grew, by the gateway's clock)
   title?: string
   tasks?: ConvoTask[]
   meta?: ConvoMeta
@@ -170,6 +171,10 @@ export interface Convo {
   gen: number
   bind?: ConvoBind
   agentStatus?: 'busy' | 'idle' // (tmux) as Claude Code's file for the process says
+  // When its log last grew (ms, this page's clock: told as how long since,
+  // so no clocks are compared); kept while it moves by less than a few
+  // seconds, so a poll that brings nothing new changes nothing.
+  quietAt?: number
   title?: string // the session's own title (Claude Code's, or the person's)
   tasks?: ConvoTask[] // the agent's task list (the same array while it did not change)
   meta?: ConvoMeta // (the same object while it did not change)
@@ -324,8 +329,10 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
             const meta = a.meta ? (sameMeta(a.meta, c.meta) ? c.meta : a.meta) : undefined
             const queued = a.queued?.length ? (JSON.stringify(a.queued) === JSON.stringify(c.queued) ? c.queued : a.queued) : undefined
             const running = a.running?.length ? (JSON.stringify(a.running) === JSON.stringify(c.running) ? c.running : a.running) : undefined
-            if (!entries && c.of === key && c.status === 'ready' && c.gen === a.gen && c.older === older && c.olderCut === olderCut && c.loadingOlder === loadingOlder && sameBind(c.bind, a.bind) && c.agentStatus === a.agent_status && c.title === a.title && c.tasks === tasks && c.meta === meta && c.queued === queued && c.running === running && !c.failing && c.defaultChanged === a.default_changed) return c
-            return { ...initial(key), status: 'ready', entries: entries ?? c.entries, older, olderCut, loadingOlder, gen: a.gen, bind: a.bind, agentStatus: a.agent_status, title: a.title || undefined, tasks, meta, queued, running, failing: false, okAt: now, changedAt: entries ? now : c.changedAt, of: key, defaultChanged: a.default_changed }
+            const told = a.quiet_ms !== undefined ? now - a.quiet_ms : undefined
+            const quietAt = told !== undefined && c.quietAt !== undefined && Math.abs(told - c.quietAt) < 3000 ? c.quietAt : told
+            if (!entries && c.of === key && c.status === 'ready' && c.quietAt === quietAt && c.gen === a.gen && c.older === older && c.olderCut === olderCut && c.loadingOlder === loadingOlder && sameBind(c.bind, a.bind) && c.agentStatus === a.agent_status && c.title === a.title && c.tasks === tasks && c.meta === meta && c.queued === queued && c.running === running && !c.failing && c.defaultChanged === a.default_changed) return c
+            return { ...initial(key), status: 'ready', entries: entries ?? c.entries, older, olderCut, loadingOlder, gen: a.gen, bind: a.bind, agentStatus: a.agent_status, quietAt, title: a.title || undefined, tasks, meta, queued, running, failing: false, okAt: now, changedAt: entries ? now : c.changedAt, of: key, defaultChanged: a.default_changed }
           })
           remember(key, gen, rev, byseq, a)
           if (a.entries.length > 0 && !fresh) next = ACTIVE

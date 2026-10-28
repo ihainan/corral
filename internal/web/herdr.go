@@ -43,6 +43,12 @@ type herdrAgent struct {
 	// them (see seenRounds): what the browser names when it marks one
 	// "done" seen.
 	Round int64 `json:"round,omitempty"`
+	// Bg: for a Claude Code agent done or idle, what it left running (see
+	// bgProber): "checking", "none", "running" (BgN subagents out, since
+	// BgSince, unix ms), "unknown".
+	Bg      string `json:"bg,omitempty"`
+	BgN     int    `json:"bg_n,omitempty"`
+	BgSince int64  `json:"bg_since,omitempty"`
 }
 
 type herdrWorkspace struct {
@@ -288,6 +294,22 @@ type herdrSockets struct {
 	path   map[string]string
 	sids   map[string]map[string]string // terminal session → pane → the agent's session id
 	rounds map[string]*seenRounds       // terminal session → its watcher's rounds
+	bg     map[string]*bgProber         // terminal session → what its Claude panes left running
+}
+
+func (h *herdrSockets) setBg(id string, p *bgProber) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.bg == nil {
+		h.bg = map[string]*bgProber{}
+	}
+	h.bg[id] = p
+}
+
+func (h *herdrSockets) bgOf(id string) *bgProber {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.bg[id]
 }
 
 func (h *herdrSockets) setRounds(id string, r *seenRounds) {
@@ -312,6 +334,7 @@ func (h *herdrSockets) set(id, path string) {
 		delete(h.path, id)
 		delete(h.sids, id)
 		delete(h.rounds, id)
+		delete(h.bg, id)
 	} else {
 		h.path[id] = path
 	}
@@ -395,6 +418,15 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 	times := s.herdrTimes.of(h, socket)
 	rounds := &seenRounds{}
 	s.herdrSocks.setRounds(sess.ID, rounds)
+	bg := newBgProber(func(ctx context.Context, sids []string, tail int) (map[string]bgRecord, error) {
+		out, err := sshx.Output(ctx, sess.Client(), bgTailCommand(sids, tail), len(sids)*(tail+256))
+		if err != nil {
+			return nil, err
+		}
+		return parseBgTails(out), nil
+	})
+	s.herdrSocks.setBg(sess.ID, bg)
+	go bg.run(ctx)
 	// When each agent last wrote to its log: what the panes the gateway
 	// never saw change are shown by (see paneSince). Looked for beside the
 	// watch, only while a pane needs it, and at most once a minute: a slow
@@ -443,7 +475,9 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 	send := func(sum herdrSummary) { // (with mu held: none goes out of order)
 		sum.Keys, sum.KeysUnknown = keys, !keysRead
 		last = &sum
-		if b, err := json.Marshal(rounds.withSeen(sum)); err == nil {
+		told := rounds.withSeen(sum)
+		bg.decorate(&told)
+		if b, err := json.Marshal(told); err == nil {
 			sess.PublishMeta(b)
 		}
 	}
@@ -477,21 +511,53 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 			s.herdrSocks.setSids(sess.ID, snap)
 			sum := summarize(name, snap, times, false)
 			rounds.number(&sum, false)
+			for _, w := range sum.Workspaces {
+				for _, a := range w.Agents {
+					bg.consider(a.PaneID, a.Agent, a.Status, s.bgSession(sess, a.PaneID, a.Session), a.Round)
+				}
+			}
 			publish(sum)
 		},
 		// (A change is told before the snapshot that has it.)
 		func(tr herdr.Transition) {
 			times.changed(tr.Pane.ID, tr.To)
 			rounds.changed(tr.Pane.ID, tr.To, agentSession(tr.Pane))
+			r, _ := rounds.current(tr.Pane.ID)
+			bg.consider(tr.Pane.ID, tr.Pane.Agent, tr.To, s.bgSession(sess, tr.Pane.ID, r.session), r.n)
 			s.onAgentTransition(sess, h, tr)
 		},
 	)
-	// An agent looked at: the last summary goes again, with it no longer "done".
-	rounds.setPoke(func() {
+	// An agent looked at: the last summary goes again, with it no longer
+	// "done"; or what one left running told.
+	again := func() {
 		mu.Lock()
 		defer mu.Unlock()
 		if last != nil && ctx.Err() == nil {
 			send(*last)
+		}
+	}
+	rounds.setPoke(again)
+	bg.setPoke(again)
+	// Subagents found back by the prober's own look, the turn's end that
+	// would have told it not seen (two changes in one snapshot): the
+	// "finished" held back goes, as for a turn ending now, if it is done
+	// still (see onHerdrTransition).
+	bg.setBack(func(pane string) {
+		snap := w.Latest()
+		if snap == nil {
+			return
+		}
+		label := map[string]string{}
+		for _, ws := range snap.Workspaces {
+			label[ws.ID] = ws.Label
+		}
+		for _, list := range [][]herdr.Pane{snap.Agents, snap.Panes} {
+			for _, p := range list {
+				if p.ID == pane && p.AgentStatus == herdr.StatusDone {
+					s.onAgentTransition(sess, h, herdr.Transition{Pane: p, Workspace: label[p.WorkspaceID], From: herdr.StatusWorking, To: herdr.StatusDone})
+					return
+				}
+			}
 		}
 	})
 	// The browser holds the last summary as current until told otherwise;

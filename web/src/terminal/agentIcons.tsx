@@ -36,7 +36,7 @@ export function agentMark(program?: string): Mark | undefined {
 // The tile: size, its side in px. dot: a status to mark on its corner
 // (waiting for you, working, done), none at rest. Named for a screen
 // reader as the program (the rows say it nowhere else).
-export function AgentIcon({ program, size = 28, dot }: { program?: string; size?: number; dot?: 'blocked' | 'working' | 'done' }) {
+export function AgentIcon({ program, size = 28, dot }: { program?: string; size?: number; dot?: 'blocked' | 'working' | 'done' | 'bg' }) {
   const m = agentMark(program)
   const glyph = Math.round(size * 0.58)
   const grad = useId() // (a page holds many of these: each its own)

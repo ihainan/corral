@@ -299,6 +299,10 @@ export interface HerdrAgent {
   session?: string // what runs there, as herdr says (Claude Code's session id)
   since?: number // (unix ms) when its status last changed, as the gateway saw it
   round?: number // which round of its status (what marking it seen names)
+  // Claude Code done or idle: what it left running (subagents out: "running", bg_n of them, since bg_since).
+  bg?: 'checking' | 'none' | 'running' | 'unknown'
+  bg_n?: number
+  bg_since?: number
 }
 
 export interface HerdrWorkspace {

@@ -3,6 +3,7 @@ import { Bot, Check, MessageCircleReply, Plus, Search } from 'lucide-react'
 import { AgentsChat } from './AgentsChat'
 import { api, choiceOf, probeBootstrap, type Host, type OpenChoice, type SessionInfo } from '../api'
 import { agentKey, sessionWhich } from '../terminal/sessionName'
+import { HIDDEN_EVERY, waitingTitle } from '../terminal/agents'
 import { t } from '../i18n'
 import { local, session as tabStore } from '../storage'
 import { navigate } from '../router'
@@ -259,9 +260,19 @@ export function TerminalTabs({ current }: { current: string }) {
   loadRef.current = load
   useEffect(() => {
     load()
-    const timer = window.setInterval(() => document.visibilityState === 'visible' && load(), POLL_MS)
+    // (Behind another tab, now and then still: the title tells what waits.)
+    let last = Date.now()
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === 'visible' || Date.now() - last >= HIDDEN_EVERY) {
+        last = Date.now()
+        load()
+      }
+    }, POLL_MS)
     return () => clearInterval(timer)
   }, [load])
+  const waiting = sessions ? waitingAgents(sessions) : 0
+  useEffect(() => waitingTitle(waiting), [waiting])
+  useEffect(() => () => waitingTitle(0), [])
   // A session just opened shows its tab with its name. (Not when mounted:
   // the effect above has asked already, and a second ask would be queued.)
   const currentSeen = useRef(false)

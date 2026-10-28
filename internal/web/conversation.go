@@ -1144,12 +1144,13 @@ type convoState struct {
 	offset      int64      // read up to here
 	size        int64      // the log's size when last looked at
 	mtime       time.Time
-	older       bool   // the log has more before what was read
-	from        int64  // where in the log the first line read begins (-1 until a first line is whole)
-	more        bool   // the last read stopped before the end
-	status      string // (tmux) the process's own word: "busy", "idle", or "" when not known
-	skipping    bool   // in a line too long to keep, until its end
-	long        []byte // a line longer than a read, so far, its images' data left out (nil when not in one)
+	grewAt      time.Time // when the log last grew, as this gateway saw it (at first, its own time of writing)
+	older       bool      // the log has more before what was read
+	from        int64     // where in the log the first line read begins (-1 until a first line is whole)
+	more        bool      // the last read stopped before the end
+	status      string    // (tmux) the process's own word: "busy", "idle", or "" when not known
+	skipping    bool      // in a line too long to keep, until its end
+	long        []byte    // a line longer than a read, so far, its images' data left out (nil when not in one)
 	strip       b64Strip
 	ocCursor    int64 // (OpenCode) rows written since this are read next (unix ms)
 	ocCursorK   int   // (OpenCode) and, stopped within its millisecond, the last row read in it
@@ -1160,6 +1161,23 @@ type convoState struct {
 type convoStates struct {
 	mu sync.Mutex
 	m  map[string]*convoState
+}
+
+// sidOf: the Claude Code session a pane's conversation was last read as
+// (key as apiConversation's), "" where none is kept or it is being read
+// just now (not waited for).
+func (c *convoStates) sidOf(id string) string {
+	c.mu.Lock()
+	st := c.m[id]
+	c.mu.Unlock()
+	if st == nil || !st.mu.TryLock() {
+		return ""
+	}
+	defer st.mu.Unlock()
+	if st.agent != "claude" {
+		return ""
+	}
+	return st.sid
 }
 
 func (c *convoStates) get(id string) *convoState {
@@ -1242,6 +1260,9 @@ type convoBind struct {
 }
 
 type convoAnswer struct {
+	// QuietMs: how long since the log last grew (what was read of it; for
+	// OpenCode, its rows), in milliseconds.
+	QuietMs   int64  `json:"quiet_ms,omitempty"`
 	Available bool   `json:"available"`
 	Reason    string `json:"reason,omitempty"`
 	Gen       int64  `json:"gen"`
@@ -1372,6 +1393,9 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 	}
 	ans.Queued = st.parser.Queued()
 	ans.Running = st.parser.Running()
+	if !st.grewAt.IsZero() {
+		ans.QuietMs = max(0, time.Since(st.grewAt).Milliseconds())
+	}
 	writeJSONCompressed(w, r, http.StatusOK, ans)
 }
 
@@ -1560,6 +1584,7 @@ func (s *Server) locateConvo(ctx context.Context, sess *term.Session, st *convoS
 		st.sid, st.log, st.agent = sid, log, agent
 		st.parser = convo.New(agent)
 		st.offset, st.size, st.mtime, st.older, st.skipping, st.from = 0, -1, time.Time{}, false, false, 0
+		st.grewAt = time.Time{} // (another log's: its own, from its first look)
 		st.long, st.strip, st.ocCursor, st.ocCursorK, st.ocCursorID = nil, b64Strip{}, 0, 0, ""
 	}
 	st.reason = reason
@@ -1622,6 +1647,17 @@ func (s *Server) readConvo(sess *term.Session, st *convoState) (more bool, err e
 		data, err := c.ReadRange(st.log, st.offset, int(n))
 		if err != nil {
 			return err
+		}
+		if st.size < 0 || st.grewAt.IsZero() {
+			// (The first look: when it was last written, by the host's clock,
+			// taken for this one's: a host whose clock is behind seems quiet
+			// longer. One ahead, not later than now.)
+			st.grewAt = fi.ModTime()
+			if st.grewAt.After(time.Now()) {
+				st.grewAt = time.Now()
+			}
+		} else if size > st.size {
+			st.grewAt = time.Now()
 		}
 		st.size, st.mtime = size, fi.ModTime()
 		st.more = st.offset+int64(len(data)) < size

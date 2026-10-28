@@ -1018,6 +1018,8 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .agent-icon-dot.is-blocked { background: var(--term-warn-text); }
 .agent-icon-dot.is-working { background: var(--term-accent-text); animation: agent-dot 1.6s ease-in-out infinite; }
 .agent-icon-dot.is-done { background: var(--term-ok-text); }
+/* Its turn over, subagents still out: a ring in the colour of work, not a dot. */
+.agent-icon-dot.is-bg { background: var(--dot-ring, var(--term-chrome)); box-shadow: 0 0 0 2px var(--dot-ring, var(--term-chrome)), inset 0 0 0 2px var(--term-accent-text); }
 @keyframes agent-dot { 50% { opacity: 0.35; } }
 @media (prefers-reduced-motion: reduce) { .agent-icon-dot.is-working { animation: none; } }
 .convo-list-row.is-unknown .agent-icon { opacity: 0.55; }

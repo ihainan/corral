@@ -121,6 +121,14 @@ func (r *seenRounds) markSeen(pane string, round int64, session string) bool {
 	return true
 }
 
+// current: the round pane is in.
+func (r *seenRounds) current(pane string) (seenRound, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	x, ok := r.at[pane]
+	return x, ok
+}
+
 func (r *seenRounds) setPoke(f func()) {
 	r.mu.Lock()
 	r.poke = f

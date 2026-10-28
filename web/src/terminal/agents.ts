@@ -18,6 +18,50 @@ export interface AgentRow {
   status: AgentStatus
   last?: AgentStatus // (herdr lost: what it said last)
   lost?: boolean // (the gateway lost herdr after this summary)
+  // Its turn over, subagents it sent off still out: it works on in the
+  // background ("running"), or has for so long that it is to be looked at
+  // ("stale"; see BG_STALE).
+  bg?: 'running' | 'stale'
+}
+
+// How long subagents may be out before it is told as to be looked at
+// (one stuck, or never back): an hour.
+export const BG_STALE = 60 * 60 * 1000
+
+// Looked at, on this device, while to be looked at so (by its agent, the
+// time its subagents went out): no longer among those to look at.
+const BG_ACK = 'corral.bgAck'
+function bgAcks(): Record<string, number> {
+  try {
+    const v = JSON.parse(localStorage.getItem(BG_ACK) ?? '{}')
+    return v && typeof v === 'object' ? v : {}
+  } catch {
+    return {}
+  }
+}
+export function ackBg(key: string, since: number) {
+  try {
+    const all = bgAcks()
+    if (all[key] === since) return
+    all[key] = since
+    const keys = Object.keys(all)
+    for (const k of keys.slice(0, Math.max(0, keys.length - 100))) delete all[k]
+    localStorage.setItem(BG_ACK, JSON.stringify(all))
+  } catch {
+    // (not kept: it is to be looked at again on this device)
+  }
+}
+
+// What a herdr agent's status is told as, with what it left running: done
+// or idle with subagents out works on (and while that is read for, so
+// that it is not marked seen meanwhile); out for over BG_STALE, done, until
+// looked at here.
+function withBg(key: string, a: HerdrAgent, known: AgentStatus, now: number): { status: AgentStatus; bg?: AgentRow['bg'] } {
+  if (known !== 'done' && known !== 'idle') return { status: known }
+  if (a.bg === 'checking') return { status: 'working' }
+  if (a.bg !== 'running') return { status: known }
+  if (a.bg_since && now - a.bg_since > BG_STALE) return bgAcks()[key] === a.bg_since ? { status: 'idle', bg: 'stale' } : { status: 'done', bg: 'stale' }
+  return { status: 'working', bg: 'running' }
 }
 
 export const isClaude = (name?: string) => !!name && /claude/i.test(name)
@@ -31,6 +75,7 @@ export const readsLog = (name?: string) => isClaude(name) || isCodex(name) || is
 export const paneTitle = (s: string) => s.replace(/^[\s·✢✳✶✻✽*⠀-⣿◐◑◒◓○●◌]+/u, '').trim()
 
 export function listAgents(sessions: SessionInfo[]): { rows: AgentRow[]; others: SessionInfo[] } {
+  const now = Date.now()
   const byKey = new Map<string, AgentRow>()
   const others: SessionInfo[] = []
   for (const s of sessions) {
@@ -46,7 +91,7 @@ export function listAgents(sessions: SessionInfo[]): { rows: AgentRow[]; others:
         // (Of two tabs' word, a current summary's over one the gateway lost.)
         if (had && !(had.lost && !m.lost)) continue
         const known = (STATUS_ORDER as string[]).includes(a.status) ? (a.status as AgentStatus) : 'unknown'
-        byKey.set(key, m.lost ? { key, s, a, ws: w.label, status: 'unknown', lost: true, last: known === 'unknown' ? undefined : known } : { key, s, a, ws: w.label, status: known })
+        byKey.set(key, m.lost ? { key, s, a, ws: w.label, status: 'unknown', lost: true, last: known === 'unknown' ? undefined : known } : { key, s, a, ws: w.label, ...withBg(key, a, known, now) })
       }
     }
   }
@@ -56,8 +101,15 @@ export function listAgents(sessions: SessionInfo[]): { rows: AgentRow[]; others:
   return { rows, others }
 }
 
-// The running sessions, polled while on and the page is visible (one
-// request at a time). null until the first answer.
+// The running sessions, polled while on (one request at a time; every
+// HIDDEN_EVERY while the page is behind another). null until the first answer.
+export const HIDDEN_EVERY = 30000
+
+// The page's title says how many agents wait for an answer (n), so a tab
+// behind others tells it.
+export function waitingTitle(n: number) {
+  document.title = n > 0 ? `(${n}) Corral` : 'Corral'
+}
 // (The last list read, for this page's life: a tab opened later starts from
 // it rather than from nothing, so its list does not appear a moment later.)
 let lastList: SessionInfo[] | null = null
@@ -78,9 +130,10 @@ export function useRunningSessions(on: boolean, every = 3000): { sessions: Sessi
     let stopped = false
     let timer: ReturnType<typeof setTimeout> | undefined
     let asking = false
+    // (Behind another tab, now and then still: what waits is told in the title.)
     const load = () => {
       timer = undefined
-      if (document.hidden || asking) return
+      if (asking) return
       asking = true
       // (One that never comes back, as after a network change, is given up: the next goes.)
       api<SessionInfo[]>('GET', '/api/sessions', undefined, { timeoutMs: 15000 })
@@ -93,11 +146,14 @@ export function useRunningSessions(on: boolean, every = 3000): { sessions: Sessi
         .catch(() => !stopped && setFailed(true))
         .finally(() => {
           asking = false
-          if (!stopped && !timer) timer = setTimeout(load, every)
+          if (!stopped && !timer) timer = setTimeout(load, document.hidden ? HIDDEN_EVERY : every)
         })
     }
     const onVisible = () => {
-      if (!document.hidden && !timer && !asking) load()
+      if (!document.hidden && !asking) {
+        clearTimeout(timer)
+        load()
+      }
     }
     document.addEventListener('visibilitychange', onVisible)
     load()

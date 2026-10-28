@@ -36,6 +36,7 @@ export interface ConvoAgent {
   where?: string // herdr: the workspace
   title?: string // the session's title (Claude Code's own), else the pane's
   status: 'working' | 'blocked' | 'done' | 'idle' | 'unknown'
+  bg?: 'running' | 'stale' | 'checking' // (its turn over: subagents still out, or that being read for; see agents.ts)
   other?: string // the program in the pane, when it is not Claude Code
   program?: string // the program in the pane, for its icon
 }
@@ -56,6 +57,7 @@ export interface ConvoPending {
 }
 
 const HINT_AFTER = 20000 // working with nothing new this long: say why
+const QUIET_LONG = 5 * 60 * 1000 // its log not grown this long: said, in minutes
 const SIDE_KEY = 'corral.convoSide'
 const SIDE_MIN = 900 // (px) the view's width from which the list goes beside the thread
 const isTouchOnly = isCoarse()
@@ -240,6 +242,9 @@ export function ConversationView({
   }, [working])
   const now = useTick(working)
   const quiet = working && now - Math.max(convo.changedAt, since) > HINT_AFTER
+  // (Long: by how long since its log last grew, as the gateway counts it;
+  // not while reading fails, which is said otherwise.)
+  const quietLong = working && !convo.failing && convo.quietAt !== undefined && now - convo.quietAt >= QUIET_LONG ? now - convo.quietAt : 0
   // How long this turn has gone on: from the last thing the person wrote.
   const lastUser = useMemo(() => {
     for (let i = convo.entries.length - 1; i >= 0; i--) if (convo.entries[i].role === 'user' && !convo.entries[i].mid && !convo.entries[i].gone) return ms(convo.entries[i].ts)
@@ -467,12 +472,13 @@ export function ConversationView({
           />
         ))}
         {pendingList}
-        {working && quiet && <p className="convo-working">{t('convo.quiet')}</p>}
+        {working && (quiet || quietLong > 0) && <p className="convo-working">{quietLong ? t('convo.quietLong', { d: quietLong < 3600000 ? t('convo.for.m', { n: Math.floor(quietLong / 60000) }) : t('convo.for.h', { n: Math.floor(quietLong / 3600000) }) }) : t('convo.quiet')}</p>}
       </>
     )
 
   let status = agent ? t(`convo.status.${agent.status}` as I18nKey) : ''
   if (working && lastUser && now >= lastUser) status = t('convo.workingFor', { d: duration(now - lastUser) })
+  if (agent?.bg) status = t(agent.bg === 'running' ? 'convo.status.bg' : agent.bg === 'stale' ? 'convo.status.bgStale' : 'convo.status.working')
   const name = agent ? [agent.title, agent.where].filter(Boolean) : []
   const rows = side?.rows ?? []
   const others = rows.filter((r) => r.status === 'blocked' && !r.current)
@@ -515,7 +521,7 @@ export function ConversationView({
           ) : (
             <span className="convo-bar-pick is-static">{label}</span>
           )}
-          <span className={'convo-bar-status' + (agent && !convo.failing && !stop ? ' is-' + agent.status : '')}>
+          <span className={'convo-bar-status' + (agent && !convo.failing && !stop ? ' is-' + (agent.bg === 'running' || agent.bg === 'checking' ? 'working' : agent.status) : '')}>
             {working && !convo.failing && !stop && <span className="convo-spin" aria-hidden="true" />}
             {convo.failing ? t('convo.paused', { time: clockMs(convo.okAt) }) : stop || status}
           </span>
@@ -1028,6 +1034,7 @@ export interface ConvoListRow {
   where: string // its workspace or session (its host too, where there are several)
   program?: string // the program in it, for its icon
   status: 'working' | 'blocked' | 'done' | 'idle' | 'unknown'
+  bg?: 'running' | 'stale' // (its turn over, subagents still out)
   since?: number // (unix ms) when its status last changed
   current: boolean
   placeAs?: { status: ConvoListRow['status']; since?: number } // (the one shown: where it is placed meanwhile, see asHeld)
@@ -1184,7 +1191,7 @@ function AgentList({ rows, onPicked, placed, query: given, onQuery }: { rows: Co
                     r.onPick() // (of the one shown: nothing, or the end of a switch to another; the list may be of before)
                   }}
                 >
-                  <AgentIcon program={r.program} size={30} dot={said ? (r.status as 'blocked' | 'working' | 'done') : undefined} />
+                  <AgentIcon program={r.program} size={30} dot={r.bg === 'running' ? 'bg' : said ? (r.status as 'blocked' | 'working' | 'done') : undefined} />
                   <span className="convo-list-text" title={[r.title, r.where].filter(Boolean).join(' · ')}>
                     <span className="convo-list-line">
                       <span className="convo-list-title">{r.title}</span>
@@ -1192,7 +1199,7 @@ function AgentList({ rows, onPicked, placed, query: given, onQuery }: { rows: Co
                     </span>
                     {/* (Its status by its dot only, and its group: in words for a screen
                         reader, and shown where the system's colours take the dot's away.) */}
-                    {said && <span className={'convo-list-status is-' + r.status}>{t(`convo.status.${r.status}` as I18nKey)}</span>}
+                    {(said || r.bg) && <span className={'convo-list-status is-' + r.status}>{t(r.bg === 'running' ? 'convo.status.bg' : r.bg === 'stale' ? 'convo.status.bgStale' : (`convo.status.${r.status}` as I18nKey))}</span>}
                     {r.where && (
                       <span className="convo-list-sub">
                         <span className="convo-list-where">{r.where}</span>

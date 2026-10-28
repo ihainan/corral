@@ -424,6 +424,9 @@ func (s *Server) ocRead(sess *term.Session, st *convoState, mode string, args ..
 		if rows.Len() > 0 {
 			st.parser.Feed(rows.Bytes())
 		}
+		if mode == "since" && cursor > st.ocCursor {
+			st.grewAt = time.Now() // (rows written since the last look; at first, not known)
+		}
 	}
 	if st.size < 0 {
 		st.size = 0 // (the first read made)

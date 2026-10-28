@@ -319,6 +319,7 @@ func TestRemoteExecCallSitesAreReviewed(t *testing.T) {
 		"herdr/client.go: out, err := sshx.Output(ctx, c, DiscoverCommand, sshx.MaxOutput)":           true,
 		"herdr/keys.go: out, err := sshx.Output(ctx, c, KeysCommand, keysLimit)":                      true, // fixed text, no input
 		"web/herdr.go: w.Run(ctx)": true, // watcher loop, runs no remote command itself
+		"web/herdr.go: out, err := sshx.Output(ctx, sess.Client(), bgTailCommand(sids, tail), len(sids)*(tail+256))":                                                                                                  true, // fixed script; its arguments a size (a constant) and Claude Code session ids, validated (convoUUID) and quoted
 		"web/herdr.go: out, err := sshx.Output(lctx, sess.Client(), convoLocateTimesCommand(sess.Persistence, sess.TmuxSession), convoLocateMax)":                                                                     true, // the same fixed script as conversation.go's, for when each agent last wrote to its log
 		"web/ports.go: out, err := sshx.Output(ctx, c, listenCommand, sshx.MaxOutput)":                                                                                                                                true,
 		`sshx/exec.go: ok, err := ch.SendRequest("exec", true, ssh.Marshal(&struct{ Command string }{cmd}))`:                                                                                                          true, // Output's and Exec's own exec; their callers are listed here
