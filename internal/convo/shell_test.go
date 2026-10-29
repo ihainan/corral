@@ -63,3 +63,24 @@ func TestUnpastedEnds(t *testing.T) {
 		t.Fatalf("its first line's indent: %q", got)
 	}
 }
+
+// A long message waiting, typed with blank lines first, arriving as a paste
+// (the wrapper's blank lines let go): the same one, cut at the same place.
+func TestQueuedLongPasteArrives(t *testing.T) {
+	body := strings.Repeat("x", maxText+10)
+	enq, _ := json.Marshal(map[string]any{"type": "queue-operation", "operation": "enqueue", "content": "\n\n" + body})
+	user, _ := json.Marshal(map[string]any{"type": "user", "uuid": "u1", "message": map[string]any{"role": "user", "content": "<pasted_content id=\"7\">\n\n" + body + "\n</pasted_content id=\"7\">"}})
+	c := NewClaude()
+	c.Feed(append(append(enq, '\n'), append(user, '\n')...))
+	if q := c.Queued(); len(q) != 0 {
+		t.Fatalf("still waiting: %d", len(q))
+	}
+	// (Taken off the queue before it came: forgotten when it comes.)
+	rm, _ := json.Marshal(map[string]any{"type": "queue-operation", "operation": "remove", "content": "\n\n" + body})
+	user2, _ := json.Marshal(map[string]any{"type": "user", "uuid": "u2", "message": map[string]any{"role": "user", "content": "<pasted_content id=\"8\">\n\n" + body + "\n</pasted_content id=\"8\">"}})
+	c = NewClaude()
+	c.Feed(append(append(append(enq, '\n'), append(rm, '\n')...), append(user2, '\n')...))
+	if len(c.Queued()) != 0 || len(c.gone) != 0 {
+		t.Fatalf("removed, then arrived: queue %d, gone %d", len(c.Queued()), len(c.gone))
+	}
+}

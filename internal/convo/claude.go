@@ -988,7 +988,7 @@ func (c *Claude) queueOp(r *claudeRow) {
 		text, from, note := queuedText(s)
 		if text != "" && c.ofNow(r.Timestamp) {
 			q := queuedItem{raw: s, from: from, note: note}
-			q.Text, _ = cut(clean(text), maxText)
+			q.Text = queuedCut(text)
 			q.Time = clip(r.Timestamp, 64)
 			c.queue = append(c.queue, q)
 			if n := len(c.queue) - maxQueue; n > 0 {
@@ -1061,8 +1061,7 @@ func (c *Claude) arrived(text string) {
 		return
 	}
 	t := queueKey(text)
-	kept, _ := cut(clean(text), maxText) // (as the queue keeps a long one, and its removals)
-	k := queueKey(kept)
+	k := queueKey(queuedCut(text)) // (as the queue keeps a long one, and its removals)
 	for i, q := range c.queue {
 		// (The person's: not another session's that has the same words.)
 		if key := queueKey(q.Text); q.from == "" && (key == t || key == k) {
@@ -1135,8 +1134,7 @@ func (c *Claude) turnOver(at string) {
 // arrive still): that is what it is, and it is forgotten. True if so.
 func (c *Claude) goneArrived(text, from string) bool {
 	t := queueKey(text)
-	kept, _ := cut(clean(text), maxText) // (as the queue keeps a long one, and its removals)
-	k := queueKey(kept)
+	k := queueKey(queuedCut(text)) // (as the queue keeps a long one, and its removals)
 	for i, g := range c.gone {
 		if g.from == from && (g.text == t || g.text == k) {
 			c.gone = append(c.gone[:i:i], c.gone[i+1:]...)
@@ -1151,6 +1149,14 @@ func squashed(s string) string { return strings.Join(strings.Fields(s), " ") }
 // queueKey is what a queued message and its arrival are matched by: its
 // words, without the "[Image #N]" a queued one has and one taken in may not.
 func queueKey(s string) string { return squashed(imageToken.ReplaceAllString(s, " ")) }
+
+// queuedCut is a waiting message's text as kept: without blank lines at its
+// ends (a paste arrives without its wrapper's, see unpasted), then cut where
+// long, so a long one is cut at the same place waiting and arriving.
+func queuedCut(text string) string {
+	kept, _ := cut(clean(blankEnds(text)), maxText)
+	return kept
+}
 
 // mid marks the entry just added as taken in during the agent's turn.
 func (c *Claude) mid() {
@@ -2212,6 +2218,12 @@ func unpasted(s string) string {
 		}
 		return m[2]
 	})
+	return blankEnds(s)
+}
+
+// blankEnds is a text without blank lines at its start and end (what is
+// indented at its first line's start kept).
+func blankEnds(s string) string {
 	return strings.TrimRight(blankLead.ReplaceAllString(s, ""), " \t\r\n")
 }
 
