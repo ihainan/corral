@@ -204,6 +204,35 @@ func TestSeenKept(t *testing.T) {
 	if got := told(herdr.StatusDone, "s1"); got.Status != herdr.StatusIdle {
 		t.Fatalf("looked at: %s", got.Status)
 	}
+	// Looked at in this watcher, herdr lost and back: looked for again, as
+	// what was kept before; a round while it was lost (its log written
+	// since): done; none: idle.
+	for _, round := range []bool{true, false} {
+		q := newSeenRounds(nil, nil)
+		qs := seenSum(herdr.StatusDone, "s1")
+		q.number(&qs, false)
+		at := time.Now().UnixMilli()
+		if !marked(q, "w1:p1", qs.Workspaces[0].Agents[0].Round, "s1") {
+			t.Fatal("not marked")
+		}
+		q.lostHerdr()
+		qs = seenSum(herdr.StatusDone, "s1")
+		q.number(&qs, false) // (back, done as before)
+		want, g := q.wantsLook()
+		if !want {
+			t.Fatal("no look wanted for what this watcher saw looked at")
+		}
+		wrote := at - 5000
+		if round {
+			wrote = at + 5000
+		}
+		q.lookedOver(map[string]int64{"w1:p1": wrote}, g)
+		qs = seenSum(herdr.StatusDone, "s1")
+		q.number(&qs, false)
+		if got, w := q.withSeen(qs).Workspaces[0].Agents[0].Status, map[bool]string{true: herdr.StatusDone, false: herdr.StatusIdle}[round]; got != w {
+			t.Fatalf("a round while lost %v: %s", round, got)
+		}
+	}
 	// Seen working in a summary (no word of it): the kept one no longer stands.
 	q := newSeenRounds(map[string]store.AgentSeen{"w1:p1": {Session: "s1", At: 1000}}, nil)
 	for _, st := range []string{herdr.StatusWorking, herdr.StatusDone} {

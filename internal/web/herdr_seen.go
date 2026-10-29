@@ -60,6 +60,7 @@ type seenRounds struct {
 type seenRound struct {
 	status, session string
 	n               int64
+	at              int64 // (seen: when it was looked at, unix ms)
 }
 
 // changed: pane's agent went to status to (gone: forgotten). session is
@@ -92,7 +93,7 @@ func (r *seenRounds) next(pane, status, session string) seenRound {
 		r.at = map[string]seenRound{}
 	}
 	r.n++
-	x := seenRound{status, session, r.n}
+	x := seenRound{status: status, session: session, n: r.n}
 	r.at[pane] = x
 	return x
 }
@@ -163,6 +164,7 @@ func (r *seenRounds) markSeen(pane string, round int64, session string) (bool, e
 	if r.seen == nil {
 		r.seen = map[string]seenRound{}
 	}
+	x.at = k.At
 	r.seen[pane] = x
 	poke := r.poke
 	r.mu.Unlock()
@@ -197,10 +199,20 @@ func (r *seenRounds) wantsLook() (bool, int64) {
 }
 
 // lostHerdr: herdr is lost; what went on meanwhile is looked for again once
-// it is back (see number).
+// it is back (see number). What this watcher saw looked at goes with what
+// was kept before: a round while it was lost would come back as the same.
 func (r *seenRounds) lostHerdr() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	for p, x := range r.seen {
+		if k, ok := r.prior[p]; !ok || k.At < x.at {
+			if r.prior == nil {
+				r.prior = map[string]store.AgentSeen{}
+			}
+			r.prior[p] = store.AgentSeen{Session: x.session, At: x.at}
+		}
+		delete(r.seen, p)
+	}
 	r.lost, r.looked, r.wrote = true, false, nil
 	r.gen++
 }
