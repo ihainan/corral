@@ -1,7 +1,8 @@
 import { createContext, Fragment, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { ArrowDown, Check, ChevronDown, ChevronRight, ChevronUp, ChevronsUpDown, Clock, Download, GitBranch, Loader, MoreVertical, PanelLeft, Search, TriangleAlert, X, Plus } from 'lucide-react'
+import { ArrowDown, Check, ChevronDown, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, Clock, Download, GitBranch, Keyboard, Loader, MoreVertical, PanelLeft, Search, TriangleAlert, X, Plus } from 'lucide-react'
 import { t, getLang, type I18nKey } from '../i18n'
-import { copyText, isCoarse, Menu, type MenuItem } from '../components/ui'
+import { copyText, Dialog, isCoarse, Menu, type MenuItem } from '../components/ui'
+import { composing, foldAllKey, helpKey, jumpKey, onMac, switchKey } from './pageKeys'
 import { local } from '../storage'
 import { Markdown } from './markdown'
 import { useSubConvo } from './subagent'
@@ -75,6 +76,7 @@ const SIDE_W_MAX = 520
 const sideWidthMax = (view: number) => Math.min(SIDE_W_MAX, Math.floor(view / 2))
 const sideWidthOf = (w: number, view: number) => Math.max(SIDE_W_MIN, Math.min(Math.round(w), sideWidthMax(view)))
 const isTouchOnly = isCoarse()
+const mac = onMac()
 
 // A duration as the view says it: 45 s, 2 min 14 s, 1 h 5 min.
 export function duration(ms: number): string {
@@ -229,7 +231,8 @@ export function ConversationView({
   useEffect(() => {
     if (!active) return
     const onKey = (e: KeyboardEvent) => {
-      if (!e.altKey || e.ctrlKey || e.metaKey || e.shiftKey || (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') || underDialog(e)) return
+      const dir = switchKey(e)
+      if (!dir || underDialog(e)) return
       const el = e.target as HTMLInputElement | null
       if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') && !el.classList.contains('xterm-helper-textarea') && el.value && !el.closest('.list-search')) return
       const q = shownQuery.current
@@ -240,7 +243,7 @@ export function ConversationView({
       e.stopPropagation()
       const at = list.findIndex((r) => r.current)
       // (The one shown not among them: from the first down, the last up.)
-      const next = at < 0 ? list[e.key === 'ArrowDown' ? 0 : list.length - 1] : list[(at + (e.key === 'ArrowDown' ? 1 : list.length - 1)) % list.length]
+      const next = at < 0 ? list[dir > 0 ? 0 : list.length - 1] : list[(at + (dir > 0 ? 1 : list.length - 1)) % list.length]
       if (!next.current) next.onPick()
     }
     window.addEventListener('keydown', onKey, true)
@@ -266,14 +269,15 @@ export function ConversationView({
   const copy = useCallback((s: string) => void copyText(s).then((ok) => ok && copiedRef.current()), [])
   // A turn's work opened or closed by hand (else: open while it goes on).
   // Folded, also while it goes on (its line says what it does now): one opened
-  // by a tap, or all with Ctrl+O, as in Claude Code.
+  // by a tap, or all with Ctrl+O on a Mac, as in Claude Code (see pageKeys).
   const [opened, setOpened] = useState<Record<string, boolean>>({})
   const toggle = useCallback((key: string, open: boolean) => setOpened((o) => ({ ...o, [key]: open })), [])
   const [allOpen, setAllOpen] = useState(false)
   useEffect(() => {
     if (!active) return
     const onKey = (e: KeyboardEvent) => {
-      if (!e.ctrlKey || e.metaKey || e.altKey || e.shiftKey || e.key.toLowerCase() !== 'o' || e.isComposing || underDialog(e) || subsNow.current) return
+      // (In a field its own: a Mac's Ctrl+O opens a line there.)
+      if (!foldAllKey(e, mac) || editable(e.target) || underDialog(e) || subsNow.current) return
       e.preventDefault()
       e.stopPropagation()
       if (e.repeat) return // (held: once)
@@ -803,9 +807,10 @@ export function ConversationView({
   useEffect(() => {
     if (!active) return
     const onKey = (e: KeyboardEvent) => {
-      if ((e.key !== '[' && e.key !== ']') || e.ctrlKey || e.metaKey || e.altKey || e.isComposing || editable(e.target) || underDialog(e) || subsNow.current) return
+      const dir = jumpKey(e)
+      if (!dir || editable(e.target) || underDialog(e) || subsNow.current) return
       e.preventDefault()
-      jump(e.key === '[' ? -1 : 1)
+      jump(dir)
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
@@ -814,9 +819,8 @@ export function ConversationView({
   // not while typing (the browsers there keep Ctrl+K for their own search).
   useEffect(() => {
     if (!active || !side) return
-    const mac = /Mac|iPhone|iPad/.test(navigator.platform)
     const onKey = (e: KeyboardEvent) => {
-      if (e.isComposing || underDialog(e) || e.altKey) return
+      if (composing(e) || underDialog(e) || e.altKey) return
       // (Shift as some layouts need it for "/", as the German's.)
       const asked = mac ? e.key.toLowerCase() === 'k' && e.metaKey && !e.ctrlKey && !e.shiftKey : e.key === '/' && !e.ctrlKey && !e.metaKey && !editable(e.target)
       if (!asked) return
@@ -827,23 +831,21 @@ export function ConversationView({
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [active, side])
-  // Ctrl/⌘+F with the conversation in front (the focus in it, or nowhere):
-  // its own search, which knows what is folded away; elsewhere (the
-  // composer, a dialog) the browser's.
+  // "?" where nothing is typed in: what keys there are (also in ⋮). (⌘F and
+  // Ctrl+F are the browser's find; this one's search is in ⋮.)
+  // (Opened from ⋮: the focus goes back to ⋮ after, the menu being gone.)
+  const [keysShown, setKeysShown] = useState<'' | 'key' | 'menu'>('')
   useEffect(() => {
-    if (!active || !more) return
+    if (!active) return
     const onKey = (e: KeyboardEvent) => {
-      if (e.key.toLowerCase() !== 'f' || !(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey || e.isComposing || underDialog(e)) return
-      // (In the thread itself, or nowhere: not in a panel beside it, a subagent's say.)
-      const at = document.activeElement
-      if (editable(e.target) || (at && at !== document.body && !box.current?.contains(at))) return
+      // (Nor over a menu that is open: it would open under it.)
+      if (!helpKey(e) || editable(e.target) || underDialog(e) || document.querySelector('[role="menu"]')) return
       e.preventDefault()
-      setSearching(true)
-      requestAnimationFrame(() => root.current?.querySelector<HTMLInputElement>('.convo-search-input')?.focus())
+      setKeysShown('key')
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [active, more])
+  }, [active])
 
   // What was sent, not in the log yet (also before a new conversation's log is written).
   const pendingList = pending.map((p) => (
@@ -995,7 +997,17 @@ export function ConversationView({
         <nav className="convo-side" aria-label={t('convo.agents')} style={{ width: sideWidth }} ref={sideEl}>
           <NewAgentRow />
           <AgentList rows={rows} query={sideQuery} onQuery={setSideQuery} search={searchAsked} onSearchLeft={() => setSearchAsked(0)} hint={!isTouchOnly} />
-          {!isTouchOnly && <p className="convo-side-keys">{t('convo.switchKeys')}<br />{t(allOpen ? 'convo.foldKeys' : 'convo.openKeys')}</p>}
+          {!isTouchOnly && (
+            <p className="convo-side-keys">
+              {t('convo.switchKeys')}
+              {mac && (
+                <>
+                  <br />
+                  {t(allOpen ? 'convo.foldKeys' : 'convo.openKeys')}
+                </>
+              )}
+            </p>
+          )}
         </nav>
       )}
       {sideShown && (
@@ -1084,6 +1096,10 @@ export function ConversationView({
               items={() => [
                 { label: t('convoSearch.item'), icon: <Search size={16} />, onSelect: () => setSearching(true) },
                 { label: t('convoExport.item'), icon: <Download size={16} />, disabled: !list.length, onSelect: () => doExport() },
+                // (All steps opened or folded: the menu's, as Ctrl+O is a Mac's only.)
+                { label: t(allOpen ? 'pageKeys.foldAll' : 'pageKeys.openAll'), icon: allOpen ? <ChevronsDownUp size={16} /> : <ChevronsUpDown size={16} />, disabled: !list.length, onSelect: () => (setOpened({}), setAllOpen((v) => !v)) },
+                // (On every device: a tablet's keyboard has these keys too.)
+                { label: t('pageKeys.item'), icon: <Keyboard size={16} />, onSelect: () => setKeysShown('menu') },
                 ...more().map((m, i) => (m && i === 0 ? { ...m, separator: true } : m)),
               ]}
               button={(open, toggle) => (
@@ -1094,6 +1110,16 @@ export function ConversationView({
             />
           )}
         </div>
+      )}
+      {keysShown && (
+        <PageKeysHelp
+          side={!!side}
+          onClose={() => {
+            const from = keysShown
+            setKeysShown('')
+            if (from === 'menu') requestAnimationFrame(() => root.current?.querySelector<HTMLElement>('.convo-bar-more')?.focus())
+          }}
+        />
       )}
       {searching && (
         <ConvoSearchPanel
@@ -1897,7 +1923,43 @@ export const SEARCH_FROM = 5
 // empties it first.
 // (⌘K on a Mac; elsewhere "/", as the browsers there keep Ctrl+K for their
 // own search: as the key is said.)
-const KEY_SEARCH = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘K' : '/'
+const KEY_SEARCH = mac ? '⌘K' : '/'
+
+// The keys of this page, as this computer has them (plans/4a-shortcuts.md);
+// side: the list of agents beside it, with its own.
+function PageKeysHelp({ onClose, side }: { onClose: () => void; side: boolean }) {
+  const rows: [string, I18nKey][] = [
+    ...(side ? ([[mac ? '⌥↑  ⌥↓' : 'Alt+↑  Alt+↓', 'pageKeys.switch'], [KEY_SEARCH, 'pageKeys.search']] as [string, I18nKey][]) : []),
+    ['[  ]', 'pageKeys.jump'],
+    ...(mac ? ([['Ctrl+O', 'pageKeys.fold']] as [string, I18nKey][]) : []),
+    ['?', 'pageKeys.help'],
+    [mac ? 'Return  ⌘Return' : 'Enter  Ctrl+Enter', 'pageKeys.send'],
+    ['Shift+' + (mac ? 'Return' : 'Enter'), 'pageKeys.newline'],
+    ['↑  ↓', 'pageKeys.history'],
+    ['Tab', 'pageKeys.suggestion'],
+    ['1–9  Esc', 'pageKeys.card'],
+  ]
+  return (
+    <Dialog title={t('pageKeys.title')} onClose={onClose}>
+      <dl className="page-keys">
+        {rows.map(([k, what]) => (
+          <div key={what} className="page-keys-row">
+            <dt>
+              <kbd>{k}</kbd>
+            </dt>
+            <dd>{t(what)}</dd>
+          </div>
+        ))}
+      </dl>
+      <p className="page-keys-note">{t(mac ? 'pageKeys.noteMac' : 'pageKeys.note')}</p>
+      <div className="dialog-actions">
+        <button type="button" className="btn" onClick={onClose}>
+          {t('common.close')}
+        </button>
+      </div>
+    </Dialog>
+  )
+}
 
 export function ListSearch({ value, onChange, focus, onLeft, hint }: { value: string; onChange: (v: string) => void; focus?: number; onLeft?: () => void; hint?: string }) {
   const ref = useRef<HTMLInputElement>(null)
@@ -2744,7 +2806,7 @@ function Work({ it, open, onToggle, onCopy }: { it: Extract<Item, { kind: 'work'
   const since = busy && partTime.has(busy) ? ms(partTime.get(busy)) : 0
   return (
     <div className="convo-work" data-work={it.key}>
-      <button type="button" className="convo-work-head" aria-expanded={open} onClick={() => onToggle(it.key, !open)} title={isTouchOnly ? undefined : t(open ? 'convo.foldHint' : 'convo.openHint')}>
+      <button type="button" className="convo-work-head" aria-expanded={open} onClick={() => onToggle(it.key, !open)} title={isTouchOnly ? undefined : t(open ? (mac ? 'convo.foldHint' : 'convo.foldHintPlain') : mac ? 'convo.openHint' : 'convo.openHintPlain')}>
         <ChevronRight size={15} className="convo-chev" aria-hidden="true" />
         {busy ? (
           <span className="convo-work-text is-live">

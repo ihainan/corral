@@ -366,7 +366,9 @@ export function TerminalTabs({ current }: { current: string }) {
       const isT = e.key.toLowerCase() === 't' || (!plain && e.code === 'KeyT')
       const bracket = e.key === '{' || (!plain && e.code === 'BracketLeft') ? -1 : e.key === '}' || (!plain && e.code === 'BracketRight') ? 1 : 0
       let act: (() => void) | null = null
-      if (e.key === 'Tab' && e.ctrlKey && !e.metaKey) {
+      // (In an installed app only, as the rest: in a browser's tab the
+      // browser has Ctrl+Tab; where it did not, the program would lose it.)
+      if (standalone && e.key === 'Tab' && e.ctrlKey && !e.metaKey) {
         if (tabs.length >= 1) act = () => go(e.shiftKey ? -1 : 1)
       } else if (standalone && e.ctrlKey && e.shiftKey && !e.metaKey && (e.key === 'PageUp' || e.key === 'PageDown')) {
         // (At either end it goes nowhere, and the program does not get it either.)

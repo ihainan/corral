@@ -1213,3 +1213,12 @@ button.convo-running-what { padding: 0; text-align: left; }
 .claude-card-key { height: 30px; padding: 0 10px; font-size: 13px; border: 1px solid var(--term-line); color: var(--term-fg); }
 .claude-card-why { margin: 6px 0 0; font-size: 12px; color: var(--term-fg-3); }
 @media (pointer: coarse) { .claude-card-key { height: 38px; } .claude-card-head { padding: 10px 12px; } }
+
+/* The page's keys (? or ⋮ → Keyboard shortcuts) */
+.page-keys { display: flex; flex-direction: column; gap: 2px; margin: 0; }
+.page-keys-row { display: flex; align-items: center; gap: 16px; min-height: 32px; }
+.page-keys-row dt { flex: none; width: 150px; margin: 0; }
+.page-keys-row dd { flex: 1; min-width: 0; margin: 0; color: var(--fg-2); font-size: 14px; }
+.page-keys kbd { font: 12px/20px var(--font-mono); padding: 0 6px; border: 1px solid var(--line-strong); border-radius: 5px; background: var(--bg-subtle); color: var(--fg); white-space: pre; }
+.page-keys-note { margin: 12px 0 0; font-size: 13px; line-height: 1.5; color: var(--fg-3); }
+@media (max-width: 480px) { .page-keys-row dt { width: 120px; } }
