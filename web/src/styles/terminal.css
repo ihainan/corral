@@ -1195,3 +1195,21 @@ button.convo-running-what { padding: 0; text-align: left; }
 .convo-shell > .convo-pre-wrap { width: 100%; }
 .convo-shell-err { width: 100%; color: var(--term-danger-text); }
 .convo-note-parts { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+/* Claude Code's card above its box (Heads up, You should know): over the composer, folded to a line */
+.claude-card { margin: 0 0 8px; border: 1px solid var(--term-line); border-radius: 10px; background: var(--term-bg); font-family: var(--font-ui); }
+.claude-card-head {
+  display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; padding: 7px 10px; border: 0; border-radius: 10px;
+  background: none; color: var(--term-fg-2); font: 13px/18px var(--font-ui); text-align: left; cursor: pointer;
+}
+.claude-card-head:hover { background: var(--term-hover); }
+.claude-card-head:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: -2px; }
+.claude-card-star { flex: none; color: var(--term-accent-text); }
+.claude-card-tag { flex: none; font-weight: 600; color: var(--term-fg); }
+.claude-card-first { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.claude-card-head svg { flex: none; color: var(--term-fg-3); }
+.claude-card-body { padding: 0 12px 10px 30px; }
+.claude-card-text { margin: 0; font-size: 13.5px; line-height: 20px; color: var(--term-fg); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 40vh; overflow-y: auto; }
+.claude-card-keys { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.claude-card-key { height: 30px; padding: 0 10px; font-size: 13px; border: 1px solid var(--term-line); color: var(--term-fg); }
+.claude-card-why { margin: 6px 0 0; font-size: 12px; color: var(--term-fg-3); }
+@media (pointer: coarse) { .claude-card-key { height: 38px; } .claude-card-head { padding: 10px 12px; } }

@@ -9,6 +9,7 @@ import { local } from '../storage'
 import { CLOSE_MENUS, Confirm, Menu, useToast, type MenuItem } from '../components/ui'
 import { chromeVars, corralDark, corralLight } from '../terminal/themes'
 import { HostHistoryDialog } from '../terminal/hostHistory'
+import { CardNotice, useClaudeCard, type ClaudeCard } from '../terminal/cardNotice'
 import { expandPastes, getDraft, keepDraft, keepPaste, keepSent, keptSent, remember, sentHistory } from '../terminal/drafts'
 import { geminiPath, shellPath } from '../terminal/paths'
 import { useCompletion } from '../terminal/Completion'
@@ -1144,6 +1145,9 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   // What is shown is what the turn's end's record says (told: drawn anew
   // when it changes, whichever view asked).
   const [, told] = useReducer((n: number) => n + 1, 0)
+  // Claude Code's card above its box (Heads up, You should know): looked
+  // for on its own times, besides what the suggestion's looks bring.
+  const claudeCard = useClaudeCard(sid, bound && !notClaude && active ? `${bindKey} ${convo.gen}` : '', askKey, () => (convo.bind ? pressBody() : null))
   useEffect(() => {
     if (!askKey) return
     let a = suggestAsks.get(askKey)
@@ -1181,8 +1185,11 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
             for (const v of at.views) v.told()
             if (!at.text) [...at.views][0]?.next() // (any left: looked for again, by a view still there)
           }
-          api<{ suggestion: string }>('POST', `/api/sessions/${sid}/conversation/suggestion`, pressBody(), { timeoutMs: PRESS_MS }).then(
-            (r) => done(r.suggestion),
+          api<{ suggestion: string; card?: ClaudeCard }>('POST', `/api/sessions/${sid}/conversation/suggestion`, pressBody(), { timeoutMs: PRESS_MS }).then(
+            (r) => {
+              claudeCard.seen(r.card) // (the card above its box, read off the same screen)
+              done(r.suggestion)
+            },
             () => done(null),
           )
         },
@@ -1333,6 +1340,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   const sendKey = composerEnter === 'send' ? enterKey : modEnter
   const composer = (
     <div className="composer">
+      {claudeCard.card && <CardNotice card={claudeCard.card} stale={claudeCard.stale} onPress={claudeCard.press} />}
       {completion.list}
       {up && (
         <div className="agents-chat-up" role="status">

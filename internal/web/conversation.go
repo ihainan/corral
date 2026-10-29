@@ -2141,6 +2141,14 @@ if [ -n "$gate" ]; then
     if [ "$mode" = tmux ]; then d=$(tmux -u capture-pane -p -t "$p" 2>/dev/null 9>&- | sha256sum)
     else d=$(HERDR_SOCKET_PATH=$sock herdr pane read "$p" --source visible 2>/dev/null 9>&- | sha256sum); fi
     [ "${d%% *}" = "${gate#reply:}" ] || exit 10 ;;
+  card:*)
+    # (A card's key: not while it waits; its region of the screen, read with
+    # its colours as the gateway read it, still the same: cardRegionAwk.)
+    [ "$st" = waiting ] && exit 9
+    command -v sha256sum >/dev/null 2>&1 || exit 11
+    if [ "$mode" = tmux ]; then d=$(tmux -u capture-pane -p -e -t "$p" 2>/dev/null 9>&- | awk 'CARDAWK' | sha256sum)
+    else d=$(HERDR_SOCKET_PATH=$sock herdr pane read "$p" --source visible --format ansi 2>/dev/null 9>&- | awk 'CARDAWK' | sha256sum); fi
+    [ "${d%% *}" = "${gate#card:}" ] || exit 10 ;;
   *) exit 4 ;;
   esac
 fi
@@ -2198,6 +2206,7 @@ fi`
 	if keys != nil {
 		n = "keys"
 	}
+	script = strings.ReplaceAll(script, "CARDAWK", cardRegionAwk) // (see convo_card.go)
 	cmd := "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(mode) + " " + sshx.QuoteShell(session) + " " + sshx.QuoteShell(pane) + " " +
 		strconv.FormatInt(pid, 10) + " " + strconv.FormatInt(start, 10) + " " + n + " " + sshx.QuoteShell(socket) + " " + sshx.QuoteShell(sid) + " " + strconv.Itoa(max(0, min(read, 60))) + " " + sshx.QuoteShell(gate)
 	for _, k := range keys {
@@ -2272,6 +2281,8 @@ var convoKeys = map[string]struct {
 	"sent_missing": {"convo.sent_missing", nil, nil},
 	// Enter for such a message, seen still in the input (see convo_sent.go).
 	"sent_enter": {"convo.sent_enter", nil, nil},
+	// A key of Claude Code's card above its box (see convo_card.go).
+	"card": {"convo.card", nil, nil},
 	// Claude Code's suggestion of the next message: nothing is pressed, the
 	// screen is read with its colours (see convo_suggest.go).
 	"suggest": {"convo.suggest", nil, nil},
@@ -2457,6 +2468,9 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		// pressed (of replyKeys, up to 4) or the text typed and Enter.)
 		Digest string   `json:"digest"`
 		Keys   []string `json:"keys"`
+		// (card: its key, and the card as the page shows it.)
+		Key  string     `json:"key"`
+		Card *convoCard `json:"card"`
 	}
 	err := readJSON(r, &b)
 	text, textOK := sendText(b.Text)
@@ -2662,6 +2676,17 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		release := turn
 		turn = func() {} // (the screen read gives it back, once it has ended on the host)
 		s.suggestion(w, ctx, sess, b.Pane, socket, &outcome, &reason, release)
+		return
+	}
+	if what == "card" {
+		if front.agent != "claude" || b.Card == nil || len(b.Key) != 1 || b.Key[0] < '0' || b.Key[0] > '9' {
+			outcome, reason = "refused", "bad_card"
+			writeError(w, http.StatusBadRequest, "bad_request", "a card's key and the card are required")
+			return
+		}
+		release := turn
+		turn = func() {} // (given back once its commands have ended on the host)
+		s.cardPress(w, ctx, sess, b.Pane, socket, b.PID, b.Start, b.Session, b.Key, b.Card, &outcome, &reason, release)
 		return
 	}
 	if what == "sent_missing" {

@@ -39,7 +39,12 @@ func (s *Server) suggestion(w http.ResponseWriter, ctx context.Context, sess *te
 		return
 	}
 	*outcome = "looked"
-	writeJSON(w, http.StatusOK, map[string]any{"suggestion": suggestionOf(string(res.Out))})
+	// (Claude Code's card above its box, if one is there: read off the same screen.)
+	out := map[string]any{"suggestion": suggestionOf(string(res.Out))}
+	if c := cardOf(string(res.Out)); c != nil {
+		out["card"] = c
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // convoColorScreenCommand prints a pane's screen as convoScreenCommand does,
