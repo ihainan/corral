@@ -210,6 +210,7 @@ func (s *Server) registerRoutes() {
 	s.handle("POST /api/sessions/{id}/conversation/send", SignedIn, s.apiConversationSend)
 	s.handle("POST /api/sessions/{id}/conversation/command", SignedIn, s.apiConversationCommand)
 	s.handle("GET /api/sessions/{id}/conversation/subagent", SignedIn, s.apiConversationSubagent)
+	s.handle("GET /api/sessions/{id}/conversation/quota", SignedIn, s.apiConversationQuota)
 	s.handle("POST /api/sessions/{id}/agents", SignedIn, s.apiNewAgent)
 	s.handle("GET /api/sessions/{id}/claude-sessions", SignedIn, s.apiClaudeSessions)
 	s.handle("GET /api/sessions/{id}/input-history", SignedIn, s.apiInputHistory)

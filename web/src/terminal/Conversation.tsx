@@ -1,6 +1,7 @@
 import { createContext, Fragment, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { ArrowDown, Check, ChevronDown, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, Clock, Download, GitBranch, Keyboard, Loader, MoreVertical, PanelLeft, Pin, Search, TriangleAlert, X, Plus } from 'lucide-react'
 import { t, getLang, type I18nKey } from '../i18n'
+import { api } from '../api'
 import { asHeld, GROUPS, inGroup, listOrder, pinned, type ConvoListRow } from './agentOrder'
 import { copyText, Dialog, isCoarse, Menu, type MenuItem } from '../components/ui'
 import { composing, foldAllKey, helpKey, jumpKey, onMac, switchKey } from './pageKeys'
@@ -1192,7 +1193,16 @@ export function ConversationView({
           </div>
         )}
         {composer}
-        {convo.status === 'ready' && convo.meta && <Runs meta={convo.meta} active={active} mode={mode} model={model} effort={effort} />}
+        {convo.status === 'ready' && convo.meta && (
+          <Runs
+            meta={convo.meta}
+            active={active}
+            mode={mode}
+            model={model}
+            effort={effort}
+            quota={convo.of && convo.bind?.agent === 'claude' && convo.bind.session ? { sid: convo.of.split(' ')[0], session: convo.bind.session } : undefined}
+          />
+        )}
       </div>
       </div>
       {changes && shownEdits && <ChangesPanel key={changes.key} edits={shownEdits} focus={changes.path} onClose={unshow} active={active} />}
@@ -1375,7 +1385,7 @@ const effortName = (e: string) => ((EFFORTS as readonly string[]).includes(e) ? 
 // What the session runs with, under the composer: its permission mode on
 // the left (a tap: a menu of them); its branch, model and how
 // full its context is on the right (the numbers on a tap).
-function Runs({ meta, active, mode, model, effort }: { meta: ConvoMeta; active: boolean; mode?: ModeSwitch; model?: ModelSwitch; effort?: EffortSwitch }) {
+function Runs({ meta, active, mode, model, effort, quota }: { meta: ConvoMeta; active: boolean; mode?: ModeSwitch; model?: ModelSwitch; effort?: EffortSwitch; quota?: { sid: string; session: string } }) {
   const [open, setOpen] = useState<false | 'ctx' | 'model' | 'effort' | 'mode'>(false) // (which of its pop-ups)
   const box = useRef<HTMLDivElement>(null)
   const modelBtn = useRef<HTMLButtonElement>(null)
@@ -1657,9 +1667,97 @@ function Runs({ meta, active, mode, model, effort }: { meta: ConvoMeta; active: 
               ? t(meta.window_by === 'model' ? 'convo.ctxNoteModel' : meta.window_by === 'request' ? 'convo.ctxNoteWide' : 'convo.ctxNoteSaid', { w: tokens(known) })
               : t(windows.length > 1 ? 'convo.ctxNote' : 'convo.ctxNoteBig')}
           </p>
+          {quota && <QuotaPart sid={quota.sid} session={quota.session} />}
           {(meta.cost || /claude/i.test(meta.model ?? '')) && <CostPart cost={meta.cost} />}
         </div>
       )}
+    </div>
+  )
+}
+
+// The subscription's quota (5 hours, the week), as cc-statusline keeps it on
+// the host (plans/3c-quota.md): read when the popover opens and each minute
+// while it is open (that program writes it once a minute), kept a minute
+// across openings. The account's, whichever session says it.
+interface Quota {
+  known: boolean
+  updated_at?: number // (unix seconds)
+  five_hour?: { used: number; resets_at: number }
+  weekly?: { used: number; resets_at: number }
+}
+const QUOTA_EVERY = 60000
+const quotaSeen = new Map<string, { at: number; q: Quota | 'failed'; last?: Quota; lastAt?: number }>()
+
+function QuotaPart({ sid, session }: { sid: string; session: string }) {
+  const key = sid + ' ' + session
+  const [seen, setSeen] = useState(() => quotaSeen.get(key))
+  useEffect(() => {
+    let live = true
+    const look = () => {
+      const was = quotaSeen.get(key)
+      if (was && was.q !== 'failed' && Date.now() - was.at < QUOTA_EVERY - 1000) return setSeen(was)
+      api<Quota>('GET', `/api/sessions/${encodeURIComponent(sid)}/conversation/quota?session=${encodeURIComponent(session)}`, undefined, { timeoutMs: 20000 }).then(
+        (q) => {
+          const v = { at: Date.now(), q, last: q.known ? q : undefined, lastAt: q.known ? Date.now() : undefined }
+          quotaSeen.set(key, v)
+          if (quotaSeen.size > 50) quotaSeen.delete(quotaSeen.keys().next().value!)
+          if (live) setSeen(v)
+        },
+        () => {
+          // (Failed: what was read before still shown, said to be of then.)
+          const v = { at: Date.now(), q: 'failed' as const, last: was?.last, lastAt: was?.lastAt }
+          quotaSeen.set(key, v)
+          if (live) setSeen(v)
+        },
+      )
+    }
+    look()
+    const timer = setInterval(look, QUOTA_EVERY)
+    return () => {
+      live = false
+      clearInterval(timer)
+    }
+  }, [key, sid, session])
+  // (What to show: what was read, where it said anything; failed, what was read before.)
+  const shown = !seen ? undefined : seen.q === 'failed' ? seen.last : seen.q.known ? seen.q : undefined
+  const clock = (sec: number) => {
+    const d = new Date(sec * 1000)
+    const time = d.toLocaleTimeString(getLang(), { hour: '2-digit', minute: '2-digit', hour12: false })
+    // (Another day: its date and weekday apart, "11月2日 周一 16:43".)
+    return d.toDateString() === new Date().toDateString() ? time : [d.toLocaleDateString(getLang(), { month: 'long', day: 'numeric' }), d.toLocaleDateString(getLang(), { weekday: 'short' }), time].join(' ')
+  }
+  const now = Date.now() / 1000
+  const stale = shown?.updated_at && now - shown.updated_at > 600 ? Math.round((now - shown.updated_at) / 60) : 0
+  return (
+    <div className="convo-cost convo-quota">
+      <div className="convo-runs-row convo-cost-head">
+        <span>{t('quota.title')}</span>
+      </div>
+      {!seen && <p className="convo-runs-note">{t('quota.reading')}</p>}
+      {seen && !shown && <p className="convo-runs-note">{t(seen.q === 'failed' ? 'quota.failed' : 'quota.none')}</p>}
+      {shown?.known &&
+        (
+          [
+            ['quota.fiveHour', shown.five_hour],
+            ['quota.weekly', shown.weekly],
+          ] as const
+        ).map(([name, w]) =>
+          !w ? null : (
+            <div key={name} className="convo-runs-win">
+              <div className="convo-runs-row">
+                <span>{t(name)}</span>
+                <span>{w.resets_at <= now ? t('quota.reset') : t('quota.used', { n: Math.round(w.used), at: clock(w.resets_at) })}</span>
+              </div>
+              {w.resets_at > now && (
+                <div className={'convo-runs-bar' + (w.used >= 95 ? ' is-danger' : w.used >= 80 ? ' is-warn' : '')}>
+                  <i style={{ width: Math.min(100, w.used) + '%' }} />
+                </div>
+              )}
+            </div>
+          ),
+        )}
+      {seen?.q === 'failed' && shown && <p className="convo-runs-note">{t('quota.failedKept', { at: clock((seen.lastAt ?? 0) / 1000) })}</p>}
+      {!!stale && <p className="convo-runs-note">{t('quota.stale', { n: stale })}</p>}
     </div>
   )
 }

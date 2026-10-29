@@ -494,6 +494,8 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-runs-row > :last-child { min-width: 0; overflow-wrap: anywhere; text-align: right; }
 .convo-runs-bar { height: 4px; margin: 1px 0 6px; border-radius: 3px; background: var(--term-line); overflow: hidden; }
 .convo-runs-bar i { display: block; height: 100%; background: var(--term-accent-text); }
+.convo-runs-bar.is-warn i { background: var(--term-warn-text); }
+.convo-runs-bar.is-danger i { background: var(--term-danger-text); }
 .convo-runs-note { margin: 4px 0 0; font-size: 12px; color: var(--term-fg-3); }
 @media (max-width: 420px) { .convo-runs-branch { display: none; } }
 .convo-col {
