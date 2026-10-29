@@ -138,7 +138,7 @@ type toolRef struct {
 
 type goneItem struct {
 	text string // (squashed)
-	size int    // its text's length as kept (cut, or not: see cutMatch)
+	cut  bool   // its text was cut (see cutMatch)
 	at   string // when it was removed
 	from string // another session's, which: its arrival is told by that too
 }
@@ -148,6 +148,7 @@ type queuedItem struct {
 	note bool
 	raw  string // as the log wrote it (a remove names it so)
 	key  string // queueKey(Text), what its arrival is matched by
+	cut  bool   // Text was cut (see cutMatch)
 	Queued
 }
 
@@ -895,9 +896,9 @@ func (c *Claude) user(r *claudeRow) {
 			// (A shell command the person typed with "!": shown so, it waited
 			// as the command alone.)
 			if strings.Contains(s, "<bash-input>") {
-				c.arrived(strings.TrimPrefix(text, "! "))
+				c.arrived(arrivalOf(strings.TrimPrefix(text, "! ")))
 			} else {
-				c.arrived(text)
+				c.arrived(arrivalOf(text))
 			}
 			c.wasSaid(text)
 		}
@@ -972,7 +973,7 @@ func (c *Claude) user(r *claudeRow) {
 	}
 	c.add(r, role, parts)
 	if role == RoleUser && len(parts) > 0 {
-		c.arrived(partsText(parts))
+		c.arrived(arrivalOfParts(parts))
 		c.wasSaid(partsText(parts))
 	}
 	c.add(r, RoleNote, notes) // (Claude Code's own word that it was stopped, say)
@@ -990,7 +991,7 @@ func (c *Claude) queueOp(r *claudeRow) {
 		text, from, note := queuedText(s)
 		if text != "" && c.ofNow(r.Timestamp) {
 			q := queuedItem{raw: s, from: from, note: note}
-			q.Text, _ = cut(clean(blankEnds(text)), maxText)
+			q.Text, q.cut = cut(clean(blankEnds(text)), maxText)
 			q.key = queueKey(q.Text)
 			q.Time = clip(r.Timestamp, 64)
 			c.queue = append(c.queue, q)
@@ -1002,7 +1003,7 @@ func (c *Claude) queueOp(r *claudeRow) {
 		for i, q := range c.queue {
 			if q.raw == s || sameCrossSession(q, s) {
 				c.queue = append(c.queue[:i:i], c.queue[i+1:]...)
-				c.gone = append(c.gone, goneItem{q.key, len(q.Text), clip(r.Timestamp, 64), q.from})
+				c.gone = append(c.gone, goneItem{q.key, q.cut, clip(r.Timestamp, 64), q.from})
 				if n := len(c.gone) - maxQueue; n > 0 {
 					c.gone = append([]goneItem(nil), c.gone[n:]...)
 				}
@@ -1059,17 +1060,21 @@ func queuedText(s string) (text, from string, note bool) {
 // in during one): it waits no more.
 // (One removed already, by its text, is the one arriving: not another of
 // the same text that still waits.)
-func (c *Claude) arrived(text string) {
-	a := arrivalOf(text)
-	if c.goneOf(a, "") {
-		return
-	}
-	// (The person's: not another session's that has the same words.)
-	if i := matchAt(len(c.queue), func(i int) (string, int, bool) {
-		q := c.queue[i]
-		return q.key, len(q.Text), q.from == ""
-	}, a); i >= 0 {
-		c.queue = append(c.queue[:i:i], c.queue[i+1:]...)
+// (The same words first, among the removed and the waiting both; only then
+// one cut, see cutMatch.)
+func (c *Claude) arrived(a arrival) {
+	for _, exact := range []bool{true, false} {
+		if c.goneOf(a, "", exact) {
+			return
+		}
+		// (The person's: not another session's that has the same words.)
+		if i := matchAt(len(c.queue), func(i int) (string, bool, bool) {
+			q := c.queue[i]
+			return q.key, q.cut, q.from == ""
+		}, a, exact); i >= 0 {
+			c.queue = append(c.queue[:i:i], c.queue[i+1:]...)
+			return
+		}
 	}
 }
 
@@ -1134,13 +1139,16 @@ func (c *Claude) turnOver(at string) {
 
 // goneArrived: the message arriving is one removed from what waited (to
 // arrive still): that is what it is, and it is forgotten. True if so.
-func (c *Claude) goneArrived(text, from string) bool { return c.goneOf(arrivalOf(text), from) }
+func (c *Claude) goneArrived(text, from string) bool {
+	a := arrivalOf(text)
+	return c.goneOf(a, from, true) || c.goneOf(a, from, false)
+}
 
-func (c *Claude) goneOf(a arrival, from string) bool {
-	i := matchAt(len(c.gone), func(i int) (string, int, bool) {
+func (c *Claude) goneOf(a arrival, from string, exact bool) bool {
+	i := matchAt(len(c.gone), func(i int) (string, bool, bool) {
 		g := c.gone[i]
-		return g.text, g.size, g.from == from
-	}, a)
+		return g.text, g.cut, g.from == from
+	}, a, exact)
 	if i < 0 {
 		return false
 	}
@@ -1155,28 +1163,37 @@ func squashed(s string) string { return strings.Join(strings.Fields(s), " ") }
 func queueKey(s string) string { return squashed(imageToken.ReplaceAllString(s, " ")) }
 
 // arrival is an arriving message as it is matched with what waited: its
-// key, and its text's length (cleaned, as what waited was).
+// key; and, where a part of it was cut on the way (a message as blocks, see
+// textPart), the key of it up to that part's cut, what is after it not to be
+// compared (see cutMatch).
 type arrival struct {
-	key  string
-	size int
+	key    string
+	cut    bool
+	cutKey string
 }
 
-func arrivalOf(text string) arrival {
-	t := clean(text)
-	return arrival{queueKey(t), len(t)}
-}
+// arrivalOf: one come whole, as the log wrote it.
+func arrivalOf(text string) arrival { return arrival{key: queueKey(clean(text))} }
 
-// matchAt: which of n that waited (each its key, its text's length, and
-// whether it may be this one's at all) the arrival is; -1 none. The same
-// words first; else one cut (see cutMatch).
-func matchAt(n int, at func(int) (string, int, bool), a arrival) int {
-	for i := 0; i < n; i++ {
-		if k, _, ok := at(i); ok && k == a.key {
-			return i
+// arrivalOfParts: one come as parts, each cut where long.
+func arrivalOfParts(parts []Part) arrival {
+	a := arrival{key: queueKey(partsText(parts))}
+	for i, p := range parts {
+		if p.Kind == KindText && p.Truncated {
+			a.cut, a.cutKey = true, queueKey(partsText(parts[:i+1]))
+			break
 		}
 	}
+	return a
+}
+
+// matchAt: which of n that waited (each its key, whether its text was cut,
+// and whether it may be this one's at all) the arrival is, by the same words
+// (exact) or as cut (cutMatch); -1 none.
+func matchAt(n int, at func(int) (string, bool, bool), a arrival, exact bool) int {
 	for i := 0; i < n; i++ {
-		if k, size, ok := at(i); ok && cutMatch(k, size, a) {
+		k, cut, ok := at(i)
+		if ok && (exact && k == a.key || !exact && cutMatch(k, cut, a)) {
 			return i
 		}
 	}
@@ -1184,16 +1201,19 @@ func matchAt(n int, at func(int) (string, int, bool), a arrival) int {
 }
 
 // cutMatch: a long message waiting and arriving, cut at different places
-// (a paste arrives without its wrapper's blank lines, see unpasted, and a
-// message as blocks comes cut with them): the shorter's words the start of
-// the other's, and the shorter cut indeed (its text at maxText, less what a
-// cut lets go of a character's bytes).
-func cutMatch(key string, size int, a arrival) bool {
-	short, n, other := key, size, a.key
-	if len(a.key) < len(key) {
-		short, n, other = a.key, a.size, key
+// (a paste arrives without its wrapper's blank lines, see unpasted, while a
+// message as blocks comes cut with them): the words of the one cut shorter
+// the start of the other's. (Two messages the same up to where one was cut
+// cannot be told apart: the first such waiting is taken.)
+func cutMatch(key string, cut bool, a arrival) bool {
+	other, otherCut := a.key, a.cut
+	if a.cut {
+		other = a.cutKey
 	}
-	return n >= maxText-(utf8.UTFMax-1) && short != "" && strings.HasPrefix(other, short)
+	if len(key) > len(other) {
+		key, cut, other = other, otherCut, key
+	}
+	return cut && key != "" && strings.HasPrefix(other, key)
 }
 
 // mid marks the entry just added as taken in during the agent's turn.
@@ -1220,7 +1240,7 @@ func (c *Claude) queued(r *claudeRow) {
 				c.add(r, role, []Part{textPart(KindText, text)})
 				if role == RoleUser && len(c.entries) > n {
 					c.mid()
-					c.arrived(text)
+					c.arrived(arrivalOf(text))
 					c.wasSaid(text)
 				}
 			}
@@ -1255,7 +1275,7 @@ func (c *Claude) queued(r *claudeRow) {
 	c.add(r, RoleUser, parts)
 	if len(c.entries) > n {
 		c.mid()
-		c.arrived(partsText(parts))
+		c.arrived(arrivalOfParts(parts))
 		c.wasSaid(partsText(parts))
 	}
 }

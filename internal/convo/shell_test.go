@@ -141,4 +141,27 @@ func TestQueuedLongPasteArrives(t *testing.T) {
 	if len(c.Queued()) != 0 {
 		t.Fatalf("control characters: still waiting")
 	}
+	// (Per review404. One just under the cut, never cut, and one of its
+	// words and more: not taken for each other.)
+	u := strings.Repeat("x", maxText-3)
+	c = NewClaude()
+	c.Feed(append(row("enqueue", u), said("u10", u+"yz")...))
+	if q := c.Queued(); len(q) != 1 || q[0].Text != u {
+		t.Fatalf("just under the cut: %d waiting", len(q))
+	}
+	// (One removed, cut, its words the start of one waiting of the same
+	// words as the arrival: that one goes, the removed is kept.)
+	c = NewClaude()
+	cutA, wholeB := "  "+strings.Repeat("x", maxText+10), strings.Repeat("x", maxText-2)+"z"
+	c.Feed(append(append(append(row("enqueue", cutA), row("remove", cutA)...), row("enqueue", wholeB)...), said("u11", wholeB)...))
+	if len(c.Queued()) != 0 || len(c.gone) != 1 {
+		t.Fatalf("the same words before a cut one: queue %d, gone %d", len(c.Queued()), len(c.gone))
+	}
+	// (Arriving as two blocks, the first cut: what follows it not compared.)
+	two, _ := json.Marshal(map[string]any{"type": "user", "uuid": "u12", "message": map[string]any{"role": "user", "content": []map[string]any{{"type": "text", "text": "\n\n" + body}, {"type": "text", "text": "tail"}}}})
+	c = NewClaude()
+	c.Feed(append(row("enqueue", "\n\n"+body+"\ntail"), append(two, '\n')...))
+	if len(c.Queued()) != 0 {
+		t.Fatalf("two blocks, the first cut: still waiting")
+	}
 }
