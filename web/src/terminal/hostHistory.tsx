@@ -30,6 +30,7 @@ export function HostHistoryDialog({ sid, cwd, onPick, onClose }: { sid: string; 
   const [busy, setBusy] = useState(false)
   const [trouble, setTrouble] = useState('')
   const [note, setNote] = useState('')
+  const [shownQ, setShownQ] = useState('') // (the search the list and its next page are of)
   // (One request at a time: a new one cancels the one before, and a page
   // that comes back for what is no longer asked is not shown.)
   const asked = useRef<{ n: number; ctl?: AbortController }>({ n: 0 })
@@ -42,6 +43,7 @@ export function HostHistoryDialog({ sid, cwd, onPick, onClose }: { sid: string; 
     setBusy(true)
     setTrouble('')
     if (fresh) {
+      setShownQ(query)
       setItems([])
       setNext(null)
       setDone(false)
@@ -75,8 +77,15 @@ export function HostHistoryDialog({ sid, cwd, onPick, onClose }: { sid: string; 
     }
   }
 
-  // The first page now; a search 400 ms after the last key.
+  // The first page now; a search 400 ms after the last key (what was asked
+  // before no longer stands from the first key: neither its answer nor its
+  // next page).
   useEffect(() => {
+    asked.current.ctl?.abort()
+    asked.current.n++
+    setNext(null)
+    setTrouble('')
+    setBusy(true)
     const tm = setTimeout(() => void load(q.trim().toLowerCase(), null, true), q ? 400 : 0)
     return () => clearTimeout(tm)
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -92,23 +101,22 @@ export function HostHistoryDialog({ sid, cwd, onPick, onClose }: { sid: string; 
         {items.map((it, i) => {
           const can = !it.text_cut && it.text !== undefined
           return (
+            <div role="listitem" key={i}>
             <button
               type="button"
-              role="listitem"
-              key={i}
               className={'host-history-row' + (here && it.project?.replace(/\/+$/, '') === here ? ' is-here' : '')}
-              disabled={!can}
-              title={can ? undefined : t('hostHistory.cut')}
+              aria-disabled={!can || undefined}
               onClick={() => can && onPick(it.text!)}
             >
               <span className="host-history-text">{it.preview}</span>
               <span className="host-history-meta">
                 {base(it.project) && <span className="host-history-project" title={it.project}>{base(it.project)}</span>}
                 <span>{when(it.ts)}</span>
-                {it.text_cut && <span className="host-history-flag">{t('hostHistory.cutShort')}</span>}
-                {it.pasted && <span className="host-history-flag" title={t('hostHistory.pastedWhy')}>{t('hostHistory.pasted')}</span>}
+                {it.text_cut && <span className="host-history-flag">{t('hostHistory.cut')}</span>}
+                {it.pasted && <span className="host-history-flag">{t('hostHistory.pastedWhy')}</span>}
               </span>
             </button>
+            </div>
           )
         })}
         {!busy && done && items.length === 0 && <p className="hint">{q ? t('hostHistory.noneFound') : t('hostHistory.empty')}</p>}
@@ -117,7 +125,7 @@ export function HostHistoryDialog({ sid, cwd, onPick, onClose }: { sid: string; 
       {trouble && (
         <p className="error" role="alert">
           {trouble}{' '}
-          <button type="button" className="btn btn-ghost" onClick={() => void load(q.trim().toLowerCase(), next, !next)}>
+          <button type="button" className="btn btn-ghost" onClick={() => void load(shownQ, next, !next)}>
             {t('hostHistory.retry')}
           </button>
         </p>
@@ -128,8 +136,8 @@ export function HostHistoryDialog({ sid, cwd, onPick, onClose }: { sid: string; 
         ) : (
           next &&
           !trouble && (
-            <button type="button" className="btn btn-ghost" onClick={() => void load(q.trim().toLowerCase(), next, false)}>
-              {q && items.length === 0 ? t('hostHistory.notYet') : t('hostHistory.more')}
+            <button type="button" className="btn btn-ghost" onClick={() => void load(shownQ, next, false)}>
+              {shownQ && items.length === 0 ? t('hostHistory.notYet') : t('hostHistory.more')}
             </button>
           )
         )}

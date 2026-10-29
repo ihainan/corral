@@ -1451,7 +1451,8 @@ function Runs({ meta, active, mode, model, effort }: { meta: ConvoMeta; active: 
 // its tokens by model and its estimated cost, with when that was said.
 function CostPart({ cost }: { cost?: ConvoCost }) {
   if (!cost) return <p className="convo-runs-note convo-cost-none">{t('convo.costNone')}</p>
-  const at = cost.at ? new Date(cost.at).toLocaleTimeString(getLang(), { hour: '2-digit', minute: '2-digit' }) : ''
+  const d = cost.at ? new Date(cost.at) : null
+  const at = !d ? '' : (d.toDateString() === new Date().toDateString() ? '' : d.toLocaleDateString(getLang(), { month: 'numeric', day: 'numeric' }) + ' ') + d.toLocaleTimeString(getLang(), { hour: '2-digit', minute: '2-digit' })
   const money = (n: number) => '$' + (n < 10 ? n.toFixed(2) : n.toFixed(1))
   return (
     <div className="convo-cost">

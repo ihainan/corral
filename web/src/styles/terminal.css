@@ -484,6 +484,8 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
   position: absolute; right: 0; bottom: calc(100% + 6px); z-index: 3; width: min(320px, 100%); padding: 8px 10px;
   border: 1px solid var(--term-line); border-radius: 10px; background: var(--term-bg); color: var(--term-fg);
   box-shadow: 0 10px 28px rgba(0, 0, 0, 0.22); font-size: 13px;
+  /* (Long, as with a session's usage by many models: it scrolls, never past the top of the view.) */
+  max-height: min(70vh, calc(100dvh - 140px)); overflow-y: auto; overscroll-behavior: contain;
 }
 .convo-runs-row { display: flex; justify-content: space-between; gap: 16px; padding: 3px 0; }
 .convo-runs-row > :first-child { color: var(--term-fg-3); flex: none; }
@@ -1112,14 +1114,15 @@ button.convo-running-what { padding: 0; text-align: left; }
 
 /* The input history on the host: what was sent, a page at a time, to put back in the composer */
 .host-history { display: flex; flex-direction: column; gap: 10px; }
+.host-history-list > [role=listitem] { display: flex; flex-direction: column; }
 .host-history-list { display: flex; flex-direction: column; gap: 4px; max-height: min(52vh, 460px); overflow: auto; overscroll-behavior: contain; }
 .host-history-row {
   display: flex; flex-direction: column; gap: 3px; padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--r-sm);
   background: none; color: var(--fg); text-align: left; font: inherit; cursor: pointer;
 }
-.host-history-row:hover:not(:disabled) { background: var(--bg-subtle); }
+.host-history-row:hover:not([aria-disabled]) { background: var(--bg-subtle); }
 .host-history-row:focus-visible { outline: 2px solid var(--accent, #3b6cf6); outline-offset: -2px; }
-.host-history-row:disabled { cursor: default; color: var(--fg-2); }
+.host-history-row[aria-disabled] { cursor: default; color: var(--fg-2); }
 .host-history-row.is-here { border-color: color-mix(in srgb, var(--accent, #3b6cf6) 45%, var(--line)); }
 .host-history-text { font-size: 13.5px; line-height: 19px; white-space: pre-wrap; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden; }
 .host-history-meta { display: flex; flex-wrap: wrap; gap: 4px 10px; font-size: 12px; line-height: 16px; color: var(--fg-3); }
