@@ -1917,41 +1917,35 @@ function AgentList({ rows, menus, onPicked, placed, query: given, onQuery, searc
   // Something picked from it: the focus put on its button first (a dialog
   // it opens gives it back there), and onto that button again where it was
   // drawn anew meanwhile with the focus left nowhere (pinned: its row in
-  // another group); on the first row where it is gone (closed, once its
-  // dialog is). Done with once its button is let be: the focus elsewhere,
-  // or a key or a press outside a dialog.
-  const refocus = useRef<{ key: string; el: HTMLElement | null } | null>(null)
-  useEffect(() => {
+  // another group); on the first row where it is gone (closed). Looked at
+  // once what was picked is done: as the list is drawn, and every 150 ms
+  // while a dialog it opened is open (wherever the focus is meanwhile, its
+  // button greyed as it asks, its backdrop pressed; shut, it need not draw
+  // the list again).
+  const refocus = useRef<{ key: string; el: HTMLElement | null; timer: number } | null>(null)
+  const settle = useCallback(() => {
     const f = refocus.current
-    if (!f) return
+    if (!f || modalOpen()) return
+    // (Its button where it was: nothing to do, the focus there or gone on
+    // since.)
+    forget()
     const a = document.activeElement
-    if (a?.closest('[role="dialog"]')) return // (one it opened: waited out)
-    const nowhere = !a || a === document.body
-    if (f.el?.isConnected) {
-      if (a !== f.el) refocus.current = null
-      return
-    }
-    refocus.current = null
-    if (nowhere) (dotsOf(f.key) ?? document.querySelector<HTMLElement>('.convo-side .convo-list-row'))?.focus({ preventScroll: true })
-  })
-  useEffect(() => {
-    const done = (e: Event) => {
-      if (refocus.current && !(e.target as Element | null)?.closest?.('[role="dialog"]')) refocus.current = null
-    }
-    document.addEventListener('pointerdown', done, true)
-    document.addEventListener('keydown', done, true)
-    return () => {
-      document.removeEventListener('pointerdown', done, true)
-      document.removeEventListener('keydown', done, true)
-    }
+    if (!f.el?.isConnected && (!a || a === document.body)) (dotsOf(f.key) ?? document.querySelector<HTMLElement>('.convo-side .convo-list-row'))?.focus({ preventScroll: true })
   }, [])
+  const forget = () => {
+    if (refocus.current) clearInterval(refocus.current.timer)
+    refocus.current = null
+  }
+  useEffect(settle)
+  useEffect(() => forget, [])
   const menuItems = (r: ConvoListRow) =>
     (r.menu!().filter(Boolean) as MenuItem[]).map((it): MenuItem => ({
       ...it,
       onSelect: it.onSelect && (() => {
         const el = dotsOf(r.key)
         el?.focus({ preventScroll: true })
-        refocus.current = { key: r.key, el }
+        forget()
+        refocus.current = { key: r.key, el, timer: window.setInterval(settle, 150) }
         it.onSelect!()
       }),
     }))
@@ -2098,6 +2092,9 @@ function AgentList({ rows, menus, onPicked, placed, query: given, onQuery, searc
     </>
   )
 }
+
+// (A dialog open over the page.)
+const modalOpen = () => !!document.querySelector('[role="dialog"][aria-modal="true"]')
 
 // A list of agents longer than this has a search box over it.
 export const SEARCH_FROM = 5
