@@ -138,6 +138,7 @@ type toolRef struct {
 
 type goneItem struct {
 	text string // (squashed)
+	long bool   // (long enough to have been cut: see sameWaiting)
 	at   string // when it was removed
 	from string // another session's, which: its arrival is told by that too
 }
@@ -146,6 +147,7 @@ type queuedItem struct {
 	from string
 	note bool
 	raw  string // as the log wrote it (a remove names it so)
+	long bool   // (long enough to have been cut: see sameWaiting)
 	Queued
 }
 
@@ -987,8 +989,8 @@ func (c *Claude) queueOp(r *claudeRow) {
 		// shown at all.
 		text, from, note := queuedText(s)
 		if text != "" && c.ofNow(r.Timestamp) {
-			q := queuedItem{raw: s, from: from, note: note}
-			q.Text = queuedCut(text)
+			q := queuedItem{raw: s, from: from, note: note, long: longText(text)}
+			q.Text, _ = cut(clean(blankEnds(text)), maxText)
 			q.Time = clip(r.Timestamp, 64)
 			c.queue = append(c.queue, q)
 			if n := len(c.queue) - maxQueue; n > 0 {
@@ -999,7 +1001,7 @@ func (c *Claude) queueOp(r *claudeRow) {
 		for i, q := range c.queue {
 			if q.raw == s || sameCrossSession(q, s) {
 				c.queue = append(c.queue[:i:i], c.queue[i+1:]...)
-				c.gone = append(c.gone, goneItem{queueKey(q.Text), clip(r.Timestamp, 64), q.from})
+				c.gone = append(c.gone, goneItem{queueKey(q.Text), q.long, clip(r.Timestamp, 64), q.from})
 				if n := len(c.gone) - maxQueue; n > 0 {
 					c.gone = append([]goneItem(nil), c.gone[n:]...)
 				}
@@ -1060,11 +1062,9 @@ func (c *Claude) arrived(text string) {
 	if c.goneArrived(text, "") {
 		return
 	}
-	t := queueKey(text)
-	k := queueKey(queuedCut(text)) // (as the queue keeps a long one, and its removals)
 	for i, q := range c.queue {
 		// (The person's: not another session's that has the same words.)
-		if key := queueKey(q.Text); q.from == "" && (key == t || key == k) {
+		if q.from == "" && sameWaiting(queueKey(q.Text), q.long, text) {
 			c.queue = append(c.queue[:i:i], c.queue[i+1:]...)
 			return
 		}
@@ -1133,10 +1133,8 @@ func (c *Claude) turnOver(at string) {
 // goneArrived: the message arriving is one removed from what waited (to
 // arrive still): that is what it is, and it is forgotten. True if so.
 func (c *Claude) goneArrived(text, from string) bool {
-	t := queueKey(text)
-	k := queueKey(queuedCut(text)) // (as the queue keeps a long one, and its removals)
 	for i, g := range c.gone {
-		if g.from == from && (g.text == t || g.text == k) {
+		if g.from == from && sameWaiting(g.text, g.long, text) {
 			c.gone = append(c.gone[:i:i], c.gone[i+1:]...)
 			return true
 		}
@@ -1150,13 +1148,29 @@ func squashed(s string) string { return strings.Join(strings.Fields(s), " ") }
 // words, without the "[Image #N]" a queued one has and one taken in may not.
 func queueKey(s string) string { return squashed(imageToken.ReplaceAllString(s, " ")) }
 
-// queuedCut is a waiting message's text as kept: without blank lines at its
-// ends (a paste arrives without its wrapper's, see unpasted), then cut where
-// long, so a long one is cut at the same place waiting and arriving.
-func queuedCut(text string) string {
-	kept, _ := cut(clean(blankEnds(text)), maxText)
-	return kept
+// sameWaiting: a message that waited (its key, and whether it was long
+// enough to have been cut) and one arriving (its text, cut or not) are the
+// same: the same words; or, both long, the shorter's words the start of the
+// other's, as a long one is cut at different places waiting and arriving (a
+// paste arrives without its wrapper's blank lines, see unpasted, and a
+// message as blocks comes cut with them).
+func sameWaiting(key string, long bool, text string) bool {
+	t := queueKey(text)
+	if key == t {
+		return true
+	}
+	if !long || !longText(text) {
+		return false
+	}
+	if len(key) > len(t) {
+		key, t = t, key
+	}
+	return key != "" && strings.HasPrefix(t, key)
 }
+
+// longText: a text long enough that it may have been cut (at maxText), or
+// cut at another place than its other copy (by what is at its ends).
+func longText(s string) bool { return len(s) > maxText-4<<10 }
 
 // mid marks the entry just added as taken in during the agent's turn.
 func (c *Claude) mid() {

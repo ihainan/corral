@@ -83,4 +83,35 @@ func TestQueuedLongPasteArrives(t *testing.T) {
 	if len(c.Queued()) != 0 || len(c.gone) != 0 {
 		t.Fatalf("removed, then arrived: queue %d, gone %d", len(c.Queued()), len(c.gone))
 	}
+	// Arriving as blocks, unwrapped (cut with its blank lines): the same one;
+	// as a row of its own and as one taken in during a turn; waiting and
+	// removed.
+	blocks, _ := json.Marshal(map[string]any{"type": "user", "uuid": "u3", "message": map[string]any{"role": "user", "content": []map[string]any{{"type": "text", "text": "\n\n" + body}}}})
+	taken, _ := json.Marshal(map[string]any{"type": "attachment", "uuid": "u4", "attachment": map[string]any{"type": "queued_command", "commandMode": "prompt", "prompt": []map[string]any{{"type": "text", "text": "\n\n" + body}}}})
+	for name, arrive := range map[string][]byte{"blocks": blocks, "taken in": taken} {
+		c = NewClaude()
+		c.Feed(append(append(enq, '\n'), append(arrive, '\n')...))
+		if q := c.Queued(); len(q) != 0 {
+			t.Fatalf("%s: still waiting: %d", name, len(q))
+		}
+		c = NewClaude()
+		c.Feed(append(append(append(enq, '\n'), append(rm, '\n')...), append(arrive, '\n')...))
+		if len(c.gone) != 0 {
+			t.Fatalf("%s: removed, then arrived: gone %d", name, len(c.gone))
+		}
+	}
+	// (Two long ones of other words: each its own.)
+	other, _ := json.Marshal(map[string]any{"type": "user", "uuid": "u5", "message": map[string]any{"role": "user", "content": strings.Repeat("y", maxText+10)}})
+	c = NewClaude()
+	c.Feed(append(append(enq, '\n'), append(other, '\n')...))
+	if len(c.Queued()) != 1 {
+		t.Fatalf("another long one arrived: %d waiting", len(c.Queued()))
+	}
+	// (A short one whose words begin a long one waiting: not it.)
+	short, _ := json.Marshal(map[string]any{"type": "user", "uuid": "u6", "message": map[string]any{"role": "user", "content": "xxxx"}})
+	c = NewClaude()
+	c.Feed(append(append(enq, '\n'), append(short, '\n')...))
+	if len(c.Queued()) != 1 {
+		t.Fatalf("a short one arrived: %d waiting", len(c.Queued()))
+	}
 }
