@@ -15,6 +15,7 @@ export type Field = 'user' | 'answer' | 'text' | 'thinking' | 'tool' | 'output' 
 export interface Hit {
   key: string // the item's (as the page keys it)
   field: Field
+  tool?: string // (a tool's command or output) its id: its card is opened when gone to
   count: number
   before: string
   match: string
@@ -28,22 +29,28 @@ const AROUND = 40
 export const itemKey = (it: Item) => (it.kind === 'work' || it.kind === 'answer' || it.kind === 'text' || it.kind === 'gone' ? it.key : 'e' + it.e.seq)
 
 const isEntry = (s: ConvoPart | ConvoEntry): s is ConvoEntry => 'seq' in s
-const partTexts = (p: ConvoPart, field: Field): [Field, string][] => {
-  const out: [Field, string][] = []
-  if (p.text) out.push([p.kind === 'thinking' ? 'thinking' : field, p.text])
-  if (p.event?.text) out.push([field, p.event.text])
+type Text = [Field, string, string?] // (field, text, the tool's id)
+// (Each text as it is, none joined to another: a long one is not copied
+// before it is looked through.)
+const partTexts = (p: ConvoPart, field: Field): Text[] => {
+  const out: Text[] = []
+  const add = (f: Field, s?: string, tool?: string) => s && out.push([f, s, tool])
+  add(p.kind === 'thinking' ? 'thinking' : field, p.text)
+  const ev = p.event
+  if (ev) for (const s of [ev.text, ev.goal, ev.why]) add(field, s)
+  if (p.trouble) for (const s of [p.trouble.name, p.trouble.text]) add(field, s)
+  if (p.noted) for (const s of p.noted.paths) add(field, s)
   const t = p.tool
   if (t) {
-    const said = [t.name, t.title, t.detail, t.plan].filter(Boolean).join('\n')
-    if (said) out.push(['tool', said])
-    const res = [t.result, t.result_tail].filter(Boolean).join('\n')
-    if (res) out.push(['output', res])
+    for (const s of [t.name, t.title, t.detail, t.plan]) add('tool', s, t.id)
+    for (const s of [t.result, t.result_tail]) add('output', s, t.id)
   }
   return out
 }
 
-// What of an item is looked through, by field.
-export function fieldsOf(it: Item): [Field, string][] {
+// What of an item is looked through, by field. (Task-list calls the page
+// leaves out of a turn, shown in its task list instead, are not.)
+export function fieldsOf(it: Item): Text[] {
   switch (it.kind) {
     case 'user':
       return it.e.parts.flatMap((p) => partTexts(p, 'user'))
@@ -56,19 +63,29 @@ export function fieldsOf(it: Item): [Field, string][] {
     case 'answer':
       return [['answer', it.text]]
     case 'work':
-      return it.steps.flatMap((s) => (isEntry(s) ? s.parts.flatMap((p) => partTexts(p, 'note')) : partTexts(s, 'tool')))
+      return it.steps.flatMap((s) => (isEntry(s) ? s.parts.flatMap((p) => partTexts(p, s.role === 'summary' ? 'summary' : 'note')) : partTexts(s, 'tool')))
     case 'gone':
       return [] // (taken back: not searched)
   }
 }
 
-// One step of looking through text for q (lower case) from at: the places
-// begun within [at, at+STEP), and where the next step begins (-1: done).
-export function stepThrough(text: string, q: string, at: number): { found: number[]; next: number } {
+// The search as a pattern: its letters whatever their case, by the
+// Unicode rules (no text lower-cased first: a letter whose lower case is
+// longer would put every place after it out).
+export const patternOf = (q: string) => new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'giu')
+
+// One step of looking through text for re (patternOf) from at: the places
+// begun within [at, at+STEP), each with its length, and where the next step
+// begins (-1: done).
+export function stepThrough(text: string, re: RegExp, qLen: number, at: number): { found: [number, number][]; next: number } {
   const end = Math.min(text.length, at + STEP)
-  const window = text.slice(at, Math.min(text.length, end + q.length - 1)).toLowerCase()
-  const found: number[] = []
-  for (let i = window.indexOf(q); i >= 0 && at + i < end; i = window.indexOf(q, i + Math.max(1, q.length))) found.push(at + i)
+  const window = text.slice(at, Math.min(text.length, end + qLen * 2))
+  const found: [number, number][] = []
+  re.lastIndex = 0
+  for (let m = re.exec(window); m && at + m.index < end; m = re.exec(window)) {
+    found.push([at + m.index, m[0].length])
+    if (!m[0].length) re.lastIndex++
+  }
   return { found, next: end < text.length ? end : -1 }
 }
 
@@ -81,8 +98,10 @@ const excerpt = (text: string, at: number, n: number) => ({
 // search goes through items for q, giving way every slice ms; done is told
 // the hits (in the page's order) and whether there were more than MAX_HITS.
 // It returns a function that calls it off.
+// (MAX_HITS places at most: past it, it stops there, said so.)
 export function search(items: Item[], query: string, done: (hits: Hit[], capped: boolean) => void, slice = 8, later: (f: () => void) => void = (f) => setTimeout(f, 0)): () => void {
-  const q = query.toLowerCase()
+  const q = query
+  const re = patternOf(q)
   let off = false
   if (!q) {
     done([], false)
@@ -91,7 +110,7 @@ export function search(items: Item[], query: string, done: (hits: Hit[], capped:
   const hits: Hit[] = []
   let total = 0
   let i = 0 // (the item)
-  let fields: [Field, string][] | null = null
+  let fields: Text[] | null = null
   let f = 0 // (its field)
   let at = 0 // (where in it)
   let mine = new Map<Field, Hit>() // (the item's hits, one a field)
@@ -111,16 +130,16 @@ export function search(items: Item[], query: string, done: (hits: Hit[], capped:
         fields = null
         continue
       }
-      const [field, text] = fields[f]
-      const step = stepThrough(text, q, at)
-      for (const p of step.found) {
-        total++
+      const [field, text, tool] = fields[f]
+      const step = stepThrough(text, re, q.length, at)
+      for (const [p, n] of step.found) {
+        if (++total > MAX_HITS) return done(hits, true)
         const h = mine.get(field)
         if (h) h.count++
-        else if (hits.length < MAX_HITS) {
-          const n: Hit = { key: itemKey(items[i]), field, count: 1, ...excerpt(text, p, q.length) }
-          mine.set(field, n)
-          hits.push(n)
+        else {
+          const hit: Hit = { key: itemKey(items[i]), field, tool, count: 1, ...excerpt(text, p, n) }
+          mine.set(field, hit)
+          hits.push(hit)
         }
       }
       if (step.next < 0) {
@@ -128,7 +147,7 @@ export function search(items: Item[], query: string, done: (hits: Hit[], capped:
         at = 0
       } else at = step.next
     }
-    done(hits, total > hits.reduce((n, h) => n + h.count, 0))
+    done(hits, false)
   }
   run()
   return () => {

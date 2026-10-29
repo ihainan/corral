@@ -20,6 +20,7 @@ export interface Say {
   gone: string
   tool: (name: string, what: string, state: 'running' | 'ok' | 'failed') => string
   event: (p: ConvoPart) => string
+  trouble: (p: ConvoPart) => string
   head: (title: string, exported: string, from?: string) => string
 }
 
@@ -35,6 +36,7 @@ function partsText(parts: ConvoPart[], say: Say): string {
     .map((p) => {
       if (p.kind === 'image') return say.image
       if (p.kind === 'event') return say.event(p)
+      if (p.kind === 'trouble') return say.trouble(p)
       if (p.kind === 'tool' && p.tool) return toolLine(p.tool, say)
       if (p.kind === 'thinking') return ''
       return (p.text ?? '') + (p.truncated ? '\n\n' + say.cut : '')
@@ -68,7 +70,7 @@ function itemText(it: Item, say: Say): string {
       for (const s of it.steps) {
         if (isEntry(s)) {
           const t = partsText(s.parts, say)
-          if (t.trim()) lines.push(`*${say.note}* ` + t)
+          if (t.trim()) lines.push(s.role === 'summary' ? `*${say.summary}*\n\n` + quote(t) : `*${say.note}* ` + t)
         } else if (s.kind === 'thinking') {
           if (!thought && s.text?.trim()) lines.push(say.thinking)
           thought = true
@@ -78,8 +80,15 @@ function itemText(it: Item, say: Say): string {
       return lines.join('\n')
     }
     case 'gone':
-      return `*${say.gone}*\n\n` + quote(it.entries.map((e) => partsText(e.parts, say)).join('\n\n'))
+      return `*${say.gone}*` // (its entries follow, one piece each: see pieces)
   }
+}
+
+// An item's Markdown in pieces, so that a big one (a long run taken back)
+// gives way between them too.
+function* pieces(it: Item, say: Say): Generator<string> {
+  yield itemText(it, say)
+  if (it.kind === 'gone') for (const e of it.entries) yield quote(partsText(e.parts, say))
 }
 
 // exportMarkdown makes the Markdown of items, a slice of them at a time
@@ -88,14 +97,18 @@ function itemText(it: Item, say: Say): string {
 export function exportMarkdown(items: Item[], say: Say, done: (md: string) => void, slice = 8, later: (f: () => void) => void = (f) => setTimeout(f, 0)): () => void {
   const out: string[] = [say.head(say.title, say.exported, say.from)]
   let i = 0
+  let cur: Generator<string> | null = null
   let off = false
   const run = () => {
     if (off) return
     const until = performance.now() + slice
     for (; i < items.length; i++) {
-      if (performance.now() > until) return later(run)
-      const t = itemText(items[i], say)
-      if (t.trim()) out.push(t)
+      if (!cur) cur = pieces(items[i], say)
+      for (let p = cur.next(); !p.done; p = cur.next()) {
+        if (p.value.trim()) out.push(p.value)
+        if (performance.now() > until) return later(run)
+      }
+      cur = null
     }
     done(out.join('\n\n') + '\n')
   }

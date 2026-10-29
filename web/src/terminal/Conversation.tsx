@@ -715,34 +715,51 @@ export function ConversationView({
     jumpedTo.current = to
     note()
   }, [note])
-  // An item gone to from a search: opened where it is a run of steps, then
-  // (once laid out) brought to the top of the view as jump brings one;
-  // false, it is not among those read in.
+  // An item gone to from a search: opened where it is a run of steps (and
+  // the tool card the hit is in, a summary's text), then, once laid out,
+  // brought to the top of the view as jump brings one; false (or gone
+  // told, by then), it is not among those read in. A later one, another log
+  // in front meanwhile: this one called off.
+  const going = useRef(0)
   const goTo = useCallback(
-    (key: string): boolean => {
-      const i = listNow.current.findIndex((it) => itemKey(it) === key)
+    (hit: { key: string; field: string; tool?: string }, gone: () => void): boolean => {
+      const n = ++going.current
+      const { of, gen } = convoNow.current
+      const i = listNow.current.findIndex((it) => itemKey(it) === hit.key)
       if (i < 0) return false
-      if (listNow.current[i].kind === 'work') toggle(key, true)
-      requestAnimationFrame(() =>
-        requestAnimationFrame(() => {
-          const el = box.current
-          const c = col.current
-          if (!el || !c) return
-          const kids = [...c.children].filter((k) => !k.hasAttribute('data-aside'))
-          const to = kids[listNow.current.findIndex((it) => itemKey(it) === key)] as HTMLElement | undefined
-          if (!to) return
-          stuck.current = false
-          did.current.glide = false
-          setAway(true)
-          el.scrollTop += to.getBoundingClientRect().top - el.getBoundingClientRect().top - 8
-          did.current.set = el.scrollTop
-          jumpedTo.current = null
-          note()
-          to.classList.remove('convo-found')
-          void to.offsetWidth
-          to.classList.add('convo-found')
-        }),
-      )
+      if (listNow.current[i].kind === 'work') toggle(hit.key, true)
+      if (hit.tool) toolShown.set(hit.tool, { open: true, full: toolShown.get(hit.tool)?.full ?? false })
+      const then = (f: () => void) => requestAnimationFrame(() => requestAnimationFrame(() => n === going.current && convoNow.current.of === of && convoNow.current.gen === gen && f()))
+      const kidOf = () => {
+        const c = col.current
+        if (!c) return undefined
+        const kids = [...c.children].filter((k) => !k.hasAttribute('data-aside'))
+        return kids[listNow.current.findIndex((it) => itemKey(it) === hit.key)] as HTMLElement | undefined
+      }
+      const place = (to: HTMLElement) => {
+        const el = box.current
+        if (!el) return
+        stuck.current = false
+        did.current.glide = false
+        setAway(true)
+        el.scrollTop += to.getBoundingClientRect().top - el.getBoundingClientRect().top - 8
+        did.current.set = el.scrollTop
+        jumpedTo.current = null
+        note()
+        to.classList.remove('convo-found')
+        void to.offsetWidth
+        to.classList.add('convo-found')
+      }
+      then(() => {
+        const to = kidOf()
+        if (!to) return gone()
+        // (A card already shown keeps its own state: opened here.)
+        const card = hit.tool ? to.querySelector<HTMLElement>(`[data-tool="${CSS.escape(hit.tool)}"]`) : null
+        const head = card?.querySelector<HTMLElement>(':scope > .convo-step-head[aria-expanded="false"]')
+        if (head) head.click()
+        if (hit.field === 'summary') to.querySelectorAll('details:not([open])').forEach((d) => d.setAttribute('open', ''))
+        then(() => place(card ?? to))
+      })
       return true
     },
     [note, toggle],
@@ -777,8 +794,9 @@ export function ConversationView({
     if (!active || !more) return
     const onKey = (e: KeyboardEvent) => {
       if (e.key.toLowerCase() !== 'f' || !(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey || e.isComposing || underDialog(e)) return
+      // (In the thread itself, or nowhere: not in a panel beside it, a subagent's say.)
       const at = document.activeElement
-      if (editable(e.target) || (at && at !== document.body && !root.current?.contains(at))) return
+      if (editable(e.target) || (at && at !== document.body && !box.current?.contains(at))) return
       e.preventDefault()
       setSearching(true)
       requestAnimationFrame(() => root.current?.querySelector<HTMLInputElement>('.convo-search-input')?.focus())
@@ -877,6 +895,7 @@ export function ConversationView({
   const name = agent ? [agent.title, agent.where].filter(Boolean) : []
   // What is read in, as a Markdown file to keep (see convoExport).
   const exporting = useRef<() => void>(() => {})
+  const paren = (x: string) => (getLang() === 'zh-CN' ? '（' + x + '）' : '(' + x + ')')
   const doExport = () => {
     exporting.current()
     const title = name[0] || t('convo.title')
@@ -896,7 +915,17 @@ export function ConversationView({
         image: t('convoExport.image'),
         gone: t('convoExport.gone'),
         tool: (n, what, state) => t('convoExport.tool', { name: n, what: what ? (getLang() === 'zh-CN' ? '：' : ': ') + what : '', state: t(state === 'running' ? 'convoExport.running' : state === 'failed' ? 'convoExport.failed' : 'convoExport.ok') }),
-        event: (p) => (p.event?.text ? p.event.text : t('convoExport.event')),
+        event: (p) => {
+          const ev = p.event
+          if (!ev) return ''
+          const said = [ev.text, ev.goal, ev.why].filter(Boolean).join(' · ')
+          return paren(t(('convoExport.ev.' + ev.kind) as Parameters<typeof t>[0])) + (said ? ' ' + said : '')
+        },
+        trouble: (p) => {
+          const tr = p.trouble
+          if (!tr) return ''
+          return paren(t(('convoExport.tr.' + tr.kind) as Parameters<typeof t>[0])) + [tr.name, tr.text].filter(Boolean).map((x) => ' ' + x).join('')
+        },
         head: (tt, ex, from) => `# ${tt}\n\n${t('convoExport.head', { at: ex })}${from ? t('convoExport.from', { from }) : t('convoExport.whole')}`,
       },
       (md) => {
@@ -1032,6 +1061,7 @@ export function ConversationView({
       {searching && (
         <ConvoSearchPanel
           list={list}
+          of={(convo.of ?? '') + ':' + convo.gen}
           onGo={goTo}
           older={convo.older && !convo.olderCut ? { can: true, busy: convo.loadingOlder } : undefined}
           onOlder={() => convo.loadOlder()}
@@ -1336,7 +1366,7 @@ function Runs({ meta, active, mode, model, effort }: { meta: ConvoMeta; active: 
       const pop = box.current?.querySelector<HTMLElement>('.convo-runs-pop')
       if (!pop || !box.current) return
       const top = box.current.getBoundingClientRect().top - (vv ? vv.offsetTop : 0)
-      pop.style.maxHeight = Math.max(120, Math.min(top, vv ? vv.height : window.innerHeight) - 16) + 'px'
+      pop.style.maxHeight = Math.max(0, Math.min(top, vv ? vv.height : window.innerHeight) - 16) + 'px'
     }
     fit()
     vv?.addEventListener('resize', fit)
@@ -2635,7 +2665,7 @@ function ToolRow({ tool, onCopy, live }: { tool: ConvoTool; onCopy: (s: string) 
   const gap = tail ? (tool.omitted ? t('convo.omittedLines', { n: tool.omitted }) : t('convo.omitted')) : ''
   const result = tail ? (head ?? '') + (head && !head.endsWith('\n') ? '\n' : '') + gap + '\n' + tail : head
   return (
-    <div className={'convo-step' + (tool.error ? ' is-error' : '')}>
+    <div className={'convo-step' + (tool.error ? ' is-error' : '')} data-tool={tool.id}>
       <button
         type="button"
         className="convo-step-head"

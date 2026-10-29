@@ -19,7 +19,7 @@ const FIELD: Record<Hit['field'], string> = {
   note: 'convoSearch.note',
 }
 
-export function ConvoSearchPanel({ list, onGo, older, onOlder, onClose }: { list: Item[]; onGo: (key: string) => boolean; older?: { can: boolean; busy: boolean }; onOlder: () => void; onClose: () => void }) {
+export function ConvoSearchPanel({ list, of, onGo, older, onOlder, onClose }: { list: Item[]; of: string; onGo: (hit: Hit, gone: () => void) => boolean; older?: { can: boolean; busy: boolean }; onOlder: () => void; onClose: () => void }) {
   const [q, setQ] = useState('')
   const [hits, setHits] = useState<Hit[] | null>(null)
   const [capped, setCapped] = useState(false)
@@ -28,9 +28,11 @@ export function ConvoSearchPanel({ list, onGo, older, onOlder, onClose }: { list
   const input = useRef<HTMLInputElement>(null)
   const listNow = useRef(list)
   listNow.current = list
-  // (Searched again 250 ms after the last key, and as what is read in grows
-  // or begins further back; not on every word the agent writes.)
-  const shape = list.length ? `${list.length}:${itemKey(list[0])}:${itemKey(list[list.length - 1])}` : '0'
+  // (Searched again 250 ms after the last key; as what is read in changes,
+  // at most every 2 s: not on every word the agent writes. Another log in
+  // front: searched anew.)
+  const lastRun = useRef({ q: '', of: '', first: '', at: 0 })
+  const first = list.length ? itemKey(list[0]) : ''
   useEffect(() => {
     const query = q.trim()
     if (!query) {
@@ -38,25 +40,30 @@ export function ConvoSearchPanel({ list, onGo, older, onOlder, onClose }: { list
       setAt(-1)
       return
     }
+    const r = lastRun.current
+    // (The part before read in, the first item another: at once, as asked.)
+    const sameAsked = r.q === query && r.of === of && r.first === first
+    const wait = sameAsked ? Math.max(250, r.at + 2000 - Date.now()) : 250
     let stop = () => {}
     const tm = setTimeout(() => {
+      lastRun.current = { q: query, of, first, at: Date.now() }
       stop = search(listNow.current, query, (h, more) => {
         setHits(h)
         setCapped(more)
         setAt((a) => (a >= h.length ? -1 : a))
       })
-    }, 250)
+    }, wait)
     return () => {
       clearTimeout(tm)
       stop()
     }
-  }, [q, shape])
-  useEffect(() => setAt(-1), [q])
+  }, [q, list, of, first])
+  useEffect(() => setAt(-1), [q, of])
   const go = (i: number) => {
     if (!hits?.length) return
     const n = (i + hits.length) % hits.length
     setAt(n)
-    setGone(!onGo(hits[n].key))
+    setGone(!onGo(hits[n], () => setGone(true)))
   }
   // (Kept in view in the list: the one gone to.)
   const listBox = useRef<HTMLDivElement>(null)
