@@ -1895,12 +1895,6 @@ export const SEARCH_FROM = 5
 
 // The box an agents' list is searched with (see matchQuery). Escape in it
 // empties it first.
-// (A pointer held down, anywhere: see ListSearch's blur.)
-let pressing = false
-window.addEventListener('pointerdown', () => (pressing = true), true)
-window.addEventListener('pointerup', () => (pressing = false), true)
-window.addEventListener('pointercancel', () => (pressing = false), true)
-
 // (⌘K on a Mac; elsewhere "/", as the browsers there keep Ctrl+K for their
 // own search: as the key is said.)
 const KEY_SEARCH = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘K' : '/'
@@ -1908,6 +1902,25 @@ const KEY_SEARCH = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘K' : '/'
 export function ListSearch({ value, onChange, focus, onLeft, hint }: { value: string; onChange: (v: string) => void; focus?: number; onLeft?: () => void; hint?: string }) {
   const ref = useRef<HTMLInputElement>(null)
   const [inside, setInside] = useState(false)
+  // (The pointer pressed down in the list it heads, until it is let go:
+  // what took the focus from it, see onBlur.)
+  const down = useRef<number | null>(null)
+  useEffect(() => {
+    const list = ref.current?.closest('.convo-side, .convo-picker')
+    if (!list) return
+    const on = (e: Event) => (down.current = (e as PointerEvent).pointerId)
+    const off = (e: Event) => {
+      if (down.current === (e as PointerEvent).pointerId) down.current = null
+    }
+    list.addEventListener('pointerdown', on, true)
+    window.addEventListener('pointerup', off, true)
+    window.addEventListener('pointercancel', off, true)
+    return () => {
+      list.removeEventListener('pointerdown', on, true)
+      window.removeEventListener('pointerup', off, true)
+      window.removeEventListener('pointercancel', off, true)
+    }
+  }, [])
   useEffect(() => {
     if (focus) {
       ref.current?.focus()
@@ -1924,12 +1937,24 @@ export function ListSearch({ value, onChange, focus, onLeft, hint }: { value: st
         onFocus={() => setInside(true)}
         onBlur={() => {
           setInside(false)
-          // (Left empty: let go once a press that took the focus is over —
-          // its click on a row under it landed — before the list moves up.)
+          // (Left empty: let go once the press in the list that took the
+          // focus is over — its click on a row under it landed — before
+          // the list moves up: that pointer's own release or cancel, or 5 s.)
           if (!value && onLeft) {
             const leave = () => document.activeElement !== ref.current && !ref.current?.value && onLeft()
-            if (pressing) window.addEventListener('pointerup', () => setTimeout(leave, 0), { once: true, capture: true })
-            else setTimeout(leave, 0)
+            const id = down.current
+            if (id === null) return void setTimeout(leave, 0)
+            let done = false
+            const end = (e?: PointerEvent) => {
+              if (done || (e && e.pointerId !== id)) return
+              done = true
+              window.removeEventListener('pointerup', end, true)
+              window.removeEventListener('pointercancel', end, true)
+              setTimeout(leave, 0)
+            }
+            window.addEventListener('pointerup', end, true)
+            window.addEventListener('pointercancel', end, true)
+            setTimeout(() => end(), 5000)
           }
         }}
         type="text"
