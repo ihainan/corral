@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { ApiError } from '../api'
 import { t } from '../i18n'
 import { Markdown } from './markdown'
-import { readAskScreen, sameWords, type AskScreen, type ScreenOption } from './askScreen'
+import { readAskScreen, sameLoose, sameWords, type AskScreen, type ScreenOption } from './askScreen'
 import { choiceText, lasting } from './askText'
 import type { ConvoAsk, ConvoTool } from './conversation'
 import type { ReplyTarget } from './ReplyDialog'
@@ -26,21 +26,27 @@ export function askOn(call: ConvoTool | undefined, s: AskScreen): number {
   if (asks.some((a) => a.cut)) return -1
   if (s.tabs.length > 0 && (s.tabs.length !== asks.length || s.tabs.some((tab, i) => !!asks[i].header && !sameLabel(tab.label, asks[i].header!, [])))) return -1
   if (s.tabs.length === 0 && asks.length !== 1) return -1
+  // (Spaces not counted, as the screen may break a word: only where no two
+  // of what it could be are alike so — else the words as they are.)
+  const loose = (all: string[]) => new Set(all.map((x) => x.replace(/\s+/g, ''))).size === all.length
+  const sameQ = loose(asks.map((a) => a.question)) ? sameLoose : sameWords
   const at = asks.findIndex((a: ConvoAsk) => {
-    if (!sameWords(a.question, s.question) || !!a.multi !== s.multi) return false
+    if (!sameQ(a.question, s.question) || !!a.multi !== s.multi) return false
     const shown = s.options.filter((o) => o.n !== s.own)
     const labels = a.options.map((o) => o.label)
     return shown.length === a.options.length && shown.every((o, i) => o.n === i + 1 && sameLabel(o.label, labels[i], labels))
   })
   // (Two questions alike: which one this is cannot be told.)
-  return at >= 0 && asks.filter((a) => sameWords(a.question, s.question)).length === 1 ? at : -1
+  return at >= 0 && asks.filter((a) => sameQ(a.question, s.question)).length === 1 ? at : -1
 }
 
 // (The screen may cut a long label short: then only where the start it
 // shows is of that label alone.)
-const flat = (x: string) => x.replace(/\s+/g, '')
+const flat = (x: string) => x.replace(/\s+/g, ' ').trim()
 function sameLabel(shown: string, asked: string, all: string[]): boolean {
   if (sameWords(shown, asked)) return true
+  // (Spaces not counted only where no other label is the same so.)
+  if (sameLoose(shown, asked)) return all.filter((l) => sameLoose(l, asked)).length === 1
   if (!shown.endsWith('…')) return false
   const start = flat(shown.slice(0, -1))
   return !!start && flat(asked).startsWith(start) && all.filter((l) => flat(l).startsWith(start)).length <= 1

@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"regexp"
@@ -75,7 +76,9 @@ func (s *Server) sentMissing(w http.ResponseWriter, ctx context.Context, sess *t
 // there, the words stayed in the box, and the next message typed went in
 // after them, the two then sent as one. (ended: the send's turn, held until
 // these have ended on the host too.)
-func (s *Server) enterAgain(ctx context.Context, sess *term.Session, pane, socket string, pid, start int64, sid, text, screen string, ended *sync.WaitGroup) {
+// track: the later look tied to the person's login (signed out or the
+// login revoked meanwhile: called off), as a request is.
+func (s *Server) enterAgain(ctx context.Context, sess *term.Session, pane, socket string, pid, start int64, sid, text, screen string, ended *sync.WaitGroup, track func(cancel func()) func()) {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	enter := []string{"enter"}
@@ -104,10 +107,14 @@ func (s *Server) enterAgain(ctx context.Context, sess *term.Session, pane, socke
 	// was not yet in its box when looked at right after the Enter, and the
 	// Enter was lost; seen there now, Enter once more. (Beside the send's
 	// answer, not before it; the send's turn held until it is done.)
+	// (Only the message whole: by then the box could hold another typed in
+	// the terminal that begins as it does.)
 	ended.Add(1)
+	lctx, cancel := context.WithTimeout(context.Background(), enterLater+10*time.Second)
+	untrack := track(cancel)
 	go func() {
 		defer ended.Done()
-		lctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), enterLater+10*time.Second)
+		defer untrack()
 		defer cancel()
 		select {
 		case <-lctx.Done():
@@ -116,7 +123,7 @@ func (s *Server) enterAgain(ctx context.Context, sess *term.Session, pane, socke
 		}
 		ended.Add(1)
 		res, err := sshx.Exec(lctx, sess.Client(), convoScreenCommand(sess.Persistence, pane, socket), 256<<10, sshx.ExecOptions{Release: ended.Done})
-		if err == nil && stillTyped(string(res.Out), text) {
+		if err == nil && typedWhole(string(res.Out), text) {
 			press(lctx)
 		}
 	}()
@@ -145,7 +152,7 @@ func (s *Server) sentEnter(w http.ResponseWriter, ctx context.Context, sess *ter
 		writeError(w, http.StatusBadGateway, "no_screen", "the pane's screen could not be read")
 		return
 	}
-	if !stillTyped(string(res.Out), text) {
+	if !typedWhole(string(res.Out), text) {
 		*outcome, *reason = "refused", "not_in_input"
 		writeJSON(w, http.StatusOK, map[string]any{"pressed": false})
 		return
@@ -157,7 +164,22 @@ func (s *Server) sentEnter(w http.ResponseWriter, ctx context.Context, sess *ter
 	held.Add(1)
 	_, err = sshx.Exec(ctx, sess.Client(), convoGatedCommand("free", sess.Persistence, sess.TmuxSession, pane, socket, pid, start, sid, 0, enter, sendLines), sendOut,
 		sshx.ExecOptions{Stdin: strings.NewReader(""), Release: held.Done})
-	if err != nil {
+	var exitErr *sshx.ExitError
+	switch {
+	case err == nil:
+	case errors.Is(err, sshx.ErrBusy), errors.As(err, &exitErr) && exitErr.Status == 7:
+		*outcome, *reason = "refused", "busy" // (nothing pressed)
+		writeError(w, http.StatusConflict, "busy", "the pane is busy with another request: try again")
+		return
+	case errors.As(err, &exitErr) && exitErr.Status == 3:
+		*outcome, *reason = "refused", "agent_changed"
+		writeError(w, http.StatusConflict, "agent_changed", "that pane no longer runs this agent")
+		return
+	case errors.As(err, &exitErr) && exitErr.Status == 9:
+		*outcome, *reason = "refused", "agent_waiting"
+		writeError(w, http.StatusConflict, "agent_waiting", "it waits for an answer, or has a dialog open: answer it first")
+		return
+	default:
 		*outcome, *reason = "unknown", "no_answer"
 		writeError(w, http.StatusBadGateway, "no_answer", "the host did not answer")
 		return
@@ -178,7 +200,15 @@ func (s *Server) apiConversationSentEnter(w http.ResponseWriter, r *http.Request
 // the screen, only the status lines under it: not one of the thread above,
 // as when a permission dialog has taken the box's place) and holds the
 // message from its start (not a part of it, nor the box's placeholder).
-func stillTyped(screen, text string) bool {
+func stillTyped(screen, text string) bool { return typedIn(screen, text, false) }
+
+// typedWhole: stillTyped, the box holding all of the message and nothing
+// else — so that Enter, pressed for an earlier message, does not send
+// another that begins as it does (a paste folded to "[Pasted text #1 …]"
+// cannot be told whole: not taken).
+func typedWhole(screen, text string) bool { return typedIn(screen, text, true) }
+
+func typedIn(screen, text string, whole bool) bool {
 	lines := strings.Split(strings.TrimRight(screen, "\n"), "\n")
 	for i := len(lines) - 1; i >= 1; i-- {
 		if !strings.HasPrefix(strings.TrimSpace(lines[i]), "\u276f") || !pickerRule.MatchString(lines[i-1]) {
@@ -209,6 +239,9 @@ func stillTyped(screen, text string) bool {
 		// "[Pasted text #1 +40 lines]" (as many lines as the message has); a
 		// path to a picture to "[Image #1]", the rest after it.
 		if m := typedPasted.FindStringSubmatch(box); m != nil {
+			if whole {
+				return false
+			}
 			// (Its newlines or its lines, as Claude Code counts them.)
 			n, _ := strconv.Atoi(m[1])
 			nl := strings.Count(strings.TrimRight(text, "\n"), "\n")
@@ -221,6 +254,9 @@ func stillTyped(screen, text string) bool {
 					return box == ""
 				}
 			}
+		}
+		if whole {
+			return wholeOf(text).MatchString(box)
 		}
 		head := []rune(want)
 		return strings.HasPrefix(box, string(head[:min(len(head), typedHead)]))
@@ -241,6 +277,26 @@ var (
 		regexp.MustCompile(`(?i)^[^'"\s]*?\.(?:png|jpe?g|gif|webp)`),
 	}
 )
+
+// wholeOf: the message as Claude Code's box shows all of it, spaces
+// squeezed out: each path to a picture in it (quoted, or standing alone
+// between spaces) as "[Image #N]", the rest as it is.
+func wholeOf(text string) *regexp.Regexp {
+	var b strings.Builder
+	b.WriteString("^")
+	at := 0
+	for _, m := range picturesIn.FindAllStringSubmatchIndex(text, -1) {
+		b.WriteString(regexp.QuoteMeta(squeeze(text[at:m[2]])))
+		b.WriteString(`\[Image#\d+\]`)
+		at = m[3]
+	}
+	b.WriteString(regexp.QuoteMeta(squeeze(text[at:])))
+	b.WriteString("$")
+	return regexp.MustCompile(b.String())
+}
+
+// (A path to a picture anywhere in a message: quoted, or alone between spaces.)
+var picturesIn = regexp.MustCompile(`(?i)(?:^|\s)('[^']*?\.(?:png|jpe?g|gif|webp)'|"[^"]*?\.(?:png|jpe?g|gif|webp)"|[^'"\s]+\.(?:png|jpe?g|gif|webp))(?:\s|$)`)
 
 // picturePath: where a path to a picture at a message's start ends (its
 // quotes, a pair of the one kind, with it; one not quoted has none in it).

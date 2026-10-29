@@ -32,6 +32,10 @@ const tabLine = /^\s*(?:←\s+)?((?:[☐☒]\s+\S.*?\s*)+)(?:✔\s+Submit\s+→)
 const ownLabel = /^Type something\.?$/
 const rule = /^\s*[─━╌]{8,}\s*$/
 
+// (Words that ran to their column's edge: what is beside them, a preview's
+// box, begins at most 4 spaces after.)
+const edge = (s: string) => /\S\s{3,4}[\u2500-\u257f]/.test(s)
+
 // (A choice's words, without what is drawn beside it: a preview's box.)
 const besideAt = (s: string) => {
   const m = /\s{3,}[\u2500-\u257f]/.exec(s)
@@ -56,11 +60,17 @@ function options(lines: string[], beside = false): ScreenOption[] {
     const m = optionLine.exec(left)
     if (!m) {
       const more = left.trim()
-      if (beside && wrapping && more && !/^Notes: press n/.test(more) && /^\s{3,}/.test(left)) out[out.length - 1].label += (/[\x21-\x7e]$/.test(out[out.length - 1].label) && /^[\x21-\x7e]/.test(more) ? ' ' : '') + more
-      else wrapping = false
+      // (Only right under a choice whose words ran to its column's edge,
+      // the box beside it a few spaces on; not Submit, not its notes.)
+      if (beside && wrapping && more && /^\s{3,}/.test(left) && !/^Notes: press n/.test(more) && !/^(❯\s*)?Submit$/.test(more)) {
+        out[out.length - 1].label += (/[\x21-\x7e]$/.test(out[out.length - 1].label) && /^[\x21-\x7e]/.test(more) ? ' ' : '') + more
+        wrapping = edge(l) // (on again only if this line ran to the edge too)
+        continue
+      }
+      wrapping = false
       continue
     }
-    wrapping = true
+    wrapping = edge(l)
     out.push({ n: Number(m[2]), label: m[4], cursor: !!m[1], ...(m[3] !== undefined ? { ticked: m[3] === '✔' } : {}) })
   }
   return out
@@ -135,7 +145,9 @@ export function readAskScreen(text: string): AskScreen {
   return { kind: 'unknown' }
 }
 
-// The same words, however the screen wrapped or spaced them (a line broken
-// within a word, as a long path is, puts a space in it when joined: spaces
-// are not counted at all).
-export const sameWords = (a: string, b: string) => a.replace(/\s+/g, '') === b.replace(/\s+/g, '')
+// The same words, however the screen wrapped or spaced them.
+export const sameWords = (a: string, b: string) => a.replace(/\s+/g, ' ').trim() === b.replace(/\s+/g, ' ').trim()
+// The same, spaces not counted at all (a line broken within a word, as a
+// long path is, puts a space in it when joined): only where nothing else it
+// could be is the same so (see askCard's askOn).
+export const sameLoose = (a: string, b: string) => a.replace(/\s+/g, '') === b.replace(/\s+/g, '')

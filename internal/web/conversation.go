@@ -2779,7 +2779,9 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		answer.digest, answer.at = b.Digest, time.Now()
 	}
 	if outcome == "typed" && what == "send" && front.agent == "claude" {
-		s.enterAgain(ctx, sess, b.Pane, socket, b.PID, b.Start, b.Session, text, string(res.Out), &ended)
+		s.enterAgain(ctx, sess, b.Pane, socket, b.PID, b.Start, b.Session, text, string(res.Out), &ended, func(cancel func()) func() {
+			return s.trackPending(currentUser(r).ID, &liveSocket{loginHash: loginHash(r), hostID: sess.HostID, cancel: cancel})
+		})
 	}
 	switch {
 	case outcome == "typed" && what == "mode":

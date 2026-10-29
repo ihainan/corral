@@ -122,6 +122,29 @@ func TestStillTyped(t *testing.T) {
 	if stillTyped(box("[Image #1] 请分析这张图"), `'/home/u/shot.png" 请分析这张图`) {
 		t.Error("quotes of two kinds taken for a pair")
 	}
+	// Whole (for Enter pressed later, or from the page): all of it and
+	// nothing more, a picture anywhere in it as Claude Code shows it.
+	stuck := "额外插一句，这个按钮非常丑。\n\n/home/u/.cache/up/20261029.png\n\n调研一下其他软件的按钮样式。"
+	for _, c := range []struct {
+		name string
+		box  string
+		want bool
+	}{
+		{"all of it, its picture as shown", "额外插一句，这个按钮非常丑。\n  [Image #1]\n  调研一下其他软件的按钮样式。", true},
+		{"another message that begins as it does", "额外插一句，这个按钮非常丑。\n  [Image #1]\n  调研一下别的东西。", false},
+		{"it and more after", "额外插一句，这个按钮非常丑。\n  [Image #1]\n  调研一下其他软件的按钮样式。再加一句", false},
+		{"its picture still as a path", "额外插一句，这个按钮非常丑。\n  /home/u/.cache/up/20261029.png\n  调研一下其他软件的按钮样式。", false},
+	} {
+		if got := typedWhole(box(c.box), stuck); got != c.want {
+			t.Errorf("whole, %s: %v, want %v", c.name, got, c.want)
+		}
+	}
+	if typedWhole(box("[Pasted text #1 +3 lines]"), long) {
+		t.Error("a folded paste taken as whole")
+	}
+	if !typedWhole(box(msg[:len(msg)-len("/home/u/shot.png")]+"[Image #1]"), msg) || typedWhole(box("提交所有的代码并 push。"), msg) {
+		t.Error("whole: a picture at its end, or a part of it")
+	}
 	if stillTyped(box("[Image #1] 别的话"), pic) {
 		t.Error("another message after a picture taken for it")
 	}
