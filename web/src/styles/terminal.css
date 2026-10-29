@@ -184,15 +184,17 @@ html.term-mode body { position: fixed; inset: 0; }
   background: var(--term-chrome); border: 1px solid var(--term-line); border-radius: var(--r-lg); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
 }
 .complete-item {
-  display: flex; align-items: baseline; gap: 10px; width: 100%; min-height: 34px; padding: 6px 10px; border: 0; border-radius: 8px;
+  display: flex; align-items: baseline; gap: 10px; width: 100%; min-height: 34px; padding: 8.5px 10px; border: 0; border-radius: 8px;
   background: none; color: var(--term-fg); text-align: left; cursor: pointer; font: 13px/1.3 var(--font-mono);
 }
+/* (Its height made by its padding round the one line, not by min-height: what
+   min-height adds falls all under a line set on its baseline.) */
 .complete-item:hover { background: var(--term-hover); }
 .complete-item[aria-selected="true"] { background: var(--term-accent-soft); }
 .complete-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .complete-hint { flex: none; color: var(--term-fg-3); font: 12px var(--font-ui); }
 .complete-note { padding: 6px 10px; color: var(--term-fg-3); font-size: 12px; }
-@media (pointer: coarse) { .complete-item { min-height: 40px; } .composer-complete { max-height: min(210px, 40vh); } }
+@media (pointer: coarse) { .complete-item { min-height: 40px; padding-top: 11.5px; padding-bottom: 11.5px; } .composer-complete { max-height: min(210px, 40vh); } }
 
 /* Key bar: flat keys, grouped by spacing */
 .keybar {
@@ -349,7 +351,7 @@ html.kb-open .keybar { padding-bottom: 6px; }
 .new-tab-list { display: flex; flex-direction: column; max-height: min(360px, 50vh); overflow-y: auto; margin: 0 -8px; }
 .new-tab-list .hint { padding: 12px 8px; }
 .new-tab-host {
-  display: flex; align-items: baseline; gap: 10px; min-height: 40px; padding: 8px; border: 0; border-radius: 8px;
+  display: flex; align-items: center; gap: 10px; min-height: 40px; padding: 8px; border: 0; border-radius: 8px;
   background: none; color: var(--fg); text-align: left; cursor: pointer; font: inherit;
 }
 .new-tab-host:hover:not(:disabled), .new-tab-host:focus-visible { background: var(--bg-hover); }

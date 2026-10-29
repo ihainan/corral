@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type ReactNode } from 'react'
-import { ArrowUp, ChevronLeft, History, Paperclip, Square, X, Plus } from 'lucide-react'
+import { ArrowUp, ChevronLeft, FoldVertical, History, MessageSquarePlus, Paperclip, Pencil, Power, Square, SquareTerminal, X, Plus } from 'lucide-react'
 import { api, ApiError, authGen, errorText, uploadFile, type SessionInfo } from '../api'
 import { t, type I18nKey } from '../i18n'
 import { navigate, onNavigate } from '../router'
@@ -532,6 +532,9 @@ const PREFETCH_MOST = 3
 const PREFETCH_AFTER_MS = 1500
 
 const SENT_KEPT_MS = 24 * 3600 * 1000
+
+// (Claude Code's commands in the conversation's menu: each by its icon.)
+const OP_ICONS = { compact: <FoldVertical size={16} />, rename: <Pencil size={16} />, clear: <MessageSquarePlus size={16} /> }
 const SENT_STATES: readonly string[] = ['sending', 'waiting', 'unseen', 'sent']
 function restoreSent(): Record<string, Sent[]> {
   const out: Record<string, Sent[]> = {}
@@ -1488,11 +1491,11 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     })
   }
   const more = (): (MenuItem | null)[] => [
-    { label: t('convo.showTerminal'), onSelect: openTerminal },
+    { label: t('convo.showTerminal'), icon: <SquareTerminal size={16} />, onSelect: openTerminal },
     ...(['compact', 'rename', 'clear'] as const).map((o, i): MenuItem | null =>
-      !notClaude && bound ? { label: t(`ops.${o}.item`), separator: i === 0, disabled: !canOps, title: canOps ? undefined : t('ops.onlyIdle'), onSelect: () => convo.bind && setOp({ op: o, bind: convo.bind, key: bindKey }) } : null,
+      !notClaude && bound ? { label: t(`ops.${o}.item`), icon: OP_ICONS[o], separator: i === 0, disabled: !canOps, title: canOps ? undefined : t('ops.onlyIdle'), onSelect: () => convo.bind && setOp({ op: o, bind: convo.bind, key: bindKey }) } : null,
     ),
-    canClose ? { label: t('agents.close'), danger: true, separator: true, onSelect: () => setClosing(true) } : null,
+    canClose ? { label: t('agents.close'), icon: <Power size={16} />, danger: true, separator: true, onSelect: () => setClosing(true) } : null,
   ]
   // (Files dropped on the conversation go up as picked ones do.)
   const dropping = (e: React.DragEvent) => e.dataTransfer.types.includes('Files')

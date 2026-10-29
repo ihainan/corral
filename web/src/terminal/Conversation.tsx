@@ -1,5 +1,5 @@
 import { createContext, Fragment, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { ArrowDown, Check, ChevronDown, ChevronRight, ChevronUp, ChevronsUpDown, Clock, GitBranch, Loader, MoreVertical, PanelLeft, Search, TriangleAlert, X, Plus } from 'lucide-react'
+import { ArrowDown, Check, ChevronDown, ChevronRight, ChevronUp, ChevronsUpDown, Clock, Download, GitBranch, Loader, MoreVertical, PanelLeft, Search, TriangleAlert, X, Plus } from 'lucide-react'
 import { t, getLang, type I18nKey } from '../i18n'
 import { copyText, isCoarse, Menu, type MenuItem } from '../components/ui'
 import { local } from '../storage'
@@ -1082,8 +1082,8 @@ export function ConversationView({
             <Menu
               label={t('common.more')}
               items={() => [
-                { label: t('convoSearch.item'), onSelect: () => setSearching(true) },
-                { label: t('convoExport.item'), disabled: !list.length, onSelect: () => doExport() },
+                { label: t('convoSearch.item'), icon: <Search size={16} />, onSelect: () => setSearching(true) },
+                { label: t('convoExport.item'), icon: <Download size={16} />, disabled: !list.length, onSelect: () => doExport() },
                 ...more().map((m, i) => (m && i === 0 ? { ...m, separator: true } : m)),
               ]}
               button={(open, toggle) => (

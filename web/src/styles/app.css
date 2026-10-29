@@ -214,6 +214,8 @@ code, .mono { font-family: var(--font-mono); font-size: 0.9em; }
 .input::placeholder, .textarea::placeholder { color: var(--fg-3); }
 .input:focus, .select:focus, .textarea:focus { border-color: var(--accent); box-shadow: var(--focus); }
 .input[aria-invalid='true'] { border-color: var(--danger); }
+/* A box of several lines in the one-line look: its padding above as at its sides, its height by its rows. */
+textarea.input { height: auto; min-height: var(--h-input); padding: 8px 12px; line-height: 20px; resize: vertical; }
 .textarea { height: auto; min-height: 120px; padding: 10px 12px; resize: vertical; font-family: var(--font-mono); font-size: 13px; line-height: 1.5; }
 @media (any-pointer: coarse) { .textarea { font-size: 16px; } }
 .row2 { display: flex; gap: 12px; }
