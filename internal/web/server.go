@@ -68,11 +68,13 @@ type Server struct {
 	fwd          *forwarder
 	code         codeServers
 	vis          visibility
-	waitAlerts   waitAlerts  // "needs you" alerts shown, to replace when no longer true
-	complete     completions // the composer's completion listings, per session and folder
-	convos       convoStates // the conversation view's logs being read, per session
-	subConvos    convoStates // and the logs of subagents opened from them
-	convoScans   convoScans  // scans of a host's processes, shared by its panes for a moment
+	waitAlerts   waitAlerts   // "needs you" alerts shown, to replace when no longer true
+	complete     completions  // the composer's completion listings, per session and folder
+	convos       convoStates  // the conversation view's logs being read, per session
+	subConvos    convoStates  // and the logs of subagents opened from them
+	newAgents    newAgents    // agents being started from the conversation page
+	claudeLists  sessionLists // Claude Code's sessions of a folder, as last listed
+	convoScans   convoScans   // scans of a host's processes, shared by its panes for a moment
 
 	sockMu  sync.Mutex
 	socks   map[int64]map[*liveSocket]struct{} // open WebSockets per user, closed on sign-out
@@ -205,6 +207,8 @@ func (s *Server) registerRoutes() {
 	s.handle("POST /api/sessions/{id}/conversation/send", SignedIn, s.apiConversationSend)
 	s.handle("POST /api/sessions/{id}/conversation/command", SignedIn, s.apiConversationCommand)
 	s.handle("GET /api/sessions/{id}/conversation/subagent", SignedIn, s.apiConversationSubagent)
+	s.handle("POST /api/sessions/{id}/agents", SignedIn, s.apiNewAgent)
+	s.handle("GET /api/sessions/{id}/claude-sessions", SignedIn, s.apiClaudeSessions)
 	s.handle("GET /api/sessions/{id}/shares", SignedIn, s.apiListShares)
 	s.handle("POST /api/sessions/{id}/shares", SignedIn, s.apiAddShare)
 	s.handle("DELETE /api/sessions/{id}/shares/{uid}", SignedIn, s.apiRemoveShare)

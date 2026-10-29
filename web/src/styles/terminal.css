@@ -1089,3 +1089,13 @@ button.convo-running-what { padding: 0; text-align: left; }
 .convo-event.is-notice.is-warn { border-left-color: var(--term-warn-text); }
 .convo-event.is-notice.is-warn .convo-trouble-head { color: var(--term-warn-text); }
 .convo-event.is-goal.is-met { border-left-color: var(--term-ok-text, #3fa45b); }
+
+/* A new agent */
+.convo-side-new { margin: 8px 10px 4px; justify-content: flex-start; gap: 6px; font-size: 13.5px; }
+.new-agent { display: flex; flex-direction: column; gap: 14px; }
+.new-agent .field > span { font-size: 13px; line-height: 18px; font-weight: 500; color: var(--fg-2); }
+.new-agent-olds { display: flex; flex-direction: column; gap: 4px; max-height: 240px; overflow: auto; }
+.new-agent-oldrow { display: flex; justify-content: space-between; gap: 12px; padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--r-sm); background: none; text-align: left; cursor: pointer; color: var(--fg); font-size: 13.5px; }
+.new-agent-oldrow.on { border-color: var(--accent, #3b6cf6); background: var(--bg-subtle); }
+.new-agent-oldtitle { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.new-agent-oldwhen { flex: none; color: var(--fg-3); font-size: 12px; }

@@ -1,10 +1,11 @@
 import { createContext, Fragment, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { ArrowDown, Check, ChevronDown, ChevronRight, ChevronUp, ChevronsUpDown, Clock, GitBranch, Loader, MoreVertical, PanelLeft, Search, TriangleAlert, X } from 'lucide-react'
+import { ArrowDown, Check, ChevronDown, ChevronRight, ChevronUp, ChevronsUpDown, Clock, GitBranch, Loader, MoreVertical, PanelLeft, Search, TriangleAlert, X, Plus } from 'lucide-react'
 import { t, getLang, type I18nKey } from '../i18n'
 import { copyText, isCoarse, Menu, type MenuItem } from '../components/ui'
 import { local } from '../storage'
 import { Markdown } from './markdown'
 import { useSubConvo } from './subagent'
+import { NEW_AGENT } from './newAgent'
 import { Code } from './Code'
 import { AgentIcon } from './agentIcons'
 import { matchQuery } from './agents'
@@ -788,6 +789,10 @@ export function ConversationView({
     <div className="convo" role="region" aria-label={t('convo.title')} ref={root}>
       {sideShown && (
         <nav className="convo-side" aria-label={t('convo.agents')}>
+          <button type="button" className="btn btn-ghost convo-side-new" onClick={() => window.dispatchEvent(new Event(NEW_AGENT))}>
+            <Plus size={15} aria-hidden="true" />
+            {t('newAgent.title')}
+          </button>
           <AgentList rows={rows} query={sideQuery} onQuery={setSideQuery} />
           {!isTouchOnly && <p className="convo-side-keys">{t('convo.switchKeys')}<br />{t(allOpen ? 'convo.foldKeys' : 'convo.openKeys')}</p>}
         </nav>

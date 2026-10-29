@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type ReactNode } from 'react'
-import { ArrowUp, ChevronLeft, History, Paperclip, Square, X } from 'lucide-react'
+import { ArrowUp, ChevronLeft, History, Paperclip, Square, X, Plus } from 'lucide-react'
 import { api, ApiError, authGen, errorText, uploadFile, type SessionInfo } from '../api'
 import { t, type I18nKey } from '../i18n'
 import { navigate, onNavigate } from '../router'
@@ -13,6 +13,7 @@ import { geminiPath, shellPath } from '../terminal/paths'
 import { useCompletion } from '../terminal/Completion'
 import { convoTarget, herdrTarget, InlineReply } from '../terminal/ReplyDialog'
 import { SessionOpDialog, type SessionOp } from '../terminal/sessionOps'
+import { NEW_AGENT, NewAgentDialog } from '../terminal/newAgent'
 import { ConversationView, ListSearch, SEARCH_FROM, when, type ConvoAgent, type ConvoListRow, type ConvoPending, type ModelOpt } from '../terminal/Conversation'
 import { answerable, asking, useConversation, type ConvoEntry } from '../terminal/conversation'
 import { ackBg, waitingTitle, isCodex, isOpenCode, listAgents, matchQuery, paneTitle, readsLog, useRunningSessions, type AgentRow } from '../terminal/agents'
@@ -227,6 +228,34 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
       navigate(chatAddress(e), false, FROM_LIST) // (down the ladder: an entry)
     } else navigate(chatAddress(e), true, history.state) // (another, in its place: its mark kept, wide or not)
   }
+  // A new agent (asked from the list): once started, it is gone to, its
+  // first message waiting in its composer.
+  const [newAgent, setNewAgent] = useState(false)
+  useEffect(() => {
+    const on = () => active && setNewAgent(true)
+    window.addEventListener(NEW_AGENT, on)
+    return () => window.removeEventListener(NEW_AGENT, on)
+  }, [active])
+  // (Gone to once the list has it: before, the list of before would put another in front.)
+  const [arriving, setArriving] = useState<{ s: SessionInfo; pane: string; key: string; until: number } | null>(null)
+  const started = (s: SessionInfo, pane: string, first: string) => {
+    setNewAgent(false)
+    const key = agentKey(s, pane)
+    if (first) keepDraft('agents ' + key, first)
+    setArriving({ s, pane, key, until: Date.now() + 30000 })
+  }
+  useEffect(() => {
+    if (!arriving) return
+    const e = entries.find((x) => x.key === arriving.key)
+    if (e) {
+      setArriving(null)
+      choose(e)
+      return
+    }
+    const tm = setTimeout(() => setArriving((a) => (a && Date.now() > a.until ? null : a ? { ...a } : a)), 1000)
+    return () => clearTimeout(tm)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [arriving, entries])
   // Back to the list: back the ladder where it came from it, else in place.
   const toList = () => {
     if (fromList()) return history.back()
@@ -382,6 +411,12 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
             {t('agents.holdStop')}
           </button>
         )}
+        {sessions !== null && !waiting && !held && sessions.some((x) => x.persistence === 'herdr') && (
+          <button type="button" className="btn btn-primary" onClick={() => setNewAgent(true)}>
+            {t('newAgent.title')}
+          </button>
+        )}
+        {arriving && <p className="hint">{t('newAgent.arriving')}</p>}
         {sessions !== null && !waiting && !held && (
           <button type="button" className="btn btn-ghost" onClick={() => navigate('/')}>
             {t('agents.toHosts')}
@@ -429,6 +464,7 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
 
   return (
     <div className={'term-root agents-chat ' + (scheme.dark ? 'dark' : 'light') + (active ? '' : ' inactive') + (stack ? ' is-stack is-' + screen : '')} inert={!active} aria-hidden={active ? undefined : true} style={chromeVars(scheme) as React.CSSProperties} ref={rootRef}>
+      {newAgent && sessions && <NewAgentDialog sessions={sessions} onDone={started} onOpen={(s, pane) => (setNewAgent(false), choose({ s, pane, key: agentKey(s, pane) }))} onClose={() => setNewAgent(false)} />}
       {/* (A phone's conversation has its way back in its own bar.) */}
       {/* (The tabs in the bar the terminals have, with its way back to the hosts.) */}
       {bar ? (
@@ -1586,6 +1622,9 @@ function PhoneList({ entries, all, titles, query, onQuery, onPick }: { entries: 
         </button>
         <button type="button" className="btn btn-ghost agents-list-mine" aria-pressed={mine} onClick={() => setMine(!mine)}>
           {t('agents.onlyMine')}
+        </button>
+        <button type="button" className="icon-btn agents-list-new" onClick={() => window.dispatchEvent(new Event(NEW_AGENT))} aria-label={t('newAgent.title')} title={t('newAgent.title')}>
+          <Plus size={18} />
         </button>
       </div>
       {(entries.length > SEARCH_FROM || query) && <ListSearch value={query} onChange={onQuery} />}

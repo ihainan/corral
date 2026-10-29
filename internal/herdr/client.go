@@ -196,6 +196,12 @@ func (c *Client) readLine() ([]byte, error) {
 // callTimeout or until ctx ends. SSH channels have no deadlines, so giving up
 // means closing the client, which is unusable afterwards.
 func (c *Client) Call(ctx context.Context, method string, params any, out any) error {
+	return c.CallWithin(ctx, callTimeout, method, params, out)
+}
+
+// CallWithin is Call with its own bound on the exchange (one that waits on
+// herdr itself, an agent starting, is longer).
+func (c *Client) CallWithin(ctx context.Context, within time.Duration, method string, params any, out any) error {
 	if params == nil {
 		params = struct{}{}
 	}
@@ -204,7 +210,7 @@ func (c *Client) Call(ctx context.Context, method string, params any, out any) e
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(ctx, callTimeout)
+	ctx, cancel := context.WithTimeout(ctx, within)
 	defer cancel()
 	stop := context.AfterFunc(ctx, func() { c.conn.Close() })
 	defer stop()
@@ -310,6 +316,28 @@ func (c *Client) NewWorkspace(ctx context.Context, sourceWS string) error {
 		params["source_workspace_id"] = sourceWS
 	}
 	return c.Call(ctx, "workspace.create", params, nil)
+}
+
+// CreateWorkspace opens a workspace in folder cwd, named label, not
+// focused: its id and its first pane's.
+func (c *Client) CreateWorkspace(ctx context.Context, cwd, label string) (workspace, pane string, err error) {
+	var res struct {
+		Workspace struct {
+			ID string `json:"workspace_id"`
+		} `json:"workspace"`
+		RootPane struct {
+			ID string `json:"pane_id"`
+		} `json:"root_pane"`
+	}
+	if err := c.Call(ctx, "workspace.create", map[string]any{"cwd": cwd, "label": label, "focus": false}, &res); err != nil {
+		return "", "", err
+	}
+	return res.Workspace.ID, res.RootPane.ID, nil
+}
+
+// CloseWorkspace closes a workspace, ending what runs in its panes.
+func (c *Client) CloseWorkspace(ctx context.Context, workspace string) error {
+	return c.Call(ctx, "workspace.close", map[string]any{"workspace_id": workspace}, nil)
 }
 
 // ClosePane closes a pane, ending what runs in it.

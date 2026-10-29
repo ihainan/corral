@@ -205,11 +205,23 @@ func (p *sftpPool) shutdown() {
 // errFileTimeout is returned. A browser that gives up does not stop f: the
 // operation is short and others may share the channel.
 func (s *Server) withSFTP(ctx context.Context, sess *term.Session, limit time.Duration, f func(*sftplite.Client) error) error {
+	return s.withSFTPFor(ctx, sess, func() time.Duration { return limit }, f)
+}
+
+// withSFTPUntil is withSFTP with all of it, the channel's making too, done
+// by deadline.
+func (s *Server) withSFTPUntil(ctx context.Context, sess *term.Session, deadline time.Time, f func(*sftplite.Client) error) error {
+	ctx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
+	return s.withSFTPFor(ctx, sess, func() time.Duration { return max(time.Until(deadline), 100*time.Millisecond) }, f)
+}
+
+func (s *Server) withSFTPFor(ctx context.Context, sess *term.Session, limit func() time.Duration, f func(*sftplite.Client) error) error {
 	c, err := s.files.get(ctx, sess)
 	if err != nil {
 		return err
 	}
-	t := time.AfterFunc(limit, func() { s.files.kill(sess.ID, c) })
+	t := time.AfterFunc(limit(), func() { s.files.kill(sess.ID, c) })
 	err = f(c.client)
 	timedOut := !t.Stop()
 	s.files.put(sess.ID, c, timedOut || channelLost(err))
