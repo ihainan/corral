@@ -48,10 +48,10 @@ export function ConvoSearchPanel({ list, of, onGo, older, onOlder, onClose }: { 
       if (s.dirty) later()
     })
   }
-  const later = () => {
+  const later = (soon = false) => {
     const s = sched.current
     if (s.timer || s.running || !s.query) return
-    s.timer = window.setTimeout(runNow, Math.max(250, s.at + 2000 - Date.now()))
+    s.timer = window.setTimeout(runNow, soon ? 250 : Math.max(250, s.at + 2000 - Date.now()))
   }
   useEffect(() => {
     const s = sched.current
@@ -70,7 +70,14 @@ export function ConvoSearchPanel({ list, of, onGo, older, onOlder, onClose }: { 
       s.running = false
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [q, of, first])
+  }, [q, of])
+  // (The first item another, the part before read in (or the oldest let
+  // go): soon, but a search under way let finish, nothing put off.)
+  useEffect(() => {
+    sched.current.dirty = true
+    later(true)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [first])
   useEffect(() => {
     sched.current.dirty = true
     later()

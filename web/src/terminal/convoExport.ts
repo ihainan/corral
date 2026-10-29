@@ -94,7 +94,7 @@ function* pieces(it: Item, say: Say): Generator<string> {
 // exportMarkdown makes the Markdown of items, a slice of them at a time
 // (giving way between: a long one does not hold up the page), telling done
 // the text; it returns a function that calls it off.
-export function exportMarkdown(items: Item[], say: Say, done: (md: string) => void, slice = 8, later: (f: () => void) => void = (f) => setTimeout(f, 0)): () => void {
+export function exportMarkdown(items: Item[], say: Say, done: (md: string[]) => void, slice = 8, later: (f: () => void) => void = (f) => setTimeout(f, 0)): () => void {
   const out: string[] = [say.head(say.title, say.exported, say.from)]
   let i = 0
   let cur: Generator<string> | null = null
@@ -110,7 +110,8 @@ export function exportMarkdown(items: Item[], say: Say, done: (md: string) => vo
       }
       cur = null
     }
-    done(out.join('\n\n') + '\n')
+    // (Its pieces, not joined here: a long one made whole is a long wait.)
+    done(out.flatMap((p, i) => (i ? ['\n\n', p] : [p])).concat('\n'))
   }
   run()
   return () => {
