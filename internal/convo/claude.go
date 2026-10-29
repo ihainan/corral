@@ -527,6 +527,9 @@ func (c *Claude) Prepend(other Parser) {
 	if !c.ctxSaid {
 		c.meta.Context, c.ctxSaid = o.meta.Context, o.ctxSaid
 	}
+	if c.meta.Cost == nil {
+		c.meta.Cost = o.meta.Cost // (running totals: the later stands, never added to)
+	}
 	if c.lastReq.model == "" {
 		c.lastReq = o.lastReq
 	}
@@ -638,7 +641,16 @@ type claudeRow struct {
 	QuotaLimits       json.RawMessage `json:"quotaLimits"`
 	RetryAttempt      json.RawMessage `json:"retryAttempt"`
 	MaxRetries        json.RawMessage `json:"maxRetries"`
-	RetryInMs         json.RawMessage `json:"retryInMs"`
+	// (cost-state rows: what the session used so far)
+	TotalCostUSD        float64         `json:"totalCostUSD"`
+	TotalAPIDuration    int64           `json:"totalAPIDuration"`
+	TotalLinesAdded     int64           `json:"totalLinesAdded"`
+	TotalLinesRemoved   int64           `json:"totalLinesRemoved"`
+	TotalDuration       int64           `json:"totalDuration"`
+	StartTime           int64           `json:"startTime"`
+	ModelUsage          json.RawMessage `json:"modelUsage"`
+	HasUnknownModelCost bool            `json:"hasUnknownModelCost"`
+	RetryInMs           json.RawMessage `json:"retryInMs"`
 
 	OriginalModel         string   `json:"originalModel"`
 	FallbackModel         string   `json:"fallbackModel"`
@@ -760,6 +772,9 @@ func (c *Claude) line(b []byte) {
 		}
 	case "api-request":
 		c.request(&r)
+		return
+	case "cost-state":
+		c.meta.Cost = costOf(&r)
 		return
 	case "ai-title":
 		if t := strings.TrimSpace(clip(r.AITitle, maxTitle)); t != "" {
@@ -2783,4 +2798,40 @@ func planOf(input json.RawMessage) (string, bool, string) {
 	}
 	p, cutP := cut(clean(in.Plan), maxPlan)
 	return p, cutP, clip(in.PlanFilePath, maxDetail)
+}
+
+// costOf reads a cost-state row. Its modelUsage is an object by model, or
+// (some versions) that object as a string.
+func costOf(r *claudeRow) *Cost {
+	c := &Cost{USD: r.TotalCostUSD, Unknown: r.HasUnknownModelCost, Added: r.TotalLinesAdded, Removed: r.TotalLinesRemoved, APIMs: r.TotalAPIDuration}
+	if r.StartTime > 0 && r.TotalDuration > 0 {
+		c.At = r.StartTime + r.TotalDuration
+	}
+	raw := r.ModelUsage
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		raw = json.RawMessage(s)
+	}
+	var by map[string]struct {
+		In         int64   `json:"inputTokens"`
+		Out        int64   `json:"outputTokens"`
+		CacheRead  int64   `json:"cacheReadInputTokens"`
+		CacheWrite int64   `json:"cacheCreationInputTokens"`
+		USD        float64 `json:"costUSD"`
+	}
+	if json.Unmarshal(raw, &by) == nil {
+		for m, u := range by {
+			c.Models = append(c.Models, ModelCost{Model: clip(m, maxMeta), In: u.In, Out: u.Out, CacheRead: u.CacheRead, CacheWrite: u.CacheWrite, USD: u.USD})
+		}
+		sort.Slice(c.Models, func(i, j int) bool {
+			if c.Models[i].USD != c.Models[j].USD {
+				return c.Models[i].USD > c.Models[j].USD
+			}
+			return c.Models[i].Model < c.Models[j].Model
+		})
+		if len(c.Models) > maxCostModels {
+			c.Models = c.Models[:maxCostModels]
+		}
+	}
+	return c
 }

@@ -74,6 +74,7 @@ type Server struct {
 	subConvos    convoStates  // and the logs of subagents opened from them
 	newAgents    newAgents    // agents being started from the conversation page
 	claudeLists  sessionLists // Claude Code's sessions of a folder, as last listed
+	histLocks    histLocks    // one reading of a session's input history at a time
 	convoScans   convoScans   // scans of a host's processes, shared by its panes for a moment
 
 	sockMu  sync.Mutex
@@ -209,6 +210,7 @@ func (s *Server) registerRoutes() {
 	s.handle("GET /api/sessions/{id}/conversation/subagent", SignedIn, s.apiConversationSubagent)
 	s.handle("POST /api/sessions/{id}/agents", SignedIn, s.apiNewAgent)
 	s.handle("GET /api/sessions/{id}/claude-sessions", SignedIn, s.apiClaudeSessions)
+	s.handle("GET /api/sessions/{id}/input-history", SignedIn, s.apiInputHistory)
 	s.handle("GET /api/sessions/{id}/shares", SignedIn, s.apiListShares)
 	s.handle("POST /api/sessions/{id}/shares", SignedIn, s.apiAddShare)
 	s.handle("DELETE /api/sessions/{id}/shares/{uid}", SignedIn, s.apiRemoveShare)

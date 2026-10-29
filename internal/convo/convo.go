@@ -363,7 +363,37 @@ type Meta struct {
 	// WindowBy says how Window is known: "log", "model" (its model's
 	// window), "request" (its requests asked for the 1M window).
 	WindowBy string `json:"window_by,omitempty"`
+	// Cost is the latest of what the session used, as Claude Code's log
+	// last said it in what was read (its cost-state rows: running totals,
+	// not added up); nil, none read.
+	Cost *Cost `json:"cost,omitempty"`
 }
+
+// Cost is a cost-state row of Claude Code's: what the session used so far.
+// USD is Claude Code's own estimate, at list prices.
+type Cost struct {
+	USD     float64 `json:"usd"`
+	Unknown bool    `json:"unknown,omitempty"` // some model's price not known: USD short of it
+	Added   int64   `json:"added,omitempty"`   // lines
+	Removed int64   `json:"removed,omitempty"`
+	APIMs   int64   `json:"api_ms,omitempty"` // time waiting on the API
+	// At is about when it was written (unix ms): the session's start and
+	// how long it has run, as the row says them (it has no time of its own).
+	At     int64       `json:"at,omitempty"`
+	Models []ModelCost `json:"models,omitempty"` // the costliest first, at most maxCostModels
+}
+
+// ModelCost is one model's part of a Cost.
+type ModelCost struct {
+	Model      string  `json:"model"`
+	In         int64   `json:"in,omitempty"`
+	Out        int64   `json:"out,omitempty"`
+	CacheRead  int64   `json:"cache_read,omitempty"`
+	CacheWrite int64   `json:"cache_write,omitempty"`
+	USD        float64 `json:"usd,omitempty"`
+}
+
+const maxCostModels = 8
 
 // Task is one item of the agent's task list (TodoWrite, or TaskCreate and
 // TaskUpdate), as it stands.
