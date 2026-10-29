@@ -2198,18 +2198,25 @@ func classifyUserText(s string) (role, text string) {
 // unpasted is the text with what Claude Code wraps a paste in taken off
 // (<pasted_content id="…">…</pasted_content id="…">, the same id at both
 // ends): as it was typed.
+// (The wrapper comes with newlines of its own around it, and the paste's
+// own at its ends: blank lines at the message's start and end are let go,
+// what is indented at its first line's start kept.)
 func unpasted(s string) string {
 	if !strings.Contains(s, "<pasted_content id=") {
 		return s
 	}
-	return pastedContent.ReplaceAllStringFunc(s, func(w string) string {
+	s = pastedContent.ReplaceAllStringFunc(s, func(w string) string {
 		m := pastedContent.FindStringSubmatch(w)
 		if m[1] != m[3] {
 			return w
 		}
 		return m[2]
 	})
+	return strings.TrimRight(blankLead.ReplaceAllString(s, ""), " \t\r\n")
 }
+
+// (Blank lines at a text's start.)
+var blankLead = regexp.MustCompile(`^(?:[ \t\r]*\n)+`)
 
 // noImageTokens is a message's text without the "[Image #N]" Claude Code
 // puts in for each picture it carries (the pictures are parts of their own).

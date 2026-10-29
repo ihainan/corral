@@ -51,3 +51,15 @@ func TestClaudeShellOutput(t *testing.T) {
 		t.Fatalf("as blocks: %+v", es)
 	}
 }
+
+// A paste comes wrapped, with newlines around: none shown at the message's
+// ends, what it holds kept.
+func TestUnpastedEnds(t *testing.T) {
+	in := "\n\n<pasted_content id=\"1790\">\n按照你的指导配置了 workbuddy\n\n  发了一个鸡兔同笼。\n</pasted_content id=\"1790\">\n"
+	if got := unpasted(in); got != "按照你的指导配置了 workbuddy\n\n  发了一个鸡兔同笼。" {
+		t.Fatalf("%q", got)
+	}
+	if got := unpasted("<pasted_content id=\"a\">\n    indented code\n</pasted_content id=\"a\">"); got != "    indented code" {
+		t.Fatalf("its first line's indent: %q", got)
+	}
+}
