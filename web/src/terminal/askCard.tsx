@@ -46,12 +46,15 @@ const flat = (x: string) => x.replace(/\s+/g, ' ').trim()
 // (cut: its words ran to its column's edge, the rest wrapped under it: then
 // it is known by its start, where that is of that label alone.)
 function sameLabel(shown: string, asked: string, all: string[], cut = false): boolean {
-  if (sameWords(shown, asked)) return true
   if (cut) {
-    const start = shown.replace(/\s+/g, '')
+    // (Only its start is known, an ellipsis the screen put at its end not
+    // of it: that start must be of this label alone, even where it is all
+    // of one.)
+    const start = shown.replace(/\s*…$/, '').replace(/\s+/g, '')
     const of = (l: string) => l.replace(/\s+/g, '').startsWith(start)
-    if (start && of(asked) && all.filter(of).length === 1) return true
+    return !!start && of(asked) && all.filter(of).length === 1
   }
+  if (sameWords(shown, asked)) return true
   // (Spaces not counted only where no other label is the same so.)
   if (sameLoose(shown, asked)) return all.filter((l) => sameLoose(l, asked)).length === 1
   if (!shown.endsWith('…')) return false
