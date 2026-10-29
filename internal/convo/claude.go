@@ -3,6 +3,7 @@ package convo
 import (
 	"bytes"
 	"encoding/json"
+	"html"
 	"regexp"
 	"slices"
 	"sort"
@@ -865,6 +866,12 @@ func (c *Claude) user(r *claudeRow) {
 		if r.IsCompactSummary {
 			c.compacted()
 			c.add(r, RoleSummary, []Part{textPart(KindText, s)})
+			return
+		}
+		if sh, ok := shellOutput(s); ok {
+			if sh != nil { // (nothing printed: nothing shown, not its empty tags)
+				c.add(r, RoleNote, []Part{{Kind: KindShell, Shell: sh}})
+			}
 			return
 		}
 		role, text := classifyUserText(s)
@@ -2835,3 +2842,38 @@ func costOf(r *claudeRow) *Cost {
 	}
 	return c
 }
+
+// shellOutput reads what a "!" command printed: Claude Code's
+// <bash-stdout>…</bash-stdout><bash-stderr>…</bash-stderr> (its text with
+// &lt; &gt; &amp; written for < > &, as in XML); ok false where s is not
+// that, sh nil where nothing was printed.
+func shellOutput(s string) (sh *Shell, ok bool) {
+	t := strings.TrimSpace(s)
+	if !strings.HasPrefix(t, "<bash-stdout>") && !strings.HasPrefix(t, "<bash-stderr>") {
+		return nil, false
+	}
+	of := func(re *regexp.Regexp) string {
+		m := re.FindStringSubmatch(t)
+		if m == nil {
+			return ""
+		}
+		return strings.TrimRight(clean(html.UnescapeString(m[1])), "\n ")
+	}
+	out, errs := of(shellStdout), of(shellStderr)
+	if strings.TrimSpace(out) == "" && strings.TrimSpace(errs) == "" {
+		return nil, true
+	}
+	var as Tool
+	as.setResult(out)
+	sh = &Shell{Out: as.Result, OutTail: as.ResultTail, Omitted: as.Omitted, Truncated: as.Truncated}
+	if errs != "" {
+		sh.Err = clip(errs, maxShellErr)
+		sh.ErrCut = len(sh.Err) < len(errs)
+	}
+	return sh, true
+}
+
+var (
+	shellStdout = regexp.MustCompile(`(?s)<bash-stdout>(.*?)</bash-stdout>`)
+	shellStderr = regexp.MustCompile(`(?s)<bash-stderr>(.*?)</bash-stderr>`)
+)

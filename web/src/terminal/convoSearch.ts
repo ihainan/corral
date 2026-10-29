@@ -40,6 +40,7 @@ const partTexts = (p: ConvoPart, field: Field): Text[] => {
   if (ev) for (const s of [ev.text, ev.goal, ev.why]) add(field, s)
   if (p.trouble) for (const s of [p.trouble.name, p.trouble.text]) add(field, s)
   if (p.noted) for (const s of p.noted.paths) add(field, s)
+  if (p.shell) for (const s of [p.shell.out, p.shell.out_tail, p.shell.err]) add('output', s)
   const t = p.tool
   if (t) {
     for (const s of [t.name, t.title, t.detail, t.plan]) add('tool', s, t.id)

@@ -57,6 +57,7 @@ const (
 	KindNoted    = "noted"   // files the turn was given without anyone saying so
 	KindTrouble  = "trouble" // something went wrong that the thread would otherwise not show
 	KindEvent    = "event"   // something that happened to the session itself (see Event)
+	KindShell    = "shell"   // what a command the person ran with "!" printed (see Shell)
 )
 
 // What an Event is of.
@@ -137,6 +138,19 @@ type Part struct {
 	Noted     *Noted   `json:"noted,omitempty"`
 	Trouble   *Trouble `json:"trouble,omitempty"`
 	Event     *Event   `json:"event,omitempty"`
+	Shell     *Shell   `json:"shell,omitempty"`
+}
+
+// Shell is what a shell command the person ran with "!" printed: its
+// output as a tool's result is kept (its start and end, see setResult),
+// what it wrote to stderr apart, cut at maxShellErr.
+type Shell struct {
+	Out       string `json:"out,omitempty"`
+	OutTail   string `json:"out_tail,omitempty"`
+	Omitted   int    `json:"omitted,omitempty"`
+	Truncated bool   `json:"truncated,omitempty"`
+	Err       string `json:"err,omitempty"`
+	ErrCut    bool   `json:"err_cut,omitempty"`
 }
 
 // Event is something that happened to the session itself, not said by
@@ -320,6 +334,7 @@ const (
 	maxText      = 64 << 10 // a text or thinking part
 	maxDetail    = 4 << 10  // a tool's detail, old and new text
 	maxResult    = 6 << 10  // a tool's result (its start and end)
+	maxShellErr  = 2 << 10  // what a "!" command wrote to stderr
 	maxHead      = 2 << 10  // of which its start
 	maxParts     = 64       // parts of one entry
 	maxID        = 128

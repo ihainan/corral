@@ -12,7 +12,7 @@ import { itemKey } from './convoSearch'
 import { exportMarkdown } from './convoExport'
 import { AgentIcon } from './agentIcons'
 import { matchQuery } from './agents'
-import type { Convo, ConvoCost, ConvoEntry, ConvoHunk, ConvoMeta, ConvoPart, ConvoQueued, ConvoRunning, ConvoTask, ConvoTool, ConvoTrouble, ConvoEvent } from './conversation'
+import type { Convo, ConvoCost, ConvoEntry, ConvoShell, ConvoHunk, ConvoMeta, ConvoPart, ConvoQueued, ConvoRunning, ConvoTask, ConvoTool, ConvoTrouble, ConvoEvent } from './conversation'
 import { category, isNote, items, ms, partTime, sameEdits, toolName, verbOf, type Category, type Edits, type Item, type Verb } from './convoItems'
 
 // The conversation view: the agent's log as turns, over the terminal (which
@@ -2102,6 +2102,52 @@ function Tasks({ tasks, fold }: { tasks: ConvoTask[]; fold?: boolean }) {
   )
 }
 
+// What a "!" command printed: as a tool's output is shown (the terminal's
+// letters, a long one by its start and end, all of it on a tap), what it
+// wrote to stderr under it.
+function ShellOut({ sh, onCopy }: { sh: ConvoShell; onCopy: (s: string) => void }) {
+  const [full, setFull] = useState(false)
+  const head = sh.out ?? ''
+  const tail = sh.out_tail
+  const gap = tail ? (sh.omitted ? t('convo.omittedLines', { n: sh.omitted }) : t('convo.omitted')) : ''
+  const all = tail ? head + (head && !head.endsWith('\n') ? '\n' : '') + gap + '\n' + tail : head
+  return (
+    <div className="convo-shell">
+      {all && (
+        <>
+          <div className="convo-pre-wrap">
+            <pre className={'convo-pre convo-result' + (full ? ' is-full' : '')}>
+              {tail ? (
+                <>
+                  {head && !head.endsWith('\n') ? head + '\n' : head}
+                  <span className="convo-omitted">{gap}</span>
+                  {'\n' + tail}
+                </>
+              ) : (
+                head
+              )}
+            </pre>
+            <button type="button" className="md-code-copy" onClick={() => onCopy(all)}>
+              {t('common.copy')}
+            </button>
+          </div>
+          {!full && all.split('\n').length > 12 && (
+            <button type="button" className="link-btn" onClick={() => setFull(true)}>
+              {t('convo.showAll')}
+            </button>
+          )}
+        </>
+      )}
+      {sh.err && (
+        <pre className="convo-pre convo-shell-err">
+          {sh.err}
+          {sh.err_cut && <span className="convo-omitted">{'\n' + t('convo.cut')}</span>}
+        </pre>
+      )}
+    </div>
+  )
+}
+
 // One item of the list. Memoised: a poll that changed one entry renders
 // that one (the others keep their objects, see conversation.ts).
 const ListItem = memo(
@@ -2114,6 +2160,7 @@ const ListItem = memo(
         if (p?.event) return <EventNote ev={p.event} idle={it.idle} />
         // (Retries next to each other: on the first's line, the last's.)
         if (p?.trouble) return <TroubleNote key={troubleKey(p.trouble)} t={(it.last ?? it.e).parts[0]?.trouble ?? p.trouble} />
+        if (p?.shell) return <ShellOut sh={p.shell} onCopy={copy} />
         return <p className="convo-note">{noteText(it.e)}</p>
       }
       case 'summary':
@@ -2554,9 +2601,11 @@ function UserTurn({ e, onCopy }: { e: ConvoEntry; onCopy: (s: string) => void })
     .map((p) => p.text)
     .join('\n')
   const images = e.parts.filter((p) => p.kind === 'image').length
+  // (A shell command run with "!": in the terminal's letters, as typed.)
+  const shell = /^! \S/.test(text)
   return (
     <div className={'convo-user' + (e.mid ? ' is-mid' : '')}>
-      <div className="convo-user-text">
+      <div className={'convo-user-text' + (shell ? ' is-shell' : '')}>
         {text}
         {images > 0 && !/\[Image #\d+\]/.test(text) && <span className="convo-image">{t(images === 1 ? 'convo.images1' : 'convo.images', { n: images })}</span>}
         {e.parts.some((p) => p.truncated) && <p className="convo-cut">{t('convo.cut')}</p>}

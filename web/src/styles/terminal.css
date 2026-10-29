@@ -1186,3 +1186,9 @@ button.convo-running-what { padding: 0; text-align: left; }
 .convo-found { animation: convo-found 1.6s ease-out; border-radius: 8px; }
 @keyframes convo-found { from { background: color-mix(in srgb, var(--term-warn-text) 22%, transparent); } to { background: transparent; } }
 @media (prefers-reduced-motion: reduce) { .convo-found { animation: none; outline: 2px solid var(--term-accent-text); outline-offset: 2px; } }
+
+/* A shell command run with "!", and what it printed: in the terminal's letters, as a tool's output is */
+.convo-user-text.is-shell { font-family: var(--font-mono); font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.convo-shell { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; min-width: 0; }
+.convo-shell > .convo-pre-wrap { width: 100%; }
+.convo-shell-err { width: 100%; color: var(--term-danger-text); }

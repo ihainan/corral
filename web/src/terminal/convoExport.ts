@@ -37,6 +37,12 @@ function partsText(parts: ConvoPart[], say: Say): string {
       if (p.kind === 'image') return say.image
       if (p.kind === 'event') return say.event(p)
       if (p.kind === 'trouble') return say.trouble(p)
+      if (p.kind === 'shell' && p.shell) {
+        const sh = p.shell
+        const out = sh.out_tail ? (sh.out ?? '') + '\n' + say.cut + '\n' + sh.out_tail : (sh.out ?? '')
+        const fence = (x: string) => '```\n' + x.replace(/```/g, '`\u200b``') + '\n```'
+        return [out && fence(out), sh.err && fence(sh.err)].filter(Boolean).join('\n\n')
+      }
       if (p.kind === 'tool' && p.tool) return toolLine(p.tool, say)
       if (p.kind === 'thinking') return ''
       return (p.text ?? '') + (p.truncated ? '\n\n' + say.cut : '')

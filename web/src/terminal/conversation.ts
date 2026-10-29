@@ -69,13 +69,25 @@ export interface ConvoHunk {
 }
 
 export interface ConvoPart {
-  kind: 'text' | 'thinking' | 'tool' | 'image' | 'noted' | 'trouble' | 'event'
+  kind: 'text' | 'thinking' | 'tool' | 'image' | 'noted' | 'trouble' | 'event' | 'shell'
   text?: string
   truncated?: boolean
   tool?: ConvoTool
   noted?: ConvoNoted
   trouble?: ConvoTrouble
   event?: ConvoEvent
+  shell?: ConvoShell
+}
+
+// What a command the person ran with "!" printed (internal/convo Shell):
+// its output's start and end where long, stderr apart.
+export interface ConvoShell {
+  out?: string
+  out_tail?: string
+  omitted?: number
+  truncated?: boolean
+  err?: string
+  err_cut?: boolean
 }
 
 // Something that happened to the session itself (internal/convo/convo.go
