@@ -1092,7 +1092,13 @@ func (c *Claude) metaArrived(s string) {
 		}
 		text, from = bodyAfterTag(s[i:], "cross-session-message"), clip(m[1], maxMeta)
 	}
-	if text == "" || c.goneArrived(text, from) {
+	if text == "" {
+		return
+	}
+	// (The same words first, among the removed and the waiting both; only
+	// then one removed, cut, see cutMatch.)
+	a := arrivalOf(text)
+	if c.goneOf(a, from, true) {
 		return
 	}
 	for i, q := range c.queue {
@@ -1105,6 +1111,7 @@ func (c *Claude) metaArrived(s string) {
 			return
 		}
 	}
+	c.goneOf(a, from, false)
 }
 
 // sameCrossSession: s is another session's message q waits as, by who and

@@ -164,4 +164,11 @@ func TestQueuedLongPasteArrives(t *testing.T) {
 	if len(c.Queued()) != 0 {
 		t.Fatalf("two blocks, the first cut: still waiting")
 	}
+	// (Per review405: the same, arriving as Claude Code's own message.)
+	meta, _ := json.Marshal(map[string]any{"type": "user", "uuid": "u13", "isMeta": true, "promptSource": "system", "message": map[string]any{"role": "user", "content": wholeB}})
+	c = NewClaude()
+	c.Feed(append(append(append(row("enqueue", cutA), row("remove", cutA)...), row("enqueue", wholeB)...), append(meta, '\n')...))
+	if len(c.Queued()) != 0 || len(c.gone) != 1 {
+		t.Fatalf("its own message, the same words before a cut one: queue %d, gone %d", len(c.Queued()), len(c.gone))
+	}
 }
