@@ -1515,7 +1515,16 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       icon: pinnedNow ? <PinOff size={16} /> : <Pin size={16} />,
       onSelect: () => {
         if (pinnedNow) return setPrefs({ pinnedAgents: pins.filter((k) => k !== cur.key) })
-        if (pins.length >= maxPinned) return toast(t('agents.pinFull', { n: maxPinned }), true)
+        // (Full: those no longer on the list, as a pane closed or a host
+        // removed, make room first, said so; only when full, a host away
+        // for a while keeps its pins till then.)
+        if (pins.length >= maxPinned) {
+          const here = new Set(entries.map((e) => e.key))
+          const gone = pins.filter((k) => !here.has(k))
+          if (!gone.length) return toast(t('agents.pinFull', { n: maxPinned }), true)
+          setPrefs({ pinnedAgents: [...pins.filter((k) => here.has(k)), cur.key] })
+          return toast(t('agents.pinCleared', { n: gone.length }))
+        }
         setPrefs({ pinnedAgents: [...pins, cur.key] })
       },
     },

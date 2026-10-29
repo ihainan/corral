@@ -1787,7 +1787,12 @@ function AgentList({ rows, onPicked, placed, query: given, onQuery, search, show
   const [own, setOwn] = useState('')
   const query = given ?? own
   const setQuery = onQuery ?? setOwn
-  const at = (r: ConvoListRow) => placed?.get(r.key) ?? asHeld(r)
+  // (Held as it was when the switcher opened: its status and time; whether it
+  // is pinned, as it is now, another tab or device may change it meanwhile.)
+  const at = (r: ConvoListRow) => {
+    const p = placed?.get(r.key)
+    return p ? { ...p, pinned: r.pinned } : asHeld(r)
+  }
   // (Placed: in their order then, ties too; new ones after.)
   const first = placed ? [...placed.keys()] : []
   const place = (r: ConvoListRow) => (first.includes(r.key) ? first.indexOf(r.key) : first.length)

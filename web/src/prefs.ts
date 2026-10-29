@@ -249,7 +249,7 @@ function sanitize(raw: unknown): Partial<Prefs> {
   const layout = sanitizeLayout(o.keyLayout)
   if (layout) out.keyLayout = layout
   // (As the server checks them: at most maxPinned, none twice.)
-  if (Array.isArray(o.pinnedAgents) && o.pinnedAgents.length <= maxPinned && o.pinnedAgents.every((k) => typeof k === 'string' && k.length >= 1 && k.length <= 200 && !controlChars.test(k)) && new Set(o.pinnedAgents).size === o.pinnedAgents.length) out.pinnedAgents = [...(o.pinnedAgents as string[])]
+  if (Array.isArray(o.pinnedAgents) && o.pinnedAgents.length <= maxPinned && o.pinnedAgents.every((k) => typeof k === 'string' && k.length >= 1 && new TextEncoder().encode(k).length <= 200 && !controlChars.test(k)) && new Set(o.pinnedAgents).size === o.pinnedAgents.length) out.pinnedAgents = [...(o.pinnedAgents as string[])]
   return out
 }
 

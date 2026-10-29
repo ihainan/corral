@@ -600,8 +600,31 @@ func TestSettingsPatchOrderingValidationAndAccount(t *testing.T) {
 	mustStatus(t, patch("pageAAAA", 3, map[string]any{"customKeys": []map[string]string{{"label": "新窗口", "keys": "C-b c"}}}), 200, "custom keys")
 	mustStatus(t, patch("pageAAAA", 3, map[string]any{"customKeys": []any{}}), 200, "no custom keys")
 	// Agents pinned on the agents page (4b): keys, none twice, at most 20.
-	mustStatus(t, patch("pageAAAA", 3, map[string]any{"pinnedAgents": []string{"3||w4AA:p1", "3|work|w1:p2"}}), 200, "pinned agents")
-	mustStatus(t, patch("pageAAAA", 3, map[string]any{"pinnedAgents": []string{}}), 200, "none pinned")
+	// (A writer of its own, its requests numbered on: each taken, read back.)
+	pinned := func(seq int, v []string) []any {
+		mustStatus(t, patch("pagePINS", seq, map[string]any{"pinnedAgents": v}), 200, "pinned agents")
+		got, _ := admin.do("GET", "/api/me/settings", nil).json()["pinnedAgents"].([]any)
+		return got
+	}
+	if got := pinned(1, []string{"3||w4AA:p1", "3|work|w1:p2"}); len(got) != 2 || got[1] != "3|work|w1:p2" {
+		t.Fatalf("pinned: %v", got)
+	}
+	if got := pinned(2, []string{}); len(got) != 0 {
+		t.Fatalf("none pinned: %v", got)
+	}
+	twenty := make([]string, 20)
+	for i := range twenty {
+		twenty[i] = fmt.Sprintf("3||w%d:p1", i)
+	}
+	if got := pinned(3, twenty); len(got) != 20 {
+		t.Fatalf("twenty: %d", len(got))
+	}
+	// (200 bytes, in letters of three bytes and one: at the bound.)
+	if got := pinned(4, []string{strings.Repeat("置", 66) + "xx"}); len(got) != 1 {
+		t.Fatalf("200 bytes: %v", got)
+	}
+	mustStatus(t, patch("pagePINS", 5, map[string]any{"pinnedAgents": []string{strings.Repeat("置", 67)}}), 400, "pinned: 201 bytes")
+	mustStatus(t, patch("pagePINS", 6, map[string]any{"pinnedAgents": nil}), 400, "pinned: null")
 	many := make([]string, 21)
 	for i := range many {
 		many[i] = fmt.Sprintf("3||w%d:p1", i)
