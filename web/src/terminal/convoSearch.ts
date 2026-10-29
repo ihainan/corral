@@ -81,12 +81,14 @@ export function stepThrough(text: string, re: RegExp, qLen: number, at: number):
   const end = Math.min(text.length, at + STEP)
   const window = text.slice(at, Math.min(text.length, end + qLen * 2))
   const found: [number, number][] = []
+  let past = end // (the next step begins after the last one found: none counted twice)
   re.lastIndex = 0
   for (let m = re.exec(window); m && at + m.index < end; m = re.exec(window)) {
     found.push([at + m.index, m[0].length])
+    past = Math.max(past, at + m.index + m[0].length)
     if (!m[0].length) re.lastIndex++
   }
-  return { found, next: end < text.length ? end : -1 }
+  return { found, next: past < text.length ? past : -1 }
 }
 
 const excerpt = (text: string, at: number, n: number) => ({

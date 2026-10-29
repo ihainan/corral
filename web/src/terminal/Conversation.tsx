@@ -729,6 +729,14 @@ export function ConversationView({
       if (i < 0) return false
       if (listNow.current[i].kind === 'work') toggle(hit.key, true)
       if (hit.tool) toolShown.set(hit.tool, { open: true, full: toolShown.get(hit.tool)?.full ?? false })
+      // (The person scrolling meanwhile calls it off too.)
+      const el0 = box.current
+      const off = () => {
+        if (n === going.current) going.current++
+      }
+      const stop = () => ['wheel', 'touchstart', 'pointerdown', 'keydown'].forEach((k) => el0?.removeEventListener(k, off))
+      ;['wheel', 'touchstart', 'pointerdown', 'keydown'].forEach((k) => el0?.addEventListener(k, off, { passive: true }))
+      setTimeout(stop, 1000)
       const then = (f: () => void) => requestAnimationFrame(() => requestAnimationFrame(() => n === going.current && convoNow.current.of === of && convoNow.current.gen === gen && f()))
       const kidOf = () => {
         const c = col.current
@@ -750,15 +758,22 @@ export function ConversationView({
         void to.offsetWidth
         to.classList.add('convo-found')
       }
+      const cardIn = (to: HTMLElement) => (hit.tool ? to.querySelector<HTMLElement>(`[data-tool="${CSS.escape(hit.tool)}"]`) : null)
       then(() => {
         const to = kidOf()
         if (!to) return gone()
         // (A card already shown keeps its own state: opened here.)
-        const card = hit.tool ? to.querySelector<HTMLElement>(`[data-tool="${CSS.escape(hit.tool)}"]`) : null
-        const head = card?.querySelector<HTMLElement>(':scope > .convo-step-head[aria-expanded="false"]')
-        if (head) head.click()
-        if (hit.field === 'summary') to.querySelectorAll('details:not([open])').forEach((d) => d.setAttribute('open', ''))
-        then(() => place(card ?? to))
+        cardIn(to)?.querySelector<HTMLElement>(':scope > .convo-step-head[aria-expanded="false"]')?.click()
+        if (hit.field === 'summary') {
+          if (to instanceof HTMLDetailsElement) to.open = true
+          to.querySelectorAll('details:not([open])').forEach((d) => d.setAttribute('open', ''))
+        }
+        then(() => {
+          // (Found again: gone meanwhile, or drawn anew.)
+          const now = kidOf()
+          if (!now) return gone()
+          place(cardIn(now) ?? now)
+        })
       })
       return true
     },

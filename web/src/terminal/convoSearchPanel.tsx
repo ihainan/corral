@@ -28,37 +28,54 @@ export function ConvoSearchPanel({ list, of, onGo, older, onOlder, onClose }: { 
   const input = useRef<HTMLInputElement>(null)
   const listNow = useRef(list)
   listNow.current = list
-  // (Searched again 250 ms after the last key; as what is read in changes,
-  // at most every 2 s: not on every word the agent writes. Another log in
-  // front: searched anew.)
-  const lastRun = useRef({ q: '', of: '', first: '', at: 0 })
+  // When it is searched: 250 ms after the last key, another log in front,
+  // or the part before read in (the first item another); as what is read
+  // in changes otherwise, at most every 2 s, a search under way let finish
+  // (not on every word the agent writes, nor put off while it writes on).
   const first = list.length ? itemKey(list[0]) : ''
+  const sched = useRef({ query: '', timer: 0, stop: () => {}, running: false, dirty: false, at: 0 })
+  const runNow = () => {
+    const s = sched.current
+    s.timer = 0
+    s.running = true
+    s.dirty = false
+    s.at = Date.now()
+    s.stop = search(listNow.current, s.query, (h, more) => {
+      s.running = false
+      setHits(h)
+      setCapped(more)
+      setAt((a) => (a >= h.length ? -1 : a))
+      if (s.dirty) later()
+    })
+  }
+  const later = () => {
+    const s = sched.current
+    if (s.timer || s.running || !s.query) return
+    s.timer = window.setTimeout(runNow, Math.max(250, s.at + 2000 - Date.now()))
+  }
   useEffect(() => {
-    const query = q.trim()
-    if (!query) {
-      setHits(null)
-      setAt(-1)
-      return
-    }
-    const r = lastRun.current
-    // (The part before read in, the first item another: at once, as asked.)
-    const sameAsked = r.q === query && r.of === of && r.first === first
-    const wait = sameAsked ? Math.max(250, r.at + 2000 - Date.now()) : 250
-    let stop = () => {}
-    const tm = setTimeout(() => {
-      lastRun.current = { q: query, of, first, at: Date.now() }
-      stop = search(listNow.current, query, (h, more) => {
-        setHits(h)
-        setCapped(more)
-        setAt((a) => (a >= h.length ? -1 : a))
-      })
-    }, wait)
+    const s = sched.current
+    clearTimeout(s.timer)
+    s.timer = 0
+    s.stop()
+    s.running = false
+    s.query = q.trim()
+    setHits(null) // (of another search, or another log: not to be gone to)
+    setAt(-1)
+    if (s.query) s.timer = window.setTimeout(runNow, 250)
     return () => {
-      clearTimeout(tm)
-      stop()
+      clearTimeout(s.timer)
+      s.timer = 0
+      s.stop()
+      s.running = false
     }
-  }, [q, list, of, first])
-  useEffect(() => setAt(-1), [q, of])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [q, of, first])
+  useEffect(() => {
+    sched.current.dirty = true
+    later()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [list])
   const go = (i: number) => {
     if (!hits?.length) return
     const n = (i + hits.length) % hits.length

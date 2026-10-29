@@ -64,21 +64,8 @@ function itemText(it: Item, say: Say): string {
     case 'text':
     case 'answer':
       return (it.kind === 'answer' ? `**${say.agent}**\n\n` : '') + it.text + (it.truncated ? '\n\n' + say.cut : '')
-    case 'work': {
-      const lines: string[] = []
-      let thought = false
-      for (const s of it.steps) {
-        if (isEntry(s)) {
-          const t = partsText(s.parts, say)
-          if (t.trim()) lines.push(s.role === 'summary' ? `*${say.summary}*\n\n` + quote(t) : `*${say.note}* ` + t)
-        } else if (s.kind === 'thinking') {
-          if (!thought && s.text?.trim()) lines.push(say.thinking)
-          thought = true
-        } else if (s.kind === 'tool' && s.tool) lines.push(toolLine(s.tool, say))
-        else if (s.text?.trim()) lines.push(partsText([s], say))
-      }
-      return lines.join('\n')
-    }
+    case 'work':
+      return '' // (its steps, one piece each: see pieces)
     case 'gone':
       return `*${say.gone}*` // (its entries follow, one piece each: see pieces)
   }
@@ -89,6 +76,19 @@ function itemText(it: Item, say: Say): string {
 function* pieces(it: Item, say: Say): Generator<string> {
   yield itemText(it, say)
   if (it.kind === 'gone') for (const e of it.entries) yield quote(partsText(e.parts, say))
+  if (it.kind === 'work') {
+    let thought = false
+    for (const s of it.steps) {
+      if (isEntry(s)) {
+        const t = partsText(s.parts, say)
+        if (t.trim()) yield s.role === 'summary' ? `*${say.summary}*\n\n` + quote(t) : `*${say.note}* ` + t
+      } else if (s.kind === 'thinking') {
+        if (!thought && s.text?.trim()) yield say.thinking
+        thought = true
+      } else if (s.kind === 'tool' && s.tool) yield toolLine(s.tool, say)
+      else if (s.text?.trim()) yield partsText([s], say)
+    }
+  }
 }
 
 // exportMarkdown makes the Markdown of items, a slice of them at a time
