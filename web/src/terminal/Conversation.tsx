@@ -1905,6 +1905,7 @@ export function ListSearch({ value, onChange, focus, onLeft, hint }: { value: st
   // (The pointer pressed down in the list it heads, until it is let go:
   // what took the focus from it, see onBlur.)
   const down = useRef<number | null>(null)
+  const leaving = useRef(0) // (which leaving a wait is for: the latest only)
   useEffect(() => {
     const list = ref.current?.closest('.convo-side, .convo-picker')
     if (!list) return
@@ -1934,14 +1935,18 @@ export function ListSearch({ value, onChange, focus, onLeft, hint }: { value: st
       </span>
       <input
         ref={ref}
-        onFocus={() => setInside(true)}
+        onFocus={() => {
+          setInside(true)
+          leaving.current++ // (a wait for an earlier leaving, called off)
+        }}
         onBlur={() => {
           setInside(false)
           // (Left empty: let go once the press in the list that took the
           // focus is over — its click on a row under it landed — before
           // the list moves up: that pointer's own release or cancel, or 5 s.)
           if (!value && onLeft) {
-            const leave = () => document.activeElement !== ref.current && !ref.current?.value && onLeft()
+            const n = ++leaving.current
+            const leave = () => n === leaving.current && document.activeElement !== ref.current && !ref.current?.value && onLeft()
             const id = down.current
             if (id === null) return void setTimeout(leave, 0)
             let done = false
