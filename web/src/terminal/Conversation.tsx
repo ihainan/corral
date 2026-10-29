@@ -187,6 +187,13 @@ export function ConversationView({
   }, [])
   const sideShown = !!side && wide && !folded
   useEffect(() => {
+    // (The view narrowed mid-drag: what is dragged to keeps within it.)
+    const d = drag.current
+    if (!d) return
+    d.to = sideWidthOf(d.to, viewW || SIDE_MIN)
+    if (sideEl.current) sideEl.current.style.width = d.to + 'px'
+  }, [viewW])
+  useEffect(() => {
     if (!sideShown && drag.current) {
       cancelAnimationFrame(drag.current.frame)
       drag.current = null // (its edge gone mid-drag: what was dragged is let go)
