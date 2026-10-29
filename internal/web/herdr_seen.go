@@ -32,18 +32,25 @@ const seenKeptFor = 30 * 24 * time.Hour
 // when), beyond this watcher's life: a watcher begun anew (the gateway
 // started again, the session reconnected) numbers rounds anew, and an
 // agent "done" since before it, looked at before, would show "done" again.
-// What was kept before this watcher (prior) is told by time: one whose
-// "done" began (its since) no later than it was looked at, of the same
-// agent session, is that one. (Only what was kept before: a round this
-// watcher saw begin is told by its round, as above.)
+// What was kept before this watcher (prior) stands for a pane only until
+// this watcher sees it other than "done" (from then on its rounds tell);
+// and what went on while no one watched is told by the agent's log: a
+// round more writes to it, so one whose log was last written (wrote, by
+// the first look over the host after this watcher began) no later than it
+// was looked at, of the same agent session, is the "done" looked at. Until
+// that look is back it is taken as looked at (a "done" told a few seconds
+// late, rather than one looked at told anew); a log not found, or written
+// since: "done".
 type seenRounds struct {
-	mu    sync.Mutex
-	at    map[string]seenRound // pane → the round it is in
-	seen  map[string]seenRound // pane → the round of "done" looked at
-	n     int64
-	poke  func() // (has the watcher's last summary go again)
-	prior map[string]store.AgentSeen
-	keep  func(pane string, a store.AgentSeen)
+	mu     sync.Mutex
+	at     map[string]seenRound // pane → the round it is in
+	seen   map[string]seenRound // pane → the round of "done" looked at
+	n      int64
+	poke   func() // (has the watcher's last summary go again)
+	prior  map[string]store.AgentSeen
+	keep   func(pane string, a store.AgentSeen)
+	looked bool             // (the first look over the host is back)
+	wrote  map[string]int64 // (what it found: pane → its log last written, unix ms)
 }
 
 type seenRound struct {
@@ -60,7 +67,11 @@ func (r *seenRounds) changed(pane, to, session string) {
 	if to == herdr.StatusGone {
 		delete(r.at, pane)
 		delete(r.seen, pane)
+		delete(r.prior, pane)
 		return
+	}
+	if to != herdr.StatusDone {
+		delete(r.prior, pane)
 	}
 	was, ok := r.at[pane]
 	if session == "" {
@@ -94,6 +105,9 @@ func (r *seenRounds) number(sum *herdrSummary, old bool) {
 		for j := range sum.Workspaces[i].Agents {
 			a := &sum.Workspaces[i].Agents[j]
 			here[a.PaneID] = true
+			if !old && a.Status != herdr.StatusDone {
+				delete(r.prior, a.PaneID)
+			}
 			x, ok := r.at[a.PaneID]
 			if !ok || x.status != a.Status || x.session != a.Session {
 				if old {
@@ -148,15 +162,34 @@ func (r *seenRounds) current(pane string) (seenRound, bool) {
 	return x, ok
 }
 
-// setKept gives what was kept of what was looked at before this watcher,
-// and how to keep more. (A look meanwhile, before it was read, is kept by
-// what comes after it only: it is in seen, as this watcher's own.)
-func (r *seenRounds) setKept(prior map[string]store.AgentSeen, keep func(pane string, a store.AgentSeen)) {
+// newSeenRounds: prior, what was kept of what was looked at before this
+// watcher; keep, how to keep more (as it is looked at, before it is said
+// noted).
+func newSeenRounds(prior map[string]store.AgentSeen, keep func(pane string, a store.AgentSeen)) *seenRounds {
+	return &seenRounds{prior: prior, keep: keep}
+}
+
+// wantsLook: a look over the host is wanted for what was kept (see
+// seenRounds): there is some, and the first look is not back.
+func (r *seenRounds) wantsLook() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.prior, r.keep = prior, keep
-	if r.poke != nil {
-		go r.poke()
+	return len(r.prior) > 0 && !r.looked
+}
+
+// lookedOver takes in the first look over the host (nil: it failed, no
+// log known), and has the summary go again.
+func (r *seenRounds) lookedOver(wrote map[string]int64) {
+	r.mu.Lock()
+	if r.looked {
+		r.mu.Unlock()
+		return
+	}
+	r.looked, r.wrote = true, wrote
+	poke := r.poke
+	r.mu.Unlock()
+	if poke != nil {
+		poke()
 	}
 }
 
@@ -181,12 +214,8 @@ func (r *seenRounds) withSeen(sum herdrSummary) herdrSummary {
 			}
 			if x, ok := r.seen[a.PaneID]; ok && x.n == a.Round && x.session == a.Session {
 				w.Agents[j].Status = herdr.StatusIdle
-			} else if k, ok := r.prior[a.PaneID]; ok && k.Session == a.Session && a.Since <= k.At {
-				// (Looked at before this watcher began, its "done" begun before
-				// that: the same. When it began not yet known (0: a restart, its
-				// log not yet looked at), taken as the same: a "done" told a
-				// little late, rather than one looked at told anew.)
-				w.Agents[j].Status = herdr.StatusIdle
+			} else if k, ok := r.prior[a.PaneID]; ok && k.Session == a.Session && (!r.looked || r.wrote[a.PaneID] > 0 && r.wrote[a.PaneID] <= k.At) {
+				w.Agents[j].Status = herdr.StatusIdle // (looked at before this watcher: see seenRounds)
 			}
 		}
 		ws[i] = w

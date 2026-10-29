@@ -108,40 +108,78 @@ func TestOcContests(t *testing.T) {
 }
 
 // What was looked at, kept beyond the watcher: a watcher begun anew (the
-// gateway started again) tells an agent "done" since before it was looked
-// at, of the same agent session, as idle; one done again since, or of
-// another session, "done".
+// gateway started again) tells an agent "done" looked at before as idle,
+// of the same agent session, its log not written since; until the first
+// look over the host is back, as idle too. Seen other than "done" by this
+// watcher, it goes by its rounds.
 func TestSeenKept(t *testing.T) {
-	r := &seenRounds{}
 	var keptPane string
 	var keptAs store.AgentSeen
-	r.setKept(map[string]store.AgentSeen{"w1:p1": {Session: "s1", At: 1000}}, func(pane string, a store.AgentSeen) { keptPane, keptAs = pane, a })
-	told := func(session string, since int64) string {
-		s := seenSum(herdr.StatusDone, session)
-		s.Workspaces[0].Agents[0].Since = since
+	r := newSeenRounds(map[string]store.AgentSeen{"w1:p1": {Session: "s1", At: 1000}}, func(pane string, a store.AgentSeen) { keptPane, keptAs = pane, a })
+	poked := 0
+	r.setPoke(func() { poked++ })
+	told := func(status, session string) herdrAgent {
+		s := seenSum(status, session)
 		r.number(&s, false)
-		return r.withSeen(s).Workspaces[0].Agents[0].Status
+		return r.withSeen(s).Workspaces[0].Agents[0]
 	}
-	if got := told("s1", 900); got != herdr.StatusIdle {
-		t.Fatalf("done before it was looked at: %s", got)
+	if !r.wantsLook() {
+		t.Fatal("no look wanted")
 	}
-	if got := told("s1", 0); got != herdr.StatusIdle {
-		t.Fatalf("when it began not known: %s", got)
+	if got := told(herdr.StatusDone, "s1"); got.Status != herdr.StatusIdle {
+		t.Fatalf("before the look: %s", got.Status)
 	}
-	if got := told("s1", 1100); got != herdr.StatusDone {
-		t.Fatalf("done again since: %s", got)
+	if got := told(herdr.StatusDone, "s2"); got.Status != herdr.StatusDone {
+		t.Fatalf("another session: %s", got.Status)
 	}
-	if got := told("s2", 900); got != herdr.StatusDone {
-		t.Fatalf("another session: %s", got)
+	r.lookedOver(map[string]int64{"w1:p1": 900})
+	if r.wantsLook() || poked != 1 {
+		t.Fatal("the look not taken in")
 	}
-	// Looked at in this watcher: kept, by the way given; told by its round.
-	s := seenSum(herdr.StatusDone, "s2")
-	r.number(&s, false)
+	r.lookedOver(map[string]int64{"w1:p1": 5000}) // (only the first)
+	if got := told(herdr.StatusDone, "s1"); got.Status != herdr.StatusIdle {
+		t.Fatalf("its log not written since: %s", got.Status)
+	}
+	// Written since (a round while no one watched), or not found: done.
+	for _, wrote := range []map[string]int64{{"w1:p1": 1100}, {}, nil} {
+		q := newSeenRounds(map[string]store.AgentSeen{"w1:p1": {Session: "s1", At: 1000}}, nil)
+		q.lookedOver(wrote)
+		s := seenSum(herdr.StatusDone, "s1")
+		q.number(&s, false)
+		if got := q.withSeen(s).Workspaces[0].Agents[0].Status; got != herdr.StatusDone {
+			t.Fatalf("wrote %v: %s", wrote, got)
+		}
+	}
+	// A lost herdr's summary changes nothing of it.
+	o := seenSum(herdr.StatusWorking, "s1")
+	r.number(&o, true)
+	if got := told(herdr.StatusDone, "s1"); got.Status != herdr.StatusIdle {
+		t.Fatalf("after a lost summary: %s", got.Status)
+	}
+	// Seen working by this watcher, then done: a round of its own, done.
+	r.changed("w1:p1", herdr.StatusWorking, "")
+	r.changed("w1:p1", herdr.StatusDone, "")
+	a := told(herdr.StatusDone, "s1")
+	if a.Status != herdr.StatusDone {
+		t.Fatalf("done again while watched: %s", a.Status)
+	}
+	// Looked at: kept (said noted after), told by its round.
 	before := time.Now().UnixMilli()
-	if !r.markSeen("w1:p1", s.Workspaces[0].Agents[0].Round, "s2") || keptPane != "w1:p1" || keptAs.Session != "s2" || keptAs.At < before {
+	if !r.markSeen("w1:p1", a.Round, "s1") || keptPane != "w1:p1" || keptAs.Session != "s1" || keptAs.At < before {
 		t.Fatalf("not kept: %q %+v", keptPane, keptAs)
 	}
-	if got := told("s2", 900); got != herdr.StatusIdle {
-		t.Fatalf("looked at: %s", got)
+	if got := told(herdr.StatusDone, "s1"); got.Status != herdr.StatusIdle {
+		t.Fatalf("looked at: %s", got.Status)
+	}
+	// Seen working in a summary (no word of it): the kept one no longer stands.
+	q := newSeenRounds(map[string]store.AgentSeen{"w1:p1": {Session: "s1", At: 1000}}, nil)
+	for _, st := range []string{herdr.StatusWorking, herdr.StatusDone} {
+		s := seenSum(st, "s1")
+		q.number(&s, false)
+		if st == herdr.StatusDone {
+			if got := q.withSeen(s).Workspaces[0].Agents[0].Status; got != herdr.StatusDone {
+				t.Fatalf("seen working, then done: %s", got)
+			}
+		}
 	}
 }

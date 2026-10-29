@@ -205,18 +205,23 @@ func (h *herdrServers) of(host *store.Host, socket string) *agentTimes {
 	if h.m == nil {
 		h.m = map[string]*agentTimes{}
 	}
-	// (Where it is, not only which record: a record edited to another machine is another server.)
-	jump := int64(0)
-	if host.JumpHostID != nil {
-		jump = *host.JumpHostID
-	}
-	k := fmt.Sprint(host.ID, "\x00", host.Username, "@", host.Address, ":", host.Port, "\x00", jump, "\x00", socket)
+	k := herdrServerKey(host, socket)
 	t := h.m[k]
 	if t == nil {
 		t = &agentTimes{at: map[string]agentTime{}}
 		h.m[k] = t
 	}
 	return t
+}
+
+// herdrServerKey names a herdr server by where it is, not only which host
+// record: a record edited to another machine is another server.
+func herdrServerKey(host *store.Host, socket string) string {
+	jump := int64(0)
+	if host.JumpHostID != nil {
+		jump = *host.JumpHostID
+	}
+	return fmt.Sprint(host.ID, "\x00", host.Username, "@", host.Address, ":", host.Port, "\x00", jump, "\x00", socket)
 }
 
 // paneSince is when a pane's agent last changed, as the gateway saw it;
@@ -458,26 +463,24 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 		name = "default"
 	}
 	times := s.herdrTimes.of(h, socket)
-	rounds := &seenRounds{}
-	s.herdrSocks.setRounds(sess.ID, rounds)
-	// (What was looked at before this watcher: read beside, kept as more is.)
-	go func() {
-		kctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// What was looked at before this watcher (read before its first
+	// summary: the gateway's own database), and kept as more is (before
+	// the look is said noted, so that a watcher begun next reads it).
+	server := herdrServerKey(h, socket)
+	kctx, kcancel := context.WithTimeout(ctx, 3*time.Second)
+	prior, err := s.store.AgentsSeen(kctx, sess.OwnerID, sess.HostID, server, time.Now().Add(-seenKeptFor).UnixMilli())
+	kcancel()
+	if err != nil {
+		s.log.Warn("agents seen not read", "err", err)
+	}
+	rounds := newSeenRounds(prior, func(pane string, a store.AgentSeen) {
+		kctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-		kept, err := s.store.AgentsSeen(kctx, sess.OwnerID, sess.HostID, socket, time.Now().Add(-seenKeptFor).UnixMilli())
-		if err != nil {
-			s.log.Warn("agents seen not read", "err", err)
+		if err := s.store.SetAgentSeen(kctx, sess.OwnerID, sess.HostID, server, pane, a); err != nil {
+			s.log.Warn("agent seen not kept", "err", err)
 		}
-		rounds.setKept(kept, func(pane string, a store.AgentSeen) {
-			go func() {
-				kctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				defer cancel()
-				if err := s.store.SetAgentSeen(kctx, sess.OwnerID, sess.HostID, socket, pane, a); err != nil {
-					s.log.Warn("agent seen not kept", "err", err)
-				}
-			}()
-		})
-	}()
+	})
+	s.herdrSocks.setRounds(sess.ID, rounds)
 	bg := newBgProber(func(ctx context.Context, sids []string, tail int) (map[string]bgRecord, error) {
 		out, err := sshx.Output(ctx, sess.Client(), bgTailCommand(sids, tail), len(sids)*(tail+256))
 		if err != nil {
@@ -491,37 +494,46 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 	// never saw change are shown by (see paneSince). Looked for beside the
 	// watch, only while a pane needs it, and at most once a minute: a slow
 	// host holds up no summary.
+	// (Also once at the start where what was looked at before is told by
+	// it: see seenRounds.)
 	go func() {
 		tick := time.NewTicker(5 * time.Second)
 		defer tick.Stop()
+		first := make(chan time.Time, 1)
+		if rounds.wantsLook() {
+			first <- time.Now()
+		}
 		for {
+			var now time.Time
 			select {
 			case <-ctx.Done():
 				return
-			case now := <-tick.C:
-				if !times.due(now) {
-					continue
-				}
-				lctx, cancel := context.WithTimeout(ctx, 20*time.Second)
-				out, err := sshx.Output(lctx, sess.Client(), convoLocateTimesCommand(sess.Persistence, sess.TmuxSession), convoLocateMax)
-				cancel()
-				var at map[string]int64
-				if err == nil {
-					at = map[string]int64{}
-					found := parseConvoLocate(string(out))
-					for _, p := range found.procs {
-						// (Of this herdr server: another on the host names
-						// its panes as this one does.)
-						if p.herdrSocket != socket || !herdrPane.MatchString(p.herdrPane) {
-							continue
-						}
-						if w := procWrote(p, found.cands); w > at[p.herdrPane] {
-							at[p.herdrPane] = w
-						}
+			case now = <-first:
+			case now = <-tick.C:
+			}
+			if !times.due(now) && !rounds.wantsLook() {
+				continue
+			}
+			lctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+			out, err := sshx.Output(lctx, sess.Client(), convoLocateTimesCommand(sess.Persistence, sess.TmuxSession), convoLocateMax)
+			cancel()
+			var at map[string]int64
+			if err == nil {
+				at = map[string]int64{}
+				found := parseConvoLocate(string(out))
+				for _, p := range found.procs {
+					// (Of this herdr server: another on the host names
+					// its panes as this one does.)
+					if p.herdrSocket != socket || !herdrPane.MatchString(p.herdrPane) {
+						continue
+					}
+					if w := procWrote(p, found.cands); w > at[p.herdrPane] {
+						at[p.herdrPane] = w
 					}
 				}
-				times.found(at, time.Now())
 			}
+			times.found(at, time.Now())
+			rounds.lookedOver(at)
 		}
 	}()
 	// The bindings are read beside the watch, not before it: a slow host

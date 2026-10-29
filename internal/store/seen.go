@@ -10,10 +10,10 @@ type AgentSeen struct {
 }
 
 // AgentsSeen gives what was looked at of a herdr server's panes (server:
-// its socket on the host), none older than since (unix ms); the older are
+// which machine and socket), none older than since (unix ms); the older are
 // let go.
 func (s *Store) AgentsSeen(ctx context.Context, ownerID, hostID int64, server string, since int64) (map[string]AgentSeen, error) {
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM agent_seen WHERE seen_at < ?`, since); err != nil {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM agent_seen WHERE owner_id = ? AND host_id = ? AND server = ? AND seen_at < ?`, ownerID, hostID, server, since); err != nil {
 		return nil, err
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT pane, session, seen_at FROM agent_seen WHERE owner_id = ? AND host_id = ? AND server = ?`, ownerID, hostID, server)
@@ -33,9 +33,11 @@ func (s *Store) AgentsSeen(ctx context.Context, ownerID, hostID int64, server st
 	return out, rows.Err()
 }
 
-// SetAgentSeen notes a pane's agent "done" looked at.
+// SetAgentSeen notes a pane's agent "done" looked at (not over a later look:
+// two noted out of order keep the later).
 func (s *Store) SetAgentSeen(ctx context.Context, ownerID, hostID int64, server, pane string, a AgentSeen) error {
 	_, err := s.db.ExecContext(ctx, `INSERT INTO agent_seen (owner_id, host_id, server, pane, session, seen_at) VALUES (?, ?, ?, ?, ?, ?)
-		ON CONFLICT(owner_id, host_id, server, pane) DO UPDATE SET session = excluded.session, seen_at = excluded.seen_at`, ownerID, hostID, server, pane, a.Session, a.At)
+		ON CONFLICT(owner_id, host_id, server, pane) DO UPDATE SET session = excluded.session, seen_at = excluded.seen_at
+		WHERE excluded.seen_at >= agent_seen.seen_at`, ownerID, hostID, server, pane, a.Session, a.At)
 	return err
 }
