@@ -3,6 +3,7 @@ package web
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"math/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -142,6 +143,73 @@ func TestCardRegionAwk(t *testing.T) {
 		out, err := cmd.Output()
 		if err != nil || len(out) != 0 {
 			t.Fatalf("%s: awk gave %q (%v)", name, out, err)
+		}
+	}
+}
+
+// The host's cardRegionAwk and cardOf, on screens changed at random in the
+// ways a screen changes (per review408: a line of colours alone at the
+// foot, a no-break space, a form feed; menus, boxes, lines of the thread):
+// where Go finds no card the host prints nothing, else the same region.
+func TestCardRegionAwkAgrees(t *testing.T) {
+	if _, err := exec.LookPath("awk"); err != nil {
+		t.Skip("no awk")
+	}
+	rule := strings.Repeat("─", 40)
+	bases := []string{
+		"● said\n\n✦ Heads up · words\n  more words\n  1: Learn more   0: Dismiss\n\n" + rule + "\n❯ \n" + rule + "\n  status\n",
+		"x\n\x1b[38;2;177;185;249m✦ \x1b[0mHeads up · words  \n  1: Learn more   0: Dismiss\n" + rule + "\n❯ \x1b[2mtry\x1b[0m   \n" + rule + "\n  status\n",
+		cardSample(t, "ccmock/samples/headsup-cjk.txt"),
+	}
+	pool := []string{"", "\x1b[0m", "\r", " ", " x", "\f", "\f1. x", "  1. Menu choice", "❯ more", "● thread", "  indented", strings.Repeat(" ", 30) + "note", "  status", rule, "✦ Another", "\t", " \t", "1.", "  2.\tx"}
+	rnd := rand.New(rand.NewSource(408))
+	checked := map[bool]int{}
+	for i := 0; i < 3000; i++ {
+		lines := strings.Split(strings.TrimRight(bases[rnd.Intn(len(bases))], "\n"), "\n")
+		for k := rnd.Intn(4); k >= 0; k-- {
+			at := rnd.Intn(len(lines) + 1)
+			if rnd.Intn(3) == 0 {
+				at = len(lines) // (most changes at the foot)
+			}
+			lines = append(lines[:at], append([]string{pool[rnd.Intn(len(pool))]}, lines[at:]...)...)
+		}
+		screen := strings.Join(lines, "\n") + "\n"
+		cmd := exec.Command("awk", cardRegionAwk)
+		cmd.Stdin = strings.NewReader(screen)
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		// (The frame is what the host checks; a card is read only in one.)
+		f, c := cardFrameOf(screen), cardOf(screen)
+		checked[f != nil]++
+		switch {
+		case c != nil && f == nil:
+			t.Fatalf("a card with no frame:\n%q", screen)
+		case f == nil && len(out) != 0:
+			t.Fatalf("Go no frame, awk a region:\n%q", screen)
+		case f != nil && len(out) == 0:
+			t.Fatalf("Go a frame, awk none:\n%q", screen)
+		case f != nil:
+			sum := sha256.Sum256(out)
+			if d := hex.EncodeToString(sum[:]); d != cardRegion(f.lines, f.star, f.end) || c != nil && d != c.digest {
+				t.Fatalf("regions differ:\n%q\nawk %q", screen, out)
+			}
+		}
+	}
+	if checked[true] < 300 || checked[false] < 300 {
+		t.Fatalf("too few of one kind: %v", checked)
+	}
+}
+
+// Per review408: keys at the screen's edge with wide letters (emoji, the
+// rarer Chinese): not to be pressed.
+func TestCardKeysAtEdgeWide(t *testing.T) {
+	rule := strings.Repeat("─", 27)
+	for _, k := range []string{"😀😀😀", "𠀀𠀀𠀀"} {
+		c := cardOf("✦ Heads up · w\n  1: Learn more   0: " + k + "\n" + rule + "\n❯ \n" + rule + "\n")
+		if c == nil || c.Actionable {
+			t.Fatalf("%s: %+v", k, c)
 		}
 	}
 }

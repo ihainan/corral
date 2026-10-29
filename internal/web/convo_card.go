@@ -56,17 +56,28 @@ var (
 
 // cardOf: the card right above the input box in front, on a screen read
 // with its colours; nil where there is none (or it cannot be read).
-func cardOf(screen string) *convoCard {
+// cardFrame: where a card is on a screen, before its words are read: the
+// screen's lines (and without their colours), the box's upper rule, its
+// prompt's line and its lower rule, the card's head. What the host's
+// cardRegionAwk does, done as it does it.
+type cardFrame struct {
+	lines, plain         []string
+	top, mark, end, star int
+}
+
+func cardFrameOf(screen string) *cardFrame {
 	lines := strings.Split(strings.TrimRight(screen, "\r\n"), "\n")
 	plain := make([]string, len(lines))
 	for i, l := range lines {
-		plain[i] = strings.TrimRight(sgr.ReplaceAllString(l, ""), "\r")
+		plain[i] = strings.ReplaceAll(sgr.ReplaceAllString(l, ""), "\r", "") // (as cardRegionAwk: every \r)
 	}
 	// The input box in front: a line beginning with the prompt's mark
 	// between two rules, at the screen's foot, nothing chosen among under it.
+	// (Every test here that the host's cardRegionAwk makes too is made as
+	// it makes it, byte for byte: blanks are ASCII ones, see cardBlank.)
 	top, mark, end := -1, -1, -1
 	for i := len(plain) - 1; i >= 1; i-- {
-		if strings.HasPrefix(strings.TrimSpace(plain[i]), "❯") && pickerRule.MatchString(plain[i-1]) {
+		if strings.HasPrefix(strings.TrimLeft(plain[i], cardBlank), "❯") && pickerRule.MatchString(plain[i-1]) {
 			top, mark = i-1, i
 			break
 		}
@@ -98,13 +109,22 @@ func cardOf(screen string) *convoCard {
 			star = k
 			break
 		}
-		if strings.TrimSpace(l) != "" && !strings.HasPrefix(l, "  ") && !rightNote(l) {
+		if strings.Trim(l, cardBlank) != "" && !strings.HasPrefix(l, "  ") && !rightNote(l) {
 			return nil
 		}
 	}
 	if star < 0 {
 		return nil
 	}
+	return &cardFrame{lines, plain, top, mark, end, star}
+}
+
+func cardOf(screen string) *convoCard {
+	f := cardFrameOf(screen)
+	if f == nil {
+		return nil
+	}
+	lines, plain, top, mark, end, star := f.lines, f.plain, f.top, f.mark, f.end, f.star
 	c := &convoCard{Actionable: true}
 	head := strings.TrimSpace(strings.TrimPrefix(plain[star], "✦ "))
 	inline := ""
@@ -137,7 +157,7 @@ func cardOf(screen string) *convoCard {
 	}
 	keyText := []string{}
 	// (The screen's width: the box's rules are drawn across all of it.)
-	width := cellWidth(strings.TrimSpace(plain[top]))
+	width := utf8.RuneCountInString(strings.Trim(plain[top], cardBlank))
 	if inline != "" {
 		keyText = append(keyText, inline)
 		if cellWidth(strings.TrimRight(plain[star], " ")) >= width-1 {
@@ -273,38 +293,44 @@ const cardRegionAwk = `function note(q) { match(q, /^ */); return RLENGTH >= 24 
 { raw[NR] = $0; p = $0; gsub(/\033\[[0-9;]*m/, "", p); gsub(/\r/, "", p); plain[NR] = p }
 END {
   n = NR
-  while (n >= 1 && plain[n] == "") n--
-  rule = "^[ \t]*(\342\224\200|\342\224\201)(\342\224\200|\342\224\201)(\342\224\200|\342\224\201)(\342\224\200|\342\224\201)(\342\224\200|\342\224\201)(\342\224\200|\342\224\201)(\342\224\200|\342\224\201)(\342\224\200|\342\224\201)"
+  while (n >= 1 && raw[n] ~ /^\r*$/) n--
+  rule = "^[ \t\f]*(\342\224\200|\342\224\201)(\342\224\200|\342\224\201)(\342\224\200|\342\224\201)(\342\224\200|\342\224\201)(\342\224\200|\342\224\201)(\342\224\200|\342\224\201)(\342\224\200|\342\224\201)(\342\224\200|\342\224\201)"
   mark = 0
-  for (i = n; i >= 2; i--) { q = plain[i]; sub(/^[ \t]+/, "", q); if (index(q, "\342\235\257") == 1 && plain[i-1] ~ rule) { mark = i; break } }
+  for (i = n; i >= 2; i--) { q = plain[i]; sub(/^[ \t\f]+/, "", q); if (index(q, "\342\235\257") == 1 && plain[i-1] ~ rule) { mark = i; break } }
   if (!mark) exit
   end = 0
   for (j = mark + 1; j <= n; j++) if (plain[j] ~ rule) { end = j; break }
   if (!end || n - end > 10) exit
-  for (j = end + 1; j <= n; j++) if (index(plain[j], "\342\235\257") || plain[j] ~ /^[ \t]*[0-9]+\.[ \t]/) exit
+  for (j = end + 1; j <= n; j++) if (index(plain[j], "\342\235\257") || plain[j] ~ /^[ \t\f]*[0-9]+\.[ \t\f]/) exit
   star = 0
   for (k = mark - 2; k >= 1 && k >= mark - 61; k--) {
     if (index(plain[k], "\342\234\246 ") == 1) { star = k; break }
     q = plain[k]
-    if (q ~ /[^ \t]/ && substr(q, 1, 2) != "  " && !note(q)) exit
+    if (q ~ /[^ \t\f]/ && substr(q, 1, 2) != "  " && !note(q)) exit
   }
   if (!star) exit
   for (k = star; k <= end; k++) { l = raw[k]; sub(/[ \t\r]+$/, "", l); print l }
 }`
 
-// cellWidth: how many of the terminal's cells s takes (the wide letters of
-// Chinese, Japanese and Korean two).
+// cellWidth: at most how many of the terminal's cells s takes: a letter of
+// ASCII one, any other two (wide ones are; a narrow one, or a mark that
+// takes none, counted two only makes a line seem nearer the screen's edge,
+// its keys not pressed from here where they could have been).
 func cellWidth(s string) int {
 	n := 0
 	for _, r := range s {
-		if r >= 0x1100 && (r <= 0x115f || r >= 0x2e80 && r <= 0xa4cf || r >= 0xac00 && r <= 0xd7a3 || r >= 0xf900 && r <= 0xfaff || r >= 0xfe30 && r <= 0xfe4f || r >= 0xff00 && r <= 0xff60 || r >= 0xffe0 && r <= 0xffe6) {
-			n += 2
-		} else {
+		if r < 0x80 {
 			n++
+		} else {
+			n += 2
 		}
 	}
 	return n
 }
+
+// cardBlank: what is blank, here and on the host (awk's [ \t\f]; \r is
+// taken out of every line before, \n cannot be in one).
+const cardBlank = " \t\f"
 
 // rightNote: a line with something only at its far right (a note of Claude
 // Code's own, as "✔ Update installed · /restart to apply", or the card's
