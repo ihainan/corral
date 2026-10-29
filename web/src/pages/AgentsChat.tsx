@@ -5,7 +5,6 @@ import { t, type I18nKey } from '../i18n'
 import { navigate, onNavigate } from '../router'
 import { onOpenRequest } from '../notifyopen'
 import { isDark, maxPinned, setChromeColor, setPrefs, usePrefs } from '../prefs'
-import { pinGone } from '../terminal/agentOrder'
 import { local } from '../storage'
 import { CLOSE_MENUS, Confirm, Menu, useToast, type MenuItem } from '../components/ui'
 import { chromeVars, corralDark, corralLight } from '../terminal/themes'
@@ -1516,15 +1515,12 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       icon: pinnedNow ? <PinOff size={16} /> : <Pin size={16} />,
       onSelect: () => {
         if (pinnedNow) return setPrefs({ pinnedAgents: pins.filter((k) => k !== cur.key) })
-        // (Full: those no longer on the list, as a pane closed or a host
-        // removed, make room first, said so; only when full, a host away
-        // for a while keeps its pins till then.)
+        // (Full: nothing let go by itself, a host away and a pane closed look
+        // alike from here; how many are out of sight said, and where all
+        // can be let go: Settings.)
         if (pins.length >= maxPinned) {
           const here = new Set(entries.map((e) => e.key))
-          const gone = pins.filter((k) => !here.has(k) && pinGone(k, all))
-          if (!gone.length) return toast(t('agents.pinFull', { n: maxPinned }), true)
-          setPrefs({ pinnedAgents: [...pins.filter((k) => !gone.includes(k)), cur.key] })
-          return toast(t('agents.pinCleared', { n: gone.length }))
+          return toast(t('agents.pinFull', { n: maxPinned, m: pins.filter((k) => !here.has(k)).length }), true)
         }
         setPrefs({ pinnedAgents: [...pins, cur.key] })
       },

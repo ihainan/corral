@@ -1,4 +1,3 @@
-import type { SessionInfo } from '../api'
 import type { I18nKey } from '../i18n'
 
 // The agents page's list: its rows, their groups and their order (plain,
@@ -57,14 +56,3 @@ export function listOrder(rows: ConvoListRow[]): ConvoListRow[] {
 // by the lists and by Alt+Up/Down alike (placeAs, which its page sets);
 // what its row says is as it is.
 export const asHeld = (r: ConvoListRow): ConvoListRow => (r.placeAs && r.current ? { ...r, status: r.placeAs.status, since: r.placeAs.since } : r)
-
-// A pinned agent known to be gone, not merely out of sight: its herdr
-// session running and its agents read in (its summary), and it not among
-// them; a tmux session no longer there at all (lost for a while, it is still
-// there). A host away, or a list not read yet, says nothing (review417).
-export function pinGone(key: string, all: SessionInfo[]): boolean {
-  const [host, mid, ...rest] = key.split('|')
-  const of = all.filter((s) => String(s.host_id) === host)
-  if (mid === 'tmux') return !of.some((s) => s.persistence === 'tmux' && (s.mux_session ?? '') === rest.join('|'))
-  return of.some((s) => s.persistence === 'herdr' && (!s.mux_session || s.mux_session === 'default' ? '' : s.mux_session) === mid && s.state === 'running' && !!s.meta)
-}

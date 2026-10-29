@@ -135,6 +135,18 @@ export function SettingsPage() {
       </section>
 
       <section className="section">
+        <h2>{t('settings.agents')}</h2>
+        <div className="settings-group">
+          {/* (Pinned at the top of the agents page: let go of all at once, those out of sight too.) */}
+          <Setting label={t('settings.pinned')} hint={t('settings.pinnedHint', { n: prefs.pinnedAgents.length })} id="pin-l">
+            <button type="button" className="btn" aria-describedby="pin-l" disabled={!prefs.pinnedAgents.length} onClick={() => setPrefs({ pinnedAgents: [] })}>
+              {t('settings.unpinAll')}
+            </button>
+          </Setting>
+        </div>
+      </section>
+
+      <section className="section">
         <h2>{t('settings.touch')}</h2>
         <div className="settings-group">
           <Switch label={t('settings.keybar')} checked={prefs.keybar} onChange={(v) => setPrefs({ keybar: v })} />
