@@ -2102,6 +2102,24 @@ function Tasks({ tasks, fold }: { tasks: ConvoTask[]; fold?: boolean }) {
   )
 }
 
+// A notice with a command's output in it: each of its parts in turn, what
+// it printed as a terminal shows it, any words as a notice's.
+function NoteParts({ e, onCopy }: { e: ConvoEntry; onCopy: (s: string) => void }) {
+  return (
+    <>
+      {e.parts.map((p, i) =>
+        p.shell ? (
+          <ShellOut key={i} sh={p.shell} onCopy={onCopy} />
+        ) : p.text?.trim() ? (
+          <p key={i} className="convo-note">
+            {p.text}
+          </p>
+        ) : null,
+      )}
+    </>
+  )
+}
+
 // What a "!" command printed: as a tool's output is shown (the terminal's
 // letters, a long one by its start and end, all of it on a tap), what it
 // wrote to stderr under it.
@@ -2112,7 +2130,7 @@ function ShellOut({ sh, onCopy }: { sh: ConvoShell; onCopy: (s: string) => void 
   const gap = tail ? (sh.omitted ? t('convo.omittedLines', { n: sh.omitted }) : t('convo.omitted')) : ''
   const all = tail ? head + (head && !head.endsWith('\n') ? '\n' : '') + gap + '\n' + tail : head
   // (Copied: what it printed, and what it wrote to stderr after.)
-  const copied = [all, sh.err ?? ''].filter(Boolean).join('\n')
+  const copied = [all, sh.err ? sh.err + (sh.err_cut ? '\n' + t('convo.cut') : '') : ''].filter(Boolean).join('\n')
   // (All of it on a tap where it is held short: by what is cut off, a long
   // line wrapped too, not by its count of lines.)
   const outEl = useRef<HTMLPreElement>(null)
@@ -2120,7 +2138,12 @@ function ShellOut({ sh, onCopy }: { sh: ConvoShell; onCopy: (s: string) => void 
   const [over, setOver] = useState(false)
   useLayoutEffect(() => {
     const cut = (e: HTMLPreElement | null) => !!e && e.scrollHeight > e.clientHeight + 2
-    setOver(cut(outEl.current) || cut(errEl.current))
+    const look = () => setOver(cut(outEl.current) || cut(errEl.current))
+    look()
+    // (Narrowed later, a long line wraps to more: looked at again.)
+    const ro = new ResizeObserver(look)
+    for (const e of [outEl.current, errEl.current]) if (e) ro.observe(e)
+    return () => ro.disconnect()
   }, [all, sh.err])
   return (
     <div className="convo-shell">
@@ -2178,7 +2201,7 @@ const ListItem = memo(
         if (p?.event) return <EventNote ev={p.event} idle={it.idle} />
         // (Retries next to each other: on the first's line, the last's.)
         if (p?.trouble) return <TroubleNote key={troubleKey(p.trouble)} t={(it.last ?? it.e).parts[0]?.trouble ?? p.trouble} />
-        if (p?.shell) return <ShellOut sh={p.shell} onCopy={copy} />
+        if (it.e.parts.some((x) => x.shell)) return <NoteParts e={it.e} onCopy={copy} />
         return <p className="convo-note">{noteText(it.e)}</p>
       }
       case 'summary':
@@ -2744,8 +2767,8 @@ function Work({ it, open, onToggle, onCopy }: { it: Extract<Item, { kind: 'work'
               ) : (
                 s.parts[0]?.event ? (
                   <EventNote key={i} ev={s.parts[0].event} />
-                ) : s.parts[0]?.shell ? (
-                  <ShellOut key={i} sh={s.parts[0].shell} onCopy={onCopy} />
+                ) : s.parts.some((x) => x.shell) ? (
+                  <NoteParts key={i} e={s} onCopy={onCopy} />
                 ) : s.parts[0]?.trouble ? (
                   <TroubleNote key={i + ':' + troubleKey(s.parts[0].trouble!)} t={s.parts[0].trouble!} />
                 ) : (
