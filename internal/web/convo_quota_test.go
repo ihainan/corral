@@ -20,6 +20,14 @@ func TestQuotaOf(t *testing.T) {
 	if q := quotaOf([]byte(rec[40:]+"\n"), false); q.Known {
 		t.Fatalf("a piece taken whole: %+v", q)
 	}
+	// (Whole JSON though it is, the first line read from the middle is not taken.)
+	if q := quotaOf([]byte(rec+"\n"), false); q.Known {
+		t.Fatalf("a first line from the middle taken: %+v", q)
+	}
+	// (null is no number, per review421.)
+	if q := quotaOf([]byte(`{"five_hour":{"used_percentage":null,"resets_at_epoch":1999999999}}`+"\n"), true); q.Known {
+		t.Fatalf("null taken for 0: %+v", q)
+	}
 	if q := quotaOf([]byte("piece\n"+rec+"\n"), false); !q.Known {
 		t.Fatalf("after a piece: %+v", q)
 	}

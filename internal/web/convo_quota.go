@@ -62,8 +62,9 @@ func quotaOf(tail []byte, whole bool) quotaInfo {
 		return quotaInfo{}
 	}
 	num := func(raw json.RawMessage) (float64, bool) {
+		// (null decodes to 0 without a word: not a number.)
 		var f float64
-		return f, raw != nil && json.Unmarshal(raw, &f) == nil && !math.IsNaN(f)
+		return f, raw != nil && string(bytes.TrimSpace(raw)) != "null" && json.Unmarshal(raw, &f) == nil && !math.IsNaN(f)
 	}
 	window := func(raw json.RawMessage) *quotaWindow {
 		var w map[string]json.RawMessage
@@ -105,8 +106,8 @@ func (s *Server) apiConversationQuota(w http.ResponseWriter, r *http.Request) {
 		}
 		// (Each step a folder, the last a plain file, none a link: a link is
 		// no record of this account's. Looked at, then read: not at once, so
-		// a file put in its place between the two by the account's own
-		// programs is read as it is then; only its own home is reached.)
+		// a link put in its place between the two is followed, as far as the
+		// SSH account may read, and a FIFO may hold the read till quotaLimit.)
 		p := home
 		for i, part := range []string{".claude", "cc-statusline", "usage-" + sid + ".jsonl"} {
 			p += "/" + part
