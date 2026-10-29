@@ -114,4 +114,31 @@ func TestQueuedLongPasteArrives(t *testing.T) {
 	if len(c.Queued()) != 1 {
 		t.Fatalf("a short one arrived: %d waiting", len(c.Queued()))
 	}
+	// (Two long ones, neither cut, one the other's start and more: the one
+	// arriving is the one of its words, not the other; waiting and removed.)
+	a := strings.Repeat("x", maxText-4<<10+1)
+	row := func(op, text string) []byte {
+		b, _ := json.Marshal(map[string]any{"type": "queue-operation", "operation": op, "content": text})
+		return append(b, '\n')
+	}
+	said := func(uuid, text string) []byte {
+		b, _ := json.Marshal(map[string]any{"type": "user", "uuid": uuid, "message": map[string]any{"role": "user", "content": text}})
+		return append(b, '\n')
+	}
+	c = NewClaude()
+	c.Feed(append(append(row("enqueue", a), row("enqueue", a+"different")...), said("u7", a+"different")...))
+	if q := c.Queued(); len(q) != 1 || q[0].Text != a {
+		t.Fatalf("not cut, one the other's start: %d waiting", len(q))
+	}
+	c = NewClaude()
+	c.Feed(append(append(append(row("enqueue", a), row("remove", a)...), row("enqueue", a+"different")...), said("u8", a+"different")...))
+	if len(c.Queued()) != 0 || len(c.gone) != 1 {
+		t.Fatalf("not cut, the other removed: queue %d, gone %d", len(c.Queued()), len(c.gone))
+	}
+	// (Control characters in its words: let go of on both sides.)
+	c = NewClaude()
+	c.Feed(append(row("enqueue", "ab\u0000cd"), said("u9", "<pasted_content id=\"9\">ab\u0000cd</pasted_content id=\"9\">")...))
+	if len(c.Queued()) != 0 {
+		t.Fatalf("control characters: still waiting")
+	}
 }
