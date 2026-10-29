@@ -136,8 +136,13 @@ func cardOf(screen string) *convoCard {
 		}
 	}
 	keyText := []string{}
+	// (The screen's width: the box's rules are drawn across all of it.)
+	width := cellWidth(strings.TrimSpace(plain[top]))
 	if inline != "" {
 		keyText = append(keyText, inline)
+		if cellWidth(strings.TrimRight(plain[star], " ")) >= width-1 {
+			c.Actionable = false
+		}
 	}
 	for j := keysAt; j <= last; j++ {
 		l := plain[j]
@@ -149,6 +154,9 @@ func cardOf(screen string) *convoCard {
 			continue
 		}
 		keyText = append(keyText, strings.TrimSpace(l))
+		if cellWidth(strings.TrimRight(l, " ")) >= width-1 {
+			c.Actionable = false // (to the screen's edge: its last key's words may be cut there, with no "…")
+		}
 	}
 	seen := map[string]bool{}
 	for _, t := range keyText {
@@ -261,20 +269,42 @@ func cardRegion(lines []string, star, end int) string {
 // rule), its lower rule, and the nearest line above it beginning with the
 // star at its very start; its lines printed as drawn, trailing spaces let
 // go. Nothing printed where there is none. (Bytes, not characters: any awk.)
-const cardRegionAwk = `{ raw[NR] = $0; p = $0; gsub(/\033\[[0-9;]*m/, "", p); gsub(/\r/, "", p); plain[NR] = p }
+const cardRegionAwk = `function note(q) { match(q, /^ */); return RLENGTH >= 24 && length(q) > RLENGTH }
+{ raw[NR] = $0; p = $0; gsub(/\033\[[0-9;]*m/, "", p); gsub(/\r/, "", p); plain[NR] = p }
 END {
+  n = NR
+  while (n >= 1 && plain[n] == "") n--
   rule = "^[ \t]*(\342\224\200|\342\224\201)(\342\224\200|\342\224\201)(\342\224\200|\342\224\201)(\342\224\200|\342\224\201)(\342\224\200|\342\224\201)(\342\224\200|\342\224\201)(\342\224\200|\342\224\201)(\342\224\200|\342\224\201)"
   mark = 0
-  for (i = NR; i >= 2; i--) { q = plain[i]; sub(/^[ \t]+/, "", q); if (index(q, "\342\235\257") == 1 && plain[i-1] ~ rule) { mark = i; break } }
+  for (i = n; i >= 2; i--) { q = plain[i]; sub(/^[ \t]+/, "", q); if (index(q, "\342\235\257") == 1 && plain[i-1] ~ rule) { mark = i; break } }
   if (!mark) exit
   end = 0
-  for (j = mark + 1; j <= NR; j++) if (plain[j] ~ rule) { end = j; break }
-  if (!end) exit
+  for (j = mark + 1; j <= n; j++) if (plain[j] ~ rule) { end = j; break }
+  if (!end || n - end > 10) exit
+  for (j = end + 1; j <= n; j++) if (index(plain[j], "\342\235\257") || plain[j] ~ /^[ \t]*[0-9]+\.[ \t]/) exit
   star = 0
-  for (k = mark - 2; k >= 1 && k >= mark - 61; k--) if (index(plain[k], "\342\234\246 ") == 1) { star = k; break }
+  for (k = mark - 2; k >= 1 && k >= mark - 61; k--) {
+    if (index(plain[k], "\342\234\246 ") == 1) { star = k; break }
+    q = plain[k]
+    if (q ~ /[^ \t]/ && substr(q, 1, 2) != "  " && !note(q)) exit
+  }
   if (!star) exit
   for (k = star; k <= end; k++) { l = raw[k]; sub(/[ \t\r]+$/, "", l); print l }
 }`
+
+// cellWidth: how many of the terminal's cells s takes (the wide letters of
+// Chinese, Japanese and Korean two).
+func cellWidth(s string) int {
+	n := 0
+	for _, r := range s {
+		if r >= 0x1100 && (r <= 0x115f || r >= 0x2e80 && r <= 0xa4cf || r >= 0xac00 && r <= 0xd7a3 || r >= 0xf900 && r <= 0xfaff || r >= 0xfe30 && r <= 0xfe4f || r >= 0xff00 && r <= 0xff60 || r >= 0xffe0 && r <= 0xffe6) {
+			n += 2
+		} else {
+			n++
+		}
+	}
+	return n
+}
 
 // rightNote: a line with something only at its far right (a note of Claude
 // Code's own, as "✔ Update installed · /restart to apply", or the card's
@@ -382,8 +412,17 @@ func (s *Server) cardPress(w http.ResponseWriter, ctx context.Context, sess *ter
 			delete(cardPressed.m, k)
 		}
 	}
-	cardPressed.m[id] = time.Now()
+	mine := time.Now()
+	cardPressed.m[id] = mine
 	cardPressed.Unlock()
+	// (Refused on the host, nothing pressed: not counted as a press.)
+	unmark := func() {
+		cardPressed.Lock()
+		if at, ok := cardPressed.m[id]; ok && at.Equal(mine) {
+			delete(cardPressed.m, id)
+		}
+		cardPressed.Unlock()
+	}
 	held.Add(1)
 	_, err = sshx.Exec(ctx, sess.Client(), convoGatedCommand("card:"+c.digest, sess.Persistence, sess.TmuxSession, pane, socket, pid, start, sid, 0, replyPress(sess.Persistence, []string{key}), 0), sendOut,
 		sshx.ExecOptions{Stdin: strings.NewReader(""), Release: held.Done})
@@ -393,16 +432,22 @@ func (s *Server) cardPress(w http.ResponseWriter, ctx context.Context, sess *ter
 		*outcome = "pressed"
 		writeJSON(w, http.StatusOK, map[string]any{"pressed": true})
 	case errors.Is(err, sshx.ErrBusy), errors.As(err, &exitErr) && exitErr.Status == 7:
+		unmark()
 		refuse("busy", "the pane is busy with another request: try again")
 	case errors.As(err, &exitErr) && exitErr.Status == 10:
+		unmark()
 		refuse("screen_changed", "the screen changed; look again before answering")
 	case errors.As(err, &exitErr) && exitErr.Status == 9:
+		unmark()
 		refuse("agent_waiting", "it waits for an answer, or has a dialog open: answer it first")
 	case errors.As(err, &exitErr) && exitErr.Status == 3:
+		unmark()
 		refuse("agent_changed", "that pane no longer runs this agent")
 	case errors.As(err, &exitErr) && exitErr.Status == 11:
+		unmark()
 		refuse("cannot_verify", "the host cannot check the screen (no sha256sum): answer in the terminal")
 	case errors.As(err, &exitErr) && exitErr.Status == 4:
+		unmark()
 		*outcome, *reason = "refused", "send_failed"
 		writeError(w, http.StatusBadGateway, "send_failed", "nothing could be sent to the pane")
 	default:

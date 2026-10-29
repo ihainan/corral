@@ -53,7 +53,7 @@ func TestCardOf(t *testing.T) {
 		t.Fatalf("above the box (2.1.302): %+v", a)
 	}
 
-	rule := strings.Repeat("─", 40)
+	rule := strings.Repeat("─", 80)
 	box := "\n" + rule + "\n❯ \n" + rule + "\n  status\n"
 	for name, screen := range map[string]string{
 		"quoted in the thread":          "● It said:\n✦ Heads up · something\n  1: Learn more   2: Knew this already   0: Dismiss\n\n● Then I went on.\n" + box,
@@ -80,6 +80,8 @@ func TestCardOf(t *testing.T) {
 		"a key's words wrapped":      {"✦ You should know · Needs the log\n\n  Some words.\n\n  1: Understood   2: Chat in main\n  session\n  0: Dismiss" + box, "explained", false, 3},
 		"keys on its head wrapped":   {"✦ Dismissed.   1: That was helpful   2: Not\n  relevant\n  0: Dismiss" + box, "other", false, 3},
 		"keys over two lines":        {"✦ Heads up · words\n  1: Learn more   2: Knew this already\n  0: Dismiss" + box, "offer", true, 3},
+		// (Per review407: cut at the screen's edge with no "…": not to be pressed.)
+		"a key cut at the edge": {"✦ You should know · Needs the log\n  1: Understood   2: Chat in main s\n" + strings.Repeat("─", 35) + "\n❯ \n" + strings.Repeat("─", 35) + "\n", "explained", false, 2},
 	} {
 		got := cardOf(c.screen)
 		if got == nil || got.State != c.state || got.Actionable != c.actionable || len(got.Choices) != c.keys {
@@ -104,6 +106,8 @@ func TestCardRegionAwk(t *testing.T) {
 	}
 	for _, screen := range []string{
 		cardSample(t, "ccmock/samples/headsup-cjk.txt"),
+		// (As much under the box as may be: found on both.)
+		"x\n✦ Heads up · words\n  1: Learn more   0: Dismiss\n" + strings.Repeat("─", 30) + "\n❯ \n" + strings.Repeat("─", 30) + "\n" + strings.Repeat("  status\n", 10),
 		collie(t, "claude--v2304-heads-up-explained--w65.txt"),
 		"x\n\x1b[38;2;177;185;249m✦ \x1b[0mHeads up · words  \n  1: Learn more   0: Dismiss\n" + strings.Repeat("─", 30) + "\n❯ \x1b[2mtry\x1b[0m   \n" + strings.Repeat("─", 30) + "\n  status\n",
 	} {
@@ -120,6 +124,24 @@ func TestCardRegionAwk(t *testing.T) {
 		sum := sha256.Sum256(out)
 		if got := hex.EncodeToString(sum[:]); got != c.digest {
 			t.Fatalf("awk %s, Go %s:\n%q", got[:12], c.digest[:12], out)
+		}
+	} // Where Go finds no card the host finds none either (review407: a menu
+	// under the box, its key let through on the host).
+	card := "x\n✦ Heads up · words\n  1: Learn more   0: Dismiss\n" + strings.Repeat("─", 30) + "\n❯ \n" + strings.Repeat("─", 30) + "\n"
+	for name, screen := range map[string]string{
+		"a menu under the box":      card + "  1. Menu choice\n",
+		"another box under it":      card + "❯ more\n",
+		"too much under the box":    card + strings.Repeat("  status\n", 11),
+		"a line of the thread over": "x\n✦ Heads up · words\nThe thread\n  1: Learn more   0: Dismiss\n" + strings.Repeat("─", 30) + "\n❯ \n" + strings.Repeat("─", 30) + "\n",
+	} {
+		if cardOf(screen) != nil {
+			t.Fatalf("%s: Go found a card", name)
+		}
+		cmd := exec.Command("awk", cardRegionAwk)
+		cmd.Stdin = strings.NewReader(screen)
+		out, err := cmd.Output()
+		if err != nil || len(out) != 0 {
+			t.Fatalf("%s: awk gave %q (%v)", name, out, err)
 		}
 	}
 }

@@ -22,8 +22,8 @@ export interface ClaudeCard {
 type Body = { pane: string; pid: number; start: number; session: string }
 
 // useClaudeCard: the card of the conversation in front (key: which one; ''
-// none), looked for on its own times (cardLooker.ts); seen: a card the
-// suggestion's look brought, taken in.
+// none), looked for on its own times (cardLooker.ts); shared: a look of the
+// suggestion's begun, the card in its answer to be taken in.
 export function useClaudeCard(sid: string, key: string, turnKey: string, body: () => Body | null) {
   const [card, setCard] = useState<ClaudeCard | null>(null)
   const [stale, setStale] = useState(false) // (the last look failed: shown as it was, not to be answered)
@@ -42,6 +42,7 @@ export function useClaudeCard(sid: string, key: string, turnKey: string, body: (
         clearTimeout: (t) => clearTimeout(t as ReturnType<typeof setTimeout>),
         setInterval: (f, ms) => setInterval(f, ms),
         clearInterval: (t) => clearInterval(t as ReturnType<typeof setInterval>),
+        now: () => Date.now(),
         found: (c) => {
           setCard(c)
           setStale(false)
@@ -64,11 +65,8 @@ export function useClaudeCard(sid: string, key: string, turnKey: string, body: (
   useEffect(() => {
     if (key && turnKey) looker.turnEnded()
   }, [key, turnKey, looker])
-  // (A look of the suggestion's, the card in it.)
-  const seen = useCallback((c: ClaudeCard | null | undefined) => {
-    setCard(c ?? null)
-    setStale(false)
-  }, [])
+  // (A look of the suggestion's begun, the card in its answer: see cardLooker's shared.)
+  const shared = useCallback(() => looker.shared(), [looker])
   const press = useCallback(
     async (k: string): Promise<void> => {
       const b = now.current.body()
@@ -78,7 +76,7 @@ export function useClaudeCard(sid: string, key: string, turnKey: string, body: (
     },
     [sid, card, looker],
   )
-  return { card, stale, seen, press }
+  return { card, stale, shared, press }
 }
 
 const LABELS: Record<string, I18nKey> = {

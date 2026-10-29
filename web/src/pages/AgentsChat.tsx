@@ -1185,12 +1185,16 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
             for (const v of at.views) v.told()
             if (!at.text) [...at.views][0]?.next() // (any left: looked for again, by a view still there)
           }
+          const card = claudeCard.shared() // (the card above its box, read off the same screen)
           api<{ suggestion: string; card?: ClaudeCard }>('POST', `/api/sessions/${sid}/conversation/suggestion`, pressBody(), { timeoutMs: PRESS_MS }).then(
             (r) => {
-              claudeCard.seen(r.card) // (the card above its box, read off the same screen)
+              card?.took(r.card ?? null)
               done(r.suggestion)
             },
-            () => done(null),
+            () => {
+              card?.failed()
+              done(null)
+            },
           )
         },
         wait ?? (at.text ? 300 : SUGGEST_AT[i] - (i ? SUGGEST_AT[i - 1] : 0)),
