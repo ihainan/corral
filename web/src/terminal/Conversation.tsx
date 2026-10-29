@@ -191,6 +191,8 @@ export function ConversationView({
     return () => ro.disconnect()
   }, [])
   const sideShown = !!side && wide && !folded
+  const sideShownNow = useRef(sideShown)
+  sideShownNow.current = sideShown
   useEffect(() => {
     // (The view narrowed mid-drag: what is dragged to keeps within it.)
     const d = drag.current
@@ -204,7 +206,11 @@ export function ConversationView({
       drag.current = null // (its edge gone mid-drag: what was dragged is let go)
     }
   }, [sideShown])
-  const [picking, setPicking] = useState(false)
+  const [picking, setPicking] = useState<boolean | 'search'>(false) // ('search': by ⌘K, its search box first)
+  // ⌘K (Ctrl+K): the list's search box, shown and in focus; where the list
+  // is not beside the thread, the switcher, its box first. (A count: each
+  // press puts the focus there again.)
+  const [searchAsked, setSearchAsked] = useState(0)
   const unpick = useCallback(() => setPicking(false), [])
   useEffect(() => {
     if (sideShown || !active) setPicking(false) // (a tab sent to the back keeps no dialog open)
@@ -804,6 +810,19 @@ export function ConversationView({
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [active, jump])
+  // ⌘K (Ctrl+K elsewhere) where the agents are listed: their search.
+  useEffect(() => {
+    if (!active || !side) return
+    const mac = /Mac|iPhone|iPad/.test(navigator.platform)
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key.toLowerCase() !== 'k' || !(mac ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey) || e.altKey || e.shiftKey || e.isComposing || underDialog(e)) return
+      e.preventDefault()
+      if (sideShownNow.current) setSearchAsked((n) => n + 1)
+      else setPicking('search')
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [active, side])
   // Ctrl/⌘+F with the conversation in front (the focus in it, or nowhere):
   // its own search, which knows what is folded away; elsewhere (the
   // composer, a dialog) the browser's.
@@ -970,11 +989,8 @@ export function ConversationView({
     <div className="convo" role="region" aria-label={t('convo.title')} ref={root}>
       {sideShown && (
         <nav className="convo-side" aria-label={t('convo.agents')} style={{ width: sideWidth }} ref={sideEl}>
-          <button type="button" className="btn btn-ghost convo-side-new" onClick={() => window.dispatchEvent(new Event(NEW_AGENT))}>
-            <Plus size={15} aria-hidden="true" />
-            {t('newAgent.title')}
-          </button>
-          <AgentList rows={rows} query={sideQuery} onQuery={setSideQuery} />
+          <NewAgentRow />
+          <AgentList rows={rows} query={sideQuery} onQuery={setSideQuery} search={searchAsked} onSearchLeft={() => setSearchAsked(0)} hint={!isTouchOnly} />
           {!isTouchOnly && <p className="convo-side-keys">{t('convo.switchKeys')}<br />{t(allOpen ? 'convo.foldKeys' : 'convo.openKeys')}</p>}
         </nav>
       )}
@@ -1043,7 +1059,7 @@ export function ConversationView({
             </button>
           )}
           {side && !sideShown ? (
-            <button type="button" className="convo-bar-pick" aria-haspopup="dialog" aria-expanded={picking} aria-label={t('convo.pick')} onClick={() => setPicking(true)}>
+            <button type="button" className="convo-bar-pick" aria-haspopup="dialog" aria-expanded={!!picking} aria-label={t('convo.pick')} onClick={() => setPicking(true)}>
               {label}
             </button>
           ) : (
@@ -1163,7 +1179,7 @@ export function ConversationView({
           copy={copy}
         />
       )}
-      {picking && side && <Picker rows={rows} onClose={unpick} />}
+      {picking && side && <Picker rows={rows} onClose={unpick} searchFirst={picking === 'search'} />}
     </div>
   )
 }
@@ -1766,7 +1782,10 @@ export function when(r: { since?: number; status: string }, now: number): string
 // their own, by key (the picker's: as when it opened).
 // query, onQuery: what it is searched for, where that is kept outside it
 // (else its own).
-function AgentList({ rows, onPicked, placed, query: given, onQuery }: { rows: ConvoListRow[]; onPicked?: () => void; placed?: Map<string, ConvoListRow>; query?: string; onQuery?: (q: string) => void }) {
+// search: its search box shown whatever the count (asked for by ⌘K) and
+// the focus put in it; onSearchLeft: the box left, empty (shown by the
+// count again); hint: the key that asks for it, said in the box.
+function AgentList({ rows, onPicked, placed, query: given, onQuery, search, onSearchLeft, hint }: { rows: ConvoListRow[]; onPicked?: () => void; placed?: Map<string, ConvoListRow>; query?: string; onQuery?: (q: string) => void; search?: number; onSearchLeft?: () => void; hint?: boolean }) {
   // (The times move on: drawn again every half minute.)
   const [now, setNow] = useState(Date.now())
   useEffect(() => {
@@ -1796,7 +1815,7 @@ function AgentList({ rows, onPicked, placed, query: given, onQuery }: { rows: Co
   })
   return (
     <>
-      {(rows.length > SEARCH_FROM || query) && <ListSearch value={query} onChange={setQuery} />}
+      {(rows.length > SEARCH_FROM || query || !!search) && <ListSearch value={query} onChange={setQuery} focus={search} onLeft={onSearchLeft} hint={hint ? KEY_SEARCH : undefined} />}
       {query.trim() && !found.length && <p className="list-search-none">{t('convo.searchNone')}</p>}
       {groups.map((g) => {
         const all = g.of.map((p) => rows.find((r) => r.key === p.key)!)
@@ -1871,11 +1890,30 @@ export const SEARCH_FROM = 5
 
 // The box an agents' list is searched with (see matchQuery). Escape in it
 // empties it first.
-export function ListSearch({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+// (⌘K, Ctrl K elsewhere: as the key is said.)
+const KEY_SEARCH = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘K' : 'Ctrl K'
+
+export function ListSearch({ value, onChange, focus, onLeft, hint }: { value: string; onChange: (v: string) => void; focus?: number; onLeft?: () => void; hint?: string }) {
+  const ref = useRef<HTMLInputElement>(null)
+  const [inside, setInside] = useState(false)
+  useEffect(() => {
+    if (focus) {
+      ref.current?.focus()
+      ref.current?.select()
+    }
+  }, [focus])
   return (
     <div className="list-search" role="search">
-      <Search size={15} aria-hidden="true" />
+      <span className="list-search-icon" aria-hidden="true">
+        <Search size={15} />
+      </span>
       <input
+        ref={ref}
+        onFocus={() => setInside(true)}
+        onBlur={() => {
+          setInside(false)
+          if (!value) onLeft?.()
+        }}
         type="text"
         enterKeyHint="search"
         value={value}
@@ -1893,6 +1931,7 @@ export function ListSearch({ value, onChange }: { value: string; onChange: (v: s
           onChange('')
         }}
       />
+      {hint && !value && !inside && <span className="list-search-hint" aria-hidden="true">{hint}</span>}
       {value && (
         <button type="button" className="icon-btn list-search-clear" onClick={() => onChange('')} aria-label={t('convo.searchClear')} title={t('convo.searchClear')}>
           <X size={14} />
@@ -1906,7 +1945,7 @@ export function ListSearch({ value, onChange }: { value: string; onChange: (v: s
 // bottom on a phone. Its rows stay where they were when it opened: statuses
 // changing meanwhile do not move them under the finger (what they say is
 // current; one gone goes, one new comes in).
-function Picker({ rows, onClose }: { rows: ConvoListRow[]; onClose: () => void }) {
+function Picker({ rows, onClose, searchFirst }: { rows: ConvoListRow[]; onClose: () => void; searchFirst?: boolean }) {
   const [first] = useState(() => new Map(rows.map((r) => [r.key, asHeld(r)])))
   const box = useRef<HTMLDivElement>(null)
   // (Once, when it opens: focus moved on in it stays where it was moved.)
@@ -1947,9 +1986,30 @@ function Picker({ rows, onClose }: { rows: ConvoListRow[]; onClose: () => void }
             <X size={16} />
           </button>
         </div>
-        <AgentList rows={rows} placed={first} onPicked={onClose} />
+        <NewAgentRow onPicked={onClose} />
+        <AgentList rows={rows} placed={first} onPicked={onClose} search={searchFirst ? 1 : 0} />
       </div>
     </>
+  )
+}
+
+// "New agent", as a row of the list it heads: its plus where the agents'
+// icons are, its words where their titles are.
+function NewAgentRow({ onPicked }: { onPicked?: () => void }) {
+  return (
+    <button
+      type="button"
+      className="convo-side-new"
+      onClick={() => {
+        onPicked?.()
+        window.dispatchEvent(new Event(NEW_AGENT))
+      }}
+    >
+      <span className="convo-side-new-icon" aria-hidden="true">
+        <Plus size={16} />
+      </span>
+      {t('newAgent.title')}
+    </button>
   )
 }
 

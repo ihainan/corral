@@ -885,6 +885,8 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .list-search input::placeholder { color: var(--term-fg-3); }
 .list-search input:focus, .list-search input:focus-visible { outline: none; box-shadow: none; } /* (the box shows it) */
 .list-search-clear { width: 26px; height: 26px; }
+.list-search-icon { flex: none; display: flex; justify-content: center; }
+.list-search-hint { flex: none; padding-right: 6px; font-size: 12px; color: var(--term-fg-3); white-space: nowrap; }
 @media (pointer: coarse) { .list-search input { font-size: 16px; } }
 .list-search-none { margin: 4px 10px 12px; font-size: 13px; color: var(--term-fg-3); }
 .agents-list > .list-search { margin: 10px max(16px, env(safe-area-inset-right, 0px)) 4px max(16px, env(safe-area-inset-left, 0px)); height: 40px; }
@@ -1103,7 +1105,20 @@ button.convo-running-what { padding: 0; text-align: left; }
 .convo-event.is-goal.is-met { border-left-color: var(--term-ok-text, #3fa45b); }
 
 /* A new agent */
-.convo-side-new { margin: 8px 10px 4px; justify-content: flex-start; gap: 6px; font-size: 13.5px; }
+/* "New agent": a row of the list it heads, its plus where the agents' icons
+   are and its words where their titles are (the search box under it lined
+   up the same way) */
+.convo-side-new {
+  flex: none; display: flex; align-items: center; gap: 10px; width: 100%; height: 36px; margin: 0 0 4px; padding: 0 10px;
+  border: 0; border-radius: 8px; background: none; color: var(--term-fg); font: 500 14px/20px var(--font-ui); text-align: left; cursor: pointer;
+}
+.convo-side-new-icon { flex: none; width: 30px; display: flex; justify-content: center; color: var(--term-fg-2); }
+.convo-side-new:hover { background: var(--term-hover); }
+.convo-side-new:hover .convo-side-new-icon { color: var(--term-fg); }
+.convo-side-new:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: -2px; }
+@media (pointer: coarse) { .convo-side-new { height: 44px; } }
+.convo-side .list-search, .convo-picker .list-search { margin: 0 0 8px; height: 36px; padding: 0 4px 0 9px; gap: 10px; }
+.convo-side .list-search-icon, .convo-picker .list-search-icon { width: 30px; }
 .new-agent { display: flex; flex-direction: column; gap: 14px; }
 .new-agent .field > span { font-size: 13px; line-height: 18px; font-weight: 500; color: var(--fg-2); }
 .new-agent-olds { display: flex; flex-direction: column; gap: 4px; max-height: 240px; overflow: auto; }
