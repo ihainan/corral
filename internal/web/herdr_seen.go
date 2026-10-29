@@ -149,7 +149,7 @@ func (r *seenRounds) markSeen(pane string, round int64, session string) (bool, e
 		return false, nil
 	}
 	k := store.AgentSeen{Session: session, At: time.Now().UnixMilli()}
-	keep := r.keep
+	keep, gen := r.keep, r.gen
 	r.mu.Unlock()
 	if keep != nil {
 		if err := keep(pane, k); err != nil {
@@ -161,11 +161,22 @@ func (r *seenRounds) markSeen(pane string, round int64, session string) (bool, e
 		r.mu.Unlock()
 		return false, nil // (another round meanwhile: what was kept is of before it)
 	}
-	if r.seen == nil {
-		r.seen = map[string]seenRound{}
+	if r.lost || r.gen != gen {
+		// (herdr lost, or lost and back, since it was asked: its round may
+		// be over unseen; told by the look, as what was kept before.)
+		if p, ok := r.prior[pane]; !ok || p.At < k.At {
+			if r.prior == nil {
+				r.prior = map[string]store.AgentSeen{}
+			}
+			r.prior[pane] = k
+		}
+	} else if was, ok := r.seen[pane]; !ok || was.n != x.n || was.at < k.At { // (two at once: the later stands)
+		if r.seen == nil {
+			r.seen = map[string]seenRound{}
+		}
+		x.at = k.At
+		r.seen[pane] = x
 	}
-	x.at = k.At
-	r.seen[pane] = x
 	poke := r.poke
 	r.mu.Unlock()
 	if poke != nil {
