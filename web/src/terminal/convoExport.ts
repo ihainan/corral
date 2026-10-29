@@ -94,8 +94,15 @@ function* pieces(it: Item, say: Say): Generator<string> {
 // exportMarkdown makes the Markdown of items, a slice of them at a time
 // (giving way between: a long one does not hold up the page), telling done
 // the text; it returns a function that calls it off.
-export function exportMarkdown(items: Item[], say: Say, done: (md: string[]) => void, slice = 8, later: (f: () => void) => void = (f) => setTimeout(f, 0)): () => void {
-  const out: string[] = [say.head(say.title, say.exported, say.from)]
+export function exportMarkdown(items: Item[], say: Say, done: (md: Blob) => void, slice = 8, later: (f: () => void) => void = (f) => setTimeout(f, 0)): () => void {
+  // (Made into the file a slice at a time too: the text gone into a Blob
+  // as each slice ends, so no one step at the end handles all of it.)
+  let out: string[] = [say.head(say.title, say.exported, say.from)]
+  const made: Blob[] = []
+  const keep = () => {
+    if (out.length) made.push(new Blob(out.flatMap((p, i) => (i || made.length ? ['\n\n', p] : [p]))))
+    out = []
+  }
   let i = 0
   let cur: Generator<string> | null = null
   let off = false
@@ -106,12 +113,15 @@ export function exportMarkdown(items: Item[], say: Say, done: (md: string[]) => 
       if (!cur) cur = pieces(items[i], say)
       for (let p = cur.next(); !p.done; p = cur.next()) {
         if (p.value.trim()) out.push(p.value)
-        if (performance.now() > until) return later(run)
+        if (performance.now() > until) {
+          keep()
+          return later(run)
+        }
       }
       cur = null
     }
-    // (Its pieces, not joined here: a long one made whole is a long wait.)
-    done(out.flatMap((p, i) => (i ? ['\n\n', p] : [p])).concat('\n'))
+    keep()
+    done(new Blob([...made, '\n'], { type: 'text/markdown;charset=utf-8' }))
   }
   run()
   return () => {

@@ -945,7 +945,7 @@ export function ConversationView({
       },
       (md) => {
         const a = document.createElement('a')
-        a.href = URL.createObjectURL(new Blob(md, { type: 'text/markdown;charset=utf-8' }))
+        a.href = URL.createObjectURL(md)
         a.download = (title.replace(/[\\/:*?"<>|\s]+/g, '-').slice(0, 60) || 'conversation') + '-' + new Date().toISOString().slice(0, 10) + '.md'
         document.body.appendChild(a)
         a.click()
