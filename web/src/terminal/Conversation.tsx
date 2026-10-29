@@ -1951,7 +1951,9 @@ function Picker({ rows, onClose, searchFirst }: { rows: ConvoListRow[]; onClose:
   // (Once, when it opens: focus moved on in it stays where it was moved.)
   useEffect(() => {
     const prev = document.activeElement as HTMLElement | null
-    ;(box.current?.querySelector<HTMLElement>('[aria-current="true"]') ?? box.current?.querySelector<HTMLElement>('button'))?.focus()
+    // (Opened by ⌘K: its search box first, which shows it.)
+    if (searchFirst) box.current?.querySelector<HTMLInputElement>('.list-search input')?.focus()
+    else (box.current?.querySelector<HTMLElement>('[aria-current="true"]') ?? box.current?.querySelector<HTMLElement>('button'))?.focus()
     const onKey = (e: KeyboardEvent) => {
       // (Its search box with words in it: emptied first, see ListSearch.)
       const field = e.target as HTMLInputElement | null
@@ -1975,6 +1977,7 @@ function Picker({ rows, onClose, searchFirst }: { rows: ConvoListRow[]; onClose:
       document.removeEventListener('keydown', onKey, true)
       prev?.focus?.()
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [onClose])
   return (
     <>
