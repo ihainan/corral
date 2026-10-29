@@ -34,7 +34,7 @@ export function askOn(call: ConvoTool | undefined, s: AskScreen): number {
     if (!sameQ(a.question, s.question) || !!a.multi !== s.multi) return false
     const shown = s.options.filter((o) => o.n !== s.own)
     const labels = a.options.map((o) => o.label)
-    return shown.length === a.options.length && shown.every((o, i) => o.n === i + 1 && sameLabel(o.label, labels[i], labels))
+    return shown.length === a.options.length && shown.every((o, i) => o.n === i + 1 && sameLabel(o.label, labels[i], labels, o.cut))
   })
   // (Two questions alike: which one this is cannot be told.)
   return at >= 0 && asks.filter((a) => sameQ(a.question, s.question)).length === 1 ? at : -1
@@ -43,8 +43,15 @@ export function askOn(call: ConvoTool | undefined, s: AskScreen): number {
 // (The screen may cut a long label short: then only where the start it
 // shows is of that label alone.)
 const flat = (x: string) => x.replace(/\s+/g, ' ').trim()
-function sameLabel(shown: string, asked: string, all: string[]): boolean {
+// (cut: its words ran to its column's edge, the rest wrapped under it: then
+// it is known by its start, where that is of that label alone.)
+function sameLabel(shown: string, asked: string, all: string[], cut = false): boolean {
   if (sameWords(shown, asked)) return true
+  if (cut) {
+    const start = shown.replace(/\s+/g, '')
+    const of = (l: string) => l.replace(/\s+/g, '').startsWith(start)
+    if (start && of(asked) && all.filter(of).length === 1) return true
+  }
   // (Spaces not counted only where no other label is the same so.)
   if (sameLoose(shown, asked)) return all.filter((l) => sameLoose(l, asked)).length === 1
   if (!shown.endsWith('…')) return false

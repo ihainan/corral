@@ -9,6 +9,7 @@ export interface ScreenOption {
   n: number // its number, the key that moves to it (or picks it)
   label: string
   cursor: boolean // the one the cursor is on (❯)
+  cut?: boolean // (previews beside) its words ran to its column's edge: more of it may be on the next line
   ticked?: boolean // (a choice of many) [✔]
 }
 
@@ -53,29 +54,15 @@ function lastLines(text: string): string[] {
 }
 
 // (beside: previews drawn beside the choices, so a label too long for its
-// column goes on, wrapped, on the lines under it, before the next choice;
-// they are taken in. Without previews, the lines under a choice are its
-// description, not its label.)
+// column goes on, wrapped, under it. That line is not taken in — it could
+// as well be some other line — but the choice is marked cut where its words
+// ran to the column's edge, and is then known by its start: see askCard.)
 function options(lines: string[], beside = false): ScreenOption[] {
   const out: ScreenOption[] = []
-  let wrapping = false
   for (const l of lines) {
-    const left = besideAt(l)
-    const m = optionLine.exec(left)
-    if (!m) {
-      const more = left.trim()
-      // (Only right under a choice whose words ran to its column's edge,
-      // the box beside it a few spaces on; not Submit, not its notes.)
-      if (beside && wrapping && more && /^\s{3,}/.test(left) && !/^Notes: press n/.test(more) && !/^(❯\s*)?Submit$/.test(more)) {
-        out[out.length - 1].label += (/[\x21-\x7e]$/.test(out[out.length - 1].label) && /^[\x21-\x7e]/.test(more) ? ' ' : '') + more
-        wrapping = edge(l) // (on again only if this line ran to the edge too)
-        continue
-      }
-      wrapping = false
-      continue
-    }
-    wrapping = edge(l)
-    out.push({ n: Number(m[2]), label: m[4], cursor: !!m[1], ...(m[3] !== undefined ? { ticked: m[3] === '✔' } : {}) })
+    const m = optionLine.exec(besideAt(l))
+    if (!m) continue
+    out.push({ n: Number(m[2]), label: m[4], cursor: !!m[1], ...(m[3] !== undefined ? { ticked: m[3] === '✔' } : {}), ...(beside && edge(l) ? { cut: true } : {}) })
   }
   return out
 }
