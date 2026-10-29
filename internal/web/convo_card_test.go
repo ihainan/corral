@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -247,16 +248,22 @@ func TestCardDigestCoversCard(t *testing.T) {
 			return b.String()
 		}
 		a, b := build(), build()
+		// (What the gate stands for: the same region on the host, a card
+		// to be pressed on either side, the same card in every part.)
+		fa, fb := cardFrameOf(a), cardFrameOf(b)
+		if fa == nil || fb == nil || cardRegion(fa.lines, fa.star, fa.end) != cardRegion(fb.lines, fb.star, fb.end) {
+			continue
+		}
 		ca, cb := cardOf(a), cardOf(b)
-		if ca == nil || cb == nil || ca.digest != cb.digest {
+		if !(ca != nil && ca.Actionable || cb != nil && cb.Actionable) {
 			continue
 		}
 		same++
-		if ca.State != cb.State || ca.Actionable != cb.Actionable || ca.Empty != cb.Empty || ca.Text != cb.Text || len(ca.Choices) != len(cb.Choices) {
+		if ca == nil || cb == nil || !reflect.DeepEqual(*ca, *cb) {
 			t.Fatalf("one region, two cards:\n%q\n%+v\n%q\n%+v", a, ca, b, cb)
 		}
 	}
-	if same < 500 {
+	if same < 300 {
 		t.Fatalf("too few compared: %d", same)
 	}
 }
@@ -283,5 +290,24 @@ func TestCardReview409(t *testing.T) {
 	y := cardOf("✦ Heads up · w\n  1: Learn more\n  0:\n" + rule + "\n❯ \n" + rule + "\n")
 	if x == nil || y == nil || x.digest == y.digest && x.Actionable != y.Actionable {
 		t.Fatalf("trailing blanks: %+v %+v", x, y)
+	}
+}
+
+// Per review410: a \r inside a colour's sequence, out on both sides before
+// anything; a read that failed, no region from the host's awk.
+func TestCardReview410(t *testing.T) {
+	rule := strings.Repeat("─", 40)
+	x := cardOf("✦ Heads up · w\n  1: Learn more   0: Dismiss\n" + rule + "\n❯ \x1b[2mtry\x1b[0m\n" + rule + "\n")
+	y := cardOf("✦ Heads up · w\n  1: Learn more   0: Dismiss\n" + rule + "\n❯ \x1b[2\rmtry\x1b[0m\n" + rule + "\n")
+	if x == nil || y == nil || x.digest != y.digest || !reflect.DeepEqual(*x, *y) {
+		t.Fatalf("a \\r in a colour: %+v %+v", x, y)
+	}
+	screen := "✦ Heads up · w\n  1: Learn more   0: Dismiss\n" + rule + "\n❯ \n" + rule + "\n  status"
+	for _, tail := range []string{"\n\001corral: unread\n", "\001corral: unread\n"} {
+		cmd := exec.Command("awk", cardRegionAwk)
+		cmd.Stdin = strings.NewReader(screen + tail)
+		if out, err := cmd.Output(); err != nil || len(out) != 0 {
+			t.Fatalf("a failed read %q: %q %v", tail, out, err)
+		}
 	}
 }

@@ -2144,11 +2144,12 @@ if [ -n "$gate" ]; then
   card:*)
     # (A card's key: not while it waits; its region of the screen, read with
     # its colours as the gateway read it, still the same: cardRegionAwk. NULs
-    # taken out first, as the gateway does: some awks end a line at one.)
+    # taken out first, as the gateway does: some awks end a line at one. A
+    # read that failed says so to the awk, which then takes no region.)
     [ "$st" = waiting ] && exit 9
     command -v sha256sum >/dev/null 2>&1 || exit 11
-    if [ "$mode" = tmux ]; then d=$(tmux -u capture-pane -p -e -t "$p" 2>/dev/null 9>&- | tr -d '\000' | awk 'CARDAWK' | sha256sum)
-    else d=$(HERDR_SOCKET_PATH=$sock herdr pane read "$p" --source visible --format ansi 2>/dev/null 9>&- | tr -d '\000' | awk 'CARDAWK' | sha256sum); fi
+    if [ "$mode" = tmux ]; then d=$({ tmux -u capture-pane -p -e -t "$p" 2>/dev/null 9>&- || printf '\n\001corral: unread\n'; } | tr -d '\000' | awk 'CARDAWK' | sha256sum)
+    else d=$({ HERDR_SOCKET_PATH=$sock herdr pane read "$p" --source visible --format ansi 2>/dev/null 9>&- || printf '\n\001corral: unread\n'; } | tr -d '\000' | awk 'CARDAWK' | sha256sum); fi
     [ "${d%% *}" = "${gate#card:}" ] || exit 10 ;;
   *) exit 4 ;;
   esac

@@ -66,11 +66,13 @@ type cardFrame struct {
 }
 
 func cardFrameOf(screen string) *cardFrame {
-	screen = strings.ReplaceAll(screen, "\x00", "") // (as on the host: tr -d '\000')
+	// (NULs and every \r out of all of it first, as on the host: tr -d '\000'
+	// and cardRegionAwk's first gsub; what is read, hashed and parsed alike.)
+	screen = strings.NewReplacer("\x00", "", "\r", "").Replace(screen)
 	lines := strings.Split(strings.TrimRight(screen, "\r\n"), "\n")
 	plain := make([]string, len(lines))
 	for i, l := range lines {
-		plain[i] = strings.ReplaceAll(sgr.ReplaceAllString(l, ""), "\r", "") // (as cardRegionAwk: every \r)
+		plain[i] = sgr.ReplaceAllString(l, "")
 	}
 	// The input box in front: a line beginning with the prompt's mark
 	// between two rules, at the screen's foot, nothing chosen among under it.
@@ -208,7 +210,8 @@ func cardOf(screen string) *convoCard {
 	c.Text = strings.TrimSpace(text)
 	folded := star > 0 && rightNote(plain[star-1]) && strings.TrimSpace(plain[star-1]) == "[+]"
 	// (Folded: its head alone, no keys; the "[+]" over it, outside its region,
-	// decides nothing where it has keys.)
+	// decides nothing where it has keys — one without is never pressed, so
+	// its region is never checked.)
 	c.State = cardState(head, c.Choices, folded && star+1 > last && len(c.Choices) == 0)
 	if c.State == "" {
 		return nil
@@ -284,7 +287,7 @@ func cardState(head string, choices []cardChoice, folded bool) string {
 func cardRegion(lines []string, star, end int) string {
 	var b strings.Builder
 	for _, l := range lines[star : end+1] {
-		b.WriteString(strings.ReplaceAll(l, "\r", ""))
+		b.WriteString(l)
 		b.WriteByte('\n')
 	}
 	sum := sha256.Sum256([]byte(b.String()))
@@ -297,10 +300,12 @@ func cardRegion(lines []string, star, end int) string {
 // rule), its lower rule, and the nearest line above it beginning with the
 // star at its very start; its lines printed as drawn, \r taken out. Nothing printed where there is none. (Bytes, not characters: any awk.)
 const cardRegionAwk = `function note(q) { match(q, /^ */); return RLENGTH >= 24 && length(q) > RLENGTH }
-{ raw[NR] = $0; p = $0; gsub(/\033\[[0-9;]*m/, "", p); gsub(/\r/, "", p); plain[NR] = p }
+index($0, "\001corral: unread") { unread = 1 }
+{ gsub(/\r/, ""); raw[NR] = $0; p = $0; gsub(/\033\[[0-9;]*m/, "", p); plain[NR] = p }
 END {
+  if (unread) exit
   n = NR
-  while (n >= 1 && raw[n] ~ /^\r*$/) n--
+  while (n >= 1 && raw[n] == "") n--
   rule = "^[ \t\f]*(\342\224\200|\342\224\201)(\342\224\200|\342\224\201)(\342\224\200|\342\224\201)(\342\224\200|\342\224\201)(\342\224\200|\342\224\201)(\342\224\200|\342\224\201)(\342\224\200|\342\224\201)(\342\224\200|\342\224\201)"
   mark = 0
   for (i = n; i >= 2; i--) { q = plain[i]; sub(/^[ \t\f]+/, "", q); if (index(q, "\342\235\257") == 1 && plain[i-1] ~ rule) { mark = i; break } }
@@ -316,7 +321,7 @@ END {
     if (q ~ /[^ \t\f]/ && substr(q, 1, 2) != "  " && !note(q)) exit
   }
   if (!star) exit
-  for (k = star; k <= end; k++) { l = raw[k]; gsub(/\r/, "", l); print l }
+  for (k = star; k <= end; k++) print raw[k]
 }`
 
 // cellWidth: at most how many of the terminal's cells s takes: a letter of
