@@ -1902,6 +1902,9 @@ function AgentList({ rows, menus, onPicked, placed, query: given, onQuery, searc
   const openMenu = (key: string, at?: { x: number; y: number }) => {
     const b = dotsOf(key)
     if (!at && !b) return
+    // (Its button the one the focus goes back to, a sheet's too: a tap
+    // focuses nothing on some systems, the focus elsewhere meanwhile.)
+    if (document.activeElement !== b) b?.focus({ preventScroll: true })
     setRowMenu({ key, anchor: at ? new DOMRect(at.x, at.y, 0, 0) : b!.getBoundingClientRect(), at: at ? 'point' : 'below', sheet: isCoarse() })
   }
   // (Opened from the keyboard, its menu key or Shift+F10: at the button; the
@@ -1934,7 +1937,7 @@ function AgentList({ rows, menus, onPicked, placed, query: given, onQuery, searc
     // since.)
     forget()
     const a = document.activeElement
-    if (!f.el?.isConnected && (!a || a === document.body)) (dotsOf(f.key) ?? document.querySelector<HTMLElement>('.convo-side .convo-list-row'))?.focus({ preventScroll: true })
+    if (!f.el?.isConnected && (!a || a === document.body) && !modalNow()) (dotsOf(f.key) ?? document.querySelector<HTMLElement>('.convo-side .convo-list-row'))?.focus({ preventScroll: true })
   }, [])
   const forget = () => {
     if (refocus.current) clearInterval(refocus.current.timer)
