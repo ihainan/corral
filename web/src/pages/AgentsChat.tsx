@@ -1612,7 +1612,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     {closing?.row && (
       <Confirm
         title={closing.key === cur.key ? t('agents.closeTitle') : t('agents.closeTitleNamed', { name: rows.find((r) => r.key === closing.key)?.title ?? '' })}
-        body={t((closing.key === cur.key ? working : closing.row.status === 'working') ? 'agents.closeBodyWorking' : 'agents.closeBody')}
+        body={t((closing.key === cur.key ? working : (entries.find((e) => e.key === closing.key)?.row ?? closing.row).status === 'working') ? 'agents.closeBodyWorking' : 'agents.closeBody')}
         confirm={t('agents.closeConfirm')}
         danger
         onConfirm={async () => {

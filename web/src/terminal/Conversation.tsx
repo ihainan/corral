@@ -1889,12 +1889,13 @@ function AgentList({ rows, menus, onPicked, placed, query: given, onQuery, searc
   // Its rows' menu (menus: the side list's; the switcher's rows have none):
   // one for the list, of the row it was opened on by its key, as that row
   // may go to another group meanwhile and be drawn anew; at its "more"
-  // button, or where it was right-clicked. Gone with the row.
+  // button, or where it was right-clicked. Gone with the row, or when the
+  // row is no longer shown (searched past, folded away).
   const [rowMenu, setRowMenu] = useState<{ key: string; anchor: DOMRect; at: 'below' | 'point'; sheet: boolean } | null>(null)
   const menuRow = rowMenu ? rows.find((r) => r.key === rowMenu.key && r.menu) : undefined
   useEffect(() => {
-    if (rowMenu && !menuRow) setRowMenu(null)
-  }, [rowMenu, menuRow])
+    if (rowMenu && (!menuRow || !dotsOf(rowMenu.key))) setRowMenu(null)
+  })
   const dotsOf = (key: string) => document.querySelector<HTMLElement>(`.convo-list-dots[data-key="${CSS.escape(key)}"]`)
   const closeMenu = useCallback(() => setRowMenu(null), [])
   const menuTrigger = useCallback(() => (rowMenu ? dotsOf(rowMenu.key) : null), [rowMenu])
@@ -1904,31 +1905,53 @@ function AgentList({ rows, menus, onPicked, placed, query: given, onQuery, searc
     setRowMenu({ key, anchor: at ? new DOMRect(at.x, at.y, 0, 0) : b!.getBoundingClientRect(), at: at ? 'point' : 'below', sheet: isCoarse() })
   }
   // (Opened from the keyboard, its menu key or Shift+F10: at the button; the
-  // contextmenu that may follow it is the same asking.)
+  // contextmenu that may follow it, while that menu is open, is the same
+  // asking.)
   const keyOpened = useRef<{ key: string; at: number } | null>(null)
+  const menuKey = (key: string) => (e: React.KeyboardEvent) => {
+    if (e.key !== 'ContextMenu' && !(e.key === 'F10' && e.shiftKey)) return
+    e.preventDefault()
+    keyOpened.current = { key, at: Date.now() }
+    openMenu(key)
+  }
   // Something picked from it: the focus put on its button first (a dialog
-  // it opens gives it back there), and back on that button where its row
-  // was drawn anew meanwhile (pinned: in another group), the focus left
-  // nowhere; on the first row where it is gone. Not taken from elsewhere.
-  const refocus = useRef<{ key: string; until: number } | null>(null)
+  // it opens gives it back there), and onto that button again where it was
+  // drawn anew meanwhile with the focus left nowhere (pinned: its row in
+  // another group); on the first row where it is gone (closed, once its
+  // dialog is). Done with once its button is let be: the focus elsewhere,
+  // or a key or a press outside a dialog.
+  const refocus = useRef<{ key: string; el: HTMLElement | null } | null>(null)
   useEffect(() => {
     const f = refocus.current
     if (!f) return
     const a = document.activeElement
-    if (Date.now() > f.until || (a && a !== document.body && a !== dotsOf(f.key))) {
-      refocus.current = null
+    if (a?.closest('[role="dialog"]')) return // (one it opened: waited out)
+    const nowhere = !a || a === document.body
+    if (f.el?.isConnected) {
+      if (a !== f.el) refocus.current = null
       return
     }
-    if (a && a !== document.body && a.isConnected) return
     refocus.current = null
-    ;(dotsOf(f.key) ?? document.querySelector<HTMLElement>('.convo-side .convo-list-row'))?.focus({ preventScroll: true })
+    if (nowhere) (dotsOf(f.key) ?? document.querySelector<HTMLElement>('.convo-side .convo-list-row'))?.focus({ preventScroll: true })
   })
+  useEffect(() => {
+    const done = (e: Event) => {
+      if (refocus.current && !(e.target as Element | null)?.closest?.('[role="dialog"]')) refocus.current = null
+    }
+    document.addEventListener('pointerdown', done, true)
+    document.addEventListener('keydown', done, true)
+    return () => {
+      document.removeEventListener('pointerdown', done, true)
+      document.removeEventListener('keydown', done, true)
+    }
+  }, [])
   const menuItems = (r: ConvoListRow) =>
     (r.menu!().filter(Boolean) as MenuItem[]).map((it): MenuItem => ({
       ...it,
       onSelect: it.onSelect && (() => {
-        dotsOf(r.key)?.focus({ preventScroll: true })
-        refocus.current = { key: r.key, until: Date.now() + 1500 }
+        const el = dotsOf(r.key)
+        el?.focus({ preventScroll: true })
+        refocus.current = { key: r.key, el }
         it.onSelect!()
       }),
     }))
@@ -2000,7 +2023,7 @@ function AgentList({ rows, menus, onPicked, placed, query: given, onQuery, searc
                       ? (e) => {
                           e.preventDefault()
                           const k = keyOpened.current
-                          if (k && k.key === r.key && Date.now() - k.at < 1000) return
+                          if (k && k.key === r.key && rowMenu?.key === r.key && Date.now() - k.at < 1000) return
                           openMenu(r.key, { x: e.clientX, y: e.clientY })
                         }
                       : undefined
@@ -2014,16 +2037,7 @@ function AgentList({ rows, menus, onPicked, placed, query: given, onQuery, searc
                     onPicked?.()
                     r.onPick() // (of the one shown: nothing, or the end of a switch to another; the list may be of before)
                   }}
-                  onKeyDown={
-                    hasMenu
-                      ? (e) => {
-                          if (e.key !== 'ContextMenu' && !(e.key === 'F10' && e.shiftKey)) return
-                          e.preventDefault()
-                          keyOpened.current = { key: r.key, at: Date.now() }
-                          openMenu(r.key)
-                        }
-                      : undefined
-                  }
+                  onKeyDown={hasMenu ? menuKey(r.key) : undefined}
                 >
                   <AgentIcon program={r.program} size={30} dot={r.bg === 'running' ? 'bg' : said ? (r.status as 'blocked' | 'working' | 'done') : undefined} />
                   <span className="convo-list-text" title={[r.title, r.where].filter(Boolean).join(' · ')}>
@@ -2057,6 +2071,7 @@ function AgentList({ rows, menus, onPicked, placed, query: given, onQuery, searc
                     aria-expanded={rowMenu?.key === r.key}
                     title={t('common.more')}
                     onClick={() => (rowMenu?.key === r.key ? closeMenu() : openMenu(r.key))}
+                    onKeyDown={menuKey(r.key)}
                   >
                     <MoreHorizontal size={16} aria-hidden="true" />
                   </button>
