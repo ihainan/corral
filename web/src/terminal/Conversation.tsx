@@ -1922,10 +1922,14 @@ function AgentList({ rows, menus, onPicked, placed, query: given, onQuery, searc
   // while a dialog it opened is open (wherever the focus is meanwhile, its
   // button greyed as it asks, its backdrop pressed; shut, it need not draw
   // the list again).
-  const refocus = useRef<{ key: string; el: HTMLElement | null; timer: number } | null>(null)
+  const refocus = useRef<{ key: string; el: HTMLElement | null; timer: number; dialog?: Element } | null>(null)
   const settle = useCallback(() => {
     const f = refocus.current
-    if (!f || modalOpen()) return
+    if (!f) return
+    // (The dialog it opened: the first seen since, none being open as it
+    // was picked; waited for while that one is, not another after it.)
+    f.dialog ??= modalNow() ?? undefined
+    if (f.dialog?.isConnected) return
     // (Its button where it was: nothing to do, the focus there or gone on
     // since.)
     forget()
@@ -2094,7 +2098,7 @@ function AgentList({ rows, menus, onPicked, placed, query: given, onQuery, searc
 }
 
 // (A dialog open over the page.)
-const modalOpen = () => !!document.querySelector('[role="dialog"][aria-modal="true"]')
+const modalNow = () => document.querySelector('[role="dialog"][aria-modal="true"]')
 
 // A list of agents longer than this has a search box over it.
 export const SEARCH_FROM = 5
