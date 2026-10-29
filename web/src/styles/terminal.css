@@ -1192,3 +1192,4 @@ button.convo-running-what { padding: 0; text-align: left; }
 .convo-shell { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; min-width: 0; }
 .convo-shell > .convo-pre-wrap { width: 100%; }
 .convo-shell-err { width: 100%; color: var(--term-danger-text); }
+.convo-note-parts { display: flex; flex-direction: column; gap: 6px; min-width: 0; }

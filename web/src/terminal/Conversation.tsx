@@ -2105,8 +2105,9 @@ function Tasks({ tasks, fold }: { tasks: ConvoTask[]; fold?: boolean }) {
 // A notice with a command's output in it: each of its parts in turn, what
 // it printed as a terminal shows it, any words as a notice's.
 function NoteParts({ e, onCopy }: { e: ConvoEntry; onCopy: (s: string) => void }) {
+  // (One element for the one item: the list's places are counted by them.)
   return (
-    <>
+    <div className="convo-note-parts">
       {e.parts.map((p, i) =>
         p.shell ? (
           <ShellOut key={i} sh={p.shell} onCopy={onCopy} />
@@ -2116,7 +2117,7 @@ function NoteParts({ e, onCopy }: { e: ConvoEntry; onCopy: (s: string) => void }
           </p>
         ) : null,
       )}
-    </>
+    </div>
   )
 }
 
