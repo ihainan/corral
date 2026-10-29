@@ -134,21 +134,25 @@ func histScan(read func(off int64, n int) ([]byte, error), st histState, q strin
 			commit(page, nil, 0)
 			return nil
 		}
+		// (And histFPBytes more in front, unscanned: what a cursor in the
+		// block is bound to is in hand, wherever in it the cursor is.)
 		from := max(0, c-histBlock-1)
-		b, err := read(from, int(c-from))
+		pre := max(0, from-histFPBytes)
+		all, err := read(pre, int(c-pre))
 		if err != nil {
 			return err
 		}
-		if int64(len(b)) != c-from {
+		if int64(len(all)) != c-pre {
 			return errHistChanged // (shorter than it was)
 		}
+		b := all[from-pre:]
 		scanned += len(b) - 1
 		if page.At.Skip != "" {
 			// The start of the line skipped: after the last newline before c.
 			i := bytes.LastIndexByte(b, '\n')
 			if i < 0 && from > 0 {
 				page.At.Cursor = from
-				commit(page, b, from)
+				commit(page, all, pre)
 				continue
 			}
 			if page.At.Skip == "line" {
@@ -156,7 +160,7 @@ func histScan(read func(off int64, n int) ([]byte, error), st histState, q strin
 			}
 			page.At = histState{Cursor: from + int64(i) + 1}
 			page.Done = page.At.Cursor == 0
-			commit(page, b, from)
+			commit(page, all, pre)
 			continue
 		}
 		if b[len(b)-1] != '\n' {
@@ -167,7 +171,7 @@ func histScan(read func(off int64, n int) ([]byte, error), st histState, q strin
 		if first < 0 && from > 0 {
 			// The line ending at c is longer than a block.
 			page.At = histState{Cursor: from, Skip: "line"}
-			commit(page, b, from)
+			commit(page, all, pre)
 			continue
 		}
 		// Lines from the end: each from after a newline (or the file's
@@ -192,7 +196,10 @@ func histScan(read func(off int64, n int) ([]byte, error), st histState, q strin
 			if page.At.Cursor == 0 {
 				page.Done = true
 			}
-			commit(page, b, from)
+			commit(page, all, pre)
+			if page.Done || len(page.Items) >= histItemsMax || stop() {
+				return nil // (full, or to stop: here, between lines)
+			}
 			if i < 0 {
 				break
 			}
@@ -364,6 +371,9 @@ func (s *Server) apiInputHistory(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			return histScan(read, st, q, func() bool { return ctx.Err() != nil }, func(pg histPage, blk []byte, blkAt int64) {
+				if ctx.Err() != nil {
+					return // (answered already, or about to be: no more reading for it)
+				}
 				f := ""
 				if !pg.Done {
 					var err error
@@ -373,9 +383,6 @@ func (s *Server) apiInputHistory(w http.ResponseWriter, r *http.Request) {
 				}
 				mu.Lock()
 				defer mu.Unlock()
-				if ctx.Err() != nil && last != nil {
-					return // (answered already, or about to be: as it was)
-				}
 				pg.Items = append([]histItem(nil), pg.Items...)
 				last, lastFP = &pg, f
 			})
@@ -395,6 +402,9 @@ func (s *Server) apiInputHistory(w http.ResponseWriter, r *http.Request) {
 	page, pageFP, err, none := last, lastFP, failure, absent
 	mu.Unlock()
 	switch {
+	case none && fp != "":
+		// (Gone while it was being paged through: rotated, say. Begun again.)
+		writeError(w, http.StatusConflict, "history_changed", "the history changed: begin again from the latest")
 	case none:
 		writeJSON(w, http.StatusOK, map[string]any{"items": []histItem{}, "done": true})
 	case errors.Is(err, errHistChanged):

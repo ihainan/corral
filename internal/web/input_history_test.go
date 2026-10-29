@@ -38,6 +38,10 @@ func histAll(t *testing.T, file string, q string) ([]string, int) {
 			if blk != nil && (at < 0 || at+int64(len(blk)) > int64(len(file)) || string(blk) != file[at:at+int64(len(blk))]) {
 				t.Fatal("the block given is not the file's")
 			}
+			// (What its cursor is bound to is in the block given: no read more for it.)
+			if !pg.Done && (blk == nil || at > max(0, pg.At.Cursor-histFPBytes) || pg.At.Cursor > at+int64(len(blk))) {
+				t.Fatalf("the bytes before cursor %d not in the block [%d, %d)", pg.At.Cursor, at, at+int64(len(blk)))
+			}
 			pg.Items = append([]histItem(nil), pg.Items...)
 			last = &pg
 		})
@@ -211,5 +215,33 @@ func TestHistScanStopped(t *testing.T) {
 	err := histScan(func(off int64, k int) ([]byte, error) { return []byte(file[off : off+int64(k)]), nil }, histState{Cursor: int64(len(file))}, "", func() bool { return true }, func(histPage, []byte, int64) { n++ })
 	if err != nil || n != 0 {
 		t.Fatalf("stopped: %v %d", err, n)
+	}
+}
+
+// Full at 50: the page ends there, nothing more read for it.
+func TestHistScanFullStops(t *testing.T) {
+	var file strings.Builder
+	for i := 0; i < 2000; i++ {
+		d := fmt.Sprintf("old %d %s", i, strings.Repeat("o", 400))
+		file.WriteString(histLine(d))
+	}
+	for i := 0; i < 60; i++ {
+		file.WriteString(histLine(fmt.Sprintf("hit %d", i)))
+	}
+	f := file.String()
+	reads := 0
+	read := func(off int64, n int) ([]byte, error) { reads++; return []byte(f[off : off+int64(n)]), nil }
+	var last histPage
+	if err := histScan(read, histState{Cursor: int64(len(f))}, "hit", func() bool { return false }, func(pg histPage, _ []byte, _ int64) { last = pg }); err != nil {
+		t.Fatal(err)
+	}
+	if len(last.Items) != 50 || reads != 1 {
+		t.Fatalf("%d items, %d reads", len(last.Items), reads)
+	}
+	// Stopped between lines when told to.
+	n := 0
+	_ = histScan(read, histState{Cursor: int64(len(f))}, "", func() bool { n++; return n > 3 }, func(histPage, []byte, int64) {})
+	if n != 4 {
+		t.Fatalf("asked to stop %d times", n)
 	}
 }
