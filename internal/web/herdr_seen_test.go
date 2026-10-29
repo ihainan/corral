@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ihainan/corral/internal/herdr"
+	"github.com/ihainan/corral/internal/store"
 )
 
 func seenSum(status, session string) herdrSummary {
@@ -102,5 +104,44 @@ func TestOcContests(t *testing.T) {
 	c.ended("h\x00/p", 200, seen)
 	if e, o, _ := c.note("h\x00/p", false); e != 200 || o {
 		t.Fatalf("its own end: %d %v", e, o)
+	}
+}
+
+// What was looked at, kept beyond the watcher: a watcher begun anew (the
+// gateway started again) tells an agent "done" since before it was looked
+// at, of the same agent session, as idle; one done again since, or of
+// another session, "done".
+func TestSeenKept(t *testing.T) {
+	r := &seenRounds{}
+	var keptPane string
+	var keptAs store.AgentSeen
+	r.setKept(map[string]store.AgentSeen{"w1:p1": {Session: "s1", At: 1000}}, func(pane string, a store.AgentSeen) { keptPane, keptAs = pane, a })
+	told := func(session string, since int64) string {
+		s := seenSum(herdr.StatusDone, session)
+		s.Workspaces[0].Agents[0].Since = since
+		r.number(&s, false)
+		return r.withSeen(s).Workspaces[0].Agents[0].Status
+	}
+	if got := told("s1", 900); got != herdr.StatusIdle {
+		t.Fatalf("done before it was looked at: %s", got)
+	}
+	if got := told("s1", 0); got != herdr.StatusIdle {
+		t.Fatalf("when it began not known: %s", got)
+	}
+	if got := told("s1", 1100); got != herdr.StatusDone {
+		t.Fatalf("done again since: %s", got)
+	}
+	if got := told("s2", 900); got != herdr.StatusDone {
+		t.Fatalf("another session: %s", got)
+	}
+	// Looked at in this watcher: kept, by the way given; told by its round.
+	s := seenSum(herdr.StatusDone, "s2")
+	r.number(&s, false)
+	before := time.Now().UnixMilli()
+	if !r.markSeen("w1:p1", s.Workspaces[0].Agents[0].Round, "s2") || keptPane != "w1:p1" || keptAs.Session != "s2" || keptAs.At < before {
+		t.Fatalf("not kept: %q %+v", keptPane, keptAs)
+	}
+	if got := told("s2", 900); got != herdr.StatusIdle {
+		t.Fatalf("looked at: %s", got)
 	}
 }

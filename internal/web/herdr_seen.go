@@ -2,9 +2,14 @@ package web
 
 import (
 	"sync"
+	"time"
 
 	"github.com/ihainan/corral/internal/herdr"
+	"github.com/ihainan/corral/internal/store"
 )
+
+// seenKeptFor: how long a look is kept (see seenRounds.kept).
+const seenKeptFor = 30 * 24 * time.Hour
 
 // seenRounds is what one watcher of a herdr server knows of the agents
 // looked at on the agents page.
@@ -22,12 +27,23 @@ import (
 // it, so what it numbers is never behind itself (shared between watchers,
 // one behind another undid what the other had noted). A terminal session
 // is one watcher, whichever browsers show it.
+//
+// What was looked at is kept too (keep: by pane, its agent session and
+// when), beyond this watcher's life: a watcher begun anew (the gateway
+// started again, the session reconnected) numbers rounds anew, and an
+// agent "done" since before it, looked at before, would show "done" again.
+// What was kept before this watcher (prior) is told by time: one whose
+// "done" began (its since) no later than it was looked at, of the same
+// agent session, is that one. (Only what was kept before: a round this
+// watcher saw begin is told by its round, as above.)
 type seenRounds struct {
-	mu   sync.Mutex
-	at   map[string]seenRound // pane → the round it is in
-	seen map[string]seenRound // pane → the round of "done" looked at
-	n    int64
-	poke func() // (has the watcher's last summary go again)
+	mu    sync.Mutex
+	at    map[string]seenRound // pane → the round it is in
+	seen  map[string]seenRound // pane → the round of "done" looked at
+	n     int64
+	poke  func() // (has the watcher's last summary go again)
+	prior map[string]store.AgentSeen
+	keep  func(pane string, a store.AgentSeen)
 }
 
 type seenRound struct {
@@ -113,8 +129,11 @@ func (r *seenRounds) markSeen(pane string, round int64, session string) bool {
 		r.seen = map[string]seenRound{}
 	}
 	r.seen[pane] = x
-	poke := r.poke
+	poke, keep := r.poke, r.keep
 	r.mu.Unlock()
+	if keep != nil {
+		keep(pane, store.AgentSeen{Session: session, At: time.Now().UnixMilli()})
+	}
 	if poke != nil {
 		poke()
 	}
@@ -127,6 +146,18 @@ func (r *seenRounds) current(pane string) (seenRound, bool) {
 	defer r.mu.Unlock()
 	x, ok := r.at[pane]
 	return x, ok
+}
+
+// setKept gives what was kept of what was looked at before this watcher,
+// and how to keep more. (A look meanwhile, before it was read, is kept by
+// what comes after it only: it is in seen, as this watcher's own.)
+func (r *seenRounds) setKept(prior map[string]store.AgentSeen, keep func(pane string, a store.AgentSeen)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.prior, r.keep = prior, keep
+	if r.poke != nil {
+		go r.poke()
+	}
 }
 
 func (r *seenRounds) setPoke(f func()) {
@@ -145,7 +176,16 @@ func (r *seenRounds) withSeen(sum herdrSummary) herdrSummary {
 	for i, w := range sum.Workspaces {
 		w.Agents = append(make([]herdrAgent, 0, len(w.Agents)), w.Agents...) // (none: [], not null)
 		for j, a := range w.Agents {
-			if x, ok := r.seen[a.PaneID]; ok && a.Status == herdr.StatusDone && x.n == a.Round && x.session == a.Session {
+			if a.Status != herdr.StatusDone {
+				continue
+			}
+			if x, ok := r.seen[a.PaneID]; ok && x.n == a.Round && x.session == a.Session {
+				w.Agents[j].Status = herdr.StatusIdle
+			} else if k, ok := r.prior[a.PaneID]; ok && k.Session == a.Session && a.Since <= k.At {
+				// (Looked at before this watcher began, its "done" begun before
+				// that: the same. When it began not yet known (0: a restart, its
+				// log not yet looked at), taken as the same: a "done" told a
+				// little late, rather than one looked at told anew.)
 				w.Agents[j].Status = herdr.StatusIdle
 			}
 		}

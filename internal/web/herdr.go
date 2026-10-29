@@ -460,6 +460,24 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 	times := s.herdrTimes.of(h, socket)
 	rounds := &seenRounds{}
 	s.herdrSocks.setRounds(sess.ID, rounds)
+	// (What was looked at before this watcher: read beside, kept as more is.)
+	go func() {
+		kctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		kept, err := s.store.AgentsSeen(kctx, sess.OwnerID, sess.HostID, socket, time.Now().Add(-seenKeptFor).UnixMilli())
+		if err != nil {
+			s.log.Warn("agents seen not read", "err", err)
+		}
+		rounds.setKept(kept, func(pane string, a store.AgentSeen) {
+			go func() {
+				kctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				if err := s.store.SetAgentSeen(kctx, sess.OwnerID, sess.HostID, socket, pane, a); err != nil {
+					s.log.Warn("agent seen not kept", "err", err)
+				}
+			}()
+		})
+	}()
 	bg := newBgProber(func(ctx context.Context, sids []string, tail int) (map[string]bgRecord, error) {
 		out, err := sshx.Output(ctx, sess.Client(), bgTailCommand(sids, tail), len(sids)*(tail+256))
 		if err != nil {
