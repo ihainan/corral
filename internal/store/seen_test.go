@@ -30,6 +30,10 @@ func TestAgentsSeen(t *testing.T) {
 	if len(got) != 1 || got["w1:p1"] != (AgentSeen{"s1", 2000}) {
 		t.Fatalf("got %+v", got)
 	}
+	must(s.SetAgentSeen(ctx, 1, 2, "a", "w1:p1", AgentSeen{"s9", 2000})) // (one millisecond: the first stands)
+	if got, _ := s.AgentsSeen(ctx, 1, 2, "a", 0); got["w1:p1"].Session != "s1" {
+		t.Fatalf("same millisecond: %+v", got)
+	}
 	must(s.SetAgentSeen(ctx, 1, 2, "a", "w1:p1", AgentSeen{"s3", 3000}))
 	if got, _ := s.AgentsSeen(ctx, 1, 2, "a", 0); got["w1:p1"] != (AgentSeen{"s3", 3000}) || len(got) != 1 {
 		t.Fatalf("later: %+v", got)

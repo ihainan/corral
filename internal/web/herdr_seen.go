@@ -36,11 +36,13 @@ const seenKeptFor = 30 * 24 * time.Hour
 // this watcher sees it other than "done" (from then on its rounds tell);
 // and what went on while no one watched is told by the agent's log: a
 // round more writes to it, so one whose log was last written (wrote, by
-// the first look over the host after this watcher began) no later than it
-// was looked at, of the same agent session, is the "done" looked at. Until
-// that look is back it is taken as looked at (a "done" told a few seconds
-// late, rather than one looked at told anew); a log not found, or written
-// since: "done".
+// the first look over the host after this watcher began, or after herdr
+// came back, its clock put to the gateway's) no later than it was looked
+// at, of the same agent session, is the "done" looked at. Until that look
+// is back it is taken as looked at (a "done" told a few seconds late,
+// rather than one looked at told anew); a log not found, or written since:
+// "done". (When it was looked at is taken while it is still that round,
+// and kept before it is noted: kept, or not noted.)
 type seenRounds struct {
 	mu     sync.Mutex
 	at     map[string]seenRound // pane → the round it is in
@@ -48,9 +50,11 @@ type seenRounds struct {
 	n      int64
 	poke   func() // (has the watcher's last summary go again)
 	prior  map[string]store.AgentSeen
-	keep   func(pane string, a store.AgentSeen)
+	keep   func(pane string, a store.AgentSeen) error
 	looked bool             // (the first look over the host is back)
 	wrote  map[string]int64 // (what it found: pane → its log last written, unix ms)
+	lost   bool             // (herdr lost: what went on meanwhile is looked for once it is back)
+	gen    int64            // (looks begun before herdr was last lost or back count for nothing)
 }
 
 type seenRound struct {
@@ -121,6 +125,10 @@ func (r *seenRounds) number(sum *herdrSummary, old bool) {
 	if old {
 		return
 	}
+	if r.lost {
+		r.lost = false // (back: a look begun from now)
+		r.gen++
+	}
 	for p := range r.at {
 		if !here[p] {
 			delete(r.at, p)
@@ -132,26 +140,36 @@ func (r *seenRounds) number(sum *herdrSummary, old bool) {
 // markSeen notes pane's agent looked at in its round of "done" round, of
 // that agent session, and has the summary go again; false, nothing noted:
 // that is not the round it is in.
-func (r *seenRounds) markSeen(pane string, round int64, session string) bool {
+func (r *seenRounds) markSeen(pane string, round int64, session string) (bool, error) {
 	r.mu.Lock()
 	x, ok := r.at[pane]
 	if !ok || x.status != herdr.StatusDone || x.n != round || x.session != session {
 		r.mu.Unlock()
-		return false
+		return false, nil
+	}
+	k := store.AgentSeen{Session: session, At: time.Now().UnixMilli()}
+	keep := r.keep
+	r.mu.Unlock()
+	if keep != nil {
+		if err := keep(pane, k); err != nil {
+			return false, err
+		}
+	}
+	r.mu.Lock()
+	if y, ok := r.at[pane]; !ok || y != x {
+		r.mu.Unlock()
+		return false, nil // (another round meanwhile: what was kept is of before it)
 	}
 	if r.seen == nil {
 		r.seen = map[string]seenRound{}
 	}
 	r.seen[pane] = x
-	poke, keep := r.poke, r.keep
+	poke := r.poke
 	r.mu.Unlock()
-	if keep != nil {
-		keep(pane, store.AgentSeen{Session: session, At: time.Now().UnixMilli()})
-	}
 	if poke != nil {
 		poke()
 	}
-	return true
+	return true, nil
 }
 
 // current: the round pane is in.
@@ -165,23 +183,33 @@ func (r *seenRounds) current(pane string) (seenRound, bool) {
 // newSeenRounds: prior, what was kept of what was looked at before this
 // watcher; keep, how to keep more (as it is looked at, before it is said
 // noted).
-func newSeenRounds(prior map[string]store.AgentSeen, keep func(pane string, a store.AgentSeen)) *seenRounds {
+func newSeenRounds(prior map[string]store.AgentSeen, keep func(pane string, a store.AgentSeen) error) *seenRounds {
 	return &seenRounds{prior: prior, keep: keep}
 }
 
 // wantsLook: a look over the host is wanted for what was kept (see
-// seenRounds): there is some, and the first look is not back.
-func (r *seenRounds) wantsLook() bool {
+// seenRounds): there is some, the first look (since herdr came back) is
+// not back, and herdr is not lost. gen: the look's, for lookedOver.
+func (r *seenRounds) wantsLook() (bool, int64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return len(r.prior) > 0 && !r.looked
+	return len(r.prior) > 0 && !r.looked && !r.lost, r.gen
+}
+
+// lostHerdr: herdr is lost; what went on meanwhile is looked for again once
+// it is back (see number).
+func (r *seenRounds) lostHerdr() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.lost, r.looked, r.wrote = true, false, nil
+	r.gen++
 }
 
 // lookedOver takes in the first look over the host (nil: it failed, no
-// log known), and has the summary go again.
-func (r *seenRounds) lookedOver(wrote map[string]int64) {
+// log known) begun as gen, and has the summary go again.
+func (r *seenRounds) lookedOver(wrote map[string]int64, gen int64) {
 	r.mu.Lock()
-	if r.looked {
+	if r.looked || r.lost || gen != r.gen {
 		r.mu.Unlock()
 		return
 	}

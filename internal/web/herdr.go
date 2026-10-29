@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -473,12 +474,14 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 	if err != nil {
 		s.log.Warn("agents seen not read", "err", err)
 	}
-	rounds := newSeenRounds(prior, func(pane string, a store.AgentSeen) {
+	rounds := newSeenRounds(prior, func(pane string, a store.AgentSeen) error {
 		kctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-		if err := s.store.SetAgentSeen(kctx, sess.OwnerID, sess.HostID, server, pane, a); err != nil {
+		err := s.store.SetAgentSeen(kctx, sess.OwnerID, sess.HostID, server, pane, a)
+		if err != nil {
 			s.log.Warn("agent seen not kept", "err", err)
 		}
+		return err
 	})
 	s.herdrSocks.setRounds(sess.ID, rounds)
 	bg := newBgProber(func(ctx context.Context, sids []string, tail int) (map[string]bgRecord, error) {
@@ -500,7 +503,7 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 		tick := time.NewTicker(5 * time.Second)
 		defer tick.Stop()
 		first := make(chan time.Time, 1)
-		if rounds.wantsLook() {
+		if want, _ := rounds.wantsLook(); want {
 			first <- time.Now()
 		}
 		for {
@@ -511,11 +514,16 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 			case now = <-first:
 			case now = <-tick.C:
 			}
-			if !times.due(now) && !rounds.wantsLook() {
+			// (One for what was looked at before: not the one the watchers of
+			// the server share, which it leaves as it was.)
+			due := times.due(now)
+			want, gen := rounds.wantsLook()
+			if !due && !want {
 				continue
 			}
 			lctx, cancel := context.WithTimeout(ctx, 20*time.Second)
-			out, err := sshx.Output(lctx, sess.Client(), convoLocateTimesCommand(sess.Persistence, sess.TmuxSession), convoLocateMax)
+			out, err := sshx.Output(lctx, sess.Client(), convoLocateTimesCommand(sess.Persistence, sess.TmuxSession)+"; "+hostNowCommand, convoLocateMax)
+			got := time.Now().UnixMilli()
 			cancel()
 			var at map[string]int64
 			if err == nil {
@@ -532,8 +540,12 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 					}
 				}
 			}
-			times.found(at, time.Now())
-			rounds.lookedOver(at)
+			if due {
+				times.found(at, time.Now())
+			}
+			if want {
+				rounds.lookedOver(onGatewayClock(at, string(out), got), gen)
+			}
 		}
 	}()
 	// The bindings are read beside the watch, not before it: a slow host
@@ -635,6 +647,7 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 	// The browser holds the last summary as current until told otherwise;
 	// it keeps it (a page opened meanwhile gets it too), marked as old.
 	w.OnLost = func() {
+		rounds.lostHerdr()
 		snap := w.Latest()
 		if snap == nil {
 			return
@@ -990,7 +1003,43 @@ func (s *Server) apiHerdrSeen(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "herdr_unavailable", "herdr is not available in this session")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]bool{"seen": rs.markSeen(pane, b.Round, b.Session)})
+	ok, err := rs.markSeen(pane, b.Round, b.Session)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "not_kept", "it could not be noted")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"seen": ok})
+}
+
+// hostNowCommand prints the host's time (unix ms; seconds where its date
+// has no %N, or prints nothing for it) as a record of its own, "now=…", after what came before it.
+const hostNowCommand = `sh -c 'n=$(date +%s%3N 2>/dev/null); case $n in ""|*[!0-9]*) n=$(date +%s)000;; esac; printf "now=%s\0" "$n"'`
+
+// onGatewayClock puts times of the host's clock (unix ms, by pane) on the
+// gateway's: by the host's time printed last in out (hostNowCommand), got
+// when out came. nil, or no host time: nil (nothing known).
+func onGatewayClock(at map[string]int64, out string, got int64) map[string]int64 {
+	if at == nil {
+		return nil
+	}
+	i := strings.LastIndex(out, "now=")
+	if i < 0 {
+		return nil
+	}
+	v, _, _ := strings.Cut(out[i+len("now="):], "\x00")
+	now, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || now <= 0 {
+		return nil
+	}
+	if now < 1e11 { // (seconds: a date with no %N leaves it out, digits all the same)
+		now *= 1000
+	}
+	off := now - got // (the host ahead by; a little less than it is, by the way back)
+	m := make(map[string]int64, len(at))
+	for p, t := range at {
+		m[p] = t - off
+	}
+	return m
 }
 
 func (s *Server) apiHerdrReply(w http.ResponseWriter, r *http.Request) {

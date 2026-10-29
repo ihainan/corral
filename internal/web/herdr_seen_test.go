@@ -2,6 +2,7 @@ package web
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -9,6 +10,11 @@ import (
 	"github.com/ihainan/corral/internal/herdr"
 	"github.com/ihainan/corral/internal/store"
 )
+
+func marked(r *seenRounds, pane string, round int64, session string) bool {
+	ok, _ := r.markSeen(pane, round, session)
+	return ok
+}
 
 func seenSum(status, session string) herdrSummary {
 	return herdrSummary{Workspaces: []herdrWorkspace{
@@ -33,10 +39,10 @@ func TestSeenRounds(t *testing.T) {
 	if a.Status != herdr.StatusDone || a.Round == 0 {
 		t.Fatalf("not looked at: %+v", a)
 	}
-	if r.markSeen("w1:p1", a.Round+1, "s1") || r.markSeen("w1:p1", a.Round, "s2") || r.markSeen("w1:p1", a.Round, "") || poked != 0 {
+	if marked(r, "w1:p1", a.Round+1, "s1") || marked(r, "w1:p1", a.Round, "s2") || marked(r, "w1:p1", a.Round, "") || poked != 0 {
 		t.Fatal("another round, or another session's, marked")
 	}
-	if !r.markSeen("w1:p1", a.Round, "s1") || poked != 1 {
+	if !marked(r, "w1:p1", a.Round, "s1") || poked != 1 {
 		t.Fatal("its round not marked, or the summary not sent again")
 	}
 	if got := told(herdr.StatusDone, "s1"); got.Status != herdr.StatusIdle || got.Round != a.Round {
@@ -59,7 +65,7 @@ func TestSeenRounds(t *testing.T) {
 	if b.Status != herdr.StatusDone || b.Round == a.Round {
 		t.Fatalf("done again: %+v (first round %d)", b, a.Round)
 	}
-	if r.markSeen("w1:p1", a.Round, "s1") {
+	if marked(r, "w1:p1", a.Round, "s1") {
 		t.Fatal("the word for the round over, late, marked")
 	}
 	// Another agent session in the pane, done as well: another round.
@@ -69,7 +75,7 @@ func TestSeenRounds(t *testing.T) {
 	}
 	// One with no session told (another agent, which says none): marked as that.
 	d := told(herdr.StatusDone, "")
-	if d.Round == c.Round || !r.markSeen("w1:p1", d.Round, "") || told(herdr.StatusDone, "").Status != herdr.StatusIdle {
+	if d.Round == c.Round || !marked(r, "w1:p1", d.Round, "") || told(herdr.StatusDone, "").Status != herdr.StatusIdle {
 		t.Fatalf("no session: %+v", d)
 	}
 	// Lost herdr: as noted, nothing new.
@@ -115,7 +121,11 @@ func TestOcContests(t *testing.T) {
 func TestSeenKept(t *testing.T) {
 	var keptPane string
 	var keptAs store.AgentSeen
-	r := newSeenRounds(map[string]store.AgentSeen{"w1:p1": {Session: "s1", At: 1000}}, func(pane string, a store.AgentSeen) { keptPane, keptAs = pane, a })
+	var keepErr error
+	r := newSeenRounds(map[string]store.AgentSeen{"w1:p1": {Session: "s1", At: 1000}}, func(pane string, a store.AgentSeen) error {
+		keptPane, keptAs = pane, a
+		return keepErr
+	})
 	poked := 0
 	r.setPoke(func() { poked++ })
 	told := func(status, session string) herdrAgent {
@@ -123,7 +133,8 @@ func TestSeenKept(t *testing.T) {
 		r.number(&s, false)
 		return r.withSeen(s).Workspaces[0].Agents[0]
 	}
-	if !r.wantsLook() {
+	want, gen := r.wantsLook()
+	if !want {
 		t.Fatal("no look wanted")
 	}
 	if got := told(herdr.StatusDone, "s1"); got.Status != herdr.StatusIdle {
@@ -132,29 +143,45 @@ func TestSeenKept(t *testing.T) {
 	if got := told(herdr.StatusDone, "s2"); got.Status != herdr.StatusDone {
 		t.Fatalf("another session: %s", got.Status)
 	}
-	r.lookedOver(map[string]int64{"w1:p1": 900})
-	if r.wantsLook() || poked != 1 {
+	r.lookedOver(map[string]int64{"w1:p1": 900}, gen)
+	if want, _ := r.wantsLook(); want || poked != 1 {
 		t.Fatal("the look not taken in")
 	}
-	r.lookedOver(map[string]int64{"w1:p1": 5000}) // (only the first)
+	r.lookedOver(map[string]int64{"w1:p1": 5000}, gen) // (only the first)
 	if got := told(herdr.StatusDone, "s1"); got.Status != herdr.StatusIdle {
 		t.Fatalf("its log not written since: %s", got.Status)
 	}
 	// Written since (a round while no one watched), or not found: done.
 	for _, wrote := range []map[string]int64{{"w1:p1": 1100}, {}, nil} {
 		q := newSeenRounds(map[string]store.AgentSeen{"w1:p1": {Session: "s1", At: 1000}}, nil)
-		q.lookedOver(wrote)
+		_, g := q.wantsLook()
+		q.lookedOver(wrote, g)
 		s := seenSum(herdr.StatusDone, "s1")
 		q.number(&s, false)
 		if got := q.withSeen(s).Workspaces[0].Agents[0].Status; got != herdr.StatusDone {
 			t.Fatalf("wrote %v: %s", wrote, got)
 		}
 	}
-	// A lost herdr's summary changes nothing of it.
+	// herdr lost, then back: looked for again; a look begun before it came
+	// back counts for nothing; one after, as the first.
+	r.lostHerdr()
 	o := seenSum(herdr.StatusWorking, "s1")
-	r.number(&o, true)
+	r.number(&o, true) // (a lost herdr's summary changes nothing of it)
+	if want, _ := r.wantsLook(); want {
+		t.Fatal("a look wanted while lost")
+	}
+	_, stale := r.wantsLook()
 	if got := told(herdr.StatusDone, "s1"); got.Status != herdr.StatusIdle {
-		t.Fatalf("after a lost summary: %s", got.Status)
+		t.Fatalf("back, before the look: %s", got.Status)
+	}
+	r.lookedOver(map[string]int64{"w1:p1": 900}, stale)
+	want, gen = r.wantsLook()
+	if !want {
+		t.Fatal("a look from before it came back taken in")
+	}
+	r.lookedOver(map[string]int64{"w1:p1": 1200}, gen) // (a round while it was lost)
+	if got := told(herdr.StatusDone, "s1"); got.Status != herdr.StatusDone {
+		t.Fatalf("a round while lost: %s", got.Status)
 	}
 	// Seen working by this watcher, then done: a round of its own, done.
 	r.changed("w1:p1", herdr.StatusWorking, "")
@@ -163,9 +190,15 @@ func TestSeenKept(t *testing.T) {
 	if a.Status != herdr.StatusDone {
 		t.Fatalf("done again while watched: %s", a.Status)
 	}
-	// Looked at: kept (said noted after), told by its round.
+	// Not kept: not noted.
+	keepErr = errors.New("disk full")
+	if ok, err := r.markSeen("w1:p1", a.Round, "s1"); ok || err == nil || told(herdr.StatusDone, "s1").Status != herdr.StatusDone {
+		t.Fatal("noted though not kept")
+	}
+	// Looked at: kept (when, taken in its round), told by its round.
+	keepErr = nil
 	before := time.Now().UnixMilli()
-	if !r.markSeen("w1:p1", a.Round, "s1") || keptPane != "w1:p1" || keptAs.Session != "s1" || keptAs.At < before {
+	if !marked(r, "w1:p1", a.Round, "s1") || keptPane != "w1:p1" || keptAs.Session != "s1" || keptAs.At < before {
 		t.Fatalf("not kept: %q %+v", keptPane, keptAs)
 	}
 	if got := told(herdr.StatusDone, "s1"); got.Status != herdr.StatusIdle {
@@ -181,5 +214,22 @@ func TestSeenKept(t *testing.T) {
 				t.Fatalf("seen working, then done: %s", got)
 			}
 		}
+	}
+}
+
+// The host's times put on the gateway's clock by the host's time printed last.
+func TestOnGatewayClock(t *testing.T) {
+	out := "pid=1\nlog=x\x00now=1793234937500\x00"
+	if got := onGatewayClock(map[string]int64{"w1:p1": 1793234937000}, out, 1793234937000); got["w1:p1"] != 1793234936500 {
+		t.Fatalf("ahead: %v", got)
+	}
+	if got := onGatewayClock(map[string]int64{"w1:p1": 1793234937000}, "now=1793234938\x00", 1793234937000); got["w1:p1"] != 1793234936000 {
+		t.Fatalf("in seconds: %v", got)
+	}
+	if got := onGatewayClock(map[string]int64{"w1:p1": 10000}, "pid=1\x00", 10000); got != nil {
+		t.Fatalf("no host time: %v", got)
+	}
+	if got := onGatewayClock(nil, out, 10000); got != nil {
+		t.Fatalf("a failed look: %v", got)
 	}
 }
