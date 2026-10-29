@@ -7,6 +7,9 @@ import { Markdown } from './markdown'
 import { useSubConvo } from './subagent'
 import { NEW_AGENT } from './newAgent'
 import { Code } from './Code'
+import { ConvoSearchPanel } from './convoSearchPanel'
+import { itemKey } from './convoSearch'
+import { exportMarkdown } from './convoExport'
 import { AgentIcon } from './agentIcons'
 import { matchQuery } from './agents'
 import type { Convo, ConvoCost, ConvoEntry, ConvoHunk, ConvoMeta, ConvoPart, ConvoQueued, ConvoRunning, ConvoTask, ConvoTool, ConvoTrouble, ConvoEvent } from './conversation'
@@ -405,7 +408,10 @@ export function ConversationView({
   // in a row it goes on only when asked (the note becomes a button).
   const [olderPaused, setOlderPaused] = useState(false)
   const olderPausedNow = useRef(false)
-  olderPausedNow.current = olderPaused
+  // (Searching, the part before is read in only when asked: a batch read in
+  // for the search, its top near, does not read on by itself.)
+  const [searching, setSearching] = useState(false)
+  olderPausedNow.current = olderPaused || searching
   // (Brought something: the first entry is an earlier one. What came at the end meanwhile does not count.)
   const firstSeq = convo.entries.length ? convo.entries[0].seq : 0
   const emptyReads = useRef({ n: 0, first: 0, was: false })
@@ -440,7 +446,7 @@ export function ConversationView({
     )
     io.observe(el)
     return () => io.disconnect()
-  }, [convo.older, convo.olderCut, convo.loadingOlder, convo.of, olderPaused])
+  }, [convo.older, convo.olderCut, convo.loadingOlder, convo.of, olderPaused, searching])
   // What is in view stays where it is as items come in or change above it
   // (the part before read in, a turn opened higher up), unless the end is
   // kept in view: a few items in view are noted with where they are, and
@@ -709,6 +715,38 @@ export function ConversationView({
     jumpedTo.current = to
     note()
   }, [note])
+  // An item gone to from a search: opened where it is a run of steps, then
+  // (once laid out) brought to the top of the view as jump brings one;
+  // false, it is not among those read in.
+  const goTo = useCallback(
+    (key: string): boolean => {
+      const i = listNow.current.findIndex((it) => itemKey(it) === key)
+      if (i < 0) return false
+      if (listNow.current[i].kind === 'work') toggle(key, true)
+      requestAnimationFrame(() =>
+        requestAnimationFrame(() => {
+          const el = box.current
+          const c = col.current
+          if (!el || !c) return
+          const kids = [...c.children].filter((k) => !k.hasAttribute('data-aside'))
+          const to = kids[listNow.current.findIndex((it) => itemKey(it) === key)] as HTMLElement | undefined
+          if (!to) return
+          stuck.current = false
+          did.current.glide = false
+          setAway(true)
+          el.scrollTop += to.getBoundingClientRect().top - el.getBoundingClientRect().top - 8
+          did.current.set = el.scrollTop
+          jumpedTo.current = null
+          note()
+          to.classList.remove('convo-found')
+          void to.offsetWidth
+          to.classList.add('convo-found')
+        }),
+      )
+      return true
+    },
+    [note, toggle],
+  )
   // (The part before read in, with something in it: on up, once.)
   useEffect(() => {
     const was = upAfterOlder.current
@@ -732,6 +770,22 @@ export function ConversationView({
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [active, jump])
+  // Ctrl/⌘+F with the conversation in front (the focus in it, or nowhere):
+  // its own search, which knows what is folded away; elsewhere (the
+  // composer, a dialog) the browser's.
+  useEffect(() => {
+    if (!active || !more) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key.toLowerCase() !== 'f' || !(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey || e.isComposing || underDialog(e)) return
+      const at = document.activeElement
+      if (editable(e.target) || (at && at !== document.body && !root.current?.contains(at))) return
+      e.preventDefault()
+      setSearching(true)
+      requestAnimationFrame(() => root.current?.querySelector<HTMLInputElement>('.convo-search-input')?.focus())
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [active, more])
 
   // What was sent, not in the log yet (also before a new conversation's log is written).
   const pendingList = pending.map((p) => (
@@ -821,6 +875,41 @@ export function ConversationView({
   if (working && lastUser && now >= lastUser) status = t('convo.workingFor', { d: duration(now - lastUser) })
   if (agent?.bg) status = t(agent.bg === 'running' ? 'convo.status.bg' : agent.bg === 'stale' ? 'convo.status.bgStale' : 'convo.status.working')
   const name = agent ? [agent.title, agent.where].filter(Boolean) : []
+  // What is read in, as a Markdown file to keep (see convoExport).
+  const exporting = useRef<() => void>(() => {})
+  const doExport = () => {
+    exporting.current()
+    const title = name[0] || t('convo.title')
+    const when = (ts?: string | number) => (ts ? new Date(ts).toLocaleString(getLang()) : '')
+    exporting.current = exportMarkdown(
+      list,
+      {
+        title,
+        exported: when(Date.now()),
+        from: convo.older ? when(convo.entries[0]?.ts) || '?' : undefined,
+        you: t('convoExport.you'),
+        agent: t('convoExport.agent'),
+        summary: t('convoExport.summary'),
+        note: t('convoExport.note'),
+        thinking: t('convoExport.thinking'),
+        cut: t('convoExport.cut'),
+        image: t('convoExport.image'),
+        gone: t('convoExport.gone'),
+        tool: (n, what, state) => t('convoExport.tool', { name: n, what: what ? (getLang() === 'zh-CN' ? '：' : ': ') + what : '', state: t(state === 'running' ? 'convoExport.running' : state === 'failed' ? 'convoExport.failed' : 'convoExport.ok') }),
+        event: (p) => (p.event?.text ? p.event.text : t('convoExport.event')),
+        head: (tt, ex, from) => `# ${tt}\n\n${t('convoExport.head', { at: ex })}${from ? t('convoExport.from', { from }) : t('convoExport.whole')}`,
+      },
+      (md) => {
+        const a = document.createElement('a')
+        a.href = URL.createObjectURL(new Blob([md], { type: 'text/markdown;charset=utf-8' }))
+        a.download = (title.replace(/[\\/:*?"<>|\s]+/g, '-').slice(0, 60) || 'conversation') + '-' + new Date().toISOString().slice(0, 10) + '.md'
+        document.body.appendChild(a)
+        a.click()
+        a.remove()
+        setTimeout(() => URL.revokeObjectURL(a.href), 10000)
+      },
+    )
+  }
   const rows = side?.rows ?? []
   const others = rows.filter((r) => r.status === 'blocked' && !r.current)
   const label = (
@@ -926,7 +1015,11 @@ export function ConversationView({
           {more && (
             <Menu
               label={t('common.more')}
-              items={more}
+              items={() => [
+                { label: t('convoSearch.item'), onSelect: () => setSearching(true) },
+                { label: t('convoExport.item'), disabled: !list.length, onSelect: () => doExport() },
+                ...more().map((m, i) => (m && i === 0 ? { ...m, separator: true } : m)),
+              ]}
               button={(open, toggle) => (
                 <button type="button" className="icon-btn convo-bar-more" aria-expanded={open} onClick={toggle} aria-label={t('common.more')} title={t('common.more')}>
                   <MoreVertical size={18} />
@@ -935,6 +1028,15 @@ export function ConversationView({
             />
           )}
         </div>
+      )}
+      {searching && (
+        <ConvoSearchPanel
+          list={list}
+          onGo={goTo}
+          older={convo.older && !convo.olderCut ? { can: true, busy: convo.loadingOlder } : undefined}
+          onOlder={() => convo.loadOlder()}
+          onClose={() => setSearching(false)}
+        />
       )}
       {!sideShown && others.length > 0 && (
         // (Another agent waits: one tap to it, where the list is not in view.)
@@ -1223,6 +1325,27 @@ function Runs({ meta, active, mode, model, effort }: { meta: ConvoMeta; active: 
     return () => {
       document.removeEventListener('pointerdown', away, true)
       document.removeEventListener('keydown', onKey, true)
+    }
+  }, [open])
+  // (A pop-up open: no taller than the room above the line in what can be
+  // seen, the keyboard up too — a phone's view shrinks then, not its page.)
+  useEffect(() => {
+    if (!open) return
+    const vv = window.visualViewport
+    const fit = () => {
+      const pop = box.current?.querySelector<HTMLElement>('.convo-runs-pop')
+      if (!pop || !box.current) return
+      const top = box.current.getBoundingClientRect().top - (vv ? vv.offsetTop : 0)
+      pop.style.maxHeight = Math.max(120, Math.min(top, vv ? vv.height : window.innerHeight) - 16) + 'px'
+    }
+    fit()
+    vv?.addEventListener('resize', fit)
+    vv?.addEventListener('scroll', fit)
+    window.addEventListener('resize', fit)
+    return () => {
+      vv?.removeEventListener('resize', fit)
+      vv?.removeEventListener('scroll', fit)
+      window.removeEventListener('resize', fit)
     }
   }, [open])
   const used = meta.context ?? 0
@@ -2154,7 +2277,6 @@ function Missing({ look }: { look?: ConvoPending['look'] }) {
 }
 
 const noShow = () => {}
-const itemKey = (it: Item) => (it.kind === 'work' || it.kind === 'answer' || it.kind === 'text' || it.kind === 'gone' ? it.key : 'e' + it.e.seq)
 // (An item where it is: what the agent writes is the same text written
 // and, its turn over, its answer.)
 const placeKey = (it: Item) => itemKey(it).replace(/^[xa](?=\d)/, 'p')
