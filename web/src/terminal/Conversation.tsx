@@ -69,7 +69,8 @@ const SIDE_W_KEY = 'corral.convoSideWidth'
 const SIDE_W = 288
 const SIDE_W_MIN = 220
 const SIDE_W_MAX = 520
-const sideWidthOf = (w: number, view: number) => Math.round(Math.max(SIDE_W_MIN, Math.min(w, SIDE_W_MAX, view / 2)))
+const sideWidthMax = (view: number) => Math.min(SIDE_W_MAX, Math.floor(view / 2))
+const sideWidthOf = (w: number, view: number) => Math.max(SIDE_W_MIN, Math.min(Math.round(w), sideWidthMax(view)))
 const isTouchOnly = isCoarse()
 
 // A duration as the view says it: 45 s, 2 min 14 s, 1 h 5 min.
@@ -148,13 +149,25 @@ export function ConversationView({
   const [viewW, setViewW] = useState(0)
   const [sideW, setSideW] = useState(() => Number(local.get(SIDE_W_KEY)) || SIDE_W)
   const sideWidth = sideWidthOf(sideW, viewW || SIDE_MIN)
+  const sideEl = useRef<HTMLElement>(null)
   const keepSideW = (w: number) => {
     const v = sideWidthOf(w, viewW || SIDE_MIN)
     setSideW(v)
     if (v === SIDE_W) local.remove(SIDE_W_KEY)
     else local.set(SIDE_W_KEY, String(v))
+    if (sideEl.current) sideEl.current.style.width = v + 'px' // (as it is drawn: a drag sets it by hand)
+    return v
   }
-  const drag = useRef<{ x: number; w: number } | null>(null)
+  // (A drag sizes the list by its style, a frame at a time, and is told
+  // once, when it ends: the thread is not drawn again for each move.)
+  const drag = useRef<{ id: number; x: number; w: number; to: number; frame: number } | null>(null)
+  const endDrag = (keep: boolean) => {
+    const d = drag.current
+    if (!d) return
+    drag.current = null
+    cancelAnimationFrame(d.frame)
+    keepSideW(keep ? d.to : d.w)
+  }
   const [folded, setFoldedState] = useState(() => local.get(SIDE_KEY) === '0')
   const setFolded = (v: boolean) => {
     setFoldedState(v)
@@ -173,6 +186,12 @@ export function ConversationView({
     return () => ro.disconnect()
   }, [])
   const sideShown = !!side && wide && !folded
+  useEffect(() => {
+    if (!sideShown && drag.current) {
+      cancelAnimationFrame(drag.current.frame)
+      drag.current = null // (its edge gone mid-drag: what was dragged is let go)
+    }
+  }, [sideShown])
   const [picking, setPicking] = useState(false)
   const unpick = useCallback(() => setPicking(false), [])
   useEffect(() => {
@@ -808,7 +827,7 @@ export function ConversationView({
   return (
     <div className="convo" role="region" aria-label={t('convo.title')} ref={root}>
       {sideShown && (
-        <nav className="convo-side" aria-label={t('convo.agents')} style={{ width: sideWidth }}>
+        <nav className="convo-side" aria-label={t('convo.agents')} style={{ width: sideWidth }} ref={sideEl}>
           <button type="button" className="btn btn-ghost convo-side-new" onClick={() => window.dispatchEvent(new Event(NEW_AGENT))}>
             <Plus size={15} aria-hidden="true" />
             {t('newAgent.title')}
@@ -826,26 +845,32 @@ export function ConversationView({
           title={t('convo.sideWidth')}
           aria-valuenow={sideWidth}
           aria-valuemin={SIDE_W_MIN}
-          aria-valuemax={Math.round(Math.min(SIDE_W_MAX, (viewW || SIDE_MIN) / 2))}
+          aria-valuemax={sideWidthMax(viewW || SIDE_MIN)}
           tabIndex={0}
           onPointerDown={(e) => {
-            if (e.button !== 0) return
+            if (e.button !== 0 || drag.current) return // (one pointer at a time)
             e.preventDefault()
             e.currentTarget.setPointerCapture(e.pointerId)
-            drag.current = { x: e.clientX, w: sideWidth }
+            drag.current = { id: e.pointerId, x: e.clientX, w: sideWidth, to: sideWidth, frame: 0 }
           }}
           onPointerMove={(e) => {
-            if (drag.current) setSideW(sideWidthOf(drag.current.w + e.clientX - drag.current.x, viewW || SIDE_MIN))
+            const d = drag.current
+            if (!d || e.pointerId !== d.id) return
+            if (e.pointerType === 'mouse' && e.buttons === 0) return endDrag(true) // (let go where no word of it came: outside the window)
+            d.to = sideWidthOf(d.w + e.clientX - d.x, viewW || SIDE_MIN)
+            cancelAnimationFrame(d.frame)
+            d.frame = requestAnimationFrame(() => {
+              if (sideEl.current) sideEl.current.style.width = d.to + 'px'
+            })
           }}
           onPointerUp={(e) => {
-            if (!drag.current) return
-            const w = drag.current.w + e.clientX - drag.current.x
-            drag.current = null
-            keepSideW(w)
+            if (drag.current?.id === e.pointerId) endDrag(true)
           }}
-          onPointerCancel={() => {
-            if (drag.current) keepSideW(drag.current.w)
-            drag.current = null
+          onPointerCancel={(e) => {
+            if (drag.current?.id === e.pointerId) endDrag(false)
+          }}
+          onLostPointerCapture={(e) => {
+            if (drag.current?.id === e.pointerId) endDrag(true)
           }}
           onDoubleClick={() => keepSideW(SIDE_W)}
           onKeyDown={(e) => {
