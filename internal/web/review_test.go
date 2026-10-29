@@ -599,6 +599,16 @@ func TestSettingsPatchOrderingValidationAndAccount(t *testing.T) {
 	mustStatus(t, patch("pageAAAA", 3, map[string]any{"tapKeyboard": "yes"}), 400, "tapKeyboard not a boolean")
 	mustStatus(t, patch("pageAAAA", 3, map[string]any{"customKeys": []map[string]string{{"label": "新窗口", "keys": "C-b c"}}}), 200, "custom keys")
 	mustStatus(t, patch("pageAAAA", 3, map[string]any{"customKeys": []any{}}), 200, "no custom keys")
+	// Agents pinned on the agents page (4b): keys, none twice, at most 20.
+	mustStatus(t, patch("pageAAAA", 3, map[string]any{"pinnedAgents": []string{"3||w4AA:p1", "3|work|w1:p2"}}), 200, "pinned agents")
+	mustStatus(t, patch("pageAAAA", 3, map[string]any{"pinnedAgents": []string{}}), 200, "none pinned")
+	many := make([]string, 21)
+	for i := range many {
+		many[i] = fmt.Sprintf("3||w%d:p1", i)
+	}
+	for name, v := range map[string]any{"twice": []string{"a", "a"}, "too many": many, "empty key": []string{""}, "too long": []string{strings.Repeat("x", 201)}, "control": []string{"a\nb"}, "not a list": "a", "numbers": []int{1}} {
+		mustStatus(t, patch("pageAAAA", 3, map[string]any{"pinnedAgents": v}), 400, "pinned: "+name)
+	}
 	for name, v := range map[string]any{
 		"not a list":    "C-b c",
 		"long label":    []map[string]string{{"label": strings.Repeat("字", 13), "keys": "x"}},

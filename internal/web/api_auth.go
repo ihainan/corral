@@ -261,6 +261,7 @@ var settingRules = map[string]func(json.RawMessage) bool{
 	"composerEnter":   oneOf("send", "newline"),
 	"customKeys":      customKeys,
 	"keyLayout":       keyLayout,
+	"pinnedAgents":    pinnedAgents,
 	"webhook":         webhookURL,
 }
 
@@ -328,6 +329,30 @@ func customKeys(raw json.RawMessage) bool {
 		if !text(k.Label, 12) || !text(k.Keys, 200) {
 			return false
 		}
+	}
+	return true
+}
+
+// maxPinned: how many agents may be pinned at the top of the agents page.
+const maxPinned = 20
+
+// pinnedAgents are the agents pinned at the top of the agents page, in the
+// order they were pinned: each by its key (web/src/terminal/sessionName.ts
+// agentKey: host, herdr session, pane), none twice.
+func pinnedAgents(raw json.RawMessage) bool {
+	if len(raw) > 16<<10 {
+		return false
+	}
+	var v []string
+	if json.Unmarshal(raw, &v) != nil || v == nil || len(v) > maxPinned {
+		return false
+	}
+	seen := map[string]bool{}
+	for _, k := range v {
+		if len(k) < 1 || len(k) > 200 || !utf8.ValidString(k) || strings.ContainsFunc(k, unicode.IsControl) || seen[k] {
+			return false
+		}
+		seen[k] = true
 	}
 	return true
 }

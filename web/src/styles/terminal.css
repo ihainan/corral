@@ -907,10 +907,10 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
    conversation's bar; the list can be dragged wider): rows of one height
    are quicker to run the eye down. */
 .convo-list-title {
-  flex: 1; min-width: 0; font-size: 14px; font-weight: 500; line-height: 20px;
+  flex: 0 1 auto; min-width: 0; font-size: 14px; font-weight: 500; line-height: 20px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.convo-list-when { flex: none; min-width: 4.6em; text-align: end; font-size: 11.5px; color: var(--term-fg-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.convo-list-when { flex: none; margin-left: auto; min-width: 4.6em; text-align: end; font-size: 11.5px; color: var(--term-fg-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
 /* The one being read is marked by its colour alone: heavier letters take
    more room, and a name that just fitted one line would wrap on going to
    it, growing the row under the finger. */
@@ -1021,7 +1021,8 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .agents-list-row:active { background: var(--term-hover); }
 .agents-list-row.is-blocked { background: color-mix(in srgb, var(--term-warn-text) 10%, var(--term-bg)); }
 .agents-list-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-.agents-list-title { font-size: 15.5px; line-height: 22px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agents-list-title { display: flex; align-items: center; gap: 4px; min-width: 0; font-size: 15.5px; line-height: 22px; font-weight: 500; }
+.agents-list-title-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .agents-list-where { font-size: 13px; line-height: 18px; color: var(--term-fg-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .agents-list-side { flex: none; max-width: 40%; font-size: 13px; color: var(--term-fg-3); text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .agents-list-side.is-blocked { color: var(--term-warn-text); font-weight: 600; }
@@ -1222,3 +1223,6 @@ button.convo-running-what { padding: 0; text-align: left; }
 .page-keys kbd { font: 12px/20px var(--font-mono); padding: 0 6px; border: 1px solid var(--line-strong); border-radius: 5px; background: var(--bg-subtle); color: var(--fg); white-space: pre; }
 .page-keys-note { margin: 12px 0 0; font-size: 13px; line-height: 1.5; color: var(--fg-3); }
 @media (max-width: 480px) { .page-keys-row dt { width: 120px; } }
+.convo-list-pin { flex: none; display: inline-flex; align-items: center; color: var(--fg-3); }
+/* (Beside its title, not off by the time: the line's gap is wider than it wants.) */
+.convo-list-line .convo-list-pin { align-self: center; margin-left: -4px; color: var(--term-fg-3); }

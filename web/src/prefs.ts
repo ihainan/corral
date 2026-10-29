@@ -24,6 +24,7 @@ export interface Prefs {
   composerEnter: 'send' | 'newline' // what Enter does in the composer, on a computer (Shift+Enter, ⌘/Ctrl+Enter the other)
   customKeys: CustomKey[] // the user's own keys on the key bar, from before layouts (see keyLayout)
   keyLayout: KeyLayout | null // the key bar's keys, once the user arranged them; null: the default (see terminal/layout.ts)
+  pinnedAgents: string[] // agents pinned at the top of the agents page, by their keys (terminal/sessionName.ts agentKey), in the order pinned
 }
 
 // A key of one's own: what it is called on the key bar, and what it sends
@@ -33,10 +34,11 @@ export interface CustomKey {
   keys: string
 }
 export const maxCustomKeys = 24
+export const maxPinned = 20 // (as the server's maxPinned)
 
 // Phones get a slightly smaller default so common output fits without wrapping.
 const phone = window.matchMedia('(pointer: coarse) and (max-width: 599px)').matches
-const defaults: Prefs = { theme: 'system', termTheme: 'corral-dark', termThemeDark: 'corral-dark', termThemeLight: 'corral-light', fontSize: phone ? 13 : 14, keybar: true, optionIsMeta: true, webgl: false, remoteClipboard: true, tapKeyboard: false, composerEnter: 'send', customKeys: [], keyLayout: null }
+const defaults: Prefs = { theme: 'system', termTheme: 'corral-dark', termThemeDark: 'corral-dark', termThemeLight: 'corral-light', fontSize: phone ? 13 : 14, keybar: true, optionIsMeta: true, webgl: false, remoteClipboard: true, tapKeyboard: false, composerEnter: 'send', customKeys: [], keyLayout: null, pinnedAgents: [] }
 
 // The local copy is kept per account (several people may share a device);
 // until the account is known the last one used here paints the first frame.
@@ -246,6 +248,8 @@ function sanitize(raw: unknown): Partial<Prefs> {
   }
   const layout = sanitizeLayout(o.keyLayout)
   if (layout) out.keyLayout = layout
+  // (As the server checks them: at most maxPinned, none twice.)
+  if (Array.isArray(o.pinnedAgents) && o.pinnedAgents.length <= maxPinned && o.pinnedAgents.every((k) => typeof k === 'string' && k.length >= 1 && k.length <= 200 && !controlChars.test(k)) && new Set(o.pinnedAgents).size === o.pinnedAgents.length) out.pinnedAgents = [...(o.pinnedAgents as string[])]
   return out
 }
 

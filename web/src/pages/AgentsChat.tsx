@@ -1,10 +1,10 @@
 import { useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type ReactNode } from 'react'
-import { ArrowUp, ChevronLeft, FoldVertical, History, MessageSquarePlus, Paperclip, Pencil, Power, Square, SquareTerminal, X, Plus } from 'lucide-react'
+import { ArrowUp, ChevronLeft, FoldVertical, History, MessageSquarePlus, Paperclip, Pencil, Pin, PinOff, Power, Square, SquareTerminal, X, Plus } from 'lucide-react'
 import { api, ApiError, authGen, errorText, uploadFile, type SessionInfo } from '../api'
 import { t, type I18nKey } from '../i18n'
 import { navigate, onNavigate } from '../router'
 import { onOpenRequest } from '../notifyopen'
-import { isDark, setChromeColor, usePrefs } from '../prefs'
+import { isDark, maxPinned, setChromeColor, setPrefs, usePrefs } from '../prefs'
 import { local } from '../storage'
 import { CLOSE_MENUS, Confirm, Menu, useToast, type MenuItem } from '../components/ui'
 import { chromeVars, corralDark, corralLight } from '../terminal/themes'
@@ -678,6 +678,10 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   // known. (Not again till then: looked at or answered, it would move.)
   const [placedAs, setPlacedAs] = useState<ConvoListRow['placeAs']>(undefined)
   // The list beside the thread (or from the bar on a narrow screen).
+  // Pinned at the top (prefs, so on every device of the account): by key,
+  // which no reconnect or gateway restart changes (see agentKey, tmuxKey).
+  const pins = usePrefs().pinnedAgents
+  const pinAt = (key: string) => (pins.includes(key) ? pins.indexOf(key) : undefined)
   const rows = useMemo((): ConvoListRow[] => {
     const hosts = hostCount(entries)
     const out = entries.map((e): ConvoListRow => {
@@ -690,13 +694,14 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       if (e.row) {
         const r = e.row
         const said = (current && agent?.title) || keptTitle(titles, e) || paneTitle(r.a.title) || r.a.agent
-        return { key: e.key, ...labelOf(e, said, hosts), program: r.a.agent, status: current && agent && !r.bg ? agent.status : r.status, bg: r.lost ? undefined : r.bg, since: r.lost ? undefined : r.bg ? r.a.bg_since : r.a.since, current, onPick: () => onPick(e) }
+        return { key: e.key, ...labelOf(e, said, hosts), program: r.a.agent, status: current && agent && !r.bg ? agent.status : r.status, bg: r.lost ? undefined : r.bg, since: r.lost ? undefined : r.bg ? r.a.bg_since : r.a.since, current, pinned: pinAt(e.key), onPick: () => onPick(e) }
       }
       const title = (current && agent?.title) || keptTitle(titles, e) || `${e.s.host_name} · ${sessionWhich(e.s, all)}`
-      return { key: e.key, title, where: whereOf(e, hosts), program: current ? agent?.program : undefined, status: current && agent ? agent.status : 'unknown', current, onPick: () => onPick(e) }
+      return { key: e.key, title, where: whereOf(e, hosts), program: current ? agent?.program : undefined, status: current && agent ? agent.status : 'unknown', current, pinned: pinAt(e.key), onPick: () => onPick(e) }
     })
     return placedAs ? out.map((r) => (r.current ? { ...r, placeAs: placedAs } : r)) : out
-  }, [entries, cur, agent, convo.title, all, titles, onPick, placedAs])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [entries, cur, agent, convo.title, all, titles, onPick, placedAs, pins])
   const shown = rows.find((r) => r.current)
   const known = !!shown && shown.status !== 'unknown'
   useEffect(() => {
@@ -1502,8 +1507,18 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       convo.refresh()
     })
   }
+  const pinnedNow = pins.includes(cur.key)
   const more = (): (MenuItem | null)[] => [
     { label: t('convo.showTerminal'), icon: <SquareTerminal size={16} />, onSelect: openTerminal },
+    {
+      label: t(pinnedNow ? 'agents.unpin' : 'agents.pin'),
+      icon: pinnedNow ? <PinOff size={16} /> : <Pin size={16} />,
+      onSelect: () => {
+        if (pinnedNow) return setPrefs({ pinnedAgents: pins.filter((k) => k !== cur.key) })
+        if (pins.length >= maxPinned) return toast(t('agents.pinFull', { n: maxPinned }), true)
+        setPrefs({ pinnedAgents: [...pins, cur.key] })
+      },
+    },
     ...(['compact', 'rename', 'clear'] as const).map((o, i): MenuItem | null =>
       !notClaude && bound ? { label: t(`ops.${o}.item`), icon: OP_ICONS[o], separator: i === 0, disabled: !canOps, title: canOps ? undefined : t('ops.onlyIdle'), onSelect: () => convo.bind && setOp({ op: o, bind: convo.bind, key: bindKey }) } : null,
     ),
@@ -1628,7 +1643,10 @@ function PhoneList({ entries, all, titles, query, onQuery, onPick }: { entries: 
     })
   }, [entries])
   const byKey = new Map(entries.map((e) => [e.key + ' ' + e.s.id, e]))
-  const list = order.flatMap((k) => (byKey.has(k) ? [byKey.get(k)!] : []))
+  // (Those pinned first, in the order pinned, as the side list has them.)
+  const pins = usePrefs().pinnedAgents
+  const inOrder = order.flatMap((k) => (byKey.has(k) ? [byKey.get(k)!] : []))
+  const list = [...pins.flatMap((p) => inOrder.filter((e) => e.key === p)), ...inOrder.filter((e) => !pins.includes(e.key))]
   const n = (st: string) => entries.filter((e) => e.row?.status === st).length
   const waiting = n('blocked')
   const working = n('working')
@@ -1683,7 +1701,15 @@ function PhoneList({ entries, all, titles, query, onQuery, onPick }: { entries: 
               <button type="button" className={'agents-list-row is-' + status} onClick={() => onPick(e)}>
                 <AgentIcon program={r?.a.agent} size={36} dot={r?.bg === 'running' && !r.lost ? 'bg' : status === 'blocked' || status === 'working' || status === 'done' ? status : undefined} />
                 <span className="agents-list-text">
-                  <span className="agents-list-title">{title}</span>
+                  <span className="agents-list-title">
+                    <span className="agents-list-title-text">{title}</span>
+                    {pins.includes(e.key) && (
+                      <span className="convo-list-pin">
+                        <Pin size={12} aria-hidden="true" />
+                        <span className="sr-only">{t('convo.pinnedRow')}</span>
+                      </span>
+                    )}
+                  </span>
                   {/* (Done and not seen, or at work: said by its dot, its time beside it, as the
                       side list does; in words for a screen reader, and where forced colours take the dot's.) */}
                   {status === 'done' && since && <span className="convo-list-status">{t('agents.unseen')}</span>}
