@@ -5,6 +5,7 @@ import { t, type I18nKey } from '../i18n'
 import { navigate, onNavigate } from '../router'
 import { onOpenRequest } from '../notifyopen'
 import { isDark, maxPinned, setChromeColor, setPrefs, usePrefs } from '../prefs'
+import { pinGone } from '../terminal/agentOrder'
 import { local } from '../storage'
 import { CLOSE_MENUS, Confirm, Menu, useToast, type MenuItem } from '../components/ui'
 import { chromeVars, corralDark, corralLight } from '../terminal/themes'
@@ -1520,9 +1521,9 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
         // for a while keeps its pins till then.)
         if (pins.length >= maxPinned) {
           const here = new Set(entries.map((e) => e.key))
-          const gone = pins.filter((k) => !here.has(k))
+          const gone = pins.filter((k) => !here.has(k) && pinGone(k, all))
           if (!gone.length) return toast(t('agents.pinFull', { n: maxPinned }), true)
-          setPrefs({ pinnedAgents: [...pins.filter((k) => here.has(k)), cur.key] })
+          setPrefs({ pinnedAgents: [...pins.filter((k) => !gone.includes(k)), cur.key] })
           return toast(t('agents.pinCleared', { n: gone.length }))
         }
         setPrefs({ pinnedAgents: [...pins, cur.key] })
