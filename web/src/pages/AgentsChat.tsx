@@ -1531,6 +1531,17 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       side={{ rows }}
       active={active}
       onDismiss={(id) => setSent((ps) => ps.filter((p) => p.id !== id))}
+      onEnter={async (id) => {
+        const p = sent.find((q) => q.id === id)
+        if (!p) return false
+        const r = await api<{ pressed: boolean }>('POST', `/api/sessions/${sid}/conversation/sent-enter`, { ...pressBody(), text: p.text }, { timeoutMs: PRESS_MS })
+        if (r.pressed) {
+          // (Waited for in the log again, as when it was sent.)
+          lookedAt.delete(id)
+          setSent((ps) => ps.map((q) => (q.id === id ? { ...q, state: 'waiting' as const, look: undefined, at: Date.now() } : q)))
+        }
+        return r.pressed
+      }}
       onShowTerminal={openTerminal}
       onCopied={() => toast(t('common.copied'))}
       composer={composer}

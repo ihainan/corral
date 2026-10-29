@@ -2270,6 +2270,8 @@ var convoKeys = map[string]struct {
 	// Looking for a message that was typed and has not turned up in the
 	// log: nothing is pressed, the screen is read (see convo_sent.go).
 	"sent_missing": {"convo.sent_missing", nil, nil},
+	// Enter for such a message, seen still in the input (see convo_sent.go).
+	"sent_enter": {"convo.sent_enter", nil, nil},
 	// Claude Code's suggestion of the next message: nothing is pressed, the
 	// screen is read with its colours (see convo_suggest.go).
 	"suggest": {"convo.suggest", nil, nil},
@@ -2460,7 +2462,7 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	text, textOK := sendText(b.Text)
 	if what == "command" {
 		text, textOK = commandText(b.Text)
-	} else if what != "send" && what != "sent_missing" && what != "reply" {
+	} else if what != "send" && what != "sent_missing" && what != "sent_enter" && what != "reply" {
 		textOK = b.Text == ""
 	}
 	if what == "reply" {
@@ -2666,6 +2668,17 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		release := turn
 		turn = func() {} // (the screen read gives it back, once it has ended on the host)
 		s.sentMissing(w, ctx, sess, b.Pane, socket, text, &outcome, &reason, release)
+		return
+	}
+	if what == "sent_enter" {
+		if front.agent != "claude" {
+			outcome, reason = "refused", "not_claude"
+			writeError(w, http.StatusConflict, "not_claude", "only Claude Code's input box can be told apart")
+			return
+		}
+		release := turn
+		turn = func() {} // (given back once its commands have ended on the host)
+		s.sentEnter(w, ctx, sess, b.Pane, socket, b.PID, b.Start, b.Session, text, &outcome, &reason, release)
 		return
 	}
 	if what == "screen" {

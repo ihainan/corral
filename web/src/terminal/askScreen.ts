@@ -44,11 +44,23 @@ function lastLines(text: string): string[] {
   return lines.slice(-60)
 }
 
-function options(lines: string[]): ScreenOption[] {
+// (beside: previews drawn beside the choices, so a label too long for its
+// column goes on, wrapped, on the lines under it, before the next choice;
+// they are taken in. Without previews, the lines under a choice are its
+// description, not its label.)
+function options(lines: string[], beside = false): ScreenOption[] {
   const out: ScreenOption[] = []
+  let wrapping = false
   for (const l of lines) {
-    const m = optionLine.exec(besideAt(l))
-    if (!m) continue
+    const left = besideAt(l)
+    const m = optionLine.exec(left)
+    if (!m) {
+      const more = left.trim()
+      if (beside && wrapping && more && !/^Notes: press n/.test(more) && /^\s{3,}/.test(left)) out[out.length - 1].label += (/[\x21-\x7e]$/.test(out[out.length - 1].label) && /^[\x21-\x7e]/.test(more) ? ' ' : '') + more
+      else wrapping = false
+      continue
+    }
+    wrapping = true
     out.push({ n: Number(m[2]), label: m[4], cursor: !!m[1], ...(m[3] !== undefined ? { ticked: m[3] === '✔' } : {}) })
   }
   return out
@@ -79,17 +91,19 @@ export function readAskScreen(text: string): AskScreen {
     const block = end >= 0 ? body.slice(0, end) : body
     const first = block.findIndex((l) => optionLine.test(besideAt(l)))
     if (first <= 0) return { kind: 'unknown' }
+    // (A long question is drawn with a bar at its left, "│", on each line.)
     const question = block
       .slice(0, first)
-      .map((l) => l.trim())
+      .map((l) => l.replace(/^\s*\u2502\s?/, '').trim())
       .filter(Boolean)
       .join(' ')
-    const opts = options(block.slice(first))
+    const besideNow = block.slice(first).some((l) => /\s{3,}[\u2500-\u257f]/.test(l)) || block.some((l) => /Notes: press n/.test(l))
+    const opts = options(block.slice(first), besideNow)
     const sub = block.slice(first).find((l) => /^\s*(❯\s*)?Submit\s*$/.test(l))
     if (!question || !whole(opts, !!sub && /❯/.test(sub))) return { kind: 'unknown' }
     const own = opts.find((o) => ownLabel.test(o.label))?.n
     const multi = opts.some((o) => o.ticked !== undefined)
-    const beside = block.slice(first).some((l) => /\s{3,}[\u2500-\u257f]/.test(l)) || block.some((l) => /Notes: press n/.test(l))
+    const beside = besideNow
     // (Tabs of one question shown as one: a lone question.)
     return { kind: 'question', tabs: tabs.length > 1 ? tabs : [], question, options: opts, ...(own ? { own } : {}), multi, beside, ...(sub ? { submit: { cursor: /❯/.test(sub) } } : {}) }
   }
@@ -121,5 +135,7 @@ export function readAskScreen(text: string): AskScreen {
   return { kind: 'unknown' }
 }
 
-// The same words, however the screen wrapped or spaced them.
-export const sameWords = (a: string, b: string) => a.replace(/\s+/g, ' ').trim() === b.replace(/\s+/g, ' ').trim()
+// The same words, however the screen wrapped or spaced them (a line broken
+// within a word, as a long path is, puts a space in it when joined: spaces
+// are not counted at all).
+export const sameWords = (a: string, b: string) => a.replace(/\s+/g, '') === b.replace(/\s+/g, '')

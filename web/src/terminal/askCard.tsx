@@ -38,7 +38,7 @@ export function askOn(call: ConvoTool | undefined, s: AskScreen): number {
 
 // (The screen may cut a long label short: then only where the start it
 // shows is of that label alone.)
-const flat = (x: string) => x.replace(/\s+/g, ' ').trim()
+const flat = (x: string) => x.replace(/\s+/g, '')
 function sameLabel(shown: string, asked: string, all: string[]): boolean {
   if (sameWords(shown, asked)) return true
   if (!shown.endsWith('…')) return false

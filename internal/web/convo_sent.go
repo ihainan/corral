@@ -82,20 +82,94 @@ func (s *Server) enterAgain(ctx context.Context, sess *term.Session, pane, socke
 	if sess.Persistence == "tmux" {
 		enter = []string{"Enter"}
 	}
-	for range 2 {
-		if !stillTyped(screen, text) {
-			return
-		}
+	press := func(ctx context.Context) bool {
 		slog.Info("conversation: message still in the input, Enter again", "session", sess.ID, "pane", pane)
 		ended.Add(1)
 		// (Not while it waits: the Enter would be a question's.)
 		res, err := sshx.Exec(ctx, sess.Client(), convoGatedCommand("free", sess.Persistence, sess.TmuxSession, pane, socket, pid, start, sid, 0, enter, sendLines), sendOut,
 			sshx.ExecOptions{Stdin: strings.NewReader(""), Release: ended.Done})
 		if err != nil {
-			return
+			return false
 		}
 		screen = string(res.Out)
+		return true
 	}
+	for range 2 {
+		if !stillTyped(screen, text) || !press(ctx) {
+			break
+		}
+	}
+	// A moment on, looked at once more: a message typed as the agent was
+	// ending its turn (its hooks running, a card of its own being drawn)
+	// was not yet in its box when looked at right after the Enter, and the
+	// Enter was lost; seen there now, Enter once more. (Beside the send's
+	// answer, not before it; the send's turn held until it is done.)
+	ended.Add(1)
+	go func() {
+		defer ended.Done()
+		lctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), enterLater+10*time.Second)
+		defer cancel()
+		select {
+		case <-lctx.Done():
+			return
+		case <-time.After(enterLater):
+		}
+		ended.Add(1)
+		res, err := sshx.Exec(lctx, sess.Client(), convoScreenCommand(sess.Persistence, pane, socket), 256<<10, sshx.ExecOptions{Release: ended.Done})
+		if err == nil && stillTyped(string(res.Out), text) {
+			press(lctx)
+		}
+	}()
+}
+
+// enterLater: how long after a send its input box is looked at once more.
+const enterLater = 2500 * time.Millisecond
+
+// sentEnter: Enter pressed for a message the person was told is still in
+// the input box — only where the screen, read now, shows it there (the box
+// in front, holding it from its start: see stillTyped); pressed tells.
+func (s *Server) sentEnter(w http.ResponseWriter, ctx context.Context, sess *term.Session, pane, socket string, pid, start int64, sid, text string, outcome, reason *string, release func()) {
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	var held sync.WaitGroup
+	held.Add(1)
+	defer func() {
+		go func() {
+			held.Wait()
+			release()
+		}()
+	}()
+	res, err := sshx.Exec(ctx, sess.Client(), convoScreenCommand(sess.Persistence, pane, socket), 256<<10, sshx.ExecOptions{Release: held.Done})
+	if err != nil {
+		*outcome, *reason = "unknown", "no_screen"
+		writeError(w, http.StatusBadGateway, "no_screen", "the pane's screen could not be read")
+		return
+	}
+	if !stillTyped(string(res.Out), text) {
+		*outcome, *reason = "refused", "not_in_input"
+		writeJSON(w, http.StatusOK, map[string]any{"pressed": false})
+		return
+	}
+	enter := []string{"enter"}
+	if sess.Persistence == "tmux" {
+		enter = []string{"Enter"}
+	}
+	held.Add(1)
+	_, err = sshx.Exec(ctx, sess.Client(), convoGatedCommand("free", sess.Persistence, sess.TmuxSession, pane, socket, pid, start, sid, 0, enter, sendLines), sendOut,
+		sshx.ExecOptions{Stdin: strings.NewReader(""), Release: held.Done})
+	if err != nil {
+		*outcome, *reason = "unknown", "no_answer"
+		writeError(w, http.StatusBadGateway, "no_answer", "the host did not answer")
+		return
+	}
+	*outcome = "pressed"
+	writeJSON(w, http.StatusOK, map[string]any{"pressed": true})
+}
+
+// POST /api/sessions/{id}/conversation/sent-enter (the same body as a
+// send, with the message still in the input box): Enter, where it is.
+func (s *Server) apiConversationSentEnter(w http.ResponseWriter, r *http.Request) {
+	s.convoPress(w, r, "sent_enter")
 }
 
 // stillTyped: what Enter would now be pressed on is the message itself —

@@ -108,6 +108,7 @@ export function ConversationView({
   side,
   active = true,
   onDismiss,
+  onEnter,
   onShowTerminal,
   onCopied,
   composer,
@@ -131,6 +132,7 @@ export function ConversationView({
   side?: { rows: ConvoListRow[] } // the agents to go to: beside the thread where there is room, else from the bar
   active?: boolean // (its tab is the one shown: keys are for it)
   onDismiss: (id: number) => void
+  onEnter?: (id: number) => Promise<boolean> // (a message seen still in the input: Enter for it, where it still is)
   onShowTerminal: () => void
   onCopied: () => void
   composer?: ReactNode // (the terminal's composer, while it is open)
@@ -830,7 +832,7 @@ export function ConversationView({
           <button type="button" className="link-btn" onClick={() => onDismiss(p.id)}>{t('common.close')}</button>
         )}
       </div>
-      {p.state === 'unseen' && <Missing look={p.look} />}
+      {p.state === 'unseen' && <Missing look={p.look} onEnter={onEnter && (() => onEnter(p.id))} />}
     </div>
   ))
   let body: ReactNode
@@ -2305,14 +2307,35 @@ function resetsAt(sec: number): string {
 // log, read off the pane's own screen when it did not: it settles whether
 // the words are still sitting in the input, which nothing else can say
 // afterwards. The screen is shown on a tap, since it is what was looked at.
-function Missing({ look }: { look?: ConvoPending['look'] }) {
+function Missing({ look, onEnter }: { look?: ConvoPending['look']; onEnter?: () => Promise<boolean> }) {
   const [open, setOpen] = useState(false)
+  // (Enter pressed from here: under way, or what became of it.)
+  const [entering, setEntering] = useState<'' | 'busy' | 'gone' | 'failed'>('')
   if (!look) return null
   if (look === 'looking') return <p className="convo-missing" role="status">{t('convo.missing.looking')}</p>
   if (look === 'failed') return <p className="convo-missing">{t('convo.missing.failed')}</p>
+  const canEnter = !!onEnter && look.known && look.waiting
   return (
     <div className="convo-missing">
-      <p>{t(!look.known ? 'convo.missing.unsure' : look.waiting ? 'convo.missing.waiting' : 'convo.missing.taken')}</p>
+      <p>{t(!look.known ? 'convo.missing.unsure' : look.waiting ? (canEnter ? 'convo.missing.waitingEnter' : 'convo.missing.waiting') : 'convo.missing.taken')}</p>
+      {canEnter && (
+        <button
+          type="button"
+          className="btn btn-ghost convo-missing-enter"
+          disabled={entering === 'busy'}
+          onClick={() => {
+            setEntering('busy')
+            onEnter!().then(
+              (pressed) => setEntering(pressed ? '' : 'gone'),
+              () => setEntering('failed'),
+            )
+          }}
+        >
+          {entering === 'busy' ? t('convo.missing.entering') : t('convo.missing.enter')}
+        </button>
+      )}
+      {entering === 'gone' && <p role="status">{t('convo.missing.enterGone')}</p>}
+      {entering === 'failed' && <p role="alert">{t('convo.missing.enterFailed')}</p>}
       <button type="button" className="link-btn" aria-expanded={open} onClick={() => setOpen(!open)}>
         {t(open ? 'convo.missing.hide' : 'convo.missing.show')}
       </button>
