@@ -9,7 +9,7 @@ import { NEW_AGENT } from './newAgent'
 import { Code } from './Code'
 import { AgentIcon } from './agentIcons'
 import { matchQuery } from './agents'
-import type { Convo, ConvoEntry, ConvoHunk, ConvoMeta, ConvoPart, ConvoQueued, ConvoRunning, ConvoTask, ConvoTool, ConvoTrouble, ConvoEvent } from './conversation'
+import type { Convo, ConvoCost, ConvoEntry, ConvoHunk, ConvoMeta, ConvoPart, ConvoQueued, ConvoRunning, ConvoTask, ConvoTool, ConvoTrouble, ConvoEvent } from './conversation'
 import { category, isNote, items, ms, partTime, sameEdits, toolName, verbOf, type Category, type Edits, type Item, type Verb } from './convoItems'
 
 // The conversation view: the agent's log as turns, over the terminal (which
@@ -1440,8 +1440,46 @@ function Runs({ meta, active, mode, model, effort }: { meta: ConvoMeta; active: 
               ? t(meta.window_by === 'model' ? 'convo.ctxNoteModel' : meta.window_by === 'request' ? 'convo.ctxNoteWide' : 'convo.ctxNoteSaid', { w: tokens(known) })
               : t(windows.length > 1 ? 'convo.ctxNote' : 'convo.ctxNoteBig')}
           </p>
+          {(meta.cost || /claude/i.test(meta.model ?? '')) && <CostPart cost={meta.cost} />}
         </div>
       )}
+    </div>
+  )
+}
+
+// What the session used, as Claude Code's log last said it (cost-state):
+// its tokens by model and its estimated cost, with when that was said.
+function CostPart({ cost }: { cost?: ConvoCost }) {
+  if (!cost) return <p className="convo-runs-note convo-cost-none">{t('convo.costNone')}</p>
+  const at = cost.at ? new Date(cost.at).toLocaleTimeString(getLang(), { hour: '2-digit', minute: '2-digit' }) : ''
+  const money = (n: number) => '$' + (n < 10 ? n.toFixed(2) : n.toFixed(1))
+  return (
+    <div className="convo-cost">
+      <div className="convo-runs-row convo-cost-head">
+        <span>{at ? t('convo.costTitleAt', { at }) : t('convo.costTitle')}</span>
+        <span>{money(cost.usd)}</span>
+      </div>
+      {(cost.models ?? []).map((m) => (
+        <div key={m.model} className="convo-cost-model">
+          <div className="convo-runs-row">
+            <span className="convo-cost-name">{modelName(m.model)}</span>
+            <span>{money(m.usd ?? 0)}</span>
+          </div>
+          <div className="convo-cost-tokens">
+            {t('convo.costTokens', { i: tokens(m.in ?? 0), o: tokens(m.out ?? 0), r: tokens(m.cache_read ?? 0), w: tokens(m.cache_write ?? 0) })}
+          </div>
+        </div>
+      ))}
+      {(!!cost.added || !!cost.removed) && (
+        <div className="convo-runs-row">
+          <span>{t('convo.costLines')}</span>
+          <span>
+            +{cost.added ?? 0} −{cost.removed ?? 0}
+          </span>
+        </div>
+      )}
+      {cost.unknown && <p className="convo-runs-note">{t('convo.costUnknown')}</p>}
+      <p className="convo-runs-note">{t('convo.costNote')}</p>
     </div>
   )
 }

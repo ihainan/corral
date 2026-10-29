@@ -1109,3 +1109,29 @@ button.convo-running-what { padding: 0; text-align: left; }
 .new-agent-oldrow.on { border-color: var(--accent, #3b6cf6); background: var(--bg-subtle); }
 .new-agent-oldtitle { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .new-agent-oldwhen { flex: none; color: var(--fg-3); font-size: 12px; }
+
+/* The input history on the host: what was sent, a page at a time, to put back in the composer */
+.host-history { display: flex; flex-direction: column; gap: 10px; }
+.host-history-list { display: flex; flex-direction: column; gap: 4px; max-height: min(52vh, 460px); overflow: auto; overscroll-behavior: contain; }
+.host-history-row {
+  display: flex; flex-direction: column; gap: 3px; padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--r-sm);
+  background: none; color: var(--fg); text-align: left; font: inherit; cursor: pointer;
+}
+.host-history-row:hover:not(:disabled) { background: var(--bg-subtle); }
+.host-history-row:focus-visible { outline: 2px solid var(--accent, #3b6cf6); outline-offset: -2px; }
+.host-history-row:disabled { cursor: default; color: var(--fg-2); }
+.host-history-row.is-here { border-color: color-mix(in srgb, var(--accent, #3b6cf6) 45%, var(--line)); }
+.host-history-text { font-size: 13.5px; line-height: 19px; white-space: pre-wrap; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden; }
+.host-history-meta { display: flex; flex-wrap: wrap; gap: 4px 10px; font-size: 12px; line-height: 16px; color: var(--fg-3); }
+.host-history-project { max-width: 18em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.host-history-flag { color: var(--fg-2); }
+.host-history-foot { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+@media (pointer: coarse) { .host-history-row { padding: 11px 12px; } }
+
+/* What the session used, under its context */
+.convo-cost { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--term-line); }
+.convo-cost-head { font-weight: 600; }
+.convo-cost-model { padding: 2px 0; }
+.convo-cost-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.convo-cost-tokens { font-size: 12px; line-height: 16px; color: var(--term-fg-3); font-variant-numeric: tabular-nums; }
+.convo-cost-none { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--term-line); }

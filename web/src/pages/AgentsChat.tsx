@@ -8,6 +8,7 @@ import { isDark, setChromeColor, usePrefs } from '../prefs'
 import { local } from '../storage'
 import { CLOSE_MENUS, Confirm, Menu, useToast, type MenuItem } from '../components/ui'
 import { chromeVars, corralDark, corralLight } from '../terminal/themes'
+import { HostHistoryDialog } from '../terminal/hostHistory'
 import { expandPastes, getDraft, keepDraft, keepPaste, keepSent, keptSent, remember, sentHistory } from '../terminal/drafts'
 import { geminiPath, shellPath } from '../terminal/paths'
 import { useCompletion } from '../terminal/Completion'
@@ -582,6 +583,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   const herdr = cur.s.persistence === 'herdr'
   const convo = useConversation(sid, active, cur.pane)
   const row = cur.row
+  const [hostHistory, setHostHistory] = useState(false)
   // What the bar says of it: herdr's word for a herdr agent (as the session
   // list has it, every few seconds); a tmux one's from its process file.
   const agent = useMemo((): ConvoAgent | null => {
@@ -991,6 +993,16 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     setDraftShown(() => s)
     keepDraft(draftKey, s)
   }
+  // (One picked from a history: in the composer, the cursor at its end; not sent.)
+  const putBack = (h: string) => {
+    showSent(h)
+    requestAnimationFrame(() => {
+      const el = field.current
+      if (!el) return
+      el.focus()
+      el.selectionStart = el.selectionEnd = h.length
+    })
+  }
   const showSent = (h: string | null) => {
     if (h === null) return setDraft(getDraft(draftKey))
     if (histPos.current === null) keepDraft(draftKey, draft)
@@ -1391,26 +1403,31 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
           <Menu
             label={t('term.history')}
             note={sentHistory().length === 0 ? t('term.historyEmpty') : undefined}
-            items={() =>
-              [...sentHistory()].reverse().map((h) => ({
+            items={() => [
+              ...[...sentHistory()].reverse().map((h) => ({
                 label: h.trim().replace(/\s*\n\s*/g, ' ⏎ ').slice(0, 80),
-                onSelect: () => {
-                  showSent(h)
-                  requestAnimationFrame(() => {
-                    const el = field.current
-                    if (!el) return
-                    el.focus()
-                    el.selectionStart = el.selectionEnd = h.length
-                  })
-                },
-              }))
-            }
+                onSelect: () => putBack(h),
+              })),
+              // (What was sent anywhere on the host, from any device: Claude Code keeps it.)
+              { label: t('hostHistory.open'), separator: sentHistory().length > 0, onSelect: () => setHostHistory(true) },
+            ]}
             button={(open, toggle) => (
               <button type="button" className="icon-btn" aria-expanded={open} onClick={toggle} aria-label={t('term.history')} title={t('term.history') + (isTouch ? '' : ' (↑)')}>
                 <History size={18} />
               </button>
             )}
           />
+          {hostHistory && (
+            <HostHistoryDialog
+              sid={sid}
+              cwd={row?.a.cwd}
+              onPick={(h) => {
+                setHostHistory(false)
+                putBack(h)
+              }}
+              onClose={() => setHostHistory(false)}
+            />
+          )}
           <input
             ref={fileRef}
             type="file"
