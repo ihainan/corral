@@ -932,6 +932,12 @@ func (c *Claude) user(r *claudeRow) {
 			if strings.Contains(b.Text, "<task-notification>") {
 				c.ended(b.Text)
 			}
+			if sh, ok := shellOutput(b.Text); ok {
+				if sh != nil {
+					notes = append(notes, Part{Kind: KindShell, Shell: sh})
+				}
+				continue
+			}
 			switch role, text := classifyUserText(b.Text); role {
 			case RoleUser:
 				if images {

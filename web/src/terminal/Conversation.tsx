@@ -2111,12 +2111,23 @@ function ShellOut({ sh, onCopy }: { sh: ConvoShell; onCopy: (s: string) => void 
   const tail = sh.out_tail
   const gap = tail ? (sh.omitted ? t('convo.omittedLines', { n: sh.omitted }) : t('convo.omitted')) : ''
   const all = tail ? head + (head && !head.endsWith('\n') ? '\n' : '') + gap + '\n' + tail : head
+  // (Copied: what it printed, and what it wrote to stderr after.)
+  const copied = [all, sh.err ?? ''].filter(Boolean).join('\n')
+  // (All of it on a tap where it is held short: by what is cut off, a long
+  // line wrapped too, not by its count of lines.)
+  const outEl = useRef<HTMLPreElement>(null)
+  const errEl = useRef<HTMLPreElement>(null)
+  const [over, setOver] = useState(false)
+  useLayoutEffect(() => {
+    const cut = (e: HTMLPreElement | null) => !!e && e.scrollHeight > e.clientHeight + 2
+    setOver(cut(outEl.current) || cut(errEl.current))
+  }, [all, sh.err])
   return (
     <div className="convo-shell">
       {all && (
         <>
           <div className="convo-pre-wrap">
-            <pre className={'convo-pre convo-result' + (full ? ' is-full' : '')}>
+            <pre ref={outEl} className={'convo-pre convo-result' + (full ? ' is-full' : '')}>
               {tail ? (
                 <>
                   {head && !head.endsWith('\n') ? head + '\n' : head}
@@ -2127,22 +2138,29 @@ function ShellOut({ sh, onCopy }: { sh: ConvoShell; onCopy: (s: string) => void 
                 head
               )}
             </pre>
-            <button type="button" className="md-code-copy" onClick={() => onCopy(all)}>
+            <button type="button" className="md-code-copy" onClick={() => onCopy(copied)}>
               {t('common.copy')}
             </button>
           </div>
-          {!full && all.split('\n').length > 12 && (
-            <button type="button" className="link-btn" onClick={() => setFull(true)}>
-              {t('convo.showAll')}
-            </button>
-          )}
         </>
       )}
       {sh.err && (
-        <pre className="convo-pre convo-shell-err">
-          {sh.err}
-          {sh.err_cut && <span className="convo-omitted">{'\n' + t('convo.cut')}</span>}
-        </pre>
+        <div className="convo-pre-wrap">
+          <pre ref={errEl} className={'convo-pre convo-result convo-shell-err' + (full ? ' is-full' : '')}>
+            {sh.err}
+            {sh.err_cut && <span className="convo-omitted">{'\n' + t('convo.cut')}</span>}
+          </pre>
+          {!all && (
+            <button type="button" className="md-code-copy" onClick={() => onCopy(copied)}>
+              {t('common.copy')}
+            </button>
+          )}
+        </div>
+      )}
+      {!full && over && (
+        <button type="button" className="link-btn" onClick={() => setFull(true)}>
+          {t('convo.showAll')}
+        </button>
       )}
     </div>
   )
@@ -2726,6 +2744,8 @@ function Work({ it, open, onToggle, onCopy }: { it: Extract<Item, { kind: 'work'
               ) : (
                 s.parts[0]?.event ? (
                   <EventNote key={i} ev={s.parts[0].event} />
+                ) : s.parts[0]?.shell ? (
+                  <ShellOut key={i} sh={s.parts[0].shell} onCopy={onCopy} />
                 ) : s.parts[0]?.trouble ? (
                   <TroubleNote key={i + ':' + troubleKey(s.parts[0].trouble!)} t={s.parts[0].trouble!} />
                 ) : (

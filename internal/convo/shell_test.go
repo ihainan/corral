@@ -43,4 +43,11 @@ func TestClaudeShellOutput(t *testing.T) {
 	if sh.Err != "warn: <x>" {
 		t.Fatalf("stderr: %q", sh.Err)
 	}
+	// (The log may give the row's content as blocks: the same.)
+	c = NewClaude()
+	b, _ := json.Marshal(map[string]any{"type": "user", "uuid": "b1", "timestamp": "2026-10-29T01:00:00Z", "message": map[string]any{"role": "user", "content": []map[string]any{{"type": "text", "text": "<bash-stdout>a &gt; b</bash-stdout><bash-stderr></bash-stderr>"}}}})
+	c.Feed(append(b, '\n'))
+	if es := c.Since(0); len(es) != 1 || es[0].Parts[0].Kind != KindShell || es[0].Parts[0].Shell.Out != "a > b" {
+		t.Fatalf("as blocks: %+v", es)
+	}
 }

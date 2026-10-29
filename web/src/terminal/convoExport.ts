@@ -25,6 +25,8 @@ export interface Say {
 }
 
 const isEntry = (s: ConvoPart | ConvoEntry): s is ConvoEntry => 'seq' in s
+// (A notice's mark, then its words: on a line of their own where they begin a block, as a fence.)
+const noted = (say: Say, t: string) => `*${say.note}*` + (t.startsWith('```') ? '\n\n' : ' ') + t
 const quote = (s: string) =>
   s
     .split('\n')
@@ -41,7 +43,7 @@ function partsText(parts: ConvoPart[], say: Say): string {
         const sh = p.shell
         const out = sh.out_tail ? (sh.out ?? '') + '\n' + say.cut + '\n' + sh.out_tail : (sh.out ?? '')
         const fence = (x: string) => '```\n' + x.replace(/```/g, '`\u200b``') + '\n```'
-        return [out && fence(out), sh.err && fence(sh.err)].filter(Boolean).join('\n\n')
+        return [out && fence(out), sh.err && fence(sh.err + (sh.err_cut ? '\n' + say.cut : ''))].filter(Boolean).join('\n\n')
       }
       if (p.kind === 'tool' && p.tool) return toolLine(p.tool, say)
       if (p.kind === 'thinking') return ''
@@ -65,7 +67,7 @@ function itemText(it: Item, say: Say): string {
       return `*${say.summary}*\n\n` + quote(partsText(it.e.parts, say))
     case 'note': {
       const t = [it.e, ...(it.last ? [it.last] : [])].map((e) => partsText(e.parts, say)).join('\n\n')
-      return t.trim() ? `*${say.note}* ` + t : ''
+      return t.trim() ? noted(say, t) : ''
     }
     case 'text':
     case 'answer':
@@ -87,7 +89,7 @@ function* pieces(it: Item, say: Say): Generator<string> {
     for (const s of it.steps) {
       if (isEntry(s)) {
         const t = partsText(s.parts, say)
-        if (t.trim()) yield s.role === 'summary' ? `*${say.summary}*\n\n` + quote(t) : `*${say.note}* ` + t
+        if (t.trim()) yield s.role === 'summary' ? `*${say.summary}*\n\n` + quote(t) : noted(say, t)
       } else if (s.kind === 'thinking') {
         if (!thought && s.text?.trim()) yield say.thinking
         thought = true
