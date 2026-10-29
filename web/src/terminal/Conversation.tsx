@@ -816,8 +816,9 @@ export function ConversationView({
     if (!active || !side) return
     const mac = /Mac|iPhone|iPad/.test(navigator.platform)
     const onKey = (e: KeyboardEvent) => {
-      if (e.isComposing || underDialog(e) || e.altKey || e.shiftKey) return
-      const asked = mac ? e.key.toLowerCase() === 'k' && e.metaKey && !e.ctrlKey : e.key === '/' && !e.ctrlKey && !e.metaKey && !editable(e.target)
+      if (e.isComposing || underDialog(e) || e.altKey) return
+      // (Shift as some layouts need it for "/", as the German's.)
+      const asked = mac ? e.key.toLowerCase() === 'k' && e.metaKey && !e.ctrlKey && !e.shiftKey : e.key === '/' && !e.ctrlKey && !e.metaKey && !editable(e.target)
       if (!asked) return
       e.preventDefault()
       if (sideShownNow.current) setSearchAsked((n) => n + 1)
@@ -1894,6 +1895,12 @@ export const SEARCH_FROM = 5
 
 // The box an agents' list is searched with (see matchQuery). Escape in it
 // empties it first.
+// (A pointer held down, anywhere: see ListSearch's blur.)
+let pressing = false
+window.addEventListener('pointerdown', () => (pressing = true), true)
+window.addEventListener('pointerup', () => (pressing = false), true)
+window.addEventListener('pointercancel', () => (pressing = false), true)
+
 // (⌘K on a Mac; elsewhere "/", as the browsers there keep Ctrl+K for their
 // own search: as the key is said.)
 const KEY_SEARCH = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘K' : '/'
@@ -1917,9 +1924,13 @@ export function ListSearch({ value, onChange, focus, onLeft, hint }: { value: st
         onFocus={() => setInside(true)}
         onBlur={() => {
           setInside(false)
-          // (Left empty: let go a moment on, so that a click on a row under
-          // it, which took the focus, lands before the list moves up.)
-          if (!value && onLeft) setTimeout(() => document.activeElement !== ref.current && !ref.current?.value && onLeft(), 250)
+          // (Left empty: let go once a press that took the focus is over —
+          // its click on a row under it landed — before the list moves up.)
+          if (!value && onLeft) {
+            const leave = () => document.activeElement !== ref.current && !ref.current?.value && onLeft()
+            if (pressing) window.addEventListener('pointerup', () => setTimeout(leave, 0), { once: true, capture: true })
+            else setTimeout(leave, 0)
+          }
         }}
         type="text"
         enterKeyHint="search"

@@ -1116,12 +1116,12 @@ button.convo-running-what { padding: 0; text-align: left; }
 .convo-side-new:hover { background: var(--term-hover); }
 .convo-side-new:hover .convo-side-new-icon { color: var(--term-fg); }
 .convo-side-new:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: -2px; }
+.convo-side .list-search, .convo-picker .list-search { margin: 0 0 8px; height: 36px; padding: 0 4px 0 9px; gap: 10px; }
+.convo-side .list-search-icon, .convo-picker .list-search-icon { width: 30px; }
 @media (pointer: coarse) {
   .convo-side-new { height: 44px; padding: 0 12px; }
   .convo-side .list-search, .convo-picker .list-search { padding-left: 11px; } /* (as the rows, 12 there) */
 }
-.convo-side .list-search, .convo-picker .list-search { margin: 0 0 8px; height: 36px; padding: 0 4px 0 9px; gap: 10px; }
-.convo-side .list-search-icon, .convo-picker .list-search-icon { width: 30px; }
 .new-agent { display: flex; flex-direction: column; gap: 14px; }
 .new-agent .field > span { font-size: 13px; line-height: 18px; font-weight: 500; color: var(--fg-2); }
 .new-agent-olds { display: flex; flex-direction: column; gap: 4px; max-height: 240px; overflow: auto; }
