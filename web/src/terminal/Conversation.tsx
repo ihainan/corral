@@ -810,12 +810,15 @@ export function ConversationView({
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [active, jump])
-  // ⌘K (Ctrl+K elsewhere) where the agents are listed: their search.
+  // ⌘K on a Mac where the agents are listed: their search. Elsewhere "/",
+  // not while typing (the browsers there keep Ctrl+K for their own search).
   useEffect(() => {
     if (!active || !side) return
     const mac = /Mac|iPhone|iPad/.test(navigator.platform)
     const onKey = (e: KeyboardEvent) => {
-      if (e.key.toLowerCase() !== 'k' || !(mac ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey) || e.altKey || e.shiftKey || e.isComposing || underDialog(e)) return
+      if (e.isComposing || underDialog(e) || e.altKey || e.shiftKey) return
+      const asked = mac ? e.key.toLowerCase() === 'k' && e.metaKey && !e.ctrlKey : e.key === '/' && !e.ctrlKey && !e.metaKey && !editable(e.target)
+      if (!asked) return
       e.preventDefault()
       if (sideShownNow.current) setSearchAsked((n) => n + 1)
       else setPicking('search')
@@ -1785,7 +1788,8 @@ export function when(r: { since?: number; status: string }, now: number): string
 // search: its search box shown whatever the count (asked for by ⌘K) and
 // the focus put in it; onSearchLeft: the box left, empty (shown by the
 // count again); hint: the key that asks for it, said in the box.
-function AgentList({ rows, onPicked, placed, query: given, onQuery, search, onSearchLeft, hint }: { rows: ConvoListRow[]; onPicked?: () => void; placed?: Map<string, ConvoListRow>; query?: string; onQuery?: (q: string) => void; search?: number; onSearchLeft?: () => void; hint?: boolean }) {
+// (showSearch: shown whatever the count, the focus left to who opened it.)
+function AgentList({ rows, onPicked, placed, query: given, onQuery, search, showSearch, onSearchLeft, hint }: { rows: ConvoListRow[]; onPicked?: () => void; placed?: Map<string, ConvoListRow>; query?: string; onQuery?: (q: string) => void; search?: number; showSearch?: boolean; onSearchLeft?: () => void; hint?: boolean }) {
   // (The times move on: drawn again every half minute.)
   const [now, setNow] = useState(Date.now())
   useEffect(() => {
@@ -1815,7 +1819,7 @@ function AgentList({ rows, onPicked, placed, query: given, onQuery, search, onSe
   })
   return (
     <>
-      {(rows.length > SEARCH_FROM || query || !!search) && <ListSearch value={query} onChange={setQuery} focus={search} onLeft={onSearchLeft} hint={hint ? KEY_SEARCH : undefined} />}
+      {(rows.length > SEARCH_FROM || query || !!search || showSearch) && <ListSearch value={query} onChange={setQuery} focus={search} onLeft={onSearchLeft} hint={hint ? KEY_SEARCH : undefined} />}
       {query.trim() && !found.length && <p className="list-search-none">{t('convo.searchNone')}</p>}
       {groups.map((g) => {
         const all = g.of.map((p) => rows.find((r) => r.key === p.key)!)
@@ -1890,8 +1894,9 @@ export const SEARCH_FROM = 5
 
 // The box an agents' list is searched with (see matchQuery). Escape in it
 // empties it first.
-// (⌘K, Ctrl K elsewhere: as the key is said.)
-const KEY_SEARCH = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘K' : 'Ctrl K'
+// (⌘K on a Mac; elsewhere "/", as the browsers there keep Ctrl+K for their
+// own search: as the key is said.)
+const KEY_SEARCH = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘K' : '/'
 
 export function ListSearch({ value, onChange, focus, onLeft, hint }: { value: string; onChange: (v: string) => void; focus?: number; onLeft?: () => void; hint?: string }) {
   const ref = useRef<HTMLInputElement>(null)
@@ -1912,7 +1917,9 @@ export function ListSearch({ value, onChange, focus, onLeft, hint }: { value: st
         onFocus={() => setInside(true)}
         onBlur={() => {
           setInside(false)
-          if (!value) onLeft?.()
+          // (Left empty: let go a moment on, so that a click on a row under
+          // it, which took the focus, lands before the list moves up.)
+          if (!value && onLeft) setTimeout(() => document.activeElement !== ref.current && !ref.current?.value && onLeft(), 250)
         }}
         type="text"
         enterKeyHint="search"
@@ -1933,7 +1940,7 @@ export function ListSearch({ value, onChange, focus, onLeft, hint }: { value: st
       />
       {hint && !value && !inside && <span className="list-search-hint" aria-hidden="true">{hint}</span>}
       {value && (
-        <button type="button" className="icon-btn list-search-clear" onClick={() => onChange('')} aria-label={t('convo.searchClear')} title={t('convo.searchClear')}>
+        <button type="button" className="icon-btn list-search-clear" onClick={() => (onChange(''), ref.current?.focus())} aria-label={t('convo.searchClear')} title={t('convo.searchClear')}>
           <X size={14} />
         </button>
       )}
@@ -1990,7 +1997,7 @@ function Picker({ rows, onClose, searchFirst }: { rows: ConvoListRow[]; onClose:
           </button>
         </div>
         <NewAgentRow onPicked={onClose} />
-        <AgentList rows={rows} placed={first} onPicked={onClose} search={searchFirst ? 1 : 0} />
+        <AgentList rows={rows} placed={first} onPicked={onClose} showSearch={searchFirst} />
       </div>
     </>
   )
