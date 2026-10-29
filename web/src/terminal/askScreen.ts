@@ -34,7 +34,11 @@ const rule = /^\s*[─━╌]{8,}\s*$/
 
 // (Words that ran to their column's edge: what is beside them, a preview's
 // box, begins at most 4 spaces after.)
-const edge = (s: string) => /\S\s{3,4}[\u2500-\u257f]/.test(s)
+const edge = (s: string) => {
+  // (The first box on the line is the column's edge: not one of a preview's own lines.)
+  const m = /\s{3,}[\u2500-\u257f]/.exec(s)
+  return !!m && m[0].length - 1 <= 4 && /\S$/.test(s.slice(0, m.index))
+}
 
 // (A choice's words, without what is drawn beside it: a preview's box.)
 const besideAt = (s: string) => {

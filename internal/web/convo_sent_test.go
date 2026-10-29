@@ -133,9 +133,23 @@ func TestStillTyped(t *testing.T) {
 		{"all of it, its picture as shown", "额外插一句，这个按钮非常丑。\n  [Image #1]\n  调研一下其他软件的按钮样式。", true},
 		{"another message that begins as it does", "额外插一句，这个按钮非常丑。\n  [Image #1]\n  调研一下别的东西。", false},
 		{"it and more after", "额外插一句，这个按钮非常丑。\n  [Image #1]\n  调研一下其他软件的按钮样式。再加一句", false},
-		{"its picture still as a path", "额外插一句，这个按钮非常丑。\n  /home/u/.cache/up/20261029.png\n  调研一下其他软件的按钮样式。", false},
+		{"its picture still as a path (not found by Claude Code)", "额外插一句，这个按钮非常丑。\n  /home/u/.cache/up/20261029.png\n  调研一下其他软件的按钮样式。", true},
 	} {
 		if got := typedWhole(box(c.box), stuck); got != c.want {
+			t.Errorf("whole, %s: %v, want %v", c.name, got, c.want)
+		}
+	}
+	for _, c := range []struct {
+		name, box, text string
+		want            bool
+	}{
+		{"a picture first, words after", "[Image #1] 请分析这张图", pic, false},
+		{"a picture first, words after (as typed)", "[Image #1] 这张图里右下角为什么是 200K", pic, true},
+		{"a quoted path first", "[Image #1] 请分析这张图", "'/home/user name/shot.png' 请分析这张图", true},
+		{"two pictures one space apart", "请比较 [Image #1] [Image #2] 的差异", "请比较 /a.png /b.png 的差异", true},
+		{"a path within a word is no picture", "请看abc/a.png", "请看abc/a.png", true},
+	} {
+		if got := typedWhole(box(c.box), c.text); got != c.want {
 			t.Errorf("whole, %s: %v, want %v", c.name, got, c.want)
 		}
 	}

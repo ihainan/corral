@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/ihainan/corral/internal/sshx"
 	"github.com/ihainan/corral/internal/term"
@@ -76,9 +78,9 @@ func (s *Server) sentMissing(w http.ResponseWriter, ctx context.Context, sess *t
 // there, the words stayed in the box, and the next message typed went in
 // after them, the two then sent as one. (ended: the send's turn, held until
 // these have ended on the host too.)
-// track: the later look tied to the person's login (signed out or the
-// login revoked meanwhile: called off), as a request is.
-func (s *Server) enterAgain(ctx context.Context, sess *term.Session, pane, socket string, pid, start int64, sid, text, screen string, ended *sync.WaitGroup, track func(cancel func()) func()) {
+// later: a context for the look a moment on, tied to the person's login
+// (its end, a sign-out or revocation calls it off), nil where it is over.
+func (s *Server) enterAgain(ctx context.Context, sess *term.Session, pane, socket string, pid, start int64, sid, text, screen string, ended *sync.WaitGroup, later func(d time.Duration) (context.Context, func())) {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	enter := []string{"enter"}
@@ -109,13 +111,14 @@ func (s *Server) enterAgain(ctx context.Context, sess *term.Session, pane, socke
 	// answer, not before it; the send's turn held until it is done.)
 	// (Only the message whole: by then the box could hold another typed in
 	// the terminal that begins as it does.)
+	lctx, done := later(enterLater + 10*time.Second)
+	if lctx == nil {
+		return // (signed out meanwhile, or the login over)
+	}
 	ended.Add(1)
-	lctx, cancel := context.WithTimeout(context.Background(), enterLater+10*time.Second)
-	untrack := track(cancel)
 	go func() {
 		defer ended.Done()
-		defer untrack()
-		defer cancel()
+		defer done()
 		select {
 		case <-lctx.Done():
 			return
@@ -170,6 +173,10 @@ func (s *Server) sentEnter(w http.ResponseWriter, ctx context.Context, sess *ter
 	case errors.Is(err, sshx.ErrBusy), errors.As(err, &exitErr) && exitErr.Status == 7:
 		*outcome, *reason = "refused", "busy" // (nothing pressed)
 		writeError(w, http.StatusConflict, "busy", "the pane is busy with another request: try again")
+		return
+	case errors.As(err, &exitErr) && exitErr.Status == 4:
+		*outcome, *reason = "refused", "send_failed" // (nothing pressed)
+		writeError(w, http.StatusBadGateway, "send_failed", "nothing could be sent to the pane")
 		return
 	case errors.As(err, &exitErr) && exitErr.Status == 3:
 		*outcome, *reason = "refused", "agent_changed"
@@ -247,6 +254,9 @@ func typedIn(screen, text string, whole bool) bool {
 			nl := strings.Count(strings.TrimRight(text, "\n"), "\n")
 			return nl > 0 && (n == nl || n == nl+1)
 		}
+		if whole {
+			return wholeOf(text).MatchString(box)
+		}
 		if m := typedImage.FindStringIndex(box); m != nil {
 			if p := picturePath(want); p != nil {
 				box, want = box[m[1]:], want[p[1]:]
@@ -254,9 +264,6 @@ func typedIn(screen, text string, whole bool) bool {
 					return box == ""
 				}
 			}
-		}
-		if whole {
-			return wholeOf(text).MatchString(box)
 		}
 		head := []rune(want)
 		return strings.HasPrefix(box, string(head[:min(len(head), typedHead)]))
@@ -280,14 +287,20 @@ var (
 
 // wholeOf: the message as Claude Code's box shows all of it, spaces
 // squeezed out: each path to a picture in it (quoted, or standing alone
-// between spaces) as "[Image #N]", the rest as it is.
+// between spaces) as "[Image #N]" or as it is, the rest as it is.
 func wholeOf(text string) *regexp.Regexp {
 	var b strings.Builder
 	b.WriteString("^")
 	at := 0
 	for _, m := range picturesIn.FindAllStringSubmatchIndex(text, -1) {
+		// (Standing alone: a space, or the end, after it too. The space is
+		// not taken by the match, so the next path may begin after it.)
+		if r, _ := utf8.DecodeRuneInString(text[m[3]:]); m[3] < len(text) && !unicode.IsSpace(r) {
+			continue
+		}
 		b.WriteString(regexp.QuoteMeta(squeeze(text[at:m[2]])))
-		b.WriteString(`\[Image#\d+\]`)
+		// (As Claude Code shows a picture it found, or as typed where it did not.)
+		b.WriteString(`(?:\[Image#\d+\]|` + regexp.QuoteMeta(squeeze(text[m[2]:m[3]])) + `)`)
 		at = m[3]
 	}
 	b.WriteString(regexp.QuoteMeta(squeeze(text[at:])))
@@ -296,7 +309,7 @@ func wholeOf(text string) *regexp.Regexp {
 }
 
 // (A path to a picture anywhere in a message: quoted, or alone between spaces.)
-var picturesIn = regexp.MustCompile(`(?i)(?:^|\s)('[^']*?\.(?:png|jpe?g|gif|webp)'|"[^"]*?\.(?:png|jpe?g|gif|webp)"|[^'"\s]+\.(?:png|jpe?g|gif|webp))(?:\s|$)`)
+var picturesIn = regexp.MustCompile(`(?i)(?:^|[\s\x{00A0}])('[^']*?\.(?:png|jpe?g|gif|webp)'|"[^"]*?\.(?:png|jpe?g|gif|webp)"|[^'"\s\x{00A0}]+\.(?:png|jpe?g|gif|webp))`)
 
 // picturePath: where a path to a picture at a message's start ends (its
 // quotes, a pair of the one kind, with it; one not quoted has none in it).

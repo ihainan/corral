@@ -2779,8 +2779,24 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		answer.digest, answer.at = b.Digest, time.Now()
 	}
 	if outcome == "typed" && what == "send" && front.agent == "claude" {
-		s.enterAgain(ctx, sess, b.Pane, socket, b.PID, b.Start, b.Session, text, string(res.Out), &ended, func(cancel func()) func() {
-			return s.trackPending(currentUser(r).ID, &liveSocket{loginHash: loginHash(r), hostID: sess.HostID, cancel: cancel})
+		s.enterAgain(ctx, sess, b.Pane, socket, b.PID, b.Start, b.Session, text, string(res.Out), &ended, func(d time.Duration) (context.Context, func()) {
+			// (Within the login's time; told of a sign-out from now on, and
+			// one before now found by asking once registered.)
+			end := time.Now().Add(d)
+			if expiry.Before(end) {
+				end = expiry
+			}
+			lctx, cancel := context.WithDeadline(context.Background(), end)
+			untrack := s.trackPending(currentUser(r).ID, &liveSocket{loginHash: loginHash(r), hostID: sess.HostID, cancel: cancel})
+			if _, err := s.auth.CheckLogin(context.WithoutCancel(r.Context()), loginHash(r)); err != nil {
+				untrack()
+				cancel()
+				return nil, nil
+			}
+			return lctx, func() {
+				untrack()
+				cancel()
+			}
 		})
 	}
 	switch {
