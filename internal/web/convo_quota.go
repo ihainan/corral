@@ -38,36 +38,48 @@ type quotaInfo struct {
 	Weekly    *quotaWindow `json:"weekly,omitempty"`
 }
 
-// quotaOf reads the last whole line of the file's end (tail), as
-// cc-statusline writes it; Known false where it says nothing usable.
-func quotaOf(tail []byte) quotaInfo {
-	tail = bytes.TrimRight(tail, "\r\n")
+// quotaOf reads the last whole line of the file's end (tail; whole: it is
+// the file from its start, else its first line may be a piece of one), as
+// cc-statusline writes it; Known false where it says nothing usable. A line
+// still being written (no newline yet) is passed over for the one before.
+// (A record longer than quotaTail is not read: none is near that long.)
+func quotaOf(tail []byte, whole bool) quotaInfo {
+	if i := bytes.LastIndexByte(tail, '\n'); i >= 0 {
+		tail = tail[:i] // (what follows the last newline: not written whole yet)
+	} else {
+		return quotaInfo{}
+	}
+	tail = bytes.TrimRight(tail, "\r")
 	if i := bytes.LastIndexByte(tail, '\n'); i >= 0 {
 		tail = tail[i+1:]
+	} else if !whole {
+		return quotaInfo{} // (the first line read, begun before what was read)
 	}
-	// (Numbers only: a string, or a field of another kind, makes it nothing.)
-	type win struct {
-		Used     *float64 `json:"used_percentage"`
-		ResetsAt *float64 `json:"resets_at_epoch"`
-	}
-	var rec struct {
-		UpdatedAt *float64 `json:"updated_at"`
-		FiveHour  *win     `json:"five_hour"`
-		Weekly    *win     `json:"weekly"`
-	}
+	// Each part on its own: one of a kind not looked for (a string, say)
+	// leaves that part out, not the rest.
+	var rec map[string]json.RawMessage
 	if json.Unmarshal(tail, &rec) != nil {
 		return quotaInfo{}
 	}
-	window := func(w *win) *quotaWindow {
-		if w == nil || w.Used == nil || w.ResetsAt == nil || math.IsNaN(*w.Used) || *w.Used < 0 || *w.Used > 100 || *w.ResetsAt <= 0 || *w.ResetsAt > 1e12 {
+	num := func(raw json.RawMessage) (float64, bool) {
+		var f float64
+		return f, raw != nil && json.Unmarshal(raw, &f) == nil && !math.IsNaN(f)
+	}
+	window := func(raw json.RawMessage) *quotaWindow {
+		var w map[string]json.RawMessage
+		if json.Unmarshal(raw, &w) != nil {
 			return nil
 		}
-		return &quotaWindow{Used: *w.Used, ResetsAt: int64(*w.ResetsAt)}
+		u, ok1 := num(w["used_percentage"])
+		r, ok2 := num(w["resets_at_epoch"])
+		if !ok1 || !ok2 || u < 0 || u > 100 || r <= 0 || r > 1e12 {
+			return nil
+		}
+		return &quotaWindow{Used: u, ResetsAt: int64(r)}
 	}
-	q := quotaInfo{}
-	q.FiveHour, q.Weekly = window(rec.FiveHour), window(rec.Weekly)
-	if rec.UpdatedAt != nil && *rec.UpdatedAt > 0 && *rec.UpdatedAt < 1e12 {
-		q.UpdatedAt = int64(*rec.UpdatedAt)
+	q := quotaInfo{FiveHour: window(rec["five_hour"]), Weekly: window(rec["weekly"])}
+	if u, ok := num(rec["updated_at"]); ok && u > 0 && u < 1e12 {
+		q.UpdatedAt = int64(u)
 	}
 	q.Known = q.FiveHour != nil || q.Weekly != nil
 	return q
@@ -92,7 +104,9 @@ func (s *Server) apiConversationQuota(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 		// (Each step a folder, the last a plain file, none a link: a link is
-		// no record of this account's.)
+		// no record of this account's. Looked at, then read: not at once, so
+		// a file put in its place between the two by the account's own
+		// programs is read as it is then; only its own home is reached.)
 		p := home
 		for i, part := range []string{".claude", "cc-statusline", "usage-" + sid + ".jsonl"} {
 			p += "/" + part
@@ -113,7 +127,7 @@ func (s *Server) apiConversationQuota(w http.ResponseWriter, r *http.Request) {
 				if err != nil {
 					return err
 				}
-				q = quotaOf(b)
+				q = quotaOf(b, off == 0)
 			}
 		}
 		return nil

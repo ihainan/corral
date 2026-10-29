@@ -1667,7 +1667,7 @@ function Runs({ meta, active, mode, model, effort, quota }: { meta: ConvoMeta; a
               ? t(meta.window_by === 'model' ? 'convo.ctxNoteModel' : meta.window_by === 'request' ? 'convo.ctxNoteWide' : 'convo.ctxNoteSaid', { w: tokens(known) })
               : t(windows.length > 1 ? 'convo.ctxNote' : 'convo.ctxNoteBig')}
           </p>
-          {quota && <QuotaPart sid={quota.sid} session={quota.session} />}
+          {quota && <QuotaPart key={quota.sid + ' ' + quota.session} sid={quota.sid} session={quota.session} />}
           {(meta.cost || /claude/i.test(meta.model ?? '')) && <CostPart cost={meta.cost} />}
         </div>
       )}
@@ -1686,39 +1686,54 @@ interface Quota {
   weekly?: { used: number; resets_at: number }
 }
 const QUOTA_EVERY = 60000
-const quotaSeen = new Map<string, { at: number; q: Quota | 'failed'; last?: Quota; lastAt?: number }>()
+type QuotaSeen = { at: number; q: Quota | 'failed'; last?: Quota; lastAt?: number; n: number }
+const quotaSeen = new Map<string, QuotaSeen>()
+// (One read at a time for a session, whoever asks; each numbered, so that
+// one answered late never stands over a later one.)
+const quotaAsked = new Map<string, Promise<QuotaSeen>>()
+let quotaN = 0
+function askQuota(sid: string, session: string, key: string): Promise<QuotaSeen> {
+  const going = quotaAsked.get(key)
+  if (going) return going
+  const n = ++quotaN
+  const keep = (v: Omit<QuotaSeen, 'n'>) => {
+    const was = quotaSeen.get(key)
+    if (!was || was.n < n) {
+      quotaSeen.set(key, { ...v, n })
+      if (quotaSeen.size > 50) quotaSeen.delete(quotaSeen.keys().next().value!)
+    }
+    return quotaSeen.get(key)!
+  }
+  const p = api<Quota>('GET', `/api/sessions/${encodeURIComponent(sid)}/conversation/quota?session=${encodeURIComponent(session)}`, undefined, { timeoutMs: 20000 })
+    .then(
+      (q) => keep({ at: Date.now(), q, last: q.known ? q : undefined, lastAt: q.known ? Date.now() : undefined }),
+      // (Failed: what was read before, as it is now, still shown, said to be of then.)
+      () => keep({ at: Date.now(), q: 'failed', last: quotaSeen.get(key)?.last, lastAt: quotaSeen.get(key)?.lastAt }),
+    )
+    .finally(() => quotaAsked.delete(key))
+  quotaAsked.set(key, p)
+  return p
+}
 
+// (Keyed by its session where it is drawn: another session, another one.)
 function QuotaPart({ sid, session }: { sid: string; session: string }) {
   const key = sid + ' ' + session
   const [seen, setSeen] = useState(() => quotaSeen.get(key))
   useEffect(() => {
     let live = true
-    const look = () => {
+    // (Opened: what was read in the last minute, if any; each minute after, read.)
+    const look = (opened: boolean) => {
       const was = quotaSeen.get(key)
-      if (was && was.q !== 'failed' && Date.now() - was.at < QUOTA_EVERY - 1000) return setSeen(was)
-      api<Quota>('GET', `/api/sessions/${encodeURIComponent(sid)}/conversation/quota?session=${encodeURIComponent(session)}`, undefined, { timeoutMs: 20000 }).then(
-        (q) => {
-          const v = { at: Date.now(), q, last: q.known ? q : undefined, lastAt: q.known ? Date.now() : undefined }
-          quotaSeen.set(key, v)
-          if (quotaSeen.size > 50) quotaSeen.delete(quotaSeen.keys().next().value!)
-          if (live) setSeen(v)
-        },
-        () => {
-          // (Failed: what was read before still shown, said to be of then.)
-          const v = { at: Date.now(), q: 'failed' as const, last: was?.last, lastAt: was?.lastAt }
-          quotaSeen.set(key, v)
-          if (live) setSeen(v)
-        },
-      )
+      if (opened && was && was.q !== 'failed' && Date.now() - was.at < QUOTA_EVERY) return setSeen(was)
+      void askQuota(sid, session, key).then((v) => live && setSeen(v))
     }
-    look()
-    const timer = setInterval(look, QUOTA_EVERY)
+    look(true)
+    const timer = setInterval(() => look(false), QUOTA_EVERY)
     return () => {
       live = false
       clearInterval(timer)
     }
   }, [key, sid, session])
-  // (What to show: what was read, where it said anything; failed, what was read before.)
   const shown = !seen ? undefined : seen.q === 'failed' ? seen.last : seen.q.known ? seen.q : undefined
   const clock = (sec: number) => {
     const d = new Date(sec * 1000)
