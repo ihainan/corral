@@ -946,6 +946,38 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-list-more:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: -2px; }
 .convo-spin.is-small { width: 9px; height: 9px; margin: 0; border-width: 1.5px; flex: none; }
 @media (pointer: coarse) { .convo-list-row { padding: 10px 12px; } }
+/* A row's "more" button (the side list's): over the row's end, by its
+   first line, shown at a hover, a keyboard's focus in the row or its menu
+   open; its time gives it the room (hidden, keeping its own), else the
+   line makes room. Where nothing hovers (a tablet), always there, the row's
+   text kept clear of it. */
+.convo-list-item { position: relative; }
+/* (Hidden by being clear, not gone: it can still take the focus, from Tab
+   or given back to it, which shows it.) */
+.convo-list-dots {
+  position: absolute; top: 5px; right: 6px; display: inline-flex; align-items: center; justify-content: center;
+  width: 26px; height: 24px; padding: 0; border: 0; border-radius: 6px; background: none; color: var(--term-fg-2); cursor: pointer;
+  opacity: 0; pointer-events: none;
+}
+.convo-list-dots:hover, .convo-list-item.is-menu .convo-list-dots { background: color-mix(in srgb, var(--term-fg) 10%, transparent); color: var(--term-fg); }
+.convo-list-dots:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: -2px; }
+.convo-list-item.has-menu:has(:focus-visible) .convo-list-dots, .convo-list-item.is-menu .convo-list-dots { opacity: 1; pointer-events: auto; }
+.convo-list-item.has-menu:has(:focus-visible) .convo-list-when, .convo-list-item.is-menu .convo-list-when { visibility: hidden; }
+.convo-list-item.has-menu:has(:focus-visible) .convo-list-line:not(:has(.convo-list-when)), .convo-list-item.is-menu .convo-list-line:not(:has(.convo-list-when)) { padding-right: 26px; }
+.convo-list-item.is-menu > .convo-list-row:not([aria-current='true']) { background: var(--term-hover); --dot-ring: var(--term-hover); }
+@media (hover: hover) {
+  .convo-list-item.has-menu:hover .convo-list-dots { opacity: 1; pointer-events: auto; }
+  .convo-list-item.has-menu:hover .convo-list-when { visibility: hidden; }
+  .convo-list-item.has-menu:hover .convo-list-line:not(:has(.convo-list-when)) { padding-right: 26px; }
+  .convo-list-item.has-menu:hover > .convo-list-row:not([aria-current='true']) { background: var(--term-hover); --dot-ring: var(--term-hover); }
+}
+@media (hover: none) {
+  .convo-list-group .convo-list-item.has-menu .convo-list-dots { opacity: 1; pointer-events: auto; top: 50%; transform: translateY(-50%); color: var(--term-fg-3); }
+  .convo-list-group .convo-list-item.has-menu .convo-list-text { padding-right: 28px; }
+  .convo-list-group .convo-list-item.has-menu .convo-list-when { visibility: visible; }
+  .convo-list-group .convo-list-item.has-menu .convo-list-line { padding-right: 0; }
+}
+@media (forced-colors: active) { .convo-list-dots { color: ButtonText; } }
 .convo-nudge {
   flex: none; display: flex; align-items: center; gap: 8px; width: 100%; border: 0; border-bottom: 1px solid var(--term-line);
   padding: 7px max(16px, env(safe-area-inset-right, 0px)) 7px max(16px, env(safe-area-inset-left, 0px));

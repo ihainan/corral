@@ -448,10 +448,10 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
         used={usedBy.current.get(k) ?? usedBy.current.set(k, new Map()).get(k)!}
         query={sideQuery}
         onQuery={setSideQuery}
-        onClosed={() => {
-          setGone((g) => new Set(g).add(k))
+        onClosed={(key) => {
+          setGone((g) => new Set(g).add(key))
           // (A phone: back to the list, if it is still the one in front; else the next is shown.)
-          if (stack && lastCur.current?.key === k) toList()
+          if (stack && lastCur.current?.key === key) toList()
         }}
         lead={
           stack ? (
@@ -575,7 +575,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   setDraftShown: (f: (d: string | undefined) => string) => void
   used: Map<string, Set<number>> // per reading: the turns that confirmed one
   lead?: ReactNode
-  onClosed: () => void // (its pane closed from here)
+  onClosed: (key: string) => void // (a pane closed from here: this one's, or another's from its row's menu)
   query: string // the side list's search
   onQuery: (q: string) => void
   onPick: (e: Entry) => void
@@ -682,6 +682,9 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   // which no reconnect or gateway restart changes (see agentKey, tmuxKey).
   const pins = usePrefs().pinnedAgents
   const pinAt = (key: string) => (pins.includes(key) ? pins.indexOf(key) : undefined)
+  // A row's menu (the side list's), of whichever agent it is: as of now, not
+  // of when the rows were made (set below, with the bar's menu).
+  const rowMenu = useRef<(e: Entry) => (MenuItem | null)[]>(() => [])
   const rows = useMemo((): ConvoListRow[] => {
     const hosts = hostCount(entries)
     const out = entries.map((e): ConvoListRow => {
@@ -694,10 +697,10 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       if (e.row) {
         const r = e.row
         const said = (current && agent?.title) || keptTitle(titles, e) || paneTitle(r.a.title) || r.a.agent
-        return { key: e.key, ...labelOf(e, said, hosts), program: r.a.agent, status: current && agent && !r.bg ? agent.status : r.status, bg: r.lost ? undefined : r.bg, since: r.lost ? undefined : r.bg ? r.a.bg_since : r.a.since, current, pinned: pinAt(e.key), onPick: () => onPick(e) }
+        return { key: e.key, ...labelOf(e, said, hosts), program: r.a.agent, status: current && agent && !r.bg ? agent.status : r.status, bg: r.lost ? undefined : r.bg, since: r.lost ? undefined : r.bg ? r.a.bg_since : r.a.since, current, pinned: pinAt(e.key), onPick: () => onPick(e), menu: () => rowMenu.current(e) }
       }
       const title = (current && agent?.title) || keptTitle(titles, e) || `${e.s.host_name} · ${sessionWhich(e.s, all)}`
-      return { key: e.key, title, where: whereOf(e, hosts), program: current ? agent?.program : undefined, status: current && agent ? agent.status : 'unknown', current, pinned: pinAt(e.key), onPick: () => onPick(e) }
+      return { key: e.key, title, where: whereOf(e, hosts), program: current ? agent?.program : undefined, status: current && agent ? agent.status : 'unknown', current, pinned: pinAt(e.key), onPick: () => onPick(e), menu: () => rowMenu.current(e) }
     })
     return placedAs ? out.map((r) => (r.current ? { ...r, placeAs: placedAs } : r)) : out
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1488,12 +1491,15 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     </div>
   )
 
-  const openTerminal = () => navigate(`/t/${sid}` + (cur.pane ? '?pane=' + encodeURIComponent(cur.pane) : ''))
-  // Closing it: its herdr pane, asked first (what runs there ends; its
+  const terminalOf = (e: Entry) => () => navigate(`/t/${e.s.id}` + (e.pane ? '?pane=' + encodeURIComponent(e.pane) : ''))
+  const openTerminal = terminalOf(cur)
+  // Closing one: its herdr pane, asked first (what runs there ends; its
   // conversation stays on the host, to be taken up again in a terminal).
   // Not a tmux one's: its entry is the whole tmux session, other windows too.
-  const [closing, setClosing] = useState(false)
-  const canClose = herdr && !!row && !row.lost
+  // This one, from the bar's menu; any, from its row's.
+  const [closing, setClosing] = useState<Entry | null>(null)
+  const closable = (e: Entry) => e.s.persistence === 'herdr' && !!e.row && !e.row.lost
+  const canClose = closable(cur)
   // Claude Code's own commands on its session: only while it is idle.
   // (Of the process it was opened on: another one there meanwhile, it goes.)
   const [op, setOp] = useState<{ op: SessionOp; bind: NonNullable<typeof convo.bind>; key: string } | null>(null)
@@ -1507,14 +1513,14 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       convo.refresh()
     })
   }
-  const pinnedNow = pins.includes(cur.key)
-  const more = (): (MenuItem | null)[] => [
-    { label: t('convo.showTerminal'), icon: <SquareTerminal size={16} />, onSelect: openTerminal },
-    {
+  // Pinning one, or letting it go.
+  const pinItem = (key: string): MenuItem => {
+    const pinnedNow = pins.includes(key)
+    return {
       label: t(pinnedNow ? 'agents.unpin' : 'agents.pin'),
       icon: pinnedNow ? <PinOff size={16} /> : <Pin size={16} />,
       onSelect: () => {
-        if (pinnedNow) return setPrefs({ pinnedAgents: pins.filter((k) => k !== cur.key) })
+        if (pinnedNow) return setPrefs({ pinnedAgents: pins.filter((k) => k !== key) })
         // (Full: nothing let go by itself, a host away and a pane closed look
         // alike from here; how many are out of sight said, and where all
         // can be let go: Settings.)
@@ -1522,13 +1528,24 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
           const here = new Set(entries.map((e) => e.key))
           return toast(t('agents.pinFull', { n: maxPinned, m: pins.filter((k) => !here.has(k)).length }), true)
         }
-        setPrefs({ pinnedAgents: [...pins, cur.key] })
+        setPrefs({ pinnedAgents: [...pins, key] })
       },
-    },
+    }
+  }
+  // (Claude Code's own commands on it are not there: they are of the one
+  // shown, its process known.)
+  rowMenu.current = (e) => [
+    { label: t('convo.showTerminal'), icon: <SquareTerminal size={16} />, onSelect: terminalOf(e) },
+    pinItem(e.key),
+    closable(e) ? { label: t('agents.close'), icon: <Power size={16} />, danger: true, separator: true, onSelect: () => setClosing(e) } : null,
+  ]
+  const more = (): (MenuItem | null)[] => [
+    { label: t('convo.showTerminal'), icon: <SquareTerminal size={16} />, onSelect: openTerminal },
+    pinItem(cur.key),
     ...(['compact', 'rename', 'clear'] as const).map((o, i): MenuItem | null =>
       !notClaude && bound ? { label: t(`ops.${o}.item`), icon: OP_ICONS[o], separator: i === 0, disabled: !canOps, title: canOps ? undefined : t('ops.onlyIdle'), onSelect: () => convo.bind && setOp({ op: o, bind: convo.bind, key: bindKey }) } : null,
     ),
-    canClose ? { label: t('agents.close'), icon: <Power size={16} />, danger: true, separator: true, onSelect: () => setClosing(true) } : null,
+    canClose ? { label: t('agents.close'), icon: <Power size={16} />, danger: true, separator: true, onSelect: () => setClosing(cur) } : null,
   ]
   // (Files dropped on the conversation go up as picked ones do.)
   const dropping = (e: React.DragEvent) => e.dataTransfer.types.includes('Files')
@@ -1592,21 +1609,21 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       onQuery={onQuery}
     />
     {op && <SessionOpDialog op={op.op} name={convo.title} onSend={(text) => runOp(op.bind, text)} onClose={() => setOp(null)} onShowTerminal={openTerminal} />}
-    {closing && row && (
+    {closing?.row && (
       <Confirm
-        title={t('agents.closeTitle')}
-        body={t(working ? 'agents.closeBodyWorking' : 'agents.closeBody')}
+        title={closing.key === cur.key ? t('agents.closeTitle') : t('agents.closeTitleNamed', { name: rows.find((r) => r.key === closing.key)?.title ?? '' })}
+        body={t((closing.key === cur.key ? working : closing.row.status === 'working') ? 'agents.closeBodyWorking' : 'agents.closeBody')}
         confirm={t('agents.closeConfirm')}
         danger
         onConfirm={async () => {
           try {
-            await api('POST', `/api/sessions/${sid}/herdr`, { action: 'close_pane', target: row.a.pane_id })
+            await api('POST', `/api/sessions/${closing.s.id}/herdr`, { action: 'close_pane', target: closing.row!.a.pane_id })
           } catch (e) {
             throw { human: e instanceof ApiError && e.code === 'herdr_busy' ? t('herdr.busy') : t('sc.herdrFailed') }
           }
-          onClosed()
+          onClosed(closing.key)
         }}
-        onClose={() => setClosing(false)}
+        onClose={() => setClosing(null)}
       />
     )}
     </div>

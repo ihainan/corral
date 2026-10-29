@@ -1,3 +1,4 @@
+import type { MenuItem } from '../components/ui'
 import type { I18nKey } from '../i18n'
 
 // The agents page's list: its rows, their groups and their order (plain,
@@ -15,6 +16,7 @@ export interface ConvoListRow {
   placeAs?: { status: ConvoListRow['status']; since?: number } // (the one shown: where it is placed meanwhile, see asHeld)
   pinned?: number // pinned at the top: its place among the pinned (the order they were pinned)
   onPick: () => void
+  menu?: () => (MenuItem | null)[] // what else is done with it, from its row's menu (the side list's)
 }
 
 // What is for the person to do: one waiting for an answer, one done and not

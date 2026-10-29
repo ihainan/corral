@@ -1,9 +1,9 @@
 import { createContext, Fragment, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { ArrowDown, Check, ChevronDown, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, Clock, Download, GitBranch, Keyboard, Loader, MoreVertical, PanelLeft, Pin, Search, TriangleAlert, X, Plus } from 'lucide-react'
+import { ArrowDown, Check, ChevronDown, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, Clock, Download, GitBranch, Keyboard, Loader, MoreHorizontal, MoreVertical, PanelLeft, Pin, Search, TriangleAlert, X, Plus } from 'lucide-react'
 import { t, getLang, type I18nKey } from '../i18n'
 import { api } from '../api'
 import { asHeld, GROUPS, inGroup, listOrder, pinned, type ConvoListRow } from './agentOrder'
-import { copyText, Dialog, isCoarse, Menu, type MenuItem } from '../components/ui'
+import { copyText, Dialog, isCoarse, Menu, MenuLayer, type MenuItem } from '../components/ui'
 import { composing, foldAllKey, helpKey, jumpKey, onMac, switchKey } from './pageKeys'
 import { local } from '../storage'
 import { Markdown } from './markdown'
@@ -998,7 +998,7 @@ export function ConversationView({
       {sideShown && (
         <nav className="convo-side" aria-label={t('convo.agents')} style={{ width: sideWidth }} ref={sideEl}>
           <NewAgentRow />
-          <AgentList rows={rows} query={sideQuery} onQuery={setSideQuery} search={searchAsked} onSearchLeft={() => setSearchAsked(0)} hint={!isTouchOnly} />
+          <AgentList rows={rows} menus query={sideQuery} onQuery={setSideQuery} search={searchAsked} onSearchLeft={() => setSearchAsked(0)} hint={!isTouchOnly} />
           {!isTouchOnly && (
             <p className="convo-side-keys">
               {t('convo.switchKeys')}
@@ -1885,7 +1885,53 @@ export function when(r: { since?: number; status: string }, now: number): string
 // the focus put in it; onSearchLeft: the box left, empty (shown by the
 // count again); hint: the key that asks for it, said in the box.
 // (showSearch: shown whatever the count, the focus left to who opened it.)
-function AgentList({ rows, onPicked, placed, query: given, onQuery, search, showSearch, onSearchLeft, hint }: { rows: ConvoListRow[]; onPicked?: () => void; placed?: Map<string, ConvoListRow>; query?: string; onQuery?: (q: string) => void; search?: number; showSearch?: boolean; onSearchLeft?: () => void; hint?: boolean }) {
+function AgentList({ rows, menus, onPicked, placed, query: given, onQuery, search, showSearch, onSearchLeft, hint }: { rows: ConvoListRow[]; menus?: boolean; onPicked?: () => void; placed?: Map<string, ConvoListRow>; query?: string; onQuery?: (q: string) => void; search?: number; showSearch?: boolean; onSearchLeft?: () => void; hint?: boolean }) {
+  // Its rows' menu (menus: the side list's; the switcher's rows have none):
+  // one for the list, of the row it was opened on by its key, as that row
+  // may go to another group meanwhile and be drawn anew; at its "more"
+  // button, or where it was right-clicked. Gone with the row.
+  const [rowMenu, setRowMenu] = useState<{ key: string; anchor: DOMRect; at: 'below' | 'point'; sheet: boolean } | null>(null)
+  const menuRow = rowMenu ? rows.find((r) => r.key === rowMenu.key && r.menu) : undefined
+  useEffect(() => {
+    if (rowMenu && !menuRow) setRowMenu(null)
+  }, [rowMenu, menuRow])
+  const dotsOf = (key: string) => document.querySelector<HTMLElement>(`.convo-list-dots[data-key="${CSS.escape(key)}"]`)
+  const closeMenu = useCallback(() => setRowMenu(null), [])
+  const menuTrigger = useCallback(() => (rowMenu ? dotsOf(rowMenu.key) : null), [rowMenu])
+  const openMenu = (key: string, at?: { x: number; y: number }) => {
+    const b = dotsOf(key)
+    if (!at && !b) return
+    setRowMenu({ key, anchor: at ? new DOMRect(at.x, at.y, 0, 0) : b!.getBoundingClientRect(), at: at ? 'point' : 'below', sheet: isCoarse() })
+  }
+  // (Opened from the keyboard, its menu key or Shift+F10: at the button; the
+  // contextmenu that may follow it is the same asking.)
+  const keyOpened = useRef<{ key: string; at: number } | null>(null)
+  // Something picked from it: the focus put on its button first (a dialog
+  // it opens gives it back there), and back on that button where its row
+  // was drawn anew meanwhile (pinned: in another group), the focus left
+  // nowhere; on the first row where it is gone. Not taken from elsewhere.
+  const refocus = useRef<{ key: string; until: number } | null>(null)
+  useEffect(() => {
+    const f = refocus.current
+    if (!f) return
+    const a = document.activeElement
+    if (Date.now() > f.until || (a && a !== document.body && a !== dotsOf(f.key))) {
+      refocus.current = null
+      return
+    }
+    if (a && a !== document.body && a.isConnected) return
+    refocus.current = null
+    ;(dotsOf(f.key) ?? document.querySelector<HTMLElement>('.convo-side .convo-list-row'))?.focus({ preventScroll: true })
+  })
+  const menuItems = (r: ConvoListRow) =>
+    (r.menu!().filter(Boolean) as MenuItem[]).map((it): MenuItem => ({
+      ...it,
+      onSelect: it.onSelect && (() => {
+        dotsOf(r.key)?.focus({ preventScroll: true })
+        refocus.current = { key: r.key, until: Date.now() + 1500 }
+        it.onSelect!()
+      }),
+    }))
   // (The times move on: drawn again every half minute.)
   const [now, setNow] = useState(Date.now())
   useEffect(() => {
@@ -1944,9 +1990,23 @@ function AgentList({ rows, onPicked, placed, query: given, onQuery, search, show
               // (At rest, nothing to say of it but when.)
               const said = r.status === 'blocked' || r.status === 'working' || r.status === 'done'
               const since = stamp(r, now, yesterday)
+              const hasMenu = !!(menus && r.menu)
               return (
-                <button
+                <div
                   key={r.key}
+                  className={'convo-list-item' + (hasMenu ? ' has-menu' : '') + (rowMenu?.key === r.key ? ' is-menu' : '')}
+                  onContextMenu={
+                    hasMenu
+                      ? (e) => {
+                          e.preventDefault()
+                          const k = keyOpened.current
+                          if (k && k.key === r.key && Date.now() - k.at < 1000) return
+                          openMenu(r.key, { x: e.clientX, y: e.clientY })
+                        }
+                      : undefined
+                  }
+                >
+                <button
                   type="button"
                   className={'convo-list-row is-' + r.status}
                   aria-current={r.current || undefined}
@@ -1954,6 +2014,16 @@ function AgentList({ rows, onPicked, placed, query: given, onQuery, search, show
                     onPicked?.()
                     r.onPick() // (of the one shown: nothing, or the end of a switch to another; the list may be of before)
                   }}
+                  onKeyDown={
+                    hasMenu
+                      ? (e) => {
+                          if (e.key !== 'ContextMenu' && !(e.key === 'F10' && e.shiftKey)) return
+                          e.preventDefault()
+                          keyOpened.current = { key: r.key, at: Date.now() }
+                          openMenu(r.key)
+                        }
+                      : undefined
+                  }
                 >
                   <AgentIcon program={r.program} size={30} dot={r.bg === 'running' ? 'bg' : said ? (r.status as 'blocked' | 'working' | 'done') : undefined} />
                   <span className="convo-list-text" title={[r.title, r.where].filter(Boolean).join(' · ')}>
@@ -1977,6 +2047,21 @@ function AgentList({ rows, onPicked, placed, query: given, onQuery, search, show
                     )}
                   </span>
                 </button>
+                {hasMenu && (
+                  <button
+                    type="button"
+                    className="convo-list-dots"
+                    data-key={r.key}
+                    aria-label={t('convo.rowMenu', { name: r.title })}
+                    aria-haspopup="menu"
+                    aria-expanded={rowMenu?.key === r.key}
+                    title={t('common.more')}
+                    onClick={() => (rowMenu?.key === r.key ? closeMenu() : openMenu(r.key))}
+                  >
+                    <MoreHorizontal size={16} aria-hidden="true" />
+                  </button>
+                )}
+                </div>
               )
             })}
             {(folds || (long && !shut)) && (
@@ -1992,6 +2077,9 @@ function AgentList({ rows, onPicked, placed, query: given, onQuery, search, show
           </div>
         )
       })}
+      {rowMenu && menuRow && (
+        <MenuLayer label={t('convo.rowMenu', { name: menuRow.title })} anchor={rowMenu.anchor} at={rowMenu.at} sheet={rowMenu.sheet} trigger={menuTrigger} items={menuItems(menuRow)} onClose={closeMenu} />
+      )}
     </>
   )
 }

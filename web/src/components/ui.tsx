@@ -175,38 +175,46 @@ export function Menu(props: { label: string; button: (open: boolean, toggle: (e:
   const close = useCallback(() => setAnchor(null), [])
   const onOpenChange = props.onOpenChange
   useEffect(() => onOpenChange?.(!!anchor), [anchor, onOpenChange])
-  useEffect(() => {
-    if (!anchor) return
-    window.addEventListener(CLOSE_MENUS, close)
-    return () => window.removeEventListener(CLOSE_MENUS, close)
-  }, [anchor, close])
   const toggle = (e: React.MouseEvent<HTMLElement>) => {
     if (anchor) return close()
     trigger.current = e.currentTarget
     setSheet(isCoarse())
     setAnchor(e.currentTarget.getBoundingClientRect())
   }
-  const items = anchor ? (props.items().filter(Boolean) as MenuItem[]) : []
+  const triggerOf = useCallback(() => trigger.current, [])
   return (
     <>
       {props.button(!!anchor, toggle)}
-      {anchor &&
-        (sheet ? (
-          <Dialog title={props.label} onClose={close} hideTitle>
-            <div className="handle" aria-hidden="true" />
-            {props.note && <div className="menu-note">{props.note}</div>}
-            <div className="sheet-list" role="menu">
-              {items.map((it, i) => <MenuEntry key={i} item={it} close={close} />)}
-            </div>
-            <button className="btn btn-block" onClick={close}>{t('common.cancel')}</button>
-          </Dialog>
-        ) : (
-          <Popover anchor={anchor} trigger={trigger.current} onClose={close} label={props.label}>
-            {props.note && <div className="menu-note">{props.note}</div>}
-            {items.map((it, i) => <MenuEntry key={i} item={it} close={close} />)}
-          </Popover>
-        ))}
+      {anchor && <MenuLayer label={props.label} anchor={anchor} sheet={sheet} trigger={triggerOf} items={props.items().filter(Boolean) as MenuItem[]} note={props.note} onClose={close} />}
     </>
+  )
+}
+
+// A menu open (Menu's, or one opened by its owner: a list's rows' menu, at
+// a right click): below a button's rect, or from a point (at: the mouse's,
+// a zero rect there); a bottom sheet instead where sheet. trigger: the
+// button it belongs to, looked up when wanted (focus goes back to it; a
+// press on it is not "outside").
+export function MenuLayer(props: { label: string; anchor: DOMRect; at?: 'below' | 'point'; sheet: boolean; trigger: () => HTMLElement | null; items: MenuItem[]; note?: string; onClose: () => void }) {
+  const { onClose } = props
+  useEffect(() => {
+    window.addEventListener(CLOSE_MENUS, onClose)
+    return () => window.removeEventListener(CLOSE_MENUS, onClose)
+  }, [onClose])
+  return props.sheet ? (
+    <Dialog title={props.label} onClose={onClose} hideTitle>
+      <div className="handle" aria-hidden="true" />
+      {props.note && <div className="menu-note">{props.note}</div>}
+      <div className="sheet-list" role="menu">
+        {props.items.map((it, i) => <MenuEntry key={i} item={it} close={onClose} />)}
+      </div>
+      <button className="btn btn-block" onClick={onClose}>{t('common.cancel')}</button>
+    </Dialog>
+  ) : (
+    <Popover anchor={props.anchor} at={props.at ?? 'below'} trigger={props.trigger} onClose={onClose} label={props.label}>
+      {props.note && <div className="menu-note">{props.note}</div>}
+      {props.items.map((it, i) => <MenuEntry key={i} item={it} close={onClose} />)}
+    </Popover>
   )
 }
 
@@ -246,7 +254,7 @@ function menuKeys(e: React.KeyboardEvent<HTMLElement>) {
   items[next].focus()
 }
 
-function Popover({ anchor, trigger, onClose, label, children }: { anchor: DOMRect; trigger: HTMLElement | null; onClose: () => void; label: string; children: ReactNode }) {
+function Popover({ anchor, at, trigger, onClose, label, children }: { anchor: DOMRect; at: 'below' | 'point'; trigger: () => HTMLElement | null; onClose: () => void; label: string; children: ReactNode }) {
   const ref = useRef<HTMLDivElement>(null)
   const isTop = useLayer()
   const [pos, setPos] = useState<{ top: number; left: number; maxHeight: number } | null>(null)
@@ -259,33 +267,35 @@ function Popover({ anchor, trigger, onClose, label, children }: { anchor: DOMRec
     const place = () => {
       const w = el.offsetWidth
       const h = el.scrollHeight
-      const below = window.innerHeight - anchor.bottom - 14
-      const above = anchor.top - 14
+      const gap = at === 'point' ? 2 : 6
+      const below = window.innerHeight - anchor.bottom - 8 - gap
+      const above = anchor.top - 8 - gap
       const down = h <= below || below >= above
       const maxHeight = Math.max(120, down ? below : above)
-      const top = down ? anchor.bottom + 6 : Math.max(8, anchor.top - 6 - Math.min(h, maxHeight))
-      const left = Math.min(Math.max(8, anchor.right - w), window.innerWidth - w - 8)
+      const top = down ? anchor.bottom + gap : Math.max(8, anchor.top - gap - Math.min(h, maxHeight))
+      // (From a point: its top left corner there, as a system's context menu.)
+      const left = Math.min(Math.max(8, at === 'point' ? anchor.left : anchor.right - w), window.innerWidth - w - 8)
       setPos((p) => (p && p.top === top && p.left === left && p.maxHeight === maxHeight ? p : { top, left, maxHeight }))
     }
     place()
     const ro = new ResizeObserver(place)
     ro.observe(el)
     return () => ro.disconnect()
-  }, [anchor])
+  }, [anchor, at])
   useEffect(() => {
     // The trigger toggles the menu itself; treating it as "outside" would
     // close on pointerdown and reopen on click.
-    const outside = (t: EventTarget | null) => !ref.current?.contains(t as Node) && !trigger?.contains(t as Node)
+    const outside = (t: EventTarget | null) => !ref.current?.contains(t as Node) && !trigger()?.contains(t as Node)
     const onDown = (e: PointerEvent) => outside(e.target) && onClose()
     const onKey = (e: KeyboardEvent) => {
       if (!isTop()) return
       if (e.key === 'Escape') {
         e.stopPropagation()
         onClose()
-        trigger?.focus()
+        trigger()?.focus()
       } else if (e.key === 'Tab') {
         onClose()
-        trigger?.focus()
+        trigger()?.focus()
       }
     }
     const onScroll = (e: Event) => outside(e.target) && onClose()
