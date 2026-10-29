@@ -66,6 +66,7 @@ type cardFrame struct {
 }
 
 func cardFrameOf(screen string) *cardFrame {
+	screen = strings.ReplaceAll(screen, "\x00", "") // (as on the host: tr -d '\000')
 	lines := strings.Split(strings.TrimRight(screen, "\r\n"), "\n")
 	plain := make([]string, len(lines))
 	for i, l := range lines {
@@ -206,7 +207,9 @@ func cardOf(screen string) *convoCard {
 	}
 	c.Text = strings.TrimSpace(text)
 	folded := star > 0 && rightNote(plain[star-1]) && strings.TrimSpace(plain[star-1]) == "[+]"
-	c.State = cardState(head, c.Choices, folded && star+1 > last)
+	// (Folded: its head alone, no keys; the "[+]" over it, outside its region,
+	// decides nothing where it has keys.)
+	c.State = cardState(head, c.Choices, folded && star+1 > last && len(c.Choices) == 0)
 	if c.State == "" {
 		return nil
 	}
@@ -214,8 +217,12 @@ func cardOf(screen string) *convoCard {
 		c.Choices, c.Actionable = nil, false
 	}
 	// Whether the box holds anything typed (a dim suggestion is no typing).
+	// (Its colours from its head on, as if none were set before: what is
+	// above, outside its region, may not decide it. Where a dim carried over
+	// from above would make the box's words a suggestion, they are taken as
+	// typed: not pressed from here.)
 	var st sgrState
-	for j := 0; j < mark; j++ {
+	for j := star; j < mark; j++ {
 		st = st.through(lines[j])
 	}
 	c.Empty = true
@@ -271,12 +278,13 @@ func cardState(head string, choices []cardChoice, folded bool) string {
 
 // cardRegion: the SHA-256 of a card's region of a screen read with its
 // colours: its lines from the head (star) to the box's lower rule (end),
-// each as drawn, its trailing spaces let go, each ended by a newline — as
-// cardRegionAwk takes it on the host.
+// each as drawn (its \r taken out), each ended by a newline — as
+// cardRegionAwk takes it on the host. All that cardOf reads of a card is in
+// it: the same region, the same card.
 func cardRegion(lines []string, star, end int) string {
 	var b strings.Builder
 	for _, l := range lines[star : end+1] {
-		b.WriteString(strings.TrimRight(l, " \t\r"))
+		b.WriteString(strings.ReplaceAll(l, "\r", ""))
 		b.WriteByte('\n')
 	}
 	sum := sha256.Sum256([]byte(b.String()))
@@ -287,8 +295,7 @@ func cardRegion(lines []string, star, end int) string {
 // (on its standard input) as cardRegion does: the input box in front (the
 // last line beginning, its colours aside, with the prompt's mark under a
 // rule), its lower rule, and the nearest line above it beginning with the
-// star at its very start; its lines printed as drawn, trailing spaces let
-// go. Nothing printed where there is none. (Bytes, not characters: any awk.)
+// star at its very start; its lines printed as drawn, \r taken out. Nothing printed where there is none. (Bytes, not characters: any awk.)
 const cardRegionAwk = `function note(q) { match(q, /^ */); return RLENGTH >= 24 && length(q) > RLENGTH }
 { raw[NR] = $0; p = $0; gsub(/\033\[[0-9;]*m/, "", p); gsub(/\r/, "", p); plain[NR] = p }
 END {
@@ -309,7 +316,7 @@ END {
     if (q ~ /[^ \t\f]/ && substr(q, 1, 2) != "  " && !note(q)) exit
   }
   if (!star) exit
-  for (k = star; k <= end; k++) { l = raw[k]; sub(/[ \t\r]+$/, "", l); print l }
+  for (k = star; k <= end; k++) { l = raw[k]; gsub(/\r/, "", l); print l }
 }`
 
 // cellWidth: at most how many of the terminal's cells s takes: a letter of
@@ -319,7 +326,9 @@ END {
 func cellWidth(s string) int {
 	n := 0
 	for _, r := range s {
-		if r < 0x80 {
+		if r == '\t' {
+			n += 8 // (to the next stop: eight at most)
+		} else if r < 0x80 {
 			n++
 		} else {
 			n += 2

@@ -159,7 +159,10 @@ func TestCardRegionAwkAgrees(t *testing.T) {
 	bases := []string{
 		"● said\n\n✦ Heads up · words\n  more words\n  1: Learn more   0: Dismiss\n\n" + rule + "\n❯ \n" + rule + "\n  status\n",
 		"x\n\x1b[38;2;177;185;249m✦ \x1b[0mHeads up · words  \n  1: Learn more   0: Dismiss\n" + rule + "\n❯ \x1b[2mtry\x1b[0m   \n" + rule + "\n  status\n",
-		cardSample(t, "ccmock/samples/headsup-cjk.txt"),
+	}
+	// (A real one too, where it is at hand; the test runs without it.)
+	if b, err := os.ReadFile(filepath.Join(os.Getenv("HOME"), "tmp/corral-devtools/ccmock/samples/headsup-cjk.txt")); err == nil {
+		bases = append(bases, string(b))
 	}
 	pool := []string{"", "\x1b[0m", "\r", " ", " x", "\f", "\f1. x", "  1. Menu choice", "❯ more", "● thread", "  indented", strings.Repeat(" ", 30) + "note", "  status", rule, "✦ Another", "\t", " \t", "1.", "  2.\tx"}
 	rnd := rand.New(rand.NewSource(408))
@@ -211,5 +214,74 @@ func TestCardKeysAtEdgeWide(t *testing.T) {
 		if c == nil || c.Actionable {
 			t.Fatalf("%s: %+v", k, c)
 		}
+	}
+}
+
+// Per review409: what cardOf reads of a card is all in its region. Screens
+// changed at random outside it only (colours set and left on above, a
+// "[+]" over its head, lines under the box): where the region is the same,
+// the card is the same.
+func TestCardDigestCoversCard(t *testing.T) {
+	rule := strings.Repeat("─", 40)
+	cards := []string{
+		"✦ Heads up · words\n  more words\n  1: Learn more   0: Dismiss\n\n" + rule + "\n❯ \n" + rule + "\n",
+		"✦ Heads up · words\n  1: Learn more   0: Dismiss\n" + rule + "\n❯ draft\n" + rule + "\n",
+		"✦ Dismissed.   1: Helpful   0: Dismiss\n" + rule + "\n❯ \x1b[2mtry\x1b[0m\n" + rule + "\n",
+		"✦ Heads up · words\n  1: Learn more\n  0:  \n" + rule + "\n❯ \n" + rule + "\n",
+	}
+	above := []string{"\x1b[2mold", "\x1b[0mold", "\x1b[2m", "● said", "", strings.Repeat(" ", 30) + "[+]", strings.Repeat(" ", 30) + "[-]", "\x1b[38;2;153;153;153mgrey"}
+	below := []string{"  status", "\x1b[0m", "", "  \x1b[2mdim", strings.Repeat(" ", 30) + "note"}
+	rnd := rand.New(rand.NewSource(409))
+	same := 0
+	for i := 0; i < 3000; i++ {
+		card := cards[rnd.Intn(len(cards))]
+		build := func() string {
+			var b strings.Builder
+			for k := rnd.Intn(4); k > 0; k-- {
+				b.WriteString(above[rnd.Intn(len(above))] + "\n")
+			}
+			b.WriteString(card)
+			for k := rnd.Intn(4); k > 0; k-- {
+				b.WriteString(below[rnd.Intn(len(below))] + "\n")
+			}
+			return b.String()
+		}
+		a, b := build(), build()
+		ca, cb := cardOf(a), cardOf(b)
+		if ca == nil || cb == nil || ca.digest != cb.digest {
+			continue
+		}
+		same++
+		if ca.State != cb.State || ca.Actionable != cb.Actionable || ca.Empty != cb.Empty || ca.Text != cb.Text || len(ca.Choices) != len(cb.Choices) {
+			t.Fatalf("one region, two cards:\n%q\n%+v\n%q\n%+v", a, ca, b, cb)
+		}
+	}
+	if same < 500 {
+		t.Fatalf("too few compared: %d", same)
+	}
+}
+
+// Per review409, each: a tab counted to its stop; NULs taken out as the host
+// does; trailing blanks part of the region.
+func TestCardReview409(t *testing.T) {
+	rule := strings.Repeat("─", 33)
+	if c := cardOf("✦ Heads up · w\n  \t1: Learn more   0: Dismis\n" + rule + "\n❯ \n" + rule + "\n"); c == nil || c.Actionable {
+		t.Fatalf("a tab to its stop: %+v", c)
+	}
+	nul := "✦ Heads up · w\n  more\n\x00\n  1: Learn more   0: Dismiss\n" + rule + "\n❯ \n" + rule + "\n"
+	cmd := exec.Command("sh", "-c", "tr -d '\\000' | awk '"+strings.ReplaceAll(cardRegionAwk, "'", `'"'"'`)+"'")
+	cmd.Stdin = strings.NewReader(nul)
+	out, err := cmd.Output()
+	c := cardOf(nul)
+	if err != nil || c == nil || len(out) == 0 {
+		t.Fatalf("NUL: %v %+v %q", err, c, out)
+	}
+	if sum := sha256.Sum256(out); hex.EncodeToString(sum[:]) != c.digest {
+		t.Fatalf("NUL: regions differ")
+	}
+	x := cardOf("✦ Heads up · w\n  1: Learn more\n  0:  \n" + rule + "\n❯ \n" + rule + "\n")
+	y := cardOf("✦ Heads up · w\n  1: Learn more\n  0:\n" + rule + "\n❯ \n" + rule + "\n")
+	if x == nil || y == nil || x.digest == y.digest && x.Actionable != y.Actionable {
+		t.Fatalf("trailing blanks: %+v %+v", x, y)
 	}
 }
