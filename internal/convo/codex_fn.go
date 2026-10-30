@@ -315,6 +315,16 @@ func codexResult(raw json.RawMessage) (text string, failed bool, images int) {
 		}
 		s = strings.Join(parts, "")
 	}
+	if t := strings.TrimSpace(s); strings.HasPrefix(t, "{") && strings.Contains(t, `"content"`) {
+		var w map[string]json.RawMessage
+		if json.Unmarshal([]byte(t), &w) == nil && w["content"] != nil && len(w) <= 3 && (len(w) == 1 || w["isError"] != nil || w["structuredContent"] != nil) {
+			var blocks []json.RawMessage
+			if json.Unmarshal(w["content"], &blocks) == nil {
+				text, failed := mcpResult(json.RawMessage(t))
+				return text, failed, images
+			}
+		}
+	}
 	if t := strings.TrimSpace(s); strings.HasPrefix(t, "{") && strings.Contains(t, `"output"`) {
 		var w map[string]json.RawMessage
 		if json.Unmarshal([]byte(t), &w) == nil && len(w) <= 2 && w["output"] != nil && (len(w) == 1 || w["metadata"] != nil) {

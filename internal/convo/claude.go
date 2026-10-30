@@ -877,6 +877,10 @@ func (c *Claude) user(r *claudeRow) {
 			}
 			return
 		}
+		if ev := taskEnded(s); ev != nil {
+			c.add(r, RoleNote, []Part{{Kind: KindEvent, Event: ev}})
+			return
+		}
 		role, text := classifyUserText(s)
 		if role == "" {
 			return
@@ -934,6 +938,10 @@ func (c *Claude) user(r *claudeRow) {
 		case "text":
 			if strings.Contains(b.Text, "<task-notification>") {
 				c.ended(b.Text)
+				if ev := taskEnded(b.Text); ev != nil {
+					notes = append(notes, Part{Kind: KindEvent, Event: ev})
+					continue
+				}
 			}
 			if sh, ok := shellOutput(b.Text); ok {
 				if sh != nil {
@@ -1236,6 +1244,10 @@ func (c *Claude) queued(r *claudeRow) {
 	if json.Unmarshal(a.Prompt, &s) == nil {
 		if a.CommandMode == "task-notification" {
 			c.ended(s) // (what it says of work set going: ended, or at it still)
+			if ev := taskEnded(s); ev != nil {
+				c.add(r, RoleNote, []Part{{Kind: KindEvent, Event: ev}})
+				return
+			}
 			if _, text := classifyUserText(s); text != "" {
 				c.add(r, RoleNote, []Part{textPart(KindText, text)})
 			}
@@ -2256,7 +2268,7 @@ func classifyUserText(s string) (role, text string) {
 		return RoleUser, "! " + strings.TrimSpace(inner(s))
 	case "task-notification":
 		if sm := taskSummary.FindStringSubmatch(s); sm != nil {
-			return RoleNote, strings.TrimSpace(sm[1])
+			return RoleNote, clip(strings.TrimSpace(html.UnescapeString(sm[1])), maxDetail)
 		}
 		if st := taskStatus.FindStringSubmatch(s); st != nil {
 			return RoleNote, strings.TrimSpace(st[1])
@@ -2265,6 +2277,52 @@ func classifyUserText(s string) (role, text string) {
 	}
 	return RoleUser, unpasted(s)
 }
+
+// taskEnded: a notice that work set going in the background ended (or
+// waits), as Claude Code words its summary — `Background command "<what>"
+// completed (exit code 0)`, `Agent "<what>" finished`, `Monitor "<what>"
+// script failed (exit 1)`…: what it was, its name (a command's
+// description, else the command itself), how it ended. nil, another
+// wording (said as a note, as it is).
+func taskEnded(s string) *Event {
+	sm := taskSummary.FindStringSubmatch(s)
+	if sm == nil {
+		return nil
+	}
+	m := taskSaid.FindStringSubmatch(strings.TrimSpace(html.UnescapeString(sm[1])))
+	if m == nil {
+		return nil
+	}
+	ev := &Event{Kind: EventTask, Task: map[string]string{"Background command": "cmd", "Agent": "agent", "Monitor": "monitor"}[m[1]]}
+	ev.Text, ev.Cut = cut(clean(m[2]), maxDetail)
+	how := m[3]
+	switch {
+	case strings.Contains(how, "fail"):
+		ev.Status = "failed"
+	case strings.Contains(how, "waiting"):
+		ev.Status = "waiting"
+	case strings.Contains(how, "stopped") || strings.Contains(how, "killed"):
+		ev.Status = "stopped"
+	case strings.Contains(how, "completed") || strings.Contains(how, "finished"):
+		ev.Status = "done"
+	default:
+		return nil
+	}
+	if cm := taskCode.FindStringSubmatch(how); cm != nil {
+		if n, err := strconv.Atoi(cm[1]); err == nil {
+			ev.Code = &n
+			if n != 0 && ev.Status == "done" {
+				ev.Status = "failed"
+			}
+		}
+	}
+	return ev
+}
+
+var (
+	taskSaid = regexp.MustCompile(`(?s)^(Background command|Agent|Monitor) "(.*)" ([^"]*)$`)
+	taskCode = regexp.MustCompile(`\(exit(?: code)? (-?\d{1,4})\)`)
+)
 
 // unpasted is the text with what Claude Code wraps a paste in taken off
 // (<pasted_content id="…">…</pasted_content id="…">, the same id at both

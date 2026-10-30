@@ -81,7 +81,7 @@ func TestClaudeEnvelopes(t *testing.T) {
 		{RoleUser, "/model opus"},
 		{RoleNote, "Set model to opus"},
 		{RoleUser, "! git status"},
-		{RoleNote, `Background command "tests" completed`},
+		{RoleNote, ""}, // (a task's end: an event, see below)
 		{RoleNote, "Run the nightly check"},
 		{RoleUser, "<div> is what I mean"},
 		{RoleSummary, "This session is being continued..."},
@@ -100,6 +100,9 @@ func TestClaudeEnvelopes(t *testing.T) {
 		if got[i].Role != w.role || got[i].Parts[0].Text != w.text {
 			t.Errorf("entry %d: %s %q, want %s %q", i, got[i].Role, got[i].Parts[0].Text, w.role, w.text)
 		}
+	}
+	if ev := got[3].Parts[0].Event; ev == nil || ev.Kind != EventTask || ev.Task != "cmd" || ev.Text != "tests" || ev.Status != "done" {
+		t.Errorf("a task's end: %+v", got[3].Parts[0])
 	}
 	if img := got[7].Parts; len(img) != 2 || img[1].Kind != KindImage || img[1].Text != "" {
 		t.Errorf("image part: %+v", img)
@@ -1510,5 +1513,32 @@ func TestClaudeWindow(t *testing.T) {
 	after.Prepend(before)
 	if m := after.Meta(); m.Window != 1_000_000 {
 		t.Fatalf("of the part before: %+v", m)
+	}
+}
+
+// A background task's end, as Claude Code words its summary: what it was,
+// its name (a command whole where it was given no description, its
+// escapes undone), how it ended and its exit code.
+func TestTaskEnded(t *testing.T) {
+	n := func(s string) string {
+		return "<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n<summary>" + s + "</summary>\n</task-notification>"
+	}
+	for _, c := range []struct {
+		summary, task, text, status string
+		code                        int
+	}{
+		{`Background command "Build the Docker image" completed (exit code 0)`, "cmd", "Build the Docker image", "done", 0},
+		{"Background command \"cd ~/w &amp;&amp; cat &lt;&lt;'EOF'\nline two\nEOF\" completed (exit code 2)", "cmd", "cd ~/w && cat <<'EOF'\nline two\nEOF", "failed", 2},
+		{`Agent "Browser port forwarding research" finished`, "agent", "Browser port forwarding research", "done", -1},
+		{`Agent "Research Moshi changelog" is waiting on its own background work`, "agent", "Research Moshi changelog", "waiting", -1},
+		{`Monitor "failures in the run" script failed (exit 1)`, "monitor", "failures in the run", "failed", 1},
+	} {
+		ev := taskEnded(n(c.summary))
+		if ev == nil || ev.Task != c.task || ev.Text != c.text || ev.Status != c.status || (c.code >= 0) != (ev.Code != nil) || (ev.Code != nil && *ev.Code != c.code) {
+			t.Errorf("%q: %+v", c.summary, ev)
+		}
+	}
+	if ev := taskEnded(n("Something else happened")); ev != nil {
+		t.Errorf("another wording taken: %+v", ev)
 	}
 }

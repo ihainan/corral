@@ -2619,6 +2619,31 @@ function EventNote({ ev, idle }: { ev: ConvoEvent; idle?: boolean }) {
       </div>
     )
   }
+  // Work set going in the background, ended (or waiting): one line, its
+  // name's first line; all of it (a command of many lines) behind a tap.
+  if (ev.kind === 'task') {
+    const name = ev.text ?? ''
+    const line = firstLine(name)
+    const short = line.length > 80 ? line.slice(0, 80) + '…' : line
+    const more = name !== short
+    const head = t(`convo.task.${ev.task ?? 'cmd'}.${ev.status ?? 'done'}` as I18nKey) + (ev.code ? t('convo.task.code', { n: ev.code }) : '')
+    return (
+      <div className={'convo-event is-task' + (ev.status === 'failed' ? ' is-warn' : '')}>
+        <div className="convo-trouble-body">
+          <p className="convo-trouble-head">
+            {head}
+            {short && <span className="convo-task-name">{short}</span>}
+          </p>
+          {more && open && <pre className="convo-pre convo-task-full">{name}</pre>}
+          {more && (
+            <button type="button" className="link-btn" aria-expanded={open} onClick={() => setOpen(!open)}>
+              {t(open ? 'convo.trouble.less' : 'convo.task.all')}
+            </button>
+          )}
+        </div>
+      </div>
+    )
+  }
   if (ev.kind === 'scheduled') {
     const said = (ev.text ?? '').trim()
     return (
@@ -3214,6 +3239,17 @@ function ToolRow({ tool, onCopy, live }: { tool: ConvoTool; onCopy: (s: string) 
             <button type="button" className="link-btn convo-sub-open" onClick={() => openSub({ agent: tool.agent_id!, title: tool.title || firstLine(tool.detail ?? '') })}>
               {t('sub.open')}
             </button>
+          )}
+          {tool.asks && !tool.answers && (
+            // (A question put to the person, its choices: Codex's, read only.)
+            <dl className="convo-ask-answers">
+              {tool.asks.map((a, i) => (
+                <div key={i}>
+                  <dt>{a.question}</dt>
+                  {a.options.length > 0 && <dd>{a.options.map((o) => o.label).join(' / ')}</dd>}
+                </div>
+              ))}
+            </dl>
           )}
           {tool.asks && tool.answers && (
             // (A question of Claude Code's, answered: what was asked, what was answered.)

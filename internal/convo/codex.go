@@ -167,32 +167,38 @@ func (c *Codex) Prepend(other Parser) {
 	// told of there as well (as it went on): one line, this part's (what is
 	// latest of it), with what only the call said of it (what it was for).
 	// The part before's line goes: none of it was shown yet.
-	drop := map[*Tool]bool{}
-	touched := false
+	dropIDs := map[string]bool{}
+	var changed []*Entry
 	for id, ct := range c.seen {
 		if ots, ok := o.tools[id]; ok && len(ots) > 0 {
-			mergeCall(ct, ots)
-			for _, t := range ots {
-				drop[t] = true
+			if e := mergeCall(ct, ots); e != nil {
+				changed = append(changed, e)
+				// (The call's id is this line's now: what comes back of it
+				// is put on it.)
+				var lines []*Tool
+				for _, p := range e.Parts {
+					if p.Tool != nil && p.Tool.ID == ct.ID {
+						lines = append(lines, p.Tool)
+					}
+				}
+				c.tools[id] = lines
 			}
+			dropIDs[id] = true
 			delete(o.tools, id)
-			touched = true
 		}
 		if ot := o.seen[id]; ot != nil && ot != ct {
-			drop[ot] = true
+			dropIDs[id] = true // (all of its lines there: a change of several files told twice)
 			delete(o.seen, id)
 		}
 	}
-	if len(drop) > 0 {
-		o.entries = dropTools(o.entries, drop)
+	if len(dropIDs) > 0 {
+		o.entries = dropToolIDs(o.entries, dropIDs)
 		o.turns = keptTurns(o.turns, o.entries)
 	}
-	if touched {
+	if len(changed) > 0 {
 		c.rev++
-		for _, ct := range c.seen {
-			if ct.merged && ct.at != nil {
-				ct.at.Rev = c.rev
-			}
+		for _, e := range changed {
+			e.Rev = c.rev
 		}
 	}
 	// Its plans before this part's; its questions answered by a message of
@@ -219,10 +225,13 @@ func (c *Codex) Prepend(other Parser) {
 		}
 	}
 	for id := range o.hidden {
-		if c.hidden == nil || len(c.hidden) >= maxHidden {
-			break
+		delete(c.orphans, id) // (what came back of a call whose things are told of on their own)
+		if c.hidden == nil {
+			c.hidden = map[string]bool{}
 		}
-		c.hidden[id] = true
+		if len(c.hidden) < maxHidden {
+			c.hidden[id] = true
+		}
 	}
 	// (Each command told of on its own in either part: the lines of the
 	// calls that run them go, in the part before this one too.)
@@ -362,6 +371,21 @@ func (c *Codex) trim() {
 				delete(c.seen, id)
 			}
 		}
+		// (A plan, a question, of what is left out: no longer of the view.)
+		plans := c.plans[:0]
+		for _, p := range c.plans {
+			if !gone[p.t] {
+				plans = append(plans, p)
+			}
+		}
+		c.plans = plans
+		asked := c.asked[:0]
+		for _, t := range c.asked {
+			if !gone[t] {
+				asked = append(asked, t)
+			}
+		}
+		c.asked = asked
 		c.entries = append([]*Entry(nil), c.entries[n:]...)
 		c.turns = keptTurns(c.turns, c.entries)
 	}
@@ -926,7 +950,10 @@ func (c *Codex) item(r *codexRow, p *codexPayload) {
 			}
 		}
 		for _, t := range kept {
-			if strings.HasPrefix(t.Name, "request_user_input") && len(c.asked) < maxAsked {
+			if strings.HasPrefix(t.Name, "request_user_input") {
+				if len(c.asked) >= maxAsked {
+					c.asked = append([]*Tool(nil), c.asked[1:]...) // (the oldest goes: the latest is to be answered)
+				}
 				c.asked = append(c.asked, t)
 			}
 		}
@@ -996,7 +1023,7 @@ func (c *Codex) answer(ts []*Tool, out codexOut) {
 			t.ResultLines = lineCount(out.text)
 			t.Images = out.images
 		}
-		t.Error = failed
+		t.Error = t.Error || failed // (as told when done: what came back does not undo it)
 		if failed && t.Name == "TodoWrite" {
 			for j := len(c.plans) - 1; j >= 0; j-- {
 				if c.plans[j].t == t {
@@ -1137,7 +1164,7 @@ func scriptTool(name, src string) *Tool {
 		return &Tool{Name: "TodoWrite"}
 	case "web__run", "web_run":
 		var qs []string
-		for _, m := range scriptQuery.FindAllStringSubmatch(src, 8) {
+		for _, m := range scriptQuery.FindAllStringSubmatch(callArgs(src, "tools."+name+"("), 8) {
 			if q, ok := jsUnquote(`"` + m[1] + `"`); ok && strings.TrimSpace(q) != "" {
 				qs = append(qs, q)
 			}
@@ -1149,7 +1176,44 @@ func scriptTool(name, src string) *Tool {
 	return &Tool{Name: clip(name, 128)}
 }
 
-// scriptQuery: a search's words in a script ({q: "…"}).
+// callArgs: what a script passes to its first call that begins so: from
+// its "(" to the one that closes it, strings and comments passed over;
+// "" where there is none.
+func callArgs(src, call string) string {
+	i := strings.Index(src, call)
+	if i < 0 {
+		return ""
+	}
+	start := i + len(call)
+	depth, quote := 1, byte(0)
+	for j := start; j < len(src); j++ {
+		ch := src[j]
+		switch {
+		case quote != 0:
+			if ch == '\\' {
+				j++
+			} else if ch == quote {
+				quote = 0
+			}
+		case ch == '"' || ch == '\'' || ch == '`':
+			quote = ch
+		case ch == '/' && j+1 < len(src) && src[j+1] == '/':
+			for j < len(src) && src[j] != '\n' {
+				j++
+			}
+		case ch == '(':
+			depth++
+		case ch == ')':
+			depth--
+			if depth == 0 {
+				return src[start:j]
+			}
+		}
+	}
+	return ""
+}
+
+// scriptQuery: a search's words in a call's arguments ({q: "…"}).
 var scriptQuery = regexp.MustCompile(`\bq"?\s*:\s*"((?:[^"\\]|\\.)*)"`)
 
 // patchTools: an apply_patch's files, each with its lines added and
@@ -1161,6 +1225,11 @@ func patchTools(patch string) []*Tool {
 	size := 0
 	for _, l := range strings.Split(patch, "\n") {
 		if m := patchFile.FindStringSubmatch(l); m != nil {
+			if len(out) >= maxFiles {
+				out[len(out)-1].MoreFiles++
+				t, h = nil, nil
+				continue
+			}
 			name := "Edit"
 			if m[1] == "Add" {
 				name = "Write"
@@ -1172,10 +1241,18 @@ func patchTools(patch string) []*Tool {
 			out, h = append(out, t), nil
 			continue
 		}
+		if t != nil && strings.HasPrefix(l, "*** Move to: ") {
+			t.Title = clip(t.Detail+" → "+strings.TrimSpace(strings.TrimPrefix(l, "*** Move to: ")), maxTitle)
+			continue
+		}
 		if t == nil || strings.HasPrefix(l, "*** ") {
 			continue
 		}
 		if strings.HasPrefix(l, "@@") {
+			if len(t.Patch) >= maxHunks {
+				t.PatchCut, h = true, nil
+				continue
+			}
 			t.Patch = append(t.Patch, Hunk{})
 			h = &t.Patch[len(t.Patch)-1]
 			continue
@@ -1190,6 +1267,10 @@ func patchTools(patch string) []*Tool {
 			t.Del++
 		}
 		if h == nil {
+			if len(t.Patch) >= maxHunks {
+				t.PatchCut = true
+				continue
+			}
 			t.Patch = append(t.Patch, Hunk{})
 			h = &t.Patch[len(t.Patch)-1]
 		}
@@ -1202,6 +1283,10 @@ func patchTools(patch string) []*Tool {
 	}
 	return out
 }
+
+// maxHunks: the hunks of one file's patch kept (its lines are bounded by
+// maxPatch; this, how many it is cut into).
+const maxHunks = 200
 
 func (c *Codex) add(r *codexRow, id, role string, parts []Part) {
 	if len(parts) == 0 {
@@ -1252,21 +1337,25 @@ func (c *Codex) backtrack(n int) {
 // the line the telling made (it read in another part): what it was for,
 // its command or file as the call named it, and what came back of it if
 // the telling had nothing — as reading both together would have shown.
-// Each of the line's files is matched to the call's of the same path.
-func mergeCall(ct *Tool, calls []*Tool) {
-	lines := []*Tool{ct}
-	if e := ct.at; e != nil {
-		lines = lines[:0]
-		for _, p := range e.Parts {
-			if p.Tool != nil && p.Tool.ID == ct.ID {
-				lines = append(lines, p.Tool)
-			}
+// Each of the line's files is matched to the call's of the same path; one
+// of the call's the telling did not name is put with them. The entry
+// changed, if any.
+func mergeCall(ct *Tool, calls []*Tool) *Entry {
+	e := ct.at
+	if e == nil {
+		return nil
+	}
+	var lines []*Tool
+	for _, p := range e.Parts {
+		if p.Tool != nil && p.Tool.ID == ct.ID {
+			lines = append(lines, p.Tool)
 		}
 	}
+	used := map[*Tool]bool{}
 	for _, l := range lines {
 		var call *Tool
 		for _, x := range calls {
-			if x.Name == l.Name && (x.Detail == l.Detail || (x.Detail != "" && strings.HasSuffix(l.Detail, "/"+x.Detail))) {
+			if !used[x] && x.Name == l.Name && (x.Detail == l.Detail || (x.Detail != "" && strings.HasSuffix(l.Detail, "/"+x.Detail))) {
 				call = x
 				break
 			}
@@ -1277,7 +1366,7 @@ func mergeCall(ct *Tool, calls []*Tool) {
 		if call == nil {
 			continue
 		}
-		l.merged = true
+		used[call] = true
 		if call.Detail != "" {
 			l.Detail = call.Detail
 		}
@@ -1291,15 +1380,23 @@ func mergeCall(ct *Tool, calls []*Tool) {
 			l.Stdin = call.Stdin
 		}
 	}
+	for _, x := range calls {
+		if !used[x] && len(e.Parts) < maxParts {
+			x.at, x.Done = e, x.Done || ct.Done
+			e.Parts = append(e.Parts, Part{Kind: KindTool, Tool: x})
+		}
+	}
+	return e
 }
 
-// dropTools: the entries without these lines (one with none left goes).
-func dropTools(entries []*Entry, drop map[*Tool]bool) []*Entry {
+// dropToolIDs: the entries without the lines of these ids (one with none
+// left goes).
+func dropToolIDs(entries []*Entry, drop map[string]bool) []*Entry {
 	out := entries[:0]
 	for _, e := range entries {
 		kept := e.Parts[:0]
 		for _, p := range e.Parts {
-			if p.Tool != nil && drop[p.Tool] {
+			if p.Tool != nil && p.Tool.ID != "" && drop[p.Tool.ID] {
 				continue
 			}
 			kept = append(kept, p)

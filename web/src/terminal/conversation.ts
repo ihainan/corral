@@ -98,7 +98,7 @@ export interface ConvoShell {
 // and after; how long it took), a notice that that was while it sat idle,
 // a scheduled task (or a loop's) set a turn going with its prompt.
 export interface ConvoEvent {
-  kind: 'compact' | 'idle_compact' | 'scheduled' | 'limit' | 'limit_wait' | 'limit_reset' | 'limit_cancelled' | 'recap' | 'goal' | 'notice'
+  kind: 'compact' | 'idle_compact' | 'scheduled' | 'limit' | 'limit_wait' | 'limit_reset' | 'limit_cancelled' | 'recap' | 'goal' | 'notice' | 'task'
   trigger?: string
   pre?: number
   post?: number
@@ -114,6 +114,9 @@ export interface ConvoEvent {
   level?: string // (notice) "notice" or "warning"
   resets_at?: number // (limit) when it resets, Unix seconds
   limit_kind?: string // (limit) "five_hour", "seven_day"…
+  task?: 'cmd' | 'agent' | 'monitor' // (task) work set going in the background, ended or waiting: what it was,
+  status?: 'done' | 'failed' | 'stopped' | 'waiting' // how it ended,
+  code?: number // its exit code, if said (text: its name, a command whole where it had no description)
 }
 
 // Something that went wrong which the thread would otherwise not show: the

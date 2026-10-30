@@ -325,3 +325,100 @@ func shownOf(c *Codex) string {
 	sort.Strings(out)
 	return strings.Join(out, "\n")
 }
+
+// review446: what review 446 found, each as it would happen.
+func TestCodexFnReview446(t *testing.T) {
+	// 1. A search's words only from the search's own arguments, not what a
+	// script types to a command.
+	script := "await tools.write_stdin({session_id:1, chars:'{q:\"PRIVATE_SENTINEL\"}'});\nawait tools.web__run({search_query:[{q:\"public\"}]});"
+	c := feedAll(codexLine(t, "response_item", map[string]any{"type": "custom_tool_call", "name": "exec", "call_id": "s1", "input": script}))
+	if b, _ := json.Marshal(c.Since(0)); strings.Contains(string(b), "PRIVATE") || !strings.Contains(string(b), "public") {
+		t.Errorf("1: %s", b)
+	}
+	// 2. What comes back of a call read in a part before its telling: on the
+	// telling's line, the page told.
+	later := feedAll(fnDone(t, map[string]any{"type": "ImageView", "id": "v1", "path": "/w/a.png"}))
+	later.Prepend(feedAll(fnCall(t, "v1", "view_image", map[string]any{"path": "/w/a.png"})))
+	rev := later.Rev()
+	later.Feed([]byte(fnOut(t, "v1", []any{map[string]any{"type": "input_image", "image_url": "data:,"}})))
+	if ts := toolsOf(later); len(ts) != 1 || ts[0].Images != 1 || len(later.Since(rev)) == 0 {
+		t.Errorf("2: %+v, since %d", ts, len(later.Since(rev)))
+	}
+	// 3, 4. A call of two files, its telling naming one, parted: both kept,
+	// the line changed told.
+	patch := "apply_patch <<'P'\n*** Begin Patch\n*** Update File: a.py\n@@\n-a\n+b\n*** Update File: b.py\n@@\n-c\n+d\n*** End Patch\nP"
+	tell := fnDone(t, map[string]any{"type": "FileChange", "id": "p1", "status": "completed", "changes": map[string]any{"/w/0.py": map[string]any{"type": "update", "unified_diff": "@@ -1 +1 @@\n-x\n+y\n"}, "/w/a.py": map[string]any{"type": "update", "unified_diff": "@@ -1 +1 @@\n-a\n+b\n"}}})
+	later = feedAll(tell)
+	rev = later.Rev()
+	later.Prepend(feedAll(fnCall(t, "p1", "exec_command", map[string]any{"cmd": patch})))
+	var paths []string
+	for _, x := range toolsOf(later) {
+		paths = append(paths, x.Detail)
+	}
+	sort.Strings(paths)
+	if strings.Join(paths, ",") != "/w/0.py,a.py,b.py" || len(later.Since(rev)) == 0 {
+		t.Errorf("3, 4: %v, since %d", paths, len(later.Since(rev)))
+	}
+	// 5. The same change told in both parts: its files once.
+	later = feedAll(tell)
+	later.Prepend(feedAll(tell))
+	if ts := toolsOf(later); len(ts) != 2 {
+		t.Errorf("5: %d lines", len(ts))
+	}
+	// 6. A failed MCP call stays failed; what came back is its words.
+	c = feedAll(
+		fnCallNS(t, "m1", "mcp__x__", "do", map[string]any{}),
+		fnDone(t, map[string]any{"type": "McpToolCall", "id": "m1", "server": "x", "tool": "do", "status": "failed", "result": map[string]any{"content": []any{map[string]any{"type": "text", "text": "no"}}, "isError": true}}),
+		fnOut(t, "m1", `{"content":[{"type":"text","text":"bad thing"}],"isError":true}`),
+	)
+	if ts := toolsOf(c); len(ts) != 1 || !ts[0].Error || strings.Contains(ts[0].Result, "isError") {
+		t.Errorf("6: %+v", ts)
+	}
+	// 10, 11. A patch of many files: those kept, the rest counted; a file
+	// moved, said.
+	var b strings.Builder
+	b.WriteString("apply_patch <<'P'\n*** Begin Patch\n*** Update File: m.py\n*** Move to: n.py\n@@\n-a\n+b\n")
+	for i := 0; i < 100; i++ {
+		fmt.Fprintf(&b, "*** Add File: f%d.py\n+x\n", i)
+	}
+	b.WriteString("*** End Patch\nP")
+	ts := toolsOf(feedAll(fnCall(t, "big", "exec_command", map[string]any{"cmd": b.String()})))
+	if len(ts) != maxFiles || ts[len(ts)-1].MoreFiles != 101-maxFiles || ts[0].Title != "m.py → n.py" {
+		t.Errorf("10, 11: %d lines, more %d, %q", len(ts), ts[len(ts)-1].MoreFiles, ts[0].Title)
+	}
+	// 12. Many questions: the latest answered by the next message.
+	var rows []string
+	for i := 0; i < maxAsked+1; i++ {
+		rows = append(rows, fnCall(t, fmt.Sprintf("q%d", i), "request_user_input_async", map[string]any{"questions": []any{map[string]any{"title": "q"}}}), fnOut(t, fmt.Sprintf("q%d", i), `{"accepted":true}`))
+	}
+	ts = toolsOf(feedAll(append(rows, fnUser(t, "u", "答"))...))
+	if !ts[len(ts)-1].Done {
+		t.Error("12: the latest question not answered")
+	}
+}
+
+// review446 8: a plan of what is left out (the conversation longer than
+// is kept) is no list.
+func TestCodexPlanTrimmed(t *testing.T) {
+	rows := []string{fnCall(t, "p", "update_plan", map[string]any{"plan": []any{map[string]any{"step": "x", "status": "pending"}}}), fnOut(t, "p", "Plan updated")}
+	for i := 0; i < maxEntries; i++ {
+		rows = append(rows, fnUser(t, fmt.Sprintf("u%d", i), "m"))
+	}
+	if ts := feedAll(rows...).Tasks(); ts != nil {
+		t.Errorf("tasks of what was left out: %+v", ts)
+	}
+}
+
+// review446 9: a call of the code mode hidden in the part before: what came
+// back of it in this part is let be.
+func TestCodexHiddenAcrossParts(t *testing.T) {
+	before := feedAll(
+		fnDone(t, map[string]any{"type": "CommandExecution", "id": "exec-1", "command": []string{"ls"}, "status": "completed", "aggregated_output": "", "exit_code": 0}),
+		codexLine(t, "response_item", map[string]any{"type": "custom_tool_call", "name": "exec", "call_id": "s9", "input": "await tools.exec_command({cmd:\"ls\"});"}),
+	)
+	later := feedAll(fnOut(t, "s9", "Script completed\nWall time 0 seconds\nOutput:\n"))
+	later.Prepend(before)
+	if _, kept := later.orphans["s9"]; kept {
+		t.Error("what came back of a hidden call is kept")
+	}
+}

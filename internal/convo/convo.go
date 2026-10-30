@@ -75,6 +75,7 @@ const (
 	EventRecap          = "recap"  // Claude Code's line of what went on while the person was away
 	EventGoal           = "goal"   // (/goal) a goal set, or judged met or not (Met, Text: why)
 	EventNotice         = "notice" // a notice of Claude Code's of any other kind (Level: notice, warning)
+	EventTask           = "task"   // work set going in the background came to an end, or waits (Task, Status, Code, Text: its name)
 )
 
 // What a Trouble is of.
@@ -182,6 +183,11 @@ type Event struct {
 	// (limit) when it resets (Unix seconds), and of what: "five_hour", …
 	ResetsAt  int64  `json:"resets_at,omitempty"`
 	LimitKind string `json:"limit_kind,omitempty"`
+	// (task) what it was ("cmd", "agent", "monitor"), how it ended
+	// ("done", "failed", "stopped", "waiting") and its exit code, if said.
+	Task   string `json:"task,omitempty"`
+	Status string `json:"status,omitempty"`
+	Code   *int   `json:"code,omitempty"`
 }
 
 // Trouble is something that went wrong which the thread would otherwise
@@ -296,8 +302,6 @@ type Tool struct {
 	fromCall bool
 	// at: (Codex) the entry the line is in, whose Rev changes with it.
 	at *Entry
-	// merged: (Codex) what its call said was put on it (see mergeCall).
-	merged bool
 }
 
 // Stdin is what was put to a command still running (see Tool.Stdin).
