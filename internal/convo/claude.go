@@ -2267,6 +2267,9 @@ func classifyUserText(s string) (role, text string) {
 	case "bash-input":
 		return RoleUser, "! " + strings.TrimSpace(inner(s))
 	case "task-notification":
+		if !taskNotice(s) {
+			return RoleUser, unpasted(s) // (a notice with words around it: the person's, quoting one)
+		}
 		if sm := taskSummary.FindStringSubmatch(s); sm != nil {
 			return RoleNote, clip(strings.TrimSpace(html.UnescapeString(sm[1])), maxDetail)
 		}

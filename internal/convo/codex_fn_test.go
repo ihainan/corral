@@ -545,3 +545,71 @@ func TestCodexFnReview448(t *testing.T) {
 		t.Errorf("3: %d lines, last %s, asked %d", len(ts), ts[len(ts)-1].Name, len(c.asked))
 	}
 }
+
+// review449: what review 449 found, each as it would happen.
+func TestCodexFnReview449(t *testing.T) {
+	leaks := func(script string) string {
+		c := feedAll(codexLine(t, "response_item", map[string]any{"type": "custom_tool_call", "name": "exec", "call_id": "s", "input": script}))
+		b, _ := json.Marshal(c.Since(0))
+		return string(b)
+	}
+	for i, script := range []string{
+		// 1. A regular expression with "//" in it, one with a quote; a class with ")".
+		"const r = /https?:\\/\\//; await tools.write_stdin({session_id:1, chars:\"PRIVATE\"});",
+		"const r = /'/; await tools.write_stdin({session_id:1, chars:'tools.exec_command({cmd:\"PRIVATE\"})'});",
+		// 2. A string continued over CRLF; a comment ended by CR.
+		"await tools.write_stdin({session_id:1, chars:'a\\\r\ntools.exec_command({cmd:\"PRIVATE\"})'});",
+		// 3. A patch typed to a command, or written in a comment.
+		"await tools.write_stdin({session_id:1, chars:\"*** Begin Patch\\n*** Add File: PRIVATE\\n+PRIVATE\\n*** End Patch\"});",
+		"/* \"*** Begin Patch\\n*** Add File: PRIVATE\\n+x\\n*** End Patch\" */ await tools.exec_command({cmd:\"ls\"});",
+		// 8. Templates opened without end: bounded, nothing taken from them.
+		strings.Repeat("`${", 2000) + "tools.exec_command({cmd:\"PRIVATE\"})",
+	} {
+		if b := leaks(script); strings.Contains(b, "PRIVATE") {
+			t.Errorf("%d: %s", i, b)
+		}
+	}
+	// (A regular expression's ")" does not end the search's arguments.)
+	if b := leaks("await tools.web__run({search_query:[{q:\"one\"}], m: /[)]/, x:[{q:\"two\"}]});"); !strings.Contains(b, "one") || !strings.Contains(b, "two") {
+		t.Errorf("1, a class: %s", b)
+	}
+	// 4. Keys in quotes: the command and the words still read.
+	if b := leaks("await tools.exec_command({\"cmd\":\"go test ./...\"}); await tools.web__run({\"search_query\":[{\"q\":\"public\"}]});"); !strings.Contains(b, "go test ./...") || !strings.Contains(b, "public") {
+		t.Errorf("4: %s", b)
+	}
+	// 5. This part's script lines gone as the part before is put before:
+	// told as of a revision after the page's.
+	later := feedAll(codexLine(t, "response_item", map[string]any{"type": "custom_tool_call", "name": "exec", "call_id": "s3", "input": "await tools.exec_command({cmd:\"pwd\"});"}))
+	rev := later.Rev()
+	later.Prepend(feedAll(fnDone(t, map[string]any{"type": "CommandExecution", "id": "exec-1", "command": []string{"ls"}, "status": "completed", "aggregated_output": "", "exit_code": 0})))
+	told := false
+	for _, e := range later.Since(rev) {
+		if e.ID == later.entries[len(later.entries)-1].ID {
+			told = true
+		}
+	}
+	if !told {
+		t.Error("5: the page not told its script line went")
+	}
+	// 6. A question after many calls: still a question.
+	c := feedAll(codexLine(t, "response_item", map[string]any{"type": "custom_tool_call", "name": "exec", "call_id": "s4", "input": strings.Repeat("await tools.exec_command({cmd:\"ls\"});\n", 40) + "await tools.request_user_input({questions:[]});"}))
+	if len(c.asked) != 1 {
+		t.Errorf("6: asked %d", len(c.asked))
+	}
+}
+
+// review449 7: a notice with the person's words around it is theirs, whole.
+func TestTaskNoticeWithWords(t *testing.T) {
+	for _, s := range []string{
+		"<task-notification><summary>Agent \"a\" finished</summary></task-notification> Please explain this.",
+		"<task-notification><summary>Agent \"a\" finished</summary></task-notification> and <task-notification><summary>Agent \"b\" finished</summary></task-notification>",
+	} {
+		c := NewClaude()
+		b, _ := json.Marshal(map[string]any{"type": "user", "uuid": "u1", "message": map[string]any{"content": s}})
+		c.Feed(append(b, '\n'))
+		es := c.Since(0)
+		if len(es) != 1 || es[0].Role != RoleUser || es[0].Parts[0].Text != s {
+			t.Errorf("%q: %+v", s, es)
+		}
+	}
+}

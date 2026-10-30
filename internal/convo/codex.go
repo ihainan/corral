@@ -231,6 +231,7 @@ func (c *Codex) Prepend(other Parser) {
 	// calls that run them go, in the part before this one too.)
 	if c.itemCmds || o.itemCmds {
 		if !c.itemCmds {
+			c.rev++       // (this part's entries change: told as of a revision after the page's)
 			c.itemsTell() // (told of on their own in the part before: this part's script lines go too)
 		}
 		o.itemCmds = false
@@ -1151,22 +1152,39 @@ func codexTools(name, src string) []*Tool {
 			return out
 		}
 	}
-	// (What is code in it, its strings' and comments' insides blanked: calls
-	// are found there, and only what they are given read from src.)
+	// What is code in it (its strings' and comments' insides blanked): what
+	// is read out of it is what stands there — a string the code itself
+	// writes, a call it makes — and none of what it types to a running
+	// command (write_stdin's arguments: a password, a key).
 	code := jsCode(src)
-	for _, lit := range patchStr.FindAllString(src, 8) {
-		if patch, ok := jsUnquote(lit); ok {
+	typed := callSpans(code, "tools.write_stdin(")
+	readable := func(at int) bool { // (a string's opening quote, in the code, not in what is typed)
+		if at < 0 || at >= len(code) || code[at] != src[at] {
+			return false
+		}
+		for _, sp := range typed {
+			if at >= sp[0] && at < sp[1] {
+				return false
+			}
+		}
+		return true
+	}
+	for _, m := range patchStr.FindAllStringIndex(src, 8) {
+		if patch, ok := jsUnquote(src[m[0]:m[1]]); ok && readable(m[0]) {
 			out = append(out, patchTools(patch)...)
 		}
 	}
-	for _, lit := range patchTmpl.FindAllString(src, 8) {
-		if patch, ok := jsTemplate(lit); ok {
+	for _, m := range patchTmpl.FindAllStringIndex(src, 8) {
+		if patch, ok := jsTemplate(src[m[0]:m[1]]); ok && readable(m[0]) {
 			out = append(out, patchTools(patch)...)
 		}
 	}
 	// (Its commands, one line each, as one: what came back is of them all.)
 	var cmds []string
-	for _, m := range execCmd.FindAllStringSubmatchIndex(code, 16) {
+	for _, m := range execCmd.FindAllStringSubmatchIndex(src, 16) {
+		if !readable(m[0]) || !readable(m[2]-1) {
+			continue // (a call written in a string, a comment, or typed to a command)
+		}
 		if cmd, ok := jsUnquote(`"` + src[m[2]:m[3]] + `"`); ok {
 			cmds = append(cmds, cmd)
 		}
@@ -1178,18 +1196,14 @@ func codexTools(name, src string) []*Tool {
 	// here: what each did is told of on its own, in a newer Codex). Not the
 	// commands and patches read above, nor what it types to a command.
 	seen := map[string]bool{}
-	asks := false
-	for _, m := range toolCalled.FindAllStringSubmatch(code, 32) {
+	asks := strings.Contains(code, "tools.request_user_input") // (wherever it is, among however many calls)
+	for _, m := range toolCalled.FindAllStringSubmatch(code, 64) {
 		n := m[1]
-		if seen[n] || (n == "exec_command" && len(cmds) > 0) || (n == "apply_patch" && len(out) > 0) {
+		if seen[n] || (n == "exec_command" && len(cmds) > 0) || (n == "apply_patch" && len(out) > 0) || strings.HasPrefix(n, "request_user_input") {
 			continue
 		}
 		seen[n] = true
-		if strings.HasPrefix(n, "request_user_input") {
-			asks = true
-			continue
-		}
-		if t := scriptTool(n, src, code); t != nil && len(out) < maxParts {
+		if t := scriptTool(n, src, code, readable); t != nil && len(out) < maxParts {
 			out = append(out, t)
 		}
 	}
@@ -1200,13 +1214,14 @@ func codexTools(name, src string) []*Tool {
 	if len(out) > 0 {
 		return out
 	}
-	// (Nothing it calls named: the script, its first line only.)
-	return []*Tool{{Name: clip(name, 128), Detail: clip(firstLineOf(src), maxDetail)}}
+	// (Nothing it calls named: the script, none of it shown — it may hold
+	// what it types to a command.)
+	return []*Tool{{Name: clip(name, 128)}}
 }
 
 // scriptTool: a tool a script of the code mode calls, as the tool the view
 // knows that does the same (its arguments not read: they are code).
-func scriptTool(name, src, code string) *Tool {
+func scriptTool(name, src, code string, readable func(int) bool) *Tool {
 	switch name {
 	case "exec_command":
 		return &Tool{Name: "Bash"}
@@ -1218,8 +1233,12 @@ func scriptTool(name, src, code string) *Tool {
 		return &Tool{Name: "TodoWrite"}
 	case "web__run", "web_run":
 		var qs []string
-		if from, to := callSpan(code, "tools."+name+"("); from >= 0 {
-			for _, m := range scriptQuery.FindAllStringSubmatchIndex(code[from:to], 8) {
+		if sp := callSpans(code, "tools."+name+"("); len(sp) > 0 {
+			from, to := sp[0][0], sp[0][1]
+			for _, m := range scriptQuery.FindAllStringSubmatchIndex(src[from:to], 8) {
+				if !readable(from + m[2] - 1) {
+					continue
+				}
 				if q, ok := jsUnquote(`"` + src[from+m[2]:from+m[3]] + `"`); ok && strings.TrimSpace(q) != "" {
 					qs = append(qs, q)
 				}
@@ -1232,47 +1251,84 @@ func scriptTool(name, src, code string) *Tool {
 	return &Tool{Name: clip(name, 128)}
 }
 
-// callSpan: where what a script's first call that begins so is given lies,
-// in its code (strings and comments blanked: see jsCode): from after its
-// "(" to the ")" that closes it; -1, none.
-func callSpan(code, call string) (int, int) {
-	i := strings.Index(code, call)
-	if i < 0 {
-		return -1, -1
-	}
-	start, depth := i+len(call), 1
-	for j := start; j < len(code); j++ {
-		switch code[j] {
-		case '(':
-			depth++
-		case ')':
-			depth--
-			if depth == 0 {
-				return start, j
+// callSpans: where what a script's calls that begin so are given lies, in
+// its code (strings and comments blanked: see jsCode): from after each
+// one's "(" to the ")" that closes it (or the script's end).
+func callSpans(code, call string) [][2]int {
+	var out [][2]int
+	for from := 0; len(out) < 64; {
+		i := strings.Index(code[from:], call)
+		if i < 0 {
+			break
+		}
+		start, depth, end := from+i+len(call), 1, len(code)
+		for j := start; j < len(code); j++ {
+			if code[j] == '(' {
+				depth++
+			} else if code[j] == ')' {
+				if depth--; depth == 0 {
+					end = j
+					break
+				}
 			}
 		}
+		out = append(out, [2]int{start, end})
+		from = start
 	}
-	return -1, -1
+	return out
 }
 
 // jsCode: a script as its code alone, the same length: what is inside its
-// strings blanked ('_', their quotes kept), its comments blanked (' '); a
-// template literal's ${…} is code, blanked so in turn. (Regular expression
-// literals are not told from division: rare in what Codex writes.)
+// strings, template texts and regular expressions blanked ('_', their
+// delimiters kept), its comments blanked (' '); a template's ${…} is code,
+// blanked so in turn (to maxTplDepth deep: beyond, all of it as text).
 func jsCode(src string) string {
 	b := []byte(src)
 	jsCodeFrom(b, 0, 0)
 	return string(b)
 }
 
-// jsCodeFrom blanks from i on; in a template's ${…} (inTpl > 0), up to the
+const maxTplDepth = 32
+
+// jsLineEnd: b[i] ends a line (LF, CR, U+2028, U+2029).
+func jsLineEnd(b []byte, i int) bool {
+	return b[i] == '\n' || b[i] == '\r' || (b[i] == 0xe2 && i+2 < len(b) && b[i+1] == 0x80 && (b[i+2] == 0xa8 || b[i+2] == 0xa9))
+}
+
+// jsRegexHere: a "/" at i begins a regular expression (not a division):
+// what comes before it is no value.
+func jsRegexHere(b []byte, i int) bool {
+	j := i - 1
+	for j >= 0 && (b[j] == ' ' || b[j] == '\t' || b[j] == '\n' || b[j] == '\r') {
+		j--
+	}
+	if j < 0 {
+		return true
+	}
+	if strings.IndexByte("(,=:[!&|?{};+-*%<>~^", b[j]) >= 0 {
+		return true
+	}
+	for _, w := range []string{"return", "typeof", "case", "do", "else", "in", "of", "void", "await", "yield"} {
+		k := j + 1 - len(w)
+		if k >= 0 && string(b[k:j+1]) == w && (k == 0 || !jsWordByte(b[k-1])) {
+			return true
+		}
+	}
+	return false
+}
+
+func jsWordByte(c byte) bool {
+	return c == '_' || c == '$' || c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= 0x80
+}
+
+// jsCodeFrom blanks from i on; in a template's ${…} (depth > 0), up to the
 // "}" that closes it, whose index it returns (else len(b)).
-func jsCodeFrom(b []byte, i, inTpl int) int {
-	depth := 0
+func jsCodeFrom(b []byte, i, depth int) int {
+	braces := 0
 	for ; i < len(b); i++ {
 		switch ch := b[i]; {
 		case ch == '/' && i+1 < len(b) && b[i+1] == '/':
-			for ; i < len(b) && b[i] != '\n'; i++ {
+			for ; i < len(b) && !jsLineEnd(b, i); i++ {
 				b[i] = ' '
 			}
 		case ch == '/' && i+1 < len(b) && b[i+1] == '*':
@@ -1285,11 +1341,29 @@ func jsCodeFrom(b []byte, i, inTpl int) int {
 				b[i], b[i+1] = ' ', ' '
 				i++
 			}
+		case ch == '/' && jsRegexHere(b, i):
+			class := false
+			for i++; i < len(b) && !jsLineEnd(b, i) && (class || b[i] != '/'); i++ {
+				switch {
+				case b[i] == '\\' && i+1 < len(b):
+					b[i] = '_'
+					i++
+				case b[i] == '[':
+					class = true
+				case b[i] == ']':
+					class = false
+				}
+				b[i] = '_'
+			}
 		case ch == '"' || ch == '\'':
-			for i++; i < len(b) && b[i] != ch && b[i] != '\n'; i++ {
+			for i++; i < len(b) && b[i] != ch && !jsLineEnd(b, i); i++ {
 				if b[i] == '\\' && i+1 < len(b) {
 					b[i] = '_'
 					i++
+					if b[i] == '\r' && i+1 < len(b) && b[i+1] == '\n' { // (a line continued: CRLF)
+						b[i] = '_'
+						i++
+					}
 				}
 				b[i] = '_'
 			}
@@ -1299,19 +1373,26 @@ func jsCodeFrom(b []byte, i, inTpl int) int {
 				case b[i] == '\\' && i+1 < len(b):
 					b[i], b[i+1] = '_', '_'
 					i++
+				case b[i] == '$' && i+1 < len(b) && b[i+1] == '{' && depth >= maxTplDepth:
+					for ; i < len(b); i++ { // (nested past reason: all the rest as text)
+						if b[i] != '\n' {
+							b[i] = '_'
+						}
+					}
+					return len(b)
 				case b[i] == '$' && i+1 < len(b) && b[i+1] == '{':
-					i = jsCodeFrom(b, i+2, inTpl+1) // (its code, to its "}")
+					i = jsCodeFrom(b, i+2, depth+1) // (its code, to its "}")
 				default:
 					b[i] = '_'
 				}
 			}
-		case inTpl > 0 && ch == '{':
-			depth++
-		case inTpl > 0 && ch == '}':
-			if depth == 0 {
+		case depth > 0 && ch == '{':
+			braces++
+		case depth > 0 && ch == '}':
+			if braces == 0 {
 				return i
 			}
-			depth--
+			braces--
 		}
 	}
 	return len(b)
