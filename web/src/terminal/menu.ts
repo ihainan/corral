@@ -9,7 +9,8 @@
 // no menu.
 const menuLine = /^[\s│|]*([❯›>▶→●◉])?\s*([1-9])[.)]\s+(\S.*?)\s*[│|]?\s*$/
 const hintLine = /^[\s│|╭╮╰╯─━┌┐└┘]*$|\b(esc|cancel|confirm)\b/i
-const maxLabel = 400 // (cut where shown: what is read of it, to the end)
+const maxLabel = 120
+const maxCodexLabel = 400 // (Codex's: its command's prefix in it, read to the end to be said in Chinese)
 
 // A choice too long for the pane's width goes on in lines that begin where
 // its text does (a narrow pane, a phone's). A key hint ("Esc to cancel") is
@@ -87,7 +88,8 @@ function readMenu(lines: string[], told: boolean, codex = false): { out: Choice[
       }
       break
     }
-    const clipped = (s: string) => (s.length > maxLabel ? s.slice(0, maxLabel - 1) + '…' : s)
+    const most = codex ? maxCodexLabel : maxLabel
+    const clipped = (s: string) => (s.length > most ? s.slice(0, most - 1) + '…' : s)
     const label = told ? m[3] : codex ? [m[3], ...more].reduce(joinWrapped) : [m[3], ...more].join(' ')
     const desc = told && more.length ? clipped(more.join(' ')) : undefined
     more = []
@@ -130,9 +132,11 @@ function codexLines(text: string): string[] {
   let end = last + 1
   while (end < lines.length && goesOn(lines, end)) end++
   const tail = lines.slice(end).map((l) => l.trim()).filter(Boolean).join(' ')
-  const hints = /^(?:(?:press\s+)?(?:tab|enter|esc|space|←\/→|↑\/↓)\b.*?\bto\b[^|]*?(?:\s+or\s+(?:tab|enter|esc)\b[^|]*?)?(?:\s*\|\s*|$))+$/i
-  return !tail || hints.test(tail) ? lines.slice(0, end) : lines
+  // (Only its own phrases, between "|" and "or": anything else left over is no hint.)
+  const rest = tail.replace(codexHint, ' ').replace(/[|\s]+|\bor\b/gi, '')
+  return !rest ? lines.slice(0, end) : lines
 }
+const codexHint = /(?:press\s+)?(?:tab|enter|esc|space|←\/→|↑\/↓)\s+to\s+(?:add\s+notes|submit(?:\s+(?:all|answer))?|navigate(?:\s+questions)?|interrupt|confirm|cancel)\b/gi
 
 // The question asked over a menu on the screen: the line above it that
 // asks (ends in a question mark), else "".
@@ -261,13 +265,43 @@ export function codexAsk(text: string): CodexAsk | null {
 // and two spaces): the column where every choice with two parts has a run
 // of spaces ending, else each split at its first run of two or more.
 export function codexOptions(labels: string[]): { label: string; desc?: string }[] {
-  const ends = (s: string) => new Set([...s.matchAll(/\S(\s{2,})(?=\S)/g)].map((m) => m.index! + 1 + m[1].length))
-  const two = labels.map(ends).filter((e) => e.size)
+  // (Columns as the terminal draws them: a wide character, Chinese say, takes two.)
+  const ends = (s: string) => {
+    const out = new Map<number, number>() // column → index in s, where a run of two or more spaces ends
+    let col = 0
+    let run = 0
+    let i = 0
+    for (const ch of s) {
+      if (ch === ' ') run++
+      else {
+        if (run >= 2 && col > run) out.set(col, i)
+        run = 0
+      }
+      col += wide(ch) ? 2 : 1
+      i += ch.length
+    }
+    return out
+  }
+  const all = labels.map(ends)
+  const two = all.filter((e) => e.size)
   let col = -1
-  if (two.length > 1) for (const c of two[0]) if (two.every((e) => e.has(c))) col = Math.max(col, c)
-  return labels.map((s) => {
-    if (col > 0 && ends(s).has(col)) return { label: s.slice(0, col).trimEnd(), desc: s.slice(col) }
+  if (two.length > 1) for (const c of two[0].keys()) if (two.every((e) => e.has(c))) col = Math.max(col, c)
+  return labels.map((s, k) => {
+    const at = col > 0 ? all[k].get(col) : undefined
+    if (at !== undefined) return { label: s.slice(0, at).trimEnd(), desc: s.slice(at) }
     const m = /^(.*?\S)\s{2,}(\S.*)$/.exec(s)
     return m ? { label: m[1], desc: m[2] } : { label: s }
   })
+}
+
+// wide: a character a terminal draws two columns wide (East Asian wide and
+// full-width ones; emoji).
+function wide(ch: string): boolean {
+  const c = ch.codePointAt(0)!
+  return (
+    (c >= 0x1100 && c <= 0x115f) || (c >= 0x2e80 && c <= 0x303e) || (c >= 0x3041 && c <= 0x33ff) || (c >= 0x3400 && c <= 0x4dbf) ||
+    (c >= 0x4e00 && c <= 0x9fff) || (c >= 0xa000 && c <= 0xa4cf) || (c >= 0xac00 && c <= 0xd7a3) || (c >= 0xf900 && c <= 0xfaff) ||
+    (c >= 0xfe30 && c <= 0xfe4f) || (c >= 0xff00 && c <= 0xff60) || (c >= 0xffe0 && c <= 0xffe6) || (c >= 0x1f300 && c <= 0x1faff) ||
+    (c >= 0x20000 && c <= 0x3fffd)
+  )
 }
