@@ -60,6 +60,7 @@ type Server struct {
 	ocContested  ocContests       // (folders where two OpenCodes ran at once)
 	herdrTimes   herdrServers     // when each herdr server's agents last changed (shared by its watchers)
 	replies      paneReplies      // answers to agents in herdr panes
+	cxPressed    sync.Map         // convoReplyKey → time.Time: when keys or text last went to a Codex's pane (its title read before, stale)
 	picks        pendingConns     // connections kept while the user picks what to open
 	opening      openSlots        // opens connecting or asking a host, per user
 	files        *sftpPool        // shared SFTP channels of the file panel

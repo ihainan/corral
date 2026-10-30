@@ -656,8 +656,9 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   const waits = herdr ? !!row && agent?.status === 'blocked' && !agent.other : !!convo.bind && convo.agentStatus === 'waiting' && answerable(convo.waitingFor)
   // (Claude Code's, its process known: through the conversation, which
   // checks on the host, right before the keys, that this process still
-  // waits for an answer on the screen shown. Another agent in herdr: herdr's.)
-  const viaConvo = !!convo.bind && convo.bind.agent === 'claude' && (!herdr || convo.bind.pane === row?.a.pane_id)
+  // waits for an answer on the screen shown; a Codex in tmux likewise (its
+  // title says it waits). Another agent in herdr: herdr's.)
+  const viaConvo = !!convo.bind && (convo.bind.agent === 'claude' ? !herdr || convo.bind.pane === row?.a.pane_id : convo.bind.agent === 'codex' && !herdr)
   // What the log says it asks: the agent's last row, where that is a
   // question of Claude Code's or a plan not come back (anything after it,
   // a message of the person's above all: none).

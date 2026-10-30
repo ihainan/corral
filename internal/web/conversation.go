@@ -1318,8 +1318,12 @@ type convoState struct {
 	parser      convo.Parser
 	early       earlyTitle // (see lookEarlierTitle)
 	agent       string     // whose log: "claude", "codex" or "opencode"
-	offset      int64      // read up to here
-	size        int64      // the log's size when last looked at
+	// (A Codex in tmux: whether its title said it waits, for whom, when.)
+	cxTitleAt   time.Time
+	cxTitleFor  string
+	cxTitleWait bool
+	offset      int64 // read up to here
+	size        int64 // the log's size when last looked at
 	mtime       time.Time
 	grewAt      time.Time // when the log last grew, as this gateway saw it (at first, its own time of writing)
 	older       bool      // the log has more before what was read
@@ -1559,6 +1563,9 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 		ans.Reason = st.reason
 		writeJSON(w, http.StatusOK, ans)
 		return
+	}
+	if sess.Persistence == "tmux" && st.agent == "codex" && st.bind != nil && (st.status == "busy" || st.status == "") && s.codexWaits(ctx, sess, st) {
+		st.status = "waiting:permission prompt"
 	}
 	ans.Available, ans.Gen, ans.Rev, ans.Older, ans.More, ans.AgentStatus = true, st.gen, st.parser.Rev(), st.older, more, st.status
 	if w, ok := strings.CutPrefix(st.status, "waiting:"); ok {
@@ -2232,6 +2239,10 @@ mode=$1 sess=$2 p=$3 pid=$4 start=$5 len=$6 sock=$7 sid=$8 rd=$9
 shift 9
 gate=$1
 shift
+# (Codex's gates, "cfree" and "creply:…": whether it waits is said by its
+# terminal's title, not by a session file of Claude Code's.)
+cx=
+case $gate in cfree|creply:*) cx=1 gate=${gate#c} ;; esac
 case $rd in ''|*[!0-9]*) rd=0;; esac
 # (What the pane shows after, its last rd lines but blank ones at the end.)
 # (Not read, it exits 8: no screen is not an empty one.)
@@ -2327,6 +2338,14 @@ front || exit 3
 # it; 10 where it is not, 11 where it cannot be told).
 # (waiting: what the file says now, its status and what for.)
 waiting() {
+  if [ -n "$cx" ]; then
+    # (Codex 0.164 titles its terminal "[ ! ] Action Required | …", blinking
+    # with "[ . ] …", while it waits for an answer, and only then.)
+    if [ "$mode" = tmux ]; then t=$(tmux -u display-message -p -t "$p" '#{pane_title}' 2>/dev/null 9>&-)
+    else t=$(HERDR_SOCKET_PATH=$sock herdr pane get "$p" 2>/dev/null 9>&- | grep -o '"terminal_title" *: *"[^"]*"' | head -n 1 | sed 's/^"terminal_title" *: *"//; s/"$//'); fi
+    case $t in '[ ! ] Action Required'*|'[ . ] Action Required'*) st=waiting wf='permission prompt' ;; *) st=busy wf= ;; esac
+    return 0
+  fi
   c=$(head -c 65536 "$HOME/.claude/sessions/$pid.json" 2>/dev/null | tr -d '\n')
   st=$(printf '%s' "$c" | grep -o '"status" *: *"[a-z]*"' | head -n 1 | sed 's/.*"\([a-z]*\)"$/\1/')
   wf=$(printf '%s' "$c" | grep -o '"waitingFor" *: *"[a-z ]*"' | head -n 1 | sed 's/.*"\([a-z ]*\)"$/\1/')
@@ -2860,8 +2879,10 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		writeError(w, http.StatusConflict, "agent_changed", "that pane no longer runs this agent")
 		return
 	}
-	// (Claude Code's own keys and picker: not for Codex or OpenCode.)
-	if (front.agent == "codex" || front.agent == "opencode") && what != "send" && what != "interrupt" {
+	// (Claude Code's own keys and picker: not for Codex or OpenCode. A
+	// Codex in tmux is answered here, its screen read: in herdr, by herdr.)
+	codexAnswer := front.agent == "codex" && sess.Persistence == "tmux" && (what == "screen" || what == "reply")
+	if (front.agent == "codex" || front.agent == "opencode") && what != "send" && what != "interrupt" && !codexAnswer {
 		reason = "unsupported"
 		writeError(w, http.StatusConflict, "unsupported", "not for this agent")
 		return
@@ -2968,10 +2989,20 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	switch {
 	case what == "reply":
 		gate = "reply:" + b.Digest
+		if front.agent == "codex" {
+			gate = "c" + gate // (its title says it waits)
+		}
 	case front.agent == "claude" && (what == "send" || what == "send_now" || what == "mode"):
 		gate = "free" // (not while it waits: what is typed would go to its question)
+	case front.agent == "codex" && (what == "send" || what == "send_now"):
+		gate = "cfree" // (likewise: typed into its approval, the Enter would answer it)
 	case what == "command":
 		gate = "idle" // (not while it works either: it would wait in its queue, and run when no one looks)
+	}
+	if front.agent == "codex" {
+		// (Its title read before this, of before it: read again after, whatever came of it.)
+		s.codexPressed(sess, b.Pane)
+		defer s.codexPressed(sess, b.Pane)
 	}
 	res, err := sshx.Exec(ctx, sess.Client(), convoGatedCommand(gate, sess.Persistence, sess.TmuxSession, b.Pane, socket, b.PID, b.Start, b.Session, len(text), press, modeLines(what)), sendOut,
 		sshx.ExecOptions{Stdin: strings.NewReader(text), Release: ended.Done})

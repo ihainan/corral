@@ -95,7 +95,8 @@ func TestConvoGateOnTheHost(t *testing.T) {
 	}
 	dir := t.TempDir()
 	typed := filepath.Join(dir, "typed")
-	os.WriteFile(filepath.Join(dir, "herdr"), []byte("#!/bin/sh\nif [ \"$1 $2\" = 'pane read' ]; then printf 'Do you want to proceed?\\n 1. Yes\\n'; exit 0; fi\nprintf '%s\\n' \"$*\" >>"+typed+"\n"), 0o755)
+	title := filepath.Join(dir, "title.json")
+	os.WriteFile(filepath.Join(dir, "herdr"), []byte("#!/bin/sh\nif [ \"$1 $2\" = 'pane read' ]; then printf 'Do you want to proceed?\\n 1. Yes\\n'; exit 0; fi\nif [ \"$1 $2\" = 'pane get' ]; then cat "+title+"; exit 0; fi\nprintf '%s\\n' \"$*\" >>"+typed+"\n"), 0o755)
 	// (The agent: sleep, a session's leader with the pseudo-terminal its own, in front of it.)
 	helper := exec.Command("python3", "-c", `import pty, os, sys, time
 pid, fd = pty.fork()
@@ -165,6 +166,47 @@ time.sleep(30)`)
 		state(st, "")
 		if got := run("idle", []string{"enter"}); got != 12 || wrote() != "" {
 			t.Fatalf("%s, a command waits: exit %d, typed %q", st, got, wrote())
+		}
+	}
+	// A Codex's gates (5d-2): its terminal's title says whether it waits, not
+	// a session file of Claude Code's (here saying the other thing each time).
+	// (The stand-in is not named codex: its identity is checked as Claude Code's.)
+	state("idle", "")
+	titled := func(ti string) {
+		os.WriteFile(title, []byte(fmt.Sprintf(`{"result":{"pane":{"pane_id":"p1","terminal_title":%q}}}`, ti)), 0o644)
+	}
+	for _, ti := range []string{"[ ! ] Action Required | proj", "[ . ] Action Required | proj"} {
+		titled(ti)
+		if got := run("cfree", []string{"ctrl+x"}); got != 9 || wrote() != "" {
+			t.Fatalf("%q: a message while it waits: exit %d, typed %q", ti, got, wrote())
+		}
+		if got := run("creply:"+strings.Repeat("0", 64), []string{"1"}); got != 10 || wrote() != "" {
+			t.Fatalf("%q: another screen: exit %d, typed %q", ti, got, wrote())
+		}
+		if got := run("creply:"+shown, []string{"1"}); got != 0 || wrote() != "pane send-keys p1 1" {
+			t.Fatalf("%q: the screen answered: exit %d, typed %q", ti, got, wrote())
+		}
+	}
+	state("waiting", "permission prompt")
+	for _, ti := range []string{"proj", "Action Required", "x [ ! ] Action Required"} {
+		titled(ti)
+		if got := run("creply:"+shown, []string{"1"}); got != 9 || wrote() != "" {
+			t.Fatalf("%q: not waiting, no answer: exit %d, typed %q", ti, got, wrote())
+		}
+		if got := run("cfree", []string{"ctrl+x"}); got != 0 || wrote() != "pane send-keys p1 ctrl+x" {
+			t.Fatalf("%q: not waiting, a message goes: exit %d, typed %q", ti, got, wrote())
+		}
+	}
+}
+
+// The same titles as the host's gate takes for a Codex that waits.
+func TestCodexTitleWaits(t *testing.T) {
+	for title, want := range map[string]bool{
+		"[ ! ] Action Required | proj": true, "[ . ] Action Required | proj": true, "[ ! ] Action Required": true,
+		"proj": false, "": false, "Action Required": false, "x [ ! ] Action Required": false, "[ ? ] Action Required": false,
+	} {
+		if got := codexTitleWaits(title); got != want {
+			t.Errorf("%q: %v", title, got)
 		}
 	}
 }
