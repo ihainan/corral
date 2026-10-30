@@ -737,7 +737,9 @@ func (c *Codex) fileChanged(r *codexRow, id string, changes map[string]codexChan
 		byPath := map[string]*Tool{}
 		for _, t := range was {
 			byPath[t.Detail] = t
-			t.Done, t.Error = true, t.Error || failed
+			if !t.waits { // (a question its script put: the person answers it)
+				t.Done, t.Error = true, t.Error || failed
+			}
 		}
 		for _, t := range ts {
 			if old := byPath[t.Detail]; old != nil {

@@ -476,7 +476,8 @@ var (
 )
 
 // keyLike: a long run of key characters is a key's (random: capitals,
-// small letters and digits all; or hex, a digest's or a token's), not a
+// small letters and digits all; or hex, of either case: a digest's or a
+// token's), not a
 // path's (from its root: "/…") nor a name's (words and digits, no capital).
 func keyLike(s string) bool {
 	if s[0] == '/' {
@@ -492,9 +493,9 @@ func keyLike(s string) bool {
 		case r >= '0' && r <= '9':
 			digit = true
 		}
-		if !(r >= '0' && r <= '9' || r >= 'a' && r <= 'f' || r == '-') {
+		if !(r >= '0' && r <= '9' || r >= 'a' && r <= 'f' || r >= 'A' && r <= 'F' || r == '-') {
 			hex = false
 		}
 	}
-	return up && low && digit || hex && digit && low
+	return up && low && digit || hex && digit && (low || up)
 }

@@ -687,6 +687,7 @@ func TestCodexTitle(t *testing.T) {
 		// (review455: an AWS secret, slashes in it; a capitalised word after ASIA; a long name with a digit; a path.)
 		"aws wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY": "aws wJalrXU…",
 		"see ASIARegionMapping":                        "see ASIARegionMapping",
+		"hex 0123456789ABCDEF0123456789ABCDEF":         "hex 0123456…",
 		"fix request_user_input_async_handler2":        "fix request_user_input_async_handler2",
 		"ls /tmp/build20261030_abcdefghijklmnopq":      "ls /tmp/build20261030_abcdefghijklmnopq",
 	} {
@@ -760,5 +761,26 @@ func TestCodexFnReview455(t *testing.T) {
 		if x.Name == "request_user_input" && x.Done {
 			t.Errorf("answered by a picture looked at: %+v", ts)
 		}
+	}
+}
+
+// review456: a file a script changed, told of as done with the script's id,
+// leaves the question it put that waits open.
+func TestCodexFnReview456(t *testing.T) {
+	ts := toolsOf(feedAll(
+		codexLine(t, "response_item", map[string]any{"type": "custom_tool_call", "name": "exec", "call_id": "s", "input": "await tools.apply_patch(\"*** Begin Patch\\n*** Add File: /w/a.txt\\n+x\\n*** End Patch\"); await tools.request_user_input_async({questions:[{title:\"继续吗？\"}]});"}),
+		fnDone(t, map[string]any{"type": "FileChange", "id": "s", "status": "completed", "changes": map[string]any{"/w/a.txt": map[string]any{"type": "add", "content": "x\n"}}}),
+	))
+	asked := false
+	for _, x := range ts {
+		if x.Name == "request_user_input" {
+			asked = true
+			if x.Done {
+				t.Errorf("answered by a file changed: %+v", x)
+			}
+		}
+	}
+	if !asked {
+		t.Errorf("no question: %+v", ts)
 	}
 }
