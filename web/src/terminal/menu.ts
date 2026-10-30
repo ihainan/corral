@@ -111,15 +111,18 @@ export function asksQuestion(text: string): boolean {
 // choices: the menu's, as the agent whose screen it is draws it (agent:
 // claude, codex…; Codex's own hint lines and wrapping known).
 export function choices(text: string, agent?: string): Choice[] {
-  return agent === 'codex' ? menuAt(codexLines(text), true).out : menuAt(text.split('\n')).out
+  if (agent !== 'codex') return menuAt(text.split('\n')).out
+  const lines = codexLines(text)
+  return lines ? menuAt(lines, true).out : []
 }
 
 // codexLines: the screen's lines without what Codex draws under its menu:
 // its key hints ("tab to add notes | enter to submit answer | ←/→ to
 // navigate questions", "esc to interrupt"; "Press enter to confirm or esc
 // to cancel"), wrapped to however many lines the pane's width makes them.
-// Anything else under the menu, kept: then there is no menu at the end.
-function codexLines(text: string): string[] {
+// Anything else under the menu: null, no menu at the end (not even by the
+// looser hint rule others' menus are read by).
+function codexLines(text: string): string[] | null {
   const lines = text.split('\n')
   let last = -1
   for (let i = lines.length - 1; i >= 0 && lines.length - i <= 12; i--) {
@@ -134,9 +137,9 @@ function codexLines(text: string): string[] {
   const tail = lines.slice(end).map((l) => l.trim()).filter(Boolean).join(' ')
   // (Only its own phrases, between "|" and "or": anything else left over is no hint.)
   const rest = tail.replace(codexHint, ' ').replace(/[|\s]+|\bor\b/gi, '')
-  return !rest ? lines.slice(0, end) : lines
+  return !rest ? lines.slice(0, end) : null
 }
-const codexHint = /(?:press\s+)?(?:tab|enter|esc|space|←\/→|↑\/↓)\s+to\s+(?:add\s+notes|submit(?:\s+(?:all|answer))?|navigate(?:\s+questions)?|interrupt|confirm|cancel)\b/gi
+const codexHint = /(?:press\s+)?(?:tab|enter|esc|space|←\/→|↑\/↓)\s+to\s+(?:add\s+notes|submit(?:\s+(?:all|answer))?|navigate(?:\s+questions)?|interrupt|confirm|cancel|go\s+back|select(?:\s+(?!or\b)[a-z]+){0,3})\b/gi
 
 // The question asked over a menu on the screen: the line above it that
 // asks (ends in a question mark), else "".
@@ -228,6 +231,7 @@ export function promptBlock(text: string): { head: string; lines: string[] } | n
 export type CodexAsk = { kind: 'run' | 'edits'; question: string; lines: string[] } | { kind: 'question'; question: string; index: number; total: number }
 export function codexAsk(text: string): CodexAsk | null {
   const lines = codexLines(text)
+  if (!lines) return null
   const { top } = menuAt(lines, true)
   if (top < 0) return null
   const body = (from: number) => {
@@ -277,7 +281,7 @@ export function codexOptions(labels: string[]): { label: string; desc?: string }
         if (run >= 2 && col > run) out.set(col, i)
         run = 0
       }
-      col += wide(ch) ? 2 : 1
+      col += cols(ch)
       i += ch.length
     }
     return out
@@ -294,14 +298,16 @@ export function codexOptions(labels: string[]): { label: string; desc?: string }
   })
 }
 
-// wide: a character a terminal draws two columns wide (East Asian wide and
-// full-width ones; emoji).
-function wide(ch: string): boolean {
+// cols: the columns a terminal draws a character in: two for East Asian
+// wide and full-width ones and emoji shown as pictures, none for a mark
+// put on the one before, else one.
+function cols(ch: string): number {
+  if (/\p{M}/u.test(ch)) return 0
+  if (/\p{Emoji_Presentation}/u.test(ch)) return 2
   const c = ch.codePointAt(0)!
-  return (
-    (c >= 0x1100 && c <= 0x115f) || (c >= 0x2e80 && c <= 0x303e) || (c >= 0x3041 && c <= 0x33ff) || (c >= 0x3400 && c <= 0x4dbf) ||
+  return (c >= 0x1100 && c <= 0x115f) || (c >= 0x2e80 && c <= 0x303e) || (c >= 0x3041 && c <= 0x33ff) || (c >= 0x3400 && c <= 0x4dbf) ||
     (c >= 0x4e00 && c <= 0x9fff) || (c >= 0xa000 && c <= 0xa4cf) || (c >= 0xac00 && c <= 0xd7a3) || (c >= 0xf900 && c <= 0xfaff) ||
-    (c >= 0xfe30 && c <= 0xfe4f) || (c >= 0xff00 && c <= 0xff60) || (c >= 0xffe0 && c <= 0xffe6) || (c >= 0x1f300 && c <= 0x1faff) ||
-    (c >= 0x20000 && c <= 0x3fffd)
-  )
+    (c >= 0xfe30 && c <= 0xfe4f) || (c >= 0xff00 && c <= 0xff60) || (c >= 0xffe0 && c <= 0xffe6) || (c >= 0x20000 && c <= 0x3fffd)
+    ? 2
+    : 1
 }
