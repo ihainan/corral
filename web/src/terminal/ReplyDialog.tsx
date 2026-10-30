@@ -4,7 +4,7 @@ import { api, ApiError, errorText, type HerdrAgent } from '../api'
 import { t } from '../i18n'
 import { Dialog, isCoarse, LoadError, useToast } from '../components/ui'
 import { getReplyDraft, keepReplyDraft } from './drafts'
-import { asksQuestion, choices, codexAsk, codexOption, dashedRule, promptBlock, question } from './menu'
+import { asksQuestion, choices, codexAsk, codexOptions, dashedRule, promptBlock, question } from './menu'
 import { agentName, choiceText, lasting, questionText } from './askText'
 import { readAskScreen } from './askScreen'
 import { askOn, AskPanel, planOn, PlanPanel, ReviewPanel, useDrive } from './askCard'
@@ -169,7 +169,7 @@ export function useReply(target: ReplyTarget, { onLoaded, resizedAt, onSent }: {
     const v = text.trim()
     if (v) void send({ text: v })
   }
-  const opts = screen ? choices(screen.text) : []
+  const opts = screen ? choices(screen.text, target.agent) : []
   return { screen, setScreen, failed, reading, changed, busy, error, text, setText, load, send, submit, opts }
 }
 
@@ -508,10 +508,7 @@ export function InlineReply({ target, onLoaded, resizedAt, active = true, held, 
   // (A question of Codex's: each choice's label and description apart.)
   const shownOpts =
     cx?.kind === 'question'
-      ? opts.map((o) => {
-          const c = codexOption(o.label)
-          return { ...o, ...c, ...(/^None of the above$/i.test(c.label) ? { desc: t('convo.askNotes') } : {}) }
-        })
+      ? codexOptions(opts.map((o) => o.label)).map((c, i) => ({ ...opts[i], ...c, ...(/^None of the above$/i.test(c.label) ? { desc: t('convo.askNotes') } : {}) }))
       : opts
   return (
     <div className="convo-ask" role="group" aria-label={waiting} ref={cardRef} onPointerDown={arm} onFocus={arm}>

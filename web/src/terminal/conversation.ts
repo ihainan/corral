@@ -335,7 +335,7 @@ export function forgetConversations() {
 }
 
 const sameBind = (a?: ConvoBind, b?: ConvoBind) =>
-  a === b || (!!a && !!b && a.pane === b.pane && a.pid === b.pid && a.start === b.start && a.session === b.session && a.title === b.title)
+  a === b || (!!a && !!b && a.pane === b.pane && a.pid === b.pid && a.start === b.start && a.session === b.session && a.title === b.title && a.agent === b.agent)
 
 const sameMeta = (a?: ConvoMeta, b?: ConvoMeta) =>
   a === b || (!!a && !!b && a.model === b.model && a.mode === b.mode && a.effort === b.effort && a.branch === b.branch && a.context === b.context && a.window === b.window && a.window_by === b.window_by && JSON.stringify(a.cost) === JSON.stringify(b.cost) && JSON.stringify(a.quota) === JSON.stringify(b.quota))

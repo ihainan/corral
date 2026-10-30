@@ -8,9 +8,7 @@
 // (ordinary output), or one followed by anything else (a new question), is
 // no menu.
 const menuLine = /^[\s│|]*([❯›>▶→●◉])?\s*([1-9])[.)]\s+(\S.*?)\s*[│|]?\s*$/
-// (Codex's: "tab to add notes | enter to submit answer | ←/→ to navigate
-// questions", "esc to interrupt", wrapped to as many lines as it takes.)
-const hintLine = /^[\s│|╭╮╰╯─━┌┐└┘]*$|\b(esc|cancel|confirm)\b|\bto (?:submit|navigate|interrupt|add notes)\b/i
+const hintLine = /^[\s│|╭╮╰╯─━┌┐└┘]*$|\b(esc|cancel|confirm)\b/i
 const maxLabel = 400 // (cut where shown: what is read of it, to the end)
 
 // A choice too long for the pane's width goes on in lines that begin where
@@ -32,9 +30,10 @@ function goesOn(lines: string[], i: number): boolean {
   return false
 }
 
-// A choice's words wrapped: rejoined with the space the line broke at,
+// A choice of Codex's wrapped: rejoined with the space the line broke at,
 // unless it broke after a hyphen within a word, as Codex wraps ("made-by-"
-// "codex.txt": a file's name). (A break at a space before "-C" is a space.)
+// "codex.txt": a file's name). (A break at a space before "-C" is a space.
+// Not Claude Code's, which breaks at spaces only: "foo-" "bar" is "foo- bar".)
 const joinWrapped = (a: string, b: string) => (/[A-Za-z0-9]-$/.test(a) ? a + b : a + ' ' + b)
 
 // A line between choices: a rule (Claude Code's questions put their last
@@ -53,19 +52,19 @@ export type Choice = { key: string; label: string; desc?: string }
 // The menu at the end of the screen's lines, read as a question of Claude
 // Code's when it is one (its hint there, and one of its own choices an
 // answer of one's own), else as any other menu.
-function menuAt(lines: string[]): { out: Choice[]; top: number; asks: boolean } {
+function menuAt(lines: string[], codex = false): { out: Choice[]; top: number; asks: boolean } {
   if (lines.slice(-6).some((l) => describes.test(l))) {
     const q = readMenu(lines, true)
     if (q.out.some((c) => ownAnswer.test(c.label))) return { ...q, asks: true }
   }
-  return { ...readMenu(lines, false), asks: false }
+  return { ...readMenu(lines, false, codex), asks: false }
 }
 
 // The menu at the end of the screen's lines: its choices and the line it
 // begins on (told: read as a question of Claude Code's).
-function readMenu(lines: string[], told: boolean): { out: Choice[]; top: number } {
+function readMenu(lines: string[], told: boolean, codex = false): { out: Choice[]; top: number } {
   let end = lines.length
-  while (end > 0 && !menuLine.test(lines[end - 1]) && hintLine.test(lines[end - 1]) && !goesOn(lines, end - 1) && lines.length - end < 5) end--
+  while (end > 0 && !menuLine.test(lines[end - 1]) && hintLine.test(lines[end - 1]) && !goesOn(lines, end - 1) && lines.length - end < 3) end--
   const out: Choice[] = []
   let marked = 0
   let top = -1
@@ -89,7 +88,7 @@ function readMenu(lines: string[], told: boolean): { out: Choice[]; top: number 
       break
     }
     const clipped = (s: string) => (s.length > maxLabel ? s.slice(0, maxLabel - 1) + '…' : s)
-    const label = told ? m[3] : [m[3], ...more].reduce(joinWrapped)
+    const label = told ? m[3] : codex ? [m[3], ...more].reduce(joinWrapped) : [m[3], ...more].join(' ')
     const desc = told && more.length ? clipped(more.join(' ')) : undefined
     more = []
     top = i
@@ -107,8 +106,32 @@ export function asksQuestion(text: string): boolean {
   return m.top >= 0 && m.asks
 }
 
-export function choices(text: string): Choice[] {
-  return menuAt(text.split('\n')).out
+// choices: the menu's, as the agent whose screen it is draws it (agent:
+// claude, codex…; Codex's own hint lines and wrapping known).
+export function choices(text: string, agent?: string): Choice[] {
+  return agent === 'codex' ? menuAt(codexLines(text), true).out : menuAt(text.split('\n')).out
+}
+
+// codexLines: the screen's lines without what Codex draws under its menu:
+// its key hints ("tab to add notes | enter to submit answer | ←/→ to
+// navigate questions", "esc to interrupt"; "Press enter to confirm or esc
+// to cancel"), wrapped to however many lines the pane's width makes them.
+// Anything else under the menu, kept: then there is no menu at the end.
+function codexLines(text: string): string[] {
+  const lines = text.split('\n')
+  let last = -1
+  for (let i = lines.length - 1; i >= 0 && lines.length - i <= 12; i--) {
+    if (menuLine.test(lines[i])) {
+      last = i
+      break
+    }
+  }
+  if (last < 0) return lines
+  let end = last + 1
+  while (end < lines.length && goesOn(lines, end)) end++
+  const tail = lines.slice(end).map((l) => l.trim()).filter(Boolean).join(' ')
+  const hints = /^(?:(?:press\s+)?(?:tab|enter|esc|space|←\/→|↑\/↓)\b.*?\bto\b[^|]*?(?:\s+or\s+(?:tab|enter|esc)\b[^|]*?)?(?:\s*\|\s*|$))+$/i
+  return !tail || hints.test(tail) ? lines.slice(0, end) : lines
 }
 
 // The question asked over a menu on the screen: the line above it that
@@ -200,8 +223,8 @@ export function promptBlock(text: string): { head: string; lines: string[] } | n
 // person's "› …") ends the search. Null: not told apart.
 export type CodexAsk = { kind: 'run' | 'edits'; question: string; lines: string[] } | { kind: 'question'; question: string; index: number; total: number }
 export function codexAsk(text: string): CodexAsk | null {
-  const lines = text.split('\n')
-  const { top } = menuAt(lines)
+  const lines = codexLines(text)
+  const { top } = menuAt(lines, true)
   if (top < 0) return null
   const body = (from: number) => {
     const out = lines.slice(from, top).map((l) => l.replace(/\s+$/, ''))
@@ -209,23 +232,42 @@ export function codexAsk(text: string): CodexAsk | null {
     while (out.length && !out[out.length - 1].trim()) out.pop()
     return out.filter((l, i) => l.trim() || out[i - 1]?.trim()) // (one blank line between, at most)
   }
+  // (The topmost such line of the block: the same words further down are a
+  // command's or a file's own, under its title.)
+  let found: CodexAsk | null = null
   for (let i = top - 1; i >= 0 && top - i <= 40; i--) {
+    if (/^[•■›]\s/.test(lines[i])) break
     const l = lines[i].trim()
     const m = /^Would you like to (run the following command|make the following edits)\?$/.exec(l)
-    if (m) return { kind: m[1].startsWith('run') ? 'run' : 'edits', question: l, lines: body(i + 1).map((x) => x.replace(/^ {2}/, '')) }
+    if (m) {
+      const run = m[1].startsWith('run')
+      const said = body(i + 1).map((x) => x.replace(/^ {2}/, ''))
+      // (What Codex says under it: its environment, reason, command; or the edits' description, destination.)
+      const first = said.find((x) => x.trim()) ?? ''
+      if (!first || (run ? /^(?:Environment|Reason|Permission rule):|^\$ /.test(first) : /^(?:Description|Destination|Reason):/.test(first))) found = { kind: run ? 'run' : 'edits', question: l, lines: said }
+      continue
+    }
     const q = /^Questions? (\d+)\/(\d+)\b/.exec(l)
     if (q) {
       const words = body(i + 1).map((x) => x.trim()).filter(Boolean).join(' ')
-      return words ? { kind: 'question', question: words, index: +q[1], total: +q[2] } : null
+      if (words) found = { kind: 'question', question: words, index: +q[1], total: +q[2] }
     }
-    if (/^[•■›]\s/.test(lines[i])) break
   }
-  return null
+  return found
 }
 
-// A choice of a Codex question: its label and its description, drawn in two
-// columns (two spaces or more between them).
-export function codexOption(label: string): { label: string; desc?: string } {
-  const m = /^(.*?\S)\s{2,}(\S.*)$/.exec(label)
-  return m ? { label: m[1], desc: m[2] } : { label }
+// A Codex question's choices: each one's label and description, drawn in
+// two columns, the descriptions all at one column (the longest label's end
+// and two spaces): the column where every choice with two parts has a run
+// of spaces ending, else each split at its first run of two or more.
+export function codexOptions(labels: string[]): { label: string; desc?: string }[] {
+  const ends = (s: string) => new Set([...s.matchAll(/\S(\s{2,})(?=\S)/g)].map((m) => m.index! + 1 + m[1].length))
+  const two = labels.map(ends).filter((e) => e.size)
+  let col = -1
+  if (two.length > 1) for (const c of two[0]) if (two.every((e) => e.has(c))) col = Math.max(col, c)
+  return labels.map((s) => {
+    if (col > 0 && ends(s).has(col)) return { label: s.slice(0, col).trimEnd(), desc: s.slice(col) }
+    const m = /^(.*?\S)\s{2,}(\S.*)$/.exec(s)
+    return m ? { label: m[1], desc: m[2] } : { label: s }
+  })
 }
