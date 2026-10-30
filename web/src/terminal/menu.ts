@@ -8,8 +8,10 @@
 // (ordinary output), or one followed by anything else (a new question), is
 // no menu.
 const menuLine = /^[\s│|]*([❯›>▶→●◉])?\s*([1-9])[.)]\s+(\S.*?)\s*[│|]?\s*$/
-const hintLine = /^[\s│|╭╮╰╯─━┌┐└┘]*$|\b(esc|cancel|confirm)\b/i
-const maxLabel = 120
+// (Codex's: "tab to add notes | enter to submit answer | ←/→ to navigate
+// questions", "esc to interrupt", wrapped to as many lines as it takes.)
+const hintLine = /^[\s│|╭╮╰╯─━┌┐└┘]*$|\b(esc|cancel|confirm)\b|\bto (?:submit|navigate|interrupt|add notes)\b/i
+const maxLabel = 400 // (cut where shown: what is read of it, to the end)
 
 // A choice too long for the pane's width goes on in lines that begin where
 // its text does (a narrow pane, a phone's). A key hint ("Esc to cancel") is
@@ -29,6 +31,11 @@ function goesOn(lines: string[], i: number): boolean {
   }
   return false
 }
+
+// A choice's words wrapped: rejoined with the space the line broke at,
+// unless it broke after a hyphen within a word, as Codex wraps ("made-by-"
+// "codex.txt": a file's name). (A break at a space before "-C" is a space.)
+const joinWrapped = (a: string, b: string) => (/[A-Za-z0-9]-$/.test(a) ? a + b : a + ' ' + b)
 
 // A line between choices: a rule (Claude Code's questions put their last
 // choices under one: "4. Chat about this"). Only in such a question.
@@ -58,7 +65,7 @@ function menuAt(lines: string[]): { out: Choice[]; top: number; asks: boolean } 
 // begins on (told: read as a question of Claude Code's).
 function readMenu(lines: string[], told: boolean): { out: Choice[]; top: number } {
   let end = lines.length
-  while (end > 0 && !menuLine.test(lines[end - 1]) && hintLine.test(lines[end - 1]) && !goesOn(lines, end - 1) && lines.length - end < 3) end--
+  while (end > 0 && !menuLine.test(lines[end - 1]) && hintLine.test(lines[end - 1]) && !goesOn(lines, end - 1) && lines.length - end < 5) end--
   const out: Choice[] = []
   let marked = 0
   let top = -1
@@ -82,7 +89,7 @@ function readMenu(lines: string[], told: boolean): { out: Choice[]; top: number 
       break
     }
     const clipped = (s: string) => (s.length > maxLabel ? s.slice(0, maxLabel - 1) + '…' : s)
-    const label = told ? m[3] : [m[3], ...more].join(' ')
+    const label = told ? m[3] : [m[3], ...more].reduce(joinWrapped)
     const desc = told && more.length ? clipped(more.join(' ')) : undefined
     more = []
     top = i
@@ -182,4 +189,43 @@ export function promptBlock(text: string): { head: string; lines: string[] } | n
   const indent = Math.min(...words.map((l) => /^ */.exec(l)![0].length))
   body = body.map((l) => (dashedRule.test(l) ? l.trim() : l.slice(indent)))
   return { head: body[0].trim(), lines: body.slice(1) }
+}
+
+// What Codex (0.164) asks over the menu at the end of the screen: a command
+// to be run or edits to be made (its question, then what it says of them
+// down to the menu: Reason, $ command; Description, Destination — the
+// edits themselves are above, in the conversation), or a question of
+// request_user_input's ("Question i/n", its words). Looked for only within
+// the menu's own block: a line of the conversation above it ("• …", the
+// person's "› …") ends the search. Null: not told apart.
+export type CodexAsk = { kind: 'run' | 'edits'; question: string; lines: string[] } | { kind: 'question'; question: string; index: number; total: number }
+export function codexAsk(text: string): CodexAsk | null {
+  const lines = text.split('\n')
+  const { top } = menuAt(lines)
+  if (top < 0) return null
+  const body = (from: number) => {
+    const out = lines.slice(from, top).map((l) => l.replace(/\s+$/, ''))
+    while (out.length && !out[0].trim()) out.shift()
+    while (out.length && !out[out.length - 1].trim()) out.pop()
+    return out.filter((l, i) => l.trim() || out[i - 1]?.trim()) // (one blank line between, at most)
+  }
+  for (let i = top - 1; i >= 0 && top - i <= 40; i--) {
+    const l = lines[i].trim()
+    const m = /^Would you like to (run the following command|make the following edits)\?$/.exec(l)
+    if (m) return { kind: m[1].startsWith('run') ? 'run' : 'edits', question: l, lines: body(i + 1).map((x) => x.replace(/^ {2}/, '')) }
+    const q = /^Questions? (\d+)\/(\d+)\b/.exec(l)
+    if (q) {
+      const words = body(i + 1).map((x) => x.trim()).filter(Boolean).join(' ')
+      return words ? { kind: 'question', question: words, index: +q[1], total: +q[2] } : null
+    }
+    if (/^[•■›]\s/.test(lines[i])) break
+  }
+  return null
+}
+
+// A choice of a Codex question: its label and its description, drawn in two
+// columns (two spaces or more between them).
+export function codexOption(label: string): { label: string; desc?: string } {
+  const m = /^(.*?\S)\s{2,}(\S.*)$/.exec(label)
+  return m ? { label: m[1], desc: m[2] } : { label }
 }

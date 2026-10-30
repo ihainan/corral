@@ -4,8 +4,8 @@ import { api, ApiError, errorText, type HerdrAgent } from '../api'
 import { t } from '../i18n'
 import { Dialog, isCoarse, LoadError, useToast } from '../components/ui'
 import { getReplyDraft, keepReplyDraft } from './drafts'
-import { asksQuestion, choices, dashedRule, promptBlock, question } from './menu'
-import { choiceText, lasting, questionText } from './askText'
+import { asksQuestion, choices, codexAsk, codexOption, dashedRule, promptBlock, question } from './menu'
+import { agentName, choiceText, lasting, questionText } from './askText'
 import { readAskScreen } from './askScreen'
 import { askOn, AskPanel, planOn, PlanPanel, ReviewPanel, useDrive } from './askCard'
 import type { ConvoTool } from './conversation'
@@ -39,20 +39,22 @@ const shownLines = 40
 // and what is read anew when it changes).
 export interface ReplyTarget {
   key: string
+  agent?: string // (whose: claude, codex…)
   screen: () => Promise<Screen>
   reply: (body: { digest: string } & ({ keys: string[] } | { text: string })) => Promise<unknown>
 }
 
 export function herdrTarget(sessionId: string, agent: HerdrAgent): ReplyTarget {
   const base = `/api/sessions/${sessionId}/herdr/panes/${encodeURIComponent(agent.pane_id)}`
-  return { key: sessionId + ' ' + agent.pane_id, screen: () => api<Screen>('GET', base + '/screen'), reply: (b) => api('POST', base + '/reply', b) }
+  return { key: sessionId + ' ' + agent.pane_id, agent: agent.agent, screen: () => api<Screen>('GET', base + '/screen'), reply: (b) => api('POST', base + '/reply', b) }
 }
 
-export function convoTarget(sessionId: string, bind: { pane: string; pid: number; start: number; session: string }): ReplyTarget {
+export function convoTarget(sessionId: string, bind: { pane: string; pid: number; start: number; session: string; agent?: string }): ReplyTarget {
   const base = `/api/sessions/${sessionId}/conversation`
   const who = { pane: bind.pane, pid: bind.pid, start: bind.start, session: bind.session }
   return {
     key: [sessionId, bind.pane, bind.pid, bind.start, bind.session].join(' '),
+    agent: bind.agent,
     screen: () => api<Screen>('POST', base + '/screen', who),
     reply: (b) => api('POST', base + '/reply', { ...who, ...b }),
   }
@@ -436,9 +438,12 @@ export function InlineReply({ target, onLoaded, resizedAt, active = true, held, 
   }, [sent, screen, opts.length])
   const pre = useRef<HTMLPreElement>(null)
   const block = screen ? promptBlock(screen.text) : null
+  // (Codex's: its approval's words, or its question, as its screen draws them.)
+  const cx = screen && target.agent === 'codex' ? codexAsk(screen.text) : null
+  const waiting = t('convo.waiting', { agent: agentName(target.agent) })
   // (What is asked not told apart on the screen, the screen itself shows; a
   // question of Claude Code's is all its choices.)
-  const needScreen = !!screen && !block && !folds(screen)
+  const needScreen = !!screen && !block && !cx && !folds(screen)
   // (Not told apart, the whole screen, before the choices; else behind its button.)
   const screenLines = screen ? screen.text.split('\n') : []
   const screenBox = (
@@ -468,7 +473,7 @@ export function InlineReply({ target, onLoaded, resizedAt, active = true, held, 
   if (sent !== null) return <p className="convo-ask-sent" role="status">{t('convo.answeredHere')}</p>
   if (structured && screen && call) {
     return (
-      <div className="convo-ask" role="group" aria-label={t('convo.waiting')} aria-busy={busy}>
+      <div className="convo-ask" role="group" aria-label={waiting} aria-busy={busy}>
         {state.kind === 'question' ? (
           <AskPanel key={(call.id ?? '') + ':' + askAt} call={call} index={askAt} shown={state} target={target} drive={driven.drive} busy={busy} />
         ) : state.kind === 'review' ? (
@@ -498,13 +503,23 @@ export function InlineReply({ target, onLoaded, resizedAt, active = true, held, 
       </div>
     )
   }
-  const q = screen ? question(screen.text) : ''
+  const q = cx ? cx.question : screen ? question(screen.text) : ''
   const shownQ = block && /^Bash command$/i.test(block.head) && /^Do you want to proceed\?$/i.test(q) ? t('convo.askRun') : questionText(q)
+  // (A question of Codex's: each choice's label and description apart.)
+  const shownOpts =
+    cx?.kind === 'question'
+      ? opts.map((o) => {
+          const c = codexOption(o.label)
+          return { ...o, ...c, ...(/^None of the above$/i.test(c.label) ? { desc: t('convo.askNotes') } : {}) }
+        })
+      : opts
   return (
-    <div className="convo-ask" role="group" aria-label={t('convo.waiting')} ref={cardRef} onPointerDown={arm} onFocus={arm}>
-      <div className="convo-ask-q">{shownQ || t('convo.waiting')}</div>
+    <div className="convo-ask" role="group" aria-label={waiting} ref={cardRef} onPointerDown={arm} onFocus={arm}>
+      <div className="convo-ask-q">{shownQ || waiting}</div>
+      {cx?.kind === 'question' && cx.total > 1 && <p className="convo-ask-of">{t('convo.askQuestionOf', { i: cx.index, n: cx.total })}</p>}
       {driven.unsure && <p className="reply-changed" role="alert">{t('ask.unsure')}</p>}
       {block && <Asked lines={block.lines} />}
+      {cx && cx.kind !== 'question' && cx.lines.length > 0 && <Asked lines={cx.lines} />}
       {(needScreen || !!screen?.cut) && !failed && <p className="convo-ask-unread">{t(screen?.cut ? 'reply.cut' : 'convo.askUnread')}</p>}
       {failed ? (
         <LoadError onRetry={() => void load()} />
@@ -518,7 +533,7 @@ export function InlineReply({ target, onLoaded, resizedAt, active = true, held, 
           {needScreen && screenBox}
           {opts.length > 0 && (
             <div className="convo-ask-opts" role="group" aria-label={t('reply.choices')}>
-              {opts.map((o) => {
+              {shownOpts.map((o) => {
                 const c = choiceText(o.label)
                 const lasts = lasting(o.label)
                 return (
@@ -553,7 +568,7 @@ export function InlineReply({ target, onLoaded, resizedAt, active = true, held, 
           <div className="convo-ask-more">
             {!isTouchOnly && (
               <span className="convo-ask-keys">
-                {opts.length > 0 ? t('convo.askKeys', { n: opts.length }) : t('convo.askEsc')}
+                {opts.length > 0 ? t(target.agent === 'codex' ? 'convo.askKeysCodex' : 'convo.askKeys', { n: opts.length }) : t('convo.askEsc')}
               </span>
             )}
             <button type="button" className="link-btn" aria-expanded={shown || needScreen} disabled={needScreen} onClick={() => setShown(!shown)}>

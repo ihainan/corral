@@ -16,6 +16,7 @@ import { exportMarkdown } from './convoExport'
 import { AgentIcon } from './agentIcons'
 import { matchQuery } from './agents'
 import type { Convo, ConvoCost, ConvoQuota, ConvoQuotaWindow, ConvoEntry, ConvoShell, ConvoHunk, ConvoMeta, ConvoPart, ConvoQueued, ConvoRunning, ConvoTask, ConvoTool, ConvoTrouble, ConvoEvent } from './conversation'
+import { agentName } from './askText'
 import { category, isNote, items, ms, partTime, sameEdits, toolName, verbOf, type Category, type Edits, type Item, type Verb } from './convoItems'
 
 // The conversation view: the agent's log as turns, over the terminal (which
@@ -1191,7 +1192,7 @@ export function ConversationView({
         {waits && !ask && convo.status === 'ready' && (
           // (Where it cannot be answered here: in its terminal.)
           <div className="convo-waiting" role="status">
-            <span>{t('convo.waiting')}</span>
+            <span>{t('convo.waiting', { agent: agentName(convo.bind?.agent ?? agent?.program) })}</span>
             <button type="button" className="btn btn-primary" onClick={onReply ?? onShowTerminal}>{t(onReply ? 'convo.answer' : 'convo.answerThere')}</button>
           </div>
         )}

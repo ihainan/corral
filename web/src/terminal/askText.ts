@@ -1,4 +1,4 @@
-import { getLang } from '../i18n'
+import { getLang, t } from '../i18n'
 
 // The words of an agent's permission prompt as the person reads them.
 
@@ -6,6 +6,12 @@ import { getLang } from '../i18n'
 // ones, with the rest of the line kept as it is (a command, a folder); else
 // as on the screen.
 const zhChoices: [RegExp, (m: RegExpExecArray) => string][] = [
+  // (Codex's, 0.164: its key in brackets at the end.)
+  [/^Yes,? proceed(?: \(y\))?$/i, () => '允许这一次'],
+  [/^Yes,? and don['’]t ask again for commands that start with `(.+)`(?: \(p\))?$/i, (m) => `允许，以后以 ${m[1]} 开头的命令不再问`],
+  [/^Yes,? and don['’]t ask again for these files(?: \(a\))?$/i, () => '允许，这些文件以后不再问'],
+  [/^No,? and tell Codex what to do differently(?: \(esc\))?$/i, () => '拒绝，并告诉 Codex 怎么做'],
+  [/^None of the above$/i, () => '都不是'],
   [/^Yes$/i, () => '允许这一次'],
   [/^No$/i, () => '拒绝'],
   [/^No,? and tell Claude what to do differently(?: \(esc\))?$/i, () => '拒绝，并告诉 Claude 怎么做'],
@@ -43,6 +49,8 @@ export function choiceText(label: string): { text: string; original?: string } {
 // The question, likewise.
 const zhQuestions: [RegExp, (m: RegExpExecArray) => string][] = [
   [/^Do you want to proceed\?$/i, () => '要继续吗？'],
+  [/^Would you like to run the following command\?$/i, () => '要运行这条命令吗？'],
+  [/^Would you like to make the following edits\?$/i, () => '要做这些修改吗？'],
   [/^Do you want to make this edit to (.+)\?$/i, (m) => `要修改 ${m[1]} 吗？`],
   [/^Do you want to create (.+)\?$/i, (m) => `要新建 ${m[1]} 吗？`],
   [/^Do you want to make these changes\?$/i, () => '要做这些修改吗？'],
@@ -56,4 +64,19 @@ export function questionText(q: string): string {
     if (m) return f(m)
   }
   return q
+}
+
+// An agent's name as the person reads it (claude, codex…: its process's).
+export function agentName(agent?: string): string {
+  switch (agent) {
+    case 'claude':
+      return 'Claude'
+    case 'codex':
+      return 'Codex'
+    case 'opencode':
+      return 'OpenCode'
+    case 'gemini':
+      return 'Gemini'
+  }
+  return t('convo.agentAny')
 }

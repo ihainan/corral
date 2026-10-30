@@ -794,6 +794,7 @@ button.convo-task-line:hover .convo-task-name { color: var(--term-fg); }
   border: 1px solid var(--term-warn-text); background: var(--term-bg);
 }
 .convo-ask-q { font-weight: 600; }
+.convo-ask-of { margin: -4px 0 0; font-size: 12.5px; color: var(--term-fg-3); }
 .convo-ask-opts { display: flex; flex-direction: column; gap: 6px; }
 /* Each choice a card: its key, its words and what it is (as the terminal's answer dialog) */
 .convo-ask-opt {
