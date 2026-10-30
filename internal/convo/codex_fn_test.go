@@ -644,3 +644,28 @@ func TestCodexFnReview450(t *testing.T) {
 		t.Errorf("a division taken for a regular expression: %s", b)
 	}
 }
+
+// review451: a question called optionally, or with a space of JavaScript's
+// before its "("; reading not cut short by however many fakes before.
+func TestCodexFnReview451(t *testing.T) {
+	for _, script := range []string{
+		"await tools.request_user_input_async?.({questions:[{title:\"Continue?\"}]});",
+		"await tools.request_user_input ({questions:[]});",
+		"await tools.request_user_input ({questions:[]});",
+	} {
+		c := feedAll(codexLine(t, "response_item", map[string]any{"type": "custom_tool_call", "name": "exec", "call_id": "s", "input": script}))
+		if len(c.asked) != 1 {
+			t.Errorf("%q: not taken for a question", script)
+		}
+	}
+	for _, script := range []string{"const f = tools.request_user_input;", "await tools.request_user_input_other({});", "await mytools.request_user_input({});"} {
+		c := feedAll(codexLine(t, "response_item", map[string]any{"type": "custom_tool_call", "name": "exec", "call_id": "s", "input": script}))
+		if len(c.asked) != 0 {
+			t.Errorf("%q: taken for a question", script)
+		}
+	}
+	c := feedAll(codexLine(t, "response_item", map[string]any{"type": "custom_tool_call", "name": "exec", "call_id": "s", "input": strings.Repeat("// tools.exec_command({cmd:\"fake\"})\n", 300) + "await tools.exec_command({cmd:\"pwd\"});"}))
+	if b, _ := json.Marshal(c.Since(0)); !strings.Contains(string(b), `"detail":"pwd"`) {
+		t.Errorf("crowded out: %s", b)
+	}
+}

@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // Codex reads Codex's session log (~/.codex/sessions/…/rollout-*.jsonl),
@@ -1167,13 +1169,13 @@ func codexTools(name, src string) []*Tool {
 	}
 	// (At most so many of each read: counted as read, not as found.)
 	patches := 0
-	for _, m := range patchStr.FindAllStringIndex(src, 256) {
+	for _, m := range patchStr.FindAllStringIndex(src, -1) {
 		if patch, ok := jsUnquote(src[m[0]:m[1]]); ok && readable(m[0]) && patches < 8 {
 			out = append(out, patchTools(patch)...)
 			patches++
 		}
 	}
-	for _, m := range patchTmpl.FindAllStringIndex(src, 256) {
+	for _, m := range patchTmpl.FindAllStringIndex(src, -1) {
 		if patch, ok := jsTemplate(src[m[0]:m[1]]); ok && readable(m[0]) && patches < 8 {
 			out = append(out, patchTools(patch)...)
 			patches++
@@ -1181,7 +1183,7 @@ func codexTools(name, src string) []*Tool {
 	}
 	// (Its commands, one line each, as one: what came back is of them all.)
 	var cmds []string
-	for _, m := range execCmd.FindAllStringSubmatchIndex(src, 256) {
+	for _, m := range execCmd.FindAllStringSubmatchIndex(src, -1) {
 		if len(cmds) >= 16 || !readable(m[0]) || !readable(m[2]-1) {
 			continue // (a call written in a string or a comment)
 		}
@@ -1196,7 +1198,7 @@ func codexTools(name, src string) []*Tool {
 	// here: what each did is told of on its own, in a newer Codex). Not the
 	// commands and patches read above, nor what it types to a command.
 	seen := map[string]bool{}
-	asks := scriptAsks.MatchString(code) // (called, wherever it is among however many calls)
+	asks := scriptCalls(code, "request_user_input") // (called, wherever it is among however many calls)
 	for _, m := range toolCalled.FindAllStringSubmatch(code, 64) {
 		n := m[1]
 		if seen[n] || (n == "exec_command" && len(cmds) > 0) || (n == "apply_patch" && len(out) > 0) || strings.HasPrefix(n, "request_user_input") {
@@ -1235,7 +1237,7 @@ func scriptTool(name, src, code string, readable func(int) bool) *Tool {
 		var qs []string
 		if sp := callSpans(code, "tools."+name+"("); len(sp) > 0 {
 			from, to := sp[0][0], sp[0][1]
-			for _, m := range scriptQuery.FindAllStringSubmatchIndex(src[from:to], 256) {
+			for _, m := range scriptQuery.FindAllStringSubmatchIndex(src[from:to], -1) {
 				if len(qs) >= 8 || !readable(from+m[2]-1) {
 					continue
 				}
@@ -1401,8 +1403,35 @@ func jsCodeFrom(b []byte, i, depth int) int {
 	return len(b)
 }
 
-// scriptAsks: a script calls request_user_input (not only names it).
-var scriptAsks = regexp.MustCompile(`\btools\.request_user_input(?:_async)?\s*\(`)
+// scriptCalls: a script's code calls tools.<name> (or <name>_async):
+// the name, then — past any space of JavaScript's, an optional "?." — its
+// "(" (not only names it).
+func scriptCalls(code, name string) bool {
+	call := "tools." + name
+	for from := 0; from < len(code); {
+		i := strings.Index(code[from:], call)
+		if i < 0 {
+			return false
+		}
+		at := from + i
+		j := at + len(call)
+		from = j
+		if at > 0 && (jsWordByte(code[at-1]) || code[at-1] == '.') {
+			continue // (another's: x.tools.…, mytools.…)
+		}
+		if strings.HasPrefix(code[j:], "_async") {
+			j += len("_async")
+		}
+		if r, _ := utf8.DecodeRuneInString(code[j:]); r == '_' || r == '$' || unicode.IsLetter(r) || unicode.IsDigit(r) {
+			continue // (another name: request_user_input_other)
+		}
+		rest := strings.TrimLeftFunc(code[j:], func(r rune) bool { return unicode.IsSpace(r) || r == '\u2028' || r == '\u2029' || r == '\ufeff' })
+		if strings.HasPrefix(strings.TrimPrefix(rest, "?."), "(") {
+			return true
+		}
+	}
+	return false
+}
 
 // scriptQuery: a search's words in a call's arguments ({q: "…"}), found
 // in its code, read from the script.
