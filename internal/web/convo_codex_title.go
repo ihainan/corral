@@ -17,7 +17,7 @@ import (
 // log says it works or says nothing (a long log's tail read first), at
 // most each convoTitleTTL for a pane, and read anew after keys or text
 // went to it. A read that fails says it does not wait here (no card), and
-// is not tried again for convoTitleBackoff; the host's gate, reading it
+// is not tried again for convoTitleBackoff (unless keys went to the pane since); the host's gate, reading it
 // itself, lets no message or answer go when it cannot.
 
 const (
@@ -42,7 +42,7 @@ func (s *Server) codexWaits(ctx context.Context, sess *term.Session, st *convoSt
 	if st.cxTitleFail {
 		ttl = convoTitleBackoff
 	}
-	if st.cxTitleFor == who && time.Since(st.cxTitleAt) < ttl && (st.cxTitleFail || st.cxTitleAt.After(at)) {
+	if st.cxTitleFor == who && time.Since(st.cxTitleAt) < ttl && st.cxTitleAt.After(at) {
 		return st.cxTitleWait
 	}
 	began := time.Now()

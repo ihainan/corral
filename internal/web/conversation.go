@@ -2342,9 +2342,10 @@ waiting() {
   if [ -n "$cx" ]; then
     # (Codex 0.164 titles its terminal "[ ! ] Action Required | …", blinking
     # with "[ . ] …", while it waits for an answer, and only then. Not read
-    # (tmux failing, herdr's answer without the title): "unknown", which
-    # neither a message nor an answer goes by.)
-    st=unknown wf=
+    # (tmux failing, herdr's answer without the title): "title-unread",
+    # which neither a message nor an answer goes by — a status no session
+    # file of Claude Code's can say, its letters only being read.)
+    st=title-unread wf=
     if [ "$mode" = tmux ]; then t=$(tmux -u display-message -p -t "$p" '#{pane_title}' 2>/dev/null 9>&-) || return 0
     else
       j=$(HERDR_SOCKET_PATH=$sock herdr pane get "$p" 2>/dev/null 9>&-) || return 0
@@ -2364,7 +2365,7 @@ gate_enter() {
   [ -n "$gate" ] || return 0
   waiting
   case $gate in
-  free) case $st in waiting|unknown) exit 5;; esac ;;
+  free) case $st in waiting|title-unread) exit 5;; esac ;;
   idle) [ "$st" = idle ] || exit 5 ;;
   reply:*) [ "$st" = waiting ] || exit 5 ;;
   esac
@@ -2373,7 +2374,7 @@ gate_enter() {
 if [ -n "$gate" ]; then
   waiting
   case $gate in
-  free) [ "$st" = waiting ] && exit 9; [ "$st" = unknown ] && exit 11 ;;
+  free) [ "$st" = waiting ] && exit 9; [ "$st" = title-unread ] && exit 11 ;;
   idle) [ "$st" = idle ] || exit 12 ;;
   reply:*)
     [ "$st" = waiting ] || exit 9

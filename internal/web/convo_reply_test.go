@@ -198,6 +198,12 @@ time.sleep(30)`)
 		}
 	}
 	codexUnreadCases(t, run, wrote, title, shown)
+	// (Claude Code's file saying a status of its own that is no word of the
+	// gate's, "unknown": a message goes, as before.)
+	state("unknown", "")
+	if got := run("free", []string{"ctrl+x"}); got != 0 || wrote() != "pane send-keys p1 ctrl+x" {
+		t.Fatalf("Claude Code, status unknown: exit %d, typed %q", got, wrote())
+	}
 }
 
 // (Its title not read — herdr failing, or its answer without the title: no
