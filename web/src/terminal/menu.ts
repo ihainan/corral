@@ -299,12 +299,13 @@ export function codexOptions(labels: string[]): { label: string; desc?: string }
 }
 
 // cols: the columns a terminal draws a character in: two for East Asian
-// wide and full-width ones and emoji shown as pictures, none for a mark
-// put on the one before, else one.
+// wide and full-width ones and emoji shown as pictures (a flag, two in
+// all), none for a mark put on the one before (not one beside it), else one.
 function cols(ch: string): number {
-  if (/\p{M}/u.test(ch)) return 0
-  if (/\p{Emoji_Presentation}/u.test(ch)) return 2
+  if (/[\p{Mn}\p{Me}]/u.test(ch)) return 0 // (not a spacing mark, Mc: that takes its column)
   const c = ch.codePointAt(0)!
+  if (c >= 0x1f1e6 && c <= 0x1f1ff) return 1 // (a flag's two halves, two columns between them)
+  if (/\p{Emoji_Presentation}/u.test(ch)) return 2
   return (c >= 0x1100 && c <= 0x115f) || (c >= 0x2e80 && c <= 0x303e) || (c >= 0x3041 && c <= 0x33ff) || (c >= 0x3400 && c <= 0x4dbf) ||
     (c >= 0x4e00 && c <= 0x9fff) || (c >= 0xa000 && c <= 0xa4cf) || (c >= 0xac00 && c <= 0xd7a3) || (c >= 0xf900 && c <= 0xfaff) ||
     (c >= 0xfe30 && c <= 0xfe4f) || (c >= 0xff00 && c <= 0xff60) || (c >= 0xffe0 && c <= 0xffe6) || (c >= 0x20000 && c <= 0x3fffd)
