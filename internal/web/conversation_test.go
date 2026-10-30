@@ -363,13 +363,14 @@ func TestUnescapeJSON(t *testing.T) {
 // none is taken any more (rather than one contested being opened up again).
 func TestConvoClaimsFull(t *testing.T) {
 	var c convoClaims
-	none := map[int64]bool{}
+	none := map[procID]bool{}
+	now := time.Now().UnixMilli()
 	c.contest("contested")
 	for i := range maxConvoClaims + 10 {
-		c.take(fmt.Sprintf("s%d", i), int64(i+1), 0, nil)
+		c.take(fmt.Sprintf("s%d", i), procID{int64(i + 1), 1}, 0, nil, now, false)
 	}
-	later := time.Now().UnixMilli() + 60_000
-	if c.take("contested", 7, later, none) || c.take("s1", 2, later, none) || c.take("new-one", 3, later, none) {
+	later := now + 60_000
+	if c.take("contested", procID{7, 1}, later, none, now, true) || c.take("s1", procID{2, 1}, later, none, now, false) || c.take("new-one", procID{3, 1}, later, none, now, false) {
 		t.Error("taken although what is whose is no longer whole")
 	}
 }
@@ -379,34 +380,33 @@ func TestConvoClaimsFull(t *testing.T) {
 func TestConvoClaimsHandsOnWhenGone(t *testing.T) {
 	var c convoClaims
 	now := time.Now().UnixMilli()
-	if !c.take("s", 7, now, map[int64]bool{7: true}) {
+	a, b := procID{7, 70}, procID{9, 90}
+	if !c.take("s", a, now, map[procID]bool{a: true}, now, false) {
 		t.Error("not taken by the one it is of")
 	}
-	if c.take("s", 9, now-60_000, map[int64]bool{}) {
+	if c.take("s", b, now-60_000, map[procID]bool{}, now, false) || c.take("s", b, now-60_000, map[procID]bool{}, now, true) {
 		t.Error("taken by one that ran beside it")
 	}
-	if c.take("s", 9, now+60_000, map[int64]bool{7: true}) {
+	if c.take("s", b, now+60_000, map[procID]bool{a: true}, now, true) {
 		t.Error("taken although the Codex it is of is still there")
 	}
-	if !c.take("s", 9, now+60_000, map[int64]bool{}) {
+	// (Its pid used again by another process: not the one it is of.)
+	if c.take("s", procID{7, 71}, now-60_000, map[procID]bool{}, now, true) {
+		t.Error("taken by another process of the same pid")
+	}
+	if !c.take("s", b, now+60_000, map[procID]bool{}, now, false) {
 		t.Error("not taken by one started since it was gone")
 	}
 }
 
 // What a screen holds of a text: no colours, and none of the breaks and
-// spaces wrapping puts in it.
-func TestFlattenAndMiddle(t *testing.T) {
-	if got := flatten("\x1b[1m你好\x1b[0m，世\n界 — ok\r\n"); got != "你好，世界—ok" {
-		t.Errorf("flatten: %q", got)
+// spaces wrapping puts in it, nor punctuation.
+func TestLetters(t *testing.T) {
+	if got := letters("\x1b[1m你好\x1b[0m，世\n界 — ok 2\r\n"); got != "你好世界ok2" {
+		t.Errorf("letters: %q", got)
 	}
-	if flatten("中文连续文本") != flatten("中文连续\n文本") {
+	if letters("中文连续文本") != letters("中文连续\n  文本") {
 		t.Error("a line wrapped in the middle of the words")
-	}
-	if got := middle("0123456789", 4); got != "3456" {
-		t.Errorf("middle: %q", got)
-	}
-	if got := middle("abc", 4); got != "abc" {
-		t.Errorf("middle, short: %q", got)
 	}
 }
 
@@ -415,11 +415,11 @@ func TestFlattenAndMiddle(t *testing.T) {
 func TestConvoClaimsNoRoom(t *testing.T) {
 	var c convoClaims
 	for i := range maxConvoClaims {
-		if !c.take(fmt.Sprintf("s%d", i), 1, 0, nil) {
+		if !c.take(fmt.Sprintf("s%d", i), procID{1, 1}, 0, nil, 0, false) {
 			t.Fatalf("not taken at %d", i)
 		}
 	}
-	if c.take("one-more", 2, 0, nil) {
+	if c.take("one-more", procID{2, 1}, 0, nil, 0, false) {
 		t.Error("taken although there was no room for it")
 	}
 }
