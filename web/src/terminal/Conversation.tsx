@@ -1741,6 +1741,7 @@ function askQuota(sid: string, session: string, key: string): Promise<QuotaSeen>
 
 // (Keyed by its session where it is drawn: another session, another one.)
 function QuotaPart({ sid, session }: { sid: string; session: string }) {
+  useRedraw(30000)
   const key = sid + ' ' + session
   const [seen, setSeen] = useState(() => quotaSeen.get(key))
   useEffect(() => {
@@ -1774,6 +1775,7 @@ function QuotaPart({ sid, session }: { sid: string; session: string }) {
 // A Codex session's quota, as its log last said it (each request's
 // token_count): nothing read, its time said when it is not of just now.
 function QuotaSaid({ quota }: { quota?: ConvoQuota }) {
+  useRedraw(30000)
   const shown = quota && (quota.five_hour || quota.weekly) ? quota : undefined
   const now = Date.now() / 1000
   return (
@@ -1782,6 +1784,16 @@ function QuotaSaid({ quota }: { quota?: ConvoQuota }) {
       {!!shown?.updated_at && now - shown.updated_at > 600 && <p className="convo-runs-note">{t('quota.saidAt', { at: quotaClock(shown.updated_at) })}</p>}
     </QuotaView>
   )
+}
+
+// useRedraw: drawn again each so often while shown (a quota's window reset,
+// its figures grown old, are said so with nothing else changing).
+function useRedraw(ms: number) {
+  const [, tick] = useState(0)
+  useEffect(() => {
+    const timer = setInterval(() => tick((n) => n + 1), ms)
+    return () => clearInterval(timer)
+  }, [ms])
 }
 
 function quotaClock(sec: number) {

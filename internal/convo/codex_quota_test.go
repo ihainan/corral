@@ -34,32 +34,35 @@ func TestCodexQuota(t *testing.T) {
 	if q2 := c.Meta().Quota; q2.FiveHour.Used != 43 || q2.Weekly.Used != 18 || q2.UpdatedAt != q.UpdatedAt {
 		t.Errorf("kept %+v / %+v %+v", q2, q2.FiveHour, q2.Weekly)
 	}
-	// An older Codex's (no limit_id); one window said: the other kept.
+	// An older Codex's (no limit_id); one window said: the other kept, of
+	// its own time, the quota's time the older one's.
 	c.Feed([]byte(codexLimitsLine(t, "2026-10-30T07:10:00.000Z", map[string]any{"primary": window(50, 300, 1791302615)})))
-	if q3 := c.Meta().Quota; q3.FiveHour.Used != 50 || q3.Weekly.Used != 18 || q3.UpdatedAt != 1793344200 {
-		t.Errorf("updated %+v", q3)
+	if q3 := c.Meta().Quota; q3.FiveHour.Used != 50 || q3.Weekly.Used != 18 || q3.FiveHour.At != 1793344200 || q3.Weekly.At != 1793343600 || q3.UpdatedAt != 1793343600 {
+		t.Errorf("updated %+v / %+v %+v", q3, q3.FiveHour, q3.Weekly)
 	}
 	if q.FiveHour.Used != 43 {
 		t.Error("an earlier Meta's quota changed")
 	}
 }
 
-// Read in two parts (the later first): the later part's quota stands, else
+// Read in two parts (the later first): each window the later part's, else
 // the earlier's.
 func TestCodexQuotaPrepend(t *testing.T) {
 	early := codexLimitsLine(t, "2026-10-30T06:00:00.000Z", map[string]any{"limit_id": "codex", "primary": window(10, 300, 1791302615), "secondary": window(5, 10080, 1791581449)})
 	late := codexLimitsLine(t, "2026-10-30T07:00:00.000Z", map[string]any{"limit_id": "codex", "primary": window(40, 300, 1791302615), "secondary": window(20, 10080, 1791581449)})
 	relay := codexLimitsLine(t, "2026-10-30T07:00:00.000Z", map[string]any{"limit_id": "codex", "primary": nil, "secondary": nil})
+	half := codexLimitsLine(t, "2026-10-30T07:00:00.000Z", map[string]any{"limit_id": "codex", "primary": window(40, 300, 1791302615), "secondary": nil})
 	for _, tc := range []struct {
-		later string
-		want  float64
-	}{{late, 40}, {relay, 10}} {
+		later        string
+		five, weekly float64
+		at           int64
+	}{{late, 40, 20, 1793343600}, {relay, 10, 5, 1793340000}, {half, 40, 5, 1793340000}} {
 		a, b := NewCodex(), NewCodex()
 		a.Feed([]byte(early))
 		b.Feed([]byte(tc.later))
 		b.Prepend(a)
-		if q := b.Meta().Quota; q == nil || q.FiveHour.Used != tc.want {
-			t.Errorf("want %v: %+v", tc.want, q)
+		if q := b.Meta().Quota; q == nil || q.FiveHour.Used != tc.five || q.Weekly == nil || q.Weekly.Used != tc.weekly || q.UpdatedAt != tc.at {
+			t.Errorf("want %v %v %v: %+v", tc.five, tc.weekly, tc.at, q)
 		}
 	}
 }

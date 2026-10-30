@@ -279,9 +279,7 @@ func (c *Codex) Prepend(other Parser) {
 	if c.meta.Window == 0 {
 		c.meta.Window = o.meta.Window
 	}
-	if c.meta.Quota == nil {
-		c.meta.Quota = o.meta.Quota
-	}
+	c.meta.Quota = c.meta.Quota.withOlder(o.meta.Quota) // (each window: the later part's, else the earlier's)
 	if !c.known {
 		c.working, c.known = o.working, o.known
 	}
@@ -1699,33 +1697,31 @@ type codexLimitWindow struct {
 }
 
 // quota is old with what l says of its windows put in, as of the row's time
-// at; nil, it says nothing of them. (A new Quota: old is not changed.)
+// at (each window its own: one not said keeps its time); nil, it says
+// nothing of them. (A new Quota: old is not changed.)
 func (l *codexLimits) quota(at string, old *Quota) *Quota {
 	if l == nil || l.LimitID != nil && *l.LimitID != "codex" {
 		return nil
 	}
-	var q Quota
-	if old != nil {
-		q = *old
+	var said int64
+	if t, err := time.Parse(time.RFC3339Nano, at); err == nil {
+		said = t.Unix()
 	}
-	said := false
+	var q Quota
 	for _, w := range []*codexLimitWindow{l.Primary, l.Secondary} {
 		if w == nil || w.Used == nil || *w.Used < 0 || *w.Used > 100 || w.ResetsAt <= 0 || w.ResetsAt > 1e12 {
 			continue
 		}
-		qw := &QuotaWindow{Used: *w.Used, ResetsAt: w.ResetsAt}
+		qw := &QuotaWindow{Used: *w.Used, ResetsAt: w.ResetsAt, At: said}
 		switch {
 		case w.Minutes > 0 && w.Minutes <= 360:
-			q.FiveHour, said = qw, true
+			q.FiveHour = qw
 		case w.Minutes >= 8640 && w.Minutes <= 20160:
-			q.Weekly, said = qw, true
+			q.Weekly = qw
 		}
 	}
-	if !said {
+	if q.FiveHour == nil && q.Weekly == nil {
 		return nil
 	}
-	if t, err := time.Parse(time.RFC3339Nano, at); err == nil {
-		q.UpdatedAt = t.Unix()
-	}
-	return &q
+	return q.withOlder(old)
 }

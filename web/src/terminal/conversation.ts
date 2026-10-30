@@ -196,9 +196,10 @@ export interface ConvoMeta {
 export interface ConvoQuotaWindow {
   used: number // percent
   resets_at: number // unix seconds
+  at?: number // when it was said (unix seconds)
 }
 export interface ConvoQuota {
-  updated_at?: number // unix seconds
+  updated_at?: number // when the older of its windows was said (unix seconds)
   five_hour?: ConvoQuotaWindow
   weekly?: ConvoQuotaWindow
 }
@@ -337,7 +338,7 @@ const sameBind = (a?: ConvoBind, b?: ConvoBind) =>
   a === b || (!!a && !!b && a.pane === b.pane && a.pid === b.pid && a.start === b.start && a.session === b.session && a.title === b.title)
 
 const sameMeta = (a?: ConvoMeta, b?: ConvoMeta) =>
-  a === b || (!!a && !!b && a.model === b.model && a.mode === b.mode && a.effort === b.effort && a.branch === b.branch && a.context === b.context && a.window === b.window && a.window_by === b.window_by && JSON.stringify(a.cost) === JSON.stringify(b.cost))
+  a === b || (!!a && !!b && a.model === b.model && a.mode === b.mode && a.effort === b.effort && a.branch === b.branch && a.context === b.context && a.window === b.window && a.window_by === b.window_by && JSON.stringify(a.cost) === JSON.stringify(b.cost) && JSON.stringify(a.quota) === JSON.stringify(b.quota))
 
 const POLL = 2000
 const ACTIVE = 1000 // (after an answer that brought something: more is likely coming)

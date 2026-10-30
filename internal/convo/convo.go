@@ -413,15 +413,39 @@ type Meta struct {
 // Quota is a subscription's use of its 5-hour and weekly windows, of the
 // same shape as what the quota endpoint says of a Claude Code session.
 type Quota struct {
-	UpdatedAt int64        `json:"updated_at,omitempty"` // unix seconds: the row's time
+	// UpdatedAt is when the older of its windows was said (unix seconds).
+	UpdatedAt int64        `json:"updated_at,omitempty"`
 	FiveHour  *QuotaWindow `json:"five_hour,omitempty"`
 	Weekly    *QuotaWindow `json:"weekly,omitempty"`
 }
 
 // QuotaWindow is one window's use.
 type QuotaWindow struct {
-	Used     float64 `json:"used"`      // percent
-	ResetsAt int64   `json:"resets_at"` // unix seconds
+	Used     float64 `json:"used"`         // percent
+	ResetsAt int64   `json:"resets_at"`    // unix seconds
+	At       int64   `json:"at,omitempty"` // when it was said (unix seconds)
+}
+
+// withOlder is q with the windows it does not say as older says them (a
+// new Quota: neither is changed); nil, neither says any.
+func (q *Quota) withOlder(older *Quota) *Quota {
+	if q == nil {
+		return older
+	}
+	n := *q
+	if older != nil && n.FiveHour == nil {
+		n.FiveHour = older.FiveHour
+	}
+	if older != nil && n.Weekly == nil {
+		n.Weekly = older.Weekly
+	}
+	n.UpdatedAt = 0
+	for _, w := range []*QuotaWindow{n.FiveHour, n.Weekly} {
+		if w != nil && w.At > 0 && (n.UpdatedAt == 0 || w.At < n.UpdatedAt) {
+			n.UpdatedAt = w.At
+		}
+	}
+	return &n
 }
 
 // Cost is a cost-state row of Claude Code's: what the session used so far.
