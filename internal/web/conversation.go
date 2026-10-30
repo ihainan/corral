@@ -1322,6 +1322,7 @@ type convoState struct {
 	cxTitleAt   time.Time
 	cxTitleFor  string
 	cxTitleWait bool
+	cxTitleFail bool  // (the read failed: not read again for convoTitleBackoff)
 	offset      int64 // read up to here
 	size        int64 // the log's size when last looked at
 	mtime       time.Time
@@ -2340,10 +2341,17 @@ front || exit 3
 waiting() {
   if [ -n "$cx" ]; then
     # (Codex 0.164 titles its terminal "[ ! ] Action Required | …", blinking
-    # with "[ . ] …", while it waits for an answer, and only then.)
-    if [ "$mode" = tmux ]; then t=$(tmux -u display-message -p -t "$p" '#{pane_title}' 2>/dev/null 9>&-)
-    else t=$(HERDR_SOCKET_PATH=$sock herdr pane get "$p" 2>/dev/null 9>&- | grep -o '"terminal_title" *: *"[^"]*"' | head -n 1 | sed 's/^"terminal_title" *: *"//; s/"$//'); fi
-    case $t in '[ ! ] Action Required'*|'[ . ] Action Required'*) st=waiting wf='permission prompt' ;; *) st=busy wf= ;; esac
+    # with "[ . ] …", while it waits for an answer, and only then. Not read
+    # (tmux failing, herdr's answer without the title): "unknown", which
+    # neither a message nor an answer goes by.)
+    st=unknown wf=
+    if [ "$mode" = tmux ]; then t=$(tmux -u display-message -p -t "$p" '#{pane_title}' 2>/dev/null 9>&-) || return 0
+    else
+      j=$(HERDR_SOCKET_PATH=$sock herdr pane get "$p" 2>/dev/null 9>&-) || return 0
+      printf '%s' "$j" | grep -q '"terminal_title" *: *"' || return 0
+      t=$(printf '%s' "$j" | grep -o '"terminal_title" *: *"[^"]*"' | head -n 1 | sed 's/^"terminal_title" *: *"//; s/"$//')
+    fi
+    case $t in '[ ! ] Action Required'*|'[ . ] Action Required'*) st=waiting wf='permission prompt' ;; *) st=busy ;; esac
     return 0
   fi
   c=$(head -c 65536 "$HOME/.claude/sessions/$pid.json" 2>/dev/null | tr -d '\n')
@@ -2356,7 +2364,7 @@ gate_enter() {
   [ -n "$gate" ] || return 0
   waiting
   case $gate in
-  free) [ "$st" = waiting ] && exit 5 ;;
+  free) case $st in waiting|unknown) exit 5;; esac ;;
   idle) [ "$st" = idle ] || exit 5 ;;
   reply:*) [ "$st" = waiting ] || exit 5 ;;
   esac
@@ -2365,7 +2373,7 @@ gate_enter() {
 if [ -n "$gate" ]; then
   waiting
   case $gate in
-  free) [ "$st" = waiting ] && exit 9 ;;
+  free) [ "$st" = waiting ] && exit 9; [ "$st" = unknown ] && exit 11 ;;
   idle) [ "$st" = idle ] || exit 12 ;;
   reply:*)
     [ "$st" = waiting ] || exit 9
@@ -2999,13 +3007,20 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	case what == "command":
 		gate = "idle" // (not while it works either: it would wait in its queue, and run when no one looks)
 	}
+	done := ended.Done
 	if front.agent == "codex" {
-		// (Its title read before this, of before it: read again after, whatever came of it.)
+		// (Its title read before this, of before it: read again after, whatever
+		// came of it — after the command ended on the host, not only after this
+		// request gave up on it.)
 		s.codexPressed(sess, b.Pane)
 		defer s.codexPressed(sess, b.Pane)
+		done = func() {
+			s.codexPressed(sess, b.Pane)
+			ended.Done()
+		}
 	}
 	res, err := sshx.Exec(ctx, sess.Client(), convoGatedCommand(gate, sess.Persistence, sess.TmuxSession, b.Pane, socket, b.PID, b.Start, b.Session, len(text), press, modeLines(what)), sendOut,
-		sshx.ExecOptions{Stdin: strings.NewReader(text), Release: ended.Done})
+		sshx.ExecOptions{Stdin: strings.NewReader(text), Release: done})
 	var exitErr *sshx.ExitError
 	switch {
 	case err == nil:
@@ -3042,6 +3057,10 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		return
 	case errors.As(err, &exitErr) && exitErr.Status == 11:
 		reason = "cannot_verify"
+		if gate == "cfree" {
+			writeError(w, http.StatusConflict, "cannot_verify", "whether Codex waits for an answer cannot be told (its title not read): send it in the terminal")
+			return
+		}
 		writeError(w, http.StatusConflict, "cannot_verify", "the host cannot check the screen (no sha256sum): answer in the terminal")
 		return
 	default:

@@ -16,9 +16,14 @@ import (
 // "[ . ] …", while it waits, and only then. The title is read when the
 // log says it works or says nothing (a long log's tail read first), at
 // most each convoTitleTTL for a pane, and read anew after keys or text
-// went to it. A read that fails says it does not wait.
+// went to it. A read that fails says it does not wait here (no card), and
+// is not tried again for convoTitleBackoff; the host's gate, reading it
+// itself, lets no message or answer go when it cannot.
 
-const convoTitleTTL = 2 * time.Second
+const (
+	convoTitleTTL     = 2 * time.Second
+	convoTitleBackoff = 10 * time.Second // (after a read that failed: not each poll a wait of its timeout)
+)
 
 // codexTitleWaits: the title is one of a Codex waiting for an answer.
 func codexTitleWaits(title string) bool {
@@ -33,7 +38,11 @@ func (s *Server) codexWaits(ctx context.Context, sess *term.Session, st *convoSt
 	who := strings.Join([]string{b.Pane, strconv.FormatInt(b.PID, 10), strconv.FormatInt(b.Start, 10), b.Session}, "\x00")
 	pressed, _ := s.cxPressed.Load(s.convoReplyKey(sess, b.Pane))
 	at, _ := pressed.(time.Time)
-	if st.cxTitleFor == who && time.Since(st.cxTitleAt) < convoTitleTTL && st.cxTitleAt.After(at) {
+	ttl := convoTitleTTL
+	if st.cxTitleFail {
+		ttl = convoTitleBackoff
+	}
+	if st.cxTitleFor == who && time.Since(st.cxTitleAt) < ttl && (st.cxTitleFail || st.cxTitleAt.After(at)) {
 		return st.cxTitleWait
 	}
 	began := time.Now()
@@ -41,14 +50,17 @@ func (s *Server) codexWaits(ctx context.Context, sess *term.Session, st *convoSt
 	defer cancel()
 	res, err := sshx.Exec(ctx, sess.Client(), codexTitleCommand(b.Pane), 4<<10, sshx.ExecOptions{})
 	waits := err == nil && codexTitleWaits(strings.TrimRight(string(res.Out), "\n"))
-	st.cxTitleAt, st.cxTitleFor, st.cxTitleWait = began, who, waits
+	st.cxTitleAt, st.cxTitleFor, st.cxTitleWait, st.cxTitleFail = began, who, waits, err != nil
+	if err != nil {
+		st.cxTitleAt = time.Now() // (its backoff from when it gave up)
+	}
 	return waits
 }
 
 // codexTitleCommand prints a tmux pane's title (pane: an id of tmux's,
 // validated as the bind's).
 func codexTitleCommand(pane string) string {
-	return "tmux -u display-message -p -t " + sshx.QuoteShell(pane) + " '#{pane_title}'"
+	return `PATH="$HOME/.local/bin:$HOME/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH" tmux -u display-message -p -t ` + sshx.QuoteShell(pane) + " '#{pane_title}'"
 }
 
 // codexPressed: keys or text go (or went) to a Codex's pane now: what was

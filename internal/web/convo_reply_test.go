@@ -197,6 +197,25 @@ time.sleep(30)`)
 			t.Fatalf("%q: not waiting, a message goes: exit %d, typed %q", ti, got, wrote())
 		}
 	}
+	codexUnreadCases(t, run, wrote, title, shown)
+}
+
+// (Its title not read — herdr failing, or its answer without the title: no
+// message and no answer go.)
+func codexUnreadCases(t *testing.T, run func(string, []string) int, wrote func() string, title, shown string) {
+	for _, how := range []string{"gone", `{"result":{"pane":{"pane_id":"p1"}}}`} {
+		if how == "gone" {
+			os.Remove(title)
+		} else {
+			os.WriteFile(title, []byte(how), 0o644)
+		}
+		if got := run("cfree", []string{"ctrl+x"}); got != 11 || wrote() != "" {
+			t.Fatalf("%s: a message, its title not read: exit %d, typed %q", how, got, wrote())
+		}
+		if got := run("creply:"+shown, []string{"1"}); got != 9 || wrote() != "" {
+			t.Fatalf("%s: an answer, its title not read: exit %d, typed %q", how, got, wrote())
+		}
+	}
 }
 
 // The same titles as the host's gate takes for a Codex that waits.
