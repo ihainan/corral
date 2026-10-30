@@ -71,14 +71,16 @@ func codexFn(ns, name, args string) (tools []*Tool, tasks []Task) {
 		return []*Tool{{Name: "Read", Detail: clip(strings.TrimPrefix(str("path"), "file://"), maxDetail)}}, nil
 	case "update_plan":
 		var in struct {
-			Plan []struct {
+			Plan *[]struct {
 				Step   string `json:"step"`
 				Status string `json:"status"`
 			} `json:"plan"`
 		}
-		_ = json.Unmarshal([]byte(args), &in)
+		if json.Unmarshal([]byte(args), &in) != nil || in.Plan == nil {
+			return []*Tool{{Name: "TodoWrite"}}, nil // (no list given: the one there stands)
+		}
 		tasks = []Task{}
-		for _, s := range in.Plan {
+		for _, s := range *in.Plan {
 			if len(tasks) >= maxTasks {
 				break
 			}
@@ -263,7 +265,7 @@ func codexAsks(raw json.RawMessage) []Ask {
 		if len(out) >= maxAsks {
 			break
 		}
-		a := Ask{Header: clip(clean(q.Header), maxTitle), Question: clip(clean(firstNonEmpty(q.Question, q.Title)), maxDetail)}
+		a := Ask{Header: clip(clean(q.Header), maxTitle), Question: clip(clean(firstNonEmpty(q.Question, q.Title)), maxDetail), Options: []AskOption{}}
 		for _, o := range q.Options {
 			if len(a.Options) >= maxOptions {
 				a.Cut = true
@@ -436,3 +438,33 @@ func changeTool(path string, ch codexChange) *Tool {
 	}
 	return t
 }
+
+// codexTitle: the name a conversation of Codex's goes by (Codex names none):
+// its first message's first line, what looks like a secret in it (a key,
+// a token) cut to its start, at most codexTitleLen characters.
+func codexTitle(text string) string {
+	line := ""
+	for _, l := range strings.Split(text, "\n") {
+		if l = strings.TrimSpace(l); l != "" {
+			line = l
+			break
+		}
+	}
+	line = strings.Join(strings.Fields(line), " ")
+	line = secretShaped.ReplaceAllStringFunc(line, func(s string) string {
+		if len(s) <= 8 {
+			return s
+		}
+		return s[:min(len(s), 7)] + "…"
+	})
+	if r := []rune(line); len(r) > codexTitleLen {
+		line = strings.TrimSpace(string(r[:codexTitleLen])) + "…"
+	}
+	return line
+}
+
+const codexTitleLen = 40
+
+// secretShaped: what looks like a secret by its shape — a known key's
+// prefix and what follows it, or a long run of key characters.
+var secretShaped = regexp.MustCompile(`\b(?:sk|pk|rk|ak)-[A-Za-z0-9_-]{8,}|\b(?:ghp|gho|ghu|ghs|github_pat|xox[abprs]|glpat|AKIA|AIza)[A-Za-z0-9_-]{8,}|[A-Za-z0-9_+/=-]{32,}`)

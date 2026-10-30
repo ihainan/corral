@@ -669,3 +669,52 @@ func TestCodexFnReview451(t *testing.T) {
 		t.Errorf("crowded out: %s", b)
 	}
 }
+
+// The name of a conversation of Codex's: its first message's first line,
+// short, no secret in it.
+func TestCodexTitle(t *testing.T) {
+	for in, want := range map[string]string{
+		"测试一下这个 OpenAI 官方 API Key 是否可用：sk-proj-EXAMPLEonlyNOTaREALkey0000000000000000000000000000000000": "测试一下这个 OpenAI 官方 API Key 是否可用：sk-proj…",
+		"\n\n  修好登录\n然后跑测试": "修好登录",
+		"token ghp_abcdefghijklmnopqrstuvwxyz0123456789 please": "token ghp_abc… please",
+		"一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十多出来的": "一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十…",
+	} {
+		if got := codexTitle(in); got != want {
+			t.Errorf("%q: %q, want %q", in, got, want)
+		}
+	}
+}
+
+// review452: what review 452 found, each as it would happen.
+func TestCodexFnReview452(t *testing.T) {
+	// 1. A question without choices: its choices an empty list, not null.
+	c := feedAll(fnCall(t, "q", "request_user_input_async", map[string]any{"questions": []any{map[string]any{"title": "还有吗？"}}}))
+	if b, _ := json.Marshal(c.Since(0)); !strings.Contains(string(b), `"options":[]`) {
+		t.Errorf("1: %s", b)
+	}
+	// 2. A patch whose line is past what is kept: no hunk without lines.
+	ts := toolsOf(feedAll(fnCall(t, "p", "exec_command", map[string]any{"cmd": "apply_patch <<'P'\n*** Begin Patch\n*** Update File: a.txt\n@@\n-" + strings.Repeat("x", maxPatch+10) + "\n@@\n+y\n*** End Patch\nP"})))
+	for _, h := range ts[0].Patch {
+		if len(h.Lines) == 0 {
+			t.Errorf("2: a hunk without lines: %+v", ts[0].Patch)
+		}
+	}
+	// 3. A question answered by its result: done.
+	ts = toolsOf(feedAll(fnCall(t, "q", "request_user_input", map[string]any{"questions": []any{map[string]any{"title": "?"}}}), fnOut(t, "q", `{"answers":{"0":"yes"}}`)))
+	if !ts[0].Done {
+		t.Error("3: answered, not done")
+	}
+	// 4. A script that only looks at a picture, told of on its own: one line.
+	ts = toolsOf(feedAll(
+		codexLine(t, "response_item", map[string]any{"type": "custom_tool_call", "name": "exec", "call_id": "s", "input": "await tools.view_image({path:\"/w/a.png\"});"}),
+		fnDone(t, map[string]any{"type": "ImageView", "id": "exec-9", "path": "/w/a.png"}),
+	))
+	if len(ts) != 1 || ts[0].Detail != "/w/a.png" {
+		t.Errorf("4: %+v", ts)
+	}
+	// 5. A plan with no list: the one there stands.
+	c = feedAll(fnCall(t, "p1", "update_plan", map[string]any{"plan": []any{map[string]any{"step": "x", "status": "pending"}}}), fnOut(t, "p1", "Plan updated"), fnCall(t, "p2", "update_plan", map[string]any{"plan": "bad"}), fnOut(t, "p2", "Error parsing function call: plan"))
+	if ts := c.Tasks(); len(ts) != 1 {
+		t.Errorf("5: %+v", ts)
+	}
+}

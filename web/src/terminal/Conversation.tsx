@@ -962,6 +962,9 @@ export function ConversationView({
         event: (p) => {
           const ev = p.event
           if (!ev) return ''
+          // (Background work ended: as its line says it, its state and exit code.)
+          if (ev.kind === 'task')
+            return paren(t(`convo.task.${ev.task ?? 'cmd'}.${ev.status ?? 'done'}` as Parameters<typeof t>[0]) + (ev.code ? t('convo.task.code', { n: ev.code }) : '')) + (ev.text ? ' ' + ev.text : '')
           const said = [ev.text, ev.goal, ev.why].filter(Boolean).join(' · ')
           return paren(t(('convoExport.ev.' + ev.kind) as Parameters<typeof t>[0])) + (said ? ' ' + said : '')
         },
@@ -3249,7 +3252,7 @@ function ToolRow({ tool, onCopy, live }: { tool: ConvoTool; onCopy: (s: string) 
               {tool.asks.map((a, i) => (
                 <div key={i}>
                   <dt>{a.question}</dt>
-                  {a.options.map((o, j) => (
+                  {(a.options ?? []).map((o, j) => (
                     <dd key={j}>
                       {o.label}
                       {o.description && <span className="convo-ask-desc"> — {o.description}</span>}

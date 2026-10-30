@@ -1242,7 +1242,9 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       el.selectionStart = el.selectionEnd = s.length
     })
   }
-  const to = agent ? [agent.title, agent.where].filter((x) => x && x !== '~').join(' · ') : ''
+  // (Its name, short: a placeholder of one line, however long the name.)
+  const short = (s?: string) => (s && [...s].length > 24 ? [...s].slice(0, 24).join('').trimEnd() + '…' : s)
+  const to = agent ? [short(agent.title), agent.where].filter((x) => x && x !== '~').join(' · ') : ''
   const placeholder = suggestion ?? (to ? t('convo.toPlaceholder', { name: to }) : t('term.composerPlaceholder'))
   useComposerFit(field, draft, placeholder)
   // Why it cannot send now, if it cannot.

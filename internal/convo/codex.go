@@ -659,7 +659,7 @@ func (c *Codex) userSaid(r *codexRow, id string, parts []Part) {
 	if c.title == "" {
 		for _, pt := range parts {
 			if pt.Kind == KindText {
-				c.title = clip(strings.Join(strings.Fields(pt.Text), " "), maxTitle)
+				c.title = codexTitle(pt.Text)
 				break
 			}
 		}
@@ -707,6 +707,7 @@ func (c *Codex) done(r *codexRow, id string, t *Tool, text string, failed bool) 
 		c.touch([]*Tool{was})
 		return
 	}
+	c.itemsTell() // (of no call of its id: the code mode's, its script's lines go)
 	t.ID, t.Done, t.Error = id, true, failed
 	if text != "" {
 		t.setResult(clean(text))
@@ -1068,8 +1069,8 @@ func (c *Codex) answer(ts []*Tool, out codexOut) {
 	}
 	failed := out.failed || codexExit.MatchString(out.text)
 	for i, t := range ts {
-		if strings.HasPrefix(t.Name, "request_user_input") && !failed {
-			continue
+		if strings.HasPrefix(t.Name, "request_user_input") && !failed && strings.Contains(out.text, `"accepted"`) {
+			continue // (taken, not answered: their next message answers it)
 		}
 		t.Done = true
 		if i == at && t.Name != "request_user_input" {
@@ -1501,6 +1502,16 @@ func patchTools(patch string) []*Tool {
 		}
 		size += len(l)
 		h.Lines = append(h.Lines, clip(l, maxPatchLine))
+	}
+	// (A hunk none of whose lines were kept is none: the view draws lines.)
+	for _, t := range out {
+		kept := t.Patch[:0]
+		for _, h := range t.Patch {
+			if len(h.Lines) > 0 {
+				kept = append(kept, h)
+			}
+		}
+		t.Patch = kept
 	}
 	return out
 }
