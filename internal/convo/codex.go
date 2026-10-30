@@ -230,7 +230,10 @@ func (c *Codex) Prepend(other Parser) {
 	// (Each command told of on its own in either part: the lines of the
 	// calls that run them go, in the part before this one too.)
 	if c.itemCmds || o.itemCmds {
-		c.itemCmds, o.itemCmds = true, false
+		if !c.itemCmds {
+			c.itemsTell() // (told of on their own in the part before: this part's script lines go too)
+		}
+		o.itemCmds = false
 		o.itemsTell()
 	}
 	// (Its calls whose lines went, then or now: what came back of them here is let be.)
@@ -960,12 +963,18 @@ func (c *Codex) item(r *codexRow, p *codexPayload) {
 			}
 		}
 		var parts []Part
+		room := maxParts
+		for _, t := range tools {
+			if strings.HasPrefix(t.Name, "request_user_input") {
+				room = maxParts - 1 // (a question it puts keeps its place: what it waits on)
+			}
+		}
 		for _, t := range tools {
 			t.ID = id
 			if t.fromCall && c.itemCmds {
 				continue // (each of its things is told of on its own)
 			}
-			if len(parts) >= maxParts {
+			if len(parts) >= room && !strings.HasPrefix(t.Name, "request_user_input") {
 				parts[len(parts)-1].Tool.MoreFiles++ // (of what one call did, as many lines as an entry holds)
 				continue
 			}
@@ -1142,6 +1151,9 @@ func codexTools(name, src string) []*Tool {
 			return out
 		}
 	}
+	// (What is code in it, its strings' and comments' insides blanked: calls
+	// are found there, and only what they are given read from src.)
+	code := jsCode(src)
 	for _, lit := range patchStr.FindAllString(src, 8) {
 		if patch, ok := jsUnquote(lit); ok {
 			out = append(out, patchTools(patch)...)
@@ -1154,8 +1166,8 @@ func codexTools(name, src string) []*Tool {
 	}
 	// (Its commands, one line each, as one: what came back is of them all.)
 	var cmds []string
-	for _, m := range execCmd.FindAllStringSubmatch(src, 16) {
-		if cmd, ok := jsUnquote(`"` + m[1] + `"`); ok {
+	for _, m := range execCmd.FindAllStringSubmatchIndex(code, 16) {
+		if cmd, ok := jsUnquote(`"` + src[m[2]:m[3]] + `"`); ok {
 			cmds = append(cmds, cmd)
 		}
 	}
@@ -1167,7 +1179,7 @@ func codexTools(name, src string) []*Tool {
 	// commands and patches read above, nor what it types to a command.
 	seen := map[string]bool{}
 	asks := false
-	for _, m := range toolCalled.FindAllStringSubmatch(src, 32) {
+	for _, m := range toolCalled.FindAllStringSubmatch(code, 32) {
 		n := m[1]
 		if seen[n] || (n == "exec_command" && len(cmds) > 0) || (n == "apply_patch" && len(out) > 0) {
 			continue
@@ -1177,7 +1189,7 @@ func codexTools(name, src string) []*Tool {
 			asks = true
 			continue
 		}
-		if t := scriptTool(n, src); t != nil && len(out) < maxParts {
+		if t := scriptTool(n, src, code); t != nil && len(out) < maxParts {
 			out = append(out, t)
 		}
 	}
@@ -1194,7 +1206,7 @@ func codexTools(name, src string) []*Tool {
 
 // scriptTool: a tool a script of the code mode calls, as the tool the view
 // knows that does the same (its arguments not read: they are code).
-func scriptTool(name, src string) *Tool {
+func scriptTool(name, src, code string) *Tool {
 	switch name {
 	case "exec_command":
 		return &Tool{Name: "Bash"}
@@ -1206,9 +1218,11 @@ func scriptTool(name, src string) *Tool {
 		return &Tool{Name: "TodoWrite"}
 	case "web__run", "web_run":
 		var qs []string
-		for _, m := range scriptQuery.FindAllStringSubmatch(callArgs(src, "tools."+name+"("), 8) {
-			if q, ok := jsUnquote(`"` + m[1] + `"`); ok && strings.TrimSpace(q) != "" {
-				qs = append(qs, q)
+		if from, to := callSpan(code, "tools."+name+"("); from >= 0 {
+			for _, m := range scriptQuery.FindAllStringSubmatchIndex(code[from:to], 8) {
+				if q, ok := jsUnquote(`"` + src[from+m[2]:from+m[3]] + `"`); ok && strings.TrimSpace(q) != "" {
+					qs = append(qs, q)
+				}
 			}
 		}
 		return &Tool{Name: "WebSearch", Detail: clip(clean(strings.Join(qs, "\n")), maxDetail)}
@@ -1218,70 +1232,93 @@ func scriptTool(name, src string) *Tool {
 	return &Tool{Name: clip(name, 128)}
 }
 
-// callArgs: what a script passes to its first call that begins so: from
-// its "(" to the one that closes it, strings and comments passed over;
-// "" where there is none.
-func callArgs(src, call string) string {
-	i := codeIndex(src, call)
+// callSpan: where what a script's first call that begins so is given lies,
+// in its code (strings and comments blanked: see jsCode): from after its
+// "(" to the ")" that closes it; -1, none.
+func callSpan(code, call string) (int, int) {
+	i := strings.Index(code, call)
 	if i < 0 {
-		return ""
+		return -1, -1
 	}
-	start := i + len(call)
-	depth, quote := 1, byte(0)
-	for j := start; j < len(src); j++ {
-		ch := src[j]
-		switch {
-		case quote != 0:
-			if ch == '\\' {
-				j++
-			} else if ch == quote {
-				quote = 0
-			}
-		case ch == '"' || ch == '\'' || ch == '`':
-			quote = ch
-		case ch == '/' && j+1 < len(src) && src[j+1] == '/':
-			for j < len(src) && src[j] != '\n' {
-				j++
-			}
-		case ch == '(':
+	start, depth := i+len(call), 1
+	for j := start; j < len(code); j++ {
+		switch code[j] {
+		case '(':
 			depth++
-		case ch == ')':
+		case ')':
 			depth--
 			if depth == 0 {
-				return src[start:j]
+				return start, j
 			}
 		}
 	}
-	return ""
+	return -1, -1
 }
 
-// codeIndex: where s first is in a script's code (not in a string or a
-// comment of it); -1 where it is not.
-func codeIndex(src, s string) int {
-	quote := byte(0)
-	for j := 0; j < len(src); j++ {
-		ch := src[j]
-		switch {
-		case quote != 0:
-			if ch == '\\' {
-				j++
-			} else if ch == quote {
-				quote = 0
+// jsCode: a script as its code alone, the same length: what is inside its
+// strings blanked ('_', their quotes kept), its comments blanked (' '); a
+// template literal's ${…} is code, blanked so in turn. (Regular expression
+// literals are not told from division: rare in what Codex writes.)
+func jsCode(src string) string {
+	b := []byte(src)
+	jsCodeFrom(b, 0, 0)
+	return string(b)
+}
+
+// jsCodeFrom blanks from i on; in a template's ${…} (inTpl > 0), up to the
+// "}" that closes it, whose index it returns (else len(b)).
+func jsCodeFrom(b []byte, i, inTpl int) int {
+	depth := 0
+	for ; i < len(b); i++ {
+		switch ch := b[i]; {
+		case ch == '/' && i+1 < len(b) && b[i+1] == '/':
+			for ; i < len(b) && b[i] != '\n'; i++ {
+				b[i] = ' '
 			}
-		case ch == '"' || ch == '\'' || ch == '`':
-			quote = ch
-		case ch == '/' && j+1 < len(src) && src[j+1] == '/':
-			for j < len(src) && src[j] != '\n' {
-				j++
+		case ch == '/' && i+1 < len(b) && b[i+1] == '*':
+			for ; i < len(b) && !(b[i] == '*' && i+1 < len(b) && b[i+1] == '/'); i++ {
+				if b[i] != '\n' {
+					b[i] = ' '
+				}
 			}
-		case strings.HasPrefix(src[j:], s):
-			return j
+			if i+1 < len(b) {
+				b[i], b[i+1] = ' ', ' '
+				i++
+			}
+		case ch == '"' || ch == '\'':
+			for i++; i < len(b) && b[i] != ch && b[i] != '\n'; i++ {
+				if b[i] == '\\' && i+1 < len(b) {
+					b[i] = '_'
+					i++
+				}
+				b[i] = '_'
+			}
+		case ch == '`':
+			for i++; i < len(b) && b[i] != '`'; i++ {
+				switch {
+				case b[i] == '\\' && i+1 < len(b):
+					b[i], b[i+1] = '_', '_'
+					i++
+				case b[i] == '$' && i+1 < len(b) && b[i+1] == '{':
+					i = jsCodeFrom(b, i+2, inTpl+1) // (its code, to its "}")
+				default:
+					b[i] = '_'
+				}
+			}
+		case inTpl > 0 && ch == '{':
+			depth++
+		case inTpl > 0 && ch == '}':
+			if depth == 0 {
+				return i
+			}
+			depth--
 		}
 	}
-	return -1
+	return len(b)
 }
 
-// scriptQuery: a search's words in a call's arguments ({q: "…"}).
+// scriptQuery: a search's words in a call's arguments ({q: "…"}), found
+// in its code, read from the script.
 var scriptQuery = regexp.MustCompile(`\bq"?\s*:\s*"((?:[^"\\]|\\.)*)"`)
 
 // patchTools: an apply_patch's files, each with its lines added and

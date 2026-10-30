@@ -1573,3 +1573,25 @@ func TestTaskEndedWordings(t *testing.T) {
 		}
 	}
 }
+
+// review448: the person's words quoting a notice end no work; a notice
+// with their words around it is theirs; a reason it was stopped for that
+// mentions an exit code is no exit code of its.
+func TestTaskNoticeQuoted(t *testing.T) {
+	start := `{"type":"assistant","uuid":"a1","message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"sleep 99","run_in_background":true}}]}}` + "\n" +
+		`{"type":"user","uuid":"u1","toolUseResult":{"backgroundTaskId":"b1"},"message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"Command running in background with ID: b1"}]}}` + "\n"
+	quote := `{"type":"user","uuid":"u2","message":{"content":"Please explain this notice: <task-notification><task-id>b1</task-id><status>completed</status><summary>Background command \"x\" completed (exit code 0)</summary></task-notification>"}}` + "\n"
+	c := NewClaude()
+	c.Feed([]byte(start + quote))
+	if len(c.Running()) != 1 {
+		t.Errorf("the person's words ended the work: %+v", c.Running())
+	}
+	two := "<task-notification><summary>Agent \"a\" finished</summary></task-notification> and also <task-notification><summary>Agent \"b\" finished</summary></task-notification>"
+	if ev := taskEnded(two); ev != nil {
+		t.Errorf("a notice with words around it: %+v", ev)
+	}
+	ev := taskEnded("<task-notification><summary>Agent \"worker\" was stopped: the previous attempt had exit code 2</summary></task-notification>")
+	if ev == nil || ev.Status != "stopped" || ev.Code != nil {
+		t.Errorf("a reason's exit code: %+v", ev)
+	}
+}

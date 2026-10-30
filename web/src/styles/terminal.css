@@ -770,9 +770,10 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 }
 button.convo-task-line { cursor: pointer; }
 button.convo-task-line:hover .convo-task-name { color: var(--term-fg); }
-.convo-task-head { flex: none; white-space: nowrap; }
+/* (Both cut where the line ends, the state first: the name keeps a few letters' room) */
+.convo-task-head { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .convo-event.is-task.is-warn .convo-task-head { color: var(--term-warn-text); }
-.convo-task-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: 12px; color: var(--term-fg-2); }
+.convo-task-name { flex: 1 0 0; min-width: 6em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: 12px; color: var(--term-fg-2); }
 .convo-task-full { margin: 4px 0; max-height: 240px; overflow: auto; }
 .convo-ask-desc { color: var(--term-fg-3); }
 .convo-event.is-compact { display: flex; align-items: center; gap: 10px; margin: 4px 0; font-size: 12px; color: var(--term-fg-3); text-align: center; }

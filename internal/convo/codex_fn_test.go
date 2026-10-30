@@ -498,3 +498,50 @@ func TestCodexFnReview447(t *testing.T) {
 		t.Error("8: the oldest question left waiting")
 	}
 }
+
+// review448: what review 448 found, each as it would happen.
+func TestCodexFnReview448(t *testing.T) {
+	// 1. A call written in a string, after a comment with a quote in it, or
+	// in a template's text: no call (neither a search nor a command).
+	for _, script := range []string{
+		"/* ' */ await tools.write_stdin({session_id:1, chars:'tools.web__run({search_query:[{q:\"PRIVATE\"}]}) tools.exec_command({cmd:\"PRIVATE\"})'});\nawait tools.web__run({search_query:[{q:\"public\"}]});",
+		"const s = `x ${`tools.exec_command({cmd:\"PRIVATE\"})`} y`;\nawait tools.write_stdin({session_id:1, chars:s});\nawait tools.web__run({search_query:[{q:\"public\"}]});",
+	} {
+		c := feedAll(codexLine(t, "response_item", map[string]any{"type": "custom_tool_call", "name": "exec", "call_id": "s1", "input": script}))
+		if b, _ := json.Marshal(c.Since(0)); strings.Contains(string(b), "PRIVATE") || !strings.Contains(string(b), "public") {
+			t.Errorf("1: %s", b)
+		}
+	}
+	// (A call in code, with a template's ${…} in its argument, is read.)
+	c := feedAll(codexLine(t, "response_item", map[string]any{"type": "custom_tool_call", "name": "exec", "call_id": "s2", "input": "await tools.exec_command({cmd:\"go test ./...\"}); const x = `a ${f(\"b\")} c`;"}))
+	if ts := toolsOf(c); len(ts) != 1 || ts[0].Detail != "go test ./..." {
+		t.Errorf("1, a call in code: %+v", ts)
+	}
+	// 2. Told of on their own in the part before: this part's script lines
+	// go too (as reading it whole).
+	item := fnDone(t, map[string]any{"type": "CommandExecution", "id": "exec-1", "command": []string{"ls"}, "status": "completed", "aggregated_output": "", "exit_code": 0})
+	script := codexLine(t, "response_item", map[string]any{"type": "custom_tool_call", "name": "exec", "call_id": "s3", "input": "await tools.exec_command({cmd:\"pwd\"});"})
+	item2 := fnDone(t, map[string]any{"type": "CommandExecution", "id": "exec-2", "command": []string{"pwd"}, "status": "completed", "aggregated_output": "/w", "exit_code": 0})
+	whole := shownOf(feedAll(item, script, item2))
+	later := feedAll(script)
+	later.Prepend(feedAll(item))
+	later.Feed([]byte(item2))
+	if got := shownOf(later); got != whole {
+		t.Errorf("2:\n%s\nwhole:\n%s", got, whole)
+	}
+	// 3. A script of many patches that asks last: its question kept.
+	var b strings.Builder
+	for p := 0; p < 4; p++ {
+		b.WriteString("await tools.apply_patch(\"*** Begin Patch\\n")
+		for i := 0; i < 20; i++ {
+			fmt.Fprintf(&b, "*** Add File: p%d_%d.py\\n+x\\n", p, i)
+		}
+		b.WriteString("*** End Patch\");\n")
+	}
+	b.WriteString("await tools.request_user_input({questions:[]});")
+	c = feedAll(codexLine(t, "response_item", map[string]any{"type": "custom_tool_call", "name": "exec", "call_id": "s4", "input": b.String()}))
+	ts := toolsOf(c)
+	if len(ts) > maxParts || ts[len(ts)-1].Name != "request_user_input" || len(c.asked) != 1 {
+		t.Errorf("3: %d lines, last %s, asked %d", len(ts), ts[len(ts)-1].Name, len(c.asked))
+	}
+}

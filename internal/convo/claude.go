@@ -863,7 +863,7 @@ func (c *Claude) user(r *claudeRow) {
 	var s string
 	if json.Unmarshal(r.Message.Content, &s) == nil {
 		c.rewound()
-		if strings.Contains(s, "<task-notification>") {
+		if taskNotice(s) {
 			c.ended(s)
 		}
 		if r.IsCompactSummary {
@@ -936,7 +936,7 @@ func (c *Claude) user(r *claudeRow) {
 				c.result(b, nil)
 			}
 		case "text":
-			if strings.Contains(b.Text, "<task-notification>") {
+			if taskNotice(b.Text) {
 				c.ended(b.Text)
 				if ev := taskEnded(b.Text); ev != nil {
 					notes = append(notes, Part{Kind: KindEvent, Event: ev})
@@ -2286,10 +2286,10 @@ func classifyUserText(s string) (role, text string) {
 // wording (said as a note, as it is).
 func taskEnded(s string) *Event {
 	// (Only a notice itself, whole: not the person's words that quote one.)
-	t := strings.TrimSpace(s)
-	if !strings.HasPrefix(t, "<task-notification>") || !strings.HasSuffix(t, "</task-notification>") {
+	if !taskNotice(s) {
 		return nil
 	}
+	t := strings.TrimSpace(s)
 	sm := taskSummary.FindStringSubmatch(t)
 	if sm == nil {
 		return nil
@@ -2313,7 +2313,8 @@ func taskEnded(s string) *Event {
 		return nil // (another wording: said as it is)
 	}
 	ev.Text, ev.Cut = cut(clean(m[2]), maxDetail)
-	if cm := taskCode.FindStringSubmatch(how); cm != nil {
+	// (Its exit code as its wording says it: not one a reason it was stopped for mentions.)
+	if cm := taskCode.FindStringSubmatch(how); cm != nil && ev.Status != "stopped" && ev.Status != "waiting" {
 		if n, err := strconv.Atoi(cm[1]); err == nil {
 			ev.Code = &n
 			if n != 0 && ev.Status == "done" {
@@ -2322,6 +2323,14 @@ func taskEnded(s string) *Event {
 		}
 	}
 	return ev
+}
+
+// taskNotice: s is one notice of Claude Code's (task-notification) and
+// nothing else: what it says of work set going is taken (not the person's
+// words that quote one, nor one with words of theirs around it).
+func taskNotice(s string) bool {
+	t := strings.TrimSpace(s)
+	return strings.HasPrefix(t, "<task-notification>") && strings.HasSuffix(t, "</task-notification>") && strings.Count(t, "<task-notification>") == 1
 }
 
 // How Claude Code words a background task's end (2.1.31x): each wording
