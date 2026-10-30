@@ -221,9 +221,19 @@ func (c *Codex) Prepend(other Parser) {
 	} else {
 		c.asked = append(append([]*Tool(nil), o.asked...), c.asked...)
 		if n := len(c.asked) - maxAsked; n > 0 {
+			for _, t := range c.asked[:n] {
+				t.Done = true // (let go of, as over)
+			}
 			c.asked = c.asked[n:]
 		}
 	}
+	// (Each command told of on its own in either part: the lines of the
+	// calls that run them go, in the part before this one too.)
+	if c.itemCmds || o.itemCmds {
+		c.itemCmds, o.itemCmds = true, false
+		o.itemsTell()
+	}
+	// (Its calls whose lines went, then or now: what came back of them here is let be.)
 	for id := range o.hidden {
 		delete(c.orphans, id) // (what came back of a call whose things are told of on their own)
 		if c.hidden == nil {
@@ -232,12 +242,6 @@ func (c *Codex) Prepend(other Parser) {
 		if len(c.hidden) < maxHidden {
 			c.hidden[id] = true
 		}
-	}
-	// (Each command told of on its own in either part: the lines of the
-	// calls that run them go, in the part before this one too.)
-	if c.itemCmds || o.itemCmds {
-		c.itemCmds, o.itemCmds = true, false
-		o.itemsTell()
 	}
 	for id, t := range o.seen {
 		if len(c.seen) >= maxSeenItems {
@@ -329,6 +333,7 @@ func (c *Codex) Prepend(other Parser) {
 		}
 	}
 	if len(add) == 0 {
+		c.keepOfEntries()
 		return
 	}
 	c.rev++
@@ -341,6 +346,30 @@ func (c *Codex) Prepend(other Parser) {
 		e.Rev = c.rev
 	}
 	c.entries = append(append([]*Entry(nil), add...), c.entries...)
+	c.keepOfEntries()
+}
+
+// keepOfEntries: of plans and questions, those of the entries kept (a
+// part put before may have been cut to the room left).
+func (c *Codex) keepOfEntries() {
+	in := make(map[*Entry]bool, len(c.entries))
+	for _, e := range c.entries {
+		in[e] = true
+	}
+	plans := c.plans[:0]
+	for _, p := range c.plans {
+		if in[p.e] {
+			plans = append(plans, p)
+		}
+	}
+	c.plans = plans
+	asked := c.asked[:0]
+	for _, t := range c.asked {
+		if in[t.at] {
+			asked = append(asked, t)
+		}
+	}
+	c.asked = asked
 }
 
 func firstNonEmpty(a, b string) string {
@@ -561,8 +590,10 @@ func (c *Codex) event(r *codexRow, p *codexPayload) {
 		case "ImageView":
 			c.done(r, it.ID, &Tool{Name: "Read", Detail: clip(strings.TrimPrefix(it.Path, "file://"), maxDetail)}, "", false)
 		case "McpToolCall":
-			text, failed := mcpResult(it.Result)
-			c.done(r, it.ID, codexMCP(it.Server, it.Tool, it.Arguments), text, failed || it.Status == "failed")
+			text, failed, pics := mcpResult(it.Result)
+			t := codexMCP(it.Server, it.Tool, it.Arguments)
+			t.Images = pics
+			c.done(r, it.ID, t, text, failed || it.Status == "failed")
 		case "ContextCompaction":
 			c.add(r, it.ID, RoleNote, []Part{{Kind: KindEvent, Event: &Event{Kind: EventCompact}}})
 		case "UserMessage":
@@ -601,8 +632,10 @@ func (c *Codex) event(r *codexRow, p *codexPayload) {
 		c.done(r, p.CallID, &Tool{Name: "Read", Detail: clip(strings.TrimPrefix(p.Path, "file://"), maxDetail)}, "", false)
 	case "mcp_tool_call_end":
 		if p.Invocation != nil {
-			text, failed := mcpResult(p.Result)
-			c.done(r, p.CallID, codexMCP(p.Invocation.Server, p.Invocation.Tool, p.Invocation.Arguments), text, failed)
+			text, failed, pics := mcpResult(p.Result)
+			t := codexMCP(p.Invocation.Server, p.Invocation.Tool, p.Invocation.Arguments)
+			t.Images = pics
+			c.done(r, p.CallID, t, text, failed)
 		}
 	case "thread_goal_updated":
 		if p.Goal != nil && strings.TrimSpace(p.Goal.Objective) != "" {
@@ -656,6 +689,9 @@ func (c *Codex) done(r *codexRow, id string, t *Tool, text string, failed bool) 
 		if text != "" && ts[0].Result == "" {
 			ts[0].setResult(clean(text))
 			ts[0].ResultLines = lineCount(text)
+		}
+		if ts[0].Images == 0 {
+			ts[0].Images = t.Images
 		}
 		c.touch(ts)
 		return
@@ -929,6 +965,10 @@ func (c *Codex) item(r *codexRow, p *codexPayload) {
 			if t.fromCall && c.itemCmds {
 				continue // (each of its things is told of on its own)
 			}
+			if len(parts) >= maxParts {
+				parts[len(parts)-1].Tool.MoreFiles++ // (of what one call did, as many lines as an entry holds)
+				continue
+			}
 			parts = append(parts, Part{Kind: KindTool, Tool: t})
 		}
 		if len(parts) == 0 {
@@ -952,7 +992,9 @@ func (c *Codex) item(r *codexRow, p *codexPayload) {
 		for _, t := range kept {
 			if strings.HasPrefix(t.Name, "request_user_input") {
 				if len(c.asked) >= maxAsked {
-					c.asked = append([]*Tool(nil), c.asked[1:]...) // (the oldest goes: the latest is to be answered)
+					c.asked[0].Done = true // (the oldest goes, as over: the latest is to be answered)
+					c.touch(c.asked[:1])
+					c.asked = append([]*Tool(nil), c.asked[1:]...)
 				}
 				c.asked = append(c.asked, t)
 			}
@@ -1180,7 +1222,7 @@ func scriptTool(name, src string) *Tool {
 // its "(" to the one that closes it, strings and comments passed over;
 // "" where there is none.
 func callArgs(src, call string) string {
-	i := strings.Index(src, call)
+	i := codeIndex(src, call)
 	if i < 0 {
 		return ""
 	}
@@ -1211,6 +1253,32 @@ func callArgs(src, call string) string {
 		}
 	}
 	return ""
+}
+
+// codeIndex: where s first is in a script's code (not in a string or a
+// comment of it); -1 where it is not.
+func codeIndex(src, s string) int {
+	quote := byte(0)
+	for j := 0; j < len(src); j++ {
+		ch := src[j]
+		switch {
+		case quote != 0:
+			if ch == '\\' {
+				j++
+			} else if ch == quote {
+				quote = 0
+			}
+		case ch == '"' || ch == '\'' || ch == '`':
+			quote = ch
+		case ch == '/' && j+1 < len(src) && src[j+1] == '/':
+			for j < len(src) && src[j] != '\n' {
+				j++
+			}
+		case strings.HasPrefix(src[j:], s):
+			return j
+		}
+	}
+	return -1
 }
 
 // scriptQuery: a search's words in a call's arguments ({q: "…"}).
@@ -1376,13 +1444,17 @@ func mergeCall(ct *Tool, calls []*Tool) *Entry {
 		if l.Result == "" && call.Result != "" {
 			l.Result, l.ResultLines, l.Truncated, l.ResultTail, l.Omitted = call.Result, call.ResultLines, call.Truncated, call.ResultTail, call.Omitted
 		}
+		if l.Images == 0 {
+			l.Images = call.Images
+		}
+		l.Error = l.Error || call.Error
 		if l.Stdin == nil {
 			l.Stdin = call.Stdin
 		}
 	}
 	for _, x := range calls {
 		if !used[x] && len(e.Parts) < maxParts {
-			x.at, x.Done = e, x.Done || ct.Done
+			x.at, x.Done, x.Error = e, x.Done || ct.Done, x.Error || ct.Error
 			e.Parts = append(e.Parts, Part{Kind: KindTool, Tool: x})
 		}
 	}

@@ -320,8 +320,8 @@ func codexResult(raw json.RawMessage) (text string, failed bool, images int) {
 		if json.Unmarshal([]byte(t), &w) == nil && w["content"] != nil && len(w) <= 3 && (len(w) == 1 || w["isError"] != nil || w["structuredContent"] != nil) {
 			var blocks []json.RawMessage
 			if json.Unmarshal(w["content"], &blocks) == nil {
-				text, failed := mcpResult(json.RawMessage(t))
-				return text, failed, images
+				text, failed, pics := mcpResult(json.RawMessage(t))
+				return text, failed, images + pics
 			}
 		}
 	}
@@ -354,9 +354,10 @@ func codexResult(raw json.RawMessage) (text string, failed bool, images int) {
 // cmdHead: the head Codex puts on what a command printed.
 var cmdHead = regexp.MustCompile(`^(?:Chunk ID: \S+\n)?Wall time: [^\n]*\n(?:Process exited with code (\d+)\n)?(?:Process running with session ID \S+\n)?(?:Original token count: \d+\n)?Output:\n`)
 
-// mcpResult: what an MCP server's tool gave back (its content's words),
-// as Codex keeps it: {content, isError}, or (older) {Ok: …} / {Err: …}.
-func mcpResult(raw json.RawMessage) (string, bool) {
+// mcpResult: what an MCP server's tool gave back (its content's words, its
+// pictures counted), as Codex keeps it: {content, isError}, or (older)
+// {Ok: …} / {Err: …}.
+func mcpResult(raw json.RawMessage) (string, bool, int) {
 	var r struct {
 		Ok      json.RawMessage `json:"Ok"`
 		Err     json.RawMessage `json:"Err"`
@@ -367,25 +368,28 @@ func mcpResult(raw json.RawMessage) (string, bool) {
 		IsError bool `json:"isError"`
 	}
 	if json.Unmarshal(raw, &r) != nil {
-		return "", false
+		return "", false, 0
 	}
 	if r.Err != nil {
 		var s string
 		if json.Unmarshal(r.Err, &s) == nil {
-			return s, true
+			return s, true, 0
 		}
-		return string(r.Err), true
+		return string(r.Err), true, 0
 	}
 	if r.Ok != nil {
 		return mcpResult(r.Ok)
 	}
 	var parts []string
+	images := 0
 	for _, c := range r.Content {
-		if c.Text != "" {
+		if strings.Contains(c.Type, "image") {
+			images++
+		} else if c.Text != "" {
 			parts = append(parts, c.Text)
 		}
 	}
-	return strings.Join(parts, "\n"), r.IsError
+	return strings.Join(parts, "\n"), r.IsError, images
 }
 
 // codexChange is a file a change made, as Codex tells of it (FileChange,

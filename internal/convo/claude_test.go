@@ -1542,3 +1542,34 @@ func TestTaskEnded(t *testing.T) {
 		t.Errorf("another wording taken: %+v", ev)
 	}
 }
+
+// review447: a notice only as itself (not the person's words quoting one);
+// the exit code in Claude Code's other forms; a wording not known, none.
+func TestTaskEndedWordings(t *testing.T) {
+	n := func(s string) string {
+		return "<task-notification>\n<task-id>b1</task-id>\n<summary>" + s + "</summary>\n</task-notification>"
+	}
+	if ev := taskEnded(`Please render this XML: <summary>Agent "example" finished</summary>`); ev != nil {
+		t.Errorf("the person's words taken for a notice: %+v", ev)
+	}
+	for _, c := range []struct {
+		s, status string
+		code      int
+	}{
+		{`Background command "build" failed with exit code 2`, "failed", 2},
+		{`Background command "build" completed (exit code 1: General error)`, "failed", 1},
+		{`Agent "worker" was stopped: waiting for permission`, "stopped", -1},
+		{`Background command "build" has not completed yet`, "", -1},
+	} {
+		ev := taskEnded(n(c.s))
+		if c.status == "" {
+			if ev != nil {
+				t.Errorf("%q taken: %+v", c.s, ev)
+			}
+			continue
+		}
+		if ev == nil || ev.Status != c.status || (c.code >= 0) != (ev.Code != nil) || (ev.Code != nil && *ev.Code != c.code) {
+			t.Errorf("%q: %+v", c.s, ev)
+		}
+	}
+}

@@ -422,3 +422,79 @@ func TestCodexHiddenAcrossParts(t *testing.T) {
 		t.Error("what came back of a hidden call is kept")
 	}
 }
+
+// review447: what review 447 found, each as it would happen.
+func TestCodexFnReview447(t *testing.T) {
+	// 1. A call written in a string is no call.
+	script := "await tools.write_stdin({session_id:1, chars:'tools.web__run({search_query:[{q:\"PRIVATE\"}]})'});\nawait tools.web__run({search_query:[{q:\"public\"}]});"
+	c := feedAll(codexLine(t, "response_item", map[string]any{"type": "custom_tool_call", "name": "exec", "call_id": "s1", "input": script}))
+	if b, _ := json.Marshal(c.Since(0)); strings.Contains(string(b), "PRIVATE") {
+		t.Errorf("1: %s", b)
+	}
+	// 2. Parted: the call's picture and failure kept on the telling's line;
+	// a file the telling did not name shares its failing.
+	later := feedAll(fnDone(t, map[string]any{"type": "ImageView", "id": "v1", "path": "/w/a.png"}))
+	later.Prepend(feedAll(fnCall(t, "v1", "view_image", map[string]any{"path": "/w/a.png"}), fnOut(t, "v1", []any{map[string]any{"type": "input_image", "image_url": "data:,"}})))
+	if ts := toolsOf(later); len(ts) != 1 || ts[0].Images != 1 {
+		t.Errorf("2: %+v", ts)
+	}
+	patch := "apply_patch <<'P'\n*** Begin Patch\n*** Update File: a.py\n@@\n-a\n+b\n*** Update File: b.py\n@@\n-c\n+d\n*** End Patch\nP"
+	later = feedAll(fnDone(t, map[string]any{"type": "FileChange", "id": "p1", "status": "failed", "changes": map[string]any{"/w/a.py": map[string]any{"type": "update", "unified_diff": "@@ -1 +1 @@\n-a\n+b\n"}}}))
+	later.Prepend(feedAll(fnCall(t, "p1", "exec_command", map[string]any{"cmd": patch})))
+	for _, x := range toolsOf(later) {
+		if !x.Error {
+			t.Errorf("2: a file of a failed change not failed: %+v", x)
+		}
+	}
+	// 3. A plan of a part put before that is left out (no room): no list.
+	var rows []string
+	for i := 0; i < maxEntries; i++ {
+		rows = append(rows, fnUser(t, fmt.Sprintf("u%d", i), "m"))
+	}
+	later = feedAll(rows...)
+	later.Prepend(feedAll(fnCall(t, "p", "update_plan", map[string]any{"plan": []any{map[string]any{"step": "x", "status": "pending"}}}), fnOut(t, "p", "ok")))
+	if ts := later.Tasks(); ts != nil {
+		t.Errorf("3: %+v", ts)
+	}
+	// 4. A script hidden as the parts are put together: what comes back of
+	// it after is let be.
+	later = feedAll(fnDone(t, map[string]any{"type": "CommandExecution", "id": "exec-1", "command": []string{"ls"}, "status": "completed", "aggregated_output": "", "exit_code": 0}))
+	later.Prepend(feedAll(codexLine(t, "response_item", map[string]any{"type": "custom_tool_call", "name": "exec", "call_id": "s9", "input": "await tools.exec_command({cmd:\"ls\"});"})))
+	later.Feed([]byte(fnOut(t, "s9", "Script completed\nWall time 0 seconds\nOutput:\n")))
+	if _, kept := later.orphans["s9"]; kept {
+		t.Error("4: what came back of a call hidden as the parts were put together is kept")
+	}
+	// 5. A script of many patches: no more lines than an entry holds, each
+	// of them in it.
+	var b strings.Builder
+	for p := 0; p < 4; p++ {
+		b.WriteString("await tools.apply_patch(\"*** Begin Patch\\n")
+		for i := 0; i < 20; i++ {
+			fmt.Fprintf(&b, "*** Add File: p%d_%d.py\\n+x\\n", p, i)
+		}
+		b.WriteString("*** End Patch\");\n")
+	}
+	c = feedAll(codexLine(t, "response_item", map[string]any{"type": "custom_tool_call", "name": "exec", "call_id": "s2", "input": b.String()}))
+	ts := toolsOf(c)
+	if len(ts) > maxParts || len(c.tools["s2"]) != len(ts) {
+		t.Errorf("5: %d lines, %d of the call", len(ts), len(c.tools["s2"]))
+	}
+	for _, x := range c.tools["s2"] {
+		if x.at == nil {
+			t.Error("5: a line of the call in no entry")
+			break
+		}
+	}
+	// 7. An MCP tool's picture counted.
+	if _, _, images := codexResult(json.RawMessage(`"{\"content\":[{\"type\":\"image\",\"data\":\"AA==\"}],\"isError\":false}"`)); images != 1 {
+		t.Errorf("7: %d pictures", images)
+	}
+	// 8. The oldest question let go of is over.
+	rows = nil
+	for i := 0; i < maxAsked+1; i++ {
+		rows = append(rows, fnCall(t, fmt.Sprintf("q%d", i), "request_user_input_async", map[string]any{"questions": []any{map[string]any{"title": "q"}}}), fnOut(t, fmt.Sprintf("q%d", i), `{"accepted":true}`))
+	}
+	if ts := toolsOf(feedAll(append(rows, fnUser(t, "u", "答"))...)); !ts[0].Done {
+		t.Error("8: the oldest question left waiting")
+	}
+}

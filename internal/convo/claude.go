@@ -2285,7 +2285,12 @@ func classifyUserText(s string) (role, text string) {
 // description, else the command itself), how it ended. nil, another
 // wording (said as a note, as it is).
 func taskEnded(s string) *Event {
-	sm := taskSummary.FindStringSubmatch(s)
+	// (Only a notice itself, whole: not the person's words that quote one.)
+	t := strings.TrimSpace(s)
+	if !strings.HasPrefix(t, "<task-notification>") || !strings.HasSuffix(t, "</task-notification>") {
+		return nil
+	}
+	sm := taskSummary.FindStringSubmatch(t)
 	if sm == nil {
 		return nil
 	}
@@ -2294,20 +2299,20 @@ func taskEnded(s string) *Event {
 		return nil
 	}
 	ev := &Event{Kind: EventTask, Task: map[string]string{"Background command": "cmd", "Agent": "agent", "Monitor": "monitor"}[m[1]]}
-	ev.Text, ev.Cut = cut(clean(m[2]), maxDetail)
 	how := m[3]
 	switch {
-	case strings.Contains(how, "fail"):
-		ev.Status = "failed"
-	case strings.Contains(how, "waiting"):
-		ev.Status = "waiting"
-	case strings.Contains(how, "stopped") || strings.Contains(how, "killed"):
-		ev.Status = "stopped"
-	case strings.Contains(how, "completed") || strings.Contains(how, "finished"):
+	case taskDone.MatchString(how):
 		ev.Status = "done"
+	case taskFailed.MatchString(how):
+		ev.Status = "failed"
+	case taskWaiting.MatchString(how):
+		ev.Status = "waiting"
+	case taskStopped.MatchString(how):
+		ev.Status = "stopped"
 	default:
-		return nil
+		return nil // (another wording: said as it is)
 	}
+	ev.Text, ev.Cut = cut(clean(m[2]), maxDetail)
 	if cm := taskCode.FindStringSubmatch(how); cm != nil {
 		if n, err := strconv.Atoi(cm[1]); err == nil {
 			ev.Code = &n
@@ -2319,9 +2324,15 @@ func taskEnded(s string) *Event {
 	return ev
 }
 
+// How Claude Code words a background task's end (2.1.31x): each wording
+// whole, its exit code in one of its forms.
 var (
-	taskSaid = regexp.MustCompile(`(?s)^(Background command|Agent|Monitor) "(.*)" ([^"]*)$`)
-	taskCode = regexp.MustCompile(`\(exit(?: code)? (-?\d{1,4})\)`)
+	taskSaid    = regexp.MustCompile(`(?s)^(Background command|Agent|Monitor) "(.*)" ([^"]*)$`)
+	taskDone    = regexp.MustCompile(`^(?:completed|finished)(?: \(exit code -?\d{1,4}(?:: [^)]*)?\))?$`)
+	taskFailed  = regexp.MustCompile(`^(?:failed|script failed)(?: with exit code -?\d{1,4}| \(exit(?: code)? -?\d{1,4}(?:: [^)]*)?\))?$`)
+	taskWaiting = regexp.MustCompile(`^is waiting on its own background work$`)
+	taskStopped = regexp.MustCompile(`^was (?:stopped|killed)(?:: .*)?$`)
+	taskCode    = regexp.MustCompile(`exit(?: code)? (-?\d{1,4})`)
 )
 
 // unpasted is the text with what Claude Code wraps a paste in taken off

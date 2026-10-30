@@ -2623,24 +2623,27 @@ function EventNote({ ev, idle }: { ev: ConvoEvent; idle?: boolean }) {
   // name's first line; all of it (a command of many lines) behind a tap.
   if (ev.kind === 'task') {
     const name = ev.text ?? ''
-    const line = firstLine(name)
-    const short = line.length > 80 ? line.slice(0, 80) + '…' : line
-    const more = name !== short
     const head = t(`convo.task.${ev.task ?? 'cmd'}.${ev.status ?? 'done'}` as I18nKey) + (ev.code ? t('convo.task.code', { n: ev.code }) : '')
+    // (One line, its name's first line cut where the line ends: the line
+    // itself opens all of it, however much was cut.)
     return (
       <div className={'convo-event is-task' + (ev.status === 'failed' ? ' is-warn' : '')}>
-        <div className="convo-trouble-body">
-          <p className="convo-trouble-head">
-            {head}
-            {short && <span className="convo-task-name">{short}</span>}
+        {name ? (
+          <button type="button" className="convo-task-line" aria-expanded={open} onClick={() => setOpen(!open)} title={name.length > 400 ? name.slice(0, 400) + '…' : name}>
+            <span className="convo-task-head">{head}</span>
+            <span className="convo-task-name">{firstLine(name)}</span>
+          </button>
+        ) : (
+          <p className="convo-task-line">
+            <span className="convo-task-head">{head}</span>
           </p>
-          {more && open && <pre className="convo-pre convo-task-full">{name}</pre>}
-          {more && (
-            <button type="button" className="link-btn" aria-expanded={open} onClick={() => setOpen(!open)}>
-              {t(open ? 'convo.trouble.less' : 'convo.task.all')}
-            </button>
-          )}
-        </div>
+        )}
+        {name && open && (
+          <pre className="convo-pre convo-task-full">
+            {name}
+            {ev.cut && '\n' + t('convo.task.cut')}
+          </pre>
+        )}
       </div>
     )
   }
@@ -3246,7 +3249,12 @@ function ToolRow({ tool, onCopy, live }: { tool: ConvoTool; onCopy: (s: string) 
               {tool.asks.map((a, i) => (
                 <div key={i}>
                   <dt>{a.question}</dt>
-                  {a.options.length > 0 && <dd>{a.options.map((o) => o.label).join(' / ')}</dd>}
+                  {a.options.map((o, j) => (
+                    <dd key={j}>
+                      {o.label}
+                      {o.description && <span className="convo-ask-desc"> — {o.description}</span>}
+                    </dd>
+                  ))}
                 </div>
               ))}
             </dl>
