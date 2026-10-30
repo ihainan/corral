@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 // Codex's function calls (plans/5a-codex-parse.md): the tools of Codex's
@@ -88,7 +89,7 @@ func codexFn(ns, name, args string) (tools []*Tool, tasks []Task) {
 		}
 		return []*Tool{{Name: "TodoWrite"}}, tasks
 	case "request_user_input", "request_user_input_async":
-		t := &Tool{Name: "request_user_input", Asks: codexAsks(a["questions"])}
+		t := &Tool{Name: "request_user_input", Asks: codexAsks(a["questions"]), waits: name == "request_user_input_async"}
 		if len(t.Asks) > 0 {
 			t.Title = clip(firstLineOf(t.Asks[0].Question), maxTitle)
 		}
@@ -451,11 +452,13 @@ func codexTitle(text string) string {
 		}
 	}
 	line = strings.Join(strings.Fields(line), " ")
-	line = secretShaped.ReplaceAllStringFunc(line, func(s string) string {
-		if len(s) <= 8 {
-			return s
+	cut := func(s string) string { return s[:7] + "…" }
+	line = secretKey.ReplaceAllStringFunc(line, cut)
+	line = secretRun.ReplaceAllStringFunc(line, func(s string) string {
+		if strings.ContainsAny(s, "0123456789") && strings.IndexFunc(s, unicode.IsLetter) >= 0 {
+			return cut(s)
 		}
-		return s[:min(len(s), 7)] + "…"
+		return s // (a long name, of letters and _ only: no key)
 	})
 	if r := []rune(line); len(r) > codexTitleLen {
 		line = strings.TrimSpace(string(r[:codexTitleLen])) + "…"
@@ -465,6 +468,10 @@ func codexTitle(text string) string {
 
 const codexTitleLen = 40
 
-// secretShaped: what looks like a secret by its shape — a known key's
-// prefix and what follows it, or a long run of key characters.
-var secretShaped = regexp.MustCompile(`\b(?:sk|pk|rk|ak)-[A-Za-z0-9_-]{8,}|\b(?:ghp|gho|ghu|ghs|github_pat|xox[abprs]|glpat|AKIA|AIza)[A-Za-z0-9_-]{8,}|[A-Za-z0-9_+/=-]{32,}`)
+// secretKey: a known key's prefix and what follows it; secretRun: a long
+// run of key characters (of letters and digits both, a key's; a path's
+// parts apart).
+var (
+	secretKey = regexp.MustCompile(`\b(?:sk|pk|rk|ak)-[A-Za-z0-9_-]{8,}|\b(?:ghp|gho|ghu|ghs|github_pat|xox[abprs]|glpat|AKIA|ASIA|LTAI|AIza)[A-Za-z0-9_-]{8,}`)
+	secretRun = regexp.MustCompile(`[A-Za-z0-9_+=-]{32,}`)
+)

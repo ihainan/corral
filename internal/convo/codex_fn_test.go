@@ -675,9 +675,15 @@ func TestCodexFnReview451(t *testing.T) {
 func TestCodexTitle(t *testing.T) {
 	for in, want := range map[string]string{
 		"测试一下这个 OpenAI 官方 API Key 是否可用：sk-proj-EXAMPLEonlyNOTaREALkey0000000000000000000000000000000000": "测试一下这个 OpenAI 官方 API Key 是否可用：sk-proj…",
-		"\n\n  修好登录\n然后跑测试": "修好登录",
+		"\n\n  修好登录\n然后跑测试":                                     "修好登录",
 		"token ghp_abcdefghijklmnopqrstuvwxyz0123456789 please": "token ghp_abc… please",
 		"一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十多出来的": "一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十…",
+		// (review454: keys of AWS's for a while and of Aliyun's; a long name, a path: kept.)
+		"check ASIA1234567890ABCDEF now":                "check ASIA123… now",
+		"key LTAI5tAbCdEfGhIjKlMnOpQrSt here":           "key LTAI5tA… here",
+		"fix request_user_input_async_handler now":      "fix request_user_input_async_handler now",
+		"open /home/ihainan/shared/Projects/AI":         "open /home/ihainan/shared/Projects/AI",
+		"token Zx9QwErTyUiOpAsDfGhJkLzXcVbNm1234567 ok": "token Zx9QwEr… ok",
 	} {
 		if got := codexTitle(in); got != want {
 			t.Errorf("%q: %q, want %q", in, got, want)
@@ -716,5 +722,22 @@ func TestCodexFnReview452(t *testing.T) {
 	c = feedAll(fnCall(t, "p1", "update_plan", map[string]any{"plan": []any{map[string]any{"step": "x", "status": "pending"}}}), fnOut(t, "p1", "Plan updated"), fnCall(t, "p2", "update_plan", map[string]any{"plan": "bad"}), fnOut(t, "p2", "Error parsing function call: plan"))
 	if ts := c.Tasks(); len(ts) != 1 {
 		t.Errorf("5: %+v", ts)
+	}
+}
+
+// review454: a question put by the _async call waits for the person's
+// next message whatever its result says (a script's, empty); one put by the
+// other is answered by its result, whatever it says ("accepted" among it).
+func TestCodexFnReview454(t *testing.T) {
+	ts := toolsOf(feedAll(
+		codexLine(t, "response_item", map[string]any{"type": "custom_tool_call", "name": "exec", "call_id": "s", "input": `await tools.request_user_input_async({questions:[{title:"继续吗？"}]});`}),
+		codexLine(t, "response_item", map[string]any{"type": "custom_tool_call_output", "call_id": "s", "output": []any{map[string]any{"type": "input_text", "text": "Script completed\nWall time 0 seconds\nOutput:\n"}}}),
+	))
+	if len(ts) != 1 || ts[0].Name != "request_user_input" || ts[0].Done {
+		t.Errorf("1: %+v", ts)
+	}
+	ts = toolsOf(feedAll(fnCall(t, "q", "request_user_input", map[string]any{"questions": []any{map[string]any{"title": "?"}}}), fnOut(t, "q", `{"answers":{"q":{"answers":["accepted"]}}}`)))
+	if !ts[0].Done {
+		t.Error("2: answered \"accepted\", not done")
 	}
 }

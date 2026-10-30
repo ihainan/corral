@@ -302,6 +302,9 @@ type Tool struct {
 	fromCall bool
 	// at: (Codex) the entry the line is in, whose Rev changes with it.
 	at *Entry
+	// waits: (Codex) a question put to the person by its _async call,
+	// whose result is its being taken: their next message answers it.
+	waits bool
 }
 
 // Stdin is what was put to a command still running (see Tool.Stdin).

@@ -1057,8 +1057,9 @@ func (c *Codex) touch(ts []*Tool) {
 
 // answer: what came back of a call, on its first tool (a call's tools are
 // its file edits, or its one command): the rest only done. A question put
-// to the person is not answered by its being taken ({"accepted": true}):
-// their next message answers it. A plan that failed is no list.
+// by the _async call is not answered by its being taken (its result,
+// whatever it says): their next message answers it; one put by the other,
+// by its result. A plan that failed is no list.
 func (c *Codex) answer(ts []*Tool, out codexOut) {
 	at := 0 // (its command's, if it ran one; else its first file's)
 	for i, t := range ts {
@@ -1069,7 +1070,7 @@ func (c *Codex) answer(ts []*Tool, out codexOut) {
 	}
 	failed := out.failed || codexExit.MatchString(out.text)
 	for i, t := range ts {
-		if strings.HasPrefix(t.Name, "request_user_input") && !failed && strings.Contains(out.text, `"accepted"`) {
+		if t.waits && !failed {
 			continue // (taken, not answered: their next message answers it)
 		}
 		t.Done = true
@@ -1212,7 +1213,7 @@ func codexTools(name, src string) []*Tool {
 	}
 	// (It asks the person, last: what it waits on.)
 	if asks {
-		out = append(out, &Tool{Name: "request_user_input"})
+		out = append(out, &Tool{Name: "request_user_input", waits: scriptCalls(code, "request_user_input_async")})
 	}
 	if len(out) > 0 {
 		return out
