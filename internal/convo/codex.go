@@ -684,13 +684,16 @@ func codexMCP(server, tool string, args json.RawMessage) *Tool {
 }
 
 // done: a thing Codex did, told of when done: on the line of its call (of
-// the same id), else one of its own (once: told again, the same line).
+// the same id), else one of its own (once: told again, the same line). A
+// question its call put that waits stays open: the person answers it.
 func (c *Codex) done(r *codexRow, id string, t *Tool, text string, failed bool) {
 	id = clip(id, maxID)
 	if ts, ok := c.tools[id]; ok && len(ts) > 0 {
 		for _, x := range ts {
-			x.Done = true
-			x.Error = x.Error || failed
+			if !x.waits {
+				x.Done = true
+				x.Error = x.Error || failed
+			}
 		}
 		if text != "" && ts[0].Result == "" {
 			ts[0].setResult(clean(text))
@@ -1619,7 +1622,7 @@ func mergeCall(ct *Tool, calls []*Tool) *Entry {
 	}
 	for _, x := range calls {
 		if !used[x] && len(e.Parts) < maxParts {
-			x.at, x.Done, x.Error = e, x.Done || ct.Done, x.Error || ct.Error
+			x.at, x.Done, x.Error = e, x.Done || ct.Done && !x.waits, x.Error || ct.Error && !x.waits
 			e.Parts = append(e.Parts, Part{Kind: KindTool, Tool: x})
 		}
 	}

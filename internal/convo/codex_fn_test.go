@@ -684,6 +684,11 @@ func TestCodexTitle(t *testing.T) {
 		"fix request_user_input_async_handler now":      "fix request_user_input_async_handler now",
 		"open /home/ihainan/shared/Projects/AI":         "open /home/ihainan/shared/Projects/AI",
 		"token Zx9QwErTyUiOpAsDfGhJkLzXcVbNm1234567 ok": "token Zx9QwEr… ok",
+		// (review455: an AWS secret, slashes in it; a capitalised word after ASIA; a long name with a digit; a path.)
+		"aws wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY": "aws wJalrXU…",
+		"see ASIARegionMapping":                        "see ASIARegionMapping",
+		"fix request_user_input_async_handler2":        "fix request_user_input_async_handler2",
+		"ls /tmp/build20261030_abcdefghijklmnopq":      "ls /tmp/build20261030_abcdefghijklmnopq",
 	} {
 		if got := codexTitle(in); got != want {
 			t.Errorf("%q: %q, want %q", in, got, want)
@@ -739,5 +744,21 @@ func TestCodexFnReview454(t *testing.T) {
 	ts = toolsOf(feedAll(fnCall(t, "q", "request_user_input", map[string]any{"questions": []any{map[string]any{"title": "?"}}}), fnOut(t, "q", `{"answers":{"q":{"answers":["accepted"]}}}`)))
 	if !ts[0].Done {
 		t.Error("2: answered \"accepted\", not done")
+	}
+}
+
+// review455: a question a script puts that waits stays open when a thing
+// of the same id as the script is told of as done (on its line, or another
+// line added to it).
+func TestCodexFnReview455(t *testing.T) {
+	ts := toolsOf(feedAll(
+		codexLine(t, "response_item", map[string]any{"type": "custom_tool_call", "name": "exec", "call_id": "s", "input": `await tools.view_image({path:"/w/a.png"}); await tools.request_user_input_async({questions:[{title:"继续吗？"}]});`}),
+		fnDone(t, map[string]any{"type": "ImageView", "id": "s", "path": "/w/a.png"}),
+		codexLine(t, "response_item", map[string]any{"type": "custom_tool_call_output", "call_id": "s", "output": []any{map[string]any{"type": "input_text", "text": "Script completed\nWall time 0 seconds\nOutput:\n"}}}),
+	))
+	for _, x := range ts {
+		if x.Name == "request_user_input" && x.Done {
+			t.Errorf("answered by a picture looked at: %+v", ts)
+		}
 	}
 }

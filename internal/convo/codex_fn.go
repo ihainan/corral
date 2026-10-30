@@ -7,7 +7,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"unicode"
 )
 
 // Codex's function calls (plans/5a-codex-parse.md): the tools of Codex's
@@ -455,10 +454,10 @@ func codexTitle(text string) string {
 	cut := func(s string) string { return s[:7] + "…" }
 	line = secretKey.ReplaceAllStringFunc(line, cut)
 	line = secretRun.ReplaceAllStringFunc(line, func(s string) string {
-		if strings.ContainsAny(s, "0123456789") && strings.IndexFunc(s, unicode.IsLetter) >= 0 {
+		if keyLike(s) {
 			return cut(s)
 		}
-		return s // (a long name, of letters and _ only: no key)
+		return s
 	})
 	if r := []rune(line); len(r) > codexTitleLen {
 		line = strings.TrimSpace(string(r[:codexTitleLen])) + "…"
@@ -468,10 +467,34 @@ func codexTitle(text string) string {
 
 const codexTitleLen = 40
 
-// secretKey: a known key's prefix and what follows it; secretRun: a long
-// run of key characters (of letters and digits both, a key's; a path's
-// parts apart).
+// secretKey: a known key's prefix and what follows it (an AWS key id's,
+// 16 capitals and digits); secretRun: a long run of key characters, a
+// key's by keyLike.
 var (
-	secretKey = regexp.MustCompile(`\b(?:sk|pk|rk|ak)-[A-Za-z0-9_-]{8,}|\b(?:ghp|gho|ghu|ghs|github_pat|xox[abprs]|glpat|AKIA|ASIA|LTAI|AIza)[A-Za-z0-9_-]{8,}`)
-	secretRun = regexp.MustCompile(`[A-Za-z0-9_+=-]{32,}`)
+	secretKey = regexp.MustCompile(`\b(?:sk|pk|rk|ak)-[A-Za-z0-9_-]{8,}|\b(?:ghp|gho|ghu|ghs|github_pat|xox[abprs]|glpat|AIza)[A-Za-z0-9_-]{8,}|\b(?:AKIA|ASIA)[A-Z0-9]{16}\b|\bLTAI[A-Za-z0-9]{12,}`)
+	secretRun = regexp.MustCompile(`[A-Za-z0-9_+/=-]{32,}`)
 )
+
+// keyLike: a long run of key characters is a key's (random: capitals,
+// small letters and digits all; or hex, a digest's or a token's), not a
+// path's (from its root: "/…") nor a name's (words and digits, no capital).
+func keyLike(s string) bool {
+	if s[0] == '/' {
+		return false
+	}
+	var up, low, digit, hex = false, false, false, true
+	for _, r := range s {
+		switch {
+		case r >= 'A' && r <= 'Z':
+			up = true
+		case r >= 'a' && r <= 'z':
+			low = true
+		case r >= '0' && r <= '9':
+			digit = true
+		}
+		if !(r >= '0' && r <= '9' || r >= 'a' && r <= 'f' || r == '-') {
+			hex = false
+		}
+	}
+	return up && low && digit || hex && digit && low
+}
