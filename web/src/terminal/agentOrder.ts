@@ -11,12 +11,20 @@ export interface ConvoListRow {
   program?: string // the program in it, for its icon
   status: 'working' | 'blocked' | 'done' | 'idle' | 'unknown'
   bg?: 'running' | 'stale' // (its turn over, subagents still out)
+  cmds?: RowCmds // (its turn over: commands it left running in the background)
   since?: number // (unix ms) when its status last changed
   current: boolean
   placeAs?: { status: ConvoListRow['status']; since?: number } // (the one shown: where it is placed meanwhile, see asHeld)
   pinned?: number // pinned at the top: its place among the pinned (the order they were pinned)
   onPick: () => void
   menu?: () => (MenuItem | null)[] // what else is done with it, from its row's menu (the side list's)
+}
+
+// Commands an agent left running in the background: how many, the first of
+// them (what each runs, when it began, unix ms).
+export interface RowCmds {
+  n: number
+  list: { title?: string; since?: number }[]
 }
 
 // What is for the person to do: one waiting for an answer, one done and not

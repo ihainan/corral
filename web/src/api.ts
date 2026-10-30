@@ -303,6 +303,9 @@ export interface HerdrAgent {
   bg?: 'checking' | 'none' | 'running' | 'unknown'
   bg_n?: number
   bg_since?: number
+  // Commands it left running in the background (done or idle): how many, the first listed.
+  bg_cmds?: number
+  bg_cmd_list?: { task: string; title?: string; since?: number }[]
 }
 
 export interface HerdrWorkspace {

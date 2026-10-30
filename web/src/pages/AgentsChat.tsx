@@ -16,9 +16,10 @@ import { useCompletion } from '../terminal/Completion'
 import { convoTarget, herdrTarget, InlineReply } from '../terminal/ReplyDialog'
 import { SessionOpDialog, type SessionOp } from '../terminal/sessionOps'
 import { NEW_AGENT, NewAgentDialog } from '../terminal/newAgent'
-import { ConversationView, ListSearch, SEARCH_FROM, when, type ConvoAgent, type ConvoListRow, type ConvoPending, type ModelOpt } from '../terminal/Conversation'
+import { BgCmds, ConversationView, ListSearch, SEARCH_FROM, when, type ConvoAgent, type ConvoListRow, type ConvoPending, type ModelOpt } from '../terminal/Conversation'
 import { answerable, asking, useConversation, type ConvoEntry } from '../terminal/conversation'
 import { ackBg, waitingTitle, isCodex, isOpenCode, listAgents, matchQuery, paneTitle, readsLog, useRunningSessions, type AgentRow } from '../terminal/agents'
+import type { RowCmds } from '../terminal/agentOrder'
 import { prefetchConversation } from '../terminal/conversation'
 import { afterSend, holdsWords, holdTermMode, PENDING_MS, sameRun, sameTurn, tmuxKey } from '../terminal/chatSend'
 import { agentKey, sessionWhich } from '../terminal/sessionName'
@@ -118,6 +119,15 @@ const labelOf = (e: Entry, said: string, hosts: number): { title: string; where:
   if (!r || !ws) return { title: said, where: whereOf(e, hosts) }
   const host = hosts > 1 ? e.s.host_name : ''
   return { title: ws, where: [host, said !== ws ? said : '', agentMark(r.a.agent) ? '' : r.a.agent].filter(Boolean).join(' · ') }
+}
+
+// Commands its agent left running in the background, as its row says them:
+// only while its turn is over (done or idle, as herdr says it: then nothing
+// it runs in front is still going), and not when what is known is old.
+function cmdsOf(r: AgentRow): RowCmds | undefined {
+  const a = r.a
+  if (r.lost || !a.bg_cmds || (a.status !== 'done' && a.status !== 'idle')) return undefined
+  return { n: a.bg_cmds, list: (a.bg_cmd_list ?? []).map((c) => ({ title: c.title, since: c.since })) }
 }
 
 export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: boolean }) {
@@ -697,7 +707,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       if (e.row) {
         const r = e.row
         const said = (current && agent?.title) || keptTitle(titles, e) || paneTitle(r.a.title) || r.a.agent
-        return { key: e.key, ...labelOf(e, said, hosts), program: r.a.agent, status: current && agent && !r.bg ? agent.status : r.status, bg: r.lost ? undefined : r.bg, since: r.lost ? undefined : r.bg ? r.a.bg_since : r.a.since, current, pinned: pinAt(e.key), onPick: () => onPick(e), menu: () => rowMenu.current(e) }
+        return { key: e.key, ...labelOf(e, said, hosts), program: r.a.agent, status: current && agent && !r.bg ? agent.status : r.status, bg: r.lost ? undefined : r.bg, cmds: cmdsOf(r), since: r.lost ? undefined : r.bg ? r.a.bg_since : r.a.since, current, pinned: pinAt(e.key), onPick: () => onPick(e), menu: () => rowMenu.current(e) }
       }
       const title = (current && agent?.title) || keptTitle(titles, e) || `${e.s.host_name} · ${sessionWhich(e.s, all)}`
       return { key: e.key, title, where: whereOf(e, hosts), program: current ? agent?.program : undefined, status: current && agent ? agent.status : 'unknown', current, pinned: pinAt(e.key), onPick: () => onPick(e), menu: () => rowMenu.current(e) }
@@ -1737,7 +1747,11 @@ function PhoneList({ entries, all, titles, query, onQuery, onPick }: { entries: 
                       side list does; in words for a screen reader, and where forced colours take the dot's.) */}
                   {status === 'done' && since && <span className="convo-list-status">{t('agents.unseen')}</span>}
                   {status === 'working' && since && <span className="convo-list-status">{t('convo.status.working')}</span>}
-                  <span className="agents-list-where">{where}</span>
+                  <span className="agents-list-where">
+                    {r && cmdsOf(r) && <BgCmds cmds={cmdsOf(r)!} />}
+                    {r && cmdsOf(r) && where && ' · '}
+                    {where}
+                  </span>
                 </span>
                 {/* (Waiting for you, in words: no group heading says it here.) */}
                 <span className={'agents-list-side is-' + (status === 'done' && since ? 'idle' : status)}>

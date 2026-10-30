@@ -937,6 +937,8 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
   overflow: hidden; overflow-wrap: anywhere;
 }
 .convo-list-where { color: var(--term-fg-2); }
+/* Commands it left running in the background: said in words before where it is */
+.convo-list-cmds { color: var(--term-fg-2); font-weight: 500; }
 /* The rest of a long group of old ones, behind a tap */
 .convo-list-more {
   align-self: flex-start; padding: 4px 10px; margin-top: 1px; border: 0; border-radius: 8px;

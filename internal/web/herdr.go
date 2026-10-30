@@ -50,6 +50,11 @@ type herdrAgent struct {
 	Bg      string `json:"bg,omitempty"`
 	BgN     int    `json:"bg_n,omitempty"`
 	BgSince int64  `json:"bg_since,omitempty"`
+	// BgCmds: for a Claude Code agent done or idle, how many commands it
+	// left running in the background, the first of them listed (see
+	// cmdProber); none where not known.
+	BgCmds    int     `json:"bg_cmds,omitempty"`
+	BgCmdList []bgCmd `json:"bg_cmd_list,omitempty"`
 }
 
 type herdrWorkspace struct {
@@ -493,6 +498,15 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 	})
 	s.herdrSocks.setBg(sess.ID, bg)
 	go bg.run(ctx)
+	cmds := newCmdProber(func(ctx context.Context) (map[string][]bgCmd, bool, error) {
+		out, err := sshx.Output(ctx, sess.Client(), cmdScanCommand(), cmdScanMax)
+		if err != nil {
+			return nil, false, err
+		}
+		got, whole := parseCmdScan(string(out))
+		return got, whole, nil
+	})
+	go cmds.run(ctx)
 	// When each agent last wrote to its log: what the panes the gateway
 	// never saw change are shown by (see paneSince). Looked for beside the
 	// watch, only while a pane needs it, and at most once a minute: a slow
@@ -561,6 +575,7 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 		last = &sum
 		told := rounds.withSeen(sum)
 		bg.decorate(&told)
+		cmds.decorate(&told)
 		if b, err := json.Marshal(told); err == nil {
 			sess.PublishMeta(b)
 		}
@@ -597,7 +612,9 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 			rounds.number(&sum, false)
 			for _, w := range sum.Workspaces {
 				for _, a := range w.Agents {
-					bg.consider(a.PaneID, a.Agent, a.Status, s.bgSession(sess, a.PaneID, a.Session), a.Round)
+					sid := s.bgSession(sess, a.PaneID, a.Session)
+					bg.consider(a.PaneID, a.Agent, a.Status, sid, a.Round)
+					cmds.consider(a.PaneID, a.Agent, a.Status, sid)
 				}
 			}
 			publish(sum)
@@ -607,7 +624,9 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 			times.changed(tr.Pane.ID, tr.To)
 			rounds.changed(tr.Pane.ID, tr.To, agentSession(tr.Pane))
 			r, _ := rounds.current(tr.Pane.ID)
-			bg.consider(tr.Pane.ID, tr.Pane.Agent, tr.To, s.bgSession(sess, tr.Pane.ID, r.session), r.n)
+			sid := s.bgSession(sess, tr.Pane.ID, r.session)
+			bg.consider(tr.Pane.ID, tr.Pane.Agent, tr.To, sid, r.n)
+			cmds.consider(tr.Pane.ID, tr.Pane.Agent, tr.To, sid)
 			s.onAgentTransition(sess, h, tr)
 		},
 	)
@@ -622,6 +641,7 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 	}
 	rounds.setPoke(again)
 	bg.setPoke(again)
+	cmds.setPoke(again)
 	// Subagents found back by the prober's own look, the turn's end that
 	// would have told it not seen (two changes in one snapshot): the
 	// "finished" held back goes, as for a turn ending now, if it is done

@@ -2,7 +2,7 @@ import { createContext, Fragment, memo, useCallback, useContext, useEffect, useL
 import { ArrowDown, Check, ChevronDown, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, Clock, Download, GitBranch, Keyboard, Loader, MoreHorizontal, MoreVertical, PanelLeft, Pin, Search, TriangleAlert, X, Plus } from 'lucide-react'
 import { t, getLang, type I18nKey } from '../i18n'
 import { api } from '../api'
-import { asHeld, GROUPS, inGroup, listOrder, pinned, type ConvoListRow } from './agentOrder'
+import { asHeld, GROUPS, inGroup, listOrder, pinned, type ConvoListRow, type RowCmds } from './agentOrder'
 import { copyText, Dialog, isCoarse, Menu, MenuLayer, type MenuItem } from '../components/ui'
 import { composing, foldAllKey, helpKey, jumpKey, onMac, switchKey } from './pageKeys'
 import { local } from '../storage'
@@ -1305,6 +1305,18 @@ function RunningWork({ items, openSub }: { items: ConvoRunning[]; openSub?: (s: 
   )
 }
 
+// Commands an agent left running in the background, said beside where it
+// is: how many, and, held over, which and for how long.
+export function BgCmds({ cmds }: { cmds: RowCmds }) {
+  const hint = cmds.list.map((c) => [c.title || t('convo.bgCmd'), c.since ? t('convo.bgCmdFor', { for: duration(Math.max(Date.now() - c.since, 0)) }) : ''].filter(Boolean).join(' · '))
+  if (cmds.n > cmds.list.length) hint.push(t('convo.bgCmdsMore', { n: cmds.n - cmds.list.length }))
+  return (
+    <span className="convo-list-cmds" title={hint.join('\n')}>
+      {t(cmds.n === 1 ? 'convo.bgCmds1' : 'convo.bgCmds', { n: cmds.n })}
+    </span>
+  )
+}
+
 // How long ago, as the view says it elsewhere ("6 分 25 秒").
 function since(ts?: string): string {
   const v = ts ? Date.parse(ts) : NaN
@@ -2055,9 +2067,11 @@ function AgentList({ rows, menus, onPicked, placed, query: given, onQuery, searc
                     {/* (Its status by its dot only, and its group: in words for a screen
                         reader, and shown where the system's colours take the dot's away.) */}
                     {(said || r.bg) && <span className={'convo-list-status is-' + r.status}>{t(r.bg === 'running' ? 'convo.status.bg' : r.bg === 'stale' ? 'convo.status.bgStale' : (`convo.status.${r.status}` as I18nKey))}</span>}
-                    {r.where && (
+                    {(r.where || r.cmds) && (
                       <span className="convo-list-sub">
-                        <span className="convo-list-where">{r.where}</span>
+                        {r.cmds && <BgCmds cmds={r.cmds} />}
+                        {r.cmds && r.where && ' · '}
+                        {r.where && <span className="convo-list-where">{r.where}</span>}
                       </span>
                     )}
                   </span>
