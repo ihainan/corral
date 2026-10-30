@@ -332,7 +332,7 @@ func TestCodexFnReview446(t *testing.T) {
 	// script types to a command.
 	script := "await tools.write_stdin({session_id:1, chars:'{q:\"PRIVATE_SENTINEL\"}'});\nawait tools.web__run({search_query:[{q:\"public\"}]});"
 	c := feedAll(codexLine(t, "response_item", map[string]any{"type": "custom_tool_call", "name": "exec", "call_id": "s1", "input": script}))
-	if b, _ := json.Marshal(c.Since(0)); strings.Contains(string(b), "PRIVATE") || !strings.Contains(string(b), "public") {
+	if b, _ := json.Marshal(c.Since(0)); strings.Contains(string(b), "PRIVATE") {
 		t.Errorf("1: %s", b)
 	}
 	// 2. What comes back of a call read in a part before its telling: on the
@@ -508,7 +508,7 @@ func TestCodexFnReview448(t *testing.T) {
 		"const s = `x ${`tools.exec_command({cmd:\"PRIVATE\"})`} y`;\nawait tools.write_stdin({session_id:1, chars:s});\nawait tools.web__run({search_query:[{q:\"public\"}]});",
 	} {
 		c := feedAll(codexLine(t, "response_item", map[string]any{"type": "custom_tool_call", "name": "exec", "call_id": "s1", "input": script}))
-		if b, _ := json.Marshal(c.Since(0)); strings.Contains(string(b), "PRIVATE") || !strings.Contains(string(b), "public") {
+		if b, _ := json.Marshal(c.Since(0)); strings.Contains(string(b), "PRIVATE") {
 			t.Errorf("1: %s", b)
 		}
 	}
@@ -611,5 +611,36 @@ func TestTaskNoticeWithWords(t *testing.T) {
 		if len(es) != 1 || es[0].Role != RoleUser || es[0].Parts[0].Text != s {
 			t.Errorf("%q: %+v", s, es)
 		}
+	}
+}
+
+// review450: a script that types to a running command is read for nothing
+// (however what it types is come by); a call it only names is no call; a
+// fake call in a comment does not crowd out a real one; "x++ / 2" divides.
+func TestCodexFnReview450(t *testing.T) {
+	shown := func(script string) (string, *Codex) {
+		c := feedAll(codexLine(t, "response_item", map[string]any{"type": "custom_tool_call", "name": "exec", "call_id": "s", "input": script}))
+		b, _ := json.Marshal(c.Since(0))
+		return string(b), c
+	}
+	for i, script := range []string{
+		"const input = \"*** Begin Patch\\n*** Add File: PRIVATE\\n+PRIVATE\\n*** End Patch\";\nawait tools.write_stdin({session_id:1, chars:input});",
+		"await tools.write_stdin ({session_id:1, chars:\"*** Begin Patch\\n*** Add File: PRIVATE\\n+PRIVATE\\n*** End Patch\"});",
+		"await tools[\"write_stdin\"]({session_id:1, chars:'tools.exec_command({cmd:\"PRIVATE\"})'});",
+		"await tools.write_stdin({session_id:1, chars:(() => tools.PRIVATE()).toString()});",
+		"await tools.write_stdin({session_id:1, chars:'a\u2028) \"*** Begin Patch\\n*** Add File: PRIVATE\\n+PRIVATE\\n*** End Patch\"'});",
+	} {
+		if b, _ := shown(script); strings.Contains(b, "PRIVATE") {
+			t.Errorf("%d: %s", i, b)
+		}
+	}
+	if _, c := shown("const ask = tools.request_user_input;\ntext(\"no call\");"); len(c.asked) != 0 {
+		t.Error("a question only named taken for one asked")
+	}
+	if b, _ := shown(strings.Repeat("// tools.exec_command({cmd:\"fake\"})\n", 20) + "await tools.exec_command({cmd:\"pwd\"});"); !strings.Contains(b, `"detail":"pwd"`) {
+		t.Errorf("a real command crowded out: %s", b)
+	}
+	if b, _ := shown("let n=4; const x=n++ / 2;\nawait tools.exec_command({cmd:\"pwd\"});"); !strings.Contains(b, `"detail":"pwd"`) {
+		t.Errorf("a division taken for a regular expression: %s", b)
 	}
 }

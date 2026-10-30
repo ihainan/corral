@@ -1152,38 +1152,38 @@ func codexTools(name, src string) []*Tool {
 			return out
 		}
 	}
+	// A script that types to a running command (write_stdin: a password, a
+	// key, however it comes by it) is read for nothing: one line, no text of
+	// it. (Each thing it did is told of on its own, in a newer Codex.)
+	if strings.Contains(src, "write_stdin") {
+		return []*Tool{{Name: clip(name, 128)}}
+	}
 	// What is code in it (its strings' and comments' insides blanked): what
 	// is read out of it is what stands there — a string the code itself
-	// writes, a call it makes — and none of what it types to a running
-	// command (write_stdin's arguments: a password, a key).
+	// writes, a call it makes.
 	code := jsCode(src)
-	typed := callSpans(code, "tools.write_stdin(")
-	readable := func(at int) bool { // (a string's opening quote, in the code, not in what is typed)
-		if at < 0 || at >= len(code) || code[at] != src[at] {
-			return false
-		}
-		for _, sp := range typed {
-			if at >= sp[0] && at < sp[1] {
-				return false
-			}
-		}
-		return true
+	readable := func(at int) bool { // (a string's opening quote, in the code)
+		return at >= 0 && at < len(code) && code[at] == src[at]
 	}
-	for _, m := range patchStr.FindAllStringIndex(src, 8) {
-		if patch, ok := jsUnquote(src[m[0]:m[1]]); ok && readable(m[0]) {
+	// (At most so many of each read: counted as read, not as found.)
+	patches := 0
+	for _, m := range patchStr.FindAllStringIndex(src, 256) {
+		if patch, ok := jsUnquote(src[m[0]:m[1]]); ok && readable(m[0]) && patches < 8 {
 			out = append(out, patchTools(patch)...)
+			patches++
 		}
 	}
-	for _, m := range patchTmpl.FindAllStringIndex(src, 8) {
-		if patch, ok := jsTemplate(src[m[0]:m[1]]); ok && readable(m[0]) {
+	for _, m := range patchTmpl.FindAllStringIndex(src, 256) {
+		if patch, ok := jsTemplate(src[m[0]:m[1]]); ok && readable(m[0]) && patches < 8 {
 			out = append(out, patchTools(patch)...)
+			patches++
 		}
 	}
 	// (Its commands, one line each, as one: what came back is of them all.)
 	var cmds []string
-	for _, m := range execCmd.FindAllStringSubmatchIndex(src, 16) {
-		if !readable(m[0]) || !readable(m[2]-1) {
-			continue // (a call written in a string, a comment, or typed to a command)
+	for _, m := range execCmd.FindAllStringSubmatchIndex(src, 256) {
+		if len(cmds) >= 16 || !readable(m[0]) || !readable(m[2]-1) {
+			continue // (a call written in a string or a comment)
 		}
 		if cmd, ok := jsUnquote(`"` + src[m[2]:m[3]] + `"`); ok {
 			cmds = append(cmds, cmd)
@@ -1196,7 +1196,7 @@ func codexTools(name, src string) []*Tool {
 	// here: what each did is told of on its own, in a newer Codex). Not the
 	// commands and patches read above, nor what it types to a command.
 	seen := map[string]bool{}
-	asks := strings.Contains(code, "tools.request_user_input") // (wherever it is, among however many calls)
+	asks := scriptAsks.MatchString(code) // (called, wherever it is among however many calls)
 	for _, m := range toolCalled.FindAllStringSubmatch(code, 64) {
 		n := m[1]
 		if seen[n] || (n == "exec_command" && len(cmds) > 0) || (n == "apply_patch" && len(out) > 0) || strings.HasPrefix(n, "request_user_input") {
@@ -1235,8 +1235,8 @@ func scriptTool(name, src, code string, readable func(int) bool) *Tool {
 		var qs []string
 		if sp := callSpans(code, "tools."+name+"("); len(sp) > 0 {
 			from, to := sp[0][0], sp[0][1]
-			for _, m := range scriptQuery.FindAllStringSubmatchIndex(src[from:to], 8) {
-				if !readable(from + m[2] - 1) {
+			for _, m := range scriptQuery.FindAllStringSubmatchIndex(src[from:to], 256) {
+				if len(qs) >= 8 || !readable(from+m[2]-1) {
 					continue
 				}
 				if q, ok := jsUnquote(`"` + src[from+m[2]:from+m[3]] + `"`); ok && strings.TrimSpace(q) != "" {
@@ -1305,6 +1305,9 @@ func jsRegexHere(b []byte, i int) bool {
 	if j < 0 {
 		return true
 	}
+	if j > 0 && (b[j] == '+' || b[j] == '-') && b[j-1] == b[j] {
+		return false // (x++ / 2)
+	}
 	if strings.IndexByte("(,=:[!&|?{};+-*%<>~^", b[j]) >= 0 {
 		return true
 	}
@@ -1356,7 +1359,7 @@ func jsCodeFrom(b []byte, i, depth int) int {
 				b[i] = '_'
 			}
 		case ch == '"' || ch == '\'':
-			for i++; i < len(b) && b[i] != ch && !jsLineEnd(b, i); i++ {
+			for i++; i < len(b) && b[i] != ch && b[i] != '\n' && b[i] != '\r'; i++ { // (U+2028/9 may stand in a string)
 				if b[i] == '\\' && i+1 < len(b) {
 					b[i] = '_'
 					i++
@@ -1397,6 +1400,9 @@ func jsCodeFrom(b []byte, i, depth int) int {
 	}
 	return len(b)
 }
+
+// scriptAsks: a script calls request_user_input (not only names it).
+var scriptAsks = regexp.MustCompile(`\btools\.request_user_input(?:_async)?\s*\(`)
 
 // scriptQuery: a search's words in a call's arguments ({q: "…"}), found
 // in its code, read from the script.
