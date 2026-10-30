@@ -1319,26 +1319,27 @@ type convoState struct {
 	early       earlyTitle // (see lookEarlierTitle)
 	agent       string     // whose log: "claude", "codex" or "opencode"
 	// (A Codex in tmux: whether its title said it waits, for whom, when.)
-	cxTitleAt   time.Time
-	cxTitleFor  string
-	cxTitleWait bool
-	cxTitleFail bool  // (the read failed: not read again for convoTitleBackoff)
-	offset      int64 // read up to here
-	size        int64 // the log's size when last looked at
-	mtime       time.Time
-	grewAt      time.Time // when the log last grew, as this gateway saw it (at first, its own time of writing)
-	older       bool      // the log has more before what was read
-	from        int64     // where in the log the first line read begins (-1 until a first line is whole)
-	more        bool      // the last read stopped before the end
-	status      string    // (tmux) the process's own word: "busy", "idle", or "" when not known
-	skipping    bool      // in a line too long to keep, until its end
-	long        []byte    // a line longer than a read, so far, its images' data left out (nil when not in one)
-	strip       b64Strip
-	ocCursor    int64 // (OpenCode) rows written since this are read next (unix ms)
-	ocCursorK   int   // (OpenCode) and, stopped within its millisecond, the last row read in it
-	ocCursorID  string
-	noReaderAt  time.Time // (OpenCode) when reading found no python3
-	sub         bool      // a subagent's own log (see apiConversationSubagent)
+	cxTitleAt     time.Time
+	cxTitleFor    string
+	cxTitleWait   bool
+	cxTitleFail   bool // (the read failed: not read again for convoTitleBackoff, from cxTitleFailAt)
+	cxTitleFailAt time.Time
+	offset        int64 // read up to here
+	size          int64 // the log's size when last looked at
+	mtime         time.Time
+	grewAt        time.Time // when the log last grew, as this gateway saw it (at first, its own time of writing)
+	older         bool      // the log has more before what was read
+	from          int64     // where in the log the first line read begins (-1 until a first line is whole)
+	more          bool      // the last read stopped before the end
+	status        string    // (tmux) the process's own word: "busy", "idle", or "" when not known
+	skipping      bool      // in a line too long to keep, until its end
+	long          []byte    // a line longer than a read, so far, its images' data left out (nil when not in one)
+	strip         b64Strip
+	ocCursor      int64 // (OpenCode) rows written since this are read next (unix ms)
+	ocCursorK     int   // (OpenCode) and, stopped within its millisecond, the last row read in it
+	ocCursorID    string
+	noReaderAt    time.Time // (OpenCode) when reading found no python3
+	sub           bool      // a subagent's own log (see apiConversationSubagent)
 }
 
 // newParser: a parser for the log read, a subagent's own as such (its

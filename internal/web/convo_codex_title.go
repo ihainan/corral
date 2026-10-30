@@ -38,22 +38,15 @@ func (s *Server) codexWaits(ctx context.Context, sess *term.Session, st *convoSt
 	who := strings.Join([]string{b.Pane, strconv.FormatInt(b.PID, 10), strconv.FormatInt(b.Start, 10), b.Session}, "\x00")
 	pressed, _ := s.cxPressed.Load(s.convoReplyKey(sess, b.Pane))
 	at, _ := pressed.(time.Time)
-	ttl := convoTitleTTL
-	if st.cxTitleFail {
-		ttl = convoTitleBackoff
-	}
-	if st.cxTitleFor == who && time.Since(st.cxTitleAt) < ttl && st.cxTitleAt.After(at) {
-		return st.cxTitleWait
+	if waits, ok := st.codexTitleKept(who, at, time.Now()); ok {
+		return waits
 	}
 	began := time.Now()
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	res, err := sshx.Exec(ctx, sess.Client(), codexTitleCommand(b.Pane), 4<<10, sshx.ExecOptions{})
 	waits := err == nil && codexTitleWaits(strings.TrimRight(string(res.Out), "\n"))
-	st.cxTitleAt, st.cxTitleFor, st.cxTitleWait, st.cxTitleFail = began, who, waits, err != nil
-	if err != nil {
-		st.cxTitleAt = time.Now() // (its backoff from when it gave up)
-	}
+	st.cxTitleAt, st.cxTitleFor, st.cxTitleWait, st.cxTitleFail, st.cxTitleFailAt = began, who, waits, err != nil, time.Now()
 	return waits
 }
 
@@ -67,4 +60,19 @@ func codexTitleCommand(pane string) string {
 // read of its title before is not what it shows after.
 func (s *Server) codexPressed(sess *term.Session, pane string) {
 	s.cxPressed.Store(s.convoReplyKey(sess, pane), time.Now())
+}
+
+// codexTitleKept: what was read of the title of who's pane, if it may be
+// used again at now: read since keys last went to it (pressed; by when the
+// read began, so keys sent while it was under way count), within its time
+// (a failed read's backoff from when it failed).
+func (st *convoState) codexTitleKept(who string, pressed, now time.Time) (waits, ok bool) {
+	fresh := now.Sub(st.cxTitleAt) < convoTitleTTL
+	if st.cxTitleFail {
+		fresh = now.Sub(st.cxTitleFailAt) < convoTitleBackoff
+	}
+	if st.cxTitleFor != who || !fresh || !st.cxTitleAt.After(pressed) {
+		return false, false
+	}
+	return st.cxTitleWait, true
 }
