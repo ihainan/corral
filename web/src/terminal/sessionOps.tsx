@@ -42,7 +42,7 @@ export function SessionOpDialog({ op, name, onSend, onClose, onShowTerminal }: {
   const close = () => !busy && onClose()
   return (
     <Dialog title={t(`ops.${op}.title`)} onClose={close}>
-      <form onSubmit={submit}>
+      <form className="form" onSubmit={submit}>
         <p className="lead">{t(`ops.${op}.body`)}</p>
         {op !== 'clear' && (
           <input
@@ -52,6 +52,7 @@ export function SessionOpDialog({ op, name, onSend, onClose, onShowTerminal }: {
             placeholder={t(`ops.${op}.placeholder`)}
             aria-label={t(`ops.${op}.placeholder`)}
             autoFocus
+            autoComplete="off"
             onChange={(e) => setText(e.target.value)}
           />
         )}

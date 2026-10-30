@@ -997,6 +997,7 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
     top: auto; bottom: 0; left: 0; width: 100%; max-height: 78%; border-radius: 14px 14px 0 0; border-bottom: 0;
     padding-bottom: max(12px, env(safe-area-inset-bottom, 0px));
   }
+  html.kb-open .convo-picker { padding-bottom: 12px; }
 }
 
 /* Code coloured by its language (Code.tsx): the scheme's own colours */

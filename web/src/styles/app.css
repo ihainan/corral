@@ -344,6 +344,8 @@ a.setting:hover { text-decoration: none; background: var(--bg-hover); }
   .overlay.sheet-mode { place-items: end stretch; padding: 0; }
   .sheet-mode .dialog { max-width: none; border-radius: 14px 14px 0 0; padding-bottom: calc(20px + env(safe-area-inset-bottom, 0px)); animation: rise 0.2s var(--ease); }
   .sheet-mode .dialog-actions > .btn { flex: 1; }
+  /* (The keyboard covers the home indicator: no room kept for it.) */
+  :where(html.kb-open) .sheet-mode .dialog { padding-bottom: 20px; }
 }
 .handle { width: 36px; height: 4px; border-radius: 2px; background: var(--line-strong); margin: -8px auto 0; flex: none; }
 
@@ -654,6 +656,7 @@ details.adv > .form { margin-top: 16px; }
 @media (pointer: coarse) { .files-entry { min-height: 56px; } }
 @media (max-width: 520px) {
   .sheet-mode .dialog.files-dialog { height: calc(var(--vv-h, 100dvh) - 24px); padding-bottom: env(safe-area-inset-bottom, 0px); }
+  :where(html.kb-open) .sheet-mode .dialog.files-dialog { padding-bottom: 0; }
   .files-entry { display: grid; grid-template-columns: auto minmax(0, 1fr); column-gap: 12px; row-gap: 1px; }
   .files-icon { grid-row: span 2; }
   .files-meta { gap: 10px; }
