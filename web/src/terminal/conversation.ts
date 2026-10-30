@@ -189,6 +189,18 @@ export interface ConvoMeta {
   window?: number // the model's context window, where it is known: as the log says it (Codex's), or of the model (Claude's)
   window_by?: 'log' | 'model' | 'request' // how: said by the log, the model's own, the 1M its requests asked for
   cost?: ConvoCost // the latest of what the session used, as the log read said it (convo.Cost)
+  quota?: ConvoQuota // the subscription's use, as the log last said it (Codex's; convo.Quota)
+}
+
+// A subscription's use of its 5-hour and weekly windows (convo.Quota).
+export interface ConvoQuotaWindow {
+  used: number // percent
+  resets_at: number // unix seconds
+}
+export interface ConvoQuota {
+  updated_at?: number // unix seconds
+  five_hour?: ConvoQuotaWindow
+  weekly?: ConvoQuotaWindow
 }
 
 // What a session used so far, as Claude Code's log last said it (running

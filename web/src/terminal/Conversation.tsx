@@ -15,7 +15,7 @@ import { itemKey } from './convoSearch'
 import { exportMarkdown } from './convoExport'
 import { AgentIcon } from './agentIcons'
 import { matchQuery } from './agents'
-import type { Convo, ConvoCost, ConvoEntry, ConvoShell, ConvoHunk, ConvoMeta, ConvoPart, ConvoQueued, ConvoRunning, ConvoTask, ConvoTool, ConvoTrouble, ConvoEvent } from './conversation'
+import type { Convo, ConvoCost, ConvoQuota, ConvoQuotaWindow, ConvoEntry, ConvoShell, ConvoHunk, ConvoMeta, ConvoPart, ConvoQueued, ConvoRunning, ConvoTask, ConvoTool, ConvoTrouble, ConvoEvent } from './conversation'
 import { category, isNote, items, ms, partTime, sameEdits, toolName, verbOf, type Category, type Edits, type Item, type Verb } from './convoItems'
 
 // The conversation view: the agent's log as turns, over the terminal (which
@@ -1203,7 +1203,13 @@ export function ConversationView({
             mode={mode}
             model={model}
             effort={effort}
-            quota={convo.of && convo.bind?.agent === 'claude' && convo.bind.session ? { sid: convo.of.split(' ')[0], session: convo.bind.session } : undefined}
+            quota={
+              convo.bind?.agent === 'codex'
+                ? { codex: true as const, said: convo.meta.quota }
+                : convo.of && convo.bind?.agent === 'claude' && convo.bind.session
+                  ? { sid: convo.of.split(' ')[0], session: convo.bind.session }
+                  : undefined
+            }
           />
         )}
       </div>
@@ -1400,7 +1406,7 @@ const effortName = (e: string) => ((EFFORTS as readonly string[]).includes(e) ? 
 // What the session runs with, under the composer: its permission mode on
 // the left (a tap: a menu of them); its branch, model and how
 // full its context is on the right (the numbers on a tap).
-function Runs({ meta, active, mode, model, effort, quota }: { meta: ConvoMeta; active: boolean; mode?: ModeSwitch; model?: ModelSwitch; effort?: EffortSwitch; quota?: { sid: string; session: string } }) {
+function Runs({ meta, active, mode, model, effort, quota }: { meta: ConvoMeta; active: boolean; mode?: ModeSwitch; model?: ModelSwitch; effort?: EffortSwitch; quota?: QuotaOf }) {
   const [open, setOpen] = useState<false | 'ctx' | 'model' | 'effort' | 'mode'>(false) // (which of its pop-ups)
   const box = useRef<HTMLDivElement>(null)
   const modelBtn = useRef<HTMLButtonElement>(null)
@@ -1682,7 +1688,7 @@ function Runs({ meta, active, mode, model, effort, quota }: { meta: ConvoMeta; a
               ? t(meta.window_by === 'model' ? 'convo.ctxNoteModel' : meta.window_by === 'request' ? 'convo.ctxNoteWide' : 'convo.ctxNoteSaid', { w: tokens(known) })
               : t(windows.length > 1 ? 'convo.ctxNote' : 'convo.ctxNoteBig')}
           </p>
-          {quota && <QuotaPart key={quota.sid + ' ' + quota.session} sid={quota.sid} session={quota.session} />}
+          {quota && ('codex' in quota ? <QuotaSaid quota={quota.said} /> : <QuotaPart key={quota.sid + ' ' + quota.session} sid={quota.sid} session={quota.session} />)}
           {(meta.cost || /claude/i.test(meta.model ?? '')) && <CostPart cost={meta.cost} />}
         </div>
       )}
@@ -1700,6 +1706,9 @@ interface Quota {
   five_hour?: { used: number; resets_at: number }
   weekly?: { used: number; resets_at: number }
 }
+// (Whence it is: a Claude Code session's, read from the host; a Codex
+// session's, as its log said it: meta.quota.)
+type QuotaOf = { sid: string; session: string } | { codex: true; said?: ConvoQuota }
 const QUOTA_EVERY = 60000
 type QuotaSeen = { at: number; q: Quota | 'failed'; last?: Quota; lastAt?: number; n: number }
 const quotaSeen = new Map<string, QuotaSeen>()
@@ -1750,22 +1759,48 @@ function QuotaPart({ sid, session }: { sid: string; session: string }) {
     }
   }, [key, sid, session])
   const shown = !seen ? undefined : seen.q === 'failed' ? seen.last : seen.q.known ? seen.q : undefined
-  const clock = (sec: number) => {
-    const d = new Date(sec * 1000)
-    const time = d.toLocaleTimeString(getLang(), { hour: '2-digit', minute: '2-digit', hour12: false })
-    // (Another day: its date and weekday apart, "11月2日 周一 16:43".)
-    return d.toDateString() === new Date().toDateString() ? time : [d.toLocaleDateString(getLang(), { month: 'long', day: 'numeric' }), d.toLocaleDateString(getLang(), { weekday: 'short' }), time].join(' ')
-  }
   const now = Date.now() / 1000
   const stale = shown?.updated_at && now - shown.updated_at > 600 ? Math.round((now - shown.updated_at) / 60) : 0
+  return (
+    <QuotaView shown={shown}>
+      {!seen && <p className="convo-runs-note">{t('quota.reading')}</p>}
+      {seen && !shown && <p className="convo-runs-note">{t(seen.q === 'failed' ? 'quota.failed' : 'quota.none')}</p>}
+      {seen?.q === 'failed' && shown && <p className="convo-runs-note">{t('quota.failedKept', { at: quotaClock((seen.lastAt ?? 0) / 1000) })}</p>}
+      {!!stale && <p className="convo-runs-note">{t('quota.stale', { n: stale })}</p>}
+    </QuotaView>
+  )
+}
+
+// A Codex session's quota, as its log last said it (each request's
+// token_count): nothing read, its time said when it is not of just now.
+function QuotaSaid({ quota }: { quota?: ConvoQuota }) {
+  const shown = quota && (quota.five_hour || quota.weekly) ? quota : undefined
+  const now = Date.now() / 1000
+  return (
+    <QuotaView shown={shown}>
+      {!shown && <p className="convo-runs-note">{t('quota.noneCodex')}</p>}
+      {!!shown?.updated_at && now - shown.updated_at > 600 && <p className="convo-runs-note">{t('quota.saidAt', { at: quotaClock(shown.updated_at) })}</p>}
+    </QuotaView>
+  )
+}
+
+function quotaClock(sec: number) {
+  const d = new Date(sec * 1000)
+  const time = d.toLocaleTimeString(getLang(), { hour: '2-digit', minute: '2-digit', hour12: false })
+  // (Another day: its date and weekday apart, "11月2日 周一 16:43".)
+  return d.toDateString() === new Date().toDateString() ? time : [d.toLocaleDateString(getLang(), { month: 'long', day: 'numeric' }), d.toLocaleDateString(getLang(), { weekday: 'short' }), time].join(' ')
+}
+
+// The two windows' use, bars at 80% and 95% coloured; then what is said of it.
+function QuotaView({ shown, children }: { shown?: { five_hour?: ConvoQuotaWindow; weekly?: ConvoQuotaWindow }; children?: ReactNode }) {
+  const clock = quotaClock
+  const now = Date.now() / 1000
   return (
     <div className="convo-cost convo-quota">
       <div className="convo-runs-row convo-cost-head">
         <span>{t('quota.title')}</span>
       </div>
-      {!seen && <p className="convo-runs-note">{t('quota.reading')}</p>}
-      {seen && !shown && <p className="convo-runs-note">{t(seen.q === 'failed' ? 'quota.failed' : 'quota.none')}</p>}
-      {shown?.known &&
+      {shown &&
         (
           [
             ['quota.fiveHour', shown.five_hour],
@@ -1786,8 +1821,7 @@ function QuotaPart({ sid, session }: { sid: string; session: string }) {
             </div>
           ),
         )}
-      {seen?.q === 'failed' && shown && <p className="convo-runs-note">{t('quota.failedKept', { at: clock((seen.lastAt ?? 0) / 1000) })}</p>}
-      {!!stale && <p className="convo-runs-note">{t('quota.stale', { n: stale })}</p>}
+      {children}
     </div>
   )
 }

@@ -405,6 +405,23 @@ type Meta struct {
 	// last said it in what was read (its cost-state rows: running totals,
 	// not added up); nil, none read.
 	Cost *Cost `json:"cost,omitempty"`
+	// Quota is the subscription's use as the log last said it (Codex's,
+	// signed in to an account: through a relay it says none); nil, none.
+	Quota *Quota `json:"quota,omitempty"`
+}
+
+// Quota is a subscription's use of its 5-hour and weekly windows, of the
+// same shape as what the quota endpoint says of a Claude Code session.
+type Quota struct {
+	UpdatedAt int64        `json:"updated_at,omitempty"` // unix seconds: the row's time
+	FiveHour  *QuotaWindow `json:"five_hour,omitempty"`
+	Weekly    *QuotaWindow `json:"weekly,omitempty"`
+}
+
+// QuotaWindow is one window's use.
+type QuotaWindow struct {
+	Used     float64 `json:"used"`      // percent
+	ResetsAt int64   `json:"resets_at"` // unix seconds
 }
 
 // Cost is a cost-state row of Claude Code's: what the session used so far.

@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 )
@@ -278,6 +279,9 @@ func (c *Codex) Prepend(other Parser) {
 	if c.meta.Window == 0 {
 		c.meta.Window = o.meta.Window
 	}
+	if c.meta.Quota == nil {
+		c.meta.Quota = o.meta.Quota
+	}
 	if !c.known {
 		c.working, c.known = o.working, o.known
 	}
@@ -473,8 +477,9 @@ type codexPayload struct {
 		} `json:"last_token_usage"`
 		Window int64 `json:"model_context_window"`
 	} `json:"info"`
-	Reason   string `json:"reason"`
-	NumTurns int    `json:"num_turns"` // (thread_rolled_back)
+	RateLimits *codexLimits `json:"rate_limits"` // (token_count)
+	Reason     string       `json:"reason"`
+	NumTurns   int          `json:"num_turns"` // (thread_rolled_back)
 	// turn_context, thread_settings_applied
 	Model          string `json:"model"`
 	ApprovalPolicy string `json:"approval_policy"`
@@ -572,6 +577,9 @@ func (c *Codex) event(r *codexRow, p *codexPayload) {
 		}
 		if p.Info != nil && p.Info.Window > 0 {
 			c.meta.Window = p.Info.Window
+		}
+		if q := p.RateLimits.quota(r.Timestamp, c.meta.Quota); q != nil {
+			c.meta.Quota = q
 		}
 	case "item_completed":
 		if p.Item == nil {
@@ -1671,4 +1679,53 @@ func goneFrom(entries []*Entry, from int) {
 			e.Gone = true
 		}
 	}
+}
+
+// codexLimits is a token_count row's rate_limits: the account's use of its
+// windows (primary, secondary: which is which is by its minutes), or nulls
+// (signed in by an API key, or through a relay). limit_id "codex" is the
+// account's; others (a model of its own, "premium"…) are not, and an older
+// Codex's says none.
+type codexLimits struct {
+	LimitID   *string           `json:"limit_id"`
+	Primary   *codexLimitWindow `json:"primary"`
+	Secondary *codexLimitWindow `json:"secondary"`
+}
+
+type codexLimitWindow struct {
+	Used     *float64 `json:"used_percent"`
+	Minutes  int64    `json:"window_minutes"`
+	ResetsAt int64    `json:"resets_at"`
+}
+
+// quota is old with what l says of its windows put in, as of the row's time
+// at; nil, it says nothing of them. (A new Quota: old is not changed.)
+func (l *codexLimits) quota(at string, old *Quota) *Quota {
+	if l == nil || l.LimitID != nil && *l.LimitID != "codex" {
+		return nil
+	}
+	var q Quota
+	if old != nil {
+		q = *old
+	}
+	said := false
+	for _, w := range []*codexLimitWindow{l.Primary, l.Secondary} {
+		if w == nil || w.Used == nil || *w.Used < 0 || *w.Used > 100 || w.ResetsAt <= 0 || w.ResetsAt > 1e12 {
+			continue
+		}
+		qw := &QuotaWindow{Used: *w.Used, ResetsAt: w.ResetsAt}
+		switch {
+		case w.Minutes > 0 && w.Minutes <= 360:
+			q.FiveHour, said = qw, true
+		case w.Minutes >= 8640 && w.Minutes <= 20160:
+			q.Weekly, said = qw, true
+		}
+	}
+	if !said {
+		return nil
+	}
+	if t, err := time.Parse(time.RFC3339Nano, at); err == nil {
+		q.UpdatedAt = t.Unix()
+	}
+	return &q
 }
