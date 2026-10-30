@@ -33,7 +33,8 @@ export function useClaudeCard(sid: string, key: string, turnKey: string, body: (
     () =>
       cardLooker<ClaudeCard>({
         fetch: () =>
-          api<{ card?: ClaudeCard }>('POST', `/api/sessions/${now.current.sid}/conversation/suggestion`, now.current.body(), { timeoutMs: 20000 }).then(
+          // (for=card: said apart from the suggestion's own looks, in the gateway's log and the tests; not read.)
+          api<{ card?: ClaudeCard }>('POST', `/api/sessions/${now.current.sid}/conversation/suggestion?for=card`, now.current.body(), { timeoutMs: 20000 }).then(
             (r) => r.card ?? null,
           ),
         // (Not now: the page not in front, or nothing to look at.)
