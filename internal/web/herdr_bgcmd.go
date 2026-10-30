@@ -203,13 +203,18 @@ func sameCmds(a, b map[string][]bgCmd) bool {
 // stopped short of the rest. The Claude Code
 // processes: named claude, or node running Claude Code's program; their
 // children only are looked at (as the kernel lists each thread's, else by
-// pgrep -P one at a time: a pgrep of BusyBox takes no list). Fixed script.
+// pgrep -P one at a time: a pgrep of BusyBox takes no list, nor, in older
+// ones, -u: whose each is, is looked at here). Fixed script.
 func cmdScanCommand() string {
 	script := `btime=$(sed -n 's/^btime \([0-9]*\)$/\1/p' /proc/stat 2>/dev/null); hz=$(getconf CLK_TCK 2>/dev/null)
 printf 'clock\t%s\t%s\n' "$btime" "$hz"
 if command -v pgrep >/dev/null 2>&1; then
-  claudes=$( { pgrep -x -u "$(id -u)" claude; pgrep -u "$(id -u)" -f '[c]laude-code/cli'; } 2>/dev/null | sort -u)
-  kids=$(for c in $claudes; do cat /proc/"$c"/task/*/children 2>/dev/null || pgrep -P "$c" 2>/dev/null; done)
+  claudes=$( { pgrep -x claude; pgrep -f '[c]laude-code/cli'; } 2>/dev/null | sort -u)
+  kids=$(for c in $claudes; do
+    [ -O "/proc/$c" ] || continue
+    # (Read twice: a child ending while the list is read may leave others out of that reading.)
+    { cat /proc/"$c"/task/*/children && cat /proc/"$c"/task/*/children; } 2>/dev/null || pgrep -P "$c" 2>/dev/null
+  done | tr ' ' '\n' | sort -u)
 else
   claudes=" $(for d in /proc/[0-9]*; do
     [ -O "$d" ] || continue
