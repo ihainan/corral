@@ -3069,6 +3069,7 @@ function object(tool: ConvoTool): { text: string; code: boolean } {
   const d = firstLine(tool.detail ?? '')
   // A command: what it is for, as Claude Code says it; else the command,
   // without the "cd <folder> &&" that begins many alike (all of it opened).
+  if (tool.stdin) return { text: stdinSaid(tool.stdin).obj, code: false }
   if (v === 'cmd' && tool.title) return { text: tool.title, code: false }
   if (v === 'cmd' && d) return { text: d.replace(/^cd\s+(?:"[^"]*"|'[^']*'|[^\s&;|]+)\s*&&\s*/, ''), code: true }
   if (tool.title) return { text: tool.title, code: false }
@@ -3105,7 +3106,21 @@ const VERB_SAID: Record<Verb, { v: I18nKey; live: I18nKey }> = {
 // What a step under way says. A command says the command itself, not what
 // Claude Code says it is for: while it runs, what is running is the thing
 // wanted; the line goes back to saying what it was for once it is done.
+// What was put to a command still running (Codex's write_stdin): keys by
+// name, else how much was typed (never what); a look at what it printed
+// when nothing was.
+function stdinSaid(s: NonNullable<ConvoTool['stdin']>): { verb: string; obj: string } {
+  const at = s.session ? t('convo.stdin.at', { s: s.session }) : ''
+  if (s.keys?.length) return { verb: t('convo.stdin.press'), obj: s.keys.join(' ') + at }
+  if (s.chars) return { verb: t('convo.stdin.type'), obj: t('convo.stdin.chars', { n: s.chars }) + at }
+  return { verb: t('convo.stdin.look'), obj: t('convo.stdin.output') + at }
+}
+
 function liveText(tool: ConvoTool): string {
+  if (tool.stdin) {
+    const s = stdinSaid(tool.stdin)
+    return s.verb + ' ' + s.obj
+  }
   const v = verbOf(tool.name)
   // (The folder it goes to first comes off before the first line is taken:
   //  a command of several lines begins "cd … &&" on a line of its own.)
@@ -3182,7 +3197,7 @@ function ToolRow({ tool, onCopy, live }: { tool: ConvoTool; onCopy: (s: string) 
         }}
         title={cat === 'cmd' ? firstLine(d) : d || tool.title}
       >
-        <span className="convo-step-verb">{v ? t(VERB_SAID[v].v) : toolName(tool.name)}</span>
+        <span className="convo-step-verb">{tool.stdin ? stdinSaid(tool.stdin).verb : v ? t(VERB_SAID[v].v) : toolName(tool.name)}</span>
         <span ref={objRef} className={'convo-step-obj' + (obj.code ? ' is-code' : '')}>{v === 'cmd' && obj.code ? <Code text={obj.text} lang="bash" /> : obj.text}</span>
         {cat === 'edit' && <LineCounts add={tool.add ?? 0} del={tool.del ?? 0} />}
         {tool.error && <span className="convo-failed">{code ? t('convo.exitCode', { n: code }) : t('convo.toolFailed')}</span>}

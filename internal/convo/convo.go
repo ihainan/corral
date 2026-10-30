@@ -285,10 +285,26 @@ type Tool struct {
 	Images int `json:"images,omitempty"`
 	Refs   int `json:"refs,omitempty"`
 
+	// Stdin: (Codex's write_stdin) what was put to a command still running:
+	// its session, and the keys pressed by name, else how many characters
+	// were typed (never what they were).
+	Stdin *Stdin `json:"stdin,omitempty"`
+
 	// fromCall: (Codex) this line is of a call the agent made, which tells
 	// of the commands it means to run; where it tells of each command on
 	// its own as well, those are what is shown and this goes.
 	fromCall bool
+	// at: (Codex) the entry the line is in, whose Rev changes with it.
+	at *Entry
+	// merged: (Codex) what its call said was put on it (see mergeCall).
+	merged bool
+}
+
+// Stdin is what was put to a command still running (see Tool.Stdin).
+type Stdin struct {
+	Session string   `json:"session"`
+	Keys    []string `json:"keys,omitempty"`
+	Chars   int      `json:"chars,omitempty"`
 }
 
 // Ask is one question of an AskUserQuestion: its tab's header, the

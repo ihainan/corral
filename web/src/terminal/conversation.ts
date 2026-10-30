@@ -11,6 +11,9 @@ export interface ConvoTool {
   name: string
   title?: string
   detail?: string
+  // (Codex's write_stdin) what was put to a command still running: the keys
+  // pressed by name, else how many characters were typed (never what).
+  stdin?: { session: string; keys?: string[]; chars?: number }
   old?: string
   new?: string
   add?: number // (an edit) lines added and removed

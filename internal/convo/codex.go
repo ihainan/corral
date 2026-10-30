@@ -51,7 +51,29 @@ type Codex struct {
 	turns       []*Entry
 	turnOpen    bool
 	backPending int
+	// plans: the task lists update_plan gave, each with the line it gave it
+	// on (the latest not taken back is the list; see Tasks).
+	plans []codexPlan
+	// asked: questions put to the person (request_user_input) not yet
+	// answered: the next message of theirs answers them.
+	asked []*Tool
+	// hidden: calls of the code mode's whose lines went (each of their
+	// things told of on its own): what comes back of them is let be.
+	hidden map[string]bool
 }
+
+type codexPlan struct {
+	e     *Entry
+	t     *Tool
+	tasks []Task
+}
+
+// Bounds of what is kept of plans, questions and hidden calls.
+const (
+	maxPlans  = 200
+	maxAsked  = 16
+	maxHidden = 1024
+)
 
 // maxTurns is how many turns' starts are kept (a backtrack goes back one
 // or two).
@@ -60,6 +82,7 @@ const maxTurns = 1000
 type codexOut struct {
 	text   string
 	failed bool
+	images int
 }
 
 func NewCodex() *Codex { return &Codex{tools: map[string][]*Tool{}} }
@@ -73,8 +96,18 @@ func (c *Codex) Meta() Meta {
 	}
 	return m
 }
-func (c *Codex) Trimmed() bool      { return c.trimmed }
-func (c *Codex) Tasks() []Task      { return nil }
+func (c *Codex) Trimmed() bool { return c.trimmed }
+
+// Tasks: the list the last update_plan not taken back gave (none, where
+// all of them were taken back or none was given).
+func (c *Codex) Tasks() []Task {
+	for i := len(c.plans) - 1; i >= 0; i-- {
+		if !c.plans[i].e.Gone {
+			return append([]Task(nil), c.plans[i].tasks...)
+		}
+	}
+	return nil
+}
 func (c *Codex) Queued() []Queued   { return nil }
 func (c *Codex) Running() []Running { return nil }
 
@@ -126,9 +159,70 @@ func (c *Codex) Prepend(other Parser) {
 	}
 	for id, out := range c.orphans {
 		if ts, ok := o.tools[id]; ok {
-			o.answer(ts, out.text, out.failed)
+			o.answer(ts, out)
 			delete(c.orphans, id)
 		}
+	}
+	// A thing told of in this part whose call is in the part before, or
+	// told of there as well (as it went on): one line, this part's (what is
+	// latest of it), with what only the call said of it (what it was for).
+	// The part before's line goes: none of it was shown yet.
+	drop := map[*Tool]bool{}
+	touched := false
+	for id, ct := range c.seen {
+		if ots, ok := o.tools[id]; ok && len(ots) > 0 {
+			mergeCall(ct, ots)
+			for _, t := range ots {
+				drop[t] = true
+			}
+			delete(o.tools, id)
+			touched = true
+		}
+		if ot := o.seen[id]; ot != nil && ot != ct {
+			drop[ot] = true
+			delete(o.seen, id)
+		}
+	}
+	if len(drop) > 0 {
+		o.entries = dropTools(o.entries, drop)
+		o.turns = keptTurns(o.turns, o.entries)
+	}
+	if touched {
+		c.rev++
+		for _, ct := range c.seen {
+			if ct.merged && ct.at != nil {
+				ct.at.Rev = c.rev
+			}
+		}
+	}
+	// Its plans before this part's; its questions answered by a message of
+	// the person's in this one.
+	c.plans = append(append([]codexPlan(nil), o.plans...), c.plans...)
+	if n := len(c.plans) - maxPlans; n > 0 {
+		c.plans = c.plans[n:]
+	}
+	answered := false
+	for _, e := range c.entries {
+		if e.Role == RoleUser {
+			answered = true
+			break
+		}
+	}
+	if answered {
+		for _, t := range o.asked {
+			t.Done = true
+		}
+	} else {
+		c.asked = append(append([]*Tool(nil), o.asked...), c.asked...)
+		if n := len(c.asked) - maxAsked; n > 0 {
+			c.asked = c.asked[n:]
+		}
+	}
+	for id := range o.hidden {
+		if c.hidden == nil || len(c.hidden) >= maxHidden {
+			break
+		}
+		c.hidden[id] = true
 	}
 	// (Each command told of on its own in either part: the lines of the
 	// calls that run them go, in the part before this one too.)
@@ -263,6 +357,11 @@ func (c *Codex) trim() {
 				delete(c.tools, id)
 			}
 		}
+		for id, t := range c.seen {
+			if gone[t] {
+				delete(c.seen, id)
+			}
+		}
 		c.entries = append([]*Entry(nil), c.entries[n:]...)
 		c.turns = keptTurns(c.turns, c.entries)
 	}
@@ -304,6 +403,7 @@ type codexPayload struct {
 	} `json:"summary"`
 	CallID    string          `json:"call_id"`
 	Name      string          `json:"name"`
+	Namespace string          `json:"namespace"`
 	Input     string          `json:"input"`
 	Arguments string          `json:"arguments"`
 	Output    json.RawMessage `json:"output"`
@@ -326,8 +426,26 @@ type codexPayload struct {
 	Git *struct {
 		Branch string `json:"branch"`
 	} `json:"git"`
-	// compacted
+	// compacted; user_message and error (older Codex)
 	Message string `json:"message"`
+	// web_search_end, view_image_tool_call, mcp_tool_call_end (older Codex)
+	Query      string `json:"query"`
+	Path       string `json:"path"`
+	Invocation *struct {
+		Server    string          `json:"server"`
+		Tool      string          `json:"tool"`
+		Arguments json.RawMessage `json:"arguments"`
+	} `json:"invocation"`
+	Result json.RawMessage `json:"result"`
+	// exited_review_mode
+	Review *struct {
+		Explanation string `json:"overall_explanation"`
+	} `json:"review_output"`
+	// thread_goal_updated
+	Goal *struct {
+		Objective string `json:"objective"`
+		Status    string `json:"status"`
+	} `json:"goal"`
 }
 
 func (c *Codex) line(b []byte) {
@@ -400,43 +518,198 @@ func (c *Codex) event(r *codexRow, p *codexPayload) {
 		if p.Item == nil {
 			return
 		}
-		// (A command it ran, a search it made: told of only here, where it
-		// ran them as one process of its own. What it said and thought is
+		// (A command it ran, a search it made, a file it changed…: told of
+		// here, where it is done: the line of the call of the same id, if
+		// there is one, is the one it makes up. What it said and thought is
 		// told of again as response_item rows, and is read from those.)
-		switch p.Item.Type {
+		it := p.Item
+		switch it.Type {
 		case "CommandExecution":
-			c.ranCommand(r, p.Item)
-			return
+			c.ranCommand(r, it)
 		case "WebSearch":
-			c.searched(r, p.Item)
-			return
-		}
-		if p.Item.Type != "UserMessage" {
-			return
-		}
-		var parts []Part
-		for _, b := range codexContent(p.Item.Content) {
-			switch {
-			case b.Type == "text" || b.Type == "input_text":
-				if strings.TrimSpace(b.Text) != "" {
-					parts = append(parts, textPart(KindText, b.Text))
+			c.searched(r, it.ID, it.Query)
+		case "Extension":
+			if it.Kind == "web.search" && it.Action != nil {
+				c.searched(r, it.ID, strings.Join(append([]string{it.Action.Query}, it.Action.Queries...), "\n"))
+			}
+		case "FileChange":
+			c.fileChanged(r, it.ID, it.Changes, it.Status == "failed")
+		case "ImageView":
+			c.done(r, it.ID, &Tool{Name: "Read", Detail: clip(strings.TrimPrefix(it.Path, "file://"), maxDetail)}, "", false)
+		case "McpToolCall":
+			text, failed := mcpResult(it.Result)
+			c.done(r, it.ID, codexMCP(it.Server, it.Tool, it.Arguments), text, failed || it.Status == "failed")
+		case "ContextCompaction":
+			c.add(r, it.ID, RoleNote, []Part{{Kind: KindEvent, Event: &Event{Kind: EventCompact}}})
+		case "UserMessage":
+			var parts []Part
+			for _, b := range codexContent(it.Content) {
+				switch {
+				case b.Type == "text" || b.Type == "input_text":
+					if strings.TrimSpace(b.Text) != "" {
+						parts = append(parts, textPart(KindText, b.Text))
+					}
+				case strings.Contains(b.Type, "image"):
+					parts = append(parts, Part{Kind: KindImage})
 				}
-			case strings.Contains(b.Type, "image"):
-				parts = append(parts, Part{Kind: KindImage})
+			}
+			c.userSaid(r, it.ID, parts)
+		}
+	// An older Codex's account (to 0.147): what the person wrote, what went
+	// wrong, a review, and what its tools did when it told of them so.
+	case "user_message":
+		if strings.TrimSpace(p.Message) != "" {
+			c.userSaid(r, "", []Part{textPart(KindText, p.Message)})
+		}
+	case "error":
+		if t := strings.TrimSpace(p.Message); t != "" {
+			c.add(r, "", RoleNote, []Part{{Kind: KindTrouble, Trouble: &Trouble{Kind: "api", Text: clip(t, maxDetail)}}})
+		}
+	case "exited_review_mode":
+		if p.Review != nil && strings.TrimSpace(p.Review.Explanation) != "" {
+			c.add(r, "", RoleAssistant, []Part{textPart(KindText, p.Review.Explanation)})
+		}
+	case "context_compacted":
+		c.add(r, "", RoleNote, []Part{{Kind: KindEvent, Event: &Event{Kind: EventCompact}}})
+	case "web_search_end":
+		c.searched(r, p.CallID, p.Query)
+	case "view_image_tool_call":
+		c.done(r, p.CallID, &Tool{Name: "Read", Detail: clip(strings.TrimPrefix(p.Path, "file://"), maxDetail)}, "", false)
+	case "mcp_tool_call_end":
+		if p.Invocation != nil {
+			text, failed := mcpResult(p.Result)
+			c.done(r, p.CallID, codexMCP(p.Invocation.Server, p.Invocation.Tool, p.Invocation.Arguments), text, failed)
+		}
+	case "thread_goal_updated":
+		if p.Goal != nil && strings.TrimSpace(p.Goal.Objective) != "" {
+			c.add(r, "", RoleAssistant, []Part{{Kind: KindTool, Tool: &Tool{Name: "update_goal", Detail: clip(clean(p.Goal.Objective), maxDetail), Done: true}}})
+		}
+	}
+}
+
+// userSaid: a message of the person's. The first names the conversation
+// (Codex names none); it answers the questions put to them before.
+func (c *Codex) userSaid(r *codexRow, id string, parts []Part) {
+	if len(parts) == 0 {
+		return
+	}
+	if c.title == "" {
+		for _, pt := range parts {
+			if pt.Kind == KindText {
+				c.title = clip(strings.Join(strings.Fields(pt.Text), " "), maxTitle)
+				break
 			}
 		}
-		if len(parts) == 0 {
-			return
+	}
+	for _, t := range c.asked {
+		t.Done = true
+	}
+	c.touch(c.asked)
+	c.asked = nil
+	c.add(r, id, RoleUser, parts)
+}
+
+// codexMCP: an MCP server's tool called (its name as Claude Code's are:
+// mcp__<server>__<tool>; Codex's own web tool as a search).
+func codexMCP(server, tool string, args json.RawMessage) *Tool {
+	if server == "codex_apps" && strings.HasSuffix(tool, "web_run") {
+		var a map[string]json.RawMessage
+		_ = json.Unmarshal(args, &a)
+		return webRun(a)[0]
+	}
+	return &Tool{Name: clip("mcp__"+server+"__"+tool, 128), Detail: clip(compactJSON(string(args)), maxDetail)}
+}
+
+// done: a thing Codex did, told of when done: on the line of its call (of
+// the same id), else one of its own (once: told again, the same line).
+func (c *Codex) done(r *codexRow, id string, t *Tool, text string, failed bool) {
+	id = clip(id, maxID)
+	if ts, ok := c.tools[id]; ok && len(ts) > 0 {
+		for _, x := range ts {
+			x.Done = true
+			x.Error = x.Error || failed
 		}
-		if c.title == "" {
-			for _, pt := range parts {
-				if pt.Kind == KindText {
-					c.title = clip(strings.Join(strings.Fields(pt.Text), " "), maxTitle)
+		if text != "" && ts[0].Result == "" {
+			ts[0].setResult(clean(text))
+			ts[0].ResultLines = lineCount(text)
+		}
+		c.touch(ts)
+		return
+	}
+	if was := c.seen[id]; id != "" && was != nil {
+		was.Done, was.Error = true, was.Error || failed
+		c.touch([]*Tool{was})
+		return
+	}
+	t.ID, t.Done, t.Error = id, true, failed
+	if text != "" {
+		t.setResult(clean(text))
+		t.ResultLines = lineCount(text)
+	}
+	c.add(r, id, RoleAssistant, []Part{{Kind: KindTool, Tool: t}})
+	if id != "" {
+		c.mark(id, t)
+	}
+}
+
+// fileChanged: files a change made (FileChange). On the lines of the call
+// that made it (a patch applied by a command: one line a file), what the
+// patch did not say (a file moved, one it did not name, its failing); else
+// a line of its own, as the code mode's changes have.
+func (c *Codex) fileChanged(r *codexRow, id string, changes map[string]codexChange, failed bool) {
+	id = clip(id, maxID)
+	if len(changes) == 0 || id == "" {
+		return
+	}
+	ts, more := changeTools(changes)
+	if was, ok := c.tools[id]; ok && len(was) > 0 {
+		at := was[0].at
+		byPath := map[string]*Tool{}
+		for _, t := range was {
+			byPath[t.Detail] = t
+			t.Done, t.Error = true, t.Error || failed
+		}
+		for _, t := range ts {
+			if old := byPath[t.Detail]; old != nil {
+				if strings.Contains(t.Title, " → ") {
+					old.Title = t.Title
+				}
+				continue
+			}
+			for _, x := range was {
+				if strings.HasSuffix(t.Detail, "/"+x.Detail) && x.Detail != "" {
+					if strings.Contains(t.Title, " → ") {
+						x.Title = t.Title
+					}
+					t = nil
 					break
 				}
 			}
+			if t == nil || at == nil || len(at.Parts) >= maxParts {
+				continue
+			}
+			t.ID, t.Done, t.Error, t.at = id, true, failed, at
+			at.Parts = append(at.Parts, Part{Kind: KindTool, Tool: t})
+			c.tools[id] = append(c.tools[id], t)
 		}
-		c.add(r, p.Item.ID, RoleUser, parts)
+		c.touch(c.tools[id])
+		return
+	}
+	if c.seen[id] != nil {
+		return
+	}
+	c.itemsTell()
+	var parts []Part
+	for _, t := range ts {
+		t.ID, t.Done, t.Error = id, true, failed
+		parts = append(parts, Part{Kind: KindTool, Tool: t})
+	}
+	if more > 0 && len(ts) > 0 {
+		ts[len(ts)-1].MoreFiles = more
+	}
+	c.add(r, id, RoleAssistant, parts)
+	if len(ts) > 0 {
+		c.mark(id, ts[0])
 	}
 }
 
@@ -450,20 +723,33 @@ func (c *Codex) ranCommand(r *codexRow, it *codexItem) {
 	if id == "" {
 		return
 	}
-	c.itemsTell()
 	cmd := strings.Join(it.Command, " ")
 	if len(it.Parsed) > 0 && it.Parsed[0].Cmd != "" {
 		cmd = it.Parsed[0].Cmd // (what it means to run, without the shell it runs it in)
 	}
-	if strings.TrimSpace(cmd) == "" {
-		return
-	}
-	t := &Tool{ID: id, Name: "Bash", Detail: clip(clean(cmd), maxDetail)}
 	failed := it.Status == "failed" || (it.ExitCode != nil && *it.ExitCode != 0)
 	out := it.Output
 	if it.ExitCode != nil && *it.ExitCode != 0 {
 		out = fmt.Sprintf("Exit code %d\n%s", *it.ExitCode, out)
 	}
+	// (Of a function call's command: the call's line has it.)
+	if ts, ok := c.tools[id]; ok {
+		for _, t := range ts {
+			if t.Name != "Bash" {
+				continue
+			}
+			t.Done, t.Error = it.Status != "in_progress", failed
+			t.setResult(clean(out))
+			t.ResultLines = lineCount(out)
+		}
+		c.touch(ts)
+		return
+	}
+	c.itemsTell()
+	if strings.TrimSpace(cmd) == "" {
+		return
+	}
+	t := &Tool{ID: id, Name: "Bash", Detail: clip(clean(cmd), maxDetail)}
 	// (Told of again as it ends: the line it had is the one that changes.)
 	if was, ok := c.seen[id]; ok {
 		t = was
@@ -493,6 +779,9 @@ func (c *Codex) itemsTell() {
 		for _, p := range e.Parts {
 			if p.Kind == KindTool && p.Tool != nil && p.Tool.fromCall {
 				dropped = true
+				if ts := c.tools[p.Tool.ID]; len(ts) > 0 && ts[0] == p.Tool {
+					c.hide(p.Tool.ID)
+				}
 				continue
 			}
 			kept = append(kept, p)
@@ -503,15 +792,14 @@ func (c *Codex) itemsTell() {
 	}
 }
 
-// searched: a search the agent made on the web.
-func (c *Codex) searched(r *codexRow, it *codexItem) {
-	id := clip(it.ID, maxID)
-	if id == "" || c.seen[id] != nil || strings.TrimSpace(it.Query) == "" {
+// searched: a search the agent made on the web (on its call's line, if
+// it has one).
+func (c *Codex) searched(r *codexRow, id, query string) {
+	query = strings.TrimSpace(query)
+	if id == "" || c.seen[clip(id, maxID)] != nil || (query == "" && c.tools[clip(id, maxID)] == nil) {
 		return
 	}
-	t := &Tool{ID: id, Name: "WebSearch", Detail: clip(clean(it.Query), maxDetail), Done: true}
-	c.add(r, id, RoleAssistant, []Part{{Kind: KindTool, Tool: t}})
-	c.mark(id, t)
+	c.done(r, id, &Tool{Name: "WebSearch", Detail: clip(clean(query), maxDetail)}, "", false)
 }
 
 // mark keeps the line a thing told of on its own was given, so that it is
@@ -521,9 +809,7 @@ func (c *Codex) mark(id string, t *Tool) {
 	if c.seen == nil {
 		c.seen = map[string]*Tool{}
 	}
-	if len(c.seen) < maxSeenItems {
-		c.seen[id] = t
-	}
+	c.seen[id] = t // (bounded by the entries kept: trim forgets those it leaves out)
 }
 
 type codexItem struct {
@@ -537,6 +823,19 @@ type codexItem struct {
 	Output   string          `json:"aggregated_output"`
 	ExitCode *int            `json:"exit_code"`
 	Query    string          `json:"query"`
+	// FileChange, ImageView, McpToolCall, Extension
+	Changes   map[string]codexChange `json:"changes"`
+	Path      string                 `json:"path"`
+	Server    string                 `json:"server"`
+	Tool      string                 `json:"tool"`
+	Arguments json.RawMessage        `json:"arguments"`
+	Result    json.RawMessage        `json:"result"`
+	Kind      string                 `json:"kind"`
+	Action    *struct {
+		Query   string   `json:"query"`
+		Queries []string `json:"queries"`
+		URL     string   `json:"url"`
+	} `json:"action"`
 }
 
 type codexParsed struct {
@@ -584,64 +883,101 @@ func (c *Codex) item(r *codexRow, p *codexPayload) {
 			c.add(r, p.ID, RoleAssistant, []Part{textPart(KindThinking, strings.Join(ts, "\n\n"))})
 		}
 	case "custom_tool_call", "function_call":
-		src := p.Input
-		if p.Type == "function_call" {
-			src = p.Arguments
-		}
-		tools := codexTools(p.Name, src)
 		id := clip(p.CallID, maxID)
-		for _, t := range tools {
-			t.ID = id
+		var tools []*Tool
+		var plan []Task
+		if p.Type == "function_call" {
+			tools, plan = codexFn(p.Namespace, p.Name, p.Arguments)
+		} else {
+			// (The code mode's script: what it runs is read out of it; each
+			// thing it does is told of on its own as well, in a newer
+			// Codex, and then its lines go.)
+			tools = codexTools(p.Name, p.Input)
+			for _, t := range tools {
+				if t.Name != "request_user_input" {
+					t.fromCall = true
+				}
+			}
 		}
 		var parts []Part
 		for _, t := range tools {
-			if t.Name == "Bash" {
-				t.fromCall = true
-				if c.itemCmds {
-					continue // (each of its commands is told of on its own)
-				}
+			t.ID = id
+			if t.fromCall && c.itemCmds {
+				continue // (each of its things is told of on its own)
 			}
 			parts = append(parts, Part{Kind: KindTool, Tool: t})
 		}
+		if len(parts) == 0 {
+			c.hide(id) // (its things are told of on their own: what comes back of it is let be)
+			return
+		}
 		c.add(r, p.ID, RoleAssistant, parts)
-		if id != "" && len(tools) > 0 {
-			c.tools[id] = tools
+		kept := make([]*Tool, 0, len(parts))
+		for _, pt := range parts {
+			kept = append(kept, pt.Tool)
+		}
+		if id != "" {
+			c.tools[id] = kept
+		}
+		if plan != nil && len(kept) > 0 {
+			c.plans = append(c.plans, codexPlan{e: kept[0].at, t: kept[0], tasks: plan})
+			if n := len(c.plans) - maxPlans; n > 0 {
+				c.plans = append([]codexPlan(nil), c.plans[n:]...)
+			}
+		}
+		for _, t := range kept {
+			if strings.HasPrefix(t.Name, "request_user_input") && len(c.asked) < maxAsked {
+				c.asked = append(c.asked, t)
+			}
 		}
 		if out, ok := c.orphans[id]; ok {
-			c.answer(tools, out.text, out.failed)
+			c.answer(kept, out)
 			delete(c.orphans, id)
 		}
 	case "custom_tool_call_output", "function_call_output":
-		text, failed := codexOutput(p.Output)
+		var out codexOut
+		out.text, out.failed, out.images = codexResult(p.Output)
 		id := clip(p.CallID, maxID)
 		if ts, ok := c.tools[id]; ok {
-			c.answer(ts, text, failed)
-			c.touch(ts) // (the call's entry changed)
-		} else if id != "" && len(c.orphans) < maxOrphans {
+			c.answer(ts, out)
+		} else if id != "" && !c.hidden[id] && len(c.orphans) < maxOrphans {
 			if c.orphans == nil {
 				c.orphans = map[string]codexOut{}
 			}
-			c.orphans[id] = codexOut{text, failed}
+			c.orphans[id] = out
 		}
 	}
 }
 
-// touch marks the entries of these calls as changed now.
+// hide: a call whose line went (each thing it did told of on its own):
+// what comes back of it is let be. (Bounded: a full set starts anew, and
+// what comes back of one forgotten is kept as of a call not read.)
+func (c *Codex) hide(id string) {
+	if id == "" {
+		return
+	}
+	if c.hidden == nil || len(c.hidden) >= maxHidden {
+		c.hidden = map[string]bool{}
+	}
+	c.hidden[id] = true
+	delete(c.tools, id)
+}
+
+// touch marks the entries of these calls as changed now (each line knows
+// its entry: none is looked for).
 func (c *Codex) touch(ts []*Tool) {
-	for _, e := range c.entries {
-		for _, p := range e.Parts {
-			for _, t := range ts {
-				if p.Tool == t {
-					e.Rev = c.rev
-				}
-			}
+	for _, t := range ts {
+		if t != nil && t.at != nil {
+			t.at.Rev = c.rev
 		}
 	}
 }
 
 // answer: what came back of a call, on its first tool (a call's tools are
-// its file edits, or its one command): the rest only done.
-func (c *Codex) answer(ts []*Tool, text string, failed bool) {
+// its file edits, or its one command): the rest only done. A question put
+// to the person is not answered by its being taken ({"accepted": true}):
+// their next message answers it. A plan that failed is no list.
+func (c *Codex) answer(ts []*Tool, out codexOut) {
 	at := 0 // (its command's, if it ran one; else its first file's)
 	for i, t := range ts {
 		if t.Name == "Bash" {
@@ -649,14 +985,28 @@ func (c *Codex) answer(ts []*Tool, text string, failed bool) {
 			break
 		}
 	}
+	failed := out.failed || codexExit.MatchString(out.text)
 	for i, t := range ts {
-		t.Done = true
-		if i == at {
-			t.setResult(clean(text))
-			t.ResultLines = lineCount(text)
+		if strings.HasPrefix(t.Name, "request_user_input") && !failed {
+			continue
 		}
-		t.Error = failed || codexExit.MatchString(text)
+		t.Done = true
+		if i == at && t.Name != "request_user_input" {
+			t.setResult(clean(out.text))
+			t.ResultLines = lineCount(out.text)
+			t.Images = out.images
+		}
+		t.Error = failed
+		if failed && t.Name == "TodoWrite" {
+			for j := len(c.plans) - 1; j >= 0; j-- {
+				if c.plans[j].t == t {
+					c.plans = append(c.plans[:j:j], c.plans[j+1:]...)
+					break
+				}
+			}
+		}
 	}
+	c.touch(ts)
 }
 
 var (
@@ -664,17 +1014,6 @@ var (
 	codexExit   = regexp.MustCompile(`(?m)^Process exited with code [1-9]`)
 	codexHead   = regexp.MustCompile(`^Script (completed|failed)\nWall time [^\n]*\n(Output:\n)?`)
 )
-
-// codexOutput: what came back, as text (its "Script completed / Wall time"
-// lines left out), and whether the script failed (as those lines said).
-func codexOutput(raw json.RawMessage) (string, bool) {
-	var parts []string
-	for _, b := range codexContent(raw) {
-		parts = append(parts, b.Text)
-	}
-	all := strings.Join(parts, "")
-	return codexHead.ReplaceAllString(all, ""), codexFailed.MatchString(all)
-}
 
 var (
 	jsString   = `"((?:[^"\\]|\\.)*)"`
@@ -754,23 +1093,64 @@ func codexTools(name, src string) []*Tool {
 	if len(cmds) > 0 {
 		out = append(out, &Tool{Name: "Bash", Detail: clip(strings.Join(cmds, "\n"), maxDetail)})
 	}
+	// The rest of what it calls, by name (its arguments are code, not read
+	// here: what each did is told of on its own, in a newer Codex). Not the
+	// commands and patches read above, nor what it types to a command.
+	seen := map[string]bool{}
+	asks := false
+	for _, m := range toolCalled.FindAllStringSubmatch(src, 32) {
+		n := m[1]
+		if seen[n] || (n == "exec_command" && len(cmds) > 0) || (n == "apply_patch" && len(out) > 0) {
+			continue
+		}
+		seen[n] = true
+		if strings.HasPrefix(n, "request_user_input") {
+			asks = true
+			continue
+		}
+		if t := scriptTool(n, src); t != nil && len(out) < maxParts {
+			out = append(out, t)
+		}
+	}
 	// (It asks the person, last: what it waits on.)
-	if len(out) > 0 && strings.Contains(src, "tools.request_user_input") {
+	if asks {
 		out = append(out, &Tool{Name: "request_user_input"})
 	}
 	if len(out) > 0 {
 		return out
 	}
-	called := ""
-	if m := toolCalled.FindStringSubmatch(src); m != nil {
-		called = m[1]
-	}
-	t := &Tool{Name: clip(firstNonEmpty(called, name), 128)}
-	if name == "function_call" || called == "" {
-		t.Detail = clip(strings.TrimSpace(src), maxDetail)
-	}
-	return []*Tool{t}
+	// (Nothing it calls named: the script, its first line only.)
+	return []*Tool{{Name: clip(name, 128), Detail: clip(firstLineOf(src), maxDetail)}}
 }
+
+// scriptTool: a tool a script of the code mode calls, as the tool the view
+// knows that does the same (its arguments not read: they are code).
+func scriptTool(name, src string) *Tool {
+	switch name {
+	case "exec_command":
+		return &Tool{Name: "Bash"}
+	case "write_stdin", "wait":
+		return &Tool{Name: "BashOutput"}
+	case "view_image":
+		return &Tool{Name: "Read"}
+	case "update_plan":
+		return &Tool{Name: "TodoWrite"}
+	case "web__run", "web_run":
+		var qs []string
+		for _, m := range scriptQuery.FindAllStringSubmatch(src, 8) {
+			if q, ok := jsUnquote(`"` + m[1] + `"`); ok && strings.TrimSpace(q) != "" {
+				qs = append(qs, q)
+			}
+		}
+		return &Tool{Name: "WebSearch", Detail: clip(clean(strings.Join(qs, "\n")), maxDetail)}
+	case "text", "image", "store", "load", "notify":
+		return nil // (the script's own helpers: what it shows, keeps)
+	}
+	return &Tool{Name: clip(name, 128)}
+}
+
+// scriptQuery: a search's words in a script ({q: "…"}).
+var scriptQuery = regexp.MustCompile(`\bq"?\s*:\s*"((?:[^"\\]|\\.)*)"`)
 
 // patchTools: an apply_patch's files, each with its lines added and
 // removed and its hunks.
@@ -834,7 +1214,13 @@ func (c *Codex) add(r *codexRow, id, role string, parts []Part) {
 	if id == "" {
 		id = "c" + strconv.Itoa(c.seq)
 	}
-	c.entries = append(c.entries, &Entry{Seq: c.seq, Rev: c.rev, ID: clip(id, maxID), Role: role, Time: clip(r.Timestamp, 64), Parts: parts})
+	e := &Entry{Seq: c.seq, Rev: c.rev, ID: clip(id, maxID), Role: role, Time: clip(r.Timestamp, 64), Parts: parts}
+	for _, p := range parts {
+		if p.Tool != nil {
+			p.Tool.at = e
+		}
+	}
+	c.entries = append(c.entries, e)
 	if c.turnOpen {
 		c.turnOpen = false
 		c.turns = append(c.turns, c.entries[len(c.entries)-1])
@@ -860,6 +1246,70 @@ func (c *Codex) backtrack(n int) {
 	c.backPending = min(c.backPending+n-len(c.turns), maxTurns)
 	c.turns = nil
 	c.takeBack(c.entries, minSeq)
+}
+
+// mergeCall: what only the call said of a thing told of when done, put on
+// the line the telling made (it read in another part): what it was for,
+// its command or file as the call named it, and what came back of it if
+// the telling had nothing — as reading both together would have shown.
+// Each of the line's files is matched to the call's of the same path.
+func mergeCall(ct *Tool, calls []*Tool) {
+	lines := []*Tool{ct}
+	if e := ct.at; e != nil {
+		lines = lines[:0]
+		for _, p := range e.Parts {
+			if p.Tool != nil && p.Tool.ID == ct.ID {
+				lines = append(lines, p.Tool)
+			}
+		}
+	}
+	for _, l := range lines {
+		var call *Tool
+		for _, x := range calls {
+			if x.Name == l.Name && (x.Detail == l.Detail || (x.Detail != "" && strings.HasSuffix(l.Detail, "/"+x.Detail))) {
+				call = x
+				break
+			}
+		}
+		if call == nil && len(calls) == 1 && len(lines) == 1 {
+			call = calls[0]
+		}
+		if call == nil {
+			continue
+		}
+		l.merged = true
+		if call.Detail != "" {
+			l.Detail = call.Detail
+		}
+		if l.Title == "" || !strings.Contains(l.Title, " → ") {
+			l.Title = firstNonEmpty(call.Title, l.Title)
+		}
+		if l.Result == "" && call.Result != "" {
+			l.Result, l.ResultLines, l.Truncated, l.ResultTail, l.Omitted = call.Result, call.ResultLines, call.Truncated, call.ResultTail, call.Omitted
+		}
+		if l.Stdin == nil {
+			l.Stdin = call.Stdin
+		}
+	}
+}
+
+// dropTools: the entries without these lines (one with none left goes).
+func dropTools(entries []*Entry, drop map[*Tool]bool) []*Entry {
+	out := entries[:0]
+	for _, e := range entries {
+		kept := e.Parts[:0]
+		for _, p := range e.Parts {
+			if p.Tool != nil && drop[p.Tool] {
+				continue
+			}
+			kept = append(kept, p)
+		}
+		e.Parts = kept
+		if len(kept) > 0 {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 // minSeq is below any Seq (they go below 0 as parts are put before).

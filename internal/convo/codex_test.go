@@ -162,7 +162,7 @@ func TestCodexMixed(t *testing.T) {
 		t.Fatalf("tools %+v", ts)
 	}
 	c := NewCodex()
-	c.answer(ts, "ok", false)
+	c.answer(ts, codexOut{text: "ok"})
 	if ts[1].Result != "ok" || ts[0].Result != "" {
 		t.Errorf("result on %q / %q", ts[0].Result, ts[1].Result)
 	}

@@ -360,6 +360,7 @@ export function verbOf(name: string): Verb | null {
     case 'TodoWrite':
       return 'task'
     case 'AskUserQuestion':
+    case 'request_user_input': // (Codex's)
       return 'ask'
     case 'Monitor':
       return 'wait'
