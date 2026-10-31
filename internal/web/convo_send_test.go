@@ -165,7 +165,7 @@ func TestConvoPasteParts(t *testing.T) {
 	}{
 		{ok, 3}, // (cut out whole: on to the check of the process in front)
 		{fmt.Sprintf("%d+0+%d", n1, len(msg)-n1), 4},
-		{fmt.Sprintf("%d+%d", n1, len(msg)), 4},           // (its sum not the message's)
+		{fmt.Sprintf("%d+%d", n1, len(msg)), 4},          // (its sum not the message's)
 		{"9223372036854775807+9223372036854775807+7", 4}, // (too long: no sum run over)
 		{"+3", 4},
 		{"3+x", 4},
@@ -179,5 +179,80 @@ func TestConvoPasteParts(t *testing.T) {
 	}
 	if left, _ := os.ReadDir(tmp); len(left) != 0 {
 		t.Errorf("left behind: %v", left)
+	}
+}
+
+// A reply's text only pasted (Fill): its length "N-", nothing else, checked
+// before anything as a send's; then it pastes and does not press Enter
+// (not in front here: a valid one gets as far as that check, exit 3).
+func TestConvoFillLength(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no sh")
+	}
+	if _, err := os.Stat("/proc/self/stat"); err != nil {
+		t.Skip("no /proc")
+	}
+	dir := t.TempDir()
+	typed := filepath.Join(dir, "typed")
+	os.WriteFile(filepath.Join(dir, "herdr"), []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >>"+typed+"\n"), 0o755)
+	agent := exec.Command("sleep", "30")
+	agent.Env = append(os.Environ(), "HERDR_PANE_ID=p1")
+	if err := agent.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer agent.Process.Kill()
+	stat, _ := os.ReadFile(fmt.Sprintf("/proc/%d/stat", agent.Process.Pid))
+	rest := strings.Fields(string(stat[strings.LastIndexByte(string(stat), ')')+2:]))
+	start, _ := strconv.ParseInt(rest[19], 10, 64)
+	cmd := convoGatedFillCommand("", "herdr", "", "p1", "/run/x.sock", int64(agent.Process.Pid), start, sidA, 5, 0)
+	if !strings.Contains(cmd, " 5- '/run/x.sock'") {
+		t.Fatalf("its length not given as 5-: %s", cmd[len(cmd)-80:])
+	}
+	run := func(text, n string) int {
+		c := exec.Command("sh", "-c", strings.Replace(cmd, " 5- '/run/x.sock'", " "+n+" '/run/x.sock'", 1))
+		c.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"), "XDG_RUNTIME_DIR="+dir)
+		c.Stdin = strings.NewReader(text)
+		err := c.Run()
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			return ee.ExitCode()
+		}
+		return 0
+	}
+	for _, c := range []struct {
+		text, n string
+		want    int
+	}{{"hello", "5-", 3}, {"hello", "4-", 4}, {"hello", "-", 4}, {"hello", "5x-", 4}, {"hello", "5--", 4}} {
+		if got := run(c.text, c.n); got != c.want {
+			t.Errorf("%q %s: exit %d, want %d", c.text, c.n, got, c.want)
+		}
+	}
+	if _, err := os.Stat(typed); err == nil {
+		t.Error("something was typed")
+	}
+}
+
+// fillOK: one line, not blank, no control nor separator, at most 1000 characters.
+func TestFillOK(t *testing.T) {
+	d := strings.Repeat("a", 64)
+	for text, want := range map[string]bool{
+		"用 MongoDB 吧":             true,
+		" leading space":          true,
+		"-x flag":                 true,
+		"":                        false,
+		"   ":                     false,
+		"two\nlines":              false,
+		"a\tb":                    false,
+		"a b":                     false,
+		"a b":                     false,
+		strings.Repeat("字", 1000): true,
+		strings.Repeat("字", 1001): false,
+	} {
+		if got := fillOK(d, text); got != want {
+			t.Errorf("%q: %v", text[:min(len(text), 12)], got)
+		}
+	}
+	if fillOK("nothex", "ok") {
+		t.Error("no digest: ok")
 	}
 }

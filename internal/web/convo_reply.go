@@ -111,6 +111,18 @@ func replyOK(digest string, keys []string, text string) bool {
 	return false
 }
 
+// fillOK: a text to paste into a prompt's row to write in (Fill): the
+// screen answered a digest; one line, of 1 to maxFillText characters, not
+// blank, no control character nor line or paragraph separator (each would
+// end the row, or be a key) — review508.
+func fillOK(digest, text string) bool {
+	n := utf8.RuneCountInString(text)
+	return hexDigest.MatchString(digest) && utf8.ValidString(text) && n >= 1 && n <= maxFillText && strings.TrimSpace(text) != "" &&
+		!strings.ContainsFunc(text, func(r rune) bool { return unicode.IsControl(r) || r == '\u2028' || r == '\u2029' })
+}
+
+const maxFillText = 1000
+
 // replyPress: an answer's keys (herdr's names) as the pane's kind takes them.
 func replyPress(mode string, keys []string) []string {
 	if mode == "herdr" {

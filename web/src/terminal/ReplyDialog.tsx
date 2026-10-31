@@ -7,7 +7,8 @@ import { getReplyDraft, keepReplyDraft } from './drafts'
 import { asksQuestion, choices, codexAsk, codexOptions, dashedRule, promptBlock, question } from './menu'
 import { agentName, choiceText, lasting, questionText } from './askText'
 import { readAskScreen } from './askScreen'
-import { askOn, AskPanel, planOn, PlanPanel, ReviewPanel, useDrive } from './askCard'
+import { askOn, AskPanel, OwnBox, planOn, PlanPanel, ReviewPanel, useDrive } from './askCard'
+import { Filled, MaybeSent, NotAsShown, ownWords, permissionAmend } from './ownWords'
 import type { ConvoTool } from './conversation'
 
 interface Screen {
@@ -42,6 +43,9 @@ export interface ReplyTarget {
   agent?: string // (whose: claude, codex…)
   screen: () => Promise<Screen>
   reply: (body: { digest: string } & ({ keys: string[] } | { text: string })) => Promise<unknown>
+  // (A text only pasted into a prompt's row that takes words, no Enter:
+  // the conversation's only — see ownWords.ts.)
+  fill?: (body: { digest: string; text: string }) => Promise<unknown>
 }
 
 export function herdrTarget(sessionId: string, agent: HerdrAgent): ReplyTarget {
@@ -49,7 +53,7 @@ export function herdrTarget(sessionId: string, agent: HerdrAgent): ReplyTarget {
   return { key: sessionId + ' ' + agent.pane_id, agent: agent.agent, screen: () => api<Screen>('GET', base + '/screen'), reply: (b) => api('POST', base + '/reply', b) }
 }
 
-export function convoTarget(sessionId: string, bind: { pane: string; pid: number; start: number; session: string; agent?: string }): ReplyTarget {
+export function convoTarget(sessionId: string, bind: { pane: string; pid: number; start: number; session: string; agent?: string }, canFill = false): ReplyTarget {
   const base = `/api/sessions/${sessionId}/conversation`
   const who = { pane: bind.pane, pid: bind.pid, start: bind.start, session: bind.session }
   return {
@@ -57,6 +61,8 @@ export function convoTarget(sessionId: string, bind: { pane: string; pid: number
     agent: bind.agent,
     screen: () => api<Screen>('POST', base + '/screen', who),
     reply: (b) => api('POST', base + '/reply', { ...who, ...b }),
+    // (Claude Code's, in tmux: as tried — plans/5-claude-own-words.md.)
+    fill: canFill && bind.agent === 'claude' ? (b) => api('POST', base + '/reply', { ...who, ...b, fill: true }) : undefined,
   }
 }
 
@@ -393,9 +399,35 @@ export function InlineReply({ target, onLoaded, resizedAt, active = true, held, 
   const [shown, setShown] = useState(false)
   const answered = useRef('')
   const { screen, setScreen, failed, reading, changed, busy: sending, error: sendError, text, setText, load, send, submit, opts } = useReply(target, { onLoaded, resizedAt, onSent: () => setSent(answered.current) })
+  // A permission's amend: the person's words with Yes or No (Tab on it, then
+  // the words, then Enter: ownWords). Typed, or Enter perhaps gone, and
+  // failed: said so, not offered again on this prompt.
+  const [amending, setAmending] = useState(false)
+  const [amendError, setAmendError] = useState('')
+  const [amendStuck, setAmendStuck] = useState('')
+  const amend = (n: number, yes: boolean, words: string) => {
+    if (!screen || amending) return
+    setAmending(true)
+    setAmendError('')
+    const on = screen.digest
+    ownWords(target, screen, permissionAmend(n, yes), words)
+      .then(() => {
+        answered.current = on
+        setSent(on)
+      })
+      .catch((e) => {
+        if (e instanceof NotAsShown) setAmendError(t('reply.changed'))
+        else {
+          setAmendStuck(on)
+          setAmendError(t(e instanceof Filled ? 'own.filled' : e instanceof MaybeSent ? 'own.maybeSent' : 'own.filled'))
+        }
+        void load()
+      })
+      .finally(() => setAmending(false))
+  }
   const driven = useDrive(screen, setScreen, load, () => setSent(answered.current), call?.id ?? '')
-  const busy = sending || driven.busy
-  const error = sendError || driven.error
+  const busy = sending || driven.busy || amending
+  const error = sendError || driven.error || amendError
   const state = screen && !driven.unsure ? readAskScreen(screen.text) : ({ kind: 'unknown' } as const)
   const askAt = askOn(call, state)
   const structured = !!screen && (askAt >= 0 || (state.kind === 'review' && call?.name === 'AskUserQuestion' && !call.done) || planOn(call, state, screen.text))
@@ -547,6 +579,19 @@ export function InlineReply({ target, onLoaded, resizedAt, active = true, held, 
               })}
             </div>
           )}
+          {(() => {
+            // (Claude Code's permission, amend offered: Yes and No with the person's words.)
+            if (!target.fill || !screen || !/Tab to amend/.test(screen.text) || amendStuck) return null
+            const yes = opts.find((o) => /^Yes$/.test(o.label))
+            const no = opts.find((o) => /^No$/.test(o.label))
+            if (!yes && !no) return null
+            return (
+              <>
+                {yes && <OwnBox label={t('own.yesWith')} busy={busy} onGo={(w) => amend(Number(yes.key), true, w)} />}
+                {no && <OwnBox label={t('own.noWith')} busy={busy} onGo={(w) => amend(Number(no.key), false, w)} />}
+              </>
+            )
+          })()}
           <form className="convo-ask-text" onSubmit={submit}>
             <input
               className="input"

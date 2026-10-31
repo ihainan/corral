@@ -2413,6 +2413,12 @@ func convoGatedPasteCommand(gate, mode, session, pane, socket string, pid, start
 	return convoGated(gate, mode, session, pane, socket, pid, start, sid, strings.Join(ns, "+"), nil, read)
 }
 
+// convoGatedFillCommand: convoGatedCommand for a text only pasted, no Enter
+// after it (a prompt's row to write in: see Fill).
+func convoGatedFillCommand(gate, mode, session, pane, socket string, pid, start int64, sid string, length int, read int) string {
+	return convoGated(gate, mode, session, pane, socket, pid, start, sid, strconv.Itoa(length)+"-", nil, read)
+}
+
 func convoGated(gate, mode, session, pane, socket string, pid, start int64, sid, n string, keys []string, read int) string {
 	script := `PATH="$HOME/.local/bin:$HOME/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 mode=$1 sess=$2 p=$3 pid=$4 start=$5 len=$6 sock=$7 sid=$8 rd=$9
@@ -2438,6 +2444,14 @@ case $len in *+*)
     n=$((n + x))
   done; unset IFS
   len=$n ;;
+esac
+# (A text only pasted, its length "12-": no Enter after it, the screen read —
+# a row of a prompt's to write in, the page pressing Enter once it has
+# looked. plans/5-claude-own-words.md)
+noenter=
+case $len in *-)
+  noenter=1 len=${len%-}
+  case $len in ''|*[!0-9]*) exit 4;; esac ;;
 esac
 # (What the pane shows after, its last rd lines but blank ones at the end.)
 # (Not read, it exits 8: no screen is not an empty one.)
@@ -2647,6 +2661,7 @@ if [ "$mode" = tmux ]; then
   tmux paste-buffer -p -r -d -b "$b" -t "$p" 9>&- || exit 6
   sleep 0.3
   fi
+  if [ -n "$noenter" ]; then screen; exit 0; fi
   gate_enter
   tmux send-keys -t "$p" Enter 9>&- || exit 5
   screen
@@ -2689,6 +2704,7 @@ else
   HERDR_SOCKET_PATH=$sock herdr pane send-text "$p" "$e[200~$t$e[201~" >/dev/null 2>&1 9>&- || exit 6
   sleep 0.3
   fi
+  if [ -n "$noenter" ]; then screen; exit 0; fi
   gate_enter
   HERDR_SOCKET_PATH=$sock herdr pane send-keys "$p" enter >/dev/null 2>&1 9>&- || exit 5
   screen
@@ -2966,6 +2982,11 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		// pressed (of replyKeys, up to 4) or the text typed and Enter.)
 		Digest string   `json:"digest"`
 		Keys   []string `json:"keys"`
+		// (reply, Claude Code's: the text pasted into the row its prompt
+		// lets the person write in — a question's "Type something.", a
+		// permission's amend, a plan's "Tell Claude what to change" — and
+		// no Enter: the page looks, then presses it. plans/5-claude-own-words.md)
+		Fill bool `json:"fill"`
 		// (card: its key, and the card as the page shows it.)
 		Key  string     `json:"key"`
 		Card *convoCard `json:"card"`
@@ -2979,7 +3000,13 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	}
 	if what == "reply" {
 		textOK = replyOK(b.Digest, b.Keys, b.Text) // (keys, or a line: its own rules)
+		if b.Fill {
+			textOK = len(b.Keys) == 0 && fillOK(b.Digest, b.Text)
+		}
 		text = b.Text
+	}
+	if b.Fill && what != "reply" {
+		textOK = false
 	}
 	if what != "reply" && (b.Digest != "" || len(b.Keys) > 0) {
 		textOK = false
@@ -3172,6 +3199,11 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		writeError(w, http.StatusConflict, "unsupported", "not for this agent")
 		return
 	}
+	if b.Fill && (front.agent != "claude" || sess.Persistence != "tmux") { // (Claude Code's prompts' rows only, in tmux, as tried: plans/5-claude-own-words.md)
+		reason = "unsupported"
+		writeError(w, http.StatusConflict, "unsupported", "not for this agent")
+		return
+	}
 	// (Stopped with Ctrl+Z, or another program in front of it: keys typed
 	// there would go to that.)
 	if !front.fg {
@@ -3331,6 +3363,9 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		}
 	}
 	cmd := convoGatedCommand(gate, sess.Persistence, sess.TmuxSession, b.Pane, socket, b.PID, b.Start, b.Session, len(text), press, modeLines(what))
+	if what == "reply" && b.Fill {
+		cmd = convoGatedFillCommand(gate, sess.Persistence, sess.TmuxSession, b.Pane, socket, b.PID, b.Start, b.Session, len(text), modeLines(what))
+	}
 	if what == "send" && front.agent == "codex" {
 		// (Its pictures' paths each pasted on its own: Codex takes them for pictures — plans/4-codex-images.md.)
 		if parts := codexPasteParts(text); parts != nil {

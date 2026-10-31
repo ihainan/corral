@@ -734,9 +734,9 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     return undefined
   }, [convo.entries])
   const replyTo = useMemo(
-    () => (viaConvo && convo.bind ? convoTarget(sid, convo.bind) : herdr && row ? herdrTarget(sid, row.a) : null),
+    () => (viaConvo && convo.bind ? convoTarget(sid, convo.bind, cur.s.persistence === 'tmux') : herdr && row ? herdrTarget(sid, row.a) : null),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [viaConvo, herdr, sid, row?.a.pane_id, row?.a.agent, convo.bind?.pane, convo.bind?.pid, convo.bind?.start, convo.bind?.session, convo.bind?.agent],
+    [viaConvo, herdr, cur.s.persistence, sid, row?.a.pane_id, row?.a.agent, convo.bind?.pane, convo.bind?.pid, convo.bind?.start, convo.bind?.session, convo.bind?.agent],
   )
   const working = agent?.status === 'working'
   const bindKey = convo.bind ? `${convo.bind.pane} ${convo.bind.pid} ${convo.bind.start} ${convo.bind.session}` : ''

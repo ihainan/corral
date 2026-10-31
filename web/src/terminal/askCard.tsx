@@ -6,6 +6,7 @@ import { readAskScreen, sameLoose, sameWords, type AskScreen, type ScreenOption 
 import { choiceText, lasting } from './askText'
 import type { ConvoAsk, ConvoTool } from './conversation'
 import type { ReplyTarget } from './ReplyDialog'
+import { Filled, MaybeSent, NotAsShown, ownOK, ownWords, planChange, questionOwn } from './ownWords'
 
 // The card of a question of Claude Code's (AskUserQuestion) or a plan it
 // puts to the person, drawn from what its log says it asked, where the
@@ -136,6 +137,19 @@ export function useDrive(screen: Screen | null, set: (s: Screen) => void, reload
       .then(() => run(screen))
       .then((s) => (s && readAskScreen(s.text).kind !== 'unknown' ? set(s) : onDone()))
       .catch((e) => {
+        // (The person's own words: refused before anything was typed, read
+        // anew; typed, or Enter perhaps gone, said so and not tried again.)
+        if (e instanceof NotAsShown) {
+          setError(t('reply.changed'))
+          void reload()
+          return
+        }
+        if (e instanceof Filled || e instanceof MaybeSent) {
+          setUnsureOn(callId || '?')
+          setError(t(e instanceof Filled ? 'own.filled' : 'own.maybeSent'))
+          void reload()
+          return
+        }
         if (!refused(e)) {
           setUnsureOn(callId || '?')
           void reload()
@@ -264,8 +278,36 @@ export function AskPanel({ call, index, shown, target, drive, busy }: { call: Co
           {t('ask.goOn')}
         </button>
       )}
-      {shown.own !== undefined && <p className="convo-ask-hint">{t('ask.ownInTerminal')}</p>}
+      {shown.own !== undefined &&
+        (!ask.multi && target.fill ? (
+          <OwnBox label={t('own.answer')} busy={busy} onGo={(text) => drive((now) => ownWords(target, now, questionOwn(shown.own!), text))} />
+        ) : (
+          <p className="convo-ask-hint">{t('ask.ownInTerminal')}</p>
+        ))}
     </div>
+  )
+}
+
+// A line of the person's own, into a row of the prompt that takes it.
+export function OwnBox({ label, busy, onGo, hint }: { label: string; busy: boolean; onGo: (text: string) => void; hint?: string }) {
+  const [text, setText] = useState('')
+  const ok = ownOK(text)
+  const long = [...text].length > 1000
+  return (
+    <form
+      className="convo-ask-text convo-ask-own"
+      onSubmit={(e) => {
+        e.preventDefault()
+        if (ok && !busy) onGo(text)
+      }}
+    >
+      <input className="input" value={text} placeholder={label} aria-label={label} autoCapitalize="none" autoCorrect="off" onChange={(e) => setText(e.target.value.replace(/[\r\n]+/g, ' '))} />
+      <button className="btn" disabled={busy || !ok}>
+        {t('own.go')}
+      </button>
+      {long && <p className="convo-ask-hint is-warn">{t('own.tooLong')}</p>}
+      {hint && <p className="convo-ask-hint">{hint}</p>}
+    </form>
   )
 }
 
@@ -310,7 +352,14 @@ export function PlanPanel({ call, shown, digest, target, drive, busy, onScreen }
         </p>
       )}
       <Choices digest={digest} options={shown.options.filter((o) => !/^Tell Claude what to change$/i.test(o.label))} busy={busy} onPick={(n) => drive((now) => step(target, now, [String(n)], (x) => x.kind !== 'plan'))} />
-      <p className="convo-ask-hint">{t('ask.changeInTerminal')}</p>
+      {(() => {
+        const change = shown.options.find((o) => /^Tell Claude what to change$/i.test(o.label))
+        return change && target.fill ? (
+          <OwnBox label={t('own.change')} hint={t('own.changeHint')} busy={busy} onGo={(text) => drive((now) => ownWords(target, now, planChange(change.n), text))} />
+        ) : (
+          <p className="convo-ask-hint">{t('ask.changeInTerminal')}</p>
+        )
+      })()}
     </div>
   )
 }
