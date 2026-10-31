@@ -1345,6 +1345,8 @@ type convoState struct {
 	inUse       atomic.Int32 // requests holding it now: it is not let go meanwhile
 	relocating  atomic.Bool  // a check of what the pane runs is under way beside (see relocateLater)
 	relocFailed atomic.Bool  // the last such check failed: the next is made before answering
+	relocNow    atomic.Bool  // a press found another process in the pane: checked again before the next answer
+	scanFresh   bool         // (under mu) the next look takes a scan of its own, not one shared from before
 	mu          sync.Mutex
 	located     time.Time
 	// guessed: whose conversation this is was told by where and when it
@@ -1587,11 +1589,17 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 	// what was found shown on and on, as if current. Before answering, a
 	// failure is said.)
 	due := time.Since(st.located) > convoLocateTTL
-	if due && !st.relocFailed.Load() && !fresh && st.bind != nil && st.reason == "" && !(sess.Persistence == "herdr" && pane != st.pane) {
+	// (A press found another process in the pane than this shows: checked
+	// now, before answering, not in its own time beside.)
+	now := st.relocNow.Swap(false)
+	if now {
+		st.scanFresh = true // (the scan shared from before showed what was there then)
+	}
+	if due && !now && !st.relocFailed.Load() && !fresh && st.bind != nil && st.reason == "" && !(sess.Persistence == "herdr" && pane != st.pane) {
 		s.relocateLater(sess, key, st, pane)
 		due = false
 	}
-	if fresh || due || (sess.Persistence == "herdr" && pane != st.pane) {
+	if fresh || due || now || (sess.Persistence == "herdr" && pane != st.pane) {
 		err := s.locateConvo(ctx, sess, st, pane)
 		st.relocFailed.Store(err != nil) // (made before answering till one succeeds)
 		if err != nil {
@@ -1782,8 +1790,9 @@ func (s *Server) locateConvo(ctx context.Context, sess *term.Session, st *convoS
 	// message begins its log, and what is sent next must be of that
 	// session. Looks at once, of other windows too, share the one.)
 	var after time.Time
-	if st.bind != nil && st.bind.Agent == "codex" && (st.bind.Session == convoNoSession || st.reason == convoNoLog) {
+	if st.scanFresh || st.bind != nil && st.bind.Agent == "codex" && (st.bind.Session == convoNoSession || st.reason == convoNoLog) {
 		after = time.Now().Add(-time.Second)
+		st.scanFresh = false
 	}
 	out, at, looked, err := s.convoScans.run(ctx, sess, convoLocateCommand(sess.Persistence, sess.TmuxSession, ""), after)
 	// (The script ends with exit 0: an error is a scan cut short, by its size
@@ -3059,6 +3068,7 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	}
 	if front == nil || front.pid != b.PID || front.start != b.Start || front.sid != b.Session {
 		reason = "agent_changed"
+		s.convoRelocNow(sess, b.Pane)
 		writeError(w, http.StatusConflict, "agent_changed", "that pane no longer runs this agent")
 		return
 	}
@@ -3248,6 +3258,7 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		reason = "busy" // (not started: nothing was typed)
 	case errors.As(err, &exitErr) && exitErr.Status == 3:
 		reason = "agent_changed"
+		s.convoRelocNow(sess, b.Pane)
 		writeError(w, http.StatusConflict, "agent_changed", "that pane no longer runs this agent")
 		return
 	case errors.As(err, &exitErr) && exitErr.Status == 7:
@@ -3494,3 +3505,18 @@ const codexFdsSh = `codex_fds() {
   done
   if [ -n "$_tie" ]; then cxnew=1; else cxpend=$_pend; fi
 }`
+
+// convoRelocNow: a press found the pane running another process than its
+// conversation shows (agent_changed): what it runs is looked for again
+// before that conversation's next answer, not in its own time (up to
+// convoLocateTTL) — the page shows the agent there now at once. (Its state
+// only marked, if there is one: its lock is not waited for here.)
+func (s *Server) convoRelocNow(sess *term.Session, pane string) {
+	key := sess.ID + "\x00"
+	if sess.Persistence == "herdr" {
+		key += pane
+	}
+	if st := s.convos.peek(key); st != nil {
+		st.relocNow.Store(true)
+	}
+}

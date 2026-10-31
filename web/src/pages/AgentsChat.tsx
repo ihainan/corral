@@ -776,7 +776,10 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   }, [said])
   const refusal = (e: unknown) => {
     if (!(e instanceof ApiError)) return errorText(e)
-    if (e.code === 'agent_changed') return t('convo.stopChanged')
+    if (e.code === 'agent_changed') {
+      convo.refresh() // (read at once: the gateway looks again for what the pane runs)
+      return t('convo.stopChanged')
+    }
     if (e.code === 'not_in_front') return t('convo.notFront')
     if (e.code === 'agent_waiting' && agent?.dialog) return t('agents.dialogOpen')
     // (Of these the gateway says only in English: said here.)
@@ -1424,6 +1427,12 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
           if (e instanceof ApiError && e.code === 'agent_changed' && b.agent === 'codex' && b.session === NO_SESSION) {
             convo.refresh()
             return toast(t('agents.codexBegun'), true)
+          }
+          // (Another agent in the pane now: the page reads it at once — the
+          // gateway looks again for it — to be seen before sending there.)
+          if (e instanceof ApiError && e.code === 'agent_changed') {
+            convo.refresh()
+            return toast(t('agents.changedRefresh'), true)
           }
           toast(refusal(e), true)
         }
