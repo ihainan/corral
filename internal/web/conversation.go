@@ -393,6 +393,7 @@ func convoScreenJoinedCommand(mode, pane, socket string) string {
 f=$(mktemp) || exit 4
 g=$(mktemp) || { rm -f "$f"; exit 4; }
 trap 'rm -f "$f" "$g"' EXIT
+trap 'exit 4' HUP INT TERM
 if [ "$1" = tmux ]; then
   tmux -u capture-pane -p -t "$2" >"$f" 2>/dev/null 9>&- || exit 1
   tmux -u capture-pane -p -J -t "$2" 2>/dev/null 9>&- | tail -c MAX >"$g"
@@ -416,7 +417,7 @@ func screenJoined(raw []byte) (shown []byte, joined string, ok bool) {
 		return nil, "", false
 	}
 	n, err := strconv.Atoi(string(raw[:nl]))
-	if err != nil || n < 0 || nl+1+n > len(raw) {
+	if err != nil || n < 0 || n > len(raw)-(nl+1) { // (not as nl+1+n: a length too great to add, review499)
 		return nil, "", false
 	}
 	shown = raw[nl+1 : nl+1+n]

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -382,5 +383,48 @@ func TestScreenJoinedFraming(t *testing.T) {
 	}
 	if _, _, ok := screenJoined([]byte("12\nshort")); ok {
 		t.Fatal("a length past the output taken")
+	}
+	if _, _, ok := screenJoined([]byte("9223372036854775807\nx")); ok {
+		t.Fatal("a length too great to add taken")
+	}
+}
+
+// Ended while it reads (the request given up: SIGTERM), the screen read
+// leaves no file of the screen behind (review499).
+func TestScreenJoinedEndedLeavesNothing(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no sh here")
+	}
+	dir := t.TempDir()
+	tmp := filepath.Join(dir, "tmp")
+	os.Mkdir(tmp, 0o700)
+	// (The joined read hangs: the command is ended there.)
+	os.WriteFile(filepath.Join(dir, "herdr"), []byte("#!/bin/sh\nif [ \"$5\" = recent-unwrapped ]; then exec sleep 20; fi\nprintf 'a screen\\n'\n"), 0o755)
+	c := exec.Command("sh", "-c", convoScreenJoinedCommand("herdr", "p1", "/run/x.sock"))
+	c.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"), "HOME="+dir, "TMPDIR="+tmp)
+	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true} // (its group ended, as the SSH session's end ends it)
+	if err := c.Start(); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if es, _ := os.ReadDir(tmp); len(es) == 2 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if es, _ := os.ReadDir(tmp); len(es) != 2 {
+		t.Fatalf("its files not made: %d", len(es))
+	}
+	syscall.Kill(-c.Process.Pid, syscall.SIGTERM)
+	c.Wait()
+	for time.Now().Before(deadline.Add(5 * time.Second)) {
+		if es, _ := os.ReadDir(tmp); len(es) == 0 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if es, _ := os.ReadDir(tmp); len(es) != 0 {
+		t.Fatalf("left behind: %d files", len(es))
 	}
 }
