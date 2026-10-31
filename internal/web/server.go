@@ -61,6 +61,7 @@ type Server struct {
 	herdrTimes   herdrServers     // when each herdr server's agents last changed (shared by its watchers)
 	replies      paneReplies      // answers to agents in herdr panes
 	cxPressed    sync.Map         // convoReplyKey → time.Time: when keys or text last went to a Codex's pane (its title read before, stale)
+	tmuxCmds     sync.Map         // tmux session id → *cmdProber: commands its Claude Code left running (see convo_tmux_cmds.go)
 	picks        pendingConns     // connections kept while the user picks what to open
 	opening      openSlots        // opens connecting or asking a host, per user
 	files        *sftpPool        // shared SFTP channels of the file panel

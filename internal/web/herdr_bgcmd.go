@@ -62,11 +62,17 @@ type cmdProber struct {
 	scan  func(ctx context.Context) (cmds map[string][]bgCmd, whole bool, err error)
 
 	every, soonBy, kept time.Duration // (cmdEvery, cmdSoon, cmdKept)
+	// forget: a pane not considered again for this long is no longer looked
+	// for (0: kept till it is said to work again). For panes whose status is
+	// told only while someone reads them (a tmux session's chat): none read,
+	// no looks.
+	forget time.Duration
 }
 
 type cmdPane struct {
 	session string
 	from    time.Time // when it came to done or idle: what a look begun before found is not told of it
+	told    time.Time // when it was last considered (see forget)
 }
 
 func newCmdProber(scan func(context.Context) (map[string][]bgCmd, bool, error)) *cmdProber {
@@ -89,9 +95,11 @@ func (p *cmdProber) consider(pane, agent, status, session string) {
 		return
 	}
 	if was, ok := p.ended[pane]; ok && was.session == session {
+		was.told = time.Now()
+		p.ended[pane] = was
 		return
 	}
-	p.ended[pane] = cmdPane{session: session, from: time.Now()}
+	p.ended[pane] = cmdPane{session: session, from: time.Now(), told: time.Now()}
 	p.soon = time.Now().Add(p.soonBy)
 	select {
 	case p.wake <- struct{}{}:
@@ -110,15 +118,30 @@ func (p *cmdProber) decorate(sum *herdrSummary) {
 	for i := range sum.Workspaces {
 		for j := range sum.Workspaces[i].Agents {
 			a := &sum.Workspaces[i].Agents[j]
-			e, ok := p.ended[a.PaneID]
-			if !ok || (a.Session != "" && a.Session != e.session) || p.at.Before(e.from) {
-				continue // (a look begun before its turn was over: what it ran in front then, maybe)
-			}
-			if c := p.cmds[e.session]; len(c) > 0 {
+			if c := p.ofLocked(a.PaneID, a.Session); len(c) > 0 {
 				a.BgCmds, a.BgCmdList = len(c), c[:min(len(c), maxCmdsShown)]
 			}
 		}
 	}
+}
+
+// of: the commands pane's agent (of session; "" any) left running, while
+// what was found is recent; nil where none or not known.
+func (p *cmdProber) of(pane, session string) []bgCmd {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.at.IsZero() || time.Since(p.at) > p.kept {
+		return nil
+	}
+	return p.ofLocked(pane, session)
+}
+
+func (p *cmdProber) ofLocked(pane, session string) []bgCmd {
+	e, ok := p.ended[pane]
+	if !ok || (session != "" && session != e.session) || p.at.Before(e.from) {
+		return nil // (a look begun before its turn was over: what it ran in front then, maybe)
+	}
+	return p.cmds[e.session]
 }
 
 // run looks when due, until ctx ends.
@@ -147,6 +170,13 @@ func (p *cmdProber) run(ctx context.Context) {
 		}
 		began := time.Now()
 		p.mu.Lock()
+		if p.forget > 0 {
+			for pane, e := range p.ended {
+				if began.Sub(e.told) > p.forget {
+					delete(p.ended, pane)
+				}
+			}
+		}
 		due := len(p.ended) > 0
 		if !p.soon.After(began) {
 			p.soon = time.Time{} // (else it is due still: one coming to done or idle since the last)

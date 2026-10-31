@@ -146,3 +146,69 @@ func TestCmdProberTellsOncePastItsTurn(t *testing.T) {
 		t.Fatal("not told")
 	}
 }
+
+// A tmux session's prober (convo_tmux_cmds.go): told by the conversation's
+// reads, its status Claude Code's file's word ("idle", "busy",
+// "waiting:…"); looked up by pane and session; a pane no read told of for
+// forget is no longer looked for.
+func TestCmdProberForTmux(t *testing.T) {
+	scans := make(chan struct{}, 16)
+	p := newCmdProber(func(context.Context) (map[string][]bgCmd, bool, error) {
+		defer func() { scans <- struct{}{} }()
+		return map[string][]bgCmd{cmdSess: {{Task: "b1", Title: "make test"}}}, true, nil
+	})
+	p.every, p.soonBy, p.forget = 40*time.Millisecond, 0, 200*time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go p.run(ctx)
+	for _, st := range []string{"busy", "waiting:permission prompt"} {
+		p.consider("%3", "claude", st, cmdSess)
+	}
+	select {
+	case <-scans:
+		t.Fatal("looked at while it works or waits")
+	case <-time.After(120 * time.Millisecond):
+	}
+	p.consider("%3", "claude", "idle", cmdSess)
+	<-scans
+	deadline := time.Now().Add(time.Second)
+	for len(p.of("%3", cmdSess)) == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if c := p.of("%3", cmdSess); len(c) != 1 || c[0].Title != "make test" {
+		t.Fatalf("idle: told %+v", c)
+	}
+	if c := p.of("%3", "11111111-2222-4333-8444-555555555555"); c != nil {
+		t.Errorf("another session's: %+v", c)
+	}
+	if c := p.of("%4", cmdSess); c != nil {
+		t.Errorf("another pane: %+v", c)
+	}
+	// Told again and again while read: still looked at.
+	for i := 0; i < 6; i++ {
+		p.consider("%3", "claude", "idle", cmdSess)
+		time.Sleep(50 * time.Millisecond)
+	}
+	for len(scans) > 0 {
+		<-scans
+	}
+	// No read since: forgotten, no more looks.
+	time.Sleep(400 * time.Millisecond)
+	for len(scans) > 0 {
+		<-scans
+	}
+	select {
+	case <-scans:
+		t.Fatal("still looked at with no read")
+	case <-time.After(200 * time.Millisecond):
+	}
+	if c := p.of("%3", cmdSess); c != nil {
+		t.Errorf("told of a pane forgotten: %+v", c)
+	}
+	// Busy again: nothing told.
+	p.consider("%3", "claude", "idle", cmdSess)
+	p.consider("%3", "claude", "busy", cmdSess)
+	if c := p.of("%3", cmdSess); c != nil {
+		t.Errorf("busy: %+v", c)
+	}
+}

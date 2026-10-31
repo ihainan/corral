@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api, ApiError, authGen } from '../api'
+import type { RowCmds } from './agentOrder'
 
 // The conversation view's data: the agent's own log of the session in the
 // focused (herdr) or active (tmux) pane, as the gateway reads it
@@ -232,6 +233,8 @@ interface Answer {
   bind?: ConvoBind
   agent_status?: 'busy' | 'idle' | 'waiting'
   waiting_for?: string // (with waiting: "permission prompt", "input needed", "sandbox request", "worker request", "dialog open", "other")
+  bg_cmds?: number // (tmux) a Claude Code at rest: the commands it left running in the background
+  bg_cmd_list?: { task: string; title?: string; since?: number }[]
   quiet_ms?: number // (how long since its log last grew, by the gateway's clock)
   title?: string
   tasks?: ConvoTask[]
@@ -247,6 +250,10 @@ interface Answer {
   more?: boolean
   entries: ConvoEntry[]
 }
+
+// (tmux) What a Claude Code at rest left running, as the answer says it.
+const cmdsOf = (a: { bg_cmds?: number; bg_cmd_list?: { title?: string; since?: number }[] }): RowCmds | undefined =>
+  a.bg_cmds ? { n: a.bg_cmds, list: (a.bg_cmd_list ?? []).map((c) => ({ title: c.title, since: c.since })) } : undefined
 
 export type ConvoStatus = 'loading' | 'ready' | 'none' | 'error'
 
@@ -265,6 +272,7 @@ export interface Convo {
   bind?: ConvoBind
   agentStatus?: 'busy' | 'idle' | 'waiting' // (tmux) as Claude Code's file for the process says
   waitingFor?: string // (with waiting) what for
+  bgCmds?: RowCmds // (tmux) commands it left running in the background, at rest
   // When its log last grew (ms, this page's clock: told as how long since,
   // so no clocks are compared); kept while it moves by less than a few
   // seconds, so a poll that brings nothing new changes nothing.
@@ -425,9 +433,11 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
             const queued = a.queued?.length ? (JSON.stringify(a.queued) === JSON.stringify(c.queued) ? c.queued : a.queued) : undefined
             const running = a.running?.length ? (JSON.stringify(a.running) === JSON.stringify(c.running) ? c.running : a.running) : undefined
             const told = a.quiet_ms !== undefined ? now - a.quiet_ms : undefined
+            const fresh = cmdsOf(a)
+            const bgCmds = fresh && JSON.stringify(fresh) === JSON.stringify(c.bgCmds) ? c.bgCmds : fresh
             const quietAt = told !== undefined && c.quietAt !== undefined && Math.abs(told - c.quietAt) < 3000 ? c.quietAt : told
-            if (!entries && c.of === key && c.status === 'ready' && c.quietAt === quietAt && c.gen === a.gen && c.older === older && c.olderCut === olderCut && c.loadingOlder === loadingOlder && sameBind(c.bind, a.bind) && c.agentStatus === a.agent_status && c.waitingFor === a.waiting_for && c.title === a.title && c.tasks === tasks && c.meta === meta && c.queued === queued && c.running === running && !c.failing && c.defaultChanged === a.default_changed) return c
-            return { ...initial(key), status: 'ready', entries: entries ?? c.entries, older, olderCut, loadingOlder, gen: a.gen, bind: a.bind, agentStatus: a.agent_status, waitingFor: a.waiting_for, quietAt, title: a.title || undefined, tasks, meta, queued, running, failing: false, okAt: now, changedAt: entries ? now : c.changedAt, of: key, defaultChanged: a.default_changed }
+            if (!entries && c.of === key && c.status === 'ready' && c.quietAt === quietAt && c.gen === a.gen && c.older === older && c.olderCut === olderCut && c.loadingOlder === loadingOlder && sameBind(c.bind, a.bind) && c.agentStatus === a.agent_status && c.waitingFor === a.waiting_for && c.bgCmds === bgCmds && c.title === a.title && c.tasks === tasks && c.meta === meta && c.queued === queued && c.running === running && !c.failing && c.defaultChanged === a.default_changed) return c
+            return { ...initial(key), status: 'ready', entries: entries ?? c.entries, older, olderCut, loadingOlder, gen: a.gen, bind: a.bind, agentStatus: a.agent_status, waitingFor: a.waiting_for, bgCmds, quietAt, title: a.title || undefined, tasks, meta, queued, running, failing: false, okAt: now, changedAt: entries ? now : c.changedAt, of: key, defaultChanged: a.default_changed }
           })
           remember(key, gen, rev, byseq, a)
           if (a.entries.length > 0 && !fresh) next = ACTIVE
@@ -464,7 +474,7 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
         else {
           const entries = [...byseq.values()].sort((x, y) => x.seq - y.seq)
           const older = !!k.older || entries.length === MAX
-          setConvo({ ...initial(key), status: 'ready', entries, older, olderCut: older && (!!k.older_cut || entries.length === MAX), gen, bind: k.bind, agentStatus: k.agent_status, waitingFor: k.waiting_for, title: k.title || undefined, tasks: k.tasks?.length ? k.tasks : undefined, meta: k.meta, queued: k.queued?.length ? k.queued : undefined, running: k.running?.length ? k.running : undefined, failing: false, okAt: now, changedAt: now, of: key })
+          setConvo({ ...initial(key), status: 'ready', entries, older, olderCut: older && (!!k.older_cut || entries.length === MAX), gen, bind: k.bind, agentStatus: k.agent_status, waitingFor: k.waiting_for, bgCmds: cmdsOf(k), title: k.title || undefined, tasks: k.tasks?.length ? k.tasks : undefined, meta: k.meta, queued: k.queued?.length ? k.queued : undefined, running: k.running?.length ? k.running : undefined, failing: false, okAt: now, changedAt: now, of: key })
         }
       } else {
         gen = 0

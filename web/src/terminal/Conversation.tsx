@@ -47,6 +47,7 @@ export interface ConvoAgent {
   status: 'working' | 'blocked' | 'done' | 'idle' | 'unknown'
   bg?: 'running' | 'stale' | 'checking' // (its turn over: subagents still out, or that being read for; see agents.ts)
   dialog?: boolean // (Claude Code has a dialog of its own open, a picker or /usage, say: not a question to answer here)
+  cmds?: RowCmds // (its turn over: commands it left running in the background)
   other?: string // the program in the pane, when it is not Claude Code
   program?: string // the program in the pane, for its icon
 }
@@ -937,6 +938,7 @@ export function ConversationView({
   let status = agent ? t(`convo.status.${agent.status}` as I18nKey) : ''
   if (working && lastUser && now >= lastUser) status = t('convo.workingFor', { d: duration(now - lastUser) })
   if (agent?.bg) status = t(agent.bg === 'running' ? 'convo.status.bg' : agent.bg === 'stale' ? 'convo.status.bgStale' : 'convo.status.working')
+  else if (agent?.cmds && (agent.status === 'idle' || agent.status === 'done')) status = agent.cmds.n > 1 ? t('convo.bgCmds', { n: agent.cmds.n }) : t('convo.bgCmds1')
   const name = agent ? [agent.title, agent.where].filter(Boolean) : []
   // What is read in, as a Markdown file to keep (see convoExport).
   const exporting = useRef<() => void>(() => {})
@@ -2102,7 +2104,7 @@ function AgentList({ rows, menus, onPicked, placed, query: given, onQuery, searc
                   }}
                   onKeyDown={hasMenu ? menuKey(r.key) : undefined}
                 >
-                  <AgentIcon program={r.program} size={30} dot={r.bg === 'running' ? 'bg' : said ? (r.status as 'blocked' | 'working' | 'done') : undefined} />
+                  <AgentIcon program={r.program} size={30} dot={r.bg === 'running' || r.cmds ? 'bg' : said ? (r.status as 'blocked' | 'working' | 'done') : undefined} />
                   <span className="convo-list-text" title={[r.title, r.where].filter(Boolean).join(' · ')}>
                     <span className="convo-list-line">
                       <span className="convo-list-title">{r.title}</span>

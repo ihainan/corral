@@ -608,7 +608,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       // log's not answered yet, where that file says nothing.)
       const asks = st === 'waiting' ? answerable(convo.waitingFor) : !!st && asking(convo.entries)
       const dialog = st === 'waiting' && !asks
-      return { title: convo.title || convo.bind.title, status: asks ? 'blocked' : st === 'busy' ? 'working' : st === 'idle' || dialog ? 'idle' : 'unknown', dialog, program: convo.bind.agent }
+      return { title: convo.title || convo.bind.title, status: asks ? 'blocked' : st === 'busy' ? 'working' : st === 'idle' || dialog ? 'idle' : 'unknown', dialog, cmds: st === 'idle' ? convo.bgCmds : undefined, program: convo.bind.agent }
     }
     if (!row) return null
     const title = (convo.bind?.pane === row.a.pane_id && convo.title) || paneTitle(row.a.title)
@@ -622,8 +622,8 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     // its session file says it waits. Of this pane's process only, and of
     // Claude Code's: no other agent says so.)
     const dialog = !row.lost && status !== 'blocked' && convo.bind?.pane === row.a.pane_id && (convo.bind.agent ?? 'claude') === 'claude' && !convo.failing && convo.agentStatus === 'waiting' && !answerable(convo.waitingFor)
-    return { where: row.ws === '~' ? '' : row.ws, title, status, bg, dialog, other: readsLog(row.a.agent) ? undefined : row.a.agent, program: row.a.agent }
-  }, [herdr, row, convo.bind, convo.agentStatus, convo.waitingFor, convo.failing, convo.title, convo.entries])
+    return { where: row.ws === '~' ? '' : row.ws, title, status, bg, dialog, cmds: cmdsOf(row), other: readsLog(row.a.agent) ? undefined : row.a.agent, program: row.a.agent }
+  }, [herdr, row, convo.bind, convo.agentStatus, convo.waitingFor, convo.bgCmds, convo.failing, convo.title, convo.entries])
   // A finished one looked at here is seen: the gateway keeps it, so it is
   // no longer "done" in any browser (herdr's own word goes only with its
   // pane focused in herdr). Not while the page is behind another.
@@ -715,7 +715,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
         return { key: e.key, ...labelOf(e, said, hosts), program: r.a.agent, status: current && agent && !r.bg ? agent.status : r.status, bg: r.lost ? undefined : r.bg, cmds: cmdsOf(r), since: r.lost ? undefined : r.bg ? r.a.bg_since : r.a.since, current, pinned: pinAt(e.key), onPick: () => onPick(e), menu: () => rowMenu.current(e) }
       }
       const title = (current && agent?.title) || keptTitle(titles, e) || `${e.s.host_name} · ${sessionWhich(e.s, all)}`
-      return { key: e.key, title, where: whereOf(e, hosts), program: current ? agent?.program : undefined, status: current && agent ? agent.status : 'unknown', current, pinned: pinAt(e.key), onPick: () => onPick(e), menu: () => rowMenu.current(e) }
+      return { key: e.key, title, where: whereOf(e, hosts), program: current ? agent?.program : undefined, status: current && agent ? agent.status : 'unknown', cmds: current ? agent?.cmds : undefined, current, pinned: pinAt(e.key), onPick: () => onPick(e), menu: () => rowMenu.current(e) }
     })
     return placedAs ? out.map((r) => (r.current ? { ...r, placeAs: placedAs } : r)) : out
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1781,7 +1781,7 @@ function PhoneList({ entries, all, titles, query, onQuery, onPick }: { entries: 
           return (
             <li key={e.key + ' ' + e.s.id}>
               <button type="button" className={'agents-list-row is-' + status} onClick={() => onPick(e)}>
-                <AgentIcon program={r?.a.agent} size={36} dot={r?.bg === 'running' && !r.lost ? 'bg' : status === 'blocked' || status === 'working' || status === 'done' ? status : undefined} />
+                <AgentIcon program={r?.a.agent} size={36} dot={(r?.bg === 'running' || (r && cmdsOf(r))) && !r.lost ? 'bg' : status === 'blocked' || status === 'working' || status === 'done' ? status : undefined} />
                 <span className="agents-list-text">
                   <span className="agents-list-title">
                     <span className="agents-list-title-text">{title}</span>

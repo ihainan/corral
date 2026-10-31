@@ -1465,6 +1465,11 @@ type convoAnswer struct {
 	// Claude Code's file for the process says; absent when not known.
 	// "waiting" in herdr too (herdr does not say that of a dialog open).
 	AgentStatus string `json:"agent_status,omitempty"`
+	// BgCmds (tmux, where herdr's summary does not say): for a Claude Code
+	// at rest, how many commands it left running in the background, and the
+	// first of them (see convo_tmux_cmds.go).
+	BgCmds    int     `json:"bg_cmds,omitempty"`
+	BgCmdList []bgCmd `json:"bg_cmd_list,omitempty"`
 	// Title is the session's own (Claude Code's, or the person's);
 	// Tasks the agent's task list as the log has it.
 	Title string       `json:"title,omitempty"`
@@ -1590,6 +1595,9 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 	ans.Available, ans.Gen, ans.Rev, ans.Older, ans.More, ans.AgentStatus = true, st.gen, st.parser.Rev(), st.older, more, st.status
 	if w, ok := strings.CutPrefix(st.status, "waiting:"); ok {
 		ans.AgentStatus, ans.WaitingFor = "waiting", w
+	}
+	if c := s.tmuxCmdsTell(sess, st); len(c) > 0 {
+		ans.BgCmds, ans.BgCmdList = len(c), c[:min(len(c), maxCmdsShown)]
 	}
 	ans.OlderCut = st.older && (st.parser.Trimmed() || st.from < 0)
 	if gen != st.gen {
