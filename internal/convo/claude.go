@@ -1243,6 +1243,7 @@ func (c *Claude) queued(r *claudeRow) {
 	var s string
 	if json.Unmarshal(a.Prompt, &s) == nil {
 		if a.CommandMode == "task-notification" {
+			s = withoutReminders(s)
 			c.ended(s) // (what it says of work set going: ended, or at it still)
 			if ev := taskEnded(s); ev != nil {
 				c.add(r, RoleNote, []Part{{Kind: KindEvent, Event: ev}})
@@ -2267,6 +2268,7 @@ func classifyUserText(s string) (role, text string) {
 	case "bash-input":
 		return RoleUser, "! " + strings.TrimSpace(inner(s))
 	case "task-notification":
+		s = withoutReminders(s)
 		if !taskNotice(s) {
 			return RoleUser, unpasted(s) // (a notice with words around it: the person's, quoting one)
 		}
@@ -2327,6 +2329,19 @@ func taskEnded(s string) *Event {
 	}
 	return ev
 }
+
+// withoutReminders: s without the reminders Claude Code puts after a notice
+// of its own (a /goal check-in: <task-notification>…</task-notification>
+// then <system-reminder>…</system-reminder>), which are none of what is
+// shown: the notice alone, as one (it was shown as tags, as the person's).
+func withoutReminders(s string) string {
+	if !strings.Contains(s, "<system-reminder>") {
+		return s
+	}
+	return strings.TrimSpace(reminderBlock.ReplaceAllString(s, ""))
+}
+
+var reminderBlock = regexp.MustCompile(`(?s)<system-reminder>.*?</system-reminder>`)
 
 // taskNotice: s is one notice of Claude Code's (task-notification) and
 // nothing else: what it says of work set going is taken (not the person's

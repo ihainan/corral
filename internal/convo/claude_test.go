@@ -1595,3 +1595,40 @@ func TestTaskNoticeQuoted(t *testing.T) {
 		t.Errorf("a reason's exit code: %+v", ev)
 	}
 }
+
+// A /goal check-in comes as a notice with a reminder after it: a notice (its
+// summary), not the person's words, neither waiting nor taken in as tags
+// (10-31: the queue showed it as <task-notification> and <summary>).
+func TestClaudeNoticeWithReminder(t *testing.T) {
+	// (Its newlines as the log's JSON writes them.)
+	const notice = `<task-notification>\n<summary>Goal check-in: background work still running</summary>\n</task-notification>\n<system-reminder>\nGoal check-in: «do it all» is still active, and evaluation has been deferred.\n</system-reminder>`
+	c := NewClaude()
+	c.Feed(lines(
+		`{"type":"user","uuid":"u1","timestamp":"2026-10-31T09:00:00Z","message":{"content":"go"}}`,
+		`{"type":"queue-operation","operation":"enqueue","timestamp":"2026-10-31T09:00:05Z","content":"`+notice+`"}`,
+		`{"type":"queue-operation","operation":"enqueue","timestamp":"2026-10-31T09:00:06Z","content":"and commit"}`,
+	))
+	q := c.Queued()
+	if len(q) != 1 || q[0].Text != "and commit" {
+		t.Fatalf("queued: %+v", q)
+	}
+	c.Feed(lines(`{"type":"attachment","uuid":"n1","timestamp":"2026-10-31T09:00:07Z","attachment":{"type":"queued_command","commandMode":"task-notification","prompt":"` + notice + `"}}`))
+	c.Feed(lines(`{"type":"user","uuid":"u2","timestamp":"2026-10-31T09:00:08Z","message":{"role":"user","content":"` + notice + `"}}`))
+	for _, e := range c.Since(0) {
+		for _, p := range e.Parts {
+			if strings.Contains(p.Text, "<task-notification>") || strings.Contains(p.Text, "<system-reminder>") || strings.Contains(p.Text, "<summary>") {
+				t.Errorf("%s shown as tags: %q", e.Role, p.Text)
+			}
+		}
+	}
+	all := c.Since(0)
+	found := false
+	for _, e := range all {
+		if e.Role == RoleNote && len(e.Parts) > 0 && e.Parts[0].Text == "Goal check-in: background work still running" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("no note of it: %+v", all)
+	}
+}
