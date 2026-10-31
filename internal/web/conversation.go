@@ -1564,7 +1564,7 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 			if sess.Persistence != "tmux" && !strings.HasPrefix(now, "waiting:") {
 				now = ""
 			}
-			ans.AgentStatus = shellWord(now, false)
+			ans.AgentStatus = shellWord(now)
 			if w, ok := strings.CutPrefix(now, "waiting:"); ok {
 				ans.AgentStatus, ans.WaitingFor = "waiting", w
 			}
@@ -1600,7 +1600,7 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 	if len(cmds) > 0 {
 		ans.BgCmds, ans.BgCmdList = len(cmds), cmds[:min(len(cmds), maxCmdsShown)]
 	}
-	ans.AgentStatus = shellWord(ans.AgentStatus, len(cmds) > 0)
+	ans.AgentStatus = shellWord(ans.AgentStatus)
 	ans.OlderCut = st.older && (st.parser.Trimmed() || st.from < 0)
 	if gen != st.gen {
 		ans.Reset = true
@@ -2237,17 +2237,16 @@ func freshStatusCommand(pid int64) string {
 }
 
 // shellWord: the word told the page for a status: "shell" (a shell of
-// Claude Code's own running, its turn over) is "idle" where commands it
-// left in the background were found (what runs is those: shown as such),
-// else "busy", as before (one typed with "!", or not looked at yet).
-func shellWord(status string, cmds bool) string {
-	switch {
-	case status != "shell":
-		return status
-	case cmds:
-		return "idle"
+// Claude Code's own running, its turn over) is "busy", as before: one typed
+// with "!" may run beside what it left in the background, and what is
+// pressed or sent goes by the host's own word (the gates: "idle" only), so
+// none is said idle that the host would refuse as at work. What it left in
+// the background is told beside (bg_cmds), for the page to say.
+func shellWord(status string) string {
+	if status == "shell" {
+		return "busy"
 	}
-	return "busy"
+	return status
 }
 
 // procStatusOf: what the session file b says, if it is of the process and

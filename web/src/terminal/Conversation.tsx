@@ -938,7 +938,7 @@ export function ConversationView({
   let status = agent ? t(`convo.status.${agent.status}` as I18nKey) : ''
   if (working && lastUser && now >= lastUser) status = t('convo.workingFor', { d: duration(now - lastUser) })
   if (agent?.bg) status = t(agent.bg === 'running' ? 'convo.status.bg' : agent.bg === 'stale' ? 'convo.status.bgStale' : 'convo.status.working')
-  else if (agent?.cmds && (agent.status === 'idle' || agent.status === 'done')) status = agent.cmds.n > 1 ? t('convo.bgCmds', { n: agent.cmds.n }) : t('convo.bgCmds1')
+  else if (agent?.cmds && agent.status !== 'blocked') status = agent.cmds.n > 1 ? t('convo.bgCmds', { n: agent.cmds.n }) : t('convo.bgCmds1')
   const name = agent ? [agent.title, agent.where].filter(Boolean) : []
   // What is read in, as a Markdown file to keep (see convoExport).
   const exporting = useRef<() => void>(() => {})

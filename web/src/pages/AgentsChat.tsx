@@ -570,6 +570,19 @@ const STOP_AFTER_SEND_MS = 1500
 // back does not ask the host the same thing again.
 const lookedAt = new Set<number>()
 
+// A tmux session's background commands, as its conversation last said
+// them (only one read is told them: the list has no word of a tmux
+// session's agent otherwise): its rows show them a while after, the phone
+// list once gone back to, the side list once another is shown.
+// (TMUX_CMDS_FRESH: how long that holds: the gateway looks once a minute.)
+const TMUX_CMDS_FRESH = 2 * 60 * 1000
+const tmuxCmds = new Map<string, { cmds: RowCmds; at: number }>()
+const tmuxCmdsOf = (e: Entry): RowCmds | undefined => {
+  if (e.row || e.pane) return undefined
+  const v = tmuxCmds.get(e.key)
+  return v && Date.now() - v.at < TMUX_CMDS_FRESH ? v.cmds : undefined
+}
+
 // The conversation of one agent, and what is sent to it. Keyed by the
 // agent: nothing of another's (its draft, what was sent, a stop) carries over.
 function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerEnter, sent, setSent, sending, setSending, draft: shownDraft, setDraftShown, used, lead, onClosed, query, onQuery }: {
@@ -608,7 +621,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       // log's not answered yet, where that file says nothing.)
       const asks = st === 'waiting' ? answerable(convo.waitingFor) : !!st && asking(convo.entries)
       const dialog = st === 'waiting' && !asks
-      return { title: convo.title || convo.bind.title, status: asks ? 'blocked' : st === 'busy' ? 'working' : st === 'idle' || dialog ? 'idle' : 'unknown', dialog, cmds: st === 'idle' ? convo.bgCmds : undefined, program: convo.bind.agent }
+      return { title: convo.title || convo.bind.title, status: asks ? 'blocked' : st === 'busy' ? 'working' : st === 'idle' || dialog ? 'idle' : 'unknown', dialog, cmds: st && st !== 'waiting' ? convo.bgCmds : undefined, program: convo.bind.agent }
     }
     if (!row) return null
     const title = (convo.bind?.pane === row.a.pane_id && convo.title) || paneTitle(row.a.title)
@@ -630,6 +643,14 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   // (Of the round it is done in, as told: a word that comes late, after
   // another round, marks nothing; a round after it is marked in its turn.)
   // (Not while what it left running is read for, nor while it is out.)
+  // (What this tmux session's agent left running, kept for its row: see tmuxCmds.)
+  const tmuxKeyNow = !herdr && !cur.pane ? cur.key : ''
+  const tmuxCmdsNow = agent?.cmds
+  useEffect(() => {
+    if (!tmuxKeyNow || convo.status === 'loading') return
+    if (tmuxCmdsNow) tmuxCmds.set(tmuxKeyNow, { cmds: tmuxCmdsNow, at: Date.now() })
+    else tmuxCmds.delete(tmuxKeyNow)
+  }, [tmuxKeyNow, tmuxCmdsNow, convo.status, convo.okAt])
   const doneHere = herdr && active && row && !row.lost && row.status === 'done' && row.a.status === 'done' && !row.bg && row.a.bg !== 'checking' ? { pane: row.a.pane_id, round: row.a.round ?? 0, session: row.a.session ?? '' } : undefined
   const doneKey = doneHere && JSON.stringify(doneHere)
   useEffect(() => {
@@ -715,7 +736,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
         return { key: e.key, ...labelOf(e, said, hosts), program: r.a.agent, status: current && agent && !r.bg ? agent.status : r.status, bg: r.lost ? undefined : r.bg, cmds: cmdsOf(r), since: r.lost ? undefined : r.bg ? r.a.bg_since : r.a.since, current, pinned: pinAt(e.key), onPick: () => onPick(e), menu: () => rowMenu.current(e) }
       }
       const title = (current && agent?.title) || keptTitle(titles, e) || `${e.s.host_name} · ${sessionWhich(e.s, all)}`
-      return { key: e.key, title, where: whereOf(e, hosts), program: current ? agent?.program : undefined, status: current && agent ? agent.status : 'unknown', cmds: current ? agent?.cmds : undefined, current, pinned: pinAt(e.key), onPick: () => onPick(e), menu: () => rowMenu.current(e) }
+      return { key: e.key, title, where: whereOf(e, hosts), program: current ? agent?.program : undefined, status: current && agent ? agent.status : 'unknown', cmds: current ? agent?.cmds : tmuxCmdsOf(e), current, pinned: pinAt(e.key), onPick: () => onPick(e), menu: () => rowMenu.current(e) }
     })
     return placedAs ? out.map((r) => (r.current ? { ...r, placeAs: placedAs } : r)) : out
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1781,7 +1802,7 @@ function PhoneList({ entries, all, titles, query, onQuery, onPick }: { entries: 
           return (
             <li key={e.key + ' ' + e.s.id}>
               <button type="button" className={'agents-list-row is-' + status} onClick={() => onPick(e)}>
-                <AgentIcon program={r?.a.agent} size={36} dot={(r?.bg === 'running' || (r && cmdsOf(r))) && !r.lost ? 'bg' : status === 'blocked' || status === 'working' || status === 'done' ? status : undefined} />
+                <AgentIcon program={r?.a.agent} size={36} dot={(r?.bg === 'running' || (r && cmdsOf(r))) && !r.lost || tmuxCmdsOf(e) ? 'bg' : status === 'blocked' || status === 'working' || status === 'done' ? status : undefined} />
                 <span className="agents-list-text">
                   <span className="agents-list-title">
                     <span className="agents-list-title-text">{title}</span>
@@ -1798,7 +1819,8 @@ function PhoneList({ entries, all, titles, query, onQuery, onPick }: { entries: 
                   {status === 'working' && since && <span className="convo-list-status">{t('convo.status.working')}</span>}
                   <span className="agents-list-where">
                     {r && cmdsOf(r) && <BgCmds cmds={cmdsOf(r)!} />}
-                    {r && cmdsOf(r) && where && ' · '}
+                    {!r && tmuxCmdsOf(e) && <BgCmds cmds={tmuxCmdsOf(e)!} />}
+                    {(r ? cmdsOf(r) : tmuxCmdsOf(e)) && where && ' · '}
                     {where}
                   </span>
                 </span>

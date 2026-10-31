@@ -88,20 +88,17 @@ func TestConvoProcStatusBesideLog(t *testing.T) {
 
 // "shell": Claude Code's turn over, a shell of its own running — one typed
 // with "!", or what it left in the background (2.1.314 says "shell" while
-// a run_in_background command runs, its turn done). Told the page as idle
-// where such commands were found, else busy, as before.
+// a run_in_background command runs, its turn done). Told the page as busy,
+// as before (review482: idle enabled what the host refuses, and hid Stop
+// for a "!" command beside them); its commands are told beside.
 func TestShellWord(t *testing.T) {
 	b := []byte(`{"sessionId":"` + sidA + `","procStart":"777","status":"shell"}`)
 	if got := procStatusOf(b, &convoBind{PID: 1, Start: 777, Session: sidA}); got != "shell" {
 		t.Fatalf("its word: %q", got)
 	}
-	for _, c := range []struct {
-		status string
-		cmds   bool
-		want   string
-	}{{"shell", true, "idle"}, {"shell", false, "busy"}, {"idle", true, "idle"}, {"busy", false, "busy"}, {"waiting:dialog open", true, "waiting:dialog open"}, {"", false, ""}} {
-		if got := shellWord(c.status, c.cmds); got != c.want {
-			t.Errorf("shellWord(%q, %v) = %q, want %q", c.status, c.cmds, got, c.want)
+	for status, want := range map[string]string{"shell": "busy", "idle": "idle", "busy": "busy", "waiting:dialog open": "waiting:dialog open", "": ""} {
+		if got := shellWord(status); got != want {
+			t.Errorf("shellWord(%q) = %q, want %q", status, got, want)
 		}
 	}
 }
