@@ -2448,9 +2448,9 @@ screen() {
   else s=$(HERDR_SOCKET_PATH=$sock herdr pane read "$p" --source visible 2>/dev/null 9>&-) || exit 8; fi
   printf '%s\n' "$s" | awk -v n="$rd" '{ a[NR] = $0 } NF { last = NR } END { for (i = last - n + 1; i <= last; i++) if (i > 0) print a[i] }'
 }
-b=corral-send-$$ typing=0 fd=
+b=corral-send-$$ typing=0 partdir=
 f=$(mktemp) || exit 4
-trap 'rm -f "$f"; [ -n "$fd" ] && rm -rf "$fd"; [ "$mode" = tmux ] && tmux delete-buffer -b "$b" 2>/dev/null 9>&-' EXIT
+trap 'rm -f "$f"; [ -n "$partdir" ] && rm -rf "$partdir"; [ "$mode" = tmux ] && tmux delete-buffer -b "$b" 2>/dev/null 9>&-' EXIT
 trap '[ "$typing" = 1 ] && exit 6; exit 4' HUP INT TERM
 if [ "$len" != keys ]; then cat >"$f" || exit 4; fi
 l=${XDG_RUNTIME_DIR:-}/corral-send-$(printf '%s' "$mode-$p" | tr -c 'A-Za-z0-9-' _)
@@ -2467,13 +2467,13 @@ fi
 # own, as private as mktemp's file — and its length checked: one not read
 # whole types nothing, rather than half a message and Enter — review505.)
 if [ -n "$parts" ]; then
-  fd=$(mktemp -d) || exit 4
+  partdir=$(mktemp -d) || exit 4 # (not "fd": front() goes through /proc/…/fd with that name — review506)
   at=0 np=0
   IFS=+; set -- $parts; unset IFS
   for x in "$@"; do
     np=$((np + 1))
-    tail -c +$((at + 1)) "$f" | head -c "$x" >"$fd/$np" || exit 4
-    [ "$(wc -c <"$fd/$np" | tr -d ' ')" = "$x" ] || exit 4
+    tail -c +$((at + 1)) "$f" | head -c "$x" >"$partdir/$np" || exit 4
+    [ "$(wc -c <"$partdir/$np" | tr -d ' ')" = "$x" ] || exit 4
     at=$((at + x))
   done
 fi
@@ -2636,7 +2636,7 @@ if [ "$mode" = tmux ]; then
     typing=1 k=0
     while [ "$k" -lt "$np" ]; do
       k=$((k + 1))
-      tmux load-buffer -b "$b" "$fd/$k" 9>&- || exit 6
+      tmux load-buffer -b "$b" "$partdir/$k" 9>&- || exit 6
       tmux paste-buffer -p -r -d -b "$b" -t "$p" 9>&- || exit 6
       sleep 0.3
     done
@@ -2675,7 +2675,7 @@ else
     typing=1 k=0
     while [ "$k" -lt "$np" ]; do
       k=$((k + 1))
-      t=$(cat "$fd/$k" && printf x) || exit 6
+      t=$(cat "$partdir/$k" && printf x) || exit 6
       t=${t%x}
       HERDR_SOCKET_PATH=$sock herdr pane send-text "$p" "$e[200~$t$e[201~" >/dev/null 2>&1 9>&- || exit 6
       sleep 0.3
