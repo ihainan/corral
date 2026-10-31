@@ -44,4 +44,4 @@ func codexIdleInput(screen string) error {
 // codexFooter: a line of Codex's footer under its input: its model and
 // folder ("gpt-mock default · ~/cxreal"), its hints ("? for shortcuts",
 // "esc again to edit previous message"), its notes ("⚠ 1 warning").
-var codexFooter = regexp.MustCompile(`^\S.* · (?:~|/)\S*|^\? for shortcuts\b|\bto (?:edit|view|quit|interrupt)\b|^⚠ \d+ warnings?\b`)
+var codexFooter = regexp.MustCompile(`^\S.* · (?:~|/)\S*(?: · .*)?$|^\? for shortcuts\b|^esc again to edit previous message$|^ctrl \+ c again to quit$|^⚠ \d+ warnings? · f2 to view$|\s{2,}⚠ \d+ warnings? · f2 to view$`)

@@ -333,9 +333,8 @@ for d in $codexes; do
   if [ -n "$cxpend" ]; then
     # (A conversation its log not begun yet — just started, or begun anew
     # with /new, the one before still open: its session the one its writer
-    # lock names, which its log will have. Not told which of two: none.)
+    # lock names, which its log will have.)
     case $sub in ''|resume|fork) ;; *) continue;; esac
-    [ "$cxpend" = '?' ] && continue
     log= sid=$cxpend
   elif [ -n "$log" ]; then
     # (No subcommand to go by: its log's head says how it was begun.)
@@ -2443,7 +2442,7 @@ front() {
       case $cs in ''|resume|fork) ;; *) return 1;; esac
       # (Or the zero id, as one just started was located before its lock
       # was two seconds old: with no log open at all, the one conversation.)
-      [ "$sid" = "$cxpend" ] || { [ "$sid" = 00000000-0000-0000-0000-000000000000 ] && [ -z "$any" ] && [ "$cxpend" != '?' ]; } || return 1
+      [ "$sid" = "$cxpend" ] || { [ "$sid" = 00000000-0000-0000-0000-000000000000 ] && [ -z "$any" ]; } || return 1
     elif [ "$sid" = 00000000-0000-0000-0000-000000000000 ]; then
       [ -z "$cs" ] && [ -z "$any" ] || return 1
     elif [ -z "$lg" ]; then
@@ -3435,12 +3434,14 @@ var errSubagentFile = errors.New("not a subagent's log")
 // cxpend, the session of a conversation whose writer lock it holds
 // (~/.codex/thread-writer-locks/<id>.lock), held over two seconds, with no
 // log of it open — one just started, or begun anew (/new), its log begun
-// with its first message, the lock's id the log's ("?": more than one, not
-// told which); cxnew, such a lock held less long (a subagent's a moment,
-// its log opened with it; or one begun anew: not told yet).
+// with its first message, the lock's id the log's (of several, the one
+// taken last; one taken before its own log was last written is a
+// conversation left, not counted); cxnew, such a lock held less long (a
+// subagent's a moment, its log opened with it; or one begun anew: not told
+// yet).
 // (Codex 0.164, as a real one was seen to: plans/5d3b-codex-new-compact.md.)
 const codexFdsSh = `codex_fds() {
-  cxlog= cxany= cxpend= cxnew= _locks= _young= _logs=
+  cxlog= cxany= cxpend= cxnew= _locks= _logs=
   _nl=$(printf '\nx'); _nl=${_nl%x}
   _now=$(date +%s)
   for _f in "$1"/fd/*; do
@@ -3453,19 +3454,22 @@ const codexFdsSh = `codex_fds() {
       { [ -z "$cxlog" ] || [ "$_l" -nt "$cxlog" ]; } && cxlog=$_l ;;
     "$HOME"/.codex/thread-writer-locks/*.lock)
       _i=${_l##*/}; _i=${_i%.lock}
-      # (Held over two seconds — three, counted in whole seconds: a
-      # subagent's, begun with its log, has that open by then; a
-      # conversation begun anew waits for its first message. One younger
-      # is said apart, cxnew: what it is not known yet.)
-      case $_i in *[!0-9a-fA-F-]*) continue ;; ????????-????-????-????-????????????) ;; *) continue ;; esac
-      _t=$(stat -c %Y "$_l" 2>/dev/null) || continue
-      if [ $((_now - _t)) -ge 3 ]; then _locks="$_locks $_i"; else _young="$_young $_i"; fi ;;
+      case $_i in *[!0-9a-fA-F-]*) ;; ????????-????-????-????-????????????) _locks="$_locks $_l" ;; esac ;;
     esac
   done
-  for _i in $_locks; do
-    case "$_logs" in *"-$_i "*) ;; *) if [ -z "$cxpend" ]; then cxpend=$_i; else cxpend='?'; fi ;; esac
+  # (Of its locks without a log open: one taken before its log was last
+  # written is a conversation left (begun anew from it before its first
+  # message), not the one it is at; of the others, the one taken last.
+  # Held over two seconds — three, counted in whole seconds: a subagent's,
+  # begun with its log, has that open by then; one younger is cxnew.)
+  _pend=
+  for _l in $_locks; do
+    _i=${_l##*/}; _i=${_i%.lock}
+    case "$_logs" in *"-$_i "*) continue ;; esac
+    [ -n "$cxlog" ] && ! [ "$_l" -nt "$cxlog" ] && continue
+    _t=$(stat -c %Y "$_l" 2>/dev/null) || continue
+    if [ $((_now - _t)) -lt 3 ]; then cxnew=1; continue; fi
+    { [ -z "$_pend" ] || [ "$_l" -nt "$_pend" ]; } && _pend=$_l
   done
-  for _i in $_young; do
-    case "$_logs" in *"-$_i "*) ;; *) cxnew=1 ;; esac
-  done
+  if [ -n "$_pend" ]; then cxpend=${_pend##*/}; cxpend=${cxpend%.lock}; fi
 }`

@@ -26,6 +26,8 @@ func TestCodexFds(t *testing.T) {
 		p := filepath.Join(home, ".codex/sessions/2026/10/31/rollout-2026-10-31T02-19-22-"+id+".jsonl")
 		os.MkdirAll(filepath.Dir(p), 0o755)
 		os.WriteFile(p, []byte(`{"timestamp":"x","type":"session_meta","payload":{"id":"`+id+`","thread_source": "`+source+`"}}`+"\n"), 0o644)
+		at := time.Now().Add(-time.Minute) // (last written a while ago: before any lock of the test)
+		os.Chtimes(p, at, at)
 		return p
 	}
 	// (A lock held a while: two seconds at least; young, a subagent's just begun.)
@@ -86,14 +88,15 @@ func TestCodexFds(t *testing.T) {
 	if log, pend := fds(); !strings.Contains(log, a) || pend != b {
 		t.Errorf("/new: B's lock, no log of B: log %q (A's still), pending %q", log, pend)
 	}
-	open(lockOf(c))
-	if _, pend := fds(); pend != "?" {
-		t.Errorf("two such: not told which, pending %q", pend)
+	open(lockAged(c, 5*time.Second)) // (taken after B's: the one it is at)
+	if _, pend := fds(); pend != c {
+		t.Errorf("two such: the one taken last, pending %q", pend)
 	}
-	open(logOf(c, "user"))
-	open(logOf(b, "user"))
-	if _, pend := fds(); pend != "" {
-		t.Errorf("their logs open: pending %q", pend)
+	cLog := logOf(c, "user") // (review477: B left with no message, C begun: B's lock, taken before C's log, a leftover)
+	os.Chtimes(cLog, time.Now(), time.Now())
+	open(cLog)
+	if log, pend := fds(); !strings.Contains(log, c) || pend != "" {
+		t.Errorf("C's log open, B's lock left: log %q, pending %q", log, pend)
 	}
 }
 
@@ -102,15 +105,17 @@ func TestCodexFds(t *testing.T) {
 func TestCodexIdleInput(t *testing.T) {
 	foot := "\n\n  gpt-mock default · ~/p\n  ? for shortcuts\n"
 	for screen, want := range map[string]error{
-		"• done\n\n› Ask Codex to do anything" + foot: nil,
-		"• done\n\n› half a draft" + foot:             errDraft,
-		"• done\n\n› \n  keep this draft" + foot:      errDraft,
-		"• done\n\n› \n  \n  keep this draft" + foot:  errDraft,
+		"• done\n\n› Ask Codex to do anything" + foot:                                                               nil,
+		"• done\n\n› half a draft" + foot:                                                                           errDraft,
+		"• done\n\n› \n  keep this draft" + foot:                                                                    errDraft,
+		"• done\n\n› \n  I want to edit this file" + foot:                                                           errDraft,
+		"• done\n\n› \n  Use the app to view this report" + foot:                                                    errDraft,
+		"• done\n\n› \n  \n  keep this draft" + foot:                                                                errDraft,
 		"• done\n\n› Ask Codex to do anything\n\n  gpt-6-sol high · /srv/x\n  esc again to edit previous message\n": nil,
-		"• done\n\n› first\n  second" + foot:                                     errDraft,
-		"• done\n\n› Implement {feature}" + foot:                                 errDraft,
-		"• Working (3s • esc to interrupt)\n\n› Ask Codex to do anything" + foot: errBusyAgent,
-		"no input here" + foot:                                                   errScreen,
+		"• done\n\n› first\n  second" + foot:                                                                        errDraft,
+		"• done\n\n› Implement {feature}" + foot:                                                                    errDraft,
+		"• Working (3s • esc to interrupt)\n\n› Ask Codex to do anything" + foot:                                    errBusyAgent,
+		"no input here" + foot:                                                                                      errScreen,
 	} {
 		if got := codexIdleInput(screen); got != want {
 			t.Errorf("%q: %v, want %v", screen[:20], got, want)
