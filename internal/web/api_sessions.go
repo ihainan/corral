@@ -260,6 +260,10 @@ func (s *Server) openSession(ctx context.Context, w http.ResponseWriter, r *http
 	res, err := s.terms.Reserve(u.ID)
 	if err != nil {
 		client.Close()
+		if errors.Is(err, term.ErrClosing) {
+			writeError(w, http.StatusServiceUnavailable, "restarting", "the gateway is restarting; try again in a moment")
+			return
+		}
 		writeError(w, http.StatusTooManyRequests, "too_many_sessions", "close some sessions first")
 		return
 	}
