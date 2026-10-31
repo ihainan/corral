@@ -2396,6 +2396,24 @@ func convoSendCommand(mode, session, pane, socket string, pid, start int64, sid 
 // open, not a question (exit 9 where it has not); "reply:<sha256 of the
 // screen answered>", only while it waits for an answer, on that screen.
 func convoGatedCommand(gate, mode, session, pane, socket string, pid, start int64, sid string, length int, keys []string, read int) string {
+	n := strconv.Itoa(length)
+	if keys != nil {
+		n = "keys"
+	}
+	return convoGated(gate, mode, session, pane, socket, pid, start, sid, n, keys, read)
+}
+
+// convoGatedPasteCommand: convoGatedCommand for a message pasted in parts,
+// each on its own, in turn (parts: their lengths in bytes, all of it).
+func convoGatedPasteCommand(gate, mode, session, pane, socket string, pid, start int64, sid string, parts []int, read int) string {
+	ns := make([]string, len(parts))
+	for i, n := range parts {
+		ns[i] = strconv.Itoa(n)
+	}
+	return convoGated(gate, mode, session, pane, socket, pid, start, sid, strings.Join(ns, "+"), nil, read)
+}
+
+func convoGated(gate, mode, session, pane, socket string, pid, start int64, sid, n string, keys []string, read int) string {
 	script := `PATH="$HOME/.local/bin:$HOME/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 mode=$1 sess=$2 p=$3 pid=$4 start=$5 len=$6 sock=$7 sid=$8 rd=$9
 shift 9
@@ -2408,6 +2426,16 @@ cx=
 # read, its input seen empty there.)
 case $gate in cfree|creply:*|cscreen:*) cx=1 gate=${gate#c} ;; esac
 case $rd in ''|*[!0-9]*) rd=0;; esac
+# (A message in parts, its length "12+5+30": each part pasted on its own,
+# in turn — a picture's path alone, so that Codex takes it for a picture.
+# The whole, as one, checked as ever.)
+parts=
+case $len in *+*)
+  case $len in *[!0-9+]*|+*|*+|*++*) exit 4;; esac
+  parts=$len n=0
+  IFS=+; for x in $parts; do n=$((n + x)); done; unset IFS
+  len=$n ;;
+esac
 # (What the pane shows after, its last rd lines but blank ones at the end.)
 # (Not read, it exits 8: no screen is not an empty one.)
 screen() {
@@ -2419,7 +2447,7 @@ screen() {
 }
 b=corral-send-$$ typing=0
 f=$(mktemp) || exit 4
-trap 'rm -f "$f"; [ "$mode" = tmux ] && tmux delete-buffer -b "$b" 2>/dev/null 9>&-' EXIT
+trap 'rm -f "$f" "$f.p"; [ "$mode" = tmux ] && tmux delete-buffer -b "$b" 2>/dev/null 9>&-' EXIT
 trap '[ "$typing" = 1 ] && exit 6; exit 4' HUP INT TERM
 if [ "$len" != keys ]; then cat >"$f" || exit 4; fi
 l=${XDG_RUNTIME_DIR:-}/corral-send-$(printf '%s' "$mode-$p" | tr -c 'A-Za-z0-9-' _)
@@ -2586,11 +2614,24 @@ if [ "$mode" = tmux ]; then
     screen
     exit 0
   fi
+  if [ -n "$parts" ]; then
+    front || exit 3
+    typing=1 at=0
+    IFS=+; set -- $parts; unset IFS
+    for x in "$@"; do
+      tail -c +$((at + 1)) "$f" | head -c "$x" >"$f.p" || exit 6
+      at=$((at + x))
+      tmux load-buffer -b "$b" "$f.p" 9>&- || exit 6
+      tmux paste-buffer -p -r -d -b "$b" -t "$p" 9>&- || exit 6
+      sleep 0.3
+    done
+  else
   tmux load-buffer -b "$b" "$f" 9>&- || exit 4
   front || exit 3
   typing=1
   tmux paste-buffer -p -r -d -b "$b" -t "$p" 9>&- || exit 6
   sleep 0.3
+  fi
   gate_enter
   tmux send-keys -t "$p" Enter 9>&- || exit 5
   screen
@@ -2614,6 +2655,17 @@ else
     screen
     exit 0
   fi
+  if [ -n "$parts" ]; then
+    front || exit 3
+    typing=1 at=0
+    IFS=+; set -- $parts; unset IFS
+    for x in "$@"; do
+      t=$(tail -c +$((at + 1)) "$f" | head -c "$x" && printf x) || exit 6
+      t=${t%x} at=$((at + x))
+      HERDR_SOCKET_PATH=$sock herdr pane send-text "$p" "$e[200~$t$e[201~" >/dev/null 2>&1 9>&- || exit 6
+      sleep 0.3
+    done
+  else
   t=$(cat "$f" && printf x) || exit 4
   [ "${t%x}" != "$t" ] || exit 4
   t=${t%x}
@@ -2621,14 +2673,12 @@ else
   typing=1
   HERDR_SOCKET_PATH=$sock herdr pane send-text "$p" "$e[200~$t$e[201~" >/dev/null 2>&1 9>&- || exit 6
   sleep 0.3
+  fi
   gate_enter
   HERDR_SOCKET_PATH=$sock herdr pane send-keys "$p" enter >/dev/null 2>&1 9>&- || exit 5
   screen
 fi`
-	n := strconv.Itoa(length)
-	if keys != nil {
-		n = "keys"
-	}
+
 	script = strings.ReplaceAll(script, "CARDAWK", cardRegionAwk) // (see convo_card.go)
 	cmd := "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(mode) + " " + sshx.QuoteShell(session) + " " + sshx.QuoteShell(pane) + " " +
 		strconv.FormatInt(pid, 10) + " " + strconv.FormatInt(start, 10) + " " + n + " " + sshx.QuoteShell(socket) + " " + sshx.QuoteShell(sid) + " " + strconv.Itoa(max(0, min(read, 60))) + " " + sshx.QuoteShell(gate)
@@ -3265,7 +3315,14 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 			ended.Done()
 		}
 	}
-	res, err := sshx.Exec(ctx, sess.Client(), convoGatedCommand(gate, sess.Persistence, sess.TmuxSession, b.Pane, socket, b.PID, b.Start, b.Session, len(text), press, modeLines(what)), sendOut,
+	cmd := convoGatedCommand(gate, sess.Persistence, sess.TmuxSession, b.Pane, socket, b.PID, b.Start, b.Session, len(text), press, modeLines(what))
+	if what == "send" && front.agent == "codex" {
+		// (Its pictures' paths each pasted on its own: Codex takes them for pictures — plans/4-codex-images.md.)
+		if parts := codexPasteParts(text); parts != nil {
+			cmd = convoGatedPasteCommand(gate, sess.Persistence, sess.TmuxSession, b.Pane, socket, b.PID, b.Start, b.Session, parts, modeLines(what))
+		}
+	}
+	res, err := sshx.Exec(ctx, sess.Client(), cmd, sendOut,
 		sshx.ExecOptions{Stdin: strings.NewReader(text), Release: done})
 	var exitErr *sshx.ExitError
 	switch {

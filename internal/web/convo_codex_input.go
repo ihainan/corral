@@ -4,6 +4,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // codexIdleInput: Codex at rest, its input empty: nothing says it works
@@ -129,8 +131,18 @@ func codexTypedIn(screen, text string, whole bool) bool {
 		n, _ := strconv.Atoi(m[1])
 		return n == len([]rune(text)) || n == len(text)
 	}
+	// (Its pictures' paths, each pasted on its own, shown "[Image #N]": as
+	// Claude Code's box shows them, wholeOf and typedImage read them.)
 	if whole {
-		return box == want
+		return wholeOf(text).MatchString(box)
+	}
+	if m := typedImage.FindStringIndex(box); m != nil {
+		if p := picturePath(want); p != nil {
+			box, want = box[m[1]:], want[p[1]:]
+			if want == "" {
+				return box == ""
+			}
+		}
 	}
 	head := []rune(want)
 	return strings.HasPrefix(box, string(head[:min(len(head), typedHead)]))
@@ -158,4 +170,31 @@ func codexInInput(screen, text string) (waiting, known bool) {
 		return false, false // (folded: what it holds is not seen)
 	}
 	return false, true
+}
+
+// codexPasteParts: a message for Codex cut where a picture's path stands
+// alone in it (picturesIn: quoted, or between spaces, as the page puts an
+// upload's path in the draft): the parts' lengths in bytes, in turn, each
+// path a part of its own — pasted on its own, Codex takes it for a picture
+// ("[Image #1]"; in the middle of words, it is words). nil: none in it.
+func codexPasteParts(text string) []int {
+	var parts []int
+	at := 0
+	for _, m := range picturesIn.FindAllStringSubmatchIndex(text, -1) {
+		if r, _ := utf8.DecodeRuneInString(text[m[3]:]); m[3] < len(text) && !unicode.IsSpace(r) {
+			continue // (not standing alone: a word goes on after it)
+		}
+		if m[2] > at {
+			parts = append(parts, m[2]-at)
+		}
+		parts = append(parts, m[3]-m[2])
+		at = m[3]
+	}
+	if len(parts) == 0 {
+		return nil
+	}
+	if at < len(text) {
+		parts = append(parts, len(text)-at)
+	}
+	return parts
 }

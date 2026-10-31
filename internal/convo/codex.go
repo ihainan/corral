@@ -786,11 +786,22 @@ func (c *Codex) event(r *codexRow, p *codexPayload) {
 			c.add(r, it.ID, RoleNote, []Part{{Kind: KindEvent, Event: &Event{Kind: EventCompact}}})
 		case "UserMessage":
 			var parts []Part
-			for _, b := range codexContent(it.Content) {
+			blocks := codexContent(it.Content)
+			pics := 0
+			for _, b := range blocks {
+				if strings.Contains(b.Type, "image") {
+					pics++
+				}
+			}
+			for _, b := range blocks {
 				switch {
 				case b.Type == "text" || b.Type == "input_text":
-					if strings.TrimSpace(b.Text) != "" {
-						parts = append(parts, textPart(KindText, b.Text))
+					text := b.Text
+					if pics > 0 {
+						text = codexNoPlaceholders(text, pics) // (its pictures shown as such)
+					}
+					if strings.TrimSpace(text) != "" {
+						parts = append(parts, textPart(KindText, text))
 					}
 				case strings.Contains(b.Type, "image"):
 					parts = append(parts, Part{Kind: KindImage})
@@ -1932,3 +1943,18 @@ func (l *codexLimits) quota(at string, old *Quota) *Quota {
 func CodexAgentID(id string) bool { return codexAgentID.MatchString(id) }
 
 var codexAgentID = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+
+// codexNoPlaceholders: what the person wrote with the pictures they put in
+// it (n of them) taken out of it: Codex writes "[Image #1]" where each was
+// ("[Image #1]  [Image #2]  两张"), the pictures beside the words.
+func codexNoPlaceholders(text string, n int) string {
+	out := codexPlaceholder.ReplaceAllStringFunc(text, func(m string) string {
+		if k, _ := strconv.Atoi(codexPlaceholder.FindStringSubmatch(m)[1]); k >= 1 && k <= n {
+			return "" // (with the spaces Codex put after it: its lines as they were)
+		}
+		return m
+	})
+	return strings.TrimSpace(out)
+}
+
+var codexPlaceholder = regexp.MustCompile(`\[Image #(\d+)\] {0,2}`)
