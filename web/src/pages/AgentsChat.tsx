@@ -618,7 +618,10 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     const ended = !row.lost && (row.a.bg === 'running' || row.a.bg === 'checking') && (row.a.status === 'done' || row.a.status === 'idle')
     const status = row.lost ? 'unknown' : ended && row.bg !== 'stale' ? (row.a.status as 'done' | 'idle') : row.status
     const bg = row.lost ? undefined : row.bg
-    return { where: row.ws === '~' ? '' : row.ws, title, status, bg, other: readsLog(row.a.agent) ? undefined : row.a.agent, program: row.a.agent }
+    // (A dialog of Claude Code's own open, /usage say: herdr calls it idle,
+    // its session file says it waits. Of this pane's process only.)
+    const dialog = !row.lost && status !== 'blocked' && convo.bind?.pane === row.a.pane_id && !convo.failing && convo.agentStatus === 'waiting' && !answerable(convo.waitingFor)
+    return { where: row.ws === '~' ? '' : row.ws, title, status, bg, dialog, other: readsLog(row.a.agent) ? undefined : row.a.agent, program: row.a.agent }
   }, [herdr, row, convo.bind, convo.agentStatus, convo.waitingFor, convo.failing, convo.title, convo.entries])
   // A finished one looked at here is seen: the gateway keeps it, so it is
   // no longer "done" in any browser (herdr's own word goes only with its
@@ -737,6 +740,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     if (!(e instanceof ApiError)) return errorText(e)
     if (e.code === 'agent_changed') return t('convo.stopChanged')
     if (e.code === 'not_in_front') return t('convo.notFront')
+    if (e.code === 'agent_waiting' && agent?.dialog) return t('agents.dialogOpen')
     // (Of these the gateway says only in English: said here.)
     if (e.code === 'refused') return t('convo.err.refused')
     if (e.code === 'picker') return t('convo.err.picker')

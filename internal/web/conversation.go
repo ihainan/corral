@@ -1447,8 +1447,8 @@ type convoAnswer struct {
 	// QuietMs: how long since the log last grew (what was read of it; for
 	// OpenCode, its rows), in milliseconds.
 	QuietMs int64 `json:"quiet_ms,omitempty"`
-	// WaitingFor: with AgentStatus "waiting" (tmux), what Claude Code waits
-	// for (see convoProcStatus).
+	// WaitingFor: with AgentStatus "waiting", what Claude Code waits for
+	// (see convoProcStatus).
 	WaitingFor string `json:"waiting_for,omitempty"`
 	Available  bool   `json:"available"`
 	Reason     string `json:"reason,omitempty"`
@@ -1463,6 +1463,7 @@ type convoAnswer struct {
 	Bind     *convoBind `json:"bind,omitempty"`
 	// AgentStatus (tmux, where herdr does not say): "busy" or "idle" as
 	// Claude Code's file for the process says; absent when not known.
+	// "waiting" in herdr too (herdr does not say that of a dialog open).
 	AgentStatus string `json:"agent_status,omitempty"`
 	// Title is the session's own (Claude Code's, or the person's);
 	// Tasks the agent's task list as the log has it.
@@ -1847,8 +1848,14 @@ func (s *Server) readConvo(sess *term.Session, st *convoState) (more bool, err e
 		return false, s.readOpenCode(sess, st)
 	}
 	err = s.withSFTP(context.Background(), sess, convoReadLimit, func(c *sftplite.Client) error {
-		if sess.Persistence == "tmux" && st.agent != "codex" && !st.sub {
+		if st.agent != "codex" && !st.sub {
 			st.status = convoProcStatus(c, st)
+			// (herdr says busy or idle itself, but not a dialog Claude Code
+			// has open (/usage, a picker): its file's "waiting" only, the
+			// host refusing a message then.)
+			if sess.Persistence != "tmux" && !strings.HasPrefix(st.status, "waiting:") {
+				st.status = ""
+			}
 		}
 		// (Codex's log says whether it works.)
 		defer func() {

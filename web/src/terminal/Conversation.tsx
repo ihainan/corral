@@ -46,7 +46,7 @@ export interface ConvoAgent {
   title?: string // the session's title (Claude Code's own), else the pane's
   status: 'working' | 'blocked' | 'done' | 'idle' | 'unknown'
   bg?: 'running' | 'stale' | 'checking' // (its turn over: subagents still out, or that being read for; see agents.ts)
-  dialog?: boolean // (tmux: Claude Code has a dialog of its own open, a picker, say: not a question to answer here)
+  dialog?: boolean // (Claude Code has a dialog of its own open, a picker or /usage, say: not a question to answer here)
   other?: string // the program in the pane, when it is not Claude Code
   program?: string // the program in the pane, for its icon
 }
