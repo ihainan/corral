@@ -1705,11 +1705,12 @@ func (s *Server) locateConvo(ctx context.Context, sess *term.Session, st *convoS
 	// (looked: when the scan read began, shared or not: what it found is of
 	// then or after, and a look begun later says more.)
 	// (A Codex with no log yet, looked for again each time: a scan begun
-	// after the last look, not one shared from before — its first message
-	// begins its log, and what is sent next must be of that session.)
+	// within the last second, not one shared from further back — its first
+	// message begins its log, and what is sent next must be of that
+	// session. Looks at once, of other windows too, share the one.)
 	var after time.Time
 	if st.bind != nil && st.bind.Session == convoNoSession && st.bind.Agent == "codex" {
-		after = st.located
+		after = time.Now().Add(-time.Second)
 	}
 	out, at, looked, err := s.convoScans.run(ctx, sess, convoLocateCommand(sess.Persistence, sess.TmuxSession, ""), after)
 	// (The script ends with exit 0: an error is a scan cut short, by its size
