@@ -554,6 +554,19 @@ func (m *Manager) Running(owner, hostID int64) []*Session {
 	return out
 }
 
+// RunningAll returns every live session.
+func (m *Manager) RunningAll() []*Session {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []*Session
+	for _, s := range m.sessions {
+		if s.State() == StateRunning {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 func (m *Manager) closeMatching(match func(*Session) bool, reason string) {
 	m.mu.Lock()
 	var hit []*Session

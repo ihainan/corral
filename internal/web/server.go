@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/ihainan/corral/internal/auth"
 	"github.com/ihainan/corral/internal/config"
@@ -80,15 +81,20 @@ type Server struct {
 	histLocks    histLocks    // one reading of a session's input history at a time
 	convoScans   convoScans   // scans of a host's processes, shared by its panes for a moment
 
-	sockMu  sync.Mutex
-	socks   map[int64]map[*liveSocket]struct{} // open WebSockets per user, closed on sign-out
-	pending map[int64]map[*liveSocket]struct{} // connections being set up, cancelled on sign-out
+	sockMu   sync.Mutex
+	socks    map[int64]map[*liveSocket]struct{} // open WebSockets per user, closed on sign-out
+	pending  map[int64]map[*liveSocket]struct{} // connections being set up, cancelled on sign-out
+	stopping bool                               // the gateway stops: opens of terminals are cancelled at once
+
+	stopMu  sync.Mutex
+	stopCtx context.Context // the stop's deadline, once it began (see BeginShutdown)
 }
 
 type liveSocket struct {
 	loginHash string
 	hostID    int64 // for pending connects: deleting the host cancels them
 	cancel    context.CancelFunc
+	opens     bool // an open of a terminal: the gateway stopping cancels it
 }
 
 type Deps struct {
@@ -111,6 +117,13 @@ func New(d Deps) *Server {
 	s.fwd.wg.Add(1)
 	go s.fwd.reap()
 	s.terms.OnAlert = s.onTerminalAlert
+	prevEnd := s.terms.OnEnd
+	s.terms.OnEnd = func(sess *term.Session, state string, d time.Duration) {
+		s.tabEnded(sess)
+		if prevEnd != nil {
+			prevEnd(sess, state, d)
+		}
+	}
 	s.auth.UseVault(d.Vault) // authenticator secrets are sealed like host credentials
 	prev := s.auth.OnUserGone
 	s.auth.OnUserGone = func(userID int64) {
@@ -475,6 +488,9 @@ func (s *Server) trackPending(userID int64, ls *liveSocket) func() {
 		s.pending[userID] = map[*liveSocket]struct{}{}
 	}
 	s.pending[userID][ls] = struct{}{}
+	if s.stopping && ls.opens {
+		ls.cancel()
+	}
 	s.sockMu.Unlock()
 	return func() {
 		s.sockMu.Lock()

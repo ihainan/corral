@@ -8,10 +8,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -77,7 +79,10 @@ func run(log *slog.Logger) error {
 	terms := term.NewManager(cfg.DetachTimeout, cfg.MaxSessionsPerUser)
 	terms.OnEnd = func(s *term.Session, state string, d time.Duration) {
 		uid := s.OwnerID
-		_ = st.Audit(context.Background(), &uid, "", "session.end", s.HostName,
+		// (Bounded: the stop waits for these.)
+		actx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = st.Audit(actx, &uid, "", "session.end", s.HostName,
 			"", map[string]any{"session": s.ID, "state": state, "seconds": int(d.Seconds())})
 	}
 	web.Version = version
@@ -117,16 +122,40 @@ func run(log *slog.Logger) error {
 
 	go pruneLogins(ctx, st, cfg)
 
+	// The sessions kept open over a restart (see internal/web/tabs.go):
+	// turned off, the ones kept are forgotten before anyone can connect.
+	if os.Getenv("CORRAL_RESTORE_SESSIONS") == "off" {
+		if err := st.ClearTabs(ctx); err != nil {
+			return fmt.Errorf("forget the sessions kept over the restart: %w", err)
+		}
+	}
+	hbCtx, stopHeartbeat := context.WithCancel(context.Background())
+	defer stopHeartbeat()
+	hbDone := make(chan struct{})
+	go func() {
+		srv.RunTabHeartbeat(hbCtx)
+		close(hbDone)
+	}()
+
 	hs := &http.Server{
 		Addr:              cfg.Listen,
 		Handler:           srv.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
+	// Bound before serving: a port taken fails the start here.
+	addr := cfg.Listen
+	if addr == "" {
+		addr = ":http"
+	}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
 	errc := make(chan error, 1)
 	go func() {
 		log.Info("corral listening", "addr", cfg.Listen, "public_url", cfg.Origin(), "version", version)
-		errc <- hs.ListenAndServe()
+		errc <- hs.Serve(ln)
 	}()
 	select {
 	case err := <-errc:
@@ -136,22 +165,46 @@ func run(log *slog.Logger) error {
 	case <-ctx.Done():
 	}
 	log.Info("shutting down")
-	shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// One budget for the whole stop. Nothing opens sessions any more; then
+	// requests drain and starts under way finish, together; the heartbeat
+	// stops; the terminals close, as stopped (their records kept), and what
+	// is written as they end is waited for; then forwards, recordings and
+	// background work. The budget spent: left as after a crash.
+	stopCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	_ = hs.Shutdown(shutCtx)
+	srv.BeginShutdown(stopCtx)
+	var drain sync.WaitGroup
+	drain.Add(2)
+	go func() {
+		defer drain.Done()
+		hctx, hcancel := context.WithTimeout(stopCtx, 8*time.Second)
+		defer hcancel()
+		_ = hs.Shutdown(hctx)
+	}()
+	go func() {
+		defer drain.Done()
+		terms.WaitStarts(stopCtx)
+	}()
+	drain.Wait()
+	stopHeartbeat()
+	select {
+	case <-hbDone:
+	case <-stopCtx.Done():
+	}
 	// Terminals first: closing their SSH connections cannot block and unblocks
-	// anything still waiting on them (forwards borrowing them included). Then
-	// the forwarding connections and background work. Bounded, so a stuck
-	// host cannot keep the process from exiting.
+	// anything still waiting on them (forwards borrowing them included).
 	done := make(chan struct{})
 	go func() {
 		terms.Shutdown()
+		if !terms.WaitEnds(stopCtx) {
+			log.Warn("gave up waiting for the ends of sessions to be recorded")
+		}
 		srv.Close()
 		close(done)
 	}()
 	select {
 	case <-done:
-	case <-time.After(10 * time.Second):
+	case <-stopCtx.Done():
 		log.Warn("gave up waiting for connections to close")
 	}
 	return nil

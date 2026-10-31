@@ -85,13 +85,19 @@ func (s *Server) apiOpenSession(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithDeadline(r.Context(), expiry)
 	defer cancel()
-	untrack := s.trackPending(u.ID, &liveSocket{loginHash: loginHash(r), hostID: b.HostID, cancel: cancel})
+	untrack := s.trackPending(u.ID, &liveSocket{loginHash: loginHash(r), hostID: b.HostID, cancel: cancel, opens: true})
 	defer untrack()
 	// Opens, edits and forwarding dials of one host take turns, so two taps
 	// cannot both find nothing running and start two, and an open reads the
 	// host, its credential and its pinned key as they are together. The
 	// response is written after the turn is over.
 	resp, err := s.underHostGate(ctx, u.ID, b.HostID, func(w http.ResponseWriter) { s.openSession(ctx, w, r, &b) })
+	// Cancelled by the gateway stopping: not signed out (a 401 signs the
+	// page out); to be tried again once it is back.
+	if s.terms.Closing() && r.Context().Err() == nil && (err != nil && !errors.Is(err, errGateBusy) || err == nil && resp.status == http.StatusUnauthorized) {
+		writeError(w, http.StatusServiceUnavailable, "restarting", "the gateway is restarting; try again in a moment")
+		return
+	}
 	switch {
 	case errors.Is(err, errGateBusy):
 		writeError(w, http.StatusTooManyRequests, "busy", "this host is already being opened; try again in a moment")
@@ -258,6 +264,10 @@ func (s *Server) openSession(ctx context.Context, w http.ResponseWriter, r *http
 		return
 	}
 	defer res.Release() // no-op once Start took it
+	if opts.Persistence != store.PersistNone {
+		// Kept, to be opened again after a restart (see tabs.go).
+		opts.Register = s.registerOpened(u.ID, h.ID, cfg, loginHash(r))
+	}
 	// Last check before anything runs on the host.
 	if _, err := s.auth.CheckLogin(ctx, loginHash(r)); err != nil || ctx.Err() != nil {
 		client.Close()
@@ -266,7 +276,11 @@ func (s *Server) openSession(ctx context.Context, w http.ResponseWriter, r *http
 	}
 	sess, err := s.terms.Start(ctx, res, u.ID, h.ID, h.Name, client, opts)
 	if err != nil {
-		if ctx.Err() != nil {
+		if errors.Is(err, term.ErrClosing) {
+			writeError(w, http.StatusServiceUnavailable, "restarting", "the gateway is restarting; try again in a moment")
+			return
+		}
+		if ctx.Err() != nil || errors.Is(err, store.ErrNoLogin) {
 			writeError(w, http.StatusUnauthorized, "unauthorized", "please sign in")
 			return
 		}
@@ -275,13 +289,23 @@ func (s *Server) openSession(ctx context.Context, w http.ResponseWriter, r *http
 	}
 	// Access or the host may have gone while we were starting. The session is
 	// registered first, then checked, so a concurrent revocation or deletion
-	// either sees it (and closes it) or this check sees the change.
+	// either sees it (and closes it) or this check sees the change. The
+	// gateway stopping (which cancels ctx) is not a revocation: the session
+	// is left to the stop, to end as stopped (and be kept).
 	if _, err := s.auth.CheckLogin(ctx, loginHash(r)); err != nil {
+		if s.terms.Closing() {
+			writeError(w, http.StatusServiceUnavailable, "restarting", "the gateway is restarting; try again in a moment")
+			return
+		}
 		sess.Close("access revoked")
 		writeError(w, http.StatusUnauthorized, "unauthorized", "please sign in")
 		return
 	}
 	if _, err := s.store.Host(ctx, u.ID, h.ID); err != nil {
+		if s.terms.Closing() {
+			writeError(w, http.StatusServiceUnavailable, "restarting", "the gateway is restarting; try again in a moment")
+			return
+		}
 		sess.Close("host deleted")
 		writeError(w, http.StatusNotFound, "not_found", "no such host")
 		return
