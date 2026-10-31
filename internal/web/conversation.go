@@ -3531,6 +3531,14 @@ func (s *Server) convoRelocNow(sess *term.Session, pane string) {
 		key += pane
 	}
 	if st := s.convos.peek(key); st != nil {
-		st.relocAfter.Store(time.Now().UnixNano())
+		// (Only ever later: two refusals at once, the earlier stored last,
+		// would let a scan begun before the later one pass for it — review500.)
+		now := time.Now().UnixNano()
+		for {
+			was := st.relocAfter.Load()
+			if was >= now || st.relocAfter.CompareAndSwap(was, now) {
+				break
+			}
+		}
 	}
 }
