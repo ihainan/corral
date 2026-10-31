@@ -96,6 +96,9 @@ async function tries(target: ReplyTarget, from: Screen, pre: (text: string) => b
   // (A screen cut short is not the prompt known: not tried on.)
   let s = from
   for (let i = 0; ; i++) {
+    // (Before each try, the first too: the prompt as it is to be, the card
+    // still the person's — review515.)
+    if (!pre(s.text)) throw new NotAsShown()
     try {
       await act(s)
       return
@@ -169,10 +172,11 @@ export async function ownWords(target: ReplyTarget, now: Screen, r: OwnRow, text
   // (The words in the row, all of them, the row whole on its line — Claude
   // Code wraps a long one itself, under it — and the rest as it was: checked
   // again before each try of Enter too.)
-  const shows = (t: string) => {
+  const rowOK = (t: string) => {
     const c = cursorRow(t)
-    return !!c && c.n === r.n && c.rest === want && wholeRow(t, r.n) && same(t)
+    return !!c && c.n === r.n && c.rest === want && wholeRow(t, r.n) && frame(t, r.n) === base
   }
+  const shows = (t: string) => rowOK(t) && alive()
   const got = await after(target, shows).catch(() => null)
   if (!got) throw new Filled()
   try {
@@ -181,7 +185,12 @@ export async function ownWords(target: ReplyTarget, now: Screen, r: OwnRow, text
     if (e instanceof NotAsShown || refusal(e)) throw new Filled() // (the words there; Enter not pressed)
     throw new MaybeSent()
   }
-  const done = await after(target, (t) => !shows(t)).catch(() => null)
+  // (Gone, the row as it was no longer: what Enter did. The card no longer
+  // the person's meanwhile says nothing of that: not known — review515.)
+  const done = await after(target, (t) => {
+    if (!alive()) throw new MaybeSent()
+    return !rowOK(t)
+  }).catch(() => null)
   if (!done) throw new MaybeSent()
   return done
 }

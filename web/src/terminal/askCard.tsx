@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useState } from 'react'
 import { ApiError } from '../api'
 import { t } from '../i18n'
 import { Markdown } from './markdown'
@@ -214,12 +214,11 @@ async function tickAndGo(target: ReplyTarget, now: Screen, q0: Q, want: Set<numb
   return step(target, s, ['enter'], (x) => !sameQ(x, q0))
 }
 
-export function AskPanel({ call, index, shown, target, drive, busy }: { call: ConvoTool; index: number; shown: Q; target: ReplyTarget; drive: Drive; busy: boolean }) {
+export function AskPanel({ call, index, shown, target, drive, busy, alive }: { call: ConvoTool; index: number; shown: Q; target: ReplyTarget; drive: Drive; busy: boolean; alive: () => boolean }) {
   const ask = call.asks![index]
   const [ticks, setTicks] = useState<Set<number> | null>(null)
   const ticked = ticks ?? new Set(shown.options.filter((o) => o.ticked).map((o) => o.n))
   const [preview, setPreview] = useState(-1)
-  const alive = useAlive()
   // (A lone question with nothing beside: a digit answers it at once.)
   const pick = (n: number) =>
     drive((now) => {
@@ -289,19 +288,6 @@ export function AskPanel({ call, index, shown, target, drive, busy }: { call: Co
   )
 }
 
-// (The card still shown and its page in front: else the person's own words
-// go no further — review513.)
-function useAlive(): () => boolean {
-  const on = useRef(true)
-  useEffect(() => {
-    on.current = true
-    return () => {
-      on.current = false
-    }
-  }, [])
-  return () => on.current && document.visibilityState === 'visible'
-}
-
 // A line of the person's own, into a row of the prompt that takes it.
 export function OwnBox({ label, busy, onGo, hint }: { label: string; busy: boolean; onGo: (text: string) => void; hint?: string }) {
   const [text, setText] = useState('')
@@ -346,8 +332,7 @@ export function ReviewPanel({ shown, digest, target, drive, busy }: { shown: Ext
 
 // A plan put to the person: the plan as the log has it, the choices as the
 // screen shows them (one that lasts beyond this: a second tap).
-export function PlanPanel({ call, shown, digest, target, drive, busy, onScreen }: { call: ConvoTool; shown: Extract<AskScreen, { kind: 'plan' }>; digest: string; target: ReplyTarget; drive: Drive; busy: boolean; onScreen: () => void }) {
-  const alive = useAlive()
+export function PlanPanel({ call, shown, digest, target, drive, busy, onScreen, alive }: { call: ConvoTool; shown: Extract<AskScreen, { kind: 'plan' }>; digest: string; target: ReplyTarget; drive: Drive; busy: boolean; onScreen: () => void; alive: () => boolean }) {
   return (
     <div className="convo-ask-structured">
       <div className="convo-ask-q">{t('ask.plan')}</div>

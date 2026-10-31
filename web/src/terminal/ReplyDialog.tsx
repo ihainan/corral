@@ -410,6 +410,8 @@ export function InlineReply({ target, onLoaded, resizedAt, active = true, held, 
       shownNow.current = false
     }
   }, [])
+  // (The person's own words go on only while this card is theirs: shown, in front, its page visible — review513/515.)
+  const stillHere = () => shownNow.current && activeRef.current && document.visibilityState === 'visible'
   const [amending, setAmending] = useState(false)
   const [amendError, setAmendError] = useState('')
   const [amendStuck, setAmendStuck] = useState('')
@@ -418,7 +420,7 @@ export function InlineReply({ target, onLoaded, resizedAt, active = true, held, 
     setAmending(true)
     setAmendError('')
     const on = screen.digest
-    ownWords(target, screen, permissionAmend(n, yes), words, () => shownNow.current && activeRef.current && document.visibilityState === 'visible')
+    ownWords(target, screen, permissionAmend(n, yes), words, stillHere)
       .then(() => {
         answered.current = on
         setSent(on)
@@ -515,11 +517,11 @@ export function InlineReply({ target, onLoaded, resizedAt, active = true, held, 
     return (
       <div className="convo-ask" role="group" aria-label={waiting} aria-busy={busy}>
         {state.kind === 'question' ? (
-          <AskPanel key={(call.id ?? '') + ':' + askAt} call={call} index={askAt} shown={state} target={target} drive={driven.drive} busy={busy} />
+          <AskPanel key={(call.id ?? '') + ':' + askAt} call={call} index={askAt} shown={state} target={target} drive={driven.drive} busy={busy} alive={stillHere} />
         ) : state.kind === 'review' ? (
           <ReviewPanel shown={state} digest={screen.digest} target={target} drive={driven.drive} busy={busy} />
         ) : state.kind === 'plan' ? (
-          <PlanPanel call={call} shown={state} digest={screen.digest} target={target} drive={driven.drive} busy={busy} onScreen={() => setShown(true)} />
+          <PlanPanel call={call} shown={state} digest={screen.digest} target={target} drive={driven.drive} busy={busy} onScreen={() => setShown(true)} alive={stillHere} />
         ) : null}
         {changed && (
           <p className="reply-changed" role="alert">
