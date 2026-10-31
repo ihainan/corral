@@ -45,7 +45,7 @@ func (s *Server) apiConversationSentMissing(w http.ResponseWriter, r *http.Reque
 
 // sentMissing reads the pane's screen and says whether the message is
 // still waiting in its input. text is what was sent.
-func (s *Server) sentMissing(w http.ResponseWriter, ctx context.Context, sess *term.Session, pane, socket, text string, outcome, reason *string, release func()) {
+func (s *Server) sentMissing(w http.ResponseWriter, ctx context.Context, sess *term.Session, pane, socket, agent, text string, outcome, reason *string, release func()) {
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	res, err := sshx.Exec(ctx, sess.Client(), convoScreenCommand(sess.Persistence, pane, socket), 256<<10, sshx.ExecOptions{Release: release})
@@ -56,6 +56,9 @@ func (s *Server) sentMissing(w http.ResponseWriter, ctx context.Context, sess *t
 	}
 	screen := string(res.Out)
 	waiting, known := inInput(screen, text)
+	if agent == "codex" {
+		waiting, known = codexInInput(screen, text)
+	}
 	*outcome = "looked"
 	switch {
 	case !known:
@@ -80,7 +83,12 @@ func (s *Server) sentMissing(w http.ResponseWriter, ctx context.Context, sess *t
 // these have ended on the host too.)
 // later: a context for the look a moment on, tied to the person's login
 // (its end, a sign-out or revocation calls it off), nil where it is over.
-func (s *Server) enterAgain(ctx context.Context, sess *term.Session, pane, socket string, pid, start int64, sid, text, screen string, ended *sync.WaitGroup, later func(d time.Duration) (context.Context, func())) {
+func (s *Server) enterAgain(ctx context.Context, sess *term.Session, pane, socket, agent string, pid, start int64, sid, text, screen string, ended *sync.WaitGroup, later func(d time.Duration) (context.Context, func())) {
+	still, whole := stillTyped, typedWhole
+	if agent == "codex" { // (its input drawn its own way: codexInputArea)
+		still = func(screen, text string) bool { return codexTypedIn(screen, text, false) }
+		whole = func(screen, text string) bool { return codexTypedIn(screen, text, true) }
+	}
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	enter := []string{"enter"}
@@ -100,7 +108,7 @@ func (s *Server) enterAgain(ctx context.Context, sess *term.Session, pane, socke
 		return true
 	}
 	for range 2 {
-		if !stillTyped(screen, text) || !press(ctx) {
+		if !still(screen, text) || !press(ctx) {
 			break
 		}
 	}
@@ -126,7 +134,7 @@ func (s *Server) enterAgain(ctx context.Context, sess *term.Session, pane, socke
 		}
 		ended.Add(1)
 		res, err := sshx.Exec(lctx, sess.Client(), convoScreenCommand(sess.Persistence, pane, socket), 256<<10, sshx.ExecOptions{Release: ended.Done})
-		if err == nil && typedWhole(string(res.Out), text) {
+		if err == nil && whole(string(res.Out), text) {
 			press(lctx)
 		}
 	}()
@@ -138,7 +146,7 @@ const enterLater = 2500 * time.Millisecond
 // sentEnter: Enter pressed for a message the person was told is still in
 // the input box — only where the screen, read now, shows it there (the box
 // in front, holding it from its start: see stillTyped); pressed tells.
-func (s *Server) sentEnter(w http.ResponseWriter, ctx context.Context, sess *term.Session, pane, socket string, pid, start int64, sid, text string, outcome, reason *string, release func()) {
+func (s *Server) sentEnter(w http.ResponseWriter, ctx context.Context, sess *term.Session, pane, socket, agent string, pid, start int64, sid, text string, outcome, reason *string, release func()) {
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	var held sync.WaitGroup
@@ -155,7 +163,11 @@ func (s *Server) sentEnter(w http.ResponseWriter, ctx context.Context, sess *ter
 		writeError(w, http.StatusBadGateway, "no_screen", "the pane's screen could not be read")
 		return
 	}
-	if !typedWhole(string(res.Out), text) {
+	whole := typedWhole
+	if agent == "codex" {
+		whole = func(screen, text string) bool { return codexTypedIn(screen, text, true) }
+	}
+	if !whole(string(res.Out), text) {
 		*outcome, *reason = "refused", "not_in_input"
 		writeJSON(w, http.StatusOK, map[string]any{"pressed": false})
 		return

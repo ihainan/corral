@@ -3101,7 +3101,8 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		writeError(w, http.StatusBadRequest, "bad_request", "not a command of Claude Code's")
 		return
 	}
-	if (front.agent == "codex" || front.agent == "opencode") && what != "send" && what != "interrupt" && !codexAnswer && !codexCommand && !codexModel {
+	codexLook := front.agent == "codex" && (what == "sent_missing" || what == "sent_enter") // (its input told apart: codexInputArea)
+	if (front.agent == "codex" || front.agent == "opencode") && what != "send" && what != "interrupt" && !codexAnswer && !codexCommand && !codexModel && !codexLook {
 		reason = "unsupported"
 		writeError(w, http.StatusConflict, "unsupported", "not for this agent")
 		return
@@ -3148,18 +3149,18 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	if what == "sent_missing" {
 		release := turn
 		turn = func() {} // (the screen read gives it back, once it has ended on the host)
-		s.sentMissing(w, ctx, sess, b.Pane, socket, text, &outcome, &reason, release)
+		s.sentMissing(w, ctx, sess, b.Pane, socket, front.agent, text, &outcome, &reason, release)
 		return
 	}
 	if what == "sent_enter" {
-		if front.agent != "claude" {
+		if front.agent != "claude" && front.agent != "codex" {
 			outcome, reason = "refused", "not_claude"
-			writeError(w, http.StatusConflict, "not_claude", "only Claude Code's input box can be told apart")
+			writeError(w, http.StatusConflict, "not_claude", "only Claude Code's and Codex's input can be told apart")
 			return
 		}
 		release := turn
 		turn = func() {} // (given back once its commands have ended on the host)
-		s.sentEnter(w, ctx, sess, b.Pane, socket, b.PID, b.Start, b.Session, text, &outcome, &reason, release)
+		s.sentEnter(w, ctx, sess, b.Pane, socket, front.agent, b.PID, b.Start, b.Session, text, &outcome, &reason, release)
 		return
 	}
 	if what == "screen" {
@@ -3318,8 +3319,8 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	if answer != nil && outcome != "refused" {
 		answer.digest, answer.at = b.Digest, time.Now()
 	}
-	if outcome == "typed" && what == "send" && front.agent == "claude" {
-		s.enterAgain(ctx, sess, b.Pane, socket, b.PID, b.Start, b.Session, text, string(res.Out), &ended, func(d time.Duration) (context.Context, func()) {
+	if outcome == "typed" && what == "send" && (front.agent == "claude" || front.agent == "codex") {
+		s.enterAgain(ctx, sess, b.Pane, socket, front.agent, b.PID, b.Start, b.Session, text, string(res.Out), &ended, func(d time.Duration) (context.Context, func()) {
 			// (Within the login's time; told of a sign-out from now on, and
 			// one before now found by asking once registered.)
 			end := time.Now().Add(d)
