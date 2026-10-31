@@ -5,7 +5,7 @@ import { api, choiceOf, probeBootstrap, type Host, type OpenChoice, type Session
 import { agentKey, sessionWhich } from '../terminal/sessionName'
 import { HIDDEN_EVERY, waitingTitle } from '../terminal/agents'
 import { t } from '../i18n'
-import { local, session as tabStore } from '../storage'
+import { local } from '../storage'
 import { navigate } from '../router'
 import { takeTabs } from '../notifyopen'
 import { Dialog, useToast } from '../components/ui'
@@ -61,19 +61,34 @@ const newTabKey = isMac ? '⌘T' : 'Ctrl+Shift+T'
 // goes on on the host. A tab shown since the page loaded opens itself again
 // (see the terminal page); one never shown is opened again from here, so all
 // the tabs come back, in their places (kept by host, kind and name).
-const KEPT_KEY = 'corral.tabsKept'
+// Kept in the browser, not the tab: a phone's page put away while the
+// gateway restarted is often thrown out, and came back with no word of what
+// was open (10-31). Of one account (another signed in here opens none of
+// it), and only fresh: a device away for long would open again what was
+// closed elsewhere since (KEPT_FRESH: a deploy's restart is minutes; hours
+// away, what it saw last is not what was open when it went).
+const KEPT_KEY = 'corral.tabsKept2' // (corral.tabsKept: the tab's own, of before)
+const KEPT_FRESH = 3 * 60 * 60 * 1000
 interface KeptTabs {
   instance: string
+  user: number
+  at: number // when it was written (ms)
   tabs: { id: string; host_id: number; open: OpenChoice }[]
 }
-function readKept(): KeptTabs | null {
+function readKept(user: number | undefined): KeptTabs | null {
   try {
-    const k = JSON.parse(tabStore.get(KEPT_KEY) ?? 'null')
-    return k && typeof k.instance === 'string' && Array.isArray(k.tabs) ? k : null
+    const k = JSON.parse(local.get(KEPT_KEY) ?? 'null')
+    return k && typeof k.instance === 'string' && Array.isArray(k.tabs) && typeof k.at === 'number' && typeof k.user === 'number' && k.user === user ? k : null
   } catch {
     return null
   }
 }
+const writeKept = (k: KeptTabs) => local.set(KEPT_KEY, JSON.stringify(k))
+// (A kept tab open now: the same tab, or one of the same session, as another
+// device opened it again: not opened once more.)
+const keptOpen = (k: KeptTabs['tabs'][number], running: SessionInfo[]) =>
+  running.some((s) => s.id === k.id || (s.host_id === k.host_id && choiceOf(s)?.kind === k.open.kind && sameMuxName(k.open.kind, choiceOf(s)?.name ?? '', k.open.name ?? '')))
+const sameMuxName = (kind: string, a: string, b: string) => a === b || (kind === 'herdr' && (a === 'default' ? '' : a) === (b === 'default' ? '' : b))
 
 const ORDER_KEY = 'corral.tabOrder2' // (corral.tabOrder held when each was last seen: another meaning)
 const KEEP_GONE_MS = 10 * 60 * 1000
@@ -216,22 +231,29 @@ export function TerminalTabs({ current }: { current: string }) {
   // Ones that need a password are said to, not asked for.
   const reopening = useRef(false)
   const instanceRef = useRef<string | null>(null)
+  const userRef = useRef<number | undefined>(undefined) // (whose tabs: as the gateway said, with its run)
   const keepTabs = async (running: SessionInfo[], inst: string | null) => {
     if (reopening.current) return
-    const kept = readKept()
-    const missing = kept ? kept.tabs.filter((k) => !running.some((s) => s.id === k.id)) : []
+    let kept = readKept(userRef.current)
+    let missing = kept ? kept.tabs.filter((k) => !keptOpen(k, running)) : []
     reopening.current = true
     try {
       // (The gateway's run asked again only when tabs went: a restart, or closed.)
-      const b = missing.length || !instanceRef.current ? await probeBootstrap() : { instance: instanceRef.current }
-      if (!b?.instance) return
+      const b = missing.length || !instanceRef.current || userRef.current === undefined ? await probeBootstrap() : { instance: instanceRef.current, user: { id: userRef.current } }
+      if (!b?.instance || !b.user) return
       instanceRef.current = b.instance
+      if (userRef.current !== b.user.id) {
+        userRef.current = b.user.id
+        kept = readKept(b.user.id)
+        missing = kept ? kept.tabs.filter((k) => !keptOpen(k, running)) : []
+      }
+      const user = b.user.id
       // (A list of the run before, or of one not known: asked for again, so it is not kept as this run's.)
       if (b.instance !== inst) {
         loadRef.current()
         return
       }
-      if (kept && missing.length && kept.instance !== b.instance) {
+      if (kept && missing.length && kept.instance !== b.instance && Date.now() - kept.at < KEPT_FRESH) {
         let failed = 0
         for (const k of missing) {
           try {
@@ -243,7 +265,7 @@ export function TerminalTabs({ current }: { current: string }) {
         }
         if (failed) toast(t('tabs.reopenFailed', { n: failed }), true)
         // (Opened once: what the tabs are now is the next list's.)
-        tabStore.set(KEPT_KEY, JSON.stringify({ instance: b.instance, tabs: [] }))
+        writeKept({ instance: b.instance, user, at: Date.now(), tabs: [] })
         loadRef.current()
         return
       }
@@ -251,7 +273,7 @@ export function TerminalTabs({ current }: { current: string }) {
         const open = choiceOf(s)
         return open && (open.kind === 'tmux' || open.kind === 'herdr') ? [{ id: s.id, host_id: s.host_id, open }] : []
       })
-      tabStore.set(KEPT_KEY, JSON.stringify({ instance: b.instance, tabs }))
+      writeKept({ instance: b.instance, user, at: Date.now(), tabs })
     } finally {
       reopening.current = false
     }

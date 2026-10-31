@@ -391,7 +391,7 @@ export interface SharedSession {
 }
 
 // The start-up answer, or null when the gateway does not answer (within 5 s).
-export async function probeBootstrap(): Promise<{ instance?: string } | null> {
+export async function probeBootstrap(): Promise<{ instance?: string; user?: { id: number } | null } | null> {
   const ctl = new AbortController()
   const tm = setTimeout(() => ctl.abort(), 5000)
   try {
