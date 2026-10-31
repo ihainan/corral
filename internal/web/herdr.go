@@ -973,7 +973,7 @@ func (s *Server) apiHerdrScreen(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
-	c, _ := s.herdrConn(w, r, ctx)
+	c, sess := s.herdrConn(w, r, ctx)
 	if c == nil {
 		return
 	}
@@ -985,17 +985,35 @@ func (s *Server) apiHerdrScreen(w http.ResponseWriter, r *http.Request) {
 	}
 	// Shown with the lines the terminal wrapped joined (see unwrapScreen);
 	// its digest still that of the screen as shown, as an answer checks it.
-	// (Asked last on this request's own connection: an older herdr refuses
-	// that source, and closes it.)
 	if !cut {
-		if j, err := c.ReadPaneSource(ctx, pane, "recent_unwrapped", 0); err == nil {
-			if u, ok := unwrapScreen(text, j); ok {
-				text = u
-			}
-		}
+		text = s.herdrJoined(ctx, sess, pane, text)
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusOK, map[string]any{"text": text, "digest": digest, "cut": cut})
+}
+
+// herdrJoined: shown (a pane's screen as shown) with the lines the
+// terminal wrapped joined, as herdr's recent_unwrapped has them (see
+// unwrapScreen); shown, as it is, where that cannot be told. On a
+// connection of its own: herdr answers one request on each, and closes one
+// on a source it does not have (an older herdr).
+func (s *Server) herdrJoined(ctx context.Context, sess *term.Session, pane, shown string) string {
+	c, err := herdr.Dial(ctx, sess.Client(), s.herdrSocks.get(sess.ID))
+	if err != nil {
+		return shown
+	}
+	defer c.Close()
+	j, err := c.ReadPaneSource(ctx, pane, "recent_unwrapped", 0)
+	if err != nil {
+		return shown
+	}
+	if len(j) > unwrapMax {
+		j = j[len(j)-unwrapMax:]
+	}
+	if u, ok := unwrapScreen(shown, j); ok {
+		return u
+	}
+	return shown
 }
 
 // POST /api/sessions/{id}/herdr/panes/{pane}/reply

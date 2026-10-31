@@ -311,7 +311,10 @@ time.sleep(30)`)
 		if err != nil {
 			t.Fatal(err)
 		}
-		shown, j := screenJoined(raw)
+		shown, j, ok := screenJoined(raw)
+		if !ok {
+			t.Fatalf("not framed: %q", raw)
+		}
 		_, digest, _ = screenOf(shown)
 		text, _, _ = screenOf([]byte(j))
 		return text, digest
@@ -345,5 +348,39 @@ time.sleep(30)`)
 	}
 	if got, keys := answer(digest); got != 0 || keys != "pane send-keys p1 1" {
 		t.Fatalf("an older herdr, its screen as shown: exit %d, typed %q", got, keys)
+	}
+}
+
+// The screen as shown is framed by its length: no letters of its own (or
+// of the joined read) move where its digest's bytes end; one that cannot be
+// read fails the command, as it did (review497).
+func TestScreenJoinedFraming(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no sh here")
+	}
+	dir := t.TempDir()
+	fail := filepath.Join(dir, "fail")
+	shownText := "a line\n\x01corral-joined\nnot a mark\n"
+	joinedText := "earlier\n\x01corral-joined\nx\na line\n\x01corral-joined\nnot a mark\n"
+	os.WriteFile(filepath.Join(dir, "herdr"), []byte("#!/bin/sh\n[ -e "+fail+" ] && exit 3\nif [ \"$5\" = recent-unwrapped ]; then printf '%b' '"+strings.ReplaceAll(joinedText, "\n", "\\n")+"'; exit 0; fi\nprintf '%b' '"+strings.ReplaceAll(shownText, "\n", "\\n")+"'\n"), 0o755)
+	run := func() ([]byte, error) {
+		c := exec.Command("sh", "-c", convoScreenJoinedCommand("herdr", "p1", "/run/x.sock"))
+		c.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"), "HOME="+dir) // (the script looks in $HOME's bin first)
+		return c.Output()
+	}
+	raw, err := run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	shown, _, ok := screenJoined(raw)
+	if !ok || string(shown) != shownText {
+		t.Fatalf("framed: %v %q", ok, shown)
+	}
+	os.WriteFile(fail, nil, 0o644)
+	if out, err := run(); err == nil {
+		t.Fatalf("a screen not read: %q, no failure", out)
+	}
+	if _, _, ok := screenJoined([]byte("12\nshort")); ok {
+		t.Fatal("a length past the output taken")
 	}
 }

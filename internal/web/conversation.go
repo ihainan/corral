@@ -381,42 +381,49 @@ else HERDR_SOCKET_PATH=$3 herdr pane read "$2" --source visible 2>/dev/null 9>&-
 	return "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(mode) + " " + sshx.QuoteShell(pane) + " " + sshx.QuoteShell(socket)
 }
 
-// joinedMark separates, in convoScreenJoinedCommand's output, the screen as
-// shown from its lines as the terminal joins them.
-const joinedMark = "\x01corral-joined\n"
-
-// convoScreenJoinedCommand is convoScreenCommand, the screen as shown
-// first — the same bytes, its digest what the host checks before an
-// answer's keys — and after joinedMark, where the terminal tells them, its
-// lines with those it wrapped joined (see unwrapScreen): tmux's
+// convoScreenJoinedCommand is convoScreenCommand, framed: the length of
+// the screen as shown, in bytes, on a line of its own; the screen as shown
+// (the same bytes: its digest is what the host checks before an answer's
+// keys); then, where the terminal tells them, its lines with those it
+// wrapped joined (see unwrapScreen; its last unwrapMax bytes): tmux's
 // capture-pane -J (the screen only), herdr's recent-unwrapped (back further
-// than the screen). Nothing after the screen where that cannot be read.
+// than the screen). A screen that cannot be read fails, as it did.
 func convoScreenJoinedCommand(mode, pane, socket string) string {
 	script := `PATH="$HOME/.local/bin:$HOME/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
-if [ "$1" = tmux ]; then tmux -u capture-pane -p -t "$2" 2>/dev/null 9>&-
-  j=$(tmux -u capture-pane -p -J -t "$2" 2>/dev/null 9>&-)
-else HERDR_SOCKET_PATH=$3 herdr pane read "$2" --source visible 2>/dev/null 9>&-
-  j=$(HERDR_SOCKET_PATH=$3 herdr pane read "$2" --source recent-unwrapped 2>/dev/null 9>&-)
-fi && [ -n "$j" ] && printf '\001corral-joined\n%s\n' "$j"
-exit 0`
+f=$(mktemp) || exit 4
+g=$(mktemp) || { rm -f "$f"; exit 4; }
+trap 'rm -f "$f" "$g"' EXIT
+if [ "$1" = tmux ]; then
+  tmux -u capture-pane -p -t "$2" >"$f" 2>/dev/null 9>&- || exit 1
+  tmux -u capture-pane -p -J -t "$2" 2>/dev/null 9>&- | tail -c MAX >"$g"
+else
+  HERDR_SOCKET_PATH=$3 herdr pane read "$2" --source visible >"$f" 2>/dev/null 9>&- || exit 1
+  HERDR_SOCKET_PATH=$3 herdr pane read "$2" --source recent-unwrapped 2>/dev/null 9>&- | tail -c MAX >"$g"
+fi
+wc -c <"$f" | tr -d ' '
+cat "$f" "$g"`
+	script = strings.Replace(script, "MAX", strconv.Itoa(unwrapMax), 2)
 	return "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(mode) + " " + sshx.QuoteShell(pane) + " " + sshx.QuoteShell(socket)
 }
 
 // screenJoined splits convoScreenJoinedCommand's output: the screen as
 // shown (as read: its digest is of these bytes), and as shown with the
 // lines the terminal wrapped joined (the screen as shown where that could
-// not be told).
-func screenJoined(raw []byte) (shown []byte, joined string) {
-	at := strings.LastIndex(string(raw), joinedMark)
-	if at < 0 {
-		return raw, string(raw)
+// not be told). ok false where the output is not so framed.
+func screenJoined(raw []byte) (shown []byte, joined string, ok bool) {
+	nl := strings.IndexByte(string(raw), '\n')
+	if nl < 0 {
+		return nil, "", false
 	}
-	shown = raw[:at]
-	j, ok := unwrapScreen(string(shown), string(raw[at+len(joinedMark):]))
-	if !ok {
-		return shown, string(shown)
+	n, err := strconv.Atoi(string(raw[:nl]))
+	if err != nil || n < 0 || nl+1+n > len(raw) {
+		return nil, "", false
 	}
-	return shown, j
+	shown = raw[nl+1 : nl+1+n]
+	if j, ok := unwrapScreen(string(shown), string(raw[nl+1+n:])); ok {
+		return shown, j, true
+	}
+	return shown, string(shown), true
 }
 
 // convoTailsCommand prints the end of each log, as "<path>\n<bytes>\n<the

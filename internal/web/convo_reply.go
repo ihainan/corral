@@ -42,7 +42,15 @@ func (s *Server) apiConversationReply(w http.ResponseWriter, r *http.Request) {
 func (s *Server) convoScreen(w http.ResponseWriter, ctx context.Context, sess *term.Session, pane, socket string, outcome, reason *string, release func()) {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	res, err := sshx.Exec(ctx, sess.Client(), convoScreenJoinedCommand(sess.Persistence, pane, socket), 1<<20, sshx.ExecOptions{Release: release})
+	res, err := sshx.Exec(ctx, sess.Client(), convoScreenJoinedCommand(sess.Persistence, pane, socket), 512<<10+unwrapMax+64, sshx.ExecOptions{Release: release})
+	var shown []byte
+	var joined string
+	if err == nil {
+		var ok bool
+		if shown, joined, ok = screenJoined(res.Out); !ok {
+			err = errors.New("the screen's read is not framed")
+		}
+	}
 	if err != nil {
 		*outcome, *reason = "unknown", "no_screen"
 		writeError(w, http.StatusBadGateway, "no_screen", "the pane's screen could not be read")
@@ -51,7 +59,6 @@ func (s *Server) convoScreen(w http.ResponseWriter, ctx context.Context, sess *t
 	*outcome = "looked"
 	// (Shown with the lines the terminal wrapped joined; its digest that of
 	// the screen as the host reads it before an answer's keys.)
-	shown, joined := screenJoined(res.Out)
 	_, digest, _ := screenOf(shown)
 	text, _, cut := screenOf([]byte(joined))
 	w.Header().Set("Cache-Control", "no-store")

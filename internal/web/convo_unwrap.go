@@ -8,15 +8,20 @@ import "strings"
 // as none (10-31). What is shown is the screen with such rows joined again;
 // what an answer is checked against stays the screen as shown (its digest:
 // the host reads it so too).
-//
+
+// unwrapMax: how much of the joined read is gone by (its end): the screen
+// is at its end, and herdr's goes back further.
+const unwrapMax = 256 << 10
+
 // unwrapScreen: the rows of visible (the screen as shown, row by row) with
 // those the terminal wrapped joined, as joined (the same lines joined, by
-// the terminal: herdr's recent_unwrapped, which goes back further than the
-// screen; tmux's capture-pane -J) has them. From the bottom up, each line
-// of joined is the rows it was cut into; the top row may be the end of a
-// line begun above the screen, kept as it shows. ok false where they do not
-// match (another screen meanwhile, or a terminal that joins otherwise):
-// then visible, as it is.
+// the terminal: herdr's recent-unwrapped, which goes back further than the
+// screen; tmux's capture-pane -J) has them. From the bottom up, each line of
+// joined is the rows it was cut into, letter for letter but the spaces a
+// row's end lost (shown rows end with none); the top rows may be the end of
+// a line begun above the screen, kept as they show. Nothing is shown that
+// the screen does not: ok false (and visible, as it is) where any line does
+// not match (another screen meanwhile, or a terminal that joins otherwise).
 func unwrapScreen(visible, joined string) (string, bool) {
 	rows := screenLines(visible)
 	lines := screenLines(joined)
@@ -29,28 +34,17 @@ func unwrapScreen(visible, joined string) (string, bool) {
 		if j < 0 {
 			return visible, false
 		}
-		want := bareLine(lines[j])
-		got, k := "", 0
-		matched := false
-		for i-k >= 0 {
-			got = bareLine(rows[i-k]) + got
-			k++
-			if got == want {
-				matched = true
-				break
-			}
-			if !strings.HasSuffix(want, got) {
-				break
-			}
-		}
+		k := rowsOf(lines[j], rows[:i+1])
 		switch {
-		case matched:
+		case k > 0:
 			out = append(out, lines[j])
 			i -= k
 			j--
-		case i-k < 0 && strings.HasSuffix(want, got):
-			// (The top rows: the end of a line begun above the screen.)
-			out = append(out, strings.Join(rows[:i+1], ""))
+		case endsLine(lines[j], rows[:i+1]):
+			// (The top rows: the end of a line begun above the screen, as shown.)
+			for r := i; r >= 0; r-- {
+				out = append(out, rows[r])
+			}
 			i = -1
 		default:
 			return visible, false
@@ -60,6 +54,61 @@ func unwrapScreen(visible, joined string) (string, bool) {
 		out[l], out[r] = out[r], out[l]
 	}
 	return strings.Join(out, "\n"), true
+}
+
+// rowsOf: how many of rows' last rows line was cut into (0: none fit).
+func rowsOf(line string, rows []string) int {
+	for k := 1; k <= len(rows) && k <= 400; k++ {
+		if cutInto(line, rows[len(rows)-k:]) {
+			return k
+		}
+	}
+	return 0
+}
+
+// cutInto: line is rows one after another, letter for letter; between two,
+// the spaces the first one's end lost. A blank row is a blank line only.
+func cutInto(line string, rows []string) bool {
+	if len(rows) > 1 {
+		for _, r := range rows {
+			if r == "" {
+				return false
+			}
+		}
+	}
+	pos := 0
+	for n, r := range rows {
+		if n > 0 {
+			for pos < len(line) && line[pos] == ' ' && !strings.HasPrefix(line[pos:], r) {
+				pos++
+			}
+		}
+		if !strings.HasPrefix(line[pos:], r) {
+			return false
+		}
+		pos += len(r)
+	}
+	return pos == len(line)
+}
+
+// endsLine: rows, one after another as cutInto has them, are line's end
+// (none of them blank).
+func endsLine(line string, rows []string) bool {
+	pos := len(line)
+	for n := len(rows) - 1; n >= 0; n-- {
+		r := rows[n]
+		if r == "" || !strings.HasSuffix(line[:pos], r) {
+			return false
+		}
+		pos -= len(r)
+		if n > 0 {
+			// (The spaces the row before lost at its end.)
+			for pos > 0 && line[pos-1] == ' ' && !strings.HasSuffix(line[:pos], rows[n-1]) {
+				pos--
+			}
+		}
+	}
+	return true
 }
 
 // screenLines: text's lines, without the blank space at the end of each and
@@ -74,7 +123,3 @@ func screenLines(text string) []string {
 	}
 	return ls
 }
-
-// bareLine: a line as compared, its spaces left out (a row may end, or the next
-// begin, with the space it was cut at, shown or not).
-func bareLine(s string) string { return strings.ReplaceAll(s, " ", "") }

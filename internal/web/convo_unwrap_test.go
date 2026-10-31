@@ -38,4 +38,16 @@ func TestUnwrapScreen(t *testing.T) {
 	if _, ok := unwrapScreen("", "a"); ok {
 		t.Fatal("an empty screen taken")
 	}
+	// review497: letters differ but for spaces — not the same line; a blank
+	// row is not the end of a line before it.
+	if got, ok := unwrapScreen("rm -rf / tmp/cache\nlast", "rm -rf /tmp/cache\nlast"); ok || got != "rm -rf / tmp/cache\nlast" {
+		t.Fatalf("spaces within a row: %v %q", ok, got)
+	}
+	if _, ok := unwrapScreen("A\n\nB", "A\nB"); ok {
+		t.Fatal("a blank row taken into a line")
+	}
+	// Blank rows that are blank lines: kept.
+	if got, ok := unwrapScreen("A\n\nB b\nb", "A\n\nB bb"); !ok || got != "A\n\nB bb" {
+		t.Fatalf("blank lines: %v %q", ok, got)
+	}
 }
