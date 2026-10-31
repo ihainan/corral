@@ -53,10 +53,13 @@ func TestCodexSubagentOf(t *testing.T) {
 		{"not a subagent", head("user", main), false},
 		{"no parent said", head("subagent", ""), false},
 		{"not a log's head", []byte("garbage\n"), false},
-		// (A real one's line, its instructions after, cut off by the head read.)
-		{"its line cut off", []byte(`{"timestamp":"x","ordinal":0,"type":"session_meta","payload":{"session_id":"` + main + `","id":"01a18ff7-432f-7a80-bb03-7c6c92a8fd35","parent_thread_id":"` + main + `","source":{"subagent":{"thread_spawn":{"parent_thread_id":"` + main + `","depth":1}}},"thread_source":"subagent","base_instructions":{"text":"You are Codex, a coding agent. ` + strings.Repeat("x", 9000))[:8192], true},
-		{"cut off before it says", []byte(`{"timestamp":"x","type":"session_meta","payload":{"base_instructions":"` + strings.Repeat("x", 9000))[:8192], false},
-		{"a type after its payload not session_meta", []byte(`{"payload":{"thread_source":"subagent","parent_thread_id":"` + main + `"},"type":"session_meta"}` + "\n"), false},
+		// (review495: a line cut off says nothing; its keys in any order; a
+		// key given twice, its last; what follows the first line not read.)
+		{"its line cut off", []byte(`{"timestamp":"x","type":"session_meta","payload":{"thread_source":"subagent","parent_thread_id":"` + main + `","base_instructions":{"text":"` + strings.Repeat("x", 9000))[:8192], false},
+		{"its payload before its type", []byte(`{"payload":{"parent_thread_id":"` + main + `","thread_source":"subagent"},"type":"session_meta"}` + "\n"), true},
+		{"its long instructions first", []byte(`{"type":"session_meta","payload":{"base_instructions":"` + strings.Repeat("x", 20000) + `","thread_source":"subagent","parent_thread_id":"` + main + `"}}` + "\n"), true},
+		{"its parent given twice, another's last", []byte(`{"type":"session_meta","payload":{"thread_source":"subagent","parent_thread_id":"` + main + `","parent_thread_id":"01a18ff7-0000-7890-9ecd-1aee1502e132"}}` + "\n"), false},
+		{"not JSON after what it says", []byte(`{"type":"session_meta","payload":{"thread_source":"subagent","parent_thread_id":"` + main + `"},` + "\n"), false},
 	} {
 		if got := codexSubagentOf(c.head, main); got != c.want {
 			t.Errorf("%s: %v", c.name, got)

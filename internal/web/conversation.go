@@ -3400,21 +3400,35 @@ func (s *Server) apiConversationSubagent(w http.ResponseWriter, r *http.Request)
 			writeError(w, http.StatusBadRequest, "bad_request", "bad pane or subagent")
 			return
 		}
+		// (Found once, it is read on from there: not looked for at each read.)
+		stKey := key + "\x00" + root + "\x00" + agent
 		var file string
-		err := s.withSFTP(r.Context(), sess, convoReadLimit, func(c *sftplite.Client) error {
-			var err error
-			file, err = codexSubagentLog(c, root, mainSID, agent)
-			return err
-		})
+		if st := s.subConvos.peek(stKey); st != nil {
+			st.mu.Lock()
+			file = st.log
+			st.mu.Unlock()
+		}
+		var err error
+		if file == "" {
+			err = s.withSFTP(r.Context(), sess, convoReadLimit, func(c *sftplite.Client) error {
+				var err error
+				file, err = codexSubagentLog(c, root, mainSID, agent, time.Now())
+				return err
+			})
+		}
 		if errors.Is(err, errSubagentFile) {
 			writeError(w, http.StatusForbidden, "not_allowed", "not a subagent's log")
+			return
+		}
+		if errors.Is(err, errSubagentUnsure) {
+			writeError(w, http.StatusServiceUnavailable, "too_many_logs", err.Error())
 			return
 		}
 		if err != nil {
 			writeFileError(w, err)
 			return
 		}
-		s.subagentAnswer(w, r, sess, key+"\x00"+root+"\x00"+agent, "codex", file, agent, gen, rev, older)
+		s.subagentAnswer(w, r, sess, stKey, "codex", file, agent, gen, rev, older)
 		return
 	}
 	if !convo.SubagentID(agent) {
@@ -3491,26 +3505,63 @@ func (s *Server) subagentAnswer(w http.ResponseWriter, r *http.Request, sess *te
 }
 
 // codexSubagentLog finds a Codex subagent's log: rollout-<time>-<id>.jsonl
-// in the folder of its session's log (root), or the next day's (sent off
-// across midnight). Only one that says it is a subagent of that session
-// (its head: "thread_source": "subagent", "parent_thread_id": sid); no
-// folder or log a link, the log a plain file.
-func codexSubagentLog(c *sftplite.Client, root, sid, agent string) (string, error) {
-	dir := path.Dir(root)
-	dirs := []string{dir}
-	if day, err := time.Parse("2006/01/02", strings.Join(strings.Split(dir, "/")[max(0, len(strings.Split(dir, "/"))-3):], "/")); err == nil {
-		dirs = append(dirs, path.Join(path.Dir(path.Dir(path.Dir(dir))), day.AddDate(0, 0, 1).Format("2006/01/02")))
+// in a day's folder of its session's (root's) sessions folder — that of
+// the day it was sent off, which may be any from root's (a session run on,
+// or resumed, for days) to today's: looked for from the newest back, at
+// most maxSubagentDays (and the day after now: the host's day may run
+// ahead of ours). Only one that says it is a subagent of that session (its
+// first line: "thread_source": "subagent", "parent_thread_id": sid); no
+// folder on the way down from the sessions folder a link, the log a plain
+// file. A folder with more in it than is listed, it not found: errSubagentUnsure.
+func codexSubagentLog(c *sftplite.Client, root, sid, agent string, now time.Time) (string, error) {
+	parts := strings.Split(path.Dir(root), "/")
+	if len(parts) < 4 {
+		return "", errSubagentFile
+	}
+	sessions := strings.Join(parts[:len(parts)-3], "/")
+	first, err := time.Parse("2006/01/02", strings.Join(parts[len(parts)-3:], "/"))
+	if err != nil {
+		return "", errSubagentFile
+	}
+	// (Each folder on the way down, a plain one: what is not there, not.)
+	seen := map[string]bool{}
+	folder := func(p string) (bool, error) {
+		if ok, done := seen[p]; done {
+			return ok, nil
+		}
+		fi, err := c.Lstat(p)
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			seen[p] = false
+			return false, nil
+		case err != nil:
+			return false, err
+		case fi.Mode()&fs.ModeSymlink != 0 || !fi.IsDir():
+			return false, errSubagentFile
+		}
+		seen[p] = true
+		return true, nil
 	}
 	suffix := "-" + agent + ".jsonl"
-	for _, d := range dirs {
-		fi, err := c.Lstat(d)
-		if err != nil {
+	unsure := false
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	for d, n := today.AddDate(0, 0, 1), 0; !d.Before(first) && n < maxSubagentDays; d, n = d.AddDate(0, 0, -1), n+1 {
+		dir, there := sessions, true
+		for _, part := range []string{d.Format("2006"), d.Format("01"), d.Format("02")} {
+			dir += "/" + part
+			ok, err := folder(dir)
+			if err != nil {
+				return "", err
+			}
+			if !ok {
+				there = false
+				break
+			}
+		}
+		if !there {
 			continue
 		}
-		if fi.Mode()&fs.ModeSymlink != 0 || !fi.IsDir() {
-			return "", errSubagentFile
-		}
-		list, _, err := c.ReadDirLimit(d, 4096)
+		list, cut, err := c.ReadDirLimit(dir, 4096)
 		if err != nil {
 			return "", err
 		}
@@ -3518,11 +3569,11 @@ func codexSubagentLog(c *sftplite.Client, root, sid, agent string) (string, erro
 			if !strings.HasPrefix(e.Name(), "rollout-") || !strings.HasSuffix(e.Name(), suffix) {
 				continue
 			}
-			file := d + "/" + e.Name()
+			file := dir + "/" + e.Name()
 			if lf, err := c.Lstat(file); err != nil || lf.Mode()&fs.ModeSymlink != 0 || !lf.Mode().IsRegular() {
 				return "", errSubagentFile
 			}
-			head, err := c.ReadRange(file, 0, 8192)
+			head, err := c.ReadRange(file, 0, maxSubagentHead)
 			if err != nil {
 				return "", err
 			}
@@ -3531,78 +3582,41 @@ func codexSubagentLog(c *sftplite.Client, root, sid, agent string) (string, erro
 			}
 			return file, nil
 		}
+		unsure = unsure || cut
+	}
+	if unsure {
+		return "", errSubagentUnsure
 	}
 	return "", errSubagentFile
 }
 
-// codexSubagentOf: a Codex log's first line says it is a subagent of the
-// session sid. That line goes on for tens of kilobytes (its instructions),
-// past the head read: it is walked key by key, its type and its payload's
-// thread_source and parent_thread_id told as they come (first in it), the
-// rest of it not needed.
+// maxSubagentDays: how many days' folders a subagent's log is looked for
+// in; maxSubagentHead: how much of its head is read for its first line (its
+// instructions in it: tens of kilobytes).
+const (
+	maxSubagentDays = 31
+	maxSubagentHead = 512 << 10
+)
+
+// codexSubagentOf: a Codex log's first line, whole in head, says it is a
+// subagent of the session sid (read as JSON is: keys in any order, the
+// last of one given twice; a line cut off, or not JSON, says nothing).
 func codexSubagentOf(head []byte, sid string) bool {
-	if sid == "" {
+	line, _, whole := bytes.Cut(head, []byte("\n"))
+	if !whole || sid == "" {
 		return false
 	}
-	line, _, _ := bytes.Cut(head, []byte("\n"))
-	dec := json.NewDecoder(bytes.NewReader(line))
-	str := func() (string, bool) {
-		tok, err := dec.Token()
-		v, ok := tok.(string)
-		return v, err == nil && ok
+	var row struct {
+		Type    string `json:"type"`
+		Payload struct {
+			ThreadSource   string `json:"thread_source"`
+			ParentThreadID string `json:"parent_thread_id"`
+		} `json:"payload"`
 	}
-	open := func() bool { tok, err := dec.Token(); return err == nil && tok == json.Delim('{') }
-	skip := func() bool { var v json.RawMessage; return dec.Decode(&v) == nil }
-	var meta bool
-	if !open() {
-		return false
-	}
-	for dec.More() {
-		k, ok := str()
-		if !ok {
-			return false
-		}
-		switch k {
-		case "type":
-			v, ok := str()
-			if !ok || v != "session_meta" {
-				return false
-			}
-			meta = true
-		case "payload":
-			if !meta || !open() {
-				return false
-			}
-			var source, parent string
-			for dec.More() && (source == "" || parent == "") {
-				k, ok := str()
-				if !ok {
-					return false
-				}
-				switch k {
-				case "thread_source":
-					if source, ok = str(); !ok {
-						return false
-					}
-				case "parent_thread_id":
-					if parent, ok = str(); !ok {
-						return false
-					}
-				default:
-					if !skip() {
-						return false
-					}
-				}
-			}
-			return source == "subagent" && parent == sid
-		default:
-			if !skip() {
-				return false
-			}
-		}
-	}
-	return false
+	return json.Unmarshal(line, &row) == nil && row.Type == "session_meta" && row.Payload.ThreadSource == "subagent" && row.Payload.ParentThreadID == sid
 }
+
+var errSubagentUnsure = errors.New("too many logs in its folder to find it")
 
 var errSubagentFile = errors.New("not a subagent's log")
 
