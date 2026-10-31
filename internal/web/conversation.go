@@ -3460,21 +3460,27 @@ const codexFdsSh = `codex_fds() {
   done
   # (Locks are told apart by when each was taken, never by when a log was
   # last written: its log is written on and on. The lock of the conversation
-  # whose log it writes is the mark: one without a log taken no later than
-  # that is a conversation left (begun anew from it before its first
-  # message); of the others, the one taken last. Held over two seconds —
-  # three, counted in whole seconds: a subagent's, begun with its log, has
-  # that open by then; one younger is cxnew; two taken in the same second,
-  # which of them it is at not known, cxnew too.)
+  # whose log it writes is the mark (its log's name ends in its id, or a
+  # fork's in <id>_<part>): one without a log taken before that is a
+  # conversation left (begun anew from it before its first message); of the
+  # others, the one taken last. Held over two seconds — three, counted in
+  # whole seconds: a subagent's, begun with its log, has that open by then;
+  # one younger is cxnew. Where which it is at cannot be told — two taken in
+  # the same second, one taken in the mark's second, or no mark found for
+  # the log it writes — cxnew too: sending waits rather than guess.)
   _ref=
   for _p in $_locks; do
-    case "$cxlog" in *"-${_p%%:*}.jsonl") _ref=${_p##*:} ;; esac
+    case "${cxlog%.jsonl}" in *"-${_p%%:*}"|*"-${_p%%:*}_"*|*"_${_p%%:*}") _ref=${_p##*:} ;; esac
   done
   _pend= _pt= _tie=
   for _p in $_locks; do
     _i=${_p%%:*}; _t=${_p##*:}
-    case "$_logs" in *"-$_i "*) continue ;; esac
-    [ -n "$_ref" ] && [ "$_t" -le "$_ref" ] && continue
+    case "$_logs" in *"-$_i "*|*"-${_i}_"*|*"_$_i "*) continue ;; esac
+    if [ -n "$cxlog" ]; then
+      [ -n "$_ref" ] || { _tie=1; continue; }
+      [ "$_t" -lt "$_ref" ] && continue
+      [ "$_t" -eq "$_ref" ] && { _tie=1; continue; }
+    fi
     if [ $((_now - _t)) -lt 3 ]; then cxnew=1; continue; fi
     if [ -z "$_pt" ] || [ "$_t" -gt "$_pt" ]; then _pend=$_i _pt=$_t _tie=
     elif [ "$_t" -eq "$_pt" ]; then _tie=1; fi

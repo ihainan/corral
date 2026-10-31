@@ -117,6 +117,61 @@ func TestCodexFds(t *testing.T) {
 	}
 }
 
+// review490: where which conversation it is at cannot be told from its
+// locks, none is pending and sending waits (cxnew): a lock taken in the
+// second the mark was; no mark for the log it writes. A fork's log
+// (<id>_<part>) is its conversation's.
+func TestCodexFdsUntold(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no sh")
+	}
+	const a, b, f = "01a18fc1-27bd-7b03-9702-4a4d49147ba8", "01a18fc1-3785-7b90-b732-c90708adac93", "01a18fc1-ffff-7b90-b732-c90708adac93"
+	run := func(t *testing.T, logName string, locks map[string]time.Time) (log, pend, young string) {
+		home := t.TempDir()
+		proc := filepath.Join(t.TempDir(), "123")
+		os.MkdirAll(filepath.Join(proc, "fd"), 0o755)
+		n := 3
+		open := func(target string) {
+			os.Symlink(target, filepath.Join(proc, "fd", strconv.Itoa(n)))
+			n++
+		}
+		if logName != "" {
+			p := filepath.Join(home, ".codex/sessions/2026/10/31/"+logName)
+			os.MkdirAll(filepath.Dir(p), 0o755)
+			os.WriteFile(p, []byte(`{"type":"session_meta","payload":{"thread_source": "user"}}`+"\n"), 0o644)
+			open(p)
+		}
+		for id, at := range locks {
+			p := filepath.Join(home, ".codex/thread-writer-locks/"+id+".lock")
+			os.MkdirAll(filepath.Dir(p), 0o755)
+			os.WriteFile(p, nil, 0o644)
+			os.Chtimes(p, at, at)
+			open(p)
+		}
+		cmd := exec.Command("sh", "-c", codexFdsSh+"\ncodex_fds \"$1\"; printf '%s\\n%s\\n%s' \"$cxlog\" \"$cxpend\" \"$cxnew\"", "sh", proc)
+		cmd.Env = append(os.Environ(), "HOME="+home)
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		parts := strings.SplitN(string(out), "\n", 3)
+		return filepath.Base(parts[0]), parts[1], parts[2]
+	}
+	sec := time.Now().Add(-time.Minute).Truncate(time.Second)
+	if _, pend, young := run(t, "rollout-2026-10-31T02-19-22-"+a+".jsonl", map[string]time.Time{a: sec, b: sec.Add(500 * time.Millisecond)}); pend != "" || young != "1" {
+		t.Errorf("B's lock in A's second: pending %q, new %q", pend, young)
+	}
+	if _, pend, young := run(t, "rollout-2026-10-31T02-19-22-"+a+".jsonl", map[string]time.Time{b: sec}); pend != "" || young != "1" {
+		t.Errorf("no lock of A's: pending %q, new %q", pend, young)
+	}
+	if _, pend, young := run(t, "rollout-2026-10-31T02-19-22-"+a+"_"+f+".jsonl", map[string]time.Time{a: sec}); pend != "" || young != "" {
+		t.Errorf("a fork's log, A's lock: A's, pending %q, new %q", pend, young)
+	}
+	if _, pend, young := run(t, "rollout-2026-10-31T02-19-22-"+a+"_"+f+".jsonl", map[string]time.Time{a: sec, b: sec.Add(10 * time.Second)}); pend != b || young != "" {
+		t.Errorf("a fork's log, then /new: B, pending %q, new %q", pend, young)
+	}
+}
+
 // Codex's input empty at rest: not a draft of one line or more, under a
 // first line empty too (review475).
 func TestCodexIdleInput(t *testing.T) {
@@ -132,6 +187,8 @@ func TestCodexIdleInput(t *testing.T) {
 		"• done\n\n› first\n  second" + foot:                                                                              errDraft,
 		"• done\n\n› Ask Codex to do anything\n\n  gpt-5.1-codex default · ~/my project\n  ? for shortcuts\n":             nil,
 		"• done\n\n› Ask Codex to do anything\n\n  gpt-mock default · ~/p\n  ? for shortcuts  ⚠ 1 warning · f2 to view\n": nil,
+		"• done\n\n› Ask Codex to do anything\n\n  openai/gpt-5.1-codex high · ~/p\n  ? for shortcuts\n":                  nil,
+		"• done\n\n› Ask Codex to do anything\n\n  Context 100% left       ⚠ 2 warnings · f2 to view\n":                   nil,
 		"• done\n\n› \n  ? for shortcuts in this document" + foot:                                                         errDraft,
 		"• done\n\n› \n  text  ⚠ 2 warnings · f2 to view" + foot:                                                          errDraft,
 		"• done\n\n› Implement {feature}" + foot:                                                                          errDraft,
