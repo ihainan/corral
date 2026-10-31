@@ -1555,11 +1555,7 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 		// says it does still, a dialog of its own open above all — a
 		// message to it is refused then. herdr says busy or idle itself.)
 		if st.reason == convoNoLog && st.bind != nil && st.agent == "claude" && !st.sub {
-			var now string
-			_ = s.withSFTP(ctx, sess, convoReadLimit, func(c *sftplite.Client) error {
-				now = convoProcStatus(c, st)
-				return nil
-			})
+			now := s.convoFreshStatus(ctx, sess, st.bind)
 			if sess.Persistence != "tmux" && !strings.HasPrefix(now, "waiting:") {
 				now = ""
 			}
@@ -2201,32 +2197,45 @@ func convoProcStatus(c *sftplite.Client, st *convoState) string {
 	if st.bind == nil {
 		return ""
 	}
-	var base string
-	switch i := strings.LastIndex(st.log, "/.claude/projects/"); {
-	case i >= 0:
-		base = st.log[:i]
-	case st.log == "":
-		// (Its log not written yet, a new conversation: in the home, where
-		// locating read that file too.)
-		home, err := c.Getwd()
-		if err != nil {
-			return ""
-		}
-		base = home
-	default:
+	i := strings.LastIndex(st.log, "/.claude/projects/")
+	if i < 0 {
 		return ""
 	}
+	base := st.log[:i]
 	b, err := c.ReadRange(base+"/.claude/sessions/"+strconv.FormatInt(st.bind.PID, 10)+".json", 0, 64<<10)
 	if err != nil {
 		return ""
 	}
+	return procStatusOf(b, st.bind)
+}
+
+// convoFreshStatus is convoProcStatus for a Claude Code with no log yet (a
+// new conversation): its file read on the host, in $HOME as locating read
+// it (the SFTP session may start elsewhere). "" when it cannot tell.
+func (s *Server) convoFreshStatus(ctx context.Context, sess *term.Session, b *convoBind) string {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	res, err := sshx.Exec(ctx, sess.Client(), freshStatusCommand(b.PID), 64<<10, sshx.ExecOptions{})
+	if err != nil {
+		return ""
+	}
+	return procStatusOf(res.Out, b)
+}
+
+func freshStatusCommand(pid int64) string {
+	return `head -c 65536 "$HOME/.claude/sessions/` + strconv.FormatInt(pid, 10) + `.json"`
+}
+
+// procStatusOf: what the session file b says, if it is of the process and
+// session bound (another's under a reused pid says nothing).
+func procStatusOf(b []byte, bind *convoBind) string {
 	var f struct {
 		Status     string          `json:"status"`
 		WaitingFor string          `json:"waitingFor"`
 		SessionID  string          `json:"sessionId"`
 		ProcStart  json.RawMessage `json:"procStart"`
 	}
-	if json.Unmarshal(b, &f) != nil || f.SessionID != st.bind.Session || strings.Trim(string(f.ProcStart), `"`) != strconv.FormatInt(st.bind.Start, 10) {
+	if json.Unmarshal(b, &f) != nil || f.SessionID != bind.Session || strings.Trim(string(f.ProcStart), `"`) != strconv.FormatInt(bind.Start, 10) {
 		return ""
 	}
 	switch f.Status {
