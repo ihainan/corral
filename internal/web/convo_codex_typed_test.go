@@ -35,6 +35,9 @@ func TestCodexTypedIn(t *testing.T) {
 		{"too short to tell", codexScreen("› go"), "go", false, false},
 		// (review502: the draft goes on with words like a footer's, then more: not the message whole.)
 		{"its words, a footer's, more", codexScreen("› " + msg + "\n  ? for shortcuts\n  再加一句"), msg, true, false},
+		// (review503: the draft ends with words like a footer's; its footer wrapped in a narrow pane.)
+		{"its words, then a footer's", codexScreen("› " + msg + "\n  ? for shortcuts"), msg, true, false},
+		{"its footer wrapped", codexScreen("› "+msg, "  gpt-mock default · ~/cxreal", "  ? for", "  shortcuts"), msg, true, true},
 	} {
 		if got := codexTypedIn(c.screen, c.text, false); got != c.still {
 			t.Errorf("%s: still typed %v", c.name, got)

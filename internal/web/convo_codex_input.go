@@ -42,25 +42,30 @@ func codexIdleInput(screen string) error {
 	return errScreen
 }
 
-// codexFootStart: where Codex's footer begins — the lines at the screen's
-// end, blank or a footer's (codexFooter), one of them at least; -1 where
-// the screen does not end so. (A line like a footer's above another kind
-// is the input's, a draft's words.)
+// codexFootStart: where Codex's footer begins — as Codex draws it under
+// its input, after a blank line: the lines at the screen's end (blank ones
+// at the very end aside) with no blank line among them, one of them a
+// footer's at least (codexFooter; the others a footer's lines wrapped in a
+// narrow pane — review503); -1 where the screen does not end so. (Lines
+// like a footer's above that blank line are the input's, a draft's.)
 func codexFootStart(lines []string) int {
-	at, seen := len(lines), false
-	for at > 0 {
-		t := strings.TrimSpace(lines[at-1])
-		if t != "" && !codexFooter.MatchString(t) {
-			break
-		}
-		seen = seen || t != ""
+	end := len(lines)
+	for end > 0 && strings.TrimSpace(lines[end-1]) == "" {
+		end--
+	}
+	at, seen := end, false
+	for at > 0 && strings.TrimSpace(lines[at-1]) != "" {
+		seen = seen || codexFooter.MatchString(strings.TrimSpace(lines[at-1]))
 		at--
 	}
-	if !seen {
+	if !seen || at == 0 || at == end || end-at > codexFootMax {
 		return -1
 	}
 	return at
 }
+
+// codexFootMax: the most lines Codex's footer runs to, wrapped.
+const codexFootMax = 6
 
 // codexFooter: a line of Codex's footer under its input: its model and
 // folder ("gpt-mock default · ~/cxreal", the folder's name spaces and all;

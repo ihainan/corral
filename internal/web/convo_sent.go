@@ -204,6 +204,11 @@ func (s *Server) sentEnter(w http.ResponseWriter, ctx context.Context, sess *ter
 		*outcome, *reason = "refused", "agent_waiting"
 		writeError(w, http.StatusConflict, "agent_waiting", "it waits for an answer, or has a dialog open: answer it first")
 		return
+	case errors.As(err, &exitErr) && exitErr.Status == 11:
+		// (Codex's title not read: whether it waits not told, nothing pressed — review503.)
+		*outcome, *reason = "refused", "cannot_verify"
+		writeError(w, http.StatusConflict, "cannot_verify", "whether Codex waits for an answer cannot be told (its title not read): press Enter in the terminal")
+		return
 	default:
 		*outcome, *reason = "unknown", "no_answer"
 		writeError(w, http.StatusBadGateway, "no_answer", "the host did not answer")
