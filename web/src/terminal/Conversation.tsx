@@ -429,7 +429,7 @@ export function ConversationView({
   // for the search, its top near, does not read on by itself.)
   const [searching, setSearching] = useState(false)
   const [turnsShown, setTurnsShown] = useState(false) // (the panel of the person's turns in the whole log: convoTurnsPanel)
-  olderPausedNow.current = olderPaused || searching
+  olderPausedNow.current = olderPaused || searching || turnsShown // (the turns panel reads back on its own, as asked: not the top's reading too — review517)
   // (Brought something: the first entry is an earlier one. What came at the end meanwhile does not count.)
   const firstSeq = convo.entries.length ? convo.entries[0].seq : 0
   const emptyReads = useRef({ n: 0, first: 0, was: false })
@@ -464,7 +464,7 @@ export function ConversationView({
     )
     io.observe(el)
     return () => io.disconnect()
-  }, [convo.older, convo.olderCut, convo.loadingOlder, convo.of, olderPaused, searching])
+  }, [convo.older, convo.olderCut, convo.loadingOlder, convo.of, olderPaused, searching, turnsShown])
   // What is in view stays where it is as items come in or change above it
   // (the part before read in, a turn opened higher up), unless the end is
   // kept in view: a few items in view are noted with where they are, and

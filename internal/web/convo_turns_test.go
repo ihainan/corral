@@ -23,9 +23,21 @@ func TestTurnIndex(t *testing.T) {
 	first := user("u1", "first question") + said + tool + user("u2", `second   one\n with lines`)
 	os.WriteFile(log, []byte(first), 0o644)
 	idx := &turnIndex{}
-	idx.reset(log, "claude")
+	idx.reset(log, "claude", 1)
+	rd := func() turnReader {
+		return turnReader{
+			size: func() (int64, error) {
+				fi, err := c.Lstat(idx.log)
+				if err != nil {
+					return 0, err
+				}
+				return fi.Size(), nil
+			},
+			read: func(off int64, n int) ([]byte, error) { return c.ReadRange(idx.log, off, n) },
+		}
+	}
 	scan := func() bool {
-		more, _, err := idx.scan(c, time.Now().Add(5*time.Second))
+		more, _, err := idx.scan(rd(), time.Now().Add(5*time.Second))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -62,7 +74,7 @@ func TestTurnIndex(t *testing.T) {
 	}
 	// (Written with a space after its colons, as another JSON writer may.)
 	os.WriteFile(log, []byte(`{"type": "user", "uuid": "u1", "timestamp": "2026-10-31T10:00:00.000Z", "message": {"role": "user", "content": "spaced"}}`+"\n"), 0o644)
-	idx.reset(log, "claude")
+	idx.reset(log, "claude", 1)
 	scan()
 	if len(idx.turns) != 1 || idx.turns[0].Preview != "spaced" {
 		t.Errorf("spaced: %+v", idx.turns)
@@ -70,10 +82,50 @@ func TestTurnIndex(t *testing.T) {
 	// (Codex's: its UserMessage items.)
 	cx := filepath.Join(dir, "c.jsonl")
 	os.WriteFile(cx, []byte(`{"timestamp":"2026-10-31T10:00:00.000Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"UserMessage","id":"u1","content":[{"type":"text","text":"codex question"}]}}}`+"\n"), 0o644)
-	idx.reset(cx, "codex")
+	idx.reset(cx, "codex", 1)
 	scan()
 	if len(idx.turns) != 1 || idx.turns[0].Preview != "codex question" {
 		t.Errorf("codex: %+v", idx.turns)
+	}
+	// (review517: Codex's older user_message events too.)
+	os.WriteFile(cx, []byte(`{"timestamp":"2026-10-31T10:00:00.000Z","type":"event_msg","payload":{"type":"user_message","message":"older form"}}`+"\n"), 0o644)
+	idx.reset(cx, "codex", 1)
+	scan()
+	if len(idx.turns) != 1 || idx.turns[0].Preview != "older form" {
+		t.Errorf("codex user_message: %+v", idx.turns)
+	}
+	// (review517: a line too long to be the person's — even one that is
+	// theirs after a megabyte of spaces — passed over to its end; the next
+	// where it begins.)
+	long := strings.Repeat(" ", turnChunk+10) + user("u1", "hidden")
+	next := user("u2", "after the long one")
+	os.WriteFile(log, []byte(long+next), 0o644)
+	idx.reset(log, "claude", 1)
+	scan()
+	if len(idx.turns) != 1 || idx.turns[0].Preview != "after the long one" || idx.turns[0].At != int64(len(long)) {
+		t.Errorf("past a long line: %+v (want at %d)", idx.turns, len(long))
+	}
+	// (review517: another log of the same head and length: what is just
+	// before where it was read to tells it.)
+	a := user("u1", "same head") + user("u2", "AAAA")
+	os.WriteFile(log, []byte(a), 0o644)
+	idx.reset(log, "claude", 1)
+	scan()
+	os.WriteFile(log, []byte(strings.Replace(a, "AAAA", "BBBB", 1)), 0o644)
+	scan()
+	if len(idx.turns) != 2 || idx.turns[1].Preview != "BBBB" {
+		t.Errorf("replaced, same head and length: %+v", idx.turns)
+	}
+}
+
+// review517: past the turns kept, the first let go of in batches.
+func TestTurnsKept(t *testing.T) {
+	idx := &turnIndex{}
+	for i := 0; i < turnsKept+turnsSlack+1; i++ {
+		idx.add(convoTurn{At: int64(i)})
+	}
+	if len(idx.turns) != turnsKept || !idx.cut || idx.turns[len(idx.turns)-1].At != int64(turnsKept+turnsSlack) {
+		t.Errorf("kept %d, cut %v", len(idx.turns), idx.cut)
 	}
 }
 

@@ -11,22 +11,27 @@ import type { Item } from './convoItems'
 // else meanwhile).
 
 type Turn = { at: number; ts?: string; preview: string }
-type Answer = { gen: number; turns: Turn[]; more: boolean; scanned: number; size: number; cut: boolean }
+type Answer = { gen: number; turns: Turn[]; more: boolean; scanned: number; size: number; cut: boolean; from: number }
 
 // At most this many batches read in on the way to one turn.
 const MAX_BATCHES = 200
 
 // The item of a turn among those read in: the person's message of that
-// time, beginning as it does.
-function itemOf(list: Item[], turn: Turn): string | null {
+// time, beginning as it does — of several alike (the same time, the same
+// beginning), the one in the same place among them as the turn among its
+// own (review517: the first one of them was gone to).
+function itemOf(list: Item[], turns: Turn[], turn: Turn): string | null {
   const flat = (s: string) => s.replace(/\s+/g, ' ').trim()
-  const head = flat(turn.preview).replace(/…$/, '').slice(0, 40)
-  for (const it of list) {
-    if (it.kind !== 'user' || !turn.ts || it.e.ts !== turn.ts) continue
+  const head = flat(turn.preview).replace(/…$/, '')
+  if (!turn.ts) return null
+  const alike = (x: Turn) => x.ts === turn.ts && x.preview === turn.preview
+  const nth = turns.filter(alike).indexOf(turn)
+  const keys = list.flatMap((it) => {
+    if (it.kind !== 'user' || it.e.ts !== turn.ts) return []
     const text = flat(it.e.parts.filter((p) => p.kind === 'text').map((p) => p.text ?? '').join(' '))
-    if (!head || text.startsWith(head)) return 'e' + it.e.seq
-  }
-  return null
+    return text.startsWith(head) || (turn.preview.endsWith('…') && text.startsWith(head)) ? ['e' + it.e.seq] : []
+  })
+  return keys.length === turns.filter(alike).length && nth >= 0 ? keys[nth] : keys.length === 1 && nth === 0 ? keys[0] : null
 }
 
 export function ConvoTurnsPanel({
@@ -49,6 +54,7 @@ export function ConvoTurnsPanel({
   const [sessionId, pane = ''] = of.split(' ')
   const [turns, setTurns] = useState<Turn[] | null>(null)
   const [more, setMore] = useState(false)
+  const [cut, setCut] = useState(false)
   const [failed, setFailed] = useState(false)
   const [q, setQ] = useState('')
   const [want, setWant] = useState<{ turn: Turn; batches: number } | null>(null)
@@ -68,6 +74,7 @@ export function ConvoTurnsPanel({
           if (a.gen !== gen) return // (of another log than shown: asked again with it)
           setTurns(a.turns)
           setMore(a.more)
+          setCut(a.cut)
           setFailed(false)
           if (a.more) timer = window.setTimeout(load, 1000)
         })
@@ -79,42 +86,68 @@ export function ConvoTurnsPanel({
       clearTimeout(timer)
     }
   }, [sessionId, pane, gen])
-  // (On the way to one not read in: as each batch comes, looked for again; more read, or given up.)
+  // (On the way to one not read in: as each batch comes, looked for again;
+  // where what is read in begins already before it (asked of the gateway)
+  // and it is not there, given up — not read on to the end — review517.)
   const listNow = useRef(list)
   listNow.current = list
+  const turnsNow = useRef(turns)
+  turnsNow.current = turns
   useEffect(() => {
-    if (!want) return
-    const key = itemOf(list, want.turn)
+    if (!want || older?.busy) return
+    let stopped = false
+    const key = itemOf(list, turnsNow.current ?? [], want.turn)
     if (key) {
       setWant(null)
       setNote('')
       if (!onGo({ key, field: 'user' }, () => setNote(t('turns.gone')))) setNote(t('turns.gone'))
       return
     }
-    if (older?.busy) return
-    if (!older?.can || want.batches >= MAX_BATCHES) {
-      setWant(null)
-      setNote(t(want.batches >= MAX_BATCHES ? 'turns.tooFar' : 'turns.notFound'))
-      return
+    const qs = new URLSearchParams(pane ? { pane } : {})
+    api<Answer>('GET', `/api/sessions/${sessionId}/conversation/turns?` + qs.toString())
+      .then((a) => {
+        if (stopped) return
+        if (a.gen !== gen || (a.from >= 0 && a.from <= want.turn.at)) {
+          setWant(null)
+          setNote(t('turns.notFound'))
+          return
+        }
+        if (!older?.can || want.batches >= MAX_BATCHES) {
+          setWant(null)
+          setNote(t(want.batches >= MAX_BATCHES ? 'turns.tooFar' : 'turns.notFound'))
+          return
+        }
+        setWant({ ...want, batches: want.batches + 1 })
+        onOlder()
+      })
+      .catch(() => {
+        if (stopped) return
+        setWant(null)
+        setNote(t('turns.failed'))
+      })
+    return () => {
+      stopped = true
     }
-    setWant({ ...want, batches: want.batches + 1 })
-    onOlder()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [want, list, older?.busy, older?.can])
-  // (The person scrolling or typing meanwhile: the way back called off.)
+  }, [want?.turn, want?.batches, list, older?.busy, older?.can])
+  // (The person doing anything else meanwhile — scrolling (wheel, touch, a
+  // drag of the scrollbar), a key, the page put behind: the way back called
+  // off — review517.)
   useEffect(() => {
     if (!want) return
     const off = () => setWant(null)
-    window.addEventListener('wheel', off, { passive: true })
-    window.addEventListener('touchmove', off, { passive: true })
+    const kinds = ['wheel', 'touchmove', 'pointerdown', 'keydown'] as const
+    kinds.forEach((k) => window.addEventListener(k, off, { passive: true, capture: true }))
+    const hid = () => document.visibilityState !== 'visible' && off()
+    document.addEventListener('visibilitychange', hid)
     return () => {
-      window.removeEventListener('wheel', off)
-      window.removeEventListener('touchmove', off)
+      kinds.forEach((k) => window.removeEventListener(k, off, { capture: true }))
+      document.removeEventListener('visibilitychange', hid)
     }
   }, [want])
   const go = (turn: Turn) => {
     setNote('')
-    const key = itemOf(listNow.current, turn)
+    const key = itemOf(listNow.current, turns ?? [], turn)
     if (key) {
       if (!onGo({ key, field: 'user' }, () => setNote(t('turns.gone')))) setNote(t('turns.gone'))
       return
@@ -158,6 +191,7 @@ export function ConvoTurnsPanel({
         {failed && <p className="list-search-none">{t('turns.failed')}</p>}
         {turns === null && !failed && <p className="list-search-none">{t('common.loading')}</p>}
         {more && <p className="list-search-none">{t('turns.more')}</p>}
+        {cut && <p className="list-search-none">{t('turns.cut')}</p>}
         {want && <p className="list-search-none" role="status">{t('turns.reading')}</p>}
         {note && <p className="list-search-none" role="status">{note}</p>}
         {turns !== null && !shown.length && <p className="list-search-none">{t(q.trim() ? 'convo.searchNone' : 'turns.none')}</p>}
