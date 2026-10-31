@@ -1637,10 +1637,17 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   const opsOf = codex ? (['compact', 'clear'] as const) : notClaude ? ([] as const) : (['compact', 'rename', 'clear'] as const)
   const canOps = canModel || canEffort || (bound && opsOf.length > 0 && convo.status === 'ready' && (agent?.status === 'idle' || agent?.status === 'done') && !agent?.other)
   const runOp = (b: NonNullable<typeof convo.bind>, text: string) => {
-    return api('POST', `/api/sessions/${sid}/conversation/command`, { pane: b.pane, pid: b.pid, start: b.start, session: b.session, text }, { timeoutMs: PRESS_MS }).then(() => {
-      toast(t('ops.sent'))
-      convo.refresh()
-    })
+    return api('POST', `/api/sessions/${sid}/conversation/command`, { pane: b.pane, pid: b.pid, start: b.start, session: b.session, text }, { timeoutMs: PRESS_MS }).then(
+      () => {
+        toast(t('ops.sent'))
+        convo.refresh()
+      },
+      (e) => {
+        // (Another agent in the pane: read at once, as for a send — the dialog says why.)
+        if (e instanceof ApiError && e.code === 'agent_changed') convo.refresh()
+        throw e
+      },
+    )
   }
   // Pinning one, or letting it go.
   const pinItem = (key: string): MenuItem => {
