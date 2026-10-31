@@ -407,15 +407,14 @@ func (s *Server) restoreOne(parent context.Context, t *store.OpenTab) {
 	started = true
 	out.newID = sess.ID
 	// Revoked while it started (the record of the new one is then gone with
-	// it, or this sees it): closed. The gateway stopping is not that.
+	// it, or this sees it): closed, stopping or not. A check the stop
+	// cancelled tells nothing: left to the stop.
 	ok, err := s.auth.HasLogin(ctx, t.OwnerID)
 	nh, herr := s.store.Host(ctx, t.OwnerID, t.HostID)
 	if (err == nil && !ok) || errors.Is(herr, store.ErrNotFound) || (herr == nil && hostConfig(nh) != t.HostConfig) {
-		if !s.terms.Closing() {
-			sess.Close("access revoked")
-			out.outcome = "cancelled:revoked"
-			return
-		}
+		sess.Close("access revoked")
+		out.outcome = "cancelled:revoked"
+		return
 	}
 	if sess.Persistence == store.PersistHerdr {
 		go s.watchHerdr(sess, h)

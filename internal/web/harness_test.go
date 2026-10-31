@@ -85,6 +85,9 @@ func (h *harness) restart() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	h.srv.BeginShutdown(ctx)
+	if !h.srv.WaitRestores(ctx) || !h.terms.WaitStarts(ctx) {
+		h.t.Fatal("restores or starts under way did not end")
+	}
 	h.terms.Shutdown()
 	if !h.terms.WaitEnds(ctx) {
 		h.t.Fatal("ends of the old terminals not recorded")

@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/crypto/ssh"
+
 	"github.com/ihainan/corral/internal/store"
 )
 
@@ -69,6 +71,11 @@ func TestOpenTabKeptOverStop(t *testing.T) {
 	r := admin.do("POST", "/api/sessions", map[string]any{"host_id": id, "open": map[string]any{"kind": "tmux", "name": "work"}})
 	mustStatus(t, r, 201, "tmux")
 	before := h.tabs()[0]
+	sess, err := h.terms.Get(before.OwnerID, before.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idle := sess.Snapshot().IdleSince // (nobody has looked since it was opened)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -86,8 +93,9 @@ func TestOpenTabKeptOverStop(t *testing.T) {
 	if len(all) != 1 || all[0].SessionID != before.SessionID {
 		t.Fatalf("records after the stop %+v", all)
 	}
-	if all[0].AliveAt <= before.AliveAt || all[0].IdleSince == 0 || all[0].IdleSince > all[0].AliveAt {
-		t.Errorf("before %+v after %+v", before, all[0])
+	// As of the stop, and since when nobody looked: kept, not the stop's time.
+	if all[0].AliveAt <= before.AliveAt || idle.IsZero() || all[0].IdleSince != idle.Unix() {
+		t.Errorf("before %+v (idle since %v) after %+v", before, idle, all[0])
 	}
 }
 
@@ -298,5 +306,40 @@ func TestRestoreQuotaKeeps(t *testing.T) {
 	}
 	if all := h.tabs(); len(all) != 2 {
 		t.Errorf("records %+v", all)
+	}
+}
+
+// The gateway stopping while an open asks the host (here, the names of its
+// tmux sessions for a new one): restarting, not the host failing.
+func TestOpenCancelledByStop(t *testing.T) {
+	h := newHarness(t)
+	admin := h.admin()
+	srv := h.sshServer(t.TempDir())
+	asked, block := make(chan struct{}), make(chan struct{})
+	defer close(block)
+	srv.HandleExec(func(cmd string) func(ch ssh.Channel) {
+		if !strings.Contains(cmd, "list-sessions") {
+			return nil
+		}
+		return func(ch ssh.Channel) {
+			close(asked)
+			<-block
+		}
+	})
+	r := admin.do("POST", "/api/hosts", map[string]any{"name": "box", "address": "127.0.0.1", "port": srv.Addr.Port, "username": "alice", "auth": "password", "password": "alice-pass"})
+	mustStatus(t, r, 201, "host")
+	id := r.json()["id"].(float64)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	go func() {
+		<-asked
+		h.srv.BeginShutdown(ctx)
+	}()
+	r = admin.do("POST", "/api/sessions", map[string]any{"host_id": id, "open": map[string]any{"kind": "tmux_new"}})
+	if r.Status != 503 || r.code() != "restarting" {
+		t.Fatalf("open cancelled by the stop: %d %s", r.Status, r.Body)
+	}
+	if len(h.tabs()) != 0 {
+		t.Errorf("kept %+v", h.tabs())
 	}
 }

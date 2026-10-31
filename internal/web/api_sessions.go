@@ -93,8 +93,9 @@ func (s *Server) apiOpenSession(w http.ResponseWriter, r *http.Request) {
 	// response is written after the turn is over.
 	resp, err := s.underHostGate(ctx, u.ID, b.HostID, func(w http.ResponseWriter) { s.openSession(ctx, w, r, &b) })
 	// Cancelled by the gateway stopping: not signed out (a 401 signs the
-	// page out); to be tried again once it is back.
-	if s.terms.Closing() && r.Context().Err() == nil && (err != nil && !errors.Is(err, errGateBusy) || err == nil && resp.status == http.StatusUnauthorized) {
+	// page out), nor a failure of the host (whatever the step cancelled
+	// answered); to be tried again once it is back. review525-2
+	if s.terms.Closing() && ctx.Err() != nil && r.Context().Err() == nil && (err != nil && !errors.Is(err, errGateBusy) || err == nil && resp.status >= 400) {
 		writeError(w, http.StatusServiceUnavailable, "restarting", "the gateway is restarting; try again in a moment")
 		return
 	}
@@ -120,6 +121,11 @@ type openBody struct {
 	// lists it to choose from (with Pending, the connection kept for that).
 	Open    *openChoice `json:"open"`
 	Pending string      `json:"pending"`
+}
+
+// cancelled: err is a context's end (it tells nothing of what was asked).
+func cancelled(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 // openSession runs with the host's turn held; ctx ends with the login.
@@ -297,11 +303,12 @@ func (s *Server) openSession(ctx context.Context, w http.ResponseWriter, r *http
 	}
 	// Access or the host may have gone while we were starting. The session is
 	// registered first, then checked, so a concurrent revocation or deletion
-	// either sees it (and closes it) or this check sees the change. The
-	// gateway stopping (which cancels ctx) is not a revocation: the session
-	// is left to the stop, to end as stopped (and be kept).
+	// either sees it (and closes it) or this check sees the change. A check
+	// the gateway stopping cancelled tells nothing: the session is left to
+	// the stop, to end as stopped (and be kept); one that told the login or
+	// host gone closes it, stopping or not. review525-1
 	if _, err := s.auth.CheckLogin(ctx, loginHash(r)); err != nil {
-		if s.terms.Closing() {
+		if cancelled(err) && s.terms.Closing() {
 			writeError(w, http.StatusServiceUnavailable, "restarting", "the gateway is restarting; try again in a moment")
 			return
 		}
@@ -310,7 +317,7 @@ func (s *Server) openSession(ctx context.Context, w http.ResponseWriter, r *http
 		return
 	}
 	if _, err := s.store.Host(ctx, u.ID, h.ID); err != nil {
-		if s.terms.Closing() {
+		if cancelled(err) && s.terms.Closing() {
 			writeError(w, http.StatusServiceUnavailable, "restarting", "the gateway is restarting; try again in a moment")
 			return
 		}
