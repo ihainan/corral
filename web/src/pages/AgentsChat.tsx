@@ -79,6 +79,20 @@ const isMac = /Mac|iPhone|iPad/.test(navigator.platform)
 // agent is in another one.)
 type Pick = { s: string; pane?: string; key?: string }
 
+// What the agents page's view holds that is not in its address — the side
+// list's search, the agents closed from here, where the one shown is placed —
+// kept across the page's being made anew (the
+// window crossing the width where tabs come and go puts it under another
+// parent), of the account signed in only. Only so: the page left and come
+// back to later is as new (left: when it was let go; made anew at once, in
+// the same moment, it goes on).
+type Carried = { gen: number; left: number; query: string; gone: string[]; placed?: { key: string; as: ConvoListRow['placeAs'] } }
+const carried: Carried = { gen: -1, left: 0, query: '', gone: [] }
+function carry(): Carried {
+  if (carried.gen !== authGen() || (carried.left && Date.now() - carried.left > 2000)) Object.assign(carried, { gen: authGen(), left: 0, query: '', gone: [], placed: undefined })
+  return carried
+}
+
 function readPick(): Pick | null {
   const q = new URLSearchParams(location.search)
   const s = q.get('s')
@@ -163,7 +177,12 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
   // Agents closed from here: out of the list at once, before herdr's
   // summary says so (else the one shown would be waited for, or picked
   // again). (A pane's id is not used again.)
-  const [gone, setGone] = useState<ReadonlySet<string>>(() => new Set())
+  useEffect(() => {
+    carried.left = 0
+    return () => void (carried.left = Date.now())
+  }, [])
+  const [gone, setGone] = useState<ReadonlySet<string>>(() => new Set(carry().gone))
+  useEffect(() => void (carry().gone = [...gone]), [gone])
   // (Once herdr no longer has it, it is let go: a pane's id may come again
   // in a herdr session made anew, another agent's then.)
   useEffect(() => {
@@ -172,7 +191,8 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
     if ([...gone].some((k) => !live.has(k))) setGone((g) => new Set([...g].filter((k) => live.has(k))))
   }, [sessions, gone])
   // What the side list is searched for: the page's, as each agent's view is its own.
-  const [sideQuery, setSideQuery] = useState('')
+  const [sideQuery, setSideQuery] = useState(() => carry().query)
+  useEffect(() => void (carry().query = sideQuery), [sideQuery])
   const entries = useMemo((): Entry[] => {
     const { rows, others } = listAgents(sessions ?? [])
     const out: Entry[] = rows.filter((r) => !gone.has(r.key)).map((r) => ({ key: r.key, s: r.s, pane: r.a.pane_id, row: r }))
@@ -728,7 +748,8 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   // Where the one shown is placed on the lists while it is (see asHeld): as
   // it was when it was gone to, or the page came back to, once its state is
   // known. (Not again till then: looked at or answered, it would move.)
-  const [placedAs, setPlacedAs] = useState<ConvoListRow['placeAs']>(undefined)
+  const [placedAs, setPlacedAs] = useState<ConvoListRow['placeAs']>(() => (carry().placed?.key === cur.key ? carry().placed!.as : undefined))
+  useEffect(() => void (carry().placed = placedAs ? { key: cur.key, as: placedAs } : undefined), [placedAs, cur.key])
   // The list beside the thread (or from the bar on a narrow screen).
   // Pinned at the top (prefs, so on every device of the account): by key,
   // which no reconnect or gateway restart changes (see agentKey, tmuxKey).
