@@ -164,10 +164,13 @@ func TestCodexFdsUntold(t *testing.T) {
 	if _, pend, young := run(t, "rollout-2026-10-31T02-19-22-"+a+".jsonl", map[string]time.Time{b: sec}); pend != "" || young != "1" {
 		t.Errorf("no lock of A's: pending %q, new %q", pend, young)
 	}
-	if _, pend, young := run(t, "rollout-2026-10-31T02-19-22-"+a+"_"+f+".jsonl", map[string]time.Time{a: sec}); pend != "" || young != "" {
-		t.Errorf("a fork's log, A's lock: A's, pending %q, new %q", pend, young)
+	// (A fork's log, A_F, is F's, as locating reads it; review491: A's lock
+	// and a lock B left between them are not taken for the one it is at.)
+	fork := "rollout-2026-10-31T02-19-22-" + a + "_" + f + ".jsonl"
+	if _, pend, young := run(t, fork, map[string]time.Time{f: sec.Add(20 * time.Second), a: sec, b: sec.Add(10 * time.Second)}); pend != "" || young != "" {
+		t.Errorf("a fork's log, A's lock and B's left: F's, pending %q, new %q", pend, young)
 	}
-	if _, pend, young := run(t, "rollout-2026-10-31T02-19-22-"+a+"_"+f+".jsonl", map[string]time.Time{a: sec, b: sec.Add(10 * time.Second)}); pend != b || young != "" {
+	if _, pend, young := run(t, fork, map[string]time.Time{f: sec, b: sec.Add(10 * time.Second)}); pend != b || young != "" {
 		t.Errorf("a fork's log, then /new: B, pending %q, new %q", pend, young)
 	}
 }

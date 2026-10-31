@@ -3460,8 +3460,9 @@ const codexFdsSh = `codex_fds() {
   done
   # (Locks are told apart by when each was taken, never by when a log was
   # last written: its log is written on and on. The lock of the conversation
-  # whose log it writes is the mark (its log's name ends in its id, or a
-  # fork's in <id>_<part>): one without a log taken before that is a
+  # whose log it writes is the mark (the id its log's name ends in, as
+  # locating reads it; a fork's, <id>_<part>, its part): one without a log
+  # taken before that is a
   # conversation left (begun anew from it before its first message); of the
   # others, the one taken last. Held over two seconds — three, counted in
   # whole seconds: a subagent's, begun with its log, has that open by then;
@@ -3470,12 +3471,12 @@ const codexFdsSh = `codex_fds() {
   # the log it writes — cxnew too: sending waits rather than guess.)
   _ref=
   for _p in $_locks; do
-    case "${cxlog%.jsonl}" in *"-${_p%%:*}"|*"-${_p%%:*}_"*|*"_${_p%%:*}") _ref=${_p##*:} ;; esac
+    case "${cxlog%.jsonl}" in *[-_]"${_p%%:*}") _ref=${_p##*:} ;; esac
   done
   _pend= _pt= _tie=
   for _p in $_locks; do
     _i=${_p%%:*}; _t=${_p##*:}
-    case "$_logs" in *"-$_i "*|*"-${_i}_"*|*"_$_i "*) continue ;; esac
+    case "$_logs" in *[-_]"$_i "*) continue ;; esac
     if [ -n "$cxlog" ]; then
       [ -n "$_ref" ] || { _tie=1; continue; }
       [ "$_t" -lt "$_ref" ] && continue
