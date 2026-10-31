@@ -188,3 +188,24 @@ func TestCodexRunningPartWhileStartWrong(t *testing.T) {
 		t.Errorf("its start told right again: %q", got)
 	}
 }
+
+// review505: this part has one of this process's; the part before, 49 of a
+// process before and one of this one's: both of this one's kept.
+func TestCodexRunningMergeTrims(t *testing.T) {
+	var rows []string
+	for i := 0; i < maxRunning-1; i++ {
+		rows = append(rows, strings.ReplaceAll(strings.ReplaceAll(runCall+runOut, "call_4", fmt.Sprintf("call_o%d", i)), "8873", fmt.Sprint(9000+i)))
+	}
+	rows = append(rows, strings.ReplaceAll(strings.ReplaceAll(runCall+runOut, "06:27:5", "06:29:4"), "call_4", "call_mine"))
+	before := feedAll(rows...)
+	after := feedAll(strings.ReplaceAll(strings.ReplaceAll(runCall+runOut, "06:27:5", "06:29:5"), "call_4", "call_new"))
+	at, _ := time.Parse(time.RFC3339Nano, "2026-10-31T06:28:00Z")
+	after.QueueSince(at.UnixMilli())
+	after.Prepend(before)
+	if got := runningIDs(after); got != "cmd:call_mine:sleep 25; echo fertig cmd:call_new:sleep 25; echo fertig" {
+		t.Errorf("this process's: %q", got)
+	}
+	if len(after.running) > maxRunning {
+		t.Errorf("kept %d", len(after.running))
+	}
+}

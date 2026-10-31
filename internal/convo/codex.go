@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -396,8 +397,8 @@ func (c *Codex) Prepend(other Parser) {
 			delete(c.ranOut, id)
 			continue
 		}
-		if _, already := c.running[id]; already || !c.room() {
-			continue // (merged whatever process it is of: shown or not by Running, as the start told then — review504; a full list makes way, see room)
+		if _, already := c.running[id]; already {
+			continue // (merged whatever process it is of: shown or not by Running, as the start told then — review504)
 		}
 		if c.running == nil {
 			c.running = map[string]Running{}
@@ -406,6 +407,20 @@ func (c *Codex) Prepend(other Parser) {
 		before = append(before, id)
 	}
 	c.runOrder = append(before, c.runOrder...)
+	// (All merged, then back to as many as are kept: those of a process
+	// before this one go first, then the oldest — review505: room, asked
+	// as they came, could not let go of ones not in the order yet.)
+	for len(c.running) > maxRunning {
+		at := 0
+		for i, id := range c.runOrder {
+			if !c.ofNow(c.running[id].Time) {
+				at = i
+				break
+			}
+		}
+		delete(c.running, c.runOrder[at])
+		c.runOrder = append(c.runOrder[:at:at], c.runOrder[at+1:]...)
+	}
 	// (Each command told of on its own in either part: the lines of the
 	// calls that run them go, in the part before this one too.)
 	if c.itemCmds || o.itemCmds {
@@ -798,7 +813,7 @@ func (c *Codex) event(r *codexRow, p *codexPayload) {
 				case b.Type == "text" || b.Type == "input_text":
 					text := b.Text
 					if pics > 0 {
-						text = codexNoPlaceholders(text, pics) // (its pictures shown as such)
+						text = codexNoPlaceholders(b) // (its pictures shown as such)
 					}
 					if strings.TrimSpace(text) != "" {
 						parts = append(parts, textPart(KindText, text))
@@ -1113,6 +1128,15 @@ type codexParsed struct {
 type codexBlock struct {
 	Type string `json:"type"`
 	Text string `json:"text"`
+	// Elements: where in Text Codex put a placeholder of its own ("[Image
+	// #1]" for a picture pasted in), by byte.
+	Elements []struct {
+		Range struct {
+			Start int `json:"start"`
+			End   int `json:"end"`
+		} `json:"byte_range"`
+		Placeholder string `json:"placeholder"`
+	} `json:"text_elements"`
 }
 
 func codexContent(raw json.RawMessage) []codexBlock {
@@ -1945,16 +1969,39 @@ func CodexAgentID(id string) bool { return codexAgentID.MatchString(id) }
 var codexAgentID = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
 // codexNoPlaceholders: what the person wrote with the pictures they put in
-// it (n of them) taken out of it: Codex writes "[Image #1]" where each was
-// ("[Image #1]  [Image #2]  两张"), the pictures beside the words.
-func codexNoPlaceholders(text string, n int) string {
-	out := codexPlaceholder.ReplaceAllStringFunc(text, func(m string) string {
-		if k, _ := strconv.Atoi(codexPlaceholder.FindStringSubmatch(m)[1]); k >= 1 && k <= n {
-			return "" // (with the spaces Codex put after it: its lines as they were)
+// it taken out of it: Codex writes "[Image #1]" where each was ("[Image #1]
+// [Image #2]  两张"), the pictures beside the words; only where it says it
+// put one (text_elements, by byte), with the spaces it put after it — the
+// same words written by the person stay (review505). None said: as it is.
+func codexNoPlaceholders(b codexBlock) string {
+	text := b.Text
+	type cut struct{ from, to int }
+	var cuts []cut
+	for _, e := range b.Elements {
+		from, to := e.Range.Start, e.Range.End
+		if from < 0 || to > len(text) || from >= to || !codexPlaceholder.MatchString(text[from:to]) || text[from:to] != e.Placeholder {
+			continue
 		}
-		return m
-	})
-	return strings.TrimSpace(out)
+		for n := 0; n < 2 && to < len(text) && text[to] == ' '; n++ {
+			to++
+		}
+		cuts = append(cuts, cut{from, to})
+	}
+	if len(cuts) == 0 {
+		return text
+	}
+	sort.Slice(cuts, func(i, j int) bool { return cuts[i].from < cuts[j].from })
+	var out strings.Builder
+	at := 0
+	for _, c := range cuts {
+		if c.from < at {
+			continue // (overlapping: not as Codex writes them)
+		}
+		out.WriteString(text[at:c.from])
+		at = c.to
+	}
+	out.WriteString(text[at:])
+	return strings.TrimSpace(out.String())
 }
 
-var codexPlaceholder = regexp.MustCompile(`\[Image #(\d+)\] {0,2}`)
+var codexPlaceholder = regexp.MustCompile(`^\[Image #\d+\]$`)

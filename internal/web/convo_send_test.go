@@ -116,3 +116,68 @@ func TestPaneTurns(t *testing.T) {
 		t.Fatalf("holders %d, want 1", n)
 	}
 }
+
+// A message in parts (convoGatedPasteCommand): its parts' lengths checked
+// before anything — none empty, none too long, their sum the message's —
+// and each cut out whole into a folder of its own, gone after (review505).
+// (Not in front here: a valid one gets as far as that check, exit 3.)
+func TestConvoPasteParts(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no sh")
+	}
+	if _, err := os.Stat("/proc/self/stat"); err != nil {
+		t.Skip("no /proc")
+	}
+	dir, tmp := t.TempDir(), t.TempDir()
+	typed := filepath.Join(dir, "typed")
+	os.WriteFile(filepath.Join(dir, "herdr"), []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >>"+typed+"\n"), 0o755)
+	agent := exec.Command("sleep", "30")
+	agent.Env = append(os.Environ(), "HERDR_PANE_ID=p1")
+	if err := agent.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer agent.Process.Kill()
+	stat, _ := os.ReadFile(fmt.Sprintf("/proc/%d/stat", agent.Process.Pid))
+	rest := strings.Fields(string(stat[strings.LastIndexByte(string(stat), ')')+2:]))
+	start, _ := strconv.ParseInt(rest[19], 10, 64)
+	run := func(text, lens string) int {
+		cmd := convoGatedCommand("", "herdr", "", "p1", "/run/x.sock", int64(agent.Process.Pid), start, sidA, 0, nil, 0)
+		cmd = strings.Replace(cmd, " 0 '/run/x.sock'", " "+lens+" '/run/x.sock'", 1) // (the length as convoGatedPasteCommand gives it, or not)
+		c := exec.Command("sh", "-c", cmd)
+		c.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"), "XDG_RUNTIME_DIR="+dir, "TMPDIR="+tmp)
+		c.Stdin = strings.NewReader(text)
+		err := c.Run()
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			return ee.ExitCode()
+		}
+		return 0
+	}
+	msg := "看看 /tmp/a.png 说说"
+	n1, n2 := len("看看 "), len("/tmp/a.png")
+	ok := fmt.Sprintf("%d+%d+%d", n1, n2, len(msg)-n1-n2)
+	if !strings.Contains(convoGatedPasteCommand("", "herdr", "", "p1", "/run/x.sock", 1, 1, sidA, []int{n1, n2, len(msg) - n1 - n2}, 0), " "+ok+" ") {
+		t.Fatalf("its lengths not given as %s", ok)
+	}
+	for _, c := range []struct {
+		lens string
+		want int
+	}{
+		{ok, 3}, // (cut out whole: on to the check of the process in front)
+		{fmt.Sprintf("%d+0+%d", n1, len(msg)-n1), 4},
+		{fmt.Sprintf("%d+%d", n1, len(msg)), 4},           // (its sum not the message's)
+		{"9223372036854775807+9223372036854775807+7", 4}, // (too long: no sum run over)
+		{"+3", 4},
+		{"3+x", 4},
+	} {
+		if got := run(msg, c.lens); got != c.want {
+			t.Errorf("%s: exit %d, want %d", c.lens, got, c.want)
+		}
+	}
+	if _, err := os.Stat(typed); err == nil {
+		t.Error("something was typed")
+	}
+	if left, _ := os.ReadDir(tmp); len(left) != 0 {
+		t.Errorf("left behind: %v", left)
+	}
+}

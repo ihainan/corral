@@ -2433,7 +2433,10 @@ parts=
 case $len in *+*)
   case $len in *[!0-9+]*|+*|*+|*++*) exit 4;; esac
   parts=$len n=0
-  IFS=+; for x in $parts; do n=$((n + x)); done; unset IFS
+  IFS=+; for x in $parts; do
+    case $x in 0*|????????*) unset IFS; exit 4;; esac # (none empty, none over 9999999: no sum run over — review505)
+    n=$((n + x))
+  done; unset IFS
   len=$n ;;
 esac
 # (What the pane shows after, its last rd lines but blank ones at the end.)
@@ -2445,9 +2448,9 @@ screen() {
   else s=$(HERDR_SOCKET_PATH=$sock herdr pane read "$p" --source visible 2>/dev/null 9>&-) || exit 8; fi
   printf '%s\n' "$s" | awk -v n="$rd" '{ a[NR] = $0 } NF { last = NR } END { for (i = last - n + 1; i <= last; i++) if (i > 0) print a[i] }'
 }
-b=corral-send-$$ typing=0
+b=corral-send-$$ typing=0 fd=
 f=$(mktemp) || exit 4
-trap 'rm -f "$f" "$f.p"; [ "$mode" = tmux ] && tmux delete-buffer -b "$b" 2>/dev/null 9>&-' EXIT
+trap 'rm -f "$f"; [ -n "$fd" ] && rm -rf "$fd"; [ "$mode" = tmux ] && tmux delete-buffer -b "$b" 2>/dev/null 9>&-' EXIT
 trap '[ "$typing" = 1 ] && exit 6; exit 4' HUP INT TERM
 if [ "$len" != keys ]; then cat >"$f" || exit 4; fi
 l=${XDG_RUNTIME_DIR:-}/corral-send-$(printf '%s' "$mode-$p" | tr -c 'A-Za-z0-9-' _)
@@ -2460,6 +2463,20 @@ if [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -d "$XDG_RUNTIME_DIR" ] && [ ! -L "$l" ] &
   done
 fi
 [ "$len" = keys ] || [ "$(wc -c <"$f" | tr -d ' ')" = "$len" ] || exit 4
+# (In parts: each cut out before anything is typed — into a folder of its
+# own, as private as mktemp's file — and its length checked: one not read
+# whole types nothing, rather than half a message and Enter — review505.)
+if [ -n "$parts" ]; then
+  fd=$(mktemp -d) || exit 4
+  at=0 np=0
+  IFS=+; set -- $parts; unset IFS
+  for x in "$@"; do
+    np=$((np + 1))
+    tail -c +$((at + 1)) "$f" | head -c "$x" >"$fd/$np" || exit 4
+    [ "$(wc -c <"$fd/$np" | tr -d ' ')" = "$x" ] || exit 4
+    at=$((at + x))
+  done
+fi
 ` + codexFdsSh + `
 front() {
   stat=$(tr '\n' ' ' <"/proc/$pid/stat" 2>/dev/null) || return 1
@@ -2616,12 +2633,10 @@ if [ "$mode" = tmux ]; then
   fi
   if [ -n "$parts" ]; then
     front || exit 3
-    typing=1 at=0
-    IFS=+; set -- $parts; unset IFS
-    for x in "$@"; do
-      tail -c +$((at + 1)) "$f" | head -c "$x" >"$f.p" || exit 6
-      at=$((at + x))
-      tmux load-buffer -b "$b" "$f.p" 9>&- || exit 6
+    typing=1 k=0
+    while [ "$k" -lt "$np" ]; do
+      k=$((k + 1))
+      tmux load-buffer -b "$b" "$fd/$k" 9>&- || exit 6
       tmux paste-buffer -p -r -d -b "$b" -t "$p" 9>&- || exit 6
       sleep 0.3
     done
@@ -2657,11 +2672,11 @@ else
   fi
   if [ -n "$parts" ]; then
     front || exit 3
-    typing=1 at=0
-    IFS=+; set -- $parts; unset IFS
-    for x in "$@"; do
-      t=$(tail -c +$((at + 1)) "$f" | head -c "$x" && printf x) || exit 6
-      t=${t%x} at=$((at + x))
+    typing=1 k=0
+    while [ "$k" -lt "$np" ]; do
+      k=$((k + 1))
+      t=$(cat "$fd/$k" && printf x) || exit 6
+      t=${t%x}
       HERDR_SOCKET_PATH=$sock herdr pane send-text "$p" "$e[200~$t$e[201~" >/dev/null 2>&1 9>&- || exit 6
       sleep 0.3
     done
