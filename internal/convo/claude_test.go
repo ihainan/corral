@@ -1632,3 +1632,44 @@ func TestClaudeNoticeWithReminder(t *testing.T) {
 		t.Errorf("no note of it: %+v", all)
 	}
 }
+
+// review510: a notice with a reminder after it, coming as the user's row
+// alone (no attachment), is a note of its own and ends what it says ended;
+// the person's words that quote a notice and a reminder are kept whole.
+func TestClaudeNoticeWithReminderAsUserRow(t *testing.T) {
+	const done = `<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n<summary>Background command \"tests\" completed (exit code 0)</summary>\n</task-notification>\n<system-reminder>\nkeep going\n</system-reminder>`
+	c := NewClaude()
+	c.Feed(lines(
+		`{"type":"assistant","uuid":"a1","message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"go test ./...","description":"tests"}}]}}`,
+		`{"type":"user","uuid":"r1","timestamp":"2026-10-31T10:00:00Z","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"running in background"}]},"toolUseResult":{"stdout":"","backgroundTaskId":"b1"}}`,
+	))
+	if len(c.Running()) != 1 {
+		t.Fatalf("running: %+v", c.Running())
+	}
+	c.Feed(lines(`{"type":"user","uuid":"u2","timestamp":"2026-10-31T10:01:00Z","message":{"role":"user","content":"` + done + `"}}`))
+	if r := c.Running(); len(r) != 0 {
+		t.Errorf("still running after its end, said with a reminder: %+v", r)
+	}
+	last := c.Since(0)[len(c.Since(0))-1]
+	if last.Role != RoleNote || last.Parts[0].Event == nil || last.Parts[0].Event.Status != "done" {
+		t.Errorf("its end: %s %+v", last.Role, last.Parts)
+	}
+	// (The same in a text block.)
+	c2 := NewClaude()
+	c2.Feed(lines(
+		`{"type":"assistant","uuid":"a1","message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"go test ./...","description":"tests"}}]}}`,
+		`{"type":"user","uuid":"r1","timestamp":"2026-10-31T10:00:00Z","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"running in background"}]},"toolUseResult":{"stdout":"","backgroundTaskId":"b1"}}`,
+		`{"type":"user","uuid":"u2","timestamp":"2026-10-31T10:01:00Z","message":{"role":"user","content":[{"type":"text","text":"`+done+`"}]}}`,
+	))
+	if r := c2.Running(); len(r) != 0 {
+		t.Errorf("text block: still running: %+v", r)
+	}
+	// The person's words quoting a notice and a reminder: whole.
+	const quoted = `<task-notification>\n<summary>x</summary>\n</task-notification> please explain <system-reminder>literal content</system-reminder>`
+	c3 := NewClaude()
+	c3.Feed(lines(`{"type":"user","uuid":"u1","timestamp":"2026-10-31T10:00:00Z","message":{"role":"user","content":"` + quoted + `"}}`))
+	e := c3.Since(0)
+	if len(e) != 1 || e[0].Role != RoleUser || !strings.Contains(e[0].Parts[0].Text, "literal content") {
+		t.Errorf("quoted: %+v", e)
+	}
+}

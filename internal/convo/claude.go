@@ -863,8 +863,9 @@ func (c *Claude) user(r *claudeRow) {
 	var s string
 	if json.Unmarshal(r.Message.Content, &s) == nil {
 		c.rewound()
-		if taskNotice(s) {
-			c.ended(s)
+		n, notice := noticeOf(s)
+		if notice {
+			c.ended(n)
 		}
 		if r.IsCompactSummary {
 			c.compacted()
@@ -877,7 +878,7 @@ func (c *Claude) user(r *claudeRow) {
 			}
 			return
 		}
-		if ev := taskEnded(s); ev != nil {
+		if ev := taskEnded(n); ev != nil {
 			c.add(r, RoleNote, []Part{{Kind: KindEvent, Event: ev}})
 			return
 		}
@@ -936,9 +937,9 @@ func (c *Claude) user(r *claudeRow) {
 				c.result(b, nil)
 			}
 		case "text":
-			if taskNotice(b.Text) {
-				c.ended(b.Text)
-				if ev := taskEnded(b.Text); ev != nil {
+			if n, notice := noticeOf(b.Text); notice {
+				c.ended(n)
+				if ev := taskEnded(n); ev != nil {
 					notes = append(notes, Part{Kind: KindEvent, Event: ev})
 					continue
 				}
@@ -1243,7 +1244,9 @@ func (c *Claude) queued(r *claudeRow) {
 	var s string
 	if json.Unmarshal(a.Prompt, &s) == nil {
 		if a.CommandMode == "task-notification" {
-			s = withoutReminders(s)
+			if n, notice := noticeOf(s); notice {
+				s = n
+			}
 			c.ended(s) // (what it says of work set going: ended, or at it still)
 			if ev := taskEnded(s); ev != nil {
 				c.add(r, RoleNote, []Part{{Kind: KindEvent, Event: ev}})
@@ -2268,10 +2271,11 @@ func classifyUserText(s string) (role, text string) {
 	case "bash-input":
 		return RoleUser, "! " + strings.TrimSpace(inner(s))
 	case "task-notification":
-		s = withoutReminders(s)
-		if !taskNotice(s) {
-			return RoleUser, unpasted(s) // (a notice with words around it: the person's, quoting one)
+		n, notice := noticeOf(s)
+		if !notice {
+			return RoleUser, unpasted(s) // (a notice with words around it: the person's, quoting one, whole)
 		}
+		s = n
 		if sm := taskSummary.FindStringSubmatch(s); sm != nil {
 			return RoleNote, clip(strings.TrimSpace(html.UnescapeString(sm[1])), maxDetail)
 		}
@@ -2328,6 +2332,21 @@ func taskEnded(s string) *Event {
 		}
 	}
 	return ev
+}
+
+// noticeOf: s as one notice of Claude Code's (taskNotice), the reminders it
+// may put after one dropped (see withoutReminders); ok false, s as it is
+// (the person's words, quoting a notice and a reminder, are kept whole).
+// (A paste of exactly a notice and a reminder reads as a notice: the log
+// does not say who wrote it. review510)
+func noticeOf(s string) (string, bool) {
+	if taskNotice(s) {
+		return s, true
+	}
+	if t := withoutReminders(s); t != s && taskNotice(t) {
+		return t, true
+	}
+	return s, false
 }
 
 // withoutReminders: s without the reminders Claude Code puts after a notice
