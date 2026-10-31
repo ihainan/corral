@@ -64,6 +64,8 @@ type fakeCodexPicker struct {
 	shown   string // (the screen the last press left, while lagging)
 	late    bool
 	wrap    bool // (its "Model changed…" wrapped, as in a narrow pane)
+	queue   bool // (keys taken in a read late, the screen as it was meanwhile — its digest too)
+	pending [][]string
 }
 
 var fakeModels = []string{"GPT-6.1-Sol", "GPT-6-Astra", "GPT-6-Sol", "GPT-6-Luna"}
@@ -107,6 +109,16 @@ func (f *fakeCodexPicker) screen() string {
 }
 
 func (f *fakeCodexPicker) look() (string, string, error) {
+	if f.queue && len(f.pending) > 0 {
+		if f.late {
+			f.late = false // (not yet: this read sees the screen before them)
+			return f.screen(), fmt.Sprint(f.drawn), nil
+		}
+		for _, k := range f.pending {
+			f.run(k, "", 0)
+		}
+		f.pending = nil
+	}
 	if f.late {
 		f.late = false
 		return f.shown, "stale", nil // (the screen before: its digest no longer the screen's)
@@ -128,6 +140,10 @@ func (f *fakeCodexPicker) press(keys []string, text, digest string) error {
 	}
 	if digest != fmt.Sprint(f.drawn) {
 		return &sshx.ExitError{Status: 10}
+	}
+	if f.queue && text == "" {
+		f.pending, f.late = append(f.pending, keys), true
+		return nil
 	}
 	f.run(keys, text, 0)
 	return nil
@@ -223,6 +239,14 @@ func TestCodexModelFlow(t *testing.T) {
 	f = &fakeCodexPicker{t: t}
 	if _, err = flow(f, "GPT-6-Sol", "Ultra"); err != errNoModel || f.step != 0 {
 		t.Errorf("no such effort, left: %v step %d (%v)", err, f.step, f.pressed)
+	}
+	// (review501: leaving, the Escape taken in a read late: not pressed again.)
+	f = &fakeCodexPicker{t: t, queue: true}
+	if _, err = flow(f, "GPT-6-Sol", "Ultra"); err != errNoModel || f.step != 0 {
+		t.Errorf("left, drawn late: %v step %d", err, f.step)
+	}
+	if n := strings.Count(strings.Join(f.pressed, " "), ":esc"); n != 1 {
+		t.Errorf("left, drawn late: %d Escapes (%v)", n, f.pressed)
 	}
 	// (A picker left open that does not read as known (its footer there):
 	// closed first, then on as at rest.)

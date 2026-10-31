@@ -192,6 +192,12 @@ var (
 	codexSettleGap   = 400 * time.Millisecond
 )
 
+// (Left as is — review501: the host checks the screen, then presses, a few
+// milliseconds after; a picker closed in the terminal in between gets the
+// Escape. One Escape on Codex's input only shows a hint ("esc again to
+// edit previous message"); the flow never presses a second on a screen
+// not read again.)
+
 // codexModelFlow opens the picker; with model "" it lists the models and
 // closes it, else it takes model with effort for this session. Each press
 // is of the screen it was decided on (codexIO), its Escapes too: one only
@@ -219,15 +225,16 @@ func codexModelFlow(do, undo codexIO, model, effort string) (opts []modelOpt, er
 		return nil, err
 	}
 	before := codexModelSet(screen, model, effort)
+	// (Leaving: Escape on its picker read open, then read again till Codex
+	// has drawn what it did — not a second Escape on a picker it was still
+	// closing, which would land after it — review501.)
 	out := func(e error) ([]modelOpt, error) {
-		for i := 0; i < 2; i++ {
-			scr, d, err := undo.look()
-			if err != nil || !codexPickerOpen(scr) {
-				break
-			}
+		scr, d, err := undo.look()
+		for i := 0; i < 2 && err == nil && codexPickerOpen(scr); i++ {
 			if undo.press([]string{"esc"}, "", d) != nil {
 				break
 			}
+			scr, d, err = undo.settle(func(s string) bool { return !codexPickerOpen(s) })
 		}
 		return nil, e
 	}
