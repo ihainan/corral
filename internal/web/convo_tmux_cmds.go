@@ -50,6 +50,10 @@ func (s *Server) tmuxCmdsTell(sess *term.Session, st *convoState) []bgCmd {
 		return nil
 	}
 	p := s.tmuxCmdsOf(sess)
-	p.consider(st.bind.Pane, "claude", st.status, st.bind.Session)
+	status := st.status
+	if status == "shell" {
+		status = "idle" // (its turn over, a shell running: what it left in the background, maybe)
+	}
+	p.consider(st.bind.Pane, "claude", status, st.bind.Session)
 	return p.of(st.bind.Pane, st.bind.Session)
 }

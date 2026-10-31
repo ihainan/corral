@@ -1564,7 +1564,7 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 			if sess.Persistence != "tmux" && !strings.HasPrefix(now, "waiting:") {
 				now = ""
 			}
-			ans.AgentStatus = now
+			ans.AgentStatus = shellWord(now, false)
 			if w, ok := strings.CutPrefix(now, "waiting:"); ok {
 				ans.AgentStatus, ans.WaitingFor = "waiting", w
 			}
@@ -1596,9 +1596,11 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 	if w, ok := strings.CutPrefix(st.status, "waiting:"); ok {
 		ans.AgentStatus, ans.WaitingFor = "waiting", w
 	}
-	if c := s.tmuxCmdsTell(sess, st); len(c) > 0 {
-		ans.BgCmds, ans.BgCmdList = len(c), c[:min(len(c), maxCmdsShown)]
+	cmds := s.tmuxCmdsTell(sess, st)
+	if len(cmds) > 0 {
+		ans.BgCmds, ans.BgCmdList = len(cmds), cmds[:min(len(cmds), maxCmdsShown)]
 	}
+	ans.AgentStatus = shellWord(ans.AgentStatus, len(cmds) > 0)
 	ans.OlderCut = st.older && (st.parser.Trimmed() || st.from < 0)
 	if gen != st.gen {
 		ans.Reset = true
@@ -2234,6 +2236,20 @@ func freshStatusCommand(pid int64) string {
 	return `head -c 65536 "$HOME/.claude/sessions/` + strconv.FormatInt(pid, 10) + `.json"`
 }
 
+// shellWord: the word told the page for a status: "shell" (a shell of
+// Claude Code's own running, its turn over) is "idle" where commands it
+// left in the background were found (what runs is those: shown as such),
+// else "busy", as before (one typed with "!", or not looked at yet).
+func shellWord(status string, cmds bool) string {
+	switch {
+	case status != "shell":
+		return status
+	case cmds:
+		return "idle"
+	}
+	return "busy"
+}
+
 // procStatusOf: what the session file b says, if it is of the process and
 // session bound (another's under a reused pid says nothing).
 func procStatusOf(b []byte, bind *convoBind) string {
@@ -2250,7 +2266,10 @@ func procStatusOf(b []byte, bind *convoBind) string {
 	case "busy", "idle":
 		return f.Status
 	case "shell":
-		return "busy" // (a command typed with "!" runs)
+		// (Its turn over, a shell of its own running: one typed with "!",
+		// or what it left in the background (a command run there). Said as
+		// it is: busy where it is not told apart (see shellWord).)
+		return "shell"
 	case "waiting":
 		// What for, as Claude Code 2.1.312 says it: "permission prompt",
 		// "input needed" (a question), "sandbox request", "worker request",
