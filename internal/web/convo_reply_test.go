@@ -212,6 +212,18 @@ time.sleep(30)`)
 			t.Fatalf("%q: not waiting, a message goes: exit %d, typed %q", ti, got, wrote())
 		}
 	}
+	// A Codex's command (cscreen:): on the screen read, not while it waits.
+	titled("proj")
+	if got := run("cscreen:"+shown, []string{"ctrl+x"}); got != 0 || wrote() != "pane send-keys p1 ctrl+x" {
+		t.Fatalf("command, the screen read, not waiting: exit %d, typed %q", got, wrote())
+	}
+	if got := run("cscreen:"+strings.Repeat("0", 64), []string{"ctrl+x"}); got != 10 || wrote() != "" {
+		t.Fatalf("command, another screen: exit %d, typed %q", got, wrote())
+	}
+	titled("[ ! ] Action Required | proj")
+	if got := run("cscreen:"+shown, []string{"ctrl+x"}); got != 9 || wrote() != "" {
+		t.Fatalf("command while it waits: exit %d, typed %q", got, wrote())
+	}
 	codexUnreadCases(t, run, wrote, title, shown)
 	// (Claude Code's file saying a status of its own that is no word of the
 	// gate's, "unknown": a message goes, as before.)

@@ -183,7 +183,7 @@ printf 'hostnow=%s\0' "$(date +%s 2>/dev/null)"
 nl=$(printf '\nx'); nl=${nl%x}
 btime=$(sed -n 's/^btime \([0-9]*\)$/\1/p' /proc/stat 2>/dev/null); hz=$(getconf CLK_TCK 2>/dev/null)
 case $hz in ''|*[!0-9]*|0) hz=;; esac
-` + codexPendingSh + `
+` + codexFdsSh + `
 # Codex's subcommand ($1 its pid): its first word after options and their
 # values ("codex -p exec" is no exec; "codex -c x=1 exec" is), none after
 # "--". Those that do not converse (exec, review, …) are no agent to type to.
@@ -328,27 +328,26 @@ for d in $codexes; do
   pid=${d#/proc/}
   sub=$(codex_sub "$pid")
   case $sub in exec|e|exec-server|review|apply|a|login|logout|mcp|mcp-server|app-server|completion|sandbox|debug|cloud|features) continue;; esac
-  log= any=
-  for fd in "$d"/fd/*; do
-    l=$(readlink "$fd" 2>/dev/null) || continue
-    case $l in *"$nl"*) continue;; */rollout-*.jsonl) any=1;; esac
-    case $l in "$HOME"/.codex/sessions/*/rollout-*.jsonl) { [ -z "$log" ] || [ "$l" -nt "$log" ]; } && log=$l;; esac
-  done
-  codex_pending "$d"
-  if [ -n "$pending" ] && [ -z "$sub" ]; then
-    # (Begun anew, /new: its log not begun yet, the one it has open the
-    # conversation before. As one just started: the zero id.)
-    log= sid=00000000-0000-0000-0000-000000000000
+  codex_fds "$d"
+  log=$cxlog any=$cxany
+  if [ -n "$cxpend" ]; then
+    # (A conversation its log not begun yet — just started, or begun anew
+    # with /new, the one before still open: its session the one its writer
+    # lock names, which its log will have. Not told which of two: none.)
+    case $sub in ''|resume|fork) ;; *) continue;; esac
+    [ "$cxpend" = '?' ] && continue
+    log= sid=$cxpend
   elif [ -n "$log" ]; then
     # (No subcommand to go by: its log's head says how it was begun.)
     [ -z "$sub" ] && head -c 4096 "$log" 2>/dev/null | grep -q '"originator": *"codex_exec"' && continue
     sid=$(printf '%s' "${log%.jsonl}" | grep -o '[0-9a-fA-F]\{8\}-[0-9a-fA-F]\{4\}-[0-9a-fA-F]\{4\}-[0-9a-fA-F]\{4\}-[0-9a-fA-F]\{12\}$')
     [ -n "$sid" ] || continue
   else
-    # (None open: a new conversation, Codex beginning its log with the
-    # first message. Its session is not known till then: the zero id
-    # stands for it. Only the conversing one, run with no subcommand; not
-    # one with a log elsewhere, CODEX_HOME say.)
+    # (None open, nor any lock (a Codex before such locks): a new
+    # conversation, Codex beginning its log with the first message. Its
+    # session is not known till then: the zero id stands for it. Only the
+    # conversing one, run with no subcommand; not one with a log
+    # elsewhere, CODEX_HOME say.)
     [ -z "$sub" ] && [ -z "$any" ] || continue
     sid=00000000-0000-0000-0000-000000000000
   fi
@@ -1579,7 +1578,7 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 
 	// (A Codex not yet begun on its log is looked for again each time: its
 	// first message begins it, and what is sent next goes to that session.)
-	fresh := st.bind != nil && st.bind.Session == convoNoSession
+	fresh := st.bind != nil && (st.bind.Session == convoNoSession || st.bind.Agent == "codex" && st.reason == convoNoLog)
 	// What the pane runs, checked again now and then: where a log is read
 	// already, beside this request rather than before it (the scan of the
 	// host's processes takes a while; what is read meanwhile is of the
@@ -1784,7 +1783,7 @@ func (s *Server) locateConvo(ctx context.Context, sess *term.Session, st *convoS
 	// message begins its log, and what is sent next must be of that
 	// session. Looks at once, of other windows too, share the one.)
 	var after time.Time
-	if st.bind != nil && st.bind.Session == convoNoSession && st.bind.Agent == "codex" {
+	if st.bind != nil && st.bind.Agent == "codex" && (st.bind.Session == convoNoSession || st.reason == convoNoLog) {
 		after = time.Now().Add(-time.Second)
 	}
 	out, at, looked, err := s.convoScans.run(ctx, sess, convoLocateCommand(sess.Persistence, sess.TmuxSession, ""), after)
@@ -2387,7 +2386,9 @@ shift
 # (Codex's gates, "cfree" and "creply:…": whether it waits is said by its
 # terminal's title, not by a session file of Claude Code's.)
 cx=
-case $gate in cfree|creply:*) cx=1 gate=${gate#c} ;; esac
+# ("cscreen:…": a command of Codex's, not while it waits, on the screen
+# read, its input seen empty there.)
+case $gate in cfree|creply:*|cscreen:*) cx=1 gate=${gate#c} ;; esac
 case $rd in ''|*[!0-9]*) rd=0;; esac
 # (What the pane shows after, its last rd lines but blank ones at the end.)
 # (Not read, it exits 8: no screen is not an empty one.)
@@ -2413,7 +2414,7 @@ if [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -d "$XDG_RUNTIME_DIR" ] && [ ! -L "$l" ] &
   done
 fi
 [ "$len" = keys ] || [ "$(wc -c <"$f" | tr -d ' ')" = "$len" ] || exit 4
-` + codexPendingSh + `
+` + codexFdsSh + `
 front() {
   stat=$(tr '\n' ' ' <"/proc/$pid/stat" 2>/dev/null) || return 1
   rest=${stat##*) }
@@ -2429,20 +2430,17 @@ front() {
       /^--$/ { exit } /^-/ { if ($0 ~ /^(-[cmpsaCi]|--(config|model|profile|sandbox|ask-for-approval|cd|image|add-dir|local-provider|remote|remote-auth-token-env|enable|disable))$/) skip = 1; next }
       { print; exit }')
     case $cs in exec|e|exec-server|review|apply|a|login|logout|mcp|mcp-server|app-server|completion|sandbox|debug|cloud|features) return 1;; esac
-    lg= any=
-    for fd in /proc/$pid/fd/*; do
-      l=$(readlink "$fd" 2>/dev/null) || continue
-      case $l in */rollout-*.jsonl) any=1;; esac
-      case $l in "$HOME"/.codex/sessions/*/rollout-*.jsonl) { [ -z "$lg" ] || [ "$l" -nt "$lg" ]; } && lg=$l;; esac
-    done
-    # (The zero id: one with no log open yet, anywhere, or begun anew and
-    # its log not yet begun (codex_pending), run with no subcommand, as it
-    # was located. Begun anew, it is at no session it had: not that one's.)
-    codex_pending "/proc/$pid"
-    if [ "$sid" = 00000000-0000-0000-0000-000000000000 ]; then
-      [ -z "$cs" ] && { [ -z "$any" ] || [ -n "$pending" ]; } || return 1
-    elif [ -n "$pending" ]; then
-      return 1
+    codex_fds "/proc/$pid"
+    lg=$cxlog any=$cxany
+    # (Its log not begun yet (codex_fds: just started, or begun anew): the
+    # session asked for is the one its writer lock names, none other. The
+    # zero id: one with no log open, nor lock, anywhere, run with no
+    # subcommand, as it was located.)
+    if [ -n "$cxpend" ]; then
+      case $cs in ''|resume|fork) ;; *) return 1;; esac
+      [ "$sid" = "$cxpend" ] || return 1
+    elif [ "$sid" = 00000000-0000-0000-0000-000000000000 ]; then
+      [ -z "$cs" ] && [ -z "$any" ] || return 1
     elif [ -z "$lg" ]; then
       # (None of its own: its app-server daemon keeps it. That log is of
       # this session and was begun where this process runs, as locating
@@ -2514,7 +2512,7 @@ gate_enter() {
   [ -n "$gate" ] || return 0
   waiting
   case $gate in
-  free) case $st in waiting|title-unread) exit 5;; esac ;;
+  free|screen:*) case $st in waiting|title-unread) exit 5;; esac ;;
   idle) [ "$st" = idle ] || exit 5 ;;
   reply:*) [ "$st" = waiting ] || exit 5 ;;
   esac
@@ -2524,6 +2522,12 @@ if [ -n "$gate" ]; then
   waiting
   case $gate in
   free) [ "$st" = waiting ] && exit 9; [ "$st" = title-unread ] && exit 11 ;;
+  screen:*)
+    [ "$st" = waiting ] && exit 9; [ "$st" = title-unread ] && exit 11
+    command -v sha256sum >/dev/null 2>&1 || exit 11
+    if [ "$mode" = tmux ]; then d=$(tmux -u capture-pane -p -t "$p" 2>/dev/null 9>&- | sha256sum)
+    else d=$(HERDR_SOCKET_PATH=$sock herdr pane read "$p" --source visible 2>/dev/null 9>&- | sha256sum); fi
+    [ "${d%% *}" = "${gate#screen:}" ] || exit 10 ;;
   idle) [ "$st" = idle ] || exit 12 ;;
   dialog)
     [ "$st" = waiting ] || exit 9
@@ -3176,7 +3180,37 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	case front.agent == "codex" && (what == "send" || what == "send_now"):
 		gate = "cfree" // (likewise: typed into its approval, the Enter would answer it)
 	case what == "command" && front.agent == "codex":
-		gate = "cfree" // (not while it waits for an answer: typed into it; while it works, Codex refuses the command itself)
+		// (Not while it waits for an answer: typed into it; nor onto a draft
+		// in its input: one message of both. Its screen read now, its input
+		// seen empty, and typed only on that screen; while it works, Codex
+		// refuses the command itself.)
+		// (Refused before any keys: the pane's turn given back now — no
+		// command of its is to end on the host.)
+		refuse := func(status int, code, msg string) {
+			ended.Done()
+			reason = code
+			writeError(w, status, code, msg)
+		}
+		sctx, scancel := context.WithTimeout(ctx, 10*time.Second)
+		res, err := sshx.Exec(sctx, sess.Client(), convoScreenCommand(sess.Persistence, b.Pane, socket), 512<<10, sshx.ExecOptions{})
+		scancel()
+		if err != nil {
+			refuse(http.StatusBadGateway, "no_screen", "the pane's screen could not be read")
+			return
+		}
+		shown, digest, _ := screenOf(res.Out)
+		switch err := codexIdleInput(shown); {
+		case errors.Is(err, errDraft):
+			refuse(http.StatusConflict, "draft", err.Error())
+			return
+		case errors.Is(err, errBusyAgent):
+			refuse(http.StatusConflict, "working", err.Error())
+			return
+		case err != nil:
+			refuse(http.StatusConflict, "picker", err.Error())
+			return
+		}
+		gate = "cscreen:" + digest
 	case what == "command":
 		gate = "idle" // (not while it works either: it would wait in its queue, and run when no one looks)
 	case what == "close_dialog":
@@ -3389,20 +3423,32 @@ func (s *Server) apiConversationSubagent(w http.ResponseWriter, r *http.Request)
 
 var errSubagentFile = errors.New("not a subagent's log")
 
-// codexPendingSh defines codex_pending (of locating's script and the
-// gated command's, the same words): $1 a Codex process's /proc dir; it sets
-// pending where the process holds a conversation's writer lock
-// (~/.codex/thread-writer-locks/<id>.lock) whose log it has not open — a
-// conversation begun anew (/new), its log begun with its first message,
-// the one before still open (Codex 0.164, plans/5d3b-codex-new-compact.md).
-const codexPendingSh = `codex_pending() {
-  pending= _locks= _logs=
+// codexFdsSh defines codex_fds (of locating's script and the gated
+// command's, the same words): $1 a Codex process's /proc dir. It sets
+// cxlog, its own conversation's log written last (a subagent's not: its
+// head says "thread_source": "subagent"); cxany, a rollout open anywhere;
+// cxpend, the session of a conversation whose writer lock it holds
+// (~/.codex/thread-writer-locks/<id>.lock) with no log of it open — one
+// just started, or begun anew (/new), its log begun with its first
+// message, the lock's id the log's ("?": more than one, not told which).
+// (Codex 0.164, as a real one was seen to: plans/5d3b-codex-new-compact.md.)
+const codexFdsSh = `codex_fds() {
+  cxlog= cxany= cxpend= _locks= _logs=
+  _nl=$(printf '\nx'); _nl=${_nl%x}
   for _f in "$1"/fd/*; do
     _l=$(readlink "$_f" 2>/dev/null) || continue
+    case $_l in *"$_nl"*) continue;; */rollout-*.jsonl) cxany=1;; esac
     case $_l in
-    "$HOME"/.codex/sessions/*/rollout-*.jsonl) _logs="$_logs ${_l%.jsonl} " ;;
-    "$HOME"/.codex/thread-writer-locks/*.lock) _i=${_l##*/}; _i=${_i%.lock}; case $_i in ''|*[!0-9a-fA-F-]*) ;; *) _locks="$_locks $_i" ;; esac ;;
+    "$HOME"/.codex/sessions/*/rollout-*.jsonl)
+      _logs="$_logs ${_l%.jsonl} "
+      head -c 4096 "$_l" 2>/dev/null | grep -q '"thread_source": *"subagent"' && continue
+      { [ -z "$cxlog" ] || [ "$_l" -nt "$cxlog" ]; } && cxlog=$_l ;;
+    "$HOME"/.codex/thread-writer-locks/*.lock)
+      _i=${_l##*/}; _i=${_i%.lock}
+      case $_i in *[!0-9a-fA-F-]*) ;; ????????-????-????-????-????????????) _locks="$_locks $_i" ;; esac ;;
     esac
   done
-  for _i in $_locks; do case "$_logs" in *"-$_i "*) ;; *) pending=1 ;; esac; done
+  for _i in $_locks; do
+    case "$_logs" in *"-$_i "*) ;; *) if [ -z "$cxpend" ]; then cxpend=$_i; else cxpend='?'; fi ;; esac
+  done
 }`

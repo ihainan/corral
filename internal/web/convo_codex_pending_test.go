@@ -5,23 +5,27 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 )
 
-// codex_pending (codexPendingSh, the same words in locating's script and the
-// gated command's), run here on a stand-in /proc dir whose fd links point
-// into a home of the test's: a writer lock held without its log open is a
-// conversation begun anew (/new), its log not begun yet.
-func TestCodexPending(t *testing.T) {
+// codex_fds (codexFdsSh, the same words in locating's script and the gated
+// command's), run here on a stand-in /proc dir whose fd links point into a
+// home of the test's: its own log (not a subagent's), and a conversation's
+// writer lock held without its log open — its session the lock's.
+func TestCodexFds(t *testing.T) {
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("no sh")
 	}
 	home := t.TempDir()
 	proc := filepath.Join(t.TempDir(), "123")
 	os.MkdirAll(filepath.Join(proc, "fd"), 0o755)
-	const a, b = "01a18fc1-27bd-7b03-9702-4a4d49147ba8", "01a18fc1-3785-7b90-b732-c90708adac93"
-	logOf := func(id string) string {
-		return filepath.Join(home, ".codex/sessions/2026/10/31/rollout-2026-10-31T02-19-22-"+id+".jsonl")
+	const a, b, c, s = "01a18fc1-27bd-7b03-9702-4a4d49147ba8", "01a18fc1-3785-7b90-b732-c90708adac93", "01a18fc1-4444-7b90-b732-c90708adac93", "01a18ff7-432f-7a80-bb03-7c6c92a8fd35"
+	logOf := func(id, source string) string {
+		p := filepath.Join(home, ".codex/sessions/2026/10/31/rollout-2026-10-31T02-19-22-"+id+".jsonl")
+		os.MkdirAll(filepath.Dir(p), 0o755)
+		os.WriteFile(p, []byte(`{"timestamp":"x","type":"session_meta","payload":{"id":"`+id+`","thread_source": "`+source+`"}}`+"\n"), 0o644)
+		return p
 	}
 	lockOf := func(id string) string { return filepath.Join(home, ".codex/thread-writer-locks/"+id+".lock") }
 	n := 3
@@ -29,31 +33,45 @@ func TestCodexPending(t *testing.T) {
 		os.Symlink(target, filepath.Join(proc, "fd", strconv.Itoa(n)))
 		n++
 	}
-	pending := func() bool {
-		c := exec.Command("sh", "-c", codexPendingSh+"\ncodex_pending \"$1\"; printf %s \"$pending\"", "sh", proc)
-		c.Env = append(os.Environ(), "HOME="+home)
-		out, err := c.Output()
+	fds := func() (log, pend string) {
+		cmd := exec.Command("sh", "-c", codexFdsSh+"\ncodex_fds \"$1\"; printf '%s\\n%s' \"$cxlog\" \"$cxpend\"", "sh", proc)
+		cmd.Env = append(os.Environ(), "HOME="+home)
+		out, err := cmd.Output()
 		if err != nil {
 			t.Fatal(err)
 		}
-		return string(out) == "1"
+		l, p, _ := strings.Cut(string(out), "\n")
+		return filepath.Base(l), p
 	}
-	open(logOf(a))
 	open(lockOf(a))
-	if pending() {
-		t.Error("A's log and lock: not pending")
+	if log, pend := fds(); log != "." || pend != a {
+		t.Errorf("just started, A's lock only: log %q, pending %q", log, pend)
+	}
+	open(logOf(a, "user"))
+	if log, pend := fds(); !strings.Contains(log, a) || pend != "" {
+		t.Errorf("A's log: log %q, pending %q", log, pend)
+	}
+	open(lockOf(s))
+	open(logOf(s, "subagent"))
+	if log, pend := fds(); !strings.Contains(log, a) || pend != "" {
+		t.Errorf("a subagent's log too: still A's, log %q, pending %q", log, pend)
 	}
 	open("/elsewhere/.codex/thread-writer-locks/" + b + ".lock") // (not under its home: not its)
 	open(filepath.Join(home, ".codex/thread-writer-locks/not-an-id.lock"))
-	if pending() {
-		t.Error("locks not its, or not a session's: not pending")
+	if _, pend := fds(); pend != "" {
+		t.Errorf("locks not its, or not a session's: pending %q", pend)
 	}
 	open(lockOf(b))
-	if !pending() {
-		t.Error("B's lock, no log of B: pending (begun anew)")
+	if log, pend := fds(); !strings.Contains(log, a) || pend != b {
+		t.Errorf("/new: B's lock, no log of B: log %q (A's still), pending %q", log, pend)
 	}
-	open(logOf(b))
-	if pending() {
-		t.Error("B's log open too: not pending")
+	open(lockOf(c))
+	if _, pend := fds(); pend != "?" {
+		t.Errorf("two such: not told which, pending %q", pend)
+	}
+	open(logOf(c, "user"))
+	open(logOf(b, "user"))
+	if _, pend := fds(); pend != "" {
+		t.Errorf("their logs open: pending %q", pend)
 	}
 }
