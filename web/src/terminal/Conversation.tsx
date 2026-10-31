@@ -1,5 +1,5 @@
 import { createContext, Fragment, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { ArrowDown, Check, ChevronDown, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, Clock, Download, GitBranch, Keyboard, Loader, MoreHorizontal, MoreVertical, PanelLeft, Pin, Search, TriangleAlert, X, Plus } from 'lucide-react'
+import { ArrowDown, Check, ChevronDown, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, Clock, Download, GitBranch, Keyboard, ListOrdered, Loader, MoreHorizontal, MoreVertical, PanelLeft, Pin, Search, TriangleAlert, X, Plus } from 'lucide-react'
 import { t, getLang, type I18nKey } from '../i18n'
 import { api } from '../api'
 import { asHeld, GROUPS, inGroup, listOrder, pinned, type ConvoListRow, type RowCmds } from './agentOrder'
@@ -11,6 +11,7 @@ import { useSubConvo } from './subagent'
 import { NEW_AGENT } from './newAgent'
 import { Code } from './Code'
 import { ConvoSearchPanel } from './convoSearchPanel'
+import { ConvoTurnsPanel } from './convoTurnsPanel'
 import { itemKey } from './convoSearch'
 import { exportMarkdown } from './convoExport'
 import { AgentIcon } from './agentIcons'
@@ -427,6 +428,7 @@ export function ConversationView({
   // (Searching, the part before is read in only when asked: a batch read in
   // for the search, its top near, does not read on by itself.)
   const [searching, setSearching] = useState(false)
+  const [turnsShown, setTurnsShown] = useState(false) // (the panel of the person's turns in the whole log: convoTurnsPanel)
   olderPausedNow.current = olderPaused || searching
   // (Brought something: the first entry is an earlier one. What came at the end meanwhile does not count.)
   const firstSeq = convo.entries.length ? convo.entries[0].seq : 0
@@ -1103,6 +1105,7 @@ export function ConversationView({
               label={t('common.more')}
               items={() => [
                 { label: t('convoSearch.item'), icon: <Search size={16} />, onSelect: () => setSearching(true) },
+                ...(convo.of && (convo.bind?.agent === 'claude' || convo.bind?.agent === 'codex') ? [{ label: t('turns.item'), icon: <ListOrdered size={16} />, onSelect: () => (setSearching(false), setTurnsShown(true)) }] : []),
                 { label: t('convoExport.item'), icon: <Download size={16} />, disabled: !list.length, onSelect: () => doExport() },
                 // (All steps opened or folded: the menu's, as Ctrl+O is a Mac's only.)
                 { label: t(allOpen ? 'pageKeys.foldAll' : 'pageKeys.openAll'), icon: allOpen ? <ChevronsDownUp size={16} /> : <ChevronsUpDown size={16} />, disabled: !list.length, onSelect: () => (setOpened({}), setAllOpen((v) => !v)) },
@@ -1127,6 +1130,17 @@ export function ConversationView({
             setKeysShown('')
             if (from === 'menu') requestAnimationFrame(() => root.current?.querySelector<HTMLElement>('.convo-bar-more')?.focus())
           }}
+        />
+      )}
+      {turnsShown && convo.of && (
+        <ConvoTurnsPanel
+          of={convo.of}
+          gen={convo.gen}
+          list={list}
+          older={convo.older && !convo.olderCut ? { can: true, busy: convo.loadingOlder } : undefined}
+          onOlder={() => convo.loadOlder()}
+          onGo={goTo}
+          onClose={() => setTurnsShown(false)}
         />
       )}
       {searching && (

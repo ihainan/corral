@@ -1290,3 +1290,7 @@ button.convo-running-what { padding: 0; text-align: left; }
 .convo-list-pin { flex: none; display: inline-flex; align-items: center; color: var(--fg-3); }
 /* (Beside its title, not off by the time: the line's gap is wider than it wants.) */
 .convo-list-line .convo-list-pin { align-self: center; margin-left: -4px; color: var(--term-fg-3); }
+/* The person's turns (convoTurnsPanel): when, then how each begins. */
+.convo-turn { display: flex; gap: 10px; align-items: baseline; text-align: left; }
+.convo-turn-when { flex: none; color: var(--term-fg-3); font-size: 12px; font-variant-numeric: tabular-nums; }
+.convo-turn-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
