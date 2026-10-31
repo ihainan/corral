@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Bot, Check, MessageCircleReply, Plus, Search } from 'lucide-react'
 import { AgentsChat } from './AgentsChat'
-import { api, choiceOf, probeBootstrap, type Host, type OpenChoice, type SessionInfo } from '../api'
+import { api, authGen, choiceOf, probeBootstrap, type Host, type OpenChoice, type SessionInfo } from '../api'
 import { agentKey, sessionWhich } from '../terminal/sessionName'
 import { HIDDEN_EVERY, waitingTitle } from '../terminal/agents'
 import { t } from '../i18n'
@@ -211,12 +211,13 @@ export function TerminalTabs({ current }: { current: string }) {
     loading.current = 'yes'
     const at = Date.now()
     const inst = instanceRef.current // (the gateway's run as known when the list was asked for: see keepTabs)
+    const signedIn = authGen() // (and whose: a list of another sign-in is kept as no one's)
     api<SessionInfo[]>('GET', '/api/sessions')
       .then((l) => {
         const running = l.filter((x) => x.state === 'running')
         setSessions(inPlace(running))
         setListAt(at)
-        void keepTabs(running, inst)
+        void keepTabs(running, inst, signedIn)
       })
       .catch(() => {}) // (the tabs stay as they were; the next poll tries again)
       .finally(() => {
@@ -232,21 +233,30 @@ export function TerminalTabs({ current }: { current: string }) {
   const reopening = useRef(false)
   const instanceRef = useRef<string | null>(null)
   const userRef = useRef<number | undefined>(undefined) // (whose tabs: as the gateway said, with its run)
-  const keepTabs = async (running: SessionInfo[], inst: string | null) => {
-    if (reopening.current) return
+  const userGen = useRef(-1) // (the sign-in userRef was told in: another since, it is asked again)
+  const keepTabs = async (running: SessionInfo[], inst: string | null, signedIn: number) => {
+    if (reopening.current || authGen() !== signedIn) return
+    if (userGen.current !== signedIn) {
+      userRef.current = undefined
+      userGen.current = signedIn
+    }
     let kept = readKept(userRef.current)
-    let missing = kept ? kept.tabs.filter((k) => !keptOpen(k, running)) : []
     reopening.current = true
     try {
-      // (The gateway's run asked again only when tabs went: a restart, or closed.)
-      const b = missing.length || !instanceRef.current || userRef.current === undefined ? await probeBootstrap() : { instance: instanceRef.current, user: { id: userRef.current } }
-      if (!b?.instance || !b.user) return
+      // (The gateway's run asked again only when tabs went, as their ids say:
+      // a restart, or closed. Not by name: another device opening them again
+      // after a restart gives new ids, of a run this page has not seen. review488)
+      const gone = !!kept && kept.tabs.some((k) => !running.some((s) => s.id === k.id))
+      const b = gone || !instanceRef.current || userRef.current === undefined ? await probeBootstrap() : { instance: instanceRef.current, user: { id: userRef.current } }
+      if (!b?.instance || !b.user || authGen() !== signedIn) return
       instanceRef.current = b.instance
       if (userRef.current !== b.user.id) {
         userRef.current = b.user.id
         kept = readKept(b.user.id)
-        missing = kept ? kept.tabs.filter((k) => !keptOpen(k, running)) : []
       }
+      // (Which to open again: by host, kind and name, as another device or
+      // tab may have opened them again already.)
+      const missing = kept ? kept.tabs.filter((k) => !keptOpen(k, running)) : []
       const user = b.user.id
       // (A list of the run before, or of one not known: asked for again, so it is not kept as this run's.)
       if (b.instance !== inst) {
@@ -256,6 +266,7 @@ export function TerminalTabs({ current }: { current: string }) {
       if (kept && missing.length && kept.instance !== b.instance && Date.now() - kept.at < KEPT_FRESH) {
         let failed = 0
         for (const k of missing) {
+          if (authGen() !== signedIn) return
           try {
             const r = await api<SessionInfo | { choices?: unknown }>('POST', '/api/sessions', { host_id: k.host_id, ...estimateSize(), open: k.open })
             if (!('id' in r)) failed++
@@ -265,6 +276,7 @@ export function TerminalTabs({ current }: { current: string }) {
         }
         if (failed) toast(t('tabs.reopenFailed', { n: failed }), true)
         // (Opened once: what the tabs are now is the next list's.)
+        if (authGen() !== signedIn) return
         writeKept({ instance: b.instance, user, at: Date.now(), tabs: [] })
         loadRef.current()
         return
@@ -273,6 +285,7 @@ export function TerminalTabs({ current }: { current: string }) {
         const open = choiceOf(s)
         return open && (open.kind === 'tmux' || open.kind === 'herdr') ? [{ id: s.id, host_id: s.host_id, open }] : []
       })
+      if (authGen() !== signedIn) return
       writeKept({ instance: b.instance, user, at: Date.now(), tabs })
     } finally {
       reopening.current = false
