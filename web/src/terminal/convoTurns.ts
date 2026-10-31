@@ -11,18 +11,24 @@ export type Turn = { at: number; ts?: string; preview: string }
 // the log, not by which object: the list is asked for anew meanwhile.)
 export function itemOf(list: Item[], turns: Turn[], turn: Turn): string | null {
   if (!turn.ts) return null
-  const flat = (s: string) => s.replace(/\s+/g, ' ').trim()
-  const head = flat(turn.preview).replace(/…$/, '')
   const alike = turns.filter((x) => x.ts === turn.ts && x.preview === turn.preview).sort((a, b) => a.at - b.at)
   const nth = alike.findIndex((x) => x.at === turn.at)
   if (nth < 0) return null
+  // (Told alike as the index tells them: its preview of the same words —
+  // not a beginning shared with a longer one, review520.)
   const keys = list.flatMap((it) => {
     if (it.kind !== 'user' || it.e.ts !== turn.ts) return []
-    const text = flat(it.e.parts.filter((p) => p.kind === 'text').map((p) => p.text ?? '').join(' '))
-    return text.startsWith(head) ? ['e' + it.e.seq] : []
+    return previewOf(it.e.parts.filter((p) => p.kind === 'text').map((p) => p.text ?? '').join(' ')) === turn.preview ? ['e' + it.e.seq] : []
   })
   if (keys.length > alike.length) return null // (more read in than the log has: not told apart)
   const first = alike.length - keys.length // (of them, the first read in)
   return nth >= first ? keys[nth - first] : null
 }
 
+// previewOf: a message's preview as the gateway makes it (convo_turns.go
+// preview): its white space as one, its first 120 characters.
+export function previewOf(text: string): string {
+  const flat = text.split(/\s+/).filter(Boolean).join(' ')
+  const chars = [...flat]
+  return chars.length <= 120 ? flat : chars.slice(0, 120).join('') + '…'
+}

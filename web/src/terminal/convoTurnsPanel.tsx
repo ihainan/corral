@@ -60,7 +60,13 @@ export function ConvoTurnsPanel({
           setFailed(false)
           if (a.more) timer = window.setTimeout(load, 1000)
         })
-        .catch(() => !stopped && setFailed(true))
+        .catch(() => {
+          if (stopped) return
+          // (Asked again a while on: one failing does not leave the list
+          // as it was, its turns not to be gone to — review520.)
+          setFailed(true)
+          timer = window.setTimeout(load, 3000)
+        })
     }
     load()
     return () => {
@@ -134,6 +140,7 @@ export function ConvoTurnsPanel({
   }, [want])
   const go = (turn: Turn) => {
     setNote('')
+    setWant(null) // (the way back to another, if under way, called off: this one now — review520)
     const key = itemOf(listNow.current, turns ?? [], turn)
     if (key) {
       if (!onGo({ key, field: 'user' }, () => setNote(t('turns.gone')))) setNote(t('turns.gone'))
