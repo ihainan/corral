@@ -268,6 +268,9 @@ export interface Convo {
   // first, with lower seqs); while one is on its way, nothing more.
   loadOlder: () => void
   refresh: () => void // read now (a message sent: what it brings, at once)
+  // When this view last read an answer (ms; 0: none yet), whether or not it
+  // changed what shows — okAt stays as it was where nothing did.
+  readAt: () => number
   gen: number
   bind?: ConvoBind
   agentStatus?: 'busy' | 'idle' | 'waiting' // (tmux) as Claude Code's file for the process says
@@ -291,7 +294,7 @@ export interface Convo {
 }
 
 const noop = () => {}
-const initial = (of?: string): Convo => ({ status: 'loading', entries: [], older: false, olderCut: false, loadingOlder: false, loadOlder: noop, refresh: noop, gen: 0, failing: false, okAt: 0, changedAt: Date.now(), of })
+const initial = (of?: string): Convo => ({ status: 'loading', entries: [], older: false, olderCut: false, loadingOlder: false, loadOlder: noop, refresh: noop, readAt: () => 0, gen: 0, failing: false, okAt: 0, changedAt: Date.now(), of })
 
 // What was last read of a session's pane, for this page's life: shown at
 // once when it is in front again (its tab back to the front, the pane
@@ -540,7 +543,8 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
     setTimeout(() => pokeOlder.current())
   }, [])
   const refresh = useCallback(() => pokeNow.current(), [])
-  return useMemo(() => ({ ...convo, loadOlder, refresh }), [convo, loadOlder, refresh])
+  const readAt = useCallback(() => lastOk.current, [])
+  return useMemo(() => ({ ...convo, loadOlder, refresh, readAt }), [convo, loadOlder, refresh, readAt])
 }
 
 // Whether the agent is asking the person something (AskUserQuestion, not

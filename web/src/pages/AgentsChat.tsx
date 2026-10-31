@@ -644,26 +644,29 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   // another round, marks nothing; a round after it is marked in its turn.)
   // (Not while what it left running is read for, nor while it is out.)
   // (What this tmux session's agent left running, kept for its row: see
-  // tmuxCmds. Only what was read while it is looked at, this time: a view
-  // brought back shows what it read before till it reads again, and that is
-  // not kept, nor dated again as the view goes. Dated as it goes otherwise:
-  // reads that change nothing keep okAt. review483–485)
+  // tmuxCmds. Only as of a read this view made while looked at, this time —
+  // a view brought back shows what it read before, till it reads again —
+  // and dated by that read: as the agent's words change, and as the view
+  // goes (reads that change nothing change no state). review483–486)
   const tmuxKeyNow = !herdr && !cur.pane ? cur.key : ''
   const tmuxCmdsNow = agent?.cmds
   const lookedSince = useRef(0)
   useEffect(() => {
     if (active) lookedSince.current = Date.now()
   }, [active])
+  const readAt = convo.readAt
   useEffect(() => {
-    if (!tmuxKeyNow || !active || convo.status === 'loading' || convo.failing || convo.okAt < lookedSince.current) return
-    if (tmuxCmdsNow) tmuxCmds.set(tmuxKeyNow, { cmds: tmuxCmdsNow, at: Date.now() })
-    else tmuxCmds.delete(tmuxKeyNow)
+    if (!tmuxKeyNow || !active || convo.status === 'loading' || convo.failing) return
     const key = tmuxKeyNow
-    return () => {
-      const v = tmuxCmds.get(key)
-      if (v) v.at = Date.now()
+    const keep = () => {
+      const at = readAt()
+      if (at < lookedSince.current) return // (none read since it was brought back)
+      if (tmuxCmdsNow) tmuxCmds.set(key, { cmds: tmuxCmdsNow, at })
+      else tmuxCmds.delete(key)
     }
-  }, [tmuxKeyNow, tmuxCmdsNow, convo.status, convo.okAt, convo.failing, active])
+    keep()
+    return keep
+  }, [tmuxKeyNow, tmuxCmdsNow, convo.status, convo.okAt, convo.failing, active, readAt])
   const doneHere = herdr && active && row && !row.lost && row.status === 'done' && row.a.status === 'done' && !row.bg && row.a.bg !== 'checking' ? { pane: row.a.pane_id, round: row.a.round ?? 0, session: row.a.session ?? '' } : undefined
   const doneKey = doneHere && JSON.stringify(doneHere)
   useEffect(() => {
