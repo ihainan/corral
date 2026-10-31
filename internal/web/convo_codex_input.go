@@ -1,6 +1,9 @@
 package web
 
-import "strings"
+import (
+	"regexp"
+	"strings"
+)
 
 // codexIdleInput: Codex at rest, its input empty: nothing says it works
 // ("esc to interrupt"), and its input ("› " at the left, the last such,
@@ -20,16 +23,25 @@ func codexIdleInput(screen string) error {
 		if in := strings.TrimSpace(strings.TrimPrefix(lines[i], "› ")); in != "" && in != "Ask Codex to do anything" {
 			return errDraft
 		}
+		// (Under it, down to its footer — its model and folder, "? for
+		// shortcuts" —: any words are the input's, a draft, blank lines among
+		// them or not.)
 		for _, l := range lines[i+1:] {
-			if strings.TrimSpace(l) == "" {
+			t := strings.TrimSpace(l)
+			if t == "" {
+				continue
+			}
+			if codexFooter.MatchString(t) {
 				break
 			}
-			if strings.HasPrefix(l, "  ") {
-				return errDraft // (a line of the input under its first)
-			}
-			break
+			return errDraft
 		}
 		return nil
 	}
 	return errScreen
 }
+
+// codexFooter: a line of Codex's footer under its input: its model and
+// folder ("gpt-mock default · ~/cxreal"), its hints ("? for shortcuts",
+// "esc again to edit previous message"), its notes ("⚠ 1 warning").
+var codexFooter = regexp.MustCompile(`^\S.* · (?:~|/)\S*|^\? for shortcuts\b|\bto (?:edit|view|quit|interrupt)\b|^⚠ \d+ warnings?\b`)

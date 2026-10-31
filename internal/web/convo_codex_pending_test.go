@@ -43,15 +43,17 @@ func TestCodexFds(t *testing.T) {
 		os.Symlink(target, filepath.Join(proc, "fd", strconv.Itoa(n)))
 		n++
 	}
+	var young string
 	fds := func() (log, pend string) {
-		cmd := exec.Command("sh", "-c", codexFdsSh+"\ncodex_fds \"$1\"; printf '%s\\n%s' \"$cxlog\" \"$cxpend\"", "sh", proc)
+		cmd := exec.Command("sh", "-c", codexFdsSh+"\ncodex_fds \"$1\"; printf '%s\\n%s\\n%s' \"$cxlog\" \"$cxpend\" \"$cxnew\"", "sh", proc)
 		cmd.Env = append(os.Environ(), "HOME="+home)
 		out, err := cmd.Output()
 		if err != nil {
 			t.Fatal(err)
 		}
-		l, p, _ := strings.Cut(string(out), "\n")
-		return filepath.Base(l), p
+		parts := strings.SplitN(string(out), "\n", 3)
+		young = parts[2]
+		return filepath.Base(parts[0]), parts[1]
 	}
 	open(lockOf(a))
 	if log, pend := fds(); log != "." || pend != a {
@@ -62,11 +64,14 @@ func TestCodexFds(t *testing.T) {
 		t.Errorf("A's log: log %q, pending %q", log, pend)
 	}
 	const y = "01a18ff7-5555-7a80-bb03-7c6c92a8fd35"
-	open(lockAged(y, 0)) // (review475: a subagent's lock, its log not open yet, a moment old)
-	if _, pend := fds(); pend != "" {
-		t.Errorf("a lock just taken: not pending, %q", pend)
+	open(lockAged(y, 2*time.Second)) // (review475: a subagent's lock, its log not open yet, two seconds old)
+	if _, pend := fds(); pend != "" || young != "1" {
+		t.Errorf("a lock just taken: not pending (%q), but new (%q)", pend, young)
 	}
 	open(logOf(y, "subagent"))
+	if fds(); young != "" {
+		t.Errorf("its log open: not new, %q", young)
+	}
 	open(lockOf(s))
 	open(logOf(s, "subagent"))
 	if log, pend := fds(); !strings.Contains(log, a) || pend != "" {
@@ -97,9 +102,11 @@ func TestCodexFds(t *testing.T) {
 func TestCodexIdleInput(t *testing.T) {
 	foot := "\n\n  gpt-mock default · ~/p\n  ? for shortcuts\n"
 	for screen, want := range map[string]error{
-		"• done\n\n› Ask Codex to do anything" + foot:                            nil,
-		"• done\n\n› half a draft" + foot:                                        errDraft,
-		"• done\n\n› \n  keep this draft" + foot:                                 errDraft,
+		"• done\n\n› Ask Codex to do anything" + foot: nil,
+		"• done\n\n› half a draft" + foot:             errDraft,
+		"• done\n\n› \n  keep this draft" + foot:      errDraft,
+		"• done\n\n› \n  \n  keep this draft" + foot:  errDraft,
+		"• done\n\n› Ask Codex to do anything\n\n  gpt-6-sol high · /srv/x\n  esc again to edit previous message\n": nil,
 		"• done\n\n› first\n  second" + foot:                                     errDraft,
 		"• done\n\n› Implement {feature}" + foot:                                 errDraft,
 		"• Working (3s • esc to interrupt)\n\n› Ask Codex to do anything" + foot: errBusyAgent,
