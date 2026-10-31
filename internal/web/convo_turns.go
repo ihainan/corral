@@ -35,6 +35,7 @@ type convoTurn struct {
 // asking that reads it (taken with a deadline, its asker's end honoured).
 type turnIndex struct {
 	sem      chan struct{}
+	refs     int // (under turnIndexes.mu) askings holding it, from get to put
 	log      string
 	agent    string
 	gen      int64  // the conversation's reading it is of
@@ -148,17 +149,6 @@ func (idx *turnIndex) scan(r turnReader, deadline time.Time) (more bool, size in
 			return false, size, err
 		}
 	}
-	defer func() {
-		// (What is just before where it got to: to tell, next time, it is the same log.)
-		if err == nil && idx.scanned > 0 {
-			n := min(idx.scanned, turnMark)
-			if t, terr := r.read(idx.scanned-n, int(n)); terr == nil {
-				idx.tail = t
-			} else {
-				idx.tail = nil
-			}
-		}
-	}()
 	read := int64(0)
 	for idx.scanned < size {
 		if read >= turnBudget || time.Now().After(deadline) {
@@ -175,7 +165,7 @@ func (idx *turnIndex) scan(r turnReader, deadline time.Time) (more bool, size in
 			// (Within a line too long to be the person's: on to its end.)
 			i := bytes.IndexByte(data, '\n')
 			if i < 0 {
-				idx.scanned += int64(len(data))
+				idx.advance(data, len(data))
 				continue
 			}
 			idx.skipping = false
@@ -183,13 +173,19 @@ func (idx *turnIndex) scan(r turnReader, deadline time.Time) (more bool, size in
 		}
 		end := bytes.LastIndexByte(data, '\n')
 		if end < start {
+			if start > 0 {
+				// (The long one ended; what follows, a line of its own, read
+				// from its start next — not passed over with it: review518.)
+				idx.advance(data, start)
+				continue
+			}
 			if int64(len(data)) < turnChunk {
-				idx.scanned += int64(start)
 				return false, size, nil // (a line not ended yet: read once it is)
 			}
-			// (A line longer than a part: not one of the person's; passed over to its end.)
+			// (Read from a line's start, a whole part without its end: a line
+			// too long to be the person's, passed over to its end.)
 			idx.skipping = true
-			idx.scanned += int64(len(data))
+			idx.advance(data, len(data))
 			continue
 		}
 		at := idx.scanned + int64(start)
@@ -201,9 +197,23 @@ func (idx *turnIndex) scan(r turnReader, deadline time.Time) (more bool, size in
 			}
 			at += int64(len(line))
 		}
-		idx.scanned += int64(end + 1)
+		idx.advance(data, end+1)
 	}
 	return false, size, nil
+}
+
+// advance: read to n bytes into data (read at scanned); what is just before
+// where it got to kept from those very bytes — read as they were taken in,
+// not read again after (review518) — to tell, next time, it is the same log.
+// (An equal rewrite of the middle of a log, its head and that kept, is not
+// told: a log only grows.)
+func (idx *turnIndex) advance(data []byte, n int) {
+	keep := append(idx.tail, data[:n]...)
+	if len(keep) > turnMark {
+		keep = keep[len(keep)-turnMark:]
+	}
+	idx.tail = append([]byte(nil), keep...)
+	idx.scanned += int64(n)
 }
 
 // add keeps the latest turnsKept, the first let go of in batches (not each
@@ -241,6 +251,10 @@ type turnIndexes struct {
 	m  map[string]*turnIndex
 }
 
+// get: the conversation's index, held (refs) till put; nil where none can be
+// had — all those kept held, none to let go of (review518: one let go of
+// between its get and its take was made anew beside it, two reading the
+// same log; and the bound was passed).
 func (t *turnIndexes) get(key string) *turnIndex {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -250,23 +264,27 @@ func (t *turnIndexes) get(key string) *turnIndex {
 	idx := t.m[key]
 	if idx == nil {
 		if len(t.m) >= turnIndexesMax {
-			// (One let go of — an index is only a cache — not one being read:
-			// asked for again, another would read the same log beside it.)
-			for k, x := range t.m {
-				select {
-				case x.sem <- struct{}{}:
-					<-x.sem
+			for k, x := range t.m { // (one let go of, none held: an index is only a cache)
+				if x.refs == 0 {
 					delete(t.m, k)
-				default:
-					continue
+					break
 				}
-				break
+			}
+			if len(t.m) >= turnIndexesMax {
+				return nil
 			}
 		}
 		idx = &turnIndex{sem: make(chan struct{}, 1)}
 		t.m[key] = idx
 	}
+	idx.refs++
 	return idx
+}
+
+func (t *turnIndexes) put(idx *turnIndex) {
+	t.mu.Lock()
+	idx.refs--
+	t.mu.Unlock()
 }
 
 // GET /api/sessions/{id}/conversation/turns?pane= — the person's turns in
@@ -293,7 +311,15 @@ func (s *Server) apiConversationTurns(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "not_located", "the conversation is not read yet")
 		return
 	}
-	main.mu.Lock()
+	// (Its reading's lock waited for by the deadline only: a read of it under
+	// way may hold it a while — review518.)
+	for !main.mu.TryLock() {
+		if time.Now().After(deadline) || r.Context().Err() != nil {
+			writeError(w, http.StatusServiceUnavailable, "turns_busy", "the conversation is being read: ask again")
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 	log, agent, reason, gen, sub, from := main.log, main.agent, main.reason, main.gen, main.sub, main.from
 	main.mu.Unlock()
 	if log == "" || reason != "" || sub || (agent != "claude" && agent != "codex") {
@@ -301,6 +327,11 @@ func (s *Server) apiConversationTurns(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	idx := s.turns.get(key)
+	if idx == nil {
+		writeError(w, http.StatusServiceUnavailable, "turns_busy", "too many conversations' turns are being read: ask again")
+		return
+	}
+	defer s.turns.put(idx)
 	if !idx.take(r.Context(), deadline) {
 		writeError(w, http.StatusServiceUnavailable, "turns_busy", "the turns are still being read: ask again")
 		return
@@ -308,10 +339,14 @@ func (s *Server) apiConversationTurns(w http.ResponseWriter, r *http.Request) {
 	if idx.log != log || idx.agent != agent || idx.gen != gen {
 		idx.reset(log, agent, gen)
 	}
-	// (Each part read on its own short while, as a conversation's read is.)
+	// (Each part read on its own short while, as a conversation's read is —
+	// its channel had by the deadline: review518. A read stuck past that
+	// while is given up as a conversation's is, its channel with it.)
+	ctx, cancel := context.WithDeadline(r.Context(), deadline)
+	defer cancel()
 	reader := turnReader{
 		size: func() (size int64, err error) {
-			err = s.withSFTP(r.Context(), sess, convoReadLimit, func(c *sftplite.Client) error {
+			err = s.withSFTP(ctx, sess, convoReadLimit, func(c *sftplite.Client) error {
 				fi, err := c.Lstat(log)
 				if err == nil {
 					size = fi.Size()
@@ -321,7 +356,7 @@ func (s *Server) apiConversationTurns(w http.ResponseWriter, r *http.Request) {
 			return size, err
 		},
 		read: func(off int64, n int) (data []byte, err error) {
-			err = s.withSFTP(r.Context(), sess, convoReadLimit, func(c *sftplite.Client) error {
+			err = s.withSFTP(ctx, sess, convoReadLimit, func(c *sftplite.Client) error {
 				data, err = c.ReadRange(log, off, n)
 				return err
 			})

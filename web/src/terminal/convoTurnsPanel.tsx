@@ -3,6 +3,7 @@ import { X } from 'lucide-react'
 import { api } from '../api'
 import { t } from '../i18n'
 import type { Item } from './convoItems'
+import { itemOf, type Turn } from './convoTurns'
 
 // The person's turns in the whole log (plans/6-turn-index.md): each of their
 // messages, newest first, filtered by what it says; one tapped is gone to —
@@ -10,29 +11,10 @@ import type { Item } from './convoItems'
 // time, till it is (or there is no more, or the person does something
 // else meanwhile).
 
-type Turn = { at: number; ts?: string; preview: string }
 type Answer = { gen: number; turns: Turn[]; more: boolean; scanned: number; size: number; cut: boolean; from: number }
 
 // At most this many batches read in on the way to one turn.
 const MAX_BATCHES = 200
-
-// The item of a turn among those read in: the person's message of that
-// time, beginning as it does — of several alike (the same time, the same
-// beginning), the one in the same place among them as the turn among its
-// own (review517: the first one of them was gone to).
-function itemOf(list: Item[], turns: Turn[], turn: Turn): string | null {
-  const flat = (s: string) => s.replace(/\s+/g, ' ').trim()
-  const head = flat(turn.preview).replace(/…$/, '')
-  if (!turn.ts) return null
-  const alike = (x: Turn) => x.ts === turn.ts && x.preview === turn.preview
-  const nth = turns.filter(alike).indexOf(turn)
-  const keys = list.flatMap((it) => {
-    if (it.kind !== 'user' || it.e.ts !== turn.ts) return []
-    const text = flat(it.e.parts.filter((p) => p.kind === 'text').map((p) => p.text ?? '').join(' '))
-    return text.startsWith(head) || (turn.preview.endsWith('…') && text.startsWith(head)) ? ['e' + it.e.seq] : []
-  })
-  return keys.length === turns.filter(alike).length && nth >= 0 ? keys[nth] : keys.length === 1 && nth === 0 ? keys[0] : null
-}
 
 export function ConvoTurnsPanel({
   of,
@@ -133,12 +115,17 @@ export function ConvoTurnsPanel({
   // (The person doing anything else meanwhile — scrolling (wheel, touch, a
   // drag of the scrollbar), a key, the page put behind: the way back called
   // off — review517.)
+  const panel = useRef<HTMLDivElement>(null)
   useEffect(() => {
     if (!want) return
-    const off = () => setWant(null)
+    // (Not what is done in the panel: another of them tapped goes to that one instead — review518.)
+    const off = (e: Event) => {
+      if (e.target instanceof Node && panel.current?.contains(e.target)) return
+      setWant(null)
+    }
     const kinds = ['wheel', 'touchmove', 'pointerdown', 'keydown'] as const
     kinds.forEach((k) => window.addEventListener(k, off, { passive: true, capture: true }))
-    const hid = () => document.visibilityState !== 'visible' && off()
+    const hid = () => document.visibilityState !== 'visible' && setWant(null)
     document.addEventListener('visibilitychange', hid)
     return () => {
       kinds.forEach((k) => window.removeEventListener(k, off, { capture: true }))
@@ -166,7 +153,7 @@ export function ConvoTurnsPanel({
     return today ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : d.toLocaleDateString([], { month: 'numeric', day: 'numeric' }) + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
   }
   return (
-    <div className="convo-search convo-turns" role="navigation" aria-label={t('turns.title')}>
+    <div className="convo-search convo-turns" role="navigation" aria-label={t('turns.title')} ref={panel}>
       <div className="convo-search-bar">
         <input
           className="convo-search-input"
@@ -196,7 +183,7 @@ export function ConvoTurnsPanel({
         {note && <p className="list-search-none" role="status">{note}</p>}
         {turns !== null && !shown.length && <p className="list-search-none">{t(q.trim() ? 'convo.searchNone' : 'turns.none')}</p>}
         {shown.map((x) => (
-          <button key={x.at} type="button" className="convo-search-hit convo-turn" onClick={() => go(x)} disabled={!!want}>
+          <button key={x.at} type="button" className="convo-search-hit convo-turn" onClick={() => go(x)} disabled={more}>
             <span className="convo-turn-when">{when(x.ts)}</span>
             <span className="convo-turn-text">{x.preview}</span>
           </button>

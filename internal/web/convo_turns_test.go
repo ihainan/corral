@@ -1,6 +1,8 @@
 package web
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -133,5 +135,90 @@ func TestTurnsKept(t *testing.T) {
 func TestTurnPreview(t *testing.T) {
 	if p := preview(strings.Repeat("字", 200)); len([]rune(p)) != turnPreview+1 || !strings.HasSuffix(p, "…") {
 		t.Errorf("cut: %q", p)
+	}
+}
+
+// memLog: a log in memory, read as the gateway reads one (failing at will).
+type memLog struct {
+	data []byte
+	fail func(off int64) bool
+}
+
+func (m *memLog) reader() turnReader {
+	return turnReader{
+		size: func() (int64, error) { return int64(len(m.data)), nil },
+		read: func(off int64, n int) ([]byte, error) {
+			if m.fail != nil && m.fail(off) {
+				return nil, errors.New("read failed")
+			}
+			end := min(int64(len(m.data)), off+int64(n))
+			return append([]byte(nil), m.data[off:end]...), nil
+		},
+	}
+}
+
+// review518: a long line passed over, its end at a part's end or a short
+// line after it across a part's end: the next one still theirs, where it begins.
+func TestTurnLongLineEnds(t *testing.T) {
+	msg := func(text string) string {
+		return `{"type":"user","uuid":"u","timestamp":"2026-10-31T10:00:00.000Z","message":{"role":"user","content":"` + text + `"}}` + "\n"
+	}
+	for _, pad := range []int{turnChunk - 1, turnChunk + 100, 2*turnChunk - 1 - 30} {
+		long := strings.Repeat("x", pad) + "\n" // (a line of pad bytes, its newline after)
+		m := &memLog{data: []byte(strings.Repeat("y", turnChunk+5) + long + msg("after"))}
+		idx := &turnIndex{}
+		idx.reset("l", "claude", 1)
+		for i := 0; i < 10; i++ {
+			if more, _, err := idx.scan(m.reader(), time.Now().Add(time.Second)); err != nil || !more {
+				break
+			}
+		}
+		want := int64(turnChunk + 5 + len(long))
+		if len(idx.turns) != 1 || idx.turns[0].Preview != "after" || idx.turns[0].At != want {
+			t.Errorf("pad %d: %+v (want at %d)", pad, idx.turns, want)
+		}
+	}
+}
+
+// review518: a read failing midway, then the log only grown: read on, not
+// gone through anew (what was kept of where it got to is of the bytes read).
+func TestTurnReadFailsMidway(t *testing.T) {
+	msg := func(text string) string {
+		return `{"type":"user","uuid":"u","timestamp":"2026-10-31T10:00:00.000Z","message":{"role":"user","content":"` + text + `"}}` + "\n"
+	}
+	first := strings.Repeat(msg("one"), 1)
+	m := &memLog{data: []byte(first + strings.Repeat(" ", turnChunk) + "\n" + msg("two"))}
+	failAt := int64(len(first))
+	m.fail = func(off int64) bool { return off >= failAt && off > 0 }
+	idx := &turnIndex{}
+	idx.reset("l", "claude", 1)
+	if _, _, err := idx.scan(m.reader(), time.Now().Add(time.Second)); err == nil {
+		t.Fatal("no failure")
+	}
+	scanned := idx.scanned
+	m.fail = nil
+	m.data = append(m.data, []byte(msg("three"))...)
+	idx.scan(m.reader(), time.Now().Add(time.Second))
+	if idx.scanned < scanned || len(idx.turns) != 3 {
+		t.Errorf("read on: scanned %d (was %d), turns %+v", idx.scanned, scanned, idx.turns)
+	}
+}
+
+// review518: indexes held are not let go of; all held, none more made.
+func TestTurnIndexesHeld(t *testing.T) {
+	var ti turnIndexes
+	held := []*turnIndex{}
+	for i := 0; i < turnIndexesMax; i++ {
+		held = append(held, ti.get(fmt.Sprint(i)))
+	}
+	if ti.get("one more") != nil {
+		t.Fatal("all held: another made")
+	}
+	ti.put(held[0])
+	if x := ti.get("one more"); x == nil || len(ti.m) != turnIndexesMax {
+		t.Errorf("one let go of: %v, %d kept", x, len(ti.m))
+	}
+	if _, ok := ti.m["1"]; !ok {
+		t.Error("a held one let go of")
 	}
 }
