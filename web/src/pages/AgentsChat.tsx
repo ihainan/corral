@@ -650,7 +650,14 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     if (!tmuxKeyNow || convo.status === 'loading') return
     if (tmuxCmdsNow) tmuxCmds.set(tmuxKeyNow, { cmds: tmuxCmdsNow, at: Date.now() })
     else tmuxCmds.delete(tmuxKeyNow)
-  }, [tmuxKeyNow, tmuxCmdsNow, convo.status, convo.okAt])
+    // (Read on and on the same, it is as of now as this view goes: unchanged
+    // reads keep okAt, so the time would stay that of the first. review483)
+    const key = tmuxKeyNow
+    return () => {
+      const v = tmuxCmds.get(key)
+      if (v) v.at = Date.now()
+    }
+  }, [tmuxKeyNow, tmuxCmdsNow, convo.status, convo.okAt, active])
   const doneHere = herdr && active && row && !row.lost && row.status === 'done' && row.a.status === 'done' && !row.bg && row.a.bg !== 'checking' ? { pane: row.a.pane_id, round: row.a.round ?? 0, session: row.a.session ?? '' } : undefined
   const doneKey = doneHere && JSON.stringify(doneHere)
   useEffect(() => {
