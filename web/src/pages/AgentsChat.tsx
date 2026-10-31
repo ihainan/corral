@@ -28,10 +28,6 @@ import { useComposerFit } from '../terminal/autosize'
 
 // The session a Codex not yet begun on its log is sent to (the gateway's convoNoSession).
 const NO_SESSION = '00000000-0000-0000-0000-000000000000'
-// The first message this page sent a Codex with no log yet (by its bind):
-// sent again with the next, it tells the gateway which log that message
-// began, before the page has read it.
-const codexFirsts = new Map<string, string>()
 
 // The agents page: every agent of the sessions the gateway has open, and the
 // conversation of the one picked, with a composer that sends to it. It
@@ -1353,14 +1349,8 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       if (draftKeyNow.current === key) setDraftShown((d) => (d === undefined || !d.trim() ? was : d))
     }
 
-    const noLog = b.agent === 'codex' && b.session === NO_SESSION
-    const first = noLog ? codexFirsts.get(bindKey) : undefined
-    api('POST', `/api/sessions/${sid}/conversation/send`, { pane: b.pane, pid: b.pid, start: b.start, session: b.session, text, ...(first ? { first } : {}) }, { timeoutMs: SEND_MS })
+    api('POST', `/api/sessions/${sid}/conversation/send`, { pane: b.pane, pid: b.pid, start: b.start, session: b.session, text }, { timeoutMs: SEND_MS })
       .then(() => {
-        if (noLog && !first) {
-          codexFirsts.set(bindKey, text)
-          if (codexFirsts.size > 20) codexFirsts.delete(codexFirsts.keys().next().value!)
-        }
         if (authGen() !== account) return drop()
         remember(was)
         mark({ state: 'waiting' })
@@ -1390,6 +1380,13 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
         } else {
           putBack() // (it never went: what was typed comes back, to be sent again)
           drop()
+          // (A Codex read with no log, which has begun one since — its first
+          // message: not typed to the one it began, which the page has not
+          // read yet; read now, to be sent again there.)
+          if (e instanceof ApiError && e.code === 'agent_changed' && b.agent === 'codex' && b.session === NO_SESSION) {
+            convo.refresh()
+            return toast(t('agents.codexBegun'), true)
+          }
           toast(refusal(e), true)
         }
       })

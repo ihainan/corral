@@ -1,14 +1,11 @@
 package web
 
 import (
-	"bytes"
 	"context"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/ihainan/corral/internal/convo"
-	"github.com/ihainan/corral/internal/sftplite"
 	"github.com/ihainan/corral/internal/sshx"
 	"github.com/ihainan/corral/internal/term"
 )
@@ -79,41 +76,3 @@ func (st *convoState) codexTitleKept(who string, pressed, now time.Time) (waits,
 	}
 	return st.cxTitleWait, true
 }
-
-// codexBegunBy: the Codex log at log (one a process of the user's has
-// open, as locating found it) has first, and no other, as the first
-// message of the person's in its head (its first codexHeadMax bytes).
-func (s *Server) codexBegunBy(ctx context.Context, sess *term.Session, log, first string) bool {
-	var head []byte
-	err := s.withSFTP(ctx, sess, 5*time.Second, func(c *sftplite.Client) error {
-		var err error
-		head, err = c.ReadRange(log, 0, codexHeadMax)
-		return err
-	})
-	return err == nil && codexFirstIs(head, first)
-}
-
-// codexFirstIs: head (a Codex log's start) has first as the first message
-// of the person's in it.
-func codexFirstIs(head []byte, first string) bool {
-	i := bytes.LastIndexByte(head, '\n')
-	if i < 0 {
-		return false
-	}
-	head = head[:i+1] // (whole lines only)
-	cx := convo.NewCodex()
-	cx.Feed(head)
-	for _, e := range cx.Since(0) {
-		if e.Role != convo.RoleUser {
-			continue
-		}
-		var text strings.Builder
-		for _, p := range e.Parts {
-			text.WriteString(p.Text)
-		}
-		return strings.TrimSpace(text.String()) == strings.TrimSpace(first)
-	}
-	return false
-}
-
-const codexHeadMax = 256 << 10

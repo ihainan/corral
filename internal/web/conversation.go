@@ -1623,7 +1623,7 @@ const convoScanShared = 5 * time.Second
 // and when it began: one made within convoScanShared, or the one under
 // way, else a new one (not bound to the asking request: others may be
 // waiting on it).
-func (c *convoScans) run(ctx context.Context, sess *term.Session, cmd string) ([]byte, time.Time, time.Time, error) {
+func (c *convoScans) run(ctx context.Context, sess *term.Session, cmd string, after time.Time) ([]byte, time.Time, time.Time, error) {
 	key := sess.ID + "\x00" + cmd
 	c.mu.Lock()
 	if c.m == nil {
@@ -1646,6 +1646,9 @@ func (c *convoScans) run(ctx context.Context, sess *term.Session, cmd string) ([
 				ok = false // (failed: made again)
 			}
 		default:
+		}
+		if !e.began.After(after) {
+			ok = false // (begun before what it must tell of: made again)
 		}
 	}
 	if !ok {
@@ -1701,7 +1704,14 @@ func (s *Server) relocateLater(sess *term.Session, key string, st *convoState, p
 func (s *Server) locateConvo(ctx context.Context, sess *term.Session, st *convoState, pane string) error {
 	// (looked: when the scan read began, shared or not: what it found is of
 	// then or after, and a look begun later says more.)
-	out, at, looked, err := s.convoScans.run(ctx, sess, convoLocateCommand(sess.Persistence, sess.TmuxSession, ""))
+	// (A Codex with no log yet, looked for again each time: a scan begun
+	// after the last look, not one shared from before — its first message
+	// begins its log, and what is sent next must be of that session.)
+	var after time.Time
+	if st.bind != nil && st.bind.Session == convoNoSession && st.bind.Agent == "codex" {
+		after = st.located
+	}
+	out, at, looked, err := s.convoScans.run(ctx, sess, convoLocateCommand(sess.Persistence, sess.TmuxSession, ""), after)
 	// (The script ends with exit 0: an error is a scan cut short, by its size
 	// or a failure, which may leave out the agent started last. What was
 	// found before stays, rather than a part of it.)
@@ -2736,13 +2746,10 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		PID     int64  `json:"pid"`
 		Start   int64  `json:"start"`
 		Session string `json:"session"`
-		// (send, to a Codex with no log when the page last read it: the first
-		// message the page sent it, by which the log it began is known.)
-		First  string `json:"first"`
-		Text   string `json:"text"`   // (send)
-		Model  string `json:"model"`  // (model: as the picker names it)
-		Effort string `json:"effort"` // (effort: a level of effortLevels)
-		Mode   string `json:"mode"`   // (mode: the one to go to, of convoModes; none: the next)
+		Text    string `json:"text"`   // (send)
+		Model   string `json:"model"`  // (model: as the picker names it)
+		Effort  string `json:"effort"` // (effort: a level of effortLevels)
+		Mode    string `json:"mode"`   // (mode: the one to go to, of convoModes; none: the next)
 		// (reply: the screen answered, as screen gave it, and the keys
 		// pressed (of replyKeys, up to 4) or the text typed and Enter.)
 		Digest string   `json:"digest"`
@@ -2917,16 +2924,6 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		if front.sid, why = s.ocSessionOf(ctx, sess, front, b.Pane, l); why != "" {
 			front.sid = ""
 		}
-	}
-	// (A Codex the page last read with no log, the page's first message to
-	// it sent since — the conversation's scan, shared a few seconds, may not
-	// have seen the log that began: the same process, with a log open whose
-	// first message of the person's is that one, is at the session that
-	// message began. Not one resumed or begun anew in its terminal meanwhile:
-	// its first message is another.)
-	if front != nil && front.agent == "codex" && what == "send" && b.Session == convoNoSession && b.First != "" && front.pid == b.PID && front.start == b.Start &&
-		front.log != "" && convoUUID.MatchString(front.sid) && front.sid != convoNoSession && s.codexBegunBy(ctx, sess, front.log, b.First) {
-		b.Session = front.sid
 	}
 	if front == nil || front.pid != b.PID || front.start != b.Start || front.sid != b.Session {
 		reason = "agent_changed"
