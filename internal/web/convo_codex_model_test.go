@@ -60,6 +60,10 @@ type fakeCodexPicker struct {
 	drawn   int // (screens drawn: a digest's)
 	cut     int // (a key typed in its terminal before the press of that number: the screen changed)
 	presses int
+	lag     bool   // (what a press brings drawn a read late)
+	shown   string // (the screen the last press left, while lagging)
+	late    bool
+	wrap    bool // (its "Model changed…" wrapped, as in a narrow pane)
 }
 
 var fakeModels = []string{"GPT-6.1-Sol", "GPT-6-Astra", "GPT-6-Sol", "GPT-6-Luna"}
@@ -69,7 +73,11 @@ func (f *fakeCodexPicker) screen() string {
 	var b strings.Builder
 	b.WriteString("  >_ OpenAI Codex (v0.164.0)\n\n")
 	for i := 0; i < f.set; i++ {
-		b.WriteString("• Model changed to " + f.setTo + " for this session only\n")
+		if f.wrap {
+			b.WriteString("• Model changed to " + f.setTo + "\n  for this session only\n")
+		} else {
+			b.WriteString("• Model changed to " + f.setTo + " for this session only\n")
+		}
 	}
 	switch f.step {
 	case 0:
@@ -99,12 +107,22 @@ func (f *fakeCodexPicker) screen() string {
 }
 
 func (f *fakeCodexPicker) look() (string, string, error) {
+	if f.late {
+		f.late = false
+		return f.shown, "stale", nil // (the screen before: its digest no longer the screen's)
+	}
 	return f.screen(), fmt.Sprint(f.drawn), nil
 }
 
 // press: as the host does, only on the screen read last (its digest).
 func (f *fakeCodexPicker) press(keys []string, text, digest string) error {
+	if keys == nil && text == "" {
+		f.t.Fatalf("an empty paste, and Enter (review498)")
+	}
 	f.presses++
+	if f.lag {
+		f.shown, f.late = f.screen(), true
+	}
 	if f.presses == f.cut {
 		f.drawn++ // (the person pressed a key in the terminal: another screen)
 	}
@@ -149,8 +167,10 @@ func (f *fakeCodexPicker) run(keys []string, text string, read int) (string, err
 }
 
 func TestCodexModelFlow(t *testing.T) {
+	codexSettleGap = 0
 	flow := func(f *fakeCodexPicker, model, effort string) ([]modelOpt, error) {
-		return codexModelFlow(f.look, f.press, f.run, model, effort)
+		io := codexIO{f.look, f.press}
+		return codexModelFlow(io, io, model, effort)
 	}
 	f := &fakeCodexPicker{t: t}
 	opts, err := flow(f, "", "")
@@ -187,6 +207,22 @@ func TestCodexModelFlow(t *testing.T) {
 	f = &fakeCodexPicker{t: t, setTo: "gpt-6-luna high"}
 	if _, err = flow(f, "GPT-6-Sol", "High"); err == nil {
 		t.Errorf("another model said taken: ok")
+	}
+	// (review498: Codex draws what a press brought a read late: read again.)
+	f = &fakeCodexPicker{t: t, lag: true}
+	if _, err = flow(f, "GPT-6-Sol", "High"); err != nil || f.set != 1 {
+		t.Errorf("drawn late: %v, set %d (%v)", err, f.set, f.pressed)
+	}
+	// (review498: its "Model changed…" wrapped: done all the same.)
+	f = &fakeCodexPicker{t: t, wrap: true}
+	if _, err = flow(f, "GPT-6-Sol", "High"); err != nil {
+		t.Errorf("wrapped: %v", err)
+	}
+	// (review498: left after a failure on the effort step — Escape only,
+	// never Enter (the fake fails on Enter there, and on an empty paste).)
+	f = &fakeCodexPicker{t: t}
+	if _, err = flow(f, "GPT-6-Sol", "Ultra"); err != errNoModel || f.step != 0 {
+		t.Errorf("no such effort, left: %v step %d (%v)", err, f.step, f.pressed)
 	}
 	// (A picker left open that does not read as known (its footer there):
 	// closed first, then on as at rest.)

@@ -462,13 +462,35 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 		shown, digest, _ := screenOf(res.Out)
 		return shown, digest, nil
 	}
+	// (Leaving it after a failure, as leave: in a while of its own.)
+	undo := codexIO{
+		look: func() (string, string, error) {
+			running.Wait()
+			lctx, lcancel := context.WithTimeout(context.WithoutCancel(ctx), 8*time.Second)
+			defer lcancel()
+			running.Add(1)
+			res, err := sshx.Exec(lctx, sess.Client(), convoScreenCommand(sess.Persistence, pane, socket), 512<<10, sshx.ExecOptions{Release: running.Done})
+			if err != nil {
+				return "", "", err
+			}
+			shown, digest, _ := screenOf(res.Out)
+			return shown, digest, nil
+		},
+		press: func(keys []string, text, digest string) error {
+			running.Wait()
+			lctx, lcancel := context.WithTimeout(context.WithoutCancel(ctx), 8*time.Second)
+			defer lcancel()
+			_, err := run(lctx, keys, text, pickerLines, digest)
+			return err
+		},
+	}
 	press := func(keys []string, text, digest string) error {
 		_, err := run(ctx, keys, text, pickerLines, digest) // (its read: a moment after, as Codex draws what the keys did)
 		return err
 	}
 	var opts []modelOpt
 	if codex {
-		opts, err = codexModelFlow(look, press, leave, target, effort)
+		opts, err = codexModelFlow(codexIO{look, press}, undo, target, effort)
 	} else {
 		opts, err = modelFlow(step, leave, target)
 	}
