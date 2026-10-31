@@ -59,6 +59,11 @@ func TestCodexSubagentOf(t *testing.T) {
 		{"its payload before its type", []byte(`{"payload":{"parent_thread_id":"` + main + `","thread_source":"subagent"},"type":"session_meta"}` + "\n"), true},
 		{"its long instructions first", []byte(`{"type":"session_meta","payload":{"base_instructions":"` + strings.Repeat("x", 20000) + `","thread_source":"subagent","parent_thread_id":"` + main + `"}}` + "\n"), true},
 		{"its parent given twice, another's last", []byte(`{"type":"session_meta","payload":{"thread_source":"subagent","parent_thread_id":"` + main + `","parent_thread_id":"01a18ff7-0000-7890-9ecd-1aee1502e132"}}` + "\n"), false},
+		// (review500: given again later as null or {}: what it says is that.)
+		{"its payload again, empty", []byte(`{"type":"session_meta","payload":{"thread_source":"subagent","parent_thread_id":"` + main + `"},"payload":{}}` + "\n"), false},
+		{"its payload again, null", []byte(`{"type":"session_meta","payload":{"thread_source":"subagent","parent_thread_id":"` + main + `"},"payload":null}` + "\n"), false},
+		{"its parent again, null", []byte(`{"type":"session_meta","payload":{"thread_source":"subagent","parent_thread_id":"` + main + `","parent_thread_id":null}}` + "\n"), false},
+		{"its type again, null", []byte(`{"type":"session_meta","payload":{"thread_source":"subagent","parent_thread_id":"` + main + `"},"type":null}` + "\n"), false},
 		{"not JSON after what it says", []byte(`{"type":"session_meta","payload":{"thread_source":"subagent","parent_thread_id":"` + main + `"},` + "\n"), false},
 	} {
 		if got := codexSubagentOf(c.head, main); got != c.want {

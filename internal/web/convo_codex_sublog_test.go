@@ -56,6 +56,26 @@ func TestCodexSubagentLog(t *testing.T) {
 	if got, err := codexSubagentLog(c, root, main, sub, now); err != nil || got != want {
 		t.Fatalf("two days on: %q %v", got, err)
 	}
+	// (Found before, read again: still plain; a link put in its place, or in
+	// a folder's, since: refused — review500.)
+	if err := codexSubagentStill(c, root, want); err != nil {
+		t.Errorf("still plain: %v", err)
+	}
+	os.Rename(want, want+".was")
+	os.Symlink(want+".was", want)
+	if err := codexSubagentStill(c, root, want); !errors.Is(err, errSubagentFile) {
+		t.Errorf("a link in its place: %v", err)
+	}
+	os.Remove(want)
+	os.Rename(want+".was", want)
+	moved := filepath.Join(sessions, "2026", "10", "31.was")
+	os.Rename(filepath.Join(sessions, "2026", "10", "31"), moved)
+	os.Symlink(moved, filepath.Join(sessions, "2026", "10", "31"))
+	if err := codexSubagentStill(c, root, want); !errors.Is(err, errSubagentFile) {
+		t.Errorf("its day's folder a link: %v", err)
+	}
+	os.Remove(filepath.Join(sessions, "2026", "10", "31"))
+	os.Rename(moved, filepath.Join(sessions, "2026", "10", "31"))
 	// (Not one of another session's.)
 	if _, err := codexSubagentLog(c, root, "01a18ff7-0000-7890-9ecd-1aee1502e132", sub, now); !errors.Is(err, errSubagentFile) {
 		t.Errorf("another session's: %v", err)

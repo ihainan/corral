@@ -3409,6 +3409,13 @@ func (s *Server) apiConversationSubagent(w http.ResponseWriter, r *http.Request)
 			st.mu.Unlock()
 		}
 		var err error
+		if file != "" {
+			// (Found before: still a plain file, in plain folders — not one
+			// put in its place as a link since, review500.)
+			err = s.withSFTP(r.Context(), sess, convoReadLimit, func(c *sftplite.Client) error {
+				return codexSubagentStill(c, root, file)
+			})
+		}
 		if file == "" {
 			err = s.withSFTP(r.Context(), sess, convoReadLimit, func(c *sftplite.Client) error {
 				var err error
@@ -3590,6 +3597,33 @@ func codexSubagentLog(c *sftplite.Client, root, sid, agent string, now time.Time
 	return "", errSubagentFile
 }
 
+// codexSubagentStill: a subagent's log found before is still a plain file,
+// and the day's, month's and year's folders it is in (under root's
+// sessions folder) still plain folders: none of them a link put there since.
+func codexSubagentStill(c *sftplite.Client, root, file string) error {
+	parts := strings.Split(path.Dir(root), "/")
+	if len(parts) < 4 {
+		return errSubagentFile
+	}
+	sessions := strings.Join(parts[:len(parts)-3], "/")
+	rest, ok := strings.CutPrefix(file, sessions+"/")
+	if !ok || strings.Count(rest, "/") != 3 {
+		return errSubagentFile
+	}
+	at := sessions
+	for i, part := range strings.Split(rest, "/") {
+		at += "/" + part
+		fi, err := c.Lstat(at)
+		if err != nil {
+			return err
+		}
+		if fi.Mode()&fs.ModeSymlink != 0 || (i < 3 && !fi.IsDir()) || (i == 3 && !fi.Mode().IsRegular()) {
+			return errSubagentFile
+		}
+	}
+	return nil
+}
+
 // maxSubagentDays: how many days' folders a subagent's log is looked for
 // in; maxSubagentHead: how much of its head is read for its first line (its
 // instructions in it: tens of kilobytes).
@@ -3599,21 +3633,29 @@ const (
 )
 
 // codexSubagentOf: a Codex log's first line, whole in head, says it is a
-// subagent of the session sid (read as JSON is: keys in any order, the
-// last of one given twice; a line cut off, or not JSON, says nothing).
+// subagent of the session sid (read as JSON is: keys in any order; of one
+// given twice, its last, null or {} too — review500; each a string; a
+// line cut off, or not JSON, says nothing).
 func codexSubagentOf(head []byte, sid string) bool {
 	line, _, whole := bytes.Cut(head, []byte("\n"))
 	if !whole || sid == "" {
 		return false
 	}
-	var row struct {
-		Type    string `json:"type"`
-		Payload struct {
-			ThreadSource   string `json:"thread_source"`
-			ParentThreadID string `json:"parent_thread_id"`
-		} `json:"payload"`
+	str := func(raw json.RawMessage) string {
+		var v string
+		if len(raw) == 0 || raw[0] != '"' || json.Unmarshal(raw, &v) != nil {
+			return ""
+		}
+		return v
 	}
-	return json.Unmarshal(line, &row) == nil && row.Type == "session_meta" && row.Payload.ThreadSource == "subagent" && row.Payload.ParentThreadID == sid
+	var row, payload map[string]json.RawMessage
+	if json.Unmarshal(line, &row) != nil || str(row["type"]) != "session_meta" {
+		return false
+	}
+	if p := row["payload"]; len(p) == 0 || p[0] != '{' || json.Unmarshal(p, &payload) != nil {
+		return false
+	}
+	return str(payload["thread_source"]) == "subagent" && str(payload["parent_thread_id"]) == sid
 }
 
 var errSubagentUnsure = errors.New("too many logs in its folder to find it")
