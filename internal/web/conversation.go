@@ -3435,10 +3435,10 @@ var errSubagentFile = errors.New("not a subagent's log")
 // (~/.codex/thread-writer-locks/<id>.lock), held over two seconds, with no
 // log of it open — one just started, or begun anew (/new), its log begun
 // with its first message, the lock's id the log's (of several, the one
-// taken last; one taken before its own log was last written is a
-// conversation left, not counted); cxnew, such a lock held less long (a
-// subagent's a moment, its log opened with it; or one begun anew: not told
-// yet).
+// taken last; one taken no later than the lock of the conversation whose
+// log it writes is a conversation left, not counted); cxnew, such a lock
+// held less long (a subagent's a moment, its log opened with it; or one
+// begun anew: not told yet), or two taken in the same second.
 // (Codex 0.164, as a real one was seen to: plans/5d3b-codex-new-compact.md.)
 const codexFdsSh = `codex_fds() {
   cxlog= cxany= cxpend= cxnew= _locks= _logs=
@@ -3454,22 +3454,30 @@ const codexFdsSh = `codex_fds() {
       { [ -z "$cxlog" ] || [ "$_l" -nt "$cxlog" ]; } && cxlog=$_l ;;
     "$HOME"/.codex/thread-writer-locks/*.lock)
       _i=${_l##*/}; _i=${_i%.lock}
-      case $_i in *[!0-9a-fA-F-]*) ;; ????????-????-????-????-????????????) _locks="$_locks $_l" ;; esac ;;
+      case $_i in *[!0-9a-fA-F-]*) ;; ????????-????-????-????-????????????)
+        _t=$(stat -c %Y "$_l" 2>/dev/null) && _locks="$_locks $_i:$_t" ;; esac ;;
     esac
   done
-  # (Of its locks without a log open: one taken before its log was last
-  # written is a conversation left (begun anew from it before its first
-  # message), not the one it is at; of the others, the one taken last.
-  # Held over two seconds — three, counted in whole seconds: a subagent's,
-  # begun with its log, has that open by then; one younger is cxnew.)
-  _pend=
-  for _l in $_locks; do
-    _i=${_l##*/}; _i=${_i%.lock}
-    case "$_logs" in *"-$_i "*) continue ;; esac
-    [ -n "$cxlog" ] && ! [ "$_l" -nt "$cxlog" ] && continue
-    _t=$(stat -c %Y "$_l" 2>/dev/null) || continue
-    if [ $((_now - _t)) -lt 3 ]; then cxnew=1; continue; fi
-    { [ -z "$_pend" ] || [ "$_l" -nt "$_pend" ]; } && _pend=$_l
+  # (Locks are told apart by when each was taken, never by when a log was
+  # last written: its log is written on and on. The lock of the conversation
+  # whose log it writes is the mark: one without a log taken no later than
+  # that is a conversation left (begun anew from it before its first
+  # message); of the others, the one taken last. Held over two seconds —
+  # three, counted in whole seconds: a subagent's, begun with its log, has
+  # that open by then; one younger is cxnew; two taken in the same second,
+  # which of them it is at not known, cxnew too.)
+  _ref=
+  for _p in $_locks; do
+    case "$cxlog" in *"-${_p%%:*}.jsonl") _ref=${_p##*:} ;; esac
   done
-  if [ -n "$_pend" ]; then cxpend=${_pend##*/}; cxpend=${cxpend%.lock}; fi
+  _pend= _pt= _tie=
+  for _p in $_locks; do
+    _i=${_p%%:*}; _t=${_p##*:}
+    case "$_logs" in *"-$_i "*) continue ;; esac
+    [ -n "$_ref" ] && [ "$_t" -le "$_ref" ] && continue
+    if [ $((_now - _t)) -lt 3 ]; then cxnew=1; continue; fi
+    if [ -z "$_pt" ] || [ "$_t" -gt "$_pt" ]; then _pend=$_i _pt=$_t _tie=
+    elif [ "$_t" -eq "$_pt" ]; then _tie=1; fi
+  done
+  if [ -n "$_tie" ]; then cxnew=1; else cxpend=$_pend; fi
 }`

@@ -42,6 +42,8 @@ func codexIdleInput(screen string) error {
 }
 
 // codexFooter: a line of Codex's footer under its input: its model and
-// folder ("gpt-mock default · ~/cxreal"), its hints ("? for shortcuts",
-// "esc again to edit previous message"), its notes ("⚠ 1 warning").
-var codexFooter = regexp.MustCompile(`^\S.* · (?:~|/)\S*(?: · .*)?$|^\? for shortcuts\b|^esc again to edit previous message$|^ctrl \+ c again to quit$|^⚠ \d+ warnings? · f2 to view$|\s{2,}⚠ \d+ warnings? · f2 to view$`)
+// folder ("gpt-mock default · ~/cxreal", the folder's name spaces and all),
+// its hints ("? for shortcuts", "esc again to edit previous message"), its
+// notes ("⚠ 1 warning · f2 to view"), each the whole line but for what
+// stands at its right, two spaces off or more.
+var codexFooter = regexp.MustCompile(`^[A-Za-z][\w.-]*(?: (?:default|minimal|low|medium|high|xhigh|max))? · (?:~|/).*$|^(?:\? for shortcuts|esc again to edit previous message|ctrl \+ c again to quit|⚠ \d+ warnings? · f2 to view)(?:\s{2,}\S.*)?$`)
