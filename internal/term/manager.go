@@ -18,6 +18,8 @@ import (
 var (
 	ErrNotFound = errors.New("session not found")
 	ErrTooMany  = errors.New("too many open sessions")
+	// ErrClosing: the gateway is stopping; no session is started any more.
+	ErrClosing = errors.New("the gateway is stopping")
 )
 
 const (
@@ -41,6 +43,14 @@ type Manager struct {
 	spillMu     sync.Mutex
 	spilled     []*Session // sessions whose alert did not fit in alerts; each at most once
 	stop        chan struct{}
+
+	// closing: BeginShutdown was called (under mu): nothing is reserved,
+	// started or published after it. ops counts Starts under way (from
+	// their admission, under mu, to their session published or ended);
+	// ends counts onEnd calls under way (see Session.end).
+	closing bool
+	ops     sync.WaitGroup
+	ends    sync.WaitGroup
 }
 
 // alertQueue bounds sessions waiting for the alert worker; alertRetry is how
@@ -91,7 +101,47 @@ func (m *Manager) spill(s *Session) {
 	m.spillMu.Unlock()
 }
 
+// BeginShutdown stops new sessions: Reserve and Start refuse (ErrClosing)
+// from now on, and a Start under way does not publish its session (it ends
+// it as the gateway's stop: ReasonShutdown).
+func (m *Manager) BeginShutdown() {
+	m.mu.Lock()
+	m.closing = true
+	m.mu.Unlock()
+}
+
+// Closing is true once BeginShutdown was called.
+func (m *Manager) Closing() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.closing
+}
+
+// WaitStarts waits for the Starts under way to publish or end their
+// sessions (after BeginShutdown, no more begin); false if ctx ended first.
+func (m *Manager) WaitStarts(ctx context.Context) bool { return waitCtx(ctx, &m.ops) }
+
+// WaitEnds waits for the onEnd calls under way, of every session that has
+// ended (by Shutdown or before it); false if ctx ended first. After Shutdown
+// and WaitStarts, none begins any more.
+func (m *Manager) WaitEnds(ctx context.Context) bool { return waitCtx(ctx, &m.ends) }
+
+func waitCtx(ctx context.Context, wg *sync.WaitGroup) bool {
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
 func (m *Manager) Shutdown() {
+	m.BeginShutdown()
 	select {
 	case <-m.stop:
 	default:
@@ -129,6 +179,23 @@ type StartOptions struct {
 	// HostConfig fingerprints the host settings the connection was made with,
 	// so a session is only reused while the host still describes it.
 	HostConfig string
+	// AttachOnly attaches a tmux or herdr session that is there and starts
+	// none: tmux's attach-session (exact name) fails where the session is
+	// not, and neither falls back to a shell where the program is missing.
+	// (herdr has no way to attach only: its attach starts a session that is
+	// not running; the caller looks first.)
+	AttachOnly bool
+	// PreExec, when set, is called once the terminal is set up and right
+	// before the remote command is sent; an error gives up, nothing run.
+	PreExec func(ctx context.Context) error
+	// Register, when set, is called once the remote command runs and before
+	// the session is published (none of its ends can come before it): what
+	// keeps it (the web package's open_tabs). An error gives up: the
+	// connection is closed, the session never published.
+	Register func(ctx context.Context, s *Session) error
+	// IdleSince, when not zero, is since when nobody has looked at the
+	// session (a session opened again keeps its unattended time).
+	IdleSince time.Time
 }
 
 // Reservation holds one of a user's session slots while a connection is being
@@ -155,6 +222,9 @@ func (r *Reservation) Release() {
 func (m *Manager) Reserve(owner int64) (*Reservation, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.closing {
+		return nil, ErrClosing
+	}
 	if m.countRunning(owner)+m.pending[owner] >= m.maxPerUser {
 		return nil, ErrTooMany
 	}
@@ -178,6 +248,16 @@ func (m *Manager) countRunning(owner int64) int {
 // runs on the host.
 func (m *Manager) Start(ctx context.Context, res *Reservation, owner, hostID int64, hostName string, client *ssh.Client, opt StartOptions) (*Session, error) {
 	defer res.Release()
+	// (Admitted, and counted, in one: a stop begun after this waits for it.)
+	m.mu.Lock()
+	if m.closing {
+		m.mu.Unlock()
+		client.Close()
+		return nil, ErrClosing
+	}
+	m.ops.Add(1)
+	m.mu.Unlock()
+	defer m.ops.Done()
 	cols, rows := clamp(opt.Cols, 20, 1000, 80), clamp(opt.Rows, 5, 500, 24)
 
 	type setup struct {
@@ -218,15 +298,27 @@ func (m *Manager) Start(ctx context.Context, res *Reservation, owner, hostID int
 			fail(ctx.Err())
 			return
 		}
+		if opt.PreExec != nil {
+			if err := opt.PreExec(ctx); err != nil {
+				fail(err)
+				return
+			}
+		}
 		switch opt.Persistence {
 		case "tmux":
-			if opt.TmuxNew {
+			if opt.AttachOnly {
+				err = sess.Start(TmuxAttachCommand(opt.TmuxSession))
+			} else if opt.TmuxNew {
 				err = sess.Start(TmuxNewCommand(opt.TmuxSession))
 			} else {
 				err = sess.Start(TmuxCommand(opt.TmuxSession))
 			}
 		case "herdr":
-			err = sess.Start(HerdrCommand(opt.HerdrSession))
+			if opt.AttachOnly {
+				err = sess.Start(HerdrAttachCommand(opt.HerdrSession))
+			} else {
+				err = sess.Start(HerdrCommand(opt.HerdrSession))
+			}
 		default:
 			err = sess.Shell()
 		}
@@ -240,7 +332,10 @@ func (m *Manager) Start(ctx context.Context, res *Reservation, owner, hostID int
 			client: client, ssh: sess, stdin: stdin, input: make(chan []byte, inputQueue),
 			buf: newRing(ringSize), subs: map[*Sub]struct{}{}, state: StateRunning,
 			cols: cols, rows: rows, ptySize: [2]int{cols, rows}, winch: sess.WindowChange, idleSince: time.Now(), finished: make(chan struct{}), uploads: make(chan struct{}, 2),
-			onAlert: m.OnAlert, alertq: m.alerts, spill: m.spill,
+			onAlert: m.OnAlert, alertq: m.alerts, spill: m.spill, ends: &m.ends,
+		}
+		if !opt.IdleSince.IsZero() {
+			s.idleSince = opt.IdleSince
 		}
 		if m.NewRecorder != nil {
 			s.rec = m.NewRecorder(s)
@@ -280,10 +375,32 @@ func (m *Manager) Start(ctx context.Context, res *Reservation, owner, hostID int
 			m.OnEnd(s, s.State(), time.Since(s.Created))
 		}
 	}
-
+	// Registered before it is published: its exit is not watched yet, so
+	// none of its ends comes before what keeps it. Failing, nothing was kept.
+	if opt.Register != nil {
+		if err := opt.Register(ctx, s); err != nil {
+			client.Close()
+			abandon(st)
+			return nil, err
+		}
+	}
+	// Published, or (the gateway stopping, or the request given up since it
+	// was registered) ended: as the gateway's stop, what keeps it kept; else
+	// as given up, what keeps it gone. Not ended under mu: its onEnd takes it.
 	m.mu.Lock()
-	m.sessions[s.ID] = s
+	closing := m.closing
+	if !closing && ctx.Err() == nil {
+		m.sessions[s.ID] = s
+	}
 	m.mu.Unlock()
+	switch {
+	case closing:
+		s.end(StateClosed, 0, ReasonShutdown)
+		return nil, ErrClosing
+	case ctx.Err() != nil:
+		s.end(StateClosed, 0, "given up")
+		return nil, ctx.Err()
+	}
 
 	go s.writer()
 	// Both the program exiting and the connection dropping end the session.
@@ -325,6 +442,25 @@ func TmuxCommand(name string) string {
 	script := `PATH="$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"; ` +
 		`if command -v tmux >/dev/null 2>&1; then exec tmux -u new-session -A -s "$1"; ` +
 		`else printf '\r\n[corral] tmux is not installed on this host; starting a plain shell.\r\n'; exec "${SHELL:-/bin/sh}" -l; fi`
+	return "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(name)
+}
+
+// TmuxAttachCommand attaches the tmux session of exactly that name (no
+// prefix match), and fails where there is none or tmux is missing: no
+// session is started and no shell runs instead. Fixed script; the only
+// variable part is the validated, quoted session name.
+func TmuxAttachCommand(name string) string {
+	script := `PATH="$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"; ` +
+		`command -v tmux >/dev/null 2>&1 || exit 127; exec tmux -u attach-session -t "=$1"`
+	return "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(name)
+}
+
+// HerdrAttachCommand is HerdrCommand with no shell where herdr is missing.
+// (herdr's attach starts a session that is not running: the caller looked
+// for it first.)
+func HerdrAttachCommand(name string) string {
+	script := `PATH="$HOME/.local/bin:$HOME/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"; ` +
+		`command -v herdr >/dev/null 2>&1 || exit 127; if [ -n "$1" ]; then exec herdr --session "$1"; else exec herdr; fi`
 	return "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(name)
 }
 

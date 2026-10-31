@@ -315,6 +315,8 @@ func TestRemoteExecCallSitesAreReviewed(t *testing.T) {
 		"term/manager.go: err = sess.Start(TmuxCommand(opt.TmuxSession))":                             true,
 		"term/manager.go: err = sess.Start(TmuxNewCommand(opt.TmuxSession))":                          true,
 		"term/manager.go: err = sess.Start(HerdrCommand(opt.HerdrSession))":                           true,
+		"term/manager.go: err = sess.Start(TmuxAttachCommand(opt.TmuxSession))":                       true, // fixed script, the validated session name quoted; attaches only (no new session, no shell)
+		"term/manager.go: err = sess.Start(HerdrAttachCommand(opt.HerdrSession))":                     true, // fixed script, the validated session name quoted; no shell where herdr is missing
 		"web/api_sessions.go: sess, err := s.terms.Start(ctx, res, u.ID, h.ID, h.Name, client, opts)": true,
 		"herdr/client.go: out, err := sshx.Output(ctx, c, DiscoverCommand, sshx.MaxOutput)":           true,
 		"herdr/keys.go: out, err := sshx.Output(ctx, c, KeysCommand, keysLimit)":                      true, // fixed text, no input

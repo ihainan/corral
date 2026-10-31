@@ -190,12 +190,13 @@ type Session struct {
 	grants    map[int64]*grant // users the owner let watch, read-only
 
 	onEnd   func(*Session)
-	rec     Recorder      // nil when the session is not recorded; fixed before output starts
-	uploads chan struct{} // limits concurrent file transfers on this connection
-	meta    []byte        // latest side information, replayed to new viewers
-	preview *Preview      // what a window last showed; nil until one sent it
-	prevRev int64         // previews kept so far
-	winSeqs []winSeq      // the windows that sent previews (the latest last), and their numbers for them
+	ends    *sync.WaitGroup // the manager's: counts onEnd calls under way (see Manager.WaitEnds); nil in tests
+	rec     Recorder        // nil when the session is not recorded; fixed before output starts
+	uploads chan struct{}   // limits concurrent file transfers on this connection
+	meta    []byte          // latest side information, replayed to new viewers
+	preview *Preview        // what a window last showed; nil until one sent it
+	prevRev int64           // previews kept so far
+	winSeqs []winSeq        // the windows that sent previews (the latest last), and their numbers for them
 	alerts  alertScanner
 	onAlert func(*Session, Alert) // from Manager.OnAlert, fixed before output starts
 	alertq  chan<- *Session       // the manager's alert queue
@@ -335,6 +336,24 @@ func (s *Session) Client() *ssh.Client { return s.client }
 
 // Finished is closed when the session ends.
 func (s *Session) Finished() <-chan struct{} { return s.finished }
+
+// Snapshot is what is kept of a session (see the web package's open_tabs),
+// read at once: its state, why it ended, since when no viewer of its owner
+// has looked (zero while one does), when it ended, its size.
+type Snapshot struct {
+	State     string
+	Reason    string
+	IdleSince time.Time
+	EndedAt   time.Time
+	Cols      int
+	Rows      int
+}
+
+func (s *Session) Snapshot() Snapshot {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return Snapshot{State: s.state, Reason: s.reason, IdleSince: s.idleSince, EndedAt: s.endedAt, Cols: s.cols, Rows: s.rows}
+}
 
 func (s *Session) State() string {
 	s.mu.Lock()
@@ -697,6 +716,12 @@ func (s *Session) end(state string, code int, reason string) {
 		return
 	}
 	s.state, s.exitCode, s.reason, s.endedAt = state, code, reason, time.Now()
+	// (Counted where the final state is set: one who sees it ended knows its
+	// onEnd is counted, done or under way.)
+	ends := s.onEnd != nil && s.ends != nil
+	if ends {
+		s.ends.Add(1)
+	}
 	ev := Event{State: state, ExitCode: code, Reason: reason, Offset: s.buf.end()}
 	for sub := range s.subs {
 		select {
@@ -721,6 +746,9 @@ func (s *Session) end(state string, code int, reason string) {
 	}
 	if s.onEnd != nil {
 		s.onEnd(s)
+	}
+	if ends {
+		s.ends.Done()
 	}
 }
 

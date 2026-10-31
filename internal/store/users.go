@@ -183,6 +183,10 @@ func (s *Store) ResetPasswordTx(ctx context.Context, userID int64, hash string, 
 	if _, err := tx.ExecContext(ctx, `DELETE FROM login_sessions WHERE user_id = ?`, userID); err != nil {
 		return err
 	}
+	// (Nothing of theirs opened again after a restart: with the logins, at once.)
+	if err := deleteUserTabs(ctx, tx, userID); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
@@ -211,6 +215,10 @@ func (s *Store) UpdateUserGuarded(ctx context.Context, id int64, role *string, d
 		}
 		if *disabled {
 			if _, err := tx.ExecContext(ctx, `DELETE FROM login_sessions WHERE user_id = ?`, id); err != nil {
+				return err
+			}
+			// (Nothing of theirs opened again after a restart: with the logins, at once.)
+			if err := deleteUserTabs(ctx, tx, id); err != nil {
 				return err
 			}
 		}

@@ -328,8 +328,26 @@ func (s *Service) touch(ctx context.Context, hash string, now time.Time) {
 	_ = s.store.TouchLoginSession(ctx, hash)
 }
 
+// Logout ends one login; with the user's last valid one, nothing of theirs
+// is opened again after a restart (their terminals stay: other devices may
+// use them).
 func (s *Service) Logout(ctx context.Context, sessionHash string) error {
-	return s.store.DeleteLoginSession(ctx, sessionHash)
+	return s.store.LogoutTx(ctx, sessionHash, s.LoginRule())
+}
+
+// LoginRule is validLogin's policy now, for the store to apply within its
+// own transactions: seen within the idle timeout, made within the absolute
+// limit (the rest — user enabled, not told to choose a password, login not
+// older than the password — is the store's).
+func (s *Service) LoginRule() store.LoginRule {
+	now := s.now()
+	return store.LoginRule{SeenSince: now.Add(-s.idle).Unix(), CreatedSince: now.Add(-s.maxAge).Unix()}
+}
+
+// HasLogin: the user has a valid login now (no login is touched by it). An
+// error: it could not be told.
+func (s *Service) HasLogin(ctx context.Context, userID int64) (bool, error) {
+	return s.store.HasLogin(ctx, userID, s.LoginRule())
 }
 
 // ChangePassword verifies the current password, stores the new one and signs
@@ -383,7 +401,7 @@ func (s *Service) ResetPassword(ctx context.Context, userID int64, next string, 
 // It keeps going if the caller's request is cancelled: half-revoked access is
 // worse than a slow response.
 func (s *Service) EndAccess(ctx context.Context, userID int64) error {
-	err := s.store.DeleteUserLoginSessions(context.WithoutCancel(ctx), userID, "")
+	err := s.store.EndAccessTx(context.WithoutCancel(ctx), userID)
 	s.CloseConnections(userID)
 	return err
 }
