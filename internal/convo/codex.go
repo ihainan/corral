@@ -396,8 +396,8 @@ func (c *Codex) Prepend(other Parser) {
 			delete(c.ranOut, id)
 			continue
 		}
-		if _, already := c.running[id]; already || !c.ofNow(r.Time) || !c.room() {
-			continue // (of a process before this one: not merged — review503)
+		if _, already := c.running[id]; already || !c.room() {
+			continue // (merged whatever process it is of: shown or not by Running, as the start told then — review504; a full list makes way, see room)
 		}
 		if c.running == nil {
 			c.running = map[string]Running{}

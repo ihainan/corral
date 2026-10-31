@@ -174,3 +174,17 @@ func TestCodexRunningOldPartTakesNoPlace(t *testing.T) {
 		t.Errorf("this process's: %q", got)
 	}
 }
+
+// review504: a part before read in while the start was told wrong (later):
+// what it set going is kept, shown once the start is told right.
+func TestCodexRunningPartWhileStartWrong(t *testing.T) {
+	before, after := feedAll(runCall, runOut), feedAll(subCall)
+	late, _ := time.Parse(time.RFC3339Nano, "2026-10-31T06:30:00Z")
+	after.QueueSince(late.UnixMilli())
+	after.Prepend(before)
+	right, _ := time.Parse(time.RFC3339Nano, "2026-10-31T06:00:00Z")
+	after.QueueSince(right.UnixMilli())
+	if got := runningIDs(after); got != "cmd:call_4:sleep 25; echo fertig" {
+		t.Errorf("its start told right again: %q", got)
+	}
+}
