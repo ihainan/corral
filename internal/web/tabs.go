@@ -28,8 +28,12 @@ func tabOf(sess *term.Session, owner, host int64, cfg string) *store.OpenTab {
 		name, def = "default", true // (herdr's default session: one name, see sameMux)
 	}
 	snap := sess.Snapshot()
+	var idle int64 // (since when nobody looked: one opened again keeps it. review526-4)
+	if !snap.IdleSince.IsZero() {
+		idle = snap.IdleSince.Unix()
+	}
 	return &store.OpenTab{SessionID: sess.ID, OwnerID: owner, HostID: host, Kind: kind, Name: name, HerdrDefault: def,
-		HostConfig: cfg, Cols: snap.Cols, Rows: snap.Rows, AliveAt: time.Now().Unix()}
+		HostConfig: cfg, Cols: snap.Cols, Rows: snap.Rows, IdleSince: idle, AliveAt: time.Now().Unix()}
 }
 
 // registerOpened is the Register of a session a person opens (tmux or

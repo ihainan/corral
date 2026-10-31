@@ -167,7 +167,10 @@ func (s *Server) WaitRestores(ctx context.Context) bool {
 	}
 }
 
-var errHostChanged = errors.New("the host was changed")
+var (
+	errHostChanged = errors.New("the host was changed")
+	errRestoreDB   = errors.New("database")
+)
 
 // restoreOne opens one record again, or says why not (its outcome, audited
 // as session.restore).
@@ -300,14 +303,32 @@ func (s *Server) restoreOne(parent context.Context, t *store.OpenTab) {
 		}
 	}
 	defer s.opening.release(t.OwnerID)
+	// (Only what is sure removes the record: no key pinned, the credential
+	// or the jump host gone or unusable. The database failing, or the jump
+	// host's turn busy, keeps it. review526-3)
+	switch _, err := s.store.HostKey(ctx, t.OwnerID, t.HostID); {
+	case errors.Is(err, store.ErrNotFound):
+		drop("skipped:no_host_key")
+		return
+	case err != nil:
+		keep(dbOr(ctx, gone))
+		return
+	}
 	target, err := s.storedTarget(ctx, h)
 	if err != nil {
-		if ctx.Err() != nil {
+		switch {
+		case ctx.Err() != nil:
 			keep(gone())
-			return
+		case errors.Is(err, errGateBusy):
+			keep("cancelled:busy")
+		case errors.Is(err, store.ErrNotFound):
+			drop("skipped:no_credential")
+		case errors.Is(err, errJumpGone), errors.Is(err, errJumpChained), errors.Is(err, errJumpNoCredential), errors.Is(err, errJumpNotTrusted):
+			drop("failed:jump")
+			out.detail = jumpReason(err)
+		default:
+			keep("cancelled:db")
 		}
-		drop("failed:target")
-		out.detail = err.Error()
 		return
 	}
 	dialed, err := sshx.Dial(ctx, s.guard, *target)
@@ -367,18 +388,35 @@ func (s *Server) restoreOne(parent context.Context, t *store.OpenTab) {
 	// Nothing runs at the host if the host was changed meanwhile; the record
 	// takes the old one's place only if that is still there, its user still
 	// signed in somewhere and the host as it was, together.
+	// (Only a host gone or changed is errHostChanged; the database failing
+	// is errRestoreDB, and keeps the record. review526-2)
 	opts.PreExec = func(ctx context.Context) error {
 		nh, err := s.store.Host(ctx, t.OwnerID, t.HostID)
-		if err != nil || hostConfig(nh) != t.HostConfig {
+		switch {
+		case errors.Is(err, store.ErrNotFound):
+			return errHostChanged
+		case err != nil && ctx.Err() == nil:
+			return fmt.Errorf("%w: %v", errRestoreDB, err)
+		case err != nil:
+			return ctx.Err()
+		case hostConfig(nh) != t.HostConfig:
 			return errHostChanged
 		}
 		return nil
 	}
 	committed := false
 	opts.Register = func(ctx context.Context, sess *term.Session) error {
-		err := s.store.ReplaceTab(ctx, t.SessionID, tabOf(sess, t.OwnerID, t.HostID, t.HostConfig), s.auth.LoginRule(),
+		rec := tabOf(sess, t.OwnerID, t.HostID, t.HostConfig)
+		rec.Name, rec.HerdrDefault = t.Name, t.HerdrDefault // (as recorded: not told again from the name. review526-5)
+		err := s.store.ReplaceTab(ctx, t.SessionID, rec, s.auth.LoginRule(),
 			func(nh *store.Host) bool { return hostConfig(nh) == t.HostConfig })
-		committed = err == nil
+		switch {
+		case err == nil:
+			committed = true
+		case errors.Is(err, store.ErrNotFound), errors.Is(err, store.ErrNoLogin), errors.Is(err, store.ErrHostChanged), ctx.Err() != nil:
+		default:
+			err = fmt.Errorf("%w: %v", errRestoreDB, err)
+		}
 		return err
 	}
 	sess, err := s.terms.Start(ctx, res, t.OwnerID, t.HostID, h.Name, client, opts)
@@ -399,6 +437,8 @@ func (s *Server) restoreOne(parent context.Context, t *store.OpenTab) {
 			out.outcome = "gone"
 		case ctx.Err() != nil:
 			keep(gone())
+		case errors.Is(err, errRestoreDB):
+			keep("cancelled:db")
 		default:
 			drop("failed:start")
 		}
@@ -407,11 +447,19 @@ func (s *Server) restoreOne(parent context.Context, t *store.OpenTab) {
 	started = true
 	out.newID = sess.ID
 	// Revoked while it started (the record of the new one is then gone with
-	// it, or this sees it): closed, stopping or not. A check the stop
-	// cancelled tells nothing: left to the stop.
-	ok, err := s.auth.HasLogin(ctx, t.OwnerID)
-	nh, herr := s.store.Host(ctx, t.OwnerID, t.HostID)
-	if (err == nil && !ok) || errors.Is(herr, store.ErrNotFound) || (herr == nil && hostConfig(nh) != t.HostConfig) {
+	// it, or this sees it): closed, stopping or not. Checked within a bound
+	// of its own (this one's may be spent), under parent: a check the stop
+	// cancelled tells nothing and leaves it to the stop; any other failure
+	// to tell closes it. review526-1
+	cctx, ccancel := context.WithTimeout(parent, 5*time.Second)
+	ok, err := s.auth.HasLogin(cctx, t.OwnerID)
+	nh, herr := s.store.Host(cctx, t.OwnerID, t.HostID)
+	ccancel()
+	if (cancelled(err) || cancelled(herr)) && s.terms.Closing() {
+		out.outcome = "cancelled:stopping"
+		return
+	}
+	if err != nil || !ok || herr != nil || hostConfig(nh) != t.HostConfig {
 		sess.Close("access revoked")
 		out.outcome = "cancelled:revoked"
 		return

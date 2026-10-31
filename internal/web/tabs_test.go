@@ -213,6 +213,11 @@ func TestRestoreAfterRestart(t *testing.T) {
 	if len(all) != 2 || names["work"] != work || work == byName["work"].SessionID || names["other"] != otherID || names["nothere"] != "" {
 		t.Fatalf("records %+v (work running as %s)", all, work)
 	}
+	for _, tb := range all {
+		if tb.Name == "work" && (tb.IdleSince == 0 || tb.IdleSince != byName["work"].IdleSince) {
+			t.Errorf("the new record's unattended time %d, the old %d", tb.IdleSince, byName["work"].IdleSince)
+		}
+	}
 	sess, _ := h.terms.Get(byName["work"].OwnerID, work)
 	if snap := sess.Snapshot(); snap.Cols != 132 || snap.Rows != 40 || snap.IdleSince.Unix() != byName["work"].IdleSince {
 		t.Errorf("size or unattended time not kept: %+v, recorded %+v", snap, byName["work"])
@@ -283,8 +288,14 @@ func TestRestoreHerdr(t *testing.T) {
 		!slices.ContainsFunc(attach, func(c string) bool { return strings.HasSuffix(c, " corral 'work'") }) {
 		t.Errorf("attached with %q", attach)
 	}
-	if all := h.tabs(); len(all) != 2 {
+	all := h.tabs()
+	if len(all) != 2 {
 		t.Errorf("records after %+v", all)
+	}
+	for _, tb := range all {
+		if tb.HerdrDefault != (tb.Name == "default") {
+			t.Errorf("default as recorded? %+v", tb)
+		}
 	}
 }
 
