@@ -288,6 +288,10 @@ func (s *Server) openSession(ctx context.Context, w http.ResponseWriter, r *http
 			writeError(w, http.StatusUnauthorized, "unauthorized", "please sign in")
 			return
 		}
+		if errors.Is(err, store.ErrHostChanged) {
+			writeError(w, http.StatusConflict, "host_changed", "the host was changed meanwhile; open it again")
+			return
+		}
 		writeError(w, http.StatusBadGateway, "start_failed", "connected, but could not start a shell")
 		return
 	}

@@ -340,8 +340,17 @@ func (s *Service) Logout(ctx context.Context, sessionHash string) error {
 // limit (the rest — user enabled, not told to choose a password, login not
 // older than the password — is the store's).
 func (s *Service) LoginRule() store.LoginRule {
+	// (Rounded up: a login seen at a whole second is valid while now minus
+	// it is at most the limit, as validLogin tells. review523-3)
 	now := s.now()
-	return store.LoginRule{SeenSince: now.Add(-s.idle).Unix(), CreatedSince: now.Add(-s.maxAge).Unix()}
+	return store.LoginRule{SeenSince: ceilUnix(now.Add(-s.idle)), CreatedSince: ceilUnix(now.Add(-s.maxAge))}
+}
+
+func ceilUnix(t time.Time) int64 {
+	if t.Nanosecond() > 0 {
+		return t.Unix() + 1
+	}
+	return t.Unix()
 }
 
 // HasLogin: the user has a valid login now (no login is touched by it). An

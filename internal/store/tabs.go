@@ -68,8 +68,9 @@ func insertTab(ctx context.Context, tx *sql.Tx, t *OpenTab) error {
 // while the login that opened it (loginHash) is valid and its user's (a
 // revocation committed before finds none; one after removes it), taking
 // the place of a record of the same session left from before (owner, host,
-// kind, name and settings).
-func (s *Store) RegisterTab(ctx context.Context, t *OpenTab, loginHash string, r LoginRule) error {
+// kind, name and settings); and only while the host is its user's with
+// the settings hostOK wants (ErrHostChanged). review523-2
+func (s *Store) RegisterTab(ctx context.Context, t *OpenTab, loginHash string, r LoginRule, hostOK func(*Host) bool) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -81,6 +82,9 @@ func (s *Store) RegisterTab(ctx context.Context, t *OpenTab, loginHash string, r
 		return ErrNoLogin
 	}
 	if err != nil {
+		return err
+	}
+	if err := hostAsWanted(ctx, tx, t, hostOK); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM open_tabs WHERE owner_id = ? AND host_id = ? AND kind = ? AND name = ? AND host_config = ?`,
@@ -114,6 +118,18 @@ func (s *Store) ReplaceTab(ctx context.Context, oldID string, t *OpenTab, r Logi
 	if n == 0 {
 		return ErrNoLogin
 	}
+	if err := hostAsWanted(ctx, tx, t, hostOK); err != nil {
+		return err
+	}
+	if err := insertTab(ctx, tx, t); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// hostAsWanted: the record's host is its user's, as hostOK wants it (read
+// in tx).
+func hostAsWanted(ctx context.Context, tx *sql.Tx, t *OpenTab, hostOK func(*Host) bool) error {
 	h, err := scanHost(tx.QueryRowContext(ctx, `SELECT `+hostCols+` FROM hosts WHERE owner_id = ? AND id = ?`, t.OwnerID, t.HostID))
 	if errors.Is(err, ErrNotFound) {
 		return ErrHostChanged
@@ -124,10 +140,7 @@ func (s *Store) ReplaceTab(ctx context.Context, oldID string, t *OpenTab, r Logi
 	if !hostOK(h) {
 		return ErrHostChanged
 	}
-	if err := insertTab(ctx, tx, t); err != nil {
-		return err
-	}
-	return tx.Commit()
+	return nil
 }
 
 // HasLogin: the user has a valid login now (by r), as RegisterTab tells it.

@@ -41,6 +41,8 @@ func newTabEnv(t *testing.T) *tabEnv {
 	return &tabEnv{t: t, ctx: ctx, s: s, user: u, host: h, rule: LoginRule{SeenSince: now - 3600, CreatedSince: now - 86400}, nowSec: now}
 }
 
+func anyHost(*Host) bool { return true }
+
 func (e *tabEnv) tab(id, name string) *OpenTab {
 	return &OpenTab{SessionID: id, OwnerID: e.user.ID, HostID: e.host.ID, Kind: "tmux", Name: name, HostConfig: "cfg1", Cols: 80, Rows: 24, AliveAt: e.nowSec}
 }
@@ -69,15 +71,23 @@ func (e *tabEnv) login(hash string) {
 // the record of the same session left from before.
 func TestRegisterTab(t *testing.T) {
 	e := newTabEnv(t)
-	if err := e.s.RegisterTab(e.ctx, e.tab("s1", "main"), "nologin", e.rule); !errors.Is(err, ErrNoLogin) {
+	if err := e.s.RegisterTab(e.ctx, e.tab("s1", "main"), "nologin", e.rule, anyHost); !errors.Is(err, ErrNoLogin) {
 		t.Fatalf("no login: %v", err)
 	}
 	e.login("L1")
-	if err := e.s.RegisterTab(e.ctx, e.tab("s1", "main"), "L1", e.rule); err != nil {
+	if err := e.s.RegisterTab(e.ctx, e.tab("s1", "main"), "L1", e.rule, func(*Host) bool { return false }); !errors.Is(err, ErrHostChanged) {
+		t.Fatalf("host changed: %v", err)
+	}
+	other := e.tab("s1", "main")
+	other.HostID = 9999 // (not a host of the user's)
+	if err := e.s.RegisterTab(e.ctx, other, "L1", e.rule, anyHost); !errors.Is(err, ErrHostChanged) {
+		t.Fatalf("not the user's host: %v", err)
+	}
+	if err := e.s.RegisterTab(e.ctx, e.tab("s1", "main"), "L1", e.rule, anyHost); err != nil {
 		t.Fatal(err)
 	}
 	// (The same session opened again: the old record goes, the new one stays.)
-	if err := e.s.RegisterTab(e.ctx, e.tab("s2", "main"), "L1", e.rule); err != nil {
+	if err := e.s.RegisterTab(e.ctx, e.tab("s2", "main"), "L1", e.rule, anyHost); err != nil {
 		t.Fatal(err)
 	}
 	if ids := e.ids(); len(ids) != 1 || ids[0] != "s2" {
@@ -85,13 +95,13 @@ func TestRegisterTab(t *testing.T) {
 	}
 	// A login too old for the rule, or of a user told to choose a password: none.
 	stale := LoginRule{SeenSince: e.nowSec + 10, CreatedSince: e.rule.CreatedSince}
-	if err := e.s.RegisterTab(e.ctx, e.tab("s3", "other"), "L1", stale); !errors.Is(err, ErrNoLogin) {
+	if err := e.s.RegisterTab(e.ctx, e.tab("s3", "other"), "L1", stale, anyHost); !errors.Is(err, ErrNoLogin) {
 		t.Errorf("stale login: %v", err)
 	}
 	if _, err := e.s.db.Exec(`UPDATE users SET must_change_password = 1 WHERE id = ?`, e.user.ID); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.s.RegisterTab(e.ctx, e.tab("s3", "other"), "L1", e.rule); !errors.Is(err, ErrNoLogin) {
+	if err := e.s.RegisterTab(e.ctx, e.tab("s3", "other"), "L1", e.rule, anyHost); !errors.Is(err, ErrNoLogin) {
 		t.Errorf("must change: %v", err)
 	}
 }
@@ -101,7 +111,7 @@ func TestRegisterTab(t *testing.T) {
 func TestReplaceTab(t *testing.T) {
 	e := newTabEnv(t)
 	e.login("L1")
-	if err := e.s.RegisterTab(e.ctx, e.tab("old", "main"), "L1", e.rule); err != nil {
+	if err := e.s.RegisterTab(e.ctx, e.tab("old", "main"), "L1", e.rule, anyHost); err != nil {
 		t.Fatal(err)
 	}
 	ok := func(*Host) bool { return true }
@@ -141,7 +151,7 @@ func TestTabsRevoked(t *testing.T) {
 	e.login("L2")
 	reg := func(id string) {
 		t.Helper()
-		if err := e.s.RegisterTab(e.ctx, e.tab(id, id), "L1", e.rule); err != nil {
+		if err := e.s.RegisterTab(e.ctx, e.tab(id, id), "L1", e.rule, anyHost); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -190,7 +200,7 @@ func TestKeepTabs(t *testing.T) {
 	e.login("L1")
 	for i := 0; i < 3; i++ {
 		id := string(rune('a' + i))
-		if err := e.s.RegisterTab(e.ctx, e.tab(id, id), "L1", e.rule); err != nil {
+		if err := e.s.RegisterTab(e.ctx, e.tab(id, id), "L1", e.rule, anyHost); err != nil {
 			t.Fatal(err)
 		}
 	}

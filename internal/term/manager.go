@@ -387,9 +387,11 @@ func (m *Manager) Start(ctx context.Context, res *Reservation, owner, hostID int
 	// Published, or (the gateway stopping, or the request given up since it
 	// was registered) ended: as the gateway's stop, what keeps it kept; else
 	// as given up, what keeps it gone. Not ended under mu: its onEnd takes it.
+	// (Decided once, under mu: published, a stop or a cancel after is the
+	// stop's to end. review523-1)
 	m.mu.Lock()
-	closing := m.closing
-	if !closing && ctx.Err() == nil {
+	closing, gaveUp := m.closing, ctx.Err()
+	if !closing && gaveUp == nil {
 		m.sessions[s.ID] = s
 	}
 	m.mu.Unlock()
@@ -397,9 +399,9 @@ func (m *Manager) Start(ctx context.Context, res *Reservation, owner, hostID int
 	case closing:
 		s.end(StateClosed, 0, ReasonShutdown)
 		return nil, ErrClosing
-	case ctx.Err() != nil:
+	case gaveUp != nil:
 		s.end(StateClosed, 0, "given up")
-		return nil, ctx.Err()
+		return nil, gaveUp
 	}
 
 	go s.writer()

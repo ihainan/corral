@@ -174,15 +174,15 @@ func TestAttachOnlyCommands(t *testing.T) {
 // ended too; it does not return while one is held.
 func TestWaitEnds(t *testing.T) {
 	m, _, dial := startEnv(t)
-	hold := make(chan struct{})
-	m.OnEnd = func(*Session, string, time.Duration) { <-hold }
+	hold, entered := make(chan struct{}), make(chan struct{})
+	m.OnEnd = func(*Session, string, time.Duration) { close(entered); <-hold }
 	res, _ := m.Reserve(1)
 	s, err := m.Start(context.Background(), res, 1, 9, "h", dial(), StartOptions{Persistence: "none"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	go s.Close("elsewhere")
-	time.Sleep(50 * time.Millisecond)
+	<-entered    // (ended by the other goroutine, its onEnd held: review523-4)
 	m.Shutdown() // (its Close returns at once: the session ended already)
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
