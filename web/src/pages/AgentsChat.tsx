@@ -647,7 +647,9 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   const tmuxKeyNow = !herdr && !cur.pane ? cur.key : ''
   const tmuxCmdsNow = agent?.cmds
   useEffect(() => {
-    if (!tmuxKeyNow || convo.status === 'loading') return
+    // (Only while looked at: a view behind another reads nothing new, and
+    // would date again what may have ended meanwhile. review484)
+    if (!tmuxKeyNow || !active || convo.status === 'loading') return
     if (tmuxCmdsNow) tmuxCmds.set(tmuxKeyNow, { cmds: tmuxCmdsNow, at: Date.now() })
     else tmuxCmds.delete(tmuxKeyNow)
     // (Read on and on the same, it is as of now as this view goes: unchanged
