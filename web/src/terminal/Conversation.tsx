@@ -1185,7 +1185,7 @@ export function ConversationView({
         )}
       </div>
       <div className="convo-dock">
-        {convo.status === 'ready' && convo.running && <RunningWork items={convo.running} openSub={!convo.bind?.agent || convo.bind.agent === 'claude' ? openSub : undefined} />}
+        {convo.status === 'ready' && convo.running && <RunningWork items={convo.running} openSub={!convo.bind?.agent || convo.bind.agent === 'claude' || convo.bind.agent === 'codex' ? openSub : undefined} />}
         {convo.status === 'ready' && convo.tasks && <Tasks tasks={convo.tasks} fold={!!ask} />}
         {/* (Asked from the screen: also where its log is not read.) */}
         {(convo.status === 'ready' || convo.status === 'none') && ask && <AskDock>{ask}</AskDock>}
@@ -2778,7 +2778,8 @@ const ShowTerminal = createContext<(() => void) | undefined>(undefined)
 // A subagent sent off, whose own conversation can be shown: by its id.
 type Sub = { agent: string; title?: string }
 const OpenSub = createContext<((s: Sub) => void) | undefined>(undefined)
-const isSubId = (id: string) => /^[a-z0-9]{6,40}$/.test(id)
+// (Claude Code's subagents' ids; a Codex's, its thread's UUID.)
+const isSubId = (id: string) => /^[a-z0-9]{6,40}$/.test(id) || /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(id)
 
 // A subagent's own conversation, beside the thread (over it, where narrow),
 // read only: what it was asked, what it did and answered. Read when shown;

@@ -784,3 +784,22 @@ func TestCodexFnReview456(t *testing.T) {
 		t.Errorf("no question: %+v", ts)
 	}
 }
+
+// A subagent sent off (spawn_agent): its id, by which its log is opened,
+// and the name it goes by, from what came back (item 1).
+func TestCodexSpawnAgentID(t *testing.T) {
+	ts := toolsOf(feedAll(
+		fnCallNS(t, "s1", "multi_agent_v1", "spawn_agent", map[string]any{"message": "#sub 做点事", "task_name": "helper"}),
+		fnOut(t, "s1", `{"agent_id":"01a18ff7-432f-7a80-bb03-7c6c92a8fd35","nickname":"Turing"}`),
+	))
+	if len(ts) != 1 || ts[0].Name != "Agent" || ts[0].AgentID != "01a18ff7-432f-7a80-bb03-7c6c92a8fd35" || !strings.HasPrefix(ts[0].Title, "Turing") {
+		t.Fatalf("%+v", ts)
+	}
+	ts = toolsOf(feedAll(
+		fnCallNS(t, "s2", "multi_agent_v1", "spawn_agent", map[string]any{"message": "x"}),
+		fnOut(t, "s2", `{"agent_id":"../../etc/passwd","nickname":"x"}`),
+	))
+	if ts[0].AgentID != "" {
+		t.Fatalf("not an id: %+v", ts[0])
+	}
+}

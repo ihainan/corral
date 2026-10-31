@@ -21,6 +21,7 @@ import (
 	"io/fs"
 	"math"
 	"net/http"
+	"path"
 	"regexp"
 	"slices"
 	"strconv"
@@ -1397,7 +1398,7 @@ type convoState struct {
 // newParser: a parser for the log read, a subagent's own as such (its
 // side-chain rows its own); every reader made anew is made by it.
 func (st *convoState) newParser() convo.Parser {
-	if st.sub {
+	if st.sub && st.agent == "claude" { // (a Codex subagent's log is a Codex log as any)
 		return convo.NewClaudeSub()
 	}
 	return convo.New(st.agent)
@@ -3368,7 +3369,7 @@ func (s *Server) apiConversationSubagent(w http.ResponseWriter, r *http.Request)
 	}
 	q := r.URL.Query()
 	pane, agent := q.Get("pane"), q.Get("agent")
-	if (pane != "" && !herdrPane.MatchString(pane)) || !convo.SubagentID(agent) {
+	if (pane != "" && !herdrPane.MatchString(pane)) || !convo.SubagentID(agent) && !convo.CodexAgentID(agent) {
 		writeError(w, http.StatusBadRequest, "bad_request", "bad pane or subagent")
 		return
 	}
@@ -3387,26 +3388,42 @@ func (s *Server) apiConversationSubagent(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	main.mu.Lock()
-	root, agentKind, reason := main.log, main.agent, main.reason
+	root, agentKind, reason, mainSID := main.log, main.agent, main.reason, main.sid
 	main.mu.Unlock()
-	if root == "" || reason != "" || agentKind != "claude" || main.sub || !strings.HasSuffix(root, ".jsonl") {
+	if root == "" || reason != "" || (agentKind != "claude" && agentKind != "codex") || main.sub || !strings.HasSuffix(root, ".jsonl") {
 		writeError(w, http.StatusConflict, "not_located", "the conversation is not read yet")
+		return
+	}
+	// A Codex's subagent: its own log, beside the session's (codexSubagentLog).
+	if agentKind == "codex" {
+		if !convo.CodexAgentID(agent) {
+			writeError(w, http.StatusBadRequest, "bad_request", "bad pane or subagent")
+			return
+		}
+		var file string
+		err := s.withSFTP(r.Context(), sess, convoReadLimit, func(c *sftplite.Client) error {
+			var err error
+			file, err = codexSubagentLog(c, root, mainSID, agent)
+			return err
+		})
+		if errors.Is(err, errSubagentFile) {
+			writeError(w, http.StatusForbidden, "not_allowed", "not a subagent's log")
+			return
+		}
+		if err != nil {
+			writeFileError(w, err)
+			return
+		}
+		s.subagentAnswer(w, r, sess, key+"\x00"+root+"\x00"+agent, "codex", file, agent, gen, rev, older)
+		return
+	}
+	if !convo.SubagentID(agent) {
+		writeError(w, http.StatusBadRequest, "bad_request", "bad pane or subagent")
 		return
 	}
 	home := strings.TrimSuffix(root, ".jsonl") // (the session's own folder, beside its log)
 	dir := home + "/subagents"
 	file := dir + "/agent-" + agent + ".jsonl"
-	st := s.subConvos.get(key + "\x00" + root + "\x00" + agent)
-	defer st.done()
-	st.mu.Lock()
-	defer st.mu.Unlock()
-	if st.log != file {
-		st.sub, st.agent, st.log, st.sid = true, "claude", file, agent
-		st.gen = convoGens.Add(1)
-		st.parser = st.newParser()
-		st.offset, st.size, st.mtime, st.older, st.skipping, st.from = 0, -1, time.Time{}, false, false, 0
-		st.long, st.strip = nil, b64Strip{}
-	}
 	// (The session's folder, its subagents' and the log: none a link (to
 	// another session's, or out of them), the log a plain file (not a pipe
 	// a read would wait on). Looked at, then opened: between the two, only
@@ -3433,6 +3450,23 @@ func (s *Server) apiConversationSubagent(w http.ResponseWriter, r *http.Request)
 		writeFileError(w, err)
 		return
 	}
+	s.subagentAnswer(w, r, sess, key+"\x00"+root+"\x00"+agent, "claude", file, agent, gen, rev, older)
+}
+
+// subagentAnswer reads a subagent's log (file, of kind's: claude, codex)
+// as the conversation's is read, a part at a time, and answers with it.
+func (s *Server) subagentAnswer(w http.ResponseWriter, r *http.Request, sess *term.Session, stKey, kind, file, agent string, gen int64, rev int, older bool) {
+	st := s.subConvos.get(stKey)
+	defer st.done()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.log != file {
+		st.sub, st.agent, st.log, st.sid = true, kind, file, agent
+		st.gen = convoGens.Add(1)
+		st.parser = st.newParser()
+		st.offset, st.size, st.mtime, st.older, st.skipping, st.from = 0, -1, time.Time{}, false, false, 0
+		st.long, st.strip = nil, b64Strip{}
+	}
 	more, err := s.readConvo(sess, st)
 	if err == nil && older && gen == st.gen {
 		err = s.readOlder(sess, st)
@@ -3454,6 +3488,120 @@ func (s *Server) apiConversationSubagent(w http.ResponseWriter, r *http.Request)
 		ans.Meta = &m
 	}
 	writeJSONCompressed(w, r, http.StatusOK, ans)
+}
+
+// codexSubagentLog finds a Codex subagent's log: rollout-<time>-<id>.jsonl
+// in the folder of its session's log (root), or the next day's (sent off
+// across midnight). Only one that says it is a subagent of that session
+// (its head: "thread_source": "subagent", "parent_thread_id": sid); no
+// folder or log a link, the log a plain file.
+func codexSubagentLog(c *sftplite.Client, root, sid, agent string) (string, error) {
+	dir := path.Dir(root)
+	dirs := []string{dir}
+	if day, err := time.Parse("2006/01/02", strings.Join(strings.Split(dir, "/")[max(0, len(strings.Split(dir, "/"))-3):], "/")); err == nil {
+		dirs = append(dirs, path.Join(path.Dir(path.Dir(path.Dir(dir))), day.AddDate(0, 0, 1).Format("2006/01/02")))
+	}
+	suffix := "-" + agent + ".jsonl"
+	for _, d := range dirs {
+		fi, err := c.Lstat(d)
+		if err != nil {
+			continue
+		}
+		if fi.Mode()&fs.ModeSymlink != 0 || !fi.IsDir() {
+			return "", errSubagentFile
+		}
+		list, _, err := c.ReadDirLimit(d, 4096)
+		if err != nil {
+			return "", err
+		}
+		for _, e := range list {
+			if !strings.HasPrefix(e.Name(), "rollout-") || !strings.HasSuffix(e.Name(), suffix) {
+				continue
+			}
+			file := d + "/" + e.Name()
+			if lf, err := c.Lstat(file); err != nil || lf.Mode()&fs.ModeSymlink != 0 || !lf.Mode().IsRegular() {
+				return "", errSubagentFile
+			}
+			head, err := c.ReadRange(file, 0, 8192)
+			if err != nil {
+				return "", err
+			}
+			if !codexSubagentOf(head, sid) {
+				return "", errSubagentFile
+			}
+			return file, nil
+		}
+	}
+	return "", errSubagentFile
+}
+
+// codexSubagentOf: a Codex log's first line says it is a subagent of the
+// session sid. That line goes on for tens of kilobytes (its instructions),
+// past the head read: it is walked key by key, its type and its payload's
+// thread_source and parent_thread_id told as they come (first in it), the
+// rest of it not needed.
+func codexSubagentOf(head []byte, sid string) bool {
+	if sid == "" {
+		return false
+	}
+	line, _, _ := bytes.Cut(head, []byte("\n"))
+	dec := json.NewDecoder(bytes.NewReader(line))
+	str := func() (string, bool) {
+		tok, err := dec.Token()
+		v, ok := tok.(string)
+		return v, err == nil && ok
+	}
+	open := func() bool { tok, err := dec.Token(); return err == nil && tok == json.Delim('{') }
+	skip := func() bool { var v json.RawMessage; return dec.Decode(&v) == nil }
+	var meta bool
+	if !open() {
+		return false
+	}
+	for dec.More() {
+		k, ok := str()
+		if !ok {
+			return false
+		}
+		switch k {
+		case "type":
+			v, ok := str()
+			if !ok || v != "session_meta" {
+				return false
+			}
+			meta = true
+		case "payload":
+			if !meta || !open() {
+				return false
+			}
+			var source, parent string
+			for dec.More() && (source == "" || parent == "") {
+				k, ok := str()
+				if !ok {
+					return false
+				}
+				switch k {
+				case "thread_source":
+					if source, ok = str(); !ok {
+						return false
+					}
+				case "parent_thread_id":
+					if parent, ok = str(); !ok {
+						return false
+					}
+				default:
+					if !skip() {
+						return false
+					}
+				}
+			}
+			return source == "subagent" && parent == sid
+		default:
+			if !skip() {
+				return false
+			}
+		}
+	}
+	return false
 }
 
 var errSubagentFile = errors.New("not a subagent's log")

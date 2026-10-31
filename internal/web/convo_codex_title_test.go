@@ -1,6 +1,7 @@
 package web
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -32,5 +33,36 @@ func TestCodexTitleKept(t *testing.T) {
 		if _, ok := st.codexTitleKept("another", c.pressed, now); ok {
 			t.Errorf("%s: kept for another process", c.name)
 		}
+	}
+}
+
+// A Codex log's head says it is a subagent of the session asked about, or
+// it is not given (item 1).
+func TestCodexSubagentOf(t *testing.T) {
+	const main = "01a18ff7-4138-7890-9ecd-1aee1502e132"
+	head := func(source, parent string) []byte {
+		return []byte(`{"timestamp":"x","type":"session_meta","payload":{"id":"01a18ff7-432f-7a80-bb03-7c6c92a8fd35","thread_source":"` + source + `","parent_thread_id":"` + parent + `"}}` + "\n{}\n")
+	}
+	for _, c := range []struct {
+		name string
+		head []byte
+		want bool
+	}{
+		{"its subagent", head("subagent", main), true},
+		{"another session's subagent", head("subagent", "01a18ff7-0000-7890-9ecd-1aee1502e132"), false},
+		{"not a subagent", head("user", main), false},
+		{"no parent said", head("subagent", ""), false},
+		{"not a log's head", []byte("garbage\n"), false},
+		// (A real one's line, its instructions after, cut off by the head read.)
+		{"its line cut off", []byte(`{"timestamp":"x","ordinal":0,"type":"session_meta","payload":{"session_id":"` + main + `","id":"01a18ff7-432f-7a80-bb03-7c6c92a8fd35","parent_thread_id":"` + main + `","source":{"subagent":{"thread_spawn":{"parent_thread_id":"` + main + `","depth":1}}},"thread_source":"subagent","base_instructions":{"text":"You are Codex, a coding agent. ` + strings.Repeat("x", 9000))[:8192], true},
+		{"cut off before it says", []byte(`{"timestamp":"x","type":"session_meta","payload":{"base_instructions":"` + strings.Repeat("x", 9000))[:8192], false},
+		{"a type after its payload not session_meta", []byte(`{"payload":{"thread_source":"subagent","parent_thread_id":"` + main + `"},"type":"session_meta"}` + "\n"), false},
+	} {
+		if got := codexSubagentOf(c.head, main); got != c.want {
+			t.Errorf("%s: %v", c.name, got)
+		}
+	}
+	if codexSubagentOf(head("subagent", ""), "") {
+		t.Error("no session: none")
 	}
 }

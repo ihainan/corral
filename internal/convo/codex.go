@@ -1091,6 +1091,20 @@ func (c *Codex) answer(ts []*Tool, out codexOut) {
 			t.Images = out.images
 		}
 		t.Error = t.Error || failed // (as told when done: what came back does not undo it)
+		// (A subagent sent off: its id, by which its own log is opened, and
+		// the name it goes by.)
+		if t.Name == "Agent" && !failed && t.AgentID == "" {
+			var sent struct {
+				AgentID  string `json:"agent_id"`
+				Nickname string `json:"nickname"`
+			}
+			if json.Unmarshal([]byte(strings.TrimSpace(out.text)), &sent) == nil && CodexAgentID(sent.AgentID) {
+				t.AgentID = sent.AgentID
+				if n := clean(sent.Nickname); n != "" && !strings.HasPrefix(t.Title, n) {
+					t.Title = clip(strings.TrimSuffix(n+": "+t.Title, ": "), maxTitle)
+				}
+			}
+		}
 		if failed && t.Name == "TodoWrite" {
 			for j := len(c.plans) - 1; j >= 0; j-- {
 				if c.plans[j].t == t {
@@ -1725,3 +1739,9 @@ func (l *codexLimits) quota(at string, old *Quota) *Quota {
 	}
 	return q.withOlder(old)
 }
+
+// CodexAgentID: a Codex subagent's id, as spawn_agent gives it (a thread's
+// UUID, in small letters): its log is named by it.
+func CodexAgentID(id string) bool { return codexAgentID.MatchString(id) }
+
+var codexAgentID = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
