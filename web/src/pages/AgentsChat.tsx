@@ -1273,7 +1273,10 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   // (Its name, short: a placeholder of one line, however long the name.)
   const short = (s?: string) => (s && [...s].length > 24 ? [...s].slice(0, 24).join('').trimEnd() + '…' : s)
   const to = agent ? [short(agent.title), agent.where].filter((x) => x && x !== '~').join(' · ') : ''
-  const placeholder = suggestion ?? (to ? t('convo.toPlaceholder', { name: to }) : t('term.composerPlaceholder'))
+  // (A Codex at work takes a message into the turn under way, as its own
+  // Enter does: it says so.)
+  const steers = convo.bind?.agent === 'codex' && agent?.status === 'working'
+  const placeholder = suggestion ?? (to ? t(steers ? 'convo.toPlaceholderSteer' : 'convo.toPlaceholder', { name: to }) : t('term.composerPlaceholder'))
   useComposerFit(field, draft, placeholder)
   // Why it cannot send now, if it cannot.
   // (Waiting for an answer, a message's Enter could take an option of its

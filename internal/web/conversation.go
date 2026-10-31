@@ -2911,6 +2911,12 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 			front.sid = ""
 		}
 	}
+	// (A Codex asked of before its log was begun, which its first message
+	// begins: the same process, at the one session it can have begun since.
+	// The conversation's scan, shared a few seconds, may not have seen it yet.)
+	if front != nil && front.agent == "codex" && b.Session == convoNoSession && front.pid == b.PID && front.start == b.Start && front.log != "" && convoUUID.MatchString(front.sid) && front.sid != convoNoSession {
+		b.Session = front.sid
+	}
 	if front == nil || front.pid != b.PID || front.start != b.Start || front.sid != b.Session {
 		reason = "agent_changed"
 		writeError(w, http.StatusConflict, "agent_changed", "that pane no longer runs this agent")
