@@ -88,6 +88,8 @@ type Server struct {
 
 	stopMu  sync.Mutex
 	stopCtx context.Context // the stop's deadline, once it began (see BeginShutdown)
+
+	restores restorer // sessions open before the restart, being opened again (restore.go)
 }
 
 type liveSocket struct {
@@ -114,6 +116,7 @@ func New(d Deps) *Server {
 		log: d.Log, mux: http.NewServeMux(), static: d.Static, socks: map[int64]map[*liveSocket]struct{}{},
 		pending: map[int64]map[*liveSocket]struct{}{}, herdrSocks: herdrSockets{path: map[string]string{}},
 		notifier: d.Notifier, vis: visibility{seen: map[string]map[*liveSocket]bool{}}, fwd: newForwarder(), files: newSFTPPool(), code: codeServers{jobs: map[[2]int64]*codeJob{}}}
+	s.restores.ctx, s.restores.stop = context.WithCancel(context.Background())
 	s.fwd.wg.Add(1)
 	go s.fwd.reap()
 	s.terms.OnAlert = s.onTerminalAlert
@@ -133,6 +136,7 @@ func New(d Deps) *Server {
 		// Cancel what is still connecting and the open sockets first: those must
 		// stop immediately; closing terminals can take a moment per host.
 		s.closeSockets(userID, "")
+		s.cancelRestores(userID, 0)
 		s.closeUserForwards(userID)
 		s.forgetUserCode(userID)
 		if s.notifier != nil {

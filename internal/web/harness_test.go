@@ -12,6 +12,7 @@ import (
 	"net/netip"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -25,13 +26,15 @@ import (
 )
 
 type harness struct {
-	t     *testing.T
-	ts    *httptest.Server
-	srv   *Server
-	cfg   *config.Config
-	store *store.Store
-	auth  *auth.Service
-	terms *term.Manager
+	t       *testing.T
+	ts      *httptest.Server
+	srv     *Server
+	cfg     *config.Config
+	store   *store.Store
+	auth    *auth.Service
+	terms   *term.Manager
+	vault   *vault.Vault
+	handler atomic.Value // http.Handler: the server's, replaced by restart
 }
 
 type harnessOpt func(*config.Config)
@@ -39,8 +42,7 @@ type harnessOpt func(*config.Config)
 func newHarness(t *testing.T, opts ...harnessOpt) *harness {
 	t.Helper()
 	h := &harness{t: t}
-	var handler http.Handler
-	h.ts = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { handler.ServeHTTP(w, r) }))
+	h.ts = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { h.handler.Load().(http.Handler).ServeHTTP(w, r) }))
 	t.Cleanup(h.ts.Close)
 	u, _ := url.Parse(h.ts.URL)
 	h.cfg = &config.Config{
@@ -63,7 +65,7 @@ func newHarness(t *testing.T, opts ...harnessOpt) *harness {
 	}
 	t.Cleanup(func() { st.Close() })
 	v, _ := vault.New(h.cfg.MasterKey)
-	h.store = st
+	h.store, h.vault = st, v
 	h.auth = auth.NewService(st, h.cfg.LoginIdleTimeout, h.cfg.LoginAbsoluteLimit)
 	h.terms = term.NewManager(h.cfg.DetachTimeout, h.cfg.MaxSessionsPerUser)
 	t.Cleanup(h.terms.Shutdown)
@@ -71,8 +73,30 @@ func newHarness(t *testing.T, opts ...harnessOpt) *harness {
 		Guard: netguard.New(h.cfg.AllowedNetworks, h.cfg.DeniedNetworks), Terms: h.terms,
 		Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
 	t.Cleanup(h.srv.Close) // runs before the terminal manager's shutdown
-	handler = h.srv.Handler()
+	h.handler.Store(h.srv.Handler())
 	return h
+}
+
+// restart stops the server as the gateway stops (its terminals ended as
+// stopped) and serves a new one, with its own terminal manager, on the same
+// database; the sessions kept are not opened again (StartRestore does).
+func (h *harness) restart() {
+	h.t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	h.srv.BeginShutdown(ctx)
+	h.terms.Shutdown()
+	if !h.terms.WaitEnds(ctx) {
+		h.t.Fatal("ends of the old terminals not recorded")
+	}
+	h.auth = auth.NewService(h.store, h.cfg.LoginIdleTimeout, h.cfg.LoginAbsoluteLimit)
+	h.terms = term.NewManager(h.cfg.DetachTimeout, h.cfg.MaxSessionsPerUser)
+	h.t.Cleanup(h.terms.Shutdown)
+	h.srv = New(Deps{Config: h.cfg, Store: h.store, Auth: h.auth, Vault: h.vault,
+		Guard: netguard.New(h.cfg.AllowedNetworks, h.cfg.DeniedNetworks), Terms: h.terms,
+		Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	h.t.Cleanup(h.srv.Close)
+	h.handler.Store(h.srv.Handler())
 }
 
 type client struct {

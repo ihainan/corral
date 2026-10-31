@@ -34,14 +34,16 @@ func tabOf(sess *term.Session, owner, host int64, cfg string) *store.OpenTab {
 
 // registerOpened is the Register of a session a person opens (tmux or
 // herdr): kept while the login that opened it is valid, in the same
-// transaction (a revocation committed before: refused, nothing published).
+// transaction (a revocation committed before: refused, nothing published),
+// and while the host is as it was dialed (changed: refused too).
 // The database failing otherwise: opened all the same, not kept (it is not
 // opened again after a restart; the browser still does).
 func (s *Server) registerOpened(owner, host int64, cfg, login string) func(context.Context, *term.Session) error {
 	return func(ctx context.Context, sess *term.Session) error {
-		err := s.store.RegisterTab(ctx, tabOf(sess, owner, host, cfg), login, s.auth.LoginRule())
+		err := s.store.RegisterTab(ctx, tabOf(sess, owner, host, cfg), login, s.auth.LoginRule(),
+			func(h *store.Host) bool { return hostConfig(h) == cfg })
 		switch {
-		case errors.Is(err, store.ErrNoLogin):
+		case errors.Is(err, store.ErrNoLogin), errors.Is(err, store.ErrHostChanged):
 			return err
 		case err != nil && ctx.Err() == nil:
 			s.log.Warn("open tabs: a session not kept", "err", err)
@@ -125,7 +127,7 @@ func (s *Server) keepRunningTabs(ctx context.Context) {
 }
 
 // BeginShutdown stops what opens sessions: the manager refuses new ones,
-// opens under way are cancelled and new ones refused (only those: other
+// restores are cancelled, opens under way are cancelled and new ones refused (only those: other
 // requests drain; one cancelled would answer "sign in", which signs the
 // page out), and writes made as sessions end are bounded by stop (the
 // stop's deadline).
@@ -134,6 +136,7 @@ func (s *Server) BeginShutdown(stop context.Context) {
 	s.stopCtx = stop
 	s.stopMu.Unlock()
 	s.terms.BeginShutdown()
+	s.stopRestores()
 	s.sockMu.Lock()
 	s.stopping = true
 	for _, m := range s.pending {

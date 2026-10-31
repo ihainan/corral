@@ -450,6 +450,7 @@ func (s *Server) deleteHost(w http.ResponseWriter, r *http.Request) {
 	}
 	// Deleted first, then closed: a connect finishing now fails its host re-check.
 	s.cancelPendingForHost(u.ID, h.ID)
+	s.cancelRestores(u.ID, h.ID)
 	s.picks.dropHost(u.ID, h.ID)
 	s.closeHostForwards(u.ID, h.ID)
 	s.forgetHostCode(u.ID, h.ID)

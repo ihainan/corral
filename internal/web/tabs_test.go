@@ -2,6 +2,9 @@ package web
 
 import (
 	"context"
+	"encoding/json"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -112,5 +115,188 @@ func TestOpenTabHeartbeat(t *testing.T) {
 	h.srv.keepRunningTabs(context.Background())
 	if after := h.tabs()[0]; after.AliveAt <= before.AliveAt {
 		t.Errorf("not recorded as running: before %d after %d", before.AliveAt, after.AliveAt)
+	}
+}
+
+// restored: the session.restore outcomes, by the name of what was kept.
+func (h *harness) restored() map[string]string {
+	h.t.Helper()
+	list, err := h.store.ListAudit(context.Background(), storeAuditQuery())
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	out := map[string]string{}
+	for _, a := range list {
+		if a.Action != "session.restore" {
+			continue
+		}
+		var d struct{ Name, Outcome string }
+		_ = json.Unmarshal(a.Detail, &d)
+		out[d.Name] = d.Outcome
+	}
+	return out
+}
+
+// kept: the records as a start reads them, before anyone connects.
+func (h *harness) kept() []*store.OpenTab {
+	h.t.Helper()
+	all, err := h.store.OpenTabs(context.Background(), RestoreMax)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	return all
+}
+
+func (h *harness) restoreNow(kept []*store.OpenTab) {
+	h.t.Helper()
+	h.srv.StartRestore(kept)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if !h.srv.WaitRestores(ctx) {
+		h.t.Fatal("restores did not end")
+	}
+}
+
+// After a restart: what still runs at the host is opened again, attached
+// only, its record now the new terminal's, with its size and unattended
+// time; what is no longer there is not, nor what is too old; one opened
+// again from a browser first is left to it.
+func TestRestoreAfterRestart(t *testing.T) {
+	h := newHarness(t)
+	admin := h.admin()
+	srv, id := pickerHost(t, h, admin, true, "password") // (its tmux lists work and other)
+	for _, name := range []string{"work", "other", "nothere"} {
+		mustStatus(t, admin.do("POST", "/api/sessions", map[string]any{"host_id": id, "cols": 132, "rows": 40, "open": map[string]any{"kind": "tmux", "name": name}}), 201, name)
+	}
+	h.restart()
+	kept := h.kept()
+	byName := map[string]*store.OpenTab{}
+	for _, tb := range kept {
+		byName[tb.Name] = tb
+	}
+	// other: opened again from a browser before its turn.
+	mustStatus(t, admin.do("POST", "/api/sessions", map[string]any{"host_id": id, "open": map[string]any{"kind": "tmux", "name": "other"}}), 201, "other again")
+	execsBefore := len(srv.Commands())
+	h.restoreNow(kept)
+
+	got := h.restored()
+	if got["work"] != "restored" || got["nothere"] != "skipped:not_running" || got["other"] != "" {
+		t.Fatalf("outcomes %v", got)
+	}
+	list := h.terms.List(byName["work"].OwnerID)
+	if len(list) != 2 {
+		t.Fatalf("running %+v", list)
+	}
+	var otherID string
+	var work string
+	for _, in := range list {
+		switch in.MuxSession {
+		case "work":
+			work = in.ID
+		case "other":
+			otherID = in.ID
+		}
+	}
+	all := h.tabs()
+	names := map[string]string{}
+	for _, tb := range all {
+		names[tb.Name] = tb.SessionID
+	}
+	if len(all) != 2 || names["work"] != work || work == byName["work"].SessionID || names["other"] != otherID || names["nothere"] != "" {
+		t.Fatalf("records %+v (work running as %s)", all, work)
+	}
+	sess, _ := h.terms.Get(byName["work"].OwnerID, work)
+	if snap := sess.Snapshot(); snap.Cols != 132 || snap.Rows != 40 || snap.IdleSince.Unix() != byName["work"].IdleSince {
+		t.Errorf("size or unattended time not kept: %+v, recorded %+v", snap, byName["work"])
+	}
+	// Attached only: no command that makes a session or a shell.
+	for _, c := range srv.Commands()[execsBefore:] {
+		if strings.Contains(c, "new-session") || strings.Contains(c, "SHELL") {
+			t.Errorf("ran %s", c)
+		}
+	}
+}
+
+// Too old, or its user signed out everywhere: not opened again.
+func TestRestoreSkipsStaleAndSignedOut(t *testing.T) {
+	h := newHarness(t)
+	admin := h.admin()
+	_, id := pickerHost(t, h, admin, true, "password")
+	mustStatus(t, admin.do("POST", "/api/sessions", map[string]any{"host_id": id, "open": map[string]any{"kind": "tmux", "name": "work"}}), 201, "work")
+	h.restart()
+	tb := h.tabs()[0]
+	old := time.Now().Add(-2 * time.Hour).Unix()
+	if err := h.store.KeepTabs(context.Background(), []store.TabState{{SessionID: tb.SessionID, OwnerID: tb.OwnerID, AliveAt: old, IdleSince: old, Cols: 80, Rows: 24}}); err != nil {
+		t.Fatal(err)
+	}
+	h.restoreNow(h.kept())
+	if got := h.restored()["work"]; got != "skipped:stale" || len(h.tabs()) != 0 || len(h.terms.List(tb.OwnerID)) != 0 {
+		t.Fatalf("stale: %q, records %d", got, len(h.tabs()))
+	}
+
+	mustStatus(t, admin.do("POST", "/api/sessions", map[string]any{"host_id": id, "open": map[string]any{"kind": "tmux", "name": "other"}}), 201, "other")
+	// (The logins outlived as the new gateway counts them: none valid.)
+	time.Sleep(1100 * time.Millisecond)
+	h.cfg.LoginIdleTimeout = time.Millisecond
+	h.restart()
+	h.restoreNow(h.kept())
+	if got := h.restored()["other"]; got != "skipped:no_login" || len(h.tabs()) != 0 || len(h.terms.List(tb.OwnerID)) != 0 {
+		t.Fatalf("signed out: %q, records %d", got, len(h.tabs()))
+	}
+}
+
+// herdr: the default session opened again as herdr's default (not one
+// named "default"), a named one by its name; one stopped since, not.
+func TestRestoreHerdr(t *testing.T) {
+	h := newHarness(t)
+	admin := h.admin()
+	list := `{"sessions":[{"name":"default","default":true,"running":true},{"name":"work","default":false,"running":true},{"name":"gone","default":false,"running":false}]}`
+	srv, id := pickerHost(t, h, admin, false, "password", list)
+	for _, name := range []string{"", "work", "gone"} {
+		mustStatus(t, admin.do("POST", "/api/sessions", map[string]any{"host_id": id, "open": map[string]any{"kind": "herdr", "name": name}}), 201, "herdr "+name)
+	}
+	if all := h.tabs(); len(all) != 3 {
+		t.Fatalf("records %+v", all)
+	}
+	h.restart()
+	before := len(srv.Commands())
+	h.restoreNow(h.kept())
+	got := h.restored()
+	if got["default"] != "restored" || got["work"] != "restored" || got["gone"] != "skipped:not_running" {
+		t.Fatalf("outcomes %v", got)
+	}
+	var attach []string
+	for _, c := range srv.Commands()[before:] {
+		if strings.Contains(c, "exit 127") {
+			attach = append(attach, c)
+		}
+	}
+	if len(attach) != 2 || !slices.ContainsFunc(attach, func(c string) bool { return strings.HasSuffix(c, " corral ''") }) ||
+		!slices.ContainsFunc(attach, func(c string) bool { return strings.HasSuffix(c, " corral 'work'") }) {
+		t.Errorf("attached with %q", attach)
+	}
+	if all := h.tabs(); len(all) != 2 {
+		t.Errorf("records after %+v", all)
+	}
+}
+
+// Over the user's terminals: the rest kept, for later (Reserve counts
+// what is pending: it may be only for now).
+func TestRestoreQuotaKeeps(t *testing.T) {
+	h := newHarness(t)
+	admin := h.admin()
+	_, id := pickerHost(t, h, admin, true, "password")
+	for _, name := range []string{"work", "other"} {
+		mustStatus(t, admin.do("POST", "/api/sessions", map[string]any{"host_id": id, "open": map[string]any{"kind": "tmux", "name": name}}), 201, name)
+	}
+	h.cfg.MaxSessionsPerUser = 1
+	h.restart()
+	h.restoreNow(h.kept())
+	got := h.restored()
+	if !(got["work"] == "restored" && got["other"] == "cancelled:quota" || got["other"] == "restored" && got["work"] == "cancelled:quota") {
+		t.Fatalf("outcomes %v", got)
+	}
+	if all := h.tabs(); len(all) != 2 {
+		t.Errorf("records %+v", all)
 	}
 }

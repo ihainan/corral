@@ -45,6 +45,13 @@ func (s *SSHServer) BeforeAuth(f func()) {
 
 // HandleExec lets a test run a command itself: f returns what to do with the
 // channel, or nil for the default echoing shell. The channel closes after.
+// Commands are the exec requests received so far.
+func (s *SSHServer) Commands() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.Execs...)
+}
+
 func (s *SSHServer) HandleExec(f func(cmd string) func(ch ssh.Channel)) {
 	s.mu.Lock()
 	s.onExec = f

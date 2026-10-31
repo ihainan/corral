@@ -26,7 +26,7 @@ func pickerHost(t *testing.T, h *harness, admin *client, withTmux bool, auth str
 	if len(herdrList) > 0 {
 		bin := filepath.Join(home, ".local", "bin")
 		os.MkdirAll(bin, 0o755)
-		os.WriteFile(filepath.Join(bin, "herdr"), []byte("#!/bin/sh\n[ \"$1\" = --session ] && { read x; exit; }\necho '"+herdrList[0]+"'\n"), 0o755)
+		os.WriteFile(filepath.Join(bin, "herdr"), []byte("#!/bin/sh\n[ \"$1\" = session ] && { echo '"+herdrList[0]+"'; exit; }\nread x\n"), 0o755)
 	}
 	// Only sh on PATH: whatever tmux or herdr this machine has is not seen.
 	sys := filepath.Join(t.TempDir(), "sys")

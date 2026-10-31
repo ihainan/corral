@@ -312,14 +312,15 @@ func TestShellQuotingRoundTrips(t *testing.T) {
 // 6b. Only reviewed call sites start remote processes.
 func TestRemoteExecCallSitesAreReviewed(t *testing.T) {
 	allowed := map[string]bool{
-		"term/manager.go: err = sess.Start(TmuxCommand(opt.TmuxSession))":                             true,
-		"term/manager.go: err = sess.Start(TmuxNewCommand(opt.TmuxSession))":                          true,
-		"term/manager.go: err = sess.Start(HerdrCommand(opt.HerdrSession))":                           true,
-		"term/manager.go: err = sess.Start(TmuxAttachCommand(opt.TmuxSession))":                       true, // fixed script, the validated session name quoted; attaches only (no new session, no shell)
-		"term/manager.go: err = sess.Start(HerdrAttachCommand(opt.HerdrSession))":                     true, // fixed script, the validated session name quoted; no shell where herdr is missing
-		"web/api_sessions.go: sess, err := s.terms.Start(ctx, res, u.ID, h.ID, h.Name, client, opts)": true,
-		"herdr/client.go: out, err := sshx.Output(ctx, c, DiscoverCommand, sshx.MaxOutput)":           true,
-		"herdr/keys.go: out, err := sshx.Output(ctx, c, KeysCommand, keysLimit)":                      true, // fixed text, no input
+		"term/manager.go: err = sess.Start(TmuxCommand(opt.TmuxSession))":                                 true,
+		"term/manager.go: err = sess.Start(TmuxNewCommand(opt.TmuxSession))":                              true,
+		"term/manager.go: err = sess.Start(HerdrCommand(opt.HerdrSession))":                               true,
+		"term/manager.go: err = sess.Start(TmuxAttachCommand(opt.TmuxSession))":                           true, // fixed script, the validated session name quoted; attaches only (no new session, no shell)
+		"term/manager.go: err = sess.Start(HerdrAttachCommand(opt.HerdrSession))":                         true, // fixed script, the validated session name quoted; no shell where herdr is missing
+		"web/api_sessions.go: sess, err := s.terms.Start(ctx, res, u.ID, h.ID, h.Name, client, opts)":     true,
+		"web/restore.go: sess, err := s.terms.Start(ctx, res, t.OwnerID, t.HostID, h.Name, client, opts)": true, // attach only; the recorded name checked as an open's
+		"herdr/client.go: out, err := sshx.Output(ctx, c, DiscoverCommand, sshx.MaxOutput)":               true,
+		"herdr/keys.go: out, err := sshx.Output(ctx, c, KeysCommand, keysLimit)":                          true, // fixed text, no input
 		"web/herdr.go: w.Run(ctx)": true, // watcher loop, runs no remote command itself
 		"web/herdr.go: out, err := sshx.Output(ctx, sess.Client(), cmdScanCommand(), cmdScanMax)":                                                                                                                                         true, // fixed script, no arguments: the SSH account's Claude Code processes' children whose output goes to a task file
 		"web/herdr.go: out, err := sshx.Output(ctx, sess.Client(), bgTailCommand(sids, tail), len(sids)*(tail+256))":                                                                                                                      true, // fixed script; its arguments a size (a constant) and Claude Code session ids, validated (convoUUID) and quoted

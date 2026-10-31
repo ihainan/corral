@@ -124,10 +124,14 @@ func run(log *slog.Logger) error {
 
 	// The sessions kept open over a restart (see internal/web/tabs.go):
 	// turned off, the ones kept are forgotten before anyone can connect.
+	// Read before anyone can connect: what is opened meanwhile is not among them.
+	var reopen []*store.OpenTab
 	if os.Getenv("CORRAL_RESTORE_SESSIONS") == "off" {
 		if err := st.ClearTabs(ctx); err != nil {
 			return fmt.Errorf("forget the sessions kept over the restart: %w", err)
 		}
+	} else if reopen, err = st.OpenTabs(ctx, web.RestoreMax); err != nil {
+		return fmt.Errorf("read the sessions kept over the restart: %w", err)
 	}
 	hbCtx, stopHeartbeat := context.WithCancel(context.Background())
 	defer stopHeartbeat()
@@ -157,6 +161,7 @@ func run(log *slog.Logger) error {
 		log.Info("corral listening", "addr", cfg.Listen, "public_url", cfg.Origin(), "version", version)
 		errc <- hs.Serve(ln)
 	}()
+	srv.StartRestore(reopen)
 	select {
 	case err := <-errc:
 		if !errors.Is(err, http.ErrServerClosed) {
@@ -166,7 +171,7 @@ func run(log *slog.Logger) error {
 	}
 	log.Info("shutting down")
 	// One budget for the whole stop. Nothing opens sessions any more; then
-	// requests drain and starts under way finish, together; the heartbeat
+	// requests drain, and restores and starts under way finish, together; the heartbeat
 	// stops; the terminals close, as stopped (their records kept), and what
 	// is written as they end is waited for; then forwards, recordings and
 	// background work. The budget spent: left as after a crash.
@@ -183,6 +188,7 @@ func run(log *slog.Logger) error {
 	}()
 	go func() {
 		defer drain.Done()
+		srv.WaitRestores(stopCtx)
 		terms.WaitStarts(stopCtx)
 	}()
 	drain.Wait()
