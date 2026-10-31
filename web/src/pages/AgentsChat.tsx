@@ -1602,7 +1602,9 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   useEffect(() => {
     if (op && op.key !== bindKey) setOp(null)
   }, [op, bindKey])
-  const canOps = canModel || canEffort || (bound && !notClaude && convo.status === 'ready' && (agent?.status === 'idle' || agent?.status === 'done') && !agent?.other)
+  // (A Codex's: compact and start anew, as Claude Code's.)
+  const opsOf = codex ? (['compact', 'clear'] as const) : notClaude ? ([] as const) : (['compact', 'rename', 'clear'] as const)
+  const canOps = canModel || canEffort || (bound && opsOf.length > 0 && convo.status === 'ready' && (agent?.status === 'idle' || agent?.status === 'done') && !agent?.other)
   const runOp = (b: NonNullable<typeof convo.bind>, text: string) => {
     return api('POST', `/api/sessions/${sid}/conversation/command`, { pane: b.pane, pid: b.pid, start: b.start, session: b.session, text }, { timeoutMs: PRESS_MS }).then(() => {
       toast(t('ops.sent'))
@@ -1638,8 +1640,8 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   const more = (): (MenuItem | null)[] => [
     { label: t('convo.showTerminal'), icon: <SquareTerminal size={16} />, onSelect: openTerminal },
     pinItem(cur.key),
-    ...(['compact', 'rename', 'clear'] as const).map((o, i): MenuItem | null =>
-      !notClaude && bound ? { label: t(`ops.${o}.item`), icon: OP_ICONS[o], separator: i === 0, disabled: !canOps, title: canOps ? undefined : t('ops.onlyIdle'), onSelect: () => convo.bind && setOp({ op: o, bind: convo.bind, key: bindKey }) } : null,
+    ...opsOf.map((o, i): MenuItem | null =>
+      bound ? { label: t(codex && o === 'clear' ? 'ops.clear.itemCodex' : `ops.${o}.item`), icon: OP_ICONS[o], separator: i === 0, disabled: !canOps, title: canOps ? undefined : t('ops.onlyIdle'), onSelect: () => convo.bind && setOp({ op: o, bind: convo.bind, key: bindKey }) } : null,
     ),
     canClose ? { label: t('agents.close'), icon: <Power size={16} />, danger: true, separator: true, onSelect: () => setClosing(cur) } : null,
   ]
@@ -1704,7 +1706,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       query={query}
       onQuery={onQuery}
     />
-    {op && <SessionOpDialog op={op.op} name={convo.title} onSend={(text) => runOp(op.bind, text)} onClose={() => setOp(null)} onShowTerminal={openTerminal} />}
+    {op && <SessionOpDialog op={op.op} name={convo.title} codex={op.bind.agent === 'codex'} onSend={(text) => runOp(op.bind, text)} onClose={() => setOp(null)} onShowTerminal={openTerminal} />}
     {closing?.row && (
       <Confirm
         title={closing.key === cur.key ? t('agents.closeTitle') : t('agents.closeTitleNamed', { name: rows.find((r) => r.key === closing.key)?.title ?? '' })}

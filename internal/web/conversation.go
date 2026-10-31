@@ -183,6 +183,7 @@ printf 'hostnow=%s\0' "$(date +%s 2>/dev/null)"
 nl=$(printf '\nx'); nl=${nl%x}
 btime=$(sed -n 's/^btime \([0-9]*\)$/\1/p' /proc/stat 2>/dev/null); hz=$(getconf CLK_TCK 2>/dev/null)
 case $hz in ''|*[!0-9]*|0) hz=;; esac
+` + codexPendingSh + `
 # Codex's subcommand ($1 its pid): its first word after options and their
 # values ("codex -p exec" is no exec; "codex -c x=1 exec" is), none after
 # "--". Those that do not converse (exec, review, …) are no agent to type to.
@@ -333,7 +334,12 @@ for d in $codexes; do
     case $l in *"$nl"*) continue;; */rollout-*.jsonl) any=1;; esac
     case $l in "$HOME"/.codex/sessions/*/rollout-*.jsonl) { [ -z "$log" ] || [ "$l" -nt "$log" ]; } && log=$l;; esac
   done
-  if [ -n "$log" ]; then
+  codex_pending "$d"
+  if [ -n "$pending" ] && [ -z "$sub" ]; then
+    # (Begun anew, /new: its log not begun yet, the one it has open the
+    # conversation before. As one just started: the zero id.)
+    log= sid=00000000-0000-0000-0000-000000000000
+  elif [ -n "$log" ]; then
     # (No subcommand to go by: its log's head says how it was begun.)
     [ -z "$sub" ] && head -c 4096 "$log" 2>/dev/null | grep -q '"originator": *"codex_exec"' && continue
     sid=$(printf '%s' "${log%.jsonl}" | grep -o '[0-9a-fA-F]\{8\}-[0-9a-fA-F]\{4\}-[0-9a-fA-F]\{4\}-[0-9a-fA-F]\{4\}-[0-9a-fA-F]\{12\}$')
@@ -2407,6 +2413,7 @@ if [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -d "$XDG_RUNTIME_DIR" ] && [ ! -L "$l" ] &
   done
 fi
 [ "$len" = keys ] || [ "$(wc -c <"$f" | tr -d ' ')" = "$len" ] || exit 4
+` + codexPendingSh + `
 front() {
   stat=$(tr '\n' ' ' <"/proc/$pid/stat" 2>/dev/null) || return 1
   rest=${stat##*) }
@@ -2428,10 +2435,14 @@ front() {
       case $l in */rollout-*.jsonl) any=1;; esac
       case $l in "$HOME"/.codex/sessions/*/rollout-*.jsonl) { [ -z "$lg" ] || [ "$l" -nt "$lg" ]; } && lg=$l;; esac
     done
-    # (The zero id: one with no log open yet, anywhere, run with no
-    # subcommand, as it was located.)
+    # (The zero id: one with no log open yet, anywhere, or begun anew and
+    # its log not yet begun (codex_pending), run with no subcommand, as it
+    # was located. Begun anew, it is at no session it had: not that one's.)
+    codex_pending "/proc/$pid"
     if [ "$sid" = 00000000-0000-0000-0000-000000000000 ]; then
-      [ -z "$cs" ] && [ -z "$any" ] || return 1
+      [ -z "$cs" ] && { [ -z "$any" ] || [ -n "$pending" ]; } || return 1
+    elif [ -n "$pending" ]; then
+      return 1
     elif [ -z "$lg" ]; then
       # (None of its own: its app-server daemon keeps it. That log is of
       # this session and was begun where this process runs, as locating
@@ -2692,7 +2703,7 @@ func commandText(s string) (string, bool) {
 		return "", false
 	}
 	switch {
-	case t == "/compact" || t == "/clear" || strings.HasPrefix(t, "/compact "):
+	case t == "/compact" || t == "/clear" || t == "/new" || strings.HasPrefix(t, "/compact "):
 	case strings.HasPrefix(t, "/rename ") && strings.TrimSpace(t[len("/rename "):]) != "":
 	default:
 		return "", false
@@ -3042,7 +3053,15 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	// (Claude Code's own keys and picker: not for Codex or OpenCode. A
 	// Codex in tmux is answered here, its screen read: in herdr, by herdr.)
 	codexAnswer := front.agent == "codex" && sess.Persistence == "tmux" && (what == "screen" || what == "reply")
-	if (front.agent == "codex" || front.agent == "opencode") && what != "send" && what != "interrupt" && !codexAnswer {
+	// (A Codex's own commands from the menu: /compact, /new; it refuses them
+	// itself while it works. Not Claude Code's /clear and /rename.)
+	codexCommand := front.agent == "codex" && what == "command" && (text == "/compact" || text == "/new")
+	if what == "command" && front.agent == "claude" && text == "/new" {
+		reason = "bad_request"
+		writeError(w, http.StatusBadRequest, "bad_request", "not a command of Claude Code's")
+		return
+	}
+	if (front.agent == "codex" || front.agent == "opencode") && what != "send" && what != "interrupt" && !codexAnswer && !codexCommand {
 		reason = "unsupported"
 		writeError(w, http.StatusConflict, "unsupported", "not for this agent")
 		return
@@ -3156,6 +3175,8 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		gate = "free" // (not while it waits: what is typed would go to its question)
 	case front.agent == "codex" && (what == "send" || what == "send_now"):
 		gate = "cfree" // (likewise: typed into its approval, the Enter would answer it)
+	case what == "command" && front.agent == "codex":
+		gate = "cfree" // (not while it waits for an answer: typed into it; while it works, Codex refuses the command itself)
 	case what == "command":
 		gate = "idle" // (not while it works either: it would wait in its queue, and run when no one looks)
 	case what == "close_dialog":
@@ -3367,3 +3388,21 @@ func (s *Server) apiConversationSubagent(w http.ResponseWriter, r *http.Request)
 }
 
 var errSubagentFile = errors.New("not a subagent's log")
+
+// codexPendingSh defines codex_pending (of locating's script and the
+// gated command's, the same words): $1 a Codex process's /proc dir; it sets
+// pending where the process holds a conversation's writer lock
+// (~/.codex/thread-writer-locks/<id>.lock) whose log it has not open — a
+// conversation begun anew (/new), its log begun with its first message,
+// the one before still open (Codex 0.164, plans/5d3b-codex-new-compact.md).
+const codexPendingSh = `codex_pending() {
+  pending= _locks= _logs=
+  for _f in "$1"/fd/*; do
+    _l=$(readlink "$_f" 2>/dev/null) || continue
+    case $_l in
+    "$HOME"/.codex/sessions/*/rollout-*.jsonl) _logs="$_logs ${_l%.jsonl} " ;;
+    "$HOME"/.codex/thread-writer-locks/*.lock) _i=${_l##*/}; _i=${_i%.lock}; case $_i in ''|*[!0-9a-fA-F-]*) ;; *) _locks="$_locks $_i" ;; esac ;;
+    esac
+  done
+  for _i in $_locks; do case "$_logs" in *"-$_i "*) ;; *) pending=1 ;; esac; done
+}`

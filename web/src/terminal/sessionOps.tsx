@@ -5,17 +5,19 @@ import { Dialog } from '../components/ui'
 
 // Claude Code's own commands on its session, from the conversation's menu:
 // compact it (with what to keep, if said), rename it, start anew (/clear).
-// Sent only while it is idle (the gateway checks on the host).
+// Sent only while it is idle (the gateway checks on the host). A Codex's:
+// compact it (/compact, nothing to say with it), start anew (/new).
 export type SessionOp = 'compact' | 'rename' | 'clear'
 
-export function SessionOpDialog({ op, name, onSend, onClose, onShowTerminal }: { op: SessionOp; name?: string; onSend: (text: string) => Promise<unknown>; onClose: () => void; onShowTerminal: () => void }) {
+export function SessionOpDialog({ op, name, codex, onSend, onClose, onShowTerminal }: { op: SessionOp; name?: string; codex?: boolean; onSend: (text: string) => Promise<unknown>; onClose: () => void; onShowTerminal: () => void }) {
   const [text, setText] = useState(op === 'rename' ? (name ?? '') : '')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   // (Typed into its input, not sent: what is there now is for the terminal to see to, not to be typed again.)
   const [left, setLeft] = useState(false)
   const line = text.replace(/\s+/g, ' ').trim()
-  const command = op === 'compact' ? (line ? '/compact ' + line : '/compact') : op === 'rename' ? '/rename ' + line : '/clear'
+  const command = codex ? (op === 'compact' ? '/compact' : '/new') : op === 'compact' ? (line ? '/compact ' + line : '/compact') : op === 'rename' ? '/rename ' + line : '/clear'
+  const body = codex ? (op === 'compact' ? t('ops.compact.bodyCodex') : t('ops.clear.bodyCodex')) : t(`ops.${op}.body`)
   const ready = op !== 'rename' || !!line
   const submit = async (e?: FormEvent) => {
     e?.preventDefault()
@@ -43,8 +45,8 @@ export function SessionOpDialog({ op, name, onSend, onClose, onShowTerminal }: {
   return (
     <Dialog title={t(`ops.${op}.title`)} onClose={close}>
       <form className="form" onSubmit={submit}>
-        <p className="lead">{t(`ops.${op}.body`)}</p>
-        {op !== 'clear' && (
+        <p className="lead">{body}</p>
+        {op !== 'clear' && !codex && (
           <input
             className="input"
             value={text}
