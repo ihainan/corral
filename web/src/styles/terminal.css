@@ -480,6 +480,14 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-models-desc { grid-column: 1; font-size: 12px; color: var(--term-fg-3); }
 .convo-models-item svg { grid-column: 2; grid-row: 1 / span 2; }
 .convo-models .convo-runs-note { margin: 4px 8px 2px; }
+/* (A Codex's efforts, chosen with its model: under it, a row of chips.) */
+.convo-models-efforts { display: flex; flex-wrap: wrap; gap: 6px; padding: 4px 8px 8px; }
+.convo-models-effort {
+  padding: 4px 10px; border: 1px solid var(--term-line); border-radius: 999px; background: var(--term-bg);
+  color: var(--term-fg); font: inherit; font-size: 12.5px; cursor: pointer;
+}
+.convo-models-effort:hover, .convo-models-effort:focus-visible { background: var(--term-hover); outline: none; }
+.convo-models-effort.is-current { border-color: var(--term-accent-text); color: var(--term-accent-text); }
 .convo-runs-ctx:hover, .convo-runs-ctx[aria-expanded='true'] { background: var(--term-hover); color: var(--term-fg); }
 .convo-runs-ctx:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: 1px; }
 .convo-runs-pop {

@@ -323,13 +323,21 @@ func modelFlow(step, leave modelStep, target string) (opts []modelOpt, err error
 // of convoSendCommand (the same process in front there). It holds the
 // pane's turn (release gives it back): until the last step's command has
 // ended on the host, if one was given up before. target "": the list.
-func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *term.Session, pane, socket string, pid, start int64, sid, target string, outcome, reason *string, release func()) {
+// A Codex's (codex): codexModelFlow, target with effort; its config.toml,
+// which "s" leaves alone, read before and after only to say if it changed.
+func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *term.Session, pane, socket string, pid, start int64, sid, target string, outcome, reason *string, release func(), codex bool, effort string) {
 	var running sync.WaitGroup // (steps whose command may still run on the host)
 	// The default model as it is now, put back after if changed (see withModel).
 	sctx, scancel := context.WithTimeout(ctx, 10*time.Second)
 	saved, none, err := readSettings(sctx, sess)
+	if codex {
+		saved, none, err = readCodexConfig(sctx, sess)
+	}
 	scancel()
 	was, had, perr := settingsModel(saved, none)
+	if codex {
+		perr = nil
+	}
 	if err != nil || perr != nil {
 		release()
 		*reason = "settings"
@@ -341,6 +349,17 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 	restore := func() (changed bool, err error) {
 		rctx, rcancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
 		defer rcancel()
+		if codex {
+			// (Codex's config: said if changed, not written back — Codex writes it itself too.)
+			now, gone, err := readCodexConfig(rctx, sess)
+			if err != nil {
+				return true, err
+			}
+			if gone != none || !bytes.Equal(now, saved) {
+				return true, errors.New("Codex's config.toml changed")
+			}
+			return false, nil
+		}
 		for try := 0; try < 2; try++ { // (changed again meanwhile: read once more)
 			now, none, err := readSettings(rctx, sess)
 			if err != nil {
@@ -409,6 +428,9 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 		gate := ""
 		if text != "" {
 			gate = "free"
+			if codex {
+				gate = "cfree"
+			}
 		}
 		running.Add(1)
 		res, err := sshx.Exec(ctx, sess.Client(), convoGatedCommand(gate, sess.Persistence, sess.TmuxSession, pane, socket, pid, start, sid, len(text), press, read), 64<<10,
@@ -427,7 +449,12 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 		defer lcancel()
 		return run(lctx, keys, text, read)
 	}
-	opts, err := modelFlow(step, leave, target)
+	var opts []modelOpt
+	if codex {
+		opts, err = codexModelFlow(step, leave, target, effort)
+	} else {
+		opts, err = modelFlow(step, leave, target)
+	}
 	restored, restoreFailed := false, false
 	if ctx.Err() == nil {
 		running.Wait()
@@ -451,6 +478,10 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 	case restoreFailed:
 		// (Above all else: the person is to know, and put it back.)
 		*outcome = "unknown"
+		if codex {
+			writeError(w, http.StatusInternalServerError, "default_changed", "Codex's config.toml (the default of new sessions) changed meanwhile")
+			break
+		}
 		writeError(w, http.StatusInternalServerError, "default_changed", "the default model of new sessions changed and could not be put back")
 	case err == nil:
 		*outcome = "typed"
@@ -660,3 +691,22 @@ func jsonSame(a, b json.RawMessage) bool {
 	var x, y bytes.Buffer
 	return json.Compact(&x, a) == nil && json.Compact(&y, b) == nil && bytes.Equal(x.Bytes(), y.Bytes())
 }
+
+// readCodexConfig reads ~/.codex/config.toml (none: there is none), as
+// readSettings reads Claude Code's settings.
+func readCodexConfig(ctx context.Context, sess *term.Session) (doc []byte, none bool, err error) {
+	out, err := sshx.Output(ctx, sess.Client(), codexConfigReadCommand, maxSettings+16)
+	var exitErr *sshx.ExitError
+	switch {
+	case errors.As(err, &exitErr) && exitErr.Status == 3:
+		return nil, true, nil
+	case err != nil:
+		return nil, false, err
+	case len(out) > maxSettings:
+		return nil, false, errors.New("config too long")
+	}
+	return out, false, nil
+}
+
+// codexConfigReadCommand: fixed; exit 3 where there is no config.
+const codexConfigReadCommand = `f="${CODEX_HOME:-$HOME/.codex}/config.toml"; [ -f "$f" ] || exit 3; head -c 262160 "$f"`

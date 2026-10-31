@@ -16,7 +16,7 @@ import { useCompletion } from '../terminal/Completion'
 import { convoTarget, herdrTarget, InlineReply } from '../terminal/ReplyDialog'
 import { SessionOpDialog, type SessionOp } from '../terminal/sessionOps'
 import { NEW_AGENT, NewAgentDialog } from '../terminal/newAgent'
-import { BgCmds, ConversationView, ListSearch, SEARCH_FROM, when, type ConvoAgent, type ConvoListRow, type ConvoPending, type ModelOpt } from '../terminal/Conversation'
+import { BgCmds, CODEX_EFFORTS, ConversationView, ListSearch, SEARCH_FROM, when, type ConvoAgent, type ConvoListRow, type ConvoPending, type ModelOpt } from '../terminal/Conversation'
 import { answerable, asking, useConversation, type ConvoEntry } from '../terminal/conversation'
 import { ackBg, waitingTitle, isCodex, isOpenCode, listAgents, matchQuery, paneTitle, readsLog, useRunningSessions, type AgentRow } from '../terminal/agents'
 import type { RowCmds } from '../terminal/agentOrder'
@@ -887,7 +887,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     warnedDefault.current = true
     toast(t('convo.err.defaultChanged'), true)
   }, [convo.defaultChanged, toast])
-  const canModel = bound && !notClaude && convo.status === 'ready' && !!convo.meta?.model && (agent?.status === 'idle' || agent?.status === 'done') && !agent?.other
+  const canModel = bound && (!notClaude || codex) && convo.status === 'ready' && !!convo.meta?.model && (agent?.status === 'idle' || agent?.status === 'done') && !agent?.other
   // How hard it is asked to think, set through Claude Code's /effort, for
   // this session only. Offered only where its log has said one: a Claude
   // Code without /effort never does, and nothing is typed to find out.
@@ -931,12 +931,12 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       })
       .finally(() => setModelBusy(false))
   }
-  const pickModel = (label: string) => {
+  const pickModel = (label: string, effort?: string) => {
     if (!convo.bind || modelBusy) return
     setModelBusy(true)
-    api<{ restored?: boolean }>('POST', `/api/sessions/${sid}/conversation/model`, { ...pressBody(), model: label }, { timeoutMs: MODEL_MS })
+    api<{ restored?: boolean }>('POST', `/api/sessions/${sid}/conversation/model`, { ...pressBody(), model: label, ...(effort ? { effort } : {}) }, { timeoutMs: MODEL_MS })
       .then((r) => {
-        toast(t('convo.modelSet', { m: label }) + (r.restored ? t('convo.modelRestored') : ''))
+        toast(t('convo.modelSet', { m: effort ? `${label} · ${effort}` : label }) + (r.restored ? t('convo.modelRestored') : ''))
         setModels((m) => m && { ...m, list: m.list && m.list.map((o) => ({ ...o, current: o.label === label })) })
       })
       .catch((e) => toast(refusal(e), true))
@@ -1699,7 +1699,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       onSendNow={canPress && !notClaude ? () => press('now') : undefined}
       sendNow={said?.what === 'now' && said.bind === bindKey ? said.text : undefined}
       mode={{ now: modeNow?.bind === bindKey ? modeNow.mode : undefined, busy: modeBusy, onPick: canMode ? pickMode : undefined }}
-      model={canModel || modelBusy ? { list: models?.bind === bindKey ? models.list : null, fresh: !!models?.at && Date.now() - models.at < 60000, busy: modelBusy, can: canModel, onOpen: openModels, onPick: pickModel } : undefined}
+      model={canModel || modelBusy ? { list: models?.bind === bindKey ? models.list : null, fresh: !!models?.at && Date.now() - models.at < 60000, busy: modelBusy, can: canModel, onOpen: openModels, onPick: pickModel, ...(codex ? { efforts: CODEX_EFFORTS } : {}) } : undefined}
       effort={{ now: effortNow?.bind === bindKey ? effortNow.effort : undefined, busy: effortBusy, can: canEffort, onPick: pickEffort }}
       lead={lead}
       more={more}

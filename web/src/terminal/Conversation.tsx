@@ -1396,7 +1396,19 @@ const PICKED_MODES = ['default', 'acceptEdits', 'plan', 'auto', 'bypassPermissio
 // (list: null while it is read), for the session only.
 export type ModelOpt = { label: string; desc?: string; current?: boolean }
 // (fresh: the list read a moment ago, its "current" to go by; can: it may be switched now.)
-export type ModelSwitch = { list: ModelOpt[] | null; fresh: boolean; busy: boolean; can: boolean; onOpen: () => void; onPick: (label: string) => void }
+// (efforts: a Codex's, chosen with its model, its picker's second step.)
+// A Codex's efforts as its picker names them (its second step), their
+// words here and the word its log says ("Extra high" is xhigh).
+const EFFORT_WORDS: Record<string, 'convo.effort.low' | 'convo.effort.medium' | 'convo.effort.high' | 'convo.effort.xhigh'> = {
+  Low: 'convo.effort.low',
+  Medium: 'convo.effort.medium',
+  High: 'convo.effort.high',
+  'Extra high': 'convo.effort.xhigh',
+}
+const effortWord = (e: string) => (e === 'Extra high' ? 'xhigh' : e.toLowerCase())
+export const CODEX_EFFORTS = Object.keys(EFFORT_WORDS)
+
+export type ModelSwitch = { list: ModelOpt[] | null; fresh: boolean; busy: boolean; can: boolean; onOpen: () => void; onPick: (label: string, effort?: string) => void; efforts?: string[] }
 
 // How hard the agent is asked to think (Claude Code's /effort), for the
 // session only. The levels are its slider's, in its order.
@@ -1411,6 +1423,7 @@ const effortName = (e: string) => ((EFFORTS as readonly string[]).includes(e) ? 
 // full its context is on the right (the numbers on a tap).
 function Runs({ meta, active, mode, model, effort, quota }: { meta: ConvoMeta; active: boolean; mode?: ModeSwitch; model?: ModelSwitch; effort?: EffortSwitch; quota?: QuotaOf }) {
   const [open, setOpen] = useState<false | 'ctx' | 'model' | 'effort' | 'mode'>(false) // (which of its pop-ups)
+  const [effortsOf, setEffortsOf] = useState('') // (a Codex's model whose efforts show, chosen with it)
   const box = useRef<HTMLDivElement>(null)
   const modelBtn = useRef<HTMLButtonElement>(null)
   const effortBtn = useRef<HTMLButtonElement>(null)
@@ -1578,25 +1591,39 @@ function Runs({ meta, active, mode, model, effort, quota }: { meta: ConvoMeta; a
             <p className="convo-runs-note" role="status">{t('convo.modelReading')}</p>
           ) : (
             model.list.map((o) => {
-              // (As its picker last said, which the log may not yet.)
-              const now = model.fresh && model.list!.some((x) => x.current) ? !!o.current : modelName(meta.model!) === o.label
+              // (As its picker last said, which the log may not yet. A Codex's
+              // log names it in small letters: "gpt-6-sol" is "GPT-6-Sol".)
+              const now = model.fresh && model.list!.some((x) => x.current) ? !!o.current : modelName(meta.model!).toLowerCase() === o.label.toLowerCase()
+              const pick = (effort?: string) => {
+                setOpen(false)
+                setEffortsOf('')
+                modelBtn.current?.focus()
+                model.onPick(o.label, effort) // (the one ticked too: what is ticked may be past)
+              }
               return (
-                <button
-                  key={o.label}
-                  type="button"
-                  role="menuitemradio"
-                  aria-checked={now}
-                  className="convo-models-item"
-                  onClick={() => {
-                    setOpen(false)
-                    modelBtn.current?.focus()
-                    model.onPick(o.label) // (the one ticked too: what is ticked may be past)
-                  }}
-                >
-                  <span className="convo-models-label">{o.label}</span>
-                  {o.desc && <span className="convo-models-desc">{o.desc}</span>}
-                  {now && <Check size={14} aria-hidden="true" />}
-                </button>
+                <Fragment key={o.label}>
+                  <button
+                    type="button"
+                    role="menuitemradio"
+                    aria-checked={now}
+                    aria-expanded={model.efforts ? effortsOf === o.label : undefined}
+                    className="convo-models-item"
+                    onClick={() => (model.efforts ? setEffortsOf(effortsOf === o.label ? '' : o.label) : pick())}
+                  >
+                    <span className="convo-models-label">{o.label}</span>
+                    {o.desc && <span className="convo-models-desc">{o.desc}</span>}
+                    {now && <Check size={14} aria-hidden="true" />}
+                  </button>
+                  {model.efforts && effortsOf === o.label && (
+                    <div className="convo-models-efforts" role="group" aria-label={t('convo.effort')}>
+                      {model.efforts.map((e) => (
+                        <button key={e} type="button" role="menuitem" className={'convo-models-effort' + (now && meta.effort?.toLowerCase() === effortWord(e) ? ' is-current' : '')} onClick={() => pick(e)}>
+                          {t(EFFORT_WORDS[e] ?? 'convo.effort')}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </Fragment>
               )
             })
           )}

@@ -2906,6 +2906,10 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	if what == "effort" && effortLevel(b.Effort) < 0 {
 		textOK = false
 	}
+	// (A Codex's effort, with its model: a label its picker shows, compared, never typed.)
+	if what == "model" && (len(b.Effort) > 32 || strings.ContainsFunc(b.Effort, func(r rune) bool { return r < 0x20 || r == 0x7f })) {
+		textOK = false
+	}
 	if b.Mode != "" && (what != "mode" || !convoModes[b.Mode]) {
 		textOK = false
 	}
@@ -3064,12 +3068,14 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	// (A Codex's own commands from the menu: /compact, /new; it refuses them
 	// itself while it works. Not Claude Code's /clear and /rename.)
 	codexCommand := front.agent == "codex" && what == "command" && (text == "/compact" || text == "/new")
+	// (Its picker, for its model and effort, as Claude Code's: convo_codex_model.go.)
+	codexModel := front.agent == "codex" && (what == "models" || what == "model")
 	if what == "command" && front.agent == "claude" && text == "/new" {
 		reason = "bad_request"
 		writeError(w, http.StatusBadRequest, "bad_request", "not a command of Claude Code's")
 		return
 	}
-	if (front.agent == "codex" || front.agent == "opencode") && what != "send" && what != "interrupt" && !codexAnswer && !codexCommand {
+	if (front.agent == "codex" || front.agent == "opencode") && what != "send" && what != "interrupt" && !codexAnswer && !codexCommand && !codexModel {
 		reason = "unsupported"
 		writeError(w, http.StatusConflict, "unsupported", "not for this agent")
 		return
@@ -3087,7 +3093,7 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	if what == "models" || what == "model" {
 		release := turn
 		turn = func() {} // (convoModel gives it back, once its steps have ended on the host)
-		s.convoModel(w, ctx, sess, b.Pane, socket, b.PID, b.Start, b.Session, b.Model, &outcome, &reason, release)
+		s.convoModel(w, ctx, sess, b.Pane, socket, b.PID, b.Start, b.Session, b.Model, &outcome, &reason, release, front.agent == "codex", b.Effort)
 		return
 	}
 	if what == "effort" {
