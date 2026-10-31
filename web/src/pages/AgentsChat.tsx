@@ -643,23 +643,27 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   // (Of the round it is done in, as told: a word that comes late, after
   // another round, marks nothing; a round after it is marked in its turn.)
   // (Not while what it left running is read for, nor while it is out.)
-  // (What this tmux session's agent left running, kept for its row: see tmuxCmds.)
+  // (What this tmux session's agent left running, kept for its row: see
+  // tmuxCmds. Only what was read while it is looked at, this time: a view
+  // brought back shows what it read before till it reads again, and that is
+  // not kept, nor dated again as the view goes. Dated as it goes otherwise:
+  // reads that change nothing keep okAt. review483–485)
   const tmuxKeyNow = !herdr && !cur.pane ? cur.key : ''
   const tmuxCmdsNow = agent?.cmds
+  const lookedSince = useRef(0)
   useEffect(() => {
-    // (Only while looked at: a view behind another reads nothing new, and
-    // would date again what may have ended meanwhile. review484)
-    if (!tmuxKeyNow || !active || convo.status === 'loading') return
+    if (active) lookedSince.current = Date.now()
+  }, [active])
+  useEffect(() => {
+    if (!tmuxKeyNow || !active || convo.status === 'loading' || convo.failing || convo.okAt < lookedSince.current) return
     if (tmuxCmdsNow) tmuxCmds.set(tmuxKeyNow, { cmds: tmuxCmdsNow, at: Date.now() })
     else tmuxCmds.delete(tmuxKeyNow)
-    // (Read on and on the same, it is as of now as this view goes: unchanged
-    // reads keep okAt, so the time would stay that of the first. review483)
     const key = tmuxKeyNow
     return () => {
       const v = tmuxCmds.get(key)
       if (v) v.at = Date.now()
     }
-  }, [tmuxKeyNow, tmuxCmdsNow, convo.status, convo.okAt, active])
+  }, [tmuxKeyNow, tmuxCmdsNow, convo.status, convo.okAt, convo.failing, active])
   const doneHere = herdr && active && row && !row.lost && row.status === 'done' && row.a.status === 'done' && !row.bg && row.a.bg !== 'checking' ? { pane: row.a.pane_id, round: row.a.round ?? 0, session: row.a.session ?? '' } : undefined
   const doneKey = doneHere && JSON.stringify(doneHere)
   useEffect(() => {
