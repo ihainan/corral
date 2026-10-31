@@ -197,6 +197,7 @@ func TestCodexIdleInput(t *testing.T) {
 		"• done\n\n› Implement {feature}" + foot:                                                                          errDraft,
 		"• Working (3s • esc to interrupt)\n\n› Ask Codex to do anything" + foot:                                          errBusyAgent,
 		"no input here" + foot: errScreen,
+		"• done\n\n› \n  ? for shortcuts\n  a draft under it" + foot: errDraft, // (review502: words like a footer's in the draft)
 	} {
 		if got := codexIdleInput(screen); got != want {
 			t.Errorf("%q: %v, want %v", screen[:20], got, want)

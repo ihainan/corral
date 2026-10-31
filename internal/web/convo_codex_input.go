@@ -25,21 +25,41 @@ func codexIdleInput(screen string) error {
 			return errDraft
 		}
 		// (Under it, down to its footer — its model and folder, "? for
-		// shortcuts" —: any words are the input's, a draft, blank lines among
-		// them or not.)
-		for _, l := range lines[i+1:] {
-			t := strings.TrimSpace(l)
-			if t == "" {
-				continue
+		// shortcuts", the block at the screen's end —: any words are the
+		// input's, a draft, blank lines among them or not, words like a
+		// footer's among them too — review502.)
+		foot := codexFootStart(lines)
+		if foot < i {
+			return errScreen
+		}
+		for _, l := range lines[i+1 : foot] {
+			if strings.TrimSpace(l) != "" {
+				return errDraft
 			}
-			if codexFooter.MatchString(t) {
-				break
-			}
-			return errDraft
 		}
 		return nil
 	}
 	return errScreen
+}
+
+// codexFootStart: where Codex's footer begins — the lines at the screen's
+// end, blank or a footer's (codexFooter), one of them at least; -1 where
+// the screen does not end so. (A line like a footer's above another kind
+// is the input's, a draft's words.)
+func codexFootStart(lines []string) int {
+	at, seen := len(lines), false
+	for at > 0 {
+		t := strings.TrimSpace(lines[at-1])
+		if t != "" && !codexFooter.MatchString(t) {
+			break
+		}
+		seen = seen || t != ""
+		at--
+	}
+	if !seen {
+		return -1
+	}
+	return at
 }
 
 // codexFooter: a line of Codex's footer under its input: its model and
@@ -52,28 +72,27 @@ func codexIdleInput(screen string) error {
 var codexFooter = regexp.MustCompile(`^(?:[A-Za-z][\w./-]*(?: (?:default|minimal|low|medium|high|xhigh|max))? · (?:~|/).*|Context \d+% (?:left|used)(?: · .*)?|\? for shortcuts|esc again to edit previous message|ctrl \+ c again to quit|⚠ \d+ warnings? · f2 to view)(?:\s{2,}\S.*)?$`)
 
 // codexInputArea: what Codex's input holds — its last line beginning
-// "› " (the person's messages above begin so too: the last is the input),
-// and the lines under it down to its footer; ok only where that footer is
+// "› " above its footer (the person's messages above begin so too: the
+// last is the input), and the lines under it down to that footer (the
+// block at the screen's end: codexFootStart); ok only where that footer is
 // there, close under it (else what is at the bottom is not told: a
 // dialog, a menu whose choice is marked "› 1."). Its placeholder, when
 // empty, is what it holds.
 func codexInputArea(screen string) (area string, ok bool) {
 	lines := strings.Split(strings.TrimRight(screen, "\n"), "\n")
-	for i := len(lines) - 1; i >= 0; i-- {
+	foot := codexFootStart(lines)
+	if foot < 0 {
+		return "", false
+	}
+	for i := foot - 1; i >= 0 && foot-i <= codexInputMax; i-- {
 		if !strings.HasPrefix(lines[i], "› ") && lines[i] != "›" {
 			continue
 		}
 		if codexMenuChoice.MatchString(lines[i]) {
 			return "", false
 		}
-		in := []string{strings.TrimPrefix(strings.TrimPrefix(lines[i], "›"), " ")}
-		for j := i + 1; j < len(lines) && j-i <= codexInputMax; j++ {
-			if codexFooter.MatchString(strings.TrimSpace(lines[j])) {
-				return strings.TrimSpace(strings.Join(in, "\n")), true
-			}
-			in = append(in, lines[j])
-		}
-		return "", false
+		in := append([]string{strings.TrimPrefix(strings.TrimPrefix(lines[i], "›"), " ")}, lines[i+1:foot]...)
+		return strings.TrimSpace(strings.Join(in, "\n")), true
 	}
 	return "", false
 }

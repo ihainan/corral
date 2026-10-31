@@ -85,7 +85,9 @@ func (s *Server) sentMissing(w http.ResponseWriter, ctx context.Context, sess *t
 // (its end, a sign-out or revocation calls it off), nil where it is over.
 func (s *Server) enterAgain(ctx context.Context, sess *term.Session, pane, socket, agent string, pid, start int64, sid, text, screen string, ended *sync.WaitGroup, later func(d time.Duration) (context.Context, func())) {
 	still, whole := stillTyped, typedWhole
-	if agent == "codex" { // (its input drawn its own way: codexInputArea)
+	freeGate := "free"
+	if agent == "codex" { // (its input drawn its own way: codexInputArea; whether it waits, its title says: review502)
+		freeGate = "cfree"
 		still = func(screen, text string) bool { return codexTypedIn(screen, text, false) }
 		whole = func(screen, text string) bool { return codexTypedIn(screen, text, true) }
 	}
@@ -99,7 +101,7 @@ func (s *Server) enterAgain(ctx context.Context, sess *term.Session, pane, socke
 		slog.Info("conversation: message still in the input, Enter again", "session", sess.ID, "pane", pane)
 		ended.Add(1)
 		// (Not while it waits: the Enter would be a question's.)
-		res, err := sshx.Exec(ctx, sess.Client(), convoGatedCommand("free", sess.Persistence, sess.TmuxSession, pane, socket, pid, start, sid, 0, enter, sendLines), sendOut,
+		res, err := sshx.Exec(ctx, sess.Client(), convoGatedCommand(freeGate, sess.Persistence, sess.TmuxSession, pane, socket, pid, start, sid, 0, enter, sendLines), sendOut,
 			sshx.ExecOptions{Stdin: strings.NewReader(""), Release: ended.Done})
 		if err != nil {
 			return false
@@ -177,7 +179,11 @@ func (s *Server) sentEnter(w http.ResponseWriter, ctx context.Context, sess *ter
 		enter = []string{"Enter"}
 	}
 	held.Add(1)
-	_, err = sshx.Exec(ctx, sess.Client(), convoGatedCommand("free", sess.Persistence, sess.TmuxSession, pane, socket, pid, start, sid, 0, enter, sendLines), sendOut,
+	freeGate := "free"
+	if agent == "codex" {
+		freeGate = "cfree" // (whether Codex waits, its title says — an approval come meanwhile is not answered by this Enter: review502)
+	}
+	_, err = sshx.Exec(ctx, sess.Client(), convoGatedCommand(freeGate, sess.Persistence, sess.TmuxSession, pane, socket, pid, start, sid, 0, enter, sendLines), sendOut,
 		sshx.ExecOptions{Stdin: strings.NewReader(""), Release: held.Done})
 	var exitErr *sshx.ExitError
 	switch {

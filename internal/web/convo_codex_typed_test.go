@@ -33,6 +33,8 @@ func TestCodexTypedIn(t *testing.T) {
 		{"no footer under it", codexScreen("› "+msg, "  something else"), msg, false, false},
 		{"a menu's choice", codexScreen("› 1. Yes, proceed\n  2. No"), "1. Yes, proceed", false, false},
 		{"too short to tell", codexScreen("› go"), "go", false, false},
+		// (review502: the draft goes on with words like a footer's, then more: not the message whole.)
+		{"its words, a footer's, more", codexScreen("› " + msg + "\n  ? for shortcuts\n  再加一句"), msg, true, false},
 	} {
 		if got := codexTypedIn(c.screen, c.text, false); got != c.still {
 			t.Errorf("%s: still typed %v", c.name, got)
