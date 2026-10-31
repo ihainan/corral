@@ -353,8 +353,19 @@ func codexResult(raw json.RawMessage) (text string, failed bool, images int) {
 	return codexHead.ReplaceAllString(s, ""), codexFailed.MatchString(s), images
 }
 
-// cmdHead: the head Codex puts on what a command printed.
-var cmdHead = regexp.MustCompile(`^(?:Chunk ID: \S+\n)?Wall time: [^\n]*\n(?:Process exited with code (\d+)\n)?(?:Process running with session ID \S+\n)?(?:Original token count: \d+\n)?Output:\n`)
+// cmdHead: the head Codex puts on what a command printed (its exit code,
+// or, still running when its call came back, the session it goes on in).
+var cmdHead = regexp.MustCompile(`^(?:Chunk ID: \S+\n)?Wall time: [^\n]*\n(?:Process exited with code (\d+)\n)?(?:Process running with session ID (\S+)\n)?(?:Original token count: \d+\n)?Output:\n`)
+
+// cmdGoesOn: what came back of a command's call says it is still running.
+func cmdGoesOn(raw json.RawMessage) bool {
+	var s string
+	if json.Unmarshal(raw, &s) != nil {
+		return false
+	}
+	m := cmdHead.FindStringSubmatch(s)
+	return m != nil && m[2] != ""
+}
 
 // mcpResult: what an MCP server's tool gave back (its content's words, its
 // pictures counted), as Codex keeps it: {content, isError}, or (older)

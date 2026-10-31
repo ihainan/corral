@@ -63,6 +63,17 @@ type Codex struct {
 	// hidden: calls of the code mode's whose lines went (each of their
 	// things told of on its own): what comes back of them is let be.
 	hidden map[string]bool
+	// running: work it set going and left to itself — a command still
+	// running when its call came back (by its call's id), a subagent sent
+	// off (by its id) — till it is told of as ended; runOrder, as set going.
+	// ranOut: ended with no start read (it is in a part before): kept, so
+	// that reading that start later does not set it going again. since: when
+	// the process the log is read for started (unix ms; 0 not known): what
+	// was set going before went with the process before.
+	running  map[string]Running
+	runOrder []string
+	ranOut   map[string]bool
+	since    int64
 }
 
 type codexPlan struct {
@@ -86,6 +97,7 @@ type codexOut struct {
 	text   string
 	failed bool
 	images int
+	goesOn bool // (a command still running when its call came back)
 }
 
 func NewCodex() *Codex { return &Codex{tools: map[string][]*Tool{}} }
@@ -112,11 +124,105 @@ func (c *Codex) Tasks() []Task {
 	return nil
 }
 func (c *Codex) Queued() []Queued   { return nil }
-func (c *Codex) Running() []Running { return nil }
+func (c *Codex) Running() []Running {
+	var out []Running
+	for _, id := range c.runOrder {
+		if r, ok := c.running[id]; ok && c.ofNow(r.Time) {
+			out = append(out, r)
+		}
+	}
+	return out
+}
 
 // (Codex's queue is not in its log.)
 func (c *Codex) ClearQueue()      {}
-func (c *Codex) QueueSince(int64) {}
+// QueueSince: when the process the log is read for started (unix ms; 0
+// not known). Its commands and subagents end with it: what was set going
+// before that is not running.
+func (c *Codex) QueueSince(started int64) { c.since = started }
+
+func (c *Codex) ofNow(ts string) bool {
+	if c.since <= 0 {
+		return true
+	}
+	at, err := time.Parse(time.RFC3339Nano, ts)
+	return err == nil && at.UnixMilli() >= c.since
+}
+
+// setGoing: work set going and left to itself (see running).
+func (c *Codex) setGoing(id, kind, what, at string) {
+	if id == "" || c.ranOut[id] {
+		delete(c.ranOut, id)
+		return
+	}
+	if _, there := c.running[id]; there || len(c.running) >= maxRunning {
+		return
+	}
+	if c.running == nil {
+		c.running = map[string]Running{}
+	}
+	c.running[id] = Running{ID: id, What: clip(clean(firstLineOf(what)), maxTitle), Kind: kind, Time: at}
+	c.runOrder = append(c.runOrder, id)
+}
+
+// endRun: work told of as ended.
+func (c *Codex) endRun(id string) {
+	if id == "" {
+		return
+	}
+	if _, there := c.running[id]; there {
+		delete(c.running, id)
+		for i, x := range c.runOrder {
+			if x == id {
+				c.runOrder = append(c.runOrder[:i:i], c.runOrder[i+1:]...)
+				break
+			}
+		}
+		return
+	}
+	if c.ranOut == nil || len(c.ranOut) >= maxRunning {
+		c.ranOut = map[string]bool{}
+	}
+	c.ranOut[id] = true
+}
+
+// leftGoing: what came back of a call says it set work going: a command
+// still running ("Process running with session ID …"), a subagent sent off
+// (its id on its line, see answer).
+func (c *Codex) leftGoing(r *codexRow, ts []*Tool, out codexOut) {
+	for _, t := range ts {
+		switch {
+		case t.Name == "Bash" && !out.failed && out.goesOn:
+			c.setGoing(t.ID, "cmd", t.Detail, r.Timestamp)
+		case t.Name == "Agent" && t.AgentID != "":
+			c.setGoing(t.AgentID, "agent", t.Title, r.Timestamp)
+		}
+	}
+}
+
+// subagentEnded: what Codex tells the conversation of a subagent of its
+// (a "user" message of its own, not the person's): one that has ended —
+// any state but still running — is no longer running.
+func (c *Codex) subagentEnded(text string) {
+	text = strings.TrimSpace(text)
+	if !strings.HasPrefix(text, "<subagent_notification>") || !strings.HasSuffix(text, "</subagent_notification>") {
+		return
+	}
+	var n struct {
+		Agent  string                     `json:"agent_path"`
+		Status map[string]json.RawMessage `json:"status"`
+	}
+	body := strings.TrimSuffix(strings.TrimPrefix(text, "<subagent_notification>"), "</subagent_notification>")
+	if json.Unmarshal([]byte(strings.TrimSpace(body)), &n) != nil || !CodexAgentID(n.Agent) || len(n.Status) == 0 {
+		return
+	}
+	for k := range n.Status {
+		if k == "running" || k == "pending_init" {
+			return
+		}
+	}
+	c.endRun(n.Agent)
+}
 
 // Status is "busy" while a turn goes on, "idle" after it, "" when no row
 // has said.
@@ -230,6 +336,32 @@ func (c *Codex) Prepend(other Parser) {
 			c.asked = c.asked[n:]
 		}
 	}
+	// What the part before set going and was never told had ended: still
+	// going, unless what was read since says it has ended. What the part
+	// before was told had ended, whose start is older still: kept as ended,
+	// so that reading that start later does not set it going again.
+	for id := range o.ranOut {
+		if _, there := o.running[id]; !there {
+			c.endRun(id)
+		}
+	}
+	var before []string
+	for _, id := range o.runOrder {
+		r, there := o.running[id]
+		if !there || c.ranOut[id] {
+			delete(c.ranOut, id)
+			continue
+		}
+		if _, already := c.running[id]; already || len(c.running) >= maxRunning {
+			continue
+		}
+		if c.running == nil {
+			c.running = map[string]Running{}
+		}
+		c.running[id] = r
+		before = append(before, id)
+	}
+	c.runOrder = append(before, c.runOrder...)
 	// (Each command told of on its own in either part: the lines of the
 	// calls that run them go, in the part before this one too.)
 	if c.itemCmds || o.itemCmds {
@@ -806,6 +938,9 @@ func (c *Codex) ranCommand(r *codexRow, it *codexItem) {
 		cmd = it.Parsed[0].Cmd // (what it means to run, without the shell it runs it in)
 	}
 	failed := it.Status == "failed" || (it.ExitCode != nil && *it.ExitCode != 0)
+	if it.Status != "in_progress" {
+		c.endRun(id) // (a command left running when its call came back: ended now)
+	}
 	out := it.Output
 	if it.ExitCode != nil && *it.ExitCode != 0 {
 		out = fmt.Sprintf("Exit code %d\n%s", *it.ExitCode, out)
@@ -940,6 +1075,11 @@ func codexContent(raw json.RawMessage) []codexBlock {
 func (c *Codex) item(r *codexRow, p *codexPayload) {
 	switch p.Type {
 	case "message":
+		if p.Role == "user" {
+			for _, b := range codexContent(p.Content) {
+				c.subagentEnded(b.Text)
+			}
+		}
 		if p.Role != "assistant" {
 			return // (the person's is read from its event; the rest is Codex's own)
 		}
@@ -1025,14 +1165,17 @@ func (c *Codex) item(r *codexRow, p *codexPayload) {
 		}
 		if out, ok := c.orphans[id]; ok {
 			c.answer(kept, out)
+			c.leftGoing(r, kept, out)
 			delete(c.orphans, id)
 		}
 	case "custom_tool_call_output", "function_call_output":
 		var out codexOut
 		out.text, out.failed, out.images = codexResult(p.Output)
+		out.goesOn = cmdGoesOn(p.Output)
 		id := clip(p.CallID, maxID)
 		if ts, ok := c.tools[id]; ok {
 			c.answer(ts, out)
+			c.leftGoing(r, ts, out)
 		} else if id != "" && !c.hidden[id] && len(c.orphans) < maxOrphans {
 			if c.orphans == nil {
 				c.orphans = map[string]codexOut{}
