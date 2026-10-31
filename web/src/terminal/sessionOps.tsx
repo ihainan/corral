@@ -30,7 +30,7 @@ export function SessionOpDialog({ op, name, codex, onSend, onClose, onShowTermin
     } catch (err) {
       // (Refused before anything was typed: tried again at will; else what
       // became of it is for the terminal to tell.)
-      const refused = err instanceof ApiError && err.code !== 'typed_not_sent' && ([400, 403, 404, 409, 429].includes(err.status) || (err.status === 502 && (err.code === 'host_error' || err.code === 'send_failed')))
+      const refused = err instanceof ApiError && err.code !== 'typed_not_sent' && ([400, 403, 404, 409, 429].includes(err.status) || (err.status === 502 && (err.code === 'host_error' || err.code === 'send_failed' || err.code === 'no_screen')))
       if (!refused) {
         setLeft(true)
         setError(t(err instanceof ApiError && err.code === 'typed_not_sent' ? 'ops.typedNotSent' : 'ops.unsure'))

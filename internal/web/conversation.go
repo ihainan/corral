@@ -2438,7 +2438,9 @@ front() {
     # subcommand, as it was located.)
     if [ -n "$cxpend" ]; then
       case $cs in ''|resume|fork) ;; *) return 1;; esac
-      [ "$sid" = "$cxpend" ] || return 1
+      # (Or the zero id, as one just started was located before its lock
+      # was two seconds old: with no log open at all, the one conversation.)
+      [ "$sid" = "$cxpend" ] || { [ "$sid" = 00000000-0000-0000-0000-000000000000 ] && [ -z "$any" ] && [ "$cxpend" != '?' ]; } || return 1
     elif [ "$sid" = 00000000-0000-0000-0000-000000000000 ]; then
       [ -z "$cs" ] && [ -z "$any" ] || return 1
     elif [ -z "$lg" ]; then
@@ -3428,13 +3430,16 @@ var errSubagentFile = errors.New("not a subagent's log")
 // cxlog, its own conversation's log written last (a subagent's not: its
 // head says "thread_source": "subagent"); cxany, a rollout open anywhere;
 // cxpend, the session of a conversation whose writer lock it holds
-// (~/.codex/thread-writer-locks/<id>.lock) with no log of it open — one
-// just started, or begun anew (/new), its log begun with its first
-// message, the lock's id the log's ("?": more than one, not told which).
+// (~/.codex/thread-writer-locks/<id>.lock), held two seconds at least, with
+// no log of it open — one just started, or begun anew (/new), its log
+// begun with its first message, the lock's id the log's ("?": more than
+// one, not told which). (A subagent's lock, its log opened with it, is
+// not one: the two seconds pass it by.)
 // (Codex 0.164, as a real one was seen to: plans/5d3b-codex-new-compact.md.)
 const codexFdsSh = `codex_fds() {
   cxlog= cxany= cxpend= _locks= _logs=
   _nl=$(printf '\nx'); _nl=${_nl%x}
+  _now=$(date +%s)
   for _f in "$1"/fd/*; do
     _l=$(readlink "$_f" 2>/dev/null) || continue
     case $_l in *"$_nl"*) continue;; */rollout-*.jsonl) cxany=1;; esac
@@ -3445,6 +3450,11 @@ const codexFdsSh = `codex_fds() {
       { [ -z "$cxlog" ] || [ "$_l" -nt "$cxlog" ]; } && cxlog=$_l ;;
     "$HOME"/.codex/thread-writer-locks/*.lock)
       _i=${_l##*/}; _i=${_i%.lock}
+      # (Held two seconds at least: a subagent's, begun with its log, has
+      # that open by then; a conversation begun anew waits for its first
+      # message.)
+      _t=$(stat -c %Y "$_l" 2>/dev/null) || continue
+      [ $((_now - _t)) -ge 2 ] || continue
       case $_i in *[!0-9a-fA-F-]*) ;; ????????-????-????-????-????????????) _locks="$_locks $_i" ;; esac ;;
     esac
   done
