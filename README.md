@@ -175,7 +175,7 @@ also have Linux binaries.
 
 ```sh
 (umask 077; docker run --rm ghcr.io/ihainan/corral genkey > corral.key)   # keep it: it decrypts what is stored
-docker run -d --name corral -p 127.0.0.1:8080:8080 -v corral-data:/data \
+docker run -d --name corral --stop-timeout 30 -p 127.0.0.1:8080:8080 -v corral-data:/data \
   -e CORRAL_PUBLIC_URL=https://ssh.example.com \
   -e CORRAL_MASTER_KEY="$(cat corral.key)" \
   ghcr.io/ihainan/corral
@@ -196,6 +196,7 @@ services:
   corral:
     image: ghcr.io/ihainan/corral:0.2.0
     restart: unless-stopped
+    stop_grace_period: 30s  # time to record the open sessions, to open them again after
     ports: ["127.0.0.1:8080:8080"]
     environment:
       CORRAL_PUBLIC_URL: https://ssh.example.com
@@ -280,6 +281,7 @@ All settings are environment variables. Only the first two are required.
 | `CORRAL_RECORDING_MAX_MB` | `200` | Size limit of one recording |
 | `CORRAL_PUSH_HOSTS` | — | Extra push services (besides Apple, Google, Mozilla, Microsoft): a host name, or `.example.com` for any below it |
 | `CORRAL_WEBHOOK_PREFIXES` | — (webhooks off) | URL prefixes users may send alert webhooks to |
+| `CORRAL_RESTORE_SESSIONS` | `on` | `off`: tmux and herdr terminals open when the gateway stops are not opened again when it starts (see Restarts) |
 | `CORRAL_STATIC_DIR` | — (embedded) | Serve the web interface from this directory instead (front-end development) |
 
 </details>
@@ -306,6 +308,14 @@ All settings are environment variables. Only the first two are required.
   terminals and forwards at once; changing your own password signs out your
   other browsers; signing out ends that browser's login. Terminals otherwise
   keep running until closed or detached for `CORRAL_DETACH_TIMEOUT`.
+- **Restarts.** Terminals end with the gateway, but tmux and herdr sessions
+  keep running on their hosts. When it starts again, the gateway attaches
+  again the ones that were open within the last hour, for users still signed
+  in somewhere, with the host's saved credential and pinned key (never a
+  password asked for), and only if the session is still on the host: it
+  makes none anew. Give the container time to stop (`--stop-timeout 30`,
+  or `stop_grace_period` with Compose). Each outcome is in the audit log as
+  `session.restore`.
 - **Recordings** contain whatever the screen showed: typing that the terminal
   echoes, but not a password typed at a prompt that hides it.
   Owners see their own, administrators everyone's; watching one is audited.

@@ -6,6 +6,12 @@ before 1.0, a minor version may change configuration or behaviour (said here whe
 ## [Unreleased]
 
 ### Added
+- The gateway opens again, when it starts, the tmux and herdr terminals that
+  were open when it stopped or crashed, within the last hour:
+  attached to the same sessions on their hosts, never made anew, for users
+  still signed in, with the saved credential and pinned key only. Audited as
+  `session.restore`; `CORRAL_RESTORE_SESSIONS=off` turns it off. Containers
+  should get 30 s to stop (`--stop-timeout 30`).
 - An Agents page (in the menu; with tabs, its own tab from the bot button,
   which counts the agents waiting, the terminal tabs staying open behind it):
   every agent of the tmux and herdr sessions open on the gateway, waiting ones
