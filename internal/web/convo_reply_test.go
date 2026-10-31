@@ -151,6 +151,20 @@ time.sleep(30)`)
 	if got := run("reply:"+shown, []string{"1"}); got != 9 || wrote() != "" {
 		t.Fatalf("a dialog of its own is no question: exit %d, typed %q", got, wrote())
 	}
+	// Escape for a dialog of its own: only while one is open — not for a
+	// question, nor once it was closed (a turn begun since would stop).
+	for _, why := range []string{"dialog open", "other"} {
+		state("waiting", why)
+		if got := run("dialog", []string{"esc"}); got != 0 || wrote() != "pane send-keys p1 esc" {
+			t.Fatalf("%s, Escape closes it: exit %d, typed %q", why, got, wrote())
+		}
+	}
+	for _, st := range [][2]string{{"waiting", "permission prompt"}, {"waiting", "input needed"}, {"busy", ""}, {"idle", ""}} {
+		state(st[0], st[1])
+		if got := run("dialog", []string{"esc"}); got != 9 || wrote() != "" {
+			t.Fatalf("%v, no dialog: exit %d, typed %q", st, got, wrote())
+		}
+	}
 	state("idle", "")
 	if got := run("reply:"+shown, []string{"1"}); got != 9 || wrote() != "" {
 		t.Fatalf("no longer waiting: exit %d, typed %q", got, wrote())

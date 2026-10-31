@@ -765,17 +765,26 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   }
   const canPress = bound && working
   // A dialog of Claude Code's own open (/usage, a picker): Escape closes it,
-  // pressed from here only when asked (it may be in use in the terminal).
+  // pressed from here only when asked (it may be in use in the terminal),
+  // and by the host only while one is still open (closed there meanwhile,
+  // it would stop a turn begun since).
   const [shutting, setShutting] = useState(false)
   const closeDialog = () => {
     const b = convo.bind
     if (!b || shutting) return
     setShutting(true)
-    api('POST', `/api/sessions/${sid}/conversation/interrupt`, { pane: b.pane, pid: b.pid, start: b.start, session: b.session }, { timeoutMs: PRESS_MS })
-      // (Its session file says so a moment after: read then, not at the next tick.)
-      .then(() => setTimeout(() => convo.refresh(), 700))
-      .catch((e) => toast(refusal(e), true))
-      .finally(() => setShutting(false))
+    // (Its session file says so a moment after: read then, not at the next
+    // tick; pressed again only once that read had time to come.)
+    const settle = () => setTimeout(() => {
+      convo.refresh()
+      setTimeout(() => setShutting(false), 1500)
+    }, 700)
+    api('POST', `/api/sessions/${sid}/conversation/close-dialog`, { pane: b.pane, pid: b.pid, start: b.start, session: b.session }, { timeoutMs: PRESS_MS })
+      .then(settle)
+      .catch((e) => {
+        if (!(e instanceof ApiError && e.code === 'no_dialog')) toast(refusal(e), true) // (closed already: the read says so)
+        settle()
+      })
   }
   // (What Claude Code alone has: its permission modes, its model picker, its "send now".)
   const codex = convo.bind?.agent === 'codex' || (!!row && isCodex(row.a.agent))

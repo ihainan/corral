@@ -112,6 +112,7 @@ const zh = {
   'error.no_screen': '没能读到这个窗格的屏幕，请重试。',
   'error.herdr_unavailable': '这个会话里没有可用的 herdr。',
   'error.not_claude': '只有 Claude Code 的输入框能这样核对。',
+  'error.no_dialog': '面板已经关掉了，没有按键。',
   'error.unauthorized': '登录已失效，请重新登录。',
 
   'login.title': '登录',
@@ -1536,6 +1537,7 @@ const en: Record<Key, string> = {
   'error.no_screen': 'The pane\'s screen could not be read. Try again.',
   'error.herdr_unavailable': 'herdr is not available in this session.',
   'error.not_claude': 'Only Claude Code\'s input box can be checked this way.',
+  'error.no_dialog': 'The panel is already closed: nothing was pressed.',
   'error.unauthorized': 'Your sign-in has ended: sign in again.',
 
   'login.title': 'Sign in',

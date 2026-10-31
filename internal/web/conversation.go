@@ -2246,8 +2246,9 @@ func convoSendCommand(mode, session, pane, socket string, pid, start int64, sid 
 
 // convoGatedCommand is convoSendCommand with a gate (see the script): ""
 // none; "free", not while Claude Code waits; "idle", only while it is idle
-// (exit 12 where it is not); "reply:<sha256 of the screen answered>", only
-// while it waits for an answer, on that screen.
+// (exit 12 where it is not); "dialog", only while it has a dialog of its own
+// open, not a question (exit 9 where it has not); "reply:<sha256 of the
+// screen answered>", only while it waits for an answer, on that screen.
 func convoGatedCommand(gate, mode, session, pane, socket string, pid, start int64, sid string, length int, keys []string, read int) string {
 	script := `PATH="$HOME/.local/bin:$HOME/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 mode=$1 sess=$2 p=$3 pid=$4 start=$5 len=$6 sock=$7 sid=$8 rd=$9
@@ -2390,6 +2391,9 @@ if [ -n "$gate" ]; then
   case $gate in
   free) [ "$st" = waiting ] && exit 9; [ "$st" = title-unread ] && exit 11 ;;
   idle) [ "$st" = idle ] || exit 12 ;;
+  dialog)
+    [ "$st" = waiting ] || exit 9
+    case $wf in "permission prompt"|"input needed"|"sandbox request"|"worker request") exit 9;; esac ;;
   reply:*)
     [ "$st" = waiting ] || exit 9
     case $wf in "permission prompt"|"input needed"|"sandbox request"|"worker request") ;; *) exit 9;; esac
@@ -2529,6 +2533,9 @@ var convoKeys = map[string]struct {
 	tmux  []string
 }{
 	"interrupt": {"convo.interrupt", []string{"esc"}, []string{"Escape"}},
+	// Escape for a dialog of Claude Code's own (/usage, a picker), only
+	// while one is open: closed meanwhile, it would stop a turn begun since.
+	"close_dialog": {"convo.close_dialog", []string{"esc"}, []string{"Escape"}},
 	"send_now":  {"convo.send_now", []string{"ctrl+x", "ctrl+s"}, []string{"C-x", "C-s"}},
 	"mode":      {"convo.mode", []string{"shift+tab"}, []string{"BTab"}}, // (Claude Code's next permission mode)
 	"models":    {"convo.models", nil, nil},                              // (its picker read: see convo_model.go)
@@ -2642,6 +2649,13 @@ func sendText(s string) (string, bool) {
 // whatever pane is in front by the time it arrives.
 func (s *Server) apiConversationInterrupt(w http.ResponseWriter, r *http.Request) {
 	s.convoPress(w, r, "interrupt")
+}
+
+// POST /api/sessions/{id}/conversation/close-dialog (the same as interrupt):
+// Escape, only while Claude Code says a dialog of its own is open (409
+// no_dialog where it no longer is: nothing pressed).
+func (s *Server) apiConversationCloseDialog(w http.ResponseWriter, r *http.Request) {
+	s.convoPress(w, r, "close_dialog")
 }
 
 func (s *Server) apiConversationSendNow(w http.ResponseWriter, r *http.Request) {
@@ -3021,6 +3035,8 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		gate = "cfree" // (likewise: typed into its approval, the Enter would answer it)
 	case what == "command":
 		gate = "idle" // (not while it works either: it would wait in its queue, and run when no one looks)
+	case what == "close_dialog":
+		gate = "dialog" // (closed meanwhile, the Escape would stop what it does now)
 	}
 	done := ended.Done
 	if front.agent == "codex" {
@@ -3050,6 +3066,10 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		reason = "busy" // (another to the pane on the host still: nothing typed)
 	case errors.As(err, &exitErr) && exitErr.Status == 4:
 		reason = "send_failed" // (nothing typed)
+	case errors.As(err, &exitErr) && exitErr.Status == 9 && what == "close_dialog":
+		reason = "no_dialog"
+		writeError(w, http.StatusConflict, "no_dialog", "no dialog of its own is open any more: nothing pressed")
+		return
 	case errors.As(err, &exitErr) && exitErr.Status == 9 && what == "reply":
 		reason = "not_waiting"
 		writeError(w, http.StatusConflict, "not_waiting", "it no longer waits for an answer")
