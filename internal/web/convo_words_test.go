@@ -47,7 +47,9 @@ func TestConvoPressRefusalsWorded(t *testing.T) {
 		t.Fatalf("only %d codes found in convoPress: the pattern no longer matches", len(codes))
 	}
 	for code := range codes {
-		if strings.Contains(string(chat), "e.code === '"+code+"'") {
+		// (A case of the page's own counts only when it holds for every
+		// one: "e.code === 'x')" or "e.code === 'x' ||", not "… && something".)
+		if regexp.MustCompile(`e\.code === '` + code + `'(\)| \|\|)`).Match(chat) {
 			continue
 		}
 		for n, l := range locales[:2] {

@@ -1848,13 +1848,19 @@ func (s *Server) readConvo(sess *term.Session, st *convoState) (more bool, err e
 		return false, s.readOpenCode(sess, st)
 	}
 	err = s.withSFTP(context.Background(), sess, convoReadLimit, func(c *sftplite.Client) error {
-		if st.agent != "codex" && !st.sub {
+		if sess.Persistence == "tmux" && st.agent != "codex" && !st.sub {
 			st.status = convoProcStatus(c, st)
+		}
+		if sess.Persistence != "tmux" {
 			// (herdr says busy or idle itself, but not a dialog Claude Code
 			// has open (/usage, a picker): its file's "waiting" only, the
-			// host refusing a message then.)
-			if sess.Persistence != "tmux" && !strings.HasPrefix(st.status, "waiting:") {
-				st.status = ""
+			// host refusing a message then. Read anew each time: none for
+			// another agent come into the pane since.)
+			st.status = ""
+			if st.agent != "codex" && !st.sub {
+				if w := convoProcStatus(c, st); strings.HasPrefix(w, "waiting:") {
+					st.status = w
+				}
 			}
 		}
 		// (Codex's log says whether it works.)

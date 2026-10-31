@@ -619,8 +619,9 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     const status = row.lost ? 'unknown' : ended && row.bg !== 'stale' ? (row.a.status as 'done' | 'idle') : row.status
     const bg = row.lost ? undefined : row.bg
     // (A dialog of Claude Code's own open, /usage say: herdr calls it idle,
-    // its session file says it waits. Of this pane's process only.)
-    const dialog = !row.lost && status !== 'blocked' && convo.bind?.pane === row.a.pane_id && !convo.failing && convo.agentStatus === 'waiting' && !answerable(convo.waitingFor)
+    // its session file says it waits. Of this pane's process only, and of
+    // Claude Code's: no other agent says so.)
+    const dialog = !row.lost && status !== 'blocked' && convo.bind?.pane === row.a.pane_id && (convo.bind.agent ?? 'claude') === 'claude' && !convo.failing && convo.agentStatus === 'waiting' && !answerable(convo.waitingFor)
     return { where: row.ws === '~' ? '' : row.ws, title, status, bg, dialog, other: readsLog(row.a.agent) ? undefined : row.a.agent, program: row.a.agent }
   }, [herdr, row, convo.bind, convo.agentStatus, convo.waitingFor, convo.failing, convo.title, convo.entries])
   // A finished one looked at here is seen: the gateway keeps it, so it is
@@ -763,6 +764,19 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       .catch((e) => settle(refusal(e)))
   }
   const canPress = bound && working
+  // A dialog of Claude Code's own open (/usage, a picker): Escape closes it,
+  // pressed from here only when asked (it may be in use in the terminal).
+  const [shutting, setShutting] = useState(false)
+  const closeDialog = () => {
+    const b = convo.bind
+    if (!b || shutting) return
+    setShutting(true)
+    api('POST', `/api/sessions/${sid}/conversation/interrupt`, { pane: b.pane, pid: b.pid, start: b.start, session: b.session }, { timeoutMs: PRESS_MS })
+      // (Its session file says so a moment after: read then, not at the next tick.)
+      .then(() => setTimeout(() => convo.refresh(), 700))
+      .catch((e) => toast(refusal(e), true))
+      .finally(() => setShutting(false))
+  }
   // (What Claude Code alone has: its permission modes, its model picker, its "send now".)
   const codex = convo.bind?.agent === 'codex' || (!!row && isCodex(row.a.agent))
   // (Claude Code's own keys and pickers: not Codex's, nor OpenCode's.)
@@ -1380,7 +1394,16 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
         </div>
       )}
       {/* (Why nothing can be sent now: over the box, where a phone shows it too) */}
-      {blocked && <p className="agents-chat-why">{blocked}</p>}
+      {blocked && (
+        <p className="agents-chat-why">
+          {blocked}
+          {blocked === t('agents.dialogOpen') && (
+            <button type="button" className="link-btn agents-chat-why-act" disabled={shutting} onClick={closeDialog}>
+              {t('agents.closeDialog')}
+            </button>
+          )}
+        </p>
+      )}
       <div className="composer-box">
         <textarea
           ref={field}

@@ -1045,6 +1045,9 @@ button.convo-task-line:hover .convo-task-name { color: var(--term-fg); }
   border-bottom: 1px solid var(--term-line); font: 13px/20px var(--font-ui); text-align: center;
 }
 .term-root .agents-chat-why { margin: 0 0 6px; padding: 0 4px; color: var(--term-fg-2); font: 13px/18px var(--font-ui); }
+/* (Its one way out, in the line: a tap a finger finds.) */
+.term-root .agents-chat-why-act { margin-left: 6px; padding: 4px 2px; }
+.term-root .agents-chat-why-act:disabled { opacity: 0.5; cursor: default; text-decoration: none; }
 
 /* A phone's agents list: one row an agent (what, where, how it is); waiting is the one loud colour. */
 .agents-list { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 0 0 calc(16px + env(safe-area-inset-bottom, 0px)); }
