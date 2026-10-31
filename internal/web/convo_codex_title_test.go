@@ -1,6 +1,7 @@
 package web
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 )
@@ -31,6 +32,36 @@ func TestCodexTitleKept(t *testing.T) {
 		}
 		if _, ok := st.codexTitleKept("another", c.pressed, now); ok {
 			t.Errorf("%s: kept for another process", c.name)
+		}
+	}
+}
+
+// A Codex log begun by the page's first message: its first message of the
+// person's is that one (review468: not one resumed or begun anew in its
+// terminal, whose first message is another).
+func TestCodexFirstIs(t *testing.T) {
+	row := func(typ string, p map[string]any) string {
+		b, _ := json.Marshal(map[string]any{"timestamp": "2026-10-31T01:00:00.000Z", "type": typ, "payload": p})
+		return string(b) + "\n"
+	}
+	user := func(text string) string {
+		return row("event_msg", map[string]any{"type": "item_completed", "item": map[string]any{"type": "UserMessage", "id": "u-" + text, "content": []any{map[string]any{"type": "text", "text": text}}}})
+	}
+	head := row("session_meta", map[string]any{"id": "s"}) +
+		row("response_item", map[string]any{"type": "message", "role": "user", "content": []any{map[string]any{"type": "input_text", "text": "<environment_context>x</environment_context>"}}}) +
+		user("修好登录\n然后跑测试") + user("插一句")
+	for _, c := range []struct {
+		name, head, first string
+		want              bool
+	}{
+		{"its first is ours", head, "修好登录\n然后跑测试", true},
+		{"ours, spaces about it", head, "  修好登录\n然后跑测试\n", true},
+		{"another first (resumed, begun anew)", head, "插一句", false},
+		{"none of the person's yet", row("session_meta", map[string]any{"id": "s"}), "修好登录", false},
+		{"a line cut short only", `{"timestamp":"x","type":"event_msg","payload":{"type":"item_completed"`, "修好登录", false},
+	} {
+		if got := codexFirstIs([]byte(c.head), c.first); got != c.want {
+			t.Errorf("%s: %v", c.name, got)
 		}
 	}
 }

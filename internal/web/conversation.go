@@ -1567,8 +1567,12 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, ans)
 		return
 	}
-	if sess.Persistence == "tmux" && st.agent == "codex" && st.bind != nil && (st.status == "busy" || st.status == "") && s.codexWaits(ctx, sess, st) {
-		st.status = "waiting:permission prompt"
+	if sess.Persistence == "tmux" && st.agent == "codex" && st.bind != nil && (st.status == "busy" || st.status == "") {
+		if s.codexWaits(ctx, sess, st) {
+			st.status = "waiting:permission prompt"
+		} else if st.cxTitleFail {
+			st.status = "" // (whether it waits not known: not said to work either)
+		}
 	}
 	ans.Available, ans.Gen, ans.Rev, ans.Older, ans.More, ans.AgentStatus = true, st.gen, st.parser.Rev(), st.older, more, st.status
 	if w, ok := strings.CutPrefix(st.status, "waiting:"); ok {
@@ -2732,10 +2736,13 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		PID     int64  `json:"pid"`
 		Start   int64  `json:"start"`
 		Session string `json:"session"`
-		Text    string `json:"text"`   // (send)
-		Model   string `json:"model"`  // (model: as the picker names it)
-		Effort  string `json:"effort"` // (effort: a level of effortLevels)
-		Mode    string `json:"mode"`   // (mode: the one to go to, of convoModes; none: the next)
+		// (send, to a Codex with no log when the page last read it: the first
+		// message the page sent it, by which the log it began is known.)
+		First  string `json:"first"`
+		Text   string `json:"text"`   // (send)
+		Model  string `json:"model"`  // (model: as the picker names it)
+		Effort string `json:"effort"` // (effort: a level of effortLevels)
+		Mode   string `json:"mode"`   // (mode: the one to go to, of convoModes; none: the next)
 		// (reply: the screen answered, as screen gave it, and the keys
 		// pressed (of replyKeys, up to 4) or the text typed and Enter.)
 		Digest string   `json:"digest"`
@@ -2911,10 +2918,14 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 			front.sid = ""
 		}
 	}
-	// (A Codex asked of before its log was begun, which its first message
-	// begins: the same process, at the one session it can have begun since.
-	// The conversation's scan, shared a few seconds, may not have seen it yet.)
-	if front != nil && front.agent == "codex" && b.Session == convoNoSession && front.pid == b.PID && front.start == b.Start && front.log != "" && convoUUID.MatchString(front.sid) && front.sid != convoNoSession {
+	// (A Codex the page last read with no log, the page's first message to
+	// it sent since — the conversation's scan, shared a few seconds, may not
+	// have seen the log that began: the same process, with a log open whose
+	// first message of the person's is that one, is at the session that
+	// message began. Not one resumed or begun anew in its terminal meanwhile:
+	// its first message is another.)
+	if front != nil && front.agent == "codex" && what == "send" && b.Session == convoNoSession && b.First != "" && front.pid == b.PID && front.start == b.Start &&
+		front.log != "" && convoUUID.MatchString(front.sid) && front.sid != convoNoSession && s.codexBegunBy(ctx, sess, front.log, b.First) {
 		b.Session = front.sid
 	}
 	if front == nil || front.pid != b.PID || front.start != b.Start || front.sid != b.Session {
