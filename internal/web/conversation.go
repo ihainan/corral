@@ -381,6 +381,44 @@ else HERDR_SOCKET_PATH=$3 herdr pane read "$2" --source visible 2>/dev/null 9>&-
 	return "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(mode) + " " + sshx.QuoteShell(pane) + " " + sshx.QuoteShell(socket)
 }
 
+// joinedMark separates, in convoScreenJoinedCommand's output, the screen as
+// shown from its lines as the terminal joins them.
+const joinedMark = "\x01corral-joined\n"
+
+// convoScreenJoinedCommand is convoScreenCommand, the screen as shown
+// first — the same bytes, its digest what the host checks before an
+// answer's keys — and after joinedMark, where the terminal tells them, its
+// lines with those it wrapped joined (see unwrapScreen): tmux's
+// capture-pane -J (the screen only), herdr's recent-unwrapped (back further
+// than the screen). Nothing after the screen where that cannot be read.
+func convoScreenJoinedCommand(mode, pane, socket string) string {
+	script := `PATH="$HOME/.local/bin:$HOME/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+if [ "$1" = tmux ]; then tmux -u capture-pane -p -t "$2" 2>/dev/null 9>&-
+  j=$(tmux -u capture-pane -p -J -t "$2" 2>/dev/null 9>&-)
+else HERDR_SOCKET_PATH=$3 herdr pane read "$2" --source visible 2>/dev/null 9>&-
+  j=$(HERDR_SOCKET_PATH=$3 herdr pane read "$2" --source recent-unwrapped 2>/dev/null 9>&-)
+fi && [ -n "$j" ] && printf '\001corral-joined\n%s\n' "$j"
+exit 0`
+	return "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(mode) + " " + sshx.QuoteShell(pane) + " " + sshx.QuoteShell(socket)
+}
+
+// screenJoined splits convoScreenJoinedCommand's output: the screen as
+// shown (as read: its digest is of these bytes), and as shown with the
+// lines the terminal wrapped joined (the screen as shown where that could
+// not be told).
+func screenJoined(raw []byte) (shown []byte, joined string) {
+	at := strings.LastIndex(string(raw), joinedMark)
+	if at < 0 {
+		return raw, string(raw)
+	}
+	shown = raw[:at]
+	j, ok := unwrapScreen(string(shown), string(raw[at+len(joinedMark):]))
+	if !ok {
+		return shown, string(shown)
+	}
+	return shown, j
+}
+
 // convoTailsCommand prints the end of each log, as "<path>\n<bytes>\n<the
 // end of it>" NUL-terminated records. Fixed script; the paths, already
 // matched against what a daemon keeps, are its arguments.
@@ -2613,11 +2651,11 @@ var convoKeys = map[string]struct {
 	// Escape for a dialog of Claude Code's own (/usage, a picker), only
 	// while one is open: closed meanwhile, it would stop a turn begun since.
 	"close_dialog": {"convo.close_dialog", []string{"esc"}, []string{"Escape"}},
-	"send_now":  {"convo.send_now", []string{"ctrl+x", "ctrl+s"}, []string{"C-x", "C-s"}},
-	"mode":      {"convo.mode", []string{"shift+tab"}, []string{"BTab"}}, // (Claude Code's next permission mode)
-	"models":    {"convo.models", nil, nil},                              // (its picker read: see convo_model.go)
-	"model":     {"convo.model", nil, nil},
-	"effort":    {"convo.effort", nil, nil}, // (its slider: see convo_effort.go)
+	"send_now":     {"convo.send_now", []string{"ctrl+x", "ctrl+s"}, []string{"C-x", "C-s"}},
+	"mode":         {"convo.mode", []string{"shift+tab"}, []string{"BTab"}}, // (Claude Code's next permission mode)
+	"models":       {"convo.models", nil, nil},                              // (its picker read: see convo_model.go)
+	"model":        {"convo.model", nil, nil},
+	"effort":       {"convo.effort", nil, nil}, // (its slider: see convo_effort.go)
 	// Looking for a message that was typed and has not turned up in the
 	// log: nothing is pressed, the screen is read (see convo_sent.go).
 	"sent_missing": {"convo.sent_missing", nil, nil},

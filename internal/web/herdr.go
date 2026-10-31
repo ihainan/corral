@@ -983,6 +983,17 @@ func (s *Server) apiHerdrScreen(w http.ResponseWriter, r *http.Request) {
 		writeHerdrError(w, err)
 		return
 	}
+	// Shown with the lines the terminal wrapped joined (see unwrapScreen);
+	// its digest still that of the screen as shown, as an answer checks it.
+	// (Asked last on this request's own connection: an older herdr refuses
+	// that source, and closes it.)
+	if !cut {
+		if j, err := c.ReadPaneSource(ctx, pane, "recent_unwrapped", 0); err == nil {
+			if u, ok := unwrapScreen(text, j); ok {
+				text = u
+			}
+		}
+	}
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusOK, map[string]any{"text": text, "digest": digest, "cut": cut})
 }

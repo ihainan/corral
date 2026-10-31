@@ -260,3 +260,90 @@ func TestCommandText(t *testing.T) {
 		}
 	}
 }
+
+// The screen shown for an answer has the lines the terminal wrapped joined;
+// its digest is still that of the screen as shown, which the host checks
+// before the answer's keys (10-31; review496). A herdr with no such source:
+// the screen as shown.
+func TestScreenJoinedForAnswer(t *testing.T) {
+	for _, p := range []string{"sh", "python3", "sha256sum"} {
+		if _, err := exec.LookPath(p); err != nil {
+			t.Skip("no " + p)
+		}
+	}
+	if _, err := os.Stat("/proc/self/stat"); err != nil {
+		t.Skip("no /proc")
+	}
+	dir := t.TempDir()
+	typed := filepath.Join(dir, "typed")
+	old := filepath.Join(dir, "old") // (there: a herdr with no such source)
+	const wrapped = " Do you want to proceed?\n ❯ 1. Yes\n   2. Yes, and switch to auto mode · auto mode handles these prompts f\nor you\n   3. No\n"
+	// (Joined, herdr's goes back above the screen: an old prompt there.)
+	const joined = " Old question?\n ❯ 1. Something\n Do you want to proceed?\n ❯ 1. Yes\n   2. Yes, and switch to auto mode · auto mode handles these prompts for you\n   3. No\n"
+	os.WriteFile(filepath.Join(dir, "herdr"), []byte("#!/bin/sh\nif [ \"$1 $2\" = 'pane read' ]; then\n  if [ \"$5\" = recent-unwrapped ]; then [ -e "+old+" ] && exit 2; printf '%s' '"+joined+"'; exit 0; fi\n  printf '%s' '"+wrapped+"'; exit 0\nfi\nprintf '%s\\n' \"$*\" >>"+typed+"\n"), 0o755)
+	helper := exec.Command("python3", "-c", `import pty, os, sys, time
+pid, fd = pty.fork()
+if pid == 0:
+    os.environ["HERDR_PANE_ID"] = "p1"
+    os.execvp("sleep", ["sleep", "30"])
+print(pid, flush=True)
+time.sleep(30)`)
+	out, _ := helper.StdoutPipe()
+	if err := helper.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer helper.Process.Kill()
+	var pid int
+	if _, err := fmt.Fscan(out, &pid); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	stat, _ := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	rest := strings.Fields(string(stat[strings.LastIndexByte(string(stat), ')')+2:]))
+	start, _ := strconv.ParseInt(rest[19], 10, 64)
+	os.MkdirAll(filepath.Join(dir, ".claude", "sessions"), 0o755)
+	os.WriteFile(filepath.Join(dir, ".claude", "sessions", strconv.Itoa(pid)+".json"), []byte(fmt.Sprintf(`{"pid":%d,"sessionId":%q,"status":"waiting","waitingFor":"permission prompt"}`, pid, sidA)), 0o644)
+	env := append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"), "XDG_RUNTIME_DIR="+dir, "HOME="+dir)
+	shownFor := func() (text, digest string) {
+		c := exec.Command("sh", "-c", convoScreenJoinedCommand("herdr", "p1", "/run/x.sock"))
+		c.Env = env
+		raw, err := c.Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		shown, j := screenJoined(raw)
+		_, digest, _ = screenOf(shown)
+		text, _, _ = screenOf([]byte(j))
+		return text, digest
+	}
+	answer := func(digest string) (int, string) {
+		os.Remove(typed)
+		c := exec.Command("sh", "-c", convoGatedCommand("reply:"+digest, "herdr", "", "p1", "/run/x.sock", int64(pid), start, sidA, 0, []string{"1"}, 0))
+		c.Env = env
+		err := c.Run()
+		b, _ := os.ReadFile(typed)
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			return ee.ExitCode(), strings.TrimSpace(string(b))
+		}
+		return 0, strings.TrimSpace(string(b))
+	}
+	text, digest := shownFor()
+	if !strings.Contains(text, "prompts for you") || strings.Contains(text, "\nor you") || strings.Contains(text, "Old question") {
+		t.Fatalf("not the screen, joined: %q", text)
+	}
+	vis := sha256.Sum256([]byte(wrapped))
+	if digest != hex.EncodeToString(vis[:]) {
+		t.Fatal("its digest not that of the screen as shown")
+	}
+	if got, keys := answer(digest); got != 0 || keys != "pane send-keys p1 1" {
+		t.Fatalf("its screen as shown: exit %d, typed %q", got, keys)
+	}
+	os.WriteFile(old, nil, 0o644)
+	if text, digest = shownFor(); !strings.Contains(text, "\nor you") {
+		t.Fatalf("an older herdr: %q", text)
+	}
+	if got, keys := answer(digest); got != 0 || keys != "pane send-keys p1 1" {
+		t.Fatalf("an older herdr, its screen as shown: exit %d, typed %q", got, keys)
+	}
+}

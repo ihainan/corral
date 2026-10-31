@@ -260,12 +260,19 @@ func (c *Client) Snapshot(ctx context.Context) (*Snapshot, error) {
 // ReadPane returns the visible text of a pane (ANSI stripped), used to confirm
 // a prompt is still on screen before answering it.
 func (c *Client) ReadPane(ctx context.Context, paneID string, lines int) (string, error) {
+	return c.ReadPaneSource(ctx, paneID, "visible", lines)
+}
+
+// ReadPaneSource is ReadPane from another of herdr's sources ("recent",
+// "recent_unwrapped": the lines it wrapped joined). One a herdr does not
+// have is refused, and the connection closed: asked last on it.
+func (c *Client) ReadPaneSource(ctx context.Context, paneID, source string, lines int) (string, error) {
 	var res struct {
 		Read struct {
 			Text string `json:"text"`
 		} `json:"read"`
 	}
-	params := map[string]any{"pane_id": paneID, "source": "visible", "strip_ansi": true}
+	params := map[string]any{"pane_id": paneID, "source": source, "strip_ansi": true}
 	if lines > 0 {
 		params["lines"] = lines
 	}

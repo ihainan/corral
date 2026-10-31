@@ -18,6 +18,7 @@ func TestHostScriptsParse(t *testing.T) {
 		"locate herdr":  convoLocateCommand("herdr", "", ""),
 		"locate tmux":   convoLocateCommand("tmux", "main", "%1"),
 		"screen":        convoScreenCommand("herdr", "w1:p1", "/tmp/herdr.sock"),
+		"screen joined": convoScreenJoinedCommand("tmux", "%1", ""),
 		"tails":         convoTailsCommand([]string{"/home/u/.claude/projects/-w/a.jsonl"}),
 		"title":         convoTitleCommand("/home/u/.claude/projects/-w/a.jsonl", "11111111-2222-4333-8444-555555555501", 4096),
 		"complete":      completeCommand("/home/u/proj"),
