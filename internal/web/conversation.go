@@ -1551,6 +1551,23 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 	ans := convoAnswer{Gen: st.gen, Bind: st.bind, Entries: []convo.Entry{}, DefaultChanged: defaultChangedOf(sess.ID)}
 	if st.reason != "" {
 		ans.Reason = st.reason
+		// (A Claude Code with no log yet, a new conversation: what its file
+		// says it does still, a dialog of its own open above all — a
+		// message to it is refused then. herdr says busy or idle itself.)
+		if st.reason == convoNoLog && st.bind != nil && st.agent == "claude" && !st.sub {
+			var now string
+			_ = s.withSFTP(ctx, sess, convoReadLimit, func(c *sftplite.Client) error {
+				now = convoProcStatus(c, st)
+				return nil
+			})
+			if sess.Persistence != "tmux" && !strings.HasPrefix(now, "waiting:") {
+				now = ""
+			}
+			ans.AgentStatus = now
+			if w, ok := strings.CutPrefix(now, "waiting:"); ok {
+				ans.AgentStatus, ans.WaitingFor = "waiting", w
+			}
+		}
 		writeJSON(w, http.StatusOK, ans)
 		return
 	}
@@ -2184,11 +2201,21 @@ func convoProcStatus(c *sftplite.Client, st *convoState) string {
 	if st.bind == nil {
 		return ""
 	}
-	i := strings.LastIndex(st.log, "/.claude/projects/")
-	if i < 0 {
+	var base string
+	switch i := strings.LastIndex(st.log, "/.claude/projects/"); {
+	case i >= 0:
+		base = st.log[:i]
+	case st.log == "":
+		// (Its log not written yet, a new conversation: in the home, where
+		// locating read that file too.)
+		home, err := c.Getwd()
+		if err != nil {
+			return ""
+		}
+		base = home
+	default:
 		return ""
 	}
-	base := st.log[:i]
 	b, err := c.ReadRange(base+"/.claude/sessions/"+strconv.FormatInt(st.bind.PID, 10)+".json", 0, 64<<10)
 	if err != nil {
 		return ""

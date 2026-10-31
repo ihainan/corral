@@ -391,9 +391,10 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
           rev = 0
           byseq = new Map()
           setConvo((c) =>
-            c.of === key && c.status === 'none' && c.reason === a.reason && c.gen === a.gen && sameBind(c.bind, a.bind) && !c.failing && c.defaultChanged === a.default_changed
+            // (A new conversation's agent says what it does too: a dialog of its own open, say.)
+            c.of === key && c.status === 'none' && c.reason === a.reason && c.gen === a.gen && sameBind(c.bind, a.bind) && !c.failing && c.defaultChanged === a.default_changed && c.agentStatus === a.agent_status && c.waitingFor === a.waiting_for
               ? c
-              : { ...initial(key), status: 'none', reason: a.reason, gen: a.gen, bind: a.bind, okAt: now, changedAt: now, defaultChanged: a.default_changed },
+              : { ...initial(key), status: 'none', reason: a.reason, gen: a.gen, bind: a.bind, agentStatus: a.agent_status, waitingFor: a.waiting_for, okAt: now, changedAt: now, defaultChanged: a.default_changed },
           )
           remember(key, gen, rev, byseq, a)
         } else {
@@ -459,7 +460,7 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
         byseq = new Map(was.byseq)
         const now = Date.now()
         const k = was.a
-        if (!k.available) setConvo({ ...initial(key), status: 'none', reason: k.reason, gen, bind: k.bind, okAt: now, changedAt: now })
+        if (!k.available) setConvo({ ...initial(key), status: 'none', reason: k.reason, gen, bind: k.bind, agentStatus: k.agent_status, waitingFor: k.waiting_for, okAt: now, changedAt: now })
         else {
           const entries = [...byseq.values()].sort((x, y) => x.seq - y.seq)
           const older = !!k.older || entries.length === MAX
