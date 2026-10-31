@@ -73,18 +73,19 @@ func TestCodexRunningSubagent(t *testing.T) {
 }
 
 // What was set going before the process it is read for started went with
-// the process before (and is let go of: it is not coming back).
+// the process before: not shown. (Kept: a start told wrong a while, then
+// right again, loses nothing — review503.)
 func TestCodexRunningSince(t *testing.T) {
 	c := feedAll(runCall, runOut)
-	at, _ := time.Parse(time.RFC3339Nano, "2026-10-31T06:00:00Z")
-	c.QueueSince(at.UnixMilli())
-	if got := runningIDs(c); got == "" {
-		t.Errorf("of this process: gone")
-	}
-	at, _ = time.Parse(time.RFC3339Nano, "2026-10-31T06:30:00Z")
+	at, _ := time.Parse(time.RFC3339Nano, "2026-10-31T06:30:00Z")
 	c.QueueSince(at.UnixMilli())
 	if got := runningIDs(c); got != "" {
 		t.Errorf("of the process before: %q", got)
+	}
+	at, _ = time.Parse(time.RFC3339Nano, "2026-10-31T06:00:00Z")
+	c.QueueSince(at.UnixMilli())
+	if got := runningIDs(c); got == "" {
+		t.Errorf("of this process, its start told right again: gone")
 	}
 }
 
@@ -152,6 +153,24 @@ func TestCodexRunningOldTakesNoPlace(t *testing.T) {
 	c.QueueSince(at.UnixMilli())
 	c.Feed([]byte(strings.ReplaceAll(strings.ReplaceAll(runCall+runOut, "06:27:5", "06:29:5"), "call_4", "call_new")))
 	if got := runningIDs(c); got != "cmd:call_new:sleep 25; echo fertig" {
+		t.Errorf("this process's: %q", got)
+	}
+}
+
+// review503: a part before read in, full of what the process before left:
+// it takes no place from what this one sets going.
+func TestCodexRunningOldPartTakesNoPlace(t *testing.T) {
+	var rows []string
+	for i := 0; i < maxRunning; i++ {
+		rows = append(rows, strings.ReplaceAll(strings.ReplaceAll(runCall+runOut, "call_4", fmt.Sprintf("call_o%d", i)), "8873", fmt.Sprint(9000+i)))
+	}
+	before := feedAll(rows...)
+	after := feedAll(strings.ReplaceAll(strings.ReplaceAll(runCall+runOut, "06:27:5", "06:29:5"), "call_4", "call_new"))
+	at, _ := time.Parse(time.RFC3339Nano, "2026-10-31T06:28:00Z")
+	after.QueueSince(at.UnixMilli())
+	after.Prepend(before)
+	after.Feed([]byte(strings.ReplaceAll(strings.ReplaceAll(runCall+runOut, "06:27:5", "06:29:5"), "call_4", "call_newer")))
+	if got := runningIDs(after); got != "cmd:call_new:sleep 25; echo fertig cmd:call_newer:sleep 25; echo fertig" {
 		t.Errorf("this process's: %q", got)
 	}
 }

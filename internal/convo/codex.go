@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -142,19 +141,7 @@ func (c *Codex) ClearQueue() {}
 // QueueSince: when the process the log is read for started (unix ms; 0
 // not known). Its commands and subagents end with it: what was set going
 // before that is not running.
-func (c *Codex) QueueSince(started int64) {
-	if started == c.since {
-		return
-	}
-	c.since = started
-	// (Gone with the process before: not kept, taking places — review502.)
-	for id, r := range c.running {
-		if !c.ofNow(r.Time) {
-			delete(c.running, id)
-		}
-	}
-	c.runOrder = slices.DeleteFunc(c.runOrder, func(id string) bool { _, ok := c.running[id]; return !ok })
-}
+func (c *Codex) QueueSince(started int64) { c.since = started }
 
 func (c *Codex) ofNow(ts string) bool {
 	if c.since <= 0 {
@@ -170,7 +157,7 @@ func (c *Codex) setGoing(id, kind, what, at string) {
 		delete(c.ranOut, id)
 		return
 	}
-	if _, there := c.running[id]; there || len(c.running) >= maxRunning || !c.ofNow(at) {
+	if _, there := c.running[id]; there || !c.room() {
 		return
 	}
 	if c.running == nil {
@@ -178,6 +165,24 @@ func (c *Codex) setGoing(id, kind, what, at string) {
 	}
 	c.running[id] = Running{ID: id, What: clip(clean(firstLineOf(what)), maxTitle), Kind: kind, Time: at}
 	c.runOrder = append(c.runOrder, id)
+}
+
+// room: a place for one more running: full, one of a process before this
+// one's (not shown, see Running) makes way — review503: what the process
+// before left takes no place from this one's; kept, not dropped, so that
+// a start of the process told wrong a while loses nothing.
+func (c *Codex) room() bool {
+	if len(c.running) < maxRunning {
+		return true
+	}
+	for i, id := range c.runOrder {
+		if !c.ofNow(c.running[id].Time) {
+			delete(c.running, id)
+			c.runOrder = append(c.runOrder[:i:i], c.runOrder[i+1:]...)
+			return true
+		}
+	}
+	return false
 }
 
 // endRun: work told of as ended.
@@ -391,8 +396,8 @@ func (c *Codex) Prepend(other Parser) {
 			delete(c.ranOut, id)
 			continue
 		}
-		if _, already := c.running[id]; already || len(c.running) >= maxRunning {
-			continue
+		if _, already := c.running[id]; already || !c.ofNow(r.Time) || !c.room() {
+			continue // (of a process before this one: not merged — review503)
 		}
 		if c.running == nil {
 			c.running = map[string]Running{}
