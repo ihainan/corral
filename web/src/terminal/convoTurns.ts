@@ -28,7 +28,12 @@ export function itemOf(list: Item[], turns: Turn[], turn: Turn): string | null {
 // previewOf: a message's preview as the gateway makes it (convo_turns.go
 // preview): its white space as one, its first 120 characters.
 export function previewOf(text: string): string {
-  const flat = text.split(/\s+/).filter(Boolean).join(' ')
+  const flat = text.split(GO_SPACE).filter(Boolean).join(' ')
   const chars = [...flat]
   return chars.length <= 120 ? flat : chars.slice(0, 120).join('') + '…'
 }
+
+// (White space as Go's unicode.IsSpace has it, as strings.Fields splits
+// on — not quite JavaScript's \s: NEL is, the byte-order mark is not —
+// review521.)
+const GO_SPACE = new RegExp('[\\t\\n\\v\\f\\r \\u0085\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000]+')
