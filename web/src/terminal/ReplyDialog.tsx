@@ -402,6 +402,14 @@ export function InlineReply({ target, onLoaded, resizedAt, active = true, held, 
   // A permission's amend: the person's words with Yes or No (Tab on it, then
   // the words, then Enter: ownWords). Typed, or Enter perhaps gone, and
   // failed: said so, not offered again on this prompt.
+  // (The card still shown: one closed or gone to another agent goes no further.)
+  const shownNow = useRef(true)
+  useEffect(() => {
+    shownNow.current = true
+    return () => {
+      shownNow.current = false
+    }
+  }, [])
   const [amending, setAmending] = useState(false)
   const [amendError, setAmendError] = useState('')
   const [amendStuck, setAmendStuck] = useState('')
@@ -410,7 +418,7 @@ export function InlineReply({ target, onLoaded, resizedAt, active = true, held, 
     setAmending(true)
     setAmendError('')
     const on = screen.digest
-    ownWords(target, screen, permissionAmend(n, yes), words)
+    ownWords(target, screen, permissionAmend(n, yes), words, () => shownNow.current && activeRef.current && document.visibilityState === 'visible')
       .then(() => {
         answered.current = on
         setSent(on)

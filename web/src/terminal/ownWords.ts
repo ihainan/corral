@@ -39,13 +39,21 @@ export function cursorRow(text: string): { n: number; rest: string; line: string
 }
 
 // The prompt without row n, its cursor mark, nor its hints at the foot
-// (they change as the row does): what must stay as it was.
-const FOOT = /to cancel|Tab to amend|to approve with this feedback|to edit in Vim|to navigate/
+// (they change as the row does): what must stay as it was. The hints only
+// where a line is one of them whole — a command saying "to cancel" in it
+// is the prompt's, kept (review513).
+const FOOT = [
+  /^\s*Esc to cancel( · Tab to amend)?\s*$/,
+  /^\s*Enter to select · ↑\/↓ to navigate( · ctrl\+g to edit in Vim)? · Esc to cancel\s*$/,
+  /^\s*shift\+tab to approve with this feedback\s*$/,
+  /^\s*ctrl\+g to edit in Vim · ~?\/?[\w./-]*\.md\s*$/,
+]
+const isFoot = (l: string) => FOOT.some((f) => f.test(l))
 export function frame(text: string, n: number): string {
   const row = new RegExp(`^\\s*❯?\\s*${n}\\. `)
   return text
     .split('\n')
-    .filter((l) => !row.test(l) && !FOOT.test(l))
+    .filter((l) => !row.test(l) && !isFoot(l))
     // (Its tool's bullet blinks while it waits; a rule may carry a hint that
     // changes as it waits, "◐ medium · /effort", "tmux detected · …": a rule.)
     .map((l) => (RULE.test(l) ? '—' : l.replace('❯', ' ').replace(/^●/, ' ').replace(/\s+$/, '')))
@@ -53,15 +61,19 @@ export function frame(text: string, n: number): string {
     .trim()
 }
 
-const RULE = /^\s*[─▔]{2,}.*[─▔]\s*$/
-
-// How wide a line is drawn: wide letters (CJK, full-width) two columns.
-const WIDE = /[ᄀ-ᅟ⺀-꓏가-힣豈-﫿︰-﹏＀-｠￠-￦\u{20000}-\u{3fffd}]/u
-export function width(s: string): number {
-  let w = 0
-  for (const ch of s) w += WIDE.test(ch) ? 2 : 1
-  return w
+// The row whole on its line: what comes under it is no more of it — another
+// choice, a rule, a blank line, or a hint at the foot. (Claude Code wraps a
+// long row itself, its words going on under it: then the row is not all
+// there, nor sent — review513.)
+export function wholeRow(text: string, n: number): boolean {
+  const lines = text.split('\n')
+  const i = lines.findIndex((l) => new RegExp(`^\\s*❯\\s*${n}\\. `).test(l))
+  if (i < 0) return false
+  const next = lines[i + 1] ?? ''
+  return !next.trim() || /^\s*(❯\s*)?\d+\. /.test(next) || RULE.test(next) || isFoot(next)
 }
+
+const RULE = /^\s*[─▔]{2,}.*[─▔]\s*$/
 
 // A key's or text's answer, then the screen read again till done says it shows what it was to (3.5 s at most).
 async function after(target: ReplyTarget, done: (text: string) => boolean): Promise<Screen | null> {
@@ -69,7 +81,7 @@ async function after(target: ReplyTarget, done: (text: string) => boolean): Prom
   for (let i = 0; Date.now() < until; i++) {
     await sleep(i === 0 ? 150 : 250)
     const s = await target.screen()
-    if (done(s.text)) return s
+    if (!s.cut && done(s.text)) return s
   }
   return null
 }
@@ -81,6 +93,7 @@ const refusal = (e: unknown) => e instanceof ApiError && [409, 429].includes(e.s
 // pressed). Read again and tried again — a few times — where the prompt is
 // still the one, as the press needs it (pre).)
 async function tries(target: ReplyTarget, from: Screen, pre: (text: string) => boolean, act: (s: Screen) => Promise<unknown>): Promise<void> {
+  // (A screen cut short is not the prompt known: not tried on.)
   let s = from
   for (let i = 0; ; i++) {
     try {
@@ -90,7 +103,7 @@ async function tries(target: ReplyTarget, from: Screen, pre: (text: string) => b
       if (!refusal(e) || i >= 3) throw e
     }
     s = await target.screen()
-    if (!pre(s.text)) throw new NotAsShown()
+    if (s.cut || !pre(s.text)) throw new NotAsShown()
   }
 }
 
@@ -107,10 +120,15 @@ async function press(target: ReplyTarget, from: Screen, keys: string[], done: (t
 }
 
 // The words into row r, then Enter; now: the screen the person saw.
-export async function ownWords(target: ReplyTarget, now: Screen, r: OwnRow, text: string): Promise<Screen> {
-  if (!target.fill) throw new NotAsShown()
+// alive: the card still shown, its page in front, the same agent's — else
+// nothing more is done (review513: one gone to another agent, or left, went
+// on typing and pressing Enter).
+export async function ownWords(target: ReplyTarget, now: Screen, r: OwnRow, text: string, alive: () => boolean = () => true): Promise<Screen> {
+  if (!target.fill || now.cut) throw new NotAsShown()
   const base = frame(now.text, r.n)
-  const same = (t: string) => frame(t, r.n) === base
+  // (A screen cut short — more of it than the gateway keeps — cannot be told
+  // the same: what changed may be in the part cut off; refused at each read — review513.)
+  const same = (t: string) => frame(t, r.n) === base && alive()
   // (From the screen as it is now — the one shown was read a while ago, as
   // the words were being written — where it is still the prompt shown.)
   let s: Screen
@@ -119,7 +137,7 @@ export async function ownWords(target: ReplyTarget, now: Screen, r: OwnRow, text
   } catch {
     throw new NotAsShown()
   }
-  if (!same(s.text)) throw new NotAsShown()
+  if (!same(s.text) || s.cut || !alive()) throw new NotAsShown()
   // (The cursor to it: by ↑↓, four at most a step, each read again.)
   for (let guard = 0; guard < 4; guard++) {
     const at = cursorRow(s.text)
@@ -148,15 +166,15 @@ export async function ownWords(target: ReplyTarget, now: Screen, r: OwnRow, text
     throw new Filled()
   }
   const want = r.filled(text).replace(/\s+$/, '')
+  // (The words in the row, all of them, the row whole on its line — Claude
+  // Code wraps a long one itself, under it — and the rest as it was: checked
+  // again before each try of Enter too.)
   const shows = (t: string) => {
     const c = cursorRow(t)
-    return !!c && c.n === r.n && c.rest === want && same(t)
+    return !!c && c.n === r.n && c.rest === want && wholeRow(t, r.n) && same(t)
   }
   const got = await after(target, shows).catch(() => null)
   if (!got) throw new Filled()
-  // (On one line, not wrapped nor cut: its line narrower than the screen's widest.)
-  const widest = Math.max(...got.text.split('\n').map(width))
-  if (width(cursorRow(got.text)!.line) >= widest - 1) throw new Filled()
   try {
     await tries(target, got, shows, (x) => target.reply({ digest: x.digest, keys: ['enter'] }))
   } catch (e) {

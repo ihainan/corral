@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { ApiError } from '../api'
 import { t } from '../i18n'
 import { Markdown } from './markdown'
@@ -219,6 +219,7 @@ export function AskPanel({ call, index, shown, target, drive, busy }: { call: Co
   const [ticks, setTicks] = useState<Set<number> | null>(null)
   const ticked = ticks ?? new Set(shown.options.filter((o) => o.ticked).map((o) => o.n))
   const [preview, setPreview] = useState(-1)
+  const alive = useAlive()
   // (A lone question with nothing beside: a digit answers it at once.)
   const pick = (n: number) =>
     drive((now) => {
@@ -280,12 +281,25 @@ export function AskPanel({ call, index, shown, target, drive, busy }: { call: Co
       )}
       {shown.own !== undefined &&
         (!ask.multi && target.fill ? (
-          <OwnBox label={t('own.answer')} busy={busy} onGo={(text) => drive((now) => ownWords(target, now, questionOwn(shown.own!), text))} />
+          <OwnBox label={t('own.answer')} busy={busy} onGo={(text) => drive((now) => ownWords(target, now, questionOwn(shown.own!), text, alive))} />
         ) : (
           <p className="convo-ask-hint">{t('ask.ownInTerminal')}</p>
         ))}
     </div>
   )
+}
+
+// (The card still shown and its page in front: else the person's own words
+// go no further — review513.)
+function useAlive(): () => boolean {
+  const on = useRef(true)
+  useEffect(() => {
+    on.current = true
+    return () => {
+      on.current = false
+    }
+  }, [])
+  return () => on.current && document.visibilityState === 'visible'
 }
 
 // A line of the person's own, into a row of the prompt that takes it.
@@ -333,6 +347,7 @@ export function ReviewPanel({ shown, digest, target, drive, busy }: { shown: Ext
 // A plan put to the person: the plan as the log has it, the choices as the
 // screen shows them (one that lasts beyond this: a second tap).
 export function PlanPanel({ call, shown, digest, target, drive, busy, onScreen }: { call: ConvoTool; shown: Extract<AskScreen, { kind: 'plan' }>; digest: string; target: ReplyTarget; drive: Drive; busy: boolean; onScreen: () => void }) {
+  const alive = useAlive()
   return (
     <div className="convo-ask-structured">
       <div className="convo-ask-q">{t('ask.plan')}</div>
@@ -355,7 +370,7 @@ export function PlanPanel({ call, shown, digest, target, drive, busy, onScreen }
       {(() => {
         const change = shown.options.find((o) => /^Tell Claude what to change$/i.test(o.label))
         return change && target.fill ? (
-          <OwnBox label={t('own.change')} hint={t('own.changeHint')} busy={busy} onGo={(text) => drive((now) => ownWords(target, now, planChange(change.n), text))} />
+          <OwnBox label={t('own.change')} hint={t('own.changeHint')} busy={busy} onGo={(text) => drive((now) => ownWords(target, now, planChange(change.n), text, alive))} />
         ) : (
           <p className="convo-ask-hint">{t('ask.changeInTerminal')}</p>
         )
