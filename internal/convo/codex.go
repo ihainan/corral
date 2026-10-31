@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -97,7 +98,8 @@ type codexOut struct {
 	text   string
 	failed bool
 	images int
-	goesOn bool // (a command still running when its call came back)
+	goesOn bool   // (a command still running when its call came back)
+	at     string // (when it came back: of an orphan, for leftGoing when its call is read)
 }
 
 func NewCodex() *Codex { return &Codex{tools: map[string][]*Tool{}} }
@@ -123,7 +125,7 @@ func (c *Codex) Tasks() []Task {
 	}
 	return nil
 }
-func (c *Codex) Queued() []Queued   { return nil }
+func (c *Codex) Queued() []Queued { return nil }
 func (c *Codex) Running() []Running {
 	var out []Running
 	for _, id := range c.runOrder {
@@ -135,11 +137,24 @@ func (c *Codex) Running() []Running {
 }
 
 // (Codex's queue is not in its log.)
-func (c *Codex) ClearQueue()      {}
+func (c *Codex) ClearQueue() {}
+
 // QueueSince: when the process the log is read for started (unix ms; 0
 // not known). Its commands and subagents end with it: what was set going
 // before that is not running.
-func (c *Codex) QueueSince(started int64) { c.since = started }
+func (c *Codex) QueueSince(started int64) {
+	if started == c.since {
+		return
+	}
+	c.since = started
+	// (Gone with the process before: not kept, taking places — review502.)
+	for id, r := range c.running {
+		if !c.ofNow(r.Time) {
+			delete(c.running, id)
+		}
+	}
+	c.runOrder = slices.DeleteFunc(c.runOrder, func(id string) bool { _, ok := c.running[id]; return !ok })
+}
 
 func (c *Codex) ofNow(ts string) bool {
 	if c.since <= 0 {
@@ -155,7 +170,7 @@ func (c *Codex) setGoing(id, kind, what, at string) {
 		delete(c.ranOut, id)
 		return
 	}
-	if _, there := c.running[id]; there || len(c.running) >= maxRunning {
+	if _, there := c.running[id]; there || len(c.running) >= maxRunning || !c.ofNow(at) {
 		return
 	}
 	if c.running == nil {
@@ -180,8 +195,16 @@ func (c *Codex) endRun(id string) {
 		}
 		return
 	}
-	if c.ranOut == nil || len(c.ranOut) >= maxRunning {
+	if c.ranOut == nil {
 		c.ranOut = map[string]bool{}
+	}
+	// (Full: one makes way, not all — review502; told of as over twice
+	// takes one place, as Claude's.)
+	for len(c.ranOut) >= maxRunning && !c.ranOut[id] {
+		for k := range c.ranOut {
+			delete(c.ranOut, k)
+			break
+		}
 	}
 	c.ranOut[id] = true
 }
@@ -209,14 +232,29 @@ func (c *Codex) subagentEnded(text string) {
 		return
 	}
 	var n struct {
-		Agent  string                     `json:"agent_path"`
-		Status map[string]json.RawMessage `json:"status"`
+		Agent  string          `json:"agent_path"`
+		Status json.RawMessage `json:"status"`
 	}
 	body := strings.TrimSuffix(strings.TrimPrefix(text, "<subagent_notification>"), "</subagent_notification>")
-	if json.Unmarshal([]byte(strings.TrimSpace(body)), &n) != nil || !CodexAgentID(n.Agent) || len(n.Status) == 0 {
+	if json.Unmarshal([]byte(strings.TrimSpace(body)), &n) != nil || !CodexAgentID(n.Agent) {
 		return
 	}
-	for k := range n.Status {
+	// (Its state a word — "shutdown", "not_found" — or an object of one
+	// key, with what it said: review502.)
+	var states []string
+	var word string
+	var of map[string]json.RawMessage
+	switch {
+	case json.Unmarshal(n.Status, &word) == nil && word != "":
+		states = []string{word}
+	case json.Unmarshal(n.Status, &of) == nil && len(of) > 0:
+		for k := range of {
+			states = append(states, k)
+		}
+	default:
+		return
+	}
+	for _, k := range states {
 		if k == "running" || k == "pending_init" {
 			return
 		}
@@ -269,6 +307,7 @@ func (c *Codex) Prepend(other Parser) {
 	for id, out := range c.orphans {
 		if ts, ok := o.tools[id]; ok {
 			o.answer(ts, out)
+			o.leftGoing(&codexRow{Timestamp: out.at}, ts, out) // (its call in the part before: going all the same — review502)
 			delete(c.orphans, id)
 		}
 	}
@@ -1171,7 +1210,7 @@ func (c *Codex) item(r *codexRow, p *codexPayload) {
 	case "custom_tool_call_output", "function_call_output":
 		var out codexOut
 		out.text, out.failed, out.images = codexResult(p.Output)
-		out.goesOn = cmdGoesOn(p.Output)
+		out.goesOn, out.at = cmdGoesOn(p.Output), r.Timestamp
 		id := clip(p.CallID, maxID)
 		if ts, ok := c.tools[id]; ok {
 			c.answer(ts, out)

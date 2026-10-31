@@ -1,6 +1,7 @@
 package convo
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -72,18 +73,18 @@ func TestCodexRunningSubagent(t *testing.T) {
 }
 
 // What was set going before the process it is read for started went with
-// the process before.
+// the process before (and is let go of: it is not coming back).
 func TestCodexRunningSince(t *testing.T) {
 	c := feedAll(runCall, runOut)
-	at, _ := time.Parse(time.RFC3339Nano, "2026-10-31T06:30:00Z")
-	c.QueueSince(at.UnixMilli())
-	if got := runningIDs(c); got != "" {
-		t.Errorf("of the process before: %q", got)
-	}
-	at, _ = time.Parse(time.RFC3339Nano, "2026-10-31T06:00:00Z")
+	at, _ := time.Parse(time.RFC3339Nano, "2026-10-31T06:00:00Z")
 	c.QueueSince(at.UnixMilli())
 	if got := runningIDs(c); got == "" {
 		t.Errorf("of this process: gone")
+	}
+	at, _ = time.Parse(time.RFC3339Nano, "2026-10-31T06:30:00Z")
+	c.QueueSince(at.UnixMilli())
+	if got := runningIDs(c); got != "" {
+		t.Errorf("of the process before: %q", got)
 	}
 }
 
@@ -100,5 +101,57 @@ func TestCodexRunningAcrossPrepend(t *testing.T) {
 	c.Feed([]byte(runCall + runOut))
 	if got := runningIDs(c); got != "" {
 		t.Errorf("ended before its start was read: %q", got)
+	}
+}
+
+// review502: the subagent's state a word, not an object.
+func TestCodexRunningStateWord(t *testing.T) {
+	for _, st := range []string{"shutdown", "not_found", "errored"} {
+		c := feedAll(subCall, subOut)
+		c.Feed([]byte(strings.Replace(subDone, `{\"completed\":\"这里有几个文件。\"}`, `\"`+st+`\"`, 1)))
+		if got := runningIDs(c); got != "" {
+			t.Errorf("%s: %q", st, got)
+		}
+	}
+}
+
+// review502: its call in the part before, what came back of it in this
+// one: going all the same, once the parts are put together.
+func TestCodexRunningCallBefore(t *testing.T) {
+	before, after := feedAll(runCall), feedAll(runOut)
+	after.Prepend(before)
+	if got := runningIDs(after); got != "cmd:call_4:sleep 25; echo fertig" {
+		t.Errorf("its call before: %q", got)
+	}
+}
+
+// review502: the ends of many, then one told of again: the rest not
+// forgotten (a start read later of one of them not set going again).
+func TestCodexRunningEndsKept(t *testing.T) {
+	c := NewCodex()
+	for i := 0; i < maxRunning-1; i++ {
+		c.endRun(fmt.Sprintf("call_x%d", i))
+	}
+	c.endRun("call_4")
+	c.endRun("call_x0") // (one told of again: one place, not all of them gone)
+	c.Feed([]byte(runCall + runOut))
+	if got := runningIDs(c); got != "" {
+		t.Errorf("ended before its start was read: %q", got)
+	}
+}
+
+// review502: what the process before left, not shown, takes no place from
+// what this one sets going.
+func TestCodexRunningOldTakesNoPlace(t *testing.T) {
+	var rows []string
+	for i := 0; i < maxRunning; i++ {
+		rows = append(rows, strings.ReplaceAll(strings.ReplaceAll(runCall+runOut, "call_4", fmt.Sprintf("call_o%d", i)), "8873", fmt.Sprint(9000+i)))
+	}
+	c := feedAll(rows...)
+	at, _ := time.Parse(time.RFC3339Nano, "2026-10-31T06:28:00Z")
+	c.QueueSince(at.UnixMilli())
+	c.Feed([]byte(strings.ReplaceAll(strings.ReplaceAll(runCall+runOut, "06:27:5", "06:29:5"), "call_4", "call_new")))
+	if got := runningIDs(c); got != "cmd:call_new:sleep 25; echo fertig" {
+		t.Errorf("this process's: %q", got)
 	}
 }
