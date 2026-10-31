@@ -1408,7 +1408,7 @@ const EFFORT_WORDS: Record<string, 'convo.effort.low' | 'convo.effort.medium' | 
 const effortWord = (e: string) => (e === 'Extra high' ? 'xhigh' : e.toLowerCase())
 export const CODEX_EFFORTS = Object.keys(EFFORT_WORDS)
 
-export type ModelSwitch = { list: ModelOpt[] | null; fresh: boolean; busy: boolean; can: boolean; onOpen: () => void; onPick: (label: string, effort?: string) => void; efforts?: string[] }
+export type ModelSwitch = { list: ModelOpt[] | null; fresh: boolean; busy: boolean; can: boolean; onOpen: () => void; onPick: (label: string, effort?: string) => void; efforts?: string[]; of?: string }
 
 // How hard the agent is asked to think (Claude Code's /effort), for the
 // session only. The levels are its slider's, in its order.
@@ -1423,6 +1423,11 @@ const effortName = (e: string) => ((EFFORTS as readonly string[]).includes(e) ? 
 // full its context is on the right (the numbers on a tap).
 function Runs({ meta, active, mode, model, effort, quota }: { meta: ConvoMeta; active: boolean; mode?: ModeSwitch; model?: ModelSwitch; effort?: EffortSwitch; quota?: QuotaOf }) {
   const [open, setOpen] = useState<false | 'ctx' | 'model' | 'effort' | 'mode'>(false) // (which of its pop-ups)
+  // (Another agent bound meanwhile — the pane's program changed: its model and effort menus, of the one before, closed;
+  // opened again, the list read is the new one's.)
+  useEffect(() => {
+    setOpen((o) => (o === 'model' || o === 'effort' ? false : o))
+  }, [model?.of])
   const [effortsOf, setEffortsOf] = useState('') // (a Codex's model whose efforts show, chosen with it)
   const box = useRef<HTMLDivElement>(null)
   const modelBtn = useRef<HTMLButtonElement>(null)

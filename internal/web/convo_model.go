@@ -410,7 +410,7 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 	ctx, cancel := context.WithTimeout(ctx, 40*time.Second)
 	defer cancel()
 	typed := false
-	run := func(ctx context.Context, keys []string, text string, read int) (string, error) {
+	run := func(ctx context.Context, keys []string, text string, read int, at string) (string, error) {
 		var press []string
 		if keys != nil {
 			press = []string{} // (none: the screen only)
@@ -432,6 +432,9 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 				gate = "cfree"
 			}
 		}
+		if at != "" {
+			gate = "cscreen:" + at // (Codex's: pressed only on the screen it was decided on)
+		}
 		running.Add(1)
 		res, err := sshx.Exec(ctx, sess.Client(), convoGatedCommand(gate, sess.Persistence, sess.TmuxSession, pane, socket, pid, start, sid, len(text), press, read), 64<<10,
 			sshx.ExecOptions{Stdin: strings.NewReader(text), Release: running.Done})
@@ -440,18 +443,32 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 		}
 		return string(res.Out), err
 	}
-	step := func(keys []string, text string, read int) (string, error) { return run(ctx, keys, text, read) }
+	step := func(keys []string, text string, read int) (string, error) { return run(ctx, keys, text, read, "") }
 	// (Leaving the picker after a failure: once a step given up has ended,
 	// on its own short while, the request's may be over.)
 	leave := func(keys []string, text string, read int) (string, error) {
 		running.Wait()
 		lctx, lcancel := context.WithTimeout(context.WithoutCancel(ctx), 8*time.Second)
 		defer lcancel()
-		return run(lctx, keys, text, read)
+		return run(lctx, keys, text, read, "")
+	}
+	// (Codex's: the screen whole and its digest; keys pressed only on it.)
+	look := func() (string, string, error) {
+		running.Add(1)
+		res, err := sshx.Exec(ctx, sess.Client(), convoScreenCommand(sess.Persistence, pane, socket), 512<<10, sshx.ExecOptions{Release: running.Done})
+		if err != nil {
+			return "", "", err
+		}
+		shown, digest, _ := screenOf(res.Out)
+		return shown, digest, nil
+	}
+	press := func(keys []string, text, digest string) error {
+		_, err := run(ctx, keys, text, pickerLines, digest) // (its read: a moment after, as Codex draws what the keys did)
+		return err
 	}
 	var opts []modelOpt
 	if codex {
-		opts, err = codexModelFlow(step, leave, target, effort)
+		opts, err = codexModelFlow(look, press, leave, target, effort)
 	} else {
 		opts, err = modelFlow(step, leave, target)
 	}
@@ -497,6 +514,14 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 		// (Its picker's command not sent, or typed and not sent: it waits for an answer.)
 		*outcome, *reason = said(typed || exitErr.Status == 5), "agent_waiting"
 		writeError(w, http.StatusConflict, "agent_waiting", "it waits for an answer, or has a dialog open: answer it first")
+	case errors.As(err, &exitErr) && exitErr.Status == 10:
+		// (A press not made: the screen changed after it was read — a key
+		// typed in the terminal, say. Its picker, if open, left.)
+		*outcome, *reason = said(typed), "screen_changed"
+		writeError(w, http.StatusConflict, "screen_changed", "its screen changed meanwhile: nothing more was pressed")
+	case errors.As(err, &exitErr) && exitErr.Status == 11:
+		*outcome, *reason = said(typed), "cannot_verify"
+		writeError(w, http.StatusConflict, "cannot_verify", "its screen cannot be checked on the host: switch in the terminal")
 	case errors.Is(err, sshx.ErrBusy) || errors.As(err, &exitErr) && exitErr.Status == 7:
 		*reason = "busy"
 		writeError(w, http.StatusTooManyRequests, "busy", "the host is still answering earlier requests")

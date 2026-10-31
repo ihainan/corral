@@ -824,9 +824,10 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       })
   }
   // (What Claude Code alone has: its permission modes, its model picker, its "send now".)
-  const codex = convo.bind?.agent === 'codex' || (!!row && isCodex(row.a.agent))
+  // (Bound, the agent it is bound to says; the list's, of a reading before, only till then.)
+  const codex = convo.bind?.agent ? convo.bind.agent === 'codex' : !!row && isCodex(row.a.agent)
   // (Claude Code's own keys and pickers: not Codex's, nor OpenCode's.)
-  const notClaude = codex || convo.bind?.agent === 'opencode' || (!!row && isOpenCode(row.a.agent))
+  const notClaude = convo.bind?.agent ? convo.bind.agent !== 'claude' : !!row && (isCodex(row.a.agent) || isOpenCode(row.a.agent))
 
   // The permission mode, switched from here: Shift+Tab pressed in its pane,
   // the mode it went to read off its screen (the log says it only with the
@@ -1699,7 +1700,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       onSendNow={canPress && !notClaude ? () => press('now') : undefined}
       sendNow={said?.what === 'now' && said.bind === bindKey ? said.text : undefined}
       mode={{ now: modeNow?.bind === bindKey ? modeNow.mode : undefined, busy: modeBusy, onPick: canMode ? pickMode : undefined }}
-      model={canModel || modelBusy ? { list: models?.bind === bindKey ? models.list : null, fresh: !!models?.at && Date.now() - models.at < 60000, busy: modelBusy, can: canModel, onOpen: openModels, onPick: pickModel, ...(codex ? { efforts: CODEX_EFFORTS } : {}) } : undefined}
+      model={canModel || modelBusy ? { list: models?.bind === bindKey ? models.list : null, fresh: !!models?.at && Date.now() - models.at < 60000, busy: modelBusy, can: canModel, onOpen: openModels, onPick: pickModel, of: bindKey, ...(codex ? { efforts: CODEX_EFFORTS } : {}) } : undefined}
       effort={{ now: effortNow?.bind === bindKey ? effortNow.effort : undefined, busy: effortBusy, can: canEffort, onPick: pickEffort }}
       lead={lead}
       more={more}

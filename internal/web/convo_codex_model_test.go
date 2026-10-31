@@ -5,6 +5,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/ihainan/corral/internal/sshx"
 )
 
 func cxScreen(t *testing.T, name string) string {
@@ -53,7 +55,11 @@ type fakeCodexPicker struct {
 	at      int
 	of      string
 	set     int
+	setTo   string // (what its "Model changed to" says: the model chosen, or another — a Codex that took another)
 	pressed []string
+	drawn   int // (screens drawn: a digest's)
+	cut     int // (a key typed in its terminal before the press of that number: the screen changed)
+	presses int
 }
 
 var fakeModels = []string{"GPT-6.1-Sol", "GPT-6-Astra", "GPT-6-Sol", "GPT-6-Luna"}
@@ -62,7 +68,9 @@ var fakeEfforts = []string{"Low", "Medium (default)", "High", "Extra high"}
 func (f *fakeCodexPicker) screen() string {
 	var b strings.Builder
 	b.WriteString("  >_ OpenAI Codex (v0.164.0)\n\n")
-	b.WriteString(strings.Repeat("• Model changed to x high for this session only\n", f.set))
+	for i := 0; i < f.set; i++ {
+		b.WriteString("• Model changed to " + f.setTo + " for this session only\n")
+	}
 	switch f.step {
 	case 0:
 		b.WriteString("\n› Ask Codex to do anything\n\n  gpt-mock default · ~/p\n")
@@ -90,6 +98,23 @@ func (f *fakeCodexPicker) screen() string {
 	return b.String()
 }
 
+func (f *fakeCodexPicker) look() (string, string, error) {
+	return f.screen(), fmt.Sprint(f.drawn), nil
+}
+
+// press: as the host does, only on the screen read last (its digest).
+func (f *fakeCodexPicker) press(keys []string, text, digest string) error {
+	f.presses++
+	if f.presses == f.cut {
+		f.drawn++ // (the person pressed a key in the terminal: another screen)
+	}
+	if digest != fmt.Sprint(f.drawn) {
+		return &sshx.ExitError{Status: 10}
+	}
+	f.run(keys, text, 0)
+	return nil
+}
+
 func (f *fakeCodexPicker) run(keys []string, text string, read int) (string, error) {
 	if text == "/model" {
 		f.step, f.at = 1, 0
@@ -111,20 +136,29 @@ func (f *fakeCodexPicker) run(keys []string, text string, read int) (string, err
 		case k == "yes" && f.step == 2:
 			f.t.Fatalf("Enter on the effort step: the default saved")
 		case k == "this" && f.step == 2:
+			if f.setTo == "" {
+				f.setTo = strings.ToLower(f.of) + " " + codexEffortID(codexEffortName(fakeEfforts[f.at]))
+			}
 			f.step, f.set = 0, f.set+1
 		}
+	}
+	if text != "" || len(keys) > 0 {
+		f.drawn++
 	}
 	return f.screen(), nil
 }
 
 func TestCodexModelFlow(t *testing.T) {
+	flow := func(f *fakeCodexPicker, model, effort string) ([]modelOpt, error) {
+		return codexModelFlow(f.look, f.press, f.run, model, effort)
+	}
 	f := &fakeCodexPicker{t: t}
-	opts, err := codexModelFlow(f.run, f.run, "", "")
+	opts, err := flow(f, "", "")
 	if err != nil || len(opts) != 4 || opts[2].Label != "GPT-6-Sol" || f.step != 0 {
 		t.Fatalf("list: %v %+v step %d", err, opts, f.step)
 	}
 	f = &fakeCodexPicker{t: t}
-	opts, err = codexModelFlow(f.run, f.run, "GPT-6-Sol", "High")
+	opts, err = flow(f, "GPT-6-Sol", "High")
 	if err != nil || len(opts) != 1 || f.set != 1 || f.of != "GPT-6-Sol" {
 		t.Fatalf("switch: %v %+v %+v", err, opts, f)
 	}
@@ -132,11 +166,33 @@ func TestCodexModelFlow(t *testing.T) {
 		t.Fatalf("keys: %s", got)
 	}
 	f = &fakeCodexPicker{t: t}
-	if _, err = codexModelFlow(f.run, f.run, "GPT-9", "High"); err != errNoModel || f.step != 0 {
+	if _, err = flow(f, "GPT-9", "High"); err != errNoModel || f.step != 0 {
 		t.Fatalf("no such model: %v, left at step %d", err, f.step)
 	}
 	f = &fakeCodexPicker{t: t}
-	if _, err = codexModelFlow(f.run, f.run, "GPT-6-Sol", "Ultra"); err != errNoModel || f.step != 0 {
+	if _, err = flow(f, "GPT-6-Sol", "Ultra"); err != errNoModel || f.step != 0 {
 		t.Fatalf("no such effort: %v, left at step %d", err, f.step)
+	}
+	// (review493: a key typed in the terminal between a read and a press —
+	// at each press in turn: that press not made, the picker left, never
+	// Enter on the effort step; nothing said to be done.)
+	for cut := 1; cut <= 5; cut++ {
+		f = &fakeCodexPicker{t: t, cut: cut}
+		_, err = flow(f, "GPT-6-Sol", "High")
+		if !screenRefused(err) || f.step != 0 || f.set != 0 {
+			t.Errorf("screen changed before press %d: %v, step %d, set %d (%v)", cut, err, f.step, f.set, f.pressed)
+		}
+	}
+	// (review493: what it says it took is another model's: not done.)
+	f = &fakeCodexPicker{t: t, setTo: "gpt-6-luna high"}
+	if _, err = flow(f, "GPT-6-Sol", "High"); err == nil {
+		t.Errorf("another model said taken: ok")
+	}
+	// (A picker left open that does not read as known (its footer there):
+	// closed first, then on as at rest.)
+	f = &fakeCodexPicker{t: t, step: 1}
+	scr := f.screen()
+	if !codexPickerOpen(strings.Replace(scr, "1. ", "1) ", 1)) || parseCodexPicker(strings.Replace(scr, "1. ", "1) ", 1)).ok {
+		t.Fatalf("a picker not read as known, its footer there")
 	}
 }

@@ -1,8 +1,11 @@
 package web
 
 import (
+	"errors"
 	"regexp"
 	"strings"
+
+	"github.com/ihainan/corral/internal/sshx"
 )
 
 // Switching a Codex's model and reasoning effort from the agents page,
@@ -119,64 +122,119 @@ func codexEffortName(label string) string {
 	return label
 }
 
-// codexModelSet: the screen says the model and effort were taken for this
-// session ("Model changed to gpt-6-sol high for this session only"), as
-// many times as it says so.
-func codexModelSet(screen string) int {
-	return strings.Count(screen, "for this session only")
+// codexModelSet: how many times the screen says model with effort was
+// taken for this session ("Model changed to gpt-6-sol high for this session
+// only": the model's label in lower case, its effort's id).
+func codexModelSet(screen, model, effort string) int {
+	n := 0
+	for _, m := range codexModelSaid.FindAllStringSubmatch(screen, -1) {
+		if strings.EqualFold(m[1], strings.ReplaceAll(model, " ", "-")) && strings.EqualFold(m[2], codexEffortID(effort)) {
+			n++
+		}
+	}
+	return n
+}
+
+var codexModelSaid = regexp.MustCompile(`Model changed to (\S+) (\S+) for this session only`)
+
+// codexEffortID: an effort as Codex says it ("Extra high" is xhigh).
+func codexEffortID(effort string) string {
+	if strings.EqualFold(effort, "Extra high") {
+		return "xhigh"
+	}
+	return strings.ToLower(effort)
+}
+
+// codexPickerOpen: a picker of Codex's is open — its footer at the end of
+// the screen — whether the rest of it reads as known or not.
+func codexPickerOpen(screen string) bool {
+	lines := strings.Split(strings.TrimRight(screen, "\n"), "\n")
+	for i := len(lines) - 1; i >= 0 && len(lines)-i <= 4; i-- {
+		if codexPickerFoot.MatchString(lines[i]) {
+			return true
+		}
+	}
+	return false
 }
 
 const maxCodexPickerMove = 12
 
 // codexModelFlow opens the picker; with model "" it lists the models and
-// closes it, else it takes model with effort for this session. As
-// modelFlow, it acts only on Codex at rest, its input empty, no picker of
-// its open (one left open is closed with Escape first); on a failure after
-// the picker opened, Escape is pressed (by leave).
-func codexModelFlow(step, leave modelStep, model, effort string) (opts []modelOpt, err error) {
-	screen, err := step([]string{}, "", pickerLines)
+// closes it, else it takes model with effort for this session. Each press
+// is of the screen it was decided on: look reads the screen whole (and its
+// digest), press presses only while the screen is still that one (the
+// host checks: a key typed in the terminal meanwhile, or anything drawn
+// since, and nothing is pressed). As modelFlow, it acts only on Codex at
+// rest, its input empty (a picker of its left open is closed with Escape
+// first); on a failure after the picker opened, it is left (leave: Escape
+// while its picker is seen open).
+func codexModelFlow(look func() (string, string, error), press func(keys []string, text, digest string) error, leave modelStep, model, effort string) (opts []modelOpt, err error) {
+	screen, digest, err := look()
 	if err != nil {
 		return nil, err
 	}
-	for i := 0; i < 2 && parseCodexPicker(screen).ok; i++ {
-		if screen, err = step([]string{"esc"}, "", pickerLines); err != nil {
+	for i := 0; i < 2 && codexPickerOpen(screen); i++ {
+		if _, err := leave([]string{"esc"}, "", pickerLines); err != nil {
+			return nil, err
+		}
+		if screen, digest, err = look(); err != nil {
 			return nil, err
 		}
 	}
-	if parseCodexPicker(screen).ok {
+	if codexPickerOpen(screen) {
 		return nil, errScreen
 	}
 	if err := codexIdleInput(screen); err != nil {
 		return nil, err
 	}
-	before := codexModelSet(screen)
-	opened, err := step(nil, "/model", pickerLines)
+	before := codexModelSet(screen, model, effort)
 	out := func(e error) ([]modelOpt, error) {
 		for i := 0; i < 2; i++ {
-			if scr, err := leave([]string{"esc"}, "", pickerLines); err != nil || !parseCodexPicker(scr).ok {
+			scr, err := leave(nil, "", pickerLines) // (looked at: Escape only on its picker)
+			if err != nil || !codexPickerOpen(scr) {
+				break
+			}
+			if _, err := leave([]string{"esc"}, "", pickerLines); err != nil {
 				break
 			}
 		}
 		return nil, e
 	}
-	if gateRefused(err) {
-		return nil, err // (it came to wait: nothing opened)
+	err = press(nil, "/model", digest)
+	if gateRefused(err) || screenRefused(err) {
+		return nil, err // (nothing typed)
 	}
 	if err != nil {
 		return out(err)
 	}
-	pk := parseCodexPicker(opened)
+	// (The picker as now read, and its digest: what the next press is of.)
+	read := func() (codexPicker, error) {
+		scr, d, err := look()
+		if err != nil {
+			return codexPicker{}, err
+		}
+		digest = d
+		return parseCodexPicker(scr), nil
+	}
+	pk, err := read()
+	if err != nil {
+		return out(err)
+	}
 	if !pk.ok || pk.effort {
 		return out(errNoPicker)
 	}
 	if model == "" {
-		if screen, err = step([]string{"esc"}, "", pickerLines); err != nil || parseCodexPicker(screen).ok {
+		if err := press([]string{"esc"}, "", digest); err != nil {
+			return out(err)
+		}
+		if scr, _, err := look(); err != nil || codexPickerOpen(scr) {
 			return out(errScreen)
 		}
 		return pk.options, nil
 	}
-	// (Moved to the choice of label on picker p, read again: the cursor there.)
-	moveTo := func(p codexPicker, match func(modelOpt) bool) (codexPicker, error) {
+	// (Moved to the choice match finds on picker p, read again: the cursor
+	// there, on the step of the same model.)
+	moveTo := func(p codexPicker, match func(modelOpt) bool, same func(codexPicker) bool) (codexPicker, error) {
 		var to modelOpt
 		found := false
 		for _, o := range p.options {
@@ -200,38 +258,55 @@ func codexModelFlow(step, leave modelStep, model, effort string) (opts []modelOp
 			for i := range keys {
 				keys[i] = key
 			}
-			scr, err := step(keys, "", pickerLines)
-			if err != nil {
+			if err := press(keys, "", digest); err != nil {
 				return p, err
 			}
-			p = parseCodexPicker(scr)
-			if c, ok := p.cursor(); !p.ok || !ok || !match(c) {
+			var err error
+			if p, err = read(); err != nil {
+				return p, err
+			}
+			if c, ok := p.cursor(); !p.ok || !ok || !match(c) || !same(p) {
 				return p, errNotThere
 			}
 		}
 		return p, nil
 	}
-	if _, err := moveTo(pk, func(o modelOpt) bool { return o.Label == model }); err != nil {
+	isModels := func(p codexPicker) bool { return !p.effort }
+	if _, err := moveTo(pk, func(o modelOpt) bool { return o.Label == model }, isModels); err != nil {
 		return out(err)
 	}
-	if screen, err = step([]string{"yes"}, "", pickerLines); err != nil {
+	if err := press([]string{"yes"}, "", digest); err != nil {
 		return out(err)
 	}
-	ef := parseCodexPicker(screen)
-	if !ef.ok || !ef.effort || !strings.EqualFold(ef.of, model) {
+	ofModel := func(p codexPicker) bool { return p.effort && strings.EqualFold(p.of, model) }
+	ef, err := read()
+	if err != nil {
+		return out(err)
+	}
+	if !ef.ok || !ofModel(ef) {
 		return out(errNotTaken)
 	}
-	if _, err := moveTo(ef, func(o modelOpt) bool { return strings.EqualFold(codexEffortName(o.Label), effort) }); err != nil {
+	if _, err := moveTo(ef, func(o modelOpt) bool { return strings.EqualFold(codexEffortName(o.Label), effort) }, ofModel); err != nil {
 		return out(err)
 	}
-	if screen, err = step([]string{"this"}, "", pickerLines); err != nil { // ("s": this session only)
+	if err := press([]string{"this"}, "", digest); err != nil { // ("s": this session only)
 		return out(err)
 	}
+	scr, _, err := look()
 	switch {
-	case codexModelSet(screen) > before:
+	case err != nil:
+		return out(err)
+	case codexModelSet(scr, model, effort) > before:
 		return []modelOpt{{Label: model, Desc: effort}}, nil
-	case parseCodexPicker(screen).ok:
+	case codexPickerOpen(scr):
 		return out(errNotTaken)
 	}
 	return nil, errUnsure
+}
+
+// screenRefused: the press not made, the screen not the one it was of
+// (exit 10), or not to be checked there (exit 11).
+func screenRefused(err error) bool {
+	var e *sshx.ExitError
+	return errors.As(err, &e) && (e.Status == 10 || e.Status == 11)
 }
