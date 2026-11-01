@@ -6,7 +6,7 @@ import { fitToEdge } from '../terminal/fit'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import { WebglAddon } from '@xterm/addon-webgl'
-import { ArrowUp, Check, ChevronDown, ChevronLeft, CircleStop, Code2, Eye, FolderOpen, Globe, History, ImagePlus, MessageCircleReply, MoreVertical, Minus, Palette, Paperclip, Plus, TextSelect, Keyboard as KeyboardIcon, Power, RotateCw, Server, TextCursorInput, X } from 'lucide-react'
+import { ArrowUp, Check, ChevronDown, ChevronLeft, CircleStop, Code2, CornerDownLeft, Eye, FolderOpen, Globe, History, ImagePlus, MessageCircleReply, MoreVertical, Minus, Palette, Paperclip, Plus, TextSelect, Keyboard as KeyboardIcon, Power, RotateCw, Server, SquarePen, X } from 'lucide-react'
 import { api, ApiError, choiceOf, errorText, uploadFile, type HerdrAgent, type HerdrSummary, type Host, type OpenChoice, type SessionInfo, probeBootstrap } from '../api'
 import { t } from '../i18n'
 import { navigate } from '../router'
@@ -2099,6 +2099,10 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
       setDraft(s)
     },
     agent: herdr?.focused_agent,
+    // herdr says which agent its focused pane runs: with none there, "/" and
+    // "$" are a shell's (a path, a variable), not a command to offer for
+    // (ux1101 T14; a tmux or plain session cannot tell, so offers as before).
+    noAgent: info?.persistence === 'herdr' && !!herdr && herdrFresh && status === 'open' && !herdr.focused_agent,
   })
 
   // What the keys do in the composer, shown by the send button on a computer.
@@ -2313,7 +2317,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
   // With tabs, the open session's state beyond "connected": slow, recorded, watched.
   const tabNote =
     status === 'open' && !ended
-      ? [slow && t('term.latency', { ms: latency }), info?.recording && t('term.recording'), !watch && info?.watching && t('term.watchedBy', { n: info.watching })].filter(Boolean).join(' · ')
+      ? [slow && t('term.latency', { ms: latency }), info?.recording && t('term.recordingTab'), !watch && info?.watching && t('term.watchedBy', { n: info.watching })].filter(Boolean).join(' · ')
       : ''
   const paused = !ended && (status === 'reconnecting' || status === 'offline')
   const herdrStale = paused || !herdrFresh
@@ -2380,12 +2384,17 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
     ]
   }
 
+  // Text size: the menu stays open, saying the size now, so a few presses
+  // in a row need no reopening (ux1101 T19).
+  const fontItems = (): MenuItem[] => [
+    { label: t('term.fontLarger'), hint: t('term.fontNow', { n: prefs.fontSize }), icon: <Plus size={16} />, keepOpen: true, disabled: prefs.fontSize >= 28, onSelect: () => setPrefs({ fontSize: Math.min(28, getPrefs().fontSize + 1) }) },
+    { label: t('term.fontSmaller'), icon: <Minus size={16} />, keepOpen: true, disabled: prefs.fontSize <= 9, onSelect: () => setPrefs({ fontSize: Math.max(9, getPrefs().fontSize - 1) }) },
+  ]
   // Watching: only what changes this window's view.
   const watchItems = (): (MenuItem | null)[] => [
     { label: t('term.copyMode'), icon: <TextSelect size={16} />, onSelect: openCopyMode },
     { label: t('settings.termTheme'), icon: <Palette size={16} />, separator: true, onSelect: () => setSchemesOpen(true) },
-    { label: t('term.fontLarger'), icon: <Plus size={16} />, onSelect: () => setPrefs({ fontSize: Math.min(28, getPrefs().fontSize + 1) }) },
-    { label: t('term.fontSmaller'), icon: <Minus size={16} />, onSelect: () => setPrefs({ fontSize: Math.max(9, getPrefs().fontSize - 1) }) },
+    ...fontItems(),
   ]
   const moreItems = (): (MenuItem | null)[] => watch ? watchItems() : [
     { label: t('term.upload'), icon: <ImagePlus size={16} />, onSelect: () => fileRef.current?.click() },
@@ -2396,8 +2405,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
     boot.code && info ? { label: t('code.open'), icon: <Code2 size={16} />, onSelect: () => code.open(info.host_id, info.host_name) } : null,
     boot.code && info && code.running[info.host_id] ? { label: t('code.stop'), icon: <CircleStop size={16} />, onSelect: () => code.stop(info.host_id) } : null,
     { label: t('settings.termTheme'), icon: <Palette size={16} />, separator: true, onSelect: () => setSchemesOpen(true) },
-    { label: t('term.fontLarger'), icon: <Plus size={16} />, onSelect: () => setPrefs({ fontSize: Math.min(28, getPrefs().fontSize + 1) }) },
-    { label: t('term.fontSmaller'), icon: <Minus size={16} />, onSelect: () => setPrefs({ fontSize: Math.max(9, getPrefs().fontSize - 1) }) },
+    ...fontItems(),
     isTouch ? { label: prefs.keybar ? t('term.hideKeybar') : t('term.showKeybar'), icon: <KeyboardIcon size={16} />, onSelect: () => setPrefs({ keybar: !prefs.keybar }) } : null,
     ended
       ? null
@@ -2410,7 +2418,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
             setConfirm(
               <Confirm
                 title={t('term.closeSession')}
-                body={t('hosts.closeSessionConfirm')}
+                body={t('hosts.closeSessionConfirm') + (tabs ? t('term.closeSessionTab') : '')}
                 confirm={t('term.closeSession')}
                 danger
                 onClose={() => setConfirm(null)}
@@ -2426,7 +2434,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
 
   // The composer, under the terminal.
   const composerEl = (
-    <div className="composer">
+    <div className="composer composer-term">
       {completion.list}
       <div className="composer-box">
         <textarea
@@ -2521,7 +2529,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
               </button>
             )}
           />
-          <button type="button" className="btn btn-ghost composer-insert" onClick={() => sendComposer(false)} disabled={!draft} title={t('term.insertHint')}>
+          <button type="button" className="btn composer-insert composer-typein" onClick={() => sendComposer(false)} disabled={!draft} title={t('term.insertHint')}>
             {t('term.insert')}
           </button>
           <div className="spacer" />
@@ -2531,8 +2539,15 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
             </button>
           )}
           {hasKeyboardPointer() && <span className="composer-keys" aria-hidden="true">{suggestion && !draft ? t('term.suggestionKey') + ' · ' : ''}{composerKeys}</span>}
-          <button type="button" className="composer-send" onClick={() => sendComposer(true)} aria-label={t('term.send')} title={t('term.send') + (isTouch ? '' : ' (' + composerSendKey + ')')}>
-            <ArrowUp size={18} strokeWidth={2.25} />
+          {/* (Nothing typed: it sends Enter alone, and says so — ux1101 T10.) */}
+          <button
+            type="button"
+            className={'composer-send' + (draft ? '' : ' is-enter')}
+            onClick={() => sendComposer(true)}
+            aria-label={draft ? t('term.send') : t('term.sendEnter')}
+            title={(draft ? t('term.send') : t('term.sendEnter')) + (isTouch ? '' : ' (' + composerSendKey + ')')}
+          >
+            {draft ? <ArrowUp size={18} strokeWidth={2.25} /> : <CornerDownLeft size={17} strokeWidth={2.25} />}
           </button>
         </div>
       </div>
@@ -2586,16 +2601,12 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
         ) : tabs ? (
           <>
             {tabs}
-            {/* (Connection trouble shows on the tab; what else the bar would say, here.) */}
-            {tabNote ? (
-              <span className={'term-status term-tab-note ' + statusClass} aria-live="polite">{tabNote}</span>
-            ) : (
-              <span className="sr-only" aria-live="polite">{statusText}</span>
-            )}
+            {!tabNote && <span className="sr-only" aria-live="polite">{statusText}</span>}
           </>
         ) : (
         <Menu
           label={t('term.switchSession')}
+          heading={t('term.switchSession')}
           items={switcherItems}
           note={sessionsFailed ? t('term.sessionsFailed') : sessions === null ? t('term.sessionsLoading') : undefined}
           button={(open, toggle) => (
@@ -2621,6 +2632,11 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
         />
         )}
         <div className="spacer" />
+        {/* (Connection trouble shows on the tab; what else the bar would say,
+            here: by the bar's icons, apart from the tabs — ux1101 T26.) */}
+        {tabs && !watch && tabNote && (
+          <span className={'term-status term-tab-note ' + statusClass} aria-live="polite" title={tabNote}>{tabNote}</span>
+        )}
         {(waiting.length > 0 || waitingOpen) && (
           // Only while an agent waits (herdr's own sidebar lists them all):
           // one is answered at once, several are picked from a menu. The
@@ -2628,8 +2644,9 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
           // it is open moves nothing under the pointer or the focus.
           <Menu
             label={t('herdr.waitingMenu')}
+            heading={t('herdr.waitingMenu')}
             onOpenChange={setWaitingOpen}
-            items={() => waitingShown.current.map(({ a, ws }) => ({ label: `${ws} · ${a.agent}${a.title ? ' · ' + a.title : ''}`, onSelect: () => setReplyTo(a) }))}
+            items={() => waitingShown.current.map(({ a, ws }) => ({ label: [ws && ws !== '~' ? ws : '', a.agent, a.title].filter(Boolean).join(' · '), onSelect: () => setReplyTo(a) }))}
             button={(open, toggle) => (
               <button
                 className="icon-btn herdr-btn"
@@ -2652,7 +2669,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
         )}
         {!ended && !watch && (
           <button className="icon-btn" aria-pressed={composer} onClick={toggleComposer} aria-label={t('term.composer')} title={t('term.composer') + (isTouch ? '' : isMac ? ' (⇧⌘↩)' : ' (Ctrl+Shift+Enter)')}>
-            <TextCursorInput size={19} />
+            <SquarePen size={19} />
           </button>
         )}
         <Menu
@@ -2789,7 +2806,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
           a hidden tab keeps them open but draws them only when back. */}
       {active && (
         <>
-          {copyText !== null && <CopyMode text={copyText} onClose={() => setCopyText(null)} />}
+          {copyText !== null && <CopyMode text={copyText} fontSize={prefs.fontSize} onClose={() => setCopyText(null)} />}
           {schemesOpen && <SchemeDialog onClose={() => setSchemesOpen(false)} />}
           {closingPane && !ended && (
             <Confirm
@@ -2822,7 +2839,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
 }
 
 // Copy mode shows the scrollback as real text, so native selection works on touch screens.
-function CopyMode({ text, onClose }: { text: string; onClose: () => void }) {
+function CopyMode({ text, fontSize, onClose }: { text: string; fontSize: number; onClose: () => void }) {
   const toast = useToast()
   const ref = useFocusTrap<HTMLDivElement>(onClose)
   // Start at the bottom once; later renders must not move a reader back down.
@@ -2830,10 +2847,22 @@ function CopyMode({ text, onClose }: { text: string; onClose: () => void }) {
   useLayoutEffect(() => {
     if (pre.current) pre.current.scrollTop = pre.current.scrollHeight
   }, [])
+  // Whether some of it is selected: the button copies that, else all of it,
+  // and says which (ux1101 T05).
+  const [selected, setSelected] = useState(false)
+  useEffect(() => {
+    const on = () => {
+      const sel = window.getSelection()
+      setSelected(!!sel && !sel.isCollapsed && !!pre.current && pre.current.contains(sel.anchorNode) && sel.toString().length > 0)
+    }
+    document.addEventListener('selectionchange', on)
+    return () => document.removeEventListener('selectionchange', on)
+  }, [])
   return (
     <div className="copy-mode" role="dialog" aria-modal="true" aria-label={t('term.copyMode')} ref={ref}>
       <div className="copy-bar">
-        <span className="hint">{t('term.copyModeHint')}</span>
+        {/* (A mouse drags; a finger holds — ux1101 T03.) */}
+        <span className="hint">{hasKeyboardPointer() ? t('term.copyModeHintMouse') : t('term.copyModeHint')}</span>
         <div className="spacer" />
         <button
           className="btn"
@@ -2842,11 +2871,12 @@ function CopyMode({ text, onClose }: { text: string; onClose: () => void }) {
             if (await copyToClipboard(sel || text)) toast(t('common.copied'))
           }}
         >
-          {t('common.copy')}
+          {selected ? t('common.copy') : t('term.copyAll')}
         </button>
         <button className="icon-btn" onClick={onClose} aria-label={t('common.close')}><X size={20} /></button>
       </div>
-      <pre className="copy-text" tabIndex={0} ref={pre}>{text}</pre>
+      {/* (At the terminal's text size, so its lines wrap as there — ux1101 T04.) */}
+      <pre className="copy-text" tabIndex={0} ref={pre} style={{ fontSize }}>{text}</pre>
     </div>
   )
 }

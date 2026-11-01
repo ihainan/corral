@@ -114,14 +114,14 @@ export function useConnect(onOpen: (s: SessionInfo) => void): {
     dialogs = (
       <Dialog title={t('hostkey.title')} onClose={cancel}>
         <p className="lead">{t('hostkey.body', { name: p.host.name })}</p>
-        <div className="field">
-          <span className="field-label">{t('hostkey.expected')}</span>
-          <code className="mono" style={{ wordBreak: 'break-all' }}>{p.expected}</code>
-        </div>
-        <div className="field">
-          <span className="field-label">{t('hostkey.got')}</span>
-          <code className="mono" style={{ wordBreak: 'break-all' }}>{p.got}</code>
-        </div>
+        {/* The two fingerprints one above the other, in the same columns, so
+            they are compared character by character (ux1101 T51). */}
+        <dl className="hostkey-compare">
+          <dt>{t('hostkey.expected')}</dt>
+          <dd className="mono">{p.expected}</dd>
+          <dt>{t('hostkey.got')}</dt>
+          <dd className="mono">{p.got}</dd>
+        </dl>
         <div className="dialog-actions">
           <button className="btn" onClick={cancel}>{t('common.cancel')}</button>
           <button

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Bot, Check, MessageCircleReply, Plus, Search } from 'lucide-react'
+import { Activity, Bot, Check, MessageCircleReply, Plus, Search } from 'lucide-react'
 import { AgentsChat } from './AgentsChat'
 import { api, authGen, choiceOf, probeBootstrap, type Host, type OpenChoice, type SessionInfo } from '../api'
 import { agentKey, sessionWhich } from '../terminal/sessionName'
@@ -708,11 +708,32 @@ function TabBar(p: { tabs: SessionInfo[]; current: string; infos: Record<string,
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [p.current, order])
   const which = (s: SessionInfo) => sessionWhich(s, p.tabs)
+  // Tabs beyond either end of the bar: that end fades out (ux1101 T27).
+  const [fade, setFade] = useState('')
+  useEffect(() => {
+    const el = ref.current
+    if (!el) return
+    const look = () => {
+      const l = el.scrollLeft > 1
+      const r = el.scrollLeft + el.clientWidth < el.scrollWidth - 1
+      setFade((l ? ' fade-l' : '') + (r ? ' fade-r' : ''))
+    }
+    look()
+    el.addEventListener('scroll', look, { passive: true })
+    const ro = new ResizeObserver(look)
+    ro.observe(el)
+    for (const c of el.children) ro.observe(c)
+    return () => {
+      el.removeEventListener('scroll', look)
+      ro.disconnect()
+    }
+  }, [order])
   // Agents waiting in all tabs' sessions: the way to the agents page says so.
   // (Each agent once: two tabs of one herdr session list its agents twice.)
   const waitingAll = waitingAgents(p.tabs)
   return (
-    <nav className={'term-tabs' + (drag ? ' dragging' : '')} aria-label={t('tabs.label')} ref={ref}>
+    <>
+    <nav className={'term-tabs' + (drag ? ' dragging' : '') + fade} aria-label={t('tabs.label')} ref={ref}>
       <button
         type="button"
         className="term-tab term-tab-agents"
@@ -731,7 +752,15 @@ function TabBar(p: { tabs: SessionInfo[]; current: string; infos: Record<string,
       </button>
       {p.tabs.map((s) => {
         const info = p.infos[s.id]
-        const name = s.host_name ? s.host_name + ' · ' + which(s) : t('term.connecting')
+        // (Its host kept as long as it fits: what follows gives way first — ux1101 T27.)
+        const name = s.host_name ? (
+          <>
+            <span className="term-tab-host">{s.host_name}</span>
+            <span className="term-tab-which">{'\u00a0· ' + which(s)}</span>
+          </>
+        ) : (
+          t('term.connecting')
+        )
         const quiet = !info || info.status === 's-open'
         // Agents: as the tab's page tells (mounted), else as the session list last said.
         const count = (st: string) => (s.meta?.t === 'herdr' && !s.meta.lost ? s.meta.workspaces.reduce((n, w) => n + w.agents.filter((a) => a.status === st).length, 0) : 0)
@@ -755,13 +784,21 @@ function TabBar(p: { tabs: SessionInfo[]; current: string; infos: Record<string,
             onClick={() => !dragged() && s.id !== p.current && navigate('/t/' + s.id, true)}
           >
             {/* (A connection's trouble before agents at work: it is the one to see to.) */}
-            {!quiet ? <span className={'term-tab-dot ' + info.status} aria-hidden="true" /> : working > 0 && <span className="term-tab-working" role="img" aria-label={t('herdr.working', { n: working })} />}
+            {!quiet && <span className={'term-tab-dot ' + info.status} aria-hidden="true" />}
             <span className="term-tab-name">{name}</span>
             {s.title && <span className="term-tab-title">{s.title}</span>}
             {waiting > 0 && (
               <span className="term-tab-count term-tab-wait" aria-label={t('herdr.waiting', { n: waiting })}>
                 <MessageCircleReply size={13} strokeWidth={2.25} aria-hidden="true" />
                 {waiting}
+              </span>
+            )}
+            {/* Agents at work: a count as the others are, not a turning ring
+                that reads as the tab still loading (ux1101 T28). */}
+            {working > 0 && (
+              <span className="term-tab-count term-tab-busy" aria-label={t('herdr.working', { n: working })}>
+                <Activity size={13} strokeWidth={2.25} aria-hidden="true" />
+                {working}
               </span>
             )}
             {/* (Finished and not looked at yet, when none waits.) */}
@@ -774,10 +811,12 @@ function TabBar(p: { tabs: SessionInfo[]; current: string; infos: Record<string,
           </button>
         )
       })}
-      <button type="button" className="icon-btn term-tab-new" onClick={p.onNew} aria-label={t('tabs.new')} aria-keyshortcuts={standalone ? (isMac ? 'Meta+T' : 'Control+Shift+T') : undefined} title={standalone ? `${t('tabs.new')} (${newTabKey})` : t('tabs.new')}>
+    </nav>
+    {/* (Outside the tabs that scroll: always in sight — ux1101 N2.) */}
+    <button type="button" className="icon-btn term-tab-new" onClick={p.onNew} aria-label={t('tabs.new')} aria-keyshortcuts={standalone ? (isMac ? 'Meta+T' : 'Control+Shift+T') : undefined} title={standalone ? `${t('tabs.new')} (${newTabKey})` : t('tabs.new')}>
         <Plus size={17} />
       </button>
-    </nav>
+    </>
   )
 }
 
@@ -792,6 +831,13 @@ function NewTabDialog(p: { busyHost: number | null; onPick: (h: Host) => void; o
   }, [])
   const needle = q.trim().toLowerCase()
   const shown = (hosts ?? []).filter((h) => !needle || h.name.toLowerCase().includes(needle) || h.address.toLowerCase().includes(needle))
+  // The host Enter opens: marked, and moved with Up and Down (ux1101 T32).
+  const [sel, setSel] = useState(0)
+  useEffect(() => setSel(0), [needle])
+  const cur = Math.min(sel, Math.max(0, shown.length - 1))
+  useEffect(() => {
+    document.getElementById(`new-tab-host-${cur}`)?.scrollIntoView({ block: 'nearest' })
+  }, [cur])
   return (
     <Dialog title={t('tabs.new')} onClose={p.onClose} className="new-tab">
       <label className="new-tab-search">
@@ -803,15 +849,23 @@ function NewTabDialog(p: { busyHost: number | null; onPick: (h: Host) => void; o
           placeholder={t('tabs.search')}
           aria-label={t('tabs.search')}
           autoFocus
+          role="combobox"
+          aria-expanded={shown.length > 0}
+          aria-controls="new-tab-list"
+          aria-activedescendant={shown.length > 0 ? `new-tab-host-${cur}` : undefined}
           onKeyDown={(e) => {
+            if (e.nativeEvent.isComposing) return
             if (e.key === 'Enter' && shown.length > 0) {
               e.preventDefault()
-              p.onPick(shown[0])
+              if (p.busyHost === null) p.onPick(shown[cur])
+            } else if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && shown.length > 0) {
+              e.preventDefault()
+              setSel((cur + (e.key === 'ArrowDown' ? 1 : shown.length - 1)) % shown.length)
             }
           }}
         />
       </label>
-      <div className="new-tab-list" role="list">
+      <div className="new-tab-list" id="new-tab-list" role={shown.length > 0 ? 'listbox' : undefined} aria-label={shown.length > 0 ? t('tabs.new') : undefined}>
         {failed ? (
           <p className="hint">{t('tabs.hostsFailed')}</p>
         ) : hosts === null ? (
@@ -821,8 +875,20 @@ function NewTabDialog(p: { busyHost: number | null; onPick: (h: Host) => void; o
         ) : shown.length === 0 ? (
           <p className="hint">{t('tabs.noMatch')}</p>
         ) : (
-          shown.map((h) => (
-            <button key={h.id} type="button" role="listitem" className="new-tab-host" disabled={p.busyHost !== null} aria-busy={p.busyHost === h.id || undefined} onClick={() => p.onPick(h)}>
+          shown.map((h, i) => (
+            <button
+              key={h.id}
+              id={`new-tab-host-${i}`}
+              type="button"
+              role="option"
+              aria-selected={i === cur}
+              tabIndex={-1}
+              className={'new-tab-host' + (i === cur ? ' is-sel' : '')}
+              disabled={p.busyHost !== null}
+              aria-busy={p.busyHost === h.id || undefined}
+              onMouseMove={() => i !== cur && setSel(i)}
+              onClick={() => p.onPick(h)}
+            >
               <span className="new-tab-name">{h.name}</span>
               <span className="new-tab-addr">{h.username}@{h.address}{h.port !== 22 ? ':' + h.port : ''}</span>
               {p.busyHost === h.id && <span className="new-tab-busy">{t('term.connecting')}</span>}

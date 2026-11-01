@@ -84,8 +84,8 @@ export function PortsDialog({ hostId, onClose }: { hostId: number; onClose: () =
   }
 
   return (
-    <Dialog title={t('ports.title')} onClose={onClose}>
-      <p className="hint">{t('ports.intro')}</p>
+    <Dialog title={t('ports.title')} onClose={onClose} className="ports-dialog">
+      <p className="lead">{t('ports.intro')}</p>
       <section className="section">
         <h2>{t('ports.listening')}</h2>
         {ports === null && !portsError && <p className="loading">{t('common.loading')}</p>}
@@ -105,10 +105,13 @@ export function PortsDialog({ hostId, onClose }: { hostId: number; onClose: () =
             ))}
           </ul>
         )}
-        <form className="row2" onSubmit={submit}>
-          <input className="input mono" inputMode="numeric" aria-label={t('ports.manual')} placeholder={t('ports.manual')} value={manual}
+        {/* (Its own heading, apart from the list above — ux1101 T42; a field
+            and its button as the invite's are — T41.) */}
+        <h3 className="ports-sub" id="ports-manual">{t('ports.manualTitle')}</h3>
+        <form className="input-row" onSubmit={submit}>
+          <input className="input mono" inputMode="numeric" aria-labelledby="ports-manual" placeholder={t('ports.manual')} value={manual}
             onChange={(e) => setManual(e.target.value.replace(/\D/g, '').slice(0, 5))} />
-          <button className="btn" style={{ flex: 'none', height: 'var(--h-input)' }} disabled={!manual}>{t('ports.open')}</button>
+          <button className="btn btn-primary" disabled={!manual}>{t('ports.open')}</button>
         </form>
       </section>
       {forwardsFailed && <LoadError onRetry={loadForwards} />}

@@ -15,6 +15,7 @@ export function useCompletion(p: {
   draft: string
   setDraft: (s: string) => void
   agent: string | undefined // herdr's focused pane's agent, when known
+  noAgent?: boolean // known to have no agent in front (herdr's focused pane): no "/" or "$" offers
   pane?: string // (a herdr pane not in front, as the agents page's agent: its folder)
 }) {
   const [data, setData] = useState<Completions | null>(null)
@@ -60,7 +61,7 @@ export function useCompletion(p: {
   }, [tok, dismissed])
 
   const a: Agent | null = p.agent === 'claude' || p.agent === 'codex' || p.agent === 'opencode' ? p.agent : null
-  const items: Suggestion[] = tok && dismissed !== tok.start ? suggest(tok, data, a) : []
+  const items: Suggestion[] = tok && dismissed !== tok.start && !(p.noAgent && tok.kind !== '@') ? suggest(tok, data, a) : []
   const cur = Math.min(sel, Math.max(0, items.length - 1)) // (the list may have shrunk under it)
   const waitingFiles = !!tok && tok.kind === '@' && dismissed !== tok.start && !data
   // Asked again and not answered: what is offered is from before (another folder, maybe).
