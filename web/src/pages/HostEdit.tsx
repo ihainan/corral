@@ -132,7 +132,7 @@ export function HostEditPage({ id }: { id?: number }) {
     const a = splitAddress()
     // Every field at fault is marked at once, focus on the first; the
     // server's answer stays the last word for what is not checked here.
-    const found = hostFormErrors({ name, address: a.address, port: a.port, username: a.username, auth, credentialId })
+    const found = hostFormErrors({ name, address: a.address, port: a.port, username: a.username, auth, credentialId, password, hadPassword })
     if (found.length > 0) {
       setErrors(Object.fromEntries(found.map(([f, k]) => [f, t(k)])))
       focusField(found[0][0])

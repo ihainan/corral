@@ -7,7 +7,7 @@ import { hasKey, relTime, t, type I18nKey } from '../i18n'
 // validateHost), in the form's order: every field at fault at once, each
 // with its message's key. The server's own answer stays the last word (a
 // key that is no longer there, a jump host that cannot be one).
-export type HostFormValues = { name: string; address: string; port: string; username: string; auth: string; credentialId: number | null }
+export type HostFormValues = { name: string; address: string; port: string; username: string; auth: string; credentialId: number | null; password?: string; hadPassword?: boolean }
 const HOSTNAME = /^[A-Za-z0-9_]([A-Za-z0-9._-]{0,251}[A-Za-z0-9_])?$/
 export function hostFormErrors(v: HostFormValues): [field: string, key: I18nKey][] {
   const out: [string, I18nKey][] = []
@@ -17,8 +17,12 @@ export function hostFormErrors(v: HostFormValues): [field: string, key: I18nKey]
   if (!HOSTNAME.test(addr) && !addr.includes(':')) out.push(['address', 'hostField.address'])
   const port = v.port === '' ? 22 : Number(v.port)
   if (!(Number.isInteger(port) && port >= 1 && port <= 65535)) out.push(['port', 'host.portInvalid'])
-  if (!/^[^\s\x00-\x1f\x7f]{1,255}$/.test(v.username.trim())) out.push(['username', 'hostField.username'])
+  // (As the server's: Go's \s is ASCII white space only; 255 characters, not UTF-16 units.)
+  const user = v.username.trim()
+  if (!user || [...user].length > 255 || /[ \t\n\v\f\r\x00-\x1f\x7f]/.test(user)) out.push(['username', 'hostField.username'])
   if (v.auth === 'key' && v.credentialId === null) out.push(['credential_id', 'hostField.credential_id'])
+  // (A password to save, none kept before: one must be given — review.)
+  if (v.auth === 'password' && v.password !== undefined && !v.password && !v.hadPassword) out.push(['password', 'hostField.password'])
   return out
 }
 

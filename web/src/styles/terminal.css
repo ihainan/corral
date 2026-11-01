@@ -1442,3 +1442,6 @@ html.kb-open .convo-runs .convo-runs-pop.is-sheet { padding-bottom: 16px; }
 .hostkey-compare { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px 12px; margin: 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--r); }
 .hostkey-compare dt { font-size: 13px; color: var(--fg-2); white-space: nowrap; }
 .hostkey-compare dd { margin: 0; font-size: 13px; line-height: 18px; word-break: break-all; }
+
+/* (A primary button off inside the terminal page: as before, not the app's light grey on a dark terminal — review.) */
+.term-root .btn-primary:disabled, .term-root .btn-primary:disabled:hover { opacity: 0.5; background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }

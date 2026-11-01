@@ -88,11 +88,11 @@ export function LoginPage() {
             on a touch screen, where it would pop the keyboard up — ux1101 PG-49.) */}
         <Field label={t('login.username')} htmlFor="login-user" error={missing.user ? t('login.fillUsername') : undefined}>
           <input id="login-user" className="input" autoComplete="username" autoCapitalize="none" autoCorrect="off" spellCheck={false} autoFocus={!isCoarse()}
-            value={username} onChange={(e) => setUsername(e.target.value)} required aria-invalid={!!missing.user} />
+            value={username} onChange={(e) => (setUsername(e.target.value), missing.user && setMissing({ ...missing, user: false }))} required aria-invalid={!!missing.user} />
         </Field>
         <Field label={t('login.password')} htmlFor="login-pass" error={missing.pass ? t('login.fillPassword') : undefined}>
           <input id="login-pass" className="input" type="password" autoComplete="current-password" value={password}
-            onChange={(e) => setPassword(e.target.value)} required aria-invalid={!!missing.pass} />
+            onChange={(e) => (setPassword(e.target.value), missing.pass && setMissing({ ...missing, pass: false }))} required aria-invalid={!!missing.pass} />
         </Field>
         {error && <p className="err" role="alert">{error}</p>}
         <button className="btn btn-primary btn-block" disabled={busy}>

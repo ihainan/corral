@@ -398,7 +398,8 @@ export function AdminAuditPage() {
               host where this page knows it, dates past a day (ux1101 PG-06/09/10). */}
           <table className="audit-table">
             <colgroup>
-              <col style={{ width: '14%' }} />
+              {/* (Wide enough for "2025-10-28 14:05" on a tablet's narrow table — review.) */}
+              <col style={{ width: '10em' }} />
               <col style={{ width: '12%' }} />
               <col style={{ width: '20%' }} />
               <col />

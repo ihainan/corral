@@ -9,7 +9,7 @@ import { PhoneBack, useSession } from '../app'
 import { termScheme } from '../prefs'
 import { chromeVars } from '../terminal/themes'
 import { formatSize } from '../terminal/FilesDialog'
-import { Confirm, EmptyState, LoadError, Menu, useToast } from '../components/ui'
+import { Confirm, EmptyState, LoadError, Menu, isCoarse, useToast } from '../components/ui'
 import { durationText, whenText } from './pageText'
 
 const FONT_STACK = "'JetBrains Mono', 'SFMono-Regular', Menlo, Consolas, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', monospace"
@@ -294,6 +294,12 @@ export function RecordingPlayerPage({ id }: { id: string }) {
   }, [])
 
   const times = useMemo(() => (cast ? playTimes(cast.events, skipIdle) : []), [cast, skipIdle])
+  // (Its first output's time: at 0 itself a screen is empty — a recording's first output comes a moment after it
+  // began — so play is set there before it starts, its first screen drawn — review of ux1101 PG-02.)
+  const startAt = useMemo(() => {
+    const i = cast ? cast.events.findIndex((e) => e.kind === 'o') : -1
+    return i >= 0 ? times[i] : 0
+  }, [cast, times])
   const total = times.length ? times[times.length - 1] : 0
   const marker = useMemo(() => {
     const ms = cast?.events.filter((e) => e.kind === 'm') ?? []
@@ -376,7 +382,9 @@ export function RecordingPlayerPage({ id }: { id: string }) {
       pendingTo.current = null
       show(to)
     } else if (screen.current && shown.current === 0) {
-      show(posRef.current)
+      const at = posRef.current > 0 ? posRef.current : startAt
+      if (at !== posRef.current) setPos(at)
+      show(at)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [screenGen, cast])
@@ -470,7 +478,7 @@ export function RecordingPlayerPage({ id }: { id: string }) {
             <div className="player-screen" ref={hostEl} key={screenGen} onClick={toggle} />
           </div>
         )}
-        {cast && !playing && pos === 0 && <p className="hint player-note">{t('rec.startHint')}</p>}
+        {cast && !playing && pos <= startAt && <p className="hint player-note">{t(isCoarse() ? 'rec.startHintTouch' : 'rec.startHint')}</p>}
         {marker && <p className="hint player-note">{marker === 'truncated' ? t('rec.truncatedNote') : t('rec.gapsNote')}</p>}
       </div>
       <div className="player-controls">

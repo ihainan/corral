@@ -294,6 +294,7 @@ function PasswordDialog({ onClose }: { onClose: () => void }) {
     e.preventDefault()
     if (busy) return
     if (next !== again) {
+      setError('') // (not the last try's error beside this one — review)
       setMismatch(true)
       document.getElementById('s-again')?.focus()
       return
@@ -321,7 +322,7 @@ function PasswordDialog({ onClose }: { onClose: () => void }) {
           <input id="s-next" className="input" type="password" autoComplete="new-password" minLength={8} value={next} onChange={(e) => setNext(e.target.value)} required />
         </Field>
         <Field label={t('settings.againPassword')} htmlFor="s-again" error={mismatch ? t('settings.passwordMismatch') : undefined}>
-          <input id="s-again" className="input" type="password" autoComplete="new-password" value={again} onChange={(e) => setAgain(e.target.value)} required aria-invalid={mismatch} />
+          <input id="s-again" className="input" type="password" autoComplete="new-password" value={again} onChange={(e) => (setAgain(e.target.value), setMismatch(false))} required aria-invalid={mismatch} />
         </Field>
         {error && <p className="err" role="alert">{error}</p>}
         <div className="dialog-actions">

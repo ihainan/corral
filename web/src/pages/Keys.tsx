@@ -37,7 +37,7 @@ export function KeysPage() {
         <div className="spacer" />
         {/* (With their icons, as the other pages' buttons here — ux1101 PG-41; in
             the empty state instead while there are none, as on the hosts page.) */}
-        {keys && keys.length > 0 && (
+        {!(keys && keys.length === 0) && (
           <>
             <button className="btn" onClick={importKey}>
               <Import size={16} />
@@ -180,7 +180,7 @@ function GenerateDialog({ onClose, onDone }: { onClose: () => void; onDone: () =
         <div className="pubkey">
           <code>{made.public_key}</code>
         </div>
-        <div className="dialog-actions">
+        <div className="dialog-actions" ref={(el) => el?.querySelector<HTMLElement>('button')?.focus()}>
           <CopyButton text={made.public_key} label={t('keys.copyPublic')} />
           <button className="btn btn-primary" onClick={onClose}>{t('common.close')}</button>
         </div>
