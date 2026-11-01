@@ -3067,7 +3067,7 @@ const en: Record<Key, string> = {
   'convo.pressEscCancel': 'Press Esc to cancel',
   'convo.askOwnText': 'Or write your own answer',
   'convo.askText': 'Write your answer',
-  'convo.answered': 'Answered',
+  'convo.answered': 'Responded',
   'convo.othersWaitingMany': '{title} and {m} more are waiting for you',
   'convo.event.compactAuto': 'Compacted automatically',
   'convo.event.compactManual': 'Compacted by hand',

@@ -1865,6 +1865,10 @@ function PhoneList({ entries, all, titles, query, onQuery, onPick }: { entries: 
   const list = [...pins.flatMap((p) => inOrder.filter((e) => e.key === p)), ...inOrder.filter((e) => !pins.includes(e.key))]
   const n = (st: string) => entries.filter((e) => e.row?.status === st).length
   const waiting = n('blocked')
+  // (Not in order any more — one has come to wait, say, while the list was looked at: put in order at a tap,
+  // not under the finger by itself.)
+  const want = sorted(entries)
+  const stale = want.join('\n') !== order.filter((k) => byKey.has(k)).join('\n')
   const working = n('working')
   const done = n('done')
   const box = useRef<HTMLDivElement>(null)
@@ -1895,7 +1899,7 @@ function PhoneList({ entries, all, titles, query, onQuery, onPick }: { entries: 
   return (
     <div className="agents-list" ref={box}>
       <div className="agents-list-top">
-        <p className="agents-list-sum" role="status">
+        <p className="agents-list-sum">
           {waiting > 0 && <span className="is-blocked">{t('agents.sumWaiting', { n: waiting })}</span>}
           {working > 0 && <span className="is-working">{t('agents.sumWorking', { n: working })}</span>}
           {done > 0 && <span className="is-done">{t('agents.sumDone', { n: done })}</span>}
@@ -1908,6 +1912,11 @@ function PhoneList({ entries, all, titles, query, onQuery, onPick }: { entries: 
           <Plus size={18} />
         </button>
       </div>
+      {stale && (
+        <button type="button" className="link-btn agents-list-resort" onClick={() => (setOrder(want), box.current?.scrollTo({ top: 0 }))}>
+          {t('agents.sumHint')}
+        </button>
+      )}
       {(entries.length > SEARCH_FROM || query) && <ListSearch value={query} onChange={onQuery} />}
       {shown.length === 0 && <p className="agents-list-none">{t(query.trim() ? 'convo.searchNone' : 'agents.noneMine')}</p>}
       <ul className="agents-list-rows">
@@ -1915,7 +1924,7 @@ function PhoneList({ entries, all, titles, query, onQuery, onPick }: { entries: 
           const r = e.row
           const status = r?.lost ? 'unknown' : (r?.status ?? 'unknown')
           const { title, where } = labelled(e)
-          const since = r && !r.lost ? when({ since: r.a.since, status }, now) : ''
+          const since = r && !r.lost ? when({ since: r.bg ? r.a.bg_since : r.a.since, status }, now) : ''
           return (
             <li key={e.key + ' ' + e.s.id}>
               <button type="button" className={'agents-list-row is-' + status} onClick={() => onPick(e)}>

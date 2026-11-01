@@ -1147,6 +1147,9 @@ button.convo-task-line:hover .convo-task-name { color: var(--term-fg); }
 .agents-list-sum .is-blocked { color: var(--term-warn-text); font-weight: 600; }
 .agents-list-sum .is-working { color: var(--term-accent-text); }
 .agents-list-sum .is-done { color: var(--term-ok-text); }
+/* (The list out of order: a line to put it in order, under the counts.) */
+.term-root .agents-list-resort { display: block; width: 100%; padding: 8px 16px; text-align: left; font-size: 13px; color: var(--term-accent-text); }
+@media (pointer: coarse) { .term-root .agents-list-resort { min-height: 44px; } }
 .term-root .agents-list-mine { flex: none; height: 32px; padding: 0 10px; color: var(--term-fg-2); font-size: 13px; border: 1px solid var(--term-line); }
 @media (pointer: coarse) { .term-root .agents-list-mine { height: 44px; margin: -6px -4px -6px 0; } }
 /* (A toggle: outlined, off; on, filled a shade and in heavier letters — no colour of its own) */

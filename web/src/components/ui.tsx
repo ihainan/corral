@@ -143,7 +143,7 @@ export function Confirm(props: { title: string; body: string; confirm: string; d
               await props.onConfirm()
               props.onClose()
             } catch (e: any) {
-              setError(errorText(e)) // (not a network error's English, "TypeError: …": ux1101 PG-31)
+              setError(typeof e?.human === 'string' ? e.human : errorText(e)) // (its own words where it has them; never a network error's English, "TypeError: …": ux1101 PG-31)
               setBusy(false)
             }
           }}
