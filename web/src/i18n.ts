@@ -161,7 +161,7 @@ const zh = {
   'agents.sumDone': '{n} 个完成未看',
   'agents.sumAll': '{n} 个智能体',
   'agents.sumHint': '重新排序，等你的排最前',
-  'agents.onlyMine': '只看要我处理的',
+  'agents.onlyMine': '只看待处理',
   'agents.noneMine': '现在没有等你回答、或做完还没看的智能体。',
   'agents.unseen': '完成未看',
   'agents.cannotSend': '还没读到这个智能体的对话，暂时不能发送。',
