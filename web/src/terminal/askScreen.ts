@@ -11,6 +11,7 @@ export interface ScreenOption {
   cursor: boolean // the one the cursor is on (❯)
   cut?: boolean // (previews beside) its words ran to its column's edge: more of it may be on the next line
   ticked?: boolean // (a choice of many) [✔]
+  desc?: string // (nothing beside) the lines drawn under it, indented: its description
 }
 
 export type AskScreen =
@@ -67,6 +68,49 @@ function options(lines: string[], beside = false): ScreenOption[] {
   return out
 }
 
+// (Nothing beside: the choices, each with the lines under it, indented
+// past its number, as its description — a label too long for a line goes
+// on there too, read as of the description: its words all shown still.)
+function described(lines: string[]): ScreenOption[] {
+  const out: ScreenOption[] = []
+  let indent = 0
+  for (const l of lines) {
+    const m = optionLine.exec(l)
+    if (m) {
+      out.push({ n: Number(m[2]), label: m[4], cursor: !!m[1], ...(m[3] !== undefined ? { ticked: m[3] === '✔' } : {}) })
+      indent = l.indexOf(m[2] + '.')
+      continue
+    }
+    const last = out[out.length - 1]
+    const words = l.trim()
+    if (!last || !words || /^(❯\s*)?Submit$/.test(words) || l.search(/\S/) <= indent) continue
+    last.desc = last.desc ? last.desc + ' ' + words : words
+  }
+  return out
+}
+
+// What Claude Code said above its question on the screen, since the
+// person's last message there (its lines as drawn, "●" not kept): shown
+// with a question its log does not have yet (see askCard's screenCall).
+// None where the screen does not show where it began.
+export function askLead(text: string): string[] {
+  const lines = lastLines(text)
+  const hint = lines.findLastIndex((l, i) => /Enter to select/.test(l) && /navigate/.test(l + ' ' + (lines[i + 1] ?? '')))
+  const top = lines.findLastIndex((l, i) => i < hint && tabLine.test(l))
+  if (hint < 0 || top < 0) return []
+  // (The dialog's own rule over it, then the words; the person's message, ❯ or >, before them.)
+  const over = lines.slice(0, top).findLastIndex((l) => rule.test(l))
+  const end = over >= 0 ? over : top
+  const asked = lines.slice(0, end).findLastIndex((l) => /^[❯>] \S/.test(l))
+  if (asked < 0) return []
+  const words = lines.slice(asked + 1, end)
+  const from = words.findIndex((l) => /^●\s/.test(l))
+  if (from < 0) return []
+  const out = words.slice(from).map((l) => l.replace(/^●\s?/, '').replace(/^ {2}/, '').trimEnd())
+  while (out.length && !out[out.length - 1].trim()) out.pop()
+  return out.slice(-12)
+}
+
 // A menu drawn whole: numbered 1, 2, 3… once each, the cursor on one of
 // them (or, cursorElsewhere, on none: a question's Submit line).
 const whole = (o: ScreenOption[], cursorElsewhere = false) =>
@@ -99,7 +143,7 @@ export function readAskScreen(text: string): AskScreen {
       .filter(Boolean)
       .join(' ')
     const besideNow = block.slice(first).some((l) => /\s{3,}[\u2500-\u257f]/.test(l)) || block.some((l) => /Notes: press n/.test(l))
-    const opts = options(block.slice(first), besideNow)
+    const opts = besideNow ? options(block.slice(first), true) : described(block.slice(first))
     const sub = block.slice(first).find((l) => /^\s*(❯\s*)?Submit\s*$/.test(l))
     if (!question || !whole(opts, !!sub && /❯/.test(sub))) return { kind: 'unknown' }
     const own = opts.find((o) => ownLabel.test(o.label))?.n

@@ -63,6 +63,20 @@ function sameLabel(shown: string, asked: string, all: string[], cut = false): bo
   return !!start && flat(asked).startsWith(start) && all.filter((l) => flat(l).startsWith(start)).length <= 1
 }
 
+// A question of Claude Code's as its screen alone shows it, for where its
+// log does not have it yet: in auto mode Claude Code writes the call (and
+// what it said before it) to its log only once it is answered. Its words
+// and choices as drawn (a label wrapped under it read with its
+// description); the keys still answer only the screen read just before
+// each, as for one from the log. One of several (tabs): the one shown.
+export function screenCall(s: Q): ConvoTool {
+  return {
+    id: 'screen:' + s.question,
+    name: 'AskUserQuestion',
+    asks: [{ question: s.question, multi: s.multi, options: s.options.filter((o) => o.n !== s.own).map((o) => ({ label: o.label, ...(o.desc ? { description: o.desc } : {}) })) }],
+  }
+}
+
 // The screen shows the same question as q (the same words, choices, ways).
 const sameQ = (x: AskScreen, q: Q): x is Q =>
   x.kind === 'question' &&
@@ -214,7 +228,8 @@ async function tickAndGo(target: ReplyTarget, now: Screen, q0: Q, want: Set<numb
   return step(target, s, ['enter'], (x) => !sameQ(x, q0))
 }
 
-export function AskPanel({ call, index, shown, target, drive, busy, alive }: { call: ConvoTool; index: number; shown: Q; target: ReplyTarget; drive: Drive; busy: boolean; alive: () => boolean }) {
+// lead: what it said before asking, where only its screen shows it (see screenCall).
+export function AskPanel({ call, index, shown, target, drive, busy, alive, lead }: { call: ConvoTool; index: number; shown: Q; target: ReplyTarget; drive: Drive; busy: boolean; alive: () => boolean; lead?: string[] }) {
   const ask = call.asks![index]
   const [ticks, setTicks] = useState<Set<number> | null>(null)
   const ticked = ticks ?? new Set(shown.options.filter((o) => o.ticked).map((o) => o.n))
@@ -227,7 +242,11 @@ export function AskPanel({ call, index, shown, target, drive, busy, alive }: { c
     })
   return (
     <div className="convo-ask-structured">
-      {shown.tabs.length > 1 && (
+      {!!lead?.length && <div className="convo-ask-lead">{lead.join('\n')}</div>}
+      {shown.tabs.length > 1 && call.asks!.length !== shown.tabs.length && (
+        <p className="convo-ask-of">{t('ask.oneOfTabs', { n: shown.tabs.length, done: shown.tabs.filter((x) => x.answered).length })}</p>
+      )}
+      {shown.tabs.length > 1 && call.asks!.length === shown.tabs.length && (
         <ol className="convo-ask-tabs" aria-label={t('ask.questions')}>
           {call.asks!.map((a, i) => (
             <li key={i} className={(i === index ? 'is-now' : '') + (shown.tabs[i]?.answered ? ' is-done' : '')} aria-current={i === index || undefined}>
