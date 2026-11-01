@@ -1,6 +1,7 @@
 import { cloneElement, createContext, isValidElement, useCallback, useContext, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { Check, CircleAlert, CircleCheck, Copy, Info } from 'lucide-react'
+import { errorText } from '../api'
 import { t } from '../i18n'
 
 export const isCoarse = () => window.matchMedia('(pointer: coarse)').matches
@@ -104,10 +105,14 @@ export function useFocusTrap<T extends HTMLElement>(onClose: () => void) {
 // Dialog ---------------------------------------------------------------------
 
 // seeThrough: a light backdrop, for dialogs whose effect shows behind them.
-export function Dialog(props: { title: string; onClose: () => void; children: ReactNode; sheet?: boolean; hideTitle?: boolean; wide?: boolean; seeThrough?: boolean; className?: string; dialogProps?: React.HTMLAttributes<HTMLDivElement> }) {
-  const ref = useFocusTrap<HTMLDivElement>(props.onClose)
+// guard: while true (something typed in it not yet saved, a request under
+// way, words shown only once), a press outside it or Escape does not close
+// it — only its own buttons do (ux1101 PG-03/PG-04).
+export function Dialog(props: { title: string; onClose: () => void; children: ReactNode; sheet?: boolean; hideTitle?: boolean; wide?: boolean; seeThrough?: boolean; guard?: boolean; className?: string; dialogProps?: React.HTMLAttributes<HTMLDivElement> }) {
+  const dismiss = () => !props.guard && props.onClose()
+  const ref = useFocusTrap<HTMLDivElement>(dismiss)
   return createPortal(
-    <div className={'overlay' + (props.sheet !== false ? ' sheet-mode' : '') + (props.seeThrough ? ' see-through' : '')} onMouseDown={(e) => e.target === e.currentTarget && props.onClose()}>
+    <div className={'overlay' + (props.sheet !== false ? ' sheet-mode' : '') + (props.seeThrough ? ' see-through' : '')} onMouseDown={(e) => e.target === e.currentTarget && dismiss()}>
       <div {...props.dialogProps} className={'dialog' + (props.wide ? ' dialog-wide' : '') + (props.className ? ' ' + props.className : '')} role="dialog" aria-modal="true" aria-label={props.title} ref={ref}>
         {props.hideTitle ? null : <h2>{props.title}</h2>}
         {props.children}
@@ -126,7 +131,7 @@ export function Confirm(props: { title: string; body: string; confirm: string; d
   return (
     <Dialog title={props.title} onClose={close}>
       <p className="lead">{props.body}</p>
-      {error && <p className="err">{error}</p>}
+      {error && <p className="err" role="alert">{error}</p>}
       <div className="dialog-actions">
         <button className="btn" onClick={close} disabled={busy}>{t('common.cancel')}</button>
         <button
@@ -138,7 +143,7 @@ export function Confirm(props: { title: string; body: string; confirm: string; d
               await props.onConfirm()
               props.onClose()
             } catch (e: any) {
-              setError(e?.human ?? String(e))
+              setError(errorText(e)) // (not a network error's English, "TypeError: …": ux1101 PG-31)
               setBusy(false)
             }
           }}
@@ -163,6 +168,7 @@ export interface MenuItem {
   keepOpen?: boolean // e.g. "retry": the menu stays open to show the result
   disabled?: boolean // shown, not to be picked now (title: why)
   title?: string
+  hint?: string // a line under it, where all can read it (a touch screen shows no title): why it is off, say
 }
 
 // Sent on the window to close every open menu (a terminal tab sent to the back).
@@ -223,7 +229,14 @@ function MenuEntry({ item, close }: { item: MenuItem; close: () => void }) {
   const body = (
     <>
       {item.icon}
-      <span>{item.label}</span>
+      {item.hint ? (
+        <span className="menu-item-text">
+          <span>{item.label}</span>
+          <span className="menu-hint">{item.hint}</span>
+        </span>
+      ) : (
+        <span>{item.label}</span>
+      )}
     </>
   )
   return (
@@ -431,7 +444,8 @@ export function Field(props: { label: string; htmlFor?: string; optional?: boole
       </label>
       {child}
       {props.error ? (
-        <p className="err" id={props.htmlFor ? props.htmlFor + '-desc' : undefined}>
+        // (Read out as it appears, not only when its field is next reached: ux1101 PG-05.)
+        <p className="err" role="alert" id={props.htmlFor ? props.htmlFor + '-desc' : undefined}>
           {props.error}
         </p>
       ) : props.hint ? (

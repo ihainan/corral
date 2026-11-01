@@ -146,7 +146,9 @@ code, .mono { font-family: var(--font-mono); font-size: 0.9em; }
     height: 49px; color: var(--fg-2); font-size: 11px; font-weight: 500;
   }
   .tab:hover { text-decoration: none; }
-  .tab[aria-current='page'] { color: var(--accent-text); }
+  /* (The current one by weight, not by a colour: ux1101 PG-32.) */
+  .tab[aria-current='page'] { color: var(--fg); font-weight: 600; }
+  .tab[aria-current='page'] svg { stroke-width: 2.25; }
   .content { padding-bottom: calc(49px + env(safe-area-inset-bottom, 0px)); }
 }
 
@@ -181,6 +183,8 @@ code, .mono { font-family: var(--font-mono); font-size: 0.9em; }
 .btn svg { color: var(--fg-2); }
 .btn:hover { background: var(--bg-hover); text-decoration: none; }
 .btn:disabled { opacity: 0.5; cursor: default; }
+/* (A primary button off: plainly off, not a paler blue that still looks pressable — ux1101 PG-17.) */
+.btn-primary:disabled, .btn-primary:disabled:hover { opacity: 1; background: var(--bg-subtle); border-color: var(--line); color: var(--fg-3); }
 .btn-primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
 .btn-primary svg { color: currentColor; }
 .btn-primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
@@ -193,7 +197,11 @@ code, .mono { font-family: var(--font-mono); font-size: 0.9em; }
   display: inline-grid; place-items: center; width: 36px; height: 36px; border-radius: var(--r);
   border: 0; background: transparent; color: var(--fg-3); cursor: pointer; flex: none; position: relative;
 }
-@media (pointer: coarse) { .icon-btn { width: 40px; height: 40px; } }
+@media (pointer: coarse) {
+  .icon-btn { width: 40px; height: 40px; }
+  /* (Touched over 44px, as drawn over 40: ux1101 PG-34.) */
+  .icon-btn::after { content: ''; position: absolute; inset: -2px; }
+}
 .icon-btn:hover { background: var(--bg-hover); color: var(--fg); }
 .icon-btn[aria-pressed='true'] { color: var(--accent-text); background: var(--accent-soft); }
 
@@ -362,6 +370,9 @@ a.setting:hover { text-decoration: none; background: var(--bg-hover); }
 }
 .menu-item svg { color: var(--fg-3); flex: none; }
 .menu-item:disabled { color: var(--fg-3); cursor: default; }
+.menu-item-text { display: flex; flex-direction: column; min-width: 0; }
+.menu-hint { font-size: 12px; line-height: 16px; color: var(--fg-3); font-weight: 400; }
+.sheet-list .menu-item:has(.menu-hint) { padding-top: 6px; padding-bottom: 6px; }
 .menu-item:disabled:hover { background: none; }
 .menu-item:hover { background: var(--bg-hover); text-decoration: none; }
 .menu-item.danger, .menu-item.danger svg { color: var(--danger); }
@@ -735,6 +746,8 @@ details.adv > .form { margin-top: 16px; }
 .check input { width: 18px; height: 18px; margin: 0; accent-color: var(--accent); flex: none; }
 .input-row { display: flex; gap: 8px; }
 .input-row .input { flex: 1; min-width: 0; }
+/* (A button beside a field as tall as it: ux1101 PG-18.) */
+.input-row > .btn, .kl-add-builtin > .btn { height: var(--h-input); }
 .pre-line { white-space: pre-line; }
 
 
