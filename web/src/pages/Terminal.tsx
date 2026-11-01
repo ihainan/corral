@@ -2387,8 +2387,8 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
   // Text size: the menu stays open, saying the size now, so a few presses
   // in a row need no reopening (ux1101 T19).
   const fontItems = (): MenuItem[] => [
-    { label: t('term.fontLarger'), hint: t('term.fontNow', { n: prefs.fontSize }), icon: <Plus size={16} />, keepOpen: true, disabled: prefs.fontSize >= 28, onSelect: () => setPrefs({ fontSize: Math.min(28, getPrefs().fontSize + 1) }) },
-    { label: t('term.fontSmaller'), icon: <Minus size={16} />, keepOpen: true, disabled: prefs.fontSize <= 9, onSelect: () => setPrefs({ fontSize: Math.max(9, getPrefs().fontSize - 1) }) },
+    { label: t('term.fontLarger'), hint: t('term.fontNow', { n: prefs.fontSize }), icon: <Plus size={16} />, keepOpen: true, onSelect: () => setPrefs({ fontSize: Math.min(28, getPrefs().fontSize + 1) }) },
+    { label: t('term.fontSmaller'), icon: <Minus size={16} />, keepOpen: true, onSelect: () => setPrefs({ fontSize: Math.max(9, getPrefs().fontSize - 1) }) },
   ]
   // Watching: only what changes this window's view.
   const watchItems = (): (MenuItem | null)[] => [
@@ -2635,7 +2635,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
         {/* (Connection trouble shows on the tab; what else the bar would say,
             here: by the bar's icons, apart from the tabs — ux1101 T26.) */}
         {tabs && !watch && tabNote && (
-          <span className={'term-status term-tab-note ' + statusClass} aria-live="polite" title={tabNote}>{tabNote}</span>
+          <span className={'term-status term-tab-note ' + statusClass} aria-live="polite" title={tabNote}><span className="term-tab-note-text">{tabNote}</span></span>
         )}
         {(waiting.length > 0 || waitingOpen) && (
           // Only while an agent waits (herdr's own sidebar lists them all):
@@ -2867,7 +2867,9 @@ function CopyMode({ text, fontSize, onClose }: { text: string; fontSize: number;
         <button
           className="btn"
           onClick={async () => {
-            const sel = window.getSelection()?.toString()
+            // (Its selection only where the button says so — one in the
+            // text shown — else all of it: one left elsewhere is not it.)
+            const sel = selected ? window.getSelection()?.toString() : ''
             if (await copyToClipboard(sel || text)) toast(t('common.copied'))
           }}
         >

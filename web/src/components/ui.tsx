@@ -168,6 +168,7 @@ export interface MenuItem {
   keepOpen?: boolean // e.g. "retry": the menu stays open to show the result
   disabled?: boolean // shown, not to be picked now (title: why)
   title?: string
+  checked?: boolean // an on/off one (a menuitemcheckbox): on or not
   hint?: string // a line under it, where all can read it (a touch screen shows no title): why it is off, say
 }
 
@@ -248,7 +249,7 @@ function MenuEntry({ item, close }: { item: MenuItem; close: () => void }) {
       {item.href ? (
         <a className={cls} role="menuitem" href={item.href} onClick={(e) => { close(); if (item.onSelect) { e.preventDefault(); item.onSelect() } }}>{body}</a>
       ) : (
-        <button className={cls} role="menuitem" disabled={item.disabled} title={item.title} onClick={() => { if (!item.keepOpen) close(); item.onSelect?.() }}>{body}</button>
+        <button className={cls} role={item.checked === undefined ? 'menuitem' : 'menuitemcheckbox'} aria-checked={item.checked} disabled={item.disabled} title={item.title} onClick={() => { if (!item.keepOpen) close(); item.onSelect?.() }}>{body}</button>
       )}
     </>
   )

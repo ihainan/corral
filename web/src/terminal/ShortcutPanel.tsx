@@ -82,14 +82,17 @@ export function ShortcutPanel(p: { pages: PanelPage[]; open: PanelPage; herdrKey
   // the foot away (the room it would take counts as the page's).
   const pageRef = useRef<HTMLDivElement>(null)
   const footRef = useRef<HTMLElement>(null)
-  const [needFoot, setNeedFoot] = useState(false)
+  // (Told once a page, with the foot away, and only ever turned on for it:
+  // measured with the foot there, a short screen's page — held at its
+  // min-height — would take it away and back again, for ever — review.)
+  const [footPage, setFootPage] = useState<typeof page | null>(null)
+  const needFoot = footPage === page
   const [faded, setFaded] = useState(false) // more below in the page
   useLayoutEffect(() => {
     const el = pageRef.current
     if (!el) return
     const look = () => {
-      const room = el.clientHeight + (footRef.current ? footRef.current.offsetHeight + 8 : 0) // (+ its margin)
-      setNeedFoot(el.scrollHeight > room + 1)
+      if (!needFoot && el.scrollHeight > el.clientHeight + 1) setFootPage(page)
       setFaded(el.scrollTop + el.clientHeight < el.scrollHeight - 1)
     }
     look()
@@ -104,6 +107,7 @@ export function ShortcutPanel(p: { pages: PanelPage[]; open: PanelPage; herdrKey
   // Tabs: Left and Right (Home, End) move between them and show that page,
   // the selected one the only stop for Tab (ux1101 T17).
   const tabKeys = (e: React.KeyboardEvent) => {
+    if (e.altKey || e.ctrlKey || e.metaKey) return
     const i = p.pages.indexOf(page)
     const next = e.key === 'ArrowRight' ? (i + 1) % p.pages.length : e.key === 'ArrowLeft' ? (i - 1 + p.pages.length) % p.pages.length : e.key === 'Home' ? 0 : e.key === 'End' ? p.pages.length - 1 : -1
     if (next < 0) return

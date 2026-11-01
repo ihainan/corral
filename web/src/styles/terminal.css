@@ -337,6 +337,9 @@ html.kb-open .keybar { padding-bottom: 6px; }
 /* What the bar says of the session in front (recorded, watched, slow): by
    its icons, in the quiet colour, apart from the tabs (ux1101 T26). */
 .term-tab-note { flex: none; max-width: 40%; min-width: 0; margin: 0 6px 0 12px; } /* (the tabs give way, not its words) */
+.term-tab-note-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* (A key or a shortcut reached by the keyboard: shown, inside it — the bar scrolls and clips what is outside — review.) */
+.term-root .kb-key:focus-visible, .term-root.light .kb-key:focus-visible, .term-root .sc-item:focus-visible, .term-root.light .sc-item:focus-visible { outline: none; box-shadow: inset 0 0 0 2px var(--term-accent-text); }
 .term-tab {
   display: flex; align-items: center; gap: 6px; flex: none; min-width: 0; max-width: 320px; height: 30px; padding: 0 12px;
   border: 0; border-radius: 8px; background: none; color: var(--term-fg-3); font: 500 13px/1 var(--font-ui); cursor: pointer;

@@ -796,7 +796,7 @@ function TabBar(p: { tabs: SessionInfo[]; current: string; infos: Record<string,
             {/* Agents at work: a count as the others are, not a turning ring
                 that reads as the tab still loading (ux1101 T28). */}
             {working > 0 && (
-              <span className="term-tab-count term-tab-busy" aria-label={t('herdr.working', { n: working })}>
+              <span className="term-tab-count term-tab-busy" role="img" aria-label={t('herdr.working', { n: working })}>
                 <Activity size={13} strokeWidth={2.25} aria-hidden="true" />
                 {working}
               </span>

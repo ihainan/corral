@@ -102,7 +102,7 @@ export function ShareDialog({ sessionId, onClose }: { sessionId: string; onClose
                 {s.display_name && <span className="hint mono"> {s.username}</span>}
               </span>
               <span className={'share-state' + (s.watching ? ' on' : '')}>{s.watching ? t('share.watching') : t('share.notWatching')}</span>
-              <button className="btn btn-ghost share-revoke" onClick={() => setRevoking(s)} aria-label={t('share.remove', { name: s.username })} title={t('share.removeHint')}>
+              <button className="btn btn-ghost share-revoke" onClick={() => setRevoking(s)} aria-label={t('share.remove', { name: s.username })}>
                 {t('share.revoke')}
               </button>
             </li>

@@ -464,7 +464,7 @@ export function FilesDialog({ sessionId, start, onPath, onInsert, onClose }: Pro
           items={() => [
             { label: t('files.cwd'), icon: <LocateFixed size={16} />, onSelect: () => void goTerminalFolder(false) },
             { label: t('files.refresh'), icon: <RotateCw size={16} />, disabled: path === null, onSelect: reload },
-            { label: t('files.showHidden'), icon: hidden ? <Check size={16} /> : <span className="menu-icon-space" />, onSelect: toggleHidden },
+            { label: t('files.showHidden'), icon: hidden ? <Check size={16} /> : <span className="menu-icon-space" />, checked: hidden, onSelect: toggleHidden },
             { label: t('files.newFolder'), icon: <FolderPlus size={16} />, disabled: path === null, onSelect: mkdir },
           ]}
           button={(open, toggle) => (

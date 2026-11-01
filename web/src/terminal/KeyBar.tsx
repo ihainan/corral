@@ -178,6 +178,7 @@ export function KeyBar(p: KeyBarProps) {
     if (keys.length && !keys.some((k) => k.tabIndex === 0)) keys[0].tabIndex = 0
   })
   const roam = (e: React.KeyboardEvent) => {
+    if (e.altKey || e.ctrlKey || e.metaKey) return // (a chord is not a move along the bar)
     const keys = keysOf()
     const i = keys.indexOf(document.activeElement as HTMLButtonElement)
     if (i < 0) return
