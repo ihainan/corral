@@ -4,6 +4,7 @@ import { api, ApiError, errorText, type Host, type KeyCred } from '../api'
 import { hasKey, t } from '../i18n'
 import { linkHandler, navigate } from '../router'
 import { CopyButton, Field, LoadError, useToast } from '../components/ui'
+import { hostFormErrors } from './pageText'
 
 type Auth = Host['auth']
 
@@ -25,7 +26,9 @@ export function HostEditPage({ id }: { id?: number }) {
   const [hosts, setHosts] = useState<Host[] | null>(null) // null until loaded
   const [hostsFailed, setHostsFailed] = useState(false)
   const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<{ field?: string; text: string } | null>(null)
+  // Each field at fault with its message (several at once: ux1101 PG-01);
+  // '' for one that belongs to no field.
+  const [errors, setErrors] = useState<Record<string, string>>({})
   // The host's version the form shows; an edit is refused if it was saved
   // elsewhere since (stale), and the form can then be opened again.
   const [version, setVersion] = useState<number | undefined>(undefined)
@@ -77,7 +80,7 @@ export function HostEditPage({ id }: { id?: number }) {
     setBusy(true)
     try {
       fill(await api<Host>('GET', '/api/hosts/' + id))
-      setError(null)
+      setErrors({})
       setStale(false)
     } catch (e) {
       toast(errorText(e), true)
@@ -115,20 +118,30 @@ export function HostEditPage({ id }: { id?: number }) {
   }
   const [advOpen, setAdvOpen] = useState(false)
 
+  // Focus to a field by its name as the server says it (one with no list
+  // to choose from, a key: the button beside its message).
+  const focusField = (f: string) => {
+    const id: Record<string, string> = { name: 'h-name', address: 'h-addr', port: 'h-port', username: 'h-user', password: 'h-pass', credential_id: 'h-key', jump_host_id: 'h-jump' }
+    const el = (id[f] && document.getElementById(id[f])) || (f === 'credential_id' ? document.getElementById('h-key-new') : f === 'auth' ? document.querySelector<HTMLElement>('[aria-labelledby="auth-label"] button') : null)
+    el?.focus()
+  }
+
   const submit = async (e: FormEvent) => {
     e.preventDefault()
     if (busy) return
-    setBusy(true)
-    setError(null)
     const a = splitAddress()
-    // Left empty, the usual SSH port; anything else must be a port.
-    const portN = a.port === '' ? 22 : Number(a.port)
-    if (!(portN >= 1 && portN <= 65535)) {
-      setError({ field: 'port', text: t('host.portInvalid') })
-      setBusy(false)
-      document.getElementById('h-port')?.focus()
+    // Every field at fault is marked at once, focus on the first; the
+    // server's answer stays the last word for what is not checked here.
+    const found = hostFormErrors({ name, address: a.address, port: a.port, username: a.username, auth, credentialId })
+    if (found.length > 0) {
+      setErrors(Object.fromEntries(found.map(([f, k]) => [f, t(k)])))
+      focusField(found[0][0])
       return
     }
+    setBusy(true)
+    setErrors({})
+    // Left empty, the usual SSH port.
+    const portN = a.port === '' ? 22 : Number(a.port)
     const body = {
       name, address: a.address, port: portN, username: a.username, auth,
       password: auth === 'password' ? password : '',
@@ -142,13 +155,14 @@ export function HostEditPage({ id }: { id?: number }) {
     } catch (err) {
       const field = err instanceof ApiError ? err.field : undefined
       setStale(err instanceof ApiError && err.code === 'host_changed')
-      setError({ field, text: err instanceof ApiError && err.code === 'invalid_field' ? fieldMessage(field, err.message) : errorText(err) })
+      setErrors({ [field ?? '']: err instanceof ApiError && err.code === 'invalid_field' ? fieldMessage(field, err.message) : errorText(err) })
       if (field === 'jump_host_id') setAdvOpen(true)
       setBusy(false)
+      if (field) requestAnimationFrame(() => focusField(field))
     }
   }
 
-  const fe = (f: string) => (error?.field === f ? error.text : undefined)
+  const fe = (f: string) => errors[f] || undefined
   // Hosts this one can go through: the user's others that are reached
   // directly and have a saved credential (and the one chosen, whatever it is now).
   const jumpChoices = (hosts ?? []).filter((h) => h.id === jumpId || (h.id !== id && !h.jump_host_id && h.auth !== 'ask'))
@@ -174,12 +188,13 @@ export function HostEditPage({ id }: { id?: number }) {
             <input id="h-addr" className="input" value={address} onChange={(e) => setAddress(e.target.value)} onBlur={splitAddress} placeholder={t('host.addressPlaceholder')}
               autoCapitalize="none" autoCorrect="off" spellCheck={false} inputMode="url" required aria-invalid={!!fe('address')} />
           </Field>
-          <div className="field port">
-            <label htmlFor="h-port">{t('host.port')}</label>
-            <input id="h-port" className="input" value={port} onChange={(e) => setPort(e.target.value.replace(/\D/g, ''))} inputMode="numeric" placeholder="22" aria-invalid={!!fe('port')} aria-describedby={fe('port') ? 'h-port-desc' : undefined} />
+          {/* (A Field as the others, its error under it: ux1101 PG-19.) */}
+          <div className="port">
+            <Field label={t('host.port')} htmlFor="h-port" error={fe('port')}>
+              <input id="h-port" className="input" value={port} onChange={(e) => setPort(e.target.value.replace(/\D/g, ''))} inputMode="numeric" placeholder="22" aria-invalid={!!fe('port')} />
+            </Field>
           </div>
         </div>
-        {fe('port') && <p className="err" id="h-port-desc">{fe('port')}</p>}
         <Field label={t('host.username')} htmlFor="h-user" error={fe('username')}>
           <input id="h-user" className="input" value={username} onChange={(e) => setUsername(e.target.value)} autoCapitalize="none" autoCorrect="off" spellCheck={false} required aria-invalid={!!fe('username')} />
         </Field>
@@ -222,9 +237,9 @@ export function HostEditPage({ id }: { id?: number }) {
             ) : (
               <p className="hint">{t('host.keyNone')}</p>
             )}
-            {fe('credential_id') && <p className="err">{fe('credential_id')}</p>}
+            {fe('credential_id') && <p className="err" role="alert">{fe('credential_id')}</p>}
             <div>
-              <button type="button" className="btn" onClick={generateKey} disabled={generating}>
+              <button type="button" id="h-key-new" className="btn" onClick={generateKey} disabled={generating}>
                 <KeyRound size={16} />
                 {t('host.keyCreate')}
               </button>
@@ -276,7 +291,7 @@ export function HostEditPage({ id }: { id?: number }) {
           </div>
         </details>
 
-        {error && !error.field && <p className="err" role="alert">{error.text}</p>}
+        {errors[''] && <p className="err" role="alert">{errors['']}</p>}
         {stale && (
           <div>
             <button type="button" className="btn" onClick={reopen} disabled={busy}>{t('host.reopen')}</button>

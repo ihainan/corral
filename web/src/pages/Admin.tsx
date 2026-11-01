@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react'
-import { KeySquare, MoreHorizontal, ScrollText, Send, Shield, Smartphone, UserCheck, UserPlus, UserRound, UserX } from 'lucide-react'
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
+import { ChevronRight, KeySquare, MoreHorizontal, ScrollText, Send, Shield, Smartphone, UserCheck, UserPlus, UserRound, UserX } from 'lucide-react'
 import { api, ApiError, errorText, type AdminUser, type AuditEntry } from '../api'
-import { relTime, t } from '../i18n'
-import { useSession } from '../app'
+import { t } from '../i18n'
+import { PhoneBack, useSession } from '../app'
+import { auditAction, auditDetail, auditTarget, sessionHosts, whenText } from './pageText'
 import { Confirm, CopyButton, Dialog, EmptyState, Field, LoadError, Menu, useToast } from '../components/ui'
 
 export function AdminUsersPage() {
@@ -35,6 +36,7 @@ export function AdminUsersPage() {
   return (
     <main className="page">
       <div className="page-head">
+        <PhoneBack />
         <h1>{t('admin.users')}</h1>
         <div className="spacer" />
         <button className="btn" onClick={() => setDialog(<CreateUserDialog onClose={() => setDialog(null)} onCreated={load} />)}>
@@ -61,13 +63,15 @@ export function AdminUsersPage() {
                 </span>
                 <span className="row-meta">{u.role === 'admin' ? t('admin.roleAdmin') : t('admin.roleMember')}</span>
                 {(() => {
-                  // The user name again only when the title is another name.
+                  // The user name again only when the title is another name;
+                  // every row with a second line, so rows are one height (ux1101 PG-38).
                   const parts: React.ReactNode[] = []
                   if (u.display_name && u.display_name !== u.username) parts.push(<span key="u" className="mono">{u.username}</span>)
+                  if (u.disabled) parts.push(<span key="d" className="state-danger">{t('admin.disabled')}</span>)
                   if (u.open_sessions > 0) parts.push(t('admin.openSessions', { n: u.open_sessions }))
                   if (u.totp) parts.push(t('admin.twoStep'))
-                  if (u.disabled) parts.push(<span key="d" className="state-danger">{t('admin.disabled')}</span>)
-                  return parts.length > 0 && <span className="row-sub">{parts.flatMap((x, i) => (i ? [' · ', x] : [x]))}</span>
+                  parts.push(t('admin.createdAt', { when: whenText(u.created_at) }))
+                  return <span className="row-sub">{parts.flatMap((x, i) => (i ? [' · ', x] : [x]))}</span>
                 })()}
               </div>
               <div className="row-actions">
@@ -79,11 +83,28 @@ export function AdminUsersPage() {
                     </button>
                   )}
                   items={() => [
-                    {
-                      label: u.role === 'admin' ? t('admin.makeMember') : t('admin.makeAdmin'),
-                      icon: <Shield size={16} />,
-                      onSelect: () => update(u, { role: u.role === 'admin' ? 'member' : 'admin' }),
-                    },
+                    // One's own role and account are not one's own to take
+                    // away here: off, saying why (the server would allow it —
+                    // ux1101 PG-08). Another's role, once confirmed.
+                    u.id === me?.id
+                      ? { label: u.role === 'admin' ? t('admin.makeMember') : t('admin.makeAdmin'), icon: <Shield size={16} />, disabled: true, hint: t('admin.selfRoleHint') }
+                      : {
+                          label: u.role === 'admin' ? t('admin.makeMember') : t('admin.makeAdmin'),
+                          icon: <Shield size={16} />,
+                          onSelect: () =>
+                            setDialog(
+                              <Confirm
+                                title={u.role === 'admin' ? t('admin.makeMember') : t('admin.makeAdmin')}
+                                body={t(u.role === 'admin' ? 'admin.roleToMemberBody' : 'admin.roleToAdminBody', { name: u.display_name || u.username })}
+                                confirm={u.role === 'admin' ? t('admin.makeMember') : t('admin.makeAdmin')}
+                                onClose={() => setDialog(null)}
+                                onConfirm={async () => {
+                                  await api('PUT', '/api/admin/users/' + u.id, { role: u.role === 'admin' ? 'member' : 'admin' })
+                                  load()
+                                }}
+                              />,
+                            ),
+                        },
                     {
                       label: t('admin.resetPassword'),
                       icon: <KeySquare size={16} />,
@@ -110,6 +131,8 @@ export function AdminUsersPage() {
                       : null,
                     u.disabled
                       ? { label: t('admin.enable'), icon: <UserCheck size={16} />, separator: true, onSelect: () => update(u, { disabled: false }) }
+                      : u.id === me?.id
+                      ? { label: t('admin.disable'), icon: <UserX size={16} />, separator: true, disabled: true, hint: t('admin.selfDisableHint') }
                       : {
                           label: t('admin.disable'),
                           icon: <UserX size={16} />,
@@ -161,7 +184,9 @@ function InviteDialog({ onClose }: { onClose: () => void }) {
     }
   }
   return (
-    <Dialog title={t('admin.invite')} onClose={onClose}>
+    // (A note typed or the link being made is not lost to a stray press; the
+    // link, shown once, leaves by its button — ux1101 PG-03.)
+    <Dialog title={t('admin.invite')} onClose={onClose} guard={busy || !!note.trim() || !!link}>
       {link ? (
         <>
           <p className="lead">{t('admin.inviteLink', { when: new Date(link.expires_at * 1000).toLocaleString() })}</p>
@@ -177,7 +202,7 @@ function InviteDialog({ onClose }: { onClose: () => void }) {
               <button type="button" aria-pressed={role === 'admin'} onClick={() => setRole('admin')}>{t('admin.roleAdmin')}</button>
             </div>
           </div>
-          <Field label={t('admin.inviteNote')} htmlFor="inv-note" optional>
+          <Field label={t('admin.inviteNote')} htmlFor="inv-note" optional hint={t('admin.inviteNoteHint')}>
             <input id="inv-note" className="input" value={note} onChange={(e) => setNote(e.target.value)} />
           </Field>
           <Field label={t('admin.inviteTtl')} htmlFor="inv-ttl">
@@ -187,9 +212,9 @@ function InviteDialog({ onClose }: { onClose: () => void }) {
               <option value={168}>{t('admin.inviteDays', { n: 7 })}</option>
             </select>
           </Field>
-          {error && <p className="err">{error}</p>}
+          {error && <p className="err" role="alert">{error}</p>}
           <div className="dialog-actions">
-            <button type="button" className="btn" onClick={onClose}>{t('common.cancel')}</button>
+            <button type="button" className="btn" onClick={onClose} disabled={busy}>{t('common.cancel')}</button>
             <button className="btn btn-primary" disabled={busy}>{t('admin.inviteCreate')}</button>
           </div>
         </form>
@@ -235,7 +260,8 @@ function CreateUserDialog({ onClose, onCreated }: { onClose: () => void; onCreat
   if (done) {
     const text = t('admin.createdText', { username: done.username, password: done.password })
     return (
-      <Dialog title={t('admin.create')} onClose={onClose}>
+      // (The first password is shown this once: only its button leaves, as the recovery codes — ux1101 PG-04.)
+      <Dialog title={t('admin.create')} onClose={onClose} guard>
         <p className="lead">{mustChange ? t('admin.createdBody') : t('admin.createdBodyKeep')}</p>
         <div className="pubkey"><code className="pre-line">{text}</code><CopyButton text={text} /></div>
         <div className="dialog-actions"><button className="btn btn-primary" onClick={onClose}>{t('common.close')}</button></div>
@@ -243,7 +269,7 @@ function CreateUserDialog({ onClose, onCreated }: { onClose: () => void; onCreat
     )
   }
   return (
-    <Dialog title={t('admin.create')} onClose={onClose}>
+    <Dialog title={t('admin.create')} onClose={onClose} guard={busy || !!username.trim() || !!name.trim()}>
       <form className="form" onSubmit={submit} noValidate>
         <p className="lead">{t('admin.createLead')}</p>
         <Field label={t('login.username')} htmlFor="cu-user" hint={t('admin.usernameHint')} error={fe('username')}>
@@ -259,7 +285,7 @@ function CreateUserDialog({ onClose, onCreated }: { onClose: () => void; onCreat
             <button type="button" aria-pressed={role === 'admin'} onClick={() => setRole('admin')}>{t('admin.roleAdmin')}</button>
           </div>
         </div>
-        <Field label={t('admin.firstPassword')} htmlFor="cu-pw" hint={t('setup.passwordHint')} error={fe('password')}>
+        <Field label={t('admin.firstPassword')} htmlFor="cu-pw" hint={t('admin.firstPasswordHint')} error={fe('password')}>
           <div className="input-row">
             <input id="cu-pw" className="input mono" value={pw} onChange={(e) => setPw(e.target.value)} autoComplete="off" autoCapitalize="none" autoCorrect="off" spellCheck={false} required aria-invalid={!!fe('password')} />
             <button type="button" className="btn" onClick={() => setPw(newPassword())}>{t('admin.generate')}</button>
@@ -271,7 +297,7 @@ function CreateUserDialog({ onClose, onCreated }: { onClose: () => void; onCreat
         </label>
         {error && !error.field && <p className="err" role="alert">{error.text}</p>}
         <div className="dialog-actions">
-          <button type="button" className="btn" onClick={onClose}>{t('common.cancel')}</button>
+          <button type="button" className="btn" onClick={onClose} disabled={busy}>{t('common.cancel')}</button>
           <button className="btn btn-primary" disabled={busy || !username.trim() || !pw}>{t('admin.createSubmit')}</button>
         </div>
       </form>
@@ -299,7 +325,7 @@ function ResetDialog({ user, onClose }: { user: AdminUser; onClose: () => void }
     }
   }
   return (
-    <Dialog title={t('admin.resetPassword')} onClose={onClose}>
+    <Dialog title={t('admin.resetPassword')} onClose={onClose} guard={busy || !!pw}>
       <form className="form" onSubmit={submit}>
         <p className="lead">{t('admin.resetPasswordBody', { name: user.display_name || user.username })}</p>
         <Field label={t('settings.newPassword')} htmlFor="rp-pw" hint={t('setup.passwordHint')} error={error}>
@@ -310,7 +336,7 @@ function ResetDialog({ user, onClose }: { user: AdminUser; onClose: () => void }
           <span>{t('admin.mustChange')}</span>
         </label>
         <div className="dialog-actions">
-          <button type="button" className="btn" onClick={onClose}>{t('common.cancel')}</button>
+          <button type="button" className="btn" onClick={onClose} disabled={busy}>{t('common.cancel')}</button>
           <button className="btn btn-primary" disabled={busy}>{t('admin.resetPassword')}</button>
         </div>
       </form>
@@ -353,9 +379,13 @@ export function AdminAuditPage() {
     load()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+  const hosts = useMemo(() => sessionHosts(entries ?? []), [entries])
   return (
     <main className="page">
-      <div className="page-head"><h1>{t('admin.audit')}</h1></div>
+      <div className="page-head">
+        <PhoneBack />
+        <h1>{t('admin.audit')}</h1>
+      </div>
       {entries === null && failed ? (
         <LoadError onRetry={() => load()} />
       ) : entries === null ? (
@@ -364,13 +394,15 @@ export function AdminAuditPage() {
         <EmptyState icon={<ScrollText size={20} strokeWidth={1.75} />} title={t('admin.auditEmpty')} />
       ) : (
         <>
+          {/* Actions in words, details as "key: value", a session by its
+              host where this page knows it, dates past a day (ux1101 PG-06/09/10). */}
           <table className="audit-table">
             <colgroup>
               <col style={{ width: '14%' }} />
-              <col style={{ width: '14%' }} />
-              <col style={{ width: '22%' }} />
+              <col style={{ width: '12%' }} />
+              <col style={{ width: '20%' }} />
               <col />
-              <col style={{ width: '16%' }} />
+              <col style={{ width: '14%' }} />
             </colgroup>
             <thead>
               <tr>
@@ -383,15 +415,16 @@ export function AdminAuditPage() {
             </thead>
             <tbody>
               {entries.map((e) => {
-                const detail = Object.keys(e.detail ?? {}).length > 0 ? JSON.stringify(e.detail) : ''
+                const detail = auditDetail(e.detail)
+                const target = auditTarget(e.target, hosts)
                 return (
                   <tr key={e.id}>
-                    <td className="tnum" title={new Date(e.ts * 1000).toLocaleString()}>{relTime(e.ts)}</td>
+                    <td className="tnum" title={new Date(e.ts * 1000).toLocaleString()}>{whenText(e.ts)}</td>
                     <td title={e.username}>{e.username || '—'}</td>
-                    <td className="code" title={e.action}>{e.action}</td>
-                    <td title={[e.target, detail].filter(Boolean).join('\n')}>
-                      {e.target || '—'}
-                      {detail && <span className="detail">{detail}</span>}
+                    <td title={e.action}>{auditAction(e.action)}</td>
+                    <td title={[e.target, ...detail].filter(Boolean).join('\n')}>
+                      {target || '—'}
+                      {detail.length > 0 && <span className="detail">{detail.join(' · ')}</span>}
                     </td>
                     <td className="code" title={e.ip}>{e.ip}</td>
                   </tr>
@@ -401,20 +434,21 @@ export function AdminAuditPage() {
           </table>
           <div className="audit-list">
             {entries.map((e) => {
-              const detail = Object.keys(e.detail ?? {}).length > 0 ? JSON.stringify(e.detail, null, 2) : ''
+              const target = auditTarget(e.target, hosts)
               return (
                 <details className="audit-item" key={e.id}>
                   <summary>
                     <span className="top">
-                      <span className="action">{e.action}</span>
-                      <span className="row-meta">{relTime(e.ts)}</span>
+                      <span className="action">{auditAction(e.action)}</span>
+                      <span className="row-meta">{whenText(e.ts)}</span>
+                      <ChevronRight className="audit-chev" size={16} aria-hidden="true" />
                     </span>
                     <span className="hint">
                       {e.username || '—'}
-                      {e.target ? ' · ' + e.target : ''}
+                      {target ? ' · ' + target : ''}
                     </span>
                   </summary>
-                  <pre>{[new Date(e.ts * 1000).toLocaleString(), e.ip, detail].filter(Boolean).join('\n')}</pre>
+                  <pre>{[new Date(e.ts * 1000).toLocaleString(), e.ip, target !== e.target ? e.target : '', e.action, ...auditDetail(e.detail)].filter(Boolean).join('\n')}</pre>
                 </details>
               )
             })}

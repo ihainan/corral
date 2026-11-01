@@ -46,7 +46,9 @@ export function TwoStepSetting() {
     load()
   }
   return (
-    <div className="setting setting-wide">
+    // (Off, one button at the right as the password row's; on, two that go
+    // under the words on a narrow screen — ux1101 PG-24.)
+    <div className={'setting' + (status?.on ? ' setting-wide' : '')}>
       <div className="setting-label">
         <span>{t('totp.title')}</span>
         {failed ? (
@@ -183,7 +185,9 @@ function EnrolDialog({ onClose, onDone }: { onClose: () => void; onDone: () => v
   // Grouped in fours, as apps show it.
   const spaced = setup?.secret.replace(/(.{4})/g, '$1 ').trim() ?? ''
   return (
-    <Dialog title={t('totp.turnOn')} onClose={close}>
+    // The recovery codes are shown once: only "I have saved them" leaves
+    // (ux1101 PG-04); a password typed, or a request under way, is not lost to a stray press.
+    <Dialog title={t('totp.turnOn')} onClose={close} guard={!!codes || busy || !!setup || !!password}>
       {codes ? (
         <>
           <RecoveryCodes codes={codes} leadRef={stepRef} />
@@ -274,7 +278,7 @@ function ConfirmDialog({ kind, onClose, onDone }: { kind: 'recovery' | 'disable'
   const stepRef = useStepFocus(!!codes)
   const title = kind === 'recovery' ? t('totp.newCodes') : t('totp.turnOff')
   return (
-    <Dialog title={title} onClose={close}>
+    <Dialog title={title} onClose={close} guard={!!codes || busy || !!password || !!code}>
       {codes ? (
         <>
           <RecoveryCodes codes={codes} leadRef={stepRef} />

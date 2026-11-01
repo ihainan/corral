@@ -2,7 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useRef, useState, ty
 import { forgetConversations } from './terminal/conversation'
 import { forgetSessions } from './terminal/agents'
 import { forgetColours } from './terminal/Code'
-import { Bot, Film, KeyRound, LogOut, ScrollText, Server, Settings, Users } from 'lucide-react'
+import { ArrowLeft, Bot, Film, KeyRound, LogOut, ScrollText, Server, Settings, Users } from 'lucide-react'
 import { api, ApiError, bumpAuthGen, setUnauthorizedHandler, type Bootstrap, type Me } from './api'
 import { applyDefaultLanguage, t } from './i18n'
 import { freezePrefs, resetPrefsSession, sendPendingPrefs, syncPrefsFromServer } from './prefs'
@@ -304,6 +304,33 @@ function Shell({ active, children }: { active: NavKey; children: ReactNode }) {
         ))}
       </nav>
     </div>
+  )
+}
+
+// On phones the recordings and admin pages are reached from Settings (no
+// sidebar there): a way back to it, to where it was scrolled (ux1101 PG-07).
+const SETTINGS_Y = 'corral.settingsY'
+export function rememberSettingsScroll() {
+  try {
+    sessionStorage.setItem(SETTINGS_Y, String(window.scrollY))
+  } catch {
+    /* storage unavailable */
+  }
+}
+export function takeSettingsScroll(): number | null {
+  try {
+    const v = sessionStorage.getItem(SETTINGS_Y)
+    sessionStorage.removeItem(SETTINGS_Y)
+    return v === null ? null : Number(v) || 0
+  } catch {
+    return null
+  }
+}
+export function PhoneBack() {
+  return (
+    <a className="icon-btn phone-back" href="/settings" onClick={linkHandler('/settings')} aria-label={t('common.back')}>
+      <ArrowLeft size={20} />
+    </a>
   )
 }
 
