@@ -1451,6 +1451,7 @@ const zh = {
   'hostField.tmux_session': '只能包含字母、数字、短横线和下划线。',
   'code.state.language': '正在安装 VS Code 中文语言包…',
   // ux1101 B2
+  'ops.onlyIdleGroup': '这几项要等智能体空闲时才能用',
   'convo.dur.d': '{d} 天',
   'convo.waitFor.now': '刚开始等',
   'convo.waitFor.m': '等了 {n} 分钟',
@@ -2934,6 +2935,7 @@ const en: Record<Key, string> = {
   'hostField.tmux_session': 'Use only letters, digits, dashes and underscores.',
   'code.state.language': 'Installing the VS Code language pack…',
   // ux1101 B2
+  'ops.onlyIdleGroup': 'These wait until the agent is idle',
   'convo.dur.d': '{d}d',
   'convo.waitFor.now': 'waiting, just now',
   'convo.waitFor.m': 'waiting {n} min',

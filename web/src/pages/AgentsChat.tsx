@@ -1695,7 +1695,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     { label: t('convo.showTerminal'), icon: <SquareTerminal size={16} />, onSelect: openTerminal },
     pinItem(cur.key),
     ...opsOf.map((o, i): MenuItem | null =>
-      bound ? { label: t(codex && o === 'clear' ? 'ops.clear.itemCodex' : `ops.${o}.item`), icon: OP_ICONS[o], separator: i === 0, disabled: !canOps, title: canOps ? undefined : t('ops.onlyIdle'), hint: canOps || i > 0 ? undefined : t('ops.onlyIdle'), onSelect: () => convo.bind && setOp({ op: o, bind: convo.bind, key: bindKey }) } : null,
+      bound ? { label: t(codex && o === 'clear' ? 'ops.clear.itemCodex' : `ops.${o}.item`), icon: OP_ICONS[o], separator: i === 0, disabled: !canOps, title: canOps ? undefined : t('ops.onlyIdle'), hint: canOps || i < opsOf.length - 1 ? undefined : t(opsOf.length > 1 ? 'ops.onlyIdleGroup' : 'ops.onlyIdle'), onSelect: () => convo.bind && setOp({ op: o, bind: convo.bind, key: bindKey }) } : null,
     ),
     canClose ? { label: t('agents.close'), icon: <Power size={16} />, danger: true, separator: true, onSelect: () => setClosing(cur) } : null,
   ]
@@ -1876,10 +1876,14 @@ function PhoneList({ entries, all, titles, query, onQuery, onPick }: { entries: 
       listScroll = el?.scrollTop ?? 0
     }
   }, [])
-  const regroup = () => {
-    setOrder(sorted(entries))
-    requestAnimationFrame(() => box.current?.scrollTo({ top: 0, behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' }))
-  }
+  // (Put in order again as the page comes back to the front: rows do not
+  // move under the finger while it is looked at, but are in order when
+  // looked at anew — as they are on coming back from a conversation.)
+  useEffect(() => {
+    const on = () => !document.hidden && setOrder(sorted(entries))
+    document.addEventListener('visibilitychange', on)
+    return () => document.removeEventListener('visibilitychange', on)
+  })
   const hosts = hostCount(entries)
   // (Searched: by its title, where it is, its program; "only mine" still holds.)
   const labelled = (e: Entry) => labelOf(e, keptTitle(titles, e) || (e.row ? paneTitle(e.row.a.title) || dirName(e.row.a.cwd) || e.row.a.agent : `${e.s.host_name} · ${sessionWhich(e.s, all)}`), hosts)
@@ -1891,12 +1895,12 @@ function PhoneList({ entries, all, titles, query, onQuery, onPick }: { entries: 
   return (
     <div className="agents-list" ref={box}>
       <div className="agents-list-top">
-        <button type="button" className="agents-list-sum" onClick={regroup} title={t('agents.sumHint')}>
+        <p className="agents-list-sum" role="status">
           {waiting > 0 && <span className="is-blocked">{t('agents.sumWaiting', { n: waiting })}</span>}
           {working > 0 && <span className="is-working">{t('agents.sumWorking', { n: working })}</span>}
           {done > 0 && <span className="is-done">{t('agents.sumDone', { n: done })}</span>}
           {!waiting && !working && !done && <span>{t('agents.sumAll', { n: entries.length })}</span>}
-        </button>
+        </p>
         <button type="button" className="btn btn-ghost agents-list-mine" aria-pressed={mine} onClick={() => setMine(!mine)}>
           {t('agents.onlyMine')}
         </button>
@@ -1926,10 +1930,6 @@ function PhoneList({ entries, all, titles, query, onQuery, onPick }: { entries: 
                       </span>
                     )}
                   </span>
-                  {/* (Done and not seen, or at work: said by its dot, its time beside it, as the
-                      side list does; in words for a screen reader, and where forced colours take the dot's.) */}
-                  {status === 'done' && since && <span className="convo-list-status">{t('agents.unseen')}</span>}
-                  {status === 'working' && since && <span className="convo-list-status">{t('convo.status.working')}</span>}
                   <span className="agents-list-where">
                     {r && cmdsOf(r) && <BgCmds cmds={cmdsOf(r)!} />}
                     {!r && tmuxCmdsOf(e) && <BgCmds cmds={tmuxCmdsOf(e)!} />}
@@ -1937,15 +1937,18 @@ function PhoneList({ entries, all, titles, query, onQuery, onPick }: { entries: 
                     {where}
                   </span>
                 </span>
-                {/* (Waiting for you, in words: no group heading says it here.) */}
-                <span className={'agents-list-side is-' + (status === 'done' && since ? 'idle' : status)}>
-                  {r?.bg && !r.lost
-                    ? t(r.bg === 'running' ? 'convo.status.bg' : 'convo.status.bgStale')
-                    : status === 'blocked'
-                      ? t('convo.status.blocked')
-                      : status === 'done' && !since
-                        ? t('agents.unseen')
-                        : since || (status === 'working' ? t('convo.status.working') : '')}
+                {/* (Its state in words, in its colour — no group heading says it here — and
+                    how long under it, in words that say which: waited, at work, ago.) */}
+                <span className="agents-list-side">
+                  {(() => {
+                    const word = r?.bg && !r.lost ? t(r.bg === 'running' ? 'convo.status.bg' : 'convo.status.bgStale') : status === 'blocked' ? t('convo.status.blocked') : status === 'done' ? t('agents.unseen') : status === 'working' ? t('convo.status.working') : ''
+                    return (
+                      <>
+                        {word && <span className={'agents-list-state is-' + (r?.bg && !r.lost ? 'working' : status)}>{word}</span>}
+                        {since && <span className="agents-list-when">{since}</span>}
+                      </>
+                    )
+                  })()}
                 </span>
               </button>
             </li>
