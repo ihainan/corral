@@ -70,13 +70,15 @@ function sameLabel(shown: string, asked: string, all: string[], cut = false): bo
 // description); the keys still answer only the screen read just before
 // each, as for one from the log. One of several (tabs): the one shown.
 // None where "Type something" is not the one last choice (the card numbers
-// the rest 1… as drawn). Its id: all it shows, so another question, alike
-// or not, is another card (its ticks, its words, not carried over).
+// the rest 1… as drawn). Its id: what it shows that stays while it is
+// answered, so another question, alike or not, is another card (its ticks,
+// its words, not carried over).
 // review528-3/4
 export function screenCall(s: Q): ConvoTool | undefined {
   if (s.own === undefined || s.own !== s.options.length || s.options.filter((o) => /^Type something\.?$/.test(o.label)).length !== 1) return undefined
   return {
-    id: 'screen:' + JSON.stringify([s.question, s.multi, s.tabs, s.options.map((o) => [o.label, o.desc ?? ''])]),
+    // (Not which tabs are answered, nor ticks or the cursor: those change as it is answered. review529-1)
+    id: 'screen:' + JSON.stringify([s.question, s.multi, s.tabs.map((x) => x.label), s.options.map((o) => [o.label, o.desc ?? ''])]),
     name: 'AskUserQuestion',
     asks: [{ question: s.question, multi: s.multi, options: s.options.filter((o) => o.n !== s.own).map((o) => ({ label: o.label, ...(o.desc ? { description: o.desc } : {}) })) }],
   }

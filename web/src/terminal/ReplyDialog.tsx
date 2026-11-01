@@ -443,9 +443,11 @@ export function InlineReply({ target, onLoaded, resizedAt, active = true, held, 
   const read = screen ? readAskScreen(screen.text) : ({ kind: 'unknown' } as const)
   const logAsks = !!call && !call.done && call.name === 'AskUserQuestion'
   const fromScreen = !logAsks && target.agent === 'claude' && read.kind === 'question' ? screenCall(read) : undefined
+  // (A review page so drawn: its own id, never empty — an empty one never matches what a key not known to have done set. review529-2)
+  const reviewId = !logAsks && target.agent === 'claude' && reviewAsDrawn(read) && read.kind === 'review' ? 'screen-review:' + JSON.stringify(read.answers) : undefined
   // (What a key not known to have done stops: this question, as the log or
   // else the screen tells it — another one, the card again. review528-5)
-  const driven = useDrive(screen, setScreen, load, () => setSent(answered.current), logAsks ? (call!.id ?? '') : (fromScreen?.id ?? (call && !call.done ? (call.id ?? '') : '')))
+  const driven = useDrive(screen, setScreen, load, () => setSent(answered.current), logAsks ? (call!.id ?? '') : (fromScreen?.id ?? reviewId ?? (call && !call.done ? (call.id ?? '') : '')))
   const busy = sending || driven.busy || amending
   const error = sendError || driven.error || amendError
   const state = !driven.unsure ? read : ({ kind: 'unknown' } as const)

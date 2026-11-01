@@ -106,16 +106,21 @@ export function askLead(text: string): string[] {
   // (Its words only: a block "● …" that is not a tool's call, "● Name(…)", with
   // the lines under it; a call's lines, and what it gave back ("⎿ …"), not.
   // review528-6)
-  const out: string[] = []
-  let keep = false
+  // (Each block whole, then told: one with a tool's output under it ("⎿")
+  // is a call, whatever its title says. review529-4)
+  const blocks: string[][] = []
   for (const l of lines.slice(asked + 1, end)) {
-    if (/^●\s/.test(l)) {
-      const what = l.replace(/^●\s+/, '')
-      keep = !/^[\w.:-]+\(/.test(what) && !/^User answered/.test(what)
-      if (keep) out.push(what.trimEnd())
-    } else if (keep && /^ {2}/.test(l) && !/^\s*⎿/.test(l)) out.push(l.slice(2).trimEnd())
-    else if (keep && !l.trim()) out.push('')
-    else keep = false
+    if (/^●\s/.test(l)) blocks.push([l])
+    else if (blocks.length) blocks[blocks.length - 1].push(l)
+  }
+  const out: string[] = []
+  for (const b of blocks) {
+    const head = b[0].replace(/^●\s+/, '')
+    const rest = b.slice(1)
+    if (/^[\w.:-]+\(/.test(head) || /^User answered/.test(head) || rest.some((l) => /^\s*⎿/.test(l))) continue
+    if (rest.some((l) => l.trim() && !/^ {2}/.test(l))) continue // (not drawn as its words are: not known)
+    if (out.length) out.push('')
+    out.push(head.trimEnd(), ...rest.map((l) => l.slice(2).trimEnd()))
   }
   while (out.length && !out[out.length - 1].trim()) out.pop()
   while (out.length && !out[0].trim()) out.shift()
@@ -192,10 +197,11 @@ export function readAskScreen(text: string): AskScreen {
 }
 
 // A review page with nothing in a log to check it against: only as Claude
-// Code draws one, its answers listed and its choices Submit and Cancel
-// (words a command shows above its own prompt are not one. review528-1)
+// Code draws one, its choices Submit answers and Cancel, its answers listed
+// or it saying not all are (words a command shows above its own prompt are
+// not one. review528-1, 529-3)
 export const reviewAsDrawn = (s: AskScreen) =>
-  s.kind === 'review' && s.answers.length > 0 && s.options.length === 2 && /^Submit answers$/.test(s.options[0].label) && /^Cancel$/.test(s.options[1].label)
+  s.kind === 'review' && (s.answers.length > 0 || s.incomplete) && s.options.length === 2 && /^Submit answers$/.test(s.options[0].label) && /^Cancel$/.test(s.options[1].label)
 
 // The same words, however the screen wrapped or spaced them.
 export const sameWords = (a: string, b: string) => a.replace(/\s+/g, ' ').trim() === b.replace(/\s+/g, ' ').trim()
