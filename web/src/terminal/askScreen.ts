@@ -103,11 +103,22 @@ export function askLead(text: string): string[] {
   const end = over >= 0 ? over : top
   const asked = lines.slice(0, end).findLastIndex((l) => /^[❯>] \S/.test(l))
   if (asked < 0) return []
-  const words = lines.slice(asked + 1, end)
-  const from = words.findIndex((l) => /^●\s/.test(l))
-  if (from < 0) return []
-  const out = words.slice(from).map((l) => l.replace(/^●\s?/, '').replace(/^ {2}/, '').trimEnd())
+  // (Its words only: a block "● …" that is not a tool's call, "● Name(…)", with
+  // the lines under it; a call's lines, and what it gave back ("⎿ …"), not.
+  // review528-6)
+  const out: string[] = []
+  let keep = false
+  for (const l of lines.slice(asked + 1, end)) {
+    if (/^●\s/.test(l)) {
+      const what = l.replace(/^●\s+/, '')
+      keep = !/^[\w.:-]+\(/.test(what) && !/^User answered/.test(what)
+      if (keep) out.push(what.trimEnd())
+    } else if (keep && /^ {2}/.test(l) && !/^\s*⎿/.test(l)) out.push(l.slice(2).trimEnd())
+    else if (keep && !l.trim()) out.push('')
+    else keep = false
+  }
   while (out.length && !out[out.length - 1].trim()) out.pop()
+  while (out.length && !out[0].trim()) out.shift()
   return out.slice(-12)
 }
 
@@ -179,6 +190,12 @@ export function readAskScreen(text: string): AskScreen {
   }
   return { kind: 'unknown' }
 }
+
+// A review page with nothing in a log to check it against: only as Claude
+// Code draws one, its answers listed and its choices Submit and Cancel
+// (words a command shows above its own prompt are not one. review528-1)
+export const reviewAsDrawn = (s: AskScreen) =>
+  s.kind === 'review' && s.answers.length > 0 && s.options.length === 2 && /^Submit answers$/.test(s.options[0].label) && /^Cancel$/.test(s.options[1].label)
 
 // The same words, however the screen wrapped or spaced them.
 export const sameWords = (a: string, b: string) => a.replace(/\s+/g, ' ').trim() === b.replace(/\s+/g, ' ').trim()

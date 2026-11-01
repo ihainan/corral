@@ -69,9 +69,14 @@ function sameLabel(shown: string, asked: string, all: string[], cut = false): bo
 // and choices as drawn (a label wrapped under it read with its
 // description); the keys still answer only the screen read just before
 // each, as for one from the log. One of several (tabs): the one shown.
-export function screenCall(s: Q): ConvoTool {
+// None where "Type something" is not the one last choice (the card numbers
+// the rest 1… as drawn). Its id: all it shows, so another question, alike
+// or not, is another card (its ticks, its words, not carried over).
+// review528-3/4
+export function screenCall(s: Q): ConvoTool | undefined {
+  if (s.own === undefined || s.own !== s.options.length || s.options.filter((o) => /^Type something\.?$/.test(o.label)).length !== 1) return undefined
   return {
-    id: 'screen:' + s.question,
+    id: 'screen:' + JSON.stringify([s.question, s.multi, s.tabs, s.options.map((o) => [o.label, o.desc ?? ''])]),
     name: 'AskUserQuestion',
     asks: [{ question: s.question, multi: s.multi, options: s.options.filter((o) => o.n !== s.own).map((o) => ({ label: o.label, ...(o.desc ? { description: o.desc } : {}) })) }],
   }
@@ -86,7 +91,12 @@ const sameQ = (x: AskScreen, q: Q): x is Q =>
   x.tabs.length === q.tabs.length &&
   x.tabs.every((tab, i) => sameWords(tab.label, q.tabs[i].label)) &&
   x.options.length === q.options.length &&
-  x.options.every((o, i) => o.n === q.options[i].n && sameWords(o.label, q.options[i].label))
+  x.options.every((o, i) => o.n === q.options[i].n && sameWords(o.label, q.options[i].label) && sameWords(o.desc ?? '', q.options[i].desc ?? ''))
+// (Descriptions too: two questions of the same words and first lines are
+// told apart by them, between a key and the next read. review528-2. Not
+// which tabs are answered: ticking a choice of many marks its own tab
+// answered as it goes. Two of the same words, choices and descriptions
+// both are not told apart.)
 
 // (The plan's first line, shown on the screen too: that very plan.)
 export function planOn(call: ConvoTool | undefined, s: AskScreen, text: string): boolean {

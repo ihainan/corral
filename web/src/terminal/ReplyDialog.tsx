@@ -6,7 +6,7 @@ import { Dialog, isCoarse, LoadError, useToast } from '../components/ui'
 import { getReplyDraft, keepReplyDraft } from './drafts'
 import { asksQuestion, choices, codexAsk, codexOptions, dashedRule, promptBlock, question } from './menu'
 import { agentName, choiceText, lasting, questionText } from './askText'
-import { askLead, readAskScreen } from './askScreen'
+import { askLead, readAskScreen, reviewAsDrawn } from './askScreen'
 import { askOn, AskPanel, OwnBox, planOn, PlanPanel, ReviewPanel, screenCall, useDrive } from './askCard'
 import { Filled, MaybeSent, NotAsShown, ownWords, permissionAmend } from './ownWords'
 import type { ConvoTool } from './conversation'
@@ -435,22 +435,29 @@ export function InlineReply({ target, onLoaded, resizedAt, active = true, held, 
       })
       .finally(() => setAmending(false))
   }
-  const driven = useDrive(screen, setScreen, load, () => setSent(answered.current), call && !call.done ? (call.id ?? '') : 'screen')
-  const busy = sending || driven.busy || amending
-  const error = sendError || driven.error || amendError
-  const state = screen && !driven.unsure ? readAskScreen(screen.text) : ({ kind: 'unknown' } as const)
   // (Its log without a question of Claude Code's not yet answered — in auto
   // mode it writes it only once answered — the one its screen shows, drawn
   // as such: where Claude Code waits, drawn as its question is, with the
-  // line for one's own words. A question the log has, other than the
+  // line for one's own words last. A question the log has, other than the
   // screen's: neither. See askCard's screenCall.)
+  const read = screen ? readAskScreen(screen.text) : ({ kind: 'unknown' } as const)
   const logAsks = !!call && !call.done && call.name === 'AskUserQuestion'
-  const onScreen = !logAsks && target.agent === 'claude' && state.kind === 'question' && state.own !== undefined ? screenCall(state) : undefined
+  const fromScreen = !logAsks && target.agent === 'claude' && read.kind === 'question' ? screenCall(read) : undefined
+  // (What a key not known to have done stops: this question, as the log or
+  // else the screen tells it — another one, the card again. review528-5)
+  const driven = useDrive(screen, setScreen, load, () => setSent(answered.current), logAsks ? (call!.id ?? '') : (fromScreen?.id ?? (call && !call.done ? (call.id ?? '') : '')))
+  const busy = sending || driven.busy || amending
+  const error = sendError || driven.error || amendError
+  const state = !driven.unsure ? read : ({ kind: 'unknown' } as const)
+  const onScreen = state.kind === 'question' ? fromScreen : undefined
   const asking = onScreen ?? call
   const askAt = onScreen ? 0 : askOn(call, state)
   const lead = onScreen && screen ? askLead(screen.text) : undefined
   const structured =
-    !!screen && (askAt >= 0 || (state.kind === 'review' && target.agent === 'claude' && (logAsks || !call || call.done)) || planOn(call, state, screen.text))
+    !!screen &&
+    (askAt >= 0 ||
+      (state.kind === 'review' && target.agent === 'claude' && (logAsks || ((!call || call.done) && reviewAsDrawn(state)))) ||
+      planOn(call, state, screen.text))
   // (Not known what a key did: the screen, for the person to look at.)
   useEffect(() => {
     if (driven.unsure) setShown(true)
