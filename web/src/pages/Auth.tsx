@@ -4,7 +4,7 @@ import { t } from '../i18n'
 import { navigate } from '../router'
 import { syncPrefsFromServer } from '../prefs'
 import { useSession } from '../app'
-import { BrandMark, Field } from '../components/ui'
+import { BrandMark, Field, isCoarse } from '../components/ui'
 
 function AuthFrame({ title, intro, children }: { title: string; intro?: string; children: React.ReactNode }) {
   return (
@@ -35,6 +35,9 @@ export function LoginPage() {
   const [password, setPassword] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  // Empty fields, said under them in the page's own words, not the
+  // browser's bubble (ux1101 PG-50).
+  const [missing, setMissing] = useState<{ user?: boolean; pass?: boolean }>({})
   const [challenge, setChallenge] = useState('') // set once the password was right and a code is due
   const signedIn = (user: Me) => {
     setMe(user)
@@ -43,6 +46,13 @@ export function LoginPage() {
   }
   const submit = async (e: FormEvent) => {
     e.preventDefault()
+    if (busy) return
+    const m = { user: !username.trim(), pass: !password }
+    setMissing(m)
+    if (m.user || m.pass) {
+      document.getElementById(m.user ? 'login-user' : 'login-pass')?.focus()
+      return
+    }
     setBusy(true)
     setError('')
     try {
@@ -73,14 +83,16 @@ export function LoginPage() {
   }
   return (
     <AuthFrame title={t('login.title')}>
-      <form className="form" onSubmit={submit}>
-        <Field label={t('login.username')} htmlFor="login-user">
-          <input id="login-user" className="input" autoComplete="username" autoCapitalize="none" autoCorrect="off" spellCheck={false}
-            value={username} onChange={(e) => setUsername(e.target.value)} required />
+      <form className="form" onSubmit={submit} noValidate>
+        {/* (Focus starts in the first field where a keyboard is at hand, not
+            on a touch screen, where it would pop the keyboard up — ux1101 PG-49.) */}
+        <Field label={t('login.username')} htmlFor="login-user" error={missing.user ? t('login.fillUsername') : undefined}>
+          <input id="login-user" className="input" autoComplete="username" autoCapitalize="none" autoCorrect="off" spellCheck={false} autoFocus={!isCoarse()}
+            value={username} onChange={(e) => setUsername(e.target.value)} required aria-invalid={!!missing.user} />
         </Field>
-        <Field label={t('login.password')} htmlFor="login-pass">
+        <Field label={t('login.password')} htmlFor="login-pass" error={missing.pass ? t('login.fillPassword') : undefined}>
           <input id="login-pass" className="input" type="password" autoComplete="current-password" value={password}
-            onChange={(e) => setPassword(e.target.value)} required />
+            onChange={(e) => setPassword(e.target.value)} required aria-invalid={!!missing.pass} />
         </Field>
         {error && <p className="err" role="alert">{error}</p>}
         <button className="btn btn-primary btn-block" disabled={busy}>

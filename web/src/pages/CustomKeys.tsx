@@ -2,7 +2,7 @@ import { useRef, useState, type FormEvent } from 'react'
 import { ChevronLeft, ChevronRight } from 'lucide-react'
 import { t } from '../i18n'
 import { getPrefs, setPrefs, usePrefs } from '../prefs'
-import { Confirm, Field } from '../components/ui'
+import { Confirm, Field, keysInUse } from '../components/ui'
 import { controlChars, describeMacro, parseMacro } from '../terminal/macro'
 import {
   builtinIds, builtins, defaultLayout, isBuiltin, layoutIn, longOf, mayLong, maxCustom, maxLabel, maxLayoutBytes, maxPinned, maxRow, layoutBytes,
@@ -96,12 +96,12 @@ export function CustomKeysSection() {
     change(p, k, (l) => ({ ...l, [p.group]: l[p.group].filter((_, j) => j !== p.i) }))
     if (form?.at && form.at.group === p.group && form.at.i === p.i) close()
   }
-  const addBuiltin = () => {
-    if (!adding) return
-    const l = current()
-    if (l.row.length >= maxRow || [...l.pinned, ...l.row].some((k) => isBuiltin(k) && k.k === adding)) return
-    save({ ...l, row: [...l.row, { k: adding }] })
+  const addBuiltin = (id: BuiltinId | '' = adding) => {
+    if (!id) return
     setAdding('')
+    const l = current()
+    if (l.row.length >= maxRow || [...l.pinned, ...l.row].some((k) => isBuiltin(k) && k.k === id)) return
+    save({ ...l, row: [...l.row, { k: id }] })
   }
 
   const open = (p: Pos | null, k: LayoutKey | null) => {
@@ -248,7 +248,7 @@ export function CustomKeysSection() {
   const longPreview = !longProblem && long.trim() ? t('keybar.longOf', { what: describeKeys(long) }) : ''
   const ownFull = ownCount(layout) >= maxCustom || layout.row.length >= maxRow
   return (
-    <section className="section">
+    <section className="section section-ruled">
       <h2>{t('keybar.title')}</h2>
       <p className="hint">{t('keybar.lead')}</p>
       {(['pinned', 'row'] as Group[]).map((g) => (
@@ -266,20 +266,23 @@ export function CustomKeysSection() {
       <div className="kl-add">
         {missing.length > 0 && (
           <div className="kl-add-builtin">
-            <select className="input" aria-label={t('keybar.addBuiltin')} value={adding} onChange={(e) => setAdding(e.target.value as BuiltinId | '')}>
+            {/* Picked, added (ux1101 PG-53); from the keyboard, whose arrows
+                pick as they go, only with the button beside it. */}
+            <select className="input" aria-label={t('keybar.addBuiltin')} value={adding}
+              onChange={(e) => (keysInUse() ? setAdding(e.target.value as BuiltinId | '') : addBuiltin(e.target.value as BuiltinId | ''))}>
               <option value="">{t('keybar.addBuiltin')}</option>
               {missing.map((id) => (
                 <option key={id} value={id}>{keyName({ k: id })}</option>
               ))}
             </select>
-            <button type="button" className="btn" disabled={!adding} onClick={addBuiltin}>{t('customKeys.add')}</button>
+            {adding && <button type="button" className="btn" onClick={() => addBuiltin()}>{t('customKeys.add')}</button>}
           </div>
         )}
         <div className="kl-add-actions">
           {!form && (
             <button type="button" className="btn" disabled={ownFull} onClick={() => open(null, null)}>{t('keybar.new')}</button>
           )}
-          <button type="button" className="btn btn-ghost" onClick={() => setResetting(true)}>{t('keybar.reset')}</button>
+          <button type="button" className="btn" onClick={() => setResetting(true)}>{t('keybar.reset')}</button>
         </div>
         {ownFull && !form && <p className="hint">{t('customKeys.full', { n: maxCustom })}</p>}
       </div>

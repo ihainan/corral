@@ -1,12 +1,12 @@
-import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
+import { useEffect, useLayoutEffect, useState, type FormEvent, type ReactNode } from 'react'
 import { ChevronRight, Film, LogOut, Minus, Plus, ScrollText, Users } from 'lucide-react'
 import { disablePush, enablePush, pushState, syncPush, type PushState } from '../push'
 import { api, errorText, type Me } from '../api'
 import { getLang, setLang, t, type Lang } from '../i18n'
 import { setPrefs, usePrefs } from '../prefs'
 import { linkHandler } from '../router'
-import { signOut, useSession } from '../app'
-import { Dialog, Field, useToast } from '../components/ui'
+import { rememberSettingsScroll, signOut, takeSettingsScroll, useSession } from '../app'
+import { Confirm, Dialog, Field, useToast } from '../components/ui'
 import { CurrentScheme, SchemeDialog } from '../terminal/SchemePicker'
 import { TwoStepSetting } from './TwoStep'
 import { CustomKeysSection } from './CustomKeys'
@@ -59,12 +59,59 @@ export function SettingsPage() {
   const prefs = usePrefs()
   const toast = useToast()
   const [lang, setLangState] = useState<Lang>(getLang())
+  const [profileDirty, setProfileDirty] = useState(false)
   const [schemesOpen, setSchemesOpen] = useState(false)
+  const [langAsk, setLangAsk] = useState<Lang | null>(null)
+  const switchLang = (v: Lang) => {
+    setLang(v)
+    setLangState(v)
+    location.reload()
+  }
+  // Back from a page opened here (phones): where the list was.
+  useLayoutEffect(() => {
+    const y = takeSettingsScroll()
+    if (y) window.scrollTo(0, y)
+  }, [])
+  const morePage = (href: string) => (e: React.MouseEvent) => {
+    rememberSettingsScroll()
+    linkHandler(href)(e)
+  }
   const stepFont = (d: number) => setPrefs({ fontSize: Math.min(FONT_MAX, Math.max(FONT_MIN, prefs.fontSize + d)) })
 
   return (
     <main className="page page-form page-settings">
       <div className="page-head"><h1>{t('settings.title')}</h1></div>
+
+      {/* Phones have no sidebar: the recordings and admin pages open from
+          here, first, not under every setting (ux1101 PG-07). */}
+      {(boot.recordings || me?.role === 'admin') && (
+        <section className="section phone-only">
+          <h2>{t('settings.more')}</h2>
+          <div className="settings-group">
+            {boot.recordings && (
+              <a className="setting setting-link" href="/recordings" onClick={morePage('/recordings')}>
+                <Film size={18} strokeWidth={1.75} className="row-icon" />
+                <span className="setting-label">{t('nav.recordings')}</span>
+                <ChevronRight size={16} className="chev" />
+              </a>
+            )}
+            {me?.role === 'admin' && (
+              <>
+                <a className="setting setting-link" href="/admin/users" onClick={morePage('/admin/users')}>
+                  <Users size={18} strokeWidth={1.75} className="row-icon" />
+                  <span className="setting-label">{t('nav.users')}</span>
+                  <ChevronRight size={16} className="chev" />
+                </a>
+                <a className="setting setting-link" href="/admin/audit" onClick={morePage('/admin/audit')}>
+                  <ScrollText size={18} strokeWidth={1.75} className="row-icon" />
+                  <span className="setting-label">{t('nav.audit')}</span>
+                  <ChevronRight size={16} className="chev" />
+                </a>
+              </>
+            )}
+          </div>
+        </section>
+      )}
 
       <section className="section">
         <h2>{t('settings.appearance')}</h2>
@@ -83,9 +130,9 @@ export function SettingsPage() {
               value={lang}
               options={[['zh-CN', '简体中文'], ['en', 'English']]}
               onChange={(v) => {
-                setLang(v)
-                setLangState(v)
-                location.reload()
+                // (The page reloads: a display name typed and not saved would go — ux1101 PG-55.)
+                if (v !== lang && profileDirty) setLangAsk(v)
+                else if (v !== lang) switchLang(v)
               }}
             />
           </Setting>
@@ -118,11 +165,14 @@ export function SettingsPage() {
       </section>
 
       {schemesOpen && <SchemeDialog onClose={() => setSchemesOpen(false)} />}
+      {langAsk && (
+        <Confirm title={t('settings.langTitle')} body={t('settings.langUnsaved')} confirm={t('settings.langSwitch')} onClose={() => setLangAsk(null)} onConfirm={() => switchLang(langAsk)} />
+      )}
 
       <section className="section">
         <h2>{t('settings.keyboard')}</h2>
         <div className="settings-group">
-          <Setting label={t('settings.composerEnter')} hint={t('settings.composerEnterHint', { mod: isMac ? '⌘Return' : 'Ctrl+Enter' })} id="ce-l">
+          <Setting label={t('settings.composerEnter')} hint={t('settings.composerEnterHint', { mod: isMac ? t('settings.modEnterMac') : t('settings.modEnterOther') })} id="ce-l">
             <Seg
               labelledBy="ce-l"
               value={prefs.composerEnter}
@@ -130,7 +180,8 @@ export function SettingsPage() {
               onChange={(v) => setPrefs({ composerEnter: v })}
             />
           </Setting>
-          <Switch label={t('settings.optionIsMeta')} checked={prefs.optionIsMeta} onChange={(v) => setPrefs({ optionIsMeta: v })} />
+          {/* (Option is a Mac key: elsewhere the setting means nothing — ux1101 PG-23.) */}
+          {isMac && <Switch label={t('settings.optionIsMeta')} hint={t('settings.optionIsMetaHint')} checked={prefs.optionIsMeta} onChange={(v) => setPrefs({ optionIsMeta: v })} />}
         </div>
       </section>
 
@@ -138,7 +189,7 @@ export function SettingsPage() {
         <h2>{t('settings.agents')}</h2>
         <div className="settings-group">
           {/* (Pinned at the top of the agents page: let go of all at once, those out of sight too.) */}
-          <Setting label={t('settings.pinned')} hint={t('settings.pinnedHint', { n: prefs.pinnedAgents.length })} id="pin-l">
+          <Setting label={t('settings.pinned')} hint={prefs.pinnedAgents.length ? t('settings.pinnedHint', { n: prefs.pinnedAgents.length }) : t('settings.pinnedNone')} id="pin-l">
             <button type="button" className="btn" aria-describedby="pin-l" disabled={!prefs.pinnedAgents.length} onClick={() => setPrefs({ pinnedAgents: [] })}>
               {t('settings.unpinAll')}
             </button>
@@ -161,38 +212,12 @@ export function SettingsPage() {
       <section className="section">
         <h2>{t('settings.account')}</h2>
         <div className="settings-group">
-          <ProfileSetting />
+          <ProfileSetting onDirty={setProfileDirty} />
           <PasswordSetting />
           <TwoStepSetting />
-        </div>
-      </section>
-
-      {/* Phones have no sidebar: admin pages and sign-out live here. */}
-      <section className="section phone-only">
-        <h2>{t('settings.more')}</h2>
-        <div className="settings-group">
-          {boot.recordings && (
-            <a className="setting setting-link" href="/recordings" onClick={linkHandler('/recordings')}>
-              <Film size={18} strokeWidth={1.75} className="row-icon" />
-              <span className="setting-label">{t('nav.recordings')}</span>
-              <ChevronRight size={16} className="chev" />
-            </a>
-          )}
-          {me?.role === 'admin' && (
-            <>
-              <a className="setting setting-link" href="/admin/users" onClick={linkHandler('/admin/users')}>
-                <Users size={18} strokeWidth={1.75} className="row-icon" />
-                <span className="setting-label">{t('nav.users')}</span>
-                <ChevronRight size={16} className="chev" />
-              </a>
-              <a className="setting setting-link" href="/admin/audit" onClick={linkHandler('/admin/audit')}>
-                <ScrollText size={18} strokeWidth={1.75} className="row-icon" />
-                <span className="setting-label">{t('nav.audit')}</span>
-                <ChevronRight size={16} className="chev" />
-              </a>
-            </>
-          )}
-          <button className="setting setting-link danger" onClick={() => signOut(setMe, toast)}>
+          {/* Phones have no sidebar: sign-out is the account's last row. (Not
+              in red: signing out loses nothing — ux1101 PG-56.) */}
+          <button className="setting setting-link phone-only" onClick={() => signOut(setMe, toast)}>
             <LogOut size={18} strokeWidth={1.75} className="row-icon" />
             <span className="setting-label">
               {t('nav.signOut')}
@@ -201,6 +226,7 @@ export function SettingsPage() {
           </button>
         </div>
       </section>
+
       <p className="notices">
         <a href="/THIRD-PARTY-NOTICES.txt" target="_blank" rel="noopener">{t('settings.notices')}</a>
       </p>
@@ -209,12 +235,13 @@ export function SettingsPage() {
 }
 
 // The display name, edited in place; Save shows once it differs.
-function ProfileSetting() {
+function ProfileSetting({ onDirty }: { onDirty: (dirty: boolean) => void }) {
   const { me, setMe } = useSession()
   const toast = useToast()
   const [display, setDisplay] = useState(me?.display_name ?? '')
   const [busy, setBusy] = useState(false)
   const dirty = display !== (me?.display_name ?? '')
+  useEffect(() => onDirty(dirty), [dirty, onDirty])
   const save = async (e: FormEvent) => {
     e.preventDefault()
     if (busy || !dirty) return
@@ -257,12 +284,21 @@ function PasswordDialog({ onClose }: { onClose: () => void }) {
   const toast = useToast()
   const [cur, setCur] = useState('')
   const [next, setNext] = useState('')
+  // The new one twice, as when a password must be changed (ux1101 PG-51).
+  const [again, setAgain] = useState('')
+  const [mismatch, setMismatch] = useState(false)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
   const close = () => !busy && onClose()
   const submit = async (e: FormEvent) => {
     e.preventDefault()
     if (busy) return
+    if (next !== again) {
+      setMismatch(true)
+      document.getElementById('s-again')?.focus()
+      return
+    }
+    setMismatch(false)
     setBusy(true)
     setError('')
     try {
@@ -276,7 +312,7 @@ function PasswordDialog({ onClose }: { onClose: () => void }) {
     }
   }
   return (
-    <Dialog title={t('settings.password')} onClose={close}>
+    <Dialog title={t('settings.password')} onClose={close} guard={busy || !!(cur || next || again)}>
       <form className="form" onSubmit={submit}>
         <Field label={t('settings.currentPassword')} htmlFor="s-cur">
           <input id="s-cur" className="input" type="password" autoComplete="current-password" value={cur} onChange={(e) => setCur(e.target.value)} required />
@@ -284,10 +320,13 @@ function PasswordDialog({ onClose }: { onClose: () => void }) {
         <Field label={t('settings.newPassword')} htmlFor="s-next" hint={t('setup.passwordHint')}>
           <input id="s-next" className="input" type="password" autoComplete="new-password" minLength={8} value={next} onChange={(e) => setNext(e.target.value)} required />
         </Field>
+        <Field label={t('settings.againPassword')} htmlFor="s-again" error={mismatch ? t('settings.passwordMismatch') : undefined}>
+          <input id="s-again" className="input" type="password" autoComplete="new-password" value={again} onChange={(e) => setAgain(e.target.value)} required aria-invalid={mismatch} />
+        </Field>
         {error && <p className="err" role="alert">{error}</p>}
         <div className="dialog-actions">
           <button type="button" className="btn" onClick={close} disabled={busy}>{t('common.cancel')}</button>
-          <button className="btn btn-primary" disabled={busy || !cur || next.length < 8}>{t('settings.password')}</button>
+          <button className="btn btn-primary" disabled={busy || !cur || next.length < 8 || !again}>{t('settings.password')}</button>
         </div>
       </form>
     </Dialog>
@@ -353,7 +392,15 @@ function PushSection() {
   else if (info && !info.enabled) body = <p className="hint">{t('push.unavailable')}</p>
   else if (view === 'needs-home-screen') body = <p className="hint">{t('push.needsHomeScreen')}</p>
   else if (view === 'unsupported') body = <p className="hint">{t('push.unsupported')}</p>
-  else if (view === 'denied') body = <p className="err">{t('push.denied')}</p>
+  // Blocked in the browser: said plainly, with a way to look again once
+  // allowed there (not as an error of ours — ux1101 PG-22).
+  else if (view === 'denied')
+    body = (
+      <p className="hint push-denied">
+        <span>{t('push.denied')}</span>{' '}
+        <button type="button" className="link-btn" onClick={() => void refresh()}>{t('push.recheck')}</button>
+      </p>
+    )
   else {
     const on = view === 'on'
     body = (
@@ -402,7 +449,7 @@ function PushSection() {
     )
   }
   return (
-    <section className="section">
+    <section className="section section-ruled">
       <h2>{t('push.title')}</h2>
       <p className="hint">{t('push.intro')}</p>
       {body}
