@@ -18,6 +18,7 @@ import { AgentIcon } from './agentIcons'
 import { matchQuery } from './agents'
 import type { Convo, ConvoCost, ConvoQuota, ConvoQuotaWindow, ConvoEntry, ConvoShell, ConvoHunk, ConvoMeta, ConvoPart, ConvoQueued, ConvoRunning, ConvoTask, ConvoTool, ConvoTrouble, ConvoEvent } from './conversation'
 import { agentName } from './askText'
+import { duration, when } from './convoTime'
 import { category, isNote, items, ms, partTime, sameEdits, toolName, verbOf, type Category, type Edits, type Item, type Verb } from './convoItems'
 
 // The conversation view: the agent's log as turns, over the terminal (which
@@ -83,15 +84,6 @@ const sideWidthOf = (w: number, view: number) => Math.max(SIDE_W_MIN, Math.min(M
 const isTouchOnly = isCoarse()
 const mac = onMac()
 
-// A duration as the view says it: 45 s, 2 min 14 s, 1 h 5 min.
-export function duration(ms: number): string {
-  const s = Math.max(0, Math.round(ms / 1000))
-  if (s < 60) return t('convo.dur.s', { s })
-  if (s < 3600) return t('convo.dur.ms', { m: Math.floor(s / 60), s: s % 60 })
-  return t('convo.dur.hm', { h: Math.floor(s / 3600), m: Math.floor((s % 3600) / 60) })
-}
-
-
 // Now, every second while on: for what counts up.
 function useTick(on: boolean): number {
   const [now, setNow] = useState(Date.now())
@@ -128,6 +120,7 @@ export function ConversationView({
   more,
   query,
   onQuery,
+  answered,
 }: {
   convo: Convo
   agent: ConvoAgent | null
@@ -152,6 +145,7 @@ export function ConversationView({
   model?: ModelSwitch // (so can its model)
   effort?: EffortSwitch // (and how hard it is asked to think)
   lead?: ReactNode // (first in the bar: the agents page's way back to its list, on a phone)
+  answered?: boolean // (its question answered here, its list's word of it not come yet)
 }) {
   const working = agent?.status === 'working'
   const waits = agent?.status === 'blocked'
@@ -259,9 +253,12 @@ export function ConversationView({
   const col = useRef<HTMLDivElement>(null)
   const stuck = useRef(true) // following the end
   const [away, setAway] = useState(false) // (not following, the end out of view: the button to it shows)
+  // (Scrolled by the person just now: the buttons that float over the thread
+  // keep out of the way of what is read till it rests — a phone's, see CSS.)
+  const [scrolling, setScrolling] = useState(false)
   // What the person did to the scroll lately (see the listeners below):
   // only that leaves the end, or comes back to following it.
-  const did = useRef({ pressed: false, downAt: -1e9, drag: false, touch: false, touchY: 0, fling: 0, touchEndAt: -1e9, top: 0, h: 0, ch: 0, set: -1, glide: false })
+  const did = useRef({ pressed: false, downAt: -1e9, drag: false, touch: false, touchY: 0, fling: 0, touchEndAt: -1e9, top: 0, h: 0, ch: 0, set: -1, glide: false, moving: false, rest: 0 })
   // The end put in view (its place noted: the scroll it makes is not theirs).
   const pin = useCallback(() => {
     const el = box.current
@@ -606,6 +603,15 @@ export function ConversationView({
       if (!ours) {
         jumpedTo.current = null
         upAfterOlder.current = null
+        if (!g.moving) {
+          g.moving = true
+          setScrolling(true)
+        }
+        clearTimeout(g.rest)
+        g.rest = window.setTimeout(() => {
+          g.moving = false
+          setScrolling(false)
+        }, 700)
       }
       if (stuck.current) {
         if (end) g.glide = false
@@ -690,6 +696,7 @@ export function ConversationView({
       window.removeEventListener('keydown', onKey)
       grows.disconnect()
       cancelAnimationFrame(noting)
+      clearTimeout(g.rest)
     }
   }, [])
 
@@ -938,7 +945,9 @@ export function ConversationView({
     )
 
   let status = agent ? t(`convo.status.${agent.status}` as I18nKey) : ''
-  if (working && lastUser && now >= lastUser) status = t('convo.workingFor', { d: duration(now - lastUser) })
+  let workedFor = ''
+  if (working && lastUser && now >= lastUser) workedFor = duration(now - lastUser)
+  if (answered && waits) status = t('convo.answered')
   if (agent?.bg) status = t(agent.bg === 'running' ? 'convo.status.bg' : agent.bg === 'stale' ? 'convo.status.bgStale' : 'convo.status.working')
   else if (agent?.cmds && agent.status !== 'blocked') status = agent.cmds.n > 1 ? t('convo.bgCmds', { n: agent.cmds.n }) : t('convo.bgCmds1')
   const name = agent ? [agent.title, agent.where].filter(Boolean) : []
@@ -1009,7 +1018,7 @@ export function ConversationView({
           <AgentList rows={rows} menus query={sideQuery} onQuery={setSideQuery} search={searchAsked} onSearchLeft={() => setSearchAsked(0)} hint={!isTouchOnly} />
           {!isTouchOnly && (
             <p className="convo-side-keys">
-              {t('convo.switchKeys')}
+              {t(mac ? 'convo.switchKeysMac' : 'convo.switchKeys')}
               {mac && (
                 <>
                   <br />
@@ -1091,9 +1100,19 @@ export function ConversationView({
           ) : (
             <span className="convo-bar-pick is-static">{label}</span>
           )}
-          <span className={'convo-bar-status' + (agent && !convo.failing && !stop ? ' is-' + (agent.bg === 'running' || agent.bg === 'checking' ? 'working' : agent.status) : '')}>
+          <span className={'convo-bar-status' + (agent && !convo.failing && !stop ? ' is-' + (agent.bg === 'running' || agent.bg === 'checking' ? 'working' : answered && waits ? 'answered' : agent.status) : '')}>
             {working && !convo.failing && !stop && <span className="convo-spin" aria-hidden="true" />}
-            {convo.failing ? t('convo.paused', { time: clockMs(convo.okAt) }) : stop || status}
+            {convo.failing ? (
+              t('convo.paused', { time: clockMs(convo.okAt) })
+            ) : (
+              stop || (
+                <>
+                  {status}
+                  {/* (How long: dropped where the bar is narrow, the name needing the room.) */}
+                  {workedFor && !agent?.bg && !(agent?.cmds && agent.status !== 'blocked') && <span className="convo-bar-dur"> · {workedFor}</span>}
+                </>
+              )
+            )}
           </span>
           {onStop && (
             <button type="button" className="btn btn-ghost convo-stop" onClick={onStop}>
@@ -1156,7 +1175,7 @@ export function ConversationView({
       {!sideShown && others.length > 0 && (
         // (Another agent waits: one tap to it, where the list is not in view.)
         <button type="button" className="convo-nudge" onClick={others[0].onPick}>
-          <span className="convo-nudge-text">{t('convo.othersWaiting', { n: others.length, title: others[0].title })}</span>
+          <span className="convo-nudge-text">{others.length > 1 ? t('convo.othersWaitingMany', { n: others.length, m: others.length - 1, title: others[0].title }) : t('convo.othersWaiting', { n: 1, title: others[0].title })}</span>
           <ChevronRight size={15} aria-hidden="true" />
         </button>
       )}
@@ -1169,7 +1188,7 @@ export function ConversationView({
           </div>
         </div>
         {away && convo.status === 'ready' && (
-          <div className="convo-jump" role="group" aria-label={t('convo.jump')}>
+          <div className={'convo-jump' + (scrolling ? ' is-moving' : '')} role="group" aria-label={t('convo.jump')}>
             <button type="button" className="icon-btn" onClick={() => jump(-1)} aria-label={t('convo.jumpPrev')} title={t('convo.jumpPrev') + (isTouchOnly ? '' : ' ([)')}>
               <ChevronUp size={16} aria-hidden="true" />
             </button>
@@ -1489,14 +1508,31 @@ function Runs({ meta, active, mode, model, effort, quota }: { meta: ConvoMeta; a
   }, [open])
   // (A pop-up open: no taller than the room above the line in what can be
   // seen, the keyboard up too — a phone's view shrinks then, not its page.)
+  // (A narrow screen: from the bottom, over a dimmed page, as its other menus
+  // are — not a box with the thread's words cut off around it. Decided as it opens.)
+  const [sheet, setSheet] = useState(false)
+  useLayoutEffect(() => {
+    if (open) setSheet(matchMedia('(max-width: 640px)').matches)
+  }, [open])
   useEffect(() => {
     if (!open) return
     const vv = window.visualViewport
     const fit = () => {
       const pop = box.current?.querySelector<HTMLElement>('.convo-runs-pop')
       if (!pop || !box.current) return
-      const top = box.current.getBoundingClientRect().top - (vv ? vv.offsetTop : 0)
-      pop.style.maxHeight = Math.max(0, Math.min(top, vv ? vv.height : window.innerHeight) - 16) + 'px'
+      const seen = vv ? vv.height : window.innerHeight
+      if (pop.classList.contains('is-sheet')) {
+        pop.style.bottom = ''
+        pop.style.maxHeight = Math.round(seen * 0.8) + 'px'
+        return
+      }
+      const at = box.current.getBoundingClientRect()
+      // (The context's details: over the composer, not over its send and stop button.)
+      const over = open === 'ctx' ? box.current.parentElement?.querySelector<HTMLElement>('.composer-box')?.getBoundingClientRect() : undefined
+      const edge = over && over.bottom <= at.top + 1 ? over.top : at.top
+      pop.style.bottom = over && edge !== at.top ? Math.round(at.bottom - edge + 6) + 'px' : ''
+      const top = edge - (vv ? vv.offsetTop : 0)
+      pop.style.maxHeight = Math.max(0, Math.min(top, seen) - 16) + 'px'
     }
     fit()
     vv?.addEventListener('resize', fit)
@@ -1507,7 +1543,7 @@ function Runs({ meta, active, mode, model, effort, quota }: { meta: ConvoMeta; a
       vv?.removeEventListener('scroll', fit)
       window.removeEventListener('resize', fit)
     }
-  }, [open])
+  }, [open, sheet])
   const used = meta.context ?? 0
   // (Where it is not known: past the smaller window, the session has the
   // larger one. Known and filled past, it was not that one after all.)
@@ -1585,11 +1621,11 @@ function Runs({ meta, active, mode, model, effort, quota }: { meta: ConvoMeta; a
             title={t('convo.effortSwitch')}
             onClick={() => setOpen(open === 'effort' ? false : 'effort')}
           >
-            {effortName(level)}
+            {t('convo.effortShort', { e: effortName(level) })}
             <ChevronsUpDown size={12} aria-hidden="true" />
           </button>
           ) : (
-            <span className="convo-runs-item convo-runs-effort" title={t('convo.effort') + ': ' + effortName(level)}>{effortName(level)}</span>
+            <span className="convo-runs-item convo-runs-effort" title={t('convo.effort') + ': ' + effortName(level)}>{t('convo.effortShort', { e: effortName(level) })}</span>
           )
         })()}
       {used > 0 && (
@@ -1598,9 +1634,10 @@ function Runs({ meta, active, mode, model, effort, quota }: { meta: ConvoMeta; a
           {tokens(used)}
         </button>
       )}
+      {open && sheet && <div className="convo-runs-back" aria-hidden="true" onPointerDown={() => setOpen(false)} />}
       {open === 'model' && model && (
         <div
-          className="convo-runs-pop convo-models"
+          className={"convo-runs-pop convo-models" + (sheet ? " is-sheet" : "")}
           role="menu"
           aria-label={t('convo.model')}
           ref={menu}
@@ -1651,7 +1688,7 @@ function Runs({ meta, active, mode, model, effort, quota }: { meta: ConvoMeta; a
       )}
       {open === 'mode' && mode?.onPick && (
         <div
-          className="convo-runs-pop convo-models convo-modes"
+          className={"convo-runs-pop convo-models convo-modes" + (sheet ? " is-sheet" : "")}
           role="menu"
           aria-label={t('convo.modeTitle')}
           ref={menu}
@@ -1682,7 +1719,7 @@ function Runs({ meta, active, mode, model, effort, quota }: { meta: ConvoMeta; a
       )}
       {open === 'effort' && effort && (
         <div
-          className="convo-runs-pop convo-models"
+          className={"convo-runs-pop convo-models" + (sheet ? " is-sheet" : "")}
           role="menu"
           aria-label={t('convo.effort')}
           ref={menu}
@@ -1709,7 +1746,7 @@ function Runs({ meta, active, mode, model, effort, quota }: { meta: ConvoMeta; a
         </div>
       )}
       {open === 'ctx' && (
-        <div className="convo-runs-pop" role="dialog" aria-label={t('convo.ctxTitle')}>
+        <div className={'convo-runs-pop' + (sheet ? ' is-sheet' : '')} role="dialog" aria-label={t('convo.ctxTitle')}>
           <div className="convo-runs-row">
             <span>{t('convo.ctxTitle')}</span>
             <span>{t('convo.ctxTokens', { n: used.toLocaleString(getLang()) })}</span>
@@ -1729,7 +1766,7 @@ function Runs({ meta, active, mode, model, effort, quota }: { meta: ConvoMeta; a
           {meta.model && (
             <div className="convo-runs-row">
               <span>{t('convo.model')}</span>
-              <span>{meta.model}</span>
+              <span title={meta.model}>{modelName(meta.model)}</span>
             </div>
           )}
           <p className="convo-runs-note">
@@ -1966,7 +2003,7 @@ const dayBefore = (start: number) => {
 // when it came to rest, the clock's time (its day said by its group), or
 // the date before yesterday.
 function stamp(r: ConvoListRow, now: number, yesterday: number): string {
-  if (r.status === 'working' || r.status === 'blocked') return r.since && now >= r.since && now - r.since < 60000 ? t('convo.ago.now') : when(r, now)
+  if (r.status === 'working' || r.status === 'blocked') return when(r, now)
   if (!r.since || now < r.since) return ''
   const d = new Date(r.since)
   if (r.since >= yesterday) return d.toLocaleTimeString(getLang(), { hour: '2-digit', minute: '2-digit', hour12: false })
@@ -1974,18 +2011,6 @@ function stamp(r: ConvoListRow, now: number, yesterday: number): string {
 }
 
 
-
-// How long a status has lasted (at work, waiting), or how long ago it came
-// (done, idle), in minutes at least.
-export function when(r: { since?: number; status: string }, now: number): string {
-  if (!r.since || now < r.since) return ''
-  const m = Math.floor((now - r.since) / 60000)
-  const going = r.status === 'working' || r.status === 'blocked'
-  if (m < 1) return t(going ? 'convo.for.now' : 'convo.ago.now')
-  if (m < 60) return t(going ? 'convo.for.m' : 'convo.ago.m', { n: m })
-  if (m < 48 * 60) return t(going ? 'convo.for.h' : 'convo.ago.h', { n: Math.floor(m / 60) })
-  return t(going ? 'convo.for.d' : 'convo.ago.d', { n: Math.floor(m / 1440) })
-}
 
 // placed: where rows go (their group, their order) by another status than
 // their own, by key (the picker's: as when it opened).
@@ -2227,16 +2252,17 @@ const KEY_SEARCH = mac ? '⌘K' : '/'
 // The keys of this page, as this computer has them (plans/4a-shortcuts.md);
 // side: the list of agents beside it, with its own.
 function PageKeysHelp({ onClose, side }: { onClose: () => void; side: boolean }) {
-  const rows: [string, I18nKey][] = [
-    ...(side ? ([[mac ? '⌥↑  ⌥↓' : 'Alt+↑  Alt+↓', 'pageKeys.switch'], [KEY_SEARCH, 'pageKeys.search']] as [string, I18nKey][]) : []),
-    ['[  ]', 'pageKeys.jump'],
-    ...(mac ? ([['Ctrl+O', 'pageKeys.fold']] as [string, I18nKey][]) : []),
-    ['?', 'pageKeys.help'],
-    [mac ? 'Return  ⌘Return' : 'Enter  Ctrl+Enter', 'pageKeys.send'],
-    ['Shift+' + (mac ? 'Return' : 'Enter'), 'pageKeys.newline'],
-    ['↑  ↓', 'pageKeys.history'],
-    ['Tab', 'pageKeys.suggestion'],
-    ['1–9  Esc', 'pageKeys.card'],
+  // (Each key in a box of its own; two that do the same, or go each way, apart: not a chord.)
+  const rows: [string[], I18nKey][] = [
+    ...(side ? ([[mac ? ['⌥↑', '⌥↓'] : ['Alt+↑', 'Alt+↓'], 'pageKeys.switch'], [[KEY_SEARCH], 'pageKeys.search']] as [string[], I18nKey][]) : []),
+    [['[', ']'], 'pageKeys.jump'],
+    ...(mac ? ([[['Ctrl+O'], 'pageKeys.fold']] as [string[], I18nKey][]) : []),
+    [['?'], 'pageKeys.help'],
+    [mac ? ['Return', '⌘Return'] : ['Enter', 'Ctrl+Enter'], 'pageKeys.send'],
+    [['Shift+' + (mac ? 'Return' : 'Enter')], 'pageKeys.newline'],
+    [['↑', '↓'], 'pageKeys.history'],
+    [['Tab'], 'pageKeys.suggestion'],
+    [['1–9', 'Esc'], 'pageKeys.card'],
   ]
   return (
     <Dialog title={t('pageKeys.title')} onClose={onClose}>
@@ -2244,7 +2270,12 @@ function PageKeysHelp({ onClose, side }: { onClose: () => void; side: boolean })
         {rows.map(([k, what]) => (
           <div key={what} className="page-keys-row">
             <dt>
-              <kbd>{k}</kbd>
+              {k.map((x, i) => (
+                <Fragment key={x}>
+                  {i > 0 && <span className="page-keys-or"> / </span>}
+                  <kbd>{x}</kbd>
+                </Fragment>
+              ))}
             </dt>
             <dd>{t(what)}</dd>
           </div>
@@ -2453,8 +2484,12 @@ function Tasks({ tasks, fold }: { tasks: ConvoTask[]; fold?: boolean }) {
           {tasks.map((x, i) => (
             <li key={i} className={'is-' + x.status}>
               {x.subject}
-              {/* (Its state is in its look: said in words too.) */}
-              <span className="sr-only">{' · ' + t(x.status === 'completed' ? 'convo.taskDone' : x.status === 'in_progress' ? 'convo.taskDoing' : 'convo.taskTodo')}</span>
+              {/* (Its state is in its look: said in words too; the one under way, to all.) */}
+              {x.status === 'in_progress' ? (
+                <span className="convo-tasks-now">{' · ' + t('convo.taskDoing')}</span>
+              ) : (
+                <span className="sr-only">{' · ' + t(x.status === 'completed' ? 'convo.taskDone' : 'convo.taskTodo')}</span>
+              )}
             </li>
           ))}
         </ol>
@@ -2569,7 +2604,10 @@ const ListItem = memo(
       case 'summary':
         return (
           <details className="convo-summary">
-            <summary>{t('convo.summary')}</summary>
+            <summary>
+              <ChevronRight size={15} className="convo-chev" aria-hidden="true" />
+              {t('convo.summary')}
+            </summary>
             <div className="convo-md">
               <Markdown text={it.e.parts[0]?.text ?? ''} />
             </div>
@@ -2679,7 +2717,7 @@ function EventNote({ ev, idle }: { ev: ConvoEvent; idle?: boolean }) {
   // What went on while the person was away; a goal set or judged; any other notice.
   if (ev.kind === 'recap' || ev.kind === 'goal' || ev.kind === 'notice') {
     const head = ev.kind === 'recap' ? t('convo.recap') : ev.kind === 'goal' ? t(ev.set ? 'convo.goal.set' : ev.met ? 'convo.goal.met' : 'convo.goal.unmet') : ev.text ?? ''
-    const said = ev.kind === 'recap' ? (ev.text ?? '') : ev.kind === 'goal' ? (ev.goal ?? '') : ''
+    const said = ev.kind === 'recap' ? recapText(ev.text ?? '') : ev.kind === 'goal' ? (ev.goal ?? '') : ''
     return (
       <div className={'convo-event is-' + ev.kind + (ev.level === 'warning' ? ' is-warn' : '') + (ev.kind === 'goal' && ev.met ? ' is-met' : '')}>
         <div className="convo-trouble-body">
@@ -2767,8 +2805,7 @@ function EventNote({ ev, idle }: { ev: ConvoEvent; idle?: boolean }) {
       </div>
     )
   }
-  const how = ev.kind === 'idle_compact' || idle ? t('convo.event.idle') : ev.trigger === 'manual' ? t('convo.event.manual') : ev.trigger === 'auto' ? t('convo.event.auto') : ''
-  const said = [how ? t('convo.event.compactHow', { how }) : t('convo.event.compact')]
+  const said = [t(ev.kind === 'idle_compact' || idle ? 'convo.event.compactIdle' : ev.trigger === 'manual' ? 'convo.event.compactManual' : ev.trigger === 'auto' ? 'convo.event.compactAuto' : 'convo.event.compact')]
   if (ev.pre && ev.post) said.push(t('convo.event.sizes', { a: tokens(ev.pre), b: tokens(ev.post) }))
   if (ev.ms) said.push(t('convo.event.took', { n: Math.max(1, Math.round(ev.ms / 1000)) }))
   // (Each part whole on a line: a narrow screen breaks between them.)
@@ -2777,7 +2814,7 @@ function EventNote({ ev, idle }: { ev: ConvoEvent; idle?: boolean }) {
       <span className="convo-event-said">
         {said.map((x, i) => (
           <span key={i} className="convo-event-part">
-            {i > 0 && ' · '}
+            {i > 0 && t(i === 1 ? 'convo.event.sepFirst' : 'convo.event.sepNext')}
             {x}
           </span>
         ))}
@@ -2785,6 +2822,10 @@ function EventNote({ ev, idle }: { ev: ConvoEvent; idle?: boolean }) {
     </p>
   )
 }
+
+// A recap as Claude Code writes it, without its closing word on turning
+// recaps off ("(disable recaps in /config)"): a setting of its terminal.
+export const recapText = (s: string) => s.replace(/\s*\((?:disable|turn off)[^()]*\/config\)\.?\s*$/i, '').trim()
 
 // (The conversation's terminal, for a line that sends one there.)
 const ShowTerminal = createContext<(() => void) | undefined>(undefined)
@@ -3132,11 +3173,19 @@ function Work({ it, open, onToggle, onCopy }: { it: Extract<Item, { kind: 'work'
   // While a step is under way, the line says it (what it runs, for how long);
   // the counts come back once it is done.
   const since = busy && partTime.has(busy) ? ms(partTime.get(busy)) : 0
+  // (Under way while the agent is not at work: it waits for the person, to
+  // be let run it or to be answered — not running, not for that long.)
+  const asks = !!busy && !it.moving
   return (
     <div className="convo-work" data-work={it.key}>
       <button type="button" className="convo-work-head" aria-expanded={open} onClick={() => onToggle(it.key, !open)} title={isTouchOnly ? undefined : t(open ? (mac ? 'convo.foldHint' : 'convo.foldHintPlain') : mac ? 'convo.openHint' : 'convo.openHintPlain')}>
         <ChevronRight size={15} className="convo-chev" aria-hidden="true" />
-        {busy ? (
+        {busy && asks ? (
+          <span className="convo-work-text is-live is-asking">
+            <span className="convo-asking-text">{waitText(busy.tool)}</span>
+            {since > 0 && now >= since && <span className="convo-live-time">{t('convo.waitedFor', { d: duration(now - since) })}</span>}
+          </span>
+        ) : busy ? (
           <span className="convo-work-text is-live">
             <span className="convo-shimmer">{busy.tool ? liveText(busy.tool) : t('convo.live.thinking')}</span>
             {since > 0 && now >= since && <span className="convo-live-time">{duration(now - since)}</span>}
@@ -3145,7 +3194,12 @@ function Work({ it, open, onToggle, onCopy }: { it: Extract<Item, { kind: 'work'
           <span className={'convo-work-text' + (thought ? ' is-thought' : '')}>
             {head || sum}
             {thought && <span className="convo-work-sum"> · {firstLine(thought.text ?? '')}</span>}
-            {failed > 0 && <span className="convo-failed">{t('convo.failed', { n: failed })}</span>}
+            {failed > 0 && (
+              <>
+                {t('convo.sep')}
+                <span className="convo-failed is-inline">{t('convo.failed', { n: failed })}</span>
+              </>
+            )}
           </span>
         )}
       </button>
@@ -3241,6 +3295,17 @@ function stdinSaid(s: NonNullable<ConvoTool['stdin']>): { verb: string; obj: str
   if (s.keys?.length) return { verb: t('convo.stdin.press'), obj: s.keys.join(' ') + at }
   if (s.chars) return { verb: t('convo.stdin.type'), obj: t('convo.stdin.chars', { n: s.chars }) + at }
   return { verb: t('convo.stdin.look'), obj: t('convo.stdin.output') + at }
+}
+
+// What a step not come back says while the agent waits for the person:
+// leave to run it, or an answer.
+function waitText(tool?: ConvoTool): string {
+  if (!tool) return t('convo.status.blocked')
+  // (A command: the command itself, as while it runs — that is what is to be let run.)
+  const cmd = firstLine((tool.detail ?? '').replace(/^cd\s+(?:"[^"]*"|'[^']*'|[^\s&;|]+)\s*&&\s*/, ''))
+  const o = tool.stdin ? '' : verbOf(tool.name) === 'cmd' && cmd ? cmd : object(tool).text
+  const ask = verbOf(tool.name) === 'ask' || tool.name === 'AskUserQuestion' || tool.name === 'ExitPlanMode'
+  return o ? t(ask ? 'convo.waitAnswer' : 'convo.waitApprove', { s: o }) : t('convo.status.blocked')
 }
 
 function liveText(tool: ConvoTool): string {
@@ -3543,4 +3608,4 @@ function Diff({ old, new: nw }: { old: string; new: string }) {
   )
 }
 
-export { listOrder, type ConvoListRow }
+export { listOrder, type ConvoListRow, duration, when }

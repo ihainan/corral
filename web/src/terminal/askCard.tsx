@@ -288,7 +288,8 @@ export function AskPanel({ call, index, shown, target, drive, busy, alive, lead 
                   setTicks(next)
                 }}
               >
-                <span className="convo-ask-key">{ask.multi ? (ticked.has(n) ? '✓' : '') : n}</span>
+                {/* (A number is a key to press: not shown on a touch screen, see CSS. A tick is what is chosen.) */}
+                <span className={'convo-ask-key' + (ask.multi ? '' : ' is-num')} aria-hidden={ask.multi ? undefined : true}>{ask.multi ? (ticked.has(n) ? '✓' : '') : n}</span>
                 <span className="convo-ask-what">
                   <span className="convo-ask-label">{o.label}</span>
                   {o.description && <span className="convo-ask-desc">{o.description}</span>}
@@ -418,7 +419,7 @@ function Choices({ digest, options, busy, onPick }: { digest: string; options: S
               onPick(o.n)
             }}
           >
-            <span className="convo-ask-key">{o.n}</span>
+            <span className="convo-ask-key is-num" aria-hidden="true">{o.n}</span>
             <span className="convo-ask-what" title={c.original || undefined}>
               <span className="convo-ask-label">{c.text}</span>
               {lasts && <span className="convo-ask-desc is-lasting">{t(asked === o.n ? 'convo.askConfirm' : lasts === 'rule' ? 'convo.askRule' : 'convo.askMode')}</span>}
