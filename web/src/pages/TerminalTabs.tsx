@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Bot, Check, MessageCircleReply, Plus, Search } from 'lucide-react'
+import { Activity, Bot, Check, MessageCircleReply, Plus, Search } from 'lucide-react'
 import { AgentsChat } from './AgentsChat'
 import { api, authGen, choiceOf, probeBootstrap, type Host, type OpenChoice, type SessionInfo } from '../api'
 import { agentKey, sessionWhich } from '../terminal/sessionName'
@@ -756,7 +756,7 @@ function TabBar(p: { tabs: SessionInfo[]; current: string; infos: Record<string,
         const name = s.host_name ? (
           <>
             <span className="term-tab-host">{s.host_name}</span>
-            <span className="term-tab-which">{' · ' + which(s)}</span>
+            <span className="term-tab-which">{'\u00a0· ' + which(s)}</span>
           </>
         ) : (
           t('term.connecting')
@@ -784,13 +784,21 @@ function TabBar(p: { tabs: SessionInfo[]; current: string; infos: Record<string,
             onClick={() => !dragged() && s.id !== p.current && navigate('/t/' + s.id, true)}
           >
             {/* (A connection's trouble before agents at work: it is the one to see to.) */}
-            {!quiet ? <span className={'term-tab-dot ' + info.status} aria-hidden="true" /> : working > 0 && <span className="term-tab-working" role="img" aria-label={t('herdr.working', { n: working })} />}
+            {!quiet && <span className={'term-tab-dot ' + info.status} aria-hidden="true" />}
             <span className="term-tab-name">{name}</span>
             {s.title && <span className="term-tab-title">{s.title}</span>}
             {waiting > 0 && (
               <span className="term-tab-count term-tab-wait" aria-label={t('herdr.waiting', { n: waiting })}>
                 <MessageCircleReply size={13} strokeWidth={2.25} aria-hidden="true" />
                 {waiting}
+              </span>
+            )}
+            {/* Agents at work: a count as the others are, not a turning ring
+                that reads as the tab still loading (ux1101 T28). */}
+            {working > 0 && (
+              <span className="term-tab-count term-tab-busy" aria-label={t('herdr.working', { n: working })}>
+                <Activity size={13} strokeWidth={2.25} aria-hidden="true" />
+                {working}
               </span>
             )}
             {/* (Finished and not looked at yet, when none waits.) */}

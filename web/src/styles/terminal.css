@@ -336,7 +336,7 @@ html.kb-open .keybar { padding-bottom: 6px; }
 }
 /* What the bar says of the session in front (recorded, watched, slow): by
    its icons, in the quiet colour, apart from the tabs (ux1101 T26). */
-.term-tab-note { flex: 0 1 auto; max-width: 40%; min-width: 0; margin: 0 6px 0 12px; }
+.term-tab-note { flex: none; max-width: 40%; min-width: 0; margin: 0 6px 0 12px; } /* (the tabs give way, not its words) */
 .term-tab {
   display: flex; align-items: center; gap: 6px; flex: none; min-width: 0; max-width: 320px; height: 30px; padding: 0 12px;
   border: 0; border-radius: 8px; background: none; color: var(--term-fg-3); font: 500 13px/1 var(--font-ui); cursor: pointer;
@@ -357,7 +357,7 @@ html.kb-open .keybar { padding-bottom: 6px; }
 .term-tab-name { display: flex; min-width: 0; flex: 0 1 auto; white-space: nowrap; }
 /* A long name is cut, its host kept longest: the title gives way first,
    then the session's name, then the host (ux1101 T27). */
-.term-tab-host { flex: 0 1 auto; min-width: 2.5em; overflow: hidden; text-overflow: ellipsis; }
+.term-tab-host { flex: 0 0 auto; max-width: 100%; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .term-tab-which { flex: 0 1000 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .term-tab-title { flex: 0 100000 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--term-fg-3); font-weight: 400; }
 /* Agents waiting for you, and finished ones not looked at yet: an icon says
@@ -365,17 +365,10 @@ html.kb-open .keybar { padding-bottom: 6px; }
 .term-tab-count { flex: none; display: inline-flex; align-items: center; gap: 2px; font: 600 12px/1 var(--font-ui); font-variant-numeric: tabular-nums; }
 .term-tab-wait { color: var(--term-warn-text); }
 .term-tab-done { color: var(--term-ok-text); }
+.term-tab-busy { color: var(--term-fg-2); }
 .term-tab-dot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--term-fg-3); }
 .term-tab-dot.s-connecting, .term-tab-dot.s-reconnecting, .term-tab-dot.s-slow { background: var(--term-warn-text); }
 .term-tab-dot.s-offline, .term-tab-dot.s-full { background: var(--term-danger-text); }
-/* Agents at work in the tab's session: a ring that turns, in the colour the
-   conversation view gives working. */
-.term-tab-working {
-  flex: none; width: 11px; height: 11px; border-radius: 50%; box-sizing: border-box;
-  border: 2px solid color-mix(in srgb, var(--term-fg-3) 45%, transparent);
-  border-top-color: var(--term-accent-text); border-right-color: var(--term-accent-text); animation: convo-spin 0.9s linear infinite;
-}
-@media (prefers-reduced-motion: reduce) { .term-tab-working { animation: none; border-color: var(--term-accent-text); } }
 .term-tab-new { flex: none; width: 30px; height: 30px; color: var(--term-fg-2); }
 /* (A finger's: 40 high in the 44 bar — ux1101 T31.) */
 @media (pointer: coarse) { .term-tab, .term-tab-new { height: 40px; } .term-tab-new { width: 40px; } }
@@ -400,7 +393,7 @@ html.kb-open .keybar { padding-bottom: 6px; }
 }
 .new-tab-host:hover:not(:disabled), .new-tab-host:focus-visible { background: var(--bg-hover); }
 /* The one Enter opens (ux1101 T32). */
-.new-tab-host.is-sel { background: var(--bg-hover); }
+.new-tab-host.is-sel { background: var(--bg-active); }
 .new-tab-host:disabled { cursor: default; }
 .new-tab-name { font-weight: 600; font-size: 14px; white-space: nowrap; }
 .new-tab-addr { min-width: 0; flex: 1; color: var(--fg-3); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -412,6 +405,8 @@ html.kb-open .keybar { padding-bottom: 6px; }
 .herdr-count { color: var(--term-warn-text); font: 600 12px/1 var(--font-ui); font-variant-numeric: tabular-nums; }
 
 .menu-icon-space { width: 16px; flex: none; }
+/* (As wide as a sheet's icons, 18: a row with none lines up with one with a tick — ux1101 T24.) */
+.sheet-list .menu-icon-space { width: 18px; }
 
 /* Floating layers over a dark terminal use the dark tokens whatever the page theme. */
 html.term-dark .overlay, html.term-dark .menu, html.term-dark .toast {
@@ -1349,7 +1344,7 @@ button.convo-running-what { padding: 0; text-align: left; }
 
 /* Port forwarding dialog: its sections' titles a step under the dialog's,
    its words as the invite dialog's (ux1101 T42, T43). */
-.dialog.ports-dialog .lead { text-wrap: pretty; }
+.dialog.ports-dialog .lead { text-wrap: balance; }
 .dialog.ports-dialog .section h2 { font-size: 13px; line-height: 18px; font-weight: 600; color: var(--fg-2); }
 .ports-sub { margin-top: 8px; font-size: 13px; line-height: 18px; font-weight: 600; color: var(--fg-2); }
 /* Watching: "Revoke", a word, not a cross that reads as "hide" (ux1101 T46). */
@@ -1357,3 +1352,8 @@ button.convo-running-what { padding: 0; text-align: left; }
 /* Terminal schemes: the dialog clear of the top bar, whose tabs stay whole (ux1101 T39). */
 .dialog.scheme-dialog { max-height: calc(var(--vv-h, 100dvh) - 112px); }
 @media (max-width: 520px) { .sheet-mode .dialog.scheme-dialog { max-height: calc(var(--vv-h, 100dvh) - 56px - env(safe-area-inset-top, 0px)); } }
+/* A host's changed key: the fingerprint expected over the one presented,
+   wrapped at the same columns (ux1101 T51). */
+.hostkey-compare { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px 12px; margin: 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--r); }
+.hostkey-compare dt { font-size: 13px; color: var(--fg-2); white-space: nowrap; }
+.hostkey-compare dd { margin: 0; font-size: 13px; line-height: 18px; word-break: break-all; }
