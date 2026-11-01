@@ -174,7 +174,7 @@ export interface MenuItem {
 // Sent on the window to close every open menu (a terminal tab sent to the back).
 export const CLOSE_MENUS = 'corral:close-menus'
 
-export function Menu(props: { label: string; button: (open: boolean, toggle: (e: React.MouseEvent<HTMLElement>) => void) => ReactNode; items: () => (MenuItem | null)[]; note?: string; onOpenChange?: (open: boolean) => void }) {
+export function Menu(props: { label: string; heading?: string; button: (open: boolean, toggle: (e: React.MouseEvent<HTMLElement>) => void) => ReactNode; items: () => (MenuItem | null)[]; note?: string; onOpenChange?: (open: boolean) => void }) {
   const [anchor, setAnchor] = useState<DOMRect | null>(null)
   const [sheet, setSheet] = useState(false)
   const trigger = useRef<HTMLElement | null>(null)
@@ -191,7 +191,7 @@ export function Menu(props: { label: string; button: (open: boolean, toggle: (e:
   return (
     <>
       {props.button(!!anchor, toggle)}
-      {anchor && <MenuLayer label={props.label} anchor={anchor} sheet={sheet} trigger={triggerOf} items={props.items().filter(Boolean) as MenuItem[]} note={props.note} onClose={close} />}
+      {anchor && <MenuLayer label={props.label} heading={props.heading} anchor={anchor} sheet={sheet} trigger={triggerOf} items={props.items().filter(Boolean) as MenuItem[]} note={props.note} onClose={close} />}
     </>
   )
 }
@@ -200,8 +200,10 @@ export function Menu(props: { label: string; button: (open: boolean, toggle: (e:
 // a right click): below a button's rect, or from a point (at: the mouse's,
 // a zero rect there); a bottom sheet instead where sheet. trigger: the
 // button it belongs to, looked up when wanted (focus goes back to it; a
-// press on it is not "outside").
-export function MenuLayer(props: { label: string; anchor: DOMRect; at?: 'below' | 'point'; sheet: boolean; trigger: () => HTMLElement | null; items: MenuItem[]; note?: string; onClose: () => void }) {
+// press on it is not "outside"). heading: a line over its items in the bottom
+// sheet, what they are of (a file's name, "switch session"): a popover shows
+// beside what opened it, a sheet does not (ux1101 T22).
+export function MenuLayer(props: { label: string; heading?: string; anchor: DOMRect; at?: 'below' | 'point'; sheet: boolean; trigger: () => HTMLElement | null; items: MenuItem[]; note?: string; onClose: () => void }) {
   const { onClose } = props
   useEffect(() => {
     window.addEventListener(CLOSE_MENUS, onClose)
@@ -210,6 +212,7 @@ export function MenuLayer(props: { label: string; anchor: DOMRect; at?: 'below' 
   return props.sheet ? (
     <Dialog title={props.label} onClose={onClose} hideTitle>
       <div className="handle" aria-hidden="true" />
+      {props.heading && <div className="sheet-heading">{props.heading}</div>}
       {props.note && <div className="menu-note">{props.note}</div>}
       <div className="sheet-list" role="menu">
         {props.items.map((it, i) => <MenuEntry key={i} item={it} close={onClose} />)}
