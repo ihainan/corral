@@ -2606,6 +2606,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
         ) : (
         <Menu
           label={t('term.switchSession')}
+          heading={t('term.switchSession')}
           items={switcherItems}
           note={sessionsFailed ? t('term.sessionsFailed') : sessions === null ? t('term.sessionsLoading') : undefined}
           button={(open, toggle) => (
@@ -2643,6 +2644,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
           // it is open moves nothing under the pointer or the focus.
           <Menu
             label={t('herdr.waitingMenu')}
+            heading={t('herdr.waitingMenu')}
             onOpenChange={setWaitingOpen}
             items={() => waitingShown.current.map(({ a, ws }) => ({ label: [ws && ws !== '~' ? ws : '', a.agent, a.title].filter(Boolean).join(' · '), onSelect: () => setReplyTo(a) }))}
             button={(open, toggle) => (

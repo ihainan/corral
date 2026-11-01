@@ -516,6 +516,7 @@ export function FilesDialog({ sessionId, start, onPath, onInsert, onClose }: Pro
                   <EntryButton entry={e} items={() => items(e)} onOpen={() => void load(join(path!, e.name))} />
                   <Menu
                     label={e.name}
+                    heading={e.name}
                     items={() => items(e)}
                     button={(open, toggle) => (
                       <button className="icon-btn files-more" aria-expanded={open} aria-label={t('files.actionsFor', { name: e.name })} onClick={toggle}>
@@ -585,6 +586,7 @@ function EntryButton({ entry: e, items, onOpen }: { entry: FileEntry; items: () 
   return (
     <Menu
       label={e.name}
+      heading={e.name}
       items={items}
       button={(open, toggle) => (
         <button className="files-entry" aria-expanded={open} aria-haspopup="menu" onClick={toggle}>
