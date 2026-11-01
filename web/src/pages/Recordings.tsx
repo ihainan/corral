@@ -1,15 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
-import { ChevronLeft, Download, Film, MoreHorizontal, Pause, Play, Trash2 } from 'lucide-react'
+import { ArrowLeft, Download, Film, MoreHorizontal, Pause, Play, Trash2 } from 'lucide-react'
 import { api, errorText, type Recording } from '../api'
-import { relTime, t } from '../i18n'
+import { t } from '../i18n'
 import { linkHandler, navigate } from '../router'
-import { useSession } from '../app'
+import { PhoneBack, useSession } from '../app'
 import { termScheme } from '../prefs'
 import { chromeVars } from '../terminal/themes'
 import { formatSize } from '../terminal/FilesDialog'
 import { Confirm, EmptyState, LoadError, Menu, useToast } from '../components/ui'
+import { durationText, whenText } from './pageText'
 
 const FONT_STACK = "'JetBrains Mono', 'SFMono-Regular', Menlo, Consolas, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', monospace"
 
@@ -64,6 +65,7 @@ export function RecordingsPage() {
   return (
     <main className="page">
       <div className="page-head">
+        <PhoneBack />
         <h1>{t('rec.title')}</h1>
       </div>
       {list && (
@@ -89,11 +91,11 @@ export function RecordingsPage() {
                 <a className="row-main" href={href} onClick={linkHandler(href)}>
                   <Film className="row-icon" size={18} strokeWidth={1.75} />
                   <span className="row-title">{r.host_name}</span>
-                  <span className="row-meta" title={new Date(r.started_at * 1000).toLocaleString()}>{relTime(r.started_at)}</span>
+                  <span className="row-meta" title={new Date(r.started_at * 1000).toLocaleString()}>{whenText(r.started_at)}</span>
                   <span className="row-sub">
-                    {admin && <span className="mono">{r.owner_name}</span>}
-                    {admin && ' · '}
-                    {live ? t('rec.live') : formatDuration(dur)}
+                    {admin && r.owner_name + ' · '}
+                    {/* (A length, in words: "13:10:24" reads as a time of day — ux1101 PG-44.) */}
+                    {live ? t('rec.live') : durationText(dur)}
                     {!live && r.bytes >= 0 && ' · ' + formatSize(r.bytes)}
                     {r.truncated && <span className="warn-text">{' · ' + t('rec.truncated')}</span>}
                     {r.gaps && <span className="warn-text">{' · ' + t('rec.gaps')}</span>}
@@ -365,12 +367,16 @@ export function RecordingPlayerPage({ id }: { id: string }) {
     if (batch) sc.write(batch)
     shown.current = i
   }
-  // After a new terminal was made for going back, catch it up.
+  // After a new terminal was made for going back, catch it up; a first one
+  // is brought to where play stands (the start: what is on the screen at 0
+  // seconds is drawn before play — ux1101 PG-02).
   useEffect(() => {
     if (screen.current && pendingTo.current !== null) {
       const to = pendingTo.current
       pendingTo.current = null
       show(to)
+    } else if (screen.current && shown.current === 0) {
+      show(posRef.current)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [screenGen, cast])
@@ -438,7 +444,7 @@ export function RecordingPlayerPage({ id }: { id: string }) {
     <div className={'term-root player-root ' + (scheme.dark ? 'dark' : 'light')} style={chromeVars(scheme) as React.CSSProperties}>
       <header className="term-bar">
         <button className="icon-btn" onClick={() => navigate('/recordings')} aria-label={t('common.back')} title={t('common.back')}>
-          <ChevronLeft size={20} />
+          <ArrowLeft size={20} />
         </button>
         <div className="player-title">
           <span className="term-host-name">{meta?.host_name ?? ''}</span>
@@ -464,6 +470,7 @@ export function RecordingPlayerPage({ id }: { id: string }) {
             <div className="player-screen" ref={hostEl} key={screenGen} onClick={toggle} />
           </div>
         )}
+        {cast && !playing && pos === 0 && <p className="hint player-note">{t('rec.startHint')}</p>}
         {marker && <p className="hint player-note">{marker === 'truncated' ? t('rec.truncatedNote') : t('rec.gapsNote')}</p>}
       </div>
       <div className="player-controls">

@@ -110,7 +110,9 @@ code, .mono { font-family: var(--font-mono); font-size: 0.9em; }
     gap: 2px;
   }
 }
-@media (min-width: 1024px) {
+/* The whole sidebar, names and all, from an iPad held upright (820) up: an
+   icon's title is not shown on a touch screen (ux1101 PG-33). */
+@media (min-width: 820px) {
   .shell { grid-template-columns: var(--sidebar) minmax(0, 1fr); }
   .sidebar { padding-left: 12px; padding-right: 12px; }
 }
@@ -128,7 +130,7 @@ code, .mono { font-family: var(--font-mono); font-size: 0.9em; }
 .nav-item[aria-current='page'] svg { color: var(--fg); }
 .sidebar-foot { margin-top: auto; display: flex; align-items: center; gap: 4px; padding: 8px 0 0 8px; border-top: 1px solid var(--line); }
 .sidebar-user { flex: 1; min-width: 0; font-size: 13px; color: var(--fg-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-@media (min-width: 760px) and (max-width: 1023.98px) {
+@media (min-width: 760px) and (max-width: 819.98px) {
   .sidebar .label, .nav-group, .sidebar-user { display: none; }
   .brand { padding: 0; justify-content: center; }
   .nav-item { justify-content: center; padding: 0; height: 40px; }
@@ -152,8 +154,10 @@ code, .mono { font-family: var(--font-mono); font-size: 0.9em; }
   .content { padding-bottom: calc(49px + env(safe-area-inset-bottom, 0px)); }
 }
 
+/* (A list no wider than it reads well: not 1130 points of row with its time
+   far off at the right — ux1101 PG-37.) */
 .page {
-  width: 100%; max-width: calc(1200px + 2 * var(--pad-x));
+  width: 100%; max-width: calc(960px + 2 * var(--pad-x));
   padding: calc(env(safe-area-inset-top, 0px) + 24px) max(var(--pad-x), env(safe-area-inset-right, 0px)) 48px max(var(--pad-x), env(safe-area-inset-left, 0px));
   display: flex; flex-direction: column; gap: 24px;
 }
@@ -162,6 +166,12 @@ code, .mono { font-family: var(--font-mono); font-size: 0.9em; }
 .page-head { display: flex; align-items: center; gap: 8px; min-height: 36px; flex-wrap: wrap; }
 .page-head h1 { font-size: 20px; line-height: 28px; font-weight: 600; }
 .page-head > .icon-btn:first-child { margin-left: -10px; }
+/* Back to Settings, on phones only (where these pages are opened from it). */
+.page-head > .phone-back { display: none; }
+@media (max-width: 759.98px) { .page-head > .phone-back { display: inline-grid; } }
+/* (The rule under a section's heading, as above a group of settings, where
+   the section begins with words instead: ux1101 PG-21.) */
+.section-ruled > h2 + * { border-top: 1px solid var(--line); padding-top: 8px; }
 .section { display: flex; flex-direction: column; gap: 8px; }
 .section > h2 { font-size: 15px; line-height: 22px; font-weight: 600; color: var(--fg); }
 @media (pointer: coarse) { .section > h2 { font-size: 17px; line-height: 24px; } }
@@ -237,9 +247,10 @@ textarea.input { height: auto; min-height: var(--h-input); padding: 8px 12px; li
 .seg button:hover { color: var(--fg); }
 .scheme-slot { margin: 12px 0 4px; }
 .scheme-slot button { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.seg button[aria-pressed='true'] { background: var(--bg); color: var(--fg); box-shadow: 0 0 0 1px var(--line), 0 1px 2px rgba(16, 18, 24, 0.06); }
-:root[data-theme='dark'] .seg button[aria-pressed='true'] { background: var(--bg-active); }
-@media (prefers-color-scheme: dark) { :root:not([data-theme='light']) .seg button[aria-pressed='true'] { background: var(--bg-active); } }
+.seg button[aria-pressed='true'] { background: var(--bg); color: var(--fg); font-weight: 600; box-shadow: 0 0 0 1px var(--line), 0 1px 2px rgba(16, 18, 24, 0.06); }
+/* (In the dark the chosen one framed as well as lighter: the two greys alone are close — ux1101 PG-54.) */
+:root[data-theme='dark'] .seg button[aria-pressed='true'] { background: var(--bg-active); box-shadow: 0 0 0 1px var(--line-strong); }
+@media (prefers-color-scheme: dark) { :root:not([data-theme='light']) .seg button[aria-pressed='true'] { background: var(--bg-active); box-shadow: 0 0 0 1px var(--line-strong); } }
 .form-actions { display: flex; gap: 8px; justify-content: flex-end; }
 @media (pointer: coarse) {
   .form-actions {
@@ -270,6 +281,10 @@ textarea.input { height: auto; min-height: var(--h-input); padding: 8px 12px; li
   padding: 10px 8px; min-height: var(--row-min); text-align: left; background: none; border: 0; border-radius: var(--r); cursor: pointer; color: inherit;
 }
 .row-main.no-icon { grid-template-columns: minmax(0, 1fr) auto; }
+/* A row that opens in place (a key's whole public key): a chevron at its end, turned when open. */
+.row-main.has-chev { grid-template-columns: 18px minmax(0, 1fr) auto 16px; }
+.row-main.has-chev > .row-chev { grid-column: 4; grid-row: 1 / span 2; align-self: center; color: var(--fg-3); transition: transform 0.15s var(--ease); }
+.row-main.has-chev[aria-expanded='true'] > .row-chev { transform: rotate(90deg); }
 a.row-main:hover { text-decoration: none; }
 .row-main:hover { background: var(--bg-hover); }
 div.row-main { cursor: default; }
@@ -324,6 +339,11 @@ a.setting:hover { text-decoration: none; background: var(--bg-hover); }
 .empty h2 { font-size: 15px; line-height: 22px; font-weight: 600; }
 .empty p { color: var(--fg-2); max-width: 44ch; }
 .empty .btn { margin-top: 10px; }
+/* (A button's icon in an empty state is the button's, not the state's grey icon.) */
+.empty .btn svg { margin-bottom: 0; color: var(--fg-2); }
+.empty .btn-primary svg { color: currentColor; }
+.empty .btn-row .btn { margin-top: 0; }
+.empty .btn-row { margin-top: 10px; }
 .inline-error { color: var(--danger); font-size: 13px; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
 .loading { color: var(--fg-3); font-size: 13px; padding: 12px 0; }
 .quiet-note { color: var(--fg-3); font-size: 12px; }
@@ -418,7 +438,10 @@ html.term-mode .toasts { top: calc(env(safe-area-inset-top, 0px) + 52px); bottom
 .audit-item summary { list-style: none; cursor: pointer; display: flex; flex-direction: column; gap: 2px; }
 .audit-item summary::-webkit-details-marker { display: none; }
 .audit-item .top { display: flex; gap: 8px; align-items: baseline; }
-.audit-item .action { font-family: var(--font-mono); font-size: 12.5px; flex: 1; }
+.audit-item .action { flex: 1; min-width: 0; font-weight: 500; }
+/* (It opens: said by a chevron, turned when open — ux1101 PG-06.) */
+.audit-chev { flex: none; align-self: center; color: var(--fg-3); transition: transform 0.15s var(--ease); }
+.audit-item[open] .audit-chev { transform: rotate(90deg); }
 .audit-item pre { margin: 6px 0 0; font-family: var(--font-mono); font-size: 12px; color: var(--fg-2); white-space: pre-wrap; word-break: break-all; }
 
 .port-share { height: 30px; padding: 0 8px; font-size: 13px; width: auto; justify-self: start; }
@@ -453,6 +476,8 @@ label.setting { cursor: pointer; }
 
 /* Host form: advanced section */
 details.adv > summary { cursor: pointer; color: var(--fg-2); font-size: 13px; font-weight: 500; list-style: none; display: inline-flex; gap: 6px; align-items: center; }
+/* (A finger's height on touch screens: ux1101 PG-20.) */
+@media (pointer: coarse) { details.adv > summary { min-height: 44px; } }
 details.adv > summary::-webkit-details-marker { display: none; }
 details.adv > summary svg { transition: transform 0.15s var(--ease); color: var(--fg-3); }
 details.adv[open] > summary svg { transform: rotate(90deg); }
@@ -735,6 +760,8 @@ details.adv > .form { margin-top: 16px; }
   .live-grid:has(> :only-child) { grid-template-columns: minmax(0, 1fr); }
   .live-info { padding: 8px 40px 8px 10px; }
   .live-close { right: 2px; bottom: 6px; }
+  /* (Narrow cards: what the agents are doing in two lines, not cut after the first words — ux1101 PG-35.) */
+  .live-sub { white-space: normal; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow-wrap: anywhere; }
 }
 .share-add { display: flex; gap: 8px; }
 .share-add .input { flex: 1; min-width: 0; }

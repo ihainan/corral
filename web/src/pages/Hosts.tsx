@@ -173,7 +173,8 @@ export function HostsPage() {
                     <Server className="row-icon" size={18} strokeWidth={1.75} />
                     <span className="row-title">{h.name}</span>
                     <span className="row-meta">
-                      {busyHost === h.id ? t('hosts.connecting') : h.last_connected_at ? relTime(h.last_connected_at) : ''}
+                      {/* ("8 天前连接": which time it is — ux1101 PG-11.) */}
+                      {busyHost === h.id ? t('hosts.connecting') : h.last_connected_at ? t('hosts.lastConnected', { when: relTime(h.last_connected_at) }) : ''}
                     </span>
                     <span className="row-sub" id={'hs-' + h.id}>
                       {h.username}@{h.address}
