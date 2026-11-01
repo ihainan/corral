@@ -1,4 +1,4 @@
-import { Fragment, type ReactNode } from 'react'
+import { Fragment, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { Code } from './Code'
 
 // A small Markdown renderer for an agent's answers in the conversation view:
@@ -88,9 +88,7 @@ function blocks(lines: string[], copy: Copy, depth: number): ReactNode[] {
               )}
             </div>
           )}
-          <pre>
-            <Code text={body} lang={lang || undefined} />
-          </pre>
+          <CodePre text={body} lang={lang || undefined} />
         </div>,
       )
       continue
@@ -281,4 +279,30 @@ function inline(s: string): ReactNode[] {
   }
   if (pos < s.length) out.push(s.slice(pos))
   return out
+}
+
+// A code block's lines: where they run past its right edge, that edge
+// fades, so a line cut there is seen to go on (it scrolls sideways), not
+// taken for its end.
+function CodePre({ text, lang }: { text: string; lang?: string }) {
+  const ref = useRef<HTMLPreElement>(null)
+  const [more, setMore] = useState(false)
+  useLayoutEffect(() => {
+    const el = ref.current
+    if (!el) return
+    const look = () => setMore(el.scrollWidth - el.scrollLeft - el.clientWidth > 2)
+    look()
+    el.addEventListener('scroll', look, { passive: true })
+    const ro = new ResizeObserver(look)
+    ro.observe(el)
+    return () => {
+      el.removeEventListener('scroll', look)
+      ro.disconnect()
+    }
+  }, [text])
+  return (
+    <pre ref={ref} className={more ? 'is-more' : undefined}>
+      <Code text={text} lang={lang} />
+    </pre>
+  )
 }

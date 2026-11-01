@@ -121,6 +121,15 @@ const whereOf = (e: Entry, hosts: number) => {
 }
 const hostCount = (entries: Entry[]) => new Set(entries.map((e) => e.s.host_name)).size
 
+// An agent not named yet (no title from its log or its pane): by the folder
+// it runs in, before its program's name — several "claude" are not told
+// apart. Not a home folder: its name is the account's, not the work's.
+export const dirName = (cwd?: string): string => {
+  const p = (cwd ?? '').replace(/\/+$/, '')
+  if (!p || /^(?:\/home\/[^/]+|\/Users\/[^/]+|\/root)$/.test(p)) return ''
+  return p.slice(p.lastIndexOf('/') + 1)
+}
+
 // What a row says of an entry, on either list (said: its title, as the log
 // or its pane has it). The person's own name for it goes first, where there
 // is one: a workspace they named says what the work is better than the name
@@ -644,7 +653,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       return { title: convo.title || convo.bind.title, status: asks ? 'blocked' : st === 'busy' ? 'working' : st === 'idle' || dialog ? 'idle' : 'unknown', dialog, cmds: st && st !== 'waiting' ? convo.bgCmds : undefined, program: convo.bind.agent }
     }
     if (!row) return null
-    const title = (convo.bind?.pane === row.a.pane_id && convo.title) || paneTitle(row.a.title)
+    const title = (convo.bind?.pane === row.a.pane_id && convo.title) || paneTitle(row.a.title) || dirName(row.a.cwd)
     // (herdr's name for a workspace at home, "~": nothing to tell)
     // (Its turn over, with subagents out or that being read for: the thread
     // is of a turn that ended, whatever the list says of the agent.)
@@ -739,6 +748,10 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     [viaConvo, herdr, cur.s.persistence, sid, row?.a.pane_id, row?.a.agent, convo.bind?.pane, convo.bind?.pid, convo.bind?.start, convo.bind?.session, convo.bind?.agent],
   )
   const working = agent?.status === 'working'
+  // (Answered from the card: till the agent's state moves on — read every few
+  // seconds — the page says so, not "answer the question above".)
+  const [answered, setAnswered] = useState(false)
+  if (answered && agent?.status !== 'blocked') setAnswered(false)
   const bindKey = convo.bind ? `${convo.bind.pane} ${convo.bind.pid} ${convo.bind.start} ${convo.bind.session}` : ''
   // (A Codex's first message goes before its session is known: sent to the
   // zero one, it is of the session the same process then has.)
@@ -769,7 +782,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       }
       if (e.row) {
         const r = e.row
-        const said = (current && agent?.title) || keptTitle(titles, e) || paneTitle(r.a.title) || r.a.agent
+        const said = (current && agent?.title) || keptTitle(titles, e) || paneTitle(r.a.title) || dirName(r.a.cwd) || r.a.agent
         return { key: e.key, ...labelOf(e, said, hosts), program: r.a.agent, status: current && agent && !r.bg ? agent.status : r.status, bg: r.lost ? undefined : r.bg, cmds: cmdsOf(r), since: r.lost ? undefined : r.bg ? r.a.bg_since : r.a.since, current, pinned: pinAt(e.key), onPick: () => onPick(e), menu: () => rowMenu.current(e) }
       }
       const title = (current && agent?.title) || keptTitle(titles, e) || `${e.s.host_name} · ${sessionWhich(e.s, all)}`
@@ -1332,13 +1345,14 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       el.selectionStart = el.selectionEnd = s.length
     })
   }
-  // (Its name, short: a placeholder of one line, however long the name.)
-  const short = (s?: string) => (s && [...s].length > 24 ? [...s].slice(0, 24).join('').trimEnd() + '…' : s)
-  const to = agent ? [short(agent.title), agent.where].filter((x) => x && x !== '~').join(' · ') : ''
+  const to = agent ? [agent.title, agent.where].filter((x) => x && x !== '~').join(' · ') : ''
   // (A Codex at work takes a message into the turn under way, as its own
   // Enter does: it says so.)
   const steers = convo.bind?.agent === 'codex' && agent?.status === 'working'
-  const placeholder = suggestion ?? (to ? t(steers ? 'convo.toPlaceholderSteer' : 'convo.toPlaceholder', { name: to }) : t('term.composerPlaceholder'))
+  // (Its name cut to what the box's width holds: a placeholder of one line,
+  // however long the name, and all of it where there is room.)
+  const fieldW = useWidth(field)
+  const placeholder = suggestion ?? (to ? fitLine(field.current, fieldW, (name) => t(steers ? 'convo.toPlaceholderSteer' : 'convo.toPlaceholder', { name }), to) : t('term.composerPlaceholder'))
   useComposerFit(field, draft, placeholder)
   // Why it cannot send now, if it cannot.
   // (Waiting for an answer, a message's Enter could take an option of its
@@ -1469,7 +1483,8 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   const modEnter = isMac ? '⌘Return' : 'Ctrl+Enter'
   const sendKey = composerEnter === 'send' ? enterKey : modEnter
   const composer = (
-    <div className="composer">
+    // (A question over it: the box kept to a line, its tools back when it is typed in.)
+    <div className={'composer' + (waits && agent?.status === 'blocked' ? ' is-held' : '')}>
       {claudeCard.card && <CardNotice card={claudeCard.card} stale={claudeCard.stale} onPress={claudeCard.press} />}
       {completion.list}
       {up && (
@@ -1480,8 +1495,9 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
           </button>
         </div>
       )}
-      {/* (Why nothing can be sent now: over the box, where a phone shows it too) */}
-      {blocked && (
+      {/* (Why nothing can be sent now: over the box, where a phone shows it too;
+          answered from the card, the card says what goes on.) */}
+      {blocked && !(answered && agent?.status === 'blocked') && (
         <p className="agents-chat-why">
           {blocked}
           {blocked === t('agents.dialogOpen') && (
@@ -1679,7 +1695,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     { label: t('convo.showTerminal'), icon: <SquareTerminal size={16} />, onSelect: openTerminal },
     pinItem(cur.key),
     ...opsOf.map((o, i): MenuItem | null =>
-      bound ? { label: t(codex && o === 'clear' ? 'ops.clear.itemCodex' : `ops.${o}.item`), icon: OP_ICONS[o], separator: i === 0, disabled: !canOps, title: canOps ? undefined : t('ops.onlyIdle'), onSelect: () => convo.bind && setOp({ op: o, bind: convo.bind, key: bindKey }) } : null,
+      bound ? { label: t(codex && o === 'clear' ? 'ops.clear.itemCodex' : `ops.${o}.item`), icon: OP_ICONS[o], separator: i === 0, disabled: !canOps, title: canOps ? undefined : t('ops.onlyIdle'), hint: canOps || i < opsOf.length - 1 ? undefined : t(opsOf.length > 1 ? 'ops.onlyIdleGroup' : 'ops.onlyIdle'), onSelect: () => convo.bind && setOp({ op: o, bind: convo.bind, key: bindKey }) } : null,
     ),
     canClose ? { label: t('agents.close'), icon: <Power size={16} />, danger: true, separator: true, onSelect: () => setClosing(cur) } : null,
   ]
@@ -1712,7 +1728,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       ask={
         waits && replyTo ? (
           // (One a pane, and a process in it: nothing of another's carries over. Not tied to a terminal: no size to wait for.)
-          <InlineReply key={replyTo.key} target={replyTo} resizedAt={0} active={active} held={() => false} call={asked} />
+          <InlineReply key={replyTo.key} target={replyTo} resizedAt={0} active={active} held={() => false} call={asked} onAnswered={setAnswered} />
         ) : undefined
       }
       onStop={canPress && !lead ? () => press('stop') : undefined} // (a phone: the composer's button stops it, the bar keeps the room for the name)
@@ -1743,6 +1759,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       more={more}
       query={query}
       onQuery={onQuery}
+      answered={answered}
     />
     {op && <SessionOpDialog op={op.op} name={convo.title} codex={op.bind.agent === 'codex'} onSend={(text) => runOp(op.bind, text)} onClose={() => setOp(null)} onShowTerminal={openTerminal} />}
     {closing?.row && (
@@ -1764,6 +1781,46 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     )}
     </div>
   )
+}
+
+// An element's inner width, as it changes (0 till it is laid out).
+function useWidth(ref: { current: HTMLElement | null }): number {
+  const [w, setW] = useState(0)
+  useLayoutEffect(() => {
+    const el = ref.current
+    if (!el) return
+    const look = () => setW(el.clientWidth)
+    look()
+    const ro = new ResizeObserver(look)
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [ref])
+  return w
+}
+
+// A line made of words around a name, the name cut short (an ellipsis at
+// its end) so that the line fits the field's width in its own font.
+let measurer: CanvasRenderingContext2D | null = null
+function fitLine(el: HTMLElement | null, width: number, make: (name: string) => string, name: string): string {
+  const whole = make(name)
+  const chars = [...name]
+  // (Not laid out yet: a short name, as a guess.)
+  if (!el || !width) return chars.length > 24 ? make(chars.slice(0, 24).join('').trimEnd() + '…') : whole
+  const cs = getComputedStyle(el)
+  const room = width - parseFloat(cs.paddingLeft || '0') - parseFloat(cs.paddingRight || '0') - 2
+  measurer ??= document.createElement('canvas').getContext('2d')
+  if (!measurer) return whole
+  measurer.font = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`
+  const fits = (s: string) => measurer!.measureText(s).width <= room
+  if (fits(whole)) return whole
+  let lo = 0
+  let hi = chars.length - 1
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1
+    if (fits(make(chars.slice(0, mid).join('').trimEnd() + '…'))) lo = mid
+    else hi = mid - 1
+  }
+  return make(chars.slice(0, Math.max(1, lo)).join('').trimEnd() + '…')
 }
 
 // A phone's list of the agents: those for you first (waiting, then done and
@@ -1819,13 +1876,17 @@ function PhoneList({ entries, all, titles, query, onQuery, onPick }: { entries: 
       listScroll = el?.scrollTop ?? 0
     }
   }, [])
-  const regroup = () => {
-    setOrder(sorted(entries))
-    requestAnimationFrame(() => box.current?.scrollTo({ top: 0, behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' }))
-  }
+  // (Put in order again as the page comes back to the front: rows do not
+  // move under the finger while it is looked at, but are in order when
+  // looked at anew — as they are on coming back from a conversation.)
+  useEffect(() => {
+    const on = () => !document.hidden && setOrder(sorted(entries))
+    document.addEventListener('visibilitychange', on)
+    return () => document.removeEventListener('visibilitychange', on)
+  })
   const hosts = hostCount(entries)
   // (Searched: by its title, where it is, its program; "only mine" still holds.)
-  const labelled = (e: Entry) => labelOf(e, keptTitle(titles, e) || (e.row ? paneTitle(e.row.a.title) || e.row.a.agent : `${e.s.host_name} · ${sessionWhich(e.s, all)}`), hosts)
+  const labelled = (e: Entry) => labelOf(e, keptTitle(titles, e) || (e.row ? paneTitle(e.row.a.title) || dirName(e.row.a.cwd) || e.row.a.agent : `${e.s.host_name} · ${sessionWhich(e.s, all)}`), hosts)
   const shown = (mine ? list.filter((e) => e.row?.status === 'blocked' || e.row?.status === 'done') : list).filter((e) => {
     if (!query.trim()) return true
     const { title, where } = labelled(e)
@@ -1834,12 +1895,12 @@ function PhoneList({ entries, all, titles, query, onQuery, onPick }: { entries: 
   return (
     <div className="agents-list" ref={box}>
       <div className="agents-list-top">
-        <button type="button" className="agents-list-sum" onClick={regroup} title={t('agents.sumHint')}>
+        <p className="agents-list-sum" role="status">
           {waiting > 0 && <span className="is-blocked">{t('agents.sumWaiting', { n: waiting })}</span>}
           {working > 0 && <span className="is-working">{t('agents.sumWorking', { n: working })}</span>}
           {done > 0 && <span className="is-done">{t('agents.sumDone', { n: done })}</span>}
           {!waiting && !working && !done && <span>{t('agents.sumAll', { n: entries.length })}</span>}
-        </button>
+        </p>
         <button type="button" className="btn btn-ghost agents-list-mine" aria-pressed={mine} onClick={() => setMine(!mine)}>
           {t('agents.onlyMine')}
         </button>
@@ -1869,10 +1930,6 @@ function PhoneList({ entries, all, titles, query, onQuery, onPick }: { entries: 
                       </span>
                     )}
                   </span>
-                  {/* (Done and not seen, or at work: said by its dot, its time beside it, as the
-                      side list does; in words for a screen reader, and where forced colours take the dot's.) */}
-                  {status === 'done' && since && <span className="convo-list-status">{t('agents.unseen')}</span>}
-                  {status === 'working' && since && <span className="convo-list-status">{t('convo.status.working')}</span>}
                   <span className="agents-list-where">
                     {r && cmdsOf(r) && <BgCmds cmds={cmdsOf(r)!} />}
                     {!r && tmuxCmdsOf(e) && <BgCmds cmds={tmuxCmdsOf(e)!} />}
@@ -1880,15 +1937,18 @@ function PhoneList({ entries, all, titles, query, onQuery, onPick }: { entries: 
                     {where}
                   </span>
                 </span>
-                {/* (Waiting for you, in words: no group heading says it here.) */}
-                <span className={'agents-list-side is-' + (status === 'done' && since ? 'idle' : status)}>
-                  {r?.bg && !r.lost
-                    ? t(r.bg === 'running' ? 'convo.status.bg' : 'convo.status.bgStale')
-                    : status === 'blocked'
-                      ? t('convo.status.blocked')
-                      : status === 'done' && !since
-                        ? t('agents.unseen')
-                        : since || (status === 'working' ? t('convo.status.working') : '')}
+                {/* (Its state in words, in its colour — no group heading says it here — and
+                    how long under it, in words that say which: waited, at work, ago.) */}
+                <span className="agents-list-side">
+                  {(() => {
+                    const word = r?.bg && !r.lost ? t(r.bg === 'running' ? 'convo.status.bg' : 'convo.status.bgStale') : status === 'blocked' ? t('convo.status.blocked') : status === 'done' ? t('agents.unseen') : status === 'working' ? t('convo.status.working') : ''
+                    return (
+                      <>
+                        {word && <span className={'agents-list-state is-' + (r?.bg && !r.lost ? 'working' : status)}>{word}</span>}
+                        {since && <span className="agents-list-when">{since}</span>}
+                      </>
+                    )
+                  })()}
                 </span>
               </button>
             </li>

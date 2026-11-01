@@ -161,6 +161,8 @@ export function ConvoTurnsPanel({
   }
   return (
     <div className="convo-search convo-turns" role="navigation" aria-label={t('turns.title')} ref={panel}>
+      {/* (Its name over it: told apart from the search, which looks the same.) */}
+      <div className="convo-turns-head">{t('turns.item')}</div>
       <div className="convo-search-bar">
         <input
           className="convo-search-input"
@@ -188,7 +190,7 @@ export function ConvoTurnsPanel({
         {cut && <p className="list-search-none">{t('turns.cut')}</p>}
         {want && <p className="list-search-none" role="status">{t('turns.reading')}</p>}
         {note && <p className="list-search-none" role="status">{note}</p>}
-        {turns !== null && !shown.length && <p className="list-search-none">{t(q.trim() ? 'convo.searchNone' : 'turns.none')}</p>}
+        {turns !== null && !shown.length && <p className="list-search-none">{t(q.trim() ? 'turns.noMatch' : 'turns.none')}</p>}
         {shown.map((x) => (
           <button key={x.at} type="button" className="convo-search-hit convo-turn" onClick={() => go(x)} disabled={more}>
             <span className="convo-turn-when">{when(x.ts)}</span>

@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 'react'
+import { Fragment, useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 'react'
 import { RotateCw } from 'lucide-react'
 import { api, ApiError, errorText, type HerdrAgent } from '../api'
 import { t } from '../i18n'
@@ -32,6 +32,24 @@ const isTouchOnly = isCoarse()
 
 // The last lines of a pane's screen are what the user needs to answer.
 const shownLines = 40
+
+// A screen's lines, its dashed rules each kept to one line (cut where the
+// box ends, not wrapped into a stray row of dashes on a narrow screen).
+function ScreenText({ lines }: { lines: string[] }) {
+  return (
+    <>
+      {lines.map((l, i) =>
+        dashedRule.test(l) ? (
+          <span key={i} className="reply-rule">
+            {l}
+          </span>
+        ) : (
+          <Fragment key={i}>{l + (i < lines.length - 1 ? '\n' : '')}</Fragment>
+        ),
+      )}
+    </>
+  )
+}
 
 
 // Where an answer goes: a herdr pane (herdr's own answer), or the process a
@@ -73,7 +91,8 @@ export function convoTarget(sessionId: string, bind: { pane: string; pid: number
 // resizedAt: when the terminal's size last changed; herdr then redraws the
 // pane, so the screen is read again a moment later.
 // onSent: after an answer went through.
-export function useReply(target: ReplyTarget, { onLoaded, resizedAt, onSent }: { onLoaded?: () => void; resizedAt?: number; onSent: () => void }) {
+// quiet: no toast once sent (the card in the thread says so in its place).
+export function useReply(target: ReplyTarget, { onLoaded, resizedAt, onSent, quiet }: { onLoaded?: () => void; resizedAt?: number; onSent: () => void; quiet?: boolean }) {
   const toast = useToast()
   const base = target.key
   const targetRef = useRef(target)
@@ -154,7 +173,7 @@ export function useReply(target: ReplyTarget, { onLoaded, resizedAt, onSent }: {
         // (Shown too, not only kept: the next question here starts empty.)
         if (live.current) setTextState((v) => (v.trim() === body.text ? '' : v))
       }
-      toast(t('reply.sent'))
+      if (!quiet) toast(t('reply.sent'))
       if (live.current) onSent()
     } catch (e) {
       if (!live.current) return
@@ -218,7 +237,7 @@ export function ReplyDialog({ sessionId, agent, onLoaded, onClose, resizedAt }: 
           {(opts.length === 0 || screenOpen || (!block && !questionOnly)) && (
             <div className="reply-screen-wrap">
               <pre className="reply-screen" ref={pre} tabIndex={0} aria-label={t('reply.screen')} aria-busy={reading}>
-                {screen ? shown || t('reply.blank') : t('common.loading')}
+                {screen ? shown ? <ScreenText lines={shown.split('\n')} /> : t('reply.blank') : t('common.loading')}
               </pre>
               <button type="button" className={'icon-btn reply-refresh' + (reading ? ' reading' : '')} onClick={() => void load()} disabled={busy || reading} aria-label={t('reply.refresh')} title={t('reply.refresh')}>
                 <RotateCw size={16} />
@@ -332,8 +351,9 @@ function useConfirm(screen: { text: string; digest: string } | null, opts: { key
 
 // promptBlock): an edit's lines marked added and removed as the screen marks
 // them ("12 +", "12 -", and the lines going on from them).
-function Asked({ lines }: { lines: string[] }) {
+function Asked({ lines: all }: { lines: string[] }) {
   let sign: '' | 'add' | 'del' = ''
+  const lines = all.filter((l) => !dashedRule.test(l))
   return (
     <pre className="convo-pre convo-ask-block">
       {lines.map((l, i) => {
@@ -341,7 +361,7 @@ function Asked({ lines }: { lines: string[] }) {
         if (m) sign = m[1] === '+' ? 'add' : 'del'
         else if (!(sign && /^\s+[-+]/.test(l))) sign = ''
         return (
-          <span key={i} className={sign ? 'convo-' + sign : dashedRule.test(l) ? 'convo-ask-rule' : undefined}>
+          <span key={i} className={sign ? 'convo-' + sign : undefined}>
             {l + '\n'}
           </span>
         )
@@ -394,11 +414,18 @@ function useAnswerKeys(on: boolean, ready: boolean, keys: string[], held: (() =>
 // call: what the log says is asked (the last call of the agent's, not
 // come back): a question of Claude Code's or a plan, drawn from it where
 // the screen shows that very one (see askCard).
-export function InlineReply({ target, onLoaded, resizedAt, active = true, held, call }: { target: ReplyTarget; onLoaded?: () => void; resizedAt?: number; active?: boolean; held?: () => boolean; call?: ConvoTool }) {
+// onAnswered: told when it has been answered here (and when that no longer
+// holds: another question came), so the page says so before the agent's
+// state, read every few seconds, does.
+export function InlineReply({ target, onLoaded, resizedAt, active = true, held, call, onAnswered }: { target: ReplyTarget; onLoaded?: () => void; resizedAt?: number; active?: boolean; held?: () => boolean; call?: ConvoTool; onAnswered?: (yes: boolean) => void }) {
   const [sent, setSent] = useState<string | null>(null) // (the screen answered)
+  const answeredRef = useRef(onAnswered)
+  answeredRef.current = onAnswered
+  useEffect(() => answeredRef.current?.(sent !== null), [sent])
+  useEffect(() => () => answeredRef.current?.(false), [])
   const [shown, setShown] = useState(false)
   const answered = useRef('')
-  const { screen, setScreen, failed, reading, changed, busy: sending, error: sendError, text, setText, load, send, submit, opts } = useReply(target, { onLoaded, resizedAt, onSent: () => setSent(answered.current) })
+  const { screen, setScreen, failed, reading, changed, busy: sending, error: sendError, text, setText, load, send, submit, opts } = useReply(target, { onLoaded, resizedAt, onSent: () => setSent(answered.current), quiet: true })
   // A permission's amend: the person's words with Yes or No (Tab on it, then
   // the words, then Enter: ownWords). Typed, or Enter perhaps gone, and
   // failed: said so, not offered again on this prompt.
@@ -507,16 +534,21 @@ export function InlineReply({ target, onLoaded, resizedAt, active = true, held, 
   const needScreen = !!screen && !block && !cx && !folds(screen)
   // (Not told apart, the whole screen, before the choices; else behind its button.)
   const screenLines = screen ? screen.text.split('\n') : []
+  const linesShown = needScreen ? screenLines : screenLines.slice(-shownLines)
   const screenBox = (
-            // (What is asked could not be told apart on the screen: the screen itself.)
-            <div className="reply-screen-wrap">
-              <pre className="reply-screen" ref={pre} tabIndex={0} aria-label={t('reply.screen')} aria-busy={reading}>
-                {screen ? (needScreen ? screenLines : screenLines.slice(-shownLines)).join('\n') || t('reply.blank') : t('common.loading')}
-              </pre>
-              <button type="button" className={'icon-btn reply-refresh' + (reading ? ' reading' : '')} onClick={() => void load()} disabled={busy || reading} aria-label={t('reply.refresh')} title={t('reply.refresh')}>
-                <RotateCw size={16} />
-              </button>
-            </div>
+    // (What is asked could not be told apart on the screen: the screen itself;
+    // read again from a button over it that says so, not one over its words.)
+    <div className="reply-screen-wrap convo-ask-screen">
+      <div className="convo-ask-screen-head">
+        <button type="button" className={'btn btn-ghost btn-sm convo-ask-act reply-refresh-btn' + (reading ? ' reading' : '')} onClick={() => void load()} disabled={busy || reading}>
+          <RotateCw size={14} aria-hidden="true" />
+          {t('reply.refresh')}
+        </button>
+      </div>
+      <pre className="reply-screen" ref={pre} tabIndex={0} aria-label={t('reply.screen')} aria-busy={reading}>
+        {screen ? linesShown.join('').length ? <ScreenText lines={linesShown} /> : t('reply.blank') : t('common.loading')}
+      </pre>
+    </div>
   )
   useLayoutEffect(() => {
     // (Its end: what it asks is drawn last, at the bottom of the screen.)
@@ -527,6 +559,7 @@ export function InlineReply({ target, onLoaded, resizedAt, active = true, held, 
   // again (touched again) before a key answers it.
   const [armedFor, setArmedFor] = useState('')
   const arm = () => setArmedFor(screen?.digest ?? '')
+  const armed = !!screen && armedFor === screen.digest
   const confirm = useConfirm(screen, opts, (keys) => void send({ keys }))
   // (The card drawn from the log answers by its own steps: no keys here.)
   const ready = sent === null && !!screen && !busy && !failed && armedFor === screen.digest && !structured
@@ -549,11 +582,11 @@ export function InlineReply({ target, onLoaded, resizedAt, active = true, held, 
           </p>
         )}
         <div className="convo-ask-more">
-          <button type="button" className="link-btn" aria-expanded={shown} onClick={() => setShown(!shown)}>
+          <button type="button" className="btn btn-ghost btn-sm convo-ask-act" aria-expanded={shown} onClick={() => setShown(!shown)}>
             {t(shown ? 'convo.hideScreen' : 'convo.showScreen')}
           </button>
-          <button type="button" className="link-btn" disabled={busy} onClick={() => void send({ keys: ['esc'] })}>
-            {t('reply.esc')}
+          <button type="button" className="btn btn-ghost btn-sm convo-ask-act" disabled={busy} onClick={() => void send({ keys: ['esc'] })}>
+            {t('convo.pressEscCancel')}
           </button>
         </div>
         {shown && screenBox}
@@ -597,7 +630,7 @@ export function InlineReply({ target, onLoaded, resizedAt, active = true, held, 
                 const lasts = lasting(o.label)
                 return (
                   <button key={o.key} type="button" className={'convo-ask-opt' + (confirm.asked === o.key ? ' is-confirm' : '')} disabled={!screen || busy} onClick={() => confirm.choose(o.key)}>
-                    <span className="convo-ask-key">{o.key}</span>
+                    <span className="convo-ask-key is-num" aria-hidden="true">{o.key}</span>
                     {/* (Its words as Claude Code wrote them, where shown in Chinese: on a pointer's rest.) */}
                     <span className="convo-ask-what" title={c.original || undefined}>
                       <span className="convo-ask-label">{c.text}</span>
@@ -627,8 +660,8 @@ export function InlineReply({ target, onLoaded, resizedAt, active = true, held, 
               className="input"
               value={text}
               maxLength={2000}
-              placeholder={t('reply.placeholder')}
-              aria-label={t('reply.placeholder')}
+              placeholder={t(opts.length > 0 ? 'convo.askOwnText' : 'convo.askText')}
+              aria-label={t(opts.length > 0 ? 'convo.askOwnText' : 'convo.askText')}
               autoCapitalize="none"
               autoCorrect="off"
               onChange={(e) => setText(e.target.value)}
@@ -637,27 +670,37 @@ export function InlineReply({ target, onLoaded, resizedAt, active = true, held, 
               {t('reply.send')}
             </button>
           </form>
-          <div className="convo-ask-more">
-            {!isTouchOnly && (
-              <span className="convo-ask-keys">
-                {opts.length > 0 ? t(target.agent === 'codex' ? 'convo.askKeysCodex' : 'convo.askKeys', { n: opts.length }) : t('convo.askEsc')}
-              </span>
-            )}
-            <button type="button" className="link-btn" aria-expanded={shown || needScreen} disabled={needScreen} onClick={() => setShown(!shown)}>
-              {t(shown ? 'convo.hideScreen' : 'convo.showScreen')}
-            </button>
-            {opts.length === 0 && (
-              <button type="button" className="link-btn" disabled={!screen || busy} onClick={confirm.enter}>
-                {t('reply.enter')}
-              </button>
-            )}
-            {opts.length === 0 && (
-              // (With choices, the last one says no, and Esc does too.)
-              <button type="button" className="link-btn" disabled={!screen || busy} onClick={() => void send({ keys: ['esc'] })}>
-                {t('reply.esc')}
-              </button>
-            )}
-          </div>
+          {/* (The keys, on a line of their own: words, not to be taken for buttons. Only
+              once the card is in hand do they answer it: said so till then.) */}
+          {!isTouchOnly && opts.length > 0 && (
+            <p className="convo-ask-keys">
+              {t(
+                target.agent === 'codex' ? (armed ? 'convo.askKeysCodex' : 'convo.askKeysArmCodex') : armed ? 'convo.askKeys' : 'convo.askKeysArm',
+                { n: opts.length },
+              )}
+            </p>
+          )}
+          {(!needScreen || opts.length === 0) && (
+            <div className="convo-ask-more">
+              {/* (The screen shown whole already: no button to show it.) */}
+              {!needScreen && (
+                <button type="button" className="btn btn-ghost btn-sm convo-ask-act" aria-expanded={shown} onClick={() => setShown(!shown)}>
+                  {t(shown ? 'convo.hideScreen' : 'convo.showScreen')}
+                </button>
+              )}
+              {opts.length === 0 && (
+                <button type="button" className={'btn btn-ghost btn-sm convo-ask-act' + (confirm.asked === 'enter' ? ' is-confirm' : '')} disabled={!screen || busy} onClick={confirm.enter}>
+                  {t(confirm.asked === 'enter' ? 'reply.enterAgain' : 'convo.pressEnter')}
+                </button>
+              )}
+              {opts.length === 0 && (
+                // (With choices, the last one says no, and Esc does too.)
+                <button type="button" className="btn btn-ghost btn-sm convo-ask-act" disabled={!screen || busy} onClick={() => void send({ keys: ['esc'] })}>
+                  {t('convo.pressEsc')}
+                </button>
+              )}
+            </div>
+          )}
           {shown && !needScreen && screenBox}
           {error && (
             <p className="err" role="alert">

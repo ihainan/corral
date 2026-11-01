@@ -557,12 +557,14 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
   background: none; color: var(--term-fg-3); font: 12px/18px var(--font-ui);
 }
 .convo-pre-wrap .md-code-copy { position: absolute; top: 4px; right: 4px; background: var(--term-chrome); }
-/* (A touch screen: more to touch than shows, over the space around) */
+/* (A touch screen: 44 to touch, over the space around — padding, taken
+   back by a margin, so nothing moves; a chip over a command's output keeps
+   its look, painted at its middle) */
 @media (pointer: coarse) {
-  .md-code-copy:not(.convo-pre-wrap .md-code-copy), .convo-meta .link-btn { position: relative; }
-  /* (Less up than down: what is over them is close) */
-  .md-code-copy::after { content: ''; position: absolute; inset: -4px -6px -12px; }
-  .convo-meta .link-btn::after { content: ''; position: absolute; inset: -6px -6px -14px; }
+  .md-code-copy { padding: 13px; margin: -13px -6px; }
+  .convo-pre-wrap .md-code-copy { top: -7px; right: -2px; margin: 0; background: linear-gradient(var(--term-chrome), var(--term-chrome)) center / calc(100% - 12px) 22px no-repeat; }
+  .convo-pre-wrap .md-code-copy:hover { background: linear-gradient(var(--term-hover), var(--term-hover)) center / calc(100% - 12px) 22px no-repeat; }
+  .convo-meta .link-btn { padding: 12px 10px; margin: -12px -10px; }
 }
 .md-code-copy:hover { color: var(--term-fg); background: var(--term-hover); }
 .md-table { overflow-x: auto; }
@@ -687,7 +689,8 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-tasks-toggle { flex: none; color: var(--term-fg-3); }
 .convo-tasks-list { margin: 4px 0 2px; padding-left: 1.5em; max-height: 30vh; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
 .convo-tasks-list .is-completed { color: var(--term-fg-3); text-decoration: line-through; }
-.convo-tasks-list .is-in_progress { color: var(--term-fg); font-weight: 500; }
+.convo-tasks-list .is-in_progress { color: var(--term-fg); font-weight: 600; }
+.convo-tasks-now { color: var(--term-fg-3); font-weight: 400; }
 .convo-pre-wrap { position: relative; }
 .convo-pre {
   margin: 0; padding: 8px 10px; border-radius: 6px; background: var(--term-chrome); border: 1px solid var(--term-line);
@@ -703,7 +706,11 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-add { background: color-mix(in srgb, #3fa45b 16%, transparent); }
 .convo-more { color: var(--term-fg-3); }
 .convo-step-body .link-btn { margin-top: 4px; font-size: 13px; }
-.convo-summary summary { cursor: pointer; font-size: 13.5px; color: var(--term-fg-2); }
+.convo-summary summary { display: flex; align-items: center; gap: 6px; cursor: pointer; list-style: none; font-size: 13.5px; color: var(--term-fg-2); }
+.convo-summary summary::-webkit-details-marker { display: none; }
+.convo-summary[open] > summary > .convo-chev { transform: rotate(90deg); }
+.convo-summary summary:hover { color: var(--term-fg); }
+@media (pointer: coarse) { .convo-summary summary { min-height: 44px; margin: -11px 0; } }
 .convo-summary .convo-md { margin-top: 8px; color: var(--term-fg-2); font-size: 14px; }
 
 .convo-latest {
@@ -788,6 +795,8 @@ button.convo-task-line:hover .convo-task-name { color: var(--term-fg); }
 .convo-event.is-compact::before, .convo-event.is-compact::after { content: ''; flex: 1 1 24px; border-top: 1px solid var(--term-line); }
 .convo-event-said { flex: 0 1 auto; min-width: 0; }
 .convo-event-part { white-space: nowrap; }
+/* (A narrow screen: the line wraps; rules beside it would line up with its first line only) */
+@media (max-width: 640px) { .convo-event.is-compact { justify-content: center; } .convo-event.is-compact::before, .convo-event.is-compact::after { display: none; } }
 .convo-trouble.is-cut svg { color: var(--term-fg-3); }
 .convo-trouble.is-cut { background: var(--term-key-active); }
 .convo-trouble-body { min-width: 0; flex: 1; }
@@ -836,9 +845,27 @@ button.convo-task-line:hover .convo-task-name { color: var(--term-fg); }
 .convo-ask-text .input::placeholder { color: var(--term-fg-3); }
 .convo-ask-text .input:focus { border-color: var(--term-accent-text); }
 .convo-ask-text .btn:hover:not(:disabled) { background: var(--term-hover); }
-.convo-ask-more { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 13px; }
-.convo-ask-more .link-btn { font-size: 13px; color: var(--term-fg-2); }
-@media (pointer: coarse) { .convo-ask-more { gap: 0 20px; margin: -6px 0; } .convo-ask-more .link-btn { min-height: 44px; } }
+.convo-ask-more { display: flex; flex-wrap: wrap; gap: 8px; font-size: 13px; }
+/* (What the card's foot does: buttons that look it, each saying what it presses) */
+.term-root .convo-ask-act { height: 30px; padding: 0 10px; font-size: 13px; color: var(--term-fg); border: 1px solid var(--term-line); background: var(--term-bg); }
+.term-root .convo-ask-act:hover:not(:disabled) { background: var(--term-hover); border-color: var(--term-fg-3); }
+.term-root .convo-ask-act:disabled { opacity: 0.5; }
+.term-root .convo-ask-act.is-confirm { border-color: var(--term-warn-text); color: var(--term-warn-text); }
+.convo-ask-act svg { flex: none; }
+.convo-ask-act.reading svg { animation: convo-spin 0.9s linear infinite; }
+@media (prefers-reduced-motion: reduce) { .convo-ask-act.reading svg { animation: none; } }
+@media (pointer: coarse) { .term-root .convo-ask-act { height: 44px; padding: 0 14px; font-size: 14px; } }
+/* A number is a key to press: not on a touch screen (a tick, what is chosen, stays) */
+@media (pointer: coarse) {
+  .convo-ask-key.is-num { display: none; }
+  .reply-dialog .reply-choice { grid-template-columns: minmax(0, 1fr); }
+  .reply-dialog .reply-key { display: none; }
+}
+/* The screen in the card: read again from a button over it, its words not under one */
+.convo-ask-screen-head { display: flex; justify-content: flex-end; margin-bottom: 6px; }
+.convo-ask .reply-screen { padding-right: 12px; }
+/* (A dashed rule of the screen: one line, cut where the box ends) */
+.reply-rule { display: block; white-space: pre; overflow: hidden; color: var(--term-fg-3); opacity: 0.6; }
 .convo-ask .reply-screen { max-height: 260px; }
 .convo-ask-sent { margin: 0; font-size: 13px; color: var(--term-fg-3); }
 /* The card over the composer, its own scroll where the screen is short */
@@ -855,7 +882,7 @@ button.convo-task-line:hover .convo-task-name { color: var(--term-fg); }
 .convo-ask-block > .convo-ask-rule { color: var(--term-fg-3); opacity: 0.6; }
 .convo-ask-unread { margin: 0; font-size: 13px; color: var(--term-warn-text); }
 .convo-ask-label { min-width: 0; line-height: 22px; font-weight: 500; overflow-wrap: anywhere; }
-.convo-ask-keys { color: var(--term-fg-3); font-size: 12.5px; }
+.convo-ask-keys { margin: 0; color: var(--term-fg-3); font-size: 12.5px; line-height: 18px; }
 /* What the agent set going and left to itself, over the composer */
 /* (The mark in a column of its own, so that the head and the rows under it start at one edge) */
 .convo-running { display: flex; align-items: flex-start; gap: 8px; border: 1px solid var(--term-line); border-radius: 10px; background: var(--term-chrome); padding: 6px 12px; font-size: 13px; }
@@ -867,7 +894,7 @@ button.convo-task-line:hover .convo-task-name { color: var(--term-fg); }
 .convo-running-sum { flex: 1; min-width: 0; }
 .term-root .convo-running-more { flex: none; font-size: 13px; color: var(--term-fg-2); }
 .convo-running-row { display: flex; align-items: baseline; gap: 10px; min-width: 0; color: var(--term-fg-3); font-size: 12.5px; }
-.convo-running-what { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); }
+.convo-running-what { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--term-fg-2); }
 .convo-running-note { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .convo-running-since { flex: none; margin-left: auto; font-variant-numeric: tabular-nums; }
 
@@ -932,7 +959,7 @@ button.convo-task-line:hover .convo-task-name { color: var(--term-fg); }
 .convo-list-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
 .convo-list-row:hover { background: var(--term-hover); --dot-ring: var(--term-hover); }
 .convo-list-row:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: -2px; }
-.convo-list-row[aria-current='true'] { background: var(--term-accent-soft); --dot-ring: var(--term-accent-soft); }
+.convo-list-row[aria-current='true'] { background: color-mix(in srgb, var(--term-fg) 10%, transparent); --dot-ring: var(--term-key-active); }
 .convo-list-line { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
 /* One line, cut short with an ellipsis (the whole in its tooltip and the
    conversation's bar; the list can be dragged wider): rows of one height
@@ -942,10 +969,9 @@ button.convo-task-line:hover .convo-task-name { color: var(--term-fg); }
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .convo-list-when { flex: none; margin-left: auto; min-width: 4.6em; text-align: end; font-size: 11.5px; color: var(--term-fg-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
-/* The one being read is marked by its colour alone: heavier letters take
-   more room, and a name that just fitted one line would wrap on going to
-   it, growing the row under the finger. */
-.convo-list-row[aria-current='true'] .convo-list-title { color: var(--term-accent-text); }
+/* The one being read: a shade and heavier letters, no colour (its title is
+   one line, cut short: heavier letters do not wrap it). */
+.convo-list-row[aria-current='true'] .convo-list-title { font-weight: 650; }
 /* Where the system paints the colours instead (high contrast), both the
    tint and those letters are gone: an outline marks it there, taking no
    room of its own and so moving nothing. */
@@ -1070,15 +1096,16 @@ button.convo-task-line:hover .convo-task-name { color: var(--term-fg); }
   background: var(--term-bg); border-bottom: 1px solid var(--term-line);
 }
 .agents-list-sum {
-  flex: 1; min-width: 0; display: flex; flex-wrap: wrap; gap: 4px 12px; padding: 6px 0; border: 0; background: none;
-  color: var(--term-fg-2); font: 500 14px/20px var(--font-ui); text-align: left; cursor: pointer;
+  flex: 1; min-width: 0; display: flex; flex-wrap: wrap; gap: 4px 12px; margin: 0; padding: 6px 0;
+  color: var(--term-fg-2); font: 500 14px/20px var(--font-ui);
 }
 .agents-list-sum .is-blocked { color: var(--term-warn-text); font-weight: 600; }
 .agents-list-sum .is-working { color: var(--term-accent-text); }
 .agents-list-sum .is-done { color: var(--term-ok-text); }
-.term-root .agents-list-mine { flex: none; height: 32px; padding: 0 10px; color: var(--term-fg-2); font-size: 13px; }
-@media (pointer: coarse) { .term-root .agents-list-mine { height: 40px; margin: -4px -4px -4px 0; } }
-.term-root .agents-list-mine[aria-pressed='true'] { background: var(--term-accent-soft); color: var(--term-accent-text); }
+.term-root .agents-list-mine { flex: none; height: 32px; padding: 0 10px; color: var(--term-fg-2); font-size: 13px; border: 1px solid var(--term-line); }
+@media (pointer: coarse) { .term-root .agents-list-mine { height: 44px; margin: -6px -4px -6px 0; } }
+/* (A toggle: outlined, off; on, filled a shade and in heavier letters — no colour of its own) */
+.term-root .agents-list-mine[aria-pressed='true'] { background: var(--term-key-active); color: var(--term-fg); border-color: var(--term-fg-3); font-weight: 600; }
 .agents-list-none { margin: 24px 16px; color: var(--term-fg-3); font: 14px/22px var(--font-ui); text-align: center; }
 .agents-list-rows { list-style: none; margin: 0; padding: 0; }
 .agents-list-row {
@@ -1093,10 +1120,12 @@ button.convo-task-line:hover .convo-task-name { color: var(--term-fg); }
 .agents-list-title { display: flex; align-items: center; gap: 4px; min-width: 0; font-size: 15.5px; line-height: 22px; font-weight: 500; }
 .agents-list-title-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .agents-list-where { font-size: 13px; line-height: 18px; color: var(--term-fg-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.agents-list-side { flex: none; max-width: 40%; font-size: 13px; color: var(--term-fg-3); text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.agents-list-side.is-blocked { color: var(--term-warn-text); font-weight: 600; }
-.agents-list-side.is-working { color: var(--term-accent-text); }
-.agents-list-side.is-done { color: var(--term-ok-text); }
+.agents-list-side { flex: none; max-width: 40%; display: flex; flex-direction: column; align-items: flex-end; gap: 2px; font-size: 13px; line-height: 18px; color: var(--term-fg-3); text-align: right; white-space: nowrap; }
+.agents-list-side > span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.agents-list-state.is-blocked { color: var(--term-warn-text); font-weight: 600; }
+.agents-list-state.is-working { color: var(--term-accent-text); }
+.agents-list-state.is-done { color: var(--term-ok-text); }
+.agents-list-when { font-size: 12px; font-variant-numeric: tabular-nums; }
 /* An agent's icon: its program's mark on a tile tinted with its colour; a
    dot on its corner says it waits for you, works, or is done (none at rest),
    ringed in the colour of what it sits on. */
@@ -1168,7 +1197,11 @@ button.convo-task-line:hover .convo-task-name { color: var(--term-fg); }
 .convo-sub-state { font-size: 12px; color: var(--term-fg-3); }
 .convo-sub-open { align-self: flex-start; margin: 4px 0 6px; font-size: 13px; }
 .convo-sub .is-back { transform: rotate(180deg); }
-button.convo-running-what { padding: 0; text-align: left; }
+button.convo-running-what { padding: 0; text-align: left; color: var(--term-fg-2); font: inherit; text-decoration: underline; text-decoration-color: var(--term-line); text-underline-offset: 3px; }
+button.convo-running-what:hover { color: var(--term-fg); text-decoration-color: var(--term-fg-3); }
+@media (pointer: coarse) {
+  button.convo-running-what, .term-root .convo-running-more { padding-top: 13px; padding-bottom: 13px; margin-top: -13px; margin-bottom: -13px; }
+}
 .convo-event.is-recap, .convo-event.is-goal, .convo-event.is-notice { margin: 0; font-size: 13px; color: var(--term-fg-2); padding-left: 10px; border-left: 2px solid var(--term-line); }
 .convo-event.is-recap .convo-trouble-head, .convo-event.is-goal .convo-trouble-head { color: var(--term-fg-3); font-size: 12px; }
 .convo-event.is-notice .convo-trouble-head { color: var(--term-fg-3); }
@@ -1299,3 +1332,47 @@ button.convo-running-what { padding: 0; text-align: left; }
 .convo-turn { display: flex; gap: 10px; align-items: baseline; text-align: left; }
 .convo-turn-when { flex: none; color: var(--term-fg-3); font-size: 12px; font-variant-numeric: tabular-nums; }
 .convo-turn-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ux1101 B2 ------------------------------------------------------------- */
+/* A step waiting for the person: said plainly, cut to its line, no shimmer */
+.convo-asking-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.convo-work-text.is-asking .convo-live-time { flex: none; white-space: nowrap; }
+.convo-failed.is-inline { margin-left: 0; }
+/* The bar on a narrow screen: the state, not how long (the name needs the room) */
+@media (max-width: 640px) { .convo-bar-dur { display: none; } }
+/* The composer under a question: a line, its tools back once it is typed in */
+.convo-dock .composer.is-held .composer-box:not(:focus-within) .composer-tools { display: none; }
+/* The send and stop circle on a touch screen: 44 to touch, the circle 38 inside it, no ring drawn round it */
+@media (pointer: coarse) {
+  .convo-dock .composer-send, .convo-dock .composer-send:hover { padding: 3px; box-shadow: none; background: var(--accent); background-clip: content-box; }
+  .convo-dock .composer-send.is-stop, .convo-dock .composer-send.is-stop:hover { box-shadow: none; background: var(--term-fg); background-clip: content-box; }
+  .convo-dock .composer-send:disabled, .convo-dock .composer-send:disabled:hover { box-shadow: none; background: var(--term-line); background-clip: content-box; }
+}
+/* What the session runs with, on a touch screen: pressed, shaded as high as the line, not to the screen's edge */
+@media (pointer: coarse) {
+  .convo-runs-item.is-switch:hover:not(:disabled), .convo-runs-item.is-switch[aria-expanded='true'], .convo-runs-ctx:hover, .convo-runs-ctx[aria-expanded='true'] {
+    background: linear-gradient(var(--term-hover), var(--term-hover)) center / 100% 24px no-repeat;
+  }
+}
+/* Its pop-ups on a narrow screen: from the bottom, over the page dimmed */
+.convo-runs-back { position: fixed; inset: 0; z-index: 20; background: rgba(0, 0, 0, 0.28); }
+.term-root.dark .convo-runs-back { background: rgba(0, 0, 0, 0.55); }
+.convo-runs .convo-runs-pop.is-sheet {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 21; width: 100%; border-radius: 14px 14px 0 0; border-bottom: 0;
+  padding: 14px 16px max(16px, env(safe-area-inset-bottom, 0px)); font-size: 14px;
+}
+html.kb-open .convo-runs .convo-runs-pop.is-sheet { padding-bottom: 16px; }
+/* The switcher over a dark page: the page behind dimmed as much as over a light one */
+.term-root.dark .convo-picker-back { background: rgba(0, 0, 0, 0.55); }
+/* The floating ways about the thread: out of the way while the person scrolls */
+@media (pointer: coarse) { .convo-jump { transition: opacity 0.15s; } .convo-jump.is-moving { opacity: 0; pointer-events: none; } }
+@media (pointer: coarse) and (prefers-reduced-motion: reduce) { .convo-jump { transition: none; } }
+/* The search's and the turns' panels: in the thread's column; no second clear button in the box */
+.convo-search-bar, .convo-search-hits, .convo-search-foot, .convo-turns-head { width: 100%; max-width: 780px; margin-left: auto; margin-right: auto; box-sizing: border-box; }
+.convo-search-bar { padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(10px, env(safe-area-inset-right, 0px)); }
+.convo-search-input::-webkit-search-cancel-button { -webkit-appearance: none; appearance: none; display: none; }
+.convo-turns-head { padding: 8px max(16px, env(safe-area-inset-right, 0px)) 0 max(16px, env(safe-area-inset-left, 0px)); font: 600 13px/18px var(--font-ui); color: var(--term-fg-2); }
+.page-keys-or { color: var(--fg-3); }
+.page-keys-row dt { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 4px; }
+/* A code block whose lines run on past its edge: that edge fades (it scrolls sideways) */
+.md-code pre.is-more { -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 32px), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 32px), transparent); }
