@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { Keyboard } from 'lucide-react'
 import type { SpecialKey } from './keys'
 import { t } from '../i18n'
@@ -17,6 +17,7 @@ interface KeyProps {
   wide?: boolean
   hint?: boolean // it has a long press (a mark in its corner)
   opener?: boolean // it opens the shortcut panel (a press on it is not one outside)
+  describedBy?: string // what its long press does, read after its name
 }
 
 const MOVE_CANCEL = 10 // px: beyond this the gesture is a scroll of the bar, not a key press
@@ -46,6 +47,7 @@ function Key(p: KeyProps) {
       tabIndex={-1}
       className={'kb-key' + (p.wide ? ' wide' : '') + (p.mod && p.mod !== 'off' ? ' mod-' + p.mod : '') + (p.hint ? ' has-long' : '')}
       aria-label={p.aria}
+      aria-describedby={p.describedBy}
       data-sc-opener={p.opener ? '' : undefined}
       aria-pressed={p.mod ? p.mod !== 'off' : undefined}
       // Preventing mousedown (not pointerdown, which WebKit treats as cancelling
@@ -132,6 +134,7 @@ const fkeys: SpecialKey[] = ['F1', 'F2', 'F3', 'F4', 'F5', 'F6', 'F7', 'F8', 'F9
 // keyboard toggle on the right; the row between scrolls sideways. Fn swaps
 // the row for function and navigation keys.
 export function KeyBar(p: KeyBarProps) {
+  const uid = useId()
   const rowRef = useRef<HTMLDivElement>(null)
   const [atEnd, setAtEnd] = useState(false)
   const onScroll = () => {
@@ -148,7 +151,8 @@ export function KeyBar(p: KeyBarProps) {
     const b = builtins[k.k]
     if ('mod' in b) {
       const m = b.mod
-      return <Key key={k.k} label={b.label} aria={b.aria} mod={m === 'ctrl' ? p.ctrl : p.alt} onPress={() => p.onMod(m)} onLong={m === 'ctrl' ? p.onPanel : undefined} hint={m === 'ctrl'} opener={m === 'ctrl'} />
+      // (Its long press named, for those who cannot see the dot — ux1101 T08.)
+      return <Key key={k.k} label={b.label} aria={b.aria} describedBy={m === 'ctrl' ? uid + '-ctrl' : undefined} mod={m === 'ctrl' ? p.ctrl : p.alt} onPress={() => p.onMod(m)} onLong={m === 'ctrl' ? p.onPanel : undefined} hint={m === 'ctrl'} opener={m === 'ctrl'} />
     }
     if ('act' in b) {
       return b.act === 'fn'
@@ -164,9 +168,36 @@ export function KeyBar(p: KeyBarProps) {
     )
   }
   const fnInRow = p.layout.row.find((k) => isBuiltin(k) && k.k === 'fn')
+  // A hardware keyboard reaches the bar as one stop (the key last on, else
+  // the first), Left and Right (Home, End) moving along it (ux1101 T18).
+  // Presses never focus a key (see Key), so a tap keeps the terminal's focus.
+  const barRef = useRef<HTMLDivElement>(null)
+  const keysOf = () => [...(barRef.current?.querySelectorAll<HTMLButtonElement>(':scope > .kb-group .kb-key, :scope > .kb-row .kb-key') ?? [])]
+  useLayoutEffect(() => {
+    const keys = keysOf()
+    if (keys.length && !keys.some((k) => k.tabIndex === 0)) keys[0].tabIndex = 0
+  })
+  const roam = (e: React.KeyboardEvent) => {
+    const keys = keysOf()
+    const i = keys.indexOf(document.activeElement as HTMLButtonElement)
+    if (i < 0) return
+    const next = e.key === 'ArrowRight' ? Math.min(i + 1, keys.length - 1) : e.key === 'ArrowLeft' ? Math.max(i - 1, 0) : e.key === 'Home' ? 0 : e.key === 'End' ? keys.length - 1 : -1
+    if (next < 0) return
+    e.preventDefault()
+    e.stopPropagation()
+    keys[next].focus()
+    keys[next].scrollIntoView({ block: 'nearest', inline: 'nearest' })
+  }
+  const onFocus = (e: React.FocusEvent) => {
+    const keys = keysOf()
+    if (!keys.includes(e.target as HTMLButtonElement)) return
+    for (const k of keys) k.tabIndex = k === e.target ? 0 : -1
+  }
   return (
-    <div className="keybar" role="toolbar" aria-label={t('term.keys')}>
+    <div className="keybar" role="toolbar" aria-label={t('term.keys')} ref={barRef} onKeyDown={roam} onFocus={onFocus}>
       {p.panel}
+      <span id={uid + '-ctrl'} className="sr-only">{t('keybar.ctrlLong')}</span>
+      <span id={uid + '-kb'} className="sr-only">{t('keybar.kbLong')}</span>
       {p.layout.pinned.length > 0 && <div className="kb-group kb-fixed kb-pinned">{p.layout.pinned.map(key)}</div>}
       <div className={'kb-row' + (atEnd ? ' at-end' : '')} ref={rowRef} onScroll={onScroll}>
         {p.fn ? (
@@ -192,7 +223,7 @@ export function KeyBar(p: KeyBarProps) {
         )}
       </div>
       <div className="kb-group kb-fixed">
-        <Key label={<Keyboard size={18} />} aria={t('term.keyboard')} onPress={p.onKeyboard} onDown={p.onKeyboardDown} onLong={() => p.onKey('Enter')} />
+        <Key label={<Keyboard size={18} />} aria={t('term.keyboard')} describedBy={uid + '-kb'} onPress={p.onKeyboard} onDown={p.onKeyboardDown} onLong={() => p.onKey('Enter')} hint />
       </div>
     </div>
   )

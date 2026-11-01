@@ -3,6 +3,8 @@
 // the message (the agents' commands, and those found on the host) and "$" (a
 // Codex skill).
 
+import { t } from '../i18n'
+
 export type Agent = 'claude' | 'codex' | 'opencode'
 
 export interface Completions {
@@ -133,13 +135,14 @@ export function suggest(tok: Token, data: Completions | null, agent: Agent | nul
   for (const a of agents) for (const n of builtin[a]) cmds.push({ agent: a, name: n })
   for (const c of data?.commands ?? []) if (agents.includes(c.agent)) cmds.push(c)
   const want = cmds.filter((c) => c.name[0] === tok.kind)
-  // The same name for both agents is offered once, named only when it is
-  // one agent's.
+  // The same name for both agents is offered once: named by its agent when
+  // it is one agent's, as both's ("common") when it is both's — each row
+  // says whose it is (ux1101 T13). With the agent known, none is named.
   const owners = new Map<string, Set<Agent>>()
   for (const c of want) owners.set(c.name, (owners.get(c.name) ?? new Set<Agent>()).add(c.agent))
   const hint = (name: string) => {
     const o = owners.get(name)!
-    return agent || o.size > 1 ? undefined : o.has('claude') ? 'Claude Code' : 'Codex'
+    return agent ? undefined : o.size > 1 ? t('complete.both') : o.has('claude') ? 'Claude Code' : 'Codex'
   }
   return rank([...owners.keys()], (n) => n.slice(1)).map((n) => ({ insert: n, label: n, hint: hint(n) }))
 }

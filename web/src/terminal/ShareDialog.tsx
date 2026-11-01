@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
-import { UserRound, X } from 'lucide-react'
+import { UserRound } from 'lucide-react'
 import { api, ApiError, errorText, type Share } from '../api'
 import { t } from '../i18n'
-import { Dialog, LoadError, useToast } from '../components/ui'
+import { Confirm, Dialog, LoadError, useToast } from '../components/ui'
 
 // The owner lets other users watch the session, read-only, and sees who is
 // watching now.
@@ -14,6 +14,7 @@ export function ShareDialog({ sessionId, onClose }: { sessionId: string; onClose
   const [name, setName] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  const [revoking, setRevoking] = useState<Share | null>(null)
   // Only the latest request's answer is shown: a slow poll must not undo
   // what an add or a remove just showed.
   const seq = useRef(0)
@@ -64,20 +65,17 @@ export function ShareDialog({ sessionId, onClose }: { sessionId: string; onClose
       setBusy(false)
     }
   }
+  // (Asked first: it closes their view at once — ux1101 T46. A failure shows in the dialog.)
   const remove = async (s: Share) => {
-    try {
-      await api('DELETE', `${base}/${s.user_id}`)
-      toast(t('share.removed', { name: s.display_name || s.username }))
-      load()
-    } catch (err) {
-      toast(errorText(err), true)
-    }
+    await api('DELETE', `${base}/${s.user_id}`)
+    toast(t('share.removed', { name: s.display_name || s.username }))
+    load()
   }
 
   return (
     <Dialog title={t('share.title')} onClose={onClose}>
       <p className="lead">{t('share.lead')}</p>
-      <form className="share-add" onSubmit={add}>
+      <form className="share-add input-row" onSubmit={add}>
         <input
           className="input"
           value={name}
@@ -104,8 +102,8 @@ export function ShareDialog({ sessionId, onClose }: { sessionId: string; onClose
                 {s.display_name && <span className="hint mono"> {s.username}</span>}
               </span>
               <span className={'share-state' + (s.watching ? ' on' : '')}>{s.watching ? t('share.watching') : t('share.notWatching')}</span>
-              <button className="icon-btn" onClick={() => void remove(s)} aria-label={t('share.remove', { name: s.username })} title={t('share.removeHint')}>
-                <X size={16} />
+              <button className="btn btn-ghost share-revoke" onClick={() => setRevoking(s)} aria-label={t('share.remove', { name: s.username })} title={t('share.removeHint')}>
+                {t('share.revoke')}
               </button>
             </li>
           ))}
@@ -116,6 +114,16 @@ export function ShareDialog({ sessionId, onClose }: { sessionId: string; onClose
       <div className="dialog-actions">
         <button className="btn" onClick={onClose}>{t('common.close')}</button>
       </div>
+      {revoking && (
+        <Confirm
+          title={t('share.revokeTitle')}
+          body={t('share.revokeBody', { name: revoking.display_name || revoking.username })}
+          confirm={t('share.revoke')}
+          danger
+          onConfirm={() => remove(revoking)}
+          onClose={() => setRevoking(null)}
+        />
+      )}
     </Dialog>
   )
 }

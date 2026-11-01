@@ -88,7 +88,7 @@ export function SchemeDialog({ onClose }: { onClose: () => void }) {
   const shown = [...(needle ? [] : ['ui']), ...dark.map((x) => x.id), ...light.map((x) => x.id)]
   const tabStop = shown.includes(current) ? current : shown[0]
   return (
-    <Dialog title={t('settings.termTheme')} onClose={onClose} wide seeThrough>
+    <Dialog title={t('settings.termTheme')} onClose={onClose} wide seeThrough className="scheme-dialog">
       <label className="scheme-search">
         <Search size={16} aria-hidden="true" />
         <input
@@ -139,7 +139,8 @@ export function SchemeDialog({ onClose }: { onClose: () => void }) {
         {dark.length + light.length === 0 && <p className="hint">{t('schemes.none')}</p>}
       </div>
       <div className="dialog-actions">
-        <button className="btn btn-primary" onClick={onClose}>{t('schemes.done')}</button>
+        {/* (A choice takes effect at once: nothing to confirm, only to close — ux1101 T40.) */}
+        <button className="btn" onClick={onClose}>{t('common.close')}</button>
       </div>
     </Dialog>
   )

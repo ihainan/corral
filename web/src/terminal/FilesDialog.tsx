@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
 import {
-  ArrowUp, Copy, Download, Eye, EyeOff, File as FileIcon, FileQuestion, Folder, FolderPlus, House, LocateFixed, MoreHorizontal, Pencil, RotateCw,
+  ArrowUp, Check, Copy, Download, Eye, File as FileIcon, FileQuestion, Folder, FolderPlus, House, LocateFixed, MoreHorizontal, Pencil, RotateCw,
   SquareTerminal, Trash2, Upload, X,
 } from 'lucide-react'
 import { api, ApiError, errorText, postFile, type FileEntry, type FileListing } from '../api'
@@ -437,8 +437,9 @@ export function FilesDialog({ sessionId, start, onPath, onInsert, onClose }: Pro
         <button className="icon-btn" onClick={() => void load('')} aria-label={t('files.home')} title={t('files.home')}>
           <House size={18} />
         </button>
+        {/* (A phone's width: the less used ones go in the "⋯" menu, with words — ux1101 T35.) */}
         <button
-          className="icon-btn"
+          className="icon-btn files-tool-extra"
           onClick={async () => {
             await goTerminalFolder(false)
           }}
@@ -447,16 +448,31 @@ export function FilesDialog({ sessionId, start, onPath, onInsert, onClose }: Pro
         >
           <LocateFixed size={18} />
         </button>
-        <button className="icon-btn" onClick={reload} disabled={path === null} aria-label={t('files.refresh')} title={t('files.refresh')}>
+        <button className="icon-btn files-tool-extra" onClick={reload} disabled={path === null} aria-label={t('files.refresh')} title={t('files.refresh')}>
           <RotateCw size={18} />
         </button>
         <div className="spacer" />
-        <button className="icon-btn" aria-pressed={hidden} onClick={toggleHidden} aria-label={t('files.showHidden')} title={t('files.showHidden')}>
-          {hidden ? <Eye size={18} /> : <EyeOff size={18} />}
+        {/* (One icon, on or off by its pressed state: ux1101 T36.) */}
+        <button className="icon-btn files-tool-extra" aria-pressed={hidden} onClick={toggleHidden} aria-label={t('files.showHidden')} title={t('files.showHidden')}>
+          <Eye size={18} />
         </button>
-        <button className="icon-btn" onClick={mkdir} disabled={path === null} aria-label={t('files.newFolder')} title={t('files.newFolder')}>
+        <button className="icon-btn files-tool-extra" onClick={mkdir} disabled={path === null} aria-label={t('files.newFolder')} title={t('files.newFolder')}>
           <FolderPlus size={18} />
         </button>
+        <Menu
+          label={t('common.more')}
+          items={() => [
+            { label: t('files.cwd'), icon: <LocateFixed size={16} />, onSelect: () => void goTerminalFolder(false) },
+            { label: t('files.refresh'), icon: <RotateCw size={16} />, disabled: path === null, onSelect: reload },
+            { label: t('files.showHidden'), icon: hidden ? <Check size={16} /> : <span className="menu-icon-space" />, onSelect: toggleHidden },
+            { label: t('files.newFolder'), icon: <FolderPlus size={16} />, disabled: path === null, onSelect: mkdir },
+          ]}
+          button={(open, toggle) => (
+            <button className="icon-btn files-tools-more" aria-expanded={open} aria-haspopup="menu" onClick={toggle} aria-label={t('common.more')} title={t('common.more')}>
+              <MoreHorizontal size={18} />
+            </button>
+          )}
+        />
         <button className="btn btn-primary files-upload" onClick={() => fileInput.current?.click()} disabled={path === null}>
           <Upload size={16} />
           <span className="files-upload-label">{t('files.upload')}</span>
@@ -510,7 +526,19 @@ export function FilesDialog({ sessionId, start, onPath, onInsert, onClose }: Pro
                 </li>
               ))}
             </ul>
-            {entries.length === 0 && <p className="hint files-note">{hiddenCount > 0 && !hidden ? t('files.onlyHidden', { n: hiddenCount }) : t('files.empty')}</p>}
+            {entries.length === 0 && (
+              <p className="hint files-note">
+                {hiddenCount > 0 && !hidden ? (
+                  // (The way to show them, here: not a description of where it is — ux1101 T38.)
+                  <>
+                    {t('files.onlyHidden', { n: hiddenCount })}{' '}
+                    <button className="link-btn" onClick={toggleHidden}>{t('files.showHidden')}</button>
+                  </>
+                ) : (
+                  t('files.empty')
+                )}
+              </p>
+            )}
             {listing.truncated && <p className="hint files-note">{t('files.truncated', { n: listing.entries.length })}</p>}
           </>
         )}

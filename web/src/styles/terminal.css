@@ -63,9 +63,9 @@ html.term-mode body { position: fixed; inset: 0; }
 .term-host-name { font-weight: 600; font-size: 15px; line-height: 20px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .term-status { font-size: 12px; line-height: 16px; color: var(--term-fg-3); display: flex; align-items: center; gap: 6px; max-width: 100%; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .term-status .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--term-fg-3); flex: none; display: none; }
-.term-status.s-connecting, .term-status.s-reconnecting, .term-status.s-slow { color: var(--warn); }
-.term-status.s-connecting .dot, .term-status.s-reconnecting .dot { display: block; background: var(--warn); animation: pulse 1.2s ease-in-out infinite; }
-.term-status.s-offline, .term-status.s-full { color: var(--danger); }
+.term-status.s-connecting, .term-status.s-reconnecting, .term-status.s-slow { color: var(--term-warn-text); }
+.term-status.s-connecting .dot, .term-status.s-reconnecting .dot { display: block; background: var(--term-warn-text); animation: pulse 1.2s ease-in-out infinite; }
+.term-status.s-offline, .term-status.s-full { color: var(--term-danger-text); }
 @keyframes pulse { 50% { opacity: 0.3; } }
 
 .term-paused {
@@ -120,7 +120,7 @@ html.term-mode body { position: fixed; inset: 0; }
 .term-host-el .xterm-helper-textarea { font-size: 16px !important; }
 
 .term-drop {
-  position: absolute; inset: 10px; border: 2px dashed var(--accent); border-radius: 12px;
+  position: absolute; inset: 10px; border: 2px dashed var(--term-accent-text); border-radius: 12px;
   display: grid; place-items: center; background: color-mix(in srgb, var(--term-bg) 70%, transparent);
   color: var(--term-fg); font-weight: 600; pointer-events: none;
 }
@@ -175,6 +175,28 @@ html.term-mode body { position: fixed; inset: 0; }
   .composer-send:disabled, .composer-send:disabled:hover { background: none; box-shadow: inset 0 0 0 3px var(--term-key), inset 0 0 0 22px var(--term-line); }
   .composer-send.is-stop + .composer-send { margin-left: 2px; }
 }
+/* The terminal's composer: the terminal's colours throughout, its accent the
+   scheme's (ux1101 T11); the agents page's composer keeps its own. */
+.composer-term .composer-box:focus-within { box-shadow: 0 0 0 2px var(--term-accent-text); }
+.composer-term .composer-send { background: var(--term-accent-text); color: var(--term-bg); }
+.composer-term .composer-send:hover { background: color-mix(in srgb, var(--term-accent-text) 85%, var(--term-fg)); }
+/* Nothing typed: it sends Enter alone, a key's grey, not the accent (ux1101 T10). */
+.composer-term .composer-send.is-enter, .composer-term .composer-send.is-enter:hover { background: var(--term-key-active); color: var(--term-fg); }
+/* "Insert only": an outlined button, not words that read as a note; off,
+   its words greyed, not all of it faded (ux1101 T09). Touched over 44px. */
+.term-root .composer-term .composer-typein {
+  position: relative; height: 30px; padding: 0 10px; margin-left: 4px; border: 1px solid color-mix(in srgb, var(--term-fg-3) 55%, transparent);
+  background: transparent; color: var(--term-fg); font-size: 13px; font-weight: 500;
+}
+.term-root .composer-term .composer-typein:hover:not(:disabled) { background: var(--term-hover); }
+.term-root .composer-term .composer-typein:disabled { opacity: 1; color: var(--term-fg-3); border-color: var(--term-line); }
+@media (pointer: coarse) {
+  .term-root .composer-term .composer-typein { height: 34px; }
+  .term-root .composer-term .composer-typein::after { content: ''; position: absolute; inset: -5px -2px; }
+  .composer-term .composer-send, .composer-term .composer-send:hover { background: none; box-shadow: inset 0 0 0 3px var(--term-key), inset 0 0 0 22px var(--term-accent-text); }
+  .composer-term .composer-send.is-enter, .composer-term .composer-send.is-enter:hover { background: none; box-shadow: inset 0 0 0 3px var(--term-key), inset 0 0 0 22px var(--term-key-active); }
+}
+
 /* "@", "/", "$": suggestions over the terminal, right above the composer */
 .composer-complete {
   position: absolute; z-index: 5; bottom: calc(100% - 4px); left: max(8px, env(safe-area-inset-left, 0px));
@@ -211,8 +233,9 @@ html.kb-open .keybar { padding-bottom: 6px; }
 .kb-key .kb-text { max-width: 9em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .kb-row {
   flex: 1; min-width: 0; display: flex; gap: 12px; overflow-x: auto; scrollbar-width: none; touch-action: pan-x;
-  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 12px), transparent);
-  mask-image: linear-gradient(to right, #000 calc(100% - 12px), transparent);
+  /* (A fade wide enough to read as "more this way": ux1101 T07.) */
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent);
+  mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent);
 }
 .kb-row.at-end { -webkit-mask-image: none; mask-image: none; }
 .kb-row::-webkit-scrollbar { display: none; }
@@ -226,11 +249,11 @@ html.kb-open .keybar { padding-bottom: 6px; }
 .kb-key .kb-text { font-family: var(--font-ui); font-size: 13px; }
 .kb-key:active { background: var(--term-key-active); }
 .kb-key.mod-once { background: var(--term-accent-soft); color: var(--term-accent-text); }
-.kb-key.mod-lock { background: var(--accent); color: #fff; }
+.kb-key.mod-lock { background: var(--term-accent-text); color: var(--term-bg); }
 /* A key with a long press: a dot in its corner. */
 .kb-key { position: relative; }
 .kb-key.has-long::after { content: ''; position: absolute; top: 4px; right: 4px; width: 4px; height: 4px; border-radius: 50%; background: var(--term-fg-3); }
-.kb-key.mod-lock.has-long::after { background: rgba(255, 255, 255, 0.7); }
+.kb-key.mod-lock.has-long::after { background: var(--term-bg); opacity: 0.7; }
 
 /* Shortcut panel: above the key bar, over the terminal */
 .sc-panel {
@@ -253,6 +276,8 @@ html.kb-open .keybar { padding-bottom: 6px; }
 .sc-close { flex: none; }
 /* The groups scroll; the row of the most used stays at the foot, by the key bar. */
 .sc-page { flex: 1 1 auto; min-height: 96px; overflow-y: auto; overscroll-behavior: contain; }
+/* More below: the page's foot fades, so a row cut in half reads as "scrolls" (ux1101 T15). */
+.sc-page.faded { -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 24px), transparent); mask-image: linear-gradient(to bottom, #000 calc(100% - 24px), transparent); }
 .sc-foot { flex: none; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--term-line); }
 .sc-row {
   display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; touch-action: pan-x;
@@ -271,11 +296,13 @@ html.kb-open .keybar { padding-bottom: 6px; }
 }
 .term-root.light .sc-item { box-shadow: 0 0 0 1px var(--term-line); }
 .sc-item:active { background: var(--term-key-active); }
-.sc-label { display: flex; align-items: center; min-height: 18px; font: 500 14px/1.2 var(--font-mono); color: var(--term-accent-text); }
+.sc-label { display: flex; align-items: center; min-height: 18px; font: 500 14px/1.2 var(--font-mono); color: var(--term-fg); }
 .sc-desc { font-size: 12px; line-height: 16px; color: var(--term-fg-2); }
 @media (max-width: 479.98px) { .kb-key { min-width: 34px; padding: 0 6px; font-size: 13px; } .kb-key.wide { min-width: 44px; } .keybar { gap: 6px; } .kb-row { gap: 10px; } }
 @media (max-width: 380px) { .kb-key { min-width: 32px; padding: 0 4px; } }
 @media (pointer: coarse) and (min-width: 700px) { .kb-key { min-width: 44px; height: 44px; } }
+/* A finger's keys: 44 high on any width (ux1101 T06). */
+@media (pointer: coarse) { .kb-key { height: 44px; } }
 
 /* Copy mode: real text, so native selection works on touch screens. */
 .copy-mode { position: absolute; inset: 0; z-index: 50; display: flex; flex-direction: column; background: var(--term-bg); color: var(--term-fg); }
@@ -284,7 +311,10 @@ html.kb-open .keybar { padding-bottom: 6px; }
   padding: calc(env(safe-area-inset-top, 0px) + 6px) max(8px, env(safe-area-inset-right, 0px)) 6px max(16px, env(safe-area-inset-left, 0px));
   background: var(--term-chrome); border-bottom: 1px solid var(--term-line);
 }
-.copy-bar .hint { color: var(--term-fg-2); }
+.copy-bar .hint { color: var(--term-fg-2); min-width: 0; }
+/* (Its button in the terminal's colours, not the page's: ux1101 T02.) */
+.copy-bar .btn { flex: none; background: var(--term-key); border-color: var(--term-line); color: var(--term-fg); }
+.copy-bar .btn:hover { background: var(--term-hover); }
 .copy-text {
   flex: 1; margin: 0; overflow: auto; padding: 12px max(12px, env(safe-area-inset-right, 0px)) calc(12px + env(safe-area-inset-bottom, 0px)) max(12px, env(safe-area-inset-left, 0px));
   font: 13px/1.45 var(--font-mono); white-space: pre-wrap; word-break: break-all;
@@ -297,9 +327,18 @@ html.kb-open .keybar { padding-bottom: 6px; }
   margin-left: 4px; padding: 0 2px;
 }
 .term-tabs::-webkit-scrollbar { display: none; }
-.term-tab-note { flex: 0 1 auto; min-width: 0; margin: 0 4px 0 8px; }
+/* Tabs past either end: that end fades (ux1101 T27). */
+.term-tabs.fade-r { -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent); }
+.term-tabs.fade-l { -webkit-mask-image: linear-gradient(to right, transparent, #000 28px); mask-image: linear-gradient(to right, transparent, #000 28px); }
+.term-tabs.fade-l.fade-r {
+  -webkit-mask-image: linear-gradient(to right, transparent, #000 28px, #000 calc(100% - 28px), transparent);
+  mask-image: linear-gradient(to right, transparent, #000 28px, #000 calc(100% - 28px), transparent);
+}
+/* What the bar says of the session in front (recorded, watched, slow): by
+   its icons, in the quiet colour, apart from the tabs (ux1101 T26). */
+.term-tab-note { flex: 0 1 auto; max-width: 40%; min-width: 0; margin: 0 6px 0 12px; }
 .term-tab {
-  display: flex; align-items: center; gap: 6px; flex: none; max-width: 320px; height: 30px; padding: 0 12px;
+  display: flex; align-items: center; gap: 6px; flex: none; min-width: 0; max-width: 320px; height: 30px; padding: 0 12px;
   border: 0; border-radius: 8px; background: none; color: var(--term-fg-3); font: 500 13px/1 var(--font-ui); cursor: pointer;
   user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
 }
@@ -313,18 +352,22 @@ html.kb-open .keybar { padding-bottom: 6px; }
 .term-tab.held:not([aria-current="page"]) { background: var(--term-hover); }
 /* The tab in front: as a pressed button of the bar is, so it stands apart in
    every scheme (the key colour can be the bar's own in a light one). */
-.term-tab[aria-current="page"] { background: var(--term-accent-soft); color: var(--term-accent-text); font-weight: 600; }
+.term-tab[aria-current="page"] { background: var(--term-accent-soft); color: var(--term-fg); font-weight: 600; } /* (by its ground and weight, not a third colour: ux1101 T29) */
 .term-tab[aria-current="page"] .term-tab-title { color: var(--term-fg-2); }
-.term-tab-name { white-space: nowrap; }
-.term-tab-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--term-fg-3); font-weight: 400; }
+.term-tab-name { display: flex; min-width: 0; flex: 0 1 auto; white-space: nowrap; }
+/* A long name is cut, its host kept longest: the title gives way first,
+   then the session's name, then the host (ux1101 T27). */
+.term-tab-host { flex: 0 1 auto; min-width: 2.5em; overflow: hidden; text-overflow: ellipsis; }
+.term-tab-which { flex: 0 1000 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.term-tab-title { flex: 0 100000 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--term-fg-3); font-weight: 400; }
 /* Agents waiting for you, and finished ones not looked at yet: an icon says
    which, in colours read at 4.5:1 on the bar of any scheme. */
 .term-tab-count { flex: none; display: inline-flex; align-items: center; gap: 2px; font: 600 12px/1 var(--font-ui); font-variant-numeric: tabular-nums; }
 .term-tab-wait { color: var(--term-warn-text); }
 .term-tab-done { color: var(--term-ok-text); }
 .term-tab-dot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--term-fg-3); }
-.term-tab-dot.s-connecting, .term-tab-dot.s-reconnecting, .term-tab-dot.s-slow { background: var(--warn); }
-.term-tab-dot.s-offline, .term-tab-dot.s-full { background: var(--danger); }
+.term-tab-dot.s-connecting, .term-tab-dot.s-reconnecting, .term-tab-dot.s-slow { background: var(--term-warn-text); }
+.term-tab-dot.s-offline, .term-tab-dot.s-full { background: var(--term-danger-text); }
 /* Agents at work in the tab's session: a ring that turns, in the colour the
    conversation view gives working. */
 .term-tab-working {
@@ -334,7 +377,8 @@ html.kb-open .keybar { padding-bottom: 6px; }
 }
 @media (prefers-reduced-motion: reduce) { .term-tab-working { animation: none; border-color: var(--term-accent-text); } }
 .term-tab-new { flex: none; width: 30px; height: 30px; color: var(--term-fg-2); }
-@media (pointer: coarse) { .term-tab, .term-tab-new { height: 36px; } .term-tab-new { width: 36px; } }
+/* (A finger's: 40 high in the 44 bar — ux1101 T31.) */
+@media (pointer: coarse) { .term-tab, .term-tab-new { height: 40px; } .term-tab-new { width: 40px; } }
 
 /* "+": a host to open */
 .new-tab { width: min(440px, calc(100vw - 32px)); }
@@ -355,14 +399,17 @@ html.kb-open .keybar { padding-bottom: 6px; }
   background: none; color: var(--fg); text-align: left; cursor: pointer; font: inherit;
 }
 .new-tab-host:hover:not(:disabled), .new-tab-host:focus-visible { background: var(--bg-hover); }
+/* The one Enter opens (ux1101 T32). */
+.new-tab-host.is-sel { background: var(--bg-hover); }
 .new-tab-host:disabled { cursor: default; }
 .new-tab-name { font-weight: 600; font-size: 14px; white-space: nowrap; }
 .new-tab-addr { min-width: 0; flex: 1; color: var(--fg-3); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .new-tab-busy { flex: none; color: var(--fg-3); font-size: 12px; }
 
-/* Agents waiting for an answer (herdr) */
-.herdr-btn { position: relative; color: var(--term-warn-text); }
-.herdr-count { position: absolute; top: 3px; right: 2px; color: var(--term-warn-text); font: 600 11px/1 var(--font-ui); }
+/* Agents waiting for an answer (herdr): the icon and how many, side by side,
+   as a tab shows them (ux1101 T25). */
+.term-root .herdr-btn { width: auto; padding: 0 8px; display: inline-flex; align-items: center; gap: 3px; color: var(--term-warn-text); }
+.herdr-count { color: var(--term-warn-text); font: 600 12px/1 var(--font-ui); font-variant-numeric: tabular-nums; }
 
 .menu-icon-space { width: 16px; flex: none; }
 
@@ -1299,3 +1346,14 @@ button.convo-running-what { padding: 0; text-align: left; }
 .convo-turn { display: flex; gap: 10px; align-items: baseline; text-align: left; }
 .convo-turn-when { flex: none; color: var(--term-fg-3); font-size: 12px; font-variant-numeric: tabular-nums; }
 .convo-turn-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Port forwarding dialog: its sections' titles a step under the dialog's,
+   its words as the invite dialog's (ux1101 T42, T43). */
+.dialog.ports-dialog .lead { text-wrap: pretty; }
+.dialog.ports-dialog .section h2 { font-size: 13px; line-height: 18px; font-weight: 600; color: var(--fg-2); }
+.ports-sub { margin-top: 8px; font-size: 13px; line-height: 18px; font-weight: 600; color: var(--fg-2); }
+/* Watching: "Revoke", a word, not a cross that reads as "hide" (ux1101 T46). */
+.share-revoke { flex: none; height: 32px; padding: 0 10px; color: var(--fg-2); font-size: 13px; }
+/* Terminal schemes: the dialog clear of the top bar, whose tabs stay whole (ux1101 T39). */
+.dialog.scheme-dialog { max-height: calc(var(--vv-h, 100dvh) - 112px); }
+@media (max-width: 520px) { .sheet-mode .dialog.scheme-dialog { max-height: calc(var(--vv-h, 100dvh) - 56px - env(safe-area-inset-top, 0px)); } }

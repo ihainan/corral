@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, ChevronLeft, ChevronRight, Columns2, LayoutGrid, Maximize2, Plus, Rows2, SquareX, X } from 'lucide-react'
 import { t } from '../i18n'
 import { keysInUse } from '../components/ui'
@@ -77,6 +77,41 @@ export function ShortcutPanel(p: { pages: PanelPage[]; open: PanelPage; herdrKey
   const keep = (e: React.MouseEvent) => e.preventDefault() // (focus stays where it is)
   const groups = pageGroups(page, p.herdrKeys, p.keysUnknown)
   const foot = pageCommon(groups, page)
+  // The foot row repeats the page's most used ones, for when the page has to
+  // scroll: a page seen whole does without it (ux1101 T15). Measured with
+  // the foot away (the room it would take counts as the page's).
+  const pageRef = useRef<HTMLDivElement>(null)
+  const footRef = useRef<HTMLElement>(null)
+  const [needFoot, setNeedFoot] = useState(false)
+  const [faded, setFaded] = useState(false) // more below in the page
+  useLayoutEffect(() => {
+    const el = pageRef.current
+    if (!el) return
+    const look = () => {
+      const room = el.clientHeight + (footRef.current ? footRef.current.offsetHeight + 8 : 0) // (+ its margin)
+      setNeedFoot(el.scrollHeight > room + 1)
+      setFaded(el.scrollTop + el.clientHeight < el.scrollHeight - 1)
+    }
+    look()
+    const ro = new ResizeObserver(look)
+    ro.observe(el)
+    el.addEventListener('scroll', look, { passive: true })
+    return () => {
+      ro.disconnect()
+      el.removeEventListener('scroll', look)
+    }
+  }, [page, needFoot])
+  // Tabs: Left and Right (Home, End) move between them and show that page,
+  // the selected one the only stop for Tab (ux1101 T17).
+  const tabKeys = (e: React.KeyboardEvent) => {
+    const i = p.pages.indexOf(page)
+    const next = e.key === 'ArrowRight' ? (i + 1) % p.pages.length : e.key === 'ArrowLeft' ? (i - 1 + p.pages.length) % p.pages.length : e.key === 'Home' ? 0 : e.key === 'End' ? p.pages.length - 1 : -1
+    if (next < 0) return
+    e.preventDefault()
+    e.stopPropagation()
+    choose(p.pages[next])
+    requestAnimationFrame(() => ref.current?.querySelector<HTMLElement>('.sc-tab[aria-selected="true"]')?.focus())
+  }
   const item = (s: Shortcut, i: number) => {
     const Icon = 'herdr' in s ? icons[s.herdr] : undefined
     return (
@@ -89,9 +124,20 @@ export function ShortcutPanel(p: { pages: PanelPage[]; open: PanelPage; herdrKey
   return (
     <div ref={ref} className="sc-panel" role="dialog" aria-label={t('sc.title')}>
       <div className="sc-head">
-        <div className="sc-tabs" role="tablist">
+        <div className="sc-tabs" role="tablist" aria-label={t('sc.title')} onKeyDown={tabKeys}>
           {p.pages.map((pg) => (
-            <button key={pg} type="button" role="tab" aria-selected={pg === page} className="sc-tab" onMouseDown={keep} onClick={() => choose(pg)}>
+            <button
+              key={pg}
+              id={'sc-tab-' + pg}
+              type="button"
+              role="tab"
+              aria-selected={pg === page}
+              aria-controls="sc-page"
+              tabIndex={pg === page ? 0 : -1}
+              className="sc-tab"
+              onMouseDown={keep}
+              onClick={() => choose(pg)}
+            >
               {pageTitles[pg]}
             </button>
           ))}
@@ -100,7 +146,7 @@ export function ShortcutPanel(p: { pages: PanelPage[]; open: PanelPage; herdrKey
           <X size={16} />
         </button>
       </div>
-      <div className="sc-page" role="tabpanel" aria-label={pageTitles[page]}>
+      <div className={'sc-page' + (faded ? ' faded' : '')} id="sc-page" role="tabpanel" aria-labelledby={'sc-tab-' + page} ref={pageRef}>
         {groups.map((g) => (
           <section key={g.title} className="sc-group" aria-label={t(g.title)}>
             <h3 className="sc-group-title">{t(g.title)}</h3>
@@ -108,8 +154,8 @@ export function ShortcutPanel(p: { pages: PanelPage[]; open: PanelPage; herdrKey
           </section>
         ))}
       </div>
-      {foot.length > 0 && (
-        <section className="sc-foot" aria-label={t('sc.gCommon')}>
+      {foot.length > 0 && needFoot && (
+        <section className="sc-foot" aria-label={t('sc.gCommon')} ref={footRef}>
           <h3 className="sc-group-title">{t('sc.gCommon')}</h3>
           <div className="sc-row">{foot.map(item)}</div>
         </section>

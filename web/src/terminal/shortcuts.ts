@@ -41,7 +41,7 @@ export const shortcuts: Record<PanelPage, ShortcutGroup[]> = {
         { label: '^B "', desc: 'sc.splitDown', keys: `C-b '"'` },
         { label: '^B o', desc: 'sc.nextPane', keys: 'C-b o' },
         { label: '^B z', desc: 'sc.zoom', keys: 'C-b z' },
-        { label: '^B [', desc: 'sc.copyMode', keys: 'C-b [' },
+        { label: '^B [', desc: 'sc.tmuxCopyMode', keys: 'C-b [' },
         { label: '^B x', desc: 'sc.closePane', keys: 'C-b x' },
       ],
     },
