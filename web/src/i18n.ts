@@ -1460,7 +1460,7 @@ const zh = {
   'admin.selfDisableHint': '不能停用自己的账号',
   'admin.roleToAdminBody': '把 {name} 设为管理员？管理员可以管理所有账号，查看审计日志和所有人的录像。',
   'admin.roleToMemberBody': '把 {name} 设为成员？之后对方不能再管理账号，也看不到审计日志和别人的录像。',
-  'admin.createdAt': '{when}创建',
+  'admin.createdAt': '创建于 {when}',
   'admin.inviteNoteHint': '只记在审计日志里，方便日后查这个链接发给了谁。',
   'admin.firstPasswordHint': '至少 8 个字符。创建后会显示可复制的用户名和密码。',
   'keys.generatedLead': '已生成。把下面的公钥加到服务器的 ~/.ssh/authorized_keys 里，就可以用这把密钥登录。',

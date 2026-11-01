@@ -339,6 +339,11 @@ a.setting:hover { text-decoration: none; background: var(--bg-hover); }
 .empty h2 { font-size: 15px; line-height: 22px; font-weight: 600; }
 .empty p { color: var(--fg-2); max-width: 44ch; }
 .empty .btn { margin-top: 10px; }
+/* (A button's icon in an empty state is the button's, not the state's grey icon.) */
+.empty .btn svg { margin-bottom: 0; color: var(--fg-2); }
+.empty .btn-primary svg { color: currentColor; }
+.empty .btn-row .btn { margin-top: 0; }
+.empty .btn-row { margin-top: 10px; }
 .inline-error { color: var(--danger); font-size: 13px; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
 .loading { color: var(--fg-3); font-size: 13px; padding: 12px 0; }
 .quiet-note { color: var(--fg-3); font-size: 12px; }
