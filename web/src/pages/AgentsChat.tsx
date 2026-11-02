@@ -317,7 +317,7 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
   useEffect(() => {
     if (!active || !cur || (stack && screen === 'list') || holding) return // (behind a terminal tab: its address is not ours)
     if (!(pick && pick.s === cur.s.id && (pick.pane ?? '') === (cur.pane ?? ''))) {
-      if (named.current && pick?.pane) toast(t('agents.namedGone'))
+      if (named.current && pick && !picked) toast(t('agents.namedGone')) // (found under another connection of it: no)
       named.current = false
       return choose(cur)
     }

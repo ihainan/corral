@@ -201,8 +201,10 @@ function openPage(url) {
       // page knows whether it can): one with terminals or the agents page
       // first, then any other. Nothing is loaded again, no terminal's
       // connection ends (tabs: it shows as one of them).
+      // (A watched session's page is not asked: it keeps its connection.)
       const app = (c) => path(c).startsWith('/t/') || path(c) === '/agents'
-      return firstAccepting([...list.filter(app), ...list.filter((c) => !app(c))], url.href).then(({ taker, declined }) => {
+      const asked = list.filter((c) => !path(c).startsWith('/w/'))
+      return firstAccepting([...asked.filter(app), ...asked.filter((c) => !app(c))], url.href).then(({ taker, declined }) => {
         if (taker) return taker.focus()
         // Else a window that is not on a terminal or watched session's page,
         // and did not say no (a dialog up, terminals in its tabs: all would
