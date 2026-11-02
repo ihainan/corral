@@ -1449,3 +1449,7 @@ html.kb-open .convo-runs .convo-runs-pop.is-sheet { padding-bottom: 16px; }
 
 /* (A primary button off inside the terminal page: as before, not the app's light grey on a dark terminal — review.) */
 .term-root .btn-primary:disabled, .term-root .btn-primary:disabled:hover { opacity: 0.5; background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+/* The card's offer of Claude Code's question hook (terminal/askHook.tsx), in the terminal's colours */
+.ask-hook-hint { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
+.ask-hook-hint .convo-ask-more { margin: 0; }
+.convo-ask .ask-hook-snippet { border-color: var(--term-line); background: var(--term-key-active); color: var(--term-fg); }

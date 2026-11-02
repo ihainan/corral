@@ -783,3 +783,10 @@ details.adv > .form { margin-top: 16px; }
 
 /* A lasting choice tapped once: waiting for its second, outlined. */
 .reply-choice.is-confirm { box-shadow: inset 0 0 0 2px var(--warn); }
+
+/* Claude Code's question hook on a host (terminal/askHook.tsx): the host page's row, and what goes into the file */
+.ask-hook-row { margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--line); display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
+.ask-hook-row h3 { margin: 0; font-size: 15px; line-height: 22px; font-weight: 600; }
+.ask-hook-row .hint { margin: 0; }
+.ask-hook-state { margin: 0; font-size: 14px; line-height: 20px; }
+.ask-hook-snippet { margin: 4px 0; max-width: 100%; overflow-x: auto; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg-subtle); font: 12px/1.5 var(--font-mono); white-space: pre; }
