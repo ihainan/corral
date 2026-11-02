@@ -124,7 +124,7 @@ export interface ConvoEvent {
 // agent is seen falling silent, or answering half a sentence, with nothing
 // said of why (internal/convo/convo.go Trouble).
 export interface ConvoTrouble {
-  kind: 'refused' | 'api' | 'cut' | 'hook'
+  kind: 'refused' | 'api' | 'cut' | 'hook' | 'limit'
   text?: string // what was said of it, in the words it was said in
   name?: string // the model it went on with, or the hook that failed
   status?: number // the interface's status code, or the hook's exit code
@@ -134,6 +134,7 @@ export interface ConvoTrouble {
   attempt?: number // (api) it is tried again: this time, of max
   max?: number
   retry_ms?: number
+  until?: string // (limit) when it can be used again, as the agent said it (its host's time)
 }
 
 // Files the turn was given without the conversation saying so: ones that

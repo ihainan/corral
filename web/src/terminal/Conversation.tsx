@@ -2643,6 +2643,9 @@ function TroubleNote({ t: tr }: { t: ConvoTrouble }) {
     case 'cut':
       head = t('convo.trouble.cut')
       break
+    case 'limit':
+      head = tr.until ? t('convo.trouble.limitUntil', { w: tr.until }) : t('convo.trouble.limit')
+      break
     default: {
       const why = tr.secs ? t('convo.trouble.hookTimedOut', { n: tr.secs }) : tr.status ? t('convo.trouble.hookExit', { n: tr.status }) : ''
       head = tr.name ? t('convo.trouble.hook', { h: tr.name + (why ? ' · ' + why : '') }) : why ? t('convo.trouble.hook', { h: why }) : t('convo.trouble.hookPlain')

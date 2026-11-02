@@ -32,7 +32,8 @@ func TestCodexTurnError(t *testing.T) {
 	rows = append(rows, turn("s", map[string]any{"message": "Selected model is at capacity. Please try a different model.", "codex_error_info": "server_overloaded"})...)
 	rows = append(rows, turn("c", map[string]any{"message": "stream disconnected before completion: response protection is unavailable", "codex_error_info": "other"})...)
 	rows = append(rows, turn("d", map[string]any{"message": "This content was flagged for possible cybersecurity risk.", "codex_error_info": "cyber_policy"})...)
-	rows = append(rows, turn("e", map[string]any{"message": "You’ve hit your usage limit. Try again at 10:00 PM.", "codex_error_info": "usage_limit_exceeded"})...)
+	rows = append(rows, turn("e", map[string]any{"message": "You’ve hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at 6:48 PM.", "codex_error_info": "usage_limit_exceeded"})...)
+	rows = append(rows, turn("g", map[string]any{"message": "You’ve hit your usage limit. Try again later.", "codex_error_info": "usage_limit_exceeded"})...)
 	rows = append(rows, turn("f", nil)...) // (a turn that went well: nothing)
 	c := NewCodex()
 	c.Feed([]byte(strings.Join(rows, "")))
@@ -41,7 +42,7 @@ func TestCodexTurnError(t *testing.T) {
 		for _, p := range e.Parts {
 			switch {
 			case p.Trouble != nil:
-				got = append(got, e.Role+":"+p.Trouble.Kind+":"+strconv.Itoa(p.Trouble.Status)+":"+string([]rune(p.Trouble.Text)[:12]))
+				got = append(got, e.Role+":"+p.Trouble.Kind+":"+strconv.Itoa(p.Trouble.Status)+":"+string([]rune(p.Trouble.Text)[:12])+p.Trouble.Until)
 			default:
 				got = append(got, e.Role+":"+p.Text)
 			}
@@ -53,7 +54,8 @@ func TestCodexTurnError(t *testing.T) {
 		"user:s", "note:api:0:Selected mod",
 		"user:c", "note:api:0:stream disco",
 		"user:d", "note:refused:0:This content",
-		"user:e", "note:api:0:You’ve hit y",
+		"user:e", "note:limit:0:You’ve hit y6:48 PM",
+		"user:g", "note:limit:0:You’ve hit y",
 		"user:f",
 	}
 	if strings.Join(got, "|") != strings.Join(want, "|") {

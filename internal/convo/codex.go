@@ -875,6 +875,11 @@ func (c *Codex) event(r *codexRow, p *codexPayload) {
 // or {what: {http_status_code}} ("http_connection_failed",
 // "response_too_many_failed_attempts"…). Without
 // it the turn is seen ending with no answer and nothing said of why.
+// codexRetryAt: when a usage limit lifts, as Codex says it at the end of
+// the error ("… or try again at 6:48 PM.", in its host's time; all 15 seen
+// so far say it so). Not said so, no time is given.
+var codexRetryAt = regexp.MustCompile(`(?i)\btry again at ([^\n]{1,40}?)\.?\s*$`)
+
 func codexTrouble(raw json.RawMessage) *Trouble {
 	var e struct {
 		Message string          `json:"message"`
@@ -906,8 +911,15 @@ func codexTrouble(raw json.RawMessage) *Trouble {
 		status = 0
 	}
 	said, cutOff := cut(clean(text), maxTrouble)
-	if word == "cyber_policy" {
+	switch word {
+	case "cyber_policy":
 		return &Trouble{Kind: TroubleRefused, Text: said, Cut: cutOff}
+	case "usage_limit_exceeded":
+		t := &Trouble{Kind: TroubleLimit, Text: said, Cut: cutOff}
+		if m := codexRetryAt.FindStringSubmatch(text); m != nil {
+			t.Until = clip(m[1], 40)
+		}
+		return t
 	}
 	return &Trouble{Kind: TroubleAPI, Text: said, Status: status, Cut: cutOff}
 }
