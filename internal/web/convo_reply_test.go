@@ -510,6 +510,12 @@ func ownerGateCases(t *testing.T, dir string, pid int, start int64, run func(str
 	if got := text("free", "hello"); got != 16 || strings.Contains(wrote(), "send-keys") || !strings.Contains(wrote(), "send-text") {
 		t.Fatalf("the box went to a subagent before Enter: exit %d, typed %q", got, wrote())
 	}
+	// (A dialog come over it once pasted, its keys' hint wrapped: Enter held back — review551-1.)
+	showing(ownerMain)
+	os.WriteFile(nextFile, []byte("──────────\n❯ hello\n──────────\n  Esc to\n  cancel\n"), 0o644)
+	if got := text("free", "hello"); got != 16 || strings.Contains(wrote(), "send-keys") {
+		t.Fatalf("a dialog's wrapped hint before Enter: exit %d, typed %q", got, wrote())
+	}
 	// (A message of ours beginning as the placeholder does: once pasted, not read.)
 	showing(ownerMain)
 	os.WriteFile(nextFile, []byte("──────────\n❯ Message @team, the report\n──────────\n  ⏵⏵ auto mode on\n"), 0o644)

@@ -2933,9 +2933,9 @@ function Missing({ look, onEnter }: { look?: ConvoPending['look']; onEnter?: () 
     <div className="convo-missing">
       <p>
         {t(
-          !look.waiting && look.view === 'subagent'
+          look.view === 'subagent'
             ? 'convo.missing.subagent'
-            : !look.waiting && (look.view === 'list' || look.view === 'sessions')
+            : look.view === 'list' || look.view === 'sessions'
               ? 'convo.missing.otherView'
               : !look.known
                 ? 'convo.missing.unsure'

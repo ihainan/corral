@@ -51,9 +51,14 @@ import (
 // (Words are matched with spaces taken out, across the lines they wrap to
 // in a narrow pane.)
 func claudeOwner(screen string, after bool) string {
-	lines := strings.Split(strings.ReplaceAll(screen, "\r", ""), "\n")
+	// (As the awk reads it: a CR only at a line's end taken off; blank, a
+	// line of spaces, tabs and no-break spaces only — review551-3.)
+	lines := strings.Split(screen, "\n")
+	for k, l := range lines {
+		lines[k] = strings.TrimSuffix(l, "\r")
+	}
 	n := len(lines)
-	for n > 0 && strings.TrimSpace(strings.ReplaceAll(lines[n-1], "\u00a0", " ")) == "" {
+	for n > 0 && ownerSqueeze(lines[n-1]) == "" {
 		n--
 	}
 	for i := n - 1; i >= 1; i-- {
@@ -96,9 +101,12 @@ func claudeOwner(screen string, after bool) string {
 				continue
 			}
 			other++
-			if strings.Contains(l, "\u276f") || ownerChoice.MatchString(l) || strings.Contains(l, "Esc to cancel") || strings.Contains(l, "Enter to select") || strings.Contains(l, "Enter to confirm") {
+			if strings.Contains(l, "\u276f") || ownerChoice.MatchString(l) {
 				return "none"
 			}
+		}
+		if strings.Contains(said, "Esctocancel") || strings.Contains(said, "Entertoselect") || strings.Contains(said, "Entertoconfirm") {
+			return "none"
 		}
 		if other > ownerFoot {
 			return "none"
@@ -150,7 +158,7 @@ function agentrow(s) { return s ~ /^[ \t]*(❯[ \t]+)?(◯|●) / }
 { sub(/\r$/, ""); L[NR] = $0 }
 END {
   n = NR
-  while (n > 0) { t = L[n]; gsub(/NBSP/, " ", t); if (t !~ /^[ \t]*$/) break; n-- }
+  while (n > 0 && squeeze(L[n]) == "") n--
   for (i = n; i >= 2; i--) {
     if (!isprompt(L[i]) || !isrule(L[i-1])) continue
     e = 0
@@ -168,8 +176,9 @@ END {
     for (j = e + 1; j <= n; j++) {
       if (agentrow(L[j])) continue
       other++
-      if (index(L[j], "❯") || L[j] ~ /^[ \t]*[0-9]+\.[ \t]/ || index(L[j], "Esc to cancel") || index(L[j], "Enter to select") || index(L[j], "Enter to confirm")) { print "none"; exit }
+      if (index(L[j], "❯") || L[j] ~ /^[ \t]*[0-9]+\.[ \t]/) { print "none"; exit }
     }
+    if (index(f, "Esctocancel") || index(f, "Entertoselect") || index(f, "Entertoconfirm")) { print "none"; exit }
     if (other > FOOT) { print "none"; exit }
     if (after != 1) {
       b = ""
