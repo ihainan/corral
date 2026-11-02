@@ -131,7 +131,6 @@ let lastList: SessionInfo[] | null = null
 // (Another account signed in, or none: nothing of the one before stays.)
 export function forgetSessions() {
   lastList = null
-  appBadge(0)
 }
 
 // A session as the last list read has it (null when it has none).

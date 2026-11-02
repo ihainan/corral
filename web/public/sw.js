@@ -77,13 +77,27 @@ self.addEventListener('push', (e) => {
 
 // The app icon's number: how many agents wait for the person, as the
 // gateway counted when the alert went (the page sets it itself while open).
-// A count arriving late does not undo a newer one (while this worker runs).
+// A count arriving late does not undo a newer one (the newest number kept,
+// in memory and in Cache Storage, as the alerts are); one for another
+// account than the one signed in here is not shown.
 let badgeSeq = 0
 async function setBadge(n) {
   if (typeof n.badge !== 'number' || typeof n.seq !== 'number' || !self.navigator.setAppBadge) return
   const seq = micro(n.seq)
-  if (seq <= badgeSeq) return
-  badgeSeq = seq
+  try {
+    const c = await caches.open(ALERTS)
+    const owner = await c.match('/owner')
+    if (owner && n.badge_for && (await owner.text()) !== String(n.badge_for)) return
+    const r = await c.match('/badge')
+    const stored = r ? Number(await r.text()) : 0
+    if (stored > badgeSeq) badgeSeq = stored
+    if (seq <= badgeSeq) return
+    badgeSeq = seq
+    await c.put('/badge', new Response(String(seq)))
+  } catch {
+    if (seq <= badgeSeq) return // (no storage: what this worker remembers)
+    badgeSeq = seq
+  }
   try {
     await (n.badge > 0 ? self.navigator.setAppBadge(n.badge) : self.navigator.clearAppBadge())
   } catch {

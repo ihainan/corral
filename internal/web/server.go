@@ -119,7 +119,7 @@ func New(d Deps) *Server {
 		notifier: d.Notifier, vis: visibility{seen: map[string]map[*liveSocket]bool{}}, fwd: newForwarder(), files: newSFTPPool(), code: codeServers{jobs: map[[2]int64]*codeJob{}}}
 	s.restores.ctx, s.restores.stop = context.WithCancel(context.Background())
 	if s.notifier != nil {
-		s.notifier.SetBadges(s.waitAlerts.waitingOf) // (the app icon's number: agents waiting)
+		s.notifier.SetBadges(s.agentsWaiting) // (the app icon's number: agents waiting)
 	}
 	s.fwd.wg.Add(1)
 	go s.fwd.reap()
@@ -220,6 +220,7 @@ func (s *Server) registerRoutes() {
 	s.handle("GET /api/sessions/{id}/complete", SignedIn, s.apiComplete)
 	s.handle("GET /api/sessions/{id}/conversation", SignedIn, s.apiConversation)
 	s.handle("POST /api/sessions/{id}/conversation/interrupt", SignedIn, s.apiConversationInterrupt)
+	s.handle("POST /api/sessions/{id}/conversation/unlook", SignedIn, s.apiConversationUnlook)
 	s.handle("POST /api/sessions/{id}/conversation/send-now", SignedIn, s.apiConversationSendNow)
 	s.handle("POST /api/sessions/{id}/conversation/close-dialog", SignedIn, s.apiConversationCloseDialog)
 	s.handle("POST /api/sessions/{id}/conversation/mode", SignedIn, s.apiConversationMode)

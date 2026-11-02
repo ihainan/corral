@@ -179,7 +179,7 @@ export function NewAgentDialog({ sessions, onDone, onOpen, onClose }: { sessions
           <span>{t('newAgent.kind')}</span>
           <div className="seg" role="radiogroup">
             {(['claude', 'codex', 'opencode'] as const).map((k) => (
-              <button key={k} type="button" role="radio" aria-checked={kind === k} aria-pressed={kind === k} onClick={() => setKind(k)}>
+              <button key={k} type="button" role="radio" aria-checked={kind === k} aria-pressed={kind === k} onClick={() => (setKind(k), k !== 'claude' && setResume(''))}>
                 {t(`newAgent.kind.${k}`)}
               </button>
             ))}

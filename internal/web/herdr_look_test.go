@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/ihainan/corral/internal/herdr"
+	"github.com/ihainan/corral/internal/store"
 )
 
 // lookServer: a server with one herdr session watched, its snapshot having
@@ -78,5 +79,34 @@ func TestPaneWatchedByAnAgentsPage(t *testing.T) {
 	s.looks.at[id+"\x00p4"] = time.Now().Add(-lookTTL - time.Second)
 	if s.paneWatched(id, "p4") {
 		t.Fatal("still looked at long after the page last read it")
+	}
+}
+
+// The app icon's number: the panes waiting on the herdr servers a person's
+// sessions watch, each server once (two sessions of one server, one count),
+// those waiting before the watch began too; another person's not.
+func TestAgentsWaitingCountsEachServerOnce(t *testing.T) {
+	s := &Server{herdrSocks: herdrSockets{path: map[string]string{}}}
+	a := s.herdrTimes.of(&store.Host{ID: 1, Address: "a"}, "/s")
+	b := s.herdrTimes.of(&store.Host{ID: 2, Address: "b"}, "/s")
+	ka, kb := herdrServerKey(&store.Host{ID: 1, Address: "a"}, "/s"), herdrServerKey(&store.Host{ID: 2, Address: "b"}, "/s")
+	a.of("p1", herdr.StatusBlocked, false) // (waiting when first seen: no change to tell of it)
+	a.changed("p2", herdr.StatusBlocked)
+	a.changed("p3", herdr.StatusWorking)
+	b.changed("p1", herdr.StatusBlocked)
+	for id, w := range map[string]watchedServer{"s1": {ka, 7}, "s2": {ka, 7}, "s3": {kb, 8}} {
+		s.herdrSocks.set(id, "/s")
+		s.herdrSocks.setServer(id, w.key, w.owner)
+	}
+	if n := s.agentsWaiting(7); n != 2 {
+		t.Fatalf("waiting for 7: %d, want 2", n)
+	}
+	if n := s.agentsWaiting(8); n != 1 {
+		t.Fatalf("waiting for 8: %d, want 1", n)
+	}
+	a.changed("p2", herdr.StatusGone)
+	s.herdrSocks.set("s3", "") // (its watch over: its server no longer counted)
+	if s.agentsWaiting(7) != 1 || s.agentsWaiting(8) != 0 {
+		t.Fatalf("after: %d, %d; want 1, 0", s.agentsWaiting(7), s.agentsWaiting(8))
 	}
 }

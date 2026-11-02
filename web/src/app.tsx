@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
 import { forgetConversations } from './terminal/conversation'
-import { forgetSessions } from './terminal/agents'
+import { appBadge, forgetSessions } from './terminal/agents'
 import { forgetColours } from './terminal/Code'
 import { ArrowLeft, Bot, Film, KeyRound, LogOut, ScrollText, Server, Settings, Users } from 'lucide-react'
 import { api, ApiError, bumpAuthGen, setUnauthorizedHandler, type Bootstrap, type Me } from './api'
@@ -105,10 +105,15 @@ export function App() {
 
   // What was kept of one account's sessions and conversations (to switch
   // without a flash) goes when another signs in, or none is.
+  const wasMe = useRef(me?.id)
   useEffect(() => {
     forgetConversations()
     forgetSessions()
     forgetColours()
+    // (The app icon's number was another's: gone. Not when the page starts
+    // and learns who is signed in: that one's stays.)
+    if (wasMe.current !== undefined && wasMe.current !== me?.id) appBadge(0)
+    wasMe.current = me?.id
   }, [me?.id])
 
   // What the start-up answer says about the user (such as whether there are

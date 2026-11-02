@@ -378,7 +378,7 @@ func TestNotesSayTheBadge(t *testing.T) {
 		}
 		return 0
 	})
-	for u, want := range map[int64]string{7: `"badge":2`, 8: `"badge":0`} {
+	for u, want := range map[int64]string{7: `"badge":2,"badge_for":7`, 8: `"badge":0,"badge_for":8`} {
 		var note Note
 		n.stampBadge(u, &note)
 		if b, _ := json.Marshal(note); !strings.Contains(string(b), want) {

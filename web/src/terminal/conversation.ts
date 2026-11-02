@@ -377,6 +377,16 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
     let rev = 0
     let byseq = new Map<number, ConvoEntry>()
     let again = false // (asked for while one was on its way: once it is answered)
+    // The agent last read as looked at (look=1): told it is no longer when
+    // another is in front, the page is hidden or the view goes, so that it
+    // is alerted about again at once.
+    let looked: string | undefined
+    const unlook = () => {
+      const p = looked
+      looked = undefined
+      if (p)
+        void fetch(`/api/sessions/${sessionId}/conversation/unlook`, { method: 'POST', credentials: 'same-origin', keepalive: true, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pane: p }) }).catch(() => {})
+    }
     const run = async () => {
       timer = undefined
       if (stopped) return
@@ -391,6 +401,7 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
       // screen, the page not hidden: the agent is looked at, and the gateway
       // does not alert about it meanwhile.)
       q.set('look', '1')
+      if (pane) looked = pane
       const asksOlder = wantOlder.current !== null && wantOlder.current === gen
       if (asksOlder) q.set('older', '1')
       let next = POLL
@@ -463,7 +474,8 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
       if (!stopped) timer = setTimeout(run, next)
     }
     const onVisible = () => {
-      if (!document.hidden && !timer && !ctl) void run()
+      if (document.hidden) unlook()
+      else if (!timer && !ctl) void run()
     }
     // What shows first of the pane in front: what was last read of it, if
     // anything (its entries as read up to where reading goes on from), else
@@ -508,6 +520,7 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
     }
     // Another pane in front: what is on its way is for the old one.
     poke.current = () => {
+      unlook()
       clearTimeout(timer)
       timer = undefined
       ctl?.abort()
@@ -522,6 +535,7 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
       stopped = true
       clearTimeout(timer)
       ctl?.abort()
+      unlook()
       document.removeEventListener('visibilitychange', onVisible)
       poke.current = () => {}
       pokeOlder.current = () => {}

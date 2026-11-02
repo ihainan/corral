@@ -68,8 +68,9 @@ type paneLooks struct {
 }
 
 // lookTTL: how long after a reading an agent counts as looked at (the page
-// reads every second or two, every five after a failure).
-const lookTTL = 12 * time.Second
+// reads every second or two, every five after a failure). A page that stops
+// showing it says so (unlook): the time is for one that could not.
+const lookTTL = 8 * time.Second
 
 func (l *paneLooks) note(session, pane string) {
 	l.mu.Lock()
@@ -86,6 +87,12 @@ func (l *paneLooks) note(session, pane string) {
 		}
 	}
 	l.at[session+"\x00"+pane] = now
+}
+
+func (l *paneLooks) drop(session, pane string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	delete(l.at, session+"\x00"+pane)
 }
 
 func (l *paneLooks) recent(session, pane string) bool {
@@ -109,6 +116,21 @@ func (s *Server) paneWatched(session, pane string) bool {
 	return s.vis.watched(session) && s.herdrSocks.shows(session, pane)
 }
 
+// agentsWaiting: how many of a person's agents wait for them now, as the
+// gateway sees them (the app icon's number, see Notifier.SetBadges): the
+// panes in "needs you" of the herdr servers their sessions watch, each
+// server once however many sessions watch it. Only leaf locks: it is
+// counted while alerts are sent under others.
+func (s *Server) agentsWaiting(user int64) int {
+	n := 0
+	for _, key := range s.herdrSocks.serversOf(user) {
+		if t := s.herdrTimes.get(key); t != nil {
+			n += t.count(herdr.StatusBlocked)
+		}
+	}
+	return n
+}
+
 // waitAlerts follows agents waiting for the user, by alert tag (a pane of a
 // session): which wait is under way, the "needs you" alert sent for it, and
 // the single-use tokens its buttons answer with.
@@ -118,48 +140,6 @@ type waitAlerts struct {
 	waiting map[string]uint64     // tag → the wait under way
 	sent    map[string]*waitAlert // tag → the alert shown for it
 	tokens  map[string]*waitAlert // a button's token → its alert
-	// whose: whose agent each wait under way is, under a lock of its own:
-	// counted while alerts are sent under mu (see Notifier.SetBadges).
-	whose waitOwners
-}
-
-// waitOwners: tag → the person whose agent waits.
-type waitOwners struct {
-	mu sync.Mutex
-	of map[string]int64
-}
-
-func (o *waitOwners) set(tag string, user int64) {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	if o.of == nil {
-		o.of = map[string]int64{}
-	}
-	o.of[tag] = user
-}
-
-// keep leaves only the tags still waited on (the rest ended or forgotten).
-func (o *waitOwners) keep(waiting func(tag string) bool) {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	for tag := range o.of {
-		if !waiting(tag) {
-			delete(o.of, tag)
-		}
-	}
-}
-
-// waitingOf: how many of a person's agents wait now.
-func (a *waitAlerts) waitingOf(user int64) int {
-	a.whose.mu.Lock()
-	defer a.whose.mu.Unlock()
-	n := 0
-	for _, u := range a.whose.of {
-		if u == user {
-			n++
-		}
-	}
-	return n
 }
 
 // current says whether a wait is still the one under way for its tag.
@@ -185,9 +165,8 @@ type waitAlert struct {
 // tokenTTL is how long an alert's buttons answer.
 const tokenTTL = 30 * time.Minute
 
-// begin notes that user's agent started to wait, and names this wait.
-func (a *waitAlerts) begin(tag string, user int64) uint64 {
-	a.whose.set(tag, user)
+// begin notes that an agent started to wait, and names this wait.
+func (a *waitAlerts) begin(tag string) uint64 {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.waiting == nil {
@@ -195,7 +174,6 @@ func (a *waitAlerts) begin(tag string, user int64) uint64 {
 	}
 	if len(a.waiting) > 5000 { // (waits of sessions gone without ending)
 		a.waiting = map[string]uint64{}
-		a.whose.keep(func(t string) bool { return t == tag })
 	}
 	for k, al := range a.tokens {
 		if time.Since(al.at) > tokenTTL {
@@ -249,7 +227,6 @@ func (a *waitAlerts) end(tag string) *waitAlert {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	delete(a.waiting, tag)
-	a.whose.keep(func(t string) bool { return t != tag })
 	al := a.sent[tag]
 	delete(a.sent, tag)
 	if al != nil {
@@ -272,7 +249,6 @@ func (a *waitAlerts) endSession(sessionID string) []*waitAlert {
 			delete(a.waiting, tag)
 		}
 	}
-	a.whose.keep(func(t string) bool { return !strings.HasPrefix(t, waitTagPrefix(sessionID)) })
 	a.mu.Unlock()
 	var out []*waitAlert
 	for _, tag := range tags {
@@ -383,7 +359,7 @@ func (s *Server) onHerdrTransition(sess *term.Session, h *store.Host, tr herdr.T
 		}
 	}
 	if tr.To == herdr.StatusBlocked {
-		wait := s.waitAlerts.begin(tag, sess.OwnerID) // (also while looked at: a later alert must not be for this wait)
+		wait := s.waitAlerts.begin(tag) // (also while looked at: a later alert must not be for this wait)
 		if !s.paneWatched(sess.ID, tr.Pane.ID) {
 			go s.alertWaiting(sess, tr, wait, note, agent, agentZh)
 		}

@@ -161,9 +161,11 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
   const { sessions, failed } = useRunningSessions(active, 3000)
   // (On its own, not a tab: the title tells how many wait for an answer.)
   const waitingN = useMemo(() => (sessions ? listAgents(sessions).rows.filter((r) => r.status === 'blocked').length : null), [sessions])
+  // (Said again at each reading, not only when it changes: an alert come
+  // late may have set the icon to an older count meanwhile.)
   useEffect(() => {
     if (!bar) waitingTitle(waitingN)
-  }, [bar, waitingN])
+  }, [bar, waitingN, sessions])
   useEffect(() => () => void (!bar && waitingTitle(null)), [bar])
   const [pick, setPick] = useState<Pick | null>(readPick)
   // The entry key of the one picked last (an address names only its session and pane).

@@ -306,7 +306,7 @@ export function TerminalTabs({ current }: { current: string }) {
     return () => clearInterval(timer)
   }, [load])
   const waiting = sessions ? waitingAgents(sessions) : null // (null: not read yet)
-  useEffect(() => waitingTitle(waiting), [waiting])
+  useEffect(() => waitingTitle(waiting), [waiting, sessions]) // (again at each reading: see AgentsChat)
   useEffect(() => () => waitingTitle(null), [])
   // A session just opened shows its tab with its name. (Not when mounted:
   // the effect above has asked already, and a second ask would be queued.)

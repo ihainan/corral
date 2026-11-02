@@ -1545,6 +1545,26 @@ type convoAnswer struct {
 // gen is not the current one (then reset is set). older=1 reads in the part
 // of the log before what was read (convoOlderStep of it): its entries come
 // as changed ones, before the others (lower seqs).
+// POST /api/sessions/{id}/conversation/unlook {"pane"} → 204: an agents
+// page no longer shows that agent (another picked, the page hidden or
+// left): it is alerted about again at once, not lookTTL after its last
+// reading.
+func (s *Server) apiConversationUnlook(w http.ResponseWriter, r *http.Request) {
+	sess, ok := s.runningSession(w, r)
+	if !ok {
+		return
+	}
+	var b struct {
+		Pane string `json:"pane"`
+	}
+	if err := readJSON(r, &b); err != nil || !herdrPane.MatchString(b.Pane) {
+		writeError(w, http.StatusBadRequest, "bad_request", "bad pane")
+		return
+	}
+	s.looks.drop(sess.ID, b.Pane)
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 	sess, ok := s.runningSession(w, r)
 	if !ok {

@@ -51,7 +51,8 @@ type Note struct {
 	// Badge: how many agents wait for the person as this goes (set by
 	// Send, where the Notifier is told how to count): the app icon's
 	// number on the devices, till the page itself says.
-	Badge *int `json:"badge,omitempty"`
+	Badge    *int  `json:"badge,omitempty"`
+	BadgeFor int64 `json:"badge_for,omitempty"` // (whose: a device signed in to another account since leaves it)
 }
 
 // Action is a button on an alert.
@@ -240,8 +241,9 @@ func (n *Notifier) CheckWebhook(raw string) error {
 const rateWindow = time.Minute
 
 // SetBadges tells how many agents wait for a person: each note sent says
-// it (Note.Badge). Set once, before any is sent. It must not wait on
-// anything held while Send is called.
+// it (Note.Badge). Set once, before any is sent. It is called under n.mu
+// (and whatever Send's caller holds): it must take only locks that are
+// never held while calling Send.
 func (n *Notifier) SetBadges(count func(userID int64) int) { n.badgeOf = count }
 
 // stampBadge says on a note how many agents wait for its person, where
@@ -249,7 +251,7 @@ func (n *Notifier) SetBadges(count func(userID int64) int) { n.badgeOf = count }
 func (n *Notifier) stampBadge(userID int64, note *Note) {
 	if n.badgeOf != nil {
 		b := n.badgeOf(userID)
-		note.Badge = &b
+		note.Badge, note.BadgeFor = &b, userID
 	}
 }
 
@@ -260,7 +262,6 @@ func (n *Notifier) stampBadge(userID int64, note *Note) {
 // passes the first.
 func (n *Notifier) Send(ctx context.Context, userID int64, note Note) bool {
 	key := fmt.Sprintf("%d|%s", userID, note.Tag)
-	n.stampBadge(userID, &note) // (before n.mu: counting takes locks of its own)
 	n.mu.Lock()
 	now := time.Now()
 	if !note.Replace {
@@ -304,6 +305,7 @@ func (n *Notifier) Send(ctx context.Context, userID int64, note Note) bool {
 		n.lastSeq++
 	}
 	note.Seq = n.lastSeq
+	n.stampBadge(userID, &note) // (with its number: a later note says a count no older)
 	item := queued{ctx: context.WithoutCancel(ctx), gen: gen, note: note}
 	pushIdle := n.pushes.add(userID, item)
 	hookIdle := !note.Replace && n.hooks.add(userID, item) // (a replacement is for devices only)
