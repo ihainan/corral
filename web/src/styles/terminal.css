@@ -1377,6 +1377,10 @@ button.convo-running-what:hover { color: var(--term-fg); text-decoration-color: 
 .page-keys-note { margin: 12px 0 0; font-size: 13px; line-height: 1.5; color: var(--fg-3); }
 @media (max-width: 480px) { .page-keys-row dt { width: 120px; } }
 .convo-list-pin { flex: none; display: inline-flex; align-items: center; color: var(--fg-3); }
+/* (A pushpin stuck in, leaning: its head filled, as a mark of what is so
+   rather than a thing to press. The menu's stays upright: its PinOff's
+   stroke, leaning, reads as a broken line.) */
+.convo-list-pin svg { transform: rotate(45deg); fill: currentColor; }
 /* (Beside its title, not off by the time: the line's gap is wider than it wants.) */
 .convo-list-line .convo-list-pin { align-self: center; margin-left: -4px; color: var(--term-fg-3); }
 /* The person's turns (convoTurnsPanel): when, then how each begins. */
