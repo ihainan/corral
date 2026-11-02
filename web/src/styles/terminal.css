@@ -613,6 +613,11 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-md hr { border: 0; border-top: 1px solid var(--term-line); margin: 14px 0; }
 .convo-md blockquote { padding-left: 14px; color: var(--term-fg-2); }
 .convo-md code { font-family: var(--font-mono); font-size: 0.88em; background: var(--term-hover); color: var(--term-accent-text); border-radius: 4px; padding: 1px 5px; }
+/* A file's path in an answer: its code, underlined as something to open (a menu). */
+.md-path { display: inline; padding: 0; margin: 0; border: 0; background: none; font: inherit; color: inherit; cursor: pointer; text-align: inherit; }
+.md-path > code { text-decoration: underline dotted color-mix(in srgb, var(--term-accent-text) 60%, transparent); text-underline-offset: 3px; overflow-wrap: anywhere; }
+.md-path:hover > code { text-decoration-style: solid; }
+.md-path:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: 1px; border-radius: 4px; }
 .md-code { position: relative; background: var(--term-chrome); border: 1px solid var(--term-line); border-radius: 8px; }
 .md-code pre { margin: 0; padding: 10px 12px; overflow-x: auto; font-family: var(--font-mono); font-size: 13px; line-height: 1.55; tab-size: 4; }
 .convo-md .md-code code { background: none; padding: 0; font-size: inherit; color: inherit; }

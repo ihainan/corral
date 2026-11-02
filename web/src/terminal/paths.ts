@@ -15,3 +15,13 @@ export function geminiPath(p: string): string | null {
   if (/[\x00-\x1f\x7f]/.test(p)) return null
   return '@' + p.replace(/[ ,;!?()[\]{}"'`\\]/g, '\\$&').replace(/\.$/, '\\.')
 }
+
+// A code span of an answer that is a path and nothing else (an absolute
+// one; a line number after it, "file.go:42", left off): its path. Paths in
+// the prose itself are left as they are — too much there only looks like
+// one (an address's path, a route, one on another host).
+export function codePath(s: string): string | null {
+  const m = /^(\/(?!\/)[^\s`'"<>|;&$]{0,1023}?)(?::\d+(?::\d+)?)?$/.exec(s.trim())
+  if (!m || m[1] === '/' || /\/\.{1,2}(\/|$)/.test(m[1])) return null
+  return m[1]
+}

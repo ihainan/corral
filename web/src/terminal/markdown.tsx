@@ -1,4 +1,4 @@
-import { Fragment, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
+import { createContext, Fragment, useContext, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { Code } from './Code'
 
 // A small Markdown renderer for an agent's answers in the conversation view:
@@ -15,6 +15,14 @@ export function Markdown({ text, onCopyCode, copyLabel = 'Copy' }: { text: strin
 }
 
 type Copy = { fn: (code: string) => void; label: string } | undefined
+
+// What an inline code span is drawn as, where its page has more to say of
+// some (the conversation: a file's path, to be acted on); null: as code.
+export const CodeSpanOf = createContext<((text: string) => ReactNode | null) | undefined>(undefined)
+function InlineCode({ text }: { text: string }) {
+  const draw = useContext(CodeSpanOf)
+  return draw?.(text) ?? <code>{text}</code>
+}
 
 const fence = /^\s{0,3}(`{3,}|~{3,})\s*([^`\s]*)/
 const heading = /^ {0,3}(#{1,6})[ \t]+(.*)$/
@@ -240,7 +248,7 @@ function inlineLines(lines: string[]): ReactNode {
 // line is not searched again from the start for every span on it.
 const wide = '\\u3000-\\u303f\\uff00-\\uffef' // full-width punctuation ends a bare address
 const spans: { re: RegExp; make: (m: RegExpExecArray, key: number) => ReactNode }[] = [
-  { re: /`([^`]+)`/g, make: (m, k) => <code key={k}>{m[1]}</code> },
+  { re: /`([^`]+)`/g, make: (m, k) => <InlineCode key={k} text={m[1]} /> },
   { re: /\[([^\]]{1,500})\]\((https?:\/\/[^\s)]{1,2000})\)/g, make: (m, k) => link(m[2], inline(m[1]), k) },
   { re: new RegExp(`https?://[^\\s<>()${wide}"']{0,2000}[^\\s<>()${wide}"'.,;:!?]`, 'g'), make: (m, k) => link(m[0], m[0], k) },
   { re: /\*\*(?=\S)((?:`[^`]{0,500}`|[^`]){0,1000}?\S)\*\*/g, make: (m, k) => <strong key={k}>{inline(m[1])}</strong> },

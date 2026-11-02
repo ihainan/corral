@@ -1,12 +1,13 @@
 import { createContext, Fragment, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { ArrowDown, Check, Image as ImageIcon, ChevronDown, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, Clock, Download, GitBranch, Keyboard, ListOrdered, Loader, MoreHorizontal, MoreVertical, PanelLeft, Pin, Search, TriangleAlert, X, Plus } from 'lucide-react'
+import { ArrowDown, Check, Copy, FolderOpen, Image as ImageIcon, ChevronDown, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, Clock, Download, GitBranch, Keyboard, ListOrdered, Loader, MoreHorizontal, MoreVertical, PanelLeft, Pin, Search, TriangleAlert, X, Plus } from 'lucide-react'
 import { t, getLang, type I18nKey } from '../i18n'
 import { api } from '../api'
 import { asHeld, dayBefore, DAYS, dayStart, FOLDED, foldAt, GROUPS, inGroup, listOrder, pinned, type ConvoListRow, type RowCmds } from './agentOrder'
 import { copyText, Dialog, isCoarse, Menu, MenuLayer, type MenuItem } from '../components/ui'
 import { composing, foldAllKey, helpKey, jumpKey, onMac, switchKey } from './pageKeys'
 import { local } from '../storage'
-import { Markdown } from './markdown'
+import { CodeSpanOf, Markdown } from './markdown'
+import { codePath } from './paths'
 import { useSubConvo } from './subagent'
 import { NEW_AGENT } from './newAgent'
 import { Code } from './Code'
@@ -1014,8 +1015,15 @@ export function ConversationView({
       {side && !sideShown && <ChevronDown size={14} className="convo-bar-chev" aria-hidden="true" />}
     </>
   )
+  // (A path in an answer's code span: acted on, its session live.)
+  const codeSpan = useCallback((text: string) => {
+    const p = files ? codePath(text) : null
+    return p ? <PathCode path={p} text={text} /> : null
+  }, [files])
   return (
     <FileActsOf.Provider value={files}>
+    <CopyOf.Provider value={copy}>
+    <CodeSpanOf.Provider value={codeSpan}>
     <div className="convo" role="region" aria-label={t('convo.title')} ref={root}>
       {sideShown && (
         <nav className="convo-side" aria-label={t('convo.agents')} style={{ width: sideWidth }} ref={sideEl}>
@@ -1272,6 +1280,8 @@ export function ConversationView({
       )}
       {picking && side && <Picker rows={rows} onClose={unpick} searchFirst={picking === 'search'} />}
     </div>
+    </CodeSpanOf.Provider>
+    </CopyOf.Provider>
     </FileActsOf.Provider>
   )
 }
@@ -2834,6 +2844,33 @@ export function fullPath(p: string): string | null {
 }
 
 export const IMAGE_EXT = /\.(png|jpe?g|gif|webp)$/i
+
+// Such a span, while its session is live: a menu of what can be done with it.
+function PathCode({ path, text }: { path: string; text: string }) {
+  const acts = useContext(FileActsOf)!
+  const copyOf = useContext(CopyOf)
+  const dir = path.endsWith('/')
+  return (
+    <Menu
+      label={path}
+      heading={path}
+      items={() =>
+        [
+          { label: t('convo.path.copy'), icon: <Copy size={16} />, onSelect: () => copyOf?.(path) },
+          IMAGE_EXT.test(path) ? { label: t('convo.path.view'), icon: <ImageIcon size={16} />, onSelect: () => acts.view(path) } : null,
+          { label: t('convo.path.reveal'), icon: <FolderOpen size={16} />, onSelect: () => acts.reveal(dir ? path.replace(/\/+$/, '') || '/' : path) },
+          dir ? null : { label: t('convo.path.download'), icon: <Download size={16} />, onSelect: () => acts.download(path) },
+        ].filter(Boolean) as MenuItem[]
+      }
+      button={(open, toggle) => (
+        <button type="button" className="md-path" aria-expanded={open} aria-haspopup="menu" onClick={toggle} title={t('convo.path.menu')}>
+          <code>{text}</code>
+        </button>
+      )}
+    />
+  )
+}
+const CopyOf = createContext<((s: string) => void) | undefined>(undefined)
 
 // A file a step acted on: its whole path, and what can be done with it.
 // (acts: only what can be done, the path being said beside it already.)
