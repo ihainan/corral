@@ -123,6 +123,7 @@ export function ConversationView({
   query,
   onQuery,
   answered,
+  files,
 }: {
   convo: Convo
   agent: ConvoAgent | null
@@ -148,6 +149,7 @@ export function ConversationView({
   effort?: EffortSwitch // (and how hard it is asked to think)
   lead?: ReactNode // (first in the bar: the agents page's way back to its list, on a phone)
   answered?: boolean // (its question answered here, its list's word of it not come yet)
+  files?: FileActs // (its session live: a file it names can be shown, fetched, looked at)
 }) {
   const working = agent?.status === 'working'
   const waits = agent?.status === 'blocked'
@@ -1013,6 +1015,7 @@ export function ConversationView({
     </>
   )
   return (
+    <FileActsOf.Provider value={files}>
     <div className="convo" role="region" aria-label={t('convo.title')} ref={root}>
       {sideShown && (
         <nav className="convo-side" aria-label={t('convo.agents')} style={{ width: sideWidth }} ref={sideEl}>
@@ -1252,7 +1255,7 @@ export function ConversationView({
         )}
       </div>
       </div>
-      {changes && shownEdits && <ChangesPanel key={changes.key} edits={shownEdits} focus={changes.path} onClose={unshow} active={active} />}
+      {changes && shownEdits && <ChangesPanel key={changes.key} edits={shownEdits} focus={changes.path} onClose={unshow} active={active} onCopy={copy} />}
       {subs && subs.length > 0 && convo.of && (
         <SubPanel
           key={subs[subs.length - 1].agent}
@@ -1269,6 +1272,7 @@ export function ConversationView({
       )}
       {picking && side && <Picker rows={rows} onClose={unpick} searchFirst={picking === 'search'} />}
     </div>
+    </FileActsOf.Provider>
   )
 }
 
@@ -2815,6 +2819,46 @@ const ShowTerminal = createContext<(() => void) | undefined>(undefined)
 // A subagent sent off, whose own conversation can be shown: by its id.
 type Sub = { agent: string; title?: string }
 const OpenSub = createContext<((s: Sub) => void) | undefined>(undefined)
+
+// What can be done with a file the agent names, on its host (through the
+// session the conversation is read through): shown in the files panel,
+// downloaded, looked at (an image). Not there once that session has ended.
+// cwd: the agent's folder, for a path given relative to it.
+export type FileActs = { reveal: (path: string) => void; download: (path: string) => void; view?: (path: string) => void; cwd?: string }
+const FileActsOf = createContext<FileActs | undefined>(undefined)
+
+// A path as the host knows it: absolute, or relative to the agent's folder
+// where that is known ("~/" is the home folder: left to the host to say).
+export function fullPath(p: string, cwd?: string): string | null {
+  if (!p || /[\x00-\x1f\x7f]/.test(p)) return null
+  if (p.startsWith('/')) return p
+  if (!cwd?.startsWith('/') || p.startsWith('~')) return null
+  return (cwd.replace(/\/+$/, '') + '/' + p.replace(/^\.\//, '')).replace(/\/{2,}/g, '/')
+}
+
+export const IMAGE_EXT = /\.(png|jpe?g|gif|webp)$/i
+
+// A file a step acted on: its whole path, and what can be done with it.
+// (acts: only what can be done, the path being said beside it already.)
+function PathBar({ path, onCopy, acts: only }: { path: string; onCopy: (s: string) => void; acts?: boolean }) {
+  const acts = useContext(FileActsOf)
+  const full = fullPath(path, acts?.cwd)
+  return (
+    <div className={'convo-path' + (only ? ' is-acts' : '')}>
+      {!only && <span className="convo-path-text">{full ?? path}</span>}
+      <span className="convo-path-acts">
+        <button type="button" className="link-btn" onClick={() => onCopy(full ?? path)}>{t('convo.path.copy')}</button>
+        {acts && full && (
+          <>
+            {acts.view && IMAGE_EXT.test(full) && <button type="button" className="link-btn" onClick={() => acts.view!(full)}>{t('convo.path.view')}</button>}
+            <button type="button" className="link-btn" onClick={() => acts.reveal(full)}>{t('convo.path.reveal')}</button>
+            <button type="button" className="link-btn" onClick={() => acts.download(full)}>{t('convo.path.download')}</button>
+          </>
+        )}
+      </span>
+    </div>
+  )
+}
 // (Claude Code's subagents' ids; a Codex's, its thread's UUID.)
 const isSubId = (id: string) => /^[a-z0-9]{6,40}$/.test(id) || /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(id)
 
@@ -3393,6 +3437,7 @@ function ToolRow({ tool, onCopy, live }: { tool: ConvoTool; onCopy: (s: string) 
       </button>
       {open && (
         <div className="convo-step-body">
+          {(cat === 'read' || cat === 'edit') && !!d && !d.includes('\n') && <PathBar path={d} onCopy={onCopy} />}
           {more && (
             <div className="convo-pre-wrap">
               <pre className="convo-pre">{v === 'cmd' ? <Code text={d} lang="bash" /> : d}</pre>
@@ -3511,7 +3556,7 @@ const created = (tool: ConvoTool): ConvoHunk[] | undefined => {
 
 // The changes a turn made, beside the thread (over it, where narrow): its
 // files, each with its edits in order.
-function ChangesPanel({ edits, focus, onClose, active }: { edits: Edits; focus?: string; onClose: () => void; active: boolean }) {
+function ChangesPanel({ edits, focus, onClose, active, onCopy }: { edits: Edits; focus?: string; onClose: () => void; active: boolean; onCopy: (s: string) => void }) {
   const box = useRef<HTMLDivElement>(null)
   const panel = useRef<HTMLElement>(null)
   // (Opened, the keys go to it; closed, back where they were.)
@@ -3564,6 +3609,7 @@ function ChangesPanel({ edits, focus, onClose, active }: { edits: Edits; focus?:
               <span className="convo-changes-path">{shortPath(f.path)}</span>
               <LineCounts add={f.add} del={f.del} />
             </div>
+            <PathBar path={f.path} onCopy={onCopy} acts />
             {f.tools.map((tl, i) => {
               const h = tl.patch ?? created(tl)
               return (

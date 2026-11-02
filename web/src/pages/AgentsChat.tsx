@@ -16,7 +16,8 @@ import { useCompletion } from '../terminal/Completion'
 import { convoTarget, herdrTarget, InlineReply } from '../terminal/ReplyDialog'
 import { SessionOpDialog, type SessionOp } from '../terminal/sessionOps'
 import { NEW_AGENT, NewAgentDialog } from '../terminal/newAgent'
-import { BgCmds, CODEX_EFFORTS, ConversationView, ListSearch, SEARCH_FROM, when, type ConvoAgent, type ConvoListRow, type ConvoPending, type ModelOpt } from '../terminal/Conversation'
+import { BgCmds, CODEX_EFFORTS, ConversationView, ListSearch, SEARCH_FROM, when, type ConvoAgent, type ConvoListRow, type ConvoPending, type FileActs, type ModelOpt } from '../terminal/Conversation'
+import { downloadPath, FilesDialog } from '../terminal/FilesDialog'
 import { answerable, asking, useConversation, type ConvoEntry } from '../terminal/conversation'
 import { ackBg, waitingTitle, isCodex, isOpenCode, listAgents, matchQuery, paneTitle, readsLog, useRunningSessions, type AgentRow } from '../terminal/agents'
 import { dayBefore, dayStart, foldAt, foldedDay, listOrder, type RowCmds } from '../terminal/agentOrder'
@@ -664,6 +665,9 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   const convo = useConversation(sid, active, cur.pane)
   const row = cur.row
   const [hostHistory, setHostHistory] = useState(false)
+  // A file the conversation names, shown in the files panel (its folder, it marked).
+  const [filesAt, setFilesAt] = useState<string | null>(null)
+  const fileActs = useMemo((): FileActs => ({ reveal: setFilesAt, download: (p) => downloadPath(sid, p), cwd: row?.a.cwd }), [sid, row?.a.cwd])
   // What the bar says of it: herdr's word for a herdr agent (as the session
   // list has it, every few seconds); a tmux one's from its process file.
   const agent = useMemo((): ConvoAgent | null => {
@@ -1794,7 +1798,22 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       query={query}
       onQuery={onQuery}
       answered={answered}
+      files={fileActs}
     />
+    {filesAt && (
+      <FilesDialog
+        sessionId={sid}
+        start={null}
+        reveal={filesAt}
+        onPath={() => {}}
+        onInsert={(p) => {
+          setFilesAt(null)
+          const quoted = /gemini/i.test(row?.a.agent ?? convo.bind?.agent ?? '') ? geminiPath(p) : shellPath(p)
+          if (quoted) insert(quoted + ' ')
+        }}
+        onClose={() => setFilesAt(null)}
+      />
+    )}
     {op && <SessionOpDialog op={op.op} name={convo.title} codex={op.bind.agent === 'codex'} onSend={(text) => runOp(op.bind, text)} onClose={() => setOp(null)} onShowTerminal={openTerminal} />}
     {closing?.row && (
       <Confirm

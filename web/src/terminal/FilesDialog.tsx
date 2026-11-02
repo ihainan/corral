@@ -11,6 +11,7 @@ import { local } from '../storage'
 type Props = {
   sessionId: string
   start: string | null // where the panel was last time on this page
+  reveal?: string // a file to show: its folder opened, it marked (over start)
   onPath: (p: string) => void
   onInsert: (path: string) => void // puts a path into the terminal (or the composer)
   onClose: () => void
@@ -19,6 +20,16 @@ type Props = {
 type Upload = { key: number; name: string; progress: number; error?: string; abort: AbortController }
 
 const HIDDEN_KEY = 'corral.files.hidden'
+
+// downloadPath has the browser save a file of the session's host.
+export function downloadPath(sessionId: string, p: string) {
+  const a = document.createElement('a')
+  a.href = `/api/sessions/${sessionId}/files/download?path=` + encodeURIComponent(p)
+  a.download = p.slice(p.lastIndexOf('/') + 1)
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+}
 
 const join = (dir: string, name: string) => (dir === '/' ? '/' + name : dir + '/' + name)
 // cleanPath spells a path the way the server answers with it (as Go's
@@ -58,7 +69,7 @@ const sortEntries = (list: FileEntry[]) =>
 
 // Browse and change files on the session's host, over the terminal's own
 // SSH connection.
-export function FilesDialog({ sessionId, start, onPath, onInsert, onClose }: Props) {
+export function FilesDialog({ sessionId, start, reveal, onPath, onInsert, onClose }: Props) {
   const toast = useToast()
   const base = `/api/sessions/${sessionId}/files`
   const [path, setPath] = useState<string | null>(null)
@@ -92,6 +103,9 @@ export function FilesDialog({ sessionId, start, onPath, onInsert, onClose }: Pro
   const uploadsRef = useRef<Upload[]>([])
   uploadsRef.current = uploads
   const pendingAsk = useRef<((ok: boolean) => void) | null>(null)
+  // The file asked to be shown: marked while its folder is the one listed.
+  const marked = reveal ? { dir: cleanPath(parent(reveal)), name: reveal.slice(reveal.lastIndexOf('/') + 1) } : null
+  const markedSaid = useRef(false)
   useEffect(() => {
     alive.current = true
     return () => {
@@ -178,12 +192,23 @@ export function FilesDialog({ sessionId, start, onPath, onInsert, onClose }: Pro
   }
 
   useEffect(() => {
-    if (start) void load(start, true)
+    if (marked) void load(marked.dir, true)
+    else if (start) void load(start, true)
     else void goTerminalFolder(true)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId])
 
-  const entries = listing ? sortEntries(listing.entries.filter((e) => hidden || !e.name.startsWith('.'))) : []
+  const markHere = !!marked && !!listing && listing.path === marked.dir
+  const entries = listing ? sortEntries(listing.entries.filter((e) => hidden || !e.name.startsWith('.') || (markHere && e.name === marked!.name))) : []
+  // (Once listed: scrolled to; not there, said so, once.)
+  useEffect(() => {
+    if (!markHere || !marked || markedSaid.current) return
+    markedSaid.current = true
+    const el = listRef.current?.querySelector(`[data-name="${CSS.escape(marked.name)}"]`)
+    if (el) el.scrollIntoView({ block: 'center' })
+    else if (!listing?.truncated) toast(t('files.notThere', { name: marked.name }), true)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [markHere, listing])
   const hiddenCount = listing ? listing.entries.length - listing.entries.filter((e) => !e.name.startsWith('.')).length : 0
 
   const toggleHidden = () => {
@@ -195,12 +220,7 @@ export function FilesDialog({ sessionId, start, onPath, onInsert, onClose }: Pro
 
   const download = (e: FileEntry) => {
     if (path === null) return
-    const a = document.createElement('a')
-    a.href = base + '/download?path=' + encodeURIComponent(join(path, e.name))
-    a.download = e.name
-    document.body.appendChild(a)
-    a.click()
-    a.remove()
+    downloadPath(sessionId, join(path, e.name))
   }
 
   // Uploads wait in one queue and go one after another, each into the folder
@@ -512,7 +532,7 @@ export function FilesDialog({ sessionId, start, onPath, onInsert, onClose }: Pro
           <>
             <ul className={'files-list' + (loading ? ' loading' : '')} ref={listRef}>
               {entries.map((e) => (
-                <li key={e.name} className="files-row">
+                <li key={e.name} className={'files-row' + (markHere && e.name === marked!.name ? ' is-marked' : '')} data-name={e.name}>
                   <EntryButton entry={e} items={() => items(e)} onOpen={() => void load(join(path!, e.name))} />
                   <Menu
                     label={e.name}

@@ -677,6 +677,7 @@ details.adv > .form { margin-top: 16px; }
 .files-list.loading { opacity: 0.55; transition: opacity 0.15s 0.2s; }
 .files-row { display: flex; align-items: center; border-radius: var(--r); }
 .files-row:hover { background: var(--bg-hover); }
+.files-row.is-marked { background: var(--accent-soft, var(--bg-hover)); box-shadow: inset 2px 0 0 var(--accent); }
 .files-entry {
   flex: 1; min-width: 0; display: flex; align-items: center; gap: 12px; min-height: 44px; padding: 6px 4px 6px 12px;
   border: 0; background: none; color: var(--fg); text-align: left; cursor: pointer; border-radius: var(--r); font-size: 14px;
