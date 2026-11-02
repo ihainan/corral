@@ -20,7 +20,7 @@ import { KeyBar, type ModState } from '../terminal/KeyBar'
 import { macroBytes, parseMacro, type Step } from '../terminal/macro'
 import { chromeVars } from '../terminal/themes'
 import { attachedIn, expandPastes, getDraft, keepDraft, keepPaste, remember, sentHistory, showDraft, unsendable } from '../terminal/drafts'
-import { attach, ATTACH_LABEL, AttachStrip, takeOut, wholeLabels } from '../terminal/attach'
+import { attach, ATTACH_LABEL, AttachStrip, takeOut } from '../terminal/attach'
 import { PictureDialog } from '../terminal/picture'
 import { useCompletion } from '../terminal/Completion'
 import { SchemeDialog } from '../terminal/SchemePicker'
@@ -2479,13 +2479,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
           rows={1}
           onChange={(e) => {
             histPos.current = null // (an entry edited is a draft of its own)
-            // (A file's label is kept whole, as its chip.)
-            const w = wholeLabels(draft, e.target.value)
-            setDraft(w.text)
-            if (w.at !== null) {
-              const el = e.target
-              requestAnimationFrame(() => el.setSelectionRange(w.at!, w.at!))
-            }
+            setDraft(e.target.value)
           }}
           onSelect={() => completion.update()}
           {...completion.field}

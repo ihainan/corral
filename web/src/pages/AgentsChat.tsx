@@ -19,7 +19,7 @@ import { NEW_AGENT, NewAgentDialog } from '../terminal/newAgent'
 import { BgCmds, CODEX_EFFORTS, ConversationView, ListSearch, SEARCH_FROM, when, type ConvoAgent, type ConvoListRow, type ConvoPending, type FileActs, type ModelOpt } from '../terminal/Conversation'
 import { FilesDialog } from '../terminal/FilesDialog'
 import { downloadPath, PictureDialog } from '../terminal/picture'
-import { attach, ATTACH_LABEL, AttachStrip, takeOut, wholeLabels } from '../terminal/attach'
+import { attach, ATTACH_LABEL, AttachStrip, takeOut } from '../terminal/attach'
 import { answerable, asking, useConversation, type ConvoEntry } from '../terminal/conversation'
 import { ackBg, waitingTitle, isCodex, isOpenCode, listAgents, matchQuery, paneTitle, readsLog, useRunningSessions, type AgentRow } from '../terminal/agents'
 import { dayBefore, dayStart, foldAt, foldedDay, listOrder, type RowCmds } from '../terminal/agentOrder'
@@ -1581,15 +1581,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
           spellCheck={false}
           placeholder={placeholder}
           rows={1}
-          onChange={(e) => {
-            // (An entry edited is a draft of its own. A file's label is kept whole, as its chip.)
-            const w = wholeLabels(draft, e.target.value)
-            setDraft(w.text)
-            if (w.at !== null) {
-              const el = e.target
-              requestAnimationFrame(() => el.setSelectionRange(w.at!, w.at!))
-            }
-          }}
+          onChange={(e) => setDraft(e.target.value)} // (an entry edited is a draft of its own)
           onSelect={() => completion.update()}
           {...completion.field}
           onBlur={() => setTimeout(completion.update)}

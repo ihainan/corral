@@ -91,38 +91,6 @@ export function attachedIn(s: string): Attached[] {
   }
   return at.sort((x, y) => x[0] - y[0]).map(([, a]) => a)
 }
-// wholeLabels is an edit of a draft (old to next) with its files' labels
-// kept whole, as a chip is: what takes away any of one takes all of it,
-// and what is typed inside one goes after it. at: where the caret goes
-// (null: where the edit put it).
-export function wholeLabels(old: string, next: string): { text: string; at: number | null } {
-  const files = attachedIn(old)
-  if (!files.length || old === next) return { text: next, at: null }
-  // (The edit: what of old was replaced, by what.)
-  let p = 0
-  while (p < old.length && p < next.length && old[p] === next[p]) p++
-  let q = 0
-  while (q < old.length - p && q < next.length - p && old[old.length - 1 - q] === next[next.length - 1 - q]) q++
-  let from = p
-  let to = old.length - q
-  const put = next.slice(p, next.length - q)
-  let changed = false
-  for (const f of files) {
-    for (let i = old.indexOf(f.label); i >= 0; i = old.indexOf(f.label, i + f.label.length)) {
-      const end = i + f.label.length
-      if (from === to) {
-        // (Typed inside one: after it.)
-        if (i < from && from < end) [from, to, changed] = [end, end, true]
-      } else if (i < to && end > from) {
-        from = Math.min(from, i)
-        to = Math.max(to, end)
-        changed = true
-      }
-    }
-  }
-  if (!changed) return { text: next, at: null }
-  return { text: old.slice(0, from) + put + old.slice(to), at: from + put.length }
-}
 
 // What of a text cannot be sent as it is: a file put on another host than
 // this one, or a label of a file whose path is not known (any more: the

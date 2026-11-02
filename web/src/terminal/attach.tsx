@@ -2,7 +2,6 @@ import { useEffect, useState } from 'react'
 import { File as FileIcon, X } from 'lucide-react'
 import { t } from '../i18n'
 import { attachedIn, keepAttached, type Attached } from './drafts'
-export { wholeLabels } from './drafts'
 import { lookAt, useObjectURL } from './picture'
 
 // Files put up from a composer: a label in the draft (sent as the path),
@@ -21,8 +20,9 @@ export function labelName(name: string): string {
 }
 
 // A whole label of the kind this makes, whether or not its file is known
-// (one whose path was lost is not sent as it is). Labels are kept whole in
-// the box (wholeLabels): one cut short is not to be looked for.
+// (one whose path was lost is not sent as it is). A label is words in the
+// box, as a long paste's is: one edited is no longer its file's — its chip
+// goes at once — and is sent as the words it is.
 export const ATTACH_LABEL = /\[(?:图片|文件|Attached (?:image|file)) #\d+[：:] ?[^\]\n]{1,60}\]/g
 
 
