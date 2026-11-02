@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { File as FileIcon, X } from 'lucide-react'
 import { t } from '../i18n'
 import { attachedIn, keepAttached, type Attached } from './drafts'
+export { wholeLabels } from './drafts'
 import { lookAt, useObjectURL } from './picture'
 
 // Files put up from a composer: a label in the draft (sent as the path),
@@ -19,10 +20,11 @@ export function labelName(name: string): string {
   return n.length > 40 ? n.slice(0, 28) + '…' + n.slice(-11) : n
 }
 
-// Where a label of the kind this makes begins, as much of it as stays when
-// some was taken out (a label not whole, or of a file not known, is not
-// sent as it is).
-export const LABEL_START = /\[(?:图片|文件|Attached (?:image|file)) ?#? ?\d+|(?:图片|文件|Attached (?:image|file)) ?# ?\d*[：:]/g
+// A whole label of the kind this makes, whether or not its file is known
+// (one whose path was lost is not sent as it is). Labels are kept whole in
+// the box (wholeLabels): one cut short is not to be looked for.
+export const ATTACH_LABEL = /\[(?:图片|文件|Attached (?:image|file)) #\d+[：:] ?[^\]\n]{1,60}\]/g
+
 
 // attach keeps a file just put up on the host (path) and is its label,
 // for the draft; quoted: the path as the agent is to read it.

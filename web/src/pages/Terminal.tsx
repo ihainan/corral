@@ -20,7 +20,7 @@ import { KeyBar, type ModState } from '../terminal/KeyBar'
 import { macroBytes, parseMacro, type Step } from '../terminal/macro'
 import { chromeVars } from '../terminal/themes'
 import { attachedIn, expandPastes, getDraft, keepDraft, keepPaste, remember, sentHistory, showDraft, unsendable } from '../terminal/drafts'
-import { attach, LABEL_START, AttachStrip, takeOut } from '../terminal/attach'
+import { attach, ATTACH_LABEL, AttachStrip, takeOut, wholeLabels } from '../terminal/attach'
 import { PictureDialog } from '../terminal/picture'
 import { useCompletion } from '../terminal/Completion'
 import { SchemeDialog } from '../terminal/SchemePicker'
@@ -2045,7 +2045,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
       return
     }
     // (A file of another host's, or one whose path is lost: not sent as it is.)
-    const bad = unsendable(draft, hostRef.current, LABEL_START)
+    const bad = unsendable(draft, hostRef.current, ATTACH_LABEL, 4 << 20)
     if (bad) {
       toast(bad.other ? t('attach.wrongHost', { name: bad.other.name }) : t('attach.lost', { label: bad.lost! }), true)
       return
@@ -2479,7 +2479,13 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
           rows={1}
           onChange={(e) => {
             histPos.current = null // (an entry edited is a draft of its own)
-            setDraft(e.target.value)
+            // (A file's label is kept whole, as its chip.)
+            const w = wholeLabels(draft, e.target.value)
+            setDraft(w.text)
+            if (w.at !== null) {
+              const el = e.target
+              requestAnimationFrame(() => el.setSelectionRange(w.at!, w.at!))
+            }
           }}
           onSelect={() => completion.update()}
           {...completion.field}

@@ -23,11 +23,12 @@ export function downloadPath(sessionId: string, p: string) {
   a.remove()
 }
 
-type Job = { sid: string; path: string; resolve: (b: Blob) => void; reject: (e: unknown) => void; signal?: AbortSignal; gen: number; fresh?: boolean; at: number }
+type Job = { sid: string; path: string; resolve: (b: Blob) => void; reject: (e: unknown) => void; signal?: AbortSignal; gen: number; fresh?: boolean; n: number }
 
 const KEEP = 24
 const FRESH_MS = 30_000
-const kept = new Map<string, { blob: Blob; at: number }>() // (the oldest first)
+const kept = new Map<string, { blob: Blob; at: number; n: number }>() // (the oldest first; n: in the order they came)
+let came = 0
 const queues = new Map<string, Job[]>()
 const running = new Set<string>()
 
@@ -35,7 +36,7 @@ const keyOf = (sid: string, path: string) => sid + '\0' + path
 
 function keep(key: string, blob: Blob) {
   kept.delete(key)
-  kept.set(key, { blob, at: Date.now() })
+  kept.set(key, { blob, at: Date.now(), n: ++came })
   while (kept.size > KEEP) kept.delete(kept.keys().next().value!)
 }
 
@@ -55,7 +56,7 @@ export function lookAt(sid: string, path: string, opts: { first?: boolean; signa
   if (had && !opts.fresh && Date.now() - had.at < FRESH_MS) return Promise.resolve(had.blob)
   return new Promise((resolve, reject) => {
     const q = queues.get(sid) ?? []
-    const job = { sid, path, resolve, reject, signal: opts.signal, gen: authGen(), fresh: opts.fresh, at: Date.now() }
+    const job = { sid, path, resolve, reject, signal: opts.signal, gen: authGen(), fresh: opts.fresh, n: came }
     if (opts.first) q.unshift(job)
     else q.push(job)
     queues.set(sid, q)
@@ -76,7 +77,7 @@ async function work(sid: string) {
       }
       // (Asked for twice while waiting: the second has it from the first — one asked afresh, only if it came after the asking.)
       const had = kept.get(keyOf(sid, job.path))
-      if (had && (job.fresh ? had.at >= job.at : Date.now() - had.at < 1000)) {
+      if (had && (job.fresh ? had.n > job.n : Date.now() - had.at < 1000)) {
         job.resolve(had.blob)
         continue
       }

@@ -19,7 +19,7 @@ import { NEW_AGENT, NewAgentDialog } from '../terminal/newAgent'
 import { BgCmds, CODEX_EFFORTS, ConversationView, ListSearch, SEARCH_FROM, when, type ConvoAgent, type ConvoListRow, type ConvoPending, type FileActs, type ModelOpt } from '../terminal/Conversation'
 import { FilesDialog } from '../terminal/FilesDialog'
 import { downloadPath, PictureDialog } from '../terminal/picture'
-import { attach, LABEL_START, AttachStrip, takeOut } from '../terminal/attach'
+import { attach, ATTACH_LABEL, AttachStrip, takeOut, wholeLabels } from '../terminal/attach'
 import { answerable, asking, useConversation, type ConvoEntry } from '../terminal/conversation'
 import { ackBg, waitingTitle, isCodex, isOpenCode, listAgents, matchQuery, paneTitle, readsLog, useRunningSessions, type AgentRow } from '../terminal/agents'
 import { dayBefore, dayStart, foldAt, foldedDay, listOrder, type RowCmds } from '../terminal/agentOrder'
@@ -1442,7 +1442,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     if (blocked || !b) return toast(blocked ?? t('agents.cannotSend'), true)
     if (up) return toast(t('term.waitUpload'), true) // (its path is not in the draft yet; nor, while it goes up, in an empty one)
     // (A file of another host's, or one whose path is lost: not sent as it is.)
-    const bad = unsendable(draft, cur.s.host_id, LABEL_START)
+    const bad = unsendable(draft, cur.s.host_id, ATTACH_LABEL, 100 << 10)
     if (bad) return toast(bad.other ? t('attach.wrongHost', { name: bad.other.name }) : t('attach.lost', { label: bad.lost! }), true)
     const text = expandPastes(draft, 100 << 10)
     if (text === null || new TextEncoder().encode(text).length > 100 << 10) return toast(t('agents.tooLong'), true)
@@ -1581,7 +1581,15 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
           spellCheck={false}
           placeholder={placeholder}
           rows={1}
-          onChange={(e) => setDraft(e.target.value)} // (an entry edited is a draft of its own)
+          onChange={(e) => {
+            // (An entry edited is a draft of its own. A file's label is kept whole, as its chip.)
+            const w = wholeLabels(draft, e.target.value)
+            setDraft(w.text)
+            if (w.at !== null) {
+              const el = e.target
+              requestAnimationFrame(() => el.setSelectionRange(w.at!, w.at!))
+            }
+          }}
           onSelect={() => completion.update()}
           {...completion.field}
           onBlur={() => setTimeout(completion.update)}

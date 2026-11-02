@@ -91,20 +91,51 @@ export function attachedIn(s: string): Attached[] {
   }
   return at.sort((x, y) => x[0] - y[0]).map(([, a]) => a)
 }
+// wholeLabels is an edit of a draft (old to next) with its files' labels
+// kept whole, as a chip is: what takes away any of one takes all of it,
+// and what is typed inside one goes after it. at: where the caret goes
+// (null: where the edit put it).
+export function wholeLabels(old: string, next: string): { text: string; at: number | null } {
+  const files = attachedIn(old)
+  if (!files.length || old === next) return { text: next, at: null }
+  // (The edit: what of old was replaced, by what.)
+  let p = 0
+  while (p < old.length && p < next.length && old[p] === next[p]) p++
+  let q = 0
+  while (q < old.length - p && q < next.length - p && old[old.length - 1 - q] === next[next.length - 1 - q]) q++
+  let from = p
+  let to = old.length - q
+  const put = next.slice(p, next.length - q)
+  let changed = false
+  for (const f of files) {
+    for (let i = old.indexOf(f.label); i >= 0; i = old.indexOf(f.label, i + f.label.length)) {
+      const end = i + f.label.length
+      if (from === to) {
+        // (Typed inside one: after it.)
+        if (i < from && from < end) [from, to, changed] = [end, end, true]
+      } else if (i < to && end > from) {
+        from = Math.min(from, i)
+        to = Math.max(to, end)
+        changed = true
+      }
+    }
+  }
+  if (!changed) return { text: next, at: null }
+  return { text: old.slice(0, from) + put + old.slice(to), at: from + put.length }
+}
+
 // What of a text cannot be sent as it is: a file put on another host than
-// this one, or what is left of a label that is not one of a file known —
-// its path lost (the tab's storage lost it), or the label itself edited
-// (a bracket or its number taken out). labelStart: where a label begins, as
-// much of it as is still there when part of it is gone. Its words, to be
-// said; null where all is well. (A long paste's text is looked at too.)
-export function unsendable(s: string, host: number, labelStart: RegExp): { other?: Attached; lost?: string } | null {
-  const text = expandPastesOnly(s)
+// this one, or a label of a file whose path is not known (any more: the
+// tab's storage lost it). label: a whole label's pattern. Its words, to be
+// said; null where all is well — or where the text is too long to send at
+// all (max, as expandPastes is given it: that says so). A long paste's text
+// is looked at as it will be sent.
+export function unsendable(s: string, host: number, label: RegExp, max: number): { other?: Attached; lost?: string } | null {
+  const text = pastesExpanded(s, max)
+  if (text === null) return null
   const other = attachedIn(text).find((a) => a.host !== host)
   if (other) return { other }
-  for (const m of text.matchAll(labelStart)) {
-    // (Of a whole label: it begins there, or a character before — its bracket.)
-    if (![...attached.keys()].some((l) => text.startsWith(l, m.index) || (m.index > 0 && text.startsWith(l, m.index - 1)))) return { lost: text.slice(m.index, m.index + 60).split('\n')[0] }
-  }
+  for (const m of text.matchAll(label)) if (!attached.has(m[0])) return { lost: m[0] }
   return null
 }
 export function keepPaste(text: string, label: (n: number) => string): string {
@@ -122,11 +153,11 @@ export function keepPaste(text: string, label: (n: number) => string): string {
 // (Files put up go in as what the agent reads, their paths — also ones a
 // paste holds: the pastes first, then the files, each once.)
 export function expandPastes(s: string, max: number): string | null {
-  // (Before the files are, a label may be longer than its path: the text in between bounded apart.)
-  const t = expandLabels(s, pastes, 2 * max + (64 << 10))
+  const t = pastesExpanded(s, max)
   return t === null ? null : expandLabels(t, new Map([...attached].map(([l, a]) => [l, a.send])), max)
 }
-const expandPastesOnly = (s: string) => expandLabels(s, pastes, 1 << 22) ?? s
+// (Before the files are, a label may be longer than its path: the text in between bounded apart.)
+const pastesExpanded = (s: string, max: number) => expandLabels(s, pastes, 2 * max + (64 << 10))
 function expandLabels(s: string, labels: Map<string, string>, max: number): string | null {
   let out = ''
   let rest = s
