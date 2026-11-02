@@ -29,6 +29,7 @@ func TestCodexTurnError(t *testing.T) {
 	var rows []string
 	rows = append(rows, turn("a", map[string]any{"message": "unexpected status 503 Service Unavailable: Service temporarily unavailable, url: https://relay.example/responses, request id: 66cb", "codex_error_info": map[string]any{"http_connection_failed": map[string]any{"http_status_code": 503}}})...)
 	rows = append(rows, turn("b", map[string]any{"message": "exceeded retry limit, last status: 429 Too Many Requests, request id: f30e", "codex_error_info": map[string]any{"response_too_many_failed_attempts": map[string]any{"http_status_code": 429}}})...)
+	rows = append(rows, turn("s", map[string]any{"message": "Selected model is at capacity. Please try a different model.", "codex_error_info": "server_overloaded"})...)
 	rows = append(rows, turn("c", map[string]any{"message": "stream disconnected before completion: response protection is unavailable", "codex_error_info": "other"})...)
 	rows = append(rows, turn("d", map[string]any{"message": "This content was flagged for possible cybersecurity risk.", "codex_error_info": "cyber_policy"})...)
 	rows = append(rows, turn("e", map[string]any{"message": "You’ve hit your usage limit. Try again at 10:00 PM.", "codex_error_info": "usage_limit_exceeded"})...)
@@ -49,6 +50,7 @@ func TestCodexTurnError(t *testing.T) {
 	want := []string{
 		"user:a", "note:api:503:unexpected s",
 		"user:b", "note:api:429:exceeded ret",
+		"user:s", "note:api:0:Selected mod",
 		"user:c", "note:api:0:stream disco",
 		"user:d", "note:refused:0:This content",
 		"user:e", "note:api:0:You’ve hit y",
@@ -62,7 +64,7 @@ func TestCodexTurnError(t *testing.T) {
 	}
 }
 
-// An older Codex's error row (to 0.147), and one that wrote both it and the
+// An older Codex's error row (seen to 0.128), and one that wrote both it and the
 // error on task_complete: told once.
 func TestCodexTurnErrorOnce(t *testing.T) {
 	rows := []string{
@@ -109,19 +111,33 @@ func TestCodexTurnErrorReal(t *testing.T) {
 		if err != nil {
 			continue
 		}
-		want := 0
+		// (Turns that ended in an error: once a turn, as shown, whichever
+		// way it was written.)
+		want, failed := 0, false
 		for _, l := range bytes.Split(b, []byte("\n")) {
 			var r struct {
+				Type    string `json:"type"`
 				Payload struct {
-					Type  string          `json:"type"`
-					Error json.RawMessage `json:"error"`
+					Type    string          `json:"type"`
+					Message string          `json:"message"`
+					Error   json.RawMessage `json:"error"`
 				} `json:"payload"`
 			}
-			if json.Unmarshal(l, &r) != nil {
+			if json.Unmarshal(l, &r) != nil || r.Type != "event_msg" {
 				continue
 			}
-			if r.Payload.Type == "error" || r.Payload.Type == "task_complete" && len(r.Payload.Error) > 0 && string(r.Payload.Error) != "null" {
-				want++
+			switch r.Payload.Type {
+			case "task_started":
+				failed = false
+			case "error":
+				if !failed && strings.TrimSpace(r.Payload.Message) != "" {
+					want, failed = want+1, true
+				}
+			case "task_complete":
+				if !failed && len(r.Payload.Error) > 0 && string(r.Payload.Error) != "null" {
+					want++
+				}
+				failed = false
 			}
 		}
 		if want == 0 {
@@ -129,6 +145,9 @@ func TestCodexTurnErrorReal(t *testing.T) {
 		}
 		c := NewCodex()
 		c.Feed(b)
+		if c.trimmed {
+			continue // (its first entries let go: not all there to count)
+		}
 		got := 0
 		for _, e := range c.entries {
 			for _, p := range e.Parts {

@@ -832,8 +832,8 @@ func (c *Codex) event(r *codexRow, p *codexPayload) {
 			}
 			c.userSaid(r, it.ID, parts)
 		}
-	// An older Codex's account (to 0.147): what the person wrote, what went
-	// wrong, a review, and what its tools did when it told of them so.
+	// An older Codex's account (to 0.147; its error rows seen to 0.128):
+	// what the person wrote, what went wrong, a review, and what its tools did when it told of them so.
 	case "user_message":
 		if strings.TrimSpace(p.Message) != "" {
 			c.userSaid(r, "", []Part{textPart(KindText, p.Message)})
@@ -868,11 +868,12 @@ func (c *Codex) event(r *codexRow, p *codexPayload) {
 	}
 }
 
-// codexTrouble: what went wrong with a turn, as Codex writes it (since
-// 0.15x; before, as an error row of its own) on the turn's task_complete:
-// {message, codex_error_info}, the info a word ("cyber_policy",
-// "usage_limit_exceeded", "other"…) or {what: {http_status_code}}
-// ("http_connection_failed", "response_too_many_failed_attempts"…). Without
+// codexTrouble: what went wrong with a turn, as Codex writes it (seen
+// from 0.146; before, as an error row of its own) on the turn's
+// task_complete: {message, codex_error_info}, the info a word
+// ("server_overloaded", "other", "cyber_policy", "usage_limit_exceeded"…)
+// or {what: {http_status_code}} ("http_connection_failed",
+// "response_too_many_failed_attempts"…). Without
 // it the turn is seen ending with no answer and nothing said of why.
 func codexTrouble(raw json.RawMessage) *Trouble {
 	var e struct {
