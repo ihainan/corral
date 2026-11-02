@@ -34,6 +34,7 @@ func TestCodexTurnError(t *testing.T) {
 	rows = append(rows, turn("d", map[string]any{"message": "This content was flagged for possible cybersecurity risk.", "codex_error_info": "cyber_policy"})...)
 	rows = append(rows, turn("e", map[string]any{"message": "You’ve hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at 6:48 PM.", "codex_error_info": "usage_limit_exceeded"})...)
 	rows = append(rows, turn("g", map[string]any{"message": "You’ve hit your usage limit. Try again later.", "codex_error_info": "usage_limit_exceeded"})...)
+	rows = append(rows, turn("h", map[string]any{"message": "You’ve hit your usage limit. Try again at 10:00 PM.", "codex_error_info": "usage_limit_exceeded"})...)
 	rows = append(rows, turn("f", nil)...) // (a turn that went well: nothing)
 	c := NewCodex()
 	c.Feed([]byte(strings.Join(rows, "")))
@@ -56,6 +57,7 @@ func TestCodexTurnError(t *testing.T) {
 		"user:d", "note:refused:0:This content",
 		"user:e", "note:limit:0:You’ve hit y6:48 PM",
 		"user:g", "note:limit:0:You’ve hit y",
+		"user:h", "note:limit:0:You’ve hit y10:00 PM",
 		"user:f",
 	}
 	if strings.Join(got, "|") != strings.Join(want, "|") {

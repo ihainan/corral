@@ -868,18 +868,18 @@ func (c *Codex) event(r *codexRow, p *codexPayload) {
 	}
 }
 
-// codexTrouble: what went wrong with a turn, as Codex writes it (seen
-// from 0.146; before, as an error row of its own) on the turn's
-// task_complete: {message, codex_error_info}, the info a word
-// ("server_overloaded", "other", "cyber_policy", "usage_limit_exceeded"…)
-// or {what: {http_status_code}} ("http_connection_failed",
-// "response_too_many_failed_attempts"…). Without
-// it the turn is seen ending with no answer and nothing said of why.
 // codexRetryAt: when a usage limit lifts, as Codex says it at the end of
 // the error ("… or try again at 6:48 PM.", in its host's time; all 15 seen
 // so far say it so). Not said so, no time is given.
 var codexRetryAt = regexp.MustCompile(`(?i)\btry again at ([^\n]{1,40}?)\.?\s*$`)
 
+// codexTrouble: what went wrong with a turn, as Codex writes it (seen
+// from 0.146; before, as an error row of its own) on the turn's
+// task_complete: {message, codex_error_info}, the info a word
+// ("server_overloaded", "other", "cyber_policy", "usage_limit_exceeded"…)
+// or {what: {http_status_code}} ("http_connection_failed",
+// "response_too_many_failed_attempts"…). Without it the turn is seen
+// ending with no answer and nothing said of why.
 func codexTrouble(raw json.RawMessage) *Trouble {
 	var e struct {
 		Message string          `json:"message"`
