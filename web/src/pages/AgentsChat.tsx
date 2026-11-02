@@ -1890,6 +1890,19 @@ function PhoneList({ entries, all, titles, query, onQuery, onPick }: { entries: 
   const pins = usePrefs().pinnedAgents
   const sorted = (list: Entry[]) => listOrder(list.map((e) => asRow(e, pins))).map((r) => r.key)
   const [order, setOrder] = useState<string[]>(() => sorted(entries))
+  // Of the old ones, which group each is in, as it was when they were put in
+  // order (and so it stays: one gone old meanwhile is not folded away under
+  // the finger, nor one folded away shown; new ones are not folded).
+  const foldedOf = (list: Entry[]) => {
+    const today = dayStart(Date.now())
+    const yesterday = dayBefore(today)
+    return new Map(list.flatMap((e) => {
+      const d = foldedDay(asRow(e, pins), today, yesterday)
+      return d ? [[e.key + ' ' + e.s.id, d] as const] : []
+    }))
+  }
+  const [foldOf, setFoldOf] = useState(() => foldedOf(entries))
+  const place = () => (setOrder(sorted(entries)), setFoldOf(foldedOf(entries)))
   useEffect(() => {
     setOrder((o) => {
       const have = new Set(entries.map((e) => e.key + ' ' + e.s.id))
@@ -1907,7 +1920,7 @@ function PhoneList({ entries, all, titles, query, onQuery, onPick }: { entries: 
   // (Not in order any more — one has come to wait, say, while the list was looked at: put in order at a tap,
   // not under the finger by itself.)
   const want = sorted(entries)
-  const stale = want.join('\n') !== order.filter((k) => byKey.has(k)).join('\n')
+  const stale = want.join('\n') !== list.map((e) => e.key + ' ' + e.s.id).join('\n') // (as shown: those pinned since, first)
   const working = n('working')
   const done = n('done')
   const box = useRef<HTMLDivElement>(null)
@@ -1923,7 +1936,7 @@ function PhoneList({ entries, all, titles, query, onQuery, onPick }: { entries: 
   // move under the finger while it is looked at, but are in order when
   // looked at anew — as they are on coming back from a conversation.)
   useEffect(() => {
-    const on = () => !document.hidden && setOrder(sorted(entries))
+    const on = () => !document.hidden && place()
     document.addEventListener('visibilitychange', on)
     return () => document.removeEventListener('visibilitychange', on)
   })
@@ -1936,11 +1949,9 @@ function PhoneList({ entries, all, titles, query, onQuery, onPick }: { entries: 
     return matchQuery(query, title, where, e.row?.a.agent)
   })
   // (The old ones past the first few of their group: behind a tap, unless searched for.)
-  const today = dayStart(now)
-  const yesterday = dayBefore(today)
   const days = new Map<string, Entry[]>()
   for (const e of shown) {
-    const d = foldedDay(asRow(e, pins), today, yesterday)
+    const d = foldOf.get(e.key + ' ' + e.s.id)
     if (d) days.set(d, [...(days.get(d) ?? []), e])
   }
   const [open, setOpen] = useState(oldOpen)
@@ -1966,7 +1977,7 @@ function PhoneList({ entries, all, titles, query, onQuery, onPick }: { entries: 
         </button>
       </div>
       {stale && (
-        <button type="button" className="link-btn agents-list-resort" onClick={() => (setOrder(want), box.current?.scrollTo({ top: 0 }))}>
+        <button type="button" className="link-btn agents-list-resort" onClick={() => (place(), box.current?.scrollTo({ top: 0 }))}>
           {t('agents.sumHint')}
         </button>
       )}
