@@ -65,6 +65,7 @@ func Discover(ctx context.Context, c *ssh.Client) ([]SessionInfo, error) {
 type Snapshot struct {
 	Version          string      `json:"version"`
 	FocusedWorkspace string      `json:"focused_workspace_id"`
+	FocusedTab       string      `json:"focused_tab_id"` // (not from herdr 0.8: its workspace's active tab then)
 	FocusedPane      string      `json:"focused_pane_id"`
 	Workspaces       []Workspace `json:"workspaces"`
 	Tabs             []Tab       `json:"tabs"`

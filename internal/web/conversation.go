@@ -1559,6 +1559,11 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 	gen, _ := strconv.ParseInt(q.Get("gen"), 10, 64)
 	rev, _ := strconv.Atoi(q.Get("rev"))
 	older := q.Get("older") == "1"
+	// (Read by an agents page in front, showing this agent: it is looked
+	// at, not alerted about meanwhile. Only the owner reads it here.)
+	if q.Get("look") == "1" && sess.Persistence == "herdr" && pane != "" {
+		s.looks.note(sess.ID, pane)
+	}
 	w.Header().Set("Cache-Control", "no-store")
 	if sess.Persistence != "herdr" && sess.Persistence != "tmux" {
 		writeJSON(w, http.StatusOK, convoAnswer{Reason: convoUnsupported, Entries: []convo.Entry{}})

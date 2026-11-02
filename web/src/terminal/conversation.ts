@@ -387,6 +387,10 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
       const key = keyOf(sessionId, pane)
       const q = new URLSearchParams({ gen: String(gen), rev: String(rev) })
       if (pane) q.set('pane', pane)
+      // (Read only while shown — the agents page in front, its chat on
+      // screen, the page not hidden: the agent is looked at, and the gateway
+      // does not alert about it meanwhile.)
+      q.set('look', '1')
       const asksOlder = wantOlder.current !== null && wantOlder.current === gen
       if (asksOlder) q.set('older', '1')
       let next = POLL

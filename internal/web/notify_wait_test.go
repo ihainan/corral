@@ -3,6 +3,7 @@ package web
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ihainan/corral/internal/sshx"
 )
@@ -59,19 +60,19 @@ func sent(ok bool) func() bool { return func() bool { return ok } }
 // its user, its keys, and while that wait lasts.
 func TestWaitAlertsTokens(t *testing.T) {
 	var a waitAlerts
-	w1 := a.begin("p")
+	w1 := a.begin("p", 1)
 	a.end("p")
 	if a.send(&waitAlert{tag: "p", wait: w1}, sent(true)) {
 		t.Fatal("an alert was sent for a wait that ended")
 	}
-	w2 := a.begin("p")
+	w2 := a.begin("p", 1)
 	if a.send(&waitAlert{tag: "p", wait: w2}, sent(false)) {
 		t.Fatal("an alert held back counted as sent")
 	}
 	if a.end("p") != nil {
 		t.Fatal("an alert held back is to be replaced")
 	}
-	w3 := a.begin("p")
+	w3 := a.begin("p", 1)
 	al := &waitAlert{tag: "p", wait: w3, user: 7, token: "tok", keys: map[string]bool{"1": true, "3": true}}
 	if !a.send(al, sent(true)) {
 		t.Fatal("not sent")
@@ -83,10 +84,10 @@ func TestWaitAlertsTokens(t *testing.T) {
 		t.Fatal("the token does not answer exactly once")
 	}
 	// A new wait of the same pane: the old alert's token no longer answers.
-	w4 := a.begin("p")
+	w4 := a.begin("p", 1)
 	al4 := &waitAlert{tag: "p", wait: w4, user: 7, token: "t4", keys: map[string]bool{"1": true}}
 	a.send(al4, sent(true))
-	a.begin("p") // (another wait began meanwhile)
+	a.begin("p", 1) // (another wait began meanwhile)
 	if a.use("t4", 7, "1") != nil {
 		t.Fatal("an alert of an earlier wait answered")
 	}
@@ -97,7 +98,7 @@ func TestWaitAlertsTokens(t *testing.T) {
 	a2 := waitAlerts{}
 	sid := "0123456789abcdef"
 	tag := waitTagPrefix(sid) + "w1-p1"
-	wa := a2.begin(tag)
+	wa := a2.begin(tag, 1)
 	a2.send(&waitAlert{tag: tag, wait: wa, session: sid, token: "x", keys: map[string]bool{"1": true}}, sent(true))
 	if got := a2.endSession(sid); len(got) != 1 || a2.use("x", 0, "1") != nil || a2.current(tag, wa) {
 		t.Fatalf("endSession: %d alerts", len(got))
@@ -116,7 +117,7 @@ func TestAlertAnswer(t *testing.T) {
 	me := int64(admin.do("GET", "/api/me", nil).json()["id"].(float64))
 	tag := waitTagPrefix(id) + "w1-p1"
 	alert := func(token string) {
-		w := h.srv.waitAlerts.begin(tag)
+		w := h.srv.waitAlerts.begin(tag, 1)
 		if !h.srv.waitAlerts.send(&waitAlert{tag: tag, wait: w, user: me, session: id, pane: "w1:p1", digest: digest, token: token, keys: map[string]bool{"1": true, "2": true}}, sent(true)) {
 			t.Fatal("alert not kept")
 		}
@@ -138,7 +139,7 @@ func TestAlertAnswer(t *testing.T) {
 
 	// Another wait of the pane began: the earlier alert no longer answers.
 	alert("t2")
-	h.srv.waitAlerts.begin(tag)
+	h.srv.waitAlerts.begin(tag, 1)
 	mustStatus(t, answer(admin, "t2", "2"), 410, "an earlier wait's alert")
 
 	// The token taken, the wait ends and an identical one begins before the
@@ -146,7 +147,7 @@ func TestAlertAnswer(t *testing.T) {
 	hd.setScreen("Proceed again?\n❯ 1. Yes\n  2. No") // (a screen not answered moments ago)
 	digest, _ = admin.do("GET", base+"screen", nil).json()["digest"].(string)
 	alert("t5")
-	alertAnswerHook = func() { h.srv.waitAlerts.begin(tag) }
+	alertAnswerHook = func() { h.srv.waitAlerts.begin(tag, 1) }
 	r := answer(admin, "t5", "1")
 	alertAnswerHook = nil
 	mustStatus(t, r, 410, "the wait changed while answering")
@@ -192,16 +193,50 @@ func TestParseComplete(t *testing.T) {
 // replaces the old one).
 func TestWaitReplacementSkippedWhenWaitingAgain(t *testing.T) {
 	var a waitAlerts
-	a.send(&waitAlert{tag: "p", wait: a.begin("p")}, sent(true))
+	a.send(&waitAlert{tag: "p", wait: a.begin("p", 1)}, sent(true))
 	a.end("p")
 	n := 0
 	a.sendReplacement("p", func() bool { n++; return true })
 	if n != 1 {
 		t.Fatal("no replacement after the wait ended")
 	}
-	a.send(&waitAlert{tag: "p", wait: a.begin("p")}, sent(true))
+	a.send(&waitAlert{tag: "p", wait: a.begin("p", 1)}, sent(true))
 	a.sendReplacement("p", func() bool { n++; return true })
 	if n != 1 {
 		t.Fatal("a replacement hid an agent that waits again")
 	}
+}
+
+func TestWaitingOfCountsEachPersonsWaits(t *testing.T) {
+	var a waitAlerts
+	s1, s2 := waitTagPrefix("aaaaaaaa11111111"), waitTagPrefix("bbbbbbbb22222222")
+	a.begin(s1+"p1", 1)
+	a.begin(s1+"p2", 1)
+	a.begin(s1+"p2", 1) // (the same agent waiting again: one)
+	a.begin(s2+"p1", 2)
+	if a.waitingOf(1) != 2 || a.waitingOf(2) != 1 || a.waitingOf(3) != 0 {
+		t.Fatalf("waiting: %d, %d, %d; want 2, 1, 0", a.waitingOf(1), a.waitingOf(2), a.waitingOf(3))
+	}
+	a.end(s1 + "p1")
+	if a.waitingOf(1) != 1 {
+		t.Fatalf("after one stopped waiting: %d, want 1", a.waitingOf(1))
+	}
+	a.endSession("aaaaaaaa11111111")
+	if a.waitingOf(1) != 0 || a.waitingOf(2) != 1 {
+		t.Fatalf("after the session ended: %d, %d; want 0, 1", a.waitingOf(1), a.waitingOf(2))
+	}
+	// (Counted while an alert is sent under the lock: it must not wait on it.)
+	done := make(chan int)
+	a.send(&waitAlert{tag: s2 + "p1", wait: a.begin(s2+"p1", 2)}, func() bool {
+		go func() { done <- a.waitingOf(2) }()
+		select {
+		case n := <-done:
+			if n != 1 {
+				t.Errorf("counted %d while sending, want 1", n)
+			}
+		case <-time.After(2 * time.Second):
+			t.Error("counting waited on the lock held while sending")
+		}
+		return true
+	})
 }

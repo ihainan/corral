@@ -362,3 +362,27 @@ func TestReplacementLineBounded(t *testing.T) {
 		t.Fatalf("%d replacements waiting", len(l[1]))
 	}
 }
+
+// Each note says how many agents wait (the app icon's number), none
+// included; without a count told, it says nothing.
+func TestNotesSayTheBadge(t *testing.T) {
+	n, _ := newTestNotifier(t, Options{})
+	var note Note
+	n.stampBadge(7, &note)
+	if b, _ := json.Marshal(note); strings.Contains(string(b), "badge") {
+		t.Fatalf("a badge said with no count told: %s", b)
+	}
+	n.SetBadges(func(u int64) int {
+		if u == 7 {
+			return 2
+		}
+		return 0
+	})
+	for u, want := range map[int64]string{7: `"badge":2`, 8: `"badge":0`} {
+		var note Note
+		n.stampBadge(u, &note)
+		if b, _ := json.Marshal(note); !strings.Contains(string(b), want) {
+			t.Fatalf("user %d: %s, want %s in it", u, b, want)
+		}
+	}
+}

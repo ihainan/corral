@@ -48,6 +48,10 @@ type Note struct {
 	// older one after a newer one (pushes can overtake each other) keeps
 	// showing the newer.
 	Seq int64 `json:"seq"`
+	// Badge: how many agents wait for the person as this goes (set by
+	// Send, where the Notifier is told how to count): the app icon's
+	// number on the devices, till the page itself says.
+	Badge *int `json:"badge,omitempty"`
 }
 
 // Action is a button on an alert.
@@ -84,6 +88,7 @@ type Notifier struct {
 	pushes, hooks lines
 	revoked       map[int64]uint64 // per user, bumped when access ends; older queued notes are dropped
 	sending       map[*sending]struct{}
+	badgeOf       func(userID int64) int // (SetBadges; nil: no badge said)
 	loginValid    func(ctx context.Context, loginHash string) (bool, error)
 }
 
@@ -234,6 +239,20 @@ func (n *Notifier) CheckWebhook(raw string) error {
 // rateWindow is the window of the per-user limit (rateMax alerts in it).
 const rateWindow = time.Minute
 
+// SetBadges tells how many agents wait for a person: each note sent says
+// it (Note.Badge). Set once, before any is sent. It must not wait on
+// anything held while Send is called.
+func (n *Notifier) SetBadges(count func(userID int64) int) { n.badgeOf = count }
+
+// stampBadge says on a note how many agents wait for its person, where
+// that is counted (0 included: the number on the icon goes).
+func (n *Notifier) stampBadge(userID int64, note *Note) {
+	if n.badgeOf != nil {
+		b := n.badgeOf(userID)
+		note.Badge = &b
+	}
+}
+
 // Send delivers a note to every channel the user set up, and says whether it
 // is on its way: bursts with the same tag inside minGap are collapsed, and a
 // user gets at most rateMax alerts a minute, so chatty programs cannot flood
@@ -241,6 +260,7 @@ const rateWindow = time.Minute
 // passes the first.
 func (n *Notifier) Send(ctx context.Context, userID int64, note Note) bool {
 	key := fmt.Sprintf("%d|%s", userID, note.Tag)
+	n.stampBadge(userID, &note) // (before n.mu: counting takes locks of its own)
 	n.mu.Lock()
 	now := time.Now()
 	if !note.Replace {

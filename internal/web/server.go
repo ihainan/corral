@@ -71,6 +71,7 @@ type Server struct {
 	fwd          *forwarder
 	code         codeServers
 	vis          visibility
+	looks        paneLooks    // (agents shown on an agents page now: see paneWatched)
 	waitAlerts   waitAlerts   // "needs you" alerts shown, to replace when no longer true
 	complete     completions  // the composer's completion listings, per session and folder
 	convos       convoStates  // the conversation view's logs being read, per session
@@ -117,6 +118,9 @@ func New(d Deps) *Server {
 		pending: map[int64]map[*liveSocket]struct{}{}, herdrSocks: herdrSockets{path: map[string]string{}},
 		notifier: d.Notifier, vis: visibility{seen: map[string]map[*liveSocket]bool{}}, fwd: newForwarder(), files: newSFTPPool(), code: codeServers{jobs: map[[2]int64]*codeJob{}}}
 	s.restores.ctx, s.restores.stop = context.WithCancel(context.Background())
+	if s.notifier != nil {
+		s.notifier.SetBadges(s.waitAlerts.waitingOf) // (the app icon's number: agents waiting)
+	}
 	s.fwd.wg.Add(1)
 	go s.fwd.reap()
 	s.terms.OnAlert = s.onTerminalAlert

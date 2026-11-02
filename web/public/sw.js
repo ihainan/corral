@@ -70,10 +70,26 @@ self.addEventListener('push', (e) => {
   } catch {
     n = { title: 'Corral', body: e.data ? e.data.text() : '' }
   }
-  const run = pushes.then(() => showAlert(n))
+  const run = pushes.then(() => Promise.all([showAlert(n), setBadge(n)]))
   pushes = run.catch(() => {})
   e.waitUntil(run)
 })
+
+// The app icon's number: how many agents wait for the person, as the
+// gateway counted when the alert went (the page sets it itself while open).
+// A count arriving late does not undo a newer one (while this worker runs).
+let badgeSeq = 0
+async function setBadge(n) {
+  if (typeof n.badge !== 'number' || typeof n.seq !== 'number' || !self.navigator.setAppBadge) return
+  const seq = micro(n.seq)
+  if (seq <= badgeSeq) return
+  badgeSeq = seq
+  try {
+    await (n.badge > 0 ? self.navigator.setAppBadge(n.badge) : self.navigator.clearAppBadge())
+  } catch {
+    /* not allowed here (no permission): no number */
+  }
+}
 
 // newest keeps the newest alert of a tag and returns what to show: this one,
 // or (an older one, arriving late) the newer one again, quietly and without
@@ -134,6 +150,12 @@ async function setAccount(id) {
   }
   if (owner !== null && owner === me) return
   seen.clear()
+  badgeSeq = 0
+  try {
+    await self.navigator.clearAppBadge?.()
+  } catch {
+    /* none to clear */
+  }
   try {
     await caches.delete(ALERTS)
     if (me) await (await caches.open(ALERTS)).put('/owner', new Response(me))

@@ -106,8 +106,23 @@ export const HIDDEN_EVERY = 30000
 
 // The page's title says how many agents wait for an answer (n), so a tab
 // behind others tells it.
-export function waitingTitle(n: number) {
-  document.title = n > 0 ? `(${n}) Corral` : 'Corral'
+// The app icon (where installed and allowed) says it too. null: no longer
+// known here (the page left): the title plain, the icon as it was (alerts
+// keep it, see sw.js).
+export function waitingTitle(n: number | null) {
+  document.title = n ? `(${n}) Corral` : 'Corral'
+  if (n !== null) appBadge(n)
+}
+
+// The app icon's number (0: none). Not everywhere: an app not installed, or
+// without leave to alert, has none; the browser refuses quietly.
+export function appBadge(n: number) {
+  const nav = navigator as Navigator & { setAppBadge?: (n: number) => Promise<void>; clearAppBadge?: () => Promise<void> }
+  try {
+    void (n > 0 ? nav.setAppBadge?.(n) : nav.clearAppBadge?.())?.catch(() => {})
+  } catch {
+    // (none)
+  }
 }
 // (The last list read, for this page's life: a tab opened later starts from
 // it rather than from nothing, so its list does not appear a moment later.)
@@ -116,6 +131,7 @@ let lastList: SessionInfo[] | null = null
 // (Another account signed in, or none: nothing of the one before stays.)
 export function forgetSessions() {
   lastList = null
+  appBadge(0)
 }
 
 // A session as the last list read has it (null when it has none).

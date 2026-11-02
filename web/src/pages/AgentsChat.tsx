@@ -160,11 +160,11 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
   const scheme = isDark() ? corralDark : corralLight
   const { sessions, failed } = useRunningSessions(active, 3000)
   // (On its own, not a tab: the title tells how many wait for an answer.)
-  const waitingN = useMemo(() => (sessions ? listAgents(sessions).rows.filter((r) => r.status === 'blocked').length : 0), [sessions])
+  const waitingN = useMemo(() => (sessions ? listAgents(sessions).rows.filter((r) => r.status === 'blocked').length : null), [sessions])
   useEffect(() => {
     if (!bar) waitingTitle(waitingN)
   }, [bar, waitingN])
-  useEffect(() => () => void (!bar && waitingTitle(0)), [bar])
+  useEffect(() => () => void (!bar && waitingTitle(null)), [bar])
   const [pick, setPick] = useState<Pick | null>(readPick)
   // The entry key of the one picked last (an address names only its session and pane).
   const pickKey = useRef<Pick | null>(pick?.key ? pick : null)
@@ -446,7 +446,7 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
     const held = holding && !(stack && screen === 'list') // (a phone's list waits for none)
     body = (
       <div className="agents-chat-empty">
-        <p>{sessions === null ? (failed ? t('agents.failed') : t('common.loading')) : waiting ? t('common.loading') : held ? t('agents.holding') : t('agents.chatNone')}</p>
+        <p>{sessions === null ? (failed ? t('agents.failed') : t('common.loading')) : waiting ? t('common.loading') : held ? t('agents.holding') : t(sessions.some((x) => x.persistence === 'herdr') ? 'agents.noneInHerdr' : 'agents.chatNone')}</p>
         {sessions !== null && held && (
           <button type="button" className="btn btn-ghost" onClick={() => setGaveUp(true)}>
             {t('agents.holdStop')}

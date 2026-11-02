@@ -305,9 +305,9 @@ export function TerminalTabs({ current }: { current: string }) {
     }, POLL_MS)
     return () => clearInterval(timer)
   }, [load])
-  const waiting = sessions ? waitingAgents(sessions) : 0
+  const waiting = sessions ? waitingAgents(sessions) : null // (null: not read yet)
   useEffect(() => waitingTitle(waiting), [waiting])
-  useEffect(() => () => waitingTitle(0), [])
+  useEffect(() => () => waitingTitle(null), [])
   // A session just opened shows its tab with its name. (Not when mounted:
   // the effect above has asked already, and a second ask would be queued.)
   const currentSeen = useRef(false)

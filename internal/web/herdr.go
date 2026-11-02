@@ -310,6 +310,9 @@ type herdrSockets struct {
 	// its conversation found it at, and when that was looked for (kept for
 	// the session's life, bounded; "" none found there).
 	located map[string]map[string]locatedAt
+	// inView: terminal session → the panes herdr shows now (its focused
+	// tab's), as its last snapshot says; none where that is not known.
+	inView map[string]map[string]bool
 }
 
 type locatedAt struct {
@@ -388,6 +391,7 @@ func (h *herdrSockets) set(id, path string) {
 		delete(h.rounds, id)
 		delete(h.bg, id)
 		delete(h.located, id)
+		delete(h.inView, id)
 	} else {
 		h.path[id] = path
 	}
@@ -412,6 +416,51 @@ func (h *herdrSockets) setSids(id string, snap *herdr.Snapshot) {
 		h.sids = map[string]map[string]string{}
 	}
 	h.sids[id] = m
+}
+
+// setView keeps which panes a snapshot says herdr shows: those of its
+// focused tab (herdr 0.8 tells no focused tab: its focused workspace's
+// active one). Not known (no focused workspace, say): none kept.
+func (h *herdrSockets) setView(id string, snap *herdr.Snapshot) {
+	tab := snap.FocusedTab
+	if tab == "" {
+		for _, w := range snap.Workspaces {
+			if w.ID == snap.FocusedWorkspace && snap.FocusedWorkspace != "" {
+				tab = w.ActiveTab
+			}
+		}
+	}
+	var m map[string]bool
+	if tab != "" {
+		m = map[string]bool{}
+		for _, p := range snap.Panes {
+			if p.TabID == tab {
+				m[p.ID] = true
+			}
+		}
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if _, ok := h.path[id]; !ok {
+		return // (the watch is over)
+	}
+	if h.inView == nil {
+		h.inView = map[string]map[string]bool{}
+	}
+	if m == nil {
+		delete(h.inView, id)
+	} else {
+		h.inView[id] = m
+	}
+}
+
+// shows says whether herdr shows pane now, to whoever looks at the session:
+// true too where that is not known (all of it taken as shown, as before).
+func (h *herdrSockets) shows(id, pane string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	m, ok := h.inView[id]
+	return !ok || m[pane]
 }
 
 // sid is the agent session id herdr gives the pane ("" when it gives none).
@@ -608,6 +657,7 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 	w := herdr.NewWatcher(sess.Client(), socket,
 		func(snap *herdr.Snapshot) {
 			s.herdrSocks.setSids(sess.ID, snap)
+			s.herdrSocks.setView(sess.ID, snap)
 			sum := summarize(name, snap, times, false)
 			rounds.number(&sum, false)
 			for _, w := range sum.Workspaces {

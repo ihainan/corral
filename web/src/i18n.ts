@@ -1594,6 +1594,10 @@ const zh = {
   'auditAction.user.enable': '启用账号',
   'auditAction.user.password_reset': '重置密码',
   'auditAction.user.role': '修改角色',
+  // herdr-borrow
+  'newAgent.worktree': '在新的 git 工作副本里开',
+  'newAgent.worktreeHint': '目录要是一个 git 仓库。工作副本由 {agent} 自己建立和管理，需要较新的版本。',
+  'agents.noneInHerdr': '打开的 herdr 会话里还没有智能体。在里面启动 Claude Code、Codex 或 OpenCode 后，会出现在这里。',
 }
 
 type Key = keyof typeof zh
@@ -3191,6 +3195,10 @@ const en: Record<Key, string> = {
   'auditAction.user.enable': 'Enable account',
   'auditAction.user.password_reset': 'Reset password',
   'auditAction.user.role': 'Change role',
+  // herdr-borrow
+  'newAgent.worktree': 'Open in a new git worktree',
+  'newAgent.worktreeHint': 'The folder must be a git repository. {agent} makes and manages the worktree itself; it needs a recent version.',
+  'agents.noneInHerdr': 'No agents in the open herdr sessions yet. Start Claude Code, Codex or OpenCode in one and it shows up here.',
 }
 
 const tables: Record<string, Record<Key, string>> = { 'zh-CN': zh, en }
