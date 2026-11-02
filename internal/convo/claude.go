@@ -65,6 +65,9 @@ type Claude struct {
 	imaged       map[string]*Entry
 	imagedOrder  []string
 	attachedRows map[string]string // uuid → the row it hangs on
+	// sourcesWaiting: sources read whose message was not (in a part of the
+	// log before the one read: told when that part is put before).
+	sourcesWaiting []imageSourceRow
 	// running: work set going and left to itself (a command in the
 	// background, a subagent on its own), until it is told to have ended;
 	// runOrder keeps them as they were set going.
@@ -543,6 +546,41 @@ func (c *Claude) Prepend(other Parser) {
 	if c.lastReq.model == "" {
 		c.lastReq = o.lastReq
 	}
+	// (Pictures: sources read here whose message is of o's part; o's
+	// messages and attachments still to be told, kept for later reads.)
+	waiting := c.sourcesWaiting[:0]
+	for _, w := range c.sourcesWaiting {
+		at := o.up(w.at, nil)
+		if e := o.imaged[at]; e != nil {
+			o.linkImages(e, w.paths)
+			delete(o.imaged, at)
+		} else {
+			waiting = append(waiting, w)
+		}
+	}
+	c.sourcesWaiting = waiting
+	for _, w := range o.sourcesWaiting { // (of a part older still)
+		if len(c.sourcesWaiting) < maxImaged {
+			c.sourcesWaiting = append(c.sourcesWaiting, w)
+		}
+	}
+	for _, id := range o.imagedOrder {
+		if e := o.imaged[id]; e != nil && len(c.imaged) < maxImaged {
+			if c.imaged == nil {
+				c.imaged = map[string]*Entry{}
+			}
+			c.imaged[id] = e
+			c.imagedOrder = append([]string{id}, c.imagedOrder...)
+		}
+	}
+	for id, up := range o.attachedRows {
+		if c.attachedRows == nil {
+			c.attachedRows = map[string]string{}
+		}
+		if len(c.attachedRows) < maxAttachedRows {
+			c.attachedRows[id] = up
+		}
+	}
 	// (What c's rewinds into o's part took back, there and here.)
 	mine := c.treeBefore(o)
 	add := o.entries
@@ -884,6 +922,46 @@ func imagePath(p string) string {
 	return p
 }
 
+// imageSourceRow is a source row's paths, and the row its chain of
+// attachments ended at, not read yet.
+type imageSourceRow struct {
+	at    string
+	paths []string
+}
+
+// linkImages gives e's pictures their files, if as many as it has.
+func (c *Claude) linkImages(e *Entry, paths []string) bool {
+	var at []int
+	for i := range e.Parts {
+		if e.Parts[i].Kind == KindImage {
+			at = append(at, i)
+		}
+	}
+	if len(paths) == 0 || len(paths) != len(at) {
+		return false
+	}
+	for k, i := range at {
+		e.Parts[i].Path = imagePath(paths[k])
+	}
+	e.Rev = c.rev
+	return true
+}
+
+// up follows a row up through the attachments' rows (of c's part, and
+// also of another's) to the first row that is not one.
+func (c *Claude) up(id string, also map[string]string) string {
+	for n := 0; n < 32; n++ {
+		p, ok := c.attachedRows[id]
+		if !ok {
+			if p, ok = also[id]; !ok {
+				return id
+			}
+		}
+		id = p
+	}
+	return id
+}
+
 // imageSources gives the pictures of a message of the person's the files
 // they came from. Claude Code, given a picture's path, writes a row of its
 // own (isMeta) of "[Image: source: <path>]" texts, a picture each in
@@ -892,19 +970,6 @@ func imagePath(p string) string {
 // message's pictures'). Where the count is not the same, none is taken;
 // a path not absolute is left out, its picture keeping its place.
 func (c *Claude) imageSources(r *claudeRow) {
-	var parent string
-	_ = json.Unmarshal(r.ParentUUID, &parent)
-	for n := 0; n < 32 && c.imaged[parent] == nil; n++ {
-		up, ok := c.attachedRows[parent]
-		if !ok {
-			return
-		}
-		parent = up
-	}
-	e := c.imaged[parent]
-	if e == nil {
-		return
-	}
 	var texts []string
 	var s string
 	var blocks []claudeBlock
@@ -923,20 +988,22 @@ func (c *Claude) imageSources(r *claudeRow) {
 			paths = append(paths, m[1])
 		}
 	}
-	var at []int
-	for i := range e.Parts {
-		if e.Parts[i].Kind == KindImage {
-			at = append(at, i)
-		}
-	}
-	if len(paths) == 0 || len(paths) != len(at) {
+	if len(paths) == 0 {
 		return
 	}
-	for k, i := range at {
-		e.Parts[i].Path = imagePath(paths[k])
+	var parent string
+	_ = json.Unmarshal(r.ParentUUID, &parent)
+	at := c.up(parent, nil)
+	if e := c.imaged[at]; e != nil {
+		if c.linkImages(e, paths) {
+			delete(c.imaged, at) // (told once)
+		}
+		return
 	}
-	e.Rev = c.rev
-	delete(c.imaged, parent) // (told once)
+	// (Its message not read: of the part before, maybe.)
+	if at != "" && len(c.sourcesWaiting) < maxImaged {
+		c.sourcesWaiting = append(c.sourcesWaiting, imageSourceRow{at: clip(at, maxID), paths: paths})
+	}
 }
 
 func (c *Claude) user(r *claudeRow) {

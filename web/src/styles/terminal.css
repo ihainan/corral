@@ -588,7 +588,8 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-pics { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; white-space: normal; align-items: center; }
 .convo-pic { display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px; border-radius: 999px; border: 1px solid color-mix(in srgb, var(--term-fg) 18%, transparent);
   background: color-mix(in srgb, var(--term-bg) 55%, transparent); color: var(--term-fg-2); font-size: 13px; cursor: pointer; }
-.convo-pic:hover { color: var(--term-fg); border-color: color-mix(in srgb, var(--term-fg) 32%, transparent); }
+.convo-pic.is-unknown { cursor: default; opacity: 0.6; }
+.convo-pic:not(.is-unknown):hover { color: var(--term-fg); border-color: color-mix(in srgb, var(--term-fg) 32%, transparent); }
 .convo-pic:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: 2px; }
 @media (pointer: coarse) { .convo-pic { padding: 7px 12px; } }
 .convo-meta { display: flex; gap: 12px; font-size: 12px; color: var(--term-fg-3); font-variant-numeric: tabular-nums; }
@@ -742,6 +743,7 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-panel-files .convo-changes-file { border-top: 0; border-radius: 6px; min-height: 30px; }
 .convo-panel-body { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 12px 14px 24px; display: flex; flex-direction: column; gap: 18px; }
 .convo-panel-file-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px; font-size: 13px; }
+.convo-changes-path.is-full { overflow-wrap: anywhere; white-space: normal; min-width: 0; }
 .convo-panel-edit + .convo-panel-edit { margin-top: 8px; }
 .convo-panel-edit > .convo-hunk-gap { border-radius: 6px 6px 0 0; }
 .convo-panel .convo-hunks { max-height: none; }

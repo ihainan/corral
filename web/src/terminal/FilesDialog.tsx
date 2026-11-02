@@ -194,11 +194,13 @@ export function FilesDialog({ sessionId, start, reveal, onPath, onInsert, onClos
   const entries = listing ? sortEntries(listing.entries.filter((e) => hidden || !e.name.startsWith('.') || (markHere && e.name === marked!.name))) : []
   // (Once listed: scrolled to; not there, said so, once.)
   useEffect(() => {
-    if (!markHere || !marked || markedSaid.current) return
+    if (!marked || !listing || markedSaid.current) return
     markedSaid.current = true
+    // (Its folder not opened — gone, not allowed: the home folder instead, said so.)
+    if (!markHere) return toast(t('files.revealGone', { dir: marked.dir }), true)
     const el = listRef.current?.querySelector(`[data-name="${CSS.escape(marked.name)}"]`)
     if (el) el.scrollIntoView({ block: 'center' })
-    else if (!listing?.truncated) toast(t('files.notThere', { name: marked.name }), true)
+    else toast(t(listing.truncated ? 'files.revealCut' : 'files.notThere', { name: marked.name }), true)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [markHere, listing])
   const hiddenCount = listing ? listing.entries.length - listing.entries.filter((e) => !e.name.startsWith('.')).length : 0

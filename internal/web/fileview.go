@@ -120,7 +120,69 @@ func pictureOf(b []byte) (ctype string, wide, high int) {
 	if err != nil || "image/"+format != ctype {
 		return "", 0, 0
 	}
+	if ctype == "image/gif" {
+		// (A browser draws a frame bigger than the canvas the header says at
+		// the frame's size: the largest the frames reach is what it decodes.)
+		w, h, ok := gifReach(b)
+		if !ok {
+			return "", 0, 0
+		}
+		return ctype, max(cfg.Width, w), max(cfg.Height, h)
+	}
 	return ctype, cfg.Width, cfg.Height
+}
+
+// gifReach walks a GIF's blocks (not decoding them) for how far right and
+// down its frames reach; not ok where it is not well formed.
+func gifReach(b []byte) (w, h int, ok bool) {
+	if len(b) < 13 {
+		return 0, 0, false
+	}
+	i := 13
+	if b[10]&0x80 != 0 { // (a global color table)
+		i += 3 << (b[10]&7 + 1)
+	}
+	skipBlocks := func() bool { // (data sub-blocks, to the empty one)
+		for i < len(b) {
+			n := int(b[i])
+			i++
+			if n == 0 {
+				return true
+			}
+			i += n
+		}
+		return false
+	}
+	for i < len(b) {
+		switch b[i] {
+		case 0x3b: // (its end)
+			return w, h, true
+		case 0x21: // (an extension)
+			i += 2
+			if !skipBlocks() {
+				return 0, 0, false
+			}
+		case 0x2c: // (a frame)
+			if i+10 > len(b) {
+				return 0, 0, false
+			}
+			d := b[i+1 : i+10]
+			left, top := int(binary.LittleEndian.Uint16(d[0:])), int(binary.LittleEndian.Uint16(d[2:]))
+			fw, fh := int(binary.LittleEndian.Uint16(d[4:])), int(binary.LittleEndian.Uint16(d[6:]))
+			w, h = max(w, left+fw), max(h, top+fh)
+			i += 10
+			if d[8]&0x80 != 0 { // (a local color table)
+				i += 3 << (d[8]&7 + 1)
+			}
+			i++ // (the LZW code size)
+			if !skipBlocks() {
+				return 0, 0, false
+			}
+		default:
+			return 0, 0, false
+		}
+	}
+	return 0, 0, false // (no end: cut short)
 }
 
 // webpSize reads a WebP's size from its first chunk: lossy (VP8), lossless

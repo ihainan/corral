@@ -164,8 +164,15 @@ let authGeneration = 0
 export const authGen = () => authGeneration
 // startup: who is signed in learnt as the page starts, which changes no
 // one: what was asked for early was asked as them, and is kept.
+// onAuthChange: told of each sign-in and sign-out (what was kept of the one before let go).
+const authListeners = new Set<() => void>()
+export function onAuthChange(f: () => void): () => void {
+  authListeners.add(f)
+  return () => void authListeners.delete(f)
+}
 export function bumpAuthGen(startup = false) {
   authGeneration++
+  if (!startup) for (const f of authListeners) f()
   if (!startup) early.clear() // (asked for as another sign-in, or none)
   else for (const e of early.values()) e.gen = authGeneration
 }

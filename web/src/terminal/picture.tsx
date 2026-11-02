@@ -1,15 +1,17 @@
 import { useEffect, useState } from 'react'
 import { Copy, Download, FolderOpen, X } from 'lucide-react'
-import { ApiError, authGen, errorText } from '../api'
+import { ApiError, authGen, errorText, onAuthChange } from '../api'
 import { t } from '../i18n'
 import { copyText, Dialog, useToast } from '../components/ui'
 
 // Pictures of a session's host shown on the page (files/view). Asked for one
 // at a time a session — each is a transfer, and a host's file channels are
-// few — what is looked at now before what is only shown small; kept a while
-// as the browser's own copy (an object URL) to be shown again, and dropped
-// once signed out. Never cached by the browser itself (no-store): a look
-// after signing out is asked again, and refused.
+// few — what is looked at now before what is only shown small. What came is
+// kept a little while (a few, half a minute: the file may be written again)
+// to be shown again, and dropped at once on signing in or out; whoever
+// shows one makes its own object URL of it, and lets it go. The browser's
+// own cache never has them (no-store): a look after signing out is asked
+// again, and refused.
 
 // downloadPath has the browser save a file of the session's host.
 export function downloadPath(sessionId: string, p: string) {
@@ -21,46 +23,46 @@ export function downloadPath(sessionId: string, p: string) {
   a.remove()
 }
 
-type Job = { sid: string; path: string; resolve: (url: string) => void; reject: (e: unknown) => void; signal?: AbortSignal }
+type Job = { sid: string; path: string; resolve: (b: Blob) => void; reject: (e: unknown) => void; signal?: AbortSignal; gen: number }
 
 const KEEP = 24
-const kept = new Map<string, { url: string; gen: number }>() // (the oldest first)
+const FRESH_MS = 30_000
+// (seeded: the browser's own copy of a file it just put up — of a name of its own, never written again.)
+const kept = new Map<string, { blob: Blob; at: number; seeded?: boolean }>() // (the oldest first)
 const queues = new Map<string, Job[]>()
 const running = new Set<string>()
 
 const keyOf = (sid: string, path: string) => sid + '\0' + path
 
-function keep(key: string, url: string) {
-  kept.set(key, { url, gen: authGen() })
-  while (kept.size > KEEP) {
-    const [k, v] = kept.entries().next().value!
-    kept.delete(k)
-    URL.revokeObjectURL(v.url)
-  }
+function keep(key: string, blob: Blob, seeded = false) {
+  kept.delete(key)
+  kept.set(key, { blob, at: Date.now(), seeded })
+  while (kept.size > KEEP) kept.delete(kept.keys().next().value!)
 }
+
+// (Signed in or out: none of it is shown again, nor what was asked as before.)
+onAuthChange(() => {
+  kept.clear()
+  for (const q of queues.values()) for (const j of q.splice(0)) j.reject(new ApiError(401, 'unauthorized', 'signed out'))
+})
 
 // seedPicture keeps the browser's own copy of a picture just put on the
 // host: looked at without asking for it again.
 export function seedPicture(sid: string, path: string, file: Blob) {
-  keep(keyOf(sid, path), URL.createObjectURL(file))
+  keep(keyOf(sid, path), file, true)
 }
 
-// lookAt is the picture's object URL; first: put before the others waiting.
-export function lookAt(sid: string, path: string, opts: { first?: boolean; signal?: AbortSignal } = {}): Promise<string> {
-  const key = keyOf(sid, path)
-  const had = kept.get(key)
-  if (had && had.gen === authGen()) {
-    kept.delete(key) // (the latest used: last to go)
-    kept.set(key, had)
-    return Promise.resolve(had.url)
-  }
-  if (had) {
-    kept.delete(key)
-    URL.revokeObjectURL(had.url)
-  }
+// forgetPicture drops what is kept of one (the browser could not show it).
+export const forgetPicture = (sid: string, path: string) => void kept.delete(keyOf(sid, path))
+
+// lookAt is the picture; first: put before the others waiting; fresh: not
+// what is kept of it.
+export function lookAt(sid: string, path: string, opts: { first?: boolean; signal?: AbortSignal; fresh?: boolean } = {}): Promise<Blob> {
+  const had = kept.get(keyOf(sid, path))
+  if (had && !opts.fresh && (had.seeded || Date.now() - had.at < FRESH_MS)) return Promise.resolve(had.blob)
   return new Promise((resolve, reject) => {
     const q = queues.get(sid) ?? []
-    const job = { sid, path, resolve, reject, signal: opts.signal }
+    const job = { sid, path, resolve, reject, signal: opts.signal, gen: authGen() }
     if (opts.first) q.unshift(job)
     else q.push(job)
     queues.set(sid, q)
@@ -81,8 +83,8 @@ async function work(sid: string) {
       }
       // (Asked for twice while waiting: the second has it from the first.)
       const had = kept.get(keyOf(sid, job.path))
-      if (had && had.gen === authGen()) {
-        job.resolve(had.url)
+      if (had && Date.now() - had.at < 1000) {
+        job.resolve(had.blob)
         continue
       }
       try {
@@ -99,15 +101,15 @@ async function work(sid: string) {
 
 // (Busy — another transfer of the session's under way — is asked again a
 // few times, a little later each time.)
-async function fetchPicture(job: Job): Promise<string> {
-  const gen = authGen()
+async function fetchPicture(job: Job): Promise<Blob> {
   for (let i = 0; ; i++) {
     const res = await fetch(`/api/sessions/${job.sid}/files/view?path=` + encodeURIComponent(job.path), { credentials: 'same-origin', signal: job.signal })
+    if (job.gen !== authGen()) throw new ApiError(401, 'unauthorized', 'signed out') // (asked as another sign-in)
     if (res.ok) {
       const blob = await res.blob()
-      const url = URL.createObjectURL(blob)
-      if (gen === authGen()) keep(keyOf(job.sid, job.path), url)
-      return url
+      if (job.gen !== authGen()) throw new ApiError(401, 'unauthorized', 'signed out')
+      keep(keyOf(job.sid, job.path), blob)
+      return blob
     }
     let code = 'failed'
     let message = res.statusText
@@ -124,6 +126,18 @@ async function fetchPicture(job: Job): Promise<string> {
     }
     throw new ApiError(res.status, code, message)
   }
+}
+
+// useObjectURL is an object URL of a picture while it is shown.
+export function useObjectURL(blob: Blob | null): string | null {
+  const [url, setUrl] = useState<string | null>(null)
+  useEffect(() => {
+    if (!blob) return setUrl(null)
+    const u = URL.createObjectURL(blob)
+    setUrl(u)
+    return () => URL.revokeObjectURL(u)
+  }, [blob])
+  return url
 }
 
 export function pictureError(e: unknown): string {
@@ -147,15 +161,16 @@ export function pictureError(e: unknown): string {
 // what else can be done with it.
 export function PictureDialog({ sid, path, onClose, onReveal }: { sid: string; path: string; onClose: () => void; onReveal?: () => void }) {
   const toast = useToast()
-  const [url, setUrl] = useState<string | null>(null)
+  const [blob, setBlob] = useState<Blob | null>(null)
   const [error, setError] = useState('')
   const [again, setAgain] = useState(0)
+  const url = useObjectURL(blob)
   useEffect(() => {
     const ctl = new AbortController()
-    setUrl(null)
+    setBlob(null)
     setError('')
-    lookAt(sid, path, { first: true, signal: ctl.signal }).then(
-      (u) => !ctl.signal.aborted && setUrl(u),
+    lookAt(sid, path, { first: true, signal: ctl.signal, fresh: again > 0 }).then(
+      (b) => !ctl.signal.aborted && setBlob(b),
       (e) => !ctl.signal.aborted && setError(pictureError(e)),
     )
     return () => ctl.abort()
@@ -168,13 +183,23 @@ export function PictureDialog({ sid, path, onClose, onReveal }: { sid: string; p
         <button type="button" className="icon-btn" onClick={onClose} aria-label={t('common.close')}><X size={18} /></button>
       </div>
       <div className="picture-body">
-        {url ? (
-          <img className="picture-img" src={url} alt={name} onError={() => setError(t('picture.notPicture'))} />
-        ) : error ? (
+        {error ? (
           <div className="picture-note" role="alert">
             <p>{error}</p>
             <button type="button" className="btn" onClick={() => setAgain((n) => n + 1)}>{t('common.retry')}</button>
           </div>
+        ) : url ? (
+          <img
+            className="picture-img"
+            src={url}
+            alt={name}
+            onError={() => {
+              // (Not to be shown by the browser after all: said so, and asked again on retry.)
+              forgetPicture(sid, path)
+              setBlob(null)
+              setError(t('picture.notPicture'))
+            }}
+          />
         ) : (
           <p className="picture-note hint">{t('common.loading')}</p>
         )}

@@ -3152,23 +3152,32 @@ function UserTurn({ e, onCopy }: { e: ConvoEntry; onCopy: (s: string) => void })
   const images = pics.length
   // (Of the pictures, the ones whose file is told: each to be looked at, its session live.)
   const acts = useContext(FileActsOf)
-  const files = acts ? pics.flatMap((p) => (p.path && fullPath(p.path) ? [p.path] : [])) : []
+  // (Each in its place, numbered by it; one whose file is not told, not to be opened.)
+  const files = acts ? pics.map((p) => (p.path && fullPath(p.path) ? p.path : null)) : []
+  const any = files.some(Boolean)
   // (A shell command run with "!": in the terminal's letters, as typed.)
   const shell = /^! \S/.test(text)
   return (
     <div className={'convo-user' + (e.mid ? ' is-mid' : '')}>
       <div className={'convo-user-text' + (shell ? ' is-shell' : '')}>
         {text}
-        {images > 0 && !files.length && !/\[Image #\d+\]/.test(text) && <span className="convo-image">{t(images === 1 ? 'convo.images1' : 'convo.images', { n: images })}</span>}
-        {files.length > 0 && (
+        {images > 0 && !any && !/\[Image #\d+\]/.test(text) && <span className="convo-image">{t(images === 1 ? 'convo.images1' : 'convo.images', { n: images })}</span>}
+        {any && (
           <span className="convo-pics">
-            {files.map((f, i) => (
-              <button key={i} type="button" className="convo-pic" onClick={() => acts!.view(f)} title={f}>
-                <ImageIcon size={14} aria-hidden="true" />
-                <span>{files.length > 1 ? t('convo.picN', { n: i + 1 }) : t('convo.pic')}</span>
-              </button>
-            ))}
-            {images > files.length && <span className="convo-image">{t(images - files.length === 1 ? 'convo.images1' : 'convo.images', { n: images - files.length })}</span>}
+            {files.map((f, i) => {
+              const said = images > 1 ? t('convo.picN', { n: i + 1 }) : t('convo.pic')
+              return f ? (
+                <button key={i} type="button" className="convo-pic" onClick={() => acts!.view(f)} title={f}>
+                  <ImageIcon size={14} aria-hidden="true" />
+                  <span>{said}</span>
+                </button>
+              ) : (
+                <span key={i} className="convo-pic is-unknown" title={t('convo.picUnknown')}>
+                  <ImageIcon size={14} aria-hidden="true" />
+                  <span>{said}</span>
+                </span>
+              )
+            })}
           </span>
         )}
         {e.parts.some((p) => p.truncated) && <p className="convo-cut">{t('convo.cut')}</p>}
@@ -3654,8 +3663,8 @@ function ChangesPanel({ edits, focus, onClose, active, onCopy }: { edits: Edits;
       <div className="convo-panel-body" ref={box}>
         {edits.files.map((f) => (
           <section key={f.path} className="convo-panel-file" data-file={f.path}>
-            <div className="convo-panel-file-head" title={f.path}>
-              <span className="convo-changes-path">{shortPath(f.path)}</span>
+            <div className="convo-panel-file-head">
+              <span className="convo-changes-path is-full">{f.path}</span>
               <LineCounts add={f.add} del={f.del} />
             </div>
             <PathBar path={f.path} onCopy={onCopy} acts />

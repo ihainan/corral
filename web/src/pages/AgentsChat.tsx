@@ -672,6 +672,16 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   // A picture of its host looked at.
   const [viewing, setViewing] = useState<string | null>(null)
   const fileActs = useMemo((): FileActs => ({ reveal: setFilesAt, download: (p) => downloadPath(sid, p), view: setViewing }), [sid])
+  // (Another tab shown — a terminal's — or another agent: what was opened of this one's files closes.)
+  useEffect(() => {
+    if (active) return
+    setFilesAt(null)
+    setViewing(null)
+  }, [active])
+  useEffect(() => {
+    setFilesAt(null)
+    setViewing(null)
+  }, [sid])
   // What the bar says of it: herdr's word for a herdr agent (as the session
   // list has it, every few seconds); a tmux one's from its process file.
   const agent = useMemo((): ConvoAgent | null => {
@@ -1815,7 +1825,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       answered={answered}
       files={fileActs}
     />
-    {viewing && (
+    {viewing && active && (
       <PictureDialog
         sid={sid}
         path={viewing}
@@ -1826,7 +1836,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
         }}
       />
     )}
-    {filesAt && (
+    {filesAt && active && (
       <FilesDialog
         sessionId={sid}
         start={null}

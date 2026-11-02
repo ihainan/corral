@@ -8,6 +8,7 @@ import (
 	"image/gif"
 	"image/jpeg"
 	"image/png"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -65,6 +66,10 @@ func TestFilesView(t *testing.T) {
 			t.Errorf("%s: %d %s %.80q", name, res.StatusCode, res.Header.Get("Content-Type"), body)
 		}
 	}
+	// A GIF whose canvas is 1×1 and one frame 8000×6500: refused by the frame (review548-1).
+	if res, body := view(e, "big-frame.gif", bigFrameGIF()); res.StatusCode != 413 {
+		t.Errorf("a frame past the canvas: %d %.80q", res.StatusCode, body)
+	}
 	os.Mkdir(filepath.Join(e.root, "dir.png"), 0o755)
 	if res, _ := e.raw("GET", e.url("view", url.Values{"path": {e.root + "/dir.png"}}), nil, ""); res.StatusCode != 400 {
 		t.Errorf("a folder: %d", res.StatusCode)
@@ -88,5 +93,39 @@ func TestFilesView(t *testing.T) {
 	e.c.do("POST", "/api/logout", nil)
 	if res, _ := e.raw("GET", e.url("view", url.Values{"path": {e.root + "/a.png"}}), nil, ""); res.StatusCode != 401 {
 		t.Errorf("signed out: %d", res.StatusCode)
+	}
+}
+
+func view(e *fileEnv, name string, data []byte) (*http.Response, []byte) {
+	os.WriteFile(filepath.Join(e.root, name), data, 0o644)
+	return e.raw("GET", e.url("view", url.Values{"path": {e.root + "/" + name}}), nil, "")
+}
+
+// bigFrameGIF is a well formed GIF of a 1×1 canvas holding one frame of
+// 8000×6500 (its pixels a single LZW clear and end: what the frame says of
+// its size is what counts).
+func bigFrameGIF() []byte {
+	b := []byte("GIF89a")
+	b = binary.LittleEndian.AppendUint16(b, 1)
+	b = binary.LittleEndian.AppendUint16(b, 1)
+	b = append(b, 0x80, 0, 0, 0, 0, 0, 0xff, 0xff, 0xff) // (a global table of two colors)
+	b = append(b, 0x2c, 0, 0, 0, 0)
+	b = binary.LittleEndian.AppendUint16(b, 8000)
+	b = binary.LittleEndian.AppendUint16(b, 6500)
+	b = append(b, 0, 2, 2, 0x4c, 0x01, 0, 0x3b)
+	return b
+}
+
+func TestGifReach(t *testing.T) {
+	var gb bytes.Buffer
+	gif.Encode(&gb, image.NewPaletted(image.Rect(0, 0, 3, 2), color.Palette{color.Black, color.White}), nil)
+	if w, h, ok := gifReach(gb.Bytes()); !ok || w != 3 || h != 2 {
+		t.Fatalf("a plain GIF: %d×%d %v", w, h, ok)
+	}
+	if w, h, ok := gifReach(bigFrameGIF()); !ok || w != 8000 || h != 6500 {
+		t.Fatalf("the big frame: %d×%d %v", w, h, ok)
+	}
+	if _, _, ok := gifReach(bigFrameGIF()[:30]); ok {
+		t.Fatal("cut short: taken")
 	}
 }

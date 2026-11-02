@@ -57,6 +57,39 @@ func TestClaudeImageSources(t *testing.T) {
 	}
 }
 
+// The log read in parts (its end first, then the part before put before
+// it): a source read before its message is told it once that part comes;
+// a message of the part before, its source read later, likewise.
+func TestClaudeImageSourcesPrepend(t *testing.T) {
+	img := `{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AA=="}}`
+	msg := `{"type":"user","uuid":"u1","parentUuid":null,"message":{"role":"user","content":[{"type":"text","text":"[Image #1]"},` + img + `]}}`
+	att := `{"type":"attachment","uuid":"x1","parentUuid":"u1","attachment":{"type":"total_tokens_reminder"}}`
+	src := `{"type":"user","uuid":"m1","parentUuid":"x1","isMeta":true,"message":{"role":"user","content":[{"type":"text","text":"[Image: source: /home/u/a.png]"}]}}`
+
+	// The source in the later part (read first), the message and its attachment before.
+	c, o := NewClaude(), NewClaude()
+	c.Feed(lines(src))
+	o.Feed(lines(msg, att))
+	rev := c.Rev()
+	c.Prepend(o)
+	got := find(c, "u1")
+	if p := paths(got); len(p) != 1 || p[0] != "/home/u/a.png" || got.Rev <= rev {
+		t.Fatalf("source before its message: %q rev %d", p, got.Rev)
+	}
+
+	// The message and its attachment in the part before, the source read after it was put before.
+	c, o = NewClaude(), NewClaude()
+	c.Feed(lines(`{"type":"assistant","uuid":"a0","parentUuid":"x1","message":{"content":[{"type":"text","text":"…"}]}}`))
+	o.Feed(lines(msg, att))
+	c.Prepend(o)
+	rev = c.Rev()
+	c.Feed(lines(src))
+	got = find(c, "u1")
+	if p := paths(got); len(p) != 1 || p[0] != "/home/u/a.png" || got.Rev <= rev {
+		t.Fatalf("source after the part before: %q rev %d", p, got.Rev)
+	}
+}
+
 func paths(e Entry) []string {
 	var out []string
 	for _, p := range e.Parts {

@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { File as FileIcon, X } from 'lucide-react'
 import { t } from '../i18n'
 import { attachedIn, keepAttached, type Attached } from './drafts'
-import { lookAt, seedPicture } from './picture'
+import { lookAt, seedPicture, useObjectURL } from './picture'
 
 // Files put up from a composer: a label in the draft (sent as the path),
 // and over the box a chip each — its picture small, its name, its whole
@@ -25,14 +25,10 @@ export const ATTACH_LABEL = /\[(?:图片|文件|Attached (?:image|file)) #\d+[�
 
 // The browser's own copies of files just put up: shown small at once, and
 // looked at without asking the host. This page's only, a few.
-const thumbs = new Map<string, string>() // label → object URL
+const thumbs = new Map<string, Blob>() // by label
 function keepThumb(label: string, file: File) {
-  thumbs.set(label, URL.createObjectURL(file))
-  while (thumbs.size > 40) {
-    const [k, v] = thumbs.entries().next().value!
-    thumbs.delete(k)
-    URL.revokeObjectURL(v)
-  }
+  thumbs.set(label, file)
+  while (thumbs.size > 40) thumbs.delete(thumbs.keys().next().value!)
 }
 
 // attach keeps a file just put up on the host (path) and is its label,
@@ -66,16 +62,17 @@ export function AttachStrip({ draft, sid, host, onRemove, onOpen }: { draft: str
 function AttachChip({ a, sid, here, onRemove, onOpen }: { a: Attached; sid: string; here: boolean; onRemove: () => void; onOpen: () => void }) {
   // (Its picture: the browser's copy, else — the page loaded since — asked
   // of the host, after what is looked at; not of another host.)
-  const [thumb, setThumb] = useState(() => thumbs.get(a.label) ?? null)
+  const [blob, setBlob] = useState(() => thumbs.get(a.label) ?? null)
+  const thumb = useObjectURL(blob)
   useEffect(() => {
-    if (thumb || !a.image || !here) return
+    if (blob || !a.image || !here) return
     const ctl = new AbortController()
     lookAt(sid, a.path, { signal: ctl.signal }).then(
-      (u) => !ctl.signal.aborted && setThumb(u),
+      (b) => !ctl.signal.aborted && setBlob(b),
       () => {},
     )
     return () => ctl.abort()
-  }, [sid, a.path, a.image, here, thumb])
+  }, [sid, a.path, a.image, here, blob])
   return (
     <span className={'attach-chip' + (here ? '' : ' is-other')} title={here ? a.path : t('attach.otherHost', { path: a.path })}>
       <button type="button" className="attach-open" onClick={onOpen} disabled={!here} aria-label={t(a.image ? 'attach.view' : 'attach.reveal', { name: a.name })}>
