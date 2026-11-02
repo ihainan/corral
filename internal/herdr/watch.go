@@ -33,8 +33,9 @@ type Watcher struct {
 	// reported last may no longer be so until the next snapshot.
 	OnLost func()
 
-	mu   sync.Mutex
-	last *Snapshot
+	mu     sync.Mutex
+	last   *Snapshot
+	lastAt time.Time // (when last was read)
 }
 
 func NewWatcher(c *ssh.Client, socketPath string, onChange func(*Snapshot), onTransition func(Transition)) *Watcher {
@@ -46,6 +47,13 @@ func (w *Watcher) Latest() *Snapshot {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.last
+}
+
+// LatestAt is Latest with when it was read.
+func (w *Watcher) LatestAt() (*Snapshot, time.Time) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.last, w.lastAt
 }
 
 // Run blocks until ctx ends, reconnecting with backoff after failures.
@@ -149,7 +157,7 @@ func (w *Watcher) refresh(ctx context.Context) (*Snapshot, error) {
 	}
 	w.mu.Lock()
 	prev := w.last
-	w.last = snap
+	w.last, w.lastAt = snap, time.Now()
 	w.mu.Unlock()
 	if prev != nil && w.onTrans != nil {
 		before := map[string]string{}

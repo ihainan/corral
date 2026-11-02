@@ -59,26 +59,26 @@ func (v *visibility) watched(sessionID string) bool {
 	return false
 }
 
-// paneLooks: the agents shown on an agents page now (its owner's), by
-// session and pane, as the page's readings of their conversation say: each
+// paneLooks: the agents shown on agents pages now (their owner's), by
+// session and pane, as the pages' readings of their conversation say: each
 // reading marks it looked at for lookTTL. A page names each time it shows
-// an agent (look id): its end said (unlook) ends that one only, and a
-// reading of it that comes after its end (sent before) is not taken.
+// an agent (look id): its end said (unlook) ends that one only (another
+// page, another device, may look at it still), and a reading of it that
+// comes after its end (sent before) is not taken.
 type paneLooks struct {
 	mu    sync.Mutex
-	at    map[string]paneLook  // session + "\x00" + pane → the last reading
-	ended map[string]time.Time // look id → when its end was said
-}
-
-type paneLook struct {
-	t  time.Time
-	id string
+	at    map[string]map[string]time.Time // session + "\x00" + pane → look id → its last reading
+	ended map[string]time.Time            // look id → when its end was said
 }
 
 // lookTTL: how long after a reading an agent counts as looked at (the page
 // reads every second or two, every five after a failure). A page that stops
 // showing it says so: the time is for one that could not.
 const lookTTL = 8 * time.Second
+
+// lookEndKept: how long an ended look id is known as such, well past any
+// reading of it still on its way (pages give up on one after 25 s).
+const lookEndKept = 5 * time.Minute
 
 func (l *paneLooks) note(session, pane, id string) {
 	l.mu.Lock()
@@ -87,20 +87,36 @@ func (l *paneLooks) note(session, pane, id string) {
 		return
 	}
 	if l.at == nil {
-		l.at = map[string]paneLook{}
+		l.at = map[string]map[string]time.Time{}
 	}
 	now := time.Now()
 	if len(l.at) > 256 {
-		for k, x := range l.at {
-			if now.Sub(x.t) > lookTTL {
+		for k, m := range l.at {
+			for id, t := range m {
+				if now.Sub(t) > lookTTL {
+					delete(m, id)
+				}
+			}
+			if len(m) == 0 {
 				delete(l.at, k)
 			}
 		}
 	}
-	l.at[session+"\x00"+pane] = paneLook{now, id}
+	k := session + "\x00" + pane
+	m := l.at[k]
+	if m == nil {
+		m = map[string]time.Time{}
+		l.at[k] = m
+	}
+	for id, t := range m { // (each pane's own: those of pages gone without saying)
+		if now.Sub(t) > lookTTL {
+			delete(m, id)
+		}
+	}
+	m[id] = now
 }
 
-// end ends the look id of pane (not a later one of it).
+// end ends the look id of pane (not another of it).
 func (l *paneLooks) end(session, pane, id string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -110,14 +126,15 @@ func (l *paneLooks) end(session, pane, id string) {
 	now := time.Now()
 	if len(l.ended) > 256 {
 		for k, t := range l.ended {
-			if now.Sub(t) > time.Minute { // (a reading sent before is answered long since)
+			if now.Sub(t) > lookEndKept {
 				delete(l.ended, k)
 			}
 		}
 	}
 	l.ended[id] = now
 	k := session + "\x00" + pane
-	if l.at[k].id == id {
+	delete(l.at[k], id)
+	if len(l.at[k]) == 0 {
 		delete(l.at, k)
 	}
 }
@@ -125,8 +142,12 @@ func (l *paneLooks) end(session, pane, id string) {
 func (l *paneLooks) recent(session, pane string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	x, ok := l.at[session+"\x00"+pane]
-	return ok && time.Since(x.t) < lookTTL
+	for _, t := range l.at[session+"\x00"+pane] {
+		if time.Since(t) < lookTTL {
+			return true
+		}
+	}
+	return false
 }
 
 // paneWatched says whether someone looks at a herdr pane's agent now, so

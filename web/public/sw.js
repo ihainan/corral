@@ -82,14 +82,18 @@ self.addEventListener('push', (e) => {
 // one for another account than the one signed in here (or for any, signed
 // out) is not shown.
 let badgeSeq = 0
+let ownerSeen = null // (the account signed in, as last known here: '' none; null not known)
 async function setBadge(n) {
   if (typeof n.badge !== 'number' || typeof n.seq !== 'number' || !self.navigator.setAppBadge) return
   const seq = micro(n.seq)
   if (seq <= badgeSeq) return
+  const notOurs = (owner) => owner !== null && n.badge_for !== undefined && owner !== String(n.badge_for)
+  if (notOurs(ownerSeen)) return
   try {
     const c = await caches.open(ALERTS)
     const owner = await c.match('/owner')
-    if (owner && n.badge_for !== undefined && (await owner.text()) !== String(n.badge_for)) return
+    if (owner) ownerSeen = await owner.text()
+    if (notOurs(ownerSeen)) return
     const r = await c.match('/badge')
     const stored = r ? Number(await r.text()) || 0 : 0
     if (seq <= stored) return void (badgeSeq = Math.max(badgeSeq, stored))
@@ -170,6 +174,7 @@ async function setAccount(id) {
   } catch {
     /* unknown: as for another account */
   }
+  ownerSeen = me
   if (owner !== null && owner === me) return
   seen.clear()
   badgeSeq = 0

@@ -75,7 +75,7 @@ func TestPaneWatchedByAnAgentsPage(t *testing.T) {
 	if s.paneWatched("fedcba9876543210", "p4") {
 		t.Fatal("the same pane of another session counted as looked at")
 	}
-	s.looks.at[id+"\x00p4"] = paneLook{time.Now().Add(-lookTTL - time.Second), "look-0001"}
+	s.looks.at[id+"\x00p4"]["look-0001"] = time.Now().Add(-lookTTL - time.Second)
 	if s.paneWatched(id, "p4") {
 		t.Fatal("still looked at long after the page last read it")
 	}
@@ -100,6 +100,12 @@ func TestLookEndsByItsName(t *testing.T) {
 	if !s.paneWatched(id, "p4") {
 		t.Fatal("a later look ended by an earlier one's end")
 	}
+	// (Two pages looking: one's end leaves the other's.)
+	s.looks.note(id, "p4", "look-0003")
+	s.looks.end(id, "p4", "look-0003")
+	if !s.paneWatched(id, "p4") {
+		t.Fatal("one page's end ended another's look")
+	}
 }
 
 // The app icon's number: the panes waiting in the last snapshot of each
@@ -110,7 +116,10 @@ func TestAgentsWaitingCountsEachServerOnce(t *testing.T) {
 	s := &Server{herdrSocks: herdrSockets{path: map[string]string{}}}
 	snapA := &herdr.Snapshot{Panes: []herdr.Pane{{ID: "p1", AgentStatus: herdr.StatusBlocked}, {ID: "p2", AgentStatus: herdr.StatusBlocked}, {ID: "p3", AgentStatus: herdr.StatusWorking}}}
 	snapB := &herdr.Snapshot{Panes: []herdr.Pane{{ID: "p1", AgentStatus: herdr.StatusBlocked}}}
-	of := func(snap **herdr.Snapshot) func() *herdr.Snapshot { return func() *herdr.Snapshot { return *snap } }
+	at := time.Now()
+	of := func(snap **herdr.Snapshot) func() (*herdr.Snapshot, time.Time) {
+		return func() (*herdr.Snapshot, time.Time) { return *snap, at }
+	}
 	var none *herdr.Snapshot
 	for id, w := range map[string]watchedServer{"s1": {"ka", 7, of(&snapA)}, "s2": {"ka", 7, of(&snapA)}, "s0": {"ka", 7, of(&none)}, "s3": {"kb", 8, of(&snapB)}} {
 		s.herdrSocks.set(id, "/s")
@@ -126,5 +135,16 @@ func TestAgentsWaitingCountsEachServerOnce(t *testing.T) {
 	s.herdrSocks.set("s3", "")
 	if s.agentsWaiting(7) != 1 || s.agentsWaiting(8) != 0 {
 		t.Fatalf("after: %d, %d; want 1, 0", s.agentsWaiting(7), s.agentsWaiting(8))
+	}
+	// (Two watchers of one server, one behind: the one read last counts, whichever comes first.)
+	old := &herdr.Snapshot{Panes: []herdr.Pane{{ID: "p1", AgentStatus: herdr.StatusBlocked}, {ID: "p2", AgentStatus: herdr.StatusBlocked}}}
+	fresh := &herdr.Snapshot{}
+	for i := 0; i < 20; i++ {
+		s.herdrSocks.setServer("s1", "ka", 7, func() (*herdr.Snapshot, time.Time) { return old, at.Add(-time.Minute) })
+		s.herdrSocks.setServer("s2", "ka", 7, func() (*herdr.Snapshot, time.Time) { return fresh, at })
+		s.herdrSocks.set("s0", "")
+		if n := s.agentsWaiting(7); n != 0 {
+			t.Fatalf("a watcher behind counted: %d, want 0", n)
+		}
 	}
 }

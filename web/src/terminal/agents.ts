@@ -115,26 +115,27 @@ export function waitingTitle(n: number | null) {
 }
 
 // The app icon's number (0: none). Not everywhere: an app not installed, or
-// without leave to alert, has none; the browser refuses quietly. The
-// service worker is told it too, with when it was read by the gateway's
-// clock (see readAt), so that an alert's older count arriving after does
-// not undo it.
-export function appBadge(n: number) {
+// without leave to alert, has none; the browser refuses quietly. Where a
+// service worker runs the page, it sets it, ordered with the alerts' counts
+// by when the list was read (see readAt): an older count, the page's or an
+// alert's, does not undo a newer. (0 at once, the account gone: see app.)
+export function appBadge(n: number, ordered = true) {
   const nav = navigator as Navigator & { setAppBadge?: (n: number) => Promise<void>; clearAppBadge?: () => Promise<void> }
   try {
+    const sw = nav.serviceWorker?.controller
+    if (ordered && sw && listReadAt) return sw.postMessage({ t: 'badge', n, seq: listReadAt })
     void (n > 0 ? nav.setAppBadge?.(n) : nav.clearAppBadge?.())?.catch(() => {})
-    if (gatewayNow) nav.serviceWorker?.controller?.postMessage({ t: 'badge', n, seq: gatewayNow })
   } catch {
     // (none)
   }
 }
 
-// When the session list was last read, by the gateway's clock (its Date, in
-// microseconds as the alerts' numbers are): 0 not known.
-let gatewayNow = 0
+// When the session list last read was read, by the gateway's clock alerts
+// are numbered by (its X-Corral-Now, microseconds): 0 not known.
+let listReadAt = 0
 export function readAt(res: Response) {
-  const t = Date.parse(res.headers.get('Date') ?? '')
-  if (!Number.isNaN(t)) gatewayNow = t * 1000
+  const t = Number(res.headers.get('X-Corral-Now'))
+  if (Number.isFinite(t) && t > listReadAt) listReadAt = t
 }
 // (The last list read, for this page's life: a tab opened later starts from
 // it rather than from nothing, so its list does not appear a moment later.)

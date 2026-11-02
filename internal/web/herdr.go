@@ -321,10 +321,10 @@ type herdrSockets struct {
 type watchedServer struct {
 	key    string
 	owner  int64
-	latest func() *herdr.Snapshot // (its watcher's last snapshot)
+	latest func() (*herdr.Snapshot, time.Time) // (its watcher's last snapshot, and when it was read)
 }
 
-func (h *herdrSockets) setServer(id, key string, owner int64, latest func() *herdr.Snapshot) {
+func (h *herdrSockets) setServer(id, key string, owner int64, latest func() (*herdr.Snapshot, time.Time)) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if _, ok := h.path[id]; !ok {
@@ -337,7 +337,8 @@ func (h *herdrSockets) setServer(id, key string, owner int64, latest func() *her
 }
 
 // snapshotsOf: the last snapshot of each herdr server a person's sessions
-// watch now, each server once (the first of its watchers to have one).
+// watch now, each server once (the one its watchers read last: another may
+// be behind, reconnecting say).
 func (h *herdrSockets) snapshotsOf(owner int64) []*herdr.Snapshot {
 	h.mu.Lock()
 	var ws []watchedServer
@@ -347,16 +348,19 @@ func (h *herdrSockets) snapshotsOf(owner int64) []*herdr.Snapshot {
 		}
 	}
 	h.mu.Unlock()
-	seen := map[string]bool{}
-	var out []*herdr.Snapshot
+	type read struct {
+		snap *herdr.Snapshot
+		at   time.Time
+	}
+	best := map[string]read{}
 	for _, w := range ws {
-		if seen[w.key] {
-			continue
+		if snap, at := w.latest(); snap != nil && (best[w.key].snap == nil || at.After(best[w.key].at)) {
+			best[w.key] = read{snap, at}
 		}
-		if snap := w.latest(); snap != nil {
-			seen[w.key] = true
-			out = append(out, snap)
-		}
+	}
+	out := make([]*herdr.Snapshot, 0, len(best))
+	for _, r := range best {
+		out = append(out, r.snap)
 	}
 	return out
 }
@@ -734,7 +738,7 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 		},
 	)
 	latest = w.Latest
-	s.herdrSocks.setServer(sess.ID, server, sess.OwnerID, w.Latest)
+	s.herdrSocks.setServer(sess.ID, server, sess.OwnerID, w.LatestAt)
 	// An agent looked at: the last summary goes again, with it no longer
 	// "done"; or what one left running told.
 	again := func() {

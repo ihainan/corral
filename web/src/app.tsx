@@ -112,7 +112,7 @@ export function App() {
     forgetColours()
     // (The app icon's number was another's: gone. Not when the page starts
     // and learns who is signed in: that one's stays.)
-    if (wasMe.current !== undefined && wasMe.current !== me?.id) appBadge(0)
+    if (wasMe.current !== undefined && wasMe.current !== me?.id) appBadge(0, false)
     wasMe.current = me?.id
   }, [me?.id])
 

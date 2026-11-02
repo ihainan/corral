@@ -65,6 +65,9 @@ func failureReason(err error) string {
 }
 
 func (s *Server) apiListSessions(w http.ResponseWriter, r *http.Request) {
+	// When it was read, by the clock alerts are numbered by (Note.Seq): the
+	// page tells the app icon's count with it, ordered with the alerts'.
+	w.Header().Set("X-Corral-Now", strconv.FormatInt(time.Now().UnixMicro(), 10))
 	writeJSONCompressed(w, r, http.StatusOK, s.terms.List(currentUser(r).ID))
 }
 
