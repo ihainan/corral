@@ -1,6 +1,10 @@
 package convo
 
 import (
+	"bytes"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -86,4 +90,57 @@ func TestCodexTurnErrorOnce(t *testing.T) {
 	if n != 2 {
 		t.Fatalf("%d troubles, want 2 (once a turn)", n)
 	}
+}
+
+// TestCodexTurnErrorReal: in every rollout under CORRAL_CODEX_LOGS, each
+// turn that ended in an error (on its task_complete, or an older Codex's
+// error row) shows as a note. Run it when a new Codex version is about: a
+// change in where it writes errors shows here, not in the person's chat.
+// Skipped without it.
+func TestCodexTurnErrorReal(t *testing.T) {
+	glob := os.Getenv("CORRAL_CODEX_LOGS")
+	if glob == "" {
+		t.Skip("CORRAL_CODEX_LOGS not set")
+	}
+	files, _ := filepath.Glob(glob)
+	all, n := 0, 0
+	for _, name := range files {
+		b, err := os.ReadFile(name)
+		if err != nil {
+			continue
+		}
+		want := 0
+		for _, l := range bytes.Split(b, []byte("\n")) {
+			var r struct {
+				Payload struct {
+					Type  string          `json:"type"`
+					Error json.RawMessage `json:"error"`
+				} `json:"payload"`
+			}
+			if json.Unmarshal(l, &r) != nil {
+				continue
+			}
+			if r.Payload.Type == "error" || r.Payload.Type == "task_complete" && len(r.Payload.Error) > 0 && string(r.Payload.Error) != "null" {
+				want++
+			}
+		}
+		if want == 0 {
+			continue
+		}
+		c := NewCodex()
+		c.Feed(b)
+		got := 0
+		for _, e := range c.entries {
+			for _, p := range e.Parts {
+				if p.Trouble != nil && p.Trouble.Kind != TroubleCut {
+					got++
+				}
+			}
+		}
+		if got != want {
+			t.Errorf("%s: %d turns ended in an error, %d shown", name, want, got)
+		}
+		all, n = all+want, n+1
+	}
+	t.Logf("%d rollouts, %d errors", n, all)
 }
