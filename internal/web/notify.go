@@ -380,8 +380,10 @@ func (s *Server) onHerdrTransition(sess *term.Session, h *store.Host, tr herdr.T
 		x, ok := rs.current(tr.Pane.ID)
 		return !ok || x.n != round
 	}
-	// Opened, the alert brings the session to this pane (herdr focuses it).
-	note := notify.Note{Body: where, BodyZh: where, URL: "/t/" + sess.ID + "?pane=" + url.QueryEscape(tr.Pane.ID), Tag: tag}
+	// Opened, the alert shows this agent on the agents page: its question's
+	// card whole, what it did; its terminal a tap away. (A terminal's own
+	// alerts, a bell, open its terminal: see onTerminalAlert.)
+	note := notify.Note{Body: where, BodyZh: where, URL: agentAddress(sess.ID, tr.Pane.ID), Tag: tag}
 	// Waiting no more: the alert on the devices is replaced, also while the
 	// session is looked at (that is often where it was answered).
 	if tr.From == herdr.StatusBlocked && tr.To != herdr.StatusBlocked {
@@ -472,6 +474,12 @@ func (s *Server) endSessionAlerts(sess *term.Session) {
 	}
 }
 
+// agentAddress: where an alert about a herdr agent opens (the agents page,
+// at it).
+func agentAddress(session, pane string) string {
+	return "/agents?s=" + url.QueryEscape(session) + "&pane=" + url.QueryEscape(pane)
+}
+
 // alertWaiting sends "needs you" with what the agent asks, read from its
 // screen. When the agent asks with a menu and all it shows with it fits in
 // the alert, the first and last choices become buttons, answering with a
@@ -479,8 +487,7 @@ func (s *Server) endSessionAlerts(sess *term.Session) {
 // Without the screen (herdr slow or gone) the alert goes as it is.
 func (s *Server) alertWaiting(sess *term.Session, tr herdr.Transition, wait uint64, note notify.Note, agent, agentZh string) {
 	note.Title, note.TitleZh = agent+" needs you", agentZh+" 在等你处理"
-	note.URL += "&reply=" + url.QueryEscape(tr.Pane.ID) // opens the answer to it
-	note.Distinct = true                                // (another wait than the last alert of this pane)
+	note.Distinct = true // (another wait than the last alert of this pane)
 	al := &waitAlert{tag: note.Tag, wait: wait, user: sess.OwnerID, session: sess.ID, pane: tr.Pane.ID}
 	if text, digest, ok := s.waitingScreen(sess, tr.Pane.ID); ok {
 		w := waitQuestion(text)

@@ -7,7 +7,7 @@ import { HIDDEN_EVERY, markRead, readAt, waitingTitle } from '../terminal/agents
 import { t } from '../i18n'
 import { local } from '../storage'
 import { navigate } from '../router'
-import { takeTabs } from '../notifyopen'
+import { agentsAddress, takeTabs } from '../notifyopen'
 import { Dialog, useToast } from '../components/ui'
 import { estimateSize, useConnect } from '../connect'
 import type { TabInfo } from './Terminal'
@@ -440,7 +440,7 @@ export function TerminalTabs({ current }: { current: string }) {
   // tabs) opens as its tab here, with what its address asks for (?reply=).
   useEffect(() => {
     takeTabs((u) => {
-      if (!/^\/t\/[0-9a-f]+$/.test(u.pathname) || document.querySelector('[aria-modal="true"]')) return false
+      if (!(/^\/t\/[0-9a-f]+$/.test(u.pathname) || agentsAddress(u)) || document.querySelector('[aria-modal="true"]')) return false
       if (u.searchParams.get('convo') === '1') {
         // (An address from before the agents page: there, at that agent.)
         const to = new URLSearchParams({ s: u.pathname.slice(3) })

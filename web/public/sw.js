@@ -197,11 +197,13 @@ function openPage(url) {
         if (url.search) same.postMessage({ t: 'open', url: url.href })
         return same.focus()
       }
-      // A window on a terminal page switches to it (as a tab where it has
-      // tabs; asked, as only the page knows whether it can).
-      const terms = list.filter((c) => path(c).startsWith('/t/'))
-      return firstAccepting(terms, url.href).then((tabs) => {
-        if (tabs) return tabs.focus()
+      // Else a window takes it in place, within the app (asked, as only the
+      // page knows whether it can): one with terminals or the agents page
+      // first, then any other. Nothing is loaded again, no terminal's
+      // connection ends (tabs: it shows as one of them).
+      const app = (c) => path(c).startsWith('/t/') || path(c) === '/agents'
+      return firstAccepting([...list.filter(app), ...list.filter((c) => !app(c))], url.href).then((taker) => {
+        if (taker) return taker.focus()
         // Else a window that is not on a terminal page is reused; a terminal
         // page is never navigated away (its connection would end).
         const free = list.find((c) => 'navigate' in c && !path(c).startsWith('/t/'))

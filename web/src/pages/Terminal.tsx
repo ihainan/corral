@@ -32,7 +32,7 @@ import { PortsDialog, openForward } from '../terminal/PortsDialog'
 import { FilesDialog } from '../terminal/FilesDialog'
 import { ShareDialog } from '../terminal/ShareDialog'
 import { useCode } from '../terminal/CodeDialog'
-import { onOpenRequest, takeTabs } from '../notifyopen'
+import { agentsAddress, onOpenRequest, takeTabs } from '../notifyopen'
 import { offerAlerts } from '../push'
 import { adoptComposer, composerWasOpen, rememberComposer } from '../terminal/composerOpen'
 import { promptSuggestion } from '../terminal/suggestion'
@@ -407,7 +407,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
   useEffect(() => {
     if (tabs || watch) return
     takeTabs((u) => {
-      if (!/^\/t\/[0-9a-f]+$/.test(u.pathname) || document.querySelector('[aria-modal="true"]')) return false
+      if (!(/^\/t\/[0-9a-f]+$/.test(u.pathname) || agentsAddress(u)) || document.querySelector('[aria-modal="true"]')) return false
       navigate(u.pathname + u.search)
       return true
     })
