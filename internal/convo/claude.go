@@ -546,24 +546,9 @@ func (c *Claude) Prepend(other Parser) {
 	if c.lastReq.model == "" {
 		c.lastReq = o.lastReq
 	}
-	// (Pictures: sources read here whose message is of o's part; o's
-	// messages and attachments still to be told, kept for later reads.)
-	waiting := c.sourcesWaiting[:0]
-	for _, w := range c.sourcesWaiting {
-		at := o.up(w.at, nil)
-		if e := o.imaged[at]; e != nil {
-			o.linkImages(e, w.paths)
-			delete(o.imaged, at)
-		} else {
-			waiting = append(waiting, w)
-		}
-	}
-	c.sourcesWaiting = waiting
-	for _, w := range o.sourcesWaiting { // (of a part older still)
-		if len(c.sourcesWaiting) < maxImaged {
-			c.sourcesWaiting = append(c.sourcesWaiting, w)
-		}
-	}
+	// (Pictures: o's messages and attachments still to be told kept, then
+	// the sources waiting — c's, o's own — tried again with them: told, or
+	// kept from as far up as they now go, for a part older still.)
 	for _, id := range o.imagedOrder {
 		if e := o.imaged[id]; e != nil && len(c.imaged) < maxImaged {
 			if c.imaged == nil {
@@ -581,6 +566,16 @@ func (c *Claude) Prepend(other Parser) {
 			c.attachedRows[id] = up
 		}
 	}
+	var waiting []imageSourceRow
+	for _, w := range append(c.sourcesWaiting, o.sourcesWaiting...) {
+		at := c.up(w.at, nil)
+		if e := c.imaged[at]; e != nil && c.linkImages(e, w.paths) {
+			delete(c.imaged, at)
+		} else if len(waiting) < maxImaged {
+			waiting = append(waiting, imageSourceRow{at: at, paths: w.paths})
+		}
+	}
+	c.sourcesWaiting = waiting
 	// (What c's rewinds into o's part took back, there and here.)
 	mine := c.treeBefore(o)
 	add := o.entries

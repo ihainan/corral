@@ -8,7 +8,7 @@ import { copyText, Dialog, useToast } from '../components/ui'
 // at a time a session — each is a transfer, and a host's file channels are
 // few — what is looked at now before what is only shown small. What came is
 // kept a little while (a few, half a minute: the file may be written again)
-// to be shown again, and dropped at once on signing in or out; whoever
+// to be shown small again (looked at, it is asked for afresh), and dropped at once on signing in or out; whoever
 // shows one makes its own object URL of it, and lets it go. The browser's
 // own cache never has them (no-store): a look after signing out is asked
 // again, and refused.
@@ -27,16 +27,15 @@ type Job = { sid: string; path: string; resolve: (b: Blob) => void; reject: (e: 
 
 const KEEP = 24
 const FRESH_MS = 30_000
-// (seeded: the browser's own copy of a file it just put up — of a name of its own, never written again.)
-const kept = new Map<string, { blob: Blob; at: number; seeded?: boolean }>() // (the oldest first)
+const kept = new Map<string, { blob: Blob; at: number }>() // (the oldest first)
 const queues = new Map<string, Job[]>()
 const running = new Set<string>()
 
 const keyOf = (sid: string, path: string) => sid + '\0' + path
 
-function keep(key: string, blob: Blob, seeded = false) {
+function keep(key: string, blob: Blob) {
   kept.delete(key)
-  kept.set(key, { blob, at: Date.now(), seeded })
+  kept.set(key, { blob, at: Date.now() })
   while (kept.size > KEEP) kept.delete(kept.keys().next().value!)
 }
 
@@ -46,12 +45,6 @@ onAuthChange(() => {
   for (const q of queues.values()) for (const j of q.splice(0)) j.reject(new ApiError(401, 'unauthorized', 'signed out'))
 })
 
-// seedPicture keeps the browser's own copy of a picture just put on the
-// host: looked at without asking for it again.
-export function seedPicture(sid: string, path: string, file: Blob) {
-  keep(keyOf(sid, path), file, true)
-}
-
 // forgetPicture drops what is kept of one (the browser could not show it).
 export const forgetPicture = (sid: string, path: string) => void kept.delete(keyOf(sid, path))
 
@@ -59,7 +52,7 @@ export const forgetPicture = (sid: string, path: string) => void kept.delete(key
 // what is kept of it.
 export function lookAt(sid: string, path: string, opts: { first?: boolean; signal?: AbortSignal; fresh?: boolean } = {}): Promise<Blob> {
   const had = kept.get(keyOf(sid, path))
-  if (had && !opts.fresh && (had.seeded || Date.now() - had.at < FRESH_MS)) return Promise.resolve(had.blob)
+  if (had && !opts.fresh && Date.now() - had.at < FRESH_MS) return Promise.resolve(had.blob)
   return new Promise((resolve, reject) => {
     const q = queues.get(sid) ?? []
     const job = { sid, path, resolve, reject, signal: opts.signal, gen: authGen() }
@@ -169,7 +162,7 @@ export function PictureDialog({ sid, path, onClose, onReveal }: { sid: string; p
     const ctl = new AbortController()
     setBlob(null)
     setError('')
-    lookAt(sid, path, { first: true, signal: ctl.signal, fresh: again > 0 }).then(
+    lookAt(sid, path, { first: true, signal: ctl.signal, fresh: true }).then(
       (b) => !ctl.signal.aborted && setBlob(b),
       (e) => !ctl.signal.aborted && setError(pictureError(e)),
     )

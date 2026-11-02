@@ -249,7 +249,8 @@ function inlineLines(lines: string[]): ReactNode {
 const wide = '\\u3000-\\u303f\\uff00-\\uffef' // full-width punctuation ends a bare address
 const spans: { re: RegExp; make: (m: RegExpExecArray, key: number) => ReactNode }[] = [
   { re: /`([^`]+)`/g, make: (m, k) => <InlineCode key={k} text={m[1]} /> },
-  { re: /\[([^\]]{1,500})\]\((https?:\/\/[^\s)]{1,2000})\)/g, make: (m, k) => link(m[2], inline(m[1]), k) },
+  // (A link's words are only words: no code span in them is drawn as more — a button in a link opens both.)
+  { re: /\[([^\]]{1,500})\]\((https?:\/\/[^\s)]{1,2000})\)/g, make: (m, k) => link(m[2], <CodeSpanOf.Provider value={undefined}>{inline(m[1])}</CodeSpanOf.Provider>, k) },
   { re: new RegExp(`https?://[^\\s<>()${wide}"']{0,2000}[^\\s<>()${wide}"'.,;:!?]`, 'g'), make: (m, k) => link(m[0], m[0], k) },
   { re: /\*\*(?=\S)((?:`[^`]{0,500}`|[^`]){0,1000}?\S)\*\*/g, make: (m, k) => <strong key={k}>{inline(m[1])}</strong> },
   { re: /~~(?=\S)([^~]{0,2000}?\S)~~/g, make: (m, k) => <del key={k}>{inline(m[1])}</del> },

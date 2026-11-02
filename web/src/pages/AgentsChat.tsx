@@ -10,7 +10,7 @@ import { CLOSE_MENUS, Confirm, Menu, useToast, type MenuItem } from '../componen
 import { chromeVars, corralDark, corralLight } from '../terminal/themes'
 import { HostHistoryDialog } from '../terminal/hostHistory'
 import { CardNotice, useClaudeCard, type ClaudeCard } from '../terminal/cardNotice'
-import { expandPastes, getDraft, keepDraft, keepPaste, keepSent, keptSent, remember, sentHistory, unsendable } from '../terminal/drafts'
+import { attachedIn, expandPastes, getDraft, keepDraft, keepPaste, keepSent, keptSent, remember, sentHistory, unsendable } from '../terminal/drafts'
 import { geminiPath, shellPath } from '../terminal/paths'
 import { useCompletion } from '../terminal/Completion'
 import { convoTarget, herdrTarget, InlineReply } from '../terminal/ReplyDialog'
@@ -19,7 +19,7 @@ import { NEW_AGENT, NewAgentDialog } from '../terminal/newAgent'
 import { BgCmds, CODEX_EFFORTS, ConversationView, ListSearch, SEARCH_FROM, when, type ConvoAgent, type ConvoListRow, type ConvoPending, type FileActs, type ModelOpt } from '../terminal/Conversation'
 import { FilesDialog } from '../terminal/FilesDialog'
 import { downloadPath, PictureDialog } from '../terminal/picture'
-import { attach, ATTACH_LABEL, AttachStrip, takeOut } from '../terminal/attach'
+import { attach, LABEL_START, AttachStrip, takeOut } from '../terminal/attach'
 import { answerable, asking, useConversation, type ConvoEntry } from '../terminal/conversation'
 import { ackBg, waitingTitle, isCodex, isOpenCode, listAgents, matchQuery, paneTitle, readsLog, useRunningSessions, type AgentRow } from '../terminal/agents'
 import { dayBefore, dayStart, foldAt, foldedDay, listOrder, type RowCmds } from '../terminal/agentOrder'
@@ -1268,7 +1268,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
         const quoted = r.prefix === '@' ? geminiPath(r.path) : shellPath(r.path)
         if (!alive.current || lastKey.current !== forKey) break
         // (In the draft as a label, a chip over the box; sent as the path.)
-        if (quoted) insert(attach(f, r.path, quoted, sid, cur.s.host_id) + ' ')
+        if (quoted) insert(attach(f, r.path, quoted, cur.s.host_id) + ' ')
         else toast(r.path)
       } catch (e) {
         setUp((u) => (u?.abort === abort ? null : u))
@@ -1442,7 +1442,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     if (blocked || !b) return toast(blocked ?? t('agents.cannotSend'), true)
     if (up) return toast(t('term.waitUpload'), true) // (its path is not in the draft yet; nor, while it goes up, in an empty one)
     // (A file of another host's, or one whose path is lost: not sent as it is.)
-    const bad = unsendable(draft, cur.s.host_id, ATTACH_LABEL)
+    const bad = unsendable(draft, cur.s.host_id, LABEL_START)
     if (bad) return toast(bad.other ? t('attach.wrongHost', { name: bad.other.name }) : t('attach.lost', { label: bad.lost! }), true)
     const text = expandPastes(draft, 100 << 10)
     if (text === null || new TextEncoder().encode(text).length > 100 << 10) return toast(t('agents.tooLong'), true)
@@ -1594,7 +1594,8 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
             }
             // A long paste goes in as a label, as in the terminal's composer; it is sent as the text.
             const text = e.clipboardData?.getData('text/plain') ?? ''
-            if (text.split('\n').length <= PASTE_LINES && text.length <= PASTE_CHARS) return
+            // (One holding a file's label is not folded: the label stays one, its chip shown.)
+            if ((text.split('\n').length <= PASTE_LINES && text.length <= PASTE_CHARS) || attachedIn(text).length) return
             e.preventDefault()
             const el = e.currentTarget
             const label = keepPaste(text, (n) => t('term.pasteLabel', { n, lines: text.split('\n').length }))

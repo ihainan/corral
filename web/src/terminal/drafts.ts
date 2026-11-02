@@ -92,12 +92,18 @@ export function attachedIn(s: string): Attached[] {
   return at.sort((x, y) => x[0] - y[0]).map(([, a]) => a)
 }
 // What of a text cannot be sent as it is: a file put on another host than
-// this one, or a label of a file whose path is not known (any more: the
-// tab's storage lost it). Its words, to be said; null where all is well.
-export function unsendable(s: string, host: number, lostLabel: RegExp): { other?: Attached; lost?: string } | null {
-  const other = attachedIn(s).find((a) => a.host !== host)
+// this one, or what is left of a label that is not one of a file known —
+// its path lost (the tab's storage lost it), or the label itself edited
+// (a bracket or its number taken out). labelStart: where a label begins, as
+// much of it as is still there when part of it is gone. Its words, to be
+// said; null where all is well. (A long paste's text is looked at too.)
+export function unsendable(s: string, host: number, labelStart: RegExp): { other?: Attached; lost?: string } | null {
+  const text = expandPastesOnly(s)
+  const other = attachedIn(text).find((a) => a.host !== host)
   if (other) return { other }
-  for (const m of s.matchAll(lostLabel)) if (!attached.has(m[0])) return { lost: m[0] }
+  for (const m of text.matchAll(labelStart)) {
+    if (![...attached.keys()].some((l) => text.startsWith(l, m.index))) return { lost: text.slice(m.index, m.index + 60).split('\n')[0] }
+  }
   return null
 }
 export function keepPaste(text: string, label: (n: number) => string): string {
@@ -112,15 +118,21 @@ export function keepPaste(text: string, label: (n: number) => string): string {
 }
 // The text with its labels expanded, or null past max characters (counted as
 // it goes, so a label repeated many times is not expanded first).
-// (Files put up go in as what the agent reads: their paths.)
+// (Files put up go in as what the agent reads, their paths — also ones a
+// paste holds: the pastes first, then the files, each once.)
 export function expandPastes(s: string, max: number): string | null {
+  const t = expandLabels(s, pastes, max)
+  return t === null ? null : expandLabels(t, new Map([...attached].map(([l, a]) => [l, a.send])), max)
+}
+const expandPastesOnly = (s: string) => expandLabels(s, pastes, 1 << 22) ?? s
+function expandLabels(s: string, labels: Map<string, string>, max: number): string | null {
   let out = ''
   let rest = s
-  const of = (l: string) => pastes.get(l) ?? attached.get(l)!.send
+  const of = (l: string) => labels.get(l)!
   for (;;) {
     let at = -1
     let label = ''
-    for (const l of [...pastes.keys(), ...attached.keys()]) {
+    for (const l of labels.keys()) {
       const i = rest.indexOf(l)
       if (i >= 0 && (at < 0 || i < at)) [at, label] = [i, l]
     }

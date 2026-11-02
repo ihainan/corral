@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { File as FileIcon, X } from 'lucide-react'
 import { t } from '../i18n'
 import { attachedIn, keepAttached, type Attached } from './drafts'
-import { lookAt, seedPicture, useObjectURL } from './picture'
+import { lookAt, useObjectURL } from './picture'
 
 // Files put up from a composer: a label in the draft (sent as the path),
 // and over the box a chip each — its picture small, its name, its whole
@@ -19,28 +19,19 @@ export function labelName(name: string): string {
   return n.length > 40 ? n.slice(0, 28) + '…' + n.slice(-11) : n
 }
 
-// A label of the kind this makes, whether or not its file is known (one
-// whose path was lost is not sent as it is).
-export const ATTACH_LABEL = /\[(?:图片|文件|Attached (?:image|file)) #\d+[：:] ?[^\]\n]{1,60}\]/g
-
-// The browser's own copies of files just put up: shown small at once, and
-// looked at without asking the host. This page's only, a few.
-const thumbs = new Map<string, Blob>() // by label
-function keepThumb(label: string, file: File) {
-  thumbs.set(label, file)
-  while (thumbs.size > 40) thumbs.delete(thumbs.keys().next().value!)
-}
+// Where a label of the kind this makes begins, as much of it as stays when
+// some was taken out (a label not whole, or of a file not known, is not
+// sent as it is).
+export const LABEL_START = /\[(?:图片|文件|Attached (?:image|file)) ?#? ?\d+/g
 
 // attach keeps a file just put up on the host (path) and is its label,
 // for the draft; quoted: the path as the agent is to read it.
-export function attach(f: File, path: string, quoted: string, sid: string, host: number): string {
+// (Its picture is asked of the host, as any: what the browser holds of it
+// is not shown as it is, the host's checks of a picture's size not made.)
+export function attach(f: File, path: string, quoted: string, host: number): string {
   const image = PICTURE_PATH.test(path)
   const name = labelName(f.name || (image ? 'image' : 'file'))
   const a = keepAttached({ send: quoted, path, name, image, host }, (n) => t(image ? 'attach.image' : 'attach.file', { n, name }))
-  if (image) {
-    keepThumb(a.label, f)
-    seedPicture(sid, path, f)
-  }
   return a.label
 }
 
@@ -60,9 +51,8 @@ export function AttachStrip({ draft, sid, host, onRemove, onOpen }: { draft: str
 }
 
 function AttachChip({ a, sid, here, onRemove, onOpen }: { a: Attached; sid: string; here: boolean; onRemove: () => void; onOpen: () => void }) {
-  // (Its picture: the browser's copy, else — the page loaded since — asked
-  // of the host, after what is looked at; not of another host.)
-  const [blob, setBlob] = useState(() => thumbs.get(a.label) ?? null)
+  // (Its picture: asked of the host, after what is looked at; not of another host.)
+  const [blob, setBlob] = useState<Blob | null>(null)
   const thumb = useObjectURL(blob)
   useEffect(() => {
     if (blob || !a.image || !here) return

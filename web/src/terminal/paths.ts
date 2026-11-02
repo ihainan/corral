@@ -17,11 +17,13 @@ export function geminiPath(p: string): string | null {
 }
 
 // A code span of an answer that is a path and nothing else (an absolute
-// one; a line number after it, "file.go:42", left off): its path. Paths in
+// one; a line number after a file's name, "file.go:42", left off — not
+// after a name of no extension: "backup-12:30" may be the name). Paths in
 // the prose itself are left as they are — too much there only looks like
 // one (an address's path, a route, one on another host).
 export function codePath(s: string): string | null {
-  const m = /^(\/(?!\/)[^\s`'"<>|;&$]{0,1023}?)(?::\d+(?::\d+)?)?$/.exec(s.trim())
-  if (!m || m[1] === '/' || /\/\.{1,2}(\/|$)/.test(m[1])) return null
-  return m[1]
+  const t = s.trim()
+  if (!/^\/(?!\/)[^\s`'"<>|;&$]{0,1023}$/.test(t) || t === '/' || /\/\.{1,2}(\/|$)/.test(t)) return null
+  const m = /^(.*\/[^/]*\.[^/.:]+)(?::\d+(?::\d+)?)$/.exec(t)
+  return m ? m[1] : t
 }

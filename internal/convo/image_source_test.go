@@ -90,6 +90,24 @@ func TestClaudeImageSourcesPrepend(t *testing.T) {
 	}
 }
 
+// Three parts: the source read first, then its attachment's row, then
+// the message (review549-2).
+func TestClaudeImageSourcesThreeParts(t *testing.T) {
+	img := `{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AA=="}}`
+	c, mid, old := NewClaude(), NewClaude(), NewClaude()
+	c.Feed(lines(`{"type":"user","uuid":"m1","parentUuid":"x1","isMeta":true,"message":{"role":"user","content":[{"type":"text","text":"[Image: source: /home/u/a.png]"}]}}`))
+	mid.Feed(lines(`{"type":"attachment","uuid":"x1","parentUuid":"u1","attachment":{"type":"total_tokens_reminder"}}`))
+	old.Feed(lines(`{"type":"user","uuid":"u1","parentUuid":null,"message":{"role":"user","content":[{"type":"text","text":"[Image #1]"},` + img + `]}}`))
+	c.Prepend(mid)
+	c.Prepend(old)
+	if p := paths(find(c, "u1")); len(p) != 1 || p[0] != "/home/u/a.png" {
+		t.Fatalf("three parts: %q", p)
+	}
+	if len(c.sourcesWaiting) != 0 {
+		t.Fatalf("still waiting: %+v", c.sourcesWaiting)
+	}
+}
+
 func paths(e Entry) []string {
 	var out []string
 	for _, p := range e.Parts {

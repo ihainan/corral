@@ -19,8 +19,8 @@ import { applyMods, specialKey, type KeysApart, type Mods, type SpecialKey } fro
 import { KeyBar, type ModState } from '../terminal/KeyBar'
 import { macroBytes, parseMacro, type Step } from '../terminal/macro'
 import { chromeVars } from '../terminal/themes'
-import { expandPastes, getDraft, keepDraft, keepPaste, remember, sentHistory, showDraft, unsendable } from '../terminal/drafts'
-import { attach, ATTACH_LABEL, AttachStrip, takeOut } from '../terminal/attach'
+import { attachedIn, expandPastes, getDraft, keepDraft, keepPaste, remember, sentHistory, showDraft, unsendable } from '../terminal/drafts'
+import { attach, LABEL_START, AttachStrip, takeOut } from '../terminal/attach'
 import { PictureDialog } from '../terminal/picture'
 import { useCompletion } from '../terminal/Completion'
 import { SchemeDialog } from '../terminal/SchemePicker'
@@ -1830,7 +1830,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
             const quoted = r.prefix === '@' ? geminiPath(r.path) : shellPath(r.path)
             if (quoted && toDraft) {
               // (A label, a chip over the box; sent as the path.)
-              insertDraft(attach(f, r.path, quoted, id, hostRef.current) + ' ')
+              insertDraft(attach(f, r.path, quoted, hostRef.current) + ' ')
               toast(t('term.uploaded'))
             } else if (quoted) {
               // Never paste into a composition in progress: wait for it to end.
@@ -2045,7 +2045,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
       return
     }
     // (A file of another host's, or one whose path is lost: not sent as it is.)
-    const bad = unsendable(draft, hostRef.current, ATTACH_LABEL)
+    const bad = unsendable(draft, hostRef.current, LABEL_START)
     if (bad) {
       toast(bad.other ? t('attach.wrongHost', { name: bad.other.name }) : t('attach.lost', { label: bad.lost! }), true)
       return
@@ -2455,7 +2455,10 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
           draft={draft}
           sid={id}
           host={hostRef.current}
-          onRemove={(l) => setDraft(takeOut(draft, l))}
+          onRemove={(l) => {
+            histPos.current = null // (an entry edited is a draft of its own)
+            setDraft(takeOut(draft, l))
+          }}
           onOpen={(a) => {
             if (a.image) return setViewing(a.path)
             openFiles()
@@ -2492,7 +2495,8 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
             // the text (deleting the label drops it).
             const text = e.clipboardData?.getData('text/plain') ?? ''
             const lines = text.split('\n').length
-            if (lines <= PASTE_LINES && text.length <= PASTE_CHARS) return
+            // (One holding a file's label is not folded: the label stays one, its chip shown.)
+            if ((lines <= PASTE_LINES && text.length <= PASTE_CHARS) || attachedIn(text).length) return
             e.preventDefault()
             insertDraft(keepPaste(text, (n) => t('term.pasteLabel', { n, lines })))
           }}
