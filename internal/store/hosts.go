@@ -336,3 +336,30 @@ func (s *Store) RenameCredential(ctx context.Context, ownerID, id int64, name st
 func (s *Store) DeleteCredential(ctx context.Context, ownerID, id int64) error {
 	return affectedOrNotFound(s.db.ExecContext(ctx, `DELETE FROM credentials WHERE owner_id = ? AND id = ?`, ownerID, id))
 }
+
+// AskHookDeclined: whether the owner said no to the gateway putting Claude
+// Code's question hook in on this host (see web/askhook.go).
+func (s *Store) AskHookDeclined(ctx context.Context, ownerID, hostID int64) (bool, error) {
+	var d int
+	err := s.db.QueryRowContext(ctx, `SELECT ask_hook_declined FROM hosts WHERE owner_id = ? AND id = ?`, ownerID, hostID).Scan(&d)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, ErrNotFound
+	}
+	return d != 0, err
+}
+
+// SetAskHookDeclined records (or clears) that no.
+func (s *Store) SetAskHookDeclined(ctx context.Context, ownerID, hostID int64, declined bool) error {
+	d := 0
+	if declined {
+		d = 1
+	}
+	res, err := s.db.ExecContext(ctx, `UPDATE hosts SET ask_hook_declined = ? WHERE owner_id = ? AND id = ?`, d, ownerID, hostID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}

@@ -18,6 +18,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/ihainan/corral/internal/askhook"
 	"github.com/ihainan/corral/internal/herdr"
 	"github.com/ihainan/corral/internal/sftplite"
 	"github.com/ihainan/corral/internal/sshx"
@@ -183,17 +184,35 @@ func (s *Server) newAgent(ctx context.Context, w http.ResponseWriter, sess *term
 	}
 }
 
+// agentStartCmd: herdr's own `agent start` of the agent, every value quoted.
+// Claude Code gets the question hook inline (--settings): its questions
+// written to its log as it asks them, so the card has them whole, nothing of
+// the person's own settings changed (internal/askhook).
+func agentStartCmd(socket, pane, name, kind, resume string) string {
+	q := sshx.QuoteShell
+	cmd := `PATH="$HOME/.local/bin:$HOME/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH" HERDR_SOCKET_PATH=` + q(socket) +
+		` herdr agent start ` + q(name) + ` --kind ` + q(kind) + ` --pane ` + q(pane) + ` --timeout ` + strconv.FormatInt(newAgentWait.Milliseconds(), 10)
+	var args []string
+	if kind == "claude" {
+		args = append(args, "--settings", askhook.Inline())
+	}
+	if resume != "" {
+		args = append(args, "--resume", resume)
+	}
+	if len(args) > 0 {
+		cmd += ` --`
+		for _, a := range args {
+			cmd += " " + q(a)
+		}
+	}
+	return cmd + ` 2>&1`
+}
+
 // startAgent runs herdr's own `agent start` on the host, against the
 // session's herdr: failed (with why) where herdr said it failed; why alone
 // where what became of it is not known.
 func (s *Server) startAgent(ctx context.Context, sess *term.Session, socket, pane, name, kind, resume string) (failed bool, why string) {
-	q := sshx.QuoteShell
-	cmd := `PATH="$HOME/.local/bin:$HOME/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH" HERDR_SOCKET_PATH=` + q(socket) +
-		` herdr agent start ` + q(name) + ` --kind ` + q(kind) + ` --pane ` + q(pane) + ` --timeout ` + strconv.FormatInt(newAgentWait.Milliseconds(), 10)
-	if resume != "" {
-		cmd += ` -- --resume ` + q(resume)
-	}
-	cmd += ` 2>&1`
+	cmd := agentStartCmd(socket, pane, name, kind, resume)
 	out, err := sshx.Output(ctx, sess.Client(), cmd, 64<<10)
 	var res struct {
 		Error *struct {
