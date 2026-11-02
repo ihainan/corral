@@ -74,3 +74,32 @@ func TestNewAgentsOnce(t *testing.T) {
 		t.Fatal("after it: a new one")
 	}
 }
+
+func TestAgentStartCommandArgs(t *testing.T) {
+	tail := func(c string) string {
+		if i := strings.Index(c, " -- "); i >= 0 {
+			return c[i+4:]
+		}
+		return ""
+	}
+	cases := []struct {
+		kind, resume string
+		worktree     bool
+		want         string
+	}{
+		{"claude", "", false, ""},
+		{"claude", "", true, "-w"},
+		{"codex", "", true, "--worktree"},
+		{"opencode", "", true, ""}, // (none of its own)
+		{"claude", "0b5d3f0e-1c1a-4f7e-9d1e-2a3b4c5d6e7f", false, "--resume '0b5d3f0e-1c1a-4f7e-9d1e-2a3b4c5d6e7f'"},
+	}
+	for _, c := range cases {
+		cmd := agentStartCommand("/run/h.sock", "w1:p1", "proj", c.kind, c.resume, c.worktree)
+		if got := tail(cmd); got != c.want {
+			t.Fatalf("%s resume=%q worktree=%v: agent's args %q, want %q (%s)", c.kind, c.resume, c.worktree, got, c.want, cmd)
+		}
+		if !strings.Contains(cmd, "herdr agent start 'proj' --kind '"+c.kind+"' --pane 'w1:p1'") {
+			t.Fatalf("herdr's part changed: %s", cmd)
+		}
+	}
+}

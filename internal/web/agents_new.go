@@ -33,9 +33,12 @@ import (
 // answer, not a second agent.
 
 var (
-	agentKinds  = map[string]bool{"claude": true, "codex": true, "opencode": true}
-	newAgentKey = regexp.MustCompile(`^[A-Za-z0-9-]{8,64}$`)
-	sessionUUID = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+	agentKinds = map[string]bool{"claude": true, "codex": true, "opencode": true}
+	// worktreeFlag: what starts a kind in a git worktree of its own, which it
+	// makes and manages itself (none for OpenCode).
+	worktreeFlag = map[string]string{"claude": "-w", "codex": "--worktree"}
+	newAgentKey  = regexp.MustCompile(`^[A-Za-z0-9-]{8,64}$`)
+	sessionUUID  = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 )
 
 const (
@@ -58,20 +61,21 @@ type newAgents struct {
 	busy map[string]bool         // by person and session
 }
 
-// POST /api/sessions/{id}/agents {"dir", "kind", "label", "resume", "key"}
+// POST /api/sessions/{id}/agents {"dir", "kind", "label", "resume", "worktree", "key"}
 // → {"workspace", "pane"}; 409 unsupported (not herdr), in_progress (that
 // key under way), 429 busy (another under way); 400 bad_folder; 422
 // start_failed (herdr's own words; "closed": the workspace made for it was
 // closed again).
 func (s *Server) apiNewAgent(w http.ResponseWriter, r *http.Request) {
 	var b struct {
-		Dir    string `json:"dir"`
-		Kind   string `json:"kind"`
-		Label  string `json:"label"`
-		Resume string `json:"resume"`
-		Key    string `json:"key"`
+		Dir      string `json:"dir"`
+		Kind     string `json:"kind"`
+		Label    string `json:"label"`
+		Resume   string `json:"resume"`
+		Worktree bool   `json:"worktree"` // (not with resume: a session taken up stays where it was)
+		Key      string `json:"key"`
 	}
-	if err := readJSON(r, &b); err != nil || !agentKinds[b.Kind] || !newAgentKey.MatchString(b.Key) || (b.Resume != "" && (b.Kind != "claude" || !sessionUUID.MatchString(b.Resume))) {
+	if err := readJSON(r, &b); err != nil || !agentKinds[b.Kind] || !newAgentKey.MatchString(b.Key) || (b.Resume != "" && (b.Kind != "claude" || !sessionUUID.MatchString(b.Resume))) || (b.Worktree && (worktreeFlag[b.Kind] == "" || b.Resume != "")) {
 		writeError(w, http.StatusBadRequest, "bad_request", "folder, kind and key are required")
 		return
 	}
@@ -108,7 +112,7 @@ func (s *Server) apiNewAgent(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), newAgentWait+30*time.Second)
 	defer cancel()
 	rec := &recorder{header: http.Header{}}
-	s.newAgent(ctx, rec, sess, socket, dir, b.Kind, b.Label, b.Resume)
+	s.newAgent(ctx, rec, sess, socket, dir, b.Kind, b.Label, b.Resume, b.Worktree)
 	s.newAgents.finish(key, who, run, rec.status, rec.body.Bytes())
 	for k, v := range rec.header {
 		w.Header()[k] = v
@@ -121,10 +125,10 @@ func (s *Server) apiNewAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	actx, acancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
 	defer acancel()
-	s.audit(r.WithContext(actx), "agents.new", sess.HostName, map[string]any{"session": sess.ID, "kind": b.Kind, "resume": b.Resume != "", "outcome": outcome})
+	s.audit(r.WithContext(actx), "agents.new", sess.HostName, map[string]any{"session": sess.ID, "kind": b.Kind, "resume": b.Resume != "", "worktree": b.Worktree, "outcome": outcome})
 }
 
-func (s *Server) newAgent(ctx context.Context, w http.ResponseWriter, sess *term.Session, socket, dir, kind, label, resume string) {
+func (s *Server) newAgent(ctx context.Context, w http.ResponseWriter, sess *term.Session, socket, dir, kind, label, resume string, worktree bool) {
 	// The folder: the home's when under ~/, a folder that is there.
 	err := s.withSFTP(ctx, sess, convoReadLimit, func(c *sftplite.Client) error {
 		if strings.HasPrefix(dir, "~") {
@@ -170,7 +174,7 @@ func (s *Server) newAgent(ctx context.Context, w http.ResponseWriter, sess *term
 	}
 	// The agent: started by herdr's own start (which waits until herdr
 	// finds it ready, not just started), told plainly whether it failed.
-	failed, why := s.startAgent(ctx, sess, socket, pane, agentName(label, kind), kind, resume)
+	failed, why := s.startAgent(ctx, sess, socket, pane, agentName(label, kind), kind, resume, worktree)
 	switch {
 	case failed:
 		closed := s.closeWorkspace(sess, socket, ws) == nil
@@ -183,17 +187,30 @@ func (s *Server) newAgent(ctx context.Context, w http.ResponseWriter, sess *term
 	}
 }
 
-// startAgent runs herdr's own `agent start` on the host, against the
-// session's herdr: failed (with why) where herdr said it failed; why alone
-// where what became of it is not known.
-func (s *Server) startAgent(ctx context.Context, sess *term.Session, socket, pane, name, kind, resume string) (failed bool, why string) {
+// agentStartCommand: herdr's own `agent start` of kind in pane, against
+// the herdr of socket, with what the agent itself is to be given.
+func agentStartCommand(socket, pane, name, kind, resume string, worktree bool) string {
 	q := sshx.QuoteShell
 	cmd := `PATH="$HOME/.local/bin:$HOME/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH" HERDR_SOCKET_PATH=` + q(socket) +
 		` herdr agent start ` + q(name) + ` --kind ` + q(kind) + ` --pane ` + q(pane) + ` --timeout ` + strconv.FormatInt(newAgentWait.Milliseconds(), 10)
+	var args []string // (the agent's own, after herdr's --)
 	if resume != "" {
-		cmd += ` -- --resume ` + q(resume)
+		args = append(args, `--resume `+q(resume))
 	}
-	cmd += ` 2>&1`
+	if worktree && worktreeFlag[kind] != "" {
+		args = append(args, worktreeFlag[kind])
+	}
+	if len(args) > 0 {
+		cmd += ` -- ` + strings.Join(args, " ")
+	}
+	return cmd
+}
+
+// startAgent runs herdr's own `agent start` on the host, against the
+// session's herdr: failed (with why) where herdr said it failed; why alone
+// where what became of it is not known.
+func (s *Server) startAgent(ctx context.Context, sess *term.Session, socket, pane, name, kind, resume string, worktree bool) (failed bool, why string) {
+	cmd := agentStartCommand(socket, pane, name, kind, resume, worktree) + ` 2>&1`
 	out, err := sshx.Output(ctx, sess.Client(), cmd, 64<<10)
 	var res struct {
 		Error *struct {

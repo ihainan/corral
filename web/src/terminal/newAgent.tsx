@@ -31,6 +31,13 @@ const keepDir = (d: string) => {
   }
 }
 
+// The kind last started from here (this device's).
+const KIND = 'corral.newAgentKind'
+const lastKind = (): Kind => {
+  const v = local.get(KIND)
+  return v === 'codex' || v === 'opencode' ? v : 'claude'
+}
+
 const herdrOf = (s: SessionInfo) => (s.persistence === 'herdr' && s.meta?.t === 'herdr' && !s.meta.lost ? s.meta : null)
 
 export function NewAgentDialog({ sessions, onDone, onOpen, onClose }: { sessions: SessionInfo[]; onDone: (s: SessionInfo, pane: string, first: string) => void; onOpen: (s: SessionInfo, pane: string) => void; onClose: () => void }) {
@@ -44,13 +51,18 @@ export function NewAgentDialog({ sessions, onDone, onOpen, onClose }: { sessions
     return [...new Set([...seen, ...recentDirs()])].slice(0, 12)
   }, [sess])
   const [dir, setDir] = useState(() => dirs[0] ?? '~/')
-  const [kind, setKind] = useState<Kind>('claude')
+  const [kind, setKind] = useState<Kind>(lastKind)
+  // In a git worktree of its own, made and tidied by the agent itself
+  // (Claude Code's -w, Codex's --worktree): not for OpenCode, nor a session
+  // taken up.
+  const [worktree, setWorktree] = useState(false)
   const [label, setLabel] = useState('')
   const [first, setFirst] = useState('')
   const [olds, setOlds] = useState<Old[] | null>(null)
   const asked = useState(() => ({ n: 0 }))[0] // (a list come back for what is no longer asked: not shown)
   const [oldsBusy, setOldsBusy] = useState(false)
   const [resume, setResume] = useState('')
+  const inWorktree = worktree && kind !== 'opencode' && !resume
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   // (One key for one thing asked: said again unchanged (its answer not
@@ -101,9 +113,10 @@ export function NewAgentDialog({ sessions, onDone, onOpen, onClose }: { sessions
     setBusy(true)
     setError('')
     try {
-      const body = { dir: dir.trim(), kind, label: label.trim(), resume: kind === 'claude' ? resume : '' }
+      const body = { dir: dir.trim(), kind, label: label.trim(), resume: kind === 'claude' ? resume : '', worktree: inWorktree }
       const r = await api<{ pane: string }>('POST', `/api/sessions/${sess.id}/agents`, { ...body, key: keyOf(sess.id + '\n' + JSON.stringify(body)) }, { timeoutMs: 90000 })
       keepDir(dir.trim())
+      local.set(KIND, kind)
       onDone(sess, r.pane, first.trim())
     } catch (err) {
       if (err instanceof ApiError && err.code === 'bad_folder') setError(t('newAgent.badFolder'))
@@ -172,6 +185,15 @@ export function NewAgentDialog({ sessions, onDone, onOpen, onClose }: { sessions
             ))}
           </div>
         </div>
+        {kind !== 'opencode' && !resume && (
+          <div className="field">
+            <label className="check">
+              <input type="checkbox" checked={worktree} onChange={(e) => setWorktree(e.target.checked)} />
+              <span>{t('newAgent.worktree')}</span>
+            </label>
+            <p className="hint">{t('newAgent.worktreeHint', { agent: t(`newAgent.kind.${kind}`) })}</p>
+          </div>
+        )}
         <label className="field">
           <span>{t('newAgent.label')}</span>
           <input className="input" value={label} maxLength={40} placeholder={t('newAgent.labelHint')} onChange={(e) => setLabel(e.target.value)} />
