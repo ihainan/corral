@@ -36,4 +36,8 @@ func TestCodexUserPictures(t *testing.T) {
 			t.Errorf("%d: %d pictures, %q", i, pics, text)
 		}
 	}
+	// (Each picture its file, as Codex told it.)
+	if p := paths(es[0]); len(p) != 2 || p[0] != "/home/alice/cxreal/p1.png" || p[1] != "/home/alice/cxreal/p2.png" {
+		t.Errorf("paths: %q", p)
+	}
 }

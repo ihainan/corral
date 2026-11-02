@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
 import {
-  ArrowUp, Check, Copy, Download, Eye, File as FileIcon, FileQuestion, Folder, FolderPlus, House, LocateFixed, MoreHorizontal, Pencil, RotateCw,
+  ArrowUp, Check, Copy, Download, Eye, File as FileIcon, Image as ImageIcon, FileQuestion, Folder, FolderPlus, House, LocateFixed, MoreHorizontal, Pencil, RotateCw,
   SquareTerminal, Trash2, Upload, X,
 } from 'lucide-react'
 import { api, ApiError, errorText, postFile, type FileEntry, type FileListing } from '../api'
 import { getLang, t } from '../i18n'
 import { Confirm, Dialog, Field, LoadError, Menu, copyText, useToast, type MenuItem } from '../components/ui'
 import { local } from '../storage'
+import { downloadPath, PictureDialog } from './picture'
 
 type Props = {
   sessionId: string
@@ -20,16 +21,6 @@ type Props = {
 type Upload = { key: number; name: string; progress: number; error?: string; abort: AbortController }
 
 const HIDDEN_KEY = 'corral.files.hidden'
-
-// downloadPath has the browser save a file of the session's host.
-export function downloadPath(sessionId: string, p: string) {
-  const a = document.createElement('a')
-  a.href = `/api/sessions/${sessionId}/files/download?path=` + encodeURIComponent(p)
-  a.download = p.slice(p.lastIndexOf('/') + 1)
-  document.body.appendChild(a)
-  a.click()
-  a.remove()
-}
 
 const join = (dir: string, name: string) => (dir === '/' ? '/' + name : dir + '/' + name)
 // cleanPath spells a path the way the server answers with it (as Go's
@@ -88,6 +79,7 @@ export function FilesDialog({ sessionId, start, reveal, onPath, onInsert, onClos
     const id = ++dialogId.current
     setDialog(make(() => dialogId.current === id && setDialog(null)))
   }
+  const [viewing, setViewing] = useState<string | null>(null) // a picture of the folder looked at
   const [question, setQuestion] = useState<React.ReactNode>(null) // the upload queue's, apart from the dialogs above
   const seq = useRef(0) // numbers navigations; only the latest one's answer is shown
   const settled = useRef(0) // the latest navigation that has finished
@@ -330,6 +322,7 @@ export function FilesDialog({ sessionId, start, reveal, onPath, onInsert, onClos
   const items = (e: FileEntry): MenuItem[] => {
     const full = path === null ? '' : join(path, e.name)
     return [
+      e.type === 'file' && /\.(png|jpe?g|gif|webp)$/i.test(e.name) ? { label: t('convo.path.view'), icon: <ImageIcon size={16} />, onSelect: () => setViewing(full) } : null,
       e.type === 'dir'
         ? { label: t('files.open'), icon: <Folder size={16} />, onSelect: () => void load(full) }
         : e.type === 'file'
@@ -580,6 +573,7 @@ export function FilesDialog({ sessionId, start, reveal, onPath, onInsert, onClos
       />
       {dialog}
       {question}
+      {viewing && <PictureDialog sid={sessionId} path={viewing} onClose={() => setViewing(null)} />}
     </div>
   )
 }

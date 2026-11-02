@@ -17,7 +17,8 @@ import { convoTarget, herdrTarget, InlineReply } from '../terminal/ReplyDialog'
 import { SessionOpDialog, type SessionOp } from '../terminal/sessionOps'
 import { NEW_AGENT, NewAgentDialog } from '../terminal/newAgent'
 import { BgCmds, CODEX_EFFORTS, ConversationView, ListSearch, SEARCH_FROM, when, type ConvoAgent, type ConvoListRow, type ConvoPending, type FileActs, type ModelOpt } from '../terminal/Conversation'
-import { downloadPath, FilesDialog } from '../terminal/FilesDialog'
+import { FilesDialog } from '../terminal/FilesDialog'
+import { downloadPath, PictureDialog } from '../terminal/picture'
 import { answerable, asking, useConversation, type ConvoEntry } from '../terminal/conversation'
 import { ackBg, waitingTitle, isCodex, isOpenCode, listAgents, matchQuery, paneTitle, readsLog, useRunningSessions, type AgentRow } from '../terminal/agents'
 import { dayBefore, dayStart, foldAt, foldedDay, listOrder, type RowCmds } from '../terminal/agentOrder'
@@ -667,7 +668,9 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   const [hostHistory, setHostHistory] = useState(false)
   // A file the conversation names, shown in the files panel (its folder, it marked).
   const [filesAt, setFilesAt] = useState<string | null>(null)
-  const fileActs = useMemo((): FileActs => ({ reveal: setFilesAt, download: (p) => downloadPath(sid, p), cwd: row?.a.cwd }), [sid, row?.a.cwd])
+  // A picture of its host looked at.
+  const [viewing, setViewing] = useState<string | null>(null)
+  const fileActs = useMemo((): FileActs => ({ reveal: setFilesAt, download: (p) => downloadPath(sid, p), view: setViewing }), [sid])
   // What the bar says of it: herdr's word for a herdr agent (as the session
   // list has it, every few seconds); a tmux one's from its process file.
   const agent = useMemo((): ConvoAgent | null => {
@@ -1800,6 +1803,17 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       answered={answered}
       files={fileActs}
     />
+    {viewing && (
+      <PictureDialog
+        sid={sid}
+        path={viewing}
+        onClose={() => setViewing(null)}
+        onReveal={() => {
+          setViewing(null)
+          setFilesAt(viewing)
+        }}
+      />
+    )}
     {filesAt && (
       <FilesDialog
         sessionId={sid}

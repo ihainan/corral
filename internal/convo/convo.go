@@ -141,6 +141,7 @@ type Part struct {
 	Trouble   *Trouble `json:"trouble,omitempty"`
 	Event     *Event   `json:"event,omitempty"`
 	Shell     *Shell   `json:"shell,omitempty"`
+	Path      string   `json:"path,omitempty"` // (an image the person sent) the file it came from, where told
 }
 
 // Shell is what a shell command the person ran with "!" printed: its
@@ -359,32 +360,35 @@ type Hunk struct {
 
 // Bounds on what one entry keeps.
 const (
-	maxText      = 64 << 10 // a text or thinking part
-	maxDetail    = 4 << 10  // a tool's detail, old and new text
-	maxResult    = 6 << 10  // a tool's result (its start and end)
-	maxShellErr  = 2 << 10  // what a "!" command wrote to stderr
-	maxHead      = 2 << 10  // of which its start
-	maxParts     = 64       // parts of one entry
-	maxID        = 128
-	maxTasks     = 50       // tasks of a task list
-	maxTitle     = 300      // the session's title, a task's subject
-	maxMeta      = 120      // a model's, a mode's, a branch's name
-	maxQueue     = 20       // messages waiting to be taken in
-	maxPatch     = 12 << 10 // an edit's patch, all its lines
-	maxFiles     = 20       // the files of one call whose patches are kept
-	maxRunning   = 50       // work set going that is kept
-	maxSeenItems = 4096     // (Codex) the things told of as done that are remembered
-	maxPatchLine = 400      // one line of it
-	maxTrouble   = 600      // of what was said of something that went wrong
-	maxNoted     = 8        // files one note of them names (the rest are counted)
-	maxWrote     = 4096     // the files written that are remembered (see Noted)
-	maxSaid      = 16 << 10 // of the person's last message, what is read for the files it names
-	maxAsks      = 4        // questions of one AskUserQuestion
-	maxOptions   = 8        // choices of one question
-	maxPreview   = 2 << 10  // a choice's preview
-	maxPlan      = 32 << 10 // a plan put to the person
-	maxRecap     = 1200     // a recap of what went on, a goal and why
-	maxNotice    = 300      // a notice of Claude Code's
+	maxText         = 64 << 10 // a text or thinking part
+	maxDetail       = 4 << 10  // a tool's detail, old and new text
+	maxResult       = 6 << 10  // a tool's result (its start and end)
+	maxShellErr     = 2 << 10  // what a "!" command wrote to stderr
+	maxHead         = 2 << 10  // of which its start
+	maxParts        = 64       // parts of one entry
+	maxID           = 128
+	maxImagePath    = 4096 // (a picture's file, as Claude Code told it)
+	maxImaged       = 16   // messages with pictures waiting to be told their files
+	maxAttachedRows = 512
+	maxTasks        = 50       // tasks of a task list
+	maxTitle        = 300      // the session's title, a task's subject
+	maxMeta         = 120      // a model's, a mode's, a branch's name
+	maxQueue        = 20       // messages waiting to be taken in
+	maxPatch        = 12 << 10 // an edit's patch, all its lines
+	maxFiles        = 20       // the files of one call whose patches are kept
+	maxRunning      = 50       // work set going that is kept
+	maxSeenItems    = 4096     // (Codex) the things told of as done that are remembered
+	maxPatchLine    = 400      // one line of it
+	maxTrouble      = 600      // of what was said of something that went wrong
+	maxNoted        = 8        // files one note of them names (the rest are counted)
+	maxWrote        = 4096     // the files written that are remembered (see Noted)
+	maxSaid         = 16 << 10 // of the person's last message, what is read for the files it names
+	maxAsks         = 4        // questions of one AskUserQuestion
+	maxOptions      = 8        // choices of one question
+	maxPreview      = 2 << 10  // a choice's preview
+	maxPlan         = 32 << 10 // a plan put to the person
+	maxRecap        = 1200     // a recap of what went on, a goal and why
+	maxNotice       = 300      // a notice of Claude Code's
 )
 
 // Meta is what a session runs with, as its log last said it: each field

@@ -1,5 +1,5 @@
 import { createContext, Fragment, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { ArrowDown, Check, ChevronDown, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, Clock, Download, GitBranch, Keyboard, ListOrdered, Loader, MoreHorizontal, MoreVertical, PanelLeft, Pin, Search, TriangleAlert, X, Plus } from 'lucide-react'
+import { ArrowDown, Check, Image as ImageIcon, ChevronDown, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, Clock, Download, GitBranch, Keyboard, ListOrdered, Loader, MoreHorizontal, MoreVertical, PanelLeft, Pin, Search, TriangleAlert, X, Plus } from 'lucide-react'
 import { t, getLang, type I18nKey } from '../i18n'
 import { api } from '../api'
 import { asHeld, dayBefore, DAYS, dayStart, FOLDED, foldAt, GROUPS, inGroup, listOrder, pinned, type ConvoListRow, type RowCmds } from './agentOrder'
@@ -2822,18 +2822,15 @@ const OpenSub = createContext<((s: Sub) => void) | undefined>(undefined)
 
 // What can be done with a file the agent names, on its host (through the
 // session the conversation is read through): shown in the files panel,
-// downloaded, looked at (an image). Not there once that session has ended.
-// cwd: the agent's folder, for a path given relative to it.
-export type FileActs = { reveal: (path: string) => void; download: (path: string) => void; view?: (path: string) => void; cwd?: string }
+// downloaded, looked at (a picture). Not there once that session has ended.
+export type FileActs = { reveal: (path: string) => void; download: (path: string) => void; view: (path: string) => void }
 const FileActsOf = createContext<FileActs | undefined>(undefined)
 
-// A path as the host knows it: absolute, or relative to the agent's folder
-// where that is known ("~/" is the home folder: left to the host to say).
-export function fullPath(p: string, cwd?: string): string | null {
-  if (!p || /[\x00-\x1f\x7f]/.test(p)) return null
-  if (p.startsWith('/')) return p
-  if (!cwd?.startsWith('/') || p.startsWith('~')) return null
-  return (cwd.replace(/\/+$/, '') + '/' + p.replace(/^\.\//, '')).replace(/\/{2,}/g, '/')
+// A path the host can be asked for: absolute. (A relative one is not made
+// whole with the agent's folder as it is now: the call may have been made
+// in another — a worktree, a folder gone to since. It is copied only.)
+export function fullPath(p: string): string | null {
+  return p.startsWith('/') && !/[\x00-\x1f\x7f]/.test(p) ? p : null
 }
 
 export const IMAGE_EXT = /\.(png|jpe?g|gif|webp)$/i
@@ -2842,7 +2839,7 @@ export const IMAGE_EXT = /\.(png|jpe?g|gif|webp)$/i
 // (acts: only what can be done, the path being said beside it already.)
 function PathBar({ path, onCopy, acts: only }: { path: string; onCopy: (s: string) => void; acts?: boolean }) {
   const acts = useContext(FileActsOf)
-  const full = fullPath(path, acts?.cwd)
+  const full = fullPath(path)
   return (
     <div className={'convo-path' + (only ? ' is-acts' : '')}>
       {!only && <span className="convo-path-text">{full ?? path}</span>}
@@ -2850,7 +2847,7 @@ function PathBar({ path, onCopy, acts: only }: { path: string; onCopy: (s: strin
         <button type="button" className="link-btn" onClick={() => onCopy(full ?? path)}>{t('convo.path.copy')}</button>
         {acts && full && (
           <>
-            {acts.view && IMAGE_EXT.test(full) && <button type="button" className="link-btn" onClick={() => acts.view!(full)}>{t('convo.path.view')}</button>}
+            {IMAGE_EXT.test(full) && <button type="button" className="link-btn" onClick={() => acts.view(full)}>{t('convo.path.view')}</button>}
             <button type="button" className="link-btn" onClick={() => acts.reveal(full)}>{t('convo.path.reveal')}</button>
             <button type="button" className="link-btn" onClick={() => acts.download(full)}>{t('convo.path.download')}</button>
           </>
@@ -3114,14 +3111,29 @@ function UserTurn({ e, onCopy }: { e: ConvoEntry; onCopy: (s: string) => void })
     .filter((p) => p.kind === 'text')
     .map((p) => p.text)
     .join('\n')
-  const images = e.parts.filter((p) => p.kind === 'image').length
+  const pics = e.parts.filter((p) => p.kind === 'image')
+  const images = pics.length
+  // (Of the pictures, the ones whose file is told: each to be looked at, its session live.)
+  const acts = useContext(FileActsOf)
+  const files = acts ? pics.flatMap((p) => (p.path && fullPath(p.path) ? [p.path] : [])) : []
   // (A shell command run with "!": in the terminal's letters, as typed.)
   const shell = /^! \S/.test(text)
   return (
     <div className={'convo-user' + (e.mid ? ' is-mid' : '')}>
       <div className={'convo-user-text' + (shell ? ' is-shell' : '')}>
         {text}
-        {images > 0 && !/\[Image #\d+\]/.test(text) && <span className="convo-image">{t(images === 1 ? 'convo.images1' : 'convo.images', { n: images })}</span>}
+        {images > 0 && !files.length && !/\[Image #\d+\]/.test(text) && <span className="convo-image">{t(images === 1 ? 'convo.images1' : 'convo.images', { n: images })}</span>}
+        {files.length > 0 && (
+          <span className="convo-pics">
+            {files.map((f, i) => (
+              <button key={i} type="button" className="convo-pic" onClick={() => acts!.view(f)} title={f}>
+                <ImageIcon size={14} aria-hidden="true" />
+                <span>{files.length > 1 ? t('convo.picN', { n: i + 1 }) : t('convo.pic')}</span>
+              </button>
+            ))}
+            {images > files.length && <span className="convo-image">{t(images - files.length === 1 ? 'convo.images1' : 'convo.images', { n: images - files.length })}</span>}
+          </span>
+        )}
         {e.parts.some((p) => p.truncated) && <p className="convo-cut">{t('convo.cut')}</p>}
       </div>
       <div className="convo-meta">

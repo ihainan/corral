@@ -827,7 +827,7 @@ func (c *Codex) event(r *codexRow, p *codexPayload) {
 						parts = append(parts, textPart(KindText, text))
 					}
 				case strings.Contains(b.Type, "image"):
-					parts = append(parts, Part{Kind: KindImage})
+					parts = append(parts, Part{Kind: KindImage, Path: imagePath(b.Path)})
 				}
 			}
 			c.userSaid(r, it.ID, parts)
@@ -1194,6 +1194,7 @@ type codexParsed struct {
 type codexBlock struct {
 	Type string `json:"type"`
 	Text string `json:"text"`
+	Path string `json:"path"` // (local_image) the picture's file
 	// Elements: where in Text Codex put a placeholder of its own ("[Image
 	// #1]" for a picture pasted in), by byte.
 	Elements []struct {

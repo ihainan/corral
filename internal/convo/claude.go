@@ -59,6 +59,12 @@ type Claude struct {
 	tasks   []taskItem // the task list as it stands
 	meta    Meta
 	queue   []queuedItem // what waits to be taken in, oldest first
+	// imaged: the person's latest messages with pictures, by row, while
+	// their pictures may yet be told where they came from; attachedRows:
+	// the rows of attachments between (see imageSources).
+	imaged       map[string]*Entry
+	imagedOrder  []string
+	attachedRows map[string]string // uuid → the row it hangs on
 	// running: work set going and left to itself (a command in the
 	// background, a subagent on its own), until it is told to have ended;
 	// runOrder keeps them as they were set going.
@@ -759,6 +765,7 @@ func (c *Claude) line(b []byte) {
 			return
 		}
 	case "attachment":
+		c.attachedRow(&r)
 		if a := r.Attachment; a != nil {
 			if a.Type == "queued_command" && !a.IsMeta {
 				c.queued(&r)
@@ -835,11 +842,101 @@ func (c *Claude) add(r *claudeRow, role string, parts []Part) {
 	// (Gone as it comes: it hangs on a row taken back.)
 	c.entries = append(c.entries, &Entry{Seq: c.seq, Rev: c.rev, ID: id, Role: role, Time: clip(r.Timestamp, 64), Parts: parts, Gone: id != "" && c.tree.dead[id]})
 	e := c.entries[len(c.entries)-1]
+	pictures := false
 	for i := range e.Parts {
 		if t := e.Parts[i].Tool; t != nil && t.ID != "" {
 			c.tools[t.ID] = toolRef{e: e, t: t}
 		}
+		pictures = pictures || e.Parts[i].Kind == KindImage
 	}
+	if role == RoleUser && pictures && id != "" {
+		if c.imaged == nil {
+			c.imaged = map[string]*Entry{}
+		}
+		c.imaged[id] = e
+		c.imagedOrder = append(c.imagedOrder, id)
+		if len(c.imagedOrder) > maxImaged {
+			delete(c.imaged, c.imagedOrder[0])
+			c.imagedOrder = c.imagedOrder[1:]
+		}
+	}
+}
+
+// attachedRow keeps where an attachment's row hangs, for imageSources.
+func (c *Claude) attachedRow(r *claudeRow) {
+	var parent string
+	_ = json.Unmarshal(r.ParentUUID, &parent)
+	if r.UUID == "" || parent == "" {
+		return
+	}
+	if c.attachedRows == nil || len(c.attachedRows) >= maxAttachedRows {
+		c.attachedRows = map[string]string{} // (forgotten all at once: few are wanted, and only of late)
+	}
+	c.attachedRows[clip(r.UUID, maxID)] = clip(parent, maxID)
+}
+
+// imagePath is a picture's file as an agent told it, if it is a path the
+// page can ask for: absolute, of no control characters, not too long.
+func imagePath(p string) string {
+	if !strings.HasPrefix(p, "/") || len(p) > maxImagePath || strings.IndexFunc(p, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 {
+		return ""
+	}
+	return p
+}
+
+// imageSources gives the pictures of a message of the person's the files
+// they came from. Claude Code, given a picture's path, writes a row of its
+// own (isMeta) of "[Image: source: <path>]" texts, a picture each in
+// order, hanging on that message through the attachments it put between
+// (of this machine's logs, all 300 such rows; the count always the
+// message's pictures'). Where the count is not the same, none is taken;
+// a path not absolute is left out, its picture keeping its place.
+func (c *Claude) imageSources(r *claudeRow) {
+	var parent string
+	_ = json.Unmarshal(r.ParentUUID, &parent)
+	for n := 0; n < 32 && c.imaged[parent] == nil; n++ {
+		up, ok := c.attachedRows[parent]
+		if !ok {
+			return
+		}
+		parent = up
+	}
+	e := c.imaged[parent]
+	if e == nil {
+		return
+	}
+	var texts []string
+	var s string
+	var blocks []claudeBlock
+	if json.Unmarshal(r.Message.Content, &s) == nil {
+		texts = []string{s}
+	} else if json.Unmarshal(r.Message.Content, &blocks) == nil {
+		for _, b := range blocks {
+			if b.Type == "text" {
+				texts = append(texts, b.Text)
+			}
+		}
+	}
+	var paths []string
+	for _, t := range texts {
+		if m := imageSource.FindStringSubmatch(strings.TrimSpace(t)); m != nil {
+			paths = append(paths, m[1])
+		}
+	}
+	var at []int
+	for i := range e.Parts {
+		if e.Parts[i].Kind == KindImage {
+			at = append(at, i)
+		}
+	}
+	if len(paths) == 0 || len(paths) != len(at) {
+		return
+	}
+	for k, i := range at {
+		e.Parts[i].Path = imagePath(paths[k])
+	}
+	e.Rev = c.rev
+	delete(c.imaged, parent) // (told once)
 }
 
 func (c *Claude) user(r *claudeRow) {
@@ -848,6 +945,7 @@ func (c *Claude) user(r *claudeRow) {
 	// caveat hangs where the message before the last does, and the session
 	// resumed goes on from that last one.)
 	if r.IsMeta {
+		c.imageSources(r)
 		// (Not shown. But one Claude Code sent on its own may be what waited:
 		// another session's message, a scheduled task's prompt, which it
 		// writes so when it takes them in — the waiting is over.)
@@ -2220,6 +2318,7 @@ var (
 	tagContent    = regexp.MustCompile(`(?s)^\s*<([a-z-]+)>(.*?)</[a-z-]+>\s*$`)
 	pastedContent = regexp.MustCompile(`(?s)<pasted_content id="([^"]*)">\n?(.*?)\n?</pasted_content id="([^"]*)">`)
 	imageToken    = regexp.MustCompile(`\[Image #\d+\]`)
+	imageSource   = regexp.MustCompile(`^\[Image: source: (.+)\]$`)
 	ansiSequence  = regexp.MustCompile("\x1b\\[[0-9;?]*[ -/]*[@-~]|\x1b\\][^\x07\x1b]*(\x07|\x1b\\\\)|\x1b[@-_]")
 )
 

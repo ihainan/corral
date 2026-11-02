@@ -81,6 +81,7 @@ export interface ConvoPart {
   trouble?: ConvoTrouble
   event?: ConvoEvent
   shell?: ConvoShell
+  path?: string // (an image the person sent) the file it came from, where its agent told it
 }
 
 // What a command the person ran with "!" printed (internal/convo Shell):
