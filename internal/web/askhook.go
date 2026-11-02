@@ -64,7 +64,10 @@ true`
 // a gateway's lock is let go when the connection ends, not when a command
 // still running on the host does — review534-2; it holds its taker's pid,
 // taken over only when over a minute old and that process is gone, and let
-// go of only by its taker — review535-2). Prints "done" once in place.
+// go of only by its taker — review535-2; taken over by moving it aside, one
+// rename winning, and only if what was moved is the one found gone: another
+// taker's new lock moved by a late one is left aside, the late one giving
+// up — review537-1). Prints "done" once in place.
 const askHookWrite = `set -u
 d="$HOME/.claude"; f="$d/settings.json"; b="$f.corral-bak"; lk="$d/.settings.json.corral-lock"; was="$1"; op="$2"; new="${3:-}"
 sum() { { sha256sum "$1" 2>/dev/null || shasum -a 256 "$1" 2>/dev/null; } | cut -c1-64; }
@@ -77,10 +80,15 @@ if [ ! -d "$d" ]; then mkdir -m 700 "$d" || exit 5; fi
 tmp=""; tb=""; held=""
 trap 'rm -f "$tmp" "$tb"; [ -n "$held" ] && [ "$(cat "$lk/pid" 2>/dev/null)" = "$$" ] && rm -rf "$lk"' EXIT
 take() { mkdir "$lk" 2>/dev/null && echo $$ > "$lk/pid"; }
+find "$d" -maxdepth 1 -name '.settings.json.corral-lock.stale.*' -mmin +1 -exec rm -rf {} + 2>/dev/null
 if ! take; then
   p=$(cat "$lk/pid" 2>/dev/null)
   if [ -n "$(find "$lk" -maxdepth 0 -mmin +1 2>/dev/null)" ] && { [ -z "$p" ] || ! kill -0 "$p" 2>/dev/null; }; then
-    rm -rf "$lk"; take || exit 6
+    s="$lk.stale.$$"
+    mv "$lk" "$s" 2>/dev/null || exit 6
+    [ "$(cat "$s/pid" 2>/dev/null)" = "$p" ] || exit 6
+    rm -rf "$s"
+    take || exit 6
   else
     exit 6
   fi
@@ -418,8 +426,10 @@ func (s *Server) apiSetAskHook(w http.ResponseWriter, r *http.Request) {
 		next, remove, changed, err = askhook.Disable(f.settings)
 		// (Removed only where the gateway made the file from none and it is still
 		// just that: a {} of the person's — with or without its newline — stays. review535-1)
-		made, _ := s.store.AskHookCreated(r.Context(), h.OwnerID, h.ID)
-		remove = remove && made && string(f.kind) == "file" && bytes.Equal(f.settings, askhook.Created())
+		// (And the host connecting as it did then: the record is of that
+		// account's file, not of another the host was pointed at since — review537-2.)
+		made, err := s.store.AskHookCreated(r.Context(), h.OwnerID, h.ID)
+		remove = remove && err == nil && made != 0 && made == h.ConnVersion && string(f.kind) == "file" && bytes.Equal(f.settings, askhook.Created())
 	}
 	if err != nil {
 		writeErrorExtra(w, http.StatusUnprocessableEntity, "cannot", "the gateway does not change this settings file", map[string]any{"info": info})
@@ -471,9 +481,13 @@ func (s *Server) apiSetAskHook(w http.ResponseWriter, r *http.Request) {
 	}
 	if on {
 		_ = s.store.SetAskHookDeclined(r.Context(), h.OwnerID, h.ID, false)
-		_ = s.store.SetAskHookCreated(r.Context(), h.OwnerID, h.ID, info.Seen == "none")
+		made := int64(0)
+		if info.Seen == "none" {
+			made = h.ConnVersion
+		}
+		_ = s.store.SetAskHookCreated(r.Context(), h.OwnerID, h.ID, made)
 	} else {
-		_ = s.store.SetAskHookCreated(r.Context(), h.OwnerID, h.ID, false)
+		_ = s.store.SetAskHookCreated(r.Context(), h.OwnerID, h.ID, 0)
 	}
 	s.answerAskHook(w, r.Context(), h, key, on, c)
 }

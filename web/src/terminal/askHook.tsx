@@ -100,7 +100,9 @@ function AskHookConfirm({ hostId, hostName, info, on, onDone, onInfo, onClose }:
     setError('')
     try {
       const i = await api<AskHookInfo>('POST', `/api/hosts/${hostId}/ask-hook`, { on, seen: info.seen })
-      if ((i.state === 'on') !== on) {
+      // (Said done only once the file reads back as asked: on, or off — not
+      // a file that can no longer be read — review537-4.)
+      if (on ? i.state !== 'on' : i.state !== 'off' && i.state !== 'on-own') {
         onInfo(i)
         setError(t('askHook.notAsAsked'))
         setBusy(false)

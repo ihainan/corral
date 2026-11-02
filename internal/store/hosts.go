@@ -364,23 +364,20 @@ func (s *Store) SetAskHookDeclined(ctx context.Context, ownerID, hostID int64, d
 	return nil
 }
 
-// AskHookCreated: whether the gateway made the host's Claude Code settings
-// file itself when turning the hook on (there was none).
-func (s *Store) AskHookCreated(ctx context.Context, ownerID, hostID int64) (bool, error) {
-	var d int
-	err := s.db.QueryRowContext(ctx, `SELECT ask_hook_created FROM hosts WHERE owner_id = ? AND id = ?`, ownerID, hostID).Scan(&d)
+// AskHookCreated: the host's connection version when the gateway made its
+// Claude Code settings file itself, turning the hook on (there was none);
+// 0 when it did not.
+func (s *Store) AskHookCreated(ctx context.Context, ownerID, hostID int64) (int64, error) {
+	var v int64
+	err := s.db.QueryRowContext(ctx, `SELECT ask_hook_created FROM hosts WHERE owner_id = ? AND id = ?`, ownerID, hostID).Scan(&v)
 	if errors.Is(err, sql.ErrNoRows) {
-		return false, ErrNotFound
+		return 0, ErrNotFound
 	}
-	return d != 0, err
+	return v, err
 }
 
-// SetAskHookCreated records (or clears) that.
-func (s *Store) SetAskHookCreated(ctx context.Context, ownerID, hostID int64, created bool) error {
-	d := 0
-	if created {
-		d = 1
-	}
-	_, err := s.db.ExecContext(ctx, `UPDATE hosts SET ask_hook_created = ? WHERE owner_id = ? AND id = ?`, d, ownerID, hostID)
+// SetAskHookCreated records that (version 0: clears it).
+func (s *Store) SetAskHookCreated(ctx context.Context, ownerID, hostID, version int64) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE hosts SET ask_hook_created = ? WHERE owner_id = ? AND id = ?`, version, ownerID, hostID)
 	return err
 }

@@ -386,6 +386,19 @@ func TestAskHookWriteGuards(t *testing.T) {
 	if _, err := os.Stat(lk); !os.IsNotExist(err) {
 		t.Error("the lock left behind")
 	}
+	// A lock moved aside by a late taker (review537-1), over a minute old: cleared by the next.
+	aside := lk + ".stale.12345"
+	os.Mkdir(aside, 0o700)
+	os.Chtimes(aside, past, past)
+	cur0, _ := os.ReadFile(f)
+	again, _, _, _ := askhook.Disable(cur0)
+	if _, code := runAskHookScript(t, home, askHookWrite, again, shaOf(cur0), "write", shaOf(again)); code != 0 {
+		t.Errorf("after one moved aside: exit %d", code)
+	}
+	if _, err := os.Stat(aside); !os.IsNotExist(err) {
+		t.Error("the one moved aside left")
+	}
+	old = again
 	// The backup's name a folder: refused, nothing written.
 	cur, _ := os.ReadFile(f)
 	b := f + ".corral-bak"
