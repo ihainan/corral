@@ -19,7 +19,9 @@ import { applyMods, specialKey, type KeysApart, type Mods, type SpecialKey } fro
 import { KeyBar, type ModState } from '../terminal/KeyBar'
 import { macroBytes, parseMacro, type Step } from '../terminal/macro'
 import { chromeVars } from '../terminal/themes'
-import { expandPastes, getDraft, keepDraft, keepPaste, remember, sentHistory, showDraft } from '../terminal/drafts'
+import { expandPastes, getDraft, keepDraft, keepPaste, remember, sentHistory, showDraft, unsendable } from '../terminal/drafts'
+import { attach, ATTACH_LABEL, AttachStrip, takeOut } from '../terminal/attach'
+import { PictureDialog } from '../terminal/picture'
 import { useCompletion } from '../terminal/Completion'
 import { SchemeDialog } from '../terminal/SchemePicker'
 import { ShortcutPanel, lastPanelPage } from '../terminal/ShortcutPanel'
@@ -453,11 +455,15 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
   const { boot } = useSession()
   const [portsOpen, setPortsOpen] = useState(false)
   const [filesOpen, setFilesOpen] = useState(false)
+  const [filesReveal, setFilesReveal] = useState<string | undefined>() // (a file to show there: an attachment's)
+  const [viewing, setViewing] = useState<string | null>(null) // (a picture put up, looked at)
+  const hostRef = useRef(0)
   const [shareOpen, setShareOpen] = useState(false)
   const filesPath = useRef<string | null>(null) // where the file panel was, for this page
   const filesOpens = useRef(-1) // the connection the panel was opened on
   const openFiles = () => {
     filesOpens.current = connRef.current?.isOpen() ? connRef.current.opens : -1
+    setFilesReveal(undefined)
     setFilesOpen(true)
   }
   const code = useCode()
@@ -1823,7 +1829,8 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
             clear()
             const quoted = r.prefix === '@' ? geminiPath(r.path) : shellPath(r.path)
             if (quoted && toDraft) {
-              insertDraft(quoted + ' ')
+              // (A label, a chip over the box; sent as the path.)
+              insertDraft(attach(f, r.path, quoted, id, hostRef.current) + ' ')
               toast(t('term.uploaded'))
             } else if (quoted) {
               // Never paste into a composition in progress: wait for it to end.
@@ -2037,6 +2044,12 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
       toast(t('term.notConnected'), true)
       return
     }
+    // (A file of another host's, or one whose path is lost: not sent as it is.)
+    const bad = unsendable(draft, hostRef.current, ATTACH_LABEL)
+    if (bad) {
+      toast(bad.other ? t('attach.wrongHost', { name: bad.other.name }) : t('attach.lost', { label: bad.lost! }), true)
+      return
+    }
     const text = expandPastes(draft, 4 << 20)
     if (text === null) {
       toast(t('term.tooLong'), true)
@@ -2185,6 +2198,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
   }
 
   const hostIdForReconnect = watch ? 0 : info?.host_id ?? Number(local.get('corral.sessHost.' + id) || 0)
+  hostRef.current = hostIdForReconnect
   // (A tab in the back opened again stays in the back: its new session shows up as a tab.)
   const { connect, busyHost, dialogs } = useConnect((s) => activeRef.current && navigate('/t/' + s.id, true))
   // Closed as the gateway stopped (internal/term: ReasonShutdown).
@@ -2437,6 +2451,17 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
     <div className="composer composer-term">
       {completion.list}
       <div className="composer-box">
+        <AttachStrip
+          draft={draft}
+          sid={id}
+          host={hostRef.current}
+          onRemove={(l) => setDraft(takeOut(draft, l))}
+          onOpen={(a) => {
+            if (a.image) return setViewing(a.path)
+            openFiles()
+            setFilesReveal(a.path)
+          }}
+        />
         <textarea
           ref={composerRef}
           className="composer-input"
@@ -2827,8 +2852,19 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
           {portsOpen && info && <PortsDialog hostId={info.host_id} onClose={() => setPortsOpen(false)} />}
           {shareOpen && !ended && <ShareDialog sessionId={id} onClose={() => setShareOpen(false)} />}
           {filesOpen && !ended && (
-            <FilesDialog sessionId={id} start={filesPath.current} onPath={(p) => (filesPath.current = p)} onInsert={insertPath} onClose={() => setFilesOpen(false)} />
+            <FilesDialog
+              sessionId={id}
+              start={filesPath.current}
+              reveal={filesReveal}
+              onPath={(p) => (filesPath.current = p)}
+              onInsert={insertPath}
+              onClose={() => {
+                setFilesOpen(false)
+                setFilesReveal(undefined)
+              }}
+            />
           )}
+          {viewing && !ended && <PictureDialog sid={id} path={viewing} onClose={() => setViewing(null)} />}
           {code.dialog}
           {confirm}
           {dialogs}

@@ -60,6 +60,46 @@ export function showDraft(session: string, text: string) {
 }
 const inUse = (l: string) =>
   history.some((h) => h.includes(l)) || [...drafts.values()].some((d) => d.includes(l)) || [...shown.values()].some((d) => d.includes(l))
+
+// Files put up to the host from a composer: shown in the draft as a label
+// ("[图片 #3：shot.png]") with a chip over the box, sent as what the agent
+// reads — the path, quoted as the upload put it (send). Kept with the
+// drafts, apart from the pastes and never given up for them (each is
+// small); past a few the oldest no draft or history entry holds goes.
+// host: the host it was put on (a label taken to another host's composer
+// is not sent there).
+export type Attached = { label: string; send: string; path: string; name: string; image: boolean; host: number }
+const ATTACHED_MAX = 200
+const attached = new Map<string, Attached>()
+let attachN = 0
+export function keepAttached(a: Omit<Attached, 'label'>, label: (n: number) => string): Attached {
+  const one = { ...a, label: label(++attachN) }
+  attached.set(one.label, one)
+  for (const old of attached.keys()) {
+    if (attached.size <= ATTACHED_MAX) break
+    if (old !== one.label && !inUse(old)) attached.delete(old)
+  }
+  saveSoon()
+  return one
+}
+// The files a text holds, in the order it holds them (each once).
+export function attachedIn(s: string): Attached[] {
+  const at: [number, Attached][] = []
+  for (const a of attached.values()) {
+    const i = s.indexOf(a.label)
+    if (i >= 0) at.push([i, a])
+  }
+  return at.sort((x, y) => x[0] - y[0]).map(([, a]) => a)
+}
+// What of a text cannot be sent as it is: a file put on another host than
+// this one, or a label of a file whose path is not known (any more: the
+// tab's storage lost it). Its words, to be said; null where all is well.
+export function unsendable(s: string, host: number, lostLabel: RegExp): { other?: Attached; lost?: string } | null {
+  const other = attachedIn(s).find((a) => a.host !== host)
+  if (other) return { other }
+  for (const m of s.matchAll(lostLabel)) if (!attached.has(m[0])) return { lost: m[0] }
+  return null
+}
 export function keepPaste(text: string, label: (n: number) => string): string {
   const l = label(++pasteN)
   pastes.set(l, text)
@@ -72,18 +112,20 @@ export function keepPaste(text: string, label: (n: number) => string): string {
 }
 // The text with its labels expanded, or null past max characters (counted as
 // it goes, so a label repeated many times is not expanded first).
+// (Files put up go in as what the agent reads: their paths.)
 export function expandPastes(s: string, max: number): string | null {
   let out = ''
   let rest = s
+  const of = (l: string) => pastes.get(l) ?? attached.get(l)!.send
   for (;;) {
     let at = -1
     let label = ''
-    for (const l of pastes.keys()) {
+    for (const l of [...pastes.keys(), ...attached.keys()]) {
       const i = rest.indexOf(l)
       if (i >= 0 && (at < 0 || i < at)) [at, label] = [i, l]
     }
     if (at < 0) break
-    out += rest.slice(0, at) + pastes.get(label)!
+    out += rest.slice(0, at) + of(label)
     rest = rest.slice(at + label.length)
     if (out.length > max) return null
   }
@@ -105,11 +147,12 @@ export function draftsFor(uid: number | null) {
   drafts.clear()
   replies.clear()
   pastes.clear()
+  attached.clear()
   shown.clear()
   history = []
   sent = {}
   owner = uid
-  let saved: { uid?: number; drafts?: Record<string, string>; pastes?: [string, string][]; n?: number; sent?: Record<string, unknown> } | null = null
+  let saved: { uid?: number; drafts?: Record<string, string>; pastes?: [string, string][]; n?: number; files?: Attached[]; fn?: number; sent?: Record<string, unknown> } | null = null
   try {
     saved = JSON.parse(tabStore.get(STORE) ?? 'null')
   } catch {
@@ -122,6 +165,10 @@ export function draftsFor(uid: number | null) {
   for (const [k, v] of Object.entries(saved.drafts ?? {})) if (typeof v === 'string' && v) drafts.set(k, v)
   for (const p of saved.pastes ?? []) if (Array.isArray(p) && typeof p[0] === 'string' && typeof p[1] === 'string') pastes.set(p[0], p[1])
   if (Number.isInteger(saved.n)) pasteN = Math.max(pasteN, saved.n as number)
+  for (const a of saved.files ?? [])
+    if (a && typeof a.label === 'string' && typeof a.send === 'string' && typeof a.path === 'string' && typeof a.name === 'string' && typeof a.host === 'number')
+      attached.set(a.label, { label: a.label, send: a.send, path: a.path, name: a.name, image: !!a.image, host: a.host })
+  if (Number.isInteger(saved.fn)) attachN = Math.max(attachN, saved.fn as number)
   for (const [k, v] of Object.entries(saved.sent ?? {})) if (Array.isArray(v) && v.length) sent[k] = v
 }
 function save() {
@@ -129,10 +176,13 @@ function save() {
   if (owner === null) return
   if (drafts.size === 0 && Object.keys(sent).length === 0) return tabStore.remove(STORE)
   const held = [...pastes].filter(([l]) => [...drafts.values()].some((d) => d.includes(l)))
-  // (Too much for it: what was sent goes first, then the pastes.)
-  let out = JSON.stringify({ uid: owner, drafts: Object.fromEntries(drafts), pastes: held, n: pasteN, sent })
-  if (out.length > STORE_MAX) out = JSON.stringify({ uid: owner, drafts: Object.fromEntries(drafts), pastes: held, n: pasteN })
-  if (out.length > STORE_MAX) out = JSON.stringify({ uid: owner, drafts: Object.fromEntries(drafts), pastes: [], n: pasteN })
+  // (Files: the ones a draft or what was sent holds — a message sent comes back from the history with its own.)
+  const files = [...attached.values()].filter((a) => inUse(a.label))
+  const keep = { uid: owner, drafts: Object.fromEntries(drafts), files, fn: attachN, n: pasteN }
+  // (Too much for it: what was sent goes first, then the pastes; never the files.)
+  let out = JSON.stringify({ ...keep, pastes: held, sent })
+  if (out.length > STORE_MAX) out = JSON.stringify({ ...keep, pastes: held })
+  if (out.length > STORE_MAX) out = JSON.stringify({ ...keep, pastes: [] })
   tabStore.set(STORE, out)
 }
 // (A moment after typing stops, and at once as the page goes or is hidden.)

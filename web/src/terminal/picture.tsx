@@ -39,6 +39,12 @@ function keep(key: string, url: string) {
   }
 }
 
+// seedPicture keeps the browser's own copy of a picture just put on the
+// host: looked at without asking for it again.
+export function seedPicture(sid: string, path: string, file: Blob) {
+  keep(keyOf(sid, path), URL.createObjectURL(file))
+}
+
 // lookAt is the picture's object URL; first: put before the others waiting.
 export function lookAt(sid: string, path: string, opts: { first?: boolean; signal?: AbortSignal } = {}): Promise<string> {
   const key = keyOf(sid, path)

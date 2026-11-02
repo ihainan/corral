@@ -151,6 +151,20 @@ html.term-mode body { position: fixed; inset: 0; }
 .composer-input::placeholder { color: var(--term-fg-3); }
 .composer-input:focus { outline: none; box-shadow: none; }
 .composer-box:focus-within { box-shadow: 0 0 0 2px var(--accent); }
+/* Files put up for the message: a chip each over the box. */
+.attach-strip { display: flex; gap: 6px; padding: 8px 10px 0; overflow-x: auto; scrollbar-width: thin; }
+.attach-chip { flex: none; display: inline-flex; align-items: center; max-width: 220px; height: 34px; border-radius: 8px;
+  background: color-mix(in srgb, var(--term-fg) 7%, transparent); border: 1px solid color-mix(in srgb, var(--term-fg) 12%, transparent); color: var(--term-fg); }
+.attach-chip.is-other { opacity: 0.6; border-style: dashed; }
+.attach-open { display: inline-flex; align-items: center; gap: 7px; min-width: 0; height: 100%; padding: 0 2px 0 3px; border: 0; background: none; color: inherit; cursor: pointer; border-radius: 7px; font-size: 12.5px; }
+.attach-open:disabled { cursor: default; }
+.attach-open:focus-visible, .attach-x:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: 1px; }
+.attach-thumb { width: 26px; height: 26px; border-radius: 5px; object-fit: cover; flex: none; background: color-mix(in srgb, var(--term-fg) 10%, transparent); }
+.attach-icon { width: 26px; height: 26px; display: grid; place-items: center; flex: none; color: var(--term-fg-2); }
+.attach-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.attach-x { flex: none; width: 26px; height: 100%; display: grid; place-items: center; border: 0; background: none; color: var(--term-fg-3); cursor: pointer; border-radius: 0 7px 7px 0; }
+.attach-x:hover { color: var(--term-fg); background: color-mix(in srgb, var(--term-fg) 8%, transparent); }
+@media (pointer: coarse) { .attach-chip { height: 40px; } .attach-x { width: 36px; } }
 .composer-tools { display: flex; align-items: center; gap: 2px; height: 40px; padding: 0 4px 4px; }
 .term-root .composer-insert { height: 32px; color: var(--term-fg-2); font-weight: 500; }
 .term-root .composer-insert:hover { background: var(--term-hover); color: var(--term-fg); }
