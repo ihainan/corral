@@ -22,7 +22,8 @@ import (
 //     reasoning (its summary, as thinking), a tool call (custom_tool_call:
 //     a script calling tools.exec_command, tools.apply_patch…; or a
 //     function_call) and, by call_id, what came back;
-//   - task_started, task_complete and turn_aborted say whether it works;
+//   - task_started, task_complete and turn_aborted say whether it works
+//     (task_complete also what went wrong with the turn, if anything);
 //   - turn_context and thread_settings_applied say the model and the
 //     approval policy; token_count how full the context is;
 //   - "compacted" rows hold the summary of a compacted session.
@@ -46,6 +47,7 @@ type Codex struct {
 	known    bool // (a row said whether it works)
 	trimmed  bool
 	ctxSaid  bool
+	errSaid  bool // (an older Codex's error row said what went wrong with this turn)
 	Skipped  int
 	// Turns, to tell what a backtrack takes back: the first entry of each
 	// turn not taken back (a turn starts at task_started; its first entry is
@@ -666,9 +668,10 @@ type codexPayload struct {
 		} `json:"last_token_usage"`
 		Window int64 `json:"model_context_window"`
 	} `json:"info"`
-	RateLimits *codexLimits `json:"rate_limits"` // (token_count)
-	Reason     string       `json:"reason"`
-	NumTurns   int          `json:"num_turns"` // (thread_rolled_back)
+	RateLimits *codexLimits    `json:"rate_limits"` // (token_count)
+	Reason     string          `json:"reason"`
+	Error      json.RawMessage `json:"error"`     // (task_complete)
+	NumTurns   int             `json:"num_turns"` // (thread_rolled_back)
 	// turn_context, thread_settings_applied
 	Model          string `json:"model"`
 	ApprovalPolicy string `json:"approval_policy"`
@@ -744,6 +747,7 @@ func (c *Codex) event(r *codexRow, p *codexPayload) {
 	case "task_started":
 		c.working, c.known = true, true
 		c.turnOpen = true
+		c.errSaid = false
 	case "thread_rolled_back":
 		// Codex's backtrack (Esc Esc, then a message edited and sent
 		// again): the last turns go, the person's message with all that
@@ -751,6 +755,10 @@ func (c *Codex) event(r *codexRow, p *codexPayload) {
 		c.backtrack(p.NumTurns)
 	case "task_complete":
 		c.working, c.known = false, true
+		if t := codexTrouble(p.Error); t != nil && !c.errSaid {
+			c.add(r, "", RoleNote, []Part{{Kind: KindTrouble, Trouble: t}})
+		}
+		c.errSaid = false
 	case "turn_aborted":
 		c.working, c.known = false, true
 		if p.Reason == "interrupted" {
@@ -824,15 +832,17 @@ func (c *Codex) event(r *codexRow, p *codexPayload) {
 			}
 			c.userSaid(r, it.ID, parts)
 		}
-	// An older Codex's account (to 0.147): what the person wrote, what went
-	// wrong, a review, and what its tools did when it told of them so.
+	// An older Codex's account (to 0.147; its error rows seen to 0.128):
+	// what the person wrote, what went wrong, a review, and what its tools did when it told of them so.
 	case "user_message":
 		if strings.TrimSpace(p.Message) != "" {
 			c.userSaid(r, "", []Part{textPart(KindText, p.Message)})
 		}
 	case "error":
 		if t := strings.TrimSpace(p.Message); t != "" {
-			c.add(r, "", RoleNote, []Part{{Kind: KindTrouble, Trouble: &Trouble{Kind: "api", Text: clip(t, maxDetail)}}})
+			said, cutOff := cut(clean(t), maxTrouble)
+			c.add(r, "", RoleNote, []Part{{Kind: KindTrouble, Trouble: &Trouble{Kind: TroubleAPI, Text: said, Cut: cutOff}}})
+			c.errSaid = true
 		}
 	case "exited_review_mode":
 		if p.Review != nil && strings.TrimSpace(p.Review.Explanation) != "" {
@@ -856,6 +866,62 @@ func (c *Codex) event(r *codexRow, p *codexPayload) {
 			c.add(r, "", RoleAssistant, []Part{{Kind: KindTool, Tool: &Tool{Name: "update_goal", Detail: clip(clean(p.Goal.Objective), maxDetail), Done: true}}})
 		}
 	}
+}
+
+// codexRetryAt: when a usage limit lifts, as Codex says it at the end of
+// the error ("… or try again at 6:48 PM.", in its host's time; all 15 seen
+// so far say it so). Not said so, no time is given.
+var codexRetryAt = regexp.MustCompile(`(?i)\btry again at ([^\n]{1,40}?)\.?\s*$`)
+
+// codexTrouble: what went wrong with a turn, as Codex writes it (seen
+// from 0.146; before, as an error row of its own) on the turn's
+// task_complete: {message, codex_error_info}, the info a word
+// ("server_overloaded", "other", "cyber_policy", "usage_limit_exceeded"…)
+// or {what: {http_status_code}} ("http_connection_failed",
+// "response_too_many_failed_attempts"…). Without it the turn is seen
+// ending with no answer and nothing said of why.
+func codexTrouble(raw json.RawMessage) *Trouble {
+	var e struct {
+		Message string          `json:"message"`
+		Info    json.RawMessage `json:"codex_error_info"`
+	}
+	if len(raw) == 0 || json.Unmarshal(raw, &e) != nil {
+		return nil
+	}
+	var word string
+	status := 0
+	if json.Unmarshal(e.Info, &word) != nil {
+		var what map[string]struct {
+			Status int `json:"http_status_code"`
+		}
+		if json.Unmarshal(e.Info, &what) == nil && len(what) == 1 {
+			for k, v := range what {
+				word, status = k, v.Status
+			}
+		}
+	}
+	text := strings.TrimSpace(e.Message)
+	if text == "" {
+		text = word
+	}
+	if text == "" {
+		return nil
+	}
+	if status < 100 || status > 599 {
+		status = 0
+	}
+	said, cutOff := cut(clean(text), maxTrouble)
+	switch word {
+	case "cyber_policy":
+		return &Trouble{Kind: TroubleRefused, Text: said, Cut: cutOff}
+	case "usage_limit_exceeded":
+		t := &Trouble{Kind: TroubleLimit, Text: said, Cut: cutOff}
+		if m := codexRetryAt.FindStringSubmatch(text); m != nil {
+			t.Until = clip(m[1], 40)
+		}
+		return t
+	}
+	return &Trouble{Kind: TroubleAPI, Text: said, Status: status, Cut: cutOff}
 }
 
 // userSaid: a message of the person's. The first names the conversation

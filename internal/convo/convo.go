@@ -84,6 +84,7 @@ const (
 	TroubleAPI     = "api"     // the interface answered with an error
 	TroubleCut     = "cut"     // the answer ran into the model's limit
 	TroubleHook    = "hook"    // a hook of the person's failed
+	TroubleLimit   = "limit"   // the account's usage limit is reached (Until: when it can go on)
 )
 
 // Entry is one row of the log that the view shows. Seq orders entries;
@@ -196,7 +197,8 @@ type Event struct {
 type Trouble struct {
 	// Kind: "refused" (the model's safeguards stopped the message),
 	// "api" (the interface answered with an error), "cut" (the answer ran
-	// into the model's limit), "hook" (a hook of the person's failed).
+	// into the model's limit), "hook" (a hook of the person's failed),
+	// "limit" (the account's usage limit is reached).
 	Kind string `json:"kind"`
 	// Text: what was said of it, in the words it was said in.
 	Text string `json:"text,omitempty"`
@@ -217,6 +219,9 @@ type Trouble struct {
 	Attempt int   `json:"attempt,omitempty"`
 	Max     int   `json:"max,omitempty"`
 	RetryMs int64 `json:"retry_ms,omitempty"`
+	// (limit) Until: when it can be used again, as the agent said it (its
+	// host's time: "6:48 PM"); empty when it did not say.
+	Until string `json:"until,omitempty"`
 }
 
 // Noted is a file the turn was given without it being said in the
