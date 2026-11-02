@@ -19,36 +19,37 @@ export interface AskHookInfo {
   declined: boolean
 }
 
-// (One reading per host for the page's life, shared by its cards; read
-// again after a change, or when asked to.)
-const reads = new Map<number, Promise<AskHookInfo>>()
+// (A reading per host shared by the cards shown within half a minute; the
+// gateway keeps its own for five. The host's page reads afresh. review535-4)
+const reads = new Map<number, { at: number; p: Promise<AskHookInfo> }>()
+const readFor = 30_000
 
 export function readAskHook(hostId: number, fresh = false): Promise<AskHookInfo> {
-  let p = reads.get(hostId)
-  if (!p || fresh) {
-    p = api<AskHookInfo>('GET', `/api/hosts/${hostId}/ask-hook` + (fresh ? '?fresh=1' : ''))
-    p.catch(() => reads.delete(hostId))
-    reads.set(hostId, p)
-  }
+  const r = reads.get(hostId)
+  if (r && !fresh && Date.now() - r.at < readFor) return r.p
+  const p = api<AskHookInfo>('GET', `/api/hosts/${hostId}/ask-hook` + (fresh ? '?fresh=1' : ''))
+  p.catch(() => reads.delete(hostId))
+  reads.set(hostId, { at: Date.now(), p })
   return p
 }
 
-function useAskHook(hostId: number) {
+function useAskHook(hostId: number, fresh = false) {
   const [info, setInfo] = useState<AskHookInfo | null>(null)
   const [failed, setFailed] = useState<ApiError | Error | null>(null)
   useEffect(() => {
     let live = true
-    readAskHook(hostId).then(
+    readAskHook(hostId, fresh).then(
       (i) => live && setInfo(i),
       (e) => live && setFailed(e),
     )
     return () => {
       live = false
     }
-  }, [hostId])
+  }, [hostId, fresh])
   const set = (i: AskHookInfo) => {
-    reads.set(hostId, Promise.resolve(i))
+    reads.set(hostId, { at: Date.now(), p: Promise.resolve(i) })
     setInfo(i)
+    setFailed(null)
   }
   return { info, failed, set }
 }
@@ -71,7 +72,10 @@ export function hintOf(info: AskHookInfo | null): 'none' | 'blocked' | 'cannot' 
 // Claude Code's question frame's own last line on it.
 export function asksFromScreen(o: { agent?: string; logAsks: boolean; screen?: string; drawn: boolean }): boolean {
   if (o.agent !== 'claude' || o.logAsks || o.screen === undefined) return false
-  return o.drawn || (/Enter to select/.test(o.screen) && /Esc to cancel/.test(o.screen))
+  // (The frame's own last line, as the last line: words in a command a
+  // permission prompt shows do not make it one — review535-7.)
+  const last = o.screen.split('\n').filter((l) => l.trim()).pop() ?? ''
+  return o.drawn || /^\s*Enter to select\b.*\bEsc to cancel\s*$/.test(last)
 }
 
 const cannotText = (c: NonNullable<AskHookInfo['cannot']>) => t(('askHook.cannot.' + c) as I18nKey)
@@ -79,28 +83,48 @@ const cannotText = (c: NonNullable<AskHookInfo['cannot']>) => t(('askHook.cannot
 // AskHookConfirm: turning it on or off, the file and what goes in shown.
 // The file is written only if it is still as it was read (seen); else it is
 // read again and shown, to be confirmed again.
-function AskHookConfirm({ hostId, hostName, info, on, onDone, onClose }: { hostId: number; hostName: string; info: AskHookInfo; on: boolean; onDone: (i: AskHookInfo) => void; onClose: () => void }) {
+// onInfo: what the file says now, read again after a refusal or a doubt
+// (the page and this dialog then show that — review535-5); onDone only once
+// the file is read back as asked (review535-6).
+function AskHookConfirm({ hostId, hostName, info, on, onDone, onInfo, onClose }: { hostId: number; hostName: string; info: AskHookInfo; on: boolean; onDone: (i: AskHookInfo) => void; onInfo: (i: AskHookInfo) => void; onClose: () => void }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
-  const [seen, setSeen] = useState(info.seen)
   const close = () => !busy && onClose()
+  const again = async () => {
+    const fresh = await readAskHook(hostId, true).catch(() => null)
+    if (fresh) onInfo(fresh)
+    return fresh
+  }
   const go = async () => {
     setBusy(true)
     setError('')
     try {
-      const i = await api<AskHookInfo>('POST', `/api/hosts/${hostId}/ask-hook`, { on, seen })
+      const i = await api<AskHookInfo>('POST', `/api/hosts/${hostId}/ask-hook`, { on, seen: info.seen })
+      if ((i.state === 'on') !== on) {
+        onInfo(i)
+        setError(t('askHook.notAsAsked'))
+        setBusy(false)
+        return
+      }
       onDone(i)
       onClose()
     } catch (e) {
-      if (e instanceof ApiError && e.code === 'changed') {
-        const fresh = await readAskHook(hostId, true).catch(() => null)
-        if (fresh) setSeen(fresh.seen)
-        setError(t('askHook.changed'))
-      } else if (e instanceof ApiError && e.code === 'uncertain') {
-        void readAskHook(hostId, true).catch(() => null)
+      const code = e instanceof ApiError ? e.code : ''
+      if (code === 'changed') {
+        setError(t((await again()) ? 'askHook.changed' : 'askHook.changedUnread'))
+      } else if (code === 'uncertain') {
+        void again()
         setError(t('askHook.uncertain'))
-      } else if (e instanceof ApiError && (e.code === 'write_failed' || e.code === 'cannot')) {
+      } else if (code === 'cannot') {
+        const now = (e as ApiError).extra?.info as AskHookInfo | undefined
+        if (now) onInfo(now)
+        setError(t('askHook.cannotNow'))
+      } else if (code === 'write_failed') {
         setError(t('askHook.failed'))
+      } else if (code === 'no_connection') {
+        setError(t('askHook.state.noConnection'))
+      } else if (code === 'busy') {
+        setError(t('askHook.busy'))
       } else {
         setError(errorText(e))
       }
@@ -111,7 +135,7 @@ function AskHookConfirm({ hostId, hostName, info, on, onDone, onClose }: { hostI
     <Dialog title={t(on ? 'askHook.confirmTitle' : 'askHook.offTitle', { host: hostName })} onClose={close}>
       <p className="lead">{t(on ? 'askHook.confirmBody' : 'askHook.offBody', { file: info.file })}</p>
       {on && <pre className="ask-hook-snippet">{info.snippet}</pre>}
-      {on && <p className="hint">{t('askHook.confirmRace')}</p>}
+      <p className="hint">{t('askHook.confirmRace')}</p>
       {error && <p className="err" role="alert">{error}</p>}
       <div className="dialog-actions">
         <button className="btn" onClick={close} disabled={busy}>{t('common.cancel')}</button>
@@ -169,6 +193,7 @@ export function AskHookHint({ hostId, hostName }: { hostId: number; hostName: st
         set(i)
         toast(t('askHook.done'))
       }}
+      onInfo={set}
       onClose={() => setConfirming(false)}
     />
   )
@@ -201,7 +226,7 @@ export function AskHookHint({ hostId, hostName }: { hostId: number; hostName: st
 // AskHookRow: the host's page — whether it is on, and the switch.
 export function AskHookRow({ hostId, hostName }: { hostId: number; hostName: string }) {
   const toast = useToast()
-  const { info, failed, set } = useAskHook(hostId)
+  const { info, failed, set } = useAskHook(hostId, true)
   const [confirming, setConfirming] = useState<boolean | null>(null)
   let state: string
   if (failed) state = t(failed instanceof ApiError && failed.code === 'no_connection' ? 'askHook.state.noConnection' : 'askHook.state.unknown')
@@ -236,6 +261,7 @@ export function AskHookRow({ hostId, hostName }: { hostId: number; hostName: str
             set(i)
             toast(t(confirming ? 'askHook.done' : 'askHook.offDone'))
           }}
+          onInfo={set}
           onClose={() => setConfirming(null)}
         />
       )}

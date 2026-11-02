@@ -62,8 +62,9 @@ true`
 // 5: a step failed, the new file came short among them (the file as it
 // was); 6: another change is under way on the host (its lock, taken here:
 // a gateway's lock is let go when the connection ends, not when a command
-// still running on the host does — review534-2; one left over a minute is
-// taken as gone). Prints "done" once in place.
+// still running on the host does — review534-2; it holds its taker's pid,
+// taken over only when over a minute old and that process is gone, and let
+// go of only by its taker — review535-2). Prints "done" once in place.
 const askHookWrite = `set -u
 d="$HOME/.claude"; f="$d/settings.json"; b="$f.corral-bak"; lk="$d/.settings.json.corral-lock"; was="$1"; op="$2"; new="${3:-}"
 sum() { { sha256sum "$1" 2>/dev/null || shasum -a 256 "$1" 2>/dev/null; } | cut -c1-64; }
@@ -74,10 +75,15 @@ if [ -e "$f" ]; then
 fi
 if [ ! -d "$d" ]; then mkdir -m 700 "$d" || exit 5; fi
 tmp=""; tb=""; held=""
-trap 'rm -f "$tmp" "$tb"; [ -n "$held" ] && rmdir "$lk" 2>/dev/null' EXIT
-if ! mkdir "$lk" 2>/dev/null; then
-  [ -n "$(find "$lk" -maxdepth 0 -mmin +1 2>/dev/null)" ] && rmdir "$lk" 2>/dev/null
-  mkdir "$lk" 2>/dev/null || exit 6
+trap 'rm -f "$tmp" "$tb"; [ -n "$held" ] && [ "$(cat "$lk/pid" 2>/dev/null)" = "$$" ] && rm -rf "$lk"' EXIT
+take() { mkdir "$lk" 2>/dev/null && echo $$ > "$lk/pid"; }
+if ! take; then
+  p=$(cat "$lk/pid" 2>/dev/null)
+  if [ -n "$(find "$lk" -maxdepth 0 -mmin +1 2>/dev/null)" ] && { [ -z "$p" ] || ! kill -0 "$p" 2>/dev/null; }; then
+    rm -rf "$lk"; take || exit 6
+  else
+    exit 6
+  fi
 fi
 held=1
 if [ "$op" = write ]; then
@@ -410,7 +416,10 @@ func (s *Server) apiSetAskHook(w http.ResponseWriter, r *http.Request) {
 		next, changed, err = askhook.Enable(f.settings)
 	} else {
 		next, remove, changed, err = askhook.Disable(f.settings)
-		remove = remove && string(f.kind) == "file" && bytes.Equal(f.settings, askhook.Created())
+		// (Removed only where the gateway made the file from none and it is still
+		// just that: a {} of the person's — with or without its newline — stays. review535-1)
+		made, _ := s.store.AskHookCreated(r.Context(), h.OwnerID, h.ID)
+		remove = remove && made && string(f.kind) == "file" && bytes.Equal(f.settings, askhook.Created())
 	}
 	if err != nil {
 		writeErrorExtra(w, http.StatusUnprocessableEntity, "cannot", "the gateway does not change this settings file", map[string]any{"info": info})
@@ -462,12 +471,16 @@ func (s *Server) apiSetAskHook(w http.ResponseWriter, r *http.Request) {
 	}
 	if on {
 		_ = s.store.SetAskHookDeclined(r.Context(), h.OwnerID, h.ID, false)
+		_ = s.store.SetAskHookCreated(r.Context(), h.OwnerID, h.ID, info.Seen == "none")
+	} else {
+		_ = s.store.SetAskHookCreated(r.Context(), h.OwnerID, h.ID, false)
 	}
 	s.answerAskHook(w, r.Context(), h, key, on, c)
 }
 
 // answerAskHook: the file read again after a change, what it says now.
 func (s *Server) answerAskHook(w http.ResponseWriter, ctx context.Context, h *store.Host, key [2]int64, on bool, c *ssh.Client) {
+	gen := s.askHook.generation(key) // (before reading: a change after it is not undone by this reading — review535-3)
 	rctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	f, err := readAskHookFile(rctx, c)
@@ -476,7 +489,7 @@ func (s *Server) answerAskHook(w http.ResponseWriter, ctx context.Context, h *st
 		return
 	}
 	info := askHookInfoOf(f)
-	s.askHook.keep(key, h.ConnVersion, s.askHook.generation(key), info)
+	s.askHook.keep(key, h.ConnVersion, gen, info)
 	info.Declined, _ = s.store.AskHookDeclined(ctx, h.OwnerID, h.ID)
 	writeJSON(w, http.StatusOK, info)
 }

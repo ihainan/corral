@@ -282,14 +282,17 @@ func TestAskHookEndpoints(t *testing.T) {
 	if _, err := os.Stat(f); !os.IsNotExist(err) {
 		t.Error("left")
 	}
-	// A file of the person's that said nothing ({}): kept as {} once off, not removed (review534-6).
-	os.WriteFile(f, []byte("{}"), 0o600)
-	r = admin.do("GET", u+"?fresh=1", nil)
-	r = admin.do("POST", u, map[string]any{"on": true, "seen": r.json()["seen"]})
-	mustStatus(t, r, 200, "on over {}")
-	mustStatus(t, admin.do("POST", u, map[string]any{"on": false, "seen": r.json()["seen"]}), 200, "off over {}")
-	if b, err := os.ReadFile(f); err != nil || strings.TrimSpace(string(b)) != "{}" {
-		t.Errorf("{}: %q %v", b, err)
+	// A file of the person's that said nothing ({}, with its newline or not, or empty): kept once off,
+	// not removed (review534-6, review535-1).
+	for _, body := range []string{"{}", "{}\n", ""} {
+		os.WriteFile(f, []byte(body), 0o600)
+		r = admin.do("GET", u+"?fresh=1", nil)
+		r = admin.do("POST", u, map[string]any{"on": true, "seen": r.json()["seen"]})
+		mustStatus(t, r, 200, "on over "+body)
+		mustStatus(t, admin.do("POST", u, map[string]any{"on": false, "seen": r.json()["seen"]}), 200, "off over "+body)
+		if b, err := os.ReadFile(f); err != nil || strings.TrimSpace(string(b)) != "{}" {
+			t.Errorf("%q: %q %v", body, b, err)
+		}
 	}
 	// Hooks turned off there, or the person's own doing it: not put in (review534-7).
 	for _, body := range []string{`{"disableAllHooks":true}`, `{"hooks":{"PreToolUse":[{"matcher":"*","hooks":[{"type":"command","command":"x"}]}]}}`} {
@@ -320,7 +323,7 @@ func TestAskHookEndpoints(t *testing.T) {
 			n++
 		}
 	}
-	if err != nil || n != 4 { // (on, off; on and off over {})
+	if err != nil || n != 8 { // (on, off; on and off over three empty files)
 		t.Errorf("audit: %d %v", n, err)
 	}
 }
@@ -366,6 +369,16 @@ func TestAskHookWriteGuards(t *testing.T) {
 		t.Errorf("locked: exit %d", code)
 	}
 	past := time.Now().Add(-2 * time.Minute)
+	// Old, but its taker still running: not taken over (review535-2).
+	os.WriteFile(filepath.Join(lk, "pid"), []byte(fmt.Sprint(os.Getpid())), 0o600)
+	os.Chtimes(lk, past, past)
+	if _, code := runAskHookScript(t, home, askHookWrite, next, shaOf(old), "write", shaOf(next)); code != 6 {
+		t.Errorf("an old lock of a live taker: exit %d", code)
+	}
+	// Old, its taker gone: taken over.
+	gone := exec.Command("true")
+	gone.Run()
+	os.WriteFile(filepath.Join(lk, "pid"), []byte(fmt.Sprint(gone.Process.Pid)), 0o600)
 	os.Chtimes(lk, past, past)
 	if _, code := runAskHookScript(t, home, askHookWrite, next, shaOf(old), "write", shaOf(next)); code != 0 {
 		t.Errorf("a stale lock: exit %d", code)
