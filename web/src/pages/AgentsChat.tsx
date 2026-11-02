@@ -1910,6 +1910,11 @@ function PhoneList({ entries, all, titles, query, onQuery, onPick }: { entries: 
       const added = entries.filter((e) => !kept.includes(e.key + ' ' + e.s.id)).map((e) => e.key + ' ' + e.s.id)
       return kept.length === o.length && !added.length ? o : [...kept, ...added]
     })
+    // (One gone: forgotten here too, so back it is a new one, not folded.)
+    setFoldOf((f) => {
+      const have = new Set(entries.map((e) => e.key + ' ' + e.s.id))
+      return [...f.keys()].every((k) => have.has(k)) ? f : new Map([...f].filter(([k]) => have.has(k)))
+    })
   }, [entries])
   const byKey = new Map(entries.map((e) => [e.key + ' ' + e.s.id, e]))
   // (Those pinned first, in the order pinned, as the side list has them.)
@@ -1951,7 +1956,7 @@ function PhoneList({ entries, all, titles, query, onQuery, onPick }: { entries: 
   // (The old ones past the first few of their group: behind a tap, unless searched for.)
   const days = new Map<string, Entry[]>()
   for (const e of shown) {
-    const d = foldOf.get(e.key + ' ' + e.s.id)
+    const d = !pins.includes(e.key) && foldOf.get(e.key + ' ' + e.s.id) // (pinned since: first, never folded)
     if (d) days.set(d, [...(days.get(d) ?? []), e])
   }
   const [open, setOpen] = useState(oldOpen)
