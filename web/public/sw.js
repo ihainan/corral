@@ -70,44 +70,10 @@ self.addEventListener('push', (e) => {
   } catch {
     n = { title: 'Corral', body: e.data ? e.data.text() : '' }
   }
-  const run = pushes.then(() => Promise.all([showAlert(n), setBadge(n)]))
+  const run = pushes.then(() => showAlert(n))
   pushes = run.catch(() => {})
   e.waitUntil(run)
 })
-
-// The app icon's number: how many agents wait for the person, as the
-// gateway counted when the alert went, or as the page read it (by the
-// gateway's clock then). A count older than one shown does not undo it (the
-// newest's number kept, in memory and in Cache Storage, as the alerts are);
-// one for another account than the one signed in here (or for any, signed
-// out) is not shown.
-let badgeSeq = 0
-let ownerSeen = null // (the account signed in, as last known here: '' none; null not known)
-async function setBadge(n) {
-  if (typeof n.badge !== 'number' || typeof n.seq !== 'number' || !self.navigator.setAppBadge) return
-  const seq = micro(n.seq)
-  if (seq <= badgeSeq) return
-  const notOurs = (owner) => owner !== null && n.badge_for !== undefined && owner !== String(n.badge_for)
-  if (notOurs(ownerSeen)) return
-  try {
-    const c = await caches.open(ALERTS)
-    const owner = await c.match('/owner')
-    if (owner && ownerSeen === null) ownerSeen = await owner.text() // (what the page said last wins: see setAccount)
-    if (notOurs(ownerSeen)) return
-    const r = await c.match('/badge')
-    const stored = r ? Number(await r.text()) || 0 : 0
-    if (seq <= stored) return void (badgeSeq = Math.max(badgeSeq, stored))
-    await c.put('/badge', new Response(String(seq)))
-  } catch {
-    /* no storage: what this worker remembers */
-  }
-  badgeSeq = seq
-  try {
-    await (n.badge > 0 ? self.navigator.setAppBadge(n.badge) : self.navigator.clearAppBadge())
-  } catch {
-    /* not allowed here (no permission): no number */
-  }
-}
 
 // newest keeps the newest alert of a tag and returns what to show: this one,
 // or (an older one, arriving late) the newer one again, quietly and without
@@ -151,14 +117,6 @@ async function newest(pushed) {
 // handled finishes first and none can bring it back.
 self.addEventListener('message', (e) => {
   const d = e.data
-  // The page's own count (see agents.ts appBadge): in the same line, so an
-  // alert's older count handled after does not undo it.
-  if (d && d.t === 'badge' && typeof d.n === 'number' && typeof d.seq === 'number') {
-    const run = pushes.then(() => setBadge({ badge: d.n, seq: d.seq }))
-    pushes = run.catch(() => {})
-    e.waitUntil?.(run)
-    return
-  }
   if (!d || d.t !== 'account' || (d.id !== null && typeof d.id !== 'number')) return
   const run = pushes.then(() => setAccount(d.id))
   pushes = run.catch(() => {})
@@ -174,19 +132,11 @@ async function setAccount(id) {
   } catch {
     /* unknown: as for another account */
   }
-  ownerSeen = me
   if (owner !== null && owner === me) return
   seen.clear()
-  badgeSeq = 0
-  try {
-    await self.navigator.clearAppBadge?.()
-  } catch {
-    /* none to clear */
-  }
   try {
     await caches.delete(ALERTS)
-    // ('' signed out: kept as such, so that no alert's count is shown then.)
-    await (await caches.open(ALERTS)).put('/owner', new Response(me))
+    if (me) await (await caches.open(ALERTS)).put('/owner', new Response(me))
   } catch {
     /* the memory went; storage stays unwritable */
   }
