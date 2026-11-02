@@ -115,13 +115,13 @@ func ownMatch(m *string) bool {
 	if m == nil {
 		return true
 	}
-	s := strings.TrimSpace(*m)
+	s := *m
 	if s == "" || s == "*" {
 		return true
 	}
 	found := false
 	for _, n := range strings.FieldsFunc(s, func(r rune) bool { return r == '|' || r == ',' }) {
-		n = strings.TrimSpace(n)
+		n = strings.Trim(n, " ") // (spaces around a name only: Claude Code 2.1.316 takes " ", " * " or a tab as matching nothing — review534-5)
 		if !plainName.MatchString(n) {
 			return false
 		}
@@ -143,7 +143,7 @@ func Enable(settings []byte) (out []byte, changed bool, err error) {
 	if err != nil {
 		return nil, false, err
 	}
-	if st, _, _ := Read(settings, nil); st == On {
+	if hasOurs(entries) {
 		return settings, false, nil
 	}
 	hooks := object{}
@@ -219,6 +219,36 @@ func Disable(settings []byte) (out []byte, empty, changed bool, err error) {
 		top = top.set("hooks", hooks.bytes())
 	}
 	return render(top, settings), top.empty(), true, nil
+}
+
+// hasOurs: the gateway's hook among PreToolUse's entries (whatever else the
+// file says: hooks turned off there or not — review534-7).
+func hasOurs(entries []json.RawMessage) bool {
+	for _, raw := range entries {
+		var e struct {
+			Matcher *string `json:"matcher"`
+			Hooks   []struct {
+				Type    string `json:"type"`
+				Command string `json:"command"`
+			} `json:"hooks"`
+		}
+		if json.Unmarshal(raw, &e) != nil || e.Matcher == nil || *e.Matcher != Matcher {
+			continue
+		}
+		for _, h := range e.Hooks {
+			if h.Type == "command" && h.Command == Command {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// Created is the file as Enable makes it from none: the one a turning off
+// may remove again (a file that held anything else is kept — review534-6).
+func Created() []byte {
+	b, _, _ := Enable(nil)
+	return b
 }
 
 // array: the values as a JSON array, each as it was (json.Marshal would

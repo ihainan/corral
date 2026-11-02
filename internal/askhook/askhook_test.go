@@ -202,3 +202,20 @@ func TestEmitForLive(t *testing.T) {
 		t.Fatal("not written")
 	}
 }
+
+// review534-5/7: spaces only around a name; hooks turned off: ours not put in twice.
+func TestReview534(t *testing.T) {
+	for m, want := range map[string]State{" ": Off, " * ": Off, "Bash,\tAskUserQuestion": Off, "Bash , AskUserQuestion": OnOwn, "Bash|AskUserQuestion ": OnOwn} {
+		in := `{"hooks":{"PreToolUse":[{"matcher":` + strings.ReplaceAll(strings.ReplaceAll(`"`+m+`"`, "\t", `\t`), "\n", `\n`) + `,"hooks":[{"type":"command","command":"x"}]}]}}`
+		if got, _, err := Read([]byte(in), nil); got != want || err != nil {
+			t.Errorf("%q: %q %v, want %q", m, got, err, want)
+		}
+	}
+	on := `{"disableAllHooks":true,"hooks":{"PreToolUse":[` + ours + `]}}`
+	if _, changed, _ := Enable([]byte(on)); changed {
+		t.Error("put in twice where hooks are off")
+	}
+	if c := Created(); !strings.Contains(string(c), "AskUserQuestion") || !strings.HasSuffix(string(c), "\n") {
+		t.Errorf("%s", c)
+	}
+}

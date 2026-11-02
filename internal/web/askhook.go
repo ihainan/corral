@@ -57,11 +57,15 @@ done
 true`
 
 // askHookWrite: $1 the file's sha256 as read ("none": there was no file),
-// $2 write (the new file on stdin) or remove. Exit 3: the file is not as read
-// (or a link, or hard-linked) now; 4: it cannot be written so; 5: a step
-// failed (the file as it was). Prints "done" once in place.
+// $2 write (the new file on stdin, its sha256 $3) or remove. Exit 3: the file
+// is not as read now; 4: it (or the backup's name) is not one to write so;
+// 5: a step failed, the new file came short among them (the file as it
+// was); 6: another change is under way on the host (its lock, taken here:
+// a gateway's lock is let go when the connection ends, not when a command
+// still running on the host does — review534-2; one left over a minute is
+// taken as gone). Prints "done" once in place.
 const askHookWrite = `set -u
-d="$HOME/.claude"; f="$d/settings.json"; b="$f.corral-bak"; was="$1"; op="$2"
+d="$HOME/.claude"; f="$d/settings.json"; b="$f.corral-bak"; lk="$d/.settings.json.corral-lock"; was="$1"; op="$2"; new="${3:-}"
 sum() { { sha256sum "$1" 2>/dev/null || shasum -a 256 "$1" 2>/dev/null; } | cut -c1-64; }
 if [ -L "$f" ]; then exit 4; fi
 if [ -e "$f" ]; then
@@ -69,18 +73,26 @@ if [ -e "$f" ]; then
   [ "$(ls -ldn "$f" | awk '{print $2}')" = 1 ] || exit 4
 fi
 if [ ! -d "$d" ]; then mkdir -m 700 "$d" || exit 5; fi
-tmp=""; tb=""
-trap 'rm -f "$tmp" "$tb"' EXIT
+tmp=""; tb=""; held=""
+trap 'rm -f "$tmp" "$tb"; [ -n "$held" ] && rmdir "$lk" 2>/dev/null' EXIT
+if ! mkdir "$lk" 2>/dev/null; then
+  [ -n "$(find "$lk" -maxdepth 0 -mmin +1 2>/dev/null)" ] && rmdir "$lk" 2>/dev/null
+  mkdir "$lk" 2>/dev/null || exit 6
+fi
+held=1
 if [ "$op" = write ]; then
   tmp=$(mktemp "$d/.settings.json.corral.XXXXXX") || exit 5
   if [ -e "$f" ]; then cp -p "$f" "$tmp" || exit 5; fi
   cat > "$tmp" || exit 5
+  [ -n "$new" ] && [ "$(sum "$tmp")" = "$new" ] || exit 5
 fi
 if [ "$was" = none ]; then
   [ -e "$f" ] && exit 3
 else
   [ -f "$f" ] && [ ! -L "$f" ] && [ "$(sum "$f")" = "$was" ] || exit 3
 fi
+if [ -L "$b" ]; then rm -f "$b" || exit 5
+elif [ -e "$b" ] && [ ! -f "$b" ]; then exit 4; fi
 if [ -e "$f" ]; then
   tb=$(mktemp "$d/.settings.json.corral-bak.XXXXXX") || exit 5
   cp -p "$f" "$tb" || exit 5
@@ -116,6 +128,9 @@ type askHooks struct {
 	mu    sync.Mutex
 	busy  map[[2]int64]bool // a change on the host under way, till its command has really ended
 	cache map[[2]int64]askHookCached
+	// gen: per host, how many times what was read has been let go of: a
+	// reading begun before a change is not kept after it (review534-4).
+	gen map[[2]int64]int
 }
 
 type askHookCached struct {
@@ -131,9 +146,20 @@ func (a *askHooks) cached(key [2]int64, version int64) (askHookInfo, bool) {
 	return c.info, ok && c.version == version && time.Since(c.at) < askHookTTL
 }
 
-func (a *askHooks) keep(key [2]int64, version int64, info askHookInfo) {
+// generation: the host's, as a reading begins.
+func (a *askHooks) generation(key [2]int64) int {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	return a.gen[key]
+}
+
+// keep: what was read, unless a change let go of readings since it began.
+func (a *askHooks) keep(key [2]int64, version int64, gen int, info askHookInfo) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.gen[key] != gen {
+		return
+	}
 	if a.cache == nil {
 		a.cache = map[[2]int64]askHookCached{}
 	}
@@ -144,6 +170,10 @@ func (a *askHooks) forget(key [2]int64) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	delete(a.cache, key)
+	if a.gen == nil {
+		a.gen = map[[2]int64]int{}
+	}
+	a.gen[key]++
 }
 
 // take: the host's turn to be changed; release gives it back (called once
@@ -288,6 +318,7 @@ func (s *Server) askHookState(ctx context.Context, h *store.Host, fresh bool) (a
 	if c == nil {
 		return askHookInfo{}, http.StatusConflict, "no_connection", "open a terminal to this host first"
 	}
+	gen := s.askHook.generation(key)
 	rctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	f, err := readAskHookFile(rctx, c)
@@ -298,7 +329,7 @@ func (s *Server) askHookState(ctx context.Context, h *store.Host, fresh bool) (a
 		return askHookInfo{}, http.StatusBadGateway, "read_failed", "could not read the Claude Code settings on the host"
 	}
 	info := askHookInfoOf(f)
-	s.askHook.keep(key, h.ConnVersion, info)
+	s.askHook.keep(key, h.ConnVersion, gen, info)
 	info.Declined = declined
 	return info, 0, "", ""
 }
@@ -352,16 +383,24 @@ func (s *Server) apiSetAskHook(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, "read_failed", "could not read the Claude Code settings on the host")
 		return
 	}
+	gen := s.askHook.generation(key)
 	info := askHookInfoOf(f)
 	audit := func(outcome string) {
 		s.audit(r, "host.ask_hook", hostTarget(h), map[string]any{"on": on, "file": askHookFile, "outcome": outcome})
 	}
 	if b.Seen != info.Seen {
-		s.askHook.keep(key, h.ConnVersion, info)
+		s.askHook.keep(key, h.ConnVersion, gen, info)
 		writeErrorExtra(w, http.StatusConflict, "changed", "the settings file changed since it was shown; look at it again", map[string]any{"info": info})
 		return
 	}
 	if info.Cannot != "" || info.State == "" {
+		writeErrorExtra(w, http.StatusUnprocessableEntity, "cannot", "the gateway does not change this settings file", map[string]any{"info": info})
+		return
+	}
+	// (On where hooks do not run, or a hook of the person's own does it
+	// already: not written — review534-7. Off where it is not the gateway's:
+	// nothing to take out.)
+	if on && (info.State == askhook.Blocked || info.State == askhook.OnOwn) {
 		writeErrorExtra(w, http.StatusUnprocessableEntity, "cannot", "the gateway does not change this settings file", map[string]any{"info": info})
 		return
 	}
@@ -371,7 +410,7 @@ func (s *Server) apiSetAskHook(w http.ResponseWriter, r *http.Request) {
 		next, changed, err = askhook.Enable(f.settings)
 	} else {
 		next, remove, changed, err = askhook.Disable(f.settings)
-		remove = remove && string(f.kind) == "file"
+		remove = remove && string(f.kind) == "file" && bytes.Equal(f.settings, askhook.Created())
 	}
 	if err != nil {
 		writeErrorExtra(w, http.StatusUnprocessableEntity, "cannot", "the gateway does not change this settings file", map[string]any{"info": info})
@@ -385,9 +424,16 @@ func (s *Server) apiSetAskHook(w http.ResponseWriter, r *http.Request) {
 	if remove {
 		op, next = "remove", nil
 	}
-	cmd := "sh -c " + sshx.QuoteShell(askHookWrite) + " sh " + sshx.QuoteShell(info.Seen) + " " + op
+	newSum := ""
+	if op == "write" {
+		sum := sha256.Sum256(next)
+		newSum = hex.EncodeToString(sum[:])
+	}
+	cmd := "sh -c " + sshx.QuoteShell(askHookWrite) + " sh " + sshx.QuoteShell(info.Seen) + " " + op + " " + sshx.QuoteShell(newSum)
 	held = true
-	res, err := sshx.Exec(ctx, c, cmd, 4096, sshx.ExecOptions{Stdin: bytes.NewReader(next), Release: release})
+	// (Let go of once the command has ended here: what was read meanwhile is
+	// let go of again then, the file perhaps changed only at its end.)
+	res, err := sshx.Exec(ctx, c, cmd, 4096, sshx.ExecOptions{Stdin: bytes.NewReader(next), Release: func() { s.askHook.forget(key); release() }})
 	s.askHook.forget(key)
 	var ee *sshx.ExitError
 	switch {
@@ -396,6 +442,9 @@ func (s *Server) apiSetAskHook(w http.ResponseWriter, r *http.Request) {
 	case errors.As(err, &ee) && ee.Status == 3:
 		audit("changed")
 		writeError(w, http.StatusConflict, "changed", "the settings file changed meanwhile; nothing was written")
+		return
+	case errors.As(err, &ee) && ee.Status == 6:
+		writeError(w, http.StatusConflict, "busy", "a change to this host's settings is already under way")
 		return
 	case errors.As(err, &ee) && (ee.Status == 4 || ee.Status == 5):
 		audit("failed")
@@ -427,7 +476,7 @@ func (s *Server) answerAskHook(w http.ResponseWriter, ctx context.Context, h *st
 		return
 	}
 	info := askHookInfoOf(f)
-	s.askHook.keep(key, h.ConnVersion, info)
+	s.askHook.keep(key, h.ConnVersion, s.askHook.generation(key), info)
 	info.Declined, _ = s.store.AskHookDeclined(ctx, h.OwnerID, h.ID)
 	writeJSON(w, http.StatusOK, info)
 }

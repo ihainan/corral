@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ihainan/corral/internal/askhook"
 	"github.com/ihainan/corral/internal/sshx"
@@ -60,7 +61,7 @@ func TestAskHookWriteNew(t *testing.T) {
 		t.Fatalf("no file: %+v", info)
 	}
 	next, _, _ := askhook.Enable(nil)
-	if out, code := runAskHookScript(t, home, askHookWrite, next, "none", "write"); code != 0 || strings.TrimSpace(out) != "done" {
+	if out, code := runAskHookScript(t, home, askHookWrite, next, "none", "write", shaOf(next)); code != 0 || strings.TrimSpace(out) != "done" {
 		t.Fatalf("write: %d %q", code, out)
 	}
 	f := filepath.Join(home, ".claude", "settings.json")
@@ -106,7 +107,7 @@ func TestAskHookWriteKeepsModeAndBacksUp(t *testing.T) {
 	os.WriteFile(f, old, 0o644)
 	os.Chmod(f, 0o644)
 	next, _, _ := askhook.Enable(old)
-	if _, code := runAskHookScript(t, home, askHookWrite, next, shaOf(old), "write"); code != 0 {
+	if _, code := runAskHookScript(t, home, askHookWrite, next, shaOf(old), "write", shaOf(next)); code != 0 {
 		t.Fatal(code)
 	}
 	st, _ := os.Stat(f)
@@ -126,10 +127,10 @@ func TestAskHookWriteRefusesAChangedFile(t *testing.T) {
 	now := []byte(`{"model":"sonnet"}`)
 	os.WriteFile(f, now, 0o600)
 	next, _, _ := askhook.Enable([]byte(`{"model":"opus"}`))
-	if _, code := runAskHookScript(t, home, askHookWrite, next, shaOf([]byte(`{"model":"opus"}`)), "write"); code != 3 {
+	if _, code := runAskHookScript(t, home, askHookWrite, next, shaOf([]byte(`{"model":"opus"}`)), "write", shaOf(next)); code != 3 {
 		t.Fatalf("exit %d", code)
 	}
-	if _, code := runAskHookScript(t, home, askHookWrite, next, "none", "write"); code != 3 {
+	if _, code := runAskHookScript(t, home, askHookWrite, next, "none", "write", shaOf(next)); code != 3 {
 		t.Fatalf("appeared: exit %d", code)
 	}
 	if b, _ := os.ReadFile(f); !bytes.Equal(b, now) {
@@ -155,7 +156,7 @@ func TestAskHookBackupLinkNotFollowed(t *testing.T) {
 	os.WriteFile(victim, []byte("keep"), 0o600)
 	os.Symlink(victim, f+".corral-bak")
 	next, _, _ := askhook.Enable(old)
-	if _, code := runAskHookScript(t, home, askHookWrite, next, shaOf(old), "write"); code != 0 {
+	if _, code := runAskHookScript(t, home, askHookWrite, next, shaOf(old), "write", shaOf(next)); code != 0 {
 		t.Fatal(code)
 	}
 	if v, _ := os.ReadFile(victim); string(v) != "keep" {
@@ -185,7 +186,7 @@ func TestAskHookLinksRefused(t *testing.T) {
 			t.Errorf("%s: %+v", kind, info)
 		}
 		next, _, _ := askhook.Enable([]byte(`{}`))
-		if _, code := runAskHookScript(t, home, askHookWrite, next, shaOf([]byte(`{}`)), "write"); code != 4 {
+		if _, code := runAskHookScript(t, home, askHookWrite, next, shaOf([]byte(`{}`)), "write", shaOf(next)); code != 4 {
 			t.Errorf("%s: exit %d", kind, code)
 		}
 		if b, _ := os.ReadFile(real); string(b) != `{}` {
@@ -281,6 +282,24 @@ func TestAskHookEndpoints(t *testing.T) {
 	if _, err := os.Stat(f); !os.IsNotExist(err) {
 		t.Error("left")
 	}
+	// A file of the person's that said nothing ({}): kept as {} once off, not removed (review534-6).
+	os.WriteFile(f, []byte("{}"), 0o600)
+	r = admin.do("GET", u+"?fresh=1", nil)
+	r = admin.do("POST", u, map[string]any{"on": true, "seen": r.json()["seen"]})
+	mustStatus(t, r, 200, "on over {}")
+	mustStatus(t, admin.do("POST", u, map[string]any{"on": false, "seen": r.json()["seen"]}), 200, "off over {}")
+	if b, err := os.ReadFile(f); err != nil || strings.TrimSpace(string(b)) != "{}" {
+		t.Errorf("{}: %q %v", b, err)
+	}
+	// Hooks turned off there, or the person's own doing it: not put in (review534-7).
+	for _, body := range []string{`{"disableAllHooks":true}`, `{"hooks":{"PreToolUse":[{"matcher":"*","hooks":[{"type":"command","command":"x"}]}]}}`} {
+		os.WriteFile(f, []byte(body), 0o600)
+		r = admin.do("GET", u+"?fresh=1", nil)
+		mustStatus(t, admin.do("POST", u, map[string]any{"on": true, "seen": r.json()["seen"]}), 422, body)
+		if b, _ := os.ReadFile(f); string(b) != body {
+			t.Errorf("written: %s", b)
+		}
+	}
 	// A file the gateway does not change: refused with what to add by hand.
 	os.WriteFile(f, []byte(`{"a": // x`), 0o600)
 	r = admin.do("GET", u+"?fresh=1", nil)
@@ -301,7 +320,7 @@ func TestAskHookEndpoints(t *testing.T) {
 			n++
 		}
 	}
-	if err != nil || n != 2 {
+	if err != nil || n != 4 { // (on, off; on and off over {})
 		t.Errorf("audit: %d %v", n, err)
 	}
 }
@@ -320,5 +339,83 @@ func TestAgentStartCmd(t *testing.T) {
 		if c := agentStartCmd("/s", "w1:p1", k+"-1", k, ""); strings.Contains(c, "--settings") || strings.Contains(c, " -- ") {
 			t.Errorf("%s", c)
 		}
+	}
+}
+
+// review534: the new file come short (its sum not the one sent): nothing
+// written; another change under way on the host (its lock): refused, one
+// left over a minute taken as gone; a backup name that is a folder: refused,
+// a link to one: the link replaced, the folder untouched.
+func TestAskHookWriteGuards(t *testing.T) {
+	home := t.TempDir()
+	d := filepath.Join(home, ".claude")
+	os.MkdirAll(d, 0o700)
+	f := filepath.Join(d, "settings.json")
+	old := []byte(`{"a":1}`)
+	os.WriteFile(f, old, 0o600)
+	next, _, _ := askhook.Enable(old)
+	if _, code := runAskHookScript(t, home, askHookWrite, next[:len(next)/2], shaOf(old), "write", shaOf(next)); code != 5 {
+		t.Errorf("short: exit %d", code)
+	}
+	if b, _ := os.ReadFile(f); !bytes.Equal(b, old) {
+		t.Errorf("short: written %s", b)
+	}
+	lk := filepath.Join(d, ".settings.json.corral-lock")
+	os.Mkdir(lk, 0o700)
+	if _, code := runAskHookScript(t, home, askHookWrite, next, shaOf(old), "write", shaOf(next)); code != 6 {
+		t.Errorf("locked: exit %d", code)
+	}
+	past := time.Now().Add(-2 * time.Minute)
+	os.Chtimes(lk, past, past)
+	if _, code := runAskHookScript(t, home, askHookWrite, next, shaOf(old), "write", shaOf(next)); code != 0 {
+		t.Errorf("a stale lock: exit %d", code)
+	}
+	if _, err := os.Stat(lk); !os.IsNotExist(err) {
+		t.Error("the lock left behind")
+	}
+	// The backup's name a folder: refused, nothing written.
+	cur, _ := os.ReadFile(f)
+	b := f + ".corral-bak"
+	os.Remove(b)
+	os.Mkdir(b, 0o700)
+	off, _, _, _ := askhook.Disable(cur)
+	if _, code := runAskHookScript(t, home, askHookWrite, off, shaOf(cur), "write", shaOf(off)); code != 4 {
+		t.Errorf("backup a folder: exit %d", code)
+	}
+	if now, _ := os.ReadFile(f); !bytes.Equal(now, cur) {
+		t.Error("written past a folder")
+	}
+	// A link to a folder: the link replaced by the backup, the folder as it was.
+	os.Remove(b)
+	away := filepath.Join(home, "away")
+	os.Mkdir(away, 0o700)
+	os.Symlink(away, b)
+	if _, code := runAskHookScript(t, home, askHookWrite, off, shaOf(cur), "write", shaOf(off)); code != 0 {
+		t.Errorf("backup a link to a folder: exit %d", code)
+	}
+	if st, err := os.Lstat(b); err != nil || !st.Mode().IsRegular() {
+		t.Errorf("backup: %v %v", st, err)
+	}
+	if left, _ := os.ReadDir(away); len(left) != 0 {
+		t.Errorf("written into the folder: %v", left)
+	}
+}
+
+// review534-4: a reading begun before a change is not kept after it.
+func TestAskHookCacheGenerations(t *testing.T) {
+	var a askHooks
+	key := [2]int64{1, 2}
+	g := a.generation(key)
+	a.forget(key) // (a change, meanwhile)
+	a.keep(key, 7, g, askHookInfo{State: askhook.Off})
+	if _, ok := a.cached(key, 7); ok {
+		t.Error("an old reading kept")
+	}
+	a.keep(key, 7, a.generation(key), askHookInfo{State: askhook.On})
+	if i, ok := a.cached(key, 7); !ok || i.State != askhook.On {
+		t.Error("a new reading not kept")
+	}
+	if _, ok := a.cached(key, 8); ok {
+		t.Error("kept over a connection change")
 	}
 }
