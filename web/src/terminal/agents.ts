@@ -109,33 +109,38 @@ export const HIDDEN_EVERY = 30000
 // The app icon (where installed and allowed) says it too. null: no longer
 // known here (the page left): the title plain, the icon as it was (alerts
 // keep it, see sw.js).
-export function waitingTitle(n: number | null) {
+export function waitingTitle(n: number | null, list?: SessionInfo[] | null) {
   document.title = n ? `(${n}) Corral` : 'Corral'
-  if (n !== null) appBadge(n)
+  if (n !== null) appBadge(n, (list && listReadAt.get(list)) || 0)
 }
 
 // The app icon's number (0: none). Not everywhere: an app not installed, or
 // without leave to alert, has none; the browser refuses quietly. Where a
 // service worker runs the page, it sets it, ordered with the alerts' counts
-// by when the list was read (see readAt): an older count, the page's or an
-// alert's, does not undo a newer. (0 at once, the account gone: see app.)
-export function appBadge(n: number, ordered = true) {
+// by seq, when the list counted was read (see readAt): an older count, the
+// page's or an alert's, does not undo a newer. (No seq: at once, as the
+// account gone, see app.)
+export function appBadge(n: number, seq = 0) {
   const nav = navigator as Navigator & { setAppBadge?: (n: number) => Promise<void>; clearAppBadge?: () => Promise<void> }
   try {
     const sw = nav.serviceWorker?.controller
-    if (ordered && sw && listReadAt) return sw.postMessage({ t: 'badge', n, seq: listReadAt })
+    if (seq && sw) return sw.postMessage({ t: 'badge', n, seq })
     void (n > 0 ? nav.setAppBadge?.(n) : nav.clearAppBadge?.())?.catch(() => {})
   } catch {
     // (none)
   }
 }
 
-// When the session list last read was read, by the gateway's clock alerts
-// are numbered by (its X-Corral-Now, microseconds): 0 not known.
-let listReadAt = 0
-export function readAt(res: Response) {
+// When a session list was read, by the gateway's clock alerts are numbered
+// by (its X-Corral-Now, microseconds): each list its own (two pages read
+// lists of their own, answered in any order).
+const listReadAt = new WeakMap<SessionInfo[], number>()
+export function readAt(res: Response): number {
   const t = Number(res.headers.get('X-Corral-Now'))
-  if (Number.isFinite(t) && t > listReadAt) listReadAt = t
+  return Number.isFinite(t) && t > 0 ? t : 0
+}
+export function markRead(list: SessionInfo[], at: number) {
+  if (at) listReadAt.set(list, at)
 }
 // (The last list read, for this page's life: a tab opened later starts from
 // it rather than from nothing, so its list does not appear a moment later.)
@@ -163,10 +168,12 @@ export function useRunningSessions(on: boolean, every = 3000): { sessions: Sessi
       if (asking) return
       asking = true
       // (One that never comes back, as after a network change, is given up: the next goes.)
-      api<SessionInfo[]>('GET', '/api/sessions', undefined, { timeoutMs: 15000, onResponse: readAt })
+      let at = 0
+      api<SessionInfo[]>('GET', '/api/sessions', undefined, { timeoutMs: 15000, onResponse: (r) => (at = readAt(r)) })
         .then((l) => {
           if (stopped) return
           lastList = l.filter((x) => x.state === 'running')
+          markRead(lastList, at)
           setSessions(lastList)
           setFailed(false)
         })

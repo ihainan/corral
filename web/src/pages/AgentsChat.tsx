@@ -164,7 +164,7 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
   // (Said again at each reading, not only when it changes: an alert come
   // late may have set the icon to an older count meanwhile.)
   useEffect(() => {
-    if (!bar) waitingTitle(waitingN)
+    if (!bar) waitingTitle(waitingN, sessions)
   }, [bar, waitingN, sessions])
   useEffect(() => () => void (!bar && waitingTitle(null)), [bar])
   const [pick, setPick] = useState<Pick | null>(readPick)

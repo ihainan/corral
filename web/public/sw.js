@@ -92,7 +92,7 @@ async function setBadge(n) {
   try {
     const c = await caches.open(ALERTS)
     const owner = await c.match('/owner')
-    if (owner) ownerSeen = await owner.text()
+    if (owner && ownerSeen === null) ownerSeen = await owner.text() // (what the page said last wins: see setAccount)
     if (notOurs(ownerSeen)) return
     const r = await c.match('/badge')
     const stored = r ? Number(await r.text()) || 0 : 0

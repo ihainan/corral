@@ -3,7 +3,7 @@ import { Activity, Bot, Check, MessageCircleReply, Plus, Search } from 'lucide-r
 import { AgentsChat } from './AgentsChat'
 import { api, authGen, choiceOf, probeBootstrap, type Host, type OpenChoice, type SessionInfo } from '../api'
 import { agentKey, sessionWhich } from '../terminal/sessionName'
-import { HIDDEN_EVERY, readAt, waitingTitle } from '../terminal/agents'
+import { HIDDEN_EVERY, markRead, readAt, waitingTitle } from '../terminal/agents'
 import { t } from '../i18n'
 import { local } from '../storage'
 import { navigate } from '../router'
@@ -212,10 +212,13 @@ export function TerminalTabs({ current }: { current: string }) {
     const at = Date.now()
     const inst = instanceRef.current // (the gateway's run as known when the list was asked for: see keepTabs)
     const signedIn = authGen() // (and whose: a list of another sign-in is kept as no one's)
-    api<SessionInfo[]>('GET', '/api/sessions', undefined, { onResponse: readAt })
+    let readAtGw = 0
+    api<SessionInfo[]>('GET', '/api/sessions', undefined, { onResponse: (r) => (readAtGw = readAt(r)) })
       .then((l) => {
         const running = l.filter((x) => x.state === 'running')
-        setSessions(inPlace(running))
+        const next = inPlace(running)
+        markRead(next, readAtGw)
+        setSessions(next)
         setListAt(at)
         void keepTabs(running, inst, signedIn)
       })
@@ -306,7 +309,7 @@ export function TerminalTabs({ current }: { current: string }) {
     return () => clearInterval(timer)
   }, [load])
   const waiting = sessions ? waitingAgents(sessions) : null // (null: not read yet)
-  useEffect(() => waitingTitle(waiting), [waiting, sessions]) // (again at each reading: see AgentsChat)
+  useEffect(() => waitingTitle(waiting, sessions), [waiting, sessions]) // (again at each reading: see AgentsChat)
   useEffect(() => () => waitingTitle(null), [])
   // A session just opened shows its tab with its name. (Not when mounted:
   // the effect above has asked already, and a second ask would be queued.)
