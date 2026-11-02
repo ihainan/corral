@@ -64,10 +64,11 @@ true`
 // a gateway's lock is let go when the connection ends, not when a command
 // still running on the host does — review534-2; it holds its taker's pid,
 // taken over only when over a minute old and that process is gone, and let
-// go of only by its taker — review535-2; taken over by moving it aside, one
-// rename winning, and only if what was moved is the one found gone: another
-// taker's new lock moved by a late one is left aside, the late one giving
-// up — review537-1). Prints "done" once in place.
+// go of only by its taker — review535-2; taken over by one taker at a time,
+// under a lock of its own (lock.reclaim), the old one looked at again there:
+// a late one finds the new lock fresh and gives up — review537-1, review539-2;
+// a reclaim lock left over a minute is cleared, the one finding it giving up).
+// Prints "done" once in place.
 const askHookWrite = `set -u
 d="$HOME/.claude"; f="$d/settings.json"; b="$f.corral-bak"; lk="$d/.settings.json.corral-lock"; was="$1"; op="$2"; new="${3:-}"
 sum() { { sha256sum "$1" 2>/dev/null || shasum -a 256 "$1" 2>/dev/null; } | cut -c1-64; }
@@ -80,18 +81,20 @@ if [ ! -d "$d" ]; then mkdir -m 700 "$d" || exit 5; fi
 tmp=""; tb=""; held=""
 trap 'rm -f "$tmp" "$tb"; [ -n "$held" ] && [ "$(cat "$lk/pid" 2>/dev/null)" = "$$" ] && rm -rf "$lk"' EXIT
 take() { mkdir "$lk" 2>/dev/null && echo $$ > "$lk/pid"; }
-find "$d" -maxdepth 1 -name '.settings.json.corral-lock.stale.*' -mmin +1 -exec rm -rf {} + 2>/dev/null
+old() { [ -n "$(find "$1" -maxdepth 0 -mmin +1 2>/dev/null)" ]; }
 if ! take; then
-  p=$(cat "$lk/pid" 2>/dev/null)
-  if [ -n "$(find "$lk" -maxdepth 0 -mmin +1 2>/dev/null)" ] && { [ -z "$p" ] || ! kill -0 "$p" 2>/dev/null; }; then
-    s="$lk.stale.$$"
-    mv "$lk" "$s" 2>/dev/null || exit 6
-    [ "$(cat "$s/pid" 2>/dev/null)" = "$p" ] || exit 6
-    rm -rf "$s"
-    take || exit 6
-  else
+  rc="$lk.reclaim"
+  if ! mkdir "$rc" 2>/dev/null; then
+    old "$rc" && rmdir "$rc" 2>/dev/null
     exit 6
   fi
+  p=$(cat "$lk/pid" 2>/dev/null)
+  ok=1
+  if old "$lk" && { [ -z "$p" ] || ! kill -0 "$p" 2>/dev/null; }; then
+    rm -rf "$lk" && take && ok=0
+  fi
+  rmdir "$rc" 2>/dev/null
+  [ "$ok" = 0 ] || exit 6
 fi
 held=1
 if [ "$op" = write ]; then

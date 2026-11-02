@@ -386,17 +386,32 @@ func TestAskHookWriteGuards(t *testing.T) {
 	if _, err := os.Stat(lk); !os.IsNotExist(err) {
 		t.Error("the lock left behind")
 	}
-	// A lock moved aside by a late taker (review537-1), over a minute old: cleared by the next.
-	aside := lk + ".stale.12345"
-	os.Mkdir(aside, 0o700)
-	os.Chtimes(aside, past, past)
+	// Another taking a stale lock over meanwhile (its reclaim lock there): this one gives up
+	// (review539-2); that reclaim lock left over a minute: cleared, the one finding it giving up.
 	cur0, _ := os.ReadFile(f)
 	again, _, _, _ := askhook.Disable(cur0)
-	if _, code := runAskHookScript(t, home, askHookWrite, again, shaOf(cur0), "write", shaOf(again)); code != 0 {
-		t.Errorf("after one moved aside: exit %d", code)
+	os.Mkdir(lk, 0o700)
+	os.WriteFile(filepath.Join(lk, "pid"), []byte(fmt.Sprint(gone.Process.Pid)), 0o600)
+	os.Chtimes(lk, past, past)
+	rc := lk + ".reclaim"
+	os.Mkdir(rc, 0o700)
+	if _, code := runAskHookScript(t, home, askHookWrite, again, shaOf(cur0), "write", shaOf(again)); code != 6 {
+		t.Errorf("another taking it over: exit %d", code)
 	}
-	if _, err := os.Stat(aside); !os.IsNotExist(err) {
-		t.Error("the one moved aside left")
+	os.Chtimes(rc, past, past)
+	if _, code := runAskHookScript(t, home, askHookWrite, again, shaOf(cur0), "write", shaOf(again)); code != 6 {
+		t.Errorf("a reclaim lock left: exit %d", code)
+	}
+	if _, err := os.Stat(rc); !os.IsNotExist(err) {
+		t.Error("the reclaim lock left")
+	}
+	if _, code := runAskHookScript(t, home, askHookWrite, again, shaOf(cur0), "write", shaOf(again)); code != 0 {
+		t.Errorf("then: exit %d", code)
+	}
+	for _, p := range []string{lk, rc} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("%s left", p)
+		}
 	}
 	old = again
 	// The backup's name a folder: refused, nothing written.
