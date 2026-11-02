@@ -202,11 +202,13 @@ function openPage(url) {
       // first, then any other. Nothing is loaded again, no terminal's
       // connection ends (tabs: it shows as one of them).
       const app = (c) => path(c).startsWith('/t/') || path(c) === '/agents'
-      return firstAccepting([...list.filter(app), ...list.filter((c) => !app(c))], url.href).then((taker) => {
+      return firstAccepting([...list.filter(app), ...list.filter((c) => !app(c))], url.href).then(({ taker, declined }) => {
         if (taker) return taker.focus()
-        // Else a window that is not on a terminal page is reused; a terminal
-        // page is never navigated away (its connection would end).
-        const free = list.find((c) => 'navigate' in c && !path(c).startsWith('/t/'))
+        // Else a window that is not on a terminal or watched session's page,
+        // and did not say no (a dialog up, terminals in its tabs: all would
+        // be lost), goes there: one whose page did not answer at all (not
+        // started yet, say).
+        const free = list.find((c) => 'navigate' in c && !path(c).startsWith('/t/') && !path(c).startsWith('/w/') && !declined.has(c))
         if (free) return free.focus().then(() => free.navigate(url.href))
         return self.clients.openWindow(url.href)
       })
@@ -217,17 +219,19 @@ function openPage(url) {
 // The first of these windows that takes the address as a tab, or null. Each
 // is asked in turn and given a moment to answer.
 async function firstAccepting(clients, href) {
+  const declined = new Set() // (those that answered no)
   for (const c of clients) {
-    const ok = await new Promise((resolve) => {
+    const said = await new Promise((resolve) => {
       const ch = new MessageChannel()
-      const timer = setTimeout(() => resolve(false), 500)
+      const timer = setTimeout(() => resolve(undefined), 500)
       ch.port1.onmessage = (e) => {
         clearTimeout(timer)
         resolve(e.data === true)
       }
       c.postMessage({ t: 'tab', url: href }, [ch.port2])
     })
-    if (ok) return c
+    if (said === true) return { taker: c, declined }
+    if (said === false) declined.add(c)
   }
-  return null
+  return { taker: null, declined }
 }

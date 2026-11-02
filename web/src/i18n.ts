@@ -1638,6 +1638,7 @@ const zh = {
   'newAgent.worktree': '在新的 git 工作副本里开',
   'newAgent.worktreeHint': '目录要是一个 git 仓库。工作副本由 {agent} 自己建立和管理，需要较新的版本。',
   'agents.noneInHerdr': '打开的 herdr 会话里还没有智能体。在里面启动 Claude Code、Codex 或 OpenCode 后，会出现在这里。',
+  'agents.namedGone': '要打开的那个智能体已经不在了（会话已结束或窗格已关闭），先显示列表里的第一个。',
 }
 
 type Key = keyof typeof zh
@@ -3279,6 +3280,7 @@ const en: Record<Key, string> = {
   'newAgent.worktree': 'Open in a new git worktree',
   'newAgent.worktreeHint': 'The folder must be a git repository. {agent} makes and manages the worktree itself; it needs a recent version.',
   'agents.noneInHerdr': 'No agents in the open herdr sessions yet. Start Claude Code, Codex or OpenCode in one and it shows up here.',
+  'agents.namedGone': 'The agent asked for is no longer there (its session ended or its pane closed): the first in the list is shown.',
 }
 
 const tables: Record<string, Record<Key, string>> = { 'zh-CN': zh, en }

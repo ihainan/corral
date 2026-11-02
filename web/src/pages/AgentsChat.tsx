@@ -174,6 +174,10 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
   // (A phone's two screens: the address says which.)
   const stack = !bar
   const [screen, setScreen] = useState<'list' | 'chat'>(() => (stack && !new URLSearchParams(location.search).get('s') ? 'list' : 'chat'))
+  const screenRef = useRef(screen)
+  screenRef.current = screen
+  // The pick named by an address (see the pick's being made the one shown).
+  const named = useRef(!!new URLSearchParams(location.search).get('s'))
   // Opened straight at a conversation: the list goes under it, once.
   useEffect(() => {
     if (!stack || screen !== 'chat' || fromList()) return
@@ -308,9 +312,16 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
   // Shown without being picked (none was, its session ended, an address
   // named one gone): it is the pick from now on, so the list's order
   // changing does not move the view. One shown is remembered, however picked.
+  // (One an address named — an alert's, a link, back — not there: said so,
+  // not another shown as if it were it.)
   useEffect(() => {
     if (!active || !cur || (stack && screen === 'list') || holding) return // (behind a terminal tab: its address is not ours)
-    if (!(pick && pick.s === cur.s.id && (pick.pane ?? '') === (cur.pane ?? ''))) return choose(cur)
+    if (!(pick && pick.s === cur.s.id && (pick.pane ?? '') === (cur.pane ?? ''))) {
+      if (named.current && pick?.pane) toast(t('agents.namedGone'))
+      named.current = false
+      return choose(cur)
+    }
+    named.current = false
     try {
       local.set(LAST, JSON.stringify({ s: cur.s.id, pane: cur.pane, key: cur.key }))
       pickKey.current = { s: cur.s.id, pane: cur.pane, key: cur.key }
@@ -324,13 +335,23 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
   useEffect(() => {
     const follow = () => {
       if (location.pathname !== '/agents') return
+      named.current = !!new URLSearchParams(location.search).get('s')
       const p = readPick()
       setPick((was) => (was && p && was.s === p.s && (was.pane ?? '') === (p.pane ?? '') ? was : p))
       setGaveUp(false)
       if (stack) setScreen(new URLSearchParams(location.search).get('s') ? 'chat' : 'list')
     }
     const a = onNavigate(follow)
-    const b = onOpenRequest(follow)
+    // A notification tapped on a phone's list: the address it wrote in place
+    // of the list's goes down the ladder instead (back comes to the list).
+    const b = onOpenRequest(() => {
+      if (stack && screenRef.current === 'list' && location.pathname === '/agents' && new URLSearchParams(location.search).get('s')) {
+        const at = location.pathname + location.search
+        history.replaceState(history.state, '', '/agents')
+        return navigate(at, false, FROM_LIST)
+      }
+      follow()
+    })
     return () => {
       a()
       b()

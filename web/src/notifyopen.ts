@@ -13,14 +13,15 @@ const listeners = new Set<() => void>()
 // agents page's, as a tab: the service worker asks before it opens a window
 // for it. A page that says nothing of it (the hosts page, the agents page on
 // a phone, settings) goes there within the app, unless a dialog is up; a
-// terminal's page without a say (a watcher's) keeps its connection.
+// terminal's or a watched session's page without a say keeps its
+// connection, the sign-in page what is typed in it.
 let tabTaker: ((url: URL) => boolean) | null = null
 export function takeTabs(f: ((url: URL) => boolean) | null) {
   tabTaker = f
 }
 export const agentsAddress = (u: URL) => u.pathname === '/agents'
 const takeElsewhere = (u: URL) => {
-  if (location.pathname.startsWith('/t/') || location.pathname === '/login' || document.querySelector('[aria-modal="true"]')) return false
+  if (/^\/(t|w)\//.test(location.pathname) || location.pathname === '/login' || document.querySelector('[aria-modal="true"]')) return false
   if (!agentsAddress(u) && !/^\/t\/[0-9a-f]+$/.test(u.pathname)) return false
   navigate(u.pathname + u.search)
   return true
