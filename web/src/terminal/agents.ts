@@ -115,14 +115,26 @@ export function waitingTitle(n: number | null) {
 }
 
 // The app icon's number (0: none). Not everywhere: an app not installed, or
-// without leave to alert, has none; the browser refuses quietly.
+// without leave to alert, has none; the browser refuses quietly. The
+// service worker is told it too, with when it was read by the gateway's
+// clock (see readAt), so that an alert's older count arriving after does
+// not undo it.
 export function appBadge(n: number) {
   const nav = navigator as Navigator & { setAppBadge?: (n: number) => Promise<void>; clearAppBadge?: () => Promise<void> }
   try {
     void (n > 0 ? nav.setAppBadge?.(n) : nav.clearAppBadge?.())?.catch(() => {})
+    if (gatewayNow) nav.serviceWorker?.controller?.postMessage({ t: 'badge', n, seq: gatewayNow })
   } catch {
     // (none)
   }
+}
+
+// When the session list was last read, by the gateway's clock (its Date, in
+// microseconds as the alerts' numbers are): 0 not known.
+let gatewayNow = 0
+export function readAt(res: Response) {
+  const t = Date.parse(res.headers.get('Date') ?? '')
+  if (!Number.isNaN(t)) gatewayNow = t * 1000
 }
 // (The last list read, for this page's life: a tab opened later starts from
 // it rather than from nothing, so its list does not appear a moment later.)
@@ -150,7 +162,7 @@ export function useRunningSessions(on: boolean, every = 3000): { sessions: Sessi
       if (asking) return
       asking = true
       // (One that never comes back, as after a network change, is given up: the next goes.)
-      api<SessionInfo[]>('GET', '/api/sessions', undefined, { timeoutMs: 15000 })
+      api<SessionInfo[]>('GET', '/api/sessions', undefined, { timeoutMs: 15000, onResponse: readAt })
         .then((l) => {
           if (stopped) return
           lastList = l.filter((x) => x.state === 'running')

@@ -3,7 +3,7 @@ import { Activity, Bot, Check, MessageCircleReply, Plus, Search } from 'lucide-r
 import { AgentsChat } from './AgentsChat'
 import { api, authGen, choiceOf, probeBootstrap, type Host, type OpenChoice, type SessionInfo } from '../api'
 import { agentKey, sessionWhich } from '../terminal/sessionName'
-import { HIDDEN_EVERY, waitingTitle } from '../terminal/agents'
+import { HIDDEN_EVERY, readAt, waitingTitle } from '../terminal/agents'
 import { t } from '../i18n'
 import { local } from '../storage'
 import { navigate } from '../router'
@@ -212,7 +212,7 @@ export function TerminalTabs({ current }: { current: string }) {
     const at = Date.now()
     const inst = instanceRef.current // (the gateway's run as known when the list was asked for: see keepTabs)
     const signedIn = authGen() // (and whose: a list of another sign-in is kept as no one's)
-    api<SessionInfo[]>('GET', '/api/sessions')
+    api<SessionInfo[]>('GET', '/api/sessions', undefined, { onResponse: readAt })
       .then((l) => {
         const running = l.filter((x) => x.state === 'running')
         setSessions(inPlace(running))

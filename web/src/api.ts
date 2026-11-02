@@ -198,6 +198,7 @@ export function unauthorized(sentAt: number) {
 export interface ApiOptions {
   signal?: AbortSignal
   timeoutMs?: number
+  onResponse?: (res: Response) => void // (its headers, as it came)
 }
 
 export async function api<T>(method: string, path: string, body?: unknown, opts: ApiOptions = {}): Promise<T> {
@@ -225,6 +226,7 @@ export async function api<T>(method: string, path: string, body?: unknown, opts:
       // (One answered with a refusal is asked again: it may be of a moment
       // before — a password changed since, say.)
       res = asked ? await asked.res.then((r) => (r.ok ? r : fresh()), fresh) : await fresh()
+      opts.onResponse?.(res)
       // The timeout and cancellation cover reading the body too.
       const text = await res.text()
       try {

@@ -377,15 +377,18 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
     let rev = 0
     let byseq = new Map<number, ConvoEntry>()
     let again = false // (asked for while one was on its way: once it is answered)
-    // The agent last read as looked at (look=1): told it is no longer when
-    // another is in front, the page is hidden or the view goes, so that it
-    // is alerted about again at once.
-    let looked: string | undefined
+    // The agent read as looked at (look): told it is no longer when another
+    // is in front, the page is hidden or the view goes, so that it is
+    // alerted about again at once. Each time it is shown is named (a reading
+    // of a time over, come late, is not taken).
+    let look = ''
+    let looked: { pane: string; look: string } | undefined
     const unlook = () => {
-      const p = looked
+      const l = looked
       looked = undefined
-      if (p)
-        void fetch(`/api/sessions/${sessionId}/conversation/unlook`, { method: 'POST', credentials: 'same-origin', keepalive: true, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pane: p }) }).catch(() => {})
+      look = ''
+      if (l)
+        void fetch(`/api/sessions/${sessionId}/conversation/unlook`, { method: 'POST', credentials: 'same-origin', keepalive: true, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(l) }).catch(() => {})
     }
     const run = async () => {
       timer = undefined
@@ -400,8 +403,9 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
       // (Read only while shown — the agents page in front, its chat on
       // screen, the page not hidden: the agent is looked at, and the gateway
       // does not alert about it meanwhile.)
-      q.set('look', '1')
-      if (pane) looked = pane
+      if (!look) look = crypto.randomUUID()
+      q.set('look', look)
+      if (pane) looked = { pane, look }
       const asksOlder = wantOlder.current !== null && wantOlder.current === gen
       if (asksOlder) q.set('older', '1')
       let next = POLL

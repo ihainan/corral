@@ -1545,10 +1545,10 @@ type convoAnswer struct {
 // gen is not the current one (then reset is set). older=1 reads in the part
 // of the log before what was read (convoOlderStep of it): its entries come
 // as changed ones, before the others (lower seqs).
-// POST /api/sessions/{id}/conversation/unlook {"pane"} → 204: an agents
-// page no longer shows that agent (another picked, the page hidden or
-// left): it is alerted about again at once, not lookTTL after its last
-// reading.
+// POST /api/sessions/{id}/conversation/unlook {"pane", "look"} → 204: an
+// agents page no longer shows that agent, the time it showed it named by
+// look (another picked, the page hidden or left): it is alerted about again
+// at once, not lookTTL after its last reading.
 func (s *Server) apiConversationUnlook(w http.ResponseWriter, r *http.Request) {
 	sess, ok := s.runningSession(w, r)
 	if !ok {
@@ -1556,14 +1556,18 @@ func (s *Server) apiConversationUnlook(w http.ResponseWriter, r *http.Request) {
 	}
 	var b struct {
 		Pane string `json:"pane"`
+		Look string `json:"look"`
 	}
-	if err := readJSON(r, &b); err != nil || !herdrPane.MatchString(b.Pane) {
-		writeError(w, http.StatusBadRequest, "bad_request", "bad pane")
+	if err := readJSON(r, &b); err != nil || !herdrPane.MatchString(b.Pane) || !lookID.MatchString(b.Look) {
+		writeError(w, http.StatusBadRequest, "bad_request", "bad pane or look")
 		return
 	}
-	s.looks.drop(sess.ID, b.Pane)
+	s.looks.end(sess.ID, b.Pane, b.Look)
 	w.WriteHeader(http.StatusNoContent)
 }
+
+// lookID: what a page names a time it shows an agent by.
+var lookID = regexp.MustCompile(`^[A-Za-z0-9-]{8,64}$`)
 
 func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 	sess, ok := s.runningSession(w, r)
@@ -1581,8 +1585,8 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 	older := q.Get("older") == "1"
 	// (Read by an agents page in front, showing this agent: it is looked
 	// at, not alerted about meanwhile. Only the owner reads it here.)
-	if q.Get("look") == "1" && sess.Persistence == "herdr" && pane != "" {
-		s.looks.note(sess.ID, pane)
+	if look := q.Get("look"); lookID.MatchString(look) && sess.Persistence == "herdr" && pane != "" {
+		s.looks.note(sess.ID, pane, look)
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	if sess.Persistence != "herdr" && sess.Persistence != "tmux" {

@@ -61,45 +61,72 @@ func (v *visibility) watched(sessionID string) bool {
 
 // paneLooks: the agents shown on an agents page now (its owner's), by
 // session and pane, as the page's readings of their conversation say: each
-// reading of a page in front marks it looked at for lookTTL.
+// reading marks it looked at for lookTTL. A page names each time it shows
+// an agent (look id): its end said (unlook) ends that one only, and a
+// reading of it that comes after its end (sent before) is not taken.
 type paneLooks struct {
-	mu sync.Mutex
-	at map[string]time.Time // session + "\x00" + pane → the last reading
+	mu    sync.Mutex
+	at    map[string]paneLook  // session + "\x00" + pane → the last reading
+	ended map[string]time.Time // look id → when its end was said
+}
+
+type paneLook struct {
+	t  time.Time
+	id string
 }
 
 // lookTTL: how long after a reading an agent counts as looked at (the page
 // reads every second or two, every five after a failure). A page that stops
-// showing it says so (unlook): the time is for one that could not.
+// showing it says so: the time is for one that could not.
 const lookTTL = 8 * time.Second
 
-func (l *paneLooks) note(session, pane string) {
+func (l *paneLooks) note(session, pane, id string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if _, over := l.ended[id]; over {
+		return
+	}
 	if l.at == nil {
-		l.at = map[string]time.Time{}
+		l.at = map[string]paneLook{}
 	}
 	now := time.Now()
 	if len(l.at) > 256 {
-		for k, t := range l.at {
-			if now.Sub(t) > lookTTL {
+		for k, x := range l.at {
+			if now.Sub(x.t) > lookTTL {
 				delete(l.at, k)
 			}
 		}
 	}
-	l.at[session+"\x00"+pane] = now
+	l.at[session+"\x00"+pane] = paneLook{now, id}
 }
 
-func (l *paneLooks) drop(session, pane string) {
+// end ends the look id of pane (not a later one of it).
+func (l *paneLooks) end(session, pane, id string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	delete(l.at, session+"\x00"+pane)
+	if l.ended == nil {
+		l.ended = map[string]time.Time{}
+	}
+	now := time.Now()
+	if len(l.ended) > 256 {
+		for k, t := range l.ended {
+			if now.Sub(t) > time.Minute { // (a reading sent before is answered long since)
+				delete(l.ended, k)
+			}
+		}
+	}
+	l.ended[id] = now
+	k := session + "\x00" + pane
+	if l.at[k].id == id {
+		delete(l.at, k)
+	}
 }
 
 func (l *paneLooks) recent(session, pane string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	t, ok := l.at[session+"\x00"+pane]
-	return ok && time.Since(t) < lookTTL
+	x, ok := l.at[session+"\x00"+pane]
+	return ok && time.Since(x.t) < lookTTL
 }
 
 // paneWatched says whether someone looks at a herdr pane's agent now, so
@@ -118,14 +145,18 @@ func (s *Server) paneWatched(session, pane string) bool {
 
 // agentsWaiting: how many of a person's agents wait for them now, as the
 // gateway sees them (the app icon's number, see Notifier.SetBadges): the
-// panes in "needs you" of the herdr servers their sessions watch, each
-// server once however many sessions watch it. Only leaf locks: it is
-// counted while alerts are sent under others.
+// panes in "needs you" in the last snapshot of each herdr server their
+// sessions watch, each server once however many sessions watch it. (A
+// change is told with its snapshot already the last: the count is of all
+// of that reading.) Only leaf locks: it is counted while alerts are sent
+// under others.
 func (s *Server) agentsWaiting(user int64) int {
 	n := 0
-	for _, key := range s.herdrSocks.serversOf(user) {
-		if t := s.herdrTimes.get(key); t != nil {
-			n += t.count(herdr.StatusBlocked)
+	for _, snap := range s.herdrSocks.snapshotsOf(user) {
+		for _, p := range snap.Panes {
+			if p.AgentStatus == herdr.StatusBlocked {
+				n++
+			}
 		}
 	}
 	return n

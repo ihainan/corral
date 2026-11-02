@@ -220,26 +220,6 @@ func (h *herdrServers) of(host *store.Host, socket string) *agentTimes {
 	return t
 }
 
-// get: a server's agentTimes, if any (none made).
-func (h *herdrServers) get(key string) *agentTimes {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return h.m[key]
-}
-
-// count: how many of the server's panes are in status, as last noted.
-func (a *agentTimes) count(status string) int {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	n := 0
-	for _, r := range a.at {
-		if r.status == status {
-			n++
-		}
-	}
-	return n
-}
-
 // herdrServerKey names a herdr server by where it is, not only which host
 // record: a record edited to another machine is another server.
 func herdrServerKey(host *store.Host, socket string) string {
@@ -339,11 +319,12 @@ type herdrSockets struct {
 }
 
 type watchedServer struct {
-	key   string
-	owner int64
+	key    string
+	owner  int64
+	latest func() *herdr.Snapshot // (its watcher's last snapshot)
 }
 
-func (h *herdrSockets) setServer(id, key string, owner int64) {
+func (h *herdrSockets) setServer(id, key string, owner int64, latest func() *herdr.Snapshot) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if _, ok := h.path[id]; !ok {
@@ -352,19 +333,29 @@ func (h *herdrSockets) setServer(id, key string, owner int64) {
 	if h.server == nil {
 		h.server = map[string]watchedServer{}
 	}
-	h.server[id] = watchedServer{key, owner}
+	h.server[id] = watchedServer{key, owner, latest}
 }
 
-// serversOf: the herdr servers a person's sessions watch now, each once.
-func (h *herdrSockets) serversOf(owner int64) []string {
+// snapshotsOf: the last snapshot of each herdr server a person's sessions
+// watch now, each server once (the first of its watchers to have one).
+func (h *herdrSockets) snapshotsOf(owner int64) []*herdr.Snapshot {
 	h.mu.Lock()
-	defer h.mu.Unlock()
-	seen := map[string]bool{}
-	var out []string
+	var ws []watchedServer
 	for _, w := range h.server {
-		if w.owner == owner && !seen[w.key] {
+		if w.owner == owner {
+			ws = append(ws, w)
+		}
+	}
+	h.mu.Unlock()
+	seen := map[string]bool{}
+	var out []*herdr.Snapshot
+	for _, w := range ws {
+		if seen[w.key] {
+			continue
+		}
+		if snap := w.latest(); snap != nil {
 			seen[w.key] = true
-			out = append(out, w.key)
+			out = append(out, snap)
 		}
 	}
 	return out
@@ -578,7 +569,6 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 	// summary: the gateway's own database), and kept as more is (before
 	// the look is said noted, so that a watcher begun next reads it).
 	server := herdrServerKey(h, socket)
-	s.herdrSocks.setServer(sess.ID, server, sess.OwnerID)
 	kctx, kcancel := context.WithTimeout(ctx, 3*time.Second)
 	prior, err := s.store.AgentsSeen(kctx, sess.OwnerID, sess.HostID, server, time.Now().Add(-seenKeptFor).UnixMilli())
 	kcancel()
@@ -744,6 +734,7 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 		},
 	)
 	latest = w.Latest
+	s.herdrSocks.setServer(sess.ID, server, sess.OwnerID, w.Latest)
 	// An agent looked at: the last summary goes again, with it no longer
 	// "done"; or what one left running told.
 	again := func() {
@@ -792,7 +783,8 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 		publish(sum)
 	}
 	w.Run(ctx)
-	s.endSessionAlerts(sess) // (its agents wait no more)
+	s.herdrSocks.set(sess.ID, "") // (before the alerts' end: their count is without it)
+	s.endSessionAlerts(sess)      // (its agents wait no more)
 }
 
 func (s *Server) onAgentTransition(sess *term.Session, h *store.Host, tr herdr.Transition) {
