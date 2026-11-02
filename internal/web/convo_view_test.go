@@ -48,6 +48,7 @@ var ownerMade = []struct {
 	{"a picker under an old box", "──────────\n❯ \n──────────\n Select model\n ❯ 1. Default\n   2. Opus\n Enter to select · Esc to cancel\n", "none", "none"},
 	{"ideographic spaces are no blank lines", "──────────\n❯ \n──────────\n" + strings.Repeat("\u3000\n", 13), "none", "none"},
 	{"a CR inside a line", "──────────\n❯ Message \r@general-purpose…\n──────────\n", "main", "main"},
+	{"an agent's description is not the footer's words", "──────────\n❯ \n──────────\n  ● main\n  ◯ Explore  inspect Enter to confirm handler\n  ◯ Plan  Esc to cancel, enter to return, ↑/↓ to select\n", "main", "main"},
 	{"wrapped: a picker's keys", "──────────\n❯ \n──────────\n  Esc to\n  cancel\n", "none", "none"},
 	{"a numbered choice under the box", "──────────\n❯ \n──────────\n  1. Yes\n  2. No\n", "none", "none"},
 	{"too much under the box", "──────────\n❯ \n──────────\n" + strings.Repeat("  status\n", 13), "none", "none"},

@@ -81,7 +81,15 @@ func claudeOwner(screen string, after bool) string {
 				return "subagent"
 			}
 		}
-		said := ownerSqueeze(strings.Join(foot, ""))
+		// (The footer's own words: the agents' rows aside — a subagent's
+		// description may say anything — review552.)
+		var own []string
+		for _, l := range foot {
+			if !ownerAgentRow.MatchString(l) {
+				own = append(own, l)
+			}
+		}
+		said := ownerSqueeze(strings.Join(own, ""))
 		for _, l := range foot {
 			if ownerListCursor.MatchString(l) {
 				return "list"
@@ -168,7 +176,7 @@ END {
     f = ""
     for (j = e + 1; j <= n; j++) {
       if (L[j] ~ /^[ \t]*❯[ \t]+(◯|●) /) { print "list"; exit }
-      f = f squeeze(L[j])
+      if (!agentrow(L[j])) f = f squeeze(L[j])
     }
     if (index(f, "↑/↓toselect")) { print "list"; exit }
     if (index(f, "entertoreturn")) { print "sessions"; exit }
