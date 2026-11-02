@@ -97,7 +97,12 @@ func TestConvoGateOnTheHost(t *testing.T) {
 	dir := t.TempDir()
 	typed := filepath.Join(dir, "typed")
 	title := filepath.Join(dir, "title.json")
-	os.WriteFile(filepath.Join(dir, "herdr"), []byte("#!/bin/sh\nif [ \"$1 $2\" = 'pane read' ]; then printf 'Do you want to proceed?\\n 1. Yes\\n'; exit 0; fi\nif [ \"$1 $2\" = 'pane get' ]; then cat "+title+"; exit 0; fi\nprintf '%s\\n' \"$*\" >>"+typed+"\n"), 0o755)
+	// (Its screen: screen.txt; a text pasted makes it next.txt, where there is one.)
+	screenFile, nextFile := filepath.Join(dir, "screen.txt"), filepath.Join(dir, "next.txt")
+	asked := "Do you want to proceed?\n 1. Yes\n"
+	os.WriteFile(filepath.Join(dir, "herdr"), []byte("#!/bin/sh\nif [ \"$1 $2\" = 'pane read' ]; then cat "+screenFile+"; exit 0; fi\nif [ \"$1 $2\" = 'pane get' ]; then cat "+title+"; exit 0; fi\nif [ \"$1 $2\" = 'pane send-text' ] && [ -f "+nextFile+" ]; then mv "+nextFile+" "+screenFile+"; fi\nprintf '%s\\n' \"$*\" >>"+typed+"\n"), 0o755)
+	showing := func(s string) { os.WriteFile(screenFile, []byte(s), 0o644); os.Remove(nextFile) }
+	showing(asked)
 	// (The agent: sleep, a session's leader with the pseudo-terminal its own, in front of it.)
 	helper := exec.Command("python3", "-c", `import pty, os, sys, time
 pid, fd = pty.fork()
@@ -170,6 +175,13 @@ time.sleep(30)`)
 	if got := run("reply:"+shown, []string{"1"}); got != 9 || wrote() != "" {
 		t.Fatalf("no longer waiting: exit %d, typed %q", got, wrote())
 	}
+	// (Claude Code's own: keys and text only where its input box is the conversation's.)
+	showing(asked)
+	if got := run("free", []string{"ctrl+x"}); got != 15 || wrote() != "" {
+		t.Fatalf("no input box on the screen: exit %d, typed %q", got, wrote())
+	}
+	ownerGateCases(t, dir, pid, start, run, wrote, showing, nextFile)
+	showing(ownerMain)
 	if got := run("free", []string{"ctrl+x", "ctrl+s"}); got != 0 || wrote() != "pane send-keys p1 ctrl+x\npane send-keys p1 ctrl+s" {
 		t.Fatalf("not waiting, keys go: exit %d, typed %q", got, wrote())
 	}
@@ -187,6 +199,7 @@ time.sleep(30)`)
 	// a session file of Claude Code's (here saying the other thing each time).
 	// (The stand-in is not named codex: its identity is checked as Claude Code's.)
 	state("idle", "")
+	showing(asked) // (Codex's gates read no box: answered on the screen of a question)
 	titled := func(ti string) {
 		os.WriteFile(title, []byte(fmt.Sprintf(`{"result":{"pane":{"pane_id":"p1","terminal_title":%q}}}`, ti)), 0o644)
 	}
@@ -228,6 +241,7 @@ time.sleep(30)`)
 	// (Claude Code's file saying a status of its own that is no word of the
 	// gate's, "unknown": a message goes, as before.)
 	state("unknown", "")
+	showing(ownerMain)
 	if got := run("free", []string{"ctrl+x"}); got != 0 || wrote() != "pane send-keys p1 ctrl+x" {
 		t.Fatalf("Claude Code, status unknown: exit %d, typed %q", got, wrote())
 	}
@@ -438,5 +452,68 @@ func TestScreenJoinedEndedLeavesNothing(t *testing.T) {
 	}
 	if es, _ := os.ReadDir(tmp); len(es) != 0 {
 		t.Fatalf("left behind: %d files", len(es))
+	}
+}
+
+const ownerMain = "some answer\n──────────\n❯ \n──────────\n  ⏵⏵ auto mode on\n"
+
+// Who has Claude Code's input box, on the host (convo_view.go): keys and a
+// text go only to the conversation's own; where the box goes to another
+// between the paste and Enter, Enter is held back.
+func ownerGateCases(t *testing.T, dir string, pid int, start int64, run func(string, []string) int, wrote func() string, showing func(string), nextFile string) {
+	t.Helper()
+	sub := "──────────\n❯ Message @general-purpose…\n──────────\n  ◯ main\n  ● general-purpose  x\n"
+	list := "──────────\n❯ \n──────────\n  ↑/↓ to select\n\n❯ ● main\n  ◯ Explore  x\n"
+	sessions := "──────────\n❯ describe a task for a new session\n──────────\n  enter to return · space to reply\n"
+	for _, c := range []struct {
+		name, screen string
+		gate         string
+		want         int
+	}{
+		{"a subagent's", sub, "free", 13}, {"the list of agents", list, "free", 14}, {"the sessions' view", sessions, "free", 14},
+		{"a subagent's, a command", sub, "idle", 13},
+	} {
+		showing(c.screen)
+		if got := run(c.gate, []string{"enter"}); got != c.want || wrote() != "" {
+			t.Fatalf("%s: exit %d, typed %q", c.name, got, wrote())
+		}
+	}
+	// (Keys go after a text of ours: what the box holds is not read.)
+	showing("──────────\n❯ Message @team, the report\n──────────\n  ⏵⏵ auto mode on\n")
+	if got := run("free", []string{"enter"}); got != 0 || wrote() != "pane send-keys p1 enter" {
+		t.Fatalf("Enter again after a text of ours: exit %d, typed %q", got, wrote())
+	}
+	text := func(gate, msg string) int {
+		os.Remove(filepath.Join(dir, "typed"))
+		cmd := convoGatedCommand(gate, "herdr", "", "p1", "/run/x.sock", int64(pid), start, sidA, len(msg), nil, 0)
+		c := exec.Command("sh", "-c", cmd)
+		c.Stdin = strings.NewReader(msg)
+		c.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"), "XDG_RUNTIME_DIR="+dir, "HOME="+dir)
+		err := c.Run()
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			return ee.ExitCode()
+		}
+		return 0
+	}
+	showing(ownerMain)
+	if got := text("free", "hello"); got != 0 || !strings.HasSuffix(wrote(), "pane send-keys p1 enter") {
+		t.Fatalf("a text to the conversation: exit %d, typed %q", got, wrote())
+	}
+	showing(sub)
+	if got := text("free", "hello"); got != 13 || wrote() != "" {
+		t.Fatalf("a text to a subagent's: exit %d, typed %q", got, wrote())
+	}
+	// (Gone to a subagent's once pasted: typed, Enter held back.)
+	showing(ownerMain)
+	os.WriteFile(nextFile, []byte("──────────\n❯ hello\n──────────\n  ◯ main\n  ● general-purpose  x\n"), 0o644)
+	if got := text("free", "hello"); got != 16 || strings.Contains(wrote(), "send-keys") || !strings.Contains(wrote(), "send-text") {
+		t.Fatalf("the box went to a subagent before Enter: exit %d, typed %q", got, wrote())
+	}
+	// (A message of ours beginning as the placeholder does: once pasted, not read.)
+	showing(ownerMain)
+	os.WriteFile(nextFile, []byte("──────────\n❯ Message @team, the report\n──────────\n  ⏵⏵ auto mode on\n"), 0o644)
+	if got := text("free", "Message @team, the report"); got != 0 {
+		t.Fatalf("a message beginning Message @: exit %d, typed %q", got, wrote())
 	}
 }

@@ -1,0 +1,12 @@
+
+· Orchestrating… (21m 3s · ↓ 44.1k tokens)
+                                                                                [-]
+✦ Heads up · The main agent has already built in Ctrl+K for searching agents,
+  and on Windows and Linux that takes over the browser's own Ctrl+K.
+  1: Learn more   2: Knew this already   0: Dismiss
+                                            ✔ Update installed · /restart to apply
+────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────
+  Opus 5.5·H │ Ctx 811.1K (405.6% / u 507.0%) │ $1771.09 (241h35m) │ +34371 -1138…
+  ⏵⏵ auto mode on · 1 shell

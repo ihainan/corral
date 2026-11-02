@@ -2,6 +2,7 @@ import { useState, type FormEvent } from 'react'
 import { ApiError, errorText } from '../api'
 import { t } from '../i18n'
 import { Dialog } from '../components/ui'
+import { viewRefusal } from './sendView'
 
 // Claude Code's own commands on its session, from the conversation's menu:
 // compact it (with what to keep, if said), rename it, start anew (/clear).
@@ -30,14 +31,14 @@ export function SessionOpDialog({ op, name, codex, onSend, onClose, onShowTermin
     } catch (err) {
       // (Refused before anything was typed: tried again at will; else what
       // became of it is for the terminal to tell.)
-      const refused = err instanceof ApiError && err.code !== 'typed_not_sent' && ([400, 403, 404, 409, 429].includes(err.status) || (err.status === 502 && (err.code === 'host_error' || err.code === 'send_failed' || err.code === 'no_screen')))
+      const refused = err instanceof ApiError && err.code !== 'typed_not_sent' && err.code !== 'typed_other_view' && ([400, 403, 404, 409, 429].includes(err.status) || (err.status === 502 && (err.code === 'host_error' || err.code === 'send_failed' || err.code === 'no_screen')))
       if (!refused) {
         setLeft(true)
-        setError(t(err instanceof ApiError && err.code === 'typed_not_sent' ? 'ops.typedNotSent' : 'ops.unsure'))
+        setError(err instanceof ApiError && err.code === 'typed_other_view' ? t('convo.err.typedOtherView') : t(err instanceof ApiError && err.code === 'typed_not_sent' ? 'ops.typedNotSent' : 'ops.unsure'))
         setBusy(false)
         return
       }
-      setError(err instanceof ApiError && err.code === 'agent_busy' ? t('ops.notIdle') : err instanceof ApiError && err.code === 'agent_waiting' ? t('ops.waits') : errorText(err))
+      setError((err instanceof ApiError && viewRefusal(err.code)) || (err instanceof ApiError && err.code === 'agent_busy' ? t('ops.notIdle') : err instanceof ApiError && err.code === 'agent_waiting' ? t('ops.waits') : errorText(err)))
       setBusy(false)
     }
   }

@@ -891,7 +891,7 @@ const zh = {
   'convo.missing.looking': '正在看终端上现在是什么样…',
   'convo.missing.failed': '读不到终端画面，说不清它到哪一步了',
   'convo.missing.waiting': '这段文字还停在终端的输入框里——敲进去了，但智能体没有收下。可以在终端里按回车，或者关掉这条重发。',
-  'convo.missing.taken': '终端上已经看不到这段文字了——它已经被收下，只是还没写进记录。稍等一下应该就会出现。',
+  'convo.missing.taken': '终端输入框里已经没有这段文字，但这个对话的记录里还没有它，是否送达还不确定。可以先等一会儿；一直没有出现的话，到终端里看一眼。',
   'convo.missing.unsure': '终端画面上看不出它到哪一步了——下面是当时的画面，你自己看一眼。',
   'convo.missing.show': '显示终端画面',
   'convo.missing.hide': '收起终端画面',
@@ -1639,6 +1639,13 @@ const zh = {
   'newAgent.worktreeHint': '目录要是一个 git 仓库。工作副本由 {agent} 自己建立和管理，需要较新的版本。',
   'agents.noneInHerdr': '打开的 herdr 会话里还没有智能体。在里面启动 Claude Code、Codex 或 OpenCode 后，会出现在这里。',
   'agents.namedGone': '要打开的那个智能体已经不在了（会话已结束或窗格已关闭），先显示列表里的第一个。',
+  // send-view
+  'convo.err.subagentView': '终端里现在显示的是子代理的对话，消息会进子代理而不是这个对话，所以没有发送。请在终端里切回主对话（底部那一栏选中 main）再发。',
+  'convo.err.otherView': '终端的按键现在落在智能体列表或会话列表上，不在这个对话的输入框里，所以没有发送。请在终端里回到对话再发。',
+  'convo.err.noInput': '没在终端里看到这个对话的输入框，所以没有发送。请到终端里看一眼。',
+  'convo.err.typedOtherView': '消息已经打进输入框，但按回车前终端切到了别的界面，没有发出。请到终端里看一眼，自己决定发出还是删掉。',
+  'convo.missing.subagent': '终端现在显示的是子代理的对话。这条消息有没有进这个对话还不确定，很可能进了子代理。请在终端里切回主对话（底部那一栏选中 main），确认没有送到再重新发送。',
+  'convo.missing.otherView': '终端的按键现在落在智能体列表或会话列表上。这条消息有没有进这个对话还不确定，请到终端里看一眼。',
 }
 
 type Key = keyof typeof zh
@@ -2533,7 +2540,7 @@ const en: Record<Key, string> = {
   'convo.missing.looking': 'Looking at the terminal as it is now…',
   'convo.missing.failed': "The terminal's screen could not be read, so where it got to cannot be said",
   'convo.missing.waiting': 'The words are still sitting in the terminal\'s input: they were typed and the agent has not taken them in. Press Enter in the terminal, or close this and send again.',
-  'convo.missing.taken': 'The terminal no longer shows the words: they were taken in, and only the record is behind. They should turn up shortly.',
+  'convo.missing.taken': 'The terminal\'s input no longer holds the words, but this conversation\'s record does not have them yet: whether they arrived is not known. Give it a moment; if they never turn up, look at the terminal.',
   'convo.missing.unsure': "The screen does not say where it got to — here is what it showed, to look at.",
   'convo.missing.show': 'Show the terminal',
   'convo.missing.hide': 'Hide the terminal',
@@ -3281,6 +3288,13 @@ const en: Record<Key, string> = {
   'newAgent.worktreeHint': 'The folder must be a git repository. {agent} makes and manages the worktree itself; it needs a recent version.',
   'agents.noneInHerdr': 'No agents in the open herdr sessions yet. Start Claude Code, Codex or OpenCode in one and it shows up here.',
   'agents.namedGone': 'The agent asked for is no longer there (its session ended or its pane closed): the first in the list is shown.',
+  // send-view
+  'convo.err.subagentView': 'The terminal is showing a subagent\'s conversation: the message would go to the subagent, not this conversation, so it was not sent. Switch back to main in the terminal (select main in the list at the bottom), then send.',
+  'convo.err.otherView': 'The terminal\'s keys go to the list of agents or of sessions, not this conversation\'s input, so it was not sent. Go back to the conversation in the terminal, then send.',
+  'convo.err.noInput': 'This conversation\'s input box is not on the terminal\'s screen, so nothing was sent. Have a look at the terminal.',
+  'convo.err.typedOtherView': 'The message is in the input, but the terminal went to another view before Enter, so it was not sent. Look at the terminal and send or delete it there.',
+  'convo.missing.subagent': 'The terminal is showing a subagent\'s conversation now. Whether this message reached this conversation is not known; it may well have gone to the subagent. Switch back to main in the terminal (select main in the list at the bottom) and, if it did not arrive, send it again.',
+  'convo.missing.otherView': 'The terminal\'s keys go to the list of agents or of sessions now. Whether this message reached this conversation is not known: have a look at the terminal.',
 }
 
 const tables: Record<string, Record<Key, string>> = { 'zh-CN': zh, en }

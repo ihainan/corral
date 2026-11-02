@@ -290,6 +290,13 @@ func (s *Server) convoEffort(w http.ResponseWriter, ctx context.Context, sess *t
 	case errors.As(err, &exitErr) && (exitErr.Status == 9 || exitErr.Status == 5):
 		*outcome, *reason = said(typed || exitErr.Status == 5), "agent_waiting"
 		writeError(w, http.StatusConflict, "agent_waiting", "it waits for an answer, or has a dialog open: answer it first")
+	case errors.As(err, &exitErr) && exitErr.Status >= exitOwnerSubagent && exitErr.Status <= exitOwnerTyped:
+		// (Claude Code's input box not the conversation's: /effort not sent.)
+		code, typedNow, _ := writeOwnerRefusal(w, err)
+		*outcome, *reason = said(typed || typedNow), code
+	case errors.As(err, &exitErr) && exitErr.Status == 11:
+		*outcome, *reason = said(typed), "cannot_verify"
+		writeError(w, http.StatusConflict, "cannot_verify", "its screen cannot be checked on the host: set it in the terminal")
 	case ctx.Err() != nil:
 		*outcome, *reason = said(typed), "timeout"
 		writeError(w, http.StatusGatewayTimeout, "timeout", "the agent did not answer in time")

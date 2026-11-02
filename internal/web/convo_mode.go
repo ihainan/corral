@@ -112,6 +112,9 @@ func (s *Server) convoModeTo(w http.ResponseWriter, ctx context.Context, sess *t
 			*reason = "send_failed"
 			writeError(w, http.StatusConflict, "refused", "the pane did not take the key")
 			return
+		case errors.As(err, &exitErr) && exitErr.Status >= exitOwnerSubagent && exitErr.Status <= exitOwnerTyped:
+			*reason, _, _ = writeOwnerRefusal(w, err) // (Claude Code's input box not the conversation's: nothing pressed)
+			return
 		default:
 			*outcome = "unknown"
 			writeError(w, http.StatusBadGateway, "unknown", "it is not known whether the key arrived")

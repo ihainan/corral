@@ -22,6 +22,7 @@ import { ackBg, waitingTitle, isCodex, isOpenCode, listAgents, matchQuery, paneT
 import { dayBefore, dayStart, foldAt, foldedDay, listOrder, type RowCmds } from '../terminal/agentOrder'
 import { prefetchConversation } from '../terminal/conversation'
 import { afterSend, holdsWords, holdTermMode, PENDING_MS, sameRun, sameTurn, tmuxKey } from '../terminal/chatSend'
+import { viewRefusal } from '../terminal/sendView'
 import { agentKey, sessionWhich } from '../terminal/sessionName'
 import { AgentIcon, agentMark } from '../terminal/agentIcons'
 import { useComposerFit } from '../terminal/autosize'
@@ -66,7 +67,7 @@ const SUGGEST_AT = [1500, 4000, 9000]
 type SuggestAsk = { left: number; text: string; seq: number; busy: boolean; views: Set<{ told: () => void; next: () => void }> }
 const suggestAsks = new Map<string, SuggestAsk>()
 // Refusals of a switch made before any key was pressed (see convoPress, convoModeTo).
-const NOTHING_PRESSED = ['bad_request', 'unauthorized', 'unsupported', 'busy', 'host_error', 'agent_changed', 'not_in_front', 'refused', 'no_screen', 'not_found', 'forbidden']
+const NOTHING_PRESSED = ['bad_request', 'unauthorized', 'unsupported', 'busy', 'host_error', 'agent_changed', 'not_in_front', 'refused', 'no_screen', 'not_found', 'forbidden', 'subagent_view', 'other_view', 'no_input']
 const MODE_MS = 50000 // (to a mode picked: several presses, each read back; the gateway gives up at 45 s)
 const MODEL_MS = 50000 // (the picker, step by step: see convo_model.go)
 const PASTE_CHARS = 2000
@@ -839,6 +840,9 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   }, [said])
   const refusal = (e: unknown) => {
     if (!(e instanceof ApiError)) return errorText(e)
+    // (Claude Code's input box not this conversation's: said what to do in the terminal.)
+    const v = viewRefusal(e.code)
+    if (v) return v
     if (e.code === 'agent_changed') {
       convo.refresh() // (read at once: the gateway looks again for what the pane runs)
       return t('convo.stopChanged')
@@ -1121,8 +1125,8 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       if (lookedAt.size > 200) for (const q of [...lookedAt].slice(0, 100)) lookedAt.delete(q)
       const bind = bindKey // (the answer is of that conversation, not of whichever is open when it comes)
       const at = (look: ConvoPending['look']) => setSent((ps) => ps.map((q) => (q.id === p.id && q.bind === bind ? { ...q, look } : q)))
-      api<{ screen: string; waiting: boolean; known: boolean }>('POST', `/api/sessions/${sid}/conversation/sent-missing`, { ...pressBody(), text: p.text }, { timeoutMs: PRESS_MS })
-        .then((r) => at({ waiting: r.waiting, known: r.known, screen: r.screen }))
+      api<{ screen: string; waiting: boolean; known: boolean; view?: string }>('POST', `/api/sessions/${sid}/conversation/sent-missing`, { ...pressBody(), text: p.text }, { timeoutMs: PRESS_MS })
+        .then((r) => at({ waiting: r.waiting, known: r.known, screen: r.screen, view: r.view }))
         .catch(() => at('failed'))
     }
   }, [sent, convo.bind, sid, bindKey])
@@ -1469,11 +1473,12 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
         // Whether it went is not known (the gateway lost the host on the way,
         // or the answer was lost on its way here): it is looked for as one
         // sent, the draft staying until it is seen.
-        if (e instanceof ApiError && e.code === 'typed_not_sent') {
-          // (In its input, not sent: it came to ask first. Not typed again from
-          // here — sent again, it would be there twice: Enter, in the terminal,
-          // once it is answered. Looked for as one sent meanwhile.)
-          toast(t('agents.typedNotSent'), true)
+        if (e instanceof ApiError && (e.code === 'typed_not_sent' || e.code === 'typed_other_view')) {
+          // (In its input, not sent: it came to ask first, or the terminal went
+          // to another view before Enter. Not typed again from here — sent
+          // again, it would be there twice: Enter, in the terminal. Looked for
+          // as one sent meanwhile.)
+          toast(e.code === 'typed_not_sent' ? t('agents.typedNotSent') : t('convo.err.typedOtherView'), true)
           mark({ state: 'waiting', was })
           return
         }

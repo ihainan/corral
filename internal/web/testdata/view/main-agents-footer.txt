@@ -1,0 +1,40 @@
+
+ ▐▛███▛█   Claude Code v2.1.314
+▝▜██████▀  Opus 5.5 · API Usage Billing
+ ▝▝   ▝▝   ~/proj
+
+
+❯ go count
+
+● Agent(Count the files)
+  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)
+
+● Started a subagent to count.
+
+✻ Waiting for 1 background agent to finish
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                            tmux focus-events off · add 'set -g focus-events on' to ~/.tmux.conf and reattach for focus tracking
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏸ manual mode on · ? for shortcuts · ↓ to manage
+
+  ● main
+  ◯ general-purpose  Count the files                                                                                         17s

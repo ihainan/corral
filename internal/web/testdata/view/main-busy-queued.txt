@@ -1,0 +1,40 @@
+
+ ▐▛███▛█   Claude Code v2.1.314
+▝▜██████▀  Opus 5.5 · API Usage Billing
+ ▝▝   ▝▝   ~/proj
+
+
+❯ one
+
+● First answer.
+
+✻ Cogitated for 0s · done 9:18 PM
+
+❯ two long
+
+● Long answer done.
+
+✻ Sautéed for 25s · done 9:19 PM
+
+❯ mid message
+
+● Answer to the queued one.
+
+✻ Brewed for 0s · done 9:19 PM
+
+
+
+
+
+
+
+
+
+
+
+
+
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏸ manual mode on · ? for shortcuts

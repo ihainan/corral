@@ -536,6 +536,10 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 		// (Its picker's command not sent, or typed and not sent: it waits for an answer.)
 		*outcome, *reason = said(typed || exitErr.Status == 5), "agent_waiting"
 		writeError(w, http.StatusConflict, "agent_waiting", "it waits for an answer, or has a dialog open: answer it first")
+	case errors.As(err, &exitErr) && exitErr.Status >= exitOwnerSubagent && exitErr.Status <= exitOwnerTyped:
+		// (Claude Code's input box not the conversation's: its picker's command not sent.)
+		code, typedNow, _ := writeOwnerRefusal(w, err)
+		*outcome, *reason = said(typed || typedNow), code
 	case errors.As(err, &exitErr) && exitErr.Status == 10:
 		// (A press not made: the screen changed after it was read — a key
 		// typed in the terminal, say. Its picker, if open, left.)

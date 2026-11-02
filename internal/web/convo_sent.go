@@ -59,8 +59,18 @@ func (s *Server) sentMissing(w http.ResponseWriter, ctx context.Context, sess *t
 	if agent == "codex" {
 		waiting, known = codexInInput(screen, text)
 	}
+	// (Claude Code's: who has its input box now — a subagent's conversation
+	// shown in front, a list holding the keys — where a message typed then
+	// went, not to this conversation: plans/send-view.md. Of now only: not
+	// proof of where this one went, so said as likely.)
+	view := ""
+	if agent == "claude" {
+		view = claudeOwner(screen, waiting)
+	}
 	*outcome = "looked"
 	switch {
+	case view != "" && view != "main" && !waiting:
+		*reason = "view_" + view
 	case !known:
 		*reason = "unsure"
 	case waiting:
@@ -70,7 +80,7 @@ func (s *Server) sentMissing(w http.ResponseWriter, ctx context.Context, sess *t
 	}
 	// (Its end, where the input is: a screen longer than that is cut at
 	// the front, not the back.)
-	writeJSON(w, http.StatusOK, map[string]any{"screen": lastOf(screen, sentLook), "waiting": waiting, "known": known})
+	writeJSON(w, http.StatusOK, map[string]any{"screen": lastOf(screen, sentLook), "waiting": waiting, "known": known, "view": view})
 }
 
 // enterAgain: a message just typed into Claude Code (screen: its pane a
@@ -203,6 +213,11 @@ func (s *Server) sentEnter(w http.ResponseWriter, ctx context.Context, sess *ter
 	case errors.As(err, &exitErr) && exitErr.Status == 9:
 		*outcome, *reason = "refused", "agent_waiting"
 		writeError(w, http.StatusConflict, "agent_waiting", "it waits for an answer, or has a dialog open: answer it first")
+		return
+	case errors.As(err, &exitErr) && exitErr.Status >= exitOwnerSubagent && exitErr.Status <= exitOwnerTyped:
+		// (Claude Code's input box not the conversation's: the Enter not pressed there.)
+		*outcome = "refused"
+		*reason, _, _ = writeOwnerRefusal(w, err)
 		return
 	case errors.As(err, &exitErr) && exitErr.Status == 11:
 		// (Codex's title not read: whether it waits not told, nothing pressed — review503.)
@@ -362,6 +377,11 @@ const (
 func inInput(screen, text string) (waiting, known bool) {
 	area := squeeze(inputArea(screen))
 	if area == "" {
+		return false, false
+	}
+	// (A paste folded to "[Pasted text #1 +5 lines]": its words are not
+	// there to find, whether it is this message or not — review550-6.)
+	if typedPasted.MatchString(strings.TrimPrefix(area, "\u276f")) {
 		return false, false
 	}
 	marks := anchors(text)

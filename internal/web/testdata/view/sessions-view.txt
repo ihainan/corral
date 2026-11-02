@@ -1,0 +1,40 @@
+
+ ▐▛███▛█   Claude Code v2.1.314
+▝▜██████▀  New sessions: Opus 5.5 · medium effort · ~/proj
+ ▝▝   ▝▝   2 awaiting input · 0 working · 0 completed
+
+Your conversation moved to the background — enter opens it · esc returns to it · ctrl+c twice quits
+
+Needs input
+ ✻ mid message   Answer to the queued one.                                                                                      0s
+ ✻ go count      send a prompt to start                                                                                         5m
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ describe a task for a new session
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  enter to return · space to reply · ctrl+x to delete · ? for shortcuts

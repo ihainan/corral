@@ -85,10 +85,12 @@ func screenOf(raw []byte) (text, digest string, cut bool) {
 var hexDigest = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 // gateRefused: what the gate of convoGatedCommand stopped (exit 9), or a
-// text typed and its Enter held back (5): it waits for an answer.
+// text typed and its Enter held back (5): it waits for an answer; or Claude
+// Code's input box not the conversation's (13–16, convo_view.go): nothing
+// opened there either, and an Escape would go to whatever has the keys.
 func gateRefused(err error) bool {
 	var e *sshx.ExitError
-	return errors.As(err, &e) && (e.Status == 9 || e.Status == 5)
+	return errors.As(err, &e) && (e.Status == 9 || e.Status == 5 || (e.Status >= exitOwnerSubagent && e.Status <= exitOwnerTyped))
 }
 
 // replyOK: an answer is a digest and keys (of replyKeys, one to four) or a

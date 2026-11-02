@@ -2491,6 +2491,28 @@ screen() {
   else s=$(HERDR_SOCKET_PATH=$sock herdr pane read "$p" --source visible 2>/dev/null 9>&-) || exit 8; fi
   printf '%s\n' "$s" | awk -v n="$rd" '{ a[NR] = $0 } NF { last = NR } END { for (i = last - n + 1; i <= last; i++) if (i > 0) print a[i] }'
 }
+# Who has Claude Code's input box (convo_view.go): $1 after (1: the box
+# holds a text of ours, its line not read). Not read: none — nothing typed.
+owner() {
+  if [ "$mode" = tmux ]; then os=$(tmux -u capture-pane -p -t "$p" 2>/dev/null 9>&-) || { o=none; return 0; }
+  else os=$(HERDR_SOCKET_PATH=$sock herdr pane read "$p" --source visible 2>/dev/null 9>&-) || { o=none; return 0; }; fi
+  o=$(printf '%s\n' "$os" | awk -v after="$1" 'OWNERAWK' 2>/dev/null) || o=none
+}
+# (Claude Code's own: a text typed only where its input box is plainly the
+# conversation's — not a subagent's shown in front, nor a list holding the
+# keys. $1: what the box holds is ours (1: not read — keys, as an Enter
+# again, go after a text of ours; or the text just pasted). $2: typed
+# already. Not typed: 13 a subagent's, 14 a list's, 15 no box seen; typed
+# (Enter held back): 16, as is the agent no longer the one in front.)
+owned() {
+  [ "$kind" = claude ] && [ -z "$cx" ] || return 0
+  case $gate in free|idle) ;; *) return 0;; esac
+  if [ "$2" = 1 ]; then front || exit 16; fi
+  owner "$1"
+  [ "$o" = main ] && return 0
+  [ "$2" = 1 ] && exit 16
+  case $o in subagent) exit 13;; list|sessions) exit 14;; *) exit 15;; esac
+}
 b=corral-send-$$ typing=0 partdir=
 f=$(mktemp) || exit 4
 trap 'rm -f "$f"; [ -n "$partdir" ] && rm -rf "$partdir"; [ "$mode" = tmux ] && tmux delete-buffer -b "$b" 2>/dev/null 9>&-' EXIT
@@ -2529,7 +2551,9 @@ front() {
   [ -n "$pgrp" ] && [ "$pgrp" = "$tpgid" ] || return 1
   if [ "$mode" = tmux ]; then k=TMUX_PANE; else k=HERDR_PANE_ID; fi
   tr '\0' '\n' <"/proc/$pid/environ" 2>/dev/null | grep -qxF "$k=$p" || return 1
+  kind=claude
   if [ "$(head -c 16 "/proc/$pid/comm" 2>/dev/null)" = codex ]; then
+    kind=codex
     # (Codex, not run with exec (its arguments, its log's head): the
     # session's log is the one it has open and wrote last, as locating chose it.)
     cs=$(tr '\0' '\001' <"/proc/$pid/cmdline" 2>/dev/null | awk 'BEGIN { RS = "\001" } NR == 1 { next } skip { skip = 0; next }
@@ -2574,6 +2598,7 @@ front() {
       [ -z "$cs" ] && head -c 4096 "$lg" 2>/dev/null | grep -q '"originator": *"codex_exec"' && return 1
     fi
   elif [ "$(head -c 16 "/proc/$pid/comm" 2>/dev/null)" = opencode ]; then
+    kind=opencode
     # (OpenCode, not one that does not converse. Which of its sessions it
     # is at was told when it was read: it keeps no file to ask here.)
     cs=$(tr '\0' '\001' <"/proc/$pid/cmdline" 2>/dev/null | awk 'BEGIN { RS = "\001" } NR == 1 { next } skip { skip = 0; next } /^--$/ { exit }
@@ -2627,6 +2652,7 @@ gate_enter() {
   idle) [ "$st" = idle ] || exit 5 ;;
   reply:*) [ "$st" = waiting ] || exit 5 ;;
   esac
+  owned 1 1
   return 0
 }
 if [ -n "$gate" ]; then
@@ -2662,6 +2688,7 @@ if [ -n "$gate" ]; then
     [ "${d%% *}" = "${gate#card:}" ] || exit 10 ;;
   *) exit 4 ;;
   esac
+  if [ "$len" = keys ]; then owned 1 0; else owned 0 0; fi
 fi
 if [ "$mode" = tmux ]; then
   [ "$(tmux -u display-message -p -t "$p" '#{session_name}' 2>/dev/null 9>&-)" = "$sess" ] || exit 3
@@ -2739,7 +2766,8 @@ else
   screen
 fi`
 
-	script = strings.ReplaceAll(script, "CARDAWK", cardRegionAwk) // (see convo_card.go)
+	script = strings.ReplaceAll(script, "CARDAWK", cardRegionAwk)   // (see convo_card.go)
+	script = strings.ReplaceAll(script, "OWNERAWK", claudeOwnerAwk) // (see convo_view.go)
 	cmd := "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(mode) + " " + sshx.QuoteShell(session) + " " + sshx.QuoteShell(pane) + " " +
 		strconv.FormatInt(pid, 10) + " " + strconv.FormatInt(start, 10) + " " + n + " " + sshx.QuoteShell(socket) + " " + sshx.QuoteShell(sid) + " " + strconv.Itoa(max(0, min(read, 60))) + " " + sshx.QuoteShell(gate)
 	for _, k := range keys {
@@ -3436,6 +3464,10 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	case errors.As(err, &exitErr) && exitErr.Status == 10:
 		reason = "screen_changed"
 		writeError(w, http.StatusConflict, "screen_changed", "the screen changed; look again before answering")
+		return
+	case errors.As(err, &exitErr) && exitErr.Status >= exitOwnerSubagent && exitErr.Status <= exitOwnerTyped:
+		// (Claude Code's input box not the conversation's: nothing typed, or typed and no Enter.)
+		reason, _, _ = writeOwnerRefusal(w, err)
 		return
 	case errors.As(err, &exitErr) && exitErr.Status == 12:
 		reason = "agent_busy"

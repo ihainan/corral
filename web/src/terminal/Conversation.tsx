@@ -66,7 +66,9 @@ export interface ConvoPending {
   // taken in), taken (the input no longer holds them), or neither, where
   // the screen does not say. Undefined while it is still being looked at,
   // or where it could not be read.
-  look?: { waiting: boolean; known: boolean; screen: string } | 'looking' | 'failed'
+  // view: who has Claude Code's input box now (main, subagent, list,
+  // sessions, none), where it was read: a message gone elsewhere said so.
+  look?: { waiting: boolean; known: boolean; screen: string; view?: string } | 'looking' | 'failed'
 }
 
 const HINT_AFTER = 20000 // working with nothing new this long: say why
@@ -2925,10 +2927,25 @@ function Missing({ look, onEnter }: { look?: ConvoPending['look']; onEnter?: () 
   if (!look) return null
   if (look === 'looking') return <p className="convo-missing" role="status">{t('convo.missing.looking')}</p>
   if (look === 'failed') return <p className="convo-missing">{t('convo.missing.failed')}</p>
-  const canEnter = !!onEnter && look.known && look.waiting
+  // (Not where the terminal shows another view now: Enter would go there.)
+  const canEnter = !!onEnter && look.known && look.waiting && (!look.view || look.view === 'main')
   return (
     <div className="convo-missing">
-      <p>{t(!look.known ? 'convo.missing.unsure' : look.waiting ? (canEnter ? 'convo.missing.waitingEnter' : 'convo.missing.waiting') : 'convo.missing.taken')}</p>
+      <p>
+        {t(
+          !look.waiting && look.view === 'subagent'
+            ? 'convo.missing.subagent'
+            : !look.waiting && (look.view === 'list' || look.view === 'sessions')
+              ? 'convo.missing.otherView'
+              : !look.known
+                ? 'convo.missing.unsure'
+                : look.waiting
+                  ? canEnter
+                    ? 'convo.missing.waitingEnter'
+                    : 'convo.missing.waiting'
+                  : 'convo.missing.taken',
+        )}
+      </p>
       {canEnter && (
         <button
           type="button"
