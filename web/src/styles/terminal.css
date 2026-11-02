@@ -1391,8 +1391,8 @@ button.convo-running-what:hover { color: var(--term-fg); text-decoration-color: 
 .convo-failed.is-inline { margin-left: 0; }
 /* The bar on a narrow screen: the state, not how long (the name needs the room) */
 @media (max-width: 640px) { .convo-bar-dur { display: none; } }
-/* The composer under a question: a line, its tools back once it is typed in */
-.convo-dock .composer.is-held .composer-box:not(:focus-within) .composer-tools { display: none; }
+/* (Held — an answer is wanted first: its tools away whether it has the focus or not. Shown on focus, a press on the card above moved it 40px between press and release, and the press was lost — review of ux1101 A13.) */
+.convo-dock .composer.is-held .composer-tools { display: none; }
 /* The send and stop circle on a touch screen: 44 to touch, the circle 38 inside it, no ring drawn round it */
 @media (pointer: coarse) {
   .convo-dock .composer-send, .convo-dock .composer-send:hover { padding: 3px; box-shadow: none; background: var(--accent); background-clip: content-box; }
