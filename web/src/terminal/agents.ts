@@ -114,17 +114,15 @@ export function waitingTitle(n: number | null, list?: SessionInfo[] | null) {
   if (n !== null) appBadge(n, (list && listReadAt.get(list)) || 0)
 }
 
-// The app icon's number (0: none). Not everywhere: an app not installed, or
-// without leave to alert, has none; the browser refuses quietly. Where a
-// service worker runs the page, it sets it, ordered with the alerts' counts
-// by seq, when the list counted was read (see readAt): an older count, the
-// page's or an alert's, does not undo a newer. (No seq: at once, as the
-// account gone, see app.)
-export function appBadge(n: number, seq = 0) {
+// The app icon's number (0: none), set by the page only. Not everywhere: an
+// app not installed, or without leave to alert, has none; the browser
+// refuses quietly. (Not by the service worker: there Chromium's badge
+// calls, in its message events at least, crash the page, 11-02. Alerts say
+// the gateway's count, Note.Badge, for when it can again.) seq: unused till
+// then (see readAt).
+export function appBadge(n: number, _seq = 0) {
   const nav = navigator as Navigator & { setAppBadge?: (n: number) => Promise<void>; clearAppBadge?: () => Promise<void> }
   try {
-    const sw = nav.serviceWorker?.controller
-    if (seq && sw) return sw.postMessage({ t: 'badge', n, seq })
     void (n > 0 ? nav.setAppBadge?.(n) : nav.clearAppBadge?.())?.catch(() => {})
   } catch {
     // (none)
@@ -132,8 +130,7 @@ export function appBadge(n: number, seq = 0) {
 }
 
 // When a session list was read, by the gateway's clock alerts are numbered
-// by (its X-Corral-Now, microseconds): each list its own (two pages read
-// lists of their own, answered in any order).
+// by (its X-Corral-Now, microseconds): each list its own.
 const listReadAt = new WeakMap<SessionInfo[], number>()
 export function readAt(res: Response): number {
   const t = Number(res.headers.get('X-Corral-Now'))
