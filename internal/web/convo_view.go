@@ -82,10 +82,12 @@ func claudeOwner(screen string, after bool) string {
 			}
 		}
 		// (The footer's own words: the agents' rows aside — a subagent's
-		// description may say anything — review552.)
+		// description may say anything — review552; only rows of the list
+		// itself, not any row with a bullet — review554.)
+		agents := ownerAgents(foot)
 		var own []string
-		for _, l := range foot {
-			if !ownerAgentRow.MatchString(l) {
+		for k, l := range foot {
+			if !agents[k] {
 				own = append(own, l)
 			}
 		}
@@ -104,8 +106,8 @@ func claudeOwner(screen string, after bool) string {
 		// (Under it, a dialog's or a picker's lines — a choice, its cursor,
 		// its keys — or more than status lines: it is not the box in front.)
 		other := 0
-		for _, l := range foot {
-			if ownerAgentRow.MatchString(l) {
+		for k, l := range foot {
+			if agents[k] {
 				continue
 			}
 			other++
@@ -133,6 +135,30 @@ func claudeOwner(screen string, after bool) string {
 	return "none"
 }
 
+// ownerAgents marks the rows of the footer that are the list of agents: a
+// run of rows each shaped as one ("● main", "◯ general-purpose  what it
+// does"), one of them main. A row with a bullet elsewhere (a picker's, a
+// hint drawn with one) is not.
+func ownerAgents(foot []string) []bool {
+	mask := make([]bool, len(foot))
+	for k := 0; k < len(foot); {
+		if !ownerAgentRow.MatchString(foot[k]) {
+			k++
+			continue
+		}
+		e, hasMain := k, false
+		for e < len(foot) && ownerAgentRow.MatchString(foot[e]) {
+			hasMain = hasMain || ownerMainRow.MatchString(foot[e])
+			e++
+		}
+		for x := k; x < e && hasMain; x++ {
+			mask[x] = true
+		}
+		k = e
+	}
+	return mask
+}
+
 // ownerFoot: how many status lines under the box (the list of agents aside)
 // are taken for its own.
 const ownerFoot = 12
@@ -151,7 +177,8 @@ var (
 	ownerPrompt     = regexp.MustCompile(`^[ \t]*❯`)
 	ownerOtherMain  = regexp.MustCompile(`^[ \t]*(?:❯[ \t]+)?◯ main(?:[ \t]|$)`)
 	ownerListCursor = regexp.MustCompile(`^[ \t]*❯[ \t]+[◯●] `)
-	ownerAgentRow   = regexp.MustCompile(`^[ \t]*(?:❯[ \t]+)?[◯●] `)
+	ownerAgentRow   = regexp.MustCompile(`^[ \t]*(?:❯[ \t]+)?[◯●] [^ \t]+(?:[ \t][ \t]+.*|[ \t]*)$`)
+	ownerMainRow    = regexp.MustCompile(`^[ \t]*(?:❯[ \t]+)?[◯●] main[ \t]*$`)
 	ownerChoice     = regexp.MustCompile(`^[ \t]*\d+\.[ \t]`)
 )
 
@@ -162,7 +189,8 @@ var (
 var claudeOwnerAwk = strings.ReplaceAll(`function isrule(s) { sub(/^[ \t]*/, "", s); return index(s, "────────") == 1 || index(s, "━━━━━━━━") == 1 }
 function isprompt(s) { sub(/^[ \t]*/, "", s); return index(s, "❯") == 1 }
 function squeeze(s) { gsub(/[ \t]/, "", s); gsub(/NBSP/, "", s); return s }
-function agentrow(s) { return s ~ /^[ \t]*(❯[ \t]+)?(◯|●) / }
+function agentrow(s) { return s ~ /^[ \t]*(❯[ \t]+)?(◯|●) [^ \t]+([ \t][ \t]+.*|[ \t]*)$/ }
+function mainrow(s) { return s ~ /^[ \t]*(❯[ \t]+)?(◯|●) main[ \t]*$/ }
 { sub(/\r$/, ""); L[NR] = $0 }
 END {
   n = NR
@@ -173,16 +201,25 @@ END {
     for (j = i + 1; j <= n; j++) if (isrule(L[j])) { e = j; break }
     if (!e) continue
     for (j = e + 1; j <= n; j++) if (L[j] ~ /^[ \t]*(❯[ \t]+)?◯ main([ \t]|$)/) { print "subagent"; exit }
+    for (j = e + 1; j <= n; j++) A[j] = 0
+    j = e + 1
+    while (j <= n) {
+      if (!agentrow(L[j])) { j++; continue }
+      k = j; m = 0
+      while (k <= n && agentrow(L[k])) { if (mainrow(L[k])) m = 1; k++ }
+      if (m) for (x = j; x < k; x++) A[x] = 1
+      j = k
+    }
     f = ""
     for (j = e + 1; j <= n; j++) {
       if (L[j] ~ /^[ \t]*❯[ \t]+(◯|●) /) { print "list"; exit }
-      if (!agentrow(L[j])) f = f squeeze(L[j])
+      if (!A[j]) f = f squeeze(L[j])
     }
     if (index(f, "↑/↓toselect")) { print "list"; exit }
     if (index(f, "entertoreturn")) { print "sessions"; exit }
     other = 0
     for (j = e + 1; j <= n; j++) {
-      if (agentrow(L[j])) continue
+      if (A[j]) continue
       other++
       if (index(L[j], "❯") || L[j] ~ /^[ \t]*[0-9]+\.[ \t]/) { print "none"; exit }
     }
