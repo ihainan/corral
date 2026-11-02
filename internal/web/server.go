@@ -81,6 +81,7 @@ type Server struct {
 	claudeLists  sessionLists // Claude Code's sessions of a folder, as last listed
 	histLocks    histLocks    // one reading of a session's input history at a time
 	convoScans   convoScans   // scans of a host's processes, shared by its panes for a moment
+	askHook      askHooks     // Claude Code's question hook in hosts' settings: changes under way, what was read (askhook.go)
 
 	sockMu   sync.Mutex
 	socks    map[int64]map[*liveSocket]struct{} // open WebSockets per user, closed on sign-out
@@ -265,6 +266,8 @@ func (s *Server) registerRoutes() {
 	s.handle("PUT /api/forwards/{id}", SignedIn, s.apiUpdateForward)
 	s.handle("DELETE /api/forwards/{id}", SignedIn, s.apiDeleteForward)
 	s.handle("GET /api/hosts/{id}/ports", SignedIn, s.apiHostPorts)
+	s.handle("GET /api/hosts/{id}/ask-hook", SignedIn, s.apiAskHook)
+	s.handle("POST /api/hosts/{id}/ask-hook", SignedIn, s.apiSetAskHook)
 	s.handle("GET /fwd/{id}", Public, s.handleForwardOpen)
 
 	s.handle("GET /api/hosts/{id}/code", SignedIn, s.apiCodeStatus)

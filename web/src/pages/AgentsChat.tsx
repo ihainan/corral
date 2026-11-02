@@ -745,9 +745,15 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     return undefined
   }, [convo.entries])
   const replyTo = useMemo(
-    () => (viaConvo && convo.bind ? convoTarget(sid, convo.bind, cur.s.persistence === 'tmux') : herdr && row ? herdrTarget(sid, row.a) : null),
+    () => {
+      const to = viaConvo && convo.bind ? convoTarget(sid, convo.bind, cur.s.persistence === 'tmux') : herdr && row ? herdrTarget(sid, row.a) : null
+      // (The host it runs on, for the card's offer of Claude Code's question hook
+      // there — terminal/askHook.tsx: only for one whose log is read, so found
+      // under ~/.claude, the settings the hook goes in — review535-8.)
+      return to && viaConvo && convo.bind ? { ...to, host: { id: cur.s.host_id, name: cur.s.host_name } } : to
+    },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [viaConvo, herdr, cur.s.persistence, sid, row?.a.pane_id, row?.a.agent, convo.bind?.pane, convo.bind?.pid, convo.bind?.start, convo.bind?.session, convo.bind?.agent],
+    [viaConvo, herdr, cur.s.persistence, cur.s.host_id, cur.s.host_name, sid, row?.a.pane_id, row?.a.agent, convo.bind?.pane, convo.bind?.pid, convo.bind?.start, convo.bind?.session, convo.bind?.agent],
   )
   const working = agent?.status === 'working'
   // (Answered from the card: till the agent's state moves on — read every few

@@ -10,6 +10,7 @@ import { askLead, readAskScreen, reviewAsDrawn } from './askScreen'
 import { askOn, AskPanel, OwnBox, planOn, PlanPanel, ReviewPanel, screenCall, useDrive } from './askCard'
 import { Filled, MaybeSent, NotAsShown, ownWords, permissionAmend } from './ownWords'
 import type { ConvoTool } from './conversation'
+import { AskHookHint, asksFromScreen } from './askHook'
 
 interface Screen {
   text: string
@@ -64,6 +65,7 @@ export interface ReplyTarget {
   // (A text only pasted into a prompt's row that takes words, no Enter:
   // the conversation's only — see ownWords.ts.)
   fill?: (body: { digest: string; text: string }) => Promise<unknown>
+  host?: { id: number; name: string } // (the host it runs on, where known: for AskHookHint)
 }
 
 export function herdrTarget(sessionId: string, agent: HerdrAgent): ReplyTarget {
@@ -482,6 +484,10 @@ export function InlineReply({ target, onLoaded, resizedAt, active = true, held, 
   const asking = onScreen ?? call
   const askAt = onScreen ? 0 : askOn(call, state)
   const lead = onScreen && screen ? askLead(screen.text) : undefined
+  // (Claude Code's question drawn from its screen, its log not having it: on
+  // the host, the hook that has it written at once may be offered — askHook.tsx.)
+  const hookHint =
+    target.host && asksFromScreen({ agent: target.agent, logAsks, screen: screen?.text, drawn: !!fromScreen || !!reviewId }) ? <AskHookHint hostId={target.host.id} hostName={target.host.name} /> : null
   const structured =
     !!screen &&
     (askAt >= 0 ||
@@ -595,6 +601,7 @@ export function InlineReply({ target, onLoaded, resizedAt, active = true, held, 
             {error}
           </p>
         )}
+        {hookHint}
       </div>
     )
   }
@@ -613,6 +620,7 @@ export function InlineReply({ target, onLoaded, resizedAt, active = true, held, 
       {block && <Asked lines={block.lines} />}
       {cx && cx.kind !== 'question' && cx.lines.length > 0 && <Asked lines={cx.lines} />}
       {(needScreen || !!screen?.cut) && !failed && <p className="convo-ask-unread">{t(screen?.cut ? 'reply.cut' : 'convo.askUnread')}</p>}
+      {!failed && hookHint}
       {failed ? (
         <LoadError onRetry={() => void load()} />
       ) : (

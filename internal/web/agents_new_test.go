@@ -75,10 +75,20 @@ func TestNewAgentsOnce(t *testing.T) {
 	}
 }
 
-func TestAgentStartCommandArgs(t *testing.T) {
+func TestAgentStartCmdWorktree(t *testing.T) {
+	// The agent's own arguments (after herdr's --), each quoted; Claude
+	// Code's question hook first (see askhook_test).
 	tail := func(c string) string {
+		c = strings.TrimSuffix(c, " 2>&1")
 		if i := strings.Index(c, " -- "); i >= 0 {
-			return c[i+4:]
+			c = c[i+4:]
+			if strings.HasPrefix(c, "'--settings' ") {
+				if j := strings.Index(c, "}' "); j >= 0 {
+					return c[j+3:]
+				}
+				return ""
+			}
+			return c
 		}
 		return ""
 	}
@@ -88,13 +98,14 @@ func TestAgentStartCommandArgs(t *testing.T) {
 		want         string
 	}{
 		{"claude", "", false, ""},
-		{"claude", "", true, "-w"},
-		{"codex", "", true, "--worktree"},
+		{"claude", "", true, "'-w'"},
+		{"codex", "", true, "'--worktree'"},
+		{"codex", "", false, ""},
 		{"opencode", "", true, ""}, // (none of its own)
-		{"claude", "0b5d3f0e-1c1a-4f7e-9d1e-2a3b4c5d6e7f", false, "--resume '0b5d3f0e-1c1a-4f7e-9d1e-2a3b4c5d6e7f'"},
+		{"claude", "0b5d3f0e-1c1a-4f7e-9d1e-2a3b4c5d6e7f", false, "'--resume' '0b5d3f0e-1c1a-4f7e-9d1e-2a3b4c5d6e7f'"},
 	}
 	for _, c := range cases {
-		cmd := agentStartCommand("/run/h.sock", "w1:p1", "proj", c.kind, c.resume, c.worktree)
+		cmd := agentStartCmd("/run/h.sock", "w1:p1", "proj", c.kind, c.resume, c.worktree)
 		if got := tail(cmd); got != c.want {
 			t.Fatalf("%s resume=%q worktree=%v: agent's args %q, want %q (%s)", c.kind, c.resume, c.worktree, got, c.want, cmd)
 		}
