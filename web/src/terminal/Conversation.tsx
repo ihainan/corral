@@ -2856,7 +2856,7 @@ function PathCode({ path, text }: { path: string; text: string }) {
       heading={path}
       items={() =>
         [
-          { label: t('convo.path.copy'), icon: <Copy size={16} />, onSelect: () => copyOf?.(path) },
+          { label: t('convo.path.copy'), icon: <Copy size={16} />, onSelect: () => copyOf?.(text) },
           IMAGE_EXT.test(path) ? { label: t('convo.path.view'), icon: <ImageIcon size={16} />, onSelect: () => acts.view(path) } : null,
           { label: t('convo.path.reveal'), icon: <FolderOpen size={16} />, onSelect: () => acts.reveal(dir ? path.replace(/\/+$/, '') || '/' : path) },
           dir ? null : { label: t('convo.path.download'), icon: <Download size={16} />, onSelect: () => acts.download(path) },

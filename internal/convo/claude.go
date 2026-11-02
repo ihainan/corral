@@ -546,10 +546,25 @@ func (c *Claude) Prepend(other Parser) {
 	if c.lastReq.model == "" {
 		c.lastReq = o.lastReq
 	}
-	// (Pictures: o's messages and attachments still to be told kept, then
-	// the sources waiting — c's, o's own — tried again with them: told, or
-	// kept from as far up as they now go, for a part older still.)
-	for _, id := range o.imagedOrder {
+	// (Pictures: the sources waiting — c's, o's own — tried with both parts'
+	// messages and attachments, all of them; then what is still to be told
+	// kept, within bounds, the sources from as far up as they now go.)
+	var waiting []imageSourceRow
+	for _, w := range append(c.sourcesWaiting, o.sourcesWaiting...) {
+		at := c.up(o.up(w.at, c.attachedRows), o.attachedRows)
+		e, of := c.imaged[at], c
+		if e == nil {
+			e, of = o.imaged[at], o
+		}
+		if e != nil && c.linkImages(e, w.paths) {
+			of.told(at)
+		} else if len(waiting) < maxImaged {
+			waiting = append(waiting, imageSourceRow{at: at, paths: w.paths})
+		}
+	}
+	c.sourcesWaiting = waiting
+	for i := len(o.imagedOrder) - 1; i >= 0; i-- { // (the latest of o's first: they are the nearer)
+		id := o.imagedOrder[i]
 		if e := o.imaged[id]; e != nil && len(c.imaged) < maxImaged {
 			if c.imaged == nil {
 				c.imaged = map[string]*Entry{}
@@ -566,16 +581,6 @@ func (c *Claude) Prepend(other Parser) {
 			c.attachedRows[id] = up
 		}
 	}
-	var waiting []imageSourceRow
-	for _, w := range append(c.sourcesWaiting, o.sourcesWaiting...) {
-		at := c.up(w.at, nil)
-		if e := c.imaged[at]; e != nil && c.linkImages(e, w.paths) {
-			delete(c.imaged, at)
-		} else if len(waiting) < maxImaged {
-			waiting = append(waiting, imageSourceRow{at: at, paths: w.paths})
-		}
-	}
-	c.sourcesWaiting = waiting
 	// (What c's rewinds into o's part took back, there and here.)
 	mine := c.treeBefore(o)
 	add := o.entries
@@ -924,6 +929,17 @@ type imageSourceRow struct {
 	paths []string
 }
 
+// told forgets a message whose pictures were told their files.
+func (c *Claude) told(id string) {
+	delete(c.imaged, id)
+	for i, x := range c.imagedOrder {
+		if x == id {
+			c.imagedOrder = append(c.imagedOrder[:i:i], c.imagedOrder[i+1:]...)
+			break
+		}
+	}
+}
+
 // linkImages gives e's pictures their files, if as many as it has.
 func (c *Claude) linkImages(e *Entry, paths []string) bool {
 	var at []int
@@ -991,7 +1007,7 @@ func (c *Claude) imageSources(r *claudeRow) {
 	at := c.up(parent, nil)
 	if e := c.imaged[at]; e != nil {
 		if c.linkImages(e, paths) {
-			delete(c.imaged, at) // (told once)
+			c.told(at)
 		}
 		return
 	}

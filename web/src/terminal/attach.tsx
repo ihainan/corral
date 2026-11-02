@@ -22,7 +22,7 @@ export function labelName(name: string): string {
 // Where a label of the kind this makes begins, as much of it as stays when
 // some was taken out (a label not whole, or of a file not known, is not
 // sent as it is).
-export const LABEL_START = /\[(?:图片|文件|Attached (?:image|file)) ?#? ?\d+/g
+export const LABEL_START = /\[(?:图片|文件|Attached (?:image|file)) ?#? ?\d+|(?:图片|文件|Attached (?:image|file)) ?# ?\d*[：:]/g
 
 // attach keeps a file just put up on the host (path) and is its label,
 // for the draft; quoted: the path as the agent is to read it.

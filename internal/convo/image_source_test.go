@@ -1,6 +1,7 @@
 package convo
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -105,6 +106,33 @@ func TestClaudeImageSourcesThreeParts(t *testing.T) {
 	}
 	if len(c.sourcesWaiting) != 0 {
 		t.Fatalf("still waiting: %+v", c.sourcesWaiting)
+	}
+}
+
+// The part put before is paired with in full, before what is kept of it is
+// bounded; the messages told leave the order too (review553-1, -3).
+func TestClaudeImageSourcesBounds(t *testing.T) {
+	img := `{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AA=="}}`
+	c, o := NewClaude(), NewClaude()
+	var rows []string
+	prev := "null"
+	for i := 0; i < maxImaged; i++ { // (c holds as many messages still to be told as it may)
+		id := fmt.Sprintf("c%d", i)
+		rows = append(rows, `{"type":"user","uuid":"`+id+`","parentUuid":`+prev+`,"message":{"role":"user","content":[{"type":"text","text":"[Image #1]"},`+img+`]}}`)
+		prev = `"` + id + `"`
+	}
+	rows = append(rows, `{"type":"user","uuid":"m1","parentUuid":"x1","isMeta":true,"message":{"role":"user","content":[{"type":"text","text":"[Image: source: /home/u/a.png]"}]}}`)
+	c.Feed(lines(rows...))
+	o.Feed(lines(
+		`{"type":"user","uuid":"u1","parentUuid":null,"message":{"role":"user","content":[{"type":"text","text":"[Image #1]"},`+img+`]}}`,
+		`{"type":"attachment","uuid":"x1","parentUuid":"u1","attachment":{"type":"total_tokens_reminder"}}`,
+	))
+	c.Prepend(o)
+	if p := paths(find(c, "u1")); len(p) != 1 || p[0] != "/home/u/a.png" {
+		t.Fatalf("c full: %q", p)
+	}
+	if len(c.imagedOrder) != len(c.imaged) || len(c.imaged) > maxImaged {
+		t.Fatalf("order %d, waiting %d", len(c.imagedOrder), len(c.imaged))
 	}
 }
 

@@ -102,7 +102,8 @@ export function unsendable(s: string, host: number, labelStart: RegExp): { other
   const other = attachedIn(text).find((a) => a.host !== host)
   if (other) return { other }
   for (const m of text.matchAll(labelStart)) {
-    if (![...attached.keys()].some((l) => text.startsWith(l, m.index))) return { lost: text.slice(m.index, m.index + 60).split('\n')[0] }
+    // (Of a whole label: it begins there, or a character before — its bracket.)
+    if (![...attached.keys()].some((l) => text.startsWith(l, m.index) || (m.index > 0 && text.startsWith(l, m.index - 1)))) return { lost: text.slice(m.index, m.index + 60).split('\n')[0] }
   }
   return null
 }
@@ -121,7 +122,8 @@ export function keepPaste(text: string, label: (n: number) => string): string {
 // (Files put up go in as what the agent reads, their paths — also ones a
 // paste holds: the pastes first, then the files, each once.)
 export function expandPastes(s: string, max: number): string | null {
-  const t = expandLabels(s, pastes, max)
+  // (Before the files are, a label may be longer than its path: the text in between bounded apart.)
+  const t = expandLabels(s, pastes, 2 * max + (64 << 10))
   return t === null ? null : expandLabels(t, new Map([...attached].map(([l, a]) => [l, a.send])), max)
 }
 const expandPastesOnly = (s: string) => expandLabels(s, pastes, 1 << 22) ?? s
