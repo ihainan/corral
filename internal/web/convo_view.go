@@ -81,17 +81,15 @@ func claudeOwner(screen string, after bool) string {
 				return "subagent"
 			}
 		}
-		// (The footer's own words: the agents' rows aside — a subagent's
-		// description may say anything — review552; only rows of the list
-		// itself, not any row with a bullet — review554.)
+		// (The footer's words, all of them, the agents' rows too: telling a
+		// row of the list from a picker's or a hint's drawn alike cannot be
+		// done for sure (review552/554/556), and where unsure it refuses — a
+		// subagent whose description happens to hold a hint's words ("Enter
+		// to confirm") costs a refusal that says why, never a message sent
+		// elsewhere. The list's rows are left out of the count of status
+		// lines only: many subagents are no dialog.)
 		agents := ownerAgents(foot)
-		var own []string
-		for k, l := range foot {
-			if !agents[k] {
-				own = append(own, l)
-			}
-		}
-		said := ownerSqueeze(strings.Join(own, ""))
+		said := ownerSqueeze(strings.Join(foot, ""))
 		for _, l := range foot {
 			if ownerListCursor.MatchString(l) {
 				return "list"
@@ -107,12 +105,11 @@ func claudeOwner(screen string, after bool) string {
 		// its keys — or more than status lines: it is not the box in front.)
 		other := 0
 		for k, l := range foot {
-			if agents[k] {
-				continue
-			}
-			other++
 			if strings.Contains(l, "\u276f") || ownerChoice.MatchString(l) {
 				return "none"
+			}
+			if !agents[k] {
+				other++
 			}
 		}
 		if strings.Contains(said, "Esctocancel") || strings.Contains(said, "Entertoselect") || strings.Contains(said, "Entertoconfirm") {
@@ -213,15 +210,14 @@ END {
     f = ""
     for (j = e + 1; j <= n; j++) {
       if (L[j] ~ /^[ \t]*❯[ \t]+(◯|●) /) { print "list"; exit }
-      if (!A[j]) f = f squeeze(L[j])
+      f = f squeeze(L[j])
     }
     if (index(f, "↑/↓toselect")) { print "list"; exit }
     if (index(f, "entertoreturn")) { print "sessions"; exit }
     other = 0
     for (j = e + 1; j <= n; j++) {
-      if (A[j]) continue
-      other++
       if (index(L[j], "❯") || L[j] ~ /^[ \t]*[0-9]+\.[ \t]/) { print "none"; exit }
+      if (!A[j]) other++
     }
     if (index(f, "Esctocancel") || index(f, "Entertoselect") || index(f, "Entertoconfirm")) { print "none"; exit }
     if (other > FOOT) { print "none"; exit }
