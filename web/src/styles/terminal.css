@@ -1159,6 +1159,14 @@ button.convo-task-line:hover .convo-task-name { color: var(--term-fg); }
 .term-root .agents-list-mine[aria-pressed='true'] { background: var(--term-key-active); color: var(--term-fg); border-color: var(--term-fg-3); font-weight: 600; }
 .agents-list-none { margin: 24px 16px; color: var(--term-fg-3); font: 14px/22px var(--font-ui); text-align: center; }
 .agents-list-rows { list-style: none; margin: 0; padding: 0; }
+/* (The old ones past the first few of their group: a line where the rest would be.) */
+.term-root .agents-list-more {
+  display: block; width: 100%; padding: 12px max(16px, env(safe-area-inset-left, 0px)); text-align: left;
+  font-size: 14px; color: var(--term-fg-2); border-bottom: 1px solid var(--term-line); text-decoration: none;
+}
+.term-root .agents-list-more:hover { text-decoration: none; }
+.term-root .agents-list-more:active { background: var(--term-hover); }
+@media (pointer: coarse) { .term-root .agents-list-more { min-height: 48px; } }
 .agents-list-row {
   width: 100%; min-height: 64px; display: flex; align-items: center; gap: 12px;
   padding: 10px max(16px, env(safe-area-inset-right, 0px)) 10px max(16px, env(safe-area-inset-left, 0px));

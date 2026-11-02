@@ -2,7 +2,7 @@ import { createContext, Fragment, memo, useCallback, useContext, useEffect, useL
 import { ArrowDown, Check, ChevronDown, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, Clock, Download, GitBranch, Keyboard, ListOrdered, Loader, MoreHorizontal, MoreVertical, PanelLeft, Pin, Search, TriangleAlert, X, Plus } from 'lucide-react'
 import { t, getLang, type I18nKey } from '../i18n'
 import { api } from '../api'
-import { asHeld, GROUPS, inGroup, listOrder, pinned, type ConvoListRow, type RowCmds } from './agentOrder'
+import { asHeld, dayBefore, DAYS, dayStart, FOLDED, foldAt, GROUPS, inGroup, listOrder, pinned, type ConvoListRow, type RowCmds } from './agentOrder'
 import { copyText, Dialog, isCoarse, Menu, MenuLayer, type MenuItem } from '../components/ui'
 import { composing, foldAllKey, helpKey, jumpKey, onMac, switchKey } from './pageKeys'
 import { local } from '../storage'
@@ -1975,29 +1975,6 @@ function Gauge({ part }: { part: number }) {
 }
 
 // A row of the list of agents to go to (see AgentsChat.tsx).
-
-// The rest, as the list shows them: by the day their status last changed;
-// those of no known time (a tmux session, the gateway restarted) last.
-// (today, yesterday: the starts of the two calendar days, a day of a clock
-// change being 23 or 25 hours long.)
-const DAYS: { name: I18nKey; of: (since: number, today: number, yesterday: number) => boolean }[] = [
-  { name: 'convo.group.today', of: (since, today) => since >= today },
-  { name: 'convo.group.yesterday', of: (since, today, yesterday) => since >= yesterday && since < today },
-  { name: 'convo.group.earlier', of: (since, _, yesterday) => since > 0 && since < yesterday },
-  { name: 'convo.group.other', of: (since) => since <= 0 },
-]
-// The groups of old ones that are folded when long, and how many of such
-// a group are shown unfolded. (Today's and yesterday's are not: they are
-// what the person is at, and are short.)
-const FOLDED: I18nKey[] = ['convo.group.earlier', 'convo.group.other']
-const foldAt = 5
-
-const dayStart = (now: number) => new Date(now).setHours(0, 0, 0, 0)
-const dayBefore = (start: number) => {
-  const d = new Date(start)
-  d.setDate(d.getDate() - 1)
-  return d.setHours(0, 0, 0, 0) // (a midnight skipped by a clock change: its first hour)
-}
 
 // The time on a row of the list: how long it has waited or worked; else
 // when it came to rest, the clock's time (its day said by its group), or

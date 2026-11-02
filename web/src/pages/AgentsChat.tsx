@@ -19,7 +19,7 @@ import { NEW_AGENT, NewAgentDialog } from '../terminal/newAgent'
 import { BgCmds, CODEX_EFFORTS, ConversationView, ListSearch, SEARCH_FROM, when, type ConvoAgent, type ConvoListRow, type ConvoPending, type ModelOpt } from '../terminal/Conversation'
 import { answerable, asking, useConversation, type ConvoEntry } from '../terminal/conversation'
 import { ackBg, waitingTitle, isCodex, isOpenCode, listAgents, matchQuery, paneTitle, readsLog, useRunningSessions, type AgentRow } from '../terminal/agents'
-import type { RowCmds } from '../terminal/agentOrder'
+import { dayBefore, dayStart, foldAt, foldedDay, listOrder, type RowCmds } from '../terminal/agentOrder'
 import { prefetchConversation } from '../terminal/conversation'
 import { afterSend, holdsWords, holdTermMode, PENDING_MS, sameRun, sameTurn, tmuxKey } from '../terminal/chatSend'
 import { agentKey, sessionWhich } from '../terminal/sessionName'
@@ -1857,8 +1857,19 @@ function fitLine(el: HTMLElement | null, width: number, make: (name: string) => 
 // rest, the latest to change first in each, as it was when the list showed
 // (statuses change in place; rows do not move under the finger; one new comes
 // last). Its summary line puts them in order again and goes to the first
-// waiting; "only mine" keeps those waiting, and those done since.
+// waiting; "only mine" keeps those waiting, and those done since. In the
+// order the side list has them (listOrder, of these rows: see asRow), with
+// no group headings — each row says its state — and the old ones folded
+// past a few of each of their groups, as there: a line where the rest of
+// the group would be, opened and shut by the group, as there.
 let listScroll = 0
+let oldOpen: string[] = [] // (the groups of old ones opened out: still so, back from a conversation)
+// An agent as the side list places it (its status, its time, pinned):
+// keyed by the session too, as the phone's list tells them.
+const asRow = (e: Entry, pins: string[]): ConvoListRow => {
+  const r = e.row
+  return { key: e.key + ' ' + e.s.id, title: '', where: '', status: r?.status ?? 'unknown', since: r && !r.lost ? (r.bg ? r.a.bg_since : r.a.since) : undefined, pinned: pins.includes(e.key) ? pins.indexOf(e.key) : undefined, current: false, onPick: () => {} }
+}
 // query, onQuery: what it is searched for, kept by the page (as the side
 // list's is): still searched, back from a conversation.
 function PhoneList({ entries, all, titles, query, onQuery, onPick }: { entries: Entry[]; all: SessionInfo[]; titles: Titles; query: string; onQuery: (q: string) => void; onPick: (e: Entry) => void }) {
@@ -1876,8 +1887,8 @@ function PhoneList({ entries, all, titles, query, onQuery, onPick }: { entries: 
       /* not kept */
     }
   }
-  const rank = (e: Entry) => ['blocked', 'done', 'working'].indexOf(e.row?.status ?? '') + 1 || 4
-  const sorted = (list: Entry[]) => list.map((e, i) => [e, i] as const).sort(([a, i], [b, j]) => rank(a) - rank(b) || (b.row?.a.since ?? 0) - (a.row?.a.since ?? 0) || i - j).map(([e]) => e.key + ' ' + e.s.id)
+  const pins = usePrefs().pinnedAgents
+  const sorted = (list: Entry[]) => listOrder(list.map((e) => asRow(e, pins))).map((r) => r.key)
   const [order, setOrder] = useState<string[]>(() => sorted(entries))
   useEffect(() => {
     setOrder((o) => {
@@ -1889,7 +1900,6 @@ function PhoneList({ entries, all, titles, query, onQuery, onPick }: { entries: 
   }, [entries])
   const byKey = new Map(entries.map((e) => [e.key + ' ' + e.s.id, e]))
   // (Those pinned first, in the order pinned, as the side list has them.)
-  const pins = usePrefs().pinnedAgents
   const inOrder = order.flatMap((k) => (byKey.has(k) ? [byKey.get(k)!] : []))
   const list = [...pins.flatMap((p) => inOrder.filter((e) => e.key === p)), ...inOrder.filter((e) => !pins.includes(e.key))]
   const n = (st: string) => entries.filter((e) => e.row?.status === st).length
@@ -1925,6 +1935,20 @@ function PhoneList({ entries, all, titles, query, onQuery, onPick }: { entries: 
     const { title, where } = labelled(e)
     return matchQuery(query, title, where, e.row?.a.agent)
   })
+  // (The old ones past the first few of their group: behind a tap, unless searched for.)
+  const today = dayStart(now)
+  const yesterday = dayBefore(today)
+  const days = new Map<string, Entry[]>()
+  for (const e of shown) {
+    const d = foldedDay(asRow(e, pins), today, yesterday)
+    if (d) days.set(d, [...(days.get(d) ?? []), e])
+  }
+  const [open, setOpen] = useState(oldOpen)
+  const long = query.trim() ? [] : [...days].filter(([, of]) => of.length > foldAt)
+  const hidden = new Set(long.flatMap(([d, of]) => (open.includes(d) ? [] : of.slice(foldAt))))
+  // (Its line: after the last row shown of its group.)
+  const lineAfter = new Map(long.map(([d, of]) => [open.includes(d) ? of[of.length - 1] : of[foldAt - 1], { d, n: of.length - foldAt }]))
+  const fold = (d: string) => setOpen((o) => (oldOpen = o.includes(d) ? o.filter((x) => x !== d) : [...o, d]))
   return (
     <div className="agents-list" ref={box}>
       <div className="agents-list-top">
@@ -1949,7 +1973,8 @@ function PhoneList({ entries, all, titles, query, onQuery, onPick }: { entries: 
       {(entries.length > SEARCH_FROM || query) && <ListSearch value={query} onChange={onQuery} />}
       {shown.length === 0 && <p className="agents-list-none">{t(query.trim() ? 'convo.searchNone' : 'agents.noneMine')}</p>}
       <ul className="agents-list-rows">
-        {shown.map((e) => {
+        {shown.filter((e) => !hidden.has(e)).map((e) => {
+          const line = lineAfter.get(e)
           const r = e.row
           const status = r?.lost ? 'unknown' : (r?.status ?? 'unknown')
           const { title, where } = labelled(e)
@@ -1989,6 +2014,11 @@ function PhoneList({ entries, all, titles, query, onQuery, onPick }: { entries: 
                   })()}
                 </span>
               </button>
+              {line && (
+                <button type="button" className="link-btn agents-list-more" aria-expanded={open.includes(line.d)} onClick={() => fold(line.d)}>
+                  {open.includes(line.d) ? t('convo.group.less') : t('convo.group.more', { n: line.n })}
+                </button>
+              )}
             </li>
           )
         })}

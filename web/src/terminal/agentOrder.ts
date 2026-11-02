@@ -66,3 +66,32 @@ export function listOrder(rows: ConvoListRow[]): ConvoListRow[] {
 // by the lists and by Alt+Up/Down alike (placeAs, which its page sets);
 // what its row says is as it is.
 export const asHeld = (r: ConvoListRow): ConvoListRow => (r.placeAs && r.current ? { ...r, status: r.placeAs.status, since: r.placeAs.since } : r)
+
+// The rest, as the list shows them: by the day their status last changed;
+// those of no known time (a tmux session, the gateway restarted) last.
+// (today, yesterday: the starts of the two calendar days, a day of a clock
+// change being 23 or 25 hours long.)
+export const DAYS: { name: I18nKey; of: (since: number, today: number, yesterday: number) => boolean }[] = [
+  { name: 'convo.group.today', of: (since, today) => since >= today },
+  { name: 'convo.group.yesterday', of: (since, today, yesterday) => since >= yesterday && since < today },
+  { name: 'convo.group.earlier', of: (since, _, yesterday) => since > 0 && since < yesterday },
+  { name: 'convo.group.other', of: (since) => since <= 0 },
+]
+// The groups of old ones that are folded when long, and how many of such
+// a group are shown unfolded. (Today's and yesterday's are not: they are
+// what the person is at, and are short.)
+export const FOLDED: I18nKey[] = ['convo.group.earlier', 'convo.group.other']
+export const foldAt = 5
+
+export const dayStart = (now: number) => new Date(now).setHours(0, 0, 0, 0)
+export const dayBefore = (start: number) => {
+  const d = new Date(start)
+  d.setDate(d.getDate() - 1)
+  return d.setHours(0, 0, 0, 0) // (a midnight skipped by a clock change: its first hour)
+}
+
+// Of the old ones, which group folded when long a row is in (at rest,
+// unpinned, since before yesterday or since no known time); else none.
+const recent = GROUPS.find((g) => g.name === 'convo.group.recent')!
+export const foldedDay = (r: ConvoListRow, today: number, yesterday: number) =>
+  recent.of(r) ? DAYS.find((d) => FOLDED.includes(d.name) && d.of(r.since ?? 0, today, yesterday))?.name : undefined
