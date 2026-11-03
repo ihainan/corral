@@ -86,13 +86,8 @@ func suggestionOf(screen string) string {
 				break
 			}
 		}
-		if end < 0 || len(plain)-end-1 > typedFoot {
+		if end < 0 || !boxFootClear(plain[end+1:], typedFoot) {
 			return ""
-		}
-		for _, l := range plain[end+1:] {
-			if strings.Contains(l, "❯") || typedChoice.MatchString(l) {
-				return ""
-			}
 		}
 		// (What the lines are drawn in carries on from line to line, and from
 		// before the mark: a line break does not reset it.)

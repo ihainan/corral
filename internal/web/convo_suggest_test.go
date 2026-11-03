@@ -29,6 +29,12 @@ func TestSuggestionOf(t *testing.T) {
 		{"a colour not grey", box("❯ \x1b[38;2;200;80;80mred words\x1b[0m"), ""},
 		{"a dialog in front, a box above", box("❯ \x1b[2m提交并推送\x1b[0m") + "\n\n Do you want to proceed?\n ❯ 1. Yes\n   2. No\n", ""},
 		{"no box", "$ ls\nREADME.md", ""},
+		// (A ❯ left on a row of the list of agents where it was tapped, the
+		// box's status line drawn: no cursor — agent-view.md; the list with
+		// the keys, its cursor: none.)
+		{"a tapped row's ❯ under the box", box("❯ \x1b[2m提交并推送\x1b[0m") + "\n\n  ● main\n❯ ◯ general-purpose  Count the files", "提交并推送"},
+		{"many subagents listed", box("❯ \x1b[2m提交并推送\x1b[0m") + "\n\n  ● main" + strings.Repeat("\n  ◯ Explore  reading", 12), "提交并推送"},
+		{"the list with the keys", "● 好了。\n\n" + rule + "\n❯ \x1b[2m提交并推送\x1b[0m\n" + rule + "\n  ↑/↓ to select\n\n❯ ● main\n  ◯ general-purpose  x", ""},
 	} {
 		if got := suggestionOf(c.screen); got != c.want {
 			t.Errorf("%s: %q, want %q", c.name, got, c.want)

@@ -94,13 +94,8 @@ func cardFrameOf(screen string) *cardFrame {
 			break
 		}
 	}
-	if end < 0 || len(plain)-end-1 > typedFoot {
+	if end < 0 || !boxFootClear(plain[end+1:], typedFoot) {
 		return nil
-	}
-	for _, l := range plain[end+1:] {
-		if strings.Contains(l, "❯") || typedChoice.MatchString(l) {
-			return nil
-		}
 	}
 	// Its head: the nearest line above that begins, at its very start, with
 	// the star; every line between set in by two at least, or blank, or a
@@ -300,6 +295,10 @@ func cardRegion(lines []string, star, end int) string {
 // rule), its lower rule, and the nearest line above it beginning with the
 // star at its very start; its lines printed as drawn, \r taken out. Nothing printed where there is none. (Bytes, not characters: any awk.)
 const cardRegionAwk = `function note(q) { match(q, /^ */); return RLENGTH >= 24 && length(q) > RLENGTH }
+function squeeze(s) { gsub(/[ \t]/, "", s); gsub(/\302\240/, "", s); return s }
+function agentrow(s) { return s ~ "^[ \t]*(\342\235\257[ \t]+)?(\342\227\257|\342\227\217) [^ \t]+([ \t][ \t]+.*|[ \t]*)$" }
+function mainrow(s) { return s ~ "^[ \t]*(\342\235\257[ \t]+)?(\342\227\257|\342\227\217) main[ \t]*$" }
+function modeline(s,  q) { q = s; sub(/^([ \t]|\302\240)+/, "", q); return index(q, "\342\217\265") == 1 || index(q, "\342\217\270") == 1 || index(squeeze(s), "?forshortcuts") == 1 }
 index($0, "\001corral: unread") { unread = 1 }
 { gsub(/\r/, ""); raw[NR] = $0; p = $0; gsub(/\033\[[0-9;]*m/, "", p); plain[NR] = p }
 END {
@@ -312,8 +311,28 @@ END {
   if (!mark) exit
   end = 0
   for (j = mark + 1; j <= n; j++) if (plain[j] ~ rule) { end = j; break }
-  if (!end || n - end > 10) exit
-  for (j = end + 1; j <= n; j++) if (index(plain[j], "\342\235\257") || plain[j] ~ /^[ \t\f]*[0-9]+\.[ \t\f]/) exit
+  if (!end) exit
+  # (Under it, as boxFootClear: its status lines, ten at most, and its list
+  # of agents; a ❯ on a row of the list under the status line of the box is
+  # where it was tapped, no cursor.)
+  for (j = end + 1; j <= n; j++) AG[j] = 0
+  j = end + 1
+  while (j <= n) {
+    if (!agentrow(plain[j])) { j++; continue }
+    k = j; m = 0
+    while (k <= n && agentrow(plain[k])) { if (mainrow(plain[k])) m = 1; k++ }
+    if (m) for (x = j; x < k; x++) AG[x] = 1
+    j = k
+  }
+  kl = ""; hv = 0
+  for (j = end + 1; j <= n; j++) { if (AG[j]) { hv = modeline(kl); break }; if (squeeze(plain[j]) != "") kl = plain[j] }
+  other = 0
+  for (j = end + 1; j <= n; j++) {
+    if (AG[j]) { if (index(plain[j], "\342\235\257") && !hv) exit; continue }
+    if (index(plain[j], "\342\235\257") || plain[j] ~ /^[ \t\f]*[0-9]+\.[ \t\f]/) exit
+    other++
+  }
+  if (other > 10) exit
   star = 0
   for (k = mark - 2; k >= 1 && k >= mark - 61; k--) {
     if (index(plain[k], "\342\234\246 ") == 1) { star = k; break }

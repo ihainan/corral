@@ -225,6 +225,33 @@ func ownerPlaceholder(box []string) bool {
 // "Message @code-modernization:……" — review563.)
 var ownerPlaceholderRe = regexp.MustCompile(`^Message @[A-Za-z0-9_.:-]+…?…$`)
 
+// boxFootClear: what is under Claude Code's input box (foot, the lines
+// after its lower rule) is its status lines and its list of agents only —
+// no picker's or dialog's choice (a ❯, "1. …"), at most n lines of status
+// (the list's rows not counted: many subagents are no dialog). A ❯ on a
+// row of the list where the box's own status line is drawn is where it was
+// last clicked, not a cursor (agent-view.md): read as one, the suggestion,
+// the card and a message still in the box were no longer seen once a row
+// had been tapped.
+func boxFootClear(foot []string, n int) bool {
+	agents := ownerAgents(foot)
+	hover := ownerBoxStatus(foot, agents)
+	other := 0
+	for k, l := range foot {
+		if agents[k] {
+			if strings.Contains(l, "❯") && !hover {
+				return false
+			}
+			continue
+		}
+		if strings.Contains(l, "❯") || typedChoice.MatchString(l) {
+			return false
+		}
+		other++
+	}
+	return other <= n
+}
+
 // ownerFoot: how many status lines under the box (the list of agents aside)
 // are taken for its own.
 const ownerFoot = 12

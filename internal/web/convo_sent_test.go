@@ -95,6 +95,9 @@ func TestStillTyped(t *testing.T) {
 		{"no box at all", "$ ls\nREADME.md\n", false},
 		{"a short dialog under an old box", box(msg)[:len(box(msg))-len(foot)] + "\n Do you want to proceed?\n ❯ 1. Yes\n   2. No\n Esc to cancel", false},
 		{"a dialog's numbered choice under it", box(msg) + "\n 1. Yes", false},
+		// (A ❯ left on a tapped row of the list of agents: no cursor — agent-view.md.)
+		{"a tapped row's ❯ in the list under it", box(msg) + "\n\n  ● main\n❯ ◯ general-purpose  Count the files", true},
+		{"the list with the keys under it", rule + "\n❯ " + msg + "\n" + rule + "\n  ↑/↓ to select\n\n❯ ● main\n  ◯ general-purpose  x", false},
 	} {
 		if got := stillTyped(c.screen, msg); got != c.want {
 			t.Errorf("%s: %v, want %v", c.name, got, c.want)

@@ -163,7 +163,7 @@ func runOwnerCases(t *testing.T, check func(name, screen, before, after string))
 // real screens of each step (agent-view.md), by every awk there is here.
 func TestClaudeFootAwk(t *testing.T) {
 	// (Both put in the host's script between single quotes: none of their own.)
-	for name, prog := range map[string]string{"claudeFootAwk": claudeFootAwk, "claudeOwnerAwk": claudeOwnerAwk} {
+	for name, prog := range map[string]string{"claudeFootAwk": claudeFootAwk, "claudeOwnerAwk": claudeOwnerAwk, "cardRegionAwk": cardRegionAwk} {
 		if strings.Contains(prog, "'") {
 			t.Fatalf("%s holds a single quote: the script around it breaks", name)
 		}

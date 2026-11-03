@@ -165,7 +165,9 @@ func TestCardRegionAwkAgrees(t *testing.T) {
 	if b, err := os.ReadFile(filepath.Join(os.Getenv("HOME"), "tmp/corral-devtools/ccmock/samples/headsup-cjk.txt")); err == nil {
 		bases = append(bases, string(b))
 	}
-	pool := []string{"", "\x1b[0m", "\r", " ", " x", "\f", "\f1. x", "  1. Menu choice", "❯ more", "● thread", "  indented", strings.Repeat(" ", 30) + "note", "  status", rule, "✦ Another", "\t", " \t", "1.", "  2.\tx"}
+	pool := []string{"", "\x1b[0m", "\r", " ", " x", "\f", "\f1. x", "  1. Menu choice", "❯ more", "● thread", "  indented", strings.Repeat(" ", 30) + "note", "  status", rule, "✦ Another", "\t", " \t", "1.", "  2.\tx",
+		// (The list of agents under the box, a ❯ left on a tapped row, the box's status line or the list's keys — agent-view.md.)
+		"  ● main", "❯ ● main", "  ◯ general-purpose  Count the files", "❯ ◯ general-purpose  Count", "  ◯ main", "  ⏸ manual mode on · ↓ to manage", "\u00a0⏵⏵ auto mode on", "  ? for shortcuts", "  ↑/↓ to select"}
 	rnd := rand.New(rand.NewSource(408))
 	checked := map[bool]int{}
 	for i := 0; i < 3000; i++ {

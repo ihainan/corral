@@ -290,14 +290,9 @@ func typedIn(screen, text string, whole bool) bool {
 				break
 			}
 		}
-		if end < 0 || len(lines)-end-1 > typedFoot {
-			return false
-		}
 		// (Under it, status lines only: a choice there, a dialog's, is in front.)
-		for _, l := range lines[end+1:] {
-			if strings.Contains(l, "\u276f") || typedChoice.MatchString(l) {
-				return false
-			}
+		if end < 0 || !boxFootClear(lines[end+1:], typedFoot) {
+			return false
 		}
 		box := strings.TrimPrefix(squeeze(strings.Join(lines[i:end], "\n")), "\u276f")
 		want := squeeze(text)
