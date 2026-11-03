@@ -1085,8 +1085,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
         changed = true
         p = { ...p, gen: convo.gen, after: -Infinity }
       }
-      // (Or its words, blanks aside: one sent as Enter for the same words already in the box is there as the box had it — review575.)
-      const hit = users.find((e) => after(e, p) && !p.not?.includes(e.id) && (sameTurn(e, p.text) || sameWords(e, p.text)))
+      const hit = users.find((e) => after(e, p) && !p.not?.includes(e.id) && sameTurn(e, p.text))
       if (!hit) return [p]
       u.add(hit.seq)
       if (hit.id) taken.push(hit)
@@ -1095,6 +1094,23 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       changed = true
       return []
     })
+    // Then, of those not found so, by their words blanks aside — one sent as
+    // Enter for the same words already in the box is there as the box had
+    // them (review575) — the latest sent first: an older one of the same
+    // words, which never went, does not take its turn (review576).
+    {
+      const gone = new Set<number>()
+      for (const p of next.filter((q) => q.state !== 'sent' && ofThis(q.bind)).sort((a, b) => b.at - a.at)) {
+        const hit = users.find((e) => after(e, p) && !p.not?.includes(e.id) && sameWords(e, p.text))
+        if (!hit) continue
+        u.add(hit.seq)
+        if (hit.id) taken.push(hit)
+        got(p)
+        gone.add(p.id)
+        changed = true
+      }
+      if (gone.size) next = next.filter((q) => !gone.has(q.id))
+    }
     const merged: ConvoEntry[] = [] // (turns found as several: no other's, after a reload too)
     // Two or more sent one after another, not found each as its own turn,
     // and taken in as one (the first's Enter let go of): all of them arrived.

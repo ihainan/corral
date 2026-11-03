@@ -23,6 +23,11 @@ func TestBoxDigestAwk(t *testing.T) {
 		"x\n" + rule + "\n❯\u00a0分析现在是否可以部署 \n" + rule + "\n  ⏸ manual mode on\n",
 		"x\r\n" + rule + "\r\n❯ first line\r\n  second\u00a0line\r\n" + rule + "\r\n",
 		"old\n" + rule + "\n❯ old box\n" + rule + "\nthread\n" + rule + "\n❯ \n" + rule + "\n",
+		"x\n" + rule + "\n❯ 请把 a  b\t改成\u00a0\u00a0ab  \n  第二行\n" + rule + "\n",
+	}
+	// (As strict as boxSame: a blank in a line is the words' own — review576.)
+	if boxDigest("x\n"+rule+"\n❯ 请把 a b 改成 ab\n"+rule+"\n") == boxDigest("x\n"+rule+"\n❯ 请把 ab 改成 a b\n"+rule+"\n") {
+		t.Error("words with their blanks moved: the same digest")
 	}
 	for _, loc := range []string{"C", "C.UTF-8"} {
 		for _, a := range []string{"gawk", "mawk", "busybox"} {

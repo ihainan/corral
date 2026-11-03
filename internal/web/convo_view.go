@@ -285,9 +285,12 @@ func boxSame(lines []string, text string) bool {
 	return want != "" && at == len(want)
 }
 
-// boxDigest: the bottom input box's words, blanks out (ownerSqueeze), the
-// prompt's mark taken off, hashed (SHA-256, hex, of them and a line break)
-// — as claudeBoxAwk on the host, piped to sha256sum. "" where no box.
+// boxDigest: the bottom input box's words, a line each, its blanks (space,
+// tab, no-break space) run together as one and none at its ends, the
+// prompt's mark taken off, the lines one after another with a line break,
+// hashed (SHA-256, hex, of them and a line break) — as claudeBoxAwk on the
+// host, piped to sha256sum: as strict as boxSame, a blank in a line not let
+// go of (review576). "" where no box.
 func boxDigest(screen string) string {
 	lines := strings.Split(screen, "\n")
 	for k, l := range lines {
@@ -313,7 +316,10 @@ func boxDigest(screen string) string {
 			if j == i {
 				l = ownerPrompt.ReplaceAllString(l, "")
 			}
-			b.WriteString(ownerSqueeze(l))
+			if j > i {
+				b.WriteString("\n")
+			}
+			b.WriteString(strings.Join(strings.FieldsFunc(l, func(r rune) bool { return r == ' ' || r == '\t' || r == '\u00a0' }), " "))
 		}
 		sum := sha256.Sum256([]byte(b.String() + "\n"))
 		return hex.EncodeToString(sum[:])
@@ -333,7 +339,7 @@ END {
     for (j = i + 1; j <= NR; j++) if (isrule(L[j])) { e = j; break }
     if (!e) continue
     b = ""
-    for (j = i; j < e; j++) { t = L[j]; if (j == i) sub(/^[ \t]*❯/, "", t); b = b squeeze(t) }
+    for (j = i; j < e; j++) { t = L[j]; if (j == i) sub(/^[ \t]*❯/, "", t); gsub(/NBSP/, " ", t); gsub(/[ \t]+/, " ", t); sub(/^ /, "", t); sub(/ $/, "", t); b = (j == i) ? t : b "\n" t }
     print b; exit
   }
 }`, "NBSP", "\u00a0")
