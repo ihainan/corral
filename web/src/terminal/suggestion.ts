@@ -66,17 +66,23 @@ export function promptSuggestion(term: Terminal): string | null {
       for (; e < foot.length && AGENT_ROW.test(foot[e]); e++) main ||= MAIN_ROW.test(foot[e])
       for (; k < e; k++) agents[k] = main
     }
-    let keys = ''
-    for (let k = 0; k < foot.length && !agents[k]; k++) if (foot[k].trim()) keys = foot[k]
+    // (Its mode line whole, where a narrow screen wrapped it.)
+    let end = -1
+    for (let k = 0; k < foot.length && !agents[k]; k++) if (foot[k].trim()) end = k
+    let start = end
+    while (start > 0 && wrapped[start]) start--
+    const keys = end < 0 ? '' : foot.slice(start, end + 1).join('')
     const clicked = /^\s*[⏵⏸]/.test(keys) || /^\?forshortcuts/.test(keys.replace(/\s+/g, ''))
-    // (The list's rows are not counted: many subagents are no dialog. A
-    // clicked one's ❯ is drawn from the edge.)
+    // (The list's rows are not counted: many subagents are no dialog. They
+    // are set in as the rest, but for a clicked one's ❯, drawn from the edge.)
     if (agents.filter((a) => !a).length > FOOT) return false
     return foot.every(
       (s, k) =>
         !s.trim() ||
         (agents[k]
-          ? !s.includes('❯') || clicked
+          ? /^\s/.test(s)
+            ? !s.includes('❯') || clicked
+            : s.startsWith('❯') && clicked
           : (/^\s/.test(s) || wrapped[k]) && !s.includes('❯') && !/^\s*\d+\.\s/.test(s)),
     )
   }
