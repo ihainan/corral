@@ -5,14 +5,17 @@ import type { IBufferCell, IBufferLine, Terminal } from '@xterm/xterm'
 // the cursor is), taken with Tab. The composer offers the same text. It is
 // read off the live screen (not the scrollback), as drawn by Claude Code or
 // by herdr around it: the box is a row with "❯ " between two rows of "─",
-// near the bottom of what is drawn (not of the screen: Claude Code draws in
-// the screen's flow, so with little above it on a tall screen the box is high
-// and the rows under it blank); the text counts only when every character of it is greyed
+// the lowest such, with at most a few rows drawn under it in its columns (its
+// status lines; not a menu, nor another prompt: then that box is an old one),
+// as convo_suggest.go reads a pane. (Not near the screen's foot: Claude Code
+// draws in the screen's flow, so with little above it on a tall screen the
+// box is high and the rows under it blank.) The text counts only when every character of it is greyed
 // (dim, or a grey colour), so what the user typed (in the default or a bright
 // colour) never does. Claude Code's own example ('Try "…"', in an empty box)
 // is not a suggestion. Everything is in cell columns, as the screen is.
 
-const LOOK_ROWS = 16 // up from the lowest row with anything on it
+const FOOT = 10 // rows drawn under the box at most (convo_suggest.go's typedFoot)
+const EDGES = '│▕▐┃' // borders herdr draws at a pane's edge
 const RULE_MIN = 8 // cells of "─" over and under the prompt's mark
 
 export function promptSuggestion(term: Terminal): string | null {
@@ -25,17 +28,43 @@ export function promptSuggestion(term: Terminal): string | null {
     for (let i = 0; i < RULE_MIN; i++) if (chars(l, x + i) !== '─') return false
     return true
   }
-  let last = rows - 1
-  while (last > 0 && !line(last)?.translateToString(true).trim()) last--
-  for (let y = Math.min(rows - 2, last - 1); y >= Math.max(1, last - LOOK_ROWS); y--) {
+  // A row from column x up to a pane's edge (not a sidebar beside it).
+  const from = (l: IBufferLine | undefined, x: number) => {
+    let s = ''
+    for (let i = x; i < term.cols; i++) {
+      const ch = chars(l, i)
+      if (ch && EDGES.includes(ch)) break
+      s += ch || ' '
+    }
+    return s
+  }
+  // Under the box at row y: its status lines only.
+  const current = (y: number, x: number) => {
+    let n = 0
+    let blank = 0
+    for (let j = y + 2; j < rows; j++) {
+      const s = from(line(j), x)
+      if (!s.trim()) {
+        blank++
+        continue
+      }
+      // (A ❯ on a row of its agents' list is where one was last clicked, or
+      // the list's cursor: still that box.)
+      if ((s.includes('❯') && !/^\s*❯\s+[◯●] /.test(s)) || /^\s*\d+\.\s/.test(s)) return false
+      n += blank + 1
+      blank = 0
+      if (n > FOOT) return false
+    }
+    return true
+  }
+  for (let y = rows - 2; y >= 1; y--) {
     const l = line(y)
     if (!l) continue
     // Every mark on the row (a sidebar next to the box may have one too).
     for (let x = 0; x < term.cols - 1; x++) {
       if (chars(l, x) !== '❯' || !/^[  ]$/.test(chars(l, x + 1))) continue
       if (!ruled(line(y - 1), x) || !ruled(line(y + 1), x)) continue
-      const s = greyedAfter(term, l, x + 2)
-      if (s !== null) return s
+      return current(y, x) ? greyedAfter(term, l, x + 2) : null
     }
   }
   return null
