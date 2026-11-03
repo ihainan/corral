@@ -1221,7 +1221,9 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   useEffect(() => {
     if (!active || document.hidden) return
     const now = Date.now()
-    if (shownSent.some((p) => wentOf(p) && !p.wentSeen)) setSent((ps) => ps.map((p) => (wentOf(p) && !p.wentSeen && ofThis(p.bind) ? { ...p, wentSeen: now } : p)))
+    // (Only those shown: one held back as queued is not seen yet — review578.)
+    const ids = new Set(shownSent.filter((p) => wentOf(p) && !p.wentSeen).map((p) => p.id))
+    if (ids.size) setSent((ps) => ps.map((p) => (ids.has(p.id) && !p.wentSeen ? { ...p, wentSeen: now } : p)))
   })
   useEffect(() => {
     const seen = sent.filter((p) => wentOf(p) && p.wentSeen)
