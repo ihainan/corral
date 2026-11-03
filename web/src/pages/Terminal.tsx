@@ -289,7 +289,9 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
       timer = window.setTimeout(read, 250)
     }
     read()
-    const subs = [term.onWriteParsed(soon), term.onScroll(soon)] // (scrolled back to the live screen too)
+    // (Scrolled back to the live screen too; resized too, as opening the
+    // composer does after the first read, and a shell needn't draw again.)
+    const subs = [term.onWriteParsed(soon), term.onScroll(soon), term.onResize(soon)]
     document.addEventListener('visibilitychange', soon)
     return () => {
       clearTimeout(timer)
