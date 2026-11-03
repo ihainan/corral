@@ -138,6 +138,13 @@ type sgrState struct{ dim bool }
 // box is empty or holds greyed words only (a suggestion, its example, a
 // placeholder). known false where no box in front is seen.
 func boxDraft(screen string) (draft string, known bool) {
+	ls, known := boxDraftLines(screen)
+	return strings.Join(ls, " "), known
+}
+
+// boxDraftLines: boxDraft's words, a line of the box each (none where it
+// holds none, or greyed ones only).
+func boxDraftLines(screen string) (words []string, known bool) {
 	lines := strings.Split(strings.TrimRight(screen, "\r\n"), "\n")
 	plain := make([]string, len(lines))
 	for i, l := range lines {
@@ -155,14 +162,13 @@ func boxDraft(screen string) (draft string, known bool) {
 			}
 		}
 		if end < 0 || !boxFootClear(plain[end+1:], typedFoot) {
-			return "", false
+			return nil, false
 		}
 		var st sgrState
 		for j := 0; j < i; j++ {
 			st = st.through(lines[j])
 		}
 		greyed := true
-		var words []string
 		for j := i; j < end; j++ {
 			l, p := strings.TrimRight(lines[j], "\r"), plain[j]
 			if j == i {
@@ -182,11 +188,11 @@ func boxDraft(screen string) (draft string, known bool) {
 			}
 		}
 		if greyed || len(words) == 0 {
-			return "", true
+			return nil, true
 		}
-		return strings.Join(words, " "), true
+		return words, true
 	}
-	return "", false
+	return nil, false
 }
 
 func (st sgrState) through(s string) sgrState {

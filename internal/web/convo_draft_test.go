@@ -51,8 +51,23 @@ func TestBoxDigestAwk(t *testing.T) {
 	if strings.Contains(claudeBoxAwk, "'") {
 		t.Fatal("claudeBoxAwk holds a single quote: the script around it breaks")
 	}
-	if boxWords("conver sation.go 第二\n行") != boxWords("conversation.go 第二行") {
-		t.Error("a wrap's blank in a word: not the same words")
+	for _, c := range []struct {
+		lines []string
+		text  string
+		want  bool
+	}{
+		{[]string{"分析现在是否可以部署"}, "分析现在是否可以部署", true},
+		{[]string{"分析", "现在是否可以部署"}, "分析现在是否可以部署", true}, // (a wrap in a word)
+		{[]string{"look at internal/web/conver", "sation.go"}, "look at internal/web/conversation.go", true},
+		{[]string{"the quick brown", "fox"}, "the quick brown fox", true}, // (a wrap at a blank)
+		{[]string{"two  blanks"}, "two blanks", true},                     // (blanks run together, as the page's sameTurn)
+		{[]string{"分析 现在是否可以部署"}, "分析现在是否可以部署", false},                    // (a blank more: as the page would not find it)
+		{[]string{"[Pasted text #1 +3 lines] 请检查"}, "[Pasted text #1 +3 lines] 请检查", false},
+		{nil, "x", false},
+	} {
+		if got := boxSame(c.lines, c.text); got != c.want {
+			t.Errorf("boxSame(%q, %q) = %v, want %v", c.lines, c.text, got, c.want)
+		}
 	}
 }
 

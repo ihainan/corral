@@ -2763,8 +2763,10 @@ if [ -n "$gate" ]; then
   box:*)
     [ "$st" = waiting ] && exit 9
     command -v sha256sum >/dev/null 2>&1 || exit 11
-    if [ "$mode" = tmux ]; then d=$(tmux -u capture-pane -p -t "$p" 2>/dev/null 9>&- | awk 'BOXAWK' | sha256sum)
-    else d=$(HERDR_SOCKET_PATH=$sock herdr pane read "$p" --source visible 2>/dev/null 9>&- | awk 'BOXAWK' | sha256sum); fi
+    # (Read first, on its own: a read that failed is no screen — review572.)
+    if [ "$mode" = tmux ]; then bs=$(tmux -u capture-pane -p -t "$p" 2>/dev/null 9>&-) || exit 10
+    else bs=$(HERDR_SOCKET_PATH=$sock herdr pane read "$p" --source visible 2>/dev/null 9>&-) || exit 10; fi
+    d=$(printf '%s\n' "$bs" | awk 'BOXAWK' | sha256sum)
     [ "${d%% *}" = "${gate#box:}" ] || exit 10 ;;
   screen:*)
     [ "$st" = waiting ] && exit 9; [ "$st" = title-unread ] && exit 11
@@ -3549,20 +3551,52 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		// (A subagent's conversation in front, or the list with the keys:
 		// the conversation's own box brought back first — what it holds is
 		// not seen till then — review571.)
+		// (Not seen for sure after that — the switch failing, or its screen
+		// not read, or not main's — nothing more: main's box may hold words
+		// that would go with this — review572.)
 		if v := claudeOwner(sgr.ReplaceAllString(scr, ""), false); ok && (v == "subagent" || v == "list") {
 			sctx, scancel := context.WithTimeout(ctx, 20*time.Second)
-			res, err := sshx.Exec(sctx, sess.Client(), convoGatedCommand("free", sess.Persistence, sess.TmuxSession, b.Pane, socket, b.PID, b.Start, b.Session, 0, []string{}, 0), sendOut, sshx.ExecOptions{Stdin: strings.NewReader("")})
+			ended.Add(1) // (the pane's turn held till it has ended on the host)
+			res, err := sshx.Exec(sctx, sess.Client(), convoGatedCommand("free", sess.Persistence, sess.TmuxSession, b.Pane, socket, b.PID, b.Start, b.Session, 0, []string{}, 0), sendOut, sshx.ExecOptions{Stdin: strings.NewReader(""), Release: ended.Done})
 			scancel()
+			var exitErr *sshx.ExitError
 			if err == nil {
 				_, restoredFirst = viewRestored(res.Out)
 				scr, ok = look()
 			}
+			switch {
+			case err == nil && ok && claudeOwner(sgr.ReplaceAllString(scr, ""), false) == "main":
+			case errors.Is(err, sshx.ErrBusy) || errors.As(err, &exitErr) && exitErr.Status == 7:
+				ended.Done()
+				outcome, reason = "refused", "busy"
+				writeError(w, http.StatusTooManyRequests, "busy", "the host is still answering earlier requests")
+				return
+			case errors.As(err, &exitErr) && exitErr.Status == 9:
+				ended.Done()
+				outcome, reason = "refused", "agent_waiting"
+				writeError(w, http.StatusConflict, "agent_waiting", "it waits for an answer, or has a dialog open: answer it first")
+				return
+			case errors.As(err, &exitErr) && exitErr.Status == 3:
+				ended.Done()
+				outcome, reason = "refused", "agent_changed"
+				writeError(w, http.StatusConflict, "agent_changed", "that pane no longer runs this agent")
+				return
+			default:
+				ended.Done()
+				outcome = "refused"
+				if code, _, isOwner := writeOwnerRefusal(w, err); isOwner {
+					reason = code
+					return
+				}
+				reason = "view_unsure"
+				writeError(w, http.StatusConflict, "view_unsure", "the terminal was being brought back to this conversation, and where it is now is not seen for sure: nothing was typed; look at the terminal")
+				return
+			}
 		}
 		if plain := sgr.ReplaceAllString(scr, ""); ok && claudeOwner(plain, false) == "main" {
-			if d, ok := boxDraft(scr); ok && d != "" {
-				// (The same words, blanks aside — a wrap on the screen puts one
-				// in a word; not a folded paste, whose words are not there.)
-				if what == "send" && boxWords(d) == boxWords(text) && !strings.Contains(d, "[Pasted text #") && boxDigest(plain) != "" {
+			if ls, ok := boxDraftLines(scr); ok && len(ls) > 0 {
+				d := strings.Join(ls, " ")
+				if what == "send" && boxSame(ls, text) && boxDigest(plain) != "" {
 					inBox, gate, press = true, "box:"+boxDigest(plain), []string{"enter"}
 					if sess.Persistence == "tmux" {
 						press = []string{"Enter"}
@@ -3663,7 +3697,7 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	if answer != nil && outcome != "refused" {
 		answer.digest, answer.at = b.Digest, time.Now()
 	}
-	if outcome == "typed" && what == "send" && (front.agent == "claude" || front.agent == "codex") {
+	if outcome == "typed" && what == "send" && !inBox && (front.agent == "claude" || front.agent == "codex") {
 		s.enterAgain(ctx, sess, b.Pane, socket, front.agent, b.PID, b.Start, b.Session, text, string(res.Out), &ended, func(d time.Duration) (context.Context, func()) {
 			// (Within the login's time; told of a sign-out from now on, and
 			// one before now found by asking once registered.)

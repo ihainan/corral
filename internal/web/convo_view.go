@@ -255,15 +255,20 @@ func boxFootClear(foot []string, n int) bool {
 	return other <= n
 }
 
-// boxWords: a text as its words are compared with a box's: every blank out
-// (a wrap on the screen breaks a word with one).
-func boxWords(s string) string {
-	return strings.Map(func(r rune) rune {
-		if unicode.IsSpace(r) || r == '\u00a0' {
-			return -1
-		}
-		return r
-	}, s)
+// boxSame: the words in the box (its lines, as boxDraftLines reads them)
+// are the message's — its lines as one, a wrap's break taken as a blank or
+// as none (a wrap may break a word), blanks run together: as the page will
+// find the message in the log (sameTurn). Not a folded paste: its words are
+// not there to compare — review571/572.
+func boxSame(lines []string, text string) bool {
+	if len(lines) == 0 || strings.Contains(strings.Join(lines, " "), "[Pasted text #") {
+		return false
+	}
+	want := strings.Join(strings.FieldsFunc(text, func(r rune) bool { return unicode.IsSpace(r) || r == '\u00a0' }), " ")
+	norm := func(s string) string {
+		return strings.Join(strings.FieldsFunc(s, func(r rune) bool { return unicode.IsSpace(r) || r == '\u00a0' }), " ")
+	}
+	return want != "" && (norm(strings.Join(lines, " ")) == want || norm(strings.Join(lines, "")) == want)
 }
 
 // boxDigest: the bottom input box's words, blanks out (ownerSqueeze), the
