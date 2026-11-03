@@ -21,6 +21,15 @@ export const sameTurn = (e: ConvoEntry, sent: string) => {
   const want = n(images ? sent.replace(PICTURE, ' ') : sent)
   return parts.some((p) => p.truncated) ? got.length >= 1000 && want.startsWith(got) : got === want
 }
+// The turn of a message sent as Enter for the same words already in the
+// box (the gateway compares them blanks out: a wrap and a line break of
+// their own look alike on the screen): its words, every blank out.
+export const sameWords = (e: ConvoEntry, sent: string) => {
+  if (e.parts.some((p) => p.kind === 'image' || p.truncated)) return false
+  const n = (s: string) => s.replace(/\s+/g, '')
+  const want = n(sent)
+  return !!want && n(e.parts.filter((p) => p.kind === 'text').map((p) => p.text).join('')) === want
+}
 // One turn of several messages sent one after another: the first's Enter
 // let go of, the next typed on after it in the box, all taken in as one.
 // Their words run together, spaces aside, are the turn's.

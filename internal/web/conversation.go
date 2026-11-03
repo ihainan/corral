@@ -3594,9 +3594,9 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 			}
 		}
 		if plain := sgr.ReplaceAllString(scr, ""); ok && claudeOwner(plain, false) == "main" {
-			if ls, full, ok := boxDraftLines(scr); ok && len(ls) > 0 {
+			if ls, ok := boxDraftLines(scr); ok && len(ls) > 0 {
 				d := strings.Join(ls, " ")
-				if what == "send" && boxSame(ls, full, text) && boxDigest(plain) != "" {
+				if what == "send" && boxSame(ls, text) && boxDigest(plain) != "" {
 					inBox, gate, press = true, "box:"+boxDigest(plain), []string{"enter"}
 					if sess.Persistence == "tmux" {
 						press = []string{"Enter"}

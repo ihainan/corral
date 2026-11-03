@@ -256,40 +256,25 @@ func boxFootClear(foot []string, n int) bool {
 }
 
 // boxSame: the words in the box (its lines, as boxDraftLines reads them)
-// are the message's — its lines as one, a wrap's break taken as a blank or
-// as none (a wrap may break a word), blanks run together: as the page will
-// find the message in the log (sameTurn). Not a folded paste: its words are
-// not there to compare — review571/572.
-func boxSame(lines []string, full []bool, text string) bool {
-	if len(lines) == 0 || len(full) != len(lines) || strings.Contains(strings.Join(lines, " "), "[Pasted text #") {
+// are the message's, every blank out: a wrap on the screen and a line
+// break of the words' own cannot be told apart there (review573/574), so
+// blanks are not compared at all — and the page, told it was Enter for
+// the box's words, finds it in the log the same way (sameWords). Not a
+// folded paste: its words are not there to compare.
+func boxSame(lines []string, text string) bool {
+	if len(lines) == 0 || strings.Contains(strings.Join(lines, " "), "[Pasted text #") {
 		return false
 	}
-	norm := func(s string) string {
-		return strings.Join(strings.FieldsFunc(s, func(r rune) bool { return unicode.IsSpace(r) || r == '\u00a0' }), " ")
+	out := func(s string) string {
+		return strings.Map(func(r rune) rune {
+			if unicode.IsSpace(r) || r == '\u00a0' {
+				return -1
+			}
+			return r
+		}, s)
 	}
-	want := norm(text)
-	// (Line by line: each break a blank where the message has one there; none
-	// only after a line that reaches the box's edge — a wrap in a word; a
-	// line that did not was broken at a blank or by a line break of its
-	// own, which the page reads as a blank too — review573.)
-	at := 0
-	for k, l := range lines {
-		l = norm(l)
-		if !strings.HasPrefix(want[at:], l) {
-			return false
-		}
-		at += len(l)
-		if k == len(lines)-1 {
-			break
-		}
-		switch {
-		case at < len(want) && want[at] == ' ':
-			at++
-		case !full[k]:
-			return false
-		}
-	}
-	return want != "" && at == len(want)
+	want := out(text)
+	return want != "" && out(strings.Join(lines, "")) == want
 }
 
 // boxDigest: the bottom input box's words, blanks out (ownerSqueeze), the
