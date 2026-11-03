@@ -221,7 +221,9 @@ func ownerPlaceholder(box []string) bool {
 	return ownerPlaceholderRe.MatchString(strings.Join(parts, " "))
 }
 
-var ownerPlaceholderRe = regexp.MustCompile(`^Message @[A-Za-z0-9_.:-]+…$`)
+// (A long name is cut and ends in "…" of its own before the placeholder's:
+// "Message @code-modernization:……" — review563.)
+var ownerPlaceholderRe = regexp.MustCompile(`^Message @[A-Za-z0-9_.:-]+…?…$`)
 
 // ownerFoot: how many status lines under the box (the list of agents aside)
 // are taken for its own.
@@ -255,7 +257,7 @@ function isprompt(s) { sub(/^[ \t]*/, "", s); return index(s, "❯") == 1 }
 function squeeze(s) { gsub(/[ \t]/, "", s); gsub(/NBSP/, "", s); return s }
 function agentrow(s) { return s ~ /^[ \t]*(❯[ \t]+)?(◯|●) [^ \t]+([ \t][ \t]+.*|[ \t]*)$/ }
 function mainrow(s) { return s ~ /^[ \t]*(❯[ \t]+)?(◯|●) main[ \t]*$/ }
-function placeholder(i, e,  j, t, r) { r = ""; for (j = i; j < e; j++) { t = L[j]; if (j == i) sub(/^[ \t]*❯/, "", t); gsub(/NBSP/, " ", t); sub(/^[ \t]+/, "", t); sub(/[ \t]+$/, "", t); if (t != "") r = (r == "" ? t : r " " t) }; return r ~ /^Message @[A-Za-z0-9_.:-]+…$/ }
+function placeholder(i, e,  j, t, r) { r = ""; for (j = i; j < e; j++) { t = L[j]; if (j == i) sub(/^[ \t]*❯/, "", t); sub(/^([ \t]|NBSP)+/, "", t); sub(/([ \t]|NBSP)+$/, "", t); if (t != "") r = (r == "" ? t : r " " t) }; return r ~ /^Message @[A-Za-z0-9_.:-]+(…)?…$/ }
 function modeline(s,  t) { t = s; sub(/^[ \tNBSP]*/, "", t); return index(t, "⏵") == 1 || index(t, "⏸") == 1 || index(squeeze(s), "?forshortcuts") == 1 }
 { sub(/\r$/, ""); L[NR] = $0 }
 END {
@@ -332,7 +334,7 @@ function isprompt(s) { sub(/^[ \t]*/, "", s); return index(s, "❯") == 1 }
 function squeeze(s) { gsub(/[ \t]/, "", s); gsub(/NBSP/, "", s); return s }
 function agentrow(s) { return s ~ /^[ \t]*(❯[ \t]+)?(◯|●) [^ \t]+([ \t][ \t]+.*|[ \t]*)$/ }
 function mainrow(s) { return s ~ /^[ \t]*(❯[ \t]+)?(◯|●) main[ \t]*$/ }
-function placeholder(i, e,  j, t, r) { r = ""; for (j = i; j < e; j++) { t = L[j]; if (j == i) sub(/^[ \t]*❯/, "", t); gsub(/NBSP/, " ", t); sub(/^[ \t]+/, "", t); sub(/[ \t]+$/, "", t); if (t != "") r = (r == "" ? t : r " " t) }; return r ~ /^Message @[A-Za-z0-9_.:-]+…$/ }
+function placeholder(i, e,  j, t, r) { r = ""; for (j = i; j < e; j++) { t = L[j]; if (j == i) sub(/^[ \t]*❯/, "", t); sub(/^([ \t]|NBSP)+/, "", t); sub(/([ \t]|NBSP)+$/, "", t); if (t != "") r = (r == "" ? t : r " " t) }; return r ~ /^Message @[A-Za-z0-9_.:-]+(…)?…$/ }
 function modeline(s,  t) { t = s; sub(/^[ \tNBSP]*/, "", t); return index(t, "⏵") == 1 || index(t, "⏸") == 1 || index(squeeze(s), "?forshortcuts") == 1 }
 { sub(/\r$/, ""); L[NR] = $0 }
 END {
