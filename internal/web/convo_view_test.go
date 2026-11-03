@@ -43,7 +43,9 @@ var ownerMade = []struct {
 	before, after string
 }{
 	{"placeholder alone, no list", "──────────\n❯ Message @general-purpose…\n──────────\n  ⏵⏵ auto mode on\n", "subagent", "main"},
-	{"our text begins with the placeholder's words", "──────────\n❯ Message @team about it\n──────────\n  ⏵⏵ auto mode on\n", "subagent", "main"},
+	// (Not the placeholder whole: a draft of the person's — review562.)
+	{"our text begins with the placeholder's words", "──────────\n❯ Message @team about it\n──────────\n  ⏵⏵ auto mode on\n", "main", "main"},
+	{"a draft ending as the placeholder, with blanks", "──────────\n❯ Message @team please review…\n──────────\n  ⏵⏵ auto mode on\n", "main", "main"},
 	{"the thread quotes a footer and a box", "❯ ◯ main\n  enter to return · space to reply\n──────────\n❯ old\n──────────\nsome answer\n──────────\n❯ \n──────────\n  ⏵⏵ auto mode on\n", "main", "main"},
 	{"a box with no rule under it", "──────────\n❯ \n  ⏵⏵ auto mode on\n", "none", "none"},
 	{"blank lines at the end, CRs", "──────────\r\n❯ \r\n──────────\r\n  ◯ main\r\n  ● Explore  x\r\n\r\n \r\n", "subagent", "subagent"},
@@ -168,6 +170,7 @@ func TestClaudeFootAwk(t *testing.T) {
 		{"a description with the list's keys in it", "──────────\n❯ \n──────────\n  ⏸ manual mode on\n\n  ● main\n  ◯ Explore  fix the ↑/↓ to select hint · Enter to view\n", "box main none 0 1"},
 		{"a picker's title with a mode's words", "──────────\n❯ \n──────────\n Select branch (? for shortcuts)\n  ● main\n❯ ◯ feature/login  Add login\n", "other main none 0 1"},
 		{"three agents, the cursor and a click on two not shown", "──────────\n❯ Message @Explore…\n──────────\n  ↑/↓ to select · Enter to view\n\n❯ ◯ main\n❯ ◯ Plan  x\n  ● Explore  y\n", "list sub many 1 1"},
+		{"a draft ending as the placeholder, with blanks", "──────────\n❯ Message @team please review…\n──────────\n  ↑/↓ to select · Enter to view\n\n❯ ◯ main\n  ● Explore  y\n", "list sub main 1 0"},
 		{"a draft ending as the placeholder does", "──────────\n❯ Message @team, please review…\n──────────\n  ↑/↓ to select · Enter to view\n\n❯ ◯ main\n  ● Explore  y\n", "list sub main 1 0"},
 		{"a draft beginning with the placeholder's words", "──────────\n❯ Message @team, please review\n──────────\n  ⏸ manual mode on\n\n  ◯ main\n  ● Explore  y\n", "box sub none 0 0"},
 		{"the list's keys under a status line of the person's", "──────────\n❯ \n──────────\n  Opus 5.5 │ Ctx 1K\n  ↑/↓ to select · Enter to view\n\n❯ ◯ main\n  ● Explore  y\n", "list sub main 1 1"},

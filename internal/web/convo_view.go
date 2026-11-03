@@ -135,10 +135,10 @@ func claudeOwner(screen string, after bool) string {
 			}
 		}
 		if !after && !shown {
-			box := ownerSqueeze(ownerPrompt.ReplaceAllString(strings.Join(lines[i:end], ""), ""))
-			if strings.HasPrefix(box, "Message@") {
+			if ownerPlaceholder(lines[i:end]) {
 				return "subagent"
 			}
+			box := ownerSqueeze(ownerPrompt.ReplaceAllString(strings.Join(lines[i:end], ""), ""))
 			if box == "describeataskforanewsession" {
 				return "sessions"
 			}
@@ -203,6 +203,26 @@ func ownerModeLine(l string) bool {
 	return strings.HasPrefix(t, "⏵") || strings.HasPrefix(t, "⏸") || strings.HasPrefix(ownerSqueeze(l), "?forshortcuts")
 }
 
+// ownerPlaceholder: the box (its lines, the prompt's first) holds a
+// subagent's placeholder and nothing else: "Message @<name>…" whole, its
+// name of the letters agents' names have, its lines' blanks at their ends
+// as one space (a narrow pane wraps it). A draft of the person beginning
+// with those words is not one — review560/562.
+func ownerPlaceholder(box []string) bool {
+	parts := make([]string, 0, len(box))
+	for k, l := range box {
+		if k == 0 {
+			l = ownerPrompt.ReplaceAllString(l, "")
+		}
+		if l = strings.Trim(l, " \t\u00a0"); l != "" {
+			parts = append(parts, l)
+		}
+	}
+	return ownerPlaceholderRe.MatchString(strings.Join(parts, " "))
+}
+
+var ownerPlaceholderRe = regexp.MustCompile(`^Message @[A-Za-z0-9_.:-]+…$`)
+
 // ownerFoot: how many status lines under the box (the list of agents aside)
 // are taken for its own.
 const ownerFoot = 12
@@ -235,6 +255,7 @@ function isprompt(s) { sub(/^[ \t]*/, "", s); return index(s, "❯") == 1 }
 function squeeze(s) { gsub(/[ \t]/, "", s); gsub(/NBSP/, "", s); return s }
 function agentrow(s) { return s ~ /^[ \t]*(❯[ \t]+)?(◯|●) [^ \t]+([ \t][ \t]+.*|[ \t]*)$/ }
 function mainrow(s) { return s ~ /^[ \t]*(❯[ \t]+)?(◯|●) main[ \t]*$/ }
+function placeholder(i, e,  j, t, r) { r = ""; for (j = i; j < e; j++) { t = L[j]; if (j == i) sub(/^[ \t]*❯/, "", t); gsub(/NBSP/, " ", t); sub(/^[ \t]+/, "", t); sub(/[ \t]+$/, "", t); if (t != "") r = (r == "" ? t : r " " t) }; return r ~ /^Message @[A-Za-z0-9_.:-]+…$/ }
 function modeline(s,  t) { t = s; sub(/^[ \tNBSP]*/, "", t); return index(t, "⏵") == 1 || index(t, "⏸") == 1 || index(squeeze(s), "?forshortcuts") == 1 }
 { sub(/\r$/, ""); L[NR] = $0 }
 END {
@@ -279,7 +300,7 @@ END {
     if (after != 1 && !sh) {
       b = ""
       for (j = i; j < e; j++) { t = L[j]; if (j == i) sub(/^[ \t]*❯/, "", t); b = b squeeze(t) }
-      if (index(b, "Message@") == 1) { print "subagent"; exit }
+      if (placeholder(i, e)) { print "subagent"; exit }
       if (b == "describeataskforanewsession") { print "sessions"; exit }
     }
     print "main"; exit
@@ -311,6 +332,7 @@ function isprompt(s) { sub(/^[ \t]*/, "", s); return index(s, "❯") == 1 }
 function squeeze(s) { gsub(/[ \t]/, "", s); gsub(/NBSP/, "", s); return s }
 function agentrow(s) { return s ~ /^[ \t]*(❯[ \t]+)?(◯|●) [^ \t]+([ \t][ \t]+.*|[ \t]*)$/ }
 function mainrow(s) { return s ~ /^[ \t]*(❯[ \t]+)?(◯|●) main[ \t]*$/ }
+function placeholder(i, e,  j, t, r) { r = ""; for (j = i; j < e; j++) { t = L[j]; if (j == i) sub(/^[ \t]*❯/, "", t); gsub(/NBSP/, " ", t); sub(/^[ \t]+/, "", t); sub(/[ \t]+$/, "", t); if (t != "") r = (r == "" ? t : r " " t) }; return r ~ /^Message @[A-Za-z0-9_.:-]+…$/ }
 function modeline(s,  t) { t = s; sub(/^[ \tNBSP]*/, "", t); return index(t, "⏵") == 1 || index(t, "⏸") == 1 || index(squeeze(s), "?forshortcuts") == 1 }
 { sub(/\r$/, ""); L[NR] = $0 }
 END {
@@ -351,8 +373,8 @@ END {
     else if (fo == "list") { if (cm + cs > 1) cu = "many"; else if (cm) cu = "main"; else if (cs) cu = "sub" }
     b = ""
     for (j = i; j < e; j++) { t = L[j]; if (j == i) sub(/^[ \t]*❯/, "", t); b = b squeeze(t) }
-    # (The placeholder whole, "Message @<name>…": a draft of the person beginning with those words is no empty box — review560.)
-    em = (b == "" || b ~ /^Message@[A-Za-z0-9_.:-]+…$/) ? 1 : 0
+    # (The placeholder whole: see ownerPlaceholder.)
+    em = (b == "" || placeholder(i, e)) ? 1 : 0
     print fo, vw, cu, ev, em; exit
   }
   print "none none none 0 0"

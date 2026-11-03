@@ -32,7 +32,7 @@ const (
 	wentFragMax  = 96      // bytes of the message looked for (the longest run of it written as is)
 	wentFragMin  = 3
 	wentMaxFiles = 100
-	wentSkew     = 3 * time.Minute // (the host's clock and the gateway's)
+	wentSkew     = 30 * time.Second // (the host's clock and the gateway's: no more, an earlier row of the same words not taken for it — review562)
 	wentMidTurn  = "The user sent a new message while you were working:\n"
 	wentMidEnd   = "\n\nThis is how Claude Code surfaces messages the user sends mid-turn"
 )
@@ -56,7 +56,11 @@ n=0
 find . -maxdepth 1 -type f -name 'agent-*.jsonl' -mmin "-$m" 2>/dev/null | head -n ` + strconv.Itoa(wentMaxFiles+1) + ` | while IFS= read -r f; do
   n=$((n + 1))
   if [ "$n" -gt ` + strconv.Itoa(wentMaxFiles) + ` ]; then printf '\001more\n'; break; fi
-  h=$(grep -F -- '"origin":{"kind":"human"' "$f" 2>/dev/null | grep -F -- "$fr" | tail -n 50 | sed "s|^|$f:|")
+  h=$(grep -F -- '"origin":{"kind":"human"' "$f" 2>/dev/null | grep -F -- "$fr" | tail -n 51)
+  [ -n "$h" ] || continue
+  # (More than are read: an earlier one, maybe the one looked for, unread — not known.)
+  if [ "$(printf '%s\n' "$h" | wc -l)" -gt 50 ]; then printf '\001more\n'; h=$(printf '%s\n' "$h" | tail -n 50); fi
+  h=$(printf '%s\n' "$h" | sed "s|^|$f:|")
   [ -n "$h" ] || continue
   printf '%s\n' "$h"
   mf=${f%.jsonl}.meta.json
@@ -154,6 +158,7 @@ func wentOf(out []byte, text string, from time.Time) *sentWent {
 // mid-turn.
 func personSaid(row []byte) (string, time.Time, bool) {
 	var r struct {
+		IsMeta    bool      `json:"isMeta"`
 		Type      string    `json:"type"`
 		Timestamp time.Time `json:"timestamp"`
 		Origin    struct {
@@ -184,9 +189,10 @@ func personSaid(row []byte) (string, time.Time, bool) {
 		}
 		said = b.String()
 	}
-	// (Unwrapped only where the whole wrapping is there: a row of the
-	// person's own words that begin as it does is those words — review561.)
-	if s, ok := strings.CutPrefix(said, wentMidTurn); ok {
+	// (Unwrapped only where Claude Code wrapped it — a row of its own
+	// (isMeta), the whole wrapping there: the person's own words that begin
+	// or end as it does are those words — review561/562.)
+	if s, ok := strings.CutPrefix(said, wentMidTurn); ok && r.IsMeta {
 		if i := strings.LastIndex(s, wentMidEnd); i >= 0 {
 			said = s[:i]
 		}

@@ -101,6 +101,24 @@ func TestWentUnsure(t *testing.T) {
 	}
 }
 
+// More of the person's rows with its words in one log than are read: not known.
+func TestWentCapped(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "8251e81c-b1f1-4d4a-8f3f-bb630ba7bcf1", "subagents")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "agent-a2ee6a653f4cbc097.jsonl"), []byte(strings.Repeat(wentRow(t, wentMidTurn+"ok"+wentTail, "human")+"\n", 51)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command("sh", "-c", wentCommand(dir, 60, wentFragment("ok"))).Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "\x01more\n") {
+		t.Errorf("more rows than are read: not said")
+	}
+}
+
 // A message too short to look for by its words: the person's rows all read.
 func TestWentShort(t *testing.T) {
 	home := filepath.Join(t.TempDir(), "8251e81c-b1f1-4d4a-8f3f-bb630ba7bcf1")
@@ -133,6 +151,7 @@ func TestPersonSaid(t *testing.T) {
 		{"text parts", wentRow(t, []map[string]string{{"type": "text", "text": text}}, "human"), text, true},
 		{"not the person's", wentRow(t, wentMidTurn+text+wentTail, "coordinator"), "", false},
 		{"the wrapping's start alone: their own words", wentRow(t, wentMidTurn+text, "human"), wentMidTurn + text, true},
+		{"wrapped, but not by Claude Code (not isMeta): their own words", strings.Replace(wentRow(t, wentMidTurn+text+wentTail, "human"), `"isMeta":true`, `"isMeta":false`, 1), wentMidTurn + text + wentTail, true},
 		{"not a row", "{", "", false},
 	} {
 		said, _, ok := personSaid([]byte(c.row))
