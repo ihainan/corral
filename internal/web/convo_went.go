@@ -52,7 +52,10 @@ func wentCommand(dir string, minutes int, frag string) string {
 p=${d%/subagents}
 [ -d "$p" ] && [ ! -L "$p" ] && [ -d "$d" ] && [ ! -L "$d" ] || exit 0
 cd "$d" 2>/dev/null || exit 0
-find . -maxdepth 1 -type f -name 'agent-*.jsonl' -mmin "-$m" 2>/dev/null | head -n ` + strconv.Itoa(wentMaxFiles) + ` | while IFS= read -r f; do
+n=0
+find . -maxdepth 1 -type f -name 'agent-*.jsonl' -mmin "-$m" 2>/dev/null | head -n ` + strconv.Itoa(wentMaxFiles+1) + ` | while IFS= read -r f; do
+  n=$((n + 1))
+  if [ "$n" -gt ` + strconv.Itoa(wentMaxFiles) + ` ]; then printf '\001more\n'; break; fi
   h=$(grep -F -- '"origin":{"kind":"human"' "$f" 2>/dev/null | grep -F -- "$fr" | tail -n 50 | sed "s|^|$f:|")
   [ -n "$h" ] || continue
   printf '%s\n' "$h"
@@ -105,6 +108,7 @@ func wentOf(out []byte, text string, from time.Time) *sentWent {
 	var at time.Time
 	metas := map[string]sentWent{}
 	var hit string
+	agents := map[string]bool{} // (the subagents whose rows are it: more than one, which is not known)
 	for _, l := range bytes.Split(out, []byte("\n")) {
 		if rest, ok := bytes.CutPrefix(l, []byte("\001meta ./agent-")); ok {
 			name, js, ok := bytes.Cut(rest, []byte("\t"))
@@ -129,11 +133,14 @@ func wentOf(out []byte, text string, from time.Time) *sentWent {
 		if !ok || !convo.SubagentID(string(name)) {
 			continue
 		}
-		if said, when, ok := personSaid(row); ok && wentNorm(said) == want && !when.Before(from) && !when.Before(at) {
-			hit, at = string(name), when
+		if said, when, ok := personSaid(row); ok && wentNorm(said) == want && !when.Before(from) {
+			agents[string(name)] = true
+			if !when.Before(at) {
+				hit, at = string(name), when
+			}
 		}
 	}
-	if hit == "" {
+	if hit == "" || len(agents) > 1 {
 		return nil
 	}
 	if m, ok := metas[hit]; ok {
@@ -177,11 +184,12 @@ func personSaid(row []byte) (string, time.Time, bool) {
 		}
 		said = b.String()
 	}
+	// (Unwrapped only where the whole wrapping is there: a row of the
+	// person's own words that begin as it does is those words — review561.)
 	if s, ok := strings.CutPrefix(said, wentMidTurn); ok {
 		if i := strings.LastIndex(s, wentMidEnd); i >= 0 {
-			s = s[:i]
+			said = s[:i]
 		}
-		said = s
 	}
 	return said, r.Timestamp, true
 }
@@ -213,8 +221,8 @@ func (s *Server) sentWentTo(ctx context.Context, sess *term.Session, key, sid, t
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	res, err := sshx.Exec(ctx, sess.Client(), wentCommand(strings.TrimSuffix(root, ".jsonl")+"/subagents", minutes, frag), wentOut+(64<<10), sshx.ExecOptions{})
-	if err != nil || len(res.Out) >= wentOut {
-		return nil // (cut short: what was not read may say otherwise — not known)
+	if err != nil || len(res.Out) >= wentOut || bytes.Contains(res.Out, []byte("\x01more\n")) {
+		return nil // (cut short, or logs left unread: what was not read may say otherwise — not known)
 	}
 	return wentOf(res.Out, text, from)
 }

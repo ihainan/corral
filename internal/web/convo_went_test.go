@@ -2,6 +2,7 @@ package web
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -66,6 +67,40 @@ func TestWentLatest(t *testing.T) {
 	}
 }
 
+// The same words taken in by two subagents since: which, not known; logs
+// left unread: not known either.
+func TestWentUnsure(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "8251e81c-b1f1-4d4a-8f3f-bb630ba7bcf1", "subagents")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	row := wentRow(t, wentMidTurn+"ok"+wentTail, "human") + "\n"
+	for _, id := range []string{"a2ee6a653f4cbc097", "b1111111111111111"} {
+		if err := os.WriteFile(filepath.Join(dir, "agent-"+id+".jsonl"), []byte(row), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	out, err := exec.Command("sh", "-c", wentCommand(dir, 60, wentFragment("ok"))).Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w := wentOf(out, "ok", time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)); w != nil {
+		t.Errorf("two subagents' rows: one said for sure: %+v", w)
+	}
+	for i := 0; i < wentMaxFiles+1; i++ {
+		if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("agent-c%016d.jsonl", i)), []byte("{}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	out, err = exec.Command("sh", "-c", wentCommand(dir, 60, wentFragment("ok"))).Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "\x01more\n") {
+		t.Errorf("more logs than are read: not said")
+	}
+}
+
 // A message too short to look for by its words: the person's rows all read.
 func TestWentShort(t *testing.T) {
 	home := filepath.Join(t.TempDir(), "8251e81c-b1f1-4d4a-8f3f-bb630ba7bcf1")
@@ -97,6 +132,7 @@ func TestPersonSaid(t *testing.T) {
 		{"as is", wentRow(t, text, "human"), text, true},
 		{"text parts", wentRow(t, []map[string]string{{"type": "text", "text": text}}, "human"), text, true},
 		{"not the person's", wentRow(t, wentMidTurn+text+wentTail, "coordinator"), "", false},
+		{"the wrapping's start alone: their own words", wentRow(t, wentMidTurn+text, "human"), wentMidTurn + text, true},
 		{"not a row", "{", "", false},
 	} {
 		said, _, ok := personSaid([]byte(c.row))

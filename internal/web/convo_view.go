@@ -125,7 +125,16 @@ func claudeOwner(screen string, after bool) string {
 		if other > ownerFoot {
 			return "none"
 		}
-		if !after {
+		// (The list showing main as the one shown ("● main"): the box is the
+		// conversation's, what it holds a draft of the person's whatever its
+		// words — review561.)
+		shown := false
+		for k, l := range foot {
+			if agents[k] && ownerMainRow.MatchString(l) && strings.Contains(l, "●") {
+				shown = true
+			}
+		}
+		if !after && !shown {
 			box := ownerSqueeze(ownerPrompt.ReplaceAllString(strings.Join(lines[i:end], ""), ""))
 			if strings.HasPrefix(box, "Message@") {
 				return "subagent"
@@ -265,7 +274,9 @@ END {
     }
     if (index(f, "Esctocancel") || index(f, "Entertoselect") || index(f, "Entertoconfirm")) { print "none"; exit }
     if (other > FOOT) { print "none"; exit }
-    if (after != 1) {
+    sh = 0
+    for (j = e + 1; j <= n; j++) if (A[j] && mainrow(L[j]) && L[j] ~ /●/) sh = 1
+    if (after != 1 && !sh) {
       b = ""
       for (j = i; j < e; j++) { t = L[j]; if (j == i) sub(/^[ \t]*❯/, "", t); b = b squeeze(t) }
       if (index(b, "Message@") == 1) { print "subagent"; exit }
@@ -341,7 +352,7 @@ END {
     b = ""
     for (j = i; j < e; j++) { t = L[j]; if (j == i) sub(/^[ \t]*❯/, "", t); b = b squeeze(t) }
     # (The placeholder whole, "Message @<name>…": a draft of the person beginning with those words is no empty box — review560.)
-    em = (b == "" || b ~ /^Message@[^ ]*…$/) ? 1 : 0
+    em = (b == "" || b ~ /^Message@[A-Za-z0-9_.:-]+…$/) ? 1 : 0
     print fo, vw, cu, ev, em; exit
   }
   print "none none none 0 0"

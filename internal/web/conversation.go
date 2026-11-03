@@ -2495,8 +2495,9 @@ screen() {
 # holds a text of ours, its line not read). Not read: none — nothing typed.
 owner() {
   os=
-  if [ "$mode" = tmux ]; then os=$(tmux -u capture-pane -p -t "$p" 2>/dev/null 9>&-) || { o=none; return 0; }
-  else os=$(HERDR_SOCKET_PATH=$sock herdr pane read "$p" --source visible 2>/dev/null 9>&-) || { o=none; return 0; }; fi
+  # (A read that failed is no screen, whatever it printed: os empty — review561.)
+  if [ "$mode" = tmux ]; then os=$(tmux -u capture-pane -p -t "$p" 2>/dev/null 9>&-) || { os=; o=none; return 0; }
+  else os=$(HERDR_SOCKET_PATH=$sock herdr pane read "$p" --source visible 2>/dev/null 9>&-) || { os=; o=none; return 0; }; fi
   o=$(printf '%s\n' "$os" | awk -v after="$1" 'OWNERAWK' 2>/dev/null) || o=none
 }
 # (Claude Code's own: a text typed only where its input box is plainly the
@@ -2545,6 +2546,7 @@ owned() {
 foot() {
   if [ "$mode" = tmux ]; then fs=$(tmux -u capture-pane -p -t "$p" 2>/dev/null 9>&-) || fs=
   else fs=$(HERDR_SOCKET_PATH=$sock herdr pane read "$p" --source visible 2>/dev/null 9>&-) || fs=; fi
+  # (Not read: nothing of it — "none none none 0 0" below.)
   ft=$(printf '%s\n' "$fs" | awk 'FOOTAWK' 2>/dev/null) || ft=
   [ -n "$ft" ] || ft="none none none 0 0"
   read -r fo vw cu ev em <<FOOT
