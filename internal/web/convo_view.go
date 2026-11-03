@@ -2,11 +2,14 @@ package web
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"net/http"
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/ihainan/corral/internal/sshx"
 )
@@ -251,6 +254,70 @@ func boxFootClear(foot []string, n int) bool {
 	}
 	return other <= n
 }
+
+// boxWords: a text as its words are compared with a box's: every blank out
+// (a wrap on the screen breaks a word with one).
+func boxWords(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsSpace(r) || r == '\u00a0' {
+			return -1
+		}
+		return r
+	}, s)
+}
+
+// boxDigest: the bottom input box's words, blanks out (ownerSqueeze), the
+// prompt's mark taken off, hashed (SHA-256, hex, of them and a line break)
+// — as claudeBoxAwk on the host, piped to sha256sum. "" where no box.
+func boxDigest(screen string) string {
+	lines := strings.Split(screen, "\n")
+	for k, l := range lines {
+		lines[k] = strings.TrimSuffix(l, "\r")
+	}
+	for i := len(lines) - 1; i >= 1; i-- {
+		if !ownerPrompt.MatchString(lines[i]) || !ownerRule.MatchString(lines[i-1]) {
+			continue
+		}
+		end := -1
+		for j := i + 1; j < len(lines); j++ {
+			if ownerRule.MatchString(lines[j]) {
+				end = j
+				break
+			}
+		}
+		if end < 0 {
+			continue
+		}
+		var b strings.Builder
+		for j := i; j < end; j++ {
+			l := lines[j]
+			if j == i {
+				l = ownerPrompt.ReplaceAllString(l, "")
+			}
+			b.WriteString(ownerSqueeze(l))
+		}
+		sum := sha256.Sum256([]byte(b.String() + "\n"))
+		return hex.EncodeToString(sum[:])
+	}
+	return ""
+}
+
+// claudeBoxAwk is boxDigest's words on the host (the hashing: sha256sum).
+var claudeBoxAwk = strings.ReplaceAll(`function isrule(s) { sub(/^[ \t]*/, "", s); return index(s, "────────") == 1 || index(s, "━━━━━━━━") == 1 }
+function isprompt(s) { sub(/^[ \t]*/, "", s); return index(s, "❯") == 1 }
+function squeeze(s) { gsub(/[ \t]/, "", s); gsub(/NBSP/, "", s); return s }
+{ sub(/\r$/, ""); L[NR] = $0 }
+END {
+  for (i = NR; i >= 2; i--) {
+    if (!isprompt(L[i]) || !isrule(L[i-1])) continue
+    e = 0
+    for (j = i + 1; j <= NR; j++) if (isrule(L[j])) { e = j; break }
+    if (!e) continue
+    b = ""
+    for (j = i; j < e; j++) { t = L[j]; if (j == i) sub(/^[ \t]*❯/, "", t); b = b squeeze(t) }
+    print b; exit
+  }
+}`, "NBSP", "\u00a0")
 
 // ownerFoot: how many status lines under the box (the list of agents aside)
 // are taken for its own.

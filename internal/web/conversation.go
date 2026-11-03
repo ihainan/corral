@@ -2508,7 +2508,7 @@ owner() {
 # (Enter held back): 16, as is the agent no longer the one in front.)
 owned() {
   [ "$kind" = claude ] && [ -z "$cx" ] || return 0
-  case $gate in free|enter|idle|stop) ;; *) return 0;; esac
+  case $gate in free|enter|idle|stop|box:*) ;; *) return 0;; esac
   if [ "$2" = 1 ]; then front || exit 16; fi
   owner "$1"
   [ "$o" = main ] && return 0
@@ -2524,7 +2524,7 @@ owned() {
   # Nothing typed yet: the conversation's own box brought back in front, if
   # it can be for sure (back), then looked at again as before. (Not for an
   # Enter again, gate "enter": that is for words of ours in the box shown.)
-  case $gate:$o in enter:*) ;; *:subagent|*:list)
+  case $gate:$o in enter:*|box:*) ;; *:subagent|*:list)
     back; bk=$?
     [ "$bk" = 2 ] && exit 17
     if [ "$bk" = 0 ]; then
@@ -2757,6 +2757,15 @@ if [ -n "$gate" ]; then
   # (Stop, Claude Code's: whatever its session file says — only who has
   # its box, owned below: a subagent's shown, Escape would stop that one.)
   stop) ;;
+  # (Enter for words already in Claude Code's box, the same as the
+  # message's: only while its box still holds those words, as read —
+  # their digest, blanks out, as boxDigest; changed meanwhile, 10.)
+  box:*)
+    [ "$st" = waiting ] && exit 9
+    command -v sha256sum >/dev/null 2>&1 || exit 11
+    if [ "$mode" = tmux ]; then d=$(tmux -u capture-pane -p -t "$p" 2>/dev/null 9>&- | awk 'BOXAWK' | sha256sum)
+    else d=$(HERDR_SOCKET_PATH=$sock herdr pane read "$p" --source visible 2>/dev/null 9>&- | awk 'BOXAWK' | sha256sum); fi
+    [ "${d%% *}" = "${gate#box:}" ] || exit 10 ;;
   screen:*)
     [ "$st" = waiting ] && exit 9; [ "$st" = title-unread ] && exit 11
     command -v sha256sum >/dev/null 2>&1 || exit 11
@@ -2789,7 +2798,7 @@ if [ -n "$gate" ]; then
   # (Keys after a text of ours — Enter again, gate "enter" — read not what
   # the box holds; any other, its line read too: a subagent's placeholder
   # alone, its list out of sight, is a subagent's — review560.)
-  if [ "$len" = keys ] && [ "$gate" = enter ]; then owned 1 0; else owned 0 0; fi
+  case $len:$gate in keys:enter|keys:box:*) owned 1 0 ;; *) owned 0 0 ;; esac
 fi
 if [ "$mode" = tmux ]; then
   [ "$(tmux -u display-message -p -t "$p" '#{session_name}' 2>/dev/null 9>&-)" = "$sess" ] || exit 3
@@ -2870,6 +2879,7 @@ fi`
 	script = strings.ReplaceAll(script, "CARDAWK", cardRegionAwk)   // (see convo_card.go)
 	script = strings.ReplaceAll(script, "OWNERAWK", claudeOwnerAwk) // (see convo_view.go)
 	script = strings.ReplaceAll(script, "FOOTAWK", claudeFootAwk)
+	script = strings.ReplaceAll(script, "BOXAWK", claudeBoxAwk)
 	cmd := "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(mode) + " " + sshx.QuoteShell(session) + " " + sshx.QuoteShell(pane) + " " +
 		strconv.FormatInt(pid, 10) + " " + strconv.FormatInt(start, 10) + " " + n + " " + sshx.QuoteShell(socket) + " " + sshx.QuoteShell(sid) + " " + strconv.Itoa(max(0, min(read, 60))) + " " + sshx.QuoteShell(gate)
 	for _, k := range keys {
@@ -3527,15 +3537,33 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	// its colours first (the conversation's own box in front): the same
 	// words, Enter only; others, refused, said what they are; greyed ones (a
 	// suggestion) are none. Not read: as before.
-	inBox := false
+	inBox, restoredFirst := false, false
 	if front.agent == "claude" && (what == "send" || what == "command") {
-		sctx, scancel := context.WithTimeout(ctx, 10*time.Second)
-		res, err := sshx.Exec(sctx, sess.Client(), convoColorScreenCommand(sess.Persistence, b.Pane, socket), 512<<10, sshx.ExecOptions{})
-		scancel()
-		if err == nil && claudeOwner(sgr.ReplaceAllString(string(res.Out), ""), false) == "main" {
-			if d, ok := boxDraft(string(res.Out)); ok && d != "" {
-				if what == "send" && wentNorm(d) == wentNorm(text) {
-					inBox, gate, press = true, "enter", []string{"enter"}
+		look := func() (string, bool) {
+			sctx, scancel := context.WithTimeout(ctx, 10*time.Second)
+			defer scancel()
+			res, err := sshx.Exec(sctx, sess.Client(), convoColorScreenCommand(sess.Persistence, b.Pane, socket), 512<<10, sshx.ExecOptions{})
+			return string(res.Out), err == nil
+		}
+		scr, ok := look()
+		// (A subagent's conversation in front, or the list with the keys:
+		// the conversation's own box brought back first — what it holds is
+		// not seen till then — review571.)
+		if v := claudeOwner(sgr.ReplaceAllString(scr, ""), false); ok && (v == "subagent" || v == "list") {
+			sctx, scancel := context.WithTimeout(ctx, 20*time.Second)
+			res, err := sshx.Exec(sctx, sess.Client(), convoGatedCommand("free", sess.Persistence, sess.TmuxSession, b.Pane, socket, b.PID, b.Start, b.Session, 0, []string{}, 0), sendOut, sshx.ExecOptions{Stdin: strings.NewReader("")})
+			scancel()
+			if err == nil {
+				_, restoredFirst = viewRestored(res.Out)
+				scr, ok = look()
+			}
+		}
+		if plain := sgr.ReplaceAllString(scr, ""); ok && claudeOwner(plain, false) == "main" {
+			if d, ok := boxDraft(scr); ok && d != "" {
+				// (The same words, blanks aside — a wrap on the screen puts one
+				// in a word; not a folded paste, whose words are not there.)
+				if what == "send" && boxWords(d) == boxWords(text) && !strings.Contains(d, "[Pasted text #") && boxDigest(plain) != "" {
+					inBox, gate, press = true, "box:"+boxDigest(plain), []string{"enter"}
 					if sess.Persistence == "tmux" {
 						press = []string{"Enter"}
 					}
@@ -3578,6 +3606,7 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		sshx.ExecOptions{Stdin: strings.NewReader(in), Release: done})
 	var restored bool // (a subagent's conversation had been shown: the conversation's own brought back first)
 	res.Out, restored = viewRestored(res.Out)
+	restored = restored || restoredFirst
 	var exitErr *sshx.ExitError
 	switch {
 	case err == nil:

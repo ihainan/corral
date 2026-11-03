@@ -486,6 +486,16 @@ func ownerGateCases(t *testing.T, dir string, pid int, start int64, run func(str
 			t.Fatalf("%s: exit %d, typed %q", c.name, got, wrote())
 		}
 	}
+	// (Enter for words already in the box, the message's: only while the box
+	// still holds them as read — review571.)
+	same := "──────────\n❯ the same words\n──────────\n  ⏵⏵ auto mode on\n"
+	showing(same)
+	if got := run("box:"+boxDigest(same), []string{"enter"}); got != 0 || wrote() != "pane send-keys p1 enter" {
+		t.Fatalf("Enter for the same words in the box: exit %d, typed %q", got, wrote())
+	}
+	if got := run("box:"+boxDigest("──────────\n❯ other words\n──────────\n"), []string{"enter"}); got != 10 || wrote() != "" {
+		t.Fatalf("the box changed since it was read: exit %d, typed %q", got, wrote())
+	}
 	// (Keys go after a text of ours: what the box holds is not read.)
 	showing("──────────\n❯ Message @team, the report\n──────────\n  ⏵⏵ auto mode on\n")
 	if got := run("enter", []string{"enter"}); got != 0 || wrote() != "pane send-keys p1 enter" {

@@ -1,11 +1,82 @@
 package web
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// The box's words hashed alike here and on the host (every awk, both
+// locales): what Enter for words already in it is checked by.
+func TestBoxDigestAwk(t *testing.T) {
+	ansi, err := os.ReadFile(filepath.Join("testdata", "view", "restored-after-stop.ansi"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rule := strings.Repeat("─", 40)
+	screens := []string{
+		sgr.ReplaceAllString(string(ansi), ""),
+		"x\n" + rule + "\n❯\u00a0分析现在是否可以部署 \n" + rule + "\n  ⏸ manual mode on\n",
+		"x\r\n" + rule + "\r\n❯ first line\r\n  second\u00a0line\r\n" + rule + "\r\n",
+		"old\n" + rule + "\n❯ old box\n" + rule + "\nthread\n" + rule + "\n❯ \n" + rule + "\n",
+	}
+	for _, loc := range []string{"C", "C.UTF-8"} {
+		for _, a := range []string{"gawk", "mawk", "busybox"} {
+			if _, err := exec.LookPath(a); err != nil {
+				continue
+			}
+			for k, s := range screens {
+				args := []string{claudeBoxAwk}
+				if a == "busybox" {
+					args = append([]string{"awk"}, args...)
+				}
+				cmd := exec.Command(a, args...)
+				cmd.Stdin = strings.NewReader(s)
+				cmd.Env = append(os.Environ(), "LC_ALL="+loc)
+				out, err := cmd.Output()
+				if err != nil {
+					t.Fatal(err)
+				}
+				sum := sha256.Sum256(out)
+				if got, want := hex.EncodeToString(sum[:]), boxDigest(s); got != want {
+					t.Errorf("screen %d (%s, %s): awk %q", k, a, loc, out)
+				}
+			}
+		}
+	}
+	if strings.Contains(claudeBoxAwk, "'") {
+		t.Fatal("claudeBoxAwk holds a single quote: the script around it breaks")
+	}
+	if boxWords("conver sation.go 第二\n行") != boxWords("conversation.go 第二行") {
+		t.Error("a wrap's blank in a word: not the same words")
+	}
+}
+
+// The host's script as sent, every gate: its shell reads it (a name of what
+// is put in it, said in a comment, was put in there too — and broke it).
+func TestConvoGatedScriptParses(t *testing.T) {
+	for _, sh := range [][]string{{"dash", "-n"}, {"busybox", "sh", "-n"}} {
+		if _, err := exec.LookPath(sh[0]); err != nil {
+			continue
+		}
+		for _, gate := range []string{"", "free", "enter", "idle", "stop", "box:00", "screen:00", "card:00", "reply:00", "dialog"} {
+			cmd := convoGatedCommand(gate, "herdr", "", "p1", "/s", 1, 2, "sid", 0, []string{"enter"}, 0)
+			script := strings.TrimPrefix(cmd, "sh -c ")
+			// (The quoted script, unquoted by a shell, to a file; then read by the shell under test.)
+			f := filepath.Join(t.TempDir(), "s.sh")
+			if out, err := exec.Command("sh", "-c", "printf %s "+script[:strings.Index(script, " corral ")]+" > "+f).CombinedOutput(); err != nil {
+				t.Fatalf("%s: %v %s", gate, err, out)
+			}
+			if out, err := exec.Command(sh[0], append(sh[1:], f)...).CombinedOutput(); err != nil {
+				t.Errorf("%s, gate %q: %v %s", sh[0], gate, err, out)
+			}
+		}
+	}
+}
 
 // Words left in Claude Code's box, as a send sees them first: a message a
 // stop interrupted, put back there by Claude Code (the real screen, 2.1.312
