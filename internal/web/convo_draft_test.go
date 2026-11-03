@@ -51,9 +51,8 @@ func TestBoxDigestAwk(t *testing.T) {
 	if strings.Contains(claudeBoxAwk, "'") {
 		t.Fatal("claudeBoxAwk holds a single quote: the script around it breaks")
 	}
-	// (Blanks not compared at all: a wrap and a line break of the words' own
-	// look alike on the screen — review573/574; the page then finds it the
-	// same way, sameWords.)
+	// (A blank let go of only where the screen's lines break: a wrap and a
+	// line break of the words' own look alike there — review573/574/575.)
 	for _, c := range []struct {
 		lines []string
 		text  string
@@ -64,7 +63,10 @@ func TestBoxDigestAwk(t *testing.T) {
 		{[]string{"Please review internal/web/some_real", "ly_long_directory/conversation.go", "and then check all tests"},
 			"Please review internal/web/some_really_long_directory/conversation.go and then check all tests", true},
 		{[]string{"first", "second"}, "firstsecond", true},
-		{[]string{"分析 现在是否可以部署"}, "分析现在是否可以部署", true},
+		{[]string{"分析 现在是否可以部署"}, "分析现在是否可以部署", false},    // (a blank in a line is the words' own)
+		{[]string{"请把 a b 改成 ab"}, "请把 ab 改成 a b", false}, // (review575)
+		{[]string{"the quick brown", "fox"}, "the quick brown fox", true},
+		{[]string{"two  blanks"}, "two blanks", true},
 		{[]string{strings.Repeat("🚀", 18), strings.Repeat("🚀", 7)}, strings.Repeat("🚀", 25), true},
 		{[]string{"abc"}, "abcd", false},
 		{[]string{"[Pasted text #1 +3 lines] 请检查"}, "[Pasted text #1 +3 lines] 请检查", false},

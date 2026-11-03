@@ -587,8 +587,7 @@ const keptTitle = (titles: Titles, e: Entry): string | undefined => {
 // not this one: kept with it, so a reload does not find this one there.)
 // (How many turns a message waiting is kept not to be: see marked.)
 const NOT_KEPT = 100
-// (loose: sent as Enter for the same words already in its box — found in the log blanks aside, as compared.)
-type Sent = ConvoPending & { bind: string; after: number; gen: number; at: number; was?: string; afterTs?: string; not?: string[]; loose?: boolean }
+type Sent = ConvoPending & { bind: string; after: number; gen: number; at: number; was?: string; afterTs?: string; not?: string[] }
 
 // What was sent and not seen in the log yet, as this tab kept it (the page
 // reloaded meanwhile): looked for again in all of the log, by its time as
@@ -1042,7 +1041,8 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   // What was sent, until the log has a user turn of its text after it (each
   // turn answers one); not seen in time, it says so. One the agent queued
   // shows in its queue instead.
-  const norm = (s: string) => s.replace(/\s+/g, ' ').trim()
+  // (Blanks aside: one sent as Enter for the same words already in the box is queued as the box had it — review575.)
+  const norm = (s: string) => s.replace(/\s+/g, '')
   // (Only while the queue shows, not of one at rest: else the message would show nowhere.)
   const queueShown = agent?.status !== 'idle' && agent?.status !== 'done'
   const queued = useMemo(() => new Set((queueShown ? (convo.queued ?? []) : []).map((q) => norm(q.text))), [convo.queued, queueShown])
@@ -1085,7 +1085,8 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
         changed = true
         p = { ...p, gen: convo.gen, after: -Infinity }
       }
-      const hit = users.find((e) => after(e, p) && !p.not?.includes(e.id) && (p.loose ? sameWords(e, p.text) : sameTurn(e, p.text)))
+      // (Or its words, blanks aside: one sent as Enter for the same words already in the box is there as the box had it — review575.)
+      const hit = users.find((e) => after(e, p) && !p.not?.includes(e.id) && (sameTurn(e, p.text) || sameWords(e, p.text)))
       if (!hit) return [p]
       u.add(hit.seq)
       if (hit.id) taken.push(hit)
@@ -1531,7 +1532,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
         // (The same words were in its box already — put back there by a stop: Enter only.)
         else if (r?.in_box) toast(t('convo.inBoxSent'))
         remember(was)
-        mark({ state: 'waiting', loose: !!r?.in_box })
+        mark({ state: 'waiting' })
         convo.refresh() // (it is in its log in a moment: read now, not at the next tick)
       })
       .catch((e) => {

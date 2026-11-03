@@ -256,25 +256,33 @@ func boxFootClear(foot []string, n int) bool {
 }
 
 // boxSame: the words in the box (its lines, as boxDraftLines reads them)
-// are the message's, every blank out: a wrap on the screen and a line
-// break of the words' own cannot be told apart there (review573/574), so
-// blanks are not compared at all — and the page, told it was Enter for
-// the box's words, finds it in the log the same way (sameWords). Not a
-// folded paste: its words are not there to compare.
+// are the message's: each line's own as the message has them there (blanks
+// run together), each break between two lines a blank or none — a wrap on
+// the screen (in a word, or at a blank) and a line break of the words' own
+// cannot be told apart there (review573/574), and nowhere else is a blank
+// let go of (review575: "a b" for "ab" in a line is other words). The page
+// finds such a message in the log blanks aside (sameWords). Not a folded
+// paste: its words are not there to compare.
 func boxSame(lines []string, text string) bool {
 	if len(lines) == 0 || strings.Contains(strings.Join(lines, " "), "[Pasted text #") {
 		return false
 	}
-	out := func(s string) string {
-		return strings.Map(func(r rune) rune {
-			if unicode.IsSpace(r) || r == '\u00a0' {
-				return -1
-			}
-			return r
-		}, s)
+	norm := func(s string) string {
+		return strings.Join(strings.FieldsFunc(s, func(r rune) bool { return unicode.IsSpace(r) || r == '\u00a0' }), " ")
 	}
-	want := out(text)
-	return want != "" && out(strings.Join(lines, "")) == want
+	want := norm(text)
+	at := 0
+	for k, l := range lines {
+		l = norm(l)
+		if !strings.HasPrefix(want[at:], l) {
+			return false
+		}
+		at += len(l)
+		if k < len(lines)-1 && at < len(want) && want[at] == ' ' {
+			at++ // (the break a blank; else none)
+		}
+	}
+	return want != "" && at == len(want)
 }
 
 // boxDigest: the bottom input box's words, blanks out (ownerSqueeze), the

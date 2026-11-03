@@ -21,9 +21,10 @@ export const sameTurn = (e: ConvoEntry, sent: string) => {
   const want = n(images ? sent.replace(PICTURE, ' ') : sent)
   return parts.some((p) => p.truncated) ? got.length >= 1000 && want.startsWith(got) : got === want
 }
-// The turn of a message sent as Enter for the same words already in the
-// box (the gateway compares them blanks out: a wrap and a line break of
-// their own look alike on the screen): its words, every blank out.
+// A turn of the same words as a message, blanks aside: one sent as Enter for
+// the same words already in the box (the gateway lets a blank go only where
+// the screen's lines break: a wrap and a line break of their own look alike
+// there) is in the log as the box had it.
 export const sameWords = (e: ConvoEntry, sent: string) => {
   if (e.parts.some((p) => p.kind === 'image' || p.truncated)) return false
   const n = (s: string) => s.replace(/\s+/g, '')
