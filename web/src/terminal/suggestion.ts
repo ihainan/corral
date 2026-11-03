@@ -49,9 +49,12 @@ export function promptSuggestion(term: Terminal): string | null {
   // over the list, as convo_view.go reads it.
   const current = (y: number, x: number) => {
     const foot: string[] = []
-    for (let j = y + 2; j < rows; j++) foot.push(from(line(j), x))
+    const wrapped: boolean[] = [] // (the rest of a line too long for the screen: from the edge)
+    for (let j = y + 2; j < rows; j++) {
+      foot.push(from(line(j), x))
+      wrapped.push(!!line(j)?.isWrapped)
+    }
     while (foot.length && !foot[foot.length - 1].trim()) foot.pop()
-    if (foot.length > FOOT) return false
     const agents = foot.map(() => false)
     for (let k = 0; k < foot.length; ) {
       if (!AGENT_ROW.test(foot[k])) {
@@ -66,8 +69,15 @@ export function promptSuggestion(term: Terminal): string | null {
     let keys = ''
     for (let k = 0; k < foot.length && !agents[k]; k++) if (foot[k].trim()) keys = foot[k]
     const clicked = /^\s*[⏵⏸]/.test(keys) || /^\?forshortcuts/.test(keys.replace(/\s+/g, ''))
+    // (The list's rows are not counted: many subagents are no dialog. A
+    // clicked one's ❯ is drawn from the edge.)
+    if (agents.filter((a) => !a).length > FOOT) return false
     return foot.every(
-      (s, k) => !s.trim() || (/^\s/.test(s) && (!s.includes('❯') || (clicked && agents[k])) && !/^\s*\d+\.\s/.test(s)),
+      (s, k) =>
+        !s.trim() ||
+        (agents[k]
+          ? !s.includes('❯') || clicked
+          : (/^\s/.test(s) || wrapped[k]) && !s.includes('❯') && !/^\s*\d+\.\s/.test(s)),
     )
   }
   // The lowest box decides for its pane (the column it starts at): one
