@@ -131,6 +131,64 @@ func suggestionOf(screen string) string {
 type sgrState struct{ dim bool }
 
 // through: the state after a stretch of the screen, its text aside.
+// boxDraft: the words left in Claude Code's input box in front, as the
+// screen (with its colours) shows them — typed in the terminal, or a message
+// a stop interrupted, which Claude Code puts back there — their text where
+// any of it is drawn as typed (not greyed), its lines as one; "" where the
+// box is empty or holds greyed words only (a suggestion, its example, a
+// placeholder). known false where no box in front is seen.
+func boxDraft(screen string) (draft string, known bool) {
+	lines := strings.Split(strings.TrimRight(screen, "\r\n"), "\n")
+	plain := make([]string, len(lines))
+	for i, l := range lines {
+		plain[i] = strings.TrimRight(sgr.ReplaceAllString(l, ""), "\r")
+	}
+	for i := len(plain) - 1; i >= 1; i-- {
+		if !strings.HasPrefix(strings.TrimSpace(plain[i]), "❯") || !pickerRule.MatchString(plain[i-1]) {
+			continue
+		}
+		end := -1
+		for j := i + 1; j < len(plain); j++ {
+			if pickerRule.MatchString(plain[j]) {
+				end = j
+				break
+			}
+		}
+		if end < 0 || !boxFootClear(plain[end+1:], typedFoot) {
+			return "", false
+		}
+		var st sgrState
+		for j := 0; j < i; j++ {
+			st = st.through(lines[j])
+		}
+		greyed := true
+		var words []string
+		for j := i; j < end; j++ {
+			l, p := strings.TrimRight(lines[j], "\r"), plain[j]
+			if j == i {
+				k := strings.Index(l, "❯")
+				st = st.through(l[:k])
+				l = l[k+len("❯"):]
+				p = p[strings.Index(p, "❯")+len("❯"):]
+			}
+			if _, ok, next := st.greyed(l); ok {
+				st = next
+			} else {
+				greyed = false
+				st = st.through(l)
+			}
+			if p = strings.Trim(p, " \t\u00a0"); p != "" {
+				words = append(words, p)
+			}
+		}
+		if greyed || len(words) == 0 {
+			return "", true
+		}
+		return strings.Join(words, " "), true
+	}
+	return "", false
+}
+
 func (st sgrState) through(s string) sgrState {
 	for _, m := range sgr.FindAllString(s, -1) {
 		st = st.apply(m[2 : len(m)-1])

@@ -3520,6 +3520,34 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	case what == "close_dialog":
 		gate = "dialog" // (closed meanwhile, the Escape would stop what it does now)
 	}
+	// Claude Code's box holding words already — a message a stop
+	// interrupted, which it puts back there, or words typed in the
+	// terminal: pasted after them, the two went as one message, and the
+	// page, waiting for its own, never saw it arrive. Its screen read with
+	// its colours first (the conversation's own box in front): the same
+	// words, Enter only; others, refused, said what they are; greyed ones (a
+	// suggestion) are none. Not read: as before.
+	inBox := false
+	if front.agent == "claude" && (what == "send" || what == "command") {
+		sctx, scancel := context.WithTimeout(ctx, 10*time.Second)
+		res, err := sshx.Exec(sctx, sess.Client(), convoColorScreenCommand(sess.Persistence, b.Pane, socket), 512<<10, sshx.ExecOptions{})
+		scancel()
+		if err == nil && claudeOwner(sgr.ReplaceAllString(string(res.Out), ""), false) == "main" {
+			if d, ok := boxDraft(string(res.Out)); ok && d != "" {
+				if what == "send" && wentNorm(d) == wentNorm(text) {
+					inBox, gate, press = true, "enter", []string{"enter"}
+					if sess.Persistence == "tmux" {
+						press = []string{"Enter"}
+					}
+				} else {
+					ended.Done()
+					outcome, reason = "refused", "box_draft"
+					writeErrorExtra(w, http.StatusConflict, "box_draft", "its input holds other words: sent after them, the two would go as one", map[string]any{"draft": clip(d, 200)})
+					return
+				}
+			}
+		}
+	}
 	done := ended.Done
 	if front.agent == "codex" {
 		// (Its title read before this, of before it: read again after, whatever
@@ -3542,8 +3570,12 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 			cmd = convoGatedPasteCommand(gate, sess.Persistence, sess.TmuxSession, b.Pane, socket, b.PID, b.Start, b.Session, parts, modeLines(what))
 		}
 	}
+	in := text
+	if inBox {
+		in = "" // (Enter only: nothing pasted)
+	}
 	res, err := sshx.Exec(ctx, sess.Client(), cmd, sendOut,
-		sshx.ExecOptions{Stdin: strings.NewReader(text), Release: done})
+		sshx.ExecOptions{Stdin: strings.NewReader(in), Release: done})
 	var restored bool // (a subagent's conversation had been shown: the conversation's own brought back first)
 	res.Out, restored = viewRestored(res.Out)
 	var exitErr *sshx.ExitError
@@ -3630,7 +3662,7 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	case outcome == "typed" && what == "mode":
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "mode": screenMode(string(res.Out)), "view_restored": restored})
 	case outcome == "typed":
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "view_restored": restored})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "view_restored": restored, "in_box": inBox})
 	case reason == "busy":
 		writeError(w, http.StatusTooManyRequests, "busy", "the host is still answering earlier requests")
 	case outcome == "refused":

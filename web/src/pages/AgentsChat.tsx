@@ -70,7 +70,7 @@ const SUGGEST_AT = [1500, 4000, 9000]
 type SuggestAsk = { left: number; text: string; seq: number; busy: boolean; views: Set<{ told: () => void; next: () => void }> }
 const suggestAsks = new Map<string, SuggestAsk>()
 // Refusals of a switch made before any key was pressed (see convoPress, convoModeTo).
-const NOTHING_PRESSED = ['bad_request', 'unauthorized', 'unsupported', 'busy', 'host_error', 'agent_changed', 'not_in_front', 'refused', 'no_screen', 'not_found', 'forbidden', 'subagent_view', 'other_view', 'no_input', 'view_unsure']
+const NOTHING_PRESSED = ['bad_request', 'unauthorized', 'unsupported', 'busy', 'host_error', 'agent_changed', 'not_in_front', 'refused', 'no_screen', 'not_found', 'forbidden', 'subagent_view', 'other_view', 'no_input', 'view_unsure', 'box_draft']
 const MODE_MS = 50000 // (to a mode picked: several presses, each read back; the gateway gives up at 45 s)
 const MODEL_MS = 50000 // (the picker, step by step: see convo_model.go)
 const PASTE_CHARS = 2000
@@ -876,6 +876,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     if (e.code === 'picker') return t('convo.err.picker')
     if (e.code === 'default_changed') return t('convo.err.defaultChanged')
     if (e.code === 'draft') return t('convo.err.draft')
+    if (e.code === 'box_draft') return t('convo.err.boxDraft', { draft: String(e.extra.draft ?? '') })
     if (e.code === 'working') return t('convo.err.working')
     if (e.code === 'unknown') return t('convo.err.unknown')
     if (e.code === 'host_error' || e.code === 'unsupported' || e.code === 'bad_request') return t('convo.err.other')
@@ -1520,11 +1521,13 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       if (draftKeyNow.current === key) setDraftShown((d) => (d === undefined || !d.trim() ? was : d))
     }
 
-    api<{ view_restored?: boolean }>('POST', `/api/sessions/${sid}/conversation/send`, { pane: b.pane, pid: b.pid, start: b.start, session: b.session, text }, { timeoutMs: SEND_MS })
+    api<{ view_restored?: boolean; in_box?: boolean }>('POST', `/api/sessions/${sid}/conversation/send`, { pane: b.pane, pid: b.pid, start: b.start, session: b.session, text }, { timeoutMs: SEND_MS })
       .then((r) => {
         if (authGen() !== account) return drop()
         // (A subagent's conversation was in front in the terminal: brought back first, said.)
         if (r?.view_restored) toast(t('convo.viewRestored'))
+        // (The same words were in its box already — put back there by a stop: Enter only.)
+        else if (r?.in_box) toast(t('convo.inBoxSent'))
         remember(was)
         mark({ state: 'waiting' })
         convo.refresh() // (it is in its log in a moment: read now, not at the next tick)

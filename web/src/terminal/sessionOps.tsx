@@ -38,7 +38,7 @@ export function SessionOpDialog({ op, name, codex, onSend, onClose, onShowTermin
         setBusy(false)
         return
       }
-      setError((err instanceof ApiError && viewRefusal(err.code)) || (err instanceof ApiError && err.code === 'agent_busy' ? t('ops.notIdle') : err instanceof ApiError && err.code === 'agent_waiting' ? t('ops.waits') : errorText(err)))
+      setError((err instanceof ApiError && err.code === 'box_draft' && t('convo.err.boxDraft', { draft: String(err.extra.draft ?? '') })) || (err instanceof ApiError && viewRefusal(err.code)) || (err instanceof ApiError && err.code === 'agent_busy' ? t('ops.notIdle') : err instanceof ApiError && err.code === 'agent_waiting' ? t('ops.waits') : errorText(err)))
       setBusy(false)
     }
   }
