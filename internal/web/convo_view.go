@@ -260,15 +260,36 @@ func boxFootClear(foot []string, n int) bool {
 // as none (a wrap may break a word), blanks run together: as the page will
 // find the message in the log (sameTurn). Not a folded paste: its words are
 // not there to compare — review571/572.
-func boxSame(lines []string, text string) bool {
-	if len(lines) == 0 || strings.Contains(strings.Join(lines, " "), "[Pasted text #") {
+func boxSame(lines []string, full []bool, text string) bool {
+	if len(lines) == 0 || len(full) != len(lines) || strings.Contains(strings.Join(lines, " "), "[Pasted text #") {
 		return false
 	}
-	want := strings.Join(strings.FieldsFunc(text, func(r rune) bool { return unicode.IsSpace(r) || r == '\u00a0' }), " ")
 	norm := func(s string) string {
 		return strings.Join(strings.FieldsFunc(s, func(r rune) bool { return unicode.IsSpace(r) || r == '\u00a0' }), " ")
 	}
-	return want != "" && (norm(strings.Join(lines, " ")) == want || norm(strings.Join(lines, "")) == want)
+	want := norm(text)
+	// (Line by line: each break a blank where the message has one there; none
+	// only after a line that reaches the box's edge — a wrap in a word; a
+	// line that did not was broken at a blank or by a line break of its
+	// own, which the page reads as a blank too — review573.)
+	at := 0
+	for k, l := range lines {
+		l = norm(l)
+		if !strings.HasPrefix(want[at:], l) {
+			return false
+		}
+		at += len(l)
+		if k == len(lines)-1 {
+			break
+		}
+		switch {
+		case at < len(want) && want[at] == ' ':
+			at++
+		case !full[k]:
+			return false
+		}
+	}
+	return want != "" && at == len(want)
 }
 
 // boxDigest: the bottom input box's words, blanks out (ownerSqueeze), the

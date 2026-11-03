@@ -53,21 +53,36 @@ func TestBoxDigestAwk(t *testing.T) {
 	}
 	for _, c := range []struct {
 		lines []string
+		full  []bool
 		text  string
 		want  bool
 	}{
-		{[]string{"分析现在是否可以部署"}, "分析现在是否可以部署", true},
-		{[]string{"分析", "现在是否可以部署"}, "分析现在是否可以部署", true}, // (a wrap in a word)
-		{[]string{"look at internal/web/conver", "sation.go"}, "look at internal/web/conversation.go", true},
-		{[]string{"the quick brown", "fox"}, "the quick brown fox", true}, // (a wrap at a blank)
-		{[]string{"two  blanks"}, "two blanks", true},                     // (blanks run together, as the page's sameTurn)
-		{[]string{"分析 现在是否可以部署"}, "分析现在是否可以部署", false},                    // (a blank more: as the page would not find it)
-		{[]string{"[Pasted text #1 +3 lines] 请检查"}, "[Pasted text #1 +3 lines] 请检查", false},
-		{nil, "x", false},
+		{[]string{"分析现在是否可以部署"}, []bool{false}, "分析现在是否可以部署", true},
+		{[]string{"分析", "现在是否可以部署"}, []bool{true, false}, "分析现在是否可以部署", true},                   // (a wrap in a word, the line full)
+		{[]string{"the quick brown", "fox"}, []bool{false, false}, "the quick brown fox", true}, // (a wrap at a blank)
+		{[]string{"the quick brown", "fox"}, []bool{true, false}, "the quick brown fox", true},
+		{[]string{"two  blanks"}, []bool{false}, "two blanks", true},              // (blanks run together, as the page's sameTurn)
+		{[]string{"分析 现在是否可以部署"}, []bool{false}, "分析现在是否可以部署", false},             // (a blank more: as the page would not find it)
+		{[]string{"first", "second"}, []bool{false, false}, "firstsecond", false}, // (a line break of its own: the page reads a blank — review573)
+		{[]string{"first", "second"}, []bool{false, false}, "first second", true},
+		{[]string{"Please review internal/web/some_real", "ly_long_directory/conversation.go", "and then check all tests"}, []bool{true, false, false},
+			"Please review internal/web/some_really_long_directory/conversation.go and then check all tests", true}, // (both kinds of wrap — review573)
+		{[]string{"[Pasted text #1 +3 lines] 请检查"}, []bool{false}, "[Pasted text #1 +3 lines] 请检查", false},
+		{[]string{"abc"}, []bool{false}, "abcd", false},
+		{nil, nil, "x", false},
 	} {
-		if got := boxSame(c.lines, c.text); got != c.want {
-			t.Errorf("boxSame(%q, %q) = %v, want %v", c.lines, c.text, got, c.want)
+		if got := boxSame(c.lines, c.full, c.text); got != c.want {
+			t.Errorf("boxSame(%q, %v, %q) = %v, want %v", c.lines, c.full, c.text, got, c.want)
 		}
+	}
+	// (Which lines reach the edge, off a screen 40 cells wide.)
+	r40 := strings.Repeat("─", 40)
+	scr := "x\n" + r40 + "\n❯ Please review internal/web/some_real\n  ly_long_directory/conversation.go\n  and then check all tests\n" + r40 + "\n  ⏸ manual mode on\n"
+	if ls, full, ok := boxDraftLines(scr); !ok || len(ls) != 3 || !full[0] || full[1] || full[2] || !boxSame(ls, full, "Please review internal/web/some_really_long_directory/conversation.go and then check all tests") {
+		t.Errorf("a screen 40 wide: %q %v %v", ls, full, ok)
+	}
+	if ls, full, _ := boxDraftLines("x\n" + r40 + "\n❯ 分析现在是否可以部署分析现在是否可以部署\n  现在\n" + r40 + "\n"); len(full) != 2 || !full[0] || full[1] {
+		t.Errorf("a wide line, its cells counted two each: %q %v", ls, full)
 	}
 }
 

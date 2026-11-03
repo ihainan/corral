@@ -138,13 +138,16 @@ type sgrState struct{ dim bool }
 // box is empty or holds greyed words only (a suggestion, its example, a
 // placeholder). known false where no box in front is seen.
 func boxDraft(screen string) (draft string, known bool) {
-	ls, known := boxDraftLines(screen)
+	ls, _, known := boxDraftLines(screen)
 	return strings.Join(ls, " "), known
 }
 
 // boxDraftLines: boxDraft's words, a line of the box each (none where it
-// holds none, or greyed ones only).
-func boxDraftLines(screen string) (words []string, known bool) {
+// holds none, or greyed ones only), and of each whether it reaches the
+// box's right edge (within a few cells of its rule's width): a line that
+// does may have been broken in a word by the wrap, one that does not was
+// broken at a blank or by a line break of the words' own.
+func boxDraftLines(screen string) (words []string, full []bool, known bool) {
 	lines := strings.Split(strings.TrimRight(screen, "\r\n"), "\n")
 	plain := make([]string, len(lines))
 	for i, l := range lines {
@@ -162,8 +165,9 @@ func boxDraftLines(screen string) (words []string, known bool) {
 			}
 		}
 		if end < 0 || !boxFootClear(plain[end+1:], typedFoot) {
-			return nil, false
+			return nil, nil, false
 		}
+		edge := dispWidth(strings.TrimRight(plain[i-1], " \t\u00a0")) - 3
 		var st sgrState
 		for j := 0; j < i; j++ {
 			st = st.through(lines[j])
@@ -183,16 +187,34 @@ func boxDraftLines(screen string) (words []string, known bool) {
 				greyed = false
 				st = st.through(l)
 			}
-			if p = strings.Trim(p, " \t\u00a0"); p != "" {
-				words = append(words, p)
+			if t := strings.Trim(p, " \t\u00a0"); t != "" {
+				words = append(words, t)
+				full = append(full, dispWidth(strings.TrimRight(plain[j], " \t\u00a0")) >= edge)
 			}
 		}
 		if greyed || len(words) == 0 {
-			return nil, true
+			return nil, nil, true
 		}
-		return words, true
+		return words, full, true
 	}
-	return nil, false
+	return nil, nil, false
+}
+
+// dispWidth: the cells a line takes on a terminal: the wide characters
+// (CJK, full-width forms, most emoji) two, any other one.
+func dispWidth(s string) int {
+	n := 0
+	for _, r := range s {
+		switch {
+		case r >= 0x1100 && r <= 0x115F, r >= 0x2E80 && r <= 0xA4CF && r != 0x303F, r >= 0xAC00 && r <= 0xD7A3,
+			r >= 0xF900 && r <= 0xFAFF, r >= 0xFE30 && r <= 0xFE4F, r >= 0xFF00 && r <= 0xFF60, r >= 0xFFE0 && r <= 0xFFE6,
+			r >= 0x1F300 && r <= 0x1F64F, r >= 0x1F900 && r <= 0x1F9FF, r >= 0x20000 && r <= 0x3FFFD:
+			n += 2
+		default:
+			n++
+		}
+	}
+	return n
 }
 
 func (st sgrState) through(s string) sgrState {
