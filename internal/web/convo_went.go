@@ -40,7 +40,8 @@ const (
 // wentCommand lists the person's rows (origin "human") of the subagents'
 // logs (dir, its subagents/ folder) changed in the last minutes holding
 // frag — the person's only first: a short message's words are in many a
-// row of a long log, which would fill what is printed — each as
+// row of a long log, which would fill what is printed; of each log its
+// latest such rows (the one looked for is recent) — each as
 // "./agent-<id>.jsonl:<line>", a few a log, and after the lines of each
 // log that had any, its meta as "\001meta ./agent-<id>.jsonl\t<json>".
 // Not through links: the folder and the session's folder plain ones, the
@@ -52,7 +53,7 @@ p=${d%/subagents}
 [ -d "$p" ] && [ ! -L "$p" ] && [ -d "$d" ] && [ ! -L "$d" ] || exit 0
 cd "$d" 2>/dev/null || exit 0
 find . -maxdepth 1 -type f -name 'agent-*.jsonl' -mmin "-$m" 2>/dev/null | head -n ` + strconv.Itoa(wentMaxFiles) + ` | while IFS= read -r f; do
-  h=$(grep -F -- '"origin":{"kind":"human"' "$f" 2>/dev/null | grep -F -- "$fr" | head -n 50 | sed "s|^|$f:|")
+  h=$(grep -F -- '"origin":{"kind":"human"' "$f" 2>/dev/null | grep -F -- "$fr" | tail -n 50 | sed "s|^|$f:|")
   [ -n "$h" ] || continue
   printf '%s\n' "$h"
   mf=${f%.jsonl}.meta.json
@@ -202,10 +203,7 @@ func (s *Server) sentWentTo(ctx context.Context, sess *term.Session, key, sid, t
 	if root == "" || reason != "" || agent != "claude" || sub || logSID != sid || !strings.HasSuffix(root, "/"+sid+".jsonl") || !strings.Contains(root, "/.claude/projects/") {
 		return nil
 	}
-	frag := wentFragment(text)
-	if frag == "" {
-		return nil
-	}
+	frag := wentFragment(text) // ("" for a short one: the person's rows all read)
 	since := time.Duration(ago) * time.Millisecond
 	if ago < 0 || since > 2*24*time.Hour {
 		return nil
@@ -215,8 +213,8 @@ func (s *Server) sentWentTo(ctx context.Context, sess *term.Session, key, sid, t
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	res, err := sshx.Exec(ctx, sess.Client(), wentCommand(strings.TrimSuffix(root, ".jsonl")+"/subagents", minutes, frag), wentOut+(64<<10), sshx.ExecOptions{})
-	if err != nil {
-		return nil
+	if err != nil || len(res.Out) >= wentOut {
+		return nil // (cut short: what was not read may say otherwise — not known)
 	}
 	return wentOf(res.Out, text, from)
 }

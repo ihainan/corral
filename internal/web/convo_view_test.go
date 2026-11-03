@@ -154,11 +154,18 @@ func runOwnerCases(t *testing.T, check func(name, screen, before, after string))
 // What the gate reads to bring the conversation's box back in front, on the
 // real screens of each step (agent-view.md), by every awk there is here.
 func TestClaudeFootAwk(t *testing.T) {
+	// (Both put in the host's script between single quotes: none of their own.)
+	for name, prog := range map[string]string{"claudeFootAwk": claudeFootAwk, "claudeOwnerAwk": claudeOwnerAwk} {
+		if strings.Contains(prog, "'") {
+			t.Fatalf("%s holds a single quote: the script around it breaks", name)
+		}
+	}
 	made := []struct{ name, screen, want string }{
 		// (Words of a description, or a picker's title: not the line of the keys — review559.)
 		{"a description with the list's keys in it", "──────────\n❯ \n──────────\n  ⏸ manual mode on\n\n  ● main\n  ◯ Explore  fix the ↑/↓ to select hint · Enter to view\n", "box main none 0 1"},
 		{"a picker's title with a mode's words", "──────────\n❯ \n──────────\n Select branch (? for shortcuts)\n  ● main\n❯ ◯ feature/login  Add login\n", "other main none 0 1"},
 		{"three agents, the cursor and a click on two not shown", "──────────\n❯ Message @Explore…\n──────────\n  ↑/↓ to select · Enter to view\n\n❯ ◯ main\n❯ ◯ Plan  x\n  ● Explore  y\n", "list sub many 1 1"},
+		{"a draft beginning with the placeholder's words", "──────────\n❯ Message @team, please review\n──────────\n  ⏸ manual mode on\n\n  ◯ main\n  ● Explore  y\n", "box sub none 0 0"},
 		{"the list's keys under a status line of the person's", "──────────\n❯ \n──────────\n  Opus 5.5 │ Ctx 1K\n  ↑/↓ to select · Enter to view\n\n❯ ◯ main\n  ● Explore  y\n", "list sub main 1 1"},
 	}
 	cases := []struct{ file, want string }{

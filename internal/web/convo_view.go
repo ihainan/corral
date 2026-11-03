@@ -340,7 +340,8 @@ END {
     else if (fo == "list") { if (cm + cs > 1) cu = "many"; else if (cm) cu = "main"; else if (cs) cu = "sub" }
     b = ""
     for (j = i; j < e; j++) { t = L[j]; if (j == i) sub(/^[ \t]*❯/, "", t); b = b squeeze(t) }
-    em = (b == "" || index(b, "Message@") == 1) ? 1 : 0
+    # (The placeholder whole, "Message @<name>…": a draft of the person beginning with those words is no empty box — review560.)
+    em = (b == "" || b ~ /^Message@[^ ]*…$/) ? 1 : 0
     print fo, vw, cu, ev, em; exit
   }
   print "none none none 0 0"

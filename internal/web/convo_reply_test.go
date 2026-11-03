@@ -478,6 +478,8 @@ func ownerGateCases(t *testing.T, dir string, pid int, start int64, run func(str
 		// where the terminal is, not known — 17.)
 		{"the list of agents", list, "free", 17, "pane send-keys p1 esc"},
 		{"the list of agents, Enter again", list, "enter", 14, ""},
+		// (Stop on a subagent's placeholder alone, its list out of sight: not pressed — review560.)
+		{"a subagent's placeholder alone, stop", "──────────\n❯ Message @general-purpose…\n──────────\n  ⏵⏵ auto mode on\n", "stop", 13, ""},
 	} {
 		showing(c.screen)
 		if got := run(c.gate, []string{"enter"}); got != c.want || wrote() != c.typed {
@@ -486,7 +488,7 @@ func ownerGateCases(t *testing.T, dir string, pid int, start int64, run func(str
 	}
 	// (Keys go after a text of ours: what the box holds is not read.)
 	showing("──────────\n❯ Message @team, the report\n──────────\n  ⏵⏵ auto mode on\n")
-	if got := run("free", []string{"enter"}); got != 0 || wrote() != "pane send-keys p1 enter" {
+	if got := run("enter", []string{"enter"}); got != 0 || wrote() != "pane send-keys p1 enter" {
 		t.Fatalf("Enter again after a text of ours: exit %d, typed %q", got, wrote())
 	}
 	text := func(gate, msg string) int {

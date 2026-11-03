@@ -2588,7 +2588,8 @@ back() {
       downs=1
       press1 down || return 2 ;;
     "list sub")
-      [ "$cu" = main ] && [ "$ev" = 1 ] && [ "$enters" = 0 ] || break
+      # (Its box holding a draft of the person's: left alone, as below.)
+      [ "$cu" = main ] && [ "$ev" = 1 ] && [ "$enters" = 0 ] && [ "$em" = 1 ] || break
       enters=1
       press1 enter || return 2 ;;
     "list main")
@@ -2783,7 +2784,10 @@ if [ -n "$gate" ]; then
     [ "${d%% *}" = "${gate#card:}" ] || exit 10 ;;
   *) exit 4 ;;
   esac
-  if [ "$len" = keys ]; then owned 1 0; else owned 0 0; fi
+  # (Keys after a text of ours — Enter again, gate "enter" — read not what
+  # the box holds; any other, its line read too: a subagent's placeholder
+  # alone, its list out of sight, is a subagent's — review560.)
+  if [ "$len" = keys ] && [ "$gate" = enter ]; then owned 1 0; else owned 0 0; fi
 fi
 if [ "$mode" = tmux ]; then
   [ "$(tmux -u display-message -p -t "$p" '#{session_name}' 2>/dev/null 9>&-)" = "$sess" ] || exit 3

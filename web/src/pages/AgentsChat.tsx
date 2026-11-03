@@ -1172,6 +1172,8 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
         continue
       }
       logAsked.set(p.id, { n: a.n + 1, at: Date.now() })
+      // (Its next ask timed from now: nothing else may change for this effect to run again — review560.)
+      if (a.n + 1 < LOG_ASK_AFTER.length) next = Math.min(next, Date.now() + LOG_ASK_AFTER[a.n + 1])
       if (logAsked.size > 200) for (const q of [...logAsked.keys()].slice(0, 100)) logAsked.delete(q)
       const bind = bindKey
       api<{ went?: ConvoWent | null }>('POST', `/api/sessions/${sid}/conversation/sent-missing`, { ...pressBody(), text: p.text, ago: Date.now() - p.at, only: 'log' }, { timeoutMs: PRESS_MS })

@@ -43,6 +43,29 @@ func TestWentFragment(t *testing.T) {
 	}
 }
 
+// The same words said to it many times before: the latest row still seen.
+func TestWentLatest(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "8251e81c-b1f1-4d4a-8f3f-bb630ba7bcf1", "subagents")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	for i := 0; i < 60; i++ {
+		b.WriteString(strings.Replace(wentRow(t, wentMidTurn+"go on"+wentTail, "human"), "2026-11-02T12:44:39.266Z", "2026-11-01T10:00:00.000Z", 1) + "\n")
+	}
+	b.WriteString(strings.Replace(wentRow(t, wentMidTurn+"go on"+wentTail, "human"), "2026-11-02T12:44:39.266Z", "2026-11-02T13:00:00.000Z", 1) + "\n")
+	if err := os.WriteFile(filepath.Join(dir, "agent-a2ee6a653f4cbc097.jsonl"), []byte(b.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command("sh", "-c", wentCommand(dir, 60, wentFragment("go on"))).Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w := wentOf(out, "go on", time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)); w == nil {
+		t.Fatalf("the latest row not seen among %d bytes", len(out))
+	}
+}
+
 // A message too short to look for by its words: the person's rows all read.
 func TestWentShort(t *testing.T) {
 	home := filepath.Join(t.TempDir(), "8251e81c-b1f1-4d4a-8f3f-bb630ba7bcf1")
