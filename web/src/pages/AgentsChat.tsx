@@ -587,7 +587,8 @@ const keptTitle = (titles: Titles, e: Entry): string | undefined => {
 // not this one: kept with it, so a reload does not find this one there.)
 // (How many turns a message waiting is kept not to be: see marked.)
 const NOT_KEPT = 100
-type Sent = ConvoPending & { bind: string; after: number; gen: number; at: number; was?: string; afterTs?: string; not?: string[] }
+// (wentSeen: when one found gone to a subagent was first shown, its note let go of WENT_SHOWN_MS after.)
+type Sent = ConvoPending & { bind: string; after: number; gen: number; at: number; was?: string; afterTs?: string; not?: string[]; wentSeen?: number }
 
 // What was sent and not seen in the log yet, as this tab kept it (the page
 // reloaded meanwhile): looked for again in all of the log, by its time as
@@ -599,6 +600,10 @@ const PREFETCH_MOST = 3
 const PREFETCH_AFTER_MS = 1500
 
 const SENT_KEPT_MS = 24 * 3600 * 1000
+// One found gone to a subagent (its own log has it): said for sure, and
+// that subagent has dealt with it since — its note is let go of this long
+// after it was first shown (not sent again by itself: an old instruction).
+const WENT_SHOWN_MS = 10 * 60 * 1000
 
 // (Claude Code's commands in the conversation's menu: each by its icon.)
 const OP_ICONS = { compact: <FoldVertical size={16} />, rename: <Pencil size={16} />, clear: <MessageSquarePlus size={16} /> }
@@ -1210,6 +1215,21 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   }, [sent, convo.bind, sid, bindKey, logTick])
 
   const shownSent = sent.filter((p) => ofThis(p.bind) && !(p.state !== 'sent' && queued.has(norm(p.text))))
+  // Gone to a subagent: when it is first shown (this agent's view in front,
+  // the page not hidden), and let go of WENT_SHOWN_MS after.
+  const wentOf = (p: Sent) => !!(p.look && typeof p.look === 'object' && p.look.went)
+  useEffect(() => {
+    if (!active || document.hidden) return
+    const now = Date.now()
+    if (shownSent.some((p) => wentOf(p) && !p.wentSeen)) setSent((ps) => ps.map((p) => (wentOf(p) && !p.wentSeen && ofThis(p.bind) ? { ...p, wentSeen: now } : p)))
+  })
+  useEffect(() => {
+    const seen = sent.filter((p) => wentOf(p) && p.wentSeen)
+    if (!seen.length) return
+    const due = Math.min(...seen.map((p) => p.wentSeen! + WENT_SHOWN_MS)) - Date.now()
+    const timer = setTimeout(() => setSent((ps) => ps.filter((p) => !(wentOf(p) && p.wentSeen && Date.now() - p.wentSeen >= WENT_SHOWN_MS))), Math.max(0, due) + 50)
+    return () => clearTimeout(timer)
+  }, [sent])
 
   // The composer: its draft kept per agent (as the terminal's per session;
   // a tmux session's per pane: another pane in front is another agent).
