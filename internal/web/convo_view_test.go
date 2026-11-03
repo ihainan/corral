@@ -27,6 +27,14 @@ var ownerCases = []struct {
 	{"list-focus-main.txt", "list", "list"},       // (the list of agents holds the keys)
 	{"sessions-view.txt", "sessions", "sessions"}, // (← on an empty input: a message there starts a session)
 	{"permission-dialog.txt", "none", "none"},     // (a dialog in the box's place)
+	// (Fullscreen, a mouse-reporting terminal: a ❯ left on the row last
+	// clicked or tapped, the box's status line still drawn — agent-view.md.)
+	{"main-hover-main.txt", "main", "main"},
+	{"main-hover-sub.txt", "main", "main"},
+	{"subagent-hover-cursor.txt", "subagent", "subagent"},
+	{"list-focus-from-sub.txt", "subagent", "subagent"}, // (main not the one shown: subagent first)
+	{"list-focus-hover-sub.txt", "list", "list"},
+	{"list-focus-main-hover.txt", "list", "list"},
 }
 
 // Screens made up for what the real ones above have not shown.
@@ -65,6 +73,14 @@ var ownerMade = []struct {
 	{"a numbered choice under the box", "──────────\n❯ \n──────────\n  1. Yes\n  2. No\n", "none", "none"},
 	{"too much under the box", "──────────\n❯ \n──────────\n" + strings.Repeat("  status\n", 13), "none", "none"},
 	{"many agents listed", "──────────\n❯ \n──────────\n  ⏵⏵ auto mode on\n\n  ● main\n" + strings.Repeat("  ◯ Explore  reading\n", 15), "main", "main"},
+	// (Words of a description, or a picker's title: not the line of the keys — review559.)
+	{"a picker's title with a mode's words", "──────────\n❯ \n──────────\n Select branch (? for shortcuts)\n  ● main\n❯ ◯ feature/login  Add login\n", "list", "list"},
+	{"a description with a mode's mark", "──────────\n❯ \n──────────\n  ● main\n❯ ◯ Explore  ⏸ pause the job\n", "list", "list"},
+	// (The ❯ of a click: taken for one only under the box's own status line.)
+	{"a click's ❯ under the busy status line", "──────────\n❯ \n──────────\n  ⏵⏵ auto mode on · esc to interrupt\n\n  ● main\n❯ ◯ Explore  x\n", "main", "main"},
+	{"a ❯ on a row, no status line: the cursor", "──────────\n❯ \n──────────\n\n  ● main\n❯ ◯ Explore  x\n", "list", "list"},
+	{"a status line under the list is not the box's", "──────────\n❯ \n──────────\n  ● main\n❯ ◯ Explore  x\n  ? for shortcuts\n", "list", "list"},
+	{"a ❯ off the list, a status line: still unsure", "──────────\n❯ \n──────────\n  ⏸ manual mode on\n  ❯ something\n", "none", "none"},
 	{"main-agent is not main", "──────────\n❯ \n──────────\n  ◯ main-agent  x\n  ● main\n", "main", "main"},
 }
 
@@ -132,5 +148,71 @@ func runOwnerCases(t *testing.T, check func(name, screen, before, after string))
 	}
 	for _, c := range ownerMade {
 		check(c.name, c.screen, c.before, c.after)
+	}
+}
+
+// What the gate reads to bring the conversation's box back in front, on the
+// real screens of each step (agent-view.md), by every awk there is here.
+func TestClaudeFootAwk(t *testing.T) {
+	made := []struct{ name, screen, want string }{
+		// (Words of a description, or a picker's title: not the line of the keys — review559.)
+		{"a description with the list's keys in it", "──────────\n❯ \n──────────\n  ⏸ manual mode on\n\n  ● main\n  ◯ Explore  fix the ↑/↓ to select hint · Enter to view\n", "box main none 0 1"},
+		{"a picker's title with a mode's words", "──────────\n❯ \n──────────\n Select branch (? for shortcuts)\n  ● main\n❯ ◯ feature/login  Add login\n", "other main none 0 1"},
+		{"three agents, the cursor and a click on two not shown", "──────────\n❯ Message @Explore…\n──────────\n  ↑/↓ to select · Enter to view\n\n❯ ◯ main\n❯ ◯ Plan  x\n  ● Explore  y\n", "list sub many 1 1"},
+		{"the list's keys under a status line of the person's", "──────────\n❯ \n──────────\n  Opus 5.5 │ Ctx 1K\n  ↑/↓ to select · Enter to view\n\n❯ ◯ main\n  ● Explore  y\n", "list sub main 1 1"},
+	}
+	cases := []struct{ file, want string }{
+		{"main-agents-footer.txt", "box main none 0 1"},
+		{"main-hover-main.txt", "box main none 0 1"},
+		{"main-hover-sub.txt", "box main none 0 1"},
+		{"subagent-hover-cursor.txt", "box sub none 0 1"}, // (a subagent's shown: ↓ first)
+		{"subagent-typed.txt", "box sub none 0 0"},        // (a draft in its box: left alone)
+		{"subagent-live-fullscreen.txt", "box sub none 0 1"},
+		{"list-focus-from-sub.txt", "list sub main 1 1"}, // (↓ from a subagent's: Enter would show another, the ◯ one with ❯)
+		{"subagent-list-cursor.txt", "list sub sub 0 1"},
+		{"list-focus-main.txt", "list main main 0 1"},      // (Enter on main done: Esc next)
+		{"list-focus-hover-sub.txt", "list main main 0 1"}, // (no "Enter to view": on the one shown)
+		{"list-focus-main-hover.txt", "list main main 0 1"},
+		{"main-plain.txt", "other none none 0 1"}, // (no list: nothing to go back from)
+		{"sessions-view.txt", "other none none 0 0"},
+		{"permission-dialog.txt", "none none none 0 0"},
+	}
+	var awks []string
+	for _, a := range []string{"gawk", "mawk", "busybox"} {
+		if _, err := exec.LookPath(a); err == nil {
+			awks = append(awks, a)
+		}
+	}
+	type one struct{ name, screen, want string }
+	all := []one{}
+	for _, c := range cases {
+		b, err := os.ReadFile(filepath.Join("testdata", "view", c.file))
+		if err != nil {
+			t.Fatal(err)
+		}
+		all = append(all, one{c.file, string(b), c.want})
+	}
+	for _, c := range made {
+		all = append(all, one{c.name, c.screen, c.want})
+	}
+	for _, loc := range []string{"C", "C.UTF-8"} {
+		for _, c := range all {
+			for _, a := range awks {
+				args := []string{claudeFootAwk}
+				if a == "busybox" {
+					args = append([]string{"awk"}, args...)
+				}
+				cmd := exec.Command(a, args...)
+				cmd.Stdin = strings.NewReader(c.screen)
+				cmd.Env = append(os.Environ(), "LC_ALL="+loc)
+				out, err := cmd.Output()
+				if err != nil {
+					t.Fatalf("%s: %v", a, err)
+				}
+				if got := strings.TrimSpace(string(out)); got != c.want {
+					t.Errorf("%s (%s, %s): %q, want %q", c.name, a, loc, got, c.want)
+				}
+			}
+		}
 	}
 }

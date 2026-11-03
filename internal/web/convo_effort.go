@@ -249,6 +249,7 @@ func (s *Server) convoEffort(w http.ResponseWriter, ctx context.Context, sess *t
 		running.Add(1)
 		res, err := sshx.Exec(ctx, sess.Client(), convoGatedCommand(gate, sess.Persistence, sess.TmuxSession, pane, socket, pid, start, sid, len(text), press, read), 64<<10,
 			sshx.ExecOptions{Stdin: strings.NewReader(text), Release: running.Done})
+		res.Out, _ = viewRestored(res.Out) // (its word that it brought the box back: not of the screen)
 		if err == nil && (len(press) > 0 || text != "") {
 			typed = true
 		}
@@ -272,6 +273,12 @@ func (s *Server) convoEffort(w http.ResponseWriter, ctx context.Context, sess *t
 	case errors.Is(err, sshx.ErrBusy) || errors.As(err, &exitErr) && exitErr.Status == 7:
 		*outcome, *reason = "refused", "busy"
 		writeError(w, http.StatusTooManyRequests, "busy", "the host is still answering earlier requests")
+	case errors.Is(err, errViewSubagent):
+		*outcome, *reason = "refused", "subagent_view"
+		writeError(w, http.StatusConflict, "subagent_view", err.Error())
+	case errors.Is(err, errViewOther):
+		*outcome, *reason = "refused", "other_view"
+		writeError(w, http.StatusConflict, "other_view", err.Error())
 	case errors.Is(err, errBusyAgent), errors.Is(err, errDraft):
 		*outcome, *reason = "refused", "busy"
 		writeError(w, http.StatusConflict, "busy", "the agent is working, or its input holds text not sent")
@@ -290,7 +297,7 @@ func (s *Server) convoEffort(w http.ResponseWriter, ctx context.Context, sess *t
 	case errors.As(err, &exitErr) && (exitErr.Status == 9 || exitErr.Status == 5):
 		*outcome, *reason = said(typed || exitErr.Status == 5), "agent_waiting"
 		writeError(w, http.StatusConflict, "agent_waiting", "it waits for an answer, or has a dialog open: answer it first")
-	case errors.As(err, &exitErr) && exitErr.Status >= exitOwnerSubagent && exitErr.Status <= exitOwnerTyped:
+	case errors.As(err, &exitErr) && exitErr.Status >= exitOwnerSubagent && exitErr.Status <= exitOwnerLast:
 		// (Claude Code's input box not the conversation's: /effort not sent.)
 		code, typedNow, _ := writeOwnerRefusal(w, err)
 		*outcome, *reason = said(typed || typedNow), code

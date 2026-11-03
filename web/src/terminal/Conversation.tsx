@@ -69,8 +69,12 @@ export interface ConvoPending {
   // or where it could not be read.
   // view: who has Claude Code's input box now (main, subagent, list,
   // sessions, none), where it was read: a message gone elsewhere said so.
-  look?: { waiting: boolean; known: boolean; screen: string; view?: string } | 'looking' | 'failed'
+  // went: the subagent that took it in, found in its own log (Claude Code
+  // had that subagent's conversation in front as it was typed): said for sure.
+  look?: { waiting: boolean; known: boolean; screen: string; view?: string; went?: ConvoWent } | 'looking' | 'failed'
 }
+export type ConvoWent = { agent: string; type?: string; description?: string }
+const wentOf = (p: ConvoPending) => (p.look && typeof p.look === 'object' ? p.look.went : undefined)
 
 const HINT_AFTER = 20000 // working with nothing new this long: say why
 const QUIET_LONG = 5 * 60 * 1000 // its log not grown this long: said, in minutes
@@ -111,6 +115,7 @@ export function ConversationView({
   active = true,
   onDismiss,
   onEnter,
+  onResend,
   onShowTerminal,
   onCopied,
   composer,
@@ -137,6 +142,7 @@ export function ConversationView({
   active?: boolean // (its tab is the one shown: keys are for it)
   onDismiss: (id: number) => void
   onEnter?: (id: number) => Promise<boolean> // (a message seen still in the input: Enter for it, where it still is)
+  onResend?: (id: number) => void // (one a subagent took in: back in the composer, to send to this one)
   onShowTerminal: () => void
   onCopied: () => void
   composer?: ReactNode // (the terminal's composer, while it is open)
@@ -870,12 +876,12 @@ export function ConversationView({
     <div key={p.id} className={'convo-user convo-pending' + (p.state === 'sending' ? ' is-sending' : '')}>
       <div className="convo-user-text">{p.text}</div>
       <div className="convo-meta">
-        <span role="status">{t(p.state === 'sending' ? 'convo.sending' : p.state === 'waiting' ? 'convo.sent' : p.state === 'unseen' ? 'convo.unseen' : 'convo.sentOnly')}</span>
+        <span role="status">{t(p.state === 'sending' ? 'convo.sending' : p.state === 'waiting' ? 'convo.sent' : p.state === 'unseen' ? (wentOf(p) ? 'convo.wentSub' : 'convo.unseen') : 'convo.sentOnly')}</span>
         {(p.state === 'unseen' || p.state === 'sent') && (
           <button type="button" className="link-btn" onClick={() => onDismiss(p.id)}>{t('common.close')}</button>
         )}
       </div>
-      {p.state === 'unseen' && <Missing look={p.look} onEnter={onEnter && (() => onEnter(p.id))} />}
+      {p.state === 'unseen' && <Missing look={p.look} onEnter={onEnter && (() => onEnter(p.id))} onResend={onResend && (() => onResend(p.id))} />}
     </div>
   ))
   let body: ReactNode
@@ -2998,13 +3004,25 @@ function resetsAt(sec: number): string {
 // log, read off the pane's own screen when it did not: it settles whether
 // the words are still sitting in the input, which nothing else can say
 // afterwards. The screen is shown on a tap, since it is what was looked at.
-function Missing({ look, onEnter }: { look?: ConvoPending['look']; onEnter?: () => Promise<boolean> }) {
+function Missing({ look, onEnter, onResend }: { look?: ConvoPending['look']; onEnter?: () => Promise<boolean>; onResend?: () => void }) {
   const [open, setOpen] = useState(false)
   // (Enter pressed from here: under way, or what became of it.)
   const [entering, setEntering] = useState<'' | 'busy' | 'gone' | 'failed'>('')
   if (!look) return null
   if (look === 'looking') return <p className="convo-missing" role="status">{t('convo.missing.looking')}</p>
   if (look === 'failed') return <p className="convo-missing">{t('convo.missing.failed')}</p>
+  // (Found in a subagent's own log: where it went, for sure; sent again from here, it goes to this one.)
+  if (look.went)
+    return (
+      <div className="convo-missing">
+        <p>{t('convo.missing.went', { name: look.went.description || look.went.type || look.went.agent })}</p>
+        {onResend && (
+          <button type="button" className="btn btn-ghost convo-missing-enter" onClick={onResend}>
+            {t('convo.missing.resend')}
+          </button>
+        )}
+      </div>
+    )
   // (Not where the terminal shows another view now: Enter would go there.)
   const canEnter = !!onEnter && look.known && look.waiting && (!look.view || look.view === 'main')
   return (

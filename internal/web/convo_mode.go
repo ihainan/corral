@@ -87,6 +87,7 @@ func (s *Server) convoModeTo(w http.ResponseWriter, ctx context.Context, sess *t
 		// (Not while it waits: Shift+Tab is a question's then. Exit 9.)
 		res, err := sshx.Exec(ctx, sess.Client(), convoGatedCommand("free", sess.Persistence, sess.TmuxSession, pane, socket, pid, start, sid, 0, press, convoModeLines), 16<<10,
 			sshx.ExecOptions{Stdin: strings.NewReader(""), Release: ended.Done})
+		res.Out, _ = viewRestored(res.Out)
 		var exitErr *sshx.ExitError
 		switch {
 		case err == nil:
@@ -112,7 +113,7 @@ func (s *Server) convoModeTo(w http.ResponseWriter, ctx context.Context, sess *t
 			*reason = "send_failed"
 			writeError(w, http.StatusConflict, "refused", "the pane did not take the key")
 			return
-		case errors.As(err, &exitErr) && exitErr.Status >= exitOwnerSubagent && exitErr.Status <= exitOwnerTyped:
+		case errors.As(err, &exitErr) && exitErr.Status >= exitOwnerSubagent && exitErr.Status <= exitOwnerLast:
 			*reason, _, _ = writeOwnerRefusal(w, err) // (Claude Code's input box not the conversation's: nothing pressed)
 			return
 		default:

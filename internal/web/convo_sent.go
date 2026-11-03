@@ -45,9 +45,27 @@ func (s *Server) apiConversationSentMissing(w http.ResponseWriter, r *http.Reque
 
 // sentMissing reads the pane's screen and says whether the message is
 // still waiting in its input. text is what was sent.
-func (s *Server) sentMissing(w http.ResponseWriter, ctx context.Context, sess *term.Session, pane, socket, agent, text string, outcome, reason *string, release func()) {
+// Claude Code's: also where it went, if a subagent took it in (sentWentTo:
+// said for sure, not as likely). logOnly: only that, the screen not read —
+// asked again of one looked at before the page was opened anew, which a
+// screen of now says nothing of.
+func (s *Server) sentMissing(w http.ResponseWriter, ctx context.Context, sess *term.Session, pane, socket, agent, text, key, sid string, ago int64, logOnly bool, outcome, reason *string, release func()) {
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
+	if logOnly {
+		defer release()
+		*outcome = "looked"
+		var went *sentWent
+		if agent == "claude" {
+			went = s.sentWentTo(ctx, sess, key, sid, text, ago)
+		}
+		*reason = "log"
+		if went != nil {
+			*reason = "went_subagent"
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"went": went})
+		return
+	}
 	res, err := sshx.Exec(ctx, sess.Client(), convoScreenCommand(sess.Persistence, pane, socket), 256<<10, sshx.ExecOptions{Release: release})
 	if err != nil {
 		*outcome, *reason = "unknown", "no_screen"
@@ -68,7 +86,13 @@ func (s *Server) sentMissing(w http.ResponseWriter, ctx context.Context, sess *t
 		view = claudeOwner(screen, waiting)
 	}
 	*outcome = "looked"
+	var went *sentWent
+	if agent == "claude" && !waiting {
+		went = s.sentWentTo(ctx, sess, key, sid, text, ago)
+	}
 	switch {
+	case went != nil:
+		*reason = "went_subagent"
 	case view != "" && view != "main" && !waiting:
 		*reason = "view_" + view
 	case !known:
@@ -80,7 +104,7 @@ func (s *Server) sentMissing(w http.ResponseWriter, ctx context.Context, sess *t
 	}
 	// (Its end, where the input is: a screen longer than that is cut at
 	// the front, not the back.)
-	writeJSON(w, http.StatusOK, map[string]any{"screen": lastOf(screen, sentLook), "waiting": waiting, "known": known, "view": view})
+	writeJSON(w, http.StatusOK, map[string]any{"screen": lastOf(screen, sentLook), "waiting": waiting, "known": known, "view": view, "went": went})
 }
 
 // enterAgain: a message just typed into Claude Code (screen: its pane a
@@ -95,7 +119,7 @@ func (s *Server) sentMissing(w http.ResponseWriter, ctx context.Context, sess *t
 // (its end, a sign-out or revocation calls it off), nil where it is over.
 func (s *Server) enterAgain(ctx context.Context, sess *term.Session, pane, socket, agent string, pid, start int64, sid, text, screen string, ended *sync.WaitGroup, later func(d time.Duration) (context.Context, func())) {
 	still, whole := stillTyped, typedWhole
-	freeGate := "free"
+	freeGate := "enter"   // (as "free", the box not brought back in front: the words in it are ours, where they are — agent-view.md)
 	if agent == "codex" { // (its input drawn its own way: codexInputArea; whether it waits, its title says: review502)
 		freeGate = "cfree"
 		still = func(screen, text string) bool { return codexTypedIn(screen, text, false) }
@@ -189,7 +213,7 @@ func (s *Server) sentEnter(w http.ResponseWriter, ctx context.Context, sess *ter
 		enter = []string{"Enter"}
 	}
 	held.Add(1)
-	freeGate := "free"
+	freeGate := "enter" // (as "free", the box not brought back in front: the words in it are ours, where they are — agent-view.md)
 	if agent == "codex" {
 		freeGate = "cfree" // (whether Codex waits, its title says — an approval come meanwhile is not answered by this Enter: review502)
 	}
@@ -214,7 +238,7 @@ func (s *Server) sentEnter(w http.ResponseWriter, ctx context.Context, sess *ter
 		*outcome, *reason = "refused", "agent_waiting"
 		writeError(w, http.StatusConflict, "agent_waiting", "it waits for an answer, or has a dialog open: answer it first")
 		return
-	case errors.As(err, &exitErr) && exitErr.Status >= exitOwnerSubagent && exitErr.Status <= exitOwnerTyped:
+	case errors.As(err, &exitErr) && exitErr.Status >= exitOwnerSubagent && exitErr.Status <= exitOwnerLast:
 		// (Claude Code's input box not the conversation's: the Enter not pressed there.)
 		*outcome = "refused"
 		*reason, _, _ = writeOwnerRefusal(w, err)

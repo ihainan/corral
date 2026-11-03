@@ -2494,6 +2494,7 @@ screen() {
 # Who has Claude Code's input box (convo_view.go): $1 after (1: the box
 # holds a text of ours, its line not read). Not read: none — nothing typed.
 owner() {
+  os=
   if [ "$mode" = tmux ]; then os=$(tmux -u capture-pane -p -t "$p" 2>/dev/null 9>&-) || { o=none; return 0; }
   else os=$(HERDR_SOCKET_PATH=$sock herdr pane read "$p" --source visible 2>/dev/null 9>&-) || { o=none; return 0; }; fi
   o=$(printf '%s\n' "$os" | awk -v after="$1" 'OWNERAWK' 2>/dev/null) || o=none
@@ -2506,17 +2507,108 @@ owner() {
 # (Enter held back): 16, as is the agent no longer the one in front.)
 owned() {
   [ "$kind" = claude ] && [ -z "$cx" ] || return 0
-  case $gate in free|idle) ;; *) return 0;; esac
+  case $gate in free|enter|idle|stop) ;; *) return 0;; esac
   if [ "$2" = 1 ]; then front || exit 16; fi
   owner "$1"
   [ "$o" = main ] && return 0
+  # (Stop: where no box is seen — a dialog of its own — Escape as ever; not
+  # where the screen was not read, nor where a list of agents shows a
+  # subagent's conversation in front — review559.)
+  if [ "$gate" = stop ] && [ "$o" = none ]; then
+    [ -n "$os" ] || exit 15
+    printf '%s\n' "$os" | awk '/^[ \t]*(❯[ \t]+)?◯ main[ \t]*$/ { f = 1 } END { exit !f }' && exit 13
+    return 0
+  fi
   [ "$2" = 1 ] && exit 16
+  # Nothing typed yet: the conversation's own box brought back in front, if
+  # it can be for sure (back), then looked at again as before. (Not for an
+  # Enter again, gate "enter": that is for words of ours in the box shown.)
+  case $gate:$o in enter:*) ;; *:subagent|*:list)
+    back; bk=$?
+    [ "$bk" = 2 ] && exit 17
+    if [ "$bk" = 0 ]; then
+      owner "$1"
+      if [ "$o" = main ]; then printf '\001corral: main again\n'; return 0; fi
+    fi ;;
+  esac
   case $o in subagent) exit 13;; list|sessions) exit 14;; *) exit 15;; esac
 }
-b=corral-send-$$ typing=0 partdir=
+# Back to the conversation's own box (agent-view.md): a subagent's
+# conversation in front — clicked or tapped in its list of agents, in a
+# fullscreen Claude Code — or that list holding the keys. Keys only where
+# the screen says what each will do, read again after each (foot, of
+# claudeFootAwk): the list's keys released with Escape only while the list
+# has them (Escape in a box stops what works there); a subagent's left only
+# with its box empty (a draft of the person's is not carried off); down into
+# the list once, Enter only with its cursor on main. Not sure at any step:
+# the list let go of, if it has the keys, and no more (refused, as before).
+foot() {
+  if [ "$mode" = tmux ]; then fs=$(tmux -u capture-pane -p -t "$p" 2>/dev/null 9>&-) || fs=
+  else fs=$(HERDR_SOCKET_PATH=$sock herdr pane read "$p" --source visible 2>/dev/null 9>&-) || fs=; fi
+  ft=$(printf '%s\n' "$fs" | awk 'FOOTAWK' 2>/dev/null) || ft=
+  [ -n "$ft" ] || ft="none none none 0 0"
+  read -r fo vw cu ev em <<FOOT
+$ft
+FOOT
+}
+# (One key, of the same agent still in front — and, tmux, in that session —
+# then the screen read until what it says changes, 2 seconds at most.)
+press1() {
+  front || return 1
+  if [ "$mode" = tmux ]; then
+    [ "$(tmux -u display-message -p -t "$p" '#{session_name}' 2>/dev/null 9>&-)" = "$sess" ] || return 1
+    case $1 in down) k=Down;; enter) k=Enter;; *) k=Escape;; esac
+    moved=1
+    tmux send-keys -t "$p" "$k" 9>&- || return 1
+  else
+    moved=1
+    HERDR_SOCKET_PATH=$sock herdr pane send-keys "$p" "$1" >/dev/null 2>&1 9>&- || return 1
+  fi
+  was=$ft i=0
+  while [ "$i" -lt 13 ]; do
+    sleep 0.15 2>/dev/null || sleep 1
+    foot
+    [ "$ft" != "$was" ] && return 0
+    i=$((i + 1))
+  done
+  return 0
+}
+# (Each key once at most: a screen that did not change as said is given up
+# on. 0: back; 1: not, nothing pressed or the screen as it was; 2: keys
+# pressed and where the terminal is now not known — left in the list.)
+back() {
+  moved=0 downs=0 enters=0 escs=0 n=0
+  foot
+  while [ "$n" -lt 4 ]; do
+    n=$((n + 1))
+    case "$fo $vw" in
+    "box main"|"other none") return 0 ;; # (no list left: who has the box, looked at again)
+    "box sub")
+      [ "$em" = 1 ] && [ "$downs" = 0 ] || break
+      downs=1
+      press1 down || return 2 ;;
+    "list sub")
+      [ "$cu" = main ] && [ "$ev" = 1 ] && [ "$enters" = 0 ] || break
+      enters=1
+      press1 enter || return 2 ;;
+    "list main")
+      [ "$escs" = 0 ] || break
+      escs=1
+      press1 esc || return 2 ;;
+    *) break ;;
+    esac
+  done
+  # (The list let go of, if it has the keys and was not let go of yet.)
+  if [ "$fo" = list ] && [ "$escs" = 0 ]; then escs=1; press1 esc || return 2; fi
+  [ "$moved" = 1 ] && [ "$fo" != box ] && return 2
+  return 1
+}
+b=corral-send-$$ typing=0 moved=0 partdir=
 f=$(mktemp) || exit 4
 trap 'rm -f "$f"; [ -n "$partdir" ] && rm -rf "$partdir"; [ "$mode" = tmux ] && tmux delete-buffer -b "$b" 2>/dev/null 9>&-' EXIT
-trap '[ "$typing" = 1 ] && exit 6; exit 4' HUP INT TERM
+# (Stopped while bringing the conversation's box back (back): where the
+# terminal was left is not known, 17.)
+trap '[ "$typing" = 1 ] && exit 6; [ "$moved" = 1 ] && exit 17; exit 4' HUP INT TERM
 if [ "$len" != keys ]; then cat >"$f" || exit 4; fi
 l=${XDG_RUNTIME_DIR:-}/corral-send-$(printf '%s' "$mode-$p" | tr -c 'A-Za-z0-9-' _)
 if [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -d "$XDG_RUNTIME_DIR" ] && [ ! -L "$l" ] && command -v flock >/dev/null 2>&1 && (exec 9>>"$l") 2>/dev/null; then
@@ -2648,7 +2740,7 @@ gate_enter() {
   [ -n "$gate" ] || return 0
   waiting
   case $gate in
-  free|screen:*) case $st in waiting|title-unread) exit 5;; esac ;;
+  free|enter|screen:*) case $st in waiting|title-unread) exit 5;; esac ;;
   idle) [ "$st" = idle ] || exit 5 ;;
   reply:*) [ "$st" = waiting ] || exit 5 ;;
   esac
@@ -2658,7 +2750,10 @@ gate_enter() {
 if [ -n "$gate" ]; then
   waiting
   case $gate in
-  free) [ "$st" = waiting ] && exit 9; [ "$st" = title-unread ] && exit 11 ;;
+  free|enter) [ "$st" = waiting ] && exit 9; [ "$st" = title-unread ] && exit 11 ;;
+  # (Stop, Claude Code's: whatever its session file says — only who has
+  # its box, owned below: a subagent's shown, Escape would stop that one.)
+  stop) ;;
   screen:*)
     [ "$st" = waiting ] && exit 9; [ "$st" = title-unread ] && exit 11
     command -v sha256sum >/dev/null 2>&1 || exit 11
@@ -2768,6 +2863,7 @@ fi`
 
 	script = strings.ReplaceAll(script, "CARDAWK", cardRegionAwk)   // (see convo_card.go)
 	script = strings.ReplaceAll(script, "OWNERAWK", claudeOwnerAwk) // (see convo_view.go)
+	script = strings.ReplaceAll(script, "FOOTAWK", claudeFootAwk)
 	cmd := "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(mode) + " " + sshx.QuoteShell(session) + " " + sshx.QuoteShell(pane) + " " +
 		strconv.FormatInt(pid, 10) + " " + strconv.FormatInt(start, 10) + " " + n + " " + sshx.QuoteShell(socket) + " " + sshx.QuoteShell(sid) + " " + strconv.Itoa(max(0, min(read, 60))) + " " + sshx.QuoteShell(gate)
 	for _, k := range keys {
@@ -3047,6 +3143,11 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		// (card: its key, and the card as the page shows it.)
 		Key  string     `json:"key"`
 		Card *convoCard `json:"card"`
+		// (sent_missing: how long ago it was sent (ms, by the page's clock),
+		// and "log" to look only in the subagents' logs for where it went,
+		// not at the screen.)
+		Ago  int64  `json:"ago"`
+		Only string `json:"only"`
 	}
 	err := readJSON(r, &b)
 	text, textOK := sendText(b.Text)
@@ -3302,8 +3403,12 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	}
 	if what == "sent_missing" {
 		release := turn
-		turn = func() {} // (the screen read gives it back, once it has ended on the host)
-		s.sentMissing(w, ctx, sess, b.Pane, socket, front.agent, text, &outcome, &reason, release)
+		turn = func() {}        // (the screen read gives it back, once it has ended on the host)
+		key := sess.ID + "\x00" // (the conversation read for it: see apiConversationSubagent)
+		if sess.Persistence == "herdr" {
+			key += b.Pane
+		}
+		s.sentMissing(w, ctx, sess, b.Pane, socket, front.agent, text, key, b.Session, b.Ago, b.Only == "log", &outcome, &reason, release)
 		return
 	}
 	if what == "sent_enter" {
@@ -3368,6 +3473,8 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		}
 	case front.agent == "claude" && (what == "send" || what == "send_now" || what == "mode"):
 		gate = "free" // (not while it waits: what is typed would go to its question)
+	case front.agent == "claude" && what == "interrupt":
+		gate = "stop" // (a subagent's conversation shown: Escape would stop that one — agent-view.md)
 	case front.agent == "codex" && (what == "send" || what == "send_now"):
 		gate = "cfree" // (likewise: typed into its approval, the Enter would answer it)
 	case what == "command" && front.agent == "codex":
@@ -3431,6 +3538,8 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	}
 	res, err := sshx.Exec(ctx, sess.Client(), cmd, sendOut,
 		sshx.ExecOptions{Stdin: strings.NewReader(text), Release: done})
+	var restored bool // (a subagent's conversation had been shown: the conversation's own brought back first)
+	res.Out, restored = viewRestored(res.Out)
 	var exitErr *sshx.ExitError
 	switch {
 	case err == nil:
@@ -3465,7 +3574,7 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		reason = "screen_changed"
 		writeError(w, http.StatusConflict, "screen_changed", "the screen changed; look again before answering")
 		return
-	case errors.As(err, &exitErr) && exitErr.Status >= exitOwnerSubagent && exitErr.Status <= exitOwnerTyped:
+	case errors.As(err, &exitErr) && exitErr.Status >= exitOwnerSubagent && exitErr.Status <= exitOwnerLast:
 		// (Claude Code's input box not the conversation's: nothing typed, or typed and no Enter.)
 		reason, _, _ = writeOwnerRefusal(w, err)
 		return
@@ -3508,11 +3617,14 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 			}
 		})
 	}
+	if restored && reason == "" {
+		reason = "view_restored"
+	}
 	switch {
 	case outcome == "typed" && what == "mode":
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "mode": screenMode(string(res.Out))})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "mode": screenMode(string(res.Out)), "view_restored": restored})
 	case outcome == "typed":
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "view_restored": restored})
 	case reason == "busy":
 		writeError(w, http.StatusTooManyRequests, "busy", "the host is still answering earlier requests")
 	case outcome == "refused":

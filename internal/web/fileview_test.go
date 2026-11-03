@@ -56,7 +56,7 @@ func TestFilesView(t *testing.T) {
 		"x.svg":     {[]byte(`<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>`), 415, "not_an_image"},
 		"page.png":  {[]byte("<html><script>alert(1)</script></html>"), 415, "not_an_image"},
 		"fake.png":  {append([]byte("\x89PNG\r\n\x1a\n"), "<html>"...), 415, "not_an_image"}, // (a PNG's start, not a PNG)
-		"huge.png":  {pngOf(10000, 6000), 413, "too_large"},                              // (60 million pixels)
+		"huge.png":  {pngOf(10000, 6000), 413, "too_large"},                                  // (60 million pixels)
 		"heavy.png": {append(pngOf(2, 2), make([]byte, viewMaxBytes)...), 413, "too_large"},
 	}
 	for name, c := range refused {

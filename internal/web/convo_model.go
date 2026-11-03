@@ -143,9 +143,13 @@ var (
 	errNotTaken  = errors.New("the picker did not take the choice")
 	errBusyAgent = errors.New("the agent is working")
 	errDraft     = errors.New("its input holds text not sent")
-	errScreen    = errors.New("its screen is not as expected")
-	errUnsure    = errors.New("it is not known whether the model was taken")
-	pickerRule   = regexp.MustCompile(`^\s*[─━]{8,}`)
+	// (Its box not the conversation's: a subagent's conversation shown in
+	// front, or a list holding the keys — its placeholder is no draft.)
+	errViewSubagent = errors.New("the terminal shows a subagent's conversation")
+	errViewOther    = errors.New("the terminal's keys go to the list of agents or of sessions")
+	errScreen       = errors.New("its screen is not as expected")
+	errUnsure       = errors.New("it is not known whether the model was taken")
+	pickerRule      = regexp.MustCompile(`^\s*[─━]{8,}`)
 )
 
 const (
@@ -201,6 +205,12 @@ func askShows(screen, target string) bool {
 func idleInput(screen string) error {
 	if strings.Contains(screen, "esc to interrupt") {
 		return errBusyAgent
+	}
+	switch claudeOwner(screen, false) {
+	case "subagent":
+		return errViewSubagent
+	case "list", "sessions":
+		return errViewOther
 	}
 	lines := strings.Split(screen, "\n")
 	for i := len(lines) - 2; i >= 1; i-- {
@@ -438,6 +448,7 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 		running.Add(1)
 		res, err := sshx.Exec(ctx, sess.Client(), convoGatedCommand(gate, sess.Persistence, sess.TmuxSession, pane, socket, pid, start, sid, len(text), press, read), 64<<10,
 			sshx.ExecOptions{Stdin: strings.NewReader(text), Release: running.Done})
+		res.Out, _ = viewRestored(res.Out) // (its word that it brought the box back: not of the screen)
 		if err == nil && (len(press) > 0 || text != "") {
 			typed = true
 		}
@@ -536,7 +547,7 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 		// (Its picker's command not sent, or typed and not sent: it waits for an answer.)
 		*outcome, *reason = said(typed || exitErr.Status == 5), "agent_waiting"
 		writeError(w, http.StatusConflict, "agent_waiting", "it waits for an answer, or has a dialog open: answer it first")
-	case errors.As(err, &exitErr) && exitErr.Status >= exitOwnerSubagent && exitErr.Status <= exitOwnerTyped:
+	case errors.As(err, &exitErr) && exitErr.Status >= exitOwnerSubagent && exitErr.Status <= exitOwnerLast:
 		// (Claude Code's input box not the conversation's: its picker's command not sent.)
 		code, typedNow, _ := writeOwnerRefusal(w, err)
 		*outcome, *reason = said(typed || typedNow), code
@@ -557,6 +568,12 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 	case errors.Is(err, errDraft):
 		*reason = "draft"
 		writeError(w, http.StatusConflict, "draft", err.Error())
+	case errors.Is(err, errViewSubagent):
+		*reason = "subagent_view"
+		writeError(w, http.StatusConflict, "subagent_view", err.Error())
+	case errors.Is(err, errViewOther):
+		*reason = "other_view"
+		writeError(w, http.StatusConflict, "other_view", err.Error())
 	case errors.Is(err, errNoPicker), errors.Is(err, errNoModel), errors.Is(err, errNotThere), errors.Is(err, errNotTaken), errors.Is(err, errScreen):
 		if typed {
 			*outcome = "unknown"

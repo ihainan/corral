@@ -469,12 +469,18 @@ func ownerGateCases(t *testing.T, dir string, pid int, start int64, run func(str
 		name, screen string
 		gate         string
 		want         int
+		typed        string
 	}{
-		{"a subagent's", sub, "free", 13}, {"the list of agents", list, "free", 14}, {"the sessions' view", sessions, "free", 14},
-		{"a subagent's, a command", sub, "idle", 13},
+		{"a subagent's", sub, "free", 13, ""}, {"the sessions' view", sessions, "free", 14, ""},
+		{"a subagent's, a command", sub, "idle", 13, ""},
+		// (The list holding the keys: let go of with one Escape, the box
+		// then brought back; here the screen stays as it was after it:
+		// where the terminal is, not known — 17.)
+		{"the list of agents", list, "free", 17, "pane send-keys p1 esc"},
+		{"the list of agents, Enter again", list, "enter", 14, ""},
 	} {
 		showing(c.screen)
-		if got := run(c.gate, []string{"enter"}); got != c.want || wrote() != "" {
+		if got := run(c.gate, []string{"enter"}); got != c.want || wrote() != c.typed {
 			t.Fatalf("%s: exit %d, typed %q", c.name, got, wrote())
 		}
 	}

@@ -16,7 +16,7 @@ import { useCompletion } from '../terminal/Completion'
 import { convoTarget, herdrTarget, InlineReply } from '../terminal/ReplyDialog'
 import { SessionOpDialog, type SessionOp } from '../terminal/sessionOps'
 import { NEW_AGENT, NewAgentDialog } from '../terminal/newAgent'
-import { BgCmds, CODEX_EFFORTS, ConversationView, ListSearch, SEARCH_FROM, when, type ConvoAgent, type ConvoListRow, type ConvoPending, type FileActs, type ModelOpt } from '../terminal/Conversation'
+import { BgCmds, CODEX_EFFORTS, ConversationView, ListSearch, SEARCH_FROM, when, type ConvoAgent, type ConvoListRow, type ConvoPending, type ConvoWent, type FileActs, type ModelOpt } from '../terminal/Conversation'
 import { FilesDialog } from '../terminal/FilesDialog'
 import { downloadPath, PictureDialog } from '../terminal/picture'
 import { attach, ATTACH_LABEL, AttachStrip, takeOut } from '../terminal/attach'
@@ -70,7 +70,7 @@ const SUGGEST_AT = [1500, 4000, 9000]
 type SuggestAsk = { left: number; text: string; seq: number; busy: boolean; views: Set<{ told: () => void; next: () => void }> }
 const suggestAsks = new Map<string, SuggestAsk>()
 // Refusals of a switch made before any key was pressed (see convoPress, convoModeTo).
-const NOTHING_PRESSED = ['bad_request', 'unauthorized', 'unsupported', 'busy', 'host_error', 'agent_changed', 'not_in_front', 'refused', 'no_screen', 'not_found', 'forbidden', 'subagent_view', 'other_view', 'no_input']
+const NOTHING_PRESSED = ['bad_request', 'unauthorized', 'unsupported', 'busy', 'host_error', 'agent_changed', 'not_in_front', 'refused', 'no_screen', 'not_found', 'forbidden', 'subagent_view', 'other_view', 'no_input', 'view_unsure']
 const MODE_MS = 50000 // (to a mode picked: several presses, each read back; the gateway gives up at 45 s)
 const MODEL_MS = 50000 // (the picker, step by step: see convo_model.go)
 const PASTE_CHARS = 2000
@@ -625,6 +625,10 @@ const STOP_AFTER_SEND_MS = 1500
 // the page's life, not the view's, so that leaving an agent and coming
 // back does not ask the host the same thing again.
 const lookedAt = new Set<number>()
+// (And, of those still not known, how often and when the subagents' logs
+// were asked where they went: see below.)
+const logAsked = new Map<number, { n: number; at: number }>()
+const LOG_ASK_AFTER = [0, 30_000, 120_000, 480_000] // (the first at once; then a subagent may write it only once its tool is done)
 
 // A tmux session's background commands, as its conversation last said
 // them (only one read is told them: the list has no word of a tmux
@@ -884,8 +888,8 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     const bind = bindKey // (what becomes of it is of that process: another in the pane shows none of it)
     setSaid({ what, text: t(what === 'stop' ? 'convo.stopping' : 'convo.sendingNow'), busy: true, n, bind })
     const settle = (text: string) => setSaid((cur) => (cur?.n === n ? { what, text, busy: false, n, bind } : cur))
-    api('POST', `/api/sessions/${sid}/conversation/${what === 'stop' ? 'interrupt' : 'send-now'}`, { pane: b.pane, pid: b.pid, start: b.start, session: b.session }, { timeoutMs: PRESS_MS })
-      .then(() => settle(t(what === 'stop' ? 'convo.stopped' : 'convo.sentNow')))
+    api<{ view_restored?: boolean }>('POST', `/api/sessions/${sid}/conversation/${what === 'stop' ? 'interrupt' : 'send-now'}`, { pane: b.pane, pid: b.pid, start: b.start, session: b.session }, { timeoutMs: PRESS_MS })
+      .then((r) => settle(t(what === 'stop' ? 'convo.stopped' : 'convo.sentNow') + (r?.view_restored ? ' ' + t('convo.viewRestoredShort') : '')))
       .catch((e) => settle(refusal(e)))
   }
   const canPress = bound && working
@@ -1143,11 +1147,45 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       if (lookedAt.size > 200) for (const q of [...lookedAt].slice(0, 100)) lookedAt.delete(q)
       const bind = bindKey // (the answer is of that conversation, not of whichever is open when it comes)
       const at = (look: ConvoPending['look']) => setSent((ps) => ps.map((q) => (q.id === p.id && q.bind === bind ? { ...q, look } : q)))
-      api<{ screen: string; waiting: boolean; known: boolean; view?: string }>('POST', `/api/sessions/${sid}/conversation/sent-missing`, { ...pressBody(), text: p.text }, { timeoutMs: PRESS_MS })
-        .then((r) => at({ waiting: r.waiting, known: r.known, screen: r.screen, view: r.view }))
+      logAsked.set(p.id, { n: 1, at: Date.now() }) // (its own look asks the logs too)
+      api<{ screen: string; waiting: boolean; known: boolean; view?: string; went?: ConvoWent | null }>('POST', `/api/sessions/${sid}/conversation/sent-missing`, { ...pressBody(), text: p.text, ago: Date.now() - p.at }, { timeoutMs: PRESS_MS })
+        .then((r) => at({ waiting: r.waiting, known: r.known, screen: r.screen, view: r.view, went: r.went ?? undefined }))
         .catch(() => at('failed'))
     }
   }, [sent, convo.bind, sid, bindKey])
+  // One not seen in the log, where it went not known (its look found it in
+  // no subagent's log, or failed, or the page was opened anew meanwhile):
+  // the subagents' logs asked again, alone, a few times, a while apart — a
+  // subagent may write it only once its tool is done (agent-view.md,
+  // review559). The screen is not read again: of now, it says nothing of then.
+  const [logTick, setLogTick] = useState(0)
+  useEffect(() => {
+    let next = Infinity
+    for (const p of sent) {
+      const look = p.look
+      if (p.state !== 'unseen' || look === 'looking' || (look && typeof look === 'object' && (look.went || look.waiting)) || !convo.bind || !ofThis(p.bind)) continue
+      const a = logAsked.get(p.id) ?? { n: 0, at: 0 }
+      if (a.n >= LOG_ASK_AFTER.length) continue
+      const when = a.at + LOG_ASK_AFTER[a.n]
+      if (when > Date.now()) {
+        next = Math.min(next, when)
+        continue
+      }
+      logAsked.set(p.id, { n: a.n + 1, at: Date.now() })
+      if (logAsked.size > 200) for (const q of [...logAsked.keys()].slice(0, 100)) logAsked.delete(q)
+      const bind = bindKey
+      api<{ went?: ConvoWent | null }>('POST', `/api/sessions/${sid}/conversation/sent-missing`, { ...pressBody(), text: p.text, ago: Date.now() - p.at, only: 'log' }, { timeoutMs: PRESS_MS })
+        .then((r) => {
+          const went = r.went
+          if (!went) return
+          setSent((ps) => ps.map((q) => (q.id === p.id && q.bind === bind && q.state === 'unseen' ? { ...q, look: { ...(q.look && typeof q.look === 'object' ? q.look : { waiting: false, known: false, screen: '' }), went } } : q)))
+        })
+        .catch(() => {}) // (as it was: not known)
+    }
+    if (next === Infinity) return
+    const timer = setTimeout(() => setLogTick((n) => n + 1), next - Date.now() + 50)
+    return () => clearTimeout(timer)
+  }, [sent, convo.bind, sid, bindKey, logTick])
 
   const shownSent = sent.filter((p) => ofThis(p.bind) && !(p.state !== 'sent' && queued.has(norm(p.text))))
 
@@ -1480,9 +1518,11 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       if (draftKeyNow.current === key) setDraftShown((d) => (d === undefined || !d.trim() ? was : d))
     }
 
-    api('POST', `/api/sessions/${sid}/conversation/send`, { pane: b.pane, pid: b.pid, start: b.start, session: b.session, text }, { timeoutMs: SEND_MS })
-      .then(() => {
+    api<{ view_restored?: boolean }>('POST', `/api/sessions/${sid}/conversation/send`, { pane: b.pane, pid: b.pid, start: b.start, session: b.session, text }, { timeoutMs: SEND_MS })
+      .then((r) => {
         if (authGen() !== account) return drop()
+        // (A subagent's conversation was in front in the terminal: brought back first, said.)
+        if (r?.view_restored) toast(t('convo.viewRestored'))
         remember(was)
         mark({ state: 'waiting' })
         convo.refresh() // (it is in its log in a moment: read now, not at the next tick)
@@ -1800,6 +1840,20 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       side={{ rows }}
       active={active}
       onDismiss={(id) => setSent((ps) => ps.filter((p) => p.id !== id))}
+      onResend={(id) => {
+        const p = sent.find((q) => q.id === id)
+        if (!p) return
+        setSent((ps) => ps.filter((q) => q.id !== id))
+        // (After what is in the box already, if anything: the person sends it when ready.)
+        const next = draft.trim() ? draft.replace(/\s+$/, '') + '\n' + p.text : p.text
+        setDraft(next)
+        requestAnimationFrame(() => {
+          const el = field.current
+          if (!el) return
+          el.focus()
+          el.selectionStart = el.selectionEnd = next.length
+        })
+      }}
       onEnter={async (id) => {
         const p = sent.find((q) => q.id === id)
         if (!p) return false

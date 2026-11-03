@@ -57,7 +57,10 @@ function greyedAfter(term: Terminal, l: IBufferLine, from: number): string | nul
     out += ch
   }
   const s = out.trim() // (spaces inside are the suggestion's own)
-  if (!s || /^Try "/.test(s)) return null
+  // (Nor the box's placeholder while a subagent's conversation, or the
+  // background sessions' view, is the one shown: "Message @…", "describe a
+  // task for a new session" — agent-view.md.)
+  if (!s || /^Try "/.test(s) || /^Message @/.test(s) || s === 'describe a task for a new session') return null
   return s
 }
 

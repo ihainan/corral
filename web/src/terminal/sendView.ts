@@ -14,6 +14,8 @@ export function viewRefusal(code: string | undefined): string | null {
       return t('convo.err.noInput')
     case 'typed_other_view':
       return t('convo.err.typedOtherView')
+    case 'view_unsure':
+      return t('convo.err.viewUnsure')
   }
   return null
 }

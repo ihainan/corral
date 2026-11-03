@@ -39,10 +39,17 @@ func (s *Server) suggestion(w http.ResponseWriter, ctx context.Context, sess *te
 		return
 	}
 	*outcome = "looked"
-	// (Claude Code's card above its box, if one is there: read off the same screen.)
-	out := map[string]any{"suggestion": suggestionOf(string(res.Out))}
-	if c := cardOf(string(res.Out)); c != nil {
-		out["card"] = c
+	// (Only of the conversation's own box: with a subagent's conversation
+	// shown, or the background sessions' view, its greyed text is that
+	// one's placeholder ("Message @…"), and a card above it that one's —
+	// agent-view.md.)
+	out := map[string]any{"suggestion": ""}
+	if claudeOwner(sgr.ReplaceAllString(string(res.Out), ""), false) == "main" {
+		out["suggestion"] = suggestionOf(string(res.Out))
+		// (Claude Code's card above its box, if one is there: read off the same screen.)
+		if c := cardOf(string(res.Out)); c != nil {
+			out["card"] = c
+		}
 	}
 	writeJSON(w, http.StatusOK, out)
 }

@@ -90,7 +90,7 @@ var hexDigest = regexp.MustCompile(`^[0-9a-f]{64}$`)
 // opened there either, and an Escape would go to whatever has the keys.
 func gateRefused(err error) bool {
 	var e *sshx.ExitError
-	return errors.As(err, &e) && (e.Status == 9 || e.Status == 5 || (e.Status >= exitOwnerSubagent && e.Status <= exitOwnerTyped))
+	return errors.As(err, &e) && (e.Status == 9 || e.Status == 5 || (e.Status >= exitOwnerSubagent && e.Status <= exitOwnerLast))
 }
 
 // replyOK: an answer is a digest and keys (of replyKeys, one to four) or a
