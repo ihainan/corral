@@ -621,7 +621,13 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-meta-more { display: none; align-items: center; justify-content: center; width: 28px; height: 20px; margin: 0 -6px; padding: 0; border: 0; border-radius: 6px; background: none; color: var(--term-fg-3); cursor: pointer; }
 .convo-meta-more:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: 1px; }
 @media (hover: hover) {
-  .convo-meta-acts { opacity: 0; transition: opacity 0.12s; }
+  /* (Out of the line while hidden, so the time keeps to the message's edge;
+     shown beside it, never moving it: left of it under the person's own
+     message, right of it under an answer.) */
+  .convo-meta { position: relative; }
+  .convo-meta-acts { position: absolute; top: 0; white-space: nowrap; opacity: 0; transition: opacity 0.12s; }
+  .convo-user .convo-meta-acts { right: 100%; margin-right: 12px; }
+  .convo-answer .convo-meta-acts { left: 100%; margin-left: 12px; }
   .convo-user:hover .convo-meta-acts, .convo-answer:hover .convo-meta-acts, .convo-meta-acts:focus-within { opacity: 1; }
 }
 /* (Nothing hovers: the words behind one small button, 44 to touch) */
