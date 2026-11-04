@@ -394,8 +394,13 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
   // it (by its key): long past their wait, or found not taken, lately; not
   // one found gone to a subagent. From what is kept here: nothing is read
   // for it — its own view, gone back to, makes sure as it does.
+  // (Of one not shown, nothing makes sure: one still waiting counts only
+  // where nothing says it went — the agent at rest, its state the same
+  // since it was sent. At work, it takes a message in when it can: queued
+  // till then, not lost — 11-04.)
   const unsentOf = useCallback(
-    (key: string) => (sentBy[key] ?? []).filter(unsentNow).length,
+    (key: string, live?: { status: string; since?: number }) =>
+      (sentBy[key] ?? []).filter((p) => unsentNow(p) && (p.state === 'unseen' || (!!live && live.status !== 'working' && live.status !== 'unknown' && !((live.since ?? 0) > p.at)))).length,
     [sentBy],
   )
   useEffect(() => keepSent(sentBy), [sentBy])
@@ -745,7 +750,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   all: SessionInfo[]
   titles: Titles
   sent: Sent[]
-  unsentOf: (key: string) => number
+  unsentOf: (key: string, live?: { status: string; since?: number }) => number
   setSent: (f: (ps: Sent[]) => Sent[]) => void
   sending: boolean
   setSending: (v: boolean) => void
@@ -958,7 +963,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
         const r = e.row
         const said = (current && agent?.title) || keptTitle(titles, e) || paneTitle(r.a.title) || dirName(r.a.cwd) || r.a.agent
         const st = current && agent && !r.bg ? agent.status : r.status
-        return { key: e.key, ...labelOf(e, said, hosts), unsent: unsentOf(e.key) || undefined, now: r.lost || r.bg || st !== 'blocked' ? undefined : glanceOf(e.s.id, e.pane, st, r.a.since) || undefined /* (said only of one waiting on the person) */, program: r.a.agent, status: st, bg: r.lost ? undefined : r.bg, cmds: cmdsOf(r), since: r.lost ? undefined : r.bg ? r.a.bg_since : r.a.since, current, pinned: pinAt(e.key), onPick: () => onPick(e), menu: () => rowMenu.current(e) }
+        return { key: e.key, ...labelOf(e, said, hosts), unsent: unsentOf(e.key, r.lost ? undefined : { status: st, since: r.a.since }) || undefined, now: r.lost || r.bg || st !== 'blocked' ? undefined : glanceOf(e.s.id, e.pane, st, r.a.since) || undefined /* (said only of one waiting on the person) */, program: r.a.agent, status: st, bg: r.lost ? undefined : r.bg, cmds: cmdsOf(r), since: r.lost ? undefined : r.bg ? r.a.bg_since : r.a.since, current, pinned: pinAt(e.key), onPick: () => onPick(e), menu: () => rowMenu.current(e) }
       }
       const title = (current && agent?.title) || keptTitle(titles, e) || `${e.s.host_name} · ${sessionWhich(e.s, all)}`
       return { key: e.key, title, where: whereOf(e, hosts), unsent: unsentOf(e.key) || undefined, program: current ? agent?.program : undefined, status: current && agent ? agent.status : 'unknown', cmds: current ? agent?.cmds : tmuxCmdsOf(e), current, pinned: pinAt(e.key), onPick: () => onPick(e), menu: () => rowMenu.current(e) }
@@ -2239,7 +2244,7 @@ const asRow = (e: Entry, pins: string[]): ConvoListRow => {
 }
 // query, onQuery: what it is searched for, kept by the page (as the side
 // list's is): still searched, back from a conversation.
-function PhoneList({ entries, all, titles, query, onQuery, onPick, unsentOf }: { entries: Entry[]; all: SessionInfo[]; titles: Titles; query: string; onQuery: (q: string) => void; onPick: (e: Entry) => void; unsentOf: (key: string) => number }) {
+function PhoneList({ entries, all, titles, query, onQuery, onPick, unsentOf }: { entries: Entry[]; all: SessionInfo[]; titles: Titles; query: string; onQuery: (q: string) => void; onPick: (e: Entry) => void; unsentOf: (key: string, live?: { status: string; since?: number }) => number }) {
   const [now, setNow] = useState(Date.now())
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 30000)
@@ -2363,6 +2368,7 @@ function PhoneList({ entries, all, titles, query, onQuery, onPick, unsentOf }: {
           const line = lineAfter.get(e)
           const r = e.row
           const status = r?.lost ? 'unknown' : (r?.status ?? 'unknown')
+          const unsent = unsentOf(e.key, r && !r.lost ? { status, since: r.a.since } : undefined)
           const { title, where } = labelled(e)
           const since = r && !r.lost ? when({ since: r.bg ? r.a.bg_since : r.a.since, status }, now) : ''
           return (
@@ -2380,9 +2386,9 @@ function PhoneList({ entries, all, titles, query, onQuery, onPick, unsentOf }: {
                     )}
                   </span>
                   <span className="agents-list-where">{where}</span>
-                  {unsentOf(e.key) > 0 && <span className="agents-list-now is-unsent">{t('convo.unsentRow', { n: unsentOf(e.key) })}</span>}
+                  {unsent > 0 && <span className="agents-list-now is-unsent">{t('convo.unsentRow', { n: unsent })}</span>}
                   {/* (A third line only for what waits on the person — as the side list.) */}
-                  {status === 'blocked' && r && !r.lost && !r.bg && unsentOf(e.key) === 0 && (() => {
+                  {status === 'blocked' && r && !r.lost && !r.bg && unsent === 0 && (() => {
                     const g = glanceOf(e.s.id, e.pane, status, r.a.since)
                     return g ? <span className="agents-list-now is-blocked">{g}</span> : null
                   })()}
