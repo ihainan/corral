@@ -677,6 +677,27 @@ details.adv > .form { margin-top: 16px; }
   .picture-img { max-height: calc(var(--vv-h, 100dvh) - 230px); }
 }
 
+/* A text file of the host, read (textPreview.tsx): its lines numbered beside
+   it, long ones scrolled to, not wrapped; Markdown drawn. In the terminal's
+   colours (term-vars), as code in a conversation is. */
+.dialog.text-preview-dialog { max-width: min(1100px, calc(100vw - 32px)); width: 100%; padding: 12px 0 0; gap: 0; overflow: hidden; }
+.text-preview-icon { display: flex; flex: none; }
+.text-preview-size { flex: none; font-size: 12px; color: var(--fg-3); font-variant-numeric: tabular-nums; }
+.text-preview-mode { flex: none; gap: 6px; }
+.text-preview { position: relative; min-height: 160px; max-height: calc(var(--vv-h, 100dvh) - 190px); overflow: auto; overscroll-behavior: contain; background: var(--term-bg); color: var(--term-fg); border-block: 1px solid var(--line); }
+.text-preview-code { display: grid; grid-template-columns: auto 1fr; min-width: max-content; font: 13px/20px var(--font-mono); }
+.text-preview-nums { position: sticky; left: 0; margin: 0; padding: 12px 10px 12px 16px; text-align: right; color: var(--term-fg-3); background: var(--term-bg); border-right: 1px solid var(--term-line); user-select: none; }
+.text-preview-text { margin: 0; padding: 12px 16px; white-space: pre; tab-size: 4; }
+.text-preview-text code { font: inherit; background: none; padding: 0; }
+.text-preview-md { max-width: 820px; padding: 16px 24px; font-size: 15px; line-height: 1.7; }
+.text-preview-cut { position: sticky; left: 0; bottom: 0; margin: 0; padding: 8px 16px; font-size: 12px; color: var(--term-warn-text); background: var(--term-chrome); border-top: 1px solid var(--term-line); }
+.text-preview .picture-note { color: var(--term-fg-2); }
+@media (max-width: 520px) {
+  .sheet-mode .dialog.text-preview-dialog { max-width: none; padding-bottom: env(safe-area-inset-bottom, 0px); }
+  .text-preview { max-height: calc(var(--vv-h, 100dvh) - 230px); }
+  .text-preview-md { padding: 14px 16px; }
+}
+
 /* File panel */
 .dialog.files-dialog { max-width: 760px; height: min(680px, calc(var(--vv-h, 100dvh) - 32px)); padding: 14px 0 0; gap: 0; overflow: hidden; }
 .files-head { display: flex; align-items: center; justify-content: space-between; padding: 0 12px 0 20px; }

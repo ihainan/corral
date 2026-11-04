@@ -21,6 +21,7 @@ import { agentWho, ChimeCounter, chime, countsOf } from '../terminal/chime'
 import { CODEX_EFFORTS, ConversationView, glanceOf, ListSearch, SEARCH_FROM, when, type ConvoAgent, type ConvoListRow, type ConvoPending, type ConvoWent, type FileActs, type ModelOpt } from '../terminal/Conversation'
 import { FilesDialog } from '../terminal/FilesDialog'
 import { downloadPath, PictureDialog } from '../terminal/picture'
+import { IMAGE_EXT, TextPreview } from '../terminal/textPreview'
 import { attach, ATTACH_LABEL, AttachStrip, takeOut } from '../terminal/attach'
 import { answerable, asking, useConversation, type ConvoEntry } from '../terminal/conversation'
 import { ackBg, waitingTitle, isCodex, isOpenCode, listAgents, matchQuery, paneTitle, readsLog, useRunningSessions, type AgentRow } from '../terminal/agents'
@@ -776,21 +777,27 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   const [filesAt, setFilesAt] = useState<string | null>(null)
   // A picture of its host looked at.
   const [viewing, setViewing] = useState<string | null>(null)
+  // A text file of its host read in the page.
+  const [reading, setReading] = useState<string | null>(null)
   // (A path under the home folder, "~/…": made whole with the host's home first.)
   const fileActs = useMemo((): FileActs => {
     const whole = (p: string, then: (p: string) => void) =>
       atHome(sid, p).then(then, () => toast(t('convo.path.noHome'), true))
-    return { reveal: (p) => whole(p, setFilesAt), download: (p) => whole(p, (q) => downloadPath(sid, q)), view: (p) => whole(p, setViewing) }
+    // (Looked at: a picture as one, anything else as text — the host says if it is.)
+    const look = (q: string) => (IMAGE_EXT.test(q) ? setViewing(q) : setReading(q))
+    return { reveal: (p) => whole(p, setFilesAt), download: (p) => whole(p, (q) => downloadPath(sid, q)), view: (p) => whole(p, look) }
   }, [sid, toast])
   // (Another tab shown — a terminal's — or another agent: what was opened of this one's files closes.)
   useEffect(() => {
     if (active) return
     setFilesAt(null)
     setViewing(null)
+    setReading(null)
   }, [active])
   useEffect(() => {
     setFilesAt(null)
     setViewing(null)
+    setReading(null)
   }, [sid])
   // What the bar says of it: herdr's word for a herdr agent (as the session
   // list has it, every few seconds); a tmux one's from its process file.
@@ -2127,6 +2134,17 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
         onReveal={() => {
           setViewing(null)
           setFilesAt(viewing)
+        }}
+      />
+    )}
+    {reading && active && (
+      <TextPreview
+        sid={sid}
+        path={reading}
+        onClose={() => setReading(null)}
+        onReveal={() => {
+          setReading(null)
+          setFilesAt(reading)
         }}
       />
     )}

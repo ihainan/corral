@@ -9,6 +9,7 @@ import { getLang, t } from '../i18n'
 import { Confirm, Dialog, Field, LoadError, Menu, copyText, useToast, type MenuItem } from '../components/ui'
 import { local } from '../storage'
 import { downloadPath, PictureDialog } from './picture'
+import { IMAGE_EXT, previewable, TextPreview } from './textPreview'
 
 type Props = {
   sessionId: string
@@ -81,6 +82,9 @@ export function FilesDialog({ sessionId, start, reveal, onPath, onInsert, onClos
     setDialog(make(() => dialogId.current === id && setDialog(null)))
   }
   const [viewing, setViewing] = useState<string | null>(null) // a picture of the folder looked at
+  const [reading, setReading] = useState<string | null>(null) // a text file of it read
+  // (A file looked at: a picture as one, anything else as text — the host says if it is.)
+  const look = (full: string) => (IMAGE_EXT.test(full) ? setViewing(full) : setReading(full))
   const [question, setQuestion] = useState<React.ReactNode>(null) // the upload queue's, apart from the dialogs above
   const seq = useRef(0) // numbers navigations; only the latest one's answer is shown
   const settled = useRef(0) // the latest navigation that has finished
@@ -325,7 +329,7 @@ export function FilesDialog({ sessionId, start, reveal, onPath, onInsert, onClos
   const items = (e: FileEntry): MenuItem[] => {
     const full = path === null ? '' : join(path, e.name)
     return [
-      e.type === 'file' && /\.(png|jpe?g|gif|webp)$/i.test(e.name) ? { label: t('convo.path.view'), icon: <ImageIcon size={16} />, onSelect: () => setViewing(full) } : null,
+      e.type === 'file' && previewable(e.name) ? { label: t(IMAGE_EXT.test(e.name) ? 'convo.path.view' : 'preview.item'), icon: IMAGE_EXT.test(e.name) ? <ImageIcon size={16} /> : <Eye size={16} />, onSelect: () => look(full) } : null,
       e.type === 'dir'
         ? { label: t('files.open'), icon: <Folder size={16} />, onSelect: () => void load(full) }
         : e.type === 'file'
@@ -529,7 +533,7 @@ export function FilesDialog({ sessionId, start, reveal, onPath, onInsert, onClos
             <ul className={'files-list' + (loading ? ' loading' : '')} ref={listRef}>
               {entries.map((e) => (
                 <li key={e.name} className={'files-row' + (markHere && e.name === marked!.name ? ' is-marked' : '')} data-name={e.name}>
-                  <EntryButton entry={e} items={() => items(e)} onOpen={() => void load(join(path!, e.name))} />
+                  <EntryButton entry={e} items={() => items(e)} onOpen={() => void load(join(path!, e.name))} onLook={e.type === 'file' && previewable(e.name) ? () => look(join(path!, e.name)) : undefined} />
                   <Menu
                     label={e.name}
                     heading={e.name}
@@ -577,12 +581,14 @@ export function FilesDialog({ sessionId, start, reveal, onPath, onInsert, onClos
       {dialog}
       {question}
       {viewing && <PictureDialog sid={sessionId} path={viewing} onClose={() => setViewing(null)} />}
+      {reading && <TextPreview sid={sessionId} path={reading} onClose={() => setReading(null)} />}
     </div>
   )
 }
 
-// A folder opens; a file shows what can be done with it.
-function EntryButton({ entry: e, items, onOpen }: { entry: FileEntry; items: () => MenuItem[]; onOpen: () => void }) {
+// A folder opens; a file that can be looked at is (onLook); any other shows
+// what can be done with it (as its ⋯ does for every one).
+function EntryButton({ entry: e, items, onOpen, onLook }: { entry: FileEntry; items: () => MenuItem[]; onOpen: () => void; onLook?: () => void }) {
   // (Of its kind, by its name, as VS Code draws it; one of no known kind — a link to nothing — as before.)
   const icon = e.type === 'dir' || e.type === 'file' ? <FileTypeIcon name={e.name} dir={e.type === 'dir'} /> : <FileQuestion size={18} />
   const body = (
@@ -601,6 +607,7 @@ function EntryButton({ entry: e, items, onOpen }: { entry: FileEntry; items: () 
   if (e.type === 'dir') {
     return <button className="files-entry" onClick={onOpen}>{body}</button>
   }
+  if (onLook) return <button className="files-entry" onClick={onLook}>{body}</button>
   return (
     <Menu
       label={e.name}

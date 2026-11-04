@@ -14,7 +14,7 @@ html.term-mode body { position: fixed; inset: 0; }
 /* A tab in the back: laid out at the same size (so it keeps its grid and
    needs no refit), not seen, not reachable. */
 .term-root.inactive { visibility: hidden; pointer-events: none; }
-.term-root.dark {
+.term-root.dark, .term-vars.dark {
   --term-bg: #0f1115; --term-chrome: #15181d; --term-line: rgba(255, 255, 255, 0.07);
   --term-key: #23272e; --term-key-active: #323741; --term-fg: #e6e8ec; --term-fg-2: #b0b6c1; --term-fg-3: #929aa7;
   --term-hover: rgba(255, 255, 255, 0.07);
@@ -25,7 +25,7 @@ html.term-mode body { position: fixed; inset: 0; }
   --term-line-strong: #3b4350; --term-pop: #1b1f26; --term-row-hover: rgba(255, 255, 255, 0.04); --term-row-current: rgba(255, 255, 255, 0.09); --term-add-bg: #17271f; --term-del-bg: #2a1b1d;
   color-scheme: dark;
 }
-.term-root.light {
+.term-root.light, .term-vars.light {
   --term-bg: #ffffff; --term-chrome: #f6f7f9; --term-line: #e7e9ed;
   --term-key: #ffffff; --term-key-active: #e7eaef; --term-fg: #16181d; --term-fg-2: #545c68; --term-fg-3: #646a76;
   --term-hover: #f0f2f5;
@@ -1213,17 +1213,17 @@ button.convo-task-line:hover .convo-task-name { color: var(--term-fg); }
 }
 
 /* Code coloured by its language (Code.tsx): the scheme's own colours */
-.convo .hljs-keyword, .convo .hljs-selector-tag, .convo .hljs-tag, .convo .hljs-name, .convo .hljs-doctag { color: var(--term-syn-keyword); }
-.convo .hljs-string, .convo .hljs-regexp, .convo .hljs-char.escape_ { color: var(--term-syn-string); }
-.convo .hljs-number, .convo .hljs-literal, .convo .hljs-symbol, .convo .hljs-bullet { color: var(--term-syn-number); }
-.convo .hljs-title, .convo .hljs-section, .convo .hljs-selector-id, .convo .hljs-selector-class { color: var(--term-syn-title); }
-.convo .hljs-built_in, .convo .hljs-type, .convo .hljs-title.class_ { color: var(--term-syn-type); }
-.convo .hljs-attr, .convo .hljs-attribute, .convo .hljs-property, .convo .hljs-variable, .convo .hljs-template-variable, .convo .hljs-params { color: var(--term-syn-attr); }
-.convo .hljs-comment, .convo .hljs-quote, .convo .hljs-meta { color: var(--term-syn-comment); }
-.convo .hljs-addition { color: var(--term-ok-text); }
-.convo .hljs-deletion { color: var(--term-danger-text); }
-.convo .hljs-emphasis { font-style: italic; }
-.convo .hljs-strong { font-weight: 600; }
+:is(.convo, .text-preview) .hljs-keyword, :is(.convo, .text-preview) .hljs-selector-tag, :is(.convo, .text-preview) .hljs-tag, :is(.convo, .text-preview) .hljs-name, :is(.convo, .text-preview) .hljs-doctag { color: var(--term-syn-keyword); }
+:is(.convo, .text-preview) .hljs-string, :is(.convo, .text-preview) .hljs-regexp, :is(.convo, .text-preview) .hljs-char.escape_ { color: var(--term-syn-string); }
+:is(.convo, .text-preview) .hljs-number, :is(.convo, .text-preview) .hljs-literal, :is(.convo, .text-preview) .hljs-symbol, :is(.convo, .text-preview) .hljs-bullet { color: var(--term-syn-number); }
+:is(.convo, .text-preview) .hljs-title, :is(.convo, .text-preview) .hljs-section, :is(.convo, .text-preview) .hljs-selector-id, :is(.convo, .text-preview) .hljs-selector-class { color: var(--term-syn-title); }
+:is(.convo, .text-preview) .hljs-built_in, :is(.convo, .text-preview) .hljs-type, :is(.convo, .text-preview) .hljs-title.class_ { color: var(--term-syn-type); }
+:is(.convo, .text-preview) .hljs-attr, :is(.convo, .text-preview) .hljs-attribute, :is(.convo, .text-preview) .hljs-property, :is(.convo, .text-preview) .hljs-variable, :is(.convo, .text-preview) .hljs-template-variable, :is(.convo, .text-preview) .hljs-params { color: var(--term-syn-attr); }
+:is(.convo, .text-preview) .hljs-comment, :is(.convo, .text-preview) .hljs-quote, :is(.convo, .text-preview) .hljs-meta { color: var(--term-syn-comment); }
+:is(.convo, .text-preview) .hljs-addition { color: var(--term-ok-text); }
+:is(.convo, .text-preview) .hljs-deletion { color: var(--term-danger-text); }
+:is(.convo, .text-preview) .hljs-emphasis { font-style: italic; }
+:is(.convo, .text-preview) .hljs-strong { font-weight: 600; }
 
 /* The agents page: the conversation view on the whole page (a tab of its own with tabs) */
 .agents-chat-title { padding: 0 6px; font: 600 15px/20px var(--font-ui); color: var(--term-fg); }

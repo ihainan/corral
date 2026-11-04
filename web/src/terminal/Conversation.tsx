@@ -1,5 +1,5 @@
 import { createContext, Fragment, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { ArrowDown, Check, Copy, FolderOpen, Image as ImageIcon, ChevronDown, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, Clock, Download, GitBranch, Keyboard, ListOrdered, Loader, MoreHorizontal, MoreVertical, PanelLeft, Pin, Search, TriangleAlert, X, Plus } from 'lucide-react'
+import { ArrowDown, Check, Copy, FolderOpen, Image as ImageIcon, ChevronDown, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, Clock, Download, Eye, GitBranch, Keyboard, ListOrdered, Loader, MoreHorizontal, MoreVertical, PanelLeft, Pin, Search, TriangleAlert, X, Plus } from 'lucide-react'
 import { t, getLang, type I18nKey } from '../i18n'
 import { api } from '../api'
 import { asHeld, dayStart, FOLDED, foldAt, GROUPS, inGroup, listOrder, pinned, type ConvoListRow, type RowCmds } from './agentOrder'
@@ -14,6 +14,7 @@ import { Code } from './Code'
 import { ConvoSearchPanel } from './convoSearchPanel'
 import { ConvoTurnsPanel } from './convoTurnsPanel'
 import { ConvoRail, railCell, type RailTurn } from './convoRail'
+import { IMAGE_EXT, previewable } from './textPreview'
 import { previewOf } from './convoTurns'
 import { itemKey } from './convoSearch'
 import { exportMarkdown } from './convoExport'
@@ -3028,7 +3029,6 @@ export function fullPath(p: string): string | null {
   return p.startsWith('/') && !/[\x00-\x1f\x7f]/.test(p) ? p : null
 }
 
-export const IMAGE_EXT = /\.(png|jpe?g|gif|webp)$/i
 
 // Such a span, while its session is live: a menu of what can be done with it.
 function PathCode({ path, text, copy = text }: { path: string; text: string; copy?: string }) {
@@ -3042,7 +3042,7 @@ function PathCode({ path, text, copy = text }: { path: string; text: string; cop
       items={() =>
         [
           { label: t('convo.path.copy'), icon: <Copy size={16} />, onSelect: () => copyOf?.(copy) },
-          IMAGE_EXT.test(path) ? { label: t('convo.path.view'), icon: <ImageIcon size={16} />, onSelect: () => acts.view(path) } : null,
+          !dir && previewable(path) ? { label: t(IMAGE_EXT.test(path) ? 'convo.path.view' : 'preview.item'), icon: IMAGE_EXT.test(path) ? <ImageIcon size={16} /> : <Eye size={16} />, onSelect: () => acts.view(path) } : null,
           { label: t('convo.path.reveal'), icon: <FolderOpen size={16} />, onSelect: () => acts.reveal(dir ? path.replace(/\/+$/, '') || '/' : path) },
           dir ? null : { label: t('convo.path.download'), icon: <Download size={16} />, onSelect: () => acts.download(path) },
         ].filter(Boolean) as MenuItem[]
@@ -3071,7 +3071,7 @@ function PathBar({ path, onCopy, acts: only }: { path: string; onCopy: (s: strin
         <button type="button" className="link-btn" onClick={() => onCopy(full ?? path)}>{t('convo.path.copy')}</button>
         {acts && full && (
           <>
-            {IMAGE_EXT.test(full) && <button type="button" className="link-btn" onClick={() => acts.view(full)}>{t('convo.path.view')}</button>}
+            {previewable(full) && <button type="button" className="link-btn" onClick={() => acts.view(full)}>{t(IMAGE_EXT.test(full) ? 'convo.path.view' : 'preview.item')}</button>}
             <button type="button" className="link-btn" onClick={() => acts.reveal(full)}>{t('convo.path.reveal')}</button>
             <button type="button" className="link-btn" onClick={() => acts.download(full)}>{t('convo.path.download')}</button>
           </>

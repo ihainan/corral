@@ -252,6 +252,7 @@ func (s *Server) registerRoutes() {
 	s.handle("GET /api/sessions/{id}/files/cwd", SignedIn, s.apiFilesCwd)
 	s.handle("GET /api/sessions/{id}/files/download", SignedIn, s.apiFilesDownload)
 	s.handle("GET /api/sessions/{id}/files/view", SignedIn, s.apiFilesView)
+	s.handle("GET /api/sessions/{id}/files/text", SignedIn, s.apiFilesText)
 	s.handle("POST /api/sessions/{id}/files/upload", SignedIn, s.apiFilesUpload)
 	s.handle("POST /api/sessions/{id}/files/mkdir", SignedIn, s.apiFilesMkdir)
 	s.handle("POST /api/sessions/{id}/files/rename", SignedIn, s.apiFilesRename)
