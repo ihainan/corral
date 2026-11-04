@@ -11,6 +11,7 @@ import { askOn, AskPanel, OwnBox, planOn, PlanPanel, ReviewPanel, screenCall, us
 import { Filled, MaybeSent, NotAsShown, ownWords, permissionAmend } from './ownWords'
 import type { ConvoTool } from './conversation'
 import { AskHookHint, asksFromScreen } from './askHook'
+import { keepShown, steadily } from './steadyReply'
 
 interface Screen {
   text: string
@@ -70,19 +71,23 @@ export interface ReplyTarget {
 
 export function herdrTarget(sessionId: string, agent: HerdrAgent): ReplyTarget {
   const base = `/api/sessions/${sessionId}/herdr/panes/${encodeURIComponent(agent.pane_id)}`
-  return { key: sessionId + ' ' + agent.pane_id, agent: agent.agent, screen: () => api<Screen>('GET', base + '/screen'), reply: (b) => api('POST', base + '/reply', b) }
+  const screen = async () => keepShown(await api<Screen>('GET', base + '/screen'))
+  return { key: sessionId + ' ' + agent.pane_id, agent: agent.agent, screen, reply: (b) => steadily((x) => api('POST', base + '/reply', x), screen, b) }
 }
 
 export function convoTarget(sessionId: string, bind: { pane: string; pid: number; start: number; session: string; agent?: string }, canFill = false): ReplyTarget {
   const base = `/api/sessions/${sessionId}/conversation`
   const who = { pane: bind.pane, pid: bind.pid, start: bind.start, session: bind.session }
+  // (Its screens kept, an answer refused as only a countdown on it went on
+  // sent again: steadyReply.ts.)
+  const screen = async () => keepShown(await api<Screen>('POST', base + '/screen', who))
   return {
     key: [sessionId, bind.pane, bind.pid, bind.start, bind.session].join(' '),
     agent: bind.agent,
-    screen: () => api<Screen>('POST', base + '/screen', who),
-    reply: (b) => api('POST', base + '/reply', { ...who, ...b }),
+    screen,
+    reply: (b) => steadily((x) => api('POST', base + '/reply', { ...who, ...x }), screen, b),
     // (Claude Code's, in tmux: as tried — plans/5-claude-own-words.md.)
-    fill: canFill && bind.agent === 'claude' ? (b) => api('POST', base + '/reply', { ...who, ...b, fill: true }) : undefined,
+    fill: canFill && bind.agent === 'claude' ? (b) => steadily((x) => api('POST', base + '/reply', { ...who, ...x, fill: true }), screen, b) : undefined,
   }
 }
 
@@ -181,7 +186,7 @@ export function useReply(target: ReplyTarget, { onLoaded, resizedAt, onSent, qui
       if (!live.current) return
       if (e instanceof ApiError && (e.code === 'screen_changed' || e.code === 'already_answered')) {
         // (herdr's answer says the screen as it is now; the conversation's is read anew.)
-        if (typeof e.extra.digest === 'string') setScreen({ text: String(e.extra.text ?? ''), digest: e.extra.digest, cut: e.extra.cut === true })
+        if (typeof e.extra.digest === 'string') setScreen(keepShown({ text: String(e.extra.text ?? ''), digest: e.extra.digest, cut: e.extra.cut === true }))
         else void load().then(() => live.current && setChanged(e.code === 'already_answered' ? 'answered' : 'changed'))
         setChanged(e.code === 'already_answered' ? 'answered' : 'changed')
       } else if (e instanceof ApiError && e.code === 'not_waiting') setError(t('reply.notWaiting'))
