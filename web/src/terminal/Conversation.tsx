@@ -938,7 +938,7 @@ export function ConversationView({
         ) : (
           convo.entries.length > 0 && (
             <p className="convo-older" data-aside="">
-              {t('convo.atStart')}
+              {t(convo.meta?.forked ? 'convo.atFork' : 'convo.atStart')}
             </p>
           )
         )}

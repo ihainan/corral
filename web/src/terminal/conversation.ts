@@ -188,6 +188,7 @@ export interface ConvoMeta {
   mode?: string // the permission mode: default, acceptEdits, plan, auto, ...
   effort?: string // how hard it is asked to think: low, medium, high, xhigh, max
   branch?: string
+  forked?: boolean // a copy of another (Codex's): its log has only what came after; before, in the other's
   context?: number // tokens the latest request sent
   window?: number // the model's context window, where it is known: as the log says it (Codex's), or of the model (Claude's)
   window_by?: 'log' | 'model' | 'request' // how: said by the log, the model's own, the 1M its requests asked for

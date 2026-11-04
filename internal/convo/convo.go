@@ -417,6 +417,10 @@ type Meta struct {
 	// Quota is the subscription's use as the log last said it (Codex's,
 	// signed in to an account: through a relay it says none); nil, none.
 	Quota *Quota `json:"quota,omitempty"`
+	// Forked: the session is a copy of another (Codex's "codex fork"),
+	// whose log has only what came after it: what came before is in the
+	// other's.
+	Forked bool `json:"forked,omitempty"`
 }
 
 // Quota is a subscription's use of its 5-hour and weekly windows, of the

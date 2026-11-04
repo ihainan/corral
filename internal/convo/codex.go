@@ -682,6 +682,7 @@ type codexPayload struct {
 	Git *struct {
 		Branch string `json:"branch"`
 	} `json:"git"`
+	ForkedFrom string `json:"forked_from_id"` // (session_meta: a copy's, "codex fork" — its log has only what came after)
 	// compacted; user_message and error (older Codex)
 	Message string `json:"message"`
 	// web_search_end, view_image_tool_call, mcp_tool_call_end (older Codex)
@@ -716,6 +717,9 @@ func (c *Codex) line(b []byte) {
 	case "session_meta":
 		if p.Git != nil && p.Git.Branch != "" {
 			c.meta.Branch = clip(p.Git.Branch, maxMeta)
+		}
+		if p.ForkedFrom != "" {
+			c.meta.Forked = true
 		}
 	case "turn_context":
 		c.settings(p.Model, p.ApprovalPolicy)

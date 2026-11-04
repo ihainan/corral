@@ -243,3 +243,17 @@ func TestCodexCommandGoesOn(t *testing.T) {
 		t.Errorf("once it ended: %d lines, %+v", n, x)
 	}
 }
+
+// A copy ("codex fork"): its log has only what came after; told so.
+func TestCodexForked(t *testing.T) {
+	c := NewCodex()
+	c.Feed([]byte(codexLine(t, "session_meta", map[string]any{"id": "s2", "forked_from_id": "s1"})))
+	if !c.Meta().Forked {
+		t.Fatal("not told forked")
+	}
+	c = NewCodex()
+	c.Feed([]byte(strings.Join(codexSession(t), "")))
+	if c.Meta().Forked {
+		t.Fatal("told forked")
+	}
+}
