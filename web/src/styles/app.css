@@ -37,6 +37,16 @@
   --pad-x: 16px;
   --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
   --sidebar: 224px;
+  /* The scale everything is set in (chat redesign, 11-04): type size/line,
+     spacing and corners. Values between these steps read as mistakes. */
+  --fs-note: 12px; --lh-note: 18px;   /* times, labels */
+  --fs-sub: 13px; --lh-sub: 20px;     /* secondary words, code */
+  --fs-ui: 14px; --lh-ui: 22px;       /* controls, lists */
+  --fs-body: 15px; --lh-body: 25px;   /* the thread's text */
+  --fs-head: 18px; --lh-head: 26px;   /* headings in an answer */
+  --fs-title: 20px; --lh-title: 28px; /* dialog titles */
+  --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 16px; --sp-5: 24px; --sp-6: 32px;
+  --r-xs: 4px; --r-xl: 16px;
   color-scheme: light;
 }
 @media (pointer: coarse) {
