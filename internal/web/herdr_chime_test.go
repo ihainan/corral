@@ -66,12 +66,13 @@ func TestChimeRoundOnce(t *testing.T) {
 	if c.n["p"].done != 1 {
 		t.Fatalf("%+v", c.n["p"])
 	}
-	c.addRound("p", "s2", 8) // (another session in the pane, its work not seen: its finish is one)
+	c.addRound("p", "s2", 7) // (another session in the pane, its work not seen: its finish is one, its round as it was)
 	c.working("p")
 	c.addRound("p", "s2", 4) // (a round before the last counted)
 	c.addRound("p", "s2", 9)
 	c.working("p")
-	c.addRound("p", "", 0)
+	c.addRound("p", "", 10)
+	c.addRound("p", "s3", 11) // (the session known late: the same finish)
 	if c.n["p"].done != 4 {
 		t.Fatalf("%+v", c.n["p"])
 	}

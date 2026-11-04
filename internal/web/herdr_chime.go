@@ -43,7 +43,12 @@ func newChimeCounts() *chimeCounts {
 // and not one before the last counted; 0, none known: counted.
 func (c *chimeCounts) addRound(pane, sid string, round int64) {
 	c.mu.Lock()
-	if t, ok := c.told[pane]; (ok && t == sid) || (round != 0 && round <= c.counted[pane]) {
+	// (Told already, not at work since: the same session — or one of them
+	// not known, taken as the same rather than told twice; another session
+	// in the pane is news, whatever its round — review593. Not told: not a
+	// round before the last counted.)
+	t, ok := c.told[pane]
+	if (ok && (t == sid || t == "" || sid == "")) || (!ok && round != 0 && round <= c.counted[pane]) {
 		c.mu.Unlock()
 		return
 	}
