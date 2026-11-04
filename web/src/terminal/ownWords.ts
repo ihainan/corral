@@ -1,4 +1,3 @@
-import { shownAt, steadySame, withAlive } from './steadyReply'
 import { ApiError } from '../api'
 import type { ReplyTarget } from './ReplyDialog'
 
@@ -128,27 +127,16 @@ async function press(target: ReplyTarget, from: Screen, keys: string[], done: (t
 // nothing more is done (review513: one gone to another agent, or left, went
 // on typing and pressing Enter).
 export async function ownWords(target0: ReplyTarget, now: Screen, r: OwnRow, text: string, alive: () => boolean = () => true): Promise<Screen> {
-  const target = withAlive(target0, alive) // (each key's retries too — review582)
+  // (Its keys not sent again past a countdown (steadyReply.ts): its frames,
+  // the row taken out, cannot tell the prompt's countdown from a command's
+  // words that read so — review586; a prompt that counts down refused here
+  // as before, nothing typed.)
+  const target: ReplyTarget = { ...target0, reply: (b) => target0.reply({ ...b, once: true }) }
   if (!target.fill || now.cut) throw new NotAsShown()
   const base = frame(now.text, r.n)
-  // (When the screen shown was read: as kept with it, or by its digest; not
-  // known, its count's fall not bounded — its never going up still is. review582)
-  const baseAt = (now as { at?: number }).at ?? shownAt(now.digest) ?? 0
   // (A screen cut short — more of it than the gateway keeps — cannot be told
-  // the same: what changed may be in the part cut off; refused at each read — review513.
-  // An unattended session's countdown going on aside: steadyReply.ts, review581.)
-  // (Against the screen shown and the last one taken since: its count never up — review582.)
-  let last = { f: base, at: baseAt }
-  const like = (t: string) => {
-    const f = frame(t, r.n)
-    const at = Date.now()
-    if (!steadySame(base, baseAt, f, at) || !steadySame(last.f, last.at, f, at)) return false
-    // (Its time too, the same frame read again: a fall is bounded from the
-    // last read that showed it — review584.)
-    last = { f, at }
-    return true
-  }
-  const same = (t: string) => like(t) && alive()
+  // the same: what changed may be in the part cut off; refused at each read — review513.)
+  const same = (t: string) => frame(t, r.n) === base && alive()
   // (From the screen as it is now — the one shown was read a while ago, as
   // the words were being written — where it is still the prompt shown.)
   let s: Screen
@@ -191,13 +179,13 @@ export async function ownWords(target0: ReplyTarget, now: Screen, r: OwnRow, tex
   // again before each try of Enter too.)
   const rowOK = (t: string) => {
     const c = cursorRow(t)
-    return !!c && c.n === r.n && c.rest === want && wholeRow(t, r.n) && like(t)
+    return !!c && c.n === r.n && c.rest === want && wholeRow(t, r.n) && frame(t, r.n) === base
   }
   const shows = (t: string) => rowOK(t) && alive()
   const got = await after(target, shows).catch(() => null)
   if (!got) throw new Filled()
   try {
-    await tries(target, got, shows, (x) => target.reply({ digest: x.digest, keys: ['enter'], alive }))
+    await tries(target, got, shows, (x) => target.reply({ digest: x.digest, keys: ['enter'] }))
   } catch (e) {
     if (e instanceof NotAsShown || refusal(e)) throw new Filled() // (the words there; Enter not pressed)
     throw new MaybeSent()

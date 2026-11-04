@@ -65,9 +65,6 @@ export function keepShown<S extends Screen>(s: S): S {
   return { ...s, at }
 }
 
-// shownAt: when the screen of that digest was read, where it was kept.
-export const shownAt = (digest: string) => shown.get(digest)?.at
-
 // steadily: an answer sent again, a few times, where it was refused as the
 // screen changed and the screen read now is the one answered (steadySame,
 // with the first and with each read since: its count never up — review582)
@@ -99,6 +96,9 @@ export async function steadily<B extends { digest: string }>(send: (b: B) => Pro
     }
   }
 }
+
+// (A continuation of a choice's words that begins "1. " is taken for
+// another menu: not counting down, refused as before — review586, safe.)
 
 // withAlive: a target whose answers say who answers is still there (alive),
 // unless they say so themselves — for those made in many steps.

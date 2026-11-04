@@ -64,7 +64,8 @@ export interface ReplyTarget {
   screen: () => Promise<Screen>
   // (alive: the one answering still there — else an answer refused as only
   // a countdown went on is not sent again: steadyReply.ts.)
-  reply: (body: { digest: string; alive?: () => boolean } & ({ keys: string[] } | { text: string })) => Promise<unknown>
+  // once: not sent again so at all.)
+  reply: (body: { digest: string; alive?: () => boolean; once?: boolean } & ({ keys: string[] } | { text: string })) => Promise<unknown>
   // (A text only pasted into a prompt's row that takes words, no Enter:
   // the conversation's only — see ownWords.ts.)
   fill?: (body: { digest: string; text: string }) => Promise<unknown>
@@ -74,7 +75,7 @@ export interface ReplyTarget {
 export function herdrTarget(sessionId: string, agent: HerdrAgent): ReplyTarget {
   const base = `/api/sessions/${sessionId}/herdr/panes/${encodeURIComponent(agent.pane_id)}`
   const screen = async () => keepShown(await api<Screen>('GET', base + '/screen'))
-  return { key: sessionId + ' ' + agent.pane_id, agent: agent.agent, screen, reply: ({ alive, ...b }) => steadily((x) => api('POST', base + '/reply', x), screen, b, alive) }
+  return { key: sessionId + ' ' + agent.pane_id, agent: agent.agent, screen, reply: ({ alive, once, ...b }) => steadily((x) => api('POST', base + '/reply', x), screen, b, once ? () => false : alive) }
 }
 
 export function convoTarget(sessionId: string, bind: { pane: string; pid: number; start: number; session: string; agent?: string }, canFill = false): ReplyTarget {
@@ -87,9 +88,9 @@ export function convoTarget(sessionId: string, bind: { pane: string; pid: number
     key: [sessionId, bind.pane, bind.pid, bind.start, bind.session].join(' '),
     agent: bind.agent,
     screen,
-    reply: ({ alive, ...b }) => steadily((x) => api('POST', base + '/reply', { ...who, ...x }), screen, b, alive),
+    reply: ({ alive, once, ...b }) => steadily((x) => api('POST', base + '/reply', { ...who, ...x }), screen, b, once ? () => false : alive),
     // (Claude Code's, in tmux: as tried — plans/5-claude-own-words.md. Its
-    // tries made by ownWords, a countdown aside there too.)
+    // tries made by ownWords.)
     fill: canFill && bind.agent === 'claude' ? (b) => api('POST', base + '/reply', { ...who, ...b, fill: true }) : undefined,
   }
 }
