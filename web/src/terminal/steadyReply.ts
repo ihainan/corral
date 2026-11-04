@@ -59,14 +59,18 @@ export function steadySame(a: string, was: number, b: string, now: number): bool
 // (at: when it was read, as kept.)
 type Screen = { text: string; digest: string; cut?: boolean; at?: number }
 
-// The screens read lately, by digest (whole, not cut), and when: what an
-// answer's digest showed. (Module-wide: a target is made again at each render.)
+// The screens read lately, by digest (whole, not cut), and when first: what
+// an answer's digest showed. (Module-wide: a target is made again at each
+// render.) The same screen read again later keeps its first time: a prompt
+// drawn anew that reads the same, read by another part of the page, does
+// not make an old card's screen look recent — review589.
 const shown = new Map<string, { text: string; at: number }>()
 export function keepShown<S extends Screen>(s: S): S {
   const at = Date.now()
   if (!s.cut) {
+    const was = shown.get(s.digest)
     shown.delete(s.digest)
-    shown.set(s.digest, { text: s.text, at })
+    shown.set(s.digest, { text: s.text, at: was?.at ?? at })
     if (shown.size > 64) shown.delete(shown.keys().next().value!)
   }
   return { ...s, at }
