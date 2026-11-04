@@ -20,6 +20,9 @@ func TestChimeCounts(t *testing.T) {
 	s.herdrSocks.setChimes("s1", c)
 	sess := &term.Session{ID: "s1"}
 	p := herdr.Pane{ID: "w1:p1"}
+	p.AgentSession = &struct {
+		Value string `json:"value"`
+	}{"0b5d3f0e-1c1a-4f7e-9d1e-2a3b4c5d6e7f"} // (as herdr tells it: the gateway does not look for it)
 	s.chimeOn(sess, herdr.Transition{Pane: p, From: herdr.StatusWorking, To: herdr.StatusBlocked})
 	s.chimeOn(sess, herdr.Transition{Pane: p, From: herdr.StatusBlocked, To: herdr.StatusBlocked})
 	s.chimeOn(sess, herdr.Transition{Pane: p, From: herdr.StatusIdle, To: herdr.StatusDone}) // (not from work: not a finish)
@@ -71,5 +74,37 @@ func TestChimeRoundOnce(t *testing.T) {
 	c.addRound("p", "", 0)
 	if c.n["p"].done != 4 {
 		t.Fatalf("%+v", c.n["p"])
+	}
+}
+
+// Asked again and done at once, unseen at work between: another finish.
+func TestChimeAfterAsking(t *testing.T) {
+	s := &Server{}
+	c := newChimeCounts()
+	s.herdrSocks.setChimes("s1", c)
+	sess := &term.Session{ID: "s1"}
+	p := herdr.Pane{ID: "w1:p1"}
+	p.AgentSession = &struct {
+		Value string `json:"value"`
+	}{"0b5d3f0e-1c1a-4f7e-9d1e-2a3b4c5d6e7f"} // (as herdr tells it: the gateway does not look for it)
+	wait := func(n int64) chimeN {
+		var got chimeN
+		for i := 0; i < 100; i++ {
+			c.mu.Lock()
+			got = c.n["w1:p1"]
+			c.mu.Unlock()
+			if got.done >= n {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		return got
+	}
+	s.chimeOn(sess, herdr.Transition{Pane: p, From: herdr.StatusWorking, To: herdr.StatusDone})
+	wait(1)
+	s.chimeOn(sess, herdr.Transition{Pane: p, From: herdr.StatusDone, To: herdr.StatusBlocked})
+	s.chimeOn(sess, herdr.Transition{Pane: p, From: herdr.StatusBlocked, To: herdr.StatusIdle})
+	if got := wait(2); got.done != 2 || got.needs != 1 {
+		t.Fatalf("%+v", got)
 	}
 }

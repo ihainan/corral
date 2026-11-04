@@ -137,6 +137,9 @@ func (s *Server) chimeOn(sess *term.Session, tr herdr.Transition) {
 	case tr.To == herdr.StatusWorking:
 		c.working(tr.Pane.ID)
 	case tr.To == herdr.StatusBlocked && tr.From != herdr.StatusBlocked:
+		// (Waiting for the person: what comes after it is news, as after
+		// work — review592-1.)
+		c.working(tr.Pane.ID)
 		c.add(tr.Pane.ID, true)
 	// (Idle, not done: it finished in sight in herdr — the agents page shows
 	// it there, say. Finished all the same. From waiting for the person:
@@ -152,6 +155,8 @@ func (s *Server) chimeOn(sess *term.Session, tr herdr.Transition) {
 				}
 			}
 		}
+		// (Not told by herdr: as the gateway found it on the host — review592-2.)
+		sid = s.bgSession(sess, tr.Pane.ID, sid)
 		go func() {
 			// (Looked at meanwhile — done to idle, the agents page showing it
 			// — another round at rest: what was left running is asked of that
