@@ -55,7 +55,12 @@ func (s *Server) forkSource(ctx context.Context, sess *term.Session, kind, id st
 	}
 	src = strings.TrimSpace(string(out))
 	err = s.withSFTP(ctx, sess, convoReadLimit, func(c *sftplite.Client) error {
-		head, err := c.ReadRange(src, 0, sessionHead)
+		// (Codex's first line has its instructions in it: tens of KB.)
+		n := sessionHead
+		if kind == "codex" {
+			n = maxForkLine
+		}
+		head, err := c.ReadRange(src, 0, n)
 		if err != nil {
 			return err
 		}
