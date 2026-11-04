@@ -308,6 +308,8 @@ const initial = (of?: string): Convo => ({ status: 'loading', entries: [], older
 interface Kept {
   gen: number
   rev: number
+  at: number // (ms) when it was kept
+  tail: ConvoEntry[] // its last entries, oldest first (see keptEntries)
   byseq: Map<number, ConvoEntry>
   a: Omit<Answer, 'entries' | 'gen' | 'rev' | 'reset' | 'more'>
 }
@@ -317,7 +319,9 @@ const keyOf = (session: string, pane?: string) => session + ' ' + (pane ?? '')
 function remember(key: string, gen: number, rev: number, byseq: Map<number, ConvoEntry>, a: Answer) {
   const { entries: _e, gen: _g, rev: _r, reset: _x, more: _m, ...facts } = a
   kept.delete(key) // (the latest last: the map keeps its order of use)
-  kept.set(key, { gen, rev, byseq, a: facts })
+  // (Its tail sorted once here, not each time a list is drawn.)
+  const tail = [...byseq.values()].sort((x, y) => x.seq - y.seq).slice(-TAIL)
+  kept.set(key, { gen, rev, at: Date.now(), tail, byseq, a: facts })
   while (kept.size > KEEP) kept.delete(kept.keys().next().value!)
 }
 
@@ -346,10 +350,12 @@ export async function prefetchConversation(sessionId: string, pane: string | und
 // The last entries kept of a pane's conversation (read by a view or a
 // prefetch), oldest first; null when none is kept. For a glance at what it
 // is doing from the list: nothing read for it.
-export function keptEntries(sessionId: string, pane: string | undefined, most = 40): ConvoEntry[] | null {
+// at: when it was kept (ms), for one to tell it is older than what it is to say.
+const TAIL = 40
+export function keptEntries(sessionId: string, pane: string | undefined): { entries: ConvoEntry[]; at: number } | null {
   const k = kept.get(keyOf(sessionId, pane))
-  if (!k || !k.byseq.size) return null
-  return [...k.byseq.values()].sort((a, b) => a.seq - b.seq).slice(-most)
+  if (!k || !k.tail.length) return null
+  return { entries: k.tail, at: k.at }
 }
 
 // (Another account signed in, or none: nothing of the one before stays.)

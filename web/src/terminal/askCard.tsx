@@ -343,7 +343,7 @@ export function keepDraft<T>(m: Map<string, T>, key: string | undefined, v: T | 
   if (!key) return
   m.delete(key)
   if (v === undefined || (typeof v === 'string' && !v)) return
-  m.set(key, v)
+  m.set(key, typeof v === 'string' && v.length > 4000 ? (v.slice(0, 4000) as T) : v)
   while (m.size > 50) m.delete(m.keys().next().value!)
 }
 

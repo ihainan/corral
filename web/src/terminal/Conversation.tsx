@@ -53,7 +53,10 @@ const baseName = (p: string) => p.split('\n')[0].trim().replace(/\/+$/, '').spli
 function said(cat: Category, tools: ConvoTool[]): string {
   const n = tools.length
   if (cat === 'edit') {
-    const files = [...new Set(tools.map((tl) => baseName(tl.detail ?? '')).filter(Boolean))]
+    // (By the whole path, named by the last part — with its folder where two share it.)
+    const paths = [...new Set(tools.map((tl) => (tl.detail ?? '').split('\n')[0].trim()).filter(Boolean))]
+    const names = paths.map(baseName)
+    const files = paths.map((p, i) => (names.indexOf(names[i]) !== names.lastIndexOf(names[i]) ? p.split('/').slice(-2).join('/') : names[i]))
     if (!files.length) return count(cat, n)
     const two = files.slice(0, 2).join(t('convo.listSep'))
     return files.length > 2 ? t('convo.sum.editedMany', { files: two, n: files.length, m: files.length - 2 }) : t('convo.sum.edited', { files: two })
@@ -2086,7 +2089,9 @@ function stamp(r: ConvoListRow, now: number, yesterday: number): string {
   }
   if (!r.since || now < r.since) return ''
   const d = new Date(r.since)
-  if (r.since >= yesterday) return d.toLocaleTimeString(getLang(), { hour: '2-digit', minute: '2-digit', hour12: false })
+  // (Today: its time; yesterday: said so — the ones at rest are one group, the day is the time's to say.)
+  if (r.since >= dayStart(now)) return d.toLocaleTimeString(getLang(), { hour: '2-digit', minute: '2-digit', hour12: false })
+  if (r.since >= yesterday) return t('convo.group.yesterday')
   return d.toLocaleDateString(getLang(), { month: 'numeric', day: 'numeric' })
 }
 
@@ -3559,10 +3564,13 @@ function waitText(tool?: ConvoTool): string {
 // conversation (see keptEntries): what it waits for the person to allow or
 // answer; the step under way; or how its answer begins. '' where nothing is
 // known (never read) or nothing says more than its state.
-export function glanceOf(sessionId: string, pane: string | undefined, status: string): string {
+// since: when its state last changed (ms): what was kept before then is not
+// of this state and says nothing (a new turn begun, a process replaced).
+export function glanceOf(sessionId: string, pane: string | undefined, status: string, since?: number): string {
   if (status !== 'blocked' && status !== 'working' && status !== 'done') return ''
-  const es = keptEntries(sessionId, pane)
-  if (!es) return ''
+  const k = keptEntries(sessionId, pane)
+  if (!k || (since && k.at < since)) return ''
+  const es = k.entries.filter((e) => !e.gone) // (taken back by a rewind or undo: not what it is about)
   let i = es.length - 1
   while (i >= 0 && !(es[i].role === 'user' && !es[i].mid)) i--
   const parts = es.slice(i + 1).flatMap((e) => (e.role === 'assistant' ? e.parts : []))

@@ -47,6 +47,8 @@ if ('serviceWorker' in navigator) {
         heldListeners.forEach((l) => l())
         return
       }
+      // (Gone to one: an older one held is let go of — it is not to be gone back to.)
+      if (held) (held = null), heldListeners.forEach((l) => l())
       history.replaceState(history.state, '', u.pathname + u.search)
     } else if (location.pathname === '/login') {
       // Sent to sign in first: where it returns to carries it.

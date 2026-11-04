@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type ReactNode } from 'react'
 import { ArrowUp, ChevronLeft, FoldVertical, GitBranch, History, MessageSquarePlus, Paperclip, Pencil, Pin, PinOff, Power, Square, SquareTerminal, TextCursorInput, X, Plus } from 'lucide-react'
 import { api, ApiError, authGen, errorText, uploadFile, type SessionInfo } from '../api'
 import { t, type I18nKey } from '../i18n'
@@ -394,8 +394,10 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
   // it (by its key): long past their wait, or found not taken, lately; not
   // one found gone to a subagent. From what is kept here: nothing is read
   // for it — its own view, gone back to, makes sure as it does.
-  const unsentOf = (key: string) =>
-    (sentBy[key] ?? []).filter((p) => Date.now() - p.at < UNSENT_LISTED_MS && !(p.look && typeof p.look === 'object' && p.look.went) && (p.state === 'unseen' || (p.state === 'waiting' && Date.now() - p.at >= PENDING_MS))).length
+  const unsentOf = useCallback(
+    (key: string) => (sentBy[key] ?? []).filter(unsentNow).length,
+    [sentBy],
+  )
   useEffect(() => keepSent(sentBy), [sentBy])
   const [sendingBy, setSendingBy] = useState<Record<string, boolean>>({})
   const [draftBy, setDraftBy] = useState<Record<string, string>>({})
@@ -665,6 +667,7 @@ const PREFETCH_AFTER_MS = 1500
 const SENT_KEPT_MS = 24 * 3600 * 1000
 // (Said on the lists only of late ones: an old one of a process long gone says nothing of now.)
 const UNSENT_LISTED_MS = 2 * 3600 * 1000
+const unsentNow = (p: Sent) => Date.now() - p.at < UNSENT_LISTED_MS && !(p.look && typeof p.look === 'object' && p.look.went) && (p.state === 'unseen' || (p.state === 'waiting' && Date.now() - p.at >= PENDING_MS))
 // One found gone to a subagent (its own log has it): said for sure, and
 // that subagent has dealt with it since — its note is let go of this long
 // after it was first shown (not sent again by itself: an old instruction).
@@ -817,19 +820,35 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   // (Seen only once its conversation is in front and read afresh since it was
   // gone to — what was kept from before shows at once, and is no proof the
   // person sees what it did since; not while it fails to load — review B02.)
+  // (A visit begins again when the page comes back to the front, the agents
+  // page is gone back to, or this one finishes another round: each needs a
+  // read of its own — review of 97ebccc.)
+  const [visibleAt, setVisibleAt] = useState(() => Date.now())
+  useEffect(() => {
+    const on = () => !document.hidden && setVisibleAt(Date.now())
+    document.addEventListener('visibilitychange', on)
+    return () => document.removeEventListener('visibilitychange', on)
+  }, [])
+  useEffect(() => void (active && setVisibleAt(Date.now())), [active])
   const shownSince = useRef({ key: '', at: 0 })
-  if (shownSince.current.key !== cur.key + ' ' + cur.s.id) shownSince.current = { key: cur.key + ' ' + cur.s.id, at: Date.now() }
-  const doneHere = herdr && active && (convo.status === 'ready' || convo.status === 'none') && !convo.failing && convo.readAt() >= shownSince.current.at && row && !row.lost && row.status === 'done' && row.a.status === 'done' && !row.bg && row.a.bg !== 'checking' ? { pane: row.a.pane_id, round: row.a.round ?? 0, session: row.a.session ?? '' } : undefined
+  const visit = [cur.key, cur.s.id, row?.a.round ?? 0, row?.a.session ?? ''].join(' ')
+  if (shownSince.current.key !== visit) shownSince.current = { key: visit, at: Date.now() }
+  const freshSince = Math.max(shownSince.current.at, visibleAt)
+  const doneHere = herdr && active && !document.hidden && (convo.status === 'ready' || convo.status === 'none') && !convo.failing && convo.readAt() >= freshSince && row && !row.lost && row.status === 'done' && row.a.status === 'done' && !row.bg && row.a.bg !== 'checking' ? { pane: row.a.pane_id, round: row.a.round ?? 0, session: row.a.session ?? '', fresh: freshSince } : undefined
   const doneKey = doneHere && JSON.stringify(doneHere)
+  // (Done and in front, its fresh read not in yet: looked at again every 2s —
+  // a read that brought nothing new draws nothing, so nothing else asks.)
+  const [, recheck] = useReducer((n: number) => n + 1, 0)
+  const awaitingRead = herdr && active && !doneHere && row?.status === 'done' && row.a.status === 'done' && !row.bg
+  useEffect(() => {
+    if (!awaitingRead) return
+    const timer = setInterval(recheck, 2000)
+    return () => clearInterval(timer)
+  }, [awaitingRead])
   useEffect(() => {
     if (!doneKey) return
     const { pane, round, session } = JSON.parse(doneKey) as { pane: string; round: number; session: string }
-    const mark = () => {
-      if (!document.hidden) api('POST', `/api/sessions/${sid}/herdr/panes/${encodeURIComponent(pane)}/seen`, { round, session }).catch(() => {})
-    }
-    mark()
-    document.addEventListener('visibilitychange', mark)
-    return () => document.removeEventListener('visibilitychange', mark)
+    api('POST', `/api/sessions/${sid}/herdr/panes/${encodeURIComponent(pane)}/seen`, { round, session }).catch(() => {})
   }, [sid, doneKey])
   // Looked at while its subagents have been out too long: no longer among
   // those to look at, on this device (see agents.ts withBg).
@@ -913,7 +932,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
         const r = e.row
         const said = (current && agent?.title) || keptTitle(titles, e) || paneTitle(r.a.title) || dirName(r.a.cwd) || r.a.agent
         const st = current && agent && !r.bg ? agent.status : r.status
-        return { key: e.key, ...labelOf(e, said, hosts), unsent: unsentOf(e.key) || undefined, now: r.lost ? undefined : glanceOf(e.s.id, e.pane, st) || undefined, program: r.a.agent, status: st, bg: r.lost ? undefined : r.bg, cmds: cmdsOf(r), since: r.lost ? undefined : r.bg ? r.a.bg_since : r.a.since, current, pinned: pinAt(e.key), onPick: () => onPick(e), menu: () => rowMenu.current(e) }
+        return { key: e.key, ...labelOf(e, said, hosts), unsent: unsentOf(e.key) || undefined, now: r.lost || r.bg ? undefined : glanceOf(e.s.id, e.pane, st, r.a.since) || undefined, program: r.a.agent, status: st, bg: r.lost ? undefined : r.bg, cmds: cmdsOf(r), since: r.lost ? undefined : r.bg ? r.a.bg_since : r.a.since, current, pinned: pinAt(e.key), onPick: () => onPick(e), menu: () => rowMenu.current(e) }
       }
       const title = (current && agent?.title) || keptTitle(titles, e) || `${e.s.host_name} · ${sessionWhich(e.s, all)}`
       return { key: e.key, title, where: whereOf(e, hosts), unsent: unsentOf(e.key) || undefined, program: current ? agent?.program : undefined, status: current && agent ? agent.status : 'unknown', cmds: current ? agent?.cmds : tmuxCmdsOf(e), current, pinned: pinAt(e.key), onPick: () => onPick(e), menu: () => rowMenu.current(e) }
@@ -2023,7 +2042,8 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       }
       onStop={canPress && !lead ? () => press('stop') : undefined} // (a phone: the composer's button stops it, the bar keeps the room for the name)
       stop={said?.what === 'stop' && said.bind === bindKey ? said.text : undefined}
-      side={{ rows }}
+      // (The one shown: its count as its own view has it — of this process, not those queued.)
+      side={{ rows: rows.map((r) => (r.current ? { ...r, unsent: shownSent.filter(unsentNow).length || undefined } : r)) }}
       active={active}
       onDismiss={(id) => setSent((ps) => ps.filter((p) => p.id !== id))}
       onResend={(id) => {
@@ -2331,8 +2351,8 @@ function PhoneList({ entries, all, titles, query, onQuery, onPick, unsentOf }: {
                     )}
                   </span>
                   {unsentOf(e.key) > 0 && <span className="agents-list-now is-unsent">{t('convo.unsentRow', { n: unsentOf(e.key) })}</span>}
-                  {r && !r.lost && (() => {
-                    const g = glanceOf(e.s.id, e.pane, status)
+                  {r && !r.lost && !r.bg && (() => {
+                    const g = glanceOf(e.s.id, e.pane, status, r.a.since)
                     return g ? <span className={'agents-list-now is-' + status}>{g}</span> : null
                   })()}
                   <span className="agents-list-where">
