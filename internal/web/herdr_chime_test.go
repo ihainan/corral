@@ -23,6 +23,7 @@ func TestChimeCounts(t *testing.T) {
 	s.chimeOn(sess, herdr.Transition{Pane: p, From: herdr.StatusWorking, To: herdr.StatusBlocked})
 	s.chimeOn(sess, herdr.Transition{Pane: p, From: herdr.StatusBlocked, To: herdr.StatusBlocked})
 	s.chimeOn(sess, herdr.Transition{Pane: p, From: herdr.StatusIdle, To: herdr.StatusDone}) // (not from work: not a finish)
+	s.chimeOn(sess, herdr.Transition{Pane: p, From: herdr.StatusBlocked, To: herdr.StatusDone}) // (answered, done at once: a finish)
 	s.chimeOn(sess, herdr.Transition{Pane: p, From: herdr.StatusWorking, To: herdr.StatusDone})
 	var got chimeN
 	for i := 0; i < 100 && got.done == 0; i++ {
@@ -31,7 +32,7 @@ func TestChimeCounts(t *testing.T) {
 		got = c.n["w1:p1"]
 		c.mu.Unlock()
 	}
-	if got.needs != 1 || got.done != 1 || pokes.Load() != 2 {
+	if got.needs != 1 || got.done != 1 || pokes.Load() != 2 { // (two finishes of one spell of work, unseen at it between: one)
 		t.Fatalf("counts %+v, pokes %d", got, pokes.Load())
 	}
 	sum := herdrSummary{Workspaces: []herdrWorkspace{{Agents: []herdrAgent{{PaneID: "w1:p1"}, {PaneID: "w1:p2"}}}}}
@@ -56,18 +57,19 @@ func TestChimeCounts(t *testing.T) {
 // A round counted once (two looks at one finish), none before the last.
 func TestChimeRoundOnce(t *testing.T) {
 	c := newChimeCounts()
-	c.addRound("p", 5)
-	c.addRound("p", 5)
-	c.addRound("p", 7) // (the same work, looked at: another round, not another finish)
+	c.addRound("p", "s1", 5)
+	c.addRound("p", "s1", 5)
+	c.addRound("p", "s1", 7) // (the same work, looked at: another round, not another finish)
 	if c.n["p"].done != 1 {
 		t.Fatalf("%+v", c.n["p"])
 	}
+	c.addRound("p", "s2", 8) // (another session in the pane, its work not seen: its finish is one)
 	c.working("p")
-	c.addRound("p", 4) // (a round before the last counted)
-	c.addRound("p", 9)
+	c.addRound("p", "s2", 4) // (a round before the last counted)
+	c.addRound("p", "s2", 9)
 	c.working("p")
-	c.addRound("p", 0)
-	if c.n["p"].done != 3 {
+	c.addRound("p", "", 0)
+	if c.n["p"].done != 4 {
 		t.Fatalf("%+v", c.n["p"])
 	}
 }

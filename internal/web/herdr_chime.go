@@ -26,30 +26,31 @@ type chimeCounts struct {
 	mu      sync.Mutex
 	n       map[string]chimeN // pane → its counts
 	counted map[string]int64  // pane → the last round counted as finished
-	// told: pane → its finish counted, not at work since: another word of
-	// a finish (the same work looked at, its subagents back) is not
-	// another — review588-4.
-	told map[string]bool
+	// told: pane → the agent session whose finish was counted, not at work
+	// since: another word of a finish of it (the same work looked at, its
+	// subagents back) is not another — review588-4; another session's in
+	// the pane is (review590-1).
+	told map[string]string
 	poke func() // (has the watcher's last summary go again)
 }
 
 func newChimeCounts() *chimeCounts {
-	return &chimeCounts{n: map[string]chimeN{}, counted: map[string]int64{}, told: map[string]bool{}}
+	return &chimeCounts{n: map[string]chimeN{}, counted: map[string]int64{}, told: map[string]string{}}
 }
 
-// addRound counts a finish of pane's agent in round (the watcher's
-// numbering: see seenRounds), once a round and not one before the last
-// counted; 0, none known: counted.
-func (c *chimeCounts) addRound(pane string, round int64) {
+// addRound counts a finish of pane's agent (of agent session sid, "" not
+// known) in round (the watcher's numbering: see seenRounds), once a round
+// and not one before the last counted; 0, none known: counted.
+func (c *chimeCounts) addRound(pane, sid string, round int64) {
 	c.mu.Lock()
-	if c.told[pane] || (round != 0 && round <= c.counted[pane]) {
+	if t, ok := c.told[pane]; (ok && t == sid) || (round != 0 && round <= c.counted[pane]) {
 		c.mu.Unlock()
 		return
 	}
 	if round != 0 {
 		c.counted[pane] = round
 	}
-	c.told[pane] = true
+	c.told[pane] = sid
 	c.mu.Unlock()
 	c.add(pane, false)
 }
@@ -138,12 +139,17 @@ func (s *Server) chimeOn(sess *term.Session, tr herdr.Transition) {
 	case tr.To == herdr.StatusBlocked && tr.From != herdr.StatusBlocked:
 		c.add(tr.Pane.ID, true)
 	// (Idle, not done: it finished in sight in herdr — the agents page shows
-	// it there, say. Finished all the same.)
-	case (tr.To == herdr.StatusDone || tr.To == herdr.StatusIdle) && tr.From == herdr.StatusWorking:
+	// it there, say. Finished all the same. From waiting for the person:
+	// answered, it worked on too briefly to be seen at it — review590-2.)
+	case (tr.To == herdr.StatusDone || tr.To == herdr.StatusIdle) && (tr.From == herdr.StatusWorking || tr.From == herdr.StatusBlocked):
 		var round int64
+		sid := agentSession(tr.Pane)
 		if rs := s.herdrSocks.roundsOf(sess.ID); rs != nil {
 			if x, ok := rs.current(tr.Pane.ID); ok {
 				round = x.n
+				if sid == "" {
+					sid = x.session
+				}
 			}
 		}
 		go func() {
@@ -171,7 +177,7 @@ func (s *Server) chimeOn(sess *term.Session, tr herdr.Transition) {
 				}
 				round = x.n
 			}
-			c.addRound(tr.Pane.ID, round)
+			c.addRound(tr.Pane.ID, sid, round)
 		}()
 	}
 }

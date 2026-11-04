@@ -113,8 +113,10 @@ function AskHookConfirm({ hostId, hostName, info, on, hook = 'ask', onDone, onIn
   const [error, setError] = useState('')
   const close = () => !busy && onClose()
   const again = async () => {
+    // (Not shown if a change was told meanwhile: what it says is newer — review590-4.)
+    const at = changes.get(hostId) ?? 0
     const fresh = await readAskHook(hostId, true).catch(() => null)
-    if (fresh) onInfo(fresh)
+    if (fresh && (changes.get(hostId) ?? 0) === at) onInfo(fresh)
     return fresh
   }
   const go = async () => {
