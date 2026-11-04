@@ -43,6 +43,14 @@ export function OpenPicker(props: { host: Host; found: HostChoices; busy: boolea
     return () => cancelAnimationFrame(f)
   }, [])
 
+  // Whether Corral has this herdr or tmux session open already (in "running"
+  // above): said on its row, as opening it again opens a second window on it
+  // (pages-1105 1.6). By kind and name, herdr's default one by either of its
+  // names; not by the host's own "running", which is its program, not ours.
+  const plain = (n?: string, dflt = false) => (dflt || !n || n === 'default' ? '' : n)
+  const isOpen = (kind: 'herdr' | 'tmux', name: string, dflt = false) =>
+    found.running.some((r) => r.kind === kind && (kind === 'herdr' ? plain(r.name) === plain(name, dflt) : (r.name ?? '') === name))
+
   // meta: on the right of the name; sub: a line under it.
   const item = (choice: OpenChoice, icon: React.ReactNode, title: string, meta?: string, sub?: string) => {
     const isLast = same(last, choice)
@@ -120,7 +128,7 @@ export function OpenPicker(props: { host: Host; found: HostChoices; busy: boolea
                 { kind: 'herdr', name: s.name },
                 <LayoutGrid size={16} />,
                 s.name,
-                [s.default ? t('picker.herdrDefault') : '', s.running ? '' : t('picker.herdrStopped')].filter(Boolean).join(' · ') || undefined,
+                [s.default ? t('picker.herdrDefault') : '', isOpen('herdr', s.name, s.default) ? t('picker.openAgain') : s.running ? '' : t('picker.herdrStopped')].filter(Boolean).join(' · ') || undefined,
               ),
             )}
           </ul>
@@ -135,7 +143,7 @@ export function OpenPicker(props: { host: Host; found: HostChoices; busy: boolea
                 { kind: 'tmux', name: s.name },
                 <Layers size={16} />,
                 s.name,
-                t(s.windows === 1 ? 'picker.window' : 'picker.windows', { n: s.windows }) + (s.attached ? ' · ' + t('picker.attached') : ''),
+                isOpen('tmux', s.name) ? t('picker.openAgain') : t(s.windows === 1 ? 'picker.window' : 'picker.windows', { n: s.windows }) + (s.attached ? ' · ' + t('picker.attached') : ''),
               ),
             )}
           </ul>

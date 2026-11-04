@@ -138,10 +138,24 @@ code, .mono { font-family: var(--font-mono); font-size: 0.9em; }
 .nav-item:hover { background: var(--bg-hover); color: var(--fg); text-decoration: none; }
 .nav-item[aria-current='page'] { background: var(--bg-active); color: var(--fg); }
 .nav-item[aria-current='page'] svg { color: var(--fg); }
+/* Agents waiting for the user: a count on the way to them (pages-1105 1.1).
+   Grey when the list could not be read just now: what was so, not what is. */
+.nav-badge, .tab-badge {
+  font-size: 12px; line-height: 18px; font-weight: 600; font-variant-numeric: tabular-nums;
+  min-width: 18px; padding: 0 5px; border-radius: 999px; text-align: center;
+  color: var(--warn); background: color-mix(in srgb, var(--warn) 16%, transparent);
+}
+.nav-badge { margin-left: auto; }
+.nav-badge.is-stale, .tab-badge.is-stale { color: var(--fg-3); background: var(--bg-active); }
+.tab-icon { position: relative; display: inline-flex; }
+.tab-badge { position: absolute; left: calc(100% - 6px); top: -6px; background: var(--bg); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--warn) 45%, transparent); }
+.tab-badge.is-stale { box-shadow: inset 0 0 0 1px var(--line-strong); }
 .sidebar-foot { margin-top: auto; display: flex; align-items: center; gap: 4px; padding: 8px 0 0 8px; border-top: 1px solid var(--line); }
 .sidebar-user { flex: 1; min-width: 0; font-size: 13px; color: var(--fg-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 @media (min-width: 760px) and (max-width: 819.98px) {
   .sidebar .label, .nav-group, .sidebar-user { display: none; }
+  .nav-item { position: relative; }
+  .nav-badge { position: absolute; left: 50%; top: 0; margin: 0; font-size: 12px; line-height: 16px; min-width: 16px; padding: 0 4px; background: var(--bg-subtle); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--warn) 45%, transparent); }
   .brand { padding: 0; justify-content: center; }
   .nav-item { justify-content: center; padding: 0; height: 40px; }
   .sidebar-foot { padding-left: 0; justify-content: center; }
@@ -829,6 +843,25 @@ details.adv > .form { margin-top: 16px; }
   /* (Narrow cards: what the agents are doing in two lines, not cut after the first words — ux1101 PG-35.) */
   .live-sub { white-space: normal; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow-wrap: anywhere; }
 }
+/* A phone's running sessions: rows, as the hosts below, no screen in small (pages-1105 1.4). */
+.live-rows { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--line); }
+.live-row { position: relative; border-bottom: 1px solid var(--line); }
+.live-row .live-link { min-height: var(--row-min); justify-content: center; }
+.live-row .live-info { padding: 10px 48px 10px 0; }
+.live-row .live-link:hover .live-info { background: none; }
+.live-row .live-link:active { background: var(--bg-hover); }
+.live-row .live-close { right: -6px; top: 50%; bottom: auto; transform: translateY(-50%); }
+.live-row .live-sub { -webkit-line-clamp: 2; }
+.live-which { color: var(--fg-2); font-weight: 400; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 0 1 auto; }
+.live-name { flex: 0 1 auto; }
+/* Searching a long list, and its order (hosts: pages-1105 1.5). */
+.page-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin: 4px 0 12px; }
+.page-search { flex: 1 1 240px; display: flex; align-items: center; gap: 8px; height: var(--h-input); padding: 0 12px; border: 1px solid var(--line-strong); border-radius: var(--r); color: var(--fg-3); background: var(--bg); }
+.page-search:focus-within { border-color: var(--accent); box-shadow: var(--focus); }
+.page-search input { flex: 1; min-width: 0; height: 100%; border: 0; padding: 0; background: none; color: var(--fg); outline: none; }
+@media (any-pointer: coarse) { .page-search input { font-size: 16px; } }
+.page-order { width: auto; flex: none; }
+.page-none { color: var(--fg-2); padding: 12px 0; }
 .share-add { display: flex; gap: 8px; }
 .share-add .input { flex: 1; min-width: 0; }
 .share-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }

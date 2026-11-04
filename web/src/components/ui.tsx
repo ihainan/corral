@@ -6,6 +6,19 @@ import { t } from '../i18n'
 
 export const isCoarse = () => window.matchMedia('(pointer: coarse)').matches
 
+// Whether a media query matches, kept up to date (a window resized, a tablet turned).
+export function useMedia(query: string): boolean {
+  const [on, setOn] = useState(() => window.matchMedia(query).matches)
+  useEffect(() => {
+    const m = window.matchMedia(query)
+    const f = () => setOn(m.matches)
+    f()
+    m.addEventListener('change', f)
+    return () => m.removeEventListener('change', f)
+  }, [query])
+  return on
+}
+
 // Whether the latest interaction was a key press (a hardware keyboard) rather
 // than a tap or click.
 let lastWasKey = false

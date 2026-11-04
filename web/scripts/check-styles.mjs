@@ -38,4 +38,30 @@ if (bad.length) {
   console.error('left-edge bars are not used in this project: tint the element, or weight its words, instead')
   process.exit(1)
 }
-console.log('styles: no left-edge bars')
+
+// A class given rules in both stylesheets: app.css's (the pages, their
+// colours --fg, --line…) and terminal.css's (the terminal and the agents
+// page, theirs --term-fg…). A new one is mostly a name taken twice by
+// mistake, and the rule of the other sheet then applies where its colours
+// are not set: a box drawn with no border, unseen till looked at (11-05,
+// .list-search). Those meant to be shared — the terminal's own look of a
+// common component — are named here.
+const SHARED = new Set(['dialog', 'kb-key', 'reply-desc', 'reply-dialog', 'sheet-list', 'text-preview'])
+const heads = (f) => {
+  const css = readFileSync(join(web, 'src/styles', f), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '')
+  const out = new Set()
+  for (const m of css.matchAll(/(?:^|\})\s*([^{}@]+)\{/g))
+    for (const part of m[1].split(',')) {
+      const c = /^\s*\.([a-zA-Z][\w-]*)/.exec(part)
+      if (c) out.add(c[1])
+    }
+  return out
+}
+const term = heads('terminal.css')
+const twice = [...heads('app.css')].filter((c) => term.has(c) && !SHARED.has(c))
+if (twice.length) {
+  console.error(`styles: class given rules in both app.css and terminal.css: ${twice.map((c) => '.' + c).join(', ')}`)
+  console.error('rename one (or, if the terminal styles a common component on purpose, add it to SHARED in scripts/check-styles.mjs)')
+  process.exit(1)
+}
+console.log('styles: no left-edge bars, no class styled by both sheets')

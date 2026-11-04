@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
 import { forgetConversations } from './terminal/conversation'
-import { appBadge, forgetSessions } from './terminal/agents'
+import { appBadge, forgetSessions, useWaitingCount } from './terminal/agents'
 import { forgetColours } from './terminal/Code'
 import { ArrowLeft, Bot, Film, KeyRound, LogOut, ScrollText, Server, Settings, Users } from 'lucide-react'
 import { api, ApiError, bumpAuthGen, setUnauthorizedHandler, type Bootstrap, type Me } from './api'
@@ -273,10 +273,23 @@ function Shell({ active, children }: { active: NavKey; children: ReactNode }) {
         { key: 'audit', href: '/admin/audit', label: t('nav.audit'), icon: <ScrollText size={17} strokeWidth={1.75} /> },
       ]
     : []
+  // Agents waiting for the user, on the way to them: wherever one is in the
+  // app, not only on the hosts page and in a terminal (pages-1105 1.1). The
+  // hosts page reads the list itself: no second poll there.
+  const waiting = useWaitingCount(active !== 'hosts')
+  const badge = (key: NavKey, cls: string) =>
+    key === 'agents' && waiting.n ? (
+      <span className={cls + (waiting.stale ? ' is-stale' : '')} title={waiting.stale ? t('nav.waitingStale') : undefined} aria-hidden="true">
+        {waiting.n > 99 ? '99+' : waiting.n}
+      </span>
+    ) : null
+  const named = (i: (typeof main)[number]) =>
+    i.key === 'agents' && waiting.n ? `${i.label}，${t(waiting.stale ? 'nav.waitingStaleN' : 'nav.waitingN', { n: waiting.n })}` : undefined
   const item = (i: (typeof main)[number]) => (
-    <a key={i.key} className="nav-item" href={i.href} onClick={linkHandler(i.href)} aria-current={i.key === active ? 'page' : undefined} title={i.label}>
+    <a key={i.key} className="nav-item" href={i.href} onClick={linkHandler(i.href)} aria-current={i.key === active ? 'page' : undefined} title={i.label} aria-label={named(i)}>
       {i.icon}
       <span className="label">{i.label}</span>
+      {badge(i.key, 'nav-badge')}
     </a>
   )
   // On phones the admin pages sit under Settings in the tab bar.
@@ -302,8 +315,11 @@ function Shell({ active, children }: { active: NavKey; children: ReactNode }) {
       <div className="content">{children}</div>
       <nav className="tabbar" aria-label={t('nav.main')}>
         {main.map((i) => (
-          <a key={i.key} className="tab" href={i.href} onClick={linkHandler(i.href)} aria-current={i.key === tabActive ? 'page' : undefined}>
-            {i.icon}
+          <a key={i.key} className="tab" href={i.href} onClick={linkHandler(i.href)} aria-current={i.key === tabActive ? 'page' : undefined} aria-label={named(i)}>
+            <span className="tab-icon">
+              {i.icon}
+              {badge(i.key, 'tab-badge')}
+            </span>
             <span>{i.label}</span>
           </a>
         ))}

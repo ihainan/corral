@@ -147,6 +147,98 @@ let lastList: SessionInfo[] | null = null
 // (Another account signed in, or none: nothing of the one before stays.)
 export function forgetSessions() {
   lastList = null
+  listFailed = false
+  told()
+}
+
+// Whoever reads the session list says so here (the agents page's poll, the
+// hosts page's), and whoever shows what it says (the navigation's count)
+// learns of it: one list, not a poll of its own beside each. failed: the
+// last read did not come back (what is known is no longer current).
+let listFailed = false
+const listeners = new Set<() => void>()
+const told = () => listeners.forEach((f) => f())
+export function noteSessions(all: SessionInfo[] | null, at = 0) {
+  if (all === null) listFailed = true
+  else {
+    lastList = all.filter((x) => x.state === 'running')
+    markRead(lastList, at)
+    listFailed = false
+  }
+  told()
+}
+
+// The agents waiting for an answer in these sessions, each counted once
+// (several tabs may show one herdr session), as herdr's summaries say; a
+// summary herdr lost since counts for nothing (it was so then, not now).
+export function waitingAgents(list: SessionInfo[]): number {
+  const seen = new Set<string>()
+  for (const s of list) {
+    if (s.meta?.t !== 'herdr' || s.meta.lost) continue
+    for (const w of s.meta.workspaces) for (const a of w.agents) if (a.status === 'blocked') seen.add(agentKey(s, a.pane_id))
+  }
+  return seen.size
+}
+
+// One session's agents, as its summary says: how many wait, work, are done
+// and not looked at. lost: the summary is old (herdr lost since) — none of it
+// is to be told as now. null: no agents' summary (a plain shell, tmux).
+export function sessionAgents(s: SessionInfo): { waiting: number; working: number; done: number; lost: boolean } | null {
+  if (s.meta?.t !== 'herdr') return null
+  const n = (st: string) => s.meta!.t === 'herdr' ? s.meta!.workspaces.reduce((k, w) => k + w.agents.filter((a) => a.status === st).length, 0) : 0
+  return { waiting: n('blocked'), working: n('working'), done: n('done'), lost: !!s.meta.lost }
+}
+
+// How many agents wait for the user, for the navigation: null until known;
+// stale when the last read failed (the number shown is what was so then).
+// poll: read the list here too (pages where nothing else does) — every
+// VISIBLE_EVERY while in sight, HIDDEN_EVERY behind another tab.
+const VISIBLE_EVERY = 15000
+export function useWaitingCount(poll: boolean): { n: number | null; stale: boolean } {
+  const read = () => ({ n: lastList ? waitingAgents(lastList) : null, stale: listFailed })
+  const [v, setV] = useState(read)
+  useEffect(() => {
+    const f = () => setV((cur) => {
+      const next = read()
+      return cur.n === next.n && cur.stale === next.stale ? cur : next
+    })
+    listeners.add(f)
+    f()
+    return () => void listeners.delete(f)
+  }, [])
+  useEffect(() => {
+    if (!poll) return
+    let stopped = false
+    let asking = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const load = () => {
+      timer = undefined
+      if (asking) return
+      asking = true
+      let at = 0
+      api<SessionInfo[]>('GET', '/api/sessions', undefined, { timeoutMs: 15000, onResponse: (r) => (at = readAt(r)) })
+        .then((l) => !stopped && noteSessions(l, at))
+        .catch(() => !stopped && noteSessions(null))
+        .finally(() => {
+          asking = false
+          if (!stopped && !timer) timer = setTimeout(load, document.hidden ? HIDDEN_EVERY : VISIBLE_EVERY)
+        })
+    }
+    const onVisible = () => {
+      if (!document.hidden && !asking) {
+        clearTimeout(timer)
+        load()
+      }
+    }
+    document.addEventListener('visibilitychange', onVisible)
+    load()
+    return () => {
+      stopped = true
+      clearTimeout(timer)
+      document.removeEventListener('visibilitychange', onVisible)
+    }
+  }, [poll])
+  return v
 }
 
 // A session as the last list read has it (null when it has none).
@@ -170,12 +262,15 @@ export function useRunningSessions(on: boolean, every = 3000): { sessions: Sessi
       api<SessionInfo[]>('GET', '/api/sessions', undefined, { timeoutMs: 15000, onResponse: (r) => (at = readAt(r)) })
         .then((l) => {
           if (stopped) return
-          lastList = l.filter((x) => x.state === 'running')
-          markRead(lastList, at)
+          noteSessions(l, at)
           setSessions(lastList)
           setFailed(false)
         })
-        .catch(() => !stopped && setFailed(true))
+        .catch(() => {
+          if (stopped) return
+          setFailed(true)
+          noteSessions(null)
+        })
         .finally(() => {
           asking = false
           if (!stopped && !timer) timer = setTimeout(load, document.hidden ? HIDDEN_EVERY : every)

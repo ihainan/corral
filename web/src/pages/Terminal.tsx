@@ -6,7 +6,7 @@ import { fitToEdge } from '../terminal/fit'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import { WebglAddon } from '@xterm/addon-webgl'
-import { ArrowUp, Check, ChevronDown, ChevronLeft, CircleStop, Code2, CornerDownLeft, Eye, FolderOpen, Globe, History, ImagePlus, MessageCircleReply, MoreVertical, Minus, Palette, Paperclip, Plus, TextSelect, Keyboard as KeyboardIcon, Power, RotateCw, Server, SquarePen, X } from 'lucide-react'
+import { ArrowUp, Bot, Check, ChevronDown, ChevronLeft, CircleStop, Code2, CornerDownLeft, Eye, FolderOpen, Globe, History, ImagePlus, MessageCircleReply, MoreVertical, Minus, Palette, Paperclip, Plus, TextSelect, Keyboard as KeyboardIcon, Power, RotateCw, Server, SquarePen, X } from 'lucide-react'
 import { api, ApiError, choiceOf, errorText, uploadFile, type HerdrAgent, type HerdrSummary, type Host, type OpenChoice, type SessionInfo, probeBootstrap } from '../api'
 import { t } from '../i18n'
 import { navigate } from '../router'
@@ -39,6 +39,8 @@ import { offerAlerts } from '../push'
 import { adoptComposer, composerWasOpen, rememberComposer } from '../terminal/composerOpen'
 import { promptSuggestion } from '../terminal/suggestion'
 import { sessionWhich } from '../terminal/sessionName'
+import { sessionAgents, waitingAgents } from '../terminal/agents'
+import { NewTabDialog } from '../terminal/NewSessionDialog'
 import { knownSession } from '../terminal/agents'
 import { holdTermMode } from '../terminal/chatSend'
 import { useComposerFit } from '../terminal/autosize'
@@ -2427,18 +2429,37 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
       .then((l) => setSessions(l.filter((x) => x.state === 'running').sort((a, b) => a.created_at - b.created_at)))
       .catch(() => setSessionsFailed(true))
   }
+  // A phone's way between sessions (no tab bar there): each with what its
+  // agents are at, and the ways the tab bar offers — the agents page, a new
+  // session — beside them (pages-1105 1.3). Of the list read as it opened.
+  const agentsLine = (x: SessionInfo): string | undefined => {
+    const a = sessionAgents(x)
+    if (!a) return undefined
+    if (a.lost) return t('hosts.agentsUnknown')
+    return [a.waiting && t('hosts.herdrWaiting', { n: a.waiting }), a.working && t('hosts.herdrWorking', { n: a.working }), !a.waiting && a.done && t('hosts.herdrDone', { n: a.done })].filter(Boolean).join(' · ') || undefined
+  }
   const switcherItems = (): (MenuItem | null)[] => {
     const list = sessions ?? []
+    const waitingAll = sessions ? waitingAgents(list) : 0
     return [
       sessionsFailed ? { label: t('common.retry'), icon: <RotateCw size={16} />, keepOpen: true, onSelect: loadSessions } : null,
       ...list.map((x) => ({
         label: `${x.host_name} · ${sessionWhich(x, list)}${x.title ? ' · ' + x.title : ''}`,
         icon: x.id === id ? <Check size={16} /> : <span className="menu-icon-space" />,
+        hint: agentsLine(x),
         onSelect: () => x.id !== id && navigate('/t/' + x.id),
       })),
-      { label: t('term.backToHosts'), icon: <Server size={16} />, separator: list.length > 0 || sessionsFailed, onSelect: () => navigate('/') },
+      { label: t('nav.agents'), icon: <Bot size={16} />, separator: list.length > 0 || sessionsFailed, hint: waitingAll ? t('nav.waitingN', { n: waitingAll }) : undefined, onSelect: () => navigate('/agents') },
+      { label: t('tabs.new'), icon: <Plus size={16} />, onSelect: () => setNewOpen(true) },
+      { label: t('term.backToHosts'), icon: <Server size={16} />, onSelect: () => navigate('/') },
     ]
   }
+  const [newOpen, setNewOpen] = useState(false)
+  // (Its own: what it opens is a new page in the history, not this one replaced.)
+  const fresh = useConnect((s) => {
+    setNewOpen(false)
+    navigate('/t/' + s.id)
+  })
 
   // Text size: the menu stays open, saying the size now, so a few presses
   // in a row need no reopening (ux1101 T19).
@@ -2914,6 +2935,17 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
           {code.dialog}
           {confirm}
           {dialogs}
+          {newOpen && (
+            <NewTabDialog
+              busyHost={fresh.busyHost}
+              onPick={(h) => fresh.connect(h)}
+              onClose={() => {
+                fresh.cancel()
+                setNewOpen(false)
+              }}
+            />
+          )}
+          {fresh.dialogs}
         </>
       )}
     </div>
