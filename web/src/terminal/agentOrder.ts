@@ -32,20 +32,23 @@ export interface RowCmds {
 // What is for the person to do: one waiting for an answer, one done and not
 // looked at since. Above the rest, those waiting first: working ones are
 // not, nothing being for the person there yet (and coming and going often).
-const forYou = (r: ConvoListRow) => r.status === 'blocked' || r.status === 'done'
-// (Those pinned first, whatever their status, in the order they were pinned;
-// in no other group.)
+// (A turn over with commands it left running in the background — a build, a
+// server — counts as at work, as the person asked (11-04): even a server
+// that runs on keeps it there, and not "done, not looked at".)
+const working = (r: ConvoListRow) => r.status === 'working' || (!!r.cmds && r.status !== 'blocked')
+const forYou = (r: ConvoListRow) => (r.status === 'blocked' || r.status === 'done') && !working(r)
+// (Those pinned first, whatever their status, latest to change first — as
+// every group, 11-04; in no other group.)
 export const pinned = (r: ConvoListRow) => r.pinned !== undefined
 export const GROUPS: { name: I18nKey; of: (r: ConvoListRow) => boolean }[] = [
   { name: 'convo.group.pinned', of: pinned },
   { name: 'convo.group.todo', of: (r) => !pinned(r) && forYou(r) },
-  { name: 'convo.group.working', of: (r) => !pinned(r) && r.status === 'working' },
-  { name: 'convo.group.recent', of: (r) => !pinned(r) && !forYou(r) && r.status !== 'working' },
+  { name: 'convo.group.working', of: (r) => !pinned(r) && working(r) },
+  { name: 'convo.group.recent', of: (r) => !pinned(r) && !forYou(r) && !working(r) },
 ]
 // A group's rows in their order: the latest to change first (those waiting
 // before those done, in the first).
 export const inGroup = (g: (typeof GROUPS)[number], rows: ConvoListRow[]) => {
-  if (g.name === 'convo.group.pinned') return rows.filter(g.of).sort((a, b) => a.pinned! - b.pinned!)
   const of = byRecent(rows.filter(g.of))
   return g.name === 'convo.group.todo' ? [...of.filter((r) => r.status === 'blocked'), ...of.filter((r) => r.status !== 'blocked')] : of
 }

@@ -18,7 +18,7 @@ import { SessionOpDialog, type SessionOp } from '../terminal/sessionOps'
 import { NEW_AGENT, NewAgentDialog } from '../terminal/newAgent'
 import { ForkDialog, RenameDialog, type RenameTarget } from '../terminal/agentOps'
 import { agentWho, ChimeCounter, chime, countsOf } from '../terminal/chime'
-import { BgCmds, CODEX_EFFORTS, ConversationView, glanceOf, ListSearch, SEARCH_FROM, when, type ConvoAgent, type ConvoListRow, type ConvoPending, type ConvoWent, type FileActs, type ModelOpt } from '../terminal/Conversation'
+import { CODEX_EFFORTS, ConversationView, glanceOf, ListSearch, SEARCH_FROM, when, type ConvoAgent, type ConvoListRow, type ConvoPending, type ConvoWent, type FileActs, type ModelOpt } from '../terminal/Conversation'
 import { FilesDialog } from '../terminal/FilesDialog'
 import { downloadPath, PictureDialog } from '../terminal/picture'
 import { attach, ATTACH_LABEL, AttachStrip, takeOut } from '../terminal/attach'
@@ -932,7 +932,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
         const r = e.row
         const said = (current && agent?.title) || keptTitle(titles, e) || paneTitle(r.a.title) || dirName(r.a.cwd) || r.a.agent
         const st = current && agent && !r.bg ? agent.status : r.status
-        return { key: e.key, ...labelOf(e, said, hosts), unsent: unsentOf(e.key) || undefined, now: r.lost || r.bg ? undefined : glanceOf(e.s.id, e.pane, st, r.a.since) || undefined, program: r.a.agent, status: st, bg: r.lost ? undefined : r.bg, cmds: cmdsOf(r), since: r.lost ? undefined : r.bg ? r.a.bg_since : r.a.since, current, pinned: pinAt(e.key), onPick: () => onPick(e), menu: () => rowMenu.current(e) }
+        return { key: e.key, ...labelOf(e, said, hosts), unsent: unsentOf(e.key) || undefined, now: r.lost || r.bg || st !== 'blocked' ? undefined : glanceOf(e.s.id, e.pane, st, r.a.since) || undefined /* (said only of one waiting on the person) */, program: r.a.agent, status: st, bg: r.lost ? undefined : r.bg, cmds: cmdsOf(r), since: r.lost ? undefined : r.bg ? r.a.bg_since : r.a.since, current, pinned: pinAt(e.key), onPick: () => onPick(e), menu: () => rowMenu.current(e) }
       }
       const title = (current && agent?.title) || keptTitle(titles, e) || `${e.s.host_name} · ${sessionWhich(e.s, all)}`
       return { key: e.key, title, where: whereOf(e, hosts), unsent: unsentOf(e.key) || undefined, program: current ? agent?.program : undefined, status: current && agent ? agent.status : 'unknown', cmds: current ? agent?.cmds : tmuxCmdsOf(e), current, pinned: pinAt(e.key), onPick: () => onPick(e), menu: () => rowMenu.current(e) }
@@ -2260,7 +2260,8 @@ function PhoneList({ entries, all, titles, query, onQuery, onPick, unsentOf }: {
   const byKey = new Map(entries.map((e) => [e.key + ' ' + e.s.id, e]))
   // (Those pinned first, in the order pinned, as the side list has them.)
   const inOrder = order.flatMap((k) => (byKey.has(k) ? [byKey.get(k)!] : []))
-  const list = [...pins.flatMap((p) => inOrder.filter((e) => e.key === p)), ...inOrder.filter((e) => !pins.includes(e.key))]
+  // (Those pinned first, latest first as the rest — as the side list has them, 11-04.)
+  const list = [...inOrder.filter((e) => pins.includes(e.key)), ...inOrder.filter((e) => !pins.includes(e.key))]
   const n = (st: string) => entries.filter((e) => e.row?.status === st).length
   const waiting = n('blocked')
   // (Not in order any more — one has come to wait, say, while the list was looked at: put in order at a tap,
@@ -2350,26 +2351,24 @@ function PhoneList({ entries, all, titles, query, onQuery, onPick, unsentOf }: {
                       </span>
                     )}
                   </span>
+                  <span className="agents-list-where">{where}</span>
                   {unsentOf(e.key) > 0 && <span className="agents-list-now is-unsent">{t('convo.unsentRow', { n: unsentOf(e.key) })}</span>}
-                  {r && !r.lost && !r.bg && (() => {
+                  {/* (A third line only for what waits on the person — as the side list.) */}
+                  {status === 'blocked' && r && !r.lost && !r.bg && unsentOf(e.key) === 0 && (() => {
                     const g = glanceOf(e.s.id, e.pane, status, r.a.since)
-                    return g ? <span className={'agents-list-now is-' + status}>{g}</span> : null
+                    return g ? <span className="agents-list-now is-blocked">{g}</span> : null
                   })()}
-                  <span className="agents-list-where">
-                    {r && cmdsOf(r) && <BgCmds cmds={cmdsOf(r)!} />}
-                    {!r && tmuxCmdsOf(e) && <BgCmds cmds={tmuxCmdsOf(e)!} />}
-                    {(r ? cmdsOf(r) : tmuxCmdsOf(e)) && where && ' · '}
-                    {where}
-                  </span>
                 </span>
                 {/* (Its state in words, in its colour — no group heading says it here — and
                     how long under it, in words that say which: waited, at work, ago.) */}
                 <span className="agents-list-side">
                   {(() => {
-                    const word = r?.bg && !r.lost ? t(r.bg === 'running' ? 'convo.status.bg' : 'convo.status.bgStale') : status === 'blocked' ? t('convo.status.blocked') : status === 'done' ? t('agents.unseen') : status === 'working' ? t('convo.status.working') : ''
+                    // (Commands it left running: said as at work in the background, as the side list groups it.)
+                    const cmdsOut = status !== 'blocked' && !!(r && !r.lost ? cmdsOf(r) : !r && tmuxCmdsOf(e))
+                    const word = r?.bg && !r.lost ? t(r.bg === 'running' ? 'convo.status.bg' : 'convo.status.bgStale') : cmdsOut ? t('convo.status.bg') : status === 'blocked' ? t('convo.status.blocked') : status === 'done' ? t('agents.unseen') : status === 'working' ? t('convo.status.working') : ''
                     return (
                       <>
-                        {word && <span className={'agents-list-state is-' + (r?.bg && !r.lost ? 'working' : status)}>{word}</span>}
+                        {word && <span className={'agents-list-state is-' + ((r?.bg && !r.lost) || cmdsOut ? 'working' : status)}>{word}</span>}
                         {since && <span className="agents-list-when">{since}</span>}
                       </>
                     )

@@ -2,7 +2,7 @@ import { createContext, Fragment, memo, useCallback, useContext, useEffect, useL
 import { ArrowDown, Check, Copy, FolderOpen, Image as ImageIcon, ChevronDown, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, Clock, Download, GitBranch, Keyboard, ListOrdered, Loader, MoreHorizontal, MoreVertical, PanelLeft, Pin, Search, TriangleAlert, X, Plus } from 'lucide-react'
 import { t, getLang, type I18nKey } from '../i18n'
 import { api } from '../api'
-import { asHeld, dayBefore, dayStart, FOLDED, foldAt, GROUPS, inGroup, listOrder, pinned, type ConvoListRow, type RowCmds } from './agentOrder'
+import { asHeld, dayStart, FOLDED, foldAt, GROUPS, inGroup, listOrder, pinned, type ConvoListRow, type RowCmds } from './agentOrder'
 import { copyText, Dialog, isCoarse, Menu, MenuLayer, type MenuItem } from '../components/ui'
 import { composing, foldAllKey, helpKey, jumpKey, onMac, switchKey } from './pageKeys'
 import { local } from '../storage'
@@ -2089,21 +2089,19 @@ function Gauge({ part }: { part: number }) {
 
 // A row of the list of agents to go to (see AgentsChat.tsx).
 
-// The time on a row of the list: how long it has waited or worked; else
-// when it came to rest, the clock's time (its day said by its group), or
-// the date before yesterday.
-function stamp(r: ConvoListRow, now: number, yesterday: number): string {
+// The time on a row of the list, short: how long it has waited or worked;
+// else when it came to rest — the clock's time today, the date before.
+function stamp(r: ConvoListRow, now: number): string {
   // (Waiting or at work: how long, short — its colour and group say which; the room is the title's.)
   if (r.status === 'working' || r.status === 'blocked') {
     if (!r.since || now < r.since) return ''
     const m = Math.floor((now - r.since) / 60000)
-    return m < 1 ? t('convo.for.now') : m < 60 ? t('convo.for.m', { n: m }) : m < 48 * 60 ? t('convo.for.h', { n: Math.floor(m / 60) }) : t('convo.for.d', { n: Math.floor(m / 1440) })
+    return m < 1 ? t('convo.short.now') : m < 60 ? t('convo.short.m', { n: m }) : m < 48 * 60 ? t('convo.short.h', { n: Math.floor(m / 60) }) : t('convo.short.d', { n: Math.floor(m / 1440) })
   }
   if (!r.since || now < r.since) return ''
   const d = new Date(r.since)
-  // (Today: its time; yesterday: said so — the ones at rest are one group, the day is the time's to say.)
   if (r.since >= dayStart(now)) return d.toLocaleTimeString(getLang(), { hour: '2-digit', minute: '2-digit', hour12: false })
-  if (r.since >= yesterday) return t('convo.group.yesterday')
+  // (Before today: its date, short — never a word wider than a time.)
   return d.toLocaleDateString(getLang(), { month: 'numeric', day: 'numeric' })
 }
 
@@ -2213,8 +2211,6 @@ function AgentList({ rows, menus, onPicked, placed, query: given, onQuery, searc
   const place = (r: ConvoListRow) => (first.includes(r.key) ? first.indexOf(r.key) : first.length)
   const found = query.trim() ? rows.filter((r) => matchQuery(query, r.title, r.where, r.program)) : rows
   const inOrder = placed ? [...found].sort((a, b) => place(a) - place(b)) : found
-  const today = dayStart(now)
-  const yesterday = dayBefore(today)
   const groups = GROUPS.flatMap((g) => {
     const of = inGroup(g, inOrder.map(at))
     if (g.name !== 'convo.group.recent') return [{ name: g.name, of }]
@@ -2250,7 +2246,7 @@ function AgentList({ rows, menus, onPicked, placed, query: given, onQuery, searc
             {of.map((r) => {
               // (At rest, nothing to say of it but when.)
               const said = r.status === 'blocked' || r.status === 'working' || r.status === 'done'
-              const since = stamp(r, now, yesterday)
+              const since = stamp(r, now)
               const hasMenu = !!(menus && r.menu)
               return (
                 <div
@@ -2278,28 +2274,31 @@ function AgentList({ rows, menus, onPicked, placed, query: given, onQuery, searc
                   onKeyDown={hasMenu ? menuKey(r.key) : undefined}
                 >
                   <AgentIcon program={r.program} size={30} dot={r.bg === 'running' || r.cmds ? 'bg' : said ? (r.status as 'blocked' | 'working' | 'done') : undefined} />
-                  <span className="convo-list-text" title={[r.title, r.where].filter(Boolean).join(' · ')}>
+                  {/* (Two lines a row, always: its name; where it is — the session's title,
+                      which tells alike names apart — and when. A third only for what
+                      waits on the person: what it asks, or messages not seen taken in.
+                      The whole of each in its tooltip and the conversation's bar.) */}
+                  <span className="convo-list-text" title={[r.title, r.where, r.now].filter(Boolean).join('\n')}>
                     <span className="convo-list-line">
                       <span className="convo-list-title">{r.title}</span>
-                      {pinned(r) && (
+                      {pinned(r) && g.name !== 'convo.group.pinned' && (
                         <span className="convo-list-pin">
                           <Pin size={12} aria-hidden="true" />
                           <span className="sr-only">{t('convo.pinnedRow')}</span>
                         </span>
                       )}
+                    </span>
+                    <span className="convo-list-meta">
+                      <span className="convo-list-where">{r.where || '\u00a0'}</span>
                       {since && <span className="convo-list-when">{since}</span>}
                     </span>
                     {/* (Its status by its dot only, and its group: in words for a screen
                         reader, and shown where the system's colours take the dot's away.) */}
                     {(said || r.bg) && <span className={'convo-list-status is-' + r.status}>{t(r.bg === 'running' ? 'convo.status.bg' : r.bg === 'stale' ? 'convo.status.bgStale' : (`convo.status.${r.status}` as I18nKey))}</span>}
-                    {!!r.unsent && <span className="convo-list-now is-unsent">{t('convo.unsentRow', { n: r.unsent })}</span>}
-                    {r.now && <span className={'convo-list-now is-' + r.status}>{r.now}</span>}
-                    {(r.where || r.cmds) && (
-                      <span className="convo-list-sub">
-                        {r.cmds && <BgCmds cmds={r.cmds} />}
-                        {r.cmds && r.where && ' · '}
-                        {r.where && <span className="convo-list-where">{r.where}</span>}
-                      </span>
+                    {r.unsent ? (
+                      <span className="convo-list-now is-unsent">{t('convo.unsentRow', { n: r.unsent })}</span>
+                    ) : (
+                      r.status === 'blocked' && r.now && <span className="convo-list-now is-blocked">{r.now}</span>
                     )}
                   </span>
                 </button>

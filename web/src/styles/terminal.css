@@ -1105,7 +1105,10 @@ button.convo-task-line:hover .convo-task-name { color: var(--term-fg); }
   flex: 0 1 auto; min-width: 0; font-size: 14px; font-weight: 500; line-height: 20px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.convo-list-when { flex: none; margin-left: auto; min-width: 4.6em; text-align: end; font-size: 12px; color: var(--term-fg-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.convo-list-when { flex: none; margin-left: auto; min-width: 3.2em; text-align: end; font-size: 12px; color: var(--term-fg-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* Its second line: where it is (the session's title, which tells alike names apart) and, at its end, when. One line. */
+.convo-list-meta { display: flex; align-items: baseline; gap: 8px; min-width: 0; font-size: 12px; line-height: 18px; color: var(--term-fg-3); }
+.convo-list-meta .convo-list-where { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* The one being read: a shade and heavier letters, no colour (its title is
    one line, cut short: heavier letters do not wrap it). */
 .convo-list-row[aria-current='true'] .convo-list-title { font-weight: 600; }
@@ -1160,19 +1163,16 @@ button.convo-task-line:hover .convo-task-name { color: var(--term-fg); }
 .convo-list-dots:hover, .convo-list-item.is-menu .convo-list-dots { background: color-mix(in srgb, var(--term-fg) 10%, transparent); color: var(--term-fg); }
 .convo-list-dots:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: -2px; }
 .convo-list-item.has-menu:has(:focus-visible) .convo-list-dots, .convo-list-item.is-menu .convo-list-dots { opacity: 1; pointer-events: auto; }
-.convo-list-item.has-menu:has(:focus-visible) .convo-list-when, .convo-list-item.is-menu .convo-list-when { visibility: hidden; }
 .convo-list-item.has-menu:has(:focus-visible) .convo-list-line:not(:has(.convo-list-when)), .convo-list-item.is-menu .convo-list-line:not(:has(.convo-list-when)) { padding-right: 26px; }
 .convo-list-item.is-menu > .convo-list-row:not([aria-current='true']) { background: var(--term-row-hover); --dot-ring: var(--term-row-hover); }
 @media (hover: hover) {
   .convo-list-item.has-menu:hover .convo-list-dots { opacity: 1; pointer-events: auto; }
-  .convo-list-item.has-menu:hover .convo-list-when { visibility: hidden; }
   .convo-list-item.has-menu:hover .convo-list-line:not(:has(.convo-list-when)) { padding-right: 26px; }
   .convo-list-item.has-menu:hover > .convo-list-row:not([aria-current='true']) { background: var(--term-row-hover); --dot-ring: var(--term-row-hover); }
 }
 @media (hover: none) {
-  .convo-list-group .convo-list-item.has-menu .convo-list-dots { opacity: 1; pointer-events: auto; top: 50%; transform: translateY(-50%); color: var(--term-fg-3); }
-  .convo-list-group .convo-list-item.has-menu .convo-list-text { padding-right: 28px; }
-  .convo-list-group .convo-list-item.has-menu .convo-list-when { visibility: visible; }
+  .convo-list-group .convo-list-item.has-menu .convo-list-dots { opacity: 1; pointer-events: auto; color: var(--term-fg-3); }
+  .convo-list-group .convo-list-item.has-menu .convo-list-line { padding-right: 28px; }
   .convo-list-group .convo-list-item.has-menu .convo-list-line { padding-right: 0; }
 }
 @media (forced-colors: active) { .convo-list-dots { color: ButtonText; } }
