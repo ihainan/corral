@@ -408,6 +408,12 @@ a.setting:hover { text-decoration: none; background: var(--bg-hover); }
 .menu-item.danger, .menu-item.danger svg { color: var(--danger); }
 .menu hr, .sheet-list hr { border: 0; border-top: 1px solid var(--line); margin: 4px 6px; }
 .menu-note { padding: 6px 10px 8px; color: var(--fg-3); font-size: 12px; }
+/* A group's heading in a menu: a label, not an item */
+.menu-group { padding: 8px 10px 2px; font-size: 12px; line-height: 18px; font-weight: 500; letter-spacing: 0.02em; color: var(--fg-3); }
+/* Two-line items (a word on why one is off): room above and under, not pressed to the rules */
+.menu-item:has(.menu-hint) { min-height: 52px; padding-top: 8px; padding-bottom: 8px; }
+.menu-item-text { gap: 2px; }
+.menu-hint { line-height: 18px; }
 .sheet-list { display: flex; flex-direction: column; margin: -4px -8px 0; }
 .sheet-list .menu-item { min-height: 52px; font-size: 15px; padding: 0 12px; }
 .sheet-list .menu-item svg { width: 18px; height: 18px; }

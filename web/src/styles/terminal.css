@@ -27,13 +27,13 @@ html.term-mode body { position: fixed; inset: 0; }
 }
 .term-root.light {
   --term-bg: #ffffff; --term-chrome: #f6f7f9; --term-line: #e7e9ed;
-  --term-key: #ffffff; --term-key-active: #e7eaef; --term-fg: #16181d; --term-fg-2: #545c68; --term-fg-3: #6b717d;
+  --term-key: #ffffff; --term-key-active: #e7eaef; --term-fg: #16181d; --term-fg-2: #545c68; --term-fg-3: #646a76;
   --term-hover: #f0f2f5;
   --term-accent-soft: #edf2fc; --term-accent-text: #2c5fcc; --term-danger-text: #c2352f;
   --term-warn-text: #9a5f00; --term-ok-text: #1d7a45;
   --term-syn-keyword: #cf222e; --term-syn-string: #116329; --term-syn-number: #0550ae; --term-syn-title: #8250df;
   --term-syn-type: #953800; --term-syn-attr: #0550ae; --term-syn-comment: #6e7781;
-  --term-line-strong: #c7ced8; --term-pop: #ffffff; --term-row-hover: #eef0f3; --term-row-current: #e6eaf0; --term-add-bg: #e6f4ea; --term-del-bg: #fdecea; --term-user: #f1f3f6;
+  --term-line-strong: #c7ced8; --term-pop: #ffffff; --term-row-hover: #f1f3f6; --term-row-current: #edf0f4; --term-add-bg: #e6f4ea; --term-del-bg: #fdecea; --term-user: #f1f3f6;
   color-scheme: light;
 }
 .term-root .icon-btn { color: var(--term-fg-2); }
@@ -482,12 +482,14 @@ html.term-dark .overlay, html.term-dark .menu, html.term-dark .toast {
 .term-title.term-title-static:hover { background: none; }
 
 /* Conversation view: over the terminal, in the terminal's colours */
-.convo { position: absolute; inset: 0; z-index: 5; display: flex; background: var(--term-bg); color: var(--term-fg); }
+.convo { position: absolute; inset: 0; z-index: 5; display: flex; background: var(--term-bg); color: var(--term-fg); container-type: inline-size; }
 /* (In the terminal's colours whatever the app's are) */
 .term-root .convo .btn-ghost { color: var(--term-fg); }
 .term-root .convo .btn-ghost:hover { background: var(--term-hover); }
 .convo-main { flex: 1; min-width: 0; display: flex; flex-direction: column; position: relative; }
-.convo-scroll-wrap { flex: 1; min-height: 0; display: flex; flex-direction: column; position: relative; }
+.convo-scroll-wrap { flex: 1; min-height: 0; display: flex; flex-direction: column; position: relative; container-type: inline-size; }
+/* The thread fades into the composer under it, not cut off mid-line */
+.convo-scroll-wrap::after { content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 20px; background: linear-gradient(to bottom, transparent, var(--term-bg)); pointer-events: none; }
 .convo-scroll { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; overflow-anchor: none; /* (what goes in above is made up for by hand: Safari has no anchoring) */ }
 /* Under the thread, in its column: the task list, the wait, the composer, what the session runs with */
 .convo-dock {
@@ -500,6 +502,7 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-dock .composer { padding: 0; background: none; border-top: 0; }
 .convo-dock .composer-box { border: 1px solid var(--term-line); }
 .term-root.dark .convo-dock .composer-box { background: #1d222a; border-color: #343b46; }
+.term-root.dark .convo-dock .composer-box:focus-within { border-color: color-mix(in srgb, var(--term-accent-text) 70%, var(--term-line)); }
 .term-root.light .convo-dock .composer-box { box-shadow: none; }
 .convo-dock .composer-box:focus-within,
 .term-root.light .convo-dock .composer-box:focus-within { border-color: color-mix(in srgb, var(--term-accent-text) 70%, var(--term-line)); box-shadow: 0 0 0 2px color-mix(in srgb, var(--term-accent-text) 12%, transparent); }
@@ -577,7 +580,7 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-runs-note { margin: 4px 0 0; font-size: 12px; color: var(--term-fg-3); }
 @media (max-width: 420px) { .convo-runs-branch { display: none; } }
 .convo-col {
-  max-width: 780px; margin: 0 auto; display: flex; flex-direction: column; gap: 0;
+  max-width: 780px; margin: 0 auto; display: flex; flex-direction: column; gap: 12px;
   padding: 16px max(16px, env(safe-area-inset-right, 0px)) 28px max(16px, env(safe-area-inset-left, 0px));
   font-family: var(--font-ui); font-size: 15px; line-height: 1.65; overflow-wrap: anywhere;
 }
@@ -591,12 +594,12 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 /* The thread's rhythm: its parts 12 apart; what the agent did tucked under
    what it said of it (4); the answer 16 off what led to it; a new turn of the
    person's 32 off the last. Distance does the grouping, not more frames. */
-.convo-col > * + * { margin-top: 12px; }
-.convo-col > .convo-mid + .convo-work, .convo-col > .convo-work + .convo-work { margin-top: 4px; }
-.convo-col > * + .convo-answer, .convo-col > .convo-user + * { margin-top: 16px; }
-.convo-col > * + .convo-user { margin-top: 32px; }
-.convo-col > .convo-user.is-mid { margin-top: 16px; }
-.convo-col > .convo-older + * { margin-top: 16px; }
+/* (The column's gap is the 12; the pairs below only add to it or take from
+   it, so a part's own margins — an event's, a note's — never undo it.) */
+:is(.convo-col, .convo-sub-body) > .convo-mid + .convo-work, :is(.convo-col, .convo-sub-body) > .convo-work + .convo-work { margin-top: -8px; }
+:is(.convo-col, .convo-sub-body) > * + .convo-answer, :is(.convo-col, .convo-sub-body) > .convo-user + * { margin-top: 4px; }
+:is(.convo-col, .convo-sub-body) > * + .convo-user { margin-top: 20px; }
+:is(.convo-col, .convo-sub-body) > * + .convo-user.is-mid, :is(.convo-col, .convo-sub-body) > .convo-older + .convo-user { margin-top: 4px; }
 
 .convo-user { align-self: flex-end; max-width: min(88%, 620px); display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
 .convo-user-text { background: var(--term-user, color-mix(in srgb, var(--term-fg) 8%, var(--term-bg))); border-radius: 16px; padding: 9px 14px; white-space: pre-wrap; }
@@ -611,9 +614,17 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 @media (pointer: coarse) { .convo-pic { padding: 7px 12px; } }
 .convo-meta { display: flex; gap: 12px; font-size: 12px; color: var(--term-fg-3); font-variant-numeric: tabular-nums; }
 .convo-meta .link-btn { font-size: 12px; color: var(--term-fg-3); }
+.convo-meta-acts { display: inline-flex; gap: 12px; }
+.convo-meta-more { display: none; align-items: center; justify-content: center; width: 28px; height: 20px; margin: 0 -6px; padding: 0; border: 0; border-radius: 6px; background: none; color: var(--term-fg-3); cursor: pointer; }
+.convo-meta-more:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: 1px; }
 @media (hover: hover) {
-  .convo-meta .link-btn { opacity: 0; transition: opacity 0.12s; }
-  .convo-user:hover .convo-meta .link-btn, .convo-answer:hover .convo-meta .link-btn, .convo-meta:focus-within .link-btn { opacity: 1; }
+  .convo-meta-acts { opacity: 0; transition: opacity 0.12s; }
+  .convo-user:hover .convo-meta-acts, .convo-answer:hover .convo-meta-acts, .convo-meta-acts:focus-within { opacity: 1; }
+}
+/* (Nothing hovers: the words behind one small button, 44 to touch) */
+@media (hover: none) {
+  .convo-meta-acts { display: none; }
+  .convo-meta-more { display: inline-flex; padding: 12px 14px; margin: -12px -14px; width: auto; height: auto; box-sizing: content-box; }
 }
 .convo-pending { opacity: 0.72; }
 /* (While it is being typed on the host: fainter still, so the wait shows) */
@@ -635,7 +646,7 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-md hr { border: 0; border-top: 1px solid var(--term-line); margin: 14px 0; }
 .convo-md blockquote { padding-left: 14px; color: var(--term-fg-2); }
 .convo-md code { font-family: var(--font-mono); font-size: 0.88em; background: color-mix(in srgb, var(--term-fg) 8%, transparent); color: var(--term-fg); border-radius: 4px; padding: 1px 4px; }
-.convo-md .md-path > code { color: var(--term-accent-text); }
+.convo-md .md-path > code, .convo-md a code { color: var(--term-accent-text); }
 /* A file's path in an answer: its code, underlined as something to open (a menu). */
 .md-path { display: inline; padding: 0; margin: 0; border: 0; background: none; font: inherit; color: inherit; cursor: pointer; text-align: inherit; }
 .md-path > code { text-decoration: underline dotted color-mix(in srgb, var(--term-accent-text) 60%, transparent); text-underline-offset: 3px; overflow-wrap: anywhere; }
@@ -698,7 +709,7 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 /* What the agent wrote between its steps: as its answer is. */
 .convo-mid { margin: 0; }
 /* (What it says on the way, a step quieter than the answer it ends with: C04/A04) */
-.convo-col > .convo-mid { font-size: 14px; line-height: 22px; color: var(--term-fg-2); }
+.convo-col > .convo-mid, .convo-sub-body > .convo-mid { font-size: 14px; line-height: 22px; color: var(--term-fg-2); }
 /* Thinking: told apart from calls (lighter, slanted), in a run's line and as a step. */
 .convo-work-text.is-thought, .convo-step.is-thought .convo-step-head { color: var(--term-fg-3); font-size: 13px; }
 .convo-step.is-thought .convo-step-verb { color: var(--term-fg-3); font-weight: 400; }
@@ -773,8 +784,11 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-panel-edit + .convo-panel-edit { margin-top: 8px; }
 .convo-panel-edit > .convo-hunk-gap { border-radius: 6px 6px 0 0; }
 .convo-panel .convo-hunks { max-height: none; }
-@media (max-width: 900px) {
-  .convo-panel { position: absolute; inset: 0 0 0 auto; z-index: 6; width: min(100%, 560px); box-shadow: -8px 0 28px rgba(0, 0, 0, 0.25); }
+/* (Beside the thread only where the thread keeps ~520px of its own next to
+   it and the list: else over the thread, from the right — as on a tablet held
+   either way, where side by side left the thread a sliver.) */
+@container (max-width: 1300px) {
+  .convo-panel { position: absolute; inset: 0 0 0 auto; z-index: 6; width: min(100%, 620px); box-shadow: -8px 0 28px rgba(0, 0, 0, 0.25); }
 }
 .term-root .convo-changes-see { flex: none; height: 30px; padding: 0 10px; font-size: 13px; color: var(--term-fg); }
 .term-root .convo-changes-see:hover { background: var(--term-hover); }
@@ -1060,7 +1074,6 @@ button.convo-task-line:hover .convo-task-name { color: var(--term-fg); }
 .agents-list > .list-search { margin: 10px max(16px, env(safe-area-inset-right, 0px)) 4px max(16px, env(safe-area-inset-left, 0px)); height: 40px; }
 .convo-list-group { display: flex; flex-direction: column; gap: 1px; margin-bottom: 8px; }
 .convo-list-head { display: flex; gap: 6px; padding: 10px 10px 4px; font-size: 12px; font-weight: 500; letter-spacing: 0.02em; color: var(--term-fg-3); font-variant-numeric: tabular-nums; }
-.convo-list-head > span { opacity: 0.7; }
 .convo-list-row {
   display: flex; align-items: flex-start; gap: 10px; width: 100%; padding: 7px 10px; border: 0; border-radius: 8px;
   background: none; color: var(--term-fg); font: inherit; text-align: left; cursor: pointer;
@@ -1195,6 +1208,8 @@ button.convo-task-line:hover .convo-task-name { color: var(--term-fg); }
   margin: 0; padding: 6px 16px; flex: none; color: var(--term-fg-2); background: var(--term-chrome);
   border-bottom: 1px solid var(--term-line); font: 13px/20px var(--font-ui); text-align: center;
 }
+.agents-chat-stale.is-warn { color: var(--term-warn-text); }
+.term-root .agents-chat-stale-act { margin-left: 12px; font-size: 13px; }
 .term-root .agents-chat-why { margin: 0 0 6px; padding: 0 4px; color: var(--term-fg-2); font: 13px/18px var(--font-ui); }
 /* (Its one way out, in the line: a tap a finger finds.) */
 .term-root .agents-chat-why-act { margin-left: 6px; padding: 4px 2px; }
@@ -1298,6 +1313,7 @@ button.convo-task-line:hover .convo-task-name { color: var(--term-fg); }
 .convo-ask-hint { margin: 4px 0; font-size: 13px; color: var(--term-fg-3); }
 .convo-ask-hint.is-warn { color: var(--term-warn-text); }
 .convo-ask-opt.is-ticked { background: var(--term-accent-soft); }
+@media (forced-colors: active) { .convo-ask-key { border: 1px solid CanvasText; } }
 .convo-ask-opt-wrap { display: flex; flex-direction: column; gap: 4px; }
 .convo-ask-preview-btn { align-self: flex-start; margin-left: 4px; font-size: 13px; }
 .convo-ask-preview { max-height: 240px; }
@@ -1311,6 +1327,10 @@ button.convo-task-line:hover .convo-task-name { color: var(--term-fg); }
 .convo-unread { display: flex; align-items: center; gap: 10px; margin: 8px 0; font-size: 12px; color: var(--term-accent-text); }
 .convo-unread::before, .convo-unread::after { content: ''; flex: 1 1 24px; border-top: 1px solid color-mix(in srgb, var(--term-accent-text) 45%, transparent); }
 .convo-jump { position: absolute; right: 16px; bottom: 12px; display: flex; flex-direction: column; gap: 4px; z-index: 2; }
+/* (Room beside the thread's column: the buttons there, off the text.) */
+@container (min-width: 900px) { .convo-jump { right: calc(50% - 390px - 52px); } }
+/* (A phone: the way to the latest only; one's own messages are in the menu.) */
+@media (max-width: 640px) { .convo-jump { display: none; } }
 .convo-jump .icon-btn { background: var(--term-chrome); border: 1px solid var(--term-line); box-shadow: 0 1px 4px rgb(0 0 0 / 10%); }
 .convo-event.is-limit { display: flex; gap: 8px; align-items: flex-start; margin: 0; font-size: 13px; color: var(--term-fg-2); }
 .convo-event.is-limit svg { flex: none; margin-top: 3px; color: var(--term-fg-3); }
@@ -1471,6 +1491,11 @@ button.convo-running-what:hover { color: var(--term-fg); text-decoration-color: 
 @media (max-width: 640px) { .convo-bar-dur { display: none; } }
 /* (Held — an answer is wanted first: its tools away whether it has the focus or not. Shown on focus, a press on the card above moved it 40px between press and release, and the press was lost — review of ux1101 A13.) */
 .convo-dock .composer.is-held .composer-tools { display: none; }
+.convo-dock .composer.is-asked .composer-box { display: none; }
+/* (Its room taken back by the card: as tall as the screen allows, not cut to a scroll of its own.) */
+.convo-dock:has(.composer.is-asked) > .convo-dock-ask { max-height: min(80vh, 640px); }
+.convo-dock .composer.is-asked .agents-chat-why { margin-bottom: 0; }
+.term-root .agents-chat-why.is-note { color: var(--term-fg-3); }
 /* The send and stop circle on a touch screen: 44 to touch, the circle 38 inside it, no ring drawn round it */
 @media (pointer: coarse) {
   .convo-dock .composer-send, .convo-dock .composer-send:hover { padding: 3px; box-shadow: none; background: var(--accent); background-clip: content-box; }

@@ -170,6 +170,7 @@ export interface MenuItem {
   title?: string
   checked?: boolean // an on/off one (a menuitemcheckbox): on or not
   hint?: string // a line under it, where all can read it (a touch screen shows no title): why it is off, say
+  group?: string // a small heading over it: the first of a group of items of one kind
 }
 
 // Sent on the window to close every open menu (a terminal tab sent to the back).
@@ -246,6 +247,7 @@ function MenuEntry({ item, close }: { item: MenuItem; close: () => void }) {
   return (
     <>
       {item.separator && <hr />}
+      {item.group && <div className="menu-group" role="presentation">{item.group}</div>}
       {item.href ? (
         <a className={cls} role="menuitem" href={item.href} onClick={(e) => { close(); if (item.onSelect) { e.preventDefault(); item.onSelect() } }}>{body}</a>
       ) : (

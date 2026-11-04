@@ -23,6 +23,15 @@ function InlineCode({ text }: { text: string }) {
   const draw = useContext(CodeSpanOf)
   return draw?.(text) ?? <code>{text}</code>
 }
+// A link to a file on the host, as Codex writes them ("[a.go:12](/home/me/a.go:12)"):
+// its words, as a path to act on where the page can (null: as code, the
+// whole path in its title). Never drawn as the markdown it was written in.
+export const FileLinkOf = createContext<((label: string, target: string) => ReactNode | null) | undefined>(undefined)
+function FileLink({ label, target }: { label: string; target: string }) {
+  const draw = useContext(FileLinkOf)
+  const words = label.replace(/^`(.*)`$/, '$1') // ("[`a.go`](…)": the words, not their quotes)
+  return draw?.(words, target) ?? <code title={target}>{words}</code>
+}
 
 const fence = /^\s{0,3}(`{3,}|~{3,})\s*([^`\s]*)/
 const heading = /^ {0,3}(#{1,6})[ \t]+(.*)$/
@@ -251,6 +260,7 @@ const spans: { re: RegExp; make: (m: RegExpExecArray, key: number) => ReactNode 
   { re: /`([^`]+)`/g, make: (m, k) => <InlineCode key={k} text={m[1]} /> },
   // (A link's words are only words: no code span in them is drawn as more — a button in a link opens both.)
   { re: /\[([^\]]{1,500})\]\((https?:\/\/[^\s)]{1,2000})\)/g, make: (m, k) => link(m[2], <CodeSpanOf.Provider value={undefined}>{inline(m[1])}</CodeSpanOf.Provider>, k) },
+  { re: /\[([^\]]{1,500})\]\((\/(?!\/)[^\s)]{1,2000})\)/g, make: (m, k) => <FileLink key={k} label={m[1]} target={m[2]} /> },
   { re: new RegExp(`https?://[^\\s<>()${wide}"']{0,2000}[^\\s<>()${wide}"'.,;:!?]`, 'g'), make: (m, k) => link(m[0], m[0], k) },
   { re: /\*\*(?=\S)((?:`[^`]{0,500}`|[^`]){0,1000}?\S)\*\*/g, make: (m, k) => <strong key={k}>{inline(m[1])}</strong> },
   { re: /~~(?=\S)([^~]{0,2000}?\S)~~/g, make: (m, k) => <del key={k}>{inline(m[1])}</del> },

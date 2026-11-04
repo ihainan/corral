@@ -307,7 +307,7 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
     return () => window.removeEventListener(NEW_AGENT, on)
   }, [active])
   // (Gone to once the list has it: before, the list of before would put another in front.)
-  const [arriving, setArriving] = useState<{ s: SessionInfo; pane: string; key: string; until: number } | null>(null)
+  const [arriving, setArriving] = useState<{ s: SessionInfo; pane: string; key: string; until: number; late?: boolean } | null>(null)
   const started = (s: SessionInfo, pane: string, first: string) => {
     setNewAgent(false)
     const key = agentKey(s, pane)
@@ -322,7 +322,9 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
       choose(e)
       return
     }
-    const tm = setTimeout(() => setArriving((a) => (a && Date.now() > a.until ? null : a ? { ...a } : a)), 1000)
+    // (Not there in time: said so, with a way to look again or to its terminal — not dropped without a word.)
+    if (arriving.late) return
+    const tm = setTimeout(() => setArriving((a) => (a && Date.now() > a.until ? { ...a, late: true } : a ? { ...a } : a)), 1000)
     return () => clearTimeout(tm)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [arriving, entries])
@@ -503,7 +505,6 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
             {t('newAgent.title')}
           </button>
         )}
-        {arriving && <p className="hint">{t('newAgent.arriving')}</p>}
         {sessions !== null && !waiting && !held && (
           <button type="button" className="btn btn-ghost" onClick={() => navigate('/')}>
             {t('agents.toHosts')}
@@ -582,6 +583,27 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
       {failed && sessions !== null && (
         <p className="agents-chat-stale" role="status">
           {t('agents.failed')}
+        </p>
+      )}
+      {/* (A new agent on its way: said over the page wherever the person is, until it shows in the list.) */}
+      {arriving && (
+        <p className={'agents-chat-stale' + (arriving.late ? ' is-warn' : '')} role="status">
+          {arriving.late ? (
+            <>
+              {t('newAgent.late')}
+              <button type="button" className="link-btn agents-chat-stale-act" onClick={() => setArriving((a) => a && { ...a, late: false, until: Date.now() + 30000 })}>
+                {t('newAgent.again')}
+              </button>
+              <button type="button" className="link-btn agents-chat-stale-act" onClick={() => navigate(`/t/${arriving.s.id}?pane=` + encodeURIComponent(arriving.pane))}>
+                {t('convo.showTerminal')}
+              </button>
+              <button type="button" className="link-btn agents-chat-stale-act" onClick={() => setArriving(null)}>
+                {t('common.close')}
+              </button>
+            </>
+          ) : (
+            t('newAgent.arriving')
+          )}
         </p>
       )}
       <div className="term-body">{body}</div>
@@ -1647,7 +1669,8 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   const sendKey = composerEnter === 'send' ? enterKey : modEnter
   const composer = (
     // (A question over it: the box kept to a line, its tools back when it is typed in.)
-    <div className={'composer' + (waits && agent?.status === 'blocked' ? ' is-held' : '')}>
+    // (The card asking is up: the box gives its room to the card — one line says why — rather than stand empty under it, as on a small phone it pushed the card's own buttons out of sight.)
+    <div className={'composer' + (waits && agent?.status === 'blocked' ? ' is-held' : '') + (waits && replyTo && agent?.status === 'blocked' && !answered ? ' is-asked' : '')}>
       {claudeCard.card && <CardNotice card={claudeCard.card} stale={claudeCard.stale} onPress={claudeCard.press} />}
       {completion.list}
       {up && (
@@ -1670,6 +1693,8 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
           )}
         </p>
       )}
+      {/* (Something written while it works: what will become of it, said while it is typed — the placeholder that said so is gone by then.) */}
+      {!blocked && draft.trim() && agent?.status === 'working' && <p className="agents-chat-why is-note">{t(steers ? 'convo.steerNote' : 'convo.queueNote')}</p>}
       <div className="composer-box">
         <AttachStrip
           draft={draft}
@@ -1791,6 +1816,14 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
           {/* (One in its place: stop while it works and nothing is to be
               sent, see stopShown; else send. Send with nothing in the box
               is grey, but while a file goes up: pressed, it says to wait.) */}
+          {/* (A phone, its bar without a stop: one kept beside send while
+              something is written, so a draft never stands between the
+              person and stopping it.) */}
+          {!stopShown && lead && canPress && !sending && !sentAt && (
+            <button type="button" className="composer-send is-stop" onClick={() => press('stop')} aria-label={t('convo.stop')} title={t('convo.stop')}>
+              <Square size={14} fill="currentColor" strokeWidth={0} />
+            </button>
+          )}
           {stopShown ? (
             <button type="button" className="composer-send is-stop" onClick={() => press('stop')} aria-label={t('convo.stop')} title={t('convo.stop')}>
               <Square size={14} fill="currentColor" strokeWidth={0} />
@@ -1916,12 +1949,13 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     closable(e) ? { label: t('agents.close'), icon: <Power size={16} />, danger: true, separator: true, onSelect: () => setClosing(e) } : null,
   ]
   const more = (): (MenuItem | null)[] => [
-    { label: t('convo.showTerminal'), icon: <SquareTerminal size={16} />, onSelect: openTerminal },
+    { label: t('convo.showTerminal'), icon: <SquareTerminal size={16} />, group: t('menu.group.agent'), onSelect: openTerminal },
     pinItem(cur.key),
-    forkItem(cur),
+    // (Within its group here: no rule of its own, as it has in a row's menu.)
+    ((f) => f && { ...f, separator: false })(forkItem(cur)),
     renameItem(cur),
     ...opsOf.map((o, i): MenuItem | null =>
-      bound ? { label: t(codex && o === 'clear' ? 'ops.clear.itemCodex' : `ops.${o}.item`), icon: OP_ICONS[o], separator: i === 0, disabled: !canOps, title: canOps ? undefined : t('ops.onlyIdle'), hint: canOps || i < opsOf.length - 1 ? undefined : t(opsOf.length > 1 ? 'ops.onlyIdleGroup' : 'ops.onlyIdle'), onSelect: () => convo.bind && setOp({ op: o, bind: convo.bind, key: bindKey }) } : null,
+      bound ? { label: t(codex && o === 'clear' ? 'ops.clear.itemCodex' : `ops.${o}.item`), icon: OP_ICONS[o], separator: i === 0, group: i === 0 ? t('menu.group.convo') : undefined, disabled: !canOps, title: canOps ? undefined : t('ops.onlyIdle'), hint: canOps || i < opsOf.length - 1 ? undefined : t(opsOf.length > 1 ? 'ops.onlyIdleGroup' : 'ops.onlyIdle'), onSelect: () => convo.bind && setOp({ op: o, bind: convo.bind, key: bindKey }) } : null,
     ),
     canClose ? { label: t('agents.close'), icon: <Power size={16} />, danger: true, separator: true, onSelect: () => setClosing(cur) } : null,
   ]

@@ -6,7 +6,7 @@ import { asHeld, dayBefore, DAYS, dayStart, FOLDED, foldAt, GROUPS, inGroup, lis
 import { copyText, Dialog, isCoarse, Menu, MenuLayer, type MenuItem } from '../components/ui'
 import { composing, foldAllKey, helpKey, jumpKey, onMac, switchKey } from './pageKeys'
 import { local } from '../storage'
-import { CodeSpanOf, Markdown } from './markdown'
+import { CodeSpanOf, FileLinkOf, Markdown } from './markdown'
 import { codePath } from './paths'
 import { useSubConvo } from './subagent'
 import { NEW_AGENT } from './newAgent'
@@ -1028,24 +1028,39 @@ export function ConversationView({
     const p = files ? codePath(text) : null
     return p ? <PathCode path={p} text={text} /> : null
   }, [files])
+  // (A file link of Codex's: its words shown, the path behind them acted on and copied.)
+  const fileLink = useCallback((label: string, target: string) => {
+    const p = files ? codePath(target) : null
+    return p ? <PathCode path={p} text={label} copy={p} /> : null
+  }, [files])
   // A copy of it up to the end of one of the person's turns: cut before the
   // next message they typed (one taken in during that turn is of it).
   const entriesRef = useRef(convo.entries)
   entriesRef.current = convo.entries
+  const atRest = agent?.status === 'idle' || agent?.status === 'done'
   const forkAt = useMemo(() => {
     if (!onForkAt) return undefined
-    return (e: ConvoEntry) => {
+    const next = (e: ConvoEntry) => {
       const all = entriesRef.current
       const i = all.findIndex((x) => x.seq === e.seq)
-      if (i < 0) return
-      onForkAt(all.slice(i + 1).find((x) => x.role === 'user' && !x.mid && x.id)?.id)
+      return i < 0 ? null : all.slice(i + 1).find((x) => x.role === 'user' && !x.mid && x.id)?.id
     }
-  }, [onForkAt])
+    return {
+      go: (e: ConvoEntry) => {
+        const at = next(e)
+        if (at !== null) onForkAt(at)
+      },
+      // (The last turn is all of it: only while it is at rest — not offered
+      // while it works, rather than offered and refused.)
+      can: (e: ConvoEntry) => atRest || !!next(e),
+    }
+  }, [onForkAt, atRest])
   return (
     <ForkAtOf.Provider value={forkAt}>
     <FileActsOf.Provider value={files}>
     <CopyOf.Provider value={copy}>
     <CodeSpanOf.Provider value={codeSpan}>
+    <FileLinkOf.Provider value={fileLink}>
     <div className="convo" role="region" aria-label={t('convo.title')} ref={root}>
       {sideShown && (
         <nav className="convo-side" aria-label={t('convo.agents')} style={{ width: sideWidth }} ref={sideEl}>
@@ -1158,11 +1173,12 @@ export function ConversationView({
             <Menu
               label={t('common.more')}
               items={() => [
-                { label: t('convoSearch.item'), icon: <Search size={16} />, onSelect: () => setSearching(true) },
+                // (In three groups, each headed: finding and reading here; the agent; the conversation itself.)
+                { label: t('convoSearch.item'), icon: <Search size={16} />, group: t('menu.group.find'), onSelect: () => setSearching(true) },
                 ...(convo.of && (convo.bind?.agent === 'claude' || convo.bind?.agent === 'codex') ? [{ label: t('turns.item'), icon: <ListOrdered size={16} />, onSelect: () => (setSearching(false), setTurnsShown(true)) }] : []),
-                { label: t('convoExport.item'), icon: <Download size={16} />, disabled: !list.length, onSelect: () => doExport() },
                 // (All steps opened or folded: the menu's, as Ctrl+O is a Mac's only.)
                 { label: t(allOpen ? 'pageKeys.foldAll' : 'pageKeys.openAll'), icon: allOpen ? <ChevronsDownUp size={16} /> : <ChevronsUpDown size={16} />, disabled: !list.length, onSelect: () => (setOpened({}), setAllOpen((v) => !v)) },
+                { label: t('convoExport.item'), icon: <Download size={16} />, disabled: !list.length, onSelect: () => doExport() },
                 // (On every device: a tablet's keyboard has these keys too.)
                 { label: t('pageKeys.item'), icon: <Keyboard size={16} />, onSelect: () => setKeysShown('menu') },
                 ...more().map((m, i) => (m && i === 0 ? { ...m, separator: true } : m)),
@@ -1302,6 +1318,7 @@ export function ConversationView({
       )}
       {picking && side && <Picker rows={rows} onClose={unpick} searchFirst={picking === 'search'} />}
     </div>
+    </FileLinkOf.Provider>
     </CodeSpanOf.Provider>
     </CopyOf.Provider>
     </FileActsOf.Provider>
@@ -2869,7 +2886,7 @@ export function fullPath(p: string): string | null {
 export const IMAGE_EXT = /\.(png|jpe?g|gif|webp)$/i
 
 // Such a span, while its session is live: a menu of what can be done with it.
-function PathCode({ path, text }: { path: string; text: string }) {
+function PathCode({ path, text, copy = text }: { path: string; text: string; copy?: string }) {
   const acts = useContext(FileActsOf)!
   const copyOf = useContext(CopyOf)
   const dir = path.endsWith('/')
@@ -2879,7 +2896,7 @@ function PathCode({ path, text }: { path: string; text: string }) {
       heading={path}
       items={() =>
         [
-          { label: t('convo.path.copy'), icon: <Copy size={16} />, onSelect: () => copyOf?.(text) },
+          { label: t('convo.path.copy'), icon: <Copy size={16} />, onSelect: () => copyOf?.(copy) },
           IMAGE_EXT.test(path) ? { label: t('convo.path.view'), icon: <ImageIcon size={16} />, onSelect: () => acts.view(path) } : null,
           { label: t('convo.path.reveal'), icon: <FolderOpen size={16} />, onSelect: () => acts.reveal(dir ? path.replace(/\/+$/, '') || '/' : path) },
           dir ? null : { label: t('convo.path.download'), icon: <Download size={16} />, onSelect: () => acts.download(path) },
@@ -2895,7 +2912,7 @@ function PathCode({ path, text }: { path: string; text: string }) {
 }
 const CopyOf = createContext<((s: string) => void) | undefined>(undefined)
 // (A copy of the conversation up to the end of one of the person's turns, where one can be started.)
-const ForkAtOf = createContext<((e: ConvoEntry) => void) | undefined>(undefined)
+const ForkAtOf = createContext<{ go: (e: ConvoEntry) => void; can: (e: ConvoEntry) => boolean } | undefined>(undefined)
 
 // A file a step acted on: its whole path, and what can be done with it.
 // (acts: only what can be done, the path being said beside it already.)
@@ -3223,18 +3240,44 @@ function UserTurn({ e, onCopy }: { e: ConvoEntry; onCopy: (s: string) => void })
       <div className="convo-meta">
         {e.mid && <span>{t('convo.midSent')}</span>}
         <span>{clock(e.ts)}</span>
-        {text && (
-          <button type="button" className="link-btn" onClick={() => onCopy(text)}>
+        <MetaActs copy={text ? () => onCopy(text) : undefined} fork={forkAt && !e.mid && !e.gone && e.id && forkAt.can(e) ? () => forkAt.go(e) : undefined} />
+      </div>
+    </div>
+  )
+}
+
+// What can be done with a message, after its time: words where a pointer
+// hovers (shown as it does, see terminal.css); behind a "···" on a touch
+// screen, so they take no line of their own under every message.
+function MetaActs({ copy, fork }: { copy?: () => void; fork?: () => void }) {
+  if (!copy && !fork) return null
+  return (
+    <>
+      <span className="convo-meta-acts">
+        {copy && (
+          <button type="button" className="link-btn" onClick={copy}>
             {t('common.copy')}
           </button>
         )}
-        {forkAt && !e.mid && !e.gone && e.id && (
-          <button type="button" className="link-btn" onClick={() => forkAt(e)} title={t('fork.atHint')}>
+        {fork && (
+          <button type="button" className="link-btn" onClick={fork} title={t('fork.atHint')}>
             {t('fork.at')}
           </button>
         )}
-      </div>
-    </div>
+      </span>
+      <Menu
+        label={t('common.more')}
+        items={() => [
+          copy ? { label: t('common.copy'), icon: <Copy size={16} />, onSelect: copy } : null,
+          fork ? { label: t('fork.at'), icon: <GitBranch size={16} />, hint: t('fork.atHint'), onSelect: fork } : null,
+        ]}
+        button={(open, toggle) => (
+          <button type="button" className="convo-meta-more" aria-expanded={open} aria-haspopup="menu" onClick={toggle} aria-label={t('common.more')}>
+            <MoreHorizontal size={16} aria-hidden="true" />
+          </button>
+        )}
+      />
+    </>
   )
 }
 
@@ -3274,11 +3317,9 @@ function Answer({ it, onCopy, onShow }: { it: Extract<Item, { kind: 'answer' }>;
         </div>
       )}
       <div className="convo-meta">
-        <button type="button" className="link-btn" onClick={() => onCopy(it.text)}>
-          {t('common.copy')}
-        </button>
         {it.span !== undefined && <span>{t('convo.worked', { d: duration(it.span) })}</span>}
         <span>{clock(it.ts)}</span>
+        <MetaActs copy={() => onCopy(it.text)} />
       </div>
     </div>
   )
