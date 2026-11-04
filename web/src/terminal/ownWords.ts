@@ -1,3 +1,4 @@
+import { shownAt, steadySame } from './steadyReply'
 import { ApiError } from '../api'
 import type { ReplyTarget } from './ReplyDialog'
 
@@ -129,9 +130,12 @@ async function press(target: ReplyTarget, from: Screen, keys: string[], done: (t
 export async function ownWords(target: ReplyTarget, now: Screen, r: OwnRow, text: string, alive: () => boolean = () => true): Promise<Screen> {
   if (!target.fill || now.cut) throw new NotAsShown()
   const base = frame(now.text, r.n)
+  const baseAt = shownAt(now.digest) ?? Date.now() // (when the screen shown was read)
   // (A screen cut short — more of it than the gateway keeps — cannot be told
-  // the same: what changed may be in the part cut off; refused at each read — review513.)
-  const same = (t: string) => frame(t, r.n) === base && alive()
+  // the same: what changed may be in the part cut off; refused at each read — review513.
+  // An unattended session's countdown going on aside: steadyReply.ts, review581.)
+  const like = (t: string) => steadySame(base, baseAt, frame(t, r.n), Date.now())
+  const same = (t: string) => like(t) && alive()
   // (From the screen as it is now — the one shown was read a while ago, as
   // the words were being written — where it is still the prompt shown.)
   let s: Screen
@@ -174,13 +178,13 @@ export async function ownWords(target: ReplyTarget, now: Screen, r: OwnRow, text
   // again before each try of Enter too.)
   const rowOK = (t: string) => {
     const c = cursorRow(t)
-    return !!c && c.n === r.n && c.rest === want && wholeRow(t, r.n) && frame(t, r.n) === base
+    return !!c && c.n === r.n && c.rest === want && wholeRow(t, r.n) && like(t)
   }
   const shows = (t: string) => rowOK(t) && alive()
   const got = await after(target, shows).catch(() => null)
   if (!got) throw new Filled()
   try {
-    await tries(target, got, shows, (x) => target.reply({ digest: x.digest, keys: ['enter'] }))
+    await tries(target, got, shows, (x) => target.reply({ digest: x.digest, keys: ['enter'], alive }))
   } catch (e) {
     if (e instanceof NotAsShown || refusal(e)) throw new Filled() // (the words there; Enter not pressed)
     throw new MaybeSent()
