@@ -459,6 +459,14 @@ export function ConversationView({
   const keepPlace = useCallback(() => {
     markRead()
     const was = shownOf.current
+    // (When its end was last read, as it is left: what coming back goes by —
+    // reading it again on the way back must not make that "just now", review.)
+    const r = was?.of ? reads.get(was.of) : undefined
+    if (was?.of && r) {
+      leftRead.delete(was.of)
+      leftRead.set(was.of, r.at)
+      while (leftRead.size > 50) leftRead.delete(leftRead.keys().next().value!)
+    }
     if (was?.of) keepAt(was.of, { gen: was.gen, stuck: stuck.current, anchors: anchors.current, noted: notedList.current, opened: openedNow.current, allOpen: allOpenNow.current })
   }, [])
   useLayoutEffect(() => {
@@ -485,7 +493,7 @@ export function ConversationView({
     anchors.current = back ? p.anchors : []
     notedList.current = back ? p.noted : []
     restoring.current = back ? p : null
-    toUnread.current = !back && after !== null && seen ? { after, until: Date.now() + 8000, readAt: seen.at } : null
+    toUnread.current = !back && after !== null && seen ? { after, until: Date.now() + 8000, readAt: leftRead.get(convo.of!) ?? seen.at } : null
     setFarUnread(false)
     if (!back) pin()
   }, [convo.of, convo.gen])
@@ -497,7 +505,7 @@ export function ConversationView({
     const seen = o.of ? reads.get(o.of) : undefined
     if (!seen || seen.gen !== o.gen) return
     setUnreadAfter(seen.seq)
-    if (stuck.current) toUnread.current = { after: seen.seq, until: Date.now() + 8000, readAt: seen.at }
+    if (stuck.current) toUnread.current = { after: seen.seq, until: Date.now() + 8000, readAt: (o.of && leftRead.get(o.of)) || seen.at }
   }, [])
   const wasActive = useRef(active)
   useEffect(() => {
@@ -596,7 +604,8 @@ export function ConversationView({
     notedList.current = listNow.current
     if (farUnreadNow.current) {
       const line = c.querySelector<HTMLElement>(':scope > .convo-unread')
-      if (!line || line.getBoundingClientRect().top >= view.top) setFarUnread(false) // (in view, or gone)
+      const lr = line?.getBoundingClientRect()
+      if (!lr || (lr.bottom > view.top && lr.top < view.bottom)) setFarUnread(false) // (in view, or gone — review)
     }
     const r = railNow.current
     const shown = r.turns.length > 0 && (el.parentElement?.querySelector<HTMLElement>(':scope > .convo-rail')?.offsetParent ?? null) !== null
@@ -3316,6 +3325,8 @@ const startSeq = (it: Item): number => (it.kind === 'gone' ? it.entries[0].seq :
 // seen at its end (of that reading of its log).
 // (at: when it was last seen at its end, ms — read on since, or looked at again with nothing new.)
 const reads = new Map<string, { gen: number; seq: number; at: number }>()
+// (When each was last read at its end as it was left: see keepPlace.)
+const leftRead = new Map<string, number>()
 function readUpTo(of: string, gen: number, seq: number) {
   const was = reads.get(of)
   const at = Date.now()
