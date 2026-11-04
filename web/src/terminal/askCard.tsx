@@ -7,6 +7,7 @@ import { choiceText, lasting } from './askText'
 import type { ConvoAsk, ConvoTool } from './conversation'
 import type { ReplyTarget } from './ReplyDialog'
 import { Filled, MaybeSent, NotAsShown, ownOK, ownWords, planChange, questionOwn } from './ownWords'
+import { withAlive } from './steadyReply'
 
 // The card of a question of Claude Code's (AskUserQuestion) or a plan it
 // puts to the person, drawn from what its log says it asked, where the
@@ -250,7 +251,7 @@ export function AskPanel({ call, index, shown, target, drive, busy, alive, lead 
   const pick = (n: number) =>
     drive((now) => {
       if (!sameQ(at(now), shown)) throw new Unsure()
-      return shown.tabs.length === 0 && !shown.beside ? step(target, now, [String(n)], (x) => !sameQ(x, shown)) : pickWithEnter(target, now, shown, n)
+      return shown.tabs.length === 0 && !shown.beside ? step(withAlive(target, alive), now, [String(n)], (x) => !sameQ(x, shown)) : pickWithEnter(withAlive(target, alive), now, shown, n)
     })
   return (
     <div className="convo-ask-structured">
@@ -306,7 +307,7 @@ export function AskPanel({ call, index, shown, target, drive, busy, alive, lead 
         })}
       </div>
       {ask.multi && (
-        <button type="button" className="btn btn-primary convo-ask-go" disabled={busy} onClick={() => drive((now) => tickAndGo(target, now, shown, ticked))}>
+        <button type="button" className="btn btn-primary convo-ask-go" disabled={busy} onClick={() => drive((now) => tickAndGo(withAlive(target, alive), now, shown, ticked))}>
           {t('ask.goOn')}
         </button>
       )}
@@ -383,7 +384,7 @@ export function PlanPanel({ call, shown, digest, target, drive, busy, onScreen, 
           </button>
         </p>
       )}
-      <Choices digest={digest} options={shown.options.filter((o) => !/^Tell Claude what to change$/i.test(o.label))} busy={busy} onPick={(n) => drive((now) => step(target, now, [String(n)], (x) => x.kind !== 'plan'))} />
+      <Choices digest={digest} options={shown.options.filter((o) => !/^Tell Claude what to change$/i.test(o.label))} busy={busy} onPick={(n) => drive((now) => step(withAlive(target, alive), now, [String(n)], (x) => x.kind !== 'plan'))} />
       {(() => {
         const change = shown.options.find((o) => /^Tell Claude what to change$/i.test(o.label))
         return change && target.fill ? (

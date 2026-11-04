@@ -1,4 +1,4 @@
-import { shownAt, steadySame } from './steadyReply'
+import { shownAt, steadySame, withAlive } from './steadyReply'
 import { ApiError } from '../api'
 import type { ReplyTarget } from './ReplyDialog'
 
@@ -127,14 +127,25 @@ async function press(target: ReplyTarget, from: Screen, keys: string[], done: (t
 // alive: the card still shown, its page in front, the same agent's — else
 // nothing more is done (review513: one gone to another agent, or left, went
 // on typing and pressing Enter).
-export async function ownWords(target: ReplyTarget, now: Screen, r: OwnRow, text: string, alive: () => boolean = () => true): Promise<Screen> {
+export async function ownWords(target0: ReplyTarget, now: Screen, r: OwnRow, text: string, alive: () => boolean = () => true): Promise<Screen> {
+  const target = withAlive(target0, alive) // (each key's retries too — review582)
   if (!target.fill || now.cut) throw new NotAsShown()
   const base = frame(now.text, r.n)
-  const baseAt = shownAt(now.digest) ?? Date.now() // (when the screen shown was read)
+  // (When the screen shown was read: as kept with it, or by its digest; not
+  // known, its count's fall not bounded — its never going up still is. review582)
+  const baseAt = (now as { at?: number }).at ?? shownAt(now.digest) ?? 0
   // (A screen cut short — more of it than the gateway keeps — cannot be told
   // the same: what changed may be in the part cut off; refused at each read — review513.
   // An unattended session's countdown going on aside: steadyReply.ts, review581.)
-  const like = (t: string) => steadySame(base, baseAt, frame(t, r.n), Date.now())
+  // (Against the screen shown and the last one taken since: its count never up — review582.)
+  let last = { f: base, at: baseAt }
+  const like = (t: string) => {
+    const f = frame(t, r.n)
+    const at = Date.now()
+    if (!steadySame(base, baseAt, f, at) || !steadySame(last.f, last.at, f, at)) return false
+    if (f !== last.f) last = { f, at }
+    return true
+  }
   const same = (t: string) => like(t) && alive()
   // (From the screen as it is now — the one shown was read a while ago, as
   // the words were being written — where it is still the prompt shown.)
