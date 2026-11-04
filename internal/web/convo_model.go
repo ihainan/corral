@@ -225,10 +225,15 @@ func idleInput(screen string, greyed ...func() string) error {
 		if !strings.HasPrefix(t, "❯") || !pickerRule.MatchString(lines[i-1]) {
 			continue
 		}
-		// (Its lines down to the rule under it: a suggestion wraps in a narrow pane.)
+		// (Its lines down to the rule under it: a suggestion wraps in a narrow
+		// pane. That rule is the one over it again, the same to the letter —
+		// a line of dashes in a draft is indented and of its own length, and
+		// taken for the box's foot it would have the draft read as empty:
+		// review of 4b4dddd.)
+		top := strings.TrimRight(lines[i-1], " \r")
 		end := -1
 		for j := i + 1; j < len(lines) && j <= i+inputLinesMost; j++ {
-			if pickerRule.MatchString(lines[j]) {
+			if strings.TrimRight(lines[j], " \r") == top {
 				end = j
 				break
 			}
@@ -241,8 +246,13 @@ func idleInput(screen string, greyed ...func() string) error {
 			words = append(words, strings.TrimSpace(lines[j]))
 		}
 		in := oneSpaced(strings.Join(words, " "))
-		if in == "" || end == i+1 && strings.HasPrefix(in, `Try "`) {
+		// (Empty: its one line, the mark alone. Lines of nothing over more
+		// than one are words typed — new lines — not an empty box.)
+		if in == "" && end == i+1 || strings.HasPrefix(in, `Try "`) {
 			return nil
+		}
+		if in == "" {
+			return errDraft
 		}
 		for _, g := range greyed {
 			if g != nil && in == oneSpaced(g()) {
@@ -255,7 +265,7 @@ func idleInput(screen string, greyed ...func() string) error {
 }
 
 // (How many lines the input's words may take, wrapped: a suggestion is short.)
-const inputLinesMost = 6
+const inputLinesMost = 10
 
 func oneSpaced(s string) string { return strings.Join(strings.Fields(s), " ") }
 

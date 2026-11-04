@@ -251,6 +251,22 @@ func TestModelFlowCareful(t *testing.T) {
 	if err := idleInput(wrapped, func() string { return "" }); !errors.Is(err, errDraft) {
 		t.Errorf("wrapped words typed: %v", err)
 	}
+	// A draft with a line of dashes in it (after a blank line): not the box's
+	// foot — that is the rule over it again, to the letter. (Review of 4b4dddd.)
+	dashes := "● done\n────────────────────────\n❯ \n  \n  ────────\n  not sent yet\n────────────────────────\n  Opus 5.5·H │ Ctx 0\n"
+	if err := idleInput(dashes, func() string { return "" }); !errors.Is(err, errDraft) {
+		t.Errorf("draft with a line of dashes: %v", err)
+	}
+	// New lines only, over two lines: words typed, not an empty box.
+	blank := "● done\n────────────────────────\n❯ \n  \n────────────────────────\n  Opus 5.5·H │ Ctx 0\n"
+	if err := idleInput(blank, func() string { return "" }); !errors.Is(err, errDraft) {
+		t.Errorf("new lines typed: %v", err)
+	}
+	// Its placeholder wrapped: empty.
+	try := "● done\n────────────────────────\n❯ Try \"edit <filepath> to\n  do something\"\n────────────────────────\n  Opus 5.5·H │ Ctx 0\n"
+	if err := idleInput(try, func() string { return "" }); err != nil {
+		t.Errorf("wrapped placeholder: %v", err)
+	}
 	// The picker gone, nothing said: not known (not "switched").
 	f = newFake(false)
 	silent := func(keys []string, text string, read int) (string, error) {
