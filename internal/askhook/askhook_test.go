@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -217,5 +218,65 @@ func TestReview534(t *testing.T) {
 	}
 	if c := Created(); !strings.Contains(string(c), "AskUserQuestion") || !strings.HasSuffix(string(c), "\n") {
 		t.Errorf("%s", c)
+	}
+}
+
+// The bell hook: a Stop entry of no matcher, kept apart from the question
+// hook (each put in and taken out alone); its command, run by sh as Claude
+// Code runs it, says the bell for Claude Code to write — outside herdr only.
+func TestBell(t *testing.T) {
+	both, changed, err := Bell.Enable(Created())
+	if err != nil || !changed {
+		t.Fatal(err)
+	}
+	if st, _, _ := Bell.Read(both, nil); st != On {
+		t.Fatalf("bell %s", st)
+	}
+	if st, _, _ := Read(both, nil); st != On {
+		t.Fatalf("ask %s", st)
+	}
+	if st, _, _ := Bell.Read(Created(), nil); st != Off {
+		t.Fatalf("bell in the ask's file: %s", st)
+	}
+	// (A Stop hook of the person's own is not the bell: not taken as on, kept.)
+	own := []byte(`{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"make test"}]}]}}`)
+	if st, _, _ := Bell.Read(own, nil); st != Off {
+		t.Fatalf("own stop hook: %s", st)
+	}
+	withOwn, _, _ := Bell.Enable(own)
+	back, empty, changed, err := Bell.Disable(withOwn)
+	if err != nil || !changed || empty || !strings.Contains(string(back), "make test") || strings.Contains(string(back), "corral") {
+		t.Fatalf("off: %s %v %v %v", back, empty, changed, err)
+	}
+	askOnly, _, changed, _ := Bell.Disable(both)
+	if !changed || !bytes.Equal(askOnly, Created()) {
+		t.Fatalf("the bell off, the ask's left: %s", askOnly)
+	}
+	_, empty, _, _ = Bell.Disable(Bell.Created())
+	if !empty {
+		t.Fatal("the bell's own file: empty once off")
+	}
+	if st, why, _ := Bell.Read(Bell.Created(), []byte(`{"disableAllHooks":true}`)); st != Blocked || why != "disableAllHooks" {
+		t.Fatalf("blocked: %s %s", st, why)
+	}
+	for _, c := range []struct {
+		env  []string
+		want string
+	}{{nil, `{"terminalSequence":"\u0007"}`}, {[]string{"HERDR_PANE_ID=w1:p1"}, ``}} {
+		cmd := exec.Command("sh", "-c", BellCommand)
+		cmd.Stdin = strings.NewReader(`{"hook_event_name":"Stop"}`)
+		cmd.Env = append([]string{"PATH=/usr/bin:/bin"}, c.env...)
+		out, err := cmd.Output()
+		if err != nil || string(out) != c.want {
+			t.Fatalf("env %v: %q %v", c.env, out, err)
+		}
+		if c.want != "" {
+			var v struct {
+				TerminalSequence string `json:"terminalSequence"`
+			}
+			if json.Unmarshal(out, &v) != nil || v.TerminalSequence != "\a" {
+				t.Fatalf("not a bell: %q", out)
+			}
+		}
 	}
 }

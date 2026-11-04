@@ -17,7 +17,13 @@ export interface AskHookInfo {
   seen: string
   snippet: string
   declined: boolean
+  // The bell hook's (the same file): Claude Code rings the terminal's bell when it stops.
+  bell?: { state?: 'on' | 'off' | 'blocked'; why?: string; snippet: string }
 }
+
+// Which of the two hooks of the file: the question hook, or the bell.
+type HookName = 'ask' | 'bell'
+const stateOf = (info: AskHookInfo, hook: HookName) => (hook === 'bell' ? info.bell?.state : info.state)
 
 // (A reading per host shared by the cards shown within half a minute; the
 // gateway keeps its own for five. The host's page reads afresh. review535-4)
@@ -86,7 +92,8 @@ const cannotText = (c: NonNullable<AskHookInfo['cannot']>) => t(('askHook.cannot
 // onInfo: what the file says now, read again after a refusal or a doubt
 // (the page and this dialog then show that — review535-5); onDone only once
 // the file is read back as asked (review535-6).
-function AskHookConfirm({ hostId, hostName, info, on, onDone, onInfo, onClose }: { hostId: number; hostName: string; info: AskHookInfo; on: boolean; onDone: (i: AskHookInfo) => void; onInfo: (i: AskHookInfo) => void; onClose: () => void }) {
+function AskHookConfirm({ hostId, hostName, info, on, hook = 'ask', onDone, onInfo, onClose }: { hostId: number; hostName: string; info: AskHookInfo; on: boolean; hook?: HookName; onDone: (i: AskHookInfo) => void; onInfo: (i: AskHookInfo) => void; onClose: () => void }) {
+  const k = hook === 'bell' ? 'bellHook' : 'askHook'
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const close = () => !busy && onClose()
@@ -99,10 +106,11 @@ function AskHookConfirm({ hostId, hostName, info, on, onDone, onInfo, onClose }:
     setBusy(true)
     setError('')
     try {
-      const i = await api<AskHookInfo>('POST', `/api/hosts/${hostId}/ask-hook`, { on, seen: info.seen })
+      const i = await api<AskHookInfo>('POST', `/api/hosts/${hostId}/ask-hook`, { on, seen: info.seen, hook })
       // (Said done only once the file reads back as asked: on, or off — not
       // a file that can no longer be read — review537-4.)
-      if (on ? i.state !== 'on' : i.state !== 'off' && i.state !== 'on-own') {
+      const st = stateOf(i, hook)
+      if (on ? st !== 'on' : st !== 'off' && st !== 'on-own') {
         onInfo(i)
         setError(t('askHook.notAsAsked'))
         setBusy(false)
@@ -134,9 +142,9 @@ function AskHookConfirm({ hostId, hostName, info, on, onDone, onInfo, onClose }:
     }
   }
   return (
-    <Dialog title={t(on ? 'askHook.confirmTitle' : 'askHook.offTitle', { host: hostName })} onClose={close}>
-      <p className="lead">{t(on ? 'askHook.confirmBody' : 'askHook.offBody', { file: info.file })}</p>
-      {on && <pre className="ask-hook-snippet">{info.snippet}</pre>}
+    <Dialog title={t(on ? `${k}.confirmTitle` : `${k}.offTitle`, { host: hostName })} onClose={close}>
+      <p className="lead">{t(on ? `${k}.confirmBody` : 'askHook.offBody', { file: info.file })}</p>
+      {on && <pre className="ask-hook-snippet">{hook === 'bell' ? info.bell?.snippet : info.snippet}</pre>}
       <p className="hint">{t('askHook.confirmRace')}</p>
       {error && <p className="err" role="alert">{error}</p>}
       <div className="dialog-actions">
@@ -262,6 +270,57 @@ export function AskHookRow({ hostId, hostName }: { hostId: number; hostName: str
           onDone={(i) => {
             set(i)
             toast(t(confirming ? 'askHook.done' : 'askHook.offDone'))
+          }}
+          onInfo={set}
+          onClose={() => setConfirming(null)}
+        />
+      )}
+    </section>
+  )
+}
+
+// BellHookRow: the host's page — Claude Code ringing the terminal's bell
+// when it stops (the same file as the question hook, on its own): so a
+// page in sight plays a sound for one run in a plain terminal or tmux
+// (herdr's agents are told by herdr: terminal/chime.ts).
+export function BellHookRow({ hostId, hostName }: { hostId: number; hostName: string }) {
+  const toast = useToast()
+  const { info, failed, set } = useAskHook(hostId, true)
+  const [confirming, setConfirming] = useState<boolean | null>(null)
+  const b = info?.bell
+  let state: string
+  if (failed) state = t(failed instanceof ApiError && failed.code === 'no_connection' ? 'askHook.state.noConnection' : 'askHook.state.unknown')
+  else if (!info) state = t('common.loading')
+  else if (b?.state === 'blocked') state = t('askHook.state.blocked', { why: b.why ?? '' })
+  else if (b?.state) state = t(('askHook.state.' + b.state) as I18nKey)
+  else state = t('askHook.state.unknown')
+  const canChange = !!info && !info.cannot && (b?.state === 'on' || b?.state === 'off')
+  return (
+    <section className="ask-hook-row" aria-labelledby="bell-hook-title">
+      <h3 id="bell-hook-title">{t('bellHook.row')}</h3>
+      <p className="hint">{t('bellHook.rowHint', { file: info?.file ?? '~/.claude/settings.json' })}</p>
+      <p className="ask-hook-state" role="status">
+        {state}
+        {info?.cannot && <> · {cannotText(info.cannot)}</>}
+      </p>
+      {info?.cannot && b && <Snippet info={{ ...info, snippet: b.snippet }} />}
+      {canChange && (
+        <div>
+          <button type="button" className="btn" onClick={() => setConfirming(b?.state === 'off')}>
+            {t(b?.state === 'off' ? 'askHook.turnOn' : 'askHook.turnOff')}
+          </button>
+        </div>
+      )}
+      {confirming !== null && info && (
+        <AskHookConfirm
+          hostId={hostId}
+          hostName={hostName}
+          info={info}
+          on={confirming}
+          hook="bell"
+          onDone={(i) => {
+            set(i)
+            toast(t(confirming ? 'bellHook.done' : 'askHook.offDone'))
           }}
           onInfo={set}
           onClose={() => setConfirming(null)}

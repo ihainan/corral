@@ -328,6 +328,52 @@ func TestAskHookEndpoints(t *testing.T) {
 	}
 }
 
+// The bell hook beside the question hook, in the same file, each on its
+// own: the file the gateway made from none goes once the last of them is
+// off; a bell has no "no" to say; an unknown hook is refused.
+func TestBellHookEndpoints(t *testing.T) {
+	h := newHarness(t)
+	admin := h.admin()
+	home := t.TempDir()
+	srv := h.sshServer(home)
+	srv.HandleExec(testutil.ShellExec(home, func(cmd string) bool { return strings.Contains(cmd, ".claude") }))
+	hostID := h.hostFor(admin, srv.Addr.Port)
+	u := fmt.Sprintf("/api/hosts/%d/ask-hook", hostID)
+	mustStatus(t, admin.do("POST", "/api/sessions", map[string]any{"host_id": hostID}), 201, "open session")
+	r := admin.do("GET", u, nil)
+	mustStatus(t, r, 200, "read")
+	bell := func(j map[string]any) any {
+		b, _ := j["bell"].(map[string]any)
+		return b["state"]
+	}
+	if j := r.json(); bell(j) != "off" || !strings.Contains(fmt.Sprint(j["bell"]), "terminalSequence") {
+		t.Fatalf("%v", j)
+	}
+	mustStatus(t, admin.do("POST", u, map[string]any{"declined": true, "hook": "bell"}), 400, "a bell's no")
+	mustStatus(t, admin.do("POST", u, map[string]any{"on": true, "seen": "none", "hook": "other"}), 400, "unknown hook")
+	r = admin.do("POST", u, map[string]any{"on": true, "seen": "none"})
+	mustStatus(t, r, 200, "ask on")
+	r = admin.do("POST", u, map[string]any{"on": true, "seen": r.json()["seen"], "hook": "bell"})
+	mustStatus(t, r, 200, "bell on")
+	j := r.json()
+	if j["state"] != "on" || bell(j) != "on" {
+		t.Fatalf("%v", j)
+	}
+	f := filepath.Join(home, ".claude", "settings.json")
+	r = admin.do("POST", u, map[string]any{"on": false, "seen": j["seen"]})
+	mustStatus(t, r, 200, "ask off")
+	if j := r.json(); j["state"] != "off" || bell(j) != "on" {
+		t.Fatalf("%v", j)
+	}
+	if b, _ := os.ReadFile(f); !bytes.Equal(b, askhook.Bell.Created()) {
+		t.Fatalf("the bell's left: %s", b)
+	}
+	mustStatus(t, admin.do("POST", u, map[string]any{"on": false, "seen": r.json()["seen"], "hook": "bell"}), 200, "bell off")
+	if _, err := os.Stat(f); !os.IsNotExist(err) {
+		t.Error("the file the gateway made, left")
+	}
+}
+
 // The agents the gateway starts: Claude Code with the hook given inline,
 // beside a resume; Codex and OpenCode as before.
 func TestAgentStartCmd(t *testing.T) {

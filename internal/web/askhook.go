@@ -133,6 +133,15 @@ type askHookInfo struct {
 	Seen     string        `json:"seen"`    // the file as read (sha256, or "none"): a change is refused when it is no longer so
 	Snippet  string        `json:"snippet"` // what goes into hooks.PreToolUse, for the confirmation (and to add by hand)
 	Declined bool          `json:"declined"`
+	// Bell: the same of the bell hook (askhook.Bell), kept in the same file
+	// and changed on its own ({hook: "bell"}).
+	Bell *askHookBell `json:"bell,omitempty"`
+}
+
+type askHookBell struct {
+	State   askhook.State `json:"state,omitempty"`
+	Why     string        `json:"why,omitempty"`
+	Snippet string        `json:"snippet"`
 }
 
 type askHookFileRead struct {
@@ -286,6 +295,7 @@ func askHookInfoOf(f *askHookFileRead) askHookInfo {
 	if info.Cannot == "" && !f.sum {
 		info.Cannot = "no_sum"
 	}
+	info.Bell = &askHookBell{Snippet: hookSnippet(askhook.Bell)}
 	if string(f.kind) == "file" || string(f.kind) == "none" {
 		st, why, err := askhook.Read(f.settings, f.managed)
 		if err != nil {
@@ -295,14 +305,19 @@ func askHookInfoOf(f *askHookFileRead) askHookInfo {
 		} else {
 			info.State, info.Why = st, why
 		}
+		if st, why, err := askhook.Bell.Read(f.settings, f.managed); err == nil {
+			info.Bell.State, info.Bell.Why = st, why
+		}
 	}
 	return info
 }
 
 // askHookSnippet: the hook as it reads in the file (under "hooks").
-func askHookSnippet() string {
+func askHookSnippet() string { return hookSnippet(askhook.Ask) }
+
+func hookSnippet(h askhook.Hook) string {
 	var b bytes.Buffer
-	_ = json.Indent(&b, []byte(askhook.Inline()), "", "  ")
+	_ = json.Indent(&b, []byte(h.Inline()), "", "  ")
 	return b.String()
 }
 
@@ -351,8 +366,10 @@ func (s *Server) askHookState(ctx context.Context, h *store.Host, fresh bool) (a
 	return info, 0, "", ""
 }
 
-// POST /api/hosts/{id}/ask-hook {on, seen}: the hook put in (on) or taken
-// out, the file being as it was seen; or {declined}: the card's "no".
+// POST /api/hosts/{id}/ask-hook {on, seen, hook}: the hook put in (on) or
+// taken out, the file being as it was seen — the question hook, or (hook
+// "bell") the bell hook; or {declined}: the card's "no" (the question
+// hook's).
 func (s *Server) apiSetAskHook(w http.ResponseWriter, r *http.Request) {
 	h, ok := s.ownedHost(w, r)
 	if !ok {
@@ -362,10 +379,15 @@ func (s *Server) apiSetAskHook(w http.ResponseWriter, r *http.Request) {
 		On       *bool  `json:"on"`
 		Seen     string `json:"seen"`
 		Declined *bool  `json:"declined"`
+		Hook     string `json:"hook"` // ("" or "ask": the question hook; "bell")
 	}
-	if err := readJSON(r, &b); err != nil || (b.On == nil) == (b.Declined == nil) {
+	if err := readJSON(r, &b); err != nil || (b.On == nil) == (b.Declined == nil) || (b.Hook != "" && b.Hook != "ask" && b.Hook != "bell") || (b.Hook == "bell" && b.Declined != nil) {
 		writeError(w, http.StatusBadRequest, "bad_request", "say on or declined")
 		return
+	}
+	hook, name := askhook.Ask, "ask"
+	if b.Hook == "bell" {
+		hook, name = askhook.Bell, "bell"
 	}
 	if b.Declined != nil {
 		if err := s.store.SetAskHookDeclined(r.Context(), h.OwnerID, h.ID, *b.Declined); err != nil {
@@ -403,36 +425,40 @@ func (s *Server) apiSetAskHook(w http.ResponseWriter, r *http.Request) {
 	gen := s.askHook.generation(key)
 	info := askHookInfoOf(f)
 	audit := func(outcome string) {
-		s.audit(r, "host.ask_hook", hostTarget(h), map[string]any{"on": on, "file": askHookFile, "outcome": outcome})
+		s.audit(r, "host.ask_hook", hostTarget(h), map[string]any{"on": on, "hook": name, "file": askHookFile, "outcome": outcome})
 	}
 	if b.Seen != info.Seen {
 		s.askHook.keep(key, h.ConnVersion, gen, info)
 		writeErrorExtra(w, http.StatusConflict, "changed", "the settings file changed since it was shown; look at it again", map[string]any{"info": info})
 		return
 	}
-	if info.Cannot != "" || info.State == "" {
+	state := info.State
+	if name == "bell" {
+		state = info.Bell.State
+	}
+	if info.Cannot != "" || state == "" {
 		writeErrorExtra(w, http.StatusUnprocessableEntity, "cannot", "the gateway does not change this settings file", map[string]any{"info": info})
 		return
 	}
 	// (On where hooks do not run, or a hook of the person's own does it
 	// already: not written — review534-7. Off where it is not the gateway's:
 	// nothing to take out.)
-	if on && (info.State == askhook.Blocked || info.State == askhook.OnOwn) {
+	if on && (state == askhook.Blocked || state == askhook.OnOwn) {
 		writeErrorExtra(w, http.StatusUnprocessableEntity, "cannot", "the gateway does not change this settings file", map[string]any{"info": info})
 		return
 	}
 	var next []byte
 	var changed, remove bool
 	if on {
-		next, changed, err = askhook.Enable(f.settings)
+		next, changed, err = hook.Enable(f.settings)
 	} else {
-		next, remove, changed, err = askhook.Disable(f.settings)
+		next, remove, changed, err = hook.Disable(f.settings)
 		// (Removed only where the gateway made the file from none and it is still
 		// just that: a {} of the person's — with or without its newline — stays. review535-1)
 		// (And the host connecting as it did then: the record is of that
 		// account's file, not of another the host was pointed at since — review537-2.)
 		made, err := s.store.AskHookCreated(r.Context(), h.OwnerID, h.ID)
-		remove = remove && err == nil && made != 0 && made == h.ConnVersion && string(f.kind) == "file" && bytes.Equal(f.settings, askhook.Created())
+		remove = remove && err == nil && made != 0 && made == h.ConnVersion && string(f.kind) == "file" && bytes.Equal(f.settings, hook.Created())
 	}
 	if err != nil {
 		writeErrorExtra(w, http.StatusUnprocessableEntity, "cannot", "the gateway does not change this settings file", map[string]any{"info": info})
@@ -482,14 +508,16 @@ func (s *Server) apiSetAskHook(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, "uncertain", "it is not known whether the settings file was changed; look at it again in a moment")
 		return
 	}
-	if on {
+	if on && name == "ask" {
 		_ = s.store.SetAskHookDeclined(r.Context(), h.OwnerID, h.ID, false)
-		made := int64(0)
-		if info.Seen == "none" {
-			made = h.ConnVersion
-		}
-		_ = s.store.SetAskHookCreated(r.Context(), h.OwnerID, h.ID, made)
-	} else {
+	}
+	// (The file made from none: so recorded. Another hook put in or taken
+	// out of it after, the record stays: it is removed only while it is
+	// still just what one hook made of none — see remove above.)
+	switch {
+	case on && info.Seen == "none":
+		_ = s.store.SetAskHookCreated(r.Context(), h.OwnerID, h.ID, h.ConnVersion)
+	case !on && op == "remove":
 		_ = s.store.SetAskHookCreated(r.Context(), h.OwnerID, h.ID, 0)
 	}
 	s.answerAskHook(w, r.Context(), h, key, on, c)

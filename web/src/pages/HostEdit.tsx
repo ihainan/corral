@@ -5,7 +5,7 @@ import { hasKey, t } from '../i18n'
 import { linkHandler, navigate } from '../router'
 import { CopyButton, Field, LoadError, useToast } from '../components/ui'
 import { hostFormErrors } from './pageText'
-import { AskHookRow } from '../terminal/askHook'
+import { AskHookRow, BellHookRow } from '../terminal/askHook'
 
 type Auth = Host['auth']
 
@@ -304,6 +304,7 @@ export function HostEditPage({ id }: { id?: number }) {
         </div>
       </form>
       {editing && loaded && <AskHookRow hostId={id} hostName={name} />}
+      {editing && loaded && <BellHookRow hostId={id} hostName={name} />}
     </main>
   )
 }

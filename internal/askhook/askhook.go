@@ -13,6 +13,12 @@
 // itself, and written to the person's settings file only when they ask
 // (internal/web/askhook.go). Here: what that file says of it, and the file
 // with it put in or taken out, all else as it was (keys in their order).
+//
+// A second hook is kept the same way, on its own (Bell): a Stop hook that
+// has Claude Code ring the terminal's bell when it stops — it does not on
+// its own in a terminal it does not know (a browser's over SSH), and a page
+// in sight plays a sound for a bell. Not in herdr (its own word of the
+// agent's status tells that), nor given inline.
 package askhook
 
 import (
@@ -31,14 +37,47 @@ const (
 	Command = "true # corral: AskUserQuestion to the log at once"
 )
 
-// Inline is the hook as Claude Code's --settings takes it inline.
-func Inline() string {
-	return `{"hooks":{"PreToolUse":[` + entry() + `]}}`
+// BellCommand is the Stop hook's: its input read and let go of; outside
+// herdr, the bell (BEL) for Claude Code to write itself (a hook has no
+// terminal of its own: terminalSequence, Claude Code 2.1.3xx).
+const BellCommand = `cat >/dev/null; [ -n "${HERDR_PANE_ID:-}" ] || printf '{"terminalSequence":"\\u0007"}' # corral: ring the bell when Claude Code stops`
+
+// Hook is one hook the gateway keeps in the file: under hooks.<Event>, an
+// entry of Matcher (none: "") whose one element of Command is the gateway's.
+type Hook struct {
+	Event, Matcher, Command string
+	// OwnOK: a hook of the person's own may do what it does (see ownMatch);
+	// else only the gateway's is told.
+	OwnOK bool
 }
 
-func entry() string {
-	c, _ := json.Marshal(Command)
-	return `{"matcher":"` + Matcher + `","hooks":[{"type":"command","command":` + string(c) + `}]}`
+var (
+	Ask  = Hook{Event: "PreToolUse", Matcher: Matcher, Command: Command, OwnOK: true}
+	Bell = Hook{Event: "Stop", Command: BellCommand}
+)
+
+// Inline is the question hook as Claude Code's --settings takes it inline.
+func Inline() string { return Ask.Inline() }
+
+// Inline is the hook as Claude Code's --settings takes it inline.
+func (h Hook) Inline() string {
+	return `{"hooks":{"` + h.Event + `":[` + h.entry() + `]}}`
+}
+
+func (h Hook) entry() string {
+	c, _ := json.Marshal(h.Command)
+	if h.Matcher == "" {
+		return `{"hooks":[{"type":"command","command":` + string(c) + `}]}`
+	}
+	return `{"matcher":"` + h.Matcher + `","hooks":[{"type":"command","command":` + string(c) + `}]}`
+}
+
+// matches: an entry's matcher is the hook's (none for one of none: absent or "").
+func (h Hook) matches(m *string) bool {
+	if h.Matcher == "" {
+		return m == nil || *m == ""
+	}
+	return m != nil && *m == h.Matcher
 }
 
 // State is what a settings file says of the hook.
@@ -59,6 +98,11 @@ var ErrShape = errors.New("the settings file is not in a shape that can be chang
 // managed (the system's managed-settings.json, nil if none) make of the
 // hook. why names the setting that blocks it.
 func Read(settings, managed []byte) (st State, why string, err error) {
+	return Ask.Read(settings, managed)
+}
+
+// Read says what settings and managed make of the hook (as Read).
+func (h Hook) Read(settings, managed []byte) (st State, why string, err error) {
 	top, err := parseTop(settings)
 	if err != nil {
 		return "", "", err
@@ -74,7 +118,7 @@ func Read(settings, managed []byte) (st State, why string, err error) {
 	if isTrue(top.get("disableAllHooks")) {
 		return Blocked, "disableAllHooks", nil
 	}
-	entries, err := preToolUse(top)
+	entries, err := entriesOf(top, h.Event)
 	if err != nil {
 		return "", "", err
 	}
@@ -90,12 +134,12 @@ func Read(settings, managed []byte) (st State, why string, err error) {
 		if json.Unmarshal(raw, &e) != nil {
 			continue
 		}
-		mine := e.Matcher != nil && *e.Matcher == Matcher
-		for _, h := range e.Hooks {
-			if mine && h.Type == "command" && h.Command == Command {
+		mine := h.matches(e.Matcher)
+		for _, x := range e.Hooks {
+			if mine && x.Type == "command" && x.Command == h.Command {
 				return On, "", nil
 			}
-			if h.Type == "command" && strings.TrimSpace(h.Command) != "" && ownMatch(e.Matcher) {
+			if h.OwnOK && x.Type == "command" && strings.TrimSpace(x.Command) != "" && ownMatch(e.Matcher) {
 				own = true
 			}
 		}
@@ -134,16 +178,19 @@ var plainName = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
 
 // Enable is settings with the gateway's hook put in (at the end of
 // hooks.PreToolUse); changed is false when it was there already.
-func Enable(settings []byte) (out []byte, changed bool, err error) {
+func Enable(settings []byte) (out []byte, changed bool, err error) { return Ask.Enable(settings) }
+
+// Enable is settings with the hook put in (at the end of hooks.<Event>).
+func (h Hook) Enable(settings []byte) (out []byte, changed bool, err error) {
 	top, err := parseTop(settings)
 	if err != nil {
 		return nil, false, err
 	}
-	entries, err := preToolUse(top)
+	entries, err := entriesOf(top, h.Event)
 	if err != nil {
 		return nil, false, err
 	}
-	if hasOurs(entries) {
+	if h.hasOurs(entries) {
 		return settings, false, nil
 	}
 	hooks := object{}
@@ -152,8 +199,8 @@ func Enable(settings []byte) (out []byte, changed bool, err error) {
 			return nil, false, ErrShape
 		}
 	}
-	entries = append(entries, json.RawMessage(entry()))
-	hooks = hooks.set("PreToolUse", array(entries))
+	entries = append(entries, json.RawMessage(h.entry()))
+	hooks = hooks.set(h.Event, array(entries))
 	top = top.set("hooks", hooks.bytes())
 	return render(top, settings), true, nil
 }
@@ -163,18 +210,23 @@ func Enable(settings []byte) (out []byte, changed bool, err error) {
 // only once that leaves them empty. empty: nothing is left in the file
 // ({}), so the file can go as well. changed is false when it was not there.
 func Disable(settings []byte) (out []byte, empty, changed bool, err error) {
+	return Ask.Disable(settings)
+}
+
+// Disable is settings with the hook taken out (as Disable).
+func (h Hook) Disable(settings []byte) (out []byte, empty, changed bool, err error) {
 	top, err := parseTop(settings)
 	if err != nil {
 		return nil, false, false, err
 	}
-	entries, err := preToolUse(top)
+	entries, err := entriesOf(top, h.Event)
 	if err != nil {
 		return nil, false, false, err
 	}
 	var kept []json.RawMessage
 	for _, raw := range entries {
 		e, err := parseObject(raw)
-		if err != nil || !matcherIs(e.get("matcher"), Matcher) {
+		if err != nil || !h.matcherOf(e.get("matcher")) {
 			kept = append(kept, raw)
 			continue
 		}
@@ -185,16 +237,16 @@ func Disable(settings []byte) (out []byte, empty, changed bool, err error) {
 		}
 		var left []json.RawMessage
 		gone := false
-		for _, h := range hs {
+		for _, x := range hs {
 			var c struct {
 				Type    string `json:"type"`
 				Command string `json:"command"`
 			}
-			if json.Unmarshal(h, &c) == nil && c.Type == "command" && c.Command == Command {
+			if json.Unmarshal(x, &c) == nil && c.Type == "command" && c.Command == h.Command {
 				gone = true
 				continue
 			}
-			left = append(left, h)
+			left = append(left, x)
 		}
 		switch {
 		case !gone:
@@ -209,9 +261,9 @@ func Disable(settings []byte) (out []byte, empty, changed bool, err error) {
 	}
 	hooks, _ := parseObject(top.get("hooks"))
 	if len(kept) == 0 {
-		hooks = hooks.del("PreToolUse")
+		hooks = hooks.del(h.Event)
 	} else {
-		hooks = hooks.set("PreToolUse", array(kept))
+		hooks = hooks.set(h.Event, array(kept))
 	}
 	if hooks.empty() {
 		top = top.del("hooks")
@@ -221,9 +273,9 @@ func Disable(settings []byte) (out []byte, empty, changed bool, err error) {
 	return render(top, settings), top.empty(), true, nil
 }
 
-// hasOurs: the gateway's hook among PreToolUse's entries (whatever else the
+// hasOurs: the gateway's hook among the event's entries (whatever else the
 // file says: hooks turned off there or not — review534-7).
-func hasOurs(entries []json.RawMessage) bool {
+func (h Hook) hasOurs(entries []json.RawMessage) bool {
 	for _, raw := range entries {
 		var e struct {
 			Matcher *string `json:"matcher"`
@@ -232,11 +284,11 @@ func hasOurs(entries []json.RawMessage) bool {
 				Command string `json:"command"`
 			} `json:"hooks"`
 		}
-		if json.Unmarshal(raw, &e) != nil || e.Matcher == nil || *e.Matcher != Matcher {
+		if json.Unmarshal(raw, &e) != nil || !h.matches(e.Matcher) {
 			continue
 		}
-		for _, h := range e.Hooks {
-			if h.Type == "command" && h.Command == Command {
+		for _, x := range e.Hooks {
+			if x.Type == "command" && x.Command == h.Command {
 				return true
 			}
 		}
@@ -246,8 +298,11 @@ func hasOurs(entries []json.RawMessage) bool {
 
 // Created is the file as Enable makes it from none: the one a turning off
 // may remove again (a file that held anything else is kept — review534-6).
-func Created() []byte {
-	b, _, _ := Enable(nil)
+func Created() []byte { return Ask.Created() }
+
+// Created is the file as the hook's Enable makes it from none.
+func (h Hook) Created() []byte {
+	b, _, _ := h.Enable(nil)
 	return b
 }
 
@@ -268,9 +323,13 @@ func array(vals []json.RawMessage) json.RawMessage {
 	return b.Bytes()
 }
 
-func matcherIs(raw json.RawMessage, want string) bool {
+// matcherOf: an entry's matcher value (raw; nil where absent) is the hook's.
+func (h Hook) matcherOf(raw json.RawMessage) bool {
+	if raw == nil {
+		return h.Matcher == ""
+	}
 	var s string
-	return raw != nil && json.Unmarshal(raw, &s) == nil && s == want
+	return json.Unmarshal(raw, &s) == nil && h.matches(&s)
 }
 
 func isTrue(raw json.RawMessage) bool {
@@ -278,8 +337,8 @@ func isTrue(raw json.RawMessage) bool {
 	return raw != nil && json.Unmarshal(raw, &b) == nil && b
 }
 
-// preToolUse: hooks.PreToolUse's entries (none when either is absent).
-func preToolUse(top object) ([]json.RawMessage, error) {
+// entriesOf: hooks.<event>'s entries (none when either is absent).
+func entriesOf(top object, event string) ([]json.RawMessage, error) {
 	raw := top.get("hooks")
 	if raw == nil {
 		return nil, nil
@@ -288,7 +347,7 @@ func preToolUse(top object) ([]json.RawMessage, error) {
 	if err != nil {
 		return nil, ErrShape
 	}
-	p := hooks.get("PreToolUse")
+	p := hooks.get(event)
 	if p == nil {
 		return nil, nil
 	}
