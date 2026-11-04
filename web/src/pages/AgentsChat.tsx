@@ -944,7 +944,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   const known = !!shown && shown.status !== 'unknown'
   useEffect(() => {
     if (!active) return setPlacedAs(undefined)
-    if (known && shown) setPlacedAs((p) => p ?? { status: shown.status, since: shown.since })
+    if (known && shown) setPlacedAs((p) => p ?? { status: shown.status, since: shown.since, cmds: shown.cmds })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active, known])
 
@@ -2209,7 +2209,7 @@ let oldOpen: string[] = [] // (the groups of old ones opened out: still so, back
 // keyed by the session too, as the phone's list tells them.
 const asRow = (e: Entry, pins: string[]): ConvoListRow => {
   const r = e.row
-  return { key: e.key + ' ' + e.s.id, title: '', where: '', status: r?.status ?? 'unknown', since: r && !r.lost ? (r.bg ? r.a.bg_since : r.a.since) : undefined, pinned: pins.includes(e.key) ? pins.indexOf(e.key) : undefined, current: false, onPick: () => {} }
+  return { key: e.key + ' ' + e.s.id, title: '', where: '', status: r?.status ?? 'unknown', cmds: r ? cmdsOf(r) : tmuxCmdsOf(e), since: r && !r.lost ? (r.bg ? r.a.bg_since : r.a.since) : undefined, pinned: pins.includes(e.key) ? pins.indexOf(e.key) : undefined, current: false, onPick: () => {} }
 }
 // query, onQuery: what it is searched for, kept by the page (as the side
 // list's is): still searched, back from a conversation.
@@ -2262,7 +2262,9 @@ function PhoneList({ entries, all, titles, query, onQuery, onPick, unsentOf }: {
   const inOrder = order.flatMap((k) => (byKey.has(k) ? [byKey.get(k)!] : []))
   // (Those pinned first, latest first as the rest — as the side list has them, 11-04.)
   const list = [...inOrder.filter((e) => pins.includes(e.key)), ...inOrder.filter((e) => !pins.includes(e.key))]
-  const n = (st: string) => entries.filter((e) => e.row?.status === st).length
+  // (Its state as the lists place it: one done or at rest with commands left running is at work — review batch4.)
+  const stateOf = (e: Entry) => (e.row && e.row.status !== 'blocked' && (cmdsOf(e.row) || tmuxCmdsOf(e)) ? 'working' : e.row?.status)
+  const n = (st: string) => entries.filter((e) => stateOf(e) === st).length
   const waiting = n('blocked')
   // (Not in order any more — one has come to wait, say, while the list was looked at: put in order at a tap,
   // not under the finger by itself.)
@@ -2290,7 +2292,7 @@ function PhoneList({ entries, all, titles, query, onQuery, onPick, unsentOf }: {
   const hosts = hostCount(entries)
   // (Searched: by its title, where it is, its program; "only mine" still holds.)
   const labelled = (e: Entry) => labelOf(e, keptTitle(titles, e) || (e.row ? paneTitle(e.row.a.title) || dirName(e.row.a.cwd) || e.row.a.agent : `${e.s.host_name} · ${sessionWhich(e.s, all)}`), hosts)
-  const shown = (mine ? list.filter((e) => e.row?.status === 'blocked' || e.row?.status === 'done') : list).filter((e) => {
+  const shown = (mine ? list.filter((e) => stateOf(e) === 'blocked' || stateOf(e) === 'done') : list).filter((e) => {
     if (!query.trim()) return true
     const { title, where } = labelled(e)
     return matchQuery(query, title, where, e.row?.a.agent)

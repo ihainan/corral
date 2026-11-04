@@ -13,7 +13,7 @@ import { NEW_AGENT } from './newAgent'
 import { Code } from './Code'
 import { ConvoSearchPanel } from './convoSearchPanel'
 import { ConvoTurnsPanel } from './convoTurnsPanel'
-import { ConvoRail, type RailTurn } from './convoRail'
+import { ConvoRail, railCell, type RailTurn } from './convoRail'
 import { previewOf } from './convoTurns'
 import { itemKey } from './convoSearch'
 import { exportMarkdown } from './convoExport'
@@ -130,6 +130,8 @@ const sideWidthOf = (w: number, view: number) => Math.max(SIDE_W_MIN, Math.min(M
 const isTouchOnly = isCoarse()
 // (Of fewer turns than this, the rail would say nothing the eye does not see.)
 const RAIL_MIN = 3
+// (A message's preview for the rail, made once.)
+const railText = new WeakMap<ConvoEntry, string>()
 const mac = onMac()
 
 // Now, every second while on: for what counts up.
@@ -305,10 +307,26 @@ export function ConversationView({
     return () => window.removeEventListener('keydown', onKey, true)
   }, [active])
   const list = useMemo(() => items(convo.entries, working || waits, working), [convo.entries, working, waits])
-  const railTurns = useMemo<RailTurn[]>(
-    () => list.flatMap((it) => (it.kind === 'user' && !it.e.mid ? [{ key: itemKey(it), ts: it.e.ts, text: previewOf(it.e.parts.filter((p) => p.kind === 'text').map((p) => p.text ?? '').join(' ')) }] : [])),
-    [list],
-  )
+  // The rail's turns, and where each is in the list: of the same turns as
+  // before, the same array (the rail not drawn again for an answer coming
+  // in); each message's preview made once (review batch4).
+  const railWas = useRef<{ turns: RailTurn[]; at: number[] }>({ turns: [], at: [] })
+  const rail = useMemo(() => {
+    const turns: RailTurn[] = []
+    const at: number[] = []
+    list.forEach((it, i) => {
+      if (it.kind !== 'user' || it.e.mid) return
+      let text = railText.get(it.e)
+      if (text === undefined) railText.set(it.e, (text = previewOf(it.e.parts.filter((p) => p.kind === 'text').map((p) => (p.text ?? '').slice(0, 600)).join(' '))))
+      turns.push({ key: itemKey(it), ts: it.e.ts, text })
+      at.push(i)
+    })
+    const was = railWas.current
+    const same = was.turns.length === turns.length && turns.every((x, i) => x.key === was.turns[i].key && x.text === was.turns[i].text && x.ts === was.turns[i].ts)
+    railWas.current = { turns: same ? was.turns : turns, at }
+    return railWas.current
+  }, [list])
+  const railTurns = rail.turns
   const box = useRef<HTMLDivElement>(null)
   const col = useRef<HTMLDivElement>(null)
   const stuck = useRef(true) // following the end
@@ -535,8 +553,11 @@ export function ConversationView({
   const listNow = useRef(list)
   listNow.current = list
   // (The turn read now, for the rail at the side: of the person's messages,
-  // the last at the top quarter of the view or above it.)
-  const [railAt, setRailAt] = useState('')
+  // the last at the top quarter of the view or above it. Only while the
+  // rail is shown.)
+  const railAt = useMemo(railCell, [])
+  const railNow = useRef(rail)
+  railNow.current = rail
   const note = useCallback(() => {
     const el = box.current
     const c = col.current
@@ -561,18 +582,24 @@ export function ConversationView({
     }
     anchors.current = out
     notedList.current = listNow.current
-    const mine = (i: number) => {
-      const it = listNow.current[i]
-      return it?.kind === 'user' && !it.e.mid
+    const r = railNow.current
+    const shown = r.turns.length > 0 && (el.parentElement?.querySelector<HTMLElement>(':scope > .convo-rail')?.offsetParent ?? null) !== null
+    if (!shown) return
+    // (Of the list, the last item begun in the view's top quarter — the
+    // first in it, at least; at the end, the last of all.)
+    let upTo = lo
+    if (el.scrollTop + el.clientHeight >= el.scrollHeight - 4) upTo = kids.length - 1
+    else while (upTo + 1 < kids.length && kids[upTo + 1].getBoundingClientRect().top < view.top + view.height / 4) upTo++
+    // (The last turn at or before it: by halving.)
+    let a = 0
+    let b = r.at.length
+    while (a < b) {
+      const m = (a + b) >> 1
+      if (r.at[m] <= upTo) a = m + 1
+      else b = m
     }
-    let cur = -1
-    // (At the end: the last, wherever its message is in the view.)
-    if (el.scrollTop + el.clientHeight >= el.scrollHeight - 4) for (let i = listNow.current.length - 1; i >= 0 && cur < 0; i--) if (mine(i)) cur = i
-    if (cur < 0) for (let i = lo; i < kids.length && kids[i].getBoundingClientRect().top < view.top + view.height / 4; i++) if (mine(i)) cur = i
-    if (cur < 0) for (let i = Math.min(lo, listNow.current.length - 1); i >= 0; i--) if (mine(i)) { cur = i; break }
-    const at = cur >= 0 ? itemKey(listNow.current[cur]) : ''
-    setRailAt((was) => (was === at ? was : at))
-  }, [])
+    railAt.set(a > 0 ? r.turns[a - 1].key : '')
+  }, [railAt])
   useLayoutEffect(() => {
     const el = box.current
     const c = col.current
@@ -2342,7 +2369,8 @@ function AgentList({ rows, menus, onPicked, placed, query: given, onQuery, searc
                     </span>
                     {/* (Its status by its dot only, and its group: in words for a screen
                         reader, and shown where the system's colours take the dot's away.) */}
-                    {(said || r.bg) && <span className={'convo-list-status is-' + r.status}>{t(r.bg === 'running' ? 'convo.status.bg' : r.bg === 'stale' ? 'convo.status.bgStale' : (`convo.status.${r.status}` as I18nKey))}</span>}
+                    {/* (Commands it left running: at work in the background, as its group says — review batch4.) */}
+                    {(said || r.bg || r.cmds) && <span className={'convo-list-status is-' + (r.cmds && r.status !== 'blocked' ? 'working' : r.status)}>{t(r.bg === 'running' ? 'convo.status.bg' : r.bg === 'stale' ? 'convo.status.bgStale' : r.cmds && r.status !== 'blocked' ? 'convo.status.bg' : (`convo.status.${r.status}` as I18nKey))}</span>}
                     {r.unsent ? (
                       <span className="convo-list-now is-unsent">{t('convo.unsentRow', { n: r.unsent })}</span>
                     ) : (

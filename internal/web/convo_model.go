@@ -233,7 +233,7 @@ func idleInput(screen string, greyed ...func() string) error {
 		top := strings.TrimRight(lines[i-1], " \r")
 		end := -1
 		for j := i + 1; j < len(lines) && j <= i+inputLinesMost; j++ {
-			if strings.TrimRight(lines[j], " \r") == top {
+			if boxFoot(top, strings.TrimRight(lines[j], " \r")) {
 				end = j
 				break
 			}
@@ -248,7 +248,10 @@ func idleInput(screen string, greyed ...func() string) error {
 		in := oneSpaced(strings.Join(words, " "))
 		// (Empty: its one line, the mark alone. Lines of nothing over more
 		// than one are words typed — new lines — not an empty box.)
-		if in == "" && end == i+1 || strings.HasPrefix(in, `Try "`) {
+		// (Its placeholder, "Try \"…\"", on its one line: empty. Wrapped
+		// over more, it is told from a draft beginning so by the read with
+		// colours, greyed as a suggestion is — review batch4.)
+		if end == i+1 && (in == "" || strings.HasPrefix(in, `Try "`)) {
 			return nil
 		}
 		if in == "" {
@@ -262,6 +265,26 @@ func idleInput(screen string, greyed ...func() string) error {
 		return errDraft
 	}
 	return errScreen
+}
+
+// boxFoot: line is the rule under the input whose top rule is top. Of a
+// plain top, the same to the letter; of one with the session's name in it
+// (a renamed session: "──── name ─"), a rule alone from the same column,
+// at least as long as the top's run before the name. (A line of dashes in
+// a draft is indented past the mark: not from the top's column.)
+func boxFoot(top, line string) bool {
+	if line == top {
+		return true
+	}
+	body := strings.TrimLeft(top, " ")
+	indent := top[:len(top)-len(body)]
+	run := len([]rune(body)) - len([]rune(strings.TrimLeft(body, "─━")))
+	if run < 8 || run == len([]rune(body)) || !strings.HasPrefix(line, indent) {
+		return false
+	}
+	rest := line[len(indent):]
+	n := len([]rune(rest))
+	return n >= run && strings.Trim(rest, "─━") == ""
 }
 
 // (How many lines the input's words may take, wrapped: a suggestion is short.)

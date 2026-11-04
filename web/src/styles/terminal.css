@@ -1173,8 +1173,7 @@ button.convo-task-line:hover .convo-task-name { color: var(--term-fg); }
 }
 @media (hover: none) {
   .convo-list-group .convo-list-item.has-menu .convo-list-dots { opacity: 1; pointer-events: auto; color: var(--term-fg-3); }
-  .convo-list-group .convo-list-item.has-menu .convo-list-line { padding-right: 28px; }
-  .convo-list-group .convo-list-item.has-menu .convo-list-line { padding-right: 0; }
+  .convo-list-group .convo-list-item.has-menu .convo-list-line { padding-right: 28px; } /* (the button, always shown, at its right) */
 }
 @media (forced-colors: active) { .convo-list-dots { color: ButtonText; } }
 .convo-nudge {

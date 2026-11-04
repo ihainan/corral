@@ -16,7 +16,7 @@ export interface ConvoListRow {
   cmds?: RowCmds // (its turn over: commands it left running in the background)
   since?: number // (unix ms) when its status last changed
   current: boolean
-  placeAs?: { status: ConvoListRow['status']; since?: number } // (the one shown: where it is placed meanwhile, see asHeld)
+  placeAs?: { status: ConvoListRow['status']; since?: number; cmds?: RowCmds } // (the one shown: where it is placed meanwhile, see asHeld)
   pinned?: number // pinned at the top: its place among the pinned (the order they were pinned)
   onPick: () => void
   menu?: () => (MenuItem | null)[] // what else is done with it, from its row's menu (the side list's)
@@ -70,7 +70,8 @@ export function listOrder(rows: ConvoListRow[]): ConvoListRow[] {
 // is (else it would move from under the pointer as it is read). Placed so
 // by the lists and by Alt+Up/Down alike (placeAs, which its page sets);
 // what its row says is as it is.
-export const asHeld = (r: ConvoListRow): ConvoListRow => (r.placeAs && r.current ? { ...r, status: r.placeAs.status, since: r.placeAs.since } : r)
+// (Its commands in the background too, as they place it among those at work — review batch4.)
+export const asHeld = (r: ConvoListRow): ConvoListRow => (r.placeAs && r.current ? { ...r, status: r.placeAs.status, since: r.placeAs.since, cmds: r.placeAs.cmds } : r)
 
 // The rest, as the list shows them: by the day their status last changed;
 // those of no known time (a tmux session, the gateway restarted) last.

@@ -262,10 +262,30 @@ func TestModelFlowCareful(t *testing.T) {
 	if err := idleInput(blank, func() string { return "" }); !errors.Is(err, errDraft) {
 		t.Errorf("new lines typed: %v", err)
 	}
-	// Its placeholder wrapped: empty.
+	// Its placeholder wrapped: empty, greyed as it is; words typed beginning
+	// so, over two lines, a draft (review batch4).
 	try := "● done\n────────────────────────\n❯ Try \"edit <filepath> to\n  do something\"\n────────────────────────\n  Opus 5.5·H │ Ctx 0\n"
-	if err := idleInput(try, func() string { return "" }); err != nil {
+	if err := idleInput(try, func() string { return "Try \"edit <filepath> to do something\"" }); err != nil {
 		t.Errorf("wrapped placeholder: %v", err)
+	}
+	typedTry := "● done\n────────────────────────\n❯ Try \"npm test\"\n  then fix the errors\n────────────────────────\n  Opus 5.5·H │ Ctx 0\n"
+	if err := idleInput(typedTry, func() string { return "" }); !errors.Is(err, errDraft) {
+		t.Errorf("draft beginning as the placeholder does: %v", err)
+	}
+	if err := idleInput("● done\n────────────────────────\n❯ Try \"fix lint errors\"\n────────────────────────\n  Opus 5.5·H │ Ctx 0\n"); err != nil {
+		t.Errorf("placeholder: %v", err)
+	}
+	// A renamed session: its name on the box's top rule, the foot a rule
+	// alone. Empty, and with a draft; a draft's dashes are still no foot.
+	named := "● done\n──────────────────────── 重命名后的会话 ─\n❯ \n────────────────────────────────────\n  Opus 5.5·H │ Ctx 0\n"
+	if err := idleInput(named); err != nil {
+		t.Errorf("renamed, empty: %v", err)
+	}
+	if err := idleInput(strings.Replace(named, "❯ \n", "❯ not sent yet\n", 1)); !errors.Is(err, errDraft) {
+		t.Errorf("renamed, a draft: %v", err)
+	}
+	if err := idleInput(strings.Replace(named, "❯ \n", "❯ \n  ────────────────────────────\n  not sent yet\n", 1), func() string { return "" }); !errors.Is(err, errDraft) {
+		t.Errorf("renamed, a draft with dashes: %v", err)
 	}
 	// The picker gone, nothing said: not known (not "switched").
 	f = newFake(false)
