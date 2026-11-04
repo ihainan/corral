@@ -863,12 +863,22 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
   padding: 7px max(16px, env(safe-area-inset-right, 0px)) 7px max(16px, env(safe-area-inset-left, 0px));
   border-bottom: 1px solid var(--term-line); background: var(--term-bg); font-size: 13px; line-height: 18px;
 }
-.convo-bar-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--term-fg); font-weight: 600; }
-.convo-bar-status { flex: none; color: var(--term-fg-3); font-variant-numeric: tabular-nums; }
+.convo-bar-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--term-fg); font-weight: 600; font-size: 14px; }
+.convo-bar-status {
+  flex: none; display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px;
+  --st: var(--term-fg-3); color: var(--term-fg-2); background: color-mix(in srgb, var(--st) 11%, transparent);
+  font-size: 12px; line-height: 18px; font-weight: 500; font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+/* (Its dot, in its colour; at work the spinner is in its place.) */
+.convo-bar-status::before { content: ''; flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--st); }
+.convo-bar-status:has(.convo-spin)::before { display: none; }
+.convo-bar-status .convo-spin { margin: 0; }
 /* The status, in one colour each wherever it shows: at work, waiting for you (as the tabs' count), done */
-.convo-bar-status.is-working { color: var(--term-accent-text); }
-.convo-bar-status.is-blocked { color: var(--term-warn-text); font-weight: 600; }
-.convo-bar-status.is-done { color: var(--term-ok-text); }
+.convo-bar-status.is-working { --st: var(--term-accent-text); color: var(--term-accent-text); }
+.convo-bar-status.is-blocked { --st: var(--term-warn-text); color: var(--term-warn-text); font-weight: 600; }
+.convo-bar-status.is-done { --st: var(--term-ok-text); color: var(--term-ok-text); }
+.convo-bar-status:empty { display: none; }
+@media (forced-colors: active) { .convo-bar-status { border: 1px solid CanvasText; } .convo-bar-status::before { background: CanvasText; } }
 .convo-waiting {
   flex: none; display: flex; align-items: center; gap: 12px; justify-content: space-between; padding: 8px 8px 8px 14px;
   border: 1px solid var(--term-warn-text); border-radius: 10px; background: var(--term-bg); font-size: 14px; font-weight: 500;
@@ -1049,8 +1059,12 @@ button.convo-task-line:hover .convo-task-name { color: var(--term-fg); }
 /* The agents to go to: beside the thread (wide), over it (narrow, or folded away) */
 .convo-side {
   flex: none; width: 288px; /* (as dragged: its style) */ display: flex; flex-direction: column; overflow-y: auto; overscroll-behavior: contain;
-  padding: 8px; border-right: 1px solid var(--term-line); background: var(--term-chrome); font-family: var(--font-ui);
+  padding: 8px; border-right: 1px solid var(--term-line); background: var(--term-side, var(--term-chrome)); font-family: var(--font-ui);
 }
+/* (Its rows on its own surface: the one read lifted off it, as a card; a
+   hover a shade of it.) */
+.term-root.light .convo-side { --term-side: #f3f4f6; --term-row-hover: rgba(16, 24, 40, 0.045); --term-row-current: #ffffff; --row-lift: 0 0 0 1px rgba(16, 24, 40, 0.07), 0 1px 2px rgba(16, 24, 40, 0.06); }
+.term-root.dark .convo-side { --term-row-hover: rgba(255, 255, 255, 0.04); --term-row-current: rgba(255, 255, 255, 0.075); --row-lift: inset 0 0 0 1px rgba(255, 255, 255, 0.05); }
 /* (Longer than the window, it scrolls: what is in it keeps its height, not
    squeezed to fit, the search box to a line of its text.) */
 .convo-side > * { flex-shrink: 0; }
@@ -1085,8 +1099,9 @@ button.convo-task-line:hover .convo-task-name { color: var(--term-fg); }
 @media (pointer: coarse) { .list-search input { font-size: 16px; } }
 .list-search-none { margin: 4px 10px 12px; font-size: 13px; color: var(--term-fg-3); }
 .agents-list > .list-search { margin: 10px max(16px, env(safe-area-inset-right, 0px)) 4px max(16px, env(safe-area-inset-left, 0px)); height: 40px; }
-.convo-list-group { display: flex; flex-direction: column; gap: 1px; margin-bottom: 8px; }
-.convo-list-head { display: flex; gap: 6px; padding: 10px 10px 4px; font-size: 12px; font-weight: 500; letter-spacing: 0.02em; color: var(--term-fg-3); font-variant-numeric: tabular-nums; }
+.convo-list-group { display: flex; flex-direction: column; gap: 1px; margin-bottom: 12px; }
+.convo-list-head { display: flex; gap: 6px; padding: 10px 10px 6px; font-size: 12px; font-weight: 600; letter-spacing: 0.02em; color: var(--term-fg-2); font-variant-numeric: tabular-nums; }
+.convo-list-head > span { font-weight: 400; color: var(--term-fg-3); }
 .convo-list-row {
   display: flex; align-items: flex-start; gap: 10px; width: 100%; padding: 7px 10px; border: 0; border-radius: 8px;
   background: none; color: var(--term-fg); font: inherit; text-align: left; cursor: pointer;
@@ -1094,7 +1109,7 @@ button.convo-task-line:hover .convo-task-name { color: var(--term-fg); }
 .convo-list-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
 .convo-list-row:hover { background: var(--term-row-hover); --dot-ring: var(--term-row-hover); }
 .convo-list-row:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: -2px; }
-.convo-list-row[aria-current='true'] { background: var(--term-row-current); --dot-ring: var(--term-row-current); }
+.convo-list-row[aria-current='true'] { background: var(--term-row-current); --dot-ring: var(--term-row-current); box-shadow: var(--row-lift, none); }
 /* (The rows that want the person say so in their time's colour, not only a dot's.) */
 .convo-list-row.is-blocked .convo-list-when { color: var(--term-warn-text); font-weight: 500; }
 .convo-list-row.is-done .convo-list-when { color: var(--term-ok-text); }
