@@ -245,7 +245,7 @@ export function ReplyDialog({ sessionId, agent, onLoaded, onClose, resizedAt }: 
           {screen?.cut && <p className="reply-changed" role="alert">{t('reply.cut')}</p>}
           {opts.length > 0 && q && <p className="reply-q">{block && /^Bash command$/i.test(block.head) && /^Do you want to proceed\?$/i.test(q) ? t('convo.askRun') : questionText(q)}</p>}
           {/* (What a permission asks to be allowed, before its choices.) */}
-          {opts.length > 0 && block && <Asked lines={block.lines} />}
+          {opts.length > 0 && block && <Asked lines={block.lines} head={block.head} />}
           {(opts.length === 0 || screenOpen || (!block && !questionOnly)) && (
             <div className="reply-screen-wrap">
               <pre className="reply-screen" ref={pre} tabIndex={0} aria-label={t('reply.screen')} aria-busy={reading}>
@@ -371,25 +371,40 @@ function useConfirm(screen: { text: string; digest: string } | null, opts: { key
 // and the lines going on from them). Rules other than two: all of it as
 // the command is (11-04).
 const GUTTER = /^(\s*)│ ?/
-const COUNTDOWN = /automatically ([a-z]+) this request in (\d+):(\d{2})/
-function Asked({ lines: all }: { lines: string[] }) {
+// (Its countdown, the sentence whole: "… will automatically block (deny) this
+// request in 1:09 (45s, 1m 5s), to avoid …" — steadyReply's WARNING.)
+const COUNTDOWN = /^⚠?\s*Claude Code will automatically (?:deny|block) this request in (\d+(?::\d\d)+|\d+\s*[hms](?:\s*\d+\s*[hms])*), to avoid (?:blocking progress on|holding up) an unattended session\.?(.*)$/
+const secsOf = (t: string) => {
+  let n = 0
+  if (t.includes(':')) for (const p of t.split(':')) n = n * 60 + Number(p)
+  else for (const [, v, u] of t.matchAll(/(\d+)\s*([hms])/g)) n += Number(v) * (u === 'h' ? 3600 : u === 'm' ? 60 : 1)
+  return n
+}
+function Asked({ lines: all, head = '' }: { lines: string[]; head?: string }) {
   const rules = all.flatMap((l, i) => (dashedRule.test(l) ? [i] : []))
   const two = rules.length >= 2
   const desc = two ? all.slice(0, rules[0]).map((l) => l.trim()).filter(Boolean) : []
-  const main = (two ? all.slice(rules[0] + 1, rules[rules.length - 1]) : all).filter((l) => !dashedRule.test(l)).map((l) => l.replace(GUTTER, '$1'))
-  // (Its notes: a line beginning with ⚠ or after a blank one begins one; the
-  // rest go on from the line before, as they were wrapped.)
+  let main = (two ? all.slice(rules[0] + 1, rules[rules.length - 1]) : all).filter((l) => !dashedRule.test(l))
+  // (The bar along a command's lines: only a Bash command's, and only where
+  // every line of it has one — anything else as it is — review.)
+  if (/^Bash command$/i.test(head) && main.some((l) => l.trim()) && main.every((l) => !l.trim() || GUTTER.test(l))) main = main.map((l) => l.replace(GUTTER, '$1'))
+  // (Its notes: one begins after a blank line, at a warning sign, or where
+  // the bar along its lines begins or ends; the rest go on from the line
+  // before, as they were wrapped.)
   const notes: string[] = []
   let gap = true
+  let barred = false
   for (const raw of two ? all.slice(rules[rules.length - 1] + 1) : []) {
+    const bar = GUTTER.test(raw)
     const l = raw.replace(GUTTER, '').trim()
     if (!l) {
       gap = true
       continue
     }
-    if (gap || l.startsWith('⚠') || !notes.length) notes.push(l)
+    if (gap || l.startsWith('⚠') || bar !== barred || !notes.length) notes.push(l)
     else notes[notes.length - 1] += (/[\u3000-\u9fff]$/.test(notes[notes.length - 1]) ? '' : ' ') + l
     gap = false
+    barred = bar
   }
   let sign: '' | 'add' | 'del' = ''
   return (
@@ -409,7 +424,14 @@ function Asked({ lines: all }: { lines: string[] }) {
       </pre>
       {notes.map((n, i) => {
         const c = COUNTDOWN.exec(n)
-        return c ? <Countdown key={i + n} secs={Number(c[2]) * 60 + Number(c[3])} /> : <p key={i} className="convo-ask-note">{n.replace(/^⚠\s*/, '')}</p>
+        return c ? (
+          <Fragment key={i + n}>
+            <Countdown secs={secsOf(c[1])} />
+            {c[2].trim() && <p className="convo-ask-note">{c[2].trim()}</p>}
+          </Fragment>
+        ) : (
+          <p key={i} className="convo-ask-note">{n.replace(/^⚠\s*/, '')}</p>
+        )
       })}
     </>
   )
@@ -677,7 +699,7 @@ export function InlineReply({ target, onLoaded, resizedAt, active = true, held, 
       <div className="convo-ask-q">{shownQ || waiting}</div>
       {cx?.kind === 'question' && cx.total > 1 && <p className="convo-ask-of">{t('convo.askQuestionOf', { i: cx.index, n: cx.total })}</p>}
       {driven.unsure && <p className="reply-changed" role="alert">{t('ask.unsure')}</p>}
-      {block && <Asked lines={block.lines} />}
+      {block && <Asked lines={block.lines} head={block.head} />}
       {cx && cx.kind !== 'question' && cx.lines.length > 0 && <Asked lines={cx.lines} />}
       {(needScreen || !!screen?.cut) && !failed && <p className="convo-ask-unread">{t(screen?.cut ? 'reply.cut' : 'convo.askUnread')}</p>}
       {!failed && hookHint}

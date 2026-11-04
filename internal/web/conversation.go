@@ -2714,8 +2714,7 @@ front || exit 3
 # waits (for an answer, or with a dialog open: the message's Enter would go
 # there), exit 9; an answer only while it waits for one (exit 9) and the
 # pane's screen is still the one answered (its SHA-256 as the gateway read
-# it, but what changes by itself — steadyAwk; 10 where it is not, 11 where
-# it cannot be told).
+# it; 10 where it is not, 11 where it cannot be told).
 # (waiting: what the file says now, its status and what for.)
 waiting() {
   if [ -n "$cx" ]; then
@@ -2772,8 +2771,8 @@ if [ -n "$gate" ]; then
   screen:*)
     [ "$st" = waiting ] && exit 9; [ "$st" = title-unread ] && exit 11
     command -v sha256sum >/dev/null 2>&1 || exit 11
-    if [ "$mode" = tmux ]; then d=$(tmux -u capture-pane -p -t "$p" 2>/dev/null 9>&- | awk 'STEADYAWK' | sha256sum)
-    else d=$(HERDR_SOCKET_PATH=$sock herdr pane read "$p" --source visible 2>/dev/null 9>&- | awk 'STEADYAWK' | sha256sum); fi
+    if [ "$mode" = tmux ]; then d=$(tmux -u capture-pane -p -t "$p" 2>/dev/null 9>&- | sha256sum)
+    else d=$(HERDR_SOCKET_PATH=$sock herdr pane read "$p" --source visible 2>/dev/null 9>&- | sha256sum); fi
     [ "${d%% *}" = "${gate#screen:}" ] || exit 10 ;;
   idle) [ "$st" = idle ] || exit 12 ;;
   dialog)
@@ -2783,8 +2782,8 @@ if [ -n "$gate" ]; then
     [ "$st" = waiting ] || exit 9
     case $wf in "permission prompt"|"input needed"|"sandbox request"|"worker request") ;; *) exit 9;; esac
     command -v sha256sum >/dev/null 2>&1 || exit 11
-    if [ "$mode" = tmux ]; then d=$(tmux -u capture-pane -p -t "$p" 2>/dev/null 9>&- | awk 'STEADYAWK' | sha256sum)
-    else d=$(HERDR_SOCKET_PATH=$sock herdr pane read "$p" --source visible 2>/dev/null 9>&- | awk 'STEADYAWK' | sha256sum); fi
+    if [ "$mode" = tmux ]; then d=$(tmux -u capture-pane -p -t "$p" 2>/dev/null 9>&- | sha256sum)
+    else d=$(HERDR_SOCKET_PATH=$sock herdr pane read "$p" --source visible 2>/dev/null 9>&- | sha256sum); fi
     [ "${d%% *}" = "${gate#reply:}" ] || exit 10 ;;
   card:*)
     # (A card's key: not while it waits; its region of the screen, read with
@@ -2883,7 +2882,6 @@ fi`
 	script = strings.ReplaceAll(script, "OWNERAWK", claudeOwnerAwk) // (see convo_view.go)
 	script = strings.ReplaceAll(script, "FOOTAWK", claudeFootAwk)
 	script = strings.ReplaceAll(script, "BOXAWK", claudeBoxAwk)
-	script = strings.ReplaceAll(script, "STEADYAWK", steadyAwk) // (see convo_reply.go)
 	cmd := "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(mode) + " " + sshx.QuoteShell(session) + " " + sshx.QuoteShell(pane) + " " +
 		strconv.FormatInt(pid, 10) + " " + strconv.FormatInt(start, 10) + " " + n + " " + sshx.QuoteShell(socket) + " " + sshx.QuoteShell(sid) + " " + strconv.Itoa(max(0, min(read, 60))) + " " + sshx.QuoteShell(gate)
 	for _, k := range keys {

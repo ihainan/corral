@@ -16,7 +16,11 @@ import type { ReplyTarget } from './ReplyDialog'
 // own, once on the screen, and the prompt's choices right under it: a
 // command's own words that say so are not taken for it — review581/582.)
 const WARNING = /^([^\S\n]*(?:⚠[^\S\n]*)?Claude\s+Code\s+will\s+automatically\s+(?:deny|block)\s+this\s+request\s+in\s+)(\d+(?::\d\d)+|\d+\s*[hms](?:\s*\d+\s*[hms])*)(,\s+to\s+avoid\s+(?:blocking\s+progress\s+on|holding\s+up)\s+an\s+unattended\s+session[^\S\n]*)$/gm
-const CHOICES_UNDER = /^\n(?:[^\S\n]*\n){0,2}[^\S\n]*(?:❯[^\S\n]*)?1\.[^\S\n]/
+// (Its choices right under it — or under the prompt's question, a line of
+// its own ending "?" between them, as 2.1.31x draws it: "⚠ … unattended
+// session", a blank line, "Do you want to proceed?", the choices. 11-05:
+// not taken for one, its answers were refused every time.)
+const CHOICES_UNDER = /^\n(?:[^\S\n]*\n){0,2}(?:[^\S\n]*[^\s❯][^\n]*\?[^\S\n]*\n(?:[^\S\n]*\n)?)?[^\S\n]*(?:❯[^\S\n]*)?1\.[^\S\n]/
 
 // countdown: the screen with its count taken out, and the count (seconds);
 // null where it shows none, or more than one.
