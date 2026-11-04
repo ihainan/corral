@@ -710,6 +710,27 @@ const LOG_ASK_AFTER = [0, 30_000, 120_000, 480_000] // (the first at once; then 
 // (TMUX_CMDS_FRESH: how long that holds: the gateway looks once a minute.)
 const TMUX_CMDS_FRESH = 2 * 60 * 1000
 const tmuxCmds = new Map<string, { cmds: RowCmds; at: number }>()
+// The host's home folder, by session (asked once: the files list of no
+// path answers with it), to make "~/…" whole. (Kept once had: the same
+// account's home does not move.)
+const homes = new Map<string, string | Promise<string>>()
+function atHome(sid: string, p: string): Promise<string> {
+  if (p !== '~' && !p.startsWith('~/')) return Promise.resolve(p)
+  const join = (home: string) => home.replace(/\/+$/, '') + p.slice(1) || '/'
+  let h = homes.get(sid)
+  if (typeof h === 'string') return Promise.resolve(join(h))
+  if (!h) {
+    h = api<{ path: string }>('GET', `/api/sessions/${sid}/files`).then((r) => {
+      if (!r.path?.startsWith('/')) throw new Error('no home')
+      homes.set(sid, r.path)
+      return r.path
+    })
+    h.catch(() => homes.delete(sid))
+    homes.set(sid, h)
+  }
+  return h.then(join)
+}
+
 const tmuxCmdsOf = (e: Entry): RowCmds | undefined => {
   if (e.row || e.pane) return undefined
   const v = tmuxCmds.get(e.key)
@@ -750,7 +771,12 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   const [filesAt, setFilesAt] = useState<string | null>(null)
   // A picture of its host looked at.
   const [viewing, setViewing] = useState<string | null>(null)
-  const fileActs = useMemo((): FileActs => ({ reveal: setFilesAt, download: (p) => downloadPath(sid, p), view: setViewing }), [sid])
+  // (A path under the home folder, "~/…": made whole with the host's home first.)
+  const fileActs = useMemo((): FileActs => {
+    const whole = (p: string, then: (p: string) => void) =>
+      atHome(sid, p).then(then, () => toast(t('convo.path.noHome'), true))
+    return { reveal: (p) => whole(p, setFilesAt), download: (p) => whole(p, (q) => downloadPath(sid, q)), view: (p) => whole(p, setViewing) }
+  }, [sid, toast])
   // (Another tab shown — a terminal's — or another agent: what was opened of this one's files closes.)
   useEffect(() => {
     if (active) return

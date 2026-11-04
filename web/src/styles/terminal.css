@@ -709,7 +709,6 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 [aria-expanded='true'] > .convo-chev { transform: rotate(90deg); }
 .convo-work-text { min-width: 0; }
 .convo-failed { flex: none; margin-left: 8px; font-size: 13px; font-weight: 500; color: var(--term-danger-text); white-space: nowrap; }
-.convo-running { margin-left: 8px; font-size: 13px; color: var(--term-fg-3); }
 .convo-work-body { display: flex; flex-direction: column; gap: 1px; padding: 4px 0 2px 21px; }
 .convo-step { display: flex; flex-direction: column; min-width: 0; }
 .convo-step-head { width: 100%; color: var(--term-fg-2); }
