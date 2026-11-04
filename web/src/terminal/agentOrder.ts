@@ -8,6 +8,8 @@ export interface ConvoListRow {
   key: string
   title: string
   where: string // its workspace or session (its host too, where there are several)
+  unsent?: number // messages sent to it not seen taken in (see unsentOf)
+  now?: string // what it is about now, where known: waits to be allowed, the step under way, how its answer begins
   program?: string // the program in it, for its icon
   status: 'working' | 'blocked' | 'done' | 'idle' | 'unknown'
   bg?: 'running' | 'stale' // (its turn over, subagents still out)
@@ -80,7 +82,7 @@ export const DAYS: { name: I18nKey; of: (since: number, today: number, yesterday
 // The groups of old ones that are folded when long, and how many of such
 // a group are shown unfolded. (Today's and yesterday's are not: they are
 // what the person is at, and are short.)
-export const FOLDED: I18nKey[] = ['convo.group.earlier', 'convo.group.other']
+export const FOLDED: I18nKey[] = ['convo.group.earlier', 'convo.group.other', 'convo.group.idle']
 export const foldAt = 5
 
 export const dayStart = (now: number) => new Date(now).setHours(0, 0, 0, 0)

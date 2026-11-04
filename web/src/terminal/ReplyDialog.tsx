@@ -668,8 +668,8 @@ export function InlineReply({ target, onLoaded, resizedAt, active = true, held, 
             if (!yes && !no) return null
             return (
               <>
-                {yes && <OwnBox label={t('own.yesWith')} busy={busy} onGo={(w) => amend(Number(yes.key), true, w)} />}
-                {no && <OwnBox label={t('own.noWith')} busy={busy} onGo={(w) => amend(Number(no.key), false, w)} />}
+                {yes && <OwnBox label={t('own.yesWith')} keep={call?.id ? `${target.key} ${call.id} yes` : undefined} busy={busy} onGo={(w) => amend(Number(yes.key), true, w)} />}
+                {no && <OwnBox label={t('own.noWith')} keep={call?.id ? `${target.key} ${call.id} no` : undefined} busy={busy} onGo={(w) => amend(Number(no.key), false, w)} />}
               </>
             )
           })()}

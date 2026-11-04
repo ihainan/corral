@@ -21,7 +21,20 @@ type Copy = { fn: (code: string) => void; label: string } | undefined
 export const CodeSpanOf = createContext<((text: string) => ReactNode | null) | undefined>(undefined)
 function InlineCode({ text }: { text: string }) {
   const draw = useContext(CodeSpanOf)
-  return draw?.(text) ?? <code>{text}</code>
+  return draw?.(text) ?? <code>{breakable(text)}</code>
+}
+// A long name in code (a test's, a path): may wrap after its _ / . - :, as a
+// reader would break it, before it is cut anywhere (see terminal.css).
+export function breakable(text: string): ReactNode {
+  if (text.length < 24) return text
+  const out: ReactNode[] = []
+  let at = 0
+  for (const m of text.matchAll(/[_/.:-](?=[^_/.:-])/g)) {
+    out.push(text.slice(at, m.index + 1), <wbr key={m.index} />)
+    at = m.index + 1
+  }
+  out.push(text.slice(at))
+  return out
 }
 // A link to a file on the host, as Codex writes them ("[a.go:12](/home/me/a.go:12)"):
 // its words, as a path to act on where the page can (null: as code, the
@@ -260,7 +273,8 @@ const spans: { re: RegExp; make: (m: RegExpExecArray, key: number) => ReactNode 
   { re: /`([^`]+)`/g, make: (m, k) => <InlineCode key={k} text={m[1]} /> },
   // (A link's words are only words: no code span in them is drawn as more — a button in a link opens both.)
   { re: /\[([^\]]{1,500})\]\((https?:\/\/[^\s)]{1,2000})\)/g, make: (m, k) => link(m[2], <CodeSpanOf.Provider value={undefined}>{inline(m[1])}</CodeSpanOf.Provider>, k) },
-  { re: /\[([^\]]{1,500})\]\((\/(?!\/)[^\s)]{1,2000})\)/g, make: (m, k) => <FileLink key={k} label={m[1]} target={m[2]} /> },
+  // (Its words may hold one level of [brackets] — a route's [id].ts; its path one level of (parens).)
+  { re: /\[((?:[^[\]\n]|\[[^[\]\n]{0,200}\]){1,500})\]\((\/(?!\/)(?:[^\s()]|\([^\s()]{0,200}\)){1,2000})\)/g, make: (m, k) => <FileLink key={k} label={m[1]} target={m[2]} /> },
   { re: new RegExp(`https?://[^\\s<>()${wide}"']{0,2000}[^\\s<>()${wide}"'.,;:!?]`, 'g'), make: (m, k) => link(m[0], m[0], k) },
   { re: /\*\*(?=\S)((?:`[^`]{0,500}`|[^`]){0,1000}?\S)\*\*/g, make: (m, k) => <strong key={k}>{inline(m[1])}</strong> },
   { re: /~~(?=\S)([^~]{0,2000}?\S)~~/g, make: (m, k) => <del key={k}>{inline(m[1])}</del> },

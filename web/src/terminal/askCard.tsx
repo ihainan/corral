@@ -1,4 +1,5 @@
-import { useState } from 'react'
+import { useContext, useEffect, useRef, useState } from 'react'
+import { ShowTerminal } from './showTerminal'
 import { ApiError } from '../api'
 import { t } from '../i18n'
 import { Markdown } from './markdown'
@@ -244,7 +245,15 @@ async function tickAndGo(target: ReplyTarget, now: Screen, q0: Q, want: Set<numb
 // lead: what it said before asking, where only its screen shows it (see screenCall).
 export function AskPanel({ call, index, shown, target, drive, busy, alive, lead }: { call: ConvoTool; index: number; shown: Q; target: ReplyTarget; drive: Drive; busy: boolean; alive: () => boolean; lead?: string[] }) {
   const ask = call.asks![index]
-  const [ticks, setTicks] = useState<Set<number> | null>(null)
+  // (Ticks not sent yet: kept for the card, as its typed words are.)
+  const tickKey = call.id ? `${target.key} ${call.id} ${index}` : undefined
+  const [ticks, setTicksNow] = useState<Set<number> | null>(() => (tickKey && cardTicks.has(tickKey) ? new Set(cardTicks.get(tickKey)) : null))
+  const setTicks = (v: Set<number> | null | ((x: Set<number> | null) => Set<number> | null)) =>
+    setTicksNow((cur) => {
+      const next = typeof v === 'function' ? v(cur) : v
+      keepDraft(cardTicks, tickKey, next ? [...next] : undefined)
+      return next
+    })
   const ticked = ticks ?? new Set(shown.options.filter((o) => o.ticked).map((o) => o.n))
   const [preview, setPreview] = useState(-1)
   // (A lone question with nothing beside: a digit answers it at once.)
@@ -313,17 +322,54 @@ export function AskPanel({ call, index, shown, target, drive, busy, alive, lead 
       )}
       {shown.own !== undefined &&
         (!ask.multi && target.fill ? (
-          <OwnBox label={t('own.answer')} busy={busy} onGo={(text) => drive((now) => ownWords(target, now, questionOwn(shown.own!), text, alive))} />
+          <OwnBox label={t('own.answer')} keep={call.id ? `${target.key} ${call.id} ${index} own` : undefined} busy={busy} onGo={(text) => drive((now) => ownWords(target, now, questionOwn(shown.own!), text, alive))} />
         ) : (
-          <p className="convo-ask-hint">{t('ask.ownInTerminal')}</p>
+          <p className="convo-ask-hint">
+            {t('ask.ownInTerminal')}
+            <ToTerminal />
+          </p>
         ))}
     </div>
   )
 }
 
+// What was written into a question's card and not sent yet, by the card's
+// key (its process and its question): kept while the person goes to another
+// agent and back, for the page's life — never stored, the words are theirs
+// and the question passes. (Bounded: the oldest go.)
+export const cardDrafts = new Map<string, string>()
+export const cardTicks = new Map<string, number[]>()
+export function keepDraft<T>(m: Map<string, T>, key: string | undefined, v: T | undefined) {
+  if (!key) return
+  m.delete(key)
+  if (v === undefined || (typeof v === 'string' && !v)) return
+  m.set(key, v)
+  while (m.size > 50) m.delete(m.keys().next().value!)
+}
+
+// Where this card cannot take the person's own words: the way to the
+// terminal that can, in the line that says so.
+function ToTerminal() {
+  const go = useContext(ShowTerminal)
+  return go ? (
+    <button type="button" className="link-btn convo-ask-there" onClick={go}>
+      {t('convo.toTerminal')}
+    </button>
+  ) : null
+}
+
 // A line of the person's own, into a row of the prompt that takes it.
-export function OwnBox({ label, busy, onGo, hint }: { label: string; busy: boolean; onGo: (text: string) => void; hint?: string }) {
-  const [text, setText] = useState('')
+// keep: where what is typed is kept while it is not sent (see cardDrafts).
+export function OwnBox({ label, busy, onGo, hint, keep }: { label: string; busy: boolean; onGo: (text: string) => void; hint?: string; keep?: string }) {
+  const [text, setTextNow] = useState(() => (keep && cardDrafts.get(keep)) || '')
+  const setText = (v: string) => (setTextNow(v), keepDraft(cardDrafts, keep, v))
+  // (Another question in the same place: its own words, or none — not the last one's.)
+  const was = useRef(keep)
+  useEffect(() => {
+    if (was.current === keep) return
+    was.current = keep
+    setTextNow((keep && cardDrafts.get(keep)) || '')
+  }, [keep])
   const ok = ownOK(text)
   const long = [...text].length > 1000
   return (
@@ -331,6 +377,7 @@ export function OwnBox({ label, busy, onGo, hint }: { label: string; busy: boole
       className="convo-ask-text convo-ask-own"
       onSubmit={(e) => {
         e.preventDefault()
+        // (Kept after it goes: refused or lost, it is still there; the card goes once answered, and its key with its question.)
         if (ok && !busy) onGo(text)
       }}
     >
@@ -388,9 +435,12 @@ export function PlanPanel({ call, shown, digest, target, drive, busy, onScreen, 
       {(() => {
         const change = shown.options.find((o) => /^Tell Claude what to change$/i.test(o.label))
         return change && target.fill ? (
-          <OwnBox label={t('own.change')} hint={t('own.changeHint')} busy={busy} onGo={(text) => drive((now) => ownWords(target, now, planChange(change.n), text, alive))} />
+          <OwnBox label={t('own.change')} hint={t('own.changeHint')} keep={call.id ? `${target.key} ${call.id} plan` : undefined} busy={busy} onGo={(text) => drive((now) => ownWords(target, now, planChange(change.n), text, alive))} />
         ) : (
-          <p className="convo-ask-hint">{t('ask.changeInTerminal')}</p>
+          <p className="convo-ask-hint">
+            {t('ask.changeInTerminal')}
+            <ToTerminal />
+          </p>
         )
       })()}
     </div>

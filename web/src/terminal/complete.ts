@@ -3,7 +3,27 @@
 // the message (the agents' commands, and those found on the host) and "$" (a
 // Codex skill).
 
-import { t } from '../i18n'
+import { getLang, t } from '../i18n'
+
+// The commands used most, offered first on a bare "/" (Claude Code's and Codex's alike).
+const COMMON = ['/compact', '/clear', '/new', '/model', '/resume', '/rename', '/context', '/review', '/plan', '/btw', '/rewind', '/init', '/memory', '/status', '/usage', '/cost', '/diff', '/mcp', '/agents', '/help']
+// What those do, in a few words beside each (the rest are said by their names).
+const SAID: Record<'zh-CN' | 'en', Record<string, string>> = {
+  'zh-CN': {
+    '/compact': '压缩对话，只带摘要继续', '/clear': '清空，开始新对话', '/new': '开始新对话', '/model': '换模型',
+    '/resume': '接着以前的对话', '/rename': '改对话标题', '/context': '看上下文用了多少', '/review': '审查代码改动',
+    '/plan': '先出计划再动手', '/btw': '顺便问一句，不打断', '/rewind': '退回到之前某一步', '/init': '为项目写说明文件',
+    '/memory': '编辑记忆文件', '/status': '看当前状态', '/usage': '看用量和额度', '/cost': '看这次花费', '/diff': '看未提交的改动',
+    '/mcp': '管理 MCP 服务', '/agents': '管理子智能体', '/help': '帮助',
+  },
+  en: {
+    '/compact': 'summarise and go on', '/clear': 'start a new conversation', '/new': 'start a new conversation', '/model': 'switch model',
+    '/resume': 'go back to an earlier conversation', '/rename': 'change the title', '/context': 'context used', '/review': 'review changes',
+    '/plan': 'plan before doing', '/btw': 'a side question', '/rewind': 'go back to an earlier step', '/init': 'write the project notes',
+    '/memory': 'edit memory files', '/status': 'status', '/usage': 'usage and limits', '/cost': 'cost so far', '/diff': 'uncommitted changes',
+    '/mcp': 'MCP servers', '/agents': 'subagents', '/help': 'help',
+  },
+}
 
 export type Agent = 'claude' | 'codex' | 'opencode'
 
@@ -144,7 +164,15 @@ export function suggest(tok: Token, data: Completions | null, agent: Agent | nul
     const o = owners.get(name)!
     return agent ? undefined : o.size > 1 ? t('complete.both') : o.has('claude') ? 'Claude Code' : 'Codex'
   }
-  return rank([...owners.keys()], (n) => n.slice(1)).map((n) => ({ insert: n, label: n, hint: hint(n) }))
+  // (Just "/" typed: the ones most used first, then the rest as they score.)
+  const names = [...owners.keys()]
+  const first = tok.query ? [] : COMMON.filter((n) => owners.has(n))
+  const rest = rank(names.filter((n) => !first.includes(n)), (n) => n.slice(1))
+  return [...first, ...rest].slice(0, MAX_SHOWN).map((n) => {
+    const d = SAID[getLang()][n]
+    const who = hint(n)
+    return { insert: n, label: n, hint: d ? (who ? d + ' · ' + who : d) : who }
+  })
 }
 
 // A path after "@" as the agents read it: quoted when it has spaces.

@@ -39,6 +39,14 @@ if ('serviceWorker' in navigator) {
     const u = new URL(d.url, location.origin)
     if (u.origin !== location.origin) return
     if (location.pathname === u.pathname) {
+      // (A dialog is up — a fork being filled in, say: the page is not taken
+      // from under it, nor its address changed; it is told one is there, and
+      // takes it when the person says so — see takeHeld. Review B18.)
+      if (u.pathname === '/agents' && document.querySelector('[aria-modal="true"]')) {
+        held = u
+        heldListeners.forEach((l) => l())
+        return
+      }
       history.replaceState(history.state, '', u.pathname + u.search)
     } else if (location.pathname === '/login') {
       // Sent to sign in first: where it returns to carries it.
@@ -51,6 +59,28 @@ if ('serviceWorker' in navigator) {
     } else return
     listeners.forEach((l) => l())
   })
+}
+
+// A request held back while a dialog was up (see above): the latest only.
+let held: URL | null = null
+const heldListeners = new Set<() => void>()
+export const heldOpen = () => held
+// onHeldOpen calls f when one is held, or let go of (taken or dropped).
+export function onHeldOpen(f: () => void): () => void {
+  heldListeners.add(f)
+  return () => {
+    heldListeners.delete(f)
+  }
+}
+// takeHeld does what was held: its address written, the page told. drop:
+// let go of without.
+export function takeHeld(drop = false) {
+  const u = held
+  held = null
+  heldListeners.forEach((l) => l())
+  if (!u || drop || location.pathname !== u.pathname) return
+  history.replaceState(history.state, '', u.pathname + u.search)
+  listeners.forEach((l) => l())
 }
 
 // onOpenRequest calls f when such a request has been written into the

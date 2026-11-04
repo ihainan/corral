@@ -591,6 +591,7 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-older, .convo-working, .convo-note, .convo-cut { margin: 0; font-size: 13px; color: var(--term-fg-3); }
 .convo-note { white-space: pre-wrap; }
 .convo-older { text-align: center; }
+.term-root .convo-working-act { margin-left: 10px; font-size: 13px; }
 /* The thread's rhythm: its parts 12 apart; what the agent did tucked under
    what it said of it (4); the answer 16 off what led to it; a new turn of the
    person's 32 off the last. Distance does the grouping, not more frames. */
@@ -604,6 +605,8 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-user { align-self: flex-end; max-width: min(88%, 620px); display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
 .convo-user-text { background: var(--term-user, color-mix(in srgb, var(--term-fg) 8%, var(--term-bg))); border-radius: 16px; padding: 9px 14px; white-space: pre-wrap; }
 .convo-image { color: var(--term-fg-3); }
+.convo-user-fold { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 8; line-clamp: 8; overflow: hidden; }
+.term-root .convo-user-more { display: block; margin-top: 4px; font-size: 13px; color: var(--term-fg-2); }
 /* The pictures of a message, each to be looked at. */
 .convo-pics { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; white-space: normal; align-items: center; }
 .convo-pic { display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px; border-radius: 999px; border: 1px solid color-mix(in srgb, var(--term-fg) 18%, transparent);
@@ -645,6 +648,7 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-md a { color: var(--term-accent-text); text-underline-offset: 2px; }
 .convo-md hr { border: 0; border-top: 1px solid var(--term-line); margin: 14px 0; }
 .convo-md blockquote { padding-left: 14px; color: var(--term-fg-2); }
+.convo-md code { overflow-wrap: break-word; }
 .convo-md code { font-family: var(--font-mono); font-size: 0.88em; background: color-mix(in srgb, var(--term-fg) 8%, transparent); color: var(--term-fg); border-radius: 4px; padding: 1px 4px; }
 .convo-md .md-path > code, .convo-md a code { color: var(--term-accent-text); }
 /* A file's path in an answer: its code, underlined as something to open (a menu). */
@@ -676,6 +680,8 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 }
 .md-code-copy:hover { color: var(--term-fg); background: var(--term-hover); }
 .md-table { overflow-x: auto; }
+/* (A narrow screen: a table's first column keeps a few letters' width, the rest scrolls sideways.) */
+.md-table th:first-child, .md-table td:first-child { min-width: 4.5em; }
 .md-table table { border-collapse: collapse; font-size: 14px; line-height: 1.5; }
 .md-table th, .md-table td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--term-line); vertical-align: top; }
 .md-table th:first-child, .md-table td:first-child { padding-left: 0; }
@@ -1117,6 +1123,10 @@ button.convo-task-line:hover .convo-task-name { color: var(--term-fg); }
   overflow: hidden; overflow-wrap: anywhere;
 }
 .convo-list-where { color: var(--term-fg-2); }
+/* What it is about now (a step under way, what it waits for, how its answer begins): one line, under its name */
+.convo-list-now, .agents-list-now { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; line-height: 18px; color: var(--term-fg-2); }
+.agents-list-now { font-size: 13px; }
+.convo-list-now.is-unsent, .agents-list-now.is-unsent { color: var(--term-warn-text); }
 /* Commands it left running in the background: said in words before where it is */
 .convo-list-cmds { color: var(--term-fg-2); font-weight: 500; }
 /* The rest of a long group of old ones, behind a tap */
@@ -1312,6 +1322,7 @@ button.convo-task-line:hover .convo-task-name { color: var(--term-fg); }
 .convo-ask-tabs li.is-done::after { content: ' ✓'; }
 .convo-ask-hint { margin: 4px 0; font-size: 13px; color: var(--term-fg-3); }
 .convo-ask-hint.is-warn { color: var(--term-warn-text); }
+.term-root .convo-ask-there { margin-left: 8px; font-size: 13px; }
 .convo-ask-opt.is-ticked { background: var(--term-accent-soft); }
 @media (forced-colors: active) { .convo-ask-key { border: 1px solid CanvasText; } }
 .convo-ask-opt-wrap { display: flex; flex-direction: column; gap: 4px; }

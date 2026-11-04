@@ -2,7 +2,7 @@ import { createContext, Fragment, memo, useCallback, useContext, useEffect, useL
 import { ArrowDown, Check, Copy, FolderOpen, Image as ImageIcon, ChevronDown, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, Clock, Download, GitBranch, Keyboard, ListOrdered, Loader, MoreHorizontal, MoreVertical, PanelLeft, Pin, Search, TriangleAlert, X, Plus } from 'lucide-react'
 import { t, getLang, type I18nKey } from '../i18n'
 import { api } from '../api'
-import { asHeld, dayBefore, DAYS, dayStart, FOLDED, foldAt, GROUPS, inGroup, listOrder, pinned, type ConvoListRow, type RowCmds } from './agentOrder'
+import { asHeld, dayBefore, dayStart, FOLDED, foldAt, GROUPS, inGroup, listOrder, pinned, type ConvoListRow, type RowCmds } from './agentOrder'
 import { copyText, Dialog, isCoarse, Menu, MenuLayer, type MenuItem } from '../components/ui'
 import { composing, foldAllKey, helpKey, jumpKey, onMac, switchKey } from './pageKeys'
 import { local } from '../storage'
@@ -17,6 +17,8 @@ import { itemKey } from './convoSearch'
 import { exportMarkdown } from './convoExport'
 import { AgentIcon } from './agentIcons'
 import { matchQuery } from './agents'
+import { keptEntries } from './conversation'
+import { ShowTerminal } from './showTerminal'
 import type { Convo, ConvoCost, ConvoQuota, ConvoQuotaWindow, ConvoEntry, ConvoShell, ConvoHunk, ConvoMeta, ConvoPart, ConvoQueued, ConvoRunning, ConvoTask, ConvoTool, ConvoTrouble, ConvoEvent } from './conversation'
 import { agentName } from './askText'
 import { duration, when } from './convoTime'
@@ -40,6 +42,27 @@ import { category, isNote, items, ms, partTime, sameEdits, toolName, verbOf, typ
 
 function count(cat: Category, n: number): string {
   return t(`convo.n.${cat}${n === 1 ? '1' : ''}` as I18nKey, { n })
+}
+
+const LONG_LINES = 8 // a message of the person's longer than this is folded
+const LONG_CHARS = 700
+const clip = (s: string, n: number) => (s.length > n ? s.slice(0, n - 1) + '…' : s)
+const baseName = (p: string) => p.split('\n')[0].trim().replace(/\/+$/, '').split('/').pop() ?? ''
+// A kind of step in a turn's line: the files changed by name (two, then how
+// many more), the one command run by what it is; else how many.
+function said(cat: Category, tools: ConvoTool[]): string {
+  const n = tools.length
+  if (cat === 'edit') {
+    const files = [...new Set(tools.map((tl) => baseName(tl.detail ?? '')).filter(Boolean))]
+    if (!files.length) return count(cat, n)
+    const two = files.slice(0, 2).join(t('convo.listSep'))
+    return files.length > 2 ? t('convo.sum.editedMany', { files: two, n: files.length, m: files.length - 2 }) : t('convo.sum.edited', { files: two })
+  }
+  if (cat === 'cmd' && n === 1) {
+    const o = object(tools[0])
+    return o.text ? (o.code ? t('convo.sum.ran', { s: clip(o.text, 40) }) : clip(o.text, 48)) : count(cat, n)
+  }
+  return count(cat, n)
 }
 
 // What the bar over the conversation says of the agent: where it is, what
@@ -131,6 +154,7 @@ export function ConversationView({
   answered,
   files,
   onForkAt,
+  forkWhole,
 }: {
   convo: Convo
   agent: ConvoAgent | null
@@ -158,6 +182,7 @@ export function ConversationView({
   lead?: ReactNode // (first in the bar: the agents page's way back to its list, on a phone)
   answered?: boolean // (its question answered here, its list's word of it not come yet)
   files?: FileActs // (its session live: a file it names can be shown, fetched, looked at)
+  forkWhole?: boolean // (all of it can be forked now: its turn over and nothing of it running, as the list says)
   onForkAt?: (at: string | undefined) => void // (a copy of it up to the end of a turn can be started: cut before at, the next message typed; none, all of it)
 }) {
   const working = agent?.status === 'working'
@@ -953,7 +978,17 @@ export function ConversationView({
           </Fragment>
         ))}
         {pendingList}
-        {working && (quiet || quietLong > 0) && <p className="convo-working">{quietLong ? t('convo.quietLong', { d: quietLong < 3600000 ? t('convo.for.m', { n: Math.floor(quietLong / 60000) }) : t('convo.for.h', { n: Math.floor(quietLong / 3600000) }) }) : t('convo.quiet')}</p>}
+        {working && (quiet || quietLong > 0) && (
+          <p className="convo-working">
+            {quietLong ? t('convo.quietLong', { d: quietLong < 3600000 ? t('convo.for.m', { n: Math.floor(quietLong / 60000) }) : t('convo.for.h', { n: Math.floor(quietLong / 3600000) }) }) : t('convo.quiet')}
+            {/* (Long without a word: where to see what it shows meanwhile.) */}
+            {quietLong > 0 && (
+              <button type="button" className="link-btn convo-working-act" onClick={onShowTerminal}>
+                {t('convo.lookTerminal')}
+              </button>
+            )}
+          </p>
+        )}
       </>
     )
 
@@ -1037,7 +1072,7 @@ export function ConversationView({
   // next message they typed (one taken in during that turn is of it).
   const entriesRef = useRef(convo.entries)
   entriesRef.current = convo.entries
-  const atRest = agent?.status === 'idle' || agent?.status === 'done'
+  const atRest = !!forkWhole
   const forkAt = useMemo(() => {
     if (!onForkAt) return undefined
     const next = (e: ConvoEntry) => {
@@ -1272,7 +1307,11 @@ export function ConversationView({
         {convo.status === 'ready' && convo.running && <RunningWork items={convo.running} openSub={!convo.bind?.agent || convo.bind.agent === 'claude' || convo.bind.agent === 'codex' ? openSub : undefined} />}
         {convo.status === 'ready' && convo.tasks && <Tasks tasks={convo.tasks} fold={!!ask} />}
         {/* (Asked from the screen: also where its log is not read.) */}
-        {(convo.status === 'ready' || convo.status === 'none') && ask && <AskDock>{ask}</AskDock>}
+        {(convo.status === 'ready' || convo.status === 'none') && ask && (
+          <ShowTerminal.Provider value={onShowTerminal}>
+            <AskDock>{ask}</AskDock>
+          </ShowTerminal.Provider>
+        )}
         {/* (Not of one at rest, which would have taken them in: not when its state is not known.) */}
         {convo.status === 'ready' && agent?.status !== 'idle' && agent?.status !== 'done' && convo.queued && <Queue items={convo.queued} onSendNow={working ? onSendNow : undefined} said={sendNow} />}
         {waits && !ask && convo.status === 'ready' && (
@@ -1303,6 +1342,8 @@ export function ConversationView({
       </div>
       {changes && shownEdits && <ChangesPanel key={changes.key} edits={shownEdits} focus={changes.path} onClose={unshow} active={active} onCopy={copy} />}
       {subs && subs.length > 0 && convo.of && (
+        // (A subagent's messages are not the session's turns: no fork from them.)
+        <ForkAtOf.Provider value={undefined}>
         <SubPanel
           key={subs[subs.length - 1].agent}
           of={convo.of}
@@ -1315,6 +1356,7 @@ export function ConversationView({
           active={active}
           copy={copy}
         />
+        </ForkAtOf.Provider>
       )}
       {picking && side && <Picker rows={rows} onClose={unpick} searchFirst={picking === 'search'} />}
     </div>
@@ -2036,7 +2078,12 @@ function Gauge({ part }: { part: number }) {
 // when it came to rest, the clock's time (its day said by its group), or
 // the date before yesterday.
 function stamp(r: ConvoListRow, now: number, yesterday: number): string {
-  if (r.status === 'working' || r.status === 'blocked') return when(r, now)
+  // (Waiting or at work: how long, short — its colour and group say which; the room is the title's.)
+  if (r.status === 'working' || r.status === 'blocked') {
+    if (!r.since || now < r.since) return ''
+    const m = Math.floor((now - r.since) / 60000)
+    return m < 1 ? t('convo.for.now') : m < 60 ? t('convo.for.m', { n: m }) : m < 48 * 60 ? t('convo.for.h', { n: Math.floor(m / 60) }) : t('convo.for.d', { n: Math.floor(m / 1440) })
+  }
   if (!r.since || now < r.since) return ''
   const d = new Date(r.since)
   if (r.since >= yesterday) return d.toLocaleTimeString(getLang(), { hour: '2-digit', minute: '2-digit', hour12: false })
@@ -2154,7 +2201,12 @@ function AgentList({ rows, menus, onPicked, placed, query: given, onQuery, searc
   const groups = GROUPS.flatMap((g) => {
     const of = inGroup(g, inOrder.map(at))
     if (g.name !== 'convo.group.recent') return [{ name: g.name, of }]
-    return DAYS.map((d) => ({ name: d.name, of: of.filter((p) => d.of(p.since ?? 0, today, yesterday)) }))
+    // (At rest: one group, latest first — its time says which day — not a
+    // heading a day for a row or two; those of no known time last.)
+    return [
+      { name: 'convo.group.idle' as I18nKey, of: of.filter((p) => (p.since ?? 0) > 0) },
+      { name: 'convo.group.other' as I18nKey, of: of.filter((p) => (p.since ?? 0) <= 0) },
+    ]
   })
   return (
     <>
@@ -2223,6 +2275,8 @@ function AgentList({ rows, menus, onPicked, placed, query: given, onQuery, searc
                     {/* (Its status by its dot only, and its group: in words for a screen
                         reader, and shown where the system's colours take the dot's away.) */}
                     {(said || r.bg) && <span className={'convo-list-status is-' + r.status}>{t(r.bg === 'running' ? 'convo.status.bg' : r.bg === 'stale' ? 'convo.status.bgStale' : (`convo.status.${r.status}` as I18nKey))}</span>}
+                    {!!r.unsent && <span className="convo-list-now is-unsent">{t('convo.unsentRow', { n: r.unsent })}</span>}
+                    {r.now && <span className={'convo-list-now is-' + r.status}>{r.now}</span>}
                     {(r.where || r.cmds) && (
                       <span className="convo-list-sub">
                         {r.cmds && <BgCmds cmds={r.cmds} />}
@@ -2490,11 +2544,11 @@ function NewAgentRow({ onPicked }: { onPicked?: () => void }) {
 }
 
 // The agent's task list, over the composer while some of it is left: one
-// line (how far, what now) that opens to all of it. Folded at first on a
-// small screen, where the thread needs the room.
+// line (how far, what now) that opens to all of it. Folded at first on
+// every screen: the line says what is under way; the thread keeps the room.
 // fold: a question is being answered over it: one line, unless opened then.
 function Tasks({ tasks, fold }: { tasks: ConvoTask[]; fold?: boolean }) {
-  const [opened, setOpened] = useState(() => !matchMedia('(max-width: 640px)').matches)
+  const [opened, setOpened] = useState(false)
   const [asked, setAsked] = useState<boolean | null>(null) // (chosen while folded for a question)
   useEffect(() => setAsked(null), [fold])
   const open = fold ? (asked ?? false) : opened
@@ -2864,7 +2918,6 @@ function EventNote({ ev, idle }: { ev: ConvoEvent; idle?: boolean }) {
 export const recapText = (s: string) => s.replace(/\s*\((?:disable|turn off)[^()]*\/config\)\.?\s*$/i, '').trim()
 
 // (The conversation's terminal, for a line that sends one there.)
-const ShowTerminal = createContext<(() => void) | undefined>(undefined)
 
 // A subagent sent off, whose own conversation can be shown: by its id.
 type Sub = { agent: string; title?: string }
@@ -3212,10 +3265,18 @@ function UserTurn({ e, onCopy }: { e: ConvoEntry; onCopy: (s: string) => void })
   // (A shell command run with "!": in the terminal's letters, as typed.)
   const shell = /^! \S/.test(text)
   const forkAt = useContext(ForkAtOf)
+  // (A long one — a pasted command, a log — folded to its first lines, opened at a tap.)
+  const long = text.split('\n').length > LONG_LINES || text.length > LONG_CHARS
+  const [whole, setWhole] = useState(false)
   return (
     <div className={'convo-user' + (e.mid ? ' is-mid' : '')}>
       <div className={'convo-user-text' + (shell ? ' is-shell' : '')}>
-        {text}
+        {long && !whole ? <span className="convo-user-fold">{text}</span> : text}
+        {long && (
+          <button type="button" className="link-btn convo-user-more" aria-expanded={whole} onClick={() => setWhole(!whole)}>
+            {t(whole ? 'convo.userLess' : 'convo.userMore')}
+          </button>
+        )}
         {images > 0 && !any && !/\[Image #\d+\]/.test(text) && <span className="convo-image">{t(images === 1 ? 'convo.images1' : 'convo.images', { n: images })}</span>}
         {any && (
           <span className="convo-pics">
@@ -3343,11 +3404,14 @@ function Work({ it, open, onToggle, onCopy }: { it: Extract<Item, { kind: 'work'
   const counts = new Map<Category, number>()
   for (const tl of tools) counts.set(category(tl.name), (counts.get(category(tl.name)) ?? 0) + 1)
   const order: Category[] = ['edit', 'cmd', 'read', 'search', 'web', 'agent', 'other']
+  // (What it did, named where a name says more than a count: the files it
+  // changed, the one command it ran; counts for the rest.)
   const sum = order
     .filter((c) => counts.has(c))
-    .map((c) => count(c, counts.get(c)!))
+    .map((c) => said(c, tools.filter((tl) => category(tl.name) === c)))
     .join(t('convo.sep'))
-  const failed = tools.filter((tl) => tl.error).length
+  const failedOnes = tools.filter((tl) => tl.error)
+  const failed = failedOnes.length
   const busy = it.busy
   const now = useTick(!!busy)
   // (Of thinking only: that it thought, and the start of it.)
@@ -3380,7 +3444,7 @@ function Work({ it, open, onToggle, onCopy }: { it: Extract<Item, { kind: 'work'
             {failed > 0 && (
               <>
                 {t('convo.sep')}
-                <span className="convo-failed is-inline">{t('convo.failed', { n: failed })}</span>
+                <span className="convo-failed is-inline">{failed === 1 ? t('convo.failedOne', { s: clip(object(failedOnes[0]).text, 32) }) : t('convo.failed', { n: failed })}</span>
               </>
             )}
           </span>
@@ -3489,6 +3553,27 @@ function waitText(tool?: ConvoTool): string {
   const o = tool.stdin ? '' : verbOf(tool.name) === 'cmd' && cmd ? cmd : object(tool).text
   const ask = verbOf(tool.name) === 'ask' || tool.name === 'AskUserQuestion' || tool.name === 'ExitPlanMode'
   return o ? t(ask ? 'convo.waitAnswer' : 'convo.waitApprove', { s: o }) : t('convo.status.blocked')
+}
+
+// A row's line of what it is about now, from what is kept of its
+// conversation (see keptEntries): what it waits for the person to allow or
+// answer; the step under way; or how its answer begins. '' where nothing is
+// known (never read) or nothing says more than its state.
+export function glanceOf(sessionId: string, pane: string | undefined, status: string): string {
+  if (status !== 'blocked' && status !== 'working' && status !== 'done') return ''
+  const es = keptEntries(sessionId, pane)
+  if (!es) return ''
+  let i = es.length - 1
+  while (i >= 0 && !(es[i].role === 'user' && !es[i].mid)) i--
+  const parts = es.slice(i + 1).flatMap((e) => (e.role === 'assistant' ? e.parts : []))
+  const open = [...parts].reverse().find((p) => p.kind === 'tool' && p.tool && !p.tool.done)
+  if (status === 'blocked') return open?.tool ? waitText(open.tool) : ''
+  if (status === 'working' && open?.tool) return liveText(open.tool)
+  const said = [...parts].reverse().find((p) => p.kind === 'text' && p.text?.trim())
+  if (!said?.text) return ''
+  // (Its first line of words: no heading or list marks, no code quotes.)
+  const line = said.text.split('\n').map((l) => l.replace(/^\s*(?:#{1,6}\s+|[-*+]\s+|\d+[.)]\s+|>\s*)/, '').replace(/[`*_]/g, '').trim()).find(Boolean) ?? ''
+  return line.length > 120 ? line.slice(0, 120) + '…' : line
 }
 
 function liveText(tool: ConvoTool): string {

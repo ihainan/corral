@@ -3,7 +3,7 @@ import { ArrowUp, ChevronLeft, FoldVertical, GitBranch, History, MessageSquarePl
 import { api, ApiError, authGen, errorText, uploadFile, type SessionInfo } from '../api'
 import { t, type I18nKey } from '../i18n'
 import { navigate, onNavigate } from '../router'
-import { onOpenRequest } from '../notifyopen'
+import { heldOpen, onHeldOpen, onOpenRequest, takeHeld } from '../notifyopen'
 import { isDark, maxPinned, setChromeColor, setPrefs, usePrefs } from '../prefs'
 import { local } from '../storage'
 import { CLOSE_MENUS, Confirm, Menu, useToast, type MenuItem } from '../components/ui'
@@ -18,7 +18,7 @@ import { SessionOpDialog, type SessionOp } from '../terminal/sessionOps'
 import { NEW_AGENT, NewAgentDialog } from '../terminal/newAgent'
 import { ForkDialog, RenameDialog, type RenameTarget } from '../terminal/agentOps'
 import { agentWho, ChimeCounter, chime, countsOf } from '../terminal/chime'
-import { BgCmds, CODEX_EFFORTS, ConversationView, ListSearch, SEARCH_FROM, when, type ConvoAgent, type ConvoListRow, type ConvoPending, type ConvoWent, type FileActs, type ModelOpt } from '../terminal/Conversation'
+import { BgCmds, CODEX_EFFORTS, ConversationView, glanceOf, ListSearch, SEARCH_FROM, when, type ConvoAgent, type ConvoListRow, type ConvoPending, type ConvoWent, type FileActs, type ModelOpt } from '../terminal/Conversation'
 import { FilesDialog } from '../terminal/FilesDialog'
 import { downloadPath, PictureDialog } from '../terminal/picture'
 import { attach, ATTACH_LABEL, AttachStrip, takeOut } from '../terminal/attach'
@@ -306,6 +306,9 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
     window.addEventListener(NEW_AGENT, on)
     return () => window.removeEventListener(NEW_AGENT, on)
   }, [active])
+  // An alert tapped while a dialog was up here: held, said over the page, gone to when asked.
+  const [held, setHeld] = useState(() => !!heldOpen())
+  useEffect(() => onHeldOpen(() => setHeld(!!heldOpen())), [])
   // (Gone to once the list has it: before, the list of before would put another in front.)
   const [arriving, setArriving] = useState<{ s: SessionInfo; pane: string; key: string; until: number; late?: boolean } | null>(null)
   const started = (s: SessionInfo, pane: string, first: string) => {
@@ -387,6 +390,12 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
   // back loses neither (a second send of the same could follow).
   // So are its draft as shown, and the log's turns that confirmed one.
   const [sentBy, setSentBy] = useState<Record<string, Sent[]>>(restoreSent)
+  // How many of an agent's messages are not seen taken in, as the lists say
+  // it (by its key): long past their wait, or found not taken, lately; not
+  // one found gone to a subagent. From what is kept here: nothing is read
+  // for it — its own view, gone back to, makes sure as it does.
+  const unsentOf = (key: string) =>
+    (sentBy[key] ?? []).filter((p) => Date.now() - p.at < UNSENT_LISTED_MS && !(p.look && typeof p.look === 'object' && p.look.went) && (p.state === 'unseen' || (p.state === 'waiting' && Date.now() - p.at >= PENDING_MS))).length
   useEffect(() => keepSent(sentBy), [sentBy])
   const [sendingBy, setSendingBy] = useState<Record<string, boolean>>({})
   const [draftBy, setDraftBy] = useState<Record<string, string>>({})
@@ -489,7 +498,7 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
 
   let body: ReactNode
   if (stack && screen === 'list' && sessions !== null && entries.length)
-    body = <PhoneList entries={entries} all={sessions} titles={titles.current} query={sideQuery} onQuery={setSideQuery} onPick={choose} />
+    body = <PhoneList entries={entries} all={sessions} titles={titles.current} query={sideQuery} onQuery={setSideQuery} onPick={choose} unsentOf={unsentOf} />
   else if (!cur || (stack && screen === 'list')) {
     const held = holding && !(stack && screen === 'list') // (a phone's list waits for none)
     body = (
@@ -526,6 +535,7 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
         toast={toast}
         composerEnter={prefs.composerEnter}
         sent={sentBy[k] ?? []}
+        unsentOf={unsentOf}
         setSent={(f) => setSentBy((all) => ({ ...all, [k]: f(all[k] ?? []) }))}
         sending={!!sendingBy[k]}
         setSending={(v) => setSendingBy((all) => ({ ...all, [k]: v }))}
@@ -585,6 +595,17 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
           {t('agents.failed')}
         </p>
       )}
+      {held && (
+        <p className="agents-chat-stale is-warn" role="status">
+          {t('agents.alertHeld')}
+          <button type="button" className="link-btn agents-chat-stale-act" onClick={() => takeHeld()}>
+            {t('agents.alertGo')}
+          </button>
+          <button type="button" className="link-btn agents-chat-stale-act" onClick={() => takeHeld(true)}>
+            {t('common.close')}
+          </button>
+        </p>
+      )}
       {/* (A new agent on its way: said over the page wherever the person is, until it shows in the list.) */}
       {arriving && (
         <p className={'agents-chat-stale' + (arriving.late ? ' is-warn' : '')} role="status">
@@ -642,6 +663,8 @@ const PREFETCH_MOST = 3
 const PREFETCH_AFTER_MS = 1500
 
 const SENT_KEPT_MS = 24 * 3600 * 1000
+// (Said on the lists only of late ones: an old one of a process long gone says nothing of now.)
+const UNSENT_LISTED_MS = 2 * 3600 * 1000
 // One found gone to a subagent (its own log has it): said for sure, and
 // that subagent has dealt with it since — its note is let go of this long
 // after it was first shown (not sent again by itself: an old instruction).
@@ -692,12 +715,13 @@ const tmuxCmdsOf = (e: Entry): RowCmds | undefined => {
 
 // The conversation of one agent, and what is sent to it. Keyed by the
 // agent: nothing of another's (its draft, what was sent, a stop) carries over.
-function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerEnter, sent, setSent, sending, setSending, draft: shownDraft, setDraftShown, used, lead, onClosed, onStarted, query, onQuery }: {
+function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerEnter, sent, unsentOf, setSent, sending, setSending, draft: shownDraft, setDraftShown, used, lead, onClosed, onStarted, query, onQuery }: {
   cur: Entry
   entries: Entry[]
   all: SessionInfo[]
   titles: Titles
   sent: Sent[]
+  unsentOf: (key: string) => number
   setSent: (f: (ps: Sent[]) => Sent[]) => void
   sending: boolean
   setSending: (v: boolean) => void
@@ -790,7 +814,12 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     keep()
     return keep
   }, [tmuxKeyNow, tmuxCmdsNow, convo.status, convo.okAt, convo.failing, active, readAt])
-  const doneHere = herdr && active && row && !row.lost && row.status === 'done' && row.a.status === 'done' && !row.bg && row.a.bg !== 'checking' ? { pane: row.a.pane_id, round: row.a.round ?? 0, session: row.a.session ?? '' } : undefined
+  // (Seen only once its conversation is in front and read afresh since it was
+  // gone to — what was kept from before shows at once, and is no proof the
+  // person sees what it did since; not while it fails to load — review B02.)
+  const shownSince = useRef({ key: '', at: 0 })
+  if (shownSince.current.key !== cur.key + ' ' + cur.s.id) shownSince.current = { key: cur.key + ' ' + cur.s.id, at: Date.now() }
+  const doneHere = herdr && active && (convo.status === 'ready' || convo.status === 'none') && !convo.failing && convo.readAt() >= shownSince.current.at && row && !row.lost && row.status === 'done' && row.a.status === 'done' && !row.bg && row.a.bg !== 'checking' ? { pane: row.a.pane_id, round: row.a.round ?? 0, session: row.a.session ?? '' } : undefined
   const doneKey = doneHere && JSON.stringify(doneHere)
   useEffect(() => {
     if (!doneKey) return
@@ -883,14 +912,15 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       if (e.row) {
         const r = e.row
         const said = (current && agent?.title) || keptTitle(titles, e) || paneTitle(r.a.title) || dirName(r.a.cwd) || r.a.agent
-        return { key: e.key, ...labelOf(e, said, hosts), program: r.a.agent, status: current && agent && !r.bg ? agent.status : r.status, bg: r.lost ? undefined : r.bg, cmds: cmdsOf(r), since: r.lost ? undefined : r.bg ? r.a.bg_since : r.a.since, current, pinned: pinAt(e.key), onPick: () => onPick(e), menu: () => rowMenu.current(e) }
+        const st = current && agent && !r.bg ? agent.status : r.status
+        return { key: e.key, ...labelOf(e, said, hosts), unsent: unsentOf(e.key) || undefined, now: r.lost ? undefined : glanceOf(e.s.id, e.pane, st) || undefined, program: r.a.agent, status: st, bg: r.lost ? undefined : r.bg, cmds: cmdsOf(r), since: r.lost ? undefined : r.bg ? r.a.bg_since : r.a.since, current, pinned: pinAt(e.key), onPick: () => onPick(e), menu: () => rowMenu.current(e) }
       }
       const title = (current && agent?.title) || keptTitle(titles, e) || `${e.s.host_name} · ${sessionWhich(e.s, all)}`
-      return { key: e.key, title, where: whereOf(e, hosts), program: current ? agent?.program : undefined, status: current && agent ? agent.status : 'unknown', cmds: current ? agent?.cmds : tmuxCmdsOf(e), current, pinned: pinAt(e.key), onPick: () => onPick(e), menu: () => rowMenu.current(e) }
+      return { key: e.key, title, where: whereOf(e, hosts), unsent: unsentOf(e.key) || undefined, program: current ? agent?.program : undefined, status: current && agent ? agent.status : 'unknown', cmds: current ? agent?.cmds : tmuxCmdsOf(e), current, pinned: pinAt(e.key), onPick: () => onPick(e), menu: () => rowMenu.current(e) }
     })
     return placedAs ? out.map((r) => (r.current ? { ...r, placeAs: placedAs } : r)) : out
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [entries, cur, agent, convo.title, all, titles, onPick, placedAs, pins])
+  }, [entries, cur, agent, convo.title, all, titles, onPick, placedAs, pins, unsentOf])
   const shown = rows.find((r) => r.current)
   const known = !!shown && shown.status !== 'unknown'
   useEffect(() => {
@@ -1670,7 +1700,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   const composer = (
     // (A question over it: the box kept to a line, its tools back when it is typed in.)
     // (The card asking is up: the box gives its room to the card — one line says why — rather than stand empty under it, as on a small phone it pushed the card's own buttons out of sight.)
-    <div className={'composer' + (waits && agent?.status === 'blocked' ? ' is-held' : '') + (waits && replyTo && agent?.status === 'blocked' && !answered ? ' is-asked' : '')}>
+    <div className={'composer' + (waits && agent?.status === 'blocked' ? ' is-held' : '') + (waits && replyTo && agent?.status === 'blocked' && !answered && (convo.status === 'ready' || convo.status === 'none') && !draft.trim() && !up ? ' is-asked' : '')}>
       {claudeCard.card && <CardNotice card={claudeCard.card} stale={claudeCard.stale} onPress={claudeCard.press} />}
       {completion.list}
       {up && (
@@ -2036,6 +2066,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       answered={answered}
       files={fileActs}
       onForkAt={forkOf(cur, 'probe') ? forkHere : undefined}
+      forkWhole={!!cur.row && (cur.row.status === 'idle' || cur.row.status === 'done')}
     />
     {viewing && active && (
       <PictureDialog
@@ -2162,7 +2193,7 @@ const asRow = (e: Entry, pins: string[]): ConvoListRow => {
 }
 // query, onQuery: what it is searched for, kept by the page (as the side
 // list's is): still searched, back from a conversation.
-function PhoneList({ entries, all, titles, query, onQuery, onPick }: { entries: Entry[]; all: SessionInfo[]; titles: Titles; query: string; onQuery: (q: string) => void; onPick: (e: Entry) => void }) {
+function PhoneList({ entries, all, titles, query, onQuery, onPick, unsentOf }: { entries: Entry[]; all: SessionInfo[]; titles: Titles; query: string; onQuery: (q: string) => void; onPick: (e: Entry) => void; unsentOf: (key: string) => number }) {
   const [now, setNow] = useState(Date.now())
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 30000)
@@ -2299,6 +2330,11 @@ function PhoneList({ entries, all, titles, query, onQuery, onPick }: { entries: 
                       </span>
                     )}
                   </span>
+                  {unsentOf(e.key) > 0 && <span className="agents-list-now is-unsent">{t('convo.unsentRow', { n: unsentOf(e.key) })}</span>}
+                  {r && !r.lost && (() => {
+                    const g = glanceOf(e.s.id, e.pane, status)
+                    return g ? <span className={'agents-list-now is-' + status}>{g}</span> : null
+                  })()}
                   <span className="agents-list-where">
                     {r && cmdsOf(r) && <BgCmds cmds={cmdsOf(r)!} />}
                     {!r && tmuxCmdsOf(e) && <BgCmds cmds={tmuxCmdsOf(e)!} />}

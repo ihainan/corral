@@ -343,6 +343,15 @@ export async function prefetchConversation(sessionId: string, pane: string | und
   return true
 }
 
+// The last entries kept of a pane's conversation (read by a view or a
+// prefetch), oldest first; null when none is kept. For a glance at what it
+// is doing from the list: nothing read for it.
+export function keptEntries(sessionId: string, pane: string | undefined, most = 40): ConvoEntry[] | null {
+  const k = kept.get(keyOf(sessionId, pane))
+  if (!k || !k.byseq.size) return null
+  return [...k.byseq.values()].sort((a, b) => a.seq - b.seq).slice(-most)
+}
+
 // (Another account signed in, or none: nothing of the one before stays.)
 export function forgetConversations() {
   kept.clear()

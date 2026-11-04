@@ -202,6 +202,8 @@ export function NewAgentDialog({ sessions, onDone, onOpen, onClose }: { sessions
           <span>{t('newAgent.label')}</span>
           <input className="input" value={label} maxLength={40} placeholder={t('newAgent.labelHint')} onChange={(e) => setLabel(e.target.value)} />
         </label>
+        {/* (Not Claude Code: going on with an old conversation is not offered here — said, not just missing.) */}
+        {kind !== 'claude' && <p className="hint">{t(kind === 'codex' ? 'newAgent.noResumeCodex' : 'newAgent.noResumeOpencode')}</p>}
         {kind === 'claude' && (
           <div className="field new-agent-old">
             {olds === null ? (
