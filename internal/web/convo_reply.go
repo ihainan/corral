@@ -67,10 +67,11 @@ func (s *Server) convoScreen(w http.ResponseWriter, ctx context.Context, sess *t
 
 // screenOf: a screen as read (convoScreenCommand's output) as it is shown
 // (without blank space at its end, its last maxScreenBytes), and the digest
-// that names it: the SHA-256 of all of it as read, which the host computes
-// again right before an answer's keys.
+// that names it: the SHA-256 of all of it as read but what changes by
+// itself (steady), which the host computes again right before an answer's
+// keys.
 func screenOf(raw []byte) (text, digest string, cut bool) {
-	sum := sha256.Sum256(raw)
+	sum := sha256.Sum256(steady(raw))
 	text = strings.TrimRight(strings.ReplaceAll(string(raw), "\r\n", "\n"), " \t\n")
 	if len(text) > maxScreenBytes {
 		at := len(text) - maxScreenBytes
@@ -80,6 +81,47 @@ func screenOf(raw []byte) (text, digest string, cut bool) {
 		text, cut = text[at:], true
 	}
 	return text, hex.EncodeToString(sum[:]), cut
+}
+
+// What of a screen changes on its own while it waits, left out of its
+// digest — else an answer to it could never be sent, the screen read again
+// before its keys always another: the countdown Claude Code puts under a
+// permission prompt in an unattended session ("⚠ Claude Code will
+// automatically block this request in 1:09, to avoid …", a new figure a
+// second), its line and the lines it wraps onto, down to the next blank
+// line (its figure's width may move where it wraps: "10:00", "9:59").
+// steadyAwk does the same on the host (the gates screen: and reply:), line
+// by line as awk reads and prints them; steady here, to the byte.
+const steadyAwk = `skip && /^[ \t]*$/ { skip = 0 }
+!skip && /will automatically [a-z]+ this request in [0-9]+:[0-9][0-9]/ { skip = 1 }
+!skip { print }`
+
+var steadyCountdown = regexp.MustCompile(`will automatically [a-z]+ this request in [0-9]+:[0-9][0-9]`)
+
+func steady(raw []byte) []byte {
+	s := string(raw)
+	if s == "" {
+		return nil
+	}
+	lines := strings.Split(s, "\n")
+	if strings.HasSuffix(s, "\n") {
+		lines = lines[:len(lines)-1] // (awk's last record ends at the last newline)
+	}
+	var b strings.Builder
+	skip := false
+	for _, l := range lines {
+		if skip && strings.Trim(l, " \t") == "" {
+			skip = false
+		}
+		if !skip && steadyCountdown.MatchString(l) {
+			skip = true
+		}
+		if !skip {
+			b.WriteString(l)
+			b.WriteByte('\n')
+		}
+	}
+	return []byte(b.String())
 }
 
 var hexDigest = regexp.MustCompile(`^[0-9a-f]{64}$`)

@@ -1023,8 +1023,12 @@ button.convo-task-line:hover .convo-task-name { color: var(--term-fg); }
 .convo-dock > * { flex: none; }
 .convo-dock > .convo-dock-ask { flex: 0 1 auto; min-height: 96px; }
 .convo-dock-ask .convo-ask { box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18); }
-.convo-ask-block { max-height: min(34vh, 300px); white-space: pre; overflow: auto; }
-.convo-ask-block > span { display: block; min-width: max-content; }
+.convo-ask-block { max-height: min(34vh, 300px); white-space: pre-wrap; overflow-wrap: anywhere; overflow: auto; }
+.convo-ask-block > span { display: block; }
+/* (What a permission is for, above its command; what Claude Code notes under it, as words.) */
+.convo-ask-desc { margin: 0 0 8px; font-size: 14px; line-height: 20px; color: var(--term-fg); }
+.convo-ask-note { margin: 8px 0 0; font-size: 13px; line-height: 19px; color: var(--term-warn-text); }
+.convo-ask-note.is-countdown { font-variant-numeric: tabular-nums; }
 .convo-ask-block > .convo-ask-rule { color: var(--term-fg-3); opacity: 0.6; }
 .convo-ask-unread { margin: 0; font-size: 13px; color: var(--term-warn-text); }
 .convo-ask-label { min-width: 0; line-height: 22px; font-weight: 500; overflow-wrap: anywhere; }

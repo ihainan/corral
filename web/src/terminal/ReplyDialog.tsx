@@ -361,24 +361,74 @@ function useConfirm(screen: { text: string; digest: string } | null, opts: { key
   return { asked: asked && asked.digest === digest ? asked.key : null, choose, enter }
 }
 
-// promptBlock): an edit's lines marked added and removed as the screen marks
-// them ("12 +", "12 -", and the lines going on from them).
+// What a permission prompt asks to be allowed (its lines, as promptBlock
+// gives them), read as it is drawn: what it says it is for, above the first
+// dashed rule; the command or the edit itself between the rules — the bar
+// Claude Code draws along a command left out, its lines as drawn but wrapped
+// here, not cut at the card's edge; and what it notes under them (a danger
+// it sees, the countdown before it refuses by itself), as words. An edit's
+// lines marked added and removed as the screen marks them ("12 +", "12 -",
+// and the lines going on from them). Rules other than two: all of it as
+// the command is (11-04).
+const GUTTER = /^(\s*)│ ?/
+const COUNTDOWN = /automatically ([a-z]+) this request in (\d+):(\d{2})/
 function Asked({ lines: all }: { lines: string[] }) {
+  const rules = all.flatMap((l, i) => (dashedRule.test(l) ? [i] : []))
+  const two = rules.length >= 2
+  const desc = two ? all.slice(0, rules[0]).map((l) => l.trim()).filter(Boolean) : []
+  const main = (two ? all.slice(rules[0] + 1, rules[rules.length - 1]) : all).filter((l) => !dashedRule.test(l)).map((l) => l.replace(GUTTER, '$1'))
+  // (Its notes: a line beginning with ⚠ or after a blank one begins one; the
+  // rest go on from the line before, as they were wrapped.)
+  const notes: string[] = []
+  let gap = true
+  for (const raw of two ? all.slice(rules[rules.length - 1] + 1) : []) {
+    const l = raw.replace(GUTTER, '').trim()
+    if (!l) {
+      gap = true
+      continue
+    }
+    if (gap || l.startsWith('⚠') || !notes.length) notes.push(l)
+    else notes[notes.length - 1] += (/[\u3000-\u9fff]$/.test(notes[notes.length - 1]) ? '' : ' ') + l
+    gap = false
+  }
   let sign: '' | 'add' | 'del' = ''
-  const lines = all.filter((l) => !dashedRule.test(l))
   return (
-    <pre className="convo-pre convo-ask-block">
-      {lines.map((l, i) => {
-        const m = /^\s*\d+\s?([-+])/.exec(l)
-        if (m) sign = m[1] === '+' ? 'add' : 'del'
-        else if (!(sign && /^\s+[-+]/.test(l))) sign = ''
-        return (
-          <span key={i} className={sign ? 'convo-' + sign : undefined}>
-            {l + '\n'}
-          </span>
-        )
+    <>
+      {desc.length > 0 && <p className="convo-ask-desc">{desc.join(' ')}</p>}
+      <pre className="convo-pre convo-ask-block">
+        {main.map((l, i) => {
+          const m = /^\s*\d+\s?([-+])/.exec(l)
+          if (m) sign = m[1] === '+' ? 'add' : 'del'
+          else if (!(sign && /^\s+[-+]/.test(l))) sign = ''
+          return (
+            <span key={i} className={sign ? 'convo-' + sign : undefined}>
+              {l + '\n'}
+            </span>
+          )
+        })}
+      </pre>
+      {notes.map((n, i) => {
+        const c = COUNTDOWN.exec(n)
+        return c ? <Countdown key={i + n} secs={Number(c[2]) * 60 + Number(c[3])} /> : <p key={i} className="convo-ask-note">{n.replace(/^⚠\s*/, '')}</p>
       })}
-    </pre>
+    </>
+  )
+}
+
+// (The time left before Claude Code refuses it by itself, going down here
+// from what the screen said when read: read again, it starts again from that.)
+function Countdown({ secs }: { secs: number }) {
+  const [until] = useState(() => Date.now() + secs * 1000)
+  const [now, setNow] = useState(Date.now())
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(timer)
+  }, [])
+  const left = Math.max(0, Math.round((until - now) / 1000))
+  return (
+    <p className="convo-ask-note is-countdown" role="timer">
+      {left > 0 ? t('convo.askAutoNo', { t: Math.floor(left / 60) + ':' + String(left % 60).padStart(2, '0') }) : t('convo.askAutoNoNow')}
+    </p>
   )
 }
 

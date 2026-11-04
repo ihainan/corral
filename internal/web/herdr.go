@@ -1084,7 +1084,7 @@ func paneScreenCut(ctx context.Context, c *herdr.Client, pane string) (text, dig
 		return "", "", false, err
 	}
 	text = strings.TrimRight(strings.ReplaceAll(text, "\r\n", "\n"), " \t\n")
-	sum := sha256.Sum256([]byte(text))
+	sum := sha256.Sum256(steady([]byte(text))) // (what changes by itself left out: see steady)
 	if len(text) > maxScreenBytes {
 		at := len(text) - maxScreenBytes
 		for at < len(text) && !utf8.RuneStart(text[at]) {

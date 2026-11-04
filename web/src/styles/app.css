@@ -646,8 +646,10 @@ details.adv > .form { margin-top: 16px; }
 .reply-show { margin-left: auto; }
 .reply-dialog .convo-ask-block {
   margin: 0; max-height: min(34vh, 300px); overflow: auto; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--r);
-  background: var(--bg-subtle); color: var(--fg); font: 13px/1.5 var(--font-mono); white-space: pre;
+  background: var(--bg-subtle); color: var(--fg); font: 13px/1.5 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere;
 }
+.reply-dialog .convo-ask-desc { color: var(--fg); }
+.reply-dialog .convo-ask-note { color: var(--warn); }
 .reply-dialog .convo-ask-rule { color: var(--fg-3); opacity: 0.6; }
 .reply-text { display: flex; gap: 8px; }
 .reply-text .input { flex: 1; min-width: 0; }
