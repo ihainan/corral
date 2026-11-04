@@ -21,6 +21,7 @@ type fakePicker struct {
 	session string
 	said    []string // the thread above the input ("Set model to …", words quoted)
 	draft   string   // in its input
+	greyed  bool     // (the draft is the suggestion it greys in: typing replaces it)
 	busy    bool
 }
 
@@ -84,6 +85,9 @@ func (f *fakePicker) step(keys []string, text string, read int) (string, error) 
 	}
 	if text != "" {
 		f.pressed = append(f.pressed, "text:"+text)
+		if f.greyed {
+			f.draft, f.greyed = "", false
+		}
 		switch {
 		case f.open:
 			f.saved = true // (Enter on the picker, after the text: the default saved)
@@ -210,6 +214,24 @@ func TestModelFlowCareful(t *testing.T) {
 		if err == nil || len(f.pressed) != 0 {
 			t.Errorf("%s: %v, pressed %v", name, err, f.pressed)
 		}
+	}
+	// Its greyed suggestion in the input (as a read with colours found it):
+	// no draft — switched; the same words found typed (no suggestion seen):
+	// refused. (11-04: a suggestion stopped every switch.)
+	f = newFake(false)
+	f.draft, f.greyed = "commit and push", true
+	if _, err := modelFlow(f.step, f.step, "Haiku 5.5", "commit and push"); err != nil || f.session != "Haiku 5.5" {
+		t.Errorf("suggestion: %v, session %q, pressed %v", err, f.session, f.pressed)
+	}
+	f = newFake(false)
+	f.draft = "commit and push"
+	if _, err := modelFlow(f.step, f.step, "Haiku 5.5", ""); !errors.Is(err, errDraft) || len(f.pressed) != 0 {
+		t.Errorf("typed, no suggestion: %v, pressed %v", err, f.pressed)
+	}
+	f = newFake(false)
+	f.draft = "commit and push now"
+	if _, err := modelFlow(f.step, f.step, "Haiku 5.5", "commit and push"); !errors.Is(err, errDraft) {
+		t.Errorf("typed past the suggestion: %v", err)
 	}
 	// The picker gone, nothing said: not known (not "switched").
 	f = newFake(false)

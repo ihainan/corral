@@ -1876,7 +1876,8 @@ function Runs({ meta, active, mode, model, effort, quota }: { meta: ConvoMeta; a
               : t(windows.length > 1 ? 'convo.ctxNote' : 'convo.ctxNoteBig')}
           </p>
           {quota && ('codex' in quota ? <QuotaSaid quota={quota.said} /> : <QuotaPart key={quota.sid + ' ' + quota.session} sid={quota.sid} session={quota.session} />)}
-          {(meta.cost || /claude/i.test(meta.model ?? '')) && <CostPart cost={meta.cost} />}
+          {/* (No cost read yet: nothing said — a line saying "no usage" under the context's count read as if that count were none.) */}
+          {meta.cost && <CostPart cost={meta.cost} />}
         </div>
       )}
     </div>
