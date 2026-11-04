@@ -222,7 +222,7 @@ func idleInput(screen string, greyed ...func() string) error {
 	lines := strings.Split(screen, "\n")
 	for i := len(lines) - 2; i >= 1; i-- {
 		t := strings.TrimSpace(lines[i])
-		if !strings.HasPrefix(t, "❯") || !pickerRule.MatchString(lines[i-1]) {
+		if !strings.HasPrefix(t, "❯") || !boxTop(lines[i-1]) {
 			continue
 		}
 		// (Its lines down to the rule under it: a suggestion wraps in a narrow
@@ -248,10 +248,14 @@ func idleInput(screen string, greyed ...func() string) error {
 		in := oneSpaced(strings.Join(words, " "))
 		// (Empty: its one line, the mark alone. Lines of nothing over more
 		// than one are words typed — new lines — not an empty box.)
-		// (Its placeholder, "Try \"…\"", on its one line: empty. Wrapped
-		// over more, it is told from a draft beginning so by the read with
-		// colours, greyed as a suggestion is — review batch4.)
-		if end == i+1 && (in == "" || strings.HasPrefix(in, `Try "`)) {
+		if in == "" && end == i+1 {
+			return nil
+		}
+		// (Its placeholder, "Try \"…\"": of one line — Claude Code cuts it
+		// short with "…" in a narrow pane, it does not wrap it — and greyed,
+		// told so from words typed beginning so by the read with colours,
+		// where there is one (review batch4).)
+		if strings.HasPrefix(in, `Try "`) && end == i+1 && len(greyed) == 0 {
 			return nil
 		}
 		if in == "" {
@@ -269,22 +273,27 @@ func idleInput(screen string, greyed ...func() string) error {
 
 // boxFoot: line is the rule under the input whose top rule is top. Of a
 // plain top, the same to the letter; of one with the session's name in it
-// (a renamed session: "──── name ─"), a rule alone from the same column,
-// at least as long as the top's run before the name. (A line of dashes in
-// a draft is indented past the mark: not from the top's column.)
+// (a renamed session: "──── name ─"), a rule alone from the first column.
+// (A line of dashes in a draft is indented past the mark.)
 func boxFoot(top, line string) bool {
 	if line == top {
 		return true
 	}
-	body := strings.TrimLeft(top, " ")
-	indent := top[:len(top)-len(body)]
-	run := len([]rune(body)) - len([]rune(strings.TrimLeft(body, "─━")))
-	if run < 8 || run == len([]rune(body)) || !strings.HasPrefix(line, indent) {
-		return false
+	if strings.Trim(strings.TrimSpace(top), "─━") == "" {
+		return false // (a plain top: its foot is the same)
 	}
-	rest := line[len(indent):]
-	n := len([]rune(rest))
-	return n >= run && strings.Trim(rest, "─━") == ""
+	return len([]rune(line)) >= 8 && strings.Trim(line, "─━") == ""
+}
+
+// boxTop: line is the rule over Claude Code's input: a rule, or a renamed
+// session's with its name on it, ending " ─" — in a narrow pane with no
+// rule before the name at all (" a long name… ─": seen so at 30 columns).
+func boxTop(line string) bool {
+	if pickerRule.MatchString(line) {
+		return true
+	}
+	t := strings.TrimRight(line, " \r")
+	return (strings.HasSuffix(t, " ─") || strings.HasSuffix(t, " ━")) && strings.Trim(strings.TrimSpace(t), "─━ ") != ""
 }
 
 // (How many lines the input's words may take, wrapped: a suggestion is short.)

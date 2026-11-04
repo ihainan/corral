@@ -2263,7 +2263,7 @@ function PhoneList({ entries, all, titles, query, onQuery, onPick, unsentOf }: {
   // (Those pinned first, latest first as the rest — as the side list has them, 11-04.)
   const list = [...inOrder.filter((e) => pins.includes(e.key)), ...inOrder.filter((e) => !pins.includes(e.key))]
   // (Its state as the lists place it: one done or at rest with commands left running is at work — review batch4.)
-  const stateOf = (e: Entry) => (e.row && e.row.status !== 'blocked' && (cmdsOf(e.row) || tmuxCmdsOf(e)) ? 'working' : e.row?.status)
+  const stateOf = (e: Entry) => (e.row?.status !== 'blocked' && (e.row ? cmdsOf(e.row) : tmuxCmdsOf(e)) ? 'working' : e.row?.status)
   const n = (st: string) => entries.filter((e) => stateOf(e) === st).length
   const waiting = n('blocked')
   // (Not in order any more — one has come to wait, say, while the list was looked at: put in order at a tap,

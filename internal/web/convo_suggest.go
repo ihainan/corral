@@ -76,7 +76,7 @@ func (s *Server) greyedSuggestion(ctx context.Context, sess *term.Session, pane,
 	if err != nil || claudeOwner(sgr.ReplaceAllString(string(res.Out), ""), false) != "main" {
 		return ""
 	}
-	return suggestionOf(string(res.Out))
+	return greyedIn(string(res.Out))
 }
 
 // suggestionOf: the greyed text in Claude Code's input box in front, as the
@@ -85,13 +85,26 @@ func (s *Server) greyedSuggestion(ctx context.Context, sess *term.Session, pane,
 // nothing chosen among under it (as stillTyped). Its text, the lines in the
 // box after the mark, counts only where every character of it is dim.
 func suggestionOf(screen string) string {
+	s := greyedIn(screen)
+	if strings.HasPrefix(s, `Try "`) {
+		return ""
+	}
+	if r := []rune(s); len(r) > maxSuggestion {
+		return ""
+	}
+	return s
+}
+
+// greyedIn: the text in the box when all of it is greyed, its placeholder
+// too ("Try \"…\"", which idleInput tells from words typed so by it).
+func greyedIn(screen string) string {
 	lines := strings.Split(strings.TrimRight(screen, "\r\n"), "\n")
 	plain := make([]string, len(lines))
 	for i, l := range lines {
 		plain[i] = strings.TrimRight(sgr.ReplaceAllString(l, ""), "\r")
 	}
 	for i := len(plain) - 1; i >= 1; i-- {
-		if !strings.HasPrefix(strings.TrimSpace(plain[i]), "❯") || !pickerRule.MatchString(plain[i-1]) {
+		if !strings.HasPrefix(strings.TrimSpace(plain[i]), "❯") || !boxTop(plain[i-1]) {
 			continue
 		}
 		end := -1
@@ -128,14 +141,7 @@ func suggestionOf(screen string) string {
 				out = append(out, text)
 			}
 		}
-		s := strings.Join(out, " ")
-		if strings.HasPrefix(s, `Try "`) {
-			return ""
-		}
-		if r := []rune(s); len(r) > maxSuggestion {
-			return ""
-		}
-		return s
+		return strings.Join(out, " ")
 	}
 	return ""
 }
@@ -166,7 +172,7 @@ func boxDraftLines(screen string) (words []string, known bool) {
 		plain[i] = strings.TrimRight(sgr.ReplaceAllString(l, ""), "\r")
 	}
 	for i := len(plain) - 1; i >= 1; i-- {
-		if !strings.HasPrefix(strings.TrimSpace(plain[i]), "❯") || !pickerRule.MatchString(plain[i-1]) {
+		if !strings.HasPrefix(strings.TrimSpace(plain[i]), "❯") || !boxTop(plain[i-1]) {
 			continue
 		}
 		end := -1

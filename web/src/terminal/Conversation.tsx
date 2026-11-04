@@ -317,7 +317,7 @@ export function ConversationView({
     list.forEach((it, i) => {
       if (it.kind !== 'user' || it.e.mid) return
       let text = railText.get(it.e)
-      if (text === undefined) railText.set(it.e, (text = previewOf(it.e.parts.filter((p) => p.kind === 'text').map((p) => (p.text ?? '').slice(0, 600)).join(' '))))
+      if (text === undefined) railText.set(it.e, (text = previewOf(it.e.parts.filter((p) => p.kind === 'text').map((p) => p.text ?? '').join(' ').trimStart().slice(0, 2000))))
       turns.push({ key: itemKey(it), ts: it.e.ts, text })
       at.push(i)
     })

@@ -262,18 +262,46 @@ func TestModelFlowCareful(t *testing.T) {
 	if err := idleInput(blank, func() string { return "" }); !errors.Is(err, errDraft) {
 		t.Errorf("new lines typed: %v", err)
 	}
-	// Its placeholder wrapped: empty, greyed as it is; words typed beginning
-	// so, over two lines, a draft (review batch4).
-	try := "● done\n────────────────────────\n❯ Try \"edit <filepath> to\n  do something\"\n────────────────────────\n  Opus 5.5·H │ Ctx 0\n"
-	if err := idleInput(try, func() string { return "Try \"edit <filepath> to do something\"" }); err != nil {
-		t.Errorf("wrapped placeholder: %v", err)
+	// Its placeholder: one line (Claude Code cuts it short in a narrow pane:
+	// as it drew it at 22 columns), greyed; words typed beginning so, on one
+	// line or over two, a draft (review batch4).
+	foot := "\x1b[39m  \x1b[1m\x1b[35mOpus 5.5\x1b[0;2m\x1b[38;5;246m·\x1b[0m\x1b[35mH\x1b[2m\x1b[38;5;246m │ \x1b[0m\x1b[38;5;246mCtx \x1b[32m…\x1b[39m\n  \x1b[38;5;220m⏵⏵ auto mode on\x1b[38;5;246m \x1b[39m"
+	rule22 := strings.Repeat("─", 22)
+	try22 := "● done\n\x1b[38;5;244m" + rule22 + "\n\x1b[39m❯\u00a0\x1b[2mTry \"edit <filepath…\n\x1b[0m\x1b[38;5;244m" + rule22 + "\n" + foot
+	plain := func(s string) string { return sgr.ReplaceAllString(s, "") }
+	if err := idleInput(plain(try22), func() string { return greyedIn(try22) }); err != nil {
+		t.Errorf("placeholder, cut short: %v", err)
 	}
-	typedTry := "● done\n────────────────────────\n❯ Try \"npm test\"\n  then fix the errors\n────────────────────────\n  Opus 5.5·H │ Ctx 0\n"
-	if err := idleInput(typedTry, func() string { return "" }); !errors.Is(err, errDraft) {
+	typedTry := strings.Replace(try22, "\x1b[2mTry \"edit <filepath…", "Try \"npm test\"", 1)
+	if err := idleInput(plain(typedTry), func() string { return greyedIn(typedTry) }); !errors.Is(err, errDraft) {
 		t.Errorf("draft beginning as the placeholder does: %v", err)
 	}
-	if err := idleInput("● done\n────────────────────────\n❯ Try \"fix lint errors\"\n────────────────────────\n  Opus 5.5·H │ Ctx 0\n"); err != nil {
-		t.Errorf("placeholder: %v", err)
+	typedTry2 := strings.Replace(typedTry, "Try \"npm test\"\n", "Try \"npm test\"\n  then fix the errors\n", 1)
+	if err := idleInput(plain(typedTry2), func() string { return greyedIn(typedTry2) }); !errors.Is(err, errDraft) {
+		t.Errorf("draft beginning as the placeholder does, two lines: %v", err)
+	}
+	if got := suggestionOf(try22); got != "" {
+		t.Errorf("the placeholder is no suggestion: %q", got)
+	}
+	// A renamed session in a narrow pane: no rule before its name at all (as
+	// Claude Code drew it at 30 and 22 columns).
+	for _, top := range []string{" 重命名后的一个很长的会话名… ─", " 重命名后的一个很长… ─"} {
+		w := 30
+		if strings.Contains(top, "很长…") {
+			w = 22
+		}
+		scr := "● done\n\x1b[38;5;244m" + top + "\n\x1b[39m❯\u00a0\n\x1b[38;5;244m" + strings.Repeat("─", w) + "\n" + foot
+		if err := idleInput(plain(scr), func() string { return greyedIn(scr) }); err != nil {
+			t.Errorf("renamed, %d columns, empty: %v", w, err)
+		}
+		draft := strings.Replace(scr, "❯\u00a0\n", "❯\u00a0not sent yet\n  ──────────\n  more\n", 1)
+		if err := idleInput(plain(draft), func() string { return greyedIn(draft) }); !errors.Is(err, errDraft) {
+			t.Errorf("renamed, %d columns, a draft with dashes: %v", w, err)
+		}
+		sug := strings.Replace(scr, "❯\u00a0\n", "❯\u00a0\x1b[2mcommit and push\x1b[0m\n", 1)
+		if err := idleInput(plain(sug), func() string { return greyedIn(sug) }); err != nil {
+			t.Errorf("renamed, %d columns, a suggestion: %v", w, err)
+		}
 	}
 	// A renamed session: its name on the box's top rule, the foot a rule
 	// alone. Empty, and with a draft; a draft's dashes are still no foot.
