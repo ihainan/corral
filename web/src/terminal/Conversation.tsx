@@ -2115,6 +2115,8 @@ function stamp(r: ConvoListRow, now: number): string {
 // the focus put in it; onSearchLeft: the box left, empty (shown by the
 // count again); hint: the key that asks for it, said in the box.
 // (showSearch: shown whatever the count, the focus left to who opened it.)
+let sideOpen: string[] = [] // (the side list's groups of old ones opened out, for the page's life)
+
 function AgentList({ rows, menus, onPicked, placed, query: given, onQuery, search, showSearch, onSearchLeft, hint }: { rows: ConvoListRow[]; menus?: boolean; onPicked?: () => void; placed?: Map<string, ConvoListRow>; query?: string; onQuery?: (q: string) => void; search?: number; showSearch?: boolean; onSearchLeft?: () => void; hint?: boolean }) {
   // Its rows' menu (menus: the side list's; the switcher's rows have none):
   // one for the list, of the row it was opened on by its key, as that row
@@ -2194,7 +2196,9 @@ function AgentList({ rows, menus, onPicked, placed, query: given, onQuery, searc
   }, [])
   // Which of the long groups are opened out (by their name; shut again at
   // a tap, and shut when the list is drawn anew).
-  const [open, setOpen] = useState<string[]>([])
+  // (Groups opened out stay so as another agent is gone to: the list is drawn anew with each, as the phone's keeps it — oldOpen.)
+  const [open, setOpenNow] = useState<string[]>(() => sideOpen)
+  const setOpen = (f: (o: string[]) => string[]) => setOpenNow((o) => (sideOpen = f(o)))
   // What it is searched for (by its title, where it is, its program): the
   // rest goes, and no group is folded.
   const [own, setOwn] = useState('')
