@@ -1,5 +1,5 @@
 import { createContext, Fragment, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { ArrowDown, Check, Copy, FolderOpen, Image as ImageIcon, ChevronDown, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, Clock, Download, Eye, GitBranch, Keyboard, ListOrdered, Loader, MoreHorizontal, MoreVertical, PanelLeft, Pin, Search, TriangleAlert, X, Plus } from 'lucide-react'
+import { ArrowDown, ArrowUp, Check, Copy, FolderOpen, Image as ImageIcon, ChevronDown, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, Clock, Download, Eye, GitBranch, Keyboard, ListOrdered, Loader, MoreHorizontal, MoreVertical, PanelLeft, Pin, Search, TriangleAlert, X, Plus } from 'lucide-react'
 import { t, getLang, type I18nKey } from '../i18n'
 import { api } from '../api'
 import { asHeld, dayStart, FOLDED, foldAt, GROUPS, inGroup, listOrder, pinned, type ConvoListRow, type RowCmds } from './agentOrder'
@@ -131,6 +131,10 @@ const sideWidthOf = (w: number, view: number) => Math.max(SIDE_W_MIN, Math.min(M
 const isTouchOnly = isCoarse()
 // (Of fewer turns than this, the rail would say nothing the eye does not see.)
 const RAIL_MIN = 3
+// (How far up, in screens, the line of what came since is gone to on coming
+// back, and how long ago read; further and older, the end shown.)
+const UNREAD_FAR = 4
+const UNREAD_STALE_MS = 30 * 60 * 1000
 // (A message's preview for the rail, made once.)
 const railText = new WeakMap<ConvoEntry, string>()
 const mac = onMac()
@@ -428,7 +432,13 @@ export function ConversationView({
   const unreadAt = unreadAfter === null ? -1 : list.findIndex((it) => startSeq(it) > unreadAfter)
   // (Coming back to it while following: shown from that line, if there is
   // more than a screen of it; once, as soon as the line is known.)
-  const toUnread = useRef<{ after: number; until: number } | null>(null)
+  const toUnread = useRef<{ after: number; until: number; readAt: number } | null>(null)
+  // (That line further up than UNREAD_FAR screens: shown from its end, the
+  // latest — read elsewhere meanwhile, another device, or a long while — a
+  // button at the top to that line. Gone once it is gone to, or in view.)
+  const [farUnread, setFarUnread] = useState(false)
+  const farUnreadNow = useRef(false)
+  farUnreadNow.current = farUnread
   const lastSeq = convo.entries.length ? convo.entries[convo.entries.length - 1].seq : 0
   const ofNow = useRef({ of: convo.of, gen: convo.gen, last: lastSeq })
   ofNow.current = { of: convo.of, gen: convo.gen, last: lastSeq }
@@ -475,7 +485,8 @@ export function ConversationView({
     anchors.current = back ? p.anchors : []
     notedList.current = back ? p.noted : []
     restoring.current = back ? p : null
-    toUnread.current = !back && after !== null ? { after, until: Date.now() + 8000 } : null
+    toUnread.current = !back && after !== null && seen ? { after, until: Date.now() + 8000, readAt: seen.at } : null
+    setFarUnread(false)
     if (!back) pin()
   }, [convo.of, convo.gen])
   useEffect(() => keepPlace, [keepPlace]) // (and as the view goes)
@@ -486,7 +497,7 @@ export function ConversationView({
     const seen = o.of ? reads.get(o.of) : undefined
     if (!seen || seen.gen !== o.gen) return
     setUnreadAfter(seen.seq)
-    if (stuck.current) toUnread.current = { after: seen.seq, until: Date.now() + 8000 }
+    if (stuck.current) toUnread.current = { after: seen.seq, until: Date.now() + 8000, readAt: seen.at }
   }, [])
   const wasActive = useRef(active)
   useEffect(() => {
@@ -583,6 +594,10 @@ export function ConversationView({
     }
     anchors.current = out
     notedList.current = listNow.current
+    if (farUnreadNow.current) {
+      const line = c.querySelector<HTMLElement>(':scope > .convo-unread')
+      if (!line || line.getBoundingClientRect().top >= view.top) setFarUnread(false) // (in view, or gone)
+    }
     const r = railNow.current
     const shown = r.turns.length > 0 && (el.parentElement?.querySelector<HTMLElement>(':scope > .convo-rail')?.offsetParent ?? null) !== null
     if (!shown) return
@@ -643,7 +658,13 @@ export function ConversationView({
     else if (tu && tu.after === unreadAfter && el && c && unreadAt >= 0) {
       toUnread.current = null
       const line = stuck.current ? c.querySelector<HTMLElement>(':scope > .convo-unread') : null
-      if (line && el.scrollHeight - (line.offsetTop - c.offsetTop) > el.clientHeight) {
+      const below = line ? el.scrollHeight - (line.offsetTop - c.offsetTop) : 0
+      // (More than a screen of it: shown from that line — unless it is far up
+      // and was read long ago, then from the end, a button to it — 11-05:
+      // back on an iPad three hours after reading on a Mac, it went sixteen
+      // screens up. Back soon, read on from there however much came.)
+      if (line && below > el.clientHeight * UNREAD_FAR && Date.now() - tu.readAt > UNREAD_STALE_MS) setFarUnread(true)
+      else if (line && below > el.clientHeight) {
         stuck.current = false
         setAway(true)
         el.scrollTop += line.getBoundingClientRect().top - el.getBoundingClientRect().top - 8
@@ -1368,6 +1389,27 @@ export function ConversationView({
               <ChevronDown size={16} aria-hidden="true" />
             </button>
           </div>
+        )}
+        {farUnread && convo.status === 'ready' && (
+          <button
+            type="button"
+            className="convo-latest convo-to-unread"
+            onClick={() => {
+              const el = box.current
+              const line = col.current?.querySelector<HTMLElement>(':scope > .convo-unread')
+              setFarUnread(false)
+              if (!el || !line) return
+              stuck.current = false
+              did.current.glide = false
+              setAway(true)
+              el.scrollTop += line.getBoundingClientRect().top - el.getBoundingClientRect().top - 8
+              did.current.set = el.scrollTop
+              note()
+            }}
+          >
+            <ArrowUp size={15} aria-hidden="true" />
+            {t('convo.toUnread')}
+          </button>
         )}
         {away && convo.status === 'ready' && (
           <button
@@ -3272,12 +3314,14 @@ const startSeq = (it: Item): number => (it.kind === 'gone' ? it.entries[0].seq :
 
 // What was read of each conversation, for this page's life: the last entry
 // seen at its end (of that reading of its log).
-const reads = new Map<string, { gen: number; seq: number }>()
+// (at: when it was last seen at its end, ms — read on since, or looked at again with nothing new.)
+const reads = new Map<string, { gen: number; seq: number; at: number }>()
 function readUpTo(of: string, gen: number, seq: number) {
   const was = reads.get(of)
-  if (was && was.gen === gen && was.seq >= seq) return
+  const at = Date.now()
+  if (was && was.gen === gen && was.seq >= seq) return void (was.at = at)
   reads.delete(of)
-  reads.set(of, { gen, seq })
+  reads.set(of, { gen, seq, at })
   while (reads.size > 50) reads.delete(reads.keys().next().value!)
 }
 

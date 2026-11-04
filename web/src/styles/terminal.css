@@ -854,6 +854,8 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
   box-shadow: 0 6px 18px rgba(0, 0, 0, 0.16); font: 13px/18px var(--font-ui);
 }
 @media (pointer: coarse) { .convo-latest { padding: 11px 18px; } }
+/* (Where one left off, far up: at the top, as the way to the latest is at the foot.) */
+.convo-latest.convo-to-unread { top: 12px; bottom: auto; }
 @media (prefers-reduced-motion: reduce) { .convo-chev { transition: none; } }
 .convo-bar-where { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--term-fg-3); margin-left: 6px; }
 @media (max-width: 640px) { .convo-bar-where { display: none; } }
