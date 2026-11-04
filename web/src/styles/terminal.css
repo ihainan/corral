@@ -721,7 +721,7 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 /* What the agent wrote between its steps: as its answer is. */
 .convo-mid { margin: 0; }
 /* (What it says on the way, a step quieter than the answer it ends with: C04/A04) */
-.convo-col > .convo-mid, .convo-sub-body > .convo-mid { font-size: 14px; line-height: 22px; color: var(--term-fg-2); }
+.convo-mid.is-brief { font-size: 14px; line-height: 22px; color: var(--term-fg-2); }
 /* Thinking: told apart from calls (lighter, slanted), in a run's line and as a step. */
 .convo-work-text.is-thought, .convo-step.is-thought .convo-step-head { color: var(--term-fg-3); font-size: 13px; }
 .convo-step.is-thought .convo-step-verb { color: var(--term-fg-3); font-weight: 400; }

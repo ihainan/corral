@@ -44,6 +44,17 @@ function count(cat: Category, n: number): string {
   return t(`convo.n.${cat}${n === 1 ? '1' : ''}` as I18nKey, { n })
 }
 
+// What the agent says on its way that is only that — a line or two before a
+// step ("Let me look at the code first") — drawn a step quieter than what it
+// concludes. Not by where it stands alone: a finding of length or with a
+// structure (a heading, a list, a table, code) is read as body text wherever
+// it is, as one followed by some last small step is still the answer.
+function brief(text: string): boolean {
+  const s = text.trim()
+  if (s.length > 160 || s.split('\n').filter((l) => l.trim()).length > 2) return false
+  return !/^\s*(?:#{1,6}\s|[-*+]\s|\d+[.)]\s|>|\||```)/m.test(s)
+}
+
 const LONG_LINES = 8 // a message of the person's longer than this is folded
 const LONG_CHARS = 700
 const clip = (s: string, n: number) => (s.length > n ? s.slice(0, n - 1) + '…' : s)
@@ -2710,7 +2721,7 @@ const ListItem = memo(
         return <Answer it={it} onCopy={copy} onShow={onShow} />
       case 'text':
         return (
-          <div className="convo-md convo-mid">
+          <div className={'convo-md convo-mid' + (brief(it.text) ? ' is-brief' : '')}>
             <Markdown text={it.text} onCopyCode={copy} copyLabel={t('common.copy')} />
             {it.truncated && <p className="convo-cut">{t('convo.cut')}</p>}
           </div>
