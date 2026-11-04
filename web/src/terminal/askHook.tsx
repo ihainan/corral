@@ -39,6 +39,10 @@ export function readAskHook(hostId: number, fresh = false): Promise<AskHookInfo>
   return p
 }
 
+// (What a host's file says, told to every row of it shown: one hook
+// changed, the other's row has the file as it is now — review585-13.)
+const told = new Map<number, Set<(i: AskHookInfo) => void>>()
+
 function useAskHook(hostId: number, fresh = false) {
   const [info, setInfo] = useState<AskHookInfo | null>(null)
   const [failed, setFailed] = useState<ApiError | Error | null>(null)
@@ -48,14 +52,21 @@ function useAskHook(hostId: number, fresh = false) {
       (i) => live && setInfo(i),
       (e) => live && setFailed(e),
     )
+    const hear = (i: AskHookInfo) => {
+      setInfo(i)
+      setFailed(null)
+    }
+    const all = told.get(hostId) ?? new Set()
+    all.add(hear)
+    told.set(hostId, all)
     return () => {
       live = false
+      all.delete(hear)
     }
   }, [hostId, fresh])
   const set = (i: AskHookInfo) => {
     reads.set(hostId, { at: Date.now(), p: Promise.resolve(i) })
-    setInfo(i)
-    setFailed(null)
+    for (const hear of told.get(hostId) ?? []) hear(i)
   }
   return { info, failed, set }
 }

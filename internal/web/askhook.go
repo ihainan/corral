@@ -511,16 +511,31 @@ func (s *Server) apiSetAskHook(w http.ResponseWriter, r *http.Request) {
 	if on && name == "ask" {
 		_ = s.store.SetAskHookDeclined(r.Context(), h.OwnerID, h.ID, false)
 	}
-	// (The file made from none: so recorded. Another hook put in or taken
-	// out of it after, the record stays: it is removed only while it is
-	// still just what one hook made of none — see remove above.)
+	// (The file made from none: so recorded. The other hook put in or
+	// taken out of it after, the record stays — while the file was still
+	// just what one hook made of none: another file put there since, the
+	// person's own, is never theirs to remove — review585-4.)
+	made, _ := s.store.AskHookCreated(r.Context(), h.OwnerID, h.ID)
+	ours := made != 0 && made == h.ConnVersion && string(f.kind) == "file" && onlyOurs(f.settings)
 	switch {
 	case on && info.Seen == "none":
 		_ = s.store.SetAskHookCreated(r.Context(), h.OwnerID, h.ID, h.ConnVersion)
-	case !on && op == "remove":
+	case op == "remove" || !ours:
 		_ = s.store.SetAskHookCreated(r.Context(), h.OwnerID, h.ID, 0)
 	}
 	s.answerAskHook(w, r.Context(), h, key, on, c)
+}
+
+// onlyOurs: the file has a hook of the gateway's in it and nothing else
+// (what it makes of none, one hook or both: the person's own file — a {}
+// say — has none).
+func onlyOurs(settings []byte) bool {
+	a, _, askIn, err := askhook.Ask.Disable(settings)
+	if err != nil {
+		return false
+	}
+	_, empty, bellIn, err := askhook.Bell.Disable(a)
+	return err == nil && empty && (askIn || bellIn)
 }
 
 // answerAskHook: the file read again after a change, what it says now.

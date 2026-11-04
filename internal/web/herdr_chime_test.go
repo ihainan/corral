@@ -52,3 +52,16 @@ func TestChimeCounts(t *testing.T) {
 	// (No watcher: nothing counted, nothing fails.)
 	s.chimeOn(&term.Session{ID: "s2"}, herdr.Transition{Pane: p, From: herdr.StatusWorking, To: herdr.StatusBlocked})
 }
+
+// A round counted once (two looks at one finish), none before the last.
+func TestChimeRoundOnce(t *testing.T) {
+	c := newChimeCounts()
+	c.addRound("p", 5)
+	c.addRound("p", 5)
+	c.addRound("p", 4)
+	c.addRound("p", 7)
+	c.addRound("p", 0)
+	if c.n["p"].done != 3 {
+		t.Fatalf("%+v", c.n["p"])
+	}
+}

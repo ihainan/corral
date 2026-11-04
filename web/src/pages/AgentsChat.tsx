@@ -17,7 +17,7 @@ import { convoTarget, herdrTarget, InlineReply } from '../terminal/ReplyDialog'
 import { SessionOpDialog, type SessionOp } from '../terminal/sessionOps'
 import { NEW_AGENT, NewAgentDialog } from '../terminal/newAgent'
 import { ForkDialog, RenameDialog, type RenameTarget } from '../terminal/agentOps'
-import { ChimeCounter, chime, countsOf } from '../terminal/chime'
+import { agentWho, ChimeCounter, chime, countsOf } from '../terminal/chime'
 import { BgCmds, CODEX_EFFORTS, ConversationView, ListSearch, SEARCH_FROM, when, type ConvoAgent, type ConvoListRow, type ConvoPending, type ConvoWent, type FileActs, type ModelOpt } from '../terminal/Conversation'
 import { FilesDialog } from '../terminal/FilesDialog'
 import { downloadPath, PictureDialog } from '../terminal/picture'
@@ -175,7 +175,11 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
   useEffect(() => {
     if (!sessions) return
     const now = countsOf(sessions)
-    for (const c of chimeCounts.current.feed(now)) chime(c.kind, c.pane + ' ' + c.n)
+    for (const c of chimeCounts.current.feed(now)) {
+      const [sid, pane] = c.pane.split(' ')
+      const s = sessions.find((x) => x.id === sid)
+      if (s) chime(c.kind, agentWho(s, pane))
+    }
     chimeCounts.current.keep(new Set(now.keys()))
   }, [sessions])
   // (On its own, not a tab: the title tells how many wait for an answer.)
@@ -1837,7 +1841,15 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   // known). Of the one shown, its session as bound; of another, as herdr
   // tells it. While it is at rest (as the list says it): not a turn in
   // the middle (a check when asked, not a hold on it).
-  const [forking, setForking] = useState<{ s: SessionInfo; kind: 'claude' | 'codex'; source: string; at?: string; dir: string; name: string } | null>(null)
+  const [forking, setForking] = useState<{ s: SessionInfo; kind: 'claude' | 'codex'; source: string; at?: string; dir: string; name: string; key: string } | null>(null)
+  // (All of it: asked again as it is sent, of the list now — another
+  // window may have set it to work meanwhile — review585-11.)
+  const entriesNow = useRef(entries)
+  entriesNow.current = entries
+  const stillAtRest = (key: string) => () => {
+    const r = entriesNow.current.find((x) => x.key === key)?.row
+    return r && r.status !== 'idle' && r.status !== 'done' ? t('fork.onlyIdle') : ''
+  }
   const forkOf = (e: Entry, at?: string) => {
     const r = e.row
     if (e.s.persistence !== 'herdr' || !r || r.lost) return null
@@ -1846,7 +1858,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     const source = (shown && convo.bind?.session) || r.a.session || ''
     if ((prog !== 'claude' && prog !== 'codex') || !source || (at && prog !== 'claude')) return null
     const name = (r.ws && r.ws !== '~' ? r.ws : '') || dirName(r.a.cwd) || r.a.agent
-    return { s: e.s, kind: prog, source, at, dir: r.a.cwd, name } as const
+    return { s: e.s, kind: prog, source, at, dir: r.a.cwd, name, key: e.key } as const
   }
   const forkItem = (e: Entry): MenuItem | null => {
     const f = forkOf(e)
@@ -2022,6 +2034,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
         at={forking.at}
         dir={forking.dir}
         name={forking.name}
+        check={forking.at ? undefined : stillAtRest(forking.key)}
         onDone={(pane, first) => {
           const f = forking
           setForking(null)

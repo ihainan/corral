@@ -118,8 +118,15 @@ func (s *Server) forkCopy(ctx context.Context, sess *term.Session, src, from, at
 	}
 	id := newSessionID()
 	dst := src[:strings.LastIndexByte(src, '/')+1] + id + ".jsonl"
-	out, err = sshx.Output(ctx, sess.Client(), forkCopyCommand(src, dst, off, from, id), 64)
-	if err != nil || strings.TrimSpace(string(out)) != "ok" {
+	// (Not known to have ended well — the connection lost on the way, say —
+	// the copy, if it was made, goes once the command has really ended.)
+	ended := make(chan struct{})
+	res, err := sshx.Exec(ctx, sess.Client(), forkCopyCommand(src, dst, off, from, id), 64, sshx.ExecOptions{Release: func() { close(ended) }})
+	if err != nil || strings.TrimSpace(string(res.Out)) != "ok" {
+		go func() {
+			<-ended
+			s.dropForkCopy(sess, src, id)
+		}()
 		return "", errors.New("the conversation could not be copied")
 	}
 	return id, nil
@@ -166,13 +173,17 @@ func forkCutCommand(src, at string) string {
 }
 
 // forkCopyCommand writes the first off bytes of src to dst, the session id
-// from (a UUID) made id (one) where the lines say it: only the account
-// reads it (as Claude Code's own), nothing put where one is, nothing left
-// half written. "ok" once it is there.
+// from (a UUID) made id (one) where the lines say it (the same length: the
+// copy is off bytes, or it is not taken). Only the account reads it (as
+// Claude Code's own); written to a file of its own made anew (mktemp: no
+// link followed, none there before), put in place only where nothing is
+// (ln: not over one), nothing left half written. "ok" once it is there.
 func forkCopyCommand(src, dst string, off int64, from, id string) string {
 	q := sshx.QuoteShell
-	return `umask 077; d=` + q(dst) + `; [ -e "$d" ] && exit 3; head -c ` + strconv.FormatInt(off, 10) + ` ` + q(src) +
-		` | sed ` + q(`s/"sessionId":"`+from+`"/"sessionId":"`+id+`"/g`) + ` > "$d.tmp" && mv "$d.tmp" "$d" && echo ok || { rm -f "$d.tmp"; exit 1; }`
+	n := strconv.FormatInt(off, 10)
+	return `umask 077; d=` + q(dst) + `; t=$(mktemp "$d.XXXXXX") || exit 1; trap 'rm -f "$t"' EXIT; ` +
+		`head -c ` + n + ` ` + q(src) + ` | sed ` + q(`s/"sessionId":"`+from+`"/"sessionId":"`+id+`"/g`) + ` > "$t" && ` +
+		`[ "$(wc -c < "$t")" -eq ` + n + ` ] && ln "$t" "$d" && echo ok`
 }
 
 // dropForkCopy removes a copy forkCopy made, for an agent that did not
@@ -192,10 +203,12 @@ func forkDropCommand(copy string) string {
 }
 
 // typedMessage: line is Claude Code's record of a message the person typed,
-// of uuid at (not a tool's result, not one of its own notes).
+// of uuid at (not a tool's result, not one of its own notes), or of a slash
+// command they ran (the conversation view shows it as theirs).
 func typedMessage(line []byte, at string) bool {
 	var r struct {
 		Type        string `json:"type"`
+		Subtype     string `json:"subtype"`
 		UUID        string `json:"uuid"`
 		IsMeta      bool   `json:"isMeta"`
 		IsSidechain bool   `json:"isSidechain"`
@@ -204,7 +217,13 @@ func typedMessage(line []byte, at string) bool {
 			Content json.RawMessage `json:"content"`
 		} `json:"message"`
 	}
-	if json.Unmarshal(line, &r) != nil || r.Type != "user" || r.UUID != at || r.IsMeta || r.IsSidechain || r.Message.Role != "user" {
+	if json.Unmarshal(line, &r) != nil || r.UUID != at || r.IsSidechain {
+		return false
+	}
+	if r.Type == "system" && r.Subtype == "local_command" {
+		return true
+	}
+	if r.Type != "user" || r.IsMeta || r.Message.Role != "user" {
 		return false
 	}
 	var blocks []struct {

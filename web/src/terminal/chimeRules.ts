@@ -68,7 +68,7 @@ export class ChimeCounter {
 }
 
 // countsOf: the counts of the herdr agents of sessions (a summary the
-// gateway lost is no reading: none of it).
+// gateway lost is no reading: none of it), by session and pane.
 export function countsOf(sessions: SessionInfo[]): Map<string, Counts> {
   const out = new Map<string, Counts>()
   for (const s of sessions) {
@@ -77,6 +77,14 @@ export function countsOf(sessions: SessionInfo[]): Map<string, Counts> {
     for (const w of m.workspaces) for (const a of w.agents) out.set(s.id + ' ' + a.pane_id, { done: a.chime_done ?? 0, needs: a.chime_needs ?? 0 })
   }
   return out
+}
+
+// agentWho: what a sound of a herdr agent is taken by: the agent (its
+// host, herdr session and pane), not the gateway's session reading it —
+// two of them on one herdr server count apart, from when each began
+// (review585-7): one sound within a few seconds (taken), whichever.
+export function agentWho(s: Pick<SessionInfo, 'host_id' | 'mux_session'>, pane: string): string {
+  return `${s.host_id} ${s.mux_session ?? ''} ${pane}`
 }
 
 // Bells: a program's bell, or its notice (OSC 9, 777), as live output of a

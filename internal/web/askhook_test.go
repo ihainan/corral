@@ -506,3 +506,39 @@ func TestAskHookCacheGenerations(t *testing.T) {
 		t.Error("kept over a connection change")
 	}
 }
+
+// review585-4: the file the gateway made, replaced since by one of the
+// person's ({}): the bell put in and taken out of theirs, it stays.
+func TestHookRecordNotForAnothersFile(t *testing.T) {
+	if !onlyOurs(askhook.Ask.Created()) || !onlyOurs(askhook.Bell.Created()) {
+		t.Fatal("the gateway's own")
+	}
+	both, _, _ := askhook.Bell.Enable(askhook.Ask.Created())
+	if !onlyOurs(both) {
+		t.Fatal("both of ours")
+	}
+	for _, f := range []string{"{}\n", "{}", `{"model":"x"}`, `{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"x"}]}]}}`} {
+		if onlyOurs([]byte(f)) {
+			t.Fatalf("%s taken as ours", f)
+		}
+	}
+	h := newHarness(t)
+	admin := h.admin()
+	home := t.TempDir()
+	srv := h.sshServer(home)
+	srv.HandleExec(testutil.ShellExec(home, func(cmd string) bool { return strings.Contains(cmd, ".claude") }))
+	hostID := h.hostFor(admin, srv.Addr.Port)
+	u := fmt.Sprintf("/api/hosts/%d/ask-hook", hostID)
+	mustStatus(t, admin.do("POST", "/api/sessions", map[string]any{"host_id": hostID}), 201, "open session")
+	admin.do("GET", u, nil)
+	mustStatus(t, admin.do("POST", u, map[string]any{"on": true, "seen": "none"}), 200, "made")
+	f := filepath.Join(home, ".claude", "settings.json")
+	os.WriteFile(f, []byte("{}\n"), 0o600) // (the person's own, in its place)
+	r := admin.do("GET", u+"?fresh=1", nil)
+	r = admin.do("POST", u, map[string]any{"on": true, "seen": r.json()["seen"], "hook": "bell"})
+	mustStatus(t, r, 200, "bell on")
+	mustStatus(t, admin.do("POST", u, map[string]any{"on": false, "seen": r.json()["seen"], "hook": "bell"}), 200, "bell off")
+	if b, err := os.ReadFile(f); err != nil || strings.TrimSpace(string(b)) != "{}" {
+		t.Fatalf("the person's file: %q %v", b, err)
+	}
+}

@@ -20,6 +20,7 @@ export function ForkDialog({
   at,
   dir,
   name,
+  check,
   onDone,
   onClose,
 }: {
@@ -29,6 +30,7 @@ export function ForkDialog({
   at?: string
   dir: string
   name: string
+  check?: () => string // (asked again as it is sent: why not now, or '')
   onDone: (pane: string, first: string) => void
   onClose: () => void
 }) {
@@ -48,6 +50,8 @@ export function ForkDialog({
   const submit = async (e?: FormEvent) => {
     e?.preventDefault()
     if (busy) return
+    const no = check?.()
+    if (no) return setError(no)
     setBusy(true)
     setError('')
     try {
@@ -113,7 +117,9 @@ export function RenameDialog({ target, onClose }: { target: RenameTarget; onClos
   if (clean(ws) !== clean(target.ws.label === '~' ? '' : target.ws.label)) changes.push({ action: 'rename_workspace', target: target.ws.id, label: clean(ws) })
   if (target.tab && clean(tab) !== clean(target.tab.label)) changes.push({ action: 'rename_tab', target: target.tab.id, label: clean(tab) })
   if (clean(pane) !== clean(target.pane.label)) changes.push({ action: 'rename_pane', target: target.pane.id, label: clean(pane) })
-  const ready = changes.length > 0 && !!clean(ws) && (!target.tab || !!clean(tab))
+  // (A name required only of what is changed: a pane named alone, its
+  // workspace's unnamed as it was — review585-12.)
+  const ready = changes.length > 0 && changes.every((c) => c.action === 'rename_pane' || !!c.label)
   const submit = async (e?: FormEvent) => {
     e?.preventDefault()
     if (!ready || busy) return

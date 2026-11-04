@@ -44,7 +44,7 @@ import { holdTermMode } from '../terminal/chatSend'
 import { useComposerFit } from '../terminal/autosize'
 import { useSession, VERSION_EVENT } from '../app'
 import { geminiPath, shellPath } from '../terminal/paths'
-import { BellFilter, ChimeCounter, chime, oscNotice } from '../terminal/chime'
+import { agentWho, BellFilter, ChimeCounter, chime, oscNotice } from '../terminal/chime'
 
 const isTouch = window.matchMedia('(pointer: coarse)').matches || navigator.maxTouchPoints > 0
 
@@ -241,6 +241,11 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
 
   // (Known at once when the list of agents had it: the conversation view shows without the terminal first.)
   const [info, setInfo] = useState<SessionInfo | null>(() => (watch ? null : knownSession(id)))
+  // (For the sounds, terminal/chime.ts: whose agents these are; when the
+  // person last pressed a key here, the key bar's too.)
+  const infoRef = useRef(info)
+  infoRef.current = info
+  const lastKey = useRef(0)
   const [status, setStatus] = useState<Status>('connecting')
   const [latency, setLatency] = useState<number | null>(null)
   const [end, setEnd] = useState<EndInfo | null>(null)
@@ -938,6 +943,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
     const counts = new ChimeCounter()
     const ring = (plain: boolean) => {
       if (replaying || watch) return
+      bells.key = lastKey.current
       if (bells.ring(Date.now(), plain)) chime('bell', id)
     }
     const bellSub = term.onBell(() => ring(true))
@@ -1028,7 +1034,8 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
           for (const w of sum.workspaces) for (const a of w.agents) now.set(id + ' ' + a.pane_id, { done: a.chime_done ?? 0, needs: a.chime_needs ?? 0 })
           for (const c of counts.feed(now)) {
             bells.agent = Date.now()
-            chime(c.kind, c.pane + ' ' + c.n)
+            const pane = c.pane.slice(id.length + 1)
+            chime(c.kind, infoRef.current ? agentWho(infoRef.current, pane) : c.pane)
           }
         }
         setHerdr(m as HerdrSummary)
@@ -1321,7 +1328,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
       imeLog?.('→ sent ' + JSON.stringify(data))
       const typed = typedChar !== null && data === typedChar && !composing
       const fromUser = onUserInput ? userData : !isTerminalReply(data)
-      if (fromUser && !isMouseReport(data) && !isWheelReport(data)) bells.key = Date.now()
+      if (fromUser && !isMouseReport(data) && !isWheelReport(data)) lastKey.current = Date.now()
       typedChar = null
       userData = false
       // xterm's own answers (to queries, focus changes) during a replay are
@@ -1922,6 +1929,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
       settleRef.current()
       const term = termRef.current
       const m = activeMods()
+      lastKey.current = Date.now()
       outRef.current(specialKey(k, m, term?.modes.applicationCursorKeysMode ?? false, keysApartRef.current()))
       releaseOnce()
       forgetTypedRef.current(k === 'Backspace' && !m.ctrl && !m.alt)
@@ -1934,6 +1942,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
       if (ok && !ok()) return
       takeOverRef.current()
       settleRef.current()
+      lastKey.current = Date.now()
       outRef.current(macroBytes(steps, termRef.current?.modes.applicationCursorKeysMode ?? false, keysApartRef.current()))
       releaseOnce()
       then?.()
@@ -1998,6 +2007,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
     afterComposition(() => {
       takeOverRef.current()
       settleRef.current()
+      lastKey.current = Date.now()
       outRef.current(applyMods(s, activeMods()))
       releaseOnce()
     })

@@ -23,12 +23,31 @@ type chimeN struct {
 }
 
 type chimeCounts struct {
-	mu   sync.Mutex
-	n    map[string]chimeN // pane → its counts
-	poke func()            // (has the watcher's last summary go again)
+	mu      sync.Mutex
+	n       map[string]chimeN // pane → its counts
+	counted map[string]int64  // pane → the last round counted as finished
+	poke    func()            // (has the watcher's last summary go again)
 }
 
-func newChimeCounts() *chimeCounts { return &chimeCounts{n: map[string]chimeN{}} }
+func newChimeCounts() *chimeCounts {
+	return &chimeCounts{n: map[string]chimeN{}, counted: map[string]int64{}}
+}
+
+// addRound counts a finish of pane's agent in round (the watcher's
+// numbering: see seenRounds), once a round and not one before the last
+// counted; 0, none known: counted.
+func (c *chimeCounts) addRound(pane string, round int64) {
+	c.mu.Lock()
+	if round != 0 && round <= c.counted[pane] {
+		c.mu.Unlock()
+		return
+	}
+	if round != 0 {
+		c.counted[pane] = round
+	}
+	c.mu.Unlock()
+	c.add(pane, false)
+}
 
 func (c *chimeCounts) setPoke(f func()) {
 	c.mu.Lock()
@@ -72,6 +91,7 @@ func (c *chimeCounts) decorate(sum *herdrSummary) {
 	for p := range c.n {
 		if !here[p] {
 			delete(c.n, p)
+			delete(c.counted, p)
 		}
 	}
 }
@@ -113,9 +133,10 @@ func (s *Server) chimeOn(sess *term.Session, tr herdr.Transition) {
 		}
 		go func() {
 			// (Looked at meanwhile — done to idle, the agents page showing it
-			// — is another round at rest: what was left running is asked of
-			// that one. At work again, or waiting for the person: not a
-			// finish to tell; the latter tells of itself.)
+			// — another round at rest: what was left running is asked of that
+			// one. At work again: not a finish to tell (the next one tells of
+			// itself). Subagents out: their coming back tells it (bg.setBack).
+			// A round counted once, whichever looks at it — review585-5.)
 			for try := 0; ; try++ {
 				st := s.bgAwait(sess.ID, tr.Pane.ID, round)
 				if st == bgRunning {
@@ -130,11 +151,12 @@ func (s *Server) chimeOn(sess *term.Session, tr herdr.Transition) {
 					return
 				}
 				if (st != bgMoved && x.n == round) || try == 2 {
+					round = x.n
 					break
 				}
 				round = x.n
 			}
-			c.add(tr.Pane.ID, false)
+			c.addRound(tr.Pane.ID, round)
 		}()
 	}
 }

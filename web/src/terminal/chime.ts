@@ -1,7 +1,7 @@
 import { getPrefs, type Prefs } from '../prefs'
 import { taken, wanted, type ChimeKind } from './chimeRules'
 
-export { BellFilter, ChimeCounter, countsOf, oscNotice } from './chimeRules'
+export { agentWho, BellFilter, ChimeCounter, countsOf, oscNotice } from './chimeRules'
 
 // A sound on this device when an agent finishes, or comes to need the
 // person (the "chime" setting), or a program in a terminal rings its bell.
@@ -108,6 +108,9 @@ export function playChime(tone: Prefs['chimeTone'], needs = false) {
 export function chime(kind: ChimeKind, key: string) {
   const p = getPrefs()
   if (!wanted(kind, p) || document.visibilityState !== 'visible') return
+  // (Only a page let to play takes it: one not yet tapped would take it
+  // from one that can — review585-8.)
+  if (!ctx || ctx.state !== 'running') return
   if (taken(kind + ' ' + key)) return
   playChime(p.chimeTone, kind === 'needs')
 }

@@ -48,7 +48,9 @@ func TestForkCopyCommands(t *testing.T) {
 	}
 	if !typedMessage([]byte(lines[2]), at) || typedMessage([]byte(lines[1]), "aaaaaaaa-0000-4000-8000-000000000002") ||
 		typedMessage([]byte(`{"type":"user","uuid":"`+at+`","message":{"role":"user","content":[{"type":"tool_result"}]}}`), at) ||
-		typedMessage([]byte(`{"type":"user","uuid":"`+at+`","isMeta":true,"message":{"role":"user","content":"x"}}`), at) {
+		typedMessage([]byte(`{"type":"user","uuid":"`+at+`","isMeta":true,"message":{"role":"user","content":"x"}}`), at) ||
+		!typedMessage([]byte(`{"type":"system","subtype":"local_command","uuid":"`+at+`","content":"<command-name>/model</command-name>"}`), at) ||
+		typedMessage([]byte(`{"type":"system","subtype":"turn_duration","uuid":"`+at+`"}`), at) {
 		t.Fatal("typedMessage")
 	}
 	dst := filepath.Join(dir, id+".jsonl")

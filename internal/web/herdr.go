@@ -808,6 +808,12 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 					s.onAgentTransition(sess, h, herdr.Transition{Pane: p, Workspace: label[p.WorkspaceID], From: herdr.StatusWorking, To: herdr.StatusDone})
 					return
 				}
+				// (Idle — looked at as it finished: no alert, but the sound —
+				// review585-6.)
+				if p.ID == pane && p.AgentStatus == herdr.StatusIdle {
+					s.chimeOn(sess, herdr.Transition{Pane: p, Workspace: label[p.WorkspaceID], From: herdr.StatusWorking, To: herdr.StatusIdle})
+					return
+				}
 			}
 		}
 	})
