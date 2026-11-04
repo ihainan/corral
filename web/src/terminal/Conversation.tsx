@@ -3342,6 +3342,15 @@ function clock(ts?: string): string {
   return d.toLocaleTimeString(getLang(), { hour: '2-digit', minute: '2-digit' })
 }
 
+// The pictures' paths written in a message's words: absolute or under the
+// home folder, of a kind a picture is looked at as, at most a few.
+const PICTURE_PATH = /(?:^|[\s"'(（「])((?:\/(?!\/)|~\/)[^\s"'()（）「」<>]{1,1000}\.(?:png|jpe?g|gif|webp))(?=$|[\s"'),.;:!?，。；：！？）」])/gi
+function picturePaths(text: string): string[] {
+  const out: string[] = []
+  for (const m of text.matchAll(PICTURE_PATH)) if (!out.includes(m[1]) && out.length < 8) out.push(m[1])
+  return out
+}
+
 function UserTurn({ e, onCopy }: { e: ConvoEntry; onCopy: (s: string) => void }) {
   const text = e.parts
     .filter((p) => p.kind === 'text')
@@ -3351,8 +3360,12 @@ function UserTurn({ e, onCopy }: { e: ConvoEntry; onCopy: (s: string) => void })
   const images = pics.length
   // (Of the pictures, the ones whose file is told: each to be looked at, its session live.)
   const acts = useContext(FileActsOf)
-  // (Each in its place, numbered by it; one whose file is not told, not to be opened.)
-  const files = acts ? pics.map((p) => (p.path && fullPath(p.path) ? p.path : null)) : []
+  // (Each in its place, numbered by it; one whose file is not told, not to be
+  // opened. And a picture's path written in its words — one sent from here
+  // goes as its path, "/…/uploads/x.png look at this" — after them, each
+  // once: 11-04.)
+  const told = acts ? pics.map((p) => (p.path && fullPath(p.path) ? p.path : null)) : []
+  const files = acts ? [...told, ...picturePaths(text).filter((p) => !told.includes(p))] : []
   const any = files.some(Boolean)
   // (A shell command run with "!": in the terminal's letters, as typed.)
   const shell = /^! \S/.test(text)
@@ -3369,11 +3382,11 @@ function UserTurn({ e, onCopy }: { e: ConvoEntry; onCopy: (s: string) => void })
             {t(whole ? 'convo.userLess' : 'convo.userMore')}
           </button>
         )}
-        {images > 0 && !any && !/\[Image #\d+\]/.test(text) && <span className="convo-image">{t(images === 1 ? 'convo.images1' : 'convo.images', { n: images })}</span>}
+        {images > 0 && !told.some(Boolean) && !/\[Image #\d+\]/.test(text) && <span className="convo-image">{t(images === 1 ? 'convo.images1' : 'convo.images', { n: images })}</span>}
         {any && (
           <span className="convo-pics">
             {files.map((f, i) => {
-              const said = images > 1 ? t('convo.picN', { n: i + 1 }) : t('convo.pic')
+              const said = files.length > 1 ? t('convo.picN', { n: i + 1 }) : t('convo.pic')
               return f ? (
                 <button key={i} type="button" className="convo-pic" onClick={() => acts!.view(f)} title={f}>
                   <ImageIcon size={14} aria-hidden="true" />

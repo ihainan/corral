@@ -891,9 +891,11 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-bar-pick:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: 2px; border-radius: 4px; }
 .convo-bar-chev { flex: none; color: var(--term-fg-3); }
 /* Stop: a button that looks it, quiet until hovered */
-.convo-stop { flex: none; height: 26px; padding: 0 10px; font-size: 13px; border: 1px solid var(--term-line); color: var(--term-fg); }
-.term-root .convo .convo-stop.btn-ghost:hover { border-color: var(--term-fg-3); background: var(--term-hover); }
-@media (pointer: coarse) { .convo-stop { height: 34px; } }
+/* (A pill as the status beside it, of the same height: its words the action's, on a grey of its own.) */
+.term-root .convo .convo-stop.btn-ghost { flex: none; height: 24px; padding: 0 12px; border: 0; border-radius: 999px; font-size: 12px; font-weight: 500; line-height: 18px; color: var(--term-fg); background: color-mix(in srgb, var(--term-fg) 8%, transparent); }
+.term-root .convo .convo-stop.btn-ghost:hover { background: color-mix(in srgb, var(--term-fg) 14%, transparent); }
+@media (pointer: coarse) { .term-root .convo .convo-stop.btn-ghost { height: 32px; padding: 0 14px; } }
+@media (forced-colors: active) { .term-root .convo .convo-stop.btn-ghost { border: 1px solid ButtonText; } }
 .convo-bar-more { flex: none; align-self: center; margin: -4px -6px -4px 0; color: var(--term-fg-2); }
 .convo-bar-pick .convo-bar-name { flex: 0 1 auto; }
 .convo-bar-pick .agent-icon { margin-right: 4px; --dot-ring: var(--term-bg); }

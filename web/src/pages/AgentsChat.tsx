@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type ReactNode } from 'react'
-import { ArrowUp, ChevronLeft, FoldVertical, GitBranch, History, MessageSquarePlus, Paperclip, Pencil, Pin, PinOff, Power, Square, SquareTerminal, TextCursorInput, X, Plus } from 'lucide-react'
+import { ArrowUp, ChevronLeft, Copy, FoldVertical, GitBranch, History, MessageSquarePlus, Paperclip, Pencil, Pin, PinOff, Power, Square, SquareTerminal, TextCursorInput, X, Plus } from 'lucide-react'
 import { api, ApiError, authGen, errorText, uploadFile, type SessionInfo } from '../api'
 import { t, type I18nKey } from '../i18n'
 import { navigate, onNavigate } from '../router'
 import { heldOpen, onHeldOpen, onOpenRequest, takeHeld } from '../notifyopen'
 import { isDark, maxPinned, setChromeColor, setPrefs, usePrefs } from '../prefs'
 import { local } from '../storage'
-import { CLOSE_MENUS, Confirm, Menu, useToast, type MenuItem } from '../components/ui'
+import { CLOSE_MENUS, Confirm, copyText, Menu, useToast, type MenuItem } from '../components/ui'
 import { chromeVars, corralDark, corralLight } from '../terminal/themes'
 import { HostHistoryDialog } from '../terminal/hostHistory'
 import { CardNotice, useClaudeCard, type ClaudeCard } from '../terminal/cardNotice'
@@ -1669,6 +1669,8 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     return () => clearTimeout(timer)
   }, [sentAt])
   const stopShown = canPress && !draft.trim() && !up && !sending && !sentAt
+  // (The question's card in the box's place: the box, its stop too, out of sight.)
+  const askHides = !!(waits && replyTo && agent?.status === 'blocked' && !answered && (convo.status === 'ready' || convo.status === 'none') && !draft.trim() && !up)
   const send = () => {
     const b = convo.bind
     if (sending || (!draft.trim() && !up)) return
@@ -1778,7 +1780,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   const composer = (
     // (A question over it: the box kept to a line, its tools back when it is typed in.)
     // (The card asking is up: the box gives its room to the card — one line says why — rather than stand empty under it, as on a small phone it pushed the card's own buttons out of sight.)
-    <div className={'composer' + (waits && agent?.status === 'blocked' ? ' is-held' : '') + (waits && replyTo && agent?.status === 'blocked' && !answered && (convo.status === 'ready' || convo.status === 'none') && !draft.trim() && !up ? ' is-asked' : '')}>
+    <div className={'composer' + (waits && agent?.status === 'blocked' ? ' is-held' : '') + (askHides ? ' is-asked' : '')}>
       {claudeCard.card && <CardNotice card={claudeCard.card} stale={claudeCard.stale} onPress={claudeCard.press} />}
       {completion.list}
       {up && (
@@ -2065,6 +2067,11 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     ...opsOf.map((o, i): MenuItem | null =>
       bound ? { label: t(codex && o === 'clear' ? 'ops.clear.itemCodex' : `ops.${o}.item`), icon: OP_ICONS[o], separator: i === 0, group: i === 0 ? t('menu.group.convo') : undefined, disabled: !canOps, title: canOps ? undefined : t('ops.onlyIdle'), hint: canOps || i < opsOf.length - 1 ? undefined : t(opsOf.length > 1 ? 'ops.onlyIdleGroup' : 'ops.onlyIdle'), onSelect: () => convo.bind && setOp({ op: o, bind: convo.bind, key: bindKey }) } : null,
     ),
+    // (Its session's id, as the agent's own resume takes it: claude --resume, codex resume.)
+    ((sess) =>
+      sess && sess !== NO_SESSION
+        ? { label: t('convo.copySession'), icon: <Copy size={16} />, ...(bound && opsOf.length ? {} : { separator: true, group: t('menu.group.convo') }), onSelect: async () => void ((await copyText(sess)) && toast(t('convo.sessionCopied', { id: sess.slice(0, 8) }))) }
+        : null)(convo.bind?.session),
     canClose ? { label: t('agents.close'), icon: <Power size={16} />, danger: true, separator: true, onSelect: () => setClosing(cur) } : null,
   ]
   // (Files dropped on the conversation go up as picked ones do.)
@@ -2099,7 +2106,11 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
           <InlineReply key={replyTo.key} target={replyTo} resizedAt={0} active={active} held={() => false} call={asked} onAnswered={setAnswered} />
         ) : undefined
       }
-      onStop={canPress && !lead ? () => press('stop') : undefined} // (a phone: the composer's button stops it, the bar keeps the room for the name)
+      // (The bar's stop only where the box's one is not there: words or files
+      // in the box make it send, or a question's card stands in its place —
+      // 11-04. A phone: the composer's button stops it, the bar keeps the room
+      // for the name.)
+      onStop={canPress && !lead && (!!draft.trim() || !!up || askHides) ? () => press('stop') : undefined}
       stop={said?.what === 'stop' && said.bind === bindKey ? said.text : undefined}
       // (The one shown: its count as its own view has it — of this process, not those queued.)
       side={{ rows: rows.map((r) => (r.current ? { ...r, unsent: shownSent.filter(unsentNow).length || undefined } : r)) }}
