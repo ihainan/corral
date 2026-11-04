@@ -730,7 +730,7 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 /* What a rewind took back: a quiet line; what it was, faded, behind it. */
 .convo-gone { display: flex; flex-direction: column; min-width: 0; }
 .convo-gone-head { font-size: 13px; }
-.convo-gone-body { display: flex; flex-direction: column; gap: 14px; margin: 6px 0 2px 6px; padding: 2px 0 2px 14px; border-left: 2px solid var(--term-line); opacity: 0.62; }
+.convo-gone-body { display: flex; flex-direction: column; gap: 14px; margin: 6px 0 2px 6px; padding: 2px 0 2px 14px; opacity: 0.62; }
 .convo-lines { flex: none; display: inline-flex; gap: 5px; font-family: var(--font-mono); font-size: 13px; }
 .convo-lines-add { color: var(--term-ok-text); }
 .convo-lines-del { color: var(--term-danger-text); }
@@ -1392,12 +1392,14 @@ button.convo-running-what:hover { color: var(--term-fg); text-decoration-color: 
 @media (pointer: coarse) {
   button.convo-running-what, .term-root .convo-running-more { padding-top: 13px; padding-bottom: 13px; margin-top: -13px; margin-bottom: -13px; }
 }
-.convo-event.is-recap, .convo-event.is-goal, .convo-event.is-notice { margin: 0; font-size: 13px; color: var(--term-fg-2); padding-left: 10px; border-left: 2px solid var(--term-line); }
+/* (A block of its own, tinted: never a bar at its left edge — the user's rule, 11-04.) */
+.convo-event.is-recap, .convo-event.is-goal, .convo-event.is-notice { margin: 0; font-size: 13px; color: var(--term-fg-2); padding: 8px 12px; border-radius: 8px; background: color-mix(in srgb, var(--term-fg) 4%, transparent); }
 .convo-event.is-recap .convo-trouble-head, .convo-event.is-goal .convo-trouble-head { color: var(--term-fg-3); font-size: 12px; }
 .convo-event.is-notice .convo-trouble-head { color: var(--term-fg-3); }
-.convo-event.is-notice.is-warn { border-left-color: var(--term-warn-text); }
+.convo-event.is-notice.is-warn { background: color-mix(in srgb, var(--term-warn-text) 9%, transparent); }
 .convo-event.is-notice.is-warn .convo-trouble-head { color: var(--term-warn-text); }
-.convo-event.is-goal.is-met { border-left-color: var(--term-ok-text, #3fa45b); }
+.convo-event.is-goal.is-met { background: color-mix(in srgb, var(--term-ok-text, #3fa45b) 9%, transparent); }
+@media (forced-colors: active) { .convo-event.is-recap, .convo-event.is-goal, .convo-event.is-notice { border: 1px solid CanvasText; } }
 
 /* A new agent */
 /* "New agent": a row of the list it heads, its plus where the agents' icons
