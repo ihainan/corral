@@ -18,7 +18,7 @@ test:
 check: test web-deps
 	cd web && pnpm run typecheck
 	python3 scripts/gen-notices.py --check
-	python3 scripts/check-styles.py
+	cd web && node scripts/check-styles.mjs
 
 # Regenerate the third-party notices after changing dependencies.
 notices: web-deps

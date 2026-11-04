@@ -493,7 +493,7 @@ export function FilesDialog({ sessionId, start, reveal, onPath, onInsert, onClos
             </button>
           )}
         />
-        <button className="btn btn-primary files-upload" onClick={() => fileInput.current?.click()} disabled={path === null}>
+        <button className="btn files-upload" onClick={() => fileInput.current?.click()} disabled={path === null}>
           <Upload size={16} />
           <span className="files-upload-label">{t('files.upload')}</span>
         </button>
