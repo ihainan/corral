@@ -716,6 +716,7 @@ details.adv > .form { margin-top: 16px; }
   border: 0; background: none; color: var(--fg); text-align: left; cursor: pointer; border-radius: var(--r); font-size: 14px;
 }
 .files-icon { display: flex; color: var(--fg-3); flex: none; }
+.file-type-icon { display: block; flex: none; user-select: none; }
 .files-icon.dir { color: var(--fg-3); } /* (Not a colour of its own: its shape says folder — ux1101 T37.) */
 .files-name { flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; }
 .files-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

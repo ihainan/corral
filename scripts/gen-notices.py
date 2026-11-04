@@ -1,7 +1,8 @@
 """Generate web/public/THIRD-PARTY-NOTICES.txt: the licences of everything
 the built program contains — the npm packages bundled into the web
 interface, the Go modules compiled into the gateway — and the terminal
-colour schemes (web/scripts/schemes-notice.txt, from gen-schemes.py).
+colour schemes (web/scripts/schemes-notice.txt, from gen-schemes.py) and
+the file icons (web/src/assets/file-icons, from material-icon-theme).
 
 Run after changing dependencies; `--check` (used by `make check`) fails
 when the file is not up to date. Needs `pnpm install` in web/ and the Go
@@ -74,6 +75,11 @@ def render():
         lines += [f'{path} {ver}', '-' * len(f'{path} {ver}'), '', licence_text(d), '']
     with open(os.path.join(ROOT, 'web', 'scripts', 'schemes-notice.txt'), encoding='utf-8') as f:
         lines.append(f.read().rstrip())
+    # File icons: some of material-icon-theme's, copied into the source (web/src/terminal/fileIconMap.ts).
+    with open(os.path.join(ROOT, 'web', 'src', 'assets', 'file-icons', 'LICENSE'), encoding='utf-8') as f:
+        lines += ['', 'File icons', '==========', '',
+                  'From material-icon-theme 5.40.0, https://github.com/material-extensions/vscode-material-icon-theme',
+                  '(some of its icons, unchanged).', '', f.read().strip()]
     return '\n'.join(lines) + '\n'
 
 text = render()

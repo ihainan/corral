@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
 import {
-  ArrowUp, Check, Copy, Download, Eye, File as FileIcon, Image as ImageIcon, FileQuestion, Folder, FolderPlus, House, LocateFixed, MoreHorizontal, Pencil, RotateCw,
+  ArrowUp, Check, Copy, Download, Eye, Image as ImageIcon, FileQuestion, Folder, FolderPlus, House, LocateFixed, MoreHorizontal, Pencil, RotateCw,
   SquareTerminal, Trash2, Upload, X,
 } from 'lucide-react'
+import { FileTypeIcon } from './fileIcons'
 import { api, ApiError, errorText, postFile, type FileEntry, type FileListing } from '../api'
 import { getLang, t } from '../i18n'
 import { Confirm, Dialog, Field, LoadError, Menu, copyText, useToast, type MenuItem } from '../components/ui'
@@ -582,7 +583,8 @@ export function FilesDialog({ sessionId, start, reveal, onPath, onInsert, onClos
 
 // A folder opens; a file shows what can be done with it.
 function EntryButton({ entry: e, items, onOpen }: { entry: FileEntry; items: () => MenuItem[]; onOpen: () => void }) {
-  const icon = e.type === 'dir' ? <Folder size={18} /> : e.type === 'file' ? <FileIcon size={18} /> : <FileQuestion size={18} />
+  // (Of its kind, by its name, as VS Code draws it; one of no known kind — a link to nothing — as before.)
+  const icon = e.type === 'dir' || e.type === 'file' ? <FileTypeIcon name={e.name} dir={e.type === 'dir'} /> : <FileQuestion size={18} />
   const body = (
     <>
       <span className={'files-icon' + (e.type === 'dir' ? ' dir' : '')} aria-hidden="true">{icon}</span>
