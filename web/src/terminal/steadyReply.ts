@@ -24,7 +24,11 @@ function countdown(text: string): { rest: string; secs: number } | null {
   const all = [...text.matchAll(WARNING)]
   if (all.length !== 1) return null
   const m = all[0]
-  if (!CHOICES_UNDER.test(text.slice(m.index! + m[0].length))) return null
+  // (Its choices the screen's last: no row "1." after their first — a
+  // command's numbered words under such a sentence, the prompt's own
+  // choices further down, are not it — review584.)
+  const under = CHOICES_UNDER.exec(text.slice(m.index! + m[0].length))
+  if (!under || /^[^\S\n]*(?:❯[^\S\n]*)?1\.[^\S\n]/m.test(text.slice(m.index! + m[0].length + under[0].length))) return null
   const t = m[2]
   let secs = 0
   if (t.includes(':')) for (const p of t.split(':')) secs = secs * 60 + Number(p)

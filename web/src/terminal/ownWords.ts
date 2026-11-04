@@ -143,7 +143,9 @@ export async function ownWords(target0: ReplyTarget, now: Screen, r: OwnRow, tex
     const f = frame(t, r.n)
     const at = Date.now()
     if (!steadySame(base, baseAt, f, at) || !steadySame(last.f, last.at, f, at)) return false
-    if (f !== last.f) last = { f, at }
+    // (Its time too, the same frame read again: a fall is bounded from the
+    // last read that showed it — review584.)
+    last = { f, at }
     return true
   }
   const same = (t: string) => like(t) && alive()
