@@ -1350,6 +1350,19 @@ button.convo-task-line:hover .convo-task-name { color: var(--term-fg); }
 /* (A phone: the way to the latest only; one's own messages are in the menu.) */
 @media (max-width: 640px) { .convo-jump { display: none; } }
 .convo-jump .icon-btn { background: var(--term-chrome); border: 1px solid var(--term-line); box-shadow: 0 1px 4px rgb(0 0 0 / 10%); }
+/* The turns at the side: a short line for each of the person's messages, the
+   one read now marked; over one, what it said. (Only beside the column, with
+   a pointer that hovers: the keys and the turns panel are the way otherwise.) */
+.convo-rail { display: none; position: absolute; top: 50%; transform: translateY(-50%); right: calc(50% - 390px - 52px); width: 34px; max-height: calc(100% - 168px); flex-direction: column; padding: 4px 0; z-index: 2; }
+@container (min-width: 900px) { @media (hover: hover) and (pointer: fine) { .convo-rail { display: flex; } } }
+.convo-rail-tick { flex: 0 1 12px; min-height: 2px; width: 100%; padding: 0; border: 0; background: none; cursor: pointer; display: flex; align-items: center; justify-content: center; }
+.convo-rail-tick::before { content: ''; width: 10px; height: 2px; border-radius: 1px; background: var(--term-line-strong); transition: width 0.12s, background-color 0.12s; }
+.convo-rail-tick:hover::before { width: 18px; background: var(--term-fg-3); }
+.convo-rail-tick.is-at::before { width: 18px; background: var(--term-accent-text); }
+.convo-rail-tip { position: absolute; right: calc(100% + 6px); transform: translateY(-50%); width: max-content; max-width: 280px; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--term-line); background: var(--term-pop); box-shadow: 0 4px 16px rgb(0 0 0 / 14%); pointer-events: none; display: flex; flex-direction: column; gap: 2px; }
+.convo-rail-when { font-size: 12px; color: var(--term-fg-3); }
+.convo-rail-text { font-size: 13px; line-height: 1.45; color: var(--term-fg); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+@media (prefers-reduced-motion: reduce) { .convo-rail-tick::before { transition: none; } }
 .convo-event.is-limit { display: flex; gap: 8px; align-items: flex-start; margin: 0; font-size: 13px; color: var(--term-fg-2); }
 .convo-event.is-limit svg { flex: none; margin-top: 3px; color: var(--term-fg-3); }
 .convo-event.is-limit .convo-trouble-head { color: var(--term-fg-2); }

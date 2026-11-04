@@ -13,6 +13,8 @@ import { NEW_AGENT } from './newAgent'
 import { Code } from './Code'
 import { ConvoSearchPanel } from './convoSearchPanel'
 import { ConvoTurnsPanel } from './convoTurnsPanel'
+import { ConvoRail, type RailTurn } from './convoRail'
+import { previewOf } from './convoTurns'
 import { itemKey } from './convoSearch'
 import { exportMarkdown } from './convoExport'
 import { AgentIcon } from './agentIcons'
@@ -126,6 +128,8 @@ const SIDE_W_MAX = 520
 const sideWidthMax = (view: number) => Math.min(SIDE_W_MAX, Math.floor(view / 2))
 const sideWidthOf = (w: number, view: number) => Math.max(SIDE_W_MIN, Math.min(Math.round(w), sideWidthMax(view)))
 const isTouchOnly = isCoarse()
+// (Of fewer turns than this, the rail would say nothing the eye does not see.)
+const RAIL_MIN = 3
 const mac = onMac()
 
 // Now, every second while on: for what counts up.
@@ -301,6 +305,10 @@ export function ConversationView({
     return () => window.removeEventListener('keydown', onKey, true)
   }, [active])
   const list = useMemo(() => items(convo.entries, working || waits, working), [convo.entries, working, waits])
+  const railTurns = useMemo<RailTurn[]>(
+    () => list.flatMap((it) => (it.kind === 'user' && !it.e.mid ? [{ key: itemKey(it), ts: it.e.ts, text: previewOf(it.e.parts.filter((p) => p.kind === 'text').map((p) => p.text ?? '').join(' ')) }] : [])),
+    [list],
+  )
   const box = useRef<HTMLDivElement>(null)
   const col = useRef<HTMLDivElement>(null)
   const stuck = useRef(true) // following the end
@@ -526,6 +534,9 @@ export function ConversationView({
   const notedList = useRef<typeof list>([]) // (the list they were noted in)
   const listNow = useRef(list)
   listNow.current = list
+  // (The turn read now, for the rail at the side: of the person's messages,
+  // the last at the top quarter of the view or above it.)
+  const [railAt, setRailAt] = useState('')
   const note = useCallback(() => {
     const el = box.current
     const c = col.current
@@ -550,6 +561,17 @@ export function ConversationView({
     }
     anchors.current = out
     notedList.current = listNow.current
+    const mine = (i: number) => {
+      const it = listNow.current[i]
+      return it?.kind === 'user' && !it.e.mid
+    }
+    let cur = -1
+    // (At the end: the last, wherever its message is in the view.)
+    if (el.scrollTop + el.clientHeight >= el.scrollHeight - 4) for (let i = listNow.current.length - 1; i >= 0 && cur < 0; i--) if (mine(i)) cur = i
+    if (cur < 0) for (let i = lo; i < kids.length && kids[i].getBoundingClientRect().top < view.top + view.height / 4; i++) if (mine(i)) cur = i
+    if (cur < 0) for (let i = Math.min(lo, listNow.current.length - 1); i >= 0; i--) if (mine(i)) { cur = i; break }
+    const at = cur >= 0 ? itemKey(listNow.current[cur]) : ''
+    setRailAt((was) => (was === at ? was : at))
   }, [])
   useLayoutEffect(() => {
     const el = box.current
@@ -761,6 +783,21 @@ export function ConversationView({
   // (Going up past what was read in: the first entry then, of that log; any
   // other doing of the person's meanwhile calls it off.)
   const upAfterOlder = useRef<{ seq: number; of?: string; gen: number } | null>(null)
+  // (Brought to the top of the view, by the person's asking: not following the end then.)
+  const land = useCallback(
+    (to: HTMLElement) => {
+      const el = box.current
+      if (!el) return
+      stuck.current = false
+      did.current.glide = false
+      setAway(true)
+      el.scrollTop += to.getBoundingClientRect().top - el.getBoundingClientRect().top - 8
+      did.current.set = el.scrollTop
+      jumpedTo.current = to
+      note()
+    },
+    [note],
+  )
   const jump = useCallback((dir: 1 | -1) => {
     upAfterOlder.current = null
     const el = box.current
@@ -784,14 +821,20 @@ export function ConversationView({
       }
       return
     }
-    stuck.current = false
-    did.current.glide = false
-    setAway(true)
-    el.scrollTop += at(to) - 8
-    did.current.set = el.scrollTop
-    jumpedTo.current = to
-    note()
-  }, [note])
+    land(to)
+  }, [land])
+  // (One of the rail's turns: gone to as jump goes to one.)
+  const goTurn = useCallback(
+    (key: string) => {
+      upAfterOlder.current = null
+      const c = col.current
+      if (!c) return
+      const kids = [...c.children].filter((k) => !k.hasAttribute('data-aside'))
+      const to = kids[listNow.current.findIndex((it) => itemKey(it) === key)] as HTMLElement | undefined
+      if (to) land(to)
+    },
+    [land],
+  )
   // An item gone to from a search: opened where it is a run of steps (and
   // the tool card the hit is in, a summary's text), then, once laid out,
   // brought to the top of the view as jump brings one; false (or gone
@@ -1287,6 +1330,7 @@ export function ConversationView({
             </ShowTerminal.Provider>
           </div>
         </div>
+        {railTurns.length >= RAIL_MIN && convo.status === 'ready' && <ConvoRail turns={railTurns} at={railAt} onGo={goTurn} />}
         {away && convo.status === 'ready' && (
           <div className={'convo-jump' + (scrolling ? ' is-moving' : '')} role="group" aria-label={t('convo.jump')}>
             <button type="button" className="icon-btn" onClick={() => jump(-1)} aria-label={t('convo.jumpPrev')} title={t('convo.jumpPrev') + (isTouchOnly ? '' : ' ([)')}>
