@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type ReactNode } from 'react'
-import { ArrowUp, ChevronLeft, FoldVertical, History, MessageSquarePlus, Paperclip, Pencil, Pin, PinOff, Power, Square, SquareTerminal, X, Plus } from 'lucide-react'
+import { ArrowUp, ChevronLeft, FoldVertical, GitBranch, History, MessageSquarePlus, Paperclip, Pencil, Pin, PinOff, Power, Square, SquareTerminal, TextCursorInput, X, Plus } from 'lucide-react'
 import { api, ApiError, authGen, errorText, uploadFile, type SessionInfo } from '../api'
 import { t, type I18nKey } from '../i18n'
 import { navigate, onNavigate } from '../router'
@@ -16,6 +16,8 @@ import { useCompletion } from '../terminal/Completion'
 import { convoTarget, herdrTarget, InlineReply } from '../terminal/ReplyDialog'
 import { SessionOpDialog, type SessionOp } from '../terminal/sessionOps'
 import { NEW_AGENT, NewAgentDialog } from '../terminal/newAgent'
+import { ForkDialog, RenameDialog, type RenameTarget } from '../terminal/agentOps'
+import { ChimeCounter, chime, countsOf } from '../terminal/chime'
 import { BgCmds, CODEX_EFFORTS, ConversationView, ListSearch, SEARCH_FROM, when, type ConvoAgent, type ConvoListRow, type ConvoPending, type ConvoWent, type FileActs, type ModelOpt } from '../terminal/Conversation'
 import { FilesDialog } from '../terminal/FilesDialog'
 import { downloadPath, PictureDialog } from '../terminal/picture'
@@ -121,8 +123,10 @@ const whereOf = (e: Entry, hosts: number) => {
   const host = hosts > 1 ? e.s.host_name : ''
   const r = e.row
   if (!r) return [host, 'tmux'].filter(Boolean).join(' · ')
-  return [host, r.ws && r.ws !== '~' ? r.ws : '', agentMark(r.a.agent) ? '' : r.a.agent].filter(Boolean).join(' · ')
+  return [host, r.ws && r.ws !== '~' ? r.ws : '', tabOf(r), agentMark(r.a.agent) ? '' : r.a.agent].filter(Boolean).join(' · ')
 }
+// Its tab's name, where its workspace has more than one (one alone says nothing).
+const tabOf = (r: AgentRow) => ((r.a.tabs ?? 0) > 1 ? (r.a.tab_label ?? '') : '')
 const hostCount = (entries: Entry[]) => new Set(entries.map((e) => e.s.host_name)).size
 
 // An agent not named yet (no title from its log or its pane): by the folder
@@ -143,9 +147,12 @@ export const dirName = (cwd?: string): string => {
 const labelOf = (e: Entry, said: string, hosts: number): { title: string; where: string } => {
   const r = e.row
   const ws = r && r.ws !== '~' ? r.ws : ''
-  if (!r || !ws) return { title: said, where: whereOf(e, hosts) }
+  // (A name given its pane, the most of the person's own: before its workspace's.)
+  const own = r?.a.label ?? ''
+  if (!r || (!ws && !own)) return { title: said, where: whereOf(e, hosts) }
   const host = hosts > 1 ? e.s.host_name : ''
-  return { title: ws, where: [host, said !== ws ? said : '', agentMark(r.a.agent) ? '' : r.a.agent].filter(Boolean).join(' · ') }
+  const title = own || ws
+  return { title, where: [host, own ? ws : '', tabOf(r), said !== title ? said : '', agentMark(r.a.agent) ? '' : r.a.agent].filter(Boolean).join(' · ') }
 }
 
 // Commands its agent left running in the background, as its row says them:
@@ -163,6 +170,14 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
   // (Its own two looks, light and dark as the app is: not the terminal's colours.)
   const scheme = isDark() ? corralDark : corralLight
   const { sessions, failed } = useRunningSessions(active, 3000)
+  // A sound when one finishes or comes to need the person (terminal/chime.ts).
+  const chimeCounts = useRef(new ChimeCounter())
+  useEffect(() => {
+    if (!sessions) return
+    const now = countsOf(sessions)
+    for (const c of chimeCounts.current.feed(now)) chime(c.kind, c.pane + ' ' + c.n)
+    chimeCounts.current.keep(new Set(now.keys()))
+  }, [sessions])
   // (On its own, not a tab: the title tells how many wait for an answer.)
   const waitingN = useMemo(() => (sessions ? listAgents(sessions).rows.filter((r) => r.status === 'blocked').length : null), [sessions])
   // (Said again at each reading, not only when it changes: an alert come
@@ -514,6 +529,7 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
         used={usedBy.current.get(k) ?? usedBy.current.set(k, new Map()).get(k)!}
         query={sideQuery}
         onQuery={setSideQuery}
+        onStarted={started}
         onClosed={(key) => {
           setGone((g) => new Set(g).add(key))
           // (A phone: back to the list, if it is still the one in front; else the next is shown.)
@@ -650,7 +666,7 @@ const tmuxCmdsOf = (e: Entry): RowCmds | undefined => {
 
 // The conversation of one agent, and what is sent to it. Keyed by the
 // agent: nothing of another's (its draft, what was sent, a stop) carries over.
-function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerEnter, sent, setSent, sending, setSending, draft: shownDraft, setDraftShown, used, lead, onClosed, query, onQuery }: {
+function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerEnter, sent, setSent, sending, setSending, draft: shownDraft, setDraftShown, used, lead, onClosed, onStarted, query, onQuery }: {
   cur: Entry
   entries: Entry[]
   all: SessionInfo[]
@@ -664,6 +680,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   used: Map<string, Set<number>> // per reading: the turns that confirmed one
   lead?: ReactNode
   onClosed: (key: string) => void // (a pane closed from here: this one's, or another's from its row's menu)
+  onStarted: (s: SessionInfo, pane: string, first: string) => void // (a copy of one started: gone to, its first message in its composer)
   query: string // the side list's search
   onQuery: (q: string) => void
   onPick: (e: Entry) => void
@@ -1815,6 +1832,47 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       },
     )
   }
+  // A copy of its conversation, in a workspace of its own (a herdr one's:
+  // where a new agent can be started; Claude Code's or Codex's, its session
+  // known). Of the one shown, its session as bound; of another, as herdr
+  // tells it. While it is at rest (as the list says it): not a turn in
+  // the middle (a check when asked, not a hold on it).
+  const [forking, setForking] = useState<{ s: SessionInfo; kind: 'claude' | 'codex'; source: string; at?: string; dir: string; name: string } | null>(null)
+  const forkOf = (e: Entry, at?: string) => {
+    const r = e.row
+    if (e.s.persistence !== 'herdr' || !r || r.lost) return null
+    const shown = e.key === cur.key && e.s.id === cur.s.id
+    const prog = (shown && convo.bind?.agent) || (isCodex(r.a.agent) ? 'codex' : isOpenCode(r.a.agent) ? 'opencode' : /claude/i.test(r.a.agent) ? 'claude' : '')
+    const source = (shown && convo.bind?.session) || r.a.session || ''
+    if ((prog !== 'claude' && prog !== 'codex') || !source || (at && prog !== 'claude')) return null
+    const name = (r.ws && r.ws !== '~' ? r.ws : '') || dirName(r.a.cwd) || r.a.agent
+    return { s: e.s, kind: prog, source, at, dir: r.a.cwd, name } as const
+  }
+  const forkItem = (e: Entry): MenuItem | null => {
+    const f = forkOf(e)
+    if (!f) return null
+    const still = e.row!.status === 'idle' || e.row!.status === 'done'
+    return { label: t('fork.item'), icon: <GitBranch size={16} />, separator: true, disabled: !still, hint: still ? undefined : t('fork.onlyIdle'), onSelect: () => setForking(f) }
+  }
+  // Of it up to a turn's end (Claude Code's, from the thread): any turn;
+  // the last, as all of it, while it is at rest.
+  const forkHere = (at: string | undefined) => {
+    const f = forkOf(cur, at)
+    if (!f) return
+    if (!at && cur.row && cur.row.status !== 'idle' && cur.row.status !== 'done') return toast(t('fork.onlyIdle'), true)
+    setForking(f)
+  }
+  // Its names in herdr: the workspace's, its tab's, its pane's own.
+  const [renaming, setRenaming] = useState<RenameTarget | null>(null)
+  const renameItem = (e: Entry): MenuItem | null => {
+    const r = e.row
+    if (e.s.persistence !== 'herdr' || !r || r.lost || !r.wsId) return null
+    return {
+      label: t('rename.item'),
+      icon: <TextCursorInput size={16} />,
+      onSelect: () => setRenaming({ sessionId: e.s.id, ws: { id: r.wsId, label: r.ws }, tab: r.a.tab ? { id: r.a.tab, label: r.a.tab_label ?? '' } : undefined, pane: { id: r.a.pane_id, label: r.a.label ?? '' } }),
+    }
+  }
   // Pinning one, or letting it go.
   const pinItem = (key: string): MenuItem => {
     const pinnedNow = pins.includes(key)
@@ -1839,11 +1897,15 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   rowMenu.current = (e) => [
     { label: t('convo.showTerminal'), icon: <SquareTerminal size={16} />, onSelect: terminalOf(e) },
     pinItem(e.key),
+    forkItem(e),
+    renameItem(e),
     closable(e) ? { label: t('agents.close'), icon: <Power size={16} />, danger: true, separator: true, onSelect: () => setClosing(e) } : null,
   ]
   const more = (): (MenuItem | null)[] => [
     { label: t('convo.showTerminal'), icon: <SquareTerminal size={16} />, onSelect: openTerminal },
     pinItem(cur.key),
+    forkItem(cur),
+    renameItem(cur),
     ...opsOf.map((o, i): MenuItem | null =>
       bound ? { label: t(codex && o === 'clear' ? 'ops.clear.itemCodex' : `ops.${o}.item`), icon: OP_ICONS[o], separator: i === 0, disabled: !canOps, title: canOps ? undefined : t('ops.onlyIdle'), hint: canOps || i < opsOf.length - 1 ? undefined : t(opsOf.length > 1 ? 'ops.onlyIdleGroup' : 'ops.onlyIdle'), onSelect: () => convo.bind && setOp({ op: o, bind: convo.bind, key: bindKey }) } : null,
     ),
@@ -1925,6 +1987,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       onQuery={onQuery}
       answered={answered}
       files={fileActs}
+      onForkAt={forkOf(cur, 'probe') ? forkHere : undefined}
     />
     {viewing && active && (
       <PictureDialog
@@ -1951,6 +2014,23 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
         onClose={() => setFilesAt(null)}
       />
     )}
+    {forking && (
+      <ForkDialog
+        sessionId={forking.s.id}
+        kind={forking.kind}
+        source={forking.source}
+        at={forking.at}
+        dir={forking.dir}
+        name={forking.name}
+        onDone={(pane, first) => {
+          const f = forking
+          setForking(null)
+          onStarted(f.s, pane, first)
+        }}
+        onClose={() => setForking(null)}
+      />
+    )}
+    {renaming && <RenameDialog target={renaming} onClose={() => setRenaming(null)} />}
     {op && <SessionOpDialog op={op.op} name={convo.title} codex={op.bind.agent === 'codex'} onSend={(text) => runOp(op.bind, text)} onClose={() => setOp(null)} onShowTerminal={openTerminal} />}
     {closing?.row && (
       <Confirm

@@ -36,10 +36,20 @@ type Watcher struct {
 	mu     sync.Mutex
 	last   *Snapshot
 	lastAt time.Time // (when last was read)
+	again  chan struct{}
 }
 
 func NewWatcher(c *ssh.Client, socketPath string, onChange func(*Snapshot), onTransition func(Transition)) *Watcher {
-	return &Watcher{client: c, socketPath: socketPath, onChange: onChange, onTrans: onTransition}
+	return &Watcher{client: c, socketPath: socketPath, onChange: onChange, onTrans: onTransition, again: make(chan struct{}, 1)}
+}
+
+// Again has the snapshot read again soon: for a change herdr tells no
+// event of (a pane renamed).
+func (w *Watcher) Again() {
+	select {
+	case w.again <- struct{}{}:
+	default:
+	}
 }
 
 // Latest returns the most recent snapshot, or nil before the first read.
@@ -134,6 +144,7 @@ func (w *Watcher) once(ctx context.Context) error {
 				<-kick
 			}
 		case <-tick.C:
+		case <-w.again:
 		}
 		s, err := w.refresh(ctx)
 		if err != nil {

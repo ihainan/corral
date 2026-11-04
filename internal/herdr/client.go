@@ -102,6 +102,7 @@ type Pane struct {
 	Agent       string `json:"agent,omitempty"`
 	Cwd         string `json:"cwd"`
 	Focused     bool   `json:"focused"`
+	Label       string `json:"label,omitempty"` // (the name given it, if one was: pane.rename)
 	Title       string `json:"terminal_title_stripped,omitempty"`
 	// AgentSession is the agent's own id for what runs there, as herdr's
 	// integration reports it (Claude Code's session id), when it does.
@@ -374,6 +375,22 @@ func (c *Client) FocusPane(ctx context.Context, paneID string) error {
 
 func (c *Client) FocusWorkspace(ctx context.Context, workspaceID string) error {
 	return c.Call(ctx, "workspace.focus", map[string]any{"workspace_id": workspaceID}, nil)
+}
+
+// RenameWorkspace names a workspace (herdr sets even an empty name: not
+// asked for one).
+func (c *Client) RenameWorkspace(ctx context.Context, workspaceID, label string) error {
+	return c.Call(ctx, "workspace.rename", map[string]any{"workspace_id": workspaceID, "label": label}, nil)
+}
+
+func (c *Client) RenameTab(ctx context.Context, tabID, label string) error {
+	return c.Call(ctx, "tab.rename", map[string]any{"tab_id": tabID, "label": label}, nil)
+}
+
+// RenamePane gives a pane a name of its own; an empty one takes it away
+// (herdr names it as before). herdr tells no event of it.
+func (c *Client) RenamePane(ctx context.Context, paneID, label string) error {
+	return c.Call(ctx, "pane.rename", map[string]any{"pane_id": paneID, "label": label}, nil)
 }
 
 // Subscribe starts an event stream on this connection. Each event is reported

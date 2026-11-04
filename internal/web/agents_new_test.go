@@ -92,20 +92,25 @@ func TestAgentStartCmdWorktree(t *testing.T) {
 		}
 		return ""
 	}
+	const id = "0b5d3f0e-1c1a-4f7e-9d1e-2a3b4c5d6e7f"
 	cases := []struct {
 		kind, resume string
 		worktree     bool
 		want         string
+		fork         bool
 	}{
-		{"claude", "", false, ""},
-		{"claude", "", true, "'-w'"},
-		{"codex", "", true, "'--worktree'"},
-		{"codex", "", false, ""},
-		{"opencode", "", true, ""}, // (none of its own)
-		{"claude", "0b5d3f0e-1c1a-4f7e-9d1e-2a3b4c5d6e7f", false, "'--resume' '0b5d3f0e-1c1a-4f7e-9d1e-2a3b4c5d6e7f'"},
+		{"claude", "", false, "", false},
+		{"claude", "", true, "'-w'", false},
+		{"codex", "", true, "'--worktree'", false},
+		{"codex", "", false, "", false},
+		{"opencode", "", true, "", false}, // (none of its own)
+		{"claude", id, false, "'--resume' '" + id + "'", false},
+		// (A copy: Claude Code's own flag; Codex's own subcommand.)
+		{"claude", id, false, "'--resume' '" + id + "' '--fork-session'", true},
+		{"codex", id, false, "'fork' '" + id + "'", true},
 	}
 	for _, c := range cases {
-		cmd := agentStartCmd("/run/h.sock", "w1:p1", "proj", c.kind, c.resume, c.worktree)
+		cmd := agentStartCmd("/run/h.sock", "w1:p1", "proj", c.kind, agentStart{resume: c.resume, fork: c.fork, worktree: c.worktree})
 		if got := tail(cmd); got != c.want {
 			t.Fatalf("%s resume=%q worktree=%v: agent's args %q, want %q (%s)", c.kind, c.resume, c.worktree, got, c.want, cmd)
 		}

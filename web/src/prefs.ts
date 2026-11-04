@@ -25,6 +25,11 @@ export interface Prefs {
   customKeys: CustomKey[] // the user's own keys on the key bar, from before layouts (see keyLayout)
   keyLayout: KeyLayout | null // the key bar's keys, once the user arranged them; null: the default (see terminal/layout.ts)
   pinnedAgents: string[] // agents pinned at the top of the agents page, by their keys (terminal/sessionName.ts agentKey), in the order pinned
+  // A sound on this device when an agent finishes ("done"), or also when it comes to need the person ("all"); its tone;
+  // a program's own bell in a terminal too (see terminal/chime.ts). The gateway's "finished" alert is heard too, unless "off".
+  chime: 'off' | 'done' | 'all'
+  chimeTone: 'bell' | 'soft' | 'ping'
+  chimeBells: boolean
 }
 
 // A key of one's own: what it is called on the key bar, and what it sends
@@ -38,7 +43,7 @@ export const maxPinned = 20 // (as the server's maxPinned)
 
 // Phones get a slightly smaller default so common output fits without wrapping.
 const phone = window.matchMedia('(pointer: coarse) and (max-width: 599px)').matches
-const defaults: Prefs = { theme: 'system', termTheme: 'corral-dark', termThemeDark: 'corral-dark', termThemeLight: 'corral-light', fontSize: phone ? 13 : 14, keybar: true, optionIsMeta: true, webgl: false, remoteClipboard: true, tapKeyboard: false, composerEnter: 'send', customKeys: [], keyLayout: null, pinnedAgents: [] }
+const defaults: Prefs = { theme: 'system', termTheme: 'corral-dark', termThemeDark: 'corral-dark', termThemeLight: 'corral-light', fontSize: phone ? 13 : 14, keybar: true, optionIsMeta: true, webgl: false, remoteClipboard: true, tapKeyboard: false, composerEnter: 'send', customKeys: [], keyLayout: null, pinnedAgents: [], chime: 'all', chimeTone: 'bell', chimeBells: true }
 
 // The local copy is kept per account (several people may share a device);
 // until the account is known the last one used here paints the first frame.
@@ -240,7 +245,9 @@ function sanitize(raw: unknown): Partial<Prefs> {
   for (const k of ['termTheme', 'termThemeDark', 'termThemeLight'] as const) if (typeof o[k] === 'string' && /^[a-z0-9][a-z0-9-]{0,63}$/.test(o[k] as string)) out[k] = o[k] as string
   if (Number.isInteger(o.fontSize) && (o.fontSize as number) >= 9 && (o.fontSize as number) <= 28) out.fontSize = o.fontSize as number
   if (o.composerEnter === 'send' || o.composerEnter === 'newline') out.composerEnter = o.composerEnter
-  for (const k of ['keybar', 'optionIsMeta', 'webgl', 'remoteClipboard', 'tapKeyboard'] as const) if (typeof o[k] === 'boolean') out[k] = o[k] as boolean
+  if (o.chime === 'off' || o.chime === 'done' || o.chime === 'all') out.chime = o.chime
+  if (o.chimeTone === 'bell' || o.chimeTone === 'soft' || o.chimeTone === 'ping') out.chimeTone = o.chimeTone
+  for (const k of ['keybar', 'optionIsMeta', 'webgl', 'remoteClipboard', 'tapKeyboard', 'chimeBells'] as const) if (typeof o[k] === 'boolean') out[k] = o[k] as boolean
   if (Array.isArray(o.customKeys) && o.customKeys.length <= maxCustomKeys) {
     const text = (v: unknown, max: number) => typeof v === 'string' && v.trim() !== '' && [...v].length <= max && !controlChars.test(v)
     const keys = o.customKeys.filter((k): k is CustomKey => !!k && typeof k === 'object' && text(k.label, 12) && text(k.keys, 200))

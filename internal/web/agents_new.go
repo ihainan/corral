@@ -62,7 +62,7 @@ type newAgents struct {
 	busy map[string]bool         // by person and session
 }
 
-// POST /api/sessions/{id}/agents {"dir", "kind", "label", "resume", "worktree", "key"}
+// POST /api/sessions/{id}/agents {"dir", "kind", "label", "resume", "fork", "at", "worktree", "key"}
 // → {"workspace", "pane"}; 409 unsupported (not herdr), in_progress (that
 // key under way), 429 busy (another under way); 400 bad_folder; 422
 // start_failed (herdr's own words; "closed": the workspace made for it was
@@ -73,15 +73,20 @@ func (s *Server) apiNewAgent(w http.ResponseWriter, r *http.Request) {
 		Kind     string `json:"kind"`
 		Label    string `json:"label"`
 		Resume   string `json:"resume"`
+		Fork     bool   `json:"fork"`     // (resume a copy: Claude Code's or Codex's; the folder, the session's own)
+		At       string `json:"at"`       // (fork: of it up to before this message the person typed; Claude Code's)
 		Worktree bool   `json:"worktree"` // (not with resume: a session taken up stays where it was)
 		Key      string `json:"key"`
 	}
-	if err := readJSON(r, &b); err != nil || !agentKinds[b.Kind] || !newAgentKey.MatchString(b.Key) || (b.Resume != "" && (b.Kind != "claude" || !sessionUUID.MatchString(b.Resume))) || (b.Worktree && (worktreeFlag[b.Kind] == "" || b.Resume != "")) {
+	if err := readJSON(r, &b); err != nil || !agentKinds[b.Kind] || !newAgentKey.MatchString(b.Key) ||
+		(b.Resume != "" && (!sessionUUID.MatchString(b.Resume) || b.Kind != "claude" && !(b.Kind == "codex" && b.Fork))) ||
+		(b.Fork && b.Resume == "") || (b.At != "" && (!b.Fork || b.Kind != "claude" || !sessionUUID.MatchString(b.At))) ||
+		(b.Worktree && (worktreeFlag[b.Kind] == "" || b.Resume != "")) {
 		writeError(w, http.StatusBadRequest, "bad_request", "folder, kind and key are required")
 		return
 	}
 	dir, ok := agentDir(b.Dir)
-	if !ok {
+	if !ok && !b.Fork {
 		writeError(w, http.StatusBadRequest, "bad_folder", "a folder's full path (or one under ~/) is required")
 		return
 	}
@@ -113,7 +118,7 @@ func (s *Server) apiNewAgent(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), newAgentWait+30*time.Second)
 	defer cancel()
 	rec := &recorder{header: http.Header{}}
-	s.newAgent(ctx, rec, sess, socket, dir, b.Kind, b.Label, b.Resume, b.Worktree)
+	s.newAgent(ctx, rec, sess, socket, dir, b.Kind, b.Label, agentStart{resume: b.Resume, fork: b.Fork, at: b.At, worktree: b.Worktree})
 	s.newAgents.finish(key, who, run, rec.status, rec.body.Bytes())
 	for k, v := range rec.header {
 		w.Header()[k] = v
@@ -126,10 +131,35 @@ func (s *Server) apiNewAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	actx, acancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
 	defer acancel()
-	s.audit(r.WithContext(actx), "agents.new", sess.HostName, map[string]any{"session": sess.ID, "kind": b.Kind, "resume": b.Resume != "", "worktree": b.Worktree, "outcome": outcome})
+	s.audit(r.WithContext(actx), "agents.new", sess.HostName, map[string]any{"session": sess.ID, "kind": b.Kind, "resume": b.Resume != "", "fork": b.Fork, "at": b.At != "", "worktree": b.Worktree, "outcome": outcome})
 }
 
-func (s *Server) newAgent(ctx context.Context, w http.ResponseWriter, sess *term.Session, socket, dir, kind, label, resume string, worktree bool) {
+// agentStart: how an agent is started: anew (in a worktree of its own, or
+// not), taking up a session of before (resume), or a copy of one (fork; of
+// it up to the message at, where at is given).
+type agentStart struct {
+	resume   string
+	fork     bool
+	at       string
+	worktree bool
+}
+
+func (s *Server) newAgent(ctx context.Context, w http.ResponseWriter, sess *term.Session, socket, dir, kind, label string, how agentStart) {
+	// A copy: of the session's log found by its id, in the folder it began
+	// in (not the one asked for: the copy is of that folder's session).
+	var src string
+	if how.fork {
+		var err error
+		src, dir, err = s.forkSource(ctx, sess, kind, how.resume)
+		if errors.Is(err, errForkNotFound) {
+			writeError(w, http.StatusNotFound, "no_session", "that conversation's record was not found on the host")
+			return
+		}
+		if err != nil {
+			writeFileError(w, err)
+			return
+		}
+	}
 	// The folder: the home's when under ~/, a folder that is there.
 	err := s.withSFTP(ctx, sess, convoReadLimit, func(c *sftplite.Client) error {
 		if strings.HasPrefix(dir, "~") {
@@ -157,8 +187,30 @@ func (s *Server) newAgent(ctx context.Context, w http.ResponseWriter, sess *term
 		return
 	}
 	label = agentLabel(label, dir)
+	// Claude Code's: its log (up to a message, where one is named) a
+	// session of its own, taken up as one. (Gone again where no agent was
+	// started on it.)
+	keep := true
+	if how.fork && kind == "claude" {
+		id, err := s.forkCopy(ctx, sess, src, how.resume, how.at)
+		switch {
+		case errors.Is(err, errForkAt):
+			writeError(w, http.StatusBadRequest, "bad_message", "that is not a message of yours in this conversation")
+			return
+		case err != nil:
+			writeError(w, http.StatusUnprocessableEntity, "start_failed", err.Error())
+			return
+		}
+		how.resume, how.fork = id, false
+		defer func() {
+			if !keep {
+				s.dropForkCopy(sess, src, id)
+			}
+		}()
+	}
 	c := herdrDial(w, ctx, sess, socket)
 	if c == nil {
+		keep = false
 		return
 	}
 	ws, pane, err := c.CreateWorkspace(ctx, dir, label)
@@ -166,18 +218,22 @@ func (s *Server) newAgent(ctx context.Context, w http.ResponseWriter, sess *term
 	var apiErr *herdr.APIError
 	switch {
 	case errors.As(err, &apiErr):
+		keep = false
 		writeError(w, http.StatusUnprocessableEntity, "start_failed", apiErr.Message)
 		return
 	case err != nil || ws == "" || !herdrPaneID.MatchString(pane):
-		// (Made or not, or made in part, it cannot be told: not closed on a guess.)
+		// (Made or not, or made in part, it cannot be told: not closed on a
+		// guess. No agent was started: no copy for one.)
+		keep = false
 		writeErrorExtra(w, http.StatusBadGateway, "unknown", "herdr did not say what it made", map[string]any{"workspace": ws})
 		return
 	}
 	// The agent: started by herdr's own start (which waits until herdr
 	// finds it ready, not just started), told plainly whether it failed.
-	failed, why := s.startAgent(ctx, sess, socket, pane, agentName(label, kind), kind, resume, worktree)
+	failed, why := s.startAgent(ctx, sess, socket, pane, agentName(label, kind), kind, how)
 	switch {
 	case failed:
+		keep = false
 		closed := s.closeWorkspace(sess, socket, ws) == nil
 		writeErrorExtra(w, http.StatusUnprocessableEntity, "start_failed", why, map[string]any{"closed": closed, "workspace": ws})
 	case why != "":
@@ -193,7 +249,7 @@ func (s *Server) newAgent(ctx context.Context, w http.ResponseWriter, sess *term
 // written to its log as it asks them, so the card has them whole, nothing of
 // the person's own settings changed (internal/askhook). In a worktree:
 // the kind's own flag for it (worktreeFlag).
-func agentStartCmd(socket, pane, name, kind, resume string, worktree bool) string {
+func agentStartCmd(socket, pane, name, kind string, how agentStart) string {
 	q := sshx.QuoteShell
 	cmd := `PATH="$HOME/.local/bin:$HOME/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH" HERDR_SOCKET_PATH=` + q(socket) +
 		` herdr agent start ` + q(name) + ` --kind ` + q(kind) + ` --pane ` + q(pane) + ` --timeout ` + strconv.FormatInt(newAgentWait.Milliseconds(), 10)
@@ -201,10 +257,15 @@ func agentStartCmd(socket, pane, name, kind, resume string, worktree bool) strin
 	if kind == "claude" {
 		args = append(args, "--settings", askhook.Inline())
 	}
-	if resume != "" {
-		args = append(args, "--resume", resume)
+	switch {
+	case how.resume != "" && how.fork && kind == "codex":
+		args = append(args, "fork", how.resume)
+	case how.resume != "" && how.fork:
+		args = append(args, "--resume", how.resume, "--fork-session")
+	case how.resume != "":
+		args = append(args, "--resume", how.resume)
 	}
-	if worktree && worktreeFlag[kind] != "" {
+	if how.worktree && worktreeFlag[kind] != "" {
 		args = append(args, worktreeFlag[kind])
 	}
 	if len(args) > 0 {
@@ -219,8 +280,8 @@ func agentStartCmd(socket, pane, name, kind, resume string, worktree bool) strin
 // startAgent runs herdr's own `agent start` on the host, against the
 // session's herdr: failed (with why) where herdr said it failed; why alone
 // where what became of it is not known.
-func (s *Server) startAgent(ctx context.Context, sess *term.Session, socket, pane, name, kind, resume string, worktree bool) (failed bool, why string) {
-	cmd := agentStartCmd(socket, pane, name, kind, resume, worktree)
+func (s *Server) startAgent(ctx context.Context, sess *term.Session, socket, pane, name, kind string, how agentStart) (failed bool, why string) {
+	cmd := agentStartCmd(socket, pane, name, kind, how)
 	out, err := sshx.Output(ctx, sess.Client(), cmd, 64<<10)
 	var res struct {
 		Error *struct {

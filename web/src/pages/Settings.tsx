@@ -10,6 +10,7 @@ import { Confirm, Dialog, Field, useToast } from '../components/ui'
 import { CurrentScheme, SchemeDialog } from '../terminal/SchemePicker'
 import { TwoStepSetting } from './TwoStep'
 import { CustomKeysSection } from './CustomKeys'
+import { playChime } from '../terminal/chime'
 
 // As the terminal's menu sets it (one point at a time).
 const FONT_MIN = 9
@@ -194,6 +195,39 @@ export function SettingsPage() {
               {t('settings.unpinAll')}
             </button>
           </Setting>
+        </div>
+      </section>
+
+      {/* (A sound on this device when an agent finishes, needs you, or a program rings: terminal/chime.ts.) */}
+      <section className="section">
+        <h2>{t('settings.chime')}</h2>
+        <div className="settings-group">
+          <Setting label={t('settings.chimeWhen')} hint={t('settings.chimeWhenHint')} id="chime-l">
+            <Seg
+              labelledBy="chime-l"
+              value={prefs.chime}
+              options={[['off', t('settings.chimeOff')], ['done', t('settings.chimeDone')], ['all', t('settings.chimeAll')]]}
+              onChange={(v) => setPrefs({ chime: v })}
+            />
+          </Setting>
+          {prefs.chime !== 'off' && (
+            <>
+              <Setting label={t('settings.chimeTone')} id="chime-tone-l">
+                <div className="settings-inline">
+                  <Seg
+                    labelledBy="chime-tone-l"
+                    value={prefs.chimeTone}
+                    options={[['bell', t('settings.chimeToneBell')], ['soft', t('settings.chimeToneSoft')], ['ping', t('settings.chimeTonePing')]]}
+                    onChange={(v) => (setPrefs({ chimeTone: v }), playChime(v))}
+                  />
+                  <button type="button" className="btn" onClick={() => playChime(prefs.chimeTone)}>
+                    {t('settings.chimeTry')}
+                  </button>
+                </div>
+              </Setting>
+              <Switch label={t('settings.chimeBells')} hint={t('settings.chimeBellsHint')} checked={prefs.chimeBells} onChange={(v) => setPrefs({ chimeBells: v })} />
+            </>
+          )}
         </div>
       </section>
 

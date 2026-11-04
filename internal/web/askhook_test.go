@@ -332,14 +332,14 @@ func TestAskHookEndpoints(t *testing.T) {
 // beside a resume; Codex and OpenCode as before.
 func TestAgentStartCmd(t *testing.T) {
 	inline := sshx.QuoteShell(askhook.Inline())
-	if c := agentStartCmd("/s", "w1:p1", "claude-1", "claude", "", false); !strings.Contains(c, " -- '--settings' "+inline+" 2>&1") {
+	if c := agentStartCmd("/s", "w1:p1", "claude-1", "claude", agentStart{}); !strings.Contains(c, " -- '--settings' "+inline+" 2>&1") {
 		t.Errorf("%s", c)
 	}
-	if c := agentStartCmd("/s", "w1:p1", "claude-1", "claude", "0b1c2d3e-0000-4000-8000-000000000000", false); !strings.Contains(c, " -- '--settings' "+inline+" '--resume' '0b1c2d3e-0000-4000-8000-000000000000' 2>&1") {
+	if c := agentStartCmd("/s", "w1:p1", "claude-1", "claude", agentStart{resume: "0b1c2d3e-0000-4000-8000-000000000000"}); !strings.Contains(c, " -- '--settings' "+inline+" '--resume' '0b1c2d3e-0000-4000-8000-000000000000' 2>&1") {
 		t.Errorf("%s", c)
 	}
 	for _, k := range []string{"codex", "opencode"} {
-		if c := agentStartCmd("/s", "w1:p1", k+"-1", k, "", false); strings.Contains(c, "--settings") || strings.Contains(c, " -- ") {
+		if c := agentStartCmd("/s", "w1:p1", k+"-1", k, agentStart{}); strings.Contains(c, "--settings") || strings.Contains(c, " -- ") {
 			t.Errorf("%s", c)
 		}
 	}

@@ -263,6 +263,9 @@ var settingRules = map[string]func(json.RawMessage) bool{
 	"keyLayout":       keyLayout,
 	"pinnedAgents":    pinnedAgents,
 	"webhook":         webhookURL,
+	"chime":           oneOf("off", "done", "all"),
+	"chimeTone":       oneOf("bell", "soft", "ping"),
+	"chimeBells":      isBool,
 }
 
 // validSetting is true for a known setting with a valid value. null is no

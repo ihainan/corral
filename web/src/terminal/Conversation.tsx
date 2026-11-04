@@ -130,6 +130,7 @@ export function ConversationView({
   onQuery,
   answered,
   files,
+  onForkAt,
 }: {
   convo: Convo
   agent: ConvoAgent | null
@@ -157,6 +158,7 @@ export function ConversationView({
   lead?: ReactNode // (first in the bar: the agents page's way back to its list, on a phone)
   answered?: boolean // (its question answered here, its list's word of it not come yet)
   files?: FileActs // (its session live: a file it names can be shown, fetched, looked at)
+  onForkAt?: (at: string | undefined) => void // (a copy of it up to the end of a turn can be started: cut before at, the next message typed; none, all of it)
 }) {
   const working = agent?.status === 'working'
   const waits = agent?.status === 'blocked'
@@ -1026,7 +1028,21 @@ export function ConversationView({
     const p = files ? codePath(text) : null
     return p ? <PathCode path={p} text={text} /> : null
   }, [files])
+  // A copy of it up to the end of one of the person's turns: cut before the
+  // next message they typed (one taken in during that turn is of it).
+  const entriesRef = useRef(convo.entries)
+  entriesRef.current = convo.entries
+  const forkAt = useMemo(() => {
+    if (!onForkAt) return undefined
+    return (e: ConvoEntry) => {
+      const all = entriesRef.current
+      const i = all.findIndex((x) => x.seq === e.seq)
+      if (i < 0) return
+      onForkAt(all.slice(i + 1).find((x) => x.role === 'user' && !x.mid && x.id)?.id)
+    }
+  }, [onForkAt])
   return (
+    <ForkAtOf.Provider value={forkAt}>
     <FileActsOf.Provider value={files}>
     <CopyOf.Provider value={copy}>
     <CodeSpanOf.Provider value={codeSpan}>
@@ -1289,6 +1305,7 @@ export function ConversationView({
     </CodeSpanOf.Provider>
     </CopyOf.Provider>
     </FileActsOf.Provider>
+    </ForkAtOf.Provider>
   )
 }
 
@@ -2877,6 +2894,8 @@ function PathCode({ path, text }: { path: string; text: string }) {
   )
 }
 const CopyOf = createContext<((s: string) => void) | undefined>(undefined)
+// (A copy of the conversation up to the end of one of the person's turns, where one can be started.)
+const ForkAtOf = createContext<((e: ConvoEntry) => void) | undefined>(undefined)
 
 // A file a step acted on: its whole path, and what can be done with it.
 // (acts: only what can be done, the path being said beside it already.)
@@ -3175,6 +3194,7 @@ function UserTurn({ e, onCopy }: { e: ConvoEntry; onCopy: (s: string) => void })
   const any = files.some(Boolean)
   // (A shell command run with "!": in the terminal's letters, as typed.)
   const shell = /^! \S/.test(text)
+  const forkAt = useContext(ForkAtOf)
   return (
     <div className={'convo-user' + (e.mid ? ' is-mid' : '')}>
       <div className={'convo-user-text' + (shell ? ' is-shell' : '')}>
@@ -3206,6 +3226,11 @@ function UserTurn({ e, onCopy }: { e: ConvoEntry; onCopy: (s: string) => void })
         {text && (
           <button type="button" className="link-btn" onClick={() => onCopy(text)}>
             {t('common.copy')}
+          </button>
+        )}
+        {forkAt && !e.mid && !e.gone && e.id && (
+          <button type="button" className="link-btn" onClick={() => forkAt(e)} title={t('fork.atHint')}>
+            {t('fork.at')}
           </button>
         )}
       </div>

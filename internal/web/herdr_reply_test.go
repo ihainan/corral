@@ -76,7 +76,7 @@ func (f *fakeHerdr) serve(c net.Conn) {
 			result = map[string]any{"snapshot": map[string]any{"version": "0.9.5", "focused_workspace_id": "w1", "workspaces": []any{}, "panes": []any{}, "tabs": f.tabs}}
 		case "pane.read":
 			result = map[string]any{"read": map[string]any{"text": f.screen}}
-		case "pane.zoom", "tab.create", "pane.split", "pane.focus_direction", "tab.focus":
+		case "pane.zoom", "tab.create", "pane.split", "pane.focus_direction", "tab.focus", "workspace.rename", "tab.rename", "pane.rename":
 			req.Params["method"] = req.Method
 			f.sent = append(f.sent, req.Params)
 		case "pane.send_keys", "pane.send_input":
@@ -423,6 +423,38 @@ func TestHerdrPanelActions(t *testing.T) {
 		"pane.focus_direction mode=<nil> dir=down focus=<nil> tab=<nil>",
 		"tab.focus mode=<nil> dir=<nil> focus=<nil> tab=w1:t3", // next after 2 (of 1, 2, 3; w2's aside)
 		"tab.focus mode=<nil> dir=<nil> focus=<nil> tab=w1:t1",
+	}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("requests:\n got %q\nwant %q", got, want)
+	}
+}
+
+// Renaming from the conversation page: a workspace's or tab's name is
+// required (cleaned); a pane's may be none (its own taken away).
+func TestHerdrRename(t *testing.T) {
+	h := newHarness(t)
+	admin := h.admin()
+	hd := newFakeHerdr(t)
+	_, id := herdrReplyEnv(t, h, admin, hd)
+	path := "/api/sessions/" + id + "/herdr"
+	mustStatus(t, admin.do("POST", path, map[string]any{"action": "rename_workspace", "target": "w1", "label": "  build\tfix  "}), 200, "workspace")
+	mustStatus(t, admin.do("POST", path, map[string]any{"action": "rename_tab", "target": "w1:t1", "label": "logs"}), 200, "tab")
+	mustStatus(t, admin.do("POST", path, map[string]any{"action": "rename_pane", "target": "w1:p2", "label": ""}), 200, "pane, none")
+	mustStatus(t, admin.do("POST", path, map[string]any{"action": "rename_workspace", "target": "w1", "label": " \n "}), 400, "workspace, none")
+	mustStatus(t, admin.do("POST", path, map[string]any{"action": "rename_tab", "target": "w1:t1"}), 400, "tab, none")
+	mustStatus(t, admin.do("POST", path, map[string]any{"action": "rename_pane", "target": "w1 p2", "label": "x"}), 400, "a bad id")
+	mustStatus(t, admin.do("POST", path, map[string]any{"action": "rename_pane", "label": "x"}), 400, "no target")
+	long := strings.Repeat("名", 60)
+	mustStatus(t, admin.do("POST", path, map[string]any{"action": "rename_pane", "target": "w1:p2", "label": long}), 200, "long")
+	got := []string{}
+	for _, p := range hd.typed() {
+		got = append(got, fmt.Sprintf("%v ws=%v tab=%v pane=%v label=%v", p["method"], p["workspace_id"], p["tab_id"], p["pane_id"], p["label"]))
+	}
+	want := []string{
+		"workspace.rename ws=w1 tab=<nil> pane=<nil> label=buildfix",
+		"tab.rename ws=<nil> tab=w1:t1 pane=<nil> label=logs",
+		"pane.rename ws=<nil> tab=<nil> pane=w1:p2 label=",
+		"pane.rename ws=<nil> tab=<nil> pane=w1:p2 label=" + strings.Repeat("名", maxAgentLabel),
 	}
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("requests:\n got %q\nwant %q", got, want)

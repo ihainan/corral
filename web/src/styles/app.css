@@ -808,3 +808,11 @@ details.adv > .form { margin-top: 16px; }
 .ask-hook-row .hint { margin: 0; }
 .ask-hook-state { margin: 0; font-size: 14px; line-height: 20px; }
 .ask-hook-snippet { margin: 4px 0; max-width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg-subtle); font: 12px/1.5 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* A setting's choice with a button beside it (the tone and "play"); wrapped on a narrow screen. */
+.settings-inline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}

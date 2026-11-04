@@ -15,6 +15,7 @@ export interface AgentRow {
   s: SessionInfo
   a: HerdrAgent
   ws: string
+  wsId: string // (its workspace's id: what renaming it names)
   status: AgentStatus
   last?: AgentStatus // (herdr lost: what it said last)
   lost?: boolean // (the gateway lost herdr after this summary)
@@ -90,7 +91,7 @@ export function listAgents(sessions: SessionInfo[]): { rows: AgentRow[]; others:
         // (Of two tabs' word, a current summary's over one the gateway lost.)
         if (had && !(had.lost && !m.lost)) continue
         const known = (STATUS_ORDER as string[]).includes(a.status) ? (a.status as AgentStatus) : 'unknown'
-        byKey.set(key, m.lost ? { key, s, a, ws: w.label, status: 'unknown', lost: true, last: known === 'unknown' ? undefined : known } : { key, s, a, ws: w.label, ...withBg(key, a, known, now) })
+        byKey.set(key, m.lost ? { key, s, a, ws: w.label, wsId: w.id, status: 'unknown', lost: true, last: known === 'unknown' ? undefined : known } : { key, s, a, ws: w.label, wsId: w.id, ...withBg(key, a, known, now) })
       }
     }
   }

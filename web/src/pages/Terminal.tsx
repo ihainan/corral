@@ -44,6 +44,7 @@ import { holdTermMode } from '../terminal/chatSend'
 import { useComposerFit } from '../terminal/autosize'
 import { useSession, VERSION_EVENT } from '../app'
 import { geminiPath, shellPath } from '../terminal/paths'
+import { BellFilter, ChimeCounter, chime, oscNotice } from '../terminal/chime'
 
 const isTouch = window.matchMedia('(pointer: coarse)').matches || navigator.maxTouchPoints > 0
 
@@ -930,6 +931,22 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
     // Disambiguate (1) or report all keys (8); else modifyOtherKeys.
     const keysApart = (): KeysApart => ((flags().at(-1) ?? 0) & 9 ? 'kitty' : otherKeys > 0 ? 'xterm' : null)
     keysApartRef.current = keysApart
+    // Sounds (terminal/chime.ts): a program's bell or notice, as live output
+    // (not a replay's, not a session watched); herdr's agents by the counts
+    // its summary brings.
+    const bells = new BellFilter()
+    const counts = new ChimeCounter()
+    const ring = (plain: boolean) => {
+      if (replaying || watch) return
+      if (bells.ring(Date.now(), plain)) chime('bell', id)
+    }
+    const bellSub = term.onBell(() => ring(true))
+    const noticeSubs = [9, 777].map((code) =>
+      term.parser.registerOscHandler(code, (data) => {
+        if (oscNotice(code, data)) ring(false)
+        return false // (not taken: as before)
+      }),
+    )
     const clipSub = term.parser.registerOscHandler(52, (data) => {
       if (replaying || !mayCopy()) return true
       const text = clipboardText(data)
@@ -1005,6 +1022,15 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
       },
       onMeta: (m) => {
         if (watch) return // herdr belongs to the owner
+        const sum = m as HerdrSummary
+        if (!sum.lost) {
+          const now = new Map<string, { done: number; needs: number }>()
+          for (const w of sum.workspaces) for (const a of w.agents) now.set(id + ' ' + a.pane_id, { done: a.chime_done ?? 0, needs: a.chime_needs ?? 0 })
+          for (const c of counts.feed(now)) {
+            bells.agent = Date.now()
+            chime(c.kind, c.pane + ' ' + c.n)
+          }
+        }
         setHerdr(m as HerdrSummary)
         // (lost: the gateway lost herdr; kept for the pane in front, but what it says was so then)
         setHerdrFresh(!(m as HerdrSummary).lost)
@@ -1295,6 +1321,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
       imeLog?.('→ sent ' + JSON.stringify(data))
       const typed = typedChar !== null && data === typedChar && !composing
       const fromUser = onUserInput ? userData : !isTerminalReply(data)
+      if (fromUser && !isMouseReport(data) && !isWheelReport(data)) bells.key = Date.now()
       typedChar = null
       userData = false
       // xterm's own answers (to queries, focus changes) during a replay are
@@ -1503,6 +1530,8 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
       alive = false
       dataSub.dispose()
       clipSub.dispose()
+      bellSub.dispose()
+      for (const s of noticeSubs) s.dispose()
       kbSubs.forEach((d) => d.dispose())
       userSub?.dispose()
       binSub.dispose()

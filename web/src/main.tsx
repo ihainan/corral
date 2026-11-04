@@ -10,6 +10,7 @@ import { App } from './app'
 import { askEarly } from './api'
 import { preloadTerminal } from './pages/lazyPages'
 import './notifyopen' // listens from the start (see there)
+import { unlockChime } from './terminal/chime'
 
 document.documentElement.lang = getLang()
 
@@ -56,6 +57,7 @@ if ('serviceWorker' in navigator && location.protocol === 'https:') {
   window.addEventListener('resize', apply)
 }
 
+unlockChime() // (sound lets itself be played from the first tap or key on: terminal/chime.ts)
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <App />

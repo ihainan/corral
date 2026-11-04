@@ -62,6 +62,9 @@ export function NewAgentDialog({ sessions, onDone, onOpen, onClose }: { sessions
   const asked = useState(() => ({ n: 0 }))[0] // (a list come back for what is no longer asked: not shown)
   const [oldsBusy, setOldsBusy] = useState(false)
   const [resume, setResume] = useState('')
+  // (Of the one picked, a copy taken up: it goes on as it was, a running one too.)
+  const [fork, setFork] = useState(false)
+  const copying = fork && !!resume
   const inWorktree = worktree && kind !== 'opencode' && !resume
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -113,13 +116,14 @@ export function NewAgentDialog({ sessions, onDone, onOpen, onClose }: { sessions
     setBusy(true)
     setError('')
     try {
-      const body = { dir: dir.trim(), kind, label: label.trim(), resume: kind === 'claude' ? resume : '', worktree: inWorktree }
+      const body = { dir: dir.trim(), kind, label: label.trim(), resume: kind === 'claude' ? resume : '', fork: kind === 'claude' && copying, worktree: inWorktree }
       const r = await api<{ pane: string }>('POST', `/api/sessions/${sess.id}/agents`, { ...body, key: keyOf(sess.id + '\n' + JSON.stringify(body)) }, { timeoutMs: 90000 })
       keepDir(dir.trim())
       local.set(KIND, kind)
-      onDone(sess, r.pane, first.trim())
+      onDone(sess, r.pane, !resume || copying ? first.trim() : '')
     } catch (err) {
       if (err instanceof ApiError && err.code === 'bad_folder') setError(t('newAgent.badFolder'))
+      else if (err instanceof ApiError && err.code === 'no_session') setError(t('fork.noSession'))
       else if (err instanceof ApiError && err.code === 'start_failed') setError(t('newAgent.failed', { why: err.message }) + (err.extra.closed === false ? ' ' + t('newAgent.notClosed') : ''))
       else if (err instanceof ApiError && (err.code === 'busy' || err.code === 'in_progress')) setError(t('newAgent.busy'))
       else setError(t('newAgent.unknown') + (err instanceof ApiError && typeof err.extra.workspace === 'string' && err.extra.workspace ? ' ' + t('newAgent.which', { w: err.extra.workspace }) : ''))
@@ -220,18 +224,27 @@ export function NewAgentDialog({ sessions, onDone, onOpen, onClose }: { sessions
                       role="radio"
                       aria-checked={resume === o.id}
                       className={'new-agent-oldrow' + (resume === o.id ? ' on' : '')}
-                      onClick={() => (open && sess ? onOpen(sess, open) : setResume(o.id))}
+                      onClick={() => (open && sess && !fork ? onOpen(sess, open) : setResume(o.id))}
                     >
                       <span className="new-agent-oldtitle">{o.title || o.first || o.id.slice(0, 8)}</span>
-                      <span className="new-agent-oldwhen">{open ? t('newAgent.open') : new Date(o.modified).toLocaleString()}</span>
+                      <span className="new-agent-oldwhen">{open ? t(fork ? 'newAgent.running' : 'newAgent.open') : new Date(o.modified).toLocaleString()}</span>
                     </button>
                   )
                 })}
               </div>
             )}
+            {olds !== null && olds.length > 0 && (
+              <>
+                <label className="check">
+                  <input type="checkbox" checked={fork} onChange={(e) => (setFork(e.target.checked), !e.target.checked && resume && running.has(resume) && setResume(''))} />
+                  <span>{t('newAgent.fork')}</span>
+                </label>
+                {fork && <p className="hint">{t('fork.shared')}</p>}
+              </>
+            )}
           </div>
         )}
-        {!resume && (
+        {(!resume || copying) && (
           <label className="field">
             <span>{t('newAgent.first')}</span>
             <textarea className="input" rows={3} value={first} placeholder={t('newAgent.firstHint')} onChange={(e) => setFirst(e.target.value)} />
@@ -243,7 +256,7 @@ export function NewAgentDialog({ sessions, onDone, onOpen, onClose }: { sessions
             {t('common.cancel')}
           </button>
           <button type="submit" className="btn btn-primary" disabled={busy || !dir.trim()}>
-            {t(busy ? 'newAgent.starting' : resume ? 'newAgent.resume' : 'newAgent.start')}
+            {t(busy ? 'newAgent.starting' : copying ? 'newAgent.forkGo' : resume ? 'newAgent.resume' : 'newAgent.start')}
           </button>
         </div>
       </form>

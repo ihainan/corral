@@ -440,6 +440,8 @@ func (s *Server) onHerdrTransition(sess *term.Session, h *store.Host, tr herdr.T
 			if !still() || s.paneWatched(sess.ID, tr.Pane.ID) {
 				return
 			}
+			// (Heard, for one who asked for a sound when an agent finishes.)
+			note.Quiet = !s.chimeOnDone(sess.OwnerID)
 			s.notifier.Send(context.Background(), sess.OwnerID, note)
 		}()
 	}

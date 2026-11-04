@@ -55,6 +55,16 @@ type herdrAgent struct {
 	// cmdProber); none where not known.
 	BgCmds    int     `json:"bg_cmds,omitempty"`
 	BgCmdList []bgCmd `json:"bg_cmd_list,omitempty"`
+	// Tab: the tab it is in, its name, and how many tabs its workspace
+	// has; Label: the name the pane was given, if one was (pane.rename).
+	Tab      string `json:"tab,omitempty"`
+	TabLabel string `json:"tab_label,omitempty"`
+	Tabs     int    `json:"tabs,omitempty"`
+	Label    string `json:"label,omitempty"`
+	// ChimeDone, ChimeNeeds: how many times it finished, came to need the
+	// person, as this watcher counted (see chimeCounts).
+	ChimeDone  int64 `json:"chime_done,omitempty"`
+	ChimeNeeds int64 `json:"chime_needs,omitempty"`
 }
 
 type herdrWorkspace struct {
@@ -253,6 +263,16 @@ func summarize(session string, s *herdr.Snapshot, times *agentTimes, old bool) h
 		out.Workspaces = append(out.Workspaces, herdrWorkspace{ID: w.ID, Label: w.Label, Number: w.Number,
 			Status: w.AgentStatus, Focused: w.Focused || w.ID == s.FocusedWorkspace, Agents: []herdrAgent{}})
 	}
+	tabs, tabCount := map[string]string{}, map[string]int{}
+	for _, t := range s.Tabs {
+		tabs[t.ID] = t.Label
+		tabCount[t.WorkspaceID]++
+	}
+	// (A pane's own name is in the panes' list: the agents' has none.)
+	named := map[string]string{}
+	for _, p := range s.Panes {
+		named[p.ID] = p.Label
+	}
 	agents := s.Agents
 	if len(agents) == 0 {
 		for _, p := range s.Panes {
@@ -267,7 +287,8 @@ func summarize(session string, s *herdr.Snapshot, times *agentTimes, old bool) h
 			continue
 		}
 		out.Workspaces[i].Agents = append(out.Workspaces[i].Agents,
-			herdrAgent{PaneID: p.ID, Agent: p.Agent, Status: p.AgentStatus, Title: truncate(p.Title, 120), Cwd: p.Cwd, Session: agentSession(p), Since: paneSince(p, times, old)})
+			herdrAgent{PaneID: p.ID, Agent: p.Agent, Status: p.AgentStatus, Title: truncate(p.Title, 120), Cwd: p.Cwd, Session: agentSession(p), Since: paneSince(p, times, old),
+				Tab: p.TabID, TabLabel: truncate(tabs[p.TabID], 120), Tabs: tabCount[p.WorkspaceID], Label: truncate(named[p.ID], 120)})
 		if p.AgentStatus == herdr.StatusBlocked {
 			out.Waiting++
 		}
@@ -306,6 +327,7 @@ type herdrSockets struct {
 	sids   map[string]map[string]string // terminal session → pane → the agent's session id
 	rounds map[string]*seenRounds       // terminal session → its watcher's rounds
 	bg     map[string]*bgProber         // terminal session → what its Claude panes left running
+	chimes map[string]*chimeCounts      // terminal session → its watcher's chime counts
 	// located: terminal session → pane → the Claude Code session reading
 	// its conversation found it at, and when that was looked for (kept for
 	// the session's life, bounded; "" none found there).
@@ -322,9 +344,20 @@ type watchedServer struct {
 	key    string
 	owner  int64
 	latest func() (*herdr.Snapshot, time.Time) // (its watcher's last snapshot, and when it was read)
+	again  func()                              // (its watcher's: read it again soon)
 }
 
-func (h *herdrSockets) setServer(id, key string, owner int64, latest func() (*herdr.Snapshot, time.Time)) {
+// poke has a session's watcher read herdr again soon, if it has one.
+func (h *herdrSockets) poke(id string) {
+	h.mu.Lock()
+	w, ok := h.server[id]
+	h.mu.Unlock()
+	if ok && w.again != nil {
+		w.again()
+	}
+}
+
+func (h *herdrSockets) setServer(id, key string, owner int64, latest func() (*herdr.Snapshot, time.Time), again func()) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if _, ok := h.path[id]; !ok {
@@ -333,7 +366,7 @@ func (h *herdrSockets) setServer(id, key string, owner int64, latest func() (*he
 	if h.server == nil {
 		h.server = map[string]watchedServer{}
 	}
-	h.server[id] = watchedServer{key, owner, latest}
+	h.server[id] = watchedServer{key, owner, latest, again}
 }
 
 // snapshotsOf: the last snapshot of each herdr server a person's sessions
@@ -440,6 +473,7 @@ func (h *herdrSockets) set(id, path string) {
 		delete(h.sids, id)
 		delete(h.rounds, id)
 		delete(h.bg, id)
+		delete(h.chimes, id)
 		delete(h.located, id)
 		delete(h.inView, id)
 		delete(h.server, id)
@@ -597,6 +631,8 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 		return parseBgTails(out), nil
 	})
 	s.herdrSocks.setBg(sess.ID, bg)
+	chimes := newChimeCounts()
+	s.herdrSocks.setChimes(sess.ID, chimes)
 	go bg.run(ctx)
 	cmds := newCmdProber(func(ctx context.Context) (map[string][]bgCmd, bool, error) {
 		out, err := sshx.Output(ctx, sess.Client(), cmdScanCommand(), cmdScanMax)
@@ -676,6 +712,7 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 		told := rounds.withSeen(sum)
 		bg.decorate(&told)
 		cmds.decorate(&told)
+		chimes.decorate(&told)
 		if b, err := json.Marshal(told); err == nil {
 			sess.PublishMeta(b)
 		}
@@ -738,7 +775,7 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 		},
 	)
 	latest = w.Latest
-	s.herdrSocks.setServer(sess.ID, server, sess.OwnerID, w.LatestAt)
+	s.herdrSocks.setServer(sess.ID, server, sess.OwnerID, w.LatestAt, w.Again)
 	// An agent looked at: the last summary goes again, with it no longer
 	// "done"; or what one left running told.
 	again := func() {
@@ -751,6 +788,7 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 	rounds.setPoke(again)
 	bg.setPoke(again)
 	cmds.setPoke(again)
+	chimes.setPoke(again)
 	// Subagents found back by the prober's own look, the turn's end that
 	// would have told it not seen (two changes in one snapshot): the
 	// "finished" held back goes, as for a turn ending now, if it is done
@@ -792,6 +830,7 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 }
 
 func (s *Server) onAgentTransition(sess *term.Session, h *store.Host, tr herdr.Transition) {
+	s.chimeOn(sess, tr)
 	s.onHerdrTransition(sess, h, tr)
 }
 
@@ -863,9 +902,17 @@ func (s *Server) apiHerdrAction(w http.ResponseWriter, r *http.Request) {
 	var b struct {
 		Action string `json:"action"`
 		Target string `json:"target"`
+		Label  string `json:"label"` // (rename_*: the new name)
 	}
 	if err := readJSON(r, &b); err != nil || len(b.Target) > 64 || (b.Target == "") != herdrUntargeted[b.Action] {
 		writeError(w, http.StatusBadRequest, "bad_request", "action and target are required")
+		return
+	}
+	// Renaming: of a workspace or tab a name is required (herdr would show
+	// an empty one); of a pane, none takes its own away.
+	label := herdrLabel(b.Label)
+	if strings.HasPrefix(b.Action, "rename_") && (!herdrPaneID.MatchString(b.Target) || len(b.Label) > 1024 || label == "" && b.Action != "rename_pane") {
+		writeError(w, http.StatusBadRequest, "bad_request", "a name is required")
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
@@ -913,6 +960,15 @@ func (s *Server) apiHerdrAction(w http.ResponseWriter, r *http.Request) {
 			defer c2.Close()
 			err = c2.NewWorkspace(ctx, snap.FocusedWorkspace)
 		}
+	case "rename_workspace":
+		err = c.RenameWorkspace(ctx, b.Target, label)
+	case "rename_tab":
+		err = c.RenameTab(ctx, b.Target, label)
+	case "rename_pane":
+		// (herdr tells no event of it: the watch is told to look again.)
+		if err = c.RenamePane(ctx, b.Target, label); err == nil {
+			s.herdrSocks.poke(sess.ID)
+		}
 	case "focus_left", "focus_right", "focus_up", "focus_down":
 		err = c.FocusDirection(ctx, strings.TrimPrefix(b.Action, "focus_"))
 	case "next_tab", "prev_tab":
@@ -935,6 +991,21 @@ func (s *Server) apiHerdrAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// herdrLabel: a name for a workspace, tab or pane as asked for: without
+// control characters or the spaces around it, at most maxAgentLabel.
+func herdrLabel(l string) string {
+	l = strings.TrimSpace(strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, l))
+	if utf8.RuneCountInString(l) > maxAgentLabel {
+		l = strings.TrimSpace(string([]rune(l)[:maxAgentLabel]))
+	}
+	return l
 }
 
 // stepTab is the next (or previous) tab of the focused workspace, by number,

@@ -315,6 +315,14 @@ export interface HerdrAgent {
   // Commands it left running in the background (done or idle): how many, the first listed.
   bg_cmds?: number
   bg_cmd_list?: { task: string; title?: string; since?: number }[]
+  // Its tab, the tab's name, how many tabs its workspace has; the name the pane was given (if one was).
+  tab?: string
+  tab_label?: string
+  tabs?: number
+  label?: string
+  // How many times it finished, came to need the person, as the gateway counts (the page's sound).
+  chime_done?: number
+  chime_needs?: number
 }
 
 export interface HerdrWorkspace {
