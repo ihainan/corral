@@ -66,10 +66,10 @@ else HERDR_SOCKET_PATH=$3 herdr pane read "$2" --source visible --format ansi 2>
 }
 
 // greyedSuggestion: the suggestion Claude Code greys into its input box now,
-// read off the screen with its colours ("" where there is none, or it could
-// not be read): for a switch's check that the box holds no words typed —
-// the plain screen it reads shows a suggestion as words. One read of the
-// screen, only when a switch is asked for.
+// read off the screen with its colours ("" where there is none, any of the
+// box is not greyed, or it could not be read): for a switch's check that
+// the box holds no words typed — the plain screen it reads shows a
+// suggestion as words. Read only when that screen shows words in the box.
 func (s *Server) greyedSuggestion(ctx context.Context, sess *term.Session, pane, socket string, running *sync.WaitGroup) string {
 	running.Add(1)
 	res, err := sshx.Exec(ctx, sess.Client(), convoColorScreenCommand(sess.Persistence, pane, socket), 512<<10, sshx.ExecOptions{Release: running.Done})

@@ -137,7 +137,7 @@ var (
 // far left and then right to target: it stops at either end, so where it
 // stood need not be guessed at. On a failure after it opened, Escape is
 // pressed (best effort, by leave).
-func effortFlow(step, leave modelStep, target string, suggest ...string) (string, error) {
+func effortFlow(step, leave modelStep, target string, greyed ...func() string) (string, error) {
 	want := effortLevel(target)
 	if want < 0 {
 		return "", errNoEffort
@@ -165,7 +165,7 @@ func effortFlow(step, leave modelStep, target string, suggest ...string) (string
 	if open(screen) {
 		return out(errScreen)
 	}
-	if err := idleInput(screen, suggest...); err != nil {
+	if err := idleInput(screen, greyed...); err != nil {
 		return "", err
 	}
 	if screen, err = step(nil, "/effort", effortLines); err != nil {
@@ -264,7 +264,7 @@ func (s *Server) convoEffort(w http.ResponseWriter, ctx context.Context, sess *t
 		defer lcancel()
 		return run(lctx, keys, text, read)
 	}
-	took, err := effortFlow(step, leave, target, s.greyedSuggestion(ctx, sess, pane, socket, &running))
+	took, err := effortFlow(step, leave, target, func() string { return s.greyedSuggestion(ctx, sess, pane, socket, &running) })
 	var exitErr *sshx.ExitError
 	switch {
 	case err == nil:

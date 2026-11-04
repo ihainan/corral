@@ -200,12 +200,16 @@ func askShows(screen, target string) bool {
 }
 
 // idleInput: the screen shows Claude Code at rest with its input empty: the
-// input's line ("❯" between two rules) holds nothing but its placeholder,
-// or the suggestion of what to say next it greys in there (suggest: as a
-// read of the screen with its colours found it — the plain screen cannot
-// tell it from words typed), and nothing says it works ("esc to interrupt").
-// (A suggestion is no draft: typing a command over it replaces it.)
-func idleInput(screen string, suggest ...string) error {
+// input's lines (from "❯" between two rules, a few at most) hold nothing but
+// its placeholder, and nothing says it works ("esc to interrupt"). Words in
+// it are a draft, unless greyed (given: a read of the screen with its
+// colours, made only then, right after this one) finds the box holding only
+// the suggestion Claude Code greys in there, the same words: the plain
+// screen cannot tell a suggestion from words typed. (A suggestion is no
+// draft: typing a command over it replaces it. Decided on the read with
+// colours itself, so that words typed, or the suggestion taken with Tab,
+// since the plain one are not let through — review of 9eedda3.)
+func idleInput(screen string, greyed ...func() string) error {
 	if strings.Contains(screen, "esc to interrupt") {
 		return errBusyAgent
 	}
@@ -218,28 +222,42 @@ func idleInput(screen string, suggest ...string) error {
 	lines := strings.Split(screen, "\n")
 	for i := len(lines) - 2; i >= 1; i-- {
 		t := strings.TrimSpace(lines[i])
-		if !strings.HasPrefix(t, "❯") || !pickerRule.MatchString(lines[i-1]) || !pickerRule.MatchString(lines[i+1]) {
+		if !strings.HasPrefix(t, "❯") || !pickerRule.MatchString(lines[i-1]) {
 			continue
 		}
-		if in := strings.TrimSpace(strings.TrimPrefix(t, "❯")); in != "" && !strings.HasPrefix(in, `Try "`) && !isSuggestion(in, suggest) {
-			return errDraft
+		// (Its lines down to the rule under it: a suggestion wraps in a narrow pane.)
+		end := -1
+		for j := i + 1; j < len(lines) && j <= i+inputLinesMost; j++ {
+			if pickerRule.MatchString(lines[j]) {
+				end = j
+				break
+			}
 		}
-		return nil
+		if end < 0 {
+			continue
+		}
+		words := []string{strings.TrimSpace(strings.TrimPrefix(t, "❯"))}
+		for j := i + 1; j < end; j++ {
+			words = append(words, strings.TrimSpace(lines[j]))
+		}
+		in := oneSpaced(strings.Join(words, " "))
+		if in == "" || end == i+1 && strings.HasPrefix(in, `Try "`) {
+			return nil
+		}
+		for _, g := range greyed {
+			if g != nil && in == oneSpaced(g()) {
+				return nil
+			}
+		}
+		return errDraft
 	}
 	return errScreen
 }
 
-// isSuggestion: the input's first line is how the greyed suggestion begins
-// (it may wrap onto more lines; spaces as the screen has them).
-func isSuggestion(in string, suggest []string) bool {
-	one := func(s string) string { return strings.Join(strings.Fields(s), " ") }
-	for _, s := range suggest {
-		if s != "" && strings.HasPrefix(one(s), one(in)) {
-			return true
-		}
-	}
-	return false
-}
+// (How many lines the input's words may take, wrapped: a suggestion is short.)
+const inputLinesMost = 6
+
+func oneSpaced(s string) string { return strings.Join(strings.Fields(s), " ") }
 
 // taken: how many times the screen says target was taken for the session
 // ("Set model to Haiku 5.5 for this session only").
@@ -252,7 +270,7 @@ func taken(screen, target string) int {
 // Code at rest, its input empty, no picker or question of it open (one
 // left open is closed with Escape first). On a failure after the picker
 // opened, Escape is pressed (best effort, by leave).
-func modelFlow(step, leave modelStep, target string, suggest ...string) (opts []modelOpt, err error) {
+func modelFlow(step, leave modelStep, target string, greyed ...func() string) (opts []modelOpt, err error) {
 	screen, err := step([]string{}, "", pickerLines)
 	if err != nil {
 		return nil, err
@@ -265,7 +283,7 @@ func modelFlow(step, leave modelStep, target string, suggest ...string) (opts []
 	if pickerShows(screen) || askShows(screen, "") {
 		return nil, errScreen
 	}
-	if err := idleInput(screen, suggest...); err != nil {
+	if err := idleInput(screen, greyed...); err != nil {
 		return nil, err
 	}
 	before := taken(screen, target)
@@ -518,7 +536,7 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 	if codex {
 		opts, err = codexModelFlow(codexIO{look, press}, undo, target, effort)
 	} else {
-		opts, err = modelFlow(step, leave, target, s.greyedSuggestion(ctx, sess, pane, socket, &running))
+		opts, err = modelFlow(step, leave, target, func() string { return s.greyedSuggestion(ctx, sess, pane, socket, &running) })
 	}
 	restored, restoreFailed := false, false
 	if ctx.Err() == nil {

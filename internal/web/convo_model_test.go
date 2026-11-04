@@ -216,22 +216,40 @@ func TestModelFlowCareful(t *testing.T) {
 		}
 	}
 	// Its greyed suggestion in the input (as a read with colours found it):
-	// no draft — switched; the same words found typed (no suggestion seen):
-	// refused. (11-04: a suggestion stopped every switch.)
+	// no draft — switched; the read with colours made only when the box shows
+	// words. The same words found typed by then (Tab took the suggestion,
+	// say: the read with colours finds no greyed box), words typed past it,
+	// or before it: refused. (11-04: a suggestion stopped every switch;
+	// review of 9eedda3: decided on the read with colours itself.)
+	grey := func(s string, n *int) func() string { return func() string { *n++; return s } }
+	var looks int
+	f = newFake(false)
+	if _, err := modelFlow(f.step, f.step, "Haiku 5.5", grey("commit and push", &looks)); err != nil || looks != 0 {
+		t.Errorf("empty box: %v, read with colours %d times", err, looks)
+	}
 	f = newFake(false)
 	f.draft, f.greyed = "commit and push", true
-	if _, err := modelFlow(f.step, f.step, "Haiku 5.5", "commit and push"); err != nil || f.session != "Haiku 5.5" {
-		t.Errorf("suggestion: %v, session %q, pressed %v", err, f.session, f.pressed)
+	if _, err := modelFlow(f.step, f.step, "Haiku 5.5", grey("commit and push", &looks)); err != nil || f.session != "Haiku 5.5" || looks != 1 {
+		t.Errorf("suggestion: %v, session %q, looks %d, pressed %v", err, f.session, looks, f.pressed)
 	}
-	f = newFake(false)
-	f.draft = "commit and push"
-	if _, err := modelFlow(f.step, f.step, "Haiku 5.5", ""); !errors.Is(err, errDraft) || len(f.pressed) != 0 {
-		t.Errorf("typed, no suggestion: %v, pressed %v", err, f.pressed)
+	for name, c := range map[string]struct{ draft, grey string }{
+		"taken with Tab since (none greyed now)": {"commit and push", ""},
+		"typed past it":                          {"commit and push now", "commit and push"},
+		"typed, its first words":                 {"commit", "commit and push"},
+	} {
+		f = newFake(false)
+		f.draft = c.draft
+		if _, err := modelFlow(f.step, f.step, "Haiku 5.5", grey(c.grey, &looks)); !errors.Is(err, errDraft) || len(f.pressed) != 0 {
+			t.Errorf("%s: %v, pressed %v", name, err, f.pressed)
+		}
 	}
-	f = newFake(false)
-	f.draft = "commit and push now"
-	if _, err := modelFlow(f.step, f.step, "Haiku 5.5", "commit and push"); !errors.Is(err, errDraft) {
-		t.Errorf("typed past the suggestion: %v", err)
+	// A suggestion wrapped in a narrow pane: its lines down to the rule.
+	wrapped := "● done\n────────────────────────\n❯ run the tests and\n  fix what fails\n────────────────────────\n  Opus 5.5·H │ Ctx 0\n"
+	if err := idleInput(wrapped, func() string { return "run the tests and fix what fails" }); err != nil {
+		t.Errorf("wrapped suggestion: %v", err)
+	}
+	if err := idleInput(wrapped, func() string { return "" }); !errors.Is(err, errDraft) {
+		t.Errorf("wrapped words typed: %v", err)
 	}
 	// The picker gone, nothing said: not known (not "switched").
 	f = newFake(false)
