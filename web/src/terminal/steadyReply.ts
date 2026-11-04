@@ -16,7 +16,7 @@ import type { ReplyTarget } from './ReplyDialog'
 // own, once on the screen, and the prompt's choices right under it: a
 // command's own words that say so are not taken for it — review581/582.)
 const WARNING = /^([^\S\n]*(?:⚠[^\S\n]*)?Claude\s+Code\s+will\s+automatically\s+(?:deny|block)\s+this\s+request\s+in\s+)(\d+(?::\d\d)+|\d+\s*[hms](?:\s*\d+\s*[hms])*)(,\s+to\s+avoid\s+(?:blocking\s+progress\s+on|holding\s+up)\s+an\s+unattended\s+session[^\S\n]*)$/gm
-const CHOICES_UNDER = /^\n(?:[^\S\n]*\n){0,2}[^\S\n]*(?:❯[^\S\n]*)?\d+\.[^\S\n]/
+const CHOICES_UNDER = /^\n(?:[^\S\n]*\n){0,2}[^\S\n]*(?:❯[^\S\n]*)?1\.[^\S\n]/
 
 // countdown: the screen with its count taken out, and the count (seconds);
 // null where it shows none, or more than one.
@@ -24,9 +24,11 @@ function countdown(text: string): { rest: string; secs: number } | null {
   const all = [...text.matchAll(WARNING)]
   if (all.length !== 1) return null
   const m = all[0]
-  // (Its choices the screen's last: no row "1." after their first — a
-  // command's numbered words under such a sentence, the prompt's own
-  // choices further down, are not it — review584.)
+  // (Its choices right under it, from the first — a choice's own words that
+  // say so, the next choice under them, are not it: review587 — and the
+  // screen's last, no row "1." after their first — a command's numbered
+  // words under such a sentence, the prompt's own choices further down, are
+  // not it: review584.)
   const under = CHOICES_UNDER.exec(text.slice(m.index! + m[0].length))
   if (!under || /^[^\S\n]*(?:❯[^\S\n]*)?1\.[^\S\n]/m.test(text.slice(m.index! + m[0].length + under[0].length))) return null
   const t = m[2]
@@ -39,14 +41,19 @@ function countdown(text: string): { rest: string; secs: number } | null {
 export const countsDown = (text: string) => countdown(text) !== null
 
 // steadySame: two screens (texts read at was and now, ms) the same prompt
-// still: alike, or but for its count, gone down by no more than the time
-// between them (a second more allowed each side: a count shown rounded).
+// still: alike, or but for its count, gone down by as much as the time
+// between them — no more, two seconds allowed (a count shown rounded), nor
+// less, three (the reads' own time): a prompt that ran out meanwhile, one of
+// the same words drawn anew showing a count a little lower, is not it —
+// review587.
 export function steadySame(a: string, was: number, b: string, now: number): boolean {
   if (a === b) return true
   const x = countdown(a)
   const y = countdown(b)
   if (!x || !y || x.rest !== y.rest) return false
-  return y.secs <= x.secs && x.secs - y.secs <= (now - was) / 1000 + 2
+  const fell = x.secs - y.secs
+  const took = (now - was) / 1000
+  return y.secs <= x.secs && fell <= took + 2 && fell >= took - 3
 }
 
 // (at: when it was read, as kept.)

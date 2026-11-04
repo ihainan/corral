@@ -75,7 +75,7 @@ export interface ReplyTarget {
 export function herdrTarget(sessionId: string, agent: HerdrAgent): ReplyTarget {
   const base = `/api/sessions/${sessionId}/herdr/panes/${encodeURIComponent(agent.pane_id)}`
   const screen = async () => keepShown(await api<Screen>('GET', base + '/screen'))
-  return { key: sessionId + ' ' + agent.pane_id, agent: agent.agent, screen, reply: ({ alive, once, ...b }) => steadily((x) => api('POST', base + '/reply', x), screen, b, once ? () => false : alive) }
+  return { key: sessionId + ' ' + agent.pane_id, agent: agent.agent, screen, reply: ({ alive, once, ...b }) => steadily((x) => api('POST', base + '/reply', x), screen, b, once || agent.agent !== 'claude' ? () => false : alive) }
 }
 
 export function convoTarget(sessionId: string, bind: { pane: string; pid: number; start: number; session: string; agent?: string }, canFill = false): ReplyTarget {
@@ -88,7 +88,8 @@ export function convoTarget(sessionId: string, bind: { pane: string; pid: number
     key: [sessionId, bind.pane, bind.pid, bind.start, bind.session].join(' '),
     agent: bind.agent,
     screen,
-    reply: ({ alive, once, ...b }) => steadily((x) => api('POST', base + '/reply', { ...who, ...x }), screen, b, once ? () => false : alive),
+    // (Claude Code's alone count down: another's answers are not sent again — review587.)
+    reply: ({ alive, once, ...b }) => steadily((x) => api('POST', base + '/reply', { ...who, ...x }), screen, b, once || bind.agent !== 'claude' ? () => false : alive),
     // (Claude Code's, in tmux: as tried — plans/5-claude-own-words.md. Its
     // tries made by ownWords.)
     fill: canFill && bind.agent === 'claude' ? (b) => api('POST', base + '/reply', { ...who, ...b, fill: true }) : undefined,
