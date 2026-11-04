@@ -17,7 +17,9 @@ export function wanted(kind: ChimeKind, p: Pick<Prefs, 'chime' | 'chimeBells'>):
 // taken: whether a sound of key was taken already, by this page or another
 // of this browser, in the last few seconds; if not, it is taken now.
 const TAKEN = 'corral.chime.'
-const TAKEN_FOR = 5000
+// (Short: two finishes of one agent are seldom closer; one finish read by
+// two of the gateway's sessions comes within it.)
+const TAKEN_FOR = 3000
 export function taken(key: string, now = Date.now(), store: Pick<Storage, 'getItem' | 'setItem' | 'removeItem' | 'key' | 'length'> | null = safeStorage()): boolean {
   if (!store) return false
   try {
@@ -84,7 +86,8 @@ export function countsOf(sessions: SessionInfo[]): Map<string, Counts> {
 // two of them on one herdr server count apart, from when each began
 // (review585-7): one sound within a few seconds (taken), whichever.
 export function agentWho(s: Pick<SessionInfo, 'host_id' | 'mux_session'>, pane: string): string {
-  return `${s.host_id} ${s.mux_session ?? ''} ${pane}`
+  // (herdr's default session: '' or "default", one and the same — review588-5.)
+  return `${s.host_id} ${s.mux_session || 'default'} ${pane}`
 }
 
 // Bells: a program's bell, or its notice (OSC 9, 777), as live output of a

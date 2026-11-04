@@ -726,6 +726,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
     // ends, unless another window is reported to have taken over first;
     // actions of two windows that close together count as simultaneous).
     takeOverRef.current = () => {
+      lastKey.current = Date.now() // (the person's own doing: a bell now is not news — review588-6)
       if (conn.status === 'full') return // refused: actions here take nothing over
       const now = Date.now()
       if (!following && inCharge && now - claimedAt < CLAIM_GAP) {

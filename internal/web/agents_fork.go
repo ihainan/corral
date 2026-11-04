@@ -119,14 +119,12 @@ func (s *Server) forkCopy(ctx context.Context, sess *term.Session, src, from, at
 	id := newSessionID()
 	dst := src[:strings.LastIndexByte(src, '/')+1] + id + ".jsonl"
 	// (Not known to have ended well — the connection lost on the way, say —
-	// the copy, if it was made, goes once the command has really ended.)
-	ended := make(chan struct{})
-	res, err := sshx.Exec(ctx, sess.Client(), forkCopyCommand(src, dst, off, from, id), 64, sshx.ExecOptions{Release: func() { close(ended) }})
-	if err != nil || strings.TrimSpace(string(res.Out)) != "ok" {
-		go func() {
-			<-ended
-			s.dropForkCopy(sess, src, id)
-		}()
+	// a copy made is left: removing what is at its path on a guess could
+	// remove what is not the gateway's — review588-1. A session of a new
+	// id, that much of a log: harmless, if one too many in Claude Code's
+	// list of sessions.)
+	out, err = sshx.Output(ctx, sess.Client(), forkCopyCommand(src, dst, off, from, id), 64)
+	if err != nil || strings.TrimSpace(string(out)) != "ok" {
 		return "", errors.New("the conversation could not be copied")
 	}
 	return id, nil
@@ -181,9 +179,10 @@ func forkCutCommand(src, at string) string {
 func forkCopyCommand(src, dst string, off int64, from, id string) string {
 	q := sshx.QuoteShell
 	n := strconv.FormatInt(off, 10)
-	return `umask 077; d=` + q(dst) + `; t=$(mktemp "$d.XXXXXX") || exit 1; trap 'rm -f "$t"' EXIT; ` +
+	return `umask 077; d=` + q(dst) + `; { [ -e "$d" ] || [ -L "$d" ]; } && exit 3; ` +
+		`t=$(mktemp "$d.XXXXXX") || exit 1; trap 'rm -f "$t"' EXIT; trap 'exit 1' HUP INT TERM; ` +
 		`head -c ` + n + ` ` + q(src) + ` | sed ` + q(`s/"sessionId":"`+from+`"/"sessionId":"`+id+`"/g`) + ` > "$t" && ` +
-		`[ "$(wc -c < "$t")" -eq ` + n + ` ] && ln "$t" "$d" && echo ok`
+		`[ "$(wc -c < "$t")" -eq ` + n + ` ] && ln "$t" "$d" && [ "$t" -ef "$d" ] && echo ok`
 }
 
 // dropForkCopy removes a copy forkCopy made, for an agent that did not

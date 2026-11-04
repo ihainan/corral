@@ -26,11 +26,15 @@ type chimeCounts struct {
 	mu      sync.Mutex
 	n       map[string]chimeN // pane → its counts
 	counted map[string]int64  // pane → the last round counted as finished
-	poke    func()            // (has the watcher's last summary go again)
+	// told: pane → its finish counted, not at work since: another word of
+	// a finish (the same work looked at, its subagents back) is not
+	// another — review588-4.
+	told map[string]bool
+	poke func() // (has the watcher's last summary go again)
 }
 
 func newChimeCounts() *chimeCounts {
-	return &chimeCounts{n: map[string]chimeN{}, counted: map[string]int64{}}
+	return &chimeCounts{n: map[string]chimeN{}, counted: map[string]int64{}, told: map[string]bool{}}
 }
 
 // addRound counts a finish of pane's agent in round (the watcher's
@@ -38,15 +42,23 @@ func newChimeCounts() *chimeCounts {
 // counted; 0, none known: counted.
 func (c *chimeCounts) addRound(pane string, round int64) {
 	c.mu.Lock()
-	if round != 0 && round <= c.counted[pane] {
+	if c.told[pane] || (round != 0 && round <= c.counted[pane]) {
 		c.mu.Unlock()
 		return
 	}
 	if round != 0 {
 		c.counted[pane] = round
 	}
+	c.told[pane] = true
 	c.mu.Unlock()
 	c.add(pane, false)
+}
+
+// working: pane's agent is at work again: its next finish is news.
+func (c *chimeCounts) working(pane string) {
+	c.mu.Lock()
+	delete(c.told, pane)
+	c.mu.Unlock()
 }
 
 func (c *chimeCounts) setPoke(f func()) {
@@ -92,6 +104,7 @@ func (c *chimeCounts) decorate(sum *herdrSummary) {
 		if !here[p] {
 			delete(c.n, p)
 			delete(c.counted, p)
+			delete(c.told, p)
 		}
 	}
 }
@@ -120,6 +133,8 @@ func (s *Server) chimeOn(sess *term.Session, tr herdr.Transition) {
 		return
 	}
 	switch {
+	case tr.To == herdr.StatusWorking:
+		c.working(tr.Pane.ID)
 	case tr.To == herdr.StatusBlocked && tr.From != herdr.StatusBlocked:
 		c.add(tr.Pane.ID, true)
 	// (Idle, not done: it finished in sight in herdr — the agents page shows

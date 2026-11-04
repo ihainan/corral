@@ -58,8 +58,14 @@ func TestChimeRoundOnce(t *testing.T) {
 	c := newChimeCounts()
 	c.addRound("p", 5)
 	c.addRound("p", 5)
-	c.addRound("p", 4)
-	c.addRound("p", 7)
+	c.addRound("p", 7) // (the same work, looked at: another round, not another finish)
+	if c.n["p"].done != 1 {
+		t.Fatalf("%+v", c.n["p"])
+	}
+	c.working("p")
+	c.addRound("p", 4) // (a round before the last counted)
+	c.addRound("p", 9)
+	c.working("p")
 	c.addRound("p", 0)
 	if c.n["p"].done != 3 {
 		t.Fatalf("%+v", c.n["p"])

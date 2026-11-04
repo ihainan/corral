@@ -71,6 +71,18 @@ func TestForkCopyCommands(t *testing.T) {
 	if _, err := os.Stat(dst + ".tmp"); err == nil {
 		t.Fatal("left a .tmp")
 	}
+	// (Its path a folder, or a link to one: not written into it — review588-3.)
+	box := filepath.Join(dir, "box")
+	os.Mkdir(box, 0o700)
+	os.Symlink(box, filepath.Join(dir, "link.jsonl"))
+	for _, d := range []string{box, filepath.Join(dir, "link.jsonl")} {
+		if out, err := sh(forkCopyCommand(src, d, int64(want), from, id)); err == nil || out == "ok" {
+			t.Fatalf("%s: %q", d, out)
+		}
+	}
+	if es, _ := os.ReadDir(box); len(es) != 0 {
+		t.Fatalf("written into the folder: %v", es)
+	}
 	if _, err := sh(forkDropCommand(dst)); err != nil {
 		t.Fatal(err)
 	}

@@ -42,15 +42,18 @@ export function readAskHook(hostId: number, fresh = false): Promise<AskHookInfo>
 // (What a host's file says, told to every row of it shown: one hook
 // changed, the other's row has the file as it is now — review585-13.)
 const told = new Map<number, Set<(i: AskHookInfo) => void>>()
+// (A reading begun before the last change told is not shown after it — review588-8.)
+const changes = new Map<number, number>()
 
 function useAskHook(hostId: number, fresh = false) {
   const [info, setInfo] = useState<AskHookInfo | null>(null)
   const [failed, setFailed] = useState<ApiError | Error | null>(null)
   useEffect(() => {
     let live = true
+    const at = changes.get(hostId) ?? 0
     readAskHook(hostId, fresh).then(
-      (i) => live && setInfo(i),
-      (e) => live && setFailed(e),
+      (i) => live && (changes.get(hostId) ?? 0) === at && setInfo(i),
+      (e) => live && (changes.get(hostId) ?? 0) === at && setFailed(e),
     )
     const hear = (i: AskHookInfo) => {
       setInfo(i)
@@ -65,6 +68,7 @@ function useAskHook(hostId: number, fresh = false) {
     }
   }, [hostId, fresh])
   const set = (i: AskHookInfo) => {
+    changes.set(hostId, (changes.get(hostId) ?? 0) + 1)
     reads.set(hostId, { at: Date.now(), p: Promise.resolve(i) })
     for (const hear of told.get(hostId) ?? []) hear(i)
   }

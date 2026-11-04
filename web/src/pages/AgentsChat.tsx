@@ -1848,7 +1848,9 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   entriesNow.current = entries
   const stillAtRest = (key: string) => () => {
     const r = entriesNow.current.find((x) => x.key === key)?.row
-    return r && r.status !== 'idle' && r.status !== 'done' ? t('fork.onlyIdle') : ''
+    // (Not in the list any more, or its state not known: not sent on a guess — review588-7.)
+    if (!r || r.lost) return t('fork.gone')
+    return r.status !== 'idle' && r.status !== 'done' ? t('fork.onlyIdle') : ''
   }
   const forkOf = (e: Entry, at?: string) => {
     const r = e.row
