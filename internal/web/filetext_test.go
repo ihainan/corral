@@ -7,7 +7,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 	"unicode/utf8"
 )
 
@@ -73,6 +75,25 @@ func TestFilesText(t *testing.T) {
 	os.Mkdir(filepath.Join(e.root, "dir.txt"), 0o755)
 	if res, _ := e.raw("GET", e.url("text", url.Values{"path": {e.root + "/dir.txt"}}), nil, ""); res.StatusCode != 400 {
 		t.Errorf("a folder: %d", res.StatusCode)
+	}
+	// A FIFO with no writer, and a link to it: refused before it is opened (opening would block).
+	if err := syscall.Mkfifo(filepath.Join(e.root, "pipe.txt"), 0o644); err == nil {
+		os.Symlink(filepath.Join(e.root, "pipe.txt"), filepath.Join(e.root, "to-pipe.txt"))
+		for _, n := range []string{"pipe.txt", "to-pipe.txt"} {
+			done := make(chan int, 1)
+			go func() {
+				res, _ := e.raw("GET", e.url("text", url.Values{"path": {e.root + "/" + n}}), nil, "")
+				done <- res.StatusCode
+			}()
+			select {
+			case st := <-done:
+				if st != 400 {
+					t.Errorf("%s: %d", n, st)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatalf("%s: blocked", n)
+			}
+		}
 	}
 	if res, _ := e.raw("GET", e.url("text", url.Values{"path": {e.root + "/none.txt"}}), nil, ""); res.StatusCode != 404 {
 		t.Errorf("not there: %d", res.StatusCode)

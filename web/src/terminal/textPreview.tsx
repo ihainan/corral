@@ -35,12 +35,15 @@ const LANG: Record<string, string> = {
   c: 'c', h: 'c', cpp: 'cpp', hpp: 'cpp', cc: 'cpp', java: 'java', kt: 'java', diff: 'diff', patch: 'diff', mk: 'makefile',
 }
 const NAMED: Record<string, string> = { dockerfile: 'dockerfile', containerfile: 'dockerfile', makefile: 'makefile', gnumakefile: 'makefile', '.bashrc': 'bash', '.zshrc': 'bash', '.profile': 'bash', '.bash_profile': 'bash', '.env': 'bash' }
+// (Own keys only: a file named "constructor" is no language — review.)
+const own = (o: Record<string, string>, k: string) => (Object.hasOwn(o, k) ? o[k] : undefined)
 export function langOf(path: string): string | undefined {
   const n = baseName(path).toLowerCase()
-  if (NAMED[n]) return NAMED[n]
+  const named = own(NAMED, n)
+  if (named) return named
   if (n.startsWith('.env.')) return 'bash'
   const dot = n.lastIndexOf('.')
-  return dot > 0 ? LANG[n.slice(dot + 1)] : undefined
+  return dot > 0 ? own(LANG, n.slice(dot + 1)) : undefined
 }
 
 type Read = { text: string; size: number; cut: boolean }
@@ -61,6 +64,8 @@ function readError(e: unknown): string {
   return errorText(e)
 }
 
+const MD_DRAWN_MAX = 300_000
+
 export function TextPreview({ sid, path, onClose, onReveal }: { sid: string; path: string; onClose: () => void; onReveal?: () => void }) {
   usePrefs() // (its colours follow the theme)
   const toast = useToast()
@@ -68,7 +73,7 @@ export function TextPreview({ sid, path, onClose, onReveal }: { sid: string; pat
   const [error, setError] = useState('')
   const [again, setAgain] = useState(0)
   const lang = langOf(path)
-  const md = lang === 'markdown'
+  const name0 = baseName(path)
   const [source, setSource] = useState(false) // (Markdown: its source shown, not drawn)
   useEffect(() => {
     const ctl = new AbortController()
@@ -80,7 +85,9 @@ export function TextPreview({ sid, path, onClose, onReveal }: { sid: string; pat
     )
     return () => ctl.abort()
   }, [sid, path, again])
-  const name = baseName(path)
+  const name = name0
+  // (Markdown drawn up to so long; a longer one shown as its source: drawing it would hold the page.)
+  const md = lang === 'markdown' && (!read || read.text.length <= MD_DRAWN_MAX)
   // (Its lines' numbers, beside them: as many as it has.)
   const lines = useMemo(() => (read ? read.text.split('\n').length - (read.text.endsWith('\n') ? 1 : 0) : 0), [read])
   return (

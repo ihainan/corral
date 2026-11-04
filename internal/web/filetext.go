@@ -39,6 +39,16 @@ func (s *Server) apiFilesText(w http.ResponseWriter, r *http.Request) {
 		writeFileError(w, err)
 		return
 	}
+	// (Not a plain file — a FIFO, a device, or a link to one — refused before
+	// it is opened: opening one may block till the transfer's watchdog. The
+	// check after opening stays: the path may be changed in between.)
+	if fi, err := client.Stat(p); err != nil {
+		writeFileError(w, err)
+		return
+	} else if !fi.Mode().IsRegular() {
+		writeError(w, http.StatusBadRequest, "not_a_file", "only a file can be shown")
+		return
+	}
 	f, err := client.Open(p)
 	if err != nil {
 		writeFileError(w, err)

@@ -395,13 +395,22 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
   // it (by its key): long past their wait, or found not taken, lately; not
   // one found gone to a subagent. From what is kept here: nothing is read
   // for it — its own view, gone back to, makes sure as it does.
-  // (Of one not shown, nothing makes sure: one still waiting counts only
-  // where nothing says it went — the agent at rest, its state the same
-  // since it was sent. At work, it takes a message in when it can: queued
-  // till then, not lost — 11-04.)
+  // (Of one not shown, nothing makes sure: one not seen counts only where
+  // nothing says it went — the agent at rest, its state as it was when the
+  // message was sent (the gateway's time of it then, not this browser's
+  // clock against the gateway's — review). At work, it takes a message in
+  // when it can: queued till then, not lost — 11-04. Its words seen still
+  // in the agent's box count whatever it does; an agent of no known state
+  // (a tmux one) counts as before.)
   const unsentOf = useCallback(
     (key: string, live?: { status: string; since?: number }) =>
-      (sentBy[key] ?? []).filter((p) => unsentNow(p) && (p.state === 'unseen' || (!!live && live.status !== 'working' && live.status !== 'unknown' && !((live.since ?? 0) > p.at)))).length,
+      (sentBy[key] ?? []).filter((p) => {
+        if (!unsentNow(p)) return false
+        if (p.look && typeof p.look === 'object' && p.look.waiting) return true
+        if (!live || live.status === 'unknown') return true
+        if (live.status === 'working') return false
+        return p.sinceAt !== undefined ? live.since === p.sinceAt : !((live.since ?? 0) > p.at)
+      }).length,
     [sentBy],
   )
   useEffect(() => keepSent(sentBy), [sentBy])
@@ -659,7 +668,7 @@ const keptTitle = (titles: Titles, e: Entry): string | undefined => {
 // (How many turns a message waiting is kept not to be: see marked.)
 const NOT_KEPT = 100
 // (wentSeen: when one found gone to a subagent was first shown, its note let go of WENT_SHOWN_MS after.)
-type Sent = ConvoPending & { bind: string; after: number; gen: number; at: number; was?: string; afterTs?: string; not?: string[]; wentSeen?: number }
+type Sent = ConvoPending & { bind: string; after: number; gen: number; at: number; was?: string; afterTs?: string; not?: string[]; wentSeen?: number; sinceAt?: number /* (the agent's state's time as the gateway said it when sent) */ }
 
 // What was sent and not seen in the log yet, as this tab kept it (the page
 // reloaded meanwhile): looked for again in all of the log, by its time as
@@ -779,12 +788,24 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   const [viewing, setViewing] = useState<string | null>(null)
   // A text file of its host read in the page.
   const [reading, setReading] = useState<string | null>(null)
-  // (A path under the home folder, "~/…": made whole with the host's home first.)
+  // (A path under the home folder, "~/…": made whole with the host's home
+  // first. Only the latest asked is acted on, and not once the agent or the
+  // page is left meanwhile: a slow first answer of the home must not open
+  // an older one over a newer — review.)
+  const actN = useRef(0)
+  const activeNow = useRef(active)
+  activeNow.current = active
+  useEffect(() => void actN.current++, [sid, active])
   const fileActs = useMemo((): FileActs => {
-    const whole = (p: string, then: (p: string) => void) =>
-      atHome(sid, p).then(then, () => toast(t('convo.path.noHome'), true))
-    // (Looked at: a picture as one, anything else as text — the host says if it is.)
-    const look = (q: string) => (IMAGE_EXT.test(q) ? setViewing(q) : setReading(q))
+    const whole = (p: string, then: (p: string) => void) => {
+      const n = ++actN.current
+      atHome(sid, p).then(
+        (q) => n === actN.current && activeNow.current && then(q),
+        () => n === actN.current && toast(t('convo.path.noHome'), true),
+      )
+    }
+    // (Looked at: a picture as one, anything else as text — the host says if it is. One at a time.)
+    const look = (q: string) => (IMAGE_EXT.test(q) ? (setReading(null), setViewing(q)) : (setViewing(null), setReading(q)))
     return { reveal: (p) => whole(p, setFilesAt), download: (p) => whole(p, (q) => downloadPath(sid, q)), view: (p) => whole(p, look) }
   }, [sid, toast])
   // (Another tab shown — a terminal's — or another agent: what was opened of this one's files closes.)
@@ -1673,7 +1694,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     const id = Date.now() * 100 + (++sentN.current % 100)
     const mark = (extra: Partial<Sent>) => setSent((ps) => ps.map((p) => (p.id === id ? { ...p, ...extra } : p)))
     const drop = () => setSent((ps) => ps.filter((p) => p.id !== id))
-    setSent((ps) => [...ps, { id, text, state: 'sending' as const, bind: bindKey, after, afterTs, gen: convo.gen, at }].slice(-5))
+    setSent((ps) => [...ps, { id, text, state: 'sending' as const, bind: bindKey, after, afterTs, gen: convo.gen, at, sinceAt: cur.row && !cur.row.lost ? cur.row.a.since : undefined }].slice(-5))
     // The box is emptied with it (the draft kept too, even if put aside
     // meanwhile, or shown by another of this page since); what it held comes
     // back if the message is refused.

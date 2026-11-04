@@ -10,13 +10,17 @@ const urlOf = (icon: string) => urls[`../assets/file-icons/${icon}.svg`]
 
 // iconOf: the icon's name for a file (its whole name first — Dockerfile,
 // package.json —, then its extension), a folder; "file" for any other.
+// (Own keys only: a file named "constructor" is no icon — review. A name
+// that begins with a dot is its own extension: .env, .dockerignore.)
+const own = (o: Record<string, string>, k: string) => (Object.hasOwn(o, k) ? o[k] : undefined)
 export function iconOf(name: string, dir = false): string {
   if (dir) return 'folder'
   const n = name.toLowerCase()
-  if (ICON_NAME[n]) return ICON_NAME[n]
-  if (n.startsWith('.env.')) return ICON_NAME['.env'] ?? 'file'
+  const named = own(ICON_NAME, n)
+  if (named) return named
+  if (n.startsWith('.env.')) return own(ICON_EXT, 'env') ?? 'file'
   const dot = n.lastIndexOf('.')
-  return (dot > 0 && ICON_EXT[n.slice(dot + 1)]) || 'file'
+  return (dot >= 0 && own(ICON_EXT, n.slice(dot + 1))) || 'file'
 }
 
 export function FileTypeIcon({ name, dir = false, size = 18 }: { name: string; dir?: boolean; size?: number }) {

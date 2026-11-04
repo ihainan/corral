@@ -226,7 +226,9 @@ function blocks(lines: string[], copy: Copy, depth: number): ReactNode[] {
 }
 
 function dedent(lines: string[]): string[] {
-  const n = Math.min(...lines.filter((l) => l.trim()).map(indentOf))
+  // (By a loop: Math.min(...lines) of a long list goes past how many arguments a call takes — review.)
+  let n = Infinity
+  for (const l of lines) if (l.trim()) n = Math.min(n, indentOf(l))
   if (!isFinite(n)) return lines
   return lines.map((l) => l.replace(/\t/g, '    ').slice(n))
 }
