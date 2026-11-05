@@ -43,3 +43,8 @@ export function switchKey(e: KeyLike): -1 | 0 | 1 {
   if (composing(e) || !e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return 0
   return e.key === 'ArrowUp' ? -1 : e.key === 'ArrowDown' ? 1 : 0
 }
+
+// ⌘B on a Mac, Ctrl+B elsewhere: the list beside folded or opened, as VS Code
+// has it. (Firefox's own is its bookmarks sidebar, little used: as "/".)
+export const sideKey = (e: KeyLike, mac: boolean) =>
+  !composing(e) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'b' && (mac ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey)

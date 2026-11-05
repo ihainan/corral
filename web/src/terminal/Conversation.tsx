@@ -4,7 +4,7 @@ import { t, getLang, type I18nKey } from '../i18n'
 import { api } from '../api'
 import { asHeld, dayStart, FOLDED, foldAt, GROUPS, inGroup, listOrder, pinned, type ConvoListRow, type RowCmds } from './agentOrder'
 import { copyText, Dialog, isCoarse, Menu, MenuLayer, type MenuItem } from '../components/ui'
-import { composing, foldAllKey, helpKey, jumpKey, onMac, switchKey } from './pageKeys'
+import { composing, foldAllKey, helpKey, jumpKey, onMac, sideKey, switchKey } from './pageKeys'
 import { keepNames, keptNames, local } from '../storage'
 import { CodeSpanOf, FileLinkOf, Markdown } from './markdown'
 import { codePath } from './paths'
@@ -257,6 +257,8 @@ export function ConversationView({
   const sideShown = !!side && wide && !folded
   const sideShownNow = useRef(sideShown)
   sideShownNow.current = sideShown
+  const wideNow = useRef(wide)
+  wideNow.current = wide
   useEffect(() => {
     // (The view narrowed mid-drag: what is dragged to keeps within it.)
     const d = drag.current
@@ -1001,6 +1003,25 @@ export function ConversationView({
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [active, side])
+  // ⌘B (Ctrl+B elsewhere): the list beside folded or opened, as its button
+  // does; where it fits beside. Typing too, not in a terminal (tmux's prefix).
+  // (Folded with the focus in it: the focus to its button, not lost.)
+  useEffect(() => {
+    if (!active || !side) return
+    const onKey = (e: KeyboardEvent) => {
+      if (!sideKey(e, mac) || underDialog(e) || !wideNow.current) return
+      if (e.target instanceof Element && e.target.closest('.xterm')) return
+      e.preventDefault()
+      const inSide = !!sideEl.current?.contains(document.activeElement)
+      setFoldedState((f) => {
+        local.set(SIDE_KEY, f ? '1' : '0')
+        return !f
+      })
+      if (inSide) requestAnimationFrame(() => root.current?.querySelector<HTMLElement>('.convo-side-btn')?.focus())
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [active, side])
   // "?" where nothing is typed in: what keys there are (also in ⋮). (⌘F and
   // Ctrl+F are the browser's find; this one's search is in ⋮.)
   // (Opened from ⋮: the focus goes back to ⋮ after, the menu being gone.)
@@ -1292,7 +1313,8 @@ export function ConversationView({
               aria-pressed={sideShown}
               onClick={() => setFolded(!folded)}
               aria-label={t(sideShown ? 'convo.foldSide' : 'convo.openSide')}
-              title={t(sideShown ? 'convo.foldSide' : 'convo.openSide')}
+              aria-keyshortcuts={mac ? 'Meta+B' : 'Control+B'}
+              title={`${t(sideShown ? 'convo.foldSide' : 'convo.openSide')} (${KEY_SIDE})`}
             >
               <PanelLeft size={17} aria-hidden="true" />
             </button>
@@ -2536,13 +2558,14 @@ export const SEARCH_FROM = 5
 // (⌘K on a Mac; elsewhere "/", as the browsers there keep Ctrl+K for their
 // own search: as the key is said.)
 const KEY_SEARCH = mac ? '⌘K' : '/'
+const KEY_SIDE = mac ? '⌘B' : 'Ctrl+B'
 
 // The keys of this page, as this computer has them (plans/4a-shortcuts.md);
 // side: the list of agents beside it, with its own.
 function PageKeysHelp({ onClose, side }: { onClose: () => void; side: boolean }) {
   // (Each key in a box of its own; two that do the same, or go each way, apart: not a chord.)
   const rows: [string[], I18nKey][] = [
-    ...(side ? ([[mac ? ['⌥↑', '⌥↓'] : ['Alt+↑', 'Alt+↓'], 'pageKeys.switch'], [[KEY_SEARCH], 'pageKeys.search']] as [string[], I18nKey][]) : []),
+    ...(side ? ([[mac ? ['⌥↑', '⌥↓'] : ['Alt+↑', 'Alt+↓'], 'pageKeys.switch'], [[KEY_SEARCH], 'pageKeys.search'], [[KEY_SIDE], 'pageKeys.side']] as [string[], I18nKey][]) : []),
     [['[', ']'], 'pageKeys.jump'],
     ...(mac ? ([[['Ctrl+O'], 'pageKeys.fold']] as [string[], I18nKey][]) : []),
     [['?'], 'pageKeys.help'],
