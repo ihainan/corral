@@ -397,12 +397,13 @@ html.kb-open .keybar { padding-bottom: 6px; }
 
 /* "+": a host to open */
 .new-tab { width: min(440px, calc(100vw - 32px)); }
-.new-tab-search { display: flex; align-items: center; gap: 8px; height: 40px; padding: 0 12px; margin-bottom: 8px; border: 1px solid var(--line-strong); border-radius: var(--r-md, 8px); color: var(--fg-3); }
+.new-tab-search { display: flex; align-items: center; gap: 8px; height: 40px; padding: 0 12px; margin-bottom: 8px; border: 1px solid var(--line-input); border-radius: var(--r-md, 8px); color: var(--fg-3); }
 .new-tab-search:focus-within { border-color: var(--accent); box-shadow: var(--focus); }
 .new-tab-search input {
   flex: 1; min-width: 0; height: 100%; padding: 0; border: 0; border-radius: 0; background: none; color: var(--fg); font: inherit;
   -webkit-appearance: none; appearance: none;
 }
+@media (any-pointer: coarse) { .new-tab-search input { font-size: 16px; } } /* (iOS zooms into a smaller one: pages-1105 4.3) */
 /* (The box around it shows the focus.) */
 .new-tab-search input:focus, .new-tab-search input:focus-visible { outline: none; box-shadow: none; }
 .new-tab-search input::-webkit-search-decoration { -webkit-appearance: none; }
@@ -433,7 +434,7 @@ html.kb-open .keybar { padding-bottom: 6px; }
 /* Floating layers over a dark terminal use the dark tokens whatever the page theme. */
 html.term-dark .overlay, html.term-dark .menu, html.term-dark .toast {
   --bg: #0f1115; --bg-subtle: #15181d; --bg-hover: #1c2026; --bg-active: #242830; --surface: #1a1d23;
-  --fg: #e6e8ec; --fg-2: #a1a7b2; --fg-3: #858c98; --fg-4: #4e545e; --line: #23272e; --line-strong: #3d4350;
+  --fg: #e6e8ec; --fg-2: #a1a7b2; --fg-3: #858c98; --fg-4: #4e545e; --line: #23272e; --line-strong: #3d4350; --line-input: #616977;
   --accent: #3b68dc; --accent-hover: #4470e0; --accent-text: #8fadf7; --accent-soft: rgba(74, 120, 236, 0.16);
   --ok: #5cc28a; --warn: #e0a24a; --danger: #f07c73; --danger-soft: rgba(240, 124, 115, 0.12);
   --focus: 0 0 0 3px rgba(74, 120, 236, 0.35);
@@ -1064,7 +1065,9 @@ button.convo-task-line:hover .convo-task-name { color: var(--term-fg); }
 .term-root .convo-queue-now { flex: none; height: 28px; padding: 0 10px; font-size: 13px; color: var(--term-fg); border: 1px solid var(--term-line); background: var(--term-bg); }
 .term-root .convo-queue-now:hover { background: var(--term-hover); }
 .convo-queue-said { flex: none; font-size: 13px; color: var(--term-fg-3); }
-.convo-queue-row { padding: 6px 12px; border-top: 1px solid var(--term-line); color: var(--term-fg); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 5.2em; overflow: hidden; }
+/* (Three lines at most, cut at a whole line with "…": a height in em, the
+   padding inside it, cut the last line in half against the border — 11-05.) */
+.convo-queue-row { padding: 8px 12px 10px; border-top: 1px solid var(--term-line); color: var(--term-fg); line-height: 20px; white-space: pre-wrap; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden; }
 /* Not the person's own: another session's agent, or a notice */
 .convo-queue-row.is-note { color: var(--term-fg-3); }
 .convo-queue-from { margin-right: 6px; color: var(--term-fg-2); font-weight: 500; }
@@ -1516,13 +1519,16 @@ button.convo-running-what:hover { color: var(--term-fg); text-decoration-color: 
   display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; padding: 7px 10px; border: 0; border-radius: 10px;
   background: none; color: var(--term-fg-2); font: 13px/18px var(--font-ui); text-align: left; cursor: pointer;
 }
-.claude-card-head:hover { background: var(--term-hover); }
+/* (Only where there is a pointer to hover: a tap on a phone left it on, a grey
+   band on the words below — 11-05.) Open: its own band ends above the body. */
+@media (hover: hover) { .claude-card-head:hover { background: var(--term-hover); } }
+.claude-card.is-open .claude-card-head { border-radius: 9px 9px 0 0; }
 .claude-card-head:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: -2px; }
 .claude-card-star { flex: none; color: var(--term-accent-text); }
 .claude-card-tag { flex: none; font-weight: 600; color: var(--term-fg); }
 .claude-card-first { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .claude-card-head svg { flex: none; color: var(--term-fg-3); }
-.claude-card-body { padding: 0 12px 10px 30px; }
+.claude-card-body { padding: 4px 12px 10px 30px; }
 .claude-card-text { margin: 0; font-size: 13px; line-height: 20px; color: var(--term-fg); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 40vh; overflow-y: auto; }
 .claude-card-keys { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .claude-card-key { height: 30px; padding: 0 10px; font-size: 13px; border: 1px solid var(--term-line); color: var(--term-fg); }

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
 import { ArrowLeft, Download, Film, Maximize2, MoreHorizontal, Pause, Play, RotateCw, Trash2 } from 'lucide-react'
-import { api, errorText, type Recording } from '../api'
+import { api, authGen, errorText, type Recording } from '../api'
 import { t } from '../i18n'
 import { linkHandler, navigate } from '../router'
 import { PhoneBack, useSession } from '../app'
@@ -23,7 +23,7 @@ export function formatDuration(secs: number): string {
   return h > 0 ? `${h}:${pad(m)}:${pad(s % 60)}` : `${m}:${pad(s % 60)}`
 }
 
-type Choice = { id: number; name: string }
+type Choice = { id: number; name: string; owner?: string }
 type List = { recordings: Recording[]; enabled: boolean; days: number; hosts?: Choice[]; owners?: Choice[] }
 // What the list is narrowed to (pages-1105 3.1): a host, an owner (an
 // admin's), a span of days back — the gateway narrows it, whole.
@@ -35,20 +35,27 @@ const sameFilter = (a: Filter, b: Filter) => a.host === b.host && a.owner === b.
 // what it was narrowed to, and the one opened, to come back to — this page's
 // life only, and only for the account it was read for. What changed since
 // (one ended, one started) comes in with the first page, read again.
-let kept: { who: number; filter: Filter; list: List; more: boolean; opened: string; choices: { hosts: Choice[]; owners: Choice[] } } | null = null
-// (The first page read again, over what was kept: the newer as it is now, then
-// the older pages as they were.)
-function overKept(fresh: Recording[], prev: Recording[]): Recording[] {
+// (Kept for one sign-in: signed out and in again — the same account, its role
+// changed say — it is read anew: review cfcc12c.)
+let kept: { gen: number; filter: Filter; list: List; more: boolean; opened: string; choices: { hosts: Choice[]; owners: Choice[] } } | null = null
+// The first page read again, over what was kept: the newer as it is now, then
+// the older pages as they were — only where the two meet. A first page that
+// is all there is now is the list (what is not in it is gone); one that does
+// not reach what was kept leaves a gap: the list starts again from it
+// (null).
+function overKept(fresh: Recording[], prev: Recording[], whole: boolean): Recording[] | null {
+  if (whole) return null
   const ids = new Set(fresh.map((r) => r.id))
+  if (prev.length > 0 && !prev.some((r) => ids.has(r.id))) return null
   const last = fresh[fresh.length - 1]
-  const older = (r: Recording) => !last || r.started_at < last.started_at || (r.started_at === last.started_at && r.id > last.id)
+  const older = (r: Recording) => r.started_at < last.started_at || (r.started_at === last.started_at && r.id > last.id)
   return [...fresh, ...prev.filter((r) => !ids.has(r.id) && older(r))]
 }
 
 export function RecordingsPage() {
   const { me } = useSession()
   const toast = useToast()
-  const back = kept && kept.who === me?.id ? kept : null
+  const back = kept && kept.gen === authGen() ? kept : null
   const [filter, setFilter] = useState<Filter>(back?.filter ?? NO_FILTER)
   const [choices, setChoices] = useState(back?.choices ?? { hosts: [], owners: [] })
   const [list, setList] = useState<List | null>(back?.list ?? null)
@@ -82,8 +89,18 @@ export function RecordingsPage() {
       .then((l) => {
         if (n !== seq.current) return
         setChoices({ hosts: l.hosts ?? [], owners: l.owners ?? [] })
-        setList((prev) => (keep && prev ? { ...l, recordings: overKept(l.recordings, prev.recordings) } : l))
-        if (!keep) setMore(l.recordings.length === PAGE)
+        const full = l.recordings.length === PAGE
+        // (A span of days is today's, read again: what was kept may be of
+        // days now out of it — review cd07bb9. Read whole instead.)
+        const merged = keep && listRef.current && f.span === 'all' ? overKept(l.recordings, listRef.current.recordings, !full) : null
+        if (merged && merged !== l.recordings) setList({ ...l, recordings: merged })
+        else {
+          setList(l)
+          setMore(full)
+        }
+        // (Back from a recording: the row opened kept in sight as the newer come in above it.)
+        if (keep && back?.opened)
+          requestAnimationFrame(() => document.querySelector(`[data-rec="${CSS.escape(back.opened)}"]`)?.scrollIntoView({ block: 'center' }))
       })
       .catch(() => n === seq.current && !keep && setFailed(true))
       .finally(() => n === seq.current && setRefreshing(false))
@@ -93,13 +110,16 @@ export function RecordingsPage() {
     setFilter(f)
     setList(null)
     setMore(false)
+    setLoadingMore(false) // (an older filter's page still coming holds nothing up)
     load(false, f)
   }
   // (Kept as it is now, whenever it changes: what leaving finds.)
   const opened = useRef(back?.opened ?? '')
+  const listRef = useRef(list)
+  listRef.current = list
   useEffect(() => {
-    if (list && me) kept = { who: me.id, filter, list, more, opened: opened.current, choices }
-  }, [list, more, me, filter, choices])
+    if (list) kept = { gen: authGen(), filter, list, more, opened: opened.current, choices }
+  }, [list, more, filter, choices])
   // (Back from a recording: the row opened, in sight again.)
   useEffect(() => {
     if (!back?.opened) return
@@ -126,14 +146,20 @@ export function RecordingsPage() {
     } catch (e) {
       if (n === seq.current) toast(errorText(e), true)
     } finally {
-      setLoadingMore(false)
+      if (n === seq.current) setLoadingMore(false)
     }
   }
   useEffect(() => load(!!back), [])
   const filtered = !sameFilter(filter, NO_FILTER)
   // (The choices offered: those there are recordings of, and the one chosen
   // even if none is left of it now.)
-  const offer = (cs: Choice[], id: number) => (id && !cs.some((c) => c.id === id) ? [...cs, { id, name: '#' + id }] : cs)
+  const offer = (cs: Choice[], id: number) => {
+    const all = id && !cs.some((c) => c.id === id) ? [...cs, { id, name: '#' + id }] : cs
+    // (Two of one name told apart: by whose, else by number — review cd07bb9.)
+    const named = new Map<string, number>()
+    for (const c of all) named.set(c.name, (named.get(c.name) ?? 0) + 1)
+    return all.map((c) => ((named.get(c.name) ?? 0) > 1 ? { ...c, name: c.owner && admin ? `${c.name}（${c.owner}）` : `${c.name}（#${c.id}）` } : c))
+  }
   const tools = (list || filtered) && (choices.hosts.length > 1 || choices.owners.length > 1 || filtered || (list?.recordings.length ?? 0) > 10) && (
     <div className="page-tools rec-tools">
       <select className="select" value={filter.host} onChange={(e) => narrow({ ...filter, host: Number(e.target.value) })} aria-label={t('rec.byHost')}>
@@ -438,6 +464,7 @@ export function RecordingPlayerPage({ id }: { id: string }) {
   const [actual, setActual] = useState(() => local.get(ACTUAL_KEY) === '1')
   const actualRef = useRef(actual)
   actualRef.current = actual
+  const fitFor = useRef('') // (the room a size was last guessed for)
   const refit = () => {
     const el = hostEl.current
     const box = fitRef.current
@@ -451,17 +478,31 @@ export function RecordingPlayerPage({ id }: { id: string }) {
     const notes = [...stage.querySelectorAll<HTMLElement>('.player-note')].reduce((n, x) => n + x.offsetHeight + parseFloat(cs.rowGap || '0'), 0)
     const roomH = stage.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom) - notes
     const font = sc.term.options.fontSize ?? BASE_FONT
-    // (Its size at the base letters', whatever they are now.)
-    const w = (xs.offsetWidth * BASE_FONT) / font
-    const h = (xs.offsetHeight * BASE_FONT) / font
-    const k = actualRef.current || w <= 0 || h <= 0 ? 1 : Math.min(roomW / w, roomH > 40 ? roomH / h : Infinity)
-    const want = k > 1 ? Math.min(MAX_FONT, Math.floor(BASE_FONT * k)) : BASE_FONT
-    if (want !== font) {
-      sc.term.options.fontSize = want
-      requestAnimationFrame(refit) // (measured again once laid out at it)
+    // A grid's size does not scale with its letters' exactly (pixels are
+    // rounded): a size is guessed once for a room, then only made smaller
+    // till it fits — never larger again for the same room, or two sizes
+    // would take turns for ever (review cfcc12c).
+    const room = `${roomW}x${roomH}x${actualRef.current}`
+    const fits = xs.offsetWidth <= roomW + 1 && (roomH <= 40 || xs.offsetHeight <= roomH + 1)
+    if (fitFor.current !== room) {
+      fitFor.current = room
+      // (Its size at the base letters', whatever they are now.)
+      const w = (xs.offsetWidth * BASE_FONT) / font
+      const h = (xs.offsetHeight * BASE_FONT) / font
+      const k = actualRef.current || w <= 0 || h <= 0 ? 1 : Math.min(roomW / w, roomH > 40 ? roomH / h : Infinity)
+      const want = k > 1 ? Math.min(MAX_FONT, Math.floor(BASE_FONT * k)) : BASE_FONT
+      if (want !== font) {
+        sc.term.options.fontSize = want
+        requestAnimationFrame(refit) // (measured again once laid out at it)
+        return
+      }
+    } else if (!fits && font > BASE_FONT && !actualRef.current) {
+      sc.term.options.fontSize = font - 1
+      requestAnimationFrame(refit)
       return
     }
-    const scale = k < 1 ? k : 1
+    // (Too big even at the base letters: the whole scaled down to fit.)
+    const scale = actualRef.current || xs.offsetWidth <= 0 ? 1 : Math.min(1, roomW / xs.offsetWidth, roomH > 40 ? roomH / xs.offsetHeight : 1)
     el.style.transform = scale < 1 ? `scale(${scale})` : ''
     box.style.width = Math.ceil(xs.offsetWidth * scale) + 'px'
     box.style.height = Math.ceil(xs.offsetHeight * scale) + 'px'
@@ -555,8 +596,9 @@ export function RecordingPlayerPage({ id }: { id: string }) {
     }
     frame = requestAnimationFrame(tick)
     return () => cancelAnimationFrame(frame)
+    // (A new cast — its newer part read — the clock goes on over it, not the old one: review cfcc12c.)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [playing, speed, skipIdle])
+  }, [playing, speed, skipIdle, cast])
 
   const seek = (p: number) => {
     show(p)
@@ -615,7 +657,7 @@ export function RecordingPlayerPage({ id }: { id: string }) {
           {meta && (
             <span className="term-status">
               {meta.owner_name} · {new Date(meta.started_at * 1000).toLocaleString()}
-              {live && readUntil ? ' · ' + t('rec.liveUntil', { time: readUntil.toLocaleTimeString() }) : meta.ended_at === 0 ? ' · ' + t('rec.live') : ''}
+              {live && readUntil ? ' · ' + t('rec.liveUntil', { time: readUntil.toLocaleTimeString() }) : marker === 'truncated' ? ' · ' + t('rec.truncated') : meta.ended_at === 0 ? ' · ' + t('rec.live') : ''}
             </span>
           )}
         </div>

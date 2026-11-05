@@ -216,3 +216,28 @@ func TestRecordingListFilters(t *testing.T) {
 }
 
 func itoa(n int64) string { return strconv.FormatInt(n, 10) }
+
+// A user's audit entries take in the sign-ins tried as them that failed —
+// written with no user, the name tried as their target (review cd07bb9).
+func TestAuditByUserHasFailedSignIns(t *testing.T) {
+	h := newHarness(t)
+	admin := h.admin()
+	bob := h.member(admin, "bob")
+	stranger := &client{h: h}
+	if r := stranger.do("POST", "/api/login", map[string]string{"username": "bob", "password": "not-his-password"}); r.Status == 200 {
+		t.Fatal("a wrong password signed in")
+	}
+	var list []map[string]any
+	if err := json.Unmarshal(admin.do("GET", "/api/admin/audit?user="+itoa(h.userID(bob)), nil).Body, &list); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, e := range list {
+		if e["action"] == "login.failed" && e["target"] == "bob" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("bob's entries have no failed sign-in: %v", list)
+	}
+}

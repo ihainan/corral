@@ -41,6 +41,7 @@ import { promptSuggestion } from '../terminal/suggestion'
 import { sessionWhich } from '../terminal/sessionName'
 import { sessionAgents, waitingAgents } from '../terminal/agents'
 import { NewTabDialog } from '../terminal/NewSessionDialog'
+import { screenReaderOn, useScreenReader } from '../terminal/screenReader'
 import { knownSession } from '../terminal/agents'
 import { holdTermMode } from '../terminal/chatSend'
 import { useComposerFit } from '../terminal/autosize'
@@ -548,6 +549,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
     const p = getPrefs()
     const term = new Terminal({
       disableStdin: watch, // keys typed while watching go nowhere
+      screenReaderMode: screenReaderOn(),
       fontFamily: FONT_STACK,
       fontSize: p.fontSize,
       // (JetBrains Mono's own line is 1.32 of its size, more than most
@@ -1554,6 +1556,14 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
     }
   }, [id, releaseOnce])
 
+  // Read to a screen reader, as this device is set (turned on or off in the
+  // settings while this terminal is open: at once, no new connection).
+  const reader = useScreenReader()
+  useEffect(() => {
+    const term = termRef.current
+    if (term && term.options.screenReaderMode !== reader) term.options.screenReaderMode = reader
+  }, [reader])
+
   // Preferences that can change while the terminal is open.
   useEffect(() => {
     const term = termRef.current
@@ -2259,12 +2269,17 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
   }
   // (connecting: from asking for the host until the attempt is over, a
   // question it asked included; see reopening.)
+  // (Each reconnecting its number: one given up — another session opened
+  // meanwhile, review cfcc12c — does not go on once its host is read.)
+  const reconnectGen = useRef(0)
   const reconnect = async () => {
     if (!hostIdForReconnect) return navigate('/')
+    const n = ++reconnectGen.current
     setConnecting(true)
     try {
       const h = await api<Host>('GET', '/api/hosts/' + hostIdForReconnect)
       if (pageGone.current) return // (left meanwhile)
+      if (n !== reconnectGen.current) return setConnecting(false)
       connect(h, againChoice())
       setAsked(true)
     } catch (e) {
@@ -2457,6 +2472,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
         icon: <Plus size={16} />,
         onSelect: () => {
           stopAuto()
+          reconnectGen.current++
           cancelConnect()
           setNewOpen(true)
         },

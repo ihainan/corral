@@ -54,7 +54,9 @@ export function auditTarget(target: string, hosts: Map<string, string>): string 
 // key is known (pages-1105 3.2): "时长：26 秒", a session's long id cut to
 // its first eight (the whole stays in the entry's own text); long values cut.
 const LONG_ID = /^(?:[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i
-export function auditDetail(detail: Record<string, unknown> | null | undefined): string[] {
+// whole: values as they are, ids and all (an entry opened, its title: what
+// can be copied whole — review cd07bb9), the keys still in words.
+export function auditDetail(detail: Record<string, unknown> | null | undefined, whole = false): string[] {
   if (!detail) return []
   return Object.entries(detail).map(([k, v]) => {
     const key = 'auditKey.' + k
@@ -62,9 +64,9 @@ export function auditDetail(detail: Record<string, unknown> | null | undefined):
     if (k === 'seconds' && typeof v === 'number') s = durationText(v)
     else if (k === 'bytes' && typeof v === 'number') s = sizeText(v)
     else if (typeof v === 'boolean') s = t(v ? 'auditDetail.yes' : 'auditDetail.no')
-    else if (typeof v === 'string' && LONG_ID.test(v)) s = v.slice(0, 8)
+    else if (typeof v === 'string' && LONG_ID.test(v) && !whole) s = v.slice(0, 8)
     else s = typeof v === 'string' ? v : JSON.stringify(v)
-    if (s.length > 80) s = s.slice(0, 79) + '…'
+    if (s.length > 80 && !whole) s = s.slice(0, 79) + '…'
     return (hasKey(key) ? t(key as I18nKey) : k) + t('auditDetail.sep') + s
   })
 }

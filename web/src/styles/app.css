@@ -13,6 +13,8 @@
   --fg-4: #b5bac3;
   --line: #e7e9ed;
   --line-strong: #c6cbd3;
+  /* A field's edge, what tells where it is: 3:1 against what it is on (pages-1105 4.2). */
+  --line-input: #8a919c;
   --accent: #2c5fcc;
   --accent-hover: #244fb0;
   --accent-text: #2c5fcc;
@@ -58,7 +60,7 @@
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme='light']) {
     --bg: #0f1115; --bg-subtle: #15181d; --bg-hover: #1c2026; --bg-active: #242830; --surface: #1a1d23;
-    --fg: #e6e8ec; --fg-2: #a1a7b2; --fg-3: #858c98; --fg-4: #4e545e; --line: #23272e; --line-strong: #3d4350;
+    --fg: #e6e8ec; --fg-2: #a1a7b2; --fg-3: #858c98; --fg-4: #4e545e; --line: #23272e; --line-strong: #3d4350; --line-input: #616977;
     --accent: #3b68dc; --accent-hover: #4470e0; --accent-text: #8fadf7; --accent-fg: #ffffff; --accent-soft: rgba(74, 120, 236, 0.16);
     --ok: #5cc28a; --warn: #e0a24a; --danger: #f07c73; --danger-soft: rgba(240, 124, 115, 0.12);
     --focus: 0 0 0 3px rgba(74, 120, 236, 0.35);
@@ -68,7 +70,7 @@
 }
 :root[data-theme='dark'] {
   --bg: #0f1115; --bg-subtle: #15181d; --bg-hover: #1c2026; --bg-active: #242830; --surface: #1a1d23;
-  --fg: #e6e8ec; --fg-2: #a1a7b2; --fg-3: #858c98; --fg-4: #4e545e; --line: #23272e; --line-strong: #3d4350;
+  --fg: #e6e8ec; --fg-2: #a1a7b2; --fg-3: #858c98; --fg-4: #4e545e; --line: #23272e; --line-strong: #3d4350; --line-input: #616977;
   --accent: #3b68dc; --accent-hover: #4470e0; --accent-text: #8fadf7; --accent-fg: #ffffff; --accent-soft: rgba(74, 120, 236, 0.16);
   --ok: #5cc28a; --warn: #e0a24a; --danger: #f07c73; --danger-soft: rgba(240, 124, 115, 0.12);
   --focus: 0 0 0 3px rgba(74, 120, 236, 0.35);
@@ -158,6 +160,7 @@ code, .mono { font-family: var(--font-mono); font-size: 0.9em; }
   .nav-badge { position: absolute; left: 50%; top: 0; margin: 0; font-size: 12px; line-height: 16px; min-width: 16px; padding: 0 4px; background: var(--bg-subtle); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--warn) 45%, transparent); }
   .brand { padding: 0; justify-content: center; }
   .nav-item { justify-content: center; padding: 0; height: 40px; }
+  @media (pointer: coarse) { .nav-item { height: 44px; } }
   .sidebar-foot { padding-left: 0; justify-content: center; }
 }
 
@@ -169,7 +172,7 @@ code, .mono { font-family: var(--font-mono); font-size: 0.9em; }
   }
   .tab {
     flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
-    height: 49px; color: var(--fg-2); font-size: 11px; font-weight: 500;
+    height: 49px; color: var(--fg-2); font-size: var(--fs-note); line-height: 16px; font-weight: 500;
   }
   .tab:hover { text-decoration: none; }
   /* (The current one by weight, not by a colour: ux1101 PG-32.) */
@@ -248,7 +251,7 @@ code, .mono { font-family: var(--font-mono); font-size: 0.9em; }
 .field .opt { color: var(--fg-3); font-weight: 400; }
 .input, .select, .textarea {
   width: 100%; height: var(--h-input); padding: 0 12px; border-radius: var(--r);
-  border: 1px solid var(--line-strong); background: var(--bg); color: var(--fg);
+  border: 1px solid var(--line-input); background: var(--bg); color: var(--fg);
   font-size: 16px; /* keeps iOS from zooming on focus */
 }
 /* 14px only where no touch pointer exists at all, so iOS never zooms on focus. */
@@ -332,7 +335,7 @@ div.row-main:hover { background: none; }
 .row-main:has(> .row-sub) > .row-meta { grid-row: 1 / span 2; align-self: center; }
 .row-main.no-icon > .row-title, .row-main.no-icon > .row-sub { grid-column: 1; }
 .row-main.no-icon > .row-meta { grid-column: 2; }
-.row-sub { grid-column: 2 / 3; font-size: 13px; line-height: 18px; color: var(--fg-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.row-sub { grid-column: 2 / 3; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--fg-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .row-main.no-icon .row-sub { grid-column: 1 / 2; }
 .row-session { border-bottom: 0; }
 .row-session .row-main { padding-left: 38px; grid-template-columns: 6px minmax(0, 1fr) auto; min-height: 44px; padding-top: 6px; padding-bottom: 6px; }
@@ -395,11 +398,11 @@ a.setting:hover { text-decoration: none; background: var(--bg-hover); }
   background: var(--surface); border-radius: var(--r-lg); box-shadow: var(--shadow-pop); padding: 20px;
   display: flex; flex-direction: column; gap: 16px;
 }
-.dialog h2 { font-size: 17px; line-height: 24px; font-weight: 600; }
+.dialog h2 { font-size: var(--fs-title); line-height: var(--lh-title); font-weight: 600; }
 .dialog-actions { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
 @media (max-width: 520px) {
   .overlay.sheet-mode { place-items: end stretch; padding: 0; }
-  .sheet-mode .dialog { max-width: none; border-radius: 14px 14px 0 0; padding-bottom: calc(20px + env(safe-area-inset-bottom, 0px)); animation: rise 0.2s var(--ease); }
+  .sheet-mode .dialog { max-width: none; border-radius: var(--r-xl) var(--r-xl) 0 0; padding-bottom: calc(20px + env(safe-area-inset-bottom, 0px)); animation: rise 0.2s var(--ease); }
   .sheet-mode .dialog-actions > .btn { flex: 1; }
   /* (The keyboard covers the home indicator: no room kept for it.) */
   :where(html.kb-open) .sheet-mode .dialog { padding-bottom: 20px; }
@@ -490,14 +493,14 @@ label.setting { cursor: pointer; }
 .setting-link:hover { background: var(--bg-hover); text-decoration: none; }
 .setting-link.danger, .setting-link.danger .row-icon { color: var(--danger); }
 .setting .seg button { height: 30px; padding: 0 10px; font-size: 13px; }
-@media (pointer: coarse) { .setting .seg button { height: 34px; } }
+@media (pointer: coarse) { .setting .seg button { height: 40px; } } /* (in its 2px frame: 44 to touch — pages-1105 4.3) */
 /* The settings page: a little wider than a form, sections further apart. */
 .page-settings { max-width: calc(680px + 2 * var(--pad-x)); }
 .page-settings .section + .section { margin-top: 16px; }
 /* The font size stepper framed as the segmented controls beside it. */
 .setting .stepper { gap: 2px; padding: 2px; border-radius: var(--r); background: var(--bg-subtle); box-shadow: inset 0 0 0 1px var(--line); }
 .setting .stepper .icon-btn { width: 30px; height: 30px; color: var(--fg-2); }
-@media (pointer: coarse) { .setting .stepper .icon-btn { width: 34px; height: 34px; } }
+@media (pointer: coarse) { .setting .stepper .icon-btn { width: 40px; height: 40px; } .setting .stepper .icon-btn::after { inset: -2px 0; } }
 .setting-wide .setting-control .input { width: 220px; }
 @media (max-width: 479.98px) {
   .setting:has(.seg) { flex-direction: column; align-items: stretch; gap: 8px; }
@@ -727,13 +730,14 @@ details.adv > .form { margin-top: 16px; }
 .crumb-wrap { display: inline-flex; align-items: center; }
 .crumb { border: 0; background: none; padding: 3px 5px; border-radius: var(--r-sm); color: var(--fg-2); cursor: pointer; font: 500 13px/20px var(--font-mono); }
 .crumb:hover:not(:disabled) { background: var(--bg-hover); color: var(--fg); }
+@media (pointer: coarse) { .crumb { min-height: 44px; padding: 12px 8px; } }
 .crumb[aria-current] { color: var(--fg); }
 .crumb-sep { color: var(--fg-4); font: 13px/20px var(--font-mono); }
 .crumb-edit { flex: none; width: 28px; height: 28px; margin-left: 2px; color: var(--fg-3); position: sticky; right: 0; background: var(--surface); }
 /* Narrowing a long folder, and its order (pages-1105 2.4). */
 .files-tools:has(+ .files-filter) { border-bottom: 0; }
 .files-filter { display: flex; align-items: center; gap: 8px; padding: 0 14px 10px; border-bottom: 1px solid var(--line); }
-.files-filter-box { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; height: 34px; padding: 0 10px; border: 1px solid var(--line-strong); border-radius: var(--r); color: var(--fg-3); }
+.files-filter-box { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; height: 34px; padding: 0 10px; border: 1px solid var(--line-input); border-radius: var(--r); color: var(--fg-3); }
 .files-filter-box:focus-within { border-color: var(--accent); box-shadow: var(--focus); }
 .files-filter-box input { flex: 1; min-width: 0; height: 100%; border: 0; padding: 0; background: none; color: var(--fg); outline: none; }
 .files-order { flex: none; gap: 6px; height: 34px; }
@@ -868,7 +872,7 @@ details.adv > .form { margin-top: 16px; }
 .live-name { flex: 0 1 auto; }
 /* Searching a long list, and its order (hosts: pages-1105 1.5). */
 .page-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin: 4px 0 12px; }
-.page-search { flex: 1 1 240px; display: flex; align-items: center; gap: 8px; height: var(--h-input); padding: 0 12px; border: 1px solid var(--line-strong); border-radius: var(--r); color: var(--fg-3); background: var(--bg); }
+.page-search { flex: 1 1 240px; display: flex; align-items: center; gap: 8px; height: var(--h-input); padding: 0 12px; border: 1px solid var(--line-input); border-radius: var(--r); color: var(--fg-3); background: var(--bg); }
 .page-search:focus-within { border-color: var(--accent); box-shadow: var(--focus); }
 .page-search input:focus, .page-search input:focus-visible, .files-filter-box input:focus, .files-filter-box input:focus-visible { outline: none; box-shadow: none; } /* (the box shows it) */
 .page-search input { flex: 1; min-width: 0; height: 100%; border: 0; padding: 0; background: none; color: var(--fg); outline: none; }
@@ -923,3 +927,5 @@ details.adv > .form { margin-top: 16px; }
 .audit-table .audit-day th { padding-top: var(--sp-4); font-size: var(--fs-sub); line-height: var(--lh-sub); font-weight: 600; color: var(--fg-2); text-align: left; border-bottom: 1px solid var(--line); }
 .audit-table tbody:first-of-type .audit-day th { padding-top: var(--sp-2); }
 @media (max-width: 599px) { .rec-tools .select, .audit-tools .select { flex: 1 1 0; padding-left: 10px; padding-right: 28px; background-position: right 8px center; } }
+/* (A sidebar row on an iPad: a finger's, 44 — pages-1105 4.3; after .nav-item's own height.) */
+@media (min-width: 760px) and (pointer: coarse) { .nav-item { height: 44px; } }

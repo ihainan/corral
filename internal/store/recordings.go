@@ -91,6 +91,8 @@ func (s *Store) ListRecordings(ctx context.Context, f RecordingFilter, before in
 type RecordingChoice struct {
 	ID   int64  `json:"id"`
 	Name string `json:"name"`
+	// Of a host: whose (as last recorded) — two hosts of one name told apart.
+	Owner string `json:"owner,omitempty"`
 }
 
 // RecordingChoices returns the hosts and the owners of the recordings owner
@@ -99,11 +101,13 @@ func (s *Store) RecordingChoices(ctx context.Context, owner int64) (hosts, owner
 	// (SQLite gives the bare name column of the row MAX picked: the name as
 	// last recorded.)
 	pick := func(id, name string) ([]RecordingChoice, error) {
-		q, args := `SELECT `+id+`, `+name+`, MAX(started_at) FROM recordings`, []any{}
+		q, args := `SELECT `+id+`, `+name+`, owner_name, MAX(started_at) FROM recordings`, []any{}
 		if owner != 0 {
 			q, args = q+` WHERE owner_id = ?`, append(args, owner)
 		}
-		rows, err := s.db.QueryContext(ctx, q+` GROUP BY `+id+` ORDER BY MAX(started_at) DESC LIMIT 200`, args...)
+		// (All of them: as many as there are hosts and people recorded, a list
+		// cut short would leave some out of reach — review cd07bb9.)
+		rows, err := s.db.QueryContext(ctx, q+` GROUP BY `+id+` ORDER BY MAX(started_at) DESC`, args...)
 		if err != nil {
 			return nil, err
 		}
@@ -112,8 +116,12 @@ func (s *Store) RecordingChoices(ctx context.Context, owner int64) (hosts, owner
 		for rows.Next() {
 			var c RecordingChoice
 			var at int64
-			if err := rows.Scan(&c.ID, &c.Name, &at); err != nil {
+			var owner string
+			if err := rows.Scan(&c.ID, &c.Name, &owner, &at); err != nil {
 				return nil, err
+			}
+			if id == "host_id" {
+				c.Owner = owner
 			}
 			out = append(out, c)
 		}

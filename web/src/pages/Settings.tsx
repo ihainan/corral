@@ -11,6 +11,7 @@ import { CurrentScheme, SchemeDialog } from '../terminal/SchemePicker'
 import { TwoStepSetting } from './TwoStep'
 import { CustomKeysSection } from './CustomKeys'
 import { playChime } from '../terminal/chime'
+import { setScreenReader, useScreenReader } from '../terminal/screenReader'
 
 // As the terminal's menu sets it (one point at a time).
 const FONT_MIN = 9
@@ -58,6 +59,7 @@ function Seg<T extends string>(props: { labelledBy: string; value: T; options: [
 export function SettingsPage() {
   const { me, setMe, boot } = useSession()
   const prefs = usePrefs()
+  const reader = useScreenReader()
   const toast = useToast()
   const [lang, setLangState] = useState<Lang>(getLang())
   const [profileDirty, setProfileDirty] = useState(false)
@@ -161,6 +163,7 @@ export function SettingsPage() {
             </div>
           </Setting>
           <Switch label={t('settings.webgl')} hint={t('settings.webglHint')} checked={prefs.webgl} onChange={(v) => setPrefs({ webgl: v })} />
+          <Switch label={t('settings.screenReader')} hint={t('settings.screenReaderHint')} checked={reader} onChange={setScreenReader} />
           <Switch label={t('settings.remoteClipboard')} hint={t('settings.remoteClipboardHint')} checked={prefs.remoteClipboard} onChange={(v) => setPrefs({ remoteClipboard: v })} />
         </div>
       </section>

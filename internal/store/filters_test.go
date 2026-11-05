@@ -63,11 +63,11 @@ func TestRecordingFilters(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fmt.Sprint(hosts) != "[{12 gone} {10 web-renamed} {11 db}]" || fmt.Sprint(owners) != "[{2 u2} {1 u1}]" {
+	if fmt.Sprint(hosts) != "[{12 gone u2} {10 web-renamed u2} {11 db u1}]" || fmt.Sprint(owners) != "[{2 u2 } {1 u1 }]" {
 		t.Fatalf("choices: %v %v", hosts, owners)
 	}
 	hosts, _, _ = s.RecordingChoices(ctx, 1)
-	if fmt.Sprint(hosts) != "[{11 db} {10 web}]" {
+	if fmt.Sprint(hosts) != "[{11 db u1} {10 web u1}]" {
 		t.Fatalf("one owner's hosts: %v", hosts)
 	}
 }
@@ -89,7 +89,11 @@ func TestAuditFilters(t *testing.T) {
 	add := func(uid *int64, name, action string) {
 		t.Helper()
 		clock += 10
-		if err := s.Audit(ctx, uid, name, action, "", "", nil); err != nil {
+		target := ""
+		if uid == nil {
+			name, target = "", name // (a failed sign-in: no one's, the name tried its target — as auditAs writes it)
+		}
+		if err := s.Audit(ctx, uid, name, action, target, "", nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -117,7 +121,8 @@ func TestAuditFilters(t *testing.T) {
 		want string
 	}{
 		{"user by id", AuditQuery{UserID: &one}, "logout convo.screen login.success "},
-		{"user and their failed sign-ins", AuditQuery{UserID: &one, Username: "alice"}, "logout convo.screen login.success login.failed "},
+		{"user and their failed sign-ins", AuditQuery{UserID: &one, SignInAs: "alice"}, "logout convo.screen login.success login.failed "},
+		{"not another's failed sign-ins", AuditQuery{UserID: &two, SignInAs: "bob"}, "brandnew.thing host.create "},
 		{"kind", AuditQuery{Heads: []string{"login", "logout"}}, "logout login.success login.failed "},
 		{"a head with no dot", AuditQuery{Heads: []string{"logout"}}, "logout "},
 		{"other", AuditQuery{NotHeads: []string{"login", "logout", "convo", "host"}}, "brandnew.thing "},

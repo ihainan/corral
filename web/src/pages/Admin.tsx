@@ -513,7 +513,7 @@ export function AdminAuditPage() {
                     <td className="tnum" title={new Date(e.ts * 1000).toLocaleString()}>{clockText(e.ts)}</td>
                     <td title={e.username}>{e.username || '—'}</td>
                     <td title={e.action}>{auditAction(e.action)}</td>
-                    <td title={[e.target, ...detail].filter(Boolean).join('\n')}>
+                    <td title={[e.target, ...auditDetail(e.detail, true)].filter(Boolean).join('\n')}>
                       {target || '—'}
                       {detail.length > 0 && <span className="detail">{detail.join(' · ')}</span>}
                     </td>
@@ -543,7 +543,7 @@ export function AdminAuditPage() {
                       {target ? ' · ' + target : ''}
                     </span>
                   </summary>
-                  <pre>{[new Date(e.ts * 1000).toLocaleString(), e.ip, target !== e.target ? e.target : '', e.action, ...auditDetail(e.detail)].filter(Boolean).join('\n')}</pre>
+                  <pre>{[new Date(e.ts * 1000).toLocaleString(), e.ip, target !== e.target ? e.target : '', e.action, ...auditDetail(e.detail, true)].filter(Boolean).join('\n')}</pre>
                 </details>
               )
             })}

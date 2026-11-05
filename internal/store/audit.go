@@ -36,9 +36,10 @@ func (s *Store) Audit(ctx context.Context, userID *int64, username, action, targ
 
 type AuditQuery struct {
 	UserID *int64
-	// Username: with UserID, also the entries naming that user without an
-	// id — a failed sign-in as them, which is no one's yet.
-	Username string
+	// SignInAs: with UserID, also the sign-ins tried as this user name that
+	// failed (or were locked): no one's yet, with no id — the name tried is
+	// their target (review cd07bb9).
+	SignInAs string
 	// Heads: actions whose first part ("login" of "login.failed") is one of
 	// these; NotHeads: none of these (what no kind takes in).
 	Heads, NotHeads []string
@@ -61,9 +62,9 @@ func (s *Store) ListAudit(ctx context.Context, q AuditQuery) ([]*AuditEntry, err
 	sqlq := `SELECT id, ts, user_id, username, action, target, ip, detail FROM audit_log WHERE 1 = 1`
 	var args []any
 	if q.UserID != nil {
-		if q.Username != "" {
-			sqlq += ` AND (user_id = ? OR (user_id IS NULL AND username = ?))`
-			args = append(args, *q.UserID, q.Username)
+		if q.SignInAs != "" {
+			sqlq += ` AND (user_id = ? OR (user_id IS NULL AND target = ? AND action LIKE 'login.%'))`
+			args = append(args, *q.UserID, q.SignInAs)
 		} else {
 			sqlq += ` AND user_id = ?`
 			args = append(args, *q.UserID)

@@ -805,7 +805,7 @@ func (s *Server) apiAdminAudit(w http.ResponseWriter, r *http.Request) {
 			q.UserID = &n
 			// (Their name too: a failed sign-in as them has no id — it is shown with theirs.)
 			if u, err := s.store.UserByID(r.Context(), n); err == nil {
-				q.Username = u.Username
+				q.SignInAs = u.Username
 			}
 		}
 	}

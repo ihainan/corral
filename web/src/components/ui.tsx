@@ -229,7 +229,7 @@ export function MenuLayer(props: { label: string; heading?: string; anchor: DOMR
       <div className="handle" aria-hidden="true" />
       {props.heading && <div className="sheet-heading">{props.heading}</div>}
       {props.note && <div className="menu-note">{props.note}</div>}
-      <div className="sheet-list" role="menu">
+      <div className="sheet-list" role="menu" onKeyDown={menuKeys}>
         {props.items.map((it, i) => <MenuEntry key={i} item={it} close={onClose} />)}
       </div>
       <button className="btn btn-block" onClick={onClose}>{t('common.cancel')}</button>
@@ -272,8 +272,10 @@ function MenuEntry({ item, close }: { item: MenuItem; close: () => void }) {
 
 // Arrow keys, Home and End move between menu items (the ARIA menu pattern);
 // Tab leaves the menu and closes it.
+// (Only items that can be chosen: a greyed one is passed over — pages-1105 4.4.)
+const PICKABLE = '.menu-item:not(:disabled):not([aria-disabled="true"])'
 function menuKeys(e: React.KeyboardEvent<HTMLElement>) {
-  const items = [...e.currentTarget.querySelectorAll<HTMLElement>('.menu-item')]
+  const items = [...e.currentTarget.querySelectorAll<HTMLElement>(PICKABLE)]
   if (items.length === 0) return
   const i = items.indexOf(document.activeElement as HTMLElement)
   let next = -1
@@ -335,7 +337,7 @@ function Popover({ anchor, at, trigger, onClose, label, children }: { anchor: DO
     document.addEventListener('keydown', onKey, true)
     window.addEventListener('resize', onClose)
     window.addEventListener('scroll', onScroll, true)
-    ref.current?.querySelector<HTMLElement>('.menu-item')?.focus()
+    ref.current?.querySelector<HTMLElement>(PICKABLE)?.focus()
     return () => {
       document.removeEventListener('pointerdown', onDown, true)
       document.removeEventListener('keydown', onKey, true)
