@@ -788,7 +788,14 @@ func (s *Server) apiAdminCreateInvite(w http.ResponseWriter, r *http.Request) {
 // (TrimSpace, any case), for the audit list to find under that user: what
 // was typed stays the entry's target as it was.
 func signInAs(name string) map[string]any {
-	return map[string]any{"as": strings.ToLower(truncate(strings.TrimSpace(name), 64))}
+	// (Cases folded as the database's NOCASE does: A–Z only — a Kelvin sign
+	// is no k there, and is not here — review 3374eba.)
+	return map[string]any{"as": strings.Map(func(r rune) rune {
+		if r >= 'A' && r <= 'Z' {
+			return r + ('a' - 'A')
+		}
+		return r
+	}, truncate(strings.TrimSpace(name), 64))}
 }
 
 // The kinds an audit list can be narrowed to, by the first part of an

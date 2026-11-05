@@ -23,8 +23,11 @@ export function labelName(name: string): string {
 // (one whose path was lost is not sent as it is). A label is words in the
 // box, as a long paste's is: one edited is no longer its file's — its chip
 // goes at once — and is sent as the words it is.
-// (A picture pasted, named alike by the browser: its number alone — 11-05.)
-export const ATTACH_LABEL = /\[(?:图片|文件|Attached (?:image|file)) #\d+(?:[：:] ?[^\]\n]{1,60})?\]/g
+// (A picture pasted, named alike by the browser, is labelled by its number
+// alone, "[图片 #1]" — 11-05 — which is not taken as a label here: words
+// typed so are no file lost; such a label goes as its path while its file is
+// known, as words if not — review 3374eba.)
+export const ATTACH_LABEL = /\[(?:图片|文件|Attached (?:image|file)) #\d+[：:] ?[^\]\n]{1,60}\]/g
 
 
 // (A picture pasted is named "image.png" by the browser, every one alike:

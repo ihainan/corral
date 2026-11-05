@@ -242,3 +242,13 @@ func TestAuditByUserHasFailedSignIns(t *testing.T) {
 		t.Fatalf("bob's entries have no failed sign-in: %v", list)
 	}
 }
+
+// The name a failed sign-in is kept under: trimmed and folded as the lookup
+// does (A–Z only) — not as Unicode folds it (review 3374eba).
+func TestSignInAs(t *testing.T) {
+	for in, want := range map[string]string{" BOB ": "bob", "　Bob ": "bob", "Kob": "Kob", "ÄBC": "Äbc"} {
+		if got := signInAs(in)["as"]; got != want {
+			t.Errorf("%q: %q, want %q", in, got, want)
+		}
+	}
+}

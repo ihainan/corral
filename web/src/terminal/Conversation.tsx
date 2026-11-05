@@ -273,7 +273,7 @@ export function ConversationView({
   const [picking, setPicking] = useState<boolean | 'search'>(false) // ('search': by ⌘K, its search box first)
   const [bgCmd, setBgCmd] = useState<ConvoRunning | null>(null) // (a background command's details, open)
   // (Another agent shown: its own commands, none of the one before's open.)
-  const agentOf = convo.bind ? `${convo.bind.pane ?? ''}|${convo.bind.agent ?? ''}` : ''
+  const agentOf = convo.bind ? `${convo.bind.pane}|${convo.bind.pid}|${convo.bind.start}|${convo.bind.session}` : ''
   useEffect(() => setBgCmd(null), [agentOf])
   // ⌘K (Ctrl+K): the list's search box, shown and in focus; where the list
   // is not beside the thread, the switcher, its box first. (A count: each
@@ -3450,7 +3450,9 @@ function clock(ts?: string): string {
 
 // The pictures' paths written in a message's words: absolute or under the
 // home folder, of a kind a picture is looked at as, at most a few.
-const PICTURE_PATH = /(?:^|[\s"'(（「])((?:\/(?!\/)|~\/)[^\s"'()（）「」<>]{1,1000}\.(?:png|jpe?g|gif|webp))(?=$|[\s"'),.;:!?，。；：！？）」])/gi
+// (The shortest that ends a picture's name and then a word's end: "/a.png，再看/b.png"
+// is /a.png and words after it, not one path of both — review 3374eba.)
+const PICTURE_PATH = /(?:^|[\s"'(（「])((?:\/(?!\/)|~\/)[^\s"'()（）「」<>]{1,1000}?\.(?:png|jpe?g|gif|webp))(?=$|[\s"'),.;:!?，。；：！？）」])/gi
 // A picture put up from Corral: its name made up on upload (a time, a few
 // letters) — told as "图片 1", not as its path (11-05).
 const UPLOADED = /\/\.cache\/corral\/uploads\/[^/]+$/
