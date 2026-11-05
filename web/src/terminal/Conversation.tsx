@@ -1550,6 +1550,8 @@ function AskDock({ children }: { children: ReactNode }) {
 
 function RunningWork({ items, openSub }: { items: ConvoRunning[]; openSub?: (s: Sub) => void }) {
   const [open, setOpen] = useState(false)
+  // A command's details (11-05): the whole of it, how long, its output.
+  const [shown1, setShown1] = useState<ConvoRunning | null>(null)
   // (Down to one: opened again later, it starts folded as it did at first.)
   useEffect(() => {
     if (items.length < 2) setOpen(false)
@@ -1573,6 +1575,10 @@ function RunningWork({ items, openSub }: { items: ConvoRunning[]; openSub?: (s: 
             <button type="button" className="link-btn convo-running-what" title={t('sub.open')} onClick={() => openSub({ agent: r.id, title: r.what })}>
               {r.what || t('convo.bgAgent')}
             </button>
+          ) : r.kind === 'cmd' && (r.cmd || r.out) ? (
+            <button type="button" className="link-btn convo-running-what" title={t('convo.bgDetails')} onClick={() => setShown1(r)}>
+              {r.what || t('convo.bgCmd')}
+            </button>
           ) : (
             <span className="convo-running-what" title={r.what}>{r.what || t(r.kind === 'agent' ? 'convo.bgAgent' : 'convo.bgCmd')}</span>
           )}
@@ -1581,7 +1587,44 @@ function RunningWork({ items, openSub }: { items: ConvoRunning[]; openSub?: (s: 
         </div>
       ))}
       </div>
+      {shown1 && <BgCmdDialog r={items.find((x) => x.id === shown1.id) ?? shown1} gone={!items.some((x) => x.id === shown1.id)} onClose={() => setShown1(null)} />}
     </div>
+  )
+}
+
+// A command left running in the background: what it is (whole), since when,
+// and its output — the file Claude Code writes it to, on the host, looked at
+// from its end on asking (read once each time, no polling). gone: it has
+// ended since the dialog opened (its output stays to be looked at).
+function BgCmdDialog({ r, gone, onClose }: { r: ConvoRunning; gone: boolean; onClose: () => void }) {
+  const acts = useContext(FileActsOf)
+  const [, tick] = useState(0)
+  useEffect(() => {
+    const id = setInterval(() => tick((n) => n + 1), 1000)
+    return () => clearInterval(id)
+  }, [])
+  return (
+    <Dialog title={r.what || t('convo.bgCmd')} onClose={onClose} className="bg-cmd-dialog">
+      <p className="hint">{gone ? t('convo.bgEnded') : r.ts ? t('convo.bgFor', { for: since(r.ts) }) : t('convo.bgRunning')}</p>
+      {r.cmd && (
+        <pre className="bg-cmd-text">
+          <Code text={r.cmd} lang="bash" />
+        </pre>
+      )}
+      {r.out && <p className="bg-cmd-out hint">{t('convo.bgOutAt', { path: r.out })}</p>}
+      <div className="dialog-actions">
+        {r.cmd && (
+          <button type="button" className="btn btn-ghost" onClick={() => void copyText(r.cmd!)}>
+            <Copy size={15} /> {t('convo.bgCopy')}
+          </button>
+        )}
+        {r.out && acts?.tail && (
+          <button type="button" className="btn btn-primary" onClick={() => acts.tail!(r.out!)}>
+            <Eye size={15} /> {t('convo.bgOutput')}
+          </button>
+        )}
+      </div>
+    </Dialog>
   )
 }
 
@@ -3070,7 +3113,8 @@ const OpenSub = createContext<((s: Sub) => void) | undefined>(undefined)
 // What can be done with a file the agent names, on its host (through the
 // session the conversation is read through): shown in the files panel,
 // downloaded, looked at (a picture). Not there once that session has ended.
-export type FileActs = { reveal: (path: string) => void; download: (path: string) => void; view: (path: string) => void }
+// (tail: a file looked at from its end — a command's output, newest last.)
+export type FileActs = { reveal: (path: string) => void; download: (path: string) => void; view: (path: string) => void; tail?: (path: string) => void }
 const FileActsOf = createContext<FileActs | undefined>(undefined)
 
 // A path the host can be asked for: absolute. (A relative one is not made

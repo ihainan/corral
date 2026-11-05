@@ -58,6 +58,21 @@ func TestFilesText(t *testing.T) {
 	if st != 200 || !a.Cut || len(a.Text) != textMaxBytes-1 || !utf8.ValidString(a.Text) || a.Size != int64(len(long)) {
 		t.Errorf("long: %d cut=%v len=%d size=%d", st, a.Cut, len(a.Text), a.Size)
 	}
+	// Its end asked for (a command's output): the newest, from a whole line, said cut; a short one whole.
+	tailOf := func(name string, data []byte) answer {
+		os.WriteFile(filepath.Join(e.root, name), data, 0o644)
+		_, body := e.raw("GET", e.url("text", url.Values{"path": {e.root + "/" + name}, "tail": {"1"}}), nil, "")
+		var a answer
+		json.Unmarshal(body, &a)
+		return a
+	}
+	logLines := strings.Repeat("old line 中文\n", textMaxBytes/16) + "newest line\n"
+	if a := tailOf("out.log", []byte(logLines)); !a.Cut || !strings.HasSuffix(a.Text, "newest line\n") || !strings.HasPrefix(a.Text, "old line 中文\n") || len(a.Text) > textMaxBytes || !utf8.ValidString(a.Text) {
+		t.Errorf("tail: cut=%v len=%d start=%.20q end=%.20q", a.Cut, len(a.Text), a.Text, a.Text[max(0, len(a.Text)-20):])
+	}
+	if a := tailOf("short.log", []byte("one\ntwo\n")); a.Cut || a.Text != "one\ntwo\n" {
+		t.Errorf("a short tail: %+v", a)
+	}
 	exact := strings.Repeat("b", textMaxBytes)
 	if st, a, _, _ := read("exact.txt", []byte(exact)); st != 200 || a.Cut || len(a.Text) != textMaxBytes {
 		t.Errorf("at the limit: %d cut=%v len=%d", st, a.Cut, len(a.Text))
@@ -107,8 +122,8 @@ func TestFilesText(t *testing.T) {
 			n++
 		}
 	}
-	if n != 8 {
-		t.Errorf("file.text audited %d times, want 8", n)
+	if n != 10 { // (the eight texts read, the two ends)
+		t.Errorf("file.text audited %d times, want 10", n)
 	}
 	e.c.do("POST", "/api/logout", nil)
 	if res, _ := e.raw("GET", e.url("text", url.Values{"path": {e.root + "/main.go"}}), nil, ""); res.StatusCode != 401 {

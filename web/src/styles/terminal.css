@@ -1406,6 +1406,10 @@ button.convo-task-line:hover .convo-task-name { color: var(--term-fg); }
 .convo-sub-open { align-self: flex-start; margin: 4px 0 6px; font-size: 13px; }
 .convo-sub .is-back { transform: rotate(180deg); }
 button.convo-running-what { padding: 0; text-align: left; color: var(--term-fg-2); font: inherit; text-decoration: underline; text-decoration-color: var(--term-line); text-underline-offset: 3px; }
+/* A command's details: the whole of it, its output's file (11-05). */
+.bg-cmd-text { margin: 0; padding: 10px 12px; border-radius: var(--r); background: var(--bg-subtle); font: 13px/20px var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 40vh; overflow: auto; }
+.bg-cmd-text code { font: inherit; background: none; padding: 0; }
+.bg-cmd-out { overflow-wrap: anywhere; font-size: var(--fs-note); line-height: var(--lh-note); }
 button.convo-running-what:hover { color: var(--term-fg); text-decoration-color: var(--term-fg-3); }
 @media (pointer: coarse) {
   button.convo-running-what, .term-root .convo-running-more { padding-top: 13px; padding-bottom: 13px; margin-top: -13px; margin-bottom: -13px; }

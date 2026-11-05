@@ -1813,7 +1813,7 @@ func (c *Claude) result(b claudeBlock, account json.RawMessage) {
 		if rep := handbackReport(account); rep != "" {
 			text = rep
 		}
-		c.setGoing(ref.t, account, ref.e.Time)
+		c.setGoing(ref.t, account, ref.e.Time, text)
 		// What a command changed, as Claude Code reports it: the files, each
 		// with its patch. The lines of the turn's changes count them too.
 		if files, more := bashFiles(account); len(files) > 0 {
@@ -2002,7 +2002,7 @@ func countLines(hunks []rawHunk) (add, del int) {
 // setGoing: the call set work going that is left to itself (a command in
 // the background, a subagent sent off on its own). It stays there until
 // the agent is told it has ended.
-func (c *Claude) setGoing(t *Tool, account json.RawMessage, at string) {
+func (c *Claude) setGoing(t *Tool, account json.RawMessage, at, said string) {
 	if len(account) == 0 {
 		return
 	}
@@ -2038,7 +2038,14 @@ func (c *Claude) setGoing(t *Tool, account json.RawMessage, at string) {
 	if what == "" {
 		what = t.Detail
 	}
-	c.running[id] = Running{ID: id, What: clip(clean(what), maxTitle), Kind: kind, Time: at}
+	r := Running{ID: id, What: clip(clean(what), maxTitle), Kind: kind, Time: at}
+	if kind == "cmd" {
+		r.Cmd = clip(clean(t.Detail), maxDetail)
+		if m := bgOutFile.FindStringSubmatch(said); m != nil {
+			r.Out = clip(clean(m[1]), maxDetail)
+		}
+	}
+	c.running[id] = r
 	c.runOrder = append(c.runOrder, id)
 }
 
@@ -2384,13 +2391,15 @@ func resultText(raw json.RawMessage) (text string, images, refs int) {
 // purposes in tags; the person's own text that happens to start with "<" is
 // kept as it is.
 var (
-	envelopeTag   = regexp.MustCompile(`^\s*<([a-z][a-z0-9-]*)[\s>]`)
-	taskSummary   = regexp.MustCompile(`(?s)<summary>(.*?)</summary>`)
-	taskStatus    = regexp.MustCompile(`(?s)<status>(.*?)</status>`)
-	taskID        = regexp.MustCompile(`(?s)<task-id>(.*?)</task-id>`)
-	crossSession  = regexp.MustCompile(`^\s*<cross-session-message[^>]*\bfrom-name="([^"]*)"`)
-	taskEvent     = regexp.MustCompile(`(?s)<event>(.*?)</event>`)
-	taskOutFile   = regexp.MustCompile(`(?s)<output-file>(.*?)</output-file>`)
+	envelopeTag  = regexp.MustCompile(`^\s*<([a-z][a-z0-9-]*)[\s>]`)
+	taskSummary  = regexp.MustCompile(`(?s)<summary>(.*?)</summary>`)
+	taskStatus   = regexp.MustCompile(`(?s)<status>(.*?)</status>`)
+	taskID       = regexp.MustCompile(`(?s)<task-id>(.*?)</task-id>`)
+	crossSession = regexp.MustCompile(`^\s*<cross-session-message[^>]*\bfrom-name="([^"]*)"`)
+	taskEvent    = regexp.MustCompile(`(?s)<event>(.*?)</event>`)
+	taskOutFile  = regexp.MustCompile(`(?s)<output-file>(.*?)</output-file>`)
+	// (A command set going in the background: "Output is being written to: /tmp/…/tasks/<id>.output. You will…")
+	bgOutFile     = regexp.MustCompile(`Output is being written to: (/\S+?)\.?(?:\s|$)`)
 	commandName   = regexp.MustCompile(`(?s)<command-name>(.*?)</command-name>`)
 	commandArgs   = regexp.MustCompile(`(?s)<command-args>(.*?)</command-args>`)
 	tagContent    = regexp.MustCompile(`(?s)^\s*<([a-z-]+)>(.*?)</[a-z-]+>\s*$`)

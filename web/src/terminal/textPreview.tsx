@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from 'react'
-import { Copy, Download, FileCode2, BookOpen, FolderOpen, X } from 'lucide-react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { Copy, Download, FileCode2, BookOpen, FolderOpen, RotateCw, X } from 'lucide-react'
 import { api, ApiError, errorText } from '../api'
 import { t } from '../i18n'
 import { copyText, Dialog, useToast } from '../components/ui'
@@ -66,7 +66,9 @@ function readError(e: unknown): string {
 
 const MD_DRAWN_MAX = 300_000
 
-export function TextPreview({ sid, path, onClose, onReveal }: { sid: string; path: string; onClose: () => void; onReveal?: () => void }) {
+// tail: its end (a command's output, a log: the newest), read again on asking,
+// shown scrolled to the bottom.
+export function TextPreview({ sid, path, tail = false, onClose, onReveal }: { sid: string; path: string; tail?: boolean; onClose: () => void; onReveal?: () => void }) {
   usePrefs() // (its colours follow the theme)
   const toast = useToast()
   const [read, setRead] = useState<Read | null>(null)
@@ -77,14 +79,19 @@ export function TextPreview({ sid, path, onClose, onReveal }: { sid: string; pat
   const [source, setSource] = useState(false) // (Markdown: its source shown, not drawn)
   useEffect(() => {
     const ctl = new AbortController()
-    setRead(null)
+    if (!tail) setRead(null) // (read again from its end: what is shown stays till the newer comes)
     setError('')
-    api<Read>('GET', `/api/sessions/${sid}/files/text?path=` + encodeURIComponent(path), undefined, { signal: ctl.signal }).then(
+    api<Read>('GET', `/api/sessions/${sid}/files/text?path=` + encodeURIComponent(path) + (tail ? '&tail=1' : ''), undefined, { signal: ctl.signal }).then(
       (r) => !ctl.signal.aborted && setRead(r),
       (e) => !ctl.signal.aborted && setError(readError(e)),
     )
     return () => ctl.abort()
-  }, [sid, path, again])
+  }, [sid, path, again, tail])
+  // (From its end: the bottom in sight, as it is read, and again.)
+  const box = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (tail && read && box.current) box.current.scrollTop = box.current.scrollHeight
+  }, [tail, read])
   const name = name0
   // (Markdown drawn up to so long; a longer one shown as its source: drawing it would hold the page.)
   const md = lang === 'markdown' && (!read || read.text.length <= MD_DRAWN_MAX)
@@ -96,6 +103,11 @@ export function TextPreview({ sid, path, onClose, onReveal }: { sid: string; pat
         <span className="text-preview-icon" aria-hidden="true"><FileTypeIcon name={name} /></span>
         <h2 className="picture-name" title={name}>{name}</h2>
         {read && <span className="text-preview-size">{formatSize(read.size)}</span>}
+        {tail && (
+          <button type="button" className="icon-btn" onClick={() => setAgain((n) => n + 1)} aria-label={t('preview.reload')} title={t('preview.reload')}>
+            <RotateCw size={16} />
+          </button>
+        )}
         {md && read && (
           <button type="button" className="btn btn-ghost text-preview-mode" aria-pressed={source} onClick={() => setSource(!source)}>
             {source ? <BookOpen size={15} /> : <FileCode2 size={15} />} {t(source ? 'preview.drawn' : 'preview.source')}
@@ -103,7 +115,9 @@ export function TextPreview({ sid, path, onClose, onReveal }: { sid: string; pat
         )}
         <button type="button" className="icon-btn" onClick={onClose} aria-label={t('common.close')}><X size={18} /></button>
       </div>
-      <div className={'text-preview term-vars ' + (isDark() ? 'dark' : 'light')}>
+      <div className={'text-preview term-vars ' + (isDark() ? 'dark' : 'light')} ref={box}>
+        {/* (Its end shown: what is left out is above.) */}
+        {tail && read?.cut && <p className="text-preview-cut">{t('preview.cutTail', { all: formatSize(read.size) })}</p>}
         {error ? (
           <div className="picture-note" role="alert">
             <p>{error}</p>
@@ -120,11 +134,12 @@ export function TextPreview({ sid, path, onClose, onReveal }: { sid: string; pat
           <div className="text-preview-md convo-md"><Markdown text={read.text} /></div>
         ) : (
           <div className="text-preview-code">
-            <pre className="text-preview-nums" aria-hidden="true">{Array.from({ length: lines }, (_, i) => i + 1).join('\n')}</pre>
+            {/* (Lines counted from a cut-off start would not be the file's: none then.) */}
+            {!(tail && read.cut) && <pre className="text-preview-nums" aria-hidden="true">{Array.from({ length: lines }, (_, i) => i + 1).join('\n')}</pre>}
             <pre className="text-preview-text"><Code text={read.text} lang={lang} /></pre>
           </div>
         )}
-        {read?.cut && <p className="text-preview-cut">{t('preview.cut', { all: formatSize(read.size) })}</p>}
+        {!tail && read?.cut && <p className="text-preview-cut">{t('preview.cut', { all: formatSize(read.size) })}</p>}
       </div>
       <div className="picture-foot">
         <span className="picture-path" title={path}>{path}</span>

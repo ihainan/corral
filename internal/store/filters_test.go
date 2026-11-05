@@ -97,7 +97,7 @@ func TestAuditFilters(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	add(nil, "alice", "login.failed") // 1010
+	add(nil, " ALICE ", "login.failed") // 1010 (as typed: sign-in trims it, minds no case)
 	add(&one, "alice", "login.success")
 	add(&one, "alice", "convo.screen") // 1030
 	add(&two, "bob", "host.create")

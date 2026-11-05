@@ -1673,3 +1673,23 @@ func TestClaudeNoticeWithReminderAsUserRow(t *testing.T) {
 		t.Errorf("quoted: %+v", e)
 	}
 }
+
+// A command in the background carries the whole command and the file its
+// output goes to, as Claude Code said when it set it going (to be looked at
+// from the page); a subagent neither.
+func TestClaudeRunningOutFile(t *testing.T) {
+	c := NewClaude()
+	c.Feed(lines(
+		`{"type":"assistant","uuid":"a1","message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"cd ~/w && python3 probe.py > log 2>&1","description":"Run the probe","run_in_background":true}}]}}`,
+		`{"type":"user","uuid":"r1","timestamp":"2026-11-05T10:00:00Z","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"Command running in background with ID: b7155uhei. Output is being written to: /tmp/claude-1000/-home-x/f926/tasks/b7155uhei.output. You will be notified when it completes — do not poll that file."}]},"toolUseResult":{"stdout":"","backgroundTaskId":"b7155uhei"}}`,
+		`{"type":"assistant","uuid":"a2","message":{"content":[{"type":"tool_use","id":"t2","name":"Agent","input":{"description":"查资料","prompt":"去查"}}]}}`,
+		`{"type":"user","uuid":"r2","message":{"content":[{"type":"tool_result","tool_use_id":"t2","content":"Async agent launched. Output is being written to: /tmp/x.output"}]},"toolUseResult":{"isAsync":true,"agentId":"ag1","status":"async_launched"}}`,
+	))
+	r := c.Running()
+	if len(r) != 2 || r[0].Cmd != "cd ~/w && python3 probe.py > log 2>&1" || r[0].Out != "/tmp/claude-1000/-home-x/f926/tasks/b7155uhei.output" {
+		t.Fatalf("the command: %+v", r)
+	}
+	if r[1].Cmd != "" || r[1].Out != "" {
+		t.Fatalf("a subagent has neither: %+v", r[1])
+	}
+}

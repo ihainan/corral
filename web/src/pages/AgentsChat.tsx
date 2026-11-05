@@ -788,6 +788,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   const [viewing, setViewing] = useState<string | null>(null)
   // A text file of its host read in the page.
   const [reading, setReading] = useState<string | null>(null)
+  const [readingEnd, setReadingEnd] = useState(false) // (looked at from its end: a command's output)
   // (A path under the home folder, "~/…": made whole with the host's home
   // first. Only the latest asked is acted on, and not once the agent or the
   // page is left meanwhile: a slow first answer of the home must not open
@@ -805,8 +806,8 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       )
     }
     // (Looked at: a picture as one, anything else as text — the host says if it is. One at a time.)
-    const look = (q: string) => (IMAGE_EXT.test(q) ? (setReading(null), setViewing(q)) : (setViewing(null), setReading(q)))
-    return { reveal: (p) => whole(p, setFilesAt), download: (p) => whole(p, (q) => downloadPath(sid, q)), view: (p) => whole(p, look) }
+    const look = (q: string, end = false) => (IMAGE_EXT.test(q) ? (setReading(null), setViewing(q)) : (setViewing(null), setReadingEnd(end), setReading(q)))
+    return { reveal: (p) => whole(p, setFilesAt), download: (p) => whole(p, (q) => downloadPath(sid, q)), view: (p) => whole(p, (q) => look(q)), tail: (p) => whole(p, (q) => look(q, true)) }
   }, [sid, toast])
   // (Another tab shown — a terminal's — or another agent: what was opened of this one's files closes.)
   useEffect(() => {
@@ -2173,6 +2174,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       <TextPreview
         sid={sid}
         path={reading}
+        tail={readingEnd}
         onClose={() => setReading(null)}
         onReveal={() => {
           setReading(null)

@@ -130,6 +130,10 @@ type Running struct {
 	Kind string `json:"kind"`           // "cmd" or "agent"
 	Time string `json:"ts,omitempty"`   // when it was set going
 	Note string `json:"note,omitempty"` // the latest it has said of itself, if any
+	// Of a command: the whole of it, and the file its output goes to (as
+	// Claude Code said when it set it going), to be looked at.
+	Cmd string `json:"cmd,omitempty"`
+	Out string `json:"out,omitempty"`
 }
 
 type Part struct {

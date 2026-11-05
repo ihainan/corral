@@ -174,6 +174,8 @@ export interface ConvoRunning {
   kind: string // 'cmd' | 'agent'
   ts?: string
   note?: string // (the latest it has said of itself)
+  cmd?: string // (a command: the whole of it)
+  out?: string // (a command: the file its output goes to, on the host)
 }
 
 // An item of the agent's task list.

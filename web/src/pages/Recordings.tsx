@@ -83,6 +83,7 @@ export function RecordingsPage() {
     const n = ++seq.current
     setFailed(false)
     setRefreshing(true)
+    setLoadingMore(false) // (a page asked for before is dropped when it comes: nothing waits on it)
     const q = query(f)
     q.set('choices', '1')
     api<List>('GET', '/api/recordings?' + q)
@@ -127,7 +128,8 @@ export function RecordingsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
   const loadMore = async () => {
-    if (!list || loadingMore) return
+    // (Not while the list is read again: its older pages would follow the old one's last — review a5cd0ee.)
+    if (!list || loadingMore || refreshing) return
     const n = seq.current
     const last = list.recordings[list.recordings.length - 1]
     setLoadingMore(true)
@@ -158,7 +160,10 @@ export function RecordingsPage() {
     // (Two of one name told apart: by whose, else by number — review cd07bb9.)
     const named = new Map<string, number>()
     for (const c of all) named.set(c.name, (named.get(c.name) ?? 0) + 1)
-    return all.map((c) => ((named.get(c.name) ?? 0) > 1 ? { ...c, name: c.owner && admin ? `${c.name}（${c.owner}）` : `${c.name}（#${c.id}）` } : c))
+    const first = all.map((c) => ((named.get(c.name) ?? 0) > 1 && c.owner && admin ? { ...c, name: `${c.name}（${c.owner}）` } : c))
+    const again = new Map<string, number>()
+    for (const c of first) again.set(c.name, (again.get(c.name) ?? 0) + 1)
+    return first.map((c) => ((again.get(c.name) ?? 0) > 1 || ((named.get(c.name) ?? 0) > 1 && !(c.owner && admin)) ? { ...c, name: `${c.name}（#${c.id}）` } : c))
   }
   const tools = (list || filtered) && (choices.hosts.length > 1 || choices.owners.length > 1 || filtered || (list?.recordings.length ?? 0) > 10) && (
     <div className="page-tools rec-tools">
@@ -284,7 +289,7 @@ export function RecordingsPage() {
       )}
       {list && more && (
         <div className="load-more">
-          <button className="btn" onClick={loadMore} disabled={loadingMore}>{loadingMore ? t('common.loading') : t('rec.more')}</button>
+          <button className="btn" onClick={loadMore} disabled={loadingMore || refreshing}>{loadingMore ? t('common.loading') : t('rec.more')}</button>
         </div>
       )}
       {dialog}
@@ -516,6 +521,7 @@ export function RecordingPlayerPage({ id }: { id: string }) {
     if (!cast || !hostEl.current) return
     const sc = new Screen(hostEl.current, cast.width, cast.height, scheme.theme, () => refit())
     screen.current = sc
+    fitFor.current = '' // (a new terminal, at the base letters: its size guessed again — review a5cd0ee)
     shown.current = 0
     requestAnimationFrame(refit)
     window.addEventListener('resize', refit)
