@@ -3369,8 +3369,11 @@ function keepAt(of: string, p: Place) {
   while (places.size > 12) places.delete(places.keys().next().value!)
 }
 
-// Where an item begins in the log (its first entry's seq).
-const startSeq = (it: Item): number => (it.kind === 'gone' ? it.entries[0].seq : 'e' in it ? it.e.seq : Number(/\d+/.exec(it.key)?.[0] ?? 0))
+// Where an item begins in the log (its first entry's seq). (A key's seq with
+// its sign: a log read from its end numbers what is before that end below
+// zero — "x-151.0" is of -151, not 151; read as 151 the line of what is new
+// went to the top of a long log's conversation on every coming back, 11-05.)
+const startSeq = (it: Item): number => (it.kind === 'gone' ? it.entries[0].seq : 'e' in it ? it.e.seq : Number(/-?\d+/.exec(it.key)?.[0] ?? 0))
 
 // What was read of each conversation, for this page's life: the last entry
 // seen at its end (of that reading of its log).
