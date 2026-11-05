@@ -290,6 +290,7 @@ textarea.input { height: auto; min-height: var(--h-input); padding: 8px 12px; li
     margin: 0 calc(-1 * var(--pad-x)); padding: 12px var(--pad-x); background: var(--bg); border-top: 1px solid var(--line);
   }
   .form-actions > .btn { flex: 1; }
+  .form-actions > .btn:not(.btn-primary) { flex: 0 0 auto; min-width: 88px; } /* (cancel: a small one beside the wide save — 11-05) */
 }
 @media (pointer: coarse) and (min-width: 760px) { .form-actions { bottom: 0; } }
 
@@ -366,9 +367,11 @@ a.setting:hover { text-decoration: none; background: var(--bg-hover); }
 .setting .chev { color: var(--fg-3); }
 
 /* Empty and error states */
-.empty { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; padding: 24px 0; }
-.empty svg { color: var(--fg-3); margin-bottom: 4px; }
-.empty h2 { font-size: 15px; line-height: 22px; font-weight: 600; }
+/* An empty page: its icon on a quiet square, a title, a line, what to do — one piece (11-05). */
+.empty { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; padding: 24px 0; max-width: 400px; }
+.empty > svg { box-sizing: content-box; width: 20px; height: 20px; padding: 10px; border-radius: 12px; background: var(--bg-subtle); box-shadow: inset 0 0 0 1px var(--line); color: var(--fg-2); margin-bottom: 8px; }
+.empty h2 { font-size: var(--fs-head); line-height: var(--lh-head); font-weight: 600; }
+.empty p { font-size: var(--fs-ui); line-height: var(--lh-ui); }
 .empty p { color: var(--fg-2); max-width: 44ch; }
 .empty .btn { margin-top: 10px; }
 /* (A button's icon in an empty state is the button's, not the state's grey icon.) */
@@ -503,9 +506,12 @@ label.setting { cursor: pointer; }
 @media (pointer: coarse) { .setting .stepper .icon-btn { width: 40px; height: 40px; } .setting .stepper .icon-btn::after { inset: -2px 0; } }
 .setting-wide .setting-control .input { width: 220px; }
 @media (max-width: 479.98px) {
-  .setting:has(.seg) { flex-direction: column; align-items: stretch; gap: 8px; }
-  .setting:has(.seg) > .setting-control { align-self: stretch; }
-  .setting:has(.seg) .seg { width: 100%; }
+  /* (A choice with words under its name stacks; a short one — theme, language —
+     keeps its row, its label left and the choice right: 11-05.) */
+  .setting:has(.seg):has(.setting-label .hint) { flex-direction: column; align-items: stretch; gap: 8px; }
+  .setting:has(.seg):has(.setting-label .hint) > .setting-control { align-self: stretch; }
+  .setting:has(.seg):has(.setting-label .hint) .seg { width: 100%; }
+  .setting:has(.seg):not(:has(.setting-label .hint)) .seg button { padding: 0 10px; }
   .setting-wide { flex-direction: column; align-items: stretch; gap: 8px; }
   .setting-wide > .setting-control { align-self: stretch; flex-wrap: wrap; }
   .setting-wide .setting-control .input { flex: 1; width: auto; min-width: 0; }
@@ -795,6 +801,12 @@ details.adv > .form { margin-top: 16px; }
 @media (max-width: 520px) {
   .sheet-mode .dialog.files-dialog { height: calc(var(--vv-h, 100dvh) - 24px); padding-bottom: env(safe-area-inset-bottom, 0px); }
   :where(html.kb-open) .sheet-mode .dialog.files-dialog { padding-bottom: 0; }
+  /* (Its head, path and tools: one edge, 16 in, and no more room between them than a row's — 11-05.) */
+  .sheet-mode .dialog.files-dialog { padding-top: 6px; }
+  .files-head { padding: 0 6px 0 16px; min-height: 44px; }
+  .files-crumbs { padding: 0 10px 0 10px; }
+  .files-tools { padding: 2px 10px 8px; }
+  .files-filter { padding: 0 16px 10px; }
   .files-entry { display: grid; grid-template-columns: auto minmax(0, 1fr); column-gap: 12px; row-gap: 1px; }
   .files-icon { grid-row: span 2; }
   .files-meta { gap: 10px; }
@@ -953,3 +965,21 @@ details.adv > .form { margin-top: 16px; }
   .page-order-menu { display: inline-flex; height: var(--h-input); padding: 0 12px; border-radius: 6px; }
   .page-order-menu svg { color: var(--fg-3); }
 }
+/* A recording's row (11-05): host, how long (or recording, red), when — columns; a phone: when under the host. */
+.row-main.rec-row { grid-template-columns: minmax(0, 1fr) 128px 48px; column-gap: 16px; }
+.rec-row > .row-title, .rec-row > .row-sub { grid-column: 1; }
+.rec-row > .rec-len { grid-column: 2; grid-row: 1 / span 2; align-self: center; font-size: var(--fs-ui); font-weight: 500; color: var(--fg); }
+.rec-row > .rec-len.is-live { color: var(--danger); }
+.rec-row > .row-meta { grid-column: 3; grid-row: 1 / span 2; align-self: center; justify-self: end; font-size: var(--fs-sub); color: var(--fg-2); }
+.rec-time-inline { display: none; }
+@media (max-width: 599px) {
+  .row-main.rec-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .rec-row > .rec-len { grid-row: 1; align-self: start; }
+  .rec-row > .row-meta { display: none; }
+  .rec-time-inline { display: inline; }
+}
+/* A form's second group (a host's sign-in, after where it is): a little further off (11-05). */
+.form > .field-group-start { margin-top: 8px; }
+.auth-brand { display: flex; flex-direction: column; gap: 6px; }
+.auth-brand .brand { margin-bottom: 0; padding: 0; font-size: 18px; }
+.auth-tagline { margin: 0; color: var(--fg-2); font-size: var(--fs-sub); line-height: var(--lh-sub); }

@@ -2,6 +2,7 @@
 
 const zh = {
   'app.name': 'Corral',
+  'app.tagline': '连接你的主机，在浏览器里继续工作。',
   'common.cancel': '取消',
   'common.save': '保存',
   'common.saving': '正在保存…',
@@ -1878,6 +1879,7 @@ export type I18nKey = Key
 
 const en: Record<Key, string> = {
   'app.name': 'Corral',
+  'app.tagline': 'Your hosts, and your work on them, in the browser.',
   'common.cancel': 'Cancel',
   'common.save': 'Save',
   'common.saving': 'Saving…',

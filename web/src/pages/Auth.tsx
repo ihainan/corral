@@ -10,9 +10,13 @@ function AuthFrame({ title, intro, children }: { title: string; intro?: string; 
   return (
     <div className="auth-wrap">
       <main className="auth">
-        <div className="brand">
-          <BrandMark />
-          {t('app.name')}
+        <div className="auth-brand">
+          <div className="brand">
+            <BrandMark />
+            {t('app.name')}
+          </div>
+          {/* (What it is, once, where one comes in — 11-05: the only place it says so.) */}
+          <p className="auth-tagline">{t('app.tagline')}</p>
         </div>
         <div className="form">
           <h1>{title}</h1>

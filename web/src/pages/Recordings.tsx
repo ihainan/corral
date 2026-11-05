@@ -222,7 +222,7 @@ export function RecordingsPage() {
             return (
               <li className="row" key={r.id} data-rec={r.id}>
                 <a
-                  className="row-main"
+                  className="row-main no-icon rec-row"
                   href={href}
                   onClick={(e) => {
                     opened.current = r.id
@@ -230,14 +230,15 @@ export function RecordingsPage() {
                     linkHandler(href)(e)
                   }}
                 >
-                  <Film className="row-icon" size={18} strokeWidth={1.75} />
+                  {/* (Host first; how long — or recording, in red words — a column of its own;
+                      the time it began after: 11-05. No icon: every row's was the same.) */}
                   <span className="row-title">{r.host_name}</span>
+                  {/* (A length, in words: "13:10:24" reads as a time of day — ux1101 PG-44.) */}
+                  <span className={'rec-len tnum' + (live ? ' is-live' : '')}>{live ? t('rec.live') : durationText(dur)}</span>
                   <span className="row-meta tnum" title={new Date(r.started_at * 1000).toLocaleString()}>{clockText(r.started_at)}</span>
                   <span className="row-sub">
-                    {admin && r.owner_name + ' · '}
-                    {/* (A length, in words: "13:10:24" reads as a time of day — ux1101 PG-44.) */}
-                    {live ? t('rec.live') : durationText(dur)}
-                    {!live && r.bytes >= 0 && ' · ' + formatSize(r.bytes)}
+                    {[admin ? r.owner_name : '', !live && r.bytes >= 0 ? formatSize(r.bytes) : ''].filter(Boolean).join(' · ')}
+                    <span className="rec-time-inline">{(admin || (!live && r.bytes >= 0) ? ' · ' : '') + clockText(r.started_at)}</span>
                     {r.truncated && <span className="warn-text">{' · ' + t('rec.truncated')}</span>}
                     {r.gaps && <span className="warn-text">{' · ' + t('rec.gaps')}</span>}
                   </span>
@@ -470,6 +471,7 @@ export function RecordingPlayerPage({ id }: { id: string }) {
   const actualRef = useRef(actual)
   actualRef.current = actual
   const fitFor = useRef('') // (the room a size was last guessed for)
+  const fitTries = useRef(0)
   const refit = () => {
     const el = hostEl.current
     const box = fitRef.current
@@ -480,8 +482,16 @@ export function RecordingPlayerPage({ id }: { id: string }) {
     const cs = getComputedStyle(stage)
     const roomW = stage.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight)
     // (Less the lines said under it, and the gaps between.)
-    const notes = [...stage.querySelectorAll<HTMLElement>('.player-note')].reduce((n, x) => n + x.offsetHeight + parseFloat(cs.rowGap || '0'), 0)
+    const notes = [...stage.querySelectorAll<HTMLElement>(':scope > .player-note')].reduce((n, x) => n + x.offsetHeight + parseFloat(cs.rowGap || '0'), 0)
     const roomH = stage.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom) - notes
+    // (Not laid out yet — no width: nothing is measured, nor the room taken
+    // as sized; looked at again a frame on, a few times. Taken as sized at
+    // nought, it never grew after.)
+    if (!xs.offsetWidth || !xs.offsetHeight) {
+      if (fitTries.current++ < 10) requestAnimationFrame(refit)
+      return
+    }
+    fitTries.current = 0
     const font = sc.term.options.fontSize ?? BASE_FONT
     // A grid's size does not scale with its letters' exactly (pixels are
     // rounded): a size is guessed once for a room, then only made smaller
@@ -519,7 +529,13 @@ export function RecordingPlayerPage({ id }: { id: string }) {
   }, [actual])
   useEffect(() => {
     if (!cast || !hostEl.current) return
-    const sc = new Screen(hostEl.current, cast.width, cast.height, scheme.theme, () => refit())
+    // (The recording's own grid resized — a window made narrower while it was
+    // recorded: its size guessed anew, larger too. A size of letters set here
+    // resizes no grid: no turn taking.)
+    const sc = new Screen(hostEl.current, cast.width, cast.height, scheme.theme, () => {
+      fitFor.current = ''
+      refit()
+    })
     screen.current = sc
     fitFor.current = '' // (a new terminal, at the base letters: its size guessed again — review a5cd0ee)
     shown.current = 0
@@ -687,7 +703,15 @@ export function RecordingPlayerPage({ id }: { id: string }) {
             <div className="player-screen" ref={hostEl} key={screenGen} onClick={toggle} />
           </div>
         )}
-        {cast && !playing && pos <= startAt && <p className="hint player-note">{t(isCoarse() ? 'rec.startHintTouch' : 'rec.startHint')}</p>}
+        {/* (Not begun: a play button over the screen, the way to start said under it — 11-05.) */}
+        {cast && !playing && pos <= startAt && (
+          <div className="player-start">
+            <button type="button" className="player-start-btn" onClick={toggle} aria-label={t('rec.play')}>
+              <Play size={26} />
+            </button>
+            <p className="player-note">{t(isCoarse() ? 'rec.startHintTouch' : 'rec.startHint')}</p>
+          </div>
+        )}
         {marker && <p className="hint player-note">{marker === 'truncated' ? t('rec.truncatedNote') : t('rec.gapsNote')}</p>}
       </div>
       <div className="player-controls">

@@ -467,6 +467,13 @@ html.term-dark .overlay, html.term-dark .menu, html.term-dark .toast {
   padding: 12px max(8px, env(safe-area-inset-right, 0px)) 12px max(8px, env(safe-area-inset-left, 0px));
 }
 .player-stage:not(.is-actual) { justify-content: safe center; }
+.player-stage { position: relative; }
+.player-start { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; pointer-events: none; }
+.player-start-btn { pointer-events: auto; width: 56px; height: 56px; border-radius: 50%; border: 0; display: grid; place-items: center; cursor: pointer;
+  background: color-mix(in srgb, var(--term-fg) 88%, transparent); color: var(--term-bg); box-shadow: 0 2px 12px rgb(0 0 0 / 0.25); }
+.player-start-btn svg { margin-left: 3px; fill: currentColor; }
+.player-start-btn:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: 3px; }
+.player-start .player-note { pointer-events: none; padding: 2px 8px; border-radius: 6px; background: color-mix(in srgb, var(--term-bg) 80%, transparent); }
 .player-fit { margin: 0 auto; flex: none; overflow: hidden; }
 /* Actual size: the recording at its own size, moved about in the room (pages-1105 2.3). */
 .player-stage.is-actual { align-items: flex-start; }
@@ -489,7 +496,7 @@ html.term-dark .overlay, html.term-dark .menu, html.term-dark .toast {
 .player-idle { flex: none; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; cursor: pointer; }
 @media (max-width: 520px) {
   .player-controls { flex-wrap: wrap; row-gap: 6px; }
-  .player-seek { order: 5; flex-basis: 100%; }
+  .player-seek { order: -1; flex-basis: 100%; } /* (a phone's: the bar on its own line, above the buttons — 11-05) */
 }
 .term-title.term-title-static { cursor: default; }
 .term-title.term-title-static:hover { background: none; }

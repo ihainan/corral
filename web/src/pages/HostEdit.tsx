@@ -206,7 +206,7 @@ export function HostEditPage({ id }: { id?: number }) {
           <input id="h-user" className="input" value={username} onChange={(e) => setUsername(e.target.value)} autoCapitalize="none" autoCorrect="off" spellCheck={false} required aria-invalid={!!fe('username')} />
         </Field>
 
-        <div className="field">
+        <div className="field field-group-start">
           <span className="field-label" id="auth-label">{t('host.auth')}</span>
           <div className="seg" role="group" aria-labelledby="auth-label">
             {(['password', 'key', 'ask'] as Auth[]).map((a) => (
