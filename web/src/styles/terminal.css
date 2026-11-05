@@ -460,7 +460,14 @@ html.term-dark .overlay, html.term-dark .menu, html.term-dark .toast {
   flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 8px;
   padding: 12px max(8px, env(safe-area-inset-right, 0px)) 12px max(8px, env(safe-area-inset-left, 0px));
 }
+.player-stage:not(.is-actual) { justify-content: safe center; }
 .player-fit { margin: 0 auto; flex: none; overflow: hidden; }
+/* Actual size: the recording at its own size, moved about in the room (pages-1105 2.3). */
+.player-stage.is-actual { align-items: flex-start; }
+.player-stage.is-actual .player-fit { margin: 0; }
+.player-size[aria-pressed='true'] { background: var(--term-key); color: var(--term-fg); }
+.player-newer { flex: none; gap: 6px; color: var(--term-fg-2); background: none; border: 0; }
+.player-newer:hover { background: var(--term-key); color: var(--term-fg); }
 .player-screen { cursor: pointer; transform-origin: top left; width: max-content; }
 .player-note { color: var(--term-fg-3); font-size: 12px; text-align: center; }
 .player-stage .inline-error { color: var(--term-fg-2); }
@@ -1594,6 +1601,10 @@ html.kb-open .convo-runs .convo-runs-pop.is-sheet { padding-bottom: 16px; }
    its words as the invite dialog's (ux1101 T42, T43). */
 .dialog.ports-dialog .lead { text-wrap: balance; }
 .dialog.ports-dialog .section h2 { font-size: 13px; line-height: 18px; font-weight: 600; color: var(--fg-2); }
+.ports-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.ports-head .icon-btn { margin-right: -8px; }
+.spin { animation: spin 0.9s linear infinite; }
+@media (prefers-reduced-motion: reduce) { .spin { animation: none; } }
 .ports-sub { margin-top: 8px; font-size: 13px; line-height: 18px; font-weight: 600; color: var(--fg-2); }
 /* Watching: "Revoke", a word, not a cross that reads as "hide" (ux1101 T46). */
 .share-revoke { flex: none; height: 32px; padding: 0 10px; color: var(--fg-2); font-size: 13px; }

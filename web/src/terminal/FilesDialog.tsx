@@ -1,5 +1,7 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 'react'
 import {
+  Clock,
+  Search,
   ArrowUp, Check, Copy, Download, Eye, Image as ImageIcon, FileQuestion, Folder, FolderPlus, House, LocateFixed, MoreHorizontal, Pencil, RotateCw,
   SquareTerminal, Trash2, Upload, X,
 } from 'lucide-react'
@@ -57,8 +59,13 @@ function formatTime(unix: number): string {
 }
 
 const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' })
-const sortEntries = (list: FileEntry[]) =>
-  [...list].sort((a, b) => (a.type === 'dir') !== (b.type === 'dir') ? (a.type === 'dir' ? -1 : 1) : collator.compare(a.name, b.name))
+// Folders first; then by name, or the newest first (byTime: "what was just
+// made" — pages-1105 2.4).
+const sortEntries = (list: FileEntry[], byTime = false) =>
+  [...list].sort((a, b) =>
+    (a.type === 'dir') !== (b.type === 'dir') ? (a.type === 'dir' ? -1 : 1) : (byTime ? b.mtime - a.mtime : 0) || collator.compare(a.name, b.name))
+const ORDER_KEY = 'corral.files.byTime'
+const FILTER_FROM = 8 // (entries in a folder: more than this, and the filter shows)
 
 // Browse and change files on the session's host, over the terminal's own
 // SSH connection.
@@ -70,6 +77,12 @@ export function FilesDialog({ sessionId, start, reveal, onPath, onInsert, onClos
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [hidden, setHidden] = useState(() => local.get(HIDDEN_KEY) === '1')
+  // Narrowing the folder shown to the names with these letters (this folder
+  // only, as listed: a cut-short listing says so); cleared on leaving it.
+  const [filterQ, setFilterQ] = useState('')
+  const [byTime, setByTime] = useState(() => local.get(ORDER_KEY) === '1')
+  const crumbsRef = useRef<HTMLElement>(null)
+  const listedPath = useRef<string | null>(null)
   const [editing, setEditing] = useState<string | null>(null) // the path being typed
   const [uploads, setUploads] = useState<Upload[]>([])
   const [dragOver, setDragOver] = useState(false)
@@ -126,6 +139,8 @@ export function FilesDialog({ sessionId, start, reveal, onPath, onInsert, onClos
       if (n !== seq.current) return
       want.current = l.path
       setListing(l)
+      if (l.path !== listedPath.current) setFilterQ('')
+      listedPath.current = l.path
       setPath(l.path)
       onPath(l.path)
       listRef.current?.scrollTo(0, 0)
@@ -196,7 +211,16 @@ export function FilesDialog({ sessionId, start, reveal, onPath, onInsert, onClos
   }, [sessionId])
 
   const markHere = !!marked && !!listing && listing.path === marked.dir
-  const entries = listing ? sortEntries(listing.entries.filter((e) => hidden || !e.name.startsWith('.') || (markHere && e.name === marked!.name))) : []
+  const needle = filterQ.trim().toLowerCase()
+  const entries = listing
+    ? sortEntries(listing.entries.filter((e) => (hidden || !e.name.startsWith('.') || (markHere && e.name === marked!.name)) && (!needle || e.name.toLowerCase().includes(needle))), byTime)
+    : []
+  const filterable = !!listing && (listing.entries.length > FILTER_FROM || needle !== '')
+  // (A deep path: its end — where one is, and the pencil to edit it — in sight.)
+  useLayoutEffect(() => {
+    const el = crumbsRef.current
+    if (el) el.scrollLeft = el.scrollWidth
+  }, [path])
   // (Once listed: scrolled to; not there, said so, once.)
   useEffect(() => {
     if (!marked || !listing || markedSaid.current) return
@@ -430,7 +454,7 @@ export function FilesDialog({ sessionId, start, reveal, onPath, onInsert, onClos
           <button className="btn" type="button" onClick={() => setEditing(null)}>{t('common.cancel')}</button>
         </form>
       ) : (
-        <nav className="files-crumbs" aria-label={t('files.path')}>
+        <nav className="files-crumbs" aria-label={t('files.path')} ref={crumbsRef}>
           <button className="crumb" onClick={() => void load('/')} disabled={path === null}>/</button>
           {crumbs.map((c, i) => {
             const p = '/' + crumbs.slice(0, i + 1).join('/')
@@ -499,6 +523,27 @@ export function FilesDialog({ sessionId, start, reveal, onPath, onInsert, onClos
         </button>
       </div>
 
+      {filterable && (
+        <div className="files-filter">
+          <label className="files-filter-box">
+            <Search size={15} aria-hidden="true" />
+            <input type="search" value={filterQ} onChange={(e) => setFilterQ(e.target.value)} placeholder={t('files.filter')} aria-label={t('files.filter')} />
+          </label>
+          <button
+            type="button"
+            className="btn btn-ghost files-order"
+            aria-pressed={byTime}
+            onClick={() => {
+              setByTime(!byTime)
+              local.set(ORDER_KEY, byTime ? '0' : '1')
+            }}
+            title={t('files.byTime')}
+          >
+            <Clock size={15} /> {t('files.byTimeShort')}
+          </button>
+        </div>
+      )}
+
       {uploads.length > 0 && (
         <ul className="files-uploads" aria-label={t('files.uploads')}>
           {uploads.map((u) => (
@@ -549,7 +594,12 @@ export function FilesDialog({ sessionId, start, reveal, onPath, onInsert, onClos
             </ul>
             {entries.length === 0 && (
               <p className="hint files-note">
-                {hiddenCount > 0 && !hidden ? (
+                {needle ? (
+                  <>
+                    {t(listing.truncated ? 'files.noMatchCut' : 'files.noMatch')}{' '}
+                    <button className="link-btn" onClick={() => setFilterQ('')}>{t('common.clearSearch')}</button>
+                  </>
+                ) : hiddenCount > 0 && !hidden ? (
                   // (The way to show them, here: not a description of where it is — ux1101 T38.)
                   <>
                     {t('files.onlyHidden', { n: hiddenCount })}{' '}

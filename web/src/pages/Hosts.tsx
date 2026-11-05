@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { CircleStop, Code2, MoreHorizontal, Pencil, Plus, Search, Server, Trash2, X, Eye } from 'lucide-react'
-import { api, type Host, type SessionInfo, type SessionPreview, type SharedSession } from '../api'
+import { api, authGen, type Host, type SessionInfo, type SessionPreview, type SharedSession } from '../api'
 import { relTime, t } from '../i18n'
 import { linkHandler, navigate } from '../router'
 import { Confirm, EmptyState, LoadError, Menu } from '../components/ui'
@@ -25,7 +25,16 @@ export function HostsPage() {
   const [sessFailed, setSessFailed] = useState(false)
   const [confirm, setConfirm] = useState<React.ReactNode>(null)
 
+  // (An answer that comes after the page was left, or after another account
+  // signed in, is not this list's — nor the navigation's: review b006ffd.)
+  const alive = useRef(true)
+  useEffect(() => {
+    alive.current = true
+    return () => void (alive.current = false)
+  }, [])
   const refreshSessions = useCallback(() => {
+    const gen = authGen()
+    const ours = () => alive.current && gen === authGen()
     api<SharedSession[]>('GET', '/api/shared')
       .then((l) => {
         setShared(l)
@@ -35,11 +44,13 @@ export function HostsPage() {
     // (Told to the navigation too: its count of agents waiting is this list's.)
     return api<SessionInfo[]>('GET', '/api/sessions')
       .then((x) => {
+        if (!ours()) return
         setSessions(x)
         setSessFailed(false)
         noteSessions(x)
       })
       .catch(() => {
+        if (!ours()) return
         setSessFailed(true)
         noteSessions(null)
       })

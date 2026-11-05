@@ -2244,7 +2244,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
   const hostIdForReconnect = watch ? 0 : info?.host_id ?? Number(local.get('corral.sessHost.' + id) || 0)
   hostRef.current = hostIdForReconnect
   // (A tab in the back opened again stays in the back: its new session shows up as a tab.)
-  const { connect, busyHost, dialogs } = useConnect((s) => activeRef.current && navigate('/t/' + s.id, true))
+  const { connect, cancel: cancelConnect, busyHost, dialogs } = useConnect((s) => activeRef.current && navigate('/t/' + s.id, true))
   // Closed as the gateway stopped (internal/term: ReasonShutdown).
   const gatewayStopped = end?.state === 'closed' && end.reason === 'server shutting down'
   // What this terminal was opened as, again (no choosing).
@@ -2450,7 +2450,17 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
         onSelect: () => x.id !== id && navigate('/t/' + x.id),
       })),
       { label: t('nav.agents'), icon: <Bot size={16} />, separator: list.length > 0 || sessionsFailed, hint: waitingAll ? t('nav.waitingN', { n: waitingAll }) : undefined, onSelect: () => navigate('/agents') },
-      { label: t('tabs.new'), icon: <Plus size={16} />, onSelect: () => setNewOpen(true) },
+      // (Opening another: this one's reconnecting, by itself or asked, stops —
+      // its success would take the page from the new one — review b006ffd.)
+      {
+        label: t('tabs.new'),
+        icon: <Plus size={16} />,
+        onSelect: () => {
+          stopAuto()
+          cancelConnect()
+          setNewOpen(true)
+        },
+      },
       { label: t('term.backToHosts'), icon: <Server size={16} />, onSelect: () => navigate('/') },
     ]
   }

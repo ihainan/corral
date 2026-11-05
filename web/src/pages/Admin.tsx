@@ -1,10 +1,14 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
-import { ChevronRight, KeySquare, MoreHorizontal, ScrollText, Send, Shield, Smartphone, UserCheck, UserPlus, UserRound, UserX } from 'lucide-react'
+import { ChevronRight, KeySquare, MoreHorizontal, ScrollText, Search, Send, Shield, Smartphone, UserCheck, UserPlus, UserRound, UserX } from 'lucide-react'
 import { api, ApiError, errorText, type AdminUser, type AuditEntry } from '../api'
 import { t } from '../i18n'
 import { PhoneBack, useSession } from '../app'
 import { auditAction, auditDetail, auditTarget, sessionHosts, whenText } from './pageText'
 import { Confirm, CopyButton, Dialog, EmptyState, Field, LoadError, Menu, useToast } from '../components/ui'
+
+type UserFilter = 'all' | 'admin' | 'disabled' | 'no2fa'
+const USER_FILTERS: UserFilter[] = ['all', 'admin', 'disabled', 'no2fa']
+const USER_SEARCH_FROM = 8 // (users: more than this, and the search shows)
 
 export function AdminUsersPage() {
   const { me } = useSession()
@@ -23,6 +27,20 @@ export function AdminUsersPage() {
     load()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  // Finding one among many (pages-1105 2.7): a search past a few, and who is
+  // an admin, turned off, without two-step sign-in — the choice stays (with
+  // the count it leaves) when a change takes the row out of it.
+  const [q, setQ] = useState('')
+  const [only, setOnly] = useState<UserFilter>('all')
+  const needle = q.trim().toLowerCase()
+  const shownUsers = (users ?? []).filter(
+    (u) =>
+      (!needle || u.username.toLowerCase().includes(needle) || u.display_name.toLowerCase().includes(needle)) &&
+      (only === 'all' || (only === 'admin' ? u.role === 'admin' : only === 'disabled' ? u.disabled : !u.totp)),
+  )
+  const filtering = needle !== '' || only !== 'all'
+  const findable = (users?.length ?? 0) > USER_SEARCH_FROM || filtering
 
   const update = async (u: AdminUser, patch: Partial<Pick<AdminUser, 'role' | 'disabled'>>) => {
     try {
@@ -52,8 +70,30 @@ export function AdminUsersPage() {
       {users === null ? (
         !failed && <p className="loading">{t('common.loading')}</p>
       ) : (
+        <>
+        {findable && (
+          <div className="page-tools">
+            <label className="page-search">
+              <Search size={16} aria-hidden="true" />
+              <input type="search" value={q} onChange={(e) => setQ(e.target.value)} placeholder={t('admin.searchUsers')} aria-label={t('admin.searchUsers')} />
+            </label>
+            <div className="seg page-order" role="group" aria-label={t('admin.filterUsers')}>
+              {USER_FILTERS.map((f) => (
+                <button key={f} type="button" aria-pressed={only === f} onClick={() => setOnly(f)}>
+                  {t(`admin.only.${f}` as const)}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+        {filtering && (
+          <p className="page-count" role="status">
+            {t('admin.shownOf', { n: shownUsers.length, all: users.length })}{' '}
+            <button type="button" className="link-btn" onClick={() => (setQ(''), setOnly('all'))}>{t('common.clearSearch')}</button>
+          </p>
+        )}
         <ul className="rows">
-          {users.map((u) => (
+          {shownUsers.map((u) => (
             <li className="row" key={u.id}>
               <div className="row-main">
                 <UserRound className="row-icon" size={18} strokeWidth={1.75} />
@@ -159,6 +199,7 @@ export function AdminUsersPage() {
             </li>
           ))}
         </ul>
+        </>
       )}
       {dialog}
     </main>

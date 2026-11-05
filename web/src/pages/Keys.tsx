@@ -27,7 +27,7 @@ export function KeysPage() {
     load()
   }, [])
 
-  const generate = () => setDialog(<GenerateDialog onClose={() => setDialog(null)} onDone={load} />)
+  const generate = () => setDialog(<GenerateDialog onClose={() => setDialog(null)} onDone={() => load()} />)
   const importKey = () => setDialog(<ImportDialog onClose={() => setDialog(null)} onDone={load} />)
 
   return (
@@ -202,7 +202,8 @@ function GenerateDialog({ onClose, onDone }: { onClose: () => void; onDone: () =
   )
 }
 
-function ImportDialog({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
+// (Also the host form's, which selects the key imported: it is given it.)
+export function ImportDialog({ onClose, onDone }: { onClose: () => void; onDone: (k: KeyCred) => void }) {
   const [name, setName] = useState('')
   const [pk, setPk] = useState('')
   const [phrase, setPhrase] = useState('')
@@ -213,8 +214,7 @@ function ImportDialog({ onClose, onDone }: { onClose: () => void; onDone: () => 
     if (busy) return
     setBusy(true)
     try {
-      await api('POST', '/api/credentials', { name, mode: 'import', private_key: pk, passphrase: phrase })
-      onDone()
+      onDone(await api<KeyCred>('POST', '/api/credentials', { name, mode: 'import', private_key: pk, passphrase: phrase }))
       onClose()
     } catch (err) {
       setError({ field: err instanceof ApiError ? err.field : undefined, text: errorText(err) })

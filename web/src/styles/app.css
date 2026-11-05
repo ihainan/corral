@@ -729,7 +729,17 @@ details.adv > .form { margin-top: 16px; }
 .crumb:hover:not(:disabled) { background: var(--bg-hover); color: var(--fg); }
 .crumb[aria-current] { color: var(--fg); }
 .crumb-sep { color: var(--fg-4); font: 13px/20px var(--font-mono); }
-.crumb-edit { flex: none; width: 28px; height: 28px; margin-left: 2px; color: var(--fg-3); }
+.crumb-edit { flex: none; width: 28px; height: 28px; margin-left: 2px; color: var(--fg-3); position: sticky; right: 0; background: var(--surface); }
+/* Narrowing a long folder, and its order (pages-1105 2.4). */
+.files-tools:has(+ .files-filter) { border-bottom: 0; }
+.files-filter { display: flex; align-items: center; gap: 8px; padding: 0 14px 10px; border-bottom: 1px solid var(--line); }
+.files-filter-box { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; height: 34px; padding: 0 10px; border: 1px solid var(--line-strong); border-radius: var(--r); color: var(--fg-3); }
+.files-filter-box:focus-within { border-color: var(--accent); box-shadow: var(--focus); }
+.files-filter-box input { flex: 1; min-width: 0; height: 100%; border: 0; padding: 0; background: none; color: var(--fg); outline: none; }
+.files-order { flex: none; gap: 6px; height: 34px; }
+.files-order[aria-pressed='true'] { background: var(--accent-soft); color: var(--accent-text); }
+@media (pointer: coarse) { .files-filter-box, .files-order { height: 40px; } }
+@media (any-pointer: coarse) { .files-filter-box input { font-size: 16px; } }
 @media (pointer: coarse) { .crumb-edit { width: 40px; height: 40px; } }
 .files-path-edit { display: flex; gap: 8px; padding: 6px 20px 0; }
 .files-root { display: contents; }
@@ -798,6 +808,8 @@ details.adv > .form { margin-top: 16px; }
 .code-input { letter-spacing: 0.3em; font-size: 18px; }
 .qr-wrap { display: flex; justify-content: center; }
 .qr { width: 184px; height: 184px; border-radius: var(--r); box-shadow: 0 0 0 1px var(--line); }
+.totp-phone { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; padding: 12px; border-radius: var(--r); background: var(--bg-subtle); }
+.totp-phone p { margin: 0; color: var(--fg-2); font-size: var(--fs-sub); line-height: var(--lh-sub); }
 .totp-secret { display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
 .totp-secret .link-btn { font-size: 13px; text-align: left; overflow-wrap: anywhere; }
 .recovery-codes {
@@ -858,11 +870,17 @@ details.adv > .form { margin-top: 16px; }
 .page-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin: 4px 0 12px; }
 .page-search { flex: 1 1 240px; display: flex; align-items: center; gap: 8px; height: var(--h-input); padding: 0 12px; border: 1px solid var(--line-strong); border-radius: var(--r); color: var(--fg-3); background: var(--bg); }
 .page-search:focus-within { border-color: var(--accent); box-shadow: var(--focus); }
+.page-search input:focus, .page-search input:focus-visible, .files-filter-box input:focus, .files-filter-box input:focus-visible { outline: none; box-shadow: none; } /* (the box shows it) */
 .page-search input { flex: 1; min-width: 0; height: 100%; border: 0; padding: 0; background: none; color: var(--fg); outline: none; }
 @media (any-pointer: coarse) { .page-search input { font-size: 16px; } }
 .page-order { width: auto; flex: none; }
 .page-none { color: var(--fg-2); padding: 12px 0; }
+.page-count { color: var(--fg-2); font-size: var(--fs-sub); line-height: var(--lh-sub); margin: 0 0 8px; }
 .share-add { display: flex; gap: 8px; }
+.share-link { margin-top: 12px; display: flex; flex-direction: column; gap: 6px; }
+.share-link .hint { margin: 0; }
+.share-link-row { display: flex; align-items: center; gap: 8px; padding: 4px 4px 4px 12px; border-radius: var(--r); background: var(--bg-subtle); min-width: 0; }
+.share-link-url { flex: 1; min-width: 0; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .share-add .input { flex: 1; min-width: 0; }
 .share-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
 .share-list li { display: flex; align-items: center; gap: 10px; min-height: 44px; border-bottom: 1px solid var(--line); }
@@ -897,3 +915,4 @@ details.adv > .form { margin-top: 16px; }
   align-items: center;
   gap: 8px;
 }
+.key-acts { display: flex; flex-wrap: wrap; gap: 8px; }

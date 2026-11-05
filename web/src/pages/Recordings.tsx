@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
-import { ArrowLeft, Download, Film, MoreHorizontal, Pause, Play, Trash2 } from 'lucide-react'
+import { ArrowLeft, Download, Film, Maximize2, MoreHorizontal, Pause, Play, RotateCw, Trash2 } from 'lucide-react'
 import { api, errorText, type Recording } from '../api'
 import { t } from '../i18n'
 import { linkHandler, navigate } from '../router'
@@ -10,6 +10,7 @@ import { termScheme } from '../prefs'
 import { chromeVars } from '../terminal/themes'
 import { formatSize } from '../terminal/FilesDialog'
 import { Confirm, EmptyState, LoadError, Menu, isCoarse, useToast } from '../components/ui'
+import { local } from '../storage'
 import { durationText, whenText } from './pageText'
 
 const FONT_STACK = "'JetBrains Mono', 'SFMono-Regular', Menlo, Consolas, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', monospace"
@@ -24,25 +25,56 @@ export function formatDuration(secs: number): string {
 
 type List = { recordings: Recording[]; enabled: boolean; days: number }
 
+// The list as it was left for a recording (pages-1105 2.2): its pages read,
+// and the one opened, to come back to — this page's life only, and only for
+// the account it was read for. What changed since (one ended, one started)
+// comes in with the first page, read again.
+let kept: { who: number; list: List; more: boolean; opened: string } | null = null
+// (The first page read again, over what was kept: the newer as it is now, then
+// the older pages as they were.)
+function overKept(fresh: Recording[], prev: Recording[]): Recording[] {
+  const ids = new Set(fresh.map((r) => r.id))
+  const last = fresh[fresh.length - 1]
+  const older = (r: Recording) => !last || r.started_at < last.started_at || (r.started_at === last.started_at && r.id > last.id)
+  return [...fresh, ...prev.filter((r) => !ids.has(r.id) && older(r))]
+}
+
 export function RecordingsPage() {
   const { me } = useSession()
   const toast = useToast()
-  const [list, setList] = useState<List | null>(null)
+  const back = kept && kept.who === me?.id ? kept : null
+  const [list, setList] = useState<List | null>(back?.list ?? null)
   const [failed, setFailed] = useState(false)
-  const [more, setMore] = useState(false) // an older page may exist
+  const [more, setMore] = useState(back?.more ?? false) // an older page may exist
+  const [refreshing, setRefreshing] = useState(false)
   const [loadingMore, setLoadingMore] = useState(false)
   const [dialog, setDialog] = useState<React.ReactNode>(null)
   const admin = me?.role === 'admin'
   const PAGE = 100 // as the server sends
-  const load = () => {
+  // keep: what was read before stays below the first page (coming back);
+  // otherwise the list starts again from the first page (refresh, a delete).
+  const load = (keep = false) => {
     setFailed(false)
+    setRefreshing(true)
     api<List>('GET', '/api/recordings')
       .then((l) => {
-        setList(l)
-        setMore(l.recordings.length === PAGE)
+        setList((prev) => (keep && prev ? { ...l, recordings: overKept(l.recordings, prev.recordings) } : l))
+        if (!keep) setMore(l.recordings.length === PAGE)
       })
-      .catch(() => setFailed(true))
+      .catch(() => !keep && setFailed(true))
+      .finally(() => setRefreshing(false))
   }
+  // (Kept as it is now, whenever it changes: what leaving finds.)
+  const opened = useRef(back?.opened ?? '')
+  useEffect(() => {
+    if (list && me) kept = { who: me.id, list, more, opened: opened.current }
+  }, [list, more, me])
+  // (Back from a recording: the row opened, in sight again.)
+  useEffect(() => {
+    if (!back?.opened) return
+    document.querySelector(`[data-rec="${CSS.escape(back.opened)}"]`)?.scrollIntoView({ block: 'center' })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
   const loadMore = async () => {
     if (!list || loadingMore) return
     const last = list.recordings[list.recordings.length - 1]
@@ -61,12 +93,16 @@ export function RecordingsPage() {
       setLoadingMore(false)
     }
   }
-  useEffect(load, [])
+  useEffect(() => load(!!back), [])
   return (
     <main className="page">
       <div className="page-head">
         <PhoneBack />
         <h1>{t('rec.title')}</h1>
+        <div className="spacer" />
+        <button type="button" className="icon-btn" onClick={() => load()} disabled={refreshing} aria-label={t('rec.refresh')} title={t('rec.refresh')}>
+          <RotateCw size={17} className={refreshing ? 'spin' : undefined} />
+        </button>
       </div>
       {list && (
         <p className="lead page-lead">
@@ -75,7 +111,7 @@ export function RecordingsPage() {
         </p>
       )}
       {failed ? (
-        <LoadError onRetry={load} />
+        <LoadError onRetry={() => load()} />
       ) : list === null ? (
         <p className="loading">{t('common.loading')}</p>
       ) : list.recordings.length === 0 ? (
@@ -87,8 +123,16 @@ export function RecordingsPage() {
             const dur = (live ? Date.now() / 1000 : r.ended_at) - r.started_at
             const href = '/recordings/' + r.id
             return (
-              <li className="row" key={r.id}>
-                <a className="row-main" href={href} onClick={linkHandler(href)}>
+              <li className="row" key={r.id} data-rec={r.id}>
+                <a
+                  className="row-main"
+                  href={href}
+                  onClick={(e) => {
+                    opened.current = r.id
+                    if (kept) kept.opened = r.id
+                    linkHandler(href)(e)
+                  }}
+                >
                   <Film className="row-icon" size={18} strokeWidth={1.75} />
                   <span className="row-title">{r.host_name}</span>
                   <span className="row-meta" title={new Date(r.started_at * 1000).toLocaleString()}>{whenText(r.started_at)}</span>
@@ -192,6 +236,9 @@ function playTimes(events: Ev[], skipIdle: boolean): number[] {
 }
 
 const SPEEDS = [0.5, 1, 2, 4, 8]
+const BASE_FONT = 13 // px: the letters' size it is laid out at, scaled down from
+const MAX_FONT = 22 // (fitted to a big window: no larger)
+const ACTUAL_KEY = 'corral.player.actual'
 const WRITE_CHUNK = 64 << 10 // output is fed to the terminal in pieces, each after the last is parsed
 
 // convertPos maps a play position from one time scale to another, keeping
@@ -259,9 +306,14 @@ export function RecordingPlayerPage({ id }: { id: string }) {
   posRef.current = pos
   const scheme = termScheme()
 
+  const toast = useToast()
   const loading = useRef<AbortController | null>(null)
-  const load = () => {
-    setError('')
+  // again: what is shown stays, and play where it stands, if this fails
+  // (the newest of one still recorded — pages-1105 2.2).
+  const [reloading, setReloading] = useState(false)
+  const load = (again = false) => {
+    if (!again) setError('')
+    else setReloading(true)
     loading.current?.abort()
     const abort = new AbortController()
     loading.current = abort
@@ -279,8 +331,11 @@ export function RecordingPlayerPage({ id }: { id: string }) {
       })
       .catch((e) => {
         if (abort.signal.aborted) return
-        setError(e instanceof Error && /^\d+$/.test(e.message) ? t('rec.loadFailed') : errorText(e))
+        const text = e instanceof Error && /^\d+$/.test(e.message) ? t('rec.loadFailed') : errorText(e)
+        if (again) toast(text, true)
+        else setError(text)
       })
+      .finally(() => !abort.signal.aborted && setReloading(false))
   }
   useEffect(() => {
     load()
@@ -308,26 +363,49 @@ export function RecordingPlayerPage({ id }: { id: string }) {
   const timesRef = useRef(times)
   timesRef.current = times
 
-  // Scaled down as a whole to fit narrower screens (a terminal recorded on
-  // a desktop is wide), within the safe area.
+  // Fitted to the room there is (pages-1105 2.3): as large as fits both ways,
+  // the recorded grid kept — larger by its letters' size (sharp), smaller by
+  // scaling the whole down (a terminal recorded on a desktop is wide). Or at
+  // its own size, moved about in the room ("actual").
+  const [actual, setActual] = useState(() => local.get(ACTUAL_KEY) === '1')
+  const actualRef = useRef(actual)
+  actualRef.current = actual
   const refit = () => {
     const el = hostEl.current
     const box = fitRef.current
     const xs = el?.querySelector<HTMLElement>('.xterm-screen')
     const stage = box?.parentElement
-    if (!el || !box || !xs || !stage) return
+    const sc = screen.current
+    if (!el || !box || !xs || !stage || !sc) return
     const cs = getComputedStyle(stage)
-    const room = stage.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight)
-    const w = xs.offsetWidth
-    const h = xs.offsetHeight
-    const k = w > 0 ? Math.min(1, room / w) : 1
-    el.style.transform = k < 1 ? `scale(${k})` : ''
-    box.style.width = Math.ceil(w * k) + 'px'
-    box.style.height = Math.ceil(h * k) + 'px'
+    const roomW = stage.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight)
+    // (Less the lines said under it, and the gaps between.)
+    const notes = [...stage.querySelectorAll<HTMLElement>('.player-note')].reduce((n, x) => n + x.offsetHeight + parseFloat(cs.rowGap || '0'), 0)
+    const roomH = stage.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom) - notes
+    const font = sc.term.options.fontSize ?? BASE_FONT
+    // (Its size at the base letters', whatever they are now.)
+    const w = (xs.offsetWidth * BASE_FONT) / font
+    const h = (xs.offsetHeight * BASE_FONT) / font
+    const k = actualRef.current || w <= 0 || h <= 0 ? 1 : Math.min(roomW / w, roomH > 40 ? roomH / h : Infinity)
+    const want = k > 1 ? Math.min(MAX_FONT, Math.floor(BASE_FONT * k)) : BASE_FONT
+    if (want !== font) {
+      sc.term.options.fontSize = want
+      requestAnimationFrame(refit) // (measured again once laid out at it)
+      return
+    }
+    const scale = k < 1 ? k : 1
+    el.style.transform = scale < 1 ? `scale(${scale})` : ''
+    box.style.width = Math.ceil(xs.offsetWidth * scale) + 'px'
+    box.style.height = Math.ceil(xs.offsetHeight * scale) + 'px'
   }
   useEffect(() => {
+    local.set(ACTUAL_KEY, actual ? '1' : '0')
+    requestAnimationFrame(refit)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [actual])
+  useEffect(() => {
     if (!cast || !hostEl.current) return
-    const sc = new Screen(hostEl.current, cast.width, cast.height, scheme.theme, refit)
+    const sc = new Screen(hostEl.current, cast.width, cast.height, scheme.theme, () => refit())
     screen.current = sc
     shown.current = 0
     requestAnimationFrame(refit)
@@ -434,6 +512,16 @@ export function RecordingPlayerPage({ id }: { id: string }) {
     return () => window.removeEventListener('keydown', onKey)
   }, [])
 
+  // Recorded still: as far as was read, and the rest read on asking. Play
+  // stops (a running clock would carry on over the old recording) and goes
+  // on from the same moment: the part read before plays at the same times.
+  const live = !!meta && meta.ended_at === 0 && marker !== 'truncated'
+  const readUntil = meta && cast && cast.events.length ? new Date((meta.started_at + cast.events[cast.events.length - 1].t) * 1000) : null
+  const loadNewer = () => {
+    setPlaying(false)
+    load(true)
+  }
+
   const changeScale = (next: boolean) => {
     if (!cast) return
     const p = convertPos(posRef.current, cast.events, times, playTimes(cast.events, next))
@@ -459,16 +547,21 @@ export function RecordingPlayerPage({ id }: { id: string }) {
           {meta && (
             <span className="term-status">
               {meta.owner_name} · {new Date(meta.started_at * 1000).toLocaleString()}
-              {meta.ended_at === 0 ? ' · ' + t('rec.live') : ''}
+              {live && readUntil ? ' · ' + t('rec.liveUntil', { time: readUntil.toLocaleTimeString() }) : meta.ended_at === 0 ? ' · ' + t('rec.live') : ''}
             </span>
           )}
         </div>
         <div className="spacer" />
+        {live && (
+          <button type="button" className="btn btn-ghost player-newer" onClick={loadNewer} disabled={reloading}>
+            <RotateCw size={15} className={reloading ? 'spin' : undefined} /> {t('rec.loadNewer')}
+          </button>
+        )}
         <a className="icon-btn" href={`/api/recordings/${id}/cast?download=1`} aria-label={t('rec.download')} title={t('rec.download')}>
           <Download size={19} />
         </a>
       </header>
-      <div className="player-stage">
+      <div className={'player-stage' + (actual ? ' is-actual' : '')}>
         {error ? (
           <LoadError text={error} onRetry={() => load()} />
         ) : !cast ? (
@@ -501,6 +594,9 @@ export function RecordingPlayerPage({ id }: { id: string }) {
         <select className="player-speed" value={speed} onChange={(e) => setSpeed(Number(e.target.value))} aria-label={t('rec.speed')}>
           {SPEEDS.map((s) => <option key={s} value={s}>{s}×</option>)}
         </select>
+        <button type="button" className="icon-btn player-size" aria-pressed={actual} onClick={() => setActual(!actual)} aria-label={t('rec.actualSize')} title={t(actual ? 'rec.fitSize' : 'rec.actualSize')}>
+          <Maximize2 size={17} />
+        </button>
         <label className="player-idle">
           <input type="checkbox" checked={skipIdle} onChange={(e) => changeScale(e.target.checked)} />
           {t('rec.skipIdle')}

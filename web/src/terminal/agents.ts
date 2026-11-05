@@ -181,10 +181,12 @@ export function waitingAgents(list: SessionInfo[]): number {
 }
 
 // One session's agents, as its summary says: how many wait, work, are done
-// and not looked at. lost: the summary is old (herdr lost since) — none of it
-// is to be told as now. null: no agents' summary (a plain shell, tmux).
+// and not looked at. lost: the summary is old (herdr lost since), or there is
+// none yet — none of it is to be told as now. null: no agents' summary (a plain shell, tmux).
 export function sessionAgents(s: SessionInfo): { waiting: number; working: number; done: number; lost: boolean } | null {
-  if (s.meta?.t !== 'herdr') return null
+  // (A herdr session herdr has said nothing of yet, as it starts: not known —
+  // told so, not as all well — review b006ffd.)
+  if (s.meta?.t !== 'herdr') return s.persistence === 'herdr' ? { waiting: 0, working: 0, done: 0, lost: true } : null
   const n = (st: string) => s.meta!.t === 'herdr' ? s.meta!.workspaces.reduce((k, w) => k + w.agents.filter((a) => a.status === st).length, 0) : 0
   return { waiting: n('blocked'), working: n('working'), done: n('done'), lost: !!s.meta.lost }
 }

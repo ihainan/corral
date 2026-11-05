@@ -4,7 +4,7 @@ import { encode } from 'uqr'
 import { api, ApiError, errorText } from '../api'
 import { t } from '../i18n'
 import { useSession } from '../app'
-import { Dialog, Field, LoadError, copyText, useToast } from '../components/ui'
+import { Dialog, Field, LoadError, copyText, isCoarse, useToast } from '../components/ui'
 
 type Status = { on: boolean; recovery_left: number }
 
@@ -156,9 +156,13 @@ function EnrolDialog({ onClose, onDone }: { onClose: () => void; onDone: () => v
       await f()
     } catch (err) {
       // The set-up timed out (or used up its tries): back to the start.
+      // (The key added to the app with it is no good now: said, as a new one
+      // comes with the next start — pages-1105 2.8.)
       if (err instanceof ApiError && err.code === 'no_enrolment') {
         setSetup(null)
         setCode('')
+        setError(t('totp.expired'))
+        return
       }
       setError(errorText(err))
     } finally {
@@ -198,6 +202,21 @@ function EnrolDialog({ onClose, onDone }: { onClose: () => void; onDone: () => v
       ) : setup ? (
         <form className="form" onSubmit={enable}>
           <p className="lead" ref={stepRef} tabIndex={-1}>{t('totp.scanLead')}</p>
+          {/* (A phone cannot scan its own screen: the way round it, first — pages-1105 2.8.) */}
+          {isCoarse() && (
+            <div className="totp-phone">
+              <p>{t('totp.samePhone')}</p>
+              <button
+                type="button"
+                className="btn"
+                onClick={async () => {
+                  if (await copyText(setup.secret)) toast(t('common.copied'))
+                }}
+              >
+                <Copy size={15} /> {t('totp.copyKey')}
+              </button>
+            </div>
+          )}
           <div className="qr-wrap">
             <QRCode text={setup.uri} label={t('totp.qrLabel')} />
           </div>

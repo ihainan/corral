@@ -46,11 +46,11 @@ if (bad.length) {
 // are not set: a box drawn with no border, unseen till looked at (11-05,
 // .list-search). Those meant to be shared — the terminal's own look of a
 // common component — are named here.
-const SHARED = new Set(['dialog', 'kb-key', 'reply-desc', 'reply-dialog', 'sheet-list', 'text-preview'])
+const SHARED = new Set(['dialog', 'kb-key', 'reply-desc', 'reply-dialog', 'sheet-list', 'sheet-mode', 'text-preview'])
 const heads = (f) => {
   const css = readFileSync(join(web, 'src/styles', f), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '')
   const out = new Set()
-  for (const m of css.matchAll(/(?:^|\})\s*([^{}@]+)\{/g))
+  for (const m of css.matchAll(/(?:^|[{}])\s*([^{}@]+)\{/g))
     for (const part of m[1].split(',')) {
       const c = /^\s*\.([a-zA-Z][\w-]*)/.exec(part)
       if (c) out.add(c[1])

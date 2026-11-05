@@ -275,8 +275,9 @@ function Shell({ active, children }: { active: NavKey; children: ReactNode }) {
     : []
   // Agents waiting for the user, on the way to them: wherever one is in the
   // app, not only on the hosts page and in a terminal (pages-1105 1.1). The
-  // hosts page reads the list itself: no second poll there.
-  const waiting = useWaitingCount(active !== 'hosts')
+  // hosts list reads it itself: no second poll there (its forms do not).
+  const path = usePath()
+  const waiting = useWaitingCount(path !== '/' && path !== '/hosts')
   const badge = (key: NavKey, cls: string) =>
     key === 'agents' && waiting.n ? (
       <span className={cls + (waiting.stale ? ' is-stale' : '')} title={waiting.stale ? t('nav.waitingStale') : undefined} aria-hidden="true">

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { UserRound } from 'lucide-react'
 import { api, ApiError, errorText, type Share } from '../api'
 import { t } from '../i18n'
-import { Confirm, Dialog, LoadError, useToast } from '../components/ui'
+import { Confirm, CopyButton, Dialog, LoadError, useToast } from '../components/ui'
 
 // The owner lets other users watch the session, read-only, and sees who is
 // watching now.
@@ -110,6 +110,17 @@ export function ShareDialog({ sessionId, onClose }: { sessionId: string; onClose
         </ul>
       ) : (
         <p className="hint">{shares ? t('share.none') : t('common.loading')}</p>
+      )}
+      {/* (Who was let watch is told nothing by Corral: the link to send them,
+          their way in once signed in — pages-1105 2.6.) */}
+      {shares && shares.length > 0 && (
+        <div className="share-link">
+          <p className="hint">{t('share.linkLead')}</p>
+          <div className="share-link-row">
+            <span className="mono share-link-url">{location.origin + '/w/' + sessionId}</span>
+            <CopyButton text={location.origin + '/w/' + sessionId} label={t('share.copyLink')} />
+          </div>
+        </div>
       )}
       <div className="dialog-actions">
         <button className="btn" onClick={onClose}>{t('common.close')}</button>

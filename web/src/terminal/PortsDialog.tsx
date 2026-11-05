@@ -1,5 +1,5 @@
-import { useEffect, useState, type FormEvent } from 'react'
-import { ExternalLink, Globe, Trash2 } from 'lucide-react'
+import { useEffect, useRef, useState, type FormEvent } from 'react'
+import { ExternalLink, Globe, RotateCw, Trash2 } from 'lucide-react'
 import { api, ApiError, errorText, type Forward, type ListeningPort } from '../api'
 import { t } from '../i18n'
 import { Dialog, LoadError, useToast } from '../components/ui'
@@ -33,12 +33,19 @@ export function PortsDialog({ hostId, onClose }: { hostId: number; onClose: () =
   const [forwardsFailed, setForwardsFailed] = useState(false)
   const [manual, setManual] = useState('')
 
+  // (Asked again with "refresh" — a server started after the dialog opened —
+  // pages-1105 2.5: an answer to an older asking is dropped.)
+  const portsSeq = useRef(0)
+  const [portsBusy, setPortsBusy] = useState(false)
   const loadPorts = () => {
+    const n = ++portsSeq.current
     setPortsError('')
-    setPorts(null)
+    setPortsBusy(true)
     api<ListeningPort[]>('GET', `/api/hosts/${hostId}/ports`)
-      .then(setPorts)
+      .then((l) => n === portsSeq.current && setPorts(l))
+      .finally(() => n === portsSeq.current && setPortsBusy(false))
       .catch((e) =>
+        n === portsSeq.current &&
         setPortsError(
           e instanceof ApiError && e.code === 'no_connection' ? t('ports.needsConnection') : e instanceof ApiError && e.code === 'busy' ? t('ports.busy') : t('ports.loadFailed'),
         ),
@@ -57,9 +64,23 @@ export function PortsDialog({ hostId, onClose }: { hostId: number; onClose: () =
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hostId])
 
+  // A port being opened: once, from whichever row or the field (a slow answer
+  // and a second tap opened two blank tabs — 2.5). The tab is opened in the
+  // tap, before any waiting (openForward), or it counts as a pop-up.
+  const openingNow = useRef(new Set<number>())
+  const [opening, setOpening] = useState<number[]>([])
   const open = async (port: number) => {
-    if (await openForward(hostId, port, '/', toast)) void loadForwards()
+    if (openingNow.current.has(port)) return
+    openingNow.current.add(port)
+    setOpening([...openingNow.current])
+    try {
+      if (await openForward(hostId, port, '/', toast)) void loadForwards()
+    } finally {
+      openingNow.current.delete(port)
+      setOpening([...openingNow.current])
+    }
   }
+  const isOpening = (port: number) => opening.includes(port)
   const submit = (e: FormEvent) => {
     e.preventDefault()
     const n = Number(manual)
@@ -87,7 +108,12 @@ export function PortsDialog({ hostId, onClose }: { hostId: number; onClose: () =
     <Dialog title={t('ports.title')} onClose={onClose} className="ports-dialog">
       <p className="lead">{t('ports.intro')}</p>
       <section className="section">
-        <h2>{t('ports.listening')}</h2>
+        <div className="ports-head">
+          <h2>{t('ports.listening')}</h2>
+          <button type="button" className="icon-btn" onClick={loadPorts} disabled={portsBusy} aria-label={t('ports.refresh')} title={t('ports.refresh')}>
+            <RotateCw size={16} className={portsBusy ? 'spin' : undefined} />
+          </button>
+        </div>
         {ports === null && !portsError && <p className="loading">{t('common.loading')}</p>}
         {portsError && <LoadError text={portsError} onRetry={loadPorts} />}
         {ports && ports.length === 0 && <p className="hint">{t('ports.none')}</p>}
@@ -95,10 +121,10 @@ export function PortsDialog({ hostId, onClose }: { hostId: number; onClose: () =
           <ul className="rows">
             {ports.map((p) => (
               <li className="row" key={p.port}>
-                <button className="row-main" onClick={() => open(p.port)}>
+                <button className="row-main" onClick={() => open(p.port)} disabled={isOpening(p.port)} aria-busy={isOpening(p.port) || undefined}>
                   <Globe className="row-icon" size={18} strokeWidth={1.75} />
                   <span className="row-title mono">{p.port}</span>
-                  <ExternalLink size={15} className="row-meta" aria-hidden="true" />
+                  {isOpening(p.port) ? <span className="row-meta">{t('ports.opening')}</span> : <ExternalLink size={15} className="row-meta" aria-hidden="true" />}
                   <span className="row-sub mono">{p.address}</span>
                 </button>
               </li>
@@ -111,7 +137,7 @@ export function PortsDialog({ hostId, onClose }: { hostId: number; onClose: () =
         <form className="input-row" onSubmit={submit}>
           <input className="input mono" inputMode="numeric" aria-labelledby="ports-manual" placeholder={t('ports.manual')} value={manual}
             onChange={(e) => setManual(e.target.value.replace(/\D/g, '').slice(0, 5))} />
-          <button className="btn btn-primary" disabled={!manual}>{t('ports.open')}</button>
+          <button className="btn btn-primary" disabled={!manual || isOpening(Number(manual))}>{isOpening(Number(manual)) ? t('ports.opening') : t('ports.open')}</button>
         </form>
       </section>
       {forwardsFailed && <LoadError onRetry={loadForwards} />}
@@ -130,7 +156,7 @@ export function PortsDialog({ hostId, onClose }: { hostId: number; onClose: () =
                   </select>
                 </div>
                 <div className="row-actions">
-                  <button className="icon-btn" aria-label={t('ports.open') + ' ' + f.port} title={t('ports.open')} onClick={() => open(f.port)}><ExternalLink size={16} /></button>
+                  <button className="icon-btn" aria-label={t('ports.open') + ' ' + f.port} title={t('ports.open')} disabled={isOpening(f.port)} onClick={() => open(f.port)}><ExternalLink size={16} /></button>
                   <button className="icon-btn" aria-label={t('ports.remove') + ' ' + f.port} title={t('ports.remove')} onClick={() => remove(f)}><Trash2 size={16} /></button>
                 </div>
               </li>

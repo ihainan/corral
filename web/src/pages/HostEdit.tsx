@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react'
-import { ArrowLeft, ChevronRight, KeyRound } from 'lucide-react'
+import { ArrowLeft, ChevronRight, FileKey, KeyRound } from 'lucide-react'
 import { api, ApiError, errorText, type Host, type KeyCred } from '../api'
 import { hasKey, t } from '../i18n'
 import { linkHandler, navigate } from '../router'
 import { CopyButton, Field, LoadError, useToast } from '../components/ui'
 import { hostFormErrors } from './pageText'
 import { AskHookRow, BellHookRow } from '../terminal/askHook'
+import { ImportDialog } from './Keys'
 
 type Auth = Host['auth']
 
@@ -104,6 +105,11 @@ export function HostEditPage({ id }: { id?: number }) {
       setGenerating(false)
     }
   }
+
+  // A key there is no need to leave the form for (pages-1105 2.1): imported
+  // here, and chosen. (Its dialog is outside the form: its own submit is not
+  // the form's.)
+  const [importing, setImporting] = useState(false)
 
   // "alice@10.0.0.5:2222" pasted into the address fills user name and port too.
   // Runs on blur and again on submit, since Enter submits without a blur.
@@ -239,10 +245,14 @@ export function HostEditPage({ id }: { id?: number }) {
               <p className="hint">{t('host.keyNone')}</p>
             )}
             {fe('credential_id') && <p className="err" role="alert">{fe('credential_id')}</p>}
-            <div>
+            <div className="key-acts">
               <button type="button" id="h-key-new" className="btn" onClick={generateKey} disabled={generating}>
                 <KeyRound size={16} />
                 {t('host.keyCreate')}
+              </button>
+              <button type="button" className="btn" onClick={() => setImporting(true)}>
+                <FileKey size={16} />
+                {t('keys.import')}
               </button>
             </div>
             {selectedKey && (
@@ -303,6 +313,15 @@ export function HostEditPage({ id }: { id?: number }) {
           <button className="btn btn-primary" disabled={busy}>{busy ? t('common.saving') : t('common.save')}</button>
         </div>
       </form>
+      {importing && (
+        <ImportDialog
+          onClose={() => setImporting(false)}
+          onDone={(k) => {
+            setKeys((ks) => [...ks.filter((x) => x.id !== k.id), k])
+            setCredentialId(k.id)
+          }}
+        />
+      )}
       {editing && loaded && <AskHookRow hostId={id} hostName={name} />}
       {editing && loaded && <BellHookRow hostId={id} hostName={name} />}
     </main>
