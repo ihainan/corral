@@ -524,14 +524,18 @@ function fromLog(call: ConvoTool | undefined, screen: string): { kind: 'run' | '
 // the call asking where the log says) — not again as its screen is read
 // anew, its card is drawn another way, or it is gone back to.
 const asksSeen = new Set<string>()
+// (Told by its call, from the log or read off the screen. One not told yet —
+// its card just come, the screen not read — is new: it fades in, and is not
+// remembered, or every later untold one would be taken for it.)
+const told = (id: string) => !id.endsWith('|')
 function useFreshAsk(id: string): boolean {
-  const [at, setAt] = useState(() => ({ id, fresh: !asksSeen.has(id) }))
+  const [at, setAt] = useState(() => ({ id, fresh: !told(id) || !asksSeen.has(id) }))
   // (Another question in the same card: it fades in as it comes. Not the
-  // same one told apart only now, its call found in the log after the card
-  // came: it faded in already.)
-  if (at.id !== id) setAt({ id, fresh: !asksSeen.has(id) && !at.id.endsWith('|') })
+  // same one told apart only now, its call found after the card came: it
+  // faded in already.)
+  if (at.id !== id) setAt({ id, fresh: told(at.id) ? !asksSeen.has(id) : at.fresh }) // (told mid-fade: the fade runs on)
   useEffect(() => {
-    asksSeen.add(id)
+    if (told(id)) asksSeen.add(id)
     if (!at.fresh) return
     const timer = setTimeout(() => setAt((a) => (a.id === id ? { id, fresh: false } : a)), 400) // (past its fade: a card drawn anew does not fade again)
     return () => clearTimeout(timer)
@@ -540,7 +544,6 @@ function useFreshAsk(id: string): boolean {
 }
 
 export function InlineReply({ target, onLoaded, resizedAt, active = true, held, call, pending, onAnswered }: { target: ReplyTarget; onLoaded?: () => void; resizedAt?: number; active?: boolean; held?: () => boolean; call?: ConvoTool; pending?: ConvoTool; onAnswered?: (yes: boolean) => void }) {
-  const fresh = useFreshAsk(target.key + '|' + (call?.id ?? pending?.id ?? ''))
   const [sent, setSent] = useState<string | null>(null) // (the screen answered)
   const answeredRef = useRef(onAnswered)
   answeredRef.current = onAnswered
@@ -597,6 +600,7 @@ export function InlineReply({ target, onLoaded, resizedAt, active = true, held, 
   const reviewId = !logAsks && target.agent === 'claude' && reviewAsDrawn(read) && read.kind === 'review' ? 'screen-review:' + JSON.stringify(read.answers) : undefined
   // (What a key not known to have done stops: this question, as the log or
   // else the screen tells it — another one, the card again. review528-5)
+  const fresh = useFreshAsk(target.key + '|' + (call?.id ?? pending?.id ?? fromScreen?.id ?? ''))
   const driven = useDrive(screen, setScreen, load, () => setSent(answered.current), logAsks ? (call!.id ?? '') : (fromScreen?.id ?? reviewId ?? (call && !call.done ? (call.id ?? '') : '')))
   const busy = sending || driven.busy || amending
   const error = sendError || driven.error || amendError
