@@ -159,7 +159,28 @@ func TestExtraURLs(t *testing.T) {
 			t.Errorf("SameSite(%q) = %v", o, !ok)
 		}
 	}
-	for _, bad := range []string{"http://ssh.example.com", "ssh.example.com", "https://ssh.example.com/path", "https://u@ssh.example.com", "https://ssh.example.com/?a=1"} {
+	// (As the browser writes the origin: review-extraurls #2.)
+	for raw, want := range map[string]string{
+		"https://[2001:0db8:0:0:0:0:0:1]": "https://[2001:db8::1]",
+		"https://ssh.example.com:0443":    "https://ssh.example.com",
+		"https://ssh.example.com:08443":   "https://ssh.example.com:8443",
+		"https://ssh.example.com:":        "https://ssh.example.com",
+		"https://xn--fsqu00a.xn--0zwm56d": "https://xn--fsqu00a.xn--0zwm56d",
+		"https://Ssh.Example.com.":        "https://ssh.example.com",
+		"https://10.0.0.1:8443":           "https://10.0.0.1:8443",
+	} {
+		t.Setenv("CORRAL_EXTRA_URLS", raw)
+		c, err := Load()
+		if err != nil {
+			t.Errorf("%s: %v", raw, err)
+			continue
+		}
+		if got := c.Origins(); len(got) != 2 || got[1] != want {
+			t.Errorf("%s: %q, want %q", raw, got, want)
+		}
+	}
+	for _, bad := range []string{"http://ssh.example.com", "ssh.example.com", "https://ssh.example.com/path", "https://u@ssh.example.com", "https://ssh.example.com/?a=1",
+		"https://İ.example.com", "https://例子.测试", "https://127.1", "https://0x7f.0.0.1", "https://ssh.example.com:99999", "https://[fe80::1%25eth0]", "https://a_b.example.com"} {
 		t.Setenv("CORRAL_EXTRA_URLS", bad)
 		if _, err := Load(); err == nil {
 			t.Errorf("%q: accepted", bad)
@@ -168,5 +189,25 @@ func TestExtraURLs(t *testing.T) {
 	t.Setenv("CORRAL_EXTRA_URLS", "")
 	if c, err := Load(); err != nil || len(c.Origins()) != 1 {
 		t.Fatalf("none: %v %v", c, err)
+	}
+}
+
+// Not under the forward domain (its names are forwarded ports'), and not over
+// plain HTTP beside forwarded ports (review-extraurls #1, #4).
+func TestExtraURLsAndForwardDomain(t *testing.T) {
+	t.Setenv("CORRAL_MASTER_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	t.Setenv("CORRAL_PUBLIC_URL", "https://ssh.inner.example.com")
+	t.Setenv("CORRAL_FORWARD_DOMAIN", "inner.example.com")
+	for raw, ok := range map[string]bool{"https://ssh.example.com": true, "https://8080-abcd.inner.example.com": false, "https://inner.example.com": false, "https://code-abcd.INNER.example.com": false} {
+		t.Setenv("CORRAL_EXTRA_URLS", raw)
+		if _, err := Load(); (err == nil) != ok {
+			t.Errorf("%s: err %v", raw, err)
+		}
+	}
+	t.Setenv("CORRAL_PUBLIC_URL", "http://127.0.0.1:8080")
+	t.Setenv("CORRAL_LISTEN", "127.0.0.1:8080")
+	t.Setenv("CORRAL_EXTRA_URLS", "http://ssh.example.test:8080")
+	if _, err := Load(); err == nil {
+		t.Error("plain HTTP beside forwarded ports: accepted")
 	}
 }

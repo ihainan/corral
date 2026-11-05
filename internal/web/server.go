@@ -383,6 +383,15 @@ func (s *Server) sameOrigin(r *http.Request) bool {
 	return s.cfg.SameSite(origin)
 }
 
+// originOf: the main site's origin this request came by (CORRAL_EXTRA_URLS:
+// one of its ways in), else CORRAL_PUBLIC_URL's — for a link made for it.
+func (s *Server) originOf(r *http.Request) string {
+	if o := r.Header.Get("Origin"); o != "" && s.cfg.SameSite(o) {
+		return o
+	}
+	return s.cfg.Origin()
+}
+
 func (s *Server) cookieName() string {
 	if s.cfg.SecureCookies() {
 		// __Host- forbids a Domain attribute, so forwarded-port subdomains can

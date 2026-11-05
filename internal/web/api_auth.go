@@ -779,7 +779,8 @@ func (s *Server) apiAdminCreateInvite(w http.ResponseWriter, r *http.Request) {
 	}
 	s.audit(r, "invite.create", b.Role, map[string]any{"note": b.Note, "expires_at": exp})
 	writeJSON(w, http.StatusOK, map[string]any{
-		"url":        s.cfg.Origin() + "/invite/" + tok,
+		// (By the way it was asked from: one made from outside opens from outside.)
+		"url":        s.originOf(r) + "/invite/" + tok,
 		"expires_at": exp,
 	})
 }

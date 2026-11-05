@@ -174,8 +174,13 @@ func (c *Config) SameSite(origin string) bool {
 // CORRAL_PUBLIC_URL is written, each another way to the same site. They
 // must use the public URL's scheme: the cookies' Secure attribute and the
 // __Host- prefix follow it, and a plain-HTTP way in beside an HTTPS one
-// would send the login in the clear.
-func parseExtraURLs(raw string, public *url.URL) ([]string, error) {
+// would send the login in the clear. Each is kept as the Origin a browser
+// sends for it (extraOrigin), or refused where that cannot be told for sure.
+// Not beside forwarded ports over plain HTTP (no __Host- cookie then: a
+// forwarded app could plant a login cookie the other way in would take),
+// nor under the forward domain (its names are forwarded ports' and VS
+// Code's, routed as theirs).
+func parseExtraURLs(raw string, public *url.URL, forwardDomain string) ([]string, error) {
 	var out []string
 	for _, s := range strings.Split(raw, ",") {
 		s = strings.TrimSpace(s)
@@ -183,23 +188,76 @@ func parseExtraURLs(raw string, public *url.URL) ([]string, error) {
 			continue
 		}
 		u, err := url.Parse(s)
-		if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.User != nil {
+		if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" || u.User != nil {
 			return nil, fmt.Errorf("CORRAL_EXTRA_URLS: each must be an absolute http(s) URL with no path, got %q", s)
 		}
 		if u.Scheme != public.Scheme {
 			return nil, fmt.Errorf("CORRAL_EXTRA_URLS: %q must use %s://, as CORRAL_PUBLIC_URL does", s, public.Scheme)
 		}
-		host := strings.ToLower(u.Host)
-		if p := u.Port(); (u.Scheme == "https" && p == "443") || (u.Scheme == "http" && p == "80") {
-			host = strings.TrimSuffix(host, ":"+p)
+		if forwardDomain != "" && u.Scheme != "https" {
+			return nil, fmt.Errorf("CORRAL_EXTRA_URLS over plain HTTP cannot be used with CORRAL_FORWARD_DOMAIN: " +
+				"without __Host- cookies a forwarded app could set the login another way in would take")
 		}
-		o := u.Scheme + "://" + host
+		o, host, err := extraOrigin(u)
+		if err != nil {
+			return nil, fmt.Errorf("CORRAL_EXTRA_URLS: %q: %w", s, err)
+		}
+		if forwardDomain != "" && (host == forwardDomain || strings.HasSuffix(host, "."+forwardDomain)) {
+			return nil, fmt.Errorf("CORRAL_EXTRA_URLS: %q is under CORRAL_FORWARD_DOMAIN (%s), whose names are forwarded ports'", s, forwardDomain)
+		}
 		if o == public.Scheme+"://"+public.Host || slices.Contains(out, o) {
 			continue
 		}
 		out = append(out, o)
 	}
 	return out, nil
+}
+
+var dnsName = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$`)
+
+// extraOrigin: the Origin a browser sends for u, and its host. An IP address
+// as browsers write it (IPv6 shortened, in brackets); a name in ASCII, lower
+// case — one in another script must be written as its xn-- form, as the
+// browser turns it into that and a lower-cased Unicode name may be another
+// name altogether; a name that browsers would read as an IPv4 address (all
+// digits last, or hex) refused; the port as a number, the scheme's default
+// left out.
+func extraOrigin(u *url.URL) (origin, host string, err error) {
+	h := u.Hostname()
+	if a, perr := netip.ParseAddr(h); perr == nil {
+		if a.Zone() != "" {
+			return "", "", errors.New("an IPv6 zone has no origin")
+		}
+		host = a.Unmap().String()
+		if a.Unmap().Is6() {
+			host = "[" + host + "]"
+		}
+	} else {
+		h = strings.TrimSuffix(h, ".")
+		for _, r := range h {
+			if r > 0x7f {
+				return "", "", errors.New("write the name in its ASCII (xn--) form")
+			}
+		}
+		h = strings.ToLower(h)
+		labels := strings.Split(h, ".")
+		last := labels[len(labels)-1]
+		if !dnsName.MatchString(h) || strings.Trim(last, "0123456789") == "" || strings.HasPrefix(last, "0x") {
+			return "", "", errors.New("not a host name (or one a browser reads as an IPv4 address)")
+		}
+		host = h
+	}
+	bare := strings.Trim(host, "[]")
+	if p := u.Port(); p != "" {
+		n, perr := strconv.Atoi(p)
+		if perr != nil || n < 1 || n > 65535 {
+			return "", "", fmt.Errorf("bad port %q", p)
+		}
+		if !(u.Scheme == "https" && n == 443) && !(u.Scheme == "http" && n == 80) {
+			host += ":" + strconv.Itoa(n)
+		}
+	}
+	return u.Scheme + "://" + host, bare, nil
 }
 
 const (
@@ -233,7 +291,7 @@ func Load() (*Config, error) {
 		host = strings.TrimSuffix(host, ":"+p)
 	}
 	c.PublicURL = &url.URL{Scheme: u.Scheme, Host: host}
-	if c.ExtraOrigins, err = parseExtraURLs(env("CORRAL_EXTRA_URLS", ""), c.PublicURL); err != nil {
+	if c.ExtraOrigins, err = parseExtraURLs(env("CORRAL_EXTRA_URLS", ""), c.PublicURL, c.ForwardDomain); err != nil {
 		return nil, err
 	}
 	// Forwarded ports are sibling subdomains that run arbitrary apps. Only the

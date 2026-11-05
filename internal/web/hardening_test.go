@@ -423,6 +423,13 @@ func TestExtraOriginsAreTheSameSite(t *testing.T) {
 	}
 	ok := *a
 	ok.extra = map[string]string{"Origin": extra}
+	// (An invite made from the other way in: its link opens there.)
+	if r := ok.do("POST", "/api/admin/invites", map[string]any{"role": "member"}); r.Status != 200 || !strings.Contains(string(r.Body), `"url":"`+extra+`/invite/`) {
+		t.Errorf("invite from %s: %d %s", extra, r.Status, r.Body)
+	}
+	if r := a.do("POST", "/api/admin/invites", map[string]any{"role": "member"}); !strings.Contains(string(r.Body), `"url":"`+h.cfg.Origin()+`/invite/`) {
+		t.Errorf("invite from the public URL: %s", r.Body)
+	}
 	if r := ok.do("POST", "/api/logout", nil); r.Status >= 300 {
 		t.Errorf("logout from %s: %d", extra, r.Status)
 	}
