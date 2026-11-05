@@ -345,8 +345,19 @@ function paintChrome() {
   document.querySelectorAll('meta[name="theme-color"]').forEach((m) => m.setAttribute('content', c))
 }
 
+// (Which theme was last put on: the transitions held off only as it changes.)
+let themeOn = ''
 export function applyTheme() {
   const root = document.documentElement
+  const now = state.theme + (media.matches ? ':dark' : ':light')
+  if (themeOn && now !== themeOn) {
+    // Recoloured in one frame: the controls' colour transitions held off
+    // until it is drawn (two frames: the terminal's colours come with the
+    // render after), else they trail the page by 0.12s — motion-1105.
+    root.classList.add('theme-switching')
+    requestAnimationFrame(() => requestAnimationFrame(() => root.classList.remove('theme-switching')))
+  }
+  themeOn = now
   if (state.theme === 'system') root.removeAttribute('data-theme')
   else root.setAttribute('data-theme', state.theme)
   paintChrome()

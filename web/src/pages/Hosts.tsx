@@ -5,6 +5,7 @@ import { relTime, t } from '../i18n'
 import { linkHandler, navigate } from '../router'
 import { Confirm, EmptyState, LoadError, Menu } from '../components/ui'
 import { useConnect } from '../connect'
+import { useFlip } from '../flip'
 import { useSession } from '../app'
 import { useCode } from '../terminal/CodeDialog'
 import { noteSessions, sessionAgents, waitingAgents } from '../terminal/agents'
@@ -141,10 +142,15 @@ export function HostsPage() {
   const shownHosts = (hosts ?? [])
     .filter((h) => !needle || [h.name, h.address, h.username].some((x) => x.toLowerCase().includes(needle)))
     .sort((a, b) => (order === 'recent' ? b.last_connected_at - a.last_connected_at : 0) || a.name.localeCompare(b.name) || a.id - b.id)
+  // A session opened or closed elsewhere, come in by the poll: what is under
+  // it slides to its place, the new row fading in (motion-1105). Not for a
+  // search or a sort, the person's own.
+  const pageEl = useRef<HTMLElement>(null)
+  useFlip(pageEl, needle + '|' + order)
   // Others' sessions this user may watch: under the running ones, not past
   // all the hosts (pages-1105 2.6) — and shown with no host of one's own too.
   const sharedSection = (
-        <section className="section shared-sessions">
+        <section className="section shared-sessions" data-flip="shared">
           <h2>{t('watch.sharedTitle')}</h2>
           {sharedFailed && <LoadError text={t('watch.sharedFailed')} onRetry={() => void refreshSessions()} />}
           <ul className="rows">
@@ -162,7 +168,7 @@ export function HostsPage() {
         </section>
   )
   return (
-    <main className="page">
+    <main className="page" ref={pageEl}>
       <div className="page-head">
         <h1>{t('hosts.title')}</h1>
         <div className="spacer" />
@@ -180,7 +186,7 @@ export function HostsPage() {
 
       {running.length > 0 && (
         <section className="section live" aria-labelledby="live-title">
-          <h2 id="live-title">{t('hosts.running')}<span className="section-n">{running.length}</span></h2>
+          <h2 id="live-title" data-flip="live" data-flip-in="">{t('hosts.running')}<span className="section-n">{running.length}</span></h2>
           <ul className="live-rows">
             {running.map((s) => (
               <LiveCard key={s.id} s={s} all={running} stale={sessFailed} onClose={(label) => closeSession(s, label)} />
@@ -206,7 +212,7 @@ export function HostsPage() {
       )}
       {!empty && (shared.length > 0 || sharedFailed) && sharedSection}
       {hosts && hosts.length > 0 && (
-        <section className="section">
+        <section className="section" data-flip="hosts">
           {(running.length > 0 || shared.length > 0) && <h2>{t('hosts.all')}<span className="section-n">{hosts.length}</span></h2>}
           {findable && (
             <div className="page-tools">
@@ -328,7 +334,7 @@ function LiveCard({ s, all, stale, onClose }: { s: SessionInfo; all: SessionInfo
   const label = `${which}${s.title ? ' · ' + s.title : ''}`
   const dot = unknown ? 'unknown' : waiting > 0 ? 'warn' : 'ok'
   return (
-    <li className="live-row">
+    <li className="live-row" data-flip={'l:' + s.id} data-flip-in="">
       <a className="live-link" href={'/t/' + s.id} onClick={linkHandler('/t/' + s.id)} aria-label={`${s.host_name}：${label}`} aria-describedby={'ld-' + s.id} title={s.title || undefined}>
         <span className="live-info">
           <span className="live-title">

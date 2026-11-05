@@ -103,7 +103,8 @@ code, .mono { font-family: var(--font-mono); font-size: 0.9em; }
 .spacer { flex: 1; }
 
 .btn, .icon-btn, .row-main, .nav-item, .kb-key, .seg button, .menu-item {
-  transition: background-color 0.12s var(--ease), color 0.12s var(--ease), box-shadow 0.12s var(--ease);
+  /* (Not the shadow: a focus ring is one, and it shows at once — motion-1105.) */
+  transition: background-color 0.12s var(--ease), color 0.12s var(--ease);
 }
 
 /* Shell: sidebar on desktop, icon rail on tablets, bottom tabs on phones --- */
@@ -462,7 +463,11 @@ html.term-mode .toasts { top: calc(env(safe-area-inset-top, 0px) + 52px); bottom
 @keyframes fade { from { opacity: 0; } }
 @keyframes rise { from { transform: translateY(10px); opacity: 0; } }
 @keyframes pop { from { opacity: 0; transform: scale(0.98) translateY(-2px); } }
-@media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+/* (Pseudo-elements too: "*" alone leaves them, and a switch's knob is one — motion-1105.) */
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+/* A theme put on: the whole page recoloured in one frame, its controls with
+   it, not trailing it by their colour transitions (prefs.ts applyTheme). */
+html.theme-switching *, html.theme-switching *::before, html.theme-switching *::after { transition: none !important; }
 
 /* Audit */
 .audit-table { width: 100%; border-collapse: collapse; font-size: 13px; table-layout: fixed; }

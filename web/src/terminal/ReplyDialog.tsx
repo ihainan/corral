@@ -519,7 +519,28 @@ function fromLog(call: ConvoTool | undefined, screen: string): { kind: 'run' | '
 // pending: the agent's last call not come back, whatever it is — what a
 // permission asks of, drawn from the log where the screen does not show its
 // start (fromLog).
+// A question's card fades in once, as it comes (motion-1105): the one thing
+// on the page that waits for the person. Once a question (its agent, and
+// the call asking where the log says) — not again as its screen is read
+// anew, its card is drawn another way, or it is gone back to.
+const asksSeen = new Set<string>()
+function useFreshAsk(id: string): boolean {
+  const [at, setAt] = useState(() => ({ id, fresh: !asksSeen.has(id) }))
+  // (Another question in the same card: it fades in as it comes. Not the
+  // same one told apart only now, its call found in the log after the card
+  // came: it faded in already.)
+  if (at.id !== id) setAt({ id, fresh: !asksSeen.has(id) && !at.id.endsWith('|') })
+  useEffect(() => {
+    asksSeen.add(id)
+    if (!at.fresh) return
+    const timer = setTimeout(() => setAt((a) => (a.id === id ? { id, fresh: false } : a)), 400) // (past its fade: a card drawn anew does not fade again)
+    return () => clearTimeout(timer)
+  }, [id, at.fresh])
+  return at.id === id && at.fresh
+}
+
 export function InlineReply({ target, onLoaded, resizedAt, active = true, held, call, pending, onAnswered }: { target: ReplyTarget; onLoaded?: () => void; resizedAt?: number; active?: boolean; held?: () => boolean; call?: ConvoTool; pending?: ConvoTool; onAnswered?: (yes: boolean) => void }) {
+  const fresh = useFreshAsk(target.key + '|' + (call?.id ?? pending?.id ?? ''))
   const [sent, setSent] = useState<string | null>(null) // (the screen answered)
   const answeredRef = useRef(onAnswered)
   answeredRef.current = onAnswered
@@ -679,7 +700,7 @@ export function InlineReply({ target, onLoaded, resizedAt, active = true, held, 
   if (sent !== null) return <p className="convo-ask-sent" role="status">{t('convo.answeredHere')}</p>
   if (structured && screen && (asking || state.kind === 'review')) {
     return (
-      <div className="convo-ask" role="group" aria-label={waiting} aria-busy={busy}>
+      <div className={'convo-ask' + (fresh ? ' is-new' : '')} role="group" aria-label={waiting} aria-busy={busy}>
         {state.kind === 'question' && asking ? (
           <AskPanel key={(asking.id ?? '') + ':' + askAt} call={asking} index={askAt} shown={state} target={target} drive={driven.drive} busy={busy} alive={stillHere} lead={lead} />
         ) : state.kind === 'review' ? (
@@ -718,7 +739,7 @@ export function InlineReply({ target, onLoaded, resizedAt, active = true, held, 
       ? codexOptions(opts.map((o) => o.label)).map((c, i) => ({ ...opts[i], ...c, ...(/^None of the above$/i.test(c.label) ? { desc: t('convo.askNotes') } : {}) }))
       : opts
   return (
-    <div className="convo-ask" role="group" aria-label={waiting} ref={cardRef} onPointerDown={arm} onFocus={arm}>
+    <div className={'convo-ask' + (fresh ? ' is-new' : '')} role="group" aria-label={waiting} ref={cardRef} onPointerDown={arm} onFocus={arm}>
       <div className="convo-ask-q">{shownQ || waiting}</div>
       {cx?.kind === 'question' && cx.total > 1 && <p className="convo-ask-of">{t('convo.askQuestionOf', { i: cx.index, n: cx.total })}</p>}
       {driven.unsure && <p className="reply-changed" role="alert">{t('ask.unsure')}</p>}

@@ -1654,3 +1654,14 @@ html.kb-open .convo-runs .convo-runs-pop.is-sheet { padding-bottom: 16px; }
 .ask-hook-hint { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
 .ask-hook-hint .convo-ask-more { margin: 0; }
 .convo-ask .ask-hook-snippet { border-color: var(--term-line); background: var(--term-key-active); color: var(--term-fg); }
+
+/* Entrances (motion-1105): the agents' picker, the composer's pop-ups and the
+   phone's shortcut panel come in as the app's other layers do — a menu's
+   pop, a sheet's rise from below; the latest pill and a question's card
+   (the first time it is shown: ReplyDialog useFreshAsk) fade in. All shut
+   at once, as the others do. */
+.convo-picker, .convo-runs-pop { animation: pop 0.14s var(--ease); }
+.convo-runs .convo-runs-pop.is-sheet, .sc-panel { animation: rise 0.2s var(--ease); }
+@media (max-width: 640px) { .convo-picker { animation: rise 0.2s var(--ease); } }
+.convo-latest { animation: fade 0.1s var(--ease); }
+.convo-ask.is-new { animation: fade 0.16s var(--ease); }

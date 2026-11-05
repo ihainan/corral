@@ -6,6 +6,7 @@ import { asHeld, dayStart, FOLDED, foldAt, GROUPS, inGroup, listOrder, pinned, t
 import { copyText, Dialog, isCoarse, Menu, MenuLayer, type MenuItem } from '../components/ui'
 import { composing, foldAllKey, helpKey, jumpKey, onMac, sideKey, switchKey } from './pageKeys'
 import { keepNames, keptNames, local } from '../storage'
+import { useFlip } from '../flip'
 import { CodeSpanOf, FileLinkOf, Markdown } from './markdown'
 import { codePath } from './paths'
 import { useSubConvo } from './subagent'
@@ -2395,6 +2396,8 @@ function AgentList({ rows, menus, onPicked, placed, query: given, onQuery, searc
   // a tap).
   // (Groups opened out stay so as another agent is gone to, and across a reload: SIDE_OPEN_KEY.)
   const [open, setOpenNow] = useState<string[]>(() => keptNames(SIDE_OPEN_KEY))
+  // (Rows regrouped by a poll slide to their place; a search's are its own — useFlip.)
+  const groupsEl = useRef<HTMLDivElement>(null)
   const setOpen = (f: (o: string[]) => string[]) =>
     setOpenNow((o) => {
       const now = f(o)
@@ -2406,6 +2409,8 @@ function AgentList({ rows, menus, onPicked, placed, query: given, onQuery, searc
   const [own, setOwn] = useState('')
   const query = given ?? own
   const setQuery = onQuery ?? setOwn
+  // (Not a group opened or shut by a tap, nor a search typed: the change is the person's own.)
+  useFlip(groupsEl, query.trim() + '|' + open.join())
   // (Held as it was when the switcher opened: its status and time; whether it
   // is pinned, as it is now, another tab or device may change it meanwhile.)
   const at = (r: ConvoListRow) => {
@@ -2431,6 +2436,7 @@ function AgentList({ rows, menus, onPicked, placed, query: given, onQuery, searc
     <>
       {(rows.length > SEARCH_FROM || query || !!search || showSearch) && <ListSearch value={query} onChange={setQuery} focus={search} onLeft={onSearchLeft} hint={hint ? KEY_SEARCH : undefined} />}
       {query.trim() && !found.length && <p className="list-search-none">{t('convo.searchNone')}</p>}
+      <div className="convo-list-groups" ref={groupsEl}>
       {groups.map((g) => {
         const all = g.of.map((p) => rows.find((r) => r.key === p.key)!)
         if (!all.length) return null
@@ -2445,7 +2451,7 @@ function AgentList({ rows, menus, onPicked, placed, query: given, onQuery, searc
         const folds = shut && rest > 0
         return (
           <div key={g.name} className="convo-list-group" role="group" aria-label={t(g.name)}>
-            <div className="convo-list-head">
+            <div className="convo-list-head" data-flip={'g:' + g.name} data-flip-fade="">
               {t(g.name)}
               <span>{all.length}</span>
             </div>
@@ -2457,6 +2463,7 @@ function AgentList({ rows, menus, onPicked, placed, query: given, onQuery, searc
               return (
                 <div
                   key={r.key}
+                  data-flip={'r:' + r.key}
                   className={'convo-list-item' + (hasMenu ? ' has-menu' : '') + (rowMenu?.key === r.key ? ' is-menu' : '')}
                   onContextMenu={
                     hasMenu
@@ -2531,6 +2538,7 @@ function AgentList({ rows, menus, onPicked, placed, query: given, onQuery, searc
               <button
                 type="button"
                 className="convo-list-more"
+                data-flip={'m:' + g.name}
                 aria-expanded={!folds}
                 onClick={() => setOpen((o) => (folds ? [...o, g.name] : o.filter((n) => n !== g.name)))}
               >
@@ -2540,6 +2548,7 @@ function AgentList({ rows, menus, onPicked, placed, query: given, onQuery, searc
           </div>
         )
       })}
+      </div>
       {rowMenu && menuRow && (
         <MenuLayer label={t('convo.rowMenu', { name: menuRow.title })} anchor={rowMenu.anchor} at={rowMenu.at} sheet={rowMenu.sheet} trigger={menuTrigger} items={menuItems(menuRow)} onClose={closeMenu} />
       )}
@@ -4109,7 +4118,7 @@ function ChangesPanel({ edits, focus, onClose, active, onCopy }: { edits: Edits;
       </div>
       <div className="convo-panel-files">
         {edits.files.map((f) => (
-          <button key={f.path} type="button" className="convo-changes-file" onClick={() => box.current?.querySelector(`[data-file="${CSS.escape(f.path)}"]`)?.scrollIntoView({ block: 'start', behavior: 'smooth' })} title={f.path}>
+          <button key={f.path} type="button" className="convo-changes-file" onClick={() => box.current?.querySelector(`[data-file="${CSS.escape(f.path)}"]`)?.scrollIntoView({ block: 'start', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' })} title={f.path}>
             <span className="convo-changes-path">{shortPath(f.path)}</span>
             <LineCounts add={f.add} del={f.del} />
           </button>
