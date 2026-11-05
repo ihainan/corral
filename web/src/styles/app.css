@@ -967,15 +967,15 @@ details.adv > .form { margin-top: 16px; }
 }
 /* A recording's row (11-05): host, how long (or recording, red), when — columns; a phone: when under the host. */
 .row-main.rec-row { grid-template-columns: minmax(0, 1fr) 128px 48px; column-gap: 16px; }
-.rec-row > .row-title, .rec-row > .row-sub { grid-column: 1; }
-.rec-row > .rec-len { grid-column: 2; grid-row: 1 / span 2; align-self: center; font-size: var(--fs-ui); font-weight: 500; color: var(--fg); }
-.rec-row > .rec-len.is-live { color: var(--danger); }
-.rec-row > .row-meta { grid-column: 3; grid-row: 1 / span 2; align-self: center; justify-self: end; font-size: var(--fs-sub); color: var(--fg-2); }
+.row-main.rec-row > .row-title, .row-main.rec-row > .row-sub { grid-column: 1; }
+.row-main.rec-row > .rec-len { grid-column: 2; grid-row: 1 / span 2; align-self: center; font-size: var(--fs-ui); font-weight: 500; color: var(--fg); }
+.row-main.rec-row > .rec-len.is-live { color: var(--danger); }
+.row-main.rec-row > .row-meta { grid-column: 3; grid-row: 1 / span 2; align-self: center; justify-self: end; font-size: var(--fs-sub); color: var(--fg-2); }
 .rec-time-inline { display: none; }
 @media (max-width: 599px) {
   .row-main.rec-row { grid-template-columns: minmax(0, 1fr) auto; }
-  .rec-row > .rec-len { grid-row: 1; align-self: start; }
-  .rec-row > .row-meta { display: none; }
+  .row-main.rec-row > .rec-len { grid-row: 1; align-self: start; }
+  .row-main.rec-row > .row-meta { display: none; }
   .rec-time-inline { display: inline; }
 }
 /* A form's second group (a host's sign-in, after where it is): a little further off (11-05). */
