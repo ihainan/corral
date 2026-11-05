@@ -5,7 +5,7 @@ import { api } from '../api'
 import { asHeld, dayStart, FOLDED, foldAt, GROUPS, inGroup, listOrder, pinned, type ConvoListRow, type RowCmds } from './agentOrder'
 import { copyText, Dialog, isCoarse, Menu, MenuLayer, type MenuItem } from '../components/ui'
 import { composing, foldAllKey, helpKey, jumpKey, onMac, switchKey } from './pageKeys'
-import { local } from '../storage'
+import { keepNames, keptNames, local } from '../storage'
 import { CodeSpanOf, FileLinkOf, Markdown } from './markdown'
 import { codePath } from './paths'
 import { useSubConvo } from './subagent'
@@ -2288,7 +2288,9 @@ function stamp(r: ConvoListRow, now: number): string {
 // the focus put in it; onSearchLeft: the box left, empty (shown by the
 // count again); hint: the key that asks for it, said in the box.
 // (showSearch: shown whatever the count, the focus left to who opened it.)
-let sideOpen: string[] = [] // (the side list's groups of old ones opened out, for the page's life)
+// The side list's groups of old ones opened out: kept on this device, so a
+// reload keeps them so.
+const SIDE_OPEN_KEY = 'corral.convo.sideOpen'
 
 function AgentList({ rows, menus, onPicked, placed, query: given, onQuery, search, showSearch, onSearchLeft, hint }: { rows: ConvoListRow[]; menus?: boolean; onPicked?: () => void; placed?: Map<string, ConvoListRow>; query?: string; onQuery?: (q: string) => void; search?: number; showSearch?: boolean; onSearchLeft?: () => void; hint?: boolean }) {
   // Its rows' menu (menus: the side list's; the switcher's rows have none):
@@ -2368,10 +2370,15 @@ function AgentList({ rows, menus, onPicked, placed, query: given, onQuery, searc
     return () => clearInterval(timer)
   }, [])
   // Which of the long groups are opened out (by their name; shut again at
-  // a tap, and shut when the list is drawn anew).
-  // (Groups opened out stay so as another agent is gone to: the list is drawn anew with each, as the phone's keeps it — oldOpen.)
-  const [open, setOpenNow] = useState<string[]>(() => sideOpen)
-  const setOpen = (f: (o: string[]) => string[]) => setOpenNow((o) => (sideOpen = f(o)))
+  // a tap).
+  // (Groups opened out stay so as another agent is gone to, and across a reload: SIDE_OPEN_KEY.)
+  const [open, setOpenNow] = useState<string[]>(() => keptNames(SIDE_OPEN_KEY))
+  const setOpen = (f: (o: string[]) => string[]) =>
+    setOpenNow((o) => {
+      const now = f(o)
+      keepNames(SIDE_OPEN_KEY, now)
+      return now
+    })
   // What it is searched for (by its title, where it is, its program): the
   // rest goes, and no group is folded.
   const [own, setOwn] = useState('')

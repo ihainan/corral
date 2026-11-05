@@ -49,3 +49,15 @@ export const session = {
     }
   },
 }
+
+// A list of names kept on this device (as JSON): none when unset, unreadable,
+// or not a list of strings.
+export function keptNames(key: string): string[] {
+  try {
+    const v: unknown = JSON.parse(local.get(key) ?? '[]')
+    return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []
+  } catch {
+    return []
+  }
+}
+export const keepNames = (key: string, names: string[]) => local.set(key, JSON.stringify(names))

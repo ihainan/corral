@@ -5,7 +5,7 @@ import { t, type I18nKey } from '../i18n'
 import { navigate, onNavigate } from '../router'
 import { heldOpen, onHeldOpen, onOpenRequest, takeHeld } from '../notifyopen'
 import { isDark, maxPinned, setChromeColor, setPrefs, usePrefs } from '../prefs'
-import { local } from '../storage'
+import { keepNames, keptNames, local } from '../storage'
 import { CLOSE_MENUS, Confirm, copyText, Menu, useToast, type MenuItem } from '../components/ui'
 import { chromeVars, corralDark, corralLight } from '../terminal/themes'
 import { HostHistoryDialog } from '../terminal/hostHistory'
@@ -2298,7 +2298,9 @@ function fitLine(el: HTMLElement | null, width: number, make: (name: string) => 
 // past a few of each of their groups, as there: a line where the rest of
 // the group would be, opened and shut by the group, as there.
 let listScroll = 0
-let oldOpen: string[] = [] // (the groups of old ones opened out: still so, back from a conversation)
+// (The groups of old ones opened out: still so, back from a conversation and
+// after a reload — kept on this device.)
+const OPEN_KEY = 'corral.agents.open'
 // An agent as the side list places it (its status, its time, pinned):
 // keyed by the session too, as the phone's list tells them.
 const asRow = (e: Entry, pins: string[]): ConvoListRow => {
@@ -2397,12 +2399,17 @@ function PhoneList({ entries, all, titles, query, onQuery, onPick, unsentOf }: {
     const d = !pins.includes(e.key) && foldOf.get(e.key + ' ' + e.s.id) // (pinned since: first, never folded)
     if (d) days.set(d, [...(days.get(d) ?? []), e])
   }
-  const [open, setOpen] = useState(oldOpen)
+  const [open, setOpen] = useState(() => keptNames(OPEN_KEY))
   const long = query.trim() ? [] : [...days].filter(([, of]) => of.length > foldAt)
   const hidden = new Set(long.flatMap(([d, of]) => (open.includes(d) ? [] : of.slice(foldAt))))
   // (Its line: after the last row shown of its group.)
   const lineAfter = new Map(long.map(([d, of]) => [open.includes(d) ? of[of.length - 1] : of[foldAt - 1], { d, n: of.length - foldAt }]))
-  const fold = (d: string) => setOpen((o) => (oldOpen = o.includes(d) ? o.filter((x) => x !== d) : [...o, d]))
+  const fold = (d: string) =>
+    setOpen((o) => {
+      const now = o.includes(d) ? o.filter((x) => x !== d) : [...o, d]
+      keepNames(OPEN_KEY, now)
+      return now
+    })
   return (
     <div className="agents-list" ref={box}>
       <div className="agents-list-top">
