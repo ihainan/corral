@@ -31,8 +31,9 @@ const ours = (el: HTMLElement) => el.getAnimations().filter((a) => a.id === FLIP
 // height, not its own (a long list's box is all of it, mostly out of sight).
 function seenHeight(root: HTMLElement): number {
   for (let e: HTMLElement | null = root; e; e = e.parentElement) {
+    // (A scroller, whether it has more than it shows now or not: a list grown short is still seen through it — review2.)
     const o = getComputedStyle(e).overflowY
-    if ((o === 'auto' || o === 'scroll') && e.scrollHeight > e.clientHeight) return Math.min(e.clientHeight, window.innerHeight)
+    if (o === 'auto' || o === 'scroll') return Math.min(e.clientHeight, window.innerHeight)
   }
   return window.innerHeight
 }

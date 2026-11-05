@@ -2115,7 +2115,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       ask={
         waits && replyTo ? (
           // (One a pane, and a process in it: nothing of another's carries over. Not tied to a terminal: no size to wait for.)
-          <InlineReply key={replyTo.key} target={replyTo} resizedAt={0} active={active} held={() => false} call={asked} pending={pendingCall} onAnswered={setAnswered} />
+          <InlineReply key={replyTo.key} target={replyTo} resizedAt={0} active={active} held={() => false} call={asked} pending={pendingCall} onAnswered={setAnswered} waitSince={cur.row && !cur.row.lost && cur.row.a.since ? cur.row.a.since : undefined} />
         ) : undefined
       }
       // (The bar's stop only where the box's one is not there: words or files
