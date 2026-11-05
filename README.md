@@ -259,6 +259,7 @@ All settings are environment variables. Only the first two are required.
 | Variable | Default | Meaning |
 |---|---|---|
 | `CORRAL_PUBLIC_URL` | (required) | The URL users open; used for origin checks and cookies |
+| `CORRAL_EXTRA_URLS` | — | More URLs for the same site, comma-separated (say, an outside domain beside an inside one), same scheme as the public URL; they pass the origin checks too. Links the server makes (invites, forwarded ports) still use `CORRAL_PUBLIC_URL`, and each domain has its own sign-in |
 | `CORRAL_MASTER_KEY` / `CORRAL_MASTER_KEY_FILE` | (required) | 32 random bytes, base64 (`corral genkey`); encrypts stored credentials. The file wins if both are set |
 | `CORRAL_LISTEN` | `127.0.0.1:8080` (`0.0.0.0:8080` in the image) | Listen address |
 | `CORRAL_DATA_DIR` | `./data` (`/data` in the image) | Database and recordings |

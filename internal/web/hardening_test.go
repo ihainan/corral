@@ -400,3 +400,30 @@ func TestPushSubscriptionAcceptsExpirationTime(t *testing.T) {
 		}
 	}
 }
+
+// Another way to the main site (CORRAL_EXTRA_URLS): its requests and its
+// WebSockets pass the same-site checks, and the page lets its scripts
+// connect to it; any other origin is still refused.
+func TestExtraOriginsAreTheSameSite(t *testing.T) {
+	const extra = "https://ssh.example.org"
+	h := newHarness(t, func(c *config.Config) { c.ExtraOrigins = []string{extra} })
+	a := h.admin()
+	res, err := http.Get(h.ts.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	if csp := res.Header.Get("Content-Security-Policy"); !strings.Contains(csp, "wss://ssh.example.org") || !strings.Contains(csp, wsOrigin(h.cfg.Origin())) {
+		t.Errorf("CSP: %q", csp)
+	}
+	evil := *a
+	evil.extra = map[string]string{"Origin": "https://evil.example"}
+	if r := evil.do("POST", "/api/logout", nil); r.Status != 403 {
+		t.Errorf("logout from another site: %d, want 403", r.Status)
+	}
+	ok := *a
+	ok.extra = map[string]string{"Origin": extra}
+	if r := ok.do("POST", "/api/logout", nil); r.Status >= 300 {
+		t.Errorf("logout from %s: %d", extra, r.Status)
+	}
+}

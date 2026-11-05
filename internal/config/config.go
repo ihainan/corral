@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -22,6 +23,11 @@ type Config struct {
 	Listen    string
 	DataDir   string
 	PublicURL *url.URL
+	// More URLs the same site is opened by (another domain for it, as one
+	// reached from outside while PublicURL is the inside one): their origins
+	// pass the same-site checks too. Links the server makes (invites, the
+	// setup link, forwarded ports, VS Code) still use PublicURL.
+	ExtraOrigins []string
 
 	MasterKey []byte
 
@@ -151,6 +157,51 @@ func (c *Config) SecureCookies() bool { return c.PublicURL.Scheme == "https" }
 // Origin is the exact Origin header browsers send for the main site.
 func (c *Config) Origin() string { return c.PublicURL.Scheme + "://" + c.PublicURL.Host }
 
+// Origins are all the origins the main site is opened by: PublicURL's first.
+func (c *Config) Origins() []string { return append([]string{c.Origin()}, c.ExtraOrigins...) }
+
+// SameSite reports whether an Origin header is one of the main site's.
+func (c *Config) SameSite(origin string) bool {
+	for _, o := range c.Origins() {
+		if origin == o {
+			return true
+		}
+	}
+	return false
+}
+
+// parseExtraURLs reads CORRAL_EXTRA_URLS: comma-separated absolute URLs, as
+// CORRAL_PUBLIC_URL is written, each another way to the same site. They
+// must use the public URL's scheme: the cookies' Secure attribute and the
+// __Host- prefix follow it, and a plain-HTTP way in beside an HTTPS one
+// would send the login in the clear.
+func parseExtraURLs(raw string, public *url.URL) ([]string, error) {
+	var out []string
+	for _, s := range strings.Split(raw, ",") {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			continue
+		}
+		u, err := url.Parse(s)
+		if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.User != nil {
+			return nil, fmt.Errorf("CORRAL_EXTRA_URLS: each must be an absolute http(s) URL with no path, got %q", s)
+		}
+		if u.Scheme != public.Scheme {
+			return nil, fmt.Errorf("CORRAL_EXTRA_URLS: %q must use %s://, as CORRAL_PUBLIC_URL does", s, public.Scheme)
+		}
+		host := strings.ToLower(u.Host)
+		if p := u.Port(); (u.Scheme == "https" && p == "443") || (u.Scheme == "http" && p == "80") {
+			host = strings.TrimSuffix(host, ":"+p)
+		}
+		o := u.Scheme + "://" + host
+		if o == public.Scheme+"://"+public.Host || slices.Contains(out, o) {
+			continue
+		}
+		out = append(out, o)
+	}
+	return out, nil
+}
+
 const (
 	defaultAllowed = "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7"
 	// Link-local (incl. cloud metadata), unspecified, multicast and broadcast are never useful SSH targets.
@@ -182,6 +233,9 @@ func Load() (*Config, error) {
 		host = strings.TrimSuffix(host, ":"+p)
 	}
 	c.PublicURL = &url.URL{Scheme: u.Scheme, Host: host}
+	if c.ExtraOrigins, err = parseExtraURLs(env("CORRAL_EXTRA_URLS", ""), c.PublicURL); err != nil {
+		return nil, err
+	}
 	// Forwarded ports are sibling subdomains that run arbitrary apps. Only the
 	// __Host- cookie prefix, which needs HTTPS, stops one from planting a login
 	// cookie for the parent domain that the main site would then accept.

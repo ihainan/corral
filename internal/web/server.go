@@ -378,9 +378,9 @@ func (s *Server) sameOrigin(r *http.Request) bool {
 	origin := r.Header.Get("Origin")
 	isUpgrade := strings.EqualFold(r.Header.Get("Upgrade"), "websocket")
 	if (r.Method == http.MethodGet || r.Method == http.MethodHead) && !isUpgrade {
-		return origin == "" || origin == s.cfg.Origin()
+		return origin == "" || s.cfg.SameSite(origin)
 	}
-	return origin == s.cfg.Origin()
+	return s.cfg.SameSite(origin)
 }
 
 func (s *Server) cookieName() string {
@@ -449,7 +449,7 @@ func (s *Server) trusted(a netip.Addr) bool {
 
 func (s *Server) withHeaders(next http.Handler) http.Handler {
 	csp := "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; " +
-		"font-src 'self' data:; connect-src 'self' " + wsOrigin(s.cfg.Origin()) + "; worker-src 'self'; manifest-src 'self'; " +
+		"font-src 'self' data:; connect-src 'self' " + wsOrigins(s.cfg.Origins()) + "; worker-src 'self'; manifest-src 'self'; " +
 		"frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'"
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
@@ -463,6 +463,15 @@ func (s *Server) withHeaders(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// wsOrigins: the WebSocket origins of every way to the site, space-separated.
+func wsOrigins(origins []string) string {
+	ws := make([]string, len(origins))
+	for i, o := range origins {
+		ws[i] = wsOrigin(o)
+	}
+	return strings.Join(ws, " ")
 }
 
 func wsOrigin(origin string) string {

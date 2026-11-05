@@ -137,3 +137,36 @@ func TestPublicURLDefaultPortIsDropped(t *testing.T) {
 		}
 	}
 }
+
+// CORRAL_EXTRA_URLS: more ways to the same site, written as the public URL
+// is; same scheme only, the default port dropped, the public one and repeats
+// left out.
+func TestExtraURLs(t *testing.T) {
+	t.Setenv("CORRAL_MASTER_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	t.Setenv("CORRAL_FORWARD_DOMAIN", "")
+	t.Setenv("CORRAL_PUBLIC_URL", "https://ssh.inner.example.com")
+	t.Setenv("CORRAL_EXTRA_URLS", " https://SSH.example.com:443/ , https://ssh.inner.example.com,https://ssh.example.com, https://alt.example.com:8443")
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"https://ssh.inner.example.com", "https://ssh.example.com", "https://alt.example.com:8443"}
+	if got := c.Origins(); strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Fatalf("origins %q, want %q", got, want)
+	}
+	for o, ok := range map[string]bool{"https://ssh.example.com": true, "https://ssh.inner.example.com": true, "http://ssh.example.com": false, "https://evil.example.com": false, "": false} {
+		if c.SameSite(o) != ok {
+			t.Errorf("SameSite(%q) = %v", o, !ok)
+		}
+	}
+	for _, bad := range []string{"http://ssh.example.com", "ssh.example.com", "https://ssh.example.com/path", "https://u@ssh.example.com", "https://ssh.example.com/?a=1"} {
+		t.Setenv("CORRAL_EXTRA_URLS", bad)
+		if _, err := Load(); err == nil {
+			t.Errorf("%q: accepted", bad)
+		}
+	}
+	t.Setenv("CORRAL_EXTRA_URLS", "")
+	if c, err := Load(); err != nil || len(c.Origins()) != 1 {
+		t.Fatalf("none: %v %v", c, err)
+	}
+}
