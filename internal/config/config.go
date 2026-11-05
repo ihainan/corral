@@ -228,26 +228,33 @@ func extraOrigin(u *url.URL) (origin, host string, err error) {
 		if a.Zone() != "" {
 			return "", "", errors.New("an IPv6 zone has no origin")
 		}
-		host = a.Unmap().String()
-		if a.Unmap().Is6() {
+		// (An IPv4 address within IPv6 is written another way by browsers
+		// than here: refused rather than taken for the IPv4 one — review2.)
+		if a.Is4In6() {
+			return "", "", errors.New("write an IPv4 address as IPv4")
+		}
+		host = a.String()
+		if a.Is6() {
 			host = "[" + host + "]"
 		}
 	} else {
-		h = strings.TrimSuffix(h, ".")
 		for _, r := range h {
 			if r > 0x7f {
 				return "", "", errors.New("write the name in its ASCII (xn--) form")
 			}
 		}
+		// (A name's final dot is kept: the browser keeps it in the origin,
+		// another origin than the name without it — review2.)
 		h = strings.ToLower(h)
-		labels := strings.Split(h, ".")
+		name := strings.TrimSuffix(h, ".")
+		labels := strings.Split(name, ".")
 		last := labels[len(labels)-1]
-		if !dnsName.MatchString(h) || strings.Trim(last, "0123456789") == "" || strings.HasPrefix(last, "0x") {
+		if !dnsName.MatchString(name) || strings.Trim(last, "0123456789") == "" || strings.HasPrefix(last, "0x") {
 			return "", "", errors.New("not a host name (or one a browser reads as an IPv4 address)")
 		}
 		host = h
 	}
-	bare := strings.Trim(host, "[]")
+	bare := strings.TrimSuffix(strings.Trim(host, "[]"), ".")
 	if p := u.Port(); p != "" {
 		n, perr := strconv.Atoi(p)
 		if perr != nil || n < 1 || n > 65535 {
