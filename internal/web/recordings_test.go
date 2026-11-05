@@ -1,7 +1,9 @@
 package web
 
 import (
+	"encoding/json"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -147,3 +149,70 @@ func TestStaleRecordingsAreFinished(t *testing.T) {
 		t.Fatalf("stale recording: %+v", rec)
 	}
 }
+
+// The list narrowed (pages-1105 3.1): by host and time for anyone, by owner
+// for an admin only — a member asking for another's sees their own still;
+// the choices are of what one may see, owners for an admin only.
+func TestRecordingListFilters(t *testing.T) {
+	h := newHarness(t, withRecording(t))
+	admin := h.admin()
+	bob := h.member(admin, "bob")
+	carol := h.member(admin, "carol")
+	bobID, carolID := h.userID(bob), h.userID(carol)
+	for _, r := range []store.Recording{
+		{ID: "r1", OwnerID: bobID, OwnerName: "bob", HostID: 7, HostName: "web", StartedAt: 1000, EndedAt: 1010},
+		{ID: "r2", OwnerID: bobID, OwnerName: "bob", HostID: 8, HostName: "db", StartedAt: 2000, EndedAt: 2010},
+		{ID: "r3", OwnerID: carolID, OwnerName: "carol", HostID: 7, HostName: "web", StartedAt: 3000, EndedAt: 3010},
+	} {
+		if err := h.store.CreateRecording(t.Context(), &r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ids := func(c *client, q string) string {
+		t.Helper()
+		out := ""
+		for _, x := range c.do("GET", "/api/recordings"+q, nil).json()["recordings"].([]any) {
+			out += x.(map[string]any)["id"].(string)
+		}
+		return out
+	}
+	for _, c := range []struct {
+		who  *client
+		q    string
+		want string
+	}{
+		{admin, "", "r3r2r1"},
+		{admin, "?host_id=7", "r3r1"},
+		{admin, "?owner_id=" + itoa(bobID), "r2r1"},
+		{admin, "?from=1500&to=3000", "r2"},
+		{bob, "?host_id=7", "r1"},
+		{carol, "?owner_id=" + itoa(bobID), "r3"}, // (not bob's: hers)
+	} {
+		if got := ids(c.who, c.q); got != c.want {
+			t.Errorf("%s: got %q, want %q", c.q, got, c.want)
+		}
+	}
+	j := carol.do("GET", "/api/recordings?choices=1", nil).json()
+	if hs := j["hosts"].([]any); len(hs) != 1 || j["owners"] != nil {
+		t.Fatalf("carol's choices: %v", j)
+	}
+	j = admin.do("GET", "/api/recordings?choices=1", nil).json()
+	if len(j["hosts"].([]any)) != 2 || len(j["owners"].([]any)) != 2 {
+		t.Fatalf("admin's choices: %v", j)
+	}
+	// The audit list's kinds: a known one, "other", an unknown one refused.
+	mustStatus(t, admin.do("GET", "/api/admin/audit?kind=account", nil), 200, "kind")
+	mustStatus(t, admin.do("GET", "/api/admin/audit?kind=other", nil), 200, "other")
+	mustStatus(t, admin.do("GET", "/api/admin/audit?kind=nope", nil), 400, "unknown kind")
+	var list []map[string]any
+	if err := json.Unmarshal(admin.do("GET", "/api/admin/audit?kind=account", nil).Body, &list); err != nil || len(list) == 0 {
+		t.Fatalf("account entries: %v %v", list, err)
+	}
+	for _, e := range list {
+		if a := e["action"].(string); !strings.HasPrefix(a, "login") && !strings.HasPrefix(a, "user") && !strings.HasPrefix(a, "logout") && !strings.HasPrefix(a, "setup") && !strings.HasPrefix(a, "invite") {
+			t.Errorf("account kind has %s", a)
+		}
+	}
+}
+
+func itoa(n int64) string { return strconv.FormatInt(n, 10) }

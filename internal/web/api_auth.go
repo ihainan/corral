@@ -784,6 +784,15 @@ func (s *Server) apiAdminCreateInvite(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// The kinds an audit list can be narrowed to, by the first part of an
+// action ("login" of "login.failed"). Anything else is "other".
+var auditKinds = map[string][]string{
+	"account":  {"login", "logout", "password", "totp", "user", "admin", "invite", "setup", "push"},
+	"hosts":    {"host", "hostkey", "credential"},
+	"sessions": {"session", "recording", "file", "forward", "code"},
+	"agents":   {"convo", "agents", "herdr"},
+}
+
 func (s *Server) apiAdminAudit(w http.ResponseWriter, r *http.Request) {
 	q := store.AuditQuery{Limit: 100}
 	if v := r.URL.Query().Get("before"); v != "" {
@@ -794,6 +803,33 @@ func (s *Server) apiAdminAudit(w http.ResponseWriter, r *http.Request) {
 	if v := r.URL.Query().Get("user"); v != "" {
 		if n, err := parseInt(v); err == nil {
 			q.UserID = &n
+			// (Their name too: a failed sign-in as them has no id — it is shown with theirs.)
+			if u, err := s.store.UserByID(r.Context(), n); err == nil {
+				q.Username = u.Username
+			}
+		}
+	}
+	// A kind of action (pages-1105 3.2): by its first part. "other" is all no
+	// kind takes in, so an action added later is never left out of every list.
+	switch k := r.URL.Query().Get("kind"); k {
+	case "":
+	case "other":
+		for _, heads := range auditKinds {
+			q.NotHeads = append(q.NotHeads, heads...)
+		}
+	default:
+		heads, ok := auditKinds[k]
+		if !ok {
+			writeError(w, http.StatusBadRequest, "invalid", "unknown kind")
+			return
+		}
+		q.Heads = heads
+	}
+	for k, p := range map[string]*int64{"from": &q.From, "to": &q.To} {
+		if v := r.URL.Query().Get(k); v != "" {
+			if n, err := parseInt(v); err == nil && n > 0 {
+				*p = n
+			}
 		}
 	}
 	entries, err := s.store.ListAudit(r.Context(), q)

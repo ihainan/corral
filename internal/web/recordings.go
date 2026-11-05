@@ -219,13 +219,37 @@ func (s *Server) apiListRecordings(w http.ResponseWriter, r *http.Request) {
 	if u.IsAdmin() {
 		owner = 0
 	}
-	before, _ := strconv.ParseInt(r.URL.Query().Get("before"), 10, 64)
-	list, err := s.store.ListRecordings(r.Context(), owner, before, r.URL.Query().Get("after_id"), 100)
+	qv := r.URL.Query()
+	num := func(k string) int64 {
+		n, _ := strconv.ParseInt(qv.Get(k), 10, 64)
+		return max(n, 0)
+	}
+	// Narrowed by host, by when it started ([from, to), the page's own days),
+	// and for an admin by owner; a member's are always their own, whatever
+	// is asked.
+	f := store.RecordingFilter{Owner: owner, Host: num("host_id"), From: num("from"), To: num("to")}
+	if u.IsAdmin() {
+		f.Owner = num("owner_id")
+	}
+	list, err := s.store.ListRecordings(r.Context(), f, num("before"), qv.Get("after_id"), 100)
 	if err != nil {
 		s.internalError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"recordings": list, "enabled": s.cfg.Recording, "days": s.cfg.RecordingDays})
+	out := map[string]any{"recordings": list, "enabled": s.cfg.Recording, "days": s.cfg.RecordingDays}
+	// (What it can be narrowed to: asked for with the first page.)
+	if qv.Get("choices") == "1" {
+		hosts, owners, err := s.store.RecordingChoices(r.Context(), owner)
+		if err != nil {
+			s.internalError(w, r, err)
+			return
+		}
+		out["hosts"] = hosts
+		if u.IsAdmin() {
+			out["owners"] = owners
+		}
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) apiGetRecording(w http.ResponseWriter, r *http.Request) {

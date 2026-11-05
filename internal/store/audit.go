@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"strings"
 )
 
 type AuditEntry struct {
@@ -34,9 +35,23 @@ func (s *Store) Audit(ctx context.Context, userID *int64, username, action, targ
 }
 
 type AuditQuery struct {
-	UserID   *int64
-	BeforeID int64
-	Limit    int
+	UserID *int64
+	// Username: with UserID, also the entries naming that user without an
+	// id — a failed sign-in as them, which is no one's yet.
+	Username string
+	// Heads: actions whose first part ("login" of "login.failed") is one of
+	// these; NotHeads: none of these (what no kind takes in).
+	Heads, NotHeads []string
+	From, To        int64 // [From, To), unix seconds; 0: no bound
+	BeforeID        int64
+	Limit           int
+}
+
+// (An action's first part: the whole of one with no dot.)
+const auditHead = `substr(action, 1, instr(action || '.', '.') - 1)`
+
+func placeholders(n int) string {
+	return strings.TrimSuffix(strings.Repeat("?, ", n), ", ")
 }
 
 func (s *Store) ListAudit(ctx context.Context, q AuditQuery) ([]*AuditEntry, error) {
@@ -46,8 +61,33 @@ func (s *Store) ListAudit(ctx context.Context, q AuditQuery) ([]*AuditEntry, err
 	sqlq := `SELECT id, ts, user_id, username, action, target, ip, detail FROM audit_log WHERE 1 = 1`
 	var args []any
 	if q.UserID != nil {
-		sqlq += ` AND user_id = ?`
-		args = append(args, *q.UserID)
+		if q.Username != "" {
+			sqlq += ` AND (user_id = ? OR (user_id IS NULL AND username = ?))`
+			args = append(args, *q.UserID, q.Username)
+		} else {
+			sqlq += ` AND user_id = ?`
+			args = append(args, *q.UserID)
+		}
+	}
+	if len(q.Heads) > 0 {
+		sqlq += ` AND ` + auditHead + ` IN (` + placeholders(len(q.Heads)) + `)`
+		for _, h := range q.Heads {
+			args = append(args, h)
+		}
+	}
+	if len(q.NotHeads) > 0 {
+		sqlq += ` AND ` + auditHead + ` NOT IN (` + placeholders(len(q.NotHeads)) + `)`
+		for _, h := range q.NotHeads {
+			args = append(args, h)
+		}
+	}
+	if q.From > 0 {
+		sqlq += ` AND ts >= ?`
+		args = append(args, q.From)
+	}
+	if q.To > 0 {
+		sqlq += ` AND ts < ?`
+		args = append(args, q.To)
 	}
 	if q.BeforeID > 0 {
 		sqlq += ` AND id < ?`

@@ -463,7 +463,7 @@ html.term-mode .toasts { top: calc(env(safe-area-inset-top, 0px) + 52px); bottom
 .audit-table th { text-align: left; font-size: 12px; font-weight: 500; color: var(--fg-3); padding: 8px; border-bottom: 1px solid var(--line); }
 .audit-table td { padding: 10px 8px; border-bottom: 1px solid var(--line); vertical-align: top; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .audit-table td.code { font-family: var(--font-mono); font-size: 12px; }
-.audit-table .detail { display: block; color: var(--fg-3); font-family: var(--font-mono); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; }
+.audit-table .detail { display: block; color: var(--fg-3); font-size: var(--fs-note); line-height: var(--lh-note); overflow: hidden; text-overflow: ellipsis; }
 .audit-list { display: none; }
 @media (max-width: 759.98px) {
   .audit-table { display: none; }
@@ -916,3 +916,10 @@ details.adv > .form { margin-top: 16px; }
   gap: 8px;
 }
 .key-acts { display: flex; flex-wrap: wrap; gap: 8px; }
+/* A list grouped by day (recordings, the audit log: pages-1105 3.x). */
+.day-group + .day-group { margin-top: var(--sp-5); }
+.day-head { font-size: var(--fs-sub); line-height: var(--lh-sub); font-weight: 600; color: var(--fg-2); margin: 0 0 var(--sp-1); }
+.rec-tools .select, .audit-tools .select { width: auto; flex: 0 1 auto; min-width: 0; max-width: 100%; }
+.audit-table .audit-day th { padding-top: var(--sp-4); font-size: var(--fs-sub); line-height: var(--lh-sub); font-weight: 600; color: var(--fg-2); text-align: left; border-bottom: 1px solid var(--line); }
+.audit-table tbody:first-of-type .audit-day th { padding-top: var(--sp-2); }
+@media (max-width: 599px) { .rec-tools .select, .audit-tools .select { flex: 1 1 0; padding-left: 10px; padding-right: 28px; background-position: right 8px center; } }

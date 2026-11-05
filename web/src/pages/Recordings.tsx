@@ -11,7 +11,7 @@ import { chromeVars } from '../terminal/themes'
 import { formatSize } from '../terminal/FilesDialog'
 import { Confirm, EmptyState, LoadError, Menu, isCoarse, useToast } from '../components/ui'
 import { local } from '../storage'
-import { durationText, whenText } from './pageText'
+import { byDay, clockText, durationText, spanFrom, type DaySpan } from './pageText'
 
 const FONT_STACK = "'JetBrains Mono', 'SFMono-Regular', Menlo, Consolas, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', monospace"
 
@@ -23,13 +23,19 @@ export function formatDuration(secs: number): string {
   return h > 0 ? `${h}:${pad(m)}:${pad(s % 60)}` : `${m}:${pad(s % 60)}`
 }
 
-type List = { recordings: Recording[]; enabled: boolean; days: number }
+type Choice = { id: number; name: string }
+type List = { recordings: Recording[]; enabled: boolean; days: number; hosts?: Choice[]; owners?: Choice[] }
+// What the list is narrowed to (pages-1105 3.1): a host, an owner (an
+// admin's), a span of days back — the gateway narrows it, whole.
+type Filter = { host: number; owner: number; span: DaySpan }
+const NO_FILTER: Filter = { host: 0, owner: 0, span: 'all' }
+const sameFilter = (a: Filter, b: Filter) => a.host === b.host && a.owner === b.owner && a.span === b.span
 
 // The list as it was left for a recording (pages-1105 2.2): its pages read,
-// and the one opened, to come back to — this page's life only, and only for
-// the account it was read for. What changed since (one ended, one started)
-// comes in with the first page, read again.
-let kept: { who: number; list: List; more: boolean; opened: string } | null = null
+// what it was narrowed to, and the one opened, to come back to — this page's
+// life only, and only for the account it was read for. What changed since
+// (one ended, one started) comes in with the first page, read again.
+let kept: { who: number; filter: Filter; list: List; more: boolean; opened: string; choices: { hosts: Choice[]; owners: Choice[] } } | null = null
 // (The first page read again, over what was kept: the newer as it is now, then
 // the older pages as they were.)
 function overKept(fresh: Recording[], prev: Recording[]): Recording[] {
@@ -43,6 +49,8 @@ export function RecordingsPage() {
   const { me } = useSession()
   const toast = useToast()
   const back = kept && kept.who === me?.id ? kept : null
+  const [filter, setFilter] = useState<Filter>(back?.filter ?? NO_FILTER)
+  const [choices, setChoices] = useState(back?.choices ?? { hosts: [], owners: [] })
   const [list, setList] = useState<List | null>(back?.list ?? null)
   const [failed, setFailed] = useState(false)
   const [more, setMore] = useState(back?.more ?? false) // an older page may exist
@@ -51,24 +59,47 @@ export function RecordingsPage() {
   const [dialog, setDialog] = useState<React.ReactNode>(null)
   const admin = me?.role === 'admin'
   const PAGE = 100 // as the server sends
+  const query = (f: Filter) => {
+    const q = new URLSearchParams()
+    if (f.host) q.set('host_id', String(f.host))
+    if (f.owner) q.set('owner_id', String(f.owner))
+    const from = spanFrom(f.span)
+    if (from) q.set('from', String(from))
+    return q
+  }
+  // Each reading of the list its own number: one for an older filter, or an
+  // older page of one, is dropped when it comes.
+  const seq = useRef(0)
   // keep: what was read before stays below the first page (coming back);
-  // otherwise the list starts again from the first page (refresh, a delete).
-  const load = (keep = false) => {
+  // otherwise the list starts again from the first page (refresh, a filter, a delete).
+  const load = (keep = false, f = filter) => {
+    const n = ++seq.current
     setFailed(false)
     setRefreshing(true)
-    api<List>('GET', '/api/recordings')
+    const q = query(f)
+    q.set('choices', '1')
+    api<List>('GET', '/api/recordings?' + q)
       .then((l) => {
+        if (n !== seq.current) return
+        setChoices({ hosts: l.hosts ?? [], owners: l.owners ?? [] })
         setList((prev) => (keep && prev ? { ...l, recordings: overKept(l.recordings, prev.recordings) } : l))
         if (!keep) setMore(l.recordings.length === PAGE)
       })
-      .catch(() => !keep && setFailed(true))
-      .finally(() => setRefreshing(false))
+      .catch(() => n === seq.current && !keep && setFailed(true))
+      .finally(() => n === seq.current && setRefreshing(false))
+  }
+  const narrow = (f: Filter) => {
+    if (sameFilter(f, filter)) return
+    setFilter(f)
+    setList(null)
+    setMore(false)
+    load(false, f)
   }
   // (Kept as it is now, whenever it changes: what leaving finds.)
   const opened = useRef(back?.opened ?? '')
   useEffect(() => {
-    if (list && me) kept = { who: me.id, list, more, opened: opened.current }
-  }, [list, more, me])
+    if (list && me) kept = { who: me.id, filter, list, more, opened: opened.current, choices }
+  }, [list, more, me, filter, choices])
   // (Back from a recording: the row opened, in sight again.)
   useEffect(() => {
     if (!back?.opened) return
@@ -77,10 +108,15 @@ export function RecordingsPage() {
   }, [])
   const loadMore = async () => {
     if (!list || loadingMore) return
+    const n = seq.current
     const last = list.recordings[list.recordings.length - 1]
     setLoadingMore(true)
     try {
-      const l = await api<List>('GET', `/api/recordings?before=${last.started_at}&after_id=${encodeURIComponent(last.id)}`)
+      const q = query(filter)
+      q.set('before', String(last.started_at))
+      q.set('after_id', last.id)
+      const l = await api<List>('GET', '/api/recordings?' + q)
+      if (n !== seq.current) return
       setList((prev) => {
         if (!prev) return l
         const seen = new Set(prev.recordings.map((r) => r.id))
@@ -88,12 +124,33 @@ export function RecordingsPage() {
       })
       setMore(l.recordings.length === PAGE)
     } catch (e) {
-      toast(errorText(e), true)
+      if (n === seq.current) toast(errorText(e), true)
     } finally {
       setLoadingMore(false)
     }
   }
   useEffect(() => load(!!back), [])
+  const filtered = !sameFilter(filter, NO_FILTER)
+  // (The choices offered: those there are recordings of, and the one chosen
+  // even if none is left of it now.)
+  const offer = (cs: Choice[], id: number) => (id && !cs.some((c) => c.id === id) ? [...cs, { id, name: '#' + id }] : cs)
+  const tools = (list || filtered) && (choices.hosts.length > 1 || choices.owners.length > 1 || filtered || (list?.recordings.length ?? 0) > 10) && (
+    <div className="page-tools rec-tools">
+      <select className="select" value={filter.host} onChange={(e) => narrow({ ...filter, host: Number(e.target.value) })} aria-label={t('rec.byHost')}>
+        <option value={0}>{t('rec.allHosts')}</option>
+        {offer(choices.hosts, filter.host).map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+      </select>
+      {admin && (
+        <select className="select" value={filter.owner} onChange={(e) => narrow({ ...filter, owner: Number(e.target.value) })} aria-label={t('rec.byOwner')}>
+          <option value={0}>{t('rec.allOwners')}</option>
+          {offer(choices.owners, filter.owner).map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+        </select>
+      )}
+      <select className="select" value={filter.span} onChange={(e) => narrow({ ...filter, span: e.target.value as DaySpan })} aria-label={t('rec.bySpan')}>
+        {(['all', 'today', '7d', '30d'] as const).map((sp) => <option key={sp} value={sp}>{t(`span.${sp}` as const)}</option>)}
+      </select>
+    </div>
+  )
   return (
     <main className="page">
       <div className="page-head">
@@ -110,15 +167,24 @@ export function RecordingsPage() {
           {list.enabled && (admin ? t('rec.leadAdmin') : t('rec.leadMember'))}
         </p>
       )}
+      {tools}
       {failed ? (
         <LoadError onRetry={() => load()} />
       ) : list === null ? (
         <p className="loading">{t('common.loading')}</p>
+      ) : list.recordings.length === 0 && filtered ? (
+        <p className="page-none">
+          {t('rec.noMatch')}{' '}
+          <button type="button" className="link-btn" onClick={() => narrow(NO_FILTER)}>{t('common.clearFilters')}</button>
+        </p>
       ) : list.recordings.length === 0 ? (
         <EmptyState icon={<Film size={20} strokeWidth={1.75} />} title={t('rec.empty')} />
       ) : (
+        byDay(list.recordings, (r) => r.started_at).map((g) => (
+        <section className="day-group" key={g.key} aria-label={g.heading}>
+        <h2 className="day-head">{g.heading}</h2>
         <ul className="rows">
-          {list.recordings.map((r) => {
+          {g.items.map((r) => {
             const live = r.ended_at === 0
             const dur = (live ? Date.now() / 1000 : r.ended_at) - r.started_at
             const href = '/recordings/' + r.id
@@ -135,7 +201,7 @@ export function RecordingsPage() {
                 >
                   <Film className="row-icon" size={18} strokeWidth={1.75} />
                   <span className="row-title">{r.host_name}</span>
-                  <span className="row-meta" title={new Date(r.started_at * 1000).toLocaleString()}>{whenText(r.started_at)}</span>
+                  <span className="row-meta tnum" title={new Date(r.started_at * 1000).toLocaleString()}>{clockText(r.started_at)}</span>
                   <span className="row-sub">
                     {admin && r.owner_name + ' · '}
                     {/* (A length, in words: "13:10:24" reads as a time of day — ux1101 PG-44.) */}
@@ -187,6 +253,8 @@ export function RecordingsPage() {
             )
           })}
         </ul>
+        </section>
+        ))
       )}
       {list && more && (
         <div className="load-more">

@@ -3,7 +3,7 @@ import { ChevronRight, KeySquare, MoreHorizontal, ScrollText, Search, Send, Shie
 import { api, ApiError, errorText, type AdminUser, type AuditEntry } from '../api'
 import { t } from '../i18n'
 import { PhoneBack, useSession } from '../app'
-import { auditAction, auditDetail, auditTarget, sessionHosts, whenText } from './pageText'
+import { auditAction, auditDetail, auditTarget, byDay, clockText, sessionHosts, spanFrom, whenText, type DaySpan } from './pageText'
 import { Confirm, CopyButton, Dialog, EmptyState, Field, LoadError, Menu, useToast } from '../components/ui'
 
 type UserFilter = 'all' | 'admin' | 'disabled' | 'no2fa'
@@ -385,21 +385,39 @@ function ResetDialog({ user, onClose }: { user: AdminUser; onClose: () => void }
   )
 }
 
+type AuditKind = '' | 'account' | 'hosts' | 'sessions' | 'agents' | 'other'
+const AUDIT_KINDS: AuditKind[] = ['', 'account', 'hosts', 'sessions', 'agents', 'other']
+type AuditFilter = { user: number; kind: AuditKind; span: DaySpan }
+
 export function AdminAuditPage() {
   const toast = useToast()
   const [entries, setEntries] = useState<AuditEntry[] | null>(null)
   const [failed, setFailed] = useState(false)
   const [more, setMore] = useState(true)
   const [loading, setLoading] = useState(false)
+  // Narrowed (pages-1105 3.2) by who did it, the kind of action, the days
+  // back; the gateway narrows the whole log. A new choice starts the list
+  // again: what an older one was still reading is dropped when it comes.
+  const [filter, setFilter] = useState<AuditFilter>({ user: 0, kind: '', span: 'all' })
+  const [users, setUsers] = useState<AdminUser[]>([])
+  useEffect(() => {
+    api<AdminUser[]>('GET', '/api/admin/users').then(setUsers, () => {})
+  }, [])
   const busy = useRef(false)
   const gen = useRef(0)
-  const load = async (before?: number) => {
-    if (busy.current) return
+  const load = async (before?: number, f = filter) => {
+    if (before && busy.current) return
     busy.current = true
     setLoading(true)
     const mine = ++gen.current
     try {
-      const rows = await api<AuditEntry[]>('GET', '/api/admin/audit' + (before ? '?before=' + before : ''))
+      const q = new URLSearchParams()
+      if (before) q.set('before', String(before))
+      if (f.user) q.set('user', String(f.user))
+      if (f.kind) q.set('kind', f.kind)
+      const from = spanFrom(f.span)
+      if (from) q.set('from', String(from))
+      const rows = await api<AuditEntry[]>('GET', '/api/admin/audit' + (q.toString() ? '?' + q : ''))
       if (mine !== gen.current) return
       setEntries((prev) => {
         if (!before || !prev) return rows
@@ -409,13 +427,23 @@ export function AdminAuditPage() {
       setMore(rows.length === 100)
       setFailed(false)
     } catch (e) {
+      if (mine !== gen.current) return
       if (before) toast(errorText(e), true)
       else setFailed(true)
     } finally {
-      busy.current = false
-      setLoading(false)
+      if (mine === gen.current) {
+        busy.current = false
+        setLoading(false)
+      }
     }
   }
+  const narrow = (f: AuditFilter) => {
+    setFilter(f)
+    setEntries(null)
+    setFailed(false)
+    void load(undefined, f)
+  }
+  const filtered = filter.user !== 0 || filter.kind !== '' || filter.span !== 'all'
   useEffect(() => {
     load()
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -427,10 +455,27 @@ export function AdminAuditPage() {
         <PhoneBack />
         <h1>{t('admin.audit')}</h1>
       </div>
+      <div className="page-tools audit-tools">
+        <select className="select" value={filter.user} onChange={(e) => narrow({ ...filter, user: Number(e.target.value) })} aria-label={t('audit.byUser')}>
+          <option value={0}>{t('audit.allUsers')}</option>
+          {users.map((u) => <option key={u.id} value={u.id}>{u.display_name && u.display_name !== u.username ? `${u.display_name}（${u.username}）` : u.username}</option>)}
+        </select>
+        <select className="select" value={filter.kind} onChange={(e) => narrow({ ...filter, kind: e.target.value as AuditKind })} aria-label={t('audit.byKind')}>
+          {AUDIT_KINDS.map((k) => <option key={k} value={k}>{t(`audit.kind.${k || 'all'}` as const)}</option>)}
+        </select>
+        <select className="select" value={filter.span} onChange={(e) => narrow({ ...filter, span: e.target.value as DaySpan })} aria-label={t('audit.bySpan')}>
+          {(['all', 'today', '7d', '30d'] as const).map((sp) => <option key={sp} value={sp}>{t(`span.${sp}` as const)}</option>)}
+        </select>
+      </div>
       {entries === null && failed ? (
         <LoadError onRetry={() => load()} />
       ) : entries === null ? (
         <p className="loading">{t('common.loading')}</p>
+      ) : entries.length === 0 && filtered ? (
+        <p className="page-none">
+          {t('audit.noMatch')}{' '}
+          <button type="button" className="link-btn" onClick={() => narrow({ user: 0, kind: '', span: 'all' })}>{t('common.clearFilters')}</button>
+        </p>
       ) : entries.length === 0 ? (
         <EmptyState icon={<ScrollText size={20} strokeWidth={1.75} />} title={t('admin.auditEmpty')} />
       ) : (
@@ -439,8 +484,8 @@ export function AdminAuditPage() {
               host where this page knows it, dates past a day (ux1101 PG-06/09/10). */}
           <table className="audit-table">
             <colgroup>
-              {/* (Wide enough for "2025-10-28 14:05" on a tablet's narrow table — review.) */}
-              <col style={{ width: '10em' }} />
+              {/* (A time of day: the day is the heading above — pages-1105 3.2.) */}
+              <col style={{ width: '5em' }} />
               <col style={{ width: '12%' }} />
               <col style={{ width: '20%' }} />
               <col />
@@ -455,13 +500,17 @@ export function AdminAuditPage() {
                 <th>{t('audit.ip')}</th>
               </tr>
             </thead>
-            <tbody>
-              {entries.map((e) => {
+            {byDay(entries, (e) => e.ts).map((g) => (
+            <tbody key={g.key}>
+              <tr className="audit-day">
+                <th colSpan={5} scope="colgroup">{g.heading}</th>
+              </tr>
+              {g.items.map((e) => {
                 const detail = auditDetail(e.detail)
                 const target = auditTarget(e.target, hosts)
                 return (
                   <tr key={e.id}>
-                    <td className="tnum" title={new Date(e.ts * 1000).toLocaleString()}>{whenText(e.ts)}</td>
+                    <td className="tnum" title={new Date(e.ts * 1000).toLocaleString()}>{clockText(e.ts)}</td>
                     <td title={e.username}>{e.username || '—'}</td>
                     <td title={e.action}>{auditAction(e.action)}</td>
                     <td title={[e.target, ...detail].filter(Boolean).join('\n')}>
@@ -473,16 +522,20 @@ export function AdminAuditPage() {
                 )
               })}
             </tbody>
+            ))}
           </table>
           <div className="audit-list">
-            {entries.map((e) => {
+            {byDay(entries, (e) => e.ts).map((g) => (
+            <section className="day-group" key={g.key} aria-label={g.heading}>
+            <h2 className="day-head">{g.heading}</h2>
+            {g.items.map((e) => {
               const target = auditTarget(e.target, hosts)
               return (
                 <details className="audit-item" key={e.id}>
                   <summary>
                     <span className="top">
                       <span className="action">{auditAction(e.action)}</span>
-                      <span className="row-meta">{whenText(e.ts)}</span>
+                      <span className="row-meta tnum">{clockText(e.ts)}</span>
                       <ChevronRight className="audit-chev" size={16} aria-hidden="true" />
                     </span>
                     <span className="hint">
@@ -494,6 +547,8 @@ export function AdminAuditPage() {
                 </details>
               )
             })}
+            </section>
+            ))}
           </div>
           {more && (
             <div>

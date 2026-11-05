@@ -42,13 +42,30 @@ func (s *Store) RecordingByID(ctx context.Context, id string) (*Recording, error
 	return scanRecording(s.db.QueryRowContext(ctx, `SELECT `+recordingCols+` FROM recordings WHERE id = ?`, id))
 }
 
+// RecordingFilter narrows a list of recordings: one owner's (0: everyone's),
+// one host's (0: any; by id, so a deleted host's still match), started in
+// [From, To) (0: no bound).
+type RecordingFilter struct {
+	Owner, Host int64
+	From, To    int64
+}
+
 // ListRecordings returns recordings in order newest first (and by id among
 // those started the same second), after the one at (before, afterID) when
-// before is set; owner 0 means everyone's.
-func (s *Store) ListRecordings(ctx context.Context, owner, before int64, afterID string, limit int) ([]*Recording, error) {
+// before is set, that match f.
+func (s *Store) ListRecordings(ctx context.Context, f RecordingFilter, before int64, afterID string, limit int) ([]*Recording, error) {
 	q, args := `SELECT `+recordingCols+` FROM recordings WHERE 1 = 1`, []any{}
-	if owner != 0 {
-		q, args = q+` AND owner_id = ?`, append(args, owner)
+	if f.Owner != 0 {
+		q, args = q+` AND owner_id = ?`, append(args, f.Owner)
+	}
+	if f.Host != 0 {
+		q, args = q+` AND host_id = ?`, append(args, f.Host)
+	}
+	if f.From != 0 {
+		q, args = q+` AND started_at >= ?`, append(args, f.From)
+	}
+	if f.To != 0 {
+		q, args = q+` AND started_at < ?`, append(args, f.To)
 	}
 	if before != 0 {
 		q, args = q+` AND (started_at < ? OR (started_at = ? AND id > ?))`, append(args, before, before, afterID)
@@ -67,6 +84,48 @@ func (s *Store) ListRecordings(ctx context.Context, owner, before int64, afterID
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// RecordingChoice is one host, or one owner, there are recordings of: what a
+// list of them can be narrowed to (by id; the name as last recorded).
+type RecordingChoice struct {
+	ID   int64  `json:"id"`
+	Name string `json:"name"`
+}
+
+// RecordingChoices returns the hosts and the owners of the recordings owner
+// may see (0: all), the most recently recorded first.
+func (s *Store) RecordingChoices(ctx context.Context, owner int64) (hosts, owners []RecordingChoice, err error) {
+	// (SQLite gives the bare name column of the row MAX picked: the name as
+	// last recorded.)
+	pick := func(id, name string) ([]RecordingChoice, error) {
+		q, args := `SELECT `+id+`, `+name+`, MAX(started_at) FROM recordings`, []any{}
+		if owner != 0 {
+			q, args = q+` WHERE owner_id = ?`, append(args, owner)
+		}
+		rows, err := s.db.QueryContext(ctx, q+` GROUP BY `+id+` ORDER BY MAX(started_at) DESC LIMIT 200`, args...)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		out := []RecordingChoice{}
+		for rows.Next() {
+			var c RecordingChoice
+			var at int64
+			if err := rows.Scan(&c.ID, &c.Name, &at); err != nil {
+				return nil, err
+			}
+			out = append(out, c)
+		}
+		return out, rows.Err()
+	}
+	if hosts, err = pick("host_id", "host_name"); err != nil {
+		return nil, nil, err
+	}
+	if owners, err = pick("owner_id", "owner_name"); err != nil {
+		return nil, nil, err
+	}
+	return hosts, owners, nil
 }
 
 // HasRecordings reports whether there is a recording owner may see (owner 0:
