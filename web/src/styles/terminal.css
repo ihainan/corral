@@ -374,7 +374,12 @@ html.kb-open .keybar { padding-bottom: 6px; }
 .term-tab.held:not([aria-current="page"]) { background: var(--term-hover); }
 /* The tab in front: as a pressed button of the bar is, so it stands apart in
    every scheme (the key colour can be the bar's own in a light one). */
-.term-tab[aria-current="page"] { background: var(--term-accent-soft); color: var(--term-fg); font-weight: 600; } /* (by its ground and weight, not a third colour: ux1101 T29) */
+.term-tab[aria-current="page"] { background: var(--term-key); color: var(--term-fg); } /* (by its ground, neutral: ux1101 T29, 11-05) */
+.term-tab-host { font-weight: 600; }
+.term-tab-which { color: var(--term-fg-3); }
+/* Recorded: red words, a plain dot before them — no ground, no halo (11-05). */
+.term-rec { flex: none; display: inline-flex; align-items: center; gap: 6px; margin: 0 4px 0 12px; font-size: 13px; font-weight: 500; color: var(--term-danger-text); white-space: nowrap; }
+.term-rec::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 .term-tab[aria-current="page"] .term-tab-title { color: var(--term-fg-2); }
 .term-tab-name { display: flex; min-width: 0; flex: 0 1 auto; white-space: nowrap; }
 /* A long name is cut, its host kept longest: the title gives way first,

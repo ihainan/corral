@@ -27,7 +27,6 @@ import { SchemeDialog } from '../terminal/SchemePicker'
 import { ShortcutPanel, lastPanelPage } from '../terminal/ShortcutPanel'
 import { panelPages, type Shortcut } from '../terminal/shortcuts'
 import { layoutIn } from '../terminal/layout'
-import { startPreviews } from '../terminal/preview'
 import { atCursor, inPromptBox } from '../terminal/prompt'
 import { ReplyDialog } from '../terminal/ReplyDialog'
 import { PortsDialog, openForward } from '../terminal/PortsDialog'
@@ -1512,7 +1511,6 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
     })
 
     // What the screen shows, for the session list (the owner's windows only).
-    const stopPreviews = watch ? () => {} : startPreviews(id, term, () => conn.isOpen() && !replaying && !settling)
 
     let fitTimer: number | undefined
     const ro = new ResizeObserver(() => {
@@ -1548,7 +1546,6 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
       userSub?.dispose()
       binSub.dispose()
       resizeSub.dispose()
-      stopPreviews()
       conn.dispose()
       term.dispose()
       termRef.current = null
@@ -2390,8 +2387,10 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
   // With tabs, the open session's state beyond "connected": slow, recorded, watched.
   const tabNote =
     status === 'open' && !ended
-      ? [slow && t('term.latency', { ms: latency }), info?.recording && t('term.recordingTab'), !watch && info?.watching && t('term.watchedBy', { n: info.watching })].filter(Boolean).join(' · ')
+      ? [slow && t('term.latency', { ms: latency }), !watch && info?.watching && t('term.watchedBy', { n: info.watching })].filter(Boolean).join(' · ')
       : ''
+  // (Recorded: said apart, in red words — not one more grey note, 11-05.)
+  const tabRec = status === 'open' && !ended && !!info?.recording
   const paused = !ended && (status === 'reconnecting' || status === 'offline')
   const herdrStale = paused || !herdrFresh
   // Agents waiting for an answer, while what herdr reported is current.
@@ -2752,6 +2751,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
         <div className="spacer" />
         {/* (Connection trouble shows on the tab; what else the bar would say,
             here: by the bar's icons, apart from the tabs — ux1101 T26.) */}
+        {tabs && !watch && tabRec && <span className="term-rec" title={t('term.recordingTab')}>{t('term.recording')}</span>}
         {tabs && !watch && tabNote && (
           <span className={'term-status term-tab-note ' + statusClass} aria-live="polite" title={tabNote}><span className="term-tab-note-text">{tabNote}</span></span>
         )}

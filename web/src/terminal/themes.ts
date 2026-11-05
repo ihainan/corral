@@ -75,6 +75,8 @@ function readable(fg: string, bgs: string[], min: number, dark: boolean): string
 // are then pushed until they reach 4.5:1 on every surface they sit on. The
 // terminal itself keeps the scheme's colours untouched. Corral's own pair
 // keeps its hand-tuned values in terminal.css.
+const PRODUCT_BLUE = '#4a78ec'
+
 export function chromeVars(s: Scheme): Record<string, string> {
   if (s === corralDark || s === corralLight) return {}
   const bg = s.theme.background ?? '#000000'
@@ -84,7 +86,10 @@ export function chromeVars(s: Scheme): Record<string, string> {
   const key = mix(bg, fg, d ? 0.1 : 0)
   const keyActive = mix(bg, fg, d ? 0.18 : 0.1)
   const hover = mix(bg, fg, d ? 0.08 : 0.06)
-  const accentSoft = mix(bg, s.theme.blue ?? '#4a78ec', d ? 0.22 : 0.14)
+  // (Corral's own controls — sending, focus, what is chosen — in the product's
+  // blue whatever the scheme: its "blue" (Dracula's is a violet) is for what
+  // the host prints and code — one accent across the app, 11-05.)
+  const accentSoft = mix(bg, PRODUCT_BLUE, d ? 0.22 : 0.14)
   // Every surface chrome text sits on, including the highlighted row
   // (current herdr workspace, latched modifier keys).
   const surfaces = [bg, chrome, key, hover, accentSoft]
@@ -100,7 +105,7 @@ export function chromeVars(s: Scheme): Record<string, string> {
     '--term-fg-2': readable(mix(fg, bg, 0.25), surfaces, 4.5, d),
     '--term-fg-3': readable(mix(fg, bg, 0.45), surfaces, 4.5, d),
     '--term-accent-soft': accentSoft,
-    '--term-accent-text': readable(s.theme.blue ?? '#4a78ec', surfaces, 4.5, d),
+    '--term-accent-text': readable(d ? '#8fadf7' : '#2c5fcc', surfaces, 4.5, d),
     '--term-danger-text': readable(s.theme.red ?? '#d0453e', surfaces, 4.5, d),
     '--term-warn-text': readable(s.theme.yellow ?? '#e0a24a', surfaces, 4.5, d),
     '--term-ok-text': readable(s.theme.green ?? '#3fa45b', surfaces, 4.5, d),

@@ -779,7 +779,8 @@ function TabBar(p: { tabs: SessionInfo[]; current: string; infos: Record<string,
             {/* (A connection's trouble before agents at work: it is the one to see to.) */}
             {!quiet && <span className={'term-tab-dot ' + info.status} aria-hidden="true" />}
             <span className="term-tab-name">{name}</span>
-            {s.title && <span className="term-tab-title">{s.title}</span>}
+            {/* (The terminal's own title — a path, a prompt — is in the tab's tooltip and the
+                switcher, not on the tab: "host · which" is what tells tabs apart, 11-05.) */}
             {waiting > 0 && (
               <span className="term-tab-count term-tab-wait" aria-label={t('herdr.waiting', { n: waiting })}>
                 <MessageCircleReply size={13} strokeWidth={2.25} aria-hidden="true" />

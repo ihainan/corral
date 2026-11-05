@@ -1,17 +1,15 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { CircleStop, Code2, MoreHorizontal, Pencil, Plus, Search, Server, Trash2, X, Eye } from 'lucide-react'
-import { api, authGen, type Host, type SessionInfo, type SessionPreview, type SharedSession } from '../api'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { Check, ChevronDown, CircleStop, Code2, MoreHorizontal, Pencil, Plus, Search, Server, Trash2, X, Eye } from 'lucide-react'
+import { api, authGen, type Host, type SessionInfo, type SharedSession } from '../api'
 import { relTime, t } from '../i18n'
 import { linkHandler, navigate } from '../router'
 import { Confirm, EmptyState, LoadError, Menu } from '../components/ui'
 import { useConnect } from '../connect'
 import { useSession } from '../app'
 import { useCode } from '../terminal/CodeDialog'
-import { termScheme, usePrefs } from '../prefs'
 import { noteSessions, sessionAgents } from '../terminal/agents'
 import { sessionWhich } from '../terminal/sessionName'
 import { local } from '../storage'
-import { useMedia } from '../components/ui'
 
 const HOST_ORDER = 'corral.hostOrder'
 const HOST_SEARCH_FROM = 6 // (hosts: more than this, and a search shows)
@@ -91,38 +89,6 @@ export function HostsPage() {
   const running = sessions
     .filter((s) => s.state === 'running')
     .sort((a, b) => Number(waitingIn(b) > 0) - Number(waitingIn(a) > 0) || a.created_at - b.created_at)
-  // A phone shows the running sessions as rows: a screen in small there is
-  // too small to read (pages-1105 1.4), and is not fetched.
-  const narrow = useMedia('(max-width: 599px)')
-
-  // Each running session's latest screen, fetched again when the list says
-  // a newer one was sent. Responses may arrive out of order: the newest one
-  // stays. Sessions that are gone are forgotten.
-  const [previews, setPreviews] = useState<Record<string, SessionPreview>>({})
-  const asked = useRef<Record<string, number>>({}) // the newest revision asked for, per session
-  useEffect(() => {
-    const live = new Set(sessions.filter((s) => s.state === 'running').map((s) => s.id))
-    for (const id of Object.keys(asked.current)) if (!live.has(id)) delete asked.current[id]
-    setPreviews((cur) => {
-      const gone = Object.keys(cur).filter((id) => !live.has(id))
-      if (gone.length === 0) return cur
-      const next = { ...cur }
-      for (const id of gone) delete next[id]
-      return next
-    })
-    if (narrow) return
-    for (const s of sessions) {
-      const rev = s.preview_rev ?? 0
-      if (!live.has(s.id) || rev === 0 || (asked.current[s.id] ?? 0) >= rev) continue
-      asked.current[s.id] = rev
-      api<SessionPreview>('GET', `/api/sessions/${s.id}/preview`)
-        .then((p) => setPreviews((cur) => (!(s.id in asked.current) || (cur[s.id]?.rev ?? 0) >= p.rev ? cur : { ...cur, [s.id]: p })))
-        .catch(() => {
-          if (asked.current[s.id] === rev) delete asked.current[s.id] // (asked again next time)
-        })
-    }
-  }, [sessions, narrow])
-
   // The confirmation names exactly what the row showed, plus when it started,
   // so sessions without a title (or with the same one) can be told apart.
   const closeSession = (s: SessionInfo, label: string) =>
@@ -155,6 +121,15 @@ export function HostsPage() {
     )
 
   const empty = hosts !== null && hosts.length === 0
+  // Each host's sessions, as its row says them (11-05): agents waiting, in
+  // their colour and weight, else that it runs — words, no badge.
+  const hostState = (id: number): { text: string; wait: boolean } | null => {
+    const mine = running.filter((x) => x.host_id === id)
+    if (!mine.length) return null
+    const w = mine.reduce((n, x) => n + waitingIn(x), 0)
+    if (w) return { text: t('hosts.herdrWaiting', { n: w }), wait: true }
+    return { text: mine.length > 1 ? t('hosts.sessionsRunning', { n: mine.length }) : t('hosts.runningOne'), wait: false }
+  }
   // Finding a host among many (pages-1105 1.5): a search once there are more
   // than a few (by all there are, not by what it shows), and the order — by
   // when last connected, or by name — kept on this device.
@@ -194,7 +169,8 @@ export function HostsPage() {
           <button className="link-btn quiet-note" onClick={refreshSessions}>{t('hosts.sessionsStale')}</button>
         )}
         {!empty && (
-          <a className="btn btn-primary" href="/hosts/new" onClick={linkHandler('/hosts/new')}>
+          // (Outlined: what is going on, below, is what is to be seen first — 11-05.)
+          <a className="btn" href="/hosts/new" onClick={linkHandler('/hosts/new')}>
             <Plus size={16} />
             {t('hosts.add')}
           </a>
@@ -203,10 +179,10 @@ export function HostsPage() {
 
       {running.length > 0 && (
         <section className="section live" aria-labelledby="live-title">
-          <h2 id="live-title">{t('hosts.running')}</h2>
-          <ul className={narrow ? 'live-rows' : 'live-grid'}>
+          <h2 id="live-title">{t('hosts.running')}<span className="section-n">{running.length}</span></h2>
+          <ul className="live-rows">
             {running.map((s) => (
-              <LiveCard key={s.id} s={s} all={running} row={narrow} stale={sessFailed} preview={previews[s.id]} onClose={(label) => closeSession(s, label)} />
+              <LiveCard key={s.id} s={s} all={running} stale={sessFailed} onClose={(label) => closeSession(s, label)} />
             ))}
           </ul>
         </section>
@@ -230,12 +206,12 @@ export function HostsPage() {
       {!empty && (shared.length > 0 || sharedFailed) && sharedSection}
       {hosts && hosts.length > 0 && (
         <section className="section">
-          {(running.length > 0 || shared.length > 0) && <h2>{t('hosts.all')}</h2>}
+          {(running.length > 0 || shared.length > 0) && <h2>{t('hosts.all')}<span className="section-n">{hosts.length}</span></h2>}
           {findable && (
             <div className="page-tools">
               <label className="page-search">
                 <Search size={16} aria-hidden="true" />
-                <input type="search" value={q} onChange={(e) => setQ(e.target.value)} placeholder={t('hosts.search')} aria-label={t('hosts.search')} />
+                <input type="search" value={q} onChange={(e) => setQ(e.target.value)} placeholder={t('hosts.search')} aria-label={t('hosts.searchLong')} />
               </label>
               <div className="seg page-order" role="group" aria-label={t('hosts.order')}>
                 {(['name', 'recent'] as const).map((o) => (
@@ -252,6 +228,27 @@ export function HostsPage() {
                   </button>
                 ))}
               </div>
+              {/* (A phone's: one button beside the search, the choice in its menu — 11-05.) */}
+              <Menu
+                label={t('hosts.order')}
+                items={() =>
+                  (['name', 'recent'] as const).map((o) => ({
+                    label: t(o === 'name' ? 'hosts.orderName' : 'hosts.orderRecent'),
+                    checked: order === o,
+                    icon: order === o ? <Check size={16} /> : <span className="menu-icon-space" />,
+                    onSelect: () => {
+                      setOrder(o)
+                      local.set(HOST_ORDER, o)
+                    },
+                  }))
+                }
+                button={(open, toggle) => (
+                  <button type="button" className="btn page-order-menu" aria-expanded={open} aria-haspopup="menu" onClick={toggle}>
+                    {t('hosts.order')}
+                    <ChevronDown size={15} />
+                  </button>
+                )}
+              />
             </div>
           )}
           {shownHosts.length === 0 && (
@@ -264,9 +261,12 @@ export function HostsPage() {
             {shownHosts.map((h) => (
               <li key={h.id} className="row-group">
                 <div className="row">
-                  <button className="row-main" onClick={() => connect(h)} disabled={busyHost === h.id} aria-label={`${t('hosts.connect')} ${h.name}`} aria-describedby={'hs-' + h.id}>
-                    <Server className="row-icon" size={18} strokeWidth={1.75} />
+                  <button className="row-main no-icon has-state" onClick={() => connect(h)} disabled={busyHost === h.id} aria-label={`${t('hosts.connect')} ${h.name}`} aria-describedby={'hs-' + h.id}>
                     <span className="row-title">{h.name}</span>
+                    {(() => {
+                      const st = hostState(h.id)
+                      return st ? <span className={'row-state ' + (st.wait ? 'is-wait' : 'is-run')}>{st.text}</span> : <span className="row-state" />
+                    })()}
                     <span className="row-meta">
                       {/* ("8 天前连接": which time it is — ux1101 PG-11.) */}
                       {busyHost === h.id ? t('hosts.connecting') : h.last_connected_at ? t('hosts.lastConnected', { when: relTime(h.last_connected_at) }) : ''}
@@ -306,42 +306,29 @@ export function HostsPage() {
   )
 }
 
-// A running session: its screen in small (as a window of the owner last
-// showed it) — on a phone a row, without it —, the host and which session of
-// it this is (two shells of one host told apart, pages-1105 1.4); herdr
-// agents waiting for an answer are named first. Their state when herdr was
-// lost since, or the list could not be read just now (stale), is not told
-// as now: it is said to be unknown (1.2).
-function LiveCard({ s, all, row, stale, preview, onClose }: { s: SessionInfo; all: SessionInfo[]; row: boolean; stale: boolean; preview?: SessionPreview; onClose: (label: string) => void }) {
-  usePrefs() // (the screen follows the terminal colours)
-  const theme = termScheme().theme
+// A running session, a row (11-05: no screen in small — at a card's size it
+// told little, and without one a black block took the page): the host and
+// which session of it this is (two shells of one host told apart, pages-1105
+// 1.4); herdr agents waiting for an answer said first, in their colour. Their
+// state when herdr was lost since, or the list could not be read just now
+// (stale), is not told as now: it is said to be unknown (1.2).
+function LiveCard({ s, all, stale, onClose }: { s: SessionInfo; all: SessionInfo[]; stale: boolean; onClose: (label: string) => void }) {
   const which = sessionWhich(s, all)
   const ag = sessionAgents(s)
   const unknown = !!ag && (ag.lost || stale)
   const waiting = ag && !unknown ? ag.waiting : 0
   const done = ag && !unknown ? ag.done : 0 // finished, not looked at since
   const working = ag && !unknown ? ag.working : 0
-  const old = preview && Date.now() / 1000 - preview.at > 120
   const herdrState = unknown
     ? t('hosts.agentsUnknown')
     : waiting > 0 ? t('hosts.herdrWaiting', { n: waiting }) : done > 0 ? t('hosts.herdrDone', { n: done }) : working > 0 ? t('hosts.herdrWorking', { n: working }) : ''
   const marked = waiting > 0 || done > 0
-  // (Agents waiting, or done and not seen, come first, in their colour.)
-  const detail = [marked ? '' : herdrState, s.title, !s.title && !herdrState ? t('hosts.startedAgo', { when: relTime(s.created_at) }) : '', old && !row ? t('hosts.previewAge', { when: relTime(preview.at) }) : '']
-    .filter(Boolean)
-    .join(' · ')
+  const detail = [marked ? '' : herdrState, s.title, !s.title && !herdrState ? t('hosts.startedAgo', { when: relTime(s.created_at) }) : ''].filter(Boolean).join(' · ')
   const label = `${which}${s.title ? ' · ' + s.title : ''}`
   const dot = unknown ? 'unknown' : waiting > 0 ? 'warn' : 'ok'
   return (
-    <li className={row ? 'live-row' : 'live-card'}>
+    <li className="live-row">
       <a className="live-link" href={'/t/' + s.id} onClick={linkHandler('/t/' + s.id)} aria-label={`${s.host_name}：${label}`} aria-describedby={'ld-' + s.id} title={s.title || undefined}>
-        {row ? null : preview ? (
-          <LiveScreen lines={preview.lines} bg={theme.background ?? '#000'} fg={theme.foreground ?? '#fff'} />
-        ) : (
-          <div className="live-screen" aria-hidden="true" style={{ background: theme.background, color: theme.foreground }}>
-            <span className="live-empty">{t('hosts.noPreview')}</span>
-          </div>
-        )}
         <span className="live-info">
           <span className="live-title">
             <span className={'dot ' + dot} aria-hidden="true" />
@@ -359,63 +346,5 @@ function LiveCard({ s, all, row, stale, preview, onClose }: { s: SessionInfo; al
         <X size={16} />
       </button>
     </li>
-  )
-}
-
-// The screen in small: the whole of it, without blank lines at either end,
-// scaled down to fit the card, however small (laid out at a fixed size, then shrunk, so the
-// browser's smallest font size does not apply and wide characters measure as
-// drawn); a few lines stay at a readable size rather than grow. Only a screen
-// too big even at the smallest scale is cut: what does not fit fades out at
-// the top (older lines) and the right.
-const PREVIEW_BASE = 10 // px, the size it is laid out at
-const PREVIEW_MAX = 11 / PREVIEW_BASE // the largest scale
-const PREVIEW_MIN = 1.5 / PREVIEW_BASE // the smallest (on a phone a card is an outline of the screen)
-const PREVIEW_LINE = 1.25
-function LiveScreen({ lines, bg, fg }: { lines: string[]; bg: string; fg: string }) {
-  const box = useRef<HTMLDivElement>(null)
-  const pre = useRef<HTMLPreElement>(null)
-  const [fit, setFit] = useState<{ scale: number; cutTop: boolean; cutRight: boolean } | null>(null)
-  let first = 0
-  let last = lines.length
-  while (first < last && !lines[first].trim()) first++
-  while (last > first && !lines[last - 1].trim()) last--
-  const body = lines.slice(first, last).join('\n')
-  useLayoutEffect(() => {
-    const b = box.current
-    const p = pre.current
-    if (!b || !p) return
-    const measure = () => {
-      const cs = getComputedStyle(b)
-      const w = b.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight)
-      const h = b.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom)
-      // (The size as laid out: a transform does not change it.)
-      const tw = p.scrollWidth
-      const th = p.scrollHeight
-      if (!w || !h || !tw || !th) return
-      // (A little room: glyphs scaled down round wider than measured.)
-      const scale = Math.min(PREVIEW_MAX, Math.max(PREVIEW_MIN, Math.min((0.98 * w) / tw, h / th)))
-      const next = { scale, cutTop: th * scale > h + 1, cutRight: tw * scale > w + 1 }
-      setFit((f) => (f && f.scale === next.scale && f.cutTop === next.cutTop && f.cutRight === next.cutRight ? f : next))
-    }
-    measure()
-    const ro = new ResizeObserver(measure)
-    ro.observe(b)
-    return () => ro.disconnect()
-  }, [body])
-  return (
-    <div
-      ref={box}
-      className={'live-screen' + (fit?.cutTop ? ' cut-top' : '') + (fit?.cutRight ? ' cut-right' : '')}
-      aria-hidden="true"
-      style={{ background: bg, color: fg, ['--live-bg' as string]: bg }}
-    >
-      <pre
-        ref={pre}
-        style={{ fontSize: PREVIEW_BASE + 'px', lineHeight: PREVIEW_LINE, transform: fit ? `scale(${fit.scale})` : undefined, visibility: fit ? undefined : 'hidden' }}
-      >
-        {body}
-      </pre>
-    </div>
   )
 }

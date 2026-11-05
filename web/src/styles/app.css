@@ -184,7 +184,7 @@ code, .mono { font-family: var(--font-mono); font-size: 0.9em; }
 /* (A list no wider than it reads well: not 1130 points of row with its time
    far off at the right — ux1101 PG-37.) */
 .page {
-  width: 100%; max-width: calc(960px + 2 * var(--pad-x));
+  width: 100%; max-width: calc(960px + 2 * var(--pad-x)); margin-inline: auto; /* (centred in a wide window: not 400 points of nothing on its right — 11-05) */
   padding: calc(env(safe-area-inset-top, 0px) + 24px) max(var(--pad-x), env(safe-area-inset-right, 0px)) 48px max(var(--pad-x), env(safe-area-inset-left, 0px));
   display: flex; flex-direction: column; gap: 24px;
 }
@@ -820,7 +820,10 @@ details.adv > .form { margin-top: 16px; }
   margin: 0; padding: 12px 16px; list-style: none; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 24px;
   background: var(--bg-subtle); border-radius: var(--r); font-size: 14px;
 }
-.page-lead { margin: -8px 0 16px; }
+/* A page's head, its words, its tools, its list: 12, 16, 16 apart (the page's
+   gap is 24; sections 32) — one rhythm on every page, 11-05. */
+.page-lead { margin: -12px 0 0; }
+.page > .page-tools { margin: -8px 0 -8px; }
 .load-more { margin-top: 16px; }
 
 /* Watching */
@@ -871,7 +874,7 @@ details.adv > .form { margin-top: 16px; }
 .live-which { color: var(--fg-2); font-weight: 400; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 0 1 auto; }
 .live-name { flex: 0 1 auto; }
 /* Searching a long list, and its order (hosts: pages-1105 1.5). */
-.page-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin: 4px 0 12px; }
+.page-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin: 4px 0 8px; }
 .page-search { flex: 1 1 240px; display: flex; align-items: center; gap: 8px; height: var(--h-input); padding: 0 12px; border: 1px solid var(--line-input); border-radius: var(--r); color: var(--fg-3); background: var(--bg); }
 .page-search:focus-within { border-color: var(--accent); box-shadow: var(--focus); }
 .page-search input:focus, .page-search input:focus-visible, .files-filter-box input:focus, .files-filter-box input:focus-visible { outline: none; box-shadow: none; } /* (the box shows it) */
@@ -929,3 +932,24 @@ details.adv > .form { margin-top: 16px; }
 @media (max-width: 599px) { .rec-tools .select, .audit-tools .select { flex: 1 1 0; padding-left: 10px; padding-right: 28px; background-position: right 8px center; } }
 /* (A sidebar row on an iPad: a finger's, 44 — pages-1105 4.3; after .nav-item's own height.) */
 @media (min-width: 760px) and (pointer: coarse) { .nav-item { height: 44px; } }
+/* A host's sessions in words, a column of their own (11-05): no badge. */
+.row-main.no-icon.has-state { grid-template-columns: minmax(0, 1fr) minmax(0, max-content) auto; }
+.row-main.has-state > .row-state { grid-column: 2; grid-row: 1 / span 2; align-self: center; justify-self: end; padding-left: 16px; font-size: var(--fs-sub); line-height: var(--lh-sub); white-space: nowrap; }
+.row-main.has-state > .row-meta { grid-column: 3; grid-row: 1 / span 2; min-width: 88px; text-align: right; }
+.row-main.has-state > .row-sub { grid-column: 1; }
+.row-state.is-run { color: var(--ok); }
+.row-state.is-wait { color: var(--warn); font-weight: 600; }
+@media (max-width: 599px) {
+  .row-main.no-icon.has-state { grid-template-columns: minmax(0, 1fr) auto; }
+  .row-main.has-state > .row-state { grid-column: 1; grid-row: 3; justify-self: start; padding: 0; font-size: var(--fs-note); line-height: var(--lh-note); }
+  .row-main.has-state > .row-meta { grid-column: 2; min-width: 0; }
+  .row-main.has-state > .row-state:empty { display: none; }
+}
+.section > h2 .section-n { margin-left: 6px; font-weight: 400; color: var(--fg-3); font-variant-numeric: tabular-nums; }
+.page-order-menu { display: none; flex: none; gap: 4px; }
+@media (max-width: 599px) {
+  .page-tools:has(.page-order-menu) { flex-wrap: nowrap; }
+  .page-tools .page-order { display: none; }
+  .page-order-menu { display: inline-flex; height: var(--h-input); padding: 0 12px; border-radius: 6px; }
+  .page-order-menu svg { color: var(--fg-3); }
+}
