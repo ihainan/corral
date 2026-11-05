@@ -23,9 +23,13 @@ export function labelName(name: string): string {
 // (one whose path was lost is not sent as it is). A label is words in the
 // box, as a long paste's is: one edited is no longer its file's — its chip
 // goes at once — and is sent as the words it is.
-export const ATTACH_LABEL = /\[(?:图片|文件|Attached (?:image|file)) #\d+[：:] ?[^\]\n]{1,60}\]/g
+// (A picture pasted, named alike by the browser: its number alone — 11-05.)
+export const ATTACH_LABEL = /\[(?:图片|文件|Attached (?:image|file)) #\d+(?:[：:] ?[^\]\n]{1,60})?\]/g
 
 
+// (A picture pasted is named "image.png" by the browser, every one alike:
+// told by its number in the message instead, as its label has it — 11-05.)
+const GENERIC = /^(?:image|img|pasted image|screenshot)(?:\.(?:png|jpe?g|gif|webp))?$/i
 // attach keeps a file just put up on the host (path) and is its label,
 // for the draft; quoted: the path as the agent is to read it.
 // (Its picture is asked of the host, as any: what the browser holds of it
@@ -33,7 +37,7 @@ export const ATTACH_LABEL = /\[(?:图片|文件|Attached (?:image|file)) #\d+[�
 export function attach(f: File, path: string, quoted: string, host: number): string {
   const image = PICTURE_PATH.test(path)
   const name = labelName(f.name || (image ? 'image' : 'file'))
-  const a = keepAttached({ send: quoted, path, name, image, host }, (n) => t(image ? 'attach.image' : 'attach.file', { n, name }))
+  const a = keepAttached({ send: quoted, path, name, image, host }, (n) => (image && GENERIC.test(name) ? t('attach.imageN', { n }) : t(image ? 'attach.image' : 'attach.file', { n, name })))
   return a.label
 }
 
@@ -50,6 +54,11 @@ export function AttachStrip({ draft, sid, host, onRemove, onOpen }: { draft: str
       ))}
     </div>
   )
+}
+
+function shownName(a: Attached): string {
+  const n = /#(\d+)/.exec(a.label)?.[1]
+  return a.image && n && GENERIC.test(a.name) ? t('convo.picN', { n }) : a.name
 }
 
 function AttachChip({ a, sid, here, onRemove, onOpen }: { a: Attached; sid: string; here: boolean; onRemove: () => void; onOpen: () => void }) {
@@ -69,7 +78,7 @@ function AttachChip({ a, sid, here, onRemove, onOpen }: { a: Attached; sid: stri
     <span className={'attach-chip' + (here ? '' : ' is-other')} title={here ? a.path : t('attach.otherHost', { path: a.path })}>
       <button type="button" className="attach-open" onClick={onOpen} disabled={!here} aria-label={t(a.image ? 'attach.view' : 'attach.reveal', { name: a.name })}>
         {thumb ? <img className="attach-thumb" src={thumb} alt="" /> : <span className="attach-icon" aria-hidden="true"><FileIcon size={15} /></span>}
-        <span className="attach-name">{a.name}</span>
+        <span className="attach-name">{shownName(a)}</span>
       </button>
       <button type="button" className="attach-x" onClick={onRemove} aria-label={t('attach.remove', { name: a.name })} title={t('attach.remove', { name: a.name })}>
         <X size={13} />

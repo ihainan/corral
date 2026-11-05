@@ -271,6 +271,10 @@ export function ConversationView({
     }
   }, [sideShown])
   const [picking, setPicking] = useState<boolean | 'search'>(false) // ('search': by ⌘K, its search box first)
+  const [bgCmd, setBgCmd] = useState<ConvoRunning | null>(null) // (a background command's details, open)
+  // (Another agent shown: its own commands, none of the one before's open.)
+  const agentOf = convo.bind ? `${convo.bind.pane ?? ''}|${convo.bind.agent ?? ''}` : ''
+  useEffect(() => setBgCmd(null), [agentOf])
   // ⌘K (Ctrl+K): the list's search box, shown and in focus; where the list
   // is not beside the thread, the switcher, its box first. (A count: each
   // press puts the focus there again.)
@@ -1441,7 +1445,13 @@ export function ConversationView({
         )}
       </div>
       <div className="convo-dock">
-        {convo.status === 'ready' && convo.running && <RunningWork items={convo.running} openSub={!convo.bind?.agent || convo.bind.agent === 'claude' || convo.bind.agent === 'codex' ? openSub : undefined} />}
+        {convo.status === 'ready' && convo.running && <RunningWork items={convo.running} openCmd={setBgCmd} openSub={!convo.bind?.agent || convo.bind.agent === 'claude' || convo.bind.agent === 'codex' ? openSub : undefined} />}
+        {/* (Its details kept here, not with the list above: it stays when the
+            command ends — the list gone with it — saying so, its output still
+            to be seen; not over another tab — review 1ad2c3d.) */}
+        {bgCmd && active && (
+          <BgCmdDialog r={convo.running?.find((x) => x.id === bgCmd.id) ?? bgCmd} gone={!convo.running?.some((x) => x.id === bgCmd.id)} onClose={() => setBgCmd(null)} />
+        )}
         {convo.status === 'ready' && convo.tasks && <Tasks tasks={convo.tasks} fold={!!ask} />}
         {/* (Asked from the screen: also where its log is not read.) */}
         {(convo.status === 'ready' || convo.status === 'none') && ask && (
@@ -1548,10 +1558,8 @@ function AskDock({ children }: { children: ReactNode }) {
   )
 }
 
-function RunningWork({ items, openSub }: { items: ConvoRunning[]; openSub?: (s: Sub) => void }) {
+function RunningWork({ items, openSub, openCmd }: { items: ConvoRunning[]; openSub?: (s: Sub) => void; openCmd: (r: ConvoRunning) => void }) {
   const [open, setOpen] = useState(false)
-  // A command's details (11-05): the whole of it, how long, its output.
-  const [shown1, setShown1] = useState<ConvoRunning | null>(null)
   // (Down to one: opened again later, it starts folded as it did at first.)
   useEffect(() => {
     if (items.length < 2) setOpen(false)
@@ -1576,7 +1584,7 @@ function RunningWork({ items, openSub }: { items: ConvoRunning[]; openSub?: (s: 
               {r.what || t('convo.bgAgent')}
             </button>
           ) : r.kind === 'cmd' && (r.cmd || r.out) ? (
-            <button type="button" className="link-btn convo-running-what" title={t('convo.bgDetails')} onClick={() => setShown1(r)}>
+            <button type="button" className="link-btn convo-running-what" title={t('convo.bgDetails')} onClick={() => openCmd(r)}>
               {r.what || t('convo.bgCmd')}
             </button>
           ) : (
@@ -1587,7 +1595,6 @@ function RunningWork({ items, openSub }: { items: ConvoRunning[]; openSub?: (s: 
         </div>
       ))}
       </div>
-      {shown1 && <BgCmdDialog r={items.find((x) => x.id === shown1.id) ?? shown1} gone={!items.some((x) => x.id === shown1.id)} onClose={() => setShown1(null)} />}
     </div>
   )
 }
@@ -3444,10 +3451,43 @@ function clock(ts?: string): string {
 // The pictures' paths written in a message's words: absolute or under the
 // home folder, of a kind a picture is looked at as, at most a few.
 const PICTURE_PATH = /(?:^|[\s"'(（「])((?:\/(?!\/)|~\/)[^\s"'()（）「」<>]{1,1000}\.(?:png|jpe?g|gif|webp))(?=$|[\s"'),.;:!?，。；：！？）」])/gi
-function picturePaths(text: string): string[] {
-  const out: string[] = []
-  for (const m of text.matchAll(PICTURE_PATH)) if (!out.includes(m[1]) && out.length < 8) out.push(m[1])
-  return out
+// A picture put up from Corral: its name made up on upload (a time, a few
+// letters) — told as "图片 1", not as its path (11-05).
+const UPLOADED = /\/\.cache\/corral\/uploads\/[^/]+$/
+const baseOf = (p: string) => p.slice(p.lastIndexOf('/') + 1)
+
+// The person's words with the pictures they name in their places: each path
+// a chip to look at it — one put up from here "图片 1", another by its file's
+// name — the path whole in its title, the words copied as they were.
+function withPictures(text: string, open: ((p: string) => void) | null): ReactNode {
+  const parts: ReactNode[] = []
+  const ups = [...text.matchAll(PICTURE_PATH)].map((m) => m[1]).filter((p, i, all) => UPLOADED.test(p) && all.indexOf(p) === i)
+  let at = 0
+  let k = 0
+  for (const m of text.matchAll(PICTURE_PATH)) {
+    const path = m[1]
+    const start = m.index! + m[0].length - path.length
+    if (start > at) parts.push(text.slice(at, start))
+    const n = ups.indexOf(path)
+    const said = n < 0 ? baseOf(path) : ups.length > 1 ? t('convo.picN', { n: n + 1 }) : t('convo.pic')
+    parts.push(
+      open ? (
+        <button key={k++} type="button" className="convo-pic is-inline" onClick={() => open(path)} title={path}>
+          <ImageIcon size={13} aria-hidden="true" />
+          <span>{said}</span>
+        </button>
+      ) : (
+        <span key={k++} className="convo-pic is-inline is-unknown" title={path}>
+          <ImageIcon size={13} aria-hidden="true" />
+          <span>{said}</span>
+        </span>
+      ),
+    )
+    at = start + path.length
+  }
+  if (at === 0) return text
+  if (at < text.length) parts.push(text.slice(at))
+  return parts
 }
 
 function UserTurn({ e, onCopy }: { e: ConvoEntry; onCopy: (s: string) => void }) {
@@ -3464,7 +3504,11 @@ function UserTurn({ e, onCopy }: { e: ConvoEntry; onCopy: (s: string) => void })
   // goes as its path, "/…/uploads/x.png look at this" — after them, each
   // once: 11-04.)
   const told = acts ? pics.map((p) => (p.path && fullPath(p.path) ? p.path : null)) : []
-  const files = acts ? [...told, ...picturePaths(text).filter((p) => !told.includes(p))] : []
+  // (A path written in the words is a chip where it stands — withPictures —
+  // not again under them: these are the pictures with no words of theirs.)
+  const files = acts ? told : []
+  const view = acts ? (p: string) => acts.view(p) : null
+  const shown = useMemo(() => withPictures(text, view), [text, acts])
   const any = files.some(Boolean)
   // (A shell command run with "!": in the terminal's letters, as typed.)
   const shell = /^! \S/.test(text)
@@ -3475,7 +3519,7 @@ function UserTurn({ e, onCopy }: { e: ConvoEntry; onCopy: (s: string) => void })
   return (
     <div className={'convo-user' + (e.mid ? ' is-mid' : '')}>
       <div className={'convo-user-text' + (shell ? ' is-shell' : '')}>
-        {long && !whole ? <span className="convo-user-fold">{text}</span> : text}
+        {long && !whole ? <span className="convo-user-fold">{shown}</span> : shown}
         {long && (
           <button type="button" className="link-btn convo-user-more" aria-expanded={whole} onClick={() => setWhole(!whole)}>
             {t(whole ? 'convo.userLess' : 'convo.userMore')}

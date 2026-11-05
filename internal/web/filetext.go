@@ -71,11 +71,13 @@ func (s *Server) apiFilesText(w http.ResponseWriter, r *http.Request) {
 	var data []byte
 	cut := false
 	if tail && fi.Size() > textMaxBytes {
-		if _, err := f.Seek(fi.Size()-textMaxBytes, io.SeekStart); err != nil {
+		// (One byte more, before: whether the part read starts a line — the
+		// byte before it a newline — or begins inside one.)
+		if _, err := f.Seek(fi.Size()-textMaxBytes-1, io.SeekStart); err != nil {
 			writeFileError(w, err)
 			return
 		}
-		data, err = io.ReadAll(io.LimitReader(&progressReader{r: f, t: t}, textMaxBytes))
+		data, err = io.ReadAll(io.LimitReader(&progressReader{r: f, t: t}, textMaxBytes+1))
 		if err != nil {
 			writeFileError(w, err)
 			return
@@ -101,13 +103,22 @@ func (s *Server) apiFilesText(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"path": p, "size": fi.Size(), "text": string(data), "cut": cut, "tail": tail})
 }
 
-// fromWholeLine: the end of a file read from somewhere in its middle, from
-// the start of its first whole line (else, a line longer than all of it,
-// from its first whole character).
+// fromWholeLine: the end of a file read from somewhere in its middle — the
+// byte before the part wanted first — from the start of its first whole line
+// (that part's own start, the byte before it a newline; else after the first
+// newline in it; else, a line longer than all of it, its first whole
+// character).
 func fromWholeLine(b []byte) []byte {
+	if len(b) == 0 {
+		return b
+	}
+	if b[0] == '\n' {
+		return b[1:]
+	}
 	if i := bytes.IndexByte(b, '\n'); i >= 0 && i < len(b)-1 {
 		return b[i+1:]
 	}
+	b = b[1:]
 	for i := 0; i < len(b) && i < utf8.UTFMax; i++ {
 		if utf8.RuneStart(b[i]) {
 			return b[i:]

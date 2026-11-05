@@ -224,7 +224,8 @@ func TestAuditByUserHasFailedSignIns(t *testing.T) {
 	admin := h.admin()
 	bob := h.member(admin, "bob")
 	stranger := &client{h: h}
-	if r := stranger.do("POST", "/api/login", map[string]string{"username": "bob", "password": "not-his-password"}); r.Status == 200 {
+	// (As typed: wide spaces round it, another case — sign-in still finds bob.)
+	if r := stranger.do("POST", "/api/login", map[string]string{"username": "\u3000BOB\u00a0", "password": "not-his-password"}); r.Status == 200 {
 		t.Fatal("a wrong password signed in")
 	}
 	var list []map[string]any
@@ -233,7 +234,7 @@ func TestAuditByUserHasFailedSignIns(t *testing.T) {
 	}
 	found := false
 	for _, e := range list {
-		if e["action"] == "login.failed" && e["target"] == "bob" {
+		if e["action"] == "login.failed" && e["target"] == "\u3000BOB\u00a0" {
 			found = true
 		}
 	}

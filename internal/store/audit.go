@@ -64,8 +64,10 @@ func (s *Store) ListAudit(ctx context.Context, q AuditQuery) ([]*AuditEntry, err
 	if q.UserID != nil {
 		if q.SignInAs != "" {
 			// (As sign-in finds the name: its spaces round it trimmed, its case not minded.)
-			sqlq += ` AND (user_id = ? OR (user_id IS NULL AND trim(target, ' ' || char(9) || char(10) || char(13)) = ? COLLATE NOCASE AND action LIKE 'login.%'))`
-			args = append(args, *q.UserID, q.SignInAs)
+			// (The name as sign-in looked it up, kept with the entry ("as");
+			// older entries: their target trimmed of plain spaces, any case.)
+			sqlq += ` AND (user_id = ? OR (user_id IS NULL AND action LIKE 'login.%' AND (CASE WHEN json_valid(detail) THEN json_extract(detail, '$.as') END = lower(?) OR trim(target, ' ' || char(9) || char(10) || char(13)) = ? COLLATE NOCASE)))`
+			args = append(args, *q.UserID, q.SignInAs, q.SignInAs)
 		} else {
 			sqlq += ` AND user_id = ?`
 			args = append(args, *q.UserID)

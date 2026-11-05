@@ -70,6 +70,11 @@ func TestFilesText(t *testing.T) {
 	if a := tailOf("out.log", []byte(logLines)); !a.Cut || !strings.HasSuffix(a.Text, "newest line\n") || !strings.HasPrefix(a.Text, "old line 中文\n") || len(a.Text) > textMaxBytes || !utf8.ValidString(a.Text) {
 		t.Errorf("tail: cut=%v len=%d start=%.20q end=%.20q", a.Cut, len(a.Text), a.Text, a.Text[max(0, len(a.Text)-20):])
 	}
+	// (The part read starting a line exactly: that line kept — review 1ad2c3d.)
+	edge := "old\n" + strings.Repeat("A", textMaxBytes-8) + "\nnewest\n"
+	if a := tailOf("edge.log", []byte(edge)); !a.Cut || !strings.HasPrefix(a.Text, "AAA") || !strings.HasSuffix(a.Text, "\nnewest\n") {
+		t.Errorf("tail from a line's start: cut=%v len=%d start=%.10q", a.Cut, len(a.Text), a.Text)
+	}
 	if a := tailOf("short.log", []byte("one\ntwo\n")); a.Cut || a.Text != "one\ntwo\n" {
 		t.Errorf("a short tail: %+v", a)
 	}
@@ -122,8 +127,8 @@ func TestFilesText(t *testing.T) {
 			n++
 		}
 	}
-	if n != 10 { // (the eight texts read, the two ends)
-		t.Errorf("file.text audited %d times, want 10", n)
+	if n != 11 { // (the eight texts read, the three ends)
+		t.Errorf("file.text audited %d times, want 11", n)
 	}
 	e.c.do("POST", "/api/logout", nil)
 	if res, _ := e.raw("GET", e.url("text", url.Values{"path": {e.root + "/main.go"}}), nil, ""); res.StatusCode != 401 {

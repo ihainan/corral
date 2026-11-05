@@ -131,7 +131,7 @@ func (s *Server) apiLogin(w http.ResponseWriter, r *http.Request) {
 		var locked *auth.LockedError
 		switch {
 		case errors.As(err, &locked):
-			s.auditAs(r, nil, "login.locked", b.Username, nil)
+			s.auditAs(r, nil, "login.locked", b.Username, signInAs(b.Username))
 			writeErrorExtra(w, http.StatusTooManyRequests, "locked", "too many failed attempts",
 				map[string]any{"retry_after": int(locked.RetryAfter.Seconds())})
 		case errors.Is(err, auth.ErrRateLimited):
@@ -139,7 +139,7 @@ func (s *Server) apiLogin(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, auth.ErrBusy):
 			writeError(w, http.StatusServiceUnavailable, "busy", "the server is busy, try again in a moment")
 		case errors.Is(err, auth.ErrInvalidLogin):
-			s.auditAs(r, nil, "login.failed", truncate(b.Username, 64), nil)
+			s.auditAs(r, nil, "login.failed", truncate(b.Username, 64), signInAs(b.Username))
 			writeError(w, http.StatusUnauthorized, "invalid_login", "wrong username or password")
 		default:
 			s.internalError(w, r, err)
@@ -782,6 +782,13 @@ func (s *Server) apiAdminCreateInvite(w http.ResponseWriter, r *http.Request) {
 		"url":        s.cfg.Origin() + "/invite/" + tok,
 		"expires_at": exp,
 	})
+}
+
+// signInAs: of a sign-in that failed, the name as sign-in looks it up
+// (TrimSpace, any case), for the audit list to find under that user: what
+// was typed stays the entry's target as it was.
+func signInAs(name string) map[string]any {
+	return map[string]any{"as": strings.ToLower(truncate(strings.TrimSpace(name), 64))}
 }
 
 // The kinds an audit list can be narrowed to, by the first part of an

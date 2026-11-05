@@ -623,6 +623,9 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-pic:not(.is-unknown):hover { color: var(--term-fg); border-color: color-mix(in srgb, var(--term-fg) 32%, transparent); }
 .convo-pic:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: 2px; }
 @media (pointer: coarse) { .convo-pic { padding: 7px 12px; } }
+/* A picture named in the words, where it stands (11-05): a chip in the line. */
+.convo-pic.is-inline { display: inline-flex; vertical-align: baseline; padding: 0 8px; margin: 0 2px; line-height: 22px; font-size: 13px; position: relative; }
+@media (pointer: coarse) { .convo-pic.is-inline { padding: 0 9px; } .convo-pic.is-inline::after { content: ''; position: absolute; inset: -11px -2px; } }
 .convo-meta { display: flex; gap: 12px; font-size: 12px; color: var(--term-fg-3); font-variant-numeric: tabular-nums; }
 .convo-meta .link-btn { font-size: 12px; color: var(--term-fg-3); }
 .convo-meta-acts { display: inline-flex; gap: 12px; }
