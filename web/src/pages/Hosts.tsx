@@ -7,7 +7,7 @@ import { Confirm, EmptyState, LoadError, Menu } from '../components/ui'
 import { useConnect } from '../connect'
 import { useSession } from '../app'
 import { useCode } from '../terminal/CodeDialog'
-import { noteSessions, sessionAgents } from '../terminal/agents'
+import { noteSessions, sessionAgents, waitingAgents } from '../terminal/agents'
 import { sessionWhich } from '../terminal/sessionName'
 import { local } from '../storage'
 
@@ -126,7 +126,8 @@ export function HostsPage() {
   const hostState = (id: number): { text: string; wait: boolean } | null => {
     const mine = running.filter((x) => x.host_id === id)
     if (!mine.length) return null
-    const w = mine.reduce((n, x) => n + waitingIn(x), 0)
+    // (Each agent once, however many of its sessions show it — as the navigation counts: review.)
+    const w = sessFailed ? 0 : waitingAgents(mine)
     if (w) return { text: t('hosts.herdrWaiting', { n: w }), wait: true }
     return { text: mine.length > 1 ? t('hosts.sessionsRunning', { n: mine.length }) : t('hosts.runningOne'), wait: false }
   }

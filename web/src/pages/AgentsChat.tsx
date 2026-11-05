@@ -944,6 +944,17 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     }
     return undefined
   }, [convo.entries])
+  // (Any call of the agent's not come back yet: what a permission is of.)
+  const pendingCall = useMemo(() => {
+    for (let i = convo.entries.length - 1; i >= 0; i--) {
+      const e = convo.entries[i]
+      if (e.gone || (e.role === 'note' && !e.parts.some((p) => p.text))) continue
+      if (e.role !== 'assistant') return undefined
+      const last = e.parts[e.parts.length - 1]?.tool
+      return last && !last.done ? last : undefined
+    }
+    return undefined
+  }, [convo.entries])
   const replyTo = useMemo(
     () => {
       const to = viaConvo && convo.bind ? convoTarget(sid, convo.bind, cur.s.persistence === 'tmux') : herdr && row ? herdrTarget(sid, row.a) : null
@@ -2104,7 +2115,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       ask={
         waits && replyTo ? (
           // (One a pane, and a process in it: nothing of another's carries over. Not tied to a terminal: no size to wait for.)
-          <InlineReply key={replyTo.key} target={replyTo} resizedAt={0} active={active} held={() => false} call={asked} onAnswered={setAnswered} />
+          <InlineReply key={replyTo.key} target={replyTo} resizedAt={0} active={active} held={() => false} call={asked} pending={pendingCall} onAnswered={setAnswered} />
         ) : undefined
       }
       // (The bar's stop only where the box's one is not there: words or files

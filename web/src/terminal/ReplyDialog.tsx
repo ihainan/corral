@@ -492,6 +492,21 @@ function useAnswerKeys(on: boolean, ready: boolean, keys: string[], held: (() =>
   }, [on, list])
 }
 
+// What a permission asks, from the log, where the screen shows its end: the
+// last call's command (Bash) or file (an edit), if the last of its words —
+// spaces and the box's own lines aside, as the screen wraps them — are on the
+// screen. null: not that call, or none.
+const SPACES = /[\s│|]+/g
+function fromLog(call: ConvoTool | undefined, screen: string): { kind: 'run' | 'edit'; what: string; desc?: string } | null {
+  if (!call?.detail) return null
+  const run = call.name === 'Bash'
+  const edit = /^(?:Edit|MultiEdit|Write|NotebookEdit)$/.test(call.name)
+  if (!run && !edit) return null
+  const tail = call.detail.replace(SPACES, '').slice(-24)
+  if (tail.length < 4 || !screen.replace(SPACES, '').includes(tail)) return null
+  return { kind: run ? 'run' : 'edit', what: call.detail, desc: run ? call.title : undefined }
+}
+
 // The same, in the conversation, over the composer: the question, what it is
 // of (from the log), its choices (keys 1–9, Esc), a line of text, and the
 // screen itself on demand.
@@ -501,7 +516,10 @@ function useAnswerKeys(on: boolean, ready: boolean, keys: string[], held: (() =>
 // onAnswered: told when it has been answered here (and when that no longer
 // holds: another question came), so the page says so before the agent's
 // state, read every few seconds, does.
-export function InlineReply({ target, onLoaded, resizedAt, active = true, held, call, onAnswered }: { target: ReplyTarget; onLoaded?: () => void; resizedAt?: number; active?: boolean; held?: () => boolean; call?: ConvoTool; onAnswered?: (yes: boolean) => void }) {
+// pending: the agent's last call not come back, whatever it is — what a
+// permission asks of, drawn from the log where the screen does not show its
+// start (fromLog).
+export function InlineReply({ target, onLoaded, resizedAt, active = true, held, call, pending, onAnswered }: { target: ReplyTarget; onLoaded?: () => void; resizedAt?: number; active?: boolean; held?: () => boolean; call?: ConvoTool; pending?: ConvoTool; onAnswered?: (yes: boolean) => void }) {
   const [sent, setSent] = useState<string | null>(null) // (the screen answered)
   const answeredRef = useRef(onAnswered)
   answeredRef.current = onAnswered
@@ -619,7 +637,12 @@ export function InlineReply({ target, onLoaded, resizedAt, active = true, held, 
   const waiting = t('convo.waiting', { agent: agentName(target.agent) })
   // (What is asked not told apart on the screen, the screen itself shows; a
   // question of Claude Code's is all its choices.)
-  const needScreen = !!screen && !block && !cx && !folds(screen)
+  // (Not told apart there — a long command, the box's top gone up off the
+  // screen — what the log says it asks: its command or file, where the
+  // screen does show that very one (its end found there). 11-05: a long
+  // heredoc showed as a stretch of code from its middle, no telling what.)
+  const logged = !!screen && !block && !cx && !folds(screen) && opts.length > 0 ? fromLog(pending, screen.text) : null
+  const needScreen = !!screen && !block && !cx && !folds(screen) && !logged
   // (Not told apart, the whole screen, before the choices; else behind its button.)
   const screenLines = screen ? screen.text.split('\n') : []
   const linesShown = needScreen ? screenLines : screenLines.slice(-shownLines)
@@ -688,7 +711,7 @@ export function InlineReply({ target, onLoaded, resizedAt, active = true, held, 
     )
   }
   const q = cx ? cx.question : screen ? question(screen.text) : ''
-  const shownQ = block && /^Bash command$/i.test(block.head) && /^Do you want to proceed\?$/i.test(q) ? t('convo.askRun') : questionText(q)
+  const shownQ = (block && /^Bash command$/i.test(block.head)) || logged?.kind === 'run' ? (/^Do you want to proceed\?$/i.test(q) || logged ? t('convo.askRun') : questionText(q)) : logged?.kind === 'edit' ? t('convo.askEdit') : questionText(q)
   // (A question of Codex's: each choice's label and description apart.)
   const shownOpts =
     cx?.kind === 'question'
@@ -700,6 +723,12 @@ export function InlineReply({ target, onLoaded, resizedAt, active = true, held, 
       {cx?.kind === 'question' && cx.total > 1 && <p className="convo-ask-of">{t('convo.askQuestionOf', { i: cx.index, n: cx.total })}</p>}
       {driven.unsure && <p className="reply-changed" role="alert">{t('ask.unsure')}</p>}
       {block && <Asked lines={block.lines} head={block.head} />}
+      {logged && (
+        <div className="convo-ask-asked">
+          {logged.desc && <p className="convo-ask-desc">{logged.desc}</p>}
+          <pre className="convo-ask-block">{logged.what}</pre>
+        </div>
+      )}
       {cx && cx.kind !== 'question' && cx.lines.length > 0 && <Asked lines={cx.lines} />}
       {(needScreen || !!screen?.cut) && !failed && <p className="convo-ask-unread">{t(screen?.cut ? 'reply.cut' : 'convo.askUnread')}</p>}
       {!failed && hookHint}

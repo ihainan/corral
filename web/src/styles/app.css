@@ -875,7 +875,7 @@ details.adv > .form { margin-top: 16px; }
 .live-name { flex: 0 1 auto; }
 /* Searching a long list, and its order (hosts: pages-1105 1.5). */
 .page-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin: 4px 0 8px; }
-.page-search { flex: 1 1 240px; display: flex; align-items: center; gap: 8px; height: var(--h-input); padding: 0 12px; border: 1px solid var(--line-input); border-radius: var(--r); color: var(--fg-3); background: var(--bg); }
+.page-search { min-width: 0; flex: 1 1 240px; display: flex; align-items: center; gap: 8px; height: var(--h-input); padding: 0 12px; border: 1px solid var(--line-input); border-radius: var(--r); color: var(--fg-3); background: var(--bg); }
 .page-search:focus-within { border-color: var(--accent); box-shadow: var(--focus); }
 .page-search input:focus, .page-search input:focus-visible, .files-filter-box input:focus, .files-filter-box input:focus-visible { outline: none; box-shadow: none; } /* (the box shows it) */
 .page-search input { flex: 1; min-width: 0; height: 100%; border: 0; padding: 0; background: none; color: var(--fg); outline: none; }
@@ -949,7 +949,7 @@ details.adv > .form { margin-top: 16px; }
 .page-order-menu { display: none; flex: none; gap: 4px; }
 @media (max-width: 599px) {
   .page-tools:has(.page-order-menu) { flex-wrap: nowrap; }
-  .page-tools .page-order { display: none; }
+  .page-tools:has(.page-order-menu) .page-order { display: none; } /* (the hosts' order only: the users' filter stays — review) */
   .page-order-menu { display: inline-flex; height: var(--h-input); padding: 0 12px; border-radius: 6px; }
   .page-order-menu svg { color: var(--fg-3); }
 }
