@@ -67,10 +67,10 @@ func (s *Server) convoScreen(w http.ResponseWriter, ctx context.Context, sess *t
 
 // screenOf: a screen as read (convoScreenCommand's output) as it is shown
 // (without blank space at its end, its last maxScreenBytes), and the digest
-// that names it: the SHA-256 of all of it as read, which the host computes
-// again right before an answer's keys.
+// that names it: the SHA-256 of all of it as read, what blinks aside
+// (steadyScreen), which the host computes again right before an answer's keys.
 func screenOf(raw []byte) (text, digest string, cut bool) {
-	sum := sha256.Sum256(raw)
+	sum := sha256.Sum256(steadyScreen(raw))
 	text = strings.TrimRight(strings.ReplaceAll(string(raw), "\r\n", "\n"), " \t\n")
 	if len(text) > maxScreenBytes {
 		at := len(text) - maxScreenBytes

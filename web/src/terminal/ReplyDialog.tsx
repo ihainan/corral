@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 'react'
+import { Fragment, useContext, useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 'react'
 import { RotateCw } from 'lucide-react'
 import { api, ApiError, errorText, type HerdrAgent } from '../api'
 import { t } from '../i18n'
@@ -7,6 +7,8 @@ import { getReplyDraft, keepReplyDraft } from './drafts'
 import { asksQuestion, choices, codexAsk, codexOptions, dashedRule, promptBlock, question } from './menu'
 import { agentName, choiceText, lasting, questionText } from './askText'
 import { askLead, readAskScreen, reviewAsDrawn } from './askScreen'
+import { PanelWindow } from './PanelWindow'
+import { ShowTerminal } from './showTerminal'
 import { askOn, AskPanel, OwnBox, planOn, PlanPanel, ReviewPanel, screenCall, useDrive } from './askCard'
 import { Filled, MaybeSent, NotAsShown, ownWords, permissionAmend } from './ownWords'
 import type { ConvoTool } from './conversation'
@@ -70,6 +72,7 @@ export interface ReplyTarget {
   // the conversation's only — see ownWords.ts.)
   fill?: (body: { digest: string; text: string }) => Promise<unknown>
   host?: { id: number; name: string } // (the host it runs on, where known: for AskHookHint)
+  live?: { sid: string; press: () => Record<string, unknown> } // (Claude Code's in the conversation: its terminal can be shown here: PanelWindow)
 }
 
 export function herdrTarget(sessionId: string, agent: HerdrAgent): ReplyTarget {
@@ -93,6 +96,7 @@ export function convoTarget(sessionId: string, bind: { pane: string; pid: number
     // (Claude Code's, in tmux: as tried — plans/5-claude-own-words.md. Its
     // tries made by ownWords.)
     fill: canFill && bind.agent === 'claude' ? (b) => api('POST', base + '/reply', { ...who, ...b, fill: true }) : undefined,
+    live: (bind.agent ?? 'claude') === 'claude' ? { sid: sessionId, press: () => who } : undefined,
   }
 }
 
@@ -544,6 +548,8 @@ function useFreshAsk(id: string): boolean {
 }
 
 export function InlineReply({ target, onLoaded, resizedAt, active = true, held, call, pending, onAnswered, waitSince }: { target: ReplyTarget; onLoaded?: () => void; resizedAt?: number; active?: boolean; held?: () => boolean; call?: ConvoTool; pending?: ConvoTool; onAnswered?: (yes: boolean) => void; waitSince?: number }) {
+  const toast = useToast()
+  const showTerminal = useContext(ShowTerminal)
   const [sent, setSent] = useState<string | null>(null) // (the screen answered)
   const answeredRef = useRef(onAnswered)
   answeredRef.current = onAnswered
@@ -704,6 +710,17 @@ export function InlineReply({ target, onLoaded, resizedAt, active = true, held, 
   const cardRef = useRef<HTMLDivElement>(null)
   useAnswerKeys(active && !structured, ready, [...opts.map((o) => o.key), 'esc'], held, cardRef, (k) => (k === 'esc' ? void send({ keys: [k] }) : confirm.choose(k)))
   if (sent !== null) return <p className="convo-ask-sent" role="status">{t('convo.answeredHere')}</p>
+  // (What it asks not made out: the terminal itself, with its colours and its
+  // layout, keys going to it. Not the words of a screen and two buttons: that
+  // was a third way of showing it, worse than either.)
+  if (needScreen && target.live && !failed && !structured) {
+    return (
+      <div className="convo-ask-live">
+        {hookHint}
+        <PanelWindow key={target.key} sid={target.live.sid} press={target.live.press} active={active} onSettled={() => {}} toast={toast} live={{ note: t('panel.waiting'), onFull: showTerminal }} />
+      </div>
+    )
+  }
   if (structured && screen && (asking || state.kind === 'review')) {
     return (
       <div className={'convo-ask' + (fresh ? ' is-new' : '')} role="group" aria-label={waiting} aria-busy={busy}>

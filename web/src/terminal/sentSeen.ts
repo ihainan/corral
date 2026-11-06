@@ -11,13 +11,20 @@
 const PICTURE = /'[^']*\.(?:png|jpe?g|gif|webp)'|"[^"]*\.(?:png|jpe?g|gif|webp)"|(?:~|\/)[^\s'"]*\.(?:png|jpe?g|gif|webp)\b/gi
 const IMAGE_TOKEN = /\[Image #\d+\]/g
 
+const picturesIn = (s: string) => (s.match(PICTURE) ?? []).map((p) => p.replace(/^['"]|['"]$/g, ''))
 const wordsOf = (s: string) => s.replace(IMAGE_TOKEN, ' ').replace(PICTURE, ' ').replace(/\s+/g, '')
 
-// The same message, pictures and blanks aside, however it was written down.
-// (Nothing but pictures: nothing to tell it by.)
+// The same message, however it was written down: the same words, and each
+// path it was sent with still there as a path or gone for a placeholder. (A
+// path the log has that was not sent is another message's: "delete a.png" is
+// not "delete b.png". Nothing but pictures: nothing to tell it by.)
 export function sameMessage(logged: string, sent: string): boolean {
   const w = wordsOf(sent)
-  return !!w && wordsOf(logged) === w
+  if (!w || wordsOf(logged) !== w) return false
+  const paths = picturesIn(sent)
+  const kept = picturesIn(logged)
+  const tokens = logged.match(IMAGE_TOKEN)?.length ?? 0
+  return kept.every((k) => paths.includes(k)) && kept.length + tokens === paths.length
 }
 
 // A row the log has of something submitted: its place, its time, its words.
@@ -32,6 +39,7 @@ export interface Waiting {
   text: string
   at: number
   after: number // the log's last seq when it went
+  beforeQueued?: number[] // what waited in its queue when it went: not this one's
   afterTs?: string // and that row's time: read anew (other seqs), only later ones count
 }
 
@@ -40,13 +48,14 @@ const CLOCK_LEEWAY_MS = 60000
 
 export const camesAfter = (s: Submission, p: Waiting) => {
   if (s.seq !== undefined && s.seq <= p.after) return false
+  if (s.seq === undefined && p.beforeQueued?.includes(s.key)) return false
   const ts = s.ts ? Date.parse(s.ts) : NaN
   if (!isNaN(ts) && ts < p.at - CLOCK_LEEWAY_MS) return false
   return !(p.afterTs && !isNaN(ts) && ts <= Date.parse(p.afterTs))
 }
 
 // A command that opens a panel, or that Claude Code answers itself, may write
-// no row at all: none is waited for.
+// no row at all: none is waited for, and only a row of that command is its own.
 // (A command, not a path: a message may well begin with a picture's.)
 export const isCommand = (text: string) => /^\/[\w:.-]+(?:\s|$)/.test(text.trimStart()) && !/\.(?:png|jpe?g|gif|webp)$/i.test(text.trimStart().split(/\s/, 1)[0])
 
@@ -56,8 +65,8 @@ export function pairSent<P extends Waiting>(waiting: P[], subs: Submission[], us
   const out: { p: P; s: Submission }[] = []
   const taken = new Set<number>()
   for (const p of waiting) {
-    if (isCommand(p.text)) continue
-    const s = subs.find((x) => !used.has(x.key) && !taken.has(x.key) && camesAfter(x, p))
+    const command = isCommand(p.text) ? p.text.trimStart().split(/\s/, 1)[0] : ''
+    const s = subs.find((x) => !used.has(x.key) && !taken.has(x.key) && camesAfter(x, p) && (!command || x.text.trimStart().startsWith(command)))
     if (!s) continue
     taken.add(s.key)
     out.push({ p, s })

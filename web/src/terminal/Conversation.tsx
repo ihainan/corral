@@ -164,6 +164,7 @@ export function ConversationView({
   onDismiss,
   onEnter,
   onResend,
+  onLook,
   onShowTerminal,
   onCopied,
   composer,
@@ -193,6 +194,7 @@ export function ConversationView({
   onDismiss: (id: number) => void
   onEnter?: (id: number) => Promise<boolean> // (a message seen still in the input: Enter for it, where it still is)
   onResend?: (id: number) => void // (one a subagent took in: back in the composer, to send to this one)
+  onLook?: () => void // (its terminal shown here, where it can be)
   onShowTerminal: () => void
   onCopied: () => void
   composer?: ReactNode // (the terminal's composer, while it is open)
@@ -1050,7 +1052,7 @@ export function ConversationView({
             <button type="button" className="link-btn" onClick={() => onDismiss(p.id)}>{t('common.close')}</button>
           )}
         </div>
-        <SentNote p={p} onEnter={onEnter && (() => onEnter(p.id))} onResend={onResend && (() => onResend(p.id))} onShowTerminal={onShowTerminal} />
+        <SentNote p={p} onEnter={onEnter && (() => onEnter(p.id))} onResend={onResend && (() => onResend(p.id))} onShowTerminal={onLook ?? onShowTerminal} />
       </div>
     )
   })

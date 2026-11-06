@@ -21,6 +21,12 @@ import (
 // its panel would stop what it does then). A key that settles something (Enter,
 // Space, a digit: /config's flips a setting at once) goes only onto the screen
 // the person was shown, "panel:<digest>".
+//
+// The same window shows the terminal as it is where the page cannot make out
+// what is up there or was refused a message: "look" and "look:<digest>", which
+// ask nothing of its state, a key there being as one in the terminal, and no
+// more than that. No key goes unless pressed; this does not resize the pane or
+// bring it in front, as the terminal page does.
 
 // panelKeyOK: what may be pressed in a panel: moving, confirming, cancelling,
 // and the letters its search takes (not words pasted: a list takes them key by key).
@@ -75,7 +81,7 @@ func (s *Server) convoPanelScreen(w http.ResponseWriter, ctx context.Context, se
 // (cross-checked in a test).
 func panelDigest(raw []byte) string {
 	b := bytes.ReplaceAll(raw, []byte{0}, nil)
-	b = panelSGR.ReplaceAll(b, nil)
+	b = steadyScreen(panelSGR.ReplaceAll(b, nil))
 	if len(b) > 0 && b[len(b)-1] != '\n' {
 		b = append(append([]byte(nil), b...), '\n')
 	}
@@ -86,7 +92,18 @@ func panelDigest(raw []byte) string {
 var panelSGR = regexp.MustCompile(`\x1b\[[0-9;:]*m`)
 
 // panelDigestPipe: panelDigest as a shell pipeline, of what comes in.
-const panelDigestPipe = `tr -d '\000' | LC_ALL=C sed "s/$(printf '\033')\[[0-9;:]*m//g" | LC_ALL=C awk 1 | sha256sum`
+const panelDigestPipe = `tr -d '\000' | LC_ALL=C sed "s/$(printf '\033')\[[0-9;:]*m//g" | ` + steadyPipe + ` | LC_ALL=C awk 1 | sha256sum`
+
+// A tool's row under way blinks: its "●" (macOS's "⏺") goes to a blank and back
+// a few times a second, on a screen where nothing else moves. Counted, the
+// digest went between two values, and half of all answers to the prompt under
+// it were refused as "the screen changed" (11-06). So a line's first mark is
+// left out of what names a screen; both sides, steadyScreen and steadyPipe.
+var blinkingMark = regexp.MustCompile(`(?m)^([ \t]*)(?:●|⏺)`)
+
+func steadyScreen(raw []byte) []byte { return blinkingMark.ReplaceAll(raw, []byte("${1} ")) }
+
+const steadyPipe = `LC_ALL=C sed -e 's/^\([ 	]*\)●/\1 /' -e 's/^\([ 	]*\)⏺/\1 /'`
 
 // POST /api/sessions/{id}/conversation/panel-screen → {"text", "digest"}: the
 // screen, with its colours, to show a panel of its own by.

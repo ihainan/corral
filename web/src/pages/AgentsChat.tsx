@@ -649,7 +649,7 @@ const keptTitle = (titles: Titles, e: Entry): string | undefined => {
 // afterTs: the time of the log's last entry when it went; read anew (other
 // seqs), only a turn after that can be it.)
 // (wentSeen: when one found gone to a subagent was first shown, its note let go of WENT_SHOWN_MS after.)
-type Sent = ConvoPending & { bind: string; after: number; gen: number; at: number; was?: string; afterTs?: string; looked?: boolean; wentSeen?: number; sinceAt?: number /* (the agent's state's time as the gateway said it when sent) */ }
+type Sent = ConvoPending & { bind: string; after: number; gen: number; at: number; was?: string; afterTs?: string; beforeQueued?: number[]; looked?: boolean; wentSeen?: number; sinceAt?: number /* (the agent's state's time as the gateway said it when sent) */ }
 
 // What was sent and not seen in the log yet, as this tab kept it (the page
 // reloaded meanwhile): looked for again in all of the log, by its time as
@@ -661,6 +661,20 @@ const PREFETCH_MOST = 3
 const PREFETCH_AFTER_MS = 1500
 
 const SENT_KEPT_MS = 24 * 3600 * 1000
+// A queue's rows as submissions: placed by their time, apart from the seqs by
+// their sign, and of the same millisecond by their order. Not another session's, nor a notice.
+function queueRows(queued: { text: string; ts?: string; from?: string; note?: boolean }[] | undefined): Submission[] {
+  const seen = new Map<number, number>()
+  return (queued ?? []).flatMap((q) => {
+    const ms = q.ts ? Date.parse(q.ts) : NaN
+    if (q.from || q.note || isNaN(ms)) return []
+    const n = seen.get(ms) ?? 0
+    seen.set(ms, n + 1)
+    return [{ key: -(ms * 100 + n), ts: q.ts, text: q.text }]
+  })
+}
+// (A message refused for what is up in the terminal, or what could not be made out there.)
+const LIVE_ON = new Set(['no_input', 'other_view', 'subagent_view', 'typed_other_view', 'typed_not_sent', 'view_unsure', 'no_screen', 'cannot_verify', 'box_draft', 'draft', 'picker', 'unknown'])
 // (See the note on these where they are used.)
 const LOOK_AFTER_MS = 4000
 const LOOK_WITHIN_MS = 60000 // (later, as a page opened anew: a screen of now says nothing of then)
@@ -1156,6 +1170,8 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   const panelWanted = !!agent?.dialog && !!convo.bind && ownPicker === 0
   const [panelOpen, setPanelOpen] = useState(false)
   const panelShutAt = useRef(0)
+  // (The terminal as it is, shown here: a message refused, or asked for. Of this agent, till closed.)
+  const [liveOf, setLiveOf] = useState<string | null>(null)
   // (Before what waits on it reads it, below: effects run in order.)
   const panelHad = useRef(false)
   useEffect(() => {
@@ -1208,6 +1224,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       .finally(() => setModelBusy(false))
   }
 
+  const queueShown = agent?.status !== 'idle' && agent?.status !== 'done'
   // What was sent, until the log shows a submission after it: see sentSeen.
   // Only what the page shows goes by that; a draft is let go of by the words.
   const sentN = useRef(0)
@@ -1234,8 +1251,8 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     })
     const subs: Submission[] = [
       ...convo.entries.filter((e: ConvoEntry) => e.role === 'user').map((e: ConvoEntry) => ({ key: e.seq, seq: e.seq, ts: e.ts, text: e.parts.filter((x) => x.kind === 'text').map((x) => x.text).join('\n') })),
-      // (A queue row's place: its time, kept apart from the seqs by its sign. Not another session's, nor a notice.)
-      ...(convo.queued ?? []).filter((q) => !q.from && !q.note && q.ts).map((q) => ({ key: -Date.parse(q.ts!), ts: q.ts, text: q.text })),
+      // (Not while the queue is not shown, or the message would show nowhere.)
+      ...(queueShown ? queueRows(convo.queued) : []),
     ]
     const found = pairSent(mine.filter((p) => ofThis(p.bind)), subs, u)
     for (const { p, s } of found) {
@@ -1254,7 +1271,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       const gone = new Set(found.map((f) => f.p.id))
       setSent(() => mine.filter((p) => !gone.has(p.id)))
     }
-  }, [convo.entries, convo.queued, convo.gen, convo.status, sent, bindKey])
+  }, [convo.entries, convo.queued, convo.gen, convo.status, sent, bindKey, queueShown])
   // Nothing in the log a moment on, which is rare (it writes a row on taking
   // Enter): the screen read once, for the one thing it can show for sure, the
   // words still in its box. A command writes no row of its own, and its note
@@ -1264,20 +1281,22 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   useEffect(() => {
     const open = sent.filter((p) => p.state === 'waiting' && ofThis(p.bind))
     if (!open.length) return
-    const dues = open.flatMap((p) => (isCommand(p.text) ? [p.at + COMMAND_NOTE_MS] : [...(p.looked ? [] : [p.at + LOOK_AFTER_MS]), ...(p.quiet ? [] : [p.at + QUIET_AFTER_MS])]))
+    // (A command's note, while its panel is open: held, nothing to wake for.)
+    const dues = open.flatMap((p) => (isCommand(p.text) ? (panelOpen ? [] : [p.at + COMMAND_NOTE_MS]) : [...(p.looked ? [] : [p.at + LOOK_AFTER_MS]), ...(p.quiet ? [] : [p.at + QUIET_AFTER_MS])]))
     if (!dues.length) return
     const timer = setTimeout(() => {
       const now = Date.now()
-      setSent((ps) =>
-        ps.flatMap((p) => {
+      setSent((ps) => {
+        const next = ps.flatMap((p) => {
           if (p.state !== 'waiting' || !ofThis(p.bind)) return [p]
           if (isCommand(p.text)) return now - p.at >= COMMAND_NOTE_MS && !panelNow.current ? [] : [p]
           let q = p
           if (!q.looked && now - q.at >= LOOK_AFTER_MS) q = { ...q, looked: true, ...(now - q.at < LOOK_WITHIN_MS ? { look: 'looking' as const } : {}) }
           if (!q.quiet && now - q.at >= QUIET_AFTER_MS) q = { ...q, quiet: true }
           return [q]
-        }),
-      )
+        })
+        return next.length === ps.length && next.every((p, i) => p === ps[i]) ? ps : next
+      })
     }, Math.max(0, Math.min(...dues) - Date.now()) + 50)
     return () => clearTimeout(timer)
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1686,7 +1705,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     const id = Date.now() * 100 + (++sentN.current % 100)
     const mark = (extra: Partial<Sent>) => setSent((ps) => ps.map((p) => (p.id === id ? { ...p, ...extra } : p)))
     const drop = () => setSent((ps) => ps.filter((p) => p.id !== id))
-    setSent((ps) => [...ps, { id, text, shown: was, state: 'sending' as const, bind: bindKey, after, afterTs, gen: convo.gen, at, sinceAt: cur.row && !cur.row.lost ? cur.row.a.since : undefined }].slice(-5))
+    setSent((ps) => [...ps, { id, text, shown: was, beforeQueued: queueRows(convo.queued).map((q) => q.key), state: 'sending' as const, bind: bindKey, after, afterTs, gen: convo.gen, at, sinceAt: cur.row && !cur.row.lost ? cur.row.a.since : undefined }].slice(-5))
     // The box is emptied with it (the draft kept too, even if put aside
     // meanwhile, or shown by another of this page since); what it held comes
     // back if the message is refused.
@@ -1721,6 +1740,8 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
           drop()
           return
         }
+        // (What stopped it is up there, or could not be made out: the terminal, here, to deal with it.)
+        if (e instanceof ApiError && LIVE_ON.has(e.code) && (b.agent ?? 'claude') === 'claude') setLiveOf(bindKey)
         // Whether it went is not known (the gateway lost the host on the way,
         // or the answer was lost on its way here): it is looked for as one
         // sent, the draft staying until it is seen.
@@ -1796,6 +1817,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       {/* (Something written while it works: what will become of it, said while it is typed — the placeholder that said so is gone by then.) */}
       {!blocked && draft.trim() && agent?.status === 'working' && <p className="agents-chat-why is-note">{t(steers ? 'convo.steerNote' : 'convo.queueNote')}</p>}
       {panelOpen && <PanelWindow key={bindKey} sid={sid} active={active} press={pressBody} onSettled={convo.refresh} toast={toast} />}
+      {!panelOpen && !waits && liveOf === bindKey && <PanelWindow key={'live ' + bindKey} sid={sid} active={active} press={pressBody} onSettled={convo.refresh} toast={toast} live={{ onClose: () => setLiveOf(null), onFull: () => openTerminal() }} />}
       <div className="composer-box">
         <AttachStrip
           draft={draft}
@@ -2159,6 +2181,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
         return r.pressed
       }}
       onShowTerminal={openTerminal}
+      onLook={(convo.bind?.agent ?? 'claude') === 'claude' && convo.bind ? () => setLiveOf(bindKey) : undefined}
       onCopied={() => toast(t('common.copied'))}
       composer={composer}
       onSendNow={canPress && !notClaude ? () => press('now') : undefined}

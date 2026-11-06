@@ -10,6 +10,7 @@ export interface ScreenOption {
   label: string
   cursor: boolean // the one the cursor is on (❯)
   cut?: boolean // (previews beside) its words ran to its column's edge: more of it may be on the next line
+  under?: string // (previews beside) what its column has under it, to the next choice: the rest of a long label, and any more
   ticked?: boolean // (a choice of many) [✔]
   desc?: string // (nothing beside) the lines drawn under it, indented: its description
 }
@@ -62,7 +63,12 @@ function options(lines: string[], beside = false): ScreenOption[] {
   const out: ScreenOption[] = []
   for (const l of lines) {
     const m = optionLine.exec(besideAt(l))
-    if (!m) continue
+    if (!m) {
+      const last = out[out.length - 1]
+      const words = besideAt(l).trim()
+      if (beside && last && words && !/^[\u2500-\u257f]/.test(words)) last.under = (last.under ?? '') + words
+      continue
+    }
     out.push({ n: Number(m[2]), label: m[4], cursor: !!m[1], ...(m[3] !== undefined ? { ticked: m[3] === '✔' } : {}), ...(beside && edge(l) ? { cut: true } : {}) })
   }
   return out

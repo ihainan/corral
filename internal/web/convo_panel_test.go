@@ -54,6 +54,7 @@ func TestPanelDigest(t *testing.T) {
 		"with\x00nul\n",
 		"\xff\xfe not utf-8\n",
 		"a\x1b[38:2::1:2:3mb\n",
+		"\x1b[38;5;246m\x1b[49m●\x1b[39m Needs permission\n  ● indented\n⏺ mac\nwords ● here\n",
 	} {
 		c := exec.Command("sh", "-c", panelDigestPipe)
 		c.Stdin = strings.NewReader(s)
@@ -65,10 +66,42 @@ func TestPanelDigest(t *testing.T) {
 			t.Errorf("%q: host %s, gateway %s", s, host, panelDigest([]byte(s)))
 		}
 	}
+	if panelDigest([]byte("● Needs permission\n")) != panelDigest([]byte("  Needs permission\n")) {
+		t.Error("a tool's blinking mark counts")
+	}
+	if panelDigest([]byte("  a ● b\n")) == panelDigest([]byte("  a   b\n")) {
+		t.Error("a mark among words does not count")
+	}
 	if panelDigest([]byte("\x1b[7m❯\x1b[0m a\n")) != panelDigest([]byte("❯ a\n")) {
 		t.Error("colours count")
 	}
 	if panelDigest([]byte("❯ a\n  b\n")) == panelDigest([]byte("  a\n❯ b\n")) {
 		t.Error("the choice does not count")
+	}
+}
+
+// The digest an answer goes with: the gateway's and the host's the same, on a
+// screen as read with no colours, whichever way its tool's row has blinked.
+func TestScreenDigestSteady(t *testing.T) {
+	for _, s := range []string{"plain\n", "● Needs permission\n Do you want to proceed?\n ❯ 1. Yes\n", "  ⏺ row\n\twords ● stay\n", "中文\n\n"} {
+		c := exec.Command("sh", "-c", steadyPipe+" | sha256sum")
+		c.Stdin = strings.NewReader(s)
+		out, err := c.Output()
+		if err != nil {
+			t.Fatalf("%q: %v", s, err)
+		}
+		_, gw, _ := screenOf([]byte(s))
+		if host, _, _ := strings.Cut(string(out), " "); host != gw {
+			t.Errorf("%q: host %s, gateway %s", s, host, gw)
+		}
+	}
+	_, a, _ := screenOf([]byte("● Needs permission\n ❯ 1. Yes\n"))
+	_, b, _ := screenOf([]byte("  Needs permission\n ❯ 1. Yes\n"))
+	if a != b {
+		t.Error("the screen's digest changes as its row blinks")
+	}
+	_, c, _ := screenOf([]byte("  Needs permission\n ❯ 2. No\n"))
+	if a == c {
+		t.Error("another choice is the same screen")
 	}
 }

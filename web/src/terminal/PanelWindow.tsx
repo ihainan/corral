@@ -46,12 +46,18 @@ const runStyle = (r: AnsiRun): React.CSSProperties => {
   }
 }
 
-export function PanelWindow({ sid, active, press, onSettled, toast }: { sid: string; active: boolean; press: () => Record<string, unknown>; onSettled: () => void; toast: (s: string, bad?: boolean) => void }) {
+// live: the terminal as it is, where the page cannot make out what is up there
+// or was refused a message: closed here without a key, the whole terminal a tap
+// away (words, which keys one by one cannot be, go there).
+export type PanelLive = { onClose?: () => void; onFull?: () => void; note?: string }
+export function PanelWindow({ sid, active, press, onSettled, toast, live }: { live?: PanelLive; sid: string; active: boolean; press: () => Record<string, unknown>; onSettled: () => void; toast: (s: string, bad?: boolean) => void }) {
   const [screen, setScreen] = useState({ text: '', digest: '' })
   const [lost, setLost] = useState(false)
   const [said, setSaid] = useState('')
   const box = useRef<HTMLPreElement>(null)
   const at = useRef({ shown: '', stale: true, reading: false, pumping: false, queue: [] as Pressed[], fails: 0, escDone: 0, escGoing: false, alive: true, look: null as AbortController | null })
+  const isLive = useRef(!!live)
+  isLive.current = !!live
   const activeNow = useRef(active)
   activeNow.current = active
   const pressNow = useRef(press)
@@ -106,7 +112,7 @@ export function PanelWindow({ sid, active, press, onSettled, toast }: { sid: str
         try {
           // (What the key left comes back with it: another round trip for it would be
           // most of what a key takes on a far-off host.)
-          const r = await api<{ text?: string; digest?: string }>('POST', `/api/sessions/${sid}/conversation/panel`, { ...pressNow.current(), keys: [k], ...(settles(k) ? { digest } : {}) }, { timeoutMs: 15000 })
+          const r = await api<{ text?: string; digest?: string }>('POST', `/api/sessions/${sid}/conversation/panel`, { ...pressNow.current(), keys: [k], ...(settles(k) ? { digest } : {}), ...(isLive.current ? { live: true } : {}) }, { timeoutMs: 15000 })
           a.stale = true
           if (a.alive) setSaid('')
           if (a.alive && typeof r?.text === 'string' && typeof r.digest === 'string') {
@@ -181,20 +187,34 @@ export function PanelWindow({ sid, active, press, onSettled, toast }: { sid: str
   }, [lines])
 
   return (
-    <div className="convo-panelwin" role="group" aria-label={t('panel.title')}>
+    <div className="convo-panelwin" role="group" aria-label={t(live ? 'panel.liveTitle' : 'panel.title')}>
       <div className="convo-panelwin-head">
-        <span className="convo-panelwin-title">{t('panel.title')}</span>
+        <span className="convo-panelwin-title">{t(live ? 'panel.liveTitle' : 'panel.title')}</span>
         {!isCoarse() && <span className="convo-panelwin-hint">{t('panel.hint')}</span>}
-        <button type="button" className="link-btn convo-panelwin-close" onClick={() => send('esc')}>
-          {t('agents.closeDialog')}
-        </button>
+        {live?.onFull && (
+          <button type="button" className="link-btn convo-panelwin-close" onClick={live.onFull}>
+            {t('panel.full')}
+          </button>
+        )}
+        {live ? (
+          live.onClose && (
+            <button type="button" className="link-btn convo-panelwin-close" onClick={live.onClose}>
+              {t('common.close')}
+            </button>
+          )
+        ) : (
+          <button type="button" className="link-btn convo-panelwin-close" onClick={() => send('esc')}>
+            {t('agents.closeDialog')}
+          </button>
+        )}
       </div>
+      {live?.note && <p className="convo-panelwin-note">{live.note}</p>}
       {/* (Takes the keys: what is pressed here goes to the panel.) */}
       <pre
         ref={box}
         className="convo-panelwin-screen"
         tabIndex={0}
-        aria-label={t('panel.screen')}
+        aria-label={t(live ? 'panel.liveScreen' : 'panel.screen')}
         onScroll={(e) => {
           const el = e.currentTarget
           pinned.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24

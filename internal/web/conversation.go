@@ -2771,8 +2771,8 @@ if [ -n "$gate" ]; then
   screen:*)
     [ "$st" = waiting ] && exit 9; [ "$st" = title-unread ] && exit 11
     command -v sha256sum >/dev/null 2>&1 || exit 11
-    if [ "$mode" = tmux ]; then d=$(tmux -u capture-pane -p -t "$p" 2>/dev/null 9>&- | sha256sum)
-    else d=$(HERDR_SOCKET_PATH=$sock herdr pane read "$p" --source visible 2>/dev/null 9>&- | sha256sum); fi
+    if [ "$mode" = tmux ]; then d=$(tmux -u capture-pane -p -t "$p" 2>/dev/null 9>&- | STEADYSCREEN | sha256sum)
+    else d=$(HERDR_SOCKET_PATH=$sock herdr pane read "$p" --source visible 2>/dev/null 9>&- | STEADYSCREEN | sha256sum); fi
     [ "${d%% *}" = "${gate#screen:}" ] || exit 10 ;;
   idle) [ "$st" = idle ] || exit 12 ;;
   dialog|panel|panel:*)
@@ -2791,12 +2791,20 @@ if [ -n "$gate" ]; then
       else d=$(HERDR_SOCKET_PATH=$sock herdr pane read "$p" --source visible --format ansi 2>/dev/null | PANELDIGEST); fi
       [ "${d%% *}" = "${gate#panel:}" ] || exit 10 ;;
     esac ;;
+  look) ;;
+  # (The terminal shown as it is: any state, as a key in the terminal is; one
+  # that settles something, only on the screen the person was shown.)
+  look:*)
+    command -v sha256sum >/dev/null 2>&1 || exit 11
+    if [ "$mode" = tmux ]; then d=$(tmux -u capture-pane -p -e -t "$p" 2>/dev/null | PANELDIGEST)
+    else d=$(HERDR_SOCKET_PATH=$sock herdr pane read "$p" --source visible --format ansi 2>/dev/null | PANELDIGEST); fi
+    [ "${d%% *}" = "${gate#look:}" ] || exit 10 ;;
   reply:*)
     [ "$st" = waiting ] || exit 9
     case $wf in "permission prompt"|"input needed"|"sandbox request"|"worker request") ;; *) exit 9;; esac
     command -v sha256sum >/dev/null 2>&1 || exit 11
-    if [ "$mode" = tmux ]; then d=$(tmux -u capture-pane -p -t "$p" 2>/dev/null 9>&- | sha256sum)
-    else d=$(HERDR_SOCKET_PATH=$sock herdr pane read "$p" --source visible 2>/dev/null 9>&- | sha256sum); fi
+    if [ "$mode" = tmux ]; then d=$(tmux -u capture-pane -p -t "$p" 2>/dev/null 9>&- | STEADYSCREEN | sha256sum)
+    else d=$(HERDR_SOCKET_PATH=$sock herdr pane read "$p" --source visible 2>/dev/null 9>&- | STEADYSCREEN | sha256sum); fi
     [ "${d%% *}" = "${gate#reply:}" ] || exit 10 ;;
   card:*)
     # (A card's key: not while it waits; its region of the screen, read with
@@ -2893,6 +2901,7 @@ fi`
 
 	script = strings.ReplaceAll(script, "CARDAWK", cardRegionAwk) // (see convo_card.go)
 	script = strings.ReplaceAll(script, "PANELDIGEST", panelDigestPipe)
+	script = strings.ReplaceAll(script, "STEADYSCREEN", steadyPipe)
 	script = strings.ReplaceAll(script, "OWNERAWK", claudeOwnerAwk) // (see convo_view.go)
 	script = strings.ReplaceAll(script, "FOOTAWK", claudeFootAwk)
 	script = strings.ReplaceAll(script, "BOXAWK", claudeBoxAwk)
@@ -3175,6 +3184,7 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		// permission's amend, a plan's "Tell Claude what to change" — and
 		// no Enter: the page looks, then presses it. plans/5-claude-own-words.md)
 		Fill bool `json:"fill"`
+		Live bool `json:"live"` // (panel: the terminal shown as it is, not a panel of its own)
 		// (card: its key, and the card as the page shows it.)
 		Key  string     `json:"key"`
 		Card *convoCard `json:"card"`
@@ -3202,6 +3212,9 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		text = b.Text
 	}
 	if b.Fill && what != "reply" {
+		textOK = false
+	}
+	if b.Live && what != "panel" {
 		textOK = false
 	}
 	if what != "reply" && what != "panel" && (b.Digest != "" || len(b.Keys) > 0) {
@@ -3569,8 +3582,11 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	case what == "panel":
 		// (Not Claude Code's: refused above. Whichever key, only while one is open.)
 		gate = "panel"
+		if b.Live {
+			gate = "look" // (the terminal shown as it is, whatever is up there: see convo_panel.go)
+		}
 		if panelSettles(b.Keys[0]) {
-			gate = "panel:" + b.Digest
+			gate += ":" + b.Digest
 		}
 	}
 	// Claude Code's box holding words already — a message a stop
