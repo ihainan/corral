@@ -13,6 +13,7 @@ import { CardNotice, useClaudeCard, type ClaudeCard } from '../terminal/cardNoti
 import { attachedIn, expandPastes, getDraft, keepDraft, keepPaste, keepSent, keptSent, remember, sentHistory, unsendable } from '../terminal/drafts'
 import { geminiPath, shellPath } from '../terminal/paths'
 import { useCompletion } from '../terminal/Completion'
+import { PanelWindow } from '../terminal/PanelWindow'
 import { convoTarget, herdrTarget, InlineReply } from '../terminal/ReplyDialog'
 import { SessionOpDialog, type SessionOp } from '../terminal/sessionOps'
 import { NEW_AGENT, NewAgentDialog } from '../terminal/newAgent'
@@ -54,6 +55,8 @@ const NO_SESSION = '00000000-0000-0000-0000-000000000000'
 const LAST = 'corral.agentsPick'
 const ONLY_MINE = 'corral.agentsOnlyMine'
 const FROM_LIST = { agentsFromList: true }
+// (Longer than going through a picker of its own from here takes, between two reads.)
+const PANEL_AFTER_MS = 1500
 // Over the page, what an Escape would be meant for.
 const ESC_HELD = '[aria-modal="true"], [role="menu"], [role="dialog"], .convo-search, .convo-sub-body'
 // What is left without the "/" the commands button put in, or null when a word has been typed on to it.
@@ -1169,12 +1172,29 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     const b = convo.bind!
     return { pane: b.pane, pid: b.pid, start: b.start, session: b.session }
   }
+  // Going through a picker of its own from here (a model, an effort): that it
+  // has a dialog open then is this, not a panel to show.
+  const [ownPicker, setOwnPicker] = useState(0)
+  const own = <T,>(p: Promise<T>): Promise<T> => {
+    setOwnPicker((n) => n + 1)
+    return p.finally(() => setOwnPicker((n) => n - 1))
+  }
+  // A panel of its own open, for longer than one of those takes to go by
+  // (and a moment after it): shown here, and worked from here.
+  const panelWanted = !!agent?.dialog && !!convo.bind && ownPicker === 0
+  const [panelOpen, setPanelOpen] = useState(false)
+  const panelShutAt = useRef(0)
+  useEffect(() => {
+    if (!panelWanted) return setPanelOpen(false)
+    const h = setTimeout(() => setPanelOpen(true), PANEL_AFTER_MS)
+    return () => clearTimeout(h)
+  }, [panelWanted, bindKey])
   const pickEffort = (level: string) => {
     if (!convo.bind || effortBusy) return
     const bind = bindKey
     const was = convo.meta?.effort
     setEffortBusy(true)
-    api<{ effort?: string }>('POST', `/api/sessions/${sid}/conversation/effort`, { ...pressBody(), effort: level }, { timeoutMs: MODEL_MS })
+    own(api<{ effort?: string }>('POST', `/api/sessions/${sid}/conversation/effort`, { ...pressBody(), effort: level }, { timeoutMs: MODEL_MS }))
       .then((r) => {
         const took = r.effort || level
         setEffortNow({ effort: took, bind, was })
@@ -1190,7 +1210,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     const bind = bindKey
     setModels({ list: null, bind })
     setModelBusy(true)
-    api<{ models: ModelOpt[] }>('POST', `/api/sessions/${sid}/conversation/models`, pressBody(), { timeoutMs: MODEL_MS })
+    own(api<{ models: ModelOpt[] }>('POST', `/api/sessions/${sid}/conversation/models`, pressBody(), { timeoutMs: MODEL_MS }))
       .then((r) => setModels((m) => (m?.bind === bind ? { list: r.models, bind, at: Date.now() } : m)))
       .catch((e) => {
         setModels(null)
@@ -1201,7 +1221,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   const pickModel = (label: string, effort?: string) => {
     if (!convo.bind || modelBusy) return
     setModelBusy(true)
-    api<{ restored?: boolean }>('POST', `/api/sessions/${sid}/conversation/model`, { ...pressBody(), model: label, ...(effort ? { effort } : {}) }, { timeoutMs: MODEL_MS })
+    own(api<{ restored?: boolean }>('POST', `/api/sessions/${sid}/conversation/model`, { ...pressBody(), model: label, ...(effort ? { effort } : {}) }, { timeoutMs: MODEL_MS }))
       .then((r) => {
         toast(t('convo.modelSet', { m: effort ? `${label} · ${effort}` : label }) + (r.restored ? t('convo.modelRestored') : ''))
         setModels((m) => m && { ...m, list: m.list && m.list.map((o) => ({ ...o, current: o.label === label })) })
@@ -1320,13 +1340,16 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   useEffect(() => {
     const waiting = sent.filter((p) => p.state === 'waiting' && !queued.has(norm(p.text)))
     if (!waiting.length) return
-    const due = Math.min(...waiting.map((p) => p.at)) + PENDING_MS - Date.now()
+    // (A panel just shut: its command comes to the log now; a moment for that to be read.)
+    const due = Math.max(Math.min(...waiting.map((p) => p.at)) + PENDING_MS, panelShutAt.current + 3000) - Date.now()
     const timer = setTimeout(() => {
-      const late = (p: Sent) => p.state === 'waiting' && Date.now() - p.at >= PENDING_MS && !queuedRef.current.has(norm(p.text))
+      // (A command that opened a panel is in the log only once that is shut: not looked for meanwhile.)
+      const late = (p: Sent) => p.state === 'waiting' && Date.now() - p.at >= PENDING_MS && !queuedRef.current.has(norm(p.text)) && !(panelNow.current && p.text.trimStart().startsWith('/'))
       setSent((ps) => (ps.some(late) ? ps.map((p) => (late(p) ? { ...p, state: 'unseen' as const, look: 'looking' as const } : p)) : ps))
     }, Math.max(0, due) + 50)
     return () => clearTimeout(timer)
-  }, [sent, queued])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sent, queued, panelOpen])
   // A message that has not turned up in the log: the pane's screen is read
   // once, there and then, which is the only moment that can say whether the
   // words are still sitting in its input. (Afterwards nothing can.)
@@ -1499,6 +1522,16 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       completion.update()
     })
   }
+  // (A panel shut, its screen having had the keys: the box has them again; not
+  // where the focus has gone somewhere since.)
+  const panelNow = useRef(panelOpen)
+  panelNow.current = panelOpen
+  const panelWas = useRef(false)
+  useEffect(() => {
+    if (panelWas.current && !panelOpen) panelShutAt.current = Date.now()
+    if (panelWas.current && !panelOpen && hasKeyboardPointer() && (document.activeElement === document.body || !document.activeElement)) field.current?.focus({ preventScroll: true })
+    panelWas.current = panelOpen
+  }, [panelOpen])
   // (Another agent picked with the keyboard, or the page back in front: its
   // box takes the keys, as the terminal's does. Not from a dialog over it.)
   useEffect(() => {
@@ -1835,7 +1868,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   const composer = (
     // (A question over it: the box kept to a line, its tools back when it is typed in.)
     // (The card asking is up: the box gives its room to the card — one line says why — rather than stand empty under it, as on a small phone it pushed the card's own buttons out of sight.)
-    <div className={'composer' + (waits && agent?.status === 'blocked' ? ' is-held' : '') + (askHides ? ' is-asked' : '')}>
+    <div className={'composer' + (waits && agent?.status === 'blocked' ? ' is-held' : '') + (askHides ? ' is-asked' : '') + (panelOpen ? ' is-paneled' : '')}>
       {claudeCard.card && <CardNotice card={claudeCard.card} stale={claudeCard.stale} onPress={claudeCard.press} />}
       {completion.list}
       {up && (
@@ -1860,6 +1893,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       )}
       {/* (Something written while it works: what will become of it, said while it is typed — the placeholder that said so is gone by then.) */}
       {!blocked && draft.trim() && agent?.status === 'working' && <p className="agents-chat-why is-note">{t(steers ? 'convo.steerNote' : 'convo.queueNote')}</p>}
+      {panelOpen && <PanelWindow key={bindKey} sid={sid} press={pressBody} onSettled={convo.refresh} toast={toast} />}
       <div className="composer-box">
         <AttachStrip
           draft={draft}
@@ -2180,7 +2214,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     <ConversationView
       convo={convo}
       agent={agent}
-      pending={shownSent}
+      pending={panelOpen ? shownSent.map((p) => (p.state === 'waiting' && p.text.trimStart().startsWith('/') ? { ...p, opened: true } : p)) : shownSent}
       ask={
         waits && replyTo ? (
           // (One a pane, and a process in it: nothing of another's carries over. Not tied to a terminal: no size to wait for.)

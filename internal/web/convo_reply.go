@@ -130,7 +130,7 @@ func replyPress(mode string, keys []string) []string {
 	if mode == "herdr" {
 		return keys
 	}
-	tmux := map[string]string{"enter": "Enter", "esc": "Escape", "tab": "Tab", "space": "Space", "up": "Up", "down": "Down", "left": "Left", "right": "Right"}
+	tmux := map[string]string{"shift+tab": "BTab", "backspace": "BSpace", "enter": "Enter", "esc": "Escape", "tab": "Tab", "space": "Space", "up": "Up", "down": "Down", "left": "Left", "right": "Right"}
 	out := make([]string, len(keys))
 	for i, k := range keys {
 		if t, ok := tmux[k]; ok {

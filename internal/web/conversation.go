@@ -2778,6 +2778,14 @@ if [ -n "$gate" ]; then
   dialog)
     [ "$st" = waiting ] || exit 9
     case $wf in "permission prompt"|"input needed"|"sandbox request"|"worker request") exit 9;; esac ;;
+  dialog:*)
+    # (A key that settles something: on the screen shown, as an answer is.)
+    [ "$st" = waiting ] || exit 9
+    case $wf in "permission prompt"|"input needed"|"sandbox request"|"worker request") exit 9;; esac
+    command -v sha256sum >/dev/null 2>&1 || exit 11
+    if [ "$mode" = tmux ]; then d=$(tmux -u capture-pane -p -t "$p" 2>/dev/null 9>&- | sha256sum)
+    else d=$(HERDR_SOCKET_PATH=$sock herdr pane read "$p" --source visible 2>/dev/null 9>&- | sha256sum); fi
+    [ "${d%% *}" = "${gate#dialog:}" ] || exit 10 ;;
   reply:*)
     [ "$st" = waiting ] || exit 9
     case $wf in "permission prompt"|"input needed"|"sandbox request"|"worker request") ;; *) exit 9;; esac
@@ -2949,6 +2957,9 @@ var convoKeys = map[string]struct {
 	// Escape for a dialog of Claude Code's own (/usage, a picker), only
 	// while one is open: closed meanwhile, it would stop a turn begun since.
 	"close_dialog": {"convo.close_dialog", []string{"esc"}, []string{"Escape"}},
+	// A panel of its own, shown here and worked from here (see convo_panel.go).
+	"panel_screen": {"convo.panel_screen", nil, nil},
+	"panel":        {"convo.panel", nil, nil},
 	"send_now":     {"convo.send_now", []string{"ctrl+x", "ctrl+s"}, []string{"C-x", "C-s"}},
 	"mode":         {"convo.mode", []string{"shift+tab"}, []string{"BTab"}}, // (Claude Code's next permission mode)
 	"models":       {"convo.models", nil, nil},                              // (its picker read: see convo_model.go)
@@ -3174,6 +3185,9 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	} else if what != "send" && what != "sent_missing" && what != "sent_enter" && what != "reply" {
 		textOK = b.Text == ""
 	}
+	if what == "panel" {
+		textOK = b.Text == "" && panelOK(b.Keys, b.Digest)
+	}
 	if what == "reply" {
 		textOK = replyOK(b.Digest, b.Keys, b.Text) // (keys, or a line: its own rules)
 		if b.Fill {
@@ -3184,7 +3198,7 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	if b.Fill && what != "reply" {
 		textOK = false
 	}
-	if what != "reply" && (b.Digest != "" || len(b.Keys) > 0) {
+	if what != "reply" && what != "panel" && (b.Digest != "" || len(b.Keys) > 0) {
 		textOK = false
 	}
 	if what == "model" && (b.Model == "" || len(b.Model) > 64 || strings.ContainsFunc(b.Model, func(r rune) bool { return r < 0x20 || r == 0x7f })) {
@@ -3228,6 +3242,10 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		// only a screen that could not be read is noted, not each look, nor
 		// one not made, the agent gone from the pane say.)
 		if what == "suggest" && reason != "no_screen" {
+			return
+		}
+		// (Likewise each look at a panel, read over and over while it is open; each key is noted.)
+		if what == "panel_screen" && reason != "no_screen" {
 			return
 		}
 		actx, acancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
@@ -3446,12 +3464,23 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		s.convoScreen(w, ctx, sess, b.Pane, socket, &outcome, &reason, release)
 		return
 	}
+	if what == "panel_screen" {
+		if front.agent != "claude" {
+			outcome, reason = "refused", "unsupported"
+			writeError(w, http.StatusConflict, "unsupported", "not for this agent")
+			return
+		}
+		release := turn
+		turn = func() {} // (the screen read gives it back, once it has ended on the host)
+		s.convoPanelScreen(w, ctx, sess, b.Pane, socket, &outcome, &reason, release)
+		return
+	}
 	// (An answer goes one at a time to the pane, whichever connection of
 	// the person's it comes from; the same screen answered moments ago is
 	// not answered again: a double tap.)
 	// The check again and the typing or pressing, on the host in one go (see convoSendCommand).
 	var press []string
-	if what == "reply" && len(b.Keys) > 0 {
+	if (what == "reply" || what == "panel") && len(b.Keys) > 0 {
 		press = replyPress(sess.Persistence, b.Keys)
 	} else if what != "send" && what != "reply" && what != "command" {
 		press = keys.tmux
@@ -3531,6 +3560,12 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		gate = "idle" // (not while it works either: it would wait in its queue, and run when no one looks)
 	case what == "close_dialog":
 		gate = "dialog" // (closed meanwhile, the Escape would stop what it does now)
+	case what == "panel":
+		// (Not Claude Code's: refused above. Whichever key, only while one is open.)
+		gate = "dialog"
+		if panelSettles(b.Keys[0]) {
+			gate = "dialog:" + b.Digest
+		}
 	}
 	// Claude Code's box holding words already — a message a stop
 	// interrupted, which it puts back there, or words typed in the
@@ -3655,7 +3690,7 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		reason = "busy" // (another to the pane on the host still: nothing typed)
 	case errors.As(err, &exitErr) && exitErr.Status == 4:
 		reason = "send_failed" // (nothing typed)
-	case errors.As(err, &exitErr) && exitErr.Status == 9 && what == "close_dialog":
+	case errors.As(err, &exitErr) && exitErr.Status == 9 && (what == "close_dialog" || what == "panel"):
 		reason = "no_dialog"
 		writeError(w, http.StatusConflict, "no_dialog", "no dialog of its own is open any more: nothing pressed")
 		return

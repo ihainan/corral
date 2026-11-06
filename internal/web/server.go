@@ -225,6 +225,8 @@ func (s *Server) registerRoutes() {
 	s.handle("POST /api/sessions/{id}/conversation/unlook", SignedIn, s.apiConversationUnlook)
 	s.handle("POST /api/sessions/{id}/conversation/send-now", SignedIn, s.apiConversationSendNow)
 	s.handle("POST /api/sessions/{id}/conversation/close-dialog", SignedIn, s.apiConversationCloseDialog)
+	s.handle("POST /api/sessions/{id}/conversation/panel-screen", SignedIn, s.apiConversationPanelScreen)
+	s.handle("POST /api/sessions/{id}/conversation/panel", SignedIn, s.apiConversationPanel)
 	s.handle("POST /api/sessions/{id}/conversation/mode", SignedIn, s.apiConversationMode)
 	s.handle("POST /api/sessions/{id}/conversation/models", SignedIn, s.apiConversationModels)
 	s.handle("POST /api/sessions/{id}/conversation/model", SignedIn, s.apiConversationModel)

@@ -104,6 +104,7 @@ export interface ConvoPending {
   id: number
   text: string
   state: 'sending' | 'waiting' | 'unseen' | 'sent'
+  opened?: boolean // (a command that has opened a panel: taken in; the log tells of it once that is shut)
   // What the pane's screen said when the message had not turned up in the
   // log: waiting (the words are in its input, so it was typed and not
   // taken in), taken (the input no longer holds them), or neither, where
@@ -1045,7 +1046,7 @@ export function ConversationView({
     <div key={p.id} className={'convo-user convo-pending' + (p.state === 'sending' ? ' is-sending' : '')}>
       <div className="convo-user-text">{p.text}</div>
       <div className="convo-meta">
-        <span role="status">{t(p.state === 'sending' ? 'convo.sending' : p.state === 'waiting' ? 'convo.sent' : p.state === 'unseen' ? (wentOf(p) ? 'convo.wentSub' : 'convo.unseen') : 'convo.sentOnly')}</span>
+        <span role="status">{t(p.opened ? 'convo.sentOnly' : p.state === 'sending' ? 'convo.sending' : p.state === 'waiting' ? 'convo.sent' : p.state === 'unseen' ? (wentOf(p) ? 'convo.wentSub' : 'convo.unseen') : 'convo.sentOnly')}</span>
         {(p.state === 'unseen' || p.state === 'sent') && (
           <button type="button" className="link-btn" onClick={() => onDismiss(p.id)}>{t('common.close')}</button>
         )}

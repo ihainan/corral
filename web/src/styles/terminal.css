@@ -1602,6 +1602,20 @@ button.convo-running-what:hover { color: var(--term-fg); text-decoration-color: 
 /* (Held — an answer is wanted first: its tools away whether it has the focus or not. Shown on focus, a press on the card above moved it 40px between press and release, and the press was lost — review of ux1101 A13.) */
 .convo-dock .composer.is-held .composer-tools { display: none; }
 .convo-dock .composer.is-asked .composer-box { display: none; }
+/* A panel of its own, shown as its terminal shows it: dark in either theme, the colours being the screen's. */
+.convo-dock .composer.is-paneled .composer-box, .convo-dock .composer.is-paneled .agents-chat-why { display: none; }
+.convo-panelwin { --panel-bg: #14161a; --panel-fg: #dfe3e8; display: flex; flex-direction: column; border: 1px solid var(--term-line); border-radius: 12px; overflow: hidden; background: var(--term-chrome); animation: fade 0.1s var(--ease); }
+.convo-panelwin-head { display: flex; align-items: baseline; gap: 10px; min-width: 0; padding: 8px 12px; font-size: 13px; color: var(--term-fg-2); }
+.convo-panelwin-title { flex: none; color: var(--term-fg); font-weight: 500; }
+.convo-panelwin-hint { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--term-fg-3); }
+.term-root .convo-panelwin-close { flex: none; margin-left: auto; color: var(--term-fg-2); font-size: 13px; }
+.convo-panelwin-screen { margin: 0; padding: 10px 12px; max-height: min(56vh, 520px); overflow: auto; background: var(--panel-bg); color: var(--panel-fg); font-family: var(--font-mono, ui-monospace, Menlo, Consolas, monospace); font-size: 12.5px; line-height: 1.35; white-space: pre; outline: none; }
+.convo-panelwin-screen:focus-visible { box-shadow: inset 0 0 0 2px var(--term-accent-text); }
+.convo-panelwin-line { min-height: 1.35em; }
+.convo-panelwin-note { margin: 0; padding: 6px 12px; color: var(--term-fg-2); font-size: 13px; }
+.convo-panelwin-keys { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px; }
+.convo-panelwin-key { flex: 1 0 calc(25% - 6px); min-height: 44px; border: 1px solid var(--term-line); border-radius: 8px; background: var(--term-key, var(--term-chrome)); color: var(--term-fg); font-size: 14px; cursor: pointer; }
+.convo-panelwin-key:active { background: var(--term-hover); }
 /* (Its room taken back by the card: as tall as the screen allows, not cut to a scroll of its own.) */
 .convo-dock:has(.composer.is-asked) > .convo-dock-ask { max-height: min(80vh, 640px); }
 .convo-dock .composer.is-asked .agents-chat-why { margin-bottom: 0; }
