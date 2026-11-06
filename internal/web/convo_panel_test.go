@@ -16,7 +16,8 @@ func TestPanelKeys(t *testing.T) {
 		{[]string{"up"}, "", true},
 		{[]string{"esc"}, "", true},
 		{[]string{"a"}, "", true},
-		{[]string{"shift+tab"}, "", true},
+		{[]string{"shift+tab"}, "", false}, // (under a plan, it approves)
+		{[]string{"shift+tab"}, d, true},
 		{[]string{"backspace"}, "", true},
 		{[]string{"enter"}, d, true},
 		{[]string{"space"}, d, true},
@@ -54,7 +55,7 @@ func TestPanelDigest(t *testing.T) {
 		"with\x00nul\n",
 		"\xff\xfe not utf-8\n",
 		"a\x1b[38:2::1:2:3mb\n",
-		"\x1b[38;5;246m\x1b[49m●\x1b[39m Needs permission\n  ● indented\n⏺ mac\nwords ● here\n",
+		"\x1b[38;5;246m\x1b[49m●\x1b[39m Needs permission\n  ● indented\n⏺ mac\n● ⏺ two\nwords ● here\n",
 	} {
 		c := exec.Command("sh", "-c", panelDigestPipe)
 		c.Stdin = strings.NewReader(s)
@@ -83,7 +84,7 @@ func TestPanelDigest(t *testing.T) {
 // The digest an answer goes with: the gateway's and the host's the same, on a
 // screen as read with no colours, whichever way its tool's row has blinked.
 func TestScreenDigestSteady(t *testing.T) {
-	for _, s := range []string{"plain\n", "● Needs permission\n Do you want to proceed?\n ❯ 1. Yes\n", "  ⏺ row\n\twords ● stay\n", "中文\n\n"} {
+	for _, s := range []string{"plain\n", "no newline at its end", "with\x00nul\n", "● ⏺ two marks\n", "● Needs permission\n Do you want to proceed?\n ❯ 1. Yes\n", "  ⏺ row\n\twords ● stay\n", "中文\n\n"} {
 		c := exec.Command("sh", "-c", steadyPipe+" | sha256sum")
 		c.Stdin = strings.NewReader(s)
 		out, err := c.Output()

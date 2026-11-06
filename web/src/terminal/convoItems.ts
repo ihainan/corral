@@ -247,6 +247,12 @@ function mergeNotes(entries: ConvoEntry[]): Set<ConvoEntry> {
       merged.add(e)
       compact = null
     }
+    // (Its safeguards stopped it and it tried once more, then stopped again: the note of that says it.)
+    const stop = e.parts[0]?.event
+    if (stop?.kind === 'notice' && !e.gone && /safeguards stopped the response above/.test(stop.text ?? '') && entries.slice(i + 1).find((x) => x.role !== 'assistant' || x.parts.some((q) => q.kind !== 'thinking'))?.parts[0]?.trouble?.kind === 'refused') {
+      merged.add(e)
+      continue
+    }
     // (A notice said again next to itself: once.)
     const n = e.parts[0]?.event
     if (n?.kind === 'notice' && !e.gone && i > 0) {

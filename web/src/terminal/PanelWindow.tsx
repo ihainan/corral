@@ -20,7 +20,8 @@ const ESC_AGAIN = 1000
 const QUEUE = 16
 const FAILS = 4
 
-const settles = (k: string) => k === 'enter' || k === 'space' || /^[0-9]$/.test(k)
+// (Shift+Tab: under a plan, it approves.)
+const settles = (k: string) => k === 'enter' || k === 'space' || k === 'shift+tab' || /^[0-9]$/.test(k)
 type Pressed = { k: string; digest: string }
 
 function keyOf(e: React.KeyboardEvent): string | null {
@@ -171,7 +172,10 @@ export function PanelWindow({ sid, active, press, onSettled, toast, live }: { li
     }
   }, [read])
   useEffect(() => {
-    if (active && !isCoarse()) box.current?.focus({ preventScroll: true })
+    // (A panel opened on purpose takes the keys. The terminal shown by itself
+    // does not: what is being typed in the box goes on going there, a key in
+    // the terminal only once the person has gone to it.)
+    if (active && !isCoarse() && !isLive.current) box.current?.focus({ preventScroll: true })
   }, [active])
 
   const lines = useMemo(() => ansiLines(screen.text), [screen.text])
@@ -190,7 +194,7 @@ export function PanelWindow({ sid, active, press, onSettled, toast, live }: { li
     <div className="convo-panelwin" role="group" aria-label={t(live ? 'panel.liveTitle' : 'panel.title')}>
       <div className="convo-panelwin-head">
         <span className="convo-panelwin-title">{t(live ? 'panel.liveTitle' : 'panel.title')}</span>
-        {!isCoarse() && <span className="convo-panelwin-hint">{t('panel.hint')}</span>}
+        {!isCoarse() && <span className="convo-panelwin-hint">{t(live ? 'panel.liveHint' : 'panel.hint')}</span>}
         {live?.onFull && (
           <button type="button" className="link-btn convo-panelwin-close" onClick={live.onFull}>
             {t('panel.full')}

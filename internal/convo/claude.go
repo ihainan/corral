@@ -707,6 +707,7 @@ type claudeRow struct {
 	OriginalModel         string   `json:"originalModel"`
 	FallbackModel         string   `json:"fallbackModel"`
 	APIRefusalExplanation string   `json:"apiRefusalExplanation"`
+	RequestID             string   `json:"requestId"`
 	HookErrors            []string `json:"hookErrors"`
 	PreventedContinuation bool     `json:"preventedContinuation"`
 	// Error is an object on the rows that carry one, and a word on others
@@ -1663,6 +1664,14 @@ func (c *Claude) assistant(r *claudeRow) {
 		c.add(r, RoleNote, []Part{{Kind: KindEvent, Event: ev}})
 		return
 	}
+	// (Stopped by the model's safeguards with nothing to fall back on, Claude
+	// Code makes up an answer of its own, "API Error: …", right after the row
+	// that says so: the same thing said again, as if the model had said it, and
+	// with keys of the terminal's. The note says it.)
+	if r.IsAPIErrorMessage && r.Message.StopReason == "refusal" && c.lastIsRefused() {
+		c.Skipped++
+		return
+	}
 	// (A row Claude Code made up itself, an error say, is of no model.)
 	if m := r.Message.Model; m != "" && m != "<synthetic>" {
 		c.meta.Model = clip(m, maxMeta)
@@ -1738,6 +1747,20 @@ func (c *Claude) assistant(r *claudeRow) {
 			}
 		}
 	}
+}
+
+// lastIsRefused: the last entry says the model's safeguards stopped it.
+func (c *Claude) lastIsRefused() bool {
+	n := len(c.entries)
+	if n == 0 || c.entries[n-1].Role != RoleNote {
+		return false
+	}
+	for _, p := range c.entries[n-1].Parts {
+		if p.Kind == KindTrouble && p.Trouble != nil && p.Trouble.Kind == TroubleRefused {
+			return true
+		}
+	}
+	return false
 }
 
 // request takes in what a request of the conversation itself asked for
@@ -2892,6 +2915,11 @@ func (c *Claude) systemTrouble(r *claudeRow) *Trouble {
 		}
 		if text == "" {
 			text = strings.TrimSpace(r.APIRefusalExplanation)
+		}
+		// (Which request, to tell the provider of it: what the row Claude Code
+		// makes up after this one said too, which is not shown: see assistant.)
+		if id := strings.TrimSpace(r.RequestID); id != "" {
+			text = strings.TrimSpace(text + "\nRequest ID: " + clip(id, maxMeta))
 		}
 		said, cutOff := cut(text, maxTrouble)
 		t := &Trouble{Kind: TroubleRefused, Text: said, Cut: cutOff}

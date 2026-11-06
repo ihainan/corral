@@ -1250,7 +1250,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       return q
     })
     const subs: Submission[] = [
-      ...convo.entries.filter((e: ConvoEntry) => e.role === 'user').map((e: ConvoEntry) => ({ key: e.seq, seq: e.seq, ts: e.ts, text: e.parts.filter((x) => x.kind === 'text').map((x) => x.text).join('\n') })),
+      ...convo.entries.filter((e: ConvoEntry) => e.role === 'user').map((e: ConvoEntry) => ({ key: e.seq, seq: e.seq, ts: e.ts, text: e.parts.map((x) => (x.kind === 'text' ? x.text : x.kind === 'image' ? '[Image #0]' : '')).join('\n') })),
       // (Not while the queue is not shown, or the message would show nowhere.)
       ...(queueShown ? queueRows(convo.queued) : []),
     ]

@@ -3056,6 +3056,7 @@ function TroubleNote({ t: tr }: { t: ConvoTrouble }) {
       <TriangleAlert size={14} aria-hidden="true" />
       <div className="convo-trouble-body">
         <p className="convo-trouble-head">{head}</p>
+        {tr.kind === 'refused' && !tr.again && <p className="convo-trouble-said">{t('convo.trouble.refusedHint')}</p>}
         {said && open && (
           <p className="convo-trouble-said">
             {said}

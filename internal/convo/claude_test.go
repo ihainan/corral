@@ -1710,3 +1710,29 @@ func TestClaudeSubagentReport(t *testing.T) {
 		t.Fatalf("%+v", got)
 	}
 }
+
+// As Claude Code 2.1.318 logs it: stopped, tried once more, stopped again; the
+// answer it then makes up is no answer, the note says it all (11-06).
+func TestClaudeRefusedOnceSaid(t *testing.T) {
+	c := NewClaude()
+	c.Feed(lines(
+		`{"type":"user","uuid":"u1","message":{"content":"hi"}}`,
+		`{"type":"assistant","uuid":"a1","parentUuid":"u1","message":{"model":"claude-opus-5-5","stop_reason":"refusal","content":[{"type":"thinking","thinking":""}]}}`,
+		`{"type":"system","subtype":"model_refusal_no_fallback","uuid":"s1","parentUuid":"a1","content":"","level":"warning","requestId":"req_1","apiRefusalExplanation":"Blocked for a reason."}`,
+		`{"type":"assistant","uuid":"a2","parentUuid":"s1","isApiErrorMessage":true,"error":"invalid_request","message":{"model":"<synthetic>","stop_reason":"refusal","content":[{"type":"text","text":"API Error: stopped. Double press esc to edit."}]}}`,
+	))
+	var said []string
+	for _, e := range c.entries {
+		for _, p := range e.Parts {
+			if p.Kind == KindText && e.Role == RoleAssistant {
+				said = append(said, p.Text)
+			}
+			if p.Kind == KindTrouble {
+				said = append(said, "trouble: "+p.Trouble.Text)
+			}
+		}
+	}
+	if len(said) != 1 || !strings.Contains(said[0], "Blocked for a reason.") || !strings.Contains(said[0], "req_1") {
+		t.Fatalf("said %q", said)
+	}
+}

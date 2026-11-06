@@ -38,7 +38,8 @@ func panelKeyOK(k string) bool {
 
 // panelSettles: a key whose effect depends on what is chosen on the screen.
 func panelSettles(k string) bool {
-	return k == "enter" || k == "space" || (len(k) == 1 && k[0] >= '0' && k[0] <= '9')
+	// (Shift+Tab: under a plan, it approves.)
+	return k == "enter" || k == "space" || k == "shift+tab" || (len(k) == 1 && k[0] >= '0' && k[0] <= '9')
 }
 
 // panelOK: the one key pressed, and the digest it goes with where it settles something.
@@ -80,19 +81,14 @@ func (s *Server) convoPanelScreen(w http.ResponseWriter, ctx context.Context, se
 // it is of what is shown. The gate computes the same on the host: panelDigestPipe
 // (cross-checked in a test).
 func panelDigest(raw []byte) string {
-	b := bytes.ReplaceAll(raw, []byte{0}, nil)
-	b = steadyScreen(panelSGR.ReplaceAll(b, nil))
-	if len(b) > 0 && b[len(b)-1] != '\n' {
-		b = append(append([]byte(nil), b...), '\n')
-	}
-	sum := sha256.Sum256(b)
+	sum := sha256.Sum256(steadyScreen(panelSGR.ReplaceAll(bytes.ReplaceAll(raw, []byte{0}, nil), nil)))
 	return hex.EncodeToString(sum[:])
 }
 
 var panelSGR = regexp.MustCompile(`\x1b\[[0-9;:]*m`)
 
 // panelDigestPipe: panelDigest as a shell pipeline, of what comes in.
-const panelDigestPipe = `tr -d '\000' | LC_ALL=C sed "s/$(printf '\033')\[[0-9;:]*m//g" | ` + steadyPipe + ` | LC_ALL=C awk 1 | sha256sum`
+const panelDigestPipe = `tr -d '\000' | LC_ALL=C sed "s/$(printf '\033')\[[0-9;:]*m//g" | ` + blinkSed + ` | LC_ALL=C awk 1 | sha256sum`
 
 // A tool's row under way blinks: its "●" (macOS's "⏺") goes to a blank and back
 // a few times a second, on a screen where nothing else moves. Counted, the
@@ -101,9 +97,18 @@ const panelDigestPipe = `tr -d '\000' | LC_ALL=C sed "s/$(printf '\033')\[[0-9;:
 // left out of what names a screen; both sides, steadyScreen and steadyPipe.
 var blinkingMark = regexp.MustCompile(`(?m)^([ \t]*)(?:●|⏺)`)
 
-func steadyScreen(raw []byte) []byte { return blinkingMark.ReplaceAll(raw, []byte("${1} ")) }
+// steadyScreen: a screen as it is named: no NUL, each line ended, no first mark.
+func steadyScreen(raw []byte) []byte {
+	b := blinkingMark.ReplaceAll(bytes.ReplaceAll(raw, []byte{0}, nil), []byte("${1} "))
+	if len(b) > 0 && b[len(b)-1] != '\n' {
+		b = append(append([]byte(nil), b...), '\n')
+	}
+	return b
+}
 
-const steadyPipe = `LC_ALL=C sed -e 's/^\([ 	]*\)●/\1 /' -e 's/^\([ 	]*\)⏺/\1 /'`
+// (One mark a line, as above: "t" goes on to the next line once one is taken out.)
+const blinkSed = `LC_ALL=C sed -e 's/^\([ 	]*\)●/\1 /' -e 't' -e 's/^\([ 	]*\)⏺/\1 /'`
+const steadyPipe = `tr -d '\000' | ` + blinkSed + ` | LC_ALL=C awk 1`
 
 // POST /api/sessions/{id}/conversation/panel-screen → {"text", "digest"}: the
 // screen, with its colours, to show a panel of its own by.

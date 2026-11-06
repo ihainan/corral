@@ -21,10 +21,13 @@ const wordsOf = (s: string) => s.replace(IMAGE_TOKEN, ' ').replace(PICTURE, ' ')
 export function sameMessage(logged: string, sent: string): boolean {
   const w = wordsOf(sent)
   if (!w || wordsOf(logged) !== w) return false
-  const paths = picturesIn(sent)
-  const kept = picturesIn(logged)
-  const tokens = logged.match(IMAGE_TOKEN)?.length ?? 0
-  return kept.every((k) => paths.includes(k)) && kept.length + tokens === paths.length
+  const rest = picturesIn(sent)
+  for (const k of picturesIn(logged)) {
+    const at = rest.indexOf(k)
+    if (at < 0) return false
+    rest.splice(at, 1)
+  }
+  return rest.length === (logged.match(IMAGE_TOKEN)?.length ?? 0)
 }
 
 // A row the log has of something submitted: its place, its time, its words.
@@ -66,7 +69,7 @@ export function pairSent<P extends Waiting>(waiting: P[], subs: Submission[], us
   const taken = new Set<number>()
   for (const p of waiting) {
     const command = isCommand(p.text) ? p.text.trimStart().split(/\s/, 1)[0] : ''
-    const s = subs.find((x) => !used.has(x.key) && !taken.has(x.key) && camesAfter(x, p) && (!command || x.text.trimStart().startsWith(command)))
+    const s = subs.find((x) => !used.has(x.key) && !taken.has(x.key) && camesAfter(x, p) && (!command || x.text.trimStart().split(/\s/, 1)[0] === command))
     if (!s) continue
     taken.add(s.key)
     out.push({ p, s })

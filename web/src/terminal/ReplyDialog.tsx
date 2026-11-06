@@ -698,6 +698,18 @@ export function InlineReply({ target, onLoaded, resizedAt, active = true, held, 
     // (Its end: what it asks is drawn last, at the bottom of the screen.)
     if (pre.current) pre.current.scrollTop = pre.current.scrollHeight
   }, [screen, shown, !block])
+  // (Shown as the terminal: read now and then here too, the card coming back
+  // where the screen, half drawn when first read, turns out to be one it knows.)
+  const liveNow = needScreen && !!target.live && !structured && !failed && sent === null
+  const loadNow = useRef(load)
+  loadNow.current = load
+  useEffect(() => {
+    if (!liveNow || !active) return
+    const timer = setInterval(() => {
+      if (!document.hidden) void loadNow.current()
+    }, 3000)
+    return () => clearInterval(timer)
+  }, [liveNow, active])
   // Keys answer only the screen the card was taken in hand on (touched,
   // or its focus come in): another screen, read meanwhile, is looked at
   // again (touched again) before a key answers it.
