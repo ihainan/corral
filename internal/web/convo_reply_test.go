@@ -207,7 +207,7 @@ time.sleep(30)`)
 	}
 	// (With its colours and what moves, as a real screen is: read again a moment on.)
 	moving := func(sec string) string {
-		return "\x1b[38;5;246m●\x1b[39m Needs permission\n\x1b[1m✽ Nucleating… (" + sec + "s)\x1b[0m\n  ◯ main\n❯ ● general-purpose  Count the files      " + sec + "s\n" + asked
+		return "\x1b[38;5;246m●\x1b[39m Needs permission\n\x1b[1m✽ Nucleating… (" + sec + "s)\x1b[0m\n" + asked + "  ◯ main\n❯ ● general-purpose  Count the files      " + sec + "s\n"
 	}
 	showing(moving("9"))
 	seen := lookDigest([]byte(moving("10")))

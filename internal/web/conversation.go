@@ -2525,7 +2525,7 @@ owned() {
 }
 b=corral-send-$$ typing=0 partdir=
 f=$(mktemp) || exit 4
-trap 'rm -f "$f"; [ -n "$partdir" ] && rm -rf "$partdir"; [ "$mode" = tmux ] && tmux delete-buffer -b "$b" 2>/dev/null 9>&-' EXIT
+trap 'rm -f "$f"; [ -n "${lk:-}" ] && rm -f "$lk"; [ -n "$partdir" ] && rm -rf "$partdir"; [ "$mode" = tmux ] && tmux delete-buffer -b "$b" 2>/dev/null 9>&-' EXIT
 trap '[ "$typing" = 1 ] && exit 6; exit 4' HUP INT TERM
 if [ "$len" != keys ]; then cat >"$f" || exit 4; fi
 l=${XDG_RUNTIME_DIR:-}/corral-send-$(printf '%s' "$mode-$p" | tr -c 'A-Za-z0-9-' _)
@@ -2716,7 +2716,8 @@ if [ -n "$gate" ]; then
     lk=$(mktemp) || exit 10
     if [ "$mode" = tmux ]; then tmux -u capture-pane -p -e -t "$p" >"$lk" 2>/dev/null || { rm -f "$lk"; exit 10; }
     else HERDR_SOCKET_PATH=$sock herdr pane read "$p" --source visible --format ansi >"$lk" 2>/dev/null || { rm -f "$lk"; exit 10; }; fi
-    d=$(cat "$lk" | LOOKDIGEST); rm -f "$lk"
+    [ -s "$lk" ] || { rm -f "$lk"; exit 10; }
+    d=$(cat "$lk" | LOOKDIGEST); rm -f "$lk"; lk=
     [ "${d%% *}" = "${gate#look:}" ] || exit 10 ;;
   reply:*)
     [ "$st" = waiting ] || exit 9

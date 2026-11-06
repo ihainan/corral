@@ -121,21 +121,33 @@ func TestLookDigest(t *testing.T) {
 		"✽ Nucleating… (3s)",
 		"● Bash(kill -TERM 1234)\n",
 		"● 5s\n",
+		"● task\n  5s\n",
+		"  ◯ main\n❯ ● general-purpose  Count the files  1m 5s\n\n\n",
+		"  ● timeout 5s\n Esc to cancel\n",
+		"  ● timeout 5s\n",
+		"中文\n◯ main\n● 子代理 x 2h 3m 4s  \n",
 	} {
-		c := exec.Command("sh", "-c", lookDigestPipe)
-		c.Stdin = strings.NewReader(s)
-		out, err := c.Output()
-		if err != nil {
-			t.Fatalf("%q: %v", s, err)
-		}
-		if host, _, _ := strings.Cut(string(out), " "); host != lookDigest([]byte(s)) {
-			t.Errorf("%q: host %s, gateway %s", s, host, lookDigest([]byte(s)))
+		// (By every awk there is here: a host's may be any.)
+		for _, awk := range []string{"awk", "mawk", "gawk", "busybox awk", "original-awk"} {
+			if _, err := exec.LookPath(strings.Fields(awk)[0]); err != nil {
+				continue
+			}
+			c := exec.Command("sh", "-c", strings.ReplaceAll(lookDigestPipe, "LC_ALL=C awk", "LC_ALL=C "+awk))
+			c.Stdin = strings.NewReader(s)
+			out, err := c.Output()
+			if err != nil {
+				t.Fatalf("%s, %q: %v", awk, s, err)
+			}
+			if host, _, _ := strings.Cut(string(out), " "); host != lookDigest([]byte(s)) {
+				t.Errorf("%s, %q: host %s, gateway %s", awk, s, host, lookDigest([]byte(s)))
+			}
 		}
 	}
 	same := [][2]string{
 		{"✽ Nucleating… (23s)\nbox\n", "* Pondering… (24s · ↓ 3k tokens)\nbox\n"},
-		{"  ● general-purpose  Count      9s\n", "  ● general-purpose  Count     10s\n"},
+		{"  ◯ main\n  ● general-purpose  Count      9s\n", "  ◯ main\n  ● general-purpose  Count     10s\n"},
 		{"❯ ● general-purpose  Count 22s\n  ◯ main\n", "❯ ● general-purpose  Count 23s\n  ◯ main\n"},
+		{"◯ main\n● task 59s\n\n", "◯ main\n● task 1m 0s\n\n"},
 		{"● Needs permission\n", "  Needs permission\n"},
 	}
 	for _, c := range same {
@@ -152,6 +164,11 @@ func TestLookDigest(t *testing.T) {
 		{"echo a b\n", "echo ab\n"},
 		{"❯ 1. release/123\n  2. release/124\n", "❯ 1. release/124\n  2. release/123\n"},
 		{"● Bash(sleep 5s)\n", "● Bash(sleep 9s)  x\n"},
+		// (Words of a prompt that look like an agent's row.)
+		{"  ● timeout 5s\n ❯ 1. Yes\n Esc to cancel\n", "  ● timeout 9s\n ❯ 1. Yes\n Esc to cancel\n"},
+		{"  ● timeout 5s\n", "  ● timeout 9s\n"},
+		{"◯ main\n● task 5s\nmore\n", "◯ main\n● task 9s\nmore\n"},
+		{"● task\n  5s\n", "● task\n  9s\n"},
 	}
 	for _, c := range other {
 		if lookDigest([]byte(c[0])) == lookDigest([]byte(c[1])) {

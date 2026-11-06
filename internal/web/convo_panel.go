@@ -114,24 +114,52 @@ const steadyPipe = `tr -d '\000' | ` + blinkSed + ` | LC_ALL=C awk 1`
 // The terminal shown as it is names its screen without what is seen to move by
 // itself: an agent at work draws a spinner and counts seconds, and a key that had
 // to go on that very screen could never go. Only that goes, each seen on real
-// screens: the spinner's own line, the seconds at the end of a row of the list of
-// agents, and the mark that blinks. Everything else counts, digits and blanks too:
-// "kill -TERM 1234" is not "kill -TERM 5678". Anything else moving: the screen is
-// said to have changed, and nothing is pressed.
+// screens: the spinner's own line, the mark that blinks, and the seconds at the
+// end of the rows of the list of agents: the last thing on the screen, with its
+// "main" row (words of a prompt that look like a row are neither). Everything
+// else counts, digits and blanks too: "kill -TERM 1234" is not "kill -TERM 5678".
+// Anything else moving: the screen is said to have changed, nothing is pressed.
 var spinnerMarks = []string{`*`, `·`, `✢`, `✳`, `✶`, `✻`, `✽`}
 
 var (
 	spinnerLine = regexp.MustCompile(`(?m)^(?:\*|·|✢|✳|✶|✻|✽) [A-Za-z-]*….*$`)
-	agentRowAge = regexp.MustCompile(`(?m)^([ \t]*(?:❯[ \t]+)?(?:●|◯)[ \t].*[^ \t])[ \t]+[0-9]+[hms](?:[ \t]+[0-9]+[hms])*[ \t]*$`)
+	agentRow    = regexp.MustCompile(`^[ \t]*(?:❯[ \t]+)?(?:●|◯)[ \t]`)
+	agentMain   = regexp.MustCompile(`^[ \t]*(?:❯[ \t]+)?(?:●|◯)[ \t]+main[ \t]*$`)
+	rowAge      = regexp.MustCompile(`[ \t]+[0-9]+[hms][ \t]*$`)
+	blankLine   = regexp.MustCompile(`^[ \t]*$`)
 )
+
+// agentRowsAged: b, its lines ended, without the time at the end of the rows of
+// a list of agents at its end.
+func agentRowsAged(b []byte) []byte {
+	if len(b) == 0 {
+		return b
+	}
+	lines := bytes.Split(bytes.TrimSuffix(b, []byte("\n")), []byte("\n"))
+	n := len(lines)
+	for n > 0 && blankLine.Match(lines[n-1]) {
+		n--
+	}
+	i, hasMain := n, false
+	for i > 0 && agentRow.Match(lines[i-1]) {
+		i--
+		hasMain = hasMain || agentMain.Match(lines[i])
+	}
+	if hasMain {
+		for k := i; k < n; k++ {
+			for rowAge.Match(lines[k]) {
+				lines[k] = rowAge.ReplaceAll(lines[k], nil)
+			}
+		}
+	}
+	return append(bytes.Join(lines, []byte("\n")), '\n')
+}
+
+const agentRowsAwk = `{ l[NR] = $0 } END { n = NR; while (n > 0 && l[n] ~ /^[ 	]*$/) n--; i = n; m = 0; while (i > 0 && l[i] ~ /^[ 	]*(❯[ 	]+)?(●|◯)[ 	]/) { if (l[i] ~ /^[ 	]*(❯[ 	]+)?(●|◯)[ 	]+main[ 	]*$/) m = 1; i-- } if (m) for (k = i + 1; k <= n; k++) while (sub(/[ 	]+[0-9]+[hms][ 	]*$/, "", l[k])) ; for (k = 1; k <= NR; k++) print l[k] }`
 
 func lookDigest(raw []byte) string {
 	b := panelSGR.ReplaceAll(bytes.ReplaceAll(raw, []byte{0}, nil), nil)
-	if len(b) > 0 && b[len(b)-1] != '\n' {
-		b = append(append([]byte(nil), b...), '\n')
-	}
-	b = agentRowAge.ReplaceAll(b, []byte("${1}"))
-	b = blinkingMark.ReplaceAll(spinnerLine.ReplaceAll(b, nil), []byte("${1} "))
+	b = blinkingMark.ReplaceAll(spinnerLine.ReplaceAll(agentRowsAged(b), nil), []byte("${1} "))
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
 }
@@ -139,16 +167,13 @@ func lookDigest(raw []byte) string {
 // lookDigestPipe: lookDigest as a shell pipeline, of what comes in.
 var lookDigestPipe = func() string {
 	sed := ""
-	for _, m := range []string{`●`, `◯`} {
-		sed += ` -e 's/^\([ 	]*\(❯[ 	][ 	]*\)\{0,1\}` + m + `[ 	].*[^ 	]\)[ 	][ 	]*[0-9][0-9]*[hms]\([ 	][ 	]*[0-9][0-9]*[hms]\)*[ 	]*$/\1/'`
-	}
 	for _, m := range spinnerMarks {
 		if m == "*" {
 			m = `\*`
 		}
 		sed += ` -e 's/^` + m + ` [A-Za-z-]*….*$//'`
 	}
-	return `tr -d '\000' | LC_ALL=C sed "s/$(printf '\033')\[[0-9;:]*m//g" | LC_ALL=C awk 1 | LC_ALL=C sed` + sed + ` | ` + blinkSed + ` | sha256sum`
+	return `tr -d '\000' | LC_ALL=C sed "s/$(printf '\033')\[[0-9;:]*m//g" | LC_ALL=C awk '` + agentRowsAwk + `' | LC_ALL=C sed` + sed + ` | ` + blinkSed + ` | sha256sum`
 }()
 
 // POST /api/sessions/{id}/conversation/panel-screen → {"text", "digest"}: the
