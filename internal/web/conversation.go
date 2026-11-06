@@ -2891,7 +2891,7 @@ else
   screen
 fi`
 
-	script = strings.ReplaceAll(script, "CARDAWK", cardRegionAwk)   // (see convo_card.go)
+	script = strings.ReplaceAll(script, "CARDAWK", cardRegionAwk) // (see convo_card.go)
 	script = strings.ReplaceAll(script, "PANELDIGEST", panelDigestPipe)
 	script = strings.ReplaceAll(script, "OWNERAWK", claudeOwnerAwk) // (see convo_view.go)
 	script = strings.ReplaceAll(script, "FOOTAWK", claudeFootAwk)
@@ -3765,6 +3765,18 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	switch {
 	case outcome == "typed" && what == "mode":
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "mode": screenMode(string(res.Out)), "view_restored": restored})
+	case outcome == "typed" && what == "panel":
+		// (The screen the key left, in the same answer: a far-off host's round trip
+		// again for it would be most of what a key takes, and the panel's turn is
+		// held till this one ends anyway.)
+		out := map[string]any{"ok": true}
+		sctx, scancel := context.WithTimeout(ctx, 10*time.Second)
+		if r2, err := sshx.Exec(sctx, sess.Client(), convoColorScreenCommand(sess.Persistence, b.Pane, socket), 512<<10, sshx.ExecOptions{}); err == nil {
+			text, _, _ := screenOf(r2.Out)
+			out["text"], out["digest"] = text, panelDigest(r2.Out)
+		}
+		scancel()
+		writeJSON(w, http.StatusOK, out)
 	case outcome == "typed":
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "view_restored": restored, "in_box": inBox})
 	case reason == "busy":

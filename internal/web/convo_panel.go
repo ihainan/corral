@@ -48,6 +48,12 @@ func (s *Server) convoPanelScreen(w http.ResponseWriter, ctx context.Context, se
 	defer cancel()
 	res, err := sshx.Exec(ctx, sess.Client(), convoColorScreenCommand(sess.Persistence, pane, socket), 512<<10, sshx.ExecOptions{Release: release})
 	if err != nil {
+		// (Given up on by the page, a key having come: nothing to say of it, and
+		// nothing to note — it is no failure to read.)
+		if ctx.Err() != nil {
+			*outcome, *reason = "unknown", "cancelled"
+			return
+		}
 		*outcome, *reason = "unknown", "no_screen"
 		writeError(w, http.StatusBadGateway, "no_screen", "the pane's screen could not be read")
 		return

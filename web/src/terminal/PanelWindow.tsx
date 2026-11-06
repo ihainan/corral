@@ -51,7 +51,7 @@ export function PanelWindow({ sid, active, press, onSettled, toast }: { sid: str
   const [lost, setLost] = useState(false)
   const [said, setSaid] = useState('')
   const box = useRef<HTMLPreElement>(null)
-  const at = useRef({ shown: '', stale: true, reading: false, pumping: false, queue: [] as Pressed[], fails: 0, escDone: 0, escGoing: false, alive: true })
+  const at = useRef({ shown: '', stale: true, reading: false, pumping: false, queue: [] as Pressed[], fails: 0, escDone: 0, escGoing: false, alive: true, look: null as AbortController | null })
   const activeNow = useRef(active)
   activeNow.current = active
   const pressNow = useRef(press)
@@ -65,20 +65,24 @@ export function PanelWindow({ sid, active, press, onSettled, toast }: { sid: str
     const a = at.current
     if (a.reading) return
     a.reading = true
+    // (Given up where a key comes meanwhile: the host takes one at a time for a pane.)
+    const look = new AbortController()
+    a.look = look
     try {
-      const r = await api<{ text: string; digest: string }>('POST', `/api/sessions/${sid}/conversation/panel-screen`, pressNow.current(), { timeoutMs: 12000 })
+      const r = await api<{ text: string; digest: string }>('POST', `/api/sessions/${sid}/conversation/panel-screen`, pressNow.current(), { timeoutMs: 12000, signal: look.signal })
       if (!a.alive) return
       a.stale = false
       a.fails = 0
       setLost(false)
       setScreen({ text: r.text, digest: r.digest })
     } catch (e) {
-      // (Another of its presses under way is no failure to read.)
-      if (e instanceof ApiError && e.code === 'busy') return
+      // (Given up for a key, or another of its presses under way: no failure to read.)
+      if (look.signal.aborted || (e instanceof ApiError && e.code === 'busy')) return
       a.fails++
       if (a.alive && a.fails >= FAILS) setLost(true)
     } finally {
       a.reading = false
+      if (a.look === look) a.look = null
     }
   }, [sid])
 
@@ -100,9 +104,16 @@ export function PanelWindow({ sid, active, press, onSettled, toast }: { sid: str
           a.escGoing = true
         }
         try {
-          await api('POST', `/api/sessions/${sid}/conversation/panel`, { ...pressNow.current(), keys: [k], ...(settles(k) ? { digest } : {}) }, { timeoutMs: 15000 })
+          // (What the key left comes back with it: another round trip for it would be
+          // most of what a key takes on a far-off host.)
+          const r = await api<{ text?: string; digest?: string }>('POST', `/api/sessions/${sid}/conversation/panel`, { ...pressNow.current(), keys: [k], ...(settles(k) ? { digest } : {}) }, { timeoutMs: 15000 })
           a.stale = true
           if (a.alive) setSaid('')
+          if (a.alive && typeof r?.text === 'string' && typeof r.digest === 'string') {
+            a.stale = false
+            setLost(false)
+            setScreen({ text: r.text, digest: r.digest })
+          }
           if (k === 'esc' || settles(k)) setTimeout(() => onSettledNow.current(), 700)
         } catch (e) {
           a.queue.length = 0 // (what was pressed after it was meant for what this would have shown)
@@ -129,6 +140,7 @@ export function PanelWindow({ sid, active, press, onSettled, toast }: { sid: str
       if (settles(k) && !a.shown) return // (nothing on show yet)
       if (a.queue.length >= QUEUE) return
       a.queue.push({ k, digest: a.shown })
+      a.look?.abort() // (a look under way would hold it up behind it)
       void pump()
     },
     [pump],
@@ -140,12 +152,15 @@ export function PanelWindow({ sid, active, press, onSettled, toast }: { sid: str
     a.alive = true
     let timer: ReturnType<typeof setTimeout>
     const tick = async () => {
-      if (!document.hidden && activeNow.current && !a.pumping) await read()
+      // (Not while a key is going or waiting: the host takes one at a time for a
+      // pane, and a look under way would hold the key up behind it.)
+      if (!document.hidden && activeNow.current && !a.pumping && !a.queue.length) await read()
       if (a.alive) timer = setTimeout(tick, EVERY)
     }
     void tick()
     return () => {
       a.alive = false
+      a.look?.abort()
       clearTimeout(timer)
     }
   }, [read])
