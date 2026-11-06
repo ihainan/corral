@@ -705,8 +705,12 @@ export function InlineReply({ target, onLoaded, resizedAt, active = true, held, 
   loadNow.current = load
   useEffect(() => {
     if (!liveNow || !active) return
+    // (One at a time: a slow host's each read would end the one before it, and none be seen.)
+    let reading = false
     const timer = setInterval(() => {
-      if (!document.hidden) void loadNow.current()
+      if (document.hidden || reading) return
+      reading = true
+      void Promise.resolve(loadNow.current()).finally(() => (reading = false))
     }, 3000)
     return () => clearInterval(timer)
   }, [liveNow, active])

@@ -37,15 +37,13 @@ export function askOn(call: ConvoTool | undefined, s: AskScreen): number {
     if (!sameQ(a.question, s.question) || !!a.multi !== s.multi) return false
     const shown = s.options.filter((o) => o.n !== s.own)
     const labels = a.options.map((o) => o.label)
-    // (Previews beside: a long label goes on under it, in its column, and is
-    // compared as far as it goes there. Told by a start alone, a card still up
-    // of a question gone could answer the next, whose labels only end differently.)
+    // (Previews beside: a long label goes on under it, in its column, and nothing
+    // else is there, so it is compared whole. Told by a start, a card still up of a
+    // question gone could answer the next, whose labels only end differently. Not
+    // the same: the terminal is shown instead.)
     const nos = (x: string) => x.replace(/\s+/g, '')
-    const whole = (o: (typeof shown)[number], asked: string) => {
-      const start = nos(o.label.replace(/\s*…$/, ''))
-      return !!start && nos(asked).startsWith(start) && nos(o.label.replace(/\s*…$/, '') + (o.under ?? '')).startsWith(nos(asked))
-    }
-    return shown.length === a.options.length && shown.every((o, i) => o.n === i + 1 && (s.beside ? sameWords(o.label, labels[i]) || whole(o, labels[i]) : sameLabel(o.label, labels[i], labels, o.cut)))
+    const whole = (o: (typeof shown)[number], asked: string) => !!nos(asked) && nos(o.label + (o.under ?? '')) === nos(asked)
+    return shown.length === a.options.length && shown.every((o, i) => o.n === i + 1 && (s.beside ? whole(o, labels[i]) : sameLabel(o.label, labels[i], labels, o.cut)))
   })
   // (Two questions alike: which one this is cannot be told.)
   return at >= 0 && asks.filter((a) => sameQ(a.question, s.question)).length === 1 ? at : -1
