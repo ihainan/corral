@@ -25,10 +25,9 @@ import (
 // The same window shows the terminal as it is where the page cannot make out
 // what is up there or was refused a message: "look" and "look:<digest>", which
 // ask nothing of its state, a key there being as one in the terminal, and no
-// more than that; one that settles something goes on the screen shown where it
-// waits for an answer (at work a screen never stands still, and a key answers
-// nothing). No key goes unless pressed; this does not resize the pane or bring
-// it in front, as the terminal page does.
+// more than that; one that settles something goes only on the screen shown,
+// what moves by itself aside (lookDigest). No key goes unless pressed; this does
+// not resize the pane or bring it in front, as the terminal page does.
 
 // panelKeyOK: what may be pressed in a panel: moving, confirming, cancelling,
 // and the letters its search takes (not words pasted: a list takes them key by key).
@@ -74,7 +73,7 @@ func (s *Server) convoPanelScreen(w http.ResponseWriter, ctx context.Context, se
 	text, _, _ := screenOf(res.Out)
 	digest := panelDigest(res.Out)
 	w.Header().Set("Cache-Control", "no-store")
-	writeJSON(w, http.StatusOK, map[string]any{"text": text, "digest": digest})
+	writeJSON(w, http.StatusOK, map[string]any{"text": text, "digest": digest, "look": lookDigest(res.Out)})
 }
 
 // panelDigest names a screen as read with its colours, without them: a cursor
@@ -111,6 +110,42 @@ func steadyScreen(raw []byte) []byte {
 // (One mark a line, as above: "t" goes on to the next line once one is taken out.)
 const blinkSed = `LC_ALL=C sed -e 's/^\([ 	]*\)●/\1 /' -e 't' -e 's/^\([ 	]*\)⏺/\1 /'`
 const steadyPipe = `tr -d '\000' | ` + blinkSed + ` | LC_ALL=C awk 1`
+
+// The terminal shown as it is names its screen without what moves by itself: an
+// agent at work draws a spinner and counts seconds, and a key that had to go on
+// that very screen could never go. What a key would act on stays in: the cursor,
+// the rows, the words in a box, which panel it is. The spinner's own line, its
+// words and its time, goes, then every digit and blank: a seconds' count, and its
+// column moving when it gets longer. Other marks than these, or another layout:
+// the screen is said to have changed, and nothing is pressed.
+var spinnerMarks = []string{`*`, `·`, `✢`, `✳`, `✶`, `✻`, `✽`}
+
+var (
+	spinnerLine = regexp.MustCompile(`(?m)^(?:\*|·|✢|✳|✶|✻|✽) [A-Za-z-]*….*$`)
+	digitsBlank = regexp.MustCompile(`[0-9 \t]`)
+)
+
+func lookDigest(raw []byte) string {
+	b := panelSGR.ReplaceAll(bytes.ReplaceAll(raw, []byte{0}, nil), nil)
+	b = digitsBlank.ReplaceAll(blinkingMark.ReplaceAll(spinnerLine.ReplaceAll(b, nil), []byte("${1} ")), nil)
+	if len(b) > 0 && b[len(b)-1] != '\n' {
+		b = append(append([]byte(nil), b...), '\n')
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
+// lookDigestPipe: lookDigest as a shell pipeline, of what comes in.
+var lookDigestPipe = func() string {
+	sed := ""
+	for _, m := range spinnerMarks {
+		if m == "*" {
+			m = `\*`
+		}
+		sed += ` -e 's/^` + m + ` [A-Za-z-]*….*$//'`
+	}
+	return `tr -d '\000' | LC_ALL=C sed "s/$(printf '\033')\[[0-9;:]*m//g" | LC_ALL=C sed` + sed + ` | ` + blinkSed + ` | LC_ALL=C tr -d '0123456789 \011' | LC_ALL=C awk 1 | sha256sum`
+}()
 
 // POST /api/sessions/{id}/conversation/panel-screen → {"text", "digest"}: the
 // screen, with its colours, to show a panel of its own by.

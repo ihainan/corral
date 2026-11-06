@@ -2015,6 +2015,8 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       (e) => {
         // (Another agent in the pane: read at once, as for a send — the dialog says why.)
         if (e instanceof ApiError && e.code === 'agent_changed') convo.refresh()
+        // (Refused for what is up in its terminal: the terminal, here, as for a message.)
+        if (e instanceof ApiError && LIVE_ON.has(e.code) && (b.agent ?? 'claude') === 'claude') setLiveOf(bindKey)
         throw e
       },
     )

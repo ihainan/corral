@@ -2708,17 +2708,13 @@ if [ -n "$gate" ]; then
     esac ;;
   look) ;;
   # (The terminal shown as it is: any state, as a key in the terminal is. A key
-  # that settles something, only on the screen the person was shown where it
-  # waits: that is when it could answer anything, and such a screen stands
-  # still. At work, it never does: spinners, a subagent's seconds. A prompt come
-  # meanwhile says so in its session file before it is drawn.)
+  # that settles something, only on the screen the person was shown, what
+  # moves by itself aside: lookDigest. Not read, not the same: nothing pressed.)
   look:*)
-    if [ "$st" = waiting ]; then
-      command -v sha256sum >/dev/null 2>&1 || exit 11
-      if [ "$mode" = tmux ]; then d=$(tmux -u capture-pane -p -e -t "$p" 2>/dev/null | PANELDIGEST)
-      else d=$(HERDR_SOCKET_PATH=$sock herdr pane read "$p" --source visible --format ansi 2>/dev/null | PANELDIGEST); fi
-      [ "${d%% *}" = "${gate#look:}" ] || exit 10
-    fi ;;
+    command -v sha256sum >/dev/null 2>&1 || exit 11
+    if [ "$mode" = tmux ]; then d=$(tmux -u capture-pane -p -e -t "$p" 2>/dev/null | LOOKDIGEST)
+    else d=$(HERDR_SOCKET_PATH=$sock herdr pane read "$p" --source visible --format ansi 2>/dev/null | LOOKDIGEST); fi
+    [ "${d%% *}" = "${gate#look:}" ] || exit 10 ;;
   reply:*)
     [ "$st" = waiting ] || exit 9
     case $wf in "permission prompt"|"input needed"|"sandbox request"|"worker request") ;; *) exit 9;; esac
@@ -2821,6 +2817,7 @@ fi`
 
 	script = strings.ReplaceAll(script, "CARDAWK", cardRegionAwk) // (see convo_card.go)
 	script = strings.ReplaceAll(script, "PANELDIGEST", panelDigestPipe)
+	script = strings.ReplaceAll(script, "LOOKDIGEST", lookDigestPipe)
 	script = strings.ReplaceAll(script, "STEADYSCREEN", steadyPipe)
 	script = strings.ReplaceAll(script, "OWNERAWK", claudeOwnerAwk) // (see convo_view.go)
 	script = strings.ReplaceAll(script, "BOXAWK", claudeBoxAwk)
@@ -3636,7 +3633,7 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		sctx, scancel := context.WithTimeout(ctx, 10*time.Second)
 		if r2, err := sshx.Exec(sctx, sess.Client(), convoColorScreenCommand(sess.Persistence, b.Pane, socket), 512<<10, sshx.ExecOptions{}); err == nil {
 			text, _, _ := screenOf(r2.Out)
-			out["text"], out["digest"] = text, panelDigest(r2.Out)
+			out["text"], out["digest"], out["look"] = text, panelDigest(r2.Out), lookDigest(r2.Out)
 		}
 		scancel()
 		writeJSON(w, http.StatusOK, out)

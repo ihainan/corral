@@ -190,22 +190,26 @@ time.sleep(30)`)
 	if got := run("panel:"+strings.Repeat("a", 64), []string{"enter"}); got != 10 || wrote() != "" {
 		t.Fatalf("on another: exit %d, typed %q", got, wrote())
 	}
-	// The terminal shown as it is: waiting, a key that settles goes on the screen
-	// shown; any key that does not, and at work whichever (a screen at work never
-	// stands still), goes as in the terminal.
-	if got := run("look:"+onShow, []string{"enter"}); got != 0 || wrote() != "pane send-keys p1 enter" {
-		t.Fatalf("look, the screen shown: exit %d, typed %q", got, wrote())
+	// The terminal shown as it is: a key that settles goes on the screen shown, in
+	// any state, nor where the state cannot be read; one that does not, as in the terminal.
+	onLook := lookDigest([]byte("\x1b[7m" + asked))
+	for _, st := range [][2]string{{"waiting", "dialog open"}, {"busy", ""}, {"idle", ""}, {"", ""}} {
+		state(st[0], st[1])
+		if got := run("look:"+onLook, []string{"enter"}); got != 0 || wrote() != "pane send-keys p1 enter" {
+			t.Fatalf("look, %q, the screen shown: exit %d, typed %q", st[0], got, wrote())
+		}
+		if got := run("look:"+strings.Repeat("a", 64), []string{"enter"}); got != 10 || wrote() != "" {
+			t.Fatalf("look, %q, another screen: exit %d, typed %q", st[0], got, wrote())
+		}
+		if got := run("look", []string{"esc"}); got != 0 || wrote() != "pane send-keys p1 esc" {
+			t.Fatalf("look, %q, a key that settles nothing: exit %d, typed %q", st[0], got, wrote())
+		}
 	}
-	if got := run("look:"+strings.Repeat("a", 64), []string{"enter"}); got != 10 || wrote() != "" {
-		t.Fatalf("look, waiting, another screen: exit %d, typed %q", got, wrote())
+	os.Remove(screenFile)
+	if got := run("look:"+onLook, []string{"enter"}); got != 10 || wrote() != "" {
+		t.Fatalf("look, no screen read: exit %d, typed %q", got, wrote())
 	}
-	if got := run("look", []string{"esc"}); got != 0 || wrote() != "pane send-keys p1 esc" {
-		t.Fatalf("look, a key that settles nothing: exit %d, typed %q", got, wrote())
-	}
-	state("busy", "")
-	if got := run("look:"+strings.Repeat("a", 64), []string{"enter"}); got != 0 || wrote() != "pane send-keys p1 enter" {
-		t.Fatalf("look, at work: exit %d, typed %q", got, wrote())
-	}
+	showing(asked)
 	state("waiting", "dialog open")
 	for _, st := range [][2]string{{"waiting", "permission prompt"}, {"waiting", "input needed"}, {"busy", ""}, {"idle", ""}} {
 		state(st[0], st[1])

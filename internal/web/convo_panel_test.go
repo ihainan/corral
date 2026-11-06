@@ -106,3 +106,47 @@ func TestScreenDigestSteady(t *testing.T) {
 		t.Error("another choice is the same screen")
 	}
 }
+
+// What names the terminal shown, on the gateway and the host alike; what moves
+// by itself apart, what a key acts on not.
+func TestLookDigest(t *testing.T) {
+	for _, s := range []string{
+		"plain\n", "no newline", "", "with\x00nul\n",
+		"\x1b[1;38;5;75m✽ Nucleating… (23s)\x1b[0m\n❯ 1. Yes\n  2. No\n",
+		"* Nucleating… (23s · ↓ 1.2k tokens)\n◯ main\n● general-purpose  Count the files      14s\n",
+		"● ⏺ two\n  ● indented\nwords ● stay\n\ttabbed 12\n",
+		"· not a spinner line\n✻ Worked for 3s\n",
+		"中文 … 1234\n",
+	} {
+		c := exec.Command("sh", "-c", lookDigestPipe)
+		c.Stdin = strings.NewReader(s)
+		out, err := c.Output()
+		if err != nil {
+			t.Fatalf("%q: %v", s, err)
+		}
+		if host, _, _ := strings.Cut(string(out), " "); host != lookDigest([]byte(s)) {
+			t.Errorf("%q: host %s, gateway %s", s, host, lookDigest([]byte(s)))
+		}
+	}
+	same := [][2]string{
+		{"✽ Nucleating… (23s)\nbox\n", "* Pondering… (24s · ↓ 3k tokens)\nbox\n"},
+		{"  ● general-purpose  Count      9s\n", "  ● general-purpose  Count     10s\n"},
+		{"● Needs permission\n", "  Needs permission\n"},
+	}
+	for _, c := range same {
+		if lookDigest([]byte(c[0])) != lookDigest([]byte(c[1])) {
+			t.Errorf("what moves by itself counts: %q, %q", c[0], c[1])
+		}
+	}
+	other := [][2]string{
+		{"❯ Auto-compact  true\n  Theme\n", "  Auto-compact  true\n❯ Theme\n"}, // (the cursor)
+		{"❯ 1. Yes\n  2. No\n", "  1. Yes\n❯ 2. No\n"},                         // (the choice)
+		{"❯ draft\n", "❯ another draft\n"},                                     // (a box's words)
+		{"Delete staging?\n❯ 1. Yes\n", "Delete production?\n❯ 1. Yes\n"},      // (what is asked)
+	}
+	for _, c := range other {
+		if lookDigest([]byte(c[0])) == lookDigest([]byte(c[1])) {
+			t.Errorf("what a key acts on does not count: %q, %q", c[0], c[1])
+		}
+	}
+}

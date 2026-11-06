@@ -76,12 +76,12 @@ export function PanelWindow({ sid, active, press, onSettled, toast, live }: { li
     const look = new AbortController()
     a.look = look
     try {
-      const r = await api<{ text: string; digest: string }>('POST', `/api/sessions/${sid}/conversation/panel-screen`, pressNow.current(), { timeoutMs: 12000, signal: look.signal })
+      const r = await api<{ text: string; digest: string; look?: string }>('POST', `/api/sessions/${sid}/conversation/panel-screen`, pressNow.current(), { timeoutMs: 12000, signal: look.signal })
       if (!a.alive) return
       a.stale = false
       a.fails = 0
       setLost(false)
-      setScreen({ text: r.text, digest: r.digest })
+      setScreen({ text: r.text, digest: (isLive.current ? r.look : r.digest) ?? r.digest })
     } catch (e) {
       // (Given up for a key, or another of its presses under way: no failure to read.)
       if (look.signal.aborted || (e instanceof ApiError && e.code === 'busy')) return
@@ -113,13 +113,13 @@ export function PanelWindow({ sid, active, press, onSettled, toast, live }: { li
         try {
           // (What the key left comes back with it: another round trip for it would be
           // most of what a key takes on a far-off host.)
-          const r = await api<{ text?: string; digest?: string }>('POST', `/api/sessions/${sid}/conversation/panel`, { ...pressNow.current(), keys: [k], ...(settles(k) ? { digest } : {}), ...(isLive.current ? { live: true } : {}) }, { timeoutMs: 15000 })
+          const r = await api<{ text?: string; digest?: string; look?: string }>('POST', `/api/sessions/${sid}/conversation/panel`, { ...pressNow.current(), keys: [k], ...(settles(k) ? { digest } : {}), ...(isLive.current ? { live: true } : {}) }, { timeoutMs: 15000 })
           a.stale = true
           if (a.alive) setSaid('')
           if (a.alive && typeof r?.text === 'string' && typeof r.digest === 'string') {
             a.stale = false
             setLost(false)
-            setScreen({ text: r.text, digest: r.digest })
+            setScreen({ text: r.text, digest: (isLive.current ? r.look : r.digest) ?? r.digest })
           }
           if (k === 'esc' || settles(k)) setTimeout(() => onSettledNow.current(), 700)
         } catch (e) {
