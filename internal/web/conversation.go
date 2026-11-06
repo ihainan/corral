@@ -2521,97 +2521,12 @@ owned() {
     return 0
   fi
   [ "$2" = 1 ] && exit 16
-  # Nothing typed yet: the conversation's own box brought back in front, if
-  # it can be for sure (back), then looked at again as before. (Not for an
-  # Enter again, gate "enter": that is for words of ours in the box shown.)
-  case $gate:$o in enter:*|box:*) ;; *:subagent|*:list)
-    back; bk=$?
-    [ "$bk" = 2 ] && exit 17
-    if [ "$bk" = 0 ]; then
-      owner "$1"
-      if [ "$o" = main ]; then printf '\001corral: main again\n'; return 0; fi
-    fi ;;
-  esac
   case $o in subagent) exit 13;; list|sessions) exit 14;; *) exit 15;; esac
 }
-# Back to the conversation's own box (agent-view.md): a subagent's
-# conversation in front — clicked or tapped in its list of agents, in a
-# fullscreen Claude Code — or that list holding the keys. Keys only where
-# the screen says what each will do, read again after each (foot, of
-# claudeFootAwk): the list's keys released with Escape only while the list
-# has them (Escape in a box stops what works there); a subagent's left only
-# with its box empty (a draft of the person's is not carried off); down into
-# the list once, Enter only with its cursor on main. Not sure at any step:
-# the list let go of, if it has the keys, and no more (refused, as before).
-foot() {
-  if [ "$mode" = tmux ]; then fs=$(tmux -u capture-pane -p -t "$p" 2>/dev/null 9>&-) || fs=
-  else fs=$(HERDR_SOCKET_PATH=$sock herdr pane read "$p" --source visible 2>/dev/null 9>&-) || fs=; fi
-  # (Not read: nothing of it — "none none none 0 0" below.)
-  ft=$(printf '%s\n' "$fs" | awk 'FOOTAWK' 2>/dev/null) || ft=
-  [ -n "$ft" ] || ft="none none none 0 0"
-  read -r fo vw cu ev em <<FOOT
-$ft
-FOOT
-}
-# (One key, of the same agent still in front — and, tmux, in that session —
-# then the screen read until what it says changes, 2 seconds at most.)
-press1() {
-  front || return 1
-  if [ "$mode" = tmux ]; then
-    [ "$(tmux -u display-message -p -t "$p" '#{session_name}' 2>/dev/null 9>&-)" = "$sess" ] || return 1
-    case $1 in down) k=Down;; enter) k=Enter;; *) k=Escape;; esac
-    moved=1
-    tmux send-keys -t "$p" "$k" 9>&- || return 1
-  else
-    moved=1
-    HERDR_SOCKET_PATH=$sock herdr pane send-keys "$p" "$1" >/dev/null 2>&1 9>&- || return 1
-  fi
-  was=$ft i=0
-  while [ "$i" -lt 13 ]; do
-    sleep 0.15 2>/dev/null || sleep 1
-    foot
-    [ "$ft" != "$was" ] && return 0
-    i=$((i + 1))
-  done
-  return 0
-}
-# (Each key once at most: a screen that did not change as said is given up
-# on. 0: back; 1: not, nothing pressed or the screen as it was; 2: keys
-# pressed and where the terminal is now not known — left in the list.)
-back() {
-  moved=0 downs=0 enters=0 escs=0 n=0
-  foot
-  while [ "$n" -lt 4 ]; do
-    n=$((n + 1))
-    case "$fo $vw" in
-    "box main"|"other none") return 0 ;; # (no list left: who has the box, looked at again)
-    "box sub")
-      [ "$em" = 1 ] && [ "$downs" = 0 ] || break
-      downs=1
-      press1 down || return 2 ;;
-    "list sub")
-      # (Its box holding a draft of the person's: left alone, as below.)
-      [ "$cu" = main ] && [ "$ev" = 1 ] && [ "$enters" = 0 ] && [ "$em" = 1 ] || break
-      enters=1
-      press1 enter || return 2 ;;
-    "list main")
-      [ "$escs" = 0 ] || break
-      escs=1
-      press1 esc || return 2 ;;
-    *) break ;;
-    esac
-  done
-  # (The list let go of, if it has the keys and was not let go of yet.)
-  if [ "$fo" = list ] && [ "$escs" = 0 ]; then escs=1; press1 esc || return 2; fi
-  [ "$moved" = 1 ] && [ "$fo" != box ] && return 2
-  return 1
-}
-b=corral-send-$$ typing=0 moved=0 partdir=
+b=corral-send-$$ typing=0 partdir=
 f=$(mktemp) || exit 4
 trap 'rm -f "$f"; [ -n "$partdir" ] && rm -rf "$partdir"; [ "$mode" = tmux ] && tmux delete-buffer -b "$b" 2>/dev/null 9>&-' EXIT
-# (Stopped while bringing the conversation's box back (back): where the
-# terminal was left is not known, 17.)
-trap '[ "$typing" = 1 ] && exit 6; [ "$moved" = 1 ] && exit 17; exit 4' HUP INT TERM
+trap '[ "$typing" = 1 ] && exit 6; exit 4' HUP INT TERM
 if [ "$len" != keys ]; then cat >"$f" || exit 4; fi
 l=${XDG_RUNTIME_DIR:-}/corral-send-$(printf '%s' "$mode-$p" | tr -c 'A-Za-z0-9-' _)
 if [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -d "$XDG_RUNTIME_DIR" ] && [ ! -L "$l" ] && command -v flock >/dev/null 2>&1 && (exec 9>>"$l") 2>/dev/null; then
@@ -2792,13 +2707,18 @@ if [ -n "$gate" ]; then
       [ "${d%% *}" = "${gate#panel:}" ] || exit 10 ;;
     esac ;;
   look) ;;
-  # (The terminal shown as it is: any state, as a key in the terminal is; one
-  # that settles something, only on the screen the person was shown.)
+  # (The terminal shown as it is: any state, as a key in the terminal is. A key
+  # that settles something, only on the screen the person was shown where it
+  # waits: that is when it could answer anything, and such a screen stands
+  # still. At work, it never does: spinners, a subagent's seconds. A prompt come
+  # meanwhile says so in its session file before it is drawn.)
   look:*)
-    command -v sha256sum >/dev/null 2>&1 || exit 11
-    if [ "$mode" = tmux ]; then d=$(tmux -u capture-pane -p -e -t "$p" 2>/dev/null | PANELDIGEST)
-    else d=$(HERDR_SOCKET_PATH=$sock herdr pane read "$p" --source visible --format ansi 2>/dev/null | PANELDIGEST); fi
-    [ "${d%% *}" = "${gate#look:}" ] || exit 10 ;;
+    if [ "$st" = waiting ]; then
+      command -v sha256sum >/dev/null 2>&1 || exit 11
+      if [ "$mode" = tmux ]; then d=$(tmux -u capture-pane -p -e -t "$p" 2>/dev/null | PANELDIGEST)
+      else d=$(HERDR_SOCKET_PATH=$sock herdr pane read "$p" --source visible --format ansi 2>/dev/null | PANELDIGEST); fi
+      [ "${d%% *}" = "${gate#look:}" ] || exit 10
+    fi ;;
   reply:*)
     [ "$st" = waiting ] || exit 9
     case $wf in "permission prompt"|"input needed"|"sandbox request"|"worker request") ;; *) exit 9;; esac
@@ -2903,7 +2823,6 @@ fi`
 	script = strings.ReplaceAll(script, "PANELDIGEST", panelDigestPipe)
 	script = strings.ReplaceAll(script, "STEADYSCREEN", steadyPipe)
 	script = strings.ReplaceAll(script, "OWNERAWK", claudeOwnerAwk) // (see convo_view.go)
-	script = strings.ReplaceAll(script, "FOOTAWK", claudeFootAwk)
 	script = strings.ReplaceAll(script, "BOXAWK", claudeBoxAwk)
 	cmd := "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(mode) + " " + sshx.QuoteShell(session) + " " + sshx.QuoteShell(pane) + " " +
 		strconv.FormatInt(pid, 10) + " " + strconv.FormatInt(start, 10) + " " + n + " " + sshx.QuoteShell(socket) + " " + sshx.QuoteShell(sid) + " " + strconv.Itoa(max(0, min(read, 60))) + " " + sshx.QuoteShell(gate)
@@ -3596,7 +3515,7 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	// its colours first (the conversation's own box in front): the same
 	// words, Enter only; others, refused, said what they are; greyed ones (a
 	// suggestion) are none. Not read: as before.
-	inBox, restoredFirst := false, false
+	inBox := false
 	if front.agent == "claude" && (what == "send" || what == "command") {
 		look := func() (string, bool) {
 			sctx, scancel := context.WithTimeout(ctx, 10*time.Second)
@@ -3605,51 +3524,6 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 			return string(res.Out), err == nil
 		}
 		scr, ok := look()
-		// (A subagent's conversation in front, or the list with the keys:
-		// the conversation's own box brought back first — what it holds is
-		// not seen till then — review571.)
-		// (Not seen for sure after that — the switch failing, or its screen
-		// not read, or not main's — nothing more: main's box may hold words
-		// that would go with this — review572.)
-		if v := claudeOwner(sgr.ReplaceAllString(scr, ""), false); ok && (v == "subagent" || v == "list") {
-			sctx, scancel := context.WithTimeout(ctx, 20*time.Second)
-			ended.Add(1) // (the pane's turn held till it has ended on the host)
-			res, err := sshx.Exec(sctx, sess.Client(), convoGatedCommand("free", sess.Persistence, sess.TmuxSession, b.Pane, socket, b.PID, b.Start, b.Session, 0, []string{}, 0), sendOut, sshx.ExecOptions{Stdin: strings.NewReader(""), Release: ended.Done})
-			scancel()
-			var exitErr *sshx.ExitError
-			if err == nil {
-				_, restoredFirst = viewRestored(res.Out)
-				scr, ok = look()
-			}
-			switch {
-			case err == nil && ok && claudeOwner(sgr.ReplaceAllString(scr, ""), false) == "main":
-			case errors.Is(err, sshx.ErrBusy) || errors.As(err, &exitErr) && exitErr.Status == 7:
-				ended.Done()
-				outcome, reason = "refused", "busy"
-				writeError(w, http.StatusTooManyRequests, "busy", "the host is still answering earlier requests")
-				return
-			case errors.As(err, &exitErr) && exitErr.Status == 9:
-				ended.Done()
-				outcome, reason = "refused", "agent_waiting"
-				writeError(w, http.StatusConflict, "agent_waiting", "it waits for an answer, or has a dialog open: answer it first")
-				return
-			case errors.As(err, &exitErr) && exitErr.Status == 3:
-				ended.Done()
-				outcome, reason = "refused", "agent_changed"
-				writeError(w, http.StatusConflict, "agent_changed", "that pane no longer runs this agent")
-				return
-			default:
-				ended.Done()
-				outcome = "refused"
-				if code, _, isOwner := writeOwnerRefusal(w, err); isOwner {
-					reason = code
-					return
-				}
-				reason = "view_unsure"
-				writeError(w, http.StatusConflict, "view_unsure", "the terminal was being brought back to this conversation, and where it is now is not seen for sure: nothing was typed; look at the terminal")
-				return
-			}
-		}
 		if plain := sgr.ReplaceAllString(scr, ""); ok && claudeOwner(plain, false) == "main" {
 			if ls, ok := boxDraftLines(scr); ok && len(ls) > 0 {
 				d := strings.Join(ls, " ")
@@ -3695,9 +3569,6 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	}
 	res, err := sshx.Exec(ctx, sess.Client(), cmd, sendOut,
 		sshx.ExecOptions{Stdin: strings.NewReader(in), Release: done})
-	var restored bool // (a subagent's conversation had been shown: the conversation's own brought back first)
-	res.Out, restored = viewRestored(res.Out)
-	restored = restored || restoredFirst
 	var exitErr *sshx.ExitError
 	switch {
 	case err == nil:
@@ -3754,12 +3625,9 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	if answer != nil && outcome != "refused" {
 		answer.digest, answer.at = b.Digest, time.Now()
 	}
-	if restored && reason == "" {
-		reason = "view_restored"
-	}
 	switch {
 	case outcome == "typed" && what == "mode":
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "mode": screenMode(string(res.Out)), "view_restored": restored})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "mode": screenMode(string(res.Out))})
 	case outcome == "typed" && what == "panel":
 		// (The screen the key left, in the same answer: a far-off host's round trip
 		// again for it would be most of what a key takes, and the panel's turn is
@@ -3773,7 +3641,7 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		scancel()
 		writeJSON(w, http.StatusOK, out)
 	case outcome == "typed":
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "view_restored": restored, "in_box": inBox})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "in_box": inBox})
 	case reason == "busy":
 		writeError(w, http.StatusTooManyRequests, "busy", "the host is still answering earlier requests")
 	case outcome == "refused":

@@ -81,7 +81,7 @@ const SUGGEST_AT = [1500, 4000, 9000]
 type SuggestAsk = { left: number; text: string; seq: number; busy: boolean; views: Set<{ told: () => void; next: () => void }> }
 const suggestAsks = new Map<string, SuggestAsk>()
 // Refusals of a switch made before any key was pressed (see convoPress, convoModeTo).
-const NOTHING_PRESSED = ['bad_request', 'unauthorized', 'unsupported', 'busy', 'host_error', 'agent_changed', 'not_in_front', 'refused', 'no_screen', 'not_found', 'forbidden', 'subagent_view', 'other_view', 'no_input', 'view_unsure', 'box_draft', 'screen_changed']
+const NOTHING_PRESSED = ['bad_request', 'unauthorized', 'unsupported', 'busy', 'host_error', 'agent_changed', 'not_in_front', 'refused', 'no_screen', 'not_found', 'forbidden', 'subagent_view', 'other_view', 'no_input', 'box_draft', 'screen_changed']
 const MODE_MS = 50000 // (to a mode picked: several presses, each read back; the gateway gives up at 45 s)
 const MODEL_MS = 50000 // (the picker, step by step: see convo_model.go)
 const PASTE_CHARS = 2000
@@ -674,7 +674,7 @@ function queueRows(queued: { text: string; ts?: string; from?: string; note?: bo
   })
 }
 // (A message refused for what is up in the terminal, or what could not be made out there.)
-const LIVE_ON = new Set(['agent_waiting', 'no_input', 'other_view', 'subagent_view', 'typed_other_view', 'typed_not_sent', 'view_unsure', 'no_screen', 'cannot_verify', 'box_draft', 'draft', 'picker', 'unknown'])
+const LIVE_ON = new Set(['agent_waiting', 'no_input', 'other_view', 'subagent_view', 'typed_other_view', 'typed_not_sent', 'no_screen', 'cannot_verify', 'box_draft', 'draft', 'picker', 'unknown'])
 // (See the note on these where they are used.)
 const LOOK_AFTER_MS = 4000
 const LOOK_WITHIN_MS = 60000 // (later, as a page opened anew: a screen of now says nothing of then)
@@ -1023,6 +1023,8 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   }, [said])
   const refusal = (e: unknown) => {
     if (!(e instanceof ApiError)) return errorText(e)
+    // (What stopped it is up there, or could not be made out: the terminal, here, to deal with it.)
+    if (LIVE_ON.has(e.code) && (convo.bind?.agent ?? 'claude') === 'claude' && convo.bind) setLiveOf(bindKey)
     // (Claude Code's input box not this conversation's: said what to do in the terminal.)
     const v = viewRefusal(e.code)
     if (v) return v
@@ -1051,8 +1053,8 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     const bind = bindKey // (what becomes of it is of that process: another in the pane shows none of it)
     setSaid({ what, text: t(what === 'stop' ? 'convo.stopping' : 'convo.sendingNow'), busy: true, n, bind })
     const settle = (text: string) => setSaid((cur) => (cur?.n === n ? { what, text, busy: false, n, bind } : cur))
-    api<{ view_restored?: boolean }>('POST', `/api/sessions/${sid}/conversation/${what === 'stop' ? 'interrupt' : 'send-now'}`, { pane: b.pane, pid: b.pid, start: b.start, session: b.session }, { timeoutMs: PRESS_MS })
-      .then((r) => settle(t(what === 'stop' ? 'convo.stopped' : 'convo.sentNow') + (r?.view_restored ? ' ' + t('convo.viewRestoredShort') : '')))
+    api('POST', `/api/sessions/${sid}/conversation/${what === 'stop' ? 'interrupt' : 'send-now'}`, { pane: b.pane, pid: b.pid, start: b.start, session: b.session }, { timeoutMs: PRESS_MS })
+      .then(() => settle(t(what === 'stop' ? 'convo.stopped' : 'convo.sentNow')))
       .catch((e) => settle(refusal(e)))
   }
   const canPress = bound && working
@@ -1724,13 +1726,11 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       if (draftKeyNow.current === key) setDraftShown((d) => (d === undefined || !d.trim() ? was : d))
     }
 
-    api<{ view_restored?: boolean; in_box?: boolean }>('POST', `/api/sessions/${sid}/conversation/send`, { pane: b.pane, pid: b.pid, start: b.start, session: b.session, text }, { timeoutMs: SEND_MS })
+    api<{ in_box?: boolean }>('POST', `/api/sessions/${sid}/conversation/send`, { pane: b.pane, pid: b.pid, start: b.start, session: b.session, text }, { timeoutMs: SEND_MS })
       .then((r) => {
         if (authGen() !== account) return drop()
-        // (A subagent's conversation was in front in the terminal: brought back first, said.)
-        if (r?.view_restored) toast(t('convo.viewRestored'))
         // (The same words were in its box already — put back there by a stop: Enter only.)
-        else if (r?.in_box) toast(t('convo.inBoxSent'))
+        if (r?.in_box) toast(t('convo.inBoxSent'))
         remember(was)
         mark({ state: 'waiting' })
         convo.refresh() // (it is in its log already: read now, not at the next tick)

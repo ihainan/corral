@@ -87,7 +87,6 @@ func (s *Server) convoModeTo(w http.ResponseWriter, ctx context.Context, sess *t
 		// (Not while it waits: Shift+Tab is a question's then. Exit 9.)
 		res, err := sshx.Exec(ctx, sess.Client(), convoGatedCommand("free", sess.Persistence, sess.TmuxSession, pane, socket, pid, start, sid, 0, press, convoModeLines), 16<<10,
 			sshx.ExecOptions{Stdin: strings.NewReader(""), Release: ended.Done})
-		res.Out, _ = viewRestored(res.Out)
 		var exitErr *sshx.ExitError
 		switch {
 		case err == nil:

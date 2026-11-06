@@ -190,6 +190,23 @@ time.sleep(30)`)
 	if got := run("panel:"+strings.Repeat("a", 64), []string{"enter"}); got != 10 || wrote() != "" {
 		t.Fatalf("on another: exit %d, typed %q", got, wrote())
 	}
+	// The terminal shown as it is: waiting, a key that settles goes on the screen
+	// shown; any key that does not, and at work whichever (a screen at work never
+	// stands still), goes as in the terminal.
+	if got := run("look:"+onShow, []string{"enter"}); got != 0 || wrote() != "pane send-keys p1 enter" {
+		t.Fatalf("look, the screen shown: exit %d, typed %q", got, wrote())
+	}
+	if got := run("look:"+strings.Repeat("a", 64), []string{"enter"}); got != 10 || wrote() != "" {
+		t.Fatalf("look, waiting, another screen: exit %d, typed %q", got, wrote())
+	}
+	if got := run("look", []string{"esc"}); got != 0 || wrote() != "pane send-keys p1 esc" {
+		t.Fatalf("look, a key that settles nothing: exit %d, typed %q", got, wrote())
+	}
+	state("busy", "")
+	if got := run("look:"+strings.Repeat("a", 64), []string{"enter"}); got != 0 || wrote() != "pane send-keys p1 enter" {
+		t.Fatalf("look, at work: exit %d, typed %q", got, wrote())
+	}
+	state("waiting", "dialog open")
 	for _, st := range [][2]string{{"waiting", "permission prompt"}, {"waiting", "input needed"}, {"busy", ""}, {"idle", ""}} {
 		state(st[0], st[1])
 		if got := run("dialog", []string{"esc"}); got != 9 || wrote() != "" {
@@ -501,10 +518,8 @@ func ownerGateCases(t *testing.T, dir string, pid int, start int64, run func(str
 	}{
 		{"a subagent's", sub, "free", 13, ""}, {"the sessions' view", sessions, "free", 14, ""},
 		{"a subagent's, a command", sub, "idle", 13, ""},
-		// (The list holding the keys: let go of with one Escape, the box
-		// then brought back; here the screen stays as it was after it:
-		// where the terminal is, not known — 17.)
-		{"the list of agents", list, "free", 17, "pane send-keys p1 esc"},
+		// (The list holding the keys: refused, no key pressed: the person's to let go of.)
+		{"the list of agents", list, "free", 14, ""},
 		{"the list of agents, Enter again", list, "enter", 14, ""},
 		// (Stop on a subagent's placeholder alone, its list out of sight: not pressed — review560.)
 		{"a subagent's placeholder alone, stop", "──────────\n❯ Message @general-purpose…\n──────────\n  ⏵⏵ auto mode on\n", "stop", 13, ""},

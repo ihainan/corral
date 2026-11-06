@@ -25,8 +25,10 @@ import (
 // The same window shows the terminal as it is where the page cannot make out
 // what is up there or was refused a message: "look" and "look:<digest>", which
 // ask nothing of its state, a key there being as one in the terminal, and no
-// more than that. No key goes unless pressed; this does not resize the pane or
-// bring it in front, as the terminal page does.
+// more than that; one that settles something goes on the screen shown where it
+// waits for an answer (at work a screen never stands still, and a key answers
+// nothing). No key goes unless pressed; this does not resize the pane or bring
+// it in front, as the terminal page does.
 
 // panelKeyOK: what may be pressed in a panel: moving, confirming, cancelling,
 // and the letters its search takes (not words pasted: a list takes them key by key).

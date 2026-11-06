@@ -523,7 +523,6 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 		running.Add(1)
 		res, err := sshx.Exec(ctx, sess.Client(), convoGatedCommand(gate, sess.Persistence, sess.TmuxSession, pane, socket, pid, start, sid, len(text), press, read), 64<<10,
 			sshx.ExecOptions{Stdin: strings.NewReader(text), Release: running.Done})
-		res.Out, _ = viewRestored(res.Out) // (its word that it brought the box back: not of the screen)
 		if err == nil && (len(press) > 0 || text != "") {
 			typed = true
 		}

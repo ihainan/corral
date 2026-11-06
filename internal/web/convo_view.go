@@ -1,7 +1,6 @@
 package web
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -431,84 +430,6 @@ END {
 
 func init() { claudeOwnerAwk = strings.ReplaceAll(claudeOwnerAwk, "FOOT", strconv.Itoa(ownerFoot)) }
 
-// claudeFootAwk reads what the gate needs to bring the conversation's own
-// box back in front (agent-view.md), off the bottom input box of Claude
-// Code's screen and the list of agents under it, as five words:
-//   - focus: list (its keys, "↑/↓ to select", in the box's status line's
-//     place), box (the box's own status line drawn), other;
-//   - viewed: main ("● main"), sub ("◯ main": a subagent's conversation
-//     shown), none (no list);
-//   - cursor, while the list has the keys: main or sub. Where its keys
-//     say Enter would show another, the cursor is on a row not shown (◯),
-//     the one such with a ❯ (a ❯ is also left where it was last clicked:
-//     more than one, "many", not told apart); where they do not, it is on
-//     the one shown (●). none: the list has not the keys;
-//   - view: 1 where the list's keys say Enter would show another;
-//   - empty: 1 where the box holds nothing but its placeholder ("Message
-//     @…", or none).
-//
-// No box: "none none none 0 0".
-var claudeFootAwk = strings.ReplaceAll(`function isrule(s) { sub(/^[ \t]*/, "", s); return index(s, "────────") == 1 || index(s, "━━━━━━━━") == 1 }
-function isprompt(s) { sub(/^[ \t]*/, "", s); return index(s, "❯") == 1 }
-function squeeze(s) { gsub(/[ \t]/, "", s); gsub(/NBSP/, "", s); return s }
-function agentrow(s) { return s ~ /^[ \t]*(❯[ \t]+)?(◯|●) [^ \t]+([ \t][ \t]+.*|[ \t]*)$/ }
-function mainrow(s) { return s ~ /^[ \t]*(❯[ \t]+)?(◯|●) main[ \t]*$/ }
-function placeholder(i, e,  j, t, r) { r = ""; for (j = i; j < e; j++) { t = L[j]; if (j == i) sub(/^[ \t]*❯/, "", t); sub(/^([ \t]|NBSP)+/, "", t); sub(/([ \t]|NBSP)+$/, "", t); if (t != "") r = (r == "" ? t : r " " t) }; return r ~ /^Message @[A-Za-z0-9_.:-]+(…)?…$/ }
-function modeline(s,  t) { t = s; sub(/^[ \tNBSP]*/, "", t); return index(t, "⏵") == 1 || index(t, "⏸") == 1 || index(squeeze(s), "?forshortcuts") == 1 }
-{ sub(/\r$/, ""); L[NR] = $0 }
-END {
-  n = NR
-  while (n > 0 && squeeze(L[n]) == "") n--
-  for (i = n; i >= 2; i--) {
-    if (!isprompt(L[i]) || !isrule(L[i-1])) continue
-    e = 0
-    for (j = i + 1; j <= n; j++) if (isrule(L[j])) { e = j; break }
-    if (!e) continue
-    for (j = e + 1; j <= n; j++) A[j] = 0
-    j = e + 1
-    while (j <= n) {
-      if (!agentrow(L[j])) { j++; continue }
-      k = j; m = 0
-      while (k <= n && agentrow(L[k])) { if (mainrow(L[k])) m = 1; k++ }
-      if (m) for (x = j; x < k; x++) A[x] = 1
-      j = k
-    }
-    kl = ""; seen = 0; vw = "none"; cm = 0; cs = 0
-    for (j = e + 1; j <= n; j++) {
-      if (A[j]) {
-        seen = 1
-        if (mainrow(L[j])) { if (L[j] ~ /●/) vw = "main"; else if (vw == "none") vw = "sub" }
-        if (L[j] ~ /^[ \t]*❯[ \t]+◯/) { if (mainrow(L[j])) cm++; else cs++ }
-        continue
-      }
-      if (!seen && squeeze(L[j]) != "") kl = L[j]
-    }
-    # (Of the line above the list only, by how it begins: see ownerKeysLine.)
-    if (!seen) kl = ""
-    q = squeeze(kl)
-    fo = "other"
-    if (index(q, "↑/↓toselect") == 1) fo = "list"; else if (modeline(kl)) fo = "box"
-    ev = (fo == "list" && index(q, "Entertoview")) ? 1 : 0
-    cu = "none"
-    if (fo == "list" && !ev) cu = vw
-    else if (fo == "list") { if (cm + cs > 1) cu = "many"; else if (cm) cu = "main"; else if (cs) cu = "sub" }
-    b = ""
-    for (j = i; j < e; j++) { t = L[j]; if (j == i) sub(/^[ \t]*❯/, "", t); b = b squeeze(t) }
-    # (The placeholder whole: see ownerPlaceholder.)
-    em = (b == "" || placeholder(i, e)) ? 1 : 0
-    print fo, vw, cu, ev, em; exit
-  }
-  print "none none none 0 0"
-}`, "NBSP", " ")
-
-// viewRestored: the gate's output without its first line saying it
-// brought the conversation's own box back in front (a subagent's
-// conversation had been shown: owned and back in convoGated), and whether
-// it did.
-func viewRestored(out []byte) ([]byte, bool) {
-	return bytes.CutPrefix(out, []byte("\x01corral: main again\n"))
-}
-
 // The gate's exits for who has the box (convoGated: 13–15 before anything
 // is typed, 16 typed and Enter held back).
 const (
@@ -516,10 +437,7 @@ const (
 	exitOwnerOther    = 14
 	exitOwnerNone     = 15
 	exitOwnerTyped    = 16
-	// (Keys pressed to bring the conversation's box back in front, and
-	// where that left the terminal not known: nothing of the message typed.)
-	exitOwnerMoved = 17
-	exitOwnerLast  = exitOwnerMoved
+	exitOwnerLast     = exitOwnerTyped
 )
 
 // ownerRefusal: the error of a gate's exit for who has the input box
@@ -538,8 +456,6 @@ func ownerRefusal(err error) (code, msg string, typed, ok bool) {
 		return "no_input", "the conversation's input box is not on the screen", false, true
 	case exitOwnerTyped:
 		return "typed_other_view", "typed into its input, not sent: the terminal went to another view before Enter", true, true
-	case exitOwnerMoved:
-		return "view_unsure", "the terminal was being brought back to this conversation when that stopped: nothing was typed; look at the terminal", false, true
 	}
 	return "", "", false, false
 }
