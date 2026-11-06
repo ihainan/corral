@@ -674,7 +674,7 @@ function queueRows(queued: { text: string; ts?: string; from?: string; note?: bo
   })
 }
 // (A message refused for what is up in the terminal, or what could not be made out there.)
-const LIVE_ON = new Set(['no_input', 'other_view', 'subagent_view', 'typed_other_view', 'typed_not_sent', 'view_unsure', 'no_screen', 'cannot_verify', 'box_draft', 'draft', 'picker', 'unknown'])
+const LIVE_ON = new Set(['agent_waiting', 'no_input', 'other_view', 'subagent_view', 'typed_other_view', 'typed_not_sent', 'view_unsure', 'no_screen', 'cannot_verify', 'box_draft', 'draft', 'picker', 'unknown'])
 // (See the note on these where they are used.)
 const LOOK_AFTER_MS = 4000
 const LOOK_WITHIN_MS = 60000 // (later, as a page opened anew: a screen of now says nothing of then)
