@@ -19,7 +19,7 @@ import { applyMods, specialKey, type KeysApart, type Mods, type SpecialKey } fro
 import { KeyBar, type ModState } from '../terminal/KeyBar'
 import { macroBytes, parseMacro, type Step } from '../terminal/macro'
 import { chromeVars } from '../terminal/themes'
-import { attachedIn, expandPastes, getDraft, keepDraft, keepPaste, remember, sentHistory, showDraft, unsendable } from '../terminal/drafts'
+import { attachedIn, expandForClaude, expandPastes, getDraft, keepDraft, keepPaste, remember, sentHistory, showDraft, unsendable } from '../terminal/drafts'
 import { attach, ATTACH_LABEL, AttachStrip, takeOut } from '../terminal/attach'
 import { PictureDialog } from '../terminal/picture'
 import { useCompletion } from '../terminal/Completion'
@@ -2101,7 +2101,8 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
       toast(bad.other ? t('attach.wrongHost', { name: bad.other.name }) : t('attach.lost', { label: bad.lost! }), true)
       return
     }
-    const text = expandPastes(draft, 4 << 20)
+    // (Claude Code takes a path for a picture only alone on its line; not where another program may be in front.)
+    const text = herdr?.focused_agent === 'claude' ? expandForClaude(draft, 4 << 20) : expandPastes(draft, 4 << 20)
     if (text === null) {
       toast(t('term.tooLong'), true)
       return

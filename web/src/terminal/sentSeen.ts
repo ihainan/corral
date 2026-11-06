@@ -47,7 +47,8 @@ export const camesAfter = (s: Submission, p: Waiting) => {
 
 // A command that opens a panel, or that Claude Code answers itself, may write
 // no row at all: none is waited for.
-export const isCommand = (text: string) => text.trimStart().startsWith('/')
+// (A command, not a path: a message may well begin with a picture's.)
+export const isCommand = (text: string) => /^\/[\w:.-]+(?:\s|$)/.test(text.trimStart()) && !/\.(?:png|jpe?g|gif|webp)$/i.test(text.trimStart().split(/\s/, 1)[0])
 
 // Oldest message first, each the first submission since it went that no other
 // has: which ones the log now shows gone, and with what.

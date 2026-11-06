@@ -2117,7 +2117,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     <ConversationView
       convo={convo}
       agent={agent}
-      pending={panelOpen ? shownSent.map((p) => (p.state === 'waiting' && p.text.trimStart().startsWith('/') ? { ...p, opened: true } : p)) : shownSent}
+      pending={panelOpen ? shownSent.map((p) => (p.state === 'waiting' && isCommand(p.text) ? { ...p, opened: true } : p)) : shownSent}
       ask={
         waits && replyTo ? (
           // (One a pane, and a process in it: nothing of another's carries over. Not tied to a terminal: no size to wait for.)
