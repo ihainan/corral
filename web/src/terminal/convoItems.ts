@@ -53,7 +53,35 @@ const stepKey = (s: Step) => (isNote(s) ? 'e' + s.seq : (partKey.get(s) ?? '?'))
 // A message the person sent while the agent worked, taken in during the
 // turn (mid), is the turn's: it shows where it was taken in (the work before
 // it one run, the work after another), and does not end the turn.
-export function items(entries: ConvoEntry[], live: boolean, moving: boolean): Item[] {
+// A goal set with /goal is told three times over, each the whole of it: Claude
+// Code's event, the person's message, its "Goal set: …". The message says it;
+// the event goes and the note is the short line that it took. (By their words
+// and being next to each other: read from the middle of a log, or the goal set
+// otherwise, each stands as it is.)
+const goalWords = (s: string) => s.replace(/\s+/g, ' ').trim().slice(0, 200)
+export function goalOnce(entries: ConvoEntry[]): ConvoEntry[] {
+  let out: ConvoEntry[] | null = null
+  for (let i = 0; i < entries.length; i++) {
+    const e = entries[i]
+    const said = e.role === 'user' ? e.parts[0]?.text : undefined
+    if (!said?.startsWith('/goal ')) continue
+    const words = goalWords(said.slice(6))
+    const before = entries[i - 1]
+    const ev = before?.role === 'note' ? before.parts[0]?.event : undefined
+    const after = entries[i + 1]
+    const note = after?.role === 'note' ? after.parts[0]?.text : undefined
+    const set = !!note?.startsWith('Goal set: ') && goalWords(note.slice(10)) === words
+    const dropped = ev?.kind === 'goal' && ev.set && goalWords(ev.goal ?? '') === words
+    if (!set && !dropped) continue
+    out ??= [...entries]
+    if (dropped) out[i - 1] = { ...before, parts: [] }
+    if (set) out[i + 1] = { ...after, parts: [{ kind: 'event', event: { kind: 'goal', set: true } }] }
+  }
+  return out ? out.filter((e) => e.role !== 'note' || e.parts.length > 0) : entries
+}
+
+export function items(entriesIn: ConvoEntry[], live: boolean, moving: boolean): Item[] {
+  const entries = goalOnce(entriesIn)
   const out: Item[] = []
   const merged = mergeNotes(entries)
   let turn: { from?: string; steps: Step[]; to?: string; key: string } | null = null

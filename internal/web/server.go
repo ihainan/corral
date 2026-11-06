@@ -76,6 +76,7 @@ type Server struct {
 	complete     completions  // the composer's completion listings, per session and folder
 	convos       convoStates  // the conversation view's logs being read, per session
 	subConvos    convoStates  // and the logs of subagents opened from them
+	subScans     subScanSeen  // what their logs said last (convo_subscan.go)
 	turns        turnIndexes  // the person's turns in those logs, for the page's panel of them (convo_turns.go)
 	newAgents    newAgents    // agents being started from the conversation page
 	claudeLists  sessionLists // Claude Code's sessions of a folder, as last listed
@@ -237,6 +238,7 @@ func (s *Server) registerRoutes() {
 	s.handle("POST /api/sessions/{id}/conversation/send", SignedIn, s.apiConversationSend)
 	s.handle("POST /api/sessions/{id}/conversation/command", SignedIn, s.apiConversationCommand)
 	s.handle("GET /api/sessions/{id}/conversation/subagent", SignedIn, s.apiConversationSubagent)
+	s.handle("GET /api/sessions/{id}/conversation/subagents", SignedIn, s.apiConversationSubagents)
 	s.handle("GET /api/sessions/{id}/conversation/turns", SignedIn, s.apiConversationTurns)
 	s.handle("GET /api/sessions/{id}/conversation/quota", SignedIn, s.apiConversationQuota)
 	s.handle("POST /api/sessions/{id}/agents", SignedIn, s.apiNewAgent)

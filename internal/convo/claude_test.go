@@ -743,6 +743,10 @@ func TestClaudeRunning(t *testing.T) {
 	if r := c.Running(); len(r) != 2 || r[0].ID != "b1" || r[0].What != "跑测试" || r[0].Kind != "cmd" || r[1].Kind != "agent" {
 		t.Fatalf("running: %+v", c.Running())
 	}
+	// (Since the row answering the call: the call's own has no time here, and is older where it has.)
+	if r := c.Running(); r[0].Time != "2026-10-26T10:00:00Z" || r[1].Time != "2026-10-26T10:00:05Z" {
+		t.Errorf("since when: %+v", r)
+	}
 	// It says something of itself: still at it, with that said.
 	c.Feed(lines(`{"type":"attachment","uuid":"n1","attachment":{"type":"queued_command","commandMode":"task-notification","prompt":"<task-notification>\n<task-id>b1</task-id>\n<event>3 passed</event>\n</task-notification>"}}`))
 	if r := c.Running(); len(r) != 2 || r[0].Note != "3 passed" {

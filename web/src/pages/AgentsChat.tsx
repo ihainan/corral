@@ -54,6 +54,8 @@ const NO_SESSION = '00000000-0000-0000-0000-000000000000'
 const LAST = 'corral.agentsPick'
 const ONLY_MINE = 'corral.agentsOnlyMine'
 const FROM_LIST = { agentsFromList: true }
+// Over the page, what an Escape would be meant for.
+const ESC_HELD = '[aria-modal="true"], [role="menu"], [role="dialog"], .convo-search, .convo-sub-body'
 // What is left without the "/" the commands button put in, or null when a word has been typed on to it.
 const unslash = (s: string) => (s === '/' ? '' : s.startsWith('/ ') ? s.slice(2) : null)
 const fromList = () => !!(history.state as { agentsFromList?: boolean } | null)?.agentsFromList
@@ -1913,6 +1915,13 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
               return
             }
             if (completion.onKey(e)) return
+            // (Escape stops it, as in its terminal: from an empty box only, where it has no words to
+            // take back, and no panel over the page is what it would be meant for.)
+            if (e.key === 'Escape' && !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey && stopShown && !document.querySelector(ESC_HELD)) {
+              e.preventDefault()
+              press('stop')
+              return
+            }
             const el = e.currentTarget
             const plain = !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey && el.selectionStart === el.selectionEnd
             if (plain && e.key === 'ArrowUp' && el.selectionStart === 0 && historyStep(-1)) {
@@ -2007,7 +2016,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
             </button>
           )}
           {stopShown ? (
-            <button type="button" className="composer-send is-stop" onClick={() => press('stop')} aria-label={t('convo.stop')} title={t('convo.stop')}>
+            <button type="button" className="composer-send is-stop" onClick={() => press('stop')} aria-label={t('convo.stop')} title={t('convo.stop') + (isTouch ? '' : ' (Esc)')}>
               <Square size={14} fill="currentColor" strokeWidth={0} />
             </button>
           ) : (

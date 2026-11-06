@@ -10,6 +10,7 @@ import { useFlip } from '../flip'
 import { CodeSpanOf, FileLinkOf, Markdown } from './markdown'
 import { codePath } from './paths'
 import { useSubConvo } from './subagent'
+import { useSubScan, type SubScanAgent } from './subscan'
 import { NEW_AGENT } from './newAgent'
 import { Code } from './Code'
 import { ConvoSearchPanel } from './convoSearchPanel'
@@ -1468,7 +1469,7 @@ export function ConversationView({
         )}
       </div>
       <div className="convo-dock">
-        {convo.status === 'ready' && convo.running && <RunningWork items={convo.running} openCmd={setBgCmd} openSub={!convo.bind?.agent || convo.bind.agent === 'claude' || convo.bind.agent === 'codex' ? openSub : undefined} />}
+        {convo.status === 'ready' && convo.running && <RunningWork scanOf={!convo.bind?.agent || convo.bind.agent === 'claude' ? convo.of : undefined} items={convo.running} openCmd={setBgCmd} openSub={!convo.bind?.agent || convo.bind.agent === 'claude' || convo.bind.agent === 'codex' ? openSub : undefined} />}
         {/* (Its details kept here, not with the list above: it stays when the
             command ends — the list gone with it — saying so, its output still
             to be seen; not over another tab — review 1ad2c3d.) */}
@@ -1581,25 +1582,38 @@ function AskDock({ children }: { children: ReactNode }) {
   )
 }
 
-function RunningWork({ items, openSub, openCmd }: { items: ConvoRunning[]; openSub?: (s: Sub) => void; openCmd: (r: ConvoRunning) => void }) {
+// What a subagent does now, and how much it has in hand, as the list opened says.
+const scanNow = (a?: SubScanAgent) => (a?.tool ? (a.tool.done ? t('convo.live.thinking') : liveText(a.tool)) : '')
+const scanTokens = (a?: SubScanAgent) => (a?.tokens ? t('convo.bgTokens', { n: a.tokens >= 100000 ? Math.round(a.tokens / 1000) + 'k' : (a.tokens / 1000).toFixed(1) + 'k' }) : '')
+
+function RunningWork({ scanOf, items, openSub, openCmd }: { scanOf?: string; items: ConvoRunning[]; openSub?: (s: Sub) => void; openCmd: (r: ConvoRunning) => void }) {
   const [open, setOpen] = useState(false)
+  // (Those its subagents sent off in turn, known only from their logs.)
+  const scan = useSubScan(scanOf, items.some((r) => r.kind === 'agent'), open)
+  const nested = scan.filter((a) => (a.depth ?? 1) >= 2)
+  const scanned = new Map(scan.map((a) => [a.id, a]))
+  const many = items.length > 1 || nested.length > 0
   // (Down to one: opened again later, it starts folded as it did at first.)
   useEffect(() => {
-    if (items.length < 2) setOpen(false)
-  }, [items.length])
+    if (!many) setOpen(false)
+  }, [many])
   const shown = open ? items : items.slice(0, 1)
   return (
-    <div className="convo-running" role="status">
+    <div className="convo-running">
       <Loader size={13} className="convo-running-spin" aria-hidden="true" />
       <div className="convo-running-body">
       <div className="convo-running-head">
-        <span className="convo-running-sum">{t('convo.bg', { n: items.length })}</span>
-        {items.length > 1 && (
+        <span className="convo-running-sum" role="status">
+          {t('convo.bg', { n: items.length })}
+          {nested.length > 0 && t('convo.bgNested', { n: nested.length })}
+        </span>
+        {many && (
           <button type="button" className="link-btn convo-running-more" aria-expanded={open} onClick={() => setOpen(!open)}>
-            {t(open ? 'convo.bgLess' : 'convo.bgAll', { n: items.length })}
+            {t(open ? 'convo.bgLess' : 'convo.bgAll', { n: items.length + nested.length })}
           </button>
         )}
       </div>
+      <div className={'convo-running-list' + (open ? ' is-open' : '')}>
       {shown.map((r) => (
         <div key={r.id} className="convo-running-row">
           {r.kind === 'agent' && openSub && isSubId(r.id) ? (
@@ -1614,9 +1628,28 @@ function RunningWork({ items, openSub, openCmd }: { items: ConvoRunning[]; openS
             <span className="convo-running-what" title={r.what}>{r.what || t(r.kind === 'agent' ? 'convo.bgAgent' : 'convo.bgCmd')}</span>
           )}
           {r.note && <span className="convo-running-note" title={r.note}>{r.note}</span>}
+          {open && scanTokens(scanned.get(r.id)) && <span className="convo-running-tokens">{scanTokens(scanned.get(r.id))}</span>}
           <span className="convo-running-since">{since(r.ts)}</span>
+          {open && scanNow(scanned.get(r.id)) && <span className="convo-running-now" title={scanNow(scanned.get(r.id))}>{scanNow(scanned.get(r.id))}</span>}
         </div>
       ))}
+      {open && nested.length > 0 && <div className="convo-running-label">{t('convo.bgNestedHead')}</div>}
+      {open &&
+        nested.map((a) => (
+          <div key={a.id} className="convo-running-row">
+            {openSub ? (
+              <button type="button" className="link-btn convo-running-what" title={t('sub.open')} onClick={() => openSub({ agent: a.id, title: a.what ?? '' })}>
+                {a.what || t('convo.bgAgent')}
+              </button>
+            ) : (
+              <span className="convo-running-what" title={a.what}>{a.what || t('convo.bgAgent')}</span>
+            )}
+            {scanTokens(a) && <span className="convo-running-tokens">{scanTokens(a)}</span>}
+            <span className="convo-running-since">{since(a.ts)}</span>
+            {scanNow(a) && <span className="convo-running-now" title={scanNow(a)}>{scanNow(a)}</span>}
+          </div>
+        ))}
+      </div>
       </div>
     </div>
   )
@@ -2583,6 +2616,7 @@ function PageKeysHelp({ onClose, side }: { onClose: () => void; side: boolean })
     [['↑', '↓'], 'pageKeys.history'],
     [['Tab'], 'pageKeys.suggestion'],
     [['1–9', 'Esc'], 'pageKeys.card'],
+    [['Esc'], 'pageKeys.stop'],
   ]
   return (
     <Dialog title={t('pageKeys.title')} onClose={onClose}>
@@ -3688,6 +3722,8 @@ function LineCounts({ add, del }: { add: number; del: number }) {
   )
 }
 
+const SENT_SHOWN = 6
+
 // A run of steps between what the agent wrote: one line (what it did; while
 // it goes on, the step under way and for how long); opened, a line a step,
 // each opened on its own (a call's command, output and changes, a thought).
@@ -3715,6 +3751,14 @@ function Work({ it, open, onToggle, onCopy }: { it: Extract<Item, { kind: 'work'
   // (Under way while the agent is not at work: it waits for the person, to
   // be let run it or to be answered — not running, not for that long.)
   const asks = !!busy && !it.moving
+  // Shut, what is said of it without opening: the subagents it sent off, by
+  // name, each to be read; and with calls beside it the last of what it
+  // thought, a line (at most one for a run, however long it thought).
+  const openSub = useContext(OpenSub)
+  const sent = tools.filter((tl) => category(tl.name) === 'agent' && tl.title)
+  const lastThought = tools.length
+    ? it.steps.findLast((x): x is ConvoPart => !isNote(x) && x.kind === 'thinking' && !!x.text?.trim())
+    : undefined
   return (
     <div className="convo-work" data-work={it.key}>
       <button type="button" className="convo-work-head" aria-expanded={open} onClick={() => onToggle(it.key, !open)} title={isTouchOnly ? undefined : t(open ? (mac ? 'convo.foldHint' : 'convo.foldHintPlain') : mac ? 'convo.openHint' : 'convo.openHintPlain')}>
@@ -3742,6 +3786,23 @@ function Work({ it, open, onToggle, onCopy }: { it: Extract<Item, { kind: 'work'
           </span>
         )}
       </button>
+      {!open && lastThought && <p className="convo-work-said" title={lastThought.text}>{firstLine(lastThought.text ?? '')}</p>}
+      {!open && sent.length > 0 && (
+        <ul className="convo-work-sent">
+          {sent.slice(0, SENT_SHOWN).map((tl, i) => (
+            <li key={tl.id ?? i}>
+              {tl.agent_id && openSub ? (
+                <button type="button" className="link-btn" title={t('sub.open')} onClick={() => openSub({ agent: tl.agent_id!, title: tl.title })}>
+                  {tl.title}
+                </button>
+              ) : (
+                tl.title
+              )}
+            </li>
+          ))}
+          {sent.length > SENT_SHOWN && <li className="convo-work-sent-more">{t('convo.sentMore', { n: sent.length - SENT_SHOWN })}</li>}
+        </ul>
+      )}
       {open && (
         <div className="convo-work-body">
           {it.steps.map((s, i) =>

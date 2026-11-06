@@ -72,6 +72,7 @@ type Claude struct {
 	// background, a subagent on its own), until it is told to have ended;
 	// runOrder keeps them as they were set going.
 	running  map[string]Running
+	resultAt string // the time of the row whose results are being read
 	runOrder []string
 	// ranOut: told to have ended before what set it going was read (the
 	// log read from its middle, or a notice that came first).
@@ -1104,6 +1105,8 @@ func (c *Claude) user(r *claudeRow) {
 		images = images || b.Type == "image"
 	}
 	var parts, notes []Part
+	c.resultAt = clip(r.Timestamp, 64)
+	defer func() { c.resultAt = "" }()
 	for _, b := range blocks {
 		switch b.Type {
 		case "tool_result":
@@ -1813,7 +1816,13 @@ func (c *Claude) result(b claudeBlock, account json.RawMessage) {
 		if rep := handbackReport(account); rep != "" {
 			text = rep
 		}
-		c.setGoing(ref.t, account, ref.e.Time, text)
+		// (Since it was set going, the row answering the call: not since the
+		// call began to be written, which for a long prompt is minutes before.)
+		at := c.resultAt
+		if at == "" {
+			at = ref.e.Time
+		}
+		c.setGoing(ref.t, account, at, text)
 		// What a command changed, as Claude Code reports it: the files, each
 		// with its patch. The lines of the turn's changes count them too.
 		if files, more := bashFiles(account); len(files) > 0 {
