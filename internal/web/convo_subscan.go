@@ -25,6 +25,8 @@ const (
 	subScanMax     = 120      // logs looked at, the newest first
 	subScanOutMax  = 6 << 20  // what a scan may print
 	subScanRowsMax = 64 << 10 // of one log's last rows (detail): more is left out
+	// (Of how many (detail): so that the frames and all those fit subScanOutMax.)
+	subScanDetailMax = 60
 	// (A command may keep a subagent quiet for long, so this is long.)
 	subScanGone = 2 * time.Hour
 )
@@ -38,13 +40,14 @@ var subScanFresh = map[bool]time.Duration{false: 10 * time.Second, true: 3 * tim
 // rows. A row is one line, and control characters in a row are escaped, so
 // \001 starts only these. One untouched for subScanGone is not looked at, nor
 // any older: taken for gone (its session stopped under it).
-// Ended: its handback (Claude Code's call ending a subagent, or its last
-// answer where it has none) among the last of its log.
+// Ended: its last row of its own is its handback (Claude Code's call ending a
+// subagent), or an answer where it has none: not an earlier one, a subagent
+// being taken up again.
 func subScanCommand(home string, detail bool) string {
 	script := `d=$1/subagents; det=$2
 [ -L "$1" ] || [ -L "$d" ] && exit 0
 cd "$d" 2>/dev/null || exit 0
-now=$(date +%s); soh=$(printf '\001')
+now=$(date +%s); soh=$(printf '\001'); told=0
 ls -t 2>/dev/null | grep -E '^agent-[A-Za-z0-9_-]+\.jsonl$' | head -n ` + strconv.Itoa(subScanMax) + ` | while IFS= read -r f; do
   [ -f "$f" ] && [ ! -L "$f" ] || continue
   a=${f%.jsonl}; a=${a#agent-}
@@ -54,10 +57,10 @@ ls -t 2>/dev/null | grep -E '^agent-[A-Za-z0-9_-]+\.jsonl$' | head -n ` + strcon
   if [ -f "agent-$a.meta.json" ] && [ ! -L "agent-$a.meta.json" ]; then printf '\001M %s\n' "$(head -c 2048 "agent-$a.meta.json" | tr -d '\n\001')"; fi
   printf '\001T %s\n' "$(head -n 1 "$f" | grep -o '"timestamp":"[^"]*"' | head -n 1)"
   e=0
-  tail -c 65536 "$f" | grep -q '"name":"SubagentHandback"' && e=1
-  [ "$e" = 0 ] && tail -c 262144 "$f" | grep '"type":"assistant"' | tail -n 1 | grep -q '"stop_reason":"end_turn"' && e=1
+  tail -c 262144 "$f" | grep '"type":"assistant"' | tail -n 1 | grep -qE '"name":"SubagentHandback"|"stop_reason":"end_turn"' && e=1
   printf '\001E %s\n' "$e"
-  if [ "$det" = 1 ] && [ "$e" = 0 ]; then
+  if [ "$det" = 1 ] && [ "$e" = 0 ] && [ "$told" -lt ` + strconv.Itoa(subScanDetailMax) + ` ]; then
+    told=$((told + 1))
     tail -c 262144 "$f" | tail -n +2 | grep -E '"type":"(assistant|user)"' | tail -n 4 | tail -c ` + strconv.Itoa(subScanRowsMax) + ` | sed "s/^/${soh}R /"
   fi
 done`
@@ -173,8 +176,17 @@ func subScanNow(rows []byte) (*convo.Tool, int64) {
 // subScanSeen keeps a scan's answer for a moment: several tabs, or a tab
 // reading again, do not each go to the host.
 type subScanSeen struct {
-	mu   sync.Mutex
-	seen map[string]subScanEntry
+	mu    sync.Mutex
+	seen  map[string]subScanEntry
+	going map[string]*subScanCall
+}
+
+// subScanCall is a scan under way, which others asking meanwhile wait for: each
+// holds one of the connection's few places, wanted for the keys pressed too.
+type subScanCall struct {
+	done chan struct{}
+	list []subScanAgent
+	err  error
 }
 
 type subScanEntry struct {
@@ -190,6 +202,27 @@ func (c *subScanSeen) get(key string, fresh time.Duration, now time.Time) ([]sub
 		return nil, false
 	}
 	return e.list, true
+}
+
+// join: the scan under way for key, or a new one to make (true).
+func (c *subScanSeen) join(key string) (*subScanCall, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if g, ok := c.going[key]; ok {
+		return g, false
+	}
+	if c.going == nil {
+		c.going = map[string]*subScanCall{}
+	}
+	g := &subScanCall{done: make(chan struct{})}
+	c.going[key] = g
+	return g, true
+}
+
+func (c *subScanSeen) leave(key string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.going, key)
 }
 
 func (c *subScanSeen) put(key string, list []subScanAgent, now time.Time) {
@@ -255,13 +288,26 @@ func (s *Server) subScan(ctx context.Context, sess *term.Session, root string, d
 	if list, ok := s.subScans.get(key, subScanFresh[detail], now); ok {
 		return list, nil
 	}
-	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-	res, err := sshx.Exec(ctx, sess.Client(), subScanCommand(strings.TrimSuffix(root, ".jsonl"), detail), subScanOutMax, sshx.ExecOptions{})
-	if err != nil {
-		return nil, err
+	c, first := s.subScans.join(key)
+	if first {
+		// (Not of the one asking only: others wait on it, whoever goes away.)
+		go func() {
+			xctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+			defer cancel()
+			res, err := sshx.Exec(xctx, sess.Client(), subScanCommand(strings.TrimSuffix(root, ".jsonl"), detail), subScanOutMax, sshx.ExecOptions{})
+			if err == nil {
+				c.list = parseSubScan(res.Out)
+				s.subScans.put(key, c.list, now)
+			}
+			c.err = err
+			s.subScans.leave(key)
+			close(c.done)
+		}()
 	}
-	list := parseSubScan(res.Out)
-	s.subScans.put(key, list, now)
-	return list, nil
+	select {
+	case <-c.done:
+		return c.list, c.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }

@@ -2,9 +2,11 @@ package web
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -49,6 +51,7 @@ func TestSubScan(t *testing.T) {
 	subScanWrite(t, dir, "aaaaaaaa3", 2, "交回了", subFirst, subAtWork, subHandBk, subResult)
 	subScanWrite(t, dir, "aaaaaaaa4", 1, "答完了", subFirst, subAtWork, subAnswer)
 	subScanWrite(t, dir, "aaaaaaaa5", 2, "早没动静", subFirst, subAtWork)
+	subScanWrite(t, dir, "aaaaaaaa7", 2, "又接着做", subFirst, subAtWork, subHandBk, subResult, subAtWork)
 	if err := os.Chtimes(filepath.Join(dir, "agent-aaaaaaaa5.jsonl"), oldTime, oldTime); err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +74,7 @@ func TestSubScan(t *testing.T) {
 		return got
 	}
 	brief := run(false)
-	if len(brief) != 2 || brief["aaaaaaaa1"].Depth != 1 || brief["aaaaaaaa2"].Depth != 2 {
+	if len(brief) != 3 || brief["aaaaaaaa1"].Depth != 1 || brief["aaaaaaaa2"].Depth != 2 || brief["aaaaaaaa7"].What != "又接着做" {
 		t.Fatalf("those at work: %+v", brief)
 	}
 	if a := brief["aaaaaaaa2"]; a.What != "派生的" || a.Time != "2026-11-06T01:23:59.373Z" || a.Tool != nil || a.Tokens != 0 {
@@ -95,5 +98,42 @@ func TestSubScan(t *testing.T) {
 	// (No such folder: nothing, not an error.)
 	if out, err := exec.Command("sh", "-c", subScanCommand(filepath.Join(home, "none"), true)).Output(); err != nil || len(parseSubScan(out)) != 0 {
 		t.Errorf("no folder: %v %q", err, out)
+	}
+}
+
+// However many are at work and however long their rows, a scan fits what it may print.
+func TestSubScanFits(t *testing.T) {
+	home := t.TempDir()
+	dir := filepath.Join(home, "subagents")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	big := strings.Replace(subAtWork, "go test ./...", strings.Repeat("x", 70<<10), 1)
+	for i := 0; i < subScanMax; i++ {
+		subScanWrite(t, dir, fmt.Sprintf("dddddd%03d", i), 2, "长的", subFirst, big)
+	}
+	out, err := exec.Command("sh", "-c", subScanCommand(home, true)).Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) > subScanOutMax {
+		t.Errorf("printed %d, may %d", len(out), subScanOutMax)
+	}
+	if n := len(parseSubScan(out)); n != subScanMax {
+		t.Errorf("%d found", n)
+	}
+}
+
+// Those asking at once share one scan, each with its answer.
+func TestSubScanJoin(t *testing.T) {
+	var c subScanSeen
+	a, first := c.join("k")
+	b, second := c.join("k")
+	if !first || second || a != b {
+		t.Fatalf("%v %v", first, second)
+	}
+	c.leave("k")
+	if _, again := c.join("k"); !again {
+		t.Error("over: a new one")
 	}
 }

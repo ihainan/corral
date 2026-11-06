@@ -1184,6 +1184,12 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   const panelWanted = !!agent?.dialog && !!convo.bind && ownPicker === 0
   const [panelOpen, setPanelOpen] = useState(false)
   const panelShutAt = useRef(0)
+  // (Before what waits on it reads it, below: effects run in order.)
+  const panelHad = useRef(false)
+  useEffect(() => {
+    if (panelHad.current && !panelOpen) panelShutAt.current = Date.now()
+    panelHad.current = panelOpen
+  }, [panelOpen])
   useEffect(() => {
     if (!panelWanted) return setPanelOpen(false)
     const h = setTimeout(() => setPanelOpen(true), PANEL_AFTER_MS)
@@ -1528,7 +1534,6 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   panelNow.current = panelOpen
   const panelWas = useRef(false)
   useEffect(() => {
-    if (panelWas.current && !panelOpen) panelShutAt.current = Date.now()
     if (panelWas.current && !panelOpen && hasKeyboardPointer() && (document.activeElement === document.body || !document.activeElement)) field.current?.focus({ preventScroll: true })
     panelWas.current = panelOpen
   }, [panelOpen])
@@ -1893,7 +1898,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       )}
       {/* (Something written while it works: what will become of it, said while it is typed — the placeholder that said so is gone by then.) */}
       {!blocked && draft.trim() && agent?.status === 'working' && <p className="agents-chat-why is-note">{t(steers ? 'convo.steerNote' : 'convo.queueNote')}</p>}
-      {panelOpen && <PanelWindow key={bindKey} sid={sid} press={pressBody} onSettled={convo.refresh} toast={toast} />}
+      {panelOpen && <PanelWindow key={bindKey} sid={sid} active={active} press={pressBody} onSettled={convo.refresh} toast={toast} />}
       <div className="composer-box">
         <AttachStrip
           draft={draft}
@@ -1951,7 +1956,8 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
             if (completion.onKey(e)) return
             // (Escape stops it, as in its terminal: from an empty box only, where it has no words to
             // take back, and no panel over the page is what it would be meant for.)
-            if (e.key === 'Escape' && !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey && stopShown && !document.querySelector(ESC_HELD)) {
+            // (A key held: for what it first closed, not on to stopping it.)
+            if (e.key === 'Escape' && !e.repeat && !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey && stopShown && !document.querySelector(ESC_HELD)) {
               e.preventDefault()
               press('stop')
               return

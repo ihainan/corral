@@ -1470,7 +1470,7 @@ export function ConversationView({
         )}
       </div>
       <div className="convo-dock">
-        {convo.status === 'ready' && convo.running && <RunningWork scanOf={!convo.bind?.agent || convo.bind.agent === 'claude' ? convo.of : undefined} items={convo.running} openCmd={setBgCmd} openSub={!convo.bind?.agent || convo.bind.agent === 'claude' || convo.bind.agent === 'codex' ? openSub : undefined} />}
+        {convo.status === 'ready' && convo.running && <RunningWork scanOf={active && (!convo.bind?.agent || convo.bind.agent === 'claude') ? convo.of : undefined} items={convo.running} openCmd={setBgCmd} openSub={!convo.bind?.agent || convo.bind.agent === 'claude' || convo.bind.agent === 'codex' ? openSub : undefined} />}
         {/* (Its details kept here, not with the list above: it stays when the
             command ends — the list gone with it — saying so, its output still
             to be seen; not over another tab — review 1ad2c3d.) */}

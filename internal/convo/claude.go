@@ -136,6 +136,7 @@ const (
 type orphan struct {
 	b       claudeBlock
 	account json.RawMessage
+	at      string // (the time of the row it came in)
 }
 
 type toolRef struct {
@@ -449,7 +450,9 @@ func (c *Claude) Prepend(other Parser) {
 	o.late = late
 	for id, r := range c.orphans {
 		if _, ok := o.tools[id]; ok {
+			o.resultAt = r.at
 			o.result(r.b, r.account)
+			o.resultAt = ""
 			delete(c.orphans, id)
 		}
 	}
@@ -1780,7 +1783,7 @@ func (c *Claude) result(b claudeBlock, account json.RawMessage) {
 			c.orphans = map[string]orphan{}
 		}
 		if len(c.orphans) < maxOrphans && b.ToolUseID != "" {
-			c.orphans[b.ToolUseID] = orphan{b, append(json.RawMessage(nil), account...)}
+			c.orphans[b.ToolUseID] = orphan{b, append(json.RawMessage(nil), account...), c.resultAt}
 			if !b.IsError {
 				c.taskSaid(taskOp{orphan: b.ToolUseID})
 			}

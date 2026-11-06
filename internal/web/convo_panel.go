@@ -2,10 +2,11 @@ package web
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"context"
 	"net/http"
 	"regexp"
-	"strings"
 	"time"
 
 	"github.com/ihainan/corral/internal/sshx"
@@ -15,9 +16,11 @@ import (
 // A panel of Claude Code's own (/rewind, /resume, /mcp, /config…) is drawn on
 // its screen and tells the log nothing till it is shut, so the conversation
 // shows it as the screen does and passes on the keys pressed: only while one
-// is still open (its session file says so: the gate "dialog"). A key that
-// settles something (Enter, Space, a digit: /config's flips a setting at once)
-// goes only onto the screen the person was shown, "dialog:<digest>".
+// is still open: its session file says so, a moment late, and its input box is
+// not back on the screen, which is at once (the gate "panel"; an Escape past
+// its panel would stop what it does then). A key that settles something (Enter,
+// Space, a digit: /config's flips a setting at once) goes only onto the screen
+// the person was shown, "panel:<digest>".
 
 // panelKeyOK: what may be pressed in a panel: moving, confirming, cancelling,
 // and the letters its search takes (not words pasted: a list takes them key by key).
@@ -40,51 +43,44 @@ func panelOK(keys []string, digest string) bool {
 	return !panelSettles(keys[0]) || hexDigest.MatchString(digest)
 }
 
-// convoPanelScreenCommand prints a pane's screen with its colours, then a
-// line \001D and the digest of the screen as a key's gate reads it (without
-// them, see the gate "reply"). Fixed script; the mode, the validated pane id
-// and the socket from discovery are its arguments.
-func convoPanelScreenCommand(mode, pane, socket string) string {
-	script := `PATH="$HOME/.local/bin:$HOME/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
-if [ "$1" = tmux ]; then
-  tmux -u capture-pane -p -e -t "$2" 2>/dev/null 9>&- || exit 8
-  printf '\001D '; tmux -u capture-pane -p -t "$2" 2>/dev/null 9>&- | sha256sum 2>/dev/null
-else
-  HERDR_SOCKET_PATH=$3 herdr pane read "$2" --source visible --format ansi 2>/dev/null 9>&- || exit 8
-  printf '\001D '; HERDR_SOCKET_PATH=$3 herdr pane read "$2" --source visible 2>/dev/null 9>&- | sha256sum 2>/dev/null
-fi`
-	return "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(mode) + " " + sshx.QuoteShell(pane) + " " + sshx.QuoteShell(socket)
-}
-
-// panelScreenOf splits what convoPanelScreenCommand printed. A digest not
-// read (no sha256sum there) is "": keys that settle something are then refused.
-func panelScreenOf(out []byte) (screen, digest string) {
-	at := bytes.LastIndex(out, []byte("\x01D "))
-	if at < 0 {
-		return strings.TrimRight(string(out), " \t\r\n"), ""
-	}
-	d, _, _ := strings.Cut(string(out[at+3:]), " ")
-	if !hexDigest.MatchString(d) {
-		d = ""
-	}
-	text, _, _ := screenOf(out[:at])
-	return text, d
-}
-
 func (s *Server) convoPanelScreen(w http.ResponseWriter, ctx context.Context, sess *term.Session, pane, socket string, outcome, reason *string, release func()) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	res, err := sshx.Exec(ctx, sess.Client(), convoPanelScreenCommand(sess.Persistence, pane, socket), 512<<10, sshx.ExecOptions{Release: release})
+	res, err := sshx.Exec(ctx, sess.Client(), convoColorScreenCommand(sess.Persistence, pane, socket), 512<<10, sshx.ExecOptions{Release: release})
 	if err != nil {
 		*outcome, *reason = "unknown", "no_screen"
 		writeError(w, http.StatusBadGateway, "no_screen", "the pane's screen could not be read")
 		return
 	}
 	*outcome = "looked"
-	text, digest := panelScreenOf(res.Out)
+	// (What is shown and what names it, of the one read: read twice they could
+	// be of two screens, the choice shown not the one Enter would take. The
+	// gate reads it the same way, colours and all.)
+	text, _, _ := screenOf(res.Out)
+	digest := panelDigest(res.Out)
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusOK, map[string]any{"text": text, "digest": digest})
 }
+
+// panelDigest names a screen as read with its colours, without them: a cursor
+// blinking in a panel's search box changes only its colours, and would never
+// let a key that goes with the screen through. Read off that one read, so that
+// it is of what is shown. The gate computes the same on the host: panelDigestPipe
+// (cross-checked in a test).
+func panelDigest(raw []byte) string {
+	b := bytes.ReplaceAll(raw, []byte{0}, nil)
+	b = panelSGR.ReplaceAll(b, nil)
+	if len(b) > 0 && b[len(b)-1] != '\n' {
+		b = append(append([]byte(nil), b...), '\n')
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
+var panelSGR = regexp.MustCompile(`\x1b\[[0-9;:]*m`)
+
+// panelDigestPipe: panelDigest as a shell pipeline, of what comes in.
+const panelDigestPipe = `tr -d '\000' | LC_ALL=C sed "s/$(printf '\033')\[[0-9;:]*m//g" | LC_ALL=C awk 1 | sha256sum`
 
 // POST /api/sessions/{id}/conversation/panel-screen → {"text", "digest"}: the
 // screen, with its colours, to show a panel of its own by.

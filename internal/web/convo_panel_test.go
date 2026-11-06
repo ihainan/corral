@@ -1,6 +1,10 @@
 package web
 
-import "testing"
+import (
+	"os/exec"
+	"strings"
+	"testing"
+)
 
 func TestPanelKeys(t *testing.T) {
 	d := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -38,18 +42,33 @@ func TestPanelKeys(t *testing.T) {
 	}
 }
 
-func TestPanelScreenOf(t *testing.T) {
-	d := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	text, digest := panelScreenOf([]byte("\x1b[1mModel\x1b[0m\n  1. Opus\n\n\n\x01D " + d + "  -\n"))
-	if text != "\x1b[1mModel\x1b[0m\n  1. Opus" || digest != d {
-		t.Errorf("%q %q", text, digest)
+// The gateway's digest of a screen and the host's, the same whatever it holds;
+// and of two reads differing only in colours, the same; differing in words, not.
+func TestPanelDigest(t *testing.T) {
+	for _, s := range []string{
+		"\x1b[1;38;5;75mSettings\x1b[0m\n  \x1b[7m❯ Auto-compact\x1b[0m  \x1b[32mtrue\n\n",
+		"no newline at its end",
+		"",
+		"\x1b]8;id=1;https://a.example/\x1b\\link\x1b]8;;\x1b\\\n",
+		"中文 ⌕ …\r\nnext\n",
+		"with\x00nul\n",
+		"\xff\xfe not utf-8\n",
+		"a\x1b[38:2::1:2:3mb\n",
+	} {
+		c := exec.Command("sh", "-c", panelDigestPipe)
+		c.Stdin = strings.NewReader(s)
+		out, err := c.Output()
+		if err != nil {
+			t.Fatalf("%q: %v", s, err)
+		}
+		if host, _, _ := strings.Cut(string(out), " "); host != panelDigest([]byte(s)) {
+			t.Errorf("%q: host %s, gateway %s", s, host, panelDigest([]byte(s)))
+		}
 	}
-	// (No sha256sum there: no digest, so nothing that settles something goes.)
-	if _, digest := panelScreenOf([]byte("x\n\x01D ")); digest != "" {
-		t.Errorf("no digest: %q", digest)
+	if panelDigest([]byte("\x1b[7m❯\x1b[0m a\n")) != panelDigest([]byte("❯ a\n")) {
+		t.Error("colours count")
 	}
-	// (The last one is ours, whatever the screen shows.)
-	if text, digest := panelScreenOf([]byte("a\x01D zzz\nb\n\x01D " + d + "  -\n")); digest != d || text != "a\x01D zzz\nb" {
-		t.Errorf("%q %q", text, digest)
+	if panelDigest([]byte("❯ a\n  b\n")) == panelDigest([]byte("  a\n❯ b\n")) {
+		t.Error("the choice does not count")
 	}
 }

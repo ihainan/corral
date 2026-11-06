@@ -2778,14 +2778,21 @@ if [ -n "$gate" ]; then
   dialog)
     [ "$st" = waiting ] || exit 9
     case $wf in "permission prompt"|"input needed"|"sandbox request"|"worker request") exit 9;; esac ;;
-  dialog:*)
-    # (A key that settles something: on the screen shown, as an answer is.)
+  panel|panel:*)
+    # (A key in a panel of its own: its session file says one is open, and its
+    # box is not back: the file says so a moment after, an Escape past the panel
+    # stops what it does then. One that settles something: on the screen shown,
+    # read as the page's was: convoColorScreenCommand.)
     [ "$st" = waiting ] || exit 9
     case $wf in "permission prompt"|"input needed"|"sandbox request"|"worker request") exit 9;; esac
-    command -v sha256sum >/dev/null 2>&1 || exit 11
-    if [ "$mode" = tmux ]; then d=$(tmux -u capture-pane -p -t "$p" 2>/dev/null 9>&- | sha256sum)
-    else d=$(HERDR_SOCKET_PATH=$sock herdr pane read "$p" --source visible 2>/dev/null 9>&- | sha256sum); fi
-    [ "${d%% *}" = "${gate#dialog:}" ] || exit 10 ;;
+    owner 0
+    [ "$o" = main ] && exit 9
+    case $gate in panel:*)
+      command -v sha256sum >/dev/null 2>&1 || exit 11
+      if [ "$mode" = tmux ]; then d=$(tmux -u capture-pane -p -e -t "$p" 2>/dev/null | PANELDIGEST)
+      else d=$(HERDR_SOCKET_PATH=$sock herdr pane read "$p" --source visible --format ansi 2>/dev/null | PANELDIGEST); fi
+      [ "${d%% *}" = "${gate#panel:}" ] || exit 10 ;;
+    esac ;;
   reply:*)
     [ "$st" = waiting ] || exit 9
     case $wf in "permission prompt"|"input needed"|"sandbox request"|"worker request") ;; *) exit 9;; esac
@@ -2887,6 +2894,7 @@ else
 fi`
 
 	script = strings.ReplaceAll(script, "CARDAWK", cardRegionAwk)   // (see convo_card.go)
+	script = strings.ReplaceAll(script, "PANELDIGEST", panelDigestPipe)
 	script = strings.ReplaceAll(script, "OWNERAWK", claudeOwnerAwk) // (see convo_view.go)
 	script = strings.ReplaceAll(script, "FOOTAWK", claudeFootAwk)
 	script = strings.ReplaceAll(script, "BOXAWK", claudeBoxAwk)
@@ -3562,9 +3570,9 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		gate = "dialog" // (closed meanwhile, the Escape would stop what it does now)
 	case what == "panel":
 		// (Not Claude Code's: refused above. Whichever key, only while one is open.)
-		gate = "dialog"
+		gate = "panel"
 		if panelSettles(b.Keys[0]) {
-			gate = "dialog:" + b.Digest
+			gate = "panel:" + b.Digest
 		}
 	}
 	// Claude Code's box holding words already — a message a stop
