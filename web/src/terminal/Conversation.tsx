@@ -2125,7 +2125,7 @@ function Runs({ meta, active, mode, model, effort, quota }: { meta: ConvoMeta; a
   )
 }
 
-// The subscription's quota (5 hours, the week), as cc-statusline keeps it on
+// The subscription's quota (5 hours, the week), as Claude Code keeps it on
 // the host (plans/3c-quota.md): read when the popover opens and each minute
 // while it is open (that program writes it once a minute), kept a minute
 // across openings. The account's, whichever session says it.
@@ -2190,7 +2190,7 @@ function QuotaPart({ sid, session }: { sid: string; session: string }) {
   }, [key, sid, session])
   const shown = !seen ? undefined : seen.q === 'failed' ? seen.last : seen.q.known ? seen.q : undefined
   const now = Date.now() / 1000
-  const stale = shown?.updated_at && now - shown.updated_at > 600 ? Math.round((now - shown.updated_at) / 60) : 0
+  const stale = shown?.updated_at && now - shown.updated_at > 1200 ? Math.round((now - shown.updated_at) / 60) : 0
   return (
     <QuotaView shown={shown}>
       {!seen && <p className="convo-runs-note">{t('quota.reading')}</p>}
