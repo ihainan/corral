@@ -1587,7 +1587,7 @@ function AskDock({ children }: { children: ReactNode }) {
 const scanNow = (a?: SubScanAgent) => (a?.tool ? (a.tool.done ? t('convo.live.thinking') : liveText(a.tool)) : '')
 const scanTokens = (a?: SubScanAgent) => (a?.tokens ? t('convo.bgTokens', { n: a.tokens >= 100000 ? Math.round(a.tokens / 1000) + 'k' : (a.tokens / 1000).toFixed(1) + 'k' }) : '')
 
-function RunningWork({ scanOf, items, openSub, openCmd }: { scanOf?: string; items: ConvoRunning[]; openSub?: (s: Sub) => void; openCmd: (r: ConvoRunning) => void }) {
+function RunningWork({ scanOf, items, openSub, openCmd }: { scanOf?: string; items: ConvoRunning[]; openSub?: (s: Sub) => void; openCmd?: (r: ConvoRunning) => void }) {
   const [open, setOpen] = useState(false)
   // (Those its subagents sent off in turn, known only from their logs.)
   const scan = useSubScan(scanOf, items.some((r) => r.kind === 'agent'), open)
@@ -1621,7 +1621,7 @@ function RunningWork({ scanOf, items, openSub, openCmd }: { scanOf?: string; ite
             <button type="button" className="link-btn convo-running-what" title={t('sub.open')} onClick={() => openSub({ agent: r.id, title: r.what })}>
               {r.what || t('convo.bgAgent')}
             </button>
-          ) : r.kind === 'cmd' && (r.cmd || r.out) ? (
+          ) : r.kind === 'cmd' && (r.cmd || r.out) && openCmd ? (
             <button type="button" className="link-btn convo-running-what" title={t('convo.bgDetails')} onClick={() => openCmd(r)}>
               {r.what || t('convo.bgCmd')}
             </button>
@@ -3190,6 +3190,9 @@ export const recapText = (s: string) => s.replace(/\s*\((?:disable|turn off)[^()
 // A subagent sent off, whose own conversation can be shown: by its id.
 type Sub = { agent: string; title?: string }
 const OpenSub = createContext<((s: Sub) => void) | undefined>(undefined)
+// (In a subagent's conversation "the person" is the agent that sent it: what it
+// wrote is written in Markdown, for a model, and shown so.)
+const WordsAsWritten = createContext(false)
 
 // What can be done with a file the agent names, on its host (through the
 // session the conversation is read through): shown in the files panel,
@@ -3273,7 +3276,12 @@ function SubPanel({ of, sub, depth, live, onOpen, onBack, onClose, active, copy 
   const panel = useRef<HTMLElement>(null)
   const [opened, setOpened] = useState<Record<string, boolean>>({})
   const toggle = useCallback((key: string, open: boolean) => setOpened((o) => ({ ...o, [key]: open })), [])
-  const list = useMemo(() => items(c.entries, going, going), [c.entries, going])
+  // What it handed back is its answer, shown as one, not a step among the steps.
+  const { steps, report } = useMemo(() => subReport(c.entries), [c.entries])
+  const list = useMemo(() => items(steps, going, going), [steps, going])
+  // (How it stands now, while it goes on: read off its log with the others': subscan.ts.)
+  const scanned = useSubScan(active ? of : undefined, going, true).find((a) => a.id === sub.agent)
+  useTick(going) // (its time said goes on)
   useEffect(() => {
     const prev = document.activeElement as HTMLElement | null
     panel.current?.focus({ preventScroll: true })
@@ -3306,7 +3314,7 @@ function SubPanel({ of, sub, depth, live, onOpen, onBack, onClose, active, copy 
         <span className="convo-panel-title" title={sub.title}>
           {sub.title || t('sub.title')}
         </span>
-        <span className="convo-sub-state">{going ? t('sub.going') : ''}</span>
+        <span className="convo-sub-state">{going ? [t('sub.going'), since(scanned?.ts), scanTokens(scanned)].filter(Boolean).join(t('convo.sep')) : report ? t('sub.handedBack') : ''}</span>
         <span className="spacer" />
         <button type="button" className="icon-btn" onClick={c.read} disabled={c.loading} aria-label={t('sub.refresh')} title={t('sub.refresh')}>
           <Loader size={15} className={c.loading ? 'convo-running-spin' : ''} />
@@ -3315,6 +3323,7 @@ function SubPanel({ of, sub, depth, live, onOpen, onBack, onClose, active, copy 
           <X size={16} />
         </button>
       </div>
+      {going && scanNow(scanned) && <p className="convo-sub-now" title={scanNow(scanned)}>{scanNow(scanned)}</p>}
       <div className="convo-panel-body convo-sub-body">
         {c.older && (
           <p className="convo-older">
@@ -3330,13 +3339,41 @@ function SubPanel({ of, sub, depth, live, onOpen, onBack, onClose, active, copy 
         {c.failed && <LoadErrorLine onRetry={c.read} />}
         {!c.failed && !c.loading && list.length === 0 && <p className="convo-older">{t('sub.empty')}</p>}
         <OpenSub.Provider value={onOpen}>
+          <WordsAsWritten.Provider value={true}>
           {list.map((it) => (
             <ListItem key={itemKey(it)} it={it} copy={copy} open={it.kind === 'work' ? !!opened[it.key] : false} onToggle={toggle} onShow={noShow} />
           ))}
+          </WordsAsWritten.Provider>
+          {report && (
+            <section className="convo-sub-report" aria-label={t('sub.report')}>
+              <h3 className="convo-sub-report-head">{t('sub.report')}</h3>
+              <Markdown text={report.text} onCopyCode={copy} copyLabel={t('common.copy')} />
+              {report.cut && <p className="convo-older">{t('sub.reportCut')}</p>}
+            </section>
+          )}
         </OpenSub.Provider>
       </div>
+      {going && c.running.length > 0 && (
+        <div className="convo-sub-foot">
+          <RunningWork items={c.running} openSub={onOpen} />
+        </div>
+      )}
     </aside>
   )
+}
+
+// A subagent's log: its steps, without the call it ended with; and what that handed back.
+function subReport(entries: ConvoEntry[]): { steps: ConvoEntry[]; report?: { text: string; cut?: boolean } } {
+  let report: { text: string; cut?: boolean } | undefined
+  let changed = false
+  const steps = entries.flatMap((e) => {
+    if (e.role !== 'assistant' || !e.parts.some((p) => p.tool?.report)) return [e]
+    changed = true
+    for (const p of e.parts) if (p.tool?.report) report = { text: p.tool.report, cut: p.tool.report_cut }
+    const parts = e.parts.filter((p) => !p.tool?.report)
+    return parts.length ? [{ ...e, parts }] : []
+  })
+  return { steps: changed ? steps : entries, report }
 }
 
 function LoadErrorLine({ onRetry }: { onRetry: () => void }) {
@@ -3595,10 +3632,12 @@ function UserTurn({ e, onCopy }: { e: ConvoEntry; onCopy: (s: string) => void })
   // (A long one — a pasted command, a log — folded to its first lines, opened at a tap.)
   const long = text.split('\n').length > LONG_LINES || text.length > LONG_CHARS
   const [whole, setWhole] = useState(false)
+  const written = useContext(WordsAsWritten) && !shell
+  const words = written ? <Markdown text={text} /> : shown
   return (
     <div className={'convo-user' + (e.mid ? ' is-mid' : '')}>
-      <div className={'convo-user-text' + (shell ? ' is-shell' : '')}>
-        {long && !whole ? <span className="convo-user-fold">{shown}</span> : shown}
+      <div className={'convo-user-text' + (shell ? ' is-shell' : '') + (written ? ' is-written' : '')}>
+        {long && !whole ? <span className="convo-user-fold">{words}</span> : words}
         {long && (
           <button type="button" className="link-btn convo-user-more" aria-expanded={whole} onClick={() => setWhole(!whole)}>
             {t(whole ? 'convo.userLess' : 'convo.userMore')}

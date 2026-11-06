@@ -87,7 +87,13 @@ export function PanelWindow({ sid, active, press, onSettled, toast }: { sid: str
     if (a.pumping) return
     a.pumping = true
     try {
-      while (a.queue.length && a.alive) {
+      // (Till none is left: one pressed during the read after the last is sent too.)
+      while (a.alive && (a.queue.length || a.stale)) {
+        if (!a.queue.length) {
+          await read()
+          if (a.stale) break // (not read: the next look tries again)
+          continue
+        }
         const { k, digest } = a.queue.shift()!
         if (k === 'esc') {
           if (Date.now() - a.escDone < ESC_AGAIN) continue // (the last may have shut it, however long that took to go)
@@ -111,7 +117,6 @@ export function PanelWindow({ sid, active, press, onSettled, toast }: { sid: str
           }
         }
       }
-      if (a.stale && a.alive) await read()
     } finally {
       a.pumping = false
     }

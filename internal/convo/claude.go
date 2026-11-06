@@ -1694,6 +1694,15 @@ func (c *Claude) assistant(r *claudeRow) {
 		case "tool_use", "server_tool_use":
 			t := &Tool{ID: clip(b.ID, maxID), Name: clip(b.Name, 128)}
 			t.Title, t.Detail, t.Old, t.New = toolInput(b.Name, b.Input)
+			// (What a subagent hands back is its answer, shown as one: kept as a text is.)
+			if b.Name == subagentHandback {
+				var h struct {
+					Message string `json:"message"`
+				}
+				if json.Unmarshal(b.Input, &h) == nil && h.Message != "" {
+					t.Report, t.ReportCut = cut(clean(h.Message), maxText)
+				}
+			}
 			t.Add, t.Del = editLines(b.Name, b.Input)
 			switch b.Name {
 			case "AskUserQuestion":
@@ -2010,6 +2019,9 @@ func countLines(hunks []rawHunk) (add, del int) {
 	}
 	return add, del
 }
+
+// subagentHandback: the call with which a subagent ends, its report in it.
+const subagentHandback = "SubagentHandback"
 
 // setGoing: the call set work going that is left to itself (a command in
 // the background, a subagent sent off on its own). It stays there until

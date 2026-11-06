@@ -292,6 +292,13 @@ func (s *Server) subScan(ctx context.Context, sess *term.Session, root string, d
 	if first {
 		// (Not of the one asking only: others wait on it, whoever goes away.)
 		go func() {
+			// (One made meanwhile, between looking and joining: that one.)
+			if list, ok := s.subScans.get(key, subScanFresh[detail], time.Now()); ok {
+				c.list = list
+				s.subScans.leave(key)
+				close(c.done)
+				return
+			}
 			xctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
 			defer cancel()
 			res, err := sshx.Exec(xctx, sess.Client(), subScanCommand(strings.TrimSuffix(root, ".jsonl"), detail), subScanOutMax, sshx.ExecOptions{})

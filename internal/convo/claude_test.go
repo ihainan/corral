@@ -1697,3 +1697,16 @@ func TestClaudeRunningOutFile(t *testing.T) {
 		t.Fatalf("a subagent has neither: %+v", r[1])
 	}
 }
+
+// What a subagent hands back is kept whole, past what a call's detail keeps.
+func TestClaudeSubagentReport(t *testing.T) {
+	long := strings.Repeat("报告", 4000)
+	c := NewClaudeSub()
+	c.Feed(lines(
+		`{"type":"assistant","uuid":"a1","isSidechain":true,"timestamp":"2026-11-06T01:00:00Z","message":{"content":[{"type":"tool_use","id":"t1","name":"SubagentHandback","input":{"message":"` + long + `"}}]}}`,
+	))
+	got := c.Since(-1)
+	if len(got) != 1 || got[0].Parts[0].Tool == nil || got[0].Parts[0].Tool.Report != long || got[0].Parts[0].Tool.ReportCut {
+		t.Fatalf("%+v", got)
+	}
+}

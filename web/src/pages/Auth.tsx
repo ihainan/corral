@@ -4,9 +4,10 @@ import { t } from '../i18n'
 import { navigate } from '../router'
 import { syncPrefsFromServer } from '../prefs'
 import { useSession } from '../app'
+import { Eye, EyeOff } from 'lucide-react'
 import { BrandMark, Field, isCoarse } from '../components/ui'
 
-function AuthFrame({ title, intro, children }: { title: string; intro?: string; children: React.ReactNode }) {
+function AuthFrame({ title, titleHidden, intro, children }: { title: string; titleHidden?: boolean; intro?: string; children: React.ReactNode }) {
   return (
     <div className="auth-wrap">
       <main className="auth">
@@ -19,12 +20,27 @@ function AuthFrame({ title, intro, children }: { title: string; intro?: string; 
           <p className="auth-tagline">{t('app.tagline')}</p>
         </div>
         <div className="form">
-          <h1>{title}</h1>
+          {/* (Where the button below says the same: for a screen reader only.) */}
+          <h1 className={titleHidden ? 'sr-only' : undefined}>{title}</h1>
           {intro && <p className="lead">{intro}</p>}
           {children}
         </div>
       </main>
     </div>
+  )
+}
+
+// A password field whose words can be looked at: typed on a phone, say.
+function PasswordInput(field: React.InputHTMLAttributes<HTMLInputElement>) {
+  const [shown, setShown] = useState(false)
+  const label = t(shown ? 'login.hidePassword' : 'login.showPassword')
+  return (
+    <span className="input-eye">
+      <input {...field} type={shown ? 'text' : 'password'} />
+      <button type="button" className="input-eye-btn" aria-label={label} aria-pressed={shown} title={label} onMouseDown={(e) => e.preventDefault()} onClick={() => setShown(!shown)}>
+        {shown ? <EyeOff size={16} /> : <Eye size={16} />}
+      </button>
+    </span>
   )
 }
 
@@ -86,7 +102,7 @@ export function LoginPage() {
     )
   }
   return (
-    <AuthFrame title={t('login.title')}>
+    <AuthFrame title={t('login.title')} titleHidden>
       <form className="form" onSubmit={submit} noValidate>
         {/* (Focus starts in the first field where a keyboard is at hand, not
             on a touch screen, where it would pop the keyboard up — ux1101 PG-49.) */}
@@ -95,7 +111,7 @@ export function LoginPage() {
             value={username} onChange={(e) => (setUsername(e.target.value), missing.user && setMissing({ ...missing, user: false }))} required aria-invalid={!!missing.user} />
         </Field>
         <Field label={t('login.password')} htmlFor="login-pass" error={missing.pass ? t('login.fillPassword') : undefined}>
-          <input id="login-pass" className="input" type="password" autoComplete="current-password" value={password}
+          <PasswordInput id="login-pass" className="input" autoComplete="current-password" value={password}
             onChange={(e) => (setPassword(e.target.value), missing.pass && setMissing({ ...missing, pass: false }))} required aria-invalid={!!missing.pass} />
         </Field>
         {error && <p className="err" role="alert">{error}</p>}

@@ -2775,18 +2775,16 @@ if [ -n "$gate" ]; then
     else d=$(HERDR_SOCKET_PATH=$sock herdr pane read "$p" --source visible 2>/dev/null 9>&- | sha256sum); fi
     [ "${d%% *}" = "${gate#screen:}" ] || exit 10 ;;
   idle) [ "$st" = idle ] || exit 12 ;;
-  dialog)
-    [ "$st" = waiting ] || exit 9
-    case $wf in "permission prompt"|"input needed"|"sandbox request"|"worker request") exit 9;; esac ;;
-  panel|panel:*)
-    # (A key in a panel of its own: its session file says one is open, and its
-    # box is not back: the file says so a moment after, an Escape past the panel
-    # stops what it does then. One that settles something: on the screen shown,
-    # read as the page's was: convoColorScreenCommand.)
+  dialog|panel|panel:*)
+    # (A key in a dialog or panel of its own: its session file says one is open,
+    # and the screen, read, shows no input box: the file says so a moment after,
+    # an Escape past the panel stops what it does then. One that settles
+    # something: on the screen shown, read as the page's was:
+    # convoColorScreenCommand.)
     [ "$st" = waiting ] || exit 9
     case $wf in "permission prompt"|"input needed"|"sandbox request"|"worker request") exit 9;; esac
     owner 0
-    [ "$o" = main ] && exit 9
+    [ -n "$os" ] && [ "$o" = none ] || exit 9
     case $gate in panel:*)
       command -v sha256sum >/dev/null 2>&1 || exit 11
       if [ "$mode" = tmux ]; then d=$(tmux -u capture-pane -p -e -t "$p" 2>/dev/null | PANELDIGEST)

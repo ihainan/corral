@@ -2,9 +2,9 @@ package web
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"context"
 	"net/http"
 	"regexp"
 	"time"

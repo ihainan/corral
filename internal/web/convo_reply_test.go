@@ -165,10 +165,38 @@ time.sleep(30)`)
 			t.Fatalf("%s, Escape closes it: exit %d, typed %q", why, got, wrote())
 		}
 	}
+	// A panel of its own: its input box back on the screen, the session file
+	// not yet saying so: no key goes past it. Nor on a screen not read, nor one
+	// showing a subagent's box. A key that settles something: on the screen shown.
+	state("waiting", "dialog open")
+	for _, g := range []string{"dialog", "panel"} {
+		showing("──────────────────────────────\n❯ \n──────────────────────────────\n  ⏵⏵ auto mode on\n")
+		if got := run(g, []string{"esc"}); got != 9 || wrote() != "" {
+			t.Fatalf("%s, its box back: exit %d, typed %q", g, got, wrote())
+		}
+		os.Remove(screenFile)
+		if got := run(g, []string{"esc"}); got != 9 || wrote() != "" {
+			t.Fatalf("%s, no screen read: exit %d, typed %q", g, got, wrote())
+		}
+		showing(asked)
+		if got := run(g, []string{"esc"}); got != 0 || wrote() != "pane send-keys p1 esc" {
+			t.Fatalf("%s, open: exit %d, typed %q", g, got, wrote())
+		}
+	}
+	onShow := panelDigest([]byte("\x1b[7m" + asked))
+	if got := run("panel:"+onShow, []string{"enter"}); got != 0 || wrote() != "pane send-keys p1 enter" {
+		t.Fatalf("on the screen shown: exit %d, typed %q", got, wrote())
+	}
+	if got := run("panel:"+strings.Repeat("a", 64), []string{"enter"}); got != 10 || wrote() != "" {
+		t.Fatalf("on another: exit %d, typed %q", got, wrote())
+	}
 	for _, st := range [][2]string{{"waiting", "permission prompt"}, {"waiting", "input needed"}, {"busy", ""}, {"idle", ""}} {
 		state(st[0], st[1])
 		if got := run("dialog", []string{"esc"}); got != 9 || wrote() != "" {
 			t.Fatalf("%v, no dialog: exit %d, typed %q", st, got, wrote())
+		}
+		if got := run("panel", []string{"esc"}); got != 9 || wrote() != "" {
+			t.Fatalf("%v, no panel: exit %d, typed %q", st, got, wrote())
 		}
 	}
 	state("idle", "")

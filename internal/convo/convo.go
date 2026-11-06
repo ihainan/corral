@@ -248,6 +248,9 @@ type Tool struct {
 	// Title says what the call is for: Bash's description, a subagent's
 	// task; else empty.
 	Title string `json:"title,omitempty"`
+	// Report: (a subagent's last call) what it hands back, whole but for its limit.
+	Report    string `json:"report,omitempty"`
+	ReportCut bool   `json:"report_cut,omitempty"`
 	// Detail is what it acts on: the command, the file, the pattern, the
 	// address; for an edit, the text replaced (Old) and its replacement (New).
 	Detail string `json:"detail,omitempty"`

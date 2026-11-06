@@ -39,6 +39,8 @@ export interface ConvoTool {
   asks?: ConvoAsk[]
   answers?: string[]
   agent_id?: string // (Agent, Task) the subagent it sent off: its own conversation can be read
+  report?: string // (a subagent's last call) what it hands back
+  report_cut?: boolean
   // (ExitPlanMode) the plan put to the person (plan_cut: only its start), its file
   plan?: string
   plan_cut?: boolean
