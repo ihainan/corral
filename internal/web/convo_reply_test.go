@@ -100,7 +100,7 @@ func TestConvoGateOnTheHost(t *testing.T) {
 	// (Its screen: screen.txt; a text pasted makes it next.txt, where there is one.)
 	screenFile, nextFile := filepath.Join(dir, "screen.txt"), filepath.Join(dir, "next.txt")
 	asked := "Do you want to proceed?\n 1. Yes\n"
-	os.WriteFile(filepath.Join(dir, "herdr"), []byte("#!/bin/sh\nif [ \"$1 $2\" = 'pane read' ]; then cat "+screenFile+"; exit 0; fi\nif [ \"$1 $2\" = 'pane get' ]; then cat "+title+"; exit 0; fi\nif [ \"$1 $2\" = 'pane send-text' ] && [ -f "+nextFile+" ]; then mv "+nextFile+" "+screenFile+"; fi\nprintf '%s\\n' \"$*\" >>"+typed+"\n"), 0o755)
+	os.WriteFile(filepath.Join(dir, "herdr"), []byte("#!/bin/sh\nif [ \"$1 $2\" = 'pane read' ]; then cat "+screenFile+"; [ -e "+screenFile+".fails ] && exit 1; exit 0; fi\nif [ \"$1 $2\" = 'pane get' ]; then cat "+title+"; exit 0; fi\nif [ \"$1 $2\" = 'pane send-text' ] && [ -f "+nextFile+" ]; then mv "+nextFile+" "+screenFile+"; fi\nprintf '%s\\n' \"$*\" >>"+typed+"\n"), 0o755)
 	showing := func(s string) { os.WriteFile(screenFile, []byte(s), 0o644); os.Remove(nextFile) }
 	showing(asked)
 	// (The agent: sleep, a session's leader with the pseudo-terminal its own, in front of it.)
@@ -205,6 +205,25 @@ time.sleep(30)`)
 			t.Fatalf("look, %q, a key that settles nothing: exit %d, typed %q", st[0], got, wrote())
 		}
 	}
+	// (With its colours and what moves, as a real screen is: read again a moment on.)
+	moving := func(sec string) string {
+		return "\x1b[38;5;246m●\x1b[39m Needs permission\n\x1b[1m✽ Nucleating… (" + sec + "s)\x1b[0m\n  ◯ main\n❯ ● general-purpose  Count the files      " + sec + "s\n" + asked
+	}
+	showing(moving("9"))
+	seen := lookDigest([]byte(moving("10")))
+	if got := run("look:"+seen, []string{"enter"}); got != 0 || wrote() != "pane send-keys p1 enter" {
+		t.Fatalf("look, only what moves has moved: exit %d, typed %q", got, wrote())
+	}
+	showing("\x1b[1mDelete production?\x1b[0m\n" + asked)
+	if got := run("look:"+seen, []string{"enter"}); got != 10 || wrote() != "" {
+		t.Fatalf("look, another question: exit %d, typed %q", got, wrote())
+	}
+	showing(asked)
+	os.WriteFile(screenFile+".fails", nil, 0o644)
+	if got := run("look:"+onLook, []string{"enter"}); got != 10 || wrote() != "" {
+		t.Fatalf("look, the read failed, its output as shown: exit %d, typed %q", got, wrote())
+	}
+	os.Remove(screenFile + ".fails")
 	os.Remove(screenFile)
 	if got := run("look:"+onLook, []string{"enter"}); got != 10 || wrote() != "" {
 		t.Fatalf("look, no screen read: exit %d, typed %q", got, wrote())

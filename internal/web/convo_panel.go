@@ -111,26 +111,27 @@ func steadyScreen(raw []byte) []byte {
 const blinkSed = `LC_ALL=C sed -e 's/^\([ 	]*\)●/\1 /' -e 't' -e 's/^\([ 	]*\)⏺/\1 /'`
 const steadyPipe = `tr -d '\000' | ` + blinkSed + ` | LC_ALL=C awk 1`
 
-// The terminal shown as it is names its screen without what moves by itself: an
-// agent at work draws a spinner and counts seconds, and a key that had to go on
-// that very screen could never go. What a key would act on stays in: the cursor,
-// the rows, the words in a box, which panel it is. The spinner's own line, its
-// words and its time, goes, then every digit and blank: a seconds' count, and its
-// column moving when it gets longer. Other marks than these, or another layout:
-// the screen is said to have changed, and nothing is pressed.
+// The terminal shown as it is names its screen without what is seen to move by
+// itself: an agent at work draws a spinner and counts seconds, and a key that had
+// to go on that very screen could never go. Only that goes, each seen on real
+// screens: the spinner's own line, the seconds at the end of a row of the list of
+// agents, and the mark that blinks. Everything else counts, digits and blanks too:
+// "kill -TERM 1234" is not "kill -TERM 5678". Anything else moving: the screen is
+// said to have changed, and nothing is pressed.
 var spinnerMarks = []string{`*`, `·`, `✢`, `✳`, `✶`, `✻`, `✽`}
 
 var (
 	spinnerLine = regexp.MustCompile(`(?m)^(?:\*|·|✢|✳|✶|✻|✽) [A-Za-z-]*….*$`)
-	digitsBlank = regexp.MustCompile(`[0-9 \t]`)
+	agentRowAge = regexp.MustCompile(`(?m)^([ \t]*(?:❯[ \t]+)?(?:●|◯)[ \t].*[^ \t])[ \t]+[0-9]+[hms](?:[ \t]+[0-9]+[hms])*[ \t]*$`)
 )
 
 func lookDigest(raw []byte) string {
 	b := panelSGR.ReplaceAll(bytes.ReplaceAll(raw, []byte{0}, nil), nil)
-	b = digitsBlank.ReplaceAll(blinkingMark.ReplaceAll(spinnerLine.ReplaceAll(b, nil), []byte("${1} ")), nil)
 	if len(b) > 0 && b[len(b)-1] != '\n' {
 		b = append(append([]byte(nil), b...), '\n')
 	}
+	b = agentRowAge.ReplaceAll(b, []byte("${1}"))
+	b = blinkingMark.ReplaceAll(spinnerLine.ReplaceAll(b, nil), []byte("${1} "))
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
 }
@@ -138,13 +139,16 @@ func lookDigest(raw []byte) string {
 // lookDigestPipe: lookDigest as a shell pipeline, of what comes in.
 var lookDigestPipe = func() string {
 	sed := ""
+	for _, m := range []string{`●`, `◯`} {
+		sed += ` -e 's/^\([ 	]*\(❯[ 	][ 	]*\)\{0,1\}` + m + `[ 	].*[^ 	]\)[ 	][ 	]*[0-9][0-9]*[hms]\([ 	][ 	]*[0-9][0-9]*[hms]\)*[ 	]*$/\1/'`
+	}
 	for _, m := range spinnerMarks {
 		if m == "*" {
 			m = `\*`
 		}
 		sed += ` -e 's/^` + m + ` [A-Za-z-]*….*$//'`
 	}
-	return `tr -d '\000' | LC_ALL=C sed "s/$(printf '\033')\[[0-9;:]*m//g" | LC_ALL=C sed` + sed + ` | ` + blinkSed + ` | LC_ALL=C tr -d '0123456789 \011' | LC_ALL=C awk 1 | sha256sum`
+	return `tr -d '\000' | LC_ALL=C sed "s/$(printf '\033')\[[0-9;:]*m//g" | LC_ALL=C awk 1 | LC_ALL=C sed` + sed + ` | ` + blinkSed + ` | sha256sum`
 }()
 
 // POST /api/sessions/{id}/conversation/panel-screen → {"text", "digest"}: the

@@ -111,12 +111,16 @@ func TestScreenDigestSteady(t *testing.T) {
 // by itself apart, what a key acts on not.
 func TestLookDigest(t *testing.T) {
 	for _, s := range []string{
-		"plain\n", "no newline", "", "with\x00nul\n",
+		"plain\n", "no newline", "123", "A\n123", "", "with\x00nul\n",
 		"\x1b[1;38;5;75m✽ Nucleating… (23s)\x1b[0m\n❯ 1. Yes\n  2. No\n",
 		"* Nucleating… (23s · ↓ 1.2k tokens)\n◯ main\n● general-purpose  Count the files      14s\n",
+		"❯ ● general-purpose  Count the files      1m 5s\n  ◯ other x 2h\n",
 		"● ⏺ two\n  ● indented\nwords ● stay\n\ttabbed 12\n",
 		"· not a spinner line\n✻ Worked for 3s\n",
 		"中文 … 1234\n",
+		"✽ Nucleating… (3s)",
+		"● Bash(kill -TERM 1234)\n",
+		"● 5s\n",
 	} {
 		c := exec.Command("sh", "-c", lookDigestPipe)
 		c.Stdin = strings.NewReader(s)
@@ -131,6 +135,7 @@ func TestLookDigest(t *testing.T) {
 	same := [][2]string{
 		{"✽ Nucleating… (23s)\nbox\n", "* Pondering… (24s · ↓ 3k tokens)\nbox\n"},
 		{"  ● general-purpose  Count      9s\n", "  ● general-purpose  Count     10s\n"},
+		{"❯ ● general-purpose  Count 22s\n  ◯ main\n", "❯ ● general-purpose  Count 23s\n  ◯ main\n"},
 		{"● Needs permission\n", "  Needs permission\n"},
 	}
 	for _, c := range same {
@@ -139,10 +144,14 @@ func TestLookDigest(t *testing.T) {
 		}
 	}
 	other := [][2]string{
-		{"❯ Auto-compact  true\n  Theme\n", "  Auto-compact  true\n❯ Theme\n"}, // (the cursor)
-		{"❯ 1. Yes\n  2. No\n", "  1. Yes\n❯ 2. No\n"},                         // (the choice)
-		{"❯ draft\n", "❯ another draft\n"},                                     // (a box's words)
-		{"Delete staging?\n❯ 1. Yes\n", "Delete production?\n❯ 1. Yes\n"},      // (what is asked)
+		{"❯ Auto-compact  true\n  Theme\n", "  Auto-compact  true\n❯ Theme\n"},
+		{"❯ 1. Yes\n  2. No\n", "  1. Yes\n❯ 2. No\n"},
+		{"❯ draft\n", "❯ another draft\n"},
+		{"Delete staging?\n❯ 1. Yes\n", "Delete production?\n❯ 1. Yes\n"},
+		{"kill -TERM 1234\n❯ 1. Yes\n", "kill -TERM 5678\n❯ 1. Yes\n"},
+		{"echo a b\n", "echo ab\n"},
+		{"❯ 1. release/123\n  2. release/124\n", "❯ 1. release/124\n  2. release/123\n"},
+		{"● Bash(sleep 5s)\n", "● Bash(sleep 9s)  x\n"},
 	}
 	for _, c := range other {
 		if lookDigest([]byte(c[0])) == lookDigest([]byte(c[1])) {

@@ -2712,8 +2712,11 @@ if [ -n "$gate" ]; then
   # moves by itself aside: lookDigest. Not read, not the same: nothing pressed.)
   look:*)
     command -v sha256sum >/dev/null 2>&1 || exit 11
-    if [ "$mode" = tmux ]; then d=$(tmux -u capture-pane -p -e -t "$p" 2>/dev/null | LOOKDIGEST)
-    else d=$(HERDR_SOCKET_PATH=$sock herdr pane read "$p" --source visible --format ansi 2>/dev/null | LOOKDIGEST); fi
+    # (Read first, on its own: a read that failed names no screen, whatever came of it.)
+    lk=$(mktemp) || exit 10
+    if [ "$mode" = tmux ]; then tmux -u capture-pane -p -e -t "$p" >"$lk" 2>/dev/null || { rm -f "$lk"; exit 10; }
+    else HERDR_SOCKET_PATH=$sock herdr pane read "$p" --source visible --format ansi >"$lk" 2>/dev/null || { rm -f "$lk"; exit 10; }; fi
+    d=$(cat "$lk" | LOOKDIGEST); rm -f "$lk"
     [ "${d%% *}" = "${gate#look:}" ] || exit 10 ;;
   reply:*)
     [ "$st" = waiting ] || exit 9
