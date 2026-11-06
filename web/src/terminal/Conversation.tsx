@@ -3362,18 +3362,19 @@ function SubPanel({ of, sub, depth, live, onOpen, onBack, onClose, active, copy 
   )
 }
 
-// A subagent's log: its steps, without the call it ended with; and what that handed back.
+// A subagent's log: its steps, without the call it ended with; and what that
+// handed back. Only where it did end with it: taken up again since, it is a step
+// like any, not this one's answer yet.
 function subReport(entries: ConvoEntry[]): { steps: ConvoEntry[]; report?: { text: string; cut?: boolean } } {
-  let report: { text: string; cut?: boolean } | undefined
-  let changed = false
-  const steps = entries.flatMap((e) => {
-    if (e.role !== 'assistant' || !e.parts.some((p) => p.tool?.report)) return [e]
-    changed = true
-    for (const p of e.parts) if (p.tool?.report) report = { text: p.tool.report, cut: p.tool.report_cut }
-    const parts = e.parts.filter((p) => !p.tool?.report)
-    return parts.length ? [{ ...e, parts }] : []
-  })
-  return { steps: changed ? steps : entries, report }
+  const said = (e: ConvoEntry) => e.role === 'user' || (e.role === 'assistant' && e.parts.some((p) => p.kind !== 'thinking' || p.text?.trim()))
+  const hasReport = (e: ConvoEntry) => e.role === 'assistant' && e.parts.some((p) => p.tool?.report)
+  let at = entries.length - 1
+  while (at >= 0 && !said(entries[at])) at--
+  const e = entries[at]
+  if (!e || !hasReport(e) || e.parts[e.parts.length - 1].tool?.report === undefined) return { steps: entries }
+  const last = e.parts[e.parts.length - 1].tool!
+  const parts = e.parts.slice(0, -1)
+  return { steps: [...entries.slice(0, at), ...(parts.length ? [{ ...e, parts }] : []), ...entries.slice(at + 1)], report: { text: last.report!, cut: last.report_cut } }
 }
 
 function LoadErrorLine({ onRetry }: { onRetry: () => void }) {

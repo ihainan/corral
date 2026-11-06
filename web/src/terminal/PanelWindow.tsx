@@ -91,7 +91,7 @@ export function PanelWindow({ sid, active, press, onSettled, toast }: { sid: str
       while (a.alive && (a.queue.length || a.stale)) {
         if (!a.queue.length) {
           await read()
-          if (a.stale) break // (not read: the next look tries again)
+          if (a.stale && !a.queue.length) break // (not read: the next look tries again)
           continue
         }
         const { k, digest } = a.queue.shift()!
