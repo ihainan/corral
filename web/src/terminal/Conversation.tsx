@@ -3,7 +3,8 @@ import { ArrowDown, ArrowUp, Check, Copy, FolderOpen, Image as ImageIcon, Chevro
 import { t, getLang, type I18nKey } from '../i18n'
 import { api } from '../api'
 import { asHeld, dayStart, FOLDED, foldAt, GROUPS, inGroup, listOrder, pinned, type ConvoListRow, type RowCmds } from './agentOrder'
-import { copyText, Dialog, isCoarse, Menu, MenuLayer, type MenuItem } from '../components/ui'
+import { copyText, Dialog, isCoarse, Menu, MenuLayer, useToast, type MenuItem } from '../components/ui'
+import { saveFile } from '../saveFile'
 import { composing, foldAllKey, helpKey, jumpKey, onMac, sideKey, switchKey } from './pageKeys'
 import { keepNames, keptNames, local } from '../storage'
 import { useFlip } from '../flip'
@@ -1143,6 +1144,7 @@ export function ConversationView({
   else if (agent?.cmds && agent.status !== 'blocked') status = agent.cmds.n > 1 ? t('convo.bgCmds', { n: agent.cmds.n }) : t('convo.bgCmds1')
   const name = agent ? [agent.title, agent.where].filter(Boolean) : []
   // What is read in, as a Markdown file to keep (see convoExport).
+  const toast = useToast()
   const exporting = useRef<() => void>(() => {})
   const paren = (x: string) => (getLang() === 'zh-CN' ? '（' + x + '）' : '(' + x + ')')
   const doExport = () => {
@@ -1181,13 +1183,12 @@ export function ConversationView({
         head: (tt, ex, from) => `# ${tt}\n\n${t('convoExport.head', { at: ex })}${from ? t('convoExport.from', { from }) : t('convoExport.whole')}`,
       },
       (md) => {
-        const a = document.createElement('a')
-        a.href = URL.createObjectURL(md)
-        a.download = (title.replace(/[\\/:*?"<>|\s]+/g, '-').slice(0, 60) || 'conversation') + '-' + new Date().toISOString().slice(0, 10) + '.md'
-        document.body.appendChild(a)
-        a.click()
-        a.remove()
-        setTimeout(() => URL.revokeObjectURL(a.href), 10000)
+        const name = (title.replace(/[\\/:*?"<>|\s]+/g, '-').slice(0, 60) || 'conversation') + '-' + new Date().toISOString().slice(0, 10) + '.md'
+        void saveFile(name, md).then((saved) => {
+          if (saved.how === 'saved') toast(t('file.saved', { name: saved.as }))
+          else if (saved.how === 'started') toast(t('file.started', { name }))
+          else if (saved.how === 'failed') toast(t('file.saveFailed'), true)
+        })
       },
     )
   }

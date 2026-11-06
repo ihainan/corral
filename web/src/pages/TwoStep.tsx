@@ -5,6 +5,7 @@ import { api, ApiError, errorText } from '../api'
 import { t } from '../i18n'
 import { useSession } from '../app'
 import { Dialog, Field, LoadError, copyText, isCoarse, useToast } from '../components/ui'
+import { saveFile } from '../saveFile'
 
 type Status = { on: boolean; recovery_left: number }
 
@@ -101,13 +102,12 @@ function QRCode({ text, label }: { text: string; label: string }) {
 function RecoveryCodes({ codes, leadRef }: { codes: string[]; leadRef?: React.Ref<HTMLParagraphElement> }) {
   const toast = useToast()
   const text = codes.join('\n')
-  const download = () => {
-    const url = URL.createObjectURL(new Blob([t('totp.fileHeader') + '\n\n' + text + '\n'], { type: 'text/plain' }))
-    const a = document.createElement('a')
-    a.href = url
-    a.download = 'corral-recovery-codes.txt'
-    a.click()
-    setTimeout(() => URL.revokeObjectURL(url), 1000)
+  const download = async () => {
+    const name = 'corral-recovery-codes.txt'
+    const saved = await saveFile(name, new Blob([t('totp.fileHeader') + '\n\n' + text + '\n'], { type: 'text/plain' }))
+    if (saved.how === 'saved') toast(t('file.saved', { name: saved.as }))
+    else if (saved.how === 'started') toast(t('file.started', { name }))
+    else if (saved.how === 'failed') toast(t('totp.saveFailed'), true)
   }
   return (
     <>
