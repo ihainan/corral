@@ -184,5 +184,7 @@ function quoteAt(p: string): string {
 // where the caret goes (after the space that follows).
 export function apply(text: string, tok: Token, s: Suggestion): { text: string; caret: number } {
   const ins = s.insert.endsWith('/') ? s.insert : s.insert + ' '
-  return { text: text.slice(0, tok.start) + ins + text.slice(tok.end), caret: tok.start + ins.length }
+  // (A space already after it, as when a command goes in front of what was written: not a second one.)
+  const after = text.slice(tok.end)
+  return { text: text.slice(0, tok.start) + ins + (ins.endsWith(' ') && after.startsWith(' ') ? after.slice(1) : after), caret: tok.start + ins.length }
 }

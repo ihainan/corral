@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type ReactNode } from 'react'
-import { ArrowUp, ChevronLeft, Copy, FoldVertical, GitBranch, History, MessageSquarePlus, Paperclip, Pencil, Pin, PinOff, Power, Square, SquareTerminal, TextCursorInput, X, Plus } from 'lucide-react'
+import { ArrowUp, ChevronLeft, Copy, FoldVertical, GitBranch, History, MessageSquarePlus, Paperclip, Pencil, Pin, PinOff, Power, Square, SquareSlash, SquareTerminal, TextCursorInput, X, Plus } from 'lucide-react'
 import { api, ApiError, authGen, errorText, uploadFile, type SessionInfo } from '../api'
 import { t, type I18nKey } from '../i18n'
 import { navigate, onNavigate } from '../router'
@@ -54,6 +54,8 @@ const NO_SESSION = '00000000-0000-0000-0000-000000000000'
 const LAST = 'corral.agentsPick'
 const ONLY_MINE = 'corral.agentsOnlyMine'
 const FROM_LIST = { agentsFromList: true }
+// What is left without the "/" the commands button put in, or null when a word has been typed on to it.
+const unslash = (s: string) => (s === '/' ? '' : s.startsWith('/ ') ? s.slice(2) : null)
 const fromList = () => !!(history.state as { agentsFromList?: boolean } | null)?.agentsFromList
 const chatAddress = (e: { s: SessionInfo; pane?: string }) => {
   const q = new URLSearchParams({ s: e.s.id })
@@ -1436,6 +1438,11 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     if (was === draftKey) return
     lastKey.current = draftKey
     histPos.current = null
+    if (slashPut.current) {
+      slashPut.current = false // (another agent shown with the keys: not left in front of that one's words)
+      const left = unslash(getDraft(was))
+      if (left !== null) keepDraft(was, left)
+    }
     upAbort.current?.abort() // (what goes up has its path for the agent before)
     // (Its pane first known: what was typed before was for it.)
     if (was === baseKey && !getDraft(draftKey)) {
@@ -1456,6 +1463,40 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   )
   const field = useRef<HTMLTextAreaElement>(null)
   const completion = useCompletion({ sessionId: sid, field, draft, setDraft, agent: row?.a.agent ?? convo.bind?.agent ?? (codex ? 'codex' : 'claude'), pane: herdr ? cur.pane : undefined })
+  // The commands button: a "/" put where a command goes, for the list that opens on one (the
+  // same as typed: typing on narrows it). With words in the box it goes in front of them, the
+  // command they are then for; given up (pressed again, Escape, the box left) that "/" goes.
+  const slashPut = useRef(false)
+  const takeSlash = () => {
+    const left = slashPut.current ? unslash(draft) : null
+    slashPut.current = false
+    if (left === null) return false
+    setDraft(left)
+    requestAnimationFrame(() => field.current?.setSelectionRange(left.length, left.length))
+    return true
+  }
+  const pressCommands = () => {
+    const el = field.current
+    if (!el) return
+    const inIt = document.activeElement === el
+    el.focus() // (now, in the press: a phone opens its keyboard only from one)
+    if (inIt && draft === '/') {
+      slashPut.current = false
+      return setDraft('')
+    }
+    if (inIt && takeSlash()) return
+    // (A command already there: its word, to change it. A path is not one.)
+    const word = /^\s*\/[^\s/]*(?=\s|$)/.exec(draft)
+    if (!word) {
+      setDraft(draft ? '/ ' + draft : '/')
+      slashPut.current = true
+    }
+    const caret = word ? word[0].length : 1
+    requestAnimationFrame(() => {
+      el.setSelectionRange(caret, caret)
+      completion.update()
+    })
+  }
   // (Another agent picked with the keyboard, or the page back in front: its
   // box takes the keys, as the terminal's does. Not from a dialog over it.)
   useEffect(() => {
@@ -1838,7 +1879,10 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
           onChange={(e) => setDraft(e.target.value)} // (an entry edited is a draft of its own)
           onSelect={() => completion.update()}
           {...completion.field}
-          onBlur={() => setTimeout(completion.update)}
+          onBlur={() => {
+            takeSlash()
+            setTimeout(completion.update)
+          }}
           onPaste={(e) => {
             const files = [...(e.clipboardData?.files ?? [])]
             if (files.length > 0) {
@@ -1862,6 +1906,10 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
             if (e.key === 'Tab' && !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey && !draft && suggestion) {
               e.preventDefault()
               takeSuggestion()
+              return
+            }
+            if (e.key === 'Escape' && completion.open && takeSlash()) {
+              e.preventDefault()
               return
             }
             if (completion.onKey(e)) return
@@ -1901,6 +1949,18 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
               </button>
             )}
           />
+          <button
+            type="button"
+            className="icon-btn"
+            aria-haspopup="listbox"
+            aria-expanded={completion.open && draft.trimStart().startsWith('/')}
+            onMouseDown={(e) => e.preventDefault()} // (the box keeps the focus, and the list open)
+            onClick={pressCommands}
+            aria-label={t('term.commands')}
+            title={t('term.commands') + (isTouch ? '' : ' (/)')}
+          >
+            <SquareSlash size={18} />
+          </button>
           {hostHistory && (
             <HostHistoryDialog
               sid={sid}
