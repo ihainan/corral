@@ -106,7 +106,7 @@ function RecoveryCodes({ codes, leadRef }: { codes: string[]; leadRef?: React.Re
     const name = 'corral-recovery-codes.txt'
     const saved = await saveFile(name, new Blob([t('totp.fileHeader') + '\n\n' + text + '\n'], { type: 'text/plain' }))
     if (saved.how === 'saved') toast(t('file.saved', { name: saved.as }))
-    else if (saved.how === 'started') toast(t('file.started', { name }))
+    else if (saved.how === 'started') toast(t('totp.started', { name }))
     else if (saved.how === 'failed') toast(t('totp.saveFailed'), true)
   }
   return (

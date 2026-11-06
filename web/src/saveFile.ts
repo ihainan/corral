@@ -33,9 +33,9 @@ export async function saveFile(name: string, blob: Blob): Promise<Saved> {
       await out.close()
       return { how: 'saved', as: chosen.name }
     } catch (e) {
-      if (e instanceof DOMException && e.name === 'AbortError') return { how: 'cancelled' }
-      // (A place was chosen and could not be written: said so, nothing else tried behind the person's back.)
+      // (A place was chosen and could not be written, whatever the error's name: said so, nothing else tried behind the person's back.)
       if (chosen) return { how: 'failed' }
+      if (e instanceof DOMException && e.name === 'AbortError') return { how: 'cancelled' }
       // (Not allowed now, as long after the click, with a conversation read in first: the link below.)
     }
   }
