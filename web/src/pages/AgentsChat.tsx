@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type ReactNode } from 'react'
 import { ArrowUp, ChevronLeft, Copy, FoldVertical, GitBranch, History, MessageSquarePlus, Paperclip, Pencil, Pin, PinOff, Power, Square, SquareSlash, SquareTerminal, TextCursorInput, X, Plus } from 'lucide-react'
 import { api, ApiError, authGen, errorText, uploadFile, type SessionInfo } from '../api'
 import { t, type I18nKey } from '../i18n'
@@ -10,7 +10,7 @@ import { CLOSE_MENUS, Confirm, copyText, Menu, useToast, type MenuItem } from '.
 import { chromeVars, corralDark, corralLight } from '../terminal/themes'
 import { HostHistoryDialog } from '../terminal/hostHistory'
 import { CardNotice, useClaudeCard, type ClaudeCard } from '../terminal/cardNotice'
-import { attachedIn, expandPastes, getDraft, keepDraft, keepPaste, keepSent, keptSent, remember, sentHistory, unsendable } from '../terminal/drafts'
+import { attachedIn, expandForClaude, expandPastes, getDraft, keepDraft, keepPaste, keepSent, keptSent, remember, sentHistory, unsendable } from '../terminal/drafts'
 import { geminiPath, shellPath } from '../terminal/paths'
 import { useCompletion } from '../terminal/Completion'
 import { PanelWindow } from '../terminal/PanelWindow'
@@ -28,7 +28,8 @@ import { answerable, asking, useConversation, type ConvoEntry } from '../termina
 import { ackBg, waitingTitle, isCodex, isOpenCode, listAgents, matchQuery, paneTitle, readsLog, useRunningSessions, type AgentRow } from '../terminal/agents'
 import { dayBefore, dayStart, foldAt, foldedDay, listOrder, type RowCmds } from '../terminal/agentOrder'
 import { prefetchConversation } from '../terminal/conversation'
-import { afterSend, holdsWords, holdTermMode, PENDING_MS, sameRun, sameTurn, sameWords, tmuxKey } from '../terminal/chatSend'
+import { holdTermMode, tmuxKey } from '../terminal/chatSend'
+import { isCommand, pairSent, sameMessage, type Submission } from '../terminal/sentSeen'
 import { viewRefusal } from '../terminal/sendView'
 import { agentKey, sessionWhich } from '../terminal/sessionName'
 import { AgentIcon, agentMark } from '../terminal/agentIcons'
@@ -398,28 +399,6 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
   // back loses neither (a second send of the same could follow).
   // So are its draft as shown, and the log's turns that confirmed one.
   const [sentBy, setSentBy] = useState<Record<string, Sent[]>>(restoreSent)
-  // How many of an agent's messages are not seen taken in, as the lists say
-  // it (by its key): long past their wait, or found not taken, lately; not
-  // one found gone to a subagent. From what is kept here: nothing is read
-  // for it — its own view, gone back to, makes sure as it does.
-  // (Of one not shown, nothing makes sure: one not seen counts only where
-  // nothing says it went — the agent at rest, its state as it was when the
-  // message was sent (the gateway's time of it then, not this browser's
-  // clock against the gateway's — review). At work, it takes a message in
-  // when it can: queued till then, not lost — 11-04. Its words seen still
-  // in the agent's box count whatever it does; an agent of no known state
-  // (a tmux one) counts as before.)
-  const unsentOf = useCallback(
-    (key: string, live?: { status: string; since?: number }) =>
-      (sentBy[key] ?? []).filter((p) => {
-        if (!unsentNow(p)) return false
-        if (p.look && typeof p.look === 'object' && p.look.waiting) return true
-        if (!live || live.status === 'unknown') return true
-        if (live.status === 'working') return false
-        return p.sinceAt !== undefined ? live.since === p.sinceAt : !((live.since ?? 0) > p.at)
-      }).length,
-    [sentBy],
-  )
   useEffect(() => keepSent(sentBy), [sentBy])
   const [sendingBy, setSendingBy] = useState<Record<string, boolean>>({})
   const [draftBy, setDraftBy] = useState<Record<string, string>>({})
@@ -522,7 +501,7 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
 
   let body: ReactNode
   if (stack && screen === 'list' && sessions !== null && entries.length)
-    body = <PhoneList entries={entries} all={sessions} titles={titles.current} query={sideQuery} onQuery={setSideQuery} onPick={choose} unsentOf={unsentOf} />
+    body = <PhoneList entries={entries} all={sessions} titles={titles.current} query={sideQuery} onQuery={setSideQuery} onPick={choose} />
   else if (!cur || (stack && screen === 'list')) {
     const held = holding && !(stack && screen === 'list') // (a phone's list waits for none)
     body = (
@@ -559,7 +538,6 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
         toast={toast}
         composerEnter={prefs.composerEnter}
         sent={sentBy[k] ?? []}
-        unsentOf={unsentOf}
         setSent={(f) => setSentBy((all) => ({ ...all, [k]: f(all[k] ?? []) }))}
         sending={!!sendingBy[k]}
         setSending={(v) => setSendingBy((all) => ({ ...all, [k]: v }))}
@@ -670,12 +648,8 @@ const keptTitle = (titles: Titles, e: Entry): string | undefined => {
 // (was: the draft it went from, when whether it went is not known: seen in the log, that draft goes.
 // afterTs: the time of the log's last entry when it went; read anew (other
 // seqs), only a turn after that can be it.)
-// (not: the log's turns another of the same words was found as, which are
-// not this one: kept with it, so a reload does not find this one there.)
-// (How many turns a message waiting is kept not to be: see marked.)
-const NOT_KEPT = 100
 // (wentSeen: when one found gone to a subagent was first shown, its note let go of WENT_SHOWN_MS after.)
-type Sent = ConvoPending & { bind: string; after: number; gen: number; at: number; was?: string; afterTs?: string; not?: string[]; wentSeen?: number; sinceAt?: number /* (the agent's state's time as the gateway said it when sent) */ }
+type Sent = ConvoPending & { bind: string; after: number; gen: number; at: number; was?: string; afterTs?: string; looked?: boolean; wentSeen?: number; sinceAt?: number /* (the agent's state's time as the gateway said it when sent) */ }
 
 // What was sent and not seen in the log yet, as this tab kept it (the page
 // reloaded meanwhile): looked for again in all of the log, by its time as
@@ -687,9 +661,11 @@ const PREFETCH_MOST = 3
 const PREFETCH_AFTER_MS = 1500
 
 const SENT_KEPT_MS = 24 * 3600 * 1000
-// (Said on the lists only of late ones: an old one of a process long gone says nothing of now.)
-const UNSENT_LISTED_MS = 2 * 3600 * 1000
-const unsentNow = (p: Sent) => Date.now() - p.at < UNSENT_LISTED_MS && !(p.look && typeof p.look === 'object' && p.look.went) && (p.state === 'unseen' || (p.state === 'waiting' && Date.now() - p.at >= PENDING_MS))
+// (See the note on these where they are used.)
+const LOOK_AFTER_MS = 4000
+const LOOK_WITHIN_MS = 60000 // (later, as a page opened anew: a screen of now says nothing of then)
+const QUIET_AFTER_MS = 30000
+const COMMAND_NOTE_MS = 8000
 // One found gone to a subagent (its own log has it): said for sure, and
 // that subagent has dealt with it since — its note is let go of this long
 // after it was first shown (not sent again by itself: an old instruction).
@@ -697,7 +673,8 @@ const WENT_SHOWN_MS = 10 * 60 * 1000
 
 // (Claude Code's commands in the conversation's menu: each by its icon.)
 const OP_ICONS = { compact: <FoldVertical size={16} />, rename: <Pencil size={16} />, clear: <MessageSquarePlus size={16} /> }
-const SENT_STATES: readonly string[] = ['sending', 'waiting', 'unseen', 'sent']
+// ('unseen': as a tab kept it before 11-06.)
+const SENT_STATES: readonly string[] = ['sending', 'waiting', 'stuck', 'unseen']
 function restoreSent(): Record<string, Sent[]> {
   const out: Record<string, Sent[]> = {}
   for (const [k, v] of Object.entries(keptSent())) {
@@ -705,7 +682,7 @@ function restoreSent(): Record<string, Sent[]> {
       .filter((p) => !!p && typeof p.id === 'number' && typeof p.text === 'string' && typeof p.bind === 'string' && typeof p.at === 'number' && Date.now() - p.at < SENT_KEPT_MS && SENT_STATES.includes(p.state as string))
       // (A look at the screen under way when the page went is not asked again: the
       // screen of a later moment says nothing of that one.)
-      .map((p) => ({ ...(p as Sent), state: p.state === 'sending' ? ('waiting' as const) : p.state!, look: p.look === 'looking' ? undefined : p.look, gen: -1, after: -Infinity }))
+      .map((p) => ({ ...(p as Sent), state: p.state === 'stuck' ? ('stuck' as const) : ('waiting' as const), look: p.look && typeof p.look === 'object' && p.look.went ? p.look : undefined, looked: true, gen: -1, after: -Infinity }))
     if (ps.length) out[k] = ps
   }
   return out
@@ -720,10 +697,6 @@ const STOP_AFTER_SEND_MS = 1500
 // the page's life, not the view's, so that leaving an agent and coming
 // back does not ask the host the same thing again.
 const lookedAt = new Set<number>()
-// (And, of those still not known, how often and when the subagents' logs
-// were asked where they went: see below.)
-const logAsked = new Map<number, { n: number; at: number }>()
-const LOG_ASK_AFTER = [0, 30_000, 120_000, 480_000] // (the first at once; then a subagent may write it only once its tool is done)
 
 // A tmux session's background commands, as its conversation last said
 // them (only one read is told them: the list has no word of a tmux
@@ -761,13 +734,12 @@ const tmuxCmdsOf = (e: Entry): RowCmds | undefined => {
 
 // The conversation of one agent, and what is sent to it. Keyed by the
 // agent: nothing of another's (its draft, what was sent, a stop) carries over.
-function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerEnter, sent, unsentOf, setSent, sending, setSending, draft: shownDraft, setDraftShown, used, lead, onClosed, onStarted, query, onQuery }: {
+function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerEnter, sent, setSent, sending, setSending, draft: shownDraft, setDraftShown, used, lead, onClosed, onStarted, query, onQuery }: {
   cur: Entry
   entries: Entry[]
   all: SessionInfo[]
   titles: Titles
   sent: Sent[]
-  unsentOf: (key: string, live?: { status: string; since?: number }) => number
   setSent: (f: (ps: Sent[]) => Sent[]) => void
   sending: boolean
   setSending: (v: boolean) => void
@@ -1010,14 +982,14 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
         const r = e.row
         const said = (current && agent?.title) || keptTitle(titles, e) || paneTitle(r.a.title) || dirName(r.a.cwd) || r.a.agent
         const st = current && agent && !r.bg ? agent.status : r.status
-        return { key: e.key, ...labelOf(e, said, hosts), unsent: unsentOf(e.key, r.lost ? undefined : { status: st, since: r.a.since }) || undefined, now: r.lost || r.bg || st !== 'blocked' ? undefined : glanceOf(e.s.id, e.pane, st, r.a.since) || undefined /* (said only of one waiting on the person) */, program: r.a.agent, status: st, bg: r.lost ? undefined : r.bg, cmds: cmdsOf(r), since: r.lost ? undefined : r.bg ? r.a.bg_since : r.a.since, current, pinned: pinAt(e.key), onPick: () => onPick(e), menu: () => rowMenu.current(e) }
+        return { key: e.key, ...labelOf(e, said, hosts), now: r.lost || r.bg || st !== 'blocked' ? undefined : glanceOf(e.s.id, e.pane, st, r.a.since) || undefined /* (said only of one waiting on the person) */, program: r.a.agent, status: st, bg: r.lost ? undefined : r.bg, cmds: cmdsOf(r), since: r.lost ? undefined : r.bg ? r.a.bg_since : r.a.since, current, pinned: pinAt(e.key), onPick: () => onPick(e), menu: () => rowMenu.current(e) }
       }
       const title = (current && agent?.title) || keptTitle(titles, e) || `${e.s.host_name} · ${sessionWhich(e.s, all)}`
-      return { key: e.key, title, where: whereOf(e, hosts), unsent: unsentOf(e.key) || undefined, program: current ? agent?.program : undefined, status: current && agent ? agent.status : 'unknown', cmds: current ? agent?.cmds : tmuxCmdsOf(e), current, pinned: pinAt(e.key), onPick: () => onPick(e), menu: () => rowMenu.current(e) }
+      return { key: e.key, title, where: whereOf(e, hosts), program: current ? agent?.program : undefined, status: current && agent ? agent.status : 'unknown', cmds: current ? agent?.cmds : tmuxCmdsOf(e), current, pinned: pinAt(e.key), onPick: () => onPick(e), menu: () => rowMenu.current(e) }
     })
     return placedAs ? out.map((r) => (r.current ? { ...r, placeAs: placedAs } : r)) : out
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [entries, cur, agent, convo.title, all, titles, onPick, placedAs, pins, unsentOf])
+  }, [entries, cur, agent, convo.title, all, titles, onPick, placedAs, pins])
   const shown = rows.find((r) => r.current)
   const known = !!shown && shown.status !== 'unknown'
   useEffect(() => {
@@ -1236,129 +1208,80 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       .finally(() => setModelBusy(false))
   }
 
-  // What was sent, until the log has a user turn of its text after it (each
-  // turn answers one); not seen in time, it says so. One the agent queued
-  // shows in its queue instead.
-  // (Blanks aside: one sent as Enter for the same words already in the box is queued as the box had it — review575.)
-  const norm = (s: string) => s.replace(/\s+/g, '')
-  // (Only while the queue shows, not of one at rest: else the message would show nowhere.)
-  const queueShown = agent?.status !== 'idle' && agent?.status !== 'done'
-  const queued = useMemo(() => new Set((queueShown ? (convo.queued ?? []) : []).map((q) => norm(q.text))), [convo.queued, queueShown])
-  const queuedRef = useRef(queued)
-  queuedRef.current = queued
+  // What was sent, until the log shows a submission after it: see sentSeen.
+  // Only what the page shows goes by that; a draft is let go of by the words.
   const sentN = useRef(0)
-  // What was sent and has since been seen in the log: a request of its own
-  // that ends badly is no reason to type it again.
+  // What was sent and has since been seen in the log, by its words: a request
+  // of its own that ends badly is no reason to type it again.
   const arrived = useRef(new Set<number>())
   useEffect(() => {
-    if (convo.status !== 'ready' || !sent.some((p) => p.state !== 'sent' && ofThis(p.bind))) return
+    if (convo.status !== 'ready' || !sent.some((p) => ofThis(p.bind))) return
     const key = bindKey + ' ' + convo.gen
     let u = used.get(key)
     if (!u) {
-      used.clear() // (only this reading's turns can confirm one)
+      used.clear() // (only this reading's turns can be one)
       used.set(key, (u = new Set()))
     }
-    const users = convo.entries.filter((e: ConvoEntry) => e.role === 'user')
     let changed = false
-    const taken: ConvoEntry[] = []
-    // (Found: arrived, and its draft, still in the box, let go of.)
-    const got = (p: Sent) => {
-      arrived.current.add(p.id)
-      if (arrived.current.size > 200) arrived.current = new Set([...arrived.current].slice(-100))
-      if (p.was !== undefined && getDraft(draftKey) === p.was) {
-        keepDraft(draftKey, '')
-        setDraftShown((d) => (d === undefined || d === p.was ? '' : d))
-      }
-    }
-    const after = (e: ConvoEntry, p: Sent) => e.seq > p.after && !u.has(e.seq) && afterSend(e, p.at) && !(p.afterTs && e.ts && Date.parse(e.ts) <= Date.parse(p.afterTs))
-    let next = sent.flatMap((p) => {
-      if (p.state === 'sent' || !ofThis(p.bind)) return [p]
-      if (p.bind !== bindKey) {
-        changed = true
-        p = { ...p, bind: bindKey }
-      }
-      if (p.gen !== convo.gen) {
-        // (The log it went to, now written, or read anew: looked for in all
-        // of it, by its time as well as its text.)
-        changed = true
-        p = { ...p, gen: convo.gen, after: -Infinity }
-      }
-      const hit = users.find((e) => after(e, p) && !p.not?.includes(e.id) && sameTurn(e, p.text))
-      if (!hit) return [p]
-      u.add(hit.seq)
-      if (hit.id) taken.push(hit)
-      got(p)
-      if (u.size > 200) for (const q of [...u].sort((a, b) => a - b).slice(0, 100)) u.delete(q)
-      changed = true
-      return []
+    const mine = sent.map((p) => {
+      if (!ofThis(p.bind)) return p
+      let q = p
+      if (q.bind !== bindKey) q = { ...q, bind: bindKey }
+      // (The log it went to, now written, or read anew: by its time.)
+      if (q.gen !== convo.gen) q = { ...q, gen: convo.gen, after: -Infinity }
+      if (q !== p) changed = true
+      return q
     })
-    // Then, of those not found so, by their words blanks aside — one sent as
-    // Enter for the same words already in the box is there as the box had
-    // them (review575) — the latest sent first: an older one of the same
-    // words, which never went, does not take its turn (review576).
-    {
-      const gone = new Set<number>()
-      for (const p of next.filter((q) => q.state !== 'sent' && ofThis(q.bind)).sort((a, b) => b.at - a.at)) {
-        const hit = users.find((e) => after(e, p) && !p.not?.includes(e.id) && sameWords(e, p.text))
-        if (!hit) continue
-        u.add(hit.seq)
-        if (hit.id) taken.push(hit)
-        got(p)
-        gone.add(p.id)
-        changed = true
-      }
-      if (gone.size) next = next.filter((q) => !gone.has(q.id))
-    }
-    const merged: ConvoEntry[] = [] // (turns found as several: no other's, after a reload too)
-    // Two or more sent one after another, not found each as its own turn,
-    // and taken in as one (the first's Enter let go of): all of them arrived.
-    for (let i = 0; i < next.length; i++) {
-      const at = next.slice(i)
-      const n = at.findIndex((q) => q.state === 'sent' || !ofThis(q.bind))
-      const run = n < 0 ? at.slice(0, 5) : at.slice(0, Math.min(n, 5))
-      for (let k = run.length; k >= 2; k--) {
-        // (Written after each of them went, and not a turn any of them was found not to be.)
-        const hit = users.find((e) => run.slice(0, k).every((q) => after(e, q) && !q.not?.includes(e.id)) && sameRun(e, run.slice(0, k).map((q) => q.text)))
-        if (!hit) continue
-        u.add(hit.seq)
-        if (hit.id) merged.push(hit)
-        const gone = new Set(run.slice(0, k).map((q) => q.id))
-        run.slice(0, k).forEach(got)
-        next = next.filter((q) => !gone.has(q.id))
-        changed = true
-        i--
-        break
+    const subs: Submission[] = [
+      ...convo.entries.filter((e: ConvoEntry) => e.role === 'user').map((e: ConvoEntry) => ({ key: e.seq, seq: e.seq, ts: e.ts, text: e.parts.filter((x) => x.kind === 'text').map((x) => x.text).join('\n') })),
+      // (A queue row's place: its time, kept apart from the seqs by its sign. Not another session's, nor a notice.)
+      ...(convo.queued ?? []).filter((q) => !q.from && !q.note && q.ts).map((q) => ({ key: -Date.parse(q.ts!), ts: q.ts, text: q.text })),
+    ]
+    const found = pairSent(mine.filter((p) => ofThis(p.bind)), subs, u)
+    for (const { p, s } of found) {
+      u.add(s.key)
+      if (sameMessage(s.text, p.text)) {
+        arrived.current.add(p.id)
+        if (arrived.current.size > 200) arrived.current = new Set([...arrived.current].slice(-100))
+        if (p.was !== undefined && getDraft(draftKey) === p.was) {
+          keepDraft(draftKey, '')
+          setDraftShown((d) => (d === undefined || d === p.was ? '' : d))
+        }
       }
     }
-    // (Any other it would be found as is not that turn, after a reload too.)
-    // (Of each still waiting, those of its words: it could be found as them,
-    // alone or with others, and is not. Kept for long: one let go of could
-    // be found again, after a reload.)
-    const marked =
-      taken.length || merged.length
-        ? next.map((q) => {
-            const add = [...taken, ...merged].filter((x) => !q.not?.includes(x.id) && (sameTurn(x, q.text) || holdsWords(x, q.text))).map((x) => x.id)
-            return add.length ? { ...q, not: [...(q.not ?? []), ...add].slice(-NOT_KEPT) } : q
-          })
-        : next
-    if (changed) setSent(() => marked)
-  }, [convo.entries, convo.gen, convo.status, sent, bindKey])
+    if (u.size > 200) for (const q of [...u].sort((x, y) => Math.abs(x) - Math.abs(y)).slice(0, 100)) u.delete(q)
+    if (found.length || changed) {
+      const gone = new Set(found.map((f) => f.p.id))
+      setSent(() => mine.filter((p) => !gone.has(p.id)))
+    }
+  }, [convo.entries, convo.queued, convo.gen, convo.status, sent, bindKey])
+  // Nothing in the log a moment on, which is rare (it writes a row on taking
+  // Enter): the screen read once, for the one thing it can show for sure, the
+  // words still in its box. A command writes no row of its own, and its note
+  // is let go of soon (a panel it opened holds it, as that is its answer).
+  // Later still, one quiet line: the conversation has not caught up. Nothing
+  // here says a message did not arrive: nothing here can know that.
   useEffect(() => {
-    const waiting = sent.filter((p) => p.state === 'waiting' && !queued.has(norm(p.text)))
-    if (!waiting.length) return
-    // (A panel just shut: its command comes to the log now; a moment for that to be read.)
-    const due = Math.max(Math.min(...waiting.map((p) => p.at)) + PENDING_MS, panelShutAt.current + 3000) - Date.now()
+    const open = sent.filter((p) => p.state === 'waiting' && ofThis(p.bind))
+    if (!open.length) return
+    const dues = open.flatMap((p) => (isCommand(p.text) ? [p.at + COMMAND_NOTE_MS] : [...(p.looked ? [] : [p.at + LOOK_AFTER_MS]), ...(p.quiet ? [] : [p.at + QUIET_AFTER_MS])]))
+    if (!dues.length) return
     const timer = setTimeout(() => {
-      // (A command that opened a panel is in the log only once that is shut: not looked for meanwhile.)
-      const late = (p: Sent) => p.state === 'waiting' && Date.now() - p.at >= PENDING_MS && !queuedRef.current.has(norm(p.text)) && !(panelNow.current && p.text.trimStart().startsWith('/'))
-      setSent((ps) => (ps.some(late) ? ps.map((p) => (late(p) ? { ...p, state: 'unseen' as const, look: 'looking' as const } : p)) : ps))
-    }, Math.max(0, due) + 50)
+      const now = Date.now()
+      setSent((ps) =>
+        ps.flatMap((p) => {
+          if (p.state !== 'waiting' || !ofThis(p.bind)) return [p]
+          if (isCommand(p.text)) return now - p.at >= COMMAND_NOTE_MS && !panelNow.current ? [] : [p]
+          let q = p
+          if (!q.looked && now - q.at >= LOOK_AFTER_MS) q = { ...q, looked: true, ...(now - q.at < LOOK_WITHIN_MS ? { look: 'looking' as const } : {}) }
+          if (!q.quiet && now - q.at >= QUIET_AFTER_MS) q = { ...q, quiet: true }
+          return [q]
+        }),
+      )
+    }, Math.max(0, Math.min(...dues) - Date.now()) + 50)
     return () => clearTimeout(timer)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sent, queued, panelOpen])
-  // A message that has not turned up in the log: the pane's screen is read
-  // once, there and then, which is the only moment that can say whether the
-  // words are still sitting in its input. (Afterwards nothing can.)
+  }, [sent, panelOpen])
   // (Which were asked after is kept outside this page: going to another
   // agent and back builds it anew, and the same read must not go twice.)
   useEffect(() => {
@@ -1367,57 +1290,30 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       lookedAt.add(p.id)
       if (lookedAt.size > 200) for (const q of [...lookedAt].slice(0, 100)) lookedAt.delete(q)
       const bind = bindKey // (the answer is of that conversation, not of whichever is open when it comes)
-      const at = (look: ConvoPending['look']) => setSent((ps) => ps.map((q) => (q.id === p.id && q.bind === bind ? { ...q, look } : q)))
-      logAsked.set(p.id, { n: 1, at: Date.now() }) // (its own look asks the logs too)
-      api<{ screen: string; waiting: boolean; known: boolean; view?: string; went?: ConvoWent | null }>('POST', `/api/sessions/${sid}/conversation/sent-missing`, { ...pressBody(), text: p.text, ago: Date.now() - p.at }, { timeoutMs: PRESS_MS })
-        .then((r) => at({ waiting: r.waiting, known: r.known, screen: r.screen, view: r.view, went: r.went ?? undefined }))
-        .catch(() => at('failed'))
+      const after = (f: (q: Sent) => Sent) => setSent((ps) => ps.map((q) => (q.id === p.id && q.bind === bind ? f(q) : q)))
+      api<{ waiting: boolean; known: boolean; view?: string; went?: ConvoWent | null }>('POST', `/api/sessions/${sid}/conversation/sent-missing`, { ...pressBody(), text: p.text, ago: Date.now() - p.at }, { timeoutMs: PRESS_MS })
+        .then((r) =>
+          after((q) =>
+            // (Found in a subagent's own log: where it went, for sure.)
+            r.went
+              ? { ...q, look: { went: r.went } }
+              : // (Its words, on the screen, in the box of this conversation.)
+                r.known && r.waiting && (!r.view || r.view === 'main')
+                ? { ...q, look: undefined, state: 'stuck' as const }
+                : { ...q, look: undefined },
+          ),
+        )
+        .catch(() => after((q) => ({ ...q, look: undefined })))
     }
   }, [sent, convo.bind, sid, bindKey])
-  // One not seen in the log, where it went not known (its look found it in
-  // no subagent's log, or failed, or the page was opened anew meanwhile):
-  // the subagents' logs asked again, alone, a few times, a while apart — a
-  // subagent may write it only once its tool is done (agent-view.md,
-  // review559). The screen is not read again: of now, it says nothing of then.
-  const [logTick, setLogTick] = useState(0)
-  useEffect(() => {
-    let next = Infinity
-    for (const p of sent) {
-      const look = p.look
-      if (p.state !== 'unseen' || look === 'looking' || (look && typeof look === 'object' && (look.went || look.waiting)) || !convo.bind || !ofThis(p.bind)) continue
-      const a = logAsked.get(p.id) ?? { n: 0, at: 0 }
-      if (a.n >= LOG_ASK_AFTER.length) continue
-      const when = a.at + LOG_ASK_AFTER[a.n]
-      if (when > Date.now()) {
-        next = Math.min(next, when)
-        continue
-      }
-      logAsked.set(p.id, { n: a.n + 1, at: Date.now() })
-      // (Its next ask timed from now: nothing else may change for this effect to run again — review560.)
-      if (a.n + 1 < LOG_ASK_AFTER.length) next = Math.min(next, Date.now() + LOG_ASK_AFTER[a.n + 1])
-      if (logAsked.size > 200) for (const q of [...logAsked.keys()].slice(0, 100)) logAsked.delete(q)
-      const bind = bindKey
-      api<{ went?: ConvoWent | null }>('POST', `/api/sessions/${sid}/conversation/sent-missing`, { ...pressBody(), text: p.text, ago: Date.now() - p.at, only: 'log' }, { timeoutMs: PRESS_MS })
-        .then((r) => {
-          const went = r.went
-          if (!went) return
-          setSent((ps) => ps.map((q) => (q.id === p.id && q.bind === bind && q.state === 'unseen' ? { ...q, look: { ...(q.look && typeof q.look === 'object' ? q.look : { waiting: false, known: false, screen: '' }), went } } : q)))
-        })
-        .catch(() => {}) // (as it was: not known)
-    }
-    if (next === Infinity) return
-    const timer = setTimeout(() => setLogTick((n) => n + 1), next - Date.now() + 50)
-    return () => clearTimeout(timer)
-  }, [sent, convo.bind, sid, bindKey, logTick])
 
-  const shownSent = sent.filter((p) => ofThis(p.bind) && !(p.state !== 'sent' && queued.has(norm(p.text))))
+  const shownSent = sent.filter((p) => ofThis(p.bind))
   // Gone to a subagent: when it is first shown (this agent's view in front,
   // the page not hidden), and let go of WENT_SHOWN_MS after.
   const wentOf = (p: Sent) => !!(p.look && typeof p.look === 'object' && p.look.went)
   useEffect(() => {
     if (!active || document.hidden) return
     const now = Date.now()
-    // (Only those shown: one held back as queued is not seen yet — review578.)
     const ids = new Set(shownSent.filter((p) => wentOf(p) && !p.wentSeen).map((p) => p.id))
     if (ids.size) setSent((ps) => ps.map((p) => (ids.has(p.id) && !p.wentSeen ? { ...p, wentSeen: now } : p)))
   })
@@ -1772,7 +1668,8 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     // (A file of another host's, or one whose path is lost: not sent as it is.)
     const bad = unsendable(draft, cur.s.host_id, ATTACH_LABEL, 100 << 10)
     if (bad) return toast(bad.other ? t('attach.wrongHost', { name: bad.other.name }) : t('attach.lost', { label: bad.lost! }), true)
-    const text = expandPastes(draft, 100 << 10)
+    // (Claude Code takes a path for a picture only alone on its line.)
+    const text = (b.agent ?? 'claude') === 'claude' ? expandForClaude(draft, 100 << 10) : expandPastes(draft, 100 << 10)
     if (text === null || new TextEncoder().encode(text).length > 100 << 10) return toast(t('agents.tooLong'), true)
     const was = draft // (what is typed meanwhile is a new draft: it stays)
     setSending(true)
@@ -1789,7 +1686,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     const id = Date.now() * 100 + (++sentN.current % 100)
     const mark = (extra: Partial<Sent>) => setSent((ps) => ps.map((p) => (p.id === id ? { ...p, ...extra } : p)))
     const drop = () => setSent((ps) => ps.filter((p) => p.id !== id))
-    setSent((ps) => [...ps, { id, text, state: 'sending' as const, bind: bindKey, after, afterTs, gen: convo.gen, at, sinceAt: cur.row && !cur.row.lost ? cur.row.a.since : undefined }].slice(-5))
+    setSent((ps) => [...ps, { id, text, shown: was, state: 'sending' as const, bind: bindKey, after, afterTs, gen: convo.gen, at, sinceAt: cur.row && !cur.row.lost ? cur.row.a.since : undefined }].slice(-5))
     // The box is emptied with it (the draft kept too, even if put aside
     // meanwhile, or shown by another of this page since); what it held comes
     // back if the message is refused.
@@ -1817,7 +1714,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
         else if (r?.in_box) toast(t('convo.inBoxSent'))
         remember(was)
         mark({ state: 'waiting' })
-        convo.refresh() // (it is in its log in a moment: read now, not at the next tick)
+        convo.refresh() // (it is in its log already: read now, not at the next tick)
       })
       .catch((e) => {
         if (authGen() !== account) {
@@ -2233,8 +2130,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       // for the name.)
       onStop={canPress && !lead && (!!draft.trim() || !!up || askHides) ? () => press('stop') : undefined}
       stop={said?.what === 'stop' && said.bind === bindKey ? said.text : undefined}
-      // (The one shown: its count as its own view has it — of this process, not those queued.)
-      side={{ rows: rows.map((r) => (r.current ? { ...r, unsent: shownSent.filter(unsentNow).length || undefined } : r)) }}
+      side={{ rows }}
       active={active}
       onDismiss={(id) => setSent((ps) => ps.filter((p) => p.id !== id))}
       onResend={(id) => {
@@ -2258,7 +2154,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
         if (r.pressed) {
           // (Waited for in the log again, as when it was sent.)
           lookedAt.delete(id)
-          setSent((ps) => ps.map((q) => (q.id === id ? { ...q, state: 'waiting' as const, look: undefined, at: Date.now() } : q)))
+          setSent((ps) => ps.map((q) => (q.id === id ? { ...q, state: 'waiting' as const, look: undefined, looked: false, quiet: false, at: Date.now() } : q)))
         }
         return r.pressed
       }}
@@ -2418,7 +2314,7 @@ const asRow = (e: Entry, pins: string[]): ConvoListRow => {
 }
 // query, onQuery: what it is searched for, kept by the page (as the side
 // list's is): still searched, back from a conversation.
-function PhoneList({ entries, all, titles, query, onQuery, onPick, unsentOf }: { entries: Entry[]; all: SessionInfo[]; titles: Titles; query: string; onQuery: (q: string) => void; onPick: (e: Entry) => void; unsentOf: (key: string, live?: { status: string; since?: number }) => number }) {
+function PhoneList({ entries, all, titles, query, onQuery, onPick }: { entries: Entry[]; all: SessionInfo[]; titles: Titles; query: string; onQuery: (q: string) => void; onPick: (e: Entry) => void }) {
   const [now, setNow] = useState(Date.now())
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 30000)
@@ -2547,7 +2443,6 @@ function PhoneList({ entries, all, titles, query, onQuery, onPick, unsentOf }: {
           const line = lineAfter.get(e)
           const r = e.row
           const status = r?.lost ? 'unknown' : (r?.status ?? 'unknown')
-          const unsent = unsentOf(e.key, r && !r.lost ? { status, since: r.a.since } : undefined)
           const { title, where } = labelled(e)
           const since = r && !r.lost ? when({ since: r.bg ? r.a.bg_since : r.a.since, status }, now) : ''
           return (
@@ -2565,9 +2460,8 @@ function PhoneList({ entries, all, titles, query, onQuery, onPick, unsentOf }: {
                     )}
                   </span>
                   <span className="agents-list-where">{where}</span>
-                  {unsent > 0 && <span className="agents-list-now is-unsent">{t('convo.unsentRow', { n: unsent })}</span>}
                   {/* (A third line only for what waits on the person — as the side list.) */}
-                  {status === 'blocked' && r && !r.lost && !r.bg && unsent === 0 && (() => {
+                  {status === 'blocked' && r && !r.lost && !r.bg && (() => {
                     const g = glanceOf(e.s.id, e.pane, status, r.a.since)
                     return g ? <span className="agents-list-now is-blocked">{g}</span> : null
                   })()}

@@ -8,7 +8,6 @@ export interface ConvoListRow {
   key: string
   title: string
   where: string // its workspace or session (its host too, where there are several)
-  unsent?: number // messages sent to it not seen taken in (see unsentOf)
   now?: string // what it is about now, where known: waits to be allowed, the step under way, how its answer begins
   program?: string // the program in it, for its icon
   status: 'working' | 'blocked' | 'done' | 'idle' | 'unknown'

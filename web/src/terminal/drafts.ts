@@ -124,6 +124,21 @@ export function expandPastes(s: string, max: number): string | null {
   const t = pastesExpanded(s, max)
   return t === null ? null : expandLabels(t, new Map([...attached].map(([l, a]) => [l, a.send])), max)
 }
+// As expandPastes, for Claude Code: it takes a path for a picture only alone on
+// its line (among words it stays words, and no picture goes: 2.1.318), so each
+// picture's label is given a line of its own first.
+export function expandForClaude(s: string, max: number): string | null {
+  let t = s
+  for (const a of attached.values()) {
+    if (!a.image || !t.includes(a.label)) continue
+    const label = new RegExp('[ \\t]*' + a.label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '[ \\t]*', 'g')
+    t = t.replace(label, (m, at: number, all: string) => {
+      const end = at + m.length
+      return (at === 0 || all[at - 1] === '\n' ? '' : '\n') + a.label + (end === all.length || all[end] === '\n' || all[end] === '\r' ? '' : '\n')
+    })
+  }
+  return expandPastes(t, max)
+}
 // (Before the files are, a label may be longer than its path: the text in between bounded apart.)
 const pastesExpanded = (s: string, max: number) => expandLabels(s, pastes, 2 * max + (64 << 10))
 function expandLabels(s: string, labels: Map<string, string>, max: number): string | null {

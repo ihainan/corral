@@ -939,10 +939,6 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-missing { margin: 6px 0 0; font-size: 13px; line-height: 18px; color: var(--term-fg-2); }
 .convo-missing p { margin: 0; }
 .convo-missing .link-btn { margin-top: 2px; font-size: 13px; }
-.convo-missing-screen {
-  margin: 6px 0 0; padding: 8px 10px; border-radius: 8px; max-height: 320px; overflow: auto;
-  background: var(--term-bg); color: var(--term-fg-2); font: 12px/17px var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere;
-}
 
 /* What went wrong: why the agent fell silent, or stopped mid-sentence */
 .convo-trouble {
@@ -1092,9 +1088,10 @@ button.convo-task-line:hover .convo-task-name { color: var(--term-fg); }
 .term-root .convo-queue-now { flex: none; height: 28px; padding: 0 10px; font-size: 13px; color: var(--term-fg); border: 1px solid var(--term-line); background: var(--term-bg); }
 .term-root .convo-queue-now:hover { background: var(--term-hover); }
 .convo-queue-said { flex: none; font-size: 13px; color: var(--term-fg-3); }
-/* (Three lines at most, cut at a whole line with "…": a height in em, the
-   padding inside it, cut the last line in half against the border — 11-05.) */
-.convo-queue-row { padding: 8px 12px 10px; border-top: 1px solid var(--term-line); color: var(--term-fg); line-height: 20px; white-space: pre-wrap; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden; }
+/* (Three lines at most, cut at a whole line with "…": the padding is outside
+   the clamped text, else the fourth line shows half in it — 11-05, 11-06.) */
+.convo-queue-row { padding: 8px 12px 10px; border-top: 1px solid var(--term-line); color: var(--term-fg); line-height: 20px; }
+.convo-queue-text { white-space: pre-wrap; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden; }
 /* Not the person's own: another session's agent, or a notice */
 .convo-queue-row.is-note { color: var(--term-fg-3); }
 .convo-queue-from { margin-right: 6px; color: var(--term-fg-2); font-weight: 500; }
@@ -1201,7 +1198,6 @@ button.convo-task-line:hover .convo-task-name { color: var(--term-fg); }
 /* What it is about now (a step under way, what it waits for, how its answer begins): one line, under its name */
 .convo-list-now, .agents-list-now { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; line-height: 18px; color: var(--term-fg-2); }
 .agents-list-now { font-size: 13px; }
-.convo-list-now.is-unsent, .agents-list-now.is-unsent { color: var(--term-warn-text); }
 /* Commands it left running in the background: said in words before where it is */
 .convo-list-cmds { color: var(--term-fg-2); font-weight: 500; }
 /* The rest of a long group of old ones, behind a tap */

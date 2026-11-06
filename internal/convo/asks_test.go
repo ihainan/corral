@@ -1,6 +1,7 @@
 package convo
 
 import (
+	"encoding/json"
 	"reflect"
 	"strings"
 	"testing"
@@ -86,7 +87,7 @@ func TestClaudeAnswerOfLongQuestion(t *testing.T) {
 // Two long questions alike in what is kept of them: neither is told an
 // answer that may be the other's.
 func TestClaudeAnswersAlike(t *testing.T) {
-	head := strings.Repeat("x", 400)
+	head := strings.Repeat("x", maxAskText+100)
 	c := NewClaude()
 	c.Feed(lines(
 		`{"type":"assistant","uuid":"a1","message":{"role":"assistant","content":[{"type":"tool_use","id":"q1","name":"AskUserQuestion","input":{"questions":[{"question":"`+head+`A","options":[{"label":"a"}]},{"question":"`+head+`B","options":[{"label":"b"}]},{"question":"short","options":[{"label":"c"}]}]}}]}}`,
@@ -99,7 +100,7 @@ func TestClaudeAnswersAlike(t *testing.T) {
 
 // Two questions alike in what is kept, one of them answered: neither told.
 func TestClaudeAnswersAlikeOneAnswered(t *testing.T) {
-	head := strings.Repeat("x", 400)
+	head := strings.Repeat("x", maxAskText+100)
 	c := NewClaude()
 	c.Feed(lines(
 		`{"type":"assistant","uuid":"a1","message":{"role":"assistant","content":[{"type":"tool_use","id":"q1","name":"AskUserQuestion","input":{"questions":[{"question":"`+head+`A","options":[{"label":"a"}]},{"question":"`+head+`B","options":[{"label":"b"}]}]}}]}}`,
@@ -107,5 +108,18 @@ func TestClaudeAnswersAlikeOneAnswered(t *testing.T) {
 	))
 	if got := c.Since(0)[0].Parts[0].Tool.Answers; len(got) != 2 || got[0] != "" || got[1] != "" {
 		t.Fatalf("answers %q", got)
+	}
+}
+
+// A question long by bytes, as Chinese ones are (300 bytes is 100 characters),
+// is whole: cut, the card could not be drawn from it and fell back on the
+// screen (11-06: 10 of 49 real questions). Its choices' words whole too.
+func TestClaudeAskLongQuestionWhole(t *testing.T) {
+	q := strings.Repeat("额度来源", 40) // (480 bytes)
+	d := strings.Repeat("代价说明", 40)
+	in, _ := json.Marshal(map[string]any{"questions": []map[string]any{{"question": q, "header": "额度", "options": []map[string]any{{"label": "接口", "description": d}, {"label": "缓存", "description": "x"}}}}})
+	asks := asksOf(in)
+	if len(asks) != 1 || asks[0].Cut || asks[0].Question != q || asks[0].Options[0].Description != d {
+		t.Fatalf("a long question came out cut: %+v", asks)
 	}
 }

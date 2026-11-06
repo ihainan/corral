@@ -37,7 +37,8 @@ export function askOn(call: ConvoTool | undefined, s: AskScreen): number {
     if (!sameQ(a.question, s.question) || !!a.multi !== s.multi) return false
     const shown = s.options.filter((o) => o.n !== s.own)
     const labels = a.options.map((o) => o.label)
-    return shown.length === a.options.length && shown.every((o, i) => o.n === i + 1 && sameLabel(o.label, labels[i], labels, o.cut))
+    // (Previews beside: a long label goes on under it, where its column ends, which the screen does not mark for sure.)
+    return shown.length === a.options.length && shown.every((o, i) => o.n === i + 1 && (sameLabel(o.label, labels[i], labels, false) || (s.beside && sameLabel(o.label, labels[i], labels, true)) || sameLabel(o.label, labels[i], labels, o.cut)))
   })
   // (Two questions alike: which one this is cannot be told.)
   return at >= 0 && asks.filter((a) => sameQ(a.question, s.question)).length === 1 ? at : -1

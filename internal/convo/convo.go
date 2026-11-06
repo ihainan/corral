@@ -391,6 +391,7 @@ const (
 	maxWrote        = 4096     // the files written that are remembered (see Noted)
 	maxSaid         = 16 << 10 // of the person's last message, what is read for the files it names
 	maxAsks         = 4        // questions of one AskUserQuestion
+	maxAskText      = 16 << 10 // a question, or a choice's words: long ones are common (300 bytes is 100 Chinese characters)
 	maxOptions      = 8        // choices of one question
 	maxPreview      = 2 << 10  // a choice's preview
 	maxPlan         = 32 << 10 // a plan put to the person

@@ -3,7 +3,6 @@ package web
 import (
 	"context"
 	"errors"
-	"log/slog"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -106,78 +105,6 @@ func (s *Server) sentMissing(w http.ResponseWriter, ctx context.Context, sess *t
 	// the front, not the back.)
 	writeJSON(w, http.StatusOK, map[string]any{"screen": lastOf(screen, sentLook), "waiting": waiting, "known": known, "view": view, "went": went})
 }
-
-// enterAgain: a message just typed into Claude Code (screen: its pane a
-// moment after the Enter) still in its input box, Enter let go of: Enter
-// again, at most twice, the screen read anew after each. Not where the
-// screen does not say (nothing is pressed on a guess), and not once the
-// box no longer holds it: taken in, or queued while the agent works. Left
-// there, the words stayed in the box, and the next message typed went in
-// after them, the two then sent as one. (ended: the send's turn, held until
-// these have ended on the host too.)
-// later: a context for the look a moment on, tied to the person's login
-// (its end, a sign-out or revocation calls it off), nil where it is over.
-func (s *Server) enterAgain(ctx context.Context, sess *term.Session, pane, socket, agent string, pid, start int64, sid, text, screen string, ended *sync.WaitGroup, later func(d time.Duration) (context.Context, func())) {
-	still, whole := stillTyped, typedWhole
-	freeGate := "enter"   // (as "free", the box not brought back in front: the words in it are ours, where they are — agent-view.md)
-	if agent == "codex" { // (its input drawn its own way: codexInputArea; whether it waits, its title says: review502)
-		freeGate = "cfree"
-		still = func(screen, text string) bool { return codexTypedIn(screen, text, false) }
-		whole = func(screen, text string) bool { return codexTypedIn(screen, text, true) }
-	}
-	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-	enter := []string{"enter"}
-	if sess.Persistence == "tmux" {
-		enter = []string{"Enter"}
-	}
-	press := func(ctx context.Context) bool {
-		slog.Info("conversation: message still in the input, Enter again", "session", sess.ID, "pane", pane)
-		ended.Add(1)
-		// (Not while it waits: the Enter would be a question's.)
-		res, err := sshx.Exec(ctx, sess.Client(), convoGatedCommand(freeGate, sess.Persistence, sess.TmuxSession, pane, socket, pid, start, sid, 0, enter, sendLines), sendOut,
-			sshx.ExecOptions{Stdin: strings.NewReader(""), Release: ended.Done})
-		if err != nil {
-			return false
-		}
-		screen = string(res.Out)
-		return true
-	}
-	for range 2 {
-		if !still(screen, text) || !press(ctx) {
-			break
-		}
-	}
-	// A moment on, looked at once more: a message typed as the agent was
-	// ending its turn (its hooks running, a card of its own being drawn)
-	// was not yet in its box when looked at right after the Enter, and the
-	// Enter was lost; seen there now, Enter once more. (Beside the send's
-	// answer, not before it; the send's turn held until it is done.)
-	// (Only the message whole: by then the box could hold another typed in
-	// the terminal that begins as it does.)
-	lctx, done := later(enterLater + 10*time.Second)
-	if lctx == nil {
-		return // (signed out meanwhile, or the login over)
-	}
-	ended.Add(1)
-	go func() {
-		defer ended.Done()
-		defer done()
-		select {
-		case <-lctx.Done():
-			return
-		case <-time.After(enterLater):
-		}
-		ended.Add(1)
-		res, err := sshx.Exec(lctx, sess.Client(), convoScreenCommand(sess.Persistence, pane, socket), 256<<10, sshx.ExecOptions{Release: ended.Done})
-		if err == nil && whole(string(res.Out), text) {
-			press(lctx)
-		}
-	}()
-}
-
-// enterLater: how long after a send its input box is looked at once more.
-const enterLater = 2500 * time.Millisecond
 
 // sentEnter: Enter pressed for a message the person was told is still in
 // the input box — only where the screen, read now, shows it there (the box

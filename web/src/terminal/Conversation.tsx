@@ -99,23 +99,19 @@ export interface ConvoAgent {
 }
 
 // A message sent from the composer while the conversation shows: "waiting"
-// until the log has it (then it is dropped), "unseen" when that took too
-// long, "sent" when it can no longer be told (another log came in front).
+// until the log has it (then it is dropped); "stuck" where the screen showed
+// its words still in the input of this conversation.
 export interface ConvoPending {
   id: number
   text: string
-  state: 'sending' | 'waiting' | 'unseen' | 'sent'
+  shown?: string // (as the box had it: a picture by its label, not its path)
+  state: 'sending' | 'waiting' | 'stuck'
   opened?: boolean // (a command that has opened a panel: taken in; the log tells of it once that is shut)
-  // What the pane's screen said when the message had not turned up in the
-  // log: waiting (the words are in its input, so it was typed and not
-  // taken in), taken (the input no longer holds them), or neither, where
-  // the screen does not say. Undefined while it is still being looked at,
-  // or where it could not be read.
-  // view: who has Claude Code's input box now (main, subagent, list,
-  // sessions, none), where it was read: a message gone elsewhere said so.
-  // went: the subagent that took it in, found in its own log (Claude Code
-  // had that subagent's conversation in front as it was typed): said for sure.
-  look?: { waiting: boolean; known: boolean; screen: string; view?: string; went?: ConvoWent } | 'looking' | 'failed'
+  quiet?: boolean // (long since, nothing in the log: said so, quietly)
+  // The screen, looked at once it had not turned up: being read; or went: the
+  // subagent that took it in, found in its own log (Claude Code had that
+  // subagent's conversation in front as it was typed): said for sure.
+  look?: { went: ConvoWent } | 'looking'
 }
 export type ConvoWent = { agent: string; type?: string; description?: string }
 const wentOf = (p: ConvoPending) => (p.look && typeof p.look === 'object' ? p.look.went : undefined)
@@ -1043,18 +1039,21 @@ export function ConversationView({
   }, [active])
 
   // What was sent, not in the log yet (also before a new conversation's log is written).
-  const pendingList = pending.map((p) => (
-    <div key={p.id} className={'convo-user convo-pending' + (p.state === 'sending' ? ' is-sending' : '')}>
-      <div className="convo-user-text">{p.text}</div>
-      <div className="convo-meta">
-        <span role="status">{t(p.opened ? 'convo.sentOnly' : p.state === 'sending' ? 'convo.sending' : p.state === 'waiting' ? 'convo.sent' : p.state === 'unseen' ? (wentOf(p) ? 'convo.wentSub' : 'convo.unseen') : 'convo.sentOnly')}</span>
-        {(p.state === 'unseen' || p.state === 'sent') && (
-          <button type="button" className="link-btn" onClick={() => onDismiss(p.id)}>{t('common.close')}</button>
-        )}
+  const pendingList = pending.map((p) => {
+    const went = wentOf(p)
+    return (
+      <div key={p.id} className={'convo-user convo-pending' + (p.state === 'sending' ? ' is-sending' : '')}>
+        <div className="convo-user-text">{p.shown ?? p.text}</div>
+        <div className="convo-meta">
+          <span role="status">{t(p.opened ? 'convo.sentOnly' : p.state === 'sending' ? 'convo.sending' : went ? 'convo.wentSub' : p.state === 'stuck' ? 'convo.stuck' : 'convo.sent')}</span>
+          {(went || p.quiet || p.state === 'stuck') && (
+            <button type="button" className="link-btn" onClick={() => onDismiss(p.id)}>{t('common.close')}</button>
+          )}
+        </div>
+        <SentNote p={p} onEnter={onEnter && (() => onEnter(p.id))} onResend={onResend && (() => onResend(p.id))} onShowTerminal={onShowTerminal} />
       </div>
-      {p.state === 'unseen' && <Missing look={p.look} onEnter={onEnter && (() => onEnter(p.id))} onResend={onResend && (() => onResend(p.id))} />}
-    </div>
-  ))
+    )
+  })
   let body: ReactNode
   if (convo.status === 'loading') body = <p className="convo-state">{t('convo.loading')}</p>
   else if (convo.status === 'error') body = <p className="convo-state">{t('convo.error')}</p>
@@ -1712,6 +1711,12 @@ function since(ts?: string): string {
   return duration(Math.max(Date.now() - v, 0))
 }
 
+// (Claude Code's placeholders for its pictures say nothing here: how many, then the words.)
+function queueWords(text: string): string {
+  const n = text.match(/\[Image #\d+\]/g)?.length ?? 0
+  return n ? t('convo.queuedPics', { n }) + text.replace(/\[Image #\d+\]\s*/g, '') : text
+}
+
 function Queue({ items, onSendNow, said }: { items: ConvoQueued[]; onSendNow?: () => void; said?: string }) {
   return (
     <div className="convo-queue" role="status">
@@ -1729,8 +1734,10 @@ function Queue({ items, onSendNow, said }: { items: ConvoQueued[]; onSendNow?: (
       </div>
       {items.map((q, i) => (
         <div key={i} className={'convo-queue-row' + (q.note ? ' is-note' : '')}>
-          {q.note && <span className="convo-queue-from">{q.from ? t('convo.queuedFrom', { name: q.from }) : t('convo.queuedNotice')}</span>}
-          {q.text}
+          <div className="convo-queue-text">
+            {q.note && <span className="convo-queue-from">{q.from ? t('convo.queuedFrom', { name: q.from }) : t('convo.queuedNotice')}</span>}
+            {queueWords(q.text)}
+          </div>
         </div>
       ))}
     </div>
@@ -2544,11 +2551,7 @@ function AgentList({ rows, menus, onPicked, placed, query: given, onQuery, searc
                         reader, and shown where the system's colours take the dot's away.) */}
                     {/* (Commands it left running: at work in the background, as its group says — review batch4.) */}
                     {(said || r.bg || r.cmds) && <span className={'convo-list-status is-' + (r.cmds && r.status !== 'blocked' ? 'working' : r.status)}>{t(r.bg === 'running' ? 'convo.status.bg' : r.bg === 'stale' ? 'convo.status.bgStale' : r.cmds && r.status !== 'blocked' ? 'convo.status.bg' : (`convo.status.${r.status}` as I18nKey))}</span>}
-                    {r.unsent ? (
-                      <span className="convo-list-now is-unsent">{t('convo.unsentRow', { n: r.unsent })}</span>
-                    ) : (
-                      r.status === 'blocked' && r.now && <span className="convo-list-now is-blocked">{r.now}</span>
-                    )}
+                    {r.status === 'blocked' && r.now && <span className="convo-list-now is-blocked">{r.now}</span>}
                   </span>
                 </button>
                 {hasMenu && (
@@ -3396,22 +3399,19 @@ function resetsAt(sec: number): string {
   return d.toDateString() === new Date().toDateString() ? time : d.toLocaleDateString(getLang(), { month: 'short', day: 'numeric' }) + ' ' + time
 }
 
-// What became of a message that was typed and has not turned up in the
-// log, read off the pane's own screen when it did not: it settles whether
-// the words are still sitting in the input, which nothing else can say
-// afterwards. The screen is shown on a tap, since it is what was looked at.
-function Missing({ look, onEnter, onResend }: { look?: ConvoPending['look']; onEnter?: () => Promise<boolean>; onResend?: () => void }) {
-  const [open, setOpen] = useState(false)
+// What is known of a message sent that has not turned up in the log, where
+// anything is: it went to a subagent; its words are still in the box (Enter
+// for it here is the person's own); or only that the conversation has not
+// caught up, the terminal a tap away. Nothing else is said: not seeing it in
+// the log says nothing of whether it arrived.
+function SentNote({ p, onEnter, onResend, onShowTerminal }: { p: ConvoPending; onEnter?: () => Promise<boolean>; onResend?: () => void; onShowTerminal: () => void }) {
   // (Enter pressed from here: under way, or what became of it.)
   const [entering, setEntering] = useState<'' | 'busy' | 'gone' | 'failed'>('')
-  if (!look) return null
-  if (look === 'looking') return <p className="convo-missing" role="status">{t('convo.missing.looking')}</p>
-  if (look === 'failed') return <p className="convo-missing">{t('convo.missing.failed')}</p>
-  // (Found in a subagent's own log: where it went, for sure; sent again from here, it goes to this one.)
-  if (look.went)
+  const went = wentOf(p)
+  if (went)
     return (
       <div className="convo-missing">
-        <p>{t('convo.missing.went', { name: look.went.description || look.went.type || look.went.agent })}</p>
+        <p>{t('convo.missing.went', { name: went.description || went.type || went.agent })}</p>
         {onResend && (
           <button type="button" className="btn btn-ghost convo-missing-enter" onClick={onResend}>
             {t('convo.missing.resend')}
@@ -3419,49 +3419,39 @@ function Missing({ look, onEnter, onResend }: { look?: ConvoPending['look']; onE
         )}
       </div>
     )
-  // (Not where the terminal shows another view now: Enter would go there.)
-  const canEnter = !!onEnter && look.known && look.waiting && (!look.view || look.view === 'main')
-  return (
-    <div className="convo-missing">
-      <p>
-        {t(
-          look.view === 'subagent'
-            ? 'convo.missing.subagent'
-            : look.view === 'list' || look.view === 'sessions'
-              ? 'convo.missing.otherView'
-              : !look.known
-                ? 'convo.missing.unsure'
-                : look.waiting
-                  ? canEnter
-                    ? 'convo.missing.waitingEnter'
-                    : 'convo.missing.waiting'
-                  : 'convo.missing.taken',
+  if (p.state === 'stuck')
+    return (
+      <div className="convo-missing">
+        <p>{t(onEnter ? 'convo.missing.waitingEnter' : 'convo.stuck')}</p>
+        {onEnter && (
+          <button
+            type="button"
+            className="btn btn-ghost convo-missing-enter"
+            disabled={entering === 'busy'}
+            onClick={() => {
+              setEntering('busy')
+              onEnter().then(
+                (pressed) => setEntering(pressed ? '' : 'gone'),
+                () => setEntering('failed'),
+              )
+            }}
+          >
+            {entering === 'busy' ? t('convo.missing.entering') : t('convo.missing.enter')}
+          </button>
         )}
-      </p>
-      {canEnter && (
-        <button
-          type="button"
-          className="btn btn-ghost convo-missing-enter"
-          disabled={entering === 'busy'}
-          onClick={() => {
-            setEntering('busy')
-            onEnter!().then(
-              (pressed) => setEntering(pressed ? '' : 'gone'),
-              () => setEntering('failed'),
-            )
-          }}
-        >
-          {entering === 'busy' ? t('convo.missing.entering') : t('convo.missing.enter')}
-        </button>
-      )}
-      {entering === 'gone' && <p role="status">{t('convo.missing.enterGone')}</p>}
-      {entering === 'failed' && <p role="alert">{t('convo.missing.enterFailed')}</p>}
-      <button type="button" className="link-btn" aria-expanded={open} onClick={() => setOpen(!open)}>
-        {t(open ? 'convo.missing.hide' : 'convo.missing.show')}
-      </button>
-      {open && <pre className="convo-missing-screen">{look.screen}</pre>}
-    </div>
-  )
+        {entering === 'gone' && <p role="status">{t('convo.missing.enterGone')}</p>}
+        {entering === 'failed' && <p role="alert">{t('convo.missing.enterFailed')}</p>}
+        <button type="button" className="link-btn" onClick={onShowTerminal}>{t('convo.showTerminal')}</button>
+      </div>
+    )
+  if (p.quiet && !p.opened)
+    return (
+      <div className="convo-missing">
+        <p>{t('convo.notCaughtUp')}</p>
+        <button type="button" className="link-btn" onClick={onShowTerminal}>{t('convo.showTerminal')}</button>
+      </div>
+    )
+  return null
 }
 
 const noShow = () => {}

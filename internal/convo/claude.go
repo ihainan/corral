@@ -3156,16 +3156,16 @@ func asksOf(input json.RawMessage) []Ask {
 		}
 		a := Ask{Header: clip(q.Header, maxMeta), Multi: q.MultiSelect}
 		var cutQ bool
-		a.Question, cutQ = cut(clean(q.Question), maxTitle)
+		a.Question, cutQ = cut(clean(q.Question), maxAskText)
 		a.Cut = cutQ || len(q.Options) > maxOptions
 		for j, o := range q.Options {
 			if j == maxOptions {
 				break
 			}
-			label, cutL := cut(clean(o.Label), maxTitle)
+			label, cutL := cut(clean(o.Label), maxAskText)
 			p, cutP := cut(clean(o.Preview), maxPreview)
 			a.Cut = a.Cut || cutL
-			a.Options = append(a.Options, AskOption{Label: label, Description: clip(o.Description, maxTitle), Preview: p, PreviewCut: cutP})
+			a.Options = append(a.Options, AskOption{Label: label, Description: clip(o.Description, maxAskText), Preview: p, PreviewCut: cutP})
 		}
 		out = append(out, a)
 	}
@@ -3186,7 +3186,7 @@ func answersOf(asks []Ask, account json.RawMessage) []string {
 	got := make(map[string]string, len(acc.Answers))
 	alike := map[string]bool{}
 	for q, v := range acc.Answers {
-		k, _ := cut(clean(q), maxTitle)
+		k, _ := cut(clean(q), maxAskText)
 		if _, ok := got[k]; ok {
 			alike[k] = true
 		}
@@ -3202,7 +3202,7 @@ func answersOf(asks []Ask, account json.RawMessage) []string {
 	out := make([]string, len(asks))
 	for i, a := range asks {
 		if kept[a.Question] == 1 {
-			out[i] = clip(got[a.Question], maxTitle)
+			out[i] = clip(got[a.Question], maxAskText)
 		}
 	}
 	return out
