@@ -963,7 +963,6 @@ button.convo-task-line:hover .convo-task-name { color: var(--term-fg); }
 .convo-event.is-task.is-warn .convo-task-head { color: var(--term-warn-text); }
 .convo-task-name { flex: 1 0 0; min-width: 6em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: 12px; color: var(--term-fg-2); }
 .convo-task-full { margin: 4px 0; max-height: 240px; overflow: auto; }
-.convo-ask-desc { color: var(--term-fg-3); }
 .convo-event.is-compact { display: flex; align-items: center; gap: 10px; margin: 4px 0; font-size: 12px; color: var(--term-fg-3); text-align: center; }
 .convo-event.is-compact::before, .convo-event.is-compact::after { content: ''; flex: 1 1 24px; border-top: 1px solid var(--term-line); }
 .convo-event-said { flex: 0 1 auto; min-width: 0; }
@@ -987,19 +986,22 @@ button.convo-task-line:hover .convo-task-name { color: var(--term-fg); }
 /* What it said before asking, as its screen shows it (its log has it only once answered) */
 .convo-ask-lead {
   max-height: 168px; overflow-y: auto; white-space: pre-wrap; overflow-wrap: anywhere;
-  font-size: 13px; line-height: 20px; color: var(--term-fg-2); margin-bottom: 4px;
+  font-size: 13px; line-height: 20px; color: var(--term-fg-2);
 }
 .convo-ask-of { margin: -4px 0 0; font-size: 13px; color: var(--term-fg-3); }
-.convo-ask-opts { display: flex; flex-direction: column; gap: 0; border-top: 1px solid var(--term-line); }
+/* (Out to the card's edge: the rules are the card's own, and the words line up with the question above them.) */
+.convo-ask-opts { display: flex; flex-direction: column; gap: 0; margin-inline: -16px; border-top: 1px solid var(--term-line); }
 /* Each choice a card: its key, its words and what it is (as the terminal's answer dialog) */
 .convo-ask-opt {
-  display: flex; align-items: flex-start; gap: 12px; width: 100%; padding: 11px 8px; border-radius: 0; cursor: pointer;
+  display: flex; align-items: flex-start; gap: 12px; width: 100%; padding: 11px 16px; border-radius: 0; cursor: pointer;
   border: 0; border-bottom: 1px solid var(--term-line); background: none; color: var(--term-fg); font: inherit; text-align: left;
   transition: border-color 0.12s ease, background 0.12s ease;
 }
 .convo-ask-opt:hover:not(:disabled) { background: var(--term-hover); }
-.convo-ask-opt:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: 2px; }
+.convo-ask-opt:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: -2px; }
 .convo-ask-opt:disabled { opacity: 0.6; cursor: default; }
+/* (The rule under the last choice is the card's own edge, where nothing follows it.) */
+.convo-ask-opts:last-child > :last-child { border-bottom: 0; }
 .convo-ask-key {
   flex: none; display: grid; place-items: center; width: 22px; height: 22px; border-radius: 6px; box-shadow: inset 0 0 0 1px var(--term-line);
   font: 600 12px/1 var(--font-mono); color: var(--term-fg-2);
@@ -1018,6 +1020,10 @@ button.convo-task-line:hover .convo-task-name { color: var(--term-fg); }
 .convo-ask-text .input::placeholder { color: var(--term-fg-3); }
 .convo-ask-text .input:focus { border-color: var(--term-accent-text); }
 .convo-ask-text .btn:hover:not(:disabled) { background: var(--term-hover); }
+/* (What is said about what was written goes under the box, not beside it,
+   where it would take the room the words are written in.) */
+.convo-ask-own { flex-wrap: wrap; }
+.convo-ask-own > .convo-ask-hint { flex: 1 0 100%; }
 .convo-ask-more { display: flex; flex-wrap: wrap; gap: 8px; font-size: 13px; }
 /* (What the card's foot does: buttons that look it, each saying what it presses) */
 .term-root .convo-ask-act { height: 30px; padding: 0 10px; font-size: 13px; color: var(--term-fg); border: 1px solid var(--term-line); background: var(--term-bg); }
@@ -1052,8 +1058,9 @@ button.convo-task-line:hover .convo-task-name { color: var(--term-fg); }
 .convo-dock-ask .convo-ask { box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18); }
 .convo-ask-block { max-height: min(34vh, 300px); white-space: pre-wrap; overflow-wrap: anywhere; overflow: auto; }
 .convo-ask-block > span { display: block; }
-/* (What a permission is for, above its command; what Claude Code notes under it, as words.) */
-.convo-ask-desc { margin: 0 0 8px; font-size: 14px; line-height: 20px; color: var(--term-fg); }
+/* (What a permission is for, above its command; what Claude Code notes under it, as words.)
+   Only the paragraph: a choice's own description is a span, and keeps its smaller, quieter one. */
+p.convo-ask-desc { margin: 0 0 8px; font-size: 14px; line-height: 20px; color: var(--term-fg); }
 .convo-ask-note { margin: 8px 0 0; font-size: 13px; line-height: 19px; color: var(--term-warn-text); }
 .convo-ask-note.is-countdown { font-variant-numeric: tabular-nums; }
 .convo-ask-block > .convo-ask-rule { color: var(--term-fg-3); opacity: 0.6; }
@@ -1383,23 +1390,29 @@ button.convo-task-line:hover .convo-task-name { color: var(--term-fg); }
 .lazy-failed .btn { margin-top: 12px; }
 
 /* A question or plan of Claude Code's, drawn from its log */
-.convo-ask-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 8px; padding: 0; list-style: none; font-size: 12px; color: var(--term-fg-3); }
+/* A question asked as a form (its parts: the questions, the question, its choices,
+   what it says under them) keeps the card's own rhythm, not each part's margins. */
+.convo-ask-structured { display: flex; flex-direction: column; gap: 10px; }
+.convo-ask-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0; list-style: none; font-size: 12px; color: var(--term-fg-3); }
 .convo-ask-tabs li { padding: 2px 8px; border-radius: 999px; border: 1px solid var(--term-line); }
 .convo-ask-tabs li.is-now { color: var(--term-fg); border-color: var(--term-accent-text); }
 .convo-ask-tabs li.is-done::after { content: ' ✓'; }
-.convo-ask-hint { margin: 4px 0; font-size: 13px; color: var(--term-fg-3); }
+.convo-ask-hint { margin: 0; font-size: 13px; color: var(--term-fg-3); }
 .convo-ask-hint.is-warn { color: var(--term-warn-text); }
 .term-root .convo-ask-there { margin-left: 8px; font-size: 13px; }
 .convo-ask-opt.is-ticked { background: var(--term-accent-soft); }
 @media (forced-colors: active) { .convo-ask-key { border: 1px solid CanvasText; } }
-.convo-ask-opt-wrap { display: flex; flex-direction: column; gap: 4px; }
-.convo-ask-preview-btn { align-self: flex-start; margin-left: 4px; font-size: 13px; }
-.convo-ask-preview { max-height: 240px; }
-.convo-ask-go { margin-top: 8px; }
-.convo-ask-answers { margin: 6px 0 8px; display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
+.convo-ask-opt-wrap { display: flex; flex-direction: column; gap: 4px; border-bottom: 1px solid var(--term-line); }
+.convo-ask-opt-wrap > .convo-ask-opt { border-bottom: 0; }
+.convo-ask-opt-wrap > :last-child:not(.convo-ask-opt) { margin-bottom: 8px; }
+.convo-ask-preview-btn { align-self: flex-start; margin-left: 20px; font-size: 13px; }
+.convo-ask-preview { max-height: 240px; margin-inline: 16px; }
+/* (Its own width, not the card's: a flex column would otherwise stretch it edge to edge.) */
+.convo-ask-go { align-self: flex-start; }
+.convo-ask-answers { margin: 0; display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
 .convo-ask-answers dt { color: var(--term-fg-3); }
 .convo-ask-answers dd { margin: 0; color: var(--term-fg); }
-.convo-ask-plan { max-height: 50vh; overflow: auto; margin: 6px 0 8px; padding: 8px 12px; border-radius: 8px; border: 1px solid var(--term-line); background: var(--term-chrome); }
+.convo-ask-plan { max-height: 50vh; overflow: auto; margin: 0; padding: 8px 12px; border-radius: 8px; border: 1px solid var(--term-line); background: var(--term-chrome); }
 
 /* What came since it was last read; the way to one's own messages */
 .convo-unread { display: flex; align-items: center; gap: 10px; margin: 8px 0; font-size: 12px; color: var(--term-accent-text); }
