@@ -39,14 +39,36 @@
   --pad-x: 16px;
   --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
   --sidebar: 224px;
-  /* The scale everything is set in (chat redesign, 11-04): type size/line,
-     spacing and corners. Values between these steps read as mistakes. */
+  /* The scale everything is set in (chat redesign, 11-04; put in force 11-07).
+     Each role has ONE size and ONE line, and text takes them together, from
+     the pair below — never a size with a line of its own choosing. That is
+     what had drifted: 13px text was set with six different lines, and the two
+     commonest secondary styles disagreed with the token that describes them.
+     scripts/check-styles.mjs refuses a size or a line written as a number.
+
+     Spacing and corners are kept as plain numbers, not as tokens: a token
+     named for its own value can never be given another, so it buys nothing
+     a written number does not, and reads worse where it is used. The scale
+     is held by the checker instead, which refuses a step that is not on it:
+       spacing  0 1 2 3 4 6 8 10 12 14 16 20 24 32 40 48
+       corners  4 6 8 12 16 999 (--r-xs --r-sm --r --r-lg --r-xl, pill)
+     1px and 3px are hairlines and optical nudges; 14px is a step because 28
+     places already stand on it. Anything else is either a mistake or a size
+     taken from something else it must match — see EXEMPT in the checker,
+     where each one says what it is measured against. */
   --fs-note: 12px; --lh-note: 18px;   /* times, labels */
   --fs-sub: 13px; --lh-sub: 20px;     /* secondary words, code */
-  --fs-ui: 14px; --lh-ui: 22px;       /* controls, lists */
+  --fs-ui: 14px; --lh-ui: 20px;       /* controls, lists — as body is set, below */
   --fs-body: 15px; --lh-body: 25px;   /* the thread's text */
+  --fs-h3: 15px; --lh-h3: 22px;       /* a section's heading */
   --fs-head: 18px; --lh-head: 26px;   /* headings in an answer */
   --fs-title: 20px; --lh-title: 28px; /* dialog titles */
+  /* Touch: the page's own text grows (see body, below), and a section's
+     heading with it. An input is held at 16px whatever else happens — under
+     16px iOS zooms the page in when the box takes focus, and does not zoom
+     back out. It is a working size, not a reading one. */
+  --fs-h3-touch: 17px; --lh-h3-touch: 24px;
+  --fs-input-touch: 16px;
   --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 16px; --sp-5: 24px; --sp-6: 32px;
   --r-xs: 4px; --r-xl: 16px;
   color-scheme: light;
