@@ -106,7 +106,7 @@ html, body { margin: 0; height: 100%; }
 body {
   background: var(--bg);
   color: var(--fg);
-  font: 400 14px/20px var(--font-ui);
+  font: 400 var(--fs-ui)/var(--lh-ui) var(--font-ui);
   -webkit-font-smoothing: antialiased;
   -webkit-text-size-adjust: 100%;
   -webkit-tap-highlight-color: transparent;
@@ -170,7 +170,7 @@ code, .mono { font-family: var(--font-mono); font-size: 0.9em; }
    Grey when the list could not be read just now: what was so, not what is. */
 .nav-badge, .tab-badge {
   font-size: var(--fs-note); line-height: var(--lh-note); font-weight: 600; font-variant-numeric: tabular-nums;
-  min-width: 18px; padding: 0 5px; border-radius: 999px; text-align: center;
+  min-width: 18px; padding: 0 6px; border-radius: 999px; text-align: center;
   color: var(--warn); background: color-mix(in srgb, var(--warn) 16%, transparent);
 }
 .nav-badge { margin-left: auto; }
@@ -227,7 +227,7 @@ code, .mono { font-family: var(--font-mono); font-size: 0.9em; }
 .section-ruled > h2 + * { border-top: 1px solid var(--line); padding-top: 8px; }
 .section { display: flex; flex-direction: column; gap: 8px; }
 .section > h2 { font-size: var(--fs-h3); line-height: var(--lh-h3); font-weight: 600; color: var(--fg); }
-@media (pointer: coarse) { .section > h2 { font-size: 17px; line-height: 24px; } }
+@media (pointer: coarse) { .section > h2 { font-size: var(--fs-h3-touch); line-height: var(--lh-h3-touch); } }
 .section + .section { margin-top: 8px; }
 .lead { color: var(--fg-2); max-width: 64ch; }
 .hint { color: var(--fg-2); font-size: var(--fs-sub); line-height: var(--lh-sub); }
@@ -473,7 +473,7 @@ a.setting:hover { text-decoration: none; background: var(--bg-hover); }
 /* Two-line items (a word on why one is off): room above and under, not pressed to the rules */
 .menu-item:has(.menu-hint) { min-height: 52px; padding-top: 8px; padding-bottom: 8px; }
 .menu-item-text { gap: 2px; }
-.menu-hint { line-height: 18px; }
+.menu-hint { line-height: var(--lh-note); }
 .sheet-list { display: flex; flex-direction: column; margin: -4px -8px 0; }
 .sheet-list .menu-item { min-height: 52px; font-size: var(--fs-body); line-height: var(--lh-body); padding: 0 12px; }
 .sheet-list .menu-item svg { width: 18px; height: 18px; }
@@ -525,7 +525,7 @@ html.theme-switching *, html.theme-switching *::before, html.theme-switching *::
 .audit-item pre { margin: 6px 0 0; font-family: var(--font-mono); font-size: var(--fs-note); line-height: var(--lh-note); color: var(--fg-2); white-space: pre-wrap; word-break: break-all; }
 
 .port-share { height: 30px; padding: 0 8px; font-size: var(--fs-sub); line-height: var(--lh-sub); width: auto; justify-self: start; }
-@media (pointer: coarse) { .port-share { height: 36px; font-size: 16px; } }
+@media (pointer: coarse) { .port-share { height: 36px; font-size: var(--fs-input-touch); } }
 
 /* Settings extras */
 .phone-only { display: none; }
@@ -598,7 +598,7 @@ details.adv > .form { margin-top: 16px; }
 .overlay.see-through { background: rgba(0, 0, 0, 0.12); }
 
 /* What to open on a host */
-.picker { max-width: 460px; gap: 18px; }
+.picker { max-width: 460px; gap: 16px; }
 .pick-head { display: flex; align-items: flex-start; gap: 12px; margin-bottom: -4px; }
 .pick-head-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .pick-head h2 { overflow-wrap: anywhere; }
@@ -645,7 +645,7 @@ details.adv > .form { margin-top: 16px; }
 .kl-chip.has-long::after { content: ''; position: absolute; top: 4px; right: 4px; width: 4px; height: 4px; border-radius: 50%; background: var(--fg-3); }
 .kl-act { display: flex; align-items: center; gap: 12px; margin-top: 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--r-lg); }
 .kl-act-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-.kl-act-name { font: 500 14px/20px var(--font-mono); }
+.kl-act-name { font: 500 var(--fs-ui)/var(--lh-ui) var(--font-mono); }
 .kl-sub { font-size: var(--fs-note); line-height: var(--lh-note); color: var(--fg-2); overflow-wrap: anywhere; }
 .kl-act-btns { flex: none; display: flex; align-items: center; gap: 2px; flex-wrap: wrap; }
 .kl-act-btns .btn-sm { height: 36px; padding: 0 10px; font-size: var(--fs-sub); line-height: var(--lh-sub); }
@@ -700,7 +700,7 @@ details.adv > .form { margin-top: 16px; }
   font: 600 12px/1 var(--font-mono); color: var(--fg-2);
 }
 .reply-what { display: flex; flex-direction: column; gap: 2px; min-width: 0; padding-top: 2px; }
-.reply-label { font-weight: 500; line-height: 20px; overflow-wrap: anywhere; }
+.reply-label { font-weight: 500; line-height: var(--lh-ui); overflow-wrap: anywhere; }
 .reply-desc { font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--fg-3); overflow-wrap: anywhere; }
 .reply-keys { display: flex; flex-wrap: wrap; gap: 4px; margin-top: -4px; }
 .reply-keys .btn { height: 28px; padding: 0 10px; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--fg-2); }
@@ -708,7 +708,7 @@ details.adv > .form { margin-top: 16px; }
 .reply-show { margin-left: auto; }
 .reply-dialog .convo-ask-block {
   margin: 0; max-height: min(34vh, 300px); overflow: auto; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--r);
-  background: var(--bg-subtle); color: var(--fg); font: 13px/1.5 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere;
+  background: var(--bg-subtle); color: var(--fg); font: var(--fs-sub)/var(--lh-sub) var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere;
 }
 .reply-dialog .convo-ask-desc { color: var(--fg); }
 .reply-dialog .convo-ask-note { color: var(--warn); }
@@ -732,7 +732,7 @@ details.adv > .form { margin-top: 16px; }
 /* A picture of the host, looked at: fitted to the window. */
 .dialog.picture-dialog { max-width: min(1100px, calc(100vw - 32px)); padding: 12px 0 0; gap: 0; overflow: hidden; }
 .picture-head { display: flex; align-items: center; gap: 8px; padding: 0 12px 8px 20px; }
-.picture-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 600 15px/22px var(--font-mono); }
+.picture-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 600 var(--fs-h3)/var(--lh-h3) var(--font-mono); }
 .picture-body { display: grid; place-items: center; min-height: 160px; background: var(--bg-sunken, var(--bg)); border-block: 1px solid var(--line); }
 .picture-img { display: block; max-width: 100%; max-height: calc(var(--vv-h, 100dvh) - 190px); object-fit: contain;
   background: repeating-conic-gradient(var(--bg-hover) 0 25%, transparent 0 50%) 0 0 / 16px 16px; }
@@ -754,7 +754,7 @@ details.adv > .form { margin-top: 16px; }
 .text-preview-size { flex: none; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--fg-3); font-variant-numeric: tabular-nums; }
 .text-preview-mode { flex: none; gap: 6px; }
 .text-preview { position: relative; min-height: 160px; max-height: calc(var(--vv-h, 100dvh) - 190px); overflow: auto; overscroll-behavior: contain; background: var(--term-bg); color: var(--term-fg); border-block: 1px solid var(--line); }
-.text-preview-code { display: grid; grid-template-columns: auto 1fr; min-width: max-content; font: 13px/20px var(--font-mono); }
+.text-preview-code { display: grid; grid-template-columns: auto 1fr; min-width: max-content; font: var(--fs-sub)/var(--lh-sub) var(--font-mono); }
 .text-preview-nums { position: sticky; left: 0; margin: 0; padding: 12px 10px 12px 16px; text-align: right; color: var(--term-fg-3); background: var(--term-bg); border-right: 1px solid var(--term-line); user-select: none; }
 .text-preview-text { margin: 0; padding: 12px 16px; white-space: pre; tab-size: 4; }
 .text-preview-text code { font: inherit; background: none; padding: 0; }
@@ -773,11 +773,11 @@ details.adv > .form { margin-top: 16px; }
 .files-crumbs { display: flex; align-items: center; padding: 6px 14px 0; overflow-x: auto; white-space: nowrap; scrollbar-width: none; }
 .files-crumbs::-webkit-scrollbar { display: none; }
 .crumb-wrap { display: inline-flex; align-items: center; }
-.crumb { border: 0; background: none; padding: 3px 5px; border-radius: var(--r-sm); color: var(--fg-2); cursor: pointer; font: 500 13px/20px var(--font-mono); }
+.crumb { border: 0; background: none; padding: 3px 4px; border-radius: var(--r-sm); color: var(--fg-2); cursor: pointer; font: 500 var(--fs-sub)/var(--lh-sub) var(--font-mono); }
 .crumb:hover:not(:disabled) { background: var(--bg-hover); color: var(--fg); }
 @media (pointer: coarse) { .crumb { min-height: 44px; padding: 12px 8px; } }
 .crumb[aria-current] { color: var(--fg); }
-.crumb-sep { color: var(--fg-4); font: 13px/20px var(--font-mono); }
+.crumb-sep { color: var(--fg-4); font: var(--fs-sub)/var(--lh-sub) var(--font-mono); }
 .crumb-edit { flex: none; width: 28px; height: 28px; margin-left: 2px; color: var(--fg-3); position: sticky; right: 0; background: var(--surface); }
 /* Narrowing a long folder, and its order (pages-1105 2.4). */
 .files-tools:has(+ .files-filter) { border-bottom: 0; }
@@ -869,7 +869,7 @@ details.adv > .form { margin-top: 16px; }
 .totp-secret .link-btn { font-size: var(--fs-sub); line-height: var(--lh-sub); text-align: left; overflow-wrap: anywhere; }
 .recovery-codes {
   margin: 0; padding: 12px 16px; list-style: none; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 24px;
-  background: var(--bg-subtle); border-radius: var(--r); font-size: 14px;
+  background: var(--bg-subtle); border-radius: var(--r); font-size: var(--fs-ui); line-height: var(--lh-ui);
 }
 /* A page's head, its words, its tools, its list: 12, 16, 16 apart (the page's
    gap is 24; sections 32) — one rhythm on every page, 11-05. */
@@ -964,7 +964,7 @@ details.adv > .form { margin-top: 16px; }
 .ask-hook-row h3 { margin: 0; font-size: var(--fs-h3); line-height: var(--lh-h3); font-weight: 600; }
 .ask-hook-row .hint { margin: 0; }
 .ask-hook-state { margin: 0; font-size: var(--fs-ui); line-height: var(--lh-ui); }
-.ask-hook-snippet { margin: 4px 0; max-width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--r); background: var(--bg-subtle); font: 12px/1.5 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.ask-hook-snippet { margin: 4px 0; max-width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--r); background: var(--bg-subtle); font: var(--fs-note)/var(--lh-note) var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
 
 /* A setting's choice with a button beside it (the tone and "play"); wrapped on a narrow screen. */
 .settings-inline {
