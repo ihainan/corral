@@ -1669,16 +1669,40 @@ function BgCmdDialog({ r, gone, onClose }: { r: ConvoRunning; gone: boolean; onC
     const id = setInterval(() => tick((n) => n + 1), 1000)
     return () => clearInterval(id)
   }, [])
+  // What it was asked to do is a whole sentence ("Observe SG2 stability for 5
+  // hours in background"): it reads as the first line of the body, not as the
+  // dialog's name. Named and closed in its head as the picture and the text
+  // file are — it is a thing looked at, not a form to fill in.
+  //
+  // The path is the host's, not ours: set apart from the words around it so
+  // the eye can tell where it starts and ends. Split on where each language's
+  // own sentence puts it, so neither has to be rewritten.
+  const out = r.out ? t('convo.bgOutAt', { path: '\u0001' }).split('\u0001') : null
   return (
-    <Dialog title={r.what || t('convo.bgCmd')} onClose={onClose} className="bg-cmd-dialog">
-      <p className="hint">{gone ? t('convo.bgEnded') : r.ts ? t('convo.bgFor', { for: since(r.ts) }) : t('convo.bgRunning')}</p>
-      {r.cmd && (
-        <pre className="bg-cmd-text">
-          <Code text={r.cmd} lang="bash" />
-        </pre>
-      )}
-      {r.out && <p className="bg-cmd-out hint">{t('convo.bgOutAt', { path: r.out })}</p>}
-      <div className="dialog-actions">
+    <Dialog title={t('convo.bgCmds1')} onClose={onClose} hideTitle className="bg-cmd-dialog">
+      <div className="bg-cmd-head">
+        <h2 className="bg-cmd-title">{t('convo.bgCmds1')}</h2>
+        <button type="button" className="icon-btn" onClick={onClose} aria-label={t('common.close')}>
+          <X size={18} />
+        </button>
+      </div>
+      <div className="bg-cmd-body">
+        {r.what && <p className="bg-cmd-what">{r.what}</p>}
+        <p className="bg-cmd-when">{gone ? t('convo.bgEnded') : r.ts ? t('convo.bgFor', { for: since(r.ts) }) : t('convo.bgRunning')}</p>
+        {r.cmd && (
+          <pre className="bg-cmd-text">
+            <Code text={r.cmd} lang="bash" />
+          </pre>
+        )}
+        {out && (
+          <p className="bg-cmd-out hint">
+            {out[0]}
+            <span className="bg-cmd-path">{r.out}</span>
+            {out[1]}
+          </p>
+        )}
+      </div>
+      <div className="dialog-actions bg-cmd-acts">
         {r.cmd && (
           <button type="button" className="btn btn-ghost" onClick={() => void copyText(r.cmd!)}>
             <Copy size={15} /> {t('convo.bgCopy')}

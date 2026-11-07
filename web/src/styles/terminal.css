@@ -1454,10 +1454,27 @@ p.convo-ask-desc { margin: 0 0 8px; font-size: var(--fs-ui); line-height: var(--
 .convo-sub-open { align-self: flex-start; margin: 4px 0 6px; font-size: var(--fs-sub); line-height: var(--lh-sub); }
 .convo-sub .is-back { transform: rotate(180deg); }
 button.convo-running-what { padding: 0; text-align: left; color: var(--term-fg-2); font: inherit; text-decoration: underline; text-decoration-color: var(--term-line); text-underline-offset: 3px; }
-/* A command's details: the whole of it, its output's file (11-05). */
+/* A command's details: the whole of it, its output's file (11-05). Shaped as
+   the picture and the text file are (app.css, .picture-dialog) — a head that
+   names it and closes it, a body set off by hairlines, its actions under
+   them. It is a thing looked at, not a form: the head's × is the way out, as
+   theirs is. Before 11-07 it had the dialog's plain shape, and what the
+   command was asked to do — a whole sentence — stood in the title at 20px,
+   wrapping over two lines; it reads as the body's first line instead. */
+.dialog.bg-cmd-dialog { padding: 12px 0 0; gap: 0; overflow: hidden; }
+.bg-cmd-head { flex: none; display: flex; align-items: center; gap: 8px; padding: 0 12px 10px 20px; }
+.bg-cmd-title { flex: 1; min-width: 0; margin: 0; font-size: var(--fs-h3); line-height: var(--lh-h3); font-weight: 600; }
+.bg-cmd-body { min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 10px; padding: 14px 20px; border-block: 1px solid var(--line); }
+.bg-cmd-what { margin: 0; font-size: var(--fs-h3); line-height: var(--lh-h3); }
+.bg-cmd-when { margin: 0; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--fg-3); }
+.bg-cmd-acts { flex: none; padding: 10px 12px 12px 20px; }
 .bg-cmd-text { margin: 0; padding: 10px 12px; border-radius: var(--r); background: var(--bg-subtle); font: var(--fs-sub)/var(--lh-sub) var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 40vh; overflow: auto; }
 .bg-cmd-text code { font: inherit; background: none; padding: 0; }
-.bg-cmd-out { overflow-wrap: anywhere; font-size: var(--fs-note); line-height: var(--lh-note); }
+.bg-cmd-out { margin: 0; overflow-wrap: anywhere; font-size: var(--fs-note); line-height: var(--lh-note); }
+.bg-cmd-path { font-family: var(--font-mono); color: var(--fg-2); }
+@media (max-width: 520px) {
+  .sheet-mode .dialog.bg-cmd-dialog { padding-bottom: env(safe-area-inset-bottom, 0px); }
+}
 button.convo-running-what:hover { color: var(--term-fg); text-decoration-color: var(--term-fg-3); }
 @media (pointer: coarse) {
   button.convo-running-what, .term-root .convo-running-more { padding-top: 13px; padding-bottom: 13px; margin-top: -13px; margin-bottom: -13px; }
