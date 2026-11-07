@@ -75,7 +75,7 @@ html.term-mode body { position: fixed; inset: 0; }
 
 .term-paused {
   flex: none; height: 28px; display: flex; align-items: center; justify-content: center;
-  background: var(--term-chrome); border-bottom: 1px solid var(--term-line); color: var(--term-fg-2); font-size: 12px;
+  background: var(--term-chrome); border-bottom: 1px solid var(--term-line); color: var(--term-fg-2); font-size: var(--fs-note); line-height: var(--lh-note);
 }
 
 /* Terminal */
@@ -97,7 +97,7 @@ html.term-mode body { position: fixed; inset: 0; }
   position: absolute; z-index: 6; top: 8px; left: 50%; transform: translateX(-50%); max-width: calc(100% - 24px);
   display: flex; align-items: center; gap: 4px; padding: 0 4px 0 12px; border-radius: 10px;
   background: var(--term-chrome); color: var(--term-fg); box-shadow: 0 0 0 1px var(--term-line), 0 6px 18px rgba(0, 0, 0, 0.18);
-  font-size: 13px; line-height: 18px;
+  font-size: var(--fs-sub); line-height: var(--lh-sub);
 }
 .term-sending-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .term-host-el .xterm { height: 100%; }
@@ -136,7 +136,7 @@ html.term-mode body { position: fixed; inset: 0; }
   padding: 8px max(12px, env(safe-area-inset-right, 0px)) calc(8px + env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px));
   background: var(--term-chrome); border-top: 1px solid var(--term-line);
 }
-.term-ended p { flex: 1 1 200px; font-size: 15px; font-weight: 500; color: var(--term-fg); }
+.term-ended p { flex: 1 1 200px; font-size: var(--fs-body); line-height: var(--lh-body); font-weight: 500; color: var(--term-fg); }
 .term-ended-actions { display: flex; gap: 8px; margin-left: auto; }
 .term-root .term-ended .btn-ghost { color: var(--term-fg); }
 .term-root .term-ended .btn-ghost:hover { background: var(--term-hover); }
@@ -161,7 +161,7 @@ html.term-mode body { position: fixed; inset: 0; }
 .attach-chip { flex: none; display: inline-flex; align-items: center; max-width: 220px; height: 34px; border-radius: 8px;
   background: color-mix(in srgb, var(--term-fg) 7%, transparent); border: 1px solid color-mix(in srgb, var(--term-fg) 12%, transparent); color: var(--term-fg); }
 .attach-chip.is-other { opacity: 0.6; border-style: dashed; }
-.attach-open { display: inline-flex; align-items: center; gap: 7px; min-width: 0; height: 100%; padding: 0 2px 0 3px; border: 0; background: none; color: inherit; cursor: pointer; border-radius: 7px; font-size: 13px; }
+.attach-open { display: inline-flex; align-items: center; gap: 7px; min-width: 0; height: 100%; padding: 0 2px 0 3px; border: 0; background: none; color: inherit; cursor: pointer; border-radius: 7px; font-size: var(--fs-sub); line-height: var(--lh-sub); }
 .attach-open:disabled { cursor: default; }
 .attach-open:focus-visible, .attach-x:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: 1px; }
 .attach-thumb { width: 26px; height: 26px; border-radius: 5px; object-fit: cover; flex: none; background: color-mix(in srgb, var(--term-fg) 10%, transparent); }
@@ -174,7 +174,7 @@ html.term-mode body { position: fixed; inset: 0; }
 .term-root .composer-insert { height: 32px; color: var(--term-fg-2); font-weight: 500; }
 .term-root .composer-insert:hover { background: var(--term-hover); color: var(--term-fg); }
 .term-root .composer-insert:disabled { opacity: 0.4; }
-.composer-keys { margin-right: 8px; color: var(--term-fg-3); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.composer-keys { margin-right: 8px; color: var(--term-fg-3); font-size: var(--fs-note); line-height: var(--lh-note); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 @media (max-width: 560px) { .composer-keys { display: none; } }
 .composer-send {
   width: 32px; height: 32px; border-radius: 50%; border: 0; display: grid; place-items: center; cursor: pointer;
@@ -205,7 +205,7 @@ html.term-mode body { position: fixed; inset: 0; }
    its words greyed, not all of it faded (ux1101 T09). Touched over 44px. */
 .term-root .composer-term .composer-typein {
   position: relative; height: 30px; padding: 0 10px; margin-left: 4px; border: 1px solid color-mix(in srgb, var(--term-fg-3) 55%, transparent);
-  background: transparent; color: var(--term-fg); font-size: 13px; font-weight: 500;
+  background: transparent; color: var(--term-fg); font-size: var(--fs-sub); line-height: var(--lh-sub); font-weight: 500;
 }
 .term-root .composer-term .composer-typein:hover:not(:disabled) { background: var(--term-hover); }
 .term-root .composer-term .composer-typein:disabled { opacity: 1; color: var(--term-fg-3); border-color: var(--term-line); }
@@ -234,7 +234,7 @@ html.term-mode body { position: fixed; inset: 0; }
 .complete-item[aria-selected="true"] { background: var(--term-accent-soft); }
 .complete-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .complete-hint { flex: none; color: var(--term-fg-3); font: 12px var(--font-ui); }
-.complete-note { padding: 6px 10px; color: var(--term-fg-3); font-size: 12px; }
+.complete-note { padding: 6px 10px; color: var(--term-fg-3); font-size: var(--fs-note); line-height: var(--lh-note); }
 @media (pointer: coarse) { .complete-item { min-height: 40px; padding-top: 11.5px; padding-bottom: 11.5px; } .composer-complete { max-height: min(210px, 40vh); } }
 
 /* Key bar: flat keys, grouped by spacing */
@@ -316,7 +316,7 @@ html.kb-open .keybar { padding-bottom: 6px; }
 .term-root.light .sc-item { box-shadow: 0 0 0 1px var(--term-line); }
 .sc-item:active { background: var(--term-key-active); }
 .sc-label { display: flex; align-items: center; min-height: 18px; font: 500 14px/1.2 var(--font-mono); color: var(--term-fg); }
-.sc-desc { font-size: 12px; line-height: 16px; color: var(--term-fg-2); }
+.sc-desc { font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-2); }
 @media (max-width: 479.98px) { .kb-key { min-width: 34px; padding: 0 6px; font-size: 13px; } .kb-key.wide { min-width: 44px; } .keybar { gap: 6px; } .kb-row { gap: 10px; } }
 @media (max-width: 380px) { .kb-key { min-width: 32px; padding: 0 4px; } }
 @media (pointer: coarse) and (min-width: 700px) { .kb-key { min-width: 44px; height: 44px; } }
@@ -378,7 +378,7 @@ html.kb-open .keybar { padding-bottom: 6px; }
 .term-tab-host { font-weight: 600; }
 .term-tab-which { color: var(--term-fg-3); }
 /* Recorded: red words, a plain dot before them — no ground, no halo (11-05). */
-.term-rec { flex: none; display: inline-flex; align-items: center; gap: 6px; margin: 0 4px 0 12px; font-size: 13px; font-weight: 500; color: var(--term-danger-text); white-space: nowrap; }
+.term-rec { flex: none; display: inline-flex; align-items: center; gap: 6px; margin: 0 4px 0 12px; font-size: var(--fs-sub); line-height: var(--lh-sub); font-weight: 500; color: var(--term-danger-text); white-space: nowrap; }
 .term-rec::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 .term-tab[aria-current="page"] .term-tab-title { color: var(--term-fg-2); }
 .term-tab-name { display: flex; min-width: 0; flex: 0 1 auto; white-space: nowrap; }
@@ -423,9 +423,9 @@ html.kb-open .keybar { padding-bottom: 6px; }
 /* The one Enter opens (ux1101 T32). */
 .new-tab-host.is-sel { background: var(--bg-active); }
 .new-tab-host:disabled { cursor: default; }
-.new-tab-name { font-weight: 600; font-size: 14px; white-space: nowrap; }
-.new-tab-addr { min-width: 0; flex: 1; color: var(--fg-3); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.new-tab-busy { flex: none; color: var(--fg-3); font-size: 12px; }
+.new-tab-name { font-weight: 600; font-size: var(--fs-ui); line-height: var(--lh-ui); white-space: nowrap; }
+.new-tab-addr { min-width: 0; flex: 1; color: var(--fg-3); font-size: var(--fs-sub); line-height: var(--lh-sub); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.new-tab-busy { flex: none; color: var(--fg-3); font-size: var(--fs-note); line-height: var(--lh-note); }
 
 /* Agents waiting for an answer (herdr): the icon and how many, side by side,
    as a tab shows them (ux1101 T25). */
@@ -452,7 +452,7 @@ html.term-dark .overlay, html.term-dark .menu, html.term-dark .toast {
 .ime-debug pre { margin: 0; font: 10px/1.35 var(--font-mono); white-space: pre-wrap; word-break: break-all; }
 .ime-debug .btn { float: right; height: 26px; }
 .term-following { gap: 12px; justify-content: center; padding: 0 12px; }
-.term-following .link-btn { color: var(--term-accent-text); font-size: 12px; white-space: nowrap; }
+.term-following .link-btn { color: var(--term-accent-text); font-size: var(--fs-note); line-height: var(--lh-note); white-space: nowrap; }
 .term-following span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .term-full { height: auto; min-height: 28px; padding: 4px 12px; }
 .term-full span { white-space: normal; }
@@ -482,12 +482,12 @@ html.term-dark .overlay, html.term-dark .menu, html.term-dark .toast {
 .player-newer { flex: none; gap: 6px; color: var(--term-fg-2); background: none; border: 0; }
 .player-newer:hover { background: var(--term-key); color: var(--term-fg); }
 .player-screen { cursor: pointer; transform-origin: top left; width: max-content; }
-.player-note { color: var(--term-fg-3); font-size: 12px; text-align: center; }
+.player-note { color: var(--term-fg-3); font-size: var(--fs-note); line-height: var(--lh-note); text-align: center; }
 .player-stage .inline-error { color: var(--term-fg-2); }
 .player-controls {
   display: flex; align-items: center; gap: 10px;
   padding: 8px max(12px, env(safe-area-inset-right, 0px)) calc(8px + env(safe-area-inset-bottom, 0px)) max(12px, env(safe-area-inset-left, 0px));
-  background: var(--term-chrome); border-top: 1px solid var(--term-line); color: var(--term-fg-2); font-size: 13px;
+  background: var(--term-chrome); border-top: 1px solid var(--term-line); color: var(--term-fg-2); font-size: var(--fs-sub); line-height: var(--lh-sub);
 }
 .player-time { flex: none; min-width: 92px; }
 /* (Neutral, not the scheme's accent: ux1101 PG-48.) */
@@ -527,7 +527,7 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-dock .composer-box:focus-within,
 .term-root.light .convo-dock .composer-box:focus-within { border-color: color-mix(in srgb, var(--term-accent-text) 70%, var(--term-line)); box-shadow: 0 0 0 2px color-mix(in srgb, var(--term-accent-text) 12%, transparent); }
 @media (max-width: 640px) { .convo-dock { padding-left: max(12px, env(safe-area-inset-left, 0px)); padding-right: max(12px, env(safe-area-inset-right, 0px)); } }
-.convo-runs { position: relative; display: flex; align-items: center; gap: 2px; min-width: 0; overflow: visible; min-height: 24px; margin-top: -4px; font-size: 13px; line-height: 18px; color: var(--term-fg-3); font-variant-numeric: tabular-nums; }
+.convo-runs { position: relative; display: flex; align-items: center; gap: 2px; min-width: 0; overflow: visible; min-height: 24px; margin-top: -4px; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg-3); font-variant-numeric: tabular-nums; }
 .convo-runs-item {
   flex: none; display: inline-flex; align-items: center; gap: 5px; padding: 2px 6px; border: 0; border-radius: 6px;
   background: none; color: inherit; font: inherit; white-space: nowrap;
@@ -570,14 +570,14 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-models-item:hover, .convo-models-item:focus-visible { background: var(--term-hover); outline: none; }
 .convo-models-item[aria-checked='true'] { color: var(--term-accent-text); cursor: default; }
 .convo-models-label { grid-column: 1; font-weight: 500; }
-.convo-models-desc { grid-column: 1; font-size: 12px; color: var(--term-fg-3); }
+.convo-models-desc { grid-column: 1; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-3); }
 .convo-models-item svg { grid-column: 2; grid-row: 1 / span 2; }
 .convo-models .convo-runs-note { margin: 4px 8px 2px; }
 /* (A Codex's efforts, chosen with its model: under it, a row of chips.) */
 .convo-models-efforts { display: flex; flex-wrap: wrap; gap: 6px; padding: 4px 8px 8px; }
 .convo-models-effort {
   padding: 4px 10px; border: 1px solid var(--term-line); border-radius: 999px; background: var(--term-bg);
-  color: var(--term-fg); font: inherit; font-size: 13px; cursor: pointer;
+  color: var(--term-fg); font: inherit; font-size: var(--fs-sub); line-height: var(--lh-sub); cursor: pointer;
 }
 .convo-models-effort:hover, .convo-models-effort:focus-visible { background: var(--term-hover); outline: none; }
 .convo-models-effort.is-current { border-color: var(--term-accent-text); color: var(--term-accent-text); }
@@ -586,7 +586,7 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-runs-pop {
   position: absolute; right: 0; bottom: calc(100% + 6px); z-index: 3; width: min(320px, 100%); padding: 12px 14px;
   border: 1px solid var(--term-line-strong, var(--term-line)); border-radius: 12px; background: var(--term-pop, var(--term-bg)); color: var(--term-fg);
-  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.22); font-size: 13px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.22); font-size: var(--fs-sub); line-height: var(--lh-sub);
   /* (Long, as with a session's usage by many models: it scrolls, never past the top of the view.) */
   max-height: min(70vh, calc(100dvh - 140px)); overflow-y: auto; overscroll-behavior: contain;
 }
@@ -597,21 +597,21 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-runs-bar i { display: block; height: 100%; background: var(--term-accent-text); }
 .convo-runs-bar.is-warn i { background: var(--term-warn-text); }
 .convo-runs-bar.is-danger i { background: var(--term-danger-text); }
-.convo-runs-note { margin: 4px 0 0; font-size: 12px; color: var(--term-fg-3); }
+.convo-runs-note { margin: 4px 0 0; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-3); }
 @media (max-width: 420px) { .convo-runs-branch { display: none; } }
 .convo-col {
   max-width: 780px; margin: 0 auto; display: flex; flex-direction: column; gap: 12px;
   padding: 16px max(16px, env(safe-area-inset-right, 0px)) 28px max(16px, env(safe-area-inset-left, 0px));
-  font-family: var(--font-ui); font-size: 15px; line-height: 1.65; overflow-wrap: anywhere;
+  font-family: var(--font-ui); font-size: var(--fs-body); line-height: var(--lh-body); overflow-wrap: anywhere;
 }
 .convo-state { display: flex; flex-direction: column; align-items: center; gap: 14px; padding: 48px 8px; color: var(--term-fg-2); text-align: center; }
 .convo-state p { margin: 0; max-width: 32em; }
 /* (A new conversation: what was sent waits under its note, as it would in the thread.) */
 .convo-state-pending { align-self: stretch; display: flex; flex-direction: column; gap: 14px; text-align: start; color: var(--term-fg); margin-top: 12px; }
-.convo-older, .convo-working, .convo-note, .convo-cut { margin: 0; font-size: 13px; color: var(--term-fg-3); }
+.convo-older, .convo-working, .convo-note, .convo-cut { margin: 0; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg-3); }
 .convo-note { white-space: pre-wrap; }
 .convo-older { text-align: center; }
-.term-root .convo-working-act { margin-left: 10px; font-size: 13px; }
+.term-root .convo-working-act { margin-left: 10px; font-size: var(--fs-sub); line-height: var(--lh-sub); }
 /* The thread's rhythm: its parts 12 apart; what the agent did tucked under
    what it said of it (4); the answer 16 off what led to it; a new turn of the
    person's 32 off the last. Distance does the grouping, not more frames. */
@@ -626,7 +626,7 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-user-text { background: var(--term-user, color-mix(in srgb, var(--term-fg) 8%, var(--term-bg))); border-radius: 16px; padding: 9px 14px; white-space: pre-wrap; }
 .convo-image { color: var(--term-fg-3); }
 .convo-user-fold { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 8; line-clamp: 8; overflow: hidden; }
-.term-root .convo-user-more { display: block; margin-top: 4px; font-size: 13px; color: var(--term-fg-2); }
+.term-root .convo-user-more { display: block; margin-top: 4px; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg-2); }
 /* The pictures of a message, each to be looked at. */
 .convo-pics { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; white-space: normal; align-items: center; }
 .convo-pic { display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px; border-radius: 999px; border: 1px solid color-mix(in srgb, var(--term-fg) 18%, transparent);
@@ -638,8 +638,8 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 /* A picture named in the words, where it stands (11-05): a chip in the line. */
 .convo-pic.is-inline { display: inline-flex; vertical-align: baseline; padding: 0 8px; margin: 0 2px; line-height: 22px; font-size: 13px; position: relative; }
 @media (pointer: coarse) { .convo-pic.is-inline { padding: 0 9px; } .convo-pic.is-inline::after { content: ''; position: absolute; inset: -11px -2px; } }
-.convo-meta { display: flex; gap: 12px; font-size: 12px; color: var(--term-fg-3); font-variant-numeric: tabular-nums; }
-.convo-meta .link-btn { font-size: 12px; color: var(--term-fg-3); }
+.convo-meta { display: flex; gap: 12px; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-3); font-variant-numeric: tabular-nums; }
+.convo-meta .link-btn { font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-3); }
 .convo-meta-acts { display: inline-flex; gap: 12px; }
 .convo-meta-more { display: none; align-items: center; justify-content: center; width: 28px; height: 20px; margin: 0 -6px; padding: 0; border: 0; border-radius: 6px; background: none; color: var(--term-fg-3); cursor: pointer; }
 .convo-meta-more:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: 1px; }
@@ -721,12 +721,12 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-work { display: flex; flex-direction: column; min-width: 0; }
 .convo-work-head, .convo-step-head {
   display: flex; align-items: baseline; gap: 6px; max-width: 100%; border: 0; background: none; padding: 2px 0;
-  color: var(--term-fg-3); text-align: left; cursor: pointer; font: inherit; font-size: 14px; line-height: 1.55;
+  color: var(--term-fg-3); text-align: left; cursor: pointer; font: inherit; font-size: var(--fs-ui); line-height: var(--lh-ui);
 }
-.convo-work-head { font-size: 13px; line-height: 20px; }
+.convo-work-head { font-size: var(--fs-sub); line-height: var(--lh-sub); }
 .convo-work-head { align-self: flex-start; }
-.convo-work-said { margin: 0 0 2px 21px; color: var(--term-fg-3); font-size: 13px; line-height: 18px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.convo-work-sent { list-style: none; margin: 0 0 4px 21px; padding: 0; display: grid; gap: 2px; color: var(--term-fg-2); font-size: 13px; line-height: 20px; }
+.convo-work-said { margin: 0 0 2px 21px; color: var(--term-fg-3); font-size: var(--fs-sub); line-height: var(--lh-sub); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.convo-work-sent { list-style: none; margin: 0 0 4px 21px; padding: 0; display: grid; gap: 2px; color: var(--term-fg-2); font-size: var(--fs-sub); line-height: var(--lh-sub); }
 .convo-work-sent li { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .convo-work-sent .link-btn { color: inherit; font: inherit; }
 .convo-work-sent .link-btn:hover { color: var(--term-fg); }
@@ -737,7 +737,7 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-chev { flex: none; align-self: center; color: inherit; transition: transform 0.15s var(--ease); }
 [aria-expanded='true'] > .convo-chev { transform: rotate(90deg); }
 .convo-work-text { min-width: 0; }
-.convo-failed { flex: none; margin-left: 8px; font-size: 13px; font-weight: 500; color: var(--term-danger-text); white-space: nowrap; }
+.convo-failed { flex: none; margin-left: 8px; font-size: var(--fs-sub); line-height: var(--lh-sub); font-weight: 500; color: var(--term-danger-text); white-space: nowrap; }
 .convo-work-body { display: flex; flex-direction: column; gap: 1px; padding: 4px 0 2px 21px; }
 .convo-step { display: flex; flex-direction: column; min-width: 0; }
 .convo-step-head { width: 100%; color: var(--term-fg-2); }
@@ -746,21 +746,21 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-step-obj.is-code { font-family: var(--font-mono); font-size: 13px; }
 .convo-work-text.is-live { display: flex; align-items: baseline; gap: 8px; min-width: 0; color: var(--term-fg-2); }
 .convo-step-body, .convo-thinking { padding: 4px 0 10px; }
-.convo-thinking { white-space: pre-wrap; font-size: 13px; color: var(--term-fg-2); }
+.convo-thinking { white-space: pre-wrap; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg-2); }
 /* What the agent wrote between its steps: as its answer is. */
 .convo-mid { margin: 0; }
 /* (What it says on the way, a step quieter than the answer it ends with: C04/A04) */
-.convo-mid.is-brief { font-size: 14px; line-height: 22px; color: var(--term-fg-2); }
+.convo-mid.is-brief { font-size: var(--fs-ui); line-height: var(--lh-ui); color: var(--term-fg-2); }
 /* Thinking: told apart from calls (lighter, slanted), in a run's line and as a step. */
-.convo-work-text.is-thought, .convo-step.is-thought .convo-step-head { color: var(--term-fg-3); font-size: 13px; }
+.convo-work-text.is-thought, .convo-step.is-thought .convo-step-head { color: var(--term-fg-3); font-size: var(--fs-sub); line-height: var(--lh-sub); }
 .convo-step.is-thought .convo-step-verb { color: var(--term-fg-3); font-weight: 400; }
-.convo-thinking { color: var(--term-fg-3); font-size: 13px; line-height: 20px; }
+.convo-thinking { color: var(--term-fg-3); font-size: var(--fs-sub); line-height: var(--lh-sub); }
 .convo-work-body > .convo-note { margin: 4px 0; }
 /* What a rewind took back: a quiet line; what it was, faded, behind it. */
 .convo-gone { display: flex; flex-direction: column; min-width: 0; }
-.convo-gone-head { font-size: 13px; }
+.convo-gone-head { font-size: var(--fs-sub); line-height: var(--lh-sub); }
 .convo-gone-body { display: flex; flex-direction: column; gap: 14px; margin: 6px 0 2px 6px; padding: 2px 0 2px 14px; opacity: 0.62; }
-.convo-lines { flex: none; display: inline-flex; gap: 5px; font-family: var(--font-mono); font-size: 13px; }
+.convo-lines { flex: none; display: inline-flex; gap: 5px; font-family: var(--font-mono); font-size: var(--fs-sub); line-height: var(--lh-sub); }
 .convo-lines-add { color: var(--term-ok-text); }
 .convo-lines-del { color: var(--term-danger-text); }
 /* A band of light crosses the words of what runs, left to right, then a
@@ -774,7 +774,7 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 @keyframes convo-shimmer { 0% { background-position: 100% 0; } 75%, 100% { background-position: 0% 0; } }
 /* (Less motion asked for: no band moving, the words dim and come back in place.) */
 @keyframes convo-pulse { from { opacity: 1; } to { opacity: 0.45; } }
-.convo-live-time { flex: none; color: var(--term-fg-3); font-size: 13px; font-variant-numeric: tabular-nums; }
+.convo-live-time { flex: none; color: var(--term-fg-3); font-size: var(--fs-sub); line-height: var(--lh-sub); font-variant-numeric: tabular-nums; }
 .convo-spin {
   display: inline-block; width: 11px; height: 11px; margin-right: 6px; vertical-align: -1px; border-radius: 50%;
   border: 1.5px solid var(--term-line); border-top-color: var(--term-accent-text); animation: convo-spin 0.9s linear infinite;
@@ -788,18 +788,18 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 
 /* The answer: what changed, copy and when */
 .convo-answer { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
-.convo-changes { display: flex; flex-direction: column; border: 1px solid var(--term-line); border-radius: 10px; font-size: 14px; overflow: hidden; }
+.convo-changes { display: flex; flex-direction: column; border: 1px solid var(--term-line); border-radius: 10px; font-size: var(--fs-ui); line-height: var(--lh-ui); overflow: hidden; }
 .convo-changes-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 40px; padding: 4px 6px 4px 12px; }
 .convo-changes .convo-lines { margin-left: 4px; }
 .convo-changes-file {
   display: flex; align-items: center; gap: 10px; width: 100%; min-height: 34px; padding: 5px 12px; border: 0; border-top: 1px solid var(--term-line);
-  background: none; color: var(--term-fg); font: inherit; font-size: 13px; text-align: left; cursor: pointer;
+  background: none; color: var(--term-fg); font: inherit; font-size: var(--fs-sub); line-height: var(--lh-sub); text-align: left; cursor: pointer;
 }
 .convo-changes-file:hover { background: var(--term-hover); }
 @media (pointer: coarse) { .convo-changes-file { min-height: 44px; } }
 .convo-changes-file:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: -2px; }
 .convo-changes-file svg { flex: none; color: var(--term-fg-3); }
-.convo-changes-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: 13px; }
+.convo-changes-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: var(--fs-sub); line-height: var(--lh-sub); }
 .convo-changes-more { color: var(--term-fg-3); }
 /* An edit's hunks: the lines' numbers, what was removed and added */
 .convo-hunks { border: 1px solid var(--term-line); border-radius: 8px; background: var(--term-chrome); font: 13px/20px var(--font-mono); max-height: 360px; overflow: auto; tab-size: 4; }
@@ -815,12 +815,12 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 /* The changes of a turn, beside the thread (over it where narrow) */
 .convo-panel { flex: none; width: min(46%, 620px); min-width: 0; display: flex; flex-direction: column; border-left: 1px solid var(--term-line); background: var(--term-bg); font-family: var(--font-ui); }
 .convo-panel:focus { outline: none; } /* (focused on opening, for the keys: the panel itself is no control) */
-.convo-panel-head { flex: none; display: flex; align-items: center; gap: 8px; min-height: 40px; padding: 4px 8px 4px 14px; border-bottom: 1px solid var(--term-line); font-size: 13px; }
+.convo-panel-head { flex: none; display: flex; align-items: center; gap: 8px; min-height: 40px; padding: 4px 8px 4px 14px; border-bottom: 1px solid var(--term-line); font-size: var(--fs-sub); line-height: var(--lh-sub); }
 .convo-panel-title { font-weight: 600; }
 .convo-panel-files { flex: none; max-height: 30%; overflow-y: auto; padding: 4px; border-bottom: 1px solid var(--term-line); }
 .convo-panel-files .convo-changes-file { border-top: 0; border-radius: 6px; min-height: 30px; }
 .convo-panel-body { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 12px 14px 24px; display: flex; flex-direction: column; gap: 18px; }
-.convo-panel-file-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px; font-size: 13px; }
+.convo-panel-file-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px; font-size: var(--fs-sub); line-height: var(--lh-sub); }
 .convo-changes-path.is-full { overflow-wrap: anywhere; white-space: normal; min-width: 0; }
 .convo-panel-edit + .convo-panel-edit { margin-top: 8px; }
 .convo-panel-edit > .convo-hunk-gap { border-radius: 6px 6px 0 0; }
@@ -831,12 +831,12 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 @container (max-width: 1300px) {
   .convo-panel { position: absolute; inset: 0 0 0 auto; z-index: 6; width: min(100%, 620px); box-shadow: -8px 0 28px rgba(0, 0, 0, 0.25); }
 }
-.term-root .convo-changes-see { flex: none; height: 30px; padding: 0 10px; font-size: 13px; color: var(--term-fg); }
+.term-root .convo-changes-see { flex: none; height: 30px; padding: 0 10px; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg); }
 .term-root .convo-changes-see:hover { background: var(--term-hover); }
 
 /* The task list, over the composer */
 .convo-tasks {
-  flex: none; padding: 6px 12px; font-size: 13px;
+  flex: none; padding: 6px 12px; font-size: var(--fs-sub); line-height: var(--lh-sub);
   border: 1px solid var(--term-line); border-radius: 12px; background: var(--term-chrome);
 }
 .convo-tasks-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; width: 100%; border: 0; background: none; padding: 2px 0; color: var(--term-fg-2); font: inherit; text-align: left; cursor: pointer; }
@@ -856,25 +856,25 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 }
 .convo-pre-wrap .convo-pre { padding-right: 52px; }
 .convo-result.is-full { max-height: none; }
-.convo-omitted { color: var(--term-fg-3); font-size: 12px; }
-.convo-result-head { margin: 8px 0 4px; font-size: 12px; color: var(--term-fg-3); }
+.convo-omitted { color: var(--term-fg-3); font-size: var(--fs-note); line-height: var(--lh-note); }
+.convo-result-head { margin: 8px 0 4px; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-3); }
 .convo-diff > span { display: block; }
 .convo-del { background: var(--term-del-bg); }
 .convo-add { background: var(--term-add-bg); }
 .convo-more { color: var(--term-fg-3); }
-.convo-step-body .link-btn { margin-top: 4px; font-size: 13px; }
+.convo-step-body .link-btn { margin-top: 4px; font-size: var(--fs-sub); line-height: var(--lh-sub); }
 /* A file a step acted on: its whole path, then what can be done with it. */
-.convo-path { display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 14px; row-gap: 2px; margin: 0 0 8px; font-size: 13px; }
-.convo-path-text { font-family: var(--font-mono); font-size: 13px; color: var(--term-fg-2); overflow-wrap: anywhere; user-select: text; min-width: 0; }
+.convo-path { display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 14px; row-gap: 2px; margin: 0 0 8px; font-size: var(--fs-sub); line-height: var(--lh-sub); }
+.convo-path-text { font-family: var(--font-mono); font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg-2); overflow-wrap: anywhere; user-select: text; min-width: 0; }
 .convo-path-acts { display: inline-flex; flex-wrap: wrap; column-gap: 14px; }
-.convo-path .link-btn, .convo-step-body .convo-path .link-btn { margin-top: 0; font-size: 13px; }
+.convo-path .link-btn, .convo-step-body .convo-path .link-btn { margin-top: 0; font-size: var(--fs-sub); line-height: var(--lh-sub); }
 .convo-path.is-acts { margin: -2px 0 8px; }
-.convo-summary summary { display: flex; align-items: center; gap: 6px; cursor: pointer; list-style: none; font-size: 13px; color: var(--term-fg-2); }
+.convo-summary summary { display: flex; align-items: center; gap: 6px; cursor: pointer; list-style: none; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg-2); }
 .convo-summary summary::-webkit-details-marker { display: none; }
 .convo-summary[open] > summary > .convo-chev { transform: rotate(90deg); }
 .convo-summary summary:hover { color: var(--term-fg); }
 @media (pointer: coarse) { .convo-summary summary { min-height: 44px; margin: -11px 0; } }
-.convo-summary .convo-md { margin-top: 8px; color: var(--term-fg-2); font-size: 14px; }
+.convo-summary .convo-md { margin-top: 8px; color: var(--term-fg-2); font-size: var(--fs-ui); line-height: var(--lh-ui); }
 
 .convo-latest {
   position: absolute; left: 50%; bottom: 12px; transform: translateX(-50%); z-index: 1;
@@ -891,13 +891,13 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-bar {
   flex: none; display: flex; align-items: center; gap: 12px; min-width: 0;
   padding: 7px max(16px, env(safe-area-inset-right, 0px)) 7px max(16px, env(safe-area-inset-left, 0px));
-  border-bottom: 1px solid var(--term-line); background: var(--term-bg); font-size: 13px; line-height: 18px;
+  border-bottom: 1px solid var(--term-line); background: var(--term-bg); font-size: var(--fs-sub); line-height: var(--lh-sub);
 }
-.convo-bar-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--term-fg); font-weight: 600; font-size: 14px; }
+.convo-bar-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--term-fg); font-weight: 600; font-size: var(--fs-ui); line-height: var(--lh-ui); }
 .convo-bar-status {
   flex: none; display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px;
   --st: var(--term-fg-3); color: var(--term-fg-2); background: color-mix(in srgb, var(--st) 11%, transparent);
-  font-size: 12px; line-height: 18px; font-weight: 500; font-variant-numeric: tabular-nums; white-space: nowrap;
+  font-size: var(--fs-note); line-height: var(--lh-note); font-weight: 500; font-variant-numeric: tabular-nums; white-space: nowrap;
 }
 /* (Its dot, in its colour; at work the spinner is in its place.) */
 .convo-bar-status::before { content: ''; flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--st); }
@@ -911,7 +911,7 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 @media (forced-colors: active) { .convo-bar-status { border: 1px solid CanvasText; } .convo-bar-status::before { background: CanvasText; } }
 .convo-waiting {
   flex: none; display: flex; align-items: center; gap: 12px; justify-content: space-between; padding: 8px 8px 8px 14px;
-  border: 1px solid var(--term-warn-text); border-radius: 10px; background: var(--term-bg); font-size: 14px; font-weight: 500;
+  border: 1px solid var(--term-warn-text); border-radius: 10px; background: var(--term-bg); font-size: var(--fs-ui); line-height: var(--lh-ui); font-weight: 500;
 }
 .convo-bar-pick {
   flex: 1; min-width: 0; display: flex; align-items: center; gap: 4px; border: 0; background: none; padding: 0;
@@ -923,7 +923,7 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-bar-chev { flex: none; color: var(--term-fg-3); }
 /* Stop: a button that looks it, quiet until hovered */
 /* (A pill as the status beside it, of the same height: its words the action's, on a grey of its own.) */
-.term-root .convo .convo-stop.btn-ghost { flex: none; height: 24px; padding: 0 12px; border: 0; border-radius: 999px; font-size: 12px; font-weight: 500; line-height: 18px; color: var(--term-fg); background: color-mix(in srgb, var(--term-fg) 8%, transparent); }
+.term-root .convo .convo-stop.btn-ghost { flex: none; height: 24px; padding: 0 12px; border: 0; border-radius: 999px; font-size: var(--fs-note); font-weight: 500; line-height: var(--lh-note); color: var(--term-fg); background: color-mix(in srgb, var(--term-fg) 8%, transparent); }
 .term-root .convo .convo-stop.btn-ghost:hover { background: color-mix(in srgb, var(--term-fg) 14%, transparent); }
 @media (pointer: coarse) { .term-root .convo .convo-stop.btn-ghost { height: 32px; padding: 0 14px; } }
 @media (forced-colors: active) { .term-root .convo .convo-stop.btn-ghost { border: 1px solid ButtonText; } }
@@ -936,9 +936,9 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 
 /* A message typed into the pane that has not turned up in the log: what
    its screen said when it did not */
-.convo-missing { margin: 6px 0 0; font-size: 13px; line-height: 18px; color: var(--term-fg-2); }
+.convo-missing { margin: 6px 0 0; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg-2); }
 .convo-missing p { margin: 0; }
-.convo-missing .link-btn { margin-top: 2px; font-size: 13px; }
+.convo-missing .link-btn { margin-top: 2px; font-size: var(--fs-sub); line-height: var(--lh-sub); }
 
 /* What went wrong: why the agent fell silent, or stopped mid-sentence */
 .convo-trouble {
@@ -946,12 +946,12 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
   background: color-mix(in srgb, var(--term-warn-text) 9%, var(--term-bg)); color: var(--term-fg-2); font-size: 13px; line-height: 19px;
 }
 .convo-trouble svg { flex: none; margin-top: 2px; color: var(--term-warn-text); }
-.convo-event.is-scheduled { display: flex; gap: 8px; align-items: flex-start; margin: 0; font-size: 13px; color: var(--term-fg-2); }
+.convo-event.is-scheduled { display: flex; gap: 8px; align-items: flex-start; margin: 0; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg-2); }
 .convo-event.is-scheduled svg { flex: none; margin-top: 3px; color: var(--term-fg-3); }
 .convo-event.is-scheduled .convo-trouble-head { color: var(--term-fg-2); }
 /* Background work ended: one quiet line (itself the button that opens all of
    its name), its name in the code face, cut where the line ends */
-.convo-event.is-task { margin: 2px 0; font-size: 13px; line-height: 18px; color: var(--term-fg-3); }
+.convo-event.is-task { margin: 2px 0; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg-3); }
 .convo-task-line {
   display: flex; align-items: baseline; gap: 6px; width: 100%; min-width: 0; margin: 0; padding: 0; border: 0;
   background: none; color: inherit; font: inherit; text-align: left;
@@ -961,9 +961,9 @@ button.convo-task-line:hover .convo-task-name { color: var(--term-fg); }
 /* (Both cut where the line ends, the state first: the name keeps a few letters' room) */
 .convo-task-head { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .convo-event.is-task.is-warn .convo-task-head { color: var(--term-warn-text); }
-.convo-task-name { flex: 1 0 0; min-width: 6em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: 12px; color: var(--term-fg-2); }
+.convo-task-name { flex: 1 0 0; min-width: 6em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-2); }
 .convo-task-full { margin: 4px 0; max-height: 240px; overflow: auto; }
-.convo-event.is-compact { display: flex; align-items: center; gap: 10px; margin: 4px 0; font-size: 12px; color: var(--term-fg-3); text-align: center; }
+.convo-event.is-compact { display: flex; align-items: center; gap: 10px; margin: 4px 0; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-3); text-align: center; }
 .convo-event.is-compact::before, .convo-event.is-compact::after { content: ''; flex: 1 1 24px; border-top: 1px solid var(--term-line); }
 .convo-event-said { flex: 0 1 auto; min-width: 0; }
 .convo-event-part { white-space: nowrap; }
@@ -986,9 +986,9 @@ button.convo-task-line:hover .convo-task-name { color: var(--term-fg); }
 /* What it said before asking, as its screen shows it (its log has it only once answered) */
 .convo-ask-lead {
   max-height: 168px; overflow-y: auto; white-space: pre-wrap; overflow-wrap: anywhere;
-  font-size: 13px; line-height: 20px; color: var(--term-fg-2);
+  font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg-2);
 }
-.convo-ask-of { margin: -4px 0 0; font-size: 13px; color: var(--term-fg-3); }
+.convo-ask-of { margin: -4px 0 0; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg-3); }
 /* (Out to the card's edge: the rules are the card's own, and the words line up with the question above them.) */
 .convo-ask-opts { display: flex; flex-direction: column; gap: 0; margin-inline: -16px; border-top: 1px solid var(--term-line); }
 /* Each choice a card: its key, its words and what it is (as the terminal's answer dialog) */
@@ -1007,7 +1007,7 @@ button.convo-task-line:hover .convo-task-name { color: var(--term-fg); }
   font: 600 12px/1 var(--font-mono); color: var(--term-fg-2);
 }
 .convo-ask-what { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
-.convo-ask-desc { font-size: 13px; line-height: 18px; color: var(--term-fg-3); overflow-wrap: anywhere; }
+.convo-ask-desc { font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg-3); overflow-wrap: anywhere; }
 /* (A choice that lasts beyond this once: said in the warning's colour, under its words) */
 .convo-ask-desc.is-lasting { color: var(--term-warn-text); }
 /* A lasting choice tapped once: waiting for its second, outlined. */
@@ -1024,16 +1024,16 @@ button.convo-task-line:hover .convo-task-name { color: var(--term-fg); }
    where it would take the room the words are written in.) */
 .convo-ask-own { flex-wrap: wrap; }
 .convo-ask-own > .convo-ask-hint { flex: 1 0 100%; }
-.convo-ask-more { display: flex; flex-wrap: wrap; gap: 8px; font-size: 13px; }
+.convo-ask-more { display: flex; flex-wrap: wrap; gap: 8px; font-size: var(--fs-sub); line-height: var(--lh-sub); }
 /* (What the card's foot does: buttons that look it, each saying what it presses) */
-.term-root .convo-ask-act { height: 30px; padding: 0 10px; font-size: 13px; color: var(--term-fg); border: 1px solid var(--term-line); background: var(--term-bg); }
+.term-root .convo-ask-act { height: 30px; padding: 0 10px; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg); border: 1px solid var(--term-line); background: var(--term-bg); }
 .term-root .convo-ask-act:hover:not(:disabled) { background: var(--term-hover); border-color: var(--term-fg-3); }
 .term-root .convo-ask-act:disabled { opacity: 0.5; }
 .term-root .convo-ask-act.is-confirm { border-color: var(--term-warn-text); color: var(--term-warn-text); }
 .convo-ask-act svg { flex: none; }
 .convo-ask-act.reading svg { animation: convo-spin 0.9s linear infinite; }
 @media (prefers-reduced-motion: reduce) { .convo-ask-act.reading svg { animation: none; } }
-@media (pointer: coarse) { .term-root .convo-ask-act { height: 44px; padding: 0 14px; font-size: 14px; } }
+@media (pointer: coarse) { .term-root .convo-ask-act { height: 44px; padding: 0 14px; font-size: var(--fs-ui); line-height: var(--lh-ui); } }
 /* A number is a key to press: not on a touch screen (a tick, what is chosen, stays) */
 @media (pointer: coarse) {
   .convo-ask-key.is-num { display: none; }
@@ -1046,7 +1046,7 @@ button.convo-task-line:hover .convo-task-name { color: var(--term-fg); }
 /* (A dashed rule of the screen: one line, cut where the box ends) */
 .reply-rule { display: block; white-space: pre; overflow: hidden; color: var(--term-fg-3); opacity: 0.6; }
 .convo-ask .reply-screen { max-height: 260px; }
-.convo-ask-sent { margin: 0; font-size: 13px; color: var(--term-fg-3); }
+.convo-ask-sent { margin: 0; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg-3); }
 /* The card over the composer, its own scroll where the screen is short */
 .convo-dock-ask { display: flex; flex-direction: column; max-height: min(58vh, 520px); overflow-y: auto; overscroll-behavior: contain; border-radius: 12px; }
 .convo-dock-ask.has-more:not(:focus-within) { -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 36px), transparent); mask-image: linear-gradient(to bottom, #000 calc(100% - 36px), transparent); }
@@ -1060,27 +1060,27 @@ button.convo-task-line:hover .convo-task-name { color: var(--term-fg); }
 .convo-ask-block > span { display: block; }
 /* (What a permission is for, above its command; what Claude Code notes under it, as words.)
    Only the paragraph: a choice's own description is a span, and keeps its smaller, quieter one. */
-p.convo-ask-desc { margin: 0 0 8px; font-size: 14px; line-height: 20px; color: var(--term-fg); }
-.convo-ask-note { margin: 8px 0 0; font-size: 13px; line-height: 19px; color: var(--term-warn-text); }
+p.convo-ask-desc { margin: 0 0 8px; font-size: var(--fs-ui); line-height: var(--lh-ui); color: var(--term-fg); }
+.convo-ask-note { margin: 8px 0 0; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-warn-text); }
 .convo-ask-note.is-countdown { font-variant-numeric: tabular-nums; }
 .convo-ask-block > .convo-ask-rule { color: var(--term-fg-3); opacity: 0.6; }
-.convo-ask-unread { margin: 0; font-size: 13px; color: var(--term-warn-text); }
+.convo-ask-unread { margin: 0; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-warn-text); }
 .convo-ask-label { min-width: 0; line-height: 22px; font-weight: 500; overflow-wrap: anywhere; }
-.convo-ask-keys { margin: 0; color: var(--term-fg-3); font-size: 13px; line-height: 18px; }
+.convo-ask-keys { margin: 0; color: var(--term-fg-3); font-size: var(--fs-sub); line-height: var(--lh-sub); }
 /* What the agent set going and left to itself, over the composer */
 /* (The mark in a column of its own, so that the head and the rows under it start at one edge) */
-.convo-running { display: flex; align-items: flex-start; gap: 8px; border: 1px solid var(--term-line); border-radius: 10px; background: var(--term-chrome); padding: 6px 12px; font-size: 13px; }
+.convo-running { display: flex; align-items: flex-start; gap: 8px; border: 1px solid var(--term-line); border-radius: 10px; background: var(--term-chrome); padding: 6px 12px; font-size: var(--fs-sub); line-height: var(--lh-sub); }
 .convo-running-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .convo-running-head { display: flex; align-items: center; gap: 8px; min-width: 0; color: var(--term-fg-2); }
 .convo-running-spin { flex: none; margin-top: 3px; color: var(--term-accent-text); animation: convo-spin 1.4s linear infinite; }
 @keyframes convo-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .convo-running-spin { animation: none; } }
 .convo-running-sum { flex: 1; min-width: 0; }
-.term-root .convo-running-more { flex: none; font-size: 13px; color: var(--term-fg-2); }
+.term-root .convo-running-more { flex: none; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg-2); }
 .convo-running-list { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .convo-running-list.is-open { gap: 6px; max-height: min(40vh, 320px); overflow-y: auto; }
-.convo-running-label { margin-top: 4px; color: var(--term-fg-3); font-size: 12px; }
-.convo-running-row { display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 10px; min-width: 0; color: var(--term-fg-3); font-size: 13px; }
+.convo-running-label { margin-top: 4px; color: var(--term-fg-3); font-size: var(--fs-note); line-height: var(--lh-note); }
+.convo-running-row { display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 10px; min-width: 0; color: var(--term-fg-3); font-size: var(--fs-sub); line-height: var(--lh-sub); }
 .convo-running-tokens { flex: none; margin-left: auto; font-variant-numeric: tabular-nums; }
 .convo-running-tokens + .convo-running-since { margin-left: 0; }
 .convo-running-now { flex: 1 0 100%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1089,12 +1089,12 @@ p.convo-ask-desc { margin: 0 0 8px; font-size: 14px; line-height: 20px; color: v
 .convo-running-since { flex: none; margin-left: auto; font-variant-numeric: tabular-nums; }
 
 /* What waits to be taken in, over the composer */
-.convo-queue { display: flex; flex-direction: column; border: 1px solid var(--term-line); border-radius: 10px; background: var(--term-chrome); font-size: 13px; }
+.convo-queue { display: flex; flex-direction: column; border: 1px solid var(--term-line); border-radius: 10px; background: var(--term-chrome); font-size: var(--fs-sub); line-height: var(--lh-sub); }
 .convo-queue-head { display: flex; align-items: center; gap: 10px; min-height: 36px; padding: 2px 6px 2px 12px; color: var(--term-fg-2); }
 .convo-queue-sum { flex: 1; min-width: 0; }
-.term-root .convo-queue-now { flex: none; height: 28px; padding: 0 10px; font-size: 13px; color: var(--term-fg); border: 1px solid var(--term-line); background: var(--term-bg); }
+.term-root .convo-queue-now { flex: none; height: 28px; padding: 0 10px; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg); border: 1px solid var(--term-line); background: var(--term-bg); }
 .term-root .convo-queue-now:hover { background: var(--term-hover); }
-.convo-queue-said { flex: none; font-size: 13px; color: var(--term-fg-3); }
+.convo-queue-said { flex: none; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg-3); }
 /* (Three lines at most, cut at a whole line with "…": the padding is outside
    the clamped text, else the fourth line shows half in it — 11-05, 11-06.) */
 .convo-queue-row { padding: 8px 12px 10px; border-top: 1px solid var(--term-line); color: var(--term-fg); line-height: 20px; }
@@ -1132,7 +1132,7 @@ p.convo-ask-desc { margin: 0 0 8px; font-size: 14px; line-height: 20px; color: v
    surface, so rows pass under it. */
 .convo-side-keys {
   position: sticky; bottom: -8px; z-index: 1; margin: auto -8px -8px; padding: 8px 18px 12px;
-  font-size: 12px; color: var(--term-fg-3); background: var(--term-side, var(--term-chrome));
+  font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-3); background: var(--term-side, var(--term-chrome));
 }
 /* An agents' list's search box (side, picker, a phone's list). 16px on a
    touch screen: iOS zooms into a smaller field. */
@@ -1149,12 +1149,12 @@ p.convo-ask-desc { margin: 0 0 8px; font-size: 14px; line-height: 20px; color: v
 .list-search input:focus, .list-search input:focus-visible { outline: none; box-shadow: none; } /* (the box shows it) */
 .list-search-clear { width: 26px; height: 26px; }
 .list-search-icon { flex: none; display: flex; justify-content: center; }
-.list-search-hint { flex: none; padding-right: 6px; font-size: 12px; color: var(--term-fg-3); white-space: nowrap; }
+.list-search-hint { flex: none; padding-right: 6px; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-3); white-space: nowrap; }
 @media (pointer: coarse) { .list-search input { font-size: 16px; } }
-.list-search-none { margin: 4px 10px 12px; font-size: 13px; color: var(--term-fg-3); }
+.list-search-none { margin: 4px 10px 12px; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg-3); }
 .agents-list > .list-search { margin: 10px max(16px, env(safe-area-inset-right, 0px)) 4px max(16px, env(safe-area-inset-left, 0px)); height: 40px; }
 .convo-list-group { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
-.convo-list-head { display: flex; gap: 6px; padding: 10px 10px 6px; font-size: 12px; font-weight: 600; letter-spacing: 0.02em; color: var(--term-fg-2); font-variant-numeric: tabular-nums; }
+.convo-list-head { display: flex; gap: 6px; padding: 10px 10px 6px; font-size: var(--fs-note); line-height: var(--lh-note); font-weight: 600; letter-spacing: 0.02em; color: var(--term-fg-2); font-variant-numeric: tabular-nums; }
 .convo-list-head > span { font-weight: 400; color: var(--term-fg-3); }
 .convo-list-row {
   display: flex; align-items: flex-start; gap: 10px; width: 100%; padding: 7px 10px; border: 0; border-radius: 8px;
@@ -1172,12 +1172,12 @@ p.convo-ask-desc { margin: 0 0 8px; font-size: 14px; line-height: 20px; color: v
    conversation's bar; the list can be dragged wider): rows of one height
    are quicker to run the eye down. */
 .convo-list-title {
-  flex: 0 1 auto; min-width: 0; font-size: 14px; font-weight: 500; line-height: 20px;
+  flex: 0 1 auto; min-width: 0; font-size: var(--fs-ui); font-weight: 500; line-height: var(--lh-ui);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.convo-list-when { flex: none; margin-left: auto; min-width: 3.2em; text-align: end; font-size: 12px; color: var(--term-fg-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.convo-list-when { flex: none; margin-left: auto; min-width: 3.2em; text-align: end; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
 /* Its second line: where it is (the session's title, which tells alike names apart) and, at its end, when. One line. */
-.convo-list-meta { display: flex; align-items: baseline; gap: 8px; min-width: 0; font-size: 12px; line-height: 18px; color: var(--term-fg-3); }
+.convo-list-meta { display: flex; align-items: baseline; gap: 8px; min-width: 0; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-3); }
 .convo-list-meta .convo-list-where { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* The one being read: a shade and heavier letters, no colour (its title is
    one line, cut short: heavier letters do not wrap it). */
@@ -1192,19 +1192,19 @@ p.convo-ask-desc { margin: 0 0 8px; font-size: 14px; line-height: 20px; color: v
    colours (forced colours) leave its dot no colour of its own. */
 .convo-list-status { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 @media (forced-colors: active) {
-  .convo-list-status { position: static; width: auto; height: auto; margin: 0; overflow: visible; clip: auto; font-size: 12px; line-height: 18px; }
+  .convo-list-status { position: static; width: auto; height: auto; margin: 0; overflow: visible; clip: auto; font-size: var(--fs-note); line-height: var(--lh-note); }
 }
 /* Where it is (its workspace, what the agent called it): up to two lines.
    How it is going is said by its dot (and its group). */
 .convo-list-sub {
-  min-width: 0; font-size: 12px; line-height: 18px; color: var(--term-fg-3);
+  min-width: 0; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-3);
   display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2;
   overflow: hidden; overflow-wrap: anywhere;
 }
 .convo-list-where { color: var(--term-fg-2); }
 /* What it is about now (a step under way, what it waits for, how its answer begins): one line, under its name */
-.convo-list-now, .agents-list-now { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; line-height: 18px; color: var(--term-fg-2); }
-.agents-list-now { font-size: 13px; }
+.convo-list-now, .agents-list-now { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-2); }
+.agents-list-now { font-size: var(--fs-sub); line-height: var(--lh-sub); }
 /* Commands it left running in the background: said in words before where it is */
 .convo-list-cmds { color: var(--term-fg-2); font-weight: 500; }
 /* The rest of a long group of old ones, behind a tap */
@@ -1293,7 +1293,7 @@ p.convo-ask-desc { margin: 0 0 8px; font-size: 14px; line-height: 20px; color: v
   border-bottom: 1px solid var(--term-line); font: 13px/20px var(--font-ui); text-align: center;
 }
 .agents-chat-stale.is-warn { color: var(--term-warn-text); }
-.term-root .agents-chat-stale-act { margin-left: 12px; font-size: 13px; }
+.term-root .agents-chat-stale-act { margin-left: 12px; font-size: var(--fs-sub); line-height: var(--lh-sub); }
 .term-root .agents-chat-why { margin: 0 0 6px; padding: 0 4px; color: var(--term-fg-2); font: 13px/18px var(--font-ui); }
 /* (Its one way out, in the line: a tap a finger finds.) */
 .term-root .agents-chat-why-act { margin-left: 6px; padding: 4px 2px; }
@@ -1314,9 +1314,9 @@ p.convo-ask-desc { margin: 0 0 8px; font-size: 14px; line-height: 20px; color: v
 .agents-list-sum .is-working { color: var(--term-accent-text); }
 .agents-list-sum .is-done { color: var(--term-ok-text); }
 /* (The list out of order: a line to put it in order, under the counts.) */
-.term-root .agents-list-resort { display: block; width: 100%; padding: 8px 16px; text-align: left; font-size: 13px; color: var(--term-accent-text); }
+.term-root .agents-list-resort { display: block; width: 100%; padding: 8px 16px; text-align: left; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-accent-text); }
 @media (pointer: coarse) { .term-root .agents-list-resort { min-height: 44px; } }
-.term-root .agents-list-mine { flex: none; height: 32px; padding: 0 10px; color: var(--term-fg-2); font-size: 13px; border: 1px solid var(--term-line); }
+.term-root .agents-list-mine { flex: none; height: 32px; padding: 0 10px; color: var(--term-fg-2); font-size: var(--fs-sub); line-height: var(--lh-sub); border: 1px solid var(--term-line); }
 @media (pointer: coarse) { .term-root .agents-list-mine { height: 44px; margin: -6px -4px -6px 0; } }
 /* (A toggle: outlined, off; on, filled a shade and in heavier letters — no colour of its own) */
 .term-root .agents-list-mine[aria-pressed='true'] { background: var(--term-key-active); color: var(--term-fg); border-color: var(--term-fg-3); font-weight: 600; }
@@ -1325,7 +1325,7 @@ p.convo-ask-desc { margin: 0 0 8px; font-size: 14px; line-height: 20px; color: v
 /* (The old ones past the first few of their group: a line where the rest would be.) */
 .term-root .agents-list-more {
   display: block; width: 100%; padding: 12px max(16px, env(safe-area-inset-left, 0px)); text-align: left;
-  font-size: 14px; color: var(--term-fg-2); border-bottom: 1px solid var(--term-line); text-decoration: none;
+  font-size: var(--fs-ui); line-height: var(--lh-ui); color: var(--term-fg-2); border-bottom: 1px solid var(--term-line); text-decoration: none;
 }
 .term-root .agents-list-more:hover { text-decoration: none; }
 .term-root .agents-list-more:active { background: var(--term-hover); }
@@ -1339,15 +1339,15 @@ p.convo-ask-desc { margin: 0 0 8px; font-size: 14px; line-height: 20px; color: v
 .agents-list-row:active { background: var(--term-hover); }
 .agents-list-row.is-blocked { background: color-mix(in srgb, var(--term-warn-text) 10%, var(--term-bg)); }
 .agents-list-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-.agents-list-title { display: flex; align-items: center; gap: 4px; min-width: 0; font-size: 15px; line-height: 22px; font-weight: 500; }
+.agents-list-title { display: flex; align-items: center; gap: 4px; min-width: 0; font-size: var(--fs-h3); line-height: var(--lh-h3); font-weight: 500; }
 .agents-list-title-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.agents-list-where { font-size: 13px; line-height: 18px; color: var(--term-fg-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.agents-list-side { flex: none; max-width: 40%; display: flex; flex-direction: column; align-items: flex-end; gap: 2px; font-size: 13px; line-height: 18px; color: var(--term-fg-3); text-align: right; white-space: nowrap; }
+.agents-list-where { font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agents-list-side { flex: none; max-width: 40%; display: flex; flex-direction: column; align-items: flex-end; gap: 2px; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg-3); text-align: right; white-space: nowrap; }
 .agents-list-side > span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
 .agents-list-state.is-blocked { color: var(--term-warn-text); font-weight: 600; }
 .agents-list-state.is-working { color: var(--term-accent-text); }
 .agents-list-state.is-done { color: var(--term-ok-text); }
-.agents-list-when { font-size: 12px; font-variant-numeric: tabular-nums; }
+.agents-list-when { font-size: var(--fs-note); line-height: var(--lh-note); font-variant-numeric: tabular-nums; }
 /* An agent's icon: its program's mark on a tile tinted with its colour; a
    dot on its corner says it waits for you, works, or is done (none at rest),
    ringed in the colour of what it sits on. */
@@ -1393,29 +1393,29 @@ p.convo-ask-desc { margin: 0 0 8px; font-size: 14px; line-height: 20px; color: v
 /* A question asked as a form (its parts: the questions, the question, its choices,
    what it says under them) keeps the card's own rhythm, not each part's margins. */
 .convo-ask-structured { display: flex; flex-direction: column; gap: 10px; }
-.convo-ask-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0; list-style: none; font-size: 12px; color: var(--term-fg-3); }
+.convo-ask-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0; list-style: none; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-3); }
 .convo-ask-tabs li { padding: 2px 8px; border-radius: 999px; border: 1px solid var(--term-line); }
 .convo-ask-tabs li.is-now { color: var(--term-fg); border-color: var(--term-accent-text); }
 .convo-ask-tabs li.is-done::after { content: ' ✓'; }
-.convo-ask-hint { margin: 0; font-size: 13px; color: var(--term-fg-3); }
+.convo-ask-hint { margin: 0; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg-3); }
 .convo-ask-hint.is-warn { color: var(--term-warn-text); }
-.term-root .convo-ask-there { margin-left: 8px; font-size: 13px; }
+.term-root .convo-ask-there { margin-left: 8px; font-size: var(--fs-sub); line-height: var(--lh-sub); }
 .convo-ask-opt.is-ticked { background: var(--term-accent-soft); }
 @media (forced-colors: active) { .convo-ask-key { border: 1px solid CanvasText; } }
 .convo-ask-opt-wrap { display: flex; flex-direction: column; gap: 4px; border-bottom: 1px solid var(--term-line); }
 .convo-ask-opt-wrap > .convo-ask-opt { border-bottom: 0; }
 .convo-ask-opt-wrap > :last-child:not(.convo-ask-opt) { margin-bottom: 8px; }
-.convo-ask-preview-btn { align-self: flex-start; margin-left: 20px; font-size: 13px; }
+.convo-ask-preview-btn { align-self: flex-start; margin-left: 20px; font-size: var(--fs-sub); line-height: var(--lh-sub); }
 .convo-ask-preview { max-height: 240px; margin-inline: 16px; }
 /* (Its own width, not the card's: a flex column would otherwise stretch it edge to edge.) */
 .convo-ask-go { align-self: flex-start; }
-.convo-ask-answers { margin: 0; display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
+.convo-ask-answers { margin: 0; display: flex; flex-direction: column; gap: 6px; font-size: var(--fs-sub); line-height: var(--lh-sub); }
 .convo-ask-answers dt { color: var(--term-fg-3); }
 .convo-ask-answers dd { margin: 0; color: var(--term-fg); }
 .convo-ask-plan { max-height: 50vh; overflow: auto; margin: 0; padding: 8px 12px; border-radius: 8px; border: 1px solid var(--term-line); background: var(--term-chrome); }
 
 /* What came since it was last read; the way to one's own messages */
-.convo-unread { display: flex; align-items: center; gap: 10px; margin: 8px 0; font-size: 12px; color: var(--term-accent-text); }
+.convo-unread { display: flex; align-items: center; gap: 10px; margin: 8px 0; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-accent-text); }
 .convo-unread::before, .convo-unread::after { content: ''; flex: 1 1 24px; border-top: 1px solid color-mix(in srgb, var(--term-accent-text) 45%, transparent); }
 .convo-jump { position: absolute; right: 16px; bottom: 12px; display: flex; flex-direction: column; gap: 4px; z-index: 2; }
 /* (Room beside the thread's column: the buttons there, off the text.) */
@@ -1434,24 +1434,24 @@ p.convo-ask-desc { margin: 0 0 8px; font-size: 14px; line-height: 20px; color: v
 .convo-rail-tick:hover::before { width: 18px; background: var(--term-fg-3); }
 .convo-rail-tick.is-at::before { width: 18px; background: var(--term-accent-text); }
 .convo-rail-tip { position: absolute; right: calc(100% + 6px); transform: translateY(-50%); width: max-content; max-width: 280px; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--term-line); background: var(--term-pop); box-shadow: 0 4px 16px rgb(0 0 0 / 14%); pointer-events: none; display: flex; flex-direction: column; gap: 2px; }
-.convo-rail-when { font-size: 12px; color: var(--term-fg-3); }
-.convo-rail-text { font-size: 13px; line-height: 1.45; color: var(--term-fg); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+.convo-rail-when { font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-3); }
+.convo-rail-text { font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
 @media (prefers-reduced-motion: reduce) { .convo-rail-tick::before { transition: none; } }
-.convo-event.is-limit { display: flex; gap: 8px; align-items: flex-start; margin: 0; font-size: 13px; color: var(--term-fg-2); }
+.convo-event.is-limit { display: flex; gap: 8px; align-items: flex-start; margin: 0; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg-2); }
 .convo-event.is-limit svg { flex: none; margin-top: 3px; color: var(--term-fg-3); }
 .convo-event.is-limit .convo-trouble-head { color: var(--term-fg-2); }
 .convo-event.is-limit.is-warn svg, .convo-event.is-limit.is-warn .convo-trouble-head { color: var(--term-warn-text); }
 
 /* A subagent's own conversation, in the panel beside */
 .convo-sub-body { padding: 12px 16px 24px; display: flex; flex-direction: column; gap: 12px; }
-.convo-sub-now { flex: none; margin: 0; padding: 6px 14px; border-bottom: 1px solid var(--term-line); color: var(--term-fg-2); font-size: 13px; line-height: 18px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.convo-sub-now { flex: none; margin: 0; padding: 6px 14px; border-bottom: 1px solid var(--term-line); color: var(--term-fg-2); font-size: var(--fs-sub); line-height: var(--lh-sub); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .convo-sub-foot { flex: none; padding: 8px 12px; border-top: 1px solid var(--term-line); }
 .convo-sub-report { margin-top: 8px; padding-top: 16px; border-top: 1px solid var(--term-line); min-width: 0; }
-.convo-sub-report-head { margin: 0 0 8px; color: var(--term-fg-2); font-size: 13px; font-weight: 500; }
+.convo-sub-report-head { margin: 0 0 8px; color: var(--term-fg-2); font-size: var(--fs-sub); line-height: var(--lh-sub); font-weight: 500; }
 .convo-user-text.is-written p { margin: 0 0 8px; }
 .convo-user-text.is-written > :last-child, .convo-user-fold > :last-child { margin-bottom: 0; }
-.convo-sub-state { font-size: 12px; color: var(--term-fg-3); }
-.convo-sub-open { align-self: flex-start; margin: 4px 0 6px; font-size: 13px; }
+.convo-sub-state { font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-3); }
+.convo-sub-open { align-self: flex-start; margin: 4px 0 6px; font-size: var(--fs-sub); line-height: var(--lh-sub); }
 .convo-sub .is-back { transform: rotate(180deg); }
 button.convo-running-what { padding: 0; text-align: left; color: var(--term-fg-2); font: inherit; text-decoration: underline; text-decoration-color: var(--term-line); text-underline-offset: 3px; }
 /* A command's details: the whole of it, its output's file (11-05). */
@@ -1463,7 +1463,7 @@ button.convo-running-what:hover { color: var(--term-fg); text-decoration-color: 
   button.convo-running-what, .term-root .convo-running-more { padding-top: 13px; padding-bottom: 13px; margin-top: -13px; margin-bottom: -13px; }
 }
 /* (A block of its own, tinted: never a bar at its left edge — the user's rule, 11-04.) */
-.convo-event.is-recap, .convo-event.is-goal, .convo-event.is-notice { margin: 0; font-size: 13px; color: var(--term-fg-2); padding: 8px 12px; border-radius: 8px; background: color-mix(in srgb, var(--term-fg) 4%, transparent); }
+.convo-event.is-recap, .convo-event.is-goal, .convo-event.is-notice { margin: 0; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg-2); padding: 8px 12px; border-radius: 8px; background: color-mix(in srgb, var(--term-fg) 4%, transparent); }
 .convo-event.is-recap .convo-trouble-head, .convo-event.is-goal .convo-trouble-head { color: var(--term-fg-3); font-size: 12px; }
 .convo-event.is-notice .convo-trouble-head { color: var(--term-fg-3); }
 .convo-event.is-notice.is-warn { background: color-mix(in srgb, var(--term-warn-text) 9%, transparent); }
@@ -1495,12 +1495,12 @@ button.convo-running-what:hover { color: var(--term-fg); text-decoration-color: 
 }
 .new-agent { display: flex; flex-direction: column; gap: 14px; }
 .new-agent-old > .link-btn { align-self: flex-start; } /* (at the fields' edge, not centred between them) */
-.new-agent .field > span { font-size: 13px; line-height: 18px; font-weight: 500; color: var(--fg-2); }
+.new-agent .field > span { font-size: var(--fs-sub); line-height: var(--lh-sub); font-weight: 500; color: var(--fg-2); }
 .new-agent-olds { display: flex; flex-direction: column; gap: 4px; max-height: 240px; overflow: auto; }
-.new-agent-oldrow { display: flex; justify-content: space-between; gap: 12px; padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--r-sm); background: none; text-align: left; cursor: pointer; color: var(--fg); font-size: 13px; }
+.new-agent-oldrow { display: flex; justify-content: space-between; gap: 12px; padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--r-sm); background: none; text-align: left; cursor: pointer; color: var(--fg); font-size: var(--fs-sub); line-height: var(--lh-sub); }
 .new-agent-oldrow.on { border-color: var(--accent, #3b6cf6); background: var(--bg-subtle); }
 .new-agent-oldtitle { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.new-agent-oldwhen { flex: none; color: var(--fg-3); font-size: 12px; }
+.new-agent-oldwhen { flex: none; color: var(--fg-3); font-size: var(--fs-note); line-height: var(--lh-note); }
 
 /* The input history on the host: what was sent, a page at a time, to put back in the composer */
 .host-history { display: flex; flex-direction: column; gap: 10px; }
@@ -1514,8 +1514,8 @@ button.convo-running-what:hover { color: var(--term-fg); text-decoration-color: 
 .host-history-row:focus-visible { outline: 2px solid var(--accent, #3b6cf6); outline-offset: -2px; }
 .host-history-row[aria-disabled] { cursor: default; color: var(--fg-2); }
 .host-history-row.is-here { border-color: color-mix(in srgb, var(--accent, #3b6cf6) 45%, var(--line)); }
-.host-history-text { font-size: 13px; line-height: 19px; white-space: pre-wrap; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden; }
-.host-history-meta { display: flex; flex-wrap: wrap; gap: 4px 10px; font-size: 12px; line-height: 16px; color: var(--fg-3); }
+.host-history-text { font-size: var(--fs-sub); line-height: var(--lh-sub); white-space: pre-wrap; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden; }
+.host-history-meta { display: flex; flex-wrap: wrap; gap: 4px 10px; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--fg-3); }
 .host-history-project { max-width: 18em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .host-history-flag { color: var(--fg-2); }
 .host-history-foot { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
@@ -1528,7 +1528,7 @@ button.convo-running-what:hover { color: var(--term-fg); text-decoration-color: 
 .convo-runs-row.convo-cost-head > :last-child { flex: none; white-space: nowrap; }
 .convo-cost-model { padding: 2px 0; }
 .convo-cost-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.convo-cost-tokens { font-size: 12px; line-height: 16px; color: var(--term-fg-3); font-variant-numeric: tabular-nums; }
+.convo-cost-tokens { font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-3); font-variant-numeric: tabular-nums; }
 .convo-cost-none { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--term-line); }
 
 /* The conversation searched: a bar under its own, the hits under it */
@@ -1539,7 +1539,7 @@ button.convo-running-what:hover { color: var(--term-fg); text-decoration-color: 
   background: var(--term-bg); color: var(--term-fg); font: 14px/20px var(--font-ui);
 }
 .convo-search-input:focus { outline: 2px solid var(--term-accent-text); outline-offset: -1px; }
-.convo-search-count { flex: none; font-size: 12px; color: var(--term-fg-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.convo-search-count { flex: none; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .convo-search .icon-btn { flex: none; color: var(--term-fg-2); }
 .convo-search-hits { max-height: min(36vh, 300px); overflow-y: auto; overscroll-behavior: contain; padding: 0 8px 6px; display: flex; flex-direction: column; gap: 2px; }
 .convo-search-hit {
@@ -1549,10 +1549,10 @@ button.convo-running-what:hover { color: var(--term-fg); text-decoration-color: 
 .convo-search-hit:hover { background: var(--term-hover); }
 .convo-search-hit.is-at { background: var(--term-accent-soft); }
 .convo-search-hit:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: -2px; }
-.convo-search-field { flex: none; min-width: 5.5em; font-size: 12px; color: var(--term-fg-3); white-space: nowrap; }
+.convo-search-field { flex: none; min-width: 5.5em; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-3); white-space: nowrap; }
 .convo-search-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .convo-search-text mark { background: color-mix(in srgb, var(--term-warn-text) 30%, transparent); color: inherit; border-radius: 2px; }
-.convo-search-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding: 0 16px 8px; font-size: 12px; color: var(--term-fg-3); }
+.convo-search-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding: 0 16px 8px; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-3); }
 @media (pointer: coarse) { .convo-search-hit { padding: 10px 8px; } .convo-search-input { height: 36px; font-size: 16px; } }
 /* One gone to from a search: lit up for a moment */
 .convo-found { animation: convo-found 1.6s ease-out; border-radius: 8px; }
@@ -1560,7 +1560,7 @@ button.convo-running-what:hover { color: var(--term-fg); text-decoration-color: 
 @media (prefers-reduced-motion: reduce) { .convo-found { animation: none; outline: 2px solid var(--term-accent-text); outline-offset: 2px; } }
 
 /* A shell command run with "!", and what it printed: in the terminal's letters, as a tool's output is */
-.convo-user-text.is-shell { font-family: var(--font-mono); font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.convo-user-text.is-shell { font-family: var(--font-mono); font-size: var(--fs-sub); line-height: var(--lh-sub); white-space: pre-wrap; overflow-wrap: anywhere; }
 .convo-shell { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; min-width: 0; }
 .convo-shell > .convo-pre-wrap { width: 100%; }
 .convo-shell-err { width: 100%; color: var(--term-danger-text); }
@@ -1581,19 +1581,19 @@ button.convo-running-what:hover { color: var(--term-fg); text-decoration-color: 
 .claude-card-first { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .claude-card-head svg { flex: none; color: var(--term-fg-3); }
 .claude-card-body { padding: 4px 12px 10px 30px; }
-.claude-card-text { margin: 0; font-size: 13px; line-height: 20px; color: var(--term-fg); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 40vh; overflow-y: auto; }
+.claude-card-text { margin: 0; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 40vh; overflow-y: auto; }
 .claude-card-keys { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-.claude-card-key { height: 30px; padding: 0 10px; font-size: 13px; border: 1px solid var(--term-line); color: var(--term-fg); }
-.claude-card-why { margin: 6px 0 0; font-size: 12px; color: var(--term-fg-3); }
+.claude-card-key { height: 30px; padding: 0 10px; font-size: var(--fs-sub); line-height: var(--lh-sub); border: 1px solid var(--term-line); color: var(--term-fg); }
+.claude-card-why { margin: 6px 0 0; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-3); }
 @media (pointer: coarse) { .claude-card-key { height: 38px; } .claude-card-head { padding: 10px 12px; } }
 
 /* The page's keys (? or ⋮ → Keyboard shortcuts) */
 .page-keys { display: flex; flex-direction: column; gap: 2px; margin: 0; }
 .page-keys-row { display: flex; align-items: center; gap: 16px; min-height: 32px; }
 .page-keys-row dt { flex: none; width: 150px; margin: 0; }
-.page-keys-row dd { flex: 1; min-width: 0; margin: 0; color: var(--fg-2); font-size: 14px; }
+.page-keys-row dd { flex: 1; min-width: 0; margin: 0; color: var(--fg-2); font-size: var(--fs-ui); line-height: var(--lh-ui); }
 .page-keys kbd { font: 12px/20px var(--font-mono); padding: 0 6px; border: 1px solid var(--line-strong); border-radius: 5px; background: var(--bg-subtle); color: var(--fg); white-space: pre; }
-.page-keys-note { margin: 12px 0 0; font-size: 13px; line-height: 1.5; color: var(--fg-3); }
+.page-keys-note { margin: 12px 0 0; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--fg-3); }
 @media (max-width: 480px) { .page-keys-row dt { width: 120px; } }
 .convo-list-pin { flex: none; display: inline-flex; align-items: center; color: var(--fg-3); }
 /* (A pushpin stuck in, leaning: its head filled, as a mark of what is so
@@ -1604,7 +1604,7 @@ button.convo-running-what:hover { color: var(--term-fg); text-decoration-color: 
 .convo-list-line .convo-list-pin { align-self: center; margin-left: -4px; color: var(--term-fg-3); }
 /* The person's turns (convoTurnsPanel): when, then how each begins. */
 .convo-turn { display: flex; gap: 10px; align-items: baseline; text-align: left; }
-.convo-turn-when { flex: none; color: var(--term-fg-3); font-size: 12px; font-variant-numeric: tabular-nums; }
+.convo-turn-when { flex: none; color: var(--term-fg-3); font-size: var(--fs-note); line-height: var(--lh-note); font-variant-numeric: tabular-nums; }
 .convo-turn-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* ux1101 B2 ------------------------------------------------------------- */
@@ -1652,7 +1652,7 @@ button.convo-running-what:hover { color: var(--term-fg); text-decoration-color: 
 .term-root.dark .convo-runs-back { background: rgba(0, 0, 0, 0.55); }
 .convo-runs .convo-runs-pop.is-sheet {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 21; width: 100%; border-radius: 14px 14px 0 0; border-bottom: 0;
-  padding: 14px 16px max(16px, env(safe-area-inset-bottom, 0px)); font-size: 14px;
+  padding: 14px 16px max(16px, env(safe-area-inset-bottom, 0px)); font-size: var(--fs-ui); line-height: var(--lh-ui);
 }
 html.kb-open .convo-runs .convo-runs-pop.is-sheet { padding-bottom: 16px; }
 /* The switcher over a dark page: the page behind dimmed as much as over a light one */
@@ -1672,22 +1672,22 @@ html.kb-open .convo-runs .convo-runs-pop.is-sheet { padding-bottom: 16px; }
 /* Port forwarding dialog: its sections' titles a step under the dialog's,
    its words as the invite dialog's (ux1101 T42, T43). */
 .dialog.ports-dialog .lead { text-wrap: balance; }
-.dialog.ports-dialog .section h2 { font-size: 13px; line-height: 18px; font-weight: 600; color: var(--fg-2); }
+.dialog.ports-dialog .section h2 { font-size: var(--fs-sub); line-height: var(--lh-sub); font-weight: 600; color: var(--fg-2); }
 .ports-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .ports-head .icon-btn { margin-right: -8px; }
 .spin { animation: spin 0.9s linear infinite; }
 @media (prefers-reduced-motion: reduce) { .spin { animation: none; } }
-.ports-sub { margin-top: 8px; font-size: 13px; line-height: 18px; font-weight: 600; color: var(--fg-2); }
+.ports-sub { margin-top: 8px; font-size: var(--fs-sub); line-height: var(--lh-sub); font-weight: 600; color: var(--fg-2); }
 /* Watching: "Revoke", a word, not a cross that reads as "hide" (ux1101 T46). */
-.share-revoke { flex: none; height: 32px; padding: 0 10px; color: var(--fg-2); font-size: 13px; }
+.share-revoke { flex: none; height: 32px; padding: 0 10px; color: var(--fg-2); font-size: var(--fs-sub); line-height: var(--lh-sub); }
 /* Terminal schemes: the dialog clear of the top bar, whose tabs stay whole (ux1101 T39). */
 .dialog.scheme-dialog { max-height: calc(var(--vv-h, 100dvh) - 112px); }
 @media (max-width: 520px) { .sheet-mode .dialog.scheme-dialog { max-height: calc(var(--vv-h, 100dvh) - 56px - env(safe-area-inset-top, 0px)); } }
 /* A host's changed key: the fingerprint expected over the one presented,
    wrapped at the same columns (ux1101 T51). */
 .hostkey-compare { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px 12px; margin: 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--r); }
-.hostkey-compare dt { font-size: 13px; color: var(--fg-2); white-space: nowrap; }
-.hostkey-compare dd { margin: 0; font-size: 13px; line-height: 18px; word-break: break-all; }
+.hostkey-compare dt { font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--fg-2); white-space: nowrap; }
+.hostkey-compare dd { margin: 0; font-size: var(--fs-sub); line-height: var(--lh-sub); word-break: break-all; }
 
 /* (A primary button off inside the terminal page: as before, not the app's light grey on a dark terminal — review.) */
 .term-root .btn-primary:disabled, .term-root .btn-primary:disabled:hover { opacity: 0.5; background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
