@@ -674,6 +674,8 @@ function queueRows(queued: { text: string; ts?: string; from?: string; note?: bo
   })
 }
 // (A message refused for what is up in the terminal, or what could not be made out there.)
+// (Whose terminal is shown there, a message refused: Claude Code's, OpenCode's.)
+const liveFor = (agent?: string) => (agent ?? 'claude') === 'claude' || agent === 'opencode'
 const LIVE_ON = new Set(['agent_waiting', 'agent_busy', 'no_input', 'other_view', 'subagent_view', 'typed_other_view', 'typed_not_sent', 'no_screen', 'cannot_verify', 'box_draft', 'draft', 'picker', 'unknown'])
 // (See the note on these where they are used.)
 const LOOK_AFTER_MS = 4000
@@ -950,7 +952,13 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   }, [convo.entries])
   const replyTo = useMemo(
     () => {
-      const to = viaConvo && convo.bind ? convoTarget(sid, convo.bind, cur.s.persistence === 'tmux') : herdr && row ? herdrTarget(sid, row.a) : null
+      let to = viaConvo && convo.bind ? convoTarget(sid, convo.bind, cur.s.persistence === 'tmux') : herdr && row ? herdrTarget(sid, row.a) : null
+      // (OpenCode's in herdr, answered by herdr: where what it asks is not
+      // made out, its terminal here as it is — not its screen as words.)
+      const b = convo.bind
+      if (to && !to.live && b && b.agent === 'opencode' && b.pane === row?.a.pane_id) {
+        to = { ...to, live: { sid, press: () => ({ pane: b.pane, pid: b.pid, start: b.start, session: b.session }) } }
+      }
       // (The host it runs on, for the card's offer of Claude Code's question hook
       // there — terminal/askHook.tsx: only for one whose log is read, so found
       // under ~/.claude, the settings the hook goes in — review535-8.)
@@ -1024,7 +1032,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   const refusal = (e: unknown) => {
     if (!(e instanceof ApiError)) return errorText(e)
     // (What stopped it is up there, or could not be made out: the terminal, here, to deal with it.)
-    if (LIVE_ON.has(e.code) && (convo.bind?.agent ?? 'claude') === 'claude' && convo.bind) setLiveOf(bindKey)
+    if (LIVE_ON.has(e.code) && liveFor(convo.bind?.agent) && convo.bind) setLiveOf(bindKey)
     // (Claude Code's input box not this conversation's: said what to do in the terminal.)
     const v = viewRefusal(e.code)
     if (v) return v
@@ -1741,7 +1749,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
           return
         }
         // (What stopped it is up there, or could not be made out: the terminal, here, to deal with it.)
-        if (e instanceof ApiError && LIVE_ON.has(e.code) && (b.agent ?? 'claude') === 'claude') setLiveOf(bindKey)
+        if (e instanceof ApiError && LIVE_ON.has(e.code) && liveFor(b.agent)) setLiveOf(bindKey)
         // Whether it went is not known (the gateway lost the host on the way,
         // or the answer was lost on its way here): it is looked for as one
         // sent, the draft staying until it is seen.
@@ -2016,7 +2024,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
         // (Another agent in the pane: read at once, as for a send — the dialog says why.)
         if (e instanceof ApiError && e.code === 'agent_changed') convo.refresh()
         // (Refused for what is up in its terminal: the terminal, here, as for a message.)
-        if (e instanceof ApiError && LIVE_ON.has(e.code) && (b.agent ?? 'claude') === 'claude') setLiveOf(bindKey)
+        if (e instanceof ApiError && LIVE_ON.has(e.code) && liveFor(b.agent)) setLiveOf(bindKey)
         throw e
       },
     )

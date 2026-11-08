@@ -116,14 +116,37 @@ def slim(d):
 def line(o):
     return json.dumps(o, ensure_ascii=False, separators=(',', ':')) + '\n'
 if mode == 'find':
-    r = c.execute('select id from session where directory = ? and parent_id is null and time_updated >= ? order by time_updated desc limit 1', (sys.argv[3], int(sys.argv[4]))).fetchone()
-    out.write(line({'k': 'sid', 'id': r[0] if r else '', 'now': int(time.time() * 1000)}))
+    # (The latest begun there of OpenCode 2's sessions or of 1's, whichever
+    # was written last: a database 2 took over keeps 1's too.)
+    best = None
+    for t in ('session_v2', 'session'):
+        try:
+            r = c.execute('select id, time_updated from ' + t + ' where directory = ? and parent_id is null and time_updated >= ? order by time_updated desc limit 1', (sys.argv[3], int(sys.argv[4]))).fetchone()
+        except sqlite3.OperationalError:
+            continue  # (no such table: an OpenCode before 2)
+        if r and (best is None or (r[1] or 0) > (best[1] or 0)):
+            best = r
+    out.write(line({'k': 'sid', 'id': best[0] if best else '', 'now': int(time.time() * 1000)}))
     sys.exit()
 sid = sys.argv[3]
+# OpenCode 2 keeps its sessions apart (session_v2, session_message: a row
+# for each message, a step of an answer one, what it holds in it; no part
+# rows), each message read as 1's are: a message row and one for each of
+# what it holds, those numbered after it ("prt_" its id's, and where it is
+# in it). With its order (o: 2's own, seq) and how many it holds (np).
 try:
-    r = c.execute('select title, revert from session where id = ?', (sid,)).fetchone()
-except sqlite3.OperationalError:  # (an OpenCode without /undo's column)
-    r = c.execute('select title, null from session where id = ?', (sid,)).fetchone()
+    V2 = c.execute('select 1 from session_v2 where id = ?', (sid,)).fetchone() is not None
+except sqlite3.OperationalError:
+    V2 = False
+def num(x):
+    return x if isinstance(x, int) and not isinstance(x, bool) else 0
+if V2:
+    r = c.execute('select title, revert, time_busy, time_idle from session_v2 where id = ?', (sid,)).fetchone()
+else:
+    try:
+        r = c.execute('select title, revert from session where id = ?', (sid,)).fetchone()
+    except sqlite3.OperationalError:  # (an OpenCode without /undo's column)
+        r = c.execute('select title, null from session where id = ?', (sid,)).fetchone()
 if not r:
     out.write(line({'k': 'none'})); sys.exit()
 s = {'k': 's', 'title': r[0]}
@@ -134,12 +157,96 @@ except ValueError:
 if isinstance(rv, dict) and isinstance(rv.get('messageID'), str):
     s['rv'] = rv['messageID'][:200]
     s['rvp'] = bool(rv.get('partID'))
+    if V2:
+        o = c.execute('select seq from session_message where id = ? and session_id = ?', (rv['messageID'], sid)).fetchone()
+        if o and num(o[0]) > 0:
+            s['rvo'] = o[0]
+if V2:
+    # (At work from when it was set going till it came to rest: steps and
+    # waits for an answer between them included.)
+    s['busy'] = num(r[2]) > num(r[3])
 out.write(line(s))
 def mrow(m):
     return line({'k': 'm', 'id': m[0], 'c': m[1], 'u': m[2], 'd': slim_msg(m[3])})
 def prow(p):
     d = slim(p[4])
     return line({'k': 'p', 'id': p[0], 'm': p[1], 'c': p[2], 'u': p[3], 'd': d}) if d is not None else ''
+def v2tool(it):
+    st = it.get('state') if isinstance(it.get('state'), dict) else {}
+    md = st.get('metadata') if isinstance(st.get('metadata'), dict) else {}
+    said = ''.join(x['text'] for x in (st.get('content') or []) if isinstance(x, dict) and x.get('type') == 'text' and isinstance(x.get('text'), str))
+    got = md['output'] if isinstance(md.get('output'), str) else said
+    o = {'status': st.get('status'), 'input': st.get('input') if isinstance(st.get('input'), dict) else {}}
+    if o['status'] == 'completed':
+        o['output'] = got
+    elif o['status'] == 'error':
+        e = st.get('error')
+        o['error'] = e['message'] if isinstance(e, dict) and isinstance(e.get('message'), str) else (e if isinstance(e, str) else got or 'error')
+    o['metadata'] = {k: md[k] for k in ('exit', 'diff', 'filediff') if k in md}
+    return {'type': 'tool', 'tool': it['name'] if isinstance(it.get('name'), str) else '', 'callID': it['id'] if isinstance(it.get('id'), str) else '', 'state': o}
+def v2rows(m):
+    # (A message of 2's, (id, created, updated, data, type, seq): its rows
+    # as 1's, (updated, 0 or 1, id, line), the message's first.)
+    try:
+        d = json.loads(m[3])
+    except ValueError:
+        d = {}
+    if not isinstance(d, dict):
+        d = {}
+    t = d['time'] if isinstance(d.get('time'), dict) else {}
+    o = {'role': m[4], 'time': {'created': num(t.get('created')) or m[1]}}
+    held = []
+    if m[4] == 'user':
+        if isinstance(d.get('text'), str):
+            held.append({'type': 'text', 'text': d['text']})
+        for f in d.get('files') or []:
+            mime = (f.get('mime') or f.get('mediaType')) if isinstance(f, dict) else None
+            if isinstance(mime, str):
+                held.append({'type': 'file', 'mime': mime[:100]})
+    else:
+        if num(t.get('completed')):
+            o['time']['completed'] = t['completed']
+        md = d.get('model')
+        if isinstance(md, dict):
+            if isinstance(md.get('id'), str): o['modelID'] = md['id'][:200]
+            if isinstance(md.get('providerID'), str): o['providerID'] = md['providerID'][:200]
+        if isinstance(d.get('finish'), str): o['finish'] = d['finish'][:64]
+        if isinstance(d.get('tokens'), dict): o['tokens'] = d['tokens']
+        e = d.get('error')
+        if isinstance(e, dict):
+            if e.get('type') == 'aborted':
+                o['error'] = {'name': 'MessageAbortedError'}
+            else:
+                o['error'] = {'name': str(e.get('type') or 'error')[:200], 'data': {'message': cut(str(e.get('message') or ''), 8192)}}
+                if isinstance(e.get('statusCode'), int): o['error']['data']['statusCode'] = e['statusCode']
+        for it in d.get('content') or []:
+            if not isinstance(it, dict):
+                continue
+            k = it.get('type')
+            if k in ('text', 'reasoning'):
+                held.append({'type': k, 'text': it['text'] if isinstance(it.get('text'), str) else ''})
+            elif k == 'tool':
+                held.append(v2tool(it))
+            else:
+                held.append({'type': 'other'})  # (kept in its place: what follows keeps its number)
+    rows = [(m[2], 0, m[0], line({'k': 'm', 'id': m[0], 'c': m[1], 'u': m[2], 'o': m[5], 'np': len(held), 'd': json.dumps(o, ensure_ascii=False, separators=(',', ':'))}))]
+    for i, h in enumerate(held):
+        pid = 'prt_' + m[0][4:] + '%04d' % i
+        d = slim(json.dumps(h, ensure_ascii=False))
+        if d is not None:
+            rows.append((m[2], 1, pid, line({'k': 'p', 'id': pid, 'm': m[0], 'c': m[1], 'u': m[2], 'd': d})))
+    return rows
+V2M = "select id, time_created, time_updated, data, type, seq from session_message where type in ('user', 'assistant') and "
+def inbox():
+    # (What was sent while it worked, not taken in yet: all of it, each look.)
+    q = []
+    for i in c.execute("select id, time_created, payload from session_inbox where session_id = ? and type = 'user' order by time_created, id limit 20", (sid,)):
+        try:
+            p = json.loads(i[2])
+        except ValueError:
+            p = {}
+        q.append({'id': i[0], 'c': i[1], 't': cut(p['text'], 16384) if isinstance(p, dict) and isinstance(p.get('text'), str) else ''})
+    out.write(line({'k': 'q', 'q': q}))
 if mode == 'since':
     # (From cursor: all rows written in its millisecond and after; or, where
     # the last look stopped for want of room in one millisecond (ck, cid),
@@ -152,10 +259,15 @@ if mode == 'since':
         fc, fid, known = int(sys.argv[7]), sys.argv[8], int(sys.argv[9])
         w = 'session_id = ? and (time_created > ? or (time_created = ? and id >= ?)) and time_created <= ?'
         a = (sid, fc, fc, fid, cur)
-        if known < 0 or c.execute('select count(*) from message where ' + w, a).fetchone()[0] != known:
-            out.write(line({'k': 'ids', 'u': cur, 'ids': [m[0] for m in c.execute('select id from message where ' + w, a)]}))
-    rows = [(m[2], 0, m[0], mrow(m)) for m in c.execute('select id, time_created, time_updated, data from message where session_id = ? and time_updated >= ?', (sid, cur))]
-    rows += [(p[3], 1, p[0], prow(p)) for p in c.execute('select id, message_id, time_created, time_updated, data from part where session_id = ? and time_updated >= ?', (sid, cur))]
+        mt = "session_message where type in ('user', 'assistant') and " if V2 else 'message where '
+        if known < 0 or c.execute('select count(*) from ' + mt + w, a).fetchone()[0] != known:
+            out.write(line({'k': 'ids', 'u': cur, 'ids': [m[0] for m in c.execute('select id from ' + mt + w, a)]}))
+    if V2:
+        rows = [r for m in c.execute(V2M + 'session_id = ? and time_updated >= ?', (sid, cur)) for r in v2rows(m)]
+        inbox()
+    else:
+        rows = [(m[2], 0, m[0], mrow(m)) for m in c.execute('select id, time_created, time_updated, data from message where session_id = ? and time_updated >= ?', (sid, cur))]
+        rows += [(p[3], 1, p[0], prow(p)) for p in c.execute('select id, message_id, time_created, time_updated, data from part where session_id = ? and time_updated >= ?', (sid, cur))]
     rows.sort()
     if cid:
         rows = [r for r in rows if (r[0], r[1], r[2]) > (cur, ck, cid)]
@@ -179,16 +291,29 @@ if mode == 'since':
     sys.exit()
 if mode == 'tail':
     n = int(sys.argv[4])
-    q = c.execute('select id, time_created, time_updated, data from message where session_id = ? order by time_created desc, id desc limit ?', (sid, n))
+    if V2:
+        q = c.execute(V2M + 'session_id = ? order by time_created desc, id desc limit ?', (sid, n))
+    else:
+        q = c.execute('select id, time_created, time_updated, data from message where session_id = ? order by time_created desc, id desc limit ?', (sid, n))
+    if V2:
+        inbox()
 else:
     n = int(sys.argv[6])
     fc, fid = int(sys.argv[4]), sys.argv[5]
-    q = c.execute('select id, time_created, time_updated, data from message where session_id = ? and (time_created < ? or (time_created = ? and id < ?)) order by time_created desc, id desc limit ?', (sid, fc, fc, fid, n))
+    if V2:
+        q = c.execute(V2M + 'session_id = ? and (time_created < ? or (time_created = ? and id < ?)) order by time_created desc, id desc limit ?', (sid, fc, fc, fid, n))
+    else:
+        q = c.execute('select id, time_created, time_updated, data from message where session_id = ? and (time_created < ? or (time_created = ? and id < ?)) order by time_created desc, id desc limit ?', (sid, fc, fc, fid, n))
 took, size, cur = [], 0, 0
 for m in q.fetchall():
-    ls, k = [mrow(m)], 0
-    for p in c.execute('select id, message_id, time_created, time_updated, data from part where message_id = ? order by id', (m[0],)):
-        l = prow(p)
+    if V2:
+        rs = v2rows(m)
+        ls, k = [rs[0][3]], 0
+        parts = [r[3] for r in rs[1:]]
+    else:
+        ls, k = [mrow(m)], 0
+        parts = (prow(p) for p in c.execute('select id, message_id, time_created, time_updated, data from part where message_id = ? order by id', (m[0],)))
+    for l in parts:
         if not took and k + len(l.encode()) > BUDGET:
             break  # (one message alone more than there is room for: what fits of it)
         ls.append(l); k += len(l.encode())
@@ -200,7 +325,8 @@ took.reverse()
 if took:
     f = took[0][0]
     out.write(line({'k': 'floor', 'c': f[1], 'id': f[0]}))
-    left = c.execute('select count(*) from message where session_id = ? and (time_created < ? or (time_created = ? and id < ?))', (sid, f[1], f[1], f[0])).fetchone()[0]
+    mt = "session_message where type in ('user', 'assistant') and " if V2 else 'message where '
+    left = c.execute('select count(*) from ' + mt + 'session_id = ? and (time_created < ? or (time_created = ? and id < ?))', (sid, f[1], f[1], f[0])).fetchone()[0]
 else:
     left = 0
 out.write(line({'k': 'older', 'n': left}))
@@ -231,7 +357,9 @@ exec python3 -c ` + sshx.QuoteShell(ocQueryScript) + ` "$@"`
 // herdr does not say: which of the sessions there is whose cannot be told).
 // l is what locating found of the host's processes.
 func (s *Server) ocSessionOf(ctx context.Context, sess *term.Session, p *convoProc, pane string, l convoLocated) (sid, why string) {
-	if sess.Persistence == "herdr" {
+	// (OpenCode 2's: herdr is told by its background service, as the pane
+	// that began it — another's session, maybe: not taken.)
+	if sess.Persistence == "herdr" && !p.ocService {
 		if v := s.herdrSocks.sid(sess.ID, pane); ocSessionID.MatchString(v) {
 			return v, ""
 		}
@@ -239,9 +367,16 @@ func (s *Server) ocSessionOf(ctx context.Context, sess *term.Session, p *convoPr
 	if p.cwd == "" || strings.ContainsAny(p.cwd, "\n\x00") {
 		return convoNoSession, ""
 	}
+	// (Its database not told — of several servers, which it talks to not
+	// seen —: none of its sessions is, nor that of another where it runs.)
+	if p.log == "" {
+		return convoNoSession, convoNotTold
+	}
 	key := strconv.FormatInt(sess.HostID, 10) + "\x00" + p.cwd
 	for _, q := range l.procs {
-		if q.agent == "opencode" && q.pid != p.pid && q.cwd == p.cwd {
+		// (Another where it runs, of the same database or of one not told:
+		// a database of its own, its sessions are not these.)
+		if q.agent == "opencode" && q.pid != p.pid && q.cwd == p.cwd && (q.log == "" || q.log == p.log) {
 			s.ocContested.note(key, true)
 			return convoNoSession, convoNotTold
 		}
@@ -403,7 +538,7 @@ func (s *Server) ocRead(sess *term.Session, st *convoState, mode string, args ..
 			floorC, floorID = r.C, r.ID
 		case "older":
 			st.older = r.N > 0
-		case "s", "m", "p", "ids":
+		case "s", "m", "p", "ids", "q":
 			rows.Write(line)
 			rows.WriteByte('\n')
 		}

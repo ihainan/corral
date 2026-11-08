@@ -157,8 +157,23 @@ func agentRowsAged(b []byte) []byte {
 
 const agentRowsAwk = `{ l[NR] = $0 } END { n = NR; while (n > 0 && l[n] ~ /^[ 	]*$/) n--; i = n; m = 0; while (i > 0 && l[i] ~ /^[ 	]*(❯[ 	]+)?(●|◯)[ 	]/) { if (l[i] ~ /^[ 	]*(❯[ 	]+)?(●|◯)[ 	]+main[ 	]*$/) m = 1; i-- } if (m) for (k = i + 1; k <= n; k++) while (sub(/[ 	]+[0-9]+[hms][ 	]*$/, "", l[k])) ; for (k = 1; k <= NR; k++) print l[k] }`
 
+// OpenCode 2's, at work: the spinner before a command it runs ("┃  ⠼ touch x",
+// one of the Braille patterns, turning while it asks leave to run it too) and
+// the bar at its foot ("⬝⬝■■■■■■ esc interrupt"), each the same for the name.
+// Seen on real screens (OpenCode 2.2.6, 11-08); nothing else of its.
+var (
+	ocSpinner = regexp.MustCompile(`(?m)^([ \t]*┃[ \t]+)[\x{2800}-\x{28FF}]`)
+	ocBar     = regexp.MustCompile(`(?m)^([ \t]*)[⬝■]+ `)
+)
+
+// ocMotionAwk: ocSpinner and ocBar on the host (bytes: LC_ALL=C).
+const ocMotionAwk = `{ if (match($0, /^[ 	]*\342\224\203[ 	]+\342[\240-\243][\200-\277]/)) $0 = substr($0, 1, RLENGTH - 3) " " substr($0, RLENGTH + 1)
+  else if (match($0, /^[ 	]*(\342\254\235|\342\226\240)+ /)) { e = RLENGTH; match($0, /^[ 	]*/); $0 = substr($0, 1, RLENGTH) "\342\226\240 " substr($0, e + 1) }
+  print }`
+
 func lookDigest(raw []byte) string {
 	b := panelSGR.ReplaceAll(bytes.ReplaceAll(raw, []byte{0}, nil), nil)
+	b = ocBar.ReplaceAll(ocSpinner.ReplaceAll(b, []byte("${1} ")), []byte("${1}■ "))
 	b = blinkingMark.ReplaceAll(spinnerLine.ReplaceAll(agentRowsAged(b), nil), []byte("${1} "))
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
@@ -173,7 +188,7 @@ var lookDigestPipe = func() string {
 		}
 		sed += ` -e 's/^` + m + ` [A-Za-z-]*….*$//'`
 	}
-	return `tr -d '\000' | LC_ALL=C sed "s/$(printf '\033')\[[0-9;:]*m//g" | LC_ALL=C awk '` + agentRowsAwk + `' | LC_ALL=C sed` + sed + ` | ` + blinkSed + ` | sha256sum`
+	return `tr -d '\000' | LC_ALL=C sed "s/$(printf '\033')\[[0-9;:]*m//g" | LC_ALL=C awk '` + ocMotionAwk + `' | LC_ALL=C awk '` + agentRowsAwk + `' | LC_ALL=C sed` + sed + ` | ` + blinkSed + ` | sha256sum`
 }()
 
 // POST /api/sessions/{id}/conversation/panel-screen → {"text", "digest"}: the

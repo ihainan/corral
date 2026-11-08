@@ -126,6 +126,13 @@ func TestLookDigest(t *testing.T) {
 		"  ● timeout 5s\n Esc to cancel\n",
 		"  ● timeout 5s\n",
 		"中文\n◯ main\n● 子代理 x 2h 3m 4s  \n",
+		// (OpenCode 2's, as its screens are.)
+		"  ┃  ⠼ touch needs-ok\n  ┃\n  ┃  △ Permission required\n  ┃   Allow once   Always allow   Reject\n",
+		"\t┃\t⠋ x\n",
+		"   ⬝⬝■■■■■■ esc interrupt                 1.0K (1%)\n",
+		"■ not a bar\n",
+		"  ┃  ⠼\n",
+		"⠼ not after a bar of its\n",
 	} {
 		// (By every awk there is here: a host's may be any.)
 		for _, awk := range []string{"awk", "mawk", "gawk", "busybox awk", "original-awk"} {
@@ -149,6 +156,8 @@ func TestLookDigest(t *testing.T) {
 		{"❯ ● general-purpose  Count 22s\n  ◯ main\n", "❯ ● general-purpose  Count 23s\n  ◯ main\n"},
 		{"◯ main\n● task 59s\n\n", "◯ main\n● task 1m 0s\n\n"},
 		{"● Needs permission\n", "  Needs permission\n"},
+		{"  ┃  ⠼ touch needs-ok\n  ┃   Allow once\n", "  ┃  ⠙ touch needs-ok\n  ┃   Allow once\n"},
+		{"   ⬝⬝■■■■■■ esc interrupt   1.0K\n", "   ■■⬝⬝■■■■ esc interrupt   1.0K\n"},
 	}
 	for _, c := range same {
 		if lookDigest([]byte(c[0])) != lookDigest([]byte(c[1])) {
@@ -169,6 +178,9 @@ func TestLookDigest(t *testing.T) {
 		{"  ● timeout 5s\n", "  ● timeout 9s\n"},
 		{"◯ main\n● task 5s\nmore\n", "◯ main\n● task 9s\nmore\n"},
 		{"● task\n  5s\n", "● task\n  9s\n"},
+		{"  ┃  ⠼ touch a\n", "  ┃  ⠼ touch b\n"},
+		{"  ┃   Allow once   Always allow\n", "  ┃   Always allow   Allow once\n"},
+		{"⠼ x\n", "⠙ x\n"},
 	}
 	for _, c := range other {
 		if lookDigest([]byte(c[0])) == lookDigest([]byte(c[1])) {

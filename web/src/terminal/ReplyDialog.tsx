@@ -724,12 +724,15 @@ export function InlineReply({ target, onLoaded, resizedAt, active = true, held, 
   // (The card drawn from the log answers by its own steps: no keys here.)
   const ready = sent === null && !!screen && !busy && !failed && armedFor === screen.digest && !structured
   const cardRef = useRef<HTMLDivElement>(null)
-  useAnswerKeys(active && !structured, ready, [...opts.map((o) => o.key), 'esc'], held, cardRef, (k) => (k === 'esc' ? void send({ keys: [k] }) : confirm.choose(k)))
+  // (Not while the terminal itself is shown for it: its keys are the terminal's
+  // — taken here first, a digit or Esc pressed there went nowhere.)
+  const shownLive = needScreen && !!target.live && !failed && !structured
+  useAnswerKeys(active && !structured && !shownLive, ready, [...opts.map((o) => o.key), 'esc'], held, cardRef, (k) => (k === 'esc' ? void send({ keys: [k] }) : confirm.choose(k)))
   if (sent !== null) return <p className="convo-ask-sent" role="status">{t('convo.answeredHere')}</p>
   // (What it asks not made out: the terminal itself, with its colours and its
   // layout, keys going to it. Not the words of a screen and two buttons: that
   // was a third way of showing it, worse than either.)
-  if (needScreen && target.live && !failed && !structured) {
+  if (shownLive && target.live) {
     return (
       <div className="convo-ask-live">
         {hookHint}

@@ -194,7 +194,7 @@ codex_sub() {
     { print; exit }'
 }
 # A process's record: what it is, where its log is, and where it runs.
-rec() { # pid start fg procstart sid log agent
+rec() { # pid start fg procstart sid log agent [via]
   env=$(tr '\0' '\n' <"/proc/$1/environ" 2>/dev/null | grep -E '^(HERDR_PANE_ID|HERDR_SOCKET_PATH|TMUX|TMUX_PANE)=' | head -c 4096)
   link_of "/proc/$1/fd/0" 200; tty=$l
   # (Read with the shell's own read: a process started for each step of
@@ -221,7 +221,7 @@ rec() { # pid start fg procstart sid log agent
       awk -v now="$(date -u +%Y-%m-%dT%H:%M:%S).999999999" '{ t = $0; sub(/Z$/, "", t); if (t !~ /\./) t = t "."; i = index(t, "."); t = substr(t, 1, i) substr(substr(t, i + 1) "000000000", 1, 9) }
         t <= now && t > k { k = t; m = $0 } END { print m }')
   fi
-  printf 'pid=%s\nstart=%s\nbtime=%s\nhz=%s\nfg=%s\nprocstart=%s\nsid=%s\nlog=%s\nlogmtime=%s\nlogts=%s\ntty=%s\ncwd=%s\nanc=%s\nagent=%s\n%s\0' "$1" "$2" "$btime" "$hz" "$3" "$4" "$5" "$6" "$lw" "$lt" "$tty" "$cwd" "$anc" "$7" "$env"
+  printf 'pid=%s\nstart=%s\nbtime=%s\nhz=%s\nfg=%s\nprocstart=%s\nsid=%s\nlog=%s\nlogmtime=%s\nlogts=%s\ntty=%s\ncwd=%s\nanc=%s\nagent=%s\nvia=%s\n%s\0' "$1" "$2" "$btime" "$hz" "$3" "$4" "$5" "$6" "$lw" "$lt" "$tty" "$cwd" "$anc" "$7" "${8-}" "$env"
 }
 # (A file's lines joined by $2, as tr would put it in place of each
 # newline, the last one's left out: x. The shell's own: a name of a
@@ -358,20 +358,70 @@ done
 # has open (…/opencode/opencode.db: all its sessions; which is this one's is
 # told by herdr, or by where it runs). Not one that does not converse
 # (opencode run, serve, …): its first word that is no option.
+oc_sub() {
+  sub=$(tr '\0' '\001' <"$1/cmdline" 2>/dev/null | awk 'BEGIN { RS = "\001" } NR == 1 { next } skip { skip = 0; next } /^--$/ { exit }
+      /^(-[msp]|--(model|session|prompt|agent|port|hostname|log-level|mdns-domain|cors|server|completions))$/ { skip = 1; next }
+      /^(run|serve|web|acp|mcp|auth|agent|upgrade|update|uninstall|models|stats|export|import|github|pr|debug|session|completion|generate|attach|api|plugin|service|reload|pair)$/ { print; exit }')
+}
+oc_db() {
+  db=
+  for fd in "$1"/fd/*; do
+    l=$(readlink "$fd" 2>/dev/null) || continue
+    case $l in *"$nl"*) continue;; */opencode/opencode.db) db=$l; break;; esac
+  done
+}
+# (OpenCode 2's: its conversing process keeps no database open; a server
+# of its does — the user's background service (opencode serve --service),
+# begun by the first of them and talked to by the others on a port of this
+# host, or one of its own (--standalone: serve --stdio, its child). Each
+# server's database: svdb, "pid<TAB>parent<TAB>database" a line; and the
+# ports of the user's OpenCodes, ocports: "pid L port" one listening, "pid
+# C port" one connected to on this host.)
+svdb= ocsocks=
 for d in $opencodes; do
-  pid=${d#/proc/}
-  sub=$(tr '\0' '\001' <"$d/cmdline" 2>/dev/null | awk 'BEGIN { RS = "\001" } NR == 1 { next } skip { skip = 0; next } /^--$/ { exit }
-      /^(-[msp]|--(model|session|prompt|agent|port|hostname|log-level|mdns-domain|cors))$/ { skip = 1; next }
-      /^(run|serve|web|acp|mcp|auth|agent|upgrade|uninstall|models|stats|export|import|github|pr|debug|session|completion|generate|attach)$/ { print; exit }')
-  case $sub in run|serve|web|acp|mcp|auth|agent|upgrade|uninstall|models|stats|export|import|github|pr|debug|session|completion|generate|attach) continue;; esac
-  log=
+  oc_sub "$d"
+  if [ "$sub" = serve ]; then
+    oc_db "$d"
+    case $db in ''|*'	'*) ;; *)
+      ppid_of "${d#/proc/}"
+      case $pp in ''|*[!0-9]*) ;; *) svdb="$svdb${d#/proc/}	$pp	$db$nl";; esac ;;
+    esac
+  fi
   for fd in "$d"/fd/*; do
     l=$(readlink "$fd" 2>/dev/null) || continue
-    case $l in *"$nl"*) continue;; */opencode/opencode.db) log=$l; break;; esac
+    case $l in 'socket:['*']') i=${l#socket:[}; ocsocks="$ocsocks${d#/proc/} ${i%]}$nl";; esac
   done
-  [ -n "$log" ] || continue
+done
+ocports=
+if [ -n "$svdb" ]; then
+  ocports=$(OCS="$ocsocks" awk 'function hex(s,  n, i) { n = 0; for (i = 1; i <= length(s); i++) n = n * 16 + index("0123456789ABCDEF", toupper(substr(s, i, 1))) - 1; return n }
+    function here(r) { return (length(r) == 8 && substr(r, 7, 2) == "7F") || r == "00000000000000000000000001000000" || (length(r) == 32 && substr(r, 1, 24) == "0000000000000000FFFF0000" && substr(r, 31, 2) == "7F") }
+    BEGIN { n = split(ENVIRON["OCS"], ls, "\n"); for (k = 1; k <= n; k++) if (split(ls[k], f, " ") == 2) own[f[2]] = f[1] }
+    FNR > 1 && ($10 in own) {
+      split($2, a, ":"); split($3, b, ":")
+      if ($4 == "0A") print own[$10], "L", hex(a[2])
+      else if ($4 == "01" && here(b[1])) print own[$10], "C", hex(b[2])
+    }' /proc/net/tcp /proc/net/tcp6 2>/dev/null)
+fi
+for d in $opencodes; do
+  pid=${d#/proc/}
+  oc_sub "$d"
+  case $sub in run|serve|web|acp|mcp|auth|agent|upgrade|update|uninstall|models|stats|export|import|github|pr|debug|session|completion|generate|attach|api|plugin|service|reload|pair) continue;; esac
+  oc_db "$d"
+  log=$db via=
+  if [ -z "$log" ] && [ -n "$svdb" ]; then
+    # (The server it talks to on a port of this host, else the one it began:
+    # not found, its record without a database — another OpenCode where it
+    # runs, which no session is told for.)
+    via=service
+    log=$(printf '%s\n' "$ocports" | awk -v p="$pid" -v S="$svdb" 'BEGIN { n = split(S, ls, "\n"); for (k = 1; k <= n; k++) if (split(ls[k], f, "\t") == 3) db[f[1]] = f[3] }
+      $1 == p && $2 == "C" { want[$3] = 1; next } $2 == "L" { at[$3] = $1 }
+      END { for (q in want) if ((q in at) && (at[q] in db)) { d = db[at[q]]; if (got != "" && got != d) { print ""; exit } got = d } print got }')
+    [ -n "$log" ] || log=$(printf '%s' "$svdb" | awk -F '\t' -v p="$pid" '$2 == p { print $3; exit }')
+  fi
+  [ -n "$log" ] || [ -n "$svdb" ] || continue
   stat_of "$pid" || continue
-  rec "$pid" "$st" "$fg" "$st" 00000000-0000-0000-0000-000000000000 "$log" opencode
+  rec "$pid" "$st" "$fg" "$st" 00000000-0000-0000-0000-000000000000 "$log" opencode "$via"
 done
 exit 0`
 	return "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(mode) + " " + sshx.QuoteShell(tmuxName) + " " + sshx.QuoteShell(tmuxPane) + " " + sshx.QuoteShell(times)
@@ -451,13 +501,18 @@ exit 0`
 }
 
 type convoProc struct {
-	pid, start    int64
-	fg            bool  // in front on its terminal: what is typed there reaches it
-	started       int64 // when it started, unix milliseconds (0 when not known; within the second the host's boot time is known to)
-	wrote         int64 // when its log was last written, unix milliseconds (0: not known)
-	wroteTold     bool  // wrote is its last record's time (not the file's)
-	sid, log      string
-	agent         string // "claude" (Claude Code) or "codex"
+	pid, start int64
+	fg         bool  // in front on its terminal: what is typed there reaches it
+	started    int64 // when it started, unix milliseconds (0 when not known; within the second the host's boot time is known to)
+	wrote      int64 // when its log was last written, unix milliseconds (0: not known)
+	wroteTold  bool  // wrote is its last record's time (not the file's)
+	sid, log   string
+	agent      string // "claude" (Claude Code), "codex" or "opencode"
+	// ocService: an OpenCode 2's, whose database its background service
+	// holds (opencode serve --service, found by the port it talks to):
+	// what herdr says of its session may be another pane's (the service
+	// tells herdr, as the pane that began it), not taken.
+	ocService     bool
 	herdrPane     string
 	herdrSocket   string
 	tmuxSocket    string // (TMUX is "<socket>,<server pid>,<session index>")
@@ -663,6 +718,8 @@ func parseConvoLocate(out string) (l convoLocated) {
 				}
 			case "agent":
 				p.agent = v
+			case "via":
+				p.ocService = v == "service"
 			case "HERDR_PANE_ID":
 				p.herdrPane = v
 			case "HERDR_SOCKET_PATH":
@@ -2460,6 +2517,11 @@ cx=
 # ("cscreen:…": a command of Codex's, not while it waits, on the screen
 # read, its input seen empty there.)
 case $gate in cfree|creply:*|cscreen:*) cx=1 gate=${gate#c} ;; esac
+# ("ofree": a message to OpenCode 2, as "free" — not while it asks for an
+# answer, which takes its input's place: its screen read, that input's
+# edge seen at its foot.)
+oc=
+case $gate in ofree) oc=1 gate=free ;; esac
 case $rd in ''|*[!0-9]*) rd=0;; esac
 # (A message in parts, its length "12+5+30": each part pasted on its own,
 # in turn — a picture's path alone, so that Codex takes it for a picture.
@@ -2612,9 +2674,9 @@ front() {
     # (OpenCode, not one that does not converse. Which of its sessions it
     # is at was told when it was read: it keeps no file to ask here.)
     cs=$(tr '\0' '\001' <"/proc/$pid/cmdline" 2>/dev/null | awk 'BEGIN { RS = "\001" } NR == 1 { next } skip { skip = 0; next } /^--$/ { exit }
-      /^(-[msp]|--(model|session|prompt|agent|port|hostname|log-level|mdns-domain|cors))$/ { skip = 1; next }
-      /^(run|serve|web|acp|mcp|auth|agent|upgrade|uninstall|models|stats|export|import|github|pr|debug|session|completion|generate|attach)$/ { print; exit }')
-    case $cs in run|serve|web|acp|mcp|auth|agent|upgrade|uninstall|models|stats|export|import|github|pr|debug|session|completion|generate|attach) return 1;; esac
+      /^(-[msp]|--(model|session|prompt|agent|port|hostname|log-level|mdns-domain|cors|server|completions))$/ { skip = 1; next }
+      /^(run|serve|web|acp|mcp|auth|agent|upgrade|update|uninstall|models|stats|export|import|github|pr|debug|session|completion|generate|attach|api|plugin|service|reload|pair)$/ { print; exit }')
+    case $cs in run|serve|web|acp|mcp|auth|agent|upgrade|update|uninstall|models|stats|export|import|github|pr|debug|session|completion|generate|attach|api|plugin|service|reload|pair) return 1;; esac
   else
     c=$(head -c 65536 "$HOME/.claude/sessions/$pid.json" 2>/dev/null | tr -d '\n')
     [ "$(printf '%s' "$c" | grep -o '"sessionId" *: *"[0-9a-fA-F-]*"' | head -n 1 | sed 's/.*"\([0-9a-fA-F-]*\)"$/\1/')" = "$sid" ] || return 1
@@ -2632,6 +2694,16 @@ front || exit 3
 # it; 10 where it is not, 11 where it cannot be told).
 # (waiting: what the file says now, its status and what for.)
 waiting() {
+  if [ -n "$oc" ]; then
+    # (Not read: "title-unread", which no text goes by, as Codex's.)
+    st=title-unread wf=
+    if [ "$mode" = tmux ]; then ocs=$(tmux -u capture-pane -p -t "$p" 2>/dev/null 9>&-) || return 0
+    else ocs=$(HERDR_SOCKET_PATH=$sock herdr pane read "$p" --source visible 2>/dev/null 9>&-) || return 0; fi
+    [ -n "$ocs" ] || return 0
+    st=waiting
+    [ "$(printf '%s\n' "$ocs" | awk 'OCEDGEAWK' 2>/dev/null)" = box ] && st=idle
+    return 0
+  fi
   if [ -n "$cx" ]; then
     # (Codex 0.164 titles its terminal "[ ! ] Action Required | …", blinking
     # with "[ . ] …", while it waits for an answer, and only then. Not read
@@ -2823,6 +2895,7 @@ fi`
 	script = strings.ReplaceAll(script, "PANELDIGEST", panelDigestPipe)
 	script = strings.ReplaceAll(script, "LOOKDIGEST", lookDigestPipe)
 	script = strings.ReplaceAll(script, "STEADYSCREEN", steadyPipe)
+	script = strings.ReplaceAll(script, "OCEDGEAWK", ocEdgeAwk)     // (see convo_opencode_input.go)
 	script = strings.ReplaceAll(script, "OWNERAWK", claudeOwnerAwk) // (see convo_view.go)
 	script = strings.ReplaceAll(script, "BOXAWK", claudeBoxAwk)
 	cmd := "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(mode) + " " + sshx.QuoteShell(session) + " " + sshx.QuoteShell(pane) + " " +
@@ -3327,7 +3400,11 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		return
 	}
 	codexLook := front.agent == "codex" && (what == "sent_missing" || what == "sent_enter") // (its input told apart: codexInputArea)
-	if (front.agent == "codex" || front.agent == "opencode") && what != "send" && what != "interrupt" && !codexAnswer && !codexCommand && !codexModel && !codexLook {
+	// (OpenCode's terminal, shown here as it is where a message to it was
+	// refused: its screen, and keys pressed there only on the screen shown —
+	// the "look" gate, whoever's the screen is.)
+	ocLive := front.agent == "opencode" && (what == "panel_screen" || (what == "panel" && b.Live))
+	if (front.agent == "codex" || front.agent == "opencode") && what != "send" && what != "interrupt" && !codexAnswer && !codexCommand && !codexModel && !codexLook && !ocLive {
 		reason = "unsupported"
 		writeError(w, http.StatusConflict, "unsupported", "not for this agent")
 		return
@@ -3404,7 +3481,7 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		return
 	}
 	if what == "panel_screen" {
-		if front.agent != "claude" {
+		if front.agent != "claude" && !ocLive {
 			outcome, reason = "refused", "unsupported"
 			writeError(w, http.StatusConflict, "unsupported", "not for this agent")
 			return
@@ -3463,6 +3540,37 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		gate = "stop" // (a subagent's conversation shown: Escape would stop that one — agent-view.md)
 	case front.agent == "codex" && (what == "send" || what == "send_now"):
 		gate = "cfree" // (likewise: typed into its approval, the Enter would answer it)
+	case front.agent == "opencode" && front.ocService && what == "send":
+		// (OpenCode 2: likewise — its question or permission prompt takes
+		// its input's place, an Enter would answer it. Nor onto words in
+		// its input (what /undo put back there, say): one message of both.
+		// Its screen read now, its input seen there and empty; the host
+		// sees it there again before typing, and before the Enter.)
+		refuse := func(status int, code, msg string) {
+			ended.Done()
+			reason = code
+			writeError(w, status, code, msg)
+		}
+		sctx, scancel := context.WithTimeout(ctx, 10*time.Second)
+		res, err := sshx.Exec(sctx, sess.Client(), convoScreenCommand(sess.Persistence, b.Pane, socket), 512<<10, sshx.ExecOptions{})
+		scancel()
+		if err != nil {
+			refuse(http.StatusBadGateway, "no_screen", "the pane's screen could not be read")
+			return
+		}
+		shown, _, _ := screenOf(res.Out)
+		switch err := ocIdleInput(shown); {
+		case errors.Is(err, errOcAsks):
+			refuse(http.StatusConflict, "agent_waiting", "it asks for an answer: answer it in the terminal first")
+			return
+		case errors.Is(err, errDraft):
+			refuse(http.StatusConflict, "draft", err.Error())
+			return
+		case err != nil:
+			refuse(http.StatusConflict, "cannot_verify", "its input is not seen on its screen: send it in the terminal")
+			return
+		}
+		gate = "ofree"
 	case what == "command" && front.agent == "codex":
 		// (Not while it waits for an answer: typed into it; nor onto a draft
 		// in its input: one message of both. Its screen read now, its input

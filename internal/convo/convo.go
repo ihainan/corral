@@ -119,6 +119,9 @@ type Queued struct {
 	// person's own message; Note: it is a notice, not anyone's message.
 	From string `json:"from,omitempty"`
 	Note bool   `json:"note,omitempty"`
+	// ID: its own, where the agent gives it one that stays when it is
+	// taken in (OpenCode 2's: the message it becomes has it).
+	ID string `json:"id,omitempty"`
 }
 
 // Running is work the agent set going and left to itself: a command in the

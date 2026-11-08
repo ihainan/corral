@@ -47,6 +47,17 @@ type OpenCode struct {
 	// message is sent it deletes it (that message too, without a part).
 	revertAt   string
 	revertPart bool
+	// (OpenCode 2's) revertOrder: where the message /undo went back to is
+	// in the conversation (2's own order: a message sent while it worked
+	// keeps the id it was given then, its place among the others later).
+	revertOrder int64
+	// (OpenCode 2's) busySaid: its session says whether it is at work
+	// (busy), from when it was set going till it came to rest — what its
+	// answers' steps say only of each; queue: what was sent while it
+	// worked, not taken in yet, as last read.
+	busySaid bool
+	busy     bool
+	queue    []Queued
 }
 
 // OpenCodeRow is one line fed: K "m" a message, "p" a part (of message M),
@@ -64,15 +75,32 @@ type OpenCodeRow struct {
 	// a part of it), "" for none.
 	Revert     string `json:"rv,omitempty"`
 	RevertPart bool   `json:"rvp,omitempty"`
+	// (OpenCode 2's) "s": RevertOrder, where that message is (its own
+	// order: O); Busy, whether it is at work. "m": O, the message's place;
+	// NP, how many pieces it holds (its parts, numbered after it: those
+	// numbered after these, held before, are no longer of it). "q": Q,
+	// what waits to be taken in, all of it.
+	RevertOrder int64      `json:"rvo,omitempty"`
+	Busy        *bool      `json:"busy,omitempty"`
+	O           int64      `json:"o,omitempty"`
+	NP          *int       `json:"np,omitempty"`
+	Q           []ocQueued `json:"q,omitempty"`
 	// "ids": the messages there are now, of those made before U (the
 	// last look's cursor) from the first read (sent when fewer are there
 	// than were read: some were deleted).
 	IDs []string `json:"ids,omitempty"`
 }
 
+type ocQueued struct {
+	ID string `json:"id"`
+	C  int64  `json:"c"`
+	T  string `json:"t"`
+}
+
 type ocMsg struct {
 	id      string
 	created int64
+	order   int64 // (OpenCode 2's own: 0 where not said)
 	updated int64
 	raw     string // (the row as last fed: one written over in the same millisecond is told by it)
 	deleted bool   // (no longer in the database: taken back by /undo, then deleted)
@@ -145,11 +173,24 @@ type ocToolState struct {
 	} `json:"metadata"`
 }
 
-// Bounds of what is held of rows not shown.
+// Bounds of what is held of rows not shown, and of what waits.
 const (
 	maxOcOrphanMsgs  = 64
 	maxOcOrphanParts = 256
+	maxOcQueue       = 20
 )
+
+// ocPiece: where the part id is in message msg, read as OpenCode 2's
+// pieces are numbered ("prt_" the message's id's but "msg_", then four
+// digits); ok false for any other id (1's own).
+func ocPiece(id, msg string) (int, bool) {
+	head := "prt_" + strings.TrimPrefix(msg, "msg_")
+	if len(id) != len(head)+4 || !strings.HasPrefix(id, head) {
+		return 0, false
+	}
+	n, err := strconv.Atoi(id[len(head):])
+	return n, err == nil && n >= 0
+}
 
 func NewOpenCode() *OpenCode {
 	return &OpenCode{msgs: map[string]*ocMsg{}, orphans: map[string]map[string]ocPart{}}
@@ -160,7 +201,7 @@ func (c *OpenCode) Title() string      { return c.title }
 func (c *OpenCode) Meta() Meta         { return c.meta }
 func (c *OpenCode) Trimmed() bool      { return c.trimmed }
 func (c *OpenCode) Tasks() []Task      { return c.tasks }
-func (c *OpenCode) Queued() []Queued   { return nil }
+func (c *OpenCode) Queued() []Queued   { return c.queue }
 func (c *OpenCode) Running() []Running { return nil }
 func (c *OpenCode) QueueSince(int64)   {}
 
@@ -168,6 +209,11 @@ func (c *OpenCode) QueueSince(int64)   {}
 // nothing has said.
 func (c *OpenCode) Status() string {
 	switch {
+	case c.busySaid:
+		if c.busy {
+			return "busy"
+		}
+		return "idle"
 	case !c.known:
 		return ""
 	case c.working:
@@ -242,7 +288,20 @@ func (c *OpenCode) take(rows []OpenCodeRow) {
 			c.present(r.IDs, r.U)
 		case "s":
 			c.title = ocTitle(r.Title)
-			c.revertAt, c.revertPart = clip(r.Revert, maxID), r.RevertPart
+			c.revertAt, c.revertPart, c.revertOrder = clip(r.Revert, maxID), r.RevertPart, r.RevertOrder
+			if r.Busy != nil {
+				c.busySaid, c.busy = true, *r.Busy
+			}
+		case "q":
+			q := make([]Queued, 0, min(len(r.Q), maxOcQueue))
+			for _, x := range r.Q {
+				if len(q) == maxOcQueue {
+					break
+				}
+				t, _ := cut(clean(x.T), maxText)
+				q = append(q, Queued{Text: t, Time: ocTime(x.C), ID: clip(x.ID, maxID)})
+			}
+			c.queue = q
 		case "m":
 			if m := c.message(r); m != nil {
 				touched[m] = true
@@ -304,6 +363,9 @@ func (c *OpenCode) gone(m *ocMsg) bool {
 	if c.revertAt == "" {
 		return false
 	}
+	if c.revertOrder > 0 && m.order > 0 {
+		return m.order > c.revertOrder || (m.id == c.revertAt && !c.revertPart)
+	}
 	return m.id > c.revertAt || (m.id == c.revertAt && !c.revertPart)
 }
 
@@ -343,6 +405,18 @@ func (c *OpenCode) message(r OpenCodeRow) *ocMsg {
 		delete(c.orphans, r.ID)
 	}
 	m.updated, m.data, m.raw = r.U, d, r.D
+	if r.O > 0 {
+		m.order = r.O
+	}
+	if r.NP != nil {
+		// (What it holds now, as OpenCode 2 writes it over: pieces numbered
+		// past its count are no longer of it.)
+		for id := range m.parts {
+			if n, ok := ocPiece(id, m.id); ok && n >= *r.NP {
+				delete(m.parts, id)
+			}
+		}
+	}
 	return m
 }
 
@@ -500,6 +574,8 @@ var ocTools = map[string]string{
 	"glob": "Glob", "grep": "Grep", "list": "LS", "webfetch": "WebFetch", "websearch": "WebSearch",
 	"codesearch": "WebSearch", "task": "Task", "todowrite": "TodoWrite", "todoread": "TodoRead",
 	"skill": "Skill", "question": "AskUserQuestion",
+	// (OpenCode 2's names for them)
+	"shell": "Bash", "subagent": "Task",
 }
 
 var ocKeys = map[string]string{"filePath": "file_path", "oldString": "old_string", "newString": "new_string", "replaceAll": "replace_all"}
@@ -537,6 +613,21 @@ func (c *OpenCode) tool(p ocPartData, at int64) *Tool {
 			k = kk
 		}
 		in[k] = v
+	}
+	// (OpenCode 2's: a file's "path", where 1's was "filePath" — not a
+	// search's, whose path is where it looks, as Claude Code's; a
+	// subagent's kind, "agent".)
+	switch name {
+	case "Read", "Edit", "MultiEdit", "Write":
+		if v, ok := raw["path"]; ok && in["file_path"] == nil {
+			in["file_path"] = v
+			delete(in, "path")
+		}
+	case "Task":
+		if v, ok := raw["agent"]; ok && in["subagent_type"] == nil {
+			in["subagent_type"] = v
+			delete(in, "agent")
+		}
 	}
 	b, _ := json.Marshal(in)
 	t := &Tool{ID: clip(p.CallID, maxID), Name: name}
