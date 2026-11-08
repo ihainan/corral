@@ -2518,11 +2518,11 @@ cx=
 # ("cscreen:…": a command of Codex's, not while it waits, on the screen
 # read, its input seen empty there.)
 case $gate in cfree|creply:*|cscreen:*) cx=1 gate=${gate#c} ;; esac
-# ("ofree": a message to OpenCode 2, as "free" — not while it asks for an
-# answer, which takes its input's place: its screen read, that input's
-# edge seen at its foot.)
+# ("ofree:<sha256>": a message to OpenCode 2, as "free" — not while it asks
+# for an answer, which takes its input's place; nor onto words in its input:
+# its input as the gateway saw it empty, its digest, the same here.)
 oc=
-case $gate in ofree) oc=1 gate=free ;; esac
+case $gate in ofree:*) oc=${gate#ofree:} gate=free ;; esac
 case $rd in ''|*[!0-9]*) rd=0;; esac
 # (A message in parts, its length "12+5+30": each part pasted on its own,
 # in turn — a picture's path alone, so that Codex takes it for a picture.
@@ -2701,11 +2701,14 @@ waiting() {
     if [ "$mode" = tmux ]; then ocs=$(tmux -u capture-pane -p -t "$p" 2>/dev/null 9>&-) || return 0
     else ocs=$(HERDR_SOCKET_PATH=$sock herdr pane read "$p" --source visible 2>/dev/null 9>&-) || return 0; fi
     [ -n "$ocs" ] || return 0
-    # (Its input there and empty: idle; words in it: draft — before the
-    # paste, someone's (exit 17); after it, ours.)
-    case $(printf '%s\n' "$ocs" | LC_ALL=C awk 'OCINPUTAWK' 2>/dev/null) in
-    empty) st=idle ;; draft) st=draft ;; *) st=waiting ;;
-    esac
+    # (Its input there and as the gateway saw it: idle; there and changed:
+    # draft — before the paste, words not ours (exit 17); after it, ours.
+    # Not there: it asks something.)
+    st=waiting
+    [ -n "$(printf '%s\n' "$ocs" | OCBOXPIPE 2>/dev/null)" ] || return 0
+    command -v sha256sum >/dev/null 2>&1 || { st=title-unread; return 0; }
+    d=$(printf '%s\n' "$ocs" | OCBOXPIPE 2>/dev/null | sha256sum)
+    if [ "${d%% *}" = "$oc" ]; then st=idle; else st=draft; fi
     return 0
   fi
   if [ -n "$cx" ]; then
@@ -2899,7 +2902,7 @@ fi`
 	script = strings.ReplaceAll(script, "PANELDIGEST", panelDigestPipe)
 	script = strings.ReplaceAll(script, "LOOKDIGEST", lookDigestPipe)
 	script = strings.ReplaceAll(script, "STEADYSCREEN", steadyPipe)
-	script = strings.ReplaceAll(script, "OCINPUTAWK", ocInputAwk)   // (see convo_opencode_input.go)
+	script = strings.ReplaceAll(script, "OCBOXPIPE", ocBoxPipe)     // (see convo_opencode_input.go)
 	script = strings.ReplaceAll(script, "OWNERAWK", claudeOwnerAwk) // (see convo_view.go)
 	script = strings.ReplaceAll(script, "BOXAWK", claudeBoxAwk)
 	cmd := "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(mode) + " " + sshx.QuoteShell(session) + " " + sshx.QuoteShell(pane) + " " +
@@ -3563,6 +3566,7 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 			return
 		}
 		shown, _, _ := screenOf(res.Out)
+		box, boxed := ocBoxDigest(res.Out)
 		switch err := ocIdleInput(shown); {
 		case errors.Is(err, errOcAsks):
 			refuse(http.StatusConflict, "agent_waiting", "it asks for an answer: answer it in the terminal first")
@@ -3570,11 +3574,11 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		case errors.Is(err, errDraft):
 			refuse(http.StatusConflict, "draft", err.Error())
 			return
-		case err != nil:
+		case err != nil || !boxed:
 			refuse(http.StatusConflict, "cannot_verify", "its input is not seen on its screen: send it in the terminal")
 			return
 		}
-		gate = "ofree"
+		gate = "ofree:" + box
 	case what == "command" && front.agent == "codex":
 		// (Not while it waits for an answer: typed into it; nor onto a draft
 		// in its input: one message of both. Its screen read now, its input
@@ -3714,7 +3718,7 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		return
 	case errors.As(err, &exitErr) && exitErr.Status == 17:
 		reason = "draft" // (OpenCode's input holding words, seen on the host: nothing typed)
-		writeError(w, http.StatusConflict, "draft", "its input holds words not sent: nothing typed")
+		writeError(w, http.StatusConflict, "draft", "its input changed since it was seen empty (words typed there?): nothing typed")
 		return
 	case errors.As(err, &exitErr) && exitErr.Status == 10:
 		reason = "screen_changed"

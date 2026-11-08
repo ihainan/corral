@@ -1,6 +1,8 @@
 package web
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"regexp"
 	"strings"
@@ -80,9 +82,10 @@ func ocIdleInput(screen string) error {
 
 // ocPlaceholder: what OpenCode 2's input shows empty, an example of a
 // question in quotes ("Ask anything… "What is the tech stack of this
-// project?"", its end cut off in a narrow pane): not a draft that begins
-// with those words.
-var ocPlaceholder = regexp.MustCompile(`^Ask anything… "[^"]*"?$`)
+// project?"", cut off in a narrow pane): not a draft that begins with those
+// words (but one that begins with them and a quote: not told apart, the
+// words alone read — such a draft is not one anyone types).
+var ocPlaceholder = regexp.MustCompile(`^Ask anything…(?: "[^"]*"?)?$`)
 
 // ocEdge: the line of OpenCode 2's input's bottom edge, among the last
 // three that are not blank (its footer under it: the folder, the hints);
@@ -102,27 +105,61 @@ func ocEdge(lines []string) int {
 	return -1
 }
 
-// ocInputAwk: ocIdleInput on the host, the pane's screen read (LC_ALL=C):
-// "empty" its input there and empty, "draft" words in it, nothing where it is
-// not there (see the gate "ofree", convoGated). What stands at the right of
-// a line of it, thirty blanks or more off, is not its (a sidebar's, past its
-// box: the gateway cuts at the box's width); its own words' blanks before
-// them are its (a draft indented).
-const ocInputAwk = `{ a[NR] = $0 }
+// ocBox: OpenCode 2's input as its screen shows it — from the first of the
+// lines begun "┃" above its edge down to that edge (ocEdge) —, each line
+// without the blanks at its end; the screen without NULs and CRs. ok false
+// where it is not there. Its digest (ocBoxDigest) is what the host checks
+// again before typing: the input seen empty here, unchanged there since —
+// no judging of its words on the host (see the gate "ofree", convoGated).
+func ocBox(raw []byte) (box []string, ok bool) {
+	s := strings.NewReplacer("\x00", "", "\r", "").Replace(string(raw))
+	lines := strings.Split(s, "\n")
+	for i := range lines {
+		lines[i] = strings.TrimRight(lines[i], " \t")
+	}
+	e, seen := -1, 0
+	for i := len(lines) - 1; i >= 0 && seen < 3; i-- {
+		t := strings.TrimLeft(lines[i], " \t")
+		if t == "" {
+			continue
+		}
+		seen++
+		if strings.HasPrefix(t, "╹▀") {
+			e = i
+			break
+		}
+	}
+	if e < 0 {
+		return nil, false
+	}
+	top := e
+	for top > 0 && strings.HasPrefix(strings.TrimLeft(lines[top-1], " \t"), "┃") {
+		top--
+	}
+	if top == e {
+		return nil, false
+	}
+	return lines[top : e+1], true
+}
+
+func ocBoxDigest(raw []byte) (string, bool) {
+	box, ok := ocBox(raw)
+	if !ok {
+		return "", false
+	}
+	sum := sha256.Sum256([]byte(strings.Join(box, "\n") + "\n"))
+	return hex.EncodeToString(sum[:]), true
+}
+
+// ocBoxPipe: ocBox on the host, of the screen that comes in: its lines (none
+// where it is not there). Its sha256 is ocBoxDigest's.
+const ocBoxPipe = `tr -d '\000\r' | LC_ALL=C sed 's/[ 	]*$//' | LC_ALL=C awk '{ a[NR] = $0 }
 END {
   s = 0; e = 0
-  for (i = NR; i >= 1 && s < 3; i--) { t = a[i]; sub(/^[ \t]+/, "", t); if (t == "") continue; s++; if (index(t, "\342\225\271\342\226\200") == 1) { e = i; break } }
-  if (e < 5) exit
-  m = a[e - 1]; sub(/^[ \t]+/, "", m)
-  if (index(m, "\342\224\203") != 1 || index(m, " \302\267 ") == 0) exit
-  top = e - 2
-  while (top > 1) { t = a[top - 1]; sub(/^[ \t]+/, "", t); if (index(t, "\342\224\203") != 1) break; top-- }
-  if (e - 2 - top < 2) exit
-  for (i = top; i <= e - 2; i++) {
-    t = a[i]; sub(/^[ \t]+/, "", t); t = substr(t, 4); sub(/                              +[^ ].*$/, "", t); sub(/^[ \t]+/, "", t); sub(/[ \t]+$/, "", t)
-    if (t == "") continue
-    q = t; n = gsub(/"/, "", q)
-    if (!(index(t, "Ask anything\342\200\246 \"") == 1 && (n == 1 || (n == 2 && t ~ /"$/)))) { print "draft"; exit }
-  }
-  print "empty"
-}`
+  for (i = NR; i >= 1 && s < 3; i--) { t = a[i]; sub(/^[ 	]+/, "", t); if (t == "") continue; s++; if (index(t, "\342\225\271\342\226\200") == 1) { e = i; break } }
+  if (!e) exit
+  top = e
+  while (top > 1) { t = a[top - 1]; sub(/^[ 	]+/, "", t); if (index(t, "\342\224\203") != 1) break; top-- }
+  if (top == e) exit
+  for (i = top; i <= e; i++) print a[i]
+}'`

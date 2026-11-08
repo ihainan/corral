@@ -241,7 +241,7 @@ func TestOcIdleInput(t *testing.T) {
 	for _, c := range []struct {
 		name, screen string
 		want         error
-	}{{"idle", idle, nil}, {"first", first, nil}, {"busy", busy, nil}, {"wide", wide, nil}, {"narrow", narrow, nil},
+	}{{"idle", idle, nil}, {"first", first, nil}, {"busy", busy, nil}, {"wide", wide, nil}, {"narrow", narrow, nil}, {"narrower", strings.Replace(narrow, `Ask anything… "What is the te`, "Ask anything…", 1), nil},
 		{"draft", draft, errDraft}, {"asks-anything draft", strings.Replace(idle, "  ┃\n  ┃\n  ┃\n", "  ┃\n  ┃  Ask anything about this repo\n  ┃\n", 1), errDraft},
 		{"asks-anything… draft", strings.Replace(idle, "  ┃\n  ┃\n  ┃\n", "  ┃\n  ┃  Ask anything… about this repo\n  ┃\n", 1), errDraft},
 		{"indented draft", strings.Replace(idle, "  ┃\n  ┃\n  ┃\n", "  ┃\n  ┃          secret\n  ┃\n", 1), errDraft},
@@ -249,17 +249,20 @@ func TestOcIdleInput(t *testing.T) {
 		if got := ocIdleInput(c.screen); got != c.want {
 			t.Errorf("%s: %v, want %v", c.name, got, c.want)
 		}
-		// (The host's look before typing, by every awk there is here: the same.)
-		want := map[error]string{nil: "empty", errDraft: "draft", errOcAsks: "", errScreen: ""}[c.want]
+		// (The host's look before typing: its input's digest as the gateway's,
+		// by every awk there is here; none where it is not there.)
+		gw, boxed := ocBoxDigest([]byte(c.screen))
 		for _, awk := range []string{"awk", "mawk", "gawk", "busybox awk"} {
 			if _, err := exec.LookPath(strings.Fields(awk)[0]); err != nil {
 				continue
 			}
-			cmd := exec.Command("sh", "-c", "LC_ALL=C "+awk+" \"$0\"", ocInputAwk)
+			pipe := strings.ReplaceAll(ocBoxPipe, "LC_ALL=C awk", "LC_ALL=C "+awk)
+			cmd := exec.Command("sh", "-c", `b=$(`+pipe+`); [ -n "$b" ] || exit 0; printf '%s\n' "$b" | sha256sum`)
 			cmd.Stdin = strings.NewReader(c.screen)
 			out, err := cmd.Output()
-			if got := strings.TrimSpace(string(out)); err != nil || got != want {
-				t.Errorf("%s, %s: host says %q (%v), want %q", c.name, awk, got, err, want)
+			host, _, _ := strings.Cut(strings.TrimSpace(string(out)), " ")
+			if err != nil || host != gw || (host != "") != boxed {
+				t.Errorf("%s, %s: host %q (%v), gateway %q", c.name, awk, host, err, gw)
 			}
 		}
 	}
