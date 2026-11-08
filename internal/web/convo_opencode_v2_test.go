@@ -229,18 +229,23 @@ func TestOpenCode2Find(t *testing.T) {
 // empty; words in it; a permission or a question in its place; neither.
 func TestOcIdleInput(t *testing.T) {
 	idle := "     Build · Mock One · 8.5s · 9.9 tok/s\n\n\n  ┃\n  ┃\n  ┃\n  ┃  Build · Mock One Mock\n  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n  ~/proj                                1.0K (1%)  ctrl+p commands\n\n"
-	first := "  ┃\n  ┃  Ask anything… \"What is the tech stack of this project?\"\n  ┃\n  ┃  Build · Mock One Mock\n  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n  ~/proj       shift+tab agents  ctrl+p commands\n                                                                  2.2.6\n"
+	first := "  ┃\n  ┃  Ask anything… \"What is the tech stack of this project?\"\n  ┃\n  ┃  Build · Mock One Mock\n  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n  ~/proj       shift+tab agents  ctrl+p commands\n                                                                  2.2.6\n"
 	busy := "  ┃  second while busy\n  ┃\n\n\n  ┃\n  ┃\n  ┃\n  ┃  Build · Mock One Mock\n  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n   ⬝⬝■■■■■■ esc interrupt          1.0K (1%)  ctrl+p commands\n"
 	// (A sidebar beside it, wider than its box: not its.)
-	wide := "  ┃                          Context\n  ┃                          1,020 tokens\n  ┃\n  ┃  Build · Mock One Mock\n  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n"
+	wide := "  ┃" + strings.Repeat(" ", 62) + "Context\n  ┃" + strings.Repeat(" ", 62) + "1,020 tokens\n  ┃\n  ┃  Build · Mock One Mock\n  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n"
+	// (Its placeholder cut off in a narrow pane.)
+	narrow := "  ┃\n  ┃  Ask anything… \"What is the te\n  ┃\n  ┃  Build · Mock\n  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n"
 	draft := "  ┃  1 message reverted\n  ┃  ctrl+x r or /redo to restore\n\n  ┃\n  ┃  do a command\n  ┃\n  ┃  Build · Mock One Mock\n  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n  ~/proj\n"
 	perm := "  ┃\n  ┃  △ Permission required\n  ┃\n  ┃  $ echo needs-ok\n  ┃\n  ┃   Allow once   Always allow   Reject        ctrl+f fullscreen  ⇆ select  enter confirm\n  ┃                                                  ~/proj\n"
 	ask := "  ┃  Which database?\n  ┃  1. SQLite\n  ┃  2. Postgres\n  ┃  3. Type your own answer\n  ┃\n  ┃  ↑↓ select  enter submit  esc dismiss\n  ┃                                   ~/proj\n"
 	for _, c := range []struct {
 		name, screen string
 		want         error
-	}{{"idle", idle, nil}, {"first", first, nil}, {"busy", busy, nil}, {"wide", wide, nil},
-		{"draft", draft, errDraft}, {"asks-anything draft", strings.Replace(idle, "  ┃\n  ┃\n  ┃\n", "  ┃\n  ┃  Ask anything about this repo\n  ┃\n", 1), errDraft}, {"permission", perm, errOcAsks}, {"question", ask, errOcAsks}, {"other", "$ \n", errScreen}} {
+	}{{"idle", idle, nil}, {"first", first, nil}, {"busy", busy, nil}, {"wide", wide, nil}, {"narrow", narrow, nil},
+		{"draft", draft, errDraft}, {"asks-anything draft", strings.Replace(idle, "  ┃\n  ┃\n  ┃\n", "  ┃\n  ┃  Ask anything about this repo\n  ┃\n", 1), errDraft},
+		{"asks-anything… draft", strings.Replace(idle, "  ┃\n  ┃\n  ┃\n", "  ┃\n  ┃  Ask anything… about this repo\n  ┃\n", 1), errDraft},
+		{"indented draft", strings.Replace(idle, "  ┃\n  ┃\n  ┃\n", "  ┃\n  ┃          secret\n  ┃\n", 1), errDraft},
+		{"sidebar by an empty input", strings.Replace(idle, "  ┃\n  ┃\n  ┃\n", "  ┃\n  ┃"+strings.Repeat(" ", 62)+"Modified files\n  ┃\n", 1), nil}, {"permission", perm, errOcAsks}, {"question", ask, errOcAsks}, {"other", "$ \n", errScreen}} {
 		if got := ocIdleInput(c.screen); got != c.want {
 			t.Errorf("%s: %v, want %v", c.name, got, c.want)
 		}

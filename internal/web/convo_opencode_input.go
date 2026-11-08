@@ -2,6 +2,7 @@ package web
 
 import (
 	"errors"
+	"regexp"
 	"strings"
 )
 
@@ -70,13 +71,18 @@ func ocIdleInput(screen string) error {
 	}
 	for i := top; i <= edge-2; i++ {
 		t, _ := in(i)
-		// (Its placeholder, "Ask anything… …": not a draft that begins so.)
-		if t != "" && !strings.HasPrefix(t, "Ask anything…") {
+		if t != "" && !ocPlaceholder.MatchString(t) {
 			return errDraft
 		}
 	}
 	return nil
 }
+
+// ocPlaceholder: what OpenCode 2's input shows empty, an example of a
+// question in quotes ("Ask anything… "What is the tech stack of this
+// project?"", its end cut off in a narrow pane): not a draft that begins
+// with those words.
+var ocPlaceholder = regexp.MustCompile(`^Ask anything… "[^"]*"?$`)
 
 // ocEdge: the line of OpenCode 2's input's bottom edge, among the last
 // three that are not blank (its footer under it: the folder, the hints);
@@ -99,7 +105,9 @@ func ocEdge(lines []string) int {
 // ocInputAwk: ocIdleInput on the host, the pane's screen read (LC_ALL=C):
 // "empty" its input there and empty, "draft" words in it, nothing where it is
 // not there (see the gate "ofree", convoGated). What stands at the right of
-// a line of it, eight blanks or more off, is not its (a sidebar's).
+// a line of it, thirty blanks or more off, is not its (a sidebar's, past its
+// box: the gateway cuts at the box's width); its own words' blanks before
+// them are its (a draft indented).
 const ocInputAwk = `{ a[NR] = $0 }
 END {
   s = 0; e = 0
@@ -111,8 +119,10 @@ END {
   while (top > 1) { t = a[top - 1]; sub(/^[ \t]+/, "", t); if (index(t, "\342\224\203") != 1) break; top-- }
   if (e - 2 - top < 2) exit
   for (i = top; i <= e - 2; i++) {
-    t = a[i]; sub(/^[ \t]+/, "", t); t = substr(t, 4); sub(/        +.*$/, "", t); sub(/^[ \t]+/, "", t); sub(/[ \t]+$/, "", t)
-    if (t != "" && index(t, "Ask anything\342\200\246") != 1) { print "draft"; exit }
+    t = a[i]; sub(/^[ \t]+/, "", t); t = substr(t, 4); sub(/                              +[^ ].*$/, "", t); sub(/^[ \t]+/, "", t); sub(/[ \t]+$/, "", t)
+    if (t == "") continue
+    q = t; n = gsub(/"/, "", q)
+    if (!(index(t, "Ask anything\342\200\246 \"") == 1 && (n == 1 || (n == 2 && t ~ /"$/)))) { print "draft"; exit }
   }
   print "empty"
 }`
