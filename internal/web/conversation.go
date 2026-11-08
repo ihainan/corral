@@ -410,13 +410,14 @@ for d in $opencodes; do
   oc_db "$d"
   log=$db via=
   if [ -z "$log" ] && [ -n "$svdb" ]; then
-    # (The server it talks to on a port of this host, else the one it began:
-    # not found, its record without a database — another OpenCode where it
-    # runs, which no session is told for.)
+    # (The server it talks to on a port of this host — a port two listen on,
+    # one on each of IPv4's and IPv6's loopback, says nothing —, else the one
+    # it began: not found, its record without a database — another OpenCode
+    # where it runs, which no session is told for.)
     via=service
     log=$(printf '%s\n' "$ocports" | awk -v p="$pid" -v S="$svdb" 'BEGIN { n = split(S, ls, "\n"); for (k = 1; k <= n; k++) if (split(ls[k], f, "\t") == 3) db[f[1]] = f[3] }
-      $1 == p && $2 == "C" { want[$3] = 1; next } $2 == "L" { at[$3] = $1 }
-      END { for (q in want) if ((q in at) && (at[q] in db)) { d = db[at[q]]; if (got != "" && got != d) { print ""; exit } got = d } print got }')
+      $1 == p && $2 == "C" { want[$3] = 1; next } $2 == "L" { if (($3 in at) && at[$3] != $1) two[$3] = 1; at[$3] = $1 }
+      END { for (q in want) if ((q in at) && !(q in two) && (at[q] in db)) { d = db[at[q]]; if (got != "" && got != d) { print ""; exit } got = d } print got }')
     [ -n "$log" ] || log=$(printf '%s' "$svdb" | awk -F '\t' -v p="$pid" '$2 == p { print $3; exit }')
   fi
   [ -n "$log" ] || [ -n "$svdb" ] || continue
@@ -2700,8 +2701,11 @@ waiting() {
     if [ "$mode" = tmux ]; then ocs=$(tmux -u capture-pane -p -t "$p" 2>/dev/null 9>&-) || return 0
     else ocs=$(HERDR_SOCKET_PATH=$sock herdr pane read "$p" --source visible 2>/dev/null 9>&-) || return 0; fi
     [ -n "$ocs" ] || return 0
-    st=waiting
-    [ "$(printf '%s\n' "$ocs" | awk 'OCEDGEAWK' 2>/dev/null)" = box ] && st=idle
+    # (Its input there and empty: idle; words in it: draft — before the
+    # paste, someone's (exit 17); after it, ours.)
+    case $(printf '%s\n' "$ocs" | LC_ALL=C awk 'OCINPUTAWK' 2>/dev/null) in
+    empty) st=idle ;; draft) st=draft ;; *) st=waiting ;;
+    esac
     return 0
   fi
   if [ -n "$cx" ]; then
@@ -2740,7 +2744,7 @@ gate_enter() {
 if [ -n "$gate" ]; then
   waiting
   case $gate in
-  free|enter) [ "$st" = waiting ] && exit 9; [ "$st" = title-unread ] && exit 11 ;;
+  free|enter) [ "$st" = waiting ] && exit 9; [ "$st" = title-unread ] && exit 11; [ "$st" = draft ] && exit 17 ;;
   # (Stop, Claude Code's: whatever its session file says — only who has
   # its box, owned below: a subagent's shown, Escape would stop that one.)
   stop) ;;
@@ -2895,7 +2899,7 @@ fi`
 	script = strings.ReplaceAll(script, "PANELDIGEST", panelDigestPipe)
 	script = strings.ReplaceAll(script, "LOOKDIGEST", lookDigestPipe)
 	script = strings.ReplaceAll(script, "STEADYSCREEN", steadyPipe)
-	script = strings.ReplaceAll(script, "OCEDGEAWK", ocEdgeAwk)     // (see convo_opencode_input.go)
+	script = strings.ReplaceAll(script, "OCINPUTAWK", ocInputAwk)   // (see convo_opencode_input.go)
 	script = strings.ReplaceAll(script, "OWNERAWK", claudeOwnerAwk) // (see convo_view.go)
 	script = strings.ReplaceAll(script, "BOXAWK", claudeBoxAwk)
 	cmd := "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(mode) + " " + sshx.QuoteShell(session) + " " + sshx.QuoteShell(pane) + " " +
@@ -3707,6 +3711,10 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	case errors.As(err, &exitErr) && exitErr.Status == 5 && gate != "":
 		reason = "typed_not_sent"
 		writeError(w, http.StatusConflict, "typed_not_sent", "the text is in its input, not sent: it came to wait for an answer first")
+		return
+	case errors.As(err, &exitErr) && exitErr.Status == 17:
+		reason = "draft" // (OpenCode's input holding words, seen on the host: nothing typed)
+		writeError(w, http.StatusConflict, "draft", "its input holds words not sent: nothing typed")
 		return
 	case errors.As(err, &exitErr) && exitErr.Status == 10:
 		reason = "screen_changed"

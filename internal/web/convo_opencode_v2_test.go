@@ -194,6 +194,21 @@ func TestOpenCode2Rewritten(t *testing.T) {
 	if got := strings.Join(ocSaid(p), "\n"); got != "assistant: text:final" {
 		t.Fatalf("got %q", got)
 	}
+	// (In the same millisecond, the message's own words the same: still told.)
+	same := [][]any{{"assistant", "msg_d0000000001", 5, 100, 110, map[string]any{"time": map[string]any{"created": 100}, "content": []any{
+		map[string]any{"type": "text", "text": "draft one"}}}}}
+	p = convo.NewOpenCode()
+	p.Feed(ocFeedRows(ocV2Run(t, ocV2DB(t, two, nil, true, ""), "tail", "100")))
+	p.Feed(ocFeedRows(ocV2Run(t, ocV2DB(t, same, nil, true, ""), "since", "110", "0", "")))
+	if got := strings.Join(ocSaid(p), "\n"); got != "assistant: text:draft one" {
+		t.Fatalf("same millisecond: got %q", got)
+	}
+	// (Holding nothing now: nothing of what it held is shown.)
+	none := [][]any{{"assistant", "msg_d0000000001", 5, 100, 130, map[string]any{"time": map[string]any{"created": 100}, "content": []any{}}}}
+	p.Feed(ocFeedRows(ocV2Run(t, ocV2DB(t, none, nil, true, ""), "since", "110", "0", "")))
+	if got := strings.Join(ocSaid(p), "\n"); got != "assistant: " {
+		t.Fatalf("emptied: got %q", got)
+	}
 }
 
 // Where it runs: the latest top-level session of 2's (not a subagent's),
@@ -225,16 +240,22 @@ func TestOcIdleInput(t *testing.T) {
 		name, screen string
 		want         error
 	}{{"idle", idle, nil}, {"first", first, nil}, {"busy", busy, nil}, {"wide", wide, nil},
-		{"draft", draft, errDraft}, {"permission", perm, errOcAsks}, {"question", ask, errOcAsks}, {"other", "$ \n", errScreen}} {
+		{"draft", draft, errDraft}, {"asks-anything draft", strings.Replace(idle, "  ┃\n  ┃\n  ┃\n", "  ┃\n  ┃  Ask anything about this repo\n  ┃\n", 1), errDraft}, {"permission", perm, errOcAsks}, {"question", ask, errOcAsks}, {"other", "$ \n", errScreen}} {
 		if got := ocIdleInput(c.screen); got != c.want {
 			t.Errorf("%s: %v, want %v", c.name, got, c.want)
 		}
-		// (The host's look before the Enter: the edge there or not, as here.)
-		cmd := exec.Command("awk", ocEdgeAwk)
-		cmd.Stdin = strings.NewReader(c.screen)
-		out, _ := cmd.Output()
-		if box := strings.TrimSpace(string(out)) == "box"; box != (ocEdge(strings.Split(strings.TrimRight(c.screen, "\n"), "\n")) >= 0) {
-			t.Errorf("%s: host says box %v", c.name, box)
+		// (The host's look before typing, by every awk there is here: the same.)
+		want := map[error]string{nil: "empty", errDraft: "draft", errOcAsks: "", errScreen: ""}[c.want]
+		for _, awk := range []string{"awk", "mawk", "gawk", "busybox awk"} {
+			if _, err := exec.LookPath(strings.Fields(awk)[0]); err != nil {
+				continue
+			}
+			cmd := exec.Command("sh", "-c", "LC_ALL=C "+awk+" \"$0\"", ocInputAwk)
+			cmd.Stdin = strings.NewReader(c.screen)
+			out, err := cmd.Output()
+			if got := strings.TrimSpace(string(out)); err != nil || got != want {
+				t.Errorf("%s, %s: host says %q (%v), want %q", c.name, awk, got, err, want)
+			}
 		}
 	}
 }

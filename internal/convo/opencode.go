@@ -482,6 +482,11 @@ func (c *OpenCode) show(m *ocMsg) {
 		c.saw(m)
 	}
 	if len(parts) == 0 {
+		// (Shown before, holding nothing now — OpenCode 2's written over
+		// with fewer pieces —: what it held is not shown either.)
+		if m.e != nil && len(m.e.Parts) > 0 {
+			m.e.Rev, m.e.Parts = c.rev, nil
+		}
 		return
 	}
 	if len(parts) > maxParts {

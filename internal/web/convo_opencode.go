@@ -229,6 +229,7 @@ def v2rows(m):
                 held.append(v2tool(it))
             else:
                 held.append({'type': 'other'})  # (kept in its place: what follows keeps its number)
+    o['np'] = len(held)  # (in what it says too: written over in the same millisecond, fewer, it is read again)
     rows = [(m[2], 0, m[0], line({'k': 'm', 'id': m[0], 'c': m[1], 'u': m[2], 'o': m[5], 'np': len(held), 'd': json.dumps(o, ensure_ascii=False, separators=(',', ':'))}))]
     for i, h in enumerate(held):
         pid = 'prt_' + m[0][4:] + '%04d' % i

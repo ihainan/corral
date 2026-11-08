@@ -70,7 +70,8 @@ func ocIdleInput(screen string) error {
 	}
 	for i := top; i <= edge-2; i++ {
 		t, _ := in(i)
-		if t != "" && !strings.HasPrefix(t, "Ask anything") {
+		// (Its placeholder, "Ask anything… …": not a draft that begins so.)
+		if t != "" && !strings.HasPrefix(t, "Ask anything…") {
 			return errDraft
 		}
 	}
@@ -95,6 +96,23 @@ func ocEdge(lines []string) int {
 	return -1
 }
 
-// ocEdgeAwk: ocEdge on the host, the pane's screen read: "box" where its
-// input's edge is there (see the gate "ofree", convoGated).
-const ocEdgeAwk = `{ a[NR] = $0 } END { s = 0; for (i = NR; i >= 1 && s < 3; i--) { t = a[i]; sub(/^[ \t]+/, "", t); if (t == "") continue; s++; if (index(t, "╹▀") == 1) { print "box"; exit } } }`
+// ocInputAwk: ocIdleInput on the host, the pane's screen read (LC_ALL=C):
+// "empty" its input there and empty, "draft" words in it, nothing where it is
+// not there (see the gate "ofree", convoGated). What stands at the right of
+// a line of it, eight blanks or more off, is not its (a sidebar's).
+const ocInputAwk = `{ a[NR] = $0 }
+END {
+  s = 0; e = 0
+  for (i = NR; i >= 1 && s < 3; i--) { t = a[i]; sub(/^[ \t]+/, "", t); if (t == "") continue; s++; if (index(t, "\342\225\271\342\226\200") == 1) { e = i; break } }
+  if (e < 5) exit
+  m = a[e - 1]; sub(/^[ \t]+/, "", m)
+  if (index(m, "\342\224\203") != 1 || index(m, " \302\267 ") == 0) exit
+  top = e - 2
+  while (top > 1) { t = a[top - 1]; sub(/^[ \t]+/, "", t); if (index(t, "\342\224\203") != 1) break; top-- }
+  if (e - 2 - top < 2) exit
+  for (i = top; i <= e - 2; i++) {
+    t = a[i]; sub(/^[ \t]+/, "", t); t = substr(t, 4); sub(/        +.*$/, "", t); sub(/^[ \t]+/, "", t); sub(/[ \t]+$/, "", t)
+    if (t != "" && index(t, "Ask anything\342\200\246") != 1) { print "draft"; exit }
+  }
+  print "empty"
+}`
