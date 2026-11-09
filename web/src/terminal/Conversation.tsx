@@ -1832,6 +1832,21 @@ export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const
 // (now: what a switch took, until the log says it — an answer names the
 // level, and none comes of the switch itself.)
 export type EffortSwitch = { now?: string; busy: boolean; can: boolean; onPick: (level: string) => void }
+
+// named: what to show a model as, and what is left to say of it. A picker
+// names the model short and says the rest beside it, beginning with the
+// full name: "Opus", "Opus 5.5 · Best for everyday, complex tasks · $4/$20
+// per Mtok" (Claude Code 2.1.319). The full name is shown, the rest under
+// it, so the name is not read twice; where the two do not go together
+// (another agent's picker, another wording), both stay as they came. The
+// name the pick is made with is o.label either way, untouched.
+export function named(o: ModelOpt): [string, string] {
+  const desc = o.desc ?? ''
+  const at = desc.indexOf(' · ')
+  const head = at > 0 ? desc.slice(0, at) : ''
+  const word = o.label.split(/\s+/)[0]
+  return head && word && head.toLowerCase().startsWith(word.toLowerCase()) ? [head, desc.slice(at + 3)] : [o.label, desc]
+}
 const effortName = (e: string) => ((EFFORTS as readonly string[]).includes(e) ? t(`convo.effort.${e}` as I18nKey) : e)
 
 // What the session runs with, under the composer: its permission mode on
@@ -1913,12 +1928,14 @@ function Runs({ meta, active, mode, model, effort, quota, via, auth }: { meta: C
         return
       }
       const at = box.current.getBoundingClientRect()
-      // (The context's details: over the composer, not over its send and stop button.)
-      const over = open === 'ctx' ? box.current.parentElement?.querySelector<HTMLElement>('.composer-box')?.getBoundingClientRect() : undefined
-      const edge = over && over.bottom <= at.top + 1 ? over.top : at.top
-      pop.style.bottom = over && edge !== at.top ? Math.round(at.bottom - edge + 6) + 'px' : ''
-      const top = edge - (vv ? vv.offsetTop : 0)
-      pop.style.maxHeight = Math.max(0, Math.min(top, seen) - 16) + 'px'
+      // Each of them opens straight above this row, the composer under it
+      // covered while it is open — one way for all four, where the
+      // context's used to be kept clear of the composer and the three
+      // menus were not. (It is the room they have: kept clear, the
+      // context's details had the least room of the four and the most to
+      // say.)
+      pop.style.bottom = ''
+      pop.style.maxHeight = Math.max(0, Math.min(at.top - (vv ? vv.offsetTop : 0), seen) - 16) + 'px'
     }
     fit()
     vv?.addEventListener('resize', fit)
@@ -1934,6 +1951,11 @@ function Runs({ meta, active, mode, model, effort, quota, via, auth }: { meta: C
   // the host, or, for Amazon's and Google's, which have no address of their
   // own to show, their name. "" is the quiet case, most of them.
   const where = via || (auth === 'bedrock' ? 'Amazon Bedrock' : auth === 'vertex' ? 'Google Vertex AI' : '')
+  // merged: the model and how hard it thinks are chosen in one menu, which
+  // the effort chip opens as well. Both must be there to switch, and the
+  // agent must not already choose the two together (a Codex's picker
+  // does: its efforts hang under each model instead).
+  const merged = !!model?.can && !!effort?.can && !model?.efforts
   const used = meta.context ?? 0
   // (Where it is not known: past the smaller window, the session has the
   // larger one. Known and filled past, it was not that one after all.)
@@ -2003,13 +2025,18 @@ function Runs({ meta, active, mode, model, effort, quota, via, auth }: { meta: C
             ref={effortBtn}
             type="button"
             className="convo-runs-item convo-runs-effort is-switch"
-            aria-expanded={open === 'effort'}
+            aria-expanded={open === (merged ? 'model' : 'effort')}
             aria-haspopup="menu"
             aria-label={t('convo.effort') + ': ' + effortName(level)}
             disabled={effort.busy}
             aria-busy={effort.busy || undefined}
-            title={t('convo.effortSwitch')}
-            onClick={() => setOpen(open === 'effort' ? false : 'effort')}
+            title={t(merged ? 'convo.modelEffortSwitch' : 'convo.effortSwitch')}
+            // (Merged: the one menu, the models read as the model chip reads them.)
+            onClick={() => {
+              const which = merged ? 'model' : 'effort'
+              if (open !== which && merged) model!.onOpen()
+              setOpen(open === which ? false : which)
+            }}
           >
             {t('convo.effortShort', { e: effortName(level) })}
             <ChevronsUpDown size={12} aria-hidden="true" />
@@ -2047,6 +2074,7 @@ function Runs({ meta, active, mode, model, effort, quota, via, auth }: { meta: C
               // (As its picker last said, which the log may not yet. A Codex's
               // log names it in small letters: "gpt-6-sol" is "GPT-6-Sol".)
               const now = model.fresh && model.list!.some((x) => x.current) ? !!o.current : modelName(meta.model!).toLowerCase() === o.label.toLowerCase()
+              const [name, says] = named(o)
               const pick = (effort?: string) => {
                 setOpen(false)
                 setEffortsOf('')
@@ -2061,10 +2089,11 @@ function Runs({ meta, active, mode, model, effort, quota, via, auth }: { meta: C
                     aria-checked={now}
                     aria-expanded={model.efforts ? effortsOf === o.label : undefined}
                     className="convo-models-item"
+                    title={o.label}
                     onClick={() => (model.efforts ? setEffortsOf(effortsOf === o.label ? '' : o.label) : pick())}
                   >
-                    <span className="convo-models-label">{o.label}</span>
-                    {o.desc && <span className="convo-models-desc">{o.desc}</span>}
+                    <span className="convo-models-label">{name}</span>
+                    {says && <span className="convo-models-desc">{says}</span>}
                     {now && <Check size={14} aria-hidden="true" />}
                   </button>
                   {model.efforts && effortsOf === o.label && (
@@ -2080,7 +2109,35 @@ function Runs({ meta, active, mode, model, effort, quota, via, auth }: { meta: C
               )
             })
           )}
-          <p className="convo-runs-note">{t('convo.modelOnly')}</p>
+          {/* How hard it is asked to think, in the same menu as the model
+              — as Claude Code's own picker has it (its slider sits under
+              the models) and as the chat apps have come to. A Codex's
+              efforts are already chosen with its model, above. */}
+          {merged && effort && (
+            <>
+              <p className="convo-models-group" aria-hidden="true">{t('convo.effort')}</p>
+              <div className="convo-models-efforts" role="group" aria-label={t('convo.effort')}>
+                {EFFORTS.map((e) => (
+                  <button
+                    key={e}
+                    type="button"
+                    role="menuitemradio"
+                    aria-checked={(effort.now || meta.effort) === e}
+                    className={'convo-models-effort' + ((effort.now || meta.effort) === e ? ' is-current' : '')}
+                    disabled={effort.busy}
+                    onClick={() => {
+                      setOpen(false)
+                      effortBtn.current?.focus()
+                      effort.onPick(e)
+                    }}
+                  >
+                    {effortName(e)}
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
+          <p className="convo-runs-note">{t(merged ? 'convo.modelEffortOnly' : 'convo.modelOnly')}</p>
         </div>
       )}
       {open === 'mode' && mode?.onPick && (
@@ -2144,6 +2201,12 @@ function Runs({ meta, active, mode, model, effort, quota, via, auth }: { meta: C
       )}
       {open === 'ctx' && (
         <div className={'convo-runs-pop' + (sheet ? ' is-sheet' : '')} role="dialog" aria-label={t('convo.ctxTitle')}>
+          {/* Two blocks, each under a name of its own: what this session
+              runs with, then the account's quota — which before had the
+              only heading of the two, as though the rest hung off it. */}
+          <div className="convo-runs-row convo-cost-head">
+            <span>{t('convo.ctxHead')}</span>
+          </div>
           <div className="convo-runs-row">
             <span>{t('convo.ctxTitle')}</span>
             <span>{t('convo.ctxTokens', { n: used.toLocaleString(getLang()) })}</span>
@@ -2160,17 +2223,19 @@ function Runs({ meta, active, mode, model, effort, quota, via, auth }: { meta: C
               </div>
             )
           })}
+          {/* What the bars are of, under them: it was under the model
+              before, where it read as being about the model. */}
+          <p className="convo-runs-note">
+            {known
+              ? t(meta.window_by === 'model' ? 'convo.ctxNoteModel' : meta.window_by === 'request' ? 'convo.ctxNoteWide' : 'convo.ctxNoteSaid', { w: tokens(known) })
+              : t(windows.length > 1 ? 'convo.ctxNote' : 'convo.ctxNoteBig')}
+          </p>
           {meta.model && (
             <div className="convo-runs-row">
               <span>{t('convo.model')}</span>
               <span title={meta.model}>{modelName(meta.model)}</span>
             </div>
           )}
-          <p className="convo-runs-note">
-            {known
-              ? t(meta.window_by === 'model' ? 'convo.ctxNoteModel' : meta.window_by === 'request' ? 'convo.ctxNoteWide' : 'convo.ctxNoteSaid', { w: tokens(known) })
-              : t(windows.length > 1 ? 'convo.ctxNote' : 'convo.ctxNoteBig')}
-          </p>
           {meta.answer && <AnswerPart answer={meta.answer} />}
           {quota && ('codex' in quota ? <QuotaSaid quota={quota.said} /> : <QuotaPart key={quota.sid + ' ' + quota.session} sid={quota.sid} session={quota.session} />)}
           {/* The subscription's use, where it is left out because this
@@ -2288,13 +2353,29 @@ function useRedraw(ms: number) {
 function quotaClock(sec: number) {
   const d = new Date(sec * 1000)
   const time = d.toLocaleTimeString(getLang(), { hour: '2-digit', minute: '2-digit', hour12: false })
-  // (Another day: its date and weekday apart, "11月2日 周一 16:43".)
-  return d.toDateString() === new Date().toDateString() ? time : [d.toLocaleDateString(getLang(), { month: 'long', day: 'numeric' }), d.toLocaleDateString(getLang(), { weekday: 'short' }), time].join(' ')
+  // (Another day: its date and weekday apart, "11月2日 周一 16:43". The
+  // month short: spelt out, an English date ran the line it is on to two
+  // — "resets November 15 Sun 22:59" — while "11月15日" never did.)
+  return d.toDateString() === new Date().toDateString() ? time : [d.toLocaleDateString(getLang(), { month: 'short', day: 'numeric' }), d.toLocaleDateString(getLang(), { weekday: 'short' }), time].join(' ')
+}
+
+// resetClock: when a window of the quota comes back, as a line that fits
+// beside "19% used ·". A window runs five hours or a week, so within the
+// week ahead the weekday says it ("Sun 22:59") and the date would only
+// make the line too long to fit — which is how it read before, wrapped
+// under itself. Further off than that (nothing in a quota should be), the
+// date as well.
+function resetClock(sec: number) {
+  const d = new Date(sec * 1000)
+  const time = d.toLocaleTimeString(getLang(), { hour: '2-digit', minute: '2-digit', hour12: false })
+  if (d.toDateString() === new Date().toDateString()) return time
+  const week = d.toLocaleDateString(getLang(), { weekday: 'short' })
+  return sec * 1000 - Date.now() < 7 * 86400000 ? [week, time].join(' ') : [d.toLocaleDateString(getLang(), { month: 'short', day: 'numeric' }), week, time].join(' ')
 }
 
 // The two windows' use, bars at 80% and 95% coloured; then what is said of it.
 function QuotaView({ shown, children }: { shown?: { five_hour?: ConvoQuotaWindow; weekly?: ConvoQuotaWindow }; children?: ReactNode }) {
-  const clock = quotaClock
+  const clock = resetClock
   const now = Date.now() / 1000
   return (
     <div className="convo-cost convo-quota">

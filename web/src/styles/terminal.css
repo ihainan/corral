@@ -578,6 +578,8 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-models-desc { grid-column: 1; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-3); }
 .convo-models-item svg { grid-column: 2; grid-row: 1 / span 2; }
 .convo-models .convo-runs-note { margin: 4px 8px 2px; }
+/* (What the chips under it are: the menu's own small heading.) */
+.convo-models-group { margin: 6px 8px 0; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-3); }
 /* (A Codex's efforts, chosen with its model: under it, a row of chips.) */
 .convo-models-efforts { display: flex; flex-wrap: wrap; gap: 6px; padding: 4px 8px 8px; }
 .convo-models-effort {
