@@ -2008,19 +2008,23 @@ function Runs({ meta, active, mode, model, effort, quota, via, auth }: { meta: C
             aria-haspopup="menu"
             disabled={model.busy}
             aria-busy={model.busy || undefined}
-            title={t('convo.modelSwitch')}
+            title={t(merged ? 'convo.modelEffortSwitch' : 'convo.modelSwitch')}
             onClick={() => {
               if (open !== 'model') model.onOpen()
               setOpen(open === 'model' ? false : 'model')
             }}
           >
-            {modelName(meta.model)}
+            {/* Merged: the model and how hard it thinks are the one choice,
+                so they are the one chip — the menu behind them is one. */}
+            {merged && meta.effort
+              ? t('convo.modelEffortChip', { m: modelName(meta.model), e: effortName(effort!.now || meta.effort!) })
+              : modelName(meta.model)}
             <ChevronsUpDown size={12} aria-hidden="true" />
           </button>
         ) : (
           <span className="convo-runs-item convo-runs-model" title={meta.model}>{modelName(meta.model)}</span>
         ))}
-      {meta.effort &&
+      {meta.effort && !(merged && meta.model && model) &&
         (() => {
           const level = effort?.now || meta.effort! // (what the switch took, else what the log says)
           return effort?.can || effort?.busy ? (
