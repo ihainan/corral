@@ -1143,7 +1143,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   // The model, switched from a menu of what Claude Code's picker offers (read
   // when it opens, through the picker: see convo_model.go), for this session
   // only. Only while it is at rest: the picker takes over its input.
-  const [models, setModels] = useState<{ list: ModelOpt[] | null; bind: string; at?: number } | null>(null)
+  const [models, setModels] = useState<{ list: ModelOpt[] | null; bind: string; at?: number; unread?: boolean } | null>(null)
   const [modelBusy, setModelBusy] = useState(false)
   // (Said once: a switch here left the default of new sessions changed, as
   // where its request was given up and it was found after.)
@@ -1217,7 +1217,9 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     own(api<{ models: ModelOpt[] }>('POST', `/api/sessions/${sid}/conversation/models`, pressBody(), { timeoutMs: MODEL_MS }))
       .then((r) => setModels((m) => (m?.bind === bind ? { list: r.models, bind, at: Date.now() } : m)))
       .catch((e) => {
-        setModels(null)
+        // (Said in the menu as well as in the toast: left on "reading" it
+        // would look as though the picker were still being waited for.)
+        setModels((m) => (m?.bind === bind ? { list: null, bind, unread: true } : m))
         toast(refusal(e), true)
       })
       .finally(() => setModelBusy(false))
@@ -2197,7 +2199,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       onSendNow={canPress && !notClaude ? () => press('now') : undefined}
       sendNow={said?.what === 'now' && said.bind === bindKey ? said.text : undefined}
       mode={{ now: modeNow?.bind === bindKey ? modeNow.mode : undefined, busy: modeBusy, onPick: canMode ? pickMode : undefined }}
-      model={canModel || modelBusy ? { list: models?.bind === bindKey ? models.list : null, fresh: !!models?.at && Date.now() - models.at < 60000, busy: modelBusy, can: canModel, onOpen: openModels, onPick: pickModel, of: bindKey, ...(codex ? { efforts: CODEX_EFFORTS } : {}) } : undefined}
+      model={canModel || modelBusy ? { list: models?.bind === bindKey ? models.list : null, unread: models?.bind === bindKey && !!models.unread, fresh: !!models?.at && Date.now() - models.at < 60000, busy: modelBusy, can: canModel, onOpen: openModels, onPick: pickModel, of: bindKey, ...(codex ? { efforts: CODEX_EFFORTS } : {}) } : undefined}
       effort={{ now: effortNow?.bind === bindKey ? effortNow.effort : undefined, busy: effortBusy, can: canEffort, onPick: pickEffort }}
       lead={lead}
       more={more}

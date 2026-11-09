@@ -42,13 +42,11 @@ const (
 // them whole however it was broken. (The model picker's line of keys
 // reads "s to use this session only", so it is no slider.)
 func effortShows(screen string) bool {
-	flat := strings.Map(func(r rune) rune {
-		if r == ' ' || r == '\n' || r == '\r' || r == '\t' || r == 0xa0 {
-			return -1
-		}
-		return r
-	}, screen)
-	return strings.Contains(flat, "Effort") && strings.Contains(flat, strings.ReplaceAll(effortKeys, " ", ""))
+	// (Read with the spaces and the line ends taken out, so that a pane too
+	// narrow for the keys' line finds it all the same: convo_screen.go,
+	// where the model picker is read the same way.)
+	flat := flatScreen(screen)
+	return strings.Contains(flat, "Effort") && strings.Contains(flat, flatScreen(effortKeys))
 }
 
 // effortRow matches the slider's line of names, however it is indented.

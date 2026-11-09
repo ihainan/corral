@@ -1824,7 +1824,10 @@ const EFFORT_WORDS: Record<string, 'convo.effort.low' | 'convo.effort.medium' | 
 const effortWord = (e: string) => (e === 'Extra high' ? 'xhigh' : e.toLowerCase())
 export const CODEX_EFFORTS = Object.keys(EFFORT_WORDS)
 
-export type ModelSwitch = { list: ModelOpt[] | null; fresh: boolean; busy: boolean; can: boolean; onOpen: () => void; onPick: (label: string, effort?: string) => void; efforts?: string[]; of?: string }
+// unread: the last read of the picker came to nothing. Without it a list
+// that never arrives leaves the menu saying it is still reading, for as
+// long as it is left open.
+export type ModelSwitch = { list: ModelOpt[] | null; fresh: boolean; busy: boolean; can: boolean; unread?: boolean; onOpen: () => void; onPick: (label: string, effort?: string) => void; efforts?: string[]; of?: string }
 
 // How hard the agent is asked to think (Claude Code's /effort), for the
 // session only. The levels are its slider's, in its order.
@@ -2068,7 +2071,7 @@ function Runs({ meta, active, mode, model, effort, quota, via, auth }: { meta: C
           onBlur={(e) => !box.current?.contains(e.relatedTarget as Node | null) && setOpen(false)} // (Tab out of it: closed)
         >
           {model.list === null ? (
-            <p className="convo-runs-note" role="status">{t('convo.modelReading')}</p>
+            <p className="convo-runs-note" role="status">{t(model.unread && !model.busy ? 'convo.modelUnread' : 'convo.modelReading')}</p>
           ) : (
             model.list.map((o) => {
               // (As its picker last said, which the log may not yet. A Codex's

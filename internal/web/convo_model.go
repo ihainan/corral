@@ -49,46 +49,103 @@ type modelPicker struct {
 var (
 	pickerRow  = regexp.MustCompile(`^\s*(❯|↓|↑)?\s*(\d{1,2})\.\s+(.+?)\s*$`)
 	pickerGaps = regexp.MustCompile(`\s{2,}`)
+	// (A numbered choice of a dialog's, by which one is told from the words
+	// a narrow pane pushed under the one before it.)
+	choiceRow = regexp.MustCompile(`^(❯|›)?\s*\d{1,2}\.\s`)
 )
 
 // parseModelPicker reads the picker off the screen. Its first entry
 // ("Default (recommended)": the default of new sessions, whichever that is)
-// is left out; so are those it does not show (scrolled away).
+// is left out; so are those it does not show (scrolled away). A pane too
+// narrow for the picker breaks its lines: its title and its keys' line are
+// found all the same (see convo_screen.go), and a description pushed onto
+// the lines under it is put back together.
 func parseModelPicker(screen string) modelPicker {
 	var p modelPicker
-	// (Its rows only: between its title and its keys' line, the last such.)
+	// (Its rows only: between its title — the last the screen holds — and
+	// the keys' line under that.)
 	lines := strings.Split(screen, "\n")
-	from, to := -1, -1
+	from := -1
 	for i, l := range lines {
-		switch {
-		case strings.TrimSpace(l) == "Select model":
-			from, to = i, -1
-		case from >= 0 && to < 0 && strings.Contains(l, pickerKeys):
-			to = i
+		if strings.TrimSpace(l) == pickerTitle {
+			from = i
 		}
 	}
-	if from < 0 || to < 0 {
+	if from < 0 {
 		return modelPicker{}
 	}
+	to := wrapAt(lines, pickerKeys, from+1)
+	if to < 0 {
+		return modelPicker{}
+	}
+	// A row of the picker, and its description in as many parts as the pane
+	// took lines to show it.
+	type part struct {
+		text string
+		end  int // (the column after its last letter)
+	}
+	type row struct {
+		opt   modelOpt
+		col   int // (the column its description begins at; -1: it has none)
+		parts []part
+	}
+	var rows []row
 	for _, line := range lines[from+1 : to] {
-		m := pickerRow.FindStringSubmatch(line)
-		if m == nil {
+		if m := pickerRow.FindStringSubmatch(line); m != nil {
+			n, _ := strconv.Atoi(m[2])
+			f := pickerGaps.Split(m[3], 2)
+			label := strings.TrimSpace(f[0])
+			o := modelOpt{N: n, at: m[1] == "❯"}
+			if l, ok := strings.CutSuffix(label, "✔"); ok {
+				label, o.Current = strings.TrimSpace(l), true
+			}
+			o.Label = label
+			r := row{opt: o, col: -1}
+			if len(f) > 1 {
+				if d := strings.TrimSpace(f[1]); d != "" {
+					if at := strings.Index(line, d); at >= 0 {
+						r.col = len([]rune(line[:at]))
+						r.parts = []part{{d, r.col + len([]rune(d))}}
+					}
+				}
+			}
+			rows = append(rows, r)
 			continue
 		}
-		n, _ := strconv.Atoi(m[2])
-		f := pickerGaps.Split(m[3], 2)
-		label := strings.TrimSpace(f[0])
-		o := modelOpt{N: n, at: m[1] == "❯"}
-		if l, ok := strings.CutSuffix(label, "✔"); ok {
-			label, o.Current = strings.TrimSpace(l), true
+		// (What a narrow pane pushed off the end of a description: the lines
+		// under it, indented to where it begins — nothing else stands there.)
+		if n := len(rows); n > 0 && rows[n-1].col > 0 {
+			if lead, text := indentOf(line); text != "" && lead == rows[n-1].col {
+				rows[n-1].parts = append(rows[n-1].parts, part{text, lead + len([]rune(text))})
+			}
 		}
-		o.Label = label
-		if len(f) > 1 {
-			o.Desc = strings.TrimSpace(f[1])
+	}
+	// (Where the pane broke those lines: as far as any of them reached. A
+	// part ending there was cut either after a word or within one; the two
+	// are told apart by whether the word, put back together, would have
+	// been too long for a line of its own — only then was it cut in half.)
+	edge := 0
+	for _, r := range rows {
+		for _, d := range r.parts {
+			edge = max(edge, d.end)
 		}
-		if strings.HasPrefix(label, "Default") || label == "" || len(label) > 64 {
+	}
+	for _, r := range rows {
+		o := r.opt
+		var b strings.Builder
+		for i, d := range r.parts {
+			if i > 0 {
+				whole := lastWord(r.parts[i-1].text) + firstWord(d.text)
+				if r.parts[i-1].end < edge || len([]rune(whole)) <= edge-r.col {
+					b.WriteByte(' ')
+				}
+			}
+			b.WriteString(d.text)
+		}
+		o.Desc = b.String()
+		if strings.HasPrefix(o.Label, "Default") || o.Label == "" || len(o.Label) > 64 {
 			if o.at { // (the cursor is there: known, though not offered)
-				p.opts = append(p.opts, modelOpt{N: n, at: true})
+				p.opts = append(p.opts, modelOpt{N: o.N, at: true})
 			}
 			continue
 		}
@@ -157,19 +214,24 @@ const (
 	maxPickerMove = 20
 )
 
-// pickerKeys is in the picker's line of keys ("Enter to set as default ·
-// s to use this session only · Esc to cancel"), as in nothing else.
-const pickerKeys = "s to use this session only"
+// pickerTitle is the picker's first line, pickerKeys a part of its last
+// ("Enter to set as default · s to use this session only · Esc to cancel")
+// that stands in nothing else. A pane too narrow for that line breaks it
+// over two — "… s to use this" and "session only · …" — so the keys are
+// looked for with the line ends taken out (see convo_screen.go). The title
+// is held to a line of its own all the same: it is short enough that no
+// pane breaks it, and words of a thread about Claude Code itself ("a line
+// reading Select model") must not be taken for the picker.
+const (
+	pickerTitle = "Select model"
+	pickerKeys  = "s to use this session only"
+)
 
-// pickerShows: the picker is on the screen (its title, a line of its own,
-// then its line of keys).
+// pickerShows: the picker is on the screen (its title, then its keys).
 func pickerShows(screen string) bool {
-	title := false
-	for _, l := range strings.Split(screen, "\n") {
-		if strings.TrimSpace(l) == "Select model" {
-			title = true
-		}
-		if title && strings.Contains(l, pickerKeys) {
+	lines := strings.Split(screen, "\n")
+	for i, l := range lines {
+		if strings.TrimSpace(l) == pickerTitle && wrapAt(lines, pickerKeys, i+1) >= 0 {
 			return true
 		}
 	}
@@ -186,12 +248,27 @@ func askShows(screen, target string) bool {
 		if strings.TrimSpace(l) != "Switch model?" {
 			continue
 		}
-		for _, n := range lines[i+1 : min(len(lines), i+6)] {
-			t := strings.TrimSpace(n)
+		for j := i + 1; j < min(len(lines), i+6); j++ {
+			t := strings.TrimSpace(lines[j])
 			if !strings.HasPrefix(t, "❯") {
 				continue
 			}
-			if c := strings.TrimSpace(strings.TrimPrefix(t, "❯")); c == "1. Yes, switch to "+target || target == "" && strings.HasPrefix(c, "1. Yes, switch to ") {
+			// (The choice with what a narrow pane pushed under it: those
+			// lines are indented past its mark, and nothing else is. Read
+			// whole, it is held to the name it names, as ever.)
+			lead, _ := indentOf(lines[j])
+			c := strings.TrimSpace(strings.TrimPrefix(t, "❯"))
+			for k := j + 1; k < min(len(lines), j+wrapSpan); k++ {
+				n, text := indentOf(lines[k])
+				// (A choice of its own stands as deep as the words pushed
+				// under this one, so it is told by its number, not by that.)
+				if text == "" || n <= lead || choiceRow.MatchString(text) {
+					break
+				}
+				c += " " + text
+			}
+			if f := flatScreen(c); f == flatScreen("1. Yes, switch to "+target) ||
+				target == "" && strings.HasPrefix(f, flatScreen("1. Yes, switch to ")) {
 				return true
 			}
 		}
@@ -302,9 +379,11 @@ const inputLinesMost = 10
 func oneSpaced(s string) string { return strings.Join(strings.Fields(s), " ") }
 
 // taken: how many times the screen says target was taken for the session
-// ("Set model to Haiku 5.5 for this session only").
+// ("Set model to Haiku 5.5 for this session only"). That line is longer
+// than a narrow pane, which breaks it: counted with the line ends taken
+// out, so that the switch is not left "not known" for the want of a line.
 func taken(screen, target string) int {
-	return strings.Count(screen, "Set model to "+target+" for this session only")
+	return strings.Count(flatScreen(screen), flatScreen("Set model to "+target+" for this session only"))
 }
 
 // modelFlow opens the picker; with target "" it lists its models and closes
