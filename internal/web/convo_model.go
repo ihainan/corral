@@ -209,7 +209,40 @@ var (
 const (
 	pickerLines   = 40 // (of the screen read after a step: the picker and what is under it)
 	maxPickerMove = 20
+	pickerLooks   = 4 // (times the screen is looked at again for a picker not drawn yet)
 )
+
+// notePickerUnread says what the screen held where no picker could be read
+// off it, so that the next report of this needs no further asking: how much
+// was read, which of the picker's marks were there, how many of its rows,
+// and the foot of the screen, where the dialog would have been. The words
+// of the thread above are not written down.
+func notePickerUnread(screen string) {
+	lines := strings.Split(strings.TrimRight(screen, "\n"), "\n")
+	title, rows := false, 0
+	for _, l := range lines {
+		if strings.TrimSpace(l) == pickerTitle {
+			title = true
+		}
+		if pickerRow.MatchString(l) {
+			rows++
+		}
+	}
+	tail := lines
+	if len(tail) > 6 {
+		tail = tail[len(tail)-6:]
+	}
+	wide := 0
+	for _, l := range lines {
+		if n := len([]rune(l)); n > wide {
+			wide = n
+		}
+	}
+	slog.Warn("model picker not read off the screen",
+		"lines", len(lines), "columns", wide, "title", title,
+		"keys", wrapAt(lines, pickerKeys, 0) >= 0, "rows", rows,
+		"foot", strings.Join(tail, " ⏎ "))
+}
 
 // pickerTitle is the picker's first line, pickerKeys a part of its last
 // ("Enter to set as default · s to use this session only · Esc to cancel")
@@ -469,7 +502,17 @@ func modelFlow(step, leave modelStep, target string, greyed ...func() string) (o
 	}
 	screen = opened
 	pk := parseModelPicker(screen)
+	// (Claude Code may not have finished drawing the picker when the screen
+	// was read — a heavy session takes its time — so it is looked at again
+	// before it is given up on. One glance was all a picker on its way had.)
+	for i := 0; i < pickerLooks && !pk.ok; i++ {
+		if screen, err = step([]string{}, "", pickerLines); err != nil {
+			return out(err)
+		}
+		pk = parseModelPicker(screen)
+	}
 	if !pk.ok {
+		notePickerUnread(screen)
 		return out(errNoPicker)
 	}
 	if target == "" {

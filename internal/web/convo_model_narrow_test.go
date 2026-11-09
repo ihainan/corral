@@ -242,3 +242,33 @@ func TestPickerOtherShape(t *testing.T) {
 		t.Errorf("cursor %+v ok %v; want the entry cut short, left out", c, ok)
 	}
 }
+
+// Claude Code drawing the picker a moment late: the first looks at the
+// screen find nothing of it. The flow must look again rather than give up
+// on one glance — a heavy session does not repaint within the first read.
+func TestModelFlowWaitsForASlowPicker(t *testing.T) {
+	f := newFake(false)
+	late := 2 // (reads that find the screen as it was before the picker)
+	slow := func(keys []string, text string, read int) (string, error) {
+		s, err := f.step(keys, text, read)
+		if err != nil || !f.open || late == 0 {
+			return s, err
+		}
+		late--
+		return "  ──────────────\n  ❯\n  ──────────────\n", nil
+	}
+	opts, err := modelFlow(slow, f.step, "")
+	if err != nil {
+		t.Fatalf("gave up on a picker drawn late: %v", err)
+	}
+	var labels []string
+	for _, o := range opts {
+		labels = append(labels, o.Label)
+	}
+	if strings.Join(labels, ",") != "Opus 5.5,Fable 5.1,Sonnet 5.5,Haiku 5.5" {
+		t.Fatalf("listed %v", labels)
+	}
+	if late != 0 {
+		t.Fatalf("the screen was not looked at again (%d looks left)", late)
+	}
+}
