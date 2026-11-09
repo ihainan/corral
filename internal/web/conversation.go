@@ -2798,9 +2798,16 @@ gate_enter() {
   # not to be seen and the screen holds a list of commands — nothing else
   # of Claude Code's is ever answered this way.
   if [ "$kind" = claude ] && [ -z "$cx" ] && [ "$gate" = free ] && [ "$cmd1" = / ]; then
+    front || exit 16
+    waiting
+    case $st:$wf in
+      title-unread:*|waiting:*)
+        # Its own palette may be a dialog; a question must stay unanswered.
+        [ "$st:$wf" = 'waiting:dialog open' ] || exit 5 ;;
+    esac
     owner 1
-    if [ "$o" != main ] && [ -n "$os" ] &&
-      [ "$(printf '%s\n' "$os" | grep -cE '^[[:space:]]*/[A-Za-z0-9_-]+[[:space:]]')" -ge 2 ]; then
+    if [ "$o" = none ] && [ -n "$os" ] &&
+      printf '%s\n' "$os" | awk 'PALETTEAWK'; then
       if [ "$mode" = tmux ]; then tmux send-keys -t "$p" Escape 9>&- || exit 6
       else HERDR_SOCKET_PATH=$sock herdr pane send-keys "$p" esc >/dev/null 2>&1 9>&- || exit 6; fi
       sleep 0.3
@@ -2976,6 +2983,7 @@ fi`
 	script = strings.ReplaceAll(script, "STEADYSCREEN", steadyPipe)
 	script = strings.ReplaceAll(script, "OCBOXPIPE", ocBoxPipe)     // (see convo_opencode_input.go)
 	script = strings.ReplaceAll(script, "OWNERAWK", claudeOwnerAwk) // (see convo_view.go)
+	script = strings.ReplaceAll(script, "PALETTEAWK", claudePaletteAwk)
 	script = strings.ReplaceAll(script, "BOXAWK", claudeBoxAwk)
 	cmd := "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(mode) + " " + sshx.QuoteShell(session) + " " + sshx.QuoteShell(pane) + " " +
 		strconv.FormatInt(pid, 10) + " " + strconv.FormatInt(start, 10) + " " + n + " " + sshx.QuoteShell(socket) + " " + sshx.QuoteShell(sid) + " " + strconv.Itoa(max(0, min(read, 60))) + " " + sshx.QuoteShell(gate)

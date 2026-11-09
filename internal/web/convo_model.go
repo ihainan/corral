@@ -49,6 +49,7 @@ type modelPicker struct {
 var (
 	pickerRow  = regexp.MustCompile(`^\s*(❯|↓|↑)?\s*(\d{1,2})\.\s+(.+?)\s*$`)
 	pickerGaps = regexp.MustCompile(`\s{2,}`)
+	pickerMore = regexp.MustCompile(`^(…|\.{3})\s*\+\d+\s+models?\b`)
 	// (A numbered choice of a dialog's, by which one is told from the words
 	// a narrow pane pushed under the one before it.)
 	choiceRow = regexp.MustCompile(`^(❯|›)?\s*\d{1,2}\.\s`)
@@ -58,45 +59,63 @@ var (
 // ("Default (recommended)": the default of new sessions, whichever that is)
 // is left out; so are those it does not show (scrolled away). A pane too
 // narrow for the picker breaks its lines: its title and its keys' line are
-// found all the same (see convo_screen.go), and a description pushed onto
-// the lines under it is put back together.
+// found all the same (see convo_screen.go). Description line breaks are
+// preserved: a text capture cannot distinguish word wrap from hard splits.
 func parseModelPicker(screen string) modelPicker {
 	var p modelPicker
-	// (Its rows only: between its title — the last the screen holds — and
-	// the keys' line under that.)
+	// Only the active block, including a picker with either end clipped.
 	lines := strings.Split(screen, "\n")
 	from, to, ok := pickerBlock(lines)
 	if !ok {
 		return modelPicker{}
 	}
-	// A row of the picker, and its description in as many parts as the pane
-	// took lines to show it.
-	type part struct {
-		text string
-		end  int // (the column after its last letter)
-	}
 	type row struct {
 		opt   modelOpt
 		col   int // (the column its description begins at; -1: it has none)
-		parts []part
+		parts []string
 	}
 	var rows []row
+	cursors, currents := 0, 0
+	footer := false
 	for _, line := range lines[from:to] {
+		// The viewport's arrow is decoration, even when it lands on a row.
+		line = strings.TrimRight(line, " \r")
+		if strings.HasSuffix(line, " ↓") {
+			line = strings.TrimRight(strings.TrimSuffix(line, "↓"), " ")
+		}
+		if pickerMore.MatchString(strings.TrimSpace(line)) || screenSays(line, "←/→ to adjust") {
+			footer = true
+		}
+		if footer {
+			if pickerRow.MatchString(line) {
+				return modelPicker{}
+			}
+			continue
+		}
 		if m := pickerRow.FindStringSubmatch(line); m != nil {
 			n, _ := strconv.Atoi(m[2])
+			if n < 1 || len(rows) > 0 && n != rows[len(rows)-1].opt.N+1 {
+				return modelPicker{}
+			}
 			f := pickerGaps.Split(m[3], 2)
 			label := strings.TrimSpace(f[0])
 			o := modelOpt{N: n, at: m[1] == "❯"}
 			if l, ok := strings.CutSuffix(label, "✔"); ok {
 				label, o.Current = strings.TrimSpace(l), true
 			}
+			if o.at {
+				cursors++
+			}
+			if o.Current {
+				currents++
+			}
 			o.Label = label
 			r := row{opt: o, col: -1}
 			if len(f) > 1 {
 				if d := strings.TrimSpace(f[1]); d != "" {
-					if at := strings.Index(line, d); at >= 0 {
+					if at := strings.LastIndex(line, d); at >= 0 {
 						r.col = len([]rune(line[:at]))
-						r.parts = []part{{d, r.col + len([]rune(d))}}
+						r.parts = []string{d}
 					}
 				}
 			}
@@ -107,46 +126,41 @@ func parseModelPicker(screen string) modelPicker {
 		// under it, indented to where it begins — nothing else stands there.)
 		if n := len(rows); n > 0 && rows[n-1].col > 0 {
 			if lead, text := indentOf(line); text != "" && lead == rows[n-1].col {
-				rows[n-1].parts = append(rows[n-1].parts, part{text, lead + len([]rune(text))})
+				rows[n-1].parts = append(rows[n-1].parts, text)
+				continue
 			}
+			// A blank line, summary or effort footer ends the description.
+			rows[n-1].col = -1
 		}
 	}
-	// (Where the pane broke those lines: as far as any of them reached. A
-	// part ending there was cut either after a word or within one; the two
-	// are told apart by whether the word, put back together, would have
-	// been too long for a line of its own — only then was it cut in half.)
-	edge := 0
-	for _, r := range rows {
-		for _, d := range r.parts {
-			edge = max(edge, d.end)
+	// More marks than there should be is odd, not a reason to show the
+	// person nothing: the list is still the list. A second tick says only
+	// which is in use, so both are dropped; a second cursor is where the
+	// switch would move from, so the place is called unknown instead —
+	// listing goes on, switching refuses rather than move somewhere wrong.
+	for i := range rows {
+		if currents > 1 {
+			rows[i].opt.Current = false
+		}
+		if cursors > 1 {
+			rows[i].opt.at = false
 		}
 	}
 	for _, r := range rows {
 		o := r.opt
-		var b strings.Builder
-		for i, d := range r.parts {
-			if i > 0 {
-				whole := lastWord(r.parts[i-1].text) + firstWord(d.text)
-				if r.parts[i-1].end < edge || len([]rune(whole)) <= edge-r.col {
-					b.WriteByte(' ')
-				}
-			}
-			b.WriteString(d.text)
-		}
-		o.Desc = b.String()
-		if strings.HasPrefix(o.Label, "Default") || o.Label == "" || len(o.Label) > 64 {
-			if o.at { // (the cursor is there: known, though not offered)
-				p.opts = append(p.opts, modelOpt{N: o.N, at: true})
-			}
+		// A plain-text read has lost whether the pane broke a line within
+		// a word or after one, and no reading of it can tell: both come
+		// back the same. The words are put together with a space, because
+		// the menu they end up in is not that pane and wraps them again
+		// itself; the cost is that a word the pane cut in half keeps the
+		// space, which is rare and reads as what it is.
+		o.Desc = strings.Join(r.parts, " ")
+		if strings.HasPrefix(o.Label, "Default") || o.Label == "More models" ||
+			strings.ContainsAny(o.Label, "…") || o.Label == "" || len(o.Label) > 64 {
+			p.opts = append(p.opts, modelOpt{N: o.N, at: o.at})
 			continue
 		}
 		p.opts = append(p.opts, o)
-	}
-	// (Its numbers run up: anything else was never the picker's rows.)
-	for i := 1; i < len(p.opts); i++ {
-		if p.opts[i].N <= p.opts[i-1].N {
-			return modelPicker{}
-		}
 	}
 	p.ok = len(p.opts) > 0
 	return p
@@ -250,68 +264,73 @@ func notePickerUnread(screen string) {
 // over two — "… s to use this" and "session only · …" — so the keys are
 // looked for with the line ends taken out (see convo_screen.go).
 //
-// The picker is known by its keys' line and not by its title, because a
-// pane too short for the whole picker scrolls the title away: of 47
-// columns and 34 rows the picker fills the screen to the row, and a
-// session with a status line of its own then has no room for the title at
-// all. What tells the picker from a thread quoting its words is that
-// nothing of Claude Code's input box stands under it: the picker takes the
-// box's place while it is open.
+// A short pane may lose its title or its keys; a clipped foot instead
+// carries a trailing ↓. A title alone is not evidence of an active picker.
 const (
 	pickerTitle = "Select model"
 	pickerKeys  = "s to use this session only"
 )
 
-// pickerOwns: under line to, the screen holds no input box of Claude
-// Code's — the picker has the foot of the screen, as an open one does.
-func pickerOwns(lines []string, to int) bool {
-	for i := to + 1; i < len(lines); i++ {
+// pickerOwns: from line at down, the screen holds no input box of Claude
+// Code's — the picker has the screen, as an open one does, taking the
+// box's place. The mark alone is not the box: the picker's own cursor row
+// begins with it too. A rule above it identifies even a numbered draft;
+// an unnumbered prompt is rejected with or without that rule in view.
+func pickerOwns(lines []string, at, end int) bool {
+	cursors := 0
+	for i := max(at, 0); i < len(lines); i++ {
 		if strings.HasPrefix(strings.TrimSpace(lines[i]), "❯") {
-			return false
+			cursors++
+			if i >= end || cursors > 1 || i > 0 && boxTop(lines[i-1]) || !pickerRow.MatchString(lines[i]) {
+				return false
+			}
 		}
 	}
 	return true
 }
 
-// pickerBlock: the lines the picker's rows stand on, [from, to). to is its
-// keys' line. Where the title was scrolled away, the rows are taken from
-// the top of what was read: a picker whose title is gone is one that fills
-// the screen, so there is nothing else up there to take for a row.
+// pickerBlock: the lines the picker's rows stand on, [from, to).
+//
+// A pane too short for the whole picker loses an end of it, and which end
+// is not ours to choose: of a short list Claude Code scrolls the title off
+// the top, of a long one it cuts the foot — the keys' line with it — and
+// marks what is left with an arrow. So whichever end is on the screen is
+// the one it is read from, and what keeps a thread quoting the picker from
+// being taken for one is that the input box is nowhere under it.
 func pickerBlock(lines []string) (from, to int, ok bool) {
-	to = -1
+	title := -1
+	for i, l := range lines {
+		if strings.TrimSpace(l) == pickerTitle {
+			title = i
+		}
+	}
+	keys := -1
 	for i := 0; ; {
 		t := wrapAt(lines, pickerKeys, i)
 		if t < 0 {
 			break
 		}
-		to, i = t, t+1
+		keys, i = t, t+1
 	}
-	if to < 0 || !pickerOwns(lines, to) {
+	switch {
+	case title >= 0 && keys > title:
+		from, to = title+1, keys
+	case title >= 0 && strings.HasSuffix(strings.TrimSpace(strings.Join(lines, "\n")), "↓"):
+		from, to = title+1, len(lines)
+	case title < 0 && keys >= 0: // (its head scrolled away)
+		from, to = 0, keys
+	default:
 		return 0, 0, false
 	}
-	from = 0
-	for i := 0; i < to; i++ {
-		if strings.TrimSpace(lines[i]) == pickerTitle {
-			from = i + 1
-		}
+	if !pickerOwns(lines, from, to) {
+		return 0, 0, false
 	}
 	return from, to, true
 }
 
-// pickerShows: the picker is on the screen — its keys, the foot of the
-// screen its own, and at least one numbered row of its own above.
+// Recognition and parsing must agree, including invalid row sequences.
 func pickerShows(screen string) bool {
-	lines := strings.Split(screen, "\n")
-	from, to, ok := pickerBlock(lines)
-	if !ok {
-		return false
-	}
-	for _, l := range lines[from:to] {
-		if pickerRow.MatchString(l) {
-			return true
-		}
-	}
-	return false
+	return parseModelPicker(screen).ok
 }
 
 // askShows: Claude Code's question after "s" is on the screen, for target
@@ -322,6 +341,9 @@ func askShows(screen, target string) bool {
 	lines := strings.Split(screen, "\n")
 	for i, l := range lines {
 		if strings.TrimSpace(l) != "Switch model?" {
+			continue
+		}
+		if !pickerOwns(lines, i+1, len(lines)) {
 			continue
 		}
 		for j := i + 1; j < min(len(lines), i+6); j++ {
@@ -457,9 +479,31 @@ func oneSpaced(s string) string { return strings.Join(strings.Fields(s), " ") }
 // taken: how many times the screen says target was taken for the session
 // ("Set model to Haiku 5.5 for this session only"). That line is longer
 // than a narrow pane, which breaks it: counted with the line ends taken
-// out, so that the switch is not left "not known" for the want of a line.
+// out. Only a command result (⎿) can count, not ordinary quoted prose.
 func taken(screen, target string) int {
-	return strings.Count(flatScreen(screen), flatScreen("Set model to "+target+" for this session only"))
+	want := flatScreen("Set model to " + target + " for this session only")
+	lines := strings.Split(screen, "\n")
+	count := 0
+	for i, line := range lines {
+		text, result := strings.CutPrefix(strings.TrimSpace(line), "⎿")
+		if !result {
+			continue
+		}
+		acc := flatScreen(text)
+		for j := i; j < min(len(lines), i+wrapSpan); j++ {
+			if j > i {
+				acc += flatScreen(lines[j])
+			}
+			if strings.HasPrefix(acc, want) {
+				count++ // It may also say "with xhigh effort" after the model.
+				break
+			}
+			if !strings.HasPrefix(want, acc) {
+				break
+			}
+		}
+	}
+	return count
 }
 
 // modelFlow opens the picker; with target "" it lists its models and closes
@@ -516,7 +560,7 @@ func modelFlow(step, leave modelStep, target string, greyed ...func() string) (o
 		return out(errNoPicker)
 	}
 	if target == "" {
-		if screen, err = step([]string{"esc"}, "", pickerLines); err != nil || pickerShows(screen) {
+		if screen, err = step([]string{"esc"}, "", pickerLines); err != nil || pickerShows(screen) || askShows(screen, "") {
 			return out(errScreen)
 		}
 		return pk.offered(), nil
@@ -529,8 +573,28 @@ func modelFlow(step, leave modelStep, target string, greyed ...func() string) (o
 		}
 	}
 	at, known := pk.cursor()
-	if !found || !known {
+	if !found {
 		return out(errNoModel)
+	}
+	// Bring a clipped cursor into view before computing a move. A window
+	// starting at row 1 lost its bottom; one starting later may have lost
+	// the cursor above it. Never guess its position from the current model.
+	seek := "up"
+	if len(pk.opts) > 0 && pk.opts[0].N > 1 {
+		seek = "down"
+	}
+	for i := 0; !known && i < maxPickerMove; i++ {
+		if screen, err = step([]string{seek}, "", pickerLines); err != nil {
+			return out(err)
+		}
+		pk = parseModelPicker(screen)
+		if !pk.ok {
+			return out(errNoPicker)
+		}
+		at, known = pk.cursor()
+	}
+	if !known {
+		return out(errNotThere)
 	}
 	if d := to.N - at.N; d != 0 {
 		key := "down"
@@ -551,6 +615,8 @@ func modelFlow(step, leave modelStep, target string, greyed ...func() string) (o
 		if c, ok := now.cursor(); !now.ok || !ok || c.Label != target {
 			return out(errNotThere)
 		}
+	} else if at.Label != target {
+		return out(errNotThere)
 	}
 	if screen, err = step([]string{"this"}, "", pickerLines); err != nil {
 		return out(err)
@@ -561,10 +627,10 @@ func modelFlow(step, leave modelStep, target string, greyed ...func() string) (o
 		}
 	}
 	switch {
-	case taken(screen, target) > before:
-		return []modelOpt{to}, nil
 	case pickerShows(screen) || askShows(screen, ""):
 		return out(errNotTaken)
+	case taken(screen, target) > before:
+		return []modelOpt{to}, nil
 	}
 	return nil, errUnsure // (the picker gone, nothing said of it: as it may have been taken, no Escape)
 }

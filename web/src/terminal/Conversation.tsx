@@ -1845,10 +1845,11 @@ export type EffortSwitch = { now?: string; busy: boolean; can: boolean; onPick: 
 // name the pick is made with is o.label either way, untouched.
 export function named(o: ModelOpt): [string, string] {
   const desc = o.desc ?? ''
-  const at = desc.indexOf(' · ')
+  const separator = /\s+·\s+/.exec(desc)
+  const at = separator?.index ?? -1
   const head = at > 0 ? desc.slice(0, at) : ''
   const word = o.label.split(/\s+/)[0]
-  return head && word && head.toLowerCase().startsWith(word.toLowerCase()) ? [head, desc.slice(at + 3)] : [o.label, desc]
+  return head && !head.includes('\n') && word && head.toLowerCase().startsWith(word.toLowerCase()) ? [head, desc.slice(at + separator![0].length)] : [o.label, desc]
 }
 const effortName = (e: string) => ((EFFORTS as readonly string[]).includes(e) ? t(`convo.effort.${e}` as I18nKey) : e)
 

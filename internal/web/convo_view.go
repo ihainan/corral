@@ -13,6 +13,31 @@ import (
 	"github.com/ihainan/corral/internal/sshx"
 )
 
+// A trailing slash-command list, not slash commands quoted higher in a
+// conversation. A single remaining match is still a palette. Wrapped
+// descriptions are indented beyond their command; a new unrecognised
+// section resets the evidence. This is used only after owner says none.
+const claudePaletteAwk = `
+{
+  line = $0
+  sub(/\r$/, "", line)
+  if (line ~ /^[ \t]*$/) next
+  rule = line
+  gsub(/[─━ \t]/, "", rule)
+  if (rule == "") next
+  text = line
+  sub(/^[ \t]*(❯[ \t]*)?/, "", text)
+  if (text ~ /^\/[A-Za-z0-9_-]+([ \t]|$)/) {
+    count++
+    indent = match(line, /[^ \t]/) - 1
+    next
+  }
+  if (count && match(line, /[^ \t]/) - 1 > indent && text !~ /^(❯|[0-9]+\.)/) next
+  count = 0
+}
+END { exit !(count > 0) }
+`
+
 // Who has Claude Code's input box (plans/send-view.md).
 //
 // A message is sent by pasting it into the pane and pressing Enter: it goes

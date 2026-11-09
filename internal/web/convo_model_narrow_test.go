@@ -31,8 +31,8 @@ func realPicker(t *testing.T, cols int) string {
 	return string(b)
 }
 
-// Every width reads as the same four models, each with the description the
-// widest pane shows: a pane the person made narrow takes nothing away.
+// Every width retains the same model names and description characters.
+// The layout is preserved: plain text cannot recover lost word boundaries.
 func TestRealPickerEveryWidth(t *testing.T) {
 	for _, cols := range []int{47, 80, 100, 120} {
 		screen := realPicker(t, cols)
@@ -46,7 +46,7 @@ func TestRealPickerEveryWidth(t *testing.T) {
 		var got []string
 		for _, o := range p.offered() {
 			got = append(got, o.Label)
-			if want := pickerDescs[o.Label]; o.Desc != want {
+			if want := pickerDescs[o.Label]; flatScreen(o.Desc) != flatScreen(want) {
 				t.Errorf("%d columns: %s says\n\t%q\nwant\t%q", cols, o.Label, o.Desc, want)
 			}
 		}
@@ -136,10 +136,8 @@ func TestAskShowsAcrossLines(t *testing.T) {
 	}
 }
 
-// A word the pane cut in half goes back together; one it broke after does
-// not lose its space. Both happen at the same column, so only the length of
-// the word tells them apart (47 columns: "Efficient for" and
-// "longest-runni" both end there).
+// Both hard-split words and breaks between words are kept as captured.
+// Their original boundaries cannot be inferred from column widths.
 func TestDescriptionPutBackTogether(t *testing.T) {
 	p := parseModelPicker(realPicker(t, 47))
 	for _, o := range p.offered() {
@@ -151,11 +149,20 @@ func TestDescriptionPutBackTogether(t *testing.T) {
 	for _, o := range p.offered() {
 		got[o.Label] = o.Desc
 	}
-	if d := got["Fable"]; !strings.Contains(d, "longest-running tasks") {
-		t.Errorf("a word cut in half was not put back: %q", d)
+	for _, o := range p.offered() {
+		if strings.Contains(o.Desc, "\n") {
+			t.Errorf("%s: a line of the pane came through in %q", o.Label, o.Desc)
+		}
 	}
-	if d := got["Sonnet"]; !strings.Contains(d, "Efficient for routine") {
-		t.Errorf("a line broken after a word lost its space: %q", d)
+	// A line the pane broke after a word reads as it was written.
+	if d := got["Sonnet"]; d != "Sonnet 5.5 · Efficient for routine tasks" {
+		t.Errorf("word-wrapped description changed: %q", d)
+	}
+	// A word the pane cut in half keeps the space, and is meant to: no
+	// reading of the text can tell that break from the one above it, so
+	// the rarer case is the one left showing.
+	if d := got["Fable"]; d != "Fable 5.1 · Most capable for your hardest and longest-runni ng tasks" {
+		t.Errorf("hard-split description changed: %q", d)
 	}
 }
 
@@ -205,7 +212,7 @@ func TestPickerTitleScrolledAway(t *testing.T) {
 	var got []string
 	for _, o := range p.offered() {
 		got = append(got, o.Label)
-		if want := pickerDescs[o.Label]; o.Desc != want {
+		if want := pickerDescs[o.Label]; flatScreen(o.Desc) != flatScreen(want) {
 			t.Errorf("%s says %q, want %q", o.Label, o.Desc, want)
 		}
 	}
@@ -232,7 +239,7 @@ func TestPickerOtherShape(t *testing.T) {
 	for _, o := range p.offered() {
 		got = append(got, o.Label)
 	}
-	if want := "Opus 5.5 Fable 5.1 Sonnet 5.5 Haiku 5.5 More models"; strings.Join(got, " ") != want {
+	if want := "Opus 5.5 Fable 5.1 Sonnet 5.5 Haiku 5.5"; strings.Join(got, " ") != want {
 		t.Errorf("models %q, want %q", strings.Join(got, " "), want)
 	}
 	if d := p.offered()[0].Desc; d != "For complex work and everyday tasks" {
@@ -270,5 +277,63 @@ func TestModelFlowWaitsForASlowPicker(t *testing.T) {
 	}
 	if late != 0 {
 		t.Fatalf("the screen was not looked at again (%d looks left)", late)
+	}
+}
+
+// A pane too short for a long list: Claude Code keeps the title and cuts
+// the foot away — the keys' line with it — marking what is left with an
+// arrow. Seen on 2026-11-09 on a pane of 47 columns and 34 rows holding
+// fourteen models: title there, keys gone, eight rows read.
+func TestPickerFootCutAway(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("testdata", "model-picker-47-six.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimRight(string(b), "\n"), "\n")
+	cut := -1
+	for i, l := range lines {
+		if strings.Contains(l, "Enter to set as default") {
+			cut = i
+			break
+		}
+	}
+	if cut < 0 {
+		t.Fatal("the fixture has no keys line to cut")
+	}
+	lines = lines[:cut]
+	for i := len(lines) - 1; i >= 0; i-- { // (the arrow sits at the end of the last line left)
+		if strings.TrimSpace(lines[i]) != "" {
+			lines[i] += "     ↓"
+			break
+		}
+	}
+	screen := strings.Join(lines, "\n")
+	if wrapAt(lines, pickerKeys, 0) >= 0 {
+		t.Fatal("the keys line was not cut away")
+	}
+	if !pickerShows(screen) {
+		t.Fatal("the picker went unseen with its foot cut away")
+	}
+	p := parseModelPicker(screen)
+	var got []string
+	for _, o := range p.offered() {
+		got = append(got, o.Label)
+	}
+	if want := "Opus 5.5 Fable 5.1 Sonnet 5.5 Haiku 5.5"; strings.Join(got, " ") != want {
+		t.Errorf("models %q, want %q", strings.Join(got, " "), want)
+	}
+}
+
+// With neither end of the picker on the screen there is nothing to read,
+// and a thread quoting its words is no picker either: the input box under
+// them says so.
+func TestPickerNeitherEnd(t *testing.T) {
+	rows := "  ❯ 1. Opus                     Opus 5.5 · Best for everyday\n    2. Haiku                   Haiku 5.5 · Fastest"
+	if p := parseModelPicker(rows); p.ok {
+		t.Errorf("read %+v off rows with neither title nor keys", p.opts)
+	}
+	quoted := "  Select model\n  ❯ 1. Opus    Opus 5.5\n  ──────────────\n  ❯\n  ──────────────\n    Opus 5·H │ Ctx 0"
+	if pickerShows(quoted) {
+		t.Error("a thread quoting the picker was taken for one, its input box in plain sight")
 	}
 }

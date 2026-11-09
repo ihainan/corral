@@ -67,18 +67,3 @@ func indentOf(line string) (int, string) {
 	t := strings.TrimLeft(line, " \t")
 	return len([]rune(line)) - len([]rune(t)), strings.TrimRight(t, " \r")
 }
-
-// firstWord, lastWord: the word at either end of s ("" of none).
-func firstWord(s string) string {
-	if f := strings.Fields(s); len(f) > 0 {
-		return f[0]
-	}
-	return ""
-}
-
-func lastWord(s string) string {
-	if f := strings.Fields(s); len(f) > 0 {
-		return f[len(f)-1]
-	}
-	return ""
-}
