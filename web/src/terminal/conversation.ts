@@ -198,6 +198,17 @@ export interface ConvoMeta {
   window_by?: 'log' | 'model' | 'request' // how: said by the log, the model's own, the 1M its requests asked for
   cost?: ConvoCost // the latest of what the session used, as the log read said it (convo.Cost)
   quota?: ConvoQuota // the subscription's use, as the log last said it (Codex's; convo.Quota)
+  answer?: ConvoAnswer // the latest answer read: its tokens and how long it took (Claude Code's; convo.Answer)
+}
+
+// The session's latest answer, of the log's own rows (convo.Answer): the
+// tokens the model wrote, and how long from the request going out to the
+// answer being whole — the wait for the first token among it, and nought
+// where it is not known. Of one answer, not of a turn of work: the time
+// the agent spent running tools is not in it.
+export interface ConvoAnswer {
+  out: number // tokens written, what it thought among them
+  ms?: number // absent or 0: not known
 }
 
 // A subscription's use of its 5-hour and weekly windows (convo.Quota).
@@ -377,7 +388,7 @@ const sameBind = (a?: ConvoBind, b?: ConvoBind) =>
   a === b || (!!a && !!b && a.pane === b.pane && a.pid === b.pid && a.start === b.start && a.session === b.session && a.title === b.title && a.agent === b.agent && a.via === b.via && a.auth === b.auth)
 
 const sameMeta = (a?: ConvoMeta, b?: ConvoMeta) =>
-  a === b || (!!a && !!b && a.model === b.model && a.mode === b.mode && a.effort === b.effort && a.branch === b.branch && a.context === b.context && a.window === b.window && a.window_by === b.window_by && JSON.stringify(a.cost) === JSON.stringify(b.cost) && JSON.stringify(a.quota) === JSON.stringify(b.quota))
+  a === b || (!!a && !!b && a.model === b.model && a.mode === b.mode && a.effort === b.effort && a.branch === b.branch && a.context === b.context && a.window === b.window && a.window_by === b.window_by && JSON.stringify(a.cost) === JSON.stringify(b.cost) && JSON.stringify(a.quota) === JSON.stringify(b.quota) && JSON.stringify(a.answer) === JSON.stringify(b.answer))
 
 const POLL = 2000
 const ACTIVE = 1000 // (after an answer that brought something: more is likely coming)

@@ -425,6 +425,9 @@ type Meta struct {
 	// last said it in what was read (its cost-state rows: running totals,
 	// not added up); nil, none read.
 	Cost *Cost `json:"cost,omitempty"`
+	// Answer is the latest answer read: its tokens and how long it took
+	// (Claude Code's logs); nil, none read.
+	Answer *Answer `json:"answer,omitempty"`
 	// Quota is the subscription's use as the log last said it (Codex's,
 	// signed in to an account: through a relay it says none); nil, none.
 	Quota *Quota `json:"quota,omitempty"`
@@ -484,6 +487,20 @@ type Cost struct {
 	// how long it has run, as the row says them (it has no time of its own).
 	At     int64       `json:"at,omitempty"`
 	Models []ModelCost `json:"models,omitempty"` // the costliest first, at most maxCostModels
+}
+
+// Answer is the session's latest answer as the log's own rows have it: how
+// many tokens the model wrote and how long that took, from the request
+// going out (its api-request row) to the answer being whole (the last row
+// of it). Of one answer, not of a whole turn of work: between two answers
+// the agent runs tools, which this does not count.
+//
+// Ms holds the wait for the first token as well, so a short answer reads
+// slower than a long one; where it is not known it is nought, and nothing
+// is said of a rate. A retried request is timed from its last attempt.
+type Answer struct {
+	Out int64 `json:"out"`          // tokens written, what it thought among them
+	Ms  int64 `json:"ms,omitempty"` // 0: not known
 }
 
 // ModelCost is one model's part of a Cost.

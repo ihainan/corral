@@ -106,10 +106,14 @@ type Claude struct {
 	// lastReq: the model the conversation's latest request went to, and
 	// whether it asked for the 1M window (the context-1m beta): read from
 	// Claude Code's api-request rows, for Meta's window.
+	// sent is also when it went out, for how long the answer to it took
+	// (see answered); of the last attempt, where a request was retried.
 	lastReq struct {
 		model string // (as claudeKey has it)
 		wide  bool
+		sent  time.Time
 	}
+	answerID    string // the requestId of the answer Meta's Answer is of
 	taskBase    []taskItem
 	taskOps     []taskOp
 	taskOpsFull bool              // more were made than are kept: the list is not made again (see Prepend)
@@ -547,7 +551,12 @@ func (c *Claude) Prepend(other Parser) {
 	if c.meta.Cost == nil {
 		c.meta.Cost = o.meta.Cost // (running totals: the later stands, never added to)
 	}
+	if c.meta.Answer == nil {
+		c.meta.Answer = o.meta.Answer // (of the latest answer read: the later part's stands)
+	}
 	if c.lastReq.model == "" {
+		// (Its sent comes along: of no use here, as the rows of this part
+		// have been read already, and the model is what it is kept for.)
 		c.lastReq = o.lastReq
 	}
 	// (Pictures: the sources waiting — c's, o's own — tried with both parts'
@@ -722,6 +731,9 @@ type claudeRow struct {
 			Input      int64 `json:"input_tokens"`
 			CacheWrite int64 `json:"cache_creation_input_tokens"`
 			CacheRead  int64 `json:"cache_read_input_tokens"`
+			// Output is the whole answer's, thinking among it, and the
+			// same on every row of one answer (see answered).
+			Output int64 `json:"output_tokens"`
 		} `json:"usage"`
 	} `json:"message"`
 	Attachment *struct {
@@ -1683,6 +1695,7 @@ func (c *Claude) assistant(r *claudeRow) {
 		if n := u.Input + u.CacheWrite + u.CacheRead; n > 0 {
 			c.meta.Context, c.ctxSaid = n, true
 		}
+		c.answered(r, u.Output)
 	}
 	var blocks []claudeBlock
 	if json.Unmarshal(r.Message.Content, &blocks) != nil {
@@ -1767,13 +1780,66 @@ func (c *Claude) lastIsRefused() bool {
 // (not one made beside it, as for a title): its model, and whether it was
 // given the 1M window. (The latest says: a session switched back drops it.)
 func (c *Claude) request(r *claudeRow) {
+	if r.QuerySource != "" && r.QuerySource != "repl_main_thread" && r.QuerySource != "sdk" {
+		return
+	}
+	// When it went out, even where the row says nothing of the model: it is
+	// the start of the answer that follows it (see answered). Of a session
+	// the SDK drives as well as one a person types in — the rows are the
+	// one session's either way — while what the request asked for, below,
+	// is of the conversation's own thread alone.
+	if at, err := time.Parse(time.RFC3339Nano, r.Timestamp); err == nil {
+		c.lastReq.sent = at
+	}
 	p := r.Params
-	if p == nil || p.Model == "" || (r.QuerySource != "" && r.QuerySource != "repl_main_thread") {
+	if p == nil || p.Model == "" || r.QuerySource == "sdk" {
 		return
 	}
 	c.lastReq.model = claudeKey(clip(p.Model, maxMeta))
 	betas := bytes.TrimSpace(p.Betas)
 	c.lastReq.wide = len(betas) > 0 && betas[0] == '[' && bytes.Contains(betas, []byte(`"context-1m`))
+}
+
+// maxAnswerTook: longer than this between the request going out and the
+// answer being whole is not taken for how long the answer took. Nothing
+// says the two belong together — a log read from the middle, or a resumed
+// session's rows copied in with the times they had — and a rate worked out
+// of such a pair would be nonsense rather than slow.
+const maxAnswerTook = time.Hour
+
+// answered takes in the answer a row is of: how many tokens the model
+// wrote and how long that took, which the chat page shows as a rate.
+//
+// One answer is written as a row per block of it, and every one of them
+// carries the whole answer's tokens — so they are never added up: the rows
+// of one requestId count once, and the last of them says when the answer
+// was whole. A row with no requestId (a handful in a long log) is left out
+// rather than guessed at.
+func (c *Claude) answered(r *claudeRow, out int64) {
+	if out <= 0 || r.RequestID == "" {
+		return
+	}
+	at, err := time.Parse(time.RFC3339Nano, r.Timestamp)
+	if err != nil {
+		return
+	}
+	ms := int64(0)
+	if s := c.lastReq.sent; !s.IsZero() && at.After(s) && at.Sub(s) <= maxAnswerTook {
+		ms = at.Sub(s).Milliseconds()
+	}
+	id := clip(r.RequestID, maxID)
+	if id == c.answerID && c.meta.Answer != nil {
+		// (A further block of the same answer: the answer ended later than
+		// the block before it. Its tokens are the same ones; the larger is
+		// taken all the same, so a log that ever says otherwise is not read
+		// as an answer cut short.)
+		c.meta.Answer.Ms = ms
+		if out > c.meta.Answer.Out {
+			c.meta.Answer.Out = out
+		}
+		return
+	}
+	c.answerID, c.meta.Answer = id, &Answer{Out: out, Ms: ms}
 }
 
 // compacted: what filled the context before is gone; how full it is now is

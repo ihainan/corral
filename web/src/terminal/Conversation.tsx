@@ -25,7 +25,7 @@ import { AgentIcon } from './agentIcons'
 import { matchQuery } from './agents'
 import { keptEntries } from './conversation'
 import { ShowTerminal } from './showTerminal'
-import type { Convo, ConvoCost, ConvoQuota, ConvoQuotaWindow, ConvoEntry, ConvoShell, ConvoHunk, ConvoMeta, ConvoPart, ConvoQueued, ConvoRunning, ConvoTask, ConvoTool, ConvoTrouble, ConvoEvent } from './conversation'
+import type { Convo, ConvoAnswer, ConvoCost, ConvoQuota, ConvoQuotaWindow, ConvoEntry, ConvoShell, ConvoHunk, ConvoMeta, ConvoPart, ConvoQueued, ConvoRunning, ConvoTask, ConvoTool, ConvoTrouble, ConvoEvent } from './conversation'
 import { agentName } from './askText'
 import { duration, when } from './convoTime'
 import { category, isNote, items, ms, partTime, sameEdits, toolName, verbOf, type Category, type Edits, type Item, type Verb } from './convoItems'
@@ -2171,6 +2171,7 @@ function Runs({ meta, active, mode, model, effort, quota, via, auth }: { meta: C
               ? t(meta.window_by === 'model' ? 'convo.ctxNoteModel' : meta.window_by === 'request' ? 'convo.ctxNoteWide' : 'convo.ctxNoteSaid', { w: tokens(known) })
               : t(windows.length > 1 ? 'convo.ctxNote' : 'convo.ctxNoteBig')}
           </p>
+          {meta.answer && <AnswerPart answer={meta.answer} />}
           {quota && ('codex' in quota ? <QuotaSaid quota={quota.said} /> : <QuotaPart key={quota.sid + ' ' + quota.session} sid={quota.sid} session={quota.session} />)}
           {/* The subscription's use, where it is left out because this
               session does not draw on it: said, so that its place is not
@@ -2322,6 +2323,28 @@ function QuotaView({ shown, children }: { shown?: { five_hour?: ConvoQuotaWindow
           ),
         )}
       {children}
+    </div>
+  )
+}
+
+// How the session's latest answer went, of the log's own rows: the tokens
+// the model wrote, how long it took, and the rate of the two — which is
+// what says whether the address a session's requests go to is a quick one.
+// Where the log did not say how long, the tokens alone: a rate worked out
+// of a time nobody said would be made up.
+function AnswerPart({ answer }: { answer: ConvoAnswer }) {
+  const secs = answer.ms && answer.ms > 0 ? answer.ms / 1000 : 0
+  const rate = secs > 0 ? Math.round(answer.out / secs) : 0
+  // (Under ten seconds to a tenth: most answers are that short, and whole
+  // seconds there would round a rate by a fifth.)
+  const s = secs >= 10 ? Math.round(secs).toLocaleString(getLang()) : secs.toFixed(1)
+  const said = { o: answer.out.toLocaleString(getLang()), s, r: rate.toLocaleString(getLang()) }
+  return (
+    <div className="convo-runs-row">
+      <span>{t('convo.lastAnswer')}</span>
+      <span title={t(rate > 0 ? 'convo.answerHint' : 'convo.answerHintOut', said)}>
+        {rate > 0 ? t('convo.answerRate', { o: tokens(answer.out), s, r: rate }) : t('convo.answerOut', { o: tokens(answer.out) })}
+      </span>
     </div>
   )
 }
