@@ -65,17 +65,8 @@ func parseModelPicker(screen string) modelPicker {
 	// (Its rows only: between its title — the last the screen holds — and
 	// the keys' line under that.)
 	lines := strings.Split(screen, "\n")
-	from := -1
-	for i, l := range lines {
-		if strings.TrimSpace(l) == pickerTitle {
-			from = i
-		}
-	}
-	if from < 0 {
-		return modelPicker{}
-	}
-	to := wrapAt(lines, pickerKeys, from+1)
-	if to < 0 {
+	from, to, ok := pickerBlock(lines)
+	if !ok {
 		return modelPicker{}
 	}
 	// A row of the picker, and its description in as many parts as the pane
@@ -90,7 +81,7 @@ func parseModelPicker(screen string) modelPicker {
 		parts []part
 	}
 	var rows []row
-	for _, line := range lines[from+1 : to] {
+	for _, line := range lines[from:to] {
 		if m := pickerRow.FindStringSubmatch(line); m != nil {
 			n, _ := strconv.Atoi(m[2])
 			f := pickerGaps.Split(m[3], 2)
@@ -150,6 +141,12 @@ func parseModelPicker(screen string) modelPicker {
 			continue
 		}
 		p.opts = append(p.opts, o)
+	}
+	// (Its numbers run up: anything else was never the picker's rows.)
+	for i := 1; i < len(p.opts); i++ {
+		if p.opts[i].N <= p.opts[i-1].N {
+			return modelPicker{}
+		}
 	}
 	p.ok = len(p.opts) > 0
 	return p
@@ -218,20 +215,66 @@ const (
 // ("Enter to set as default · s to use this session only · Esc to cancel")
 // that stands in nothing else. A pane too narrow for that line breaks it
 // over two — "… s to use this" and "session only · …" — so the keys are
-// looked for with the line ends taken out (see convo_screen.go). The title
-// is held to a line of its own all the same: it is short enough that no
-// pane breaks it, and words of a thread about Claude Code itself ("a line
-// reading Select model") must not be taken for the picker.
+// looked for with the line ends taken out (see convo_screen.go).
+//
+// The picker is known by its keys' line and not by its title, because a
+// pane too short for the whole picker scrolls the title away: of 47
+// columns and 34 rows the picker fills the screen to the row, and a
+// session with a status line of its own then has no room for the title at
+// all. What tells the picker from a thread quoting its words is that
+// nothing of Claude Code's input box stands under it: the picker takes the
+// box's place while it is open.
 const (
 	pickerTitle = "Select model"
 	pickerKeys  = "s to use this session only"
 )
 
-// pickerShows: the picker is on the screen (its title, then its keys).
+// pickerOwns: under line to, the screen holds no input box of Claude
+// Code's — the picker has the foot of the screen, as an open one does.
+func pickerOwns(lines []string, to int) bool {
+	for i := to + 1; i < len(lines); i++ {
+		if strings.HasPrefix(strings.TrimSpace(lines[i]), "❯") {
+			return false
+		}
+	}
+	return true
+}
+
+// pickerBlock: the lines the picker's rows stand on, [from, to). to is its
+// keys' line. Where the title was scrolled away, the rows are taken from
+// the top of what was read: a picker whose title is gone is one that fills
+// the screen, so there is nothing else up there to take for a row.
+func pickerBlock(lines []string) (from, to int, ok bool) {
+	to = -1
+	for i := 0; ; {
+		t := wrapAt(lines, pickerKeys, i)
+		if t < 0 {
+			break
+		}
+		to, i = t, t+1
+	}
+	if to < 0 || !pickerOwns(lines, to) {
+		return 0, 0, false
+	}
+	from = 0
+	for i := 0; i < to; i++ {
+		if strings.TrimSpace(lines[i]) == pickerTitle {
+			from = i + 1
+		}
+	}
+	return from, to, true
+}
+
+// pickerShows: the picker is on the screen — its keys, the foot of the
+// screen its own, and at least one numbered row of its own above.
 func pickerShows(screen string) bool {
 	lines := strings.Split(screen, "\n")
-	for i, l := range lines {
-		if strings.TrimSpace(l) == pickerTitle && wrapAt(lines, pickerKeys, i+1) >= 0 {
+	from, to, ok := pickerBlock(lines)
+	if !ok {
+		return false
+	}
+	for _, l := range lines[from:to] {
+		if pickerRow.MatchString(l) {
 			return true
 		}
 	}
@@ -731,7 +774,10 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 		if typed {
 			*outcome = "unknown"
 		}
-		*reason = "picker"
+		// (The record says which of them it was. One word for all five left
+		// the log saying no more than the person on the page could see:
+		// a picker read and a picker left open are not the same trouble.)
+		*reason = pickerReason(err)
 		writeError(w, http.StatusConflict, "picker", err.Error())
 	default:
 		if typed {
@@ -739,6 +785,25 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 		}
 		writeError(w, http.StatusBadGateway, "unknown", "it is not known what the picker took")
 	}
+}
+
+// pickerReason names, for the record, which of the picker's troubles it
+// was. The page is told "picker" for all of them all the same: there is
+// nothing the person could do differently.
+func pickerReason(err error) string {
+	switch {
+	case errors.Is(err, errNoPicker):
+		return "picker_unread"
+	case errors.Is(err, errNoModel):
+		return "picker_no_model"
+	case errors.Is(err, errNotThere):
+		return "picker_not_there"
+	case errors.Is(err, errNotTaken):
+		return "picker_not_taken"
+	case errors.Is(err, errScreen):
+		return "picker_screen"
+	}
+	return "picker"
 }
 
 // defaultChanged: the sessions (by id) where a switch left the default model

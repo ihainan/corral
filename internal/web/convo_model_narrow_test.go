@@ -160,18 +160,85 @@ func TestDescriptionPutBackTogether(t *testing.T) {
 }
 
 // Words about Claude Code itself are no picker. A session talking this very
-// change through has both of the picker's marks on its screen; only the
-// title standing on a line of its own tells the dialog from the talk.
+// change through has the picker's words on its screen; what tells them from
+// the dialog is that Claude Code's input box still stands under them, which
+// an open picker takes the place of.
 func TestWordsAboutThePickerAreNoPicker(t *testing.T) {
 	screen := strings.Join([]string{
 		"  ❯ 1. 认菜单靠两行：一行正好是 Select model，另一行要含",
 		"       s to use this session only 这句话。",
 		"  ──────────────────────────────────────",
+		"  ❯",
+		"  ──────────────────────────────────────",
+		"    Opus 5·H │ Ctx 305.5K",
 	}, "\n")
 	if pickerShows(screen) {
 		t.Error("a thread quoting the picker was taken for the picker itself")
 	}
 	if p := parseModelPicker(screen); p.ok {
 		t.Errorf("read %+v off a thread that only talks about the picker", p.opts)
+	}
+}
+
+// A pane too short for the whole picker scrolls its title away: of 47
+// columns the picker runs to 33 lines, and a session whose status line
+// takes two of 34 rows has no room left for it. Read off the keys' line
+// upwards, the models are all still there.
+func TestPickerTitleScrolledAway(t *testing.T) {
+	lines := strings.Split(strings.TrimRight(realPicker(t, 47), "\n"), "\n")
+	at := -1
+	for i, l := range lines {
+		if strings.TrimSpace(l) == "Select model" {
+			at = i
+		}
+	}
+	if at < 0 {
+		t.Fatal("the fixture has no title to scroll away")
+	}
+	screen := strings.Join(append(append([]string{}, lines[at+1:]...),
+		"  Opus 5·H │ Ctx 305.5K (30.5% / υ 38.2%) │ …",
+		"  ⏵⏵ auto mode on (shift+tab to cycle) · ⧉ 6"), "\n")
+	if !pickerShows(screen) {
+		t.Fatal("the picker went unseen with its title scrolled off the top")
+	}
+	p := parseModelPicker(screen)
+	var got []string
+	for _, o := range p.offered() {
+		got = append(got, o.Label)
+		if want := pickerDescs[o.Label]; o.Desc != want {
+			t.Errorf("%s says %q, want %q", o.Label, o.Desc, want)
+		}
+	}
+	if want := "Opus Fable Sonnet Haiku"; strings.Join(got, " ") != want {
+		t.Errorf("models %q, want %q", strings.Join(got, " "), want)
+	}
+}
+
+// The picker as it was served a few hours later the same day: the models
+// named in full, two spaces after the number, a first entry cut short with
+// an ellipsis, and a row that opens more of them. Caught off a pane of the
+// very shape this went wrong on (47 columns, 34 rows).
+func TestPickerOtherShape(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("testdata", "model-picker-47-six.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	screen := string(b)
+	if !pickerShows(screen) {
+		t.Fatal("the picker was not seen in its other shape")
+	}
+	p := parseModelPicker(screen)
+	var got []string
+	for _, o := range p.offered() {
+		got = append(got, o.Label)
+	}
+	if want := "Opus 5.5 Fable 5.1 Sonnet 5.5 Haiku 5.5 More models"; strings.Join(got, " ") != want {
+		t.Errorf("models %q, want %q", strings.Join(got, " "), want)
+	}
+	if d := p.offered()[0].Desc; d != "For complex work and everyday tasks" {
+		t.Errorf("the first model says %q", d)
+	}
+	if c, ok := p.cursor(); !ok || c.N != 1 || c.Label != "" {
+		t.Errorf("cursor %+v ok %v; want the entry cut short, left out", c, ok)
 	}
 }
