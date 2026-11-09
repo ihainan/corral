@@ -193,6 +193,7 @@ codex_sub() {
     /^--$/ { exit } /^-/ { if ($0 ~ /^(-[cmpsaCi]|--(config|model|profile|sandbox|ask-for-approval|cd|image|add-dir|local-provider|remote|remote-auth-token-env|enable|disable))$/) skip = 1; next }
     { print; exit }'
 }
+` + convoEndpointSh + `
 # A process's record: what it is, where its log is, and where it runs.
 rec() { # pid start fg procstart sid log agent [via]
   env=$(tr '\0' '\n' <"/proc/$1/environ" 2>/dev/null | grep -E '^(HERDR_PANE_ID|HERDR_SOCKET_PATH|TMUX|TMUX_PANE)=' | head -c 4096)
@@ -221,7 +222,17 @@ rec() { # pid start fg procstart sid log agent [via]
       awk -v now="$(date -u +%Y-%m-%dT%H:%M:%S).999999999" '{ t = $0; sub(/Z$/, "", t); if (t !~ /\./) t = t "."; i = index(t, "."); t = substr(t, 1, i) substr(substr(t, i + 1) "000000000", 1, 9) }
         t <= now && t > k { k = t; m = $0 } END { print m }')
   fi
-  printf 'pid=%s\nstart=%s\nbtime=%s\nhz=%s\nfg=%s\nprocstart=%s\nsid=%s\nlog=%s\nlogmtime=%s\nlogts=%s\ntty=%s\ncwd=%s\nanc=%s\nagent=%s\nvia=%s\n%s\0' "$1" "$2" "$btime" "$hz" "$3" "$4" "$5" "$6" "$lw" "$lt" "$tty" "$cwd" "$anc" "$7" "${8-}" "$env"
+  # Where its requests go and how it signs in (see claude_ep, codex_ep):
+  # read where a conversation is shown, not in the rounds the list makes,
+  # which are over every agent of the host.
+  ep= auth=
+  if [ "$times" != times ]; then
+    case $7 in
+    claude) claude_ep "$1" "$cwd";;
+    codex) codex_ep "$1";;
+    esac
+  fi
+  printf 'pid=%s\nstart=%s\nbtime=%s\nhz=%s\nfg=%s\nprocstart=%s\nsid=%s\nlog=%s\nlogmtime=%s\nlogts=%s\ntty=%s\ncwd=%s\nanc=%s\nagent=%s\nvia=%s\nep=%s\nauth=%s\n%s\0' "$1" "$2" "$btime" "$hz" "$3" "$4" "$5" "$6" "$lw" "$lt" "$tty" "$cwd" "$anc" "$7" "${8-}" "$ep" "$auth" "$env"
 }
 # (A file's lines joined by $2, as tr would put it in place of each
 # newline, the last one's left out: x. The shell's own: a name of a
@@ -522,6 +533,35 @@ type convoProc struct {
 	tty           string     // what its input is ("/dev/pts/3"; a pipe, or "", when it has no terminal)
 	cwd           string     // where it runs
 	anc           []convoAnc // its parent, the parent's parent… (to 40, not init)
+	// ep: the host its requests go to, where that is not the model's own
+	// maker (so "" for api.anthropic.com, and for a Codex at OpenAI's own);
+	// auth: how it signs in, one of convoAuths. Read on the host, which
+	// sends the host of the address and nothing else of it: see claude_ep.
+	ep   string
+	auth string
+}
+
+// convoAuths: how an agent signs in, as its process and settings say —
+// signed in to an account (login), an API key of the model's maker (key), a
+// token for somewhere else (token), or Amazon's and Google's own ways.
+var convoAuths = map[string]bool{"login": true, "key": true, "token": true, "bedrock": true, "vertex": true}
+
+// convoEPHost: an address at the maker's own front door is no endpoint to
+// name — it is where Claude Code goes with nothing set.
+const convoEPHost = "api.anthropic.com"
+
+// convoEPOf keeps of a host read on a host what may be shown: its name, as
+// a name of a host is written, and no longer than one.
+func convoEPOf(v string) string {
+	if len(v) > 120 || v == "" || strings.EqualFold(v, convoEPHost) {
+		return ""
+	}
+	for _, r := range v {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '.' || r == '-' || r == '_' || r == ':') {
+			return ""
+		}
+	}
+	return v
 }
 
 type convoAnc struct {
@@ -721,6 +761,12 @@ func parseConvoLocate(out string) (l convoLocated) {
 				p.agent = v
 			case "via":
 				p.ocService = v == "service"
+			case "ep":
+				p.ep = convoEPOf(v)
+			case "auth":
+				if convoAuths[v] {
+					p.auth = v
+				}
 			case "HERDR_PANE_ID":
 				p.herdrPane = v
 			case "HERDR_SOCKET_PATH":
@@ -1549,6 +1595,13 @@ type convoBind struct {
 	Session string `json:"session"`
 	Agent   string `json:"agent"`           // "claude" or "codex"
 	Title   string `json:"title,omitempty"` // (tmux: the pane's title)
+	// Via: the host the process's requests go to, where it is not the
+	// model maker's own ("sub2api.example.com"); absent where it is, and
+	// for an agent whose endpoint is not read (OpenCode's). Auth: how it
+	// signs in (convoAuths). The host of the address only: a token, and a
+	// key an address may carry, stay on the host.
+	Via  string `json:"via,omitempty"`
+	Auth string `json:"auth,omitempty"`
 	// started is when the process started (unix milliseconds; 0 when not
 	// known): what was queued before was another process's.
 	started int64
@@ -1980,7 +2033,7 @@ func (s *Server) locateConvo(ctx context.Context, sess *term.Session, st *convoS
 		}
 		st.bind = nil
 		if p != nil {
-			b := &convoBind{PID: p.pid, Start: p.start, Session: p.sid, Agent: p.agent, Pane: p.herdrPane}
+			b := &convoBind{PID: p.pid, Start: p.start, Session: p.sid, Agent: p.agent, Pane: p.herdrPane, Via: p.ep, Auth: p.auth}
 			if sess.Persistence == "tmux" {
 				b.Pane, b.Title = p.tmuxPane, l.tmuxTitle
 			}
@@ -4080,6 +4133,98 @@ func codexSubagentOf(head []byte, sid string) bool {
 var errSubagentUnsure = errors.New("too many logs in its folder to find it")
 
 var errSubagentFile = errors.New("not a subagent's log")
+
+// convoEndpointSh defines claude_ep and codex_ep (of locating's script):
+// where an agent's requests go and how it signs in, read on the host so
+// that only the host of the address is sent — what signs in, and a key an
+// address may carry in its path or query, stay there.
+const convoEndpointSh = `# The host of a URL ($1): bl. Its scheme, any credentials, its path and its
+# query dropped — a key an address carries in them must not leave the host.
+host_of() {
+  bl=$(printf '%s' "$1" | sed -n 's#^[A-Za-z][A-Za-z0-9+.-]*://##p' | sed -e 's#[/?#].*##' -e 's#^[^@]*@##' | head -c 120)
+  case $bl in *[!A-Za-z0-9.:_-]*) bl=;; esac
+}
+# The value of name $2 in the "env" object of the settings file $1: pv.
+# (A settings file's env entry is a string, so the object's first "}" ends
+# it. Read as text: no JSON reader is to be had in a host's shell.)
+setting_env() {
+  pv=$(tr '\n' ' ' <"$1" 2>/dev/null | head -c 65536 | sed -n 's/.*"env"[ ]*:[ ]*{\([^}]*\)}.*/\1/p' |
+    sed -n "s/.*\"$2\"[ ]*:[ ]*\"\([^\"]*\)\".*/\1/p" | head -c 400)
+}
+# Where a Claude Code's requests go and how it signs in: ep (the host, none
+# where it is Anthropic's own), auth (login, key, token, bedrock, vertex).
+#
+# Both the environment it started with and the settings it reads can say;
+# the settings win (both set, the settings' address got the request: seen on
+# 2.1.318), and the environment is only what it was given at exec, so the
+# settings are read too. Their order is Claude Code's own, most particular
+# first; the project's are taken as those where it runs ($2), which is where
+# it was started in all but the odd case.
+claude_ep() { # pid cwd
+  aev=$(tr '\0' '\n' <"/proc/$1/environ" 2>/dev/null |
+    grep -E '^(ANTHROPIC_BASE_URL|ANTHROPIC_AUTH_TOKEN|ANTHROPIC_API_KEY|CLAUDE_CODE_USE_BEDROCK|CLAUDE_CODE_USE_VERTEX|CLAUDE_CONFIG_DIR)=' | head -c 4096)
+  bu= au=
+  cfgd=$(printf '%s\n' "$aev" | sed -n 's/^CLAUDE_CONFIG_DIR=//p' | head -1)
+  [ -n "$cfgd" ] || cfgd=$HOME/.claude
+  for sf in /etc/claude-code/managed-settings.json "$2/.claude/settings.local.json" "$2/.claude/settings.json" "$cfgd/settings.json"; do
+    [ -r "$sf" ] || continue
+    if [ -z "$bu" ]; then setting_env "$sf" ANTHROPIC_BASE_URL; bu=$pv; fi
+    if [ -z "$au" ]; then
+      setting_env "$sf" ANTHROPIC_AUTH_TOKEN; [ -n "$pv" ] && au=token
+      if [ -z "$au" ]; then setting_env "$sf" ANTHROPIC_API_KEY; [ -n "$pv" ] && au=key; fi
+    fi
+  done
+  [ -n "$bu" ] || bu=$(printf '%s\n' "$aev" | sed -n 's/^ANTHROPIC_BASE_URL=//p' | head -1)
+  if [ -z "$au" ]; then
+    if [ -n "$(printf '%s\n' "$aev" | sed -n 's/^ANTHROPIC_AUTH_TOKEN=//p' | head -1)" ]; then au=token
+    elif [ -n "$(printf '%s\n' "$aev" | sed -n 's/^ANTHROPIC_API_KEY=//p' | head -1)" ]; then au=key
+    fi
+  fi
+  # (Amazon's or Google's, which have no address of their own to show.)
+  case $(printf '%s\n' "$aev" | sed -n 's/^CLAUDE_CODE_USE_BEDROCK=//p' | head -1) in ''|0|false) ;; *) au=bedrock; bu=;; esac
+  case $(printf '%s\n' "$aev" | sed -n 's/^CLAUDE_CODE_USE_VERTEX=//p' | head -1) in ''|0|false) ;; *) au=vertex; bu=;; esac
+  [ -n "$au" ] || au=login
+  ep=; auth=$au
+  [ -n "$bu" ] && { host_of "$bu"; ep=$bl; }
+}
+# The value of key $3 in section $2 (top-level: "") of the TOML file $1: pv.
+toml_of() {
+  pv=$(awk -v s="$2" -v k="$3" '
+    /^[ \t]*\[/ { sec = $0; sub(/^[ \t]*\[/, "", sec); sub(/\][ \t]*$/, "", sec); next }
+    { line = $0; sub(/^[ \t]+/, "", line); sub(/[ \t]+$/, "", line)
+      if (sec != s) next
+      if (line !~ "^" k "[ \t]*=") next
+      sub(/^[^=]*=[ \t]*/, "", line); gsub(/^"|"$/, "", line); print line; exit }' "$1" 2>/dev/null | head -c 200)
+}
+# Where a Codex's requests go: ep. Its provider is the one its command line
+# gives (-c model_provider=…, or the profile named there), else the one its
+# config names (its profile's, else its own); that provider's base_url is
+# the address. None of them: OpenAI's own, which nothing is shown of.
+codex_ep() { # pid
+  aev=$(tr '\0' '\n' <"/proc/$1/environ" 2>/dev/null | grep -E '^(CODEX_HOME|OPENAI_BASE_URL)=' | head -c 2048)
+  cfgd=$(printf '%s\n' "$aev" | sed -n 's/^CODEX_HOME=//p' | head -1)
+  [ -n "$cfgd" ] || cfgd=$HOME/.codex
+  sf=$cfgd/config.toml
+  # (Its command line: the last of either wins, as Codex takes them.)
+  bu=$(tr '\0' '\001' <"/proc/$1/cmdline" 2>/dev/null | awk 'BEGIN { RS = "\001" }
+    want == "c" { if ($0 ~ /^model_provider[ \t]*=/) { sub(/^[^=]*=[ \t]*/, "", $0); gsub(/^"|"$/, "", $0); p = "p=" $0 } want = ""; next }
+    want == "p" { p = "f=" $0; want = ""; next }
+    /^(-c|--config)$/ { want = "c"; next }
+    /^(--profile|-p)$/ { want = "p"; next }
+    /^--config=/ { if ($0 ~ /^--config=model_provider[ \t]*=/) { sub(/^[^=]*=[^=]*=[ \t]*/, "", $0); gsub(/^"|"$/, "", $0); p = "p=" $0 }; next }
+    /^--profile=/ { sub(/^--profile=/, "", $0); p = "f=" $0; next }
+    END { print p }')
+  au=; case $bu in p=*) au=${bu#p=};; f=*) toml_of "$sf" "profiles.${bu#f=}" model_provider; au=$pv;; esac
+  if [ -z "$au" ]; then
+    toml_of "$sf" '' profile
+    [ -n "$pv" ] && { toml_of "$sf" "profiles.$pv" model_provider; au=$pv; }
+  fi
+  [ -n "$au" ] || { toml_of "$sf" '' model_provider; au=$pv; }
+  ep=; auth=
+  case $au in ''|openai|oss) bu=$(printf '%s\n' "$aev" | sed -n 's/^OPENAI_BASE_URL=//p' | head -1);;
+  *) toml_of "$sf" "model_providers.$au" base_url; bu=$pv;; esac
+  [ -n "$bu" ] && { host_of "$bu"; ep=$bl; }
+}`
 
 // codexFdsSh defines codex_fds (of locating's script and the gated
 // command's, the same words): $1 a Codex process's /proc dir. It sets

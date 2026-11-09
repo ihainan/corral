@@ -1506,10 +1506,17 @@ export function ConversationView({
             quota={
               convo.bind?.agent === 'codex'
                 ? { codex: true as const, said: convo.meta.quota }
-                : convo.of && convo.bind?.agent === 'claude' && convo.bind.session
+                : // The subscription's use is the account's, which this session
+                  // does not draw on when its requests go elsewhere: not shown
+                  // then, in place of a number that is about something else.
+                  // (A key set is no such case: Claude Code asks whether to use
+                  // one, and goes on with the account where that was refused.)
+                  convo.of && convo.bind?.agent === 'claude' && convo.bind.session && !convo.bind.via && convo.bind.auth !== 'bedrock' && convo.bind.auth !== 'vertex'
                   ? { sid: convo.of.split(' ')[0], session: convo.bind.session }
                   : undefined
             }
+            via={convo.bind?.via}
+            auth={convo.bind?.auth}
           />
         )}
       </div>
@@ -1830,7 +1837,10 @@ const effortName = (e: string) => ((EFFORTS as readonly string[]).includes(e) ? 
 // What the session runs with, under the composer: its permission mode on
 // the left (a tap: a menu of them); its branch, model and how
 // full its context is on the right (the numbers on a tap).
-function Runs({ meta, active, mode, model, effort, quota }: { meta: ConvoMeta; active: boolean; mode?: ModeSwitch; model?: ModelSwitch; effort?: EffortSwitch; quota?: QuotaOf }) {
+// (via, auth: where its requests go and how it signs in, as its process on
+// the host says — see convoBind. Shown only where that is not the model
+// maker's own door: the quiet case, which is most of them, says nothing.)
+function Runs({ meta, active, mode, model, effort, quota, via, auth }: { meta: ConvoMeta; active: boolean; mode?: ModeSwitch; model?: ModelSwitch; effort?: EffortSwitch; quota?: QuotaOf; via?: string; auth?: string }) {
   const [open, setOpen] = useState<false | 'ctx' | 'model' | 'effort' | 'mode'>(false) // (which of its pop-ups)
   // (Another agent bound meanwhile — the pane's program changed: its model and effort menus, of the one before, closed;
   // opened again, the list read is the new one's.)
@@ -1920,6 +1930,10 @@ function Runs({ meta, active, mode, model, effort, quota }: { meta: ConvoMeta; a
       window.removeEventListener('resize', fit)
     }
   }, [open, sheet])
+  // Where its requests go, when that is not the model maker's own door:
+  // the host, or, for Amazon's and Google's, which have no address of their
+  // own to show, their name. "" is the quiet case, most of them.
+  const where = via || (auth === 'bedrock' ? 'Amazon Bedrock' : auth === 'vertex' ? 'Google Vertex AI' : '')
   const used = meta.context ?? 0
   // (Where it is not known: past the smaller window, the session has the
   // larger one. Known and filled past, it was not that one after all.)
@@ -2004,6 +2018,13 @@ function Runs({ meta, active, mode, model, effort, quota }: { meta: ConvoMeta; a
             <span className="convo-runs-item convo-runs-effort" title={t('convo.effort') + ': ' + effortName(level)}>{t('convo.effortShort', { e: effortName(level) })}</span>
           )
         })()}
+      {/* Where its requests go, when that is somewhere of the person's own
+          choosing: the host and nothing else of the address. */}
+      {where && (
+        <span className="convo-runs-item convo-runs-via" title={t('convo.viaHint', { host: where })}>
+          {t('convo.via', { host: where })}
+        </span>
+      )}
       {used > 0 && (
         <button type="button" className="convo-runs-item convo-runs-ctx" aria-expanded={open === 'ctx'} aria-label={t('convo.ctxLabel', { n: tokens(used) })} title={t('convo.ctxLabel', { n: tokens(used) })} onClick={() => setOpen(open === 'ctx' ? false : 'ctx')}>
           <Gauge part={full} />
@@ -2151,6 +2172,10 @@ function Runs({ meta, active, mode, model, effort, quota }: { meta: ConvoMeta; a
               : t(windows.length > 1 ? 'convo.ctxNote' : 'convo.ctxNoteBig')}
           </p>
           {quota && ('codex' in quota ? <QuotaSaid quota={quota.said} /> : <QuotaPart key={quota.sid + ' ' + quota.session} sid={quota.sid} session={quota.session} />)}
+          {/* The subscription's use, where it is left out because this
+              session does not draw on it: said, so that its place is not
+              simply empty. */}
+          {!quota && where && <p className="convo-runs-note">{t('convo.viaNote', { host: where })}</p>}
           {/* (No cost read yet: nothing said — a line saying "no usage" under the context's count read as if that count were none.) */}
           {meta.cost && <CostPart cost={meta.cost} />}
         </div>

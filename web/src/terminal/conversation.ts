@@ -232,6 +232,12 @@ export interface ConvoBind {
   session: string
   agent?: string // "claude", "codex" or "opencode": whose process it is
   title?: string
+  // via: the host its requests go to, where that is not the model maker's
+  // own (so absent for Anthropic's and OpenAI's own, and for an OpenCode,
+  // whose endpoint is not read). Only the host: what signs in stays on the
+  // host. auth: how it signs in — login, key, token, bedrock, vertex.
+  via?: string
+  auth?: string
 }
 
 interface Answer {
@@ -368,7 +374,7 @@ export function forgetConversations() {
 }
 
 const sameBind = (a?: ConvoBind, b?: ConvoBind) =>
-  a === b || (!!a && !!b && a.pane === b.pane && a.pid === b.pid && a.start === b.start && a.session === b.session && a.title === b.title && a.agent === b.agent)
+  a === b || (!!a && !!b && a.pane === b.pane && a.pid === b.pid && a.start === b.start && a.session === b.session && a.title === b.title && a.agent === b.agent && a.via === b.via && a.auth === b.auth)
 
 const sameMeta = (a?: ConvoMeta, b?: ConvoMeta) =>
   a === b || (!!a && !!b && a.model === b.model && a.mode === b.mode && a.effort === b.effort && a.branch === b.branch && a.context === b.context && a.window === b.window && a.window_by === b.window_by && JSON.stringify(a.cost) === JSON.stringify(b.cost) && JSON.stringify(a.quota) === JSON.stringify(b.quota))

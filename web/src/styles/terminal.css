@@ -538,6 +538,11 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-runs-effort { flex: none; }
 .convo-runs-branch svg { flex: none; }
 .convo-runs-branch-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* Where its requests go (11-09), where that is not the model maker's own
+   door: before the context, whose pop-up says there what the subscription's
+   use would have stood in. A host's name can be long, so it is cut as the
+   branch's name is. */
+.convo-runs-via { flex: 0 1 auto; min-width: 2em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .convo-runs-ctx { cursor: pointer; }
 /* (A touch screen: each 44 high to touch, the row as low as it looks, into the gaps around it) */
 @media (pointer: coarse) {
