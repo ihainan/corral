@@ -2654,6 +2654,10 @@ if [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -d "$XDG_RUNTIME_DIR" ] && [ ! -L "$l" ] &
   done
 fi
 [ "$len" = keys ] || [ "$(wc -c <"$f" | tr -d ' ')" = "$len" ] || exit 4
+# (The first letter of what is to be typed: a command of Claude Code's own
+# begins with it, and its list of commands then takes the screen.)
+cmd1=
+[ "$len" = keys ] || cmd1=$(head -c 1 "$f" 2>/dev/null)
 # (In parts: each cut out before anything is typed — into a folder of its
 # own, as private as mktemp's file — and its length checked: one not read
 # whole types nothing, rather than half a message and Enter — review505.)
@@ -2787,6 +2791,21 @@ waiting() {
 # (Right before the Enter that sends a text: it may have come to wait
 # meanwhile, the text typed. Exit 5: typed, not sent.)
 gate_enter() {
+  # A command typed into Claude Code opens its list of commands, which
+  # takes the place of the input box on the screen; the Enter after it
+  # would go to that list, not to the box. Escape closes the list and
+  # leaves the words typed where they are. Pressed only where the box is
+  # not to be seen and the screen holds a list of commands — nothing else
+  # of Claude Code's is ever answered this way.
+  if [ "$kind" = claude ] && [ -z "$cx" ] && [ "$gate" = free ] && [ "$cmd1" = / ]; then
+    owner 1
+    if [ "$o" != main ] && [ -n "$os" ] &&
+      [ "$(printf '%s\n' "$os" | grep -cE '^[[:space:]]*/[A-Za-z0-9_-]+[[:space:]]')" -ge 2 ]; then
+      if [ "$mode" = tmux ]; then tmux send-keys -t "$p" Escape 9>&- || exit 6
+      else HERDR_SOCKET_PATH=$sock herdr pane send-keys "$p" esc >/dev/null 2>&1 9>&- || exit 6; fi
+      sleep 0.3
+    fi
+  fi
   [ -n "$gate" ] || return 0
   waiting
   case $gate in
