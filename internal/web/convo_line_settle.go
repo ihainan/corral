@@ -31,15 +31,19 @@ import (
 //     reached by the same address through different jumps do not.
 //   - What was there before, what the line writes and where it was typed
 //     are kept in the store before the line is typed (SettingsPending).
-//   - That is let go only once the line is known to be over and the
-//     default is seen settled — not after so many looks. A line is over
-//     when its log says how it ended (taken, or its question left), when
-//     its process is gone, or when it never ran (no record of it, the box
-//     empty, nothing asked). Until then its question may stand open in
-//     the terminal, or the line sit in the box, and whoever answers or
-//     sends it later would change the default with no one to put it
-//     back: so the account's next switch looks again first, and is
-//     refused while the line is still open.
+//   - A switch from here is the line running within lineOwn of being
+//     typed. That is what is kept for, and what the default is put back
+//     after. A line left in the box, or its question left open, that the
+//     person sends or answers in the terminal later than that is their
+//     own "/model": Claude Code tells them it is saved as the default,
+//     and it is left so — what the default was when the line was typed
+//     says nothing, by then, of what it was just before it ran (another
+//     session may have set its own since, unseen from here).
+//   - Until lineOwn is over, what is kept is let go only once the line is
+//     known to be over — its log says how it ended (taken, or its
+//     question left), its process is gone, or it never ran (no record of
+//     it, the box empty, nothing asked) — and the account's next switch
+//     looks again first, and is refused while the line is still open.
 //   - Whether a line is over and whether it wrote the settings are two
 //     questions (lineConclude). The default is put back only where the
 //     line's log says it ran, and only where the default is the word it
@@ -114,6 +118,35 @@ type lineProbe struct {
 	moved   func() bool                     // that process holds another conversation by now (/clear, /resume)
 	atRest  func() bool                     // its pane shows it at rest, the box empty, nothing asked
 	wait    func()                          // a moment, for a record being written to be there (nil: none)
+	hostNow func() (time.Time, bool)        // the host's clock now
+}
+
+// lineOwn: a line that ran within this of being typed is this switch's;
+// later, the person's own (sent or answered by them in the terminal). A
+// line still open lineOwnGrace after that is let go: nothing is owed for
+// what becomes of it. (The flow answers its question within seconds.)
+const (
+	lineOwn      = 20 * time.Second
+	lineOwnGrace = 5 * time.Second
+)
+
+// lineOurs: the line, found to have run, ran within lineOwn of being
+// typed. Looked at later than that, by when its log says it ran — the
+// host's clock, set against this one's by what the host says it is now.
+// Not said, or not known: not taken for ours (nothing is written on a
+// guess).
+func lineOurs(p lineProbe, w *lineWatch, now time.Time) bool {
+	if now.Sub(w.typedAt) <= lineOwn {
+		return true
+	}
+	if w.log.at.IsZero() || p.hostNow == nil {
+		return false
+	}
+	there, ok := p.hostNow()
+	if !ok {
+		return false
+	}
+	return w.log.at.Add(now.Sub(there)).Sub(w.typedAt) <= lineOwn
 }
 
 // lineLagWait: Claude Code writes the default up to 0.3 s before its log's
@@ -161,13 +194,18 @@ func settleSee(sio settleIO) (cur json.RawMessage, has bool, err error) {
 // tells: lineRan. The default being the line's word tells nothing —
 // another session may have set that word. So:
 //
-//   - lineRan: put back where the default is its word. Final then; where
-//     its word is not there yet, only lineSettleAge after it was typed.
+//   - lineRan, within lineOwn of being typed (lineOurs): put back where
+//     the default is its word. Final then; where its word is not there
+//     yet, only lineSettleAge after it was typed.
+//   - lineRan later than that: the person's own, sent or answered by
+//     them. Final, the settings not touched.
 //   - lineKept, lineNever, lineGone with its log read whole: it wrote
 //     nothing. Final, the settings not touched.
 //   - lineGone, its process gone and its log not read whole: not known,
 //     and no later look would know more (quitting it is the person's way
 //     out of a line kept): put back where the default is its word, final.
+//   - open, lineOwn and lineOwnGrace past, its log read whole: let go.
+//     Whatever becomes of it now is the person's own. Final.
 //   - open: nothing written. A default other than the one kept is someone
 //     else's, set since: theirs is the one to put back should the line
 //     yet run (rebased: w says so now, to be kept). Where it is the
@@ -208,6 +246,10 @@ func lineConcluded(p lineProbe, sio settleIO, w *lineWatch, now time.Time, waite
 		end = w.log.end
 	}
 	switch {
+	case end == lineRan && !lineOurs(p, w, now):
+		return end, settleSame, true, false, nil
+	case end == lineOpen && whole && now.Sub(w.typedAt) > lineOwn+lineOwnGrace:
+		return end, settleSame, true, false, nil
 	case end == lineRan, end == lineGone && dead && !whole:
 		res, _, _, err = settleLook(sio, w.had, w.was, w.wrote)
 		switch {
@@ -297,6 +339,14 @@ func (s *Server) lineProbeOf(ctx context.Context, sess *term.Session, p *store.S
 			return false, false
 		},
 		moved: func() bool { return holds != "" && holds != p.SID },
+		hostNow: func() (time.Time, bool) {
+			out, err := lineExec(ctx, sess, running, "date +%s", nil, 64)
+			sec, perr := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)
+			if err != nil || perr != nil {
+				return time.Time{}, false
+			}
+			return time.Unix(sec, 0), true
+		},
 		wait: func() {
 			select {
 			case <-ctx.Done():
@@ -499,7 +549,7 @@ func (s *Server) settingsTurn(ctx context.Context, sess *term.Session, account s
 			slog.Error("model switch: an earlier switch's default is still not put back", "session", sess.ID, "err", err)
 			return nil, "default_settling", "the default model an earlier switch changed could not be put back yet", false
 		case end == lineOpen:
-			return nil, "default_pending", "an earlier switch's command has not ended (pane " + p.Pane + "): its question may be open in the terminal, or the command still in the input box (or quit that Claude Code)", false
+			return nil, "default_pending", "an earlier switch's command has not ended (pane " + p.Pane + "): its question may be open in the terminal, or the command still in the input box; deal with it there, or try again in half a minute", false
 		}
 		return nil, "default_settling", "an earlier switch is still settling", false
 	}
@@ -520,7 +570,9 @@ func (s *Server) settingsTurn(ctx context.Context, sess *term.Session, account s
 // while the line is open, to leave its question should it come late.
 // After them what is kept stays in the store, for the account's next
 // switch to look again.
-var lineChecks = []time.Duration{2 * time.Second, 4 * time.Second, 9 * time.Second, 15 * time.Second}
+// The last comes after lineOwn and lineOwnGrace: a line still open then
+// is let go.
+var lineChecks = []time.Duration{2 * time.Second, 2 * time.Second, 3 * time.Second, 4 * time.Second, 4 * time.Second, 5 * time.Second, 7 * time.Second}
 
 const lineHeld = 2
 

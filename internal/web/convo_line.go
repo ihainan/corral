@@ -133,6 +133,7 @@ type lineLog struct {
 	cmds     map[string]bool // uuids of the command's records
 	end      lineEnd         // (kept once found)
 	name     string          // the model named, where it ran
+	at       time.Time       // when it ran, by the host's clock (zero: not said)
 }
 
 // feed takes what was read from where the last feed's use ended, and gives
@@ -164,6 +165,7 @@ func (l *lineLog) feed(data []byte) (used int) {
 			UUID      string `json:"uuid"`
 			Parent    string `json:"parentUuid"`
 			Content   string `json:"content"`
+			Timestamp string `json:"timestamp"`
 			Message   struct {
 				Content json.RawMessage `json:"content"`
 			} `json:"message"`
@@ -194,6 +196,7 @@ func (l *lineLog) feed(data []byte) (used int) {
 		}
 		if m := lineSaid.FindStringSubmatch(text); m != nil {
 			l.end, l.name = lineRan, m[1]
+			l.at, _ = time.Parse(time.RFC3339Nano, rec.Timestamp)
 		} else if lineKeep.MatchString(text) {
 			l.end, l.name = lineKept, ""
 		}
