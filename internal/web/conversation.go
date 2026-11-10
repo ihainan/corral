@@ -3514,7 +3514,7 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	if what == "models" || what == "model" {
 		release := turn
 		turn = func() {} // (convoModel gives it back, once its steps have ended on the host)
-		s.convoModel(w, ctx, sess, b.Pane, socket, b.PID, b.Start, b.Session, b.Model, &outcome, &reason, release, front.agent == "codex", b.Effort)
+		s.convoModel(w, ctx, sess, b.Pane, socket, b.PID, b.Start, b.Session, b.Model, &outcome, &reason, release, front.agent == "codex", b.Effort, front.log)
 		return
 	}
 	if what == "effort" {
