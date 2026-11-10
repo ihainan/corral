@@ -1828,7 +1828,7 @@ export const CODEX_EFFORTS = Object.keys(EFFORT_WORDS)
 // that never arrives leaves the menu saying it is still reading, for as
 // long as it is left open.
 // (byLog: the list is one the gateway kept, with no word of which it is on — marked by the log's model, see rowByLog.)
-export type ModelSwitch = { list: ModelOpt[] | null; fresh: boolean; busy: boolean; can: boolean; unread?: boolean; byLog?: boolean; picked?: { label: string; was: string; name: string }; onOpen: () => void; onPick: (label: string, effort?: string) => void; efforts?: string[]; of?: string }
+export type ModelSwitch = { list: ModelOpt[] | null; fresh: boolean; busy: boolean; can: boolean; unread?: boolean; byLog?: boolean; onOpen: () => void; onPick: (label: string, effort?: string) => void; efforts?: string[]; of?: string }
 
 // How hard the agent is asked to think (Claude Code's /effort), for the
 // session only. The levels are its slider's, in its order.
@@ -2095,8 +2095,7 @@ function Runs({ meta, active, mode, model, effort, quota, via, auth }: { meta: C
             model.list.map((o) => {
               // (As its picker last said, which the log may not yet. A Codex's
               // log names it in small letters: "gpt-6-sol" is "GPT-6-Sol".)
-              const picked = model.picked && model.picked.was === (meta.model ?? '') ? model.list!.find((x) => x.label === model.picked!.label && named(x)[0].toLowerCase() === model.picked!.name.toLowerCase()) : undefined
-              const now = model.byLog ? o.label === (picked ? picked.label : rowByLog(model.list!, meta.model)) : model.fresh && model.list!.some((x) => x.current) ? !!o.current : modelName(meta.model!).toLowerCase() === o.label.toLowerCase()
+              const now = model.byLog ? o.label === rowByLog(model.list!, meta.model) : model.fresh && model.list!.some((x) => x.current) ? !!o.current : modelName(meta.model!).toLowerCase() === o.label.toLowerCase()
               const [name, says] = named(o)
               const pick = (effort?: string) => {
                 setOpen(false)

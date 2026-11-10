@@ -1146,7 +1146,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   // The model, switched from a menu of what Claude Code's picker offers (read
   // when it opens, through the picker: see convo_model.go), for this session
   // only. Only while it is at rest: the picker takes over its input.
-  const [models, setModels] = useState<{ list: ModelOpt[] | null; bind: string; at?: number; unread?: boolean; byLog?: boolean; picked?: { label: string; was: string; name: string } } | null>(null)
+  const [models, setModels] = useState<{ list: ModelOpt[] | null; bind: string; at?: number; unread?: boolean; byLog?: boolean } | null>(null)
   const [modelBusy, setModelBusy] = useState(false)
   // (Said once: a switch here left the default of new sessions changed, as
   // where its request was given up and it was found after.)
@@ -1211,20 +1211,6 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       .finally(() => setEffortBusy(false))
   }
 
-  // (What was just picked is let go of once the log read here has moved on
-  // from the model it had then: from there the log alone — were it kept, a
-  // /model typed in the terminal back to that earlier model would look like
-  // the log not having moved yet.)
-  const modelNow = convo.meta?.model ?? ''
-  // (How many times the model read from the log has changed: an answer to a
-  // pick that comes after any change — even one away and back again — is of
-  // a log that has moved on, and marks nothing.)
-  const modelTurns = useRef({ of: modelNow, n: 0 })
-  if (modelTurns.current.of !== modelNow) modelTurns.current = { of: modelNow, n: modelTurns.current.n + 1 }
-  useEffect(() => {
-    setModels((m) => (m?.picked && m.picked.was !== modelNow ? { ...m, picked: undefined } : m))
-  }, [modelNow])
-
   const openModels = () => {
     // (Read again after a minute: what it offers and which it has now may have changed.)
     if (!convo.bind || modelBusy || (models && models.bind === bindKey && models.list && Date.now() - (models.at ?? 0) < 60000)) return
@@ -1247,19 +1233,15 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   const pickModel = (label: string, effort?: string) => {
     if (!convo.bind || modelBusy) return
     setModelBusy(true)
-    const was = convo.meta?.model ?? ''
-    const turns = modelTurns.current.n
-    own(api<{ restored?: boolean; unconfirmed?: boolean; name?: string }>('POST', `/api/sessions/${sid}/conversation/model`, { ...pressBody(), model: label, ...(effort ? { effort } : {}) }, { timeoutMs: MODEL_MS }))
+    own(api<{ restored?: boolean; unconfirmed?: boolean }>('POST', `/api/sessions/${sid}/conversation/model`, { ...pressBody(), model: label, ...(effort ? { effort } : {}) }, { timeoutMs: MODEL_MS }))
       .then((r) => {
         toast(t('convo.modelSet', { m: effort ? `${label} · ${effort}` : label }) + (r.restored ? t('convo.modelRestored') : '') + (r.unconfirmed ? t('convo.modelUnconfirmed') : ''))
         // (Not said by its log: the list's mark is left where it was, not moved by a guess.)
-        // (picked: of a list marked by the log, what was just chosen is marked until the page's read of that log
-        // moves on from the model it had — it is a moment behind the gateway's; after that the log again, which a
-        // /model typed in the terminal changes too.)
-        // (name: what its log said it was set to. A row that shows another version — a list of its kin's — is
-        // not marked for having been clicked; with no name given, a switch made in its picker, the log alone —
-        // as where the log read here has moved on already, before this answer came.)
-        if (!r.unconfirmed) setModels((m) => m && { ...m, picked: r.name && modelTurns.current.n === turns ? { label, was, name: r.name } : undefined, list: m.list && m.list.map((o) => ({ ...o, current: o.label === label })) })
+        // (A list marked by the log — see rowByLog — is marked by it alone: read at once, not at the next tick,
+        // for what was just switched to. Nothing is kept here of what was clicked: the log says it, as it says a
+        // /model typed in the terminal.)
+        if (!r.unconfirmed) setModels((m) => m && { ...m, list: m.list && m.list.map((o) => ({ ...o, current: o.label === label })) })
+        convo.refresh()
       })
       .catch((e) => toast(refusal(e), true))
       .finally(() => setModelBusy(false))
@@ -2228,7 +2210,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       onSendNow={canPress && !notClaude ? () => press('now') : undefined}
       sendNow={said?.what === 'now' && said.bind === bindKey ? said.text : undefined}
       mode={{ now: modeNow?.bind === bindKey ? modeNow.mode : undefined, busy: modeBusy, onPick: canMode ? pickMode : undefined }}
-      model={canModel || modelBusy ? { list: models?.bind === bindKey ? models.list : null, unread: models?.bind === bindKey && !!models.unread, byLog: models?.bind === bindKey && !!models.byLog, picked: models?.bind === bindKey ? models.picked : undefined, fresh: !!models?.at && Date.now() - models.at < 60000, busy: modelBusy, can: canModel, onOpen: openModels, onPick: pickModel, of: bindKey, ...(codex ? { efforts: CODEX_EFFORTS } : {}) } : undefined}
+      model={canModel || modelBusy ? { list: models?.bind === bindKey ? models.list : null, unread: models?.bind === bindKey && !!models.unread, byLog: models?.bind === bindKey && !!models.byLog, fresh: !!models?.at && Date.now() - models.at < 60000, busy: modelBusy, can: canModel, onOpen: openModels, onPick: pickModel, of: bindKey, ...(codex ? { efforts: CODEX_EFFORTS } : {}) } : undefined}
       effort={{ now: effortNow?.bind === bindKey ? effortNow.effort : undefined, busy: effortBusy, can: canEffort, onPick: pickEffort }}
       lead={lead}
       more={more}
