@@ -819,7 +819,7 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 	}()
 	ctx, cancel := context.WithTimeout(ctx, 40*time.Second)
 	defer cancel()
-	typed := false
+	typed := *outcome == "typed" // (its picker opened already by this request, for its own list: see above)
 	run := func(ctx context.Context, keys []string, text string, read int, at string) (string, error) {
 		var press []string
 		if keys != nil {

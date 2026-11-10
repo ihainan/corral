@@ -1146,7 +1146,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   // The model, switched from a menu of what Claude Code's picker offers (read
   // when it opens, through the picker: see convo_model.go), for this session
   // only. Only while it is at rest: the picker takes over its input.
-  const [models, setModels] = useState<{ list: ModelOpt[] | null; bind: string; at?: number; unread?: boolean; byLog?: boolean; picked?: { label: string; was: string } } | null>(null)
+  const [models, setModels] = useState<{ list: ModelOpt[] | null; bind: string; at?: number; unread?: boolean; byLog?: boolean; picked?: { label: string; was: string; name: string } } | null>(null)
   const [modelBusy, setModelBusy] = useState(false)
   // (Said once: a switch here left the default of new sessions changed, as
   // where its request was given up and it was found after.)
@@ -1243,14 +1243,16 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     if (!convo.bind || modelBusy) return
     setModelBusy(true)
     const was = convo.meta?.model ?? ''
-    own(api<{ restored?: boolean; unconfirmed?: boolean }>('POST', `/api/sessions/${sid}/conversation/model`, { ...pressBody(), model: label, ...(effort ? { effort } : {}) }, { timeoutMs: MODEL_MS }))
+    own(api<{ restored?: boolean; unconfirmed?: boolean; name?: string }>('POST', `/api/sessions/${sid}/conversation/model`, { ...pressBody(), model: label, ...(effort ? { effort } : {}) }, { timeoutMs: MODEL_MS }))
       .then((r) => {
         toast(t('convo.modelSet', { m: effort ? `${label} · ${effort}` : label }) + (r.restored ? t('convo.modelRestored') : '') + (r.unconfirmed ? t('convo.modelUnconfirmed') : ''))
         // (Not said by its log: the list's mark is left where it was, not moved by a guess.)
         // (picked: of a list marked by the log, what was just chosen is marked until the page's read of that log
         // moves on from the model it had — it is a moment behind the gateway's; after that the log again, which a
         // /model typed in the terminal changes too.)
-        if (!r.unconfirmed) setModels((m) => m && { ...m, picked: { label, was }, list: m.list && m.list.map((o) => ({ ...o, current: o.label === label })) })
+        // (name: what its log said it was set to. A row that shows another version — a list of its kin's — is
+        // not marked for having been clicked; with no name given, a switch made in its picker, the log alone.)
+        if (!r.unconfirmed) setModels((m) => m && { ...m, picked: r.name ? { label, was, name: r.name } : undefined, list: m.list && m.list.map((o) => ({ ...o, current: o.label === label })) })
       })
       .catch((e) => toast(refusal(e), true))
       .finally(() => setModelBusy(false))

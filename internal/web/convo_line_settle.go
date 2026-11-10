@@ -750,7 +750,9 @@ func (s *Server) convoModelLine(w http.ResponseWriter, ctx context.Context, sess
 			done()
 			release()
 		}()
-		writeSwitchError(w, err, false, outcome, reason)
+		// (typed: the line was not — its picker was, where this request
+		// read its own list first: said of it all the same.)
+		writeSwitchError(w, err, *outcome == "typed", outcome, reason)
 		return
 	}
 	conclude := func() (lineEnd, settled, bool, error) {
@@ -845,7 +847,13 @@ func (s *Server) convoModelLine(w http.ResponseWriter, ctx context.Context, sess
 		}
 		// (restored: said of a default found changed by accident — here it
 		// is how the line works, each time.)
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "model": target, "restored": false, "restore_failed": false, "unconfirmed": unconfirmed})
+		// (name: the model its log said it was set to, name and version —
+		// for the page to mark the row by, where the row shown says the same.)
+		confirmed := ""
+		if !unconfirmed {
+			confirmed = want
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "model": target, "name": confirmed, "restored": false, "restore_failed": false, "unconfirmed": unconfirmed})
 	case errors.Is(err, errElsewhere):
 		*outcome, *reason = "typed", "line_elsewhere"
 		writeError(w, http.StatusConflict, "model_elsewhere", "it took another model than the one asked for: "+name)
