@@ -40,9 +40,12 @@ import (
 //     sends it later would change the default with no one to put it
 //     back: so the account's next switch looks again first, and is
 //     refused while the line is still open.
-//   - Put back only where the default is the word the line wrote. Any
-//     other value is someone else's, later than ours: left alone, and
-//     with it this switch's say over the default is over.
+//   - Whether a line is over and whether it wrote the settings are two
+//     questions (lineConclude). The default is put back only where the
+//     line's log says it ran, and only where the default is the word it
+//     wrote: that word found there is no sign the line wrote it — another
+//     session may have set the same. While the line is open nothing is
+//     written; whatever the default is then is what to put back later.
 //
 // Not kept from: a write to the settings by someone else between the
 // write back's last check and its rename (settingsWriteCommand: a moment
@@ -110,7 +113,12 @@ type lineProbe struct {
 	alive   func() (alive, known bool)      // Claude Code's process is still that one
 	moved   func() bool                     // that process holds another conversation by now (/clear, /resume)
 	atRest  func() bool                     // its pane shows it at rest, the box empty, nothing asked
+	wait    func()                          // a moment, for a record being written to be there (nil: none)
 }
+
+// lineLagWait: Claude Code writes the default up to 0.3 s before its log's
+// record of the line.
+const lineLagWait = 1500 * time.Millisecond
 
 // lineWatch: a line whose end is looked for, between looks.
 type lineWatch struct {
@@ -131,30 +139,67 @@ const (
 	lineSettleAge = 4 * time.Second
 )
 
-// lineConclude looks for the line's end and puts the default back where
-// it is the line's word. final: the line is over and the default settled
-// — nothing more is owed, what was kept of it can go. Not final where it
-// may yet be answered or sent (end lineOpen), where it ran a moment ago
-// and has not written its word, or where the settings could not be read
-// or written — nor, while it is open, for the default having been its
-// word and put back: the settings do not say whose word it was. rebased: the default is someone else's while the line is
-// still open — it is theirs that is to be put back, should the line yet
-// write its word (w says so now, to be kept).
+// settleSee: the default as it is, nothing written (has false: none).
+func settleSee(sio settleIO) (cur json.RawMessage, has bool, err error) {
+	doc, none, err := sio.read()
+	if err != nil {
+		return nil, false, err
+	}
+	return settingsModel(doc, none)
+}
+
+// lineConclude looks for the line's end, and puts the default back where
+// the line wrote it. Two questions, answered apart:
+//
+// Is the line over (may what is kept of it go)? Its log says how it ended
+// (lineRan, lineKept); or its process is gone, or holds another
+// conversation by now (lineGone); or it never ran (lineNever: no record
+// of it in a log read whole, its pane at rest). Else it is open — it may
+// yet be answered or sent — and kept.
+//
+// Did it write the settings (may the default be put back)? Only its log
+// tells: lineRan. The default being the line's word tells nothing —
+// another session may have set that word. So:
+//
+//   - lineRan: put back where the default is its word. Final then; where
+//     its word is not there yet, only lineSettleAge after it was typed.
+//   - lineKept, lineNever, lineGone with its log read whole: it wrote
+//     nothing. Final, the settings not touched.
+//   - lineGone, its process gone and its log not read whole: not known,
+//     and no later look would know more (quitting it is the person's way
+//     out of a line kept): put back where the default is its word, final.
+//   - open: nothing written. A default other than the one kept is someone
+//     else's, set since: theirs is the one to put back should the line
+//     yet run (rebased: w says so now, to be kept). Where it is the
+//     line's very word, only once a look a moment later still finds no
+//     record: Claude Code writes the default before its log.
+//   - Its log not read whole, the process there: not known whether it
+//     ran. Kept, nothing written; a default that is neither the one kept
+//     nor the line's word is still someone else's, and noted as above.
+//
+// final: nothing more is owed, what was kept can go.
 func lineConclude(p lineProbe, sio settleIO, w *lineWatch, now time.Time) (end lineEnd, res settled, final, rebased bool, err error) {
-	w.log.read(p.logFrom, &w.off)
+	return lineConcluded(p, sio, w, now, false)
+}
+
+func lineConcluded(p lineProbe, sio settleIO, w *lineWatch, now time.Time, waited bool) (end lineEnd, res settled, final, rebased bool, err error) {
+	whole := w.log.read(p.logFrom, &w.off)
+	dead := false
 	if w.log.end == lineOpen {
 		if alive, known := p.alive(); known && !alive {
-			end = lineGone
+			// (What it logged before it went, read after it was found gone.)
+			whole = w.log.read(p.logFrom, &w.off)
+			end, dead = lineGone, true
 		} else if known && p.moved() {
 			// (Its conversation was left for another in the same process: no
 			// question of the line's can stand open through that, nor the
-			// line sit in the box. What its log said till then was read.)
-			if w.log.read(p.logFrom, &w.off); w.log.end == lineOpen {
+			// line sit in the box. Over only by a log read whole since.)
+			if whole = w.log.read(p.logFrom, &w.off); whole {
 				end = lineGone
 			}
-		} else if len(w.log.cmds) == 0 && now.Sub(w.typedAt) >= lineNeverAge && p.atRest() {
+		} else if whole && len(w.log.cmds) == 0 && now.Sub(w.typedAt) >= lineNeverAge && p.atRest() {
 			// (At rest, and still no record of it once looked for again.)
-			if w.log.read(p.logFrom, &w.off); w.log.end == lineOpen && len(w.log.cmds) == 0 {
+			if whole = w.log.read(p.logFrom, &w.off); whole && len(w.log.cmds) == 0 {
 				end = lineNever
 			}
 		}
@@ -162,27 +207,38 @@ func lineConclude(p lineProbe, sio settleIO, w *lineWatch, now time.Time) (end l
 	if w.log.end != lineOpen {
 		end = w.log.end
 	}
-	if end == lineNever || end == lineKept {
-		// (It wrote nothing: the default, whatever it is, is not its word —
-		// another session's, if the same. Over, the settings not touched.)
+	switch {
+	case end == lineRan, end == lineGone && dead && !whole:
+		res, _, _, err = settleLook(sio, w.had, w.was, w.wrote)
+		switch {
+		case res == settleFailed:
+		case res == settleSame && end == lineRan && !(w.had && jsonSame(w.was, w.wrote)):
+			final = now.Sub(w.typedAt) >= lineSettleAge
+		default:
+			final = true
+		}
+		return end, res, final, false, err
+	case end != lineOpen:
 		return end, settleSame, true, false, nil
 	}
-	res, cur, has, err := settleLook(sio, w.had, w.was, w.wrote)
-	switch {
-	case res == settleFailed:
-	case end == lineOpen:
-		// (Not over: kept, whatever the default is. Its word there and put
-		// back says nothing of the line — another session may have set the
-		// same word — and the line may yet write it.)
-		if res == settleForeign {
-			w.had, w.was, rebased = has, cur, true
-		}
-	case res == settleSame && end == lineRan && !(w.had && jsonSame(w.was, w.wrote)):
-		final = now.Sub(w.typedAt) >= lineSettleAge
-	default:
-		final = true
+	cur, has, serr := settleSee(sio)
+	if serr != nil || has == w.had && (!has || jsonSame(cur, w.was)) {
+		// (As kept, or not read: nothing to note. Not read is no failure to
+		// put back — nothing of this line's is there to put back.)
+		return lineOpen, settleSame, false, false, nil
 	}
-	return end, res, final, rebased, err
+	if its := has && len(w.wrote) > 0 && jsonSame(cur, w.wrote); its && !whole {
+		// (Its log not read whole: whether that is the line's own word is not
+		// known. Nothing noted, kept.)
+		return lineOpen, settleSame, false, false, nil
+	} else if its && !waited && p.wait != nil {
+		// (Its own word, written a moment before its record? Looked at once
+		// more, after that moment.)
+		p.wait()
+		return lineConcluded(p, sio, w, now, true)
+	}
+	w.had, w.was = has, cur
+	return lineOpen, settleForeign, false, true, nil
 }
 
 // settleSSH: the settings of the session's account on its host.
@@ -241,6 +297,12 @@ func (s *Server) lineProbeOf(ctx context.Context, sess *term.Session, p *store.S
 			return false, false
 		},
 		moved: func() bool { return holds != "" && holds != p.SID },
+		wait: func() {
+			select {
+			case <-ctx.Done():
+			case <-time.After(lineLagWait):
+			}
+		},
 		atRest: func() bool {
 			// (Its screen only where that process is still the one in front in
 			// that pane — the gate's front(), exit 3 where it is not: another

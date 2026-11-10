@@ -594,12 +594,24 @@ type fakeWhere struct {
 	noProc bool // (the host cannot tell)
 	rest   bool // its pane shows it at rest, the box empty
 	moved  bool // its process holds another conversation by now
+	logErr error
+	onWait func() // (what comes about while a look waits a moment)
 }
 
 func (f *fakeWhere) probe() lineProbe {
 	return lineProbe{
-		logFrom: func(off int64) ([]byte, error) { return f.log[min(int(off), len(f.log)):], nil },
-		alive:   func() (bool, bool) { return !f.dead, !f.noProc },
+		logFrom: func(off int64) ([]byte, error) {
+			if f.logErr != nil {
+				return nil, f.logErr
+			}
+			return f.log[min(int(off), len(f.log)):], nil
+		},
+		alive: func() (bool, bool) { return !f.dead, !f.noProc },
+		wait: func() {
+			if f.onWait != nil {
+				f.onWait()
+			}
+		},
 		moved:   func() bool { return f.moved },
 		atRest:  func() bool { return f.rest },
 	}
@@ -644,12 +656,17 @@ func TestLineConclude(t *testing.T) {
 		{"its process holds another conversation by now (/clear): over", fakeWhere{moved: true}, `{"model": "opus"}`, `"opus"`, time.Second, lineGone, settleSame, true, `"opus"`, false},
 		{"another conversation by now, the host cannot tell of its process: not known", fakeWhere{moved: true, noProc: true}, `{"model": "opus"}`, `"opus"`, time.Hour, lineOpen, settleSame, false, `"opus"`, false},
 		{"its process gone", fakeWhere{dead: true}, `{"model": "opus"}`, `"opus"`, time.Second, lineGone, settleSame, true, `"opus"`, false},
-		{"its process gone, its word there", fakeWhere{dead: true}, `{"model": "haiku"}`, `"opus"`, time.Second, lineGone, settleBack, true, `"opus"`, false},
+		{"its process gone, the same word there (it wrote nothing: another session's)", fakeWhere{dead: true}, `{"model": "haiku"}`, `"opus"`, time.Second, lineGone, settleSame, true, `"haiku"`, false},
+		{"its process gone, its log not read, its word there: put back", fakeWhere{dead: true, logErr: errors.New("denied")}, `{"model": "haiku"}`, `"opus"`, time.Second, lineGone, settleBack, true, `"opus"`, false},
+		{"its process gone, its log not read, the default as before", fakeWhere{dead: true, logErr: errors.New("denied")}, `{"model": "opus"}`, `"opus"`, time.Second, lineGone, settleSame, true, `"opus"`, false},
+		{"its log not read, at rest, its word there: not known, kept, not touched", fakeWhere{rest: true, logErr: errors.New("denied")}, `{"model": "haiku"}`, `"opus"`, time.Hour, lineOpen, settleSame, false, `"haiku"`, false},
+		{"its log not read, another conversation by now: kept", fakeWhere{moved: true, logErr: errors.New("denied")}, `{"model": "haiku"}`, `"opus"`, time.Hour, lineOpen, settleSame, false, `"haiku"`, false},
+		{"another conversation by now, the same word set by another session: theirs, not touched", fakeWhere{moved: true}, `{"model": "haiku"}`, `"opus"`, time.Hour, lineGone, settleSame, true, `"haiku"`, false},
 		{"never ran: at rest, no record of it", fakeWhere{rest: true}, `{"model": "opus"}`, `"opus"`, lineNeverAge, lineNever, settleSame, true, `"opus"`, false},
 		{"at rest a moment after it was typed: too soon to say", fakeWhere{rest: true}, `{"model": "opus"}`, `"opus"`, time.Second, lineOpen, settleSame, false, `"opus"`, false},
 		{"at rest, its command recorded, no answer", fakeWhere{rest: true, log: cmdOnly}, `{"model": "opus"}`, `"opus"`, time.Hour, lineOpen, settleSame, false, `"opus"`, false},
-		{"open, its word there (another session's, maybe): put back, and kept", fakeWhere{}, `{"model": "haiku"}`, `"opus"`, time.Second, lineOpen, settleBack, false, `"opus"`, false},
-		{"open, its word there, hours on: still kept", fakeWhere{}, `{"model": "haiku"}`, `"opus"`, 9 * time.Hour, lineOpen, settleBack, false, `"opus"`, false},
+		{"open, its word there (another session's: the line wrote nothing): not touched, theirs to keep", fakeWhere{}, `{"model": "haiku"}`, `"opus"`, time.Second, lineOpen, settleForeign, false, `"haiku"`, true},
+		{"open, the settings not read: kept, no failure of this line's", fakeWhere{}, `{"model": `, `"opus"`, time.Hour, lineOpen, settleSame, false, "?", false},
 		{"open, someone else's there", fakeWhere{}, `{"model": "fable"}`, `"opus"`, time.Minute, lineOpen, settleForeign, false, `"fable"`, true},
 		{"open, taken out by someone else", fakeWhere{}, `{}`, `"opus"`, time.Minute, lineOpen, settleForeign, false, "", true},
 		{"taken, the settings not read", fakeWhere{log: ran}, `{"model": `, `"opus"`, time.Minute, lineRan, settleFailed, false, "?", false},
@@ -683,12 +700,20 @@ func TestLineConcludeLater(t *testing.T) {
 			t.Fatalf("look %d: let go with its question open (end %v)", i, end)
 		}
 	}
-	// Another session sets the very word the line would write: put back —
-	// the settings do not say whose word it is — and still kept, the line
-	// being open.
+	// Another session sets the very word the line would write: theirs (the
+	// line, open, wrote nothing) — not touched, the one to put back from
+	// now on, and the line still kept.
 	st.doc = `{"model": "haiku"}`
-	if end, res, final, _, _ := lineConclude(where.probe(), st.io(), watchOf(&rec), t0.Add(30*time.Hour+time.Minute)); final || end != lineOpen || res != settleBack || st.model() != `"opus"` {
-		t.Fatalf("the same word set by another with the line open: end %v settled %v final %v, the model %s", end, res, final, st.model())
+	w0 := watchOf(&rec)
+	if end, _, final, rebased, _ := lineConclude(where.probe(), st.io(), w0, t0.Add(30*time.Hour+time.Minute)); final || end != lineOpen || !rebased || string(w0.was) != `"haiku"` || st.model() != `"haiku"` || st.writes != 0 {
+		t.Fatalf("the same word set by another with the line open: end %v final %v rebased %v was %s, the model %s", end, final, rebased, w0.was, st.model())
+	}
+	// (Its own word, written a moment before its record: the look waits
+	// that moment, finds the record, and puts back.)
+	lag := fakeWhere{log: append([]byte{}, before...)}
+	lag.onWait = func() { lag.log = append(lag.log, lineRecords("sid-1", "c1", "haiku", "Haiku 5.5")...) }
+	if end, res, final, rebased, _ := lineConclude(lag.probe(), st.io(), watchOf(&rec), t0.Add(time.Minute)); end != lineRan || res != settleBack || !final || rebased || st.model() != `"opus"` {
+		t.Fatalf("its word seen before its record: end %v settled %v final %v rebased %v, the model %s", end, res, final, rebased, st.model())
 	}
 	// Someone sets a default of their own meanwhile: theirs is now the one
 	// to put back.
@@ -709,4 +734,118 @@ func TestLineConcludeLater(t *testing.T) {
 	// And once let go, a look more changes nothing — nor would the same
 	// word, set by the person themselves, be taken for the line's again
 	// (there is nothing kept to look with: this is the caller's delete).
+}
+
+// Whatever comes about around a line kept — other sessions setting the
+// default, the person answering or leaving its question, quitting, a new
+// conversation, its log unreadable for a while — looked at after each:
+// the settings are written only where the line ran; what is kept is never
+// let go while the line can still run; quitting always ends it; and the
+// default, in the end, is the last one someone else set.
+func TestLineConcludeSequences(t *testing.T) {
+	t0 := time.Unix(1_800_000_000, 0)
+	before := lineRecords("sid-1", "old", "haiku", "Haiku 5.5")
+	events := []string{"same", "other", "yes", "leave", "quit", "clear", "logfail", "logback"}
+	type world struct {
+		where    fakeWhere
+		st       fakeSettings
+		rec      store.SettingsPending
+		asked    bool   // its question stands open (else: the line sits in the box)
+		canRun   bool   // it can still be answered or sent
+		ran      bool   // it ran: the settings were written by it
+		theirs   string // the default as others left it
+		owed     bool   // the line's word is the default, written by it, not put back yet
+		dropped  bool
+		failed   bool // (its log was unreadable at some point)
+		now      time.Time
+		writesAt int
+	}
+	var run func(seq []string, asked bool)
+	run = func(seq []string, asked bool) {
+		w := &world{asked: asked, canRun: true, theirs: `"opus"`, now: t0.Add(time.Minute)}
+		w.where.log = append([]byte{}, before...)
+		if asked {
+			w.where.log = append(w.where.log, lineRecord("sid-1", "c1", "p", lineCommand("haiku"))...)
+		}
+		w.st.doc = `{"model": "opus"}`
+		w.rec = store.SettingsPending{Had: true, Was: []byte(`"opus"`), Wrote: []byte(`"haiku"`), SID: "sid-1", LogOff: int64(len(before)), CreatedAt: t0.Unix()}
+		look := func(at string) {
+			if w.dropped {
+				return
+			}
+			lw := watchOf(&w.rec)
+			_, _, final, rebased, _ := lineConclude(w.where.probe(), w.st.io(), lw, w.now)
+			if w.st.writes != w.writesAt {
+				if !w.ran && !(w.where.dead && w.where.logErr != nil) {
+					t.Fatalf("%v (asked %v), after %s: the settings written, the line never ran", seq, asked, at)
+				}
+				w.writesAt, w.owed = w.st.writes, false
+			}
+			if rebased {
+				w.rec.Had, w.rec.Was = lw.had, lw.was
+			}
+			if final {
+				if w.canRun {
+					t.Fatalf("%v (asked %v), after %s: let go while the line can still run", seq, asked, at)
+				}
+				if w.owed {
+					t.Fatalf("%v (asked %v), after %s: let go with the line's word left as the default", seq, asked, at)
+				}
+				w.dropped = true
+			}
+		}
+		for _, e := range append(append([]string{}, seq...), "logback", "quit") {
+			w.now = w.now.Add(time.Minute)
+			switch e {
+			case "same":
+				w.st.doc, w.theirs, w.owed = `{"model": "haiku"}`, `"haiku"`, false
+			case "other":
+				w.st.doc, w.theirs, w.owed = `{"model": "fable"}`, `"fable"`, false
+			case "yes": // answered yes, or the line sent from the box (asking nothing)
+				if w.canRun {
+					w.where.log = append(w.where.log, lineRecords("sid-1", "c1", "haiku", "Haiku 5.5")...)
+					w.owed = w.theirs != `"haiku"`
+					w.st.doc, w.ran, w.canRun, w.where.rest = `{"model": "haiku"}`, true, false, true
+				}
+			case "leave": // its question left, or the box cleared
+				if w.canRun {
+					if w.asked {
+						w.where.log = append(w.where.log, lineKeptRecords("sid-1", "c1", "haiku", "Opus 5.5")...)
+					}
+					w.canRun, w.where.rest = false, true
+				}
+			case "quit":
+				w.where.dead, w.canRun = true, false
+			case "clear": // (not with its question open, nor the line in the box)
+				if !w.canRun && !w.where.dead {
+					w.where.moved, w.where.rest = true, true
+				}
+			case "logfail":
+				w.where.logErr, w.failed = errors.New("denied"), true
+			case "logback":
+				w.where.logErr = nil
+			}
+			look(e)
+		}
+		if !w.dropped {
+			t.Fatalf("%v (asked %v): still kept after its Claude Code was quit", seq, asked)
+		}
+		if m := w.st.model(); !w.failed && !jsonSame(rawJSON(m), rawJSON(w.theirs)) {
+			t.Fatalf("%v (asked %v): the default in the end %s, the last set by others %s", seq, asked, m, w.theirs)
+		}
+	}
+	var each func(seq []string, n int)
+	each = func(seq []string, n int) {
+		if n == 0 {
+			run(seq, true)
+			run(seq, false)
+			return
+		}
+		for _, e := range events {
+			each(append(append([]string{}, seq...), e), n-1)
+		}
+	}
+	for n := 0; n <= 4; n++ {
+		each(nil, n)
+	}
 }

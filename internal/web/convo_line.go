@@ -202,19 +202,26 @@ func (l *lineLog) feed(data []byte) (used int) {
 }
 
 // read feeds what the log has from *off on (from: the log from there, some
-// of it), until its end is found or there is no more.
-func (l *lineLog) read(from func(off int64) ([]byte, error), off *int64) {
+// of it), until its end is found or there is no more. whole: read to where
+// the log ends now — false where a read failed, a record at its end is
+// half written, or there was too much of it: then "nothing of the line in
+// its log" is not known.
+func (l *lineLog) read(from func(off int64) ([]byte, error), off *int64) (whole bool) {
 	for spins := 0; l.end == lineOpen && spins < 64; spins++ {
 		data, err := from(*off)
-		if err != nil || len(data) == 0 {
-			return
+		if err != nil {
+			return false
+		}
+		if len(data) == 0 {
+			return true
 		}
 		used := l.feed(data)
 		*off += int64(used)
 		if used == 0 {
-			return
+			return false
 		}
 	}
+	return l.end != lineOpen
 }
 
 // lineIO is the host as modelLineFlow needs it.
