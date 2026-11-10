@@ -646,7 +646,8 @@ func modelFlow(step, leave modelStep, target string, greyed ...func() string) (o
 // ended on the host, if one was given up before. target "": the list.
 // A Codex's (codex): codexModelFlow, target with effort; its config.toml,
 // which "s" leaves alone, read before and after only to say if it changed.
-func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *term.Session, pane, socket string, pid, start int64, sid, target string, outcome, reason *string, release func(), codex bool, effort string, log string) {
+func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *term.Session, pane, socket string, pid, start int64, sid, target string, outcome, reason *string, release func(), codex bool, effort string, log string, via, auth string) {
+	var procKey, kinKey string // (Claude Code's: what is kept of its picker's list, see lineListFor)
 	if !codex {
 		// (Claude Code's settings are one account's: a switch at a time, what
 		// an earlier one left settled first — convo_line_settle.go.)
@@ -657,6 +658,51 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 			writeError(w, http.StatusBadGateway, "settings", "Claude Code's settings could not be read: nothing done")
 			return
 		}
+		procKey, kinKey = lineListKey(account, pid, start), lineKinKey(account, via, auth)
+		if target == "" {
+			// (Its list as its picker last gave it, where that is kept: at
+			// once, nothing typed, its picker not opened. Of another process
+			// like it, which one this is on is not known: "kin", for the
+			// page to mark by the conversation's own log.)
+			now := time.Now()
+			opts, mine := offered(procKey, now)
+			kin := false
+			if !mine {
+				opts, kin = offered(kinKey, now)
+				if !kin {
+					// (Kept from before this gateway was started.)
+					if at, rows, found, err := s.store.ModelList(ctx, kinKey); err == nil && found && now.Sub(time.Unix(at, 0)) <= lineListFor {
+						var stored []modelOpt
+						if json.Unmarshal(rows, &stored) == nil && len(stored) > 0 {
+							noteOffered(kinKey, stored, time.Unix(at, 0))
+							opts, kin = offered(kinKey, now)
+						}
+					}
+				}
+				for i := range opts {
+					opts[i].Current = false
+				}
+			}
+			if mine || kin {
+				release()
+				*outcome, *reason = "kept", "list_kept"
+				writeJSON(w, http.StatusOK, map[string]any{"models": opts, "kept": true, "kin": !mine})
+				// (What an earlier switch left to settle is looked at all the
+				// same — after the answer, not before it: the list waits for
+				// nothing. A switch asked for meanwhile waits its moment for it,
+				// as for any other.)
+				if p, perr := s.pendingOf(ctx, account); perr == nil && p != nil {
+					go func() {
+						bctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
+						defer cancel()
+						if done, _, _, ok := s.settingsTurn(bctx, sess, account); ok {
+							done()
+						}
+					}()
+				}
+				return
+			}
+		}
 		done, code, why, ok := s.settingsTurn(ctx, sess, account)
 		if !ok {
 			release()
@@ -665,8 +711,12 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 			return
 		}
 		if target != "" && log != "" {
-			if arg, want, ok := lineModelArg(lineListKey(sess.ID, pid, start), target, time.Now()); ok {
-				s.convoModelLine(w, ctx, sess, pane, socket, pid, start, sid, target, arg, want, log, account, outcome, reason, release, done)
+			arg, want, ok := lineModelArg(procKey, target, time.Now())
+			if !ok {
+				arg, want, ok = lineModelArg(kinKey, target, time.Now())
+			}
+			if ok {
+				s.convoModelLine(w, ctx, sess, pane, socket, pid, start, sid, target, arg, want, log, account, outcome, reason, release, done, procKey, kinKey)
 				return
 			}
 		}
@@ -841,7 +891,13 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 	} else {
 		opts, err = modelFlow(step, leave, target, func() string { return s.greyedSuggestion(ctx, sess, pane, socket, &running) })
 		if err == nil && target == "" {
-			noteOffered(lineListKey(sess.ID, pid, start), opts, time.Now())
+			noteOffered(procKey, opts, time.Now())
+			noteOffered(kinKey, opts, time.Now())
+			if rows, jerr := json.Marshal(opts); jerr == nil {
+				if perr := s.store.PutModelList(context.WithoutCancel(ctx), kinKey, time.Now().Unix(), rows); perr != nil {
+					slog.Warn("model list: not kept in the store", "session", sess.ID, "err", perr)
+				}
+			}
 		}
 	}
 	restored, restoreFailed := false, false
@@ -876,6 +932,9 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 		if target == "" {
 			writeJSON(w, http.StatusOK, map[string]any{"models": opts, "restored": restored, "restore_failed": restoreFailed})
 		} else {
+			if !codex {
+				offeredNow(procKey, kinKey, target)
+			}
 			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "model": target, "restored": restored, "restore_failed": restoreFailed})
 		}
 	default:

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -42,20 +43,81 @@ var lineModels = map[string]string{"Opus": "opus", "Sonnet": "sonnet", "Haiku": 
 
 var lineVersioned = regexp.MustCompile(`^[A-Z][a-z]+ \d+(\.\d+)*$`)
 
-// lineOffered: what a process's picker listed, when: the name each of
-// lineModels stood for there ("Haiku" → "Haiku 5.5").
+// lineOffered: what a process's picker listed, when: its rows as they
+// were given to the page, and the name each of lineModels stood for there
+// ("Haiku" → "Haiku 5.5").
 type lineOffered struct {
 	at    time.Time
 	names map[string]string
+	opts  []modelOpt
 }
 
 var lineLists sync.Map // (by lineListKey)
 
-const lineListFor = 10 * time.Minute
+// lineListFor: what a picker listed is gone by for this long — its list
+// is the process's own, as it started (kept by the process, lineListKey),
+// and that of others of the account reaching the same maker's models the
+// same way (lineKinKey): opening the picker to read it again takes
+// seconds, and shows in the terminal. A switch that did not go as the
+// list said forgets it (forgetOffered): the picker is read again then.
+const lineListFor = 12 * time.Hour
 
-// lineListKey names a process of Claude Code in a session of ours.
-func lineListKey(session string, pid, start int64) string {
-	return session + "\x00" + strconv.FormatInt(pid, 10) + "\x00" + strconv.FormatInt(start, 10)
+// lineListKey names a process of Claude Code of an account on a host
+// (settingsAccount) — not by a session of ours: it is the same process
+// through another, or once this one is opened again.
+func lineListKey(account string, pid, start int64) string {
+	return account + "\x00" + strconv.FormatInt(pid, 10) + "\x00" + strconv.FormatInt(start, 10)
+}
+
+// lineKinKey names the processes of an account whose requests go to the
+// same host, signed in the same way (convoBind's Via and Auth).
+func lineKinKey(account, via, auth string) string {
+	return account + "\x00kin\x00" + via + "\x00" + auth
+}
+
+// offered: the rows kept under key, where they are not too old.
+func offered(key string, now time.Time) ([]modelOpt, bool) {
+	v, found := lineLists.Load(key)
+	if !found {
+		return nil, false
+	}
+	l := v.(lineOffered)
+	if now.Sub(l.at) > lineListFor {
+		lineLists.Delete(key)
+		return nil, false
+	}
+	return slices.Clone(l.opts), len(l.opts) > 0
+}
+
+// forgetOffered: what was kept under these is not gone by any more.
+func forgetOffered(keys ...string) {
+	for _, k := range keys {
+		lineLists.Delete(k)
+	}
+}
+
+// offeredNow marks label as the one a process is on, in what is kept of
+// its list — or of its kin's, the process's own from then on (a switch
+// from here; one made in the terminal is not seen until its picker is read
+// again).
+func offeredNow(key, kin, label string) {
+	v, found := lineLists.Load(key)
+	if !found {
+		if v, found = lineLists.Load(kin); !found {
+			return
+		}
+	}
+	l := v.(lineOffered)
+	opts := slices.Clone(l.opts)
+	hit := false
+	for i := range opts {
+		opts[i].Current = opts[i].Label == label
+		hit = hit || opts[i].Current
+	}
+	if hit {
+		l.opts = opts
+		lineLists.Store(key, l)
+	}
 }
 
 // noteOffered keeps what the picker just listed for that process: of its
@@ -73,7 +135,7 @@ func noteOffered(key string, opts []modelOpt, now time.Time) {
 			names[o.Label] = name
 		}
 	}
-	lineLists.Store(key, lineOffered{at: now, names: names})
+	lineLists.Store(key, lineOffered{at: now, names: names, opts: slices.Clone(opts)})
 }
 
 // lineModelArg: the word to type for label, and the name the log is to say

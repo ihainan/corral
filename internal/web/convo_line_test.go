@@ -215,14 +215,15 @@ func (f *fakeLine) run() (log *lineLog, off int64, name string, sent lineSent, e
 func TestLineModelArg(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	key := lineListKey("s1", 42, 7)
-	noteOffered(key, []modelOpt{
+	rows := []modelOpt{
 		{Label: "Default (recommended)", Desc: "Opus 5.5 · Most capable"},
 		{Label: "Haiku", Desc: "Haiku 5.5 · Fastest for quick answers"},
 		{Label: "Sonnet", Desc: "Sonnet 5.5 · Best for everyday tasks"},
 		{Label: "Opus", Desc: "Something else · no version"},
 		{Label: "Fable", Desc: "Opus 5.5 · another's name"},
 		{Label: "Opus 5.5 (1M context)", Desc: "Opus 5.5 · long"},
-	}, now)
+	}
+	noteOffered(key, rows, now)
 	if arg, name, ok := lineModelArg(key, "Haiku", now.Add(time.Minute)); !ok || arg != "haiku" || name != "Haiku 5.5" {
 		t.Fatalf("Haiku: %q %q %v", arg, name, ok)
 	}
@@ -237,6 +238,31 @@ func TestLineModelArg(t *testing.T) {
 	}
 	if _, _, ok := lineModelArg(key, "Haiku", now.Add(lineListFor+time.Second)); ok {
 		t.Error("listed long ago: taken")
+	}
+	// (Its rows are kept as given, for the page to be told at once; the one
+	// it is on, moved by a switch from here; forgotten when told to.)
+	noteOffered(key, rows, now)
+	if opts, ok := offered(key, now.Add(time.Hour)); !ok || len(opts) != len(rows) {
+		t.Errorf("its list an hour on: %v %v", opts, ok)
+	}
+	offeredNow(key, "", "Haiku")
+	opts, _ := offered(key, now.Add(time.Hour))
+	for _, o := range opts {
+		if o.Current != (o.Label == "Haiku") {
+			t.Errorf("after a switch to Haiku: %+v", o)
+		}
+	}
+	if _, ok := offered(key, now.Add(lineListFor+time.Second)); ok {
+		t.Error("its list kept too long")
+	}
+	kin := lineKinKey("acct", "relay.example.com", "key")
+	if _, ok := offered(kin, now); ok || kin == lineKinKey("acct", "", "key") || kin == lineKinKey("acct2", "relay.example.com", "key") {
+		t.Error("a list of others' taken for kin's")
+	}
+	noteOffered(kin, opts, now)
+	forgetOffered(kin)
+	if _, ok := offered(kin, now); ok {
+		t.Error("a list forgotten still kept")
 	}
 	if _, _, ok := lineModelArg(key, "Sonnet", now.Add(time.Minute)); ok {
 		t.Error("a list grown old was not let go")

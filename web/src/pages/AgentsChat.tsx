@@ -1217,8 +1217,14 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     const bind = bindKey
     setModels({ list: null, bind })
     setModelBusy(true)
-    own(api<{ models: ModelOpt[] }>('POST', `/api/sessions/${sid}/conversation/models`, pressBody(), { timeoutMs: MODEL_MS }))
-      .then((r) => setModels((m) => (m?.bind === bind ? { list: r.models, bind, at: Date.now() } : m)))
+    // (kin: the list of another Claude Code like this one, kept by the
+    // gateway — which of them this one is on, by its own log's model.)
+    const on = (convo.meta?.model ?? '').toLowerCase()
+    own(api<{ models: ModelOpt[]; kin?: boolean }>('POST', `/api/sessions/${sid}/conversation/models`, pressBody(), { timeoutMs: MODEL_MS }))
+      .then((r) => {
+        const list = r.kin && on ? r.models.map((o) => ({ ...o, current: /^[a-z]+$/i.test(o.label) && on.includes(o.label.toLowerCase()) })) : r.models
+        setModels((m) => (m?.bind === bind ? { list, bind, at: Date.now() } : m))
+      })
       .catch((e) => {
         // (Said in the menu as well as in the toast: left on "reading" it
         // would look as though the picker were still being waited for.)

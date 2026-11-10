@@ -653,7 +653,7 @@ const lineHeld = 2
 // convoModelLine switches a Claude Code's model with one line (see
 // convo_line.go) and puts the default back. It holds the pane's turn
 // (release) and the account's settings (done), and gives both back itself.
-func (s *Server) convoModelLine(w http.ResponseWriter, ctx context.Context, sess *term.Session, pane, socket string, pid, start int64, sid, target, arg, want, log, account string, outcome, reason *string, release, done func()) {
+func (s *Server) convoModelLine(w http.ResponseWriter, ctx context.Context, sess *term.Session, pane, socket string, pid, start int64, sid, target, arg, want, log, account string, outcome, reason *string, release, done func(), procKey, kinKey string) {
 	var running sync.WaitGroup // (commands that may still run on the host)
 	bg := context.WithoutCancel(ctx)
 	sctx, scancel := context.WithTimeout(ctx, 10*time.Second)
@@ -826,6 +826,9 @@ func (s *Server) convoModelLine(w http.ResponseWriter, ctx context.Context, sess
 		writeError(w, http.StatusInternalServerError, "default_changed", "the default model of new sessions changed and could not be put back")
 	case err == nil || unconfirmed:
 		*outcome = "typed"
+		if !unconfirmed {
+			offeredNow(procKey, kinKey, target)
+		}
 		if unconfirmed {
 			*reason = "line_unconfirmed"
 		}
@@ -833,9 +836,14 @@ func (s *Server) convoModelLine(w http.ResponseWriter, ctx context.Context, sess
 		// is how the line works, each time.)
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "model": target, "restored": false, "restore_failed": false, "unconfirmed": unconfirmed})
 	case errors.Is(err, errElsewhere):
+		// (Not as the list kept said: its picker is read again next time.)
+		forgetOffered(procKey, kinKey)
+		s.store.DeleteModelList(bg, kinKey)
 		*outcome, *reason = "typed", "line_elsewhere"
 		writeError(w, http.StatusConflict, "model_elsewhere", "it took another model than the one asked for: "+name)
 	case errors.Is(err, errUnsure):
+		forgetOffered(procKey, kinKey)
+		s.store.DeleteModelList(bg, kinKey)
 		*outcome, *reason = "unknown", "line_unsure"
 		writeError(w, http.StatusBadGateway, "unknown", "it is not known whether the model was taken")
 	default:
