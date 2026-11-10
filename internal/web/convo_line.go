@@ -6,10 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"regexp"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ihainan/corral/internal/sftplite"
+	"github.com/ihainan/corral/internal/sshx"
 	"github.com/ihainan/corral/internal/term"
 )
 
@@ -17,88 +20,163 @@ import (
 // Enter, in place of its picker walked with the arrows: no picker to read
 // off a screen, and what it took is said by its log, not by the screen.
 //
-// Measured (Claude Code 2.1.321, 2026-11-10): the line switches the session
-// at once, opens no picker, writes the settings' "model" (the default of
-// new sessions: the word typed, in small letters) within 0.13 s and its
-// log's record within 0.35 s:
+// Measured (Claude Code 2.1.312 and 2.1.321, 2026-11-10): the line switches
+// the session at once, opens no picker, writes the settings' "model" (the
+// default of new sessions: the word typed, in small letters) within 0.13 s
+// and to its log, within 0.35 s, the command and then its answer, the
+// answer's parent the command's record:
 //
+//	<command-name>/model</command-name> … <command-args>haiku</command-args>
 //	<local-command-stdout>Set model to `Haiku 5.5` and saved as your default for new sessions</local-command-stdout>
 //
 // With turns behind it, it may ask "Switch model?" first (as the picker's
 // "s" does). A name it does not know is taken all the same and becomes the
-// session's model, so only its own four words are ever typed.
+// session's model, so only its own four words are ever typed, and only for
+// a model its own picker listed for this very process.
 //
-// The default it saves is put back by convoModel's restore, as after the
-// picker; here it is known to change every time.
+// The default it saves is put back: convo_line_settle.go.
 
-// lineModels: the words "/model" takes on one line, each tried (out-e14).
-var lineModels = map[string]bool{"opus": true, "sonnet": true, "haiku": true, "fable": true}
+// lineModels: the words "/model" takes on one line, each tried (out-e14),
+// by the picker's name for them.
+var lineModels = map[string]string{"Opus": "opus", "Sonnet": "sonnet", "Haiku": "haiku", "Fable": "fable"}
 
-var lineLabel = regexp.MustCompile(`^([A-Z][a-z]+)( \d+(\.\d+)*)?$`)
+var lineVersioned = regexp.MustCompile(`^[A-Z][a-z]+ \d+(\.\d+)*$`)
 
-// lineModelArg: the word to type for a model as the picker names it
-// ("Haiku", "Haiku 5.5"), ok false where it is not one of lineModels, or
-// names more than a family and its version ("Opus 5.5 (1M context)").
-func lineModelArg(label string) (arg string, ok bool) {
-	m := lineLabel.FindStringSubmatch(label)
-	if m == nil || !lineModels[strings.ToLower(m[1])] {
-		return "", false
-	}
-	return strings.ToLower(m[1]), true
+// lineOffered: what a process's picker listed, when: the name each of
+// lineModels stood for there ("Haiku" → "Haiku 5.5").
+type lineOffered struct {
+	at    time.Time
+	names map[string]string
 }
 
-// lineNameIs: the name the log says was taken is the model label names:
-// the label itself, or the label's family with a version after it.
-func lineNameIs(name, label string) bool {
-	if name == label {
-		return true
-	}
-	return !strings.Contains(label, " ") && strings.HasPrefix(name, label+" ") && lineLabel.MatchString(name)
+var lineLists sync.Map // (by lineListKey)
+
+const lineListFor = 10 * time.Minute
+
+// lineListKey names a process of Claude Code in a session of ours.
+func lineListKey(session string, pid, start int64) string {
+	return session + "\x00" + strconv.FormatInt(pid, 10) + "\x00" + strconv.FormatInt(start, 10)
 }
 
-var lineSaid = regexp.MustCompile("^<local-command-stdout>Set model to `([^`\n]{1,80})`")
+// noteOffered keeps what the picker just listed for that process: of its
+// rows, those named as lineModels names them, whose description begins
+// with that name and a version ("Haiku 5.5 · Fastest…").
+func noteOffered(key string, opts []modelOpt, now time.Time) {
+	names := map[string]string{}
+	for _, o := range opts {
+		if _, ok := lineModels[o.Label]; !ok {
+			continue
+		}
+		name, _, _ := strings.Cut(o.Desc, " · ")
+		name = strings.TrimSpace(name)
+		if strings.HasPrefix(name, o.Label+" ") && lineVersioned.MatchString(name) {
+			names[o.Label] = name
+		}
+	}
+	lineLists.Store(key, lineOffered{at: now, names: names})
+}
 
-// lineTook reads whole records of the log (what was written to it since
-// the line was typed) for the command's own answer: the model it names.
-// Only a record of the person's side whose words are that answer from
-// their first letter counts: quoted in a message or in an answer, the same
-// words are within other words.
-func lineTook(tail []byte) (name string, found bool) {
-	for _, row := range bytes.Split(tail, []byte("\n")) {
-		if !bytes.Contains(row, []byte("local-command-stdout")) {
+// lineModelArg: the word to type for label, and the name the log is to say
+// then, where the picker listed it for that process not long ago; ok false
+// otherwise (the picker's own flow is the way then).
+func lineModelArg(key, label string, now time.Time) (arg, name string, ok bool) {
+	v, found := lineLists.Load(key)
+	if !found {
+		return "", "", false
+	}
+	l := v.(lineOffered)
+	if now.Sub(l.at) > lineListFor {
+		lineLists.Delete(key)
+		return "", "", false
+	}
+	if name, ok = l.names[label]; !ok {
+		return "", "", false
+	}
+	return lineModels[label], name, true
+}
+
+var (
+	lineCmd  = regexp.MustCompile(`^<command-name>/model</command-name>`)
+	lineArgs = regexp.MustCompile(`<command-args>([^<]*)</command-args>`)
+	lineSaid = regexp.MustCompile("^<local-command-stdout>Set model to `([^`\n]{1,80})`")
+)
+
+// lineLogSkip: a record longer than this is passed over, not waited for
+// whole (the command's and its answer's are a few hundred bytes).
+const lineLogSkip = 64 << 10
+
+// lineLog reads the log as it grows for the answer to "/model arg" typed
+// into session sid: the command's own record, then the answer whose parent
+// that record is. The same words quoted in a message, an answer to another
+// command, or one of another session writing to the same file are not it.
+type lineLog struct {
+	sid, arg string
+	skip     bool            // within a record passed over, its end not yet read
+	cmds     map[string]bool // uuids of the command's records
+}
+
+// feed takes what was read from where the last feed's use ended, and gives
+// how much of it is done with (read on from there) and the name the answer
+// gives, when it has come.
+func (l *lineLog) feed(data []byte) (used int, name string, found bool) {
+	if l.skip {
+		i := bytes.IndexByte(data, '\n')
+		if i < 0 {
+			return len(data), "", false
+		}
+		l.skip, used = false, i+1
+	}
+	end := bytes.LastIndexByte(data, '\n')
+	if end < used {
+		if len(data)-used >= lineLogSkip {
+			l.skip = true
+			return len(data), "", false
+		}
+		return used, "", false
+	}
+	for _, row := range bytes.Split(data[used:end], []byte("\n")) {
+		if !bytes.Contains(row, []byte("command-name")) && !bytes.Contains(row, []byte("local-command-stdout")) {
 			continue
 		}
 		var rec struct {
-			Type    string `json:"type"`
-			Content string `json:"content"` // (a "system" record's)
-			Message struct {
+			Type      string `json:"type"`
+			SessionID string `json:"sessionId"`
+			UUID      string `json:"uuid"`
+			Parent    string `json:"parentUuid"`
+			Message   struct {
 				Content json.RawMessage `json:"content"`
 			} `json:"message"`
 		}
-		if json.Unmarshal(row, &rec) != nil || rec.Type != "user" && rec.Type != "system" {
+		var text string
+		if json.Unmarshal(row, &rec) != nil || rec.Type != "user" || rec.SessionID != l.sid || json.Unmarshal(rec.Message.Content, &text) != nil {
 			continue
 		}
-		text := rec.Content
-		if text == "" {
-			if json.Unmarshal(rec.Message.Content, &text) != nil {
-				continue
+		if lineCmd.MatchString(text) {
+			if m := lineArgs.FindStringSubmatch(text); m != nil && strings.EqualFold(strings.TrimSpace(m[1]), l.arg) && rec.UUID != "" {
+				if l.cmds == nil {
+					l.cmds = map[string]bool{}
+				}
+				l.cmds[rec.UUID] = true
 			}
+			continue
 		}
-		if m := lineSaid.FindStringSubmatch(text); m != nil {
-			name, found = m[1], true // (the last of them)
+		if m := lineSaid.FindStringSubmatch(text); m != nil && l.cmds[rec.Parent] {
+			name, found = m[1], true
 		}
 	}
-	return name, found
+	return end + 1, name, found
 }
 
 // lineIO is the host as modelLineFlow needs it.
 type lineIO struct {
-	look    func() (string, error)              // the screen as it is
-	typed   func(text string) error             // a line typed and Enter, not while it waits for an answer
-	press   func(keys []string) (string, error) // keys of modelKeys, then the screen
+	look    func() (string, error)                  // the screen as it is
+	typed   func(text string) error                 // a line typed and Enter, not while it waits for an answer
+	dialog  func() (text, digest string, err error) // the screen, and what names it for pressOn
+	pressOn func(digest, key string) error          // a key of modelKeys, only on that screen still
 	logSize func() (int64, error)
-	logFrom func(off int64) ([]byte, error) // the log from there on
-	sleep   func(time.Duration)
+	logFrom func(off int64) ([]byte, error) // the log from there on (some of it)
+	now     func() time.Time
+	sleep   func(time.Duration) error // (an error: given up)
 }
 
 var errElsewhere = errors.New("it took another model than the one asked for")
@@ -109,110 +187,125 @@ const (
 	lineLogAfter = 2 * time.Second // after its question was answered
 )
 
-// modelLineFlow types "/model arg" into a Claude Code at rest with its
-// input empty (as modelFlow asks), and waits for its log to say which
-// model it took: the name, nil where that is label's. errElsewhere with
-// the name where it is another's. errUnsure where the line was typed and
-// the log said nothing in time (the caller then looks to the settings, see
-// convoModel). Before the line is typed, the errors of idleInput and
-// errScreen: nothing done.
-func modelLineFlow(io lineIO, label, arg string, greyed ...func() string) (name string, err error) {
-	screen, err := io.look()
-	if err != nil {
-		return "", err
-	}
-	// (Its picker or its question left open by someone: not closed from
-	// here — the picker's own flow does that, and is not this one.)
-	if pickerShows(screen) || askShows(screen, "") {
-		return "", errScreen
-	}
-	if err := idleInput(screen, greyed...); err != nil {
-		return "", err
-	}
-	off, err := io.logSize()
-	if err != nil {
-		return "", err
-	}
-	if err := io.typed("/model " + arg); err != nil {
-		return "", err
-	}
-	wait := func(d time.Duration) (string, bool) {
-		for spent := time.Duration(0); ; spent += lineLogEvery {
-			if tail, err := io.logFrom(off); err == nil {
-				if name, ok := lineTook(tail); ok {
-					return name, true
-				}
-			}
-			if spent >= d {
-				return "", false
-			}
-			io.sleep(lineLogEvery)
-		}
-	}
-	name, ok := wait(lineLogFirst)
-	if !ok {
-		// (Nothing said: its question, "Switch model?", may be what it waits
-		// on. Enter only on that question, its first choice the model's.)
-		screen, err := io.press([]string{})
-		if err != nil {
-			return "", errUnsure
-		}
-		if askShows(screen, "") {
-			if !lineAsks(screen, label) {
-				// (For another model than asked: left with Escape, nothing taken.)
-				io.press([]string{"esc"})
-				return "", errNotTaken
-			}
-			if _, err := io.press([]string{"yes"}); err != nil {
-				return "", errUnsure
-			}
-		}
-		if name, ok = wait(lineLogAfter); !ok {
-			return "", errUnsure
-		}
-	}
-	if !lineNameIs(name, label) {
-		return name, errElsewhere
-	}
-	return name, nil
-}
+// lineSent: what became of the line.
+type lineSent int
 
-// lineAsks: its question is for label's model: "Yes, switch to <name>",
-// the name label's or its family with a version.
-func lineAsks(screen, label string) bool {
-	if askShows(screen, label) {
+const (
+	lineNotSent lineSent = iota // nothing reached Claude Code
+	lineMaybe                   // it may have (typed, or the host's answer lost): the default is watched
+)
+
+// lineNotTyped: the error of typing a line says nothing was typed (the
+// gate's refusals before its paste, see convoGated). Any other — typed and
+// its Enter held back (5, 16), cut off while typing (6), the host's answer
+// lost or late — may have reached Claude Code.
+func lineNotTyped(err error) bool {
+	if errors.Is(err, sshx.ErrBusy) {
 		return true
 	}
-	if strings.Contains(label, " ") {
+	var e *sshx.ExitError
+	if !errors.As(err, &e) {
 		return false
 	}
-	// (A family alone: any version of it. The names tried are few: looked
-	// for among what a family's version can be.)
-	for _, l := range strings.Split(screen, "\n") {
-		t := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(l), "❯"))
-		if name, ok := strings.CutPrefix(t, "1. Yes, switch to "); ok && lineNameIs(strings.TrimSpace(name), label) && askShows(screen, strings.TrimSpace(name)) {
-			return true
-		}
+	switch e.Status {
+	case 3, 4, 7, 8, 9, 10, 11, 12, exitOwnerSubagent, exitOwnerOther, exitOwnerNone, 17:
+		return true
 	}
 	return false
 }
 
-// settingsTurns: whose turn it is to change a host's settings of Claude
-// Code (by the host's id), as convoSending is a pane's.
-var settingsTurns = paneTurns{m: map[string]*paneTurn{}}
-
-// lineRechecks: when the default is looked at again after a line was
-// typed. Taken and put back: once more, soon (it was once found written
-// later than its record: out-e14). Not known to be taken: for half a
-// minute, as it may yet write it.
-func lineRechecks(unsure bool) []time.Duration {
-	if unsure {
-		return []time.Duration{2 * time.Second, 8 * time.Second, 20 * time.Second}
+// modelLineFlow types "/model arg" into a Claude Code at rest with its
+// input empty (as modelFlow asks), and waits for its log to say it took
+// the model named want. nil: it did. errElsewhere with the name: it took
+// another. errUnsure: the line may have been typed and the log did not say
+// in time. errNotTaken: its question was left unanswered with Escape (it
+// was for another model, or it was still there when the wait was over).
+// Before the line is typed, the errors of idleInput and errScreen. sent
+// says whether the default may change by it, whatever the error.
+func modelLineFlow(io lineIO, sid, arg, want string, greyed ...func() string) (name string, sent lineSent, err error) {
+	screen, err := io.look()
+	if err != nil {
+		return "", lineNotSent, err
 	}
-	return []time.Duration{2 * time.Second}
+	// (Its picker or its question left open by someone: not closed from
+	// here — the picker's own flow does that, and is not this one.)
+	if pickerShows(screen) || askShows(screen, "") {
+		return "", lineNotSent, errScreen
+	}
+	if err := idleInput(screen, greyed...); err != nil {
+		return "", lineNotSent, err
+	}
+	off, err := io.logSize()
+	if err != nil {
+		return "", lineNotSent, err
+	}
+	if err := io.typed("/model " + arg); err != nil {
+		if lineNotTyped(err) {
+			return "", lineNotSent, err
+		}
+		return "", lineMaybe, err
+	}
+	log := lineLog{sid: sid, arg: arg}
+	wait := func(d time.Duration) (string, bool) {
+		until := io.now().Add(d)
+		for {
+			if data, err := io.logFrom(off); err == nil {
+				used, name, ok := log.feed(data)
+				off += int64(used)
+				if ok {
+					return name, true
+				}
+			}
+			if !io.now().Before(until) || io.sleep(lineLogEvery) != nil {
+				return "", false
+			}
+		}
+	}
+	// leave: its question, where it is (still) on the screen, left with
+	// Escape — on the screen it was read off only — so that it is not
+	// answered later, by whoever, the default then changing with no one
+	// watching. Whether it was left.
+	leave := func() bool {
+		text, digest, err := io.dialog()
+		return err == nil && askShows(text, "") && io.pressOn(digest, "esc") == nil
+	}
+	name, ok := wait(lineLogFirst)
+	if !ok {
+		// (Nothing said: its question, "Switch model?", may be what it waits
+		// on. Enter only on that question, for the model asked for, and only
+		// on the screen it was read off.)
+		text, digest, err := io.dialog()
+		if err != nil {
+			return "", lineMaybe, errUnsure
+		}
+		if askShows(text, "") {
+			if !askShows(text, want) {
+				if io.pressOn(digest, "esc") != nil {
+					return "", lineMaybe, errUnsure
+				}
+				return "", lineMaybe, errNotTaken
+			}
+			if err := io.pressOn(digest, "yes"); err != nil {
+				if leave() {
+					return "", lineMaybe, errNotTaken
+				}
+				return "", lineMaybe, errUnsure
+			}
+		}
+		if name, ok = wait(lineLogAfter); !ok {
+			if leave() {
+				return "", lineMaybe, errNotTaken
+			}
+			return "", lineMaybe, errUnsure
+		}
+	}
+	if name != want {
+		return name, lineMaybe, errElsewhere
+	}
+	return name, lineMaybe, nil
 }
 
-const lineLogMost = 256 << 10 // of the log read for its answer: its record is short, and soon
+const lineLogMost = 256 << 10 // of the log read at once: its record is short, and soon
 
 // logSize: the log's size now.
 func (s *Server) logSize(ctx context.Context, sess *term.Session, log string) (size int64, err error) {

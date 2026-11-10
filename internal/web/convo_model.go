@@ -642,22 +642,27 @@ func modelFlow(step, leave modelStep, target string, greyed ...func() string) (o
 // A Codex's (codex): codexModelFlow, target with effort; its config.toml,
 // which "s" leaves alone, read before and after only to say if it changed.
 func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *term.Session, pane, socket string, pid, start int64, sid, target string, outcome, reason *string, release func(), codex bool, effort string, log string) {
-	var running sync.WaitGroup // (steps whose command may still run on the host)
-	// (Claude Code's settings are the account's, not the pane's: one switch
-	// at a time on a host reads them, changes them and puts them back —
-	// another beside it would take the default the first has not yet put
-	// back for the one to keep.)
-	unhold := func() {}
 	if !codex {
-		held, ok := settingsTurns.take(ctx, strconv.FormatInt(sess.HostID, 10))
+		// (Claude Code's settings are one account's: a switch at a time, what
+		// an earlier one left settled first — convo_line_settle.go.)
+		account := s.settingsAccount(ctx, sess)
+		done, why, ok := s.settingsTurn(ctx, sess, account)
 		if !ok {
 			release()
-			*reason = "busy"
-			writeError(w, http.StatusTooManyRequests, "busy", "another switch on this host is still under way")
+			*reason = "default_settling"
+			writeError(w, http.StatusConflict, "default_settling", why)
 			return
 		}
-		unhold = held
+		if target != "" && log != "" {
+			if arg, want, ok := lineModelArg(lineListKey(sess.ID, pid, start), target, time.Now()); ok {
+				s.convoModelLine(w, ctx, sess, pane, socket, pid, start, sid, target, arg, want, log, account, outcome, reason, release, done)
+				return
+			}
+		}
+		turn := release
+		release = func() { done(); turn() }
 	}
+	var running sync.WaitGroup // (steps whose command may still run on the host)
 	// The default model as it is now, put back after if changed (see withModel).
 	sctx, scancel := context.WithTimeout(ctx, 10*time.Second)
 	saved, none, err := readSettings(sctx, sess)
@@ -671,24 +676,11 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 	}
 	if err != nil || perr != nil {
 		release()
-		unhold()
 		*reason = "settings"
 		writeError(w, http.StatusBadGateway, "settings", "Claude Code's settings could not be read: nothing done")
 		return
 	}
-	checked, typed, unsure := false, false, false
-	// (One line, "/model haiku", where the model is one it takes so: see
-	// convo_line.go. wrote: what that line saves as the default — known, as
-	// the picker's "s" saves none — so that a default found neither as it
-	// was nor as the line left it is someone else's doing, and left alone.)
-	lineArg, line := "", false
-	if !codex && target != "" && strings.Contains(log, "/.claude/projects/") {
-		lineArg, line = lineModelArg(target)
-	}
-	var wrote json.RawMessage
-	if line {
-		wrote, _ = json.Marshal(lineArg)
-	}
+	checked := false
 	// restore: changed says it had changed; err that it could not be put back.
 	restore := func() (changed bool, err error) {
 		rctx, rcancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
@@ -714,10 +706,6 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 				return true, err
 			}
 			if has == had && (!has || jsonSame(cur, was)) {
-				return changed, nil
-			}
-			if wrote != nil && !(has && jsonSame(cur, wrote)) {
-				slog.Warn("model switch: the default model is neither as it was nor as the switch left it; left alone", "session", sess.ID)
 				return changed, nil
 			}
 			changed = true
@@ -753,24 +741,11 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 				running.Wait()
 			}
 			release()
-			// (One line: Claude Code writes the default itself, a moment after
-			// Enter — later still where it was at work, or asked first. Looked
-			// at again, the pane's turn given back, the settings' still held.)
-			if line && typed {
-				for _, after := range lineRechecks(unsure) {
-					time.Sleep(after)
-					if changed, err := restore(); changed && err != nil {
-						slog.Error("model switch: the default model changed and could not be put back", "session", sess.ID, "err", err)
-						defaultChanged.Store(sess.ID, time.Now())
-					}
-					running.Wait()
-				}
-			}
-			unhold()
 		}()
 	}()
 	ctx, cancel := context.WithTimeout(ctx, 40*time.Second)
 	defer cancel()
+	typed := false
 	run := func(ctx context.Context, keys []string, text string, read int, at string) (string, error) {
 		var press []string
 		if keys != nil {
@@ -852,23 +827,11 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 	var opts []modelOpt
 	if codex {
 		opts, err = codexModelFlow(codexIO{look, press}, undo, target, effort)
-	} else if line {
-		var name string
-		name, err = modelLineFlow(lineIO{
-			look: func() (string, error) { return step([]string{}, "", pickerLines) },
-			typed: func(text string) error {
-				_, err := step(nil, text, 0)
-				return err
-			},
-			press:   func(keys []string) (string, error) { return step(keys, "", pickerLines) },
-			logSize: func() (int64, error) { return s.logSize(ctx, sess, log) },
-			logFrom: func(off int64) ([]byte, error) { return s.logFrom(ctx, sess, log, off) },
-			sleep:   time.Sleep,
-		}, target, lineArg, func() string { return s.greyedSuggestion(ctx, sess, pane, socket, &running) })
-		unsure = errors.Is(err, errUnsure)
-		opts = []modelOpt{{Label: target, Desc: name}}
 	} else {
 		opts, err = modelFlow(step, leave, target, func() string { return s.greyedSuggestion(ctx, sess, pane, socket, &running) })
+		if err == nil && target == "" {
+			noteOffered(lineListKey(sess.ID, pid, start), opts, time.Now())
+		}
 	}
 	restored, restoreFailed := false, false
 	if ctx.Err() == nil {
@@ -882,19 +845,12 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 			defaultChanged.Store(sess.ID, time.Now())
 		}
 	}
-	// (Its log silent, yet the default was found as the line leaves it: the
-	// line was taken — nothing else writes that word there.)
-	if line && unsure && restored {
-		err = nil
-		*reason = "unconfirmed_by_log"
-	}
 	switch {
 	case restoreFailed:
 		*reason = "default_not_restored"
-	case restored && *reason == "":
+	case restored:
 		*reason = "default_restored"
 	}
-	var exitErr *sshx.ExitError
 	switch {
 	case restoreFailed:
 		// (Above all else: the person is to know, and put it back.)
@@ -911,6 +867,16 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 		} else {
 			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "model": target, "restored": restored, "restore_failed": restoreFailed})
 		}
+	default:
+		writeSwitchError(w, err, typed, outcome, reason)
+	}
+}
+
+// writeSwitchError answers a switch that failed with err (typed: something
+// was typed into the pane before it did).
+func writeSwitchError(w http.ResponseWriter, err error, typed bool, outcome, reason *string) {
+	var exitErr *sshx.ExitError
+	switch {
 	case errors.As(err, &exitErr) && exitErr.Status == 3:
 		*reason = "agent_changed"
 		writeError(w, http.StatusConflict, "agent_changed", "that pane no longer runs this agent")
@@ -933,9 +899,6 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 	case errors.Is(err, sshx.ErrBusy) || errors.As(err, &exitErr) && exitErr.Status == 7:
 		*reason = "busy"
 		writeError(w, http.StatusTooManyRequests, "busy", "the host is still answering earlier requests")
-	case errors.Is(err, errElsewhere):
-		*outcome, *reason = "unknown", "elsewhere"
-		writeError(w, http.StatusBadGateway, "elsewhere", "it took another model than the one asked for")
 	case errors.Is(err, errBusyAgent):
 		*reason = "working"
 		writeError(w, http.StatusConflict, "working", err.Error())
