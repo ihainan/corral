@@ -570,7 +570,12 @@ func unflagDefault(account string) {
 	}
 }
 
-const settingsWait = 1500 * time.Millisecond // (a switch that goes well has the settings for about a second)
+// settingsWait: how long a switch waits for another's of the same account.
+// One typed on a line has the settings for about a second; one that reads
+// its process's own picker first (the first after the gateway started, or
+// a model not typed on a line) for some three — measured 3.3 s, 2026-11-10:
+// at 1.5 s the second of two pages switching at once was refused for it.
+const settingsWait = 6 * time.Second
 
 // settingsTurn takes the account's settings for a switch — waiting a
 // moment for one under way, no longer: the pane's turn is held meanwhile —

@@ -1827,8 +1827,8 @@ export const CODEX_EFFORTS = Object.keys(EFFORT_WORDS)
 // unread: the last read of the picker came to nothing. Without it a list
 // that never arrives leaves the menu saying it is still reading, for as
 // long as it is left open.
-// (unsure: which of the list it is on is not known — none is marked, not one guessed by the log's name.)
-export type ModelSwitch = { list: ModelOpt[] | null; fresh: boolean; busy: boolean; can: boolean; unread?: boolean; unsure?: boolean; onOpen: () => void; onPick: (label: string, effort?: string) => void; efforts?: string[]; of?: string }
+// (byLog: the list is one the gateway kept, with no word of which it is on — marked by the log's model, see rowByLog.)
+export type ModelSwitch = { list: ModelOpt[] | null; fresh: boolean; busy: boolean; can: boolean; unread?: boolean; byLog?: boolean; picked?: { label: string; was: string }; onOpen: () => void; onPick: (label: string, effort?: string) => void; efforts?: string[]; of?: string }
 
 // How hard the agent is asked to think (Claude Code's /effort), for the
 // session only. The levels are its slider's, in its order.
@@ -1844,6 +1844,19 @@ export type EffortSwitch = { now?: string; busy: boolean; can: boolean; onPick: 
 // it, so the name is not read twice; where the two do not go together
 // (another agent's picker, another wording), both stay as they came. The
 // name the pick is made with is o.label either way, untouched.
+// rowByLog: which row of a list the log's model is, where one alone is it
+// by name and version both ("Sonnet 5.5": the log's "claude-sonnet-5-5", or
+// what /model said it was set to, against the row's "Sonnet 5.5 · …").
+// None otherwise — another version of that family, a name of the person's
+// own, a variant the id marks ("[1m]") that the rows do not tell apart, two
+// rows of the same model: no row is marked rather than one guessed.
+export function rowByLog(list: ModelOpt[], model: string | undefined): string | undefined {
+  if (!model || model.includes('[')) return undefined
+  const said = modelName(model).toLowerCase()
+  const hits = list.filter((o) => named(o)[0].toLowerCase() === said)
+  return hits.length === 1 ? hits[0].label : undefined
+}
+
 export function named(o: ModelOpt): [string, string] {
   const desc = o.desc ?? ''
   const separator = /\s+·\s+/.exec(desc)
@@ -2082,7 +2095,7 @@ function Runs({ meta, active, mode, model, effort, quota, via, auth }: { meta: C
             model.list.map((o) => {
               // (As its picker last said, which the log may not yet. A Codex's
               // log names it in small letters: "gpt-6-sol" is "GPT-6-Sol".)
-              const now = model.unsure ? false : model.fresh && model.list!.some((x) => x.current) ? !!o.current : modelName(meta.model!).toLowerCase() === o.label.toLowerCase()
+              const now = model.byLog ? o.label === (model.picked && model.picked.was === (meta.model ?? '') ? model.picked.label : rowByLog(model.list!, meta.model)) : model.fresh && model.list!.some((x) => x.current) ? !!o.current : modelName(meta.model!).toLowerCase() === o.label.toLowerCase()
               const [name, says] = named(o)
               const pick = (effort?: string) => {
                 setOpen(false)

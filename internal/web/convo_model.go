@@ -661,17 +661,18 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 		procKey, kinKey = lineListKey(account, pid, start), lineKinKey(account, via, auth)
 		if target == "" && !own {
 			// (Its list as its picker last gave it, where that is kept: at
-			// once, nothing typed, its picker not opened. Of another process
-			// like it, which one this is on is not known: "kin", for the
-			// page to mark by the conversation's own log.)
+			// once, nothing typed, its picker not opened. Which of them it
+			// is on is not said with it — a /model typed in its terminal
+			// since would not be known here: the page marks that by the
+			// conversation's own log, which says each switch as it is made.)
 			now := time.Now()
 			opts, mine := offered(procKey, now)
 			kin := false
 			if !mine {
 				opts, kin = s.kinOffered(ctx, kinKey, now)
-				for i := range opts {
-					opts[i].Current = false
-				}
+			}
+			for i := range opts {
+				opts[i].Current = false
 			}
 			if mine || kin {
 				release()
@@ -713,6 +714,9 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 					quiet.to(w)
 					return
 				}
+				// (Its picker was opened for this request: said of it, however
+				// what follows ends — a refusal after it sets only why.)
+				*outcome = o
 			}
 		}
 		done, code, why, ok := s.settingsTurn(ctx, sess, account)
@@ -904,10 +908,15 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 		switch {
 		case err == nil && target != "" && len(opts) == 1:
 			confirmOffered(procKey, kinKey, opts[0], time.Now())
-		case errors.Is(err, errNoModel):
+		case errors.Is(err, errNoModel), errors.Is(err, errUnsure), errors.Is(err, errElsewhere):
+			// (Not as the lists kept said, or not known how it ended: read again.)
 			s.forgetLists(context.WithoutCancel(ctx), procKey, kinKey)
 		}
 		if err == nil && target == "" {
+			// (With the lists' lock, as kinOffered's read of the store and
+			// its keeping of that are: an older list read from the store
+			// meanwhile is not kept over this one.)
+			lineListMu.Lock()
 			noteOffered(procKey, opts, time.Now())
 			noteOffered(kinKey, opts, time.Now())
 			if rows, jerr := json.Marshal(opts); jerr == nil {
@@ -915,6 +924,7 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 					slog.Warn("model list: not kept in the store", "session", sess.ID, "err", perr)
 				}
 			}
+			lineListMu.Unlock()
 		}
 	}
 	restored, restoreFailed := false, false
