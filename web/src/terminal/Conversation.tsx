@@ -1827,7 +1827,8 @@ export const CODEX_EFFORTS = Object.keys(EFFORT_WORDS)
 // unread: the last read of the picker came to nothing. Without it a list
 // that never arrives leaves the menu saying it is still reading, for as
 // long as it is left open.
-export type ModelSwitch = { list: ModelOpt[] | null; fresh: boolean; busy: boolean; can: boolean; unread?: boolean; onOpen: () => void; onPick: (label: string, effort?: string) => void; efforts?: string[]; of?: string }
+// (unsure: which of the list it is on is not known — none is marked, not one guessed by the log's name.)
+export type ModelSwitch = { list: ModelOpt[] | null; fresh: boolean; busy: boolean; can: boolean; unread?: boolean; unsure?: boolean; onOpen: () => void; onPick: (label: string, effort?: string) => void; efforts?: string[]; of?: string }
 
 // How hard the agent is asked to think (Claude Code's /effort), for the
 // session only. The levels are its slider's, in its order.
@@ -2081,7 +2082,7 @@ function Runs({ meta, active, mode, model, effort, quota, via, auth }: { meta: C
             model.list.map((o) => {
               // (As its picker last said, which the log may not yet. A Codex's
               // log names it in small letters: "gpt-6-sol" is "GPT-6-Sol".)
-              const now = model.fresh && model.list!.some((x) => x.current) ? !!o.current : modelName(meta.model!).toLowerCase() === o.label.toLowerCase()
+              const now = model.unsure ? false : model.fresh && model.list!.some((x) => x.current) ? !!o.current : modelName(meta.model!).toLowerCase() === o.label.toLowerCase()
               const [name, says] = named(o)
               const pick = (effort?: string) => {
                 setOpen(false)

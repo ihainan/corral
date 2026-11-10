@@ -702,7 +702,7 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 				// yet seen to offer it — the list the page chose from may be
 				// its kin's: its own is read first, as for a list asked for,
 				// with the pane's turn kept here meanwhile.)
-				var o, why string
+				o, why := "refused", "" // (as the request's own begin: a refusal sets only why)
 				read := make(chan struct{})
 				quiet := &quietWriter{}
 				s.convoModel(quiet, ctx, sess, pane, socket, pid, start, sid, "", &o, &why, func() { close(read) }, false, "", log, via, auth, true)

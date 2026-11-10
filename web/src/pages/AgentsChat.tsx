@@ -1146,7 +1146,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   // The model, switched from a menu of what Claude Code's picker offers (read
   // when it opens, through the picker: see convo_model.go), for this session
   // only. Only while it is at rest: the picker takes over its input.
-  const [models, setModels] = useState<{ list: ModelOpt[] | null; bind: string; at?: number; unread?: boolean } | null>(null)
+  const [models, setModels] = useState<{ list: ModelOpt[] | null; bind: string; at?: number; unread?: boolean; unsure?: boolean } | null>(null)
   const [modelBusy, setModelBusy] = useState(false)
   // (Said once: a switch here left the default of new sessions changed, as
   // where its request was given up and it was found after.)
@@ -1229,7 +1229,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
         const hits = r.models.filter((o) => /^[a-z]+$/i.test(o.label) && on.includes(o.label.toLowerCase()))
         const one = hits.length === 1 && r.models.filter((o) => fam(o.label) === fam(hits[0].label)).length === 1 ? hits[0].label : ''
         const list = r.kin ? r.models.map((o) => ({ ...o, current: !!one && o.label === one })) : r.models
-        setModels((m) => (m?.bind === bind ? { list, bind, at: Date.now() } : m))
+        setModels((m) => (m?.bind === bind ? { list, bind, at: Date.now(), unsure: !!r.kin && !one } : m))
       })
       .catch((e) => {
         // (Said in the menu as well as in the toast: left on "reading" it
@@ -1246,7 +1246,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       .then((r) => {
         toast(t('convo.modelSet', { m: effort ? `${label} · ${effort}` : label }) + (r.restored ? t('convo.modelRestored') : '') + (r.unconfirmed ? t('convo.modelUnconfirmed') : ''))
         // (Not said by its log: the list's mark is left where it was, not moved by a guess.)
-        if (!r.unconfirmed) setModels((m) => m && { ...m, list: m.list && m.list.map((o) => ({ ...o, current: o.label === label })) })
+        if (!r.unconfirmed) setModels((m) => m && { ...m, unsure: false, list: m.list && m.list.map((o) => ({ ...o, current: o.label === label })) })
       })
       .catch((e) => toast(refusal(e), true))
       .finally(() => setModelBusy(false))
@@ -2215,7 +2215,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       onSendNow={canPress && !notClaude ? () => press('now') : undefined}
       sendNow={said?.what === 'now' && said.bind === bindKey ? said.text : undefined}
       mode={{ now: modeNow?.bind === bindKey ? modeNow.mode : undefined, busy: modeBusy, onPick: canMode ? pickMode : undefined }}
-      model={canModel || modelBusy ? { list: models?.bind === bindKey ? models.list : null, unread: models?.bind === bindKey && !!models.unread, fresh: !!models?.at && Date.now() - models.at < 60000, busy: modelBusy, can: canModel, onOpen: openModels, onPick: pickModel, of: bindKey, ...(codex ? { efforts: CODEX_EFFORTS } : {}) } : undefined}
+      model={canModel || modelBusy ? { list: models?.bind === bindKey ? models.list : null, unread: models?.bind === bindKey && !!models.unread, unsure: models?.bind === bindKey && !!models.unsure, fresh: !!models?.at && Date.now() - models.at < 60000, busy: modelBusy, can: canModel, onOpen: openModels, onPick: pickModel, of: bindKey, ...(codex ? { efforts: CODEX_EFFORTS } : {}) } : undefined}
       effort={{ now: effortNow?.bind === bindKey ? effortNow.effort : undefined, busy: effortBusy, can: canEffort, onPick: pickEffort }}
       lead={lead}
       more={more}
