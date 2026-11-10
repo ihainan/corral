@@ -15,22 +15,37 @@ type SettingsPending struct {
 	Had       bool
 	Was       []byte
 	Wrote     []byte
+	Mode      string
+	Pane      string
+	Socket    string
+	PID       int64
+	Start     int64
+	SID       string
+	Log       string
+	LogOff    int64
 	CreatedAt int64
 }
 
-// PutSettingsPending keeps p, in place of the account's earlier one.
+// PutSettingsPending keeps p, in place of the account's earlier one (its
+// time kept where p has one: the same switch, known better).
 func (s *Store) PutSettingsPending(ctx context.Context, p SettingsPending) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO settings_pending (account, owner_id, host_id, had, was, wrote, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(account) DO UPDATE SET owner_id = excluded.owner_id, host_id = excluded.host_id, had = excluded.had, was = excluded.was, wrote = excluded.wrote, created_at = excluded.created_at`,
-		p.Account, p.OwnerID, p.HostID, p.Had, nonNil(p.Was), nonNil(p.Wrote), s.unix())
+	at := p.CreatedAt
+	if at == 0 {
+		at = s.unix()
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT OR REPLACE INTO settings_pending
+		(account, owner_id, host_id, had, was, wrote, mode, pane, socket, pid, start, sid, log, log_off, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		p.Account, p.OwnerID, p.HostID, p.Had, nonNil(p.Was), nonNil(p.Wrote), p.Mode, p.Pane, p.Socket, p.PID, p.Start, p.SID, p.Log, p.LogOff, at)
 	return err
 }
 
 // SettingsPendingOf gives the account's, or nil when it has none.
 func (s *Store) SettingsPendingOf(ctx context.Context, account string) (*SettingsPending, error) {
 	p := SettingsPending{Account: account}
-	err := s.db.QueryRowContext(ctx, `SELECT owner_id, host_id, had, was, wrote, created_at FROM settings_pending WHERE account = ?`, account).
-		Scan(&p.OwnerID, &p.HostID, &p.Had, &p.Was, &p.Wrote, &p.CreatedAt)
+	err := s.db.QueryRowContext(ctx, `SELECT owner_id, host_id, had, was, wrote, mode, pane, socket, pid, start, sid, log, log_off, created_at
+		FROM settings_pending WHERE account = ?`, account).
+		Scan(&p.OwnerID, &p.HostID, &p.Had, &p.Was, &p.Wrote, &p.Mode, &p.Pane, &p.Socket, &p.PID, &p.Start, &p.SID, &p.Log, &p.LogOff, &p.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}

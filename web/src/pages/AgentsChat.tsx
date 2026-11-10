@@ -1047,6 +1047,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     if (e.code === 'picker') return t('convo.err.picker')
     if (e.code === 'default_changed') return t('convo.err.defaultChanged')
     if (e.code === 'default_settling') return t('convo.err.defaultSettling')
+    if (e.code === 'default_pending') return t('convo.err.defaultPending')
     if (e.code === 'model_elsewhere') return t('convo.err.modelElsewhere')
     if (e.code === 'draft') return t('convo.err.draft')
     if (e.code === 'box_draft') return t('convo.err.boxDraft', { draft: String(e.extra.draft ?? '') })
@@ -1232,7 +1233,8 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     own(api<{ restored?: boolean; unconfirmed?: boolean }>('POST', `/api/sessions/${sid}/conversation/model`, { ...pressBody(), model: label, ...(effort ? { effort } : {}) }, { timeoutMs: MODEL_MS }))
       .then((r) => {
         toast(t('convo.modelSet', { m: effort ? `${label} · ${effort}` : label }) + (r.restored ? t('convo.modelRestored') : '') + (r.unconfirmed ? t('convo.modelUnconfirmed') : ''))
-        setModels((m) => m && { ...m, list: m.list && m.list.map((o) => ({ ...o, current: o.label === label })) })
+        // (Not said by its log: the list's mark is left where it was, not moved by a guess.)
+        if (!r.unconfirmed) setModels((m) => m && { ...m, list: m.list && m.list.map((o) => ({ ...o, current: o.label === label })) })
       })
       .catch((e) => toast(refusal(e), true))
       .finally(() => setModelBusy(false))

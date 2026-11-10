@@ -99,30 +99,49 @@ var (
 	lineCmd  = regexp.MustCompile(`^<command-name>/model</command-name>`)
 	lineArgs = regexp.MustCompile(`<command-args>([^<]*)</command-args>`)
 	lineSaid = regexp.MustCompile("^<local-command-stdout>Set model to `([^`\n]{1,80})`")
+	lineKeep = regexp.MustCompile("^<local-command-stdout>Kept model as ")
 )
 
 // lineLogSkip: a record longer than this is passed over, not waited for
 // whole (the command's and its answer's are a few hundred bytes).
 const lineLogSkip = 64 << 10
 
-// lineLog reads the log as it grows for the answer to "/model arg" typed
+// lineEnd: how a line is known to have ended, if it is.
+type lineEnd int
+
+const (
+	lineOpen  lineEnd = iota // not known to be over: its question may be open, or it is still in the box
+	lineRan                  // its log: "Set model to …"
+	lineKept                 // its log: "Kept model as …" (its question left with Escape or No)
+	lineGone                 // its process is gone
+	lineNever                // it never ran: no record of it, the box empty, nothing asked
+)
+
+// lineLog reads the log as it grows for the end of "/model arg" typed
 // into session sid: the command's own record, then the answer whose parent
 // that record is. The same words quoted in a message, an answer to another
 // command, or one of another session writing to the same file are not it.
+//
+// Measured (2.1.312, 2026-11-10): taken, both records are of type "user",
+// their words in message.content; its question left with Escape, both are
+// "system" records (subtype local_command), their words in content, the
+// answer "Kept model as `<the model before>`". While its question stands
+// open, the log has neither.
 type lineLog struct {
 	sid, arg string
 	skip     bool            // within a record passed over, its end not yet read
 	cmds     map[string]bool // uuids of the command's records
+	end      lineEnd         // (kept once found)
+	name     string          // the model named, where it ran
 }
 
 // feed takes what was read from where the last feed's use ended, and gives
-// how much of it is done with (read on from there) and the name the answer
-// gives, when it has come.
-func (l *lineLog) feed(data []byte) (used int, name string, found bool) {
+// how much of it is done with (read on from there).
+func (l *lineLog) feed(data []byte) (used int) {
 	if l.skip {
 		i := bytes.IndexByte(data, '\n')
 		if i < 0 {
-			return len(data), "", false
+			return len(data)
 		}
 		l.skip, used = false, i+1
 	}
@@ -130,9 +149,9 @@ func (l *lineLog) feed(data []byte) (used int, name string, found bool) {
 	if end < used {
 		if len(data)-used >= lineLogSkip {
 			l.skip = true
-			return len(data), "", false
+			return len(data)
 		}
-		return used, "", false
+		return used
 	}
 	for _, row := range bytes.Split(data[used:end], []byte("\n")) {
 		if !bytes.Contains(row, []byte("command-name")) && !bytes.Contains(row, []byte("local-command-stdout")) {
@@ -140,15 +159,25 @@ func (l *lineLog) feed(data []byte) (used int, name string, found bool) {
 		}
 		var rec struct {
 			Type      string `json:"type"`
+			Subtype   string `json:"subtype"`
 			SessionID string `json:"sessionId"`
 			UUID      string `json:"uuid"`
 			Parent    string `json:"parentUuid"`
+			Content   string `json:"content"`
 			Message   struct {
 				Content json.RawMessage `json:"content"`
 			} `json:"message"`
 		}
-		var text string
-		if json.Unmarshal(row, &rec) != nil || rec.Type != "user" || rec.SessionID != l.sid || json.Unmarshal(rec.Message.Content, &text) != nil {
+		if json.Unmarshal(row, &rec) != nil || rec.SessionID != l.sid {
+			continue
+		}
+		text := rec.Content
+		switch {
+		case rec.Type == "user":
+			if json.Unmarshal(rec.Message.Content, &text) != nil {
+				continue
+			}
+		case rec.Type != "system" || rec.Subtype != "local_command":
 			continue
 		}
 		if lineCmd.MatchString(text) {
@@ -160,11 +189,32 @@ func (l *lineLog) feed(data []byte) (used int, name string, found bool) {
 			}
 			continue
 		}
-		if m := lineSaid.FindStringSubmatch(text); m != nil && l.cmds[rec.Parent] {
-			name, found = m[1], true
+		if !l.cmds[rec.Parent] {
+			continue
+		}
+		if m := lineSaid.FindStringSubmatch(text); m != nil {
+			l.end, l.name = lineRan, m[1]
+		} else if lineKeep.MatchString(text) {
+			l.end, l.name = lineKept, ""
 		}
 	}
-	return end + 1, name, found
+	return end + 1
+}
+
+// read feeds what the log has from *off on (from: the log from there, some
+// of it), until its end is found or there is no more.
+func (l *lineLog) read(from func(off int64) ([]byte, error), off *int64) {
+	for spins := 0; l.end == lineOpen && spins < 64; spins++ {
+		data, err := from(*off)
+		if err != nil || len(data) == 0 {
+			return
+		}
+		used := l.feed(data)
+		*off += int64(used)
+		if used == 0 {
+			return
+		}
+	}
 }
 
 // lineIO is the host as modelLineFlow needs it.
@@ -173,8 +223,7 @@ type lineIO struct {
 	typed   func(text string) error                 // a line typed and Enter, not while it waits for an answer
 	dialog  func() (text, digest string, err error) // the screen, and what names it for pressOn
 	pressOn func(digest, key string) error          // a key of modelKeys, only on that screen still
-	logSize func() (int64, error)
-	logFrom func(off int64) ([]byte, error) // the log from there on (some of it)
+	logFrom func(off int64) ([]byte, error)         // the log from there on (some of it)
 	now     func() time.Time
 	sleep   func(time.Duration) error // (an error: given up)
 }
@@ -199,7 +248,7 @@ type lineSent int
 
 const (
 	lineNotSent lineSent = iota // nothing reached Claude Code
-	lineMaybe                   // it may have (typed, or the host's answer lost): the default is watched
+	lineMaybe                   // it may have (typed, or the host's answer lost): its end is looked for
 )
 
 // lineNotTyped: the error of typing a line says nothing was typed (the
@@ -222,14 +271,19 @@ func lineNotTyped(err error) bool {
 }
 
 // modelLineFlow types "/model arg" into a Claude Code at rest with its
-// input empty (as modelFlow asks), and waits for its log to say it took
-// the model named want. nil: it did. errElsewhere with the name: it took
-// another. errUnsure: the line may have been typed and the log did not say
-// in time. errNotTaken: its question was left unanswered with Escape (it
-// was for another model, or it was still there when the wait was over).
-// Before the line is typed, the errors of idleInput and errScreen. sent
-// says whether the default may change by it, whatever the error.
-func modelLineFlow(io lineIO, sid, arg, want string, greyed ...func() string) (name string, sent lineSent, err error) {
+// input empty (as modelFlow asks), and waits for its log (read with log,
+// from *off: its length before this was called) to say it took the model
+// named want. nil: it did. errElsewhere with the name: it took another.
+// errNotTaken: its question was left with Escape (it was for another model,
+// or still there when the wait was over), or its log says it kept the
+// model it had. errUnsure: the line may have been typed and how it ended
+// is not known yet. Before the line is typed, the errors of idleInput and
+// errScreen. sent says whether the line may have reached it, whatever the
+// error: its end is then the caller's to look for (lineConclude).
+func modelLineFlow(io lineIO, log *lineLog, off *int64, want string, greyed ...func() string) (name string, sent lineSent, err error) {
+	// (The last look before the line is typed: what is typed into the
+	// terminal after it and before the paste goes out with the line — no
+	// more than one command's while on the host, as for any message.)
 	screen, err := io.look()
 	if err != nil {
 		return "", lineNotSent, err
@@ -242,42 +296,32 @@ func modelLineFlow(io lineIO, sid, arg, want string, greyed ...func() string) (n
 	if err := idleInput(screen, greyed...); err != nil {
 		return "", lineNotSent, err
 	}
-	off, err := io.logSize()
-	if err != nil {
-		return "", lineNotSent, err
-	}
-	if err := io.typed("/model " + arg); err != nil {
+	if err := io.typed("/model " + log.arg); err != nil {
 		if lineNotTyped(err) {
 			return "", lineNotSent, err
 		}
 		return "", lineMaybe, err
 	}
-	log := lineLog{sid: sid, arg: arg}
-	wait := func(d time.Duration) (string, bool) {
+	wait := func(d time.Duration) bool {
 		until := io.now().Add(d)
 		for {
-			if data, err := io.logFrom(off); err == nil {
-				used, name, ok := log.feed(data)
-				off += int64(used)
-				if ok {
-					return name, true
-				}
+			log.read(io.logFrom, off)
+			if log.end != lineOpen {
+				return true
 			}
 			if !io.now().Before(until) || io.sleep(lineLogEvery) != nil {
-				return "", false
+				return false
 			}
 		}
 	}
-	// leave: its question, where it is (still) on the screen, left with
-	// Escape — on the screen it was read off only — so that it is not
-	// answered later, by whoever, the default then changing with no one
-	// watching. Whether it was left.
+	// leave: its question for the model asked for — this line's, none
+	// other — where it is (still) on the screen, left with Escape, on the
+	// screen it was read off only. Whether it was left.
 	leave := func() bool {
 		text, digest, err := io.dialog()
-		return err == nil && lineAsks(text, "") && io.pressOn(digest, "esc") == nil
+		return err == nil && lineAsks(text, want) && io.pressOn(digest, "esc") == nil
 	}
-	name, ok := wait(lineLogFirst)
-	if !ok {
+	if !wait(lineLogFirst) {
 		// (Nothing said: its question, "Switch model?", may be what it waits
 		// on. Enter only on that question, for the model asked for, and only
 		// on the screen it was read off.)
@@ -287,32 +331,44 @@ func modelLineFlow(io lineIO, sid, arg, want string, greyed ...func() string) (n
 		}
 		if lineAsks(text, "") {
 			if !lineAsks(text, want) {
+				// (A second after the line, for another model: the line's word
+				// is no longer that model's. Left.)
 				if io.pressOn(digest, "esc") != nil {
 					return "", lineMaybe, errUnsure
 				}
 				return "", lineMaybe, errNotTaken
 			}
 			if err := io.pressOn(digest, "yes"); err != nil {
+				// (Not pressed: the screen is another by now. Its question, if it
+				// still stands, left; what its log says by now, taken.)
 				if leave() {
 					return "", lineMaybe, errNotTaken
 				}
-				return "", lineMaybe, errUnsure
+				if !wait(0) {
+					return "", lineMaybe, errUnsure
+				}
 			}
 		}
-		if name, ok = wait(lineLogAfter); !ok {
+		if log.end == lineOpen && !wait(lineLogAfter) {
 			if leave() {
 				return "", lineMaybe, errNotTaken
 			}
 			return "", lineMaybe, errUnsure
 		}
 	}
-	if name != want {
-		return name, lineMaybe, errElsewhere
+	switch {
+	case log.end == lineKept:
+		return "", lineMaybe, errNotTaken
+	case log.name != want:
+		return log.name, lineMaybe, errElsewhere
 	}
-	return name, lineMaybe, nil
+	return log.name, lineMaybe, nil
 }
 
-const lineLogMost = 256 << 10 // of the log read at once: its record is short, and soon
+const (
+	lineLogMost = 256 << 10       // of the log read at once: its record is short, and soon
+	lineLogRead = 2 * time.Second // one read of it, at most
+)
 
 // logSize: the log's size now.
 func (s *Server) logSize(ctx context.Context, sess *term.Session, log string) (size int64, err error) {
@@ -329,7 +385,7 @@ func (s *Server) logSize(ctx context.Context, sess *term.Session, log string) (s
 
 // logFrom: the log from off on (lineLogMost of it at most).
 func (s *Server) logFrom(ctx context.Context, sess *term.Session, log string, off int64) (data []byte, err error) {
-	err = s.withSFTP(ctx, sess, 5*time.Second, func(c *sftplite.Client) error {
+	err = s.withSFTP(ctx, sess, lineLogRead, func(c *sftplite.Client) error {
 		fi, err := c.Stat(log)
 		if err != nil {
 			return err

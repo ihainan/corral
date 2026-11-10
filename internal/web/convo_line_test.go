@@ -9,25 +9,29 @@ import (
 	"time"
 
 	"github.com/ihainan/corral/internal/sshx"
+	"github.com/ihainan/corral/internal/store"
 )
 
 // fakeLine stands in for a Claude Code taking "/model NAME" on one line,
-// as the real one does (out-e10, out-e11, out-e14): any name is taken, its
-// log says so a moment later (the command's record, then its answer), and
-// with turns behind it, it asks first. It is no more helpful than the real
-// one and its host: reads fail, records come late and in pieces, other
-// sessions write to the same log, the screen moves under a key.
+// as the real one does (out-e10, out-e11, out-e14, and the logs of
+// 2026-11-10): any name is taken, its log says so a moment later (the
+// command's record, then its answer), with turns behind it, it asks first,
+// and its question left, its log says it kept its model. It is no more
+// helpful than the real one and its host: reads fail, records come late
+// and in pieces, other sessions write to the same log, the screen becomes
+// another under a key.
 type fakeLine struct {
 	names   map[string]string // what a word typed is the name of
 	history bool              // it asks "Switch model?" first
 	asksFor string            // (its question names this, not what was typed)
 	silent  bool              // its log never says
 	lateBy  time.Duration     // its records show this long after it took the model
-	chunk   int               // of the log given by one read (0: all)
+	drip    int               // bytes of them shown by each read (0: all at once)
 	failing int               // reads of the log that fail first
 	typeErr error             // what typing gives back…
 	lands   bool              // …the line having reached it all the same
-	moves   int               // presses before which the screen moves (their digest no longer its)
+	swapTo  string            // before the next press, its question becomes one for this model (someone's own)
+	deaf    bool              // presses are refused, whatever the screen (no sha256sum on the host)
 	narrow  bool              // its question as a narrow pane shows it
 	stuck   bool              // its question stays, whatever is pressed "yes" on it
 	givenUp bool              // sleeps fail: the request is over
@@ -64,7 +68,9 @@ func (f *fakeLine) screen() string {
 		b.WriteString("▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n   Switch model?\n   Your next response will be slower\n   and use more tokens\n\n   This conversation is cached for\n   the current model. Switching to\n   " +
 			f.asking + " means the full history\n   gets re-read.\n\n   ❯ 1. Yes, switch to " + f.asking + "\n     2. No, go back\n")
 	case f.asking != "":
-		b.WriteString("   Switch model?\n   Your next response will be slower and use more tokens\n\n   ❯ 1. Yes, switch to " + f.asking + "\n     2. No, go back\n")
+		// (As a pane of 120 columns shows it.)
+		b.WriteString("▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n   Switch model?\n   Your next response will be slower and use more tokens\n\n   This conversation is cached for the current model. Switching to " +
+			f.asking + " means the full history gets re-read.\n\n   ❯ 1. Yes, switch to " + f.asking + "\n     2. No, go back\n")
 	default:
 		b.WriteString("────────────────────────\n❯ " + f.draft + "\n────────────────────────\n  Opus 5.5 · /tmp\n")
 		if f.open {
@@ -80,10 +86,25 @@ func lineRecord(sid, uuid, parent, content string) []byte {
 	return append(b, '\n')
 }
 
+func lineSystemRecord(sid, uuid, parent, content string) []byte {
+	b, _ := json.Marshal(map[string]any{"type": "system", "subtype": "local_command", "sessionId": sid, "uuid": uuid, "parentUuid": parent, "content": content})
+	return append(b, '\n')
+}
+
+func lineCommand(word string) string {
+	return "<command-name>/model</command-name>\n            <command-message>model</command-message>\n            <command-args>" + word + "</command-args>"
+}
+
+// lineRecords: what its log gains when the line is taken.
 func lineRecords(sid, uuid, word, name string) []byte {
-	cmd := "<command-name>/model</command-name>\n            <command-message>model</command-message>\n            <command-args>" + word + "</command-args>"
 	out := "<local-command-stdout>Set model to `" + name + "` and saved as your default for new sessions</local-command-stdout>"
-	return append(lineRecord(sid, uuid, "p-"+uuid, cmd), lineRecord(sid, "a-"+uuid, uuid, out)...)
+	return append(lineRecord(sid, uuid, "p-"+uuid, lineCommand(word)), lineRecord(sid, "a-"+uuid, uuid, out)...)
+}
+
+// lineKeptRecords: what it gains when its question is left.
+func lineKeptRecords(sid, uuid, word, had string) []byte {
+	out := "<local-command-stdout>Kept model as `" + had + "`</local-command-stdout>"
+	return append(lineSystemRecord(sid, uuid, "p-"+uuid, lineCommand(word)), lineSystemRecord(sid, "a-"+uuid, uuid, out)...)
 }
 
 func (f *fakeLine) take(word string) {
@@ -99,6 +120,21 @@ func (f *fakeLine) take(word string) {
 }
 
 func (f *fakeLine) digest() string { return fmt.Sprintf("%d:%x", f.draws, len(f.screen())) }
+
+func (f *fakeLine) logFrom(off int64) ([]byte, error) {
+	if f.failing > 0 {
+		f.failing--
+		return nil, errors.New("the host did not answer")
+	}
+	if len(f.hidden) > 0 && !f.clock.Before(f.showAt) {
+		n := len(f.hidden)
+		if f.drip > 0 {
+			n = min(n, f.drip)
+		}
+		f.log, f.hidden = append(f.log, f.hidden[:n]...), f.hidden[n:]
+	}
+	return f.log[min(int(off), len(f.log)):], nil
+}
 
 func (f *fakeLine) io() lineIO {
 	return lineIO{
@@ -124,9 +160,16 @@ func (f *fakeLine) io() lineIO {
 		},
 		dialog: func() (string, string, error) { return f.screen(), f.digest(), nil },
 		pressOn: func(digest, key string) error {
-			if f.moves > 0 {
-				f.moves--
+			if f.swapTo != "" {
+				// (Someone left the line's question and opened their own.)
+				if !f.silent {
+					f.hidden = append(f.hidden, lineKeptRecords(f.sid, fmt.Sprintf("c%d", len(f.typed)), f.word, "Opus 5.5")...)
+				}
+				f.asking, f.word, f.swapTo = f.swapTo, "theirs", ""
 				f.draws++
+			}
+			if f.deaf {
+				return &sshx.ExitError{Status: 11}
 			}
 			if digest != f.digest() {
 				return &sshx.ExitError{Status: 10}
@@ -142,26 +185,15 @@ func (f *fakeLine) io() lineIO {
 				}
 			case "esc":
 				f.asking = ""
+				if !f.silent {
+					f.hidden = append(f.hidden, lineKeptRecords(f.sid, fmt.Sprintf("c%d", len(f.typed)), f.word, "Opus 5.5")...)
+				}
 			}
 			f.draws++
 			return nil
 		},
-		logSize: func() (int64, error) { return int64(len(f.log)), nil },
-		logFrom: func(off int64) ([]byte, error) {
-			if f.failing > 0 {
-				f.failing--
-				return nil, errors.New("the host did not answer")
-			}
-			if len(f.hidden) > 0 && !f.clock.Before(f.showAt) {
-				f.log, f.hidden = append(f.log, f.hidden...), nil
-			}
-			data := f.log[min(int(off), len(f.log)):]
-			if f.chunk > 0 && len(data) > f.chunk {
-				data = data[:f.chunk]
-			}
-			return data, nil
-		},
-		now: func() time.Time { return f.clock },
+		logFrom: f.logFrom,
+		now:     func() time.Time { return f.clock },
 		sleep: func(d time.Duration) error {
 			if f.givenUp {
 				return errors.New("given up")
@@ -170,6 +202,13 @@ func (f *fakeLine) io() lineIO {
 			return nil
 		},
 	}
+}
+
+// run types the line for Haiku into f, as convoModelLine does.
+func (f *fakeLine) run() (log *lineLog, off int64, name string, sent lineSent, err error) {
+	log, off = &lineLog{sid: f.sid, arg: "haiku"}, int64(len(f.log))
+	name, sent, err = modelLineFlow(f.io(), log, &off, "Haiku 5.5")
+	return
 }
 
 func TestLineModelArg(t *testing.T) {
@@ -205,50 +244,59 @@ func TestLineModelArg(t *testing.T) {
 
 func TestLineLogFeed(t *testing.T) {
 	ours := lineRecords("sid-1", "c1", "haiku", "Haiku 5.5")
-	feedAll := func(l *lineLog, data []byte, chunk int) (string, bool) {
+	// feedAll: the log read as it grows, grow bytes more of it each time.
+	feedAll := func(l *lineLog, data []byte, grow int) {
 		off := 0
-		for spins := 0; off < len(data) && spins < 10000; spins++ {
-			used, name, ok := l.feed(data[off:min(len(data), off+chunk)])
-			off += used
-			if ok {
-				return name, true
-			}
-			if used == 0 {
-				chunk += 7 // (a record not whole yet: more of it next time)
+		for have := min(grow, len(data)); ; have = min(have+grow, len(data)) {
+			off += l.feed(data[off:have])
+			if have == len(data) {
+				return
 			}
 		}
-		return "", false
 	}
-	for _, chunk := range []int{1 << 20, 50, 7} {
+	for _, grow := range []int{1 << 20, 50, 7, 1} {
 		l := lineLog{sid: "sid-1", arg: "haiku"}
-		if name, ok := feedAll(&l, ours, chunk); !ok || name != "Haiku 5.5" {
-			t.Errorf("chunk %d: %q %v", chunk, name, ok)
+		if feedAll(&l, ours, grow); l.end != lineRan || l.name != "Haiku 5.5" {
+			t.Errorf("growing by %d: %v %q", grow, l.end, l.name)
 		}
+	}
+	l := lineLog{sid: "sid-1", arg: "haiku"}
+	if feedAll(&l, lineKeptRecords("sid-1", "c1", "haiku", "Opus 5.5"), 1<<20); l.end != lineKept {
+		t.Errorf("its question left: %v", l.end)
 	}
 	answer := "<local-command-stdout>Set model to `Haiku 5.5` and saved as your default for new sessions</local-command-stdout>"
 	not := map[string][]byte{
 		"another session's":         lineRecords("sid-2", "c1", "haiku", "Haiku 5.5"),
+		"another session's, left":   lineKeptRecords("sid-2", "c1", "haiku", "Opus 5.5"),
 		"an answer with no command": lineRecord("sid-1", "a1", "c1", answer),
 		"another word's command":    lineRecords("sid-1", "c1", "sonnet", "Haiku 5.5"),
-		"the answer of another command": append(lineRecord("sid-1", "c1", "p", "<command-name>/model</command-name>\n<command-args>haiku</command-args>"),
+		"the picker's, left":        lineKeptRecords("sid-1", "c1", "", "Opus 5.5"),
+		"the answer of another command": append(lineRecord("sid-1", "c1", "p", lineCommand("haiku")),
 			lineRecord("sid-1", "a1", "c0", answer)...),
-		"quoted in a message": append(lineRecord("sid-1", "c1", "p", "look: <command-name>/model</command-name><command-args>haiku</command-args>"),
+		"quoted in a message": append(lineRecord("sid-1", "c1", "p", "look: "+lineCommand("haiku")),
 			lineRecord("sid-1", "a1", "c1", "it said "+answer)...),
 		"an assistant's": []byte(`{"type":"assistant","sessionId":"sid-1","uuid":"c1","message":{"content":"<command-name>/model</command-name><command-args>haiku</command-args>"}}` + "\n" +
 			`{"type":"assistant","sessionId":"sid-1","uuid":"a1","parentUuid":"c1","message":{"content":"` + strings.ReplaceAll(answer, "`", "\\u0060") + `"}}` + "\n"),
+		"a system record of another kind": []byte(`{"type":"system","subtype":"turn_duration","sessionId":"sid-1","uuid":"c1","content":"<command-name>/model</command-name><command-args>haiku</command-args>"}` + "\n" +
+			`{"type":"system","subtype":"turn_duration","sessionId":"sid-1","uuid":"a1","parentUuid":"c1","content":"<local-command-stdout>Kept model as x</local-command-stdout>"}` + "\n"),
 		"not whole": ours[:len(ours)-1],
 	}
 	for what, data := range not {
 		l := lineLog{sid: "sid-1", arg: "haiku"}
-		if name, ok := feedAll(&l, data, 1<<20); ok {
-			t.Errorf("%s: taken for the answer (%q)", what, name)
+		if feedAll(&l, data, 1<<20); l.end != lineOpen {
+			t.Errorf("%s: taken for its end (%v %q)", what, l.end, l.name)
 		}
+	}
+	// (The command's record alone: known to have been recorded, not ended.)
+	l = lineLog{sid: "sid-1", arg: "haiku"}
+	if feedAll(&l, lineRecord("sid-1", "c1", "p", lineCommand("haiku")), 1<<20); l.end != lineOpen || len(l.cmds) != 1 {
+		t.Errorf("the command alone: %v, %d commands", l.end, len(l.cmds))
 	}
 	// (A record too long to wait for is passed over, what follows it read.)
 	long := append(lineRecord("sid-1", "x", "", strings.Repeat("y", 3*lineLogSkip)), ours...)
-	l := lineLog{sid: "sid-1", arg: "haiku"}
-	if name, ok := feedAll(&l, long, lineLogSkip); !ok || name != "Haiku 5.5" {
-		t.Errorf("after a long record: %q %v", name, ok)
+	l = lineLog{sid: "sid-1", arg: "haiku"}
+	if feedAll(&l, long, lineLogSkip); l.end != lineRan || l.name != "Haiku 5.5" {
+		t.Errorf("after a long record: %v %q", l.end, l.name)
 	}
 }
 
@@ -259,20 +307,21 @@ func TestModelLineFlowSwitches(t *testing.T) {
 	}{
 		{"at once", func(f *fakeLine) {}},
 		{"its record late", func(f *fakeLine) { f.lateBy = 600 * time.Millisecond }},
-		{"its log read in pieces", func(f *fakeLine) { f.chunk = 600 }},
+		{"its records coming in pieces", func(f *fakeLine) { f.drip = 40 }},
 		{"reads failing first", func(f *fakeLine) { f.failing = 3 }},
 		{"asked first", func(f *fakeLine) { f.history = true }},
 		{"asked first, in a narrow pane", func(f *fakeLine) { f.history, f.narrow = true, true }},
 		{"asked first, its record late", func(f *fakeLine) { f.history, f.lateBy = true, 1500*time.Millisecond }},
+		{"asked first, its records in pieces", func(f *fakeLine) { f.history, f.drip = true, 60 }},
 		{"others writing to its log", func(f *fakeLine) {
 			f.hidden = append(lineRecords("sid-2", "z1", "haiku", "Opus 5.5"), lineRecords("sid-1", "z2", "sonnet", "Sonnet 5.5")...)
 		}},
 	} {
 		f := newFakeLine()
-		f.log = lineRecords("sid-1", "old", "haiku", "Haiku 5.5") // (an earlier switch's: before the line)
+		f.log = lineRecords("sid-1", "old", "haiku", "Haiku 4.5") // (an earlier switch's: before the line)
 		c.set(f)
 		start := f.clock
-		name, sent, err := modelLineFlow(f.io(), "sid-1", "haiku", "Haiku 5.5")
+		_, _, name, sent, err := f.run()
 		if err != nil || name != "Haiku 5.5" || sent != lineMaybe || f.session != "Haiku 5.5" {
 			t.Errorf("%s: %q %v %v (its model %q)", c.what, name, sent, err, f.session)
 		}
@@ -298,10 +347,11 @@ func TestModelLineFlowNothingTyped(t *testing.T) {
 		{"a draft", func(f *fakeLine) { f.draft = "half a thought" }, errDraft},
 		{"a picker left open", func(f *fakeLine) { f.open = true }, errScreen},
 		{"a question left open", func(f *fakeLine) { f.asking = "Sonnet 5.5" }, errScreen},
+		{"a question left open, in a narrow pane", func(f *fakeLine) { f.asking, f.narrow = "Sonnet 5.5", true }, errScreen},
 	} {
 		f := newFakeLine()
 		c.set(f)
-		_, sent, err := modelLineFlow(f.io(), "sid-1", "haiku", "Haiku 5.5")
+		_, _, _, sent, err := f.run()
 		if !errors.Is(err, c.want) || sent != lineNotSent || len(f.typed) != 0 || len(f.pressed) != 0 {
 			t.Errorf("%s: %v %v, typed %q pressed %q", c.what, sent, err, f.typed, f.pressed)
 		}
@@ -310,25 +360,25 @@ func TestModelLineFlowNothingTyped(t *testing.T) {
 	for _, status := range []int{3, 7, 9, 10, 11, 12, 13, 14, 15, 17} {
 		f := newFakeLine()
 		f.typeErr = &sshx.ExitError{Status: status}
-		if _, sent, err := modelLineFlow(f.io(), "sid-1", "haiku", "Haiku 5.5"); sent != lineNotSent || err == nil {
+		if _, _, _, sent, err := f.run(); sent != lineNotSent || err == nil {
 			t.Errorf("exit %d: %v %v", status, sent, err)
 		}
 	}
 	f := newFakeLine()
 	f.typeErr = sshx.ErrBusy
-	if _, sent, _ := modelLineFlow(f.io(), "sid-1", "haiku", "Haiku 5.5"); sent != lineNotSent {
+	if _, _, _, sent, _ := f.run(); sent != lineNotSent {
 		t.Error("the host busy: taken for sent")
 	}
 }
 
-// What typing gave back does not say nothing was typed: the default is to
-// be watched, whether or not the line reached it.
+// What typing gave back does not say nothing was typed: its end is to be
+// looked for, whether or not the line reached it.
 func TestModelLineFlowMaybeTyped(t *testing.T) {
 	for _, err := range []error{&sshx.ExitError{Status: 5}, &sshx.ExitError{Status: 6}, &sshx.ExitError{Status: 16}, errors.New("the connection was lost"), errors.New("context deadline exceeded")} {
 		for _, lands := range []bool{false, true} {
 			f := newFakeLine()
 			f.typeErr, f.lands = err, lands
-			_, sent, got := modelLineFlow(f.io(), "sid-1", "haiku", "Haiku 5.5")
+			_, _, _, sent, got := f.run()
 			if sent != lineMaybe || got == nil {
 				t.Errorf("%v (landed %v): %v %v", err, lands, sent, got)
 			}
@@ -339,7 +389,7 @@ func TestModelLineFlowMaybeTyped(t *testing.T) {
 func TestModelLineFlowElsewhere(t *testing.T) {
 	f := newFakeLine()
 	f.names["haiku"] = "Haiku 4.5" // (its word is another model's by now)
-	name, sent, err := modelLineFlow(f.io(), "sid-1", "haiku", "Haiku 5.5")
+	_, _, name, sent, err := f.run()
 	if !errors.Is(err, errElsewhere) || name != "Haiku 4.5" || sent != lineMaybe {
 		t.Fatalf("%q %v %v", name, sent, err)
 	}
@@ -360,9 +410,9 @@ func TestModelLineFlowUnsure(t *testing.T) {
 		f := newFakeLine()
 		c.set(f)
 		start := f.clock
-		_, sent, err := modelLineFlow(f.io(), "sid-1", "haiku", "Haiku 5.5")
-		if !errors.Is(err, errUnsure) || sent != lineMaybe || len(f.pressed) != 0 {
-			t.Errorf("%s: %v %v, pressed %q", c.what, sent, err, f.pressed)
+		log, _, _, sent, err := f.run()
+		if !errors.Is(err, errUnsure) || sent != lineMaybe || len(f.pressed) != 0 || log.end != lineOpen {
+			t.Errorf("%s: %v %v, pressed %q, end %v", c.what, sent, err, f.pressed, log.end)
 		}
 		if spent := f.clock.Sub(start); spent > lineLogFirst+lineLogAfter+time.Second {
 			t.Errorf("%s: waited %v", c.what, spent)
@@ -371,34 +421,44 @@ func TestModelLineFlowUnsure(t *testing.T) {
 }
 
 // Its question: Enter only for the model asked for and only on the screen
-// read; else left with Escape, and never left standing to be answered later.
+// read; left with Escape only where it is this line's; never another's.
 func TestModelLineFlowQuestion(t *testing.T) {
-	// For another model: Escape, nothing taken.
+	// For another model, a second after the line: Escape, nothing taken.
 	f := newFakeLine()
 	f.history, f.asksFor = true, "Sonnet 5.5"
-	_, sent, err := modelLineFlow(f.io(), "sid-1", "haiku", "Haiku 5.5")
+	_, _, _, sent, err := f.run()
 	if !errors.Is(err, errNotTaken) || sent != lineMaybe || strings.Join(f.pressed, ",") != "esc" || f.session != "" {
 		t.Errorf("for another model: %v %v, pressed %q, its model %q", sent, err, f.pressed, f.session)
 	}
-	// The screen moved before Enter: not pressed; the question, still there
-	// on a new read, left.
-	f = newFakeLine()
-	f.history, f.moves = true, 1
-	_, _, err = modelLineFlow(f.io(), "sid-1", "haiku", "Haiku 5.5")
-	if !errors.Is(err, errNotTaken) || strings.Join(f.pressed, ",") != "esc" || f.asking != "" || f.session != "" {
-		t.Errorf("the screen moved: %v, pressed %q, asking %q", err, f.pressed, f.asking)
+	// Someone left it and opened their own, for another model, before
+	// Enter: Enter not pressed, and theirs neither answered nor left. Its
+	// log says ours was left.
+	for _, narrow := range []bool{false, true} {
+		f = newFakeLine()
+		f.history, f.swapTo, f.narrow = true, "Sonnet 5.5", narrow
+		log, _, _, _, err := f.run()
+		if !errors.Is(err, errNotTaken) || len(f.pressed) != 0 || f.asking != "Sonnet 5.5" || f.session != "" || log.end != lineKept {
+			t.Errorf("another's question in its place (narrow %v): %v, pressed %q, asking %q, end %v", narrow, err, f.pressed, f.asking, log.end)
+		}
 	}
-	// It keeps moving: nothing pressed at all, and that is said.
+	// The same, its log silent: not known, theirs still untouched.
 	f = newFakeLine()
-	f.history, f.moves = true, 5
-	_, sent, err = modelLineFlow(f.io(), "sid-1", "haiku", "Haiku 5.5")
-	if !errors.Is(err, errUnsure) || sent != lineMaybe || len(f.pressed) != 0 {
-		t.Errorf("the screen keeps moving: %v %v, pressed %q", sent, err, f.pressed)
+	f.history, f.swapTo, f.silent = true, "Sonnet 5.5", true
+	if _, _, _, _, err = f.run(); !errors.Is(err, errUnsure) || len(f.pressed) != 0 || f.asking != "Sonnet 5.5" {
+		t.Errorf("another's question, the log silent: %v, pressed %q, asking %q", err, f.pressed, f.asking)
+	}
+	// No key can be pressed at all (the host cannot name its screen): the
+	// question stands, and that is said — for the caller to keep watch.
+	f = newFakeLine()
+	f.history, f.deaf = true, true
+	log, _, _, sent, err := f.run()
+	if !errors.Is(err, errUnsure) || sent != lineMaybe || len(f.pressed) != 0 || f.asking != "Haiku 5.5" || log.end != lineOpen {
+		t.Errorf("no key can be pressed: %v %v, pressed %q, asking %q", sent, err, f.pressed, f.asking)
 	}
 	// Enter did nothing: the question is not left standing.
 	f = newFakeLine()
 	f.history, f.stuck = true, true
-	_, _, err = modelLineFlow(f.io(), "sid-1", "haiku", "Haiku 5.5")
+	_, _, _, _, err = f.run()
 	if !errors.Is(err, errNotTaken) || strings.Join(f.pressed, ",") != "yes,esc" || f.asking != "" {
 		t.Errorf("Enter did nothing: %v, pressed %q, asking %q", err, f.pressed, f.asking)
 	}
@@ -437,13 +497,25 @@ func (f *fakeSettings) io() settleIO {
 	}
 }
 
-func TestSettleDefault(t *testing.T) {
-	raw := func(s string) json.RawMessage {
-		if s == "" {
-			return nil
-		}
-		return json.RawMessage(s)
+func (f *fakeSettings) model() string {
+	cur, has, err := settingsModel([]byte(f.doc), f.none)
+	if err != nil {
+		return "?"
 	}
+	if !has {
+		return ""
+	}
+	return string(cur)
+}
+
+func rawJSON(s string) json.RawMessage {
+	if s == "" {
+		return nil
+	}
+	return json.RawMessage(s)
+}
+
+func TestSettleDefault(t *testing.T) {
 	for _, c := range []struct {
 		what       string
 		f          fakeSettings
@@ -471,19 +543,15 @@ func TestSettleDefault(t *testing.T) {
 		{"not JSON", fakeSettings{doc: `{"model": `}, `"opus"`, `"haiku"`, settleFailed, "?", 0},
 	} {
 		f := c.f
-		got, err := settleDefault(f.io(), c.was != "", raw(c.was), raw(c.wrote))
+		got, err := settleDefault(f.io(), c.was != "", rawJSON(c.was), rawJSON(c.wrote))
 		if got != c.want || (got == settleFailed) != (err != nil) {
 			t.Errorf("%s: %v (%v), want %v", c.what, got, err, c.want)
 		}
 		if f.writes != c.writes {
 			t.Errorf("%s: %d writes", c.what, f.writes)
 		}
-		if c.model == "?" {
-			continue
-		}
-		cur, has, err := settingsModel([]byte(f.doc), f.none)
-		if err != nil || has != (c.model != "") || has && !jsonSame(cur, raw(c.model)) {
-			t.Errorf("%s: the model after: %s (%v, %v)", c.what, cur, has, err)
+		if m := f.model(); m != "?" && (c.model == "") != (m == "") || m != "?" && c.model != "" && !jsonSame(rawJSON(m), rawJSON(c.model)) {
+			t.Errorf("%s: the model after: %s", c.what, m)
 		}
 		// (All else in the settings as it was.)
 		if got == settleBack && !strings.Contains(f.doc, `"x": 1`) && strings.Contains(c.f.doc, `"x": 1`) {
@@ -507,4 +575,114 @@ func TestLineNotTyped(t *testing.T) {
 	if lineNotTyped(errors.New("lost")) || lineNotTyped(fmt.Errorf("wrapped: %w", &sshx.ExitError{Status: 6})) {
 		t.Error("an error that says nothing: taken for nothing typed")
 	}
+}
+
+// fakeWhere: where a line was typed, as lineProbe looks at it.
+type fakeWhere struct {
+	log    []byte
+	dead   bool // its process is gone
+	noProc bool // (the host cannot tell)
+	rest   bool // its pane shows it at rest, the box empty
+}
+
+func (f *fakeWhere) probe() lineProbe {
+	return lineProbe{
+		logFrom: func(off int64) ([]byte, error) { return f.log[min(int(off), len(f.log)):], nil },
+		alive:   func() (bool, bool) { return !f.dead, !f.noProc },
+		atRest:  func() bool { return f.rest },
+	}
+}
+
+// What is kept of a line is let go only once the line is known to be over
+// and the default settled — never for having been looked at so many times.
+func TestLineConclude(t *testing.T) {
+	t0 := time.Unix(1_800_000_000, 0)
+	before := lineRecords("sid-1", "old", "haiku", "Haiku 5.5") // (in the log before the line: not its end)
+	watch := func(was string) *lineWatch {
+		return &lineWatch{had: was != "", was: rawJSON(was), wrote: rawJSON(`"haiku"`), log: &lineLog{sid: "sid-1", arg: "haiku"}, off: int64(len(before)), typedAt: t0}
+	}
+	ran := lineRecords("sid-1", "c1", "haiku", "Haiku 5.5")
+	kept := lineKeptRecords("sid-1", "c1", "haiku", "Opus 5.5")
+	cmdOnly := lineRecord("sid-1", "c1", "p", lineCommand("haiku"))
+	for _, c := range []struct {
+		what   string
+		where  fakeWhere
+		doc    string
+		was    string
+		after  time.Duration
+		end    lineEnd
+		res    settled
+		final  bool
+		model  string
+		rebase bool
+	}{
+		{"its question standing", fakeWhere{}, `{"model": "opus"}`, `"opus"`, 5 * time.Second, lineOpen, settleSame, false, `"opus"`, false},
+		{"its question standing, hours on", fakeWhere{}, `{"model": "opus"}`, `"opus"`, 9 * time.Hour, lineOpen, settleSame, false, `"opus"`, false},
+		{"its question standing, the host cannot tell of its process", fakeWhere{noProc: true, dead: true}, `{"model": "opus"}`, `"opus"`, time.Hour, lineOpen, settleSame, false, `"opus"`, false},
+		{"the line still in the box (not at rest), no record of it", fakeWhere{}, `{}`, "", time.Hour, lineOpen, settleSame, false, "", false},
+		{"taken, its word there", fakeWhere{log: ran}, `{"model": "haiku"}`, `"opus"`, time.Second, lineRan, settleBack, true, `"opus"`, false},
+		{"taken, its word there, none before", fakeWhere{log: ran}, `{"a": 1, "model": "haiku"}`, "", time.Second, lineRan, settleBack, true, "", false},
+		{"taken, its word not written yet", fakeWhere{log: ran}, `{"model": "opus"}`, `"opus"`, time.Second, lineRan, settleSame, false, `"opus"`, false},
+		{"taken, its word never came", fakeWhere{log: ran}, `{"model": "opus"}`, `"opus"`, lineSettleAge, lineRan, settleSame, true, `"opus"`, false},
+		{"taken, the same word as before", fakeWhere{log: ran}, `{"model": "haiku"}`, `"haiku"`, time.Second, lineRan, settleSame, true, `"haiku"`, false},
+		{"taken, someone else's there since", fakeWhere{log: ran}, `{"model": "fable"}`, `"opus"`, time.Second, lineRan, settleForeign, true, `"fable"`, false},
+		{"its question left", fakeWhere{log: kept}, `{"model": "opus"}`, `"opus"`, time.Second, lineKept, settleSame, true, `"opus"`, false},
+		{"its process gone", fakeWhere{dead: true}, `{"model": "opus"}`, `"opus"`, time.Second, lineGone, settleSame, true, `"opus"`, false},
+		{"its process gone, its word there", fakeWhere{dead: true}, `{"model": "haiku"}`, `"opus"`, time.Second, lineGone, settleBack, true, `"opus"`, false},
+		{"never ran: at rest, no record of it", fakeWhere{rest: true}, `{"model": "opus"}`, `"opus"`, lineNeverAge, lineNever, settleSame, true, `"opus"`, false},
+		{"at rest a moment after it was typed: too soon to say", fakeWhere{rest: true}, `{"model": "opus"}`, `"opus"`, time.Second, lineOpen, settleSame, false, `"opus"`, false},
+		{"at rest, its command recorded, no answer", fakeWhere{rest: true, log: cmdOnly}, `{"model": "opus"}`, `"opus"`, time.Hour, lineOpen, settleSame, false, `"opus"`, false},
+		{"open, its word there all the same", fakeWhere{}, `{"model": "haiku"}`, `"opus"`, time.Second, lineOpen, settleBack, true, `"opus"`, false},
+		{"open, someone else's there", fakeWhere{}, `{"model": "fable"}`, `"opus"`, time.Minute, lineOpen, settleForeign, false, `"fable"`, true},
+		{"open, taken out by someone else", fakeWhere{}, `{}`, `"opus"`, time.Minute, lineOpen, settleForeign, false, "", true},
+		{"over, the settings not read", fakeWhere{log: kept}, `{"model": `, `"opus"`, time.Minute, lineKept, settleFailed, false, "?", false},
+	} {
+		f := c.where
+		f.log = append(append([]byte{}, before...), f.log...)
+		st := fakeSettings{doc: c.doc}
+		w := watch(c.was)
+		end, res, final, rebased, err := lineConclude(f.probe(), st.io(), w, t0.Add(c.after))
+		if end != c.end || res != c.res || final != c.final || rebased != c.rebase || (res == settleFailed) != (err != nil) {
+			t.Errorf("%s: end %v settled %v final %v rebased %v (%v); want %v %v %v %v", c.what, end, res, final, rebased, err, c.end, c.res, c.final, c.rebase)
+		}
+		if m := st.model(); m != c.model && !(m != "" && m != "?" && c.model != "" && jsonSame(rawJSON(m), rawJSON(c.model))) {
+			t.Errorf("%s: the model after: %q, want %q", c.what, m, c.model)
+		}
+	}
+}
+
+// A line left open is followed through looks far apart, by whoever looks:
+// a gateway started again reads its log from the length kept (watchOf).
+func TestLineConcludeLater(t *testing.T) {
+	t0 := time.Unix(1_800_000_000, 0)
+	before := lineRecords("sid-1", "old", "haiku", "Haiku 5.5")
+	rec := store.SettingsPending{Had: true, Was: []byte(`"opus"`), Wrote: []byte(`"haiku"`), SID: "sid-1", LogOff: int64(len(before)), CreatedAt: t0.Unix()}
+	where := fakeWhere{log: append([]byte{}, before...)}
+	st := fakeSettings{doc: `{"model": "opus"}`}
+	// Its question stands open: looked at again and again, by a new watch
+	// each time (as after a restart), it is never let go.
+	for i, after := range []time.Duration{time.Second, time.Minute, 30 * time.Hour} {
+		if end, _, final, _, _ := lineConclude(where.probe(), st.io(), watchOf(&rec), t0.Add(after)); final || end != lineOpen {
+			t.Fatalf("look %d: let go with its question open (end %v)", i, end)
+		}
+	}
+	// Someone sets a default of their own meanwhile: theirs is now the one
+	// to put back.
+	st.doc = `{"model": "fable"}`
+	w := watchOf(&rec)
+	if _, _, final, rebased, _ := lineConclude(where.probe(), st.io(), w, t0.Add(31*time.Hour)); final || !rebased || !w.had || string(w.was) != `"fable"` {
+		t.Fatalf("someone else's default with the line open: final %v rebased %v was %s", final, rebased, w.was)
+	}
+	rec.Had, rec.Was = w.had, w.was
+	// The person answers the question at last: its word is written, its log
+	// says so. The next look puts theirs back and lets go.
+	where.log = append(where.log, lineRecords("sid-1", "c1", "haiku", "Haiku 5.5")...)
+	st.doc = `{"model": "haiku"}`
+	end, res, final, _, err := lineConclude(where.probe(), st.io(), watchOf(&rec), t0.Add(32*time.Hour))
+	if end != lineRan || res != settleBack || !final || err != nil || st.model() != `"fable"` {
+		t.Fatalf("answered at last: end %v settled %v final %v (%v), the model %s", end, res, final, err, st.model())
+	}
+	// And once let go, a look more changes nothing — nor would the same
+	// word, set by the person themselves, be taken for the line's again
+	// (there is nothing kept to look with: this is the caller's delete).
 }

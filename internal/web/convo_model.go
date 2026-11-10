@@ -650,12 +650,18 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 	if !codex {
 		// (Claude Code's settings are one account's: a switch at a time, what
 		// an earlier one left settled first — convo_line_settle.go.)
-		account := s.settingsAccount(ctx, sess)
-		done, why, ok := s.settingsTurn(ctx, sess, account)
+		account, aerr := settingsAccount(ctx, sess)
+		if aerr != nil {
+			release()
+			*reason = "settings"
+			writeError(w, http.StatusBadGateway, "settings", "Claude Code's settings could not be read: nothing done")
+			return
+		}
+		done, code, why, ok := s.settingsTurn(ctx, sess, account)
 		if !ok {
 			release()
-			*reason = "default_settling"
-			writeError(w, http.StatusConflict, "default_settling", why)
+			*reason = code
+			writeError(w, http.StatusConflict, code, why)
 			return
 		}
 		if target != "" && log != "" {
