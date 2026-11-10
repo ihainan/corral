@@ -119,6 +119,7 @@ type lineProbe struct {
 	atRest  func() bool                     // its pane shows it at rest, the box empty, nothing asked
 	wait    func()                          // a moment, for a record being written to be there (nil: none)
 	hostNow func() (time.Time, bool)        // the host's clock now
+	clock   func() time.Time                // this clock now (nil: as when the look began)
 }
 
 // lineOwn: a line that ran within this of being typed is this switch's;
@@ -130,23 +131,39 @@ const (
 	lineOwnGrace = 5 * time.Second
 )
 
+// lineClockSlack: the host's clock is set against this one's only where
+// asking it took no longer than this (the two are then read that close
+// together).
+const lineClockSlack = 2 * time.Second
+
 // lineOurs: the line, found to have run, ran within lineOwn of being
-// typed. Looked at later than that, by when its log says it ran — the
-// host's clock, set against this one's by what the host says it is now.
-// Not said, or not known: not taken for ours (nothing is written on a
-// guess).
+// typed. Where it is not yet later than that — by the clock now, not as
+// the look began: its log was read since — it did. Else by when its log
+// says it ran: the host's clock, set against this one's by what the host
+// says it is now, this one read right before and after. Not said, not
+// known, or the host slow to say: not taken for ours (nothing is written
+// on a guess).
 func lineOurs(p lineProbe, w *lineWatch, now time.Time) bool {
-	if now.Sub(w.typedAt) <= lineOwn {
+	clock := func() time.Time { return now }
+	if p.clock != nil {
+		clock = p.clock
+	}
+	if clock().Sub(w.typedAt) <= lineOwn {
 		return true
 	}
 	if w.log.at.IsZero() || p.hostNow == nil {
 		return false
 	}
+	asked := clock()
 	there, ok := p.hostNow()
-	if !ok {
+	took := clock().Sub(asked)
+	if !ok || took < 0 || took > lineClockSlack {
 		return false
 	}
-	return w.log.at.Add(now.Sub(there)).Sub(w.typedAt) <= lineOwn
+	// (The host's "date" is of some moment between the two: taken for the
+	// later, the line then counted as run no earlier than it was.)
+	here := asked.Add(took)
+	return w.log.at.Add(here.Sub(there)).Sub(w.typedAt) <= lineOwn
 }
 
 // lineLagWait: Claude Code writes the default up to 0.3 s before its log's
@@ -339,6 +356,7 @@ func (s *Server) lineProbeOf(ctx context.Context, sess *term.Session, p *store.S
 			return false, false
 		},
 		moved: func() bool { return holds != "" && holds != p.SID },
+		clock: time.Now,
 		hostNow: func() (time.Time, bool) {
 			out, err := lineExec(ctx, sess, running, "date +%s", nil, 64)
 			sec, perr := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)

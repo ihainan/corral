@@ -887,3 +887,50 @@ func TestLineConcludeSequences(t *testing.T) {
 		each(nil, n)
 	}
 }
+
+// A line found to have run is this switch's only where it ran within
+// lineOwn of being typed — by its log's time, the host's clock set against
+// this one's with both read close together.
+func TestLineOurs(t *testing.T) {
+	t0 := time.Unix(1_800_000_000, 0)
+	for _, c := range []struct {
+		what   string
+		ran    time.Duration // after it was typed
+		look   time.Duration // the look begins
+		read   time.Duration // reading its log takes
+		ask    time.Duration // the host takes to say its time
+		skew   time.Duration // the host's clock ahead of this one
+		silent bool          // the host does not say
+		bare   bool          // its record has no time
+		want   bool
+	}{
+		{"looked at within the time", 3 * time.Second, 5 * time.Second, time.Second, 0, 0, false, false, true},
+		{"looked at within the time, its record without one", 3 * time.Second, 5 * time.Second, time.Second, 0, 0, false, true, true},
+		{"ran in time, found an hour on", 10 * time.Second, time.Hour, time.Second, 300 * time.Millisecond, 0, false, false, true},
+		{"ran in time, found an hour on, the host's clock ahead", 10 * time.Second, time.Hour, time.Second, 300 * time.Millisecond, 7 * time.Minute, false, false, true},
+		{"ran in time, found an hour on, the host's clock behind", 10 * time.Second, time.Hour, time.Second, 300 * time.Millisecond, -7 * time.Minute, false, false, true},
+		{"ran a minute after, found later", time.Minute, time.Hour, time.Second, 300 * time.Millisecond, 0, false, false, false},
+		{"ran a minute after, the host's clock ahead", time.Minute, time.Hour, time.Second, 300 * time.Millisecond, 7 * time.Minute, false, false, false},
+		{"ran a minute after, the host's clock behind", time.Minute, time.Hour, time.Second, 300 * time.Millisecond, -7 * time.Minute, false, false, false},
+		{"ran at 27 s, the look begun at 30 s, its log read for 8 s", 27 * time.Second, 30 * time.Second, 8 * time.Second, 300 * time.Millisecond, 0, false, false, false},
+		{"ran at 27 s, the host 8 s to say its time: not known", 27 * time.Second, 30 * time.Second, 0, 8 * time.Second, 0, false, false, false},
+		{"ran in time, the host slow to say its time: not known", 10 * time.Second, time.Hour, 0, 8 * time.Second, 0, false, false, false},
+		{"ran at 22 s, the look begun at 19 s, its log read for 4 s", 22 * time.Second, 19 * time.Second, 4 * time.Second, 300 * time.Millisecond, 0, false, false, false},
+		{"found later, the host does not say", 10 * time.Second, time.Hour, 0, 0, 0, true, false, false},
+		{"found later, its record without a time", 10 * time.Second, time.Hour, 0, 0, 0, false, true, false},
+	} {
+		begun := t0.Add(c.look)
+		cur := begun.Add(c.read) // (its log was read before this is asked)
+		w := &lineWatch{typedAt: t0, log: &lineLog{end: lineRan}}
+		if !c.bare {
+			w.log.at = t0.Add(c.ran + c.skew)
+		}
+		p := lineProbe{clock: func() time.Time { return cur }, hostNow: func() (time.Time, bool) {
+			cur = cur.Add(c.ask)
+			return cur.Add(c.skew - c.ask/2), !c.silent
+		}}
+		if got := lineOurs(p, w, begun); got != c.want {
+			t.Errorf("%s: ours %v, want %v", c.what, got, c.want)
+		}
+	}
+}
