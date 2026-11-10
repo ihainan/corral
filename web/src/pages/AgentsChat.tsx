@@ -1216,8 +1216,11 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   // /model typed in the terminal back to that earlier model would look like
   // the log not having moved yet.)
   const modelNow = convo.meta?.model ?? ''
-  const modelSeen = useRef(modelNow) // (as last read, for an answer that comes after the log has moved on)
-  modelSeen.current = modelNow
+  // (How many times the model read from the log has changed: an answer to a
+  // pick that comes after any change — even one away and back again — is of
+  // a log that has moved on, and marks nothing.)
+  const modelTurns = useRef({ of: modelNow, n: 0 })
+  if (modelTurns.current.of !== modelNow) modelTurns.current = { of: modelNow, n: modelTurns.current.n + 1 }
   useEffect(() => {
     setModels((m) => (m?.picked && m.picked.was !== modelNow ? { ...m, picked: undefined } : m))
   }, [modelNow])
@@ -1245,6 +1248,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     if (!convo.bind || modelBusy) return
     setModelBusy(true)
     const was = convo.meta?.model ?? ''
+    const turns = modelTurns.current.n
     own(api<{ restored?: boolean; unconfirmed?: boolean; name?: string }>('POST', `/api/sessions/${sid}/conversation/model`, { ...pressBody(), model: label, ...(effort ? { effort } : {}) }, { timeoutMs: MODEL_MS }))
       .then((r) => {
         toast(t('convo.modelSet', { m: effort ? `${label} · ${effort}` : label }) + (r.restored ? t('convo.modelRestored') : '') + (r.unconfirmed ? t('convo.modelUnconfirmed') : ''))
@@ -1255,7 +1259,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
         // (name: what its log said it was set to. A row that shows another version — a list of its kin's — is
         // not marked for having been clicked; with no name given, a switch made in its picker, the log alone —
         // as where the log read here has moved on already, before this answer came.)
-        if (!r.unconfirmed) setModels((m) => m && { ...m, picked: r.name && modelSeen.current === was ? { label, was, name: r.name } : undefined, list: m.list && m.list.map((o) => ({ ...o, current: o.label === label })) })
+        if (!r.unconfirmed) setModels((m) => m && { ...m, picked: r.name && modelTurns.current.n === turns ? { label, was, name: r.name } : undefined, list: m.list && m.list.map((o) => ({ ...o, current: o.label === label })) })
       })
       .catch((e) => toast(refusal(e), true))
       .finally(() => setModelBusy(false))
