@@ -59,6 +59,7 @@ import (
 type settleIO struct {
 	read  func() (doc []byte, none bool, err error)
 	write func(was, now []byte) (conflict bool, err error) // only if they are still was
+	stamp func() (time.Time, error)                        // when they were last written, by the host's clock (nil: not told)
 }
 
 type settled int
@@ -73,13 +74,16 @@ const (
 // settleDefault puts the default back as it was (was, absent where had is
 // false) where it is what the line wrote (wrote).
 func settleDefault(sio settleIO, had bool, was, wrote json.RawMessage) (settled, error) {
-	res, _, _, err := settleLook(sio, had, was, wrote)
+	res, _, _, err := settleLook(sio, had, was, wrote, time.Time{})
 	return res, err
 }
 
 // settleLook is settleDefault, with what the default is where it is
-// someone else's (has false: none).
-func settleLook(sio settleIO, had bool, was, wrote json.RawMessage) (res settled, cur json.RawMessage, has bool, err error) {
+// someone else's (has false: none). notAfter (zero: not asked): the
+// settings written later than that, by the host's clock, are someone
+// else's whatever their word — the line wrote them before that, and the
+// same word saved since is not the line's.
+func settleLook(sio settleIO, had bool, was, wrote json.RawMessage, notAfter time.Time) (res settled, cur json.RawMessage, has bool, err error) {
 	for try := 0; try < 3; try++ { // (changed between the read and the write: read again)
 		doc, none, err := sio.read()
 		if err != nil {
@@ -94,6 +98,17 @@ func settleLook(sio settleIO, had bool, was, wrote json.RawMessage) (res settled
 			return settleSame, nil, false, nil
 		case !has || len(wrote) == 0 || !jsonSame(cur, wrote):
 			return settleForeign, cur, has, nil
+		}
+		if !notAfter.IsZero() && sio.stamp != nil {
+			// (Read after the settings were: written between the two, the
+			// write below finds them changed.)
+			at, err := sio.stamp()
+			if err != nil {
+				return settleFailed, nil, false, err
+			}
+			if at.After(notAfter) {
+				return settleForeign, cur, has, nil
+			}
 		}
 		fixed, err := withModel(doc, was, had)
 		if err != nil {
@@ -129,6 +144,18 @@ type lineProbe struct {
 const (
 	lineOwn      = 20 * time.Second
 	lineOwnGrace = 5 * time.Second
+)
+
+// lineStampSlack: Claude Code writes the settings up to 0.3 s before its
+// log's record of the line; their time is told in whole seconds.
+// lineGiveUp: a default that could not be put back is tried for this long
+// after the line was typed, no longer — the person was told when it first
+// failed; what the settings hold much later is less and less the line's
+// to judge, and an account is not held for ever by a host that cannot
+// write.
+const (
+	lineStampSlack = 2 * time.Second
+	lineGiveUp     = 10 * time.Minute
 )
 
 // lineClockSlack: the host's clock is set against this one's only where
@@ -212,8 +239,12 @@ func settleSee(sio settleIO) (cur json.RawMessage, has bool, err error) {
 // another session may have set that word. So:
 //
 //   - lineRan, within lineOwn of being typed (lineOurs): put back where
-//     the default is its word. Final then; where its word is not there
-//     yet, only lineSettleAge after it was typed.
+//     the default is its word and the settings were not written since
+//     the line ran (their time against its record's, both the host's):
+//     written since, the same word is someone else's, saved after ours.
+//     Final then; where its word is not there yet, only lineSettleAge
+//     after it was typed; where it could not be put back, only
+//     lineGiveUp after.
 //   - lineRan later than that: the person's own, sent or answered by
 //     them. Final, the settings not touched.
 //   - lineKept, lineNever, lineGone with its log read whole: it wrote
@@ -268,9 +299,14 @@ func lineConcluded(p lineProbe, sio settleIO, w *lineWatch, now time.Time, waite
 	case end == lineOpen && whole && now.Sub(w.typedAt) > lineOwn+lineOwnGrace:
 		return end, settleSame, true, false, nil
 	case end == lineRan, end == lineGone && dead && !whole:
-		res, _, _, err = settleLook(sio, w.had, w.was, w.wrote)
+		var notAfter time.Time
+		if end == lineRan && !w.log.at.IsZero() {
+			notAfter = w.log.at.Add(lineStampSlack)
+		}
+		res, _, _, err = settleLook(sio, w.had, w.was, w.wrote, notAfter)
 		switch {
 		case res == settleFailed:
+			final = now.Sub(w.typedAt) > lineGiveUp
 		case res == settleSame && end == lineRan && !(w.had && jsonSame(w.was, w.wrote)):
 			final = now.Sub(w.typedAt) >= lineSettleAge
 		default:
@@ -304,6 +340,17 @@ func lineConcluded(p lineProbe, sio settleIO, w *lineWatch, now time.Time, waite
 func settleSSH(ctx context.Context, sess *term.Session, running *sync.WaitGroup) settleIO {
 	return settleIO{
 		read: func() ([]byte, bool, error) { return readSettings(ctx, sess) },
+		stamp: func() (time.Time, error) {
+			out, err := lineExec(ctx, sess, running, settingsStampCommand, nil, 64)
+			if err != nil {
+				return time.Time{}, err
+			}
+			sec, err := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)
+			if err != nil {
+				return time.Time{}, err
+			}
+			return time.Unix(sec, 0), nil
+		},
 		write: func(was, now []byte) (bool, error) {
 			running.Add(1)
 			_, err := sshx.Exec(ctx, sess.Client(), settingsWriteCommand(was, now), 4096, sshx.ExecOptions{Stdin: bytes.NewReader(now), Release: running.Done})
@@ -315,6 +362,11 @@ func settleSSH(ctx context.Context, sess *term.Session, running *sync.WaitGroup)
 		},
 	}
 }
+
+// settingsStampCommand: when the settings were last written (seconds).
+const settingsStampCommand = `f="$HOME/.claude/settings.json"
+if [ -L "$f" ]; then f=$(readlink -f "$f") && [ -n "$f" ] || exit 5; fi
+stat -c %Y "$f" 2>/dev/null || stat -f %m "$f"`
 
 // lineExec runs one of the line's fixed commands on the host.
 func lineExec(ctx context.Context, sess *term.Session, running *sync.WaitGroup, cmd string, stdin io.Reader, limit int) ([]byte, error) {
@@ -573,6 +625,9 @@ func (s *Server) settingsTurn(ctx context.Context, sess *term.Session, account s
 	}
 	if res == settleBack {
 		slog.Warn("model switch: the default an earlier switch left changed; put back", "session", sess.ID)
+	}
+	if res == settleFailed {
+		slog.Error("model switch: the default an earlier switch changed was never put back; given up", "session", sess.ID, "err", err)
 	}
 	if err := s.dropPending(ctx, account); err != nil {
 		// (Over all the same: pendingMem says so, whatever the store still holds.)

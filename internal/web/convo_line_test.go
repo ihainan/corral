@@ -483,11 +483,14 @@ type fakeSettings struct {
 	writeErr error
 	meddle   []string // before each write, the settings become this ("": left)
 	writes   int
+	mtime    time.Time // when they were last written, by the host's clock
+	stampErr error
 }
 
 func (f *fakeSettings) io() settleIO {
 	return settleIO{
-		read: func() ([]byte, bool, error) { return []byte(f.doc), f.none, f.readErr },
+		read:  func() ([]byte, bool, error) { return []byte(f.doc), f.none, f.readErr },
+		stamp: func() (time.Time, error) { return f.mtime, f.stampErr },
 		write: func(was, now []byte) (bool, error) {
 			if len(f.meddle) > 0 {
 				if m := f.meddle[0]; m != "" {
@@ -830,9 +833,9 @@ func TestLineConcludeSequences(t *testing.T) {
 			case "later":
 				w.now = w.now.Add(time.Hour)
 			case "same":
-				w.st.doc, w.theirs, w.owed = `{"model": "haiku"}`, `"haiku"`, false
+				w.st.doc, w.theirs, w.owed, w.st.mtime = `{"model": "haiku"}`, `"haiku"`, false, w.where.clock()
 			case "other":
-				w.st.doc, w.theirs, w.owed = `{"model": "fable"}`, `"fable"`, false
+				w.st.doc, w.theirs, w.owed, w.st.mtime = `{"model": "fable"}`, `"fable"`, false, w.where.clock()
 			case "yes": // answered yes, or the line sent from the box (asking nothing)
 				if w.canRun {
 					w.where.log = append(w.where.log, stamped(lineRecords("sid-1", "c1", "haiku", "Haiku 5.5"), w.where.clock())...)
@@ -841,7 +844,7 @@ func TestLineConcludeSequences(t *testing.T) {
 					} else {
 						w.theirs = `"haiku"` // (the person's own "/model", long after: the default they were told of)
 					}
-					w.st.doc, w.canRun, w.where.rest = `{"model": "haiku"}`, false, true
+					w.st.doc, w.canRun, w.where.rest, w.st.mtime = `{"model": "haiku"}`, false, true, w.where.clock()
 				}
 			case "leave": // its question left, or the box cleared
 				if w.canRun {
@@ -931,6 +934,41 @@ func TestLineOurs(t *testing.T) {
 		}}
 		if got := lineOurs(p, w, begun); got != c.want {
 			t.Errorf("%s: ours %v, want %v", c.what, got, c.want)
+		}
+	}
+}
+
+// A default not put back at once is put back later only where the
+// settings were not written since the line ran: the same word saved by
+// another session an hour on is theirs. And it is not tried for ever.
+func TestLineConcludeRetry(t *testing.T) {
+	t0 := time.Unix(1_800_000_000, 0)
+	host := func(at time.Time) time.Time { return at.Add(7 * time.Minute) } // (the host's clock, ahead)
+	for _, c := range []struct {
+		what     string
+		written  time.Duration // the settings last written, after the line was typed
+		look     time.Duration
+		writeErr error
+		stampErr error
+		res      settled
+		final    bool
+		model    string
+	}{
+		{"written by the line, found an hour on: put back", time.Second, time.Hour, nil, nil, settleBack, true, `"opus"`},
+		{"the same word saved by another session since: theirs", 30 * time.Minute, time.Hour, nil, nil, settleForeign, true, `"haiku"`},
+		{"written a second after its record (their time in whole seconds): still the line's", 2 * time.Second, time.Minute, nil, nil, settleBack, true, `"opus"`},
+		{"when they were written not told: not put back yet", time.Second, time.Minute, nil, errors.New("no stat"), settleFailed, false, `"haiku"`},
+		{"not written back yet: tried again later", time.Second, time.Minute, errors.New("denied"), nil, settleFailed, false, `"haiku"`},
+		{"still not, long after: given up", time.Second, lineGiveUp + time.Second, errors.New("denied"), nil, settleFailed, true, `"haiku"`},
+	} {
+		where := fakeWhere{log: stamped(lineRecords("sid-1", "c1", "haiku", "Haiku 5.5"), host(t0.Add(time.Second)))}
+		now := t0.Add(c.look)
+		where.clock = func() time.Time { return host(now) }
+		st := fakeSettings{doc: `{"model": "haiku"}`, mtime: host(t0.Add(c.written)), writeErr: c.writeErr, stampErr: c.stampErr}
+		w := &lineWatch{had: true, was: rawJSON(`"opus"`), wrote: rawJSON(`"haiku"`), log: &lineLog{sid: "sid-1", arg: "haiku"}, typedAt: t0}
+		end, res, final, _, _ := lineConclude(where.probe(), st.io(), w, now)
+		if end != lineRan || res != c.res || final != c.final || !jsonSame(rawJSON(st.model()), rawJSON(c.model)) {
+			t.Errorf("%s: end %v settled %v final %v, the model %s; want %v %v %s", c.what, end, res, final, st.model(), c.res, c.final, c.model)
 		}
 	}
 }
