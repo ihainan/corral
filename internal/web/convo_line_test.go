@@ -593,12 +593,14 @@ type fakeWhere struct {
 	dead   bool // its process is gone
 	noProc bool // (the host cannot tell)
 	rest   bool // its pane shows it at rest, the box empty
+	moved  bool // its process holds another conversation by now
 }
 
 func (f *fakeWhere) probe() lineProbe {
 	return lineProbe{
 		logFrom: func(off int64) ([]byte, error) { return f.log[min(int(off), len(f.log)):], nil },
 		alive:   func() (bool, bool) { return !f.dead, !f.noProc },
+		moved:   func() bool { return f.moved },
 		atRest:  func() bool { return f.rest },
 	}
 }
@@ -637,6 +639,10 @@ func TestLineConclude(t *testing.T) {
 		{"taken, the same word as before", fakeWhere{log: ran}, `{"model": "haiku"}`, `"haiku"`, time.Second, lineRan, settleSame, true, `"haiku"`, false},
 		{"taken, someone else's there since", fakeWhere{log: ran}, `{"model": "fable"}`, `"opus"`, time.Second, lineRan, settleForeign, true, `"fable"`, false},
 		{"its question left", fakeWhere{log: kept}, `{"model": "opus"}`, `"opus"`, time.Second, lineKept, settleSame, true, `"opus"`, false},
+		{"its question left, the same word set by another session since: theirs, not touched", fakeWhere{log: kept}, `{"model": "haiku"}`, `"opus"`, time.Second, lineKept, settleSame, true, `"haiku"`, false},
+		{"never ran, the same word set by another session since: theirs, not touched", fakeWhere{rest: true}, `{"model": "haiku"}`, `"opus"`, time.Minute, lineNever, settleSame, true, `"haiku"`, false},
+		{"its process holds another conversation by now (/clear): over", fakeWhere{moved: true}, `{"model": "opus"}`, `"opus"`, time.Second, lineGone, settleSame, true, `"opus"`, false},
+		{"another conversation by now, the host cannot tell of its process: not known", fakeWhere{moved: true, noProc: true}, `{"model": "opus"}`, `"opus"`, time.Hour, lineOpen, settleSame, false, `"opus"`, false},
 		{"its process gone", fakeWhere{dead: true}, `{"model": "opus"}`, `"opus"`, time.Second, lineGone, settleSame, true, `"opus"`, false},
 		{"its process gone, its word there", fakeWhere{dead: true}, `{"model": "haiku"}`, `"opus"`, time.Second, lineGone, settleBack, true, `"opus"`, false},
 		{"never ran: at rest, no record of it", fakeWhere{rest: true}, `{"model": "opus"}`, `"opus"`, lineNeverAge, lineNever, settleSame, true, `"opus"`, false},
@@ -646,7 +652,7 @@ func TestLineConclude(t *testing.T) {
 		{"open, its word there, hours on: still kept", fakeWhere{}, `{"model": "haiku"}`, `"opus"`, 9 * time.Hour, lineOpen, settleBack, false, `"opus"`, false},
 		{"open, someone else's there", fakeWhere{}, `{"model": "fable"}`, `"opus"`, time.Minute, lineOpen, settleForeign, false, `"fable"`, true},
 		{"open, taken out by someone else", fakeWhere{}, `{}`, `"opus"`, time.Minute, lineOpen, settleForeign, false, "", true},
-		{"over, the settings not read", fakeWhere{log: kept}, `{"model": `, `"opus"`, time.Minute, lineKept, settleFailed, false, "?", false},
+		{"taken, the settings not read", fakeWhere{log: ran}, `{"model": `, `"opus"`, time.Minute, lineRan, settleFailed, false, "?", false},
 	} {
 		f := c.where
 		f.log = append(append([]byte{}, before...), f.log...)

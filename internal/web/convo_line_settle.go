@@ -108,6 +108,7 @@ func settleLook(sio settleIO, had bool, was, wrote json.RawMessage) (res settled
 type lineProbe struct {
 	logFrom func(off int64) ([]byte, error) // its log from there on (some of it)
 	alive   func() (alive, known bool)      // Claude Code's process is still that one
+	moved   func() bool                     // that process holds another conversation by now (/clear, /resume)
 	atRest  func() bool                     // its pane shows it at rest, the box empty, nothing asked
 }
 
@@ -144,6 +145,13 @@ func lineConclude(p lineProbe, sio settleIO, w *lineWatch, now time.Time) (end l
 	if w.log.end == lineOpen {
 		if alive, known := p.alive(); known && !alive {
 			end = lineGone
+		} else if known && p.moved() {
+			// (Its conversation was left for another in the same process: no
+			// question of the line's can stand open through that, nor the
+			// line sit in the box. What its log said till then was read.)
+			if w.log.read(p.logFrom, &w.off); w.log.end == lineOpen {
+				end = lineGone
+			}
 		} else if len(w.log.cmds) == 0 && now.Sub(w.typedAt) >= lineNeverAge && p.atRest() {
 			// (At rest, and still no record of it once looked for again.)
 			if w.log.read(p.logFrom, &w.off); w.log.end == lineOpen && len(w.log.cmds) == 0 {
@@ -153,6 +161,11 @@ func lineConclude(p lineProbe, sio settleIO, w *lineWatch, now time.Time) (end l
 	}
 	if w.log.end != lineOpen {
 		end = w.log.end
+	}
+	if end == lineNever || end == lineKept {
+		// (It wrote nothing: the default, whatever it is, is not its word —
+		// another session's, if the same. Over, the settings not touched.)
+		return end, settleSame, true, false, nil
 	}
 	res, cur, has, err := settleLook(sio, w.had, w.was, w.wrote)
 	switch {
@@ -197,31 +210,37 @@ func lineExec(ctx context.Context, sess *term.Session, running *sync.WaitGroup, 
 
 // lineAliveCommand: exit 0 where the process pid is still the one started
 // at start (as the gate's front() tells), 3 where it is not, 4 where it
-// cannot be told (no /proc).
+// cannot be told (no /proc). Alive, it prints the id of the conversation
+// Claude Code's session file says it holds (nothing where it says none).
 func lineAliveCommand(pid, start int64) string {
 	script := `[ -r /proc/self/stat ] || exit 4
 stat=$(tr '\n' ' ' <"/proc/$1/stat" 2>/dev/null) || exit 3
 rest=${stat##*) }
-[ "$(printf '%s' "$rest" | cut -d' ' -f20)" = "$2" ] || exit 3`
+[ "$(printf '%s' "$rest" | cut -d' ' -f20)" = "$2" ] || exit 3
+head -c 65536 "$HOME/.claude/sessions/$1.json" 2>/dev/null | tr -d '\n' | grep -o '"sessionId" *: *"[0-9a-f-]*"' | head -n 1 | sed 's/.*"\([0-9a-f-]*\)"$/\1/'
+exit 0`
 	return "sh -c " + sshx.QuoteShell(script) + " corral " + strconv.FormatInt(pid, 10) + " " + strconv.FormatInt(start, 10)
 }
 
 // lineProbeOf: the probe of a line typed where p says, looked at through
 // sess (a session of the same account: the line's own, or another's).
 func (s *Server) lineProbeOf(ctx context.Context, sess *term.Session, p *store.SettingsPending, running *sync.WaitGroup) lineProbe {
+	var holds string // (the conversation its process holds, as alive found it)
 	return lineProbe{
 		logFrom: func(off int64) ([]byte, error) { return s.logFrom(ctx, sess, p.Log, off) },
 		alive: func() (bool, bool) {
-			_, err := lineExec(ctx, sess, running, lineAliveCommand(p.PID, p.Start), nil, 256)
+			out, err := lineExec(ctx, sess, running, lineAliveCommand(p.PID, p.Start), nil, 256)
 			var e *sshx.ExitError
 			switch {
 			case err == nil:
+				holds = strings.TrimSpace(string(out))
 				return true, true
 			case errors.As(err, &e) && e.Status == 3:
 				return false, true
 			}
 			return false, false
 		},
+		moved: func() bool { return holds != "" && holds != p.SID },
 		atRest: func() bool {
 			// (Its screen only where that process is still the one in front in
 			// that pane — the gate's front(), exit 3 where it is not: another
@@ -235,7 +254,7 @@ func (s *Server) lineProbeOf(ctx context.Context, sess *term.Session, p *store.S
 			if strings.TrimSpace(shown) == "" || pickerShows(shown) || lineAsks(shown, "") {
 				return false
 			}
-			return idleInput(shown, func() string {
+			if idleInput(shown, func() string {
 				// (As greyedSuggestion, of the pane kept: by its own mode, which
 				// may not be this session's.)
 				raw, err := lineExec(ctx, sess, running, convoColorScreenCommand(p.Mode, p.Pane, p.Socket), nil, 512<<10)
@@ -243,7 +262,13 @@ func (s *Server) lineProbeOf(ctx context.Context, sess *term.Session, p *store.S
 					return ""
 				}
 				return greyedIn(string(raw))
-			}) == nil
+			}) != nil {
+				return false
+			}
+			// (And still that process in front once the screen was read: the
+			// read waits a moment, in which another's box may have come up.)
+			_, err = lineExec(ctx, sess, running, convoGatedCommand("", p.Mode, p.TmuxName, p.Pane, p.Socket, p.PID, p.Start, p.SID, 0, []string{}, 0), nil, 4096)
+			return err == nil
 		},
 	}
 }
@@ -412,7 +437,7 @@ func (s *Server) settingsTurn(ctx context.Context, sess *term.Session, account s
 			slog.Error("model switch: an earlier switch's default is still not put back", "session", sess.ID, "err", err)
 			return nil, "default_settling", "the default model an earlier switch changed could not be put back yet", false
 		case end == lineOpen:
-			return nil, "default_pending", "an earlier switch's command has not ended (pane " + p.Pane + "): its question may be open in the terminal, or the command still in the input box", false
+			return nil, "default_pending", "an earlier switch's command has not ended (pane " + p.Pane + "): its question may be open in the terminal, or the command still in the input box (or quit that Claude Code)", false
 		}
 		return nil, "default_settling", "an earlier switch is still settling", false
 	}
@@ -461,7 +486,10 @@ func (s *Server) convoModelLine(w http.ResponseWriter, ctx context.Context, sess
 	wrote, _ := json.Marshal(arg)
 	rec := store.SettingsPending{Account: account, OwnerID: sess.OwnerID, HostID: sess.HostID, Had: had, Was: was, Wrote: wrote,
 		Mode: sess.Persistence, TmuxName: sess.TmuxSession, Pane: pane, Socket: socket, PID: pid, Start: start, SID: sid, Log: log, LogOff: off, CreatedAt: time.Now().Unix()}
-	if err := s.store.PutSettingsPending(ctx, rec); err != nil {
+	if err = s.store.PutSettingsPending(ctx, rec); err == nil {
+		pendingMem.Delete(account) // (what the store could not be told of a line before this one: this one's row is there now)
+	}
+	if err != nil {
 		done()
 		release()
 		*reason = "store"
@@ -580,9 +608,9 @@ func (s *Server) convoModelLine(w http.ResponseWriter, ctx context.Context, sess
 				break
 			}
 			time.Sleep(d)
-			if end == lineOpen && held {
-				// (Its question come late, for the model asked for: left, as in
-				// the flow.)
+			if end, res, final, _ = conclude(); !final && end == lineOpen && held {
+				// (Still open by what its log says now: its question come late,
+				// for the model asked for, left, as in the flow.)
 				lctx, lcancel := context.WithTimeout(bg, 8*time.Second)
 				h := host(lctx)
 				if text, digest, err := h.dialog(); err == nil && lineAsks(text, want) {
@@ -590,7 +618,6 @@ func (s *Server) convoModelLine(w http.ResponseWriter, ctx context.Context, sess
 				}
 				lcancel()
 			}
-			end, res, final, _ = conclude()
 			if i >= lineHeld-1 || end != lineOpen {
 				free()
 			}
