@@ -299,7 +299,7 @@ func (s *Server) convoModelLine(w http.ResponseWriter, ctx context.Context, sess
 				// the flow — answered later, the default would change unwatched.)
 				lctx, lcancel := context.WithTimeout(bg, 8*time.Second)
 				h := host(lctx)
-				if text, digest, err := h.dialog(); err == nil && askShows(text, want) {
+				if text, digest, err := h.dialog(); err == nil && lineAsks(text, want) {
 					h.pressOn(digest, "esc")
 				}
 				lcancel()

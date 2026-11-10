@@ -179,6 +179,13 @@ type lineIO struct {
 	sleep   func(time.Duration) error // (an error: given up)
 }
 
+// lineAsks: its question is on the screen, for target ("" any) — in a pane
+// as narrow as they come too: the picker's flow is not gone through where
+// the pane is that narrow, this one is.
+func lineAsks(screen, target string) bool { return askWithin(screen, target, lineAskSpan) }
+
+const lineAskSpan = 16
+
 var errElsewhere = errors.New("it took another model than the one asked for")
 
 const (
@@ -229,7 +236,7 @@ func modelLineFlow(io lineIO, sid, arg, want string, greyed ...func() string) (n
 	}
 	// (Its picker or its question left open by someone: not closed from
 	// here — the picker's own flow does that, and is not this one.)
-	if pickerShows(screen) || askShows(screen, "") {
+	if pickerShows(screen) || lineAsks(screen, "") {
 		return "", lineNotSent, errScreen
 	}
 	if err := idleInput(screen, greyed...); err != nil {
@@ -267,7 +274,7 @@ func modelLineFlow(io lineIO, sid, arg, want string, greyed ...func() string) (n
 	// watching. Whether it was left.
 	leave := func() bool {
 		text, digest, err := io.dialog()
-		return err == nil && askShows(text, "") && io.pressOn(digest, "esc") == nil
+		return err == nil && lineAsks(text, "") && io.pressOn(digest, "esc") == nil
 	}
 	name, ok := wait(lineLogFirst)
 	if !ok {
@@ -278,8 +285,8 @@ func modelLineFlow(io lineIO, sid, arg, want string, greyed ...func() string) (n
 		if err != nil {
 			return "", lineMaybe, errUnsure
 		}
-		if askShows(text, "") {
-			if !askShows(text, want) {
+		if lineAsks(text, "") {
+			if !lineAsks(text, want) {
 				if io.pressOn(digest, "esc") != nil {
 					return "", lineMaybe, errUnsure
 				}

@@ -28,6 +28,7 @@ type fakeLine struct {
 	typeErr error             // what typing gives back…
 	lands   bool              // …the line having reached it all the same
 	moves   int               // presses before which the screen moves (their digest no longer its)
+	narrow  bool              // its question as a narrow pane shows it
 	stuck   bool              // its question stays, whatever is pressed "yes" on it
 	givenUp bool              // sleeps fail: the request is over
 	draft   string
@@ -58,6 +59,10 @@ func (f *fakeLine) screen() string {
 		b.WriteString("✻ Crunching… (12s · esc to interrupt)\n")
 	}
 	switch {
+	case f.asking != "" && f.narrow:
+		// (As a pane of 39 columns shows it: narrow-plain.txt, 2026-11-10.)
+		b.WriteString("▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n   Switch model?\n   Your next response will be slower\n   and use more tokens\n\n   This conversation is cached for\n   the current model. Switching to\n   " +
+			f.asking + " means the full history\n   gets re-read.\n\n   ❯ 1. Yes, switch to " + f.asking + "\n     2. No, go back\n")
 	case f.asking != "":
 		b.WriteString("   Switch model?\n   Your next response will be slower and use more tokens\n\n   ❯ 1. Yes, switch to " + f.asking + "\n     2. No, go back\n")
 	default:
@@ -257,6 +262,7 @@ func TestModelLineFlowSwitches(t *testing.T) {
 		{"its log read in pieces", func(f *fakeLine) { f.chunk = 600 }},
 		{"reads failing first", func(f *fakeLine) { f.failing = 3 }},
 		{"asked first", func(f *fakeLine) { f.history = true }},
+		{"asked first, in a narrow pane", func(f *fakeLine) { f.history, f.narrow = true, true }},
 		{"asked first, its record late", func(f *fakeLine) { f.history, f.lateBy = true, 1500*time.Millisecond }},
 		{"others writing to its log", func(f *fakeLine) {
 			f.hidden = append(lineRecords("sid-2", "z1", "haiku", "Opus 5.5"), lineRecords("sid-1", "z2", "sonnet", "Sonnet 5.5")...)

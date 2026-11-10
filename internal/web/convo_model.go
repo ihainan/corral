@@ -337,7 +337,12 @@ func pickerShows(screen string) bool {
 // ("" any): a line "Switch model?" of its own, then its first choice, where
 // its cursor is, "Yes, switch to <target>". (Words of the thread quoting it
 // are behind a mark: "● Switch model?".)
-func askShows(screen, target string) bool {
+func askShows(screen, target string) bool { return askWithin(screen, target, 6) }
+
+// askWithin is askShows with its choice looked for that many lines under
+// its title: a narrow pane breaks the words between them into more (at 39
+// columns the choice is nine lines under, measured 2026-11-10).
+func askWithin(screen, target string, span int) bool {
 	lines := strings.Split(screen, "\n")
 	for i, l := range lines {
 		if strings.TrimSpace(l) != "Switch model?" {
@@ -346,7 +351,7 @@ func askShows(screen, target string) bool {
 		if !pickerOwns(lines, i+1, len(lines)) {
 			continue
 		}
-		for j := i + 1; j < min(len(lines), i+6); j++ {
+		for j := i + 1; j < min(len(lines), i+span); j++ {
 			t := strings.TrimSpace(lines[j])
 			if !strings.HasPrefix(t, "❯") {
 				continue
