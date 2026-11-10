@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
+	"maps"
 	"regexp"
 	"slices"
 	"strconv"
@@ -89,23 +91,62 @@ func offered(key string, now time.Time) ([]modelOpt, bool) {
 	return slices.Clone(l.opts), len(l.opts) > 0
 }
 
+// lineListMu: what is kept of the lists is changed one at a time — a
+// list forgotten is not put back by a change begun before it was.
+var lineListMu sync.Mutex
+
 // forgetOffered: what was kept under these is not gone by any more.
 func forgetOffered(keys ...string) {
+	lineListMu.Lock()
+	defer lineListMu.Unlock()
 	for _, k := range keys {
 		lineLists.Delete(k)
 	}
 }
 
+// confirmOffered: the process's own picker was just seen to offer to, and
+// took it. Kept as the process's own: what its kin was listed (the page
+// shows that), with to as the one it is on — and, where to is one of
+// lineModels by its name there, to be typed on one line from now on. A
+// list of its kin's says nothing of what this process may be given: a
+// name it does not know, typed on one line, is taken all the same, as a
+// model of the person's own making.
+func confirmOffered(key, kin string, to modelOpt, now time.Time) {
+	lineListMu.Lock()
+	defer lineListMu.Unlock()
+	var l lineOffered
+	if v, found := lineLists.Load(key); found {
+		l = v.(lineOffered)
+		l.names, l.opts = maps.Clone(l.names), slices.Clone(l.opts)
+	} else if v, found := lineLists.Load(kin); found {
+		l = lineOffered{at: v.(lineOffered).at, opts: slices.Clone(v.(lineOffered).opts)}
+	} else {
+		l = lineOffered{at: now, opts: []modelOpt{to}}
+	}
+	if l.names == nil {
+		l.names = map[string]string{}
+	}
+	if _, ok := lineModels[to.Label]; ok {
+		name, _, _ := strings.Cut(to.Desc, " · ")
+		if name = strings.TrimSpace(name); strings.HasPrefix(name, to.Label+" ") && lineVersioned.MatchString(name) {
+			l.names[to.Label] = name
+		}
+	}
+	for i := range l.opts {
+		l.opts[i].Current = l.opts[i].Label == to.Label
+	}
+	lineLists.Store(key, l)
+}
+
 // offeredNow marks label as the one a process is on, in what is kept of
-// its list — or of its kin's, the process's own from then on (a switch
-// from here; one made in the terminal is not seen until its picker is read
-// again).
-func offeredNow(key, kin, label string) {
+// its own list (a switch from here; one made in the terminal is not seen
+// until its picker is read again).
+func offeredNow(key, label string) {
+	lineListMu.Lock()
+	defer lineListMu.Unlock()
 	v, found := lineLists.Load(key)
 	if !found {
-		if v, found = lineLists.Load(kin); !found {
-			return
-		}
+		return
 	}
 	l := v.(lineOffered)
 	opts := slices.Clone(l.opts)
@@ -117,6 +158,38 @@ func offeredNow(key, kin, label string) {
 	if hit {
 		l.opts = opts
 		lineLists.Store(key, l)
+	}
+}
+
+// kinOffered: the list kept for processes like this one — here, or in the
+// store from before this gateway was started.
+func (s *Server) kinOffered(ctx context.Context, kin string, now time.Time) ([]modelOpt, bool) {
+	lineListMu.Lock()
+	defer lineListMu.Unlock()
+	if opts, ok := offered(kin, now); ok {
+		return opts, true
+	}
+	at, rows, found, err := s.store.ModelList(ctx, kin)
+	if err != nil || !found || now.Sub(time.Unix(at, 0)) > lineListFor {
+		return nil, false
+	}
+	var stored []modelOpt
+	if json.Unmarshal(rows, &stored) != nil || len(stored) == 0 {
+		return nil, false
+	}
+	noteOffered(kin, stored, time.Unix(at, 0))
+	return offered(kin, now)
+}
+
+// forgetLists: a switch did not go as the lists kept said — the process's
+// and its kin's are let go, the store's too: the picker is read again.
+func (s *Server) forgetLists(ctx context.Context, key, kin string) {
+	lineListMu.Lock()
+	defer lineListMu.Unlock()
+	lineLists.Delete(key)
+	lineLists.Delete(kin)
+	if err := s.store.DeleteModelList(ctx, kin); err != nil {
+		slog.Warn("model list: not let go in the store", "err", err)
 	}
 }
 

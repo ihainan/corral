@@ -1222,7 +1222,13 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     const on = (convo.meta?.model ?? '').toLowerCase()
     own(api<{ models: ModelOpt[]; kin?: boolean }>('POST', `/api/sessions/${sid}/conversation/models`, pressBody(), { timeoutMs: MODEL_MS }))
       .then((r) => {
-        const list = r.kin && on ? r.models.map((o) => ({ ...o, current: /^[a-z]+$/i.test(o.label) && on.includes(o.label.toLowerCase()) })) : r.models
+        // (Only where one row alone can be meant: a family's name ("Opus")
+        // in the id, and no other row of that family — a variant of it would
+        // be the one, and the id does not say which.)
+        const fam = (l: string) => l.toLowerCase().split(/[^a-z]+/)[0]
+        const hits = r.models.filter((o) => /^[a-z]+$/i.test(o.label) && on.includes(o.label.toLowerCase()))
+        const one = hits.length === 1 && r.models.filter((o) => fam(o.label) === fam(hits[0].label)).length === 1 ? hits[0].label : ''
+        const list = r.kin ? r.models.map((o) => ({ ...o, current: !!one && o.label === one })) : r.models
         setModels((m) => (m?.bind === bind ? { list, bind, at: Date.now() } : m))
       })
       .catch((e) => {

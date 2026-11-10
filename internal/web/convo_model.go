@@ -646,7 +646,7 @@ func modelFlow(step, leave modelStep, target string, greyed ...func() string) (o
 // ended on the host, if one was given up before. target "": the list.
 // A Codex's (codex): codexModelFlow, target with effort; its config.toml,
 // which "s" leaves alone, read before and after only to say if it changed.
-func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *term.Session, pane, socket string, pid, start int64, sid, target string, outcome, reason *string, release func(), codex bool, effort string, log string, via, auth string) {
+func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *term.Session, pane, socket string, pid, start int64, sid, target string, outcome, reason *string, release func(), codex bool, effort string, log string, via, auth string, own bool) {
 	var procKey, kinKey string // (Claude Code's: what is kept of its picker's list, see lineListFor)
 	if !codex {
 		// (Claude Code's settings are one account's: a switch at a time, what
@@ -659,7 +659,7 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 			return
 		}
 		procKey, kinKey = lineListKey(account, pid, start), lineKinKey(account, via, auth)
-		if target == "" {
+		if target == "" && !own {
 			// (Its list as its picker last gave it, where that is kept: at
 			// once, nothing typed, its picker not opened. Of another process
 			// like it, which one this is on is not known: "kin", for the
@@ -668,17 +668,7 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 			opts, mine := offered(procKey, now)
 			kin := false
 			if !mine {
-				opts, kin = offered(kinKey, now)
-				if !kin {
-					// (Kept from before this gateway was started.)
-					if at, rows, found, err := s.store.ModelList(ctx, kinKey); err == nil && found && now.Sub(time.Unix(at, 0)) <= lineListFor {
-						var stored []modelOpt
-						if json.Unmarshal(rows, &stored) == nil && len(stored) > 0 {
-							noteOffered(kinKey, stored, time.Unix(at, 0))
-							opts, kin = offered(kinKey, now)
-						}
-					}
-				}
+				opts, kin = s.kinOffered(ctx, kinKey, now)
 				for i := range opts {
 					opts[i].Current = false
 				}
@@ -691,7 +681,10 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 				// same — after the answer, not before it: the list waits for
 				// nothing. A switch asked for meanwhile waits its moment for it,
 				// as for any other.)
-				if p, perr := s.pendingOf(ctx, account); perr == nil && p != nil {
+				// (Whether there is any, only read here: what is kept of it is
+				// changed with the account's settings in hand, in settingsTurn.)
+				_, inMem := pendingMem.Load(account)
+				if p, perr := s.store.SettingsPendingOf(ctx, account); inMem || perr != nil || p != nil {
 					go func() {
 						bctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
 						defer cancel()
@@ -703,6 +696,25 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 				return
 			}
 		}
+		if _, line := lineModels[target]; line && log != "" && !own {
+			if _, _, ok := lineModelArg(procKey, target, time.Now()); !ok {
+				// (To be typed on one line, and this process's own picker not
+				// yet seen to offer it — the list the page chose from may be
+				// its kin's: its own is read first, as for a list asked for,
+				// with the pane's turn kept here meanwhile.)
+				var o, why string
+				read := make(chan struct{})
+				quiet := &quietWriter{}
+				s.convoModel(quiet, ctx, sess, pane, socket, pid, start, sid, "", &o, &why, func() { close(read) }, false, "", log, via, auth, true)
+				<-read
+				if quiet.status >= 400 {
+					release()
+					*outcome, *reason = o, why
+					quiet.to(w)
+					return
+				}
+			}
+		}
 		done, code, why, ok := s.settingsTurn(ctx, sess, account)
 		if !ok {
 			release()
@@ -711,11 +723,8 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 			return
 		}
 		if target != "" && log != "" {
-			arg, want, ok := lineModelArg(procKey, target, time.Now())
-			if !ok {
-				arg, want, ok = lineModelArg(kinKey, target, time.Now())
-			}
-			if ok {
+			// (Only by what this process's own picker was seen to offer.)
+			if arg, want, ok := lineModelArg(procKey, target, time.Now()); ok {
 				s.convoModelLine(w, ctx, sess, pane, socket, pid, start, sid, target, arg, want, log, account, outcome, reason, release, done, procKey, kinKey)
 				return
 			}
@@ -890,6 +899,14 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 		opts, err = codexModelFlow(codexIO{look, press}, undo, target, effort)
 	} else {
 		opts, err = modelFlow(step, leave, target, func() string { return s.greyedSuggestion(ctx, sess, pane, socket, &running) })
+		// (What is kept of its list, changed while its pane and the account's
+		// settings are still in hand.)
+		switch {
+		case err == nil && target != "" && len(opts) == 1:
+			confirmOffered(procKey, kinKey, opts[0], time.Now())
+		case errors.Is(err, errNoModel):
+			s.forgetLists(context.WithoutCancel(ctx), procKey, kinKey)
+		}
 		if err == nil && target == "" {
 			noteOffered(procKey, opts, time.Now())
 			noteOffered(kinKey, opts, time.Now())
@@ -932,14 +949,48 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 		if target == "" {
 			writeJSON(w, http.StatusOK, map[string]any{"models": opts, "restored": restored, "restore_failed": restoreFailed})
 		} else {
-			if !codex {
-				offeredNow(procKey, kinKey, target)
-			}
 			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "model": target, "restored": restored, "restore_failed": restoreFailed})
 		}
 	default:
 		writeSwitchError(w, err, typed, outcome, reason)
 	}
+}
+
+// quietWriter keeps an answer instead of giving it: a step of a request
+// that is answered by what comes after it, unless the step failed.
+type quietWriter struct {
+	head   http.Header
+	status int
+	body   bytes.Buffer
+}
+
+func (q *quietWriter) Header() http.Header {
+	if q.head == nil {
+		q.head = http.Header{}
+	}
+	return q.head
+}
+
+func (q *quietWriter) WriteHeader(status int) {
+	if q.status == 0 {
+		q.status = status
+	}
+}
+
+func (q *quietWriter) Write(b []byte) (int, error) {
+	if q.status == 0 {
+		q.status = http.StatusOK
+	}
+	return q.body.Write(b)
+}
+
+// to gives w the answer kept.
+func (q *quietWriter) to(w http.ResponseWriter) {
+	for k, v := range q.head {
+		w.Header()[k] = v
+	}
+	w.WriteHeader(q.status)
+	w.Write(q.body.Bytes())
 }
 
 // writeSwitchError answers a switch that failed with err (typed: something

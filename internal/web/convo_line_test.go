@@ -245,7 +245,7 @@ func TestLineModelArg(t *testing.T) {
 	if opts, ok := offered(key, now.Add(time.Hour)); !ok || len(opts) != len(rows) {
 		t.Errorf("its list an hour on: %v %v", opts, ok)
 	}
-	offeredNow(key, "", "Haiku")
+	offeredNow(key, "Haiku")
 	opts, _ := offered(key, now.Add(time.Hour))
 	for _, o := range opts {
 		if o.Current != (o.Label == "Haiku") {
@@ -259,8 +259,30 @@ func TestLineModelArg(t *testing.T) {
 	if _, ok := offered(kin, now); ok || kin == lineKinKey("acct", "", "key") || kin == lineKinKey("acct2", "relay.example.com", "key") {
 		t.Error("a list of others' taken for kin's")
 	}
-	noteOffered(kin, opts, now)
-	forgetOffered(kin)
+	// A process shown its kin's list may be typed to on one line only for
+	// what its own picker was since seen to offer.
+	noteOffered(kin, rows, now)
+	mine := lineListKey("acct", 99, 1)
+	if _, _, ok := lineModelArg(mine, "Haiku", now); ok {
+		t.Error("its kin's list taken for its own")
+	}
+	confirmOffered(mine, kin, modelOpt{Label: "Haiku", Desc: "Haiku 5.5 · Fastest for quick answers"}, now)
+	if arg, name, ok := lineModelArg(mine, "Haiku", now); !ok || arg != "haiku" || name != "Haiku 5.5" {
+		t.Errorf("Haiku, taken through its own picker: %q %q %v", arg, name, ok)
+	}
+	if _, _, ok := lineModelArg(mine, "Sonnet", now); ok {
+		t.Error("Sonnet, only in its kin's list: taken for one of its own")
+	}
+	if got, ok := offered(mine, now); !ok || len(got) != len(rows) {
+		t.Errorf("its list after: %v", got)
+	} else {
+		for _, o := range got {
+			if o.Current != (o.Label == "Haiku") {
+				t.Errorf("the one it is on: %+v", o)
+			}
+		}
+	}
+	forgetOffered(kin, mine)
 	if _, ok := offered(kin, now); ok {
 		t.Error("a list forgotten still kept")
 	}
