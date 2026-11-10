@@ -17,6 +17,7 @@ CREATE TABLE settings_pending (
   wrote      BLOB NOT NULL,    -- what the line leaves there (JSON)
   -- Where the line was typed, to look for its end from another session too:
   mode       TEXT NOT NULL,    -- tmux or herdr
+  tmux_name  TEXT NOT NULL,    -- tmux's session ('' for herdr)
   pane       TEXT NOT NULL,
   socket     TEXT NOT NULL,    -- herdr's ('' for tmux)
   pid        INTEGER NOT NULL, -- Claude Code's process…

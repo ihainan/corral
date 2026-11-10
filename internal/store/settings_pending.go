@@ -16,6 +16,7 @@ type SettingsPending struct {
 	Was       []byte
 	Wrote     []byte
 	Mode      string
+	TmuxName  string
 	Pane      string
 	Socket    string
 	PID       int64
@@ -34,18 +35,18 @@ func (s *Store) PutSettingsPending(ctx context.Context, p SettingsPending) error
 		at = s.unix()
 	}
 	_, err := s.db.ExecContext(ctx, `INSERT OR REPLACE INTO settings_pending
-		(account, owner_id, host_id, had, was, wrote, mode, pane, socket, pid, start, sid, log, log_off, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		p.Account, p.OwnerID, p.HostID, p.Had, nonNil(p.Was), nonNil(p.Wrote), p.Mode, p.Pane, p.Socket, p.PID, p.Start, p.SID, p.Log, p.LogOff, at)
+		(account, owner_id, host_id, had, was, wrote, mode, tmux_name, pane, socket, pid, start, sid, log, log_off, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		p.Account, p.OwnerID, p.HostID, p.Had, nonNil(p.Was), nonNil(p.Wrote), p.Mode, p.TmuxName, p.Pane, p.Socket, p.PID, p.Start, p.SID, p.Log, p.LogOff, at)
 	return err
 }
 
 // SettingsPendingOf gives the account's, or nil when it has none.
 func (s *Store) SettingsPendingOf(ctx context.Context, account string) (*SettingsPending, error) {
 	p := SettingsPending{Account: account}
-	err := s.db.QueryRowContext(ctx, `SELECT owner_id, host_id, had, was, wrote, mode, pane, socket, pid, start, sid, log, log_off, created_at
+	err := s.db.QueryRowContext(ctx, `SELECT owner_id, host_id, had, was, wrote, mode, tmux_name, pane, socket, pid, start, sid, log, log_off, created_at
 		FROM settings_pending WHERE account = ?`, account).
-		Scan(&p.OwnerID, &p.HostID, &p.Had, &p.Was, &p.Wrote, &p.Mode, &p.Pane, &p.Socket, &p.PID, &p.Start, &p.SID, &p.Log, &p.LogOff, &p.CreatedAt)
+		Scan(&p.OwnerID, &p.HostID, &p.Had, &p.Was, &p.Wrote, &p.Mode, &p.TmuxName, &p.Pane, &p.Socket, &p.PID, &p.Start, &p.SID, &p.Log, &p.LogOff, &p.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}

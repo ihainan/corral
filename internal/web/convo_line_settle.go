@@ -135,7 +135,8 @@ const (
 // — nothing more is owed, what was kept of it can go. Not final where it
 // may yet be answered or sent (end lineOpen), where it ran a moment ago
 // and has not written its word, or where the settings could not be read
-// or written. rebased: the default is someone else's while the line is
+// or written — nor, while it is open, for the default having been its
+// word and put back: the settings do not say whose word it was. rebased: the default is someone else's while the line is
 // still open — it is theirs that is to be put back, should the line yet
 // write its word (w says so now, to be kept).
 func lineConclude(p lineProbe, sio settleIO, w *lineWatch, now time.Time) (end lineEnd, res settled, final, rebased bool, err error) {
@@ -156,11 +157,10 @@ func lineConclude(p lineProbe, sio settleIO, w *lineWatch, now time.Time) (end l
 	res, cur, has, err := settleLook(sio, w.had, w.was, w.wrote)
 	switch {
 	case res == settleFailed:
-	case res == settleBack:
-		// (Its word was there: it ran — only its end writes it — and the
-		// default is as it was. This switch has no more say over it.)
-		final = true
 	case end == lineOpen:
+		// (Not over: kept, whatever the default is. Its word there and put
+		// back says nothing of the line — another session may have set the
+		// same word — and the line may yet write it.)
 		if res == settleForeign {
 			w.had, w.was, rebased = has, cur, true
 		}
@@ -223,18 +223,27 @@ func (s *Server) lineProbeOf(ctx context.Context, sess *term.Session, p *store.S
 			return false, false
 		},
 		atRest: func() bool {
-			out, err := lineExec(ctx, sess, running, convoScreenCommand(p.Mode, p.Pane, p.Socket), nil, 512<<10)
+			// (Its screen only where that process is still the one in front in
+			// that pane — the gate's front(), exit 3 where it is not: another
+			// Claude Code started there, the first put aside, shows a box
+			// that is not this line's.)
+			out, err := lineExec(ctx, sess, running, convoGatedCommand("", p.Mode, p.TmuxName, p.Pane, p.Socket, p.PID, p.Start, p.SID, 0, []string{}, pickerLines), nil, 64<<10)
 			if err != nil {
 				return false
 			}
-			shown, _, _ := screenOf(out)
+			shown := string(out)
 			if strings.TrimSpace(shown) == "" || pickerShows(shown) || lineAsks(shown, "") {
 				return false
 			}
-			if p.Mode != sess.Persistence {
-				return idleInput(shown) == nil
-			}
-			return idleInput(shown, func() string { return s.greyedSuggestion(ctx, sess, p.Pane, p.Socket, running) }) == nil
+			return idleInput(shown, func() string {
+				// (As greyedSuggestion, of the pane kept: by its own mode, which
+				// may not be this session's.)
+				raw, err := lineExec(ctx, sess, running, convoColorScreenCommand(p.Mode, p.Pane, p.Socket), nil, 512<<10)
+				if err != nil || claudeOwner(sgr.ReplaceAllString(string(raw), ""), false) != "main" {
+					return ""
+				}
+				return greyedIn(string(raw))
+			}) == nil
 		},
 	}
 }
@@ -251,6 +260,49 @@ func watchOf(p *store.SettingsPending) *lineWatch {
 	return w
 }
 
+// pendingMem: what the store could not be told of an account's line — kept
+// as it is now (the default to put back became someone else's), or let go
+// (nil: over, its row still there). The store's row is then out of date:
+// gone by it, the next switch would put back a default no longer the one
+// to keep, or take a default set since for the line's word.
+var pendingMem sync.Map
+
+func (s *Server) keepPending(ctx context.Context, p store.SettingsPending) error {
+	err := s.store.PutSettingsPending(ctx, p)
+	if err != nil {
+		pendingMem.Store(p.Account, &p)
+	} else {
+		pendingMem.Delete(p.Account)
+	}
+	return err
+}
+
+func (s *Server) dropPending(ctx context.Context, account string) error {
+	err := s.store.DeleteSettingsPending(ctx, account)
+	if err != nil {
+		pendingMem.Store(account, (*store.SettingsPending)(nil))
+	} else {
+		pendingMem.Delete(account)
+	}
+	return err
+}
+
+// pendingOf: what is kept of the account's line, nil when nothing.
+func (s *Server) pendingOf(ctx context.Context, account string) (*store.SettingsPending, error) {
+	v, ok := pendingMem.Load(account)
+	if !ok {
+		return s.store.SettingsPendingOf(ctx, account)
+	}
+	p := v.(*store.SettingsPending)
+	if p == nil {
+		s.dropPending(ctx, account) // (tried again; over all the same)
+		return nil, nil
+	}
+	cp := *p
+	s.keepPending(ctx, cp)
+	return &cp, nil
+}
+
 // settingsBusy: the accounts (settingsAccount) a switch is changing the
 // settings of, or still looking for its line's end.
 var settingsBusy sync.Map
@@ -259,13 +311,19 @@ var settingsBusy sync.Map
 var settingsAccounts sync.Map
 
 // settingsIdentCommand prints what the settings are those of: the machine
-// (its id and its name: a machine's copy has its id), the user, and the
-// settings' file (through a link, the file it names).
-const settingsIdentCommand = `m=$(cat /etc/machine-id 2>/dev/null); h=$(hostname 2>/dev/null || cat /proc/sys/kernel/hostname 2>/dev/null)
+// (its id; its name only where it has none — a name may be changed under
+// what is kept), the user, and the settings' file (through a link, the
+// file it names).
+//
+// Not told apart: machines copied from one another with its id kept, the
+// same user and home on each. Not known to be one: a home shared by two
+// machines. (Neither can be told from what a host says of itself.)
+const settingsIdentCommand = `m=$(cat /etc/machine-id 2>/dev/null)
+[ -n "$m" ] || m=name:$(hostname 2>/dev/null || cat /proc/sys/kernel/hostname 2>/dev/null)
 f="$HOME/.claude/settings.json"
 if [ -L "$f" ]; then f=$(readlink -f "$f") && [ -n "$f" ] || exit 5; fi
-u=$(id -u) && [ -n "$u" ] && [ -n "$m$h" ] || exit 5
-printf '%s\n%s\n%s\n%s\n' "$m" "$h" "$u" "$f"`
+u=$(id -u) && [ -n "$u" ] && [ "$m" != name: ] || exit 5
+printf '%s\n%s\n%s\n' "$m" "$u" "$f"`
 
 // settingsAccount names whose settings a session's are, as its host says:
 // not by the address it is reached by (the same through two jumps is two
@@ -279,11 +337,11 @@ func settingsAccount(ctx context.Context, sess *term.Session) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if strings.Count(string(out), "\n") != 4 {
+	if strings.Count(string(out), "\n") != 3 {
 		return "", errors.New("the host did not say whose settings these are")
 	}
 	sum := sha256.Sum256(out)
-	account := "v1:" + hex.EncodeToString(sum[:20])
+	account := "v2:" + hex.EncodeToString(sum[:20])
 	settingsAccounts.Store(sess.ID, account)
 	return account, nil
 }
@@ -327,7 +385,7 @@ func (s *Server) settingsTurn(ctx context.Context, sess *term.Session, account s
 	}
 	var once sync.Once
 	done = func() { once.Do(func() { settingsBusy.Delete(account) }) }
-	p, err := s.store.SettingsPendingOf(ctx, account)
+	p, err := s.pendingOf(ctx, account)
 	if err != nil {
 		done()
 		return nil, "default_settling", "what an earlier switch left could not be read", false
@@ -343,7 +401,7 @@ func (s *Server) settingsTurn(ctx context.Context, sess *term.Session, account s
 	running.Wait()
 	if rebased {
 		p.Had, p.Was = w.had, w.was
-		if err := s.store.PutSettingsPending(ctx, *p); err != nil {
+		if err := s.keepPending(ctx, *p); err != nil {
 			slog.Error("model switch: a default to put back could not be kept", "session", sess.ID, "err", err)
 		}
 	}
@@ -361,9 +419,9 @@ func (s *Server) settingsTurn(ctx context.Context, sess *term.Session, account s
 	if res == settleBack {
 		slog.Warn("model switch: the default an earlier switch left changed; put back", "session", sess.ID)
 	}
-	if err := s.store.DeleteSettingsPending(ctx, account); err != nil {
-		done()
-		return nil, "default_settling", "what an earlier switch left could not be let go", false
+	if err := s.dropPending(ctx, account); err != nil {
+		// (Over all the same: pendingMem says so, whatever the store still holds.)
+		slog.Error("model switch: a default to put back could not be let go", "session", sess.ID, "err", err)
 	}
 	unflagDefault(account)
 	return done, "", "", true
@@ -402,7 +460,7 @@ func (s *Server) convoModelLine(w http.ResponseWriter, ctx context.Context, sess
 	}
 	wrote, _ := json.Marshal(arg)
 	rec := store.SettingsPending{Account: account, OwnerID: sess.OwnerID, HostID: sess.HostID, Had: had, Was: was, Wrote: wrote,
-		Mode: sess.Persistence, Pane: pane, Socket: socket, PID: pid, Start: start, SID: sid, Log: log, LogOff: off, CreatedAt: time.Now().Unix()}
+		Mode: sess.Persistence, TmuxName: sess.TmuxSession, Pane: pane, Socket: socket, PID: pid, Start: start, SID: sid, Log: log, LogOff: off, CreatedAt: time.Now().Unix()}
 	if err := s.store.PutSettingsPending(ctx, rec); err != nil {
 		done()
 		release()
@@ -456,7 +514,7 @@ func (s *Server) convoModelLine(w http.ResponseWriter, ctx context.Context, sess
 	}
 	// over: nothing more is owed for this line.
 	over := func() {
-		if err := s.store.DeleteSettingsPending(bg, account); err != nil {
+		if err := s.dropPending(bg, account); err != nil {
 			slog.Error("model switch: a default to put back could not be let go", "session", sess.ID, "err", err)
 		}
 		unflagDefault(account)
@@ -482,7 +540,7 @@ func (s *Server) convoModelLine(w http.ResponseWriter, ctx context.Context, sess
 		running.Wait()
 		if rebased {
 			rec.Had, rec.Was = watch.had, watch.was
-			if err := s.store.PutSettingsPending(bg, rec); err != nil {
+			if err := s.keepPending(bg, rec); err != nil {
 				slog.Error("model switch: a default to put back could not be kept", "session", sess.ID, "err", err)
 			}
 			slog.Warn("model switch: the default was changed by someone else while the line is open; theirs is the one to keep", "session", sess.ID)
@@ -505,7 +563,7 @@ func (s *Server) convoModelLine(w http.ResponseWriter, ctx context.Context, sess
 	}
 	// (Not said by its log, and the default was the line's word: it ran.)
 	unconfirmed := errors.Is(err, errUnsure) && res == settleBack
-	go func() {
+	go func(end lineEnd, res settled, final bool) { // (its own: the answer below goes by the first look)
 		held := true
 		free := func() {
 			if held {
@@ -545,7 +603,7 @@ func (s *Server) convoModelLine(w http.ResponseWriter, ctx context.Context, sess
 			slog.Warn("model switch: a line's end or its default is still open; kept for the next switch", "session", sess.ID, "end", int(end), "settled", int(res))
 		}
 		done()
-	}()
+	}(end, res, final)
 	switch {
 	case res == settleFailed:
 		// (Above all else: the person is to know. It is tried again for a while.)

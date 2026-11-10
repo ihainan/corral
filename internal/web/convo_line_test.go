@@ -423,12 +423,22 @@ func TestModelLineFlowUnsure(t *testing.T) {
 // Its question: Enter only for the model asked for and only on the screen
 // read; left with Escape only where it is this line's; never another's.
 func TestModelLineFlowQuestion(t *testing.T) {
-	// For another model, a second after the line: Escape, nothing taken.
+	// A question for another model where ours was looked for (someone left
+	// ours and opened their own before the first look, or the line's word
+	// is another model's by now): not known to be this line's — neither
+	// answered nor left.
 	f := newFakeLine()
 	f.history, f.asksFor = true, "Sonnet 5.5"
 	_, _, _, sent, err := f.run()
-	if !errors.Is(err, errNotTaken) || sent != lineMaybe || strings.Join(f.pressed, ",") != "esc" || f.session != "" {
-		t.Errorf("for another model: %v %v, pressed %q, its model %q", sent, err, f.pressed, f.session)
+	if !errors.Is(err, errUnsure) || sent != lineMaybe || len(f.pressed) != 0 || f.asking != "Sonnet 5.5" || f.session != "" {
+		t.Errorf("for another model: %v %v, pressed %q, asking %q, its model %q", sent, err, f.pressed, f.asking, f.session)
+	}
+	// The same, ours left before it, its log saying so: not taken.
+	f = newFakeLine()
+	f.history, f.asksFor = true, "Sonnet 5.5"
+	f.hidden = lineKeptRecords("sid-1", "c1", "haiku", "Opus 5.5")
+	if _, _, _, _, err = f.run(); !errors.Is(err, errNotTaken) || len(f.pressed) != 0 || f.asking != "Sonnet 5.5" {
+		t.Errorf("another's question, ours left before the first look: %v, pressed %q, asking %q", err, f.pressed, f.asking)
 	}
 	// Someone left it and opened their own, for another model, before
 	// Enter: Enter not pressed, and theirs neither answered nor left. Its
@@ -632,7 +642,8 @@ func TestLineConclude(t *testing.T) {
 		{"never ran: at rest, no record of it", fakeWhere{rest: true}, `{"model": "opus"}`, `"opus"`, lineNeverAge, lineNever, settleSame, true, `"opus"`, false},
 		{"at rest a moment after it was typed: too soon to say", fakeWhere{rest: true}, `{"model": "opus"}`, `"opus"`, time.Second, lineOpen, settleSame, false, `"opus"`, false},
 		{"at rest, its command recorded, no answer", fakeWhere{rest: true, log: cmdOnly}, `{"model": "opus"}`, `"opus"`, time.Hour, lineOpen, settleSame, false, `"opus"`, false},
-		{"open, its word there all the same", fakeWhere{}, `{"model": "haiku"}`, `"opus"`, time.Second, lineOpen, settleBack, true, `"opus"`, false},
+		{"open, its word there (another session's, maybe): put back, and kept", fakeWhere{}, `{"model": "haiku"}`, `"opus"`, time.Second, lineOpen, settleBack, false, `"opus"`, false},
+		{"open, its word there, hours on: still kept", fakeWhere{}, `{"model": "haiku"}`, `"opus"`, 9 * time.Hour, lineOpen, settleBack, false, `"opus"`, false},
 		{"open, someone else's there", fakeWhere{}, `{"model": "fable"}`, `"opus"`, time.Minute, lineOpen, settleForeign, false, `"fable"`, true},
 		{"open, taken out by someone else", fakeWhere{}, `{}`, `"opus"`, time.Minute, lineOpen, settleForeign, false, "", true},
 		{"over, the settings not read", fakeWhere{log: kept}, `{"model": `, `"opus"`, time.Minute, lineKept, settleFailed, false, "?", false},
@@ -665,6 +676,13 @@ func TestLineConcludeLater(t *testing.T) {
 		if end, _, final, _, _ := lineConclude(where.probe(), st.io(), watchOf(&rec), t0.Add(after)); final || end != lineOpen {
 			t.Fatalf("look %d: let go with its question open (end %v)", i, end)
 		}
+	}
+	// Another session sets the very word the line would write: put back —
+	// the settings do not say whose word it is — and still kept, the line
+	// being open.
+	st.doc = `{"model": "haiku"}`
+	if end, res, final, _, _ := lineConclude(where.probe(), st.io(), watchOf(&rec), t0.Add(30*time.Hour+time.Minute)); final || end != lineOpen || res != settleBack || st.model() != `"opus"` {
+		t.Fatalf("the same word set by another with the line open: end %v settled %v final %v, the model %s", end, res, final, st.model())
 	}
 	// Someone sets a default of their own meanwhile: theirs is now the one
 	// to put back.

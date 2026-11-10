@@ -331,14 +331,13 @@ func modelLineFlow(io lineIO, log *lineLog, off *int64, want string, greyed ...f
 		}
 		if lineAsks(text, "") {
 			if !lineAsks(text, want) {
-				// (A second after the line, for another model: the line's word
-				// is no longer that model's. Left.)
-				if io.pressOn(digest, "esc") != nil {
+				// (For another model: not known to be this line's — someone
+				// may have left ours and opened their own. Neither answered
+				// nor left; what the log says by now, taken.)
+				if !wait(0) {
 					return "", lineMaybe, errUnsure
 				}
-				return "", lineMaybe, errNotTaken
-			}
-			if err := io.pressOn(digest, "yes"); err != nil {
+			} else if err := io.pressOn(digest, "yes"); err != nil {
 				// (Not pressed: the screen is another by now. Its question, if it
 				// still stands, left; what its log says by now, taken.)
 				if leave() {
