@@ -148,8 +148,9 @@ const (
 
 // lineStampSlack: Claude Code writes the settings up to 0.3 s before its
 // log's record of the line; their time is told in whole seconds.
-// lineGiveUp: a default that could not be put back is tried for this long
-// after the line was typed, no longer — the person was told when it first
+// lineGiveUp: a default that could not be put back is kept for this long
+// after the line was typed: a look later than that tries once more, and
+// lets go whether or not it could — the person was told when it first
 // failed; what the settings hold much later is less and less the line's
 // to judge, and an account is not held for ever by a host that cannot
 // write.
