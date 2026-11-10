@@ -1046,6 +1046,8 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     if (e.code === 'refused') return t('convo.err.refused')
     if (e.code === 'picker') return t('convo.err.picker')
     if (e.code === 'default_changed') return t('convo.err.defaultChanged')
+    if (e.code === 'default_settling') return t('convo.err.defaultSettling')
+    if (e.code === 'model_elsewhere') return t('convo.err.modelElsewhere')
     if (e.code === 'draft') return t('convo.err.draft')
     if (e.code === 'box_draft') return t('convo.err.boxDraft', { draft: String(e.extra.draft ?? '') })
     if (e.code === 'screen_changed') return t('convo.err.screenChanged')
@@ -1227,9 +1229,9 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   const pickModel = (label: string, effort?: string) => {
     if (!convo.bind || modelBusy) return
     setModelBusy(true)
-    own(api<{ restored?: boolean }>('POST', `/api/sessions/${sid}/conversation/model`, { ...pressBody(), model: label, ...(effort ? { effort } : {}) }, { timeoutMs: MODEL_MS }))
+    own(api<{ restored?: boolean; unconfirmed?: boolean }>('POST', `/api/sessions/${sid}/conversation/model`, { ...pressBody(), model: label, ...(effort ? { effort } : {}) }, { timeoutMs: MODEL_MS }))
       .then((r) => {
-        toast(t('convo.modelSet', { m: effort ? `${label} · ${effort}` : label }) + (r.restored ? t('convo.modelRestored') : ''))
+        toast(t('convo.modelSet', { m: effort ? `${label} · ${effort}` : label }) + (r.restored ? t('convo.modelRestored') : '') + (r.unconfirmed ? t('convo.modelUnconfirmed') : ''))
         setModels((m) => m && { ...m, list: m.list && m.list.map((o) => ({ ...o, current: o.label === label })) })
       })
       .catch((e) => toast(refusal(e), true))
