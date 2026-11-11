@@ -697,7 +697,7 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 				return
 			}
 		}
-		if _, line := lineModels[target]; line && log != "" && !own {
+		if _, line := lineWord(target); line && log != "" && !own {
 			if _, _, ok := lineModelArg(procKey, target, time.Now()); !ok {
 				// (To be typed on one line, and this process's own picker not
 				// yet seen to offer it — the list the page chose from may be

@@ -45,6 +45,41 @@ var lineModels = map[string]string{"Opus": "opus", "Sonnet": "sonnet", "Haiku": 
 
 var lineVersioned = regexp.MustCompile(`^[A-Z][a-z]+ \d+(\.\d+)*$`)
 
+// lineWord: the word "/model" takes for a row of the picker, by the row's
+// name. The picker names its rows in two ways, both measured:
+//
+//	"Opus"      with "Opus 5.5 · Best for…" beside it (an API key's; 2.1.312, 2026-11-10)
+//	"Opus 5.5"  with "For complex work…" beside it     (a subscription's; 2.1.322, 2026-11-11)
+func lineWord(label string) (string, bool) {
+	if w, ok := lineModels[label]; ok {
+		return w, true
+	}
+	if lineVersioned.MatchString(label) {
+		family, _, _ := strings.Cut(label, " ")
+		w, ok := lineModels[family]
+		return w, ok
+	}
+	return "", false
+}
+
+// lineNamed: the word for a row, and the name with its version the log is
+// to say once it is taken ("Haiku 5.5"); ok false where the row does not
+// say a version.
+func lineNamed(o modelOpt) (word, name string, ok bool) {
+	word, ok = lineWord(o.Label)
+	if !ok {
+		return "", "", false
+	}
+	if lineVersioned.MatchString(o.Label) {
+		return word, o.Label, true
+	}
+	name, _, _ = strings.Cut(o.Desc, " · ")
+	if name = strings.TrimSpace(name); strings.HasPrefix(name, o.Label+" ") && lineVersioned.MatchString(name) {
+		return word, name, true
+	}
+	return "", "", false
+}
+
 // lineOffered: what a process's picker listed, when: its rows as they
 // were given to the page, and the name each of lineModels stood for there
 // ("Haiku" → "Haiku 5.5").
@@ -126,11 +161,8 @@ func confirmOffered(key, kin string, to modelOpt, now time.Time) {
 	if l.names == nil {
 		l.names = map[string]string{}
 	}
-	if _, ok := lineModels[to.Label]; ok {
-		name, _, _ := strings.Cut(to.Desc, " · ")
-		if name = strings.TrimSpace(name); strings.HasPrefix(name, to.Label+" ") && lineVersioned.MatchString(name) {
-			l.names[to.Label] = name
-		}
+	if _, name, ok := lineNamed(to); ok {
+		l.names[to.Label] = name
 	}
 	for i := range l.opts {
 		l.opts[i].Current = l.opts[i].Label == to.Label
@@ -197,14 +229,17 @@ func (s *Server) forgetLists(ctx context.Context, key, kin string) {
 // rows, those named as lineModels names them, whose description begins
 // with that name and a version ("Haiku 5.5 · Fastest…").
 func noteOffered(key string, opts []modelOpt, now time.Time) {
-	names := map[string]string{}
+	// (Two rows of one family — "Opus 5.5" and an older Opus, say: the one
+	// word for that family could mean only one of them, and which is not
+	// known here. Neither is typed on a line.)
+	names, rowsOf := map[string]string{}, map[string]int{}
 	for _, o := range opts {
-		if _, ok := lineModels[o.Label]; !ok {
-			continue
+		if word, _, ok := lineNamed(o); ok {
+			rowsOf[word]++
 		}
-		name, _, _ := strings.Cut(o.Desc, " · ")
-		name = strings.TrimSpace(name)
-		if strings.HasPrefix(name, o.Label+" ") && lineVersioned.MatchString(name) {
+	}
+	for _, o := range opts {
+		if word, name, ok := lineNamed(o); ok && rowsOf[word] == 1 {
 			names[o.Label] = name
 		}
 	}
@@ -227,7 +262,8 @@ func lineModelArg(key, label string, now time.Time) (arg, name string, ok bool) 
 	if name, ok = l.names[label]; !ok {
 		return "", "", false
 	}
-	return lineModels[label], name, true
+	arg, _ = lineWord(label)
+	return arg, name, true
 }
 
 var (

@@ -1020,3 +1020,41 @@ func TestLineConcludeRetry(t *testing.T) {
 		}
 	}
 }
+
+// The picker as a subscription's Claude Code draws it (2.1.322, measured on
+// a real one 2026-11-11): its rows are named with their version, and what
+// is beside them says nothing of it.
+func TestLineModelArgVersionedRows(t *testing.T) {
+	screen := "   Select model\n   Switch between Claude models. Your pick becomes the default for new sessions.\n\n     1.  Default (recommended)  Opus 5.5 · Best for everyday, complex tasks\n   ❯ 2.  Opus 5.5 ✔             For complex work and everyday tasks\n     3.  Fable 5.2              For your toughest challenges\n     4.  Sonnet 5.5             Most efficient for simpler tasks\n     5.  Haiku 5.5              Fastest for quick answers\n     ▸   More models\n\n   ● High effort ←/→ to adjust\n\n   Enter to set as default · s to use this session only · Esc to cancel\n"
+	rows := parseModelPicker(screen).offered()
+	if len(rows) != 4 {
+		t.Fatalf("rows read: %+v", rows)
+	}
+	now := time.Now()
+	key := lineListKey("acct-versioned", 1, 1)
+	t.Cleanup(func() { lineLists.Delete(key) })
+	noteOffered(key, rows, now)
+	for label, want := range map[string][2]string{"Opus 5.5": {"opus", "Opus 5.5"}, "Fable 5.2": {"fable", "Fable 5.2"}, "Sonnet 5.5": {"sonnet", "Sonnet 5.5"}, "Haiku 5.5": {"haiku", "Haiku 5.5"}} {
+		arg, name, ok := lineModelArg(key, label, now)
+		if !ok || arg != want[0] || name != want[1] {
+			t.Errorf("%s: %q %q %v, want %q %q", label, arg, name, ok, want[0], want[1])
+		}
+	}
+	// (Two rows of one family: the family's word could be either — neither is typed.)
+	two := append(append([]modelOpt{}, rows...), modelOpt{Label: "Opus 5.1", Desc: "An earlier Opus"})
+	noteOffered(key, two, now)
+	for _, label := range []string{"Opus 5.5", "Opus 5.1"} {
+		if _, _, ok := lineModelArg(key, label, now); ok {
+			t.Errorf("%s: typed on a line with two rows of its family listed", label)
+		}
+	}
+	if _, _, ok := lineModelArg(key, "Sonnet 5.5", now); !ok {
+		t.Error("Sonnet 5.5: not typed on a line though alone of its family")
+	}
+	// (Not a model's name with a version: never typed.)
+	for _, label := range []string{"Default (recommended)", "More models", "opus 5.5", "Gpt 6"} {
+		if _, ok := lineWord(label); ok {
+			t.Errorf("%q has a word", label)
+		}
+	}
+}
