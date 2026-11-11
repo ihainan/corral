@@ -187,16 +187,28 @@ func confirmOffered(key, kin string, to modelOpt, now time.Time) {
 	if l.names == nil {
 		l.names = map[string]string{}
 	}
-	// (Only where it is the one row of its family among those listed, as
-	// for a list read: a row taken in the picker is no less one of two.)
-	rows := l.opts
-	if !slices.ContainsFunc(rows, func(o modelOpt) bool { return o.Label == to.Label }) {
-		rows = append(slices.Clone(rows), to)
-	}
-	if name, ok := lineNames(rows)[to.Label]; ok {
-		l.names[to.Label] = name
+	// (The row taken is one of its rows now, as the picker just showed it —
+	// in place of one of the same name kept from before, whose words may be
+	// of an earlier version.)
+	if i := slices.IndexFunc(l.opts, func(o modelOpt) bool { return o.Label == to.Label }); i >= 0 {
+		l.opts[i] = to
 	} else {
-		delete(l.names, to.Label)
+		l.opts = append(l.opts, to)
+	}
+	// (What may be typed on a line, looked at again with it among them:
+	// the rows this process's own picker was seen to offer — those it had,
+	// and this one — and of them only one that is alone of its family, by
+	// the name it has now. One it had may be one of two since.)
+	allowed := lineNames(l.opts)
+	seen := l.names
+	l.names = map[string]string{}
+	for label := range seen {
+		if name, ok := allowed[label]; ok {
+			l.names[label] = name
+		}
+	}
+	if name, ok := allowed[to.Label]; ok {
+		l.names[to.Label] = name
 	}
 	for i := range l.opts {
 		l.opts[i].Current = l.opts[i].Label == to.Label

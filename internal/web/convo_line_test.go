@@ -1058,6 +1058,23 @@ func TestLineModelArgVersionedRows(t *testing.T) {
 			t.Errorf("%s: typed on a line after one of its family's two rows was taken in the picker", label)
 		}
 	}
+	// (Only "Opus 5.1" known, then "Opus 5.5" taken in the picker: the one known before is one of two now.)
+	noteOffered(key, []modelOpt{{Label: "Opus 5.1", Desc: "An earlier Opus"}}, now)
+	if _, _, ok := lineModelArg(key, "Opus 5.1", now); !ok {
+		t.Fatal("Opus 5.1 alone: not typed on a line")
+	}
+	confirmOffered(key, lineKinKey("acct-versioned", "", ""), modelOpt{Label: "Opus 5.5", Desc: "For complex work"}, now)
+	for _, label := range []string{"Opus 5.5", "Opus 5.1"} {
+		if _, _, ok := lineModelArg(key, label, now); ok {
+			t.Errorf("%s: typed on a line once a second row of its family was taken in the picker", label)
+		}
+	}
+	// (A row of the same name kept with an earlier version beside it: the name to expect is the one just shown.)
+	noteOffered(key, []modelOpt{{Label: "Opus", Desc: "Opus 5.1 · Earlier"}}, now)
+	confirmOffered(key, lineKinKey("acct-versioned", "", ""), modelOpt{Label: "Opus", Desc: "Opus 5.5 · Best for everyday"}, now)
+	if _, name, ok := lineModelArg(key, "Opus", now); !ok || name != "Opus 5.5" {
+		t.Errorf("Opus after its row was shown anew: %q %v, want Opus 5.5", name, ok)
+	}
 	// (A row of the family whose version is not said counts as one of its rows.)
 	noteOffered(key, []modelOpt{{Label: "Opus 5.1", Desc: "An earlier Opus"}, {Label: "Opus", Desc: "For complex work"}}, now)
 	if _, _, ok := lineModelArg(key, "Opus 5.1", now); ok {
