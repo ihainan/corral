@@ -2021,7 +2021,11 @@ function Runs({ meta, active, mode, model, effort, quota, via, auth }: { meta: C
             className="convo-runs-item convo-runs-model is-switch"
             aria-expanded={open === 'model'}
             aria-haspopup="menu"
-            disabled={model.busy}
+            // (Not disabled while busy, as the mode's: a button disabled with the
+            // focus on it loses it — Chrome 156 a frame later, measured on a
+            // real one 2026-11-11 — and the focus leaving closes the menu this
+            // very click opened. What it asks for is refused while busy.)
+            aria-disabled={model.busy || undefined}
             aria-busy={model.busy || undefined}
             title={t(merged ? 'convo.modelEffortSwitch' : 'convo.modelSwitch')}
             onClick={() => {
@@ -2050,12 +2054,13 @@ function Runs({ meta, active, mode, model, effort, quota, via, auth }: { meta: C
             aria-expanded={open === (merged ? 'model' : 'effort')}
             aria-haspopup="menu"
             aria-label={t('convo.effort') + ': ' + effortName(level)}
-            disabled={effort.busy}
+            aria-disabled={effort.busy || undefined} // (not disabled: see the model's chip)
             aria-busy={effort.busy || undefined}
             title={t(merged ? 'convo.modelEffortSwitch' : 'convo.effortSwitch')}
             // (Merged: the one menu, the models read as the model chip reads them.)
             onClick={() => {
               const which = merged ? 'model' : 'effort'
+              if (effort.busy && open !== which) return
               if (open !== which && merged) model!.onOpen()
               setOpen(open === which ? false : which)
             }}
@@ -2146,8 +2151,9 @@ function Runs({ meta, active, mode, model, effort, quota, via, auth }: { meta: C
                     role="menuitemradio"
                     aria-checked={(effort.now || meta.effort) === e}
                     className={'convo-models-effort' + ((effort.now || meta.effort) === e ? ' is-current' : '')}
-                    disabled={effort.busy}
+                    aria-disabled={effort.busy || undefined}
                     onClick={() => {
+                      if (effort.busy) return
                       setOpen(false)
                       effortBtn.current?.focus()
                       effort.onPick(e)
