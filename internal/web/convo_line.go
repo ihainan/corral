@@ -69,7 +69,10 @@ func lineWord(label string) (string, bool) {
 func lineNames(opts []modelOpt) map[string]string {
 	names, rowsOf := map[string]string{}, map[string]int{}
 	for _, o := range opts {
-		if word, ok := lineWord(o.Label); ok {
+		// (Any row of the family, whether or not it could itself be typed:
+		// "Opus 5.5 (1M context)" beside "Opus 5.5" makes two.)
+		family, _, _ := strings.Cut(o.Label, " ")
+		if word, ok := lineModels[family]; ok {
 			rowsOf[word]++
 		}
 	}

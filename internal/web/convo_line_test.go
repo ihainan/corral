@@ -1075,6 +1075,20 @@ func TestLineModelArgVersionedRows(t *testing.T) {
 	if _, name, ok := lineModelArg(key, "Opus", now); !ok || name != "Opus 5.5" {
 		t.Errorf("Opus after its row was shown anew: %q %v, want Opus 5.5", name, ok)
 	}
+	// (A variant of the same model listed beside it is a second row of the family.)
+	for _, other := range []string{"Opus 5.5 (1M context)", "Opus (1M context)", "Opus 5.5 [1m]"} {
+		noteOffered(key, []modelOpt{{Label: "Opus 5.5", Desc: "For complex work"}, {Label: other, Desc: "For long sessions"}, {Label: "Sonnet 5.5", Desc: "Efficient"}}, now)
+		if _, _, ok := lineModelArg(key, "Opus 5.5", now); ok {
+			t.Errorf("Opus 5.5: typed on a line with %q listed beside it", other)
+		}
+		if _, _, ok := lineModelArg(key, "Sonnet 5.5", now); !ok {
+			t.Errorf("Sonnet 5.5: not typed on a line with %q listed (another family's)", other)
+		}
+		confirmOffered(key, lineKinKey("acct-versioned", "", ""), modelOpt{Label: other, Desc: "For long sessions"}, now)
+		if _, _, ok := lineModelArg(key, "Opus 5.5", now); ok {
+			t.Errorf("Opus 5.5: typed on a line after %q was taken in the picker", other)
+		}
+	}
 	// (A row of the family whose version is not said counts as one of its rows.)
 	noteOffered(key, []modelOpt{{Label: "Opus 5.1", Desc: "An earlier Opus"}, {Label: "Opus", Desc: "For complex work"}}, now)
 	if _, _, ok := lineModelArg(key, "Opus 5.1", now); ok {
