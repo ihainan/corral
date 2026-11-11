@@ -2029,6 +2029,8 @@ function Runs({ meta, active, mode, model, effort, quota, via, auth }: { meta: C
             aria-busy={model.busy || undefined}
             title={t(merged ? 'convo.modelEffortSwitch' : 'convo.modelSwitch')}
             onClick={() => {
+              // (Busy with a switch: not opened — what was picked from it would be let fall. One open may be closed.)
+              if (model.busy && open !== 'model') return
               if (open !== 'model') model.onOpen()
               setOpen(open === 'model' ? false : 'model')
             }}
@@ -2155,7 +2157,7 @@ function Runs({ meta, active, mode, model, effort, quota, via, auth }: { meta: C
                     onClick={() => {
                       if (effort.busy) return
                       setOpen(false)
-                      effortBtn.current?.focus()
+                      ;(effortBtn.current ?? modelBtn.current)?.focus() // (merged: the one chip is the model's)
                       effort.onPick(e)
                     }}
                   >

@@ -561,7 +561,7 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 /* (Those that switch: a thin chip, so they read as something to press; the branch stays plain words.) */
 @media (pointer: fine) { .convo-runs-item.is-switch, .convo-runs-ctx { box-shadow: inset 0 0 0 1px var(--term-line); border-radius: 999px; padding: 1px 9px; } }
 .convo-runs-item.is-switch svg { flex: none; opacity: 0.7; }
-.convo-runs-item.is-switch:hover:not(:disabled), .convo-runs-item.is-switch[aria-expanded='true'] { background: var(--term-hover); color: var(--term-fg); }
+.convo-runs-item.is-switch:hover:not(:disabled):not([aria-disabled='true']), .convo-runs-item.is-switch[aria-expanded='true'] { background: var(--term-hover); color: var(--term-fg); }
 .convo-runs-item.is-switch:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: 1px; }
 .convo-runs-item.is-switch:disabled, .convo-runs-item.is-switch[aria-disabled='true'] { cursor: progress; }
 /* The models to switch to: as the picker lists them, the session's ticked */
@@ -1669,7 +1669,7 @@ button.convo-running-what:hover { color: var(--term-fg); text-decoration-color: 
 }
 /* What the session runs with, on a touch screen: pressed, shaded as high as the line, not to the screen's edge */
 @media (pointer: coarse) {
-  .convo-runs-item.is-switch:hover:not(:disabled), .convo-runs-item.is-switch[aria-expanded='true'], .convo-runs-ctx:hover, .convo-runs-ctx[aria-expanded='true'] {
+  .convo-runs-item.is-switch:hover:not(:disabled):not([aria-disabled='true']), .convo-runs-item.is-switch[aria-expanded='true'], .convo-runs-ctx:hover, .convo-runs-ctx[aria-expanded='true'] {
     background: linear-gradient(var(--term-hover), var(--term-hover)) center / 100% 24px no-repeat;
   }
 }
