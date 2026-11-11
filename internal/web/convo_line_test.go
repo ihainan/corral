@@ -1107,3 +1107,20 @@ func TestLineModelArgVersionedRows(t *testing.T) {
 		}
 	}
 }
+
+func TestNoteModelFrontLetsGoOfOld(t *testing.T) {
+	now := time.Now()
+	old, fresh, added := modelFrontKey("zz-g", "p", 1, 1, "s"), modelFrontKey("zz-g", "p", 2, 2, "s"), modelFrontKey("zz-g", "p", 3, 3, "s")
+	t.Cleanup(func() { modelFronts.Delete(old); modelFronts.Delete(fresh); modelFronts.Delete(added) })
+	modelFronts.Store(old, modelFront{at: now.Add(-lineListFor - time.Minute)})
+	modelFronts.Store(fresh, modelFront{at: now.Add(-time.Hour)})
+	noteModelFront(added, modelFront{via: "v", auth: "a", at: now})
+	if _, ok := modelFronts.Load(old); ok {
+		t.Error("one kept too long ago is still kept")
+	}
+	for _, k := range []string{fresh, added} {
+		if _, ok := modelFronts.Load(k); !ok {
+			t.Errorf("%q let go of", k)
+		}
+	}
+}

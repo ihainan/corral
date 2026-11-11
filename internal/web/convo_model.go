@@ -990,6 +990,19 @@ type modelFront struct {
 	at        time.Time
 }
 
+// noteModelFront keeps f, and lets go of those kept too long ago: of a
+// process gone, a conversation cleared or a session ended, nothing asks
+// again, and they would stay for as long as the gateway runs.
+func noteModelFront(key string, f modelFront) {
+	modelFronts.Range(func(k, v any) bool {
+		if f.at.Sub(v.(modelFront).at) > lineListFor {
+			modelFronts.Delete(k)
+		}
+		return true
+	})
+	modelFronts.Store(key, f)
+}
+
 func modelFrontKey(gateway, pane string, pid, start int64, session string) string {
 	return gateway + "\x00" + pane + "\x00" + strconv.FormatInt(pid, 10) + "\x00" + strconv.FormatInt(start, 10) + "\x00" + session
 }

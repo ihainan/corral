@@ -3521,7 +3521,7 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		release := turn
 		turn = func() {} // (convoModel gives it back, once its steps have ended on the host)
 		if front.agent != "codex" {
-			modelFronts.Store(modelFrontKey(sess.ID, b.Pane, b.PID, b.Start, b.Session), modelFront{via: front.ep, auth: front.auth, at: time.Now()})
+			noteModelFront(modelFrontKey(sess.ID, b.Pane, b.PID, b.Start, b.Session), modelFront{via: front.ep, auth: front.auth, at: time.Now()})
 		}
 		s.convoModel(w, ctx, sess, b.Pane, socket, b.PID, b.Start, b.Session, b.Model, &outcome, &reason, release, front.agent == "codex", b.Effort, front.log, front.ep, front.auth, false)
 		return
