@@ -3415,6 +3415,12 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		}
 		answer = lock
 	}
+	// (A list asked for of a process found here before, and kept: answered
+	// with nothing asked of the host — neither its pane's turn nor the scan
+	// of its processes. Nothing is typed for it.)
+	if what == "models" && s.keptModelsOf(w, ctx, sess, b.Pane, b.PID, b.Start, b.Session, &outcome, &reason) {
+		return
+	}
 	turn, ok := convoSending.take(ctx, convoTurnKey(sess.ID, b.Pane))
 	if !ok {
 		reason = "busy"
@@ -3514,6 +3520,9 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	if what == "models" || what == "model" {
 		release := turn
 		turn = func() {} // (convoModel gives it back, once its steps have ended on the host)
+		if front.agent != "codex" {
+			modelFronts.Store(modelFrontKey(sess.ID, b.Pane, b.PID, b.Start, b.Session), modelFront{via: front.ep, auth: front.auth, at: time.Now()})
+		}
 		s.convoModel(w, ctx, sess, b.Pane, socket, b.PID, b.Start, b.Session, b.Model, &outcome, &reason, release, front.agent == "codex", b.Effort, front.log, front.ep, front.auth, false)
 		return
 	}

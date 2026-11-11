@@ -660,40 +660,7 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 		}
 		procKey, kinKey = lineListKey(account, pid, start), lineKinKey(account, via, auth)
 		if target == "" && !own {
-			// (Its list as its picker last gave it, where that is kept: at
-			// once, nothing typed, its picker not opened. Which of them it
-			// is on is not said with it — a /model typed in its terminal
-			// since would not be known here: the page marks that by the
-			// conversation's own log, which says each switch as it is made.)
-			now := time.Now()
-			opts, mine := offered(procKey, now)
-			kin := false
-			if !mine {
-				opts, kin = s.kinOffered(ctx, kinKey, now)
-			}
-			for i := range opts {
-				opts[i].Current = false
-			}
-			if mine || kin {
-				release()
-				*outcome, *reason = "kept", "list_kept"
-				writeJSON(w, http.StatusOK, map[string]any{"models": opts, "kept": true, "kin": !mine})
-				// (What an earlier switch left to settle is looked at all the
-				// same — after the answer, not before it: the list waits for
-				// nothing. A switch asked for meanwhile waits its moment for it,
-				// as for any other.)
-				// (Whether there is any, only read here: what is kept of it is
-				// changed with the account's settings in hand, in settingsTurn.)
-				_, inMem := pendingMem.Load(account)
-				if p, perr := s.store.SettingsPendingOf(ctx, account); inMem || perr != nil || p != nil {
-					go func() {
-						bctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
-						defer cancel()
-						if done, _, _, ok := s.settingsTurn(bctx, sess, account); ok {
-							done()
-						}
-					}()
-				}
+			if s.keptModels(w, ctx, sess, account, procKey, kinKey, outcome, reason, release) {
 				return
 			}
 		}
@@ -964,6 +931,89 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 	default:
 		writeSwitchError(w, err, typed, outcome, reason)
 	}
+}
+
+// keptModels answers a list asked for with what is kept of it — the
+// process's own picker's, or that of another process like it — at once,
+// nothing typed, its picker not opened; false where none is kept. Which of
+// them it is on is not said with it — a /model typed in its terminal since
+// would not be known here: the page marks that by the conversation's own
+// log, which says each switch as it is made. free gives the pane's turn
+// back, where one is held.
+func (s *Server) keptModels(w http.ResponseWriter, ctx context.Context, sess *term.Session, account, procKey, kinKey string, outcome, reason *string, free func()) bool {
+	now := time.Now()
+	opts, mine := offered(procKey, now)
+	kin := false
+	if !mine {
+		opts, kin = s.kinOffered(ctx, kinKey, now)
+	}
+	if !mine && !kin {
+		return false
+	}
+	for i := range opts {
+		opts[i].Current = false
+	}
+	free()
+	*outcome, *reason = "kept", "list_kept"
+	writeJSON(w, http.StatusOK, map[string]any{"models": opts, "kept": true, "kin": !mine})
+	// (What an earlier switch left to settle is looked at all the same —
+	// after the answer, not before it: the list waits for nothing. A switch
+	// asked for meanwhile waits its moment for it, as for any other.)
+	// (Whether there is any, only read here: what is kept of it is changed
+	// with the account's settings in hand, in settingsTurn.)
+	_, inMem := pendingMem.Load(account)
+	if p, perr := s.store.SettingsPendingOf(ctx, account); inMem || perr != nil || p != nil {
+		go func() {
+			bctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
+			defer cancel()
+			if done, _, _, ok := s.settingsTurn(bctx, sess, account); ok {
+				done()
+			}
+		}()
+	}
+	return true
+}
+
+// modelFronts: for a process a list or a switch was asked of — found in
+// its pane then, by a scan of the host's processes — where its requests go
+// and how it signs in, which say whose list it shares (lineKinKey). A
+// process is the same one for as long as it lives (its pid and start), and
+// those do not change under it: a list asked for again is answered from
+// what is kept without the scan.
+//
+// Measured on a host with 46 Claude Codes running (2026-11-11): the scan
+// takes 2.1–2.3 s, and was all of what a kept list took to answer.
+var modelFronts sync.Map
+
+type modelFront struct {
+	via, auth string
+	at        time.Time
+}
+
+func modelFrontKey(gateway, pane string, pid, start int64, session string) string {
+	return gateway + "\x00" + pane + "\x00" + strconv.FormatInt(pid, 10) + "\x00" + strconv.FormatInt(start, 10) + "\x00" + session
+}
+
+// keptModelsOf: the list asked for of a process already found once,
+// answered from what is kept with nothing asked of the host; false where
+// that cannot be (not found before, the account not known yet, nothing
+// kept): the request goes its whole way then.
+func (s *Server) keptModelsOf(w http.ResponseWriter, ctx context.Context, sess *term.Session, pane string, pid, start int64, session string, outcome, reason *string) bool {
+	v, ok := modelFronts.Load(modelFrontKey(sess.ID, pane, pid, start, session))
+	if !ok {
+		return false
+	}
+	f := v.(modelFront)
+	if time.Since(f.at) > lineListFor {
+		modelFronts.Delete(modelFrontKey(sess.ID, pane, pid, start, session))
+		return false
+	}
+	a, ok := settingsAccounts.Load(sess.ID)
+	if !ok {
+		return false
+	}
+	account := a.(string)
+	return s.keptModels(w, ctx, sess, account, lineListKey(account, pid, start), lineKinKey(account, f.via, f.auth), outcome, reason, func() {})
 }
 
 // quietWriter keeps an answer instead of giving it: a step of a request
