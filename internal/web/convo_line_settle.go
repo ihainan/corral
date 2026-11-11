@@ -777,7 +777,7 @@ func (s *Server) convoModelLine(w http.ResponseWriter, ctx context.Context, sess
 	end, res, final, _ := conclude()
 	// (How it ended, found by now where the flow had not: its log's word.)
 	if err != nil && end == lineRan {
-		if name, err = watch.log.name, nil; name != want {
+		if name, err = watch.log.name, nil; !lineSame(name, want) {
 			err = errElsewhere
 		}
 	}

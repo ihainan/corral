@@ -62,6 +62,32 @@ func lineWord(label string) (string, bool) {
 	return "", false
 }
 
+// lineNames: of the rows listed, those that may be typed on a line, each
+// with the name the log is to say. Two rows of one family — "Opus 5.5" and
+// an older Opus, or one whose version is not said: the family's one word
+// could mean only one of them, and which is not known here. Neither is.
+func lineNames(opts []modelOpt) map[string]string {
+	names, rowsOf := map[string]string{}, map[string]int{}
+	for _, o := range opts {
+		if word, ok := lineWord(o.Label); ok {
+			rowsOf[word]++
+		}
+	}
+	for _, o := range opts {
+		if word, name, ok := lineNamed(o); ok && rowsOf[word] == 1 {
+			names[o.Label] = name
+		}
+	}
+	return names
+}
+
+// lineSame: the name the log said is the one expected — as it says it,
+// or with the mark it puts after the account's default ("Opus 5.5
+// (default)"). The version is always compared.
+func lineSame(said, want string) bool {
+	return strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(said), "(default)")) == want
+}
+
 // lineNamed: the word for a row, and the name with its version the log is
 // to say once it is taken ("Haiku 5.5"); ok false where the row does not
 // say a version.
@@ -161,8 +187,16 @@ func confirmOffered(key, kin string, to modelOpt, now time.Time) {
 	if l.names == nil {
 		l.names = map[string]string{}
 	}
-	if _, name, ok := lineNamed(to); ok {
+	// (Only where it is the one row of its family among those listed, as
+	// for a list read: a row taken in the picker is no less one of two.)
+	rows := l.opts
+	if !slices.ContainsFunc(rows, func(o modelOpt) bool { return o.Label == to.Label }) {
+		rows = append(slices.Clone(rows), to)
+	}
+	if name, ok := lineNames(rows)[to.Label]; ok {
 		l.names[to.Label] = name
+	} else {
+		delete(l.names, to.Label)
 	}
 	for i := range l.opts {
 		l.opts[i].Current = l.opts[i].Label == to.Label
@@ -229,20 +263,7 @@ func (s *Server) forgetLists(ctx context.Context, key, kin string) {
 // rows, those named as lineModels names them, whose description begins
 // with that name and a version ("Haiku 5.5 · Fastest…").
 func noteOffered(key string, opts []modelOpt, now time.Time) {
-	// (Two rows of one family — "Opus 5.5" and an older Opus, say: the one
-	// word for that family could mean only one of them, and which is not
-	// known here. Neither is typed on a line.)
-	names, rowsOf := map[string]string{}, map[string]int{}
-	for _, o := range opts {
-		if word, _, ok := lineNamed(o); ok {
-			rowsOf[word]++
-		}
-	}
-	for _, o := range opts {
-		if word, name, ok := lineNamed(o); ok && rowsOf[word] == 1 {
-			names[o.Label] = name
-		}
-	}
+	names := lineNames(opts)
 	lineLists.Store(key, lineOffered{at: now, names: names, opts: slices.Clone(opts)})
 }
 
@@ -539,7 +560,7 @@ func modelLineFlow(io lineIO, log *lineLog, off *int64, want string, greyed ...f
 	switch {
 	case log.end == lineKept:
 		return "", lineMaybe, errNotTaken
-	case log.name != want:
+	case !lineSame(log.name, want):
 		return log.name, lineMaybe, errElsewhere
 	}
 	return log.name, lineMaybe, nil

@@ -1051,6 +1051,24 @@ func TestLineModelArgVersionedRows(t *testing.T) {
 	if _, _, ok := lineModelArg(key, "Sonnet 5.5", now); !ok {
 		t.Error("Sonnet 5.5: not typed on a line though alone of its family")
 	}
+	// (One of the two taken in the picker itself: still one of two.)
+	confirmOffered(key, lineKinKey("acct-versioned", "", ""), modelOpt{Label: "Opus 5.1", Desc: "An earlier Opus"}, now)
+	for _, label := range []string{"Opus 5.5", "Opus 5.1"} {
+		if _, _, ok := lineModelArg(key, label, now); ok {
+			t.Errorf("%s: typed on a line after one of its family's two rows was taken in the picker", label)
+		}
+	}
+	// (A row of the family whose version is not said counts as one of its rows.)
+	noteOffered(key, []modelOpt{{Label: "Opus 5.1", Desc: "An earlier Opus"}, {Label: "Opus", Desc: "For complex work"}}, now)
+	if _, _, ok := lineModelArg(key, "Opus 5.1", now); ok {
+		t.Error("Opus 5.1: typed on a line with another Opus row, of no version said, listed")
+	}
+	// (The log's mark of the account's default is not another model; another version is.)
+	for said, same := range map[string]bool{"Opus 5.5": true, "Opus 5.5 (default)": true, "Opus 5.1": false, "Opus 5.1 (default)": false, "Sonnet 5.5": false} {
+		if lineSame(said, "Opus 5.5") != same {
+			t.Errorf("lineSame(%q, Opus 5.5) = %v", said, !same)
+		}
+	}
 	// (Not a model's name with a version: never typed.)
 	for _, label := range []string{"Default (recommended)", "More models", "opus 5.5", "Gpt 6"} {
 		if _, ok := lineWord(label); ok {
