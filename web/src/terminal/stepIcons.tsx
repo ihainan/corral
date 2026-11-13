@@ -73,10 +73,10 @@ export const ThinkIcon = Brain
 export const WorkIcon = Activity
 
 // A call's mark. A search of the web is the web's (its verb is a search of
-// the code's: they are counted together); what was typed into a command
-// still running, a keyboard.
+// the code's: they are counted together); keys or words put to a command
+// still running, a keyboard — a look at what it printed, an eye.
 export function stepIcon(tool: ConvoTool): LucideIcon {
-  if (tool.stdin) return Keyboard
+  if (tool.stdin) return tool.stdin.keys?.length || tool.stdin.chars ? Keyboard : Eye
   if (tool.name === 'WebSearch') return Globe
   const v = verbOf(tool.name)
   return v ? VERB_ICON[v] : Wrench

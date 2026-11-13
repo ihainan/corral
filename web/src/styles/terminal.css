@@ -803,6 +803,8 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
   -webkit-background-clip: text; background-clip: text; color: transparent; animation: convo-shimmer 2.2s steps(30) infinite; animation-play-state: paused;
 }
 .convo-shimmer[data-run] { animation-play-state: running; }
+/* (A tab of the page sent to the back is hidden, not out of view: no observer says so.) */
+.term-root.inactive .convo-shimmer { animation-play-state: paused !important; }
 @keyframes convo-shimmer { 0% { background-position: 100% 0; } 75%, 100% { background-position: 0% 0; } }
 /* (Less motion asked for: no band moving, the words dim and come back in place.) */
 @keyframes convo-pulse { from { opacity: 1; } to { opacity: 0.45; } }

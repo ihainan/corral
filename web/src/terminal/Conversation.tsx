@@ -4280,7 +4280,7 @@ function ToolRow({ tool, onCopy, live }: { tool: ConvoTool; onCopy: (s: string) 
   const cat = category(tool.name)
   const StepMark = stepIcon(tool)
   // (A command shown by what it is for, as Claude Code said it.)
-  const told = !tool.stdin && v === 'cmd' && !!tool.title && obj.text === tool.title
+  const told = !tool.stdin && v === 'cmd' && !!tool.title?.trim() && obj.text === tool.title
   const isEdit = !!tool.patch || !!tool.same || tool.old !== undefined || tool.new !== undefined
   const code = exitCode(tool)
   // What the line does not show of what it acted on: a command of more
