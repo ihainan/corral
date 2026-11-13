@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
-import { ChevronRight, KeySquare, MoreHorizontal, ScrollText, Search, Send, Shield, Smartphone, UserCheck, UserPlus, UserRound, UserX } from 'lucide-react'
+import { ChevronRight, KeySquare, MoreHorizontal, ScrollText, Search, Send, Shield, Smartphone, UserCheck, UserPlus, UserX } from 'lucide-react'
 import { api, ApiError, errorText, type AdminUser, type AuditEntry } from '../api'
 import { t } from '../i18n'
 import { PhoneBack, useSession } from '../app'
@@ -61,7 +61,7 @@ export function AdminUsersPage() {
           <UserPlus size={16} />
           {t('admin.create')}
         </button>
-        <button className="btn btn-primary" onClick={() => setDialog(<InviteDialog onClose={() => setDialog(null)} />)}>
+        <button className="btn" onClick={() => setDialog(<InviteDialog onClose={() => setDialog(null)} />)}>
           <Send size={16} />
           {t('admin.invite')}
         </button>
@@ -95,18 +95,17 @@ export function AdminUsersPage() {
         <ul className="rows">
           {shownUsers.map((u) => (
             <li className="row" key={u.id}>
-              <div className="row-main">
-                <UserRound className="row-icon" size={18} strokeWidth={1.75} />
+              <div className="row-main no-icon">
                 <span className="row-title">
                   {u.display_name || u.username}
                   {u.id === me?.id && <span className="you">{t('admin.you')}</span>}
                 </span>
-                <span className="row-meta">{u.role === 'admin' ? t('admin.roleAdmin') : t('admin.roleMember')}</span>
+                {u.role === 'admin' && <span className="row-meta">{t('admin.roleAdmin')}</span>}
                 {(() => {
                   // The user name again only when the title is another name;
                   // every row with a second line, so rows are one height (ux1101 PG-38).
                   const parts: React.ReactNode[] = []
-                  if (u.display_name && u.display_name !== u.username) parts.push(<span key="u" className="mono">{u.username}</span>)
+                  if (u.display_name && u.display_name !== u.username) parts.push(u.username)
                   if (u.disabled) parts.push(<span key="d" className="state-danger">{t('admin.disabled')}</span>)
                   if (u.open_sessions > 0) parts.push(t('admin.openSessions', { n: u.open_sessions }))
                   if (u.totp) parts.push(t('admin.twoStep'))

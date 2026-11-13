@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react'
-import { ArrowLeft, ChevronRight, FileKey, KeyRound } from 'lucide-react'
+import { ChevronLeft, ChevronRight, FileKey, KeyRound } from 'lucide-react'
 import { api, ApiError, errorText, type Host, type KeyCred } from '../api'
 import { hasKey, t } from '../i18n'
 import { linkHandler, navigate } from '../router'
@@ -182,7 +182,7 @@ export function HostEditPage({ id }: { id?: number }) {
     <main className="page page-form">
       <div className="page-head">
         <a className="icon-btn" href="/" onClick={linkHandler('/')} aria-label={t('common.back')}>
-          <ArrowLeft size={20} />
+          <ChevronLeft size={20} />
         </a>
         <h1>{editing ? t('host.editTitle') : t('host.newTitle')}</h1>
       </div>

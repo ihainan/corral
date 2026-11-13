@@ -43,14 +43,14 @@ export function KeysPage() {
               <Import size={16} />
               {t('keys.import')}
             </button>
-            <button className="btn btn-primary" onClick={generate}>
+            <button className="btn" onClick={generate}>
               <Plus size={16} />
               {t('keys.generate')}
             </button>
           </>
         )}
       </div>
-      <p className="lead">{t('keys.intro')}</p>
+      <p className="lead page-lead">{t('keys.intro')}</p>
       {failed && <LoadError onRetry={load} />}
       {keys === null && !failed && <p className="loading">{t('common.loading')}</p>}
       {keys && keys.length === 0 && (

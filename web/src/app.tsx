@@ -2,7 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useRef, useState, ty
 import { forgetConversations } from './terminal/conversation'
 import { appBadge, forgetSessions, useWaitingCount } from './terminal/agents'
 import { forgetColours } from './terminal/Code'
-import { ArrowLeft, Bot, Film, KeyRound, LogOut, ScrollText, Server, Settings, Users } from 'lucide-react'
+import { Bot, ChevronLeft, Film, KeyRound, LogOut, ScrollText, Server, Settings, Users } from 'lucide-react'
 import { api, ApiError, bumpAuthGen, setUnauthorizedHandler, type Bootstrap, type Me } from './api'
 import { applyDefaultLanguage, t } from './i18n'
 import { freezePrefs, resetPrefsSession, sendPendingPrefs, syncPrefsFromServer } from './prefs'
@@ -351,7 +351,7 @@ export function takeSettingsScroll(): number | null {
 export function PhoneBack() {
   return (
     <a className="icon-btn phone-back" href="/settings" onClick={linkHandler('/settings')} aria-label={t('common.back')}>
-      <ArrowLeft size={20} />
+      <ChevronLeft size={20} />
     </a>
   )
 }

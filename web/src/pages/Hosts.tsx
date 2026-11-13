@@ -150,7 +150,7 @@ export function HostsPage() {
   // Others' sessions this user may watch: under the running ones, not past
   // all the hosts (pages-1105 2.6) — and shown with no host of one's own too.
   const sharedSection = (
-        <section className="section shared-sessions" data-flip="shared">
+        <section className="section section-group shared-sessions" data-flip="shared">
           <h2>{t('watch.sharedTitle')}</h2>
           {sharedFailed && <LoadError text={t('watch.sharedFailed')} onRetry={() => void refreshSessions()} />}
           <ul className="rows">
@@ -185,7 +185,7 @@ export function HostsPage() {
       </div>
 
       {running.length > 0 && (
-        <section className="section live" aria-labelledby="live-title">
+        <section className="section section-group live" aria-labelledby="live-title">
           <h2 id="live-title" data-flip="live" data-flip-in="">{t('hosts.running')}<span className="section-n">{running.length}</span></h2>
           <ul className="live-rows">
             {running.map((s) => (
@@ -212,7 +212,7 @@ export function HostsPage() {
       )}
       {!empty && (shared.length > 0 || sharedFailed) && sharedSection}
       {hosts && hosts.length > 0 && (
-        <section className="section" data-flip="hosts">
+        <section className="section section-group" data-flip="hosts">
           {(running.length > 0 || shared.length > 0) && <h2>{t('hosts.all')}<span className="section-n">{hosts.length}</span></h2>}
           {findable && (
             <div className="page-tools">

@@ -211,7 +211,7 @@ export function CustomKeysSection() {
         </div>
         <div className="kl-act-btns">
           <button type="button" className="icon-btn" disabled={p.i === 0} aria-label={t('keybar.up', { label: name })} title={t('keybar.upShort')} onClick={() => step(-1)}>
-            <ChevronLeft size={18} />
+            <ChevronLeft size={20} />
           </button>
           <button type="button" className="icon-btn" disabled={p.i === layout[p.group].length - 1} aria-label={t('keybar.down', { label: name })} title={t('keybar.downShort')} onClick={() => step(1)}>
             <ChevronRight size={18} />

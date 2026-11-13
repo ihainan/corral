@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
-import { ArrowLeft, Download, Film, Maximize2, MoreHorizontal, Pause, Play, RotateCw, Trash2 } from 'lucide-react'
+import { ChevronLeft, Download, Film, Maximize2, MoreHorizontal, Pause, Play, RotateCw, Trash2 } from 'lucide-react'
 import { api, authGen, errorText, type Recording } from '../api'
 import { t } from '../i18n'
 import { linkHandler, navigate } from '../router'
@@ -234,7 +234,7 @@ export function RecordingsPage() {
                       the time it began after: 11-05. No icon: every row's was the same.) */}
                   <span className="row-title">{r.host_name}</span>
                   {/* (A length, in words: "13:10:24" reads as a time of day — ux1101 PG-44.) */}
-                  <span className={'rec-len tnum' + (live ? ' is-live' : '')}>{live ? t('rec.live') : durationText(dur)}</span>
+                  <span className={'rec-len tnum' + (live ? ' is-live' : '')}>{live ? <><span className="rec-live-dot" aria-hidden="true" />{t('rec.live')}</> : durationText(dur)}</span>
                   <span className="row-meta tnum" title={new Date(r.started_at * 1000).toLocaleString()}>{clockText(r.started_at)}</span>
                   <span className="row-sub">
                     {[admin ? r.owner_name : '', !live && r.bytes >= 0 ? formatSize(r.bytes) : ''].filter(Boolean).join(' · ')}
@@ -672,7 +672,7 @@ export function RecordingPlayerPage({ id }: { id: string }) {
     <div className={'term-root player-root ' + (scheme.dark ? 'dark' : 'light')} style={chromeVars(scheme) as React.CSSProperties}>
       <header className="term-bar">
         <button className="icon-btn" onClick={() => navigate('/recordings')} aria-label={t('common.back')} title={t('common.back')}>
-          <ArrowLeft size={20} />
+          <ChevronLeft size={20} />
         </button>
         <div className="player-title">
           <span className="term-host-name">{meta?.host_name ?? ''}</span>

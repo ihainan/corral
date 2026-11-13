@@ -215,8 +215,14 @@ code, .mono { font-family: var(--font-mono); font-size: var(--fs-sub); }
   display: flex; flex-direction: column; gap: 24px;
 }
 @media (min-width: 1024px) { .page { padding-top: 32px; } }
-.page-form { max-width: calc(560px + 2 * var(--pad-x)); }
+/* A form or the settings: narrower, but in the same column as the lists, from its left edge — the
+   title where every page's is, not moved to the middle of a narrower column (11-13: 352, 492 and 586
+   from the left, across the pages). */
+.page-form > * { width: 100%; max-width: 560px; }
 .page-head { display: flex; align-items: center; gap: 8px; min-height: 36px; flex-wrap: wrap; }
+@media (pointer: coarse) { .page-head { min-height: 44px; } } /* (its buttons' height: the title does not move as they come and go) */
+/* (A page's buttons as high as its fields beside them: not a 32 beside a 36 — pages-1113.) */
+.page { --h-btn: var(--h-input); }
 .page-head h1 { font-size: var(--fs-title); line-height: var(--lh-title); font-weight: 600; }
 .page-head > .icon-btn:first-child { margin-left: -10px; }
 /* Back to Settings, on phones only (where these pages are opened from it). */
@@ -227,6 +233,8 @@ code, .mono { font-family: var(--font-mono); font-size: var(--fs-sub); }
 .section-ruled > h2 + * { border-top: 1px solid var(--line); padding-top: 8px; }
 .section { display: flex; flex-direction: column; gap: 8px; }
 .section > h2 { font-size: var(--fs-h3); line-height: var(--lh-h3); font-weight: 600; color: var(--fg); }
+/* A list's group heading: a label over its rows, as a day's in the recordings — not a second page title (pages-1113). */
+.section.section-group > h2 { font-size: var(--fs-sub); line-height: var(--lh-sub); font-weight: 600; color: var(--fg-2); }
 @media (pointer: coarse) { .section > h2 { font-size: var(--fs-h3-touch); line-height: var(--lh-h3-touch); } }
 .section + .section { margin-top: 8px; }
 .lead { color: var(--fg-2); max-width: 64ch; }
@@ -310,6 +318,7 @@ textarea.input { height: auto; min-height: var(--h-input); padding: 8px 12px; li
 :root[data-theme='dark'] .seg button[aria-pressed='true'] { background: var(--bg-active); box-shadow: 0 0 0 1px var(--line-strong); }
 @media (prefers-color-scheme: dark) { :root:not([data-theme='light']) .seg button[aria-pressed='true'] { background: var(--bg-active); box-shadow: 0 0 0 1px var(--line-strong); } }
 .form-actions { display: flex; gap: 8px; justify-content: flex-end; }
+.form-actions .btn { min-width: 80px; }
 @media (pointer: coarse) {
   .form-actions {
     position: sticky; bottom: calc(49px + env(safe-area-inset-bottom, 0px)); z-index: 5;
@@ -333,7 +342,7 @@ textarea.input { height: auto; min-height: var(--h-input); padding: 8px 12px; li
 
 /* Rows: the one list pattern ------------------------------------------------ */
 
-.rows { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--line); }
+.rows { list-style: none; margin: 0; padding: 0; } /* (no rule above the first: the heading is enough — pages-1113) */
 .row { display: flex; align-items: center; gap: 4px; border-bottom: 1px solid var(--line); }
 .row-main {
   flex: 1; min-width: 0; display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; column-gap: 12px; row-gap: 2px; align-items: center;
@@ -394,9 +403,9 @@ a.setting:hover { text-decoration: none; background: var(--bg-hover); }
 
 /* Empty and error states */
 /* An empty page: its icon on a quiet square, a title, a line, what to do — one piece (11-05). */
-.empty { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; padding: 24px 0; max-width: 400px; }
+.empty { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; padding: 8px 0 24px; max-width: 400px; }
 .empty > svg { box-sizing: content-box; width: 20px; height: 20px; padding: 10px; border-radius: var(--r-lg); background: var(--bg-subtle); box-shadow: inset 0 0 0 1px var(--line); color: var(--fg-2); margin-bottom: 8px; }
-.empty h2 { font-size: var(--fs-head); line-height: var(--lh-head); font-weight: 600; }
+.empty h2 { font-size: var(--fs-h3); line-height: var(--lh-h3); font-weight: 600; }
 .empty p { font-size: var(--fs-ui); line-height: var(--lh-ui); }
 .empty p { color: var(--fg-2); max-width: 44ch; }
 .empty .btn { margin-top: 10px; }
@@ -541,7 +550,7 @@ html.theme-switching *, html.theme-switching *::before, html.theme-switching *::
 .audit-table { width: 100%; border-collapse: collapse; font-size: var(--fs-sub); line-height: var(--lh-sub); table-layout: fixed; }
 .audit-table th { text-align: left; font-size: var(--fs-note); line-height: var(--lh-note); font-weight: 500; color: var(--fg-3); padding: 8px; border-bottom: 1px solid var(--line); }
 .audit-table td { padding: 10px 8px; border-bottom: 1px solid var(--line); vertical-align: top; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.audit-table td.code { font-family: var(--font-mono); font-size: var(--fs-note); line-height: var(--lh-note); }
+.audit-table td.code { color: var(--fg-2); font-variant-numeric: tabular-nums; } /* (an address in the table's own type: no third face — pages-1113) */
 .audit-table .detail { display: block; color: var(--fg-3); font-size: var(--fs-note); line-height: var(--lh-note); overflow: hidden; text-overflow: ellipsis; }
 .audit-list { display: none; }
 @media (max-width: 759.98px) {
@@ -568,14 +577,14 @@ label.setting { cursor: pointer; }
 .setting-link { width: 100%; background: none; border: 0; border-bottom: 1px solid var(--line); text-align: left; cursor: pointer; color: var(--fg); gap: 12px; padding-left: 4px; padding-right: 4px; }
 .setting-link:hover { background: var(--bg-hover); text-decoration: none; }
 .setting-link.danger, .setting-link.danger .row-icon { color: var(--danger); }
-.setting .seg button { height: 30px; padding: 0 10px; font-size: var(--fs-sub); line-height: var(--lh-sub); }
+.setting .seg button { height: 32px; padding: 0 10px; font-size: var(--fs-sub); line-height: var(--lh-sub); }
 @media (pointer: coarse) { .setting .seg button { height: 40px; } } /* (in its 2px frame: 44 to touch — pages-1105 4.3) */
 /* The settings page: a little wider than a form, sections further apart. */
-.page-settings { max-width: calc(680px + 2 * var(--pad-x)); }
+.page-settings > * { max-width: 680px; }
 .page-settings .section + .section { margin-top: 16px; }
 /* The font size stepper framed as the segmented controls beside it. */
 .setting .stepper { gap: 2px; padding: 2px; border-radius: var(--r); background: var(--bg-subtle); box-shadow: inset 0 0 0 1px var(--line); }
-.setting .stepper .icon-btn { width: 30px; height: 30px; color: var(--fg-2); }
+.setting .stepper .icon-btn { width: 32px; height: 32px; color: var(--fg-2); }
 @media (pointer: coarse) { .setting .stepper .icon-btn { width: 40px; height: 40px; } .setting .stepper .icon-btn::after { inset: -2px 0; } }
 .setting-wide .setting-control .input { width: 220px; }
 @media (max-width: 479.98px) {
@@ -624,7 +633,8 @@ details.adv > .form { margin-top: 16px; }
 .scheme-name { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; font-size: var(--fs-ui); line-height: var(--lh-ui); font-weight: 500; }
 .scheme-name .hint { font-weight: 400; font-size: var(--fs-note); line-height: var(--lh-note); }
 .scheme-check { color: var(--accent-text); flex: none; }
-.scheme-btn { gap: 8px; padding-left: 6px; height: auto; min-height: var(--h-btn); }
+.scheme-btn { gap: 8px; padding-left: 6px; height: auto; min-height: var(--h-btn); background: var(--bg-subtle); border-color: var(--line); } /* (as the choices and the stepper beside it — pages-1113) */
+.scheme-btn:hover { background: var(--bg-hover); }
 .scheme-current { display: inline-flex; align-items: center; gap: 8px; }
 .scheme-current .swatch { width: 40px; height: 24px; padding: 3px 5px; font-size: 9px; }
 .scheme-current .swatch-dots i { width: 4px; height: 4px; }
@@ -959,13 +969,13 @@ details.adv > .form { margin-top: 16px; }
   .live-sub { white-space: normal; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow-wrap: anywhere; }
 }
 /* A phone's running sessions: rows, as the hosts below, no screen in small (pages-1105 1.4). */
-.live-rows { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--line); }
+.live-rows { list-style: none; margin: 0; padding: 0; }
 .live-row { position: relative; border-bottom: 1px solid var(--line); }
 .live-row .live-link { min-height: var(--row-min); justify-content: center; }
-.live-row .live-info { padding: 10px 48px 10px 0; }
+.live-row .live-info { padding: 10px 48px 10px 8px; } /* (its words where the hosts' below begin) */
 .live-row .live-link:hover .live-info { background: none; }
 .live-row .live-link:active { background: var(--bg-hover); }
-.live-row .live-close { right: -6px; top: 50%; bottom: auto; transform: translateY(-50%); }
+.live-row .live-close { right: 2px; top: 50%; bottom: auto; transform: translateY(-50%); }
 .live-row .live-sub { -webkit-line-clamp: 2; }
 .live-which { color: var(--fg-2); font-weight: 400; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 0 1 auto; }
 .live-name { flex: 0 1 auto; }
@@ -1025,6 +1035,7 @@ details.adv > .form { margin-top: 16px; }
 .rec-tools .select, .audit-tools .select { width: auto; flex: 0 1 auto; min-width: 0; max-width: 100%; }
 .audit-table .audit-day th { padding-top: var(--sp-4); font-size: var(--fs-sub); line-height: var(--lh-sub); font-weight: 600; color: var(--fg-2); text-align: left; border-bottom: 1px solid var(--line); }
 .audit-table tbody:first-of-type .audit-day th { padding-top: var(--sp-2); }
+@media (min-width: 600px) { .rec-tools .select, .audit-tools .select { min-width: 120px; max-width: 200px; } }
 @media (max-width: 599px) { .rec-tools .select, .audit-tools .select { flex: 1 1 0; padding-left: 10px; padding-right: 28px; background-position: right 8px center; } }
 /* (A sidebar row on an iPad: a finger's, 44 — pages-1105 4.3; after .nav-item's own height.) */
 @media (min-width: 760px) and (pointer: coarse) { .nav-item { height: 44px; } }
@@ -1045,6 +1056,7 @@ details.adv > .form { margin-top: 16px; }
 .page-order-menu { display: none; flex: none; gap: 4px; }
 @media (max-width: 599px) {
   .page-tools:has(.page-order-menu) { flex-wrap: nowrap; }
+  .page-tools > .seg.page-order { flex: 1 1 100%; } /* (the users' filter: across, under the search — pages-1113) */
   .page-tools:has(.page-order-menu) .page-order { display: none; } /* (the hosts' order only: the users' filter stays — review) */
   .page-order-menu { display: inline-flex; height: var(--h-input); padding: 0 12px; border-radius: var(--r-sm); }
   .page-order-menu svg { color: var(--fg-3); }
@@ -1052,8 +1064,9 @@ details.adv > .form { margin-top: 16px; }
 /* A recording's row (11-05): host, how long (or recording, red), when — columns; a phone: when under the host. */
 .row-main.rec-row { grid-template-columns: minmax(0, 1fr) 128px 48px; column-gap: 16px; }
 .row-main.rec-row > .row-title, .row-main.rec-row > .row-sub { grid-column: 1; }
-.row-main.rec-row > .rec-len { grid-column: 2; grid-row: 1 / span 2; align-self: center; font-size: var(--fs-ui); line-height: var(--lh-ui); font-weight: 500; color: var(--fg); }
-.row-main.rec-row > .rec-len.is-live { color: var(--danger); }
+.row-main.rec-row > .rec-len { grid-column: 2; grid-row: 1 / span 2; align-self: center; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--fg-2); font-variant-numeric: tabular-nums; } /* (second to the host: the host's line is the one to read — pages-1113) */
+.row-main.rec-row > .rec-len.is-live { display: inline-flex; align-items: center; gap: 6px; color: var(--danger); font-weight: 500; }
+.rec-live-dot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 .row-main.rec-row > .row-meta { grid-column: 3; grid-row: 1 / span 2; align-self: center; justify-self: end; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--fg-2); }
 .rec-time-inline { display: none; }
 @media (max-width: 599px) {
