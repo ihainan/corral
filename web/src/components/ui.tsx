@@ -139,13 +139,13 @@ export function Dialog(props: { title: string; onClose: () => void; children: Re
 // a command): what it is, a line under it (where it is, how big, how it
 // goes), the actions on it as icons, and the close — one row, the same in
 // each (app.css, .dlg-*). Its Dialog takes className "dlg" and hideTitle.
-export function DialogHead(props: { title: ReactNode; titleText?: string; oneLine?: boolean; eyebrow?: ReactNode; sub?: ReactNode; subText?: string; icon?: ReactNode; tools?: ReactNode; onClose: () => void }) {
+export function DialogHead(props: { title: ReactNode; titleText?: string; oneLine?: boolean; clamp?: boolean; eyebrow?: ReactNode; sub?: ReactNode; subText?: string; icon?: ReactNode; tools?: ReactNode; onClose: () => void }) {
   return (
     <div className="dlg-head">
       {props.icon && <span className="dlg-icon" aria-hidden="true">{props.icon}</span>}
       <div className="dlg-head-text">
         {props.eyebrow && <span className="dlg-eyebrow">{props.eyebrow}</span>}
-        <h2 className={'dlg-title' + (props.oneLine ? ' is-one' : '')} title={props.titleText}>{props.title}</h2>
+        <h2 className={'dlg-title' + (props.oneLine ? ' is-one' : props.clamp ? ' is-clamped' : '')} title={props.titleText}>{props.title}</h2>
         {props.sub && <span className="dlg-sub" title={props.subText}>{props.sub}</span>}
       </div>
       {props.tools && <div className="dlg-tools">{props.tools}</div>}

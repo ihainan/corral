@@ -457,6 +457,8 @@ a.setting:hover { text-decoration: none; background: var(--bg-hover); }
 .dlg-head-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .dlg-eyebrow { font-size: var(--fs-note); line-height: var(--lh-note); font-weight: 500; color: var(--fg-3); }
 /* (A file's name: one line, cut at its end — whole on hover and in the line under it.) */
+/* (A sentence for a name — a command's purpose: two lines at most, the whole in the body.) */
+.dialog .dlg-title.is-clamped { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
 .dialog .dlg-title.is-one { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; overflow-wrap: normal; }
 .dialog .dlg-title { margin: 0; font-size: var(--fs-h3); line-height: var(--lh-h3); font-weight: 600; color: var(--fg); overflow-wrap: anywhere; }
 .dlg-sub { display: block; min-width: 0; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--fg-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
@@ -467,7 +469,12 @@ a.setting:hover { text-decoration: none; background: var(--bg-hover); }
 @media (max-width: 520px) {
   .sheet-mode .dialog.dlg { padding-bottom: env(safe-area-inset-bottom, 0px); }
   :where(html.kb-open) .sheet-mode .dialog.dlg { padding-bottom: 0; }
-  .dlg-head { padding: 12px 8px 10px 16px; gap: 8px; }
+  .dlg-head { flex-wrap: wrap; padding: 12px 8px 10px 16px; gap: 8px; }
+  /* (Narrow: the actions on a row of their own under the name, the close kept beside it.) */
+  .dlg-head-text { order: 1; flex: 1 1 0; }
+  .dlg-close { order: 2; }
+  .dlg-icon { order: 0; }
+  .dlg-tools { order: 3; flex: 1 0 100%; justify-content: flex-end; margin-top: -4px; }
   .dlg-body { padding: 4px 16px 16px; }
   .dlg-foot { padding: 12px 16px; }
   .dlg-foot > .btn { flex: 1; }

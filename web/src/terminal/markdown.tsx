@@ -212,7 +212,7 @@ function blocks(lines: string[], copy: Copy, depth: number, soft = false): React
             // (Soft: the lines right under an item's first, before a blank
             // or a block of its own, are more of its words, as in a paragraph.)
             let n = 0
-            if (soft) while (n < sub.length && sub[n].trim() && !listItem.test(sub[n]) && !/^\s*(```|~~~|>|#{1,6}\s|\|)/.test(sub[n])) n++
+            if (soft) while (n < sub.length && sub[n].trim() && !listItem.test(sub[n]) && !rule.test(sub[n]) && !sub[n].includes('|') && !/^\s*(```|~~~|>|#{1,6}\s)/.test(sub[n])) n++
             const words = [it.first, ...sub.slice(0, n)]
             sub = sub.slice(n)
             return (
@@ -265,15 +265,30 @@ function cells(line: string): string[] {
   return out
 }
 
+// (Soft: where a line ends in an odd run of backslashes — one escaped is no
+// mark — or two spaces, the break is kept; the backslash is the mark, not shown.)
+const hardEnd = (l: string) => / {2,}$/.test(l) || /(?:^|[^\\])(?:\\\\)*\\$/.test(l)
+// Writing that sets no space between its words: Chinese and Japanese (CJK
+// ideographs, kana, their punctuation and full-width forms). Not Korean: it
+// spaces its words, so its line break is a space, as browsers make it.
+const unspaced = /[\u3000-\u9fff\uf900-\ufaff\uff00-\uffef]/
+// (Its last seen character, past any closing marks of emphasis or code.)
+const lastSeen = (l: string) => l.trimEnd().replace(/[*_~`]+$/, '').slice(-1)
+const firstSeen = (l: string) => l.trimStart().replace(/^[*_~`]+/, '').slice(0, 1)
+
 function inlineLines(lines: string[], soft = false): ReactNode {
-  return lines.map((l, k) => (
-    <Fragment key={k}>
-      {/* (Soft: a line break is a space — none between two CJK characters —
-          but a line ended with two spaces or a backslash still breaks.) */}
-      {k > 0 && (!soft || /( {2,}|\\)$/.test(lines[k - 1]) ? <br /> : /[\u3000-\u9fff\uff00-\uffef]$/.test(lines[k - 1].trimEnd()) && /^[\u3000-\u9fff\uff00-\uffef]/.test(l.trimStart()) ? null : ' ')}
-      {inline(l.trim())}
-    </Fragment>
-  ))
+  return lines.map((l, k) => {
+    const brk = k > 0 && (!soft || hardEnd(lines[k - 1]))
+    const glued = k > 0 && !brk && unspaced.test(lastSeen(lines[k - 1])) && unspaced.test(firstSeen(l))
+    // (Soft, a line marked to break with a backslash: the mark goes.)
+    const text = soft && k < lines.length - 1 && !/ {2,}$/.test(l) && hardEnd(l) ? l.replace(/\\$/, '') : l
+    return (
+      <Fragment key={k}>
+        {brk ? <br /> : k > 0 && !glued ? ' ' : null}
+        {inline(text.trim())}
+      </Fragment>
+    )
+  })
 }
 
 // Inline spans, left to right; the first match at the earliest place wins.

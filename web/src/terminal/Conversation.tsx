@@ -1729,6 +1729,7 @@ function RunningWork({ scanOf, items, openSub, openCmd }: { scanOf?: string; ite
 // its end on asking (read once each time, no polling). gone: it has ended
 // since the dialog opened (its output stays to be looked at).
 const BG_CMD_SHUT = 8 // (lines of the command shown before "show all")
+const BG_WHAT_LONG = 80 // (characters of what it is for past which the title, two lines, may not hold it)
 function BgCmdDialog({ r, gone, onClose }: { r: ConvoRunning; gone: boolean; onClose: () => void }) {
   usePrefs() // (the command's colours follow the theme)
   const acts = useContext(FileActsOf)
@@ -1744,7 +1745,14 @@ function BgCmdDialog({ r, gone, onClose }: { r: ConvoRunning; gone: boolean; onC
   const [more, setMore] = useState(false)
   useLayoutEffect(() => {
     const el = cmdRef.current
-    if (el && !all) setMore(el.scrollHeight > el.clientHeight + 1)
+    if (!el || all) return
+    const measure = () => setMore(el.scrollHeight > el.clientHeight + 1)
+    measure()
+    // (A narrower window wraps it to more lines: measured again as it changes.)
+    if (typeof ResizeObserver === 'undefined') return
+    const ro = new ResizeObserver(measure)
+    ro.observe(el)
+    return () => ro.disconnect()
   }, [r.cmd, all])
   const tail = r.out && acts?.tail ? () => acts.tail!(r.out!) : undefined
   const outName = r.out ? r.out.slice(r.out.lastIndexOf('/') + 1) : ''
@@ -1757,6 +1765,8 @@ function BgCmdDialog({ r, gone, onClose }: { r: ConvoRunning; gone: boolean; onC
         icon={<Terminal size={16} />}
         eyebrow={r.what ? t('convo.bgCmds1') : undefined}
         title={r.what || t('convo.bgCmds1')}
+        titleText={r.what}
+        clamp
         sub={
           <>
             {!gone && <span className="bg-cmd-live" aria-hidden="true" />}
@@ -1766,6 +1776,8 @@ function BgCmdDialog({ r, gone, onClose }: { r: ConvoRunning; gone: boolean; onC
         onClose={onClose}
       />
       <div className="dlg-body">
+        {/* (Longer than its title's two lines hold: all of it here, where the body scrolls.) */}
+        {r.what && r.what.length > BG_WHAT_LONG && <p className="bg-cmd-what">{r.what}</p>}
         {r.cmd && (
           <section className="bg-cmd-sec">
             <div className="bg-cmd-label">
@@ -2913,15 +2925,15 @@ function PageKeysHelp({ onClose, side }: { onClose: () => void; side: boolean })
             <dl className="page-keys">
               {rows.map(([k, what]) => (
                 <div key={what} className="page-keys-row">
-                  <dd>{t(what)}</dd>
-                  <dt>
+                  <dt>{t(what)}</dt>
+                  <dd>
                     {k.map((x, i) => (
                       <Fragment key={x}>
                         {i > 0 && <span className="page-keys-or">/</span>}
                         <kbd>{x}</kbd>
                       </Fragment>
                     ))}
-                  </dt>
+                  </dd>
                 </div>
               ))}
             </dl>
@@ -4497,6 +4509,14 @@ function Hunks({ hunks, cut }: { hunks: ConvoHunk[]; cut?: boolean }) {
   )
 }
 
+// Whether an edit made the file: Claude Code's Write says so in its result
+// ("File created successfully"); a patch that adds a whole file (Codex's
+// "*** Add File") is one hunk from line 0 of nothing but added lines. Not
+// "a Write with no patch": that may have written over a file there before.
+const madeFile = (tool: ConvoTool): boolean =>
+  (tool.name === 'Write' && /^File created successfully/i.test(tool.result ?? '')) ||
+  (!!tool.patch && tool.patch.length === 1 && tool.patch[0].old_start === 0 && tool.patch[0].lines.every((l) => l[0] === '+'))
+
 // A file a turn made anew: all of it, as added lines.
 const created = (tool: ConvoTool): ConvoHunk[] | undefined => {
   if (tool.name !== 'Write' || tool.patch || tool.same || !tool.new) return undefined
@@ -4566,13 +4586,14 @@ function ChangesPanel({ edits, focus, onClose, active, onCopy }: { edits: Edits;
               <FileTypeIcon name={baseName(f.path)} />
               <span className="convo-panel-file-name">{baseName(f.path)}</span>
               <span className="convo-panel-file-dir">{shortPath(f.path.slice(0, f.path.lastIndexOf('/') + 1) || '/')}</span>
-              {f.tools.every((tl) => !tl.patch && !!created(tl)) ? <span className="convo-new-tag">{t('convo.newFile')}</span> : <LineCounts add={f.add} del={f.del} />}
+              {madeFile(f.tools[0]) && <span className="convo-new-tag">{t('convo.newFile')}</span>}
+              <LineCounts add={f.add} del={f.del} />
               <FileHeadTools path={f.path} onCopy={onCopy} />
             </div>
             {f.tools.map((tl, i) => {
               const h = tl.patch ?? created(tl)
               return (
-                <div key={i} className={'convo-panel-edit' + (!tl.patch && h ? ' is-new' : '')}>
+                <div key={i} className={'convo-panel-edit' + (madeFile(tl) ? ' is-new' : '')}>
                   {f.tools.length > 1 && <div className="convo-hunk-gap">{t('convo.editN', { n: i + 1 })}</div>}
                   {tl.same ? (
                     <div className="convo-hunk-gap">{t('convo.noChange')}</div>
