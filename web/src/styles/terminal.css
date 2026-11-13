@@ -1206,8 +1206,10 @@ p.convo-ask-desc { margin: 0 0 8px; font-size: var(--fs-ui); line-height: var(--
    (Before: a box of its own, a hint line over it in the thread, titles
    underlined as links, rows that broke onto three lines on a phone.) */
 .convo-running { min-width: 0; border: 1px solid var(--term-line); border-radius: var(--r-lg); background: var(--term-chrome); font-size: var(--fs-sub); line-height: var(--lh-sub); }
-.convo-running:has(+ .composer) { border-bottom: 0; border-radius: var(--r-lg) var(--r-lg) 0 0; margin-bottom: -8px; }
-.convo-running + .composer .composer-box { border-top-left-radius: 0; border-top-right-radius: 0; }
+/* (On the box only where the box is the first thing under it: with Claude Code's card, a
+   reason, a panel between — inside the composer, over its box — a card of its own.) */
+.convo-running:has(+ .composer > .composer-box:first-child) { border-bottom: 0; border-radius: var(--r-lg) var(--r-lg) 0 0; margin-bottom: -8px; }
+.convo-running + .composer > .composer-box:first-child { border-top-left-radius: 0; border-top-right-radius: 0; }
 .term-root.dark .convo-running { border-color: #343b46; }
 .convo-running-head { display: flex; align-items: center; gap: 8px; min-width: 0; min-height: 36px; padding: 0 6px 0 12px; color: var(--term-fg-2); font-weight: 500; }
 .convo-running-spin { flex: none; color: var(--term-accent-text); animation: convo-spin 1.4s linear infinite; }
