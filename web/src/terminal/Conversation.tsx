@@ -4643,9 +4643,10 @@ function Thinking({ text, live }: { text: string; live?: boolean }) {
   if (live) return null // (said under the steps, as the step under way)
   return (
     <div className="convo-step is-thought">
-      <button type="button" className="convo-step-head" aria-expanded={open} onClick={() => setOpen(!open)}>
+      {/* (The mark stands for "thinking": said to a reader by the button's name, not
+          by words of its own in the line — copied, or read as its text, the line is its title.) */}
+      <button type="button" className="convo-step-head" aria-expanded={open} aria-label={title ? `${t('convo.thinking')}: ${title}` : undefined} onClick={() => setOpen(!open)}>
         <ThinkIcon size={16} strokeWidth={1.75} className="convo-step-ic" aria-hidden="true" />
-        {title && <span className="sr-only">{t('convo.thinking')} </span>}
         <span className="convo-step-obj">{title || t('convo.thinking')}</span>
       </button>
       {open && <div className="convo-thinking"><Markdown text={text} /></div>}
