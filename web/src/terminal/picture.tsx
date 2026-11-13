@@ -1,5 +1,5 @@
-import { useEffect, useState, type ReactNode } from 'react'
-import { Copy, Download, FolderOpen } from 'lucide-react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { ChevronLeft, ChevronRight, Copy, Download, FolderOpen } from 'lucide-react'
 import { ApiError, authGen, errorText, onAuthChange } from '../api'
 import { t } from '../i18n'
 import { copyText, Dialog, DialogHead, HeadTool, useToast } from '../components/ui'
@@ -192,15 +192,41 @@ export function FileTools({ sid, path, onReveal, extra }: { sid: string; path: s
 
 // A picture of the host, looked at: fitted to the window, where it is, and
 // what else can be done with it.
-export function PictureDialog({ sid, path, onClose, onReveal }: { sid: string; path: string; onClose: () => void; onReveal?: () => void }) {
+// group: the pictures sent with it (a message's), gone through here — by the
+// buttons at its sides, the arrow keys, a swipe on a phone — "2 of 3" said
+// over its name. A tap on the picture shows it at its own size, to be
+// scrolled about; another, the whole of it again.
+export function PictureDialog({ sid, path, group, onGo, onClose, onReveal }: { sid: string; path: string; group?: string[]; onGo?: (path: string) => void; onClose: () => void; onReveal?: () => void }) {
   const [blob, setBlob] = useState<Blob | null>(null)
   const [error, setError] = useState('')
   const [again, setAgain] = useState(0)
+  const [whole, setWhole] = useState(false) // (at its own size)
+  const [big, setBig] = useState(false) // (larger than it is shown: worth a tap)
   const url = useObjectURL(blob)
+  const at = group && onGo ? group.indexOf(path) : -1
+  const many = at >= 0 && group!.length > 1
+  const go = (d: 1 | -1) => many && onGo!(group![(at + d + group!.length) % group!.length])
+  const goRef = useRef(go)
+  goRef.current = go
+  useEffect(() => {
+    if (!many) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey || (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight')) return
+      const el = e.target as HTMLElement | null
+      if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')) return
+      e.preventDefault()
+      goRef.current(e.key === 'ArrowLeft' ? -1 : 1)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [many])
+  // (A swipe across, on a touch screen, not one that scrolls a picture shown at its size.)
+  const swipe = useRef<{ x: number; y: number } | null>(null)
   useEffect(() => {
     const ctl = new AbortController()
     setBlob(null)
     setError('')
+    setWhole(false)
     lookAt(sid, path, { first: true, signal: ctl.signal, fresh: true }).then(
       (b) => !ctl.signal.aborted && setBlob(b),
       (e) => !ctl.signal.aborted && setError(pictureError(e)),
@@ -210,8 +236,30 @@ export function PictureDialog({ sid, path, onClose, onReveal }: { sid: string; p
   const name = path.slice(path.lastIndexOf('/') + 1)
   return (
     <Dialog title={name} onClose={onClose} wide hideTitle className="dlg picture-dialog">
-      <DialogHead icon={<FileTypeIcon name={name} />} title={name} titleText={path} oneLine sub={fileWhere(path)} subText={path} tools={<FileTools sid={sid} path={path} onReveal={onReveal} />} onClose={onClose} />
-      <div className="picture-body">
+      <DialogHead icon={<FileTypeIcon name={name} />} eyebrow={many ? t('picture.ofN', { i: at + 1, n: group!.length }) : undefined} title={name} titleText={path} oneLine sub={fileWhere(path)} subText={path} tools={<FileTools sid={sid} path={path} onReveal={onReveal} />} onClose={onClose} />
+      {/* (Its buttons over the stage, not in what scrolls: a picture at its own size is scrolled about under them.) */}
+      <div className="picture-stage">
+        {many && (
+        <>
+          <button type="button" className="picture-step is-prev" onClick={() => go(-1)} aria-label={t('picture.prev')} title={t('picture.prev') + ' (←)'}>
+            <ChevronLeft size={20} aria-hidden="true" />
+          </button>
+          <button type="button" className="picture-step is-next" onClick={() => go(1)} aria-label={t('picture.next')} title={t('picture.next') + ' (→)'}>
+            <ChevronRight size={20} aria-hidden="true" />
+          </button>
+        </>
+      )}
+      <div
+        className={'picture-body' + (whole ? ' is-whole' : '')}
+        onPointerDown={(e) => (swipe.current = e.pointerType === 'touch' && !whole ? { x: e.clientX, y: e.clientY } : null)}
+        onPointerUp={(e) => {
+          const s0 = swipe.current
+          swipe.current = null
+          if (!s0) return
+          const dx = e.clientX - s0.x
+          if (Math.abs(dx) > 48 && Math.abs(dx) > 2 * Math.abs(e.clientY - s0.y)) go(dx < 0 ? 1 : -1)
+        }}
+      >
         {error ? (
           <div className="picture-note" role="alert">
             <p>{error}</p>
@@ -219,9 +267,14 @@ export function PictureDialog({ sid, path, onClose, onReveal }: { sid: string; p
           </div>
         ) : url ? (
           <img
-            className="picture-img"
+            className={'picture-img' + (big ? ' is-big' : '')}
             src={url}
             alt={name}
+            onLoad={(e) => {
+              const im = e.currentTarget
+              setBig(im.naturalWidth > im.clientWidth + 1 || im.naturalHeight > im.clientHeight + 1)
+            }}
+            onClick={() => (big || whole) && setWhole(!whole)}
             onError={() => {
               // (Not to be shown by the browser after all: said so, and asked again on retry.)
               forgetPicture(sid, path)
@@ -232,6 +285,7 @@ export function PictureDialog({ sid, path, onClose, onReveal }: { sid: string; p
         ) : (
           <p className="picture-note hint">{t('common.loading')}</p>
         )}
+      </div>
       </div>
     </Dialog>
   )

@@ -68,7 +68,7 @@ const inUse = (l: string) =>
 // small); past a few the oldest no draft or history entry holds goes.
 // host: the host it was put on (a label taken to another host's composer
 // is not sent there).
-export type Attached = { label: string; send: string; path: string; name: string; image: boolean; host: number }
+export type Attached = { label: string; send: string; path: string; name: string; image: boolean; host: number; size?: number } // (size: as it went up, where known)
 const ATTACHED_MAX = 200
 const attached = new Map<string, Attached>()
 let attachN = 0

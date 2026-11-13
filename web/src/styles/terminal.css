@@ -156,20 +156,38 @@ html.term-mode body { position: fixed; inset: 0; }
 .composer-input::placeholder { color: var(--term-fg-3); }
 .composer-input:focus { outline: none; box-shadow: none; }
 .composer-box:focus-within { box-shadow: 0 0 0 2px var(--accent); }
-/* Files put up for the message: a chip each over the box. */
-.attach-strip { display: flex; gap: 6px; padding: 8px 10px 0; overflow-x: auto; scrollbar-width: thin; }
-.attach-chip { flex: none; display: inline-flex; align-items: center; max-width: 220px; height: 34px; border-radius: var(--r);
-  background: color-mix(in srgb, var(--term-fg) 7%, transparent); border: 1px solid color-mix(in srgb, var(--term-fg) 12%, transparent); color: var(--term-fg); }
+/* Files put up for the message, over the box (11-13, as T3 Code and DeepSeek's
+   harness show them): a picture a 56px tile of it, its × on its corner; any
+   other file a card of its name and size; one going up, how far drawn on it;
+   one that failed, red, tried again by a tap. The row's end fades where there
+   is more of it to scroll to. */
+.attach-strip { display: flex; gap: 8px; padding: 8px 10px 0; overflow-x: auto; scrollbar-width: none; }
+.attach-strip::-webkit-scrollbar { display: none; }
+.attach-strip.is-more { -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 32px), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 32px), transparent); }
+.attach-chip { position: relative; flex: none; display: inline-flex; align-items: center; height: 56px; border-radius: var(--r); overflow: hidden;
+  background: color-mix(in srgb, var(--term-fg) 5%, transparent); border: 1px solid color-mix(in srgb, var(--term-fg) 12%, transparent); color: var(--term-fg); }
+.attach-chip.is-pic { width: 56px; }
+.attach-chip.is-file { width: 200px; }
 .attach-chip.is-other { opacity: 0.6; border-style: dashed; }
-.attach-open { display: inline-flex; align-items: center; gap: 7px; min-width: 0; height: 100%; padding: 0 2px 0 3px; border: 0; background: none; color: inherit; cursor: pointer; border-radius: 7px; font-size: var(--fs-sub); line-height: var(--lh-sub); }
+.attach-chip.is-failed { border-color: var(--term-danger-text); }
+.attach-chip.is-failed .attach-sub, .attach-chip.is-failed .attach-icon { color: var(--term-danger-text); }
+.attach-open { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; height: 100%; padding: 0 4px 0 8px; border: 0; background: none; color: inherit; cursor: pointer; text-align: left; font-size: var(--fs-sub); line-height: var(--lh-sub); }
+.attach-chip.is-pic .attach-open { padding: 0; justify-content: center; }
 .attach-open:disabled { cursor: default; }
-.attach-open:focus-visible, .attach-x:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: 1px; }
-.attach-thumb { width: 26px; height: 26px; border-radius: var(--r-sm); object-fit: cover; flex: none; background: color-mix(in srgb, var(--term-fg) 10%, transparent); }
-.attach-icon { width: 26px; height: 26px; display: grid; place-items: center; flex: none; color: var(--term-fg-2); }
+.attach-open:focus-visible, .attach-x:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: -2px; }
+.attach-thumb { display: block; width: 100%; height: 100%; object-fit: cover; }
+.attach-icon { width: 28px; height: 28px; display: grid; place-items: center; flex: none; border-radius: var(--r-sm); background: color-mix(in srgb, var(--term-fg) 6%, transparent); color: var(--term-fg-2); }
+.attach-text { display: flex; flex-direction: column; min-width: 0; }
 .attach-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.attach-x { flex: none; width: 26px; height: 100%; display: grid; place-items: center; border: 0; background: none; color: var(--term-fg-3); cursor: pointer; border-radius: 0 7px 7px 0; }
+.attach-sub { font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.attach-bar { position: absolute; left: 0; bottom: 0; height: 2px; background: var(--term-accent-text); transition: width 0.2s; }
+.attach-x { flex: none; width: 28px; height: 100%; display: grid; place-items: center; border: 0; background: none; color: var(--term-fg-3); cursor: pointer; }
 .attach-x:hover { color: var(--term-fg); background: color-mix(in srgb, var(--term-fg) 8%, transparent); }
-@media (pointer: coarse) { .attach-chip { height: 40px; } .attach-x { width: 36px; } }
+/* (On a picture's tile: a small round × on its corner — shown on hover or focus where there is hover, always on a touch screen.) */
+.attach-chip.is-pic .attach-x { position: absolute; top: 4px; right: 4px; width: 20px; height: 20px; border-radius: 50%; background: color-mix(in srgb, var(--term-fg) 72%, transparent); color: var(--term-bg); }
+.attach-chip.is-pic .attach-x:hover { background: var(--term-fg); color: var(--term-bg); }
+@media (hover: hover) { .attach-chip.is-pic .attach-x { opacity: 0; } .attach-chip.is-pic:hover .attach-x, .attach-chip.is-pic:focus-within .attach-x { opacity: 1; } }
+@media (pointer: coarse) { .attach-x { width: 36px; } .attach-chip.is-pic .attach-x { width: 24px; height: 24px; } }
 .composer-tools { display: flex; align-items: center; gap: 2px; height: 40px; padding: 0 4px 4px; }
 .term-root .composer-insert { height: 32px; color: var(--term-fg-2); font-weight: 500; }
 .term-root .composer-insert:hover { background: var(--term-hover); color: var(--term-fg); }
@@ -647,6 +665,27 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-user-fold { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 8; line-clamp: 8; overflow: hidden; }
 .term-root .convo-user-more { display: block; margin-top: 4px; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg-2); }
 /* The pictures of a message, each to be looked at. */
+/* A message's pictures, small, over its words: one at its own shape, 180 high;
+   more in one frame — two side by side, three one big and two, four and on in
+   two columns (an odd last across both). Fixed heights: a picture coming in
+   moves nothing under it. */
+.convo-thumbs { display: grid; gap: 2px; max-width: 100%; border-radius: var(--r-lg); overflow: hidden; }
+.convo-thumb { position: relative; display: block; min-width: 0; padding: 0; border: 0; background: color-mix(in srgb, var(--term-fg) 6%, transparent); cursor: zoom-in; overflow: hidden; }
+.convo-thumb:disabled { cursor: default; }
+.convo-thumb > img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.convo-thumb-mark { display: grid; place-items: center; width: 100%; height: 100%; color: var(--term-fg-3); }
+.convo-thumb.is-gone { cursor: pointer; }
+.convo-thumb:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: -2px; }
+.convo-thumbs.is-n1 > .convo-thumb { width: 180px; height: 180px; max-width: 100%; }
+.convo-thumbs.is-n2 { grid-template-columns: repeat(2, 150px); grid-auto-rows: 150px; }
+.convo-thumbs.is-n3 { grid-template-columns: repeat(2, 150px); grid-auto-rows: 100px; }
+.convo-thumbs.is-n3 > .convo-thumb:first-child { grid-row: span 2; }
+.convo-thumbs.is-n4 { grid-template-columns: repeat(2, 150px); grid-auto-rows: 110px; }
+.convo-thumbs.is-odd > .convo-thumb:last-child { grid-column: span 2; }
+@media (max-width: 640px) {
+  .convo-thumbs.is-n2, .convo-thumbs.is-n3, .convo-thumbs.is-n4 { grid-template-columns: repeat(2, minmax(0, 130px)); }
+  .convo-thumbs.is-n2 { grid-auto-rows: 130px; }
+}
 .convo-pics { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; white-space: normal; align-items: center; }
 .convo-pic { display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px; border-radius: 999px; border: 1px solid color-mix(in srgb, var(--term-fg) 18%, transparent);
   background: color-mix(in srgb, var(--term-bg) 55%, transparent); color: var(--term-fg-2); font-size: 13px; cursor: pointer; }

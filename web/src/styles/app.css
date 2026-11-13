@@ -766,7 +766,17 @@ details.adv > .form { margin-top: 16px; }
 /* A picture of the host, looked at: fitted to the window, under the shared
    viewer head (.dlg-head: its name, folder, the actions on it). */
 .dialog.picture-dialog { max-width: min(1100px, calc(100vw - 32px)); }
+.picture-stage { position: relative; flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
 .picture-body { flex: 1 1 auto; min-height: 160px; overflow: auto; display: grid; place-items: center; background: var(--bg-subtle); border-top: 1px solid var(--line); }
+.picture-img.is-big { cursor: zoom-in; }
+/* (At its own size: from its corner, scrolled about; centred where it is smaller than the stage.) */
+.picture-body.is-whole { place-items: start; }
+.picture-body.is-whole .picture-img { max-width: none; max-height: none; margin: auto; cursor: zoom-out; }
+.picture-step { position: absolute; top: 50%; z-index: 1; display: grid; place-items: center; width: 40px; height: 40px; margin-top: -20px; padding: 0; border: 1px solid var(--line); border-radius: 50%; background: var(--bg); color: var(--fg); box-shadow: var(--shadow-pop); cursor: pointer; }
+.picture-step.is-prev { left: 12px; }
+.picture-step.is-next { right: 12px; }
+.picture-step:hover { background: var(--bg-hover); }
+.picture-step:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .picture-img { display: block; max-width: 100%; max-height: calc(var(--vv-h, 100dvh) - 120px); object-fit: contain;
   background: repeating-conic-gradient(var(--bg-hover) 0 25%, transparent 0 50%) 0 0 / 16px 16px; }
 .picture-note { padding: 32px 20px; text-align: center; display: grid; gap: 12px; justify-items: center; color: var(--fg-2); }

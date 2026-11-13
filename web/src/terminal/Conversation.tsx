@@ -1,5 +1,5 @@
 import { createContext, Fragment, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { ArrowDown, ArrowUp, Check, Copy, FileText, FolderOpen, Info, Image as ImageIcon, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, Clock, Download, Eye, GitBranch, Keyboard, ListOrdered, Loader, MoreHorizontal, MoreVertical, PanelLeft, Pin, RotateCw, Search, Terminal, TriangleAlert, X, Plus } from 'lucide-react'
+import { ArrowDown, ArrowUp, Check, Copy, FileText, FolderOpen, Info, Image as ImageIcon, ImageOff, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, Clock, Download, Eye, GitBranch, Keyboard, ListOrdered, Loader, MoreHorizontal, MoreVertical, PanelLeft, Pin, RotateCw, Search, Terminal, TriangleAlert, X, Plus } from 'lucide-react'
 import { t, getLang, type I18nKey } from '../i18n'
 import { api } from '../api'
 import { asHeld, dayStart, FOLDED, foldAt, GROUPS, inGroup, listOrder, pinned, type ConvoListRow, type RowCmds } from './agentOrder'
@@ -19,6 +19,7 @@ import { ConvoSearchPanel } from './convoSearchPanel'
 import { ConvoTurnsPanel } from './convoTurnsPanel'
 import { ConvoRail, railCell, type RailTurn } from './convoRail'
 import { IMAGE_EXT, previewable } from './textPreview'
+import { useObjectURL } from './picture'
 import { previewOf } from './convoTurns'
 import { itemKey } from './convoSearch'
 import { exportMarkdown } from './convoExport'
@@ -3758,7 +3759,7 @@ const WordsAsWritten = createContext(false)
 // session the conversation is read through): shown in the files panel,
 // downloaded, looked at (a picture). Not there once that session has ended.
 // (tail: a file looked at from its end — a command's output, newest last.)
-export type FileActs = { reveal: (path: string) => void; download: (path: string) => void; view: (path: string) => void; tail?: (path: string) => void; open?: (dir: string) => void } // (open: a folder, opened in the file panel)
+export type FileActs = { reveal: (path: string) => void; download: (path: string) => void; view: (path: string, group?: string[]) => void; tail?: (path: string) => void; open?: (dir: string) => void; thumb?: (path: string, signal: AbortSignal) => Promise<Blob> } // (open: a folder, opened in the file panel; group: the pictures shown with it, gone through in the viewer; thumb: a picture to show small, asked of the host as the others are)
 const FileActsOf = createContext<FileActs | undefined>(undefined)
 
 // A path the host can be asked for: absolute. (A relative one is not made
@@ -4221,6 +4222,77 @@ function withPictures(text: string, open: ((p: string) => void) | null): ReactNo
   return parts
 }
 
+// A message's pictures, small, over its words (11-13: before, a chip each,
+// "图片 1", its picture seen only once opened). One: its own shape, a fixed
+// height (what comes in later moves nothing), as wide as its proportions say
+// within bounds; two or more, tiles in a frame. Each asked of the host only
+// once it is near the view — one at a time, as all pictures are (lookAt);
+// one not there any more says so.
+function PicGrid({ paths, thumb, onOpen }: { paths: (string | null)[]; thumb: (p: string, signal: AbortSignal) => Promise<Blob>; onOpen: (p: string) => void }) {
+  const n = paths.length
+  return (
+    <div className={'convo-thumbs is-n' + Math.min(n, 4) + (n > 4 && n % 2 ? ' is-odd' : '')}>
+      {paths.map((p, i) => (
+        <PicTile key={i} path={p} n={i + 1} one={n === 1} thumb={thumb} onOpen={onOpen} />
+      ))}
+    </div>
+  )
+}
+
+function PicTile({ path, n, one, thumb, onOpen }: { path: string | null; n: number; one: boolean; thumb: (p: string, signal: AbortSignal) => Promise<Blob>; onOpen: (p: string) => void }) {
+  const ref = useRef<HTMLButtonElement>(null)
+  const [near, setNear] = useState(false)
+  const [blob, setBlob] = useState<Blob | null>(null)
+  const [gone, setGone] = useState(false)
+  const [ratio, setRatio] = useState(0)
+  const url = useObjectURL(blob)
+  useEffect(() => {
+    const el = ref.current
+    if (!el || !path || near) return
+    const io = new IntersectionObserver((es) => es.some((x) => x.isIntersecting) && (setNear(true), io.disconnect()), { rootMargin: '300px 0px' })
+    io.observe(el)
+    return () => io.disconnect()
+  }, [path, near])
+  useEffect(() => {
+    if (!near || !path || blob) return
+    const ctl = new AbortController()
+    thumb(path, ctl.signal).then(
+      (b) => !ctl.signal.aborted && setBlob(b),
+      () => !ctl.signal.aborted && setGone(true),
+    )
+    return () => ctl.abort()
+  }, [near, path, blob, thumb])
+  // (One alone: 180 high, as wide as its shape says, 96 to 320.)
+  const width = one && ratio ? Math.round(Math.min(320, Math.max(96, 180 * Math.min(4, Math.max(0.25, ratio))))) : undefined
+  const said = t('convo.picN', { n })
+  return (
+    <button
+      ref={ref}
+      type="button"
+      className={'convo-thumb' + (gone ? ' is-gone' : '')}
+      style={width ? { width } : undefined}
+      disabled={!path}
+      onClick={() => path && onOpen(path)}
+      aria-label={gone ? t('convo.picGone', { name: said }) : said}
+      title={path ? (gone ? t('convo.picGone', { name: path }) : path) : t('convo.picUnknown')}
+    >
+      {url && !gone ? (
+        <img
+          src={url}
+          alt=""
+          decoding="async"
+          onLoad={(ev) => setRatio(ev.currentTarget.naturalWidth / Math.max(1, ev.currentTarget.naturalHeight))}
+          onError={() => setGone(true)}
+        />
+      ) : (
+        <span className="convo-thumb-mark" aria-hidden="true">
+          {gone ? <ImageOff size={18} /> : <ImageIcon size={18} />}
+        </span>
+      )}
+    </button>
+  )
+}
+
 function UserTurn({ e, onCopy }: { e: ConvoEntry; onCopy: (s: string) => void }) {
   const text = e.parts
     .filter((p) => p.kind === 'text')
@@ -4238,8 +4310,19 @@ function UserTurn({ e, onCopy }: { e: ConvoEntry; onCopy: (s: string) => void })
   // (A path written in the words is a chip where it stands — withPictures —
   // not again under them: these are the pictures with no words of theirs.)
   const files = acts ? told : []
-  const view = acts ? (p: string) => acts.view(p) : null
-  const shown = useMemo(() => withPictures(text, view), [text, acts])
+  // Shown small over the words, where the page can ask the host for them: the
+  // pictures it came with, and those it names by their whole path (one put up
+  // from here goes so) — each once, in order; gone through together in the viewer.
+  const grid = useMemo(() => {
+    if (!acts?.thumb) return null
+    const out: (string | null)[] = []
+    for (const f of files) if (!f || !out.includes(f)) out.push(f)
+    for (const m of text.matchAll(PICTURE_PATH)) if (m[1].startsWith('/') && !out.includes(m[1])) out.push(m[1])
+    return out.length ? out : null
+  }, [acts, text, e.parts])
+  const group = grid ? (grid.filter(Boolean) as string[]) : undefined
+  const view = acts ? (p: string) => acts.view(p, group) : null
+  const shown = useMemo(() => withPictures(text, view), [text, acts, grid])
   const any = files.some(Boolean)
   // (A shell command run with "!": in the terminal's letters, as typed.)
   const shell = /^! \S/.test(text)
@@ -4253,6 +4336,8 @@ function UserTurn({ e, onCopy }: { e: ConvoEntry; onCopy: (s: string) => void })
   const words = written ? <Markdown text={text} /> : shown
   return (
     <div className={'convo-user' + (e.mid ? ' is-mid' : '')}>
+      {grid && <PicGrid paths={grid} thumb={acts!.thumb!} onOpen={(p) => acts!.view(p, group)} />}
+      {(text.trim() || !grid) && (
       <div className={'convo-user-text' + (shell ? ' is-shell' : '') + (written ? ' is-written' : '')}>
         {long && !whole ? <span className="convo-user-fold">{words}</span> : words}
         {long && (
@@ -4261,7 +4346,7 @@ function UserTurn({ e, onCopy }: { e: ConvoEntry; onCopy: (s: string) => void })
           </button>
         )}
         {images > 0 && !told.some(Boolean) && !/\[Image #\d+\]/.test(text) && <span className="convo-image">{t(images === 1 ? 'convo.images1' : 'convo.images', { n: images })}</span>}
-        {any && (
+        {any && !grid && (
           <span className="convo-pics">
             {files.map((f, i) => {
               const said = files.length > 1 ? t('convo.picN', { n: i + 1 }) : t('convo.pic')
@@ -4281,6 +4366,7 @@ function UserTurn({ e, onCopy }: { e: ConvoEntry; onCopy: (s: string) => void })
         )}
         {e.parts.some((p) => p.truncated) && <p className="convo-cut">{t('convo.cut')}</p>}
       </div>
+      )}
       <div className="convo-meta">
         {e.mid && <span>{t('convo.midSent')}</span>}
         <span>{clock(e.ts)}</span>

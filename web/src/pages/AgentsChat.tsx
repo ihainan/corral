@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type ReactNode } from 'react'
-import { ArrowUp, ChevronLeft, Copy, FoldVertical, GitBranch, History, MessageSquarePlus, Paperclip, Pencil, Pin, PinOff, Power, Square, SquareSlash, SquareTerminal, TextCursorInput, X, Plus } from 'lucide-react'
+import { ArrowUp, ChevronLeft, Copy, FoldVertical, GitBranch, History, MessageSquarePlus, Paperclip, Pencil, Pin, PinOff, Power, Square, SquareSlash, SquareTerminal, TextCursorInput, Plus } from 'lucide-react'
 import { api, ApiError, authGen, errorText, uploadFile, type SessionInfo } from '../api'
 import { t, type I18nKey } from '../i18n'
 import { navigate, onNavigate } from '../router'
@@ -21,9 +21,9 @@ import { ForkDialog, RenameDialog, type RenameTarget } from '../terminal/agentOp
 import { agentWho, ChimeCounter, chime, countsOf } from '../terminal/chime'
 import { CODEX_EFFORTS, ConversationView, glanceOf, ListSearch, SEARCH_FROM, when, type ConvoAgent, type ConvoListRow, type ConvoPending, type ConvoWent, type FileActs, type ModelOpt } from '../terminal/Conversation'
 import { FilesDialog } from '../terminal/FilesDialog'
-import { downloadPath, PictureDialog } from '../terminal/picture'
+import { downloadPath, lookAt, PictureDialog } from '../terminal/picture'
 import { IMAGE_EXT, TextPreview } from '../terminal/textPreview'
-import { attach, ATTACH_LABEL, AttachStrip, takeOut } from '../terminal/attach'
+import { attach, ATTACH_LABEL, AttachStrip, PICTURE_PATH, takeOut, type Going } from '../terminal/attach'
 import { answerable, asking, useConversation, type ConvoEntry } from '../terminal/conversation'
 import { ackBg, waitingTitle, isCodex, isOpenCode, listAgents, matchQuery, paneName, paneTitle, readsLog, useRunningSessions, type AgentRow } from '../terminal/agents'
 import { dayBefore, dayStart, foldAt, foldedDay, listOrder, type RowCmds } from '../terminal/agentOrder'
@@ -817,6 +817,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   const [filesIn, setFilesIn] = useState(false) // (filesAt a folder to open, not a file to show in its folder)
   // A picture of its host looked at.
   const [viewing, setViewing] = useState<string | null>(null)
+  const [viewSet, setViewSet] = useState<string[] | null>(null) // (the pictures sent with the one looked at, gone through there)
   // A text file of its host read in the page.
   const [reading, setReading] = useState<string | null>(null)
   const [readingEnd, setReadingEnd] = useState(false) // (looked at from its end: a command's output)
@@ -837,8 +838,15 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       )
     }
     // (Looked at: a picture as one, anything else as text — the host says if it is. One at a time.)
-    const look = (q: string, end = false) => (IMAGE_EXT.test(q) ? (setReading(null), setViewing(q)) : (setViewing(null), setReadingEnd(end), setReading(q)))
-    return { reveal: (p) => whole(p, (q) => (setFilesIn(false), setFilesAt(q))), open: (p) => whole(p, (q) => (setFilesIn(true), setFilesAt(q))), download: (p) => whole(p, (q) => downloadPath(sid, q)), view: (p) => whole(p, (q) => look(q)), tail: (p) => whole(p, (q) => look(q, true)) }
+    const look = (q: string, end = false, group?: string[]) => (IMAGE_EXT.test(q) ? (setReading(null), setViewSet(group && group.length > 1 ? group : null), setViewing(q)) : (setViewing(null), setReadingEnd(end), setReading(q)))
+    return {
+      reveal: (p) => whole(p, (q) => (setFilesIn(false), setFilesAt(q))),
+      open: (p) => whole(p, (q) => (setFilesIn(true), setFilesAt(q))),
+      download: (p) => whole(p, (q) => downloadPath(sid, q)),
+      view: (p, group) => whole(p, (q) => look(q, false, group)),
+      tail: (p) => whole(p, (q) => look(q, true)),
+      thumb: (p, signal) => lookAt(sid, p, { signal }),
+    }
   }, [sid, toast])
   // (Another tab shown — a terminal's — or another agent: what was opened of this one's files closes.)
   useEffect(() => {
@@ -1481,6 +1489,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       if (left !== null) keepDraft(was, left)
     }
     upAbort.current?.abort() // (what goes up has its path for the agent before)
+    setUps([])
     // (Its pane first known: what was typed before was for it.)
     if (was === baseKey && !getDraft(draftKey)) {
       keepDraft(draftKey, getDraft(was))
@@ -1557,8 +1566,10 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   const insert = (text: string) => {
     const el = field.current
     const d = el ? el.value : draft
-    const a = el?.selectionStart ?? d.length
-    const b = el?.selectionEnd ?? a
+    // (Where the person is typing; else — a file come up after a tap elsewhere, a retry — at its end.)
+    const typing = !!el && document.activeElement === el
+    const a = typing ? el.selectionStart : d.length
+    const b = typing ? el.selectionEnd : a
     setDraft(d.slice(0, a) + text + d.slice(b))
     requestAnimationFrame(() => {
       const f = field.current
@@ -1572,8 +1583,14 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   }
   // Files (picked, pasted, dropped) go up to the host one at a time, each
   // path then put in the draft for the agent to read (not sent: there is
-  // more to say, as a rule). Sending waits for them.
-  const [up, setUp] = useState<{ name: string; p: number; abort: AbortController } | null>(null)
+  // more to say, as a rule). Sending waits for them. 11-13: taken in while
+  // others go up (they wait their turn), each shown over the box from the
+  // first — how far it has gone drawn on it; one that failed left there, to
+  // be tried again or taken out — not a line of its own, nor "wait" for a
+  // second file.
+  const [ups, setUps] = useState<(Going & { file: File; forKey: string; abort?: AbortController })[]>([])
+  const up = ups.find((u) => u.state !== 'failed') ?? null // (still to go up: sending waits)
+  const upN = useRef(0)
   const fileRef = useRef<HTMLInputElement>(null)
   // (Another agent shown, or the page left: what goes up is stopped, its path having nowhere to go.)
   const alive = useRef(true)
@@ -1585,33 +1602,49 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       upAbort.current?.abort()
     }
   }, [])
-  const upload = async (files: File[]) => {
-    if (up) return toast(t('term.waitUpload'), true)
+  const upload = (files: File[]) => {
     const forKey = draftKey // (its path is for this agent's draft only)
-    for (const f of files) {
-      if (!alive.current || lastKey.current !== forKey) break
-      const abort = new AbortController()
-      upAbort.current = abort
-      const name = f.name || 'image'
-      setUp({ name, p: 0, abort })
-      try {
-        const r = await uploadFile(sid, f, (p) => setUp((u) => (u?.abort === abort ? { ...u, p } : u)), abort.signal)
-        setUp((u) => (u?.abort === abort ? null : u))
-        const quoted = r.prefix === '@' ? geminiPath(r.path) : shellPath(r.path)
-        if (!alive.current || lastKey.current !== forKey) break
-        // (In the draft as a label, a chip over the box; sent as the path.)
-        if (quoted) insert(attach(f, r.path, quoted, cur.s.host_id) + ' ')
-        else toast(r.path)
-      } catch (e) {
-        setUp((u) => (u?.abort === abort ? null : u))
-        if (e instanceof ApiError && e.code === 'aborted') {
-          if (alive.current) toast(t('term.uploadStopped', { name }))
-          break
-        }
-        toast(errorText(e), true)
-      }
-    }
+    setUps((l) => [
+      ...l,
+      ...files.map((f) => {
+        const name = f.name || 'image'
+        return { id: ++upN.current, name, image: /^image\//.test(f.type) || PICTURE_PATH.test(name), size: f.size, p: 0, state: 'wait' as const, file: f, forKey }
+      }),
+    ])
   }
+  // (The next one up, once none is going.)
+  useEffect(() => {
+    if (ups.some((u) => u.state === 'going')) return
+    const u = ups.find((x) => x.state === 'wait')
+    if (!u) return
+    if (lastKey.current !== u.forKey) return setUps((l) => l.filter((x) => x.forKey === lastKey.current))
+    const abort = new AbortController()
+    upAbort.current = abort
+    const mine = (f: (x: (typeof ups)[number]) => (typeof ups)[number] | null) => setUps((l) => l.flatMap((x) => (x.id === u.id ? (f(x) ?? []) : [x])))
+    mine((x) => ({ ...x, state: 'going', p: 0, error: undefined, abort }))
+    uploadFile(sid, u.file, (p) => mine((x) => ({ ...x, p })), abort.signal).then(
+      (r) => {
+        if (!alive.current) return
+        mine(() => null)
+        const quoted = r.prefix === '@' ? geminiPath(r.path) : shellPath(r.path)
+        if (lastKey.current !== u.forKey) return
+        // (In the draft as a label, a chip over the box; sent as the path.)
+        if (quoted) insert(attach(u.file, r.path, quoted, cur.s.host_id) + ' ')
+        else toast(r.path)
+      },
+      (e) => {
+        if (!alive.current) return
+        if (e instanceof ApiError && e.code === 'aborted') return mine(() => null) // (taken out, or another agent shown)
+        mine((x) => ({ ...x, state: 'failed', error: errorText(e), abort: undefined }))
+      },
+    )
+  }, [ups])
+  const retryUp = (id: number) => setUps((l) => l.map((x) => (x.id === id ? { ...x, state: 'wait', p: 0, error: undefined } : x)))
+  const cancelUp = (id: number) =>
+    setUps((l) => {
+      l.find((x) => x.id === id)?.abort?.abort()
+      return l.filter((x) => x.id !== id)
+    })
   const [dragOver, setDragOver] = useState(false)
   // Going through what was sent (Up at the box's start, Down at its end).
   const historyStep = (dir: -1 | 1): boolean => {
@@ -1883,14 +1916,6 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     <div className={'composer' + (waits && agent?.status === 'blocked' ? ' is-held' : '') + (askHides ? ' is-asked' : '') + (panelOpen ? ' is-paneled' : '')}>
       {claudeCard.card && <CardNotice card={claudeCard.card} stale={claudeCard.stale} onPress={claudeCard.press} />}
       {completion.list}
-      {up && (
-        <div className="agents-chat-up" role="status">
-          <span>{t('term.uploading', { name: up.name })} {Math.round(up.p * 100)}%</span>
-          <button type="button" className="icon-btn" onClick={() => up.abort.abort()} aria-label={t('term.uploadStop')} title={t('term.uploadStop')}>
-            <X size={15} />
-          </button>
-        </div>
-      )}
       {/* (Why nothing can be sent now: over the box, where a phone shows it too;
           answered from the card, the card says what goes on.) */}
       {blocked && !(answered && agent?.status === 'blocked') && (
@@ -1913,7 +1938,10 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
           sid={sid}
           host={cur.s.host_id}
           onRemove={(l) => setDraft(takeOut(draft, l))}
-          onOpen={(a) => (a.image ? setViewing(a.path) : setFilesAt(a.path))}
+          onOpen={(a) => (a.image ? (setViewSet(null), setViewing(a.path)) : setFilesAt(a.path))}
+          going={ups}
+          onRetry={retryUp}
+          onCancel={cancelUp}
         />
         <textarea
           ref={field}
@@ -2304,6 +2332,8 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       <PictureDialog
         sid={sid}
         path={viewing}
+        group={viewSet && viewSet.includes(viewing) ? viewSet : undefined}
+        onGo={setViewing}
         onClose={() => setViewing(null)}
         onReveal={() => {
           setViewing(null)
