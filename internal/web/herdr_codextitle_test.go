@@ -54,15 +54,58 @@ func TestCodexName(t *testing.T) {
 	}
 }
 
-func TestParseCodexTitles(t *testing.T) {
-	out := "w2:p1\x1fid1\x1f\x1f[Image #1] 检查红圈\x1ffirst\x00" +
-		"w3:p1\x1fid2\x1fnamed\x1ft\x1ff\x00" +
-		"bad pane\x1fid\x1fn\x1ft\x1ff\x00" + // (not a pane id)
-		"w4:p1\x1fid3\x1f\x1f\x1f\x00" + // (nothing to show)
-		"w5:p1\x1fshort\x00" // (cut off)
-	got := parseCodexTitles(out)
-	if len(got) != 2 || got["w2:p1"] != "检查红圈" || got["w3:p1"] != "named" {
-		t.Fatalf("got %v", got)
+func TestParseCodexPanes(t *testing.T) {
+	const a = "01a1cd3b-8a27-75f1-ba56-dd9f7f22cd01"
+	const b = "01a1cd3b-8685-7b23-9bfc-b218af59d6d1"
+	rec := func(f ...string) string { return strings.Join(f, "\x1f") + "\x00" }
+	out := rec("w2:p1", "965934", "69873389", "1794460425000", "/home/u/AI", a, "/home/u/.codex/sessions/2026/11/12/rollout-2026-11-12T08-49-53-"+a+".jsonl", "", "[Image #1] 检查红圈", "first") +
+		rec("w3:p1", "100", "200", "0", "/home/u/AI", b, "/home/u/.codex/sessions/x/rollout-1-"+a+".jsonl", "named", "t", "f") + // (a log of another thread)
+		rec("w4:p1", "101", "201", "0", "/x", b, "/home/u/.codex/sessions/../../etc/rollout-1-"+b+".jsonl", "", "", "") + // (a path leaving its folder)
+		rec("w5:p1", "102", "202", "0", "/x", b, "/home/u/.codex/sessions/x/rollout-1-"+b+"_2.jsonl", "", "", "") + // (a segment)
+		rec("w6:p1", "103", "203", "0", "/x", "", "", "", "", "") + // (no thread known)
+		rec("w7:p1", "104", "204", "0", "/x", a, "", "", "", "") + rec("w7:p1", "105", "205", "0", "/x", b, "", "", "", "") + // (two in one pane)
+		rec("bad pane", "1", "2", "0", "/x", a, "", "", "", "") +
+		rec("w8:p1", "0", "2", "0", "/x", a, "", "", "", "") + // (no process)
+		"w9:p1\x1fshort\x00"
+	got := parseCodexPanes(out)
+	if w := got["w2:p1"]; w.PID != 965934 || w.Start != 69873389 || w.Started != 1794460425000 || w.Thread != a || !strings.HasSuffix(w.Path, a+".jsonl") || w.Cwd != "/home/u/AI" {
+		t.Fatalf("w2: %+v", w)
+	}
+	if got["w3:p1"].Path != "" || got["w4:p1"].Path != "" || got["w5:p1"].Path == "" || got["w6:p1"].Thread != "" {
+		t.Fatalf("paths: %+v %+v %+v %+v", got["w3:p1"], got["w4:p1"], got["w5:p1"], got["w6:p1"])
+	}
+	if !got["w7:p1"].Several || got["w7:p1"].Thread != "" {
+		t.Fatalf("two in a pane: %+v", got["w7:p1"])
+	}
+	if _, ok := got["bad pane"]; ok {
+		t.Fatal("a bad pane id taken")
+	}
+	if _, ok := got["w8:p1"]; ok {
+		t.Fatal("no process taken")
+	}
+	names := codexNames(got)
+	if names["w2:p1"] != "检查红圈" || names["w3:p1"] != "named" || names["w7:p1"] != "" || len(names) != 2 {
+		t.Fatalf("names %v", names)
+	}
+}
+
+func TestCodexTitleAgrees(t *testing.T) {
+	for _, c := range []struct {
+		title, cwd, name string
+		want             bool
+	}{
+		{"调研项目最新进展 | AI", "/x/AI", "调研项目最新进展", true},
+		{"⠋ 调研项目最新进展 | AI", "/x/AI", "调研项目最新进展", true},
+		{"AI", "/x/AI", "", true},                    // (no name: the folder alone)
+		{"AI", "/x/AI", "named since", false},        // (a thread with a name, its title bare: another one)
+		{"新会话 | AI", "/x/AI", "调研项目最新进展", false},     // (another thread: /new, /resume)
+		{"新会话 | AI", "/x/AI", "", false},             // (a name where the thread has none)
+		{"调研项目最... | AI", "/x/AI", "调研项目最新进展", true}, // (cut short)
+		{"something else", "/x/AI", "x", false},      // (a title of another form)
+	} {
+		if got := codexTitleAgrees(c.title, c.cwd, c.name); got != c.want {
+			t.Errorf("%q %q %q: %v", c.title, c.cwd, c.name, got)
+		}
 	}
 }
 

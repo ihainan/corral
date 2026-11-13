@@ -73,3 +73,54 @@ func TestCodexTaskNoticePresentation(t *testing.T) {
 		t.Fatal("task notice became a title")
 	}
 }
+
+// A Claude Code session imported into Codex (0.164's import): its tools'
+// calls and results as written there, its command envelopes in the
+// person's rows, the import's own mark.
+func TestCodexClaudeImport(t *testing.T) {
+	assistant := func(text string) []byte {
+		row, _ := json.Marshal(map[string]any{"type": "response_item", "payload": map[string]any{"type": "message", "role": "assistant", "content": []map[string]string{{"type": "output_text", "text": text}}}})
+		return append(row, '\n')
+	}
+	user := func(turn, text string) []byte {
+		row, _ := json.Marshal(map[string]any{"type": "event_msg", "payload": map[string]any{"type": "item_completed", "turn_id": turn, "item": map[string]any{"type": "UserMessage", "id": "u" + turn, "content": []map[string]string{{"type": "text", "text": text}}}}})
+		return append(row, '\n')
+	}
+	var log []byte
+	log = append(log, user("external-import-turn-1", "<command-name>/model</command-name>\n            <command-message>model</command-message>\n            <command-args>sonnet</command-args>")...)
+	log = append(log, user("external-import-turn-1", "<local-command-stdout>Set model to `Sonnet 5.5` and saved as your default for new sessions</local-command-stdout>")...)
+	log = append(log, user("external-import-turn-1", "<system-reminder>internal</system-reminder>")...)
+	log = append(log, user("external-import-turn-2", "看一下 dashboard")...)
+	log = append(log, assistant("[external_agent_tool_call: Bash]\ndescription: Download dashboard homepage\ncommand: curl -s https://example.org/\n[/external_agent_tool_call]")...)
+	log = append(log, assistant("[external_agent_tool_result]\n200 163187\n<!DOCTYPE html>")...)
+	log = append(log, assistant("[external_agent_tool_result]\nan orphan result")...)
+	log = append(log, assistant("好的，页面已下载。")...)
+	log = append(log, assistant("<EXTERNAL SESSION IMPORTED>")...)
+	// (Not imported: the person's own words, whatever they look like.)
+	log = append(log, user("turn-9", "<command-name>/model</command-name>")...)
+	p := NewCodex()
+	p.Feed(log)
+	var got []string
+	for _, e := range p.Since(0) {
+		for _, pt := range e.Parts {
+			switch {
+			case pt.Tool != nil:
+				got = append(got, e.Role+" tool "+pt.Tool.Name+" | "+pt.Tool.Title+" | "+pt.Tool.Detail+" | "+pt.Tool.Result)
+			default:
+				got = append(got, e.Role+" "+pt.Text)
+			}
+		}
+	}
+	want := []string{
+		"user /model sonnet",
+		"note Set model to `Sonnet 5.5` and saved as your default for new sessions",
+		"user 看一下 dashboard",
+		"assistant tool Bash | Download dashboard homepage | curl -s https://example.org/ | 200 163187\n<!DOCTYPE html>",
+		"assistant tool result |  |  | an orphan result",
+		"assistant 好的，页面已下载。",
+		"user <command-name>/model</command-name>",
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("got\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}

@@ -49,6 +49,9 @@ type Codex struct {
 	ctxSaid    bool
 	effortSaid bool // an effective setting, including the default (null), was read
 	errSaid    bool // (an older Codex's error row said what went wrong with this turn)
+	// importCall: the last imported tool call (see importedRecord) whose
+	// result has not come: the next imported result is its.
+	importCall *Tool
 	Skipped    int
 	// Turns, to tell what a backtrack takes back: the first entry of each
 	// turn not taken back (a turn starts at task_started; its first entry is
@@ -689,6 +692,7 @@ type codexPayload struct {
 		Branch string `json:"branch"`
 	} `json:"git"`
 	ForkedFrom string `json:"forked_from_id"` // (session_meta: a copy's, "codex fork" — its log has only what came after)
+	TurnID     string `json:"turn_id"`        // (item_completed: an imported turn's is "external-import-turn-<n>")
 	// compacted; user_message and error (older Codex)
 	Message string `json:"message"`
 	// web_search_end, view_image_tool_call, mcp_tool_call_end (older Codex)
@@ -839,6 +843,20 @@ func (c *Codex) event(r *codexRow, p *codexPayload) {
 					text := b.Text
 					if pics > 0 {
 						text = codexNoPlaceholders(b) // (its pictures shown as such)
+					}
+					// (Imported from Claude Code: its own envelopes in what the
+					// person's rows hold — a command run, its output, a
+					// reminder — told as Claude Code's are.)
+					if strings.HasPrefix(p.TurnID, "external-import-turn-") {
+						role, said := classifyUserText(text)
+						switch role {
+						case "":
+							continue
+						case RoleNote:
+							c.add(r, "", RoleNote, []Part{textPart(KindText, said)})
+							continue
+						}
+						text = said
 					}
 					if strings.TrimSpace(text) != "" {
 						parts = append(parts, textPart(KindText, text))
@@ -1262,9 +1280,23 @@ func (c *Codex) item(r *codexRow, p *codexPayload) {
 		}
 		var parts []Part
 		for _, b := range codexContent(p.Content) {
-			if t := strings.TrimSpace(b.Text); t != "" {
-				parts = append(parts, codexDisplayParts(b.Text)...)
+			t := strings.TrimSpace(b.Text)
+			if t == "" || t == codexImportMark {
+				continue
 			}
+			// (An imported tool's result: its call's, on that call's line.)
+			if kind, _, body, ok := importedRecord(b.Text); ok && kind == "result" && c.importCall != nil {
+				c.importCall.setResult(clean(body))
+				c.importCall.ResultLines = lineCount(body)
+				c.touch([]*Tool{c.importCall})
+				c.importCall = nil
+				continue
+			}
+			got := codexDisplayParts(b.Text)
+			if kind, _, _, ok := importedRecord(b.Text); ok && kind == "call" && len(got) == 1 && got[0].Tool != nil && got[0].Tool.Result == "" {
+				c.importCall = got[0].Tool
+			}
+			parts = append(parts, got...)
 		}
 		c.add(r, p.ID, RoleAssistant, parts)
 	case "reasoning":

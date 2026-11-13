@@ -2026,6 +2026,12 @@ func (s *Server) locateConvo(ctx context.Context, sess *term.Session, st *convoS
 	// within the last second, not one shared from further back — its first
 	// message begins its log, and what is sent next must be of that
 	// session. Looks at once, of other windows too, share the one.)
+	// (A herdr pane's Codex, told by the host in a short look: no scan. Not
+	// where a press found another process since: that is told by a scan
+	// begun after it.)
+	if sess.Persistence == "herdr" && pane != "" && st.scanAfter.IsZero() && s.locateCodexFast(ctx, sess, st, pane) {
+		return nil
+	}
 	var after time.Time
 	if st.bind != nil && st.bind.Agent == "codex" && (st.bind.Session == convoNoSession || st.reason == convoNoLog) {
 		after = time.Now().Add(-time.Second)
@@ -2161,6 +2167,14 @@ func (s *Server) locateConvo(ctx context.Context, sess *term.Session, st *convoS
 	if reason == "" && agent == "opencode" && st.reason == convoNoReader && sid == st.sid && log == st.log && time.Since(st.noReaderAt) < time.Minute {
 		reason = convoNoReader
 	}
+	st.adopt(sid, log, agent, reason)
+	return nil
+}
+
+// adopt takes what a look found the pane at: its conversation (sid, its
+// log, of agent), or why none is read (reason). Another than before is read
+// anew, from its end.
+func (st *convoState) adopt(sid, log, agent, reason string) {
 	if sid != st.sid || log != st.log || agent != st.agent {
 		st.gen = convoGens.Add(1)
 		st.sid, st.log, st.agent = sid, log, agent
@@ -2174,7 +2188,6 @@ func (s *Server) locateConvo(ctx context.Context, sess *term.Session, st *convoS
 	if st.parser != nil && st.bind != nil {
 		st.parser.QueueSince(st.bind.started)
 	}
-	return nil
 }
 
 // readConvo reads what the log gained since the last read: from the end at

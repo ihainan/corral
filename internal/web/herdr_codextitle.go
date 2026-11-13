@@ -9,8 +9,6 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
-
-	"github.com/ihainan/corral/internal/sshx"
 )
 
 // A Codex pane's name for what it does. Codex titles its terminal
@@ -28,7 +26,6 @@ import (
 const (
 	codexTitleEvery = 2 * time.Minute
 	codexTitleSoon  = 2 * time.Second
-	codexTitleMax   = 64 << 10 // (the host's answer, at most)
 	codexNameRunes  = 80
 )
 
@@ -234,133 +231,4 @@ func (c *codexTitler) run(ctx context.Context) {
 			poke()
 		}
 	}
-}
-
-// codexTitlesCommand prints, for each interactive Codex of the user's on
-// the herdr server at socket, its pane and what Codex's database has of its
-// thread (see parseCodexTitles). Nothing where the host has no python3.
-func codexTitlesCommand(socket string) string {
-	return `command -v python3 >/dev/null 2>&1 || exit 0
-exec python3 -I -c ` + sshx.QuoteShell(codexTitlesScript) + ` ` + sshx.QuoteShell(socket)
-}
-
-// (The thread: the conversation log it has open, else the one named by
-// `codex resume <id>`. Its database: the newest state_<n>.sqlite of its
-// CODEX_HOME, read only. A record: pane, thread, name, title, first message,
-// split by \x1f, ended by \0.)
-const codexTitlesScript = `import os, re, sqlite3, sys
-sock = sys.argv[1]
-uid = os.getuid()
-UUID = re.compile(r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}')
-TAKES = re.compile(r'^(-[cmpsaCi]|--(config|model|profile|sandbox|ask-for-approval|cd|image|add-dir|local-provider|remote|remote-auth-token-env|enable|disable))$')
-def sub_and_id(args):
-    pos, skip = [], False
-    for a in args:
-        if skip:
-            skip = False
-            continue
-        if a == '--':
-            break
-        if a.startswith('-'):
-            skip = bool(TAKES.match(a))
-            continue
-        pos.append(a)
-        if len(pos) == 2:
-            break
-    sub = pos[0] if pos else ''
-    tid = pos[1] if sub == 'resume' and len(pos) > 1 and UUID.fullmatch(pos[1]) else ''
-    return sub, tid
-found = {}
-for d in os.listdir('/proc'):
-    if not d.isdigit():
-        continue
-    p = '/proc/' + d
-    try:
-        if os.stat(p).st_uid != uid:
-            continue
-        with open(p + '/comm') as f:
-            if f.read().strip() != 'codex':
-                continue
-        with open(p + '/environ', 'rb') as f:
-            env = dict(x.split(b'=', 1) for x in f.read().split(b'\0') if b'=' in x)
-        with open(p + '/cmdline', 'rb') as f:
-            args = [a.decode('utf-8', 'replace') for a in f.read().split(b'\0')[1:]]
-    except OSError:
-        continue
-    if env.get(b'HERDR_SOCKET_PATH', b'').decode('utf-8', 'replace') != sock:
-        continue
-    pane = env.get(b'HERDR_PANE_ID', b'').decode('utf-8', 'replace')
-    if not pane or len(pane) > 64:
-        continue
-    sub, tid = sub_and_id(args)
-    if sub not in ('', 'resume'):
-        continue
-    home = env.get(b'CODEX_HOME', b'').decode('utf-8', 'replace') or os.path.join(env.get(b'HOME', b'').decode('utf-8', 'replace') or os.path.expanduser('~'), '.codex')
-    newest = 0
-    try:
-        fds = os.listdir(p + '/fd')
-    except OSError:
-        fds = []
-    for fd in fds:
-        try:
-            l = os.readlink(p + '/fd/' + fd)
-        except OSError:
-            continue
-        if l.startswith(home.rstrip('/') + '/sessions/') and l.endswith('.jsonl'):
-            m = UUID.search(os.path.basename(l))
-            try:
-                t = os.stat(l).st_mtime
-            except OSError:
-                t = 0
-            if m and t >= newest:
-                newest, tid = t, m.group(0)
-    if tid:
-        found[pane] = (home, tid)
-def db_of(home):
-    best, n = None, -1
-    try:
-        names = os.listdir(home)
-    except OSError:
-        return None
-    for name in names:
-        m = re.fullmatch(r'state_(\d+)\.sqlite', name)
-        if m and int(m.group(1)) > n:
-            best, n = os.path.join(home, name), int(m.group(1))
-    return best
-def clean(s):
-    return (s or '')[:2000].replace('\0', ' ').replace('\x1f', ' ')
-out = sys.stdout.buffer
-dbs = {}
-for pane, (home, tid) in sorted(found.items()):
-    if home not in dbs:
-        db = db_of(home)
-        try:
-            dbs[home] = sqlite3.connect('file:' + db + '?mode=ro', uri=True, timeout=2) if db else None
-        except sqlite3.Error:
-            dbs[home] = None
-    con = dbs[home]
-    if con is None:
-        continue
-    try:
-        row = con.execute('SELECT name, title, first_user_message FROM threads WHERE id = ?', (tid,)).fetchone()
-    except sqlite3.Error:
-        continue
-    if row:
-        out.write('\x1f'.join([pane, tid] + [clean(v) for v in row]).encode('utf-8', 'replace') + b'\0')
-`
-
-// parseCodexTitles reads codexTitlesCommand's records: pane → the name its
-// thread is shown by (see codexName).
-func parseCodexTitles(out string) map[string]string {
-	got := map[string]string{}
-	for _, rec := range strings.Split(out, "\x00") {
-		f := strings.Split(rec, "\x1f")
-		if len(f) != 5 || !herdrPaneID.MatchString(f[0]) {
-			continue
-		}
-		if n := codexName(f[2], f[3], f[4]); n != "" {
-			got[f[0]] = n
-		}
-	}
-	return got
 }

@@ -376,6 +376,29 @@ type watchedServer struct {
 	again  func()                              // (its watcher's: read it again soon)
 }
 
+// paneOf: a pane as its watcher's last snapshot has it (its agent's entry
+// before the pane's own); none where it has none.
+func (h *herdrSockets) paneOf(id, pane string) (herdr.Pane, bool) {
+	h.mu.Lock()
+	w, ok := h.server[id]
+	h.mu.Unlock()
+	if !ok || w.latest == nil {
+		return herdr.Pane{}, false
+	}
+	snap, _ := w.latest()
+	if snap == nil {
+		return herdr.Pane{}, false
+	}
+	for _, list := range [][]herdr.Pane{snap.Agents, snap.Panes} {
+		for _, p := range list {
+			if p.ID == pane {
+				return p, true
+			}
+		}
+	}
+	return herdr.Pane{}, false
+}
+
 // poke has a session's watcher read herdr again soon, if it has one.
 func (h *herdrSockets) poke(id string) {
 	h.mu.Lock()
@@ -599,6 +622,7 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 		cancel()
 	}()
 	defer s.herdrSocks.set(sess.ID, "")
+	defer s.codexPanes.forget(sess.ID)
 
 	// herdr starts its server when the session attaches; give it a moment.
 	var socket string
@@ -673,11 +697,11 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 	})
 	go cmds.run(ctx)
 	titles := newCodexTitler(func(ctx context.Context) (map[string]string, error) {
-		out, err := sshx.Output(ctx, sess.Client(), codexTitlesCommand(socket), codexTitleMax)
+		panes, err := s.codexPanes.of(ctx, sess, socket)
 		if err != nil {
 			return nil, err
 		}
-		return parseCodexTitles(string(out)), nil
+		return codexNames(panes), nil
 	})
 	go titles.run(ctx)
 	// When each agent last wrote to its log: what the panes the gateway

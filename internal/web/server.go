@@ -57,6 +57,7 @@ type Server struct {
 	static   fs.FS
 
 	herdrSocks   herdrSockets
+	codexPanes   codexPaneLooks   // what each herdr server's Codex panes run, looked at shortly (codex_panes.go)
 	convoClaimed convoClaims      // (which Codex each conversation was found to be of)
 	ocContested  ocContests       // (folders where two OpenCodes ran at once)
 	herdrTimes   herdrServers     // when each herdr server's agents last changed (shared by its watchers)

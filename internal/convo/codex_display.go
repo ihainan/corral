@@ -7,7 +7,37 @@ import (
 	"strings"
 )
 
-var externalCall = regexp.MustCompile(`^\[external agent tool (call|result): ([A-Za-z0-9_.:+-]{1,128})\]\s*\n`)
+// A tool's call or result as an import from another agent (Claude Code's,
+// by Codex's own import) writes it in an assistant message:
+// "[external_agent_tool_call: Bash]\n…\n[/external_agent_tool_call]" and
+// "[external_agent_tool_result]\n…" (seen so in 0.164's imports; spaced, by
+// the app server's account of them).
+var (
+	externalCall    = regexp.MustCompile(`^\[external[ _]agent[ _]tool[ _](call|result)(?::\s*([A-Za-z0-9_.:+-]{1,128}))?\]\s*(?:\n|$)`)
+	externalCallEnd = regexp.MustCompile(`\n?\[/external[ _]agent[ _]tool[ _]call\]\s*$`)
+)
+
+// codexImportMark: the message an import ends with ("<EXTERNAL SESSION
+// IMPORTED>"): Codex's own mark, nothing said by anyone.
+const codexImportMark = "<EXTERNAL SESSION IMPORTED>"
+
+// importedRecord: an imported tool's call or result (kind "call" or
+// "result"; a result names none), its body; ok false, another message.
+func importedRecord(text string) (kind, name, body string, ok bool) {
+	m := externalCall.FindStringSubmatchIndex(text)
+	if m == nil {
+		return "", "", "", false
+	}
+	kind = text[m[2]:m[3]]
+	if m[4] >= 0 {
+		name = text[m[4]:m[5]]
+	}
+	if kind == "call" && name == "" {
+		return "", "", "", false
+	}
+	body = strings.TrimSpace(externalCallEnd.ReplaceAllString(text[m[1]:], ""))
+	return kind, name, body, true
+}
 
 func codexTaskNotice(text string) *Event {
 	text, ok := noticeOf(text)
@@ -27,12 +57,13 @@ func codexTaskNotice(text string) *Event {
 // of being rendered as a page-long assistant message. Only an exact record
 // header at the start of an assistant block is interpreted.
 func codexDisplayParts(text string) []Part {
-	m := externalCall.FindStringSubmatchIndex(text)
-	if m == nil {
+	kind, name, body, ok := importedRecord(text)
+	if !ok {
 		return []Part{textPart(KindText, text)}
 	}
-	kind, name := text[m[2]:m[3]], text[m[4]:m[5]]
-	body := strings.TrimSpace(text[m[1]:])
+	if name == "" {
+		name = "result"
+	}
 	tool := &Tool{Name: name, Done: true}
 	if kind == "result" {
 		tool.setResult(body)
