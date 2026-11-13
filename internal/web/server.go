@@ -57,6 +57,7 @@ type Server struct {
 	static   fs.FS
 
 	herdrSocks   herdrSockets
+	gitCalls     gitCalls         // the session card's git state, per folder (git_info.go)
 	codexPanes   codexPaneLooks   // what each herdr server's Codex panes run, looked at shortly (codex_panes.go)
 	convoClaimed convoClaims      // (which Codex each conversation was found to be of)
 	ocContested  ocContests       // (folders where two OpenCodes ran at once)
@@ -256,6 +257,8 @@ func (s *Server) registerRoutes() {
 	s.handle("GET /api/shared/{id}/ws", SignedIn, s.apiWatchSocket)
 	s.handle("GET /api/sessions/{id}/files", SignedIn, s.apiFilesList)
 	s.handle("GET /api/sessions/{id}/files/cwd", SignedIn, s.apiFilesCwd)
+	s.handle("GET /api/sessions/{id}/git", SignedIn, s.apiGitInfo)
+	s.handle("GET /api/sessions/{id}/git/pr", SignedIn, s.apiGitPR)
 	s.handle("GET /api/sessions/{id}/files/download", SignedIn, s.apiFilesDownload)
 	s.handle("GET /api/sessions/{id}/files/view", SignedIn, s.apiFilesView)
 	s.handle("GET /api/sessions/{id}/files/text", SignedIn, s.apiFilesText)
