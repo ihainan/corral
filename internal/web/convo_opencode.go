@@ -210,6 +210,8 @@ def v2rows(m):
         if isinstance(md, dict):
             if isinstance(md.get('id'), str): o['modelID'] = md['id'][:200]
             if isinstance(md.get('providerID'), str): o['providerID'] = md['providerID'][:200]
+            if isinstance(md.get('variant'), str): o['variant'] = md['variant'][:64]
+        if isinstance(d.get('agent'), str): o['agent'] = d['agent'][:64]
         if isinstance(d.get('finish'), str): o['finish'] = d['finish'][:64]
         if isinstance(d.get('tokens'), dict): o['tokens'] = d['tokens']
         e = d.get('error')

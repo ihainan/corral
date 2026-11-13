@@ -29,8 +29,10 @@ type OpenCode struct {
 	orphans map[string]map[string]ocPart
 	title   string
 	meta    Meta
-	tasks   []Task
-	tasksAt int64 // (when the task list kept was written)
+	// modeAt, effortAt: when the step that said meta's Mode and Effort was made.
+	modeAt, effortAt int64
+	tasks            []Task
+	tasksAt          int64 // (when the task list kept was written)
 	// floor: the first message read back to (created, id): one before it,
 	// fed as it is written over (an old one's summary, say), is not taken
 	// for new; reading back goes on from it. (hasFloor: there is one.)
@@ -119,7 +121,13 @@ type ocMessage struct {
 	Role       string `json:"role"`
 	ModelID    string `json:"modelID"`
 	ProviderID string `json:"providerID"`
-	Model      *struct {
+	// (2.x: the agent it ran as — build, plan, or one of the person's own —
+	// and the model's variant, how hard it thinks: high, say. 1.x said the
+	// agent as "mode".)
+	Agent   string `json:"agent"`
+	Mode    string `json:"mode"`
+	Variant string `json:"variant"`
+	Model   *struct {
 		ModelID string `json:"modelID"`
 	} `json:"model"`
 	Finish string `json:"finish"`
@@ -503,6 +511,14 @@ func (c *OpenCode) show(m *ocMsg) {
 // saw takes what an answer says of the session: its model, how full the
 // context is, whether it goes on (the latest answer's say).
 func (c *OpenCode) saw(m *ocMsg) {
+	// (What its status line shows beside the model, "Build · … · high":
+	// of the newest step that says it — a step that went wrong may not.)
+	if a := firstNonEmpty(m.data.Agent, m.data.Mode); a != "" && m.created >= c.modeAt {
+		c.meta.Mode, c.modeAt = clip(clean(a), maxMeta), m.created
+	}
+	if v := clean(m.data.Variant); v != "" && m.created >= c.effortAt {
+		c.meta.Effort, c.effortAt = clip(v, maxMeta), m.created
+	}
 	latest := true
 	for _, o := range c.msgs {
 		if o.data.Role == "assistant" && (o.created > m.created || (o.created == m.created && o.id > m.id)) {
@@ -778,6 +794,12 @@ func (c *OpenCode) Prepend(other Parser) {
 	}
 	if c.meta.Model == "" {
 		c.meta.Model = o.meta.Model
+	}
+	if c.meta.Mode == "" {
+		c.meta.Mode, c.modeAt = o.meta.Mode, o.modeAt
+	}
+	if c.meta.Effort == "" {
+		c.meta.Effort, c.effortAt = o.meta.Effort, o.effortAt
 	}
 	if c.meta.Context == 0 {
 		c.meta.Context = o.meta.Context

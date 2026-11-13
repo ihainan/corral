@@ -2103,7 +2103,8 @@ function tokens(n: number): string {
 
 // (Claude Code's permission modes; Codex's approval policies.)
 const MODES = ['default', 'acceptEdits', 'plan', 'auto', 'bypassPermissions', 'dontAsk', 'untrusted', 'on-failure', 'on-request', 'never', 'unknown'] as const
-const modeName = (m: string) => ((MODES as readonly string[]).includes(m) ? t(`convo.mode.${m}` as I18nKey) : m)
+// (One of none of these: OpenCode's agent — build, or one of the person's own — as its status line has it, capitalised.)
+const modeName = (m: string) => ((MODES as readonly string[]).includes(m) ? t(`convo.mode.${m}` as I18nKey) : m.charAt(0).toUpperCase() + m.slice(1))
 
 // Switching the permission mode from the page, to one picked from a menu
 // (Shift+Tab until it is there, on the host): now, what the last switch went

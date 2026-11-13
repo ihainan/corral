@@ -90,7 +90,7 @@ func ocSaid(p *convo.OpenCode) []string {
 var ocV2Talk = [][]any{
 	{"user", "msg_b0000000001", 4, 110, 111, map[string]any{"time": map[string]any{"created": 110}, "text": "run it", "files": []any{}, "agents": []any{}}},
 	{"assistant", "msg_b0000000002", 5, 120, 160, map[string]any{"time": map[string]any{"created": 120, "streamed": 150, "completed": 159}, "agent": "build",
-		"model": map[string]any{"id": "deepseek-v4.1-flash", "providerID": "opencode-go"}, "finish": "tool-calls",
+		"model": map[string]any{"id": "deepseek-v4.1-flash", "providerID": "opencode-go", "variant": "high"}, "finish": "tool-calls",
 		"tokens": map[string]any{"input": 2000, "output": 40, "reasoning": 0, "cache": map[string]any{"read": 1000, "write": 0}},
 		"content": []any{
 			map[string]any{"type": "reasoning", "text": "Run the echo."},
@@ -126,6 +126,10 @@ func TestOpenCode2Read(t *testing.T) {
 	}, "\n")
 	if got != want {
 		t.Fatalf("got\n%s\nwant\n%s", got, want)
+	}
+	// (Its status line's "Build · … · high": the agent it ran as and its variant, kept from the step that said them.)
+	if m := p.Meta(); m.Mode != "build" || m.Effort != "high" {
+		t.Errorf("agent and variant: %+v", m)
 	}
 	if p.Skipped != 0 || p.Title() != "Greeting" || p.Meta().Model != "deepseek-v4.1-flash" || p.Status() != "idle" {
 		t.Fatalf("skipped %d, title %q, model %q, status %q", p.Skipped, p.Title(), p.Meta().Model, p.Status())
