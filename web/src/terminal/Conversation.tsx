@@ -24,7 +24,7 @@ import { itemKey } from './convoSearch'
 import { exportMarkdown } from './convoExport'
 import { AgentIcon } from './agentIcons'
 import { matchQuery } from './agents'
-import { keptEntries } from './conversation'
+import { callOut, keptEntries } from './conversation'
 import { ShowTerminal } from './showTerminal'
 import { FileTypeIcon } from './fileIcons'
 import { categoryIcon, stepIcon, ThinkIcon, WorkIcon } from './stepIcons'
@@ -485,8 +485,10 @@ export function ConversationView({
   // (Long: by how long since its log last grew, as the gateway counts it;
   // not while reading fails, which is said otherwise.)
   const quietLong = working && !convo.failing && convo.quietAt !== undefined && now - convo.quietAt >= QUIET_LONG ? now - convo.quietAt : 0
-  // (Subagents it sent off still out, as its log says: what it waits on.)
-  const agentsOut = working ? (convo.running?.filter((r) => r.kind === 'agent').length ?? 0) : 0
+  // (Subagents it sent off still out, as its log says: what it waits on —
+  // unless a call of its own is out, a command it runs meanwhile.)
+  const outCall = useMemo(() => callOut(convo.entries), [convo.entries])
+  const agentsOut = working && !outCall ? (convo.running?.filter((r) => r.kind === 'agent').length ?? 0) : 0
   // How long this turn has gone on: from the last thing the person wrote.
   const lastUser = useMemo(() => {
     for (let i = convo.entries.length - 1; i >= 0; i--) if (convo.entries[i].role === 'user' && !convo.entries[i].mid && !convo.entries[i].gone) return ms(convo.entries[i].ts)

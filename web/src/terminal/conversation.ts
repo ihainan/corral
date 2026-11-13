@@ -635,6 +635,19 @@ export function useConversation(sessionId: string, enabled: boolean, pane: strin
 // not known.
 export const answerable = (w?: string) => w === 'permission prompt' || w === 'input needed' || w === 'sandbox request' || w === 'worker request'
 
+// Whether a call of the agent's own is still out (a command run in the
+// foreground, a subagent it waits on there): the last thing it did, as
+// asking reads it. Then a quiet turn is that call's, not one left waiting on
+// the work it set going in the background.
+export function callOut(entries: ConvoEntry[]): boolean {
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const e = entries[i]
+    if (e.role === 'note' || e.gone) continue
+    return e.role === 'assistant' && e.parts.some((p) => !!p.tool && !p.tool.done)
+  }
+  return false
+}
+
 export function asking(entries: ConvoEntry[]): boolean {
   for (let i = entries.length - 1; i >= 0; i--) {
     const e = entries[i]
