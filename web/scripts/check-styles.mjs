@@ -92,7 +92,6 @@ const EXEMPT = [
   /\.input-eye/, /\.brand\b/, /\.auth\b/,
   // Spacing measured from something that is not the scale. Each says what.
   /\.complete-item\b/,            // 8.5 and 11.5 against a 13px/1.3 line: rows of exactly 34 and 40
-  /\.convo-running-what\b|\.convo-running-more\b/, // 13 above and below an 18px line: 44 to press, pulled back by -13 so the row does not grow
   /\.convo-summary summary\b|\.convo-bar-pick\b/,  // -11 for the same reason, against min-height 44
   /\.convo-ask-opt\b/,            // 11 above and below a 22px line: a choice is 44 to press
   /\.convo-latest\b|\.host-history-row\b/,        // 11 the same, on touch
