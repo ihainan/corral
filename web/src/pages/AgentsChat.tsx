@@ -2285,6 +2285,17 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       onQuery={onQuery}
       answered={answered}
       files={fileActs}
+      // (The session card's request of the agent: in the composer to be read and sent — after a draft there, never over it.)
+      onDraft={(text) => {
+        const d = field.current ? field.current.value : draft
+        setDraft(d.trim() ? d.replace(/\s*$/, '\n\n') + text : text)
+        requestAnimationFrame(() => {
+          const f = field.current
+          if (!f) return
+          f.focus()
+          f.setSelectionRange(f.value.length, f.value.length)
+        })
+      }}
       onForkAt={forkOf(cur, 'probe') ? forkHere : undefined}
       forkWhole={!!cur.row && (cur.row.status === 'idle' || cur.row.status === 'done')}
     />

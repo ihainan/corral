@@ -1054,3 +1054,49 @@ details.adv > .form { margin-top: 16px; }
 .auth-brand { display: flex; flex-direction: column; gap: 6px; }
 .auth-brand .brand { margin-bottom: 0; padding: 0; font-size: var(--fs-head); line-height: var(--lh-head); }
 .auth-tagline { margin: 0; color: var(--fg-2); font-size: var(--fs-sub); line-height: var(--lh-sub); }
+
+/* The session card (sessionCard.tsx): what the agent works in and on, in
+   groups with a small heading each, rows of a mark, words and a line under
+   them. A popover under its button on a wide screen; on a narrow one the
+   same groups in a bottom sheet (.scard-dialog). */
+.scard { display: flex; flex-direction: column; gap: 0; }
+.scard-pop {
+  position: fixed; z-index: 90; width: 340px; max-width: calc(100vw - 16px); overflow: auto; overscroll-behavior: contain;
+  padding: 8px; border-radius: var(--r-lg); background: var(--surface); color: var(--fg); border: 1px solid var(--line); box-shadow: var(--shadow-pop);
+  animation: fade 0.12s var(--ease);
+}
+.scard-pop:focus { outline: none; }
+.dialog.scard-dialog { max-width: 440px; }
+.scard-dialog .dlg-body { gap: 0; padding: 0 8px 12px; }
+.scard-sec { display: flex; flex-direction: column; gap: 2px; padding: 8px 0; }
+.scard-sec + .scard-sec { border-top: 1px solid var(--line); }
+.scard-head { margin: 2px 10px 4px; font-size: var(--fs-note); line-height: var(--lh-note); font-weight: 500; color: var(--fg-3); }
+.scard-row { display: flex; align-items: flex-start; gap: 10px; width: 100%; min-width: 0; padding: 6px 10px; border: 0; border-radius: var(--r); background: none; color: var(--fg); text-align: left; font: inherit; text-decoration: none; }
+.scard-row.is-act { cursor: pointer; }
+.scard-row.is-act:hover { background: var(--bg-hover); text-decoration: none; }
+.scard-row:focus-visible, .scard-file:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.scard-ic { flex: none; display: flex; margin-top: 2px; color: var(--fg-3); }
+.scard-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.scard-main { display: flex; align-items: baseline; gap: 4px; min-width: 0; font-size: var(--fs-ui); line-height: var(--lh-ui); }
+.scard-sub { font-size: var(--fs-note); line-height: var(--lh-note); color: var(--fg-3); overflow-wrap: anywhere; }
+.scard-strong { font-weight: 600; flex: none; }
+.scard-dim { color: var(--fg-3); font-size: var(--fs-note); line-height: var(--lh-note); white-space: nowrap; }
+.scard-main > .scard-dim { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.scard-one { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.scard-mono { font-family: var(--font-mono); }
+.scard-note { margin: 0; padding: 6px 10px; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--fg-2); }
+.scard-kv { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 2px 12px; padding: 4px 10px; font-size: var(--fs-sub); line-height: var(--lh-sub); }
+.scard-kv > :first-child { color: var(--fg-2); }
+.scard-kv > .scard-hint { flex-basis: 100%; }
+.scard-hint { margin: 0; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--fg-3); }
+.scard-counts { font-family: var(--font-mono); font-size: var(--fs-note); line-height: var(--lh-note); white-space: nowrap; }
+.scard-add { color: var(--ok); }
+.scard-del { color: var(--danger); }
+.scard-files { list-style: none; margin: 2px 0 0; padding: 0; display: flex; flex-direction: column; }
+.scard-files > .scard-dim { padding: 4px 10px; }
+.scard-file { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; width: 100%; padding: 4px 10px; border: 0; border-radius: var(--r-sm); background: none; color: var(--fg); text-align: left; font: inherit; cursor: pointer; }
+.scard-file:hover { background: var(--bg-hover); }
+.scard-file-name { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-family: var(--font-mono); font-size: var(--fs-sub); line-height: var(--lh-sub); }
+.scard-asks { flex-direction: row; flex-wrap: wrap; gap: 8px; padding: 12px 10px 4px; }
+.scard-asks .btn { gap: 6px; }
+.scard-asks .scard-hint { flex-basis: 100%; }

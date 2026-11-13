@@ -16,7 +16,7 @@ html.term-mode body { position: fixed; inset: 0; }
 .term-root.inactive { visibility: hidden; pointer-events: none; }
 .term-root.dark, .term-vars.dark {
   --term-bg: #0f1115; --term-chrome: #15181d; --term-line: rgba(255, 255, 255, 0.07);
-  --term-key: #23272e; --term-key-active: #323741; --term-fg: #e6e8ec; --term-fg-2: #b0b6c1; --term-fg-3: #929aa7;
+  --term-key: #23272e; --term-key-active: #323741; --term-fg: #e6e8ec; --term-fg-2: #b0b6c1; --term-fg-3: #8a919e;
   --term-hover: rgba(255, 255, 255, 0.07);
   --term-accent-soft: rgba(74, 120, 236, 0.22); --term-accent-text: #8fadf7; --term-danger-text: #f07c73;
   --term-warn-text: #e8ac55; --term-ok-text: #63cc93;
@@ -27,7 +27,7 @@ html.term-mode body { position: fixed; inset: 0; }
 }
 .term-root.light, .term-vars.light {
   --term-bg: #ffffff; --term-chrome: #f6f7f9; --term-line: #e7e9ed;
-  --term-key: #ffffff; --term-key-active: #e7eaef; --term-fg: #16181d; --term-fg-2: #545c68; --term-fg-3: #646a76;
+  --term-key: #ffffff; --term-key-active: #e7eaef; --term-fg: #16181d; --term-fg-2: #545c68; --term-fg-3: #707683;
   --term-hover: #f0f2f5;
   --term-accent-soft: #edf2fc; --term-accent-text: #2c5fcc; --term-danger-text: #c2352f;
   --term-warn-text: #9a5f00; --term-ok-text: #1d7a45;
@@ -779,7 +779,11 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 /* What the agent wrote between its steps: as its answer is. */
 .convo-mid { margin: 0; }
 /* (What it says on the way, a step quieter than the answer it ends with: C04/A04) */
-.convo-mid.is-brief { font-size: var(--fs-ui); line-height: var(--lh-ui); color: var(--term-fg-2); }
+.convo-mid.is-brief { font-size: var(--fs-ui); line-height: var(--lh-ui); color: var(--term-fg-3); }
+/* (11-13: what it says on the way was the second grey, L*39, against the answer's L*8 and the steps' third
+   grey, L*45 — the two greys six apart and the words on the way read as the answer's. Now two layers: the
+   answer black; all that goes on the way, its words and its steps, the third grey, made lighter to L*50
+   (#707683, 4.6:1 on white — the lightest that small text may be, AA) and set apart from the second.) */
 /* Thinking: told apart from calls by its mark and a lighter, smaller line, in a run's line and as a step. */
 .convo-work-text.is-thought, .convo-step.is-thought .convo-step-head { color: var(--term-fg-3); font-size: var(--fs-sub); line-height: var(--lh-sub); }
 .convo-thinking { color: var(--term-fg-3); font-size: var(--fs-sub); line-height: var(--lh-sub); }
@@ -1801,3 +1805,4 @@ html.kb-open .convo-runs .convo-runs-pop.is-sheet { padding-bottom: 16px; }
 .page-keys kbd { min-width: 24px; padding: 0 6px; border: 1px solid var(--line-strong); border-bottom-width: 2px; border-radius: var(--r-sm); background: var(--bg-subtle); color: var(--fg-2); font-family: var(--font-mono); font-size: var(--fs-note); line-height: var(--lh-note); text-align: center; white-space: pre; }
 .page-keys-or { color: var(--fg-4); font-size: var(--fs-note); line-height: var(--lh-note); }
 .page-keys-note { margin: 0; padding: 10px 12px; border-radius: var(--r); background: var(--bg-subtle); font-size: var(--fs-note); line-height: var(--lh-note); color: var(--fg-3); }
+@media (max-width: 640px) { .convo-card-btn { display: none; } } /* (narrow: the session card from the ⋮ menu, as a sheet) */

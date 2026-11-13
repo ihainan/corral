@@ -1,5 +1,5 @@
 import { createContext, Fragment, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { ArrowDown, ArrowUp, Check, Copy, FileText, FolderOpen, Image as ImageIcon, ChevronDown, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, Clock, Download, Eye, GitBranch, Keyboard, ListOrdered, Loader, MoreHorizontal, MoreVertical, PanelLeft, Pin, RotateCw, Search, Terminal, TriangleAlert, X, Plus } from 'lucide-react'
+import { ArrowDown, ArrowUp, Check, Copy, FileText, FolderOpen, Info, Image as ImageIcon, ChevronDown, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, Clock, Download, Eye, GitBranch, Keyboard, ListOrdered, Loader, MoreHorizontal, MoreVertical, PanelLeft, Pin, RotateCw, Search, Terminal, TriangleAlert, X, Plus } from 'lucide-react'
 import { t, getLang, type I18nKey } from '../i18n'
 import { api } from '../api'
 import { asHeld, dayStart, FOLDED, foldAt, GROUPS, inGroup, listOrder, pinned, type ConvoListRow, type RowCmds } from './agentOrder'
@@ -28,6 +28,7 @@ import { keptEntries } from './conversation'
 import { ShowTerminal } from './showTerminal'
 import { FileTypeIcon } from './fileIcons'
 import { categoryIcon, stepIcon, ThinkIcon, WorkIcon } from './stepIcons'
+import { SessionCard, type CardData } from './sessionCard'
 import type { Convo, ConvoAnswer, ConvoCost, ConvoQuota, ConvoQuotaWindow, ConvoEntry, ConvoShell, ConvoHunk, ConvoMeta, ConvoPart, ConvoQueued, ConvoRunning, ConvoTask, ConvoTool, ConvoTrouble, ConvoEvent } from './conversation'
 import { agentName } from './askText'
 import { duration, when } from './convoTime'
@@ -218,6 +219,7 @@ export function ConversationView({
   files,
   onForkAt,
   forkWhole,
+  onDraft,
 }: {
   convo: Convo
   agent: ConvoAgent | null
@@ -248,6 +250,7 @@ export function ConversationView({
   files?: FileActs // (its session live: a file it names can be shown, fetched, looked at)
   forkWhole?: boolean // (all of it can be forked now: its turn over and nothing of it running, as the list says)
   onForkAt?: (at: string | undefined) => void // (a copy of it up to the end of a turn can be started: cut before at, the next message typed; none, all of it)
+  onDraft?: (text: string) => void // (words put in its composer, not sent: the session card's requests of the agent)
 }) {
   const working = agent?.status === 'working'
   const waits = agent?.status === 'blocked'
@@ -1088,6 +1091,10 @@ export function ConversationView({
   // Ctrl+F are the browser's find; this one's search is in ⋮.)
   // (Opened from ⋮: the focus goes back to ⋮ after, the menu being gone.)
   const [keysShown, setKeysShown] = useState<'' | 'key' | 'menu'>('')
+  // The session card: shut, over the thread under its button, or a sheet from the bottom (narrow, or from the menu).
+  const [card, setCard] = useState<'' | 'pop' | 'sheet'>('')
+  const cardBtn = useRef<HTMLButtonElement>(null)
+  if (card && !active) setCard('') // (behind a terminal tab: shut)
   useEffect(() => {
     if (!active) return
     const onKey = (e: KeyboardEvent) => {
@@ -1410,6 +1417,20 @@ export function ConversationView({
               )
             )}
           </span>
+          {convo.of && convo.status === 'ready' && (
+            <button
+              ref={cardBtn}
+              type="button"
+              className="icon-btn convo-card-btn"
+              aria-expanded={card === 'pop'}
+              aria-haspopup="dialog"
+              onClick={() => setCard(card ? '' : matchMedia('(max-width: 640px)').matches ? 'sheet' : 'pop')}
+              aria-label={t('card.open')}
+              title={t('card.open')}
+            >
+              <Info size={17} aria-hidden="true" />
+            </button>
+          )}
           {onStop && (
             <button type="button" className="btn btn-ghost convo-stop" onClick={onStop}>
               {t('convo.stop')}
@@ -1424,6 +1445,7 @@ export function ConversationView({
                 ...(convo.of && (convo.bind?.agent === 'claude' || convo.bind?.agent === 'codex') ? [{ label: t('turns.item'), icon: <ListOrdered size={16} />, onSelect: () => (setSearching(false), setTurnsShown(true)) }] : []),
                 // (All steps opened or folded: the menu's, as Ctrl+O is a Mac's only.)
                 { label: t(allOpen ? 'pageKeys.foldAll' : 'pageKeys.openAll'), icon: allOpen ? <ChevronsDownUp size={16} /> : <ChevronsUpDown size={16} />, disabled: !list.length, onSelect: () => (setOpened({}), setAllOpen((v) => !v)) },
+                ...(convo.of && convo.status === 'ready' ? [{ label: t('card.open'), icon: <Info size={16} />, onSelect: () => setCard(matchMedia('(max-width: 640px)').matches ? 'sheet' : 'pop') }] : []),
                 { label: t('convoExport.item'), icon: <Download size={16} />, disabled: !list.length, onSelect: () => doExport() },
                 // (On every device: a tablet's keyboard has these keys too.)
                 { label: t('pageKeys.item'), icon: <Keyboard size={16} />, onSelect: () => setKeysShown('menu') },
@@ -1437,6 +1459,25 @@ export function ConversationView({
             />
           )}
         </div>
+      )}
+      {card && convo.of && (
+        <SessionCard
+          data={cardData(convo, list, mode, effort)}
+          acts={{
+            onFolder: files ? (dir) => files.reveal(dir) : undefined,
+            onChanges: (key, path) => show(key, path),
+            onRunning: (id) => {
+              const r = convo.running?.find((x) => x.id === id)
+              if (!r) return
+              if (r.kind === 'agent' && isSubId(r.id)) openSub({ agent: r.id, title: r.what })
+              else setBgCmd(r)
+            },
+            onDraft,
+          }}
+          anchor={card === 'pop' ? cardBtn.current : null}
+          sheet={card === 'sheet'}
+          onClose={() => setCard('')}
+        />
       )}
       {keysShown && (
         <PageKeysHelp
@@ -2900,6 +2941,43 @@ export const SEARCH_FROM = 5
 // own search: as the key is said.)
 const KEY_SEARCH = mac ? '⌘K' : '/'
 const KEY_SIDE = mac ? '⌘B' : 'Ctrl+B'
+
+// What the session card shows of the conversation as the page has it: the
+// files its answers changed (by the log, of what is loaded: each with the
+// latest answer that changed it, whose changes panel opens on it), what runs,
+// its tasks, its context (its window only where known: past the window, not
+// that one), its model, effort and mode as they are now (a switch's, before
+// the log says it).
+function cardData(convo: Convo, list: Item[], mode?: ModeSwitch, effort?: EffortSwitch): CardData {
+  const [sid, pane = ''] = (convo.of ?? '').split(' ')
+  const files = new Map<string, { path: string; add: number; del: number; key: string }>()
+  let add = 0
+  let del = 0
+  for (const it of list) {
+    if (it.kind !== 'answer' || !it.edits) continue
+    for (const f of it.edits.files) {
+      const was = files.get(f.path)
+      files.set(f.path, { path: f.path, add: (was?.add ?? 0) + f.add, del: (was?.del ?? 0) + f.del, key: it.key })
+      add += f.add
+      del += f.del
+    }
+  }
+  const meta = convo.meta ?? ({} as ConvoMeta)
+  const used = meta.context ?? 0
+  const eff = effort?.now || meta.effort
+  const md = mode?.now || meta.mode
+  return {
+    sid,
+    pane,
+    edits: files.size ? { files: [...files.values()].reverse(), add, del } : null,
+    running: convo.running ?? [],
+    tasks: convo.tasks?.length ? convo.tasks : null,
+    ctx: used ? { used, window: meta.window && used <= meta.window ? meta.window : undefined } : null,
+    model: meta.model ? modelName(meta.model) : undefined,
+    effort: eff ? effortName(eff) : undefined,
+    mode: md ? modeName(md) : undefined,
+  }
+}
 
 // The keys of this page, as this computer has them (plans/4a-shortcuts.md);
 // side: the list of agents beside it, with its own.

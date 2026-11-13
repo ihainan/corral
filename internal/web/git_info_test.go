@@ -49,20 +49,27 @@ func TestParseGitInfo(t *testing.T) {
 }
 
 func TestParseGitPR(t *testing.T) {
-	if gh, pr := parseGitPR("NOGH\n"); gh || pr != nil {
+	if gh, pr, ok := parseGitPR("NOGH\n"); gh || pr != nil || !ok {
 		t.Error("no gh")
 	}
-	if gh, pr := parseGitPR("NOPR\n"); !gh || pr != nil {
+	if gh, pr, ok := parseGitPR("NOPR\n"); !gh || pr != nil || !ok {
 		t.Error("no pr")
 	}
-	gh, pr := parseGitPR(`{"isDraft":true,"number":12,"state":"OPEN","title":"Add it","url":"https://github.com/o/r/pull/12"}`)
-	if !gh || pr == nil || pr.Number != 12 || !pr.Draft || pr.State != "OPEN" || pr.URL != "https://github.com/o/r/pull/12" {
+	// Could not say: nothing to keep.
+	if _, pr, ok := parseGitPR("PRERR\n"); pr != nil || ok {
+		t.Error("error kept")
+	}
+	gh, pr, ok := parseGitPR(`{"isDraft":true,"number":12,"state":"OPEN","title":"Add it","url":"https://github.com/o/r/pull/12"}`)
+	if !gh || !ok || pr == nil || pr.Number != 12 || !pr.Draft || pr.State != "OPEN" || pr.URL != "https://github.com/o/r/pull/12" {
 		t.Errorf("pr: %v %+v", gh, pr)
 	}
 	for _, bad := range []string{`{"number":1,"url":"javascript:alert(1)"}`, `{"number":0,"url":"https://x"}`, `not json`} {
-		if _, pr := parseGitPR(bad); pr != nil {
+		if _, pr, ok := parseGitPR(bad); pr != nil || ok {
 			t.Errorf("%s: %+v", bad, pr)
 		}
+	}
+	if g := parseGitInfo("E oldgit\n"); g.Repo || g.Reason != "oldgit" {
+		t.Errorf("old git: %+v", g)
 	}
 }
 
@@ -138,6 +145,13 @@ func TestGitInfoCommandRuns(t *testing.T) {
 	if g := info(filepath.Join(root, "gone")); g.Repo || g.Reason != "nodir" {
 		t.Fatalf("gone: %+v", g)
 	}
+	// A partial clone: no diff (it may fetch what it lacks), the rest read.
+	run(remote, "config", "uploadpack.allowFilter", "true")
+	part := filepath.Join(root, "partial")
+	run(root, "clone", "-q", "--filter=blob:none", "file://"+remote, part)
+	if g := info(part); !g.Repo || g.Base != "origin/main" || g.Diff != nil || g.Branch != "main" {
+		t.Fatalf("partial: %+v %+v", g, g.Diff)
+	}
 	// No origin/HEAD (a repository made here): no base, and so no diff.
 	run(root, "init", "-q", "-b", "main", filepath.Join(root, "local"))
 	if g := info(filepath.Join(root, "local")); !g.Repo || g.Base != "" || g.Diff != nil {
@@ -148,7 +162,7 @@ func TestGitInfoCommandRuns(t *testing.T) {
 func TestGitCallsOneAtATime(t *testing.T) {
 	var c gitCalls
 	var calls atomic.Int32
-	slow := func() (any, error) {
+	slow := func(context.Context) (any, error) {
 		calls.Add(1)
 		time.Sleep(50 * time.Millisecond)
 		return 1, nil
@@ -176,6 +190,29 @@ func TestGitCallsOneAtATime(t *testing.T) {
 	if calls.Load() != 2 {
 		t.Fatal("kept too long")
 	}
+	// The first asker gives up: the others still get the answer, and it is
+	// not asked twice meanwhile.
+	first, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { _, err := c.do(first, "k2", time.Second, slow); done <- err }()
+	time.Sleep(10 * time.Millisecond)
+	cancel()
+	if err := <-done; err == nil {
+		t.Fatal("the one who gave up was answered")
+	}
+	if v, err := c.do(context.Background(), "k2", time.Second, slow); err != nil || v != 1 {
+		t.Fatalf("the other: %v %v", v, err)
+	}
+	if calls.Load() != 3 {
+		t.Fatalf("asked %d times", calls.Load())
+	}
+	// An error is not kept.
+	fail := func(context.Context) (any, error) { calls.Add(1); return nil, errGitUnsaid }
+	c.do(context.Background(), "k3", time.Minute, fail)
+	c.do(context.Background(), "k3", time.Minute, fail)
+	if calls.Load() != 5 {
+		t.Fatalf("an error was kept: %d", calls.Load())
+	}
 }
 
 // CORRAL_GIT_DIR=<a repository> go test -run TestGitInfoOnDir -v: the command
@@ -194,6 +231,6 @@ func TestGitInfoOnDir(t *testing.T) {
 	t.Logf("%v %+v diff=%+v last=%+v", time.Since(start).Round(time.Millisecond), g, g.Diff, g.Last)
 	start = time.Now()
 	out, _ = exec.Command("sh", "-c", gitPRCommand(dir)).Output()
-	gh, pr := parseGitPR(string(out))
-	t.Logf("pr %v: gh=%v %+v", time.Since(start).Round(time.Millisecond), gh, pr)
+	gh, pr, ok := parseGitPR(string(out))
+	t.Logf("pr %v: gh=%v ok=%v %+v", time.Since(start).Round(time.Millisecond), gh, ok, pr)
 }
