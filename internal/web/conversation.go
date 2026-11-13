@@ -330,12 +330,14 @@ meta_of() { head -n 1 "$1" 2>/dev/null | head -c 8192 | awk 'match($0, /"payload
 for d in $codexes; do
   case $(codex_sub "${d#/proc/}") in app-server) ;; *) continue;; esac
   codex_home "$d"
-  for fd in "$d"/fd/*; do
-    l=$(readlink "$fd" 2>/dev/null) || continue
-    case $l in *"$nl"*) continue;; "$cxhome"/sessions/*/rollout-*.jsonl) ;; *) continue;; esac
+  links=$(fd_links "$d")
+  while IFS= read -r l; do
+    case $l in ''|*"$nl"*) continue;; "$cxhome"/sessions/*/rollout-*.jsonl) ;; *) continue;; esac
     codex_subagent "$l" && continue
     printf 'cand=%s\ncandcwd=%s\ncandts=%s\ncandmtime=%s\0' "$l" "$(meta_of "$l" cwd)" "$(meta_of "$l" timestamp)" "$(stat -c %Y "$l" 2>/dev/null)"
-  done
+  done <<CORRAL_FD_LINKS
+$links
+CORRAL_FD_LINKS
 done
 # Codex: a process of the user's named codex, its log the session file it
 # has open (rollout-<time>-<session id>.jsonl).
@@ -4503,13 +4505,34 @@ codex_log_sid() {
   case $_cxprefix in *[_/]*) return;; rollout-?*-) ;; *) return;; esac
   cxid=${_cxids%%_*}
 }
+# fd_links: of a process ($1 its /proc folder), where those of its open
+# files go that may be a Codex's log or lock, one a line (none with a line
+# break in it: such a name is no log of Codex's, and would read as two). In
+# one pass of find — not a process started for each file it holds, a second
+# or more a scan on a host of many Codexes; a find without -lname or
+# -printf (BusyBox's, say), each file as before.
+fd_links() {
+  [ -n "$_fdnl" ] || { _fdnl=$(printf '\nx'); _fdnl=${_fdnl%x}; }
+  if [ -z "$_fdfind" ]; then
+    if find /proc/self/fd/ -mindepth 1 -maxdepth 1 -lname '/*' -printf '' >/dev/null 2>&1; then _fdfind=1; else _fdfind=0; fi
+  fi
+  if [ "$_fdfind" = 1 ]; then
+    find "$1/fd/" -mindepth 1 -maxdepth 1 \( -lname '*/rollout-*.jsonl' -o -lname '*/thread-writer-locks/*.lock' \) ! -lname "*$_fdnl*" -printf '%l\n' 2>/dev/null
+    return 0
+  fi
+  for _ff in "$1"/fd/*; do
+    _ll=$(readlink "$_ff" 2>/dev/null) || continue
+    case $_ll in *"$_fdnl"*) ;; */rollout-*.jsonl|*/thread-writer-locks/*.lock) printf '%s\n' "$_ll";; esac
+  done
+}
 codex_fds() {
   cxlog= cxany= cxpend= cxnew= _locks= _logs=
   codex_home "$1"; _cxh=$cxhome
   _nl=$(printf '\nx'); _nl=${_nl%x}
   _now=$(date +%s)
-  for _f in "$1"/fd/*; do
-    _l=$(readlink "$_f" 2>/dev/null) || continue
+  _links=$(fd_links "$1")
+  while IFS= read -r _l; do
+    [ -n "$_l" ] || continue
     case $_l in *"$_nl"*) continue;; */rollout-*.jsonl) cxany=1;; esac
     case $_l in
     "$_cxh"/sessions/*/rollout-*.jsonl)
@@ -4521,7 +4544,9 @@ codex_fds() {
       case $_i in *[!0-9a-fA-F-]*) ;; ????????-????-????-????-????????????)
         _t=$(stat -c %Y "$_l" 2>/dev/null) && _locks="$_locks $_i:$_t" ;; esac ;;
     esac
-  done
+  done <<CORRAL_FD_LINKS
+$_links
+CORRAL_FD_LINKS
   # (Locks are told apart by when each was taken, never by when a log was
   # last written: its log is written on and on. The lock of the conversation
   # whose log it writes is the mark (the id its log's name ends in, as
