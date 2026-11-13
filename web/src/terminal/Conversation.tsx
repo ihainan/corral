@@ -1,5 +1,5 @@
 import { createContext, Fragment, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { ArrowDown, ArrowUp, Check, Copy, FileText, FolderOpen, Info, Image as ImageIcon, ChevronDown, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, Clock, Download, Eye, GitBranch, Keyboard, ListOrdered, Loader, MoreHorizontal, MoreVertical, PanelLeft, Pin, RotateCw, Search, Terminal, TriangleAlert, X, Plus } from 'lucide-react'
+import { ArrowDown, ArrowUp, Check, Copy, FileText, FolderOpen, Info, Image as ImageIcon, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, Clock, Download, Eye, GitBranch, Keyboard, ListOrdered, Loader, MoreHorizontal, MoreVertical, PanelLeft, Pin, RotateCw, Search, Terminal, TriangleAlert, X, Plus } from 'lucide-react'
 import { t, getLang, type I18nKey } from '../i18n'
 import { api } from '../api'
 import { asHeld, dayStart, FOLDED, foldAt, GROUPS, inGroup, listOrder, pinned, type ConvoListRow, type RowCmds } from './agentOrder'
@@ -517,6 +517,33 @@ export function ConversationView({
   const openSub = useCallback((s: Sub) => {
     setChanges(null)
     setSubs([s])
+  }, [])
+  // On a touch screen, a subagent's panel is a screen of its own: the phone's
+  // back (a swipe, its key) shuts it, as it would a page, rather than leaving
+  // the agent. One entry for the panel, put on when it opens; taken off when it
+  // is shut otherwise — only while it is still the one on top (a page gone to
+  // since has its own, not to be undone).
+  const subEntry = useRef(false)
+  const activeRef = useRef(active)
+  activeRef.current = active
+  useEffect(() => {
+    const open = !!subs?.length
+    if (open && !subEntry.current && active && isCoarse()) {
+      history.pushState({ ...(history.state ?? {}), corralSub: true }, '')
+      subEntry.current = true
+    } else if (!open && subEntry.current) {
+      subEntry.current = false
+      if (history.state?.corralSub) history.back()
+    }
+  }, [subs, active])
+  useEffect(() => {
+    const onPop = () => {
+      if (!subEntry.current || !activeRef.current) return
+      subEntry.current = false
+      setSubs(null)
+    }
+    window.addEventListener('popstate', onPop)
+    return () => window.removeEventListener('popstate', onPop)
   }, [])
   const shownEdits = changes ? (list.find((it) => it.kind === 'answer' && it.key === changes.key) as Extract<Item, { kind: 'answer' }> | undefined)?.edits : null
   useEffect(() => {
@@ -1737,6 +1764,8 @@ export function ConversationView({
           sub={subs[subs.length - 1]}
           depth={subs.length}
           live={(a) => !!convo.running?.some((r) => r.kind === 'agent' && r.id === a)}
+          siblings={subs.length === 1 ? convo.running?.filter((r) => r.kind === 'agent' && isSubId(r.id)).map((r) => ({ agent: r.id, title: r.what })) : undefined}
+          onSwitch={(s) => setSubs([s])}
           onOpen={(s) => setSubs((cur) => [...(cur ?? []), s])}
           onBack={() => setSubs((cur) => (cur && cur.length > 1 ? cur.slice(0, -1) : null))}
           onClose={() => setSubs(null)}
@@ -3806,7 +3835,7 @@ const isSubId = (id: string) => /^[a-z0-9]{6,40}$/.test(id) || /^[0-9a-f]{8}-[0-
 // read only: what it was asked, what it did and answered. Read when shown;
 // again while it is known to go on. One sent off by it opens here in turn
 // (back: to the one that sent it).
-function SubPanel({ of, sub, depth, live, onOpen, onBack, onClose, active, copy }: { of: string; sub: Sub; depth: number; live: (agent: string) => boolean; onOpen: (s: Sub) => void; onBack: () => void; onClose: () => void; active: boolean; copy: (s: string) => void }) {
+function SubPanel({ of, sub, depth, live, siblings, onOpen, onSwitch, onBack, onClose, active, copy }: { of: string; sub: Sub; depth: number; live: (agent: string) => boolean; siblings?: Sub[]; onOpen: (s: Sub) => void; onSwitch?: (s: Sub) => void; onBack: () => void; onClose: () => void; active: boolean; copy: (s: string) => void }) {
   const [sessionId, pane = ''] = of.split(' ')
   // (Of one sent off by the session's agent, as its running list says; of
   // one sent off by a subagent, while its log keeps growing.)
@@ -3822,6 +3851,39 @@ function SubPanel({ of, sub, depth, live, onOpen, onBack, onClose, active, copy 
   // (How it stands now, while it goes on: read off its log with the others': subscan.ts.)
   const scanned = useSubScan(active ? of : undefined, going, true).find((a) => a.id === sub.agent)
   useTick(going) // (its time said goes on)
+  // While it goes on: shown at its latest, and kept there as it goes, unless
+  // the person has scrolled up to read (then left where they are). 11-13:
+  // before, it opened at its top — a long task's words over the whole of a
+  // phone's screen — and what it did next came in out of sight.
+  const body = useRef<HTMLDivElement>(null)
+  const follow = useRef(going)
+  const onScroll = () => {
+    const el = body.current
+    if (el) follow.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48
+  }
+  useLayoutEffect(() => {
+    const el = body.current
+    if (el && going && follow.current) el.scrollTop = el.scrollHeight
+  }, [list, going, report])
+  // (What is drawn after — a line opened, a time said, a picture — grows it under the latest: kept to it.)
+  useEffect(() => {
+    const el = body.current
+    if (!el || !going) return
+    const keep = () => {
+      if (follow.current) el.scrollTop = el.scrollHeight
+    }
+    const mo = new MutationObserver(keep)
+    mo.observe(el, { childList: true, subtree: true, characterData: true })
+    const ro = new ResizeObserver(keep)
+    ro.observe(el)
+    return () => {
+      mo.disconnect()
+      ro.disconnect()
+    }
+  }, [going])
+  // The others sent off with it: gone to from here, one after another.
+  const at = siblings ? siblings.findIndex((x) => x.agent === sub.agent) : -1
+  const step = (d: 1 | -1) => siblings && at >= 0 && onSwitch?.(siblings[(at + d + siblings.length) % siblings.length])
   useEffect(() => {
     const prev = document.activeElement as HTMLElement | null
     panel.current?.focus({ preventScroll: true })
@@ -3853,13 +3915,24 @@ function SubPanel({ of, sub, depth, live, onOpen, onBack, onClose, active, copy 
         )}
         {/* (As the changes panel's head: a small word for what it is, its name, how it goes.) */}
         <div className="convo-panel-headtext">
-          <span className="convo-panel-eyebrow">{t('sub.title')}</span>
+          <span className="convo-panel-eyebrow">{at >= 0 && siblings!.length > 1 ? t('sub.titleOf', { i: at + 1, n: siblings!.length }) : t('sub.title')}</span>
           <h2 className="convo-panel-title is-one" title={sub.title}>
             {sub.title || t('sub.title')}
           </h2>
           {(going || report) && <span className="convo-panel-sub convo-sub-state">{going ? [t('sub.going'), since(scanned?.ts), scanTokens(scanned)].filter(Boolean).join(t('convo.sep')) : t('sub.handedBack')}</span>}
         </div>
-        <button type="button" className="icon-btn" onClick={c.read} disabled={c.loading} aria-label={t('sub.refresh')} title={t('sub.refresh')}>
+        {at >= 0 && siblings!.length > 1 && (
+          <span className="convo-sub-step">
+            <button type="button" className="icon-btn" onClick={() => step(-1)} aria-label={t('sub.prev')} title={t('sub.prev')}>
+              <ChevronLeft size={18} aria-hidden="true" />
+            </button>
+            <button type="button" className="icon-btn" onClick={() => step(1)} aria-label={t('sub.next')} title={t('sub.next')}>
+              <ChevronRight size={18} aria-hidden="true" />
+            </button>
+          </span>
+        )}
+        {/* (Read again every few seconds while it goes on: by hand, where a read failed or it has ended — not a phone's room for it.) */}
+        <button type="button" className="icon-btn convo-sub-refresh" onClick={c.read} disabled={c.loading} aria-label={t('sub.refresh')} title={t('sub.refresh')}>
           <RotateCw size={16} className={c.loading ? 'convo-running-spin' : ''} />
         </button>
         <button type="button" className="icon-btn" onClick={onClose} aria-label={t('common.close')} title={t('common.close') + ' (Esc)'}>
@@ -3867,7 +3940,7 @@ function SubPanel({ of, sub, depth, live, onOpen, onBack, onClose, active, copy 
         </button>
       </div>
       {going && scanNow(scanned) && <p className="convo-sub-now" title={scanNow(scanned)}>{scanNow(scanned)}</p>}
-      <div className="convo-panel-body convo-sub-body">
+      <div className="convo-panel-body convo-sub-body" ref={body} onScroll={onScroll}>
         {c.older && (
           <p className="convo-older">
             {c.olderCut ? (
@@ -4161,9 +4234,11 @@ function UserTurn({ e, onCopy }: { e: ConvoEntry; onCopy: (s: string) => void })
   const shell = /^! \S/.test(text)
   const forkAt = useContext(ForkAtOf)
   // (A long one — a pasted command, a log — folded to its first lines, opened at a tap.)
-  const long = text.split('\n').length > LONG_LINES || text.length > LONG_CHARS
-  const [whole, setWhole] = useState(false)
   const written = useContext(WordsAsWritten) && !shell
+  // (A subagent's task, in its panel: what it was asked, a few lines of it —
+  // what it does now is what is looked for there, most of all on a phone.)
+  const long = written ? text.split('\n').length > 4 || text.length > 280 : text.split('\n').length > LONG_LINES || text.length > LONG_CHARS
+  const [whole, setWhole] = useState(false)
   const words = written ? <Markdown text={text} /> : shown
   return (
     <div className={'convo-user' + (e.mid ? ' is-mid' : '')}>

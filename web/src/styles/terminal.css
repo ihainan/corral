@@ -1205,6 +1205,9 @@ button.convo-running-what { padding: 0; border: 0; background: none; font: inher
 /* Narrow: folded, how many and the toggle (the first's name cut to "Ad…" says nothing); 44 to press on touch */
 @media (max-width: 640px) {
   .convo-running:has(.convo-running-more) .convo-running-first { display: none; }
+  /* (A row's name the width of it, its figures under it: beside it, they cut the name to "Add paid models with doc…") */
+  .convo-running-row { grid-template-columns: minmax(0, 1fr); }
+  .convo-running-meta { grid-column: 1; grid-row: 2; justify-self: start; }
 }
 @media (pointer: coarse) {
   .convo-running-head { min-height: 44px; }
@@ -1574,6 +1577,9 @@ button.convo-running-what { padding: 0; border: 0; background: none; font: inher
 .convo-sub-body { padding: 12px 16px 24px; display: flex; flex-direction: column; gap: 12px; }
 .convo-sub-now { flex: none; margin: 0; padding: 6px 14px; border-bottom: 1px solid var(--term-line); color: var(--term-fg-2); font-size: var(--fs-sub); line-height: var(--lh-sub); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .convo-sub-foot { flex: none; padding: 8px 12px; border-top: 1px solid var(--term-line); }
+.convo-sub-step { flex: none; display: flex; gap: 2px; }
+/* (Read again by itself every few seconds while it goes on: a phone's head keeps its room for going from one to the next.) */
+@media (max-width: 640px) { .convo-sub-refresh { display: none; } .convo-panel-head { gap: 8px; } }
 .convo-sub-report { margin-top: 8px; padding-top: 16px; border-top: 1px solid var(--term-line); min-width: 0; }
 .convo-sub-report-head { margin: 0 0 8px; color: var(--term-fg-2); font-size: var(--fs-sub); line-height: var(--lh-sub); font-weight: 500; }
 .convo-user-text.is-written p { margin: 0 0 8px; }
