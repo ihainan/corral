@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/ihainan/corral/internal/sshx"
 	"github.com/ihainan/corral/internal/term"
@@ -117,6 +118,13 @@ func parseHeadsUp(out []byte) *headsUpNote {
 		return nil
 	}
 	n.Tag = clipRunes(n.Tag, 40)
+	// (The plugin ends each line with a full stop of its own, after the
+	// one a line in Chinese has already: "。.".)
+	if l := strings.TrimSuffix(n.Line, "."); l != n.Line {
+		if r, _ := utf8.DecodeLastRuneInString(l); strings.ContainsRune("。！？…）」』”", r) {
+			n.Line = l
+		}
+	}
 	n.Line = clipRunes(n.Line, headsUpLineMax)
 	n.More = clipRunes(n.More, headsUpMoreMax)
 	return &n

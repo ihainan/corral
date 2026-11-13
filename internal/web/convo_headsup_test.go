@@ -100,6 +100,11 @@ func TestParseHeadsUp(t *testing.T) {
 			t.Errorf("%q read as %+v", bad, n)
 		}
 	}
+	for in, want := range map[string]string{"临时磁盘。.": "临时磁盘。", "It is lost.": "It is lost.", "v1.2.": "v1.2.", "真的吗？.": "真的吗？"} {
+		if n := parseHeadsUp([]byte(`{"kind":"offer","line":"` + in + `"}`)); n == nil || n.Line != want {
+			t.Errorf("%q: %+v", in, n)
+		}
+	}
 	long := strings.Repeat("长", headsUpLineMax+10)
 	n := parseHeadsUp([]byte(`{"tag":"Heads up","kind":"explained","line":"` + long + `","more":"answer"}`))
 	if n == nil || n.Kind != "explained" || len([]rune(n.Line)) != headsUpLineMax+1 || n.More != "answer" {
