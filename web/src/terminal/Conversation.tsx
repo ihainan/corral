@@ -537,6 +537,12 @@ export function ConversationView({
     }
   }, [subs, active])
   useEffect(() => {
+    // (An entry still marked for a panel no longer open — the page went to
+    // another agent with it open, in place of its entry: the mark taken off.)
+    if (activeRef.current && !subEntry.current && history.state?.corralSub) {
+      const { corralSub: _, ...rest } = history.state
+      history.replaceState(rest, '')
+    }
     const onPop = () => {
       if (!subEntry.current || !activeRef.current) return
       subEntry.current = false
