@@ -1785,3 +1785,51 @@ func TestClaudeRunningResumed(t *testing.T) {
 		t.Fatalf("a plain message: %+v", e.Running())
 	}
 }
+
+// Of a subagent set going again, in a log out of order or read in parts:
+// the notice of this run before the answer to the message; a part before
+// telling of its run before (its end, its start) once this one is read.
+func TestClaudeRunningResumedInParts(t *testing.T) {
+	launch := `{"type":"assistant","uuid":"a1","message":{"content":[{"type":"tool_use","id":"t1","name":"Agent","input":{"description":"起草接口规格","prompt":"去写"}}]}}` + "\n" +
+		`{"type":"user","uuid":"r1","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"Async agent launched"}]},"toolUseResult":{"isAsync":true,"agentId":"ag1","status":"async_launched"}}`
+	notice := func(u string) string {
+		return `{"type":"user","uuid":"` + u + `","message":{"content":"<task-notification>\n<task-id>ag1</task-id>\n<status>completed</status>\n<summary>done</summary>\n</task-notification>"}}`
+	}
+	call := func(n string) string {
+		return `{"type":"assistant","uuid":"s` + n + `","message":{"content":[{"type":"tool_use","id":"m` + n + `","name":"SendMessage","input":{"to":"ag1","summary":"第 ` + n + ` 轮意见","message":"按意见改"}}]}}`
+	}
+	answer := func(n string) string {
+		return `{"type":"user","uuid":"sr` + n + `","message":{"content":[{"type":"tool_result","tool_use_id":"m` + n + `","content":"ok"}]},"toolUseResult":{"success":true,"resumedAgentId":"ag1"}}`
+	}
+	feed := func(rows ...string) *Claude {
+		c := NewClaude()
+		c.Feed(lines(rows...))
+		return c
+	}
+	// The run's own end told between the message and its answer: over.
+	if r := feed(launch, notice("n1"), call("1"), notice("n2"), answer("1")).Running(); len(r) != 0 {
+		t.Errorf("ended before the answer came: %+v", r)
+	}
+	// Going, read from the message on; the part before ends its run before.
+	c := feed(call("1"), answer("1"))
+	c.Prepend(feed(notice("n1")))
+	if r := c.Running(); len(r) != 1 || r[0].ID != "ag1" {
+		t.Errorf("the end of the run before ended this one: %+v", r)
+	}
+	// ...and the part before that, where it was sent off: named by that.
+	c.Prepend(feed(launch))
+	if r := c.Running(); len(r) != 1 || r[0].What != "起草接口规格" {
+		t.Errorf("the start of the run before: %+v", r)
+	}
+	// Over twice, the first start read last: not going again; set going
+	// once more, named by what it was first sent off for.
+	d := feed(notice("n1"), call("1"), answer("1"), notice("n2"))
+	d.Prepend(feed(launch))
+	if r := d.Running(); len(r) != 0 {
+		t.Errorf("revived by its first start: %+v", r)
+	}
+	d.Feed(lines(call("2"), answer("2")))
+	if r := d.Running(); len(r) != 1 || r[0].What != "起草接口规格" {
+		t.Errorf("set going once more: %+v", r)
+	}
+}

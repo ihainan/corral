@@ -1183,9 +1183,9 @@ export function ConversationView({
           </Fragment>
         ))}
         {pendingList}
-        {working && (agentsOut > 0 || quiet || quietLong > 0) && (
+        {working && (quiet || quietLong > 0) && (
           <p className="convo-working">
-            {/* (Its turn waits on subagents it sent off: they are listed below, each to be opened — not "nothing new".) */}
+            {/* (Quiet with subagents it sent off still out: it waits on them, listed below, each to be opened — not "nothing new". While it goes on at work itself, it says nothing of them.) */}
             {agentsOut > 0
               ? t('convo.waitingAgents', { n: agentsOut })
               : quietLong

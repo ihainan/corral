@@ -75,11 +75,18 @@ type Claude struct {
 	resultAt string // the time of the row whose results are being read
 	runOrder []string
 	// ranOut: told to have ended before what set it going was read (the
-	// log read from its middle, or a notice that came first).
-	ranOut map[string]bool
+	// log read from its middle, or a notice that came first), with the
+	// line it was told on (ranBefore: in a part of the log before this one).
+	ranOut map[string]int
 	// sentFor: what each subagent was sent off for (by its id), so that one
 	// set going again (SendMessage resumes it) says it, not its id.
 	sentFor map[string]string
+	// resumed: the subagents set going again here (SendMessage): whatever
+	// a part of the log before this one says of them is of a run before,
+	// over by then — it neither ends this run nor sets that one going.
+	resumed map[string]bool
+	// lines: the lines read so far, by which ranOut and a call are ordered.
+	lines int
 	// wrote: the files the agent itself wrote, a shell command's counted.
 	// Claude Code says a file changed whenever its modification time did,
 	// which is mostly the agent's own doing: only a change it did not
@@ -147,8 +154,9 @@ type orphan struct {
 }
 
 type toolRef struct {
-	e *Entry
-	t *Tool
+	e    *Entry
+	t    *Tool
+	line int // (the line it was called on)
 	// task changes the task list, once the call has come back without an
 	// error (TodoWrite, TaskUpdate; TaskCreate from its result).
 	task func(c *Claude)
@@ -190,7 +198,7 @@ const maxTaskIDs = 8 * maxRunning
 const maxOrphans = 256
 
 func NewClaude() *Claude {
-	return &Claude{tools: map[string]toolRef{}, running: map[string]Running{}, ranOut: map[string]bool{}}
+	return &Claude{tools: map[string]toolRef{}, running: map[string]Running{}, ranOut: map[string]int{}}
 }
 
 // NewClaudeSub reads a subagent's own log (subagents/agent-<id>.jsonl):
@@ -476,14 +484,22 @@ func (c *Claude) Prepend(other Parser) {
 	// unless what was read since says it has ended (or set it going again).
 	// What the part before was told had ended, whose start is older still:
 	// kept, so that reading that start later does not set it going again.
+	// (Of one set going again here, what the part before says is of a run
+	// before this one, over by then.)
 	for id := range o.ranOut {
-		if _, there := o.running[id]; !there {
+		if _, there := o.running[id]; !there && !c.resumed[id] {
 			c.endRun(id)
+			if _, noted := c.ranOut[id]; noted {
+				c.ranOut[id] = 0 // (told before all c read)
+			}
 		}
 	}
 	for _, id := range o.runOrder {
 		r, there := o.running[id]
-		if !there || c.ranOut[id] {
+		if c.resumed[id] {
+			continue
+		}
+		if _, over := c.ranOut[id]; !there || over {
 			delete(c.ranOut, id)
 			continue
 		}
@@ -492,6 +508,22 @@ func (c *Claude) Prepend(other Parser) {
 		}
 		c.running[id] = r
 		c.runOrder = append([]string{id}, c.runOrder...)
+	}
+	// What the part before said each subagent was sent off for, and which
+	// it set going again (so that a part before that one does not end or
+	// revive them either). One set going again here, named by what it was
+	// sent now for want of better, is named by what it was sent off for.
+	for id, s := range o.sentFor {
+		if _, there := c.sentFor[id]; !there {
+			c.noteSentFor(id, s)
+		}
+		if r, there := c.running[id]; there && c.resumed[id] && s != "" {
+			r.What = clip(clean(s), maxTitle)
+			c.running[id] = r
+		}
+	}
+	for id := range o.resumed {
+		c.noteResumed(id)
 	}
 	// What the part before wrote is the agent's own doing as much (see
 	// attached). What it says of files already read stands: an attachment
@@ -791,6 +823,7 @@ type claudeBlock struct {
 }
 
 func (c *Claude) line(b []byte) {
+	c.lines++
 	var r claudeRow
 	if json.Unmarshal(b, &r) != nil || (r.IsSidechain && !c.sub) {
 		c.Skipped++
@@ -903,7 +936,7 @@ func (c *Claude) add(r *claudeRow, role string, parts []Part) {
 	pictures := false
 	for i := range e.Parts {
 		if t := e.Parts[i].Tool; t != nil && t.ID != "" {
-			c.tools[t.ID] = toolRef{e: e, t: t}
+			c.tools[t.ID] = toolRef{e: e, t: t, line: c.lines}
 		}
 		pictures = pictures || e.Parts[i].Kind == KindImage
 	}
@@ -1926,7 +1959,7 @@ func (c *Claude) result(b claudeBlock, account json.RawMessage) {
 		if at == "" {
 			at = ref.e.Time
 		}
-		c.setGoing(ref.t, account, at, text)
+		c.setGoing(ref.t, account, at, text, ref.line)
 		// What a command changed, as Claude Code reports it: the files, each
 		// with its patch. The lines of the turn's changes count them too.
 		if files, more := bashFiles(account); len(files) > 0 {
@@ -2118,7 +2151,7 @@ const subagentHandback = "SubagentHandback"
 // setGoing: the call set work going that is left to itself (a command in
 // the background, a subagent sent off on its own). It stays there until
 // the agent is told it has ended.
-func (c *Claude) setGoing(t *Tool, account json.RawMessage, at, said string) {
+func (c *Claude) setGoing(t *Tool, account json.RawMessage, at, said string, called int) {
 	if len(account) == 0 {
 		return
 	}
@@ -2147,18 +2180,17 @@ func (c *Claude) setGoing(t *Tool, account json.RawMessage, at, said string) {
 		return
 	}
 	if kind == "agent" && !resumed && t.Title != "" {
-		if c.sentFor == nil {
-			c.sentFor = map[string]string{}
-		}
-		if len(c.sentFor) < maxRunning*4 {
-			c.sentFor[id] = t.Title
-		}
+		c.noteSentFor(id, t.Title)
 	}
-	// (Told it had ended before this came: it is over, not going. Not one
-	// set going again: what ended before that was its run before.)
-	if c.ranOut[id] {
+	if resumed {
+		c.noteResumed(id)
+	}
+	// (Told it had ended before this came: it is over, not going. Of one
+	// set going again, only where told so since it was asked to go on: an
+	// end told before that was of its run before.)
+	if line, over := c.ranOut[id]; over {
 		delete(c.ranOut, id)
-		if !resumed {
+		if !resumed || line > called {
 			return
 		}
 	}
@@ -2221,6 +2253,26 @@ func (c *Claude) ended(s string) {
 	}
 }
 
+// noteSentFor and noteResumed keep what is known of a subagent (see sentFor,
+// resumed), within bounds: past them, what is not kept is only less told.
+func (c *Claude) noteSentFor(id, what string) {
+	if c.sentFor == nil {
+		c.sentFor = map[string]string{}
+	}
+	if _, there := c.sentFor[id]; there || len(c.sentFor) < maxRunning*4 {
+		c.sentFor[id] = what
+	}
+}
+
+func (c *Claude) noteResumed(id string) {
+	if c.resumed == nil {
+		c.resumed = map[string]bool{}
+	}
+	if len(c.resumed) < maxRunning*4 {
+		c.resumed[id] = true
+	}
+}
+
 // endRun takes work off the list of what is still going. Where what set it
 // going has not been read (the log read from its middle), it is noted as
 // over, so that reading the start later does not set it going again.
@@ -2230,17 +2282,17 @@ func (c *Claude) endRun(id string) {
 	}
 	if _, ok := c.running[id]; !ok {
 		if c.ranOut == nil {
-			c.ranOut = map[string]bool{}
+			c.ranOut = map[string]int{}
 		}
 		// (Full: the newest word is the one worth keeping, so one makes
 		// way. Work told of as over twice takes one place, not two.)
-		for len(c.ranOut) >= maxRunning && !c.ranOut[id] {
+		for _, twice := c.ranOut[id]; len(c.ranOut) >= maxRunning && !twice; _, twice = c.ranOut[id] {
 			for k := range c.ranOut {
 				delete(c.ranOut, k)
 				break
 			}
 		}
-		c.ranOut[id] = true
+		c.ranOut[id] = c.lines
 		return
 	}
 	delete(c.running, id)
