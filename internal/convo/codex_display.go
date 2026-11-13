@@ -21,6 +21,11 @@ var (
 // IMPORTED>"): Codex's own mark, nothing said by anyone.
 const codexImportMark = "<EXTERNAL SESSION IMPORTED>"
 
+// claudeContinued: how the summary Claude Code begins a compacted session
+// with starts (in its log, a row of its own marked isCompactSummary; in an
+// import, the person's message).
+const claudeContinued = "This session is being continued from a previous conversation"
+
 // importedRecord: an imported tool's call or result (kind "call" or
 // "result"; a result names none), its body; ok false, another message.
 func importedRecord(text string) (kind, name, body string, ok bool) {

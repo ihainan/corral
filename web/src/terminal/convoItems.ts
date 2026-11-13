@@ -148,7 +148,9 @@ export function items(entriesIn: ConvoEntry[], live: boolean, moving: boolean): 
         text: answer.map((p) => p.text ?? '').join('\n\n'),
         truncated: answer.some((p) => p.truncated),
         ts: partTime.get(answer[answer.length - 1]),
-        span: worked && from && to && ms(to) >= ms(from) ? ms(to) - ms(from) : undefined,
+        // (Under a second, nothing worth the words — and a history imported
+        // all at once, its turns told as of that moment, says "0s" each.)
+        span: worked && from && to && ms(to) - ms(from) >= 1000 ? ms(to) - ms(from) : undefined,
         edits: edits(work),
       })
     for (const s of steps.slice(tail)) if (isNote(s)) out.push(noteItem(s))

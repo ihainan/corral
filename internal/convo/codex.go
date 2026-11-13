@@ -848,6 +848,12 @@ func (c *Codex) event(r *codexRow, p *codexPayload) {
 					// person's rows hold — a command run, its output, a
 					// reminder — told as Claude Code's are.)
 					if strings.HasPrefix(p.TurnID, "external-import-turn-") {
+						// (The summary Claude Code began a compacted session
+						// with: a summary, as its own view shows it.)
+						if strings.HasPrefix(strings.TrimSpace(text), claudeContinued) {
+							c.add(r, "", RoleSummary, []Part{textPart(KindText, text)})
+							continue
+						}
 						role, said := classifyUserText(text)
 						switch role {
 						case "":

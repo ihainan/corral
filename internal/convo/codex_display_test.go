@@ -90,6 +90,7 @@ func TestCodexClaudeImport(t *testing.T) {
 	log = append(log, user("external-import-turn-1", "<command-name>/model</command-name>\n            <command-message>model</command-message>\n            <command-args>sonnet</command-args>")...)
 	log = append(log, user("external-import-turn-1", "<local-command-stdout>Set model to `Sonnet 5.5` and saved as your default for new sessions</local-command-stdout>")...)
 	log = append(log, user("external-import-turn-1", "<system-reminder>internal</system-reminder>")...)
+	log = append(log, user("external-import-turn-2", "This session is being continued from a previous conversation that ran out of context. Summary: …")...)
 	log = append(log, user("external-import-turn-2", "看一下 dashboard")...)
 	log = append(log, assistant("[external_agent_tool_call: Bash]\ndescription: Download dashboard homepage\ncommand: curl -s https://example.org/\n[/external_agent_tool_call]")...)
 	log = append(log, assistant("[external_agent_tool_result]\n200 163187\n<!DOCTYPE html>")...)
@@ -114,6 +115,7 @@ func TestCodexClaudeImport(t *testing.T) {
 	want := []string{
 		"user /model sonnet",
 		"note Set model to `Sonnet 5.5` and saved as your default for new sessions",
+		"summary This session is being continued from a previous conversation that ran out of context. Summary: …",
 		"user 看一下 dashboard",
 		"assistant tool Bash | Download dashboard homepage | curl -s https://example.org/ | 200 163187\n<!DOCTYPE html>",
 		"assistant tool result |  |  | an orphan result",
