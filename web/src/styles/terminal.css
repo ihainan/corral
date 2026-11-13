@@ -631,6 +631,12 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 
 .convo-user { align-self: flex-end; max-width: min(88%, 620px); display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
 .convo-user-text { background: var(--term-user, color-mix(in srgb, var(--term-fg) 8%, var(--term-bg))); border-radius: var(--r-xl); padding: 9px 14px; white-space: pre-wrap; }
+/* (No wider than its column: a bubble sized to its widest line — a code block, a table, folded away
+   or not — stood out past the column's left edge, cut off and not to be scrolled to (11-13, a
+   subagent's prompt in its panel). What cannot wrap scrolls inside it instead.) */
+.convo-user { min-width: 0; }
+.convo-user-text { min-width: 0; max-width: 100%; box-sizing: border-box; overflow-wrap: anywhere; }
+.convo-user-text :is(pre, .md-code, .md-table) { max-width: 100%; overflow-x: auto; }
 .convo-image { color: var(--term-fg-3); }
 .convo-user-fold { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 8; line-clamp: 8; overflow: hidden; }
 .term-root .convo-user-more { display: block; margin-top: 4px; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg-2); }
