@@ -25,6 +25,7 @@ import { AgentIcon } from './agentIcons'
 import { matchQuery } from './agents'
 import { keptEntries } from './conversation'
 import { ShowTerminal } from './showTerminal'
+import { categoryIcon, stepIcon, ThinkIcon, WorkIcon } from './stepIcons'
 import type { Convo, ConvoAnswer, ConvoCost, ConvoQuota, ConvoQuotaWindow, ConvoEntry, ConvoShell, ConvoHunk, ConvoMeta, ConvoPart, ConvoQueued, ConvoRunning, ConvoTask, ConvoTool, ConvoTrouble, ConvoEvent } from './conversation'
 import { agentName } from './askText'
 import { duration, when } from './convoTime'
@@ -149,6 +150,37 @@ function useTick(on: boolean): number {
     return () => clearInterval(timer)
   }, [on])
   return now
+}
+
+// An animation run only while it can be seen: on the screen, the page in
+// front (data-run on the element; terminal.css pauses it without). Measured
+// 11-13: the live line's band of light, scrolled out of view, still painted
+// every frame — 580 paints in 5 s.
+function useRunWhileSeen(ref: React.RefObject<HTMLElement | null>, on: boolean) {
+  useEffect(() => {
+    const el = ref.current
+    if (!on || !el) return
+    if (typeof IntersectionObserver === 'undefined') {
+      el.dataset.run = ''
+      return
+    }
+    let seen = false
+    const set = () => {
+      if (seen && !document.hidden) el.dataset.run = ''
+      else delete el.dataset.run
+    }
+    const io = new IntersectionObserver((es) => {
+      seen = es[es.length - 1].isIntersecting
+      set()
+    })
+    io.observe(el)
+    document.addEventListener('visibilitychange', set)
+    return () => {
+      io.disconnect()
+      document.removeEventListener('visibilitychange', set)
+      delete el.dataset.run
+    }
+  }, [ref, on])
 }
 
 // (Where the side list was scrolled to, across the views made for each agent: see ConversationView.)
@@ -3993,6 +4025,8 @@ function Work({ it, open, onToggle, onCopy }: { it: Extract<Item, { kind: 'work'
   // (Under way while the agent is not at work: it waits for the person, to
   // be let run it or to be answered — not running, not for that long.)
   const asks = !!busy && !it.moving
+  const shine = useRef<HTMLSpanElement>(null)
+  useRunWhileSeen(shine, !!busy && !asks)
   // Shut, what is said of it without opening: the subagents it sent off, by
   // name, each to be read; and with calls beside it the last of what it
   // thought, a line (at most one for a run, however long it thought).
@@ -4001,30 +4035,44 @@ function Work({ it, open, onToggle, onCopy }: { it: Extract<Item, { kind: 'work'
   const lastThought = tools.length
     ? it.steps.findLast((x): x is ConvoPart => !isNote(x) && x.kind === 'thinking' && !!x.text?.trim())
     : undefined
+  // The line's mark, from what its words say: the step under way (or waited
+  // on); thinking; else the kind its counts name first.
+  const first = order.find((c) => counts.has(c))
+  const Mark = busy ? (busy.tool ? stepIcon(busy.tool) : ThinkIcon) : thought ? ThinkIcon : first ? categoryIcon(first) : WorkIcon
+  // (The fold mark after the words: the kind is what comes first.)
+  const chev = (
+    <span className="convo-chev-box" aria-hidden="true">
+      <ChevronRight size={14} className="convo-chev" />
+    </span>
+  )
   return (
     <div className="convo-work" data-work={it.key}>
-      <button type="button" className="convo-work-head" aria-expanded={open} onClick={() => onToggle(it.key, !open)} title={isTouchOnly ? undefined : t(open ? (mac ? 'convo.foldHint' : 'convo.foldHintPlain') : mac ? 'convo.openHint' : 'convo.openHintPlain')}>
-        <ChevronRight size={15} className="convo-chev" aria-hidden="true" />
+      <button type="button" className={'convo-work-head' + (busy && !asks ? ' is-live' : '') + (!busy && failed > 0 ? ' is-failed' : '')} aria-expanded={open} onClick={() => onToggle(it.key, !open)} title={isTouchOnly ? undefined : t(open ? (mac ? 'convo.foldHint' : 'convo.foldHintPlain') : mac ? 'convo.openHint' : 'convo.openHintPlain')}>
+        <Mark size={16} strokeWidth={1.75} className="convo-step-ic" aria-hidden="true" />
         {busy && asks ? (
           <span className="convo-work-text is-live is-asking">
             <span className="convo-asking-text">{waitText(busy.tool)}</span>
             {since > 0 && now >= since && <span className="convo-live-time">{t('convo.waitedFor', { d: duration(now - since) })}</span>}
+            {chev}
           </span>
         ) : busy ? (
           <span className="convo-work-text is-live">
-            <span className="convo-shimmer">{busy.tool ? liveText(busy.tool) : t('convo.live.thinking')}</span>
+            <span ref={shine} className="convo-shimmer">{busy.tool ? liveText(busy.tool) : t('convo.live.thinking')}</span>
             {since > 0 && now >= since && <span className="convo-live-time">{duration(now - since)}</span>}
+            {chev}
           </span>
         ) : (
           <span className={'convo-work-text' + (thought ? ' is-thought' : '')}>
-            {head || sum}
-            {thought && <span className="convo-work-sum"> · {thoughtTitle(thought.text ?? '')}</span>}
+            {/* (Thinking: the mark says it was; the words are its first line.) */}
+            {thought && thoughtTitle(thought.text ?? '') && <span className="sr-only">{head} </span>}
+            {thought ? thoughtTitle(thought.text ?? '') || head : head || sum}
             {failed > 0 && (
               <>
                 {t('convo.sep')}
                 <span className="convo-failed is-inline">{failed === 1 ? t('convo.failedOne', { s: clip(object(failedOnes[0]).text, 32) }) : t('convo.failed', { n: failed })}</span>
               </>
             )}
+            {chev}
           </span>
         )}
       </button>
@@ -4194,6 +4242,8 @@ function Thinking({ text, live }: { text: string; live?: boolean }) {
   return (
     <div className="convo-step is-thought">
       <button type="button" className="convo-step-head" aria-expanded={open} onClick={() => setOpen(!open)}>
+        <ThinkIcon size={16} strokeWidth={1.75} className="convo-step-ic" aria-hidden="true" />
+        {title && <span className="sr-only">{t('convo.thinking')} </span>}
         <span className="convo-step-obj">{title || t('convo.thinking')}</span>
       </button>
       {open && <div className="convo-thinking"><Markdown text={text} /></div>}
@@ -4228,6 +4278,9 @@ function ToolRow({ tool, onCopy, live }: { tool: ConvoTool; onCopy: (s: string) 
   const v = verbOf(tool.name)
   const obj = object(tool)
   const cat = category(tool.name)
+  const StepMark = stepIcon(tool)
+  // (A command shown by what it is for, as Claude Code said it.)
+  const told = !tool.stdin && v === 'cmd' && !!tool.title && obj.text === tool.title
   const isEdit = !!tool.patch || !!tool.same || tool.old !== undefined || tool.new !== undefined
   const code = exitCode(tool)
   // What the line does not show of what it acted on: a command of more
@@ -4259,7 +4312,10 @@ function ToolRow({ tool, onCopy, live }: { tool: ConvoTool; onCopy: (s: string) 
         }}
         title={cat === 'cmd' ? firstLine(d) : d || tool.title}
       >
-        <span className="convo-step-verb">{tool.stdin ? stdinSaid(tool.stdin).verb : v ? t(VERB_SAID[v].v) : toolName(tool.name)}</span>
+        <StepMark size={16} strokeWidth={1.75} className="convo-step-ic" aria-hidden="true" />
+        {/* (The verb, but where the line goes on with what it is for in words — a command Claude Code said the purpose of — the mark
+            says it alone: "Run local server…" is not to be read after "Run". It is kept for the screen reader.) */}
+        <span className={told ? 'sr-only' : 'convo-step-verb'}>{tool.stdin ? stdinSaid(tool.stdin).verb : v ? t(VERB_SAID[v].v) : toolName(tool.name)}</span>
         <span ref={objRef} className={'convo-step-obj' + (obj.code ? ' is-code' : '')}>{v === 'cmd' && obj.code ? <Code text={obj.text} lang="bash" /> : obj.text}</span>
         {cat === 'edit' && <LineCounts add={tool.add ?? 0} del={tool.del ?? 0} />}
         {tool.error && <span className="convo-failed">{code ? t('convo.exitCode', { n: code }) : t('convo.toolFailed')}</span>}

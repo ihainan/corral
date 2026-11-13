@@ -97,7 +97,6 @@ const EXEMPT = [
   /\.convo-ask-opt\b/,            // 11 above and below a 22px line: a choice is 44 to press
   /\.convo-latest\b|\.host-history-row\b/,        // 11 the same, on touch
   /\.convo-user-text\b|\.pick-item\b/,            // 9 and 14 round the words of a bubble and a row, sized to them
-  /\.convo-work-(said|sent|body)\b/,               // indented 21: the 15px mark before them and the 6px gap after it
   /\.claude-card-body\b/,         // indented 30: the head's mark and its gap, above it
   /\.live-info\b/,                // 44 kept clear on the right for the control that sits over it
   /\.convo-list-item\b/,          // 26 kept clear for the menu button that appears over the row

@@ -724,16 +724,19 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .md-table th:first-child, .md-table td:first-child { padding-left: 0; }
 .md-table th { font-weight: 600; color: var(--term-fg); white-space: nowrap; border-bottom-color: color-mix(in srgb, var(--term-fg) 18%, transparent); }
 
-/* A turn's work: one grey line, opened to a line a step (no cards) */
+/* A turn's work: one grey line, opened to a line a step (no cards). Each
+   begins with a mark of what kind of thing it was (stepIcons.tsx): 16px, on
+   the middle of its first line however many lines it takes, the words 8px
+   on; what is under a line starts where its words do, 24 in. */
 .convo-work { display: flex; flex-direction: column; min-width: 0; }
 .convo-work-head, .convo-step-head {
-  display: flex; align-items: baseline; gap: 6px; max-width: 100%; border: 0; background: none; padding: 2px 0;
+  display: flex; align-items: baseline; gap: 8px; max-width: 100%; border: 0; background: none; padding: 2px 0;
   color: var(--term-fg-3); text-align: left; cursor: pointer; font: inherit; font-size: var(--fs-ui); line-height: var(--lh-ui);
 }
 .convo-work-head { font-size: var(--fs-sub); line-height: var(--lh-sub); }
 .convo-work-head { align-self: flex-start; }
-.convo-work-said { margin: 0 0 2px 21px; color: var(--term-fg-3); font-size: var(--fs-sub); line-height: var(--lh-sub); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.convo-work-sent { list-style: none; margin: 0 0 4px 21px; padding: 0; display: grid; gap: 2px; color: var(--term-fg-2); font-size: var(--fs-sub); line-height: var(--lh-sub); }
+.convo-work-said { margin: 0 0 2px 24px; color: var(--term-fg-3); font-size: var(--fs-sub); line-height: var(--lh-sub); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.convo-work-sent { list-style: none; margin: 0 0 4px 24px; padding: 0; display: grid; gap: 2px; color: var(--term-fg-2); font-size: var(--fs-sub); line-height: var(--lh-sub); }
 .convo-work-sent li { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .convo-work-sent .link-btn { color: inherit; font: inherit; }
 .convo-work-sent .link-btn:hover { color: var(--term-fg); }
@@ -743,12 +746,31 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-work-head:focus-visible, .convo-step-head:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: 2px; border-radius: var(--r-xs); }
 .convo-chev { flex: none; align-self: center; color: inherit; transition: transform 0.15s var(--ease); }
 [aria-expanded='true'] > .convo-chev { transform: rotate(90deg); }
+/* The mark: placed by the line's height, not the font's baseline, so it sits
+   the same in every face (a fixed offset from the baseline did not). */
+.convo-step-ic { flex: none; align-self: flex-start; margin-top: calc((var(--lh-ui) - 16px) / 2); color: var(--term-fg-3); }
+.convo-work-head > .convo-step-ic, .convo-step.is-thought .convo-step-ic { margin-top: calc((var(--lh-sub) - 16px) / 2); }
+.convo-work-head:hover > .convo-step-ic, .convo-step-head:hover > .convo-step-ic { color: var(--term-fg-2); }
+/* (What it is in outranks the pointer over it: after the hover, as strong.) */
+.convo-work-head.is-live > .convo-step-ic { color: var(--term-fg); }
+.convo-work-head.is-failed > .convo-step-ic, .convo-step.is-error > .convo-step-head > .convo-step-ic { color: color-mix(in srgb, var(--term-danger-text) 70%, transparent); }
+/* A run's fold mark after its words (the kind comes first): a box the line's
+   height, so it centres on the line and not on a baseline. Shown where a
+   pointer is over it, it has the focus or is open; always, faint, where
+   there is no pointer to hover. */
+.convo-chev-box { display: inline-flex; align-items: center; height: var(--lh-sub); margin-left: 4px; vertical-align: top; align-self: flex-start; opacity: 0; transition: opacity 0.12s var(--ease); }
+.convo-chev-box > .convo-chev { transition: transform 0.15s var(--ease); }
+.convo-work-head:hover .convo-chev-box, .convo-work-head:focus-visible .convo-chev-box, .convo-work-head[aria-expanded='true'] .convo-chev-box { opacity: 1; }
+.convo-work-head[aria-expanded='true'] .convo-chev { transform: rotate(90deg); }
+@media (hover: none) { .convo-chev-box { opacity: 0.6; } }
+.convo-work-text.is-live > .convo-chev-box { margin-left: 0; } /* (the live line's own 8px gap is before it) */
 .convo-work-text { min-width: 0; }
 .convo-failed { flex: none; margin-left: 8px; font-size: var(--fs-sub); line-height: var(--lh-sub); font-weight: 500; color: var(--term-danger-text); white-space: nowrap; }
-.convo-work-body { display: flex; flex-direction: column; gap: 1px; padding: 4px 0 2px 21px; }
+.convo-work-body { display: flex; flex-direction: column; gap: 1px; padding: 4px 0 2px 24px; }
 .convo-step { display: flex; flex-direction: column; min-width: 0; }
 .convo-step-head { width: 100%; color: var(--term-fg-2); }
-.convo-step-verb { flex: none; color: var(--term-fg); font-weight: 500; }
+/* (The verb: of the line's words, not a column of its own down the run — regular, as grey as the rest.) */
+.convo-step-verb { flex: none; color: var(--term-fg-2); }
 .convo-step-obj { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .convo-step-obj.is-code { font-family: var(--font-mono); font-size: 13px; }
 .convo-work-text.is-live { display: flex; align-items: baseline; gap: 8px; min-width: 0; color: var(--term-fg-2); }
@@ -758,9 +780,8 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-mid { margin: 0; }
 /* (What it says on the way, a step quieter than the answer it ends with: C04/A04) */
 .convo-mid.is-brief { font-size: var(--fs-ui); line-height: var(--lh-ui); color: var(--term-fg-2); }
-/* Thinking: told apart from calls (lighter, slanted), in a run's line and as a step. */
+/* Thinking: told apart from calls by its mark and a lighter, smaller line, in a run's line and as a step. */
 .convo-work-text.is-thought, .convo-step.is-thought .convo-step-head { color: var(--term-fg-3); font-size: var(--fs-sub); line-height: var(--lh-sub); }
-.convo-step.is-thought .convo-step-verb { color: var(--term-fg-3); font-weight: 400; }
 .convo-thinking { color: var(--term-fg-3); font-size: var(--fs-sub); line-height: var(--lh-sub); }
 .convo-work-body > .convo-note { margin: 4px 0; }
 /* What a rewind took back: a quiet line; what it was, faded, behind it. */
@@ -772,12 +793,16 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-lines-del { color: var(--term-danger-text); }
 /* A band of light crosses the words of what runs, left to right, then a
    pause: the image is 2.5 lines wide, the band in its middle fifth, so at
-   either end of the sweep it is off the line. */
+   either end of the sweep it is off the line. In 30 steps rather than every
+   frame, and only while it can be seen (useRunWhileSeen sets data-run):
+   measured 11-13, 480 paints in 5 s every frame, 160 stepped, and as many
+   with the line out of view as in it. */
 .convo-shimmer {
   min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   background: linear-gradient(90deg, var(--term-fg-3) 0% 40%, var(--term-fg) 50%, var(--term-fg-3) 60% 100%) 100% 0 / 250% 100% no-repeat;
-  -webkit-background-clip: text; background-clip: text; color: transparent; animation: convo-shimmer 2.2s ease-in-out infinite;
+  -webkit-background-clip: text; background-clip: text; color: transparent; animation: convo-shimmer 2.2s steps(30) infinite; animation-play-state: paused;
 }
+.convo-shimmer[data-run] { animation-play-state: running; }
 @keyframes convo-shimmer { 0% { background-position: 100% 0; } 75%, 100% { background-position: 0% 0; } }
 /* (Less motion asked for: no band moving, the words dim and come back in place.) */
 @keyframes convo-pulse { from { opacity: 1; } to { opacity: 0.45; } }
@@ -790,7 +815,14 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 @media (prefers-reduced-motion: reduce) {
   /* (Kept against app.css's stop to all animation: a fade in place moves nothing, and without it nothing says it runs.) */
   .convo-shimmer { animation: convo-pulse 1.2s ease-in-out infinite alternate !important; background: none; color: var(--term-fg-2); }
+  .convo-shimmer:not([data-run]) { animation-play-state: paused !important; }
   .convo-spin { animation: none; }
+  .convo-chev-box, .convo-chev-box > .convo-chev { transition: none; }
+}
+/* Forced colours (high contrast): no words drawn by a clipped background —
+   the system's colours replace it, and the words could go unseen. Still. */
+@media (forced-colors: active) {
+  .convo-shimmer { animation: none !important; background: none; color: inherit; }
 }
 
 /* The answer: what changed, copy and when */
