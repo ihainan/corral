@@ -39,7 +39,8 @@ type codexPane struct {
 	Name       string // Codex's database: the thread's name, title, first message ("" none)
 	Title      string
 	First      string
-	FG         bool // in front on its terminal: what is typed there reaches it
+	FG         bool   // in front on its terminal: what is typed there reaches it
+	Via        string // where its requests go, as the scan says it (codex_ep): the host alone; "" OpenAI's own
 	// Fresh: run with no subcommand, no log open, no conversation of its
 	// folder begun since it started — its own not begun yet.
 	Fresh bool
@@ -53,19 +54,27 @@ type codexPane struct {
 // where the host has no python3.
 func codexPanesCommand(socket string) string {
 	return `command -v python3 >/dev/null 2>&1 || exit 0
-exec python3 -I -c ` + sshx.QuoteShell(codexPanesScript) + ` ` + sshx.QuoteShell(socket)
+exec python3 -I -c ` + sshx.QuoteShell(codexPanesScript) + ` ` + sshx.QuoteShell(socket) + ` ` + sshx.QuoteShell(convoEndpointSh)
 }
 
 // (A record: pane, pid, start, started ms, cwd, thread, log, name, title,
 // first message, in front ("1": its group the terminal's foreground), its
 // subcommand ("" or "resume"), whether it has any rollout log open ("1"),
 // how many conversations of its folder were begun since it started (where
-// it names none and has none open); split by \x1f, ended by \0. The database: the newest
+// it names none and has none open), where its requests go (codex_ep: the
+// host alone, "" OpenAI's own); split by \x1f, ended by \0. The database: the newest
 // state_<n>.sqlite of its CODEX_HOME, read only; the log, the one it has
 // open, else the database's rollout_path, else the newest of
 // sessions/*/*/*/rollout-*-<thread>.jsonl.)
-const codexPanesScript = `import glob, os, re, sqlite3, sys
+const codexPanesScript = `import glob, os, re, sqlite3, subprocess, sys
 sock = sys.argv[1]
+endpoint_sh = sys.argv[2]  # (codex_ep and what it uses: the scan's own, run for each)
+def endpoint(pid):
+    try:
+        r = subprocess.run(['sh', '-c', endpoint_sh + '\ncodex_ep "$1"; printf %s "$ep"', 'sh', pid], capture_output=True, timeout=3)
+        return r.stdout.decode('utf-8', 'replace')[:300]
+    except Exception:
+        return ''
 uid = os.getuid()
 UUID = re.compile(r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}')
 TAKES = re.compile(r'^(-[cmpsaCi]|--(config|model|profile|sandbox|ask-for-approval|cd|image|add-dir|local-provider|remote|remote-auth-token-env|enable|disable))$')
@@ -230,13 +239,16 @@ for pane, pid, start, started, cwd, home, tid, opened, fg, sub, anylog in sorted
             logs = glob.glob(glob.escape(home) + '/sessions/*/*/*/rollout-*-' + tid + '.jsonl')
             if logs:
                 log = max(logs, key=lambda l: os.stat(l).st_mtime)
-    out.write('\x1f'.join([pane, pid, start, started, clean(cwd), tid, clean(log), clean(name), clean(title), clean(first), fg, sub, anylog, str(cands)]).encode('utf-8', 'replace') + b'\0')
+    out.write('\x1f'.join([pane, pid, start, started, clean(cwd), tid, clean(log), clean(name), clean(title), clean(first), fg, sub, anylog, str(cands), clean(endpoint(pid))]).encode('utf-8', 'replace') + b'\0')
 `
 
 // codexLogOf: a thread's log as the host named it, where it is one: an
 // absolute path, of that thread's rollout (a segment of it too), nothing
 // that leaves its folder. Else "".
 var codexLogName = regexp.MustCompile(`/rollout-[^/]*-([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})(?:_\d+)?\.jsonl$`)
+
+// hostOnly: a host as codex_ep gives it (a name or address, a port).
+var hostOnly = regexp.MustCompile(`^[A-Za-z0-9.:\[\]-]{1,253}$`)
 
 func codexLogOf(path, thread string) string {
 	m := codexLogName.FindStringSubmatch(path)
@@ -251,7 +263,7 @@ func parseCodexPanes(out string) map[string]codexPane {
 	got := map[string]codexPane{}
 	for _, rec := range strings.Split(out, "\x00") {
 		f := strings.Split(rec, "\x1f")
-		if len(f) != 14 || !herdrPaneID.MatchString(f[0]) {
+		if len(f) != 15 || !herdrPaneID.MatchString(f[0]) {
 			continue
 		}
 		pid, err1 := strconv.ParseInt(f[1], 10, 64)
@@ -261,6 +273,9 @@ func parseCodexPanes(out string) map[string]codexPane {
 			continue
 		}
 		c := codexPane{PID: pid, Start: start, Started: max(started, 0), Cwd: f[4], Name: f[7], Title: f[8], First: f[9], FG: f[10] == "1", Fresh: f[11] == "" && f[12] == "0" && f[13] == "0"}
+		if hostOnly.MatchString(f[14]) {
+			c.Via = f[14]
+		}
 		if convoUUID.MatchString(f[5]) {
 			c.Thread = f[5]
 			c.Path = codexLogOf(f[6], c.Thread)
@@ -415,7 +430,7 @@ func (s *Server) codexFront(ctx context.Context, sess *term.Session, socket, pan
 	if !ok {
 		return nil
 	}
-	return &convoProc{pid: c.PID, start: c.Start, fg: c.FG, started: c.Started, sid: c.Thread, log: c.Path, agent: "codex", herdrPane: pane, herdrSocket: socket, cwd: c.Cwd}
+	return &convoProc{pid: c.PID, start: c.Start, fg: c.FG, started: c.Started, sid: c.Thread, log: c.Path, agent: "codex", herdrPane: pane, herdrSocket: socket, cwd: c.Cwd, ep: c.Via}
 }
 
 func (s *Server) locateCodexFast(ctx context.Context, sess *term.Session, st *convoState, pane string) bool {
@@ -437,20 +452,14 @@ func (s *Server) locateCodexFast(ctx context.Context, sess *term.Session, st *co
 		if !ok || f.Several || !f.Fresh || f.Thread != "" || !codexTitleAgrees(hp.Title, f.Cwd, "") {
 			return false
 		}
-		b := &convoBind{PID: f.PID, Start: f.Start, Session: convoNoSession, Agent: "codex", Pane: pane, started: f.Started}
-		if was := st.bind; was != nil && was.PID == b.PID && was.Start == b.Start {
-			b.Via, b.Auth = was.Via, was.Auth
-		}
+		b := &convoBind{PID: f.PID, Start: f.Start, Session: convoNoSession, Agent: "codex", Pane: pane, started: f.Started, Via: f.Via}
 		st.bind = b
 		st.located, st.pane = time.Now(), pane
 		st.guessed = false
 		st.adopt(convoNoSession, "", "codex", convoNoLog)
 		return true
 	}
-	b := &convoBind{PID: c.PID, Start: c.Start, Session: c.Thread, Agent: "codex", Pane: pane, started: c.Started}
-	if was := st.bind; was != nil && was.PID == b.PID && was.Start == b.Start {
-		b.Via, b.Auth = was.Via, was.Auth // (as the scan found them: not told by this look)
-	}
+	b := &convoBind{PID: c.PID, Start: c.Start, Session: c.Thread, Agent: "codex", Pane: pane, started: c.Started, Via: c.Via}
 	st.bind = b
 	st.located, st.pane = time.Now(), pane
 	st.guessed = false
