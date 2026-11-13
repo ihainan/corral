@@ -2825,7 +2825,9 @@ front() {
       # holds it is a Codex.)
       # (A find without -lname — BusyBox's, say — each process as before.)
       if find /proc/self/fd -maxdepth 1 -lname / >/dev/null 2>&1; then
-        for hf in $(find /proc/[0-9]*/fd -maxdepth 1 -user "$(id -u)" -lname "$ownh/sessions/*/rollout-*.jsonl" 2>/dev/null); do
+        # (Its folder as find's pattern: what a pattern takes for its own — [ ] * ? \ — as itself.)
+        ownp=$(printf '%s' "$ownh" | sed 's/[][*?\\]/\\&/g')
+        for hf in $(find /proc/[0-9]*/fd -maxdepth 1 -user "$(id -u)" -lname "$ownp/sessions/*/rollout-*.jsonl" 2>/dev/null); do
           l=$(readlink "$hf" 2>/dev/null) || continue
           codex_log_sid "$l"; [ "$cxid" = "$sid" ] || continue
           hp=${hf#/proc/}; hp=${hp%%/*}
@@ -4408,7 +4410,9 @@ codex_ep() { # pid
 const codexFdsSh = `# Where a Codex keeps its sessions, logs and locks: its own CODEX_HOME
 # (of the process under /proc, $1), else ~/.codex. (cxhome)
 codex_home() {
-  cxhome=$(tr '\0' '\n' <"$1/environ" 2>/dev/null | sed -n 's/^CODEX_HOME=//p' | head -n 1)
+  # (Its environment by its own separators: a value with a newline in it is
+  # not taken for another variable, nor cut.)
+  cxhome=$(tr '\0' '\001' <"$1/environ" 2>/dev/null | awk 'BEGIN { RS = "\001" } /^CODEX_HOME=/ { sub(/^CODEX_HOME=/, ""); printf "%s", $0; exit }')
   [ -n "$cxhome" ] || cxhome=$HOME/.codex
   cxhome=${cxhome%/}
 }

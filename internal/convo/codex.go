@@ -49,10 +49,11 @@ type Codex struct {
 	ctxSaid    bool
 	effortSaid bool // an effective setting, including the default (null), was read
 	errSaid    bool // (an older Codex's error row said what went wrong with this turn)
-	// importCall: the last imported tool call (see importedRecord) whose
-	// result has not come: the next imported result is its.
-	importCall *Tool
-	Skipped    int
+	// importCalls: the imported tool calls (see importedRecord) whose
+	// results have not come, in their order: the next imported result is
+	// the first's (several called at once, their results come in turn).
+	importCalls []*Tool
+	Skipped     int
 	// Turns, to tell what a backtrack takes back: the first entry of each
 	// turn not taken back (a turn starts at task_started; its first entry is
 	// the person's message), the latest last. turnOpen: a turn has started
@@ -854,7 +855,7 @@ func (c *Codex) event(r *codexRow, p *codexPayload) {
 							c.add(r, "", RoleSummary, []Part{textPart(KindText, text)})
 							continue
 						}
-						role, said := classifyUserText(text)
+						role, said := importedUserText(text)
 						switch role {
 						case "":
 							continue
@@ -1291,16 +1292,20 @@ func (c *Codex) item(r *codexRow, p *codexPayload) {
 				continue
 			}
 			// (An imported tool's result: its call's, on that call's line.)
-			if kind, _, body, ok := importedRecord(b.Text); ok && kind == "result" && c.importCall != nil {
-				c.importCall.setResult(clean(body))
-				c.importCall.ResultLines = lineCount(body)
-				c.touch([]*Tool{c.importCall})
-				c.importCall = nil
+			if kind, _, body, ok := importedRecord(b.Text); ok && kind == "result" && len(c.importCalls) > 0 {
+				t := c.importCalls[0]
+				c.importCalls = c.importCalls[1:]
+				t.setResult(clean(body))
+				t.ResultLines = lineCount(body)
+				c.touch([]*Tool{t})
 				continue
 			}
 			got := codexDisplayParts(b.Text)
 			if kind, _, _, ok := importedRecord(b.Text); ok && kind == "call" && len(got) == 1 && got[0].Tool != nil && got[0].Tool.Result == "" {
-				c.importCall = got[0].Tool
+				c.importCalls = append(c.importCalls, got[0].Tool)
+				if len(c.importCalls) > 64 {
+					c.importCalls = c.importCalls[1:] // (a result never come: not waited for on and on)
+				}
 			}
 			parts = append(parts, got...)
 		}

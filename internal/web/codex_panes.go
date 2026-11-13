@@ -45,6 +45,12 @@ type codexPane struct {
 	// Fresh: run with no subcommand, no log open, no conversation of its
 	// folder begun since it started — its own not begun yet.
 	Fresh bool
+	// Src: what told its thread ("fd", "argv", "db"); Unexplained: how many
+	// conversations of its folder were talked in since it started that no
+	// Codex of the user's is told at (one begun or resumed in it since,
+	// maybe: then an unnamed thread of its is not taken for sure).
+	Src         string
+	Unexplained int
 	// Several: the pane runs more than one interactive Codex (one inside
 	// another's command, say): which the pane shows is not told.
 	Several bool
@@ -61,19 +67,31 @@ exec python3 -I -c ` + sshx.QuoteShell(codexPanesScript) + ` ` + sshx.QuoteShell
 }
 
 // (A record: pane, pid, start, started ms, cwd, thread, log, name, title,
-// first message, in front ("1": its group the terminal's foreground), its
-// subcommand ("" or "resume"), whether it has any rollout log open ("1"),
-// how many conversations of its folder were begun since it started (where
-// it names none and has none open), where its requests go (codex_ep: the
-// host alone, "" OpenAI's own; "=" one the gateway named as known); split
-// by \x1f, ended by \0. The database: the newest
+// first message, in front ("1": its group the terminal's foreground),
+// fresh ("1": no subcommand, no log open, no conversation of its folder
+// begun since it started), where the thread was told by ("fd": a log it has
+// open; "argv": its resume argument; "db": the one conversation of its
+// folder begun since it started), how many conversations of its folder
+// were talked in since it started that neither it nor any other Codex of
+// the user's is told at (unexplained), where its requests go (codex_ep:
+// the host alone, "" OpenAI's own; "=" one the gateway named as known);
+// split by \x1f, ended by \0. The database: the newest
 // state_<n>.sqlite of its CODEX_HOME, read only; the log, the one it has
 // open, else the database's rollout_path, else the newest of
 // sessions/*/*/*/rollout-*-<thread>.jsonl.)
-const codexPanesScript = `import glob, os, re, sqlite3, subprocess, sys
+const codexPanesScript = `import glob, json, os, re, sqlite3, subprocess, sys
 sock = sys.argv[1]
 endpoint_sh = sys.argv[2]  # (codex_ep and what it uses: the scan's own, run for each)
-known = set(sys.argv[3].split(',')) if len(sys.argv) > 3 else set()
+known = set(sys.argv[3].split(',')) if len(sys.argv) > 3 and sys.argv[3] else set()
+uid = os.getuid()
+UUID = re.compile(r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}')
+TAKES = re.compile(r'^(-[cmpsaCi]|--(config|model|profile|sandbox|ask-for-approval|cd|image|add-dir|local-provider|remote|remote-auth-token-env|enable|disable))$')
+TALKED = "source IN ('cli', 'vscode') AND COALESCE(thread_source, '') NOT IN ('guardian_review', 'subagent')"
+try:
+    hz = os.sysconf('SC_CLK_TCK')
+    btime = int([l.split()[1] for l in open('/proc/stat') if l.startswith('btime ')][0])
+except Exception:
+    hz, btime = 0, 0
 def endpoint(pid, start):
     if pid + ':' + start in known:
         return '='
@@ -82,14 +100,6 @@ def endpoint(pid, start):
         return r.stdout.decode('utf-8', 'replace')[:300]
     except Exception:
         return ''
-uid = os.getuid()
-UUID = re.compile(r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}')
-TAKES = re.compile(r'^(-[cmpsaCi]|--(config|model|profile|sandbox|ask-for-approval|cd|image|add-dir|local-provider|remote|remote-auth-token-env|enable|disable))$')
-try:
-    hz = os.sysconf('SC_CLK_TCK')
-    btime = int([l.split()[1] for l in open('/proc/stat') if l.startswith('btime ')][0])
-except Exception:
-    hz, btime = 0, 0
 def sub_and_id(args):
     pos, skip = [], False
     for a in args:
@@ -121,7 +131,52 @@ def under_herdr(pid):
         except (OSError, ValueError, IndexError):
             return False
     return False
-found = []
+dbs = {}
+def con_of(home):
+    if home in dbs:
+        return dbs[home]
+    best, n = None, -1
+    try:
+        names = os.listdir(home)
+    except OSError:
+        names = []
+    for name in names:
+        m = re.fullmatch(r'state_(\d+)\.sqlite', name)
+        if m and int(m.group(1)) > n:
+            best, n = os.path.join(home, name), int(m.group(1))
+    try:
+        dbs[home] = sqlite3.connect('file:' + best + '?mode=ro', uri=True, timeout=2) if best else None
+    except sqlite3.Error:
+        dbs[home] = None
+    return dbs[home]
+def row_of(con, tid):
+    if con is None:
+        return None
+    try:
+        return con.execute('SELECT name, title, first_user_message, rollout_path, source, thread_source FROM threads WHERE id = ?', (tid,)).fetchone()
+    except sqlite3.Error:
+        return None
+def subagent(con, tid, log):
+    # (By the database; where it has no row, by the log's head, as the scan reads it.)
+    row = row_of(con, tid)
+    if row:
+        return (row[4] or '').startswith('{') or (row[5] or '') in ('guardian_review', 'subagent')
+    try:
+        with open(log, 'rb') as f:
+            head = f.read(8192).split(b'\n', 1)[0]
+        meta = json.loads(head).get('payload') or {}
+        src = meta.get('source')
+        return isinstance(src, dict) or meta.get('thread_source') in ('guardian_review', 'subagent')
+    except Exception:
+        return True  # (not told: not taken for its own)
+def environ(p):
+    with open(p + '/environ', 'rb') as f:
+        return dict(x.split(b'=', 1) for x in f.read().split(b'\0') if b'=' in x)
+# Every interactive Codex of the user's, in any pane or none: the threads it
+# is told at (its resume argument, the logs of its own it has open) — what
+# a thread touched in a folder is accounted for by.
+procs = []
+held = set()  # (the threads whose logs a Codex of the user's — a daemon too — holds open: those live now)
 for d in os.listdir('/proc'):
     if not d.isdigit():
         continue
@@ -132,8 +187,16 @@ for d in os.listdir('/proc'):
         with open(p + '/comm') as f:
             if f.read().strip() != 'codex':
                 continue
-        with open(p + '/environ', 'rb') as f:
-            env = dict(x.split(b'=', 1) for x in f.read().split(b'\0') if b'=' in x)
+        for fd in os.listdir(p + '/fd'):
+            try:
+                l = os.readlink(p + '/fd/' + fd)
+            except OSError:
+                continue
+            if '/rollout-' in l and l.endswith('.jsonl'):
+                m = UUID.search(os.path.basename(l))
+                if m:
+                    held.add(m.group(0))
+        env = environ(p)
         with open(p + '/cmdline', 'rb') as f:
             args = [a.decode('utf-8', 'replace') for a in f.read().split(b'\0')[1:]]
         with open(p + '/stat') as f:
@@ -144,18 +207,8 @@ for d in os.listdir('/proc'):
         cwd = os.readlink(p + '/cwd')
     except (OSError, ValueError, IndexError):
         continue
-    if env.get(b'HERDR_SOCKET_PATH', b'').decode('utf-8', 'replace') != sock:
-        continue
-    pane = env.get(b'HERDR_PANE_ID', b'').decode('utf-8', 'replace')
-    if not pane or len(pane) > 64:
-        continue
     sub, tid = sub_and_id(args)
     if sub not in ('', 'resume'):
-        continue
-    # (Run in herdr: a herdr among its parents, as the scan requires — not a
-    # process that took a pane's environment with it, detached or outliving
-    # the pane.)
-    if not under_herdr(d):
         continue
     home = env.get(b'CODEX_HOME', b'').decode('utf-8', 'replace') or os.path.join(env.get(b'HOME', b'').decode('utf-8', 'replace') or os.path.expanduser('~'), '.codex')
     home = home.rstrip('/')
@@ -180,62 +233,60 @@ for d in os.listdir('/proc'):
             if m:
                 opened.append((t, m.group(0), l))
     started = (btime * 1000 + start * 1000 // hz) if hz and btime else 0
-    found.append([pane, d, str(start), str(started), cwd, home, tid, opened, fg, sub, '1' if any_log else '0'])
-def db_of(home):
-    best, n = None, -1
-    try:
-        names = os.listdir(home)
-    except OSError:
-        return None
-    for name in names:
-        m = re.fullmatch(r'state_(\d+)\.sqlite', name)
-        if m and int(m.group(1)) > n:
-            best, n = os.path.join(home, name), int(m.group(1))
-    return best
+    mine = env.get(b'HERDR_SOCKET_PATH', b'').decode('utf-8', 'replace') == sock
+    pane = env.get(b'HERDR_PANE_ID', b'').decode('utf-8', 'replace') if mine else ''
+    procs.append({'pid': d, 'start': str(start), 'started': started, 'cwd': cwd, 'home': home, 'argv': tid, 'opened': opened,
+                  'fg': fg, 'sub': sub, 'any': any_log, 'pane': pane})
+claims = {}
+for q in procs:
+    con = con_of(q['home'])
+    own = {tid for _, tid, l in q['opened'] if not subagent(con, tid, l)}
+    if q['argv']:
+        own.add(q['argv'])
+    q['own'] = own
 def clean(s):
     return (s or '')[:2000].replace('\0', ' ').replace('\x1f', ' ')
 out = sys.stdout.buffer
-dbs = {}
-def row_of(con, tid):
-    if con is None:
-        return None
-    try:
-        return con.execute('SELECT name, title, first_user_message, rollout_path, source, thread_source FROM threads WHERE id = ?', (tid,)).fetchone()
-    except sqlite3.Error:
-        return None
-def subagent(row):
-    return bool(row) and ((row[4] or '').startswith('{') or (row[5] or '') in ('guardian_review', 'subagent'))
-for pane, pid, start, started, cwd, home, tid, opened, fg, sub, anylog in sorted(found, key=lambda f: f[:6]):
-    name = title = first = log = ''
-    if home not in dbs:
-        db = db_of(home)
-        try:
-            dbs[home] = sqlite3.connect('file:' + db + '?mode=ro', uri=True, timeout=2) if db else None
-        except sqlite3.Error:
-            dbs[home] = None
-    con = dbs[home]
-    # (Of the logs it has open, its own: the newest not a subagent's — a
-    # review's, a spawned agent's — else the thread it was resumed at.)
-    for t, otid, l in sorted(opened, reverse=True):
-        if not subagent(row_of(con, otid)):
-            tid, log = otid, l
+for q in sorted(procs, key=lambda q: (q['pane'], q['pid'])):
+    pane = q['pane']
+    if not pane or len(pane) > 64 or not under_herdr(q['pid']):
+        continue
+    con = con_of(q['home'])
+    tid, log, src = '', '', ''
+    # (Its own: the newest log of its own it has open — a review's, a spawned
+    # agent's left out — else the thread it was resumed at.)
+    for t, otid, l in sorted(q['opened'], reverse=True):
+        if not subagent(con, otid, l):
+            tid, log, src = otid, l, 'fd'
             break
-    # (Begun with no thread named and none open — run against the daemon:
-    # the one conversation of its folder begun since it started, as one
-    # talked to (cli, vscode; not exec's, not a subagent's). Two or more —
-    # another Codex in that folder since, in a pane or not — tell none
-    # (cands: how many); the title, compared by the gateway, says if the
-    # one is the one shown.)
-    cands = 0
-    if not tid and con is not None and int(started) > 0:
+    if not tid and q['argv']:
+        tid, src = q['argv'], 'argv'
+    # Conversations of its folder talked in since it started (begun, or
+    # written to: a resume writes), live now: those no other Codex is told
+    # at, but its own, are unexplained — one begun or resumed in it since,
+    # maybe.
+    touched = []
+    if con is not None and q['started'] > 0:
         try:
-            ids = [c[0] for c in con.execute("SELECT id, source, thread_source FROM threads WHERE cwd = ? AND created_at >= ? LIMIT 50", (cwd, int(started) // 1000 - 5))
-                   if (c[1] or '') in ('cli', 'vscode') and (c[2] or '') not in ('guardian_review', 'subagent')]
+            since = q['started'] // 1000 - 5
+            touched = [r[0] for r in con.execute('SELECT id, created_at FROM threads WHERE cwd = ? AND (created_at >= ? OR updated_at >= ?) AND ' + TALKED, (q['cwd'], since, since))]
+            begun = [r[0] for r in con.execute('SELECT id FROM threads WHERE cwd = ? AND created_at >= ? AND ' + TALKED, (q['cwd'], since))]
         except sqlite3.Error:
-            ids = [None, None]
-        cands = len(ids)
-        if cands == 1:
-            tid = ids[0]
+            touched, begun = None, None
+    else:
+        begun = []
+    others = set()
+    for o in procs:
+        if o is not q:
+            others |= o['own']
+    # (Begun with no thread told — run against the daemon: the one
+    # conversation of its folder begun since it started, where there is one.)
+    if not tid and begun is not None and len(begun) == 1 and begun[0] not in others:
+        tid, src = begun[0], 'db'
+    # (Only those live now — their logs held: one this Codex was resumed at
+    # or begun in since is; one of a Codex that has ended since is not.)
+    unexplained = 99 if touched is None else len([x for x in touched if x != tid and x not in others and x in held])
+    name = title = first = ''
     if tid:
         row = row_of(con, tid)
         if row:
@@ -243,10 +294,12 @@ for pane, pid, start, started, cwd, home, tid, opened, fg, sub, anylog in sorted
             if not log and row[3] and os.path.isfile(row[3]):
                 log = row[3]
         if not log:
-            logs = glob.glob(glob.escape(home) + '/sessions/*/*/*/rollout-*-' + tid + '.jsonl')
+            logs = glob.glob(glob.escape(q['home']) + '/sessions/*/*/*/rollout-*-' + tid + '.jsonl')
             if logs:
                 log = max(logs, key=lambda l: os.stat(l).st_mtime)
-    out.write('\x1f'.join([pane, pid, start, started, clean(cwd), tid, clean(log), clean(name), clean(title), clean(first), fg, sub, anylog, str(cands), clean(endpoint(pid, start))]).encode('utf-8', 'replace') + b'\0')
+    fresh = '1' if q['sub'] == '' and not q['any'] and begun is not None and len(begun) == 0 else '0'
+    out.write('\x1f'.join([pane, q['pid'], q['start'], str(q['started']), clean(q['cwd']), tid, clean(log), clean(name), clean(title), clean(first),
+                           q['fg'], fresh, src, str(unexplained), clean(endpoint(q['pid'], q['start']))]).encode('utf-8', 'replace') + b'\0')
 `
 
 // codexLogOf: a thread's log as the host named it, where it is one: an
@@ -279,7 +332,11 @@ func parseCodexPanes(out string) map[string]codexPane {
 		if err1 != nil || err2 != nil || pid <= 0 || start <= 0 {
 			continue
 		}
-		c := codexPane{PID: pid, Start: start, Started: max(started, 0), Cwd: f[4], Name: f[7], Title: f[8], First: f[9], FG: f[10] == "1", Fresh: f[11] == "" && f[12] == "0" && f[13] == "0"}
+		unexplained, err3 := strconv.Atoi(f[13])
+		if err3 != nil || unexplained < 0 {
+			unexplained = 99
+		}
+		c := codexPane{PID: pid, Start: start, Started: max(started, 0), Cwd: f[4], Name: f[7], Title: f[8], First: f[9], FG: f[10] == "1", Fresh: f[11] == "1", Src: f[12], Unexplained: unexplained}
 		if f[14] == "=" {
 			c.viaKnown = true
 		} else if hostOnly.MatchString(f[14]) {
@@ -444,6 +501,13 @@ func codexPaneSure(panes map[string]codexPane, pane string, hp herdr.Pane) (code
 	if !ok || c.Several || c.Thread == "" || c.Path == "" || !codexTitleAgrees(hp.Title, c.Cwd, c.Name) {
 		return codexPane{}, false
 	}
+	// (A thread with no name, its title the folder alone, is no word on which
+	// it is: taken only where nothing else of its folder was talked in since
+	// it started — not one resumed or begun in it since — and never on the
+	// folder's say alone (db).)
+	if c.Name == "" && (c.Src == "db" || c.Unexplained > 0) {
+		return codexPane{}, false
+	}
 	for p, o := range panes {
 		if p != pane && o.Thread == c.Thread {
 			return codexPane{}, false // (two at one thread: which is which, the scan tells)
@@ -487,7 +551,7 @@ func (s *Server) locateCodexFast(ctx context.Context, sess *term.Session, st *co
 		// as the scan would find — told so without it, rather than by a scan
 		// at each read till its first message.)
 		f, ok := panes[pane]
-		if !ok || f.Several || !f.Fresh || f.Thread != "" || !codexTitleAgrees(hp.Title, f.Cwd, "") {
+		if !ok || f.Several || !f.Fresh || f.Thread != "" || f.Unexplained > 0 || !codexTitleAgrees(hp.Title, f.Cwd, "") {
 			return false
 		}
 		b := &convoBind{PID: f.PID, Start: f.Start, Session: convoNoSession, Agent: "codex", Pane: pane, started: f.Started, Via: f.Via}

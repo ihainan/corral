@@ -93,7 +93,11 @@ func TestCodexClaudeImport(t *testing.T) {
 	log = append(log, user("external-import-turn-2", "This session is being continued from a previous conversation that ran out of context. Summary: …")...)
 	log = append(log, user("external-import-turn-2", "看一下 dashboard")...)
 	log = append(log, assistant("[external_agent_tool_call: Bash]\ndescription: Download dashboard homepage\ncommand: curl -s https://example.org/\n[/external_agent_tool_call]")...)
+	log = append(log, assistant("[external_agent_tool_call: Read]\nfile: /tmp/a.txt\n[/external_agent_tool_call]")...)
 	log = append(log, assistant("[external_agent_tool_result]\n200 163187\n<!DOCTYPE html>")...)
+	log = append(log, assistant("[external_agent_tool_result]\ncontents of a")...)
+	log = append(log, user("external-import-turn-3", "<system-reminder>样本</system-reminder>\n请解释这个标签")...)
+	log = append(log, user("external-import-turn-3", "<command-name>/model</command-name> 这个命令是做什么的")...)
 	log = append(log, assistant("[external_agent_tool_result]\nan orphan result")...)
 	log = append(log, assistant("好的，页面已下载。")...)
 	log = append(log, assistant("<EXTERNAL SESSION IMPORTED>")...)
@@ -118,6 +122,9 @@ func TestCodexClaudeImport(t *testing.T) {
 		"summary This session is being continued from a previous conversation that ran out of context. Summary: …",
 		"user 看一下 dashboard",
 		"assistant tool Bash | Download dashboard homepage | curl -s https://example.org/ | 200 163187\n<!DOCTYPE html>",
+		"assistant tool Read |  | file: /tmp/a.txt | contents of a",
+		"user 请解释这个标签",
+		"user <command-name>/model</command-name> 这个命令是做什么的",
 		"assistant tool result |  |  | an orphan result",
 		"assistant 好的，页面已下载。",
 		"user <command-name>/model</command-name>",

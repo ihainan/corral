@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"github.com/ihainan/corral/internal/herdr"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -58,7 +59,7 @@ func TestParseCodexPanes(t *testing.T) {
 	const a = "01a1cd3b-8a27-75f1-ba56-dd9f7f22cd01"
 	const b = "01a1cd3b-8685-7b23-9bfc-b218af59d6d1"
 	rec := func(f ...string) string {
-		return strings.Join(append(f, "1", "resume", "0", "0", "sub2api.example.org"), "\x1f") + "\x00"
+		return strings.Join(append(f, "1", "0", "argv", "0", "sub2api.example.org"), "\x1f") + "\x00"
 	}
 	out := rec("w2:p1", "965934", "69873389", "1794460425000", "/home/u/AI", a, "/home/u/.codex/sessions/2026/11/12/rollout-2026-11-12T08-49-53-"+a+".jsonl", "", "[Image #1] 检查红圈", "first") +
 		rec("w3:p1", "100", "200", "0", "/home/u/AI", b, "/home/u/.codex/sessions/x/rollout-1-"+a+".jsonl", "named", "t", "f") + // (a log of another thread)
@@ -85,11 +86,11 @@ func TestParseCodexPanes(t *testing.T) {
 	if _, ok := got["w8:p1"]; ok {
 		t.Fatal("no process taken")
 	}
-	known := parseCodexPanes(strings.Join([]string{"w9:p1", "1", "2", "0", "/x", "", "", "", "", "", "1", "", "0", "0", "="}, "\x1f") + "\x00")["w9:p1"]
+	known := parseCodexPanes(strings.Join([]string{"w9:p1", "1", "2", "0", "/x", "", "", "", "", "", "1", "0", "", "0", "="}, "\x1f") + "\x00")["w9:p1"]
 	if !known.viaKnown || known.Via != "" {
 		t.Fatalf("a known endpoint: %+v", known)
 	}
-	if bad := parseCodexPanes(strings.Join([]string{"w9:p1", "1", "2", "0", "/x", "", "", "", "", "", "1", "", "0", "0", "evil host;rm"}, "\x1f") + "\x00")["w9:p1"]; bad.Via != "" {
+	if bad := parseCodexPanes(strings.Join([]string{"w9:p1", "1", "2", "0", "/x", "", "", "", "", "", "1", "0", "", "0", "evil host;rm"}, "\x1f") + "\x00")["w9:p1"]; bad.Via != "" {
 		t.Fatalf("a host not a host: %+v", bad)
 	}
 	names := codexNames(got)
@@ -162,5 +163,46 @@ func TestCodexTitler(t *testing.T) {
 	}
 	if n := scans.Load(); n != 1 {
 		t.Fatalf("%d looks", n)
+	}
+}
+
+// A pane's Codex taken for sure only on evidence: a thread with no name
+// (its title the folder alone) where nothing else of its folder was talked
+// in since it started, and never on the folder's say alone; a named one by
+// its title; never one two panes are at.
+func TestCodexPaneSure(t *testing.T) {
+	const a = "01a1cd3b-8a27-75f1-ba56-dd9f7f22cd01"
+	const b = "01a1cd3b-8685-7b23-9bfc-b218af59d6d1"
+	pane := func(thread, name, src string, unexplained int) codexPane {
+		return codexPane{PID: 1, Start: 2, Cwd: "/x/AI", Thread: thread, Path: "/h/.codex/sessions/1/2/3/rollout-1-" + thread + ".jsonl", Name: name, Src: src, Unexplained: unexplained}
+	}
+	hp := func(title string) herdr.Pane { return herdr.Pane{ID: "w1:p1", Agent: "codex", Title: title} }
+	for _, c := range []struct {
+		why   string
+		p     codexPane
+		title string
+		want  bool
+	}{
+		{"unnamed, resumed at it, nothing else talked in", pane(a, "", "argv", 0), "AI", true},
+		{"unnamed, another live one talked in since (/resume, /new)", pane(a, "", "argv", 1), "AI", false},
+		{"unnamed, by the folder alone", pane(a, "", "db", 0), "AI", false},
+		{"named, by the folder, its title says it", pane(a, "调研", "db", 0), "调研 | AI", true},
+		{"named, its title another's", pane(a, "调研", "argv", 0), "别的 | AI", false},
+		{"named, others talked in since: its title tells", pane(a, "调研", "fd", 3), "调研 | AI", true},
+		{"no log", codexPane{PID: 1, Start: 2, Cwd: "/x/AI", Thread: a, Src: "argv"}, "AI", false},
+	} {
+		_, got := codexPaneSure(map[string]codexPane{"w1:p1": c.p}, "w1:p1", hp(c.title))
+		if got != c.want {
+			t.Errorf("%s: %v", c.why, got)
+		}
+	}
+	// Two panes at one thread: neither.
+	two := map[string]codexPane{"w1:p1": pane(a, "", "argv", 0), "w2:p1": pane(a, "", "argv", 0)}
+	if _, ok := codexPaneSure(two, "w1:p1", hp("AI")); ok {
+		t.Fatal("two at one thread taken")
+	}
+	two["w2:p1"] = pane(b, "", "argv", 0)
+	if _, ok := codexPaneSure(two, "w1:p1", hp("AI")); !ok {
+		t.Fatal("two at two threads refused")
 	}
 }

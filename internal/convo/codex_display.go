@@ -116,3 +116,25 @@ func codexReplyText(text string) (string, bool) {
 	}
 	return strings.Join(out, "\n\n"), true
 }
+
+// importedUserText: what a person's row of an imported Claude Code session
+// says (as classifyUserText), where what Claude Code wrapped in it for its
+// own — its reminders, its caveat — is cut out first, and the rest is told
+// as an envelope only where it is one whole (a command, its output): the
+// person's own words that hold such a tag, or quote one, are theirs.
+func importedUserText(s string) (role, text string) {
+	s = claudeOwnBlocks.ReplaceAllString(s, "")
+	if strings.TrimSpace(s) == "" {
+		return "", ""
+	}
+	if strings.TrimSpace(wholeEnvelope.ReplaceAllString(s, "")) == "" {
+		return classifyUserText(strings.TrimSpace(s))
+	}
+	return RoleUser, strings.TrimSpace(s)
+}
+
+// claudeOwnBlocks: what Claude Code writes into the person's rows for itself.
+var claudeOwnBlocks = regexp.MustCompile(`(?s)<system-reminder>.*?</system-reminder>|<local-command-caveat>.*?</local-command-caveat>`)
+
+// wholeEnvelope: one tag of Claude Code's and what it holds.
+var wholeEnvelope = regexp.MustCompile(`(?s)<([a-z][a-z0-9-]*)>.*?</([a-z][a-z0-9-]*)>`)
