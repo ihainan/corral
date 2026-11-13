@@ -2737,6 +2737,35 @@ var reminderBlock = regexp.MustCompile(`(?s)<system-reminder>.*?</system-reminde
 // taskNotice: s is one notice of Claude Code's (task-notification) and
 // nothing else: what it says of work set going is taken (not the person's
 // words that quote one, nor one with words of theirs around it).
+// EndedAgents is the subagents a notice of Claude Code's says ended —
+// finished, failed or stopped, not one waiting —, by their task ids (by
+// its summary where it gives none): none where it is no such notice. The
+// background prober (web/herdr_bg.go) takes them off the count a turn's end
+// wrote: a subagent back with no turn begun after it (Claude Code at rest,
+// a compaction since) is no longer out. (By id, as one notice may be
+// written twice — an attachment and a user row — or a subagent woken again
+// end twice.)
+func EndedAgents(s string) []string {
+	n, notice := noticeOf(s)
+	if !notice {
+		return nil
+	}
+	ev := taskEnded(n)
+	if ev == nil || ev.Task != "agent" || ev.Status == "waiting" {
+		return nil
+	}
+	var ids []string
+	for _, m := range taskID.FindAllStringSubmatch(n, maxTaskIDs) {
+		if id := strings.TrimSpace(m[1]); id != "" && !strings.HasPrefix(id, "__orphan_summary") {
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) == 0 {
+		ids = []string{"summary:" + ev.Text}
+	}
+	return ids
+}
+
 func taskNotice(s string) bool {
 	t := strings.TrimSpace(s)
 	return strings.HasPrefix(t, "<task-notification>") && strings.HasSuffix(t, "</task-notification>") && strings.Count(t, "<task-notification>") == 1

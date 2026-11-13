@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ihainan/corral/internal/convo"
 	"github.com/ihainan/corral/internal/herdr"
 	"github.com/ihainan/corral/internal/sshx"
 	"github.com/ihainan/corral/internal/term"
@@ -398,6 +399,7 @@ func parseBgTails(out []byte) map[string]bgRecord {
 		}
 		lines := bytes.Split(part[nl+1:], []byte("\n"))
 		rec := bgRecord{}
+		at := -1
 		for i := len(lines) - 1; i >= 0; i-- {
 			l := lines[i]
 			if !bytes.Contains(l, []byte(`"turn_duration"`)) {
@@ -417,11 +419,67 @@ func parseBgTails(out []byte) map[string]bgRecord {
 			if r.Pending != nil && *r.Pending > 0 {
 				rec.n = min(*r.Pending, 999)
 			}
+			at = i
 			break
+		}
+		// (Those back since, with no turn begun after — Claude Code at rest,
+		// a compaction while idle after it —: not out. 11-13: else one stayed
+		// "working in the background" for good, its subagent long done.)
+		if rec.n > 0 && at >= 0 {
+			back := map[string]bool{} // (each once: a notice may be written twice)
+			for _, l := range lines[at+1:] {
+				if bytes.Contains(l, []byte("task-notification")) {
+					for _, id := range endedIn(l) {
+						back[id] = true
+					}
+				}
+			}
+			rec.n = max(rec.n-len(back), 0)
 		}
 		got[sid] = rec
 	}
 	return got
+}
+
+// endedIn is the subagents a log's line says ended (their task ids): a notice of
+// Claude Code's, as a queued command's attachment or a user row's words
+// (see convo.EndedAgents); not a subagent's own line.
+func endedIn(l []byte) []string {
+	var r struct {
+		Type       string `json:"type"`
+		Side       bool   `json:"isSidechain"`
+		Attachment *struct {
+			Type        string          `json:"type"`
+			CommandMode string          `json:"commandMode"`
+			Prompt      json.RawMessage `json:"prompt"`
+		} `json:"attachment"`
+		Message *struct {
+			Content json.RawMessage `json:"content"`
+		} `json:"message"`
+	}
+	if json.Unmarshal(l, &r) != nil || r.Side {
+		return nil
+	}
+	var s string
+	switch {
+	case r.Attachment != nil && r.Attachment.Type == "queued_command" && r.Attachment.CommandMode == "task-notification":
+		_ = json.Unmarshal(r.Attachment.Prompt, &s)
+	case r.Type == "user" && r.Message != nil:
+		if json.Unmarshal(r.Message.Content, &s) != nil {
+			var parts []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			}
+			if json.Unmarshal(r.Message.Content, &parts) == nil {
+				for _, p := range parts {
+					if p.Type == "text" {
+						s += p.Text
+					}
+				}
+			}
+		}
+	}
+	return convo.EndedAgents(s)
 }
 
 func clipStr(s string, n int) string {

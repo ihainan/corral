@@ -2,6 +2,8 @@ package web
 
 import (
 	"context"
+	"encoding/json"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -39,6 +41,44 @@ func TestParseBgTails(t *testing.T) {
 	}
 	if len(got) != 2 {
 		t.Fatalf("an id not of a session taken: %+v", got)
+	}
+}
+
+// A subagent back with no turn begun after it (Claude Code at rest, a
+// compaction since): no longer out. Only ended subagents count — not a
+// command's end, not one waiting, not a subagent's own line.
+func TestParseBgTailsSubagentsBack(t *testing.T) {
+	notice := func(what, how string) string {
+		return "<task-notification>\n<task-id>" + what + "</task-id>\n<status>completed</status>\n<summary>" + how + "</summary>\n</task-notification>"
+	}
+	queued := func(s string) string {
+		b, _ := json.Marshal(map[string]any{"type": "attachment", "attachment": map[string]any{"type": "queued_command", "commandMode": "task-notification", "prompt": s}})
+		return string(b)
+	}
+	user := func(s string) string {
+		b, _ := json.Marshal(map[string]any{"type": "user", "message": map[string]any{"role": "user", "content": s}})
+		return string(b)
+	}
+	out := strings.Join([]string{
+		"",
+		"@@corral-bg " + bgSid1, // (one out, back as a queued notice, then a compaction while idle)
+		`{"type":"system","subtype":"turn_duration","uuid":"t1","pendingBackgroundAgentCount":1}`,
+		queued(notice("a1", `Agent "核实国内终端DLP产品说法" finished`)),
+		`{"type":"system","subtype":"compact_boundary","uuid":"c1"}`,
+		"",
+		"@@corral-bg " + bgSid2, // (three out: one back as a user row, a command's end and one waiting not)
+		`{"type":"system","subtype":"turn_duration","uuid":"t2","pendingBackgroundAgentCount":3}`,
+		user(notice("a2", `Agent "b" finished`)),
+		queued(notice("a2", `Agent "b" finished`)), // (the same one again, as an attachment: once)
+		queued(notice("c1", `Background command "dev server" completed (exit code 0)`)),
+		`{"type":"attachment","isSidechain":true,"attachment":{"type":"queued_command","commandMode":"task-notification","prompt":` + strconv.Quote(notice("a3", `Agent "c" finished`)) + `}}`,
+	}, "\n")
+	got := parseBgTails([]byte(out))
+	if r := got[bgSid1]; r.uuid != "t1" || r.n != 0 {
+		t.Fatalf("back, then at rest: %+v", r)
+	}
+	if r := got[bgSid2]; r.uuid != "t2" || r.n != 2 {
+		t.Fatalf("one of three back (a command's end and a subagent's own line not counted): %+v", r)
 	}
 }
 
