@@ -91,6 +91,20 @@ def sub_and_id(args):
     sub = pos[0] if pos else ''
     tid = pos[1] if sub == 'resume' and len(pos) > 1 and UUID.fullmatch(pos[1]) else ''
     return sub, tid
+def under_herdr(pid):
+    for _ in range(40):
+        try:
+            with open('/proc/' + pid + '/stat') as f:
+                st = f.read()
+            pid = st[st.rindex(') ') + 2:].split()[1]
+            if pid in ('0', '1'):
+                return False
+            with open('/proc/' + pid + '/comm') as f:
+                if f.read().strip() == 'herdr':
+                    return True
+        except (OSError, ValueError, IndexError):
+            return False
+    return False
 found = []
 for d in os.listdir('/proc'):
     if not d.isdigit():
@@ -121,6 +135,11 @@ for d in os.listdir('/proc'):
         continue
     sub, tid = sub_and_id(args)
     if sub not in ('', 'resume'):
+        continue
+    # (Run in herdr: a herdr among its parents, as the scan requires — not a
+    # process that took a pane's environment with it, detached or outliving
+    # the pane.)
+    if not under_herdr(d):
         continue
     home = env.get(b'CODEX_HOME', b'').decode('utf-8', 'replace') or os.path.join(env.get(b'HOME', b'').decode('utf-8', 'replace') or os.path.expanduser('~'), '.codex')
     home = home.rstrip('/')
