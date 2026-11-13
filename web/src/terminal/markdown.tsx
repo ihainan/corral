@@ -1,5 +1,7 @@
 import { createContext, Fragment, useContext, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { Code } from './Code'
+import { t } from '../i18n'
+import { Check } from 'lucide-react'
 
 // A small Markdown renderer for an agent's answers in the conversation view:
 // headings, paragraphs, lists (nested by indent), fenced code, quotes, GFM
@@ -215,9 +217,17 @@ function blocks(lines: string[], copy: Copy, depth: number, soft = false): React
             if (soft) while (n < sub.length && sub[n].trim() && !listItem.test(sub[n]) && !rule.test(sub[n]) && !sub[n].includes('|') && !/^\s*(```|~~~|>|#{1,6}\s)/.test(sub[n])) n++
             const words = [it.first, ...sub.slice(0, n)]
             sub = sub.slice(n)
+            // (A task, as GitHub writes them: "[ ] " or "[x] " first, a box to see — not to tick.)
+            const task = /^\[([ xX])\]\s+/.exec(words[0])
+            if (task) words[0] = words[0].slice(task[0].length)
             return (
-              <li key={k}>
-                {n ? inlineLines(words, true) : inline(it.first)}
+              <li key={k} className={task ? 'md-task-item' : undefined}>
+                {task && (
+                  <span className={'md-task' + (task[1] !== ' ' ? ' is-done' : '')} role="img" aria-label={t(task[1] !== ' ' ? 'convo.taskDone' : 'convo.taskTodo')}>
+                    {task[1] !== ' ' && <Check size={11} strokeWidth={3} aria-hidden="true" />}
+                  </span>
+                )}
+                {n ? inlineLines(words, true) : inline(words[0])}
                 {sub.some((s) => s.trim()) && blocks(sub, copy, depth + 1, soft)}
               </li>
             )
@@ -298,12 +308,21 @@ function inlineLines(lines: string[], soft = false): ReactNode {
 const wide = '\\u3000-\\u303f\\uff00-\\uffef' // full-width punctuation ends a bare address
 const spans: { re: RegExp; make: (m: RegExpExecArray, key: number) => ReactNode }[] = [
   { re: /`([^`]+)`/g, make: (m, k) => <InlineCode key={k} text={m[1]} /> },
+  // (A mark written to be shown as itself — \* — not as emphasis; the backslash not shown. Not in code: that is matched first.)
+  { re: /\\([!-/:-@[-`{-~])/g, make: (m, k) => <Fragment key={k}>{m[1]}</Fragment> },
+  // (A line break written as HTML, as in a table's cell: the one tag taken; any other stays text.)
+  { re: /<br\s*\/?>/gi, make: (_m, k) => <br key={k} /> },
+  // (A picture: never loaded from elsewhere — a link to it, by its words.)
+  { re: /!\[([^\]]{0,500})\]\((https?:\/\/[^\s)]{1,2000})\)/g, make: (m, k) => link(m[2], m[1] || m[2], k) },
   // (A link's words are only words: no code span in them is drawn as more — a button in a link opens both.)
   { re: /\[([^\]]{1,500})\]\((https?:\/\/[^\s)]{1,2000})\)/g, make: (m, k) => link(m[2], <CodeSpanOf.Provider value={undefined}>{inline(m[1])}</CodeSpanOf.Provider>, k) },
   // (Its words may hold one level of [brackets] — a route's [id].ts; its path one level of (parens).)
   { re: /\[((?:[^[\]\n]|\[[^[\]\n]{0,200}\]){1,500})\]\((\/(?!\/)(?:[^\s()]|\([^\s()]{0,200}\)){1,2000})\)/g, make: (m, k) => <FileLink key={k} label={m[1]} target={m[2]} /> },
   { re: new RegExp(`https?://[^\\s<>()${wide}"']{0,2000}[^\\s<>()${wide}"'.,;:!?]`, 'g'), make: (m, k) => link(m[0], m[0], k) },
-  { re: /\*\*(?=\S)((?:`[^`]{0,500}`|[^`]){0,1000}?\S)\*\*/g, make: (m, k) => <strong key={k}>{inline(m[1])}</strong> },
+  // (Its last a code span whole, or a mark that is neither a space nor a backtick: **`SKILL.md`** bold too — 11-13,
+  // before, a bold ending in code kept its stars.)
+  { re: /\*\*\*(?=[^\s*])([^*]{0,1000}?[^\s*])\*\*\*/g, make: (m, k) => <strong key={k}><em>{inline(m[1])}</em></strong> },
+  { re: /\*\*(?=\S)((?:`[^`]{0,500}`|[^`]){0,1000}?(?:`[^`]{0,500}`|[^`\s]))\*\*/g, make: (m, k) => <strong key={k}>{inline(m[1])}</strong> },
   { re: /~~(?=\S)([^~]{0,2000}?\S)~~/g, make: (m, k) => <del key={k}>{inline(m[1])}</del> },
   { re: /(?<![*\w])\*(?=\S)([^*]{0,2000}?\S)\*(?![*\w])/g, make: (m, k) => <em key={k}>{inline(m[1])}</em> },
 ]

@@ -1832,7 +1832,8 @@ function RunningWork({ scanOf, items, waiting, openSub, openCmd }: { scanOf?: st
   const toggle = many && (
     <button type="button" className="convo-running-more" aria-expanded={open} onClick={() => setOpen(!open)}>
       <span>{t(open ? 'convo.bgLess' : 'convo.bgAll', { n: items.length + nested.length })}</span>
-      <ChevronDown size={14} aria-hidden="true" />
+      {/* (Up: on the composer it opens upwards; turned down once open, the way it shuts.) */}
+      <ChevronUp size={14} aria-hidden="true" />
     </button>
   )
   // (Waited on with nothing else going on: said so, here, in place of a line in the thread.)

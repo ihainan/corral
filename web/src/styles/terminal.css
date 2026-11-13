@@ -694,6 +694,10 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-md li > ul, .convo-md li > ol, .convo-md li > p { margin: 4px 0; }
 .convo-md li + li { margin-top: 3px; }
 .convo-md strong { font-weight: 600; }
+/* A task in a list ("- [x] …"): its box where the bullet was, to see, not to tick. */
+.md-task-item { list-style: none; }
+.md-task { display: inline-grid; place-items: center; width: 14px; height: 14px; margin: 0 8px 0 -20px; vertical-align: -2px; border: 1px solid var(--term-line-strong); border-radius: var(--r-xs); color: var(--term-bg); }
+.md-task.is-done { border-color: var(--term-accent-text); background: var(--term-accent-text); }
 .convo-md a { color: var(--term-accent-text); text-underline-offset: 2px; }
 .convo-md hr { border: 0; border-top: 1px solid var(--term-line); margin: 14px 0; }
 .convo-md blockquote { padding-left: 14px; color: var(--term-fg-2); }
