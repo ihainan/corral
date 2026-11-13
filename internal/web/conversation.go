@@ -162,6 +162,32 @@ func convoLocateCommand(mode, tmuxName, tmuxPane string) string {
 	return convoLocateWith(mode, tmuxName, tmuxPane, "", "")
 }
 
+// ocPaneOwn: what a scan of OpenCode's processes only found is enough for
+// pane: an OpenCode there, and each one there run from the pane's shell —
+// none by another program there (a Claude Code or Codex of the pane, say,
+// whose record that scan has not: the whole one would pick that before it).
+func ocPaneOwn(procs []convoProc, pane, socket string) bool {
+	any := false
+	for _, p := range procs {
+		if p.agent != "opencode" || p.herdrPane != pane || p.herdrSocket != socket {
+			continue
+		}
+		any = true
+		for _, a := range p.anc {
+			if a.comm == "herdr" {
+				break
+			}
+			if !ocShells[a.comm] {
+				return false
+			}
+		}
+	}
+	return any
+}
+
+// (Shells a pane runs its program from: none of them an agent.)
+var ocShells = map[string]bool{"sh": true, "bash": true, "zsh": true, "fish": true, "dash": true, "ksh": true, "mksh": true, "tcsh": true, "csh": true, "nu": true, "xonsh": true, "elvish": true, "ash": true}
+
 // convoLocateOpenCodeCommand is convoLocateCommand of the user's OpenCode
 // processes only: no Claude Code's session files read, no Codex's open
 // files — most of a scan's time on a host of many Codexes, and nothing an
@@ -2133,9 +2159,7 @@ func (s *Server) locateScan(ctx context.Context, sess *term.Session, st *convoSt
 		return err
 	}
 	l := parseConvoLocate(string(out))
-	if ocOnly && !l.noProc && !slices.ContainsFunc(l.procs, func(p convoProc) bool {
-		return p.agent == "opencode" && p.herdrPane == pane && p.herdrSocket == socket
-	}) {
+	if ocOnly && !l.noProc && !ocPaneOwn(l.procs, pane, socket) {
 		if out, at, looked, err = s.convoScans.run(ctx, sess, convoLocateCommand(sess.Persistence, sess.TmuxSession, ""), after); err != nil {
 			return err
 		}

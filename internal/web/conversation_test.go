@@ -149,11 +149,40 @@ func TestPickConvoProcStartedInside(t *testing.T) {
 
 func TestConvoLocateCommandQuotesArguments(t *testing.T) {
 	cmd := convoLocateCommand("tmux", "a'b; rm -rf ~", "")
-	if !strings.HasSuffix(cmd, ` corral 'tmux' 'a'\''b; rm -rf ~' '' ''`) {
+	if !strings.HasSuffix(cmd, ` corral 'tmux' 'a'\''b; rm -rf ~' '' '' ''`) {
 		t.Fatalf("arguments not quoted: %s", cmd[len(cmd)-60:])
 	}
-	if cmd := convoLocateTimesCommand("herdr", ""); !strings.HasSuffix(cmd, ` corral 'herdr' '' '' 'times'`) {
+	if cmd := convoLocateTimesCommand("herdr", ""); !strings.HasSuffix(cmd, ` corral 'herdr' '' '' 'times' ''`) {
 		t.Fatalf("times not asked: %s", cmd[len(cmd)-60:])
+	}
+	if cmd := convoLocateOpenCodeCommand("herdr", ""); !strings.HasSuffix(cmd, ` corral 'herdr' '' '' '' 'opencode'`) {
+		t.Fatalf("OpenCode's only not asked: %s", cmd[len(cmd)-60:])
+	}
+}
+
+// The scan of OpenCode's processes only stands for a pane whose OpenCode is
+// its own: run from its shell, not by another agent there (whose record that
+// scan has not, which the whole one would pick before it).
+func TestOcPaneOwn(t *testing.T) {
+	own := convoProc{agent: "opencode", herdrPane: "w1:p1", herdrSocket: "/s", anc: []convoAnc{{1, "zsh"}, {2, "herdr"}}}
+	if !ocPaneOwn([]convoProc{own}, "w1:p1", "/s") {
+		t.Error("its own, from its shell: not taken")
+	}
+	under := own
+	under.anc = []convoAnc{{1, "bash"}, {9, "claude"}, {2, "zsh"}, {3, "herdr"}}
+	if ocPaneOwn([]convoProc{under}, "w1:p1", "/s") {
+		t.Error("run by a Claude Code there: taken")
+	}
+	node := own
+	node.anc = []convoAnc{{9, "node"}, {2, "herdr"}}
+	if ocPaneOwn([]convoProc{node}, "w1:p1", "/s") {
+		t.Error("run by a program not a shell: taken")
+	}
+	if ocPaneOwn([]convoProc{own}, "w2:p1", "/s") || ocPaneOwn([]convoProc{own}, "w1:p1", "/other") || ocPaneOwn(nil, "w1:p1", "/s") {
+		t.Error("another pane's, another server's, or none: taken")
+	}
+	if ocPaneOwn([]convoProc{own, under}, "w1:p1", "/s") {
+		t.Error("one of two there run by another agent: taken")
 	}
 }
 
