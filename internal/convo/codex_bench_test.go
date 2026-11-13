@@ -46,7 +46,7 @@ func BenchmarkCodexFeed(b *testing.B) {
 				for b.Loop() {
 					p := NewCodex()
 					p.Feed(data)
-					if p.Skipped != 0 || len(p.Since(0)) == 0 {
+					if p.Skipped != 0 || p.Title() == "" || len(p.Since(0)) == 0 {
 						b.Fatal("benchmark data did not produce a conversation")
 					}
 				}

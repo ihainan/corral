@@ -415,7 +415,7 @@ func codexNames(panes map[string]codexPane) map[string]string {
 		if c.Several || c.Thread == "" {
 			continue
 		}
-		if n := codexName(c.Name); n != "" {
+		if n := codexName(c.Name, c.Title, c.First); n != "" {
 			got[p] = n
 		}
 	}

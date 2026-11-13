@@ -450,6 +450,35 @@ func changeTool(path string, ch codexChange) *Tool {
 	return t
 }
 
+// codexTitle: the name a conversation of Codex's goes by (Codex names none):
+// its first message's first line, what looks like a secret in it (a key,
+// a token) cut to its start, at most codexTitleLen characters.
+func codexTitle(text string) string {
+	if s := strings.TrimSpace(text); strings.HasPrefix(s, "<send_user_message_question_reply>") || strings.HasPrefix(s, "<task-notification>") {
+		return ""
+	}
+	line := ""
+	for _, l := range strings.Split(text, "\n") {
+		if l = strings.TrimSpace(l); l != "" {
+			line = l
+			break
+		}
+	}
+	line = strings.Join(strings.Fields(line), " ")
+	cut := func(s string) string { return s[:7] + "…" }
+	line = secretKey.ReplaceAllStringFunc(line, cut)
+	line = secretRun.ReplaceAllStringFunc(line, func(s string) string {
+		if keyLike(s) {
+			return cut(s)
+		}
+		return s
+	})
+	if r := []rune(line); len(r) > codexTitleLen {
+		line = strings.TrimSpace(string(r[:codexTitleLen])) + "…"
+	}
+	return line
+}
+
 const codexTitleLen = 40
 
 // secretKey: a known key's prefix and what follows it (an AWS key id's,

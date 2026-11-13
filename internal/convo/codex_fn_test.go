@@ -210,7 +210,7 @@ func TestCodexOlderEvents(t *testing.T) {
 		codexLine(t, "event_msg", map[string]any{"type": "context_compacted"}),
 	)
 	es := c.Since(0)
-	if len(es) != 5 || es[0].Role != RoleUser || c.Title() != "" {
+	if len(es) != 5 || es[0].Role != RoleUser || c.Title() != "旧版里发的消息" {
 		t.Fatalf("entries %+v", es)
 	}
 	if tr := es[1].Parts[0].Trouble; tr == nil || tr.Kind != "api" || !strings.Contains(tr.Text, "capacity") {
@@ -667,6 +667,33 @@ func TestCodexFnReview451(t *testing.T) {
 	c := feedAll(codexLine(t, "response_item", map[string]any{"type": "custom_tool_call", "name": "exec", "call_id": "s", "input": strings.Repeat("// tools.exec_command({cmd:\"fake\"})\n", 300) + "await tools.exec_command({cmd:\"pwd\"});"}))
 	if b, _ := json.Marshal(c.Since(0)); !strings.Contains(string(b), `"detail":"pwd"`) {
 		t.Errorf("crowded out: %s", b)
+	}
+}
+
+// The name of a conversation of Codex's: its first message's first line,
+// short, no secret in it.
+func TestCodexTitle(t *testing.T) {
+	for in, want := range map[string]string{
+		"测试一下这个 OpenAI 官方 API Key 是否可用：sk-proj-EXAMPLEonlyNOTaREALkey0000000000000000000000000000000000": "测试一下这个 OpenAI 官方 API Key 是否可用：sk-proj…",
+		"\n\n  修好登录\n然后跑测试":                                     "修好登录",
+		"token ghp_abcdefghijklmnopqrstuvwxyz0123456789 please": "token ghp_abc… please",
+		"一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十多出来的": "一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十…",
+		// (review454: keys of AWS's for a while and of Aliyun's; a long name, a path: kept.)
+		"check ASIA1234567890ABCDEF now":                "check ASIA123… now",
+		"key LTAI5tAbCdEfGhIjKlMnOpQrSt here":           "key LTAI5tA… here",
+		"fix request_user_input_async_handler now":      "fix request_user_input_async_handler now",
+		"open /home/ihainan/shared/Projects/AI":         "open /home/ihainan/shared/Projects/AI",
+		"token Zx9QwErTyUiOpAsDfGhJkLzXcVbNm1234567 ok": "token Zx9QwEr… ok",
+		// (review455: an AWS secret, slashes in it; a capitalised word after ASIA; a long name with a digit; a path.)
+		"aws wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY": "aws wJalrXU…",
+		"see ASIARegionMapping":                        "see ASIARegionMapping",
+		"hex 0123456789ABCDEF0123456789ABCDEF":         "hex 0123456…",
+		"fix request_user_input_async_handler2":        "fix request_user_input_async_handler2",
+		"ls /tmp/build20261030_abcdefghijklmnopq":      "ls /tmp/build20261030_abcdefghijklmnopq",
+	} {
+		if got := codexTitle(in); got != want {
+			t.Errorf("%q: %q, want %q", in, got, want)
+		}
 	}
 }
 

@@ -39,18 +39,18 @@ func TestCodexTitleParts(t *testing.T) {
 
 func TestCodexName(t *testing.T) {
 	long := strings.Repeat("字", 100)
-	// (Its name only: never its title or first message, which may hold a secret.)
-	for _, c := range []struct{ name, want string }{
-		{"命名", "命名"},
-		{"", ""},
-		{"  ", ""},
-		{"[Image #1] 检查红圈问题。\n\n[external unsupported block: image]", "检查红圈问题。"},
-		{"\n\n  第二行  有\t空白 \n第三行", "第二行 有 空白"},
-		{"[Image #1]\n[Image #2]", ""},
-		{long, strings.Repeat("字", codexNameRunes-1) + "…"},
+	for _, c := range []struct{ name, title, first, want string }{
+		{"命名", "标题", "第一句", "命名"},
+		{"", "标题", "第一句", "标题"},
+		{"  ", "", "第一句", "第一句"},
+		{"", "[Image #1] 检查红圈问题。\n\n[external unsupported block: image]", "", "检查红圈问题。"},
+		{"", "\n\n  第二行  有\t空白 \n第三行", "", "第二行 有 空白"},
+		{"", "[Image #1]\n[Image #2]", "看这两张图", "看这两张图"},
+		{"", long, "", strings.Repeat("字", codexNameRunes-1) + "…"},
+		{"", "", "", ""},
 	} {
-		if got := codexName(c.name); got != c.want {
-			t.Errorf("%q: %q, want %q", c.name, got, c.want)
+		if got := codexName(c.name, c.title, c.first); got != c.want {
+			t.Errorf("%q %q %q: %q, want %q", c.name, c.title, c.first, got, c.want)
 		}
 	}
 }
@@ -94,8 +94,7 @@ func TestParseCodexPanes(t *testing.T) {
 		t.Fatalf("a host not a host: %+v", bad)
 	}
 	names := codexNames(got)
-	// (w2:p1 has a title and a first message but no name: none shown.)
-	if names["w2:p1"] != "" || names["w3:p1"] != "named" || names["w7:p1"] != "" || len(names) != 1 {
+	if names["w2:p1"] != "检查红圈" || names["w3:p1"] != "named" || names["w7:p1"] != "" || len(names) != 2 {
 		t.Fatalf("names %v", names)
 	}
 }
