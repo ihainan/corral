@@ -40,6 +40,9 @@ type codexPane struct {
 	Title      string
 	First      string
 	FG         bool // in front on its terminal: what is typed there reaches it
+	// Fresh: run with no subcommand, no log open, no conversation of its
+	// folder begun since it started — its own not begun yet.
+	Fresh bool
 	// Several: the pane runs more than one interactive Codex (one inside
 	// another's command, say): which the pane shows is not told.
 	Several bool
@@ -54,8 +57,10 @@ exec python3 -I -c ` + sshx.QuoteShell(codexPanesScript) + ` ` + sshx.QuoteShell
 }
 
 // (A record: pane, pid, start, started ms, cwd, thread, log, name, title,
-// first message, in front ("1": its group the terminal's foreground);
-// split by \x1f, ended by \0. The database: the newest
+// first message, in front ("1": its group the terminal's foreground), its
+// subcommand ("" or "resume"), whether it has any rollout log open ("1"),
+// how many conversations of its folder were begun since it started (where
+// it names none and has none open); split by \x1f, ended by \0. The database: the newest
 // state_<n>.sqlite of its CODEX_HOME, read only; the log, the one it has
 // open, else the database's rollout_path, else the newest of
 // sessions/*/*/*/rollout-*-<thread>.jsonl.)
@@ -119,7 +124,7 @@ for d in os.listdir('/proc'):
         continue
     home = env.get(b'CODEX_HOME', b'').decode('utf-8', 'replace') or os.path.join(env.get(b'HOME', b'').decode('utf-8', 'replace') or os.path.expanduser('~'), '.codex')
     home = home.rstrip('/')
-    opened = []
+    opened, any_log = [], False
     try:
         fds = os.listdir(p + '/fd')
     except OSError:
@@ -129,6 +134,8 @@ for d in os.listdir('/proc'):
             l = os.readlink(p + '/fd/' + fd)
         except OSError:
             continue
+        if '/rollout-' in l and l.endswith('.jsonl'):
+            any_log = True
         if l.startswith(home + '/sessions/') and l.endswith('.jsonl'):
             m = UUID.search(os.path.basename(l))
             try:
@@ -138,7 +145,7 @@ for d in os.listdir('/proc'):
             if m:
                 opened.append((t, m.group(0), l))
     started = (btime * 1000 + start * 1000 // hz) if hz and btime else 0
-    found.append([pane, d, str(start), str(started), cwd, home, tid, opened, fg])
+    found.append([pane, d, str(start), str(started), cwd, home, tid, opened, fg, sub, '1' if any_log else '0'])
 def db_of(home):
     best, n = None, -1
     try:
@@ -163,7 +170,7 @@ def row_of(con, tid):
         return None
 def subagent(row):
     return bool(row) and ((row[4] or '').startswith('{') or (row[5] or '') in ('guardian_review', 'subagent'))
-for pane, pid, start, started, cwd, home, tid, opened, fg in sorted(found, key=lambda f: f[:6]):
+for pane, pid, start, started, cwd, home, tid, opened, fg, sub, anylog in sorted(found, key=lambda f: f[:6]):
     name = title = first = log = ''
     if home not in dbs:
         db = db_of(home)
@@ -179,17 +186,21 @@ for pane, pid, start, started, cwd, home, tid, opened, fg in sorted(found, key=l
             tid, log = otid, l
             break
     # (Begun with no thread named and none open — run against the daemon:
-    # the thread of its folder begun since it started that was written to
-    # last, not a subagent's. The title, compared by the gateway, says if it
-    # is the one shown.)
+    # the one conversation of its folder begun since it started, as one
+    # talked to (cli, vscode; not exec's, not a subagent's). Two or more —
+    # another Codex in that folder since, in a pane or not — tell none
+    # (cands: how many); the title, compared by the gateway, says if the
+    # one is the one shown.)
+    cands = 0
     if not tid and con is not None and int(started) > 0:
         try:
-            for cand in con.execute("SELECT id, source, thread_source FROM threads WHERE cwd = ? AND created_at >= ? ORDER BY updated_at DESC LIMIT 20", (cwd, int(started) // 1000 - 5)):
-                if not ((cand[1] or '').startswith('{') or (cand[2] or '') in ('guardian_review', 'subagent')):
-                    tid = cand[0]
-                    break
+            ids = [c[0] for c in con.execute("SELECT id, source, thread_source FROM threads WHERE cwd = ? AND created_at >= ? LIMIT 50", (cwd, int(started) // 1000 - 5))
+                   if (c[1] or '') in ('cli', 'vscode') and (c[2] or '') not in ('guardian_review', 'subagent')]
         except sqlite3.Error:
-            pass
+            ids = [None, None]
+        cands = len(ids)
+        if cands == 1:
+            tid = ids[0]
     if tid:
         row = row_of(con, tid)
         if row:
@@ -200,7 +211,7 @@ for pane, pid, start, started, cwd, home, tid, opened, fg in sorted(found, key=l
             logs = glob.glob(glob.escape(home) + '/sessions/*/*/*/rollout-*-' + tid + '.jsonl')
             if logs:
                 log = max(logs, key=lambda l: os.stat(l).st_mtime)
-    out.write('\x1f'.join([pane, pid, start, started, clean(cwd), tid, clean(log), clean(name), clean(title), clean(first), fg]).encode('utf-8', 'replace') + b'\0')
+    out.write('\x1f'.join([pane, pid, start, started, clean(cwd), tid, clean(log), clean(name), clean(title), clean(first), fg, sub, anylog, str(cands)]).encode('utf-8', 'replace') + b'\0')
 `
 
 // codexLogOf: a thread's log as the host named it, where it is one: an
@@ -221,7 +232,7 @@ func parseCodexPanes(out string) map[string]codexPane {
 	got := map[string]codexPane{}
 	for _, rec := range strings.Split(out, "\x00") {
 		f := strings.Split(rec, "\x1f")
-		if len(f) != 11 || !herdrPaneID.MatchString(f[0]) {
+		if len(f) != 14 || !herdrPaneID.MatchString(f[0]) {
 			continue
 		}
 		pid, err1 := strconv.ParseInt(f[1], 10, 64)
@@ -230,7 +241,7 @@ func parseCodexPanes(out string) map[string]codexPane {
 		if err1 != nil || err2 != nil || pid <= 0 || start <= 0 {
 			continue
 		}
-		c := codexPane{PID: pid, Start: start, Started: max(started, 0), Cwd: f[4], Name: f[7], Title: f[8], First: f[9], FG: f[10] == "1"}
+		c := codexPane{PID: pid, Start: start, Started: max(started, 0), Cwd: f[4], Name: f[7], Title: f[8], First: f[9], FG: f[10] == "1", Fresh: f[11] == "" && f[12] == "0" && f[13] == "0"}
 		if convoUUID.MatchString(f[5]) {
 			c.Thread = f[5]
 			c.Path = codexLogOf(f[6], c.Thread)
@@ -400,7 +411,22 @@ func (s *Server) locateCodexFast(ctx context.Context, sess *term.Session, st *co
 	}
 	c, ok := codexPaneSure(panes, pane, hp)
 	if !ok {
-		return false
+		// (A Codex just started, its conversation not begun: none to read,
+		// as the scan would find — told so without it, rather than by a scan
+		// at each read till its first message.)
+		f, ok := panes[pane]
+		if !ok || f.Several || !f.Fresh || f.Thread != "" || !codexTitleAgrees(hp.Title, f.Cwd, "") {
+			return false
+		}
+		b := &convoBind{PID: f.PID, Start: f.Start, Session: convoNoSession, Agent: "codex", Pane: pane, started: f.Started}
+		if was := st.bind; was != nil && was.PID == b.PID && was.Start == b.Start {
+			b.Via, b.Auth = was.Via, was.Auth
+		}
+		st.bind = b
+		st.located, st.pane = time.Now(), pane
+		st.guessed = false
+		st.adopt(convoNoSession, "", "codex", convoNoLog)
+		return true
 	}
 	b := &convoBind{PID: c.PID, Start: c.Start, Session: c.Thread, Agent: "codex", Pane: pane, started: c.Started}
 	if was := st.bind; was != nil && was.PID == b.PID && was.Start == b.Start {
