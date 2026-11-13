@@ -294,11 +294,22 @@ const maxSuggestion = 500
 // compactingNow: Claude Code's spinner line while it compacts the
 // conversation, "✶ Compacting conversation… (12s)" (by /compact or on its
 // own), the mark blinking through the spinner's; gone once it is done
-// ("⎿  Compacted …").
-var compactingNow = regexp.MustCompile(`(?m)^(?:\*|·|✢|✳|✶|✻|✽) Compacting conversation…`)
+// ("⎿  Compacted …"). Only the screen's last spinner line counts: the one at
+// work now, right over the input box (the same words higher up are some
+// text of the conversation's).
+var (
+	compactingNow = regexp.MustCompile(`^(?:\*|·|✢|✳|✶|✻|✽) Compacting conversation…`)
+	spinnerNow    = regexp.MustCompile(`^(?:\*|·|✢|✳|✶|✻|✽) \S[^…]*…`)
+)
 
 // compactingOn: whether a screen (without its colours) shows Claude Code
 // compacting the conversation.
 func compactingOn(screen string) bool {
-	return compactingNow.MatchString(screen)
+	lines := strings.Split(screen, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if spinnerNow.MatchString(lines[i]) {
+			return compactingNow.MatchString(lines[i])
+		}
+	}
+	return false
 }

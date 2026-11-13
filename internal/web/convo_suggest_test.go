@@ -58,6 +58,15 @@ func TestCompactingOn(t *testing.T) {
 			t.Errorf("%q: not compacting", spin)
 		}
 	}
+	// (The same words higher up, quoted in the conversation, with another
+	// spinner at work now: not compacting.)
+	quoted := "● It said:\n✶ Compacting conversation… (3s)\n● Then went on.\n"
+	if compactingOn(quoted + at("✶ Thinking… (3s)")) {
+		t.Errorf("quoted line taken for the spinner at work")
+	}
+	if !compactingOn(quoted + at("✻ Compacting conversation… (4s)")) {
+		t.Errorf("compacting under a quoted line not seen")
+	}
 	for _, spin := range []string{"  ⎿  Compacted (ctrl+o to see full summary)", "✶ Thinking… (3s)", "  Compacting conversation… is what /compact does"} {
 		if compactingOn(at(spin)) {
 			t.Errorf("%q: compacting", spin)

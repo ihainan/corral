@@ -24,7 +24,7 @@ import { FilesDialog } from '../terminal/FilesDialog'
 import { downloadPath, lookAt, PictureDialog } from '../terminal/picture'
 import { IMAGE_EXT, TextPreview } from '../terminal/textPreview'
 import { attach, ATTACH_LABEL, AttachStrip, PICTURE_PATH, takeOut, type Going } from '../terminal/attach'
-import { answerable, asking, useConversation, type ConvoEntry } from '../terminal/conversation'
+import { answerable, asking, callOut, useConversation, type ConvoEntry } from '../terminal/conversation'
 import { ackBg, waitingTitle, isCodex, isOpenCode, listAgents, matchQuery, paneName, paneTitle, readsLog, useRunningSessions, type AgentRow } from '../terminal/agents'
 import { dayBefore, dayStart, foldAt, foldedDay, listOrder, type RowCmds } from '../terminal/agentOrder'
 import { conversationReadable, prefetchConversation } from '../terminal/conversation'
@@ -109,9 +109,12 @@ const PRESS_MS = 20000
 const SUGGEST_AT = [1500, 4000, 9000]
 // (ms) Claude Code compacting says so only on its screen (its log, once
 // done): looked at every COMPACT_LOOK while it works with nothing new in its
-// log for COMPACT_QUIET (see convo_suggest.go's compactingOn).
+// log for COMPACT_QUIET, up to COMPACT_UNTIL (it compacts right after its
+// log's last word, a minute or two: a silence longer than that is something
+// else). Each look takes the pane's turn a moment, as a send does.
 const COMPACT_LOOK = 10000
 const COMPACT_QUIET = 15000
+const COMPACT_UNTIL = 240000
 // Of each turn's end asked about (by its key): the looks left, what was
 // found, the latest look (only its answer is taken), whether one is on its
 // way, and the views showing it. Kept beyond a view, so that going to
@@ -1700,18 +1703,23 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   const [compacting, setCompacting] = useState(false)
   const compactNow = useRef({ changedAt: convo.changedAt, body: pressBody })
   compactNow.current = { changedAt: convo.changedAt, body: pressBody }
-  const lookCompact = bound && !notClaude && !!active && working
+  // (Not while a tool it called runs, the long silences: it compacts only
+  // between them.)
+  const toolOut = useMemo(() => callOut(convo.entries), [convo.entries])
+  const lookCompact = bound && !notClaude && !!active && working && !toolOut
   useEffect(() => setCompacting(false), [convo.changedAt, bindKey, lookCompact])
   useEffect(() => {
     if (!lookCompact) return
     let live = true
     let busy = false
+    const gone = new AbortController() // (a look under way when this ends: let go, not left holding the pane's turn)
     const timer = setInterval(() => {
-      if (busy || document.hidden || Date.now() - compactNow.current.changedAt < COMPACT_QUIET) return
+      const quiet = Date.now() - compactNow.current.changedAt
+      if (busy || document.hidden || quiet < COMPACT_QUIET || quiet > COMPACT_UNTIL) return
       busy = true
       const at = compactNow.current.changedAt
       // (for=busy: said apart from the suggestion's own looks, in the gateway's log; not read.)
-      api<{ compacting?: boolean }>('POST', `/api/sessions/${sid}/conversation/suggestion?for=busy`, compactNow.current.body(), { timeoutMs: PRESS_MS })
+      api<{ compacting?: boolean }>('POST', `/api/sessions/${sid}/conversation/suggestion?for=busy`, compactNow.current.body(), { timeoutMs: PRESS_MS, signal: gone.signal })
         .then(
           (r) => {
             if (live && compactNow.current.changedAt === at) setCompacting(!!r.compacting)
@@ -1725,6 +1733,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     return () => {
       live = false
       clearInterval(timer)
+      gone.abort()
     }
   }, [lookCompact, bindKey, sid])
   useEffect(() => {
