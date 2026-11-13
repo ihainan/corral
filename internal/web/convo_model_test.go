@@ -107,7 +107,7 @@ func newFake(history bool) *fakePicker {
 
 func TestModelFlowLists(t *testing.T) {
 	f := newFake(false)
-	opts, err := modelFlow(f.step, f.step, "")
+	opts, err := modelFlow(f.step, f.step, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +128,7 @@ func TestModelFlowSwitches(t *testing.T) {
 		for _, target := range []string{"Haiku 5.5", "Opus 5.5", "Fable 5.1"} {
 			f := newFake(history)
 			f.current, f.cursor = 3, 3 // (Sonnet now: up as well as down)
-			if _, err := modelFlow(f.step, f.step, target); err != nil {
+			if _, err := modelFlow(f.step, f.step, target, ""); err != nil {
 				t.Fatalf("%v %s: %v", history, target, err)
 			}
 			if f.session != target || f.saved || f.open || f.asking {
@@ -150,7 +150,7 @@ func TestModelFlowRefuses(t *testing.T) {
 			continue
 		}
 		f := newFake(true)
-		if _, err := modelFlow(f.step, f.step, target); !errors.Is(err, errNoModel) {
+		if _, err := modelFlow(f.step, f.step, target, ""); !errors.Is(err, errNoModel) {
 			t.Errorf("%q: %v", target, err)
 		}
 		if f.open || f.saved || f.session != "" {
@@ -163,7 +163,7 @@ func TestModelFlowRefuses(t *testing.T) {
 		f.pressed = append(f.pressed, strings.Join(keys, "+")+"|"+text)
 		return "$ ", nil
 	}
-	if _, err := modelFlow(none, none, "Haiku 5.5"); !errors.Is(err, errScreen) {
+	if _, err := modelFlow(none, none, "Haiku 5.5", ""); !errors.Is(err, errScreen) {
 		t.Fatalf("no input on the screen: %v", err)
 	}
 	if got := strings.Join(f.pressed, " "); got != "|" {
@@ -177,13 +177,13 @@ func TestModelFlowCareful(t *testing.T) {
 	// The picker left open: closed with Escape first, then opened anew.
 	f := newFake(true)
 	f.open, f.cursor = true, 3
-	if _, err := modelFlow(f.step, f.step, "Haiku 5.5"); err != nil || f.saved || f.session != "Haiku 5.5" {
+	if _, err := modelFlow(f.step, f.step, "Haiku 5.5", ""); err != nil || f.saved || f.session != "Haiku 5.5" {
 		t.Errorf("picker left open: %v saved %v session %q %v", err, f.saved, f.session, f.pressed)
 	}
 	// Its question left open too.
 	f = newFake(true)
 	f.open, f.asking, f.cursor = true, true, 2
-	if _, err := modelFlow(f.step, f.step, "Haiku 5.5"); err != nil || f.saved || f.session != "Haiku 5.5" {
+	if _, err := modelFlow(f.step, f.step, "Haiku 5.5", ""); err != nil || f.saved || f.session != "Haiku 5.5" {
 		t.Errorf("question left open: %v saved %v session %q %v", err, f.saved, f.session, f.pressed)
 	}
 	// Words of the thread like its question, the picker still up after "s": no Enter.
@@ -198,7 +198,7 @@ func TestModelFlowCareful(t *testing.T) {
 		}
 		return scr, err
 	}
-	if _, err := modelFlow(stuck, f.step, "Haiku 5.5"); !errors.Is(err, errNotTaken) || f.saved {
+	if _, err := modelFlow(stuck, f.step, "Haiku 5.5", ""); !errors.Is(err, errNotTaken) || f.saved {
 		t.Errorf("quoted question: %v saved %v %v", err, f.saved, f.pressed)
 	}
 	for _, k := range f.pressed {
@@ -210,7 +210,7 @@ func TestModelFlowCareful(t *testing.T) {
 	for name, set := range map[string]func(*fakePicker){"draft": func(f *fakePicker) { f.draft = "half a thought" }, "busy": func(f *fakePicker) { f.busy = true }} {
 		f := newFake(false)
 		set(f)
-		_, err := modelFlow(f.step, f.step, "Haiku 5.5")
+		_, err := modelFlow(f.step, f.step, "Haiku 5.5", "")
 		if err == nil || len(f.pressed) != 0 {
 			t.Errorf("%s: %v, pressed %v", name, err, f.pressed)
 		}
@@ -224,12 +224,12 @@ func TestModelFlowCareful(t *testing.T) {
 	grey := func(s string, n *int) func() string { return func() string { *n++; return s } }
 	var looks int
 	f = newFake(false)
-	if _, err := modelFlow(f.step, f.step, "Haiku 5.5", grey("commit and push", &looks)); err != nil || looks != 0 {
+	if _, err := modelFlow(f.step, f.step, "Haiku 5.5", "", grey("commit and push", &looks)); err != nil || looks != 0 {
 		t.Errorf("empty box: %v, read with colours %d times", err, looks)
 	}
 	f = newFake(false)
 	f.draft, f.greyed = "commit and push", true
-	if _, err := modelFlow(f.step, f.step, "Haiku 5.5", grey("commit and push", &looks)); err != nil || f.session != "Haiku 5.5" || looks != 1 {
+	if _, err := modelFlow(f.step, f.step, "Haiku 5.5", "", grey("commit and push", &looks)); err != nil || f.session != "Haiku 5.5" || looks != 1 {
 		t.Errorf("suggestion: %v, session %q, looks %d, pressed %v", err, f.session, looks, f.pressed)
 	}
 	for name, c := range map[string]struct{ draft, grey string }{
@@ -239,7 +239,7 @@ func TestModelFlowCareful(t *testing.T) {
 	} {
 		f = newFake(false)
 		f.draft = c.draft
-		if _, err := modelFlow(f.step, f.step, "Haiku 5.5", grey(c.grey, &looks)); !errors.Is(err, errDraft) || len(f.pressed) != 0 {
+		if _, err := modelFlow(f.step, f.step, "Haiku 5.5", "", grey(c.grey, &looks)); !errors.Is(err, errDraft) || len(f.pressed) != 0 {
 			t.Errorf("%s: %v, pressed %v", name, err, f.pressed)
 		}
 	}
@@ -322,7 +322,7 @@ func TestModelFlowCareful(t *testing.T) {
 		f.said = nil
 		return f.screen(), nil
 	}
-	if _, err := modelFlow(silent, f.step, "Haiku 5.5"); !errors.Is(err, errUnsure) {
+	if _, err := modelFlow(silent, f.step, "Haiku 5.5", ""); !errors.Is(err, errUnsure) {
 		t.Errorf("nothing said: %v", err)
 	}
 }

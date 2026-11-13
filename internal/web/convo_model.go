@@ -516,7 +516,13 @@ func taken(screen, target string) int {
 // Code at rest, its input empty, no picker or question of it open (one
 // left open is closed with Escape first). On a failure after the picker
 // opened, Escape is pressed (best effort, by leave).
-func modelFlow(step, leave modelStep, target string, greyed ...func() string) (opts []modelOpt, err error) {
+//
+// effort: a level of effortLevels to take with it, on the picker's own
+// effort line (←/→ under its models, 2.1.3xx), in the same "s" — the model
+// and how hard it thinks set at once, one wait; "": as it is. Moved to the
+// far left first and then right: the line stops at either end (it does not
+// go round), so where it stood need not be guessed at.
+func modelFlow(step, leave modelStep, target, effort string, greyed ...func() string) (opts []modelOpt, err error) {
 	screen, err := step([]string{}, "", pickerLines)
 	if err != nil {
 		return nil, err
@@ -533,6 +539,7 @@ func modelFlow(step, leave modelStep, target string, greyed ...func() string) (o
 		return nil, err
 	}
 	before := taken(screen, target)
+	first := screen // (its count of switches before, for the model's full name too: below)
 	opened, err := step(nil, "/model", pickerLines)
 	// (Escape, read, again while the picker or its question still shows: twice at most.)
 	out := func(e error) ([]modelOpt, error) {
@@ -581,6 +588,22 @@ func modelFlow(step, leave modelStep, target string, greyed ...func() string) (o
 	if !found {
 		return out(errNoModel)
 	}
+	// Its full name, as its description begins ("Fable 5.1 · Most capable…"):
+	// where the picker names it short ("Fable", 2.1.323), its question and
+	// what it says once taken name it so ("switch to Fable 5.1", "Set model
+	// to Fable 5.1 for this session only"). Either is it.
+	full, _, _ := strings.Cut(to.Desc, " · ")
+	if full = strings.TrimSpace(full); full == target || len(full) > 64 {
+		full = ""
+	}
+	beforeFull := 0
+	if full != "" {
+		beforeFull = taken(first, full)
+	}
+	asks := func(scr string) bool { return askShows(scr, target) || full != "" && askShows(scr, full) }
+	took := func(scr string) bool {
+		return taken(scr, target) > before || full != "" && taken(scr, full) > beforeFull
+	}
 	// Bring a clipped cursor into view before computing a move. A window
 	// starting at row 1 lost its bottom; one starting later may have lost
 	// the cursor above it. Never guess its position from the current model.
@@ -623,10 +646,36 @@ func modelFlow(step, leave modelStep, target string, greyed ...func() string) (o
 	} else if at.Label != target {
 		return out(errNotThere)
 	}
+	if effort != "" {
+		want := effortLevel(effort)
+		if want < 0 {
+			return out(errNoEffort)
+		}
+		keys := make([]string, 0, len(effortLevels)-1+want)
+		for i := 0; i < len(effortLevels)-1; i++ {
+			keys = append(keys, "left")
+		}
+		for i := 0; i < want; i++ {
+			keys = append(keys, "right")
+		}
+		if screen, err = step(keys, "", pickerLines); err != nil {
+			return out(err)
+		}
+		now := parseModelPicker(screen)
+		if c, ok := now.cursor(); !now.ok || !ok || c.Label != target {
+			return out(errNotThere) // (the arrows moved the models, not the effort: nothing taken)
+		}
+		switch got := pickerEffort(screen); {
+		case got == "":
+			return out(errNoEffort) // (this model offers none, or none could be read)
+		case got != effort:
+			return out(errEffortWhere)
+		}
+	}
 	if screen, err = step([]string{"this"}, "", pickerLines); err != nil {
 		return out(err)
 	}
-	if !pickerShows(screen) && askShows(screen, target) {
+	if !pickerShows(screen) && asks(screen) {
 		if screen, err = step([]string{"yes"}, "", pickerLines); err != nil {
 			return out(err)
 		}
@@ -634,11 +683,33 @@ func modelFlow(step, leave modelStep, target string, greyed ...func() string) (o
 	switch {
 	case pickerShows(screen) || askShows(screen, ""):
 		return out(errNotTaken)
-	case taken(screen, target) > before:
+	case took(screen):
+		// (The effort as the line under the input says it now, where it says one.)
+		if effort != "" {
+			if got := effortTook(screen); got != "" && got != effort {
+				return nil, errEffortTaken
+			}
+		}
 		return []modelOpt{to}, nil
 	}
 	return nil, errUnsure // (the picker gone, nothing said of it: as it may have been taken, no Escape)
 }
+
+// pickerEffort reads the picker's effort line — "◐ Medium effort (default)
+// ←/→ to adjust", "◉ xHigh effort ←/→ to adjust" — as a level of
+// effortLevels; "" where it shows none. Read with every space and line
+// break taken out, as effortShows reads the slider: a narrow pane wraps the
+// line mid-word. (The banner's "Fable 5.1 with high effort" has no ←/→.)
+func pickerEffort(screen string) string {
+	flat := strings.ToLower(strings.Join(strings.Fields(screen), ""))
+	m := pickerEffortRe.FindAllStringSubmatch(flat, -1)
+	if m == nil {
+		return ""
+	}
+	return m[len(m)-1][1]
+}
+
+var pickerEffortRe = regexp.MustCompile(`(low|medium|high|xhigh|max)effort(?:\(default\))?←/→toadjust`)
 
 // convoModel runs modelFlow in the agent's pane, each step with the checks
 // of convoSendCommand (the same process in front there). It holds the
@@ -648,6 +719,12 @@ func modelFlow(step, leave modelStep, target string, greyed ...func() string) (o
 // which "s" leaves alone, read before and after only to say if it changed.
 func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *term.Session, pane, socket string, pid, start int64, sid, target string, outcome, reason *string, release func(), codex bool, effort string, log string, via, auth string, own bool) {
 	var procKey, kinKey string // (Claude Code's: what is kept of its picker's list, see lineListFor)
+	if !codex && effort != "" && effortLevel(effort) < 0 {
+		release()
+		*outcome, *reason = "refused", "no_such_effort"
+		writeError(w, http.StatusBadRequest, "bad_request", "no such effort level")
+		return
+	}
 	if !codex {
 		// (Claude Code's settings are one account's: a switch at a time, what
 		// an earlier one left settled first — convo_line_settle.go.)
@@ -664,7 +741,7 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 				return
 			}
 		}
-		if _, line := lineWord(target); line && log != "" && !own {
+		if _, line := lineWord(target); line && log != "" && !own && effort == "" {
 			if _, _, ok := lineModelArg(procKey, target, time.Now()); !ok {
 				// (To be typed on one line, and this process's own picker not
 				// yet seen to offer it — the list the page chose from may be
@@ -693,7 +770,9 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 			writeError(w, http.StatusConflict, code, why)
 			return
 		}
-		if target != "" && log != "" {
+		// (With an effort to take too: the picker, whose one "s" takes both — a line
+		// names a model only.)
+		if target != "" && log != "" && effort == "" {
 			// (Only by what this process's own picker was seen to offer.)
 			if arg, want, ok := lineModelArg(procKey, target, time.Now()); ok {
 				s.convoModelLine(w, ctx, sess, pane, socket, pid, start, sid, target, arg, want, log, account, outcome, reason, release, done, procKey, kinKey)
@@ -712,6 +791,13 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 	}
 	scancel()
 	was, had, perr := settingsModel(saved, none)
+	// (And the default effort: the picker's ←/→ are taken by "s" for this
+	// session only, but a Claude Code that saved it — 2.1.293 fixed one that
+	// did — is put back as for the model.)
+	wasE, hadE, perrE := settingsKey(saved, none, "effortLevel")
+	if perr == nil {
+		perr = perrE
+	}
 	if codex {
 		perr = nil
 	}
@@ -752,16 +838,29 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 			if err != nil {
 				return true, err
 			}
-			if has == had && (!has || jsonSame(cur, was)) {
+			curE, hasE, err := settingsKey(now, none, "effortLevel")
+			if err != nil {
+				return true, err
+			}
+			sameModel := has == had && (!has || jsonSame(cur, was))
+			sameEffort := hasE == hadE && (!hasE || jsonSame(curE, wasE))
+			if sameModel && sameEffort {
 				return changed, nil
 			}
 			changed = true
 			if none {
 				return true, errors.New("the settings are gone")
 			}
-			fixed, err := withModel(now, was, had)
-			if err != nil {
-				return true, err
+			fixed := now
+			if !sameModel {
+				if fixed, err = withModel(fixed, was, had); err != nil {
+					return true, err
+				}
+			}
+			if !sameEffort {
+				if fixed, err = withKey(fixed, "effortLevel", wasE, hadE); err != nil {
+					return true, err
+				}
 			}
 			running.Add(1)
 			_, err = sshx.Exec(rctx, sess.Client(), settingsWriteCommand(now, fixed), 4096, sshx.ExecOptions{Stdin: bytes.NewReader(fixed), Release: running.Done})
@@ -876,7 +975,7 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 	if codex {
 		opts, err = codexModelFlow(codexIO{look, press}, undo, target, effort)
 	} else {
-		opts, err = modelFlow(step, leave, target, func() string { return s.greyedSuggestion(ctx, sess, pane, socket, &running) })
+		opts, err = modelFlow(step, leave, target, effort, func() string { return s.greyedSuggestion(ctx, sess, pane, socket, &running) })
 		// (What is kept of its list, changed while its pane and the account's
 		// settings are still in hand.)
 		switch {
@@ -933,7 +1032,11 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 		if target == "" {
 			writeJSON(w, http.StatusOK, map[string]any{"models": opts, "restored": restored, "restore_failed": restoreFailed})
 		} else {
-			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "model": target, "restored": restored, "restore_failed": restoreFailed})
+			res := map[string]any{"ok": true, "model": target, "restored": restored, "restore_failed": restoreFailed}
+			if effort != "" {
+				res["effort"] = effort
+			}
+			writeJSON(w, http.StatusOK, res)
 		}
 	default:
 		writeSwitchError(w, err, typed, outcome, reason)
@@ -1112,6 +1215,17 @@ func writeSwitchError(w http.ResponseWriter, err error, typed bool, outcome, rea
 	case errors.Is(err, errViewOther):
 		*reason = "other_view"
 		writeError(w, http.StatusConflict, "other_view", err.Error())
+	case errors.Is(err, errNoEffort):
+		// (The picker shows no effort line for that model: left with Escape, nothing taken.)
+		*outcome, *reason = said(typed), "no_effort"
+		writeError(w, http.StatusConflict, "no_effort", "that model offers no effort to set")
+	case errors.Is(err, errEffortWhere):
+		*outcome, *reason = said(typed), "effort_where"
+		writeError(w, http.StatusConflict, "picker", "the effort did not go where it was moved to: nothing taken")
+	case errors.Is(err, errEffortTaken):
+		// (The model taken, its effort another than asked: said as it is.)
+		*outcome, *reason = "unknown", "effort_elsewhere"
+		writeError(w, http.StatusBadGateway, "elsewhere", "the model was taken, with another effort than asked")
 	case errors.Is(err, errNoPicker), errors.Is(err, errNoModel), errors.Is(err, errNotThere), errors.Is(err, errNotTaken), errors.Is(err, errScreen):
 		if typed {
 			*outcome = "unknown"
@@ -1219,10 +1333,15 @@ func readSettings(ctx context.Context, sess *term.Session) (doc []byte, none boo
 // settingsModel: the settings' top-level "model" (had false: none), or an
 // error when they are not one JSON object with at most one.
 func settingsModel(doc []byte, none bool) (json.RawMessage, bool, error) {
+	return settingsKey(doc, none, "model")
+}
+
+// settingsKey: a top-level setting as written, had false where it has none.
+func settingsKey(doc []byte, none bool, key string) (json.RawMessage, bool, error) {
 	if none {
 		return nil, false, nil
 	}
-	v, _, _, had, err := topValue(doc, "model")
+	v, _, _, had, err := topValue(doc, key)
 	return v, had, err
 }
 
@@ -1263,7 +1382,14 @@ func topValue(doc []byte, key string) (val json.RawMessage, from, to int, found 
 // withModel is doc with its top-level "model" as before (absent when absent
 // before), the rest as in doc; checked to be so.
 func withModel(doc []byte, before json.RawMessage, had bool) ([]byte, error) {
-	_, from, to, found, err := topValue(doc, "model")
+	return withKey(doc, "model", before, had)
+}
+
+// withKey is doc with its top-level key as before (absent when absent
+// before), the rest as in doc; checked to be so. (key: a plain name, no
+// quote or backslash in it.)
+func withKey(doc []byte, key string, before json.RawMessage, had bool) ([]byte, error) {
+	_, from, to, found, err := topValue(doc, key)
 	if err != nil {
 		return nil, err
 	}
@@ -1288,7 +1414,7 @@ func withModel(doc []byte, before json.RawMessage, had bool) ([]byte, error) {
 		}
 	case had:
 		i := bytes.IndexByte(doc, '{')
-		member := "\n  \"model\": " + string(before)
+		member := "\n  \"" + key + "\": " + string(before)
 		if !bytes.HasPrefix(bytes.TrimLeft(doc[i+1:], " \t\r\n"), []byte("}")) {
 			member += ","
 		}
@@ -1296,16 +1422,16 @@ func withModel(doc []byte, before json.RawMessage, had bool) ([]byte, error) {
 	default:
 		return doc, nil
 	}
-	// (Checked: all else as in doc, the model as before.)
+	// (Checked: all else as in doc, the key as before.)
 	var a, b map[string]json.RawMessage
 	if json.Unmarshal(doc, &a) != nil || json.Unmarshal(out, &b) != nil {
 		return nil, errors.New("not JSON once changed")
 	}
-	delete(a, "model")
-	m, ok := b["model"]
-	delete(b, "model")
+	delete(a, key)
+	m, ok := b[key]
+	delete(b, key)
 	if ok != had || (had && !jsonSame(m, before)) || len(a) != len(b) {
-		return nil, errors.New("the model not as before")
+		return nil, errors.New(key + " not as before")
 	}
 	for k, v := range a {
 		if !jsonSame(v, b[k]) {

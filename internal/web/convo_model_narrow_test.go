@@ -264,7 +264,7 @@ func TestModelFlowWaitsForASlowPicker(t *testing.T) {
 		late--
 		return "  ──────────────\n  ❯\n  ──────────────\n", nil
 	}
-	opts, err := modelFlow(slow, f.step, "")
+	opts, err := modelFlow(slow, f.step, "", "")
 	if err != nil {
 		t.Fatalf("gave up on a picker drawn late: %v", err)
 	}

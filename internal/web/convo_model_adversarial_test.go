@@ -59,7 +59,7 @@ func TestPickerExpansionAndSummaryAreNotModels(t *testing.T) {
 		f := newFake(false)
 		f.models = append(f.models, target)
 		f.current = len(f.models) - 1
-		if _, err := modelFlow(f.step, f.step, target); !errors.Is(err, errNoModel) {
+		if _, err := modelFlow(f.step, f.step, target, ""); !errors.Is(err, errNoModel) {
 			t.Fatalf("%q: %v", target, err)
 		}
 		if f.session != "" || f.saved || strings.Contains(strings.Join(f.pressed, ","), "this") {
@@ -110,7 +110,7 @@ func TestModelFlowDoesNotSucceedWithPickerStillOpen(t *testing.T) {
 		}
 		return s, err
 	}
-	if _, err := modelFlow(stuck, f.step, "Haiku 5.5"); !errors.Is(err, errNotTaken) {
+	if _, err := modelFlow(stuck, f.step, "Haiku 5.5", ""); !errors.Is(err, errNotTaken) {
 		t.Fatalf("reported success with picker open: %v", err)
 	}
 }
@@ -125,7 +125,7 @@ func TestModelFlowListMustCloseDialog(t *testing.T) {
 		}
 		return s, err
 	}
-	if _, err := modelFlow(surprise, f.step, ""); !errors.Is(err, errScreen) || f.asking || f.open {
+	if _, err := modelFlow(surprise, f.step, "", ""); !errors.Is(err, errScreen) || f.asking || f.open {
 		t.Fatalf("returned models with a dialog left open: %v, %+v", err, f)
 	}
 }
@@ -150,7 +150,7 @@ func TestModelFlowFindsClippedCursor(t *testing.T) {
 		b.WriteString("  … +2 models\n  ● High effort (default) ←/→ to adjust     ↓")
 		return b.String(), nil
 	}
-	if _, err := modelFlow(clipped, f.step, "Opus 5.5"); err != nil || f.session != "Opus 5.5" || f.saved {
+	if _, err := modelFlow(clipped, f.step, "Opus 5.5", ""); err != nil || f.session != "Opus 5.5" || f.saved {
 		t.Fatalf("clipped cursor: %v, %+v", err, f)
 	}
 }
@@ -174,7 +174,7 @@ func TestModelFlowFindsCursorClippedAbove(t *testing.T) {
 		b.WriteString(pickerKeys)
 		return b.String(), nil
 	}
-	if _, err := modelFlow(clipped, f.step, "Haiku 5.5"); err != nil || f.session != "Haiku 5.5" || f.saved {
+	if _, err := modelFlow(clipped, f.step, "Haiku 5.5", ""); err != nil || f.session != "Haiku 5.5" || f.saved {
 		t.Fatalf("cursor clipped above: %v, %+v", err, f)
 	}
 }

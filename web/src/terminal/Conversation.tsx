@@ -2186,6 +2186,18 @@ function Runs({ meta, active, mode, model, effort, quota, via, auth }: { meta: C
     setOpen((o) => (o === 'model' || o === 'effort' ? false : o))
   }, [model?.of])
   const [effortsOf, setEffortsOf] = useState('') // (a Codex's model whose efforts show, chosen with it)
+  // The model menu's choice, held while it is open: a model and how hard it
+  // thinks are chosen there together and taken at once, by its button — one
+  // switch, one wait (11-13; before, each click switched and closed it).
+  // Cleared as it opens and closes. (going: what a switch asked for is
+  // going to, said on the chip until it ends.)
+  const [stage, setStage] = useState<{ model?: string; effort?: string }>({})
+  const [going, setGoing] = useState('')
+  const applyBtn = useRef<HTMLButtonElement>(null)
+  useEffect(() => setStage({}), [open])
+  useEffect(() => {
+    if (!model?.busy) setGoing('')
+  }, [model?.busy])
   const box = useRef<HTMLDivElement>(null)
   const modelBtn = useRef<HTMLButtonElement>(null)
   const effortBtn = useRef<HTMLButtonElement>(null)
@@ -2197,6 +2209,8 @@ function Runs({ meta, active, mode, model, effort, quota, via, auth }: { meta: C
   // The model menu: its current one (else its first) takes the focus once
   // read; Up and Down go through it; closed by Escape, back to its button.
   const menu = useRef<HTMLDivElement>(null)
+  const mergedNow = useRef(false)
+  const moveEffort = useRef<(d: 1 | -1) => void>(() => {})
   const listed = (open === 'model' && !!model?.list) || open === 'effort' || open === 'mode'
   useEffect(() => {
     // (Only where the focus still is with it: not taken back from where it went meanwhile.)
@@ -2216,6 +2230,10 @@ function Runs({ meta, active, mode, model, effort, quota, via, auth }: { meta: C
         if (open === 'effort' && box.current?.contains(document.activeElement)) effortBtn.current?.focus()
         if (open === 'mode' && box.current?.contains(document.activeElement)) modeBtn.current?.focus()
         setOpen(false)
+      } else if (open === 'model' && mergedNow.current && (e.key === 'ArrowLeft' || e.key === 'ArrowRight') && menu.current?.contains(document.activeElement)) {
+        // (As in Claude Code's own picker: ← → for how hard it thinks, wherever the focus is in the list.)
+        e.preventDefault()
+        moveEffort.current(e.key === 'ArrowRight' ? 1 : -1)
       } else if ((open === 'model' || open === 'effort' || open === 'mode') && (e.key === 'ArrowDown' || e.key === 'ArrowUp') && menu.current?.contains(document.activeElement)) {
         const all = [...menu.current.querySelectorAll<HTMLElement>('button')]
         const at = all.indexOf(document.activeElement as HTMLElement)
@@ -2279,6 +2297,34 @@ function Runs({ meta, active, mode, model, effort, quota, via, auth }: { meta: C
   // agent must not already choose the two together (a Codex's picker
   // does: its efforts hang under each model instead).
   const merged = !!model?.can && !!effort?.can && !model?.efforts
+  // (The one it is on, as the rows tick it; and how hard it thinks now.)
+  const nowOf = (o: ModelOpt) => (model!.byLog ? o.label === rowByLog(model!.list!, meta.model) : model!.fresh && model!.list!.some((x) => x.current) ? !!o.current : modelName(meta.model!).toLowerCase() === o.label.toLowerCase())
+  const nowRow = model?.list && meta.model ? model.list.find(nowOf) : undefined
+  const nowEffort = merged ? effort!.now || meta.effort : meta.effort?.toLowerCase()
+  const toModel = stage.model ?? nowRow?.label
+  const toEffort = stage.effort ?? (merged ? nowEffort : undefined)
+  const toRow = model?.list?.find((o) => o.label === toModel)
+  const modelMoved = !!toModel && toModel !== nowRow?.label
+  const effortMoved = !!stage.effort && (model?.efforts ? effortWord(stage.effort) !== nowEffort || modelMoved : stage.effort !== nowEffort)
+  const toSaid = [toRow ? named(toRow)[0] : toModel, toEffort ? (model?.efforts ? t(EFFORT_WORDS[toEffort] ?? 'convo.effort') : effortName(toEffort)) : ''].filter(Boolean).join(' · ')
+  // Taken: the model and the effort in one switch (Claude Code's picker takes both
+  // with one "s", a Codex's with its model); the effort alone, with the model it is
+  // on; the model alone, as before (a line typed, where that is known to work).
+  mergedNow.current = merged
+  moveEffort.current = (d) => {
+    const i = Math.max(0, EFFORTS.indexOf((toEffort ?? 'medium') as (typeof EFFORTS)[number]))
+    setStage((st) => ({ ...st, effort: EFFORTS[Math.min(EFFORTS.length - 1, Math.max(0, i + d))] }))
+  }
+  const apply = () => {
+    if (!model || model.busy || (!modelMoved && !effortMoved)) return
+    setOpen(false)
+    modelBtn.current?.focus()
+    setGoing(toSaid)
+    if (model.efforts) model.onPick(toModel!, stage.effort)
+    else if (effortMoved && toModel) model.onPick(toModel, stage.effort)
+    else if (effortMoved) effort?.onPick(stage.effort!)
+    else model.onPick(toModel!)
+  }
   const used = meta.context ?? 0
   // (Where it is not known: past the smaller window, the session has the
   // larger one. Known and filled past, it was not that one after all.)
@@ -2342,10 +2388,12 @@ function Runs({ meta, active, mode, model, effort, quota, via, auth }: { meta: C
           >
             {/* Merged: the model and how hard it thinks are the one choice,
                 so they are the one chip — the menu behind them is one. */}
-            {merged && meta.effort
-              ? t('convo.modelEffortChip', { m: modelName(meta.model), e: effortName(effort!.now || meta.effort!) })
-              : modelName(meta.model)}
-            <ChevronsUpDown size={12} aria-hidden="true" />
+            {going && model.busy
+              ? t('convo.modelGoing', { what: going })
+              : merged && meta.effort
+                ? t('convo.modelEffortChip', { m: modelName(meta.model), e: effortName(effort!.now || meta.effort!) })
+                : modelName(meta.model)}
+            {going && model.busy ? <Loader size={12} className="convo-running-spin" aria-hidden="true" /> : <ChevronsUpDown size={12} aria-hidden="true" />}
           </button>
         ) : (
           <span className="convo-runs-item convo-runs-model" title={meta.model}>{modelName(meta.model)}</span>
@@ -2407,33 +2455,36 @@ function Runs({ meta, active, mode, model, effort, quota, via, auth }: { meta: C
             model.list.map((o) => {
               // (As its picker last said, which the log may not yet. A Codex's
               // log names it in small letters: "gpt-6-sol" is "GPT-6-Sol".)
-              const now = model.byLog ? o.label === rowByLog(model.list!, meta.model) : model.fresh && model.list!.some((x) => x.current) ? !!o.current : modelName(meta.model!).toLowerCase() === o.label.toLowerCase()
+              const now = nowOf(o)
+              const chosen = (toModel ?? '') === o.label
               const [name, says] = named(o)
+              // (Chosen, not taken: the button under the list takes it — the focus goes there.)
               const pick = (effort?: string) => {
-                setOpen(false)
-                setEffortsOf('')
-                modelBtn.current?.focus()
-                model.onPick(o.label, effort) // (the one ticked too: what is ticked may be past)
+                setStage((st) => ({ model: o.label, effort: effort ?? (model.efforts ? undefined : st.effort) }))
+                requestAnimationFrame(() => applyBtn.current?.focus())
               }
               return (
                 <Fragment key={o.label}>
                   <button
                     type="button"
                     role="menuitemradio"
-                    aria-checked={now}
+                    aria-checked={chosen}
                     aria-expanded={model.efforts ? effortsOf === o.label : undefined}
-                    className="convo-models-item"
+                    className={'convo-models-item' + (now ? ' is-now' : '')}
                     title={o.label}
-                    onClick={() => (model.efforts ? setEffortsOf(effortsOf === o.label ? '' : o.label) : pick())}
+                    onClick={() => (model.efforts ? (setEffortsOf(o.label), setStage({ model: o.label })) : pick())}
                   >
-                    <span className="convo-models-label">{name}</span>
+                    <span className="convo-models-label">
+                      {name}
+                      {now && !chosen && <span className="convo-models-now">{t('convo.modelNowTag')}</span>}
+                    </span>
                     {says && <span className="convo-models-desc">{says}</span>}
-                    {now && <Check size={14} aria-hidden="true" />}
+                    {chosen && <Check size={14} aria-hidden="true" />}
                   </button>
                   {model.efforts && effortsOf === o.label && (
                     <div className="convo-models-efforts" role="group" aria-label={t('convo.effort')}>
                       {model.efforts.map((e) => (
-                        <button key={e} type="button" role="menuitem" className={'convo-models-effort' + (now && meta.effort?.toLowerCase() === effortWord(e) ? ' is-current' : '')} onClick={() => pick(e)}>
+                        <button key={e} type="button" role="menuitemradio" aria-checked={chosen && (stage.effort ? stage.effort === e : now && meta.effort?.toLowerCase() === effortWord(e))} className={'convo-models-effort' + ((chosen && (stage.effort ? stage.effort === e : now && meta.effort?.toLowerCase() === effortWord(e))) ? ' is-current' : '')} onClick={() => pick(e)}>
                           {t(EFFORT_WORDS[e] ?? 'convo.effort')}
                         </button>
                       ))}
@@ -2456,15 +2507,10 @@ function Runs({ meta, active, mode, model, effort, quota, via, auth }: { meta: C
                     key={e}
                     type="button"
                     role="menuitemradio"
-                    aria-checked={(effort.now || meta.effort) === e}
-                    className={'convo-models-effort' + ((effort.now || meta.effort) === e ? ' is-current' : '')}
-                    aria-disabled={effort.busy || undefined}
-                    onClick={() => {
-                      if (effort.busy) return
-                      setOpen(false)
-                      ;(effortBtn.current ?? modelBtn.current)?.focus() // (merged: the one chip is the model's)
-                      effort.onPick(e)
-                    }}
+                    aria-checked={toEffort === e}
+                    className={'convo-models-effort' + (toEffort === e ? ' is-current' : '') + (nowEffort === e ? ' is-now' : '')}
+                    title={nowEffort === e ? t('convo.modelNowTag') : undefined}
+                    onClick={() => setStage((st) => ({ ...st, effort: e }))}
                   >
                     {effortName(e)}
                   </button>
@@ -2472,7 +2518,14 @@ function Runs({ meta, active, mode, model, effort, quota, via, auth }: { meta: C
               </div>
             </>
           )}
-          <p className="convo-runs-note">{t(merged ? 'convo.modelEffortOnly' : 'convo.modelOnly')}</p>
+          {model.list !== null && (
+            <div className="convo-models-foot">
+              <p className="convo-runs-note">{t(merged ? 'convo.modelEffortOnly' : 'convo.modelOnly')}</p>
+              <button ref={applyBtn} type="button" className="btn btn-primary convo-models-apply" disabled={model.busy || (!modelMoved && !effortMoved)} onClick={apply}>
+                {modelMoved || effortMoved ? (modelMoved || model.efforts ? t('convo.applySwitch', { what: toSaid }) : t('convo.applyEffort', { e: effortName(toEffort!) })) : t('convo.applyNone')}
+              </button>
+            </div>
+          )}
         </div>
       )}
       {open === 'mode' && mode?.onPick && (

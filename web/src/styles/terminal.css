@@ -591,7 +591,7 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
   border: 0; border-radius: var(--r-sm); background: none; color: var(--term-fg); font: inherit; text-align: left; cursor: pointer;
 }
 .convo-models-item:hover, .convo-models-item:focus-visible { background: var(--term-hover); outline: none; }
-.convo-models-item[aria-checked='true'] { color: var(--term-accent-text); cursor: default; }
+.convo-models-item[aria-checked='true'] { color: var(--term-accent-text); }
 .convo-models-label { grid-column: 1; font-weight: 500; }
 .convo-models-desc { grid-column: 1; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-3); }
 .convo-models-item svg { grid-column: 2; grid-row: 1 / span 2; }
@@ -606,6 +606,13 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 }
 .convo-models-effort:hover, .convo-models-effort:focus-visible { background: var(--term-hover); outline: none; }
 .convo-models-effort.is-current { border-color: var(--term-accent-text); color: var(--term-accent-text); }
+/* The menu's choice is held until its button takes it (11-13): what it is on now, marked apart — a tag by
+   the model's name, a dashed edge round the level — from what is chosen. */
+.convo-models-now { margin-left: 6px; padding: 0 6px; border-radius: 999px; background: color-mix(in srgb, var(--term-fg) 7%, transparent); color: var(--term-fg-3); font-size: var(--fs-note); line-height: var(--lh-note); font-weight: 400; }
+.convo-models-effort.is-now:not(.is-current) { border-style: dashed; }
+.convo-models-foot { display: flex; flex-direction: column; gap: 8px; margin: 6px 8px 2px; padding-top: 8px; border-top: 1px solid var(--term-line); }
+.convo-models-foot .convo-runs-note { margin: 0; }
+.convo-models-apply { width: 100%; justify-content: center; }
 .convo-runs-ctx:hover, .convo-runs-ctx[aria-expanded='true'] { background: var(--term-hover); color: var(--term-fg); }
 .convo-runs-ctx:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: 1px; }
 .convo-runs-pop {
