@@ -432,7 +432,8 @@ export function ConversationView({
     })
     return { at, of }
   }, [list])
-  const foldShut = (key: string | undefined) => !!key && !allOpen && !unfolded[key]
+  // (As a run's line: opened or shut by hand, else as all are — Ctrl+O.)
+  const foldShut = (key: string | undefined) => !!key && !(unfolded[key] ?? allOpen)
   const heldNow = useRef({ compactSum, folds })
   heldNow.current = { compactSum, folds }
   // The rail's turns, and where each is in the list: of the same turns as
@@ -490,6 +491,7 @@ export function ConversationView({
       e.stopPropagation()
       if (e.repeat) return // (held: once)
       setOpened({})
+      setUnfolded({})
       setAllOpen((v) => !v)
     }
     window.addEventListener('keydown', onKey, true)
@@ -585,6 +587,8 @@ export function ConversationView({
   openedNow.current = opened
   const allOpenNow = useRef(allOpen)
   allOpenNow.current = allOpen
+  const unfoldedNow = useRef(unfolded)
+  unfoldedNow.current = unfolded
   const keepPlace = useCallback(() => {
     markRead()
     const was = shownOf.current
@@ -596,7 +600,7 @@ export function ConversationView({
       leftRead.set(was.of, r.at)
       while (leftRead.size > 50) leftRead.delete(leftRead.keys().next().value!)
     }
-    if (was?.of) keepAt(was.of, { gen: was.gen, stuck: stuck.current, anchors: anchors.current, noted: notedList.current, opened: openedNow.current, allOpen: allOpenNow.current })
+    if (was?.of) keepAt(was.of, { gen: was.gen, stuck: stuck.current, anchors: anchors.current, noted: notedList.current, opened: openedNow.current, allOpen: allOpenNow.current, unfolded: unfoldedNow.current })
   }, [])
   useLayoutEffect(() => {
     if (shownOf.current?.of !== convo.of) keepPlace()
@@ -617,6 +621,7 @@ export function ConversationView({
     setAway(back)
     setOpened(back ? p.opened : {})
     setAllOpen(back ? p.allOpen : false)
+    setUnfolded(back ? p.unfolded : {}) // (keys are of one conversation: never another's)
     setChanges(null)
     setSubs(null)
     anchors.current = back ? p.anchors : []
@@ -759,7 +764,7 @@ export function ConversationView({
     const c = col.current
     // (Being put back: not before its items are opened as they were, nor noted till then.)
     const r = restoring.current
-    if (r && (opened !== r.opened || allOpen !== r.allOpen)) return
+    if (r && (opened !== r.opened || allOpen !== r.allOpen || unfolded !== r.unfolded)) return
     if (el && c && !stuck.current && anchors.current.length) {
       const view = el.getBoundingClientRect()
       const kids = [...c.children].filter((k) => !k.hasAttribute('data-aside'))
@@ -1530,7 +1535,7 @@ export function ConversationView({
                 { label: t('convoSearch.item'), icon: <Search size={16} />, group: t('menu.group.find'), onSelect: () => setSearching(true) },
                 ...(convo.of && (convo.bind?.agent === 'claude' || convo.bind?.agent === 'codex') ? [{ label: t('turns.item'), icon: <ListOrdered size={16} />, onSelect: () => (setSearching(false), setTurnsShown(true)) }] : []),
                 // (All steps opened or folded: the menu's, as Ctrl+O is a Mac's only.)
-                { label: t(allOpen ? 'pageKeys.foldAll' : 'pageKeys.openAll'), icon: allOpen ? <ChevronsDownUp size={16} /> : <ChevronsUpDown size={16} />, disabled: !list.length, onSelect: () => (setOpened({}), setAllOpen((v) => !v)) },
+                { label: t(allOpen ? 'pageKeys.foldAll' : 'pageKeys.openAll'), icon: allOpen ? <ChevronsDownUp size={16} /> : <ChevronsUpDown size={16} />, disabled: !list.length, onSelect: () => (setOpened({}), setUnfolded({}), setAllOpen((v) => !v)) },
                 ...(convo.of && convo.status === 'ready' ? [{ label: t('card.open'), icon: <Info size={16} />, onSelect: () => setCard(cardMode()) }] : []),
                 { label: t('convoExport.item'), icon: <Download size={16} />, disabled: !list.length, onSelect: () => doExport() },
                 // (On every device: a tablet's keyboard has these keys too.)
@@ -1845,6 +1850,7 @@ function RunningWork({ scanOf, items, waiting, openSub, openCmd }: { scanOf?: st
         {!open && first && (
           <span className="convo-running-first">
             {what(labelOf(first), openOf(first), hintOf(first))}
+            {first.note && <span className="convo-running-note" title={first.note}>{first.note}</span>}
             <span className="convo-running-since">{since(first.ts)}</span>
           </span>
         )}
@@ -3473,7 +3479,7 @@ const ListItem = memo(
         return <Gone it={it} copy={copy} />
     }
   },
-  (a, b) => a.copy === b.copy && a.open === b.open && a.onToggle === b.onToggle && a.onShow === b.onShow && sameItem(a.it, b.it),
+  (a, b) => a.copy === b.copy && a.open === b.open && a.onToggle === b.onToggle && a.onShow === b.onShow && a.sum === b.sum && sameItem(a.it, b.it),
 )
 
 function sameItem(a: Item, b: Item): boolean {
@@ -3996,7 +4002,7 @@ type Anchor = { key: string; top: number; fromEnd: number; last: string }
 
 // Where each conversation was left, for this page's life: as many as are
 // kept to be shown at once (conversation.ts), the latest last.
-type Place = { gen: number; stuck: boolean; anchors: Anchor[]; noted: Item[]; opened: Record<string, boolean>; allOpen: boolean }
+type Place = { gen: number; stuck: boolean; anchors: Anchor[]; noted: Item[]; opened: Record<string, boolean>; allOpen: boolean; unfolded: Record<string, boolean> }
 const places = new Map<string, Place>()
 function keepAt(of: string, p: Place) {
   places.delete(of)

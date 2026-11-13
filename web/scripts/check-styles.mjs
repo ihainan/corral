@@ -136,17 +136,20 @@ for (const f of ['app.css', 'terminal.css']) {
       if (prop === 'font-size' || prop === 'line-height') {
         if (/\d/.test(strip(val)) && !/^(inherit|normal|0)$/.test(val))
           offences.push(`${where}: ${prop}: ${val} — take the pair for its role (--fs-… with --lh-…), not a number`)
+      } else if (prop === 'font' && /(^|\s)(bold|bolder|lighter|[1-9]00)(\s|$)/.test(val) && !/(^|\s)(400|500|600)(\s|$)/.test(val)) {
+        offences.push(`${where}: font: ${val} — its weight 400, 500 or 600 (body, a label, a heading)`)
       } else if (prop === 'font' && /\d*\.?\d+(px|em|rem|pt)|\/\s*\d/.test(strip(val))) {
         offences.push(`${where}: font: ${val} — the shorthand sets a size and a line; take the role's pair instead`)
       } else if (prop === 'border-radius') {
         if (strip(val).split(/\s+/).some((p) => /\d/.test(p) && !/^(0|50%|999px)$/.test(p)))
           offences.push(`${where}: border-radius: ${val} — name its step (--r-xs … --r-xl), or a pill`)
       } else if (prop === 'font-weight') {
-        if (!/^(400|500|600|inherit)$/.test(val)) offences.push(`${where}: font-weight: ${val} — 400, 500 or 600 (body, a label, a heading)`)
+        if (!/^(400|500|600|inherit)( !important)?$/.test(val)) offences.push(`${where}: font-weight: ${val} — 400, 500 or 600 (body, a label, a heading)`)
       } else if (prop === 'color') {
         // (A colour of words from the theme's roles, never written out: a grey
         // chosen by eye is how three of them came to stand side by side, 11-13.)
-        if (!/^(var\(--[\w-]+(, *[^;]+)?\)|inherit|currentColor|transparent|color-mix\(.*var\(--.*\)|[A-Z][a-zA-Z]+)( !important)?$/.test(val))
+        // (A system colour — forced colours mode — is the user's own, not a value chosen here.)
+        if (!/^(var\(--[\w-]+(, *[^;]+)?\)|inherit|currentColor|transparent|color-mix\(.*var\(--.*\)|ButtonText|ButtonFace|ButtonBorder|Canvas|CanvasText|LinkText|VisitedText|ActiveText|GrayText|Highlight|HighlightText|Field|FieldText|Mark|MarkText|SelectedItem|SelectedItemText|AccentColor|AccentColorText)( !important)?$/.test(val))
           offences.push(`${where}: color: ${val} — take a role's colour (--term-fg…, --fg…), not a value`)
       } else if (SPACED.test(prop)) {
         for (const n of px(strip(val))) if (!STEP.has(n)) offences.push(`${where}: ${prop}: ${val} — ${n}px is not a step of the scale`)

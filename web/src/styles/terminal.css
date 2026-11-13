@@ -1170,11 +1170,12 @@ p.convo-ask-desc { margin: 0 0 8px; font-size: var(--fs-ui); line-height: var(--
 .convo-running-spin { flex: none; color: var(--term-accent-text); animation: convo-spin 1.4s linear infinite; }
 @keyframes convo-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .convo-running-spin { animation: none; } }
-.convo-running-sum { flex: none; max-width: 100%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.convo-running.is-open .convo-running-sum { flex: 1; }
-.convo-running-first { flex: 1; min-width: 0; display: flex; align-items: baseline; gap: 8px; font-weight: 400; color: var(--term-fg-3); }
+.convo-running-sum { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.convo-running.is-open .convo-running-sum { flex: 1 1 auto; }
+.convo-running-first { flex: 1 1 0; min-width: 0; display: flex; align-items: baseline; gap: 8px; font-weight: 400; color: var(--term-fg-3); }
 .convo-running-first::before { content: '·'; flex: none; }
 .convo-running-first .convo-running-what { flex: 0 1 auto; color: var(--term-fg-3); font-weight: 400; }
+.convo-running-first .convo-running-note { flex: 1 1 0; }
 .convo-running-first button.convo-running-what:hover { color: var(--term-fg); }
 .convo-running-since { flex: none; margin-left: auto; font-variant-numeric: tabular-nums; }
 .convo-running-more { flex: none; display: inline-flex; align-items: center; gap: 4px; margin-left: auto; padding: 4px 6px; border: 0; border-radius: var(--r-sm); background: none; color: var(--term-fg-3); font: inherit; font-weight: 400; cursor: pointer; white-space: nowrap; }
