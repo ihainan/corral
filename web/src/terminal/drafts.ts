@@ -43,8 +43,8 @@ export function keepReplyDraft(key: string, text: string) {
   else replies.delete(key)
 }
 
-// Long pastes into the composer: shown there as a label ("[Pasted text #1,
-// 120 lines]"), sent as the text itself. Kept with the drafts (sent ones too,
+// Long pastes into the composer: shown there as a label ("[粘贴 3 · 120 行]",
+// before 11-13 "[Pasted text #1, 120 lines]"), sent as the text itself. Kept with the drafts (sent ones too,
 // so an entry brought back from the history still expands); past a few the
 // oldest that no draft (one put aside while going through the history is
 // kept as the draft) or history entry holds goes.
@@ -62,7 +62,7 @@ const inUse = (l: string) =>
   history.some((h) => h.includes(l)) || [...drafts.values()].some((d) => d.includes(l)) || [...shown.values()].some((d) => d.includes(l))
 
 // Files put up to the host from a composer: shown in the draft as a label
-// ("[图片 #3：shot.png]") with a chip over the box, sent as what the agent
+// ("[图片 3]", "[文件 4]"; before 11-13 "[图片 #3：shot.png]") with a chip over the box, sent as what the agent
 // reads — the path, quoted as the upload put it (send). Kept with the
 // drafts, apart from the pastes and never given up for them (each is
 // small); past a few the oldest no draft or history entry holds goes.
@@ -105,6 +105,16 @@ export function unsendable(s: string, host: number, label: RegExp, max: number):
   if (other) return { other }
   for (const m of text.matchAll(label)) if (!attached.has(m[0])) return { lost: m[0] }
   return null
+}
+// The long pastes a text holds, in the order it holds them (each once): a
+// card each over the box, to read it whole or take it out.
+export function pastesIn(s: string): { label: string; text: string }[] {
+  const at: [number, { label: string; text: string }][] = []
+  for (const [label, text] of pastes) {
+    const i = s.indexOf(label)
+    if (i >= 0) at.push([i, { label, text }])
+  }
+  return at.sort((x, y) => x[0] - y[0]).map(([, p]) => p)
 }
 export function keepPaste(text: string, label: (n: number) => string): string {
   const l = label(++pasteN)

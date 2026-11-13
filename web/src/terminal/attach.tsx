@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
-import { File as FileIcon, Image as ImageIcon, RotateCw, X } from 'lucide-react'
+import { File as FileIcon, FileText, Image as ImageIcon, RotateCw, X } from 'lucide-react'
 import { t } from '../i18n'
-import { attachedIn, keepAttached, type Attached } from './drafts'
+import { attachedIn, keepAttached, pastesIn, type Attached } from './drafts'
+import { Dialog, DialogHead } from '../components/ui'
 import { lookAt, useObjectURL } from './picture'
 
 // Files put up from a composer: a label in the draft (sent as the path),
@@ -27,7 +28,10 @@ export function labelName(name: string): string {
 // alone, "[图片 #1]" — 11-05 — which is not taken as a label here: words
 // typed so are no file lost; such a label goes as its path while its file is
 // known, as words if not — review 3374eba.)
-export const ATTACH_LABEL = /\[(?:图片|文件|Attached (?:image|file)) #\d+[：:] ?[^\]\n]{1,60}\]/g
+// (11-13: a file's label is its number alone, its name on its card — "[文件 4]"; one of
+// before, with its name, still known in a draft kept since. A picture's, "[图片 3]", as
+// the pasted picture's was: words typed so are no file lost.)
+export const ATTACH_LABEL = /\[(?:图片|文件|Attached (?:image|file)) #\d+[：:] ?[^\]\n]{1,60}\]|\[(?:文件|File) \d+\]/g
 
 
 // (A picture pasted is named "image.png" by the browser, every one alike:
@@ -61,6 +65,8 @@ export function sizeText(n: number): string {
 
 export function AttachStrip({ draft, sid, host, onRemove, onOpen, going = [], onRetry, onCancel }: { draft: string; sid: string; host: number; onRemove: (label: string) => void; onOpen: (a: Attached) => void; going?: Going[]; onRetry?: (id: number) => void; onCancel?: (id: number) => void }) {
   const files = attachedIn(draft)
+  const pasted = pastesIn(draft)
+  const [reading, setReading] = useState<{ label: string; text: string } | null>(null)
   const ref = useRef<HTMLDivElement>(null)
   // (More of it than its width shows, on a phone above all: its end fades, so it is seen to go on.)
   const [more, setMore] = useState(false)
@@ -77,18 +83,45 @@ export function AttachStrip({ draft, sid, host, onRemove, onOpen, going = [], on
       el.removeEventListener('scroll', look)
       ro.disconnect()
     }
-  }, [files.length, going.length])
-  if (!files.length && !going.length) return null
+  }, [files.length, going.length, pasted.length])
+  if (!files.length && !going.length && !pasted.length) return null
   return (
     <div ref={ref} className={'attach-strip' + (more ? ' is-more' : '')} aria-label={t('attach.title')}>
       {files.map((a) => (
         <AttachChip key={a.label} a={a} sid={sid} here={a.host === host} onRemove={() => onRemove(a.label)} onOpen={() => onOpen(a)} />
       ))}
+      {/* (A long paste: a card of it — how many lines — to read whole, or take out.) */}
+      {pasted.map((p) => (
+        <span key={p.label} className="attach-chip is-file is-paste" title={p.label}>
+          <button type="button" className="attach-open" onClick={() => setReading(p)} aria-label={t('attach.pasteOpen', { lines: p.text.split('\n').length })}>
+            <span className="attach-icon" aria-hidden="true"><FileText size={16} /></span>
+            <span className="attach-text">
+              <span className="attach-name">{firstWords(p.text)}</span>
+              <span className="attach-sub">{t('attach.pasteLines', { lines: p.text.split('\n').length })}</span>
+            </span>
+          </button>
+          <button type="button" className="attach-x" onClick={() => onRemove(p.label)} aria-label={t('attach.pasteRemove')} title={t('attach.pasteRemove')}>
+            <X size={13} />
+          </button>
+        </span>
+      ))}
       {going.map((g) => (
         <GoingChip key={'up' + g.id} g={g} onRetry={() => onRetry?.(g.id)} onCancel={() => onCancel?.(g.id)} />
       ))}
+      {reading && (
+        <Dialog title={t('attach.paste')} onClose={() => setReading(null)} wide hideTitle className="dlg attach-paste-dialog">
+          <DialogHead icon={<FileText size={18} />} eyebrow={t('attach.paste')} title={firstWords(reading.text)} oneLine sub={t('attach.pasteLines', { lines: reading.text.split('\n').length })} onClose={() => setReading(null)} />
+          <pre className="attach-paste-text">{reading.text}</pre>
+        </Dialog>
+      )}
     </div>
   )
+}
+
+// A paste's first words, as its card names it.
+const firstWords = (s: string) => {
+  const l = s.split('\n').find((x) => x.trim()) ?? ''
+  return l.trim().slice(0, 80)
 }
 
 function GoingChip({ g, onRetry, onCancel }: { g: Going; onRetry: () => void; onCancel: () => void }) {
@@ -112,7 +145,7 @@ function GoingChip({ g, onRetry, onCancel }: { g: Going; onRetry: () => void; on
 }
 
 function shownName(a: Attached): string {
-  const n = /#(\d+)/.exec(a.label)?.[1]
+  const n = /#?(\d+)/.exec(a.label)?.[1]
   return a.image && n && GENERIC.test(a.name) ? t('convo.picN', { n }) : a.name
 }
 

@@ -766,6 +766,9 @@ details.adv > .form { margin-top: 16px; }
 /* A picture of the host, looked at: fitted to the window, under the shared
    viewer head (.dlg-head: its name, folder, the actions on it). */
 .dialog.picture-dialog { max-width: min(1100px, calc(100vw - 32px)); }
+/* A long paste in the composer, read whole before it goes. */
+.dialog.attach-paste-dialog { max-width: min(860px, calc(100vw - 32px)); }
+.attach-paste-text { margin: 0; padding: 12px 16px; max-height: min(70vh, 640px); overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--font-mono); font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--fg); border-top: 1px solid var(--line); }
 .picture-stage { position: relative; flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
 .picture-body { flex: 1 1 auto; min-height: 160px; overflow: auto; display: grid; place-items: center; background: var(--bg-subtle); border-top: 1px solid var(--line); }
 .picture-img.is-big { cursor: zoom-in; }
