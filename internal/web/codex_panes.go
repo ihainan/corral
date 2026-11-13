@@ -319,7 +319,20 @@ for q in sorted(procs, key=lambda q: (q['pane'], q['pid'])):
             logs = glob.glob(glob.escape(q['home']) + '/sessions/*/*/*/rollout-*-' + tid + '.jsonl')
             if logs:
                 log = max(logs, key=lambda l: os.stat(l).st_mtime)
-    fresh = '1' if q['sub'] == '' and not q['any'] and begun is not None and len(begun) == 0 else '0'
+    # (Live conversations of its folder no Codex is told at — one it was
+    # resumed in, maybe, whenever begun: by what is held now, not by time.)
+    live_other = None
+    if con is not None:
+        try:
+            live_other = 0
+            for h, x in held:
+                if h == q['home'] and x != tid and (h, x) not in others:
+                    r = con.execute('SELECT cwd FROM threads WHERE id = ? AND ' + TALKED, (x,)).fetchone()
+                    if r and r[0] == q['cwd']:
+                        live_other += 1
+        except sqlite3.Error:
+            live_other = None
+    fresh = '1' if q['sub'] == '' and not q['any'] and begun is not None and len(begun) == 0 and live_other == 0 else '0'
     # (Of its name, other live conversations of its folder: a title is no word on which of them.)
     same = 0
     if name:
@@ -578,8 +591,13 @@ func codexPressSure(c codexPane) bool {
 		return true
 	}
 	// (Its title is its thread's now: one gone to since, named or not, would
-	// show its own name or the folder alone.)
-	return c.Name != "" && c.titleRead && codexTitleAgrees(c.TitleNow, c.Cwd, c.Name) && c.SameName == 0
+	// show its own name or the folder alone. The name whole, not cut short:
+	// two names of one beginning cut alike.)
+	if c.Name == "" || !c.titleRead || c.SameName != 0 {
+		return false
+	}
+	thread, bare := codexTitleParts("codex", c.TitleNow, c.Cwd)
+	return !bare && thread == c.Name
 }
 
 // codexFront: the process a press to pane's Codex goes to, told by a look

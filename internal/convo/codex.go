@@ -53,6 +53,7 @@ type Codex struct {
 	// results have not come, in their order: the next imported result is
 	// the first's (several called at once, their results come in turn).
 	importCalls []*Tool
+	importLost  bool // (too many waited: none paired after)
 	Skipped     int
 	// Turns, to tell what a backtrack takes back: the first entry of each
 	// turn not taken back (a turn starts at task_started; its first entry is
@@ -1292,7 +1293,7 @@ func (c *Codex) item(r *codexRow, p *codexPayload) {
 				continue
 			}
 			// (An imported tool's result: its call's, on that call's line.)
-			if kind, _, body, ok := importedRecord(b.Text); ok && kind == "result" && len(c.importCalls) > 0 {
+			if kind, _, body, ok := importedRecord(b.Text); ok && kind == "result" && len(c.importCalls) > 0 && !c.importLost {
 				t := c.importCalls[0]
 				c.importCalls = c.importCalls[1:]
 				t.setResult(clean(body))
@@ -1303,10 +1304,10 @@ func (c *Codex) item(r *codexRow, p *codexPayload) {
 			got := codexDisplayParts(b.Text)
 			// (Every call waits for its result, one whose long command was
 			// kept as its result too: the result comes in its place.)
-			if kind, _, _, ok := importedRecord(b.Text); ok && kind == "call" && len(got) == 1 && got[0].Tool != nil {
+			if kind, _, _, ok := importedRecord(b.Text); ok && kind == "call" && len(got) == 1 && got[0].Tool != nil && !c.importLost {
 				c.importCalls = append(c.importCalls, got[0].Tool)
 				if len(c.importCalls) > 256 {
-					c.importCalls = nil // (results not come for so many: none paired after, rather than each with another's)
+					c.importCalls, c.importLost = nil, true // (results not come for so many: none paired after, rather than each with another's)
 				}
 			}
 			parts = append(parts, got...)

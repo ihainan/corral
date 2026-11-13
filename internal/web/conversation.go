@@ -879,7 +879,9 @@ func isDigits(s string) bool {
 
 // convoBound: the log and session this gateway found for that process when
 // it last read the pane's conversation, if it is still the one it reads.
-func (s *Server) convoBound(sess *term.Session, pane string, pid, start int64) (string, string) {
+// why: "busy", a read holds it (asked again soon); "weak", what it has is no
+// proof (see convoState.weak); "" otherwise.
+func (s *Server) convoBound(sess *term.Session, pane string, pid, start int64) (log, sid, why string) {
 	key := sess.ID + "\x00"
 	if sess.Persistence == "herdr" {
 		key += pane
@@ -889,13 +891,16 @@ func (s *Server) convoBound(sess *term.Session, pane string, pid, start int64) (
 	// (Not waited for: a read holds it while it asks the host, and what is
 	// to be typed is not to wait on that. Unheld, it is read anew.)
 	if !st.mu.TryLock() {
-		return "", ""
+		return "", "", "busy"
 	}
 	defer st.mu.Unlock()
-	if st.bind == nil || st.bind.PID != pid || st.bind.Start != start || st.log == "" || st.sid == "" || st.weak {
-		return "", "" // (a weak binding vouches for nothing: the scan tells it)
+	if st.bind == nil || st.bind.PID != pid || st.bind.Start != start || st.log == "" || st.sid == "" {
+		return "", "", ""
 	}
-	return st.log, st.sid
+	if st.weak {
+		return "", "", "weak" // (a weak binding vouches for nothing)
+	}
+	return st.log, st.sid, ""
 }
 
 // convoScreenTTL: how long what the pane shows is taken to still hold.
@@ -2038,23 +2043,18 @@ func (s *Server) locateConvo(ctx context.Context, sess *term.Session, st *convoS
 // tell, what was shown stays shown, weak as before).
 func (s *Server) locateConvoBy(ctx context.Context, sess *term.Session, st *convoState, pane string, scan bool) error {
 	if scan {
-		was, wasSID, wasLog, wasReason := st.bind, st.sid, st.log, st.reason
-		err := s.locateScan(ctx, sess, st, pane, false)
-		if err == nil && was != nil && st.bind != nil && st.bind.PID == was.PID && st.bind.Start == was.Start &&
-			(st.reason == convoNotTold || st.reason == convoNoLog) && wasReason == "" {
-			b := *was
-			st.bind = &b
-			st.adopt(wasSID, wasLog, was.Agent, "")
-			st.weak = true
+		var keep *convoBind
+		if st.weak && st.reason == "" {
+			keep = st.bind
 		}
-		return err
+		return s.locateScan(ctx, sess, st, pane, false, keep)
 	}
-	return s.locateScan(ctx, sess, st, pane, true)
+	return s.locateScan(ctx, sess, st, pane, true, nil)
 }
 
 // locateScan: locateConvo's own; fast, the short look first, where it may
-// tell.
-func (s *Server) locateScan(ctx context.Context, sess *term.Session, st *convoState, pane string, fast bool) error {
+// tell. keep: a weak binding checked (see locateConvoBy), or nil.
+func (s *Server) locateScan(ctx context.Context, sess *term.Session, st *convoState, pane string, fast bool, keep *convoBind) error {
 	// (looked: when the scan read began, shared or not: what it found is of
 	// then or after, and a look begun later says more.)
 	// (A Codex with no log yet, looked for again each time: a scan begun
@@ -2202,7 +2202,17 @@ func (s *Server) locateScan(ctx context.Context, sess *term.Session, st *convoSt
 	if reason == "" && agent == "opencode" && st.reason == convoNoReader && sid == st.sid && log == st.log && time.Since(st.noReaderAt) < time.Minute {
 		reason = convoNoReader
 	}
-	st.weak = false // (the scan's: what it found, it found)
+	// (A weak binding checked: where the scan finds the same process at no
+	// conversation it can tell, nothing changes — what was shown stays,
+	// weak, its reading where it was.)
+	if keep != nil && st.bind != nil && st.bind.PID == keep.PID && st.bind.Start == keep.Start && (reason == convoNotTold || reason == convoNoLog) {
+		st.bind = keep
+		return nil
+	}
+	// (What the scan found: told for sure by a log of the process's own, or
+	// by what its screen shows; told by where and when a daemon's log began
+	// alone, it is shown, weak — no word on where keys go.)
+	st.weak = st.guessed && !(st.screenSID != "" && st.screenSID == sid)
 	st.adopt(sid, log, agent, reason)
 	return nil
 }
@@ -3635,9 +3645,19 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		// that very process when it read its conversation (not the one asked
 		// of it, which is no word on what the pane runs).
 		if front != nil && front.agent == "codex" && front.log == "" {
-			if log, sid := s.convoBound(sess, b.Pane, front.pid, front.start); sid != "" {
+			// (Not where and when it began instead, which is no proof: where
+			// what was read is weak, or a read holds it, nothing is typed.)
+			log, sid, why := s.convoBound(sess, b.Pane, front.pid, front.start)
+			switch {
+			case sid != "":
 				front.log, front.sid = log, sid
-			} else {
+			case why == "busy":
+				reason = "busy"
+				writeError(w, http.StatusTooManyRequests, "busy", "its conversation is being read: try again in a moment")
+				return
+			case why == "weak":
+				front.sid = "" // (agent_changed below: what is shown is checked anew)
+			default:
 				s.daemonLog(front, l)
 			}
 		}
