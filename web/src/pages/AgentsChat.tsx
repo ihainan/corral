@@ -5,7 +5,7 @@ import { t, type I18nKey } from '../i18n'
 import { navigate, onNavigate } from '../router'
 import { heldOpen, onHeldOpen, onOpenRequest, takeHeld } from '../notifyopen'
 import { isDark, maxPinned, setChromeColor, setPrefs, usePrefs } from '../prefs'
-import { keepNames, keptNames, local } from '../storage'
+import { local } from '../storage'
 import { CLOSE_MENUS, Confirm, copyText, Menu, useToast, type MenuItem } from '../components/ui'
 import { chromeVars, corralDark, corralLight } from '../terminal/themes'
 import { HostHistoryDialog } from '../terminal/hostHistory'
@@ -19,20 +19,20 @@ import { SessionOpDialog, type SessionOp } from '../terminal/sessionOps'
 import { NEW_AGENT, NewAgentDialog } from '../terminal/newAgent'
 import { ForkDialog, RenameDialog, type RenameTarget } from '../terminal/agentOps'
 import { agentWho, ChimeCounter, chime, countsOf } from '../terminal/chime'
-import { CODEX_EFFORTS, ConversationView, glanceOf, ListSearch, SEARCH_FROM, when, type ConvoAgent, type ConvoListRow, type ConvoPending, type ConvoWent, type FileActs, type ModelOpt } from '../terminal/Conversation'
+import { AgentList, CODEX_EFFORTS, ConversationView, glanceOf, type ConvoAgent, type ConvoListRow, type ConvoPending, type ConvoWent, type FileActs, type ModelOpt } from '../terminal/Conversation'
 import { FilesDialog } from '../terminal/FilesDialog'
 import { downloadPath, lookAt, PictureDialog } from '../terminal/picture'
 import { IMAGE_EXT, TextPreview } from '../terminal/textPreview'
 import { attach, ATTACH_LABEL, AttachStrip, PICTURE_PATH, takeOut, type Going } from '../terminal/attach'
 import { answerable, asking, callOut, useConversation, type ConvoEntry } from '../terminal/conversation'
-import { ackBg, waitingTitle, isCodex, isOpenCode, listAgents, matchQuery, paneName, paneTitle, readsLog, useRunningSessions, type AgentRow } from '../terminal/agents'
-import { dayBefore, dayStart, foldAt, foldedDay, listOrder, type RowCmds } from '../terminal/agentOrder'
+import { ackBg, waitingTitle, isCodex, isOpenCode, listAgents, paneName, paneTitle, readsLog, useRunningSessions, type AgentRow } from '../terminal/agents'
+import { type RowCmds } from '../terminal/agentOrder'
 import { conversationReadable, prefetchConversation } from '../terminal/conversation'
 import { holdTermMode, tmuxKey } from '../terminal/chatSend'
 import { isCommand, pairSent, sameMessage, type Submission } from '../terminal/sentSeen'
 import { viewRefusal } from '../terminal/sendView'
 import { agentKey, sessionWhich } from '../terminal/sessionName'
-import { AgentIcon, agentMark } from '../terminal/agentIcons'
+import { agentMark } from '../terminal/agentIcons'
 import { useComposerFit } from '../terminal/autosize'
 
 // The session a Codex not yet begun on its log is sent to (the gateway's convoNoSession).
@@ -2509,23 +2509,15 @@ function fitLine(el: HTMLElement | null, width: number, make: (name: string) => 
 // past a few of each of their groups, as there: a line where the rest of
 // the group would be, opened and shut by the group, as there.
 let listScroll = 0
-// (The groups of old ones opened out: still so, back from a conversation and
-// after a reload — kept on this device.)
-const OPEN_KEY = 'corral.agents.open'
-// An agent as the side list places it (its status, its time, pinned):
-// keyed by the session too, as the phone's list tells them.
-const asRow = (e: Entry, pins: string[]): ConvoListRow => {
-  const r = e.row
-  return { key: e.key + ' ' + e.s.id, title: '', where: '', status: r?.status ?? 'unknown', cmds: r ? cmdsOf(r) : tmuxCmdsOf(e), since: r && !r.lost ? (r.bg ? r.a.bg_since : r.a.since) : undefined, pinned: pins.includes(e.key) ? pins.indexOf(e.key) : undefined, current: false, onPick: () => {} }
-}
 // query, onQuery: what it is searched for, kept by the page (as the side
 // list's is): still searched, back from a conversation.
 function PhoneList({ entries, all, titles, query, onQuery, onPick }: { entries: Entry[]; all: SessionInfo[]; titles: Titles; query: string; onQuery: (q: string) => void; onPick: (e: Entry) => void }) {
-  const [now, setNow] = useState(Date.now())
-  useEffect(() => {
-    const timer = setInterval(() => setNow(Date.now()), 30000)
-    return () => clearInterval(timer)
-  }, [])
+  // A phone's list of the agents: the side list's own (AgentList), the
+  // whole screen — its groups, its rows, its search — as the switcher in a
+  // conversation shows it. 11-13: before, a list of its own (a line under
+  // every row, the state said twice beside each, a coloured count over
+  // them, no groups) that the person found ugly beside the side list.
+  // Over it, the way to a new agent and "waiting on me" only.
   const [mine, setMineState] = useState(() => local.get(ONLY_MINE) === '1')
   const setMine = (v: boolean) => {
     setMineState(v)
@@ -2536,170 +2528,43 @@ function PhoneList({ entries, all, titles, query, onQuery, onPick }: { entries: 
     }
   }
   const pins = usePrefs().pinnedAgents
-  const sorted = (list: Entry[]) => listOrder(list.map((e) => asRow(e, pins))).map((r) => r.key)
-  const [order, setOrder] = useState<string[]>(() => sorted(entries))
-  // Of the old ones, which group each is in, as it was when they were put in
-  // order (and so it stays: one gone old meanwhile is not folded away under
-  // the finger, nor one folded away shown; new ones are not folded).
-  const foldedOf = (list: Entry[]) => {
-    const today = dayStart(Date.now())
-    const yesterday = dayBefore(today)
-    return new Map(list.flatMap((e) => {
-      const d = foldedDay(asRow(e, pins), today, yesterday)
-      return d ? [[e.key + ' ' + e.s.id, d] as const] : []
-    }))
-  }
-  const [foldOf, setFoldOf] = useState(() => foldedOf(entries))
-  const place = () => (setOrder(sorted(entries)), setFoldOf(foldedOf(entries)))
-  useEffect(() => {
-    setOrder((o) => {
-      const have = new Set(entries.map((e) => e.key + ' ' + e.s.id))
-      const kept = o.filter((k) => have.has(k))
-      const added = entries.filter((e) => !kept.includes(e.key + ' ' + e.s.id)).map((e) => e.key + ' ' + e.s.id)
-      return kept.length === o.length && !added.length ? o : [...kept, ...added]
+  // (Its rows as the side list's are made — see AgentChat — none of them the one shown.)
+  const rows = useMemo((): ConvoListRow[] => {
+    const hosts = hostCount(entries)
+    const pinAt = (key: string) => (pins.includes(key) ? pins.indexOf(key) : undefined)
+    return entries.map((e): ConvoListRow => {
+      if (e.row) {
+        const r = e.row
+        const named = (isCodex(r.a.agent) && r.a.thread_title) || keptTitle(titles, e) || paneName(r.a)
+        const said = named || dirName(r.a.cwd) || r.a.agent
+        return { key: e.key, ...labelOf(e, said, hosts, !!named), now: r.lost || r.bg || r.status !== 'blocked' ? undefined : glanceOf(e.s.id, e.pane, r.status, r.a.since) || undefined, program: r.a.agent, status: r.status, bg: r.lost ? undefined : r.bg, cmds: cmdsOf(r), since: r.lost ? undefined : r.bg ? r.a.bg_since : r.a.since, current: false, pinned: pinAt(e.key), onPick: () => onPick(e) }
+      }
+      const title = keptTitle(titles, e) || `${e.s.host_name} · ${sessionWhich(e.s, all)}`
+      return { key: e.key, title, where: whereOf(e, hosts), status: 'unknown', cmds: tmuxCmdsOf(e), current: false, pinned: pinAt(e.key), onPick: () => onPick(e) }
     })
-    // (One gone: forgotten here too, so back it is a new one, not folded.)
-    setFoldOf((f) => {
-      const have = new Set(entries.map((e) => e.key + ' ' + e.s.id))
-      return [...f.keys()].every((k) => have.has(k)) ? f : new Map([...f].filter(([k]) => have.has(k)))
-    })
-  }, [entries])
-  const byKey = new Map(entries.map((e) => [e.key + ' ' + e.s.id, e]))
-  // (Those pinned first, in the order pinned, as the side list has them.)
-  const inOrder = order.flatMap((k) => (byKey.has(k) ? [byKey.get(k)!] : []))
-  // (Those pinned first, latest first as the rest — as the side list has them, 11-04.)
-  const list = [...inOrder.filter((e) => pins.includes(e.key)), ...inOrder.filter((e) => !pins.includes(e.key))]
-  // (Its state as the lists place it: one done or at rest with commands left running is at work — review batch4.)
-  const stateOf = (e: Entry) => (e.row?.status !== 'blocked' && (e.row ? cmdsOf(e.row) : tmuxCmdsOf(e)) ? 'working' : e.row?.status)
-  const n = (st: string) => entries.filter((e) => stateOf(e) === st).length
-  const waiting = n('blocked')
-  // (Not in order any more — one has come to wait, say, while the list was looked at: put in order at a tap,
-  // not under the finger by itself.)
-  const want = sorted(entries)
-  const stale = want.join('\n') !== list.map((e) => e.key + ' ' + e.s.id).join('\n') // (as shown: those pinned since, first)
-  const working = n('working')
-  const done = n('done')
+  }, [entries, titles, all, pins, onPick])
+  const shown = mine ? rows.filter((r) => r.status === 'blocked' || r.status === 'done') : rows
+  // (Back from a conversation: where it was scrolled to.)
   const box = useRef<HTMLDivElement>(null)
-  // (Back from a conversation: where the list was scrolled to.)
   useLayoutEffect(() => {
     const el = box.current
     if (el) el.scrollTop = listScroll
     return () => {
-      listScroll = el?.scrollTop ?? 0
+      if (el) listScroll = el.scrollTop
     }
   }, [])
-  // (Put in order again as the page comes back to the front: rows do not
-  // move under the finger while it is looked at, but are in order when
-  // looked at anew — as they are on coming back from a conversation.)
-  useEffect(() => {
-    const on = () => !document.hidden && place()
-    document.addEventListener('visibilitychange', on)
-    return () => document.removeEventListener('visibilitychange', on)
-  })
-  const hosts = hostCount(entries)
-  // (Searched: by its title, where it is, its program; "only mine" still holds.)
-  const labelled = (e: Entry) => {
-    const named = (e.row && isCodex(e.row.a.agent) && e.row.a.thread_title) || keptTitle(titles, e) || (e.row ? paneName(e.row.a) : '')
-    return labelOf(e, named || (e.row ? dirName(e.row.a.cwd) || e.row.a.agent : `${e.s.host_name} · ${sessionWhich(e.s, all)}`), hosts, !!named)
-  }
-  const shown = (mine ? list.filter((e) => stateOf(e) === 'blocked' || stateOf(e) === 'done') : list).filter((e) => {
-    if (!query.trim()) return true
-    const { title, where } = labelled(e)
-    return matchQuery(query, title, where, e.row?.a.agent)
-  })
-  // (The old ones past the first few of their group: behind a tap, unless searched for.)
-  const days = new Map<string, Entry[]>()
-  for (const e of shown) {
-    const d = !pins.includes(e.key) && foldOf.get(e.key + ' ' + e.s.id) // (pinned since: first, never folded)
-    if (d) days.set(d, [...(days.get(d) ?? []), e])
-  }
-  const [open, setOpen] = useState(() => keptNames(OPEN_KEY))
-  const long = query.trim() ? [] : [...days].filter(([, of]) => of.length > foldAt)
-  const hidden = new Set(long.flatMap(([d, of]) => (open.includes(d) ? [] : of.slice(foldAt))))
-  // (Its line: after the last row shown of its group.)
-  const lineAfter = new Map(long.map(([d, of]) => [open.includes(d) ? of[of.length - 1] : of[foldAt - 1], { d, n: of.length - foldAt }]))
-  const fold = (d: string) =>
-    setOpen((o) => {
-      const now = o.includes(d) ? o.filter((x) => x !== d) : [...o, d]
-      keepNames(OPEN_KEY, now)
-      return now
-    })
   return (
-    <div className="agents-list" ref={box}>
-      <div className="agents-list-top">
-        <p className="agents-list-sum">
-          {waiting > 0 && <span className="is-blocked">{t('agents.sumWaiting', { n: waiting })}</span>}
-          {working > 0 && <span className="is-working">{t('agents.sumWorking', { n: working })}</span>}
-          {done > 0 && <span className="is-done">{t('agents.sumDone', { n: done })}</span>}
-          {!waiting && !working && !done && <span>{t('agents.sumAll', { n: entries.length })}</span>}
-        </p>
-        <button type="button" className="btn btn-ghost agents-list-mine" aria-pressed={mine} onClick={() => setMine(!mine)}>
+    <div className="agents-list agents-phone" ref={box}>
+      <div className="agents-phone-top">
+        <button type="button" className="convo-side-new agents-phone-new" onClick={() => window.dispatchEvent(new Event(NEW_AGENT))}>
+          <Plus size={16} aria-hidden="true" />
+          <span>{t('newAgent.title')}</span>
+        </button>
+        <button type="button" className={'agents-phone-mine' + (mine ? ' is-on' : '')} aria-pressed={mine} onClick={() => setMine(!mine)}>
           {t('agents.onlyMine')}
         </button>
-        <button type="button" className="icon-btn agents-list-new" onClick={() => window.dispatchEvent(new Event(NEW_AGENT))} aria-label={t('newAgent.title')} title={t('newAgent.title')}>
-          <Plus size={18} />
-        </button>
       </div>
-      {stale && (
-        <button type="button" className="link-btn agents-list-resort" onClick={() => (place(), box.current?.scrollTo({ top: 0 }))}>
-          {t('agents.sumHint')}
-        </button>
-      )}
-      {(entries.length > SEARCH_FROM || query) && <ListSearch value={query} onChange={onQuery} />}
-      {shown.length === 0 && <p className="agents-list-none">{t(query.trim() ? 'convo.searchNone' : 'agents.noneMine')}</p>}
-      <ul className="agents-list-rows">
-        {shown.filter((e) => !hidden.has(e)).map((e) => {
-          const line = lineAfter.get(e)
-          const r = e.row
-          const status = r?.lost ? 'unknown' : (r?.status ?? 'unknown')
-          const { title, where } = labelled(e)
-          const since = r && !r.lost ? when({ since: r.bg ? r.a.bg_since : r.a.since, status }, now) : ''
-          return (
-            <li key={e.key + ' ' + e.s.id}>
-              <button type="button" className={'agents-list-row is-' + status} onClick={() => onPick(e)}>
-                <AgentIcon program={r?.a.agent} size={36} dot={(r?.bg === 'running' || (r && cmdsOf(r))) && !r.lost || tmuxCmdsOf(e) ? 'bg' : status === 'blocked' || status === 'working' || status === 'done' ? status : undefined} />
-                <span className="agents-list-text">
-                  <span className="agents-list-title">
-                    <span className="agents-list-title-text">{title}</span>
-                    {pins.includes(e.key) && (
-                      <span className="convo-list-pin">
-                        <Pin size={12} aria-hidden="true" />
-                        <span className="sr-only">{t('convo.pinnedRow')}</span>
-                      </span>
-                    )}
-                  </span>
-                  <span className="agents-list-where">{where}</span>
-                  {/* (A third line only for what waits on the person — as the side list.) */}
-                  {status === 'blocked' && r && !r.lost && !r.bg && (() => {
-                    const g = glanceOf(e.s.id, e.pane, status, r.a.since)
-                    return g ? <span className="agents-list-now is-blocked">{g}</span> : null
-                  })()}
-                </span>
-                {/* (Its state in words, in its colour — no group heading says it here — and
-                    how long under it, in words that say which: waited, at work, ago.) */}
-                <span className="agents-list-side">
-                  {(() => {
-                    // (Commands it left running: said as at work in the background, as the side list groups it.)
-                    const cmdsOut = status !== 'blocked' && !!(r && !r.lost ? cmdsOf(r) : !r && tmuxCmdsOf(e))
-                    const word = r?.bg && !r.lost ? t(r.bg === 'running' ? 'convo.status.bg' : 'convo.status.bgStale') : cmdsOut ? t('convo.status.bg') : status === 'blocked' ? t('convo.status.blocked') : status === 'done' ? t('agents.unseen') : status === 'working' ? t('convo.status.working') : ''
-                    return (
-                      <>
-                        {word && <span className={'agents-list-state is-' + ((r?.bg && !r.lost) || cmdsOut ? 'working' : status)}>{word}</span>}
-                        {since && <span className="agents-list-when">{since}</span>}
-                      </>
-                    )
-                  })()}
-                </span>
-              </button>
-              {line && (
-                <button type="button" className="link-btn agents-list-more" aria-expanded={open.includes(line.d)} onClick={() => fold(line.d)}>
-                  {open.includes(line.d) ? t('convo.group.less') : t('convo.group.more', { n: line.n })}
-                </button>
-              )}
-            </li>
-          )
-        })}
-      </ul>
+      {shown.length === 0 && !query.trim() ? <p className="agents-list-none">{t('agents.noneMine')}</p> : <AgentList rows={shown} query={query} onQuery={onQuery} />}
     </div>
   )
 }

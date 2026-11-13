@@ -1344,7 +1344,11 @@ export function ConversationView({
   if (answered && waits) status = t('convo.answered')
   if (agent?.bg) status = t(agent.bg === 'running' ? 'convo.status.bg' : agent.bg === 'stale' ? 'convo.status.bgStale' : 'convo.status.working')
   else if (agent?.cmds && agent.status !== 'blocked') status = agent.cmds.n > 1 ? t('convo.bgCmds', { n: agent.cmds.n }) : t('convo.bgCmds1')
-  const name = agent ? [agent.title, agent.where].filter(Boolean) : []
+  // (Its name as the list names its row — the workspace's or pane's name first, the
+  // session's title under it — so the bar and the list say one thing: 11-13, the
+  // bar had them the other way round. Where the list has no row of it, as before.)
+  const rowShown = side?.rows.find((r) => r.current)
+  const name = rowShown ? [rowShown.title, rowShown.where].filter(Boolean) : agent ? [agent.title, agent.where].filter(Boolean) : []
   // What is read in, as a Markdown file to keep (see convoExport).
   const toast = useToast()
   const exporting = useRef<() => void>(() => {})
@@ -2904,7 +2908,7 @@ function stamp(r: ConvoListRow, now: number): string {
 // reload keeps them so.
 const SIDE_OPEN_KEY = 'corral.convo.sideOpen'
 
-function AgentList({ rows, menus, onPicked, placed, query: given, onQuery, search, showSearch, onSearchLeft, hint }: { rows: ConvoListRow[]; menus?: boolean; onPicked?: () => void; placed?: Map<string, ConvoListRow>; query?: string; onQuery?: (q: string) => void; search?: number; showSearch?: boolean; onSearchLeft?: () => void; hint?: boolean }) {
+export function AgentList({ rows, menus, onPicked, placed, query: given, onQuery, search, showSearch, onSearchLeft, hint }: { rows: ConvoListRow[]; menus?: boolean; onPicked?: () => void; placed?: Map<string, ConvoListRow>; query?: string; onQuery?: (q: string) => void; search?: number; showSearch?: boolean; onSearchLeft?: () => void; hint?: boolean }) {
   // Its rows' menu (menus: the side list's; the switcher's rows have none):
   // one for the list, of the row it was opened on by its key, as that row
   // may go to another group meanwhile and be drawn anew; at its "more"
