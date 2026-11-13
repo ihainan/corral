@@ -3533,49 +3533,59 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	}
 	defer func() { turn() }()
 
-	tmuxTarget := "" // (the pane's own terminal, for whether a process is the pane's)
-	if sess.Persistence == "tmux" {
-		tmuxTarget = b.Pane
+	socket := s.herdrSocks.get(sess.ID)
+	// (A message or a stop to a herdr pane's Codex: its process and thread
+	// told by a short look begun now (codexFront), not a scan of every
+	// process on the host — seconds a press. Where that look does not tell
+	// it for sure: the scan, as before.)
+	var front *convoProc
+	if (what == "send" || what == "interrupt") && sess.Persistence == "herdr" {
+		front = s.codexFront(ctx, sess, socket, b.Pane)
 	}
-	out, err := sshx.Output(ctx, sess.Client(), convoLocateCommand(sess.Persistence, sess.TmuxSession, tmuxTarget), convoLocateMax)
-	if errors.Is(err, sshx.ErrBusy) {
-		reason = "busy"
-		writeError(w, http.StatusTooManyRequests, "busy", "the host is still answering earlier requests")
-		return
-	}
-	// (A scan cut short, by its size or a failure, may leave out the agent
-	// started last: what it found does not decide where keys go.)
-	if err != nil {
-		if signedOut() {
+	if front == nil {
+		tmuxTarget := "" // (the pane's own terminal, for whether a process is the pane's)
+		if sess.Persistence == "tmux" {
+			tmuxTarget = b.Pane
+		}
+		out, err := sshx.Output(ctx, sess.Client(), convoLocateCommand(sess.Persistence, sess.TmuxSession, tmuxTarget), convoLocateMax)
+		if errors.Is(err, sshx.ErrBusy) {
+			reason = "busy"
+			writeError(w, http.StatusTooManyRequests, "busy", "the host is still answering earlier requests")
 			return
 		}
-		reason = "host_error"
-		writeError(w, http.StatusBadGateway, "host_error", "the host did not answer")
-		return
-	}
-	// The process must be the one the pane's conversation shows now (chosen
-	// as reading chooses it): a Claude Code started inside it since, or a
-	// restart, is not the one the press was asked for.
-	l := parseConvoLocate(string(out))
-	socket := s.herdrSocks.get(sess.ID)
-	tty := l.paneTTY // (tmux: the pane's terminal, active or not)
-	front := pickConvoProc(l.procs, sess.Persistence, b.Pane, socket, l.tmuxPID, tty, s.herdrSocks.sid(sess.ID, b.Pane))
-	// A Codex whose log its daemon keeps: the session this gateway gave
-	// that very process when it read its conversation (not the one asked
-	// of it, which is no word on what the pane runs).
-	if front != nil && front.agent == "codex" && front.log == "" {
-		if log, sid := s.convoBound(sess, b.Pane, front.pid, front.start); sid != "" {
-			front.log, front.sid = log, sid
-		} else {
-			s.daemonLog(front, l)
+		// (A scan cut short, by its size or a failure, may leave out the agent
+		// started last: what it found does not decide where keys go.)
+		if err != nil {
+			if signedOut() {
+				return
+			}
+			reason = "host_error"
+			writeError(w, http.StatusBadGateway, "host_error", "the host did not answer")
+			return
 		}
-	}
-	// An OpenCode: the session it is at now, asked anew (it may have gone to
-	// another since it was read; one that cannot be told is not typed to).
-	if front != nil && front.agent == "opencode" {
-		var why string
-		if front.sid, why = s.ocSessionOf(ctx, sess, front, b.Pane, l); why != "" {
-			front.sid = ""
+		// The process must be the one the pane's conversation shows now (chosen
+		// as reading chooses it): a Claude Code started inside it since, or a
+		// restart, is not the one the press was asked for.
+		l := parseConvoLocate(string(out))
+		tty := l.paneTTY // (tmux: the pane's terminal, active or not)
+		front = pickConvoProc(l.procs, sess.Persistence, b.Pane, socket, l.tmuxPID, tty, s.herdrSocks.sid(sess.ID, b.Pane))
+		// A Codex whose log its daemon keeps: the session this gateway gave
+		// that very process when it read its conversation (not the one asked
+		// of it, which is no word on what the pane runs).
+		if front != nil && front.agent == "codex" && front.log == "" {
+			if log, sid := s.convoBound(sess, b.Pane, front.pid, front.start); sid != "" {
+				front.log, front.sid = log, sid
+			} else {
+				s.daemonLog(front, l)
+			}
+		}
+		// An OpenCode: the session it is at now, asked anew (it may have gone to
+		// another since it was read; one that cannot be told is not typed to).
+		if front != nil && front.agent == "opencode" {
+			var why string
+			if front.sid, why = s.ocSessionOf(ctx, sess, front, b.Pane, l); why != "" {
+				front.sid = ""
+			}
 		}
 	}
 	if front == nil || front.pid != b.PID || front.start != b.Start || front.sid != b.Session {

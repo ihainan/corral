@@ -57,7 +57,7 @@ func TestCodexName(t *testing.T) {
 func TestParseCodexPanes(t *testing.T) {
 	const a = "01a1cd3b-8a27-75f1-ba56-dd9f7f22cd01"
 	const b = "01a1cd3b-8685-7b23-9bfc-b218af59d6d1"
-	rec := func(f ...string) string { return strings.Join(f, "\x1f") + "\x00" }
+	rec := func(f ...string) string { return strings.Join(append(f, "1"), "\x1f") + "\x00" }
 	out := rec("w2:p1", "965934", "69873389", "1794460425000", "/home/u/AI", a, "/home/u/.codex/sessions/2026/11/12/rollout-2026-11-12T08-49-53-"+a+".jsonl", "", "[Image #1] 检查红圈", "first") +
 		rec("w3:p1", "100", "200", "0", "/home/u/AI", b, "/home/u/.codex/sessions/x/rollout-1-"+a+".jsonl", "named", "t", "f") + // (a log of another thread)
 		rec("w4:p1", "101", "201", "0", "/x", b, "/home/u/.codex/sessions/../../etc/rollout-1-"+b+".jsonl", "", "", "") + // (a path leaving its folder)
@@ -68,7 +68,7 @@ func TestParseCodexPanes(t *testing.T) {
 		rec("w8:p1", "0", "2", "0", "/x", a, "", "", "", "") + // (no process)
 		"w9:p1\x1fshort\x00"
 	got := parseCodexPanes(out)
-	if w := got["w2:p1"]; w.PID != 965934 || w.Start != 69873389 || w.Started != 1794460425000 || w.Thread != a || !strings.HasSuffix(w.Path, a+".jsonl") || w.Cwd != "/home/u/AI" {
+	if w := got["w2:p1"]; !w.FG || w.PID != 965934 || w.Start != 69873389 || w.Started != 1794460425000 || w.Thread != a || !strings.HasSuffix(w.Path, a+".jsonl") || w.Cwd != "/home/u/AI" {
 		t.Fatalf("w2: %+v", w)
 	}
 	if got["w3:p1"].Path != "" || got["w4:p1"].Path != "" || got["w5:p1"].Path == "" || got["w6:p1"].Thread != "" {

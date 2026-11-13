@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ihainan/corral/internal/herdr"
 	"github.com/ihainan/corral/internal/sshx"
 	"github.com/ihainan/corral/internal/term"
 )
@@ -38,6 +39,7 @@ type codexPane struct {
 	Name       string // Codex's database: the thread's name, title, first message ("" none)
 	Title      string
 	First      string
+	FG         bool // in front on its terminal: what is typed there reaches it
 	// Several: the pane runs more than one interactive Codex (one inside
 	// another's command, say): which the pane shows is not told.
 	Several bool
@@ -52,7 +54,8 @@ exec python3 -I -c ` + sshx.QuoteShell(codexPanesScript) + ` ` + sshx.QuoteShell
 }
 
 // (A record: pane, pid, start, started ms, cwd, thread, log, name, title,
-// first message; split by \x1f, ended by \0. The database: the newest
+// first message, in front ("1": its group the terminal's foreground);
+// split by \x1f, ended by \0. The database: the newest
 // state_<n>.sqlite of its CODEX_HOME, read only; the log, the one it has
 // open, else the database's rollout_path, else the newest of
 // sessions/*/*/*/rollout-*-<thread>.jsonl.)
@@ -100,7 +103,9 @@ for d in os.listdir('/proc'):
             args = [a.decode('utf-8', 'replace') for a in f.read().split(b'\0')[1:]]
         with open(p + '/stat') as f:
             st = f.read()
-        start = int(st[st.rindex(') ') + 2:].split()[19])
+        rest = st[st.rindex(') ') + 2:].split()
+        start = int(rest[19])
+        fg = '1' if rest[2] == rest[5] else '0'  # (its group the terminal's in front)
         cwd = os.readlink(p + '/cwd')
     except (OSError, ValueError, IndexError):
         continue
@@ -133,7 +138,7 @@ for d in os.listdir('/proc'):
             if m:
                 opened.append((t, m.group(0), l))
     started = (btime * 1000 + start * 1000 // hz) if hz and btime else 0
-    found.append([pane, d, str(start), str(started), cwd, home, tid, opened])
+    found.append([pane, d, str(start), str(started), cwd, home, tid, opened, fg])
 def db_of(home):
     best, n = None, -1
     try:
@@ -158,7 +163,7 @@ def row_of(con, tid):
         return None
 def subagent(row):
     return bool(row) and ((row[4] or '').startswith('{') or (row[5] or '') in ('guardian_review', 'subagent'))
-for pane, pid, start, started, cwd, home, tid, opened in sorted(found, key=lambda f: f[:6]):
+for pane, pid, start, started, cwd, home, tid, opened, fg in sorted(found, key=lambda f: f[:6]):
     name = title = first = log = ''
     if home not in dbs:
         db = db_of(home)
@@ -195,7 +200,7 @@ for pane, pid, start, started, cwd, home, tid, opened in sorted(found, key=lambd
             logs = glob.glob(glob.escape(home) + '/sessions/*/*/*/rollout-*-' + tid + '.jsonl')
             if logs:
                 log = max(logs, key=lambda l: os.stat(l).st_mtime)
-    out.write('\x1f'.join([pane, pid, start, started, clean(cwd), tid, clean(log), clean(name), clean(title), clean(first)]).encode('utf-8', 'replace') + b'\0')
+    out.write('\x1f'.join([pane, pid, start, started, clean(cwd), tid, clean(log), clean(name), clean(title), clean(first), fg]).encode('utf-8', 'replace') + b'\0')
 `
 
 // codexLogOf: a thread's log as the host named it, where it is one: an
@@ -216,7 +221,7 @@ func parseCodexPanes(out string) map[string]codexPane {
 	got := map[string]codexPane{}
 	for _, rec := range strings.Split(out, "\x00") {
 		f := strings.Split(rec, "\x1f")
-		if len(f) != 10 || !herdrPaneID.MatchString(f[0]) {
+		if len(f) != 11 || !herdrPaneID.MatchString(f[0]) {
 			continue
 		}
 		pid, err1 := strconv.ParseInt(f[1], 10, 64)
@@ -225,7 +230,7 @@ func parseCodexPanes(out string) map[string]codexPane {
 		if err1 != nil || err2 != nil || pid <= 0 || start <= 0 {
 			continue
 		}
-		c := codexPane{PID: pid, Start: start, Started: max(started, 0), Cwd: f[4], Name: f[7], Title: f[8], First: f[9]}
+		c := codexPane{PID: pid, Start: start, Started: max(started, 0), Cwd: f[4], Name: f[7], Title: f[8], First: f[9], FG: f[10] == "1"}
 		if convoUUID.MatchString(f[5]) {
 			c.Thread = f[5]
 			c.Path = codexLogOf(f[6], c.Thread)
@@ -268,12 +273,18 @@ type codexPaneLook struct {
 // of: what the host says of the Codexes of sess's herdr server (socket),
 // from a look begun within codexPanesTTL, or one begun now.
 func (c *codexPaneLooks) of(ctx context.Context, sess *term.Session, socket string) (map[string]codexPane, error) {
+	return c.since(ctx, sess, socket, time.Now().Add(-codexPanesTTL))
+}
+
+// since: as of, from a look begun no earlier than after (one begun now
+// where the last was before it).
+func (c *codexPaneLooks) since(ctx context.Context, sess *term.Session, socket string, after time.Time) (map[string]codexPane, error) {
 	c.mu.Lock()
 	if c.by == nil {
 		c.by = map[string]*codexPaneLook{}
 	}
 	l := c.by[sess.ID]
-	if l == nil || time.Since(l.at) > codexPanesTTL {
+	if l == nil || l.at.Before(after) {
 		l = &codexPaneLook{at: time.Now(), done: make(chan struct{})}
 		c.by[sess.ID] = l
 		// (Not the asker's context: another may share it.)
@@ -341,6 +352,42 @@ func codexTitleAgrees(title, cwd, name string) bool {
 // it found, no other pane at that thread; the pane's title is of that
 // thread (not of one begun or resumed in it since). Else false: the scan
 // tells it, as before.
+// codexPaneSure: pane's Codex, as a look found it, where it tells it for
+// sure (see locateCodexFast): one interactive Codex there, at a thread no
+// other pane is at, with its log; the pane's title (hp, herdr's) of that
+// thread.
+func codexPaneSure(panes map[string]codexPane, pane string, hp herdr.Pane) (codexPane, bool) {
+	c, ok := panes[pane]
+	if !ok || c.Several || c.Thread == "" || c.Path == "" || !codexTitleAgrees(hp.Title, c.Cwd, c.Name) {
+		return codexPane{}, false
+	}
+	for p, o := range panes {
+		if p != pane && o.Thread == c.Thread {
+			return codexPane{}, false // (two at one thread: which is which, the scan tells)
+		}
+	}
+	return c, true
+}
+
+// codexFront: the process a press to pane's Codex goes to, told by a look
+// begun now (not one kept from before the press), where it is told for
+// sure; nil, the scan tells it.
+func (s *Server) codexFront(ctx context.Context, sess *term.Session, socket, pane string) *convoProc {
+	hp, ok := s.herdrSocks.paneOf(sess.ID, pane)
+	if !ok || !isCodexAgent(hp.Agent) || socket == "" {
+		return nil
+	}
+	panes, err := s.codexPanes.since(ctx, sess, socket, time.Now())
+	if err != nil {
+		return nil
+	}
+	c, ok := codexPaneSure(panes, pane, hp)
+	if !ok {
+		return nil
+	}
+	return &convoProc{pid: c.PID, start: c.Start, fg: c.FG, started: c.Started, sid: c.Thread, log: c.Path, agent: "codex", herdrPane: pane, herdrSocket: socket, cwd: c.Cwd}
+}
+
 func (s *Server) locateCodexFast(ctx context.Context, sess *term.Session, st *convoState, pane string) bool {
 	hp, ok := s.herdrSocks.paneOf(sess.ID, pane)
 	socket := s.herdrSocks.get(sess.ID)
@@ -351,14 +398,9 @@ func (s *Server) locateCodexFast(ctx context.Context, sess *term.Session, st *co
 	if err != nil {
 		return false
 	}
-	c, ok := panes[pane]
-	if !ok || c.Several || c.Thread == "" || c.Path == "" || !codexTitleAgrees(hp.Title, c.Cwd, c.Name) {
+	c, ok := codexPaneSure(panes, pane, hp)
+	if !ok {
 		return false
-	}
-	for p, o := range panes {
-		if p != pane && o.Thread == c.Thread {
-			return false // (two at one thread: which is which, the scan tells)
-		}
 	}
 	b := &convoBind{PID: c.PID, Start: c.Start, Session: c.Thread, Agent: "codex", Pane: pane, started: c.Started}
 	if was := st.bind; was != nil && was.PID == b.PID && was.Start == b.Start {
