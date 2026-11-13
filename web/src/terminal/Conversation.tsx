@@ -482,6 +482,8 @@ export function ConversationView({
   // (Long: by how long since its log last grew, as the gateway counts it;
   // not while reading fails, which is said otherwise.)
   const quietLong = working && !convo.failing && convo.quietAt !== undefined && now - convo.quietAt >= QUIET_LONG ? now - convo.quietAt : 0
+  // (Subagents it sent off still out, as its log says: what it waits on.)
+  const agentsOut = working ? (convo.running?.filter((r) => r.kind === 'agent').length ?? 0) : 0
   // How long this turn has gone on: from the last thing the person wrote.
   const lastUser = useMemo(() => {
     for (let i = convo.entries.length - 1; i >= 0; i--) if (convo.entries[i].role === 'user' && !convo.entries[i].mid && !convo.entries[i].gone) return ms(convo.entries[i].ts)
@@ -1181,11 +1183,16 @@ export function ConversationView({
           </Fragment>
         ))}
         {pendingList}
-        {working && (quiet || quietLong > 0) && (
+        {working && (agentsOut > 0 || quiet || quietLong > 0) && (
           <p className="convo-working">
-            {quietLong ? t('convo.quietLong', { d: quietLong < 3600000 ? t('convo.for.m', { n: Math.floor(quietLong / 60000) }) : t('convo.for.h', { n: Math.floor(quietLong / 3600000) }) }) : t('convo.quiet')}
+            {/* (Its turn waits on subagents it sent off: they are listed below, each to be opened — not "nothing new".) */}
+            {agentsOut > 0
+              ? t('convo.waitingAgents', { n: agentsOut })
+              : quietLong
+                ? t('convo.quietLong', { d: quietLong < 3600000 ? t('convo.for.m', { n: Math.floor(quietLong / 60000) }) : t('convo.for.h', { n: Math.floor(quietLong / 3600000) }) })
+                : t('convo.quiet')}
             {/* (Long without a word: where to see what it shows meanwhile.) */}
-            {quietLong > 0 && (
+            {quietLong > 0 && agentsOut === 0 && (
               <button type="button" className="link-btn convo-working-act" onClick={onShowTerminal}>
                 {t('convo.lookTerminal')}
               </button>

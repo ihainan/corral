@@ -77,6 +77,9 @@ type Claude struct {
 	// ranOut: told to have ended before what set it going was read (the
 	// log read from its middle, or a notice that came first).
 	ranOut map[string]bool
+	// sentFor: what each subagent was sent off for (by its id), so that one
+	// set going again (SendMessage resumes it) says it, not its id.
+	sentFor map[string]string
 	// wrote: the files the agent itself wrote, a shell command's counted.
 	// Claude Code says a file changed whenever its modification time did,
 	// which is mostly the agent's own doing: only a change it did not
@@ -2124,32 +2127,50 @@ func (c *Claude) setGoing(t *Tool, account json.RawMessage, at, said string) {
 		Agent      string `json:"agentId"`
 		Async      bool   `json:"isAsync"`
 		Status     string `json:"status"`
+		Resumed    string `json:"resumedAgentId"` // (SendMessage to a subagent that had ended: it works again)
 	}
 	if json.Unmarshal(account, &a) != nil {
 		return
 	}
 	id, kind := "", "cmd"
+	resumed := false
 	switch {
 	case a.Background != "":
 		id = a.Background
 	case a.Async && a.Agent != "" && a.Status != "completed":
 		id, kind = a.Agent, "agent"
+	case a.Resumed != "" && t.Name == "SendMessage":
+		id, kind, resumed = a.Resumed, "agent", true
 	}
 	id = clip(id, maxID)
 	if id == "" {
 		return
 	}
-	// (Told it had ended before this came: it is over, not going.)
+	if kind == "agent" && !resumed && t.Title != "" {
+		if c.sentFor == nil {
+			c.sentFor = map[string]string{}
+		}
+		if len(c.sentFor) < maxRunning*4 {
+			c.sentFor[id] = t.Title
+		}
+	}
+	// (Told it had ended before this came: it is over, not going. Not one
+	// set going again: what ended before that was its run before.)
 	if c.ranOut[id] {
 		delete(c.ranOut, id)
-		return
+		if !resumed {
+			return
+		}
 	}
 	if _, there := c.running[id]; there || len(c.running) >= maxRunning {
 		return
 	}
 	what := t.Title
-	if what == "" {
-		what = t.Detail
+	if what == "" || resumed {
+		what = t.Detail // (a resumed one: what it was sent now, unless what it was sent off for is known)
+		if s := c.sentFor[id]; resumed && s != "" {
+			what = s
+		}
 	}
 	r := Running{ID: id, What: clip(clean(what), maxTitle), Kind: kind, Time: at}
 	if kind == "cmd" {

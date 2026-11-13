@@ -1736,3 +1736,52 @@ func TestClaudeRefusedOnceSaid(t *testing.T) {
 		t.Fatalf("said %q", said)
 	}
 }
+
+// A subagent sent off, ended, then set going again by a message (SendMessage
+// resumes it, Claude Code 2.1.322): going again, told by what it was sent
+// off for, till it ends again. Its end before the resume — even one read
+// with no start (the log read from its middle) — does not hold it back.
+func TestClaudeRunningResumed(t *testing.T) {
+	notice := func(uuid, status string) string {
+		return `{"type":"attachment","uuid":"` + uuid + `","attachment":{"type":"queued_command","commandMode":"task-notification","prompt":"<task-notification>\n<task-id>ag1</task-id>\n<status>` + status + `</status>\n<summary>Agent \"x\" finished</summary>\n</task-notification>"}}`
+	}
+	resume := func(n string) []string {
+		return []string{
+			`{"type":"assistant","uuid":"s` + n + `","message":{"content":[{"type":"tool_use","id":"m` + n + `","name":"SendMessage","input":{"to":"ag1","summary":"第 ` + n + ` 轮意见","message":"按意见改"}}]}}`,
+			`{"type":"user","uuid":"sr` + n + `","timestamp":"2026-11-13T04:37:3` + n + `Z","message":{"content":[{"type":"tool_result","tool_use_id":"m` + n + `","content":"{\"success\":true}"}]},"toolUseResult":{"success":true,"message":"Resuming agent ag1","resumedAgentId":"ag1","revivedAgentId":"ag1"}}`,
+		}
+	}
+	c := NewClaude()
+	c.Feed(lines(
+		`{"type":"assistant","uuid":"a1","message":{"content":[{"type":"tool_use","id":"t1","name":"Agent","input":{"description":"起草接口规格","prompt":"去写"}}]}}`,
+		`{"type":"user","uuid":"r1","timestamp":"2026-11-13T03:00:00Z","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"Async agent launched"}]},"toolUseResult":{"isAsync":true,"agentId":"ag1","status":"async_launched"}}`,
+		notice("n1", "completed"),
+	))
+	if len(c.Running()) != 0 {
+		t.Fatalf("ended: %+v", c.Running())
+	}
+	c.Feed(lines(resume("1")...))
+	if r := c.Running(); len(r) != 1 || r[0].ID != "ag1" || r[0].Kind != "agent" || r[0].What != "起草接口规格" || r[0].Time != "2026-11-13T04:37:31Z" {
+		t.Fatalf("resumed: %+v", c.Running())
+	}
+	c.Feed(lines(notice("n2", "completed")))
+	if len(c.Running()) != 0 {
+		t.Fatalf("ended again: %+v", c.Running())
+	}
+	// Read from its middle: its end seen with no start, then a resume — what
+	// it was sent now says it.
+	d := NewClaude()
+	d.Feed(lines(append([]string{notice("n3", "completed")}, resume("2")...)...))
+	if r := d.Running(); len(r) != 1 || r[0].What != "第 2 轮意见" {
+		t.Fatalf("resumed after an end with no start: %+v", d.Running())
+	}
+	// A message to a teammate that resumes nothing sets nothing going.
+	e := NewClaude()
+	e.Feed(lines(
+		`{"type":"assistant","uuid":"x1","message":{"content":[{"type":"tool_use","id":"x","name":"SendMessage","input":{"to":"ai-ee","message":"hi"}}]}}`,
+		`{"type":"user","uuid":"x2","message":{"content":[{"type":"tool_result","tool_use_id":"x","content":"sent"}]},"toolUseResult":{"success":true,"msg_id":"m1"}}`,
+	))
+	if len(e.Running()) != 0 {
+		t.Fatalf("a plain message: %+v", e.Running())
+	}
+}
