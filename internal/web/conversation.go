@@ -326,9 +326,10 @@ meta_of() { head -n 1 "$1" 2>/dev/null | head -c 8192 | awk 'match($0, /"payload
 # so that the Codex in a pane can be told which of them is its own.
 for d in $codexes; do
   case $(codex_sub "${d#/proc/}") in app-server) ;; *) continue;; esac
+  codex_home "$d"
   for fd in "$d"/fd/*; do
     l=$(readlink "$fd" 2>/dev/null) || continue
-    case $l in *"$nl"*) continue;; "$HOME"/.codex/sessions/*/rollout-*.jsonl) ;; *) continue;; esac
+    case $l in *"$nl"*) continue;; "$cxhome"/sessions/*/rollout-*.jsonl) ;; *) continue;; esac
     codex_subagent "$l" && continue
     printf 'cand=%s\ncandcwd=%s\ncandts=%s\ncandmtime=%s\0' "$l" "$(meta_of "$l" cwd)" "$(meta_of "$l" timestamp)" "$(stat -c %Y "$l" 2>/dev/null)"
   done
@@ -2817,15 +2818,30 @@ front() {
       # when it began; here only that it is still one a Codex of ours runs.)
       case $cs in ''|resume|fork) ;; *) return 1;; esac
       held=
-      for dd in /proc/[0-9]*; do
-        [ -O "$dd" ] && [ "$(head -c 16 "$dd/comm" 2>/dev/null)" = codex ] || continue
-        for fd in "$dd"/fd/*; do
-          l=$(readlink "$fd" 2>/dev/null) || continue
-          case $l in "$HOME"/.codex/sessions/*/rollout-*.jsonl)
-            codex_log_sid "$l"; [ "$cxid" = "$sid" ] && { held=1; break; };; esac
+      codex_home "/proc/$pid"; ownh=$cxhome
+      # (The logs held open under it, by a process of the user's, found in
+      # one pass — not a process started for every process and every file
+      # it holds, seconds a check on a busy host; then whether the one that
+      # holds it is a Codex.)
+      # (A find without -lname — BusyBox's, say — each process as before.)
+      if find /proc/self/fd -maxdepth 1 -lname / >/dev/null 2>&1; then
+        for hf in $(find /proc/[0-9]*/fd -maxdepth 1 -user "$(id -u)" -lname "$ownh/sessions/*/rollout-*.jsonl" 2>/dev/null); do
+          l=$(readlink "$hf" 2>/dev/null) || continue
+          codex_log_sid "$l"; [ "$cxid" = "$sid" ] || continue
+          hp=${hf#/proc/}; hp=${hp%%/*}
+          { IFS= read -r hc <"/proc/$hp/comm"; } 2>/dev/null && [ "$hc" = codex ] && { held=1; break; }
         done
-        [ -n "$held" ] && break
-      done
+      else
+        for dd in /proc/[0-9]*; do
+          [ -O "$dd" ] && [ "$(head -c 16 "$dd/comm" 2>/dev/null)" = codex ] || continue
+          for fd in "$dd"/fd/*; do
+            l=$(readlink "$fd" 2>/dev/null) || continue
+            case $l in "$ownh"/sessions/*/rollout-*.jsonl)
+              codex_log_sid "$l"; [ "$cxid" = "$sid" ] && { held=1; break; };; esac
+          done
+          [ -n "$held" ] && break
+        done
+      fi
       [ -n "$held" ] || return 1
     else
       codex_log_sid "$lg"; [ "$cxid" = "$sid" ] || return 1
@@ -4389,7 +4405,14 @@ codex_ep() { # pid
 // held less long (a subagent's a moment, its log opened with it; or one
 // begun anew: not told yet), or two taken in the same second.
 // (Codex 0.164, as a real one was seen to: plans/5d3b-codex-new-compact.md.)
-const codexFdsSh = `# The durable session ID, not the writer segment appended after rewind.
+const codexFdsSh = `# Where a Codex keeps its sessions, logs and locks: its own CODEX_HOME
+# (of the process under /proc, $1), else ~/.codex. (cxhome)
+codex_home() {
+  cxhome=$(tr '\0' '\n' <"$1/environ" 2>/dev/null | sed -n 's/^CODEX_HOME=//p' | head -n 1)
+  [ -n "$cxhome" ] || cxhome=$HOME/.codex
+  cxhome=${cxhome%/}
+}
+# The durable session ID, not the writer segment appended after rewind.
 codex_subagent() {
   head -c 4096 "$1" 2>/dev/null | grep -Eq '"thread_source": *"(subagent|guardian_review)"|"source": *\{ *"subagent"[ ]*:'
 }
@@ -4406,17 +4429,18 @@ codex_log_sid() {
 }
 codex_fds() {
   cxlog= cxany= cxpend= cxnew= _locks= _logs=
+  codex_home "$1"; _cxh=$cxhome
   _nl=$(printf '\nx'); _nl=${_nl%x}
   _now=$(date +%s)
   for _f in "$1"/fd/*; do
     _l=$(readlink "$_f" 2>/dev/null) || continue
     case $_l in *"$_nl"*) continue;; */rollout-*.jsonl) cxany=1;; esac
     case $_l in
-    "$HOME"/.codex/sessions/*/rollout-*.jsonl)
+    "$_cxh"/sessions/*/rollout-*.jsonl)
       _logs="$_logs ${_l%.jsonl} "
       codex_subagent "$_l" && continue
       { [ -z "$cxlog" ] || [ "$_l" -nt "$cxlog" ]; } && cxlog=$_l ;;
-    "$HOME"/.codex/thread-writer-locks/*.lock)
+    "$_cxh"/thread-writer-locks/*.lock)
       _i=${_l##*/}; _i=${_i%.lock}
       case $_i in *[!0-9a-fA-F-]*) ;; ????????-????-????-????-????????????)
         _t=$(stat -c %Y "$_l" 2>/dev/null) && _locks="$_locks $_i:$_t" ;; esac ;;
