@@ -173,6 +173,18 @@ for pane, pid, start, started, cwd, home, tid, opened in sorted(found, key=lambd
         if not subagent(row_of(con, otid)):
             tid, log = otid, l
             break
+    # (Begun with no thread named and none open — run against the daemon:
+    # the thread of its folder begun since it started that was written to
+    # last, not a subagent's. The title, compared by the gateway, says if it
+    # is the one shown.)
+    if not tid and con is not None and int(started) > 0:
+        try:
+            for cand in con.execute("SELECT id, source, thread_source FROM threads WHERE cwd = ? AND created_at >= ? ORDER BY updated_at DESC LIMIT 20", (cwd, int(started) // 1000 - 5)):
+                if not ((cand[1] or '').startswith('{') or (cand[2] or '') in ('guardian_review', 'subagent')):
+                    tid = cand[0]
+                    break
+        except sqlite3.Error:
+            pass
     if tid:
         row = row_of(con, tid)
         if row:
