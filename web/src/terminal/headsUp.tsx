@@ -82,7 +82,7 @@ export function HeadsUpCard({ note, onShowTerminal }: { note: HeadsUpNote; onSho
               {t(open ? 'headsUp.less' : note.kind === 'explained' ? 'headsUp.answer' : 'headsUp.more')}
             </button>
           )}
-          <span className="convo-headsup-hint">{t('headsUp.where')}</span>
+          <span className="convo-headsup-hint">{t(note.kind === 'explained' ? 'headsUp.whereExplained' : 'headsUp.where')}</span>
           <button type="button" className="link-btn" onClick={onShowTerminal}>
             {t('convo.lookTerminal')}
           </button>
