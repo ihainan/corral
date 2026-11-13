@@ -159,19 +159,29 @@ func (b *b64Strip) end(dst []byte) []byte {
 // elsewhere it prints the record "noproc". Fixed script; the mode and the
 // validated tmux session name are its only arguments.
 func convoLocateCommand(mode, tmuxName, tmuxPane string) string {
-	return convoLocateWith(mode, tmuxName, tmuxPane, "")
+	return convoLocateWith(mode, tmuxName, tmuxPane, "", "")
+}
+
+// convoLocateOpenCodeCommand is convoLocateCommand of the user's OpenCode
+// processes only: no Claude Code's session files read, no Codex's open
+// files — most of a scan's time on a host of many Codexes, and nothing an
+// OpenCode's pane is told by. (What tells which of its database's sessions
+// it is at, and whether another OpenCode runs where it does, is all among
+// OpenCode's.)
+func convoLocateOpenCodeCommand(mode, tmuxName string) string {
+	return convoLocateWith(mode, tmuxName, "", "", "opencode")
 }
 
 // convoLocateTimesCommand is convoLocateCommand that also says when each
 // JSON log was last written by its records (logts): reading their ends,
 // which the list's times ask for now and then, and nothing else does.
 func convoLocateTimesCommand(mode, tmuxName string) string {
-	return convoLocateWith(mode, tmuxName, "", "times")
+	return convoLocateWith(mode, tmuxName, "", "times", "")
 }
 
-func convoLocateWith(mode, tmuxName, tmuxPane, times string) string {
+func convoLocateWith(mode, tmuxName, tmuxPane, times, only string) string {
 	script := `PATH="$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
-times=$4
+times=$4 only=$5
 if [ "$1" = tmux ]; then
   t=$(tmux -u display-message -p -t "=$2:" '#{pane_id} #{pid} #{pane_tty} #{pane_title}' 2>/dev/null | head -c 800 | tr -d '\n')
   printf 'tmux=%s\0' "$t"
@@ -292,7 +302,9 @@ json_num() {
   v=${r%%[!0-9]*}
 }
 # Claude Code: each process's session file names its session.
+# (only=opencode: of OpenCode's processes only, see convoLocateOpenCodeCommand.)
 for f in "$HOME"/.claude/sessions/*.json; do
+  [ "$only" = opencode ] && break
   [ -f "$f" ] || continue
   pid=${f##*/}; pid=${pid%.json}
   case $pid in ''|*[!0-9]*) continue;; esac
@@ -319,6 +331,7 @@ for d in /proc/[0-9]*; do
   while :; do case $x in *"$nl") x=${x%"$nl"};; *) break;; esac; done # (as $(…) would leave it)
   case $x in codex) codexes="$codexes $d";; opencode) opencodes="$opencodes $d";; esac
 done
+[ "$only" = opencode ] && codexes=
 # What a log says of itself, from its head: where it was begun and when.
 # (What it says of itself is in its first line's payload: the line's own
 # timestamp is of when it was written, which a rewrite moves on.)
@@ -444,7 +457,7 @@ for d in $opencodes; do
   rec "$pid" "$st" "$fg" "$st" 00000000-0000-0000-0000-000000000000 "$log" opencode "$via"
 done
 exit 0`
-	return "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(mode) + " " + sshx.QuoteShell(tmuxName) + " " + sshx.QuoteShell(tmuxPane) + " " + sshx.QuoteShell(times)
+	return "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(mode) + " " + sshx.QuoteShell(tmuxName) + " " + sshx.QuoteShell(tmuxPane) + " " + sshx.QuoteShell(times) + " " + sshx.QuoteShell(only)
 }
 
 // convoScreenCommand prints the pane's screen as it is now. Fixed script;
@@ -2100,7 +2113,19 @@ func (s *Server) locateScan(ctx context.Context, sess *term.Session, st *convoSt
 		after = st.scanAfter // (review494: begun after the press that found another process, however recent one before is)
 	}
 	st.scanAfter = time.Time{}
-	out, at, looked, err := s.convoScans.run(ctx, sess, convoLocateCommand(sess.Persistence, sess.TmuxSession, ""), after)
+	// (A herdr pane herdr says runs OpenCode: of OpenCode's processes only,
+	// a fraction of a scan's time. Its OpenCode not among them — another
+	// program there now, herdr not told yet —: the whole scan, as ever.)
+	socket := s.herdrSocks.get(sess.ID)
+	ocOnly := false
+	if hp, ok := s.herdrSocks.paneOf(sess.ID, pane); ok && sess.Persistence == "herdr" && pane != "" && socket != "" && isOpenCodeAgent(hp.Agent) {
+		ocOnly = true
+	}
+	cmd := convoLocateCommand(sess.Persistence, sess.TmuxSession, "")
+	if ocOnly {
+		cmd = convoLocateOpenCodeCommand(sess.Persistence, sess.TmuxSession)
+	}
+	out, at, looked, err := s.convoScans.run(ctx, sess, cmd, after)
 	// (The script ends with exit 0: an error is a scan cut short, by its size
 	// or a failure, which may leave out the agent started last. What was
 	// found before stays, rather than a part of it.)
@@ -2108,6 +2133,14 @@ func (s *Server) locateScan(ctx context.Context, sess *term.Session, st *convoSt
 		return err
 	}
 	l := parseConvoLocate(string(out))
+	if ocOnly && !l.noProc && !slices.ContainsFunc(l.procs, func(p convoProc) bool {
+		return p.agent == "opencode" && p.herdrPane == pane && p.herdrSocket == socket
+	}) {
+		if out, at, looked, err = s.convoScans.run(ctx, sess, convoLocateCommand(sess.Persistence, sess.TmuxSession, ""), after); err != nil {
+			return err
+		}
+		l = parseConvoLocate(string(out))
+	}
 	// (The Codexes the daemons' conversations are of, seen running, whatever
 	// the pane runs.)
 	s.convoClaimed.seeAlive(l, aliveCodex(l), l.now())

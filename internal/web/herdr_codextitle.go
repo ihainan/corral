@@ -76,6 +76,9 @@ var homeDir = regexp.MustCompile(`^(?:/home/[^/]+|/Users/[^/]+|/root)$`)
 
 func isCodexAgent(agent string) bool { return strings.Contains(strings.ToLower(agent), "codex") }
 
+// isOpenCodeAgent: herdr says the pane runs OpenCode (as the page tells it: agents.ts isOpenCode).
+func isOpenCodeAgent(agent string) bool { return strings.Contains(strings.ToLower(agent), "opencode") }
+
 // codexName: the name a thread is shown by, of what Codex's database has
 // of it — its name, else its title, else its first message: the first line
 // with words in it, without the placeholders of images and the like, cut
