@@ -196,7 +196,11 @@ const labelOf = (e: Entry, said: string, hosts: number, named = true): { title: 
   if (!r || (!ws && !own)) return { title: said, where: whereOf(e, hosts) }
   const host = hosts > 1 ? e.s.host_name : ''
   const title = own || ws
-  return { title, where: [host, own ? ws : '', tabOf(r), named && said !== title ? said : '', agentMark(r.a.agent) ? '' : r.a.agent].filter(Boolean).join(' · ') }
+  const where = [host, own ? ws : '', tabOf(r), named && said !== title ? said : '', agentMark(r.a.agent) ? '' : r.a.agent].filter(Boolean)
+  // (Nothing else to say under it — a Codex not named, say, its first message
+  // not used for a name — the folder it runs in, rather than an empty line.)
+  if (!where.length && said && said !== title) where.push(said)
+  return { title, where: where.join(' · ') }
 }
 
 // Commands its agent left running in the background, as its row says them:

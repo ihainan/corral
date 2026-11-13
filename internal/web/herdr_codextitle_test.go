@@ -238,3 +238,28 @@ func TestCodexPressSure(t *testing.T) {
 		}
 	}
 }
+
+// A Codex resumed (codex resume <id>) or holding its log: its time is its
+// log's, as the daemon holds it; not one told by a guess, nor one whose
+// time is known already, nor one of several.
+func TestResumedWrote(t *testing.T) {
+	cands := []convoCand{{log: "/h/.codex/sessions/a.jsonl", wrote: 500}, {log: "/h/.codex/sessions/b.jsonl", wrote: 700}, {log: "/h/.codex/sessions/c.jsonl", wrote: 900}}
+	at := map[string]int64{"w4:p1": 100}
+	resumedWrote(at, map[string]codexPane{
+		"w1:p1": {Path: "/h/.codex/sessions/a.jsonl", Src: "argv"},
+		"w2:p1": {Path: "/h/.codex/sessions/b.jsonl", Src: "fd"},
+		"w3:p1": {Path: "/h/.codex/sessions/c.jsonl", Src: "db"},
+		"w4:p1": {Path: "/h/.codex/sessions/c.jsonl", Src: "argv"},
+		"w5:p1": {Path: "/h/.codex/sessions/c.jsonl", Src: "argv", Several: true},
+		"w6:p1": {Path: "/h/.codex/sessions/gone.jsonl", Src: "argv"},
+	}, cands)
+	want := map[string]int64{"w1:p1": 500, "w2:p1": 700, "w4:p1": 100}
+	if len(at) != len(want) {
+		t.Fatalf("got %v", at)
+	}
+	for k, v := range want {
+		if at[k] != v {
+			t.Fatalf("got %v, want %v", at, want)
+		}
+	}
+}

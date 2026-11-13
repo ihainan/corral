@@ -750,6 +750,11 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 						at[p.herdrPane] = w
 					}
 				}
+				pctx, pcancel := context.WithTimeout(ctx, 15*time.Second)
+				if panes, perr := s.codexPanes.of(pctx, sess, socket); perr == nil {
+					resumedWrote(at, panes, found.cands)
+				}
+				pcancel()
 			}
 			if due {
 				times.found(at, time.Now())

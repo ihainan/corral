@@ -636,6 +636,29 @@ func procWrote(p convoProc, cands []convoCand) int64 {
 	return wrote
 }
 
+// resumedWrote gives a Codex pane procWrote left without a time (at: by
+// pane) the time its conversation's log was last written, where the look
+// of its Codex (codexPane) tells that conversation by the log it holds or
+// the one it was resumed with ("codex resume <id>"): a conversation begun
+// before that Codex started, which procWrote does not take, its log held
+// by the app-server daemon. Not by a guess of its folder's ("db").
+func resumedWrote(at map[string]int64, panes map[string]codexPane, cands []convoCand) {
+	wrote := map[string]int64{}
+	for _, c := range cands {
+		if c.wrote > wrote[c.log] {
+			wrote[c.log] = c.wrote
+		}
+	}
+	for pane, c := range panes {
+		if at[pane] > 0 || c.Several || c.Path == "" || (c.Src != "fd" && c.Src != "argv") {
+			continue
+		}
+		if w := wrote[c.Path]; w > 0 {
+			at[pane] = w
+		}
+	}
+}
+
 // unescapeJSON reads a string as JSON wrote it (a path with a quote, a
 // backslash or a newline in it); what is no JSON string is kept as it is.
 func unescapeJSON(s string) string {
