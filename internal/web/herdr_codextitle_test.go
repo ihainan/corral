@@ -222,7 +222,7 @@ func TestCodexPressSure(t *testing.T) {
 		{"named, its title not read now", func() codexPane { p := named; p.titleRead = false; return p }(), false},
 		{"named, its title now another's", func() codexPane { p := named; p.TitleNow = "别的 | AI"; return p }(), false},
 		{"named, another live one of its name", func() codexPane { p := named; p.SameName = 1; return p }(), false},
-		{"named, one unexplained", func() codexPane { p := named; p.Unexplained = 1; return p }(), false},
+		{"named, one unexplained: its title tells", func() codexPane { p := named; p.Unexplained = 1; return p }(), true},
 		{"unnamed, by its resume argument", codexPane{Cwd: "/x/AI", Src: "argv", TitleNow: "AI", titleRead: true}, false},
 		{"unnamed, by its folder", codexPane{Cwd: "/x/AI", Src: "db", TitleNow: "AI", titleRead: true}, false},
 	} {

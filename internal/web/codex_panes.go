@@ -25,8 +25,11 @@ import (
 // per terminal session; looks at once share one.
 
 const (
-	codexPanesTTL = 3 * time.Second
-	codexPanesMax = 128 << 10 // (the host's answer, at most)
+	// codexWeakFirst: a weak binding (see convoState.weak) is checked by the
+	// scan beside this soon after it is made.
+	codexWeakFirst = 3 * time.Second
+	codexPanesTTL  = 3 * time.Second
+	codexPanesMax  = 128 << 10 // (the host's answer, at most)
 )
 
 // codexPane is one interactive Codex of a pane, as the host told it.
@@ -565,8 +568,8 @@ func codexPaneSure(panes map[string]codexPane, pane string, hp herdr.Pane) (code
 // keys to go to without the scan: it has its own log open (a Codex not run
 // against the daemon writes its own: the thread it is at), or its thread has
 // a name its pane's title shows right now (read at the press, not as a
-// snapshot had it), no other live conversation of its folder is of that
-// name, and none is unexplained (begun or resumed in it since). A thread
+// snapshot had it) and no other live conversation of its folder is of that
+// name. A thread
 // told by its resume argument or its folder alone is not: the process it
 // was resumed in may be at another since, which nothing but its screen
 // tells — the scan's.
@@ -574,7 +577,9 @@ func codexPressSure(c codexPane) bool {
 	if c.Src == "fd" {
 		return true
 	}
-	return c.Name != "" && c.titleRead && codexTitleAgrees(c.TitleNow, c.Cwd, c.Name) && c.SameName == 0 && c.Unexplained == 0
+	// (Its title is its thread's now: one gone to since, named or not, would
+	// show its own name or the folder alone.)
+	return c.Name != "" && c.titleRead && codexTitleAgrees(c.TitleNow, c.Cwd, c.Name) && c.SameName == 0
 }
 
 // codexFront: the process a press to pane's Codex goes to, told by a look
@@ -617,7 +622,7 @@ func (s *Server) locateCodexFast(ctx context.Context, sess *term.Session, st *co
 		}
 		b := &convoBind{PID: f.PID, Start: f.Start, Session: convoNoSession, Agent: "codex", Pane: pane, started: f.Started, Via: f.Via}
 		st.bind = b
-		st.weak = true
+		st.weak = true // (looked for again at each read till its first message: see apiConversation's fresh)
 		st.located, st.pane = time.Now(), pane
 		st.guessed = false
 		st.adopt(convoNoSession, "", "codex", convoNoLog)
@@ -627,6 +632,9 @@ func (s *Server) locateCodexFast(ctx context.Context, sess *term.Session, st *co
 	st.bind = b
 	st.weak = c.Src != "fd" // (see convoState.weak)
 	st.located, st.pane = time.Now(), pane
+	if st.weak {
+		st.located = time.Now().Add(codexWeakFirst - convoWeakTTL) // (checked by the scan beside soon, not in 30 s)
+	}
 	st.guessed = false
 	st.adopt(c.Thread, c.Path, "codex", "")
 	return true
