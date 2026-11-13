@@ -51,6 +51,11 @@ func (s *Server) suggestion(w http.ResponseWriter, ctx context.Context, sess *te
 		if c := cardOf(string(res.Out)); c != nil {
 			out["card"] = c
 		}
+		// (Compacting: its log says nothing till it is done, a minute or two
+		// on; the screen says so all along.)
+		if compactingOn(sgr.ReplaceAllString(string(res.Out), "")) {
+			out["compacting"] = true
+		}
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -285,3 +290,15 @@ func (st sgrState) apply(params string) sgrState {
 var sgr = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 
 const maxSuggestion = 500
+
+// compactingNow: Claude Code's spinner line while it compacts the
+// conversation, "✶ Compacting conversation… (12s)" (by /compact or on its
+// own), the mark blinking through the spinner's; gone once it is done
+// ("⎿  Compacted …").
+var compactingNow = regexp.MustCompile(`(?m)^(?:\*|·|✢|✳|✶|✻|✽) Compacting conversation…`)
+
+// compactingOn: whether a screen (without its colours) shows Claude Code
+// compacting the conversation.
+func compactingOn(screen string) bool {
+	return compactingNow.MatchString(screen)
+}

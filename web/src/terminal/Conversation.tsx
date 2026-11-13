@@ -222,6 +222,7 @@ export function ConversationView({
   onForkAt,
   forkWhole,
   onDraft,
+  compacting,
 }: {
   convo: Convo
   agent: ConvoAgent | null
@@ -253,6 +254,7 @@ export function ConversationView({
   forkWhole?: boolean // (all of it can be forked now: its turn over and nothing of it running, as the list says)
   onForkAt?: (at: string | undefined) => void // (a copy of it up to the end of a turn can be started: cut before at, the next message typed; none, all of it)
   onDraft?: (text: string) => void // (words put in its composer, not sent: the session card's requests of the agent)
+  compacting?: boolean // (its screen says it compacts the conversation: its log silent till done)
 }) {
   const working = agent?.status === 'working'
   const waits = agent?.status === 'blocked'
@@ -1320,11 +1322,13 @@ export function ConversationView({
             {/* (Quiet with subagents it sent off still out: it waits on them, listed below, each to be opened — not "nothing new". While it goes on at work itself, it says nothing of them.) */}
             {agentsOut > 0
               ? t('convo.waitingAgents', { n: agentsOut })
-              : quietLong
+              : compacting
+                ? t('convo.compacting')
+                : quietLong
                 ? t('convo.quietLong', { d: quietLong < 3600000 ? t('convo.for.m', { n: Math.floor(quietLong / 60000) }) : t('convo.for.h', { n: Math.floor(quietLong / 3600000) }) })
                 : t('convo.quiet')}
             {/* (Long without a word: where to see what it shows meanwhile.) */}
-            {quietLong > 0 && agentsOut === 0 && (
+            {quietLong > 0 && agentsOut === 0 && !compacting && (
               <button type="button" className="link-btn convo-working-act" onClick={onShowTerminal}>
                 {t('convo.lookTerminal')}
               </button>

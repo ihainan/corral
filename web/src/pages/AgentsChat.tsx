@@ -107,6 +107,11 @@ const PRESS_MS = 20000
 // When Claude Code's suggestion is looked for after a turn ends (ms): it
 // comes a moment after, at times a while after.
 const SUGGEST_AT = [1500, 4000, 9000]
+// (ms) Claude Code compacting says so only on its screen (its log, once
+// done): looked at every COMPACT_LOOK while it works with nothing new in its
+// log for COMPACT_QUIET (see convo_suggest.go's compactingOn).
+const COMPACT_LOOK = 10000
+const COMPACT_QUIET = 15000
 // Of each turn's end asked about (by its key): the looks left, what was
 // found, the latest look (only its answer is taken), whether one is on its
 // way, and the views showing it. Kept beyond a view, so that going to
@@ -1690,6 +1695,38 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   // Claude Code's card above its box (Heads up, You should know): looked
   // for on its own times, besides what the suggestion's looks bring.
   const claudeCard = useClaudeCard(sid, bound && !notClaude && active ? `${bindKey} ${convo.gen}` : '', askKey, () => (convo.bind ? pressBody() : null))
+  // Compacting (its log silent a minute or two meanwhile): read off its
+  // screen while it works with nothing new; forgotten at the log's next word.
+  const [compacting, setCompacting] = useState(false)
+  const compactNow = useRef({ changedAt: convo.changedAt, body: pressBody })
+  compactNow.current = { changedAt: convo.changedAt, body: pressBody }
+  const lookCompact = bound && !notClaude && !!active && working
+  useEffect(() => setCompacting(false), [convo.changedAt, bindKey, lookCompact])
+  useEffect(() => {
+    if (!lookCompact) return
+    let live = true
+    let busy = false
+    const timer = setInterval(() => {
+      if (busy || document.hidden || Date.now() - compactNow.current.changedAt < COMPACT_QUIET) return
+      busy = true
+      const at = compactNow.current.changedAt
+      // (for=busy: said apart from the suggestion's own looks, in the gateway's log; not read.)
+      api<{ compacting?: boolean }>('POST', `/api/sessions/${sid}/conversation/suggestion?for=busy`, compactNow.current.body(), { timeoutMs: PRESS_MS })
+        .then(
+          (r) => {
+            if (live && compactNow.current.changedAt === at) setCompacting(!!r.compacting)
+          },
+          () => {},
+        )
+        .finally(() => {
+          busy = false
+        })
+    }, COMPACT_LOOK)
+    return () => {
+      live = false
+      clearInterval(timer)
+    }
+  }, [lookCompact, bindKey, sid])
   useEffect(() => {
     if (!askKey) return
     let a = suggestAsks.get(askKey)
@@ -2262,6 +2299,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     <ConversationView
       convo={convo}
       agent={agent}
+      compacting={compacting}
       pending={panelOpen ? shownSent.map((p) => (p.state === 'waiting' && isCommand(p.text) ? { ...p, opened: true } : p)) : shownSent}
       ask={
         waits && replyTo ? (

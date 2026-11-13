@@ -45,3 +45,22 @@ func TestSuggestionOf(t *testing.T) {
 		t.Errorf("greyed across sequences: %q", got)
 	}
 }
+
+// Claude Code 2.1.323 compacting (/compact against a stand-in API, 11-13):
+// the spinner line says so, its mark blinking; once done, "Compacted".
+func TestCompactingOn(t *testing.T) {
+	rule := strings.Repeat("─", 40)
+	at := func(spin string) string {
+		return "❯ hi\n● Hello.\n✻ Sautéed for 0s · done 10:54 PM\n❯ /compact\n" + spin + "\n" + rule + "\n❯ \n" + rule + "\n  ⏸ manual mode on · ? for shortcuts\n"
+	}
+	for _, spin := range []string{"✶ Compacting conversation… (0s)", "* Compacting conversation… (1s)", "· Compacting conversation… (25s)", "✽ Compacting conversation… (39s)"} {
+		if !compactingOn(at(spin)) {
+			t.Errorf("%q: not compacting", spin)
+		}
+	}
+	for _, spin := range []string{"  ⎿  Compacted (ctrl+o to see full summary)", "✶ Thinking… (3s)", "  Compacting conversation… is what /compact does"} {
+		if compactingOn(at(spin)) {
+			t.Errorf("%q: compacting", spin)
+		}
+	}
+}
