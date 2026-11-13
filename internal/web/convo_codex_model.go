@@ -21,10 +21,11 @@ import (
 
 // codexPicker is one step of Codex's picker as its screen shows it.
 type codexPicker struct {
-	ok      bool
-	effort  bool   // (the second step: "Select Reasoning Level for …")
-	of      string // (the second step's model, as its head names it)
-	options []modelOpt
+	ok           bool
+	effort       bool   // (the second step: "Select Reasoning Level for …")
+	of           string // (the second step's model, as its head names it)
+	options      []modelOpt
+	above, below bool // rows outside the visible window
 }
 
 var (
@@ -64,6 +65,11 @@ func parseCodexPicker(screen string) codexPicker {
 		if strings.TrimSpace(l) == "" {
 			continue
 		}
+		if arrow := strings.TrimSpace(l); arrow == "↑" || arrow == "↓" || arrow == "↕" {
+			p.above = p.above || arrow == "↑" || arrow == "↕"
+			p.below = p.below || arrow == "↓" || arrow == "↕"
+			continue
+		}
 		m := codexPickerOption.FindStringSubmatch(l)
 		if m == nil {
 			// (A description wrapped in a narrow pane: indented under it, its words go on.)
@@ -78,8 +84,11 @@ func parseCodexPicker(screen string) codexPicker {
 		for _, c := range m[2] {
 			n = n*10 + int(c-'0')
 		}
-		if n != len(p.options)+1 {
+		if n < 1 || (len(p.options) > 0 && n != p.options[len(p.options)-1].N+1) {
 			return codexPicker{}
+		}
+		if !p.effort {
+			o.label = strings.TrimSuffix(o.label, " (current)")
 		}
 		opt := modelOpt{N: n, Label: o.label, Desc: o.desc, at: m[1] != ""}
 		if opt.at {
@@ -263,37 +272,25 @@ func codexModelFlow(do, undo codexIO, model, effort string) (opts []modelOpt, er
 	if !isModels(pk) {
 		return out(errNoPicker)
 	}
-	if model == "" {
-		if err := do.press([]string{"esc"}, "", digest); err != nil {
-			return out(err)
-		}
-		if scr, _, err := do.settle(func(s string) bool { return !codexPickerOpen(s) }); err != nil || codexPickerOpen(scr) {
-			return out(errScreen)
-		}
-		return pk.options, nil
-	}
-	// (Moved to the choice match finds on picker p, read again: the cursor
-	// there, on the step of the same model.)
-	moveTo := func(p codexPicker, match func(modelOpt) bool, same func(codexPicker) bool) (codexPicker, error) {
-		var to modelOpt
-		found := false
-		for _, o := range p.options {
-			if match(o) {
-				to, found = o, true
+	// A current CLI shows only a window of the list. Read every window
+	// before offering models, verifying the cursor after each guarded move.
+	// Returning a visible prefix would silently hide the remaining models.
+	const maxCodexModels = 64
+	moveCursor := func(p codexPicker, number int, same func(codexPicker) bool) (codexPicker, error) {
+		for moved := 0; moved < maxCodexModels; {
+			at, ok := p.cursor()
+			if !ok || number < 1 || number > maxCodexModels {
+				return p, errNoModel
 			}
-		}
-		at, known := p.cursor()
-		if !found || !known {
-			return p, errNoModel
-		}
-		if d := to.N - at.N; d != 0 {
+			d := number - at.N
+			if d == 0 {
+				return p, nil
+			}
 			key := "down"
 			if d < 0 {
 				key, d = "up", -d
 			}
-			if d > maxCodexPickerMove {
-				return p, errNoModel
-			}
+			d = min(d, maxCodexPickerMove)
 			keys := make([]string, d)
 			for i := range keys {
 				keys[i] = key
@@ -301,7 +298,11 @@ func codexModelFlow(do, undo codexIO, model, effort string) (opts []modelOpt, er
 			if err := do.press(keys, "", digest); err != nil {
 				return p, err
 			}
-			there := func(p codexPicker) bool { c, ok := p.cursor(); return p.ok && ok && match(c) && same(p) }
+			want := at.N + d
+			if key == "up" {
+				want = at.N - d
+			}
+			there := func(p codexPicker) bool { c, ok := p.cursor(); return p.ok && ok && c.N == want && same(p) }
 			var err error
 			if p, err = read(there); err != nil {
 				return p, err
@@ -309,10 +310,73 @@ func codexModelFlow(do, undo codexIO, model, effort string) (opts []modelOpt, er
 			if !there(p) {
 				return p, errNotThere
 			}
+			moved += d
+		}
+		return p, errNoModel
+	}
+	if pk.above || pk.options[0].N != 1 {
+		if pk, err = moveCursor(pk, 1, isModels); err != nil {
+			return out(err)
+		}
+	}
+	var models []modelOpt
+	for windows := 0; ; windows++ {
+		for _, opt := range pk.options {
+			if opt.N > maxCodexModels || opt.N > len(models)+1 {
+				return out(errNoPicker)
+			}
+			if opt.N <= len(models) {
+				if models[opt.N-1].Label != opt.Label {
+					return out(errScreen)
+				}
+			} else {
+				models = append(models, opt)
+			}
+		}
+		if !pk.below {
+			break
+		}
+		if windows >= maxCodexModels || len(models) >= maxCodexModels {
+			return out(errNoPicker)
+		}
+		if pk, err = moveCursor(pk, len(models)+1, isModels); err != nil {
+			return out(err)
+		}
+	}
+	if model == "" {
+		if err := do.press([]string{"esc"}, "", digest); err != nil {
+			return out(err)
+		}
+		if scr, _, err := do.settle(func(s string) bool { return !codexPickerOpen(s) }); err != nil || codexPickerOpen(scr) {
+			return out(errScreen)
+		}
+		return models, nil
+	}
+	// (Moved to the choice match finds on picker p, read again: the cursor
+	// there, on the step of the same model.)
+	moveTo := func(p codexPicker, choices []modelOpt, match func(modelOpt) bool, same func(codexPicker) bool) (codexPicker, error) {
+		var to modelOpt
+		found := false
+		for _, o := range choices {
+			if match(o) {
+				to, found = o, true
+			}
+		}
+		_, known := p.cursor()
+		if !found || !known {
+			return p, errNoModel
+		}
+		p, err := moveCursor(p, to.N, same)
+		if err != nil {
+			return p, err
+		}
+		at, ok := p.cursor()
+		if !ok || !match(at) {
+			return p, errNotThere
 		}
 		return p, nil
 	}
-	if _, err := moveTo(pk, func(o modelOpt) bool { return o.Label == model }, isModels); err != nil {
+	if _, err := moveTo(pk, models, func(o modelOpt) bool { return o.Label == model }, isModels); err != nil {
 		return out(err)
 	}
 	if err := do.press([]string{"yes"}, "", digest); err != nil {
@@ -326,7 +390,7 @@ func codexModelFlow(do, undo codexIO, model, effort string) (opts []modelOpt, er
 	if !ofModel(ef) {
 		return out(errNotTaken)
 	}
-	if _, err := moveTo(ef, func(o modelOpt) bool { return strings.EqualFold(codexEffortName(o.Label), effort) }, ofModel); err != nil {
+	if _, err := moveTo(ef, ef.options, func(o modelOpt) bool { return strings.EqualFold(codexEffortName(o.Label), effort) }, ofModel); err != nil {
 		return out(err)
 	}
 	if err := do.press([]string{"this"}, "", digest); err != nil { // ("s": this session only)

@@ -193,6 +193,7 @@ export interface ConvoMeta {
   effort?: string // how hard it is asked to think: low, medium, high, xhigh, max
   branch?: string
   forked?: boolean // a copy of another (Codex's): its log has only what came after; before, in the other's
+  history_partial?: boolean // a rewind's rollout contains only the new messages
   context?: number // tokens the latest request sent
   window?: number // the model's context window, where it is known: as the log says it (Codex's), or of the model (Claude's)
   window_by?: 'log' | 'model' | 'request' // how: said by the log, the model's own, the 1M its requests asked for
@@ -406,7 +407,7 @@ const sameBind = (a?: ConvoBind, b?: ConvoBind) =>
   a === b || (!!a && !!b && a.pane === b.pane && a.pid === b.pid && a.start === b.start && a.session === b.session && a.title === b.title && a.agent === b.agent && a.via === b.via && a.auth === b.auth)
 
 const sameMeta = (a?: ConvoMeta, b?: ConvoMeta) =>
-  a === b || (!!a && !!b && a.model === b.model && a.mode === b.mode && a.effort === b.effort && a.branch === b.branch && a.context === b.context && a.window === b.window && a.window_by === b.window_by && JSON.stringify(a.cost) === JSON.stringify(b.cost) && JSON.stringify(a.quota) === JSON.stringify(b.quota) && JSON.stringify(a.answer) === JSON.stringify(b.answer))
+  a === b || (!!a && !!b && a.model === b.model && a.mode === b.mode && a.effort === b.effort && a.branch === b.branch && a.forked === b.forked && a.history_partial === b.history_partial && a.context === b.context && a.window === b.window && a.window_by === b.window_by && JSON.stringify(a.cost) === JSON.stringify(b.cost) && JSON.stringify(a.quota) === JSON.stringify(b.quota) && JSON.stringify(a.answer) === JSON.stringify(b.answer))
 
 const POLL = 2000
 const ACTIVE = 1000 // (after an answer that brought something: more is likely coming)

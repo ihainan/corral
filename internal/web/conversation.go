@@ -329,6 +329,7 @@ for d in $codexes; do
   for fd in "$d"/fd/*; do
     l=$(readlink "$fd" 2>/dev/null) || continue
     case $l in *"$nl"*) continue;; "$HOME"/.codex/sessions/*/rollout-*.jsonl) ;; *) continue;; esac
+    codex_subagent "$l" && continue
     printf 'cand=%s\ncandcwd=%s\ncandts=%s\ncandmtime=%s\0' "$l" "$(meta_of "$l" cwd)" "$(meta_of "$l" timestamp)" "$(stat -c %Y "$l" 2>/dev/null)"
   done
 done
@@ -351,7 +352,7 @@ for d in $codexes; do
   elif [ -n "$log" ]; then
     # (No subcommand to go by: its log's head says how it was begun.)
     [ -z "$sub" ] && head -c 4096 "$log" 2>/dev/null | grep -q '"originator": *"codex_exec"' && continue
-    sid=$(printf '%s' "${log%.jsonl}" | grep -o '[0-9a-fA-F]\{8\}-[0-9a-fA-F]\{4\}-[0-9a-fA-F]\{4\}-[0-9a-fA-F]\{4\}-[0-9a-fA-F]\{12\}$')
+    codex_log_sid "$log"; sid=$cxid
     [ -n "$sid" ] || continue
   else
     # (None open, nor any lock (a Codex before such locks): a new
@@ -359,7 +360,8 @@ for d in $codexes; do
     # session is not known till then: the zero id stands for it. Only the
     # conversing one, run with no subcommand; not one with a log
     # elsewhere, CODEX_HOME say.)
-    [ -z "$sub" ] && [ -z "$any" ] || continue
+    case $sub in ''|resume|fork) ;; *) continue;; esac
+    [ -z "$any" ] || continue
     sid=00000000-0000-0000-0000-000000000000
   fi
   stat_of "$pid" || continue
@@ -512,6 +514,29 @@ exit 0`
 	return cmd
 }
 
+// A busy CLI may write megabytes of tool output after its last visible
+// message. Search a bounded local window, sending only short message and
+// turn-boundary records over SSH. Keep the last 64 KiB per log; splitTails
+// drops a partial first record just as it does for the ordinary tail.
+func convoMessageTailsCommand(logs []string) string {
+	script := `for l in "$@"; do
+  [ -f "$l" ] || continue
+  printf '%s\n' "$l"
+  { tail -c 4194304 "$l" 2>/dev/null || printf '\001\n'; } |
+    awk 'index($0, "\001") { bad = 1; next }
+      length($0) <= 65536 && /"type"[ ]*:[ ]*"(message|user_message|agent_message|item_completed|custom_tool_call|function_call|task_started|task_complete|thread_rolled_back)"/ { print }
+      END { if (bad) printf "\001" }' |
+    tail -c 65536
+  printf '\0'
+done
+exit 0`
+	cmd := "sh -c " + sshx.QuoteShell(script) + " corral"
+	for _, l := range logs {
+		cmd += " " + sshx.QuoteShell(l)
+	}
+	return cmd
+}
+
 type convoProc struct {
 	pid, start int64
 	fg         bool  // in front on its terminal: what is typed there reaches it
@@ -639,9 +664,10 @@ func (l convoLocated) now() int64 {
 }
 
 var (
-	convoUUID = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
-	herdrPane = regexp.MustCompile(`^[A-Za-z0-9:_.-]{1,64}$`)
-	tmuxPane  = regexp.MustCompile(`^%[0-9]{1,9}$`)
+	convoUUID        = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+	codexRolloutName = regexp.MustCompile(`^rollout-[^/_\r\n]+-([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})(?:_([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}))?\.jsonl$`)
+	herdrPane        = regexp.MustCompile(`^[A-Za-z0-9:_.-]{1,64}$`)
+	tmuxPane         = regexp.MustCompile(`^%[0-9]{1,9}$`)
 )
 
 // parseConvoLocate reads convoLocateCommand's output: the processes whose
@@ -830,8 +856,7 @@ func convoLogOf(agent, log, sid string) bool {
 		return strings.HasSuffix(l, "/opencode/opencode.db")
 	}
 	if agent == "codex" {
-		i := strings.LastIndexByte(l, '/')
-		return strings.Contains(l, "/.codex/sessions/") && strings.HasPrefix(l[i+1:], "rollout-") && strings.HasSuffix(l, "-"+sid+".jsonl")
+		return sid != "" && strings.Contains(l, "/.codex/sessions/") && convoSessionOf(l) == sid
 	}
 	return strings.HasSuffix(l, "/"+sid+".jsonl")
 }
@@ -909,7 +934,7 @@ func (s *Server) screenSays(ctx context.Context, sess *term.Session, pane string
 		return int(min(max(b.wrote-a.wrote, -1), 1))
 	})
 	if len(cands) > maxScreenLogs {
-		cands = cands[:maxScreenLogs]
+		return "", "", 0, false // cannot establish uniqueness against an incomplete set
 	}
 	if len(cands) == 0 {
 		return "", "", 0, true
@@ -927,10 +952,11 @@ func (s *Server) screenSays(ctx context.Context, sess *term.Session, pane string
 		return "", "", 0, false // (no screen to go by)
 	}
 	screen := letters(string(out))
+	toolLines := screenToolLines(string(out))
 	if screen == "" {
 		return "", "", 0, true
 	}
-	tails, err := sshx.Output(ctx, sess.Client(), convoTailsCommand(logs), maxScreenLogs*(32<<10))
+	tails, err := sshx.Output(ctx, sess.Client(), convoMessageTailsCommand(logs), maxScreenLogs*(72<<10))
 	if err != nil {
 		return "", "", 0, false
 	}
@@ -939,7 +965,7 @@ func (s *Server) screenSays(ctx context.Context, sess *term.Session, pane string
 	if len(ends) != len(logs) {
 		return "", "", 0, false
 	}
-	log, sid, evidence = screenPick(screen, ends)
+	log, sid, evidence = screenPick(screen, ends, toolLines...)
 	return log, sid, evidence, true
 }
 
@@ -967,9 +993,10 @@ func splitTails(out string, logs []string) map[string]string {
 
 // screenPick: of the conversations (their logs' ends), the one the screen
 // (as letters) shows, and its evidence; see screenSays.
-func screenPick(screen string, tails map[string]string) (log, sid string, evidence int) {
+func screenPick(screen string, tails map[string]string, toolLines ...screenToolLine) (log, sid string, evidence int) {
 	type seen struct {
 		said  []string // the pieces looked for
+		tools []string // command prefixes, looked for only in CLI tool headers
 		whole string   // all it said, as letters
 	}
 	all := map[string]seen{}
@@ -985,16 +1012,19 @@ func screenPick(screen string, tails map[string]string) (log, sid string, eviden
 			for _, part := range e.Parts {
 				if part.Kind == convo.KindText && part.Tool == nil {
 					whole.WriteString(saidLetters(part.Text))
+				} else if part.Kind == convo.KindTool && part.Tool != nil {
+					whole.WriteString(letters(part.Tool.Detail))
 				}
 			}
 		}
-		all[path] = seen{said: lastSaid(entries, 8), whole: whole.String()}
+		all[path] = seen{said: lastSaid(entries, 8), tools: screenToolSaid(entries), whole: whole.String()}
 	}
 	best, bestAt, tie := "", -1, false
 	for path, c := range all {
 		at, n := -1, 0
-		for i, piece := range c.said {
-			if slices.Contains(c.said[:i], piece) {
+		pieces := append(slices.Clone(c.said), c.tools...)
+		for i, piece := range pieces {
+			if slices.Contains(pieces[:i], piece) {
 				continue // (the same words again: one thing on the screen)
 			}
 			mine := true
@@ -1004,7 +1034,16 @@ func screenPick(screen string, tails map[string]string) (log, sid string, eviden
 					break
 				}
 			}
-			if j := strings.LastIndex(screen, piece); mine && j >= 0 {
+			j := strings.LastIndex(screen, piece)
+			if i >= len(c.said) {
+				j = -1
+				for _, line := range toolLines {
+					if k := strings.LastIndex(line.text, piece); k >= 0 {
+						j = max(j, line.at+k)
+					}
+				}
+			}
+			if mine && j >= 0 {
 				n = max(n, utf8.RuneCountInString(piece))
 				at = max(at, j+len(piece))
 			}
@@ -1027,7 +1066,7 @@ func screenPick(screen string, tails map[string]string) (log, sid string, eviden
 // screen; convoTailBytes: how much of the end of each is read (as the
 // script reads it).
 const (
-	maxScreenLogs  = 6
+	maxScreenLogs  = 64
 	convoTailBytes = 16384
 )
 
@@ -1080,6 +1119,52 @@ func lastSaid(entries []convo.Entry, n int) []string {
 				break
 			}
 		}
+	}
+	return out
+}
+
+// While working, Codex can show only compact tool-call summaries. The
+// start of an actual tool argument is evidence too, when no other
+// candidate has it. Tool results are deliberately not used: they can
+// contain quoted conversations. Never use a rolled-back call.
+func screenToolSaid(entries []convo.Entry) []string {
+	var out []string
+	for i, n := len(entries)-1, 0; i >= 0 && n < 24; i-- {
+		e := entries[i]
+		if e.Gone || e.Role != convo.RoleAssistant {
+			continue
+		}
+		for _, p := range e.Parts {
+			if p.Kind != convo.KindTool || p.Tool == nil {
+				continue
+			}
+			n++
+			for _, line := range strings.Split(p.Tool.Detail, "\n") {
+				if t := []rune(letters(line)); len(t) >= screenEnough2 {
+					out = append(out, string(t[:min(len(t), 30)]))
+				}
+			}
+		}
+	}
+	return out
+}
+
+type screenToolLine struct {
+	text string
+	at   int // byte offset in letters(screen), for ordering against messages
+}
+
+func screenToolLines(screen string) []screenToolLine {
+	var out []screenToolLine
+	at := 0
+	for _, line := range strings.Split(ansi.ReplaceAllString(screen, ""), "\n") {
+		text := letters(line)
+		// No leading indentation: quoted output and message bodies are
+		// indented by the CLI. Only its own top-level call header counts.
+		if strings.HasPrefix(line, "• Ran ") || strings.HasPrefix(line, "• Running ") {
+			out = append(out, screenToolLine{text: text, at: at})
+		}
+		at += len(text)
 	}
 	return out
 }
@@ -1323,15 +1408,11 @@ func (c *convoClaims) set(sid string, cl convoClaim) bool {
 // a process started is known only to the second (the host's boot time is).
 const convoBeganSlack = 1_500
 
-// convoSessionOf: the session a Codex log is of, by its name.
+// convoSessionOf: the resumable session a Codex log is of. After rewind,
+// Codex appends _<writer segment> while session_meta keeps the original ID.
 func convoSessionOf(log string) string {
-	name := strings.TrimSuffix(log[strings.LastIndexByte(log, '/')+1:], ".jsonl")
-	const n = len("00000000-0000-0000-0000-000000000000")
-	if len(name) < n+len("rollout-") || !strings.HasPrefix(name, "rollout-") {
-		return ""
-	}
-	if sid := name[len(name)-n:]; convoUUID.MatchString(sid) {
-		return sid
+	if m := codexRolloutName.FindStringSubmatch(log[strings.LastIndexByte(log, '/')+1:]); m != nil {
+		return m[1]
 	}
 	return ""
 }
@@ -1506,6 +1587,15 @@ func (st *convoState) newParser() convo.Parser {
 		return convo.NewClaudeSub()
 	}
 	return convo.New(st.agent)
+}
+
+func (st *convoState) meta() convo.Meta {
+	m := st.parser.Meta()
+	if st.agent == "codex" {
+		name := st.log[strings.LastIndexByte(st.log, '/')+1:]
+		m.HistoryPartial = codexRolloutName.MatchString(name) && strings.Contains(name, "_")
+	}
+	return m
 }
 
 type convoStates struct {
@@ -1814,7 +1904,7 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 	ans.Entries = st.parser.Since(rev)
 	st.takeEarlierTitle()
 	ans.Title, ans.Tasks = st.parser.Title(), st.parser.Tasks()
-	if m := st.parser.Meta(); m != (convo.Meta{}) {
+	if m := st.meta(); m != (convo.Meta{}) {
 		ans.Meta = &m
 	}
 	ans.Queued = st.parser.Queued()
@@ -2712,19 +2802,20 @@ front() {
       # found it.)
       # (Whose conversation it is was told when it was read, by where and
       # when it began; here only that it is still one a Codex of ours runs.)
-      [ -z "$cs" ] || return 1
+      case $cs in ''|resume|fork) ;; *) return 1;; esac
       held=
       for dd in /proc/[0-9]*; do
         [ -O "$dd" ] && [ "$(head -c 16 "$dd/comm" 2>/dev/null)" = codex ] || continue
         for fd in "$dd"/fd/*; do
           l=$(readlink "$fd" 2>/dev/null) || continue
-          case $l in "$HOME"/.codex/sessions/*/rollout-*-"$sid".jsonl) held=1; break;; esac
+          case $l in "$HOME"/.codex/sessions/*/rollout-*.jsonl)
+            codex_log_sid "$l"; [ "$cxid" = "$sid" ] && { held=1; break; };; esac
         done
         [ -n "$held" ] && break
       done
       [ -n "$held" ] || return 1
     else
-      case $lg in *-"$sid".jsonl) ;; *) return 1;; esac
+      codex_log_sid "$lg"; [ "$cxid" = "$sid" ] || return 1
       [ -z "$cs" ] && head -c 4096 "$lg" 2>/dev/null | grep -q '"originator": *"codex_exec"' && return 1
     fi
   elif [ "$(head -c 16 "/proc/$pid/comm" 2>/dev/null)" = opencode ]; then
@@ -4013,7 +4104,7 @@ func (s *Server) subagentAnswer(w http.ResponseWriter, r *http.Request, sess *te
 	ans.Entries = st.parser.Since(rev)
 	ans.Tasks = st.parser.Tasks()
 	ans.Running = st.parser.Running() // (what it set going in turn)
-	if m := st.parser.Meta(); m != (convo.Meta{}) {
+	if m := st.meta(); m != (convo.Meta{}) {
 		ans.Meta = &m
 	}
 	writeJSONCompressed(w, r, http.StatusOK, ans)
@@ -4275,7 +4366,22 @@ codex_ep() { # pid
 // held less long (a subagent's a moment, its log opened with it; or one
 // begun anew: not told yet), or two taken in the same second.
 // (Codex 0.164, as a real one was seen to: plans/5d3b-codex-new-compact.md.)
-const codexFdsSh = `codex_fds() {
+const codexFdsSh = `# The durable session ID, not the writer segment appended after rewind.
+codex_subagent() {
+  head -c 4096 "$1" 2>/dev/null | grep -Eq '"thread_source": *"(subagent|guardian_review)"|"source": *\{ *"subagent"[ ]*:'
+}
+codex_log_sid() {
+  cxid=
+  _cxname=${1##*/}
+  case $_cxname in rollout-*.jsonl) ;; *) return;; esac
+  _cxname=${_cxname%.jsonl}
+  _cxuuid='[0-9a-fA-F]\{8\}-[0-9a-fA-F]\{4\}-[0-9a-fA-F]\{4\}-[0-9a-fA-F]\{4\}-[0-9a-fA-F]\{12\}'
+  _cxids=$(printf '%s' "$_cxname" | grep -o "$_cxuuid\(_$_cxuuid\)\{0,1\}$") || return
+  _cxprefix=${_cxname%"$_cxids"}
+  case $_cxprefix in *[_/]*) return;; rollout-?*-) ;; *) return;; esac
+  cxid=${_cxids%%_*}
+}
+codex_fds() {
   cxlog= cxany= cxpend= cxnew= _locks= _logs=
   _nl=$(printf '\nx'); _nl=${_nl%x}
   _now=$(date +%s)
@@ -4285,7 +4391,7 @@ const codexFdsSh = `codex_fds() {
     case $_l in
     "$HOME"/.codex/sessions/*/rollout-*.jsonl)
       _logs="$_logs ${_l%.jsonl} "
-      head -c 4096 "$_l" 2>/dev/null | grep -q '"thread_source": *"subagent"' && continue
+      codex_subagent "$_l" && continue
       { [ -z "$cxlog" ] || [ "$_l" -nt "$cxlog" ]; } && cxlog=$_l ;;
     "$HOME"/.codex/thread-writer-locks/*.lock)
       _i=${_l##*/}; _i=${_i%.lock}

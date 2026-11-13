@@ -216,9 +216,12 @@ func effortFlow(step, leave modelStep, target string, greyed ...func() string) (
 // has ended on the host, even where the request was given up before.
 func (s *Server) convoEffort(w http.ResponseWriter, ctx context.Context, sess *term.Session, pane, socket string, pid, start int64, sid, target string, outcome, reason *string, release func()) {
 	var running sync.WaitGroup // (steps whose command may still run on the host)
+	// (Its slider on a narrow pane: read as the model picker is, see roomyPane.)
+	unroomy := s.roomyPane(ctx, sess, pane, socket)
 	defer func() {
 		go func() {
 			running.Wait()
+			unroomy()
 			release()
 		}()
 	}()

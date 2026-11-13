@@ -6,7 +6,7 @@
 import { getLang, t } from '../i18n'
 
 // The commands used most, offered first on a bare "/" (Claude Code's and Codex's alike).
-const COMMON = ['/compact', '/clear', '/new', '/model', '/resume', '/rename', '/context', '/review', '/plan', '/btw', '/rewind', '/init', '/memory', '/status', '/usage', '/cost', '/diff', '/mcp', '/agents', '/help']
+const COMMON = ['/compact', '/clear', '/new', '/model', '/resume', '/restart', '/rename', '/context', '/review', '/plan', '/btw', '/rewind', '/init', '/memory', '/status', '/usage', '/cost', '/diff', '/mcp', '/agents', '/help']
 // What those do, in a few words beside each (the rest are said by their names).
 const SAID: Record<'zh-CN' | 'en', Record<string, string>> = {
   'zh-CN': {
@@ -14,14 +14,14 @@ const SAID: Record<'zh-CN' | 'en', Record<string, string>> = {
     '/resume': '接着以前的对话', '/rename': '改对话标题', '/context': '看上下文用了多少', '/review': '审查代码改动',
     '/plan': '先出计划再动手', '/btw': '顺便问一句，不打断', '/rewind': '退回到之前某一步', '/init': '为项目写说明文件',
     '/memory': '编辑记忆文件', '/status': '看当前状态', '/usage': '看用量和额度', '/cost': '看这次花费', '/diff': '看未提交的改动',
-    '/mcp': '管理 MCP 服务', '/agents': '管理子智能体', '/help': '帮助',
+    '/mcp': '管理 MCP 服务', '/agents': '管理子智能体', '/help': '帮助', '/restart': '重启 Claude Code，保留这次对话',
   },
   en: {
     '/compact': 'summarise and go on', '/clear': 'start a new conversation', '/new': 'start a new conversation', '/model': 'switch model',
     '/resume': 'go back to an earlier conversation', '/rename': 'change the title', '/context': 'context used', '/review': 'review changes',
     '/plan': 'plan before doing', '/btw': 'a side question', '/rewind': 'go back to an earlier step', '/init': 'write the project notes',
     '/memory': 'edit memory files', '/status': 'status', '/usage': 'usage and limits', '/cost': 'cost so far', '/diff': 'uncommitted changes',
-    '/mcp': 'MCP servers', '/agents': 'subagents', '/help': 'help',
+    '/mcp': 'MCP servers', '/agents': 'subagents', '/help': 'help', '/restart': 'restart Claude Code, keeping this conversation',
   },
 }
 
@@ -45,7 +45,7 @@ const builtin: Record<Agent, string[]> = {
     '/help', '/hooks', '/ide', '/import', '/init', '/insights', '/install-github-app', '/keybindings',
     '/list-agents', '/login', '/logout', '/loop', '/mcp', '/memory', '/mobile', '/model', '/output-style',
     '/permissions', '/plan', '/plugin', '/powerup', '/pr-comments', '/radio', '/recap', '/release-notes', '/rename',
-    '/resume', '/review', '/rewind', '/run', '/sandbox', '/security-review', '/skills', '/status', '/statusline',
+    '/restart', '/resume', '/review', '/rewind', '/run', '/sandbox', '/security-review', '/skills', '/status', '/statusline',
     '/subtask', '/tasks', '/terminal-setup', '/theme', '/todos', '/tui', '/update-config', '/usage', '/verify',
     '/vim', '/workflows',
   ],

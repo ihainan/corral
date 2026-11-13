@@ -753,7 +753,7 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-step-obj.is-code { font-family: var(--font-mono); font-size: 13px; }
 .convo-work-text.is-live { display: flex; align-items: baseline; gap: 8px; min-width: 0; color: var(--term-fg-2); }
 .convo-step-body, .convo-thinking { padding: 4px 0 10px; }
-.convo-thinking { white-space: pre-wrap; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg-2); }
+.convo-thinking { white-space: normal; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg-2); }
 /* What the agent wrote between its steps: as its answer is. */
 .convo-mid { margin: 0; }
 /* (What it says on the way, a step quieter than the answer it ends with: C04/A04) */

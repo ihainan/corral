@@ -722,6 +722,12 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 		return
 	}
 	checked := false
+	// (Claude Code's picker on a narrow pane: read with the terminal held
+	// roomy, see roomyPane; put back once the last step has ended.)
+	unroomy := func() {}
+	if !codex {
+		unroomy = s.roomyPane(ctx, sess, pane, socket)
+	}
 	// restore: changed says it had changed; err that it could not be put back.
 	restore := func() (changed bool, err error) {
 		rctx, rcancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
@@ -781,6 +787,7 @@ func (s *Server) convoModel(w http.ResponseWriter, ctx context.Context, sess *te
 				}
 				running.Wait()
 			}
+			unroomy()
 			release()
 		}()
 	}()

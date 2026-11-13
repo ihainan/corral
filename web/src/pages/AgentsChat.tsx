@@ -1725,7 +1725,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       el.selectionStart = el.selectionEnd = s.length
     })
   }
-  const to = agent ? [agent.title, agent.where].filter((x) => x && x !== '~').join(' · ') : ''
+  const to = agent ? [agent.title?.trim().startsWith('<') ? '' : agent.title, agent.where].filter((x) => x && x !== '~').join(' · ') : ''
   // (A Codex at work takes a message into the turn under way, as its own
   // Enter does: it says so.)
   const steers = convo.bind?.agent === 'codex' && agent?.status === 'working'

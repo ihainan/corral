@@ -6,7 +6,7 @@ import { fitToEdge } from '../terminal/fit'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import { WebglAddon } from '@xterm/addon-webgl'
-import { ArrowUp, Bot, Check, ChevronDown, ChevronLeft, CircleStop, Code2, CornerDownLeft, Eye, FolderOpen, Globe, History, ImagePlus, MessageCircleReply, MoreVertical, Minus, Palette, Paperclip, Plus, TextSelect, Keyboard as KeyboardIcon, Power, RotateCw, Server, SquarePen, X } from 'lucide-react'
+import { ArrowUp, Bot, Check, ChevronDown, ChevronLeft, CircleStop, Code2, CornerDownLeft, Eye, FolderOpen, Globe, History, ImagePlus, MessageCircleReply, MessagesSquare, MoreVertical, Minus, Palette, Paperclip, Plus, TextSelect, Keyboard as KeyboardIcon, Power, RotateCw, Server, SquarePen, X } from 'lucide-react'
 import { api, ApiError, choiceOf, errorText, uploadFile, type HerdrAgent, type HerdrSummary, type Host, type OpenChoice, type SessionInfo, probeBootstrap } from '../api'
 import { t } from '../i18n'
 import { navigate } from '../router'
@@ -2500,6 +2500,11 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
     ...fontItems(),
   ]
   const moreItems = (): (MenuItem | null)[] => watch ? watchItems() : [
+    // The agent in the pane in front, on the agents page (its conversation
+    // there): only one that page reads, and only while herdr's word is fresh.
+    !ended && herdr && !herdr.lost && herdr.focused_pane && ['claude', 'codex', 'opencode'].includes(herdr.focused_agent ?? '')
+      ? { label: t('term.openChat'), icon: <MessagesSquare size={16} />, onSelect: () => navigate('/agents?' + new URLSearchParams({ s: id, pane: herdr.focused_pane! })) }
+      : null,
     { label: t('term.upload'), icon: <ImagePlus size={16} />, onSelect: () => fileRef.current?.click() },
     ended ? null : { label: t('files.menu'), icon: <FolderOpen size={16} />, onSelect: openFiles },
     ended ? null : { label: t('share.title'), icon: <Eye size={16} />, onSelect: () => setShareOpen(true) },

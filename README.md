@@ -405,6 +405,11 @@ make check                  # Go tests (incl. the security suite), type check, n
 make notices                # after changing dependencies
 ```
 
+For Codex chat changes, run `make codex-check` as well. The
+[Codex chat validation plan](docs/codex-chat-validation.md) describes the
+isolated real CLI checks, browser regressions and performance measurements,
+and distinguishes those checks from physical-device and real-provider testing.
+
 Add the test SSH server as host `127.0.0.1`, port `2222`, user `alice`,
 password `alice-pass`. Third-party licences are
 listed in [`web/public/THIRD-PARTY-NOTICES.txt`](web/public/THIRD-PARTY-NOTICES.txt),

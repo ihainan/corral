@@ -454,6 +454,9 @@ func changeTool(path string, ch codexChange) *Tool {
 // its first message's first line, what looks like a secret in it (a key,
 // a token) cut to its start, at most codexTitleLen characters.
 func codexTitle(text string) string {
+	if s := strings.TrimSpace(text); strings.HasPrefix(s, "<send_user_message_question_reply>") || strings.HasPrefix(s, "<task-notification>") {
+		return ""
+	}
 	line := ""
 	for _, l := range strings.Split(text, "\n") {
 		if l = strings.TrimSpace(l); l != "" {
