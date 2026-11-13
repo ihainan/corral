@@ -1066,7 +1066,7 @@ details.adv > .form { margin-top: 16px; }
   animation: fade 0.12s var(--ease);
 }
 .scard-pop:focus { outline: none; }
-.dialog.scard-dialog { max-width: 440px; }
+@media (min-width: 521px) { .dialog.scard-dialog { max-width: 440px; } } /* (narrower: a sheet the width of the screen, as the other sheets) */
 .scard-dialog .dlg-body { gap: 0; padding: 0 8px 12px; }
 .scard-sec { display: flex; flex-direction: column; gap: 2px; padding: 8px 0; }
 .scard-sec + .scard-sec { border-top: 1px solid var(--line); }

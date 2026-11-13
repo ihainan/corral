@@ -641,7 +641,7 @@ func (s *Server) paneCwd(ctx context.Context, sess *term.Session, pane string) (
 		if err == nil {
 			// (tmux's one line end only: a folder whose own name ends in one is
 			// not to become another folder — kept, and refused below.)
-			cwd = strings.TrimSuffix(strings.TrimSuffix(string(out), "\n"), "\r")
+			cwd = strings.TrimSuffix(string(out), "\n") // (a \r of its own stays, and is refused below)
 		}
 	case "herdr":
 		if socket := s.herdrSocks.get(sess.ID); socket != "" {

@@ -814,6 +814,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   const [hostHistory, setHostHistory] = useState(false)
   // A file the conversation names, shown in the files panel (its folder, it marked).
   const [filesAt, setFilesAt] = useState<string | null>(null)
+  const [filesIn, setFilesIn] = useState(false) // (filesAt a folder to open, not a file to show in its folder)
   // A picture of its host looked at.
   const [viewing, setViewing] = useState<string | null>(null)
   // A text file of its host read in the page.
@@ -837,7 +838,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     }
     // (Looked at: a picture as one, anything else as text — the host says if it is. One at a time.)
     const look = (q: string, end = false) => (IMAGE_EXT.test(q) ? (setReading(null), setViewing(q)) : (setViewing(null), setReadingEnd(end), setReading(q)))
-    return { reveal: (p) => whole(p, setFilesAt), download: (p) => whole(p, (q) => downloadPath(sid, q)), view: (p) => whole(p, (q) => look(q)), tail: (p) => whole(p, (q) => look(q, true)) }
+    return { reveal: (p) => whole(p, (q) => (setFilesIn(false), setFilesAt(q))), open: (p) => whole(p, (q) => (setFilesIn(true), setFilesAt(q))), download: (p) => whole(p, (q) => downloadPath(sid, q)), view: (p) => whole(p, (q) => look(q)), tail: (p) => whole(p, (q) => look(q, true)) }
   }, [sid, toast])
   // (Another tab shown — a terminal's — or another agent: what was opened of this one's files closes.)
   useEffect(() => {
@@ -2325,8 +2326,8 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     {filesAt && active && (
       <FilesDialog
         sessionId={sid}
-        start={null}
-        reveal={filesAt}
+        start={filesIn ? filesAt : null}
+        reveal={filesIn ? undefined : filesAt}
         onPath={() => {}}
         onInsert={(p) => {
           setFilesAt(null)

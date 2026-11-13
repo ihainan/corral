@@ -1095,6 +1095,15 @@ export function ConversationView({
   const [card, setCard] = useState<'' | 'pop' | 'sheet'>('')
   const cardBtn = useRef<HTMLButtonElement>(null)
   if (card && !active) setCard('') // (behind a terminal tab: shut)
+  // (Over the thread under its button where the button is shown; else — narrow, the button hidden — a sheet.
+  // Made narrow while open over the thread: a sheet then, not a card off the screen.)
+  const cardMode = () => (cardBtn.current && cardBtn.current.getBoundingClientRect().width > 0 ? 'pop' : 'sheet')
+  useEffect(() => {
+    if (card !== 'pop') return
+    const onResize = () => cardMode() === 'sheet' && setCard('sheet')
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [card])
   useEffect(() => {
     if (!active) return
     const onKey = (e: KeyboardEvent) => {
@@ -1424,7 +1433,7 @@ export function ConversationView({
               className="icon-btn convo-card-btn"
               aria-expanded={card === 'pop'}
               aria-haspopup="dialog"
-              onClick={() => setCard(card ? '' : matchMedia('(max-width: 640px)').matches ? 'sheet' : 'pop')}
+              onClick={() => setCard(card ? '' : cardMode())}
               aria-label={t('card.open')}
               title={t('card.open')}
             >
@@ -1445,7 +1454,7 @@ export function ConversationView({
                 ...(convo.of && (convo.bind?.agent === 'claude' || convo.bind?.agent === 'codex') ? [{ label: t('turns.item'), icon: <ListOrdered size={16} />, onSelect: () => (setSearching(false), setTurnsShown(true)) }] : []),
                 // (All steps opened or folded: the menu's, as Ctrl+O is a Mac's only.)
                 { label: t(allOpen ? 'pageKeys.foldAll' : 'pageKeys.openAll'), icon: allOpen ? <ChevronsDownUp size={16} /> : <ChevronsUpDown size={16} />, disabled: !list.length, onSelect: () => (setOpened({}), setAllOpen((v) => !v)) },
-                ...(convo.of && convo.status === 'ready' ? [{ label: t('card.open'), icon: <Info size={16} />, onSelect: () => setCard(matchMedia('(max-width: 640px)').matches ? 'sheet' : 'pop') }] : []),
+                ...(convo.of && convo.status === 'ready' ? [{ label: t('card.open'), icon: <Info size={16} />, onSelect: () => setCard(cardMode()) }] : []),
                 { label: t('convoExport.item'), icon: <Download size={16} />, disabled: !list.length, onSelect: () => doExport() },
                 // (On every device: a tablet's keyboard has these keys too.)
                 { label: t('pageKeys.item'), icon: <Keyboard size={16} />, onSelect: () => setKeysShown('menu') },
@@ -1464,7 +1473,7 @@ export function ConversationView({
         <SessionCard
           data={cardData(convo, list, mode, effort)}
           acts={{
-            onFolder: files ? (dir) => files.reveal(dir) : undefined,
+            onFolder: files?.open ? (dir) => files.open!(dir) : undefined,
             onChanges: (key, path) => show(key, path),
             onRunning: (id) => {
               const r = convo.running?.find((x) => x.id === id)
@@ -3583,7 +3592,7 @@ const WordsAsWritten = createContext(false)
 // session the conversation is read through): shown in the files panel,
 // downloaded, looked at (a picture). Not there once that session has ended.
 // (tail: a file looked at from its end — a command's output, newest last.)
-export type FileActs = { reveal: (path: string) => void; download: (path: string) => void; view: (path: string) => void; tail?: (path: string) => void }
+export type FileActs = { reveal: (path: string) => void; download: (path: string) => void; view: (path: string) => void; tail?: (path: string) => void; open?: (dir: string) => void } // (open: a folder, opened in the file panel)
 const FileActsOf = createContext<FileActs | undefined>(undefined)
 
 // A path the host can be asked for: absolute. (A relative one is not made
@@ -4207,6 +4216,30 @@ function Work({ it, open, onToggle, onCopy }: { it: Extract<Item, { kind: 'work'
       <ChevronRight size={14} className="convo-chev" />
     </span>
   )
+  // (Nothing yet to open — the agent just begun, its step under way said on this line: a line, not a
+  // button that opens on nothing. 11-13: "Working ›" opened on an empty run every time.)
+  const shows = it.steps.some((x) => isNote(x) || (x !== busy && (!!x.tool || x.kind === 'thinking')))
+  if (!shows)
+    return (
+      <div className="convo-work" data-work={it.key}>
+        <div className={'convo-work-head is-static' + (busy && !asks ? ' is-live' : '')}>
+          <Mark size={16} strokeWidth={1.75} className="convo-step-ic" aria-hidden="true" />
+          {busy && asks ? (
+            <span className="convo-work-text is-live is-asking">
+              <span className="convo-asking-text">{waitText(busy.tool)}</span>
+              {since > 0 && now >= since && <span className="convo-live-time">{t('convo.waitedFor', { d: duration(now - since) })}</span>}
+            </span>
+          ) : busy ? (
+            <span className="convo-work-text is-live">
+              <span ref={shine} className="convo-shimmer">{busy.tool ? liveText(busy.tool) : t('convo.live.thinking')}</span>
+              {since > 0 && now >= since && <span className="convo-live-time">{duration(now - since)}</span>}
+            </span>
+          ) : (
+            <span className="convo-work-text">{head || sum}</span>
+          )}
+        </div>
+      </div>
+    )
   return (
     <div className="convo-work" data-work={it.key}>
       <button type="button" className={'convo-work-head' + (busy && !asks ? ' is-live' : '') + (!busy && failed > 0 ? ' is-failed' : '')} aria-expanded={open} onClick={() => onToggle(it.key, !open)} title={isTouchOnly ? undefined : t(open ? (mac ? 'convo.foldHint' : 'convo.foldHintPlain') : mac ? 'convo.openHint' : 'convo.openHintPlain')}>

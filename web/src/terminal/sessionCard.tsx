@@ -89,7 +89,7 @@ function useGit(sid: string, pane: string) {
         setGit(g)
         // (Its pull request only of a branch of a repository: gh asked apart, a network call of the host's.)
         if (g.repo && g.branch)
-          api<GitPR>('GET', `/api/sessions/${sid}/git/pr${q}`, undefined, { signal: ctl.signal, timeoutMs: 20000 }).then(
+          api<GitPR>('GET', `/api/sessions/${sid}/git/pr?` + new URLSearchParams({ pane, root: g.root ?? '', branch: g.branch }).toString(), undefined, { signal: ctl.signal, timeoutMs: 20000 }).then(
             (p) => !ctl.signal.aborted && setPR(p),
             () => {},
           )
@@ -139,6 +139,11 @@ function CardBody({ data, acts, close }: { data: CardData; acts: CardActs; close
     f()
   }
   const files = data.edits?.files ?? []
+  // (What can be asked of the agent: a commit where something is not
+  // committed; a pull request of a branch that is not the main one, where gh
+  // says it has none.)
+  const canCommit = !!git?.repo && git.status && (git.changed > 0 || git.untracked > 0)
+  const canPR = !!git?.repo && !!pr?.gh && !pr.pr && !!git.branch && !!git.base && git.branch !== git.base.replace(/^origin\//, '')
   const done = data.tasks?.filter((x) => x.status === 'completed').length ?? 0
   const current = data.tasks?.find((x) => x.status === 'in_progress')
   return (
@@ -179,7 +184,7 @@ function CardBody({ data, acts, close }: { data: CardData; acts: CardActs; close
               }
             >
               <span className="scard-strong">{git.detached ? t('card.detached') : git.branch}</span>
-              {git.upstream ? (
+              {!git.status ? null : git.upstream ? (
                 git.ahead || git.behind ? (
                   <span className="scard-dim">
                     {' '}
@@ -295,14 +300,14 @@ function CardBody({ data, acts, close }: { data: CardData; acts: CardActs; close
         </section>
       )}
 
-      {acts.onDraft && git?.repo && (
+      {acts.onDraft && git?.repo && (canCommit || canPR) && (
         <section className="scard-sec scard-asks">
-          {(git.changed > 0 || git.untracked > 0) && (
+          {canCommit && (
             <button type="button" className="btn" onClick={act(() => acts.onDraft!(t('card.commitText')))} title={t('card.draftHint')}>
               <MessageSquareText size={15} /> {t('card.askCommit')}
             </button>
           )}
-          {pr && pr.gh && !pr.pr && git.branch && git.base && git.branch !== git.base.replace(/^origin\//, '') && (
+          {canPR && (
             <button type="button" className="btn" onClick={act(() => acts.onDraft!(t('card.prText')))} title={t('card.draftHint')}>
               <GitPullRequest size={15} /> {t('card.askPR')}
             </button>
@@ -332,27 +337,36 @@ export function SessionCard({ data, acts, anchor, sheet, onClose }: { data: Card
     return () => window.removeEventListener('resize', place)
   }, [anchor, sheet])
   // Shut by Escape or a press outside (not on its own button: that toggles it); the focus back to the button.
+  // (Its close kept in a ref: a new one each time its page draws must not set this up again, and take the focus back.)
+  const closeRef = useRef(onClose)
+  closeRef.current = onClose
   useEffect(() => {
     if (sheet) return
     const away = (e: PointerEvent) => {
       const n = e.target as Node
-      if (!box.current?.contains(n) && !anchor?.contains(n)) onClose()
+      if (!box.current?.contains(n) && !anchor?.contains(n)) closeRef.current()
     }
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return
       e.preventDefault()
       e.stopPropagation()
-      onClose()
+      closeRef.current()
       anchor?.focus()
     }
     document.addEventListener('pointerdown', away, true)
     document.addEventListener('keydown', onKey, true)
-    box.current?.focus({ preventScroll: true })
     return () => {
       document.removeEventListener('pointerdown', away, true)
       document.removeEventListener('keydown', onKey, true)
     }
-  }, [sheet, anchor, onClose])
+  }, [sheet, anchor])
+  // (The focus into it once, when it is there: placed after the first draw.)
+  const focused = useRef(false)
+  useEffect(() => {
+    if (sheet || !at || focused.current) return
+    focused.current = true
+    box.current?.focus({ preventScroll: true })
+  }, [sheet, at])
   if (sheet)
     return (
       <Dialog title={t('card.title')} onClose={onClose} hideTitle className="dlg scard-dialog">

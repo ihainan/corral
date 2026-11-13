@@ -16,7 +16,7 @@ html.term-mode body { position: fixed; inset: 0; }
 .term-root.inactive { visibility: hidden; pointer-events: none; }
 .term-root.dark, .term-vars.dark {
   --term-bg: #0f1115; --term-chrome: #15181d; --term-line: rgba(255, 255, 255, 0.07);
-  --term-key: #23272e; --term-key-active: #323741; --term-fg: #e6e8ec; --term-fg-2: #b0b6c1; --term-fg-3: #8a919e;
+  --term-key: #23272e; --term-key-active: #323741; --term-fg: #e6e8ec; --term-fg-2: #b0b6c1; --term-fg-3: #929aa7; --term-fg-way: #8a919e;
   --term-hover: rgba(255, 255, 255, 0.07);
   --term-accent-soft: rgba(74, 120, 236, 0.22); --term-accent-text: #8fadf7; --term-danger-text: #f07c73;
   --term-warn-text: #e8ac55; --term-ok-text: #63cc93;
@@ -27,7 +27,7 @@ html.term-mode body { position: fixed; inset: 0; }
 }
 .term-root.light, .term-vars.light {
   --term-bg: #ffffff; --term-chrome: #f6f7f9; --term-line: #e7e9ed;
-  --term-key: #ffffff; --term-key-active: #e7eaef; --term-fg: #16181d; --term-fg-2: #545c68; --term-fg-3: #707683;
+  --term-key: #ffffff; --term-key-active: #e7eaef; --term-fg: #16181d; --term-fg-2: #545c68; --term-fg-3: #646a76; --term-fg-way: #707683;
   --term-hover: #f0f2f5;
   --term-accent-soft: #edf2fc; --term-accent-text: #2c5fcc; --term-danger-text: #c2352f;
   --term-warn-text: #9a5f00; --term-ok-text: #1d7a45;
@@ -739,9 +739,9 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
   display: flex; align-items: baseline; gap: 8px; max-width: 100%; border: 0; background: none; padding: 2px 0;
   color: var(--term-fg-3); text-align: left; cursor: pointer; font: inherit; font-size: var(--fs-ui); line-height: var(--lh-ui);
 }
-.convo-work-head { font-size: var(--fs-sub); line-height: var(--lh-sub); }
+.convo-work-head { font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg-way); }
 .convo-work-head { align-self: flex-start; }
-.convo-work-said { margin: 0 0 2px 24px; color: var(--term-fg-3); font-size: var(--fs-sub); line-height: var(--lh-sub); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.convo-work-said { margin: 0 0 2px 24px; color: var(--term-fg-way); font-size: var(--fs-sub); line-height: var(--lh-sub); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .convo-work-sent { list-style: none; margin: 0 0 4px 24px; padding: 0; display: grid; gap: 2px; color: var(--term-fg-2); font-size: var(--fs-sub); line-height: var(--lh-sub); }
 .convo-work-sent li { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .convo-work-sent .link-btn { color: inherit; font: inherit; }
@@ -749,12 +749,15 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-work-sent-more { color: var(--term-fg-3); }
 @media (pointer: coarse) { .convo-work-head, .convo-step-head { padding: 8px 0; } }
 .convo-work-head:hover, .convo-step-head:hover { color: var(--term-fg); }
+/* (A run with nothing yet to open: a line, not a button.) */
+.convo-work-head.is-static, .convo-work-head.is-static:hover { cursor: default; color: var(--term-fg-way); }
+.convo-work-head.is-static:hover > .convo-step-ic { color: var(--term-fg-way); }
 .convo-work-head:focus-visible, .convo-step-head:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: 2px; border-radius: var(--r-xs); }
 .convo-chev { flex: none; align-self: center; color: inherit; transition: transform 0.15s var(--ease); }
 [aria-expanded='true'] > .convo-chev { transform: rotate(90deg); }
 /* The mark: placed by the line's height, not the font's baseline, so it sits
    the same in every face (a fixed offset from the baseline did not). */
-.convo-step-ic { flex: none; align-self: flex-start; margin-top: calc((var(--lh-ui) - 16px) / 2); color: var(--term-fg-3); }
+.convo-step-ic { flex: none; align-self: flex-start; margin-top: calc((var(--lh-ui) - 16px) / 2); color: var(--term-fg-way); }
 .convo-work-head > .convo-step-ic, .convo-step.is-thought .convo-step-ic { margin-top: calc((var(--lh-sub) - 16px) / 2); }
 .convo-work-head:hover > .convo-step-ic, .convo-step-head:hover > .convo-step-ic { color: var(--term-fg-2); }
 /* (What it is in outranks the pointer over it: after the hover, as strong.) */
@@ -785,13 +788,14 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 /* What the agent wrote between its steps: as its answer is. */
 .convo-mid { margin: 0; }
 /* (What it says on the way, a step quieter than the answer it ends with: C04/A04) */
-.convo-mid.is-brief { font-size: var(--fs-ui); line-height: var(--lh-ui); color: var(--term-fg-3); }
-/* (11-13: what it says on the way was the second grey, L*39, against the answer's L*8 and the steps' third
-   grey, L*45 — the two greys six apart and the words on the way read as the answer's. Now two layers: the
-   answer black; all that goes on the way, its words and its steps, the third grey, made lighter to L*50
-   (#707683, 4.6:1 on white — the lightest that small text may be, AA) and set apart from the second.) */
+.convo-mid.is-brief { font-size: var(--fs-ui); line-height: var(--lh-ui); color: var(--term-fg-way); }
+/* (11-13: what it says on the way was the second grey, L*39, beside the answer's L*8: read as one.
+   Now two layers — the answer black; what goes on the way, its words, a run's line, a thought, in a
+   grey of their own, --term-fg-way: #707683 (L*50, 4.6:1 on white, the lightest small text may be:
+   these are only ever on the thread's white). Not the third grey made lighter: that one is also on
+   tinted grounds — the side list, a diff — where it would fall under 4.5:1.) */
 /* Thinking: told apart from calls by its mark and a lighter, smaller line, in a run's line and as a step. */
-.convo-work-text.is-thought, .convo-step.is-thought .convo-step-head { color: var(--term-fg-3); font-size: var(--fs-sub); line-height: var(--lh-sub); }
+.convo-work-text.is-thought, .convo-step.is-thought .convo-step-head { color: var(--term-fg-way); font-size: var(--fs-sub); line-height: var(--lh-sub); }
 .convo-thinking { color: var(--term-fg-3); font-size: var(--fs-sub); line-height: var(--lh-sub); }
 .convo-work-body > .convo-note { margin: 4px 0; }
 /* What a rewind took back: a quiet line; what it was, faded, behind it. */

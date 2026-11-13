@@ -39,7 +39,7 @@ import (
 )
 
 const (
-	gitInfoTTL  = 10 * time.Second
+	gitInfoTTL  = 5 * time.Second // (kept by the pane: a folder changed meanwhile shows within this)
 	gitPRTTL    = 2 * time.Minute
 	gitOutMax   = 64 << 10
 	gitPaneMax  = 64
@@ -54,26 +54,31 @@ func gitInfoCommand(dir string) string {
 		`export GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 GIT_NO_LAZY_FETCH=1 LC_ALL=C; ` +
 		`cd -- "$1" 2>/dev/null || { echo 'E nodir'; exit 0; }; ` +
 		`command -v git >/dev/null 2>&1 || { echo 'E nogit'; exit 0; }; ` +
+		// (Every command bounded, killed where it does not end on being told to: -k where timeout(1) has it.
+		// A command out of time exits 124 (coreutils) or 143 (BusyBox), 137 killed; git's own failure is 128.)
+		`T=; K=; if command -v timeout >/dev/null 2>&1; then T=timeout; elif command -v gtimeout >/dev/null 2>&1; then T=gtimeout; fi; ` +
+		`[ -n "$T" ] && $T -k 1 2 true 2>/dev/null && K='-k 2'; ` +
+		`r() { s=$1; shift; if [ -n "$T" ]; then $T $K "$s" "$@"; else "$@"; fi; }; ` +
 		// (2.15: GIT_OPTIONAL_LOCKS. Before 2.36 core.fsmonitor is a hook's path: off is "", not "false".)
-		`set -- $(git version 2>/dev/null | sed -n 's/^git version \([0-9]*\)\.\([0-9]*\).*/\1 \2/p'); ` +
+		`set -- $(r 3 git version 2>/dev/null | sed -n 's/^git version \([0-9]*\)\.\([0-9]*\).*/\1 \2/p'); ` +
 		`[ -n "$2" ] && { [ "$1" -gt 2 ] || [ "$2" -ge 15 ]; } || { echo 'E oldgit'; exit 0; }; ` +
 		`if [ "$1" -gt 2 ] || [ "$2" -ge 36 ]; then FS=false; else FS=; fi; ` +
-		`T=; if command -v timeout >/dev/null 2>&1; then T=timeout; elif command -v gtimeout >/dev/null 2>&1; then T=gtimeout; fi; ` +
-		`g() { git -c core.fsmonitor=$FS -c core.quotepath=true -c i18n.logOutputEncoding=UTF-8 "$@"; }; ` +
-		`q() { if [ -n "$T" ]; then $T 3 git -c core.fsmonitor=$FS "$@"; else git -c core.fsmonitor=$FS "$@"; fi; }; ` +
-		`top=$(q rev-parse --show-toplevel 2>/dev/null) || { echo 'E norepo'; exit 0; }; ` +
+		`q() { r 3 git -c core.fsmonitor=$FS -c core.quotepath=true -c i18n.logOutputEncoding=UTF-8 "$@"; }; ` +
+		`top=$(q rev-parse --show-toplevel 2>/dev/null) || { case $? in 124|137|143) echo 'E timeout' ;; *) echo 'E norepo' ;; esac; exit 0; }; ` +
 		`printf 'TOP %s\n' "$top"; ` +
-		`if [ -n "$T" ] && st=$($T 6 git -c core.fsmonitor=$FS status --porcelain=v2 --branch --untracked-files=normal 2>/dev/null); then ` +
+		`if [ -n "$T" ] && st=$(r 6 git -c core.fsmonitor=$FS status --porcelain=v2 --branch --untracked-files=normal 2>/dev/null); then ` +
 		`printf '%s\n' "$st" | awk '/^# branch\./{print; next} /^[12u] /{c++} /^\? /{u++} END{printf "N %d %d\n", c, u}'; ` +
-		`else echo 'E status'; q symbolic-ref -q --short HEAD 2>/dev/null | sed 's/^/# branch.head /'; fi; ` +
+		// (The status not read: its branch at least — detached said only where git says so, exit 1.)
+		`else echo 'E status'; if b=$(q symbolic-ref -q --short HEAD 2>/dev/null); then printf '# branch.head %s\n' "$b"; elif [ $? -eq 1 ]; then echo '# branch.head (detached)'; fi; fi; ` +
 		`q log -1 --no-show-signature --encoding=UTF-8 --format='LAST %h %ct %s' 2>/dev/null; ` +
 		`base=$(q symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null); ` +
 		`[ -n "$base" ] || for b in origin/main origin/master; do q rev-parse -q --verify "refs/remotes/$b" >/dev/null 2>&1 && { base=$b; break; }; done; ` +
 		// (A partial clone may lack what the diff reads, and fetch it: no diff there.)
+		`partial=$(q config --get extensions.partialclone 2>/dev/null; q config --bool --get-regexp '^remote\..*\.promisor$' 2>/dev/null | grep ' true$'); ` +
 		`if [ -n "$base" ]; then printf 'BASE %s\n' "$base"; ` +
-		`if [ -n "$T" ] && [ -z "$(g config --get extensions.partialclone 2>/dev/null)$(g config --get-regexp '^remote\..*\.promisor$' 2>/dev/null)" ] && mb=$(q merge-base HEAD "$base" 2>/dev/null); then ` +
+		`if [ -n "$T" ] && [ -z "$partial" ] && mb=$(q merge-base HEAD "$base" 2>/dev/null); then ` +
 		`printf 'BASEAHEAD %s\n' "$(q rev-list --count "$mb..HEAD" 2>/dev/null)"; ` +
-		`d=$($T 4 git -c core.fsmonitor=$FS diff --no-ext-diff --no-textconv --shortstat "$mb" 2>/dev/null) && printf 'DIFF %s\n' "$d"; fi; fi; ` +
+		`d=$(r 4 git -c core.fsmonitor=$FS diff --no-ext-diff --no-textconv --shortstat "$mb" 2>/dev/null) && printf 'DIFF %s\n' "$d"; fi; fi; ` +
 		`exit 0`
 	return "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(dir)
 }
@@ -88,7 +93,8 @@ func gitPRCommand(dir string) string {
 		`cd -- "$1" 2>/dev/null || { echo PRERR; exit 0; }; ` +
 		`command -v gh >/dev/null 2>&1 || { echo NOGH; exit 0; }; ` +
 		`T=; if command -v timeout >/dev/null 2>&1; then T=timeout; elif command -v gtimeout >/dev/null 2>&1; then T=gtimeout; else echo PRERR; exit 0; fi; ` +
-		`if out=$($T 8 gh pr view --json number,state,title,url,isDraft 2>&1); then printf '%s\n' "$out"; ` +
+		`K=; $T -k 1 2 true 2>/dev/null && K='-k 2'; ` +
+		`if out=$($T $K 8 gh pr view --json number,state,title,url,isDraft 2>&1); then printf '%s\n' "$out"; ` +
 		`elif printf '%s' "$out" | grep -qi 'no pull requests found'; then echo NOPR; else echo PRERR; fi; exit 0`
 	return "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(dir)
 }
@@ -115,7 +121,7 @@ type gitDiff struct {
 
 type gitInfo struct {
 	Repo   bool   `json:"repo"`
-	Reason string `json:"reason,omitempty"` // (not a repo:) nodir, nogit, norepo, oldgit
+	Reason string `json:"reason,omitempty"` // (not a repo:) nodir, nogit, norepo, oldgit (timeout: not answered, not kept)
 	Dir    string `json:"dir,omitempty"`    // the folder asked of (the pane's own)
 	Root   string `json:"root,omitempty"`
 	// The branch; "" with Detached at a commit.
@@ -220,6 +226,9 @@ func parseShortstat(s string) *gitDiff {
 
 // errGitUnsaid: gh could not say (not signed in, no network, too slow).
 var errGitUnsaid = errors.New("gh could not say")
+
+// errGitNoDir: where the pane is was not told (an answer, not kept).
+var errGitNoDir = errors.New("the pane's folder is not known")
 
 type gitPR struct {
 	Number int    `json:"number"`
@@ -351,16 +360,24 @@ func (s *Server) gitAnswer(w http.ResponseWriter, r *http.Request, pr bool) {
 	}
 	// (Kept by the pane, so that a kept answer asks nothing of the host — not
 	// even where the pane is: that is a side operation too.)
-	v, err := s.gitCalls.do(ctx, kind+"\x00"+sess.ID+"\x00"+pane, ttl, func(ctx context.Context) (any, error) {
+	key := kind + "\x00" + sess.ID + "\x00" + pane
+	if pr {
+		// (A pull request is of a repository's branch: kept by them, as the page read them a moment
+		// before — not one of the folder before shown with the git state of the folder after.)
+		root, branch := r.URL.Query().Get("root"), r.URL.Query().Get("branch")
+		if len(root) > maxRemotePath || len(branch) > 256 {
+			writeError(w, http.StatusBadRequest, "bad_request", "no such branch")
+			return
+		}
+		key += "\x00" + root + "\x00" + branch
+	}
+	v, err := s.gitCalls.do(ctx, key, ttl, func(ctx context.Context) (any, error) {
 		cwd, err := s.paneCwd(ctx, sess, pane)
 		if err != nil {
 			return nil, err
 		}
 		if cwd == "" {
-			if pr {
-				return map[string]any{"gh": false, "pr": nil}, nil
-			}
-			return gitInfo{Reason: "nodir"}, nil
+			return nil, errGitNoDir // (herdr or tmux could not say, or said nothing: asked again next time)
 		}
 		out, err := sshx.Output(ctx, sess.Client(), gitCommand(pr, cwd), gitOutMax)
 		if err != nil {
@@ -374,10 +391,19 @@ func (s *Server) gitAnswer(w http.ResponseWriter, r *http.Request, pr bool) {
 			return map[string]any{"gh": gh, "pr": p}, nil
 		}
 		g := parseGitInfo(string(out))
+		if g.Reason == "timeout" {
+			return nil, errGitUnsaid
+		}
 		g.Dir = cwd
 		return g, nil
 	})
 	switch {
+	case errors.Is(err, errGitNoDir):
+		if pr {
+			writeJSON(w, http.StatusOK, map[string]any{"gh": false, "pr": nil})
+		} else {
+			writeJSON(w, http.StatusOK, gitInfo{Reason: "nodir"})
+		}
 	case errors.Is(err, sshx.ErrBusy):
 		writeError(w, http.StatusTooManyRequests, "busy", "the host is still answering earlier requests")
 	case err != nil:

@@ -104,6 +104,8 @@ export function chromeVars(s: Scheme): Record<string, string> {
     '--term-fg': readable(fg, [...surfaces, keyActive], 4.5, d),
     '--term-fg-2': readable(mix(fg, bg, 0.25), surfaces, 4.5, d),
     '--term-fg-3': readable(mix(fg, bg, 0.45), surfaces, 4.5, d),
+    // (What goes on the way — its words, a run's line, a thought: further from the answer's colour, only ever on the thread's own ground.)
+    '--term-fg-way': readable(mix(fg, bg, 0.52), [bg], 4.5, d),
     '--term-accent-soft': accentSoft,
     '--term-accent-text': readable(d ? '#8fadf7' : '#2c5fcc', surfaces, 4.5, d),
     '--term-danger-text': readable(s.theme.red ?? '#d0453e', surfaces, 4.5, d),

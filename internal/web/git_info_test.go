@@ -68,6 +68,9 @@ func TestParseGitPR(t *testing.T) {
 			t.Errorf("%s: %+v", bad, pr)
 		}
 	}
+	if g := parseGitInfo("E timeout\n"); g.Repo || g.Reason != "timeout" {
+		t.Errorf("timeout: %+v", g)
+	}
 	if g := parseGitInfo("E oldgit\n"); g.Repo || g.Reason != "oldgit" {
 		t.Errorf("old git: %+v", g)
 	}
@@ -151,6 +154,12 @@ func TestGitInfoCommandRuns(t *testing.T) {
 	run(root, "clone", "-q", "--filter=blob:none", "file://"+remote, part)
 	if g := info(part); !g.Repo || g.Base != "origin/main" || g.Diff != nil || g.Branch != "main" {
 		t.Fatalf("partial: %+v %+v", g, g.Diff)
+	}
+	// promisor=false is no partial clone: its diff is read.
+	run(clone, "config", "remote.origin.promisor", "false")
+	run(clone, "checkout", "-q", "feat")
+	if g := info(clone); g.Diff == nil {
+		t.Fatalf("promisor=false: %+v", g)
 	}
 	// No origin/HEAD (a repository made here): no base, and so no diff.
 	run(root, "init", "-q", "-b", "main", filepath.Join(root, "local"))
