@@ -284,3 +284,89 @@ func TestOnGatewayClock(t *testing.T) {
 		t.Fatalf("a failed look: %v", got)
 	}
 }
+
+// What was looked at is told by herdr's marks where both are of one
+// terminal: the same mark, looked at (its log found or not); a later one of
+// that terminal, a new "done"; another terminal's, by its log as before.
+func TestSeenKeptByMark(t *testing.T) {
+	sum := func(mark string) herdrSummary {
+		s := seenSum(herdr.StatusDone, "")
+		s.Workspaces[0].Agents[0].Mark = mark
+		return s
+	}
+	told := func(kept, now string, wrote map[string]int64) string {
+		q := newSeenRounds(map[string]store.AgentSeen{"w1:p1": {At: 1000, Mark: kept}}, nil)
+		_, g := q.wantsLook()
+		q.lookedOver(wrote, g)
+		s := sum(now)
+		q.number(&s, false)
+		return q.withSeen(s).Workspaces[0].Agents[0].Status
+	}
+	for _, c := range []struct {
+		kept, now string
+		wrote     map[string]int64
+		want      string
+	}{
+		{"term_a#5", "term_a#5", nil, herdr.StatusIdle},                             // (no log found: the mark tells)
+		{"term_a#5", "term_a#5", map[string]int64{"w1:p1": 9000}, herdr.StatusIdle}, // (a log written since: the mark tells)
+		{"term_a#5", "term_a#9", map[string]int64{"w1:p1": 900}, herdr.StatusDone},  // (a later status of the same terminal)
+		{"term_a#5", "term_b#5", map[string]int64{"w1:p1": 900}, herdr.StatusIdle},  // (another terminal: its log, not written since)
+		{"term_a#5", "term_b#5", nil, herdr.StatusDone},                             // (another terminal, no log)
+		{"", "term_a#5", nil, herdr.StatusDone},                                     // (kept before marks: its log, none)
+		{"term_a#5", "", map[string]int64{"w1:p1": 900}, herdr.StatusIdle},          // (a herdr that says none: its log)
+	} {
+		if got := told(c.kept, c.now, c.wrote); got != c.want {
+			t.Errorf("kept %q, now %q, wrote %v: %s, want %s", c.kept, c.now, c.wrote, got, c.want)
+		}
+	}
+	// A look keeps the mark of its round (filled in by a summary after the
+	// change that began it); herdr lost and back, the same mark is the one
+	// looked at, no log needed.
+	var kept store.AgentSeen
+	q := newSeenRounds(nil, func(_ string, a store.AgentSeen) error { kept = a; return nil })
+	q.changed("w1:p1", herdr.StatusDone, "")
+	s := sum("term_a#7")
+	q.number(&s, false)
+	if !marked(q, "w1:p1", s.Workspaces[0].Agents[0].Round, "") || kept.Mark != "term_a#7" {
+		t.Fatalf("kept %+v", kept)
+	}
+	q.lostHerdr()
+	s = sum("term_a#7")
+	q.number(&s, false)
+	_, g := q.wantsLook()
+	q.lookedOver(nil, g)
+	s = sum("term_a#7")
+	q.number(&s, false)
+	if got := q.withSeen(s).Workspaces[0].Agents[0].Status; got != herdr.StatusIdle {
+		t.Fatalf("back, the same mark: %s", got)
+	}
+	// Its mark filled in after the round began does not make the look late.
+	q = newSeenRounds(nil, nil)
+	q.changed("w1:p1", herdr.StatusDone, "")
+	round, _ := q.current("w1:p1")
+	s = sum("term_a#8")
+	q.number(&s, false)
+	if !marked(q, "w1:p1", round.n, "") {
+		t.Fatal("a look in its round refused once its mark was known")
+	}
+}
+
+func TestStatusMark(t *testing.T) {
+	var snap herdr.Snapshot
+	if err := json.Unmarshal([]byte(`{"workspaces":[{"workspace_id":"w2","label":"300 Coding"}],"agents":[{"agent":"codex","agent_status":"done","pane_id":"w2:p1","workspace_id":"w2","terminal_id":"term_6600d18b434b42","state_change_seq":200}],"panes":[]}`), &snap); err != nil {
+		t.Fatal(err)
+	}
+	sum := summarize("x", &snap, &agentTimes{at: map[string]agentTime{}}, false)
+	if got := sum.Workspaces[0].Agents[0].Mark; got != "term_6600d18b434b42#200" {
+		t.Fatalf("mark %q", got)
+	}
+	if b, _ := json.Marshal(sum); strings.Contains(string(b), "term_6600") {
+		t.Fatal("the mark is sent")
+	}
+	if statusMark(herdr.Pane{TerminalID: "t"}) != "" || statusMark(herdr.Pane{StateSeq: 3}) != "" {
+		t.Fatal("a mark of half")
+	}
+	if !sameTerminal("term_a#5", "term_a#9") || sameTerminal("term_a#5", "term_b#5") || sameTerminal("", "term_a#5") || sameTerminal("", "") {
+		t.Fatal("sameTerminal")
+	}
+}

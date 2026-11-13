@@ -43,6 +43,13 @@ const seenKeptFor = 30 * 24 * time.Hour
 // rather than one looked at told anew); a log not found, or written since:
 // "done". (When it was looked at is taken while it is still that round,
 // and kept before it is noted: kept, or not noted.)
+//
+// Where herdr names its statuses (see statusMark), what was kept says which
+// one was looked at, and a "done" since a watcher began is told by that
+// instead: the same status of the same terminal is the one looked at, a
+// later one is not, whether the agent's log is found or not (a Codex that
+// keeps none open, say). A terminal begun again (herdr started anew) is
+// told by the log, as before.
 type seenRounds struct {
 	mu     sync.Mutex
 	at     map[string]seenRound // pane → the round it is in
@@ -60,7 +67,8 @@ type seenRounds struct {
 type seenRound struct {
 	status, session string
 	n               int64
-	at              int64 // (seen: when it was looked at, unix ms)
+	at              int64  // (seen: when it was looked at, unix ms)
+	mark            string // which status of herdr's, as its last summary said (see statusMark)
 }
 
 // changed: pane's agent went to status to (gone: forgotten). session is
@@ -120,6 +128,10 @@ func (r *seenRounds) number(sum *herdrSummary, old bool) {
 				}
 				x = r.next(a.PaneID, a.Status, a.Session)
 			}
+			if !old && a.Mark != "" && x.mark != a.Mark {
+				x.mark = a.Mark // (the latest: a look keeps what it was when looked at)
+				r.at[a.PaneID] = x
+			}
 			a.Round = x.n
 		}
 	}
@@ -148,7 +160,7 @@ func (r *seenRounds) markSeen(pane string, round int64, session string) (bool, e
 		r.mu.Unlock()
 		return false, nil
 	}
-	k := store.AgentSeen{Session: session, At: time.Now().UnixMilli()}
+	k := store.AgentSeen{Session: session, At: time.Now().UnixMilli(), Mark: x.mark}
 	keep, gen := r.keep, r.gen
 	r.mu.Unlock()
 	if keep != nil {
@@ -157,7 +169,7 @@ func (r *seenRounds) markSeen(pane string, round int64, session string) (bool, e
 		}
 	}
 	r.mu.Lock()
-	if y, ok := r.at[pane]; !ok || y != x {
+	if y, ok := r.at[pane]; !ok || y.n != x.n { // (its mark may have been filled in meanwhile: the same round)
 		r.mu.Unlock()
 		return false, nil // (another round meanwhile: what was kept is of before it)
 	}
@@ -220,7 +232,7 @@ func (r *seenRounds) lostHerdr() {
 			if r.prior == nil {
 				r.prior = map[string]store.AgentSeen{}
 			}
-			r.prior[p] = store.AgentSeen{Session: x.session, At: x.at}
+			r.prior[p] = store.AgentSeen{Session: x.session, At: x.at, Mark: x.mark}
 		}
 		delete(r.seen, p)
 	}
@@ -244,6 +256,16 @@ func (r *seenRounds) lookedOver(wrote map[string]int64, gen int64) {
 	}
 }
 
+// lookedBefore: a, "done" now, is the "done" k was kept of — told by
+// herdr's marks where both are of one terminal, else by its log. (With
+// r.mu held.)
+func (r *seenRounds) lookedBefore(k store.AgentSeen, a herdrAgent) bool {
+	if sameTerminal(k.Mark, a.Mark) {
+		return k.Mark == a.Mark
+	}
+	return !r.looked || r.wrote[a.PaneID] > 0 && r.wrote[a.PaneID] <= k.At
+}
+
 func (r *seenRounds) setPoke(f func()) {
 	r.mu.Lock()
 	r.poke = f
@@ -265,7 +287,7 @@ func (r *seenRounds) withSeen(sum herdrSummary) herdrSummary {
 			}
 			if x, ok := r.seen[a.PaneID]; ok && x.n == a.Round && x.session == a.Session {
 				w.Agents[j].Status = herdr.StatusIdle
-			} else if k, ok := r.prior[a.PaneID]; ok && k.Session == a.Session && (!r.looked || r.wrote[a.PaneID] > 0 && r.wrote[a.PaneID] <= k.At) {
+			} else if k, ok := r.prior[a.PaneID]; ok && k.Session == a.Session && r.lookedBefore(k, a) {
 				w.Agents[j].Status = herdr.StatusIdle // (looked at before this watcher: see seenRounds)
 			}
 		}

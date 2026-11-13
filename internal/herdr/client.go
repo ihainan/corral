@@ -109,6 +109,13 @@ type Pane struct {
 	AgentSession *struct {
 		Value string `json:"value"`
 	} `json:"agent_session,omitempty"`
+	// TerminalID names the terminal the pane runs (a new one when herdr or
+	// the pane starts again); StateSeq is herdr's count of status changes
+	// at its agent's last one. Together they tell one status of the pane's
+	// from another, whatever the gateway saw meanwhile. (In the agents'
+	// list only, and not from every herdr: "", 0 where not said.)
+	TerminalID string `json:"terminal_id,omitempty"`
+	StateSeq   int64  `json:"state_change_seq,omitempty"`
 }
 
 // Status values herdr reports for agents.

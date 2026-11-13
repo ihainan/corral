@@ -65,6 +65,34 @@ type herdrAgent struct {
 	// person, as this watcher counted (see chimeCounts).
 	ChimeDone  int64 `json:"chime_done,omitempty"`
 	ChimeNeeds int64 `json:"chime_needs,omitempty"`
+	// Mark: which status of herdr's this is (see statusMark); the gateway's
+	// own, not sent.
+	Mark string `json:"-"`
+	// For a Codex: BareTitle, its title names only where it runs (or
+	// nothing); ThreadTitle, its thread's name — out of its title, or, the
+	// title bare, as Codex's database has it (see codexTitler). "" where
+	// not known.
+	ThreadTitle string `json:"thread_title,omitempty"`
+	BareTitle   bool   `json:"bare_title,omitempty"`
+}
+
+// statusMark names a pane's status as herdr counts them: its terminal and
+// herdr's count of status changes at the last one ("" where herdr says
+// neither). The same mark later is the same status, not a new one of the
+// same name — what tells a "done" looked at before a watcher began (a
+// gateway started again, a session reconnected) from one since, where the
+// agent's log cannot tell it (see seenRounds).
+func statusMark(p herdr.Pane) string {
+	if p.TerminalID == "" || p.StateSeq <= 0 || len(p.TerminalID) > 100 {
+		return ""
+	}
+	return p.TerminalID + "#" + strconv.FormatInt(p.StateSeq, 10)
+}
+
+// sameTerminal: two marks are of one terminal (so their counts compare).
+func sameTerminal(a, b string) bool {
+	i, j := strings.LastIndexByte(a, '#'), strings.LastIndexByte(b, '#')
+	return i > 0 && j > 0 && a[:i] == b[:j]
 }
 
 type herdrWorkspace struct {
@@ -286,9 +314,10 @@ func summarize(session string, s *herdr.Snapshot, times *agentTimes, old bool) h
 		if !ok {
 			continue
 		}
+		thread, bare := codexTitleParts(p.Agent, p.Title, p.Cwd)
 		out.Workspaces[i].Agents = append(out.Workspaces[i].Agents,
-			herdrAgent{PaneID: p.ID, Agent: p.Agent, Status: p.AgentStatus, Title: truncate(p.Title, 120), Cwd: p.Cwd, Session: agentSession(p), Since: paneSince(p, times, old),
-				Tab: p.TabID, TabLabel: truncate(tabs[p.TabID], 120), Tabs: tabCount[p.WorkspaceID], Label: truncate(named[p.ID], 120)})
+			herdrAgent{ThreadTitle: truncate(thread, 120), BareTitle: bare, PaneID: p.ID, Agent: p.Agent, Status: p.AgentStatus, Title: truncate(p.Title, 120), Cwd: p.Cwd, Session: agentSession(p), Since: paneSince(p, times, old),
+				Tab: p.TabID, TabLabel: truncate(tabs[p.TabID], 120), Tabs: tabCount[p.WorkspaceID], Label: truncate(named[p.ID], 120), Mark: statusMark(p)})
 		if p.AgentStatus == herdr.StatusBlocked {
 			out.Waiting++
 		}
@@ -643,6 +672,14 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 		return got, whole, nil
 	})
 	go cmds.run(ctx)
+	titles := newCodexTitler(func(ctx context.Context) (map[string]string, error) {
+		out, err := sshx.Output(ctx, sess.Client(), codexTitlesCommand(socket), codexTitleMax)
+		if err != nil {
+			return nil, err
+		}
+		return parseCodexTitles(string(out)), nil
+	})
+	go titles.run(ctx)
 	// When each agent last wrote to its log: what the panes the gateway
 	// never saw change are shown by (see paneSince). Looked for beside the
 	// watch, only while a pane needs it, and at most once a minute: a slow
@@ -713,6 +750,7 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 		bg.decorate(&told)
 		cmds.decorate(&told)
 		chimes.decorate(&told)
+		titles.decorate(&told)
 		if b, err := json.Marshal(told); err == nil {
 			sess.PublishMeta(b)
 		}
@@ -749,6 +787,7 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 			s.herdrSocks.setView(sess.ID, snap)
 			sum := summarize(name, snap, times, false)
 			rounds.number(&sum, false)
+			titles.track(&sum)
 			for _, w := range sum.Workspaces {
 				for _, a := range w.Agents {
 					sid := s.bgSession(sess, a.PaneID, a.Session)
@@ -789,6 +828,7 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 	bg.setPoke(again)
 	cmds.setPoke(again)
 	chimes.setPoke(again)
+	titles.setPoke(again)
 	// Subagents found back by the prober's own look, the turn's end that
 	// would have told it not seen (two changes in one snapshot): the
 	// "finished" held back goes, as for a turn ending now, if it is done

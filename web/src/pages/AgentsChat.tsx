@@ -25,9 +25,9 @@ import { downloadPath, PictureDialog } from '../terminal/picture'
 import { IMAGE_EXT, TextPreview } from '../terminal/textPreview'
 import { attach, ATTACH_LABEL, AttachStrip, takeOut } from '../terminal/attach'
 import { answerable, asking, useConversation, type ConvoEntry } from '../terminal/conversation'
-import { ackBg, waitingTitle, isCodex, isOpenCode, listAgents, matchQuery, paneTitle, readsLog, useRunningSessions, type AgentRow } from '../terminal/agents'
+import { ackBg, waitingTitle, isCodex, isOpenCode, listAgents, matchQuery, paneName, paneTitle, readsLog, useRunningSessions, type AgentRow } from '../terminal/agents'
 import { dayBefore, dayStart, foldAt, foldedDay, listOrder, type RowCmds } from '../terminal/agentOrder'
-import { prefetchConversation } from '../terminal/conversation'
+import { conversationReadable, prefetchConversation } from '../terminal/conversation'
 import { holdTermMode, tmuxKey } from '../terminal/chatSend'
 import { isCommand, pairSent, sameMessage, type Submission } from '../terminal/sentSeen'
 import { viewRefusal } from '../terminal/sendView'
@@ -58,6 +58,39 @@ const ONLY_MINE = 'corral.agentsOnlyMine'
 const FROM_LIST = { agentsFromList: true }
 // (Longer than going through a picker of its own from here takes, between two reads.)
 const PANEL_AFTER_MS = 1500
+// (How long one with no conversation to read is in front before it counts as looked at: not one passed over.)
+const NONE_SEEN_AFTER_MS = 1000
+
+// The "done" ones gone on from before their conversation came (see
+// doneVisit), read one at a time: those with none to read marked seen.
+let noneChecks: Promise<void> = Promise.resolve()
+const NONE_CHECK_TRIES = 3
+const NONE_CHECK_AGAIN_MS = 3000
+const noneChecking = new Set<string>()
+function seenIfNone(v: { sid: string; pane: string; round: number; session: string }) {
+  const key = JSON.stringify(v)
+  if (noneChecking.has(key)) return
+  noneChecking.add(key)
+  noneChecks = noneChecks.then(async () => {
+    try {
+      for (let tries = 1; ; tries++) {
+        try {
+          if (!(await conversationReadable(v.sid, v.pane)))
+            await api('POST', `/api/sessions/${v.sid}/herdr/panes/${encodeURIComponent(v.pane)}/seen`, { round: v.round, session: v.session })
+          return
+        } catch (e) {
+          // (The host busy with what was asked before: a little later, a few times.)
+          if (!(e instanceof ApiError && e.code === 'busy') || tries >= NONE_CHECK_TRIES) throw e
+          await new Promise((r) => setTimeout(r, NONE_CHECK_AGAIN_MS))
+        }
+      }
+    } catch {
+      // (Not known: it stays as it is, to be looked at again.)
+    } finally {
+      noneChecking.delete(key)
+    }
+  })
+}
 // Over the page, what an Escape would be meant for.
 const ESC_HELD = '[aria-modal="true"], [role="menu"], [role="dialog"], .convo-search, .convo-sub-body'
 // What is left without the "/" the commands button put in, or null when a word has been typed on to it.
@@ -153,7 +186,9 @@ export const dirName = (cwd?: string): string => {
 // the agent gave the session, and it does not change under them. What the
 // agent called it goes under it. (A session that is not in a workspace of
 // its own has no such name: see whereOf.)
-const labelOf = (e: Entry, said: string, hosts: number): { title: string; where: string } => {
+// (named: said is a name of the work's, not the folder or program it was
+// told by for want of one — that says nothing under a workspace's name.)
+const labelOf = (e: Entry, said: string, hosts: number, named = true): { title: string; where: string } => {
   const r = e.row
   const ws = r && r.ws !== '~' ? r.ws : ''
   // (A name given its pane, the most of the person's own: before its workspace's.)
@@ -161,7 +196,7 @@ const labelOf = (e: Entry, said: string, hosts: number): { title: string; where:
   if (!r || (!ws && !own)) return { title: said, where: whereOf(e, hosts) }
   const host = hosts > 1 ? e.s.host_name : ''
   const title = own || ws
-  return { title, where: [host, own ? ws : '', tabOf(r), said !== title ? said : '', agentMark(r.a.agent) ? '' : r.a.agent].filter(Boolean).join(' · ') }
+  return { title, where: [host, own ? ws : '', tabOf(r), named && said !== title ? said : '', agentMark(r.a.agent) ? '' : r.a.agent].filter(Boolean).join(' · ') }
 }
 
 // Commands its agent left running in the background, as its row says them:
@@ -829,7 +864,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       return { title: convo.title || convo.bind.title, status: asks ? 'blocked' : st === 'busy' ? 'working' : st === 'idle' || dialog ? 'idle' : 'unknown', dialog, cmds: st && st !== 'waiting' ? convo.bgCmds : undefined, program: convo.bind.agent }
     }
     if (!row) return null
-    const title = (convo.bind?.pane === row.a.pane_id && convo.title) || paneTitle(row.a.title) || dirName(row.a.cwd)
+    const title = (convo.bind?.pane === row.a.pane_id && convo.title) || paneName(row.a) || dirName(row.a.cwd)
     // (herdr's name for a workspace at home, "~": nothing to tell)
     // (Its turn over, with subagents out or that being read for: the thread
     // is of a turn that ended, whatever the list says of the agent.)
@@ -889,7 +924,13 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   const visit = [cur.key, cur.s.id, row?.a.round ?? 0, row?.a.session ?? ''].join(' ')
   if (shownSince.current.key !== visit) shownSince.current = { key: visit, at: Date.now() }
   const freshSince = Math.max(shownSince.current.at, visibleAt)
-  const doneHere = herdr && active && !document.hidden && (convo.status === 'ready' || convo.status === 'none') && !convo.failing && convo.readAt() >= freshSince && row && !row.lost && row.status === 'done' && row.a.status === 'done' && !row.bg && row.a.bg !== 'checking' ? { pane: row.a.pane_id, round: row.a.round ?? 0, session: row.a.session ?? '', fresh: freshSince } : undefined
+  // (One whose conversation cannot be read — a Codex that keeps no log
+  // open, say — shows only that, whatever a read brings: in front a moment,
+  // it is looked at. Not waited for a read, which can take seconds there,
+  // and the person gone on meanwhile: it stayed "done" however often it was
+  // opened.)
+  const shownNone = convo.status === 'none' && Date.now() - freshSince >= NONE_SEEN_AFTER_MS
+  const doneHere = herdr && active && !document.hidden && (convo.status === 'ready' || convo.status === 'none') && !convo.failing && (convo.readAt() >= freshSince || shownNone) && row && !row.lost && row.status === 'done' && row.a.status === 'done' && !row.bg && row.a.bg !== 'checking' ? { pane: row.a.pane_id, round: row.a.round ?? 0, session: row.a.session ?? '', fresh: freshSince } : undefined
   const doneKey = doneHere && JSON.stringify(doneHere)
   // (Done and in front, its fresh read not in yet: looked at again every 2s —
   // a read that brought nothing new draws nothing, so nothing else asks.)
@@ -903,8 +944,30 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   useEffect(() => {
     if (!doneKey) return
     const { pane, round, session } = JSON.parse(doneKey) as { pane: string; round: number; session: string }
+    seenSent.current = JSON.stringify({ sid, pane, round, session })
     api('POST', `/api/sessions/${sid}/herdr/panes/${encodeURIComponent(pane)}/seen`, { round, session }).catch(() => {})
   }, [sid, doneKey])
+  // Gone on from a "done" one before its conversation came (a read there
+  // can take seconds: a Codex that keeps no log open, say), after it was in
+  // front a moment: what it is is read afterwards, and where there is no
+  // conversation to read — all its view would have shown — the round it was
+  // in front for is marked seen. One with a conversation is not: that is to
+  // be seen. (The gateway marks nothing of a round over meanwhile.)
+  const doneVisit = herdr && active && !document.hidden && row && !row.lost && row.status === 'done' && row.a.status === 'done' && !row.bg ? JSON.stringify({ sid, pane: row.a.pane_id, round: row.a.round ?? 0, session: row.a.session ?? '' }) : ''
+  const seenSent = useRef('')
+  const convoStatus = useRef(convo.status)
+  convoStatus.current = convo.status
+  useEffect(() => {
+    if (!doneVisit) return
+    const began = Date.now()
+    return () => {
+      // (Whatever showed instead of a conversation — reading, none, a read
+      // refused while the host was busy — is read afresh: only one shown is
+      // left to the view's own rule.)
+      if (seenSent.current === doneVisit || convoStatus.current === 'ready' || Date.now() - began < NONE_SEEN_AFTER_MS) return
+      seenIfNone(JSON.parse(doneVisit))
+    }
+  }, [doneVisit])
   // Looked at while its subagents have been out too long: no longer among
   // those to look at, on this device (see agents.ts withBg).
   const staleAt = herdr && active && row && !row.lost && row.bg === 'stale' ? (row.a.bg_since ?? 0) : 0
@@ -1002,9 +1065,10 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       }
       if (e.row) {
         const r = e.row
-        const said = (current && agent?.title) || keptTitle(titles, e) || paneTitle(r.a.title) || dirName(r.a.cwd) || r.a.agent
+        const named = (current && convo.bind?.pane === r.a.pane_id && convo.title) || keptTitle(titles, e) || paneName(r.a)
+        const said = named || dirName(r.a.cwd) || r.a.agent
         const st = current && agent && !r.bg ? agent.status : r.status
-        return { key: e.key, ...labelOf(e, said, hosts), now: r.lost || r.bg || st !== 'blocked' ? undefined : glanceOf(e.s.id, e.pane, st, r.a.since) || undefined /* (said only of one waiting on the person) */, program: r.a.agent, status: st, bg: r.lost ? undefined : r.bg, cmds: cmdsOf(r), since: r.lost ? undefined : r.bg ? r.a.bg_since : r.a.since, current, pinned: pinAt(e.key), onPick: () => onPick(e), menu: () => rowMenu.current(e) }
+        return { key: e.key, ...labelOf(e, said, hosts, !!named), now: r.lost || r.bg || st !== 'blocked' ? undefined : glanceOf(e.s.id, e.pane, st, r.a.since) || undefined /* (said only of one waiting on the person) */, program: r.a.agent, status: st, bg: r.lost ? undefined : r.bg, cmds: cmdsOf(r), since: r.lost ? undefined : r.bg ? r.a.bg_since : r.a.since, current, pinned: pinAt(e.key), onPick: () => onPick(e), menu: () => rowMenu.current(e) }
       }
       const title = (current && agent?.title) || keptTitle(titles, e) || `${e.s.host_name} · ${sessionWhich(e.s, all)}`
       return { key: e.key, title, where: whereOf(e, hosts), program: current ? agent?.program : undefined, status: current && agent ? agent.status : 'unknown', cmds: current ? agent?.cmds : tmuxCmdsOf(e), current, pinned: pinAt(e.key), onPick: () => onPick(e), menu: () => rowMenu.current(e) }
@@ -2438,7 +2502,10 @@ function PhoneList({ entries, all, titles, query, onQuery, onPick }: { entries: 
   })
   const hosts = hostCount(entries)
   // (Searched: by its title, where it is, its program; "only mine" still holds.)
-  const labelled = (e: Entry) => labelOf(e, keptTitle(titles, e) || (e.row ? paneTitle(e.row.a.title) || dirName(e.row.a.cwd) || e.row.a.agent : `${e.s.host_name} · ${sessionWhich(e.s, all)}`), hosts)
+  const labelled = (e: Entry) => {
+    const named = keptTitle(titles, e) || (e.row ? paneName(e.row.a) : '')
+    return labelOf(e, named || (e.row ? dirName(e.row.a.cwd) || e.row.a.agent : `${e.s.host_name} · ${sessionWhich(e.s, all)}`), hosts, !!named)
+  }
   const shown = (mine ? list.filter((e) => stateOf(e) === 'blocked' || stateOf(e) === 'done') : list).filter((e) => {
     if (!query.trim()) return true
     const { title, where } = labelled(e)

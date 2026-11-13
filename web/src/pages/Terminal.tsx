@@ -38,7 +38,7 @@ import { offerAlerts } from '../push'
 import { adoptComposer, composerWasOpen, rememberComposer } from '../terminal/composerOpen'
 import { promptSuggestion } from '../terminal/suggestion'
 import { sessionWhich } from '../terminal/sessionName'
-import { sessionAgents, waitingAgents } from '../terminal/agents'
+import { paneName, sessionAgents, waitingAgents } from '../terminal/agents'
 import { NewTabDialog } from '../terminal/NewSessionDialog'
 import { screenReaderOn, useScreenReader } from '../terminal/screenReader'
 import { knownSession } from '../terminal/agents'
@@ -2765,7 +2765,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
             label={t('herdr.waitingMenu')}
             heading={t('herdr.waitingMenu')}
             onOpenChange={setWaitingOpen}
-            items={() => waitingShown.current.map(({ a, ws }) => ({ label: [ws && ws !== '~' ? ws : '', a.agent, a.title].filter(Boolean).join(' · '), onSelect: () => setReplyTo(a) }))}
+            items={() => waitingShown.current.map(({ a, ws }) => ({ label: [ws && ws !== '~' ? ws : '', a.agent, paneName(a)].filter(Boolean).join(' · '), onSelect: () => setReplyTo(a) }))}
             button={(open, toggle) => (
               <button
                 className="icon-btn herdr-btn"

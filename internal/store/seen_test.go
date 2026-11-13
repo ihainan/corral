@@ -20,22 +20,22 @@ func TestAgentsSeen(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	must(s.SetAgentSeen(ctx, 1, 2, "a", "w1:p1", AgentSeen{"s1", 2000}))
-	must(s.SetAgentSeen(ctx, 1, 2, "a", "w1:p1", AgentSeen{"s0", 1500})) // (late, older)
-	must(s.SetAgentSeen(ctx, 1, 2, "a", "w1:p2", AgentSeen{"s2", 100}))
-	must(s.SetAgentSeen(ctx, 1, 2, "b", "w1:p1", AgentSeen{"x", 2000}))
-	must(s.SetAgentSeen(ctx, 9, 2, "a", "w1:p1", AgentSeen{"y", 2000}))
+	must(s.SetAgentSeen(ctx, 1, 2, "a", "w1:p1", AgentSeen{"s1", 2000, ""}))
+	must(s.SetAgentSeen(ctx, 1, 2, "a", "w1:p1", AgentSeen{"s0", 1500, ""})) // (late, older)
+	must(s.SetAgentSeen(ctx, 1, 2, "a", "w1:p2", AgentSeen{"s2", 100, ""}))
+	must(s.SetAgentSeen(ctx, 1, 2, "b", "w1:p1", AgentSeen{"x", 2000, ""}))
+	must(s.SetAgentSeen(ctx, 9, 2, "a", "w1:p1", AgentSeen{"y", 2000, ""}))
 	got, err := s.AgentsSeen(ctx, 1, 2, "a", 1000)
 	must(err)
-	if len(got) != 1 || got["w1:p1"] != (AgentSeen{"s1", 2000}) {
+	if len(got) != 1 || got["w1:p1"] != (AgentSeen{"s1", 2000, ""}) {
 		t.Fatalf("got %+v", got)
 	}
-	must(s.SetAgentSeen(ctx, 1, 2, "a", "w1:p1", AgentSeen{"s9", 2000})) // (one millisecond: the first stands)
+	must(s.SetAgentSeen(ctx, 1, 2, "a", "w1:p1", AgentSeen{"s9", 2000, ""})) // (one millisecond: the first stands)
 	if got, _ := s.AgentsSeen(ctx, 1, 2, "a", 0); got["w1:p1"].Session != "s1" {
 		t.Fatalf("same millisecond: %+v", got)
 	}
-	must(s.SetAgentSeen(ctx, 1, 2, "a", "w1:p1", AgentSeen{"s3", 3000}))
-	if got, _ := s.AgentsSeen(ctx, 1, 2, "a", 0); got["w1:p1"] != (AgentSeen{"s3", 3000}) || len(got) != 1 {
+	must(s.SetAgentSeen(ctx, 1, 2, "a", "w1:p1", AgentSeen{"s3", 3000, "term_1#7"}))
+	if got, _ := s.AgentsSeen(ctx, 1, 2, "a", 0); got["w1:p1"] != (AgentSeen{"s3", 3000, "term_1#7"}) || len(got) != 1 {
 		t.Fatalf("later: %+v", got)
 	}
 	if got, _ := s.AgentsSeen(ctx, 1, 2, "b", 0); got["w1:p1"].Session != "x" {

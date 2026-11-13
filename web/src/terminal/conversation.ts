@@ -368,6 +368,24 @@ export async function prefetchConversation(sessionId: string, pane: string | und
   return true
 }
 
+// conversationReadable reads whether a pane's conversation can be read at
+// all: false where it cannot (no log found, or not told whose), all its
+// view would show being that. Not a view (nothing is marked looked at by
+// it). What it read is kept, as a prefetch's, where nothing is.
+export async function conversationReadable(sessionId: string, pane: string | undefined, signal?: AbortSignal): Promise<boolean> {
+  const key = keyOf(sessionId, pane)
+  const account = authGen()
+  const q = new URLSearchParams({ gen: '0', rev: '0' })
+  if (pane) q.set('pane', pane)
+  const a = await api<Answer>('GET', `/api/sessions/${sessionId}/conversation?${q}`, undefined, { signal, timeoutMs: 25000 })
+  if (authGen() !== account) throw new ApiError(0, 'aborted', 'signed out meanwhile')
+  if (!kept.has(key)) {
+    const entries = a.available ? a.entries.slice(-MAX) : []
+    remember(key, a.gen, a.available ? a.rev : 0, new Map(entries.map((e) => [e.seq, e])), a)
+  }
+  return a.available
+}
+
 // The last entries kept of a pane's conversation (read by a view or a
 // prefetch), oldest first; null when none is kept. For a glance at what it
 // is doing from the list: nothing read for it.

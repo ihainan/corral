@@ -6,7 +6,8 @@ import "context"
 // agent session.
 type AgentSeen struct {
 	Session string
-	At      int64 // (unix ms)
+	At      int64  // (unix ms)
+	Mark    string // which status of herdr's it was ("" where not known)
 }
 
 // AgentsSeen gives what was looked at of a herdr server's panes (server:
@@ -16,7 +17,7 @@ func (s *Store) AgentsSeen(ctx context.Context, ownerID, hostID int64, server st
 	if _, err := s.db.ExecContext(ctx, `DELETE FROM agent_seen WHERE owner_id = ? AND host_id = ? AND server = ? AND seen_at < ?`, ownerID, hostID, server, since); err != nil {
 		return nil, err
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT pane, session, seen_at FROM agent_seen WHERE owner_id = ? AND host_id = ? AND server = ?`, ownerID, hostID, server)
+	rows, err := s.db.QueryContext(ctx, `SELECT pane, session, seen_at, mark FROM agent_seen WHERE owner_id = ? AND host_id = ? AND server = ?`, ownerID, hostID, server)
 	if err != nil {
 		return nil, err
 	}
@@ -25,7 +26,7 @@ func (s *Store) AgentsSeen(ctx context.Context, ownerID, hostID int64, server st
 	for rows.Next() {
 		var pane string
 		var a AgentSeen
-		if err := rows.Scan(&pane, &a.Session, &a.At); err != nil {
+		if err := rows.Scan(&pane, &a.Session, &a.At, &a.Mark); err != nil {
 			return nil, err
 		}
 		out[pane] = a
@@ -36,8 +37,8 @@ func (s *Store) AgentsSeen(ctx context.Context, ownerID, hostID int64, server st
 // SetAgentSeen notes a pane's agent "done" looked at (not over a later look:
 // two noted out of order keep the later; two at one millisecond, the first).
 func (s *Store) SetAgentSeen(ctx context.Context, ownerID, hostID int64, server, pane string, a AgentSeen) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO agent_seen (owner_id, host_id, server, pane, session, seen_at) VALUES (?, ?, ?, ?, ?, ?)
-		ON CONFLICT(owner_id, host_id, server, pane) DO UPDATE SET session = excluded.session, seen_at = excluded.seen_at
-		WHERE excluded.seen_at > agent_seen.seen_at`, ownerID, hostID, server, pane, a.Session, a.At)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO agent_seen (owner_id, host_id, server, pane, session, seen_at, mark) VALUES (?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(owner_id, host_id, server, pane) DO UPDATE SET session = excluded.session, seen_at = excluded.seen_at, mark = excluded.mark
+		WHERE excluded.seen_at > agent_seen.seen_at`, ownerID, hostID, server, pane, a.Session, a.At, a.Mark)
 	return err
 }

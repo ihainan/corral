@@ -74,6 +74,12 @@ export const readsLog = (name?: string) => isClaude(name) || isCodex(name) || is
 // frames, ◐ and the like while it works, ✳ when idle).
 export const paneTitle = (s: string) => s.replace(/^[\s·✢✳✶✻✽*⠀-⣿◐◑◒◓○●◌]+/u, '').trim()
 
+// What a herdr agent is about, as its pane names it: a Codex's thread's
+// name where the gateway has one (Codex titles its pane "<thread> |
+// <folder>", or the folder alone); none where the title names only the
+// folder (a row says that already, or need not); else the pane's title.
+export const paneName = (a: HerdrAgent) => a.thread_title || (a.bare_title ? '' : paneTitle(a.title))
+
 export function listAgents(sessions: SessionInfo[]): { rows: AgentRow[]; others: SessionInfo[] } {
   const now = Date.now()
   const byKey = new Map<string, AgentRow>()
