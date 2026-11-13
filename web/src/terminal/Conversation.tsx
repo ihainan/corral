@@ -151,6 +151,9 @@ function useTick(on: boolean): number {
   return now
 }
 
+// (Where the side list was scrolled to, across the views made for each agent: see ConversationView.)
+let sideScrolled = 0
+
 export function ConversationView({
   convo,
   agent,
@@ -258,6 +261,27 @@ export function ConversationView({
   }, [])
   const sideShown = !!side && wide && !folded
   const sideShownNow = useRef(sideShown)
+  // The side list as it was scrolled: this view is made anew for each agent
+  // gone to (the agents page keys it by the agent), its list with it, which
+  // came back at its top — a row picked low in a long list went from under
+  // the pointer. Where it was is put back before it is drawn; the one gone
+  // to, where that leaves it out of sight (gone to from elsewhere), is
+  // brought in, no further than needed.
+  useLayoutEffect(() => {
+    const el = sideEl.current
+    if (!sideShown || !el) return
+    el.scrollTop = sideScrolled
+    const row = el.querySelector<HTMLElement>('.convo-list-row[aria-current="true"]')
+    if (row) {
+      const r = row.getBoundingClientRect()
+      const box = el.getBoundingClientRect()
+      if (r.top < box.top || r.bottom > box.bottom) row.scrollIntoView({ block: 'nearest' })
+    }
+    const keep = () => void (sideScrolled = el.scrollTop)
+    keep()
+    el.addEventListener('scroll', keep, { passive: true })
+    return () => el.removeEventListener('scroll', keep)
+  }, [sideShown])
   sideShownNow.current = sideShown
   const wideNow = useRef(wide)
   wideNow.current = wide
