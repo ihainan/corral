@@ -41,6 +41,7 @@ type codexPane struct {
 	First      string
 	FG         bool   // in front on its terminal: what is typed there reaches it
 	Via        string // where its requests go, as the scan says it (codex_ep): the host alone; "" OpenAI's own
+	viaKnown   bool   // (the look said "=": the gateway's own, kept from before)
 	// Fresh: run with no subcommand, no log open, no conversation of its
 	// folder begun since it started — its own not begun yet.
 	Fresh bool
@@ -52,9 +53,11 @@ type codexPane struct {
 // codexPanesCommand prints a record for each interactive Codex of the
 // user's on the herdr server at socket (see parseCodexPanes). Nothing
 // where the host has no python3.
-func codexPanesCommand(socket string) string {
+// known: the processes ("<pid>:<start>") whose endpoint the gateway has
+// already: told "=" for theirs, not worked out again.
+func codexPanesCommand(socket string, known []string) string {
 	return `command -v python3 >/dev/null 2>&1 || exit 0
-exec python3 -I -c ` + sshx.QuoteShell(codexPanesScript) + ` ` + sshx.QuoteShell(socket) + ` ` + sshx.QuoteShell(convoEndpointSh)
+exec python3 -I -c ` + sshx.QuoteShell(codexPanesScript) + ` ` + sshx.QuoteShell(socket) + ` ` + sshx.QuoteShell(convoEndpointSh) + ` ` + sshx.QuoteShell(strings.Join(known, ","))
 }
 
 // (A record: pane, pid, start, started ms, cwd, thread, log, name, title,
@@ -62,14 +65,18 @@ exec python3 -I -c ` + sshx.QuoteShell(codexPanesScript) + ` ` + sshx.QuoteShell
 // subcommand ("" or "resume"), whether it has any rollout log open ("1"),
 // how many conversations of its folder were begun since it started (where
 // it names none and has none open), where its requests go (codex_ep: the
-// host alone, "" OpenAI's own); split by \x1f, ended by \0. The database: the newest
+// host alone, "" OpenAI's own; "=" one the gateway named as known); split
+// by \x1f, ended by \0. The database: the newest
 // state_<n>.sqlite of its CODEX_HOME, read only; the log, the one it has
 // open, else the database's rollout_path, else the newest of
 // sessions/*/*/*/rollout-*-<thread>.jsonl.)
 const codexPanesScript = `import glob, os, re, sqlite3, subprocess, sys
 sock = sys.argv[1]
 endpoint_sh = sys.argv[2]  # (codex_ep and what it uses: the scan's own, run for each)
-def endpoint(pid):
+known = set(sys.argv[3].split(',')) if len(sys.argv) > 3 else set()
+def endpoint(pid, start):
+    if pid + ':' + start in known:
+        return '='
     try:
         r = subprocess.run(['sh', '-c', endpoint_sh + '\ncodex_ep "$1"; printf %s "$ep"', 'sh', pid], capture_output=True, timeout=3)
         return r.stdout.decode('utf-8', 'replace')[:300]
@@ -239,7 +246,7 @@ for pane, pid, start, started, cwd, home, tid, opened, fg, sub, anylog in sorted
             logs = glob.glob(glob.escape(home) + '/sessions/*/*/*/rollout-*-' + tid + '.jsonl')
             if logs:
                 log = max(logs, key=lambda l: os.stat(l).st_mtime)
-    out.write('\x1f'.join([pane, pid, start, started, clean(cwd), tid, clean(log), clean(name), clean(title), clean(first), fg, sub, anylog, str(cands), clean(endpoint(pid))]).encode('utf-8', 'replace') + b'\0')
+    out.write('\x1f'.join([pane, pid, start, started, clean(cwd), tid, clean(log), clean(name), clean(title), clean(first), fg, sub, anylog, str(cands), clean(endpoint(pid, start))]).encode('utf-8', 'replace') + b'\0')
 `
 
 // codexLogOf: a thread's log as the host named it, where it is one: an
@@ -273,7 +280,9 @@ func parseCodexPanes(out string) map[string]codexPane {
 			continue
 		}
 		c := codexPane{PID: pid, Start: start, Started: max(started, 0), Cwd: f[4], Name: f[7], Title: f[8], First: f[9], FG: f[10] == "1", Fresh: f[11] == "" && f[12] == "0" && f[13] == "0"}
-		if hostOnly.MatchString(f[14]) {
+		if f[14] == "=" {
+			c.viaKnown = true
+		} else if hostOnly.MatchString(f[14]) {
 			c.Via = f[14]
 		}
 		if convoUUID.MatchString(f[5]) {
@@ -306,6 +315,10 @@ func codexNames(panes map[string]codexPane) map[string]string {
 type codexPaneLooks struct {
 	mu sync.Mutex
 	by map[string]*codexPaneLook
+	// via: per terminal session, where each Codex process's requests go,
+	// as a look worked it out (a process's own, for its life), by
+	// "<pid>:<start>"; let go of once a look finds it gone.
+	via map[string]map[string]string
 }
 
 type codexPaneLook struct {
@@ -336,9 +349,33 @@ func (c *codexPaneLooks) since(ctx context.Context, sess *term.Session, socket s
 		go func() {
 			lctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
-			out, err := sshx.Output(lctx, sess.Client(), codexPanesCommand(socket), codexPanesMax)
+			c.mu.Lock()
+			kept := c.via[sess.ID]
+			known := make([]string, 0, len(kept))
+			for k := range kept {
+				known = append(known, k)
+			}
+			c.mu.Unlock()
+			out, err := sshx.Output(lctx, sess.Client(), codexPanesCommand(socket, known), codexPanesMax)
 			if err == nil {
 				l.got = parseCodexPanes(string(out))
+				now := map[string]string{}
+				for p, x := range l.got {
+					k := strconv.FormatInt(x.PID, 10) + ":" + strconv.FormatInt(x.Start, 10)
+					if x.viaKnown {
+						x.Via = kept[k]
+						l.got[p] = x
+					}
+					if !x.Several {
+						now[k] = x.Via
+					}
+				}
+				c.mu.Lock()
+				if c.via == nil {
+					c.via = map[string]map[string]string{}
+				}
+				c.via[sess.ID] = now // (those not found now: gone)
+				c.mu.Unlock()
 			}
 			l.err = err
 			if err != nil {
@@ -364,6 +401,7 @@ func (c *codexPaneLooks) since(ctx context.Context, sess *term.Session, socket s
 func (c *codexPaneLooks) forget(id string) {
 	c.mu.Lock()
 	delete(c.by, id)
+	delete(c.via, id)
 	c.mu.Unlock()
 }
 

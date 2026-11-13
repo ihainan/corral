@@ -85,6 +85,13 @@ func TestParseCodexPanes(t *testing.T) {
 	if _, ok := got["w8:p1"]; ok {
 		t.Fatal("no process taken")
 	}
+	known := parseCodexPanes(strings.Join([]string{"w9:p1", "1", "2", "0", "/x", "", "", "", "", "", "1", "", "0", "0", "="}, "\x1f") + "\x00")["w9:p1"]
+	if !known.viaKnown || known.Via != "" {
+		t.Fatalf("a known endpoint: %+v", known)
+	}
+	if bad := parseCodexPanes(strings.Join([]string{"w9:p1", "1", "2", "0", "/x", "", "", "", "", "", "1", "", "0", "0", "evil host;rm"}, "\x1f") + "\x00")["w9:p1"]; bad.Via != "" {
+		t.Fatalf("a host not a host: %+v", bad)
+	}
 	names := codexNames(got)
 	if names["w2:p1"] != "检查红圈" || names["w3:p1"] != "named" || names["w7:p1"] != "" || len(names) != 2 {
 		t.Fatalf("names %v", names)
