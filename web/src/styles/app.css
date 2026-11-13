@@ -121,7 +121,7 @@ a:hover { text-decoration: underline; }
 [hidden] { display: none !important; }
 h1, h2, h3 { margin: 0; text-wrap: balance; }
 p { margin: 0; }
-code, .mono { font-family: var(--font-mono); font-size: 0.9em; }
+code, .mono { font-family: var(--font-mono); font-size: var(--fs-sub); }
 .tnum { font-variant-numeric: tabular-nums; }
 .spacer { flex: 1; }
 
@@ -410,7 +410,7 @@ a.setting:hover { text-decoration: none; background: var(--bg-hover); }
 .quiet-note { color: var(--fg-3); font-size: var(--fs-note); line-height: var(--lh-note); }
 
 .pubkey { display: flex; gap: 8px; align-items: flex-start; background: var(--bg-subtle); border-radius: var(--r); padding: 10px 12px; }
-.pubkey code { flex: 1; min-width: 0; word-break: break-all; font-size: 12px; line-height: 1.5; }
+.pubkey code { flex: 1; min-width: 0; word-break: break-all; font-size: var(--fs-note); line-height: var(--lh-note); }
 .key-short { font-family: var(--font-mono); font-size: var(--fs-note); line-height: var(--lh-note); }
 
 /* Auth pages: a card in the middle of a page a shade off it; on a phone, the page itself, from the top. */
@@ -541,7 +541,7 @@ html.theme-switching *, html.theme-switching *::before, html.theme-switching *::
 .audit-table { width: 100%; border-collapse: collapse; font-size: var(--fs-sub); line-height: var(--lh-sub); table-layout: fixed; }
 .audit-table th { text-align: left; font-size: var(--fs-note); line-height: var(--lh-note); font-weight: 500; color: var(--fg-3); padding: 8px; border-bottom: 1px solid var(--line); }
 .audit-table td { padding: 10px 8px; border-bottom: 1px solid var(--line); vertical-align: top; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.audit-table td.code { font-family: var(--font-mono); font-size: 12px; }
+.audit-table td.code { font-family: var(--font-mono); font-size: var(--fs-note); line-height: var(--lh-note); }
 .audit-table .detail { display: block; color: var(--fg-3); font-size: var(--fs-note); line-height: var(--lh-note); overflow: hidden; text-overflow: ellipsis; }
 .audit-list { display: none; }
 @media (max-width: 759.98px) {

@@ -2670,7 +2670,7 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
             aria-label={draft ? t('term.send') : t('term.sendEnter')}
             title={(draft ? t('term.send') : t('term.sendEnter')) + (isTouch ? '' : ' (' + composerSendKey + ')')}
           >
-            {draft ? <ArrowUp size={18} strokeWidth={2.25} /> : <CornerDownLeft size={17} strokeWidth={2.25} />}
+            {draft ? <ArrowUp size={18} strokeWidth={2} /> : <CornerDownLeft size={18} strokeWidth={2} />}
           </button>
         </div>
       </div>

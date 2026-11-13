@@ -1,4 +1,5 @@
 import { memo, useMemo, useState, useSyncExternalStore } from 'react'
+import { hhmm } from './convoTime'
 import { getLang, t } from '../i18n'
 
 // The thread's turns at its side: a short line for each of the person's
@@ -39,7 +40,7 @@ function said(ts: string | undefined): string {
   const d = ts ? new Date(ts) : null
   if (!d || isNaN(d.getTime())) return ''
   const now = new Date()
-  const time = d.toLocaleTimeString(getLang(), { hour: '2-digit', minute: '2-digit', hour12: false })
+  const time = hhmm(d)
   return d.toDateString() === now.toDateString() ? time : d.toLocaleDateString(getLang(), { month: 'numeric', day: 'numeric' }) + ' ' + time
 }
 

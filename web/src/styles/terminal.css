@@ -178,7 +178,7 @@ html.term-mode body { position: fixed; inset: 0; }
 @media (max-width: 560px) { .composer-keys { display: none; } }
 .composer-send {
   width: 32px; height: 32px; border-radius: 50%; border: 0; display: grid; place-items: center; cursor: pointer;
-  background: var(--accent); color: #fff; flex: none;
+  background: var(--accent); color: var(--accent-fg); flex: none;
 }
 .composer-send:hover { background: var(--accent-hover); }
 .composer-send.is-stop, .composer-send.is-stop:hover { background: var(--term-fg); color: var(--term-bg); }
@@ -628,6 +628,12 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 :is(.convo-col, .convo-sub-body) > * + .convo-answer, :is(.convo-col, .convo-sub-body) > .convo-user + * { margin-top: 4px; }
 :is(.convo-col, .convo-sub-body) > * + .convo-user { margin-top: 20px; }
 :is(.convo-col, .convo-sub-body) > * + .convo-user.is-mid, :is(.convo-col, .convo-sub-body) > .convo-older + .convo-user { margin-top: 4px; }
+/* An item not shown (in a folded turn, or told on another's line): held in
+   its place, of no height, its gap taken back — the column's children stay
+   one to an item for the jumps and the scroll kept, which count them. */
+:is(.convo-col, .convo-sub-body) > .convo-held.convo-held { height: 0; margin: -12px 0 0; }
+/* A finished turn's way there, folded to a line over its answer (11-13). */
+.convo-fold { align-self: flex-start; }
 
 .convo-user { align-self: flex-end; max-width: min(88%, 620px); display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
 .convo-user-text { background: var(--term-user, color-mix(in srgb, var(--term-fg) 8%, var(--term-bg))); border-radius: var(--r-xl); padding: 9px 14px; white-space: pre-wrap; }
@@ -680,10 +686,10 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-md > :first-child { margin-top: 0; }
 .convo-md > :last-child { margin-bottom: 0; }
 .convo-md p, .convo-md ul, .convo-md ol, .convo-md .md-code, .convo-md .md-table, .convo-md blockquote { margin: 0 0 12px; }
-.convo-md h3, .convo-md h4, .convo-md h5, .convo-md h6 { margin: 24px 0 8px; line-height: 1.4; font-weight: 600; }
-.convo-md h3 { font-size: 18px; }
-.convo-md h4 { font-size: 16px; }
-.convo-md h5, .convo-md h6 { font-size: 15px; }
+/* (11-13: headings from the scale's roles — 18/26 and 15/22 — not 18, 16 and 15 at a line of 1.4: 16/22.4 sat between the body's 15 and its bold) */
+.convo-md h3, .convo-md h4, .convo-md h5, .convo-md h6 { margin: 24px 0 8px; font-weight: 600; }
+.convo-md h3 { font-size: var(--fs-head); line-height: var(--lh-head); }
+.convo-md h4, .convo-md h5, .convo-md h6 { font-size: var(--fs-h3); line-height: var(--lh-h3); }
 .convo-md ul, .convo-md ol { padding-left: 1.5em; }
 .convo-md li > ul, .convo-md li > ol, .convo-md li > p { margin: 4px 0; }
 .convo-md li + li { margin-top: 3px; }
@@ -692,15 +698,17 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-md hr { border: 0; border-top: 1px solid var(--term-line); margin: 14px 0; }
 .convo-md blockquote { padding-left: 14px; color: var(--term-fg-2); }
 .convo-md code { overflow-wrap: break-word; }
-.convo-md code { font-family: var(--font-mono); font-size: 0.88em; background: color-mix(in srgb, var(--term-fg) 8%, transparent); color: var(--term-fg); border-radius: var(--r-xs); padding: 1px 4px; }
+/* (Code one size wherever it stands, 13px — not 0.88em of what it is in: 13.2 in a paragraph, 12.32 in a table) */
+.convo-md code { font-family: var(--font-mono); font-size: var(--fs-sub); background: color-mix(in srgb, var(--term-fg) 8%, transparent); color: var(--term-fg); border-radius: var(--r-xs); padding: 1px 4px; }
 .convo-md .md-path > code, .convo-md a code { color: var(--term-accent-text); }
+.convo-md :is(h3, h4, h5, h6) code { font-size: inherit; }
 /* A file's path in an answer: its code, underlined as something to open (a menu). */
 .md-path { display: inline; padding: 0; margin: 0; border: 0; background: none; font: inherit; color: inherit; cursor: pointer; text-align: inherit; }
 .md-path > code { text-decoration: underline dotted color-mix(in srgb, var(--term-accent-text) 60%, transparent); text-underline-offset: 3px; overflow-wrap: anywhere; }
 .md-path:hover > code { text-decoration-style: solid; }
 .md-path:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: 1px; border-radius: var(--r-xs); }
 .md-code { position: relative; background: var(--term-chrome); border: 1px solid var(--term-line); border-radius: var(--r); }
-.md-code pre { margin: 0; padding: 10px 12px; overflow-x: auto; font-family: var(--font-mono); font-size: 13px; line-height: 1.55; tab-size: 4; }
+.md-code pre { margin: 0; padding: 10px 12px; overflow-x: auto; font-family: var(--font-mono); font-size: var(--fs-sub); line-height: var(--lh-sub); tab-size: 4; }
 .convo-md .md-code code { background: none; padding: 0; font-size: inherit; color: inherit; }
 .md-code-head {
   display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 28px;
@@ -725,7 +733,7 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .md-table { overflow-x: auto; }
 /* (A narrow screen: a table's first column keeps a few letters' width, the rest scrolls sideways.) */
 .md-table th:first-child, .md-table td:first-child { min-width: 4.5em; }
-.md-table table { border-collapse: collapse; font-size: 14px; line-height: 1.5; }
+.md-table table { border-collapse: collapse; font-size: var(--fs-ui); line-height: var(--lh-ui); }
 .md-table th, .md-table td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--term-line); vertical-align: top; }
 .md-table th:first-child, .md-table td:first-child { padding-left: 0; }
 .md-table th { font-weight: 600; color: var(--term-fg); white-space: nowrap; border-bottom-color: color-mix(in srgb, var(--term-fg) 18%, transparent); }
@@ -781,14 +789,15 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 /* (The verb: of the line's words, not a column of its own down the run — regular, as grey as the rest.) */
 .convo-step-verb { flex: none; color: var(--term-fg-2); }
 .convo-step-obj { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.convo-step-obj.is-code { font-family: var(--font-mono); font-size: 13px; }
+.convo-step-obj.is-code { font-family: var(--font-mono); font-size: var(--fs-sub); }
 .convo-work-text.is-live { display: flex; align-items: baseline; gap: 8px; min-width: 0; color: var(--term-fg-2); }
 .convo-step-body, .convo-thinking { padding: 4px 0 10px; }
 .convo-thinking { white-space: normal; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg-2); }
 /* What the agent wrote between its steps: as its answer is. */
 .convo-mid { margin: 0; }
 /* (What it says on the way, a step quieter than the answer it ends with: C04/A04) */
-.convo-mid.is-brief { font-size: var(--fs-ui); line-height: var(--lh-ui); color: var(--term-fg-way); }
+.convo-mid.is-brief { font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg-way); }
+/* (11-13: 13/20, as the rest of the way there — a run's line, a step, a thought — not 14/20 of its own) */
 /* (11-13: what it says on the way was the second grey, L*39, beside the answer's L*8: read as one.
    Now two layers — the answer black; what goes on the way, its words, a run's line, a thought, in a
    grey of their own, --term-fg-way: #707683 (L*50, 4.6:1 on white, the lightest small text may be:
@@ -941,12 +950,19 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-path-acts { display: inline-flex; flex-wrap: wrap; column-gap: 14px; }
 .convo-path .link-btn, .convo-step-body .convo-path .link-btn { margin-top: 0; font-size: var(--fs-sub); line-height: var(--lh-sub); }
 .convo-path.is-acts { margin: -2px 0 8px; }
-.convo-summary summary { display: flex; align-items: center; gap: 6px; cursor: pointer; list-style: none; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg-2); }
+.convo-summary summary { display: flex; align-items: center; gap: 8px; cursor: pointer; list-style: none; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg-2); }
 .convo-summary summary::-webkit-details-marker { display: none; }
 .convo-summary[open] > summary > .convo-chev { transform: rotate(90deg); }
 .convo-summary summary:hover { color: var(--term-fg); }
 @media (pointer: coarse) { .convo-summary summary { min-height: 44px; margin: -11px 0; } }
-.convo-summary .convo-md { margin-top: 8px; color: var(--term-fg-2); font-size: var(--fs-ui); line-height: var(--lh-ui); }
+.convo-summary .convo-md { margin-top: 8px; color: var(--term-fg-2); font-size: var(--fs-sub); line-height: var(--lh-sub); }
+/* A compaction with the summary it wrote: the compaction's line, a rule to the
+   end of the column (as a compaction alone has), opened to the summary. */
+.convo-summary.is-compact { margin: 4px 0; }
+.convo-summary.is-compact > summary { gap: 8px; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-3); }
+.convo-summary.is-compact > summary::after { content: ''; flex: 1 1 24px; border-top: 1px solid var(--term-line); }
+.convo-summary.is-compact > summary:hover { color: var(--term-fg-2); }
+@media (max-width: 640px) { .convo-summary.is-compact > summary::after { display: none; } }
 
 .convo-latest {
   position: absolute; left: 50%; bottom: 12px; transform: translateX(-50%); z-index: 1;
@@ -1047,7 +1063,7 @@ button.convo-task-line:hover .convo-task-name { color: var(--term-fg); }
 .convo-trouble-head { margin: 0; color: var(--term-fg); }
 .convo-trouble-said { margin: 4px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--term-fg-2); font-size: 13px; }
 .convo-trouble-cut { color: var(--term-fg-3); }
-.convo-trouble .link-btn { margin-top: 2px; font-size: 13px; }
+.convo-trouble .link-btn { margin-top: 2px; font-size: var(--fs-sub); line-height: var(--lh-sub); }
 
 /* Answering in the thread: the question, its choices, a line of text */
 .convo-ask {
@@ -1215,7 +1231,7 @@ button.convo-running-what { padding: 0; border: 0; background: none; font: inher
 }
 /* (Its rows on its own surface: the one read lifted off it, as a card; a
    hover a shade of it.) */
-.term-root.light .convo-side { --term-side: #f3f4f6; --term-row-hover: rgba(16, 24, 40, 0.045); --term-row-current: #ffffff; --row-lift: 0 0 0 1px rgba(16, 24, 40, 0.07), 0 1px 2px rgba(16, 24, 40, 0.06); }
+.term-root.light .convo-side { --term-side: #f3f4f6; --term-row-hover: rgba(16, 24, 40, 0.045); --term-row-current: #ffffff; --row-lift: 0 0 0 1px rgba(16, 24, 40, 0.07); } /* (11-13: a hairline, no drop shadow — shadows are for what floats) */
 .term-root.dark .convo-side { --term-row-hover: rgba(255, 255, 255, 0.04); --term-row-current: rgba(255, 255, 255, 0.075); --row-lift: inset 0 0 0 1px rgba(255, 255, 255, 0.05); }
 /* (Longer than the window, it scrolls: what is in it keeps its height, not
    squeezed to fit, the search box to a line of its text.) */
@@ -1596,7 +1612,7 @@ button.convo-running-what { padding: 0; border: 0; background: none; font: inher
 .bg-cmd-file-dir { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: var(--fs-note); line-height: var(--lh-note); color: var(--fg-3); }
 /* (A block of its own, tinted: never a bar at its left edge — the user's rule, 11-04.) */
 .convo-event.is-recap, .convo-event.is-goal, .convo-event.is-notice { margin: 0; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg-2); padding: 8px 12px; border-radius: var(--r); background: color-mix(in srgb, var(--term-fg) 4%, transparent); }
-.convo-event.is-recap .convo-trouble-head, .convo-event.is-goal .convo-trouble-head { color: var(--term-fg-3); font-size: 12px; }
+.convo-event.is-recap .convo-trouble-head, .convo-event.is-goal .convo-trouble-head { color: var(--term-fg-3); font-size: var(--fs-note); line-height: var(--lh-note); }
 .convo-event.is-notice .convo-trouble-head { color: var(--term-fg-3); }
 .convo-event.is-notice.is-warn { background: color-mix(in srgb, var(--term-warn-text) 9%, transparent); }
 .convo-event.is-notice.is-warn .convo-trouble-head { color: var(--term-warn-text); }
@@ -1608,8 +1624,8 @@ button.convo-running-what { padding: 0; border: 0; background: none; font: inher
    are and its words where their titles are (the search box under it lined
    up the same way) */
 .convo-side-new {
-  flex: none; display: flex; align-items: center; justify-content: center; gap: 8px; width: calc(100% - 4px); height: 38px; margin: 2px 2px 10px; padding: 0 10px;
-  border: 1px solid var(--term-line-strong); border-radius: var(--r-lg); background: var(--term-bg); color: var(--term-fg); font: 500 var(--fs-ui)/var(--lh-ui) var(--font-ui); cursor: pointer;
+  flex: none; display: flex; align-items: center; justify-content: center; gap: 8px; width: calc(100% - 4px); height: 36px; margin: 2px 2px 10px; padding: 0 10px;
+  border: 1px solid var(--term-line-strong); border-radius: var(--r); background: var(--term-bg); color: var(--term-fg); font: 500 var(--fs-ui)/var(--lh-ui) var(--font-ui); cursor: pointer;
 }
 /* (A button that looks it — framed, its words centred — not a row of the list under it.) */
 .convo-side-new-icon { flex: none; display: flex; justify-content: center; color: var(--term-fg); }

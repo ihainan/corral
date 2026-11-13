@@ -86,8 +86,8 @@ const EXEMPT = [
   /\.convo-pic\b/, /\.convo-runs-item\b/, /\.md-code-copy\b/, /\.convo-trouble\b/,
   /\.convo-panelwin/, /\.reply-screen\b/, /\.text-preview-code\b/, /\.md-code\b/, /\.convo-pre/,
   /\.ime-debug\b/, /\.xterm/, /\.term-host-el\b/, /\.term-tab/, /\.swatch\b/,
-  /\.(input|select|textarea)\b/, /\binput\b/, /\bcode\b/, /\.mono\b/, /\bkbd\b/,
-  /\.convo-md h[1-6]/, /\.md-table\b/, /\.switch\b/, /\.handle\b/, /\.files-progress\b/,
+  /\.(input|select|textarea)\b/, /\binput\b/, /\bkbd\b/,
+  /\.switch\b/, /\.handle\b/, /\.files-progress\b/,
   /\.convo-runs-bar\b/, /\.convo-rail-tick\b/, /\.attach-/, /\.claude-card-head\b/,
   /\.input-eye/, /\.brand\b/, /\.auth\b/,
   // Spacing measured from something that is not the scale. Each says what.
@@ -141,6 +141,13 @@ for (const f of ['app.css', 'terminal.css']) {
       } else if (prop === 'border-radius') {
         if (strip(val).split(/\s+/).some((p) => /\d/.test(p) && !/^(0|50%|999px)$/.test(p)))
           offences.push(`${where}: border-radius: ${val} — name its step (--r-xs … --r-xl), or a pill`)
+      } else if (prop === 'font-weight') {
+        if (!/^(400|500|600|inherit)$/.test(val)) offences.push(`${where}: font-weight: ${val} — 400, 500 or 600 (body, a label, a heading)`)
+      } else if (prop === 'color') {
+        // (A colour of words from the theme's roles, never written out: a grey
+        // chosen by eye is how three of them came to stand side by side, 11-13.)
+        if (!/^(var\(--[\w-]+(, *[^;]+)?\)|inherit|currentColor|transparent|color-mix\(.*var\(--.*\)|[A-Z][a-zA-Z]+)( !important)?$/.test(val))
+          offences.push(`${where}: color: ${val} — take a role's colour (--term-fg…, --fg…), not a value`)
       } else if (SPACED.test(prop)) {
         for (const n of px(strip(val))) if (!STEP.has(n)) offences.push(`${where}: ${prop}: ${val} — ${n}px is not a step of the scale`)
       }
@@ -153,4 +160,4 @@ if (offences.length) {
   console.error('against something else belongs in EXEMPT in this file, with a line saying what it is measured against.')
   process.exit(1)
 }
-console.log('styles: type and spacing on the scale')
+console.log('styles: type, weight, text colour and spacing on the scale')

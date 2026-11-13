@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { hhmm } from './convoTime'
 import { api, ApiError, errorText } from '../api'
 import { t } from '../i18n'
 import { Dialog } from '../components/ui'
@@ -16,7 +17,7 @@ const when = (ms?: number) => {
   if (!ms) return ''
   const d = new Date(ms)
   const now = new Date()
-  const hm = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  const hm = hhmm(d)
   return d.toDateString() === now.toDateString() ? hm : d.toLocaleDateString([], { month: 'numeric', day: 'numeric' }) + ' ' + hm
 }
 const base = (p?: string) => (p ? p.replace(/\/+$/, '').split('/').pop() || p : '')

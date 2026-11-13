@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { hhmm } from './convoTime'
 import { X } from 'lucide-react'
 import { api } from '../api'
 import { t } from '../i18n'
@@ -157,7 +158,7 @@ export function ConvoTurnsPanel({
     const d = new Date(ts)
     if (isNaN(d.getTime())) return ''
     const today = new Date().toDateString() === d.toDateString()
-    return today ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : d.toLocaleDateString([], { month: 'numeric', day: 'numeric' }) + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    return today ? hhmm(d) : d.toLocaleDateString([], { month: 'numeric', day: 'numeric' }) + ' ' + hhmm(d)
   }
   return (
     <div className="convo-search convo-turns" role="navigation" aria-label={t('turns.title')} ref={panel}>

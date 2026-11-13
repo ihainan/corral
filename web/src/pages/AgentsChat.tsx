@@ -2069,7 +2069,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
             </button>
           ) : (
             <button type="button" className="composer-send" onClick={send} disabled={sending || !!blocked || (!draft.trim() && !up)} aria-label={t('term.send')} title={t('term.send') + (isTouch ? '' : ' (' + sendKey + ')')}>
-              <ArrowUp size={18} strokeWidth={2.25} />
+              <ArrowUp size={18} strokeWidth={2} />
             </button>
           )}
         </div>

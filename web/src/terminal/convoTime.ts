@@ -1,4 +1,4 @@
-import { t } from '../i18n'
+import { getLang, t } from '../i18n'
 
 // How the conversation and the lists say time: one place, so that a row,
 // the bar and a turn's line say the same thing the same way.
@@ -24,3 +24,8 @@ export function when(r: { since?: number; status: string }, now: number): string
   if (m < 48 * 60) return t(`convo.${k}.h`, { n: Math.floor(m / 60) })
   return t(`convo.${k}.d`, { n: Math.floor(m / 1440) })
 }
+
+// A time of day as the view says it everywhere: 24-hour, 15:51 (not 03:51 PM
+// in one place and 15:51 in the next). (h23, not hour12: false, which some
+// engines read as h24 and so say 24:05 for five past midnight.)
+export const hhmm = (d: Date) => d.toLocaleTimeString(getLang(), { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })

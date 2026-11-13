@@ -31,7 +31,7 @@ import { categoryIcon, stepIcon, ThinkIcon, WorkIcon } from './stepIcons'
 import { SessionCard, type CardData } from './sessionCard'
 import type { Convo, ConvoAnswer, ConvoCost, ConvoQuota, ConvoQuotaWindow, ConvoEntry, ConvoShell, ConvoHunk, ConvoMeta, ConvoPart, ConvoQueued, ConvoRunning, ConvoTask, ConvoTool, ConvoTrouble, ConvoEvent } from './conversation'
 import { agentName } from './askText'
-import { duration, when } from './convoTime'
+import { duration, hhmm, when } from './convoTime'
 import { category, isNote, items, ms, partTime, sameEdits, toolName, verbOf, type Category, type Edits, type Item, type Verb } from './convoItems'
 
 // The conversation view: the agent's log as turns, over the terminal (which
@@ -382,6 +382,59 @@ export function ConversationView({
     return () => window.removeEventListener('keydown', onKey, true)
   }, [active])
   const list = useMemo(() => items(convo.entries, working || waits, working), [convo.entries, working, waits])
+  // A compaction and the summary it wrote, next to each other: one line, the
+  // summary opened from it (not a line for each).
+  const compactSum = useMemo(() => {
+    const sum = new Map<Item, ConvoEntry>()
+    const taken = new Set<Item>()
+    list.forEach((it, i) => {
+      const next = list[i + 1]
+      const k = it.kind === 'note' ? it.e.parts[0]?.event?.kind : undefined
+      if ((k === 'compact' || k === 'idle_compact') && next?.kind === 'summary') {
+        sum.set(it, next.e)
+        taken.add(next)
+      }
+    })
+    return { sum, taken }
+  }, [list])
+  // A finished turn's way there — its runs of steps and what it said between
+  // them — folded to one line over its answer, opened by a tap; not the
+  // latest turn's (the one being read, or under way), not one of a single
+  // line (nothing to gain). 11-13, the person's choice: before, every turn
+  // showed its way there in full, a step quieter than the answer.
+  const [unfolded, setUnfolded] = useState<Record<string, boolean>>({})
+  const folds = useMemo(() => {
+    const at = new Map<number, { key: string; label: string }>() // (the first of a fold: its line goes over it)
+    const of = new Map<Item, string>()
+    const starts: number[] = []
+    list.forEach((it, i) => {
+      if (it.kind === 'user' && !it.e.mid) starts.push(i)
+    })
+    starts.forEach((a, s) => {
+      const b = starts[s + 1]
+      if (b === undefined) return // (the latest turn: as it is)
+      let ans = -1
+      for (let j = b - 1; j > a; j--) if (list[j].kind === 'answer') { ans = j; break }
+      if (ans < 0) return
+      const way: number[] = []
+      for (let j = a + 1; j < ans; j++) if (list[j].kind === 'work' || list[j].kind === 'text') way.push(j)
+      if (way.length < 2) return
+      const key = 'fold:' + itemKey(list[ans])
+      const n = new Map<Category, number>()
+      for (const j of way) {
+        const it = list[j]
+        if (it.kind !== 'work') continue
+        for (const st of it.steps) if ('kind' in st && st.kind === 'tool' && st.tool) n.set(category(st.tool.name), (n.get(category(st.tool.name)) ?? 0) + 1)
+      }
+      const said = (['cmd', 'edit', 'read', 'search', 'web', 'agent', 'other'] as Category[]).filter((c) => n.get(c)).map((c) => count(c, n.get(c)!))
+      at.set(way[0], { key, label: said.length ? said.join(t('convo.listSep')) : t('convo.fold.way') })
+      for (const j of way) of.set(list[j], key)
+    })
+    return { at, of }
+  }, [list])
+  const foldShut = (key: string | undefined) => !!key && !allOpen && !unfolded[key]
+  const heldNow = useRef({ compactSum, folds })
+  heldNow.current = { compactSum, folds }
   // The rail's turns, and where each is in the list: of the same turns as
   // before, the same array (the rail not drawn again for an answer coming
   // in); each message's preview made once (review batch4).
@@ -979,9 +1032,20 @@ export function ConversationView({
     (hit: { key: string; field: string; tool?: string }, gone: () => void): boolean => {
       const n = ++going.current
       const { of, gen } = convoNow.current
-      const i = listNow.current.findIndex((it) => itemKey(it) === hit.key)
+      let i = listNow.current.findIndex((it) => itemKey(it) === hit.key)
       if (i < 0) return false
-      if (listNow.current[i].kind === 'work') toggle(hit.key, true)
+      let key = hit.key
+      let field = hit.field
+      // (A summary told on its compaction's line: that line, opened; one in a folded turn: the turn opened.)
+      const { compactSum: cs, folds: fs } = heldNow.current
+      if (cs.taken.has(listNow.current[i]) && i > 0) {
+        i -= 1
+        key = itemKey(listNow.current[i])
+        field = 'summary'
+      }
+      const fk = fs.of.get(listNow.current[i])
+      if (fk) setUnfolded((u) => ({ ...u, [fk]: true }))
+      if (listNow.current[i].kind === 'work') toggle(key, true)
       if (hit.tool) toolShown.set(hit.tool, { open: true, full: toolShown.get(hit.tool)?.full ?? false })
       // (The person scrolling meanwhile calls it off too.)
       const el0 = box.current
@@ -996,7 +1060,7 @@ export function ConversationView({
         const c = col.current
         if (!c) return undefined
         const kids = [...c.children].filter((k) => !k.hasAttribute('data-aside'))
-        return kids[listNow.current.findIndex((it) => itemKey(it) === hit.key)] as HTMLElement | undefined
+        return kids[listNow.current.findIndex((it) => itemKey(it) === key)] as HTMLElement | undefined
       }
       const place = (to: HTMLElement) => {
         const el = box.current
@@ -1018,7 +1082,7 @@ export function ConversationView({
         if (!to) return gone()
         // (A card already shown keeps its own state: opened here.)
         cardIn(to)?.querySelector<HTMLElement>(':scope > .convo-step-head[aria-expanded="false"]')?.click()
-        if (hit.field === 'summary') {
+        if (field === 'summary') {
           if (to instanceof HTMLDetailsElement) to.open = true
           to.querySelectorAll('details:not([open])').forEach((d) => d.setAttribute('open', ''))
         }
@@ -1200,7 +1264,15 @@ export function ConversationView({
                 <span>{t('convo.unread')}</span>
               </p>
             )}
-            <ListItem it={it} copy={copy} open={it.kind === 'work' ? (opened[it.key] ?? allOpen) : false} onToggle={toggle} onShow={show} />
+            {folds.at.has(i) && (
+              <FoldLine label={folds.at.get(i)!.label} open={!foldShut(folds.at.get(i)!.key)} onToggle={(o) => setUnfolded((u) => ({ ...u, [folds.at.get(i)!.key]: o }))} />
+            )}
+            {/* (Not shown, held in its place: the column's children stay one to an item, as jumps and the scroll kept count them.) */}
+            {compactSum.taken.has(it) || foldShut(folds.of.get(it)) ? (
+              <div className="convo-held" aria-hidden="true" />
+            ) : (
+              <ListItem it={it} sum={compactSum.sum.get(it)} copy={copy} open={it.kind === 'work' ? (opened[it.key] ?? allOpen) : false} onToggle={toggle} onShow={show} />
+            )}
           </Fragment>
         ))}
         {pendingList}
@@ -1407,7 +1479,7 @@ export function ConversationView({
               aria-keyshortcuts={mac ? 'Meta+B' : 'Control+B'}
               title={`${t(sideShown ? 'convo.foldSide' : 'convo.openSide')} (${KEY_SIDE})`}
             >
-              <PanelLeft size={17} aria-hidden="true" />
+              <PanelLeft size={18} aria-hidden="true" />
             </button>
           )}
           {side && !sideShown ? (
@@ -1442,7 +1514,7 @@ export function ConversationView({
               aria-label={t('card.open')}
               title={t('card.open')}
             >
-              <Info size={17} aria-hidden="true" />
+              <Info size={18} aria-hidden="true" />
             </button>
           )}
           {onStop && (
@@ -2566,7 +2638,7 @@ function useRedraw(ms: number) {
 
 function quotaClock(sec: number) {
   const d = new Date(sec * 1000)
-  const time = d.toLocaleTimeString(getLang(), { hour: '2-digit', minute: '2-digit', hour12: false })
+  const time = hhmm(d)
   // (Another day: its date and weekday apart, "11月2日 周一 16:43". The
   // month short: spelt out, an English date ran the line it is on to two
   // — "resets November 15 Sun 22:59" — while "11月15日" never did.)
@@ -2581,7 +2653,7 @@ function quotaClock(sec: number) {
 // date as well.
 function resetClock(sec: number) {
   const d = new Date(sec * 1000)
-  const time = d.toLocaleTimeString(getLang(), { hour: '2-digit', minute: '2-digit', hour12: false })
+  const time = hhmm(d)
   if (d.toDateString() === new Date().toDateString()) return time
   const week = d.toLocaleDateString(getLang(), { weekday: 'short' })
   return sec * 1000 - Date.now() < 7 * 86400000 ? [week, time].join(' ') : [d.toLocaleDateString(getLang(), { month: 'short', day: 'numeric' }), week, time].join(' ')
@@ -2649,7 +2721,7 @@ function AnswerPart({ answer }: { answer: ConvoAnswer }) {
 function CostPart({ cost }: { cost?: ConvoCost }) {
   if (!cost) return <p className="convo-runs-note convo-cost-none">{t('convo.costNone')}</p>
   const d = cost.at ? new Date(cost.at) : null
-  const at = !d ? '' : (d.toDateString() === new Date().toDateString() ? '' : d.toLocaleDateString(getLang(), { month: 'numeric', day: 'numeric' }) + ' ') + d.toLocaleTimeString(getLang(), { hour: '2-digit', minute: '2-digit' })
+  const at = !d ? '' : (d.toDateString() === new Date().toDateString() ? '' : d.toLocaleDateString(getLang(), { month: 'numeric', day: 'numeric' }) + ' ') + hhmm(d)
   const money = (n: number) => '$' + (n < 10 ? n.toFixed(2) : n.toFixed(1))
   return (
     <div className="convo-cost">
@@ -2707,7 +2779,7 @@ function stamp(r: ConvoListRow, now: number): string {
   }
   if (!r.since || now < r.since) return ''
   const d = new Date(r.since)
-  if (r.since >= dayStart(now)) return d.toLocaleTimeString(getLang(), { hour: '2-digit', minute: '2-digit', hour12: false })
+  if (r.since >= dayStart(now)) return hhmm(d)
   // (Before today: its date, short — never a word wider than a time.)
   return d.toLocaleDateString(getLang(), { month: 'numeric', day: 'numeric' })
 }
@@ -3362,13 +3434,13 @@ function ShellOut({ sh, onCopy }: { sh: ConvoShell; onCopy: (s: string) => void 
 // One item of the list. Memoised: a poll that changed one entry renders
 // that one (the others keep their objects, see conversation.ts).
 const ListItem = memo(
-  function ListItem({ it, copy, open, onToggle, onShow }: { it: Item; copy: (s: string) => void; open: boolean; onToggle: (key: string, open: boolean) => void; onShow: (key: string, path?: string) => void }) {
+  function ListItem({ it, sum, copy, open, onToggle, onShow }: { it: Item; sum?: ConvoEntry; copy: (s: string) => void; open: boolean; onToggle: (key: string, open: boolean) => void; onShow: (key: string, path?: string) => void }) {
     switch (it.kind) {
       case 'user':
         return <UserTurn e={it.e} onCopy={copy} />
       case 'note': {
         const p = it.e.parts[0]
-        if (p?.event) return <EventNote ev={p.event} idle={it.idle} />
+        if (p?.event) return <EventNote ev={p.event} idle={it.idle} sum={sum} />
         // (Retries next to each other: on the first's line, the last's.)
         if (p?.trouble) return <TroubleNote key={troubleKey(p.trouble)} t={(it.last ?? it.e).parts[0]?.trouble ?? p.trouble} />
         if (it.e.parts.some((x) => x.shell)) return <NoteParts e={it.e} onCopy={copy} />
@@ -3378,7 +3450,7 @@ const ListItem = memo(
         return (
           <details className="convo-summary">
             <summary>
-              <ChevronRight size={15} className="convo-chev" aria-hidden="true" />
+              <ChevronRight size={16} strokeWidth={1.75} className="convo-chev" aria-hidden="true" />
               {t('convo.summary')}
             </summary>
             <div className="convo-md">
@@ -3488,7 +3560,17 @@ function TroubleNote({ t: tr }: { t: ConvoTrouble }) {
 // Something that happened to the session itself: a compaction, as a line
 // across (what it came to, how long it took: the summary it wrote follows,
 // folded), or a turn a scheduled task set going, its prompt behind a tap.
-function EventNote({ ev, idle }: { ev: ConvoEvent; idle?: boolean }) {
+// A finished turn's way there, folded: what it did, in a line, to open it by.
+function FoldLine({ label, open, onToggle }: { label: string; open: boolean; onToggle: (open: boolean) => void }) {
+  return (
+    <button type="button" className="convo-work-head convo-fold" data-aside="" aria-expanded={open} onClick={() => onToggle(!open)}>
+      <ChevronRight size={16} strokeWidth={1.75} className="convo-chev" aria-hidden="true" />
+      <span className="convo-work-text">{label}</span>
+    </button>
+  )
+}
+
+function EventNote({ ev, idle, sum }: { ev: ConvoEvent; idle?: boolean; sum?: ConvoEntry }) {
   const [open, setOpen] = useState(false)
   const showTerminal = useContext(ShowTerminal)
   // What went on while the person was away; a goal set or judged; any other notice.
@@ -3584,18 +3666,30 @@ function EventNote({ ev, idle }: { ev: ConvoEvent; idle?: boolean }) {
   }
   const said = [t(ev.kind === 'idle_compact' || idle ? 'convo.event.compactIdle' : ev.trigger === 'manual' ? 'convo.event.compactManual' : ev.trigger === 'auto' ? 'convo.event.compactAuto' : 'convo.event.compact')]
   if (ev.pre && ev.post) said.push(t('convo.event.sizes', { a: tokens(ev.pre), b: tokens(ev.post) }))
-  if (ev.ms) said.push(t('convo.event.took', { n: Math.max(1, Math.round(ev.ms / 1000)) }))
+  if (ev.ms) said.push(duration(Math.max(1000, ev.ms)))
+  const line = said.map((x, i) => (
+    <span key={i} className="convo-event-part">
+      {i > 0 && t('convo.event.sep')}
+      {x}
+    </span>
+  ))
+  // With the summary it wrote: one line, opened to it.
+  if (sum)
+    return (
+      <details className="convo-summary is-compact">
+        <summary>
+          <ChevronRight size={14} className="convo-chev" aria-hidden="true" />
+          <span className="convo-event-said">{line}</span>
+        </summary>
+        <div className="convo-md">
+          <Markdown text={sum.parts[0]?.text ?? ''} />
+        </div>
+      </details>
+    )
   // (Each part whole on a line: a narrow screen breaks between them.)
   return (
     <p className="convo-event is-compact">
-      <span className="convo-event-said">
-        {said.map((x, i) => (
-          <span key={i} className="convo-event-part">
-            {i > 0 && t(i === 1 ? 'convo.event.sepFirst' : 'convo.event.sepNext')}
-            {x}
-          </span>
-        ))}
-      </span>
+      <span className="convo-event-said">{line}</span>
     </p>
   )
 }
@@ -3833,7 +3927,7 @@ function LoadErrorLine({ onRetry }: { onRetry: () => void }) {
 // When a usage limit resets, in the page's time: the day too, when not today.
 function resetsAt(sec: number): string {
   const d = new Date(sec * 1000)
-  const time = d.toLocaleTimeString(getLang(), { hour: '2-digit', minute: '2-digit' })
+  const time = hhmm(d)
   return d.toDateString() === new Date().toDateString() ? time : d.toLocaleDateString(getLang(), { month: 'short', day: 'numeric' }) + ' ' + time
 }
 
@@ -3955,7 +4049,7 @@ function Gone({ it, copy }: { it: Extract<Item, { kind: 'gone' }>; copy: (s: str
   return (
     <div className="convo-gone">
       <button type="button" className="convo-work-head convo-gone-head" aria-expanded={open} onClick={() => setOpen(!open)}>
-        <ChevronRight size={15} className="convo-chev" aria-hidden="true" />
+        <ChevronRight size={16} strokeWidth={1.75} className="convo-chev" aria-hidden="true" />
         <span className="convo-work-text">{t(said ? 'convo.gone.said' : 'convo.gone.plain', { n: said })}</span>
       </button>
       {open && (
@@ -3982,14 +4076,14 @@ const noteText = (e: ConvoEntry) => {
 }
 
 function clockMs(ms: number): string {
-  return ms ? new Date(ms).toLocaleTimeString(getLang(), { hour: '2-digit', minute: '2-digit' }) : '—'
+  return ms ? hhmm(new Date(ms)) : '—'
 }
 
 function clock(ts?: string): string {
   if (!ts) return ''
   const d = new Date(ts)
   if (isNaN(d.getTime())) return ''
-  return d.toLocaleTimeString(getLang(), { hour: '2-digit', minute: '2-digit' })
+  return hhmm(d)
 }
 
 // The pictures' paths written in a message's words: absolute or under the
