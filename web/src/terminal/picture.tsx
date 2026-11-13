@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react'
-import { Copy, Download, FolderOpen, X } from 'lucide-react'
+import { useEffect, useState, type ReactNode } from 'react'
+import { Copy, Download, FolderOpen } from 'lucide-react'
 import { ApiError, authGen, errorText, onAuthChange } from '../api'
 import { t } from '../i18n'
-import { copyText, Dialog, useToast } from '../components/ui'
+import { copyText, Dialog, DialogHead, HeadTool, useToast } from '../components/ui'
+import { FileTypeIcon } from './fileIcons'
 
 // Pictures of a session's host shown on the page (files/view). Asked for one
 // at a time a session — each is a transfer, and a host's file channels are
@@ -151,10 +152,47 @@ export function pictureError(e: unknown): string {
   return errorText(e)
 }
 
-// A picture of the host, looked at: fitted to the window, its path, and
+// Where a file of the host is, under its name in a viewer's head: its folder
+// by the last parts of it (the whole is on hover, and copied), with what else
+// is said of it after (its size, say).
+export function fileWhere(path: string, ...more: (string | false | undefined)[]): string {
+  const dir = path.slice(0, path.lastIndexOf('/') + 1) || '/'
+  const parts = dir.split('/').filter(Boolean)
+  const short = parts.length > 3 ? '…/' + parts.slice(-3).join('/') + '/' : dir
+  return [short, ...more.filter(Boolean)].join(' · ')
+}
+
+// What can be done with a file looked at, as the viewer's head holds it:
+// copy its path, show it in the file panel, download it. (extra: the
+// viewer's own, before them.)
+export function FileTools({ sid, path, onReveal, extra }: { sid: string; path: string; onReveal?: () => void; extra?: ReactNode }) {
+  const toast = useToast()
+  return (
+    <>
+      {extra}
+      <HeadTool
+        label={t('convo.path.copy')}
+        onClick={async () => {
+          if (await copyText(path)) toast(t('common.copied'))
+        }}
+      >
+        <Copy size={16} />
+      </HeadTool>
+      {onReveal && (
+        <HeadTool label={t('convo.path.reveal')} onClick={onReveal}>
+          <FolderOpen size={16} />
+        </HeadTool>
+      )}
+      <HeadTool label={t('convo.path.download')} onClick={() => downloadPath(sid, path)}>
+        <Download size={16} />
+      </HeadTool>
+    </>
+  )
+}
+
+// A picture of the host, looked at: fitted to the window, where it is, and
 // what else can be done with it.
 export function PictureDialog({ sid, path, onClose, onReveal }: { sid: string; path: string; onClose: () => void; onReveal?: () => void }) {
-  const toast = useToast()
   const [blob, setBlob] = useState<Blob | null>(null)
   const [error, setError] = useState('')
   const [again, setAgain] = useState(0)
@@ -171,11 +209,8 @@ export function PictureDialog({ sid, path, onClose, onReveal }: { sid: string; p
   }, [sid, path, again])
   const name = path.slice(path.lastIndexOf('/') + 1)
   return (
-    <Dialog title={name} onClose={onClose} wide hideTitle className="picture-dialog">
-      <div className="picture-head">
-        <h2 className="picture-name" title={name}>{name}</h2>
-        <button type="button" className="icon-btn" onClick={onClose} aria-label={t('common.close')}><X size={18} /></button>
-      </div>
+    <Dialog title={name} onClose={onClose} wide hideTitle className="dlg picture-dialog">
+      <DialogHead icon={<FileTypeIcon name={name} />} title={name} titleText={path} oneLine sub={fileWhere(path)} subText={path} tools={<FileTools sid={sid} path={path} onReveal={onReveal} />} onClose={onClose} />
       <div className="picture-body">
         {error ? (
           <div className="picture-note" role="alert">
@@ -197,28 +232,6 @@ export function PictureDialog({ sid, path, onClose, onReveal }: { sid: string; p
         ) : (
           <p className="picture-note hint">{t('common.loading')}</p>
         )}
-      </div>
-      <div className="picture-foot">
-        <span className="picture-path" title={path}>{path}</span>
-        <span className="picture-acts">
-          <button
-            type="button"
-            className="btn btn-ghost"
-            onClick={async () => {
-              if (await copyText(path)) toast(t('common.copied'))
-            }}
-          >
-            <Copy size={15} /> {t('convo.path.copy')}
-          </button>
-          {onReveal && (
-            <button type="button" className="btn btn-ghost" onClick={onReveal}>
-              <FolderOpen size={15} /> {t('convo.path.reveal')}
-            </button>
-          )}
-          <button type="button" className="btn btn-ghost" onClick={() => downloadPath(sid, path)}>
-            <Download size={15} /> {t('convo.path.download')}
-          </button>
-        </span>
       </div>
     </Dialog>
   )

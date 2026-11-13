@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Copy, Download, FileCode2, BookOpen, FolderOpen, RotateCw, X } from 'lucide-react'
+import { Download, FileCode2, BookOpen, RotateCw } from 'lucide-react'
 import { api, ApiError, errorText } from '../api'
 import { t } from '../i18n'
-import { copyText, Dialog, useToast } from '../components/ui'
+import { Dialog, DialogHead, HeadTool } from '../components/ui'
 import { isDark, usePrefs } from '../prefs'
 import { Code } from './Code'
 import { Markdown } from './markdown'
-import { downloadPath } from './picture'
+import { downloadPath, FileTools, fileWhere } from './picture'
 import { FileTypeIcon } from './fileIcons'
 import { formatSize } from './FilesDialog'
 
@@ -70,7 +70,6 @@ const MD_DRAWN_MAX = 300_000
 // shown scrolled to the bottom.
 export function TextPreview({ sid, path, tail = false, onClose, onReveal }: { sid: string; path: string; tail?: boolean; onClose: () => void; onReveal?: () => void }) {
   usePrefs() // (its colours follow the theme)
-  const toast = useToast()
   const [read, setRead] = useState<Read | null>(null)
   const [error, setError] = useState('')
   const [again, setAgain] = useState(0)
@@ -98,23 +97,38 @@ export function TextPreview({ sid, path, tail = false, onClose, onReveal }: { si
   // (Its lines' numbers, beside them: as many as it has.)
   const lines = useMemo(() => (read ? read.text.split('\n').length - (read.text.endsWith('\n') ? 1 : 0) : 0), [read])
   return (
-    <Dialog title={name} onClose={onClose} wide hideTitle className="text-preview-dialog">
-      <div className="picture-head">
-        <span className="text-preview-icon" aria-hidden="true"><FileTypeIcon name={name} /></span>
-        <h2 className="picture-name" title={name}>{name}</h2>
-        {read && <span className="text-preview-size">{formatSize(read.size)}</span>}
-        {tail && (
-          <button type="button" className="icon-btn" onClick={() => setAgain((n) => n + 1)} aria-label={t('preview.reload')} title={t('preview.reload')}>
-            <RotateCw size={16} />
-          </button>
-        )}
-        {md && read && (
-          <button type="button" className="btn btn-ghost text-preview-mode" aria-pressed={source} onClick={() => setSource(!source)}>
-            {source ? <BookOpen size={15} /> : <FileCode2 size={15} />} {t(source ? 'preview.drawn' : 'preview.source')}
-          </button>
-        )}
-        <button type="button" className="icon-btn" onClick={onClose} aria-label={t('common.close')}><X size={18} /></button>
-      </div>
+    <Dialog title={name} onClose={onClose} wide hideTitle className="dlg text-preview-dialog">
+      <DialogHead
+        icon={<FileTypeIcon name={name} />}
+        title={name}
+        titleText={path}
+        oneLine
+        sub={fileWhere(path, read ? formatSize(read.size) : undefined)}
+        subText={path}
+        tools={
+          <FileTools
+            sid={sid}
+            path={path}
+            onReveal={onReveal}
+            extra={
+              <>
+                {tail && (
+                  <HeadTool label={t('preview.reload')} onClick={() => setAgain((n) => n + 1)}>
+                    <RotateCw size={16} />
+                  </HeadTool>
+                )}
+                {/* (Drawn or its source: words, not an icon — a touch screen shows no hint.) */}
+                {md && read && (
+                  <button type="button" className="btn btn-ghost text-preview-mode" aria-pressed={source} onClick={() => setSource(!source)}>
+                    {source ? <BookOpen size={15} /> : <FileCode2 size={15} />} {t(source ? 'preview.drawn' : 'preview.source')}
+                  </button>
+                )}
+              </>
+            }
+          />
+        }
+        onClose={onClose}
+      />
       <div className={'text-preview term-vars ' + (isDark() ? 'dark' : 'light')} ref={box}>
         {/* (Its end shown: what is left out is above.) */}
         {tail && read?.cut && <p className="text-preview-cut">{t('preview.cutTail', { all: formatSize(read.size) })}</p>}
@@ -131,7 +145,7 @@ export function TextPreview({ sid, path, tail = false, onClose, onReveal }: { si
         ) : read.text === '' ? (
           <p className="picture-note hint">{t('preview.empty')}</p>
         ) : md && !source ? (
-          <div className="text-preview-md convo-md"><Markdown text={read.text} /></div>
+          <div className="text-preview-md convo-md"><Markdown text={read.text} soft /></div>
         ) : (
           <div className="text-preview-code">
             {/* (Lines counted from a cut-off start would not be the file's: none then.) */}
@@ -139,29 +153,7 @@ export function TextPreview({ sid, path, tail = false, onClose, onReveal }: { si
             <pre className="text-preview-text"><Code text={read.text} lang={lang} /></pre>
           </div>
         )}
-        {!tail && read?.cut && <p className="text-preview-cut">{t('preview.cut', { all: formatSize(read.size) })}</p>}
-      </div>
-      <div className="picture-foot">
-        <span className="picture-path" title={path}>{path}</span>
-        <span className="picture-acts">
-          <button
-            type="button"
-            className="btn btn-ghost"
-            onClick={async () => {
-              if (await copyText(path)) toast(t('common.copied'))
-            }}
-          >
-            <Copy size={15} /> {t('convo.path.copy')}
-          </button>
-          {onReveal && (
-            <button type="button" className="btn btn-ghost" onClick={onReveal}>
-              <FolderOpen size={15} /> {t('convo.path.reveal')}
-            </button>
-          )}
-          <button type="button" className="btn btn-ghost" onClick={() => downloadPath(sid, path)}>
-            <Download size={15} /> {t('convo.path.download')}
-          </button>
-        </span>
+        {!tail && read?.cut && <p className="text-preview-cut is-end">{t('preview.cut', { all: formatSize(read.size) })}</p>}
       </div>
     </Dialog>
   )

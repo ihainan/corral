@@ -856,12 +856,29 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 /* The changes of a turn, beside the thread (over it where narrow) */
 .convo-panel { flex: none; width: min(46%, 620px); min-width: 0; display: flex; flex-direction: column; border-left: 1px solid var(--term-line); background: var(--term-bg); font-family: var(--font-ui); }
 .convo-panel:focus { outline: none; } /* (focused on opening, for the keys: the panel itself is no control) */
-.convo-panel-head { flex: none; display: flex; align-items: center; gap: 8px; min-height: 40px; padding: 4px 8px 4px 14px; border-bottom: 1px solid var(--term-line); font-size: var(--fs-sub); line-height: var(--lh-sub); }
-.convo-panel-title { font-weight: 600; }
+/* (Its head as a dialog's: app.css .dlg-head — the name at 15, a line under it.) */
+.convo-panel-head { flex: none; display: flex; align-items: center; gap: 12px; padding: 12px 8px 12px 16px; border-bottom: 1px solid var(--term-line); }
+.convo-panel-headtext { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.convo-panel-title { margin: 0; font-size: var(--fs-h3); line-height: var(--lh-h3); font-weight: 600; color: var(--term-fg); }
+.convo-panel-eyebrow { font-size: var(--fs-note); line-height: var(--lh-note); font-weight: 500; color: var(--term-fg-3); }
+.convo-panel-title.is-one { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.convo-panel-sub { display: flex; align-items: baseline; gap: 8px; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-3); }
+.convo-panel-sub .convo-lines { font-size: var(--fs-note); line-height: var(--lh-note); }
 .convo-panel-files { flex: none; max-height: 30%; overflow-y: auto; padding: 4px; border-bottom: 1px solid var(--term-line); }
 .convo-panel-files .convo-changes-file { border-top: 0; border-radius: var(--r-sm); min-height: 30px; }
 .convo-panel-body { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 12px 14px 24px; display: flex; flex-direction: column; gap: 16px; }
-.convo-panel-file-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px; font-size: var(--fs-sub); line-height: var(--lh-sub); }
+.convo-panel-file-head { display: flex; align-items: center; gap: 8px; min-width: 0; margin-bottom: 8px; font-size: var(--fs-sub); line-height: var(--lh-sub); }
+.convo-panel-file-head > :first-child { flex: none; display: flex; }
+.convo-panel-file-name { flex: none; max-width: 55%; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-weight: 600; color: var(--term-fg); }
+.convo-panel-file-dir { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-family: var(--font-mono); font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-3); }
+.convo-new-tag { flex: none; padding: 0 6px; border-radius: var(--r-xs); background: color-mix(in srgb, var(--term-ok-text) 14%, transparent); color: var(--term-ok-text); font-size: var(--fs-note); line-height: var(--lh-note); font-weight: 500; }
+.convo-file-tools { flex: none; display: flex; margin-left: auto; }
+.convo-file-tools .icon-btn { width: 28px; height: 28px; color: var(--term-fg-3); }
+.convo-file-tools .icon-btn:hover { color: var(--term-fg); background: var(--term-hover); }
+@media (pointer: coarse) { .convo-file-tools .icon-btn { width: 36px; height: 36px; } }
+/* A file made anew: all of it added — no green over all of it, nor a + on every line; the tag says it. */
+.convo-panel-edit.is-new .convo-hunk-line.is-add { background: none; }
+.convo-panel-edit.is-new .is-add > .convo-hunk-sign { visibility: hidden; }
 .convo-changes-path.is-full { overflow-wrap: anywhere; white-space: normal; min-width: 0; }
 .convo-panel-edit + .convo-panel-edit { margin-top: 8px; }
 .convo-panel-edit > .convo-hunk-gap { border-radius: var(--r-sm) var(--r-sm) 0 0; }
@@ -1308,17 +1325,17 @@ p.convo-ask-desc { margin: 0 0 8px; font-size: var(--fs-ui); line-height: var(--
 }
 
 /* Code coloured by its language (Code.tsx): the scheme's own colours */
-:is(.convo, .text-preview) .hljs-keyword, :is(.convo, .text-preview) .hljs-selector-tag, :is(.convo, .text-preview) .hljs-tag, :is(.convo, .text-preview) .hljs-name, :is(.convo, .text-preview) .hljs-doctag { color: var(--term-syn-keyword); }
-:is(.convo, .text-preview) .hljs-string, :is(.convo, .text-preview) .hljs-regexp, :is(.convo, .text-preview) .hljs-char.escape_ { color: var(--term-syn-string); }
-:is(.convo, .text-preview) .hljs-number, :is(.convo, .text-preview) .hljs-literal, :is(.convo, .text-preview) .hljs-symbol, :is(.convo, .text-preview) .hljs-bullet { color: var(--term-syn-number); }
-:is(.convo, .text-preview) .hljs-title, :is(.convo, .text-preview) .hljs-section, :is(.convo, .text-preview) .hljs-selector-id, :is(.convo, .text-preview) .hljs-selector-class { color: var(--term-syn-title); }
-:is(.convo, .text-preview) .hljs-built_in, :is(.convo, .text-preview) .hljs-type, :is(.convo, .text-preview) .hljs-title.class_ { color: var(--term-syn-type); }
-:is(.convo, .text-preview) .hljs-attr, :is(.convo, .text-preview) .hljs-attribute, :is(.convo, .text-preview) .hljs-property, :is(.convo, .text-preview) .hljs-variable, :is(.convo, .text-preview) .hljs-template-variable, :is(.convo, .text-preview) .hljs-params { color: var(--term-syn-attr); }
-:is(.convo, .text-preview) .hljs-comment, :is(.convo, .text-preview) .hljs-quote, :is(.convo, .text-preview) .hljs-meta { color: var(--term-syn-comment); }
-:is(.convo, .text-preview) .hljs-addition { color: var(--term-ok-text); }
-:is(.convo, .text-preview) .hljs-deletion { color: var(--term-danger-text); }
-:is(.convo, .text-preview) .hljs-emphasis { font-style: italic; }
-:is(.convo, .text-preview) .hljs-strong { font-weight: 600; }
+:is(.convo, .text-preview, .bg-cmd-text) .hljs-keyword, :is(.convo, .text-preview, .bg-cmd-text) .hljs-selector-tag, :is(.convo, .text-preview, .bg-cmd-text) .hljs-tag, :is(.convo, .text-preview, .bg-cmd-text) .hljs-name, :is(.convo, .text-preview, .bg-cmd-text) .hljs-doctag { color: var(--term-syn-keyword); }
+:is(.convo, .text-preview, .bg-cmd-text) .hljs-string, :is(.convo, .text-preview, .bg-cmd-text) .hljs-regexp, :is(.convo, .text-preview, .bg-cmd-text) .hljs-char.escape_ { color: var(--term-syn-string); }
+:is(.convo, .text-preview, .bg-cmd-text) .hljs-number, :is(.convo, .text-preview, .bg-cmd-text) .hljs-literal, :is(.convo, .text-preview, .bg-cmd-text) .hljs-symbol, :is(.convo, .text-preview, .bg-cmd-text) .hljs-bullet { color: var(--term-syn-number); }
+:is(.convo, .text-preview, .bg-cmd-text) .hljs-title, :is(.convo, .text-preview, .bg-cmd-text) .hljs-section, :is(.convo, .text-preview, .bg-cmd-text) .hljs-selector-id, :is(.convo, .text-preview, .bg-cmd-text) .hljs-selector-class { color: var(--term-syn-title); }
+:is(.convo, .text-preview, .bg-cmd-text) .hljs-built_in, :is(.convo, .text-preview, .bg-cmd-text) .hljs-type, :is(.convo, .text-preview, .bg-cmd-text) .hljs-title.class_ { color: var(--term-syn-type); }
+:is(.convo, .text-preview, .bg-cmd-text) .hljs-attr, :is(.convo, .text-preview, .bg-cmd-text) .hljs-attribute, :is(.convo, .text-preview, .bg-cmd-text) .hljs-property, :is(.convo, .text-preview, .bg-cmd-text) .hljs-variable, :is(.convo, .text-preview, .bg-cmd-text) .hljs-template-variable, :is(.convo, .text-preview, .bg-cmd-text) .hljs-params { color: var(--term-syn-attr); }
+:is(.convo, .text-preview, .bg-cmd-text) .hljs-comment, :is(.convo, .text-preview, .bg-cmd-text) .hljs-quote, :is(.convo, .text-preview, .bg-cmd-text) .hljs-meta { color: var(--term-syn-comment); }
+:is(.convo, .text-preview, .bg-cmd-text) .hljs-addition { color: var(--term-ok-text); }
+:is(.convo, .text-preview, .bg-cmd-text) .hljs-deletion { color: var(--term-danger-text); }
+:is(.convo, .text-preview, .bg-cmd-text) .hljs-emphasis { font-style: italic; }
+:is(.convo, .text-preview, .bg-cmd-text) .hljs-strong { font-weight: 600; }
 
 /* The agents page: the conversation view on the whole page (a tab of its own with tabs) */
 .agents-chat-title { padding: 0 6px; font: 600 var(--fs-h3)/var(--lh-h3) var(--font-ui); color: var(--term-fg); }
@@ -1495,27 +1512,36 @@ p.convo-ask-desc { margin: 0 0 8px; font-size: var(--fs-ui); line-height: var(--
 .convo-sub-open { align-self: flex-start; margin: 4px 0 6px; font-size: var(--fs-sub); line-height: var(--lh-sub); }
 .convo-sub .is-back { transform: rotate(180deg); }
 button.convo-running-what { padding: 0; text-align: left; color: var(--term-fg-2); font: inherit; text-decoration: underline; text-decoration-color: var(--term-line); text-underline-offset: 3px; }
-/* A command's details: the whole of it, its output's file (11-05). Shaped as
-   the picture and the text file are (app.css, .picture-dialog) — a head that
-   names it and closes it, a body set off by hairlines, its actions under
-   them. It is a thing looked at, not a form: the head's × is the way out, as
-   theirs is. Before 11-07 it had the dialog's plain shape, and what the
-   command was asked to do — a whole sentence — stood in the title at 20px,
-   wrapping over two lines; it reads as the body's first line instead. */
-.dialog.bg-cmd-dialog { padding: 12px 0 0; gap: 0; overflow: hidden; }
-.bg-cmd-head { flex: none; display: flex; align-items: center; gap: 8px; padding: 0 12px 10px 20px; }
-.bg-cmd-title { flex: 1; min-width: 0; margin: 0; font-size: var(--fs-h3); line-height: var(--lh-h3); font-weight: 600; }
-.bg-cmd-body { min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 10px; padding: 14px 20px; border-block: 1px solid var(--line); }
-.bg-cmd-what { margin: 0; font-size: var(--fs-h3); line-height: var(--lh-h3); }
-.bg-cmd-when { margin: 0; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--fg-3); }
-.bg-cmd-acts { flex: none; padding: 10px 12px 12px 20px; }
-.bg-cmd-text { margin: 0; padding: 10px 12px; border-radius: var(--r); background: var(--bg-subtle); font: var(--fs-sub)/var(--lh-sub) var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 40vh; overflow: auto; }
-.bg-cmd-text code { font: inherit; background: none; padding: 0; }
-.bg-cmd-out { margin: 0; overflow-wrap: anywhere; font-size: var(--fs-note); line-height: var(--lh-note); }
-.bg-cmd-path { font-family: var(--font-mono); color: var(--fg-2); }
-@media (max-width: 520px) {
-  .sheet-mode .dialog.bg-cmd-dialog { padding-bottom: env(safe-area-inset-bottom, 0px); }
+/* A command's details (the shared dialog head, app.css .dlg-*): what it is
+   for as the title, how it goes under it; then the command, coloured, its
+   first lines and the rest on asking, copied from its label row; then its
+   output as a file to open. 11-13: before, a heading of its own over the
+   sentence, the command a grey wall, the output's path a sentence wrapped
+   over three lines, and two buttons for one action each. */
+.dialog.bg-cmd-dialog { max-width: 640px; }
+.bg-cmd-live { display: inline-block; width: 6px; height: 6px; margin-right: 6px; border-radius: 50%; background: var(--ok); vertical-align: middle; }
+.bg-cmd-sec { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.bg-cmd-label { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: var(--fs-note); line-height: var(--lh-note); font-weight: 500; color: var(--fg-3); }
+.bg-cmd-label .link-btn { display: inline-flex; align-items: center; gap: 4px; font-weight: 400; }
+.bg-cmd-text {
+  margin: 0; padding: 10px 12px; border-radius: var(--r); border: 1px solid var(--line); background: var(--bg-subtle); color: var(--fg);
+  font-family: var(--font-mono); font-size: var(--fs-sub); line-height: var(--lh-sub); white-space: pre-wrap; overflow-wrap: anywhere;
 }
+.bg-cmd-text.is-shut { max-height: calc(var(--lh-sub) * var(--shut) + 22px); overflow: hidden; }
+/* (More below the fold: the last lines fade out, so it does not look cut.) */
+.bg-cmd-text.is-more { -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 48px), transparent); mask-image: linear-gradient(to bottom, #000 calc(100% - 48px), transparent); }
+.bg-cmd-text code { font: inherit; background: none; padding: 0; }
+.bg-cmd-all { align-self: flex-start; font-size: var(--fs-note); line-height: var(--lh-note); }
+.bg-cmd-file {
+  display: flex; align-items: baseline; gap: 8px; width: 100%; min-width: 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--r);
+  background: none; color: var(--fg); text-align: left; cursor: pointer; font: inherit;
+}
+.bg-cmd-file:hover:not(:disabled) { background: var(--bg-hover); }
+.bg-cmd-file:disabled { cursor: default; }
+.bg-cmd-file:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.bg-cmd-file-ic { flex: none; align-self: center; color: var(--fg-3); }
+.bg-cmd-file-name { flex: none; max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: var(--fs-sub); line-height: var(--lh-sub); }
+.bg-cmd-file-dir { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: var(--fs-note); line-height: var(--lh-note); color: var(--fg-3); }
 button.convo-running-what:hover { color: var(--term-fg); text-decoration-color: var(--term-fg-3); }
 @media (pointer: coarse) {
   button.convo-running-what, .term-root .convo-running-more { padding-top: 13px; padding-bottom: 13px; margin-top: -13px; margin-bottom: -13px; }
@@ -1648,13 +1674,6 @@ button.convo-running-what:hover { color: var(--term-fg); text-decoration-color: 
 @media (pointer: coarse) { .claude-card-key { height: 38px; } .claude-card-head { padding: 10px 12px; } }
 
 /* The page's keys (? or ⋮ → Keyboard shortcuts) */
-.page-keys { display: flex; flex-direction: column; gap: 2px; margin: 0; }
-.page-keys-row { display: flex; align-items: center; gap: 16px; min-height: 32px; }
-.page-keys-row dt { flex: none; width: 150px; margin: 0; }
-.page-keys-row dd { flex: 1; min-width: 0; margin: 0; color: var(--fg-2); font-size: var(--fs-ui); line-height: var(--lh-ui); }
-.page-keys kbd { font: 12px/20px var(--font-mono); padding: 0 6px; border: 1px solid var(--line-strong); border-radius: var(--r-sm); background: var(--bg-subtle); color: var(--fg); white-space: pre; }
-.page-keys-note { margin: 12px 0 0; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--fg-3); }
-@media (max-width: 480px) { .page-keys-row dt { width: 120px; } }
 .convo-list-pin { flex: none; display: inline-flex; align-items: center; color: var(--fg-3); }
 /* (A pushpin stuck in, leaning: its head filled, as a mark of what is so
    rather than a thing to press. The menu's stays upright: its PinOff's
@@ -1725,8 +1744,6 @@ html.kb-open .convo-runs .convo-runs-pop.is-sheet { padding-bottom: 16px; }
 .convo-search-bar { padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(10px, env(safe-area-inset-right, 0px)); }
 .convo-search-input::-webkit-search-cancel-button { -webkit-appearance: none; appearance: none; display: none; }
 .convo-turns-head { padding: 8px max(16px, env(safe-area-inset-right, 0px)) 0 max(16px, env(safe-area-inset-left, 0px)); font: 600 var(--fs-sub)/var(--lh-sub) var(--font-ui); color: var(--term-fg-2); }
-.page-keys-or { color: var(--fg-3); }
-.page-keys-row dt { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 4px; }
 /* A code block whose lines run on past its edge: that edge fades (it scrolls sideways) */
 .md-code pre.is-more { -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 32px), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 32px), transparent); }
 /* Port forwarding dialog: its sections' titles a step under the dialog's,
@@ -1766,3 +1783,17 @@ html.kb-open .convo-runs .convo-runs-pop.is-sheet { padding-bottom: 16px; }
 @media (max-width: 640px) { .convo-picker { animation: rise 0.2s var(--ease); } }
 .convo-latest { animation: fade 0.1s var(--ease); }
 .convo-ask.is-new { animation: fade 0.16s var(--ease); }
+
+/* The page's keys (PageKeysHelp): in groups by where they act; what a key
+   does on the left, the keys on the right in boxes, as menus show them. */
+.dialog.page-keys-dialog { max-width: 520px; }
+.page-keys-group { display: flex; flex-direction: column; gap: 4px; }
+.page-keys-head { margin: 0; font-size: var(--fs-note); line-height: var(--lh-note); font-weight: 500; color: var(--fg-3); }
+.page-keys { display: flex; flex-direction: column; margin: 0; }
+.page-keys-row { display: flex; align-items: center; gap: 16px; min-height: 36px; border-bottom: 1px solid var(--line); }
+.page-keys-row:last-child { border-bottom: 0; }
+.page-keys-row dd { flex: 1; min-width: 0; margin: 0; color: var(--fg); font-size: var(--fs-ui); line-height: var(--lh-ui); }
+.page-keys-row dt { flex: none; display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 4px; margin: 0; }
+.page-keys kbd { min-width: 24px; padding: 0 6px; border: 1px solid var(--line-strong); border-bottom-width: 2px; border-radius: var(--r-sm); background: var(--bg-subtle); color: var(--fg-2); font-family: var(--font-mono); font-size: var(--fs-note); line-height: var(--lh-note); text-align: center; white-space: pre; }
+.page-keys-or { color: var(--fg-4); font-size: var(--fs-note); line-height: var(--lh-note); }
+.page-keys-note { margin: 0; padding: 10px 12px; border-radius: var(--r); background: var(--bg-subtle); font-size: var(--fs-note); line-height: var(--lh-note); color: var(--fg-3); }

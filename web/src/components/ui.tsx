@@ -1,6 +1,6 @@
 import { cloneElement, createContext, isValidElement, useCallback, useContext, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
-import { Check, CircleAlert, CircleCheck, Copy, Info } from 'lucide-react'
+import { Check, CircleAlert, CircleCheck, Copy, Info, X } from 'lucide-react'
 import { errorText } from '../api'
 import { t } from '../i18n'
 
@@ -132,6 +132,37 @@ export function Dialog(props: { title: string; onClose: () => void; children: Re
       </div>
     </div>,
     document.body,
+  )
+}
+
+// The head of a dialog whose body is a thing to look at (a file, a picture,
+// a command): what it is, a line under it (where it is, how big, how it
+// goes), the actions on it as icons, and the close — one row, the same in
+// each (app.css, .dlg-*). Its Dialog takes className "dlg" and hideTitle.
+export function DialogHead(props: { title: ReactNode; titleText?: string; oneLine?: boolean; eyebrow?: ReactNode; sub?: ReactNode; subText?: string; icon?: ReactNode; tools?: ReactNode; onClose: () => void }) {
+  return (
+    <div className="dlg-head">
+      {props.icon && <span className="dlg-icon" aria-hidden="true">{props.icon}</span>}
+      <div className="dlg-head-text">
+        {props.eyebrow && <span className="dlg-eyebrow">{props.eyebrow}</span>}
+        <h2 className={'dlg-title' + (props.oneLine ? ' is-one' : '')} title={props.titleText}>{props.title}</h2>
+        {props.sub && <span className="dlg-sub" title={props.subText}>{props.sub}</span>}
+      </div>
+      {props.tools && <div className="dlg-tools">{props.tools}</div>}
+      <button type="button" className="icon-btn dlg-close" onClick={props.onClose} aria-label={t('common.close')} title={t('common.close')}>
+        <X size={18} />
+      </button>
+    </div>
+  )
+}
+
+// An action of a dialog's head: an icon, its name said on hover and to the
+// screen reader.
+export function HeadTool(props: { label: string; onClick: () => void; children: ReactNode; pressed?: boolean }) {
+  return (
+    <button type="button" className="icon-btn" onClick={props.onClick} aria-label={props.label} title={props.label} aria-pressed={props.pressed}>
+      {props.children}
+    </button>
   )
 }
 

@@ -1,10 +1,11 @@
 import { createContext, Fragment, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { ArrowDown, ArrowUp, Check, Copy, FolderOpen, Image as ImageIcon, ChevronDown, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, Clock, Download, Eye, GitBranch, Keyboard, ListOrdered, Loader, MoreHorizontal, MoreVertical, PanelLeft, Pin, Search, TriangleAlert, X, Plus } from 'lucide-react'
+import { ArrowDown, ArrowUp, Check, Copy, FileText, FolderOpen, Image as ImageIcon, ChevronDown, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, Clock, Download, Eye, GitBranch, Keyboard, ListOrdered, Loader, MoreHorizontal, MoreVertical, PanelLeft, Pin, RotateCw, Search, Terminal, TriangleAlert, X, Plus } from 'lucide-react'
 import { t, getLang, type I18nKey } from '../i18n'
 import { api } from '../api'
 import { asHeld, dayStart, FOLDED, foldAt, GROUPS, inGroup, listOrder, pinned, type ConvoListRow, type RowCmds } from './agentOrder'
-import { copyText, Dialog, isCoarse, Menu, MenuLayer, useToast, type MenuItem } from '../components/ui'
+import { copyText, Dialog, DialogHead, isCoarse, Menu, MenuLayer, useToast, type MenuItem } from '../components/ui'
 import { saveFile } from '../saveFile'
+import { isDark, usePrefs } from '../prefs'
 import { composing, foldAllKey, helpKey, jumpKey, onMac, sideKey, switchKey } from './pageKeys'
 import { keepNames, keptNames, local } from '../storage'
 import { useFlip } from '../flip'
@@ -25,6 +26,7 @@ import { AgentIcon } from './agentIcons'
 import { matchQuery } from './agents'
 import { keptEntries } from './conversation'
 import { ShowTerminal } from './showTerminal'
+import { FileTypeIcon } from './fileIcons'
 import { categoryIcon, stepIcon, ThinkIcon, WorkIcon } from './stepIcons'
 import type { Convo, ConvoAnswer, ConvoCost, ConvoQuota, ConvoQuotaWindow, ConvoEntry, ConvoShell, ConvoHunk, ConvoMeta, ConvoPart, ConvoQueued, ConvoRunning, ConvoTask, ConvoTool, ConvoTrouble, ConvoEvent } from './conversation'
 import { agentName } from './askText'
@@ -1721,62 +1723,94 @@ function RunningWork({ scanOf, items, openSub, openCmd }: { scanOf?: string; ite
   )
 }
 
-// A command left running in the background: what it is (whole), since when,
-// and its output — the file Claude Code writes it to, on the host, looked at
-// from its end on asking (read once each time, no polling). gone: it has
-// ended since the dialog opened (its output stays to be looked at).
+// A command left running in the background: what it is for, how it goes,
+// the command whole (coloured, its start shown and the rest a tap away), and
+// its output — the file Claude Code writes it to, on the host, looked at from
+// its end on asking (read once each time, no polling). gone: it has ended
+// since the dialog opened (its output stays to be looked at).
+const BG_CMD_SHUT = 8 // (lines of the command shown before "show all")
 function BgCmdDialog({ r, gone, onClose }: { r: ConvoRunning; gone: boolean; onClose: () => void }) {
+  usePrefs() // (the command's colours follow the theme)
   const acts = useContext(FileActsOf)
+  const toast = useToast()
   const [, tick] = useState(0)
   useEffect(() => {
     const id = setInterval(() => tick((n) => n + 1), 1000)
     return () => clearInterval(id)
   }, [])
-  // What it was asked to do is a whole sentence ("Observe SG2 stability for 5
-  // hours in background"): it reads as the first line of the body, not as the
-  // dialog's name. Named and closed in its head as the picture and the text
-  // file are — it is a thing looked at, not a form to fill in.
-  //
-  // The path is the host's, not ours: set apart from the words around it so
-  // the eye can tell where it starts and ends. Split on where each language's
-  // own sentence puts it, so neither has to be rewritten.
-  const out = r.out ? t('convo.bgOutAt', { path: '\u0001' }).split('\u0001') : null
+  // (Shut: the first lines; "show all" only where there is more than they hold.)
+  const cmdRef = useRef<HTMLPreElement>(null)
+  const [all, setAll] = useState(false)
+  const [more, setMore] = useState(false)
+  useLayoutEffect(() => {
+    const el = cmdRef.current
+    if (el && !all) setMore(el.scrollHeight > el.clientHeight + 1)
+  }, [r.cmd, all])
+  const tail = r.out && acts?.tail ? () => acts.tail!(r.out!) : undefined
+  const outName = r.out ? r.out.slice(r.out.lastIndexOf('/') + 1) : ''
+  // (Its folder by the last two of it — the whole is on hover: a temporary
+  // folder's long name says nothing at a glance.)
+  const outDir = r.out ? shortPath(r.out.slice(0, r.out.lastIndexOf('/') + 1) || '/').replace(/\/?$/, '/') : ''
   return (
-    <Dialog title={t('convo.bgCmds1')} onClose={onClose} hideTitle className="bg-cmd-dialog">
-      <div className="bg-cmd-head">
-        <h2 className="bg-cmd-title">{t('convo.bgCmds1')}</h2>
-        <button type="button" className="icon-btn" onClick={onClose} aria-label={t('common.close')}>
-          <X size={18} />
-        </button>
-      </div>
-      <div className="bg-cmd-body">
-        {r.what && <p className="bg-cmd-what">{r.what}</p>}
-        <p className="bg-cmd-when">{gone ? t('convo.bgEnded') : r.ts ? t('convo.bgFor', { for: since(r.ts) }) : t('convo.bgRunning')}</p>
+    <Dialog title={r.what || t('convo.bgCmds1')} onClose={onClose} hideTitle className="dlg bg-cmd-dialog">
+      <DialogHead
+        icon={<Terminal size={16} />}
+        eyebrow={r.what ? t('convo.bgCmds1') : undefined}
+        title={r.what || t('convo.bgCmds1')}
+        sub={
+          <>
+            {!gone && <span className="bg-cmd-live" aria-hidden="true" />}
+            {gone ? t('convo.bgEnded') : r.ts ? t('convo.bgFor', { for: since(r.ts) }) : t('convo.bgRunning')}
+          </>
+        }
+        onClose={onClose}
+      />
+      <div className="dlg-body">
         {r.cmd && (
-          <pre className="bg-cmd-text">
-            <Code text={r.cmd} lang="bash" />
-          </pre>
+          <section className="bg-cmd-sec">
+            <div className="bg-cmd-label">
+              <span>{t('convo.bgCmdLabel')}</span>
+              <button
+                type="button"
+                className="link-btn"
+                onClick={async () => {
+                  if (await copyText(r.cmd!)) toast(t('common.copied'))
+                }}
+              >
+                <Copy size={13} /> {t('common.copy')}
+              </button>
+            </div>
+            <pre ref={cmdRef} className={'bg-cmd-text term-vars ' + (isDark() ? 'dark' : 'light') + (all ? '' : ' is-shut') + (more && !all ? ' is-more' : '')} style={{ ['--shut' as string]: BG_CMD_SHUT }}>
+              <Code text={r.cmd} lang="bash" />
+            </pre>
+            {(more || all) && (
+              <button type="button" className="link-btn bg-cmd-all" aria-expanded={all} onClick={() => setAll(!all)}>
+                {t(all ? 'convo.bgShowLess' : 'convo.bgShowAll')}
+              </button>
+            )}
+          </section>
         )}
-        {out && (
-          <p className="bg-cmd-out hint">
-            {out[0]}
-            <span className="bg-cmd-path">{r.out}</span>
-            {out[1]}
-          </p>
+        {r.out && (
+          <section className="bg-cmd-sec">
+            <div className="bg-cmd-label">
+              <span>{t('convo.bgOutLabel')}</span>
+            </div>
+            {/* (The host's file: its name to know it by, its folder after, whole on hover.) */}
+            <button type="button" className="bg-cmd-file" onClick={tail} disabled={!tail} title={r.out}>
+              <FileText size={16} className="bg-cmd-file-ic" aria-hidden="true" />
+              <span className="bg-cmd-file-name">{outName}</span>
+              <span className="bg-cmd-file-dir">{outDir}</span>
+            </button>
+          </section>
         )}
       </div>
-      <div className="dialog-actions bg-cmd-acts">
-        {r.cmd && (
-          <button type="button" className="btn btn-ghost" onClick={() => void copyText(r.cmd!)}>
-            <Copy size={15} /> {t('convo.bgCopy')}
-          </button>
-        )}
-        {r.out && acts?.tail && (
-          <button type="button" className="btn btn-primary" onClick={() => acts.tail!(r.out!)}>
+      {tail && (
+        <div className="dlg-foot">
+          <button type="button" className="btn btn-primary" onClick={tail}>
             <Eye size={15} /> {t('convo.bgOutput')}
           </button>
-        )}
-      </div>
+        </div>
+      )}
     </Dialog>
   )
 }
@@ -2852,40 +2886,48 @@ const KEY_SIDE = mac ? '⌘B' : 'Ctrl+B'
 // side: the list of agents beside it, with its own.
 function PageKeysHelp({ onClose, side }: { onClose: () => void; side: boolean }) {
   // (Each key in a box of its own; two that do the same, or go each way, apart: not a chord.)
-  const rows: [string[], I18nKey][] = [
-    ...(side ? ([[mac ? ['⌥↑', '⌥↓'] : ['Alt+↑', 'Alt+↓'], 'pageKeys.switch'], [[KEY_SEARCH], 'pageKeys.search'], [[KEY_SIDE], 'pageKeys.side']] as [string[], I18nKey][]) : []),
-    [['[', ']'], 'pageKeys.jump'],
-    ...(mac ? ([[['Ctrl+O'], 'pageKeys.fold']] as [string[], I18nKey][]) : []),
-    [['?'], 'pageKeys.help'],
-    [mac ? ['Return', '⌘Return'] : ['Enter', 'Ctrl+Enter'], 'pageKeys.send'],
-    [['Shift+' + (mac ? 'Return' : 'Enter')], 'pageKeys.newline'],
-    [['↑', '↓'], 'pageKeys.history'],
-    [['Tab'], 'pageKeys.suggestion'],
-    [['1–9', 'Esc'], 'pageKeys.card'],
-    [['Esc'], 'pageKeys.stop'],
+  // In groups by where they act, each a heading over its rows.
+  type Row = [string[], I18nKey]
+  const groups: [I18nKey, Row[]][] = [
+    ...(side ? ([['pageKeys.gAgents', [[mac ? ['⌥↑', '⌥↓'] : ['Alt+↑', 'Alt+↓'], 'pageKeys.switch'], [[KEY_SEARCH], 'pageKeys.search'], [[KEY_SIDE], 'pageKeys.side']]]] as [I18nKey, Row[]][]) : []),
+    ['pageKeys.gConvo', [[['[', ']'], 'pageKeys.jump'], ...(mac ? ([[['Ctrl+O'], 'pageKeys.fold']] as Row[]) : []), [['?'], 'pageKeys.help']]],
+    [
+      'pageKeys.gInput',
+      [
+        [mac ? ['Return', '⌘Return'] : ['Enter', 'Ctrl+Enter'], 'pageKeys.send'],
+        [['Shift+' + (mac ? 'Return' : 'Enter')], 'pageKeys.newline'],
+        [['↑', '↓'], 'pageKeys.history'],
+        [['Tab'], 'pageKeys.suggestion'],
+        [['Esc'], 'pageKeys.stop'],
+      ],
+    ],
+    ['pageKeys.gCard', [[['1–9', 'Esc'], 'pageKeys.card']]],
   ]
   return (
-    <Dialog title={t('pageKeys.title')} onClose={onClose}>
-      <dl className="page-keys">
-        {rows.map(([k, what]) => (
-          <div key={what} className="page-keys-row">
-            <dt>
-              {k.map((x, i) => (
-                <Fragment key={x}>
-                  {i > 0 && <span className="page-keys-or"> / </span>}
-                  <kbd>{x}</kbd>
-                </Fragment>
+    <Dialog title={t('pageKeys.title')} onClose={onClose} hideTitle className="dlg page-keys-dialog">
+      <DialogHead icon={<Keyboard size={16} />} title={t('pageKeys.title')} onClose={onClose} />
+      <div className="dlg-body">
+        {groups.map(([g, rows]) => (
+          <section key={g} className="page-keys-group">
+            <h3 className="page-keys-head">{t(g)}</h3>
+            <dl className="page-keys">
+              {rows.map(([k, what]) => (
+                <div key={what} className="page-keys-row">
+                  <dd>{t(what)}</dd>
+                  <dt>
+                    {k.map((x, i) => (
+                      <Fragment key={x}>
+                        {i > 0 && <span className="page-keys-or">/</span>}
+                        <kbd>{x}</kbd>
+                      </Fragment>
+                    ))}
+                  </dt>
+                </div>
               ))}
-            </dt>
-            <dd>{t(what)}</dd>
-          </div>
+            </dl>
+          </section>
         ))}
-      </dl>
-      <p className="page-keys-note">{t(mac ? 'pageKeys.noteMac' : 'pageKeys.note')}</p>
-      <div className="dialog-actions">
-        <button type="button" className="btn" onClick={onClose}>
-          {t('common.close')}
-        </button>
+        <p className="page-keys-note">{t(mac ? 'pageKeys.noteMac' : 'pageKeys.note')}</p>
       </div>
     </Dialog>
   )
@@ -3486,6 +3528,26 @@ const ForkAtOf = createContext<{ go: (e: ConvoEntry) => void; can: (e: ConvoEntr
 
 // A file a step acted on: its whole path, and what can be done with it.
 // (acts: only what can be done, the path being said beside it already.)
+// What can be done with a file a panel shows, as icons on its head row:
+// copy its path, look at it, show it in the file panel, download it.
+function FileHeadTools({ path, onCopy }: { path: string; onCopy: (s: string) => void }) {
+  const acts = useContext(FileActsOf)
+  const full = fullPath(path)
+  const tool = (label: string, onClick: () => void, icon: ReactNode) => (
+    <button type="button" className="icon-btn" onClick={onClick} aria-label={label} title={label}>
+      {icon}
+    </button>
+  )
+  return (
+    <span className="convo-file-tools">
+      {tool(t('convo.path.copy'), () => onCopy(full ?? path), <Copy size={15} />)}
+      {acts && full && previewable(full) && tool(t(IMAGE_EXT.test(full) ? 'convo.path.view' : 'preview.item'), () => acts.view(full), <Eye size={15} />)}
+      {acts && full && tool(t('convo.path.reveal'), () => acts.reveal(full), <FolderOpen size={15} />)}
+      {acts && full && tool(t('convo.path.download'), () => acts.download(full), <Download size={15} />)}
+    </span>
+  )
+}
+
 function PathBar({ path, onCopy, acts: only }: { path: string; onCopy: (s: string) => void; acts?: boolean }) {
   const acts = useContext(FileActsOf)
   const full = fullPath(path)
@@ -3557,16 +3619,19 @@ function SubPanel({ of, sub, depth, live, onOpen, onBack, onClose, active, copy 
             <ChevronRight size={16} className="is-back" />
           </button>
         )}
-        <span className="convo-panel-title" title={sub.title}>
-          {sub.title || t('sub.title')}
-        </span>
-        <span className="convo-sub-state">{going ? [t('sub.going'), since(scanned?.ts), scanTokens(scanned)].filter(Boolean).join(t('convo.sep')) : report ? t('sub.handedBack') : ''}</span>
-        <span className="spacer" />
+        {/* (As the changes panel's head: a small word for what it is, its name, how it goes.) */}
+        <div className="convo-panel-headtext">
+          <span className="convo-panel-eyebrow">{t('sub.title')}</span>
+          <h2 className="convo-panel-title is-one" title={sub.title}>
+            {sub.title || t('sub.title')}
+          </h2>
+          {(going || report) && <span className="convo-panel-sub convo-sub-state">{going ? [t('sub.going'), since(scanned?.ts), scanTokens(scanned)].filter(Boolean).join(t('convo.sep')) : t('sub.handedBack')}</span>}
+        </div>
         <button type="button" className="icon-btn" onClick={c.read} disabled={c.loading} aria-label={t('sub.refresh')} title={t('sub.refresh')}>
-          <Loader size={15} className={c.loading ? 'convo-running-spin' : ''} />
+          <RotateCw size={16} className={c.loading ? 'convo-running-spin' : ''} />
         </button>
         <button type="button" className="icon-btn" onClick={onClose} aria-label={t('common.close')} title={t('common.close') + ' (Esc)'}>
-          <X size={16} />
+          <X size={18} />
         </button>
       </div>
       {going && scanNow(scanned) && <p className="convo-sub-now" title={scanNow(scanned)}>{scanNow(scanned)}</p>}
@@ -4472,33 +4537,42 @@ function ChangesPanel({ edits, focus, onClose, active, onCopy }: { edits: Edits;
   return (
     <aside className="convo-panel" aria-label={t('convo.changesTitle')} tabIndex={-1} ref={panel}>
       <div className="convo-panel-head">
-        <span className="convo-panel-title">{t('convo.changesTitle')}</span>
-        <LineCounts add={edits.add} del={edits.del} />
-        <span className="spacer" />
+        <div className="convo-panel-headtext">
+          <h2 className="convo-panel-title">{t('convo.changesTitle')}</h2>
+          <span className="convo-panel-sub">
+            {t(edits.files.length === 1 ? 'convo.changes1' : 'convo.changes', { n: edits.files.length })}
+            <LineCounts add={edits.add} del={edits.del} />
+          </span>
+        </div>
         <button type="button" className="icon-btn" onClick={onClose} aria-label={t('common.close')} title={t('common.close') + ' (Esc)'}>
-          <X size={16} />
+          <X size={18} />
         </button>
       </div>
-      <div className="convo-panel-files">
+      {/* (A list to go to each file by: only where there is more than one.) */}
+      {edits.files.length > 1 && <div className="convo-panel-files">
         {edits.files.map((f) => (
           <button key={f.path} type="button" className="convo-changes-file" onClick={() => box.current?.querySelector(`[data-file="${CSS.escape(f.path)}"]`)?.scrollIntoView({ block: 'start', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' })} title={f.path}>
             <span className="convo-changes-path">{shortPath(f.path)}</span>
             <LineCounts add={f.add} del={f.del} />
           </button>
         ))}
-      </div>
+      </div>}
       <div className="convo-panel-body" ref={box}>
         {edits.files.map((f) => (
           <section key={f.path} className="convo-panel-file" data-file={f.path}>
-            <div className="convo-panel-file-head">
-              <span className="convo-changes-path is-full">{f.path}</span>
-              <LineCounts add={f.add} del={f.del} />
+            {/* (Its name to know it by, its folder after it — whole on hover — what
+                it gained and lost, and what can be done with it, as icons.) */}
+            <div className="convo-panel-file-head" title={f.path}>
+              <FileTypeIcon name={baseName(f.path)} />
+              <span className="convo-panel-file-name">{baseName(f.path)}</span>
+              <span className="convo-panel-file-dir">{shortPath(f.path.slice(0, f.path.lastIndexOf('/') + 1) || '/')}</span>
+              {f.tools.every((tl) => !tl.patch && !!created(tl)) ? <span className="convo-new-tag">{t('convo.newFile')}</span> : <LineCounts add={f.add} del={f.del} />}
+              <FileHeadTools path={f.path} onCopy={onCopy} />
             </div>
-            <PathBar path={f.path} onCopy={onCopy} acts />
             {f.tools.map((tl, i) => {
               const h = tl.patch ?? created(tl)
               return (
-                <div key={i} className="convo-panel-edit">
+                <div key={i} className={'convo-panel-edit' + (!tl.patch && h ? ' is-new' : '')}>
                   {f.tools.length > 1 && <div className="convo-hunk-gap">{t('convo.editN', { n: i + 1 })}</div>}
                   {tl.same ? (
                     <div className="convo-hunk-gap">{t('convo.noChange')}</div>

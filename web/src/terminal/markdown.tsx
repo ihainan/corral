@@ -9,9 +9,11 @@ import { Code } from './Code'
 // inside a paragraph is kept as a line break, as the agent shows it in the
 // terminal (joining lines with spaces would also space Chinese apart).
 
-export function Markdown({ text, onCopyCode, copyLabel = 'Copy' }: { text: string; onCopyCode?: (code: string) => void; copyLabel?: string }) {
+// soft: a paragraph's lines are one line, as Markdown files mean them (a file
+// looked at); else each line break is kept, as an agent's words mean theirs.
+export function Markdown({ text, onCopyCode, copyLabel = 'Copy', soft = false }: { text: string; onCopyCode?: (code: string) => void; copyLabel?: string; soft?: boolean }) {
   const copy = onCopyCode ? { fn: onCopyCode, label: copyLabel } : undefined
-  return <>{blocks(text.replace(/\r\n?/g, '\n').split('\n'), copy, 0)}</>
+  return <>{blocks(text.replace(/\r\n?/g, '\n').split('\n'), copy, 0, soft)}</>
 }
 
 type Copy = { fn: (code: string) => void; label: string } | undefined
@@ -85,12 +87,12 @@ function headingText(s: string): string {
   return s.slice(0, end)
 }
 
-function blocks(lines: string[], copy: Copy, depth: number): ReactNode[] {
+function blocks(lines: string[], copy: Copy, depth: number, soft = false): ReactNode[] {
   const out: ReactNode[] = []
   let i = 0
   let para: string[] = []
   const flush = () => {
-    if (para.length) out.push(<p key={out.length}>{inlineLines(para)}</p>)
+    if (para.length) out.push(<p key={out.length}>{inlineLines(para, soft)}</p>)
     para = []
   }
   while (i < lines.length) {
@@ -146,7 +148,7 @@ function blocks(lines: string[], copy: Copy, depth: number): ReactNode[] {
       flush()
       const q: string[] = []
       while (i < lines.length && quote.test(lines[i])) q.push(lines[i++].replace(quote, ''))
-      out.push(<blockquote key={out.length}>{blocks(q, copy, depth + 1)}</blockquote>)
+      out.push(<blockquote key={out.length}>{blocks(q, copy, depth + 1, soft)}</blockquote>)
       continue
     }
     if (line.includes('|') && i + 1 < lines.length && isTableSep(lines[i + 1])) {
@@ -206,11 +208,17 @@ function blocks(lines: string[], copy: Copy, depth: number): ReactNode[] {
       out.push(
         <List key={out.length} start={ordered && items[0].start !== 1 ? items[0].start : undefined}>
           {items.map((it, k) => {
-            const sub = dedent(it.rest)
+            let sub = dedent(it.rest)
+            // (Soft: the lines right under an item's first, before a blank
+            // or a block of its own, are more of its words, as in a paragraph.)
+            let n = 0
+            if (soft) while (n < sub.length && sub[n].trim() && !listItem.test(sub[n]) && !/^\s*(```|~~~|>|#{1,6}\s|\|)/.test(sub[n])) n++
+            const words = [it.first, ...sub.slice(0, n)]
+            sub = sub.slice(n)
             return (
               <li key={k}>
-                {inline(it.first)}
-                {sub.some((s) => s.trim()) && blocks(sub, copy, depth + 1)}
+                {n ? inlineLines(words, true) : inline(it.first)}
+                {sub.some((s) => s.trim()) && blocks(sub, copy, depth + 1, soft)}
               </li>
             )
           })}
@@ -257,10 +265,12 @@ function cells(line: string): string[] {
   return out
 }
 
-function inlineLines(lines: string[]): ReactNode {
+function inlineLines(lines: string[], soft = false): ReactNode {
   return lines.map((l, k) => (
     <Fragment key={k}>
-      {k > 0 && <br />}
+      {/* (Soft: a line break is a space — none between two CJK characters —
+          but a line ended with two spaces or a backslash still breaks.) */}
+      {k > 0 && (!soft || /( {2,}|\\)$/.test(lines[k - 1]) ? <br /> : /[\u3000-\u9fff\uff00-\uffef]$/.test(lines[k - 1].trimEnd()) && /^[\u3000-\u9fff\uff00-\uffef]/.test(l.trimStart()) ? null : ' ')}
       {inline(l.trim())}
     </Fragment>
   ))
