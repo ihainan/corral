@@ -78,7 +78,6 @@ type Server struct {
 	convos       convoStates  // the conversation view's logs being read, per session
 	subConvos    convoStates  // and the logs of subagents opened from them
 	subScans     subScanSeen  // what their logs said last (convo_subscan.go)
-	headsUps     headsUpLooks // the notes Claude Code shows on them now (convo_headsup.go)
 	quotaRuns    quotaRuns    // when Claude Code was last asked for its quota (convo_quota.go)
 	turns        turnIndexes  // the person's turns in those logs, for the page's panel of them (convo_turns.go)
 	newAgents    newAgents    // agents being started from the conversation page
@@ -244,7 +243,6 @@ func (s *Server) registerRoutes() {
 	s.handle("POST /api/sessions/{id}/conversation/command", SignedIn, s.apiConversationCommand)
 	s.handle("GET /api/sessions/{id}/conversation/subagent", SignedIn, s.apiConversationSubagent)
 	s.handle("GET /api/sessions/{id}/conversation/subagents", SignedIn, s.apiConversationSubagents)
-	s.handle("GET /api/sessions/{id}/conversation/headsup", SignedIn, s.apiConversationHeadsUp)
 	s.handle("GET /api/sessions/{id}/conversation/turns", SignedIn, s.apiConversationTurns)
 	s.handle("GET /api/sessions/{id}/conversation/quota", SignedIn, s.apiConversationQuota)
 	s.handle("POST /api/sessions/{id}/agents", SignedIn, s.apiNewAgent)
