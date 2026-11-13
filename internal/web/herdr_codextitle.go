@@ -76,17 +76,14 @@ var homeDir = regexp.MustCompile(`^(?:/home/[^/]+|/Users/[^/]+|/root)$`)
 
 func isCodexAgent(agent string) bool { return strings.Contains(strings.ToLower(agent), "codex") }
 
-// codexName: the name a thread is shown by, of what Codex's database has
-// of it — its name, else its title, else its first message: the first line
-// with words in it, without the placeholders of images and the like, cut
-// short. "" where none has any.
-func codexName(name, title, first string) string {
-	for _, s := range []string{name, title, first} {
-		if c := cleanCodexName(s); c != "" {
-			return c
-		}
-	}
-	return ""
+// codexName: the name a thread is shown by: the name it was given in
+// Codex's database (by the person, or by Codex), the first line with words
+// in it, without the placeholders of images and the like, cut short. Not its
+// title, nor its first message: the title Codex keeps of a thread not named
+// is its first message, and what the person said first may be anything — a
+// password, say — while a name is shown in lists. "" where it has no name.
+func codexName(name string) string {
+	return cleanCodexName(name)
 }
 
 var codexPlaceholder = regexp.MustCompile(`\[(?:Image #\d+|external [^\]\n]{0,80}|Pasted text[^\]\n]{0,40})\]`)

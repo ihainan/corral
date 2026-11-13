@@ -72,7 +72,7 @@ func TestCodexTurn(t *testing.T) {
 	if m.Model != "gpt-6.1-sol" || m.Mode != "on-request" || m.Branch != "main" || m.Context != 12345 {
 		t.Errorf("meta %+v", m)
 	}
-	if c.Title() != "跑一下测试" || c.Status() != "idle" {
+	if c.Title() != "" || c.Status() != "idle" {
 		t.Errorf("title %q status %q", c.Title(), c.Status())
 	}
 }
@@ -93,7 +93,7 @@ func TestCodexPrepend(t *testing.T) {
 	if !es[4].Parts[0].Tool.Done {
 		t.Errorf("the patch's output not filled in: %+v", es[4].Parts[0].Tool)
 	}
-	if newer.Title() != "跑一下测试" || newer.Meta().Model != "gpt-6.1-sol" || newer.Meta().Window != 258400 || newer.Status() != "idle" {
+	if newer.Title() != "" || newer.Meta().Model != "gpt-6.1-sol" || newer.Meta().Window != 258400 || newer.Status() != "idle" {
 		t.Errorf("title %q meta %+v status %q", newer.Title(), newer.Meta(), newer.Status())
 	}
 	for i := 1; i < len(es); i++ {

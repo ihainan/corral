@@ -973,7 +973,6 @@ func (c *Codex) userSaid(r *codexRow, id string, parts []Part) {
 	if len(parts) == 0 {
 		return
 	}
-	internalReply := false
 	for i := range parts {
 		if parts[i].Kind != KindText {
 			continue
@@ -984,17 +983,10 @@ func (c *Codex) userSaid(r *codexRow, id string, parts []Part) {
 		}
 		if text, ok := codexReplyText(parts[i].Text); ok {
 			parts[i].Text = text
-			internalReply = true
 		}
 	}
-	if c.title == "" && !internalReply {
-		for _, pt := range parts {
-			if pt.Kind == KindText {
-				c.title = codexTitle(pt.Text)
-				break
-			}
-		}
-	}
+	// (Not named by its first message: what the person said first may be
+	// anything — a password, say — and a name is shown in lists and tabs.)
 	for _, t := range c.asked {
 		t.Done = true
 	}
