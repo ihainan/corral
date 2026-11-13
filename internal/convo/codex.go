@@ -1301,10 +1301,12 @@ func (c *Codex) item(r *codexRow, p *codexPayload) {
 				continue
 			}
 			got := codexDisplayParts(b.Text)
-			if kind, _, _, ok := importedRecord(b.Text); ok && kind == "call" && len(got) == 1 && got[0].Tool != nil && got[0].Tool.Result == "" {
+			// (Every call waits for its result, one whose long command was
+			// kept as its result too: the result comes in its place.)
+			if kind, _, _, ok := importedRecord(b.Text); ok && kind == "call" && len(got) == 1 && got[0].Tool != nil {
 				c.importCalls = append(c.importCalls, got[0].Tool)
-				if len(c.importCalls) > 64 {
-					c.importCalls = c.importCalls[1:] // (a result never come: not waited for on and on)
+				if len(c.importCalls) > 256 {
+					c.importCalls = nil // (results not come for so many: none paired after, rather than each with another's)
 				}
 			}
 			parts = append(parts, got...)

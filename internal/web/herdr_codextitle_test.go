@@ -59,7 +59,7 @@ func TestParseCodexPanes(t *testing.T) {
 	const a = "01a1cd3b-8a27-75f1-ba56-dd9f7f22cd01"
 	const b = "01a1cd3b-8685-7b23-9bfc-b218af59d6d1"
 	rec := func(f ...string) string {
-		return strings.Join(append(f, "1", "0", "argv", "0", "sub2api.example.org"), "\x1f") + "\x00"
+		return strings.Join(append(f, "1", "0", "argv", "0", "sub2api.example.org", "0", "\x02"), "\x1f") + "\x00"
 	}
 	out := rec("w2:p1", "965934", "69873389", "1794460425000", "/home/u/AI", a, "/home/u/.codex/sessions/2026/11/12/rollout-2026-11-12T08-49-53-"+a+".jsonl", "", "[Image #1] 检查红圈", "first") +
 		rec("w3:p1", "100", "200", "0", "/home/u/AI", b, "/home/u/.codex/sessions/x/rollout-1-"+a+".jsonl", "named", "t", "f") + // (a log of another thread)
@@ -86,11 +86,11 @@ func TestParseCodexPanes(t *testing.T) {
 	if _, ok := got["w8:p1"]; ok {
 		t.Fatal("no process taken")
 	}
-	known := parseCodexPanes(strings.Join([]string{"w9:p1", "1", "2", "0", "/x", "", "", "", "", "", "1", "0", "", "0", "="}, "\x1f") + "\x00")["w9:p1"]
-	if !known.viaKnown || known.Via != "" {
+	known := parseCodexPanes(strings.Join([]string{"w9:p1", "1", "2", "0", "/x", "", "", "", "", "", "1", "0", "", "0", "=", "0", "调研 | AI"}, "\x1f") + "\x00")["w9:p1"]
+	if !known.viaKnown || known.Via != "" || !known.titleRead || known.TitleNow != "调研 | AI" {
 		t.Fatalf("a known endpoint: %+v", known)
 	}
-	if bad := parseCodexPanes(strings.Join([]string{"w9:p1", "1", "2", "0", "/x", "", "", "", "", "", "1", "0", "", "0", "evil host;rm"}, "\x1f") + "\x00")["w9:p1"]; bad.Via != "" {
+	if bad := parseCodexPanes(strings.Join([]string{"w9:p1", "1", "2", "0", "/x", "", "", "", "", "", "1", "0", "", "0", "evil host;rm", "x", "\x02"}, "\x1f") + "\x00")["w9:p1"]; bad.Via != "" || bad.SameName != 99 || bad.titleRead {
 		t.Fatalf("a host not a host: %+v", bad)
 	}
 	names := codexNames(got)
@@ -204,5 +204,30 @@ func TestCodexPaneSure(t *testing.T) {
 	two["w2:p1"] = pane(b, "", "argv", 0)
 	if _, ok := codexPaneSure(two, "w1:p1", hp("AI")); !ok {
 		t.Fatal("two at two threads refused")
+	}
+}
+
+// Keys go to a pane's Codex without the scan only on what proves it: its own
+// log open, or a named thread its title shows now, with no other live one
+// of that name or unexplained in its folder.
+func TestCodexPressSure(t *testing.T) {
+	named := codexPane{Cwd: "/x/AI", Name: "调研", Src: "argv", TitleNow: "调研 | AI", titleRead: true}
+	for _, c := range []struct {
+		why  string
+		p    codexPane
+		want bool
+	}{
+		{"its own log open", codexPane{Cwd: "/x/AI", Src: "fd"}, true},
+		{"named, its title now", named, true},
+		{"named, its title not read now", func() codexPane { p := named; p.titleRead = false; return p }(), false},
+		{"named, its title now another's", func() codexPane { p := named; p.TitleNow = "别的 | AI"; return p }(), false},
+		{"named, another live one of its name", func() codexPane { p := named; p.SameName = 1; return p }(), false},
+		{"named, one unexplained", func() codexPane { p := named; p.Unexplained = 1; return p }(), false},
+		{"unnamed, by its resume argument", codexPane{Cwd: "/x/AI", Src: "argv", TitleNow: "AI", titleRead: true}, false},
+		{"unnamed, by its folder", codexPane{Cwd: "/x/AI", Src: "db", TitleNow: "AI", titleRead: true}, false},
+	} {
+		if got := codexPressSure(c.p); got != c.want {
+			t.Errorf("%s: %v", c.why, got)
+		}
 	}
 }

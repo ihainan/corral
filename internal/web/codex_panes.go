@@ -51,6 +51,12 @@ type codexPane struct {
 	// maybe: then an unnamed thread of its is not taken for sure).
 	Src         string
 	Unexplained int
+	// SameName: other live conversations of its folder of its name (a title
+	// tells none of them apart); TitleNow: the pane's title read at the look
+	// (asked for: see codexPanesCommand), titleRead whether it was.
+	SameName  int
+	TitleNow  string
+	titleRead bool
 	// Several: the pane runs more than one interactive Codex (one inside
 	// another's command, say): which the pane shows is not told.
 	Several bool
@@ -61,9 +67,11 @@ type codexPane struct {
 // where the host has no python3.
 // known: the processes ("<pid>:<start>") whose endpoint the gateway has
 // already: told "=" for theirs, not worked out again.
-func codexPanesCommand(socket string, known []string) string {
+// target: a pane whose terminal title is read now (herdr's, by herdr pane
+// get), not as a snapshot had it; "" none.
+func codexPanesCommand(socket string, known []string, target string) string {
 	return `command -v python3 >/dev/null 2>&1 || exit 0
-exec python3 -I -c ` + sshx.QuoteShell(codexPanesScript) + ` ` + sshx.QuoteShell(socket) + ` ` + sshx.QuoteShell(convoEndpointSh) + ` ` + sshx.QuoteShell(strings.Join(known, ","))
+exec python3 -I -c ` + sshx.QuoteShell(codexPanesScript) + ` ` + sshx.QuoteShell(socket) + ` ` + sshx.QuoteShell(convoEndpointSh) + ` ` + sshx.QuoteShell(strings.Join(known, ",")) + ` ` + sshx.QuoteShell(target)
 }
 
 // (A record: pane, pid, start, started ms, cwd, thread, log, name, title,
@@ -83,6 +91,18 @@ const codexPanesScript = `import glob, json, os, re, sqlite3, subprocess, sys
 sock = sys.argv[1]
 endpoint_sh = sys.argv[2]  # (codex_ep and what it uses: the scan's own, run for each)
 known = set(sys.argv[3].split(',')) if len(sys.argv) > 3 and sys.argv[3] else set()
+target = sys.argv[4] if len(sys.argv) > 4 else ''  # (a pane whose title is read now, as herdr has it: a press's)
+def title_now(pane):
+    env = dict(os.environ, HERDR_SOCKET_PATH=sock, PATH=os.path.expanduser('~/.local/bin') + ':' + os.path.expanduser('~/bin') + ':/usr/local/bin:' + os.environ.get('PATH', ''))
+    try:
+        r = subprocess.run(['herdr', 'pane', 'get', pane], capture_output=True, timeout=5, env=env)
+        j = json.loads(r.stdout)
+        res = j.get('result') or {}
+        p = res.get('pane') or res
+        t = p.get('terminal_title_stripped')
+        return t if isinstance(t, str) else None
+    except Exception:
+        return None
 uid = os.getuid()
 UUID = re.compile(r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}')
 TAKES = re.compile(r'^(-[cmpsaCi]|--(config|model|profile|sandbox|ask-for-approval|cd|image|add-dir|local-provider|remote|remote-auth-token-env|enable|disable))$')
@@ -176,7 +196,7 @@ def environ(p):
 # is told at (its resume argument, the logs of its own it has open) — what
 # a thread touched in a folder is accounted for by.
 procs = []
-held = set()  # (the threads whose logs a Codex of the user's — a daemon too — holds open: those live now)
+held = set()  # (home, thread): those whose logs a Codex of the user's — a daemon too — holds open: live now
 for d in os.listdir('/proc'):
     if not d.isdigit():
         continue
@@ -192,10 +212,10 @@ for d in os.listdir('/proc'):
                 l = os.readlink(p + '/fd/' + fd)
             except OSError:
                 continue
-            if '/rollout-' in l and l.endswith('.jsonl'):
+            if '/rollout-' in l and l.endswith('.jsonl') and '/sessions/' in l:
                 m = UUID.search(os.path.basename(l))
                 if m:
-                    held.add(m.group(0))
+                    held.add((l.rsplit('/sessions/', 1)[0], m.group(0)))
         env = environ(p)
         with open(p + '/cmdline', 'rb') as f:
             args = [a.decode('utf-8', 'replace') for a in f.read().split(b'\0')[1:]]
@@ -240,9 +260,9 @@ for d in os.listdir('/proc'):
 claims = {}
 for q in procs:
     con = con_of(q['home'])
-    own = {tid for _, tid, l in q['opened'] if not subagent(con, tid, l)}
+    own = {(q['home'], tid) for _, tid, l in q['opened'] if not subagent(con, tid, l)}
     if q['argv']:
-        own.add(q['argv'])
+        own.add((q['home'], q['argv']))
     q['own'] = own
 def clean(s):
     return (s or '')[:2000].replace('\0', ' ').replace('\x1f', ' ')
@@ -265,7 +285,8 @@ for q in sorted(procs, key=lambda q: (q['pane'], q['pid'])):
     # written to: a resume writes), live now: those no other Codex is told
     # at, but its own, are unexplained — one begun or resumed in it since,
     # maybe.
-    touched = []
+    # (No database, or no time it started: not known — not none.)
+    touched, begun = None, None
     if con is not None and q['started'] > 0:
         try:
             since = q['started'] // 1000 - 5
@@ -273,19 +294,17 @@ for q in sorted(procs, key=lambda q: (q['pane'], q['pid'])):
             begun = [r[0] for r in con.execute('SELECT id FROM threads WHERE cwd = ? AND created_at >= ? AND ' + TALKED, (q['cwd'], since))]
         except sqlite3.Error:
             touched, begun = None, None
-    else:
-        begun = []
     others = set()
     for o in procs:
         if o is not q:
             others |= o['own']
     # (Begun with no thread told — run against the daemon: the one
     # conversation of its folder begun since it started, where there is one.)
-    if not tid and begun is not None and len(begun) == 1 and begun[0] not in others:
+    if not tid and begun is not None and len(begun) == 1 and (q['home'], begun[0]) not in others:
         tid, src = begun[0], 'db'
     # (Only those live now — their logs held: one this Codex was resumed at
     # or begun in since is; one of a Codex that has ended since is not.)
-    unexplained = 99 if touched is None else len([x for x in touched if x != tid and x not in others and x in held])
+    unexplained = 99 if touched is None else len([x for x in touched if x != tid and (q['home'], x) not in others and (q['home'], x) in held])
     name = title = first = ''
     if tid:
         row = row_of(con, tid)
@@ -298,8 +317,17 @@ for q in sorted(procs, key=lambda q: (q['pane'], q['pid'])):
             if logs:
                 log = max(logs, key=lambda l: os.stat(l).st_mtime)
     fresh = '1' if q['sub'] == '' and not q['any'] and begun is not None and len(begun) == 0 else '0'
+    # (Of its name, other live conversations of its folder: a title is no word on which of them.)
+    same = 0
+    if name:
+        try:
+            same = len([r[0] for r in con.execute('SELECT id FROM threads WHERE cwd = ? AND name = ? AND id != ? AND ' + TALKED, (q['cwd'], name, tid)) if (q['home'], r[0]) in held])
+        except sqlite3.Error:
+            same = 99
+    now_title = title_now(pane) if pane == target else None
     out.write('\x1f'.join([pane, q['pid'], q['start'], str(q['started']), clean(q['cwd']), tid, clean(log), clean(name), clean(title), clean(first),
-                           q['fg'], fresh, src, str(unexplained), clean(endpoint(q['pid'], q['start']))]).encode('utf-8', 'replace') + b'\0')
+                           q['fg'], fresh, src, str(unexplained), clean(endpoint(q['pid'], q['start'])), str(same),
+                           '\x02' if now_title is None else clean(now_title)]).encode('utf-8', 'replace') + b'\0')
 `
 
 // codexLogOf: a thread's log as the host named it, where it is one: an
@@ -323,7 +351,7 @@ func parseCodexPanes(out string) map[string]codexPane {
 	got := map[string]codexPane{}
 	for _, rec := range strings.Split(out, "\x00") {
 		f := strings.Split(rec, "\x1f")
-		if len(f) != 15 || !herdrPaneID.MatchString(f[0]) {
+		if len(f) != 17 || !herdrPaneID.MatchString(f[0]) {
 			continue
 		}
 		pid, err1 := strconv.ParseInt(f[1], 10, 64)
@@ -337,6 +365,14 @@ func parseCodexPanes(out string) map[string]codexPane {
 			unexplained = 99
 		}
 		c := codexPane{PID: pid, Start: start, Started: max(started, 0), Cwd: f[4], Name: f[7], Title: f[8], First: f[9], FG: f[10] == "1", Fresh: f[11] == "1", Src: f[12], Unexplained: unexplained}
+		if same, err := strconv.Atoi(f[15]); err == nil && same >= 0 {
+			c.SameName = same
+		} else {
+			c.SameName = 99
+		}
+		if f[16] != "\x02" {
+			c.TitleNow, c.titleRead = f[16], true
+		}
 		if f[14] == "=" {
 			c.viaKnown = true
 		} else if hostOnly.MatchString(f[14]) {
@@ -406,34 +442,8 @@ func (c *codexPaneLooks) since(ctx context.Context, sess *term.Session, socket s
 		go func() {
 			lctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
-			c.mu.Lock()
-			kept := c.via[sess.ID]
-			known := make([]string, 0, len(kept))
-			for k := range kept {
-				known = append(known, k)
-			}
-			c.mu.Unlock()
-			out, err := sshx.Output(lctx, sess.Client(), codexPanesCommand(socket, known), codexPanesMax)
-			if err == nil {
-				l.got = parseCodexPanes(string(out))
-				now := map[string]string{}
-				for p, x := range l.got {
-					k := strconv.FormatInt(x.PID, 10) + ":" + strconv.FormatInt(x.Start, 10)
-					if x.viaKnown {
-						x.Via = kept[k]
-						l.got[p] = x
-					}
-					if !x.Several {
-						now[k] = x.Via
-					}
-				}
-				c.mu.Lock()
-				if c.via == nil {
-					c.via = map[string]map[string]string{}
-				}
-				c.via[sess.ID] = now // (those not found now: gone)
-				c.mu.Unlock()
-			}
+			got, err := c.run(lctx, sess, socket, "")
+			l.got = got
 			l.err = err
 			if err != nil {
 				c.mu.Lock()
@@ -452,6 +462,41 @@ func (c *codexPaneLooks) since(ctx context.Context, sess *term.Session, socket s
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
+}
+
+// run: one look (target: a pane whose title is read now, "" none), the
+// endpoints the gateway keeps named to it and kept from it.
+func (c *codexPaneLooks) run(ctx context.Context, sess *term.Session, socket, target string) (map[string]codexPane, error) {
+	c.mu.Lock()
+	kept := c.via[sess.ID]
+	known := make([]string, 0, len(kept))
+	for k := range kept {
+		known = append(known, k)
+	}
+	c.mu.Unlock()
+	out, err := sshx.Output(ctx, sess.Client(), codexPanesCommand(socket, known, target), codexPanesMax)
+	if err != nil {
+		return nil, err
+	}
+	got := parseCodexPanes(string(out))
+	now := map[string]string{}
+	for p, x := range got {
+		k := strconv.FormatInt(x.PID, 10) + ":" + strconv.FormatInt(x.Start, 10)
+		if x.viaKnown {
+			x.Via = kept[k]
+			got[p] = x
+		}
+		if !x.Several {
+			now[k] = x.Via
+		}
+	}
+	c.mu.Lock()
+	if c.via == nil {
+		c.via = map[string]map[string]string{}
+	}
+	c.via[sess.ID] = now // (those not found now: gone)
+	c.mu.Unlock()
+	return got, nil
 }
 
 // forget: what was kept of a terminal session (closed).
@@ -516,20 +561,36 @@ func codexPaneSure(panes map[string]codexPane, pane string, hp herdr.Pane) (code
 	return c, true
 }
 
+// codexPressSure: a pane's Codex as a look found it is sure enough for
+// keys to go to without the scan: it has its own log open (a Codex not run
+// against the daemon writes its own: the thread it is at), or its thread has
+// a name its pane's title shows right now (read at the press, not as a
+// snapshot had it), no other live conversation of its folder is of that
+// name, and none is unexplained (begun or resumed in it since). A thread
+// told by its resume argument or its folder alone is not: the process it
+// was resumed in may be at another since, which nothing but its screen
+// tells — the scan's.
+func codexPressSure(c codexPane) bool {
+	if c.Src == "fd" {
+		return true
+	}
+	return c.Name != "" && c.titleRead && codexTitleAgrees(c.TitleNow, c.Cwd, c.Name) && c.SameName == 0 && c.Unexplained == 0
+}
+
 // codexFront: the process a press to pane's Codex goes to, told by a look
 // begun now (not one kept from before the press), where it is told for
 // sure; nil, the scan tells it.
 func (s *Server) codexFront(ctx context.Context, sess *term.Session, socket, pane string) *convoProc {
 	hp, ok := s.herdrSocks.paneOf(sess.ID, pane)
-	if !ok || !isCodexAgent(hp.Agent) || socket == "" {
+	if !ok || !isCodexAgent(hp.Agent) || socket == "" || !herdrPaneID.MatchString(pane) {
 		return nil
 	}
-	panes, err := s.codexPanes.since(ctx, sess, socket, time.Now())
+	panes, err := s.codexPanes.run(ctx, sess, socket, pane)
 	if err != nil {
 		return nil
 	}
 	c, ok := codexPaneSure(panes, pane, hp)
-	if !ok {
+	if !ok || !codexPressSure(c) {
 		return nil
 	}
 	return &convoProc{pid: c.PID, start: c.Start, fg: c.FG, started: c.Started, sid: c.Thread, log: c.Path, agent: "codex", herdrPane: pane, herdrSocket: socket, cwd: c.Cwd, ep: c.Via}
@@ -556,6 +617,7 @@ func (s *Server) locateCodexFast(ctx context.Context, sess *term.Session, st *co
 		}
 		b := &convoBind{PID: f.PID, Start: f.Start, Session: convoNoSession, Agent: "codex", Pane: pane, started: f.Started, Via: f.Via}
 		st.bind = b
+		st.weak = true
 		st.located, st.pane = time.Now(), pane
 		st.guessed = false
 		st.adopt(convoNoSession, "", "codex", convoNoLog)
@@ -563,6 +625,7 @@ func (s *Server) locateCodexFast(ctx context.Context, sess *term.Session, st *co
 	}
 	b := &convoBind{PID: c.PID, Start: c.Start, Session: c.Thread, Agent: "codex", Pane: pane, started: c.Started, Via: c.Via}
 	st.bind = b
+	st.weak = c.Src != "fd" // (see convoState.weak)
 	st.located, st.pane = time.Now(), pane
 	st.guessed = false
 	st.adopt(c.Thread, c.Path, "codex", "")

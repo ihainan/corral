@@ -136,5 +136,7 @@ func importedUserText(s string) (role, text string) {
 // claudeOwnBlocks: what Claude Code writes into the person's rows for itself.
 var claudeOwnBlocks = regexp.MustCompile(`(?s)<system-reminder>.*?</system-reminder>|<local-command-caveat>.*?</local-command-caveat>`)
 
-// wholeEnvelope: one tag of Claude Code's and what it holds.
-var wholeEnvelope = regexp.MustCompile(`(?s)<([a-z][a-z0-9-]*)>.*?</([a-z][a-z0-9-]*)>`)
+// wholeEnvelope: one of the envelopes Claude Code writes the person's rows
+// in for its own (a command run, its output, a task's notice) and what it
+// holds — not any tag the person may write.
+var wholeEnvelope = regexp.MustCompile(`(?s)<(command-name|command-message|command-args|local-command-stdout|local-command-stderr|bash-input|bash-stdout|bash-stderr|task-notification)>.*?</(command-name|command-message|command-args|local-command-stdout|local-command-stderr|bash-input|bash-stdout|bash-stderr|task-notification)>`)

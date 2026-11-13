@@ -98,6 +98,11 @@ func TestCodexClaudeImport(t *testing.T) {
 	log = append(log, assistant("[external_agent_tool_result]\ncontents of a")...)
 	log = append(log, user("external-import-turn-3", "<system-reminder>样本</system-reminder>\n请解释这个标签")...)
 	log = append(log, user("external-import-turn-3", "<command-name>/model</command-name> 这个命令是做什么的")...)
+	log = append(log, user("external-import-turn-3", "<command-name>/model</command-name><code>解释这个命令</code>")...)
+	log = append(log, assistant("[external_agent_tool_call: Bash]\ndescription: long one\ncommand: "+strings.Repeat("x", 3000)+"\n[/external_agent_tool_call]")...)
+	log = append(log, assistant("[external_agent_tool_call: Read]\nfile: /tmp/b.txt\n[/external_agent_tool_call]")...)
+	log = append(log, assistant("[external_agent_tool_result]\nlong one's output")...)
+	log = append(log, assistant("[external_agent_tool_result]\ncontents of b")...)
 	log = append(log, assistant("[external_agent_tool_result]\nan orphan result")...)
 	log = append(log, assistant("好的，页面已下载。")...)
 	log = append(log, assistant("<EXTERNAL SESSION IMPORTED>")...)
@@ -125,6 +130,9 @@ func TestCodexClaudeImport(t *testing.T) {
 		"assistant tool Read |  | file: /tmp/a.txt | contents of a",
 		"user 请解释这个标签",
 		"user <command-name>/model</command-name> 这个命令是做什么的",
+		"user <command-name>/model</command-name><code>解释这个命令</code>",
+		"assistant tool Bash | long one | " + clip(strings.Repeat("x", 3000), maxDetail) + " | long one's output",
+		"assistant tool Read |  | file: /tmp/b.txt | contents of b",
 		"assistant tool result |  |  | an orphan result",
 		"assistant 好的，页面已下载。",
 		"user <command-name>/model</command-name>",

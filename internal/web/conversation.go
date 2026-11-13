@@ -39,7 +39,10 @@ import (
 )
 
 const (
-	convoLocateTTL  = 10 * time.Second // a pane's binding to a log is checked again after this
+	convoLocateTTL = 10 * time.Second // a pane's binding to a log is checked again after this
+	// convoWeakTTL: a weak one's (see convoState.weak), by a scan held while
+	// it runs — reads wait on it: less often (keys go by the scan anyway).
+	convoWeakTTL    = 30 * time.Second
 	convoTitleSlack = 64 << 10         // the name is looked for this far into what is read too: a row of it the read's start cuts is whole there
 	convoIdle       = 10 * time.Minute // a log nobody reads is forgotten after this
 	convoTail       = 4 << 20          // bytes read from the end of a log when it is first opened
@@ -889,8 +892,8 @@ func (s *Server) convoBound(sess *term.Session, pane string, pid, start int64) (
 		return "", ""
 	}
 	defer st.mu.Unlock()
-	if st.bind == nil || st.bind.PID != pid || st.bind.Start != start || st.log == "" || st.sid == "" {
-		return "", ""
+	if st.bind == nil || st.bind.PID != pid || st.bind.Start != start || st.log == "" || st.sid == "" || st.weak {
+		return "", "" // (a weak binding vouches for nothing: the scan tells it)
 	}
 	return st.log, st.sid
 }
@@ -1536,6 +1539,11 @@ type convoState struct {
 	scanAfter   time.Time    // (under mu) the next look takes a scan begun after this, not one shared from before
 	mu          sync.Mutex
 	located     time.Time
+	// weak: bound by the short look on what does not prove it (a Codex's
+	// thread told by its resume argument or its folder, not a log of its
+	// own): shown so, but no word on where keys go (convoBound), and the
+	// checks beside are the scan's (see locateConvo).
+	weak bool
 	// guessed: whose conversation this is was told by where and when it
 	// began (a Codex whose log its daemon keeps), and by what the pane's
 	// screen showed of it: screenSID, of the process screenPID/screenStart,
@@ -1820,7 +1828,7 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 	// (Not once one beside has failed: checks that keep failing would leave
 	// what was found shown on and on, as if current. Before answering, a
 	// failure is said.)
-	due := time.Since(st.located) > convoLocateTTL
+	due := time.Since(st.located) > st.locateTTL()
 	// (A press found another process in the pane than this shows: checked
 	// now, before answering, not in its own time beside.)
 	// (Kept till a look succeeds: one that fails leaves it for the next
@@ -2008,19 +2016,45 @@ func (s *Server) relocateLater(sess *term.Session, key string, st *convoState, p
 		}
 		st.mu.Lock()
 		defer st.mu.Unlock()
-		if time.Since(st.located) <= convoLocateTTL || (sess.Persistence == "herdr" && pane != st.pane) {
+		if time.Since(st.located) <= st.locateTTL() || (sess.Persistence == "herdr" && pane != st.pane) {
 			return // (checked meanwhile)
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
 		// (Failed: what was found stands, and the next check is made before answering.)
-		st.relocFailed.Store(s.locateConvo(ctx, sess, st, pane) != nil)
+		// (A weak binding is checked by the scan: what the screen shows.)
+		st.relocFailed.Store(s.locateConvoBy(ctx, sess, st, pane, st.weak) != nil)
 	}()
 }
 
 // locateConvo finds the log of the Claude Code session in the pane; a
 // different one from before starts a new generation.
 func (s *Server) locateConvo(ctx context.Context, sess *term.Session, st *convoState, pane string) error {
+	return s.locateConvoBy(ctx, sess, st, pane, false)
+}
+
+// locateConvoBy: locateConvo; scan, by the scan alone (a weak binding
+// checked: where the scan finds the same process at no conversation it can
+// tell, what was shown stays shown, weak as before).
+func (s *Server) locateConvoBy(ctx context.Context, sess *term.Session, st *convoState, pane string, scan bool) error {
+	if scan {
+		was, wasSID, wasLog, wasReason := st.bind, st.sid, st.log, st.reason
+		err := s.locateScan(ctx, sess, st, pane, false)
+		if err == nil && was != nil && st.bind != nil && st.bind.PID == was.PID && st.bind.Start == was.Start &&
+			(st.reason == convoNotTold || st.reason == convoNoLog) && wasReason == "" {
+			b := *was
+			st.bind = &b
+			st.adopt(wasSID, wasLog, was.Agent, "")
+			st.weak = true
+		}
+		return err
+	}
+	return s.locateScan(ctx, sess, st, pane, true)
+}
+
+// locateScan: locateConvo's own; fast, the short look first, where it may
+// tell.
+func (s *Server) locateScan(ctx context.Context, sess *term.Session, st *convoState, pane string, fast bool) error {
 	// (looked: when the scan read began, shared or not: what it found is of
 	// then or after, and a look begun later says more.)
 	// (A Codex with no log yet, looked for again each time: a scan begun
@@ -2030,7 +2064,7 @@ func (s *Server) locateConvo(ctx context.Context, sess *term.Session, st *convoS
 	// (A herdr pane's Codex, told by the host in a short look: no scan. Not
 	// where a press found another process since: that is told by a scan
 	// begun after it.)
-	if sess.Persistence == "herdr" && pane != "" && st.scanAfter.IsZero() && s.locateCodexFast(ctx, sess, st, pane) {
+	if fast && sess.Persistence == "herdr" && pane != "" && st.scanAfter.IsZero() && s.locateCodexFast(ctx, sess, st, pane) {
 		return nil
 	}
 	var after time.Time
@@ -2168,8 +2202,18 @@ func (s *Server) locateConvo(ctx context.Context, sess *term.Session, st *convoS
 	if reason == "" && agent == "opencode" && st.reason == convoNoReader && sid == st.sid && log == st.log && time.Since(st.noReaderAt) < time.Minute {
 		reason = convoNoReader
 	}
+	st.weak = false // (the scan's: what it found, it found)
 	st.adopt(sid, log, agent, reason)
 	return nil
+}
+
+// locateTTL: how long a binding stands before it is checked again (with mu
+// held).
+func (st *convoState) locateTTL() time.Duration {
+	if st.weak {
+		return convoWeakTTL
+	}
+	return convoLocateTTL
 }
 
 // adopt takes what a look found the pane at: its conversation (sid, its
@@ -4412,7 +4456,13 @@ const codexFdsSh = `# Where a Codex keeps its sessions, logs and locks: its own 
 codex_home() {
   # (Its environment by its own separators: a value with a newline in it is
   # not taken for another variable, nor cut.)
-  cxhome=$(tr '\0' '\001' <"$1/environ" 2>/dev/null | awk 'BEGIN { RS = "\001" } /^CODEX_HOME=/ { sub(/^CODEX_HOME=/, ""); printf "%s", $0; exit }')
+  # (By NUL where grep and head take it — GNU's; else by \001, which no
+  # environment of this sort holds.)
+  if cxhome=$(grep -az '^CODEX_HOME=' "$1/environ" 2>/dev/null | head -z -n 1 2>/dev/null | tr -d '\0') && [ -n "$cxhome" ]; then
+    cxhome=${cxhome#CODEX_HOME=}
+  else
+    cxhome=$(tr '\0' '\001' <"$1/environ" 2>/dev/null | awk 'BEGIN { RS = "\001" } /^CODEX_HOME=/ { sub(/^CODEX_HOME=/, ""); printf "%s", $0; exit }')
+  fi
   [ -n "$cxhome" ] || cxhome=$HOME/.codex
   cxhome=${cxhome%/}
 }
