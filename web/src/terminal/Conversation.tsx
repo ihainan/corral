@@ -22,6 +22,7 @@ import { IMAGE_EXT, previewable } from './textPreview'
 import { previewOf } from './convoTurns'
 import { itemKey } from './convoSearch'
 import { exportMarkdown } from './convoExport'
+import { HeadsUpCard, useHeadsUp } from './headsUp'
 import { AgentIcon } from './agentIcons'
 import { matchQuery } from './agents'
 import { keptEntries } from './conversation'
@@ -484,6 +485,8 @@ export function ConversationView({
   const quietLong = working && !convo.failing && convo.quietAt !== undefined && now - convo.quietAt >= QUIET_LONG ? now - convo.quietAt : 0
   // (Subagents it sent off still out, as its log says: what it waits on.)
   const agentsOut = working ? (convo.running?.filter((r) => r.kind === 'agent').length ?? 0) : 0
+  // (Claude Code's note of what the person should know: only of its own panes, while this tab is the one seen.)
+  const headsUp = useHeadsUp(convo.of, active && convo.status === 'ready' && (!convo.bind?.agent || convo.bind.agent === 'claude'))
   // How long this turn has gone on: from the last thing the person wrote.
   const lastUser = useMemo(() => {
     for (let i = convo.entries.length - 1; i >= 0; i--) if (convo.entries[i].role === 'user' && !convo.entries[i].mid && !convo.entries[i].gone) return ms(convo.entries[i].ts)
@@ -1537,6 +1540,8 @@ export function ConversationView({
         )}
       </div>
       <div className="convo-dock">
+        {/* (Claude Code's note of what the person should know, while its terminal shows it.) */}
+        {headsUp && <HeadsUpCard note={headsUp} onShowTerminal={onShowTerminal} />}
         {convo.status === 'ready' && convo.running && <RunningWork scanOf={active && (!convo.bind?.agent || convo.bind.agent === 'claude') ? convo.of : undefined} items={convo.running} openCmd={setBgCmd} openSub={!convo.bind?.agent || convo.bind.agent === 'claude' || convo.bind.agent === 'codex' ? openSub : undefined} />}
         {/* (Its details kept here, not with the list above: it stays when the
             command ends — the list gone with it — saying so, its output still
