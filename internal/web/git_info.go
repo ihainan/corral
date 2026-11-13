@@ -60,7 +60,8 @@ func gitInfoCommand(dir string) string {
 		`[ -n "$T" ] && $T -k 1 2 true 2>/dev/null && K='-k 2'; ` +
 		`r() { s=$1; shift; if [ -n "$T" ]; then $T $K "$s" "$@"; else "$@"; fi; }; ` +
 		// (2.15: GIT_OPTIONAL_LOCKS. Before 2.36 core.fsmonitor is a hook's path: off is "", not "false".)
-		`set -- $(r 3 git version 2>/dev/null | sed -n 's/^git version \([0-9]*\)\.\([0-9]*\).*/\1 \2/p'); ` +
+		`v=$(r 3 git version 2>/dev/null) || { case $? in 124|137|143) echo 'E timeout' ;; *) echo 'E nogit' ;; esac; exit 0; }; ` +
+		`set -- $(printf '%s\n' "$v" | sed -n 's/^git version \([0-9]*\)\.\([0-9]*\).*/\1 \2/p'); ` +
 		`[ -n "$2" ] && { [ "$1" -gt 2 ] || [ "$2" -ge 15 ]; } || { echo 'E oldgit'; exit 0; }; ` +
 		`if [ "$1" -gt 2 ] || [ "$2" -ge 36 ]; then FS=false; else FS=; fi; ` +
 		`q() { r 3 git -c core.fsmonitor=$FS -c core.quotepath=true -c i18n.logOutputEncoding=UTF-8 "$@"; }; ` +
@@ -83,26 +84,31 @@ func gitInfoCommand(dir string) string {
 	return "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(dir)
 }
 
-// gitPRCommand prints, as JSON, the pull request of the folder's branch as gh
-// knows it; NOGH where there is no gh; NOPR where gh says there is none;
-// PRERR where it could not say (not signed in, no network, too slow, no
-// timeout(1) to bound it with). Fixed script; the folder is its argument.
-func gitPRCommand(dir string) string {
+// gitPRCommand prints, as JSON, the pull request of the branch given, as gh
+// knows it — where the folder is still that repository on that branch (the
+// card asks of what it read a moment before: of another, MOVED, asked again,
+// nothing kept). NOGH where there is no gh; NOPR where gh says there is
+// none; PRERR where it could not say (not signed in, no network, too slow,
+// no timeout(1) to bound it with). Fixed script; the folder, the
+// repository's top and the branch are its arguments.
+func gitPRCommand(dir, root, branch string) string {
 	script := `PATH="$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"; ` +
-		`export GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 GIT_TERMINAL_PROMPT=0 GIT_NO_LAZY_FETCH=1 NO_COLOR=1; ` +
+		`export GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 GIT_TERMINAL_PROMPT=0 GIT_NO_LAZY_FETCH=1 GIT_OPTIONAL_LOCKS=0 NO_COLOR=1; ` +
 		`cd -- "$1" 2>/dev/null || { echo PRERR; exit 0; }; ` +
 		`command -v gh >/dev/null 2>&1 || { echo NOGH; exit 0; }; ` +
 		`T=; if command -v timeout >/dev/null 2>&1; then T=timeout; elif command -v gtimeout >/dev/null 2>&1; then T=gtimeout; else echo PRERR; exit 0; fi; ` +
 		`K=; $T -k 1 2 true 2>/dev/null && K='-k 2'; ` +
-		`if out=$($T $K 8 gh pr view --json number,state,title,url,isDraft 2>&1); then printf '%s\n' "$out"; ` +
+		`[ "$($T $K 3 git rev-parse --show-toplevel 2>/dev/null)" = "$2" ] && [ "$($T $K 3 git symbolic-ref -q --short HEAD 2>/dev/null)" = "$3" ] || { echo MOVED; exit 0; }; ` +
+		`if out=$($T $K 8 gh pr view "$3" --json number,state,title,url,isDraft 2>&1); then printf '%s\n' "$out"; ` +
 		`elif printf '%s' "$out" | grep -qi 'no pull requests found'; then echo NOPR; else echo PRERR; fi; exit 0`
-	return "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(dir)
+	return "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(dir) + " " + sshx.QuoteShell(root) + " " + sshx.QuoteShell(branch)
 }
 
-// gitCommand is the card's one or the other: its git state, or its pull request.
-func gitCommand(pr bool, dir string) string {
+// gitCommand is the card's one or the other: its git state, or the pull
+// request of a repository's branch.
+func gitCommand(pr bool, dir, root, branch string) string {
 	if pr {
-		return gitPRCommand(dir)
+		return gitPRCommand(dir, root, branch)
 	}
 	return gitInfoCommand(dir)
 }
@@ -248,7 +254,7 @@ func parseGitPR(out string) (gh bool, pr *gitPR, ok bool) {
 		return false, nil, true
 	case "NOPR":
 		return true, nil, true
-	case "PRERR", "":
+	case "PRERR", "MOVED", "":
 		return true, nil, false
 	}
 	var v struct {
@@ -361,11 +367,14 @@ func (s *Server) gitAnswer(w http.ResponseWriter, r *http.Request, pr bool) {
 	// (Kept by the pane, so that a kept answer asks nothing of the host — not
 	// even where the pane is: that is a side operation too.)
 	key := kind + "\x00" + sess.ID + "\x00" + pane
+	root, branch := "", ""
 	if pr {
 		// (A pull request is of a repository's branch: kept by them, as the page read them a moment
 		// before — not one of the folder before shown with the git state of the folder after.)
-		root, branch := r.URL.Query().Get("root"), r.URL.Query().Get("branch")
-		if len(root) > maxRemotePath || len(branch) > 256 {
+		root, branch = r.URL.Query().Get("root"), r.URL.Query().Get("branch")
+		// (A branch's name as git allows it, roughly: no space, no control; not an option — gh takes no "--".)
+		if _, ok := cleanRemotePath(root); !ok || branch == "" || len(branch) > 256 || strings.HasPrefix(branch, "-") ||
+			strings.ContainsFunc(branch, func(c rune) bool { return c <= ' ' || c == 0x7f || c == '~' || c == '^' || c == ':' || c == '\\' }) {
 			writeError(w, http.StatusBadRequest, "bad_request", "no such branch")
 			return
 		}
@@ -379,7 +388,7 @@ func (s *Server) gitAnswer(w http.ResponseWriter, r *http.Request, pr bool) {
 		if cwd == "" {
 			return nil, errGitNoDir // (herdr or tmux could not say, or said nothing: asked again next time)
 		}
-		out, err := sshx.Output(ctx, sess.Client(), gitCommand(pr, cwd), gitOutMax)
+		out, err := sshx.Output(ctx, sess.Client(), gitCommand(pr, cwd, root, branch), gitOutMax)
 		if err != nil {
 			return nil, err // (cut short, too long, failed: nothing kept)
 		}

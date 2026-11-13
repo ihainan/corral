@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -58,6 +59,9 @@ func TestParseGitPR(t *testing.T) {
 	// Could not say: nothing to keep.
 	if _, pr, ok := parseGitPR("PRERR\n"); pr != nil || ok {
 		t.Error("error kept")
+	}
+	if _, pr, ok := parseGitPR("MOVED\n"); pr != nil || ok {
+		t.Error("moved kept")
 	}
 	gh, pr, ok := parseGitPR(`{"isDraft":true,"number":12,"state":"OPEN","title":"Add it","url":"https://github.com/o/r/pull/12"}`)
 	if !gh || !ok || pr == nil || pr.Number != 12 || !pr.Draft || pr.State != "OPEN" || pr.URL != "https://github.com/o/r/pull/12" {
@@ -239,7 +243,9 @@ func TestGitInfoOnDir(t *testing.T) {
 	g := parseGitInfo(string(out))
 	t.Logf("%v %+v diff=%+v last=%+v", time.Since(start).Round(time.Millisecond), g, g.Diff, g.Last)
 	start = time.Now()
-	out, _ = exec.Command("sh", "-c", gitPRCommand(dir)).Output()
+	root, _ := exec.Command("git", "-C", dir, "rev-parse", "--show-toplevel").Output()
+	br, _ := exec.Command("git", "-C", dir, "symbolic-ref", "-q", "--short", "HEAD").Output()
+	out, _ = exec.Command("sh", "-c", gitPRCommand(dir, strings.TrimSpace(string(root)), strings.TrimSpace(string(br)))).Output()
 	gh, pr, ok := parseGitPR(string(out))
 	t.Logf("pr %v: gh=%v ok=%v %+v", time.Since(start).Round(time.Millisecond), gh, ok, pr)
 }

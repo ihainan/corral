@@ -1226,6 +1226,9 @@ p.convo-ask-desc { margin: 0 0 8px; font-size: var(--fs-ui); line-height: var(--
 .list-search-none { margin: 4px 10px 12px; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg-3); }
 .agents-list > .list-search { margin: 10px max(16px, env(safe-area-inset-right, 0px)) 4px max(16px, env(safe-area-inset-left, 0px)); height: 40px; }
 .convo-list-group { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
+/* (Beside the thread, a step tighter: rows 2 apart, groups 8 — 11-13, the list read as bigger than it is. The phone's
+   own list, the whole screen, keeps its room to touch.) */
+.convo-side .convo-list-group { gap: 2px; margin-bottom: 8px; }
 .convo-list-head { display: flex; gap: 6px; padding: 10px 10px 6px; font-size: var(--fs-note); line-height: var(--lh-note); font-weight: 600; letter-spacing: 0.02em; color: var(--term-fg-2); font-variant-numeric: tabular-nums; }
 .convo-list-head > span { font-weight: 400; color: var(--term-fg-3); }
 .convo-list-row {

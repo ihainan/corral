@@ -159,9 +159,10 @@ function useTick(on: boolean): number {
 // front (data-run on the element; terminal.css pauses it without). Measured
 // 11-13: the live line's band of light, scrolled out of view, still painted
 // every frame — 580 paints in 5 s.
-function useRunWhileSeen(ref: React.RefObject<HTMLElement | null>, on: boolean) {
+// (el: the element itself, from a callback ref — the line may be drawn anew, a div then a button,
+// and the one observed must be the one shown.)
+function useRunWhileSeen(el: HTMLElement | null, on: boolean) {
   useEffect(() => {
-    const el = ref.current
     if (!on || !el) return
     if (typeof IntersectionObserver === 'undefined') {
       el.dataset.run = ''
@@ -183,7 +184,7 @@ function useRunWhileSeen(ref: React.RefObject<HTMLElement | null>, on: boolean) 
       document.removeEventListener('visibilitychange', set)
       delete el.dataset.run
     }
-  }, [ref, on])
+  }, [el, on])
 }
 
 // (Where the side list was scrolled to, across the views made for each agent: see ConversationView.)
@@ -4198,7 +4199,7 @@ function Work({ it, open, onToggle, onCopy }: { it: Extract<Item, { kind: 'work'
   // (Under way while the agent is not at work: it waits for the person, to
   // be let run it or to be answered — not running, not for that long.)
   const asks = !!busy && !it.moving
-  const shine = useRef<HTMLSpanElement>(null)
+  const [shine, setShine] = useState<HTMLSpanElement | null>(null)
   useRunWhileSeen(shine, !!busy && !asks)
   // Shut, what is said of it without opening: the subagents it sent off, by
   // name, each to be read; and with calls beside it the last of what it
@@ -4233,7 +4234,7 @@ function Work({ it, open, onToggle, onCopy }: { it: Extract<Item, { kind: 'work'
             </span>
           ) : busy ? (
             <span className="convo-work-text is-live">
-              <span ref={shine} className="convo-shimmer">{busy.tool ? liveText(busy.tool) : t('convo.live.thinking')}</span>
+              <span ref={setShine} className="convo-shimmer">{busy.tool ? liveText(busy.tool) : t('convo.live.thinking')}</span>
               {since > 0 && now >= since && <span className="convo-live-time">{duration(now - since)}</span>}
             </span>
           ) : (
@@ -4254,7 +4255,7 @@ function Work({ it, open, onToggle, onCopy }: { it: Extract<Item, { kind: 'work'
           </span>
         ) : busy ? (
           <span className="convo-work-text is-live">
-            <span ref={shine} className="convo-shimmer">{busy.tool ? liveText(busy.tool) : t('convo.live.thinking')}</span>
+            <span ref={setShine} className="convo-shimmer">{busy.tool ? liveText(busy.tool) : t('convo.live.thinking')}</span>
             {since > 0 && now >= since && <span className="convo-live-time">{duration(now - since)}</span>}
             {chev}
           </span>
