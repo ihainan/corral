@@ -2991,6 +2991,15 @@ function AgentList({ rows, menus, onPicked, placed, query: given, onQuery, searc
               // (At rest, nothing to say of it but when.)
               const said = r.status === 'blocked' || r.status === 'working' || r.status === 'done'
               const since = stamp(r, now)
+              // (Its turn over, work of its left going — subagents, commands —: said in
+              // words by its time, as its hollow dot alone did not say it; what goes on,
+              // in its tooltip. As the dot: running, or commands, not while it waits.)
+              const bgSaid = r.bg === 'running' || (r.cmds && r.status !== 'blocked') ? 'bg' : r.bg === 'stale' ? 'stale' : ''
+              const bgHint = !bgSaid
+                ? ''
+                : [r.bg === 'running' ? t('convo.list.bgAgents') : r.bg === 'stale' ? t('convo.status.bgStale') : '', r.cmds?.list.length ? t('convo.list.bgCmds', { list: r.cmds.list.map((c) => c.title || '?').join(t('convo.listSep')) }) : '']
+                    .filter(Boolean)
+                    .join('\n')
               const hasMenu = !!(menus && r.menu)
               return (
                 <div
@@ -3023,7 +3032,7 @@ function AgentList({ rows, menus, onPicked, placed, query: given, onQuery, searc
                       which tells alike names apart — and when. A third only for what
                       waits on the person: what it asks, or messages not seen taken in.
                       The whole of each in its tooltip and the conversation's bar.) */}
-                  <span className="convo-list-text" title={[r.title, r.where, r.now].filter(Boolean).join('\n')}>
+                  <span className="convo-list-text" title={[r.title, r.where, r.now, bgHint].filter(Boolean).join('\n')}>
                     <span className="convo-list-line">
                       <span className="convo-list-title">{r.title}</span>
                       {pinned(r) && g.name !== 'convo.group.pinned' && (
@@ -3035,7 +3044,13 @@ function AgentList({ rows, menus, onPicked, placed, query: given, onQuery, searc
                     </span>
                     <span className="convo-list-meta">
                       <span className="convo-list-where">{r.where || '\u00a0'}</span>
-                      {since && <span className="convo-list-when">{since}</span>}
+                      {(since || bgSaid) && (
+                        <span className="convo-list-when">
+                          {bgSaid && <span className={'convo-list-bg' + (bgSaid === 'stale' ? ' is-stale' : '')}>{t(bgSaid === 'bg' ? 'convo.list.bg' : 'convo.list.bgStale')}</span>}
+                          {bgSaid && since && ' · '}
+                          {since}
+                        </span>
+                      )}
                     </span>
                     {/* (Its status by its dot only, and its group: in words for a screen
                         reader, and shown where the system's colours take the dot's away.) */}

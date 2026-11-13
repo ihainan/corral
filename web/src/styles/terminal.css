@@ -1356,6 +1356,11 @@ button.convo-running-what { padding: 0; border: 0; background: none; font: inher
 }
 .convo-list-when { flex: none; margin-left: auto; min-width: 3.2em; text-align: end; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
 /* Its second line: where it is (the session's title, which tells alike names apart) and, at its end, when. One line. */
+/* (Its turn over, work of its left going: said by its time, in the dot's colour.) */
+.convo-list-bg { color: var(--term-accent-text); font-weight: 500; }
+.convo-list-bg.is-stale { color: var(--term-fg-3); font-weight: 400; }
+/* (Its time beside it in the plain grey: one colour of meaning in the line, not the background's and a status's.) */
+.convo-list-row .convo-list-when:has(.convo-list-bg) { color: var(--term-fg-3); font-weight: 400; }
 .convo-list-meta { display: flex; align-items: baseline; gap: 8px; min-width: 0; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-3); }
 .convo-list-meta .convo-list-where { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* The one being read: a shade and heavier letters, no colour (its title is
