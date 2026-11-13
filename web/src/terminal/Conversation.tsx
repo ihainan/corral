@@ -1892,7 +1892,11 @@ function RunningWork({ scanOf, items, waiting, openSub, openCmd }: { scanOf?: st
         )}
         {toggle}
       </div>
-      {open && (
+      {/* (Kept while shut, its height to nothing, so that it opens and shuts as a
+          drawer does — upwards, from the composer — not in a jump; not to be
+          tabbed into while shut.) */}
+      {many && (
+        <div className={'convo-running-fold' + (open ? ' is-open' : '')} inert={!open}>
         <div className="convo-running-list">
           {items.map((r) => {
             const a = scanned.get(r.id)
@@ -1913,6 +1917,7 @@ function RunningWork({ scanOf, items, waiting, openSub, openCmd }: { scanOf?: st
               {scanNow(a) && <span className="convo-running-now" title={scanNow(a)}>{scanNow(a)}</span>}
             </div>
           ))}
+        </div>
         </div>
       )}
     </div>

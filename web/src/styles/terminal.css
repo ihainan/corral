@@ -1187,6 +1187,13 @@ p.convo-ask-desc { margin: 0 0 8px; font-size: var(--fs-ui); line-height: var(--
 .convo-running-more:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: -2px; }
 .convo-running-more svg { transition: transform 0.15s; }
 .convo-running-more[aria-expanded='true'] svg { transform: rotate(180deg); }
+/* (Opened and shut as a drawer: its rows' height from nothing to their own, 180ms; at once where motion is asked to be less.) */
+.convo-running-fold { display: grid; grid-template-rows: 0fr; overflow: hidden; opacity: 0; transition: grid-template-rows 0.18s ease, opacity 0.18s ease; }
+.convo-running-fold.is-open { grid-template-rows: 1fr; opacity: 1; }
+.convo-running-fold > .convo-running-list { min-height: 0; transition: padding 0.18s ease; }
+/* (Shut, its own room too: its padding and rule, else 11px of it stayed.) */
+.convo-running-fold:not(.is-open) > .convo-running-list { padding-top: 0; padding-bottom: 0; border-top-width: 0; }
+@media (prefers-reduced-motion: reduce) { .convo-running-fold, .convo-running-fold > .convo-running-list { transition: none; } }
 .convo-running-list { display: flex; flex-direction: column; min-width: 0; max-height: min(40vh, 320px); overflow-y: auto; overscroll-behavior: contain; padding: 4px 6px 6px; border-top: 1px solid var(--term-line); }
 .convo-running-label { margin: 8px 8px 4px 28px; color: var(--term-fg-3); font-size: var(--fs-note); line-height: var(--lh-note); }
 .convo-running-row { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 12px; min-width: 0; padding: 6px 8px 6px 28px; border-radius: var(--r); color: var(--term-fg-3); }
