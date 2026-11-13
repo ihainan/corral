@@ -264,6 +264,7 @@ claims = {}
 for q in procs:
     con = con_of(q['home'])
     own = {(q['home'], tid) for _, tid, l in q['opened'] if not subagent(con, tid, l)}
+    q['own_fd'] = set(own)  # (its own logs open: what it surely is at)
     if q['argv']:
         own.add((q['home'], q['argv']))
     q['own'] = own
@@ -297,10 +298,11 @@ for q in sorted(procs, key=lambda q: (q['pane'], q['pid'])):
             begun = [r[0] for r in con.execute('SELECT id FROM threads WHERE cwd = ? AND created_at >= ? AND ' + TALKED, (q['cwd'], since))]
         except sqlite3.Error:
             touched, begun = None, None
-    others = set()
+    others, others_sure = set(), set()
     for o in procs:
         if o is not q:
             others |= o['own']
+            others_sure |= o['own_fd']
     # (Begun with no thread told — run against the daemon: the one
     # conversation of its folder begun since it started, where there is one.)
     if not tid and begun is not None and len(begun) == 1 and (q['home'], begun[0]) not in others:
@@ -326,7 +328,7 @@ for q in sorted(procs, key=lambda q: (q['pane'], q['pid'])):
         try:
             live_other = 0
             for h, x in held:
-                if h == q['home'] and x != tid and (h, x) not in others:
+                if h == q['home'] and x != tid and (h, x) not in others_sure:  # (another's resume argument may be old: not proof)
                     r = con.execute('SELECT cwd FROM threads WHERE id = ? AND ' + TALKED, (x,)).fetchone()
                     if r and r[0] == q['cwd']:
                         live_other += 1

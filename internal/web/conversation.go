@@ -2205,7 +2205,9 @@ func (s *Server) locateScan(ctx context.Context, sess *term.Session, st *convoSt
 	// (A weak binding checked: where the scan finds the same process at no
 	// conversation it can tell, nothing changes — what was shown stays,
 	// weak, its reading where it was.)
-	if keep != nil && st.bind != nil && st.bind.PID == keep.PID && st.bind.Start == keep.Start && (reason == convoNotTold || reason == convoNoLog) {
+	// (Not where it found otherwise: a conversation begun since, its log not
+	// yet written (no_log), or a screen showing another (screenNo).)
+	if keep != nil && st.bind != nil && st.bind.PID == keep.PID && st.bind.Start == keep.Start && reason == convoNotTold && !st.screenNo {
 		st.bind = keep
 		return nil
 	}
@@ -3655,10 +3657,10 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 				reason = "busy"
 				writeError(w, http.StatusTooManyRequests, "busy", "its conversation is being read: try again in a moment")
 				return
-			case why == "weak":
-				front.sid = "" // (agent_changed below: what is shown is checked anew)
 			default:
-				s.daemonLog(front, l)
+				// (Weak, none, or another's: agent_changed below — what is shown
+				// is checked anew, by the scan; nothing is typed by a log's age.)
+				front.sid = ""
 			}
 		}
 		// An OpenCode: the session it is at now, asked anew (it may have gone to
