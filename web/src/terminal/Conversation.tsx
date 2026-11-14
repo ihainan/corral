@@ -4798,6 +4798,16 @@ function Work({ it, open, onToggle, onCopy }: { it: Extract<Item, { kind: 'work'
   // on); thinking; else the kind its counts name first.
   const first = order.find((c) => counts.has(c))
   const Mark = busy ? (busy.tool ? stepIcon(busy.tool) : ThinkIcon) : thought ? ThinkIcon : first ? categoryIcon(first) : WorkIcon
+  // One step, done, nothing else in it: the step itself — not a line saying
+  // it, opened on the same line again (11-14: "清理并类型检查 ⌄", then
+  // "清理并类型检查" under it). Hooks above it all run first.
+  const solo = !busy && !it.live && it.steps.length === 1 && !isNote(it.steps[0]) && !!it.steps[0].tool
+  if (solo)
+    return (
+      <div className="convo-work is-solo" data-work={it.key}>
+        <ToolRow tool={(it.steps[0] as ConvoPart).tool!} onCopy={onCopy} live={false} />
+      </div>
+    )
   // (The fold mark after the words: the kind is what comes first.)
   const chev = (
     <span className="convo-chev-box" aria-hidden="true">
