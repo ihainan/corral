@@ -314,6 +314,10 @@ func (c *Claude) Running() []Running {
 	return out
 }
 
+// maxMonitorEvent: of what a Monitor's event said, how much is shown in the
+// conversation (its whole is in its output, and with the agent).
+const maxMonitorEvent = 300
+
 // monitorGrace: how long past its time a Monitor is still taken for going
 // (its notice of that may come late).
 const monitorGrace = 2 * time.Minute
@@ -2681,7 +2685,17 @@ func classifyUserText(s string) (role, text string) {
 		}
 		s = n
 		if sm := taskSummary.FindStringSubmatch(s); sm != nil {
-			return RoleNote, clip(strings.TrimSpace(html.UnescapeString(sm[1])), maxDetail)
+			sum := clip(strings.TrimSpace(html.UnescapeString(sm[1])), maxDetail)
+			// (What a Monitor's event said, on the line after its summary:
+			// "Monitor event: \"<what>\"" alone says nothing of it.)
+			if strings.HasPrefix(sum, "Monitor event:") {
+				if ev := taskEvent.FindStringSubmatch(s); ev != nil {
+					if t := clip(strings.TrimSpace(clean(html.UnescapeString(ev[1]))), maxMonitorEvent); t != "" {
+						sum += "\n" + t
+					}
+				}
+			}
+			return RoleNote, sum
 		}
 		if st := taskStatus.FindStringSubmatch(s); st != nil {
 			return RoleNote, strings.TrimSpace(st[1])

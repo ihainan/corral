@@ -805,6 +805,37 @@ func TestClaudeRunningMonitor(t *testing.T) {
 	}
 }
 
+// What a Monitor's event said shows with its note, on the line after its
+// summary (cut short where long); a summary of another kind is as it was.
+func TestClaudeMonitorEventNote(t *testing.T) {
+	note := func(id, body string) []byte {
+		return lines(`{"type":"attachment","uuid":"n` + id + `","attachment":{"type":"queued_command","commandMode":"task-notification","prompt":"<task-notification>\n<task-id>` + id + `</task-id>\n` + body + `\n</task-notification>"}}`)
+	}
+	c := NewClaude()
+	c.Feed(note("1", `<summary>Monitor event: \"审查第一轮\"</summary>\n<event>gpt done\ngemini done</event>`))
+	c.Feed(note("2", `<summary>Monitor event: \"长的\"</summary>\n<event>`+strings.Repeat("x", 400)+`</event>`))
+	c.Feed(note("3", `<summary>Monitor event: \"空的\"</summary>\n<event>  </event>`))
+	c.Feed(note("4", `<summary>Something new: \"别的\"</summary>\n<event>not shown</event>`))
+	var got []string
+	for _, e := range c.Since(0) {
+		if e.Role == RoleNote && len(e.Parts) > 0 {
+			got = append(got, e.Parts[0].Text)
+		}
+	}
+	if len(got) != 4 {
+		t.Fatalf("notes: %q", got)
+	}
+	if got[0] != "Monitor event: \"审查第一轮\"\ngpt done\ngemini done" {
+		t.Errorf("event: %q", got[0])
+	}
+	if !strings.HasPrefix(got[1], "Monitor event: \"长的\"\nxxx") || len(got[1]) > len("Monitor event: \"长的\"\n")+maxMonitorEvent+8 {
+		t.Errorf("long: %q", got[1])
+	}
+	if got[2] != "Monitor event: \"空的\"" || got[3] != "Something new: \"别的\"" {
+		t.Errorf("empty, other: %q, %q", got[2], got[3])
+	}
+}
+
 // A Monitor no word of whose end was read: past its time (and a little
 // more) it is not taken for going; one kept for good, or set going just
 // now, is.
