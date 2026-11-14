@@ -1,5 +1,5 @@
 import { createContext, Fragment, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { ArrowDown, ArrowUp, Bot, Check, Copy, Cpu, FileText, Gauge as GaugeIcon, LogOut, Radar, SquarePlus, SquareTerminal, Target, TextCursorInput, FolderOpen, Info, Image as ImageIcon, ImageOff, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, Clock, Download, Eye, GitBranch, Keyboard, ListOrdered, Loader, MoreHorizontal, MoreVertical, PanelLeft, Pin, RotateCw, Search, TriangleAlert, X, Plus } from 'lucide-react'
+import { ArrowDown, ArrowUp, Bot, Check, FilePen, Hand, ListChecks, ShieldOff, Sparkles, Copy, Cpu, FileText, Gauge as GaugeIcon, LogOut, Radar, SquarePlus, SquareTerminal, Target, TextCursorInput, FolderOpen, Info, Image as ImageIcon, ImageOff, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, Clock, Download, Eye, GitBranch, Keyboard, ListOrdered, Loader, MoreHorizontal, MoreVertical, PanelLeft, Pin, RotateCw, Search, TriangleAlert, X, Plus } from 'lucide-react'
 import { t, getLang, type I18nKey } from '../i18n'
 import { api } from '../api'
 import { asHeld, dayStart, FOLDED, foldAt, GROUPS, inGroup, listOrder, pinned, type ConvoListRow, type RowCmds } from './agentOrder'
@@ -2279,6 +2279,8 @@ const modeName = (m: string) => ((MODES as readonly string[]).includes(m) ? t(`c
 export type ModeSwitch = { now?: string; busy: boolean; onPick?: (mode: string) => void }
 // (Those Shift+Tab goes through, in its order; which a session has depends on how it was started.)
 const PICKED_MODES = ['default', 'acceptEdits', 'plan', 'auto', 'bypassPermissions'] as const
+// Each mode's mark, and a line of what it lets the agent do (11-14: five names to tell apart by name alone).
+const MODE_ICON: Record<(typeof PICKED_MODES)[number], typeof Info> = { default: Hand, acceptEdits: FilePen, plan: ListChecks, auto: Sparkles, bypassPermissions: ShieldOff }
 
 // Switching the model, from a menu of what Claude Code's picker offers
 // (list: null while it is read), for the session only.
@@ -2711,15 +2713,20 @@ function Runs({ meta, active, mode, model, effort, quota, via, auth }: { meta: C
                 type="button"
                 role="menuitemradio"
                 aria-checked={now}
-                className="convo-models-item"
+                className={'convo-models-item is-mode' + (m === 'bypassPermissions' ? ' is-risky' : '')}
                 onClick={() => {
                   setOpen(false)
                   modeBtn.current?.focus()
                   mode.onPick!(m) // (the one ticked too: what is ticked may be past; there already, nothing is pressed)
                 }}
               >
+                {(() => {
+                  const Ic = MODE_ICON[m]
+                  return <Ic size={16} className="convo-mode-ic" aria-hidden="true" />
+                })()}
                 <span className="convo-models-label">{modeName(m)}</span>
-                {now && <Check size={14} aria-hidden="true" />}
+                <span className="convo-models-desc">{t(`convo.modeDesc.${m}` as I18nKey)}</span>
+                {now && <Check size={14} className="convo-mode-check" aria-hidden="true" />}
               </button>
             )
           })}
