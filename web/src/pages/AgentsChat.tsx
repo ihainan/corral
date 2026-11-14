@@ -25,7 +25,7 @@ import { isLogPic, logPic, lookAt, PictureDialog, useDownload } from '../termina
 import { IMAGE_EXT, TextPreview } from '../terminal/textPreview'
 import { attach, ATTACH_LABEL, AttachStrip, PICTURE_PATH, takeOut, type Going } from '../terminal/attach'
 import { answerable, asking, callOut, useConversation, type ConvoEntry } from '../terminal/conversation'
-import { ackBg, waitingTitle, isCodex, isOpenCode, listAgents, paneName, paneTitle, readsLog, useRunningSessions, type AgentRow } from '../terminal/agents'
+import { ackBg, answeredHerdr, expectSession, paneWaits, waitingTitle, isCodex, isOpenCode, listAgents, paneName, paneTitle, readSessionsNow, readsLog, useRunningSessions, type AgentRow } from '../terminal/agents'
 import { type RowCmds } from '../terminal/agentOrder'
 import { conversationReadable, prefetchConversation } from '../terminal/conversation'
 import { holdTermMode, tmuxKey } from '../terminal/chatSend'
@@ -379,6 +379,9 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
     const key = agentKey(s, pane)
     if (first) keepDraft('agents ' + key, first)
     setArriving({ s, pane, key, until: Date.now() + 30000 })
+    // (Read again at once and in a second — herdr's summary takes a moment to have it: not at the next read, seconds on. 11-14.)
+    readSessionsNow()
+    setTimeout(readSessionsNow, 1000)
   }
   useEffect(() => {
     if (!arriving) return
@@ -830,6 +833,12 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   const sid = cur.s.id
   const herdr = cur.s.persistence === 'herdr'
   const convo = useConversation(sid, active, cur.pane)
+  // A title given with /rename, shown at once — the log says it when Claude
+  // Code writes it, a while on (11-14) — until the log says the same, or a
+  // while at most.
+  const [titleNow, setTitleNow] = useState<{ of: string; title: string; until: number } | null>(null)
+  const convoOf = convo.bind ? `${convo.bind.pane} ${convo.bind.session}` : ''
+  const convoTitle = titleNow && titleNow.of === convoOf && titleNow.title !== convo.title && Date.now() < titleNow.until ? titleNow.title : convo.title
   const row = cur.row
   const [hostHistory, setHostHistory] = useState(false)
   // A file the conversation names, shown in the files panel (its folder, it marked).
@@ -893,13 +902,13 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       // log's not answered yet, where that file says nothing.)
       const asks = st === 'waiting' ? answerable(convo.waitingFor) : !!st && asking(convo.entries)
       const dialog = st === 'waiting' && !asks
-      return { title: convo.title || convo.bind.title, status: asks ? 'blocked' : st === 'busy' ? 'working' : st === 'idle' || dialog ? 'idle' : 'unknown', dialog, cmds: st && st !== 'waiting' ? convo.bgCmds : undefined, program: convo.bind.agent }
+      return { title: convoTitle || convo.bind.title, status: asks ? 'blocked' : st === 'busy' ? 'working' : st === 'idle' || dialog ? 'idle' : 'unknown', dialog, cmds: st && st !== 'waiting' ? convo.bgCmds : undefined, program: convo.bind.agent }
     }
     if (!row) return null
     // (A Codex's: its thread's name, as the gateway has it, before its log's
     // first message, which a session imported or compacted begins with what
     // is no name.)
-    const title = (isCodex(row.a.agent) && row.a.thread_title) || (convo.bind?.pane === row.a.pane_id && convo.title) || paneName(row.a) || dirName(row.a.cwd)
+    const title = (isCodex(row.a.agent) && row.a.thread_title) || (convo.bind?.pane === row.a.pane_id && convoTitle) || paneName(row.a) || dirName(row.a.cwd)
     // (herdr's name for a workspace at home, "~": nothing to tell)
     // (Its turn over, with subagents out or that being read for: the thread
     // is of a turn that ended, whatever the list says of the agent.)
@@ -911,7 +920,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     // Claude Code's: no other agent says so.)
     const dialog = !row.lost && status !== 'blocked' && convo.bind?.pane === row.a.pane_id && (convo.bind.agent ?? 'claude') === 'claude' && !convo.failing && convo.agentStatus === 'waiting' && !answerable(convo.waitingFor)
     return { where: row.ws === '~' ? '' : row.ws, title, status, bg, dialog, cmds: cmdsOf(row), other: readsLog(row.a.agent) ? undefined : row.a.agent, program: row.a.agent }
-  }, [herdr, row, convo.bind, convo.agentStatus, convo.waitingFor, convo.bgCmds, convo.failing, convo.title, convo.entries])
+  }, [herdr, row, convo.bind, convo.agentStatus, convo.waitingFor, convo.bgCmds, convo.failing, convoTitle, convo.entries])
   // A finished one looked at here is seen: the gateway keeps it, so it is
   // no longer "done" in any browser (herdr's own word goes only with its
   // pane focused in herdr). Not while the page is behind another.
@@ -1093,14 +1102,14 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     const hosts = hostCount(entries)
     const out = entries.map((e): ConvoListRow => {
       const current = e.key === cur.key && e.s.id === cur.s.id
-      if (current && convo.title) {
+      if (current && convoTitle) {
         titles.delete(e.key) // (the latest last: the map keeps its order of use)
-        titles.set(e.key, { title: convo.title, pane: paneTitle(e.row?.a.title ?? ''), session: convo.bind?.session ?? '' })
+        titles.set(e.key, { title: convoTitle, pane: paneTitle(e.row?.a.title ?? ''), session: convo.bind?.session ?? '' })
         if (titles.size > 100) titles.delete(titles.keys().next().value!)
       }
       if (e.row) {
         const r = e.row
-        const named = (isCodex(r.a.agent) && r.a.thread_title) || (current && convo.bind?.pane === r.a.pane_id && convo.title) || keptTitle(titles, e) || paneName(r.a)
+        const named = (isCodex(r.a.agent) && r.a.thread_title) || (current && convo.bind?.pane === r.a.pane_id && convoTitle) || keptTitle(titles, e) || paneName(r.a)
         const said = named || dirName(r.a.cwd) || r.a.agent
         const st = current && agent && !r.bg ? agent.status : r.status
         return { key: e.key, ...labelOf(e, said, hosts, !!named), now: r.lost || r.bg || st !== 'blocked' ? undefined : glanceOf(e.s.id, e.pane, st, r.a.since) || undefined /* (said only of one waiting on the person) */, program: r.a.agent, status: st, bg: r.lost ? undefined : r.bg, cmds: cmdsOf(r), since: r.lost ? undefined : r.bg ? r.a.bg_since : r.a.since, current, pinned: pinAt(e.key), onPick: () => onPick(e), menu: () => rowMenu.current(e) }
@@ -1110,7 +1119,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     })
     return placedAs ? out.map((r) => (r.current ? { ...r, placeAs: placedAs } : r)) : out
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [entries, cur, agent, convo.title, all, titles, onPick, placedAs, pins])
+  }, [entries, cur, agent, convoTitle, all, titles, onPick, placedAs, pins])
   const shown = rows.find((r) => r.current)
   const known = !!shown && shown.status !== 'unknown'
   useEffect(() => {
@@ -2188,6 +2197,8 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     return api('POST', `/api/sessions/${sid}/conversation/command`, { pane: b.pane, pid: b.pid, start: b.start, session: b.session, text }, { timeoutMs: PRESS_MS }).then(
       () => {
         toast(t('ops.sent'))
+        const m = /^\/rename\s+(.+)$/s.exec(text.trim())
+        if (m && b.agent !== 'codex') setTitleNow({ of: `${b.pane} ${b.session}`, title: m[1].trim(), until: Date.now() + 15000 })
         convo.refresh()
       },
       (e) => {
@@ -2324,7 +2335,12 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       ask={
         waits && replyTo ? (
           // (One a pane, and a process in it: nothing of another's carries over. Not tied to a terminal: no size to wait for.)
-          <InlineReply key={replyTo.key} target={replyTo} resizedAt={0} active={active} held={() => false} call={asked} pending={pendingCall} onAnswered={setAnswered} waitSince={cur.row && !cur.row.lost && cur.row.a.since ? cur.row.a.since : undefined} />
+          <InlineReply key={replyTo.key} target={replyTo} resizedAt={0} active={active} held={() => false} call={asked} pending={pendingCall} onAnswered={(yes) => {
+            setAnswered(yes)
+            // (Answered: not waiting in the list and the title either, at once — not at its next read. 11-14.)
+            const pane = cur.pane
+            if (yes && pane) expectSession(cur.s.id, (s) => answeredHerdr(s, pane), (s) => !paneWaits(s, pane), 4000)
+          }} waitSince={cur.row && !cur.row.lost && cur.row.a.since ? cur.row.a.since : undefined} />
         ) : undefined
       }
       // (The bar's stop only where the box's one is not there: words or files
@@ -2447,7 +2463,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       />
     )}
     {renaming && <RenameDialog target={renaming} onClose={() => setRenaming(null)} />}
-    {op && <SessionOpDialog op={op.op} name={convo.title} codex={op.bind.agent === 'codex'} onSend={(text) => runOp(op.bind, text)} onClose={() => setOp(null)} onShowTerminal={openTerminal} />}
+    {op && <SessionOpDialog op={op.op} name={convoTitle} codex={op.bind.agent === 'codex'} onSend={(text) => runOp(op.bind, text)} onClose={() => setOp(null)} onShowTerminal={openTerminal} />}
     {closing?.row && (
       <Confirm
         title={closing.key === cur.key ? t('agents.closeTitle') : t('agents.closeTitleNamed', { name: rows.find((r) => r.key === closing.key)?.title ?? '' })}

@@ -194,8 +194,14 @@ function withExpected(list: SessionInfo[]): SessionInfo[] {
   return list.map((s) => expects.reduce((acc, x) => (x.id === s.id ? x.apply(acc) : acc), s))
 }
 const readNow = new Set<() => void>()
-export function expectSession(id: string, apply: (s: SessionInfo) => SessionInfo, seen: (s: SessionInfo) => boolean) {
-  expects.push({ id, apply, seen, until: Date.now() + EXPECT_MS })
+// The list read again now, wherever it is read (a new agent started: in it sooner than the next read).
+export function readSessionsNow() {
+  readNow.forEach((f) => f())
+}
+// (ms: how long at most — short where what follows may undo it of itself: an
+// agent answered may ask again a second later, and that must show.)
+export function expectSession(id: string, apply: (s: SessionInfo) => SessionInfo, seen: (s: SessionInfo) => boolean, ms = EXPECT_MS) {
+  expects.push({ id, apply, seen, until: Date.now() + ms })
   if (rawList) {
     lastList = withExpected(rawList)
     markRead(lastList, listReadAt.get(rawList) ?? 0)
@@ -203,6 +209,13 @@ export function expectSession(id: string, apply: (s: SessionInfo) => SessionInfo
   told()
   readNow.forEach((f) => f())
 }
+
+// A pane's agent at work again, as an answer to it puts it (not waiting for the person).
+export function answeredHerdr(s: SessionInfo, pane: string): SessionInfo {
+  if (s.meta?.t !== 'herdr') return s
+  return { ...s, meta: { ...s.meta, workspaces: s.meta.workspaces.map((w) => ({ ...w, agents: w.agents.map((a) => (a.pane_id === pane && a.status === 'blocked' ? { ...a, status: 'working' } : a)) })) } }
+}
+export const paneWaits = (s: SessionInfo, pane: string) => s.meta?.t === 'herdr' && s.meta.workspaces.some((w) => w.agents.some((a) => a.pane_id === pane && a.status === 'blocked'))
 
 // herdr's names, as a rename gives them: a workspace's, a tab's, a pane's.
 export function renamedHerdr(s: SessionInfo, ws?: { id: string; label: string }, tab?: { id: string; label: string }, pane?: { id: string; label: string }): SessionInfo {

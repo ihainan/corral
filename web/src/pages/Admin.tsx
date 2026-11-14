@@ -42,13 +42,17 @@ export function AdminUsersPage() {
   const filtering = needle !== '' || only !== 'all'
   const findable = (users?.length ?? 0) > USER_SEARCH_FROM || filtering
 
+  // (Shown changed at once — a user enabled from the menu stayed as it was
+  // until the list was read again, nothing to show it was under way: 11-14 —
+  // and back as it was if refused.)
   const update = async (u: AdminUser, patch: Partial<Pick<AdminUser, 'role' | 'disabled'>>) => {
+    setUsers((l) => l && l.map((x) => (x.id === u.id ? { ...x, ...patch } : x)))
     try {
       await api('PUT', '/api/admin/users/' + u.id, patch)
-      load()
     } catch (e) {
       toast(errorText(e), true)
     }
+    load()
   }
 
   return (

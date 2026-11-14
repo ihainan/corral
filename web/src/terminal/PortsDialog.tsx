@@ -87,7 +87,10 @@ export function PortsDialog({ hostId, onClose }: { hostId: number; onClose: () =
     if (n >= 1 && n <= 65535) void open(n)
     else toast(t('ports.badPort'), true)
   }
+  // Who it is shared with, shown as chosen at once (11-14: the choice went
+  // back to the old one while it was asked) — back again only if refused.
   const setSharing = async (f: Forward, sharing: string) => {
+    setForwards((l) => l && l.map((x) => (x.id === f.id ? { ...x, sharing: sharing as Forward['sharing'] } : x)))
     try {
       await api('PUT', '/api/forwards/' + f.id, { sharing })
     } catch (err) {
@@ -95,13 +98,18 @@ export function PortsDialog({ hostId, onClose }: { hostId: number; onClose: () =
     }
     void loadForwards()
   }
+  // (Taken off: its button off meanwhile — pressed twice, asked twice.)
+  const [removing, setRemoving] = useState<string[]>([])
   const remove = async (f: Forward) => {
+    if (removing.includes(f.id)) return
+    setRemoving((r) => [...r, f.id])
     try {
       await api('DELETE', '/api/forwards/' + f.id)
     } catch (err) {
       toast(errorText(err), true)
     }
-    void loadForwards()
+    await loadForwards()
+    setRemoving((r) => r.filter((x) => x !== f.id))
   }
 
   return (
@@ -157,7 +165,7 @@ export function PortsDialog({ hostId, onClose }: { hostId: number; onClose: () =
                 </div>
                 <div className="row-actions">
                   <button className="icon-btn" aria-label={t('ports.open') + ' ' + f.port} title={t('ports.open')} disabled={isOpening(f.port)} onClick={() => open(f.port)}><ExternalLink size={16} /></button>
-                  <button className="icon-btn" aria-label={t('ports.remove') + ' ' + f.port} title={t('ports.remove')} onClick={() => remove(f)}><Trash2 size={16} /></button>
+                  <button className="icon-btn" aria-label={t('ports.remove') + ' ' + f.port} title={t('ports.remove')} onClick={() => remove(f)} disabled={removing.includes(f.id)}><Trash2 size={16} /></button>
                 </div>
               </li>
             ))}

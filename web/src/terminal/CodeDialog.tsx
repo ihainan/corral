@@ -135,13 +135,19 @@ export function useCode() {
     })
   }
 
+  // (Asked to stop once at a time for a host: pressed again meanwhile, not asked again.)
+  const stopping = useRef(new Set<number>())
   const stopCode = async (hostId: number) => {
+    if (stopping.current.has(hostId)) return
+    stopping.current.add(hostId)
     try {
       await api('POST', `/api/hosts/${hostId}/code/stop`)
       markRunning(hostId, false)
       toast(t('code.stopped'))
     } catch (e) {
       toast(e instanceof ApiError ? e.human : t('code.stopFailed'), true)
+    } finally {
+      stopping.current.delete(hostId)
     }
   }
 
