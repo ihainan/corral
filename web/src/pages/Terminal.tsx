@@ -1570,9 +1570,13 @@ export function TerminalPage({ id, watch = false, active = true, tabs, onInfo, o
     const scheme = termScheme()
     term.options.theme = scheme.theme
     syncSchemeRef.current()
-    setChromeColor(scheme.theme.background ?? null)
-    // Menus and dialogs opened over the terminal follow its colours.
-    document.documentElement.classList.toggle('term-dark', scheme.dark)
+    // Menus and dialogs opened over the terminal follow its colours — this
+    // tab's only while it is the one in front: one in the back, its prefs
+    // changed from the agents page, made that page's dialogs dark (11-14).
+    if (activeRef.current) {
+      setChromeColor(scheme.theme.background ?? null)
+      document.documentElement.classList.toggle('term-dark', scheme.dark)
+    }
     // Through the follow check: while another viewer's size is shown the grid
     // stays at that size (only its scale changes).
     safeFitRef.current()
