@@ -1306,7 +1306,13 @@ button.convo-running-what { padding: 0; border: 0; background: none; font: inher
 .convo-queue-text { white-space: pre-wrap; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden; }
 /* Not the person's own: another session's agent, or a notice */
 .convo-queue-row.is-note { color: var(--term-fg-3); }
-.convo-queue-from { margin-right: 6px; color: var(--term-fg-2); font-weight: 500; }
+/* Another session's message waiting (QueuedNote, 11-14): where it is from over its words, a few lines, the whole at a tap. */
+button.convo-queue-row.is-note { display: flex; flex-direction: column; gap: 2px; width: 100%; border-left: 0; border-right: 0; border-bottom: 0; background: none; font: inherit; text-align: left; cursor: pointer; }
+button.convo-queue-row.is-note:hover { background: var(--term-hover); }
+button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(--r-lg); }
+.convo-queue-row.is-whole .convo-queue-text { display: block; overflow: visible; }
+.convo-queue-row.is-note .convo-queue-text { font-size: var(--fs-note); line-height: var(--lh-note); }
+.convo-queue-from { display: inline-flex; align-items: center; gap: 6px; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-2); font-weight: 500; }
 .convo-user.is-mid .convo-user-text { background: color-mix(in srgb, var(--term-fg) 5%, var(--term-bg)); }
 
 /* The agents to go to: beside the thread (wide), over it (narrow, or folded away) */

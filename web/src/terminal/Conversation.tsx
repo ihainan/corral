@@ -1,5 +1,5 @@
 import { createContext, Fragment, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { ArrowDown, ArrowUp, Bot, Check, FilePen, Hand, ListChecks, ShieldOff, Sparkles, Copy, Cpu, FileText, Gauge as GaugeIcon, LogOut, Radar, SquarePlus, SquareTerminal, Target, TextCursorInput, FolderOpen, Info, Image as ImageIcon, ImageOff, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, Clock, Download, Eye, GitBranch, Keyboard, ListOrdered, Loader, MoreHorizontal, MoreVertical, PanelLeft, Pin, RotateCw, Search, TriangleAlert, X, Plus } from 'lucide-react'
+import { ArrowDown, ArrowUp, Bot, Check, MessagesSquare, FilePen, Hand, ListChecks, ShieldOff, Sparkles, Copy, Cpu, FileText, Gauge as GaugeIcon, LogOut, Radar, SquarePlus, SquareTerminal, Target, TextCursorInput, FolderOpen, Info, Image as ImageIcon, ImageOff, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, Clock, Download, Eye, GitBranch, Keyboard, ListOrdered, Loader, MoreHorizontal, MoreVertical, PanelLeft, Pin, RotateCw, Search, TriangleAlert, X, Plus } from 'lucide-react'
 import { t, getLang, type I18nKey } from '../i18n'
 import { api } from '../api'
 import { asHeld, dayStart, FOLDED, foldAt, GROUPS, inGroup, listOrder, pinned, type ConvoListRow, type RowCmds } from './agentOrder'
@@ -2222,29 +2222,48 @@ function queueWords(text: string): string {
 }
 
 function Queue({ items, onSendNow, said }: { items: ConvoQueued[]; onSendNow?: () => void; said?: string }) {
+  // The person's own, and what another session (or the system) sent: told
+  // apart (11-14) — the others' not the person's to hurry, nor counted as
+  // theirs; shown as from where they came, a few lines, the whole at a tap.
+  const mine = items.filter((q) => !q.note)
+  const others = items.filter((q) => q.note)
   return (
     <div className="convo-queue" role="status">
       <div className="convo-queue-head">
-        <span className="convo-queue-sum">{t('convo.queued', { n: items.length })}</span>
+        <span className="convo-queue-sum">{mine.length ? t('convo.queued', { n: mine.length }) : t('convo.queuedOthers', { n: others.length })}</span>
         {said ? (
           <span className="convo-queue-said">{said}</span>
         ) : (
-          onSendNow && (
+          onSendNow &&
+          mine.length > 0 && (
             <button type="button" className="btn btn-ghost convo-queue-now" onClick={onSendNow} title={t('convo.sendNowHint')}>
               {t('convo.sendNow')}
             </button>
           )
         )}
       </div>
-      {items.map((q, i) => (
-        <div key={i} className={'convo-queue-row' + (q.note ? ' is-note' : '')}>
-          <div className="convo-queue-text">
-            {q.note && <span className="convo-queue-from">{q.from ? t('convo.queuedFrom', { name: q.from }) : t('convo.queuedNotice')}</span>}
-            {queueWords(q.text)}
-          </div>
+      {mine.map((q, i) => (
+        <div key={'m' + i} className="convo-queue-row">
+          <div className="convo-queue-text">{queueWords(q.text)}</div>
         </div>
       ))}
+      {others.map((q, i) => (
+        <QueuedNote key={'n' + i} q={q} />
+      ))}
     </div>
+  )
+}
+
+function QueuedNote({ q }: { q: ConvoQueued }) {
+  const [whole, setWhole] = useState(false)
+  return (
+    <button type="button" className={'convo-queue-row is-note' + (whole ? ' is-whole' : '')} aria-expanded={whole} onClick={() => setWhole(!whole)}>
+      <span className="convo-queue-from">
+        <MessagesSquare size={14} aria-hidden="true" />
+        {q.from ? t('convo.queuedFromName', { name: q.from }) : t('convo.queuedNoticeName')}
+      </span>
+      <span className="convo-queue-text">{queueWords(q.text)}</span>
+    </button>
   )
 }
 
