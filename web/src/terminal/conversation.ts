@@ -102,7 +102,7 @@ export interface ConvoShell {
 // and after; how long it took), a notice that that was while it sat idle,
 // a scheduled task (or a loop's) set a turn going with its prompt.
 export interface ConvoEvent {
-  kind: 'compact' | 'idle_compact' | 'scheduled' | 'limit' | 'limit_wait' | 'limit_reset' | 'limit_cancelled' | 'recap' | 'goal' | 'notice' | 'task' | 'model'
+  kind: 'compact' | 'idle_compact' | 'scheduled' | 'limit' | 'limit_wait' | 'limit_reset' | 'limit_cancelled' | 'recap' | 'goal' | 'notice' | 'task' | 'model' | 'said'
   trigger?: string
   pre?: number
   post?: number
@@ -116,6 +116,8 @@ export interface ConvoEvent {
   effort?: string
   session?: boolean
   kept?: boolean
+  saved?: boolean // (model) made the default for new sessions too
+  ic?: string // (said: made here, Claude Code's word on a command of its own, in the page's) which mark it takes
   set?: boolean
   met?: boolean
   why?: string

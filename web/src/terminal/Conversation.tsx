@@ -1,5 +1,5 @@
 import { createContext, Fragment, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { ArrowDown, ArrowUp, Check, Copy, Cpu, FileText, FolderOpen, Info, Image as ImageIcon, ImageOff, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, Clock, Download, Eye, GitBranch, Keyboard, ListOrdered, Loader, MoreHorizontal, MoreVertical, PanelLeft, Pin, RotateCw, Search, TriangleAlert, X, Plus } from 'lucide-react'
+import { ArrowDown, ArrowUp, Bot, Check, Copy, Cpu, FileText, Gauge as GaugeIcon, LogOut, Radar, SquarePlus, SquareTerminal, Target, TextCursorInput, FolderOpen, Info, Image as ImageIcon, ImageOff, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, Clock, Download, Eye, GitBranch, Keyboard, ListOrdered, Loader, MoreHorizontal, MoreVertical, PanelLeft, Pin, RotateCw, Search, TriangleAlert, X, Plus } from 'lucide-react'
 import { t, getLang, type I18nKey } from '../i18n'
 import { api } from '../api'
 import { asHeld, dayStart, FOLDED, foldAt, GROUPS, inGroup, listOrder, pinned, type ConvoListRow, type RowCmds } from './agentOrder'
@@ -3854,6 +3854,9 @@ function FoldLine({ label, open, onToggle }: { label: string; open: boolean; onT
   )
 }
 
+// The marks of Claude Code's word on its own commands (convoItems noteEvent).
+const SAID_ICONS: Record<string, typeof Info> = { effort: GaugeIcon, exit: LogOut, clear: SquarePlus, restart: RotateCw, rename: TextCursorInput, monitor: Radar, bg: SquareTerminal, agent: Bot, goal: Target, artifact: FileText }
+
 function EventNote({ ev, idle, sum }: { ev: ConvoEvent; idle?: boolean; sum?: ConvoEntry }) {
   const [open, setOpen] = useState(false)
   const showTerminal = useContext(ShowTerminal)
@@ -3876,14 +3879,25 @@ function EventNote({ ev, idle, sum }: { ev: ConvoEvent; idle?: boolean; sum?: Co
       </div>
     )
   }
-  // A model set (or kept) with /model, here or in the terminal: one line (convoItems modelOnce).
+  // A model set (or kept) with /model, here or in the terminal: one line (convoItems commandsOnce).
+  if (ev.kind === 'said') {
+    const Ic = SAID_ICONS[ev.ic ?? ''] ?? Info
+    return (
+      <div className={'convo-event is-limit is-said' + (ev.level === 'warning' ? ' is-warn' : '')}>
+        <Ic size={14} aria-hidden="true" />
+        <div className="convo-trouble-body">
+          <p className="convo-trouble-head">{ev.text}</p>
+        </div>
+      </div>
+    )
+  }
   if (ev.kind === 'model') {
     const what = [ev.model ? modelName(ev.model) : '', ev.effort ? t('convo.model.effort', { e: effortName(ev.effort) }) : ''].filter(Boolean).join(' · ') // (as the chip says it)
     return (
       <div className="convo-event is-limit is-model">
         <Cpu size={14} aria-hidden="true" />
         <div className="convo-trouble-body">
-          <p className="convo-trouble-head">{t(ev.kept ? 'convo.model.kept' : ev.session ? 'convo.model.setSession' : 'convo.model.set', { m: what })}</p>
+          <p className="convo-trouble-head">{t(ev.kept ? 'convo.model.kept' : ev.session ? 'convo.model.setSession' : ev.saved ? 'convo.model.setSaved' : 'convo.model.set', { m: what })}</p>
         </div>
       </div>
     )

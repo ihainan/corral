@@ -1,4 +1,5 @@
 import type { ConvoEntry, ConvoEvent, ConvoPart, ConvoTool } from './conversation'
+import { t, type I18nKey } from '../i18n'
 
 // The conversation view's list, from the log's entries: no React, no DOM
 // (convoItems.test.mts runs it as it is).
@@ -80,52 +81,124 @@ export function goalOnce(entries: ConvoEntry[]): ConvoEntry[] {
   return out ? out.filter((e) => e.role !== 'note' || e.parts.length > 0) : entries
 }
 
-// A model switched with /model — by hand, or by the model menu here, which
-// goes through it — is told twice: the command, as if the person had said it,
-// and Claude Code's "Set model to `Opus 5.5` for this session only with
-// `high` effort". One line in their place, in the page's words (11-14: the
-// two showed each time, the command over and over where the menu was used).
-// A bare /model with no answer after it (the menu shut on nothing) goes too.
-const MODEL_SET = /^Set model to\s+`?([^`]+?)`?(?=\s+for\s|\s+with\s|\s*\(|\.?\s*$)/
+// Claude Code's own commands and what it says of them, told in the chat as
+// if the person had written them: "/model", "/exit" and its "Goodbye!", "Set
+// effort level to …", a Monitor's "Monitor event: …" four hundred times over.
+// One short line each, in the page's words, where they carry anything; none
+// where they do not (a bare /compact: the compaction's own line says it).
+// 11-14: the model menu here went through /model, and each use left the
+// command and its English in the thread. Read from 288 real logs: the
+// commands and notes below are all that came up more than once.
+const MODEL_SET = /^Set model to\s+(?:`([^`]+)`|(.+?))(?=\s+and saved\b|\s+for\s+this\b|\s+with\s+\S+\s+effort\b|\s*$)/
 const MODEL_KEPT = /^Kept model as\s+`?([^`]+?)`?\.?\s*$/
+const EFFORT_SET = /^Set effort level to\s+`?(\w+)`?\s*\((this session only|saved as your default[^)]*)\)/
+const BYE = /^(Goodbye|Bye|See ya|Catch you later)!?$/
+const plainName = (m: string) => m.replace(/\s*\(default\)\s*$/, '').trim()
 export function modelEvent(text: string | undefined): ConvoEvent | undefined {
   const s = text?.trim()
   if (!s) return undefined
   const kept = MODEL_KEPT.exec(s)
-  if (kept) return { kind: 'model', model: kept[1], kept: true }
+  if (kept) return { kind: 'model', model: plainName(kept[1]), kept: true }
   const set = MODEL_SET.exec(s)
   if (!set) return undefined
-  return { kind: 'model', model: set[1], effort: /with\s+`?(\w+)`?\s+effort/.exec(s)?.[1], session: /for this session only/.test(s) }
+  return { kind: 'model', model: plainName(set[1] ?? set[2]), effort: /\bwith\s+`?(\w+)`?\s+effort\b/.exec(s)?.[1], session: /for this session only/.test(s), saved: /and saved as your default/.test(s) }
 }
-export function modelOnce(entries: ConvoEntry[]): ConvoEntry[] {
+const said = (text: string, ic: string, warn = false): ConvoEvent => ({ kind: 'said', text, ic, level: warn ? 'warning' : undefined })
+// What a note of Claude Code's own comes to: a line (an event), nothing
+// (null: dropped), or undefined — left as it is.
+export function noteEvent(text: string | undefined): ConvoEvent | null | undefined {
+  const s = text?.trim()
+  if (!s) return undefined
+  let m: RegExpExecArray | null
+  const model = modelEvent(s)
+  if (model) return model
+  if ((m = EFFORT_SET.exec(s))) return said(t(m[2] === 'this session only' ? 'convo.cmd.effortSession' : 'convo.cmd.effortSaved', { e: effortWord(m[1]) }), 'effort')
+  if (BYE.test(s)) return said(t('convo.cmd.exit'), 'exit')
+  if (/^Compacted\b/.test(s)) return null
+  if ((m = /^Session renamed to:\s*(.+)$/.exec(s))) return said(t('convo.cmd.renamed', { name: m[1].trim() }), 'rename')
+  if ((m = /^Monitor event:\s*"(.+)"$/s.exec(s))) return said(t('convo.cmd.monitorEvent', { what: m[1] }), 'monitor')
+  if ((m = /^Monitor "(.+)" stream ended$/s.exec(s))) return said(t('convo.cmd.monitorEnded', { what: m[1] }), 'monitor')
+  if ((m = /^(?:(\d+) background shell command tasks|Background shell command) didn't finish before the previous session ended/.exec(s))) return said(t('convo.cmd.bgLeft', { n: m[1] ?? '1' }), 'bg')
+  if ((m = /^Background command "(.+)" was stopped because the system is running low on memory$/s.exec(s))) return said(t('convo.cmd.bgLowMemory', { what: m[1] }), 'bg', true)
+  if ((m = /^Background command "(.+?)" was stopped\b/s.exec(s))) return said(t('convo.cmd.bgStopped', { what: m[1] }), 'bg')
+  if ((m = /^Monitor "(.+)" stopped$/s.exec(s))) return said(t('convo.cmd.monitorStopped', { what: m[1] }), 'monitor')
+  if ((m = /^Background agent "(.+)" didn't finish before the previous session ended/s.exec(s))) return said(t('convo.cmd.agentLeft', { what: m[1] }), 'agent')
+  if ((m = /^(\d+) background shell command task\(s\) from the previous session have no completion record/.exec(s))) return said(t('convo.cmd.bgLeft', { n: m[1] }), 'bg')
+  if ((m = /^Stopped watching Artifact:\s*"(.+)"\s*\(connection lost\)$/s.exec(s))) return said(t('convo.cmd.artifactLost', { what: m[1] }), 'artifact')
+  if ((m = /^Auto-replied to comment thread on Artifact:\s*"(.+)"$/s.exec(s))) return said(t('convo.cmd.artifactReplied', { what: m[1] }), 'artifact')
+  if ((m = /^Agent "(.+?)" failed:\s*(.*)$/s.exec(s))) return said(t('convo.cmd.agentFailed', { what: m[1], why: m[2].trim() }), 'agent', true)
+  if ((m = /^Agent "(.+)" was stopped by Claude$/s.exec(s))) return said(t('convo.cmd.agentStopped', { what: m[1] }), 'agent')
+  if (/^Goal check-in: background work still running$/.test(s)) return said(t('convo.cmd.goalCheck'), 'goal')
+  if (/^Can't restart while work is running in the background/.test(s)) return said(t('convo.cmd.restartBusy'), 'restart', true)
+  if ((m = /^Successfully updated from \S+ to version (\S+)$/.exec(s))) return said(t('convo.cmd.updated', { v: m[1] }), 'restart')
+  return undefined
+}
+const effortWord = (e: string) => {
+  const k = `convo.effort.${e.toLowerCase()}`
+  const w = t(k as I18nKey)
+  return w === k ? e : w
+}
+// A command of the person's, alone (the words it was given aside): its line
+// where it says what it did, null where something after says it, undefined
+// to keep it as the person's message.
+function commandEvent(cmd: string, rest: string): ConvoEvent | null | undefined {
+  switch (cmd) {
+    case '/model':
+    case '/effort':
+      return rest ? undefined : null // (the menu shut on nothing, or its answer follows)
+    case '/compact':
+      return rest ? undefined : null // (the compaction's own line says it)
+    case '/exit':
+    case '/quit':
+      return said(t('convo.cmd.exit'), 'exit')
+    case '/clear':
+      return said(t('convo.cmd.clear'), 'clear')
+    case '/restart':
+      return said(t('convo.cmd.restart'), 'restart')
+    case '/rename':
+      return rest ? said(t('convo.cmd.renamed', { name: rest }), 'rename') : null
+  }
+  return undefined
+}
+// (Commands whose answer, right after, says what they did, given words or not.)
+const ANSWERED = new Set(['/model', '/effort', '/exit', '/quit', '/compact', '/rename', '/restart', '/clear'])
+export function commandsOnce(entries: ConvoEntry[]): ConvoEntry[] {
   let out: ConvoEntry[] | null = null
   const dropped = new Set<number>()
+  const put = (i: number, ev: ConvoEvent | null) => {
+    out ??= [...entries]
+    if (ev) out[i] = { ...entries[i], role: 'note', parts: [{ kind: 'event', event: ev }] }
+    else dropped.add(i)
+  }
   for (let i = 0; i < entries.length; i++) {
     const e = entries[i]
-    const said = e.role === 'user' ? e.parts[0]?.text?.trim() : undefined
-    if (said !== undefined && /^\/model(\s|$)/.test(said) && e.parts.length === 1) {
+    if (e.parts.length !== 1 || e.gone) continue
+    const text = e.parts[0]?.text?.trim()
+    if (e.role === 'user' && text && /^\/[a-z][\w-]*(\s|$)/.test(text) && e.parts[0].kind === 'text') {
+      const [cmd, ...more] = text.split(/\s+/)
+      const ev = commandEvent(cmd, more.join(' '))
+      // (Its answer, right after: the line, the command's place taken by it —
+      // "/model opus" and its "Set model to opus" as much as a bare one.)
       const after = entries[i + 1]
-      const ev = after?.role === 'note' ? modelEvent(after.parts[0]?.text) : undefined
-      if (ev || said === '/model') {
-        out ??= [...entries]
-        dropped.add(i)
-        if (ev) out[i + 1] = { ...after, parts: [{ kind: 'event', event: ev }] }
-        if (ev) i++
-      }
+      const answer = after?.role === 'note' && after.parts.length === 1 ? noteEvent(after.parts[0]?.text) : undefined
+      if (ev === undefined && (answer === undefined || !ANSWERED.has(cmd))) continue
+      if (answer !== undefined) {
+        put(i, null)
+        put(i + 1, answer ?? ev ?? null)
+        i++
+      } else if (ev !== undefined) put(i, ev)
       continue
     }
-    // (Its answer alone — the command not in what was read: the line all the same.)
-    const ev = e.role === 'note' && e.parts.length === 1 ? modelEvent(e.parts[0]?.text) : undefined
-    if (ev) {
-      out ??= [...entries]
-      out[i] = { ...e, parts: [{ kind: 'event', event: ev }] }
+    if (e.role === 'note' && e.parts[0].kind === 'text') {
+      const ev = noteEvent(text)
+      if (ev !== undefined) put(i, ev)
     }
   }
-  return out ? out.filter((_, i) => !dropped.has(i)) : entries
+  return out ? (out as ConvoEntry[]).filter((_, i) => !dropped.has(i)) : entries
 }
 
 export function items(entriesIn: ConvoEntry[], live: boolean, moving: boolean): Item[] {
-  const entries = modelOnce(goalOnce(entriesIn))
+  const entries = commandsOnce(goalOnce(entriesIn))
   const out: Item[] = []
   const merged = mergeNotes(entries)
   let turn: { from?: string; steps: Step[]; to?: string; key: string } | null = null
