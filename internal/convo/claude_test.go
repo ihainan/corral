@@ -759,6 +759,42 @@ func TestClaudeRunning(t *testing.T) {
 	}
 }
 
+// A Monitor watches something in the background (Claude Code's footer: "1
+// monitor"): it is there, its latest event with it, until it ends, is
+// stopped, or runs out of time (said as an event, with no status).
+func TestClaudeRunningMonitor(t *testing.T) {
+	mon := func(id, call string) []byte {
+		return lines(
+			`{"type":"assistant","uuid":"a`+id+`","message":{"content":[{"type":"tool_use","id":"`+call+`","name":"Monitor","input":{"description":"审查第一轮 (PID 4073646)","timeout_ms":1800000,"command":"while kill -0 4073646; do sleep 20; done"}}]}}`,
+			`{"type":"user","uuid":"r`+id+`","timestamp":"2026-11-14T01:00:52Z","message":{"content":[{"type":"tool_result","tool_use_id":"`+call+`","content":"Monitor started (task `+id+`, expires in 30m unless the source ends first)."}]},"toolUseResult":{"taskId":"`+id+`","timeoutMs":1800000,"persistent":false}}`,
+		)
+	}
+	notice := func(id, body string) []byte {
+		return lines(`{"type":"attachment","uuid":"n` + id + `","attachment":{"type":"queued_command","commandMode":"task-notification","prompt":"<task-notification>\n<task-id>` + id + `</task-id>\n` + body + `\n</task-notification>"}}`)
+	}
+	c := NewClaude()
+	c.Feed(mon("m1", "t1"))
+	c.Feed(mon("m2", "t2"))
+	c.Feed(mon("m3", "t3"))
+	if r := c.Running(); len(r) != 3 || r[0].ID != "m1" || r[0].What != "审查第一轮 (PID 4073646)" || r[0].Kind != "cmd" || r[0].Cmd == "" || r[0].Time != "2026-11-14T01:00:52Z" {
+		t.Fatalf("running: %+v", r)
+	}
+	c.Feed(notice("m1", `<summary>Monitor event: \"审查第一轮\"</summary>\n<event>gpt done</event>`))
+	if r := c.Running(); len(r) != 3 || r[0].Note != "gpt done" {
+		t.Errorf("an event: %+v", r)
+	}
+	c.Feed(notice("m1", `<status>completed</status>\n<summary>Monitor \"审查第一轮\" stream ended</summary>`))
+	c.Feed(notice("m2", `<summary>Monitor event: \"审查第一轮\"</summary>\n<event>[Monitor expired after 30m with 2 events delivered. Re-arm it if you still need the watch.]</event>`))
+	if r := c.Running(); len(r) != 1 || r[0].ID != "m3" {
+		t.Errorf("ended, expired: %+v", r)
+	}
+	// (An event that only quotes an expiry, not at its start: still going.)
+	c.Feed(notice("m3", `<summary>Monitor event: \"审查第一轮\"</summary>\n<event>log: [Monitor expired] seen</event>`))
+	if r := c.Running(); len(r) != 1 {
+		t.Errorf("quoted: %+v", r)
+	}
+}
+
 // A command that changed more than there is room to keep: the lines it
 // changed are still counted whole, and the files left without a patch say
 // there was more of it.

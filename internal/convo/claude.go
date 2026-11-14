@@ -2157,6 +2157,7 @@ func (c *Claude) setGoing(t *Tool, account json.RawMessage, at, said string, cal
 	}
 	var a struct {
 		Background string `json:"backgroundTaskId"`
+		Task       string `json:"taskId"` // (a Monitor's: what it watches runs in the background)
 		Agent      string `json:"agentId"`
 		Async      bool   `json:"isAsync"`
 		Status     string `json:"status"`
@@ -2170,6 +2171,8 @@ func (c *Claude) setGoing(t *Tool, account json.RawMessage, at, said string, cal
 	switch {
 	case a.Background != "":
 		id = a.Background
+	case a.Task != "" && t.Name == "Monitor":
+		id = a.Task
 	case a.Async && a.Agent != "" && a.Status != "completed":
 		id, kind = a.Agent, "agent"
 	case a.Resumed != "" && t.Name == "SendMessage":
@@ -2236,6 +2239,9 @@ func (c *Claude) ended(s string) {
 	var note string
 	if ev := taskEvent.FindStringSubmatch(s); ev != nil {
 		note = clip(clean(strings.TrimSpace(ev[1])), maxTitle)
+		// (A Monitor that ran out of time says so as one of its events,
+		// with no status: it is over all the same.)
+		over = over || monitorExpired.MatchString(strings.TrimSpace(ev[1]))
 	}
 	for _, m := range ids {
 		id := clip(strings.TrimSpace(m[1]), maxID)
@@ -2583,7 +2589,9 @@ var (
 	taskID       = regexp.MustCompile(`(?s)<task-id>(.*?)</task-id>`)
 	crossSession = regexp.MustCompile(`^\s*<cross-session-message[^>]*\bfrom-name="([^"]*)"`)
 	taskEvent    = regexp.MustCompile(`(?s)<event>(.*?)</event>`)
-	taskOutFile  = regexp.MustCompile(`(?s)<output-file>(.*?)</output-file>`)
+	// "[Monitor expired after 30m with 2 events delivered. Re-arm it if you still need the watch.]"
+	monitorExpired = regexp.MustCompile(`^\[Monitor expired\b`)
+	taskOutFile    = regexp.MustCompile(`(?s)<output-file>(.*?)</output-file>`)
 	// (A command set going in the background: "Output is being written to: /tmp/…/tasks/<id>.output. You will…")
 	bgOutFile     = regexp.MustCompile(`Output is being written to: (/\S+?)\.?(?:\s|$)`)
 	commandName   = regexp.MustCompile(`(?s)<command-name>(.*?)</command-name>`)
