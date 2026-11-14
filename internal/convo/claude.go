@@ -1166,6 +1166,7 @@ func (c *Claude) user(r *claudeRow) {
 		images = images || b.Type == "image"
 	}
 	var parts, notes []Part
+	pics := 0 // (the pictures of the row so far: which one each is, to be had again, ImageOf)
 	c.resultAt = clip(r.Timestamp, 64)
 	defer func() { c.resultAt = "" }()
 	for _, b := range blocks {
@@ -1203,7 +1204,8 @@ func (c *Claude) user(r *claudeRow) {
 				notes = append(notes, textPart(KindText, text))
 			}
 		case "image":
-			parts = append(parts, Part{Kind: KindImage})
+			parts = append(parts, Part{Kind: KindImage, From: imageFrom(r.UUID, pics)})
+			pics++
 		}
 	}
 	if r.IsCompactSummary { // (the summary written as a session was compacted, as blocks)
@@ -1519,6 +1521,7 @@ func (c *Claude) queued(r *claudeRow) {
 		images = images || b.Type == "image"
 	}
 	var parts []Part
+	pics := 0
 	for _, b := range blocks {
 		switch b.Type {
 		case "text":
@@ -1531,7 +1534,8 @@ func (c *Claude) queued(r *claudeRow) {
 				}
 			}
 		case "image":
-			parts = append(parts, Part{Kind: KindImage})
+			parts = append(parts, Part{Kind: KindImage, From: imageFrom(r.UUID, pics)})
+			pics++
 		}
 	}
 	n := len(c.entries)

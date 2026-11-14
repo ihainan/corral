@@ -152,6 +152,10 @@ type Part struct {
 	Event     *Event   `json:"event,omitempty"`
 	Shell     *Shell   `json:"shell,omitempty"`
 	Path      string   `json:"path,omitempty"` // (an image the person sent) the file it came from, where told
+	// (An image the person sent) where in the log it is, to be had again
+	// (ImageOf): "<its row's uuid>.<which of the row's pictures, from 0>".
+	// Claude Code's only; the image itself is left out of what is read.
+	From string `json:"from,omitempty"`
 }
 
 // Shell is what a shell command the person ran with "!" printed: its
