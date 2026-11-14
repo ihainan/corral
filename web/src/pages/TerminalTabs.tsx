@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Activity, Bot, Check, MessageCircleReply, Plus } from 'lucide-react'
+import { Activity, Bot, Check, MessageCircleReply, Plus, X } from 'lucide-react'
 import { AgentsChat } from './AgentsChat'
 import { api, authGen, choiceOf, probeBootstrap, type OpenChoice, type SessionInfo } from '../api'
 import { sessionWhich } from '../terminal/sessionName'
@@ -8,7 +8,7 @@ import { t } from '../i18n'
 import { local } from '../storage'
 import { navigate } from '../router'
 import { agentsAddress, takeTabs } from '../notifyopen'
-import { useToast } from '../components/ui'
+import { Confirm, useToast } from '../components/ui'
 import { estimateSize, useConnect } from '../connect'
 import type { TabInfo } from './Terminal'
 import { TerminalPage } from './lazyPages'
@@ -468,7 +468,9 @@ export function TerminalTabs({ current }: { current: string }) {
     load()
   }
 
-  const bar = <TabBar tabs={tabs} current={current} infos={infos} onNew={() => setNewOpen(true)} onMove={move} />
+  // Closing a tab ends its session (no key does: see above): asked first, as the terminal's own "end session" is.
+  const [closing, setClosing] = useState<SessionInfo | null>(null)
+  const bar = <TabBar tabs={tabs} current={current} infos={infos} onNew={() => setNewOpen(true)} onMove={move} onClose={setClosing} />
   // (The tab shown is drawn in the same frame as the one left goes: not a
   // frame later, once the effect above has mounted it — a frame of neither,
   // the page's own background, flashed between them.)
@@ -491,6 +493,19 @@ export function TerminalTabs({ current }: { current: string }) {
         />
       )}
       {dialogs}
+      {closing && (
+        <Confirm
+          title={t('term.closeSession')}
+          body={t('tabs.closeConfirm', { name: (closing.host_name ?? '') + ' · ' + sessionWhich(closing, tabs) })}
+          confirm={t('term.closeSession')}
+          danger
+          onClose={() => setClosing(null)}
+          onConfirm={async () => {
+            await api('DELETE', '/api/sessions/' + closing.id)
+            endTab(closing.id)
+          }}
+        />
+      )}
     </>
   )
 }
@@ -684,7 +699,7 @@ function useTabDrag(nav: React.RefObject<HTMLElement | null>, ids: string[], cur
   return { drag, onPointerDown, offset, dragged, moved }
 }
 
-function TabBar(p: { tabs: SessionInfo[]; current: string; infos: Record<string, TabInfo>; onNew: () => void; onMove: (id: string, to: number) => void }) {
+function TabBar(p: { tabs: SessionInfo[]; current: string; infos: Record<string, TabInfo>; onNew: () => void; onMove: (id: string, to: number) => void; onClose: (s: SessionInfo) => void }) {
   const ref = useRef<HTMLElement>(null)
   // (The tab of a session just opened, not in the list yet, stays last.)
   const movable = p.tabs.filter((s) => s.host_id !== 0).map((s) => s.id)
@@ -765,15 +780,23 @@ function TabBar(p: { tabs: SessionInfo[]; current: string; infos: Record<string,
         const j = movable.indexOf(s.id)
         const dx = j < 0 ? 0 : offset(j)
         return (
-          <button
+          // (A tab and its close, side by side: the close is not inside the
+          // button that goes to it — 11-14, closing one asked a menu before.)
+          <div
             key={s.id}
-            type="button"
-            className={'term-tab' + (drag?.id === s.id ? ' held' : '')}
+            className={'term-tab has-x' + (drag?.id === s.id ? ' held' : '')}
             data-place={j < 0 ? undefined : j}
             style={dx ? { transform: `translateX(${dx}px)` } : undefined}
             aria-current={s.id === p.current ? 'page' : undefined}
             title={tip}
             onPointerDown={j < 0 ? undefined : (e) => onPointerDown(e, s.id, j)}
+            // (The middle button closes it, as a browser's tab — asked first, as the close is.)
+            onAuxClick={(e) => e.button === 1 && s.host_name && (e.preventDefault(), p.onClose(s))}
+          >
+          <button
+            type="button"
+            className="term-tab-main"
+            aria-current={s.id === p.current ? 'page' : undefined}
             onClick={() => !dragged() && s.id !== p.current && navigate('/t/' + s.id, true)}
           >
             {/* (A connection's trouble before agents at work: it is the one to see to.) */}
@@ -803,6 +826,19 @@ function TabBar(p: { tabs: SessionInfo[]; current: string; infos: Record<string,
               </span>
             )}
           </button>
+          {s.host_name && (
+            <button
+              type="button"
+              className="term-tab-x"
+              aria-label={t('tabs.closeTab', { name: s.host_name + ' · ' + which(s) })}
+              title={t('tabs.close')}
+              onPointerDown={(e) => e.stopPropagation()}
+              onClick={() => p.onClose(s)}
+            >
+              <X size={14} aria-hidden="true" />
+            </button>
+          )}
+          </div>
         )
       })}
     </nav>
