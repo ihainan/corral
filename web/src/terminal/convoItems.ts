@@ -116,7 +116,11 @@ export function noteEvent(text: string | undefined): ConvoEvent | null | undefin
   if (BYE.test(s)) return said(t('convo.cmd.exit'), 'exit')
   if (/^Compacted\b/.test(s)) return null
   if ((m = /^Session renamed to:\s*(.+)$/.exec(s))) return said(t('convo.cmd.renamed', { name: m[1].trim() }), 'rename')
-  if ((m = /^Monitor event:\s*"(.+)"$/s.exec(s))) return said(t('convo.cmd.monitorEvent', { what: m[1] }), 'monitor')
+  // (Its event under its first line, where the gateway kept it — aaf62bd: "gpt done", a few lines at most.)
+  if ((m = /^Monitor event:\s*"(.+?)"[ \t]*(?:\n([\s\S]*))?$/.exec(s))) {
+    const ev = m[2]?.trim().split(/\s*\n\s*/).filter(Boolean).join(' · ')
+    return said(ev ? t('convo.cmd.monitorSaid', { what: m[1], ev }) : t('convo.cmd.monitorEvent', { what: m[1] }), 'monitor')
+  }
   if ((m = /^Monitor "(.+)" stream ended$/s.exec(s))) return said(t('convo.cmd.monitorEnded', { what: m[1] }), 'monitor')
   if ((m = /^(?:(\d+) background shell command tasks|Background shell command) didn't finish before the previous session ended/.exec(s))) return said(t('convo.cmd.bgLeft', { n: m[1] ?? '1' }), 'bg')
   if ((m = /^Background command "(.+)" was stopped because the system is running low on memory$/s.exec(s))) return said(t('convo.cmd.bgLowMemory', { what: m[1] }), 'bg', true)
