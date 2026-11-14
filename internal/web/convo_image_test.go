@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -63,15 +64,17 @@ func TestPicturesOf(t *testing.T) {
 }
 
 // The command finds the row by its own uuid: not one that hangs on it
-// (parentUuid), nor one that quotes it in its words, though either comes
-// first; a uuid and a path with quotes in them stay one argument each.
+// (parentUuid), nor one that quotes it in its words, nor one with it in an
+// object of its own (a tool's input), though each comes first; written in
+// upper case, it is still found. A path with a quote stays one argument.
 func TestImageRowCommand(t *testing.T) {
 	dir := t.TempDir()
 	log := filepath.Join(dir, "it's a log.jsonl")
 	rows := []string{
 		`{"type":"user","uuid":"11111111-2222-3333-4444-555555555555","parentUuid":"` + imgUUID + `"}`,
 		`{"type":"user","uuid":"22222222-2222-3333-4444-555555555555","message":{"content":"see \"uuid\":\"` + imgUUID + `\""}}`,
-		imgRow(imgUUID, imgBlock("image/png", pngBytes)),
+		`{"type":"assistant","uuid":"33333333-2222-3333-4444-555555555555","message":{"content":[{"type":"tool_use","input":{"uuid":"` + imgUUID + `"}}]}}`,
+		imgRow(strings.ToUpper(imgUUID), imgBlock("image/png", pngBytes)),
 		imgRow(imgUUID, imgBlock("image/jpeg", jpgBytes)),
 	}
 	if err := os.WriteFile(log, []byte(strings.Join(rows, "\n")+"\n"), 0o600); err != nil {
@@ -81,10 +84,7 @@ func TestImageRowCommand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.TrimSpace(string(out)) != rows[2] {
-		t.Fatalf("found: %.120s", out)
-	}
-	p, err := picturesOf(out, imgUUID)
+	p, err := rowsPictures(out, imgUUID)
 	if err != nil || len(p.pics) != 1 || p.kinds[0] != "image/png" {
 		t.Errorf("%v %+v", err, p)
 	}
@@ -129,7 +129,7 @@ func TestImageStore(t *testing.T) {
 		t.Errorf("kept: %v %d", err, reads.Load())
 	}
 	// (Past the bound: the oldest let go.)
-	big := imageKeptMax - 5
+	big := imageKeptMax - 2*imageRowCost
 	if _, err := st.of(context.Background(), imageKey{"s", "/l.jsonl", "b"}, read(big)); err != nil {
 		t.Fatal(err)
 	}
@@ -137,8 +137,21 @@ func TestImageStore(t *testing.T) {
 	_, still := st.kept[k1]
 	size := st.size
 	st.mu.Unlock()
-	if still || size != big {
+	if still || size != big+imageRowCost {
 		t.Errorf("still kept %v, size %d", still, size)
+	}
+	// (Rows with no picture: kept, but no more of them than the bound.)
+	for i := range imageKeptRows + 10 {
+		k := imageKey{"s", "/l.jsonl", "empty" + strconv.Itoa(i)}
+		if _, err := st.of(context.Background(), k, func(context.Context) (*imagePics, error) { return &imagePics{}, nil }); err != nil {
+			t.Fatal(err)
+		}
+	}
+	st.mu.Lock()
+	rows, kept := len(st.order), len(st.kept)
+	st.mu.Unlock()
+	if rows > imageKeptRows || kept > imageKeptRows {
+		t.Errorf("rows kept: %d, %d", rows, kept)
 	}
 	// (Failed: not kept, read again next time.)
 	k3 := imageKey{"s", "/l.jsonl", "c"}

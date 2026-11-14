@@ -1,9 +1,11 @@
 package web
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -21,12 +23,16 @@ import (
 // by its uuid (grep, the first line naming it so: a row is written before
 // any that hangs on it), checked to be that row, and the picture taken out
 // as the parser counts them. Only pictures, of the kinds a page shows;
-// the same one asked for at once is read once, and those read lately kept.
+// the same one asked for at once is read once, and those read lately kept
+// (here, not by the browser: see the answer's Cache-Control).
 
 const (
 	imageLineMax   = convoLongScan // (a row read for its pictures, at most)
 	imageReadLimit = 20 * time.Second
 	imageKeptMax   = 48 << 20 // (bytes of pictures kept, at most)
+	imageKeptRows  = 256      // (rows kept, at most: one with no picture to give costs little, but not nothing)
+	imageRowCost   = 1 << 10  // (what a row kept counts for, besides its pictures)
+	imageRowsTried = 4        // (lines naming the uuid looked at, the first that is the row taken)
 )
 
 // imageKinds: the kinds of picture given, as their bytes say they are.
@@ -83,15 +89,15 @@ func (st *imageStore) of(ctx context.Context, k imageKey, read func(context.Cont
 	cancel()
 	st.mu.Lock()
 	delete(st.going, k)
-	if g.err == nil && g.pics.size <= imageKeptMax {
+	if g.err == nil && g.pics.size+imageRowCost <= imageKeptMax {
 		st.kept[k] = g.pics
 		st.order = append(st.order, k)
-		st.size += g.pics.size
-		for st.size > imageKeptMax && len(st.order) > 0 {
+		st.size += g.pics.size + imageRowCost
+		for (st.size > imageKeptMax || len(st.order) > imageKeptRows) && len(st.order) > 0 {
 			old := st.order[0]
 			st.order = st.order[1:]
 			if p := st.kept[old]; p != nil {
-				st.size -= p.size
+				st.size -= p.size + imageRowCost
 				delete(st.kept, old)
 			}
 		}
@@ -101,11 +107,27 @@ func (st *imageStore) of(ctx context.Context, k imageKey, read func(context.Cont
 	return g.pics, g.err
 }
 
-// imageRowCommand prints the first line of log naming uuid as a row's own
-// ("uuid":"<uuid>"; parentUuid and the like are not that). Fixed command;
-// the validated uuid and the located log, quoted.
+// imageRowCommand prints the first lines of log naming uuid as a "uuid"
+// (parentUuid and the like are not that; one inside another's object may
+// be, so more than one is looked at: rowOf takes the row's own). Its case
+// as the log writes it, whatever it is. Fixed command; the validated uuid
+// and the located log, quoted.
 func imageRowCommand(log, uuid string) string {
-	return "grep -m 1 -F -e " + sshx.QuoteShell(`"uuid":"`+uuid+`"`) + " -- " + sshx.QuoteShell(log)
+	return "grep -m " + strconv.Itoa(imageRowsTried) + " -i -F -e " + sshx.QuoteShell(`"uuid":"`+uuid+`"`) + " -- " + sshx.QuoteShell(log)
+}
+
+// rowsPictures: of the lines grep printed, the pictures of the first that
+// is the row of uuid (convo.ErrNoImage where none is).
+func rowsPictures(out []byte, uuid string) (*imagePics, error) {
+	for _, line := range bytes.Split(out, []byte("\n")) {
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
+		if p, err := picturesOf(line, uuid); err == nil {
+			return p, nil
+		}
+	}
+	return nil, convo.ErrNoImage
 }
 
 // picturesOf takes the pictures out of a row: only those whose bytes are
@@ -168,7 +190,7 @@ func (s *Server) apiConversationImage(w http.ResponseWriter, r *http.Request) {
 			}
 			return nil, err
 		}
-		return picturesOf(out, uuid)
+		return rowsPictures(out, uuid)
 	})
 	if err != nil {
 		if errors.Is(err, convo.ErrNoImage) {
@@ -189,6 +211,8 @@ func (s *Server) apiConversationImage(w http.ResponseWriter, r *http.Request) {
 	h.Set("Content-Type", pics.kinds[n])
 	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("Content-Security-Policy", "default-src 'none'; sandbox")
-	h.Set("Cache-Control", "private, max-age=604800, immutable") // (a row's pictures never change)
+	// (Not kept by the browser: one signed in after on it would be shown
+	// it without asking. Asked again, it is kept here.)
+	h.Set("Cache-Control", "private, no-store")
 	_, _ = w.Write(pics.pics[n])
 }
