@@ -167,11 +167,57 @@ const told = () => listeners.forEach((f) => f())
 export function noteSessions(all: SessionInfo[] | null, at = 0) {
   if (all === null) listFailed = true
   else {
-    lastList = all.filter((x) => x.state === 'running')
+    rawList = all.filter((x) => x.state === 'running')
+    lastList = withExpected(rawList)
     markRead(lastList, at)
     listFailed = false
   }
   told()
+}
+
+// A change asked for here and answered, shown at once — not when the next
+// read of the list, seconds later, says it (11-14: a name given, the list
+// and the title said the old one for three seconds). Laid over each list
+// read until one says it of itself (seen), or for a while at most; the list
+// is read again at once.
+type Expect = { id: string; apply: (s: SessionInfo) => SessionInfo; seen: (s: SessionInfo) => boolean; until: number }
+let expects: Expect[] = []
+let rawList: SessionInfo[] | null = null
+const EXPECT_MS = 15000
+function withExpected(list: SessionInfo[]): SessionInfo[] {
+  const now = Date.now()
+  expects = expects.filter((x) => {
+    const s = list.find((y) => y.id === x.id)
+    return x.until > now && !!s && !x.seen(s)
+  })
+  if (!expects.length) return list
+  return list.map((s) => expects.reduce((acc, x) => (x.id === s.id ? x.apply(acc) : acc), s))
+}
+const readNow = new Set<() => void>()
+export function expectSession(id: string, apply: (s: SessionInfo) => SessionInfo, seen: (s: SessionInfo) => boolean) {
+  expects.push({ id, apply, seen, until: Date.now() + EXPECT_MS })
+  if (rawList) {
+    lastList = withExpected(rawList)
+    markRead(lastList, listReadAt.get(rawList) ?? 0)
+  }
+  told()
+  readNow.forEach((f) => f())
+}
+
+// herdr's names, as a rename gives them: a workspace's, a tab's, a pane's.
+export function renamedHerdr(s: SessionInfo, ws?: { id: string; label: string }, tab?: { id: string; label: string }, pane?: { id: string; label: string }): SessionInfo {
+  if (s.meta?.t !== 'herdr') return s
+  return {
+    ...s,
+    meta: {
+      ...s.meta,
+      workspaces: s.meta.workspaces.map((w) => ({
+        ...w,
+        label: ws && w.id === ws.id ? ws.label : w.label,
+        agents: w.agents.map((a) => ({ ...a, tab_label: tab && a.tab === tab.id ? tab.label : a.tab_label, label: pane && a.pane_id === pane.id ? pane.label : a.label })),
+      })),
+    },
+  }
 }
 
 // The agents waiting for an answer in these sessions, each counted once
@@ -255,6 +301,12 @@ export const knownSession = (id: string): SessionInfo | null => lastList?.find((
 export function useRunningSessions(on: boolean, every = 3000): { sessions: SessionInfo[] | null; failed: boolean } {
   const [sessions, setSessions] = useState<SessionInfo[] | null>(() => lastList)
   const [failed, setFailed] = useState(false)
+  // (A change laid over the list here, or read by another: shown as it is.)
+  useEffect(() => {
+    const f = () => setSessions(lastList)
+    listeners.add(f)
+    return () => void listeners.delete(f)
+  }, [])
   useEffect(() => {
     if (!on) return
     let stopped = false
@@ -290,11 +342,19 @@ export function useRunningSessions(on: boolean, every = 3000): { sessions: Sessi
         load()
       }
     }
+    // (A change just asked for: read again at once, to see it said.)
+    const now = () => {
+      if (asking) return
+      clearTimeout(timer)
+      load()
+    }
+    readNow.add(now)
     document.addEventListener('visibilitychange', onVisible)
     load()
     return () => {
       stopped = true
       clearTimeout(timer)
+      readNow.delete(now)
       document.removeEventListener('visibilitychange', onVisible)
     }
   }, [on, every])

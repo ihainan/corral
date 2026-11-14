@@ -3,6 +3,7 @@ import { GitBranch, TextCursorInput } from 'lucide-react'
 import { api, ApiError, errorText } from '../api'
 import { t } from '../i18n'
 import { Dialog } from '../components/ui'
+import { expectSession, renamedHerdr } from './agents'
 
 // What the conversation page does to an agent's place rather than to its
 // conversation: a copy of the conversation started in a workspace of its
@@ -128,15 +129,32 @@ export function RenameDialog({ target, onClose }: { target: RenameTarget; onClos
     setError('')
     // (One after another: herdr answers one request per connection, and a
     // name taken is not undone if a later one fails — what failed is said.)
+    const show = (done: typeof changes) => {
+      const got = (action: string) => done.find((c) => c.action === action)?.label
+      const w = got('rename_workspace'), tb = got('rename_tab'), p = got('rename_pane')
+      if (w === undefined && tb === undefined && p === undefined) return
+      // (The names given, shown at once in the list and the title: herdr's own list says them a few seconds later.)
+      expectSession(
+        target.sessionId,
+        (s) => renamedHerdr(s, w !== undefined ? { id: target.ws.id, label: w } : undefined, tb !== undefined && target.tab ? { id: target.tab.id, label: tb } : undefined, p !== undefined ? { id: target.pane.id, label: p } : undefined),
+        (s) =>
+          s.meta?.t === 'herdr' &&
+          s.meta.workspaces.some((x) => x.id === target.ws.id && (w === undefined || x.label === w) && x.agents.some((a) => a.pane_id === target.pane.id && (p === undefined || (a.label ?? '') === p) && (tb === undefined || a.tab_label === tb))),
+      )
+    }
+    const done: typeof changes = []
     for (const c of changes) {
       try {
         await api('POST', `/api/sessions/${target.sessionId}/herdr`, c)
+        done.push(c)
       } catch (err) {
+        show(done) // (what was named before it failed: so named)
         setError(t('rename.failed', { what: t(`rename.${c.action}` as 'rename.rename_workspace'), why: err instanceof ApiError && err.code === 'herdr_busy' ? t('herdr.busy') : errorText(err) }))
         setBusy(false)
         return
       }
     }
+    show(done)
     onClose()
   }
   const close = () => !busy && onClose()
