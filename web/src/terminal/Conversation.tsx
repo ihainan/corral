@@ -1,5 +1,5 @@
 import { createContext, Fragment, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { ArrowDown, ArrowUp, Check, Copy, FileText, FolderOpen, Info, Image as ImageIcon, ImageOff, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, Clock, Download, Eye, GitBranch, Keyboard, ListOrdered, Loader, MoreHorizontal, MoreVertical, PanelLeft, Pin, RotateCw, Search, TriangleAlert, X, Plus } from 'lucide-react'
+import { ArrowDown, ArrowUp, Check, Copy, Cpu, FileText, FolderOpen, Info, Image as ImageIcon, ImageOff, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, Clock, Download, Eye, GitBranch, Keyboard, ListOrdered, Loader, MoreHorizontal, MoreVertical, PanelLeft, Pin, RotateCw, Search, TriangleAlert, X, Plus } from 'lucide-react'
 import { t, getLang, type I18nKey } from '../i18n'
 import { api } from '../api'
 import { asHeld, dayStart, FOLDED, foldAt, GROUPS, inGroup, listOrder, pinned, type ConvoListRow, type RowCmds } from './agentOrder'
@@ -3876,6 +3876,18 @@ function EventNote({ ev, idle, sum }: { ev: ConvoEvent; idle?: boolean; sum?: Co
       </div>
     )
   }
+  // A model set (or kept) with /model, here or in the terminal: one line (convoItems modelOnce).
+  if (ev.kind === 'model') {
+    const what = [ev.model ? modelName(ev.model) : '', ev.effort ? t('convo.model.effort', { e: effortName(ev.effort) }) : ''].filter(Boolean).join(' · ') // (as the chip says it)
+    return (
+      <div className="convo-event is-limit is-model">
+        <Cpu size={14} aria-hidden="true" />
+        <div className="convo-trouble-body">
+          <p className="convo-trouble-head">{t(ev.kept ? 'convo.model.kept' : ev.session ? 'convo.model.setSession' : 'convo.model.set', { m: what })}</p>
+        </div>
+      </div>
+    )
+  }
   // The plan's usage limit: reached (until when), to go on of itself, reset, called off.
   if (ev.kind === 'limit' || ev.kind === 'limit_wait' || ev.kind === 'limit_reset' || ev.kind === 'limit_cancelled') {
     let head: string
@@ -4718,8 +4730,11 @@ function Work({ it, open, onToggle, onCopy }: { it: Extract<Item, { kind: 'work'
   // (Under way while the agent is not at work: it waits for the person, to
   // be let run it or to be answered — not running, not for that long.)
   const asks = !!busy && !it.moving
+  // (At work between its steps — "Working", no step under way: the same
+  // light over its word as over a step's, not a word that looks left behind. 11-14.)
+  const between = !busy && !!it.live && !thought && !sum
   const [shine, setShine] = useState<HTMLSpanElement | null>(null)
-  useRunWhileSeen(shine, !!busy && !asks)
+  useRunWhileSeen(shine, (!!busy && !asks) || between)
   // Shut, what is said of it without opening: the subagents it sent off, by
   // name, each to be read; and with calls beside it the last of what it
   // thought, a line (at most one for a run, however long it thought).
@@ -4744,7 +4759,7 @@ function Work({ it, open, onToggle, onCopy }: { it: Extract<Item, { kind: 'work'
   if (!shows)
     return (
       <div className="convo-work" data-work={it.key}>
-        <div className={'convo-work-head is-static' + (busy && !asks ? ' is-live' : '')}>
+        <div className={'convo-work-head is-static' + ((busy && !asks) || between ? ' is-live' : '')}>
           <Mark size={16} strokeWidth={1.75} className="convo-step-ic" aria-hidden="true" />
           {busy && asks ? (
             <span className="convo-work-text is-live is-asking">
@@ -4756,6 +4771,10 @@ function Work({ it, open, onToggle, onCopy }: { it: Extract<Item, { kind: 'work'
               <span ref={setShine} className="convo-shimmer">{busy.tool ? liveText(busy.tool) : t('convo.live.thinking')}</span>
               {since > 0 && now >= since && <span className="convo-live-time">{duration(now - since)}</span>}
             </span>
+          ) : between ? (
+            <span className="convo-work-text is-live">
+              <span ref={setShine} className="convo-shimmer">{head}</span>
+            </span>
           ) : (
             <span className="convo-work-text">{head || sum}</span>
           )}
@@ -4764,7 +4783,7 @@ function Work({ it, open, onToggle, onCopy }: { it: Extract<Item, { kind: 'work'
     )
   return (
     <div className="convo-work" data-work={it.key}>
-      <button type="button" className={'convo-work-head' + (busy && !asks ? ' is-live' : '') + (!busy && failed > 0 ? ' is-failed' : '')} aria-expanded={open} onClick={() => onToggle(it.key, !open)} title={isTouchOnly ? undefined : t(open ? (mac ? 'convo.foldHint' : 'convo.foldHintPlain') : mac ? 'convo.openHint' : 'convo.openHintPlain')}>
+      <button type="button" className={'convo-work-head' + ((busy && !asks) || between ? ' is-live' : '') + (!busy && failed > 0 ? ' is-failed' : '')} aria-expanded={open} onClick={() => onToggle(it.key, !open)} title={isTouchOnly ? undefined : t(open ? (mac ? 'convo.foldHint' : 'convo.foldHintPlain') : mac ? 'convo.openHint' : 'convo.openHintPlain')}>
         <Mark size={16} strokeWidth={1.75} className="convo-step-ic" aria-hidden="true" />
         {busy && asks ? (
           <span className="convo-work-text is-live is-asking">
@@ -4782,7 +4801,7 @@ function Work({ it, open, onToggle, onCopy }: { it: Extract<Item, { kind: 'work'
           <span className={'convo-work-text' + (thought ? ' is-thought' : '')}>
             {/* (Thinking: the mark says it was; the words are its first line.) */}
             {thought && thoughtTitle(thought.text ?? '') && <span className="sr-only">{head} </span>}
-            {thought ? thoughtTitle(thought.text ?? '') || head : head || sum}
+            {thought ? thoughtTitle(thought.text ?? '') || head : between ? <span ref={setShine} className="convo-shimmer">{head}</span> : head || sum}
             {failed > 0 && (
               <>
                 {t('convo.sep')}

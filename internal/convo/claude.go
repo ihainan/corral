@@ -1903,7 +1903,15 @@ func (c *Claude) modelSet(text string) {
 	if name != "" {
 		c.meta.Model = clip(name, maxMeta)
 	}
+	// "… for this session only with `high` effort" (the model menu's effort
+	// line, set with it): the effort shown too, until the next answer names
+	// its own. Not said: left as it was.
+	if e := modelSetEffort.FindStringSubmatch(text); e != nil {
+		c.meta.Effort = clip(strings.ToLower(e[1]), maxMeta)
+	}
 }
+
+var modelSetEffort = regexp.MustCompile("\\bwith `?([A-Za-z]+)`? effort\\b")
 
 func (c *Claude) setMode(m string) {
 	if m = strings.TrimSpace(clip(m, maxMeta)); m != "" {

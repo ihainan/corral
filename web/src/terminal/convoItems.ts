@@ -1,4 +1,4 @@
-import type { ConvoEntry, ConvoPart, ConvoTool } from './conversation'
+import type { ConvoEntry, ConvoEvent, ConvoPart, ConvoTool } from './conversation'
 
 // The conversation view's list, from the log's entries: no React, no DOM
 // (convoItems.test.mts runs it as it is).
@@ -80,8 +80,52 @@ export function goalOnce(entries: ConvoEntry[]): ConvoEntry[] {
   return out ? out.filter((e) => e.role !== 'note' || e.parts.length > 0) : entries
 }
 
+// A model switched with /model — by hand, or by the model menu here, which
+// goes through it — is told twice: the command, as if the person had said it,
+// and Claude Code's "Set model to `Opus 5.5` for this session only with
+// `high` effort". One line in their place, in the page's words (11-14: the
+// two showed each time, the command over and over where the menu was used).
+// A bare /model with no answer after it (the menu shut on nothing) goes too.
+const MODEL_SET = /^Set model to\s+`?([^`]+?)`?(?=\s+for\s|\s+with\s|\s*\(|\.?\s*$)/
+const MODEL_KEPT = /^Kept model as\s+`?([^`]+?)`?\.?\s*$/
+export function modelEvent(text: string | undefined): ConvoEvent | undefined {
+  const s = text?.trim()
+  if (!s) return undefined
+  const kept = MODEL_KEPT.exec(s)
+  if (kept) return { kind: 'model', model: kept[1], kept: true }
+  const set = MODEL_SET.exec(s)
+  if (!set) return undefined
+  return { kind: 'model', model: set[1], effort: /with\s+`?(\w+)`?\s+effort/.exec(s)?.[1], session: /for this session only/.test(s) }
+}
+export function modelOnce(entries: ConvoEntry[]): ConvoEntry[] {
+  let out: ConvoEntry[] | null = null
+  const dropped = new Set<number>()
+  for (let i = 0; i < entries.length; i++) {
+    const e = entries[i]
+    const said = e.role === 'user' ? e.parts[0]?.text?.trim() : undefined
+    if (said !== undefined && /^\/model(\s|$)/.test(said) && e.parts.length === 1) {
+      const after = entries[i + 1]
+      const ev = after?.role === 'note' ? modelEvent(after.parts[0]?.text) : undefined
+      if (ev || said === '/model') {
+        out ??= [...entries]
+        dropped.add(i)
+        if (ev) out[i + 1] = { ...after, parts: [{ kind: 'event', event: ev }] }
+        if (ev) i++
+      }
+      continue
+    }
+    // (Its answer alone — the command not in what was read: the line all the same.)
+    const ev = e.role === 'note' && e.parts.length === 1 ? modelEvent(e.parts[0]?.text) : undefined
+    if (ev) {
+      out ??= [...entries]
+      out[i] = { ...e, parts: [{ kind: 'event', event: ev }] }
+    }
+  }
+  return out ? out.filter((_, i) => !dropped.has(i)) : entries
+}
+
 export function items(entriesIn: ConvoEntry[], live: boolean, moving: boolean): Item[] {
-  const entries = goalOnce(entriesIn)
+  const entries = modelOnce(goalOnce(entriesIn))
   const out: Item[] = []
   const merged = mergeNotes(entries)
   let turn: { from?: string; steps: Step[]; to?: string; key: string } | null = null

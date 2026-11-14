@@ -87,3 +87,25 @@ func TestReview232ContextThroughPrepend(t *testing.T) {
 		t.Fatalf("context %d", n)
 	}
 }
+
+// /model with the menu's effort line: "with `high` effort" is the effort shown
+// until an answer says its own; a /model that names none leaves it.
+func TestModelSetEffort(t *testing.T) {
+	c := NewClaude()
+	c.Feed([]byte(`{"type":"assistant","uuid":"a1","effort":"medium","message":{"role":"assistant","model":"claude-opus-5-5","content":[{"type":"text","text":"hi"}]}}
+{"type":"user","uuid":"u2","message":{"role":"user","content":"<local-command-stdout>Set model to ` + "`Opus 5.5`" + ` for this session only with ` + "`high`" + ` effort</local-command-stdout>"}}
+`))
+	if m := c.Meta(); m.Model != "Opus 5.5" || m.Effort != "high" {
+		t.Fatalf("after /model with an effort: %+v", m)
+	}
+	c.Feed([]byte(`{"type":"user","uuid":"u3","message":{"role":"user","content":"<local-command-stdout>Set model to ` + "`Sonnet 5.5`" + `</local-command-stdout>"}}
+`))
+	if m := c.Meta(); m.Model != "Sonnet 5.5" || m.Effort != "high" {
+		t.Fatalf("after /model naming no effort: %+v", m)
+	}
+	c.Feed([]byte(`{"type":"assistant","uuid":"a4","effort":"xhigh","message":{"role":"assistant","model":"claude-sonnet-5-5","content":[{"type":"text","text":"ok"}]}}
+`))
+	if m := c.Meta(); m.Effort != "xhigh" {
+		t.Fatalf("after an answer: %+v", m)
+	}
+}

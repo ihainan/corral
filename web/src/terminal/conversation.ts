@@ -102,7 +102,7 @@ export interface ConvoShell {
 // and after; how long it took), a notice that that was while it sat idle,
 // a scheduled task (or a loop's) set a turn going with its prompt.
 export interface ConvoEvent {
-  kind: 'compact' | 'idle_compact' | 'scheduled' | 'limit' | 'limit_wait' | 'limit_reset' | 'limit_cancelled' | 'recap' | 'goal' | 'notice' | 'task'
+  kind: 'compact' | 'idle_compact' | 'scheduled' | 'limit' | 'limit_wait' | 'limit_reset' | 'limit_cancelled' | 'recap' | 'goal' | 'notice' | 'task' | 'model'
   trigger?: string
   pre?: number
   post?: number
@@ -112,6 +112,10 @@ export interface ConvoEvent {
   loop?: boolean
   echo?: boolean // (scheduled) told by the turn's own row: right after its firing, the same turn
   goal?: string // (goal) its condition, set or judged met (or not), and why
+  model?: string // (model: made here, from /model and Claude Code's answer to it) the model set or kept, its effort, for this session only
+  effort?: string
+  session?: boolean
+  kept?: boolean
   set?: boolean
   met?: boolean
   why?: string
