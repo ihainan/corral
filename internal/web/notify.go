@@ -346,13 +346,28 @@ func (s *Server) onHerdrTransition(sess *term.Session, h *store.Host, tr herdr.T
 	if s.notifier == nil {
 		return
 	}
-	agent, agentZh := tr.Pane.Agent, tr.Pane.Agent
+	// Who it is, as the agents list names it — the pane's own name, else
+	// its workspace's — not the program's ("codex 已完成" said nothing of
+	// which, 11-14); the program's name where neither is given, and with
+	// the host under it.
+	prog, progZh := agentProgram(tr.Pane.Agent)
+	agent := strings.TrimSpace(tr.Pane.Label)
+	if agent == "" && tr.Workspace != "~" {
+		agent = strings.TrimSpace(tr.Workspace)
+	}
 	if agent == "" {
-		agent, agentZh = "terminal", "终端"
+		agent = prog
+	}
+	agentZh := agent
+	if agent == prog {
+		agentZh = progZh
 	}
 	where := h.Name
-	if tr.Workspace != "" {
+	if tr.Workspace != "" && tr.Workspace != "~" && tr.Workspace != agent {
 		where += " · " + tr.Workspace
+	}
+	if agent != prog {
+		where += " · " + prog
 	}
 	tag := waitTagPrefix(sess.ID) + strings.ReplaceAll(tr.Pane.ID, ":", "-")
 	// The round this change began (see seenRounds): a "finished" that waits
@@ -406,6 +421,7 @@ func (s *Server) onHerdrTransition(sess *term.Session, h *store.Host, tr herdr.T
 				// (Not known in time: finished, as before there was any reading.)
 				if st != bgRunning && st != bgMoved && still() {
 					note.Title, note.TitleZh = agent+" finished", agentZh+" 已完成"
+					note.Body, note.BodyZh = s.doneBody(sess.ID, tr, round, where)
 				}
 				s.replaceAlert(sess.OwnerID, al, note)
 			}()
@@ -424,10 +440,6 @@ func (s *Server) onHerdrTransition(sess *term.Session, h *store.Host, tr herdr.T
 	}
 	if tr.To == herdr.StatusDone && tr.From == herdr.StatusWorking {
 		note.Title, note.TitleZh, note.Quiet = agent+" finished", agentZh+" 已完成", true
-		if tr.Pane.Title != "" {
-			note.Body += "\n" + truncate(tr.Pane.Title, 120)
-			note.BodyZh = note.Body
-		}
 		// Not while subagents it sent off are out (it works on once they
 		// are back); and only if, once that is known, it is done still, in
 		// the same round, with no one looking.
@@ -440,11 +452,84 @@ func (s *Server) onHerdrTransition(sess *term.Session, h *store.Host, tr herdr.T
 			if !still() || s.paneWatched(sess.ID, tr.Pane.ID) {
 				return
 			}
+			note.Body, note.BodyZh = s.doneBody(sess.ID, tr, round, where)
 			// (Heard, for one who asked for a sound when an agent finishes.)
 			note.Quiet = !s.chimeOnDone(sess.OwnerID)
 			s.notifier.Send(context.Background(), sess.OwnerID, note)
 		}()
 	}
+}
+
+// doneBody: a finished alert's words — what the agent said last (its first
+// words, the marks of its Markdown left out), then where it is; where it
+// said nothing known, its terminal's title if that says anything, then
+// where. Read after bgAwait (lastAnswer's read is that one's).
+func (s *Server) doneBody(session string, tr herdr.Transition, round int64, where string) (string, string) {
+	said := plainWords(s.lastAnswer(session, tr.Pane.ID, round))
+	if said == "" && titleSays(tr.Pane.Title, tr.Pane.Agent) {
+		said = truncate(tr.Pane.Title, doneSaidMax)
+	}
+	if said == "" {
+		return where, where
+	}
+	return said + "\n" + where, said + "\n" + where
+}
+
+const doneSaidMax = 120
+
+var mdMarks = regexp.MustCompile("(\\*\\*|__|`+|^#{1,6}\\s+|(^|\\s)[-*+]\\s+|(^|\\s)\\d+\\.\\s+|\\[([^\\]]*)\\]\\([^)]*\\))")
+
+// plainWords: an answer as a line of an alert — Markdown's marks out (a
+// link its words), cut at a sentence's end where one falls early enough.
+func plainWords(s string) string {
+	s = mdMarks.ReplaceAllStringFunc(s, func(m string) string {
+		if sub := mdMarks.FindStringSubmatch(m); sub != nil && sub[4] != "" {
+			return sub[4]
+		}
+		if strings.TrimSpace(m) != m && (strings.HasPrefix(m, " ") || strings.HasPrefix(m, "\t")) {
+			return " "
+		}
+		return ""
+	})
+	s = strings.Join(strings.Fields(s), " ")
+	r := []rune(s)
+	if len(r) <= doneSaidMax {
+		return s
+	}
+	// (Its first sentence, where it ends in the first two thirds; else cut, with an ellipsis.)
+	for i, c := range r[:doneSaidMax] {
+		if i >= doneSaidMax/3 && strings.ContainsRune("。！？.!?；;", c) {
+			return string(r[:i+1])
+		}
+	}
+	return string(r[:doneSaidMax-1]) + "…"
+}
+
+// titleSays: a terminal title worth an alert's line — not empty, not the
+// program's own name, not a word or two of it ("AI", "claude").
+func titleSays(title, program string) bool {
+	t := strings.TrimSpace(title)
+	if len([]rune(t)) < 6 {
+		return false
+	}
+	return !strings.EqualFold(t, program) && !strings.EqualFold(t, "Claude Code")
+}
+
+// agentProgram: the program's name as people call it, and in Chinese.
+func agentProgram(a string) (string, string) {
+	switch strings.ToLower(a) {
+	case "":
+		return "terminal", "终端"
+	case "claude":
+		return "Claude Code", "Claude Code"
+	case "codex":
+		return "Codex", "Codex"
+	case "opencode":
+		return "OpenCode", "OpenCode"
+	case "gemini":
+		return "Gemini CLI", "Gemini CLI"
+	}
+	return a, a
 }
 
 // bgAwait: what a Claude pane left running at the end of the turn of
