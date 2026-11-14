@@ -1,5 +1,5 @@
 import { Fragment, useContext, useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 'react'
-import { RotateCw } from 'lucide-react'
+import { MessageCircleReply, RotateCw } from 'lucide-react'
 import { api, ApiError, errorText, type HerdrAgent } from '../api'
 import { t } from '../i18n'
 import { Dialog, isCoarse, LoadError, useToast } from '../components/ui'
@@ -238,7 +238,7 @@ export function ReplyDialog({ sessionId, agent, onLoaded, onClose, resizedAt }: 
   const block = screen ? promptBlock(screen.text) : null
   const questionOnly = !!screen && folds(screen)
   return (
-    <Dialog title={t('reply.title', { agent: title })} onClose={onClose} className="reply-dialog">
+    <Dialog title={t('reply.title', { agent: title })} onClose={onClose} className="reply-dialog" icon={<MessageCircleReply size={18} />}>
       {agent.title && <p className="hint reply-sub">{agent.title}</p>}
       {failed ? (
         <LoadError onRetry={() => void load()} />

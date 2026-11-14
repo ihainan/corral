@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { History } from 'lucide-react'
 import { hhmm } from './convoTime'
 import { api, ApiError, errorText } from '../api'
 import { t } from '../i18n'
@@ -95,7 +96,7 @@ export function HostHistoryDialog({ sid, cwd, onPick, onClose }: { sid: string; 
 
   const here = cwd?.replace(/\/+$/, '')
   return (
-    <Dialog title={t('hostHistory.title')} onClose={onClose} wide className="host-history">
+    <Dialog title={t('hostHistory.title')} onClose={onClose} wide className="host-history" icon={<History size={18} />}>
       <input className="input" type="search" autoFocus placeholder={t('hostHistory.search')} aria-label={t('hostHistory.search')} value={q} onChange={(e) => (setNote(''), setQ(e.target.value))} />
       {note && <p className="hint">{note}</p>}
       <div className="host-history-list" role="list" aria-busy={busy}>

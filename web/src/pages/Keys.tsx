@@ -175,7 +175,7 @@ function GenerateDialog({ onClose, onDone }: { onClose: () => void; onDone: () =
   // Made: its public key, to put on a server (ux1101 PG-14).
   if (made)
     return (
-      <Dialog title={t('keys.generate')} onClose={onClose}>
+      <Dialog title={t('keys.generate')} onClose={onClose} icon={<KeyRound size={18} />}>
         <p className="lead">{t('keys.generatedLead')}</p>
         <div className="pubkey">
           <code>{made.public_key}</code>
@@ -188,7 +188,7 @@ function GenerateDialog({ onClose, onDone }: { onClose: () => void; onDone: () =
     )
   return (
     // (Not closed by a stray press with a name typed or the key being made: ux1101 PG-03.)
-    <Dialog title={t('keys.generate')} onClose={onClose} guard={busy || !!name.trim()}>
+    <Dialog title={t('keys.generate')} onClose={onClose} busy={busy} guard={!!name.trim()} icon={<KeyRound size={18} />}>
       <form className="form" onSubmit={submit}>
         <Field label={t('keys.name')} htmlFor="k-name" error={error}>
           <input id="k-name" className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder={t('keys.namePlaceholder')} required />
@@ -222,7 +222,7 @@ export function ImportDialog({ onClose, onDone }: { onClose: () => void; onDone:
     }
   }
   return (
-    <Dialog title={t('keys.import')} onClose={onClose} guard={busy || !!(name.trim() || pk.trim() || phrase)}>
+    <Dialog title={t('keys.import')} onClose={onClose} busy={busy} guard={!!(name.trim() || pk.trim() || phrase)} icon={<Import size={18} />}>
       <form className="form" onSubmit={submit}>
         <Field label={t('keys.name')} htmlFor="ki-name" error={error?.field === 'name' ? error.text : undefined}>
           <input id="ki-name" className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder={t('keys.namePlaceholder')} required />

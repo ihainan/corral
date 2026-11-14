@@ -24,6 +24,7 @@
   --warn: #9e5b06;
   --danger: #c2352f;
   --danger-soft: #fdf1f0;
+  --danger-fill: #c2352f; --danger-fill-hover: #a92d28; /* (a button filled red: white on it, 4.5:1 and more) */
   --focus: 0 0 0 3px rgba(44, 95, 204, 0.22);
   --shadow-pop: 0 0 0 1px rgba(16, 18, 24, 0.06), 0 8px 24px rgba(16, 18, 24, 0.1);
   --overlay: rgba(15, 18, 24, 0.32);
@@ -85,7 +86,7 @@
     --bg: #0f1115; --bg-subtle: #15181d; --bg-hover: #1c2026; --bg-active: #242830; --surface: #1a1d23;
     --fg: #e6e8ec; --fg-2: #a1a7b2; --fg-3: #858c98; --fg-4: #4e545e; --line: #23272e; --line-strong: #3d4350; --line-input: #616977;
     --accent: #3b68dc; --accent-hover: #4470e0; --accent-text: #8fadf7; --accent-fg: #ffffff; --accent-soft: rgba(74, 120, 236, 0.16);
-    --ok: #5cc28a; --warn: #e0a24a; --danger: #f07c73; --danger-soft: rgba(240, 124, 115, 0.12);
+    --ok: #5cc28a; --warn: #e0a24a; --danger: #f07c73; --danger-soft: rgba(240, 124, 115, 0.12); --danger-fill: #c4423a; --danger-fill-hover: #cf4f47;
     --focus: 0 0 0 3px rgba(74, 120, 236, 0.35);
     --shadow-pop: 0 0 0 1px #2c313a, 0 12px 32px rgba(0, 0, 0, 0.55); --overlay: rgba(0, 0, 0, 0.6);
     color-scheme: dark;
@@ -95,7 +96,7 @@
   --bg: #0f1115; --bg-subtle: #15181d; --bg-hover: #1c2026; --bg-active: #242830; --surface: #1a1d23;
   --fg: #e6e8ec; --fg-2: #a1a7b2; --fg-3: #858c98; --fg-4: #4e545e; --line: #23272e; --line-strong: #3d4350; --line-input: #616977;
   --accent: #3b68dc; --accent-hover: #4470e0; --accent-text: #8fadf7; --accent-fg: #ffffff; --accent-soft: rgba(74, 120, 236, 0.16);
-  --ok: #5cc28a; --warn: #e0a24a; --danger: #f07c73; --danger-soft: rgba(240, 124, 115, 0.12);
+  --ok: #5cc28a; --warn: #e0a24a; --danger: #f07c73; --danger-soft: rgba(240, 124, 115, 0.12); --danger-fill: #c4423a; --danger-fill-hover: #cf4f47;
   --focus: 0 0 0 3px rgba(74, 120, 236, 0.35);
   --shadow-pop: 0 0 0 1px #2c313a, 0 12px 32px rgba(0, 0, 0, 0.55); --overlay: rgba(0, 0, 0, 0.6);
   color-scheme: dark;
@@ -450,6 +451,29 @@ a.setting:hover { text-decoration: none; background: var(--bg-hover); }
 }
 .dialog h2 { font-size: var(--fs-title); line-height: var(--lh-title); font-weight: 600; }
 .dialog-actions { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
+/* A dialog's head (Dialog in ui.tsx, 11-14): what it is for on a tinted
+   square, the title and a line under it; its close in the corner. */
+.dialog { position: relative; }
+.dialog > .dialog-x { position: absolute; top: 20px; right: 12px; z-index: 1; color: var(--fg-3); } /* (its middle on the head's: 20 + 36 / 2) */
+.dialog > .dialog-x:hover { color: var(--fg); }
+.dialog > .dialog-x + h2, .dialog > .dialog-x + .dialog-head { padding-right: 32px; }
+@media (pointer: coarse) { .dialog > .dialog-x { top: 16px; right: 8px; } .dialog > .dialog-x + h2, .dialog > .dialog-x + .dialog-head { padding-right: 40px; } }
+.dialog-head { display: flex; align-items: center; gap: 12px; }
+.dialog-icon { flex: none; width: 36px; height: 36px; display: grid; place-items: center; border-radius: var(--r); background: var(--accent-soft); color: var(--accent-text); }
+.dialog-icon.is-danger { background: var(--danger-soft); color: var(--danger); }
+.dialog-icon.is-warn { background: color-mix(in srgb, var(--warn) 14%, var(--surface)); color: var(--warn); }
+.dialog-head-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.dialog .dialog-head h2 { font-size: var(--fs-head); line-height: var(--lh-head); }
+.dialog-sub { font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--fg-2); }
+/* Its buttons set off by a rule from edge to edge (a dialog of the usual inset only). */
+.dialog:not(.dlg):not(.files-dialog) > .dialog-actions:last-child,
+.dialog:not(.dlg):not(.files-dialog) > form:last-child > .dialog-actions:last-child {
+  margin-inline: -20px; padding: 16px 20px 0; border-top: 1px solid var(--line);
+}
+/* What cannot be undone, asked in a dialog: its button filled red. */
+.dialog .btn-danger { background: var(--danger-fill); border-color: var(--danger-fill); color: var(--accent-fg); }
+.dialog .btn-danger:hover { background: var(--danger-fill-hover); border-color: var(--danger-fill-hover); }
+.dialog .btn-danger:disabled, .dialog .btn-danger:disabled:hover { background: var(--bg-subtle); border-color: var(--line); color: var(--fg-3); }
 @media (max-width: 520px) {
   .overlay.sheet-mode { place-items: end stretch; padding: 0; }
   .sheet-mode .dialog { max-width: none; border-radius: var(--r-xl) var(--r-xl) 0 0; padding-bottom: calc(20px + env(safe-area-inset-bottom, 0px)); animation: rise 0.2s var(--ease); }
@@ -467,6 +491,7 @@ a.setting:hover { text-decoration: none; background: var(--bg-hover); }
 /* (On the title's line, below the small word over it where there is one.) */
 .dlg-head:has(.dlg-eyebrow) > .dlg-icon { margin-top: calc(var(--lh-note) + 2px + 3px); }
 .dlg-head-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.dlg-icon.is-tile { width: 36px; height: 36px; align-self: center; align-items: center; justify-content: center; margin-top: 0; border-radius: var(--r); background: var(--accent-soft); color: var(--accent-text); }
 .dlg-eyebrow { font-size: var(--fs-note); line-height: var(--lh-note); font-weight: 500; color: var(--fg-3); }
 /* (A file's name: one line, cut at its end — whole on hover and in the line under it.) */
 /* (A sentence for a name — a command's purpose: two lines at most, the whole in the body.) */

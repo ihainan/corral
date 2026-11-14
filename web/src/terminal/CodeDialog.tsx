@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import { Code2 } from 'lucide-react'
 import { api, ApiError, errorText } from '../api'
 import { getLang, hasKey, t } from '../i18n'
 import { Dialog, useToast } from '../components/ui'
@@ -153,7 +154,7 @@ export function useCode() {
   if (job) {
     const failed = !!job.failure
     dialog = (
-      <Dialog title={t('code.title', { name: job.name })} onClose={close}>
+      <Dialog title={t('code.title', { name: job.name })} onClose={close} icon={<Code2 size={18} />}>
         {failed ? (
           <p className="err" role="alert">{job.failure}</p>
         ) : job.readyUrl ? (

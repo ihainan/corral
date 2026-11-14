@@ -1,4 +1,5 @@
 import { useState, type FormEvent } from 'react'
+import { GitBranch, TextCursorInput } from 'lucide-react'
 import { api, ApiError, errorText } from '../api'
 import { t } from '../i18n'
 import { Dialog } from '../components/ui'
@@ -70,7 +71,7 @@ export function ForkDialog({
   }
   const close = () => !busy && onClose()
   return (
-    <Dialog title={t(at ? 'fork.titleAt' : 'fork.title')} onClose={close}>
+    <Dialog title={t(at ? 'fork.titleAt' : 'fork.title')} onClose={close} icon={<GitBranch size={18} />}>
       <form className="form" onSubmit={submit}>
         <p className="lead">{t(at ? 'fork.bodyAt' : 'fork.body')}</p>
         <p className="hint">{t('fork.shared')}</p>
@@ -140,7 +141,7 @@ export function RenameDialog({ target, onClose }: { target: RenameTarget; onClos
   }
   const close = () => !busy && onClose()
   return (
-    <Dialog title={t('rename.title')} onClose={close}>
+    <Dialog title={t('rename.title')} onClose={close} icon={<TextCursorInput size={18} />}>
       <form className="form" onSubmit={submit}>
         <label className="field">
           <span>{t('rename.workspace')}</span>

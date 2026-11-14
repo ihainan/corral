@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
-import { ChevronRight, KeySquare, MoreHorizontal, ScrollText, Search, Send, Shield, Smartphone, UserCheck, UserPlus, UserX } from 'lucide-react'
+import { ChevronRight, KeyRound, KeySquare, MoreHorizontal, ScrollText, Search, Send, Shield, Smartphone, UserCheck, UserPlus, UserX } from 'lucide-react'
 import { api, ApiError, errorText, type AdminUser, type AuditEntry } from '../api'
 import { t } from '../i18n'
 import { PhoneBack, useSession } from '../app'
@@ -226,7 +226,7 @@ function InviteDialog({ onClose }: { onClose: () => void }) {
   return (
     // (A note typed or the link being made is not lost to a stray press; the
     // link, shown once, leaves by its button — ux1101 PG-03.)
-    <Dialog title={t('admin.invite')} onClose={onClose} guard={busy || !!note.trim() || !!link}>
+    <Dialog title={t('admin.invite')} onClose={onClose} busy={busy} guard={!!note.trim() || !!link} icon={<Send size={18} />}>
       {link ? (
         <>
           <p className="lead">{t('admin.inviteLink', { when: new Date(link.expires_at * 1000).toLocaleString() })}</p>
@@ -301,7 +301,7 @@ function CreateUserDialog({ onClose, onCreated }: { onClose: () => void; onCreat
     const text = t('admin.createdText', { username: done.username, password: done.password })
     return (
       // (The first password is shown this once: only its button leaves, as the recovery codes — ux1101 PG-04.)
-      <Dialog title={t('admin.create')} onClose={onClose} guard>
+      <Dialog title={t('admin.create')} onClose={onClose} guard icon={<UserPlus size={18} />}>
         <p className="lead">{mustChange ? t('admin.createdBody') : t('admin.createdBodyKeep')}</p>
         <div className="pubkey"><code className="pre-line">{text}</code><CopyButton text={text} /></div>
         <div className="dialog-actions"><button className="btn btn-primary" onClick={onClose}>{t('common.close')}</button></div>
@@ -309,7 +309,7 @@ function CreateUserDialog({ onClose, onCreated }: { onClose: () => void; onCreat
     )
   }
   return (
-    <Dialog title={t('admin.create')} onClose={onClose} guard={busy || !!username.trim() || !!name.trim()}>
+    <Dialog title={t('admin.create')} onClose={onClose} busy={busy} guard={!!username.trim() || !!name.trim()} icon={<UserPlus size={18} />}>
       <form className="form" onSubmit={submit} noValidate>
         <p className="lead">{t('admin.createLead')}</p>
         <Field label={t('login.username')} htmlFor="cu-user" hint={t('admin.usernameHint')} error={fe('username')}>
@@ -365,7 +365,7 @@ function ResetDialog({ user, onClose }: { user: AdminUser; onClose: () => void }
     }
   }
   return (
-    <Dialog title={t('admin.resetPassword')} onClose={onClose} guard={busy || !!pw}>
+    <Dialog title={t('admin.resetPassword')} onClose={onClose} busy={busy} guard={!!pw} icon={<KeyRound size={18} />}>
       <form className="form" onSubmit={submit}>
         <p className="lead">{t('admin.resetPasswordBody', { name: user.display_name || user.username })}</p>
         <Field label={t('settings.newPassword')} htmlFor="rp-pw" hint={t('setup.passwordHint')} error={error}>

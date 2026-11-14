@@ -1,4 +1,5 @@
 import { useMemo, useState, type FormEvent } from 'react'
+import { Bot } from 'lucide-react'
 import { api, ApiError, errorText, type SessionInfo } from '../api'
 import { t } from '../i18n'
 import { Dialog } from '../components/ui'
@@ -87,7 +88,7 @@ export function NewAgentDialog({ sessions, onDone, onOpen, onClose }: { sessions
   }, [sess])
   if (!herdrs.length) {
     return (
-      <Dialog title={t('newAgent.title')} onClose={onClose}>
+      <Dialog title={t('newAgent.title')} onClose={onClose} icon={<Bot size={18} />}>
         <p className="lead">{t('newAgent.noHerdr')}</p>
         <div className="dialog-actions">
           <button className="btn" onClick={onClose}>
@@ -133,7 +134,7 @@ export function NewAgentDialog({ sessions, onDone, onOpen, onClose }: { sessions
   }
   const close = () => !busy && onClose()
   return (
-    <Dialog title={t('newAgent.title')} onClose={close}>
+    <Dialog title={t('newAgent.title')} onClose={close} icon={<Bot size={18} />}>
       <form className="new-agent" onSubmit={submit}>
         {herdrs.length > 1 && (
           <label className="field">

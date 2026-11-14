@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Check, Search } from 'lucide-react'
+import { Check, Palette, Search } from 'lucide-react'
 import { t } from '../i18n'
 import { isDark, setPrefs, termScheme, usePrefs } from '../prefs'
 import { Dialog } from '../components/ui'
@@ -88,7 +88,7 @@ export function SchemeDialog({ onClose }: { onClose: () => void }) {
   const shown = [...(needle ? [] : ['ui']), ...dark.map((x) => x.id), ...light.map((x) => x.id)]
   const tabStop = shown.includes(current) ? current : shown[0]
   return (
-    <Dialog title={t('settings.termTheme')} onClose={onClose} wide seeThrough className="scheme-dialog">
+    <Dialog title={t('settings.termTheme')} onClose={onClose} wide seeThrough className="scheme-dialog" icon={<Palette size={18} />}>
       <label className="scheme-search">
         <Search size={16} aria-hidden="true" />
         <input

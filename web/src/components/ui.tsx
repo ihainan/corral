@@ -1,6 +1,6 @@
 import { cloneElement, createContext, isValidElement, useCallback, useContext, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
-import { Check, CircleAlert, CircleCheck, Copy, Info, X } from 'lucide-react'
+import { Check, CircleAlert, CircleCheck, CircleHelp, Copy, Info, TriangleAlert, X } from 'lucide-react'
 import { errorText } from '../api'
 import { t } from '../i18n'
 
@@ -82,7 +82,8 @@ export function useFocusTrap<T extends HTMLElement>(onClose: () => void) {
     // Fields marked data-touch-nofocus are skipped on touch screens, where
     // focusing them would pop the keyboard over the content.
     const skip = isCoarse() ? ':not([data-touch-nofocus])' : ''
-    const first = root?.querySelector<HTMLElement>(`input${skip}, textarea${skip}, select${skip}`) ?? focusables().find((el) => !(isCoarse() && el.hasAttribute('data-touch-nofocus')))
+    // (Not a dialog's close in its corner: Enter there would shut it — 11-14.)
+    const first = root?.querySelector<HTMLElement>(`input${skip}, textarea${skip}, select${skip}`) ?? focusables().find((el) => !el.classList.contains('dialog-x') && !(isCoarse() && el.hasAttribute('data-touch-nofocus')))
     first?.focus()
     const onKey = (e: KeyboardEvent) => {
       if (!isTop()) return
@@ -121,13 +122,34 @@ export function useFocusTrap<T extends HTMLElement>(onClose: () => void) {
 // guard: while true (something typed in it not yet saved, a request under
 // way, words shown only once), a press outside it or Escape does not close
 // it — only its own buttons do (ux1101 PG-03/PG-04).
-export function Dialog(props: { title: string; onClose: () => void; children: ReactNode; sheet?: boolean; hideTitle?: boolean; wide?: boolean; seeThrough?: boolean; guard?: boolean; className?: string; dialogProps?: React.HTMLAttributes<HTMLDivElement> }) {
-  const dismiss = () => !props.guard && props.onClose()
+// icon, tone, sub: its head (11-14) — what it is for, on a tinted square (red
+// for what cannot be undone, amber for a warning), a line under the title.
+// The close in its corner is its cancel: off while busy, as its cancel is.
+export function Dialog(props: { title: string; onClose: () => void; children: ReactNode; sheet?: boolean; hideTitle?: boolean; wide?: boolean; seeThrough?: boolean; guard?: boolean; busy?: boolean; icon?: ReactNode; tone?: 'danger' | 'warn'; sub?: ReactNode; className?: string; dialogProps?: React.HTMLAttributes<HTMLDivElement> }) {
+  const dismiss = () => !props.guard && !props.busy && props.onClose()
   const ref = useFocusTrap<HTMLDivElement>(dismiss)
   return createPortal(
     <div className={'overlay' + (props.sheet !== false ? ' sheet-mode' : '') + (props.seeThrough ? ' see-through' : '')} onMouseDown={(e) => e.target === e.currentTarget && dismiss()}>
       <div {...props.dialogProps} className={'dialog' + (props.wide ? ' dialog-wide' : '') + (props.className ? ' ' + props.className : '')} role="dialog" aria-modal="true" aria-label={props.title} ref={ref}>
-        {props.hideTitle ? null : <h2>{props.title}</h2>}
+        {props.hideTitle ? null : (
+          <>
+            {/* (First, so the actions stay the last child; never the one focused on opening — useFocusTrap.) */}
+            <button type="button" className="icon-btn dialog-x" onClick={props.onClose} disabled={props.busy} aria-label={t('common.close')} title={t('common.close')}>
+              <X size={18} />
+            </button>
+            {props.icon || props.sub ? (
+              <div className="dialog-head">
+                {props.icon && <span className={'dialog-icon' + (props.tone ? ' is-' + props.tone : '')} aria-hidden="true">{props.icon}</span>}
+                <div className="dialog-head-text">
+                  <h2>{props.title}</h2>
+                  {props.sub && <p className="dialog-sub">{props.sub}</p>}
+                </div>
+              </div>
+            ) : (
+              <h2>{props.title}</h2>
+            )}
+          </>
+        )}
         {props.children}
       </div>
     </div>,
@@ -139,10 +161,11 @@ export function Dialog(props: { title: string; onClose: () => void; children: Re
 // a command): what it is, a line under it (where it is, how big, how it
 // goes), the actions on it as icons, and the close — one row, the same in
 // each (app.css, .dlg-*). Its Dialog takes className "dlg" and hideTitle.
-export function DialogHead(props: { title: ReactNode; titleText?: string; oneLine?: boolean; clamp?: boolean; eyebrow?: ReactNode; sub?: ReactNode; subText?: string; icon?: ReactNode; tools?: ReactNode; onClose: () => void }) {
+// tile: its icon on a tinted square, as a form dialog's head (Dialog's icon).
+export function DialogHead(props: { title: ReactNode; titleText?: string; oneLine?: boolean; clamp?: boolean; eyebrow?: ReactNode; sub?: ReactNode; subText?: string; icon?: ReactNode; tile?: boolean; tools?: ReactNode; onClose: () => void }) {
   return (
     <div className="dlg-head">
-      {props.icon && <span className="dlg-icon" aria-hidden="true">{props.icon}</span>}
+      {props.icon && <span className={'dlg-icon' + (props.tile ? ' is-tile' : '')} aria-hidden="true">{props.icon}</span>}
       <div className="dlg-head-text">
         {props.eyebrow && <span className="dlg-eyebrow">{props.eyebrow}</span>}
         <h2 className={'dlg-title' + (props.oneLine ? ' is-one' : props.clamp ? ' is-clamped' : '')} title={props.titleText}>{props.title}</h2>
@@ -173,7 +196,7 @@ export function Confirm(props: { title: string; body: string; confirm: string; d
   // until it is answered (closing it would look like cancelling).
   const close = () => !busy && props.onClose()
   return (
-    <Dialog title={props.title} onClose={close}>
+    <Dialog title={props.title} onClose={close} busy={busy} icon={props.danger ? <TriangleAlert size={18} /> : <CircleHelp size={18} />} tone={props.danger ? 'danger' : undefined}>
       <p className="lead">{props.body}</p>
       {error && <p className="err" role="alert">{error}</p>}
       <div className="dialog-actions">

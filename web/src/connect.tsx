@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
+import { Lock, ShieldAlert } from 'lucide-react'
 import { api, ApiError, choiceOf, errorText, type Host, type HostChoices, type OpenChoice, type SessionInfo } from './api'
 import { hasKey, t } from './i18n'
 import { Dialog, Field, useToast } from './components/ui'
@@ -112,7 +113,7 @@ export function useConnect(onOpen: (s: SessionInfo) => void): {
   } else if (pending?.kind === 'hostkey') {
     const p = pending
     dialogs = (
-      <Dialog title={t('hostkey.title')} onClose={cancel}>
+      <Dialog title={t('hostkey.title')} onClose={cancel} icon={<ShieldAlert size={18} />} tone="warn">
         <p className="lead">{t('hostkey.body', { name: p.host.name })}</p>
         {/* The two fingerprints one above the other, in the same columns, so
             they are compared character by character (ux1101 T51). */}
@@ -173,7 +174,7 @@ function PasswordDialog(props: { host: Host; onClose: () => void; onSubmit: (pw:
   }
   const target = `${props.host.username}@${props.host.address}`
   return (
-    <Dialog title={t('connect.passwordTitle')} onClose={props.onClose}>
+    <Dialog title={t('connect.passwordTitle')} onClose={props.onClose} icon={<Lock size={18} />}>
       <form className="form" onSubmit={submit}>
         <p className="lead">{t('connect.passwordBody', { target })}</p>
         <Field label={t('host.password')} htmlFor="connect-pw" error={error}>

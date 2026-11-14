@@ -1971,16 +1971,18 @@ function BgCmdDialog({ r, gone, onClose }: { r: ConvoRunning; gone: boolean; onC
   const outDir = r.out ? shortPath(r.out.slice(0, r.out.lastIndexOf('/') + 1) || '/').replace(/\/?$/, '/') : ''
   return (
     <Dialog title={r.what || t('convo.bgCmds1')} onClose={onClose} hideTitle className="dlg bg-cmd-dialog">
+      {/* (Its mark on a tinted square as the other dialogs' heads; what it is,
+          a background command, said in the line under the title — 11-14.) */}
       <DialogHead
-        icon={<Terminal size={16} />}
-        eyebrow={r.what ? t('convo.bgCmds1') : undefined}
+        icon={<Terminal size={18} />}
+        tile
         title={r.what || t('convo.bgCmds1')}
         titleText={r.what}
         clamp
         sub={
           <>
             {!gone && <span className="bg-cmd-live" aria-hidden="true" />}
-            {gone ? t('convo.bgEnded') : r.ts ? t('convo.bgFor', { for: since(r.ts) }) : t('convo.bgRunning')}
+            {[r.what ? t('convo.bgCmds1') : '', gone ? t(r.out ? 'convo.bgEnded' : 'convo.bgEndedNoOut') : r.ts ? t('convo.bgFor', { for: since(r.ts) }) : t('convo.bgRunning')].filter(Boolean).join(' · ')}
           </>
         }
         onClose={onClose}
@@ -1990,49 +1992,58 @@ function BgCmdDialog({ r, gone, onClose }: { r: ConvoRunning; gone: boolean; onC
         {r.what && r.what.length > BG_WHAT_LONG && <p className="bg-cmd-what">{r.what}</p>}
         {r.cmd && (
           <section className="bg-cmd-sec">
-            <div className="bg-cmd-label">
-              <span>{t('convo.bgCmdLabel')}</span>
+            <div className="bg-cmd-label">{t('convo.bgCmdLabel')}</div>
+            <div className="bg-cmd-box">
+              <pre ref={cmdRef} className={'bg-cmd-text term-vars ' + (isDark() ? 'dark' : 'light') + (all ? '' : ' is-shut') + (more && !all ? ' is-more' : '')} style={{ ['--shut' as string]: BG_CMD_SHUT }}>
+                <Code text={r.cmd} lang="bash" />
+              </pre>
               <button
                 type="button"
-                className="link-btn"
+                className="icon-btn bg-cmd-copy"
+                aria-label={t('common.copy')}
+                title={t('common.copy')}
                 onClick={async () => {
                   if (await copyText(r.cmd!)) toast(t('common.copied'))
                 }}
               >
-                <Copy size={13} /> {t('common.copy')}
+                <Copy size={15} />
               </button>
             </div>
-            <pre ref={cmdRef} className={'bg-cmd-text term-vars ' + (isDark() ? 'dark' : 'light') + (all ? '' : ' is-shut') + (more && !all ? ' is-more' : '')} style={{ ['--shut' as string]: BG_CMD_SHUT }}>
-              <Code text={r.cmd} lang="bash" />
-            </pre>
             {(more || all) && (
               <button type="button" className="link-btn bg-cmd-all" aria-expanded={all} onClick={() => setAll(!all)}>
                 {t(all ? 'convo.bgShowLess' : 'convo.bgShowAll')}
+                {all ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
               </button>
             )}
           </section>
         )}
+        {/* (A Monitor: no file of output, its latest event instead.) */}
+        {!r.out && r.note && (
+          <section className="bg-cmd-sec">
+            <div className="bg-cmd-label">{t('convo.bgNoteLabel')}</div>
+            <p className="bg-cmd-note">{r.note}</p>
+          </section>
+        )}
         {r.out && (
           <section className="bg-cmd-sec">
-            <div className="bg-cmd-label">
-              <span>{t('convo.bgOutLabel')}</span>
-            </div>
-            {/* (The host's file: its name to know it by, its folder after, whole on hover.) */}
-            <button type="button" className="bg-cmd-file" onClick={tail} disabled={!tail} title={r.out}>
-              <FileText size={16} className="bg-cmd-file-ic" aria-hidden="true" />
-              <span className="bg-cmd-file-name">{outName}</span>
-              <span className="bg-cmd-file-dir">{outDir}</span>
+            <div className="bg-cmd-label">{t('convo.bgOutLabel')}</div>
+            {/* (The host's file: its name, its folder under it, whole on hover; pressed, its last lines.) */}
+            <button type="button" className="bg-cmd-file" onClick={tail} disabled={!tail} title={r.out} aria-label={tail ? t('convo.bgOutput') + '：' + outName : undefined}>
+              <FileText size={18} className="bg-cmd-file-ic" aria-hidden="true" />
+              <span className="bg-cmd-file-text">
+                <span className="bg-cmd-file-name">{outName}</span>
+                <span className="bg-cmd-file-dir">{outDir}</span>
+              </span>
+              {tail && (
+                <span className="bg-cmd-file-go">
+                  {t('convo.bgOutputShort')}
+                  <ChevronRight size={15} />
+                </span>
+              )}
             </button>
           </section>
         )}
       </div>
-      {tail && (
-        <div className="dlg-foot">
-          <button type="button" className="btn btn-primary" onClick={tail}>
-            <Eye size={15} /> {t('convo.bgOutput')}
-          </button>
-        </div>
-      )}
     </Dialog>
   )
 }

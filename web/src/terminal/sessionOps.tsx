@@ -1,4 +1,5 @@
 import { useState, type FormEvent } from 'react'
+import { Archive, SquarePlus, TextCursorInput } from 'lucide-react'
 import { ApiError, errorText } from '../api'
 import { t } from '../i18n'
 import { Dialog } from '../components/ui'
@@ -44,7 +45,7 @@ export function SessionOpDialog({ op, name, codex, onSend, onClose, onShowTermin
   }
   const close = () => !busy && onClose()
   return (
-    <Dialog title={t(`ops.${op}.title`)} onClose={close}>
+    <Dialog title={t(`ops.${op}.title`)} onClose={close} busy={busy} icon={op === 'compact' ? <Archive size={18} /> : op === 'rename' ? <TextCursorInput size={18} /> : <SquarePlus size={18} />}>
       <form className="form" onSubmit={submit}>
         <p className="lead">{body}</p>
         {op !== 'clear' && !codex && (

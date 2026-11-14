@@ -459,7 +459,7 @@ html.term-dark .overlay, html.term-dark .menu, html.term-dark .toast {
   --bg: #0f1115; --bg-subtle: #15181d; --bg-hover: #1c2026; --bg-active: #242830; --surface: #1a1d23;
   --fg: #e6e8ec; --fg-2: #a1a7b2; --fg-3: #858c98; --fg-4: #4e545e; --line: #23272e; --line-strong: #3d4350; --line-input: #616977;
   --accent: #3b68dc; --accent-hover: #4470e0; --accent-text: #8fadf7; --accent-soft: rgba(74, 120, 236, 0.16);
-  --ok: #5cc28a; --warn: #e0a24a; --danger: #f07c73; --danger-soft: rgba(240, 124, 115, 0.12);
+  --ok: #5cc28a; --warn: #e0a24a; --danger: #f07c73; --danger-soft: rgba(240, 124, 115, 0.12); --danger-fill: #c4423a; --danger-fill-hover: #cf4f47;
   --focus: 0 0 0 3px rgba(74, 120, 236, 0.35);
   --shadow-pop: 0 0 0 1px #2c313a, 0 12px 32px rgba(0, 0, 0, 0.55); --overlay: rgba(0, 0, 0, 0.6);
   color: var(--fg); color-scheme: dark;
@@ -1665,31 +1665,38 @@ button.convo-running-what { padding: 0; border: 0; background: none; font: inher
 .dialog.bg-cmd-dialog { max-width: 640px; }
 .bg-cmd-live { display: inline-block; width: 6px; height: 6px; margin-right: 6px; border-radius: 50%; background: var(--ok); vertical-align: middle; }
 .bg-cmd-sec { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
-.bg-cmd-label { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: var(--fs-note); line-height: var(--lh-note); font-weight: 500; color: var(--fg-3); }
-.bg-cmd-label .link-btn { display: inline-flex; align-items: center; gap: 4px; font-weight: 400; }
+.bg-cmd-label { font-size: var(--fs-note); line-height: var(--lh-note); font-weight: 500; color: var(--fg-3); }
+/* The command, its copy in its corner (11-14). */
+.bg-cmd-box { position: relative; min-width: 0; }
 .bg-cmd-text {
-  margin: 0; padding: 10px 12px; border-radius: var(--r); border: 1px solid var(--line); background: var(--bg-subtle); color: var(--fg);
+  margin: 0; padding: 10px 40px 10px 12px; border-radius: var(--r); border: 1px solid var(--line); background: var(--bg-subtle); color: var(--fg);
   font-family: var(--font-mono); font-size: var(--fs-sub); line-height: var(--lh-sub); white-space: pre-wrap; overflow-wrap: anywhere;
 }
 .bg-cmd-text.is-shut { max-height: calc(var(--lh-sub) * var(--shut) + 22px); overflow: hidden; }
 /* (More below the fold: the last lines fade out, so it does not look cut.) */
 .bg-cmd-text.is-more { -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 48px), transparent); mask-image: linear-gradient(to bottom, #000 calc(100% - 48px), transparent); }
 .bg-cmd-text code { font: inherit; background: none; padding: 0; }
-.bg-cmd-all { align-self: flex-start; font-size: var(--fs-note); line-height: var(--lh-note); }
+.bg-cmd-copy.icon-btn { position: absolute; top: 4px; right: 4px; width: 32px; height: 32px; color: var(--fg-3); }
+.bg-cmd-copy.icon-btn:hover { color: var(--fg); background: var(--bg-hover); }
+.bg-cmd-all { align-self: flex-start; display: inline-flex; align-items: center; gap: 2px; font-size: var(--fs-sub); line-height: var(--lh-sub); }
 .bg-cmd-what { margin: 0; font-size: var(--fs-ui); line-height: var(--lh-ui); color: var(--fg-2); }
+.bg-cmd-note { margin: 0; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--fg-2); overflow-wrap: anywhere; }
 /* (Small words to press: touched over 44px where fingers press, drawn as they are.) */
-.bg-cmd-label .link-btn, .bg-cmd-all { position: relative; }
-@media (pointer: coarse) { .bg-cmd-label .link-btn::after, .bg-cmd-all::after { content: ''; position: absolute; inset: -13px -8px; } }
+.bg-cmd-all { position: relative; }
+@media (pointer: coarse) { .bg-cmd-all::after { content: ''; position: absolute; inset: -13px -8px; } .bg-cmd-copy.icon-btn { width: 40px; height: 40px; top: 2px; right: 2px; } .bg-cmd-text { padding-right: 48px; } }
+/* Its output: the file's name, its folder under it, pressed for its last lines. */
 .bg-cmd-file {
-  display: flex; align-items: baseline; gap: 8px; width: 100%; min-width: 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--r);
+  display: flex; align-items: center; gap: 12px; width: 100%; min-width: 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--r);
   background: none; color: var(--fg); text-align: left; cursor: pointer; font: inherit;
 }
 .bg-cmd-file:hover:not(:disabled) { background: var(--bg-hover); }
 .bg-cmd-file:disabled { cursor: default; }
 .bg-cmd-file:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-.bg-cmd-file-ic { flex: none; align-self: center; color: var(--fg-3); }
-.bg-cmd-file-name { flex: none; max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: var(--fs-sub); line-height: var(--lh-sub); }
-.bg-cmd-file-dir { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: var(--fs-note); line-height: var(--lh-note); color: var(--fg-3); }
+.bg-cmd-file-ic { flex: none; color: var(--fg-3); }
+.bg-cmd-file-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.bg-cmd-file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: var(--fs-sub); line-height: var(--lh-sub); }
+.bg-cmd-file-dir { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: var(--fs-note); line-height: var(--lh-note); color: var(--fg-3); }
+.bg-cmd-file-go { flex: none; display: inline-flex; align-items: center; gap: 2px; font-size: var(--fs-sub); line-height: var(--lh-sub); font-weight: 500; color: var(--accent-text); }
 /* (A block of its own, tinted: never a bar at its left edge — the user's rule, 11-04.) */
 .convo-event.is-recap, .convo-event.is-goal, .convo-event.is-notice { margin: 0; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg-2); padding: 8px 12px; border-radius: var(--r); background: color-mix(in srgb, var(--term-fg) 4%, transparent); }
 .convo-event.is-recap .convo-trouble-head, .convo-event.is-goal .convo-trouble-head { color: var(--term-fg-3); font-size: var(--fs-note); line-height: var(--lh-note); }

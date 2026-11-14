@@ -5,6 +5,7 @@
 // host's page; written only once the person confirms, the file named and
 // what goes into it shown.
 import { useEffect, useState } from 'react'
+import { BellRing } from 'lucide-react'
 import { api, ApiError, errorText } from '../api'
 import { t, type I18nKey } from '../i18n'
 import { Dialog, useToast } from '../components/ui'
@@ -159,7 +160,7 @@ function AskHookConfirm({ hostId, hostName, info, on, hook = 'ask', onDone, onIn
     }
   }
   return (
-    <Dialog title={t(on ? `${k}.confirmTitle` : `${k}.offTitle`, { host: hostName })} onClose={close}>
+    <Dialog title={t(on ? `${k}.confirmTitle` : `${k}.offTitle`, { host: hostName })} onClose={close} busy={busy} icon={<BellRing size={18} />}>
       <p className="lead">{t(on ? `${k}.confirmBody` : 'askHook.offBody', { file: info.file })}</p>
       {on && <pre className="ask-hook-snippet">{hook === 'bell' ? info.bell?.snippet : info.snippet}</pre>}
       <p className="hint">{t('askHook.confirmRace')}</p>

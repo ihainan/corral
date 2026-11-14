@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
-import { UserRound } from 'lucide-react'
+import { Share2, UserRound } from 'lucide-react'
 import { api, ApiError, errorText, type Share } from '../api'
 import { t } from '../i18n'
 import { Confirm, CopyButton, Dialog, LoadError, useToast } from '../components/ui'
@@ -73,7 +73,7 @@ export function ShareDialog({ sessionId, onClose }: { sessionId: string; onClose
   }
 
   return (
-    <Dialog title={t('share.title')} onClose={onClose}>
+    <Dialog title={t('share.title')} onClose={onClose} icon={<Share2 size={18} />}>
       <p className="lead">{t('share.lead')}</p>
       <form className="share-add input-row" onSubmit={add}>
         <input

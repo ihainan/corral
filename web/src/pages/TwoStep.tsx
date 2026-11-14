@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
-import { Copy, Download } from 'lucide-react'
+import { Copy, Download, ShieldCheck } from 'lucide-react'
 import { encode } from 'uqr'
 import { api, ApiError, errorText } from '../api'
 import { t } from '../i18n'
@@ -191,7 +191,7 @@ function EnrolDialog({ onClose, onDone }: { onClose: () => void; onDone: () => v
   return (
     // The recovery codes are shown once: only "I have saved them" leaves
     // (ux1101 PG-04); a password typed, or a request under way, is not lost to a stray press.
-    <Dialog title={t('totp.turnOn')} onClose={close} guard={!!codes || busy || !!setup || !!password}>
+    <Dialog title={t('totp.turnOn')} onClose={close} busy={busy} guard={!!codes || !!setup || !!password} icon={<ShieldCheck size={18} />}>
       {codes ? (
         <>
           <RecoveryCodes codes={codes} leadRef={stepRef} />
@@ -297,7 +297,7 @@ function ConfirmDialog({ kind, onClose, onDone }: { kind: 'recovery' | 'disable'
   const stepRef = useStepFocus(!!codes)
   const title = kind === 'recovery' ? t('totp.newCodes') : t('totp.turnOff')
   return (
-    <Dialog title={title} onClose={close} guard={!!codes || busy || !!password || !!code}>
+    <Dialog title={title} onClose={close} busy={busy} guard={!!codes || !!password || !!code} icon={<ShieldCheck size={18} />}>
       {codes ? (
         <>
           <RecoveryCodes codes={codes} leadRef={stepRef} />

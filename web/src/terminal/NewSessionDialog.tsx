@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Search } from 'lucide-react'
+import { Search, SquarePlus } from 'lucide-react'
 import { api, type Host } from '../api'
 import { t } from '../i18n'
 import { navigate } from '../router'
@@ -26,7 +26,7 @@ export function NewTabDialog(p: { busyHost: number | null; onPick: (h: Host) => 
     document.getElementById(`new-tab-host-${cur}`)?.scrollIntoView({ block: 'nearest' })
   }, [cur])
   return (
-    <Dialog title={t('tabs.new')} onClose={p.onClose} className="new-tab">
+    <Dialog title={t('tabs.new')} onClose={p.onClose} className="new-tab" icon={<SquarePlus size={18} />}>
       <label className="new-tab-search">
         <Search size={16} aria-hidden="true" />
         <input

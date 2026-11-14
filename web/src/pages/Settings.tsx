@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useState, type FormEvent, type ReactNode } from 'react'
-import { ChevronRight, Film, LogOut, Minus, Plus, ScrollText, Users } from 'lucide-react'
+import { ChevronRight, Film, KeyRound, LogOut, Minus, Plus, ScrollText, Users } from 'lucide-react'
 import { disablePush, enablePush, pushState, syncPush, type PushState } from '../push'
 import { api, errorText, type Me } from '../api'
 import { getLang, setLang, t, type Lang } from '../i18n'
@@ -350,7 +350,7 @@ function PasswordDialog({ onClose }: { onClose: () => void }) {
     }
   }
   return (
-    <Dialog title={t('settings.password')} onClose={close} guard={busy || !!(cur || next || again)}>
+    <Dialog title={t('settings.password')} onClose={close} busy={busy} guard={!!(cur || next || again)} icon={<KeyRound size={18} />}>
       <form className="form" onSubmit={submit}>
         <Field label={t('settings.currentPassword')} htmlFor="s-cur">
           <input id="s-cur" className="input" type="password" autoComplete="current-password" value={cur} onChange={(e) => setCur(e.target.value)} required />

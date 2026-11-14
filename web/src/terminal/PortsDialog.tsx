@@ -105,7 +105,7 @@ export function PortsDialog({ hostId, onClose }: { hostId: number; onClose: () =
   }
 
   return (
-    <Dialog title={t('ports.title')} onClose={onClose} className="ports-dialog">
+    <Dialog title={t('ports.title')} onClose={onClose} className="ports-dialog" icon={<Globe size={18} />}>
       <p className="lead">{t('ports.intro')}</p>
       <section className="section">
         <div className="ports-head">

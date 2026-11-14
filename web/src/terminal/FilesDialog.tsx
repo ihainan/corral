@@ -1,10 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 'react'
-import {
-  Clock,
-  Search,
-  ArrowUp, Check, Copy, Download, Eye, Image as ImageIcon, FileQuestion, Folder, FolderPlus, House, LocateFixed, MoreHorizontal, Pencil, RotateCw,
-  SquareTerminal, Trash2, Upload, X,
-} from 'lucide-react'
+import { ArrowUp, Check, Clock, Copy, Download, Eye, FileQuestion, Folder, FolderPlus, House, Image as ImageIcon, LocateFixed, MoreHorizontal, Pencil, PencilLine, RotateCw, Search, SquareTerminal, Trash2, Upload, X } from 'lucide-react'
 import { FileTypeIcon } from './fileIcons'
 import { api, ApiError, errorText, postFile, type FileEntry, type FileListing } from '../api'
 import { getLang, t } from '../i18n'
@@ -701,7 +696,7 @@ function NameDialog(props: { title: string; initial: string; action: string; onS
     }
   }
   return (
-    <Dialog title={props.title} onClose={props.onClose}>
+    <Dialog title={props.title} onClose={props.onClose} icon={<PencilLine size={18} />}>
       <form className="form" onSubmit={submit}>
         <Field label={t('files.name')} htmlFor="files-name" error={error}>
           <input id="files-name" ref={ref} className="input" value={name} spellCheck={false} autoCapitalize="off" autoCorrect="off" onChange={(e) => setName(e.target.value)} />
