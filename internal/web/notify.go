@@ -421,7 +421,7 @@ func (s *Server) onHerdrTransition(sess *term.Session, h *store.Host, tr herdr.T
 				// (Not known in time: finished, as before there was any reading.)
 				if st != bgRunning && st != bgMoved && still() {
 					note.Title, note.TitleZh = agent+" finished", agentZh+" 已完成"
-					note.Body, note.BodyZh = s.doneBody(sess.ID, tr, round, where)
+					note.Body, note.BodyZh = s.doneBody(sess, tr, round, where)
 				}
 				s.replaceAlert(sess.OwnerID, al, note)
 			}()
@@ -452,7 +452,7 @@ func (s *Server) onHerdrTransition(sess *term.Session, h *store.Host, tr herdr.T
 			if !still() || s.paneWatched(sess.ID, tr.Pane.ID) {
 				return
 			}
-			note.Body, note.BodyZh = s.doneBody(sess.ID, tr, round, where)
+			note.Body, note.BodyZh = s.doneBody(sess, tr, round, where)
 			// (Heard, for one who asked for a sound when an agent finishes.)
 			note.Quiet = !s.chimeOnDone(sess.OwnerID)
 			s.notifier.Send(context.Background(), sess.OwnerID, note)
@@ -464,8 +464,8 @@ func (s *Server) onHerdrTransition(sess *term.Session, h *store.Host, tr herdr.T
 // words, the marks of its Markdown left out), then where it is; where it
 // said nothing known, its terminal's title if that says anything, then
 // where. Read after bgAwait (lastAnswer's read is that one's).
-func (s *Server) doneBody(session string, tr herdr.Transition, round int64, where string) (string, string) {
-	said := plainWords(s.lastAnswer(session, tr.Pane.ID, round))
+func (s *Server) doneBody(sess *term.Session, tr herdr.Transition, round int64, where string) (string, string) {
+	said := plainWords(s.lastAnswer(sess, tr, round))
 	if said == "" && titleSays(tr.Pane.Title, tr.Pane.Agent) {
 		said = truncate(tr.Pane.Title, doneSaidMax)
 	}
@@ -543,19 +543,6 @@ func (s *Server) bgAwait(session, pane string, round int64) string {
 	ctx, cancel := context.WithTimeout(context.Background(), bgWait)
 	defer cancel()
 	return p.await(ctx, pane, round)
-}
-
-// lastAnswer: what a Claude pane's agent said last in the turn of round, as
-// read at its end (the same read as bgAwait's, which it follows: no look of
-// its own). "" where not known: not a Claude pane, not read in time, or it
-// said nothing since the person's message. Whitespace made single, at most
-// maxSaid letters.
-func (s *Server) lastAnswer(session, pane string, round int64) string {
-	p := s.herdrSocks.bgOf(session)
-	if p == nil {
-		return ""
-	}
-	return p.said(pane, round)
 }
 
 // replaceAlert replaces an alert, unless the agent waits again meanwhile.

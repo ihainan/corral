@@ -517,11 +517,7 @@ func lastSaidIn(lines [][]byte) string {
 		if len(parts) == 0 {
 			continue
 		}
-		t := strings.Join(strings.Fields(strings.Join(parts, "\n")), " ")
-		if r := []rune(t); len(r) > maxSaid {
-			t = string(r[:maxSaid])
-		}
-		return t
+		return oneLineSaid(strings.Join(parts, "\n"))
 	}
 	return ""
 }
