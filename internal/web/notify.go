@@ -467,7 +467,7 @@ func (s *Server) onHerdrTransition(sess *term.Session, h *store.Host, tr herdr.T
 func (s *Server) doneBody(sess *term.Session, tr herdr.Transition, round int64, where string) (string, string) {
 	said := plainWords(s.lastAnswer(sess, tr, round))
 	if said == "" && titleSays(tr.Pane.Title, tr.Pane.Agent) {
-		said = truncate(tr.Pane.Title, doneSaidMax)
+		said = truncate(maskSecrets(tr.Pane.Title), doneSaidMax)
 	}
 	if said == "" {
 		return where, where
@@ -491,7 +491,7 @@ func plainWords(s string) string {
 		}
 		return ""
 	})
-	s = strings.Join(strings.Fields(s), " ")
+	s = maskSecrets(strings.Join(strings.Fields(s), " "))
 	r := []rune(s)
 	if len(r) <= doneSaidMax {
 		return s
@@ -503,6 +503,45 @@ func plainWords(s string) string {
 		}
 	}
 	return string(r[:doneSaidMax-1]) + "…"
+}
+
+// An alert goes to a phone's lock screen: what may be a secret in the
+// agent's words is left out by its shape (11-14, ai-81's catch: an answer
+// with a login link's key). A bare address keeps its host and path, not
+// its query, fragment or user; a run of 24 or more letters and digits
+// mixed (a key, a token, a long hash) goes; "password=…", "token: …"
+// keep their name only.
+var (
+	bareURL   = regexp.MustCompile(`(?i)\b(https?|wss?)://[^\s<>"'()\[\]]+`)
+	tokenLike = regexp.MustCompile(`[A-Za-z0-9_\-]{20,}`)
+	// (By a name only where it is set — "token=…", "token: …" — or a bearer's:
+	// "2M token 左右" is a count of the model's, not a key.)
+	namedSet = regexp.MustCompile(`(?i)\b(password|passwd|pwd|passphrase|token|secret|api[_-]?key|access[_-]?key|private[_-]?key|authorization)(\s*[:=]\s*)(?:(?:bearer|basic|token)\s+)?("[^"]*"|'[^']*'|\S+)|\b(bearer)(\s+)(\S+)`)
+)
+
+func maskSecrets(s string) string {
+	s = bareURL.ReplaceAllStringFunc(s, func(u string) string {
+		scheme, rest, _ := strings.Cut(u, "://")
+		if at := strings.LastIndex(strings.SplitN(rest, "/", 2)[0], "@"); at >= 0 {
+			rest = rest[at+1:]
+		}
+		if i := strings.IndexAny(rest, "?#"); i >= 0 {
+			rest = rest[:i] + "…"
+		}
+		return scheme + "://" + rest
+	})
+	s = namedSet.ReplaceAllString(s, "$1$2$4$5…")
+	// (A key has a long run of its own, letters and digits mixed: a part of
+	// 20 or more between its "-" and "_". Not a version, a UUID, a short
+	// hash, a long word or number: their parts are short, or of one kind.)
+	return tokenLike.ReplaceAllStringFunc(s, func(t string) string {
+		for _, part := range strings.FieldsFunc(t, func(r rune) bool { return r == '-' || r == '_' }) {
+			if len(part) >= 20 && strings.ContainsAny(part, "0123456789") && strings.IndexFunc(part, func(r rune) bool { return (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') }) >= 0 {
+				return "…"
+			}
+		}
+		return t
+	})
 }
 
 // titleSays: a terminal title worth an alert's line — not empty, not the
