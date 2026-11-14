@@ -4088,22 +4088,27 @@ function FileHeadTools({ path, onCopy }: { path: string; onCopy: (s: string) => 
   )
 }
 
-function PathBar({ path, onCopy, acts: only }: { path: string; onCopy: (s: string) => void; acts?: boolean }) {
+// The file a step read or changed, opened (11-14: its whole path again
+// under the line that names it, and four words to press in a row): its
+// name and folder, its tools as the panels' icons; a picture, as a picture.
+function FileCard({ path, onCopy }: { path: string; onCopy: (s: string) => void }) {
   const acts = useContext(FileActsOf)
   const full = fullPath(path)
+  const whole = full ?? path
+  const name = baseName(whole)
+  const dir = whole.slice(0, whole.length - name.length).replace(/\/$/, '') || '/'
+  const pic = !!full && !!acts?.thumb && IMAGE_EXT.test(full)
   return (
-    <div className={'convo-path' + (only ? ' is-acts' : '')}>
-      {!only && <span className="convo-path-text">{full ?? path}</span>}
-      <span className="convo-path-acts">
-        <button type="button" className="link-btn" onClick={() => onCopy(full ?? path)}>{t('convo.path.copy')}</button>
-        {acts && full && (
-          <>
-            {previewable(full) && <button type="button" className="link-btn" onClick={() => acts.view(full)}>{t(IMAGE_EXT.test(full) ? 'convo.path.view' : 'preview.item')}</button>}
-            <button type="button" className="link-btn" onClick={() => acts.reveal(full)}>{t('convo.path.reveal')}</button>
-            <button type="button" className="link-btn" onClick={() => acts.download(full)}>{t('convo.path.download')}</button>
-          </>
-        )}
-      </span>
+    <div className="convo-file-card">
+      {pic && <PicGrid paths={[full!]} thumb={acts!.thumb!} onOpen={(p) => acts!.view(p)} />}
+      <div className="convo-file-card-row">
+        <FileTypeIcon name={name} />
+        <span className="convo-file-card-text" title={whole}>
+          <span className="convo-file-card-name">{name}</span>
+          <span className="convo-file-card-dir">{shortPath(dir)}</span>
+        </span>
+        <FileHeadTools path={path} onCopy={onCopy} />
+      </div>
     </div>
   )
 }
@@ -5049,7 +5054,9 @@ function ToolRow({ tool, onCopy, live }: { tool: ConvoTool; onCopy: (s: string) 
   // for a notebook's: its result is all there is of it).
   // (A failed command's exit code is on the line: its output goes without it.)
   const receipt = (isEdit && !tool.error && tool.name !== 'NotebookEdit') || (!!tool.answers && !tool.error)
-  const head = tool.done && !receipt ? (code ? tool.result?.replace(/^Exit code \d+\n?/, '') : tool.result) : undefined
+  // (A picture read: shown on its card — not Claude Code's "1 image(s) read" under it.)
+  const picRead = cat === 'read' && /^\d+ image\(s\) read\.?$/.test(tool.result?.trim() ?? '')
+  const head = tool.done && !receipt && !picRead ? (code ? tool.result?.replace(/^Exit code \d+\n?/, '') : tool.result) : undefined
   // (A long result: its start and its end, what was left out between said
   // on a line of its own; all of it is what shows, is counted, is copied.)
   const tail = head !== undefined ? tool.result_tail : undefined
@@ -5078,7 +5085,7 @@ function ToolRow({ tool, onCopy, live }: { tool: ConvoTool; onCopy: (s: string) 
       </button>
       {open && (
         <div className="convo-step-body">
-          {(cat === 'read' || cat === 'edit') && !!d && !d.includes('\n') && <PathBar path={d} onCopy={onCopy} />}
+          {(cat === 'read' || cat === 'edit') && !!d && !d.includes('\n') && <FileCard path={d} onCopy={onCopy} />}
           {more && (
             <div className="convo-pre-wrap">
               <pre className="convo-pre">{v === 'cmd' ? <Code text={d} lang="bash" /> : d}</pre>
@@ -5145,7 +5152,7 @@ function ToolRow({ tool, onCopy, live }: { tool: ConvoTool; onCopy: (s: string) 
               )}
             </>
           ) : (
-            !receipt && (
+            !receipt && !picRead && (
               <div className="convo-result-head">
                 {tool.images ? t('convo.gotImages', { n: tool.images }) : tool.refs ? t('convo.gotTools', { n: tool.refs }) : t('convo.noOutput')}
               </div>

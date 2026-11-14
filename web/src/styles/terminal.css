@@ -995,11 +995,15 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-more { color: var(--term-fg-3); }
 .convo-step-body .link-btn { margin-top: 4px; font-size: var(--fs-sub); line-height: var(--lh-sub); }
 /* A file a step acted on: its whole path, then what can be done with it. */
-.convo-path { display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 14px; row-gap: 2px; margin: 0 0 8px; font-size: var(--fs-sub); line-height: var(--lh-sub); }
-.convo-path-text { font-family: var(--font-mono); font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg-2); overflow-wrap: anywhere; user-select: text; min-width: 0; }
-.convo-path-acts { display: inline-flex; flex-wrap: wrap; column-gap: 14px; }
-.convo-path .link-btn, .convo-step-body .convo-path .link-btn { margin-top: 0; font-size: var(--fs-sub); line-height: var(--lh-sub); }
-.convo-path.is-acts { margin: -2px 0 8px; }
+/* The file a step read or changed, opened (FileCard): its picture where it is one, then its name, folder and tools on one row. */
+.convo-file-card { display: flex; flex-direction: column; gap: 8px; margin: 0 0 8px; min-width: 0; }
+.convo-file-card .convo-thumbs { max-width: 320px; }
+.convo-file-card-row { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 4px 4px 4px 10px; border: 1px solid var(--term-line); border-radius: var(--r); }
+.convo-file-card-row > .file-icon, .convo-file-card-row > svg { flex: none; }
+.convo-file-card-text { flex: 1; min-width: 0; display: flex; align-items: baseline; gap: 8px; }
+.convo-file-card-name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-sub); line-height: var(--lh-sub); font-weight: 500; color: var(--term-fg); }
+.convo-file-card-dir { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-3); }
+.convo-file-card .convo-file-tools { margin-left: 0; }
 .convo-summary summary { display: flex; align-items: center; gap: 8px; cursor: pointer; list-style: none; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg-2); }
 .convo-summary summary::-webkit-details-marker { display: none; }
 .convo-summary[open] > summary > .convo-chev { transform: rotate(90deg); }
