@@ -788,10 +788,43 @@ func TestClaudeRunningMonitor(t *testing.T) {
 	if r := c.Running(); len(r) != 1 || r[0].ID != "m3" {
 		t.Errorf("ended, expired: %+v", r)
 	}
+	// (Other wordings of its time run out, or of its being stopped.)
+	c.Feed(mon("m4", "t4"))
+	c.Feed(mon("m5", "t5"))
+	c.Feed(notice("m4", `<event>[Monitor timed out — re-arm if needed.]</event>`))
+	c.Feed(notice("m5", `<event>[Monitor stopped]</event>`))
+	if r := c.Running(); len(r) != 1 || r[0].ID != "m3" {
+		t.Errorf("timed out, stopped: %+v", r)
+	}
 	// (An event that only quotes an expiry, not at its start: still going.)
 	c.Feed(notice("m3", `<summary>Monitor event: \"审查第一轮\"</summary>\n<event>log: [Monitor expired] seen</event>`))
 	if r := c.Running(); len(r) != 1 {
 		t.Errorf("quoted: %+v", r)
+	}
+}
+
+// A Monitor no word of whose end was read: past its time (and a little
+// more) it is not taken for going; one kept for good, or set going just
+// now, is.
+func TestClaudeRunningMonitorRunsOut(t *testing.T) {
+	now := time.Now().UTC()
+	mon := func(id string, at time.Time, account string) []byte {
+		return lines(
+			`{"type":"assistant","uuid":"a`+id+`","message":{"content":[{"type":"tool_use","id":"c`+id+`","name":"Monitor","input":{"description":"盯着","command":"tail -f x"}}]}}`,
+			`{"type":"user","uuid":"r`+id+`","timestamp":"`+at.Format(time.RFC3339Nano)+`","message":{"content":[{"type":"tool_result","tool_use_id":"c`+id+`","content":"Monitor started"}]},"toolUseResult":{"taskId":"`+id+`",`+account+`}}`,
+		)
+	}
+	c := NewClaude()
+	c.Feed(mon("old", now.Add(-40*time.Minute), `"timeoutMs":1800000,"persistent":false`))
+	c.Feed(mon("kept", now.Add(-40*time.Minute), `"timeoutMs":1800000,"persistent":true`))
+	c.Feed(mon("new", now.Add(-time.Minute), `"timeoutMs":1800000,"persistent":false`))
+	c.Feed(mon("late", now.Add(-31*time.Minute), `"timeoutMs":1800000,"persistent":false`))
+	var ids []string
+	for _, r := range c.Running() {
+		ids = append(ids, r.ID)
+	}
+	if strings.Join(ids, ",") != "kept,new,late" {
+		t.Errorf("going: %v", ids)
 	}
 }
 

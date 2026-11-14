@@ -9,6 +9,7 @@ package convo
 
 import (
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -137,6 +138,8 @@ type Running struct {
 	// Claude Code said when it set it going), to be looked at.
 	Cmd string `json:"cmd,omitempty"`
 	Out string `json:"out,omitempty"`
+
+	until time.Time // (a Monitor's: past this it has run out of time; zero: none)
 }
 
 type Part struct {

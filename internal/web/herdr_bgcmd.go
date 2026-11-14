@@ -237,12 +237,14 @@ func sameCmds(a, b map[string][]bgCmd) bool {
 // processes: named claude, or node running Claude Code's program; their
 // children only are looked at (as the kernel lists each thread's, else by
 // pgrep -P one at a time: a pgrep of BusyBox takes no list, nor, in older
-// ones, -u: whose each is, is looked at here). Fixed script.
+// ones, -u: whose each is, is looked at here). Not this script itself,
+// which names Claude Code's program too (its children, its subshells, run
+// as Claude Code's shell would: "&& eval '" … "pwd -P >| "). Fixed script.
 func cmdScanCommand() string {
 	script := `btime=$(sed -n 's/^btime \([0-9]*\)$/\1/p' /proc/stat 2>/dev/null); hz=$(getconf CLK_TCK 2>/dev/null)
 printf 'clock\t%s\t%s\n' "$btime" "$hz"
 if command -v pgrep >/dev/null 2>&1; then
-  claudes=$( { pgrep -x claude; pgrep -f '[c]laude-code/cli'; } 2>/dev/null | sort -u)
+  claudes=$( { pgrep -x claude; pgrep -f '[c]laude-code/cli'; } 2>/dev/null | sort -u | grep -vx "$$")
   kids=$(for c in $claudes; do
     [ -O "/proc/$c" ] || continue
     # (Read twice: a child ending while the list is read may leave others out of that reading.)
@@ -251,7 +253,7 @@ if command -v pgrep >/dev/null 2>&1; then
 else
   claudes=" $(for d in /proc/[0-9]*; do
     [ -O "$d" ] || continue
-    case "$(head -c 16 "$d/comm" 2>/dev/null) $(tr '\0' ' ' <"$d/cmdline" 2>/dev/null)" in claude\ *|*claude-code/cli*) printf '%s ' "${d#/proc/}";; esac
+    case "$(head -c 16 "$d/comm" 2>/dev/null) $(tr '\0' ' ' <"$d/cmdline" 2>/dev/null)" in claude\ *|*claude-code"/cli"*) printf '%s ' "${d#/proc/}";; esac
   done)"
   kids=$(for d in /proc/[0-9]*; do case $claudes in *" $(sed 's/^.*) //' "$d/stat" 2>/dev/null | cut -d' ' -f2) "*) echo "${d#/proc/}";; esac; done)
 fi
@@ -262,7 +264,7 @@ for k in $kids; do
   */tasks/*.output|*/tasks/*.output" (deleted)") ;;
   *)
     case $(tr '\0\n' '  ' <"/proc/$k/cmdline" 2>/dev/null) in *"&& eval '"*"pwd -P >| "*) ;; *) continue;; esac
-    s=$(tr '\0' '\n' <"/proc/$k/environ" 2>/dev/null | sed -n 's/^CLAUDE_CODE_SESSION_ID=\([0-9a-fA-F-]*\)$/\1/p' | head -n 1)
+    s=$(tr '\n\0' ' \n' <"/proc/$k/environ" 2>/dev/null | sed -n 's/^CLAUDE_CODE_SESSION_ID=\([0-9a-fA-F-]*\)$/\1/p' | head -n 1)
     [ -n "$s" ] || continue
     l="monitor:$s";;
   esac

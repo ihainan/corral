@@ -305,13 +305,18 @@ var (
 // Running is what the agent set going and has not been told has ended.
 func (c *Claude) Running() []Running {
 	out := make([]Running, 0, len(c.running))
+	now := time.Now()
 	for _, id := range c.runOrder {
-		if r, ok := c.running[id]; ok {
+		if r, ok := c.running[id]; ok && (r.until.IsZero() || now.Before(r.until)) {
 			out = append(out, r)
 		}
 	}
 	return out
 }
+
+// monitorGrace: how long past its time a Monitor is still taken for going
+// (its notice of that may come late).
+const monitorGrace = 2 * time.Minute
 
 func (c *Claude) Queued() []Queued {
 	var out []Queued
@@ -2158,6 +2163,8 @@ func (c *Claude) setGoing(t *Tool, account json.RawMessage, at, said string, cal
 	var a struct {
 		Background string `json:"backgroundTaskId"`
 		Task       string `json:"taskId"` // (a Monitor's: what it watches runs in the background)
+		Timeout    int64  `json:"timeoutMs"`
+		Persistent bool   `json:"persistent"`
 		Agent      string `json:"agentId"`
 		Async      bool   `json:"isAsync"`
 		Status     string `json:"status"`
@@ -2208,6 +2215,13 @@ func (c *Claude) setGoing(t *Tool, account json.RawMessage, at, said string, cal
 		}
 	}
 	r := Running{ID: id, What: clip(clean(what), maxTitle), Kind: kind, Time: at}
+	// (A Monitor runs out of time by itself: past that, it is not taken for
+	// going, though no word of its end was read.)
+	if t.Name == "Monitor" && a.Task != "" && !a.Persistent && a.Timeout > 0 {
+		if since, err := time.Parse(time.RFC3339Nano, at); err == nil {
+			r.until = since.Add(time.Duration(min(a.Timeout, int64(24*time.Hour/time.Millisecond)))*time.Millisecond + monitorGrace)
+		}
+	}
 	if kind == "cmd" {
 		r.Cmd = clip(clean(t.Detail), maxDetail)
 		if m := bgOutFile.FindStringSubmatch(said); m != nil {
@@ -2589,8 +2603,10 @@ var (
 	taskID       = regexp.MustCompile(`(?s)<task-id>(.*?)</task-id>`)
 	crossSession = regexp.MustCompile(`^\s*<cross-session-message[^>]*\bfrom-name="([^"]*)"`)
 	taskEvent    = regexp.MustCompile(`(?s)<event>(.*?)</event>`)
-	// "[Monitor expired after 30m with 2 events delivered. Re-arm it if you still need the watch.]"
-	monitorExpired = regexp.MustCompile(`^\[Monitor expired\b`)
+	// "[Monitor expired after 30m with 2 events delivered. Re-arm it if you
+	// still need the watch.]", "[Monitor timed out — re-arm if needed.]",
+	// "[Monitor stopped]"…
+	monitorExpired = regexp.MustCompile(`^\[Monitor (?:expired|timed out|stopped)\b`)
 	taskOutFile    = regexp.MustCompile(`(?s)<output-file>(.*?)</output-file>`)
 	// (A command set going in the background: "Output is being written to: /tmp/…/tasks/<id>.output. You will…")
 	bgOutFile     = regexp.MustCompile(`Output is being written to: (/\S+?)\.?(?:\s|$)`)
