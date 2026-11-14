@@ -21,7 +21,7 @@ import { ForkDialog, RenameDialog, type RenameTarget } from '../terminal/agentOp
 import { agentWho, ChimeCounter, chime, countsOf } from '../terminal/chime'
 import { AgentList, CODEX_EFFORTS, ConversationView, glanceOf, type ConvoAgent, type ConvoListRow, type ConvoPending, type ConvoWent, type FileActs, type ModelOpt } from '../terminal/Conversation'
 import { FilesDialog } from '../terminal/FilesDialog'
-import { lookAt, PictureDialog, useDownload } from '../terminal/picture'
+import { isLogPic, logPic, lookAt, PictureDialog, useDownload } from '../terminal/picture'
 import { IMAGE_EXT, TextPreview } from '../terminal/textPreview'
 import { attach, ATTACH_LABEL, AttachStrip, PICTURE_PATH, takeOut, type Going } from '../terminal/attach'
 import { answerable, asking, callOut, useConversation, type ConvoEntry } from '../terminal/conversation'
@@ -859,15 +859,18 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     }
     // (Looked at: a picture as one, anything else as text — the host says if it is. One at a time.)
     const look = (q: string, end = false, group?: string[]) => (IMAGE_EXT.test(q) ? (setReading(null), setViewSet(group && group.length > 1 ? group : null), setViewing(q)) : (setViewing(null), setReadingEnd(end), setReading(q)))
+    // (A picture of the log alone: no file to make whole, a picture whatever its name.)
+    const showPic = (q: string, group?: string[]) => (setReading(null), setViewSet(group && group.length > 1 ? group : null), setViewing(q))
     return {
+      logPic: (from) => logPic(cur.pane ?? '', from),
       reveal: (p) => whole(p, (q) => (setFilesIn(false), setFilesAt(q))),
       open: (p) => whole(p, (q) => (setFilesIn(true), setFilesAt(q))),
-      download: (p) => whole(p, (q) => download(sid, q)),
-      view: (p, group) => whole(p, (q) => look(q, false, group)),
+      download: (p) => (isLogPic(p) ? download(sid, p) : whole(p, (q) => download(sid, q))),
+      view: (p, group) => (isLogPic(p) ? showPic(p, group) : whole(p, (q) => (IMAGE_EXT.test(q) ? showPic(q, group) : look(q, false, group)))),
       tail: (p) => whole(p, (q) => look(q, true)),
       thumb: (p, signal) => lookAt(sid, p, { signal }),
     }
-  }, [sid, toast, download])
+  }, [sid, cur.pane, toast, download])
   // (Another tab shown — a terminal's — or another agent: what was opened of this one's files closes.)
   useEffect(() => {
     if (active) return

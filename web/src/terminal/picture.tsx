@@ -15,10 +15,20 @@ import { FileTypeIcon } from './fileIcons'
 // own cache never has them (no-store): a look after signing out is asked
 // again, and refused.
 
+// A picture of the conversation that no file of the host is told for (one
+// sent while the agent worked, one pasted in its terminal): its bytes are in
+// the log only, asked of the gateway by the row and its place there (11-14;
+// the gateway's conversation/image). Passed about as a path is, marked.
+export const LOG_PIC = 'logimg:'
+export const isLogPic = (p: string) => p.startsWith(LOG_PIC)
+export const logPic = (pane: string, from: string) => LOG_PIC + new URLSearchParams(pane ? { pane, from } : { from }).toString()
+const picURL = (sid: string, p: string) => (isLogPic(p) ? `/api/sessions/${sid}/conversation/image?` + p.slice(LOG_PIC.length) : `/api/sessions/${sid}/files/view?path=` + encodeURIComponent(p))
+const picName = (p: string) => (isLogPic(p) ? 'picture-' + (new URLSearchParams(p.slice(LOG_PIC.length)).get('from') ?? '').slice(0, 8) : p.slice(p.lastIndexOf('/') + 1))
+
 // downloadPath saves a file of the session's host on the device (saveURL:
 // the save dialog where there is one), and says what became of it.
 export function downloadPath(sessionId: string, p: string): Promise<Saved> {
-  return saveURL(p.slice(p.lastIndexOf('/') + 1), `/api/sessions/${sessionId}/files/download?path=` + encodeURIComponent(p))
+  return saveURL(picName(p), isLogPic(p) ? picURL(sessionId, p) : `/api/sessions/${sessionId}/files/download?path=` + encodeURIComponent(p))
 }
 
 // A host file's download, said when it is done, or handed to the browser,
@@ -27,7 +37,7 @@ export function useDownload() {
   const toast = useToast()
   return useCallback(
     (sessionId: string, p: string) => {
-      const name = p.slice(p.lastIndexOf('/') + 1)
+      const name = picName(p)
       void downloadPath(sessionId, p).then((s) => {
         if (s.how === 'saved') toast(t('file.saved', { name: s.as }))
         else if (s.how === 'started') toast(t('file.started', { name }))
@@ -112,7 +122,7 @@ async function work(sid: string) {
 // few times, a little later each time.)
 async function fetchPicture(job: Job): Promise<Blob> {
   for (let i = 0; ; i++) {
-    const res = await fetch(`/api/sessions/${job.sid}/files/view?path=` + encodeURIComponent(job.path), { credentials: 'same-origin', signal: job.signal })
+    const res = await fetch(picURL(job.sid, job.path), { credentials: 'same-origin', signal: job.signal })
     if (job.gen !== authGen()) throw new ApiError(401, 'unauthorized', 'signed out') // (asked as another sign-in)
     if (res.ok) {
       const blob = await res.blob()
@@ -182,6 +192,16 @@ export function fileWhere(path: string, ...more: (string | false | undefined)[])
 export function FileTools({ sid, path, onReveal, extra }: { sid: string; path: string; onReveal?: () => void; extra?: ReactNode }) {
   const download = useDownload()
   const toast = useToast()
+  // (A picture of the log alone: no path to copy, no folder to show it in.)
+  if (isLogPic(path))
+    return (
+      <>
+        {extra}
+        <HeadTool label={t('convo.path.download')} onClick={() => download(sid, path)}>
+          <Download size={16} />
+        </HeadTool>
+      </>
+    )
   return (
     <>
       {extra}
@@ -248,10 +268,11 @@ export function PictureDialog({ sid, path, group, onGo, onClose, onReveal }: { s
     )
     return () => ctl.abort()
   }, [sid, path, again])
-  const name = path.slice(path.lastIndexOf('/') + 1)
+  const logged = isLogPic(path)
+  const name = logged ? t('picture.inLog') : path.slice(path.lastIndexOf('/') + 1)
   return (
     <Dialog title={name} onClose={onClose} wide hideTitle className="dlg picture-dialog">
-      <DialogHead icon={<FileTypeIcon name={name} />} eyebrow={many ? t('picture.ofN', { i: at + 1, n: group!.length }) : undefined} title={name} titleText={path} oneLine sub={fileWhere(path)} subText={path} tools={<FileTools sid={sid} path={path} onReveal={onReveal} />} onClose={onClose} />
+      <DialogHead icon={<FileTypeIcon name={logged ? 'x.png' : name} />} eyebrow={many ? t('picture.ofN', { i: at + 1, n: group!.length }) : undefined} title={name} titleText={logged ? undefined : path} oneLine sub={logged ? t('picture.inLogSub') : fileWhere(path)} subText={logged ? undefined : path} tools={<FileTools sid={sid} path={path} onReveal={logged ? undefined : onReveal} />} onClose={onClose} />
       {/* (Its buttons over the stage, not in what scrolls: a picture at its own size is scrolled about under them.) */}
       <div className="picture-stage">
         {many && (

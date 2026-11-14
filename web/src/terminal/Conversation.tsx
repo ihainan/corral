@@ -4026,7 +4026,7 @@ const WordsAsWritten = createContext(false)
 // session the conversation is read through): shown in the files panel,
 // downloaded, looked at (a picture). Not there once that session has ended.
 // (tail: a file looked at from its end — a command's output, newest last.)
-export type FileActs = { reveal: (path: string) => void; download: (path: string) => void; view: (path: string, group?: string[]) => void; tail?: (path: string) => void; open?: (dir: string) => void; thumb?: (path: string, signal: AbortSignal) => Promise<Blob> } // (open: a folder, opened in the file panel; group: the pictures shown with it, gone through in the viewer; thumb: a picture to show small, asked of the host as the others are)
+export type FileActs = { logPic?: (from: string) => string; reveal: (path: string) => void; download: (path: string) => void; view: (path: string, group?: string[]) => void; tail?: (path: string) => void; open?: (dir: string) => void; thumb?: (path: string, signal: AbortSignal) => Promise<Blob> } // (open: a folder, opened in the file panel; group: the pictures shown with it, gone through in the viewer; thumb: a picture to show small, asked of the host as the others are)
 const FileActsOf = createContext<FileActs | undefined>(undefined)
 
 // A path the host can be asked for: absolute. (A relative one is not made
@@ -4566,7 +4566,8 @@ function UserTurn({ e, onCopy }: { e: ConvoEntry; onCopy: (s: string) => void })
   // opened. And a picture's path written in its words — one sent from here
   // goes as its path, "/…/uploads/x.png look at this" — after them, each
   // once: 11-04.)
-  const told = acts ? pics.map((p) => (p.path && fullPath(p.path) ? p.path : null)) : []
+  // (No file told — sent while the agent worked, pasted in its terminal: the log's own copy, where there is one.)
+  const told = acts ? pics.map((p) => (p.path && fullPath(p.path) ? p.path : p.from && acts.logPic ? acts.logPic(p.from) : null)) : []
   // (A path written in the words is a chip where it stands — withPictures —
   // not again under them: these are the pictures with no words of theirs.)
   const files = acts ? told : []

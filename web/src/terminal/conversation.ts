@@ -84,6 +84,7 @@ export interface ConvoPart {
   event?: ConvoEvent
   shell?: ConvoShell
   path?: string // (an image the person sent) the file it came from, where its agent told it
+  from?: string // (an image of Claude Code's log) its row and place there, "<uuid>.<n>": its bytes asked of the gateway where no path is told
 }
 
 // What a command the person ran with "!" printed (internal/convo Shell):
