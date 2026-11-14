@@ -763,10 +763,12 @@ func TestClaudeRunning(t *testing.T) {
 // monitor"): it is there, its latest event with it, until it ends, is
 // stopped, or runs out of time (said as an event, with no status).
 func TestClaudeRunningMonitor(t *testing.T) {
+	// (Set going a minute ago: within its time, whenever the test is run.)
+	at := time.Now().Add(-time.Minute).UTC().Format(time.RFC3339)
 	mon := func(id, call string) []byte {
 		return lines(
 			`{"type":"assistant","uuid":"a`+id+`","message":{"content":[{"type":"tool_use","id":"`+call+`","name":"Monitor","input":{"description":"审查第一轮 (PID 4073646)","timeout_ms":1800000,"command":"while kill -0 4073646; do sleep 20; done"}}]}}`,
-			`{"type":"user","uuid":"r`+id+`","timestamp":"2026-11-14T01:00:52Z","message":{"content":[{"type":"tool_result","tool_use_id":"`+call+`","content":"Monitor started (task `+id+`, expires in 30m unless the source ends first)."}]},"toolUseResult":{"taskId":"`+id+`","timeoutMs":1800000,"persistent":false}}`,
+			`{"type":"user","uuid":"r`+id+`","timestamp":"`+at+`","message":{"content":[{"type":"tool_result","tool_use_id":"`+call+`","content":"Monitor started (task `+id+`, expires in 30m unless the source ends first)."}]},"toolUseResult":{"taskId":"`+id+`","timeoutMs":1800000,"persistent":false}}`,
 		)
 	}
 	notice := func(id, body string) []byte {
@@ -776,7 +778,7 @@ func TestClaudeRunningMonitor(t *testing.T) {
 	c.Feed(mon("m1", "t1"))
 	c.Feed(mon("m2", "t2"))
 	c.Feed(mon("m3", "t3"))
-	if r := c.Running(); len(r) != 3 || r[0].ID != "m1" || r[0].What != "审查第一轮 (PID 4073646)" || r[0].Kind != "cmd" || r[0].Cmd == "" || r[0].Time != "2026-11-14T01:00:52Z" {
+	if r := c.Running(); len(r) != 3 || r[0].ID != "m1" || r[0].What != "审查第一轮 (PID 4073646)" || r[0].Kind != "cmd" || r[0].Cmd == "" || r[0].Time != at {
 		t.Fatalf("running: %+v", r)
 	}
 	c.Feed(notice("m1", `<summary>Monitor event: \"审查第一轮\"</summary>\n<event>gpt done</event>`))
