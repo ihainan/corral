@@ -69,6 +69,7 @@ type bgPane struct {
 	far     bool // (its end had no turn record: read further back)
 	due     time.Time
 	settled chan struct{} // closed once it is no longer checking
+	said    string        // what the agent said last in the turn read (see lastSaidIn)
 }
 
 // bgProber is one herdr watcher's: of its Claude panes, what each left
@@ -90,6 +91,7 @@ type bgProber struct {
 type bgRecord struct {
 	uuid string
 	n    int
+	said string // (the agent's last words before the record: lastSaidIn)
 }
 
 func newBgProber(read func(context.Context, []string, int) (map[string]bgRecord, error)) *bgProber {
@@ -159,6 +161,18 @@ func (p *bgProber) await(ctx context.Context, pane string, round int64) string {
 		return bgMoved
 	}
 	return b.state
+}
+
+// said: what pane's agent said last in the turn of round, as read at its
+// end ("" where not read, or of another round). After await.
+func (p *bgProber) said(pane string, round int64) string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	b := p.panes[pane]
+	if b == nil || (round != 0 && b.round != round) || b.state == bgChecking {
+		return ""
+	}
+	return b.said
 }
 
 func (p *bgProber) setBack(f func(pane string)) {
@@ -301,7 +315,7 @@ func (p *bgProber) once(ctx context.Context) {
 				backs = append(backs, pane)
 			}
 			changed = changed || state != b.state || r.n != b.n
-			b.state, b.n = state, r.n
+			b.state, b.n, b.said = state, r.n, r.said
 			b.due = now.Add(bgRecheck)
 			b.settle()
 		}
@@ -420,6 +434,7 @@ func parseBgTails(out []byte) map[string]bgRecord {
 				rec.n = min(*r.Pending, 999)
 			}
 			at = i
+			rec.said = lastSaidIn(lines[:i])
 			break
 		}
 		// (Those back since, with no turn begun after — Claude Code at rest,
@@ -439,6 +454,76 @@ func parseBgTails(out []byte) map[string]bgRecord {
 		got[sid] = rec
 	}
 	return got
+}
+
+// maxSaid: of the agent's last words, how much is kept (for an alert's
+// body: the start of them).
+const maxSaid = 400
+
+// lastSaidIn: what the agent said last in lines, the end of a log up to a
+// turn's record: the text of its last message that has any (not a
+// subagent's), on one look back to the person's last message — where it
+// said nothing since, "". Whitespace made single; cut at maxSaid.
+func lastSaidIn(lines [][]byte) string {
+	for i := len(lines) - 1; i >= 0; i-- {
+		l := lines[i]
+		isUser := bytes.Contains(l, []byte(`"type":"user"`))
+		if !isUser && !bytes.Contains(l, []byte(`"type":"assistant"`)) {
+			continue
+		}
+		var r struct {
+			Type    string `json:"type"`
+			Side    bool   `json:"isSidechain"`
+			Meta    bool   `json:"isMeta"`
+			Message struct {
+				Content json.RawMessage `json:"content"`
+			} `json:"message"`
+		}
+		if json.Unmarshal(l, &r) != nil || r.Side {
+			continue
+		}
+		var blocks []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		}
+		var words string
+		if json.Unmarshal(r.Message.Content, &words) != nil {
+			_ = json.Unmarshal(r.Message.Content, &blocks)
+		}
+		if r.Type == "user" {
+			// (The person's own message: nothing said after it. A tool's
+			// result, or one Claude Code wrote itself, is looked past.)
+			if r.Meta {
+				continue
+			}
+			mine := words != ""
+			for _, b := range blocks {
+				mine = mine || b.Type == "text"
+			}
+			if mine {
+				return ""
+			}
+			continue
+		}
+		if r.Type != "assistant" {
+			continue
+		}
+		var parts []string
+		for _, b := range blocks {
+			if b.Type == "text" && strings.TrimSpace(b.Text) != "" {
+				parts = append(parts, b.Text)
+			}
+		}
+		if len(parts) == 0 {
+			continue
+		}
+		t := strings.Join(strings.Fields(strings.Join(parts, "\n")), " ")
+		if r := []rune(t); len(r) > maxSaid {
+			t = string(r[:maxSaid])
+		}
+		return t
+	}
+	return ""
 }
 
 // endedIn is the subagents a log's line says ended (their task ids): a notice of

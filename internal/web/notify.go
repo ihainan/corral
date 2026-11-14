@@ -460,6 +460,19 @@ func (s *Server) bgAwait(session, pane string, round int64) string {
 	return p.await(ctx, pane, round)
 }
 
+// lastAnswer: what a Claude pane's agent said last in the turn of round, as
+// read at its end (the same read as bgAwait's, which it follows: no look of
+// its own). "" where not known: not a Claude pane, not read in time, or it
+// said nothing since the person's message. Whitespace made single, at most
+// maxSaid letters.
+func (s *Server) lastAnswer(session, pane string, round int64) string {
+	p := s.herdrSocks.bgOf(session)
+	if p == nil {
+		return ""
+	}
+	return p.said(pane, round)
+}
+
 // replaceAlert replaces an alert, unless the agent waits again meanwhile.
 func (s *Server) replaceAlert(user int64, al *waitAlert, note notify.Note) {
 	s.waitAlerts.sendReplacement(al.tag, func() bool { return s.notifier.Send(context.Background(), user, note) })

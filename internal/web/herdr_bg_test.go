@@ -44,6 +44,43 @@ func TestParseBgTails(t *testing.T) {
 	}
 }
 
+// What the agent said last in the turn read, for its "finished" alert: its
+// last message with words (its tool calls, results and a subagent's lines
+// looked past), up to the turn's record; none where it said nothing since
+// the person's message; long words cut.
+func TestParseBgTailsSaid(t *testing.T) {
+	out := strings.Join([]string{
+		"",
+		"@@corral-bg " + bgSid1,
+		`{"type":"user","uuid":"u1","message":{"content":"修一下"}}`,
+		`{"type":"assistant","uuid":"a1","message":{"content":[{"type":"text","text":"先看看。"}]}}`,
+		`{"type":"assistant","uuid":"a2","message":{"content":[{"type":"tool_use","name":"Bash","input":{}}]}}`,
+		`{"type":"user","uuid":"r2","message":{"content":[{"type":"tool_result","content":"ok"}]}}`,
+		`{"type":"assistant","uuid":"a3","message":{"content":[{"type":"thinking","thinking":"x"},{"type":"text","text":"已提交修复\n\n并部署到   ssh.inner。"}]}}`,
+		`{"type":"assistant","uuid":"s1","isSidechain":true,"message":{"content":[{"type":"text","text":"a subagent's"}]}}`,
+		`{"type":"user","uuid":"m1","isMeta":true,"message":{"content":"caveat"}}`,
+		`{"type":"system","subtype":"turn_duration","uuid":"t1"}`,
+		`{"type":"assistant","uuid":"a4","message":{"content":[{"type":"text","text":"after the record"}]}}`,
+		"",
+		"@@corral-bg " + bgSid2,
+		`{"type":"assistant","uuid":"b1","message":{"content":[{"type":"text","text":"the turn before"}]}}`,
+		`{"type":"user","uuid":"u2","message":{"content":[{"type":"text","text":"再来"}]}}`,
+		`{"type":"assistant","uuid":"b2","message":{"content":[{"type":"tool_use","name":"Bash","input":{}}]}}`,
+		`{"type":"system","subtype":"turn_duration","uuid":"t2"}`,
+	}, "\n")
+	got := parseBgTails([]byte(out))
+	if s := got[bgSid1].said; s != "已提交修复 并部署到 ssh.inner。" {
+		t.Errorf("said: %q", s)
+	}
+	if s := got[bgSid2].said; s != "" {
+		t.Errorf("nothing said since the person's message: %q", s)
+	}
+	long := parseBgTails([]byte("\n@@corral-bg " + bgSid1 + "\n" + `{"type":"assistant","uuid":"a","message":{"content":[{"type":"text","text":"` + strings.Repeat("长", 900) + `"}]}}` + "\n" + `{"type":"system","subtype":"turn_duration","uuid":"t"}`))
+	if n := len([]rune(long[bgSid1].said)); n != maxSaid {
+		t.Errorf("long: %d letters", n)
+	}
+}
+
 // A subagent back with no turn begun after it (Claude Code at rest, a
 // compaction since): no longer out. Only ended subagents count — not a
 // command's end, not one waiting, not a subagent's own line.
@@ -145,9 +182,16 @@ func TestBgProber(t *testing.T) {
 	}
 	p.consider("p1", "claude", herdr.StatusDone, bgSid1, 3)
 	time.Sleep(5 * time.Millisecond)
-	f.set(bgSid1, bgRecord{uuid: "t2"}) // (none out now)
+	f.set(bgSid1, bgRecord{uuid: "t2", said: "做完了"}) // (none out now)
 	if st := p.await(ctx, "p1", 0); st != bgNone {
 		t.Fatalf("after the subagents came back: %s", st)
+	}
+	// (What it said last, of this round only.)
+	if s := p.said("p1", 3); s != "做完了" {
+		t.Errorf("said: %q", s)
+	}
+	if s := p.said("p1", 2); s != "" {
+		t.Errorf("said, of another round: %q", s)
 	}
 	// Done, then idle (looked at in herdr): the same turn's end, not read again.
 	n := f.reads
@@ -161,6 +205,9 @@ func TestBgProber(t *testing.T) {
 	p.consider("p1", "claude", herdr.StatusDone, bgSid1, 6)
 	if st := p.await(ctx, "p1", 0); st != bgUnknown {
 		t.Fatalf("a record never written: %s", st)
+	}
+	if s := p.said("p1", 6); s != "" {
+		t.Errorf("said, its turn not read: %q", s)
 	}
 	// Not Claude, or no session: nothing read.
 	p.consider("p2", "codex", herdr.StatusDone, bgSid2, 7)
