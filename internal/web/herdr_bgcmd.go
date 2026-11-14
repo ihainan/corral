@@ -19,8 +19,10 @@ import (
 // still at it. Claude Code runs each in a shell of its own whose output
 // goes to <tmp>/claude-<uid>/<folder>/<session>/tasks/<task>.output, so
 // they are read off the host's processes, not the log: one is running for
-// as long as such a process of a Claude Code is. (A Monitor's output comes
-// through a pipe: not told this way, and not shown.)
+// as long as such a process of a Claude Code is. A Monitor's output comes
+// through a pipe, not a file: one is told by its shell (Claude Code's own,
+// running the command by eval), its session by the CLAUDE_CODE_SESSION_ID
+// Claude Code gave it — the only one of its environment read.
 //
 // Looked at apart from the subagents (bgProber): a look that fails says
 // nothing of these, and changes nothing there, nor any "finished" alert.
@@ -228,7 +230,8 @@ func sameCmds(a, b map[string][]bgCmd) bool {
 
 // cmdScanCommand prints the commands Claude Code processes of the SSH
 // account run in the background: a line "cmd<TAB><pid><TAB><start
-// ticks><TAB><where its output goes><TAB><its arguments from eval on>"
+// ticks><TAB><where its output goes, or "monitor:<session>"><TAB><its
+// arguments from eval on>"
 // each, "clock<TAB><boot time><TAB><ticks a second>", and "more" where it
 // stopped short of the rest. The Claude Code
 // processes: named claude, or node running Claude Code's program; their
@@ -255,7 +258,14 @@ fi
 n=0
 for k in $kids; do
   l=$(readlink "/proc/$k/fd/1" 2>/dev/null) || continue
-  case $l in */tasks/*.output|*/tasks/*.output" (deleted)") ;; *) continue;; esac
+  case $l in
+  */tasks/*.output|*/tasks/*.output" (deleted)") ;;
+  *)
+    case $(tr '\0\n' '  ' <"/proc/$k/cmdline" 2>/dev/null) in *"&& eval '"*"pwd -P >| "*) ;; *) continue;; esac
+    s=$(tr '\0' '\n' <"/proc/$k/environ" 2>/dev/null | sed -n 's/^CLAUDE_CODE_SESSION_ID=\([0-9a-fA-F-]*\)$/\1/p' | head -n 1)
+    [ -n "$s" ] || continue
+    l="monitor:$s";;
+  esac
   [ "$n" -lt 256 ] || { echo more; exit 0; }
   n=$((n + 1))
   st=$(sed 's/^.*) //' "/proc/$k/stat" 2>/dev/null | cut -d' ' -f20)
@@ -270,6 +280,11 @@ exit 0`
 // shell runs the command so, after setting itself up; the command may hold
 // another).
 const cmdEvalAwk = `{ i = index($0, m); if (i) print substr($0, i + length(m)) }`
+
+// cmdMonitor: what a Monitor's line says in place of where its output goes.
+var cmdMonitor = regexp.MustCompile(`^monitor:([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$`)
+
+var cmdPID = regexp.MustCompile(`^[0-9]{1,10}$`)
 
 var cmdOutput = regexp.MustCompile(`/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})/tasks/([A-Za-z0-9_-]{1,64})\.output( \(deleted\))?$`)
 
@@ -294,12 +309,19 @@ func parseCmdScan(out string) (cmds map[string][]bgCmd, whole bool) {
 			btime, _ = strconv.ParseInt(f[1], 10, 64)
 			hz, _ = strconv.ParseInt(f[2], 10, 64)
 		case len(f) == 5 && f[0] == "cmd":
-			m := cmdOutput.FindStringSubmatch(f[3])
 			start, err := strconv.ParseInt(f[2], 10, 64)
-			if m == nil || err != nil || start < 0 {
+			if err != nil || start < 0 {
 				continue
 			}
-			all = append(all, found{session: strings.ToLower(m[1]), cmd: bgCmd{Task: m[2], Title: cmdTitle(f[4])}, start: start})
+			var session, task string
+			if m := cmdOutput.FindStringSubmatch(f[3]); m != nil {
+				session, task = m[1], m[2]
+			} else if m := cmdMonitor.FindStringSubmatch(f[3]); m != nil && cmdPID.MatchString(f[1]) {
+				session, task = m[1], "monitor-"+f[1] // (its task's name is not told: its process's, for one)
+			} else {
+				continue
+			}
+			all = append(all, found{session: strings.ToLower(session), cmd: bgCmd{Task: task, Title: cmdTitle(f[4])}, start: start})
 		}
 	}
 	slices.SortStableFunc(all, func(a, b found) int { return int(min(max(a.start-b.start, -1), 1)) })

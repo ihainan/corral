@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os/exec"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -40,6 +41,25 @@ func TestParseCmdScan(t *testing.T) {
 	}
 	if c[1].Task != "b3" || c[1].Title != "cat > f <<'EOF' a long one cut short" || c[2].Task != "b2" || c[2].Title != "cd ~/w && sh suite.sh > log 2>&1" {
 		t.Errorf("then: %+v", c[1:])
+	}
+}
+
+// A Monitor's line: told by its session, its process for its task, what it
+// runs for its title; one of a session not named so, or of no process, is not.
+func TestParseCmdScanMonitor(t *testing.T) {
+	dir := "/tmp/claude-1000/-home-u-proj/" + cmdSess + "/tasks/"
+	out := "clock\t1700000000\t100\n" +
+		"cmd\t20\t3000\tmonitor:" + strings.ToUpper(cmdSess) + "\twhile kill -0 4073646 2>/dev/null; do sleep 20; done' < /dev/null && pwd -P >| /tmp/claude-a059-cwd\n" +
+		"cmd\t21\t3500\t" + dir + "b1.output\tgo test ./...' < /dev/null\n" +
+		"cmd\t22\t3600\tmonitor:not-a-session\techo\n" +
+		"cmd\tx\t3700\tmonitor:" + cmdSess + "\techo\n"
+	got, whole := parseCmdScan(out)
+	c := got[cmdSess]
+	if !whole || len(got) != 1 || len(c) != 2 {
+		t.Fatalf("got %+v", got)
+	}
+	if c[0].Task != "monitor-20" || c[0].Title != "while kill -0 4073646 2>/dev/null; do sleep 20; done" || c[0].Since != 1_700_000_000_000+30_000 || c[1].Task != "b1" {
+		t.Errorf("got %+v", c)
 	}
 }
 
