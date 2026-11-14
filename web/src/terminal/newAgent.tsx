@@ -3,6 +3,7 @@ import { api, ApiError, errorText, type SessionInfo } from '../api'
 import { t } from '../i18n'
 import { Dialog } from '../components/ui'
 import { local } from '../storage'
+import { AgentGlyph } from './agentIcons'
 
 // A new agent from the conversation page (herdr sessions): a workspace of
 // its own in a folder, the agent started there (or Claude Code taking up a
@@ -181,9 +182,10 @@ export function NewAgentDialog({ sessions, onDone, onOpen, onClose }: { sessions
         </label>
         <div className="field">
           <span>{t('newAgent.kind')}</span>
-          <div className="seg" role="radiogroup">
+          <div className="seg seg-marks" role="radiogroup">
             {(['claude', 'codex', 'opencode'] as const).map((k) => (
               <button key={k} type="button" role="radio" aria-checked={kind === k} aria-pressed={kind === k} onClick={() => (setKind(k), k !== 'claude' && setResume(''))}>
+                <AgentGlyph program={k} />
                 {t(`newAgent.kind.${k}`)}
               </button>
             ))}

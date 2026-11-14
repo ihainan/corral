@@ -36,10 +36,31 @@ export function agentMark(program?: string): Mark | undefined {
 // The tile: size, its side in px. dot: a status to mark on its corner
 // (waiting for you, working, done), none at rest. Named for a screen
 // reader as the program (the rows say it nowhere else).
+// A maker's mark alone, no tile: beside its name, as in a choice of which
+// agent to start. undefined for a program with no mark.
+export function AgentGlyph({ program, size = 16 }: { program: string; size?: number }) {
+  const m = agentMark(program)
+  const grad = useId() // (a page holds many of these: each its own)
+  if (!m) return null
+  return (
+    <svg className="agent-glyph" viewBox="0 0 24 24" width={size} height={size} fill={m.grad ? `url(#${grad})` : m.color ?? 'currentColor'} fillRule={m.even ? 'evenodd' : undefined} clipRule={m.even ? 'evenodd' : undefined} aria-hidden="true">
+      {m.grad && (
+        <defs>
+          <linearGradient id={grad} x1="0" y1="0" x2="0" y2="1">
+            {m.grad.map((c, i) => (
+              <stop key={c + i} offset={m.grad!.length < 2 ? 0 : i / (m.grad!.length - 1)} stopColor={c} />
+            ))}
+          </linearGradient>
+        </defs>
+      )}
+      <path d={m.d} />
+    </svg>
+  )
+}
+
 export function AgentIcon({ program, size = 28, dot }: { program?: string; size?: number; dot?: 'blocked' | 'working' | 'done' | 'bg' }) {
   const m = agentMark(program)
   const glyph = Math.round(size * 0.58)
-  const grad = useId() // (a page holds many of these: each its own)
   return (
     <span
       className={'agent-icon' + (m?.color ? '' : ' is-plain')}
@@ -48,18 +69,7 @@ export function AgentIcon({ program, size = 28, dot }: { program?: string; size?
       {...(program ? { role: 'img', 'aria-label': m?.name ?? program } : { 'aria-hidden': true })}
     >
       {m ? (
-        <svg viewBox="0 0 24 24" width={glyph} height={glyph} fill={m.grad ? `url(#${grad})` : 'currentColor'} fillRule={m.even ? 'evenodd' : undefined} clipRule={m.even ? 'evenodd' : undefined} aria-hidden="true">
-          {m.grad && (
-            <defs>
-              <linearGradient id={grad} x1="0" y1="0" x2="0" y2="1">
-                {m.grad.map((c, i) => (
-                  <stop key={c + i} offset={m.grad!.length < 2 ? 0 : i / (m.grad!.length - 1)} stopColor={c} />
-                ))}
-              </linearGradient>
-            </defs>
-          )}
-          <path d={m.d} />
-        </svg>
+        <AgentGlyph program={program!} size={glyph} />
       ) : (
         <SquareTerminal size={glyph} strokeWidth={1.75} aria-hidden="true" />
       )}
