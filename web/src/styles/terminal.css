@@ -1779,14 +1779,16 @@ button.convo-running-what { padding: 0; border: 0; background: none; font: inher
 @media (pointer: coarse) { .host-history-row { padding: 11px 12px; } }
 
 /* What the session used, under its context */
-.convo-cost { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--term-line); }
-.convo-cost-head { font-weight: 600; }
-.convo-runs-row.convo-cost-head > :first-child { flex: 1 1 auto; min-width: 0; }
-.convo-runs-row.convo-cost-head > :last-child { flex: none; white-space: nowrap; }
+/* The usage popover's blocks (11-14): one heading look, one rule and room between them. */
+.convo-pop-sec + .convo-pop-sec { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--term-line); }
+.convo-pop-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin: 0 0 6px; font-size: var(--fs-note); line-height: var(--lh-note); font-weight: 600; color: var(--term-fg-2); }
+.convo-cost-total { font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg); font-variant-numeric: tabular-nums; }
+.convo-cost-at { margin: -4px 0 6px; }
 .convo-cost-model { padding: 2px 0; }
 .convo-cost-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.convo-cost-tokens { font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-3); font-variant-numeric: tabular-nums; }
-.convo-cost-none { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--term-line); }
+.convo-runs-row > .convo-cost-name { color: var(--term-fg); flex: 1 1 auto; }
+.convo-cost-tokens { display: flex; flex-wrap: wrap; gap: 0 10px; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-3); font-variant-numeric: tabular-nums; }
+.convo-cost-tokens > span { white-space: nowrap; }
 
 /* The conversation searched: a bar under its own, the hits under it */
 .convo-search { flex: none; display: flex; flex-direction: column; border-bottom: 1px solid var(--term-line); background: var(--term-bg); font-family: var(--font-ui); }

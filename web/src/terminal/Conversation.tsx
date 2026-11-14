@@ -2756,47 +2756,43 @@ function Runs({ meta, active, mode, model, effort, quota, via, auth }: { meta: C
       )}
       {open === 'ctx' && (
         <div className={'convo-runs-pop' + (sheet ? ' is-sheet' : '')} role="dialog" aria-label={t('convo.ctxTitle')}>
-          {/* Two blocks, each under a name of its own: what this session
-              runs with, then the account's quota — which before had the
-              only heading of the two, as though the rest hung off it. */}
-          <div className="convo-runs-row convo-cost-head">
-            <span>{t('convo.ctxHead')}</span>
-          </div>
-          <div className="convo-runs-row">
-            <span>{t('convo.ctxTitle')}</span>
-            <span>{t('convo.ctxTokens', { n: used.toLocaleString(getLang()) })}</span>
-          </div>
-          {windows.map((w) => {
-            const p = Math.min(100, Math.round((used / w) * 100))
-            return (
-              <div key={w} className="convo-runs-win">
-                <div className="convo-runs-row">
-                  <span>{t('convo.ctxOf', { w: tokens(w) })}</span>
-                  <span>{p}%</span>
+          {/* Blocks of one look each (11-14: three kinds of heading, a count
+              said twice, a long note under every bar): this session — how
+              full, of what window, the model, its last answer — then the
+              account's quota, then the usage. */}
+          <section className="convo-pop-sec">
+            <h3 className="convo-pop-head">{t('convo.ctxHead')}</h3>
+            {windows.map((w) => {
+              const p = Math.min(100, Math.round((used / w) * 100))
+              return (
+                <div key={w} className="convo-runs-win">
+                  <div className="convo-runs-row">
+                    <span>{t('convo.ctxTitle')}</span>
+                    <span title={t('convo.ctxTokens', { n: used.toLocaleString(getLang()) })}>{t('convo.ctxOfShort', { n: tokens(used), w: tokens(w), p })}</span>
+                  </div>
+                  <div className={'convo-runs-bar' + (p >= 90 ? ' is-danger' : p >= 80 ? ' is-warn' : '')}><i style={{ width: p + '%' }} /></div>
                 </div>
-                <div className="convo-runs-bar"><i style={{ width: p + '%' }} /></div>
+              )
+            })}
+            {/* (A word on the window only where its size is not the model's own, known.) */}
+            {!(known && meta.window_by === 'model') && (
+              <p className="convo-runs-note">
+                {known ? t(meta.window_by === 'request' ? 'convo.ctxNoteWide' : 'convo.ctxNoteSaid', { w: tokens(known) }) : t(windows.length > 1 ? 'convo.ctxNote' : 'convo.ctxNoteBig')}
+              </p>
+            )}
+            {meta.model && (
+              <div className="convo-runs-row">
+                <span>{t('convo.model')}</span>
+                <span title={meta.model}>{modelName(meta.model)}</span>
               </div>
-            )
-          })}
-          {/* What the bars are of, under them: it was under the model
-              before, where it read as being about the model. */}
-          <p className="convo-runs-note">
-            {known
-              ? t(meta.window_by === 'model' ? 'convo.ctxNoteModel' : meta.window_by === 'request' ? 'convo.ctxNoteWide' : 'convo.ctxNoteSaid', { w: tokens(known) })
-              : t(windows.length > 1 ? 'convo.ctxNote' : 'convo.ctxNoteBig')}
-          </p>
-          {meta.model && (
-            <div className="convo-runs-row">
-              <span>{t('convo.model')}</span>
-              <span title={meta.model}>{modelName(meta.model)}</span>
-            </div>
-          )}
-          {meta.answer && <AnswerPart answer={meta.answer} />}
+            )}
+            {meta.answer && <AnswerPart answer={meta.answer} />}
+          </section>
           {quota && ('codex' in quota ? <QuotaSaid quota={quota.said} /> : <QuotaPart key={quota.sid + ' ' + quota.session} sid={quota.sid} session={quota.session} />)}
           {/* The subscription's use, where it is left out because this
               session does not draw on it: said, so that its place is not
               simply empty. */}
-          {!quota && where && <p className="convo-runs-note">{t('convo.viaNote', { host: where })}</p>}
+          {!quota && where && <p className="convo-runs-note convo-pop-sec">{t('convo.viaNote', { host: where })}</p>}
           {/* (No cost read yet: nothing said — a line saying "no usage" under the context's count read as if that count were none.) */}
           {meta.cost && <CostPart cost={meta.cost} />}
         </div>
@@ -2933,10 +2929,8 @@ function QuotaView({ shown, children }: { shown?: { five_hour?: ConvoQuotaWindow
   const clock = resetClock
   const now = Date.now() / 1000
   return (
-    <div className="convo-cost convo-quota">
-      <div className="convo-runs-row convo-cost-head">
-        <span>{t('quota.title')}</span>
-      </div>
+    <section className="convo-pop-sec convo-quota">
+      <h3 className="convo-pop-head">{t('quota.title')}</h3>
       {shown &&
         (
           [
@@ -2959,7 +2953,7 @@ function QuotaView({ shown, children }: { shown?: { five_hour?: ConvoQuotaWindow
           ),
         )}
       {children}
-    </div>
+    </section>
   )
 }
 
@@ -2988,24 +2982,28 @@ function AnswerPart({ answer }: { answer: ConvoAnswer }) {
 // What the session used, as Claude Code's log last said it (cost-state):
 // its tokens by model and its estimated cost, with when that was said.
 function CostPart({ cost }: { cost?: ConvoCost }) {
-  if (!cost) return <p className="convo-runs-note convo-cost-none">{t('convo.costNone')}</p>
+  if (!cost) return <p className="convo-runs-note convo-pop-sec">{t('convo.costNone')}</p>
   const d = cost.at ? new Date(cost.at) : null
   const at = !d ? '' : (d.toDateString() === new Date().toDateString() ? '' : d.toLocaleDateString(getLang(), { month: 'numeric', day: 'numeric' }) + ' ') + hhmm(d)
   const money = (n: number) => '$' + (n < 10 ? n.toFixed(2) : n.toFixed(1))
   return (
-    <div className="convo-cost">
-      <div className="convo-runs-row convo-cost-head">
-        <span>{at ? t('convo.costTitleAt', { at }) : t('convo.costTitle')}</span>
-        <span>{money(cost.usd)}</span>
-      </div>
+    <section className="convo-pop-sec convo-cost">
+      <h3 className="convo-pop-head">
+        <span>{t('convo.costTitle')}</span>
+        <span className="convo-cost-total">{money(cost.usd)}</span>
+      </h3>
+      {at && <p className="convo-runs-note convo-cost-at">{t('convo.costAt', { at })}</p>}
       {(cost.models ?? []).map((m) => (
         <div key={m.model} className="convo-cost-model">
           <div className="convo-runs-row">
-            <span className="convo-cost-name">{modelName(m.model)}</span>
-            <span>{money(m.usd ?? 0)}</span>
+            <span className="convo-cost-name" title={m.model}>{costModelName(m.model)}</span>
+            {/* (One model: its cost is the total, said once.) */}
+            {(cost.models ?? []).length > 1 && <span>{money(m.usd ?? 0)}</span>}
           </div>
           <div className="convo-cost-tokens">
-            {t('convo.costTokens', { i: tokens(m.in ?? 0), o: tokens(m.out ?? 0), r: tokens(m.cache_read ?? 0), w: tokens(m.cache_write ?? 0) })}
+            {[t('convo.costIn', { n: tokens(m.in ?? 0) }), t('convo.costOut', { n: tokens(m.out ?? 0) }), t('convo.costRead', { n: tokens(m.cache_read ?? 0) }), t('convo.costWrite', { n: tokens(m.cache_write ?? 0) })].map((x) => (
+              <span key={x}>{x}</span>
+            ))}
           </div>
         </div>
       ))}
@@ -3013,14 +3011,21 @@ function CostPart({ cost }: { cost?: ConvoCost }) {
         <div className="convo-runs-row">
           <span>{t('convo.costLines')}</span>
           <span>
-            +{cost.added ?? 0} −{cost.removed ?? 0}
+            +{(cost.added ?? 0).toLocaleString(getLang())} −{(cost.removed ?? 0).toLocaleString(getLang())}
           </span>
         </div>
       )}
       {cost.unknown && <p className="convo-runs-note">{t('convo.costUnknown')}</p>}
       <p className="convo-runs-note">{t('convo.costNote')}</p>
-    </div>
+    </section>
   )
+}
+
+// A model's id as a gateway names it ("group/auto-claude-opus-5-5"): its
+// Claude name where one is in it, the whole on hover.
+function costModelName(id: string): string {
+  const m = /claude-[a-z]+-\d+(?:-\d+)*(?:\[1m\])?/i.exec(id)
+  return modelName(m ? m[0] : id.slice(id.lastIndexOf('/') + 1))
 }
 
 // How full the context is, as a ring: past 80%, in the warning colour.
