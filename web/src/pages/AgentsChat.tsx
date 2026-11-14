@@ -220,6 +220,13 @@ function cmdsOf(r: AgentRow): RowCmds | undefined {
   return { n: a.bg_cmds, list: (a.bg_cmd_list ?? []).map((c) => ({ title: c.title, since: c.since })) }
 }
 
+// Pins kept to at most max: those of agents not on the list let go, the
+// oldest (first pinned) first, as many as must be; those on it never.
+export function makeRoom(pins: string[], here: Set<string>, max: number): string[] {
+  let over = pins.length - max
+  return over <= 0 ? pins : pins.filter((k) => here.has(k) || over-- <= 0)
+}
+
 export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: boolean }) {
   const toast = useToast()
   const prefs = usePrefs()
@@ -2248,14 +2255,14 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       icon: pinnedNow ? <PinOff size={16} /> : <Pin size={16} />,
       onSelect: () => {
         if (pinnedNow) return setPrefs({ pinnedAgents: pins.filter((k) => k !== key) })
-        // (Full: nothing let go by itself, a host away and a pane closed look
-        // alike from here; how many are out of sight said, and where all
-        // can be let go: Settings.)
-        if (pins.length >= maxPinned) {
-          const here = new Set(entries.map((e) => e.key))
-          return toast(t('agents.pinFull', { n: maxPinned, m: pins.filter((k) => !here.has(k)).length }), true)
-        }
-        setPrefs({ pinnedAgents: [...pins, key] })
+        // Full only of those on the list: pins of agents no longer here (a
+        // pane closed, a host away — alike from here) kept while there is
+        // room, and let go, the oldest first, to make room for one pinned
+        // now. 11-14: they were counted too, and 14 gone ones refused a pin.
+        const here = new Set(entries.map((e) => e.key))
+        const shown = pins.filter((k) => here.has(k))
+        if (shown.length >= maxPinned) return toast(t('agents.pinFull', { n: maxPinned }), true)
+        setPrefs({ pinnedAgents: makeRoom(pins, here, maxPinned - 1).concat(key) })
       },
     }
   }
