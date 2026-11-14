@@ -60,3 +60,40 @@ export async function saveFile(name: string, blob: Blob): Promise<Saved> {
   setTimeout(() => URL.revokeObjectURL(url), 60000)
   return { how: 'started' }
 }
+
+// A file the gateway serves (a host's file), saved on the device. Where the
+// page may ask, the save dialog is opened first — while the click still
+// counts — and the file streamed straight into what was chosen (not held
+// whole in the page: a big one would not fit). Else the link, as above (11-14:
+// a host file's download was the bare link, and did nothing to be seen in
+// Chrome's installed app; the export had been moved off it, this had not).
+export async function saveURL(name: string, url: string): Promise<Saved> {
+  const picker = (window as { showSaveFilePicker?: SavePicker }).showSaveFilePicker
+  if (picker) {
+    let chosen: Awaited<ReturnType<SavePicker>> | undefined
+    try {
+      chosen = await picker.call(window, { suggestedName: name })
+    } catch (e) {
+      if (e instanceof DOMException && e.name === 'AbortError') return { how: 'cancelled' }
+      // (Not allowed now — the click too long ago: the link below.)
+    }
+    if (chosen) {
+      try {
+        const res = await fetch(url, { credentials: 'same-origin' })
+        if (!res.ok || !res.body) return { how: 'failed' }
+        const out = await chosen.createWritable()
+        await res.body.pipeTo(out as unknown as WritableStream<Uint8Array>) // (closed by it, when all is in)
+        return { how: 'saved', as: chosen.name }
+      } catch {
+        return { how: 'failed' }
+      }
+    }
+  }
+  const a = document.createElement('a')
+  a.href = url
+  a.download = name
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  return { how: 'started' }
+}

@@ -6,7 +6,7 @@ import { Dialog, DialogHead, HeadTool } from '../components/ui'
 import { isDark, usePrefs } from '../prefs'
 import { Code } from './Code'
 import { Markdown } from './markdown'
-import { downloadPath, FileTools, fileWhere } from './picture'
+import { FileTools, fileWhere, useDownload } from './picture'
 import { FileTypeIcon } from './fileIcons'
 import { formatSize } from './FilesDialog'
 
@@ -48,7 +48,7 @@ export function langOf(path: string): string | undefined {
 
 type Read = { text: string; size: number; cut: boolean }
 
-function readError(e: unknown): string {
+export function readError(e: unknown): string {
   switch (e instanceof ApiError ? e.code : '') {
     case 'not_text':
       return t('preview.notText')
@@ -70,6 +70,7 @@ const MD_DRAWN_MAX = 300_000
 // shown scrolled to the bottom.
 export function TextPreview({ sid, path, tail = false, onClose, onReveal }: { sid: string; path: string; tail?: boolean; onClose: () => void; onReveal?: () => void }) {
   usePrefs() // (its colours follow the theme)
+  const download = useDownload()
   const [read, setRead] = useState<Read | null>(null)
   const [error, setError] = useState('')
   const [again, setAgain] = useState(0)
@@ -137,7 +138,7 @@ export function TextPreview({ sid, path, tail = false, onClose, onReveal }: { si
             <p>{error}</p>
             <span className="picture-acts">
               <button type="button" className="btn" onClick={() => setAgain((n) => n + 1)}>{t('common.retry')}</button>
-              <button type="button" className="btn" onClick={() => downloadPath(sid, path)}><Download size={15} /> {t('convo.path.download')}</button>
+              <button type="button" className="btn" onClick={() => download(sid, path)}><Download size={15} /> {t('convo.path.download')}</button>
             </span>
           </div>
         ) : !read ? (

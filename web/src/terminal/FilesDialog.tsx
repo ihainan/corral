@@ -5,7 +5,7 @@ import { api, ApiError, errorText, postFile, type FileEntry, type FileListing } 
 import { getLang, t } from '../i18n'
 import { Confirm, Dialog, Field, LoadError, Menu, copyText, useToast, type MenuItem } from '../components/ui'
 import { local } from '../storage'
-import { downloadPath, PictureDialog } from './picture'
+import { PictureDialog, useDownload } from './picture'
 import { IMAGE_EXT, previewable, TextPreview } from './textPreview'
 
 type Props = {
@@ -236,9 +236,10 @@ export function FilesDialog({ sessionId, start, reveal, onPath, onInsert, onClos
     })
   }
 
+  const saveHostFile = useDownload()
   const download = (e: FileEntry) => {
     if (path === null) return
-    downloadPath(sessionId, join(path, e.name))
+    saveHostFile(sessionId, join(path, e.name))
   }
 
   // Uploads wait in one queue and go one after another, each into the folder

@@ -1662,7 +1662,29 @@ button.convo-running-what { padding: 0; border: 0; background: none; font: inher
    output as a file to open. 11-13: before, a heading of its own over the
    sentence, the command a grey wall, the output's path a sentence wrapped
    over three lines, and two buttons for one action each. */
-.dialog.bg-cmd-dialog { max-width: 640px; }
+/* A background command beside the thread (BgPanel, 11-14): the panel's own colours. */
+.convo-bg-body { gap: 20px; padding-top: 16px; }
+.convo-bg .bg-cmd-label { color: var(--term-fg-3); }
+.convo-bg .bg-cmd-text { background: var(--term-chrome); border-color: var(--term-line); color: var(--term-fg); }
+.convo-bg .bg-cmd-copy.icon-btn { color: var(--term-fg-3); }
+.convo-bg .bg-cmd-copy.icon-btn:hover { color: var(--term-fg); background: var(--term-hover); }
+.convo-bg .bg-cmd-all, .convo-bg .bg-out-whole { color: var(--term-accent-text); }
+.convo-bg .bg-cmd-what, .convo-bg .bg-cmd-note { color: var(--term-fg-2); }
+.convo-bg .bg-cmd-live { background: var(--term-ok-text); }
+.convo-bg .bg-cmd-file { border-color: var(--term-line); color: var(--term-fg); }
+.convo-bg .bg-cmd-file:hover:not(:disabled) { background: var(--term-hover); }
+.convo-bg .bg-cmd-file-ic, .convo-bg .bg-cmd-file-dir { color: var(--term-fg-3); }
+.bg-out-head { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.bg-out-file { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-weight: 400; }
+.bg-out-whole { flex: none; font-size: var(--fs-note); line-height: var(--lh-note); font-weight: 500; }
+.bg-out {
+  margin: 0; padding: 10px 12px; border-radius: var(--r); border: 1px solid var(--term-line); background: var(--term-chrome); color: var(--term-fg);
+  font-family: var(--font-mono); font-size: var(--fs-note); line-height: var(--lh-note); white-space: pre-wrap; overflow-wrap: anywhere;
+  max-height: 60vh; overflow-y: auto; overscroll-behavior: contain; /* (its own scroll: the command above stays in sight) */
+}
+.bg-out-cut { color: var(--term-fg-3); }
+.bg-out-note { margin: 0; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg-3); }
+@media (pointer: coarse) { .bg-out-whole { position: relative; } .bg-out-whole::after { content: ''; position: absolute; inset: -13px -8px; } }
 .bg-cmd-live { display: inline-block; width: 6px; height: 6px; margin-right: 6px; border-radius: 50%; background: var(--ok); vertical-align: middle; }
 .bg-cmd-sec { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .bg-cmd-label { font-size: var(--fs-note); line-height: var(--lh-note); font-weight: 500; color: var(--fg-3); }

@@ -164,3 +164,24 @@ if (offences.length) {
   process.exit(1)
 }
 console.log('styles: type, weight, text colour and spacing on the scale')
+
+// A file saved through a bare download link, anywhere but saveFile.ts: it
+// does nothing to be seen in some browsers (Chrome's installed app, an
+// extension taking downloads over) — the export was moved off it, a host
+// file's download was not, and a person pressed it for nothing (11-14). Go
+// through saveFile / saveURL, which open the save dialog and say what became of it.
+const saving = []
+const walkTs = (d) => {
+  for (const n of readdirSync(d)) {
+    const p = join(d, n)
+    if (statSync(p).isDirectory()) walkTs(p)
+    else if (/\.tsx?$/.test(n) && n !== 'saveFile.ts') saving.push(p)
+  }
+}
+walkTs(join(web, 'src'))
+const linkSaves = saving.filter((p) => /\.download\s*=|<a\b[^>]*\sdownload[\s=>]/.test(readFileSync(p, 'utf8'))).map((p) => relative(web, p))
+if (linkSaves.length) {
+  console.error(linkSaves.map((p) => `${p}: a download link — save through saveFile / saveURL (src/saveFile.ts)`).join('\n'))
+  process.exit(1)
+}
+console.log('saves: through saveFile.ts only')

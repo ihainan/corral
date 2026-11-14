@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import { saveURL, type Saved } from '../saveFile'
 import { ChevronLeft, ChevronRight, Copy, Download, FolderOpen } from 'lucide-react'
 import { ApiError, authGen, errorText, onAuthChange } from '../api'
 import { t } from '../i18n'
@@ -14,14 +15,27 @@ import { FileTypeIcon } from './fileIcons'
 // own cache never has them (no-store): a look after signing out is asked
 // again, and refused.
 
-// downloadPath has the browser save a file of the session's host.
-export function downloadPath(sessionId: string, p: string) {
-  const a = document.createElement('a')
-  a.href = `/api/sessions/${sessionId}/files/download?path=` + encodeURIComponent(p)
-  a.download = p.slice(p.lastIndexOf('/') + 1)
-  document.body.appendChild(a)
-  a.click()
-  a.remove()
+// downloadPath saves a file of the session's host on the device (saveURL:
+// the save dialog where there is one), and says what became of it.
+export function downloadPath(sessionId: string, p: string): Promise<Saved> {
+  return saveURL(p.slice(p.lastIndexOf('/') + 1), `/api/sessions/${sessionId}/files/download?path=` + encodeURIComponent(p))
+}
+
+// A host file's download, said when it is done, or handed to the browser,
+// or failed — never nothing to be seen.
+export function useDownload() {
+  const toast = useToast()
+  return useCallback(
+    (sessionId: string, p: string) => {
+      const name = p.slice(p.lastIndexOf('/') + 1)
+      void downloadPath(sessionId, p).then((s) => {
+        if (s.how === 'saved') toast(t('file.saved', { name: s.as }))
+        else if (s.how === 'started') toast(t('file.started', { name }))
+        else if (s.how === 'failed') toast(t('file.downloadFailed', { name }), true)
+      })
+    },
+    [toast],
+  )
 }
 
 type Job = { sid: string; path: string; resolve: (b: Blob) => void; reject: (e: unknown) => void; signal?: AbortSignal; gen: number; fresh?: boolean; n: number }
@@ -166,6 +180,7 @@ export function fileWhere(path: string, ...more: (string | false | undefined)[])
 // copy its path, show it in the file panel, download it. (extra: the
 // viewer's own, before them.)
 export function FileTools({ sid, path, onReveal, extra }: { sid: string; path: string; onReveal?: () => void; extra?: ReactNode }) {
+  const download = useDownload()
   const toast = useToast()
   return (
     <>
@@ -183,7 +198,7 @@ export function FileTools({ sid, path, onReveal, extra }: { sid: string; path: s
           <FolderOpen size={16} />
         </HeadTool>
       )}
-      <HeadTool label={t('convo.path.download')} onClick={() => downloadPath(sid, path)}>
+      <HeadTool label={t('convo.path.download')} onClick={() => download(sid, path)}>
         <Download size={16} />
       </HeadTool>
     </>

@@ -1,11 +1,10 @@
 import { createContext, Fragment, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { ArrowDown, ArrowUp, Check, Copy, FileText, FolderOpen, Info, Image as ImageIcon, ImageOff, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, Clock, Download, Eye, GitBranch, Keyboard, ListOrdered, Loader, MoreHorizontal, MoreVertical, PanelLeft, Pin, RotateCw, Search, Terminal, TriangleAlert, X, Plus } from 'lucide-react'
+import { ArrowDown, ArrowUp, Check, Copy, FileText, FolderOpen, Info, Image as ImageIcon, ImageOff, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, Clock, Download, Eye, GitBranch, Keyboard, ListOrdered, Loader, MoreHorizontal, MoreVertical, PanelLeft, Pin, RotateCw, Search, TriangleAlert, X, Plus } from 'lucide-react'
 import { t, getLang, type I18nKey } from '../i18n'
 import { api } from '../api'
 import { asHeld, dayStart, FOLDED, foldAt, GROUPS, inGroup, listOrder, pinned, type ConvoListRow, type RowCmds } from './agentOrder'
 import { copyText, Dialog, DialogHead, isCoarse, Menu, MenuLayer, useToast, type MenuItem } from '../components/ui'
 import { saveFile } from '../saveFile'
-import { isDark, usePrefs } from '../prefs'
 import { composing, foldAllKey, helpKey, jumpKey, onMac, sideKey, switchKey } from './pageKeys'
 import { keepNames, keptNames, local } from '../storage'
 import { useFlip } from '../flip'
@@ -18,7 +17,7 @@ import { Code } from './Code'
 import { ConvoSearchPanel } from './convoSearchPanel'
 import { ConvoTurnsPanel } from './convoTurnsPanel'
 import { ConvoRail, railCell, type RailTurn } from './convoRail'
-import { IMAGE_EXT, previewable } from './textPreview'
+import { IMAGE_EXT, previewable, readError } from './textPreview'
 import { useObjectURL } from './picture'
 import { previewOf } from './convoTurns'
 import { itemKey } from './convoSearch'
@@ -510,16 +509,25 @@ export function ConversationView({
   // back out of), in the same place: one at a time.
   const [changes, setChanges] = useState<{ key: string; path?: string } | null>(null)
   const [subs, setSubs] = useState<Sub[] | null>(null)
-  const subsNow = useRef(subs) // (a subagent's conversation in front: the thread's keys are not the thread's)
-  subsNow.current = subs
+  const subsNow = useRef<Sub[] | null>(subs) // (a subagent's conversation, or a command's, in front: the thread's keys are not the thread's)
+  subsNow.current = subs ?? (bgCmd ? [] : null)
   const show = useCallback((key: string, path?: string) => {
     setSubs(null)
+    setBgCmd(null)
     setChanges({ key, path })
   }, [])
   const unshow = useCallback(() => setChanges(null), [])
   const openSub = useCallback((s: Sub) => {
     setChanges(null)
+    setBgCmd(null)
     setSubs([s])
+  }, [])
+  // A background command (or a Monitor) in the same place: beside the thread,
+  // not a dialog — its output under it, no second dialog over the first (11-14).
+  const openCmd = useCallback((r: ConvoRunning) => {
+    setChanges(null)
+    setSubs(null)
+    setBgCmd(r)
   }, [])
   // On a touch screen, a subagent's panel is a screen of its own: the phone's
   // back (a swipe, its key) shuts it, as it would a page, rather than leaving
@@ -530,7 +538,7 @@ export function ConversationView({
   const activeRef = useRef(active)
   activeRef.current = active
   useEffect(() => {
-    const open = !!subs?.length
+    const open = !!subs?.length || !!bgCmd
     if (open && !subEntry.current && active && isCoarse()) {
       history.pushState({ ...(history.state ?? {}), corralSub: true }, '')
       subEntry.current = true
@@ -538,7 +546,7 @@ export function ConversationView({
       subEntry.current = false
       if (history.state?.corralSub) history.back()
     }
-  }, [subs, active])
+  }, [subs, bgCmd, active])
   useEffect(() => {
     // (An entry still marked for a panel no longer open — the page went to
     // another agent with it open, in place of its entry: the mark taken off.)
@@ -550,10 +558,26 @@ export function ConversationView({
       if (!subEntry.current || !activeRef.current) return
       subEntry.current = false
       setSubs(null)
+      setBgCmd(null)
     }
     window.addEventListener('popstate', onPop)
     return () => window.removeEventListener('popstate', onPop)
   }, [])
+  // All the work going on, as the bar over the composer lists it: subagents
+  // (where they can be looked into) and commands — one after another from a
+  // panel, whichever it is (11-14). By the log's ids only.
+  const subsOk = !convo.bind?.agent || convo.bind.agent === 'claude' || convo.bind.agent === 'codex'
+  const work = (convo.running ?? []).filter((r) => (r.kind === 'agent' && isSubId(r.id) && subsOk) || r.kind === 'cmd')
+  const workNav = (id: string): WorkNav | undefined => {
+    const i = work.findIndex((r) => r.id === id)
+    if (i < 0 || work.length < 2) return undefined
+    const go = (j: number) => {
+      const r = work[(j + work.length) % work.length]
+      if (r.kind === 'agent') openSub({ agent: r.id, title: r.what })
+      else openCmd(r)
+    }
+    return { i, n: work.length, prev: () => go(i - 1), next: () => go(i + 1) }
+  }
   const shownEdits = changes ? (list.find((it) => it.kind === 'answer' && it.key === changes.key) as Extract<Item, { kind: 'answer' }> | undefined)?.edits : null
   useEffect(() => {
     if (changes && !shownEdits) setChanges(null) // (the turn is no longer kept, or another conversation shows)
@@ -1603,7 +1627,7 @@ export function ConversationView({
               const r = convo.running?.find((x) => x.id === id)
               if (!r) return
               if (r.kind === 'agent' && isSubId(r.id)) openSub({ agent: r.id, title: r.what })
-              else setBgCmd(r)
+              else openCmd(r)
             },
             onDraft,
           }}
@@ -1711,12 +1735,6 @@ export function ConversationView({
         )}
       </div>
       <div className="convo-dock">
-        {/* (Its details kept here, not with the list above: it stays when the
-            command ends — the list gone with it — saying so, its output still
-            to be seen; not over another tab — review 1ad2c3d.) */}
-        {bgCmd && active && (
-          <BgCmdDialog r={convo.running?.find((x) => x.id === bgCmd.id) ?? bgCmd} gone={!convo.running?.some((x) => x.id === bgCmd.id)} onClose={() => setBgCmd(null)} />
-        )}
         {convo.status === 'ready' && convo.tasks && <Tasks tasks={convo.tasks} fold={!!ask} />}
         {/* (Asked from the screen: also where its log is not read.) */}
         {(convo.status === 'ready' || convo.status === 'none') && ask && (
@@ -1739,7 +1757,7 @@ export function ConversationView({
             scanOf={active && (!convo.bind?.agent || convo.bind.agent === 'claude') ? convo.of : undefined}
             items={convo.running}
             waiting={waitingOn}
-            openCmd={setBgCmd}
+            openCmd={openCmd}
             openSub={!convo.bind?.agent || convo.bind.agent === 'claude' || convo.bind.agent === 'codex' ? openSub : undefined}
           />
         )}
@@ -1779,8 +1797,7 @@ export function ConversationView({
           sub={subs[subs.length - 1]}
           depth={subs.length}
           live={(a) => !!convo.running?.some((r) => r.kind === 'agent' && r.id === a)}
-          siblings={subs.length === 1 ? convo.running?.filter((r) => r.kind === 'agent' && isSubId(r.id)).map((r) => ({ agent: r.id, title: r.what })) : undefined}
-          onSwitch={(s) => setSubs([s])}
+          nav={subs.length === 1 ? workNav(subs[0].agent) : undefined}
           onOpen={(s) => setSubs((cur) => [...(cur ?? []), s])}
           onBack={() => setSubs((cur) => (cur && cur.length > 1 ? cur.slice(0, -1) : null))}
           onClose={() => setSubs(null)}
@@ -1788,6 +1805,18 @@ export function ConversationView({
           copy={copy}
         />
         </ForkAtOf.Provider>
+      )}
+      {/* (Kept when the command ends — gone from the list — saying so, its output still there: review 1ad2c3d.) */}
+      {bgCmd && convo.of && (
+        <BgPanel
+          key={bgCmd.id}
+          of={convo.of}
+          r={convo.running?.find((x) => x.id === bgCmd.id) ?? bgCmd}
+          gone={!convo.running?.some((x) => x.id === bgCmd.id)}
+          nav={workNav(bgCmd.id)}
+          onClose={() => setBgCmd(null)}
+          active={active}
+        />
       )}
       {picking && side && <Picker rows={rows} onClose={unpick} searchFirst={picking === 'search'} />}
     </div>
@@ -1940,15 +1969,38 @@ function RunningWork({ scanOf, items, waiting, openSub, openCmd }: { scanOf?: st
 // since the dialog opened (its output stays to be looked at).
 const BG_CMD_SHUT = 8 // (lines of the command shown before "show all")
 const BG_WHAT_LONG = 80 // (characters of what it is for past which the title, two lines, may not hold it)
-function BgCmdDialog({ r, gone, onClose }: { r: ConvoRunning; gone: boolean; onClose: () => void }) {
-  usePrefs() // (the command's colours follow the theme)
+// One way through the work going on, from whichever panel shows one of it.
+type WorkNav = { i: number; n: number; prev: () => void; next: () => void }
+
+function WorkStep({ nav }: { nav: WorkNav }) {
+  return (
+    <span className="convo-sub-step">
+      <button type="button" className="icon-btn" onClick={nav.prev} aria-label={t('convo.workPrev')} title={t('convo.workPrev')}>
+        <ChevronLeft size={18} aria-hidden="true" />
+      </button>
+      <button type="button" className="icon-btn" onClick={nav.next} aria-label={t('convo.workNext')} title={t('convo.workNext')}>
+        <ChevronRight size={18} aria-hidden="true" />
+      </button>
+    </span>
+  )
+}
+
+type OutRead = { text: string; size: number; cut: boolean }
+const BG_OUT_EVERY = 3000 // (its output's end read again so often, while it runs and is looked at)
+
+// A command left running in the background, or a Monitor, beside the thread
+// where a subagent's conversation shows (11-14: it was a dialog, and its
+// output a second dialog over it). Its command; its output's end under it,
+// read again every few seconds while it runs — only while this panel is
+// open, the page in sight and the command one with a file of output; once
+// when it has ended; never for a Monitor, whose latest event comes with the
+// list.
+function BgPanel({ of, r, gone, nav, onClose, active }: { of: string; r: ConvoRunning; gone: boolean; nav?: WorkNav; onClose: () => void; active: boolean }) {
+  const sid = of.split(' ')[0]
   const acts = useContext(FileActsOf)
   const toast = useToast()
-  const [, tick] = useState(0)
-  useEffect(() => {
-    const id = setInterval(() => tick((n) => n + 1), 1000)
-    return () => clearInterval(id)
-  }, [])
+  useTick(!gone && !!r.ts)
+  const panel = useRef<HTMLElement>(null)
   // (Shut: the first lines; "show all" only where there is more than they hold.)
   const cmdRef = useRef<HTMLPreElement>(null)
   const [all, setAll] = useState(false)
@@ -1958,43 +2010,124 @@ function BgCmdDialog({ r, gone, onClose }: { r: ConvoRunning; gone: boolean; onC
     if (!el || all) return
     const measure = () => setMore(el.scrollHeight > el.clientHeight + 1)
     measure()
-    // (A narrower window wraps it to more lines: measured again as it changes.)
     if (typeof ResizeObserver === 'undefined') return
     const ro = new ResizeObserver(measure)
     ro.observe(el)
     return () => ro.disconnect()
   }, [r.cmd, all])
-  const tail = r.out && acts?.tail ? () => acts.tail!(r.out!) : undefined
+  // Its output's end (a path the host can read as it is: an absolute one).
+  const out = r.out && r.out.startsWith('/') ? r.out : ''
   const outName = r.out ? r.out.slice(r.out.lastIndexOf('/') + 1) : ''
-  // (Its folder by the last two of it — the whole is on hover: a temporary
-  // folder's long name says nothing at a glance.)
   const outDir = r.out ? shortPath(r.out.slice(0, r.out.lastIndexOf('/') + 1) || '/').replace(/\/?$/, '/') : ''
+  const [read, setRead] = useState<OutRead | null>(null)
+  const [readErr, setReadErr] = useState('')
+  const [reading, setReading] = useState(false)
+  const [again, setAgain] = useState(0)
+  useEffect(() => {
+    if (!out || !active) return
+    let ctl: AbortController | null = null
+    let failed = false // (not read again by itself after a failure: by hand)
+    let over = false
+    const readNow = () => {
+      if (ctl || failed || document.hidden) return
+      const c = (ctl = new AbortController())
+      setReading(true)
+      api<OutRead>('GET', `/api/sessions/${sid}/files/text?path=` + encodeURIComponent(out) + '&tail=1', undefined, { signal: c.signal })
+        .then(
+          (x) => {
+            if (c.signal.aborted) return
+            setRead(x)
+            setReadErr('')
+          },
+          (e) => {
+            if (c.signal.aborted) return
+            failed = true
+            setReadErr(readError(e))
+          },
+        )
+        .finally(() => {
+          if (ctl !== c) return
+          ctl = null
+          if (!over) setReading(false)
+        })
+    }
+    readNow()
+    const id = gone ? 0 : window.setInterval(readNow, BG_OUT_EVERY)
+    const onSeen = () => !gone && readNow()
+    document.addEventListener('visibilitychange', onSeen)
+    return () => {
+      over = true
+      window.clearInterval(id)
+      document.removeEventListener('visibilitychange', onSeen)
+      ctl?.abort()
+    }
+  }, [sid, out, gone, active, again])
+  // The output, in a box of its own under the command (kept in sight), at its
+  // newest as it grows — unless the person has scrolled up in it to read.
+  const outBox = useRef<HTMLPreElement>(null)
+  const follow = useRef(true)
+  const onScroll = () => {
+    const el = outBox.current
+    if (el) follow.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48
+  }
+  useLayoutEffect(() => {
+    const el = outBox.current
+    if (el && read && follow.current) el.scrollTop = el.scrollHeight
+  }, [read])
+  useEffect(() => {
+    const prev = document.activeElement as HTMLElement | null
+    panel.current?.focus({ preventScroll: true })
+    return () => {
+      if (prev?.isConnected) prev.focus({ preventScroll: true })
+    }
+  }, [])
+  useEffect(() => {
+    if (!active) return
+    const onKey = (e: KeyboardEvent) => {
+      const el = e.target as HTMLElement | null
+      if (e.key !== 'Escape' || (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') && !el.classList.contains('xterm-helper-textarea'))) return
+      if (document.querySelector('[aria-modal="true"], [role="menu"]')) return
+      e.preventDefault()
+      e.stopPropagation()
+      onClose()
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [onClose, active])
+  const state = gone ? t(r.out ? 'convo.bgEnded' : 'convo.bgEndedNoOut') : r.ts ? t('convo.bgFor', { for: since(r.ts) }) : t('convo.bgRunning')
   return (
-    <Dialog title={r.what || t('convo.bgCmds1')} onClose={onClose} hideTitle className="dlg bg-cmd-dialog">
-      {/* (Its mark on a tinted square as the other dialogs' heads; what it is,
-          a background command, said in the line under the title — 11-14.) */}
-      <DialogHead
-        icon={<Terminal size={18} />}
-        tile
-        title={r.what || t('convo.bgCmds1')}
-        titleText={r.what}
-        clamp
-        sub={
-          <>
-            {!gone && <span className="bg-cmd-live" aria-hidden="true" />}
-            {[r.what ? t('convo.bgCmds1') : '', gone ? t(r.out ? 'convo.bgEnded' : 'convo.bgEndedNoOut') : r.ts ? t('convo.bgFor', { for: since(r.ts) }) : t('convo.bgRunning')].filter(Boolean).join(' · ')}
-          </>
-        }
-        onClose={onClose}
-      />
-      <div className="dlg-body">
-        {/* (Longer than its title's two lines hold: all of it here, where the body scrolls.) */}
+    <aside className="convo-panel convo-bg" aria-label={r.what || t('convo.bgCmds1')} tabIndex={-1} ref={panel}>
+      <div className="convo-panel-head">
+        <div className="convo-panel-headtext">
+          <span className="convo-panel-eyebrow">{nav ? t('convo.workOf', { what: t('convo.bgCmds1'), i: nav.i + 1, n: nav.n }) : t('convo.bgCmds1')}</span>
+          <h2 className="convo-panel-title is-one" title={r.what}>
+            {r.what || t('convo.bgCmds1')}
+          </h2>
+          <span className="convo-panel-sub">
+            <span>
+              {!gone && <span className="bg-cmd-live" aria-hidden="true" />}
+              {state}
+            </span>
+          </span>
+        </div>
+        {nav && <WorkStep nav={nav} />}
+        {out && (
+          <button type="button" className="icon-btn convo-sub-refresh" onClick={() => setAgain((n) => n + 1)} disabled={reading} aria-label={t('preview.reload')} title={t('preview.reload')}>
+            <RotateCw size={16} className={reading ? 'convo-running-spin' : ''} />
+          </button>
+        )}
+        <button type="button" className="icon-btn" onClick={onClose} aria-label={t('common.close')} title={t('common.close') + ' (Esc)'}>
+          <X size={18} />
+        </button>
+      </div>
+      <div className="convo-panel-body convo-bg-body">
+        {/* (Longer than the title's one line holds: all of it here.) */}
         {r.what && r.what.length > BG_WHAT_LONG && <p className="bg-cmd-what">{r.what}</p>}
         {r.cmd && (
           <section className="bg-cmd-sec">
             <div className="bg-cmd-label">{t('convo.bgCmdLabel')}</div>
             <div className="bg-cmd-box">
-              <pre ref={cmdRef} className={'bg-cmd-text term-vars ' + (isDark() ? 'dark' : 'light') + (all ? '' : ' is-shut') + (more && !all ? ' is-more' : '')} style={{ ['--shut' as string]: BG_CMD_SHUT }}>
+              <pre ref={cmdRef} className={'bg-cmd-text' + (all ? '' : ' is-shut') + (more && !all ? ' is-more' : '')} style={{ ['--shut' as string]: BG_CMD_SHUT }}>
                 <Code text={r.cmd} lang="bash" />
               </pre>
               <button
@@ -2026,25 +2159,40 @@ function BgCmdDialog({ r, gone, onClose }: { r: ConvoRunning; gone: boolean; onC
         )}
         {r.out && (
           <section className="bg-cmd-sec">
-            <div className="bg-cmd-label">{t('convo.bgOutLabel')}</div>
-            {/* (The host's file: its name, its folder under it, whole on hover; pressed, its last lines.) */}
-            <button type="button" className="bg-cmd-file" onClick={tail} disabled={!tail} title={r.out} aria-label={tail ? t('convo.bgOutput') + '：' + outName : undefined}>
-              <FileText size={18} className="bg-cmd-file-ic" aria-hidden="true" />
-              <span className="bg-cmd-file-text">
-                <span className="bg-cmd-file-name">{outName}</span>
-                <span className="bg-cmd-file-dir">{outDir}</span>
-              </span>
-              {tail && (
-                <span className="bg-cmd-file-go">
-                  {t('convo.bgOutputShort')}
-                  <ChevronRight size={15} />
-                </span>
+            <div className="bg-cmd-label bg-out-head">
+              <span>{t('convo.bgOutLabel')}</span>
+              <span className="bg-out-file" title={r.out}>{outName}</span>
+              {acts?.tail && (
+                <button type="button" className="link-btn bg-out-whole" onClick={() => acts.tail!(r.out!)}>
+                  {t('convo.bgOpenWhole')}
+                </button>
               )}
-            </button>
+            </div>
+            {!out ? (
+              // (A path the host must make whole first: shown as a file to open.)
+              <button type="button" className="bg-cmd-file" onClick={acts?.tail ? () => acts.tail!(r.out!) : undefined} disabled={!acts?.tail} title={r.out}>
+                <FileText size={18} className="bg-cmd-file-ic" aria-hidden="true" />
+                <span className="bg-cmd-file-text">
+                  <span className="bg-cmd-file-name">{outName}</span>
+                  <span className="bg-cmd-file-dir">{outDir}</span>
+                </span>
+              </button>
+            ) : readErr ? (
+              <p className="bg-out-note">{readErr}</p>
+            ) : !read ? (
+              <p className="bg-out-note">{t('common.loading')}</p>
+            ) : read.text ? (
+              <pre className="bg-out" ref={outBox} onScroll={onScroll}>
+                {read.cut && <span className="bg-out-cut">{t('convo.bgOutCut') + '\n'}</span>}
+                {read.text}
+              </pre>
+            ) : (
+              <p className="bg-out-note">{t('convo.bgOutEmpty')}</p>
+            )}
           </section>
         )}
       </div>
-    </Dialog>
+    </aside>
   )
 }
 
@@ -3935,7 +4083,7 @@ const isSubId = (id: string) => /^[a-z0-9]{6,40}$/.test(id) || /^[0-9a-f]{8}-[0-
 // read only: what it was asked, what it did and answered. Read when shown;
 // again while it is known to go on. One sent off by it opens here in turn
 // (back: to the one that sent it).
-function SubPanel({ of, sub, depth, live, siblings, onOpen, onSwitch, onBack, onClose, active, copy }: { of: string; sub: Sub; depth: number; live: (agent: string) => boolean; siblings?: Sub[]; onOpen: (s: Sub) => void; onSwitch?: (s: Sub) => void; onBack: () => void; onClose: () => void; active: boolean; copy: (s: string) => void }) {
+function SubPanel({ of, sub, depth, live, nav, onOpen, onBack, onClose, active, copy }: { of: string; sub: Sub; depth: number; live: (agent: string) => boolean; nav?: WorkNav; onOpen: (s: Sub) => void; onBack: () => void; onClose: () => void; active: boolean; copy: (s: string) => void }) {
   const [sessionId, pane = ''] = of.split(' ')
   // (Of one sent off by the session's agent, as its running list says; of
   // one sent off by a subagent, while its log keeps growing.)
@@ -3981,9 +4129,6 @@ function SubPanel({ of, sub, depth, live, siblings, onOpen, onSwitch, onBack, on
       ro.disconnect()
     }
   }, [going])
-  // The others sent off with it: gone to from here, one after another.
-  const at = siblings ? siblings.findIndex((x) => x.agent === sub.agent) : -1
-  const step = (d: 1 | -1) => siblings && at >= 0 && onSwitch?.(siblings[(at + d + siblings.length) % siblings.length])
   useEffect(() => {
     const prev = document.activeElement as HTMLElement | null
     panel.current?.focus({ preventScroll: true })
@@ -4015,22 +4160,13 @@ function SubPanel({ of, sub, depth, live, siblings, onOpen, onSwitch, onBack, on
         )}
         {/* (As the changes panel's head: a small word for what it is, its name, how it goes.) */}
         <div className="convo-panel-headtext">
-          <span className="convo-panel-eyebrow">{at >= 0 && siblings!.length > 1 ? t('sub.titleOf', { i: at + 1, n: siblings!.length }) : t('sub.title')}</span>
+          <span className="convo-panel-eyebrow">{nav ? t('convo.workOf', { what: t('sub.kind'), i: nav.i + 1, n: nav.n }) : t('sub.title')}</span>
           <h2 className="convo-panel-title is-one" title={sub.title}>
             {sub.title || t('sub.title')}
           </h2>
           {(going || report) && <span className="convo-panel-sub convo-sub-state">{going ? [t('sub.going'), since(scanned?.ts), scanTokens(scanned)].filter(Boolean).join(t('convo.sep')) : t('sub.handedBack')}</span>}
         </div>
-        {at >= 0 && siblings!.length > 1 && (
-          <span className="convo-sub-step">
-            <button type="button" className="icon-btn" onClick={() => step(-1)} aria-label={t('sub.prev')} title={t('sub.prev')}>
-              <ChevronLeft size={18} aria-hidden="true" />
-            </button>
-            <button type="button" className="icon-btn" onClick={() => step(1)} aria-label={t('sub.next')} title={t('sub.next')}>
-              <ChevronRight size={18} aria-hidden="true" />
-            </button>
-          </span>
-        )}
+        {nav && <WorkStep nav={nav} />}
         {/* (Read again every few seconds while it goes on: by hand, where a read failed or it has ended — not a phone's room for it.) */}
         <button type="button" className="icon-btn convo-sub-refresh" onClick={c.read} disabled={c.loading} aria-label={t('sub.refresh')} title={t('sub.refresh')}>
           <RotateCw size={16} className={c.loading ? 'convo-running-spin' : ''} />
