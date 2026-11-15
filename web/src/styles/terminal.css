@@ -953,6 +953,55 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .is-del > .convo-hunk-sign { color: var(--term-danger-text); }
 .convo-hunk-text { min-width: 0; padding-right: 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .convo-hunk-gap { padding: 2px 10px; background: var(--term-hover); color: var(--term-fg-3); font: var(--fs-note)/var(--lh-note) var(--font-ui); }
+/* The Changes view's body (app.css: its dialog): each file a box, its head
+   kept in sight while its diff scrolls by; its diff whole, not a box of its own. */
+.gch { flex: 1 1 auto; min-height: 160px; overflow: auto; overscroll-behavior: contain; display: flex; flex-direction: column; gap: 12px; padding: 12px 16px 24px; background: var(--term-bg); color: var(--term-fg); border-top: 1px solid var(--term-line); font-family: var(--font-ui); }
+.gch-bar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 12px; }
+.gch-tabs { display: flex; gap: 2px; min-width: 0; padding: 2px; border: 1px solid var(--term-line); border-radius: var(--r); background: var(--term-chrome); }
+.gch-tab { padding: 4px 12px; border: 0; border-radius: var(--r-sm); background: none; color: var(--term-fg-2); font: inherit; font-size: var(--fs-sub); line-height: var(--lh-sub); white-space: nowrap; cursor: pointer; }
+.gch-tab:hover { color: var(--term-fg); }
+.gch-tab[aria-selected='true'] { background: var(--term-accent-soft); color: var(--term-accent-text); font-weight: 500; }
+.gch-tab:focus-visible, .gch-file-btn:focus-visible, .gch-ut:focus-visible, .gch-unfold:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: -2px; }
+.gch-what { font-size: var(--fs-sub); line-height: var(--lh-sub); font-weight: 500; }
+.gch-counts { flex: none; font-family: var(--font-mono); font-size: var(--fs-note); line-height: var(--lh-note); white-space: nowrap; }
+.gch-add { color: var(--term-ok-text); }
+.gch-del { color: var(--term-danger-text); }
+.gch-hint { margin: 0; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-3); }
+.gch-note { display: flex; flex-direction: column; align-items: center; gap: 12px; margin: 0; padding: 24px 0; text-align: center; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg-2); }
+.gch-note p { margin: 0; }
+.gch-file { flex: none; border: 1px solid var(--term-line); border-radius: var(--r-lg); overflow: clip; }
+.gch-file-head { position: sticky; top: -12px; /* (the box's padding above: stuck at its very edge, no line showing over it) */ z-index: 1; display: flex; align-items: center; background: var(--term-chrome); }
+.gch-file-head:not(:last-child) { border-bottom: 1px solid var(--term-line); }
+.gch-file-btn { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; padding: 8px 12px; border: 0; background: none; color: var(--term-fg); font: inherit; font-size: var(--fs-sub); line-height: var(--lh-sub); text-align: left; cursor: pointer; }
+.gch-file-btn:hover { background: var(--term-hover); }
+.gch-chev { flex: none; color: var(--term-fg-3); transition: transform 0.12s var(--ease); }
+.gch-file-btn[aria-expanded='true'] .gch-chev { transform: rotate(90deg); }
+.gch-st { flex: none; width: 20px; border-radius: var(--r-xs); background: var(--term-hover); color: var(--term-fg-2); text-align: center; font-family: var(--font-mono); font-size: var(--fs-note); line-height: var(--lh-note); font-weight: 600; }
+.gch-st.is-A { color: var(--term-ok-text); }
+.gch-st.is-D { color: var(--term-danger-text); }
+.gch-st.is-M, .gch-st.is-T { color: var(--term-warn-text); }
+.gch-st.is-R, .gch-st.is-C { color: var(--term-accent-text); }
+.gch-path { flex: 1; min-width: 0; display: flex; align-items: baseline; font-family: var(--font-mono); white-space: nowrap; }
+/* (A long path: the name it had gives way first, then its folders; its file's name stays.) */
+.gch-dir { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--term-fg-3); }
+.gch-name { flex: 0 0 auto; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.gch-from { flex: 0 1000 auto; min-width: 0; margin-left: 8px; overflow: hidden; text-overflow: ellipsis; color: var(--term-fg-3); font-family: var(--font-ui); font-size: var(--fs-note); line-height: var(--lh-note); }
+.gch-bin { flex: none; color: var(--term-fg-3); font-size: var(--fs-note); line-height: var(--lh-note); }
+.gch-file-tool { flex: none; margin-right: 4px; color: var(--term-fg-2); }
+.gch-file-tool:hover { background: var(--term-hover); color: var(--term-fg); }
+.gch-file-note { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin: 0; padding: 8px 12px; color: var(--term-fg-2); font-size: var(--fs-sub); line-height: var(--lh-sub); }
+.gch-unfold { width: 100%; border: 0; background: none; color: var(--term-accent-text); font-family: inherit; text-align: left; cursor: pointer; }
+.gch-unfold:hover { background: var(--term-hover); }
+.convo-hunks.is-whole { max-height: none; overflow: visible; border: 0; border-radius: 0; }
+.gch-untracked ul { display: flex; flex-direction: column; margin: 8px 0 0; padding: 0; list-style: none; }
+.gch-head { margin: 0 0 4px; font-size: var(--fs-sub); line-height: var(--lh-sub); font-weight: 600; }
+.gch-ut { display: flex; align-items: center; gap: 8px; width: 100%; padding: 4px 8px; border: 0; border-radius: var(--r-sm); background: none; color: var(--term-fg); font: inherit; font-size: var(--fs-sub); line-height: var(--lh-sub); text-align: left; }
+.gch-ut svg { flex: none; color: var(--term-fg-3); }
+button.gch-ut { cursor: pointer; }
+button.gch-ut:hover { background: var(--term-hover); }
+.gch-ut .gch-path { overflow: hidden; text-overflow: ellipsis; }
+@media (pointer: coarse) { .gch-file-btn { min-height: 44px; } button.gch-ut { min-height: 40px; } .gch-tab { padding: 8px 12px; } }
+@media (max-width: 520px) { .gch { padding: 12px 12px 24px; } }
 /* The changes of a turn, beside the thread (over it where narrow) */
 .convo-panel { flex: none; width: min(46%, 620px); min-width: 0; display: flex; flex-direction: column; border-left: 1px solid var(--term-line); background: var(--term-bg); font-family: var(--font-ui); }
 .convo-panel:focus { outline: none; } /* (focused on opening, for the keys: the panel itself is no control) */

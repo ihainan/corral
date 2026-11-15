@@ -847,8 +847,11 @@ details.adv > .form { margin-top: 16px; }
 .text-preview-cut { position: sticky; left: 0; top: 0; z-index: 1; margin: 0; padding: 8px 16px; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-warn-text); background: var(--term-chrome); border-bottom: 1px solid var(--term-line); }
 .text-preview-cut.is-end { top: auto; bottom: 0; border-bottom: 0; border-top: 1px solid var(--term-line); }
 .text-preview .picture-note { color: var(--term-fg-2); }
+/* The Changes view (terminal.css: its body): as tall as it may be, so its tabs do not move as each is read. */
+.dialog.gch-dialog { max-width: min(1100px, calc(100vw - 32px)); width: 100%; height: min(900px, calc(var(--vv-h, 100dvh) - 32px)); }
 @media (max-width: 520px) {
   .sheet-mode .dialog.text-preview-dialog { max-width: none; }
+  .sheet-mode .dialog.gch-dialog { max-width: none; }
   .text-preview-md { padding: 16px 16px 24px; }
 }
 
@@ -1186,6 +1189,9 @@ details.adv > .form { margin-top: 16px; }
 .scard-kv { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 2px 12px; padding: 4px 10px; font-size: var(--fs-sub); line-height: var(--lh-sub); }
 .scard-kv > :first-child { color: var(--fg-2); }
 .scard-kv > .scard-hint { flex-basis: 100%; }
+.scard-kv.is-act { width: 100%; border: 0; border-radius: var(--r); background: none; color: var(--fg); text-align: left; font: inherit; font-size: var(--fs-sub); line-height: var(--lh-sub); cursor: pointer; }
+.scard-kv.is-act:hover { background: var(--bg-hover); }
+.scard-kv.is-act:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .scard-hint { margin: 0; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--fg-3); }
 .scard-counts { font-family: var(--font-mono); font-size: var(--fs-note); line-height: var(--lh-note); white-space: nowrap; }
 .scard-add { color: var(--ok); }

@@ -10,6 +10,8 @@ import { keepNames, keptNames, local } from '../storage'
 import { useFlip } from '../flip'
 import { CodeSpanOf, FileLinkOf, Markdown } from './markdown'
 import { codeRef, type LineSpan } from './paths'
+import { Hunks } from './hunks'
+import { ChangesView, type ChangesAgainst } from './changesView'
 import { useSubConvo } from './subagent'
 import { useSubScan, type SubScanAgent } from './subscan'
 import { NEW_AGENT } from './newAgent'
@@ -1243,6 +1245,8 @@ export function ConversationView({
   const [keysShown, setKeysShown] = useState<'' | 'key' | 'menu'>('')
   // The session card: shut, over the thread under its button, or a sheet from the bottom (narrow, or from the menu).
   const [card, setCard] = useState<'' | 'pop' | 'sheet'>('')
+  const [gitChanges, setGitChanges] = useState<{ against: ChangesAgainst; base?: string } | null>(null) // (the Changes view, from the card)
+  useEffect(() => setGitChanges(null), [convo.of]) // (another agent's: not this one's changes)
   const cardBtn = useRef<HTMLButtonElement>(null)
   if (card && !active) setCard('') // (behind a terminal tab: shut)
   // (Over the thread under its button where the button is shown; else — narrow, the button hidden — a sheet.
@@ -1669,6 +1673,7 @@ export function ConversationView({
           acts={{
             onFolder: files?.open ? (dir) => files.open!(dir) : undefined,
             onChanges: (key, path) => show(key, path),
+            onGitChanges: (against, base) => setGitChanges({ against, base }),
             onRunning: (id) => {
               const r = convo.running?.find((x) => x.id === id) ?? hostCmd(id)
               if (!r) return
@@ -1680,6 +1685,16 @@ export function ConversationView({
           anchor={card === 'pop' ? cardBtn.current : null}
           sheet={card === 'sheet'}
           onClose={() => setCard('')}
+        />
+      )}
+      {gitChanges && convo.of && (
+        <ChangesView
+          sid={convo.of.split(' ')[0]}
+          pane={convo.of.split(' ')[1] ?? ''}
+          base={gitChanges.base}
+          start={gitChanges.against}
+          acts={files ? { view: (p) => files.view(p), open: files.open } : undefined}
+          onClose={() => setGitChanges(null)}
         />
       )}
       {keysShown && (
@@ -5303,37 +5318,6 @@ function ToolRow({ tool, onCopy, live }: { tool: ConvoTool; onCopy: (s: string) 
           )}
         </div>
       )}
-    </div>
-  )
-}
-
-// An edit as Claude Code reported making it: its hunks with the lines'
-// numbers (after the edit; before it, for a line removed), the lines left
-// out between them said.
-function Hunks({ hunks, cut }: { hunks: ConvoHunk[]; cut?: boolean }) {
-  const rows: ReactNode[] = []
-  let end = 0 // (the new numbering just past the hunk before)
-  hunks.forEach((h, hi) => {
-    if (hi > 0 && h.new_start > end) rows.push(<div key={'g' + hi} className="convo-hunk-gap">{t('convo.unchanged', { n: h.new_start - end })}</div>)
-    let o = h.old_start
-    let n = h.new_start
-    h.lines.forEach((l, li) => {
-      const k = l[0]
-      const no = k === '-' ? o++ : k === '+' ? n++ : (o++, n++)
-      rows.push(
-        <div key={hi + '.' + li} className={'convo-hunk-line' + (k === '+' ? ' is-add' : k === '-' ? ' is-del' : '')}>
-          <span className="convo-hunk-no">{no}</span>
-          <span className="convo-hunk-sign">{k === ' ' ? '' : k === '-' ? '−' : '+'}</span>
-          <span className="convo-hunk-text">{l.slice(1)}</span>
-        </div>,
-      )
-    })
-    end = n
-  })
-  return (
-    <div className="convo-hunks">
-      {rows}
-      {cut && <div className="convo-hunk-gap">{t('convo.patchCut')}</div>}
     </div>
   )
 }

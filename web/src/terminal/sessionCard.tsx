@@ -67,6 +67,7 @@ export interface CardData {
 export interface CardActs {
   onFolder?: (dir: string) => void // (the file panel, there)
   onChanges: (key: string, path?: string) => void
+  onGitChanges?: (against: 'work' | 'base', base?: string) => void // (the Changes view: from the git counts)
   onRunning: (id: string) => void
   onDraft?: (text: string) => void // (words put in the composer, not sent)
 }
@@ -182,6 +183,8 @@ function CardBody({ data, acts, close }: { data: CardData; acts: CardActs; close
             </Row>
             <Row
               icon={<GitBranch size={16} />}
+              onClick={acts.onGitChanges && git.status && (git.changed || git.untracked) ? act(() => acts.onGitChanges!('work', git.base)) : undefined}
+              title={acts.onGitChanges && git.status && (git.changed || git.untracked) ? t('card.seeChanges') : undefined}
               sub={
                 !git.status
                   ? t('card.statusSlow')
@@ -229,16 +232,26 @@ function CardBody({ data, acts, close }: { data: CardData; acts: CardActs; close
       {(git?.diff || files.length > 0) && (
         <section className="scard-sec">
           <h3 className="scard-head">{t('card.changes')}</h3>
-          {git?.diff && git.base && (
-            <div className="scard-kv">
-              <span>{t('card.vsBase', { base: git.base })}</span>
-              <span>
-                {t('card.filesN', { n: git.diff.files })} <Counts add={git.diff.add} del={git.diff.del} />
-                {git.base_ahead ? <span className="scard-dim"> · {t('card.commitsN', { n: git.base_ahead })}</span> : null}
-              </span>
-              <span className="scard-hint">{t('card.vsBaseHint')}</span>
-            </div>
-          )}
+          {git?.diff && git.base && (() => {
+            const body = (
+              <>
+                <span>{t('card.vsBase', { base: git.base })}</span>
+                <span>
+                  {t('card.filesN', { n: git.diff.files })} <Counts add={git.diff.add} del={git.diff.del} />
+                  {git.base_ahead ? <span className="scard-dim"> · {t('card.commitsN', { n: git.base_ahead })}</span> : null}
+                </span>
+                <span className="scard-hint">{t('card.vsBaseHint')}</span>
+              </>
+            )
+            // (Its counts open the Changes view, against the base.)
+            return acts.onGitChanges ? (
+              <button type="button" className="scard-kv is-act" onClick={act(() => acts.onGitChanges!('base', git.base))} title={t('card.seeChanges')}>
+                {body}
+              </button>
+            ) : (
+              <div className="scard-kv">{body}</div>
+            )
+          })()}
           {data.edits && files.length > 0 && (
             <>
               <div className="scard-kv">
