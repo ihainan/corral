@@ -1,7 +1,7 @@
 import type { ReplyTarget } from './ReplyDialog'
 
 type Screen = { text: string; digest: string; cut?: boolean }
-import { codexAsk, codexCursor } from './menu'
+import { choices, codexAsk, codexCursor } from './menu'
 import { ApiError } from '../api'
 
 // A Codex question (request_user_input) answered with the person's own
@@ -21,26 +21,30 @@ export class MaybeAnswered extends Error {}
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
-// (The same question: its words, and which of how many.)
-const sameQ = (a: ReturnType<typeof codexAsk>, b: ReturnType<typeof codexAsk>) =>
-  !!a && !!b && a.kind === 'question' && b.kind === 'question' && a.question === b.question && a.index === b.index && a.total === b.total
+// (The same question: its words, which of how many, and its choices — another
+// of the same words with other choices is not answered by number — review p11-2.)
+const qOf = (text: string) => {
+  const a = codexAsk(text)
+  return a && a.kind === 'question' ? [a.question, a.index, a.total, ...choices(text, 'codex').map((c) => c.label)].join('\n') : null
+}
 
 // (Refused before anything was pressed: the gateway said so.)
 const refused = (e: unknown) => e instanceof ApiError && [400, 403, 404, 409, 429].includes(e.status)
 
 export async function codexAnswerWith(target: ReplyTarget, from: Screen, n: number, words: string, alive: () => boolean): Promise<void> {
-  const q0 = codexAsk(from.text)
-  if (!q0 || q0.kind !== 'question') throw new NotAsShown()
+  const q0 = qOf(from.text)
+  if (!q0) throw new NotAsShown()
   let s = from
   let pressed = false
-  for (let guard = 0; guard < 4; guard++) {
+  // (One key at a time, each read back before the next: a key never goes to
+  // a screen not seen to be this question's — review p11-3.)
+  for (let guard = 0; guard < 12; guard++) {
     const cur = codexCursor(s.text)
     if (cur === undefined) throw pressed ? new Unsure() : new NotAsShown()
     if (cur === n) break
     if (!alive()) throw pressed ? new Unsure() : new NotAsShown()
-    const d = n - cur
-    const keys: string[] = Array(Math.min(4, Math.abs(d))).fill(d > 0 ? 'down' : 'up')
-    const want = cur + (d > 0 ? keys.length : -keys.length)
+    const keys = [n > cur ? 'down' : 'up']
+    const want = cur + (n > cur ? 1 : -1)
     try {
       await target.reply({ digest: s.digest, keys, once: true })
     } catch (e) {
@@ -59,7 +63,7 @@ export async function codexAnswerWith(target: ReplyTarget, from: Screen, n: numb
       } catch {
         continue
       }
-      if (sameQ(codexAsk(x.text), q0) && codexCursor(x.text) === want) {
+      if (qOf(x.text) === q0 && codexCursor(x.text) === want) {
         got = x
         break
       }
@@ -67,7 +71,7 @@ export async function codexAnswerWith(target: ReplyTarget, from: Screen, n: numb
     if (!got) throw new Unsure()
     s = got
   }
-  if (codexCursor(s.text) !== n || !sameQ(codexAsk(s.text), q0)) throw pressed ? new Unsure() : new NotAsShown()
+  if (codexCursor(s.text) !== n || qOf(s.text) !== q0) throw pressed ? new Unsure() : new NotAsShown()
   if (!alive()) throw pressed ? new Unsure() : new NotAsShown()
   try {
     await target.reply({ digest: s.digest, text: words, once: true })

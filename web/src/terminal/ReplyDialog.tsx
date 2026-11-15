@@ -128,6 +128,11 @@ export function useReply(target: ReplyTarget, { onLoaded, resizedAt, onSent, qui
     setTextState(v)
     keepReplyDraft(draftKey, v)
   }
+  // (Words answered: let go of where still as they were sent — not those written meanwhile.)
+  const clearIf = (words: string) => {
+    if (getReplyDraft(draftKey).trim() === words) keepReplyDraft(draftKey, '')
+    setTextState((v) => (v.trim() === words ? '' : v))
+  }
   const seq = useRef(0)
   const live = useRef(true) // an answer that comes back after closing is not shown
   useEffect(() => {
@@ -212,14 +217,22 @@ export function useReply(target: ReplyTarget, { onLoaded, resizedAt, onSent, qui
     if (v) void send({ text: v })
   }
   const opts = screen ? choices(screen.text, target.agent) : []
-  return { screen, setScreen, failed, reading, changed, busy, error, text, setText, load, send, submit, opts }
+  return { screen, setScreen, failed, reading, changed, busy, error, text, setText, clearIf, load, send, submit, opts }
 }
 
 
 // Answer an agent in a herdr pane: its screen as it is now, the choices on
 // it, Enter, Esc, or a line of text (see useReply).
 export function ReplyDialog({ sessionId, agent, onLoaded, onClose, resizedAt }: { sessionId: string; agent: HerdrAgent; onLoaded?: () => void; onClose: () => void; resizedAt?: number }) {
-  const { screen, failed, reading, changed, busy, error, text, setText, load, send, submit, opts } = useReply(herdrTarget(sessionId, agent), { onLoaded, resizedAt, onSent: onClose })
+  const { screen, failed, reading, changed, busy: replying, error, text, clearIf, setText, load, send, submit, opts } = useReply(herdrTarget(sessionId, agent), { onLoaded, resizedAt, onSent: onClose })
+  // (Open still: a Codex answer in the person's words goes no further once it is closed — review p11-6.)
+  const openNow = useRef(true)
+  useEffect(() => {
+    openNow.current = true
+    return () => {
+      openNow.current = false
+    }
+  }, [])
   const confirm = useConfirm(screen, opts, (keys) => void send({ keys }))
   const pre = useRef<HTMLPreElement>(null)
   const [screenOpen, setScreenOpen] = useState(false) // (a menu read off it: the screen behind a button)
@@ -242,21 +255,26 @@ export function ReplyDialog({ sessionId, agent, onLoaded, onClose, resizedAt }: 
   // a note to the choice clicked — as in the chat's card, codexAnswer.ts.)
   const target = herdrTarget(sessionId, agent)
   const [own, setOwn] = useState<{ busy: boolean; error: string; stuck: string }>({ busy: false, error: '', stuck: '' })
-  const cxq = !!screen && agent.agent === 'codex' && codexAsk(screen.text)?.kind === 'question' && own.stuck !== screen.digest
+  const busy = replying || own.busy // (Enter, Esc and the rest wait for it too — review p11-5)
+  const asked = screen && agent.agent === 'codex' ? codexAsk(screen.text) : null
+  const cxq = asked?.kind === 'question'
+  // (Not known what came of the last on this question: the words go nowhere
+  // from here — not as a note to whichever choice the cursor is on — review p11-1.)
+  const cxStuck = cxq && own.stuck === asked.question
   const cxOther = cxq ? opts.find((o) => /^None of the above\b/i.test(o.label)) : undefined
-  const cxWords = cxq ? text.trim() : ''
+  const cxWords = cxq && !cxStuck ? text.trim() : ''
   const codexOwn = (n: number, words: string) => {
-    if (!screen || own.busy) return
-    const on = screen.digest
+    if (!screen || busy || !asked || asked.kind !== 'question') return
+    const q = asked.question
     setOwn({ busy: true, error: '', stuck: '' })
-    codexAnswerWith(target, screen, n, words, () => document.visibilityState === 'visible')
+    codexAnswerWith(target, screen, n, words, () => openNow.current && document.visibilityState === 'visible')
       .then(() => {
-        setText('')
+        clearIf(words)
         setOwn({ busy: false, error: '', stuck: '' })
         onClose()
       })
       .catch((e) => {
-        setOwn({ busy: false, error: t(e instanceof CodexNotAsShown ? 'reply.changed' : e instanceof MaybeAnswered ? 'own.maybeSent' : 'own.codexMoved'), stuck: e instanceof CodexNotAsShown ? '' : on })
+        setOwn({ busy: false, error: t(e instanceof CodexNotAsShown ? 'reply.changed' : e instanceof MaybeAnswered ? 'own.maybeSent' : 'own.codexMoved'), stuck: e instanceof CodexNotAsShown ? '' : q })
         void load()
       })
   }
@@ -294,7 +312,7 @@ export function ReplyDialog({ sessionId, agent, onLoaded, onClose, resizedAt }: 
                 const c = choiceText(o.label)
                 const lasts = lasting(o.label)
                 return (
-                  <button key={o.key} type="button" className={'reply-choice' + (confirm.asked === o.key ? ' is-confirm' : '')} disabled={!screen || busy || own.busy} onClick={() => (cxWords ? codexOwn(Number(o.key), cxWords) : confirm.choose(o.key))}>
+                  <button key={o.key} type="button" className={'reply-choice' + (confirm.asked === o.key ? ' is-confirm' : '')} disabled={!screen || busy} onClick={() => (cxWords ? codexOwn(Number(o.key), cxWords) : confirm.choose(o.key))}>
                     <span className="reply-key" aria-hidden="true">{o.key}</span>
                     {/* (Its words as Claude Code wrote them, where shown in Chinese: on a pointer's rest.) */}
                     <span className="reply-what" title={c.original || undefined}>
@@ -322,6 +340,7 @@ export function ReplyDialog({ sessionId, agent, onLoaded, onClose, resizedAt }: 
               className="input"
               value={text}
               maxLength={2000}
+              disabled={cxStuck}
               placeholder={t(cxq && !cxOther ? 'convo.askCodexNote' : opts.length > 0 ? 'reply.other' : 'reply.placeholder')}
               aria-label={t(cxq && !cxOther ? 'convo.askCodexNote' : opts.length > 0 ? 'reply.other' : 'reply.placeholder')}
               autoCapitalize="none"
@@ -330,7 +349,7 @@ export function ReplyDialog({ sessionId, agent, onLoaded, onClose, resizedAt }: 
               data-touch-nofocus
             />
             {!(cxq && !cxOther) && (
-              <button className="btn btn-primary" disabled={!screen || busy || own.busy || !text.trim()}>
+              <button className="btn btn-primary" disabled={!screen || busy || cxStuck || !text.trim()}>
                 {t('reply.send')}
               </button>
             )}
@@ -594,7 +613,7 @@ export function InlineReply({ target, onLoaded, resizedAt, active = true, held, 
   useEffect(() => () => answeredRef.current?.(false), [])
   const [shown, setShown] = useState(false)
   const answered = useRef('')
-  const { screen, setScreen, failed, reading, changed, busy: sending, error: sendError, text, setText, load, send, submit, opts } = useReply(target, { onLoaded, resizedAt, onSent: () => setSent(answered.current), quiet: true })
+  const { screen, setScreen, failed, reading, changed, busy: sending, error: sendError, text, setText, clearIf, load, send, submit, opts } = useReply(target, { onLoaded, resizedAt, onSent: () => setSent(answered.current), quiet: true })
   // A permission's amend: the person's words with Yes or No (Tab on it, then
   // the words, then Enter: ownWords). Typed, or Enter perhaps gone, and
   // failed: said so, not offered again on this prompt.
@@ -634,21 +653,24 @@ export function InlineReply({ target, onLoaded, resizedAt, active = true, held, 
   // A Codex question answered with the person's words: "None of the above"
   // with them, or the choice clicked with them as its note (codexAnswer.ts).
   // Not known what came of it: said so, not offered again on this question.
+  const [codexStuck, setCodexStuck] = useState('') // (the question whose answer is not known to have gone, by its words)
   const codexOwn = (n: number, words: string) => {
     if (!screen || amending) return
+    const asked = codexAsk(screen.text)
+    if (!asked || asked.kind !== 'question') return
     setAmending(true)
     setAmendError('')
     const on = screen.digest
     codexAnswerWith(target, screen, n, words, stillHere)
       .then(() => {
-        setText('')
+        clearIf(words)
         answered.current = on
         setSent(on)
       })
       .catch((e) => {
         if (e instanceof CodexNotAsShown) setAmendError(t('reply.changed'))
         else {
-          setAmendStuck(on)
+          setCodexStuck(asked.question)
           setAmendError(t(e instanceof MaybeAnswered ? 'own.maybeSent' : 'own.codexMoved'))
         }
         void load()
@@ -788,7 +810,7 @@ export function InlineReply({ target, onLoaded, resizedAt, active = true, held, 
   // (Not while the terminal itself is shown for it: its keys are the terminal's
   // — taken here first, a digit or Esc pressed there went nowhere.)
   const shownLive = needScreen && !!target.live && !failed && !structured
-  useAnswerKeys(active && !structured && !shownLive, ready, [...opts.map((o) => o.key), 'esc'], held, cardRef, (k) => (k === 'esc' ? void send({ keys: [k] }) : confirm.choose(k)))
+  useAnswerKeys(active && !structured && !shownLive, ready, [...opts.map((o) => o.key), 'esc'], held, cardRef, (k) => (k === 'esc' ? void send({ keys: [k] }) : cxWords ? codexOwn(Number(k), cxWords) : confirm.choose(k)))
   if (sent !== null) return <p className="convo-ask-sent" role="status">{t('convo.answeredHere')}</p>
   // (What it asks not made out: the terminal itself, with its colours and its
   // layout, keys going to it. Not the words of a screen and two buttons: that
@@ -839,9 +861,12 @@ export function InlineReply({ target, onLoaded, resizedAt, active = true, held, 
   // (A question of Codex's: each choice's label and description apart.)
   // (A Codex question: its "None of the above", which takes the person's
   // own words; the words, where none, a note to the choice clicked.)
-  const cxq = cx?.kind === 'question' && !amendStuck
+  const cxq = cx?.kind === 'question'
+  // (Not known what came of the last on this question: the words go nowhere
+  // from here — not as a note to whichever choice the cursor is on — review p11-1.)
+  const cxStuck = cx?.kind === 'question' && codexStuck === cx.question
   const cxOther = cxq ? opts.find((o) => /^None of the above\b/i.test(o.label)) : undefined
-  const cxWords = cxq ? text.trim() : ''
+  const cxWords = cxq && !cxStuck ? text.trim() : ''
   const shownOpts =
     cx?.kind === 'question'
       ? codexOptions(opts.map((o) => o.label)).map((c, i) => ({ ...opts[i], ...c, ...(/^None of the above$/i.test(c.label) ? { desc: t('convo.askNotes') } : {}) }))
@@ -919,6 +944,7 @@ export function InlineReply({ target, onLoaded, resizedAt, active = true, held, 
               className="input"
               value={text}
               maxLength={2000}
+              disabled={cxStuck}
               placeholder={t(cxq && !cxOther ? 'convo.askCodexNote' : opts.length > 0 ? 'convo.askOwnText' : 'convo.askText')}
               aria-label={t(cxq && !cxOther ? 'convo.askCodexNote' : opts.length > 0 ? 'convo.askOwnText' : 'convo.askText')}
               autoCapitalize="none"
@@ -926,7 +952,7 @@ export function InlineReply({ target, onLoaded, resizedAt, active = true, held, 
               onChange={(e) => setText(e.target.value)}
             />
             {!(cxq && !cxOther) && (
-              <button className="btn" disabled={!screen || busy || !text.trim()}>
+              <button className="btn" disabled={!screen || busy || cxStuck || !text.trim()}>
                 {t('reply.send')}
               </button>
             )}
