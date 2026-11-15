@@ -126,11 +126,14 @@ type gitChanges struct {
 	More          bool     `json:"more,omitempty"`
 	Untracked     []string `json:"untracked,omitempty"`
 	UntrackedMore bool     `json:"untracked_more,omitempty"`
+	raw           int      // (the host's output it was read from, its size: see approxSize)
 }
 
 // approxSize: roughly what it holds, for the cache's bound (gitCalls).
+// (Its strings are of the host's output, which they keep whole: that is
+// counted whole, raw, with what was made of it.)
 func (g *gitChanges) approxSize() int {
-	n := len(g.Root) + len(g.Base)
+	n := g.raw + len(g.Root) + len(g.Base)
 	for _, f := range g.Files {
 		n += 64 + len(f.Path) + len(f.From)
 		for _, h := range f.Hunks {
@@ -315,15 +318,23 @@ func parseGitDiff(s string, cut bool) ([]gitChangedFile, bool) {
 	}
 	seen := make([]bool, len(files))
 	chunks := strings.Split("\n"+patch, "\ndiff --git ")[1:]
-	for ci, c := range chunks {
+	last := -1 // (the file of the last chunk read)
+	for _, c := range chunks {
 		i, ok := at2[chunkPath(c)]
 		if !ok {
 			continue
 		}
 		hs, hcut := parseHunks(c)
 		files[i].Hunks = append(files[i].Hunks, hs...)
-		files[i].Cut = files[i].Cut || hcut || (cut && ci == len(chunks)-1)
+		files[i].Cut = files[i].Cut || hcut
 		seen[i] = true
+		last = i
+	}
+	// (Cut on the host: the last file read may have more than was read — its
+	// own lines, or a second chunk whose head the cap fell in, a change of
+	// type's addition: said cut, whether or not that last chunk was read.)
+	if cut && last >= 0 {
+		files[last].Cut = true
 	}
 	for i := range files {
 		if !seen[i] {
@@ -333,18 +344,20 @@ func parseGitDiff(s string, cut bool) ([]gitChangedFile, bool) {
 			files[i].Hunks, files[i].Cut = nil, false
 		}
 	}
-	// (Bad names out; the list bounded.)
-	kept := files[:0]
+	// (Bad names out; the list bounded — into a list of its own: what is left
+	// out is not kept alive behind it, review 11-15.)
+	kept := make([]gitChangedFile, 0, min(len(files), gitChangesFilesMax))
 	for _, f := range files {
-		if cleanName(f.Path) && (f.From == "" || cleanName(f.From)) {
-			kept = append(kept, f)
+		if !cleanName(f.Path) || (f.From != "" && !cleanName(f.From)) {
+			continue
 		}
+		if len(kept) == gitChangesFilesMax {
+			more = true
+			break
+		}
+		kept = append(kept, f)
 	}
-	files = kept
-	if len(files) > gitChangesFilesMax {
-		files, more = files[:gitChangesFilesMax], true
-	}
-	return files, more
+	return kept, more
 }
 
 // chunkPath: the path a chunk of the patch is of (its new one; a deleted
@@ -540,6 +553,7 @@ func (s *Server) apiGitChanges(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return nil, err
 		}
+		g.raw = len(out)
 		return &g, nil
 	})
 	switch {

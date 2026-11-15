@@ -232,7 +232,18 @@ export function ChangesView({ sid, pane, base, start, acts, onClose }: { sid: st
                     ) : f.hunks?.length ? (
                       <>
                         <Hunks hunks={f.hunks} className="is-whole" />
-                        {f.cut && <p className="gch-file-note">{t('gch.cut')}</p>}
+                        {/* (Cut with others: read alone it may come whole — a change of type's second half, say.) */}
+                        {f.cut && (
+                          <div className="gch-file-note">
+                            <span>{typeof st === 'string' && st !== 'loading' ? st : t('gch.cut')}</span>
+                            {!st && (
+                              <button type="button" className="btn" onClick={() => loadAlone(f)}>
+                                {t('gch.load')}
+                              </button>
+                            )}
+                            {st === 'loading' && <span>{t('common.loading')}</span>}
+                          </div>
+                        )}
                       </>
                     ) : (
                       <p className="gch-file-note">{t(f.from ? 'gch.movedOnly' : 'gch.noLines')}</p>

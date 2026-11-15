@@ -56,10 +56,11 @@ const NAMED_FILE = /\/(?:[^/]*\.[^/.:#]+|Makefile|Dockerfile|Containerfile|Rakef
 const REL = /^(?:\.\/)?(?![-@])[^\s`'"<>|;&$*?[\]{}\\]{1,1024}$/
 const REL_FILE = /(?:^|\/)[^/]*[^/.]\.[^/.:#]*[A-Za-z][^/.:#]*$|(?:^|\/)(?:Makefile|Dockerfile|Containerfile|Justfile|justfile|makefile|GNUmakefile)$/
 function relRef(t: string, link: boolean): { path: string; lines?: LineSpan; rel: true } | null {
-  if (!REL.test(t) || t.includes('://') || t.startsWith('/') || t.startsWith('~') || /(^|\/)\.{1,2}(\/|$)/.test(t.replace(/^\.\//, ''))) return null
+  if (!REL.test(t) || t.includes('://') || t.startsWith('/') || t.startsWith('~') || t.startsWith('#') || /(^|\/)\.{1,2}(\/|$)/.test(t.replace(/^\.\//, ''))) return null
   const m = LINES.exec(t)
   const path = (m ? t.slice(0, m.index) : t).replace(/^\.\//, '')
-  if (!path || path.endsWith('/') || !REL_FILE.test(path) || (!m && !link && !path.includes('/'))) return null
+  // (In a link of its own, any name — README, .env, a file of none: review, 11-15.)
+  if (!path || path.endsWith('/') || (!link && (!REL_FILE.test(path) || (!m && !path.includes('/'))))) return null
   if (!m) return { path, rel: true }
   const from = Number(m[1] ?? m[3])
   const to = Number(m[2] ?? m[4] ?? from)

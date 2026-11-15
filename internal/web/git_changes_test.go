@@ -362,3 +362,21 @@ func TestGitPane(t *testing.T) {
 		}
 	}
 }
+
+// Review, 11-15 (2): the cap fell in a change of type's second chunk's head —
+// its first read, its second not: said cut, not whole. And an answer counts
+// the host's output it holds on to, not only what it shows.
+func TestGitChangesCutTypeChange(t *testing.T) {
+	s := ":120000 100644 a b T\x00link\x00:100644 100644 a b M\x00z.txt\x00" +
+		"1\t1\tlink\x001\t0\tz.txt\x00\x00" +
+		"diff --git a/link b/link\ndeleted file mode 120000\n--- a/link\n+++ /dev/null\n@@ -1 +0,0 @@\n-target\n\\ No newline at end of file\n" +
+		"diff --git a/li"
+	files, _ := parseGitDiff(s, true)
+	if len(files) != 2 || files[0].Path != "link" || !files[0].Cut || len(files[0].Hunks) != 1 || !files[1].Omitted {
+		t.Fatalf("%+v", files)
+	}
+	g := &gitChanges{raw: 2 << 20, Files: files}
+	if g.approxSize() < 2<<20 {
+		t.Fatalf("size %d", g.approxSize())
+	}
+}

@@ -792,13 +792,16 @@ const homes = new Map<string, string | Promise<string>>()
 // there is said so, not opened as another or as nothing. Its folder listed
 // to find it (one the host lists only in part, and does not show it in that
 // part, is taken as there: the act itself then says).
-function underCwd(sid: string, cwd: string | undefined, rel: string): Promise<string> {
-  const base = (cwd ?? '').replace(/\/+$/, '')
-  if (!base.startsWith('/')) return Promise.reject(new Error(t('convo.path.noCwd')))
+// (No folder of its row — a tmux session's has no row: the session's own,
+// its active pane's, which is the conversation's — review, 11-15.)
+async function underCwd(sid: string, cwd: string | undefined, rel: string): Promise<string> {
+  if (!cwd) cwd = await api<{ path?: string }>('GET', `/api/sessions/${sid}/files/cwd`).then((r) => r.path, () => undefined)
+  if (!cwd?.startsWith('/')) throw new Error(t('convo.path.noCwd'))
+  const base = cwd.replace(/\/+$/, '') // ("/": "", the root's files "/x")
   const full = base + '/' + rel
   const dir = full.slice(0, full.lastIndexOf('/')) || '/'
   const name = full.slice(full.lastIndexOf('/') + 1)
-  const gone = () => new Error(t('convo.path.notUnder', { path: rel, cwd: base }))
+  const gone = () => new Error(t('convo.path.notUnder', { path: rel, cwd: base || '/' }))
   return api<{ entries?: { name: string; type: string }[]; truncated?: boolean }>('GET', `/api/sessions/${sid}/files?path=` + encodeURIComponent(dir)).then(
     (r) => {
       const e = r.entries?.find((x) => x.name === name)
