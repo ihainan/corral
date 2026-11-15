@@ -84,6 +84,7 @@ function FilesPanel({ sessionId, start, reveal, onPath, onInsert, onClose, docke
   const base = `/api/sessions/${sessionId}/files`
   const [path, setPath] = useState<string | null>(null)
   const [listing, setListing] = useState<FileListing | null>(null)
+  const [listingN, setListingN] = useState(0) // (the navigation it is the answer of: see the mark's effect)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [hidden, setHidden] = useState(() => local.get(HIDDEN_KEY) === '1')
@@ -149,6 +150,7 @@ function FilesPanel({ sessionId, start, reveal, onPath, onInsert, onClose, docke
       if (n !== seq.current) return
       want.current = l.path
       setListing(l)
+      setListingN(n)
       if (l.path !== listedPath.current) setFilterQ('')
       listedPath.current = l.path
       setPath(l.path)
@@ -247,10 +249,13 @@ function FilesPanel({ sessionId, start, reveal, onPath, onInsert, onClose, docke
   useEffect(() => {
     // (Judged once the folder asked for is listed, or its asking is over: not on the
     // last folder's listing while the new one comes — review, 11-15.)
-    // (Not while a navigation is under way — begun in this very commit by a new ask,
-    // its state not drawn yet: seq is counted as it starts, settled as it ends; the
-    // same folder listed again too, its filter cleared and its list back at its top.)
-    if (!marked || !listing || markedSaid.current || seq.current !== settled.current) return
+    // (Only against the answer of the latest navigation, as drawn: not while one is
+    // under way — begun in this very commit by a new ask, or answered after its state
+    // was drawn and before this ran (the refs say done, the listing drawn is the last
+    // one's); not while it failed, its error shown over the last listing — the file
+    // still to show, once Retry lists its folder. The same folder listed again too,
+    // its filter cleared and its list back at its top. Review, 11-15.)
+    if (!marked || !listing || markedSaid.current || listingN !== seq.current) return
     markedSaid.current = true
     // (Its folder not opened — gone, not allowed: the home folder instead, said so.)
     if (!markHere) return toast(t('files.revealGone', { dir: marked.dir }), true)
@@ -258,7 +263,7 @@ function FilesPanel({ sessionId, start, reveal, onPath, onInsert, onClose, docke
     if (el) el.scrollIntoView({ block: 'center' })
     else toast(t(listing.truncated ? 'files.revealCut' : 'files.notThere', { name: marked.name }), true)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [markHere, listing, loading])
+  }, [markHere, listing, listingN, loading])
   const hiddenCount = listing ? listing.entries.length - listing.entries.filter((e) => !e.name.startsWith('.')).length : 0
 
   const toggleHidden = () => {
