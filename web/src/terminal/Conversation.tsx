@@ -12,7 +12,7 @@ import { CodeSpanOf, FileLinkOf, Markdown } from './markdown'
 import { codeRef, type LineSpan } from './paths'
 import { Hunks } from './hunks'
 import { ChangesView, type ChangesAgainst } from './changesView'
-import { Dock, dockKept, keepDock, type DockTab, type DockTerminal } from './dock'
+import { Dock, dockKept, keepDock, type DockSink, type DockTab, type DockTerminal, type FilesAsk } from './dock'
 import { useSubConvo } from './subagent'
 import { useSubScan, type SubScanAgent } from './subscan'
 import { NEW_AGENT } from './newAgent'
@@ -217,6 +217,7 @@ export function ConversationView({
   onLook,
   onShowTerminal,
   dockTerminal,
+  dockSink,
   onCopied,
   composer,
   onSendNow,
@@ -253,6 +254,7 @@ export function ConversationView({
   onLook?: () => void // (its terminal shown here, where it can be)
   onShowTerminal: () => void
   dockTerminal?: DockTerminal // (the dock's Terminal tab: the pane's screen, where it can be shown)
+  dockSink?: { set: (s: DockSink | null) => void; insert: (path: string) => void } // (the page's file acts given to the dock's Files tab, while there is one; a path put in the composer from it)
   onCopied: () => void
   composer?: ReactNode // (the terminal's composer, while it is open)
   onSendNow?: () => void // (messages wait to be taken in: Claude Code's "send now")
@@ -1276,7 +1278,28 @@ export function ConversationView({
   // (Another agent in the pane — its process or session: the card's last tap,
   // its base the last one's repository's, is not this one's — review, 11-15.)
   const bindIdent = convo.bind ? [convo.bind.pid, convo.bind.start, convo.bind.session].join(' ') : ''
-  useEffect(() => setDockStart(undefined), [convo.of, bindIdent])
+  // (The Files tab asked for a file or a folder: by the page's file acts, while there is a dock.)
+  const [filesAsk, setFilesAsk] = useState<FilesAsk | undefined>()
+  useEffect(() => {
+    setDockStart(undefined)
+    setFilesAsk(undefined)
+  }, [convo.of, bindIdent])
+  const dockHere = dockable && !!convo.of && convo.status === 'ready'
+  const toFiles = useRef<(a: Omit<FilesAsk, 'n'>) => void>(() => {})
+  toFiles.current = (a) => {
+    // (A turn's panel in the slot: shut for it, as for the card's counts.)
+    setChanges(null)
+    setSubs(null)
+    setBgCmd(null)
+    setFilesAsk({ ...a, n: ++dockTaps })
+    setDockTab('files')
+    setDockOpen(true)
+  }
+  useEffect(() => {
+    if (!dockSink || !dockHere) return
+    dockSink.set({ file: (path, lines) => toFiles.current({ kind: 'file', path, lines }), files: (path, dir) => toFiles.current({ kind: dir ? 'open' : 'reveal', path }) })
+    return () => dockSink.set(null)
+  }, [dockSink, dockHere])
   const setDockOpen = (v: boolean) => {
     setDockOpenState(v)
     keepDock({ open: v })
@@ -1955,6 +1978,8 @@ export function ConversationView({
           tab={dockTab}
           onTab={setDockTab}
           start={dockStart}
+          ask={filesAsk}
+          onInsert={(p) => dockSink?.insert(p)}
           terminal={dockTerminal}
           acts={files ? { view: (p) => files.view(p), open: files.open } : undefined}
           over={viewW <= 1300 || viewW - (sideShown ? sideWidth : 0) - dockW < DOCK_THREAD}

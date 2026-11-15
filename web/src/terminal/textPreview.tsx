@@ -86,7 +86,8 @@ function nums(n: number, marked: LineSpan | null): ReactNode {
 // shown scrolled to the bottom. lines: those a reference named ("a.go:12",
 // "paradigm.md:82-103"), shown scrolled to and marked — a Markdown file then
 // as its source, where its lines are (not with tail: its lines are not counted).
-export function TextPreview({ sid, path, tail = false, lines: at0, onClose, onReveal }: { sid: string; path: string; tail?: boolean; lines?: LineSpan; onClose: () => void; onReveal?: () => void }) {
+// docked: in the dock's Files tab, its frame the tab's (its close: back to the folder).
+export function TextPreview({ sid, path, tail = false, lines: at0, onClose, onReveal, docked = false }: { sid: string; path: string; tail?: boolean; lines?: LineSpan; onClose: () => void; onReveal?: () => void; docked?: boolean }) {
   usePrefs() // (its colours follow the theme)
   const download = useDownload()
   const [read, setRead] = useState<Read | null>(null)
@@ -120,6 +121,7 @@ export function TextPreview({ sid, path, tail = false, lines: at0, onClose, onRe
     if (tail && read && box.current) box.current.scrollTop = box.current.scrollHeight
   }, [tail, read])
   const name = name0
+  const Frame = docked ? DockedFrame : Dialog
   // (Markdown drawn up to so long; a longer one shown as its source: drawing it would hold the page.)
   const md = lang === 'markdown' && (!read || read.text.length <= MD_DRAWN_MAX)
   // (Its lines' numbers, beside them: as many as it has.)
@@ -146,7 +148,7 @@ export function TextPreview({ sid, path, tail = false, lines: at0, onClose, onRe
     b.scrollTop += m.getBoundingClientRect().top - b.getBoundingClientRect().top - above
   }, [read, asSource, atFrom, atTo])
   return (
-    <Dialog title={name} onClose={onClose} wide hideTitle className="dlg text-preview-dialog">
+    <Frame title={name} onClose={onClose} wide hideTitle className={'dlg text-preview-dialog' + (docked ? ' is-docked' : '')}>
       <DialogHead
         icon={<FileTypeIcon name={name} />}
         title={name}
@@ -211,6 +213,11 @@ export function TextPreview({ sid, path, tail = false, lines: at0, onClose, onRe
         )}
         {!tail && read?.cut && <p className="text-preview-cut is-end">{t('preview.cut', { all: formatSize(read.size) })}</p>}
       </div>
-    </Dialog>
+    </Frame>
   )
+}
+
+// The dock's frame for it, in place of the dialog: the same head and body, in the tab.
+function DockedFrame({ children, className }: { title: string; onClose: () => void; wide?: boolean; hideTitle?: boolean; className?: string; children: ReactNode }) {
+  return <div className={className + ' text-preview-docked'}>{children}</div>
 }

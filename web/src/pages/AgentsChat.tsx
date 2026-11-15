@@ -12,6 +12,7 @@ import { HostHistoryDialog } from '../terminal/hostHistory'
 import { CardNotice, useClaudeCard, type ClaudeCard } from '../terminal/cardNotice'
 import { attachedIn, expandForClaude, expandPastes, getDraft, keepDraft, keepPaste, keepSent, keptSent, remember, sentHistory, unsendable } from '../terminal/drafts'
 import { geminiPath, shellPath, type LineSpan } from '../terminal/paths'
+import type { DockSink } from '../terminal/dock'
 import { useCompletion } from '../terminal/Completion'
 import { PanelWindow } from '../terminal/PanelWindow'
 import { convoTarget, herdrTarget, InlineReply } from '../terminal/ReplyDialog'
@@ -903,6 +904,8 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   activeNow.current = active
   useEffect(() => void actN.current++, [sid, active])
   // (The agent's folder as it is when a relative path is acted on.)
+  // (The dock's Files tab, while the conversation has one: where a text file looked at, a folder, go — dock.tsx.)
+  const dock = useRef<DockSink | null>(null)
   const cwdNow = useRef<{ cwd?: string; pane?: string }>({})
   cwdNow.current = { cwd: row?.a.cwd, pane: convo.bind?.pane ?? cur.pane } // (its pane: the conversation's, or the entry's shown — never the focused one)
   const fileActs = useMemo((): FileActs => {
@@ -915,13 +918,13 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       )
     }
     // (Looked at: a picture as one, anything else as text — the host says if it is. One at a time.)
-    const look = (q: string, end = false, group?: string[], at?: LineSpan) => (IMAGE_EXT.test(q) ? (setReading(null), setViewSet(group && group.length > 1 ? group : null), setViewing(q)) : (setViewing(null), setReadingEnd(end), setReadingAt(at), setReading(q)))
+    const look = (q: string, end = false, group?: string[], at?: LineSpan) => (IMAGE_EXT.test(q) ? (setReading(null), setViewSet(group && group.length > 1 ? group : null), setViewing(q)) : dock.current && !end ? dock.current.file(q, at) : (setViewing(null), setReadingEnd(end), setReadingAt(at), setReading(q)))
     // (A picture of the log alone: no file to make whole, a picture whatever its name.)
     const showPic = (q: string, group?: string[]) => (setReading(null), setViewSet(group && group.length > 1 ? group : null), setViewing(q))
     return {
       logPic: (from) => logPic(cur.pane ?? '', from),
-      reveal: (p) => whole(p, (q) => (setFilesIn(false), setFilesAt(q))),
-      open: (p) => whole(p, (q) => (setFilesIn(true), setFilesAt(q))),
+      reveal: (p) => whole(p, (q) => (dock.current ? dock.current.files(q, false) : (setFilesIn(false), setFilesAt(q)))),
+      open: (p) => whole(p, (q) => (dock.current ? dock.current.files(q, true) : (setFilesIn(true), setFilesAt(q)))),
       download: (p) => (isLogPic(p) ? download(sid, p) : whole(p, (q) => download(sid, q))),
       view: (p, group, at) => (isLogPic(p) ? showPic(p, group) : whole(p, (q) => (IMAGE_EXT.test(q) ? showPic(q, group) : look(q, false, group, at)))),
       tail: (p) => whole(p, (q) => look(q, true)),
@@ -1691,6 +1694,14 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     return () => cancelAnimationFrame(frame)
   }, [active])
   // Text put in where the cursor is (or at the end, the field away).
+  // (A path put in the composer as the agent takes one: quoted for a shell, or Gemini's @path.)
+  const insertPath = (p: string) => {
+    const quoted = /gemini/i.test(row?.a.agent ?? convo.bind?.agent ?? '') ? geminiPath(p) : shellPath(p)
+    if (quoted) insert(quoted + ' ')
+  }
+  const insertPathNow = useRef(insertPath)
+  insertPathNow.current = insertPath
+  const dockSink = useMemo(() => ({ set: (s: DockSink | null) => void (dock.current = s), insert: (p: string) => insertPathNow.current(p) }), [])
   const insert = (text: string) => {
     const el = field.current
     const d = el ? el.value : draft
@@ -2626,6 +2637,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
         return r.pressed
       }}
       onShowTerminal={openTerminal}
+      dockSink={dockSink}
       dockTerminal={{ can: liveFor(convo.bind?.agent) && !!convo.bind, press: pressBody, onFull: openTerminal, letters: convo.bind?.agent === 'codex' }}
       onLook={liveFor(convo.bind?.agent) && convo.bind ? () => setLiveOf(bindKey) : undefined}
       onCopied={() => toast(t('common.copied'))}
@@ -2689,8 +2701,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
         onPath={() => {}}
         onInsert={(p) => {
           setFilesAt(null)
-          const quoted = /gemini/i.test(row?.a.agent ?? convo.bind?.agent ?? '') ? geminiPath(p) : shellPath(p)
-          if (quoted) insert(quoted + ' ')
+          insertPath(p)
         }}
         onClose={() => setFilesAt(null)}
       />

@@ -1,22 +1,32 @@
 // The dock: a panel beside the thread on a wide screen (over it, from the
 // right, where the thread would keep too little of its own — as the turn's
 // panels are), its tabs what the agent's work is looked at in without a
-// dialog over it: the Changes of its folder, its Terminal as it is now.
-// (Files to come.) Shown in the slot those panels are in, and put aside
+// dialog over it: the Changes of its folder, its Files, its Terminal as it
+// is now. Shown in the slot those panels are in, and put aside
 // while one of them is open. Opened from the bar's toggle or the card's
 // counts; whether it is open, its tab and its width are the person's (kept
 // in this browser); what each tab shows is per conversation, kept while the
 // page is.
 import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
-import { GitCompareArrows, SquareTerminal, X } from 'lucide-react'
+import { FolderOpen, GitCompareArrows, SquareTerminal, X } from 'lucide-react'
 import { api } from '../api'
 import { t } from '../i18n'
 import { usePrefs } from '../prefs'
 import { ChangesBody, useChanges, type ChangesActs, type ChangesAgainst } from './changesView'
 import { PanelWindow } from './PanelWindow'
+import { FilesBrowser } from './FilesDialog'
+import { TextPreview } from './textPreview'
+import type { LineSpan } from './paths'
 
-export type DockTab = 'changes' | 'terminal'
-const TABS: DockTab[] = ['changes', 'terminal']
+export type DockTab = 'changes' | 'files' | 'terminal'
+const TABS: DockTab[] = ['changes', 'files', 'terminal']
+const TAB_WORD = { changes: 'dock.changes', files: 'dock.files', terminal: 'dock.terminal' } as const
+
+// What the page asks of the Files tab (AgentsChat's file acts, where there is
+// a dock): a text file looked at (at its lines), a folder opened, a file shown
+// in its folder. n: each its own, taken once.
+export type FilesAsk = { kind: 'file' | 'open' | 'reveal'; path: string; lines?: LineSpan; n: number }
+export type DockSink = { file: (path: string, lines?: LineSpan) => void; files: (path: string, dir: boolean) => void }
 
 // What the Terminal tab is given: whether the pane's screen can be shown
 // here (liveFor: AgentsChat's one switch for it), what a key is pressed with,
@@ -53,6 +63,9 @@ export function keepDock(k: Partial<Kept>) {
 // the Terminal tab — shows what was chosen since, not the tap again).
 const against = new Map<string, ChangesAgainst>()
 const tapTaken = new Map<string, number>()
+// The Files tab's, per conversation: the folder it was in, the file it showed.
+const filesKept = new Map<string, { dir?: string; file?: { path: string; lines?: LineSpan } }>()
+const askTaken = new Map<string, number>()
 
 // The base the card names (the remote's default branch): asked as the card
 // asks, for the tab to offer it.
@@ -78,6 +91,8 @@ export function Dock({
   tab,
   onTab,
   start,
+  ask,
+  onInsert,
   terminal,
   acts,
   over,
@@ -94,6 +109,8 @@ export function Dock({
   tab: DockTab
   onTab: (t: DockTab) => void
   start?: { against: ChangesAgainst; base?: string; n: number } // (the card's counts tapped: that reading, n each time)
+  ask?: FilesAsk // (the Files tab asked for a file or a folder)
+  onInsert: (path: string) => void // (a path put in the composer, from the Files tab)
   terminal?: DockTerminal
   acts?: ChangesActs
   over: boolean // (over the thread, not beside it)
@@ -106,6 +123,10 @@ export function Dock({
 }) {
   usePrefs()
   const sid = of.split(' ')[0]
+  const [filesShown, setFilesShown] = useState(tab === 'files')
+  useEffect(() => {
+    if (tab === 'files') setFilesShown(true)
+  }, [tab])
   const root = useRef<HTMLElement>(null)
   // (Tabs as a tablist: the arrows between them, Home and End; the one shown the one reached by Tab.)
   const tabKeys = (e: ReactKeyboardEvent) => {
@@ -175,8 +196,8 @@ export function Dock({
               tabIndex={tab === k ? 0 : -1}
               onClick={() => onTab(k)}
             >
-              {k === 'changes' ? <GitCompareArrows size={15} /> : <SquareTerminal size={15} />}
-              {t(k === 'changes' ? 'dock.changes' : 'dock.terminal')}
+              {k === 'changes' ? <GitCompareArrows size={15} /> : k === 'files' ? <FolderOpen size={15} /> : <SquareTerminal size={15} />}
+              {t(TAB_WORD[k])}
             </button>
           ))}
         </div>
@@ -184,8 +205,14 @@ export function Dock({
           <X size={18} />
         </button>
       </div>
-      <div className="convo-tray-body" role="tabpanel" id={'dock-panel-' + tab} aria-labelledby={'dock-tab-' + tab}>
-        {tab === 'changes' ? (
+      {/* (Files kept once shown — its folder, an upload going — while another tab is: hidden, not gone.) */}
+      {filesShown && (
+        <div className="convo-tray-body" role="tabpanel" id="dock-panel-files" aria-labelledby="dock-tab-files" hidden={tab !== 'files'}>
+          <DockFiles key={of + ' ' + ident} of={of} sid={sid} pane={pane} ask={ask} onInsert={onInsert} />
+        </div>
+      )}
+      <div className="convo-tray-body" role="tabpanel" id={'dock-panel-' + tab} aria-labelledby={'dock-tab-' + tab} hidden={tab === 'files'}>
+        {tab === 'files' ? null : tab === 'changes' ? (
           <DockChanges key={of + ' ' + ident} of={of} sid={sid} pane={pane} start={start} acts={acts} />
         ) : terminal?.can ? (
           <PanelWindow key={of + ' ' + ident} sid={sid} active={active} press={terminal.press} onSettled={onSettled} toast={toast} live={{ onFull: terminal.onFull, letters: terminal.letters, onLeave: () => root.current?.querySelector<HTMLElement>('.convo-tray-tab[aria-selected="true"]')?.focus() }} />
@@ -231,4 +258,68 @@ function DockChanges({ of, sid, pane, start, acts }: { of: string; sid: string; 
       <ChangesBody c={c} base={base} acts={acts} className="is-docked" />
     </>
   )
+}
+
+// The Files tab: the file panel's browser, in the conversation's folder at
+// first (its pane's, asked of the host — not the focused one's), where it
+// was after; a text file looked at shown in the tab, its close back to the
+// folder. What the page asks (ask) is taken once.
+function DockFiles({ of, sid, pane, ask, onInsert }: { of: string; sid: string; pane: string; ask?: FilesAsk; onInsert: (path: string) => void }) {
+  const kept = filesKept.get(of) ?? {}
+  const fresh = !!ask && askTaken.get(of) !== ask.n
+  const [view, setView] = useState(() => {
+    if (fresh) askTaken.set(of, ask!.n)
+    return fresh ? fromAsk(ask!, kept) : { start: kept.dir ?? null, reveal: undefined as string | undefined, file: kept.file, n: 0 }
+  })
+  // (Another ask, the tab open already: that one.)
+  useEffect(() => {
+    if (!ask || askTaken.get(of) === ask.n) return
+    askTaken.set(of, ask.n)
+    setView((v) => ({ ...fromAsk(ask, filesKept.get(of) ?? {}), n: v.n + (ask.kind === 'file' ? 0 : 1) }))
+  }, [ask, of])
+  useEffect(() => void filesKept.set(of, { ...(filesKept.get(of) ?? {}), file: view.file }), [of, view.file])
+  // (Its folder at first: the pane's, asked; none known — the browser's own way, the terminal's.)
+  const [cwd, setCwd] = useState<string | null | undefined>(view.start || view.reveal ? null : undefined)
+  useEffect(() => {
+    if (cwd !== undefined) return
+    const ctl = new AbortController()
+    api<{ path?: string }>('GET', `/api/sessions/${sid}/files/cwd` + (pane ? '?pane=' + encodeURIComponent(pane) : ''), undefined, { signal: ctl.signal, timeoutMs: 12000 }).then(
+      (r) => !ctl.signal.aborted && setCwd(r.path || null),
+      () => !ctl.signal.aborted && setCwd(null),
+    )
+    return () => ctl.abort()
+  }, [cwd, sid, pane])
+  if (cwd === undefined) return <p className="convo-tray-note">{t('common.loading')}</p>
+  return (
+    <>
+      <div className="convo-tray-files" hidden={!!view.file}>
+        <FilesBrowser
+          key={view.n}
+          sessionId={sid}
+          start={view.start ?? cwd}
+          reveal={view.reveal}
+          onPath={(p) => filesKept.set(of, { ...(filesKept.get(of) ?? {}), dir: p })}
+          onInsert={onInsert}
+          onFile={(p) => setView((v) => ({ ...v, file: { path: p } }))}
+        />
+      </div>
+      {view.file && (
+        <TextPreview
+          key={view.file.path + ':' + (view.file.lines?.from ?? '')}
+          sid={sid}
+          path={view.file.path}
+          lines={view.file.lines}
+          docked
+          onClose={() => setView((v) => ({ ...v, file: undefined }))}
+          onReveal={() => setView((v) => ({ start: null, reveal: v.file!.path, file: undefined, n: v.n + 1 }))}
+        />
+      )}
+    </>
+  )
+}
+
+function fromAsk(a: FilesAsk, kept: { dir?: string }) {
+  if (a.kind === 'file') return { start: kept.dir ?? null, reveal: undefined, file: { path: a.path, lines: a.lines }, n: 0 }
+  if (a.kind === 'open') return { start: a.path, reveal: undefined, file: undefined, n: 0 }
+  return { start: null, reveal: a.path, file: undefined, n: 0 }
 }

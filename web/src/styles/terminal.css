@@ -1052,6 +1052,9 @@ button.gch-ut:hover { background: var(--term-hover); }
 .convo-tray-tab[aria-selected='true'] { background: var(--term-accent-soft); color: var(--term-accent-text); font-weight: 500; }
 .convo-tray-tab:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: -2px; }
 .convo-tray-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.convo-tray-files { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+/* (A tab's body hidden, kept: its display above would show it.) */
+.convo-tray-body[hidden], .convo-tray-files[hidden] { display: none; }
 .convo-tray-bar { flex: none; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 16px 0; }
 .convo-tray-sub { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--term-fg-3); font-size: var(--fs-note); line-height: var(--lh-note); }
 .convo-tray-bar .link-btn { flex: none; font-size: var(--fs-note); line-height: var(--lh-note); }

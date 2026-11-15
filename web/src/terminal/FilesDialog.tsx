@@ -63,8 +63,18 @@ const ORDER_KEY = 'corral.files.byTime'
 const FILTER_FROM = 8 // (entries in a folder: more than this, and the filter shows)
 
 // Browse and change files on the session's host, over the terminal's own
-// SSH connection.
-export function FilesDialog({ sessionId, start, reveal, onPath, onInsert, onClose }: Props) {
+// SSH connection. As a dialog; or in the chat page's dock (FilesBrowser).
+export function FilesDialog(props: Props) {
+  return <FilesPanel {...props} />
+}
+
+// The same in the dock's Files tab: no dialog round it, no close of its own;
+// a text file looked at is shown in the tab (onFile), a picture as here.
+export function FilesBrowser(props: Omit<Props, 'onClose'> & { onFile: (path: string) => void }) {
+  return <FilesPanel {...props} onClose={() => {}} docked={{ onFile: props.onFile }} />
+}
+
+function FilesPanel({ sessionId, start, reveal, onPath, onInsert, onClose, docked }: Props & { docked?: { onFile: (path: string) => void } }) {
   const toast = useToast()
   const base = `/api/sessions/${sessionId}/files`
   const [path, setPath] = useState<string | null>(null)
@@ -92,7 +102,7 @@ export function FilesDialog({ sessionId, start, reveal, onPath, onInsert, onClos
   const [viewing, setViewing] = useState<string | null>(null) // a picture of the folder looked at
   const [reading, setReading] = useState<string | null>(null) // a text file of it read
   // (A file looked at: a picture as one, anything else as text — the host says if it is.)
-  const look = (full: string) => (IMAGE_EXT.test(full) ? setViewing(full) : setReading(full))
+  const look = (full: string) => (IMAGE_EXT.test(full) ? setViewing(full) : docked ? docked.onFile(full) : setReading(full))
   const [question, setQuestion] = useState<React.ReactNode>(null) // the upload queue's, apart from the dialogs above
   const seq = useRef(0) // numbers navigations; only the latest one's answer is shown
   const settled = useRef(0) // the latest navigation that has finished
@@ -420,19 +430,23 @@ export function FilesDialog({ sessionId, start, reveal, onPath, onInsert, onClos
   }
   const closePanel = () => leave(onClose)
 
+  // (In the dock: its tab is its frame — no dialog, no close.)
+  const Frame = docked ? DockFrame : Dialog
   return (
-    <div className="files-root" {...dragHandlers}>
-    <Dialog
+    <div className={'files-root' + (docked ? ' is-docked' : '')} {...dragHandlers}>
+    <Frame
       title={t('files.title')}
       onClose={closePanel}
       wide
       hideTitle
       className="files-dialog"
     >
-      <div className="files-head">
-        <h2>{t('files.title')}</h2>
-        <button className="icon-btn" onClick={closePanel} aria-label={t('common.close')}><X size={18} /></button>
-      </div>
+      {!docked && (
+        <div className="files-head">
+          <h2>{t('files.title')}</h2>
+          <button className="icon-btn" onClick={closePanel} aria-label={t('common.close')}><X size={18} /></button>
+        </div>
+      )}
 
       {editing !== null ? (
         <form className="files-path-edit" onSubmit={submitPath}>
@@ -611,7 +625,7 @@ export function FilesDialog({ sessionId, start, reveal, onPath, onInsert, onClos
         )}
         {dragOver && <div className="files-drop">{t('files.dropHint', { dir: path ?? '' })}</div>}
       </div>
-    </Dialog>
+    </Frame>
       {/* Outside the dialog, so opening it does not try to focus the picker. */}
       <input
         ref={fileInput}
@@ -630,6 +644,11 @@ export function FilesDialog({ sessionId, start, reveal, onPath, onInsert, onClos
       {reading && <TextPreview sid={sessionId} path={reading} onClose={() => setReading(null)} />}
     </div>
   )
+}
+
+// The dock's frame for it, in place of the dialog: the same body, laid out in the tab.
+function DockFrame({ children }: { title: string; onClose: () => void; wide?: boolean; hideTitle?: boolean; className?: string; children: React.ReactNode }) {
+  return <div className="files-dialog files-docked">{children}</div>
 }
 
 // A folder opens; a file that can be looked at is (onLook); any other shows
