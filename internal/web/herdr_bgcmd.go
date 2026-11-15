@@ -150,6 +150,20 @@ func (p *cmdProber) ofLocked(pane, session string) []bgCmd {
 	return p.cmds[e.session]
 }
 
+// seen: what the last look found pane's agent (of session) left running,
+// where that look tells it for sure: whole (none cut short, on a host
+// whose processes can be read: see parseCmdScan), recent, and begun after
+// the pane came to done or idle — after anything its turns set going.
+func (p *cmdProber) seen(pane, session string) ([]bgCmd, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.ended[pane]
+	if !ok || session == "" || e.session != session || p.at.IsZero() || time.Since(p.at) > p.kept || p.at.Before(e.from) {
+		return nil, false
+	}
+	return p.cmds[e.session], true
+}
+
 // run looks when due, until ctx ends.
 func (p *cmdProber) run(ctx context.Context) {
 	timer := time.NewTimer(time.Hour)
@@ -304,6 +318,16 @@ const cmdEvalAwk = `{ i = index($0, m); if (i) print substr($0, i + length(m)) }
 // goes: the thread it was run for.
 var cmdCodex = regexp.MustCompile(`^codex:([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$`)
 
+// codexSandboxWrapper: a Codex's process that holds a command in its
+// sandbox (Linux: codex-linux-sandbox, and bwrap under it; macOS:
+// sandbox-exec), the command their child, found as well — 0.167.2,
+// sandbox workspace-write, 11-15.
+func codexSandboxWrapper(cmdline string) bool {
+	first, _, _ := strings.Cut(strings.TrimSpace(cmdline), " ")
+	base := first[strings.LastIndex(first, "/")+1:]
+	return base == "codex-linux-sandbox" || base == "bwrap" || base == "sandbox-exec"
+}
+
 // cmdMonitor: what a Monitor's line says in place of where its output goes.
 var cmdMonitor = regexp.MustCompile(`^monitor:([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$`)
 
@@ -313,7 +337,8 @@ var cmdOutput = regexp.MustCompile(`/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{
 
 // parseCmdScan reads what cmdScanCommand printed: each session's commands,
 // one per task (the earliest begun of its processes), in the order begun;
-// whole false where the scan was cut short (not all of them are there).
+// whole false where the scan was cut short (not all of them are there), or
+// the host's processes could not be read at all (no /proc: no boot time).
 func parseCmdScan(out string) (cmds map[string][]bgCmd, whole bool) {
 	whole = true
 	var btime, hz int64
@@ -345,12 +370,18 @@ func parseCmdScan(out string) (cmds map[string][]bgCmd, whole bool) {
 			} else if m := cmdMonitor.FindStringSubmatch(f[3]); m != nil && cmdPID.MatchString(f[1]) {
 				session, task = m[1], "monitor-"+f[1] // (its task's name is not told: its process's, for one)
 			} else if m := cmdCodex.FindStringSubmatch(f[3]); m != nil && cmdPID.MatchString(f[1]) {
+				if codexSandboxWrapper(f[4]) {
+					continue // (its sandbox's process around the command, found as well: one command, not two)
+				}
 				session, task = m[1], "codex-"+f[1]
 			} else {
 				continue
 			}
 			all = append(all, found{session: strings.ToLower(session), cmd: bgCmd{Task: task, Title: cmdTitle(f[4]), Out: out}, start: start})
 		}
+	}
+	if btime <= 0 {
+		whole = false // (no /proc: no process of any agent found, which is not none running)
 	}
 	slices.SortStableFunc(all, func(a, b found) int { return int(min(max(a.start-b.start, -1), 1)) })
 	got := map[string][]bgCmd{}

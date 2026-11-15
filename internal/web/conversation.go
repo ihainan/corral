@@ -1976,6 +1976,7 @@ func (s *Server) apiConversation(w http.ResponseWriter, r *http.Request) {
 	if len(cmds) > 0 {
 		ans.BgCmds, ans.BgCmdList = len(cmds), cmds[:min(len(cmds), maxCmdsShown)]
 	}
+	s.codexRunningOnHost(sess, st) // (before its entries are taken: steps it ends are among them)
 	ans.AgentStatus = shellWord(ans.AgentStatus)
 	ans.OlderCut = st.older && (st.parser.Trimmed() || st.from < 0)
 	if gen != st.gen {

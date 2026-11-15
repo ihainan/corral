@@ -363,6 +363,7 @@ type herdrSockets struct {
 	rounds map[string]*seenRounds       // terminal session → its watcher's rounds
 	bg     map[string]*bgProber         // terminal session → what its Claude panes left running
 	chimes map[string]*chimeCounts      // terminal session → its watcher's chime counts
+	cmds   map[string]*cmdProber        // terminal session → what its agents left running, as the host's processes tell
 	// located: terminal session → pane → the Claude Code session reading
 	// its conversation found it at, and when that was looked for (kept for
 	// the session's life, bounded; "" none found there).
@@ -502,6 +503,21 @@ func (h *herdrSockets) setBg(id string, p *bgProber) {
 	h.bg[id] = p
 }
 
+func (h *herdrSockets) setCmds(id string, p *cmdProber) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.cmds == nil {
+		h.cmds = map[string]*cmdProber{}
+	}
+	h.cmds[id] = p
+}
+
+func (h *herdrSockets) cmdsOf(id string) *cmdProber {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.cmds[id]
+}
+
 func (h *herdrSockets) bgOf(id string) *bgProber {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -531,6 +547,7 @@ func (h *herdrSockets) set(id, path string) {
 		delete(h.sids, id)
 		delete(h.rounds, id)
 		delete(h.bg, id)
+		delete(h.cmds, id)
 		delete(h.chimes, id)
 		delete(h.located, id)
 		delete(h.inView, id)
@@ -701,6 +718,7 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 		got, whole := parseCmdScan(string(out))
 		return got, whole, nil
 	})
+	s.herdrSocks.setCmds(sess.ID, cmds)
 	go cmds.run(ctx)
 	titles := newCodexTitler(func(ctx context.Context) (map[string]string, error) {
 		panes, err := s.codexPanes.of(ctx, sess, socket)

@@ -81,6 +81,21 @@ func TestParseCmdScanCodex(t *testing.T) {
 	}
 }
 
+// A command in Codex's sandbox (Linux, workspace-write): its sandbox's
+// processes around it are found too (lines as a real 0.167.2's printed,
+// 11-15): one command, its own title.
+func TestParseCmdScanCodexSandbox(t *testing.T) {
+	const thread = "01a1dec3-2020-7ba1-9209-a3942488df00"
+	out := "clock\t1700000000\t100\n" +
+		"cmd\t3350549\t97783192\tcodex:" + thread + "\t/home/u/.codex/tmp/arg0-linux/codex-arg0A58kWq/codex-linux-sandbox --sandbox-policy-cwd /home/u/proj --command-cwd /home/u/proj\n" +
+		"cmd\t3350550\t97783193\tcodex:" + thread + "\t/usr/bin/bwrap --new-session --die-with-parent --ro-bind / /\n" +
+		"cmd\t3350595\t97783204\tcodex:" + thread + "\tsleep 45; echo bg-done \n"
+	got, _ := parseCmdScan(out)
+	if c := got[thread]; len(c) != 1 || c[0].Task != "codex-3350595" || c[0].Title != "sleep 45; echo bg-done" {
+		t.Fatalf("got %+v", got)
+	}
+}
+
 // Told only for a Claude Code agent done or idle, of the session it is at,
 // while what was found is recent; a look that fails tells nothing.
 func TestCmdProberTells(t *testing.T) {

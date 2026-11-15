@@ -2,12 +2,13 @@ package web
 
 import (
 	"context"
+	"strings"
 
 	"github.com/ihainan/corral/internal/sshx"
 	"github.com/ihainan/corral/internal/term"
 )
 
-// Commands a Claude Code in a tmux session left running in the background,
+// Commands a Claude Code or a Codex in a tmux session left running in the background,
 // as herdr panes have them told (herdr_bgcmd.go): no watch tells a tmux
 // pane's status, so the conversation's reads do (its session file: idle),
 // and the host is looked at only while one is read and at rest. One prober
@@ -46,7 +47,7 @@ func (s *Server) tmuxCmdsOf(sess *term.Session) *cmdProber {
 // convoProcStatus says it) is told to its prober; what it left running, if
 // that is known.
 func (s *Server) tmuxCmdsTell(sess *term.Session, st *convoState) []bgCmd {
-	if sess.Persistence != "tmux" || st.agent != "claude" || st.sub || st.bind == nil {
+	if sess.Persistence != "tmux" || (st.agent != "claude" && st.agent != "codex") || st.sub || st.bind == nil {
 		return nil
 	}
 	p := s.tmuxCmdsOf(sess)
@@ -54,6 +55,10 @@ func (s *Server) tmuxCmdsTell(sess *term.Session, st *convoState) []bgCmd {
 	if status == "shell" {
 		status = "idle" // (its turn over, a shell running: what it left in the background, maybe)
 	}
-	p.consider(st.bind.Pane, "claude", status, st.bind.Session)
-	return p.of(st.bind.Pane, st.bind.Session)
+	session := st.bind.Session
+	if st.agent == "codex" {
+		session = strings.ToLower(session) // (a Codex's commands are found by its thread, as the scan prints it)
+	}
+	p.consider(st.bind.Pane, st.agent, status, session)
+	return p.of(st.bind.Pane, session)
 }

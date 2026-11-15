@@ -536,3 +536,33 @@ func rawOutput(raw json.RawMessage) string {
 	}
 	return b.String()
 }
+
+// EndedOnHost: commands it set going and left running that the host has
+// no process of any more (the caller's scan of the host's processes, of
+// this conversation's own, begun after these were set going — Codex does
+// not always tell of a process's end: a script that polls several, 11-15).
+// gone(r): whether running r is one of them. Each is no longer running, its
+// step done (what it gave is not known); its process kept, so that an end
+// told after is put on that step all the same. Whether any changed.
+func (c *Codex) EndedOnHost(gone func(Running) bool) bool {
+	var ended []string
+	for _, id := range c.runOrder {
+		if r, ok := c.running[id]; ok && r.Kind == "cmd" && gone(r) {
+			ended = append(ended, id)
+		}
+	}
+	if len(ended) == 0 {
+		return false
+	}
+	c.rev++
+	for _, id := range ended {
+		c.endRun(id)
+		for _, p := range c.procs {
+			if p.id == id && p.t != nil && !p.t.Done {
+				p.t.Done = true
+				c.touch([]*Tool{p.t})
+			}
+		}
+	}
+	return true
+}

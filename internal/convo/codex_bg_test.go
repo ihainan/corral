@@ -377,3 +377,42 @@ func TestCodexFirstCommandLeftRunning(t *testing.T) {
 		t.Errorf("%d steps of it", n)
 	}
 }
+
+// The host has no process of it any more (told by the gateway's scan): no
+// longer running, its step done; its end told after goes on that step.
+func TestCodexEndedOnHost(t *testing.T) {
+	c := feedAll(bgItemBefore, bgUser, bgCall, bgOut, bgSaid, bgDone)
+	rev := c.Rev()
+	if !c.EndedOnHost(func(r Running) bool { return true }) {
+		t.Fatal("nothing ended")
+	}
+	if got := runningIDs(c); got != "" {
+		t.Errorf("still running: %q", got)
+	}
+	_, tl := entryOf(c, "proc:37552@2026-11-15T04:14:12.050Z")
+	if tl == nil || !tl.Done {
+		t.Fatalf("its step: %+v", tl)
+	}
+	if len(c.Since(rev)) == 0 {
+		t.Error("its step's change not told")
+	}
+	if c.EndedOnHost(func(r Running) bool { return true }) {
+		t.Error("ended twice")
+	}
+	c.Feed([]byte(bgUser2 + bgEnded))
+	if !strings.Contains(tl.Result, "bg-done") {
+		t.Errorf("its end told after, not on its step: %+v", tl)
+	}
+	n := 0
+	for _, x := range toolsOf(c) {
+		if strings.Contains(x.Detail, "sleep 45") {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("%d steps of it", n)
+	}
+	if got := runningIDs(c); got != "" {
+		t.Errorf("running again: %q", got)
+	}
+}
