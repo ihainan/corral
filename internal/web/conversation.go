@@ -2895,6 +2895,20 @@ func convoGatedPasteCommand(gate, mode, session, pane, socket string, pid, start
 	return convoGated(gate, mode, session, pane, socket, pid, start, sid, strings.Join(ns, "+"), nil, read)
 }
 
+// convoGatedQueueCommand: convoGatedCommand (or its paste in parts) for a
+// message to Codex queued after its turn: Tab in Enter's place.
+func convoGatedQueueCommand(gate, mode, session, pane, socket string, pid, start int64, sid string, length int, parts []int, read int) string {
+	n := strconv.Itoa(length)
+	if parts != nil {
+		ns := make([]string, len(parts))
+		for i, x := range parts {
+			ns[i] = strconv.Itoa(x)
+		}
+		n = strings.Join(ns, "+")
+	}
+	return convoGated(gate, mode, session, pane, socket, pid, start, sid, n+"~", nil, read)
+}
+
 // convoGatedFillCommand: convoGatedCommand for a text only pasted, no Enter
 // after it (a prompt's row to write in: see Fill).
 func convoGatedFillCommand(gate, mode, session, pane, socket string, pid, start int64, sid string, length int, read int) string {
@@ -2924,6 +2938,14 @@ case $gate in preply:*) cx=1 cxplan=1 gate=${gate#p} ;; esac
 oc=
 case $gate in ofree:*) oc=${gate#ofree:} gate=free ;; esac
 case $rd in ''|*[!0-9]*) rd=0;; esac
+# (A message to Codex queued after its turn, its length ending "~": Tab in
+# Enter's place — Codex's own "tab to queue message", sent once its turn
+# is over, not into it.)
+tabsend=
+case $len in *~)
+  tabsend=1 len=${len%"~"} # (quoted: a bare ~ there is the home folder)
+  case $len in ''|*[!0-9+]*) exit 4;; esac ;;
+esac
 # (A message in parts, its length "12+5+30": each part pasted on its own,
 # in turn — a picture's path alone, so that Codex takes it for a picture.
 # The whole, as one, checked as ever.)
@@ -3359,7 +3381,8 @@ if [ "$mode" = tmux ]; then
   if [ -n "$noenter" ]; then screen; exit 0; fi
   pasted
   gate_enter
-  tmux send-keys -t "$p" Enter 9>&- || exit 5
+  if [ -n "$tabsend" ]; then tmux send-keys -t "$p" Tab 9>&- || exit 5
+  else tmux send-keys -t "$p" Enter 9>&- || exit 5; fi
   taken
   screen
 else
@@ -3405,7 +3428,9 @@ else
   if [ -n "$noenter" ]; then screen; exit 0; fi
   pasted
   gate_enter
-  HERDR_SOCKET_PATH=$sock herdr pane send-keys "$p" enter >/dev/null 2>&1 9>&- || exit 5
+  k=enter
+  [ -n "$tabsend" ] && k=tab
+  HERDR_SOCKET_PATH=$sock herdr pane send-keys "$p" "$k" >/dev/null 2>&1 9>&- || exit 5
   taken
   screen
 fi`
@@ -3698,6 +3723,8 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		// permission's amend, a plan's "Tell Claude what to change" — and
 		// no Enter: the page looks, then presses it. plans/5-claude-own-words.md)
 		Fill bool `json:"fill"`
+		// Queue: (a message to Codex) queued after its turn, not into it.
+		Queue bool `json:"queue"`
 		Live bool `json:"live"` // (panel: the terminal shown as it is, not a panel of its own)
 		// (card: its key, and the card as the page shows it.)
 		Key  string     `json:"key"`
@@ -4270,8 +4297,13 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	}
 	if what == "send" && front.agent == "codex" {
 		// (Its pictures' paths each pasted on its own: Codex takes them for pictures — plans/4-codex-images.md.)
-		if parts := codexPasteParts(text); parts != nil {
+		parts := codexPasteParts(text)
+		if parts != nil {
 			cmd = convoGatedPasteCommand(gate, sess.Persistence, sess.TmuxSession, b.Pane, socket, b.PID, b.Start, b.Session, parts, modeLines(what))
+		}
+		if b.Queue {
+			// (Queued after its turn: Tab, not Enter — Enter while it works goes into it.)
+			cmd = convoGatedQueueCommand(gate, sess.Persistence, sess.TmuxSession, b.Pane, socket, b.PID, b.Start, b.Session, len(text), parts, modeLines(what))
 		}
 	}
 	in := text

@@ -115,6 +115,7 @@ export interface ConvoPending {
   state: 'sending' | 'waiting' | 'stuck'
   opened?: boolean // (a command that has opened a panel: taken in; the log tells of it once that is shut)
   quiet?: boolean // (long since, nothing in the log: said so, quietly)
+  queued?: boolean // (a Codex's, queued after its turn: in its log once that is over)
   // The screen, looked at once it had not turned up: being read; or went: the
   // subagent that took it in, found in its own log (Claude Code had that
   // subagent's conversation in front as it was typed): said for sure.
@@ -1319,7 +1320,7 @@ export function ConversationView({
         <div className="convo-user-text">{p.shown ?? p.text}</div>
         <div className="convo-meta">
           <span role="status">{t(p.opened ? 'convo.sentOnly' : p.state === 'sending' ? 'convo.sending' : went ? 'convo.wentSub' : p.state === 'stuck' ? 'convo.stuck' : 'convo.sent')}</span>
-          {(went || p.quiet || p.state === 'stuck') && (
+          {(went || p.quiet || p.queued || p.state === 'stuck') && (
             <button type="button" className="link-btn" onClick={() => onDismiss(p.id)}>{t('common.close')}</button>
           )}
         </div>
@@ -4607,6 +4608,12 @@ function SentNote({ p, onEnter, onResend, onShowTerminal }: { p: ConvoPending; o
         {entering === 'gone' && <p role="status">{t('convo.missing.enterGone')}</p>}
         {entering === 'failed' && <p role="alert">{t('convo.missing.enterFailed')}</p>}
         <button type="button" className="link-btn" onClick={onShowTerminal}>{t('convo.showTerminal')}</button>
+      </div>
+    )
+  if (p.queued)
+    return (
+      <div className="convo-missing">
+        <p>{t('convo.queuedAfter')}</p>
       </div>
     )
   if (p.quiet && !p.opened)

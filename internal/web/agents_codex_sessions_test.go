@@ -1,6 +1,7 @@
 package web
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -113,5 +114,19 @@ func TestForkFindCodexHomes(t *testing.T) {
 	real, _ := filepath.EvalSymlinks(log)
 	if got := strings.TrimRight(string(out), "\n"); got != real {
 		t.Fatalf("%q, want %q", got, real)
+	}
+}
+
+// A message queued after Codex's turn: its length read as said ("5~": five
+// bytes, Tab in Enter's place), the script going on past it.
+func TestQueueLengthRead(t *testing.T) {
+	cmd := convoGatedQueueCommand("cfree", "tmux", "s", "%0", "", 1, 1, "sid", 5, nil, 0)
+	c := exec.Command("sh", "-c", cmd)
+	c.Stdin = strings.NewReader("hello")
+	err := c.Run()
+	var ee *exec.ExitError
+	// (No such process here: it stops where it looks for it, not at its length — exit 4.)
+	if errors.As(err, &ee) && ee.ExitCode() == 4 {
+		t.Fatalf("its length not read: %v", err)
 	}
 }

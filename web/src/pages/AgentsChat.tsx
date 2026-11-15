@@ -2031,7 +2031,9 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   const stopShown = canPress && !draft.trim() && !up && !sending && !sentAt
   // (The question's card in the box's place: the box, its stop too, out of sight.)
   const askHides = !!(waits && replyTo && agent?.status === 'blocked' && !answered && (convo.status === 'ready' || convo.status === 'none') && !draft.trim() && !up)
-  const send = () => {
+  // (queue: a Codex's, queued after its turn — Tab, its own "tab to queue
+  // message" — not into the turn it is at, as Enter is.)
+  const send = (queue?: true) => {
     const b = convo.bind
     if (sending || (!draft.trim() && !up)) return
     if (blocked || !b) return toast(blocked ?? t('agents.cannotSend'), true)
@@ -2057,7 +2059,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     const id = Date.now() * 100 + (++sentN.current % 100)
     const mark = (extra: Partial<Sent>) => setSent((ps) => ps.map((p) => (p.id === id ? { ...p, ...extra } : p)))
     const drop = () => setSent((ps) => ps.filter((p) => p.id !== id))
-    setSent((ps) => [...ps, { id, text, shown: was, beforeQueued: queueRows(convo.queued).map((q) => q.key), state: 'sending' as const, bind: bindKey, after, afterTs, gen: convo.gen, at, sinceAt: cur.row && !cur.row.lost ? cur.row.a.since : undefined }].slice(-5))
+    setSent((ps) => [...ps, { id, text, shown: was, beforeQueued: queueRows(convo.queued).map((q) => q.key), state: 'sending' as const, bind: bindKey, after, afterTs, gen: convo.gen, at, sinceAt: cur.row && !cur.row.lost ? cur.row.a.since : undefined, ...(queue ? { queued: true } : {}) }].slice(-5))
     // The box is emptied with it (the draft kept too, even if put aside
     // meanwhile, or shown by another of this page since); what it held comes
     // back if the message is refused.
@@ -2076,7 +2078,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       if (draftKeyNow.current === key) setDraftShown((d) => (d === undefined || !d.trim() ? was : d))
     }
 
-    api<{ in_box?: boolean }>('POST', `/api/sessions/${sid}/conversation/send`, { pane: b.pane, pid: b.pid, start: b.start, session: b.session, text }, { timeoutMs: SEND_MS })
+    api<{ in_box?: boolean }>('POST', `/api/sessions/${sid}/conversation/send`, { pane: b.pane, pid: b.pid, start: b.start, session: b.session, text, ...(queue && b.agent === 'codex' ? { queue: true } : {}) }, { timeoutMs: SEND_MS })
       .then((r) => {
         if (authGen() !== account) return drop()
         // (The same words were in its box already — put back there by a stop: Enter only.)
@@ -2326,9 +2328,17 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
               <Square size={14} fill="currentColor" strokeWidth={0} />
             </button>
           ) : (
-            <button type="button" className="composer-send" onClick={send} disabled={sending || !!blocked || (!draft.trim() && !up)} aria-label={t('term.send')} title={t('term.send') + (isTouch ? '' : ' (' + sendKey + ')')}>
+            <>
+              {/* (A Codex at work: a message queued after its turn, besides one into it.) */}
+              {codex && working && !!draft.trim() && !sending && !blocked && !up && (
+                <button type="button" className="btn btn-ghost convo-queue-now" onClick={() => send(true)} title={t('convo.queueAfterHint')}>
+                  {t('convo.queueAfter')}
+                </button>
+              )}
+            <button type="button" className="composer-send" onClick={() => send()} disabled={sending || !!blocked || (!draft.trim() && !up)} aria-label={t('term.send')} title={t('term.send') + (isTouch ? '' : ' (' + sendKey + ')')}>
               <ArrowUp size={18} strokeWidth={2} />
             </button>
+            </>
           )}
         </div>
       </div>
