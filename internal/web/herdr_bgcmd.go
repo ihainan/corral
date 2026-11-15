@@ -60,6 +60,10 @@ type bgCmd struct {
 type cmdProber struct {
 	mu    sync.Mutex
 	ended map[string]cmdPane // the Claude panes done or idle
+	// read: the conversations a chat page reads, at rest by their own logs
+	// (Codex's: what they left running checked against the host), by
+	// their session; looked for while read (see readAt), not after.
+	read  map[string]cmdPane
 	cmds  map[string][]bgCmd // agent session → its commands, as last found
 	at    time.Time          // when they were found (zero: not known)
 	soon  time.Time          // a look due soon (a pane came to done or idle)
@@ -113,6 +117,49 @@ func (p *cmdProber) consider(pane, agent, status, session string) {
 	}
 }
 
+// readAt: a chat page read session's conversation (a Codex thread), at rest
+// or not as its log says (idle): what it left running is looked for while
+// it is, as of when it came to rest.
+func (p *cmdProber) readAt(session string, idle bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !idle || !convoUUID.MatchString(session) {
+		delete(p.read, session)
+		return
+	}
+	if p.read == nil {
+		p.read = map[string]cmdPane{}
+	}
+	if was, ok := p.read[session]; ok {
+		was.told = time.Now()
+		p.read[session] = was
+		return
+	}
+	p.read[session] = cmdPane{session: session, from: time.Now(), told: time.Now()}
+	p.soon = time.Now().Add(p.soonBy)
+	select {
+	case p.wake <- struct{}{}:
+	default:
+	}
+}
+
+// readSeen: what the last look found session left running, where that
+// look tells it for sure: whole (none cut short, on a host whose processes
+// can be read), recent, begun after its conversation came to rest as read.
+func (p *cmdProber) readSeen(session string) ([]bgCmd, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.read[session]
+	if !ok || p.at.IsZero() || time.Since(p.at) > p.kept || p.at.Before(e.from) {
+		return nil, false
+	}
+	return p.cmds[session], true
+}
+
+// readForget: a conversation no page has read for this long is no longer
+// looked for.
+const readForget = cmdKept
+
 // decorate tells each Claude agent done or idle its commands, while what
 // was found is recent.
 func (p *cmdProber) decorate(sum *herdrSummary) {
@@ -150,20 +197,6 @@ func (p *cmdProber) ofLocked(pane, session string) []bgCmd {
 	return p.cmds[e.session]
 }
 
-// seen: what the last look found pane's agent (of session) left running,
-// where that look tells it for sure: whole (none cut short, on a host
-// whose processes can be read: see parseCmdScan), recent, and begun after
-// the pane came to done or idle — after anything its turns set going.
-func (p *cmdProber) seen(pane, session string) ([]bgCmd, bool) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	e, ok := p.ended[pane]
-	if !ok || session == "" || e.session != session || p.at.IsZero() || time.Since(p.at) > p.kept || p.at.Before(e.from) {
-		return nil, false
-	}
-	return p.cmds[e.session], true
-}
-
 // run looks when due, until ctx ends.
 func (p *cmdProber) run(ctx context.Context) {
 	timer := time.NewTimer(time.Hour)
@@ -172,7 +205,7 @@ func (p *cmdProber) run(ctx context.Context) {
 	for {
 		p.mu.Lock()
 		wait := time.Hour
-		if len(p.ended) > 0 {
+		if len(p.ended) > 0 || len(p.read) > 0 {
 			next := last.Add(p.every)
 			if !p.soon.IsZero() && p.soon.Before(next) {
 				next = p.soon
@@ -197,7 +230,12 @@ func (p *cmdProber) run(ctx context.Context) {
 				}
 			}
 		}
-		due := len(p.ended) > 0
+		for sid, e := range p.read {
+			if began.Sub(e.told) > readForget {
+				delete(p.read, sid)
+			}
+		}
+		due := len(p.ended) > 0 || len(p.read) > 0
 		if !p.soon.After(began) {
 			p.soon = time.Time{} // (else it is due still: one coming to done or idle since the last)
 		}

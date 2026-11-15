@@ -11,10 +11,11 @@ import (
 // that the host has no process of any more — Codex does not always tell
 // of a process's end in its log (a script that polls several at once, its
 // output telling none of them by name) — told ended. Only on what the scan
-// of the host's processes tells for sure (cmdProber.seen): of this very
+// of the host's processes tells for sure (cmdProber.readSeen): of this very
 // conversation (each process found by the CODEX_THREAD_ID Codex gave it),
-// whole, on a host whose processes can be read, begun after the pane came
-// to done or idle (after all its turns set going). See codexRunGone.
+// whole, on a host whose processes can be read, begun after its log said
+// it was at rest (after all its turns set going). Whichever pane runs it,
+// named or not: what is told of is the thread's own. See codexRunGone.
 func (s *Server) codexRunningOnHost(sess *term.Session, st *convoState) {
 	if st.agent != "codex" || st.sub || st.bind == nil || !convoUUID.MatchString(st.bind.Session) {
 		return
@@ -28,20 +29,22 @@ func (s *Server) codexRunningOnHost(sess *term.Session, st *convoState) {
 	case "herdr":
 		p = s.herdrSocks.cmdsOf(sess.ID)
 	case "tmux":
-		p = s.tmuxCmdsOf(sess) // (told of this pane by tmuxCmdsTell, just before)
+		p = s.tmuxCmdsOf(sess)
 	}
 	if p == nil {
 		return
 	}
-	live, ok := p.seen(st.bind.Pane, strings.ToLower(st.bind.Session))
-	if !ok {
-		return
-	}
+	thread := strings.ToLower(st.bind.Session)
 	n := 0
 	for _, r := range cx.Running() {
 		if r.Kind == "cmd" {
 			n++
 		}
+	}
+	p.readAt(thread, n > 0 && cx.Status() == "idle") // (looked for while it has some, at rest)
+	live, ok := p.readSeen(thread)
+	if !ok || n == 0 {
+		return
 	}
 	cx.EndedOnHost(func(r convo.Running) bool { return codexRunGone(r, live, n) })
 }

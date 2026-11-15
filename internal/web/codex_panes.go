@@ -340,7 +340,7 @@ for q in sorted(procs, key=lambda q: (q['pane'], q['pid'])):
             if not log and row[3] and os.path.isfile(row[3]):
                 log = row[3]
         if not log:
-            logs = glob.glob(glob.escape(q['home']) + '/sessions/*/*/*/rollout-*-' + tid + '.jsonl')
+            logs = glob.glob(glob.escape(q['home']) + '/sessions/*/*/*/rollout-*-' + tid + '.jsonl') + glob.glob(glob.escape(q['home']) + '/sessions/*/*/*/rollout-*-' + tid + '_*.jsonl')  # (after a rewind, its segments: the newest is written)
             if logs:
                 log = max(logs, key=lambda l: os.stat(l).st_mtime)
     # (Live conversations of its folder no Codex is told at — one it was
@@ -373,7 +373,7 @@ for q in sorted(procs, key=lambda q: (q['pane'], q['pid'])):
 // codexLogOf: a thread's log as the host named it, where it is one: an
 // absolute path, of that thread's rollout (a segment of it too), nothing
 // that leaves its folder. Else "".
-var codexLogName = regexp.MustCompile(`/rollout-[^/]*-([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})(?:_\d+)?\.jsonl$`)
+var codexLogName = regexp.MustCompile(`/rollout-[^/]*-([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})(?:_\d+|_[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})?\.jsonl$`)
 
 // hostOnly: a host as codex_ep gives it (a name or address, a port).
 var hostOnly = regexp.MustCompile(`^[A-Za-z0-9.:\[\]-]{1,253}$`)
@@ -545,7 +545,8 @@ func (c *codexPaneLooks) run(ctx context.Context, sess *term.Session, socket, ta
 // threadOf: the thread pane's Codex is at, as the last look that came back
 // found it (none begun for it), where it tells it for sure — the look
 // recent, one Codex there at a thread no other pane is at, told by its
-// process (the log it has open, `codex resume <id>`), or else that thread
+// process (the log it has open; `codex resume <id>`, nothing talked in
+// since in its folder but that), or else that thread
 // named, its pane's title (title, herdr's) its name whole, no other live
 // conversation of its folder of that name, none unexplained in it (a thread
 // begun or resumed in it since); "" otherwise. (For what is only shown —
@@ -575,11 +576,16 @@ func (c *codexPaneLooks) threadOf(sessID, pane, title string) (thread string, st
 	if !ok || x.Several || !convoUUID.MatchString(x.Thread) {
 		return "", stale
 	}
-	// (Its process's own word — the log it has open, the thread it was
-	// resumed at —: its thread, named or not. Else, run against the daemon,
-	// only the one conversation of its folder begun since it started, which
-	// another Codex there may have begun (codex exec, an editor's): its
-	// name its pane's title, and none other unexplained.)
+	// (Its process's own word now — the log it has open —: its thread,
+	// named or not; the thread it was resumed at, unless another of its
+	// folder was talked in since (/new, /resume in it: its argument is of
+	// before). Else, run against the daemon, only the one conversation of
+	// its folder begun since it started, which another Codex there may have
+	// begun (codex exec, an editor's): its name its pane's title, and none
+	// other unexplained.)
+	if x.Src == "argv" && x.Unexplained != 0 {
+		return "", stale
+	}
 	if x.Src != "fd" && x.Src != "argv" {
 		if x.Name == "" || x.SameName != 0 || x.Unexplained != 0 {
 			return "", stale

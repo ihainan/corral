@@ -33,37 +33,43 @@ func TestCodexRunGone(t *testing.T) {
 	}
 }
 
-// What a look found is told for sure only of the pane's own session, begun
-// after it came to done or idle, recent and whole.
-func TestCmdProberSeen(t *testing.T) {
+// What a look found is told for sure of a conversation a page reads only
+// where it was at rest when the look began, the look recent; told of no
+// longer once it is at work, or no page has read it a while.
+func TestCmdProberReadSeen(t *testing.T) {
 	const th = "01a1dd95-c55c-7270-ad56-1d53266a6fd0"
 	p := newCmdProber(nil)
-	if _, ok := p.seen("w1:p1", th); ok {
-		t.Fatal("no look yet")
+	if _, ok := p.readSeen(th); ok {
+		t.Fatal("not read")
 	}
-	p.consider("w1:p1", "codex", "idle", th)
+	p.readAt(th, true)
 	p.at, p.cmds = time.Now().Add(-time.Second), map[string][]bgCmd{}
-	if _, ok := p.seen("w1:p1", th); ok {
-		t.Error("a look begun before it came to idle")
+	if _, ok := p.readSeen(th); ok {
+		t.Error("a look begun before it came to rest")
 	}
 	p.at = time.Now()
-	if live, ok := p.seen("w1:p1", th); !ok || len(live) != 0 {
+	if live, ok := p.readSeen(th); !ok || len(live) != 0 {
 		t.Errorf("none left: %v %v", live, ok)
 	}
-	if _, ok := p.seen("w1:p1", "01a1dd95-0000-7270-ad56-1d53266a6fd0"); ok {
+	p.readAt(th, true) // (read again, at rest still: as of when it came to rest)
+	if _, ok := p.readSeen(th); !ok {
+		t.Error("read again")
+	}
+	if _, ok := p.readSeen("01a1dd95-0000-7270-ad56-1d53266a6fd0"); ok {
 		t.Error("another conversation's")
 	}
-	if _, ok := p.seen("w1:p2", th); ok {
-		t.Error("another pane's")
-	}
 	p.at = time.Now().Add(-p.kept - time.Second)
-	if _, ok := p.seen("w1:p1", th); ok {
+	if _, ok := p.readSeen(th); ok {
 		t.Error("an old look")
 	}
-	p.consider("w1:p1", "codex", "working", th)
 	p.at = time.Now()
-	if _, ok := p.seen("w1:p1", th); ok {
+	p.readAt(th, false)
+	if _, ok := p.readSeen(th); ok {
 		t.Error("at work: what it runs now is its turn's")
+	}
+	p.readAt("not an id", true)
+	if len(p.read) != 0 {
+		t.Error("not an id, looked for")
 	}
 }
 
@@ -98,6 +104,7 @@ func TestCodexThreadOf(t *testing.T) {
 	}{
 		{"its log open, unnamed", codexPane{Thread: th, Cwd: "/w/proj", Src: "fd"}, "proj", nil, true},
 		{"resumed at it, unnamed", codexPane{Thread: th, Cwd: "/w/proj", Src: "argv"}, "proj", nil, true},
+		{"resumed at it, another talked in since (/new, /resume)", codexPane{Thread: th, Cwd: "/w/proj", Src: "argv", Unexplained: 1}, "proj", nil, false},
 		{"the daemon's, unnamed", codexPane{Thread: th, Cwd: "/w/proj", Src: "db"}, "proj", nil, false},
 		{"the daemon's, named, its title", codexPane{Thread: th, Cwd: "/w/proj", Src: "db", Name: "fix tests"}, "fix tests | proj", nil, true},
 		{"the daemon's, named, another title", codexPane{Thread: th, Cwd: "/w/proj", Src: "db", Name: "fix tests"}, "proj", nil, false},
