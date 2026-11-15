@@ -20,6 +20,8 @@ package web
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"net/http"
 	"path"
@@ -41,45 +43,57 @@ const (
 	gitChangesFilesMax = 5000 // (files listed at most; past that, said)
 )
 
-// gitChangesCommand prints the changes as gitChangesCommand's parser reads
-// them (parseGitChanges): a head of lines, then the diff's own output
-// (--raw --numstat -z then the patch) and, where it ran to its end, its
-// exit status; then the untracked list. Fixed script; the folder, "work" or
-// "base", and a path or "" are its arguments.
-func gitChangesCommand(dir, against, file string) string {
+// gitChangesCommand prints the changes as its parser reads them
+// (parseGitChanges): a head of lines, then sections each opened by a
+// marker of the gateway's own nonce (a file's name, printed as it is in a
+// -z list, cannot hold one it does not know: review, 11-15) — the diff's
+// own output (--raw --numstat -z then the patch) and, where it ran to its
+// end, its exit status; then the untracked list and its own. Fixed script;
+// the folder, "work" or "base", a path or "" (and, a rename's, its old
+// path: the two together are the rename), and the nonce are its arguments.
+func gitChangesCommand(dir, against, file, from, nonce string) string {
 	script := `PATH="$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"; ` +
 		`export GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 GIT_NO_LAZY_FETCH=1 GIT_LITERAL_PATHSPECS=1 LC_ALL=C; ` +
+		`a=$2; f=$3; o=$4; N=$5; ` +
 		`cd -- "$1" 2>/dev/null || { echo 'E nodir'; exit 0; }; ` +
 		`command -v git >/dev/null 2>&1 || { echo 'E nogit'; exit 0; }; ` +
 		`T=; if command -v timeout >/dev/null 2>&1; then T=timeout; elif command -v gtimeout >/dev/null 2>&1; then T=gtimeout; else echo 'E notimeout'; exit 0; fi; ` +
 		`K=; $T -k 1 2 true 2>/dev/null && K='-k 2'; ` +
 		`r() { s=$1; shift; $T $K "$s" "$@"; }; ` +
 		`v=$(r 3 git version 2>/dev/null) || { case $? in 124|137|143) echo 'E timeout' ;; *) echo 'E nogit' ;; esac; exit 0; }; ` +
-		`set -- "$1" "$2" "$3" $(printf '%s\n' "$v" | sed -n 's/^git version \([0-9]*\)\.\([0-9]*\).*/\1 \2/p'); ` +
-		`[ -n "$5" ] && { [ "$4" -gt 2 ] || [ "$5" -ge 15 ]; } || { echo 'E oldgit'; exit 0; }; ` +
-		`if [ "$4" -gt 2 ] || [ "$5" -ge 36 ]; then FS=false; else FS=; fi; ` +
+		`set -- $(printf '%s\n' "$v" | sed -n 's/^git version \([0-9]*\)\.\([0-9]*\).*/\1 \2/p'); ` +
+		`[ -n "$2" ] && { [ "$1" -gt 2 ] || [ "$2" -ge 15 ]; } || { echo 'E oldgit'; exit 0; }; ` +
+		`if [ "$1" -gt 2 ] || [ "$2" -ge 36 ]; then FS=false; else FS=; fi; ` +
 		`q() { r 3 git -c core.fsmonitor=$FS "$@"; }; ` +
 		`top=$(q rev-parse --show-toplevel 2>/dev/null) || { case $? in 124|137|143) echo 'E timeout' ;; *) echo 'E norepo' ;; esac; exit 0; }; ` +
 		// (From the top: the paths are the repository's, wherever in it the pane is.)
 		`cd -- "$top" 2>/dev/null || { echo 'E nodir'; exit 0; }; printf 'TOP %s\n' "$top"; ` +
 		`partial=$(q config --get extensions.partialclone 2>/dev/null; q config --bool --get-regexp '^remote\..*\.promisor$' 2>/dev/null | grep ' true$'); ` +
 		`[ -z "$partial" ] || { echo 'E partial'; exit 0; }; ` +
-		`if [ "$2" = base ]; then ` +
+		`if [ "$a" = base ]; then ` +
 		`base=$(q symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null); ` +
 		`[ -n "$base" ] || for b in origin/main origin/master; do q rev-parse -q --verify "refs/remotes/$b" >/dev/null 2>&1 && { base=$b; break; }; done; ` +
 		`[ -n "$base" ] && from=$(q merge-base HEAD "$base" 2>/dev/null) || { echo 'E nobase'; exit 0; }; printf 'BASE %s\n' "$base"; ` +
 		// (No commit yet: against nothing, what is staged all added.)
 		`else from=$(q rev-parse -q --verify HEAD 2>/dev/null) || from=$(q hash-object -t tree /dev/null 2>/dev/null) || { echo 'E norepo'; exit 0; }; fi; ` +
-		`if [ -n "$3" ]; then set -- "$2" -- "$3"; else set -- "$2"; fi; a=$1; shift; ` +
+		`if [ -z "$f" ]; then set --; elif [ -z "$o" ]; then set -- -- "$f"; else set -- -- "$f" "$o"; fi; ` +
 		// (What a person's config could change of the output, set back to git's own. A diff given up
-		// on (exit 124/137/143) or failed says so; one cut at the cap says nothing — its end not reached.)
-		`printf '\001DIFF\n'; ` +
+		// on (exit 124/137/143) or failed says so; one cut at the cap says nothing — its end not reached.
+		// The untracked list's the same: given up on, it is said not whole, not taken as empty.)
+		`printf '\n\001%s DIFF\n' "$N"; ` +
 		`{ r 10 git -c core.fsmonitor=$FS -c core.quotepath=false -c diff.noprefix=false -c diff.mnemonicPrefix=false -c diff.relative=false -c diff.submodule=short -c diff.suppressBlankEmpty=false -c color.ui=false ` +
-		`diff --no-color --no-ext-diff --no-textconv --src-prefix=a/ --dst-prefix=b/ --raw --numstat -z -p "$from" "$@" 2>/dev/null; printf '\n\001RC %s\n' "$?"; } | head -c ` + strconv.Itoa(gitChangesCap) + `; ` +
-		`if [ "$a" = work ] && [ $# -eq 0 ]; then printf '\n\001UNTRACKED\n'; ` +
-		`r 4 git -c core.fsmonitor=$FS ls-files --others --exclude-standard --directory --no-empty-directory -z 2>/dev/null | head -c ` + strconv.Itoa(gitUntrackedCap) + `; fi; ` +
-		`printf '\n\001END\n'; exit 0`
-	return "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(dir) + " " + sshx.QuoteShell(against) + " " + sshx.QuoteShell(file)
+		`diff --no-color --no-ext-diff --no-textconv --src-prefix=a/ --dst-prefix=b/ --raw --numstat -z -p "$from" "$@" 2>/dev/null; printf '\n\001%s RC %s\n' "$N" "$?"; } | head -c ` + strconv.Itoa(gitChangesCap) + `; ` +
+		`if [ "$a" = work ] && [ -z "$f" ]; then printf '\n\001%s UNTRACKED\n' "$N"; ` +
+		`{ r 4 git -c core.fsmonitor=$FS ls-files --others --exclude-standard --directory --no-empty-directory -z 2>/dev/null; printf '\n\001%s URC %s\n' "$N" "$?"; } | head -c ` + strconv.Itoa(gitUntrackedCap) + `; fi; ` +
+		`printf '\n\001%s END\n' "$N"; exit 0`
+	return "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(dir) + " " + sshx.QuoteShell(against) + " " + sshx.QuoteShell(file) + " " + sshx.QuoteShell(from) + " " + sshx.QuoteShell(nonce)
+}
+
+// gitNonce: a marker of the gateway's own for one run of gitChangesCommand.
+func gitNonce() string {
+	b := make([]byte, 16)
+	rand.Read(b)
+	return hex.EncodeToString(b)
 }
 
 // gitChangedFile is one file of the changes: its path (and the one it had,
@@ -114,14 +128,32 @@ type gitChanges struct {
 	UntrackedMore bool     `json:"untracked_more,omitempty"`
 }
 
+// approxSize: roughly what it holds, for the cache's bound (gitCalls).
+func (g *gitChanges) approxSize() int {
+	n := len(g.Root) + len(g.Base)
+	for _, f := range g.Files {
+		n += 64 + len(f.Path) + len(f.From)
+		for _, h := range f.Hunks {
+			n += 32
+			for _, l := range h.Lines {
+				n += 16 + len(l)
+			}
+		}
+	}
+	for _, u := range g.Untracked {
+		n += 16 + len(u)
+	}
+	return n
+}
+
 // errGitTimeout: the diff was given up on (too slow): not kept.
 var errGitTimeout = errors.New("git took too long")
 
-// parseGitChanges reads gitChangesCommand's output.
-func parseGitChanges(out string) (gitChanges, error) {
+// parseGitChanges reads gitChangesCommand's output, run with nonce.
+func parseGitChanges(out, nonce string) (gitChanges, error) {
 	g := gitChanges{Files: []gitChangedFile{}}
-	head, rest, _ := strings.Cut(out, "\x01DIFF\n")
-	for _, line := range strings.Split(head, "\n") {
+	parts := strings.Split(out, "\n\x01"+nonce+" ")
+	for _, line := range strings.Split(parts[0], "\n") {
 		key, v, _ := strings.Cut(strings.TrimRight(line, "\r"), " ")
 		switch key {
 		case "E":
@@ -138,30 +170,35 @@ func parseGitChanges(out string) (gitChanges, error) {
 	if !g.Repo {
 		return gitChanges{Reason: "norepo", Files: []gitChangedFile{}}, nil
 	}
-	// The diff's part, and what follows it: its exit status where it ended
-	// (none where the cap cut it), the untracked list.
-	diff, tail, _ := strings.Cut(rest, "\n\x01RC ")
-	cut := tail == ""
-	if cut {
-		diff, tail, _ = strings.Cut(rest, "\n\x01UNTRACKED\n")
-		tail = "UNTRACKED\n" + tail
-		if i := strings.Index(diff, "\n\x01END\n"); i >= 0 {
-			diff = diff[:i]
+	// Its sections by name: each part after a marker is its name, a line, then what it holds.
+	sec := map[string]string{}
+	for _, p := range parts[1:] {
+		name, body, _ := strings.Cut(p, "\n")
+		if k, v, ok := strings.Cut(name, " "); ok { // ("RC 0", "URC 124": a status in the name's line)
+			sec[k] = v
+			continue
 		}
-	} else {
-		rc, after, _ := strings.Cut(tail, "\n")
-		if rc != "0" && rc != "1" { // (1: some git's word for "there are differences")
-			if rc == "124" || rc == "137" || rc == "143" {
-				return g, errGitTimeout
-			}
-			return g, errors.New("git diff failed: " + rc)
-		}
-		tail = strings.TrimPrefix(after, "\n\x01")
+		sec[name] = body
 	}
-	g.Files, g.More = parseGitDiff(diff, cut)
-	if u, ok := strings.CutPrefix(tail, "UNTRACKED\n"); ok {
-		u, _, _ = strings.Cut(u, "\n\x01END")
+	diff, ok := sec["DIFF"]
+	if !ok {
+		return g, errors.New("git diff said nothing")
+	}
+	// The diff's exit status where it ended (none where the cap cut it).
+	rc, ended := sec["RC"]
+	if ended && rc != "0" && rc != "1" { // (1: some git's word for "there are differences")
+		if rc == "124" || rc == "137" || rc == "143" {
+			return g, errGitTimeout
+		}
+		return g, errors.New("git diff failed: " + rc)
+	}
+	g.Files, g.More = parseGitDiff(diff, !ended)
+	if u, ok := sec["UNTRACKED"]; ok {
 		g.Untracked, g.UntrackedMore = splitNul(u, gitUntrackedMax, true)
+		// (Not ended, or ended otherwise than well — given up on, cut: not the whole list.)
+		if urc, ended := sec["URC"]; !ended || urc != "0" {
+			g.UntrackedMore = true
+		}
 	}
 	return g, nil
 }
@@ -269,22 +306,28 @@ func parseGitDiff(s string, cut bool) ([]gitChangedFile, bool) {
 		at++
 	}
 	patch := s[at:]
-	// The patch, a chunk a file: in order, each checked to be of its file's name where that is written plain.
+	// The patch: its chunks each given to the file whose path it names (not
+	// by order: a change of type is two chunks, a deletion and an addition,
+	// of one record — review, 11-15); one naming none, left out.
+	at2 := map[string]int{}
+	for i, f := range files {
+		at2[f.Path] = i
+	}
+	seen := make([]bool, len(files))
 	chunks := strings.Split("\n"+patch, "\ndiff --git ")[1:]
+	for ci, c := range chunks {
+		i, ok := at2[chunkPath(c)]
+		if !ok {
+			continue
+		}
+		hs, hcut := parseHunks(c)
+		files[i].Hunks = append(files[i].Hunks, hs...)
+		files[i].Cut = files[i].Cut || hcut || (cut && ci == len(chunks)-1)
+		seen[i] = true
+	}
 	for i := range files {
-		if i >= len(chunks) {
+		if !seen[i] {
 			files[i].Omitted = true
-			continue
-		}
-		c := chunks[i]
-		if want := "a/" + nameOr(files[i].From, files[i].Path) + " b/" + files[i].Path + "\n"; !strings.HasPrefix(c, `"`) && !strings.HasPrefix(c, want) {
-			files[i].Omitted = true // (not the file's: nothing shown rather than another's lines)
-			continue
-		}
-		last := i == len(chunks)-1
-		files[i].Hunks, files[i].Cut = parseHunks(c)
-		if cut && last {
-			files[i].Cut = true
 		}
 		if files[i].Binary {
 			files[i].Hunks, files[i].Cut = nil, false
@@ -304,11 +347,78 @@ func parseGitDiff(s string, cut bool) ([]gitChangedFile, bool) {
 	return files, more
 }
 
-func nameOr(a, b string) string {
-	if a != "" {
-		return a
+// chunkPath: the path a chunk of the patch is of (its new one; a deleted
+// file's, its old), from its lines that say it whole — "rename to"/"copy
+// to", "+++ b/…", "--- a/…" — else from its first line, "a/X b/X" (each
+// side quoted, C style, where its name needs it); "" where none can be read.
+func chunkPath(c string) string {
+	head, _, _ := strings.Cut(c, "\n@@ ")
+	lines := strings.Split(head, "\n")
+	var plus, minus string
+	for _, l := range lines[1:] {
+		switch {
+		case strings.HasPrefix(l, "rename to "):
+			return gitName(strings.TrimPrefix(l, "rename to "), "")
+		case strings.HasPrefix(l, "copy to "):
+			return gitName(strings.TrimPrefix(l, "copy to "), "")
+		case strings.HasPrefix(l, "+++ "):
+			plus = strings.TrimPrefix(l, "+++ ")
+		case strings.HasPrefix(l, "--- "):
+			minus = strings.TrimPrefix(l, "--- ")
+		}
 	}
-	return b
+	if plus != "" && plus != "/dev/null" {
+		return gitName(plus, "b/")
+	}
+	if minus != "" && minus != "/dev/null" {
+		return gitName(minus, "a/")
+	}
+	// Its first line: two sides, either quoted.
+	l := lines[0]
+	if strings.HasPrefix(l, `"`) {
+		if _, rest, ok := cutQuoted(l); ok {
+			return gitName(strings.TrimPrefix(rest, " "), "b/")
+		}
+		return ""
+	}
+	if i := strings.Index(l, ` "b/`); i >= 0 {
+		return gitName(l[i+1:], "b/")
+	}
+	if n := len(l); n >= 5 && (n-5)%2 == 0 {
+		p := l[2 : 2+(n-5)/2]
+		if l == "a/"+p+" b/"+p {
+			return p
+		}
+	}
+	return ""
+}
+
+// gitName: a path as git writes it in a patch — quoted, C style, where it
+// needs to be; a tab after it where it has a space — its side's prefix off.
+func gitName(s, prefix string) string {
+	s = strings.TrimSuffix(s, "\t")
+	if strings.HasPrefix(s, `"`) {
+		u, err := strconv.Unquote(s)
+		if err != nil {
+			return ""
+		}
+		s = u
+	}
+	return strings.TrimPrefix(s, prefix)
+}
+
+// cutQuoted: a C-style quoted string at the start of s, unquoted, and what follows it.
+func cutQuoted(s string) (string, string, bool) {
+	for i := 1; i < len(s); i++ {
+		switch s[i] {
+		case '\\':
+			i++
+		case '"':
+			u, err := strconv.Unquote(s[:i+1])
+			return u, s[i+1:], err == nil
+		}
+	}
+	return "", "", false
 }
 
 // keepWhole: the files whose counts were read; the list cut there.
@@ -394,23 +504,25 @@ func cleanRepoPath(p string) bool {
 	return path.Clean(p) == p && p != "." && p != ".." && !strings.HasPrefix(p, "../")
 }
 
-// GET /api/sessions/{id}/git/changes?pane=&against=work|base[&path=]: the
-// changes of the pane's folder (gitChanges); with path, that file's alone.
+// GET /api/sessions/{id}/git/changes?pane=&against=work|base[&path=[&from=]]:
+// the changes of the pane's folder (gitChanges); with path, that file's
+// alone (from: a renamed one's old path, the two asked of together).
 func (s *Server) apiGitChanges(w http.ResponseWriter, r *http.Request) {
 	sess, ok := s.runningSession(w, r)
 	if !ok {
 		return
 	}
 	q := r.URL.Query()
-	pane, against, file := q.Get("pane"), q.Get("against"), q.Get("path")
-	if len(pane) > gitPaneMax || (against != "work" && against != "base") || (file != "" && !cleanRepoPath(file)) {
+	pane, okPane := gitPane(sess, q.Get("pane"))
+	against, file, from := q.Get("against"), q.Get("path"), q.Get("from")
+	if !okPane || (against != "work" && against != "base") || (file != "" && !cleanRepoPath(file)) || (from != "" && (file == "" || !cleanRepoPath(from))) {
 		writeError(w, http.StatusBadRequest, "bad_request", "no such change")
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), gitWaitTime)
 	defer cancel()
 	w.Header().Set("Cache-Control", "no-store")
-	key := "changes\x00" + sess.ID + "\x00" + pane + "\x00" + against + "\x00" + file
+	key := "changes\x00" + sess.ID + "\x00" + pane + "\x00" + against + "\x00" + file + "\x00" + from
 	v, err := s.gitCalls.do(ctx, key, gitInfoTTL, func(ctx context.Context) (any, error) {
 		cwd, err := s.paneCwd(ctx, sess, pane)
 		if err != nil {
@@ -419,11 +531,16 @@ func (s *Server) apiGitChanges(w http.ResponseWriter, r *http.Request) {
 		if cwd == "" {
 			return nil, errGitNoDir
 		}
-		out, err := sshx.Output(ctx, sess.Client(), gitChangesCommand(cwd, against, file), gitChangesOut)
+		nonce := gitNonce()
+		out, err := sshx.Output(ctx, sess.Client(), gitChangesCommand(cwd, against, file, from, nonce), gitChangesOut)
 		if err != nil {
 			return nil, err
 		}
-		return parseGitChanges(string(out))
+		g, err := parseGitChanges(string(out), nonce)
+		if err != nil {
+			return nil, err
+		}
+		return &g, nil
 	})
 	switch {
 	case errors.Is(err, errGitNoDir):

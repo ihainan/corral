@@ -1,13 +1,17 @@
 package web
 
 import (
+	"context"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/ihainan/corral/internal/term"
 	"github.com/ihainan/corral/internal/testutil"
 )
 
@@ -25,18 +29,20 @@ func TestGitChangesCommandRuns(t *testing.T) {
 			t.Fatalf("git %v: %v %s", args, err, out)
 		}
 	}
-	changes := func(dir, against, file string) gitChanges {
+	changesFrom := func(dir, against, file, from string) gitChanges {
 		t.Helper()
-		out, err := exec.Command("sh", "-c", gitChangesCommand(dir, against, file)).Output()
+		nonce := gitNonce()
+		out, err := exec.Command("sh", "-c", gitChangesCommand(dir, against, file, from, nonce)).Output()
 		if err != nil {
 			t.Fatalf("run: %v", err)
 		}
-		g, err := parseGitChanges(string(out))
+		g, err := parseGitChanges(string(out), nonce)
 		if err != nil {
 			t.Fatalf("parse: %v", err)
 		}
 		return g
 	}
+	changes := func(dir, against, file string) gitChanges { t.Helper(); return changesFrom(dir, against, file, "") }
 	byPath := func(g gitChanges) map[string]gitChangedFile {
 		m := map[string]gitChangedFile{}
 		for _, f := range g.Files {
@@ -160,6 +166,43 @@ func TestGitChangesCommandRuns(t *testing.T) {
 	if f := m["c.txt"]; len(f.Hunks) != 1 || f.Cut || f.Hunks[0].Lines[1] != " " {
 		t.Fatalf("conflict's blank line: %+v", f)
 	}
+	// Review, 11-15: a change of type (a link become a file: two chunks of one record) and a
+	// rename to a name git quotes, each with its own lines, the files after them still theirs;
+	// a file whose name holds what once was a marker; a rename read alone, as a rename.
+	odd := filepath.Join(root, "odd")
+	run(root, "init", "-q", "-b", "main", odd)
+	os.Symlink("target", filepath.Join(odd, "link"))
+	write(filepath.Join(odd, "old.txt"), strings.Repeat("line\n", 30))
+	write(filepath.Join(odd, "bad\n\x01RC 128\nsuffix"), "x\n")
+	write(filepath.Join(odd, "z.txt"), "z\n")
+	run(odd, "add", ".")
+	run(odd, "commit", "-qm", "i")
+	os.Remove(filepath.Join(odd, "link"))
+	write(filepath.Join(odd, "link"), "now a file\n")
+	run(odd, "mv", "old.txt", `new"name.txt`)
+	write(filepath.Join(odd, `new"name.txt`), strings.Repeat("line\n", 30)+"more\n")
+	write(filepath.Join(odd, "bad\n\x01RC 128\nsuffix"), "y\n")
+	write(filepath.Join(odd, "z.txt"), "z\nzz\n")
+	run(odd, "add", "-A")
+	g = changes(odd, "work", "")
+	m = byPath(g)
+	if f := m["link"]; f.Status != "T" || len(f.Hunks) != 2 || f.Omitted {
+		t.Fatalf("type change: %+v", f)
+	}
+	if f := m[`new"name.txt`]; f.Status != "R" || f.From != "old.txt" || f.Add != 1 || len(f.Hunks) != 1 || f.Omitted {
+		t.Fatalf("quoted rename: %+v", f)
+	}
+	if f := m["z.txt"]; f.Add != 1 || len(f.Hunks) != 1 || f.Omitted {
+		t.Fatalf("after them: %+v", f)
+	}
+	if _, ok := m["bad\n\x01RC 128\nsuffix"]; ok || len(g.Files) != 3 {
+		t.Fatalf("marker name: %+v", g.Files)
+	}
+	run(odd, "commit", "-qm", "j")
+	run(odd, "mv", "z.txt", "zz.txt")
+	if g := changesFrom(odd, "work", "zz.txt", "z.txt"); len(g.Files) != 1 || g.Files[0].Status != "R" || g.Files[0].Add != 0 {
+		t.Fatalf("rename alone: %+v", g.Files)
+	}
 	// Past the cap: cut on the host, said so; the files after it listed, their diffs left out.
 	big := filepath.Join(root, "big")
 	run(root, "init", "-q", "-b", "main", big)
@@ -192,24 +235,65 @@ func TestCleanRepoPath(t *testing.T) {
 }
 
 func TestParseGitChangesStates(t *testing.T) {
+	const n = "0123abcd"
+	mk := func(parts ...string) string { return "TOP /r\n\n\x01" + n + " " + strings.Join(parts, "\n\x01"+n+" ") }
 	// Given up on: not kept. Failed: an error. No timeout(1): said.
-	if _, err := parseGitChanges("TOP /r\n\x01DIFF\n\n\x01RC 124\n\n\x01END\n"); err != errGitTimeout {
+	if _, err := parseGitChanges(mk("DIFF\n", "RC 124\n", "END\n"), n); err != errGitTimeout {
 		t.Fatalf("timeout: %v", err)
 	}
-	if _, err := parseGitChanges("TOP /r\n\x01DIFF\n\n\x01RC 128\n\n\x01END\n"); err == nil {
+	if _, err := parseGitChanges(mk("DIFF\n", "RC 128\n", "END\n"), n); err == nil {
 		t.Fatal("failed diff taken")
 	}
-	if g, err := parseGitChanges("E notimeout\n"); err != nil || g.Reason != "notimeout" || g.Files == nil {
+	if g, err := parseGitChanges("E notimeout\n", n); err != nil || g.Reason != "notimeout" || g.Files == nil {
 		t.Fatalf("notimeout: %+v %v", g, err)
 	}
 	// Nothing changed.
-	if g, err := parseGitChanges("TOP /r\n\x01DIFF\n\n\x01RC 0\n\n\x01UNTRACKED\n\n\x01END\n"); err != nil || !g.Repo || len(g.Files) != 0 || g.Untracked != nil {
+	if g, err := parseGitChanges(mk("DIFF\n", "RC 0\n", "UNTRACKED\n", "URC 0\n", "END\n"), n); err != nil || !g.Repo || len(g.Files) != 0 || g.Untracked != nil || g.UntrackedMore {
 		t.Fatalf("clean: %+v %v", g, err)
 	}
+	// The untracked list given up on, or cut: not whole, not "none".
+	for _, u := range []string{"URC 124\n", "END\n"} {
+		if g, _ := parseGitChanges(mk("DIFF\n", "RC 0\n", "UNTRACKED\na\x00", u, "END\n"), n); !g.UntrackedMore || len(g.Untracked) != 1 {
+			t.Fatalf("untracked %q: %+v", u, g)
+		}
+	}
+	// A marker without the nonce is a name's bytes, nothing more.
+	if _, err := parseGitChanges(mk("DIFF\n\n\x01RC 128\n", "RC 0\n", "END\n"), n); err != nil {
+		t.Fatalf("forged marker: %v", err)
+	}
 	// The list itself cut: what was whole of it, said to be more.
-	g, _ := parseGitChanges("TOP /r\n\x01DIFF\n:100644 100644 a b M\x00a.txt\x00:100644 100644 a b M\x00b.t")
+	g, _ := parseGitChanges(mk("DIFF\n:100644 100644 a b M\x00a.txt\x00:100644 100644 a b M\x00b.t"), n)
 	if !g.More || len(g.Files) != 0 {
 		t.Fatalf("cut list: %+v", g)
+	}
+}
+
+// The cache: an answer kept its while and no longer; never more than so many,
+// so much, the oldest going first.
+func TestGitCallsBounded(t *testing.T) {
+	var c gitCalls
+	ctx := context.Background()
+	big := &gitChanges{Files: []gitChangedFile{{Path: strings.Repeat("x", 4<<20)}}}
+	for i := 0; i < 3*gitCacheMax; i++ {
+		c.do(ctx, strconv.Itoa(i), time.Hour, func(context.Context) (any, error) { return 1, nil })
+	}
+	if len(c.m) > gitCacheMax {
+		t.Fatalf("%d kept", len(c.m))
+	}
+	for i := 0; i < 20; i++ {
+		c.do(ctx, "big"+strconv.Itoa(i), time.Hour, func(context.Context) (any, error) { return big, nil })
+	}
+	if c.bytes > gitCacheBytes {
+		t.Fatalf("%d bytes kept", c.bytes)
+	}
+	c.do(ctx, "short", time.Millisecond, func(context.Context) (any, error) { return 1, nil })
+	time.Sleep(5 * time.Millisecond)
+	c.do(ctx, "next", time.Hour, func(context.Context) (any, error) { return 1, nil })
+	c.mu.Lock()
+	_, kept := c.m["short"]
+	c.mu.Unlock()
+	if kept {
+		t.Fatal("kept past its while")
 	}
 }
 
@@ -260,5 +344,21 @@ func TestGitChangesEndpoint(t *testing.T) {
 	mustStatus(t, r, 200, "base")
 	if r.json()["reason"] != "nobase" {
 		t.Fatalf("base: %s", r.Body)
+	}
+}
+
+// The pane as the host is asked of it: none of a tmux session's (so not a key
+// the page can vary), a herdr pane's of its form.
+func TestGitPane(t *testing.T) {
+	tmux, hd := &term.Session{Persistence: "tmux"}, &term.Session{Persistence: "herdr"}
+	for _, c := range []struct {
+		s    *term.Session
+		in   string
+		want string
+		ok   bool
+	}{{tmux, "%3", "", true}, {tmux, "anything", "", true}, {hd, "w1:p2", "w1:p2", true}, {hd, "w1 p2", "", false}, {hd, strings.Repeat("a", gitPaneMax+1), "", false}, {hd, "", "", true}} {
+		if got, ok := gitPane(c.s, c.in); got != c.want || ok != c.ok {
+			t.Errorf("%s %q: %q %v", c.s.Persistence, c.in, got, ok)
+		}
 	}
 }

@@ -86,9 +86,11 @@ export function ChangesView({ sid, pane, base, start, acts, onClose }: { sid: st
   const [read, setRead] = useState<Changes | null>(null)
   const [error, setError] = useState('')
   const [again, setAgain] = useState(0)
-  // (Each file's fold, by path, once the person has opened or folded it; files read alone.)
-  const [folded, setFolded] = useState<Record<string, boolean>>({})
-  const [alone, setAlone] = useState<Record<string, ChangedFile | 'loading' | string>>({})
+  // (Each file's fold, by path, once the person has opened or folded it; files read alone.
+  // Maps, not objects: a file may be named "__proto__" — review, 11-15.)
+  const [folded, setFolded] = useState<Map<string, boolean>>(() => new Map())
+  const [alone, setAlone] = useState<Map<string, ChangedFile | 'loading' | string>>(() => new Map())
+  const put = <V,>(set: (f: (m: Map<string, V>) => Map<string, V>) => void, k: string, v: V) => set((m) => new Map(m).set(k, v))
   // (A file read alone answers into the reading it was asked in, not a later one — another tab's.)
   const gen = useRef(0)
   useEffect(() => {
@@ -96,37 +98,51 @@ export function ChangesView({ sid, pane, base, start, acts, onClose }: { sid: st
     const ctl = new AbortController()
     setError('')
     setRead(null)
-    setFolded({})
-    setAlone({})
+    setFolded(new Map())
+    setAlone(new Map())
     api<Changes>('GET', `/api/sessions/${sid}/git/changes?` + new URLSearchParams({ pane, against }).toString(), undefined, { signal: ctl.signal, timeoutMs: 25000 }).then(
       (c) => !ctl.signal.aborted && setRead(c),
       (e) => !ctl.signal.aborted && setError(failText(e)),
     )
     return () => ctl.abort()
   }, [sid, pane, against, again])
-  const files = useMemo(() => (read?.files ?? []).map((f) => (typeof alone[f.path] === 'object' ? (alone[f.path] as ChangedFile) : f)), [read, alone])
+  const files = useMemo(
+    () =>
+      (read?.files ?? []).map((f) => {
+        const a = alone.get(f.path)
+        return typeof a === 'object' ? a : f
+      }),
+    [read, alone],
+  )
   // Which start folded: the long, and those past the first lines shown.
   const foldAtFirst = useMemo(() => {
-    const out: Record<string, boolean> = {}
+    const out = new Map<string, boolean>()
     let shown = 0
     for (const f of read?.files ?? []) {
       const n = lineCount(f)
-      out[f.path] = n > FOLD_LINES || (n > 0 && shown + n > OPEN_LINES)
-      if (!out[f.path]) shown += n
+      const fold = n > FOLD_LINES || (n > 0 && shown + n > OPEN_LINES)
+      out.set(f.path, fold)
+      if (!fold) shown += n
     }
     return out
   }, [read])
-  const loadAlone = (path: string) => {
+  // (A renamed file asked for with the name it had, so git reads it as the
+  // rename it is; only its diff taken from the answer — what it is and its
+  // counts stay the list's: review, 11-15.)
+  const loadAlone = (f0: ChangedFile) => {
     const n = gen.current
-    setAlone((m) => ({ ...m, [path]: 'loading' }))
-    api<Changes>('GET', `/api/sessions/${sid}/git/changes?` + new URLSearchParams({ pane, against, path }).toString(), undefined, { timeoutMs: 25000 }).then(
+    const path = f0.path
+    put(setAlone, path, 'loading')
+    const q = new URLSearchParams({ pane, against, path })
+    if (f0.from) q.set('from', f0.from)
+    api<Changes>('GET', `/api/sessions/${sid}/git/changes?` + q.toString(), undefined, { timeoutMs: 25000 }).then(
       (c) => {
         if (n !== gen.current) return
         const f = c.files.find((x) => x.path === path)
-        setAlone((m) => ({ ...m, [path]: f ?? t('gch.goneNow') }))
-        setFolded((m) => ({ ...m, [path]: false }))
+        put(setAlone, path, f ? { ...f0, hunks: f.hunks, cut: f.cut, binary: f.binary, omitted: f.omitted } : t('gch.goneNow'))
+        put(setFolded, path, false)
       },
-      (e) => n === gen.current && setAlone((m) => ({ ...m, [path]: failText(e) })),
+      (e) => n === gen.current && put(setAlone, path, failText(e)),
     )
   }
   const add = files.reduce((n, f) => n + f.add, 0)
@@ -176,17 +192,18 @@ export function ChangesView({ sid, pane, base, start, acts, onClose }: { sid: st
           <p className="gch-note">{reasonText(read.reason ?? '', base)}</p>
         ) : (
           <>
-            {files.length === 0 && !read.untracked?.length && <p className="gch-note">{against === 'work' ? t('gch.none') : t('gch.noneBase', { base: read.base ?? base ?? '' })}</p>}
+            {files.length === 0 && !read.untracked?.length && read.untracked_more && <p className="gch-note">{t('gch.untrackedUnread')}</p>}
+            {files.length === 0 && !read.untracked?.length && !read.untracked_more && <p className="gch-note">{against === 'work' ? t('gch.none') : t('gch.noneBase', { base: read.base ?? base ?? '' })}</p>}
             {files.map((f) => {
-              const st = alone[f.path]
-              const open = !(folded[f.path] ?? foldAtFirst[f.path])
+              const st = alone.get(f.path)
+              const open = !(folded.get(f.path) ?? foldAtFirst.get(f.path))
               const n = lineCount(f)
               const slash = f.path.lastIndexOf('/')
               const stKey = ('gch.st.' + (STATUS.has(f.status) ? f.status : 'M')) as I18nKey
               return (
                 <section key={f.path} className="gch-file" data-status={f.status}>
                   <div className="gch-file-head">
-                    <button type="button" className="gch-file-btn" aria-expanded={open} onClick={() => setFolded((m) => ({ ...m, [f.path]: open }))} title={f.from ? f.from + ' → ' + f.path : f.path}>
+                    <button type="button" className="gch-file-btn" aria-expanded={open} onClick={() => put(setFolded, f.path, open)} title={f.from ? f.from + ' → ' + f.path : f.path}>
                       <ChevronRight size={14} className="gch-chev" aria-hidden="true" />
                       <span className={'gch-st is-' + f.status} title={t(stKey)}>{STATUS.has(f.status) ? f.status : 'M'}</span>
                       <span className="gch-path">
@@ -208,7 +225,7 @@ export function ChangesView({ sid, pane, base, start, acts, onClose }: { sid: st
                     ) : f.omitted ? (
                       <div className="gch-file-note">
                         <span>{typeof st === 'string' && st !== 'loading' ? st : t('gch.omitted')}</span>
-                        <button type="button" className="btn" disabled={st === 'loading'} onClick={() => loadAlone(f.path)}>
+                        <button type="button" className="btn" disabled={st === 'loading'} onClick={() => loadAlone(f)}>
                           {st === 'loading' ? t('common.loading') : t('gch.load')}
                         </button>
                       </div>
@@ -221,7 +238,7 @@ export function ChangesView({ sid, pane, base, start, acts, onClose }: { sid: st
                       <p className="gch-file-note">{t(f.from ? 'gch.movedOnly' : 'gch.noLines')}</p>
                     ))}
                   {!open && n > 0 && (
-                    <button type="button" className="gch-file-note gch-unfold" onClick={() => setFolded((m) => ({ ...m, [f.path]: false }))}>
+                    <button type="button" className="gch-file-note gch-unfold" onClick={() => put(setFolded, f.path, false)}>
                       {t('gch.folded', { n })}
                     </button>
                   )}
@@ -229,12 +246,12 @@ export function ChangesView({ sid, pane, base, start, acts, onClose }: { sid: st
               )
             })}
             {read.more && <p className="gch-note">{t('gch.more')}</p>}
-            {!!read.untracked?.length && (
+            {(!!read.untracked?.length || (read.untracked_more && files.length > 0)) && (
               <section className="gch-untracked">
-                <h3 className="gch-head">{t('gch.untracked', { n: read.untracked.length + (read.untracked_more ? '+' : '') })}</h3>
+                <h3 className="gch-head">{t('gch.untracked', { n: (read.untracked?.length ?? 0) + (read.untracked_more ? '+' : '') })}</h3>
                 <p className="gch-hint">{t('gch.untrackedHint')}</p>
                 <ul>
-                  {read.untracked.map((p) => {
+                  {(read.untracked ?? []).map((p) => {
                     const dir = p.endsWith('/')
                     const go = dir ? acts?.open && (() => acts.open!(full(p).replace(/\/+$/, ''))) : acts?.view && (() => acts.view!(full(p)))
                     return (

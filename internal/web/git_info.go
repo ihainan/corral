@@ -30,12 +30,14 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/ihainan/corral/internal/sshx"
+	"github.com/ihainan/corral/internal/term"
 )
 
 const (
@@ -271,18 +273,33 @@ func parseGitPR(out string) (gh bool, pr *gitPR, ok bool) {
 }
 
 // gitCalls caches each folder's answer a while, and has a second asker of
-// one under way wait for it rather than ask the host again.
+// one under way wait for it rather than ask the host again. An answer is
+// kept only its while (ttl) and no longer; and at most gitCacheMax of them,
+// gitCacheBytes in all (as their approxSize says: a Changes answer may be
+// megabytes), the oldest going first — keys the page varies (a file's path)
+// cannot grow it past that (review, 11-15).
 type gitCalls struct {
-	mu sync.Mutex
-	m  map[string]*gitCall
+	mu    sync.Mutex
+	m     map[string]*gitCall
+	bytes int
 }
 
 type gitCall struct {
 	done chan struct{}
 	at   time.Time
+	ttl  time.Duration
+	size int
 	v    any
 	err  error
 }
+
+const (
+	gitCacheMax   = 64
+	gitCacheBytes = 32 << 20
+)
+
+// sized: an answer that says roughly how much it holds.
+type sized interface{ approxSize() int }
 
 // f runs on a context of its own (gitWork long), not the first asker's: one
 // asker giving up does not fail the others, nor end what still runs.
@@ -308,31 +325,29 @@ func (c *gitCalls) do(ctx context.Context, key string, ttl time.Duration, f func
 			}
 		}
 	}
-	for k, x := range c.m { // (old answers go)
-		select {
-		case <-x.done:
-			if time.Since(x.at) > 10*time.Minute {
-				delete(c.m, k)
-			}
-		default:
-		}
-	}
-	e := &gitCall{done: make(chan struct{})}
+	c.sweep(gitCacheMax - 1)
+	e := &gitCall{done: make(chan struct{}), ttl: ttl}
 	c.m[key] = e
 	c.mu.Unlock()
 	go func() {
 		wctx, cancel := context.WithTimeout(context.Background(), gitWork)
 		defer cancel()
-		e.v, e.err = f(wctx)
-		e.at = time.Now()
-		close(e.done)
-		if e.err != nil {
-			c.mu.Lock()
-			if c.m[key] == e {
-				delete(c.m, key)
-			}
-			c.mu.Unlock()
+		v, err := f(wctx)
+		c.mu.Lock()
+		e.v, e.err, e.at = v, err, time.Now()
+		if sz, ok := v.(sized); ok && err == nil {
+			e.size = sz.approxSize()
 		}
+		if c.m[key] == e {
+			if err != nil {
+				delete(c.m, key)
+			} else {
+				c.bytes += e.size
+				c.sweep(gitCacheMax)
+			}
+		}
+		close(e.done)
+		c.mu.Unlock()
 	}()
 	select {
 	case <-e.done:
@@ -340,6 +355,58 @@ func (c *gitCalls) do(ctx context.Context, key string, ttl time.Duration, f func
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
+}
+
+// sweep (c.mu held): answers past their while go; then, while there are more
+// than max or more than gitCacheBytes, the oldest answered. (One still being
+// asked is not dropped: the host's own quota of side operations bounds those.)
+func (c *gitCalls) sweep(max int) {
+	var done []string
+	for k, x := range c.m {
+		if x.at.IsZero() { // (still being asked: at is set, under c.mu, as it is answered)
+			continue
+		}
+		if time.Since(x.at) >= x.ttl {
+			c.drop(k)
+			continue
+		}
+		done = append(done, k)
+	}
+	if len(c.m) <= max && c.bytes <= gitCacheBytes {
+		return
+	}
+	sort.Slice(done, func(i, j int) bool { return c.m[done[i]].at.Before(c.m[done[j]].at) })
+	for _, k := range done {
+		if len(c.m) <= max && c.bytes <= gitCacheBytes {
+			break
+		}
+		c.drop(k)
+	}
+}
+
+func (c *gitCalls) drop(k string) {
+	c.bytes -= c.m[k].size
+	delete(c.m, k)
+}
+
+// gitPane: the pane the page names as the host is asked of it (paneCwd) — a
+// herdr pane's id, of its form; none of a tmux session's, whose folder is
+// its active pane's whatever the page says (so not a key of the cache it
+// could vary: review, 11-15).
+func gitPane(sess *term.Session, pane string) (string, bool) {
+	if pane == "" {
+		return "", true
+	}
+	if len(pane) > gitPaneMax {
+		return "", false
+	}
+	if sess.Persistence != "herdr" {
+		return "", true
+	}
+	if !herdrPaneID.MatchString(pane) {
+		return "", false
+	}
+	return pane, true
 }
 
 // GET /api/sessions/{id}/git[?pane=]: the folder's git state (gitInfo).
@@ -352,8 +419,8 @@ func (s *Server) gitAnswer(w http.ResponseWriter, r *http.Request, pr bool) {
 	if !ok {
 		return
 	}
-	pane := r.URL.Query().Get("pane")
-	if len(pane) > gitPaneMax {
+	pane, ok := gitPane(sess, r.URL.Query().Get("pane"))
+	if !ok {
 		writeError(w, http.StatusBadRequest, "bad_request", "no such pane")
 		return
 	}
