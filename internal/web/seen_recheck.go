@@ -167,13 +167,14 @@ func codexRecheckLog(panes map[string]codexPane, pane string) string {
 
 // logsWroteCommand prints, for each of files in turn, a line "w=" and when
 // it was last written: unix ms where the host's date tells them (GNU
-// date -r), else unix seconds; empty: not read.
+// date -r), else unix seconds (GNU stat, or BSD's and macOS's: no %N in
+// their date, no -c in their stat); empty: not read.
 func logsWroteCommand(files []string) string {
 	q := make([]string, len(files))
 	for i, f := range files {
 		q[i] = sshx.QuoteShell(f)
 	}
-	return `for f in ` + strings.Join(q, " ") + `; do t=$(date -r "$f" +%s%3N 2>/dev/null); case $t in ""|*[!0-9]*) t=$(stat -c %Y -- "$f" 2>/dev/null);; esac; printf 'w=%s\n' "$t"; done`
+	return `for f in ` + strings.Join(q, " ") + `; do t=$(date -r "$f" +%s%3N 2>/dev/null); case $t in ""|*[!0-9]*) t=$(stat -c %Y -- "$f" 2>/dev/null || stat -f %m -- "$f" 2>/dev/null);; esac; printf 'w=%s\n' "$t"; done`
 }
 
 // parseLogsWrote reads logsWroteCommand's lines, for panes in the order of
