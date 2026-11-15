@@ -314,6 +314,25 @@ export function codexCursor(text: string): number | undefined {
   return n
 }
 
+// codexQuestionKey: a Codex question as drawn — its words, which of how
+// many, and its choices' block line for line as on the screen (whole, not
+// cut as the card shows them; the cursor's mark left out): one question
+// told from another of the same words. Null: not a question told apart.
+export function codexQuestionKey(text: string): string | null {
+  const a = codexAsk(text)
+  if (!a || a.kind !== 'question') return null
+  const lines = codexLines(text)
+  if (!lines) return null
+  const { top } = menuAt(lines, true)
+  if (top < 0) return null
+  const block: string[] = []
+  for (const l of lines.slice(top)) {
+    if (!l.trim()) break // (its keys' line comes after a blank one)
+    block.push(l.replace(/^(\s*)›/, '$1 ').replace(/\s+$/, ''))
+  }
+  return [a.question, a.index, a.total, ...block].join('\n')
+}
+
 // A Codex question's choices: each one's label and description, drawn in
 // two columns, the descriptions all at one column (the longest label's end
 // and two spaces): the column where every choice with two parts has a run

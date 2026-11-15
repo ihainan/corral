@@ -4,7 +4,7 @@ import { api, ApiError, errorText, type HerdrAgent } from '../api'
 import { t } from '../i18n'
 import { Dialog, isCoarse, LoadError, useToast } from '../components/ui'
 import { getReplyDraft, keepReplyDraft } from './drafts'
-import { asksQuestion, choices, codexAsk, codexOptions, dashedRule, promptBlock, question } from './menu'
+import { asksQuestion, choices, codexAsk, codexOptions, codexQuestionKey, dashedRule, promptBlock, question } from './menu'
 import { agentName, choiceText, lasting, questionText } from './askText'
 import { askLead, readAskScreen, reviewAsDrawn } from './askScreen'
 import { PanelWindow } from './PanelWindow'
@@ -257,15 +257,18 @@ export function ReplyDialog({ sessionId, agent, onLoaded, onClose, resizedAt }: 
   const [own, setOwn] = useState<{ busy: boolean; error: string; stuck: string }>({ busy: false, error: '', stuck: '' })
   const busy = replying || own.busy // (Enter, Esc and the rest wait for it too — review p11-5)
   const asked = screen && agent.agent === 'codex' ? codexAsk(screen.text) : null
-  const cxq = asked?.kind === 'question'
-  // (Not known what came of the last on this question: the words go nowhere
-  // from here — not as a note to whichever choice the cursor is on — review p11-1.)
-  const cxStuck = cxq && own.stuck === asked.question
+  const askedKey = screen && agent.agent === 'codex' ? codexQuestionKey(screen.text) : null
+  // (Not known what came of the last on a question: the words go nowhere from
+  // here — not as a note to whichever choice the cursor is on — while no other
+  // question is told apart on its screen, its notes being written there say —
+  // review p11-1, p11b-1, p11b-3.)
+  const cxStuck = !!own.stuck && (askedKey === null || askedKey === own.stuck)
+  const cxq = asked?.kind === 'question' || cxStuck
   const cxOther = cxq ? opts.find((o) => /^None of the above\b/i.test(o.label)) : undefined
   const cxWords = cxq && !cxStuck ? text.trim() : ''
   const codexOwn = (n: number, words: string) => {
-    if (!screen || busy || !asked || asked.kind !== 'question') return
-    const q = asked.question
+    if (!screen || busy || !askedKey) return
+    const q = askedKey
     setOwn({ busy: true, error: '', stuck: '' })
     codexAnswerWith(target, screen, n, words, () => openNow.current && document.visibilityState === 'visible')
       .then(() => {
@@ -653,11 +656,11 @@ export function InlineReply({ target, onLoaded, resizedAt, active = true, held, 
   // A Codex question answered with the person's words: "None of the above"
   // with them, or the choice clicked with them as its note (codexAnswer.ts).
   // Not known what came of it: said so, not offered again on this question.
-  const [codexStuck, setCodexStuck] = useState('') // (the question whose answer is not known to have gone, by its words)
+  const [codexStuck, setCodexStuck] = useState('') // (the question, as codexQuestionKey, whose answer is not known to have gone)
   const codexOwn = (n: number, words: string) => {
     if (!screen || amending) return
-    const asked = codexAsk(screen.text)
-    if (!asked || asked.kind !== 'question') return
+    const asked = codexQuestionKey(screen.text)
+    if (!asked) return
     setAmending(true)
     setAmendError('')
     const on = screen.digest
@@ -670,7 +673,7 @@ export function InlineReply({ target, onLoaded, resizedAt, active = true, held, 
       .catch((e) => {
         if (e instanceof CodexNotAsShown) setAmendError(t('reply.changed'))
         else {
-          setCodexStuck(asked.question)
+          setCodexStuck(asked)
           setAmendError(t(e instanceof MaybeAnswered ? 'own.maybeSent' : 'own.codexMoved'))
         }
         void load()
@@ -861,10 +864,13 @@ export function InlineReply({ target, onLoaded, resizedAt, active = true, held, 
   // (A question of Codex's: each choice's label and description apart.)
   // (A Codex question: its "None of the above", which takes the person's
   // own words; the words, where none, a note to the choice clicked.)
-  const cxq = cx?.kind === 'question'
-  // (Not known what came of the last on this question: the words go nowhere
-  // from here — not as a note to whichever choice the cursor is on — review p11-1.)
-  const cxStuck = cx?.kind === 'question' && codexStuck === cx.question
+  // (Not known what came of the last on a question: the words go nowhere from
+  // here — not as a note to whichever choice the cursor is on — while no other
+  // question is told apart on its screen, its notes being written there say —
+  // review p11-1, p11b-1, p11b-3.)
+  const cxKey = screen && target.agent === 'codex' ? codexQuestionKey(screen.text) : null
+  const cxStuck = !!codexStuck && (cxKey === null || cxKey === codexStuck)
+  const cxq = cx?.kind === 'question' || cxStuck
   const cxOther = cxq ? opts.find((o) => /^None of the above\b/i.test(o.label)) : undefined
   const cxWords = cxq && !cxStuck ? text.trim() : ''
   const shownOpts =

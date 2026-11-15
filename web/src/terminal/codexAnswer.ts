@@ -1,7 +1,7 @@
 import type { ReplyTarget } from './ReplyDialog'
 
 type Screen = { text: string; digest: string; cut?: boolean }
-import { choices, codexAsk, codexCursor } from './menu'
+import { codexCursor, codexQuestionKey } from './menu'
 import { ApiError } from '../api'
 
 // A Codex question (request_user_input) answered with the person's own
@@ -21,12 +21,10 @@ export class MaybeAnswered extends Error {}
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
-// (The same question: its words, which of how many, and its choices — another
-// of the same words with other choices is not answered by number — review p11-2.)
-const qOf = (text: string) => {
-  const a = codexAsk(text)
-  return a && a.kind === 'question' ? [a.question, a.index, a.total, ...choices(text, 'codex').map((c) => c.label)].join('\n') : null
-}
+// (The same question: its words, which of how many, and its choices as drawn,
+// whole — another of the same words with other choices is not answered by
+// number — review p11-2, p11b-2.)
+const qOf = codexQuestionKey
 
 // (Refused before anything was pressed: the gateway said so.)
 const refused = (e: unknown) => e instanceof ApiError && [400, 403, 404, 409, 429].includes(e.status)
