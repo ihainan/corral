@@ -11,9 +11,17 @@ import (
 	"github.com/ihainan/corral/internal/store"
 )
 
-func pend(q *seenRounds) map[string]int64 { p, _ := q.toCheck(); return p }
+func pend(q *seenRounds) map[string]seenCheck { p, _ := q.toCheck(); return p }
 
 func gen(q *seenRounds) int64 { _, g := q.toCheck(); return g }
+
+// chk: what the log of w1:p1 said for its round round, as of its mark now.
+func chk(q *seenRounds, round, wrote, g int64) {
+	q.mu.Lock()
+	mark := q.at["w1:p1"].mark
+	q.mu.Unlock()
+	q.checked("w1:p1", seenCheck{n: round, mark: mark}, wrote, g)
+}
 
 // A "done" kept from before this watcher, of a later mark of its terminal
 // (herdr counts any change of state, not turns' ends alone): "done" till its
@@ -39,10 +47,10 @@ func TestSeenRecheckKept(t *testing.T) {
 		if got := q.withSeen(s).Workspaces[0].Agents[0].Status; got != herdr.StatusDone {
 			t.Fatalf("before its log is read: %s", got)
 		}
-		if p := pend(q); p["w1:p1"] != round {
+		if p := pend(q); p["w1:p1"].n != round {
 			t.Fatalf("not to be read: %v (round %d)", p, round)
 		}
-		q.checked("w1:p1", round, c.wrote, gen(q))
+		chk(q, round, c.wrote, gen(q))
 		if got := q.withSeen(s).Workspaces[0].Agents[0].Status; got != c.want {
 			t.Errorf("wrote %d: %s, want %s", c.wrote, got, c.want)
 		}
@@ -77,10 +85,10 @@ func TestSeenRecheckBack(t *testing.T) {
 		q.changed("w1:p1", away, "")
 		q.changed("w1:p1", herdr.StatusDone, "")
 		a := told(q)
-		if a.Status != herdr.StatusDone || pend(q)["w1:p1"] != a.Round {
+		if a.Status != herdr.StatusDone || pend(q)["w1:p1"].n != a.Round {
 			t.Fatalf("%s and back, before its log is read: %+v %v", away, a, pend(q))
 		}
-		q.checked("w1:p1", a.Round, k.At-500, gen(q))
+		chk(q, a.Round, k.At-500, gen(q))
 		if got := told(q); got.Status != herdr.StatusIdle || got.Round != a.Round {
 			t.Errorf("%s and back, not written since: %+v", away, got)
 		}
@@ -88,7 +96,7 @@ func TestSeenRecheckBack(t *testing.T) {
 		q.changed("w1:p1", away, "")
 		q.changed("w1:p1", herdr.StatusDone, "")
 		b := told(q)
-		q.checked("w1:p1", b.Round, k.At+1, gen(q))
+		chk(q, b.Round, k.At+1, gen(q))
 		if got := told(q); got.Status != herdr.StatusDone {
 			t.Errorf("%s and back, written since: %+v", away, got)
 		}
@@ -118,7 +126,7 @@ func TestSeenRecheckBack(t *testing.T) {
 	q.changed("w1:p1", herdr.StatusWorking, "")
 	q.changed("w1:p1", herdr.StatusDone, "")
 	b := told(q)
-	q.checked("w1:p1", a.Round, k.At-500, gen(q))
+	chk(q, a.Round, k.At-500, gen(q))
 	if got := told(q); got.Status != herdr.StatusDone || got.Round != b.Round {
 		t.Fatalf("a read for the round over took: %+v", got)
 	}
@@ -160,7 +168,7 @@ func TestSeenRecheckLost(t *testing.T) {
 	s.Workspaces[0].Agents[0].Mark = "term_a#9"
 	q.number(&s, false)
 	round := s.Workspaces[0].Agents[0].Round
-	q.checked("w1:p1", round, 900, gen(q))
+	chk(q, round, 900, gen(q))
 	status := func() string {
 		s := seenSum(herdr.StatusDone, "")
 		s.Workspaces[0].Agents[0].Mark = "term_a#9"
@@ -175,7 +183,7 @@ func TestSeenRecheckLost(t *testing.T) {
 	if len(pend(q)) != 0 {
 		t.Fatal("read for while lost")
 	}
-	q.checked("w1:p1", round, 900, before) // (begun before it was lost)
+	chk(q, round, 900, before) // (begun before it was lost)
 	if _, ok := q.quiet["w1:p1"]; ok {
 		t.Fatal("lost, what the log said before still stands")
 	}
@@ -183,14 +191,14 @@ func TestSeenRecheckLost(t *testing.T) {
 		t.Fatalf("back, before it is read again: %s", got)
 	}
 	p, g := q.toCheck()
-	if p["w1:p1"] != round || g == before {
+	if p["w1:p1"].n != round || g == before {
 		t.Fatalf("back, not to be read again: %v %d", p, g)
 	}
-	q.checked("w1:p1", round, 900, before) // (a read from before: nothing)
+	chk(q, round, 900, before) // (a read from before: nothing)
 	if got := status(); got != herdr.StatusDone || len(pend(q)) != 1 {
 		t.Fatalf("a read from before took: %s %v", got, pend(q))
 	}
-	q.checked("w1:p1", round, 2000, g) // (a turn ended while it was lost)
+	chk(q, round, 2000, g) // (a turn ended while it was lost)
 	if got := status(); got != herdr.StatusDone {
 		t.Fatalf("written while lost: %s", got)
 	}
@@ -223,5 +231,60 @@ func TestCodexRecheckLog(t *testing.T) {
 	}
 	if got := codexRecheckLog(map[string]codexPane{"w1:p1": good, "w2:p1": good}, "w1:p1"); got != "" {
 		t.Errorf("two panes at it: %q", got)
+	}
+}
+
+// Told the one looked at by its log, then another mark in the same round
+// (a turn begun and ended between two snapshots): read again, "done" till
+// then and if written since. A read asked for under the old mark tells
+// nothing. A new round drops what the log said of the last.
+func TestSeenRecheckMark(t *testing.T) {
+	q := newSeenRounds(map[string]store.AgentSeen{"w1:p1": {At: 1000, Mark: "term_a#5"}}, nil)
+	sum := func(mark string) herdrSummary {
+		s := seenSum(herdr.StatusDone, "")
+		s.Workspaces[0].Agents[0].Mark = mark
+		q.number(&s, false)
+		return s
+	}
+	status := func(mark string) string { return q.withSeen(sum(mark)).Workspaces[0].Agents[0].Status }
+	s := sum("term_a#9")
+	round := s.Workspaces[0].Agents[0].Round
+	asked, g := q.toCheck()
+	q.checked("w1:p1", asked["w1:p1"], 900, g)
+	if got := status("term_a#9"); got != herdr.StatusIdle {
+		t.Fatalf("not written since: %s", got)
+	}
+	if got := status("term_a#11"); got != herdr.StatusDone {
+		t.Fatalf("another mark, as before: %s", got)
+	}
+	again, g := q.toCheck()
+	if again["w1:p1"].n != round || again["w1:p1"].mark != "term_a#11" {
+		t.Fatalf("not read again: %v", again)
+	}
+	q.checked("w1:p1", asked["w1:p1"], 900, g) // (asked under the old mark)
+	if got := status("term_a#11"); got != herdr.StatusDone || len(pend(q)) != 1 {
+		t.Fatalf("a read under the old mark took: %s %v", got, pend(q))
+	}
+	q.checked("w1:p1", again["w1:p1"], 2000, g)
+	if got := status("term_a#11"); got != herdr.StatusDone {
+		t.Fatalf("written since: %s", got)
+	}
+	// A new round: what the log said of the last is dropped, and herdr
+	// lost does not bring it back over the new round's read.
+	q2 := newSeenRounds(map[string]store.AgentSeen{"w1:p1": {At: 1000, Mark: "term_a#5"}}, nil)
+	s2 := seenSum(herdr.StatusDone, "")
+	s2.Workspaces[0].Agents[0].Mark = "term_a#9"
+	q2.number(&s2, false)
+	a2, g2 := q2.toCheck()
+	q2.checked("w1:p1", a2["w1:p1"], 900, g2)
+	q2.changed("w1:p1", herdr.StatusUnknown, "")
+	q2.changed("w1:p1", herdr.StatusDone, "")
+	if len(q2.quiet) != 0 {
+		t.Fatal("what the log said of a round over kept")
+	}
+	cur, _ := q2.current("w1:p1")
+	q2.lostHerdr()
+	if q2.pending["w1:p1"] != cur.n {
+		t.Fatalf("lost: the new round's read put back to %d (round %d)", q2.pending["w1:p1"], cur.n)
 	}
 }

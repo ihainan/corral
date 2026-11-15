@@ -61,8 +61,8 @@ func (s *Server) recheckSeen(ctx context.Context, sess *term.Session, rounds *se
 			}
 		}
 		cancel()
-		for pane, round := range pend {
-			rounds.checked(pane, round, wrote[pane], gen) // (0: not known, "done")
+		for pane, c := range pend {
+			rounds.checked(pane, c, wrote[pane], gen) // (0: not known, "done")
 		}
 	}
 }

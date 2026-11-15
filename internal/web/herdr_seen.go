@@ -67,11 +67,19 @@ type seenRounds struct {
 	// the latest look at each pane (this watcher's, or kept from before
 	// it); left, when it last went from "done" to another status (unix
 	// ms); pending, the round of "done" its log is to be read for; quiet,
-	// the round its log said was the one looked at.
+	// the round its log said was the one looked at, with the mark it had
+	// (another mark, the agent's state changed since: read again).
 	last    map[string]store.AgentSeen
 	left    map[string]int64
 	pending map[string]int64
-	quiet   map[string]int64
+	quiet   map[string]seenCheck
+}
+
+// seenCheck: a round of "done" whose log is read for, and its mark when
+// it was asked for (see recheck).
+type seenCheck struct {
+	n    int64
+	mark string
 }
 
 // seenAwayMax: how long an agent may be away from "done" and still be
@@ -134,6 +142,7 @@ func (r *seenRounds) next(pane, status, session string) seenRound {
 	r.n++
 	x := seenRound{status: status, session: session, n: r.n}
 	r.at[pane] = x
+	delete(r.quiet, pane) // (of a round over)
 	if status == herdr.StatusDone {
 		// (Back to "done" soon, or first seen with a look kept from before
 		// this watcher: its log is read for whether it is the one looked
@@ -169,15 +178,15 @@ func setMs(m *map[string]int64, k string, v int64) {
 // toCheck: the panes whose log is to be read (see recheck), by the round
 // of "done" each is to be read for.
 // gen: the reads', for checked. (None while herdr is lost.)
-func (r *seenRounds) toCheck() (map[string]int64, int64) {
+func (r *seenRounds) toCheck() (map[string]seenCheck, int64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if len(r.pending) == 0 || r.lost {
 		return nil, r.gen
 	}
-	out := make(map[string]int64, len(r.pending))
+	out := make(map[string]seenCheck, len(r.pending))
 	for p, n := range r.pending {
-		out[p] = n
+		out[p] = seenCheck{n: n, mark: r.at[p].mark}
 	}
 	return out, r.gen
 }
@@ -188,22 +197,29 @@ func (r *seenRounds) toCheck() (map[string]int64, int64) {
 // as the one looked at. (Asked for a round no longer the pane's: nothing.
 // Read before herdr was last lost or back, gen not the rounds': nothing,
 // and it is read again.)
-func (r *seenRounds) checked(pane string, round, wrote, gen int64) {
+func (r *seenRounds) checked(pane string, c seenCheck, wrote, gen int64) {
 	r.mu.Lock()
 	if r.lost || gen != r.gen {
 		r.mu.Unlock()
 		return
 	}
-	if r.pending[pane] == round {
+	x, ok := r.at[pane]
+	if ok && x.n == c.n && x.mark != c.mark {
+		r.mu.Unlock() // (its state changed while it was read: read again)
+		return
+	}
+	if r.pending[pane] == c.n {
 		delete(r.pending, pane)
 	}
-	x, ok := r.at[pane]
 	l, looked := r.last[pane]
-	if !ok || x.n != round || x.status != herdr.StatusDone || !looked || l.Session != x.session || wrote <= 0 || wrote > l.At {
+	if !ok || x.n != c.n || x.status != herdr.StatusDone || !looked || l.Session != x.session || wrote <= 0 || wrote > l.At {
 		r.mu.Unlock()
 		return
 	}
-	setMs(&r.quiet, pane, round)
+	if r.quiet == nil {
+		r.quiet = map[string]seenCheck{}
+	}
+	r.quiet[pane] = c
 	poke := r.poke
 	r.mu.Unlock()
 	if poke != nil {
@@ -234,8 +250,18 @@ func (r *seenRounds) number(sum *herdrSummary, old bool) {
 				x = r.next(a.PaneID, a.Status, a.Session)
 			}
 			if !old && a.Mark != "" && x.mark != a.Mark {
+				was := x.mark
 				x.mark = a.Mark // (the latest: a look keeps what it was when looked at)
 				r.at[a.PaneID] = x
+				// (Its state changed with no status between told — two
+				// changes in one snapshot, say: what its log said is of
+				// before; read again. See recheck.)
+				q, quiet := r.quiet[a.PaneID]
+				l, looked := r.last[a.PaneID]
+				if quiet && q.mark != a.Mark || was != "" && x.status == herdr.StatusDone && looked && l.Session == x.session {
+					delete(r.quiet, a.PaneID)
+					setMs(&r.pending, a.PaneID, x.n)
+				}
 			}
 			a.Round = x.n
 		}
@@ -357,7 +383,9 @@ func (r *seenRounds) lostHerdr() {
 	// (What a log said is of before: a round told by it is read for again
 	// once herdr is back, a turn ended meanwhile in the same round.)
 	for p, q := range r.quiet {
-		setMs(&r.pending, p, q)
+		if _, ok := r.pending[p]; !ok {
+			setMs(&r.pending, p, q.n)
+		}
 	}
 	r.quiet = nil
 	r.lost, r.looked, r.wrote = true, false, nil
@@ -413,7 +441,7 @@ func (r *seenRounds) withSeen(sum herdrSummary) herdrSummary {
 				w.Agents[j].Status = herdr.StatusIdle
 			} else if k, ok := r.prior[a.PaneID]; ok && k.Session == a.Session && r.lookedBefore(k, a) {
 				w.Agents[j].Status = herdr.StatusIdle // (looked at before this watcher: see seenRounds)
-			} else if q, ok := r.quiet[a.PaneID]; ok && q == a.Round && a.Round != 0 {
+			} else if q, ok := r.quiet[a.PaneID]; ok && q.n == a.Round && q.mark == a.Mark && a.Round != 0 {
 				w.Agents[j].Status = herdr.StatusIdle // (its log not written since it was looked at: see recheck)
 			}
 		}
