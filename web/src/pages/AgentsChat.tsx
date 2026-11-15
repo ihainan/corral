@@ -1508,7 +1508,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
               ? { ...q, look: { went: r.went } }
               : // (Its words, on the screen, in the box of this conversation.)
                 r.known && r.waiting && (!r.view || r.view === 'main')
-                ? { ...q, look: undefined, state: 'stuck' as const, queued: false }
+                ? { ...q, look: undefined, state: 'stuck' as const, queued: false, ...(q.queued ? { unqueued: true } : {}) }
                 : { ...q, look: undefined },
           ),
         )

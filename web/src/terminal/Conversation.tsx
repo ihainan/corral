@@ -116,6 +116,7 @@ export interface ConvoPending {
   opened?: boolean // (a command that has opened a panel: taken in; the log tells of it once that is shut)
   quiet?: boolean // (long since, nothing in the log: said so, quietly)
   queued?: boolean // (a Codex's, queued after its turn: in its log once that is over)
+  unqueued?: boolean // (queued, then its turn stopped: Codex put it back in its input)
   // The screen, looked at once it had not turned up: being read; or went: the
   // subagent that took it in, found in its own log (Claude Code had that
   // subagent's conversation in front as it was typed): said for sure.
@@ -4588,7 +4589,7 @@ function SentNote({ p, onEnter, onResend, onShowTerminal }: { p: ConvoPending; o
   if (p.state === 'stuck')
     return (
       <div className="convo-missing">
-        <p>{t(onEnter ? 'convo.missing.waitingEnter' : 'convo.stuck')}</p>
+        <p>{t(p.unqueued ? 'convo.missing.unqueued' : onEnter ? 'convo.missing.waitingEnter' : 'convo.stuck')}</p>
         {onEnter && (
           <button
             type="button"
