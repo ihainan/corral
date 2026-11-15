@@ -519,7 +519,8 @@ func (c *codexPaneLooks) run(ctx context.Context, sess *term.Session, socket, ta
 
 // threadOf: the thread pane's Codex is at, as the last look that came back
 // found it (none begun for it), where it tells it for sure — the look
-// recent, one Codex there at a thread no other pane is at, that thread
+// recent, one Codex there at a thread no other pane is at, told by its
+// process (the log it has open, `codex resume <id>`), or else that thread
 // named, its pane's title (title, herdr's) its name whole, no other live
 // conversation of its folder of that name, none unexplained in it (a thread
 // begun or resumed in it since); "" otherwise. (For what is only shown —
@@ -546,11 +547,21 @@ func (c *codexPaneLooks) threadOf(sessID, pane, title string) (thread string, st
 		return "", true
 	}
 	x, ok := l.got[pane]
-	if !ok || x.Several || !convoUUID.MatchString(x.Thread) || x.Name == "" || x.SameName != 0 || x.Unexplained != 0 {
+	if !ok || x.Several || !convoUUID.MatchString(x.Thread) {
 		return "", stale
 	}
-	if thread, bare := codexTitleParts("codex", title, x.Cwd); bare || thread != x.Name {
-		return "", stale
+	// (Its process's own word — the log it has open, the thread it was
+	// resumed at —: its thread, named or not. Else, run against the daemon,
+	// only the one conversation of its folder begun since it started, which
+	// another Codex there may have begun (codex exec, an editor's): its
+	// name its pane's title, and none other unexplained.)
+	if x.Src != "fd" && x.Src != "argv" {
+		if x.Name == "" || x.SameName != 0 || x.Unexplained != 0 {
+			return "", stale
+		}
+		if thread, bare := codexTitleParts("codex", title, x.Cwd); bare || thread != x.Name {
+			return "", stale
+		}
 	}
 	for p, o := range l.got {
 		if p != pane && o.Thread == x.Thread {

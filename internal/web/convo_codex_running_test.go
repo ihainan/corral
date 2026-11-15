@@ -77,3 +77,41 @@ func TestParseCmdScanNoProc(t *testing.T) {
 		t.Error("none running, /proc read: not whole")
 	}
 }
+
+// A pane's Codex's thread for the commands it left running: told by its
+// process (its log open, `codex resume <id>`), named or not; else (the
+// daemon's: the one conversation of its folder begun since it started)
+// only where named, its title that name, nothing else unexplained there.
+func TestCodexThreadOf(t *testing.T) {
+	const th = "01a1dd95-c55c-7270-ad56-1d53266a6fd0"
+	look := func(got map[string]codexPane) *codexPaneLooks {
+		d := make(chan struct{})
+		close(d)
+		return &codexPaneLooks{by: map[string]*codexPaneLook{"s": {at: time.Now(), done: d, got: got}}}
+	}
+	for _, c := range []struct {
+		name  string
+		pane  codexPane
+		title string
+		other *codexPane
+		want  bool
+	}{
+		{"its log open, unnamed", codexPane{Thread: th, Cwd: "/w/proj", Src: "fd"}, "proj", nil, true},
+		{"resumed at it, unnamed", codexPane{Thread: th, Cwd: "/w/proj", Src: "argv"}, "proj", nil, true},
+		{"the daemon's, unnamed", codexPane{Thread: th, Cwd: "/w/proj", Src: "db"}, "proj", nil, false},
+		{"the daemon's, named, its title", codexPane{Thread: th, Cwd: "/w/proj", Src: "db", Name: "fix tests"}, "fix tests | proj", nil, true},
+		{"the daemon's, named, another title", codexPane{Thread: th, Cwd: "/w/proj", Src: "db", Name: "fix tests"}, "proj", nil, false},
+		{"the daemon's, named, one unexplained", codexPane{Thread: th, Cwd: "/w/proj", Src: "db", Name: "fix tests", Unexplained: 1}, "fix tests | proj", nil, false},
+		{"its log open, another pane at it too", codexPane{Thread: th, Cwd: "/w/proj", Src: "fd"}, "proj", &codexPane{Thread: th, Cwd: "/w/proj", Src: "db"}, false},
+		{"its log open, two Codexes in the pane", codexPane{Thread: th, Cwd: "/w/proj", Src: "fd", Several: true}, "proj", nil, false},
+	} {
+		got := map[string]codexPane{"w1:p1": c.pane}
+		if c.other != nil {
+			got["w1:p2"] = *c.other
+		}
+		thread, _ := look(got).threadOf("s", "w1:p1", c.title)
+		if (thread == th) != c.want {
+			t.Errorf("%s: %q", c.name, thread)
+		}
+	}
+}
