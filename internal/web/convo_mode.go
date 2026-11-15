@@ -67,7 +67,8 @@ func modeOnScreenOf(agent, screen string) string {
 }
 
 // codexPlanMode: Codex's footer saying it is in plan mode, at the right.
-var codexPlanMode = regexp.MustCompile(`(?:^|\s{2,}|… )Plan mode(?: \(shift\+tab to cycle\))?\s*$`)
+// (0.169: at the right of its hints' line, notes after it: "· ⚠ 1 warning · f2 to view".)
+var codexPlanMode = regexp.MustCompile(`(?:^|\s{2,}|… )Plan mode(?: \(shift\+tab to cycle\))?(?:\s*$| · )`)
 
 // codexModes: the collaboration modes a Codex may be switched to (Shift+Tab
 // goes from one to the other).
@@ -160,6 +161,15 @@ func (s *Server) convoModeTo(w http.ResponseWriter, ctx context.Context, sess *t
 			return
 		}
 		now = modeOnScreenOf(agent, string(res.Out))
+		// (A Codex's: one press goes to its other mode, its footer drawn a while
+		// after — longer in 0.169 —: read again for it before taking it for
+		// missing, or pressing again, back where it began.)
+		for j := 0; agent == "codex" && now == from && j < 6; j++ {
+			time.Sleep(400 * time.Millisecond)
+			if out, err := sshx.Output(ctx, sess.Client(), convoScreenCommand(sess.Persistence, pane, socket), 256<<10); err == nil {
+				now = modeOnScreenOf(agent, string(out))
+			}
+		}
 		switch now {
 		case target:
 			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "mode": now, "pressed": true})

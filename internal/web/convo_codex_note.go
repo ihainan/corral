@@ -158,4 +158,4 @@ func codexGoalOnScreen(screen string) string {
 	return ""
 }
 
-var codexGoalNote = regexp.MustCompile(`(?:^|\s{2,}|… )((?:Pursuing goal|Goal [a-z]+)(?: \([^)]{1,40}\))?)\s*$`)
+var codexGoalNote = regexp.MustCompile(`(?:^|\s{2,}|… )((?:Pursuing goal|Goal [a-z]+)(?: \([^)]{1,40}\))?)(?:\s*$| · )`)

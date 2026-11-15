@@ -3725,7 +3725,7 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		Fill bool `json:"fill"`
 		// Queue: (a message to Codex) queued after its turn, not into it.
 		Queue bool `json:"queue"`
-		Live bool `json:"live"` // (panel: the terminal shown as it is, not a panel of its own)
+		Live  bool `json:"live"` // (panel: the terminal shown as it is, not a panel of its own)
 		// (card: its key, and the card as the page shows it.)
 		Key  string     `json:"key"`
 		Card *convoCard `json:"card"`

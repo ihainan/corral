@@ -120,3 +120,16 @@ func TestCodexMenuLastMarked(t *testing.T) {
 		t.Errorf("idle: %v", err)
 	}
 }
+
+// Codex 0.169: its plan mode at the right of its hints' line, a note after
+// it (real, test container, a config with a warning).
+func TestCodexModeOnScreen169(t *testing.T) {
+	screen := "› Ask Codex to do anything\n\n  GPT-6.1-Sol medium · ~/cxreal/proj · Ready · Context 100% left · 01a1df8f-b38e-7ed1-8b81-9b9a3db874a2\n  ← for agents · ? for shortcuts                                            Plan mode (shift+tab to cycle) · ⚠ 1 warning · f2 to view\n"
+	if got := modeOnScreenOf("codex", screen); got != "plan" {
+		t.Errorf("mode %q", got)
+	}
+	draft := "› draft words\n\n  GPT-6.1-Sol medium · ~/cxpl9/proj · Ready\n                                                                   Plan mode (shift+tab to cycle)\n"
+	if got := modeOnScreenOf("codex", draft); got != "plan" {
+		t.Errorf("with a draft: mode %q", got)
+	}
+}
