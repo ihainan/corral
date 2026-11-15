@@ -63,13 +63,13 @@ type cmdProber struct {
 	// read: the conversations a chat page reads, at rest by their own logs
 	// (Codex's: what they left running checked against the host), by
 	// their session; looked for while read (see readAt), not after.
-	read  map[string]cmdPane
-	cmds  map[string][]bgCmd // agent session → its commands, as last found
-	at    time.Time          // when they were found (zero: not known)
-	soon  time.Time          // a look due soon (a pane came to done or idle)
-	wake  chan struct{}
-	poke  func()
-	scan  func(ctx context.Context) (cmds map[string][]bgCmd, whole bool, err error)
+	read map[string]cmdPane
+	cmds map[string][]bgCmd // agent session → its commands, as last found
+	at   time.Time          // when they were found (zero: not known)
+	soon time.Time          // a look due soon (a pane came to done or idle)
+	wake chan struct{}
+	poke func()
+	scan func(ctx context.Context) (cmds map[string][]bgCmd, whole bool, err error)
 
 	every, soonBy, kept time.Duration // (cmdEvery, cmdSoon, cmdKept)
 	// forget: a pane not considered again for this long is no longer looked
