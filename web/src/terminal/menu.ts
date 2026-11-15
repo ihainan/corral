@@ -48,7 +48,7 @@ const between = /^[\s│|]*[─━]{4,}[\s─━]*$/
 const describes = /to navigate/i
 const ownAnswer = /^(?:Type something\.?|Chat about this)$/
 
-export type Choice = { key: string; label: string; desc?: string }
+export type Choice = { key: string; label: string; desc?: string; keys?: string[] } // (keys: what chooses it, where not its number: cursorMenu)
 
 // The menu at the end of the screen's lines, read as a question of Claude
 // Code's when it is one (its hint there, and one of its own choices an
@@ -58,7 +58,38 @@ function menuAt(lines: string[], codex = false): { out: Choice[]; top: number; a
     const q = readMenu(lines, true)
     if (q.out.some((c) => ownAnswer.test(c.label))) return { ...q, asks: true }
   }
-  return { ...readMenu(lines, false, codex), asks: false }
+  const m = readMenu(lines, false, codex)
+  return { ...(m.out.length || codex ? m : cursorMenu(lines)), asks: false }
+}
+
+// A list chosen from by the arrows, its rows not numbered — Claude Code's
+// first question in a new folder: "❯ No, exit" over "Yes, I trust this
+// folder", "Enter to confirm · Esc to cancel" under them. Each row chosen by
+// the arrows that take the mark to it, then Enter (11-15: the card's Enter
+// took the row marked, "No, exit", and Claude Code was gone). Only with
+// that hint under it, two to four rows, one marked, all in one column.
+function cursorMenu(lines: string[]): { out: Choice[]; top: number } {
+  const none = { out: [], top: -1 }
+  let end = lines.length
+  while (end > 0 && !lines[end - 1].trim()) end--
+  if (end === 0 || !/^\s*Enter to confirm\b/i.test(lines[end - 1])) return none
+  let e = end - 1
+  while (e > 0 && !lines[e - 1].trim()) e--
+  const rows: { text: string; marked: boolean }[] = []
+  let col = -1
+  let i = e - 1
+  for (; i >= 0 && rows.length <= 4; i--) {
+    const m = /^(\s*)(❯\s+)?(\S.*?)\s*$/.exec(lines[i])
+    if (!m) break
+    const at = m[1].length + (m[2]?.length ?? 0)
+    if (col < 0) col = at
+    if (at !== col || (!m[2] && m[1].length < 2)) break
+    rows.unshift({ text: m[3], marked: !!m[2] })
+  }
+  if (rows.length < 2 || rows.length > 4 || rows.filter((r) => r.marked).length !== 1 || rows.some((r) => /^\d+[.)]\s/.test(r.text))) return none
+  const at = rows.findIndex((r) => r.marked)
+  const out = rows.map((r, k) => ({ key: String(k + 1), label: r.text.length > maxLabel ? r.text.slice(0, maxLabel - 1) + '…' : r.text, keys: [...Array<string>(Math.abs(k - at)).fill(k > at ? 'down' : 'up'), 'enter'] }))
+  return { out, top: i + 1 }
 }
 
 // The menu at the end of the screen's lines: its choices and the line it

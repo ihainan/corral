@@ -337,7 +337,7 @@ export function ReplyDialog({ sessionId, agent, onLoaded, onClose, resizedAt }: 
 // (Of this screen only: another screen's choice of the same number is
 // another choice, asked anew. Enter takes the choice marked on the screen,
 // so it asks as that one does.)
-function useConfirm(screen: { text: string; digest: string } | null, opts: { key: string; label: string }[], send: (keys: string[]) => void) {
+function useConfirm(screen: { text: string; digest: string } | null, opts: { key: string; label: string; keys?: string[] }[], send: (keys: string[]) => void) {
   const [asked, setAsked] = useState<{ key: string; digest: string } | null>(null)
   const digest = screen?.digest ?? ''
   useEffect(() => {
@@ -345,8 +345,9 @@ function useConfirm(screen: { text: string; digest: string } | null, opts: { key
     const tm = window.setTimeout(() => setAsked(null), 6000)
     return () => clearTimeout(tm)
   }, [asked])
-  const choose = (key: string, keys = [key]) => {
+  const choose = (key: string, given?: string[]) => {
     const o = opts.find((x) => x.key === key)
+    const keys = given ?? o?.keys ?? [key] // (a row chosen by the arrows: its own keys — cursorMenu)
     if (o && lasting(o.label) && !(asked?.key === key && asked.digest === digest)) return setAsked({ key, digest })
     setAsked(null)
     send(keys)
@@ -793,7 +794,8 @@ export function InlineReply({ target, onLoaded, resizedAt, active = true, held, 
         </div>
       )}
       {cx && cx.kind !== 'question' && cx.lines.length > 0 && <Asked lines={cx.lines} />}
-      {(needScreen || !!screen?.cut) && !failed && <p className="convo-ask-unread">{t(screen?.cut ? 'reply.cut' : 'convo.askUnread')}</p>}
+      {/* (Not where its choices were read, as an arrow list's rows: the screen is there for what the question is about, not as a warning — 11-15.) */}
+      {((needScreen && !(opts.length > 0 && opts.every((o) => o.keys))) || !!screen?.cut) && !failed && <p className="convo-ask-unread">{t(screen?.cut ? 'reply.cut' : 'convo.askUnread')}</p>}
       {!failed && hookHint}
       {failed ? (
         <LoadError onRetry={() => void load()} />
