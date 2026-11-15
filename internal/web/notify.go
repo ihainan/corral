@@ -461,10 +461,12 @@ func (s *Server) onHerdrTransition(sess *term.Session, h *store.Host, tr herdr.T
 			if known && doneQuiet(wrote, doneAt) {
 				return
 			}
-			if !still() || s.paneWatched(sess.ID, tr.Pane.ID) {
-				return // (meanwhile at work again, waiting, or looked at: review r2a-8)
-			}
 			note.Body, note.BodyZh = s.doneBody(sess, tr, round, where)
+			// (The last look, after all that is read on the host: meanwhile at
+			// work again, waiting, or looked at — none goes. review r2a-8, r2b-4.)
+			if !still() || s.paneWatched(sess.ID, tr.Pane.ID) {
+				return
+			}
 			// (Heard, for one who asked for a sound when an agent finishes.)
 			note.Quiet = !s.chimeOnDone(sess.OwnerID)
 			s.notifier.Send(context.Background(), sess.OwnerID, note)

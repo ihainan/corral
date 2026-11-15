@@ -89,18 +89,22 @@ func TestParseCmdScanCodexSandbox(t *testing.T) {
 	out := "clock\t1700000000\t100\n" +
 		"cmd\t3350549\t97783192\tcodex:" + thread + "\t/home/u/.codex/tmp/arg0-linux/codex-arg0A58kWq/codex-linux-sandbox --sandbox-policy-cwd /home/u/proj --command-cwd /home/u/proj\n" +
 		"cmd\t3350550\t97783193\tcodex:" + thread + "\t/usr/bin/bwrap --new-session --die-with-parent --ro-bind / /\n" +
-		"cmd\t3350595\t97783204\tcodex:" + thread + "\tsleep 45; echo bg-done \n"
+		"cmd\t3350595\t97783204\tcodex:" + thread + "\tsleep 45; echo bg-done \n" +
+		"anc\t3350549\t3343001,3342000\n" +
+		"anc\t3350595\t3350580,3350550,3350549,3343001\n" // (bash under Codex's helper, bwrap, the sandbox)
 	got, _ := parseCmdScan(out)
 	if c := got[thread]; len(c) != 1 || c[0].Task != "codex-3350595" || c[0].Title != "sleep 45; echo bg-done" {
 		t.Fatalf("got %+v", got)
 	}
 	// (Its command not found under it — a sandbox of another make: the
 	// wrapper stands for it, its command not told.)
+	// (review r2b-1: another command of its thread begun after it, not under it.)
 	alone := "clock\t1700000000\t100\n" +
 		"cmd\t3350549\t97783192\tcodex:" + thread + "\t/home/u/.codex/tmp/arg0-linux/codex-arg0A58kWq/codex-linux-sandbox --sandbox-policy-cwd /home/u/proj\n" +
-		"cmd\t3350700\t97783100\tcodex:" + thread + "\tsleep 9\n" // (begun before it: not its command)
+		"cmd\t3350700\t97783300\tcodex:" + thread + "\tsleep 9\n" +
+		"anc\t3350700\t3343001,3342000\n"
 	got, _ = parseCmdScan(alone)
-	if c := got[thread]; len(c) != 2 || c[1].Task != "codex-3350549" || c[1].Title != "" {
+	if c := got[thread]; len(c) != 2 || c[0].Task != "codex-3350549" || c[0].Title != "" || c[1].Title != "sleep 9" {
 		t.Fatalf("alone: %+v", got)
 	}
 }

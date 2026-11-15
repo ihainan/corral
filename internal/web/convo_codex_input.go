@@ -73,8 +73,8 @@ func codexInputSpan(lines []string) (at, foot int, footed, ok bool) {
 			break
 		}
 	}
-	if at < 0 || codexMenuChoice.MatchString(lines[at]) && at+1 < len(lines) && codexMenuNext.MatchString(lines[at+1]) {
-		return 0, 0, false, false // (a menu: its choice marked, the next under it — a draft "1. …" is not one: review r2a-3)
+	if at < 0 || codexMenu(lines, at, end) {
+		return 0, 0, false, false
 	}
 	blank := -1
 	for i := at + 1; i < end; i++ {
@@ -103,42 +103,79 @@ const codexFootMax = 6
 var codexFooter = regexp.MustCompile(`^(?:[A-Za-z][\w./-]*(?: (?:default|minimal|low|medium|high|xhigh|max|ultra))?(?: [A-Z][A-Za-z]+)? · (?:~|/).*|Context \d+% (?:left|used)(?: · .*)?|\d+% context (?:left|used)|(?:← for agents · )?\? for shortcuts|esc again to edit previous message|ctrl \+ c again to quit|⚠ \d+ warnings? · f2 to view)(?:\s{2,}\S.*)?$`)
 
 // codexInputArea: what Codex's input holds (codexInputSpan): area, its
-// lines down to its footer; rest, the block taken for its footer where its
-// words are not a known footer's (codexFooter) — it may be the end of a
-// draft, words after a blank line, with no footer shown under it: a
-// caller who knows what should be there tries both. ok: its input told
-// apart. Its placeholder, when empty, is what it holds.
-func codexInputArea(screen string) (area, rest string, ok bool) {
+// lines down to its footer; foot, the block after a blank line under them
+// taken for its footer — which may be the end of a draft, words after a
+// blank line, with no footer shown under it: a caller who knows what should
+// be there reads it so (codexTypedIn); known, every line of it a known
+// footer's (codexFooter). ok: its input told apart. Its placeholder, when
+// empty, is what it holds.
+func codexInputArea(screen string) (area, foot string, known, ok bool) {
 	lines := strings.Split(strings.TrimRight(screen, "\n"), "\n")
-	at, foot, footed, ok := codexInputSpan(lines)
+	at, from, footed, ok := codexInputSpan(lines)
 	if !ok {
-		return "", "", false
+		return "", "", false, false
 	}
-	in := append([]string{strings.TrimPrefix(strings.TrimPrefix(lines[at], "›"), " ")}, lines[at+1:foot]...)
+	in := append([]string{strings.TrimPrefix(strings.TrimPrefix(lines[at], "›"), " ")}, lines[at+1:from]...)
 	area = strings.TrimSpace(strings.Join(in, "\n"))
 	if footed {
-		known := false
-		for _, l := range lines[foot:] {
-			known = known || codexFooter.MatchString(strings.TrimSpace(l))
+		known = codexKnownFoot(lines[from:])
+		foot = strings.TrimSpace(strings.Join(lines[from:], "\n"))
+	}
+	return area, foot, known, true
+}
+
+// codexKnownFoot: every line of block is of a known footer's
+// (codexFooter), a line of it wrapped over a few in a narrow pane taken
+// together (review503).
+func codexKnownFoot(block []string) bool {
+	var held []string
+	for _, l := range block {
+		l = strings.TrimSpace(l)
+		if l == "" {
+			continue
 		}
-		if !known {
-			rest = strings.TrimSpace(strings.Join(lines[foot:], "\n"))
+		held = append(held, l)
+		if codexFooter.MatchString(strings.Join(held, " ")) {
+			held = nil
+		} else if len(held) >= 3 {
+			return false
 		}
 	}
-	return area, rest, true
+	return len(held) == 0
 }
 
-// codexOneLineFoot: a block under Codex's input, after a blank line, that
-// may be its status line of the person's own: one line (Codex cuts it
-// short, "…", rather than wrap it). More: words of the input's.
-func codexOneLineFoot(rest string) bool {
-	return rest != "" && !strings.Contains(rest, "\n")
+// codexTypedFoot: under Codex's input holding words, after a blank line,
+// what may be its footer: its status line alone — one line (Codex cuts it
+// short, "…", rather than wrap it), not its hints, which it shows only while
+// the input is empty ("? for shortcuts"). Else: words of the input's
+// (review r2a-4, r2b-3).
+func codexTypedFoot(foot string) bool {
+	return foot != "" && !strings.Contains(foot, "\n") && !codexEmptyHints.MatchString(foot)
 }
 
-// (A menu's choice, marked: "› 1. Yes, proceed"; its next under it, "  2. …".)
+var codexEmptyHints = regexp.MustCompile(`^(?:← for agents · )?\? for shortcuts\b`)
+
+// codexMenu: lines[at] is a menu's marked choice, not the input: "› 1.
+// Yes, proceed", the next choice under it, and Codex's keys for its menus
+// under them ("Press enter to confirm or esc to cancel", "enter select · esc
+// back"). A draft of a numbered list, one line or more, has none of those
+// keys under it (review r2a-3, r2b-2).
+func codexMenu(lines []string, at, end int) bool {
+	if !codexMenuChoice.MatchString(lines[at]) || at+1 >= end || !codexMenuNext.MatchString(lines[at+1]) {
+		return false
+	}
+	for _, l := range lines[at+2 : end] {
+		if codexMenuKeys.MatchString(l) {
+			return true
+		}
+	}
+	return false
+}
+
 var (
 	codexMenuChoice = regexp.MustCompile(`^›\s*\d+\.\s`)
 	codexMenuNext   = regexp.MustCompile(`^\s+\d+\.\s`)
+	codexMenuKeys   = regexp.MustCompile(`(?i)\b(?:enter|esc)\b(?: to)? (?:select|confirm|cancel|back|submit|go back)\b`)
 )
 
 // codexInputMax: the most lines Codex's input runs to above its footer
@@ -150,17 +187,19 @@ const codexInputMax = 40
 // "[Pasted Content N chars]": the message there where N is its length,
 // never whole (what it holds cannot be seen).
 func codexTypedIn(screen, text string, whole bool) bool {
-	area, rest, ok := codexInputArea(screen)
+	area, foot, known, ok := codexInputArea(screen)
 	if !ok {
 		return false
 	}
-	// (Under it, an unknown footer or the end of the message itself: either
-	// — a footer of one line only: more is words of the input's, and the
-	// message is not there whole without them: review r2a-4.)
-	if rest != "" && !codexOneLineFoot(rest) {
-		return codexBoxHas(area+"\n"+rest, text, whole)
+	switch {
+	case foot == "":
+		return codexBoxHas(area, text, whole)
+	case known || codexTypedFoot(foot): // (all of it a known footer's — an older Codex kept its hints shown — or one line)
+		// (Its status line, or the end of the message itself: either.)
+		return codexBoxHas(area, text, whole) || codexBoxHas(area+"\n"+foot, text, whole)
+	default:
+		return codexBoxHas(area+"\n"+foot, text, whole) // (words of the input's: the message whole only with them)
 	}
-	return codexBoxHas(area, text, whole) || rest != "" && codexBoxHas(area+"\n"+rest, text, whole)
 }
 
 // codexBoxHas: codexTypedIn's reading of what its input holds.
@@ -197,11 +236,13 @@ var codexPasted = regexp.MustCompile(`^\[PastedContent(\d+)chars\]$`)
 
 // codexInInput: inInput for Codex's input.
 func codexInInput(screen, text string) (waiting, known bool) {
-	area, rest, ok := codexInputArea(screen)
+	area, foot, known, ok := codexInputArea(screen)
 	if !ok {
 		return false, false
 	}
-	area += "\n" + rest // (an unknown footer's words or the end of the message: looked in too)
+	if !known {
+		area += "\n" + foot // (an unknown footer's words or the end of the message: looked in too)
+	}
 	marks := anchors(text)
 	if len(marks) == 0 {
 		return false, false

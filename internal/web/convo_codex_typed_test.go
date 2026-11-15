@@ -38,7 +38,11 @@ func TestCodexTypedIn(t *testing.T) {
 		{"more of a draft under it", "• done\n\n› " + msg + "\n\n  extra draft\n  more of it\n", msg, true, false},
 		// (review r2a-3: a draft beginning "1. ": not a menu.)
 		{"a draft like a menu's choice", codexScreen("› 1. " + msg), "1. " + msg, true, true},
-		{"a menu's choice", codexScreen("› 1. Yes, proceed\n  2. No"), "1. Yes, proceed", false, false},
+		{"a menu's choice", "• done\n\n  Would you like to run the following command?\n\n› 1. Yes, proceed (y)\n  2. No (esc)\n\n  Press enter to confirm or esc to cancel\n", "1. Yes, proceed (y)", false, false},
+		// (review r2b-2: a draft of a numbered list, two lines: not a menu — no keys of one under it.)
+		{"a draft like a menu, two lines", codexScreen("› 1. " + msg + "\n  2. 再跑一次"), "1. " + msg + "\n2. 再跑一次", true, true},
+		// (review r2b-3: under the message after a blank line, a known footer's words and more: words of the input's.)
+		{"a footer's words and more under it", "• done\n\n› " + msg + "\n\n  ? for shortcuts\n  这是额外草稿\n", msg, true, false},
 		{"too short to tell", codexScreen("› go"), "go", false, false},
 		// (review502: the draft goes on with words like a footer's, then more: not the message whole.)
 		{"its words, a footer's, more", codexScreen("› " + msg + "\n  ? for shortcuts\n  再加一句"), msg, true, false},

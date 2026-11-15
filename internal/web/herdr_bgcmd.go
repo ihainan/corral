@@ -345,6 +345,18 @@ for k in $kids; do
   *) t=$(tr '\0\n\t' '   ' <"/proc/$k/cmdline" 2>/dev/null | awk -v "m=&& eval '" '` + cmdEvalAwk + `' | head -c 400);;
   esac
   printf 'cmd\t%s\t%s\t%s\t%s\n' "$k" "$st" "$(printf '%s' "$l" | tr '\t\n' '  ')" "$t"
+  case $l in
+  codex:*)
+    # (Its parents, a few up: a command in Codex's sandbox is told by
+    # the sandbox's process it runs under.)
+    a=$k; anc=
+    for _ in 1 2 3 4 5; do
+      a=$(sed 's/^.*) //' "/proc/$a/stat" 2>/dev/null | cut -d' ' -f2)
+      case $a in ""|0|1|*[!0-9]*) break;; esac
+      anc="$anc,$a"
+    done
+    printf 'anc\t%s\t%s\n' "$k" "${anc#,}";;
+  esac
 done
 exit 0`
 	return "sh -c " + sshx.QuoteShell(script) + " corral"
@@ -396,11 +408,18 @@ func parseCmdScan(out string) (cmds map[string][]bgCmd, whole bool) {
 		start   int64
 	}
 	var all, wrappers []found
+	anc := map[string][]string{} // (a Codex's command's process → its parents, nearest first)
 	for _, line := range strings.Split(out, "\n") {
 		f := strings.SplitN(line, "\t", 5)
 		switch {
 		case line == "more":
 			whole = false
+		case len(f) == 3 && f[0] == "anc" && cmdPID.MatchString(f[1]):
+			for _, a := range strings.Split(f[2], ",") {
+				if cmdPID.MatchString(a) {
+					anc[f[1]] = append(anc[f[1]], a)
+				}
+			}
 		case len(f) == 3 && f[0] == "clock":
 			btime, _ = strconv.ParseInt(f[1], 10, 64)
 			hz, _ = strconv.ParseInt(f[2], 10, 64)
@@ -438,23 +457,22 @@ func parseCmdScan(out string) (cmds map[string][]bgCmd, whole bool) {
 	// (A Codex's sandbox around a command — codex-linux-sandbox, bwrap —:
 	// the command itself is found too where what runs it under the sandbox
 	// is a Codex as well (0.167.2 on Linux, 11-15): then one command, not
-	// two. Where no command of its thread begun as late is found, the
-	// wrapper stands for one, its command not told (cut short among its
-	// arguments): a command running all the same — review r2a-9.)
-	slices.SortStableFunc(wrappers, func(a, b found) int { return int(min(max(a.start-b.start, -1), 1)) })
-	paired := map[int]bool{}
+	// two. Where none of its thread is found under it, the wrapper stands
+	// for one, its command not told (cut short among its arguments): a
+	// command running all the same — review r2a-9.)
+	// (Its own command: one of its thread whose parents it is among —
+	// not one begun after it by its time alone: review r2b-1.)
+	under := map[string]bool{}
+	for _, c := range all {
+		pid := strings.TrimPrefix(c.cmd.Task, "codex-")
+		for _, a := range anc[pid] {
+			under[c.session+" "+a] = true
+		}
+	}
 	for _, w := range wrappers {
-		inner := -1
-		for i, c := range all {
-			if !paired[i] && c.session == w.session && c.start >= w.start && (inner < 0 || c.start < all[inner].start) {
-				inner = i
-			}
+		if !under[w.session+" "+strings.TrimPrefix(w.cmd.Task, "codex-")] {
+			all = append(all, w)
 		}
-		if inner >= 0 {
-			paired[inner] = true
-			continue
-		}
-		all = append(all, w)
 	}
 	slices.SortStableFunc(all, func(a, b found) int { return int(min(max(a.start-b.start, -1), 1)) })
 	got := map[string][]bgCmd{}

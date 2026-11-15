@@ -1,6 +1,7 @@
 package web
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -63,6 +64,12 @@ func (f fakeDir) ReadDirLimit(p string, _ int) ([]os.FileInfo, bool, error) {
 	return e, false, nil
 }
 
+type brokenDir struct{}
+
+func (brokenDir) ReadDirLimit(string, int) ([]os.FileInfo, bool, error) {
+	return nil, false, errors.New("connection lost")
+}
+
 func infos(t *testing.T, names ...string) []os.FileInfo {
 	dir := t.TempDir()
 	var out []os.FileInfo
@@ -87,25 +94,33 @@ func TestCodexBaseLog(t *testing.T) {
 	const day = "/h/.codex/sessions/2026/11/15"
 	live := day + "/" + seg2
 	d := fakeDir{day: infos(t, first, seg1, seg2, "rollout-2026-11-15T10-00-00-01a1dedc-0000-79e2-a0b5-59371b5979d7.jsonl")}
-	if got := codexBaseLog(d, live, rwThread, "01a1dedc-d19f-7b22-8b91-b1f46090634d"); got != day+"/"+seg1 {
+	if got, _ := codexBaseLog(d, live, rwThread, "01a1dedc-d19f-7b22-8b91-b1f46090634d"); got != day+"/"+seg1 {
 		t.Errorf("segment 1: %q", got)
 	}
-	if got := codexBaseLog(d, day+"/"+seg1, rwThread, rwThread); got != day+"/"+first {
+	if got, _ := codexBaseLog(d, day+"/"+seg1, rwThread, rwThread); got != day+"/"+first {
 		t.Errorf("the first: %q", got)
 	}
-	if got := codexBaseLog(d, live, rwThread, "01a1dedc-ffff-7b22-8b91-b1f46090634d"); got != "" {
+	if got, _ := codexBaseLog(d, live, rwThread, "01a1dedc-ffff-7b22-8b91-b1f46090634d"); got != "" {
 		t.Errorf("a writer of none: %q", got)
 	}
 	// (The day before, past midnight: by its writer's time.)
 	at, _ := uuidV7Time(rwThread)
 	prev := "/h/.codex/sessions/" + at.Format("2006/01/02")
 	moved := fakeDir{day: infos(t, seg1, seg2), prev: infos(t, first)}
-	if got := codexBaseLog(moved, day+"/"+seg1, rwThread, rwThread); got != prev+"/"+first {
+	if got, _ := codexBaseLog(moved, day+"/"+seg1, rwThread, rwThread); got != prev+"/"+first {
 		t.Errorf("another day's: %q", got)
 	}
 	twice := fakeDir{day: infos(t, seg1, seg2, first, "rollout-2026-11-15T11-00-00-01a1dedc-8c62-79e2-a0b5-59371b5979d7.jsonl")}
-	if got := codexBaseLog(twice, day+"/"+seg1, rwThread, rwThread); got != "" {
+	if got, _ := codexBaseLog(twice, day+"/"+seg1, rwThread, rwThread); got != "" {
 		t.Errorf("two alike: %q", got)
+	}
+}
+
+// A folder not read (the host, not a missing folder): an error, tried again
+// later — not "none before" for good (review r2b-5).
+func TestCodexBaseLogNotRead(t *testing.T) {
+	if got, err := codexBaseLog(brokenDir{}, "/h/.codex/sessions/2026/11/15/"+filepath.Base(rwSeg1), rwThread, rwThread); got != "" || err == nil {
+		t.Errorf("%q %v", got, err)
 	}
 }
 

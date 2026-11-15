@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"io/fs"
 	"os"
 	"path"
 	"regexp"
@@ -74,7 +76,7 @@ const codexBaseDirMax = 20000
 // written by writer: in its own day's folder, else in that of the day the
 // writer's id was made (a UUIDv7's time), or the day either side (the
 // folder is named by the host's local day). "" where none, or more than one.
-func codexBaseLog(c dirLister, log, thread, writer string) string {
+func codexBaseLog(c dirLister, log, thread, writer string) (string, error) {
 	dir := path.Dir(log)
 	root := path.Dir(path.Dir(path.Dir(dir))) // (…/sessions)
 	dirs := []string{dir}
@@ -85,6 +87,7 @@ func codexBaseLog(c dirLister, log, thread, writer string) string {
 		}
 	}
 	seen := map[string]bool{}
+	var failed error
 	for _, d := range dirs {
 		if seen[d] {
 			continue
@@ -92,6 +95,9 @@ func codexBaseLog(c dirLister, log, thread, writer string) string {
 		seen[d] = true
 		entries, _, err := c.ReadDirLimit(d, codexBaseDirMax)
 		if err != nil {
+			if !os.IsNotExist(err) && !errors.Is(err, fs.ErrNotExist) {
+				failed = err // (not read, not missing: not told it is not there)
+			}
 			continue
 		}
 		found := ""
@@ -102,16 +108,19 @@ func codexBaseLog(c dirLister, log, thread, writer string) string {
 			}
 			if (writer == strings.ToLower(thread) && m[2] == "") || strings.EqualFold(m[2], writer) {
 				if found != "" {
-					return "" // (two alike: not guessed between)
+					return "", nil // (two alike: not guessed between)
 				}
 				found = path.Join(d, e.Name())
 			}
 		}
 		if found != "" {
-			return found
+			return found, nil
 		}
 	}
-	return ""
+	if failed != nil {
+		return "", failed
+	}
+	return "", nil
 }
 
 // uuidV7Time: when a version 7 UUID was made (its first 48 bits, unix ms).

@@ -1658,10 +1658,11 @@ type convoState struct {
 	olderBase    codexBase
 	olderChecked bool
 	hops         int
-	more         bool   // the last read stopped before the end
-	status       string // (tmux) the process's own word: "busy", "idle", or "" when not known
-	skipping     bool   // in a line too long to keep, until its end
-	long         []byte // a line longer than a read, so far, its images' data left out (nil when not in one)
+	olderSeen    map[string]bool // (the logs gone back through: none twice — review r2b-6)
+	more         bool            // the last read stopped before the end
+	status       string          // (tmux) the process's own word: "busy", "idle", or "" when not known
+	skipping     bool            // in a line too long to keep, until its end
+	long         []byte          // a line longer than a read, so far, its images' data left out (nil when not in one)
 	strip        b64Strip
 	ocCursor     int64 // (OpenCode) rows written since this are read next (unix ms)
 	ocCursorK    int   // (OpenCode) and, stopped within its millisecond, the last row read in it
@@ -2332,7 +2333,7 @@ func (st *convoState) adopt(sid, log, agent, reason string) {
 		st.sid, st.log, st.agent = sid, log, agent
 		st.parser = convo.New(agent)
 		st.offset, st.size, st.mtime, st.older, st.skipping, st.from = 0, -1, time.Time{}, false, false, 0
-		st.olderLog, st.olderChecked, st.hops = "", false, 0
+		st.olderLog, st.olderChecked, st.hops, st.olderSeen = "", false, 0, nil
 		st.grewAt = time.Time{} // (another log's: its own, from its first look)
 		st.long, st.strip, st.ocCursor, st.ocCursorK, st.ocCursorID = nil, b64Strip{}, 0, 0, ""
 	}
@@ -2384,7 +2385,7 @@ func (s *Server) readConvo(sess *term.Session, st *convoState) (more bool, err e
 			st.gen = convoGens.Add(1)
 			st.parser = st.newParser()
 			st.offset, st.older, st.skipping, st.from = 0, codexChains(st), false, 0
-			st.olderLog, st.olderChecked, st.hops = "", false, 0
+			st.olderLog, st.olderChecked, st.hops, st.olderSeen = "", false, 0, nil
 			st.long, st.strip = nil, b64Strip{}
 			if st.bind != nil {
 				st.parser.QueueSince(st.bind.started) // (as locateConvo says it)
@@ -2564,9 +2565,14 @@ func (s *Server) readOlder(sess *term.Session, st *convoState) error {
 		return nil
 	}
 	return s.withSFTP(context.Background(), sess, convoReadLimit, func(c *sftplite.Client) error {
-		if st.from <= 0 && !s.codexHop(c, st) {
-			st.older = false
-			return nil
+		if st.from <= 0 {
+			switch went, err := s.codexHop(c, st); {
+			case err != nil:
+				return err // (the host not read: tried again, the next time asked — review r2b-5)
+			case !went:
+				st.older = false
+				return nil
+			}
 		}
 		log := st.log
 		if st.olderLog != "" {
@@ -2583,8 +2589,17 @@ func (s *Server) readOlder(sess *term.Session, st *convoState) error {
 		if st.olderLog != "" && !st.olderChecked {
 			// (The log before, where the one after goes on from it: a whole
 			// line there, of the ordinal just before — else not that log, or
-			// not as it was: nothing of it is read.)
-			if !codexBaseEndsRight(data, st.olderBase) {
+			// not as it was: nothing of it is read. A line longer than what
+			// was read: read whole first, from where it begins — review r2b-7.)
+			last := data
+			if start > 0 && bytes.IndexByte(data[:len(data)-1], '\n') < 0 {
+				line, _, err := longLineBefore(c, log, start, data)
+				if errors.Is(err, errLogChanged) {
+					return err
+				}
+				last = line
+			}
+			if !codexBaseEndsRight(last, st.olderBase) {
 				st.older = false
 				return nil
 			}
@@ -2643,10 +2658,11 @@ func codexChains(st *convoState) bool {
 
 // codexHop: what came before the start of the log read now (st.olderLog,
 // else st.log) is in the log it goes on from, if its first line says so and
-// that log is found: read from there next (st.olderLog, st.from). false: it
-// goes on from none (its start is the conversation's), or that is not
-// found.
-func (s *Server) codexHop(c *sftplite.Client, st *convoState) bool {
+// that log is found: read from there next (st.olderLog, st.from). went
+// false: it goes on from none (its start is the conversation's), that is
+// not found, or was gone through already. err: the host not read (tried
+// again the next time).
+func (s *Server) codexHop(c *sftplite.Client, st *convoState) (went bool, err error) {
 	log := st.log
 	if st.olderLog != "" {
 		log = st.olderLog
@@ -2656,23 +2672,30 @@ func (s *Server) codexHop(c *sftplite.Client, st *convoState) bool {
 		head, err = c.ReadRange(log, 0, maxForkLine) // (its instructions longer than most)
 	}
 	if err != nil {
-		return false
+		return false, err
 	}
 	b, ok := codexHistoryBase(head)
 	if !ok {
-		return false
+		return false, nil
 	}
 	m := codexSegmentName.FindStringSubmatch(path.Base(log))
 	if m == nil {
-		return false
+		return false, nil
 	}
-	base := codexBaseLog(c, log, m[1], b.writer)
-	if base == "" || base == log || base == st.log {
-		return false // (none, or itself again: not gone round)
+	base, err := codexBaseLog(c, log, m[1], b.writer)
+	if err != nil {
+		return false, err
 	}
+	if st.olderSeen == nil {
+		st.olderSeen = map[string]bool{st.log: true}
+	}
+	if base == "" || st.olderSeen[base] {
+		return false, nil // (none, or one gone through already: not gone round)
+	}
+	st.olderSeen[base] = true
 	st.hops++
 	st.olderLog, st.olderBase, st.olderChecked, st.from = base, b, false, b.end
-	return true
+	return true, nil
 }
 
 var errLogChanged = errors.New("the log changed under the read")
@@ -4455,7 +4478,7 @@ func (s *Server) subagentAnswer(w http.ResponseWriter, r *http.Request, sess *te
 		st.gen = convoGens.Add(1)
 		st.parser = st.newParser()
 		st.offset, st.size, st.mtime, st.older, st.skipping, st.from = 0, -1, time.Time{}, false, false, 0
-		st.olderLog, st.olderChecked, st.hops = "", false, 0
+		st.olderLog, st.olderChecked, st.hops, st.olderSeen = "", false, 0, nil
 		st.long, st.strip = nil, b64Strip{}
 	}
 	more, err := s.readConvo(sess, st)

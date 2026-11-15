@@ -49,7 +49,7 @@ func TestCodexShapes(t *testing.T) {
 				want += "\nsecond line"
 			}
 			if !codexTypedIn(plain, want, true) {
-				area, rest, ok := codexInputArea(plain)
+				area, rest, _, ok := codexInputArea(plain)
 				t.Errorf("%s: not whole: %q / %q %v", name, area, rest, ok)
 			}
 			if w, k := codexInInput(plain, want); !w || !k {
@@ -59,7 +59,7 @@ func TestCodexShapes(t *testing.T) {
 			if err := codexIdleInput(plain); err != errScreen {
 				t.Errorf("%s: idle: %v", name, err)
 			}
-			if _, _, ok := codexInputArea(plain); ok {
+			if _, _, _, ok := codexInputArea(plain); ok {
 				t.Errorf("%s: an input told on a dialog", name)
 			}
 		case name == "dialog-slash" || name == "dialog-at":
@@ -89,7 +89,7 @@ func TestCodexInputSpanNotIt(t *testing.T) {
 			t.Errorf("%q: %v", screen, err)
 		}
 	}
-	if _, _, ok := codexInputArea("› go\n\n• did it\n"); ok {
+	if _, _, _, ok := codexInputArea("› go\n\n• did it\n"); ok {
 		t.Error("an input told above the agent's words")
 	}
 }
