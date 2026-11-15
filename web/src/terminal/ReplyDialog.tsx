@@ -14,6 +14,7 @@ import { Filled, MaybeSent, NotAsShown, ownWords, permissionAmend } from './ownW
 import type { ConvoTool } from './conversation'
 import { AskHookHint, asksFromScreen } from './askHook'
 import { keepShown, steadily } from './steadyReply'
+import { codexAnswerWith, MaybeAnswered, NotAsShown as CodexNotAsShown } from './codexAnswer'
 
 interface Screen {
   text: string
@@ -237,6 +238,28 @@ export function ReplyDialog({ sessionId, agent, onLoaded, onClose, resizedAt }: 
   // it asks to be allowed shows first, as read, else the screen.)
   const block = screen ? promptBlock(screen.text) : null
   const questionOnly = !!screen && folds(screen)
+  // (A Codex question: the person's own words as "None of the above"'s, or as
+  // a note to the choice clicked — as in the chat's card, codexAnswer.ts.)
+  const target = herdrTarget(sessionId, agent)
+  const [own, setOwn] = useState<{ busy: boolean; error: string; stuck: string }>({ busy: false, error: '', stuck: '' })
+  const cxq = !!screen && agent.agent === 'codex' && codexAsk(screen.text)?.kind === 'question' && own.stuck !== screen.digest
+  const cxOther = cxq ? opts.find((o) => /^None of the above\b/i.test(o.label)) : undefined
+  const cxWords = cxq ? text.trim() : ''
+  const codexOwn = (n: number, words: string) => {
+    if (!screen || own.busy) return
+    const on = screen.digest
+    setOwn({ busy: true, error: '', stuck: '' })
+    codexAnswerWith(target, screen, n, words, () => document.visibilityState === 'visible')
+      .then(() => {
+        setText('')
+        setOwn({ busy: false, error: '', stuck: '' })
+        onClose()
+      })
+      .catch((e) => {
+        setOwn({ busy: false, error: t(e instanceof CodexNotAsShown ? 'reply.changed' : e instanceof MaybeAnswered ? 'own.maybeSent' : 'own.codexMoved'), stuck: e instanceof CodexNotAsShown ? '' : on })
+        void load()
+      })
+  }
   return (
     <Dialog title={t('reply.title', { agent: title })} onClose={onClose} className="reply-dialog" icon={<MessageCircleReply size={18} />}>
       {agent.title && <p className="hint reply-sub">{agent.title}</p>}
@@ -271,7 +294,7 @@ export function ReplyDialog({ sessionId, agent, onLoaded, onClose, resizedAt }: 
                 const c = choiceText(o.label)
                 const lasts = lasting(o.label)
                 return (
-                  <button key={o.key} type="button" className={'reply-choice' + (confirm.asked === o.key ? ' is-confirm' : '')} disabled={!screen || busy} onClick={() => confirm.choose(o.key)}>
+                  <button key={o.key} type="button" className={'reply-choice' + (confirm.asked === o.key ? ' is-confirm' : '')} disabled={!screen || busy || own.busy} onClick={() => (cxWords ? codexOwn(Number(o.key), cxWords) : confirm.choose(o.key))}>
                     <span className="reply-key" aria-hidden="true">{o.key}</span>
                     {/* (Its words as Claude Code wrote them, where shown in Chinese: on a pointer's rest.) */}
                     <span className="reply-what" title={c.original || undefined}>
@@ -284,22 +307,35 @@ export function ReplyDialog({ sessionId, agent, onLoaded, onClose, resizedAt }: 
               })}
             </div>
           )}
-          <form className="reply-text" onSubmit={submit}>
+          <form
+            className="reply-text"
+            onSubmit={
+              cxq
+                ? (e) => {
+                    e.preventDefault()
+                    if (cxOther && cxWords) codexOwn(Number(cxOther.key), cxWords)
+                  }
+                : submit
+            }
+          >
             <input
               className="input"
               value={text}
               maxLength={2000}
-              placeholder={t(opts.length > 0 ? 'reply.other' : 'reply.placeholder')}
-              aria-label={t(opts.length > 0 ? 'reply.other' : 'reply.placeholder')}
+              placeholder={t(cxq && !cxOther ? 'convo.askCodexNote' : opts.length > 0 ? 'reply.other' : 'reply.placeholder')}
+              aria-label={t(cxq && !cxOther ? 'convo.askCodexNote' : opts.length > 0 ? 'reply.other' : 'reply.placeholder')}
               autoCapitalize="none"
               autoCorrect="off"
               onChange={(e) => setText(e.target.value)}
               data-touch-nofocus
             />
-            <button className="btn btn-primary" disabled={!screen || busy || !text.trim()}>
-              {t('reply.send')}
-            </button>
+            {!(cxq && !cxOther) && (
+              <button className="btn btn-primary" disabled={!screen || busy || own.busy || !text.trim()}>
+                {t('reply.send')}
+              </button>
+            )}
           </form>
+          {cxq && cxWords && <p className="reply-desc">{t(cxOther ? 'convo.askCodexOwn' : 'convo.askCodexNoteHint')}</p>}
           <div className="reply-keys">
             <button type="button" className={'btn btn-ghost btn-sm' + (confirm.asked === 'enter' ? ' is-confirm' : '')} disabled={!screen || busy} onClick={confirm.enter}>
               {t(confirm.asked === 'enter' ? 'reply.enterAgain' : 'reply.enter')}
@@ -313,9 +349,9 @@ export function ReplyDialog({ sessionId, agent, onLoaded, onClose, resizedAt }: 
               </button>
             )}
           </div>
-          {error && (
+          {(error || own.error) && (
             <p className="err" role="alert">
-              {error}
+              {own.error || error}
             </p>
           )}
         </>
@@ -595,6 +631,30 @@ export function InlineReply({ target, onLoaded, resizedAt, active = true, held, 
       })
       .finally(() => setAmending(false))
   }
+  // A Codex question answered with the person's words: "None of the above"
+  // with them, or the choice clicked with them as its note (codexAnswer.ts).
+  // Not known what came of it: said so, not offered again on this question.
+  const codexOwn = (n: number, words: string) => {
+    if (!screen || amending) return
+    setAmending(true)
+    setAmendError('')
+    const on = screen.digest
+    codexAnswerWith(target, screen, n, words, stillHere)
+      .then(() => {
+        setText('')
+        answered.current = on
+        setSent(on)
+      })
+      .catch((e) => {
+        if (e instanceof CodexNotAsShown) setAmendError(t('reply.changed'))
+        else {
+          setAmendStuck(on)
+          setAmendError(t(e instanceof MaybeAnswered ? 'own.maybeSent' : 'own.codexMoved'))
+        }
+        void load()
+      })
+      .finally(() => setAmending(false))
+  }
   // (Its log without a question of Claude Code's not yet answered — in auto
   // mode it writes it only once answered — the one its screen shows, drawn
   // as such: where Claude Code waits, drawn as its question is, with the
@@ -777,6 +837,11 @@ export function InlineReply({ target, onLoaded, resizedAt, active = true, held, 
   const q = cx ? cx.question : screen ? question(screen.text) : ''
   const shownQ = (block && /^Bash command$/i.test(block.head)) || logged?.kind === 'run' ? (/^Do you want to proceed\?$/i.test(q) || logged ? t('convo.askRun') : questionText(q)) : logged?.kind === 'edit' ? t('convo.askEdit') : questionText(q)
   // (A question of Codex's: each choice's label and description apart.)
+  // (A Codex question: its "None of the above", which takes the person's
+  // own words; the words, where none, a note to the choice clicked.)
+  const cxq = cx?.kind === 'question' && !amendStuck
+  const cxOther = cxq ? opts.find((o) => /^None of the above\b/i.test(o.label)) : undefined
+  const cxWords = cxq ? text.trim() : ''
   const shownOpts =
     cx?.kind === 'question'
       ? codexOptions(opts.map((o) => o.label)).map((c, i) => ({ ...opts[i], ...c, ...(/^None of the above$/i.test(c.label) ? { desc: t('convo.askNotes') } : {}) }))
@@ -813,7 +878,7 @@ export function InlineReply({ target, onLoaded, resizedAt, active = true, held, 
                 const c = choiceText(o.label)
                 const lasts = lasting(o.label)
                 return (
-                  <button key={o.key} type="button" className={'convo-ask-opt' + (confirm.asked === o.key ? ' is-confirm' : '')} disabled={!screen || busy} onClick={() => confirm.choose(o.key)}>
+                  <button key={o.key} type="button" className={'convo-ask-opt' + (confirm.asked === o.key ? ' is-confirm' : '')} disabled={!screen || busy} onClick={() => (cxWords ? codexOwn(Number(o.key), cxWords) : confirm.choose(o.key))}>
                     <span className="convo-ask-key is-num" aria-hidden="true">{o.key}</span>
                     {/* (Its words as Claude Code wrote them, where shown in Chinese: on a pointer's rest.) */}
                     <span className="convo-ask-what" title={c.original || undefined}>
@@ -839,21 +904,34 @@ export function InlineReply({ target, onLoaded, resizedAt, active = true, held, 
               </>
             )
           })()}
-          <form className="convo-ask-text" onSubmit={submit}>
+          <form
+            className="convo-ask-text"
+            onSubmit={
+              cxq
+                ? (e) => {
+                    e.preventDefault()
+                    if (cxOther && cxWords) codexOwn(Number(cxOther.key), cxWords)
+                  }
+                : submit
+            }
+          >
             <input
               className="input"
               value={text}
               maxLength={2000}
-              placeholder={t(opts.length > 0 ? 'convo.askOwnText' : 'convo.askText')}
-              aria-label={t(opts.length > 0 ? 'convo.askOwnText' : 'convo.askText')}
+              placeholder={t(cxq && !cxOther ? 'convo.askCodexNote' : opts.length > 0 ? 'convo.askOwnText' : 'convo.askText')}
+              aria-label={t(cxq && !cxOther ? 'convo.askCodexNote' : opts.length > 0 ? 'convo.askOwnText' : 'convo.askText')}
               autoCapitalize="none"
               autoCorrect="off"
               onChange={(e) => setText(e.target.value)}
             />
-            <button className="btn" disabled={!screen || busy || !text.trim()}>
-              {t('reply.send')}
-            </button>
+            {!(cxq && !cxOther) && (
+              <button className="btn" disabled={!screen || busy || !text.trim()}>
+                {t('reply.send')}
+              </button>
+            )}
           </form>
+          {cxq && cxWords && <p className="convo-ask-hint">{t(cxOther ? 'convo.askCodexOwn' : 'convo.askCodexNoteHint')}</p>}
           {/* (The keys, on a line of their own: words, not to be taken for buttons. Only
               once the card is in hand do they answer it: said so till then.) */}
           {!isTouchOnly && opts.length > 0 && (

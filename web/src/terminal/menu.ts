@@ -296,6 +296,24 @@ export function codexAsk(text: string): CodexAsk | null {
   return found
 }
 
+// codexCursor: the choice a Codex question's cursor is on ("› 2. Blue"),
+// within its menu's own block; undefined where not told apart.
+export function codexCursor(text: string): number | undefined {
+  const lines = codexLines(text)
+  if (!lines) return undefined
+  const { top } = menuAt(lines, true)
+  if (top < 0) return undefined
+  let n: number | undefined
+  for (const l of lines.slice(top)) {
+    const m = /^\s*›\s*(\d+)\.\s/.exec(l)
+    if (m) {
+      if (n !== undefined) return undefined // (two marked: not told apart)
+      n = +m[1]
+    }
+  }
+  return n
+}
+
 // A Codex question's choices: each one's label and description, drawn in
 // two columns, the descriptions all at one column (the longest label's end
 // and two spaces): the column where every choice with two parts has a run
