@@ -737,8 +737,15 @@ function queueRows(queued: { text: string; ts?: string; from?: string; note?: bo
   })
 }
 // (A message refused for what is up in the terminal, or what could not be made out there.)
-// (Whose terminal is shown there, a message refused: Claude Code's, OpenCode's.)
-const liveFor = (agent?: string) => (agent ?? 'claude') === 'claude' || agent === 'opencode'
+// (Whose terminal is shown there, a message refused: Claude Code's, OpenCode's, Codex's.)
+const liveFor = (agent?: string) => (agent ?? 'claude') === 'claude' || agent === 'opencode' || agent === 'codex'
+// (A Codex's commands that only show something in its terminal, and their menu words.)
+const CODEX_LOOKS: [string, 'ops.codexStatus' | 'ops.codexPs' | 'ops.codexDiff' | 'ops.codexMcp'][] = [
+  ['/status', 'ops.codexStatus'],
+  ['/ps', 'ops.codexPs'],
+  ['/diff', 'ops.codexDiff'],
+  ['/mcp', 'ops.codexMcp'],
+]
 const LIVE_ON = new Set(['agent_waiting', 'agent_busy', 'no_input', 'other_view', 'subagent_view', 'typed_other_view', 'typed_not_sent', 'no_screen', 'cannot_verify', 'box_draft', 'draft', 'picker', 'unknown'])
 // (See the note on these where they are used.)
 const LOOK_AFTER_MS = 4000
@@ -2400,6 +2407,24 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     ...opsOf.map((o, i): MenuItem | null =>
       bound ? { label: t(codex && o === 'clear' ? 'ops.clear.itemCodex' : `ops.${o}.item`), icon: OP_ICONS[o], separator: i === 0, group: i === 0 ? t('menu.group.convo') : undefined, disabled: !canOps, title: canOps ? undefined : t('ops.onlyIdle'), hint: canOps || i < opsOf.length - 1 ? undefined : t(opsOf.length > 1 ? 'ops.onlyIdleGroup' : 'ops.onlyIdle'), onSelect: () => convo.bind && setOp({ op: o, bind: convo.bind, key: bindKey }) } : null,
     ),
+    // (A Codex's commands that only show something in its terminal: run, then its terminal shown here.)
+    ...(codex && bound
+      ? CODEX_LOOKS.map(([cmd, key], i): MenuItem => ({
+          label: t(key),
+          icon: <SquareTerminal size={16} />,
+          separator: i === 0,
+          disabled: !canOps,
+          title: canOps ? undefined : t('ops.onlyIdle'),
+          onSelect: () => {
+            const b = convo.bind
+            if (!b) return
+            runOp(b, cmd).then(
+              () => setLiveOf(bindKey),
+              (e) => toast(refusal(e), true),
+            )
+          },
+        }))
+      : []),
     // (Its session's id, as the agent's own resume takes it: claude --resume, codex resume.)
     ((sess) =>
       sess && sess !== NO_SESSION
@@ -2482,7 +2507,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
         return r.pressed
       }}
       onShowTerminal={openTerminal}
-      onLook={(convo.bind?.agent ?? 'claude') === 'claude' && convo.bind ? () => setLiveOf(bindKey) : undefined}
+      onLook={liveFor(convo.bind?.agent) && convo.bind ? () => setLiveOf(bindKey) : undefined}
       onCopied={() => toast(t('common.copied'))}
       composer={composer}
       onSendNow={canPress && !notClaude ? () => press('now') : undefined}

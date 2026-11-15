@@ -3523,6 +3523,7 @@ func commandText(s string) (string, bool) {
 	switch {
 	case t == "/compact" || t == "/clear" || t == "/new" || strings.HasPrefix(t, "/compact "):
 	case strings.HasPrefix(t, "/rename ") && strings.TrimSpace(t[len("/rename "):]) != "":
+	case codexLooks[t]: // (a Codex's only: see codexCommand)
 	default:
 		return "", false
 	}
@@ -3957,7 +3958,12 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	// (A Codex's own commands from the menu: /compact, /new, /rename (its
 	// thread's name, as commandText takes it); it refuses them
 	// itself while it works. Not Claude Code's /clear and /rename.)
-	codexCommand := front.agent == "codex" && what == "command" && (text == "/compact" || text == "/new" || strings.HasPrefix(text, "/rename "))
+	codexCommand := front.agent == "codex" && what == "command" && (text == "/compact" || text == "/new" || strings.HasPrefix(text, "/rename ") || codexLooks[text])
+	if what == "command" && codexLooks[text] && front.agent != "codex" {
+		reason = "unsupported"
+		writeError(w, http.StatusConflict, "unsupported", "not for this agent")
+		return
+	}
 	// (Its picker, for its model and effort, as Claude Code's: convo_codex_model.go.)
 	codexModel := front.agent == "codex" && (what == "models" || what == "model" || (what == "mode" && codexModes[b.Mode])) // (its collaboration mode: plan or default)
 	if what == "command" && front.agent == "claude" && text == "/new" {
@@ -3969,7 +3975,7 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	// (OpenCode's terminal, shown here as it is where a message to it was
 	// refused: its screen, and keys pressed there only on the screen shown —
 	// the "look" gate, whoever's the screen is.)
-	ocLive := front.agent == "opencode" && (what == "panel_screen" || (what == "panel" && b.Live))
+	ocLive := (front.agent == "opencode" || front.agent == "codex") && (what == "panel_screen" || (what == "panel" && b.Live)) // (and Codex's: its terminal as it is, a key only on the screen shown)
 	if (front.agent == "codex" || front.agent == "opencode") && what != "send" && what != "interrupt" && !codexAnswer && !codexCommand && !codexModel && !codexLook && !ocLive {
 		reason = "unsupported"
 		writeError(w, http.StatusConflict, "unsupported", "not for this agent")

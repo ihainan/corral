@@ -13,6 +13,11 @@ import (
 	"github.com/ihainan/corral/internal/term"
 )
 
+// codexLooks: Codex's commands that only show something in its terminal
+// (its status, its background terminals, its changes, its MCP servers),
+// none of it in its log: run from the page, its terminal shown there.
+var codexLooks = map[string]bool{"/status": true, "/ps": true, "/diff": true, "/mcp": true}
+
 // convoModes: the permission modes a Claude Code may be switched to from
 // the agents page (the ones Shift+Tab goes through; which a session has
 // depends on how it was started).
