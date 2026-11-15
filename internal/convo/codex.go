@@ -331,9 +331,21 @@ func (c *Codex) Prepend(other Parser) {
 		return
 	}
 	for id, out := range c.orphans {
+		if o.provDone(id) {
+			// (Its commands shown in the part before only while it was out:
+			// what it did is told of on its own; what it left running, so.)
+			o.procsGoing(&codexRow{Timestamp: out.at}, id, out.going)
+			delete(c.orphans, id)
+			continue
+		}
 		if ts, ok := o.tools[id]; ok {
 			o.answer(ts, out)
 			o.leftGoing(&codexRow{Timestamp: out.at}, ts, out) // (its call in the part before: going all the same — review502)
+			o.procsGoing(&codexRow{Timestamp: out.at}, id, out.going)
+			delete(c.orphans, id)
+		} else if o.hidden[id] && len(out.going) > 0 {
+			// (Its call's lines gone in the part before — each command told
+			// of on its own: what it left running, all the same.)
 			o.procsGoing(&codexRow{Timestamp: out.at}, id, out.going)
 			delete(c.orphans, id)
 		}
@@ -1168,6 +1180,9 @@ func (c *Codex) ranCommand(r *codexRow, it *codexItem) {
 			t.ResultLines = lineCount(out)
 		}
 		c.touch(ts)
+		if it.Status != "in_progress" && len(ts) > 0 {
+			c.procOver(procID(it.ProcessID), ts[0])
+		}
 		return
 	}
 	c.itemsTell()
@@ -1188,6 +1203,9 @@ func (c *Codex) ranCommand(r *codexRow, it *codexItem) {
 	t.ResultLines = lineCount(out)
 	if _, ok := c.seen[id]; ok {
 		c.touch([]*Tool{t})
+		if it.Status != "in_progress" {
+			c.procOver(procID(it.ProcessID), t) // (its end, told on the step its start had: kept as ended)
+		}
 		return
 	}
 	c.add(r, id, RoleAssistant, []Part{{Kind: KindTool, Tool: t}})
@@ -1221,6 +1239,7 @@ func (c *Codex) itemsTell() {
 			e.Parts, e.Rev = kept, c.rev
 		}
 	}
+	c.procsStepped() // (processes still running whose script's line went: codex_bg.go)
 }
 
 // searched: a search the agent made on the web (on its call's line, if

@@ -254,3 +254,47 @@ func TestCodexProcsAcrossParts(t *testing.T) {
 		t.Errorf("output before its call was read: running %q", got)
 	}
 }
+
+// Review cxparity3.
+func TestCodexProcsReview3(t *testing.T) {
+	count := func(c *Codex) (n, done int) {
+		for _, tl := range toolsOf(c) {
+			if strings.Contains(tl.Detail, "sleep 45") {
+				n++
+				if tl.Done {
+					done++
+				}
+			}
+		}
+		return
+	}
+	// 1. Started before commands were told of on their own, then one is:
+	// its step, where its script's line was, not gone.
+	c := feedAll(bgUser, bgCall, bgOut, bgSaid, bgDone, bgUser2, bgItemBefore)
+	if n, done := count(c); n != 1 || done != 0 {
+		t.Errorf("1: %d steps, %d done", n, done)
+	}
+	if got := runningIDs(c); got != "cmd:proc:37552:sleep 45; echo bg-done" {
+		t.Errorf("1: running %q", got)
+	}
+	c.Feed([]byte(bgEnded))
+	if n, done := count(c); n != 1 || done != 1 || runningIDs(c) != "" {
+		t.Errorf("1, ended: %d steps, %d done, running %q", n, done, runningIDs(c))
+	}
+	// 2. Its call hidden in the part before, its output in this one.
+	c = feedAll(bgOut, bgSaid, bgDone)
+	c.Prepend(feedAll(bgItemBefore, bgUser, bgCall))
+	if got := runningIDs(c); got != "cmd:proc:37552:sleep 45; echo bg-done" {
+		t.Errorf("2: running %q", got)
+	}
+	if n, done := count(c); n != 1 || done != 0 {
+		t.Errorf("2: %d steps, %d done", n, done)
+	}
+	// 3. Its end told running then done in this part; its start before.
+	inProg := strings.Replace(strings.Replace(bgEnded, `"status":"completed"`, `"status":"in_progress"`, 1), `"exit_code":0`, `"exit_code":null`, 1)
+	c = feedAll(bgUser2, inProg, bgEnded)
+	c.Prepend(feedAll(bgItemBefore, bgUser, bgCall, bgOut, bgSaid, bgDone))
+	if n, done := count(c); n != 1 || done != 1 || runningIDs(c) != "" {
+		t.Errorf("3: %d steps, %d done, running %q", n, done, runningIDs(c))
+	}
+}
