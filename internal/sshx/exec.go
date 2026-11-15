@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -38,6 +39,11 @@ type ExecOptions struct {
 	Stdin   io.Reader
 	OnLine  func(line string) // each output line as it arrives (from another goroutine)
 	Release func()            // a further quota, given back once the channel has really ended
+	// AwaitSlot: where MaxAuxPerConn side operations are unfinished, wait up
+	// to this long for one to end rather than refuse at once (ErrBusy) — for
+	// what a person asked for (a message sent), not for a look of the
+	// gateway's own, which comes again anyway.
+	AwaitSlot time.Duration
 }
 
 // ExecResult is what Exec learnt about the command.
@@ -60,6 +66,10 @@ func (e *ExitError) Error() string {
 func Exec(ctx context.Context, c *ssh.Client, cmd string, limit int, opt ExecOptions) (ExecResult, error) {
 	extra := oneShot(opt.Release)
 	aux, ok := takeAux(c)
+	for until := time.Now().Add(opt.AwaitSlot); !ok && time.Now().Before(until) && ctx.Err() == nil; {
+		time.Sleep(50 * time.Millisecond)
+		aux, ok = takeAux(c)
+	}
 	if !ok {
 		extra()
 		return ExecResult{}, ErrBusy

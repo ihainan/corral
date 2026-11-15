@@ -3703,7 +3703,8 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		if sess.Persistence == "tmux" {
 			tmuxTarget = b.Pane
 		}
-		out, err := sshx.Output(ctx, sess.Client(), convoLocateCommand(sess.Persistence, sess.TmuxSession, tmuxTarget), convoLocateMax)
+		lr, err := sshx.Exec(ctx, sess.Client(), convoLocateCommand(sess.Persistence, sess.TmuxSession, tmuxTarget), convoLocateMax, sshx.ExecOptions{AwaitSlot: pressSlotWait(what)})
+		out := lr.Out
 		if errors.Is(err, sshx.ErrBusy) {
 			reason = "busy"
 			writeError(w, http.StatusTooManyRequests, "busy", "the host is still answering earlier requests")
@@ -4054,7 +4055,7 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		in = "" // (Enter only: nothing pasted)
 	}
 	res, err := sshx.Exec(ctx, sess.Client(), cmd, sendOut,
-		sshx.ExecOptions{Stdin: strings.NewReader(in), Release: done})
+		sshx.ExecOptions{Stdin: strings.NewReader(in), Release: done, AwaitSlot: pressSlotWait(what)})
 	var exitErr *sshx.ExitError
 	switch {
 	case err == nil:
@@ -4679,4 +4680,16 @@ func (s *Server) convoRelocNow(sess *term.Session, pane string) {
 			}
 		}
 	}
+}
+
+// pressSlotWait: how long what a person pressed waits for one of the SSH
+// connection's side operations to end where all are taken — the gateway's
+// own looks (a command scan, a screen read: more of them at a turn's end,
+// when a next message is likeliest, 11-15) — rather than be refused at
+// once. Its own looks (a suggestion, a screen) do not wait: they come again.
+func pressSlotWait(what string) time.Duration {
+	if what == "suggest" || what == "screen" || what == "panel_screen" {
+		return 0
+	}
+	return 2 * time.Second
 }
