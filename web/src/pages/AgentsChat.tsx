@@ -2059,7 +2059,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     const id = Date.now() * 100 + (++sentN.current % 100)
     const mark = (extra: Partial<Sent>) => setSent((ps) => ps.map((p) => (p.id === id ? { ...p, ...extra } : p)))
     const drop = () => setSent((ps) => ps.filter((p) => p.id !== id))
-    setSent((ps) => [...ps, { id, text, shown: was, beforeQueued: queueRows(convo.queued).map((q) => q.key), state: 'sending' as const, bind: bindKey, after, afterTs, gen: convo.gen, at, sinceAt: cur.row && !cur.row.lost ? cur.row.a.since : undefined, ...(queue ? { queued: true } : {}) }].slice(-5))
+    setSent((ps) => [...ps, { id, text, shown: was, beforeQueued: queueRows(convo.queued).map((q) => q.key), state: 'sending' as const, bind: bindKey, after, afterTs, gen: convo.gen, at, sinceAt: cur.row && !cur.row.lost ? cur.row.a.since : undefined }].slice(-5))
     // The box is emptied with it (the draft kept too, even if put aside
     // meanwhile, or shown by another of this page since); what it held comes
     // back if the message is refused.
@@ -2084,7 +2084,8 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
         // (The same words were in its box already — put back there by a stop: Enter only.)
         if (r?.in_box) toast(t('convo.inBoxSent'))
         remember(was)
-        mark({ state: 'waiting' })
+        // (Queued: said so once it is — Tab pressed — not before: review q-2.)
+        mark({ state: 'waiting', ...(queue && b.agent === 'codex' ? { queued: true } : {}) })
         convo.refresh() // (it is in its log already: read now, not at the next tick)
       })
       .catch((e) => {

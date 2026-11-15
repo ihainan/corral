@@ -4614,6 +4614,7 @@ function SentNote({ p, onEnter, onResend, onShowTerminal }: { p: ConvoPending; o
     return (
       <div className="convo-missing">
         <p>{t('convo.queuedAfter')}</p>
+        {p.quiet && <button type="button" className="link-btn" onClick={onShowTerminal}>{t('convo.showTerminal')}</button>}
       </div>
     )
   if (p.quiet && !p.opened)

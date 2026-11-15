@@ -44,6 +44,7 @@ export interface Waiting {
   after: number // the log's last seq when it went
   beforeQueued?: number[] // what waited in its queue when it went: not this one's
   afterTs?: string // and that row's time: read anew (other seqs), only later ones count
+  queued?: boolean // (a Codex's, queued after its turn: in the log later than ones sent after it)
 }
 
 // (Clocks of the host and the browser may differ this much.)
@@ -62,6 +63,8 @@ export const camesAfter = (s: Submission, p: Waiting) => {
 // (A command, not a path: a message may well begin with a picture's.)
 export const isCommand = (text: string) => /^\/[\w:.-]+(?:\s|$)/.test(text.trimStart()) && !/\.(?:png|jpe?g|gif|webp)$/i.test(text.trimStart().split(/\s/, 1)[0])
 
+const squeezed = (t: string) => t.replace(/\s+/g, ' ').trim()
+
 // Oldest message first, each the first submission since it went that no other
 // has: which ones the log now shows gone, and with what.
 export function pairSent<P extends Waiting>(waiting: P[], subs: Submission[], used: Set<number>): { p: P; s: Submission }[] {
@@ -69,7 +72,10 @@ export function pairSent<P extends Waiting>(waiting: P[], subs: Submission[], us
   const taken = new Set<number>()
   for (const p of waiting) {
     const command = isCommand(p.text) ? p.text.trimStart().split(/\s/, 1)[0] : ''
-    const s = subs.find((x) => !used.has(x.key) && !taken.has(x.key) && camesAfter(x, p) && (!command || x.text.trimStart().split(/\s/, 1)[0] === command))
+    // (Queued after a turn, it comes after what was sent into that turn later:
+    // its own words only, not the next in the log — review q-1.)
+    const words = p.queued ? squeezed(p.text).slice(0, 40) : ''
+    const s = subs.find((x) => !used.has(x.key) && !taken.has(x.key) && camesAfter(x, p) && (!command || x.text.trimStart().split(/\s/, 1)[0] === command) && (!words || squeezed(x.text).startsWith(words)))
     if (!s) continue
     taken.add(s.key)
     out.push({ p, s })
