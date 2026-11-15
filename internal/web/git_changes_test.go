@@ -154,7 +154,11 @@ func TestGitChangesCommandRuns(t *testing.T) {
 	run(local, "commit", "-qam", "m")
 	c := exec.Command("git", "merge", "x")
 	c.Dir = local
-	c.Run() // (fails: the conflict)
+	// (Who commits, as every other git here: with none, as on CI, merge stops before it merges anything.)
+	c.Env = append(os.Environ(), "GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t", "GIT_CONFIG_GLOBAL=/dev/null")
+	if out, err := c.CombinedOutput(); err == nil || !strings.Contains(string(out), "CONFLICT") {
+		t.Fatalf("merge: want a conflict, got %v %s", err, out)
+	}
 	write(filepath.Join(local, "first.txt"), "1\n2\n")
 	os.Mkdir(filepath.Join(local, "empty"), 0o755)
 	run(local, "config", "diff.suppressBlankEmpty", "true")
