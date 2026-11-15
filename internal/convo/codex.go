@@ -117,8 +117,9 @@ type codexOut struct {
 	text   string
 	failed bool
 	images int
-	goesOn bool   // (a command still running when its call came back)
-	at     string // (when it came back: of an orphan, for leftGoing when its call is read)
+	goesOn bool     // (a command still running when its call came back)
+	going  []string // (processes a code-mode script left running: codeModeGoing)
+	at     string   // (when it came back: of an orphan, for leftGoing when its call is read)
 }
 
 func NewCodex() *Codex { return &Codex{tools: map[string][]*Tool{}} }
@@ -333,6 +334,7 @@ func (c *Codex) Prepend(other Parser) {
 		if ts, ok := o.tools[id]; ok {
 			o.answer(ts, out)
 			o.leftGoing(&codexRow{Timestamp: out.at}, ts, out) // (its call in the part before: going all the same — review502)
+			o.procsGoing(&codexRow{Timestamp: out.at}, id, out.going)
 			delete(c.orphans, id)
 		}
 	}
@@ -1432,13 +1434,16 @@ func (c *Codex) item(r *codexRow, p *codexPayload) {
 			// (Its lines were shown only while it was out: what it did is
 			// told of on its own; what it left running, as such.)
 			if p.Type == "custom_tool_call_output" {
-				c.procsGoing(r, clip(p.CallID, maxID), p.Output)
+				c.procsGoing(r, clip(p.CallID, maxID), codeModeGoing(p.Output))
 			}
 			return
 		}
 		var out codexOut
 		out.text, out.failed, out.images = codexResult(p.Output)
 		out.goesOn, out.at = cmdGoesOn(p.Output), r.Timestamp
+		if p.Type == "custom_tool_call_output" {
+			out.going = codeModeGoing(p.Output)
+		}
 		id := clip(p.CallID, maxID)
 		if ts, ok := c.tools[id]; ok {
 			c.answer(ts, out)
@@ -1449,8 +1454,8 @@ func (c *Codex) item(r *codexRow, p *codexPayload) {
 			}
 			c.orphans[id] = out
 		}
-		if p.Type == "custom_tool_call_output" {
-			c.procsGoing(r, id, p.Output) // (processes its script left running: codex_bg.go)
+		if _, ok := c.tools[id]; ok || c.hidden[id] {
+			c.procsGoing(r, id, out.going) // (processes its script left running: codex_bg.go)
 		}
 	}
 }

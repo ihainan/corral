@@ -524,35 +524,48 @@ func (c *codexPaneLooks) run(ctx context.Context, sess *term.Session, socket, ta
 // conversation of its folder of that name, none unexplained in it (a thread
 // begun or resumed in it since); "" otherwise. (For what is only shown —
 // the commands it left running — not for where keys go.)
-func (c *codexPaneLooks) threadOf(sessID, pane, title string) string {
+// stale: a look begun now would do (none, or the last one old): the
+// caller may have one begun, not waited for.
+func (c *codexPaneLooks) threadOf(sessID, pane, title string) (thread string, stale bool) {
 	c.mu.Lock()
 	l := c.by[sessID]
 	c.mu.Unlock()
-	if l == nil || time.Since(l.at) > 2*time.Minute {
-		return ""
+	if l == nil {
+		return "", true
+	}
+	stale = time.Since(l.at) > codexThreadFresh
+	if time.Since(l.at) > codexThreadKept {
+		return "", true
 	}
 	select {
 	case <-l.done:
 	default:
-		return "" // (still being looked: the one before it is not kept)
+		return "", false // (still being looked: the one before it is not kept)
 	}
 	if l.err != nil {
-		return ""
+		return "", true
 	}
 	x, ok := l.got[pane]
 	if !ok || x.Several || !convoUUID.MatchString(x.Thread) || x.Name == "" || x.SameName != 0 || x.Unexplained != 0 {
-		return ""
+		return "", stale
 	}
 	if thread, bare := codexTitleParts("codex", title, x.Cwd); bare || thread != x.Name {
-		return ""
+		return "", stale
 	}
 	for p, o := range l.got {
 		if p != pane && o.Thread == x.Thread {
-			return ""
+			return "", stale
 		}
 	}
-	return strings.ToLower(x.Thread)
+	return strings.ToLower(x.Thread), stale
 }
+
+// A look's word on a pane's thread, for threadOf: taken while this recent,
+// a new one begun once it is older than codexThreadFresh.
+const (
+	codexThreadFresh = time.Minute
+	codexThreadKept  = 5 * time.Minute
+)
 
 // forget: what was kept of a terminal session (closed).
 func (c *codexPaneLooks) forget(id string) {

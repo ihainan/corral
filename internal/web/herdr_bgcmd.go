@@ -389,8 +389,28 @@ func cmdTitle(s string) string {
 // tells it for sure (codexPaneLooks.threadOf): a thread told wrong would
 // show another conversation's commands as this one's.
 func (s *Server) cmdSession(sess *term.Session, pane, agent, title, sid string) string {
-	if isCodexAgent(agent) {
-		return s.codexPanes.threadOf(sess.ID, pane, title)
+	if !isCodexAgent(agent) {
+		return sid
 	}
-	return sid
+	thread, stale := s.codexPanes.threadOf(sess.ID, pane, title)
+	if stale {
+		// (Looked again, not waited for: what it finds is for the next
+		// summary. One at a time a session; the look's own cache shares it.)
+		if socket := s.herdrSocks.get(sess.ID); socket != "" && !threadLookTaken(&s.codexThreadLooks, sess.ID) {
+			go func() {
+				defer s.codexThreadLooks.Delete(sess.ID)
+				ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+				defer cancel()
+				_, _ = s.codexPanes.since(ctx, sess, socket, time.Now().Add(-codexThreadFresh))
+			}()
+		}
+	}
+	return thread
+}
+
+// threadLookTaken: a look for cmdSession is under way for this session
+// (else it is now taken: the caller begins it, and lets it go when done).
+func threadLookTaken(m *sync.Map, sessID string) bool {
+	_, taken := m.LoadOrStore(sessID, true)
+	return taken
 }

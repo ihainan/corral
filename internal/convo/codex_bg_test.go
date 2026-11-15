@@ -33,40 +33,57 @@ func entryOf(c *Codex, id string) (int, *Tool) {
 }
 
 func TestCodexScriptLeftRunning(t *testing.T) {
-	for _, before := range []string{bgItemBefore, ""} { // (commands told of on their own already; and not yet)
-		c := feedAll(before, bgUser, bgCall, bgOut, bgSaid, bgDone)
-		if got := runningIDs(c); got != "cmd:proc:37552:sleep 45; echo bg-done" {
-			t.Fatalf("before %t: still running: %q", before != "", got)
-		}
-		at, tl := entryOf(c, "proc:37552")
-		if tl == nil || tl.Done || tl.Detail != "sleep 45; echo bg-done" {
-			t.Fatalf("before %t: its step, running: %+v", before != "", tl)
-		}
-		// (The turn after it, and its end: in its own step, in its own turn.)
-		c.Feed([]byte(bgUser2 + bgEnded))
-		if got := runningIDs(c); got != "" {
-			t.Errorf("before %t: told of as ended: %q", before != "", got)
-		}
-		if !tl.Done || !strings.Contains(tl.Result, "bg-done") {
-			t.Errorf("before %t: its step ended: %+v", before != "", tl)
-		}
-		n := 0
-		for i, e := range c.entries {
-			for _, p := range e.Parts {
-				if p.Tool != nil && strings.Contains(p.Tool.Detail, "sleep 45") {
-					n++
-					if i != at {
-						t.Errorf("before %t: its end told of in another entry (%d, not %d)", before != "", i, at)
-					}
+	// (Commands told of on their own already: a step of its own, in its turn.)
+	c := feedAll(bgItemBefore, bgUser, bgCall, bgOut, bgSaid, bgDone)
+	if got := runningIDs(c); got != "cmd:proc:37552:sleep 45; echo bg-done" {
+		t.Fatalf("still running: %q", got)
+	}
+	at, tl := entryOf(c, "proc:37552")
+	if tl == nil || tl.Done || tl.Detail != "sleep 45; echo bg-done" {
+		t.Fatalf("its step, running: %+v", tl)
+	}
+	c.Feed([]byte(bgUser2 + bgEnded))
+	if got := runningIDs(c); got != "" {
+		t.Errorf("told of as ended: %q", got)
+	}
+	if !tl.Done || !strings.Contains(tl.Result, "bg-done") {
+		t.Errorf("its step ended: %+v", tl)
+	}
+	n := 0
+	for i, e := range c.entries {
+		for _, p := range e.Parts {
+			if p.Tool != nil && strings.Contains(p.Tool.Detail, "sleep 45") {
+				n++
+				if i != at {
+					t.Errorf("its end told of in another entry (%d, not %d)", i, at)
 				}
 			}
 		}
-		if n != 1 {
-			t.Errorf("before %t: told of %d times", before != "", n)
+	}
+	if n != 1 {
+		t.Errorf("told of %d times", n)
+	}
+	// (None told of on its own yet: the script's line stands for it, the
+	// process in the running list till its end, which is told as any.)
+	c = feedAll(bgUser, bgCall, bgOut, bgSaid, bgDone)
+	if got := runningIDs(c); got != "cmd:proc:37552:sleep 45; echo bg-done" {
+		t.Fatalf("no items: still running: %q", got)
+	}
+	c.Feed([]byte(bgUser2 + bgEnded))
+	if got := runningIDs(c); got != "" {
+		t.Errorf("no items: told of as ended: %q", got)
+	}
+	n = 0
+	for _, tl := range toolsOf(c) {
+		if strings.Contains(tl.Detail, "sleep 45") {
+			n++
 		}
 	}
+	if n != 1 {
+		t.Errorf("no items: told of %d times", n)
+	}
 	// (Ended within its call: not running.)
-	c := feedAll(bgItemBefore, bgUser, bgCall, bgQuickOut, bgSaid, bgDone)
+	c = feedAll(bgItemBefore, bgUser, bgCall, bgQuickOut, bgSaid, bgDone)
 	if got := runningIDs(c); got != "" {
 		t.Errorf("ended within its call: %q", got)
 	}
@@ -202,5 +219,38 @@ func TestCodexProcsReview(t *testing.T) {
 	}
 	if len(whats) != 2 || whats[0] == whats[1] {
 		t.Errorf("3: %q", whats)
+	}
+}
+
+// Review cxparity2: a poll of it told running in this part, then its end,
+// its start in the part before; its output in this part, its call in the
+// part before.
+func TestCodexProcsAcrossParts(t *testing.T) {
+	poll := `{"timestamp":"2026-11-15T04:14:30.000Z","type":"response_item","payload":{"type":"custom_tool_call","status":"completed","call_id":"call_p","name":"exec","input":"text(await tools.write_stdin({session_id:37552, chars:\"\"}))"}}` + "\n"
+	pollOut := `{"timestamp":"2026-11-15T04:14:31.000Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call_p","output":[{"type":"input_text","text":"{\"chunk_id\":\"c\",\"session_id\":37552,\"output\":\"\"}"}]}}` + "\n"
+	count := func(c *Codex) (n, done int) {
+		for _, tl := range toolsOf(c) {
+			if strings.Contains(tl.Detail, "sleep 45") {
+				n++
+				if tl.Done {
+					done++
+				}
+			}
+		}
+		return
+	}
+	c := feedAll(bgItemBefore, bgUser2, poll, pollOut, bgEnded)
+	c.Prepend(feedAll(bgItemBefore, bgUser, bgCall, bgOut, bgSaid, bgDone))
+	if got := runningIDs(c); got != "" {
+		t.Errorf("poll then end, start before: running %q", got)
+	}
+	if n, done := count(c); n != 1 || done != 1 {
+		t.Errorf("poll then end, start before: %d steps, %d done", n, done)
+	}
+	// (Its output first in this part: its call read with the part before.)
+	c = feedAll(bgOut, bgSaid, bgDone)
+	c.Prepend(feedAll(bgItemBefore, bgUser, bgCall))
+	if got := runningIDs(c); got != "cmd:proc:37552:sleep 45; echo bg-done" {
+		t.Errorf("output before its call was read: running %q", got)
 	}
 }
