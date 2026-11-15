@@ -98,9 +98,9 @@ func TestCodexInputSpanNotIt(t *testing.T) {
 func TestCodexModeOnScreen(t *testing.T) {
 	for screen, want := range map[string]string{
 		"› Ask Codex to do anything\n\n  GPT-6.1-Sol medium · ~/cxpl/proj · Ready · Context 100% left · 01a1def5-5907-7353-a783-c6c95fc9ca34       Plan mode (shift+tab to cycle)\n  ← for agents · ? for shortcuts\n": "plan",
-		"› Ask Codex to do anything\n\n  GPT-6.1-Sol medium · ~/cxpl/proj · Ready · Co… Plan mode\n  ← for agents · ? for shortcuts\n":                                                                    "plan",
-		"› Ask Codex to do anything\n\n  GPT-6.1-Sol high · ~/cxpl/proj · Ready · Context 100% left\n  ← for agents · ? for shortcuts\n":                                                                    "default",
-		"› make a Plan mode\n\n  GPT-6.1-Sol high · ~/p\n":                                                                    "default", // (words of the input's)
+		"› Ask Codex to do anything\n\n  GPT-6.1-Sol medium · ~/cxpl/proj · Ready · Co… Plan mode\n  ← for agents · ? for shortcuts\n":                                                                                 "plan",
+		"› Ask Codex to do anything\n\n  GPT-6.1-Sol high · ~/cxpl/proj · Ready · Context 100% left\n  ← for agents · ? for shortcuts\n":                                                                               "default",
+		"› make a Plan mode\n\n  GPT-6.1-Sol high · ~/p\n": "default", // (words of the input's)
 		"  Implement this plan?\n› 1. Yes, implement this plan\n  2. Yes, clear context and implement\n  3. No, stay in Plan mode\n\n  enter select · esc back\n": "",
 	} {
 		if got := modeOnScreenOf("codex", screen); got != want {

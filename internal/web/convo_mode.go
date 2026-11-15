@@ -1,10 +1,10 @@
 package web
 
 import (
-	"regexp"
 	"context"
 	"errors"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
