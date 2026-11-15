@@ -288,3 +288,44 @@ func TestSeenRecheckMark(t *testing.T) {
 		t.Fatalf("lost: the new round's read put back to %d (round %d)", q2.pending["w1:p1"], cur.n)
 	}
 }
+
+// A look holds for the state it was taken in: another mark in the same
+// round of "done" (a turn begun and ended between two snapshots) is
+// "done", for one looked at by this watcher or kept from before it (its
+// verdict of the log of then), till its log says otherwise.
+func TestSeenLookHoldsForItsMark(t *testing.T) {
+	sum := func(q *seenRounds, mark string) herdrSummary {
+		s := seenSum(herdr.StatusDone, "")
+		s.Workspaces[0].Agents[0].Mark = mark
+		q.number(&s, false)
+		return s
+	}
+	status := func(q *seenRounds, mark string) string {
+		return q.withSeen(sum(q, mark)).Workspaces[0].Agents[0].Status
+	}
+	// Looked at by this watcher.
+	q := newSeenRounds(nil, nil)
+	q.changed("w1:p1", herdr.StatusDone, "")
+	s := sum(q, "term_a#5")
+	if !marked(q, "w1:p1", s.Workspaces[0].Agents[0].Round, "") || status(q, "term_a#5") != herdr.StatusIdle {
+		t.Fatal("not looked at")
+	}
+	if got := status(q, "term_a#7"); got != herdr.StatusDone {
+		t.Fatalf("another mark, looked at before it: %s", got)
+	}
+	a, g := q.toCheck()
+	q.checked("w1:p1", a["w1:p1"], time.Now().UnixMilli()+5000, g) // (written since)
+	if got := status(q, "term_a#7"); got != herdr.StatusDone {
+		t.Fatalf("written since: %s", got)
+	}
+	// Kept from before, of another terminal, told by the first look's log.
+	q = newSeenRounds(map[string]store.AgentSeen{"w1:p1": {At: 1000, Mark: "term_a#5"}}, nil)
+	_, lg := q.wantsLook()
+	q.lookedOver(map[string]int64{"w1:p1": 900}, lg)
+	if got := status(q, "term_b#9"); got != herdr.StatusIdle {
+		t.Fatalf("another terminal, not written since: %s", got)
+	}
+	if got := status(q, "term_b#11"); got != herdr.StatusDone {
+		t.Fatalf("then another mark: %s", got)
+	}
+}

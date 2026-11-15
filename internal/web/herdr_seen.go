@@ -254,8 +254,14 @@ func (r *seenRounds) number(sum *herdrSummary, old bool) {
 				x.mark = a.Mark // (the latest: a look keeps what it was when looked at)
 				r.at[a.PaneID] = x
 				// (Its state changed with no status between told — two
-				// changes in one snapshot, say: what its log said is of
-				// before; read again. See recheck.)
+				// changes in one snapshot, say: a look, and what its log
+				// said, are of before; read again. See recheck.)
+				if was != "" && x.status == herdr.StatusDone {
+					if sn, ok := r.seen[a.PaneID]; ok && sn.n == x.n {
+						delete(r.seen, a.PaneID)
+					}
+					delete(r.prior, a.PaneID)
+				}
 				q, quiet := r.quiet[a.PaneID]
 				l, looked := r.last[a.PaneID]
 				if quiet && q.mark != a.Mark || was != "" && x.status == herdr.StatusDone && looked && l.Session == x.session {
