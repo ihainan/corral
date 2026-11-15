@@ -12,7 +12,7 @@
 // half-made change, or meet the agent's own git).
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
-import { Bot, FolderOpen, GitBranch, GitCommitHorizontal, GitPullRequest, Gauge, ListTodo, MessageSquareText, Terminal } from 'lucide-react'
+import { Bot, ChevronRight, FolderOpen, GitBranch, GitCommitHorizontal, GitPullRequest, Gauge, ListTodo, MessageSquareText, Terminal } from 'lucide-react'
 import { api, ApiError } from '../api'
 import { t } from '../i18n'
 import { Dialog, DialogHead } from '../components/ui'
@@ -107,7 +107,8 @@ function useGit(sid: string, pane: string) {
   return { git, pr, error, retry: () => setAgain((n) => n + 1) }
 }
 
-function Row({ icon, children, sub, onClick, title }: { icon: ReactNode; children: ReactNode; sub?: ReactNode; onClick?: () => void; title?: string }) {
+// (more: it opens a view of its own, the Changes view — a chevron says so.)
+function Row({ icon, children, sub, onClick, title, more }: { icon: ReactNode; children: ReactNode; sub?: ReactNode; onClick?: () => void; title?: string; more?: boolean }) {
   const body = (
     <>
       <span className="scard-ic" aria-hidden="true">{icon}</span>
@@ -115,6 +116,7 @@ function Row({ icon, children, sub, onClick, title }: { icon: ReactNode; childre
         <span className="scard-main">{children}</span>
         {sub && <span className="scard-sub">{sub}</span>}
       </span>
+      {more && onClick && <ChevronRight size={16} className="scard-chev" aria-hidden="true" />}
     </>
   )
   return onClick ? (
@@ -185,6 +187,7 @@ function CardBody({ data, acts, close }: { data: CardData; acts: CardActs; close
               icon={<GitBranch size={16} />}
               onClick={acts.onGitChanges && git.status && (git.changed || git.untracked) ? act(() => acts.onGitChanges!('work', git.base)) : undefined}
               title={acts.onGitChanges && git.status && (git.changed || git.untracked) ? t('card.seeChanges') : undefined}
+              more
               sub={
                 !git.status
                   ? t('card.statusSlow')
@@ -236,9 +239,12 @@ function CardBody({ data, acts, close }: { data: CardData; acts: CardActs; close
             const body = (
               <>
                 <span>{t('card.vsBase', { base: git.base })}</span>
-                <span>
-                  {t('card.filesN', { n: git.diff.files })} <Counts add={git.diff.add} del={git.diff.del} />
-                  {git.base_ahead ? <span className="scard-dim"> · {t('card.commitsN', { n: git.base_ahead })}</span> : null}
+                <span className="scard-kv-end">
+                  <span>
+                    {t('card.filesN', { n: git.diff.files })} <Counts add={git.diff.add} del={git.diff.del} />
+                    {git.base_ahead ? <span className="scard-dim"> · {t('card.commitsN', { n: git.base_ahead })}</span> : null}
+                  </span>
+                  {acts.onGitChanges && <ChevronRight size={16} className="scard-chev" aria-hidden="true" />}
                 </span>
                 <span className="scard-hint">{t('card.vsBaseHint')}</span>
               </>

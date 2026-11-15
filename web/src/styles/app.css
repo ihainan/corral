@@ -852,6 +852,8 @@ details.adv > .form { margin-top: 16px; }
 @media (max-width: 520px) {
   .sheet-mode .dialog.text-preview-dialog { max-width: none; }
   .sheet-mode .dialog.gch-dialog { max-width: none; }
+  /* (Its one action, refresh, beside the close as on a wide screen: not a row of its own.) */
+  .gch-dialog .dlg-tools { order: 2; flex: none; margin-top: 0; }
   .text-preview-md { padding: 16px 16px 24px; }
 }
 
@@ -1174,6 +1176,10 @@ details.adv > .form { margin-top: 16px; }
 .scard-row.is-act:hover { background: var(--bg-hover); text-decoration: none; }
 .scard-row:focus-visible, .scard-file:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .scard-ic { flex: none; display: flex; margin-top: 2px; color: var(--fg-3); }
+/* A row that opens something more (the Changes view): a chevron at its end, moved on hover. */
+.scard-chev { flex: none; align-self: center; color: var(--fg-3); transition: transform 0.12s var(--ease); }
+:is(.scard-row, .scard-kv).is-act:hover .scard-chev { transform: translateX(2px); }
+.scard-kv-end { display: inline-flex; align-items: center; gap: 4px; }
 .scard-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .scard-main { display: flex; align-items: baseline; gap: 4px; min-width: 0; font-size: var(--fs-ui); line-height: var(--lh-ui); }
 .scard-sub { font-size: var(--fs-note); line-height: var(--lh-note); color: var(--fg-3); overflow-wrap: anywhere; }
