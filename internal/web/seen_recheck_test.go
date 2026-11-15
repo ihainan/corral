@@ -329,3 +329,39 @@ func TestSeenLookHoldsForItsMark(t *testing.T) {
 		t.Fatalf("then another mark: %s", got)
 	}
 }
+
+// A look whose state changed while it was kept is of before; and a read
+// of the log that finds it written since overrules a look kept from
+// before, told by an older read.
+func TestSeenLookRaces(t *testing.T) {
+	sum := func(q *seenRounds, mark string) herdrSummary {
+		s := seenSum(herdr.StatusDone, "")
+		s.Workspaces[0].Agents[0].Mark = mark
+		q.number(&s, false)
+		return s
+	}
+	var q *seenRounds
+	q = newSeenRounds(nil, func(string, store.AgentSeen) error {
+		sum(q, "term_a#7") // (a turn begun and ended while the look is kept)
+		return nil
+	})
+	q.changed("w1:p1", herdr.StatusDone, "")
+	s := sum(q, "term_a#5")
+	if marked(q, "w1:p1", s.Workspaces[0].Agents[0].Round, "") {
+		t.Fatal("a look of before taken")
+	}
+	if got := q.withSeen(sum(q, "term_a#7")).Workspaces[0].Agents[0].Status; got != herdr.StatusDone {
+		t.Fatalf("after: %s", got)
+	}
+	// Kept from before, of another terminal: the first look (an older
+	// read) says not written since; a read for its round says written.
+	q = newSeenRounds(map[string]store.AgentSeen{"w1:p1": {At: 1000, Mark: "term_a#5"}}, nil)
+	_, lg := q.wantsLook()
+	q.lookedOver(map[string]int64{"w1:p1": 900}, lg)
+	sum(q, "term_b#9")
+	a, g := q.toCheck()
+	q.checked("w1:p1", a["w1:p1"], 2000, g)
+	if got := q.withSeen(sum(q, "term_b#9")).Workspaces[0].Agents[0].Status; got != herdr.StatusDone {
+		t.Fatalf("written since, by a later read: %s", got)
+	}
+}

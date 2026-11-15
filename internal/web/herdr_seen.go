@@ -212,7 +212,14 @@ func (r *seenRounds) checked(pane string, c seenCheck, wrote, gen int64) {
 		delete(r.pending, pane)
 	}
 	l, looked := r.last[pane]
-	if !ok || x.n != c.n || x.status != herdr.StatusDone || !looked || l.Session != x.session || wrote <= 0 || wrote > l.At {
+	if !ok || x.n != c.n || x.status != herdr.StatusDone || !looked || l.Session != x.session || wrote <= 0 {
+		r.mu.Unlock()
+		return
+	}
+	if wrote > l.At {
+		// (Written since it was looked at: a look kept from before, told
+		// by an older read of its log, says nothing of it.)
+		delete(r.prior, pane)
 		r.mu.Unlock()
 		return
 	}
@@ -309,7 +316,10 @@ func (r *seenRounds) markSeen(pane string, round int64, session string) (bool, e
 		}
 	}
 	r.mu.Lock()
-	if y, ok := r.at[pane]; !ok || y.n != x.n { // (its mark may have been filled in meanwhile: the same round)
+	// (Its mark may have been filled in meanwhile: the same round. Another
+	// mark than it had: its state changed while it was kept, the look is
+	// of before.)
+	if y, ok := r.at[pane]; !ok || y.n != x.n || x.mark != "" && y.mark != x.mark {
 		r.mu.Unlock()
 		return false, nil // (another round meanwhile: what was kept is of before it)
 	}
@@ -443,7 +453,7 @@ func (r *seenRounds) withSeen(sum herdrSummary) herdrSummary {
 			if a.Status != herdr.StatusDone {
 				continue
 			}
-			if x, ok := r.seen[a.PaneID]; ok && x.n == a.Round && x.session == a.Session {
+			if x, ok := r.seen[a.PaneID]; ok && x.n == a.Round && x.session == a.Session && (x.mark == "" || a.Mark == "" || x.mark == a.Mark) {
 				w.Agents[j].Status = herdr.StatusIdle
 			} else if k, ok := r.prior[a.PaneID]; ok && k.Session == a.Session && r.lookedBefore(k, a) {
 				w.Agents[j].Status = herdr.StatusIdle // (looked at before this watcher: see seenRounds)
