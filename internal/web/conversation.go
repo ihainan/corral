@@ -4006,10 +4006,10 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		// message of both, 11-15 review. Where its screen cannot be read or
 		// told, as before: the host's gate still keeps it out of an approval.)
 		sctx, scancel := context.WithTimeout(ctx, 10*time.Second)
-		res, err := sshx.Exec(sctx, sess.Client(), convoScreenCommand(sess.Persistence, b.Pane, socket), 512<<10, sshx.ExecOptions{AwaitSlot: pressSlotWait(what)})
+		res, err := sshx.Exec(sctx, sess.Client(), convoColorScreenCommand(sess.Persistence, b.Pane, socket), 512<<10, sshx.ExecOptions{AwaitSlot: pressSlotWait(what)})
 		scancel()
 		if err == nil {
-			if shown, _, _ := screenOf(res.Out); codexHasDraft(shown) {
+			if codexHasDraft(strings.ReplaceAll(string(res.Out), "\r", "")) {
 				ended.Done()
 				reason = "draft"
 				writeError(w, http.StatusConflict, "draft", "its input holds words typed in the terminal")

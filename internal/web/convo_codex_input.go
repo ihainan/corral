@@ -205,6 +205,63 @@ func codexPasteParts(text string) []int {
 
 // codexHasDraft: Codex's input holds words (typed in the terminal), whether
 // it works or not (a message sent while it works goes in as it works).
+// screen: with its colours (convoColorScreenCommand) — its placeholder
+// ("Ask Codex to do anything", cut short in a narrow pane) is dim, words
+// typed are not.
 func codexHasDraft(screen string) bool {
-	return errors.Is(codexIdleInput(strings.ReplaceAll(screen, "esc to interrupt", "")), errDraft)
+	plain := sgr.ReplaceAllString(screen, "")
+	if !errors.Is(codexIdleInput(strings.ReplaceAll(plain, "esc to interrupt", "")), errDraft) {
+		return false
+	}
+	raw := strings.Split(screen, "\n")
+	lines := strings.Split(plain, "\n")
+	if len(raw) != len(lines) {
+		return true
+	}
+	for i := len(lines) - 1; i >= 0; i-- {
+		if !strings.HasPrefix(lines[i], "› ") {
+			continue
+		}
+		foot := codexFootStart(lines)
+		for _, l := range lines[i+1 : max(foot, i+1)] {
+			if strings.TrimSpace(l) != "" {
+				return true // (more lines than its placeholder's one)
+			}
+		}
+		return !allDim(raw[i], "› ")
+	}
+	return true
+}
+
+// allDim: what line (with its colours) shows after its first prefix is all
+// dim (SGR 2) — a placeholder's.
+func allDim(line, prefix string) bool {
+	dim, seen, past := false, "", false
+	for len(line) > 0 {
+		if loc := sgr.FindStringIndex(line); loc != nil && loc[0] == 0 {
+			for _, p := range strings.Split(strings.TrimSuffix(strings.TrimPrefix(line[:loc[1]], "\x1b["), "m"), ";") {
+				switch p {
+				case "2":
+					dim = true
+				case "", "0", "22":
+					dim = false
+				}
+			}
+			line = line[loc[1]:]
+			continue
+		}
+		r, n := utf8.DecodeRuneInString(line)
+		line = line[n:]
+		if !past {
+			seen += string(r)
+			if strings.HasSuffix(seen, prefix) {
+				past = true
+			}
+			continue
+		}
+		if !unicode.IsSpace(r) && r != '\r' && !dim {
+			return false
+		}
+	}
+	return past
 }

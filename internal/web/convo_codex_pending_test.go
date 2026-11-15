@@ -219,14 +219,18 @@ func TestCodexIdleInputFastTier(t *testing.T) {
 	}
 }
 
-// A draft in its input, idle or at work: told; none: not.
+// A draft in its input, idle or at work: told; its placeholder (dim, cut
+// short in a narrow pane — real 0.167.2 colours, 11-15): not.
 func TestCodexHasDraft(t *testing.T) {
-	screen := "• Working (6s • esc to interrupt)\n\n› Ask Codex to do anything\n\n  GPT-6.1-Sol high Fast · ~/p · Working · Context 95% left\n  ← for agents · ? for shortcuts\n"
-	if codexHasDraft(screen) {
-		t.Error("empty, at work: a draft")
+	foot := "\n\n  GPT-6.1-Sol high Fast · ~/p · Working · Context 95% left\n  ← for agents · ? for shortcuts\n"
+	empty := "• Working (6s • esc to interrupt)\n\n\x1b[0m\x1b[1m›\x1b[0m \x1b[0m\x1b[2mAsk Codex to do anything\x1b[0m" + foot
+	cut := "\x1b[0m\x1b[1m›\x1b[0m \x1b[0m\x1b[2mAsk Codex to do a\x1b[0m" + foot
+	typed := "\x1b[0m\x1b[1m›\x1b[0m typed words" + foot
+	if codexHasDraft(empty) || codexHasDraft(cut) {
+		t.Error("its placeholder taken for a draft")
 	}
-	if !codexHasDraft(strings.Replace(screen, "Ask Codex to do anything", "half typed", 1)) {
-		t.Error("a draft, at work: not told")
+	if !codexHasDraft(typed) {
+		t.Error("words typed not told")
 	}
 	if codexHasDraft("no box at all") {
 		t.Error("an unknown screen: a draft")
