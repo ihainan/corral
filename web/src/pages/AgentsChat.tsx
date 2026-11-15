@@ -1959,12 +1959,12 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
         // Whether it went is not known (the gateway lost the host on the way,
         // or the answer was lost on its way here): it is looked for as one
         // sent, the draft staying until it is seen.
-        if (e instanceof ApiError && (e.code === 'typed_not_sent' || e.code === 'typed_other_view')) {
+        if (e instanceof ApiError && (e.code === 'typed_not_sent' || e.code === 'typed_other_view' || e.code === 'enter_not_taken')) {
           // (In its input, not sent: it came to ask first, or the terminal went
           // to another view before Enter. Not typed again from here — sent
           // again, it would be there twice: Enter, in the terminal. Looked for
           // as one sent meanwhile.)
-          toast(e.code === 'typed_not_sent' ? t('agents.typedNotSent') : t('convo.err.typedOtherView'), true)
+          toast(e.code === 'typed_not_sent' ? t('agents.typedNotSent') : e.code === 'enter_not_taken' ? t('agents.enterNotTaken') : t('convo.err.typedOtherView'), true)
           mark({ state: 'waiting', was })
           return
         }

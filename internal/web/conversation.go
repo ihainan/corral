@@ -3083,6 +3083,64 @@ gate_enter() {
   owned 1 1
   return 0
 }
+# A message to Claude Code, sent for sure (11-15). A path to a picture in
+# what is pasted, it reads that file before it puts anything in its box
+# ("[Image #N]" and the words after); an Enter come meanwhile it holds for
+# after, then drops (2.1.323, 2.1.325): the words stay in its box, never
+# sent, and no one is told. So Enter goes once its box shows what was pasted
+# (up to 5 seconds); after it, the box read again: our words still there a
+# second on, Enter once more (as gate_enter lets it: not into a question);
+# still there, exit 18. Its box read as the box: gate reads it.
+cc= b0= b1=
+boxread() {
+  if [ "$mode" = tmux ]; then bs=$(tmux -u capture-pane -p -t "$p" 2>/dev/null 9>&-) || return 1
+  else bs=$(HERDR_SOCKET_PATH=$sock herdr pane read "$p" --source visible 2>/dev/null 9>&-) || return 1; fi
+  bx=$(printf '%s\n' "$bs" | awk 'BOXAWK')
+}
+# (Before the paste: its box as it was, empty or a greyed suggestion — only
+# where the screen shows Claude Code's own conversation box.)
+boxbefore() {
+  [ "$kind" = claude ] && [ -z "$cx" ] && [ -z "$oc" ] && [ -z "$noenter" ] || return 0
+  case $gate in ''|free|enter|idle) ;; *) return 0;; esac
+  owner 0
+  [ "$o" = main ] || return 0
+  b0=$(printf '%s\n' "$os" | awk 'BOXAWK') && cc=1
+}
+# (After it: till its box shows something else, up to 5 seconds. Not seen
+# so long — a picture read slowly — Enter as ever, and after it the box
+# looked at for a while yet: what it shows then, the words to look for.)
+pasted() {
+  [ -n "$cc" ] || return 0
+  n=0
+  while [ "$n" -lt 47 ]; do
+    boxread || return 0
+    if [ "$bx" != "$b0" ]; then b1=$bx; return 0; fi
+    sleep 0.1; n=$((n + 1))
+  done
+}
+taken() {
+  if [ -n "$cc" ] && [ -z "$b1" ]; then
+    n=0
+    while [ "$n" -lt 30 ]; do
+      sleep 0.1; n=$((n + 1))
+      boxread || return 0
+      if [ "$bx" != "$b0" ]; then b1=$bx; break; fi
+    done
+  fi
+  [ -n "$b1" ] || return 0
+  for k in 1 2; do
+    n=0
+    while [ "$n" -lt 10 ]; do
+      sleep 0.1; n=$((n + 1))
+      boxread || return 0
+      [ "$bx" = "$b1" ] || return 0
+    done
+    [ "$k" = 2 ] && exit 18
+    gate_enter
+    if [ "$mode" = tmux ]; then tmux send-keys -t "$p" Enter 9>&- || exit 18
+    else HERDR_SOCKET_PATH=$sock herdr pane send-keys "$p" enter >/dev/null 2>&1 9>&- || exit 18; fi
+  done
+}
 if [ -n "$gate" ]; then
   waiting
   case $gate in
@@ -3184,13 +3242,16 @@ if [ "$mode" = tmux ]; then
   else
   tmux load-buffer -b "$b" "$f" 9>&- || exit 4
   front || exit 3
+  boxbefore
   typing=1
   tmux paste-buffer -p -r -d -b "$b" -t "$p" 9>&- || exit 6
   sleep 0.3
   fi
   if [ -n "$noenter" ]; then screen; exit 0; fi
+  pasted
   gate_enter
   tmux send-keys -t "$p" Enter 9>&- || exit 5
+  taken
   screen
 else
   e=$(printf '\033')
@@ -3227,13 +3288,16 @@ else
   [ "${t%x}" != "$t" ] || exit 4
   t=${t%x}
   front || exit 3
+  boxbefore
   typing=1
   HERDR_SOCKET_PATH=$sock herdr pane send-text "$p" "$e[200~$t$e[201~" >/dev/null 2>&1 9>&- || exit 6
   sleep 0.3
   fi
   if [ -n "$noenter" ]; then screen; exit 0; fi
+  pasted
   gate_enter
   HERDR_SOCKET_PATH=$sock herdr pane send-keys "$p" enter >/dev/null 2>&1 9>&- || exit 5
+  taken
   screen
 fi`
 
@@ -3627,7 +3691,15 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		writeError(w, http.StatusUnauthorized, "unauthorized", "please sign in")
 		return
 	}
-	ctx, cancel := context.WithDeadline(r.Context(), expiry)
+	// (A message once on its way is not cut short by the page going away — a
+	// phone's browser put aside just after Send — between its words and the
+	// Enter that sends them, or the look after that Enter. A sign-out, the
+	// login's end and the step's time still end it.)
+	parent := r.Context()
+	if what == "send" {
+		parent = context.WithoutCancel(parent)
+	}
+	ctx, cancel := context.WithDeadline(parent, expiry)
 	defer cancel()
 	step := 15 * time.Second
 	if what == "models" || what == "model" || what == "effort" || (what == "mode" && b.Mode != "") {
@@ -4086,6 +4158,12 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	case errors.As(err, &exitErr) && exitErr.Status == 5 && gate != "":
 		reason = "typed_not_sent"
 		writeError(w, http.StatusConflict, "typed_not_sent", "the text is in its input, not sent: it came to wait for an answer first")
+		return
+	case errors.As(err, &exitErr) && exitErr.Status == 18:
+		// (Claude Code's box holding our words still after Enter, twice: see
+		// taken() in the script.)
+		reason = "enter_not_taken"
+		writeError(w, http.StatusConflict, "enter_not_taken", "the text is in its input, but Enter did not send it: press Enter in the terminal")
 		return
 	case errors.As(err, &exitErr) && exitErr.Status == 17:
 		reason = "draft" // (OpenCode's input holding words, seen on the host: nothing typed)

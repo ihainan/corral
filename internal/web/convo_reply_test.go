@@ -100,8 +100,17 @@ func TestConvoGateOnTheHost(t *testing.T) {
 	// (Its screen: screen.txt; a text pasted makes it next.txt, where there is one.)
 	screenFile, nextFile := filepath.Join(dir, "screen.txt"), filepath.Join(dir, "next.txt")
 	asked := "Do you want to proceed?\n 1. Yes\n"
-	os.WriteFile(filepath.Join(dir, "herdr"), []byte("#!/bin/sh\nif [ \"$1 $2\" = 'pane read' ]; then cat "+screenFile+"; [ -e "+screenFile+".fails ] && exit 1; exit 0; fi\nif [ \"$1 $2\" = 'pane get' ]; then cat "+title+"; exit 0; fi\nif [ \"$1 $2\" = 'pane send-text' ] && [ -f "+nextFile+" ]; then mv "+nextFile+" "+screenFile+"; fi\nprintf '%s\\n' \"$*\" >>"+typed+"\n"), 0o755)
-	showing := func(s string) { os.WriteFile(screenFile, []byte(s), 0o644); os.Remove(nextFile) }
+	os.WriteFile(filepath.Join(dir, "herdr"), []byte("#!/bin/sh\nif [ \"$1 $2\" = 'pane read' ]; then cat "+screenFile+"; [ -e "+screenFile+".fails ] && exit 1; exit 0; fi\nif [ \"$1 $2\" = 'pane get' ]; then cat "+title+"; exit 0; fi\nif [ \"$1 $2\" = 'pane send-text' ] && [ -f "+nextFile+" ]; then if [ -f "+nextFile+".delay ]; then (sleep $(cat "+nextFile+".delay); mv "+nextFile+" "+screenFile+") & else mv "+nextFile+" "+screenFile+"; fi; fi\n"+
+		// (As Claude Code: Enter takes what its box shows (next.entered, the
+		// box after); come before a slow paste is shown (next still there:
+		// a picture's path, its file read first), dropped.)
+		"if [ \"$1 $2 $4\" = 'pane send-keys enter' ] && [ -f "+nextFile+".entered ] && [ ! -f "+nextFile+" ]; then mv "+nextFile+".entered "+screenFile+"; fi\nprintf '%s\\n' \"$*\" >>"+typed+"\n"), 0o755)
+	showing := func(s string) {
+		os.WriteFile(screenFile, []byte(s), 0o644)
+		os.Remove(nextFile)
+		os.Remove(nextFile + ".delay")
+		os.Remove(nextFile + ".entered")
+	}
 	showing(asked)
 	// (The agent: sleep, a session's leader with the pseudo-terminal its own, in front of it.)
 	helper := exec.Command("python3", "-c", `import pty, os, sys, time
@@ -603,7 +612,27 @@ func ownerGateCases(t *testing.T, dir string, pid int, start int64, run func(str
 	// (A message of ours beginning as the placeholder does: once pasted, not read.)
 	showing(ownerMain)
 	os.WriteFile(nextFile, []byte("──────────\n❯ Message @team, the report\n──────────\n  ⏵⏵ auto mode on\n"), 0o644)
+	os.WriteFile(nextFile+".entered", []byte(ownerMain), 0o644)
 	if got := text("free", "Message @team, the report"); got != 0 {
 		t.Fatalf("a message beginning Message @: exit %d, typed %q", got, wrote())
+	}
+	// A picture's path pasted: Claude Code reads the file before its box shows
+	// anything, and drops an Enter come meanwhile (11-15, a message lost).
+	// Enter once the box shows it: sent, one Enter.
+	showing(ownerMain)
+	os.WriteFile(nextFile, []byte("──────────\n❯ [Image #1]look at this\n──────────\n  ⏵⏵ auto mode on\n"), 0o644)
+	os.WriteFile(nextFile+".delay", []byte("0.8"), 0o644)
+	os.WriteFile(nextFile+".entered", []byte(ownerMain), 0o644)
+	if got := text("free", "/tmp/a.png\nlook at this"); got != 0 || strings.Count(wrote(), "send-keys p1 enter") != 1 {
+		t.Fatalf("a picture's path, read slowly: exit %d, typed %q", got, wrote())
+	}
+	if _, err := os.Stat(nextFile + ".entered"); err == nil {
+		t.Fatalf("a picture's path, read slowly: its Enter dropped, not sent")
+	}
+	// (Its words in the box still after Enter, and after another: not sent, said.)
+	showing(ownerMain)
+	os.WriteFile(nextFile, []byte("──────────\n❯ hello\n──────────\n  ⏵⏵ auto mode on\n"), 0o644)
+	if got := text("free", "hello"); got != 18 || strings.Count(wrote(), "send-keys p1 enter") != 2 {
+		t.Fatalf("Enter not taken: exit %d, typed %q", got, wrote())
 	}
 }
