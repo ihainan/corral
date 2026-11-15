@@ -2763,6 +2763,23 @@ function Runs({ meta, active, mode, model, effort, quota, via, auth }: { meta: C
             {t('convo.effortShort', { e: effortName(level) })}
             <ChevronsUpDown size={12} aria-hidden="true" />
           </button>
+          ) : model?.efforts && model.can ? (
+            // (A Codex's: chosen with its model, in its menu — opened from here too.)
+            <button
+              type="button"
+              className="convo-runs-item convo-runs-effort is-switch"
+              aria-expanded={open === 'model'}
+              aria-haspopup="menu"
+              aria-label={t('convo.effort') + ': ' + effortName(level)}
+              title={t('convo.modelEffortSwitch')}
+              onClick={() => {
+                if (open !== 'model') model.onOpen()
+                setOpen(open === 'model' ? false : 'model')
+              }}
+            >
+              {t('convo.effortShort', { e: effortName(level) })}
+              <ChevronsUpDown size={12} aria-hidden="true" />
+            </button>
           ) : (
             <span className="convo-runs-item convo-runs-effort" title={t('convo.effort') + ': ' + effortName(level)}>{t('convo.effortShort', { e: effortName(level) })}</span>
           )
