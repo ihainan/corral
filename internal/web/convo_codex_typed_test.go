@@ -42,6 +42,8 @@ func TestCodexTypedIn(t *testing.T) {
 		// (review r2b-2: a draft of a numbered list, two lines: not a menu — no keys of one under it.)
 		{"a draft like a menu, two lines", codexScreen("› 1. " + msg + "\n  2. 再跑一次"), "1. " + msg + "\n2. 再跑一次", true, true},
 		// (review r2b-3: under the message after a blank line, a known footer's words and more: words of the input's.)
+		// (review r2c-2: the message ends with words like a known footer's, the input holding only its start.)
+		{"its start, a footer's words its end", codexScreen("› 请解释这行快捷键提示", "  ? for shortcuts"), "请解释这行快捷键提示\n? for shortcuts", false, false},
 		{"a footer's words and more under it", "• done\n\n› " + msg + "\n\n  ? for shortcuts\n  这是额外草稿\n", msg, true, false},
 		{"too short to tell", codexScreen("› go"), "go", false, false},
 		// (review502: the draft goes on with words like a footer's, then more: not the message whole.)

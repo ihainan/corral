@@ -194,7 +194,9 @@ func codexTypedIn(screen, text string, whole bool) bool {
 	switch {
 	case foot == "":
 		return codexBoxHas(area, text, whole)
-	case known || codexTypedFoot(foot): // (all of it a known footer's — an older Codex kept its hints shown — or one line)
+	case known: // (all of it a known footer's — an older Codex kept its hints shown: never the message's — review r2c-2)
+		return codexBoxHas(area, text, whole)
+	case codexTypedFoot(foot):
 		// (Its status line, or the end of the message itself: either.)
 		return codexBoxHas(area, text, whole) || codexBoxHas(area+"\n"+foot, text, whole)
 	default:
@@ -300,7 +302,16 @@ func codexHasDraft(screen string) bool {
 	}
 	at, foot, _, ok := codexInputSpan(lines)
 	if !ok {
-		return false // (its input not told apart: left to the send's own reading)
+		// (Its input not told apart: left to the send's own reading — but
+		// for a last "› 1. …", a menu's choice or a draft of a numbered list,
+		// not told apart for sure: a draft, nothing sent onto it — review
+		// r2c-1. A menu up refuses a message all the same.)
+		for i := len(lines) - 1; i >= 0; i-- {
+			if strings.HasPrefix(lines[i], "›") {
+				return codexMenuChoice.MatchString(lines[i])
+			}
+		}
+		return false
 	}
 	for _, l := range lines[at+1 : foot] {
 		if strings.TrimSpace(l) != "" {

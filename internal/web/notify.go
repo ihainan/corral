@@ -420,8 +420,16 @@ func (s *Server) onHerdrTransition(sess *term.Session, h *store.Host, tr herdr.T
 				}
 				// (Not known in time: finished, as before there was any reading.)
 				if st != bgRunning && st != bgMoved && still() {
-					note.Title, note.TitleZh = agent+" finished", agentZh+" 已完成"
-					note.Body, note.BodyZh = s.doneBody(sess, tr, round, where)
+					body, bodyZh := s.doneBody(sess, tr, round, where)
+					// (Looked at again after that read on the host: another round
+					// begun meanwhile tells of itself — review r2c-4.)
+					if moved() {
+						return
+					}
+					if still() {
+						note.Title, note.TitleZh = agent+" finished", agentZh+" 已完成"
+						note.Body, note.BodyZh = body, bodyZh
+					}
 				}
 				s.replaceAlert(sess.OwnerID, al, note)
 			}()

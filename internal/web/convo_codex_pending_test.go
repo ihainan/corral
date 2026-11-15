@@ -235,6 +235,10 @@ func TestCodexHasDraft(t *testing.T) {
 	if !codexHasDraft("\x1b[0m\x1b[1m›\x1b[0m 1. 检查失败原因" + foot) {
 		t.Error("a draft beginning \"1. \" taken for a menu (review r2a-3)")
 	}
+	// (review r2c-1: a numbered draft with menu-like keys under it — a menu or a draft, not told: a draft.)
+	if !codexHasDraft("\x1b[1m›\x1b[0m 1. 打开设置\n  2. 按下 enter to confirm\n\n  Press enter to confirm or esc to cancel\n") {
+		t.Error("a menu-like draft taken for empty")
+	}
 	if codexHasDraft("no box at all") {
 		t.Error("an unknown screen: a draft")
 	}

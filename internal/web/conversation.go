@@ -2594,8 +2594,8 @@ func (s *Server) readOlder(sess *term.Session, st *convoState) error {
 			last := data
 			if start > 0 && bytes.IndexByte(data[:len(data)-1], '\n') < 0 {
 				line, _, err := longLineBefore(c, log, start, data)
-				if errors.Is(err, errLogChanged) {
-					return err
+				if err != nil {
+					return err // (not read: tried again the next time — review r2c-3)
 				}
 				last = line
 			}
