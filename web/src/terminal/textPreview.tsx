@@ -105,7 +105,7 @@ export function TextPreview({ sid, path, tail = false, lines: at0, onClose, onRe
   useEffect(() => {
     if (first.current) first.current = false
     else setSource(atFrom !== undefined)
-  }, [path, atFrom, atTo])
+  }, [path, atFrom, atTo, asked]) // (asked again: lines asked are lines of its source — a Markdown file drawn shows its source again)
   useEffect(() => {
     const ctl = new AbortController()
     if (!tail) setRead(null) // (read again from its end: what is shown stays till the newer comes)

@@ -226,6 +226,7 @@ function FilesPanel({ sessionId, start, reveal, onPath, onInsert, onClose, docke
     if (went.current === go) return
     went.current = go
     markedSaid.current = false
+    setFilterQ('') // (as a new browser would: the file asked for not filtered out)
     if (marked) void load(marked.dir, true)
     else if (start) void load(start, true)
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -244,7 +245,12 @@ function FilesPanel({ sessionId, start, reveal, onPath, onInsert, onClose, docke
   }, [path])
   // (Once listed: scrolled to; not there, said so, once.)
   useEffect(() => {
-    if (!marked || !listing || markedSaid.current) return
+    // (Judged once the folder asked for is listed, or its asking is over: not on the
+    // last folder's listing while the new one comes — review, 11-15.)
+    // (Not while a navigation is under way — begun in this very commit by a new ask,
+    // its state not drawn yet: seq is counted as it starts, settled as it ends; the
+    // same folder listed again too, its filter cleared and its list back at its top.)
+    if (!marked || !listing || markedSaid.current || seq.current !== settled.current) return
     markedSaid.current = true
     // (Its folder not opened — gone, not allowed: the home folder instead, said so.)
     if (!markHere) return toast(t('files.revealGone', { dir: marked.dir }), true)
@@ -252,7 +258,7 @@ function FilesPanel({ sessionId, start, reveal, onPath, onInsert, onClose, docke
     if (el) el.scrollIntoView({ block: 'center' })
     else toast(t(listing.truncated ? 'files.revealCut' : 'files.notThere', { name: marked.name }), true)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [markHere, listing])
+  }, [markHere, listing, loading])
   const hiddenCount = listing ? listing.entries.length - listing.entries.filter((e) => !e.name.startsWith('.')).length : 0
 
   const toggleHidden = () => {
