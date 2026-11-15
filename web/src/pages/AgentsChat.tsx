@@ -1596,7 +1596,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     [],
   )
   const field = useRef<HTMLTextAreaElement>(null)
-  const completion = useCompletion({ sessionId: sid, field, draft, setDraft, agent: row?.a.agent ?? convo.bind?.agent ?? (codex ? 'codex' : 'claude'), pane: herdr ? cur.pane : undefined })
+  const completion = useCompletion({ sessionId: sid, field, draft, setDraft, agent: row?.a.agent ?? convo.bind?.agent ?? (codex ? 'codex' : 'claude'), pane: herdr ? cur.pane : convo.bind?.pane })
   // The commands button: a "/" put where a command goes, for the list that opens on one (the
   // same as typed: typing on narrows it). With words in the box it goes in front of them, the
   // command they are then for; given up (pressed again, Escape, the box left) that "/" goes.

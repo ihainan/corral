@@ -70,6 +70,7 @@ function useBase(sid: string, pane: string, on: boolean, given?: string) {
 
 export function Dock({
   of,
+  pane,
   tab,
   onTab,
   start,
@@ -84,6 +85,7 @@ export function Dock({
   toast,
 }: {
   of: string // (the conversation: "<session> <pane>")
+  pane: string // (its pane: of's, or a tmux session's conversation's own)
   tab: DockTab
   onTab: (t: DockTab) => void
   start?: { against: ChangesAgainst; base?: string; n: number } // (the card's counts tapped: that reading, n each time)
@@ -98,7 +100,7 @@ export function Dock({
   toast: (s: string, bad?: boolean) => void
 }) {
   usePrefs()
-  const [sid, pane = ''] = of.split(' ')
+  const sid = of.split(' ')[0]
   const root = useRef<HTMLElement>(null)
   // (Tabs as a tablist: the arrows between them, Home and End; the one shown the one reached by Tab.)
   const tabKeys = (e: ReactKeyboardEvent) => {

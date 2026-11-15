@@ -688,11 +688,13 @@ func tmuxCwdCommand(name string) string {
 }
 
 // tmuxPaneCwdCommand prints a pane's folder, where that pane is of the
-// session named (else nothing). Fixed script; the validated session name
-// and pane id ("%3") are its arguments.
+// session named — among its panes, a window linked into others' too (one
+// pane's own session is one of them only: review, 11-15) — else nothing.
+// Fixed script; the validated session name and pane id ("%3") are its
+// arguments.
 func tmuxPaneCwdCommand(name, pane string) string {
 	script := `PATH="$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"; ` +
-		`s=$(tmux -u display-message -p -t "$2" '#{session_name}' 2>/dev/null) && [ "$s" = "$1" ] && exec tmux -u display-message -p -t "$2" '#{pane_current_path}'; exit 0`
+		`tmux -u list-panes -s -t "=$1" -F '#{pane_id}' 2>/dev/null | grep -qxF -- "$2" && exec tmux -u display-message -p -t "$2" '#{pane_current_path}'; exit 0`
 	return "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(name) + " " + sshx.QuoteShell(pane)
 }
 

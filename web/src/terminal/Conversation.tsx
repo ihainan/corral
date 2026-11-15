@@ -1741,7 +1741,7 @@ export function ConversationView({
       {gitChanges && convo.of && (
         <ChangesView
           sid={convo.of.split(' ')[0]}
-          pane={convo.of.split(' ')[1] ?? ''}
+          pane={convo.of.split(' ')[1] || convo.bind?.pane || ''}
           base={gitChanges.base}
           start={gitChanges.against}
           acts={files ? { view: (p) => files.view(p), open: files.open } : undefined}
@@ -1934,6 +1934,7 @@ export function ConversationView({
       {dockable && dockOpen && convo.of && convo.status === 'ready' && !(changes && shownEdits) && !subs?.length && !bgCmd && (
         <Dock
           of={convo.of}
+          pane={convo.of.split(' ')[1] || convo.bind?.pane || ''}
           tab={dockTab}
           onTab={setDockTab}
           start={dockStart}
@@ -3509,7 +3510,8 @@ const KEY_SIDE = mac ? '⌘B' : 'Ctrl+B'
 // that one), its model, effort and mode as they are now (a switch's, before
 // the log says it).
 function cardData(convo: Convo, list: Item[], mode?: ModeSwitch, effort?: EffortSwitch, cmds?: RowCmds): CardData {
-  const [sid, pane = ''] = (convo.of ?? '').split(' ')
+  const [sid, ofPane] = (convo.of ?? '').split(' ')
+  const pane = ofPane || convo.bind?.pane || '' // (a tmux session's conversation: its own pane, not the focused one)
   const files = new Map<string, { path: string; add: number; del: number; key: string }>()
   let add = 0
   let del = 0

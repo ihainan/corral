@@ -535,10 +535,12 @@ func TestFilesCwdOfAPane(t *testing.T) {
 	srv := h.sshServer(home)
 	bin := filepath.Join(home, ".local", "bin")
 	os.MkdirAll(bin, 0o755)
+	// (%3 of work, in a window linked into "other" too, its own session that; %9 of other only.)
 	os.WriteFile(filepath.Join(bin, "tmux"), []byte(`#!/bin/sh
+[ "$2" = list-panes ] && { [ "$5" = "=work" ] && printf '%%1\n%%3\n'; [ "$5" = "=other" ] && printf '%%3\n%%9\n'; exit 0; }
 case "$5|$6" in
   "=work:|#{pane_current_path}") echo /srv/active ;;
-  "%3|#{session_name}") echo work ;;
+  "%3|#{session_name}") echo other ;;
   "%3|#{pane_current_path}") echo /srv/pane3 ;;
   "%9|#{session_name}") echo other ;;
   "%9|#{pane_current_path}") echo /srv/elsewhere ;;
