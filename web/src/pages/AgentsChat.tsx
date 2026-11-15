@@ -2440,16 +2440,33 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   // window may have set it to work meanwhile — review585-11.)
   const entriesNow = useRef(entries)
   entriesNow.current = entries
+  // (A tmux session's agent: its state as its conversation says it, for the one shown.)
+  const agentNow = useRef(agent)
+  agentNow.current = agent
   const stillAtRest = (key: string) => () => {
-    const r = entriesNow.current.find((x) => x.key === key)?.row
+    const e = entriesNow.current.find((x) => x.key === key)
+    if (e && !e.row && e.s.persistence === 'tmux') {
+      const st = key === cur.key ? agentNow.current?.status : undefined
+      if (!st) return t('fork.gone')
+      return st !== 'idle' && st !== 'done' ? t('fork.onlyIdle') : ''
+    }
+    const r = e?.row
     // (Not in the list any more, or its state not known: not sent on a guess — review588-7.)
     if (!r || r.lost) return t('fork.gone')
     return r.status !== 'idle' && r.status !== 'done' ? t('fork.onlyIdle') : ''
   }
   const forkOf = (e: Entry, at?: string) => {
     const r = e.row
-    if (e.s.persistence !== 'herdr' || !r || r.lost) return null
     const shown = e.key === cur.key && e.s.id === cur.s.id
+    if (e.s.persistence === 'tmux' && !r) {
+      // (A tmux session's: the one shown, by its conversation's own id; its
+      // folder the log's, as the gateway finds it.)
+      const b = shown ? convo.bind : null
+      const kind = b?.agent === 'claude' || b?.agent === 'codex' ? b.agent : null
+      if (!b || !kind || !b.session || (at && kind !== 'claude')) return null
+      return { s: e.s, kind, source: b.session, at, dir: '~', name: e.s.mux_session || 'tmux', key: e.key } as const
+    }
+    if (e.s.persistence !== 'herdr' || !r || r.lost) return null
     const prog = (shown && convo.bind?.agent) || (isCodex(r.a.agent) ? 'codex' : isOpenCode(r.a.agent) ? 'opencode' : /claude/i.test(r.a.agent) ? 'claude' : '')
     const source = (shown && convo.bind?.session) || r.a.session || ''
     if ((prog !== 'claude' && prog !== 'codex') || !source || (at && prog !== 'claude')) return null
@@ -2459,7 +2476,8 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   const forkItem = (e: Entry): MenuItem | null => {
     const f = forkOf(e)
     if (!f) return null
-    const still = e.row!.status === 'idle' || e.row!.status === 'done'
+    const st = e.row ? e.row.status : agent?.status
+    const still = st === 'idle' || st === 'done'
     return { label: t('fork.item'), icon: <GitBranch size={16} />, separator: true, disabled: !still, hint: still ? undefined : t('fork.onlyIdle'), onSelect: () => setForking(f) }
   }
   // Of it up to a turn's end (Claude Code's, from the thread): any turn;
@@ -2467,7 +2485,8 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   const forkHere = (at: string | undefined) => {
     const f = forkOf(cur, at)
     if (!f) return
-    if (!at && cur.row && cur.row.status !== 'idle' && cur.row.status !== 'done') return toast(t('fork.onlyIdle'), true)
+    const st = cur.row ? cur.row.status : agent?.status
+    if (!at && st !== 'idle' && st !== 'done') return toast(t('fork.onlyIdle'), true)
     setForking(f)
   }
   // Its names in herdr: the workspace's, its tab's, its pane's own.
@@ -2665,7 +2684,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
         })
       }}
       onForkAt={forkOf(cur, 'probe') ? forkHere : undefined}
-      forkWhole={!!cur.row && (cur.row.status === 'idle' || cur.row.status === 'done')}
+      forkWhole={cur.row ? cur.row.status === 'idle' || cur.row.status === 'done' : cur.s.persistence === 'tmux' && (agent?.status === 'idle' || agent?.status === 'done')}
     />
     {viewing && active && (
       <PictureDialog
@@ -2709,16 +2728,17 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     {forking && (
       <ForkDialog
         sessionId={forking.s.id}
+        hostId={forking.s.host_id}
         kind={forking.kind}
         source={forking.source}
         at={forking.at}
         dir={forking.dir}
         name={forking.name}
         check={forking.at ? undefined : stillAtRest(forking.key)}
-        onDone={(pane, first) => {
+        onDone={(pane, first, opened) => {
           const f = forking
           setForking(null)
-          onStarted(f.s, pane, first)
+          onStarted(opened ?? f.s, pane, first)
         }}
         onClose={() => setForking(null)}
       />

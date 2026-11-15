@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from 'react'
 import { GitBranch, TextCursorInput } from 'lucide-react'
-import { api, ApiError, errorText } from '../api'
+import { api, ApiError, errorText, type SessionInfo } from '../api'
 import { t } from '../i18n'
 import { Dialog } from '../components/ui'
 import { expectSession, renamedHerdr } from './agents'
@@ -17,6 +17,7 @@ import { expectSession, renamedHerdr } from './agents'
 // one of its options).
 export function ForkDialog({
   sessionId,
+  hostId,
   kind,
   source,
   at,
@@ -27,13 +28,14 @@ export function ForkDialog({
   onClose,
 }: {
   sessionId: string
+  hostId: number
   kind: 'claude' | 'codex'
   source: string
   at?: string
   dir: string
   name: string
   check?: () => string // (asked again as it is sent: why not now, or '')
-  onDone: (pane: string, first: string) => void
+  onDone: (pane: string, first: string, opened?: SessionInfo) => void // (opened: from a tmux session, the terminal opened on the copy's own)
   onClose: () => void
 }) {
   const [label, setLabel] = useState(() => t('fork.defaultName', { name }).slice(0, 40))
@@ -58,8 +60,21 @@ export function ForkDialog({
     setError('')
     try {
       const body = { dir, kind, label: label.trim(), resume: source, fork: true, at: at ?? '' }
-      const r = await api<{ pane: string }>('POST', `/api/sessions/${sessionId}/agents`, { ...body, key: keyOf(JSON.stringify(body)) }, { timeoutMs: 90000 })
-      onDone(r.pane, first.trim())
+      const r = await api<{ pane?: string; tmux?: string }>('POST', `/api/sessions/${sessionId}/agents`, { ...body, key: keyOf(JSON.stringify(body)) }, { timeoutMs: 90000 })
+      if (r.tmux) {
+        // (From a tmux session: the copy in a tmux session of its own, a terminal opened on it here — as a new agent's.)
+        let opened: SessionInfo
+        try {
+          opened = await api<SessionInfo>('POST', '/api/sessions', { host_id: hostId, cols: 160, rows: 50, open: { kind: 'tmux', name: r.tmux } })
+        } catch (e) {
+          setError(t('newAgent.tmuxNotOpened', { name: r.tmux, why: errorText(e) }))
+          setBusy(false)
+          return
+        }
+        onDone('', first.trim(), opened)
+        return
+      }
+      onDone(r.pane ?? '', first.trim())
     } catch (err) {
       if (err instanceof ApiError && err.code === 'no_session') setError(t('fork.noSession'))
       else if (err instanceof ApiError && err.code === 'bad_message') setError(t('fork.badMessage'))
