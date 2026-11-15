@@ -192,12 +192,13 @@ func (r *seenRounds) toCheck() (map[string]seenCheck, int64) {
 }
 
 // checked takes in what pane's log said for its round of "done" round:
-// wrote, when it was last written (unix ms, the gateway's clock; 0: not
-// known). Not written since pane was last looked at: that round is told
+// when it was last written (unix ms, the gateway's clock), no earlier than
+// lo and no later than hi (a clock in seconds: the second's first and last
+// millisecond; 0: not known). Not written since pane was last looked at: that round is told
 // as the one looked at. (Asked for a round no longer the pane's: nothing.
 // Read before herdr was last lost or back, gen not the rounds': nothing,
 // and it is read again.)
-func (r *seenRounds) checked(pane string, c seenCheck, wrote, gen int64) {
+func (r *seenRounds) checked(pane string, c seenCheck, lo, hi, gen int64) {
 	r.mu.Lock()
 	if r.lost || gen != r.gen {
 		r.mu.Unlock()
@@ -212,11 +213,11 @@ func (r *seenRounds) checked(pane string, c seenCheck, wrote, gen int64) {
 		delete(r.pending, pane)
 	}
 	l, looked := r.last[pane]
-	if !ok || x.n != c.n || x.status != herdr.StatusDone || !looked || l.Session != x.session || wrote <= 0 {
+	if !ok || x.n != c.n || x.status != herdr.StatusDone || !looked || l.Session != x.session || lo <= 0 || hi < lo {
 		r.mu.Unlock()
 		return
 	}
-	if wrote > l.At {
+	if lo > l.At {
 		// (Written since it was looked at: the look of its round, or kept
 		// from before and told by an older read of its log, is of before.)
 		delete(r.prior, pane)
@@ -228,6 +229,10 @@ func (r *seenRounds) checked(pane string, c seenCheck, wrote, gen int64) {
 		if poke != nil {
 			poke()
 		}
+		return
+	}
+	if hi > l.At { // (that second, before or after it was looked at: not told)
+		r.mu.Unlock()
 		return
 	}
 	if r.quiet == nil {
@@ -318,10 +323,7 @@ func (r *seenRounds) markSeen(pane string, round int64, session string) (bool, e
 		}
 	}
 	r.mu.Lock()
-	// (Its mark may have been filled in meanwhile: the same round. Another
-	// mark than it had: its state changed while it was kept, the look is
-	// of before.)
-	if y, ok := r.at[pane]; !ok || y.n != x.n || x.mark != "" && y.mark != x.mark {
+	if y, ok := r.at[pane]; !ok || y.n != x.n { // (its mark may have been filled in meanwhile: the same round)
 		r.mu.Unlock()
 		return false, nil // (another round meanwhile: what was kept is of before it)
 	}

@@ -24,7 +24,11 @@ const (
 func (s *Server) recheckSeen(ctx context.Context, sess *term.Session, rounds *seenRounds, latest func() *herdr.Snapshot) {
 	tick := time.NewTicker(seenRecheckEvery)
 	defer tick.Stop()
-	failed := map[seenCheck]int{} // (by pane's round and mark: see below)
+	type tryKey struct {
+		pane string
+		c    seenCheck
+	}
+	failed := map[tryKey]int{} // reads failed, by pane's round and mark
 
 	for {
 		select {
@@ -53,7 +57,7 @@ func (s *Server) recheckSeen(ctx context.Context, sess *term.Session, rounds *se
 				}
 			}
 		}
-		wrote := map[string]int64{}
+		var lo, hi map[string]int64
 		if len(logs) > 0 {
 			panes := make([]string, 0, len(logs))
 			files := make([]string, 0, len(logs))
@@ -64,27 +68,30 @@ func (s *Server) recheckSeen(ctx context.Context, sess *term.Session, rounds *se
 			out, err := sshx.Output(cctx, sess.Client(), logsWroteCommand(files)+"; "+hostNowCommand, 64*len(files)+256)
 			got := time.Now().UnixMilli()
 			if err == nil {
-				wrote = onGatewayClock(parseLogsWrote(string(out), panes), string(out), got)
+				l, h := parseLogsWrote(string(out), panes)
+				lo, hi = onGatewayClock(l, string(out), got), onGatewayClock(h, string(out), got)
 			}
-			if err != nil || wrote == nil {
+			if err != nil || lo == nil || hi == nil {
 				for _, p := range panes {
 					unread[p] = true
 				}
 			}
 		}
 		cancel()
+		for k := range failed {
+			if pend[k.pane] != k.c {
+				delete(failed, k) // (no longer asked for)
+			}
+		}
 		for pane, c := range pend {
 			if unread[pane] {
-				k := seenCheck{n: c.n, mark: pane + "\x00" + c.mark}
+				k := tryKey{pane, c}
 				if failed[k]++; failed[k] < seenRecheckTries {
 					continue // (asked again next time)
 				}
 				delete(failed, k)
 			}
-			rounds.checked(pane, c, wrote[pane], gen) // (0: not known, "done")
-		}
-		if len(failed) > 64 {
-			clear(failed) // (of rounds long over)
+			rounds.checked(pane, c, lo[pane], hi[pane], gen) // (0: not known, "done")
 		}
 	}
 }
@@ -154,21 +161,22 @@ func codexRecheckLog(panes map[string]codexPane, pane string) string {
 }
 
 // logsWroteCommand prints, for each of files in turn, a line "w=" and when
-// it was last written (unix seconds; empty: not read).
+// it was last written: unix ms where the host's date tells them (GNU
+// date -r), else unix seconds; empty: not read.
 func logsWroteCommand(files []string) string {
 	q := make([]string, len(files))
 	for i, f := range files {
 		q[i] = sshx.QuoteShell(f)
 	}
-	return `for f in ` + strings.Join(q, " ") + `; do printf 'w=%s\n' "$(stat -c %Y -- "$f" 2>/dev/null)"; done`
+	return `for f in ` + strings.Join(q, " ") + `; do t=$(date -r "$f" +%s%3N 2>/dev/null); case $t in ""|*[!0-9]*) t=$(stat -c %Y -- "$f" 2>/dev/null);; esac; printf 'w=%s\n' "$t"; done`
 }
 
 // parseLogsWrote reads logsWroteCommand's lines, for panes in the order of
-// its files: unix ms, on the host's clock, rounded up (a log written in
-// the second a look was taken is not taken for one written before it).
-// One not read is left out.
-func parseLogsWrote(out string, panes []string) map[string]int64 {
-	at := map[string]int64{}
+// its files: when each was last written, unix ms on the host's clock, no
+// earlier than lo and no later than hi (a time in seconds: that second's
+// first and last millisecond). One not read is left out.
+func parseLogsWrote(out string, panes []string) (lo, hi map[string]int64) {
+	lo, hi = map[string]int64{}, map[string]int64{}
 	i := 0
 	for _, line := range strings.Split(out, "\n") {
 		v, ok := strings.CutPrefix(strings.TrimRight(line, "\r"), "w=")
@@ -178,10 +186,14 @@ func parseLogsWrote(out string, panes []string) map[string]int64 {
 		if i >= len(panes) {
 			break
 		}
-		if sec, err := strconv.ParseInt(v, 10, 64); err == nil && sec > 0 {
-			at[panes[i]] = (sec + 1) * 1000
+		if t, err := strconv.ParseInt(v, 10, 64); err == nil && t > 0 {
+			if t < 1e11 { // (seconds)
+				lo[panes[i]], hi[panes[i]] = t*1000, t*1000+999
+			} else {
+				lo[panes[i]], hi[panes[i]] = t, t
+			}
 		}
 		i++
 	}
-	return at
+	return lo, hi
 }

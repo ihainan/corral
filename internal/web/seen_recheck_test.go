@@ -20,7 +20,7 @@ func chk(q *seenRounds, round, wrote, g int64) {
 	q.mu.Lock()
 	mark := q.at["w1:p1"].mark
 	q.mu.Unlock()
-	q.checked("w1:p1", seenCheck{n: round, mark: mark}, wrote, g)
+	q.checked("w1:p1", seenCheck{n: round, mark: mark}, wrote, wrote, g)
 }
 
 // A "done" kept from before this watcher, of a later mark of its terminal
@@ -153,9 +153,15 @@ func TestLogsWrote(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := parseLogsWrote(string(out), []string{"p0", "p1"})
-	if _, ok := got["p0"]; ok || got["p1"] != at.UnixMilli()+1000 {
-		t.Fatalf("%v (written %d)", got, at.UnixMilli())
+	lo, hi := parseLogsWrote(string(out), []string{"p0", "p1"})
+	if _, ok := lo["p0"]; ok || lo["p1"] != at.UnixMilli() || hi["p1"] != at.UnixMilli() {
+		t.Fatalf("%v %v (written %d)", lo, hi, at.UnixMilli())
+	}
+	// (A host whose date tells seconds only: that second's first and last
+	// millisecond.)
+	lo, hi = parseLogsWrote("w=1794706675\nw=\n", []string{"p0", "p1"})
+	if lo["p0"] != 1794706675000 || hi["p0"] != 1794706675999 || len(lo) != 1 {
+		t.Fatalf("seconds: %v %v", lo, hi)
 	}
 }
 
@@ -250,7 +256,7 @@ func TestSeenRecheckMark(t *testing.T) {
 	s := sum("term_a#9")
 	round := s.Workspaces[0].Agents[0].Round
 	asked, g := q.toCheck()
-	q.checked("w1:p1", asked["w1:p1"], 900, g)
+	q.checked("w1:p1", asked["w1:p1"], 900, 900, g)
 	if got := status("term_a#9"); got != herdr.StatusIdle {
 		t.Fatalf("not written since: %s", got)
 	}
@@ -261,11 +267,11 @@ func TestSeenRecheckMark(t *testing.T) {
 	if again["w1:p1"].n != round || again["w1:p1"].mark != "term_a#11" {
 		t.Fatalf("not read again: %v", again)
 	}
-	q.checked("w1:p1", asked["w1:p1"], 900, g) // (asked under the old mark)
+	q.checked("w1:p1", asked["w1:p1"], 900, 900, g) // (asked under the old mark)
 	if got := status("term_a#11"); got != herdr.StatusDone || len(pend(q)) != 1 {
 		t.Fatalf("a read under the old mark took: %s %v", got, pend(q))
 	}
-	q.checked("w1:p1", again["w1:p1"], 2000, g)
+	q.checked("w1:p1", again["w1:p1"], 2000, 2000, g)
 	if got := status("term_a#11"); got != herdr.StatusDone {
 		t.Fatalf("written since: %s", got)
 	}
@@ -276,7 +282,7 @@ func TestSeenRecheckMark(t *testing.T) {
 	s2.Workspaces[0].Agents[0].Mark = "term_a#9"
 	q2.number(&s2, false)
 	a2, g2 := q2.toCheck()
-	q2.checked("w1:p1", a2["w1:p1"], 900, g2)
+	q2.checked("w1:p1", a2["w1:p1"], 900, 900, g2)
 	q2.changed("w1:p1", herdr.StatusUnknown, "")
 	q2.changed("w1:p1", herdr.StatusDone, "")
 	if len(q2.quiet) != 0 {
@@ -331,7 +337,7 @@ func TestSeenLookHoldsTillItsLogSays(t *testing.T) {
 			if c.wrote != 0 {
 				w = k.At + c.wrote
 			}
-			q.checked("w1:p1", a["w1:p1"], w, g)
+			q.checked("w1:p1", a["w1:p1"], w, w, g)
 		}
 		if got := status(q, "term_a#7"); got != c.want {
 			t.Errorf("looked at, %s: %s, want %s", c.name, got, c.want)
@@ -353,7 +359,7 @@ func TestSeenLookHoldsTillItsLogSays(t *testing.T) {
 			if c.wrote != 0 {
 				w = 1000 + c.wrote
 			}
-			q.checked("w1:p1", a["w1:p1"], w, g)
+			q.checked("w1:p1", a["w1:p1"], w, w, g)
 		}
 		if got := status(q, "term_b#11"); got != c.want {
 			t.Errorf("kept, %s: %s, want %s", c.name, got, c.want)
@@ -376,9 +382,9 @@ func TestSeenLookHoldsTillItsLogSays(t *testing.T) {
 	}
 }
 
-// A look whose state changed while it was kept is of before; and a read
-// of the log that finds it written since overrules a look kept from
-// before, told by an older read.
+// A read of the log that finds it written since overrules a look kept
+// from before, told by an older read; one in the second it was looked at
+// (a clock in seconds) neither tells it looked at nor overrules it.
 func TestSeenLookRaces(t *testing.T) {
 	sum := func(q *seenRounds, mark string) herdrSummary {
 		s := seenSum(herdr.StatusDone, "")
@@ -387,18 +393,6 @@ func TestSeenLookRaces(t *testing.T) {
 		return s
 	}
 	var q *seenRounds
-	q = newSeenRounds(nil, func(string, store.AgentSeen) error {
-		sum(q, "term_a#7") // (a turn begun and ended while the look is kept)
-		return nil
-	})
-	q.changed("w1:p1", herdr.StatusDone, "")
-	s := sum(q, "term_a#5")
-	if marked(q, "w1:p1", s.Workspaces[0].Agents[0].Round, "") {
-		t.Fatal("a look of before taken")
-	}
-	if got := q.withSeen(sum(q, "term_a#7")).Workspaces[0].Agents[0].Status; got != herdr.StatusDone {
-		t.Fatalf("after: %s", got)
-	}
 	// Kept from before, of another terminal: the first look (an older
 	// read) says not written since; a read for its round says written.
 	q = newSeenRounds(map[string]store.AgentSeen{"w1:p1": {At: 1000, Mark: "term_a#5"}}, nil)
@@ -406,8 +400,25 @@ func TestSeenLookRaces(t *testing.T) {
 	q.lookedOver(map[string]int64{"w1:p1": 900}, lg)
 	sum(q, "term_b#9")
 	a, g := q.toCheck()
-	q.checked("w1:p1", a["w1:p1"], 2000, g)
+	q.checked("w1:p1", a["w1:p1"], 2000, 2000, g)
 	if got := q.withSeen(sum(q, "term_b#9")).Workspaces[0].Agents[0].Status; got != herdr.StatusDone {
 		t.Fatalf("written since, by a later read: %s", got)
+	}
+	for _, c := range []struct {
+		lo, hi int64
+		want   string
+	}{
+		{500, 1499, herdr.StatusIdle}, // (as the first look said: not overruled, not told)
+		{0, 0, herdr.StatusIdle},
+	} {
+		q = newSeenRounds(map[string]store.AgentSeen{"w1:p1": {At: 1000, Mark: "term_a#5"}}, nil)
+		_, lg = q.wantsLook()
+		q.lookedOver(map[string]int64{"w1:p1": 900}, lg)
+		sum(q, "term_b#9")
+		a, g = q.toCheck()
+		q.checked("w1:p1", a["w1:p1"], c.lo, c.hi, g)
+		if got := q.withSeen(sum(q, "term_b#9")).Workspaces[0].Agents[0].Status; got != c.want || len(q.quiet) != 0 {
+			t.Errorf("read %d..%d: %s, quiet %v", c.lo, c.hi, got, q.quiet)
+		}
 	}
 }
