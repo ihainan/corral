@@ -50,7 +50,8 @@ const runStyle = (r: AnsiRun): React.CSSProperties => {
 // live: the terminal as it is, where the page cannot make out what is up there
 // or was refused a message: closed here without a key, the whole terminal a tap
 // away (words, which keys one by one cannot be, go there).
-export type PanelLive = { onClose?: () => void; onFull?: () => void; note?: string }
+// (letters: a letter, as Enter or a number, only on the screen shown — Codex's approvals answer to "y", "p".)
+export type PanelLive = { onClose?: () => void; onFull?: () => void; note?: string; letters?: boolean }
 export function PanelWindow({ sid, active, press, onSettled, toast, live }: { live?: PanelLive; sid: string; active: boolean; press: () => Record<string, unknown>; onSettled: () => void; toast: (s: string, bad?: boolean) => void }) {
   const [screen, setScreen] = useState({ text: '', digest: '' })
   const [lost, setLost] = useState(false)
@@ -58,6 +59,9 @@ export function PanelWindow({ sid, active, press, onSettled, toast, live }: { li
   const box = useRef<HTMLPreElement>(null)
   const at = useRef({ shown: '', stale: true, reading: false, pumping: false, queue: [] as Pressed[], fails: 0, escDone: 0, escGoing: false, alive: true, look: null as AbortController | null })
   const isLive = useRef(!!live)
+  const letters = useRef(!!live?.letters)
+  letters.current = !!live?.letters
+  const settlesHere = (k: string) => settles(k) || (letters.current && /^[A-Za-z0-9._/]$/.test(k))
   isLive.current = !!live
   const activeNow = useRef(active)
   activeNow.current = active
@@ -113,7 +117,7 @@ export function PanelWindow({ sid, active, press, onSettled, toast, live }: { li
         try {
           // (What the key left comes back with it: another round trip for it would be
           // most of what a key takes on a far-off host.)
-          const r = await api<{ text?: string; digest?: string; look?: string }>('POST', `/api/sessions/${sid}/conversation/panel`, { ...pressNow.current(), keys: [k], ...(settles(k) ? { digest } : {}), ...(isLive.current ? { live: true } : {}) }, { timeoutMs: 15000 })
+          const r = await api<{ text?: string; digest?: string; look?: string }>('POST', `/api/sessions/${sid}/conversation/panel`, { ...pressNow.current(), keys: [k], ...(settlesHere(k) ? { digest } : {}), ...(isLive.current ? { live: true } : {}) }, { timeoutMs: 15000 })
           a.stale = true
           if (a.alive) setSaid('')
           if (a.alive && typeof r?.text === 'string' && typeof r.digest === 'string') {
@@ -121,7 +125,7 @@ export function PanelWindow({ sid, active, press, onSettled, toast, live }: { li
             setLost(false)
             setScreen({ text: r.text, digest: (isLive.current ? r.look : r.digest) ?? r.digest })
           }
-          if (k === 'esc' || settles(k)) setTimeout(() => onSettledNow.current(), 700)
+          if (k === 'esc' || settlesHere(k)) setTimeout(() => onSettledNow.current(), 700)
         } catch (e) {
           a.queue.length = 0 // (what was pressed after it was meant for what this would have shown)
           a.stale = true
@@ -144,7 +148,7 @@ export function PanelWindow({ sid, active, press, onSettled, toast, live }: { li
     (k: string) => {
       const a = at.current
       if (k === 'esc' && (a.escGoing || a.queue.some((x) => x.k === 'esc'))) return
-      if (settles(k) && !a.shown) return // (nothing on show yet)
+      if (settlesHere(k) && !a.shown) return // (nothing on show yet)
       if (a.queue.length >= QUEUE) return
       a.queue.push({ k, digest: a.shown })
       a.look?.abort() // (a look under way would hold it up behind it)

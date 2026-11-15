@@ -4206,7 +4206,16 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		if b.Live {
 			gate = "look" // (the terminal shown as it is, whatever is up there: see convo_panel.go)
 		}
-		if panelSettles(b.Keys[0]) {
+		// (Codex's terminal: a letter too — its approvals answer to "y", "p":
+		// only on the screen shown — review p4b.)
+		codexLetter := front.agent == "codex" && b.Live && panelLetter.MatchString(b.Keys[0])
+		if codexLetter && !hexDigest.MatchString(b.Digest) {
+			ended.Done()
+			reason = "bad_request"
+			writeError(w, http.StatusBadRequest, "bad_request", "a key to Codex's terminal goes with the screen it was pressed on")
+			return
+		}
+		if panelSettles(b.Keys[0]) || codexLetter {
 			gate += ":" + b.Digest
 		}
 	}
