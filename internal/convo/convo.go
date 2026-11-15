@@ -435,6 +435,9 @@ type Meta struct {
 	// whose log has only what came after it: what came before is in the
 	// other's.
 	Forked bool `json:"forked,omitempty"`
+	// HistoryPartial: the active Codex rollout starts after a rewind; the
+	// retained earlier context is not present in this file.
+	HistoryPartial bool `json:"history_partial,omitempty"`
 }
 
 // Quota is a subscription's use of its 5-hour and weekly windows, of the

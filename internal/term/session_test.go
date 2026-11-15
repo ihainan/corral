@@ -111,3 +111,46 @@ func TestFailedResizeIsRetried(t *testing.T) {
 		t.Fatal("a size the host already has was sent again")
 	}
 }
+
+// Held roomy for a read: the host is larger for the while, the size the
+// viewers set is what it was; one set meanwhile, and a redraw, do not
+// shrink it under the read, and the host ends at the size set last.
+func TestRoomyHoldsAndPutsBack(t *testing.T) {
+	p := &fakePTY{size: [2]int{47, 34}}
+	s := sizedSession(p)
+	s.cols, s.rows, s.ptySize = 47, 34, [2]int{47, 34}
+	back, ok := s.Roomy(160, 50)
+	if size, _ := p.get(); !ok || size != [2]int{160, 50} {
+		t.Fatalf("held: ok=%v host=%v", ok, size)
+	}
+	if c, r := s.Size(); c != 47 || r != 34 {
+		t.Errorf("the viewers' size changed: %dx%d", c, r)
+	}
+	if _, again := s.Roomy(160, 50); again {
+		t.Error("held twice")
+	}
+	_ = s.Resize(50, 30) // (a viewer's, meanwhile)
+	s.Redraw()
+	if size, _ := p.get(); size != [2]int{160, 50} {
+		t.Errorf("shrunk under the read: %v", size)
+	}
+	back()
+	back()
+	if size, _ := p.get(); size != [2]int{50, 30} {
+		t.Errorf("put back at %v, not the size set last", size)
+	}
+	_ = s.Resize(60, 20)
+	if size, _ := p.get(); size != [2]int{60, 20} {
+		t.Errorf("after it, a size is sent as before: %v", size)
+	}
+	// Large already: nothing done. Taller only where it is short.
+	if _, ok := s.Roomy(60, 20); ok {
+		t.Error("held though large enough")
+	}
+	_ = s.Resize(200, 20)
+	back, _ = s.Roomy(160, 50)
+	if size, _ := p.get(); size != [2]int{200, 50} {
+		t.Errorf("a wide, short terminal held at %v", size)
+	}
+	back()
+}

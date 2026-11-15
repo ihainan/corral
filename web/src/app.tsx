@@ -11,6 +11,7 @@ import { BrandMark, ToastProvider, useToast } from './components/ui'
 import { disablePush, syncPush } from './push'
 import { LoginPage, NewPasswordPage, SetupPage, InvitePage } from './pages/Auth'
 import { AgentsChat } from './pages/AgentsChat'
+import { CodexChat } from './pages/CodexChat'
 import { HostsPage } from './pages/Hosts'
 import { HostEditPage } from './pages/HostEdit'
 import { KeysPage } from './pages/Keys'
@@ -203,6 +204,9 @@ function route(path: string, boot: Bootstrap, me: Me | null, tabs: boolean): Rea
   if (path === '/recordings') return <Shell active="recordings"><RecordingsPage /></Shell>
   // (With tabs, a tab of its own: the terminals stay open behind it.)
   if (path === '/agents') return tabs ? <TerminalTabs current="agents" /> : <AgentsChat />
+  if (path === '/codex') return <CodexChat />
+  if ((m = match('/codex/:connection/:thread', path))) return <CodexChat connection={m.connection} thread={m.thread} />
+  if ((m = match('/codex/:connection', path))) return <CodexChat connection={m.connection} />
   if (path === '/' || path === '/hosts') return <Shell active="hosts"><HostsPage /></Shell>
   if (path === '/hosts/new') return <Shell active="hosts"><HostEditPage /></Shell>
   if ((m = match('/hosts/:id/edit', path))) return <Shell active="hosts"><HostEditPage id={Number(m.id)} /></Shell>

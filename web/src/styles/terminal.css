@@ -3,6 +3,55 @@
    terminal (top bar, key bar, composer) shares the terminal's colours, so the
    whole screen reads as one surface. */
 
+.native-page { position: fixed; top: var(--vv-top, 0px); left: 0; right: 0; height: var(--vv-h, 100dvh); display: flex; flex-direction: column; background: var(--term-bg); color: var(--term-fg); }
+.native-header { flex: none; display: flex; align-items: center; gap: 8px; padding: 8px 16px; border-bottom: 1px solid var(--term-line); }
+.native-header h1 { margin: 0; font-size: var(--fs-head); line-height: var(--lh-head); }
+.native-header select { flex: 1; max-width: 320px; min-width: 0; }
+.native-page select, .native-page input, .native-page textarea { color: inherit; background: var(--term-bg); border: 1px solid var(--term-line-strong); border-radius: var(--r); padding: 8px; font: inherit; min-width: 0; }
+.native-page .hint { color: var(--term-fg-3); }
+.native-layout { display: grid; grid-template-columns: 260px minmax(0, 1fr); flex: 1; min-height: 0; }
+.native-list { overflow-y: auto; padding: 12px 8px; border-right: 1px solid var(--term-line); }
+.native-list-item { display: flex; flex-direction: column; gap: 4px; width: 100%; text-align: left; border: 0; border-radius: var(--r); color: inherit; background: none; padding: 12px; cursor: pointer; }
+.native-list-item:hover, .native-list-item.is-current { background: var(--term-hover); }
+.native-list-item strong, .native-list-item small { max-width: 100%; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.native-list-item small { color: var(--term-fg-3); font-size: var(--fs-note); line-height: var(--lh-note); }
+.native-chat { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+.native-thread-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 20px; border-bottom: 1px solid var(--term-line); }
+.native-thread-bar > strong { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.native-thread-bar select { max-width: 180px; font-size: var(--fs-sub); line-height: var(--lh-sub); }
+.native-messages { flex: 1; min-height: 0; overflow: auto; padding: 24px max(20px, calc((100% - 760px) / 2)); overflow-wrap: anywhere; }
+.native-answer { margin: 24px 0; font-size: var(--fs-body); line-height: var(--lh-body); }
+.native-user { margin: 24px 0 24px auto; padding: 12px 16px; max-width: 88%; width: fit-content; border-radius: var(--r-xl); background: var(--term-hover); white-space: pre-wrap; font-size: var(--fs-body); line-height: var(--lh-body); }
+.native-steps { margin: 16px 0; color: var(--term-fg-2); font-size: var(--fs-sub); line-height: var(--lh-sub); }
+.native-steps > summary { padding: 8px 0; cursor: pointer; }
+.native-tool, .native-thought { margin: 8px 0; padding: 8px 12px; background: var(--term-chrome); border-radius: var(--r); }
+.native-tool > summary, .native-thought > summary { cursor: pointer; overflow-wrap: anywhere; }
+.native-tool pre, .native-request pre { overflow: auto; max-height: 360px; white-space: pre-wrap; font-family: var(--font-mono); font-size: var(--fs-sub); line-height: var(--lh-sub); }
+.native-composer { flex: none; margin: 0 auto; width: min(100%, 800px); padding: 12px 20px max(12px, env(safe-area-inset-bottom)); }
+.native-composer textarea { display: block; width: 100%; resize: vertical; min-height: 80px; max-height: 220px; font-size: var(--fs-body); line-height: var(--lh-body); }
+.native-composer-actions, .native-attachments, .native-request-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding-top: 8px; }
+.native-composer-actions > .hint { flex: 1; font-size: var(--fs-note); line-height: var(--lh-note); }
+.native-attachments button { display: flex; align-items: center; gap: 4px; padding: 4px 8px; background: var(--term-hover); color: inherit; border: 0; border-radius: var(--r); }
+.native-connect, .native-create { padding: 12px 20px; display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
+.native-connect p { flex: 1; margin: 0; color: var(--term-fg-2); }
+.native-create label { display: flex; align-items: center; flex: 1; gap: 12px; }
+.native-create input { flex: 1; }
+.native-error { color: var(--term-danger-text); margin: 0; padding: 12px 20px; background: var(--term-chrome); }
+.native-request { margin: 16px 0; padding: 16px; border: 1px solid var(--term-line-strong); border-radius: var(--r-lg); }
+.native-request label { display: flex; flex-direction: column; gap: 8px; padding-bottom: 12px; }
+.native-request small { white-space: pre-wrap; color: var(--term-fg-2); }
+@media (max-width: 699.98px) {
+  .native-layout { grid-template-columns: minmax(0, 1fr); }
+  .native-layout.has-thread .native-list { display: none; }
+  .native-layout:not(.has-thread) .native-chat { display: none; }
+  .native-thread-bar { padding: 8px 12px; }
+  .native-thread-bar > strong { flex-basis: 100%; }
+  .native-header { padding: 8px; }
+  .native-messages { padding: 16px; }
+  .native-composer { padding: 8px 12px max(12px, env(safe-area-inset-bottom)); }
+  .native-composer textarea { font-size: var(--fs-input-touch); line-height: var(--lh-body); }
+}
+
 html.term-mode, html.term-mode body { overflow: hidden; overscroll-behavior: none; }
 html.term-mode body { position: fixed; inset: 0; }
 
@@ -753,7 +802,7 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-step-obj.is-code { font-family: var(--font-mono); font-size: 13px; }
 .convo-work-text.is-live { display: flex; align-items: baseline; gap: 8px; min-width: 0; color: var(--term-fg-2); }
 .convo-step-body, .convo-thinking { padding: 4px 0 10px; }
-.convo-thinking { white-space: pre-wrap; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg-2); }
+.convo-thinking { white-space: normal; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg-2); }
 /* What the agent wrote between its steps: as its answer is. */
 .convo-mid { margin: 0; }
 /* (What it says on the way, a step quieter than the answer it ends with: C04/A04) */

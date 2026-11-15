@@ -39,16 +39,17 @@ type Codex struct {
 	// itemCmds: it tells of each command on its own in this conversation,
 	// so the lines of the calls that run them are not shown (they would be
 	// the same commands again).
-	itemCmds bool
-	orphans  map[string]codexOut
-	meta     Meta
-	title    string // (its first message: Codex names no session)
-	working  bool
-	known    bool // (a row said whether it works)
-	trimmed  bool
-	ctxSaid  bool
-	errSaid  bool // (an older Codex's error row said what went wrong with this turn)
-	Skipped  int
+	itemCmds   bool
+	orphans    map[string]codexOut
+	meta       Meta
+	title      string // (its first message: Codex names no session)
+	working    bool
+	known      bool // (a row said whether it works)
+	trimmed    bool
+	ctxSaid    bool
+	effortSaid bool // an effective setting, including the default (null), was read
+	errSaid    bool // (an older Codex's error row said what went wrong with this turn)
+	Skipped    int
 	// Turns, to tell what a backtrack takes back: the first entry of each
 	// turn not taken back (a turn starts at task_started; its first entry is
 	// the person's message), the latest last. turnOpen: a turn has started
@@ -463,6 +464,9 @@ func (c *Codex) Prepend(other Parser) {
 	if c.meta.Mode == "" {
 		c.meta.Mode = o.meta.Mode
 	}
+	if !c.effortSaid {
+		c.meta.Effort, c.effortSaid = o.meta.Effort, o.effortSaid
+	}
 	if c.meta.Branch == "" {
 		c.meta.Branch = o.meta.Branch
 	}
@@ -673,11 +677,13 @@ type codexPayload struct {
 	Error      json.RawMessage `json:"error"`     // (task_complete)
 	NumTurns   int             `json:"num_turns"` // (thread_rolled_back)
 	// turn_context, thread_settings_applied
-	Model          string `json:"model"`
-	ApprovalPolicy string `json:"approval_policy"`
+	Model          string          `json:"model"`
+	ApprovalPolicy string          `json:"approval_policy"`
+	Effort         json.RawMessage `json:"effort"`
 	Settings       *struct {
-		Model          string `json:"model"`
-		ApprovalPolicy string `json:"approval_policy"`
+		Model          string          `json:"model"`
+		ApprovalPolicy string          `json:"approval_policy"`
+		Effort         json.RawMessage `json:"reasoning_effort"`
 	} `json:"thread_settings"`
 	Git *struct {
 		Branch string `json:"branch"`
@@ -722,7 +728,7 @@ func (c *Codex) line(b []byte) {
 			c.meta.Forked = true
 		}
 	case "turn_context":
-		c.settings(p.Model, p.ApprovalPolicy)
+		c.settings(p.Model, p.ApprovalPolicy, p.Effort)
 	case "compacted":
 		if t := strings.TrimSpace(p.Message); t != "" {
 			c.add(&r, p.ID, RoleSummary, []Part{textPart(KindText, t)})
@@ -737,7 +743,14 @@ func (c *Codex) line(b []byte) {
 	}
 }
 
-func (c *Codex) settings(model, policy string) {
+func (c *Codex) settings(model, policy string, effort json.RawMessage) {
+	// A null effort means the model's default, not an older explicit level.
+	// A different model without an effort also cannot inherit the old one's.
+	if len(effort) > 0 || (model != "" && model != c.meta.Model) {
+		var level string
+		_ = json.Unmarshal(effort, &level)
+		c.meta.Effort, c.effortSaid = clip(strings.TrimSpace(level), maxMeta), true
+	}
 	if m := strings.TrimSpace(model); m != "" {
 		c.meta.Model = clip(m, maxMeta)
 	}
@@ -770,7 +783,7 @@ func (c *Codex) event(r *codexRow, p *codexPayload) {
 		}
 	case "thread_settings_applied":
 		if p.Settings != nil {
-			c.settings(p.Settings.Model, p.Settings.ApprovalPolicy)
+			c.settings(p.Settings.Model, p.Settings.ApprovalPolicy, p.Settings.Effort)
 		}
 	case "token_count":
 		if p.Info != nil && p.Info.Last != nil && p.Info.Last.Input > 0 {
@@ -934,7 +947,21 @@ func (c *Codex) userSaid(r *codexRow, id string, parts []Part) {
 	if len(parts) == 0 {
 		return
 	}
-	if c.title == "" {
+	internalReply := false
+	for i := range parts {
+		if parts[i].Kind != KindText {
+			continue
+		}
+		if ev := codexTaskNotice(parts[i].Text); ev != nil {
+			c.add(r, id, RoleNote, []Part{{Kind: KindEvent, Event: ev}})
+			return
+		}
+		if text, ok := codexReplyText(parts[i].Text); ok {
+			parts[i].Text = text
+			internalReply = true
+		}
+	}
+	if c.title == "" && !internalReply {
 		for _, pt := range parts {
 			if pt.Kind == KindText {
 				c.title = codexTitle(pt.Text)
@@ -1236,7 +1263,7 @@ func (c *Codex) item(r *codexRow, p *codexPayload) {
 		var parts []Part
 		for _, b := range codexContent(p.Content) {
 			if t := strings.TrimSpace(b.Text); t != "" {
-				parts = append(parts, textPart(KindText, b.Text))
+				parts = append(parts, codexDisplayParts(b.Text)...)
 			}
 		}
 		c.add(r, p.ID, RoleAssistant, parts)
@@ -1861,7 +1888,11 @@ func (c *Codex) add(r *codexRow, id, role string, parts []Part) {
 		c.turnOpen = false
 		c.turns = append(c.turns, c.entries[len(c.entries)-1])
 		if n := len(c.turns) - maxTurns; n > 0 {
-			c.turns = append([]*Entry(nil), c.turns[n:]...)
+			// Drop the oldest starts without copying all maxTurns pointers
+			// for every later turn. Clear them so the backing array does not
+			// retain entries no longer kept by the parser.
+			clear(c.turns[:n])
+			c.turns = c.turns[n:]
 		}
 	}
 }

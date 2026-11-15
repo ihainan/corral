@@ -171,6 +171,7 @@ type Session struct {
 	// up at the size recorded last. Taken before mu, never while holding it.
 	sizeMu  sync.Mutex
 	ptySize [2]int                     // cols, rows the host was last sent; under sizeMu
+	roomy   [2]int                     // the size held by Roomy, or zero; under sizeMu
 	winch   func(rows, cols int) error // sends a size to the host (ssh.Session.WindowChange)
 
 	mu        sync.Mutex
@@ -658,10 +659,55 @@ func (s *Session) ResizeFrom(from *Sub, seq int64, take bool, cols, rows int) er
 	}
 	// Compared with what the host was sent, not with what was recorded: a
 	// size whose sending failed is sent again when it is reported again.
-	if !running || s.ptySize == [2]int{cols, rows} {
+	// (Held larger for a while: recorded, and sent once that is over.)
+	if !running || s.roomy != ([2]int{}) || s.ptySize == [2]int{cols, rows} {
 		return nil
 	}
 	return s.sendSize(cols, rows)
+}
+
+// Roomy has the host's terminal at least cols by rows for a while, the size
+// the viewers set and are told staying what it is: for a screen read off
+// the host that a narrow terminal breaks up (Claude Code's model picker on
+// a phone's 47 columns loses its keys line, and rows with it). back puts
+// the host at the viewers' size as it is by then — one set meanwhile is
+// recorded and only sent then. ok is false, and nothing was done, where it
+// is already that large, another holds it, or the size could not be sent.
+func (s *Session) Roomy(cols, rows int) (back func(), ok bool) {
+	s.sizeMu.Lock()
+	defer s.sizeMu.Unlock()
+	s.mu.Lock()
+	c, r, running := s.cols, s.rows, s.state == StateRunning
+	s.mu.Unlock()
+	if !running || s.roomy != ([2]int{}) || (c >= cols && r >= rows) {
+		return func() {}, false
+	}
+	want := [2]int{max(c, cols), max(r, rows)}
+	if err := s.sendSize(want[0], want[1]); err != nil {
+		return func() {}, false
+	}
+	s.roomy = want
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			s.sizeMu.Lock()
+			defer s.sizeMu.Unlock()
+			s.roomy = [2]int{}
+			s.mu.Lock()
+			c, r, running := s.cols, s.rows, s.state == StateRunning
+			s.mu.Unlock()
+			if running && s.ptySize != [2]int{c, r} {
+				_ = s.sendSize(c, r)
+			}
+		})
+	}, true
+}
+
+// Size is the terminal size the viewers set.
+func (s *Session) Size() (cols, rows int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cols, s.rows
 }
 
 // sendSize sends a size to the host; called with sizeMu held.
@@ -698,7 +744,7 @@ func (s *Session) Redraw() {
 	s.mu.Lock()
 	cols, rows, running := s.cols, s.rows, s.state == StateRunning
 	s.mu.Unlock()
-	if !running || cols < 3 {
+	if !running || cols < 3 || s.roomy != ([2]int{}) { // (held larger: not shrunk under what reads it)
 		return
 	}
 	_ = s.sendSize(cols-1, rows)

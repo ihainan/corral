@@ -9,6 +9,17 @@ jobs:
         with: { go-version-file: go.mod }
       - uses: actions/setup-node@v5
         with: { node-version: 22 }
+      - uses: actions/setup-python@v6
+        with: { python-version: '3.12' }
       - run: corepack enable # pnpm at the version in web/package.json
       - run: make check
+      - run: make codex-check
       - run: make build
+      - run: python3 -m pip install -r test/browser/requirements.txt
+      - run: python3 -m playwright install --with-deps chromium firefox webkit
+      - run: python3 -B scripts/codex_browser.py --output "$RUNNER_TEMP/codex-browser"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: codex-browser
+          path: ${{ runner.temp }}/codex-browser

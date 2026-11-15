@@ -1,0 +1,9 @@
+  >_ OpenAI Codex (v0.164.0)
+     ~/project
+
+• Model changed to gpt-6-sol high for this session only
+
+› Ask Codex to do anything
+
+  GPT-6-Sol high · ~/project
+  ? for shortcuts                                                                             ⚠ 1 warning · f2 to view

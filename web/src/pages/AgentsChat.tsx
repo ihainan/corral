@@ -589,6 +589,7 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
             <ChevronLeft size={20} />
           </button>
           <span className="agents-chat-title">{t('nav.agents')}</span>
+          <button type="button" className="btn btn-ghost" onClick={() => navigate('/codex')}>{t('native.open')}</button>
         </header>
       )}
       {/* (A list read before, not refreshed since: what it says may be past.) */}
@@ -1661,7 +1662,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       el.selectionStart = el.selectionEnd = s.length
     })
   }
-  const to = agent ? [agent.title, agent.where].filter((x) => x && x !== '~').join(' · ') : ''
+  const to = agent ? [agent.title?.trim().startsWith('<') ? '' : agent.title, agent.where].filter((x) => x && x !== '~').join(' · ') : ''
   // (A Codex at work takes a message into the turn under way, as its own
   // Enter does: it says so.)
   const steers = convo.bind?.agent === 'codex' && agent?.status === 'working'

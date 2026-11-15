@@ -2,6 +2,7 @@ import { createContext, Fragment, memo, useCallback, useContext, useEffect, useL
 import { ArrowDown, ArrowUp, Check, Copy, FolderOpen, Image as ImageIcon, ChevronDown, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, Clock, Download, Eye, GitBranch, Keyboard, ListOrdered, Loader, MoreHorizontal, MoreVertical, PanelLeft, Pin, Search, TriangleAlert, X, Plus } from 'lucide-react'
 import { t, getLang, type I18nKey } from '../i18n'
 import { api } from '../api'
+import { navigate } from '../router'
 import { asHeld, dayStart, FOLDED, foldAt, GROUPS, inGroup, listOrder, pinned, type ConvoListRow, type RowCmds } from './agentOrder'
 import { copyText, Dialog, isCoarse, Menu, MenuLayer, useToast, type MenuItem } from '../components/ui'
 import { saveFile } from '../saveFile'
@@ -1076,6 +1077,7 @@ export function ConversationView({
                   : t('convo.noAgent')}
         </p>
         <button type="button" className="btn btn-ghost" onClick={onShowTerminal}>{t('convo.showTerminal')}</button>
+        {(agent?.program === 'codex' || convo.bind?.agent === 'codex') && <button type="button" className="btn btn-primary" onClick={() => navigate(convo.of ? '/codex/' + convo.of.split(' ')[0] : '/codex')}>{t('native.open')}</button>}
         {convo.reason === 'no_log' && pending.length > 0 && <div className="convo-state-pending">{pendingList}</div>}
       </div>
     )
@@ -1108,7 +1110,7 @@ export function ConversationView({
         ) : (
           convo.entries.length > 0 && (
             <p className="convo-older" data-aside="">
-              {t(convo.meta?.forked ? 'convo.atFork' : 'convo.atStart')}
+              {t(convo.meta?.history_partial ? 'convo.afterRewind' : convo.meta?.forked ? 'convo.atFork' : 'convo.atStart')}
             </p>
           )
         )}
@@ -3994,7 +3996,7 @@ function Work({ it, open, onToggle, onCopy }: { it: Extract<Item, { kind: 'work'
         ) : (
           <span className={'convo-work-text' + (thought ? ' is-thought' : '')}>
             {head || sum}
-            {thought && <span className="convo-work-sum"> · {firstLine(thought.text ?? '')}</span>}
+            {thought && <span className="convo-work-sum"> · {thoughtTitle(thought.text ?? '')}</span>}
             {failed > 0 && (
               <>
                 {t('convo.sep')}
@@ -4004,7 +4006,7 @@ function Work({ it, open, onToggle, onCopy }: { it: Extract<Item, { kind: 'work'
           </span>
         )}
       </button>
-      {!open && lastThought && <p className="convo-work-said" title={lastThought.text}>{firstLine(lastThought.text ?? '')}</p>}
+      {!open && lastThought && <p className="convo-work-said" title={lastThought.text}>{thoughtTitle(lastThought.text ?? '')}</p>}
       {!open && sent.length > 0 && (
         <ul className="convo-work-sent">
           {sent.slice(0, SENT_SHOWN).map((tl, i) => (
@@ -4165,16 +4167,20 @@ function liveText(tool: ConvoTool): string {
 
 function Thinking({ text, live }: { text: string; live?: boolean }) {
   const [open, setOpen] = useState(false)
+  const title = thoughtTitle(text)
   if (live) return null // (said under the steps, as the step under way)
   return (
     <div className="convo-step is-thought">
       <button type="button" className="convo-step-head" aria-expanded={open} onClick={() => setOpen(!open)}>
-        <span className="convo-step-verb">{t('convo.thinking')}</span>
-        {!open && <span className="convo-step-obj">{firstLine(text)}</span>}
+        <span className="convo-step-obj">{title || t('convo.thinking')}</span>
       </button>
-      {open && <div className="convo-thinking">{text}</div>}
+      {open && <div className="convo-thinking"><Markdown text={text} /></div>}
     </div>
   )
+}
+
+export function thoughtTitle(text: string): string {
+  return firstLine(text).replace(/^\s*(?:Thinking\s*:?\s*)?/i, '').replace(/^#{1,6}\s+/, '').replace(/\*\*([^*]+)\*\*/g, '$1').replace(/`([^`]+)`/g, '$1').trim()
 }
 
 // Of a command that failed, its exit code (Claude Code's result begins so).

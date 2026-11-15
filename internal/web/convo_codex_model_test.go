@@ -10,15 +10,20 @@ import (
 )
 
 func cxScreen(t *testing.T, name string) string {
-	b, err := os.ReadFile(os.ExpandEnv("$HOME/tmp/corral-devtools/cxscreens/" + name + ".txt"))
+	t.Helper()
+	b, err := os.ReadFile("testdata/codex/" + name + ".txt")
 	if err != nil {
-		t.Skip("no screen sample " + name)
+		t.Fatal(err)
 	}
 	return string(b)
 }
 
-// Codex 0.164's picker, as a real one drew it (cxscreens/): its two steps.
+// Codex 0.164's picker, with paths removed: its two steps.
 func TestParseCodexPicker(t *testing.T) {
+	latest := parseCodexPicker(cxScreen(t, "model-0167"))
+	if !latest.ok || !latest.below || latest.options[0].Label != "GPT-6.1-Sol" {
+		t.Fatalf("0.167 viewport: %+v", latest)
+	}
 	m := parseCodexPicker(cxScreen(t, "model"))
 	c, _ := m.cursor()
 	if !m.ok || m.effort || len(m.options) != 8 || c.N != 3 || m.options[0].Label != "GPT-6.1-Sol" || !strings.HasPrefix(m.options[0].Desc, "Latest") {
@@ -66,6 +71,8 @@ type fakeCodexPicker struct {
 	wrap    bool // (its "Model changed…" wrapped, as in a narrow pane)
 	queue   bool // (keys taken in a read late, the screen as it was meanwhile — its digest too)
 	pending [][]string
+	page    int  // models visible at once, zero: the whole list
+	stuck   bool // a movement ignored by the terminal
 }
 
 var fakeModels = []string{"GPT-6.1-Sol", "GPT-6-Astra", "GPT-6-Sol", "GPT-6-Luna"}
@@ -92,12 +99,24 @@ func (f *fakeCodexPicker) screen() string {
 			list = fakeEfforts
 			b.WriteString("  Select Reasoning Level for " + f.of + "\n\n")
 		}
-		for i, l := range list {
+		first, end := 0, len(list)
+		if f.step == 1 && f.page > 0 {
+			first = f.at / f.page * f.page
+			end = min(first+f.page, len(list))
+			if first > 0 {
+				b.WriteString("↑\n")
+			}
+		}
+		for i := first; i < end; i++ {
+			l := list[i]
 			mark := " "
 			if i == f.at {
 				mark = "›"
 			}
 			fmt.Fprintf(&b, "%s %d. %-18s description %d\n", mark, i+1, l, i)
+		}
+		if end < len(list) {
+			b.WriteString("↓\n")
 		}
 		if f.step == 1 {
 			b.WriteString("\n  enter select · esc back\n")
@@ -160,9 +179,13 @@ func (f *fakeCodexPicker) run(keys []string, text string, read int) (string, err
 		}
 		switch {
 		case k == "down":
-			f.at++
+			if !f.stuck {
+				f.at++
+			}
 		case k == "up":
-			f.at--
+			if !f.stuck {
+				f.at--
+			}
 		case k == "esc":
 			f.step = 0
 		case k == "yes" && f.step == 1:
@@ -180,6 +203,26 @@ func (f *fakeCodexPicker) run(keys []string, text string, read int) (string, err
 		f.drawn++
 	}
 	return f.screen(), nil
+}
+
+func TestCodexModelFlowScrolled(t *testing.T) {
+	codexSettleGap = 0
+	f := &fakeCodexPicker{t: t, page: 2}
+	io := codexIO{f.look, f.press}
+	options, err := codexModelFlow(io, io, "", "")
+	if err != nil || len(options) != len(fakeModels) || f.step != 0 {
+		t.Fatalf("complete paged list: %+v, %v, step %d", options, err, f.step)
+	}
+	f = &fakeCodexPicker{t: t, page: 2}
+	io = codexIO{f.look, f.press}
+	if _, err := codexModelFlow(io, io, "GPT-6.1-Sol", "High"); err != nil || f.set != 1 {
+		t.Fatalf("switch back to an earlier page: %v, %+v", err, f)
+	}
+	f = &fakeCodexPicker{t: t, page: 2, stuck: true}
+	io = codexIO{f.look, f.press}
+	if options, err := codexModelFlow(io, io, "", ""); err == nil || len(options) != 0 || f.step != 0 {
+		t.Fatalf("ignored scroll returned a partial list: %+v, %v, step %d", options, err, f.step)
+	}
 }
 
 func TestCodexModelFlow(t *testing.T) {

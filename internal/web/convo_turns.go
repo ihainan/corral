@@ -3,6 +3,7 @@ package web
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"sync"
@@ -21,8 +22,9 @@ import (
 // head, or what was last read, another; the conversation's reading another)
 // gone through anew.
 //
-// Known limit: a message the agent later took back (a rewind) stays in the
-// list; gone to, it is not found among what the page shows, and that is said.
+// Codex's thread_rolled_back removes the messages of the turns taken back.
+// Claude's rewinds are not yet applied to this index: a message taken back
+// can stay in its list, and navigating to it says it is not found.
 
 // convoTurn: one message of the person's.
 type convoTurn struct {
@@ -34,17 +36,19 @@ type convoTurn struct {
 // turnIndex: what is known of a log's turns so far. sem: held by the one
 // asking that reads it (taken with a deadline, its asker's end honoured).
 type turnIndex struct {
-	sem      chan struct{}
-	refs     int // (under turnIndexes.mu) askings holding it, from get to put
-	log      string
-	agent    string
-	gen      int64  // the conversation's reading it is of
-	head     []byte // the log's first bytes, as read when it was begun
-	tail     []byte // the bytes just before scanned, as read then
-	scanned  int64  // read up to here (a line's start, or within a long line passed over)
-	skipping bool   // within a line too long to be the person's, passed over to its end
-	turns    []convoTurn
-	cut      bool // more turns than are kept: the first ones let go of
+	sem         chan struct{}
+	refs        int // (under turnIndexes.mu) askings holding it, from get to put
+	log         string
+	agent       string
+	gen         int64  // the conversation's reading it is of
+	head        []byte // the log's first bytes, as read when it was begun
+	tail        []byte // the bytes just before scanned, as read then
+	scanned     int64  // read up to here (a line's start, or within a long line passed over)
+	skipping    bool   // within a line too long to be the person's, passed over to its end
+	turns       []convoTurn
+	cut         bool  // more turns than are kept: the first ones let go of
+	codexStarts []int // indexes into turns, one per nonempty Codex task
+	codexOpen   bool  // a task started; its first user message has not arrived
 }
 
 const (
@@ -190,6 +194,9 @@ func (idx *turnIndex) scan(r turnReader, deadline time.Time) (more bool, size in
 		}
 		at := idx.scanned + int64(start)
 		for _, line := range bytes.SplitAfter(data[start:end+1], []byte{'\n'}) {
+			if idx.agent == "codex" {
+				idx.codexEvent(line)
+			}
 			if turnLine(idx.agent, line) {
 				if ts, text, ok := turnOf(idx.agent, bytes.TrimRight(line, "\n")); ok {
 					idx.add(convoTurn{At: at, Time: ts, Preview: preview(text)})
@@ -200,6 +207,40 @@ func (idx *turnIndex) scan(r turnReader, deadline time.Time) (more bool, size in
 		idx.advance(data, end+1)
 	}
 	return false, size, nil
+}
+
+// A task can contain several user messages (steering). Rolling it back
+// removes all of them, rather than just the last message in the index.
+func (idx *turnIndex) codexEvent(line []byte) {
+	if !bytes.Contains(line, []byte(`"task_started"`)) && !bytes.Contains(line, []byte(`"thread_rolled_back"`)) {
+		return
+	}
+	var event struct {
+		Type    string `json:"type"`
+		Payload struct {
+			Type     string `json:"type"`
+			NumTurns int    `json:"num_turns"`
+		} `json:"payload"`
+	}
+	if json.Unmarshal(line, &event) != nil || event.Type != "event_msg" {
+		return
+	}
+	switch event.Payload.Type {
+	case "task_started":
+		idx.codexOpen = true
+	case "thread_rolled_back":
+		if n := event.Payload.NumTurns; n > 0 {
+			from := max(0, len(idx.codexStarts)-n)
+			keep := 0
+			if from < len(idx.codexStarts) {
+				keep = idx.codexStarts[from]
+			}
+			clear(idx.turns[keep:])
+			idx.turns = idx.turns[:keep]
+			idx.codexStarts = idx.codexStarts[:from]
+			idx.codexOpen = false
+		}
+	}
 }
 
 // advance: read to n bytes into data (read at scanned); what is just before
@@ -219,8 +260,21 @@ func (idx *turnIndex) advance(data []byte, n int) {
 // add keeps the latest turnsKept, the first let go of in batches (not each
 // one as it comes: a copy of them all each time).
 func (idx *turnIndex) add(t convoTurn) {
+	if idx.agent == "codex" && (idx.codexOpen || len(idx.codexStarts) == 0) {
+		idx.codexStarts = append(idx.codexStarts, len(idx.turns))
+		idx.codexOpen = false
+	}
 	idx.turns = append(idx.turns, t)
 	if len(idx.turns) > turnsKept+turnsSlack {
+		drop := len(idx.turns) - turnsKept
+		var starts []int
+		for _, start := range idx.codexStarts {
+			at := max(0, start-drop)
+			if len(starts) == 0 || starts[len(starts)-1] != at {
+				starts = append(starts, at)
+			}
+		}
+		idx.codexStarts = starts
 		idx.turns = append(idx.turns[:0:0], idx.turns[len(idx.turns)-turnsKept:]...)
 		idx.cut = true
 	}
@@ -228,6 +282,7 @@ func (idx *turnIndex) add(t convoTurn) {
 
 func (idx *turnIndex) reset(log, agent string, gen int64) {
 	idx.log, idx.agent, idx.gen, idx.head, idx.tail, idx.scanned, idx.skipping, idx.turns, idx.cut = log, agent, gen, nil, nil, 0, false, nil, false
+	idx.codexStarts, idx.codexOpen = nil, false
 }
 
 // take: the index's sem, by the deadline or the asker's end; false: not got.

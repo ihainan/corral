@@ -83,6 +83,7 @@ type Server struct {
 	claudeLists  sessionLists // Claude Code's sessions of a folder, as last listed
 	histLocks    histLocks    // one reading of a session's input history at a time
 	convoScans   convoScans   // scans of a host's processes, shared by its panes for a moment
+	native       nativeCodex // Codex App Server connections, isolated by account and host
 	askHook      askHooks     // Claude Code's question hook in hosts' settings: changes under way, what was read (askhook.go)
 
 	sockMu   sync.Mutex
@@ -137,6 +138,7 @@ func New(d Deps) *Server {
 	s.auth.UseVault(d.Vault) // authenticator secrets are sealed like host credentials
 	prev := s.auth.OnUserGone
 	s.auth.OnUserGone = func(userID int64) {
+		s.native.close(userID)
 		if prev != nil {
 			prev(userID)
 		}
@@ -209,6 +211,12 @@ func (s *Server) registerRoutes() {
 	s.handle("DELETE /api/credentials/{id}", SignedIn, s.apiDeleteCredential)
 
 	s.handle("GET /api/sessions", SignedIn, s.apiListSessions)
+	s.handle("GET /api/sessions/{id}/codex/threads", SignedIn, s.apiCodexThreads)
+	s.handle("POST /api/sessions/{id}/codex/threads", SignedIn, s.apiCodexCommand)
+	s.handle("GET /api/sessions/{id}/codex/models", SignedIn, s.apiCodexModels)
+	s.handle("GET /api/sessions/{id}/codex/threads/{thread}", SignedIn, s.apiCodexThread)
+	s.handle("POST /api/sessions/{id}/codex/threads/{thread}", SignedIn, s.apiCodexCommand)
+	s.handle("GET /api/sessions/{id}/codex/threads/{thread}/events", SignedIn, s.apiCodexEvents)
 	s.handle("POST /api/sessions", SignedIn, s.apiOpenSession)
 	s.handle("DELETE /api/sessions/{id}", SignedIn, s.apiCloseSession)
 	s.handle("GET /api/sessions/{id}/ws", SignedIn, s.apiSessionSocket)
