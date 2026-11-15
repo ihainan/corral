@@ -3,8 +3,10 @@ package convo
 import (
 	"bytes"
 	"encoding/json"
+	"regexp"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // A command a code-mode script set going and left running: exec_command
@@ -107,16 +109,23 @@ func (c *Codex) procsGoing(r *codexRow, id string, sids []string) {
 		cmds = append(cmds, strings.Split(cm, "\n")...)
 	}
 	for _, sid := range sids {
-		if c.procs[sid] != nil || c.procsOver[sid] != nil {
-			continue // (going already; or its end told already)
+		if c.procs[sid] != nil || c.endedJustNow(sid, r.Timestamp) {
+			continue // (going already; or its end told already, just now — a session id
+			// comes again later for another process: that one is set going)
 		}
 		cmd := ""
 		if len(sids) == 1 && len(cmds) == 1 {
 			cmd = cmds[0]
 		}
-		step := clip("proc:"+sid, maxID)
-		if c.procs == nil || len(c.procs) >= maxRunning {
+		step := clip("proc:"+sid+"@"+r.Timestamp, maxID) // (its id again later is another process's)
+		if c.procs == nil {
 			c.procs = map[string]*codexProc{}
+		}
+		for k := range c.procs { // (full: one makes way, not all — else those kept are set going anew)
+			if len(c.procs) < maxRunning {
+				break
+			}
+			delete(c.procs, k)
 		}
 		p := &codexProc{id: step}
 		if c.itemCmds {
@@ -125,11 +134,7 @@ func (c *Codex) procsGoing(r *codexRow, id string, sids []string) {
 			c.mark(step, p.t)
 		}
 		c.procs[sid] = p
-		what := cmd
-		if what == "" {
-			what = "process " + sid
-		}
-		c.setGoing(step, "cmd", what, r.Timestamp)
+		c.setGoing(step, "cmd", cmd, r.Timestamp) // ("": the page says "a command in the background")
 	}
 }
 
@@ -169,10 +174,39 @@ func (c *Codex) procEnded(it *codexItem, out string, failed bool) bool {
 // overAt keeps that process sid has ended, told by step t (its own, or one
 // of its end's: see procOver).
 func (c *Codex) overAt(sid string, t *Tool) {
-	if c.procsOver == nil || len(c.procsOver) >= maxRunning {
+	if c.procsOver == nil {
 		c.procsOver = map[string]*Tool{}
 	}
+	for k := range c.procsOver {
+		if len(c.procsOver) < maxRunning {
+			break
+		}
+		delete(c.procsOver, k)
+	}
 	c.procsOver[sid] = t
+	if c.procsOverAt == nil || len(c.procsOverAt) > 2*maxRunning {
+		c.procsOverAt = map[string]string{}
+	}
+	c.procsOverAt[sid] = c.rowAt
+}
+
+// endedJustNow: process sid was told of as ended within a little while of
+// at (its end told before what the script gave back, in the same moment).
+func (c *Codex) endedJustNow(sid, at string) bool {
+	if c.procsOver[sid] == nil && !hasKey(c.procsOver, sid) {
+		return false
+	}
+	end, err1 := time.Parse(time.RFC3339Nano, c.procsOverAt[sid])
+	now, err2 := time.Parse(time.RFC3339Nano, at)
+	if err1 != nil || err2 != nil {
+		return true // (no time to tell by: as ended)
+	}
+	return now.Sub(end) < 2*time.Minute
+}
+
+func hasKey(m map[string]*Tool, k string) bool {
+	_, ok := m[k]
+	return ok
 }
 
 // procOver: process sid told of as ended (by step t, made of that end)
@@ -327,4 +361,116 @@ func (c *Codex) provTold(cmd string) {
 			}
 		}
 	}
+}
+
+// What a script polls, and what comes back of it: a process left running
+// is looked at again with write_stdin (its session); its script yields
+// ("Script running with cell ID …") and what it gave back comes with a
+// wait on that cell, later. A process that has ended comes back with its
+// exit code and no session: no word of it ending is told otherwise, at
+// times (11-15, the person's own logs: no CommandExecution of it).
+
+var (
+	stdinOf  = regexp.MustCompile(`write_stdin\(\s*\{\s*session_id\s*:\s*"?(\d{1,10})`)
+	cellIDOf = regexp.MustCompile(`Script running with cell ID ([\w-]{1,64})`)
+)
+
+// scriptPolls notes the sessions call id's script looks at again.
+func (c *Codex) scriptPolls(id, script string) {
+	var sids []string
+	for _, m := range stdinOf.FindAllStringSubmatch(script, maxRunning) {
+		sids = append(sids, m[1])
+	}
+	if id == "" || len(sids) == 0 {
+		return
+	}
+	if c.polls == nil || len(c.polls) >= maxScriptCalls {
+		c.polls = map[string][]string{}
+	}
+	c.polls[id] = sids
+}
+
+// cellOf / waitFor: a script that yielded (by its cell), a wait on a cell
+// (by the wait's call id): what comes back of the wait is the script's.
+func (c *Codex) scriptYielded(id string, raw json.RawMessage) {
+	text := rawOutput(raw)
+	if m := cellIDOf.FindStringSubmatch(text); m != nil && id != "" {
+		if c.cells == nil || len(c.cells) >= maxScriptCalls {
+			c.cells = map[string]string{}
+		}
+		c.cells[m[1]] = id
+	}
+}
+
+func (c *Codex) waitOn(id, args string) {
+	var a struct {
+		Cell string `json:"cell_id"`
+	}
+	if json.Unmarshal([]byte(args), &a) != nil || a.Cell == "" || id == "" {
+		return
+	}
+	if c.waits == nil || len(c.waits) >= maxScriptCalls {
+		c.waits = map[string]string{}
+	}
+	c.waits[id] = a.Cell
+}
+
+// scriptOfWait: the script whose results the wait (call id) brings, "" none.
+func (c *Codex) scriptOfWait(id string) string {
+	if cell, ok := c.waits[id]; ok {
+		return c.cells[cell]
+	}
+	return ""
+}
+
+// procsPolled: what script (call id) gave back, its script done: the
+// processes it looked at again that do not come back as still running
+// have ended. (Only where it printed what came back — some chunk of an
+// exec_command's or write_stdin's: else no word either way.)
+func (c *Codex) procsPolled(script string, raw json.RawMessage, going []string) {
+	sids := c.polls[script]
+	if len(sids) == 0 {
+		return
+	}
+	text := rawOutput(raw) // (as Codex wrote it: codexResult takes its "Script completed" off)
+	if !strings.HasPrefix(strings.TrimSpace(text), "Script completed") || !strings.Contains(text, `{"chunk_id"`) {
+		return
+	}
+	still := map[string]bool{}
+	for _, sid := range going {
+		still[sid] = true
+	}
+	for _, sid := range sids {
+		p := c.procs[sid]
+		if p == nil || still[sid] {
+			continue
+		}
+		c.endRun(p.id)
+		delete(c.procs, sid)
+		if p.t != nil {
+			p.t.Done = true
+			c.touch([]*Tool{p.t})
+		}
+		c.overAt(sid, p.t)
+	}
+}
+
+// rawOutput: a call's output's words as they are, its blocks' joined (a
+// string as it is).
+func rawOutput(raw json.RawMessage) string {
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return s
+	}
+	var blocks []struct {
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(raw, &blocks) != nil {
+		return ""
+	}
+	var b strings.Builder
+	for _, x := range blocks {
+		b.WriteString(x.Text)
+	}
+	return b.String()
 }

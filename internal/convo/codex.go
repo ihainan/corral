@@ -91,6 +91,15 @@ type Codex struct {
 	// (it is in a part before, or comes after): by session id, the step
 	// that told it (codex_bg.go).
 	procsOver map[string]*Tool
+	// polls: the sessions a code-mode call's script looks at again (by call
+	// id); cells: a script that yielded, by its cell; waits: a wait's cell,
+	// by the wait's call id (codex_bg.go).
+	polls map[string][]string
+	rowAt string // the row being read's time
+	// procsOverAt: when each process in procsOver was told of as ended.
+	procsOverAt map[string]string
+	cells       map[string]string
+	waits       map[string]string
 	// provs: code-mode calls out whose commands are shown meanwhile, by
 	// call id: the entry that has them.
 	provs map[string]*Entry
@@ -751,6 +760,7 @@ func (c *Codex) line(b []byte) {
 	}
 	var p codexPayload
 	_ = json.Unmarshal(r.Payload, &p)
+	c.rowAt = r.Timestamp // (when what is told now was written: codex_bg.go)
 	switch r.Type {
 	case "session_meta":
 		if p.Git != nil && p.Git.Branch != "" {
@@ -1374,6 +1384,9 @@ func (c *Codex) item(r *codexRow, p *codexPayload) {
 		var plan []Task
 		if p.Type == "function_call" {
 			tools, plan = codexFn(p.Namespace, p.Name, p.Arguments)
+			if p.Name == "wait" {
+				c.waitOn(id, p.Arguments) // (on a script's cell: what comes back of it is that script's)
+			}
 		} else {
 			// (The code mode's script: what it runs is read out of it; each
 			// thing it does is told of on its own as well, in a newer
@@ -1385,6 +1398,7 @@ func (c *Codex) item(r *codexRow, p *codexPayload) {
 				}
 			}
 			c.scriptRan(id, tools)
+			c.scriptPolls(id, p.Input)
 		}
 		var parts []Part
 		room := maxParts
@@ -1448,6 +1462,23 @@ func (c *Codex) item(r *codexRow, p *codexPayload) {
 			delete(c.orphans, id)
 		}
 	case "custom_tool_call_output", "function_call_output":
+		// (What a script, or a wait on it, gave back: processes it left
+		// running, and those it looked at again that have ended — codex_bg.go.)
+		script := clip(p.CallID, maxID)
+		if p.Type == "custom_tool_call_output" {
+			c.scriptYielded(script, p.Output)
+		} else {
+			script = c.scriptOfWait(clip(p.CallID, maxID))
+		}
+		defer func() {
+			if script != "" {
+				going := codeModeGoing(p.Output)
+				if p.Type == "function_call_output" {
+					c.procsGoing(r, script, going)
+				}
+				c.procsPolled(script, p.Output, going)
+			}
+		}()
 		if c.provDone(clip(p.CallID, maxID)) {
 			// (Its lines were shown only while it was out: what it did is
 			// told of on its own; what it left running, as such.)

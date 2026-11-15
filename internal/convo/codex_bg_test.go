@@ -35,10 +35,10 @@ func entryOf(c *Codex, id string) (int, *Tool) {
 func TestCodexScriptLeftRunning(t *testing.T) {
 	// (Commands told of on their own already: a step of its own, in its turn.)
 	c := feedAll(bgItemBefore, bgUser, bgCall, bgOut, bgSaid, bgDone)
-	if got := runningIDs(c); got != "cmd:proc:37552:sleep 45; echo bg-done" {
+	if got := runningIDs(c); got != "cmd:proc:37552@2026-11-15T04:14:12.050Z:sleep 45; echo bg-done" {
 		t.Fatalf("still running: %q", got)
 	}
-	at, tl := entryOf(c, "proc:37552")
+	at, tl := entryOf(c, "proc:37552@2026-11-15T04:14:12.050Z")
 	if tl == nil || tl.Done || tl.Detail != "sleep 45; echo bg-done" {
 		t.Fatalf("its step, running: %+v", tl)
 	}
@@ -66,7 +66,7 @@ func TestCodexScriptLeftRunning(t *testing.T) {
 	// (None told of on its own yet: the script's line stands for it, the
 	// process in the running list till its end, which is told as any.)
 	c = feedAll(bgUser, bgCall, bgOut, bgSaid, bgDone)
-	if got := runningIDs(c); got != "cmd:proc:37552:sleep 45; echo bg-done" {
+	if got := runningIDs(c); got != "cmd:proc:37552@2026-11-15T04:14:12.050Z:sleep 45; echo bg-done" {
 		t.Fatalf("no items: still running: %q", got)
 	}
 	c.Feed([]byte(bgUser2 + bgEnded))
@@ -199,7 +199,7 @@ func TestCodexProcsReview(t *testing.T) {
 		if got := runningIDs(c); got != "" {
 			t.Errorf("2 %s: still running: %q", order, got)
 		}
-		at, tl := entryOf(c, "proc:37552")
+		at, tl := entryOf(c, "proc:37552@2026-11-15T04:14:12.050Z")
 		if tl == nil || !tl.Done || !strings.Contains(tl.Result, "bg-done") {
 			t.Errorf("2 %s: its step: %+v", order, tl)
 		}
@@ -213,12 +213,12 @@ func TestCodexProcsReview(t *testing.T) {
 	two := `{"timestamp":"2026-11-15T04:14:11.378Z","type":"response_item","payload":{"type":"custom_tool_call","status":"completed","call_id":"call_8","name":"exec","input":"text(await tools.exec_command({cmd:\"sleep 40\",yield_time_ms:500}));\ntext(await tools.exec_command({cmd:\"sleep 50\",yield_time_ms:500}))"}}` + "\n"
 	twoOut := `{"timestamp":"2026-11-15T04:14:12.050Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call_8","output":[{"type":"input_text","text":"{\"chunk_id\":\"a\",\"session_id\":41,\"output\":\"\"}{\"chunk_id\":\"b\",\"session_id\":42,\"output\":\"\"}"}]}}` + "\n"
 	c = feedAll(bgItemBefore, bgUser, two, twoOut)
-	var whats []string
+	var ids, whats []string
 	for _, r := range c.Running() {
-		whats = append(whats, r.What)
+		ids, whats = append(ids, r.ID), append(whats, r.What)
 	}
-	if len(whats) != 2 || whats[0] == whats[1] {
-		t.Errorf("3: %q", whats)
+	if len(ids) != 2 || ids[0] == ids[1] || whats[0] != "" || whats[1] != "" {
+		t.Errorf("3: %q %q (not named by a guess)", ids, whats)
 	}
 }
 
@@ -250,7 +250,7 @@ func TestCodexProcsAcrossParts(t *testing.T) {
 	// (Its output first in this part: its call read with the part before.)
 	c = feedAll(bgOut, bgSaid, bgDone)
 	c.Prepend(feedAll(bgItemBefore, bgUser, bgCall))
-	if got := runningIDs(c); got != "cmd:proc:37552:sleep 45; echo bg-done" {
+	if got := runningIDs(c); got != "cmd:proc:37552@2026-11-15T04:14:12.050Z:sleep 45; echo bg-done" {
 		t.Errorf("output before its call was read: running %q", got)
 	}
 }
@@ -272,7 +272,7 @@ func TestCodexProcsReview3(t *testing.T) {
 	// running still (its script's line gone with the rest), its end shown
 	// once, as any command's.
 	c := feedAll(bgUser, bgCall, bgOut, bgSaid, bgDone, bgUser2, bgItemBefore)
-	if got := runningIDs(c); got != "cmd:proc:37552:sleep 45; echo bg-done" {
+	if got := runningIDs(c); got != "cmd:proc:37552@2026-11-15T04:14:12.050Z:sleep 45; echo bg-done" {
 		t.Errorf("1: running %q", got)
 	}
 	c.Feed([]byte(bgEnded))
@@ -282,7 +282,7 @@ func TestCodexProcsReview3(t *testing.T) {
 	// 2. Its call hidden in the part before, its output in this one.
 	c = feedAll(bgOut, bgSaid, bgDone)
 	c.Prepend(feedAll(bgItemBefore, bgUser, bgCall))
-	if got := runningIDs(c); got != "cmd:proc:37552:sleep 45; echo bg-done" {
+	if got := runningIDs(c); got != "cmd:proc:37552@2026-11-15T04:14:12.050Z:sleep 45; echo bg-done" {
 		t.Errorf("2: running %q", got)
 	}
 	if n, done := count(c); n != 1 || done != 0 {
@@ -294,5 +294,28 @@ func TestCodexProcsReview3(t *testing.T) {
 	c.Prepend(feedAll(bgItemBefore, bgUser, bgCall, bgOut, bgSaid, bgDone))
 	if n, done := count(c); n != 1 || done != 1 || runningIDs(c) != "" {
 		t.Errorf("3: %d steps, %d done, running %q", n, done, runningIDs(c))
+	}
+}
+
+// Real use (11-15 replay): a process looked at again by a script that
+// yields, what it gave back coming with a wait on its cell; ended, it
+// comes back with no session — no CommandExecution of it.
+func TestCodexProcPolledEnded(t *testing.T) {
+	poll := `{"timestamp":"2026-11-15T04:15:00.000Z","type":"response_item","payload":{"type":"custom_tool_call","status":"completed","call_id":"call_q","name":"exec","input":"// @exec: {\"yield_time_ms\": 1000}\ntext(await tools.write_stdin({session_id:37552,chars:\"\",\"yield_time_ms\":40000}));"}}` + "\n"
+	pollOut := `{"timestamp":"2026-11-15T04:15:01.000Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call_q","output":[{"type":"input_text","text":"Script running with cell ID 7\nWall time 1.0 seconds\nOutput:\n"}]}}` + "\n"
+	wait := `{"timestamp":"2026-11-15T04:15:02.000Z","type":"response_item","payload":{"type":"function_call","name":"wait","call_id":"call_w","arguments":"{\"cell_id\":\"7\",\"yield_time_ms\":40000}"}}` + "\n"
+	waitRunning := `{"timestamp":"2026-11-15T04:15:42.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_w","output":[{"type":"input_text","text":"Script completed\nWall time 40 seconds\nOutput:\n"},{"type":"input_text","text":"{\"chunk_id\":\"a\",\"wall_time_seconds\":40.0,\"session_id\":37552,\"output\":\"\"}"}]}}` + "\n"
+	waitEnded := strings.Replace(waitRunning, `\"session_id\":37552,`, `\"exit_code\":0,`, 1)
+	c := feedAll(bgItemBefore, bgUser, bgCall, bgOut, bgSaid, bgDone, bgUser2, poll, pollOut, wait, waitRunning)
+	if got := runningIDs(c); got != "cmd:proc:37552@2026-11-15T04:14:12.050Z:sleep 45; echo bg-done" {
+		t.Fatalf("still running when the poll says so: %q", got)
+	}
+	t.Logf("ended row: %s", waitEnded)
+	c = feedAll(bgItemBefore, bgUser, bgCall, bgOut, bgSaid, bgDone, bgUser2, poll, pollOut, wait, waitEnded)
+	if got := runningIDs(c); got != "" {
+		t.Fatalf("ended, its poll saying so: %q", got)
+	}
+	if _, tl := entryOf(c, "proc:37552@2026-11-15T04:14:12.050Z"); tl == nil || !tl.Done {
+		t.Errorf("its step ended: %+v", tl)
 	}
 }
