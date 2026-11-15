@@ -27,21 +27,35 @@ export function useCompletion(p: {
   const [sel, setSel] = useState(0)
   const [dismissed, setDismissed] = useState<number | null>(null) // the token start Escape closed it at
 
+  // (What was read is of a session's pane: another pane — the conversation's
+  // own arriving after the focused one's — reads again at once, an answer of
+  // the last coming late taken for nothing: review, 11-15.)
+  const of = p.sessionId + ' ' + (p.pane ?? '')
+  const ofNow = useRef(of)
+  ofNow.current = of
+  useEffect(() => {
+    loadedAt.current = 0
+    loading.current = false
+    setData(null)
+  }, [of])
   const load = useCallback((fresh: number) => {
     if (loading.current || Date.now() - loadedAt.current < fresh) return
     loading.current = true
+    const asked = of
     api<Completions>('GET', `/api/sessions/${p.sessionId}/complete` + (p.pane ? '?pane=' + encodeURIComponent(p.pane) : ''), undefined, { timeoutMs: 20000 })
       .then((d) => {
+        if (asked !== ofNow.current) return
         loadedAt.current = Date.now()
         setData(d)
         setFailed(false)
       })
       .catch(() => {
+        if (asked !== ofNow.current) return
         loadedAt.current = Date.now() - FRESH_MS + 5000 // (tried again in a while)
         setFailed(true)
       })
-      .finally(() => (loading.current = false))
-  }, [p.sessionId, p.pane])
+      .finally(() => asked === ofNow.current && (loading.current = false))
+  }, [p.sessionId, p.pane, of])
 
   // The token at the caret, after each change of the text or the caret.
   const update = useCallback(() => {

@@ -136,6 +136,9 @@ const SIDE_W_MIN = 220
 const SIDE_W_MAX = 520
 // (The thread's own width the dock leaves it, beside it; less, the dock goes over it.)
 const DOCK_THREAD = 560
+// (The card's taps for the dock, numbered across the page's life: one taken is
+// known by its number in dock.tsx, which outlives this view — review, 11-15.)
+let dockTaps = 0
 const sideWidthMax = (view: number) => Math.min(SIDE_W_MAX, Math.floor(view / 2))
 const sideWidthOf = (w: number, view: number) => Math.max(SIDE_W_MIN, Math.min(Math.round(w), sideWidthMax(view)))
 const isTouchOnly = isCoarse()
@@ -1266,6 +1269,10 @@ export function ConversationView({
   const [dockW, setDockWState] = useState(() => dockKept().width)
   const [dockStart, setDockStart] = useState<{ against: ChangesAgainst; base?: string; n: number } | undefined>()
   const dockBtn = useRef<HTMLButtonElement>(null)
+  // (Another agent in the pane — its process or session: the card's last tap,
+  // its base the last one's repository's, is not this one's — review, 11-15.)
+  const bindIdent = convo.bind ? [convo.bind.pid, convo.bind.start, convo.bind.session].join(' ') : ''
+  useEffect(() => setDockStart(undefined), [convo.of, bindIdent])
   const setDockOpen = (v: boolean) => {
     setDockOpenState(v)
     keepDock({ open: v })
@@ -1725,7 +1732,7 @@ export function ConversationView({
               setChanges(null)
               setSubs(null)
               setBgCmd(null)
-              setDockStart((d) => ({ against, base, n: (d?.n ?? 0) + 1 }))
+              setDockStart({ against, base, n: ++dockTaps })
               setDockTab('changes')
               setDockOpen(true)
             },
@@ -1938,7 +1945,7 @@ export function ConversationView({
       {dockable && dockOpen && convo.of && convo.status === 'ready' && !(changes && shownEdits) && !subs?.length && !bgCmd && (
         <Dock
           of={convo.of}
-          ident={convo.bind ? [convo.bind.pid, convo.bind.start, convo.bind.session].join(' ') : ''}
+          ident={bindIdent}
           pane={convo.of.split(' ')[1] || convo.bind?.pane || ''}
           tab={dockTab}
           onTab={setDockTab}

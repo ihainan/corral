@@ -51,7 +51,8 @@ const runStyle = (r: AnsiRun): React.CSSProperties => {
 // or was refused a message: closed here without a key, the whole terminal a tap
 // away (words, which keys one by one cannot be, go there).
 // (letters: a letter, as Enter or a number, only on the screen shown — Codex's approvals answer to "y", "p".)
-export type PanelLive = { onClose?: () => void; onFull?: () => void; note?: string; letters?: boolean }
+// (onLeave: where F6 takes the focus from its screen — the dock's tabs; none: its own head's first button.)
+export type PanelLive = { onClose?: () => void; onFull?: () => void; note?: string; letters?: boolean; onLeave?: () => void }
 export function PanelWindow({ sid, active, press, onSettled, toast, live }: { live?: PanelLive; sid: string; active: boolean; press: () => Record<string, unknown>; onSettled: () => void; toast: (s: string, bad?: boolean) => void }) {
   const [screen, setScreen] = useState({ text: '', digest: '' })
   const [lost, setLost] = useState(false)
@@ -217,6 +218,7 @@ export function PanelWindow({ sid, active, press, onSettled, toast, live }: { li
         )}
       </div>
       {live?.note && <p className="convo-panelwin-note">{live.note}</p>}
+      {live && !isCoarse() && <p className="convo-panelwin-note">{t('panel.leaveKey')}</p>}
       {/* (Takes the keys: what is pressed here goes to the panel.) */}
       <pre
         ref={box}
@@ -228,6 +230,15 @@ export function PanelWindow({ sid, active, press, onSettled, toast, live }: { li
           pinned.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24
         }}
         onKeyDown={(e) => {
+          // (Its screen takes Tab and Esc for the terminal: F6, as between an app's
+          // panes, is the way out — never a key of the host's — review, 11-15.)
+          if (live && e.key === 'F6' && !e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
+            e.preventDefault()
+            e.stopPropagation()
+            if (live.onLeave) live.onLeave()
+            else e.currentTarget.parentElement?.querySelector<HTMLElement>('.convo-panelwin-head button')?.focus()
+            return
+          }
           const k = keyOf(e)
           if (!k) return
           e.preventDefault()
