@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"github.com/ihainan/corral/internal/term"
 	"regexp"
 	"slices"
 	"strconv"
@@ -285,7 +286,7 @@ for k in $kids; do
   n=$((n + 1))
   st=$(sed 's/^.*) //' "/proc/$k/stat" 2>/dev/null | cut -d' ' -f20)
   case $l in
-  codex:*) t=$(tr '\0\n\t' '   ' <"/proc/$k/cmdline" 2>/dev/null | sed -n 's/^[^ ]*sh -l\{0,1\}c //p' | head -c 400);;
+  codex:*) t=$(tr '\0\n\t' '   ' <"/proc/$k/cmdline" 2>/dev/null | sed 's/^[^ ]*sh -l\{0,1\}c //' | head -c 400);; # (a shell's command; else the program itself, run as it is)
   *) t=$(tr '\0\n\t' '   ' <"/proc/$k/cmdline" 2>/dev/null | awk -v "m=&& eval '" '` + cmdEvalAwk + `' | head -c 400);;
   esac
   printf 'cmd\t%s\t%s\t%s\t%s\n' "$k" "$st" "$(printf '%s' "$l" | tr '\t\n' '  ')" "$t"
@@ -381,4 +382,15 @@ func cmdTitle(s string) string {
 		return r
 	}, s)
 	return truncate(s, 80)
+}
+
+// cmdSession: what pane's agent's commands left running are found by — a
+// Claude Code's session (sid); a Codex's thread, only where the short look
+// tells it for sure (codexPaneLooks.threadOf): a thread told wrong would
+// show another conversation's commands as this one's.
+func (s *Server) cmdSession(sess *term.Session, pane, agent, title, sid string) string {
+	if isCodexAgent(agent) {
+		return s.codexPanes.threadOf(sess.ID, pane, title)
+	}
+	return sid
 }

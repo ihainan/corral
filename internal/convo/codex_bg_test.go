@@ -39,9 +39,6 @@ func TestCodexScriptLeftRunning(t *testing.T) {
 			t.Fatalf("before %t: still running: %q", before != "", got)
 		}
 		at, tl := entryOf(c, "proc:37552")
-		if before == "" {
-			at, tl = entryOf(c, "call_7_0")
-		}
 		if tl == nil || tl.Done || tl.Detail != "sleep 45; echo bg-done" {
 			t.Fatalf("before %t: its step, running: %+v", before != "", tl)
 		}
@@ -144,5 +141,66 @@ func TestCodexScriptShownWhileOut(t *testing.T) {
 		if strings.Contains(tl.Detail, "for i in") && !tl.Done {
 			t.Errorf("left running past its turn: %+v", tl)
 		}
+	}
+}
+
+// Review cxparity1: an end told before the script's output; a start in the
+// part before, its end in this one (either read first); a script of two
+// commands, each its own process.
+func TestCodexProcsReview(t *testing.T) {
+	steps := func(c *Codex, word string) (n, done int) {
+		for _, tl := range toolsOf(c) {
+			if strings.Contains(tl.Detail, word) {
+				n++
+				if tl.Done {
+					done++
+				}
+			}
+		}
+		return
+	}
+	// 1. Its end before what the script gave back: not set going again.
+	c := feedAll(bgItemBefore, bgUser, bgCall, bgEnded, bgOut)
+	if got := runningIDs(c); got != "" {
+		t.Errorf("1: ended first, still running: %q", got)
+	}
+	if n, done := steps(c, "sleep 45"); n != 1 || done != 1 {
+		t.Errorf("1: %d steps, %d done", n, done)
+	}
+	// 2. Its start in the part before.
+	older := feedAll(bgItemBefore, bgUser, bgCall, bgOut, bgSaid, bgDone)
+	for _, order := range []string{"prepend first", "end first"} {
+		var c *Codex
+		if order == "prepend first" {
+			c = feedAll(bgUser2)
+			c.Prepend(feedAll(bgItemBefore, bgUser, bgCall, bgOut, bgSaid, bgDone))
+			c.Feed([]byte(bgEnded))
+		} else {
+			c = feedAll(bgUser2, bgEnded)
+			c.Prepend(feedAll(bgItemBefore, bgUser, bgCall, bgOut, bgSaid, bgDone))
+		}
+		if got := runningIDs(c); got != "" {
+			t.Errorf("2 %s: still running: %q", order, got)
+		}
+		at, tl := entryOf(c, "proc:37552")
+		if tl == nil || !tl.Done || !strings.Contains(tl.Result, "bg-done") {
+			t.Errorf("2 %s: its step: %+v", order, tl)
+		}
+		if n, _ := steps(c, "sleep 45"); n != 1 {
+			t.Errorf("2 %s: told of %d times", order, n)
+		}
+		_ = at
+	}
+	_ = older
+	// 3. Two commands, two processes: each its own, by its end.
+	two := `{"timestamp":"2026-11-15T04:14:11.378Z","type":"response_item","payload":{"type":"custom_tool_call","status":"completed","call_id":"call_8","name":"exec","input":"text(await tools.exec_command({cmd:\"sleep 40\",yield_time_ms:500}));\ntext(await tools.exec_command({cmd:\"sleep 50\",yield_time_ms:500}))"}}` + "\n"
+	twoOut := `{"timestamp":"2026-11-15T04:14:12.050Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call_8","output":[{"type":"input_text","text":"{\"chunk_id\":\"a\",\"session_id\":41,\"output\":\"\"}{\"chunk_id\":\"b\",\"session_id\":42,\"output\":\"\"}"}]}}` + "\n"
+	c = feedAll(bgItemBefore, bgUser, two, twoOut)
+	var whats []string
+	for _, r := range c.Running() {
+		whats = append(whats, r.What)
+	}
+	if len(whats) != 2 || whats[0] == whats[1] {
+		t.Errorf("3: %q", whats)
 	}
 }

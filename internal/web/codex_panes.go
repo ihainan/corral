@@ -518,14 +518,17 @@ func (c *codexPaneLooks) run(ctx context.Context, sess *term.Session, socket, ta
 }
 
 // threadOf: the thread pane's Codex is at, as the last look that came back
-// found it — no look begun for it — where it tells it of one Codex there,
-// at a thread no other pane is at; "" otherwise. (For what is only shown —
+// found it (none begun for it), where it tells it for sure — the look
+// recent, one Codex there at a thread no other pane is at, that thread
+// named, its pane's title (title, herdr's) its name whole, no other live
+// conversation of its folder of that name, none unexplained in it (a thread
+// begun or resumed in it since); "" otherwise. (For what is only shown —
 // the commands it left running — not for where keys go.)
-func (c *codexPaneLooks) threadOf(sessID, pane string) string {
+func (c *codexPaneLooks) threadOf(sessID, pane, title string) string {
 	c.mu.Lock()
 	l := c.by[sessID]
 	c.mu.Unlock()
-	if l == nil {
+	if l == nil || time.Since(l.at) > 2*time.Minute {
 		return ""
 	}
 	select {
@@ -537,7 +540,10 @@ func (c *codexPaneLooks) threadOf(sessID, pane string) string {
 		return ""
 	}
 	x, ok := l.got[pane]
-	if !ok || x.Several || !convoUUID.MatchString(x.Thread) {
+	if !ok || x.Several || !convoUUID.MatchString(x.Thread) || x.Name == "" || x.SameName != 0 || x.Unexplained != 0 {
+		return ""
+	}
+	if thread, bare := codexTitleParts("codex", title, x.Cwd); bare || thread != x.Name {
 		return ""
 	}
 	for p, o := range l.got {

@@ -32,8 +32,17 @@ type codexRetry struct {
 // why); neither where its status line says other.
 func codexWorkNote(screen string) (compacting bool, retry *codexRetry) {
 	lines := strings.Split(strings.ReplaceAll(screen, "\r", ""), "\n")
+	// (Above its input box only — its last line beginning "›": what is in
+	// the box, typed or pasted, is no word of what it does.)
+	box := -1
 	for i := len(lines) - 1; i >= 0; i-- {
-		m := codexStatusLine.FindStringSubmatch(strings.TrimSpace(lines[i]))
+		if strings.HasPrefix(lines[i], "›") {
+			box = i
+			break
+		}
+	}
+	for i := box - 1; i >= 0; i-- {
+		m := codexStatusLine.FindStringSubmatch(strings.TrimRight(lines[i], " "))
 		if m == nil {
 			continue
 		}

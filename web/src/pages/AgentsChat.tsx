@@ -1134,17 +1134,18 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
 
   // Stop and "send now": pressed by the gateway in the agent's pane, for the
   // process the conversation shows; what became of it is said for a while.
-  const [said, setSaid] = useState<{ what: 'stop' | 'now'; text: string; busy: boolean; n: number; bind: string } | null>(null)
+  const [said, setSaid] = useState<{ what: 'stop' | 'now'; text: string; busy: boolean; n: number; bind: string; took?: boolean } | null>(null)
   const saidN = useRef(0)
   // (A stop that took — the agent no longer at work — is said a moment more,
   // not the full while: else "stop sent" stood over its next turn, begun at
-  // once, as if that one were being stopped.)
-  const stoppedNow = said?.what === 'stop' && !said.busy && agent?.status !== 'working'
+  // once, as if that one were being stopped. Once seen to take, so it stays:
+  // its next turn, begun meanwhile, does not keep it up.)
+  if (said?.what === 'stop' && !said.busy && !said.took && agent?.status !== 'working') setSaid({ ...said, took: true })
   useEffect(() => {
     if (!said || said.busy) return
-    const timer = setTimeout(() => setSaid((s) => (s?.n === said.n ? null : s)), stoppedNow ? 1500 : said.what === 'stop' ? 15000 : 8000)
+    const timer = setTimeout(() => setSaid((s) => (s?.n === said.n ? null : s)), said.took ? 1500 : said.what === 'stop' ? 15000 : 8000)
     return () => clearTimeout(timer)
-  }, [said, stoppedNow])
+  }, [said])
   const refusal = (e: unknown) => {
     if (!(e instanceof ApiError)) return errorText(e)
     // (What stopped it is up there, or could not be made out: the terminal, here, to deal with it.)

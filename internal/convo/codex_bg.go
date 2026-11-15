@@ -96,50 +96,39 @@ func (c *Codex) procsGoing(r *codexRow, id string, raw json.RawMessage) {
 	if len(sids) == 0 {
 		return
 	}
-	cmds := c.scriptCmds[id]
+	// (Its commands, one each, where the script's lines tell them so: a
+	// line of several is no word on which of them a process is — its end
+	// tells it.)
+	var cmds []string
+	for _, cm := range c.scriptCmds[id] {
+		cmds = append(cmds, strings.Split(cm, "\n")...)
+	}
 	// (Its script's own lines, where they are shown — no command told of on
-	// its own in this conversation yet: the line of that command is the one
-	// that runs on, not a second one of it.)
-	var shown []*Tool
-	for _, t := range c.tools[id] {
-		if t.Name == "Bash" {
-			shown = append(shown, t)
-		}
+	// its own in this conversation yet: they go, its processes' steps in
+	// their place, not shown twice; nor would they stay, once commands are
+	// told of on their own.)
+	if len(c.tools[id]) > 0 {
+		c.dropScriptLines(id)
 	}
 	for i, sid := range sids {
-		if c.procs[sid] != nil {
-			continue
+		if c.procs[sid] != nil || c.procsOver[sid] != nil {
+			continue // (going already; or its end told already, its step that one)
 		}
 		cmd := ""
-		switch {
-		case len(cmds) == len(sids):
+		if len(cmds) == len(sids) {
 			cmd = cmds[i]
-		case len(cmds) == 1:
-			cmd = cmds[0]
 		}
 		step := clip("proc:"+sid, maxID)
 		if c.procs == nil || len(c.procs) >= maxRunning {
 			c.procs = map[string]*codexProc{}
 		}
-		var t *Tool
-		switch {
-		case len(shown) == len(sids):
-			t = shown[i]
-		case len(shown) == 1 && len(sids) == 1:
-			t = shown[0]
-		}
-		if t != nil {
-			t.Done = false
-			c.touch([]*Tool{t})
-		} else {
-			t = &Tool{ID: step, Name: "Bash", Detail: clip(clean(cmd), maxDetail)}
-			c.add(r, step, RoleAssistant, []Part{{Kind: KindTool, Tool: t}})
-			c.mark(step, t)
-		}
+		t := &Tool{ID: step, Name: "Bash", Detail: clip(clean(cmd), maxDetail)}
+		c.add(r, step, RoleAssistant, []Part{{Kind: KindTool, Tool: t}})
+		c.mark(step, t)
 		c.procs[sid] = &codexProc{id: step, t: t}
 		what := cmd
 		if what == "" {
-			what = "command " + sid
+			what = "process " + sid
 		}
 		c.setGoing(step, "cmd", what, r.Timestamp)
 	}
@@ -237,6 +226,78 @@ func (c *Codex) provTold(cmd string) {
 				e.Rev = c.rev
 				return
 			}
+		}
+	}
+}
+
+// dropScriptLines: the lines of call id's script, shown as it told them,
+// go (its processes' steps in their place).
+func (c *Codex) dropScriptLines(id string) {
+	for _, t := range c.tools[id] {
+		if t.fromCall && t.at != nil {
+			c.dropPart(t.at, t)
+		}
+	}
+	c.hide(id)
+	delete(c.tools, id)
+}
+
+func (c *Codex) dropPart(e *Entry, t *Tool) {
+	for i, p := range e.Parts {
+		if p.Tool == t {
+			e.Parts = append(e.Parts[:i:i], e.Parts[i+1:]...)
+			e.Rev = c.rev
+			return
+		}
+	}
+}
+
+// procOver: process sid told of as ended (by step t) with no start of it
+// read: kept, so that its start, read after (the part before, or later in
+// what the script gives back), is not set going.
+func (c *Codex) procOver(sid string, t *Tool) {
+	if sid == "" || c.procs[sid] != nil {
+		return
+	}
+	if c.procsOver == nil || len(c.procsOver) >= maxRunning {
+		c.procsOver = map[string]*Tool{}
+	}
+	c.procsOver[sid] = t
+	c.endRun("proc:" + sid)
+}
+
+// prependProcs: the part before's processes left running: still going,
+// unless this part told of their end — then that end is their step's, in
+// its turn, and the step this part made of it goes.
+func (c *Codex) prependProcs(o *Codex) {
+	for sid, p := range o.procs {
+		if end := c.procsOver[sid]; end != nil {
+			p.t.Done, p.t.Error = true, end.Error
+			if strings.TrimSpace(p.t.Detail) == "" {
+				p.t.Detail = end.Detail
+			}
+			p.t.setResult(end.Result)
+			p.t.ResultLines = end.ResultLines
+			c.touch([]*Tool{p.t})
+			if end.at != nil {
+				c.dropPart(end.at, end)
+			}
+			delete(c.procsOver, sid)
+			continue
+		}
+		if c.procs == nil {
+			c.procs = map[string]*codexProc{}
+		}
+		if _, there := c.procs[sid]; !there && len(c.procs) < maxRunning {
+			c.procs[sid] = p
+		}
+	}
+	for sid, t := range o.procsOver {
+		if c.procsOver == nil {
+			c.procsOver = map[string]*Tool{}
+		}
+		if _, there := c.procsOver[sid]; !there && len(c.procsOver) < maxRunning {
+			c.procsOver[sid] = t
 		}
 	}
 }

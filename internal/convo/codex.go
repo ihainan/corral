@@ -87,6 +87,10 @@ type Codex struct {
 	// processes their scripts left running, by session id (codex_bg.go).
 	scriptCmds map[string][]string
 	procs      map[string]*codexProc
+	// procsOver: processes told of as ended with no start of theirs read
+	// (it is in a part before, or comes after): by session id, the step
+	// that told it (codex_bg.go).
+	procsOver map[string]*Tool
 	// provs: code-mode calls out whose commands are shown meanwhile, by
 	// call id: the entry that has them.
 	provs map[string]*Entry
@@ -396,6 +400,7 @@ func (c *Codex) Prepend(other Parser) {
 			c.asked = c.asked[n:]
 		}
 	}
+	c.prependProcs(o) // (its processes left running: codex_bg.go)
 	// What the part before set going and was never told had ended: still
 	// going, unless what was read since says it has ended. What the part
 	// before was told had ended, whose start is older still: kept as ended,
@@ -1185,6 +1190,9 @@ func (c *Codex) ranCommand(r *codexRow, it *codexItem) {
 	}
 	c.add(r, id, RoleAssistant, []Part{{Kind: KindTool, Tool: t}})
 	c.mark(id, t)
+	if it.Status != "in_progress" {
+		c.procOver(procID(it.ProcessID), t) // (of no start read: see codex_bg.go)
+	}
 }
 
 // itemsTell: Codex tells of each command on its own in this conversation.

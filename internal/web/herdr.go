@@ -827,7 +827,7 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 				for _, a := range w.Agents {
 					sid := s.bgSession(sess, a.PaneID, a.Session)
 					bg.consider(a.PaneID, a.Agent, a.Status, sid, a.Round)
-					cmds.consider(a.PaneID, a.Agent, a.Status, sid)
+					cmds.consider(a.PaneID, a.Agent, a.Status, s.cmdSession(sess, a.PaneID, a.Agent, a.Title, sid))
 				}
 			}
 			publish(sum)
@@ -844,7 +844,7 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 			r, _ := rounds.current(tr.Pane.ID)
 			sid := s.bgSession(sess, tr.Pane.ID, r.session)
 			bg.consider(tr.Pane.ID, tr.Pane.Agent, tr.To, sid, r.n)
-			cmds.consider(tr.Pane.ID, tr.Pane.Agent, tr.To, sid)
+			cmds.consider(tr.Pane.ID, tr.Pane.Agent, tr.To, s.cmdSession(sess, tr.Pane.ID, tr.Pane.Agent, tr.Pane.Title, sid))
 			s.onAgentTransition(sess, h, tr)
 		},
 	)

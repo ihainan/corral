@@ -20,6 +20,9 @@ func TestCodexWorkNote(t *testing.T) {
 		"said before": {"• Compacting context (4s • esc to interrupt)\n• Context compacted · 8s\n\n• Working (2s • esc to interrupt)" + tail, false, nil},
 		"done":        {"• Context compacted · 8s\n  Worked for 8s • 04:22" + tail, false, nil},
 		"quoted":      {"• the docs say \"• Compacting context (4s • esc to interrupt)\" when it compacts" + tail, false, nil},
+		// (Pasted into its box while it works: below its status line.)
+		"in the box": {"• Working (6s • esc to interrupt)\n\n› look at this\n  • Reconnecting... 2/5 (7s • esc to interrupt)\n\n  GPT-6.1-Sol high · Working\n", false, nil},
+		"no box":     {"• Reconnecting... 2/5 (7s • esc to interrupt)\n", false, nil},
 	} {
 		compact, retry := codexWorkNote(c.screen)
 		if compact != c.compact || (retry == nil) != (c.retry == nil) || (retry != nil && *retry != *c.retry) {
