@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Activity, Bot, Check, MessageCircleReply, Plus, X } from 'lucide-react'
+import { Activity, ArrowLeftToLine, ArrowRightToLine, Bot, Check, ExternalLink, Link2, MessageCircleReply, Plus, X } from 'lucide-react'
 import { AgentsChat } from './AgentsChat'
 import { api, authGen, choiceOf, probeBootstrap, type OpenChoice, type SessionInfo } from '../api'
 import { sessionWhich } from '../terminal/sessionName'
@@ -8,7 +8,7 @@ import { t } from '../i18n'
 import { local } from '../storage'
 import { navigate } from '../router'
 import { agentsAddress, takeTabs } from '../notifyopen'
-import { Confirm, useToast } from '../components/ui'
+import { Confirm, copyText, isCoarse, MenuLayer, useToast, type MenuItem } from '../components/ui'
 import { estimateSize, useConnect } from '../connect'
 import type { TabInfo } from './Terminal'
 import { TerminalPage } from './lazyPages'
@@ -470,7 +470,9 @@ export function TerminalTabs({ current }: { current: string }) {
 
   // Closing a tab ends its session (no key does: see above): asked first, as the terminal's own "end session" is.
   const [closing, setClosing] = useState<SessionInfo | null>(null)
-  const bar = <TabBar tabs={tabs} current={current} infos={infos} onNew={() => setNewOpen(true)} onMove={move} onClose={setClosing} />
+  // (Several at once, from a tab's menu: the others, or those to its right.)
+  const [closingMany, setClosingMany] = useState<{ keep: SessionInfo; list: SessionInfo[] } | null>(null)
+  const bar = <TabBar tabs={tabs} current={current} infos={infos} onNew={() => setNewOpen(true)} onMove={move} onClose={setClosing} onCloseMany={(keep, list) => setClosingMany({ keep, list })} />
   // (The tab shown is drawn in the same frame as the one left goes: not a
   // frame later, once the effect above has mounted it — a frame of neither,
   // the page's own background, flashed between them.)
@@ -493,6 +495,24 @@ export function TerminalTabs({ current }: { current: string }) {
         />
       )}
       {dialogs}
+      {closingMany && (
+        <Confirm
+          title={t('tabs.closeMany', { n: closingMany.list.length })}
+          body={t('tabs.closeManyConfirm', { n: closingMany.list.length, names: closingMany.list.map((x) => (x.host_name ?? '') + ' · ' + sessionWhich(x, tabs)).join('、') })}
+          confirm={t('tabs.closeMany', { n: closingMany.list.length })}
+          danger
+          onClose={() => setClosingMany(null)}
+          onConfirm={async () => {
+            const { keep, list } = closingMany
+            // (Each ended on its own: one that fails does not keep the others open.)
+            await Promise.allSettled(list.map((x) => api('DELETE', '/api/sessions/' + x.id)))
+            const gone = new Set(list.map((x) => x.id))
+            setSessions((l) => l && l.filter((x) => !gone.has(x.id)))
+            if (gone.has(current)) navigate('/t/' + keep.id, true) // (the one shown closed: the tab the menu was of)
+            load()
+          }}
+        />
+      )}
       {closing && (
         <Confirm
           title={t('term.closeSession')}
@@ -699,7 +719,31 @@ function useTabDrag(nav: React.RefObject<HTMLElement | null>, ids: string[], cur
   return { drag, onPointerDown, offset, dragged, moved }
 }
 
-function TabBar(p: { tabs: SessionInfo[]; current: string; infos: Record<string, TabInfo>; onNew: () => void; onMove: (id: string, to: number) => void; onClose: (s: SessionInfo) => void }) {
+function TabBar(p: { tabs: SessionInfo[]; current: string; infos: Record<string, TabInfo>; onNew: () => void; onMove: (id: string, to: number) => void; onClose: (s: SessionInfo) => void; onCloseMany: (keep: SessionInfo, list: SessionInfo[]) => void }) {
+  const toast = useToast()
+  // A tab's own menu, at a right click (or the menu key) — as a browser's
+  // tabs have one (11-15): open it in a window of its own, copy its link, a
+  // new session, move it to either end, close it or the others. Closing
+  // ends sessions: asked first, as the close is.
+  const [menu, setMenu] = useState<{ id: string; anchor: DOMRect } | null>(null)
+  const menuItems = (s: SessionInfo): MenuItem[] => {
+    const open = p.tabs.filter((x) => x.host_id !== 0 && x.host_name)
+    const at = open.findIndex((x) => x.id === s.id)
+    const others = open.filter((x) => x.id !== s.id)
+    const right = at < 0 ? [] : open.slice(at + 1)
+    const url = location.origin + '/t/' + s.id
+    return [
+      { label: t('tabs.menu.window'), icon: <ExternalLink size={16} />, onSelect: () => window.open(url, '_blank', 'noopener') },
+      { label: t('tabs.menu.copyLink'), icon: <Link2 size={16} />, onSelect: () => void copyText(url).then((ok) => toast(ok ? t('tabs.menu.copied') : url)) },
+      { label: t('tabs.new'), icon: <Plus size={16} />, onSelect: p.onNew },
+      { label: t('tabs.menu.first'), icon: <ArrowLeftToLine size={16} />, separator: true, disabled: at <= 0, onSelect: () => p.onMove(s.id, 0) },
+      { label: t('tabs.menu.last'), icon: <ArrowRightToLine size={16} />, disabled: at < 0 || at === open.length - 1, onSelect: () => p.onMove(s.id, open.length - 1) },
+      { label: t('tabs.close'), icon: <X size={16} />, separator: true, danger: true, onSelect: () => p.onClose(s) },
+      { label: t('tabs.menu.closeOthers', { n: others.length }), icon: <span className="menu-icon-space" />, danger: true, disabled: !others.length, onSelect: () => p.onCloseMany(s, others) },
+      { label: t('tabs.menu.closeRight', { n: right.length }), icon: <span className="menu-icon-space" />, danger: true, disabled: !right.length, onSelect: () => p.onCloseMany(s, right) },
+    ]
+  }
+  const menuTab = menu && p.tabs.find((x) => x.id === menu.id)
   const ref = useRef<HTMLElement>(null)
   // (The tab of a session just opened, not in the list yet, stays last.)
   const movable = p.tabs.filter((s) => s.host_id !== 0).map((s) => s.id)
@@ -784,6 +828,7 @@ function TabBar(p: { tabs: SessionInfo[]; current: string; infos: Record<string,
           // button that goes to it — 11-14, closing one asked a menu before.)
           <div
             key={s.id}
+            data-tab={s.id}
             className={'term-tab has-x' + (drag?.id === s.id ? ' held' : '')}
             data-place={j < 0 ? undefined : j}
             style={dx ? { transform: `translateX(${dx}px)` } : undefined}
@@ -792,6 +837,16 @@ function TabBar(p: { tabs: SessionInfo[]; current: string; infos: Record<string,
             onPointerDown={j < 0 ? undefined : (e) => onPointerDown(e, s.id, j)}
             // (The middle button closes it, as a browser's tab — asked first, as the close is.)
             onAuxClick={(e) => e.button === 1 && s.host_name && (e.preventDefault(), p.onClose(s))}
+            onContextMenu={
+              s.host_name
+                ? (e) => {
+                    e.preventDefault()
+                    // (From the keyboard's menu key: at the tab, not at 0,0.)
+                    const r = e.clientX || e.clientY ? new DOMRect(e.clientX, e.clientY, 0, 0) : e.currentTarget.getBoundingClientRect()
+                    setMenu({ id: s.id, anchor: r })
+                  }
+                : undefined
+            }
           >
           <button
             type="button"
@@ -842,6 +897,18 @@ function TabBar(p: { tabs: SessionInfo[]; current: string; infos: Record<string,
         )
       })}
     </nav>
+    {menu && menuTab && (
+      <MenuLayer
+        label={t('tabs.menu.label', { name: (menuTab.host_name ?? '') + ' · ' + which(menuTab) })}
+        heading={(menuTab.host_name ?? '') + ' · ' + which(menuTab)}
+        anchor={menu.anchor}
+        at="point"
+        sheet={isCoarse()}
+        trigger={() => ref.current?.querySelector<HTMLElement>(`[data-tab="${menu.id}"] .term-tab-main`) ?? null}
+        items={menuItems(menuTab)}
+        onClose={() => setMenu(null)}
+      />
+    )}
     {/* (Outside the tabs that scroll: always in sight — ux1101 N2.) */}
     <button type="button" className="icon-btn term-tab-new" onClick={p.onNew} aria-label={t('tabs.new')} aria-keyshortcuts={standalone ? (isMac ? 'Meta+T' : 'Control+Shift+T') : undefined} title={standalone ? `${t('tabs.new')} (${newTabKey})` : t('tabs.new')}>
         <Plus size={17} />
