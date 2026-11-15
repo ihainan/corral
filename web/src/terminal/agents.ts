@@ -78,7 +78,14 @@ export const paneTitle = (s: string) => s.replace(/^[\s·✢✳✶✻✽*⠀-⣿
 // name where the gateway has one (Codex titles its pane "<thread> |
 // <folder>", or the folder alone); none where the title names only the
 // folder (a row says that already, or need not); else the pane's title.
-export const paneName = (a: HerdrAgent) => a.thread_title || (a.bare_title ? '' : paneTitle(a.title))
+// (Nor where it is only the command the agent was started by — "claude
+// --enable-auto-mode" — as its pane shows it till the agent names it: 11-15.)
+const LAUNCH = /^(?:claude|codex|opencode|gemini)(?:\s+-\S+(?:\s+[^-\s]\S*)?)*$/
+export const paneName = (a: HerdrAgent) => {
+  if (a.thread_title) return a.thread_title
+  const t = a.bare_title ? '' : paneTitle(a.title)
+  return LAUNCH.test(t) ? '' : t
+}
 
 export function listAgents(sessions: SessionInfo[]): { rows: AgentRow[]; others: SessionInfo[] } {
   const now = Date.now()

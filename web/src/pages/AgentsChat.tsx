@@ -1874,7 +1874,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   const blocked = agent?.other
     ? t('convo.otherAgent', { agent: agent.other })
     : !bound
-      ? t(convo.status === 'loading' ? 'agents.loadingSend' : convo.status === 'none' && convo.reason === 'no_agent' ? 'agents.noAgentSend' : 'agents.cannotSend')
+      ? t(convo.status === 'loading' ? 'agents.loadingSend' : convo.status === 'none' && convo.reason === 'no_agent' ? (agent?.program === 'claude' ? 'agents.claudeStartingSend' : 'agents.noAgentSend') : 'agents.cannotSend')
       : agent?.status === 'blocked'
         ? t(waits ? 'agents.answerAbove' : 'agents.answerFirst') // (its card over the composer, or the terminal only)
         : agent?.dialog

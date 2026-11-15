@@ -1299,7 +1299,11 @@ export function ConversationView({
                   ? t('convo.noReader')
                 : agent?.other
                   ? t('convo.otherAgent', { agent: agent.other })
-                  : t('convo.noAgent')}
+                  : // (herdr says Claude Code, but it has no session yet: it is starting, its
+                    // first question — trust this folder? — not answered; 11-15.)
+                    convo.reason === 'no_agent' && agent?.program === 'claude'
+                    ? t('convo.claudeStarting')
+                    : t('convo.noAgent')}
         </p>
         <button type="button" className="btn btn-ghost" onClick={onShowTerminal}>{t('convo.showTerminal')}</button>
         {convo.reason === 'no_log' && pending.length > 0 && <div className="convo-state-pending">{pendingList}</div>}
