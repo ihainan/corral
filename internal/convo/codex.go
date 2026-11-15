@@ -503,6 +503,9 @@ func (c *Codex) Prepend(other Parser) {
 	if c.meta.Model == "" {
 		c.meta.Model = o.meta.Model
 	}
+	if c.meta.Collab == "" {
+		c.meta.Collab = o.meta.Collab
+	}
 	if c.meta.Mode == "" {
 		c.meta.Mode = o.meta.Mode
 	}
@@ -726,6 +729,9 @@ type codexPayload struct {
 		Model          string          `json:"model"`
 		ApprovalPolicy string          `json:"approval_policy"`
 		Effort         json.RawMessage `json:"reasoning_effort"`
+		Collab         *struct {
+			Mode string `json:"mode"`
+		} `json:"collaboration_mode"`
 	} `json:"thread_settings"`
 	Git *struct {
 		Branch string `json:"branch"`
@@ -830,6 +836,9 @@ func (c *Codex) event(r *codexRow, p *codexPayload) {
 	case "thread_settings_applied":
 		if p.Settings != nil {
 			c.settings(p.Settings.Model, p.Settings.ApprovalPolicy, p.Settings.Effort)
+			if p.Settings.Collab != nil && p.Settings.Collab.Mode != "" {
+				c.meta.Collab = clip(p.Settings.Collab.Mode, maxMeta) // (written as it is switched, a turn or none)
+			}
 		}
 	case "token_count":
 		if p.Info != nil && p.Info.Last != nil && p.Info.Last.Input > 0 {

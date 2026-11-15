@@ -424,6 +424,9 @@ const (
 type Meta struct {
 	Model string `json:"model,omitempty"` // the model's id, as the API named it
 	Mode  string `json:"mode,omitempty"`  // the permission mode: default, acceptEdits, plan, auto, ...
+	// Collab: (Codex) its collaboration mode, "default" or "plan" (Shift+Tab
+	// in its terminal, /plan): apart from Mode, its approval policy.
+	Collab string `json:"collab,omitempty"`
 	// Effort is how hard the model is asked to think (Claude Code's
 	// /effort, its status line's "·H"): low, medium, high, xhigh, max.
 	Effort string `json:"effort,omitempty"`

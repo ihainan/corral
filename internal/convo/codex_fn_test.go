@@ -844,3 +844,20 @@ func TestCodexProposedPlan(t *testing.T) {
 		}
 	}
 }
+
+// Its collaboration mode as switched (0.167: a row written as Shift+Tab is
+// pressed, with no turn), the part read later saying none: the one before's.
+func TestCodexCollabMode(t *testing.T) {
+	row := func(at, mode string) string {
+		return `{"timestamp":"` + at + `","type":"event_msg","payload":{"type":"thread_settings_applied","thread_settings":{"model":"gpt-6.1-sol","approval_policy":"on-request","collaboration_mode":{"mode":"` + mode + `","settings":{}}}}}` + "\n"
+	}
+	c := feedAll(row("2026-11-15T11:29:12.641Z", "default"), row("2026-11-15T11:29:37.133Z", "plan"))
+	if m := c.Meta(); m.Collab != "plan" || m.Mode != "on-request" {
+		t.Fatalf("%+v", m)
+	}
+	later := feedAll(fnUser(t, "u1", "go on"))
+	later.Prepend(c)
+	if m := later.Meta(); m.Collab != "plan" {
+		t.Errorf("the part before's: %+v", m)
+	}
+}
