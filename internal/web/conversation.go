@@ -4802,13 +4802,13 @@ func pressSlotWait(what string) time.Duration {
 }
 
 // codexStillFresh: pane's Codex (pid, start) has begun no conversation yet,
-// as a look begun now finds it (herdr: Codex's own word, Fresh); a tmux
-// pane's: not told (false).
+// as a look begun now finds it (Codex's own word, Fresh: of a herdr
+// server's panes, or the user's tmux server's).
 func (s *Server) codexStillFresh(ctx context.Context, sess *term.Session, socket, pane string, pid, start int64) bool {
-	if sess.Persistence != "herdr" {
-		return false // (a tmux pane's: nothing to tell it by — its daemon may have begun one: refused, as before)
-	}
-	if socket == "" {
+	switch {
+	case sess.Persistence == "tmux":
+		socket = "tmux" // (codexPanesCommand: the user's tmux server)
+	case sess.Persistence != "herdr" || socket == "":
 		return false
 	}
 	panes, err := s.codexPanes.run(ctx, sess, socket, pane)

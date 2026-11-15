@@ -95,8 +95,25 @@ sock = sys.argv[1]
 endpoint_sh = sys.argv[2]  # (codex_ep and what it uses: the scan's own, run for each)
 known = set(sys.argv[3].split(',')) if len(sys.argv) > 3 and sys.argv[3] else set()
 target = sys.argv[4] if len(sys.argv) > 4 else ''  # (a pane whose title is read now, as herdr has it: a press's)
+PATH = os.path.expanduser('~/.local/bin') + ':' + os.path.expanduser('~/bin') + ':/opt/homebrew/bin:/usr/local/bin:' + os.environ.get('PATH', '')
+# ("tmux": the panes of the user's tmux server, the default one, by the TMUX
+# and TMUX_PANE its programs are given — as herdr's by HERDR_SOCKET_PATH and
+# HERDR_PANE_ID.)
+tmux = sock == 'tmux'
+tsock = ''
+if tmux:
+    try:
+        tsock = subprocess.run(['tmux', 'display-message', '-p', '#{socket_path}'], capture_output=True, timeout=5, env=dict(os.environ, PATH=PATH)).stdout.decode('utf-8', 'replace').strip()
+    except Exception:
+        tsock = ''
 def title_now(pane):
-    env = dict(os.environ, HERDR_SOCKET_PATH=sock, PATH=os.path.expanduser('~/.local/bin') + ':' + os.path.expanduser('~/bin') + ':/usr/local/bin:' + os.environ.get('PATH', ''))
+    if tmux:
+        try:
+            r = subprocess.run(['tmux', 'display-message', '-p', '-t', pane, '#{pane_title}'], capture_output=True, timeout=5, env=dict(os.environ, PATH=PATH))
+            return r.stdout.decode('utf-8', 'replace').rstrip('\n') if r.returncode == 0 else None
+        except Exception:
+            return None
+    env = dict(os.environ, HERDR_SOCKET_PATH=sock, PATH=PATH)
     try:
         r = subprocess.run(['herdr', 'pane', 'get', pane], capture_output=True, timeout=5, env=env)
         j = json.loads(r.stdout)
@@ -149,7 +166,8 @@ def under_herdr(pid):
             if pid in ('0', '1'):
                 return False
             with open('/proc/' + pid + '/comm') as f:
-                if f.read().strip() == 'herdr':
+                c = f.read().strip()
+                if c == 'herdr' and not tmux or tmux and c.startswith('tmux'):
                     return True
         except (OSError, ValueError, IndexError):
             return False
@@ -256,8 +274,12 @@ for d in os.listdir('/proc'):
             if m:
                 opened.append((t, m.group(0), l))
     started = (btime * 1000 + start * 1000 // hz) if hz and btime else 0
-    mine = env.get(b'HERDR_SOCKET_PATH', b'').decode('utf-8', 'replace') == sock
-    pane = env.get(b'HERDR_PANE_ID', b'').decode('utf-8', 'replace') if mine else ''
+    if tmux:
+        mine = tsock != '' and env.get(b'TMUX', b'').decode('utf-8', 'replace').split(',')[0] == tsock
+        pane = env.get(b'TMUX_PANE', b'').decode('utf-8', 'replace') if mine else ''
+    else:
+        mine = env.get(b'HERDR_SOCKET_PATH', b'').decode('utf-8', 'replace') == sock
+        pane = env.get(b'HERDR_PANE_ID', b'').decode('utf-8', 'replace') if mine else ''
     procs.append({'pid': d, 'start': str(start), 'started': started, 'cwd': cwd, 'home': home, 'argv': tid, 'opened': opened,
                   'fg': fg, 'sub': sub, 'any': any_log, 'pane': pane})
 claims = {}
@@ -364,12 +386,15 @@ func codexLogOf(path, thread string) string {
 	return path
 }
 
+// tmuxPaneID: a tmux pane's id ("%3").
+var tmuxPaneID = regexp.MustCompile(`^%[0-9]{1,9}$`)
+
 // parseCodexPanes reads codexPanesCommand's records: pane → its Codex.
 func parseCodexPanes(out string) map[string]codexPane {
 	got := map[string]codexPane{}
 	for _, rec := range strings.Split(out, "\x00") {
 		f := strings.Split(rec, "\x1f")
-		if len(f) != 17 || !herdrPaneID.MatchString(f[0]) {
+		if len(f) != 17 || !herdrPaneID.MatchString(f[0]) && !tmuxPaneID.MatchString(f[0]) {
 			continue
 		}
 		pid, err1 := strconv.ParseInt(f[1], 10, 64)

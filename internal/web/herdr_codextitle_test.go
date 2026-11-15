@@ -69,6 +69,8 @@ func TestParseCodexPanes(t *testing.T) {
 		rec("w7:p1", "104", "204", "0", "/x", a, "", "", "", "") + rec("w7:p1", "105", "205", "0", "/x", b, "", "", "", "") + // (two in one pane)
 		rec("bad pane", "1", "2", "0", "/x", a, "", "", "", "") +
 		rec("w8:p1", "0", "2", "0", "/x", a, "", "", "", "") + // (no process)
+		rec("%12", "106", "206", "0", "/x", a, "", "", "", "") + // (a tmux pane's)
+		rec("%1x", "107", "207", "0", "/x", a, "", "", "", "") +
 		"w9:p1\x1fshort\x00"
 	got := parseCodexPanes(out)
 	if w := got["w2:p1"]; w.Via != "sub2api.example.org" || !w.FG || w.PID != 965934 || w.Start != 69873389 || w.Started != 1794460425000 || w.Thread != a || !strings.HasSuffix(w.Path, a+".jsonl") || w.Cwd != "/home/u/AI" {
@@ -76,6 +78,9 @@ func TestParseCodexPanes(t *testing.T) {
 	}
 	if got["w3:p1"].Path != "" || got["w4:p1"].Path != "" || got["w5:p1"].Path == "" || got["w6:p1"].Thread != "" {
 		t.Fatalf("paths: %+v %+v %+v %+v", got["w3:p1"], got["w4:p1"], got["w5:p1"], got["w6:p1"])
+	}
+	if got["%12"].PID != 106 || got["%1x"].PID != 0 {
+		t.Fatalf("tmux panes: %+v %+v", got["%12"], got["%1x"])
 	}
 	if !got["w7:p1"].Several || got["w7:p1"].Thread != "" {
 		t.Fatalf("two in a pane: %+v", got["w7:p1"])
