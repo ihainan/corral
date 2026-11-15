@@ -13,6 +13,7 @@ func TestClaudeEvents(t *testing.T) {
 		`{"type":"user","uuid":"u2","isCompactSummary":true,"message":{"role":"user","content":"This session is being continued…"}}`,
 		`{"type":"system","subtype":"informational","uuid":"s2","content":"Compacted while idle, before the prompt cache expired","level":"notice"}`,
 		`{"type":"system","subtype":"compact_boundary","uuid":"s3","compactMetadata":{"trigger":"manual","preTokens":-5,"postTokens":"many","durationMs":900}}`,
+		`{"type":"system","subtype":"informational","uuid":"s3b","content":"Compacted using a summary written while you were away · turn off with \"idleCompaction\": false in settings.json","level":"notice"}`,
 		`{"type":"system","subtype":"informational","uuid":"s4","content":"Unknown command: /restart","level":"warning"}`,
 		`{"type":"system","subtype":"scheduled_task_fire","uuid":"s5","content":"Running scheduled task (Oct 27 9:07pm)","taskId":"e9dd925d","cron":"7 21 27 10 *","prompt":"check the deploy","taskKind":"loop"}`,
 		`{"type":"user","uuid":"u3","isMeta":true,"promptSource":"system","turnOrigin":"scheduled","scheduledTaskId":"e9dd925d","message":{"role":"user","content":"check the deploy"}}`,
@@ -49,6 +50,7 @@ func TestClaudeEvents(t *testing.T) {
 		{Role: RoleSummary, Text: "This session is being continued…"},
 		{Role: RoleNote, Ev: Event{Kind: EventIdleCompact}},
 		{Role: RoleNote, Ev: Event{Kind: EventCompact, Trigger: "manual", Ms: 900}}, // (what cannot be read of it is left out)
+		{Role: RoleNote, Ev: Event{Kind: EventIdleCompact}},
 		{Role: RoleNote, Ev: Event{Kind: EventNotice, Text: "Unknown command: /restart", Level: "warning"}},
 		{Role: RoleNote, Ev: Event{Kind: EventScheduled, Text: "check the deploy", Loop: true}},
 		{Role: RoleNote, Ev: Event{Kind: EventScheduled, Text: "check the deploy", Echo: true}}, // (u4: the view shows its firing's)

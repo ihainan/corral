@@ -1732,17 +1732,25 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     if (!lookCompact) return
     let live = true
     let busy = false
+    // (Quiet from when it went to work, as well as from its log's last word:
+    // compacting while idle (Claude Code's, 54 minutes on, before the prompt
+    // cache lapses) begins long after the log's last word, 11-15. Once seen
+    // compacting, looked at till it is done, however long: up to 7 minutes.)
+    const from = Date.now()
+    let seenAt = -1
     const gone = new AbortController() // (a look under way when this ends: let go, not left holding the pane's turn)
     const timer = setInterval(() => {
-      const quiet = Date.now() - compactNow.current.changedAt
-      if (busy || document.hidden || quiet < COMPACT_QUIET || quiet > COMPACT_UNTIL) return
-      busy = true
       const at = compactNow.current.changedAt
+      const quiet = Date.now() - Math.max(at, from)
+      if (busy || document.hidden || quiet < COMPACT_QUIET || (quiet > COMPACT_UNTIL && seenAt !== at)) return
+      busy = true
       // (for=busy: said apart from the suggestion's own looks, in the gateway's log; not read.)
       api<{ compacting?: boolean }>('POST', `/api/sessions/${sid}/conversation/suggestion?for=busy`, compactNow.current.body(), { timeoutMs: PRESS_MS, signal: gone.signal })
         .then(
           (r) => {
-            if (live && compactNow.current.changedAt === at) setCompacting(!!r.compacting)
+            if (!live || compactNow.current.changedAt !== at) return
+            seenAt = r.compacting ? at : -1
+            setCompacting(!!r.compacting)
           },
           () => {},
         )

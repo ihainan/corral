@@ -122,6 +122,7 @@ const wentOf = (p: ConvoPending) => (p.look && typeof p.look === 'object' ? p.lo
 
 const HINT_AFTER = 20000 // working with nothing new this long: say why
 const QUIET_LONG = 5 * 60 * 1000 // its log not grown this long: said, in minutes
+const IDLE_COMPACT_GAP = 15 * 60 * 1000 // its log quiet this long when it went to work compacting: idle (Claude Code's comes at 54 minutes)
 const SIDE_KEY = 'corral.convoSide'
 const SIDE_MIN = 900 // (px) the view's width from which the list goes beside the thread
 // The list's width beside the thread (px): dragged by its edge, kept in the
@@ -609,6 +610,9 @@ export function ConversationView({
   // (Long: by how long since its log last grew, as the gateway counts it;
   // not while reading fails, which is said otherwise.)
   const quietLong = working && !convo.failing && convo.quietAt !== undefined && now - convo.quietAt >= QUIET_LONG ? now - convo.quietAt : 0
+  // (Compacting long after its log's last word: Claude Code's while it sat
+  // idle — its turn was over, nothing comes after it.)
+  const compactIdle = !!compacting && convo.quietAt !== undefined && since - convo.quietAt > IDLE_COMPACT_GAP
   // (Subagents it sent off still out, as its log says: what it waits on —
   // unless a call of its own is out, a command it runs meanwhile.)
   const outCall = useMemo(() => callOut(convo.entries), [convo.entries])
@@ -1355,7 +1359,7 @@ export function ConversationView({
             {agentsOut > 0
               ? t('convo.waitingAgents', { n: agentsOut })
               : compacting
-                ? t('convo.compacting')
+                ? t(compactIdle ? 'convo.compactingIdle' : 'convo.compacting')
                 : quietLong
                 ? t('convo.quietLong', { d: quietLong < 3600000 ? t('convo.for.m', { n: Math.floor(quietLong / 60000) }) : t('convo.for.h', { n: Math.floor(quietLong / 3600000) }) })
                 : t('convo.quiet')}
@@ -1372,10 +1376,12 @@ export function ConversationView({
 
   let status = agent ? t(`convo.status.${agent.status}` as I18nKey) : ''
   let workedFor = ''
-  if (working && lastUser && now >= lastUser) workedFor = duration(now - lastUser)
+  // (Not while compacting idle: the time since the person's last word is not how long that takes.)
+  if (working && lastUser && now >= lastUser && !compactIdle) workedFor = duration(now - lastUser)
   if (answered && waits) status = t('convo.answered')
   if (agent?.bg) status = t(agent.bg === 'running' ? 'convo.status.bg' : agent.bg === 'stale' ? 'convo.status.bgStale' : 'convo.status.working')
   else if (hostCmds) status = hostCmds.n > 1 ? t('convo.bgCmds', { n: hostCmds.n }) : t('convo.bgCmds1')
+  else if (compacting && working) status = t('convo.status.compacting')
   // (Its name as the list names its row — the workspace's or pane's name first, the
   // session's title under it — so the bar and the list say one thing: 11-13, the
   // bar had them the other way round. Where the list has no row of it, as before.)

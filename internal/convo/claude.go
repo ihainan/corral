@@ -3218,7 +3218,10 @@ func systemEvent(r *claudeRow) *Event {
 			return nil
 		}
 		switch {
-		case strings.HasPrefix(s, "Compacted while idle"):
+		case strings.HasPrefix(s, "Compacted while idle"),
+			// (A summary written in the background while the person was away,
+			// taken as they came back: compacted while idle as well.)
+			strings.HasPrefix(s, "Compacted using a summary written while you were away"):
 			return &Event{Kind: EventIdleCompact}
 		case strings.HasPrefix(s, "Usage limit reached") && strings.Contains(s, "continuing automatically"):
 			return &Event{Kind: EventLimitWait}
