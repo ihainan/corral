@@ -1,0 +1,16 @@
+
+
+  [1mWould you like to run the following command?[0m
+
+  Environment: [1mlocal[0m
+
+  Reason: [3mCreate a flag outside the project for the parity test[0m
+
+  $ [38;2;137;180;250mtouch[38;2;205;214;244m /home/alice/cxreal/approved.flag[39m
+
+
+[1;7m› 1. Yes, proceed (y)
+[0m  2. Yes, and don't ask again for commands that start with `touch /home/alice/cxreal/approved.flag` ([1mp[0m)
+  3. No, and tell Codex what to do differently ([1mesc[0m)
+
+  [2mPress [0;1menter[0;2m to confirm or [0;1mesc[0;2m to cancel

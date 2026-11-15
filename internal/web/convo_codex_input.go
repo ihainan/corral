@@ -1,7 +1,6 @@
 package web
 
 import (
-	"errors"
 	"regexp"
 	"strconv"
 	"strings"
@@ -10,102 +9,123 @@ import (
 )
 
 // codexIdleInput: Codex at rest, its input empty: nothing says it works
-// ("esc to interrupt"), and its input ("› " at the left, the last such,
-// with the lines under it that go on from it, up to a blank one) holds its
-// placeholder only. Any other words there are taken for a draft (Codex's
-// placeholder varies, dimmed, which the text alone does not tell apart: a
-// command is then refused, not typed onto it).
+// ("esc to interrupt"), its input is where Codex draws it (codexInputSpan)
+// with a footer under it, and it holds its placeholder only ("Ask Codex to
+// do anything", cut short in a narrow pane). Any other words there, or none
+// (its placeholder is drawn whenever it is empty), are taken for a draft: a
+// command is then refused, not typed onto it. A footer is wanted here,
+// before anything is typed, as a sign the screen is Codex's at all (a
+// shell's prompt may be "› " too): its own hints ("? for shortcuts") are
+// always there under an empty input.
 func codexIdleInput(screen string) error {
 	if strings.Contains(screen, "esc to interrupt") {
 		return errBusyAgent
 	}
 	lines := strings.Split(screen, "\n")
-	for i := len(lines) - 1; i >= 0; i-- {
-		if !strings.HasPrefix(lines[i], "› ") {
-			continue
-		}
-		if in := strings.TrimSpace(strings.TrimPrefix(lines[i], "› ")); in != "" && in != "Ask Codex to do anything" {
+	at, foot, footed, ok := codexInputSpan(lines)
+	if !ok || !footed {
+		return errScreen
+	}
+	if !codexEmptyInput(strings.TrimSpace(strings.TrimPrefix(lines[at], "›"))) {
+		return errDraft
+	}
+	for _, l := range lines[at+1 : foot] {
+		if strings.TrimSpace(l) != "" {
 			return errDraft
 		}
-		// (Under it, down to its footer — its model and folder, "? for
-		// shortcuts", the block at the screen's end —: any words are the
-		// input's, a draft, blank lines among them or not, words like a
-		// footer's among them too — review502.)
-		foot := codexFootStart(lines)
-		if foot < i {
-			return errScreen
-		}
-		for _, l := range lines[i+1 : foot] {
-			if strings.TrimSpace(l) != "" {
-				return errDraft
-			}
-		}
-		return nil
 	}
-	return errScreen
+	return nil
 }
 
-// codexFootStart: where Codex's footer begins — as Codex draws it under
-// its input, after a blank line: the lines at the screen's end (blank ones
-// at the very end aside) with no blank line among them, one of them a
-// footer's at least (codexFooter; the others a footer's lines wrapped in a
-// narrow pane — review503); -1 where the screen does not end so. (Lines
-// like a footer's above that blank line are the input's, a draft's.)
-func codexFootStart(lines []string) int {
+// codexPlaceholderText: what Codex's input shows when empty.
+const codexPlaceholderText = "Ask Codex to do anything"
+
+// codexEmptyInput: in is Codex's placeholder, or the start of it as a
+// narrow pane cuts it short (enough of it to tell).
+func codexEmptyInput(in string) bool {
+	return in == codexPlaceholderText || len([]rune(in)) >= 10 && strings.HasPrefix(codexPlaceholderText, in)
+}
+
+// codexInputSpan: where Codex's input is on its screen. at: its first line,
+// the last one beginning "› " (the person's messages above begin so too:
+// the last is the input; its own further lines are indented, never so).
+// Under it, down to the screen's end, every line is blank or indented two
+// spaces (its lines, its footer); anything else and the bottom is not its
+// input (a dialog, a menu whose choice is marked "› 1.", a pager): !ok.
+// foot: where its footer begins — the block after the last blank line
+// under it, as Codex draws its footer one blank line under its input, a
+// block of a few lines at most (footed); where no blank line is under it,
+// or the block is longer than any footer, it has none shown (a status line
+// of items with no value yet, its hints gone while it holds words: 0.167,
+// 11-15), and foot is the screen's end.
+// (Its footer is told by where it stands, not by its words: a status line
+// is the person's to set, of any of some twenty items, or none — a model,
+// a thread's id, its limits, "100% context left" at the right alone.)
+func codexInputSpan(lines []string) (at, foot int, footed, ok bool) {
 	end := len(lines)
 	for end > 0 && strings.TrimSpace(lines[end-1]) == "" {
 		end--
 	}
-	at, seen := end, false
-	for at > 0 && strings.TrimSpace(lines[at-1]) != "" {
-		seen = seen || codexFooter.MatchString(strings.TrimSpace(lines[at-1]))
-		at--
+	at = -1
+	for i := end - 1; i >= 0 && end-i <= codexInputMax+codexFootMax+1; i-- {
+		if strings.HasPrefix(lines[i], "› ") || strings.TrimRight(lines[i], " ") == "›" {
+			at = i
+			break
+		}
 	}
-	if !seen || at == 0 || at == end || end-at > codexFootMax {
-		return -1
+	if at < 0 || codexMenuChoice.MatchString(lines[at]) {
+		return 0, 0, false, false
 	}
-	return at
+	blank := -1
+	for i := at + 1; i < end; i++ {
+		switch {
+		case strings.TrimSpace(lines[i]) == "":
+			blank = i
+		case !strings.HasPrefix(lines[i], "  "):
+			return 0, 0, false, false
+		}
+	}
+	if blank < 0 || end-blank-1 > codexFootMax {
+		return at, end, false, true
+	}
+	return at, blank + 1, true, true
 }
 
 // codexFootMax: the most lines Codex's footer runs to, wrapped.
 const codexFootMax = 6
 
-// codexFooter: a line of Codex's footer under its input: its model and
-// folder ("gpt-mock default · ~/cxreal", the folder's name spaces and all;
-// or "Context 100% left", a status line set to that; one set otherwise is
-// not known, its input taken for a draft: commands refused, nothing lost),
-// its hints ("? for shortcuts", "esc again to edit previous message"), its
-// notes ("⚠ 1 warning · f2 to view"), each the whole line but for what
-// stands at its right, two spaces off or more.
-// (Its model, its effort, its service tier where one is set ("Fast": 11-15,
-// the person's own), then its folder; "← for agents" before "? for
-// shortcuts" in a Codex that has agents to go to.)
-var codexFooter = regexp.MustCompile(`^(?:[A-Za-z][\w./-]*(?: (?:default|minimal|low|medium|high|xhigh|max|ultra))?(?: [A-Z][A-Za-z]+)? · (?:~|/).*|Context \d+% (?:left|used)(?: · .*)?|(?:← for agents · )?\? for shortcuts|esc again to edit previous message|ctrl \+ c again to quit|⚠ \d+ warnings? · f2 to view)(?:\s{2,}\S.*)?$`)
+// codexFooter: a line of Codex's own footer as it is known: its model and
+// folder, its hints ("? for shortcuts", "esc again to edit previous
+// message"), its notes ("⚠ 1 warning · f2 to view"), each the whole line but
+// for what stands at its right. Not what finds its footer (codexInputSpan:
+// where it stands): what tells a block under the input after a blank line
+// for its footer surely, not the end of a draft that looks like one.
+var codexFooter = regexp.MustCompile(`^(?:[A-Za-z][\w./-]*(?: (?:default|minimal|low|medium|high|xhigh|max|ultra))?(?: [A-Z][A-Za-z]+)? · (?:~|/).*|Context \d+% (?:left|used)(?: · .*)?|\d+% context (?:left|used)|(?:← for agents · )?\? for shortcuts|esc again to edit previous message|ctrl \+ c again to quit|⚠ \d+ warnings? · f2 to view)(?:\s{2,}\S.*)?$`)
 
-// codexInputArea: what Codex's input holds — its last line beginning
-// "› " above its footer (the person's messages above begin so too: the
-// last is the input), and the lines under it down to that footer (the
-// block at the screen's end: codexFootStart); ok only where that footer is
-// there, close under it (else what is at the bottom is not told: a
-// dialog, a menu whose choice is marked "› 1."). Its placeholder, when
-// empty, is what it holds.
-func codexInputArea(screen string) (area string, ok bool) {
+// codexInputArea: what Codex's input holds (codexInputSpan): area, its
+// lines down to its footer; rest, the block taken for its footer where its
+// words are not a known footer's (codexFooter) — it may be the end of a
+// draft, words after a blank line, with no footer shown under it: a
+// caller who knows what should be there tries both. ok: its input told
+// apart. Its placeholder, when empty, is what it holds.
+func codexInputArea(screen string) (area, rest string, ok bool) {
 	lines := strings.Split(strings.TrimRight(screen, "\n"), "\n")
-	foot := codexFootStart(lines)
-	if foot < 0 {
-		return "", false
+	at, foot, footed, ok := codexInputSpan(lines)
+	if !ok {
+		return "", "", false
 	}
-	for i := foot - 1; i >= 0 && foot-i <= codexInputMax; i-- {
-		if !strings.HasPrefix(lines[i], "› ") && lines[i] != "›" {
-			continue
+	in := append([]string{strings.TrimPrefix(strings.TrimPrefix(lines[at], "›"), " ")}, lines[at+1:foot]...)
+	area = strings.TrimSpace(strings.Join(in, "\n"))
+	if footed {
+		known := false
+		for _, l := range lines[foot:] {
+			known = known || codexFooter.MatchString(strings.TrimSpace(l))
 		}
-		if codexMenuChoice.MatchString(lines[i]) {
-			return "", false
+		if !known {
+			rest = strings.TrimSpace(strings.Join(lines[foot:], "\n"))
 		}
-		in := append([]string{strings.TrimPrefix(strings.TrimPrefix(lines[i], "›"), " ")}, lines[i+1:foot]...)
-		return strings.TrimSpace(strings.Join(in, "\n")), true
 	}
-	return "", false
+	return area, rest, true
 }
 
 // (A menu's choice, marked: "› 1. Yes, proceed".)
@@ -120,10 +140,16 @@ const codexInputMax = 40
 // "[Pasted Content N chars]": the message there where N is its length,
 // never whole (what it holds cannot be seen).
 func codexTypedIn(screen, text string, whole bool) bool {
-	area, ok := codexInputArea(screen)
+	area, rest, ok := codexInputArea(screen)
 	if !ok {
 		return false
 	}
+	// (Under it, an unknown footer or the end of the message itself: either.)
+	return codexBoxHas(area, text, whole) || rest != "" && codexBoxHas(area+"\n"+rest, text, whole)
+}
+
+// codexBoxHas: codexTypedIn's reading of what its input holds.
+func codexBoxHas(area, text string, whole bool) bool {
 	box, want := squeeze(area), squeeze(text)
 	if len([]rune(want)) < sentMark {
 		return false
@@ -156,10 +182,11 @@ var codexPasted = regexp.MustCompile(`^\[PastedContent(\d+)chars\]$`)
 
 // codexInInput: inInput for Codex's input.
 func codexInInput(screen, text string) (waiting, known bool) {
-	area, ok := codexInputArea(screen)
+	area, rest, ok := codexInputArea(screen)
 	if !ok {
 		return false, false
 	}
+	area += "\n" + rest // (an unknown footer's words or the end of the message: looked in too)
 	marks := anchors(text)
 	if len(marks) == 0 {
 		return false, false
@@ -210,27 +237,21 @@ func codexPasteParts(text string) []int {
 // typed are not.
 func codexHasDraft(screen string) bool {
 	plain := sgr.ReplaceAllString(screen, "")
-	if !errors.Is(codexIdleInput(strings.ReplaceAll(plain, "esc to interrupt", "")), errDraft) {
-		return false
-	}
 	raw := strings.Split(screen, "\n")
 	lines := strings.Split(plain, "\n")
 	if len(raw) != len(lines) {
 		return true
 	}
-	for i := len(lines) - 1; i >= 0; i-- {
-		if !strings.HasPrefix(lines[i], "› ") {
-			continue
-		}
-		foot := codexFootStart(lines)
-		for _, l := range lines[i+1 : max(foot, i+1)] {
-			if strings.TrimSpace(l) != "" {
-				return true // (more lines than its placeholder's one)
-			}
-		}
-		return !allDim(raw[i], "› ")
+	at, foot, _, ok := codexInputSpan(lines)
+	if !ok {
+		return false // (its input not told apart: left to the send's own reading)
 	}
-	return true
+	for _, l := range lines[at+1 : foot] {
+		if strings.TrimSpace(l) != "" {
+			return true // (more lines than its placeholder's one)
+		}
+	}
+	return !allDim(raw[at], "› ")
 }
 
 // allDim: what line (with its colours) shows after its first prefix is all

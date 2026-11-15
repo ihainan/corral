@@ -1,0 +1,95 @@
+package web
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+// Real Codex 0.167.2 screens (the screen's last lines, colours and all;
+// a mock model, the test container, 11-15) under status lines of several
+// configs — its default, none ([]: "100% context left" at the right of its
+// hints), a thread's id, limits with no value yet (no status line drawn at
+// all), items with no folder, the service tier Fast, a narrow pane — each
+// with its input empty, holding "half typed draft", and that and a second
+// line; and its dialogs and menus: an approval, "/" and "@" menus open.
+// Its footer is to be told by where it stands, whatever its words.
+func TestCodexShapes(t *testing.T) {
+	files, _ := filepath.Glob("testdata/codex-shapes/*.ansi")
+	if len(files) < 30 {
+		t.Fatalf("%d screens", len(files))
+	}
+	for _, f := range files {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		colour := string(b)
+		plain := sgr.ReplaceAllString(colour, "")
+		name := strings.TrimSuffix(filepath.Base(f), ".ansi")
+		kind := name[strings.LastIndex(name, ".")+1:]
+		switch {
+		case kind == "empty":
+			if err := codexIdleInput(plain); err != nil {
+				t.Errorf("%s: idle: %v", name, err)
+			}
+			if codexHasDraft(colour) {
+				t.Errorf("%s: a draft", name)
+			}
+		case kind == "draft" || kind == "draft2":
+			if err := codexIdleInput(plain); err != errDraft && err != errScreen {
+				t.Errorf("%s: idle: %v", name, err)
+			}
+			if !codexHasDraft(colour) {
+				t.Errorf("%s: its draft not told", name)
+			}
+			want := "half typed draft"
+			if kind == "draft2" {
+				want += "\nsecond line"
+			}
+			if !codexTypedIn(plain, want, true) {
+				area, rest, ok := codexInputArea(plain)
+				t.Errorf("%s: not whole: %q / %q %v", name, area, rest, ok)
+			}
+			if w, k := codexInInput(plain, want); !w || !k {
+				t.Errorf("%s: in input %v %v", name, w, k)
+			}
+		case name == "dialog-approve":
+			if err := codexIdleInput(plain); err != errScreen {
+				t.Errorf("%s: idle: %v", name, err)
+			}
+			if _, _, ok := codexInputArea(plain); ok {
+				t.Errorf("%s: an input told on a dialog", name)
+			}
+		case name == "dialog-slash" || name == "dialog-at":
+			if err := codexIdleInput(plain); err != errDraft {
+				t.Errorf("%s: idle: %v", name, err)
+			}
+		case name == "dialog-history":
+			if err := codexIdleInput(plain); err != nil {
+				t.Errorf("%s: idle: %v", name, err)
+			}
+		default:
+			t.Errorf("%s: not looked at", name)
+		}
+	}
+}
+
+// Not Codex's input: the person's message above and the agent's words under
+// it (no input drawn: a pager, a closed Codex); a shell whose prompt is
+// "› ", with nothing under it.
+func TestCodexInputSpanNotIt(t *testing.T) {
+	for _, screen := range []string{
+		"› go\n\n• did it\n  more\n",
+		"• done\n\n› Ask Codex to do anything\n",
+		"$ ls\nfoo\n› \n",
+	} {
+		if err := codexIdleInput(screen); err != errScreen {
+			t.Errorf("%q: %v", screen, err)
+		}
+	}
+	if _, _, ok := codexInputArea("› go\n\n• did it\n"); ok {
+		t.Error("an input told above the agent's words")
+	}
+}

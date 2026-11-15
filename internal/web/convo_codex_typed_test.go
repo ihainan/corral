@@ -30,7 +30,10 @@ func TestCodexTypedIn(t *testing.T) {
 		{"the same words above, the input empty", codexScreen("› Ask Codex to do anything"), "go go go go go go", false, false},
 		{"a paste folded, its length", codexScreen("› [Pasted Content 1200 chars]"), strings.Repeat("x", 1200), true, false},
 		{"a paste folded, another length", codexScreen("› [Pasted Content 900 chars]"), strings.Repeat("x", 1200), false, false},
-		{"no footer under it", codexScreen("› "+msg, "  something else"), msg, false, false},
+		// (A status line of the person's own, of words not known: where it stands tells it — 11-15.)
+		{"an unknown footer under it", codexScreen("› "+msg, "  something else"), msg, true, true},
+		{"no footer at all", "• done\n\n› " + msg + "\n\n\n", msg, true, true},
+		{"the agent's words under it", "› " + msg + "\n\n• answered\n", msg, false, false},
 		{"a menu's choice", codexScreen("› 1. Yes, proceed\n  2. No"), "1. Yes, proceed", false, false},
 		{"too short to tell", codexScreen("› go"), "go", false, false},
 		// (review502: the draft goes on with words like a footer's, then more: not the message whole.)
@@ -58,7 +61,8 @@ func TestCodexInInput(t *testing.T) {
 		{"still there", codexScreen("› " + msg), true, true},
 		{"taken: its input empty", codexScreen("› Ask Codex to do anything"), false, true},
 		{"folded: not seen", codexScreen("› [Pasted Content 1200 chars]"), false, false},
-		{"no input told apart", codexScreen("› "+msg, "  nothing of its footer"), false, false},
+		{"an unknown footer", codexScreen("› "+msg, "  nothing of its footer"), true, true},
+		{"no input told apart", "› " + msg + "\n\n• answered\n", false, false},
 	} {
 		if w, k := codexInInput(c.screen, msg); w != c.waiting || k != c.known {
 			t.Errorf("%s: waiting %v known %v", c.name, w, k)
