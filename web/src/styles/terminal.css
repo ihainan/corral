@@ -1764,6 +1764,15 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 /* (A block of its own, tinted: never a bar at its left edge — the user's rule, 11-04.) */
 .convo-event.is-recap, .convo-event.is-goal, .convo-event.is-notice { margin: 0; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg-2); padding: 8px 12px; border-radius: var(--r); background: color-mix(in srgb, var(--term-fg) 4%, transparent); }
 .convo-event.is-recap .convo-trouble-head, .convo-event.is-goal .convo-trouble-head { color: var(--term-fg-3); font-size: var(--fs-note); line-height: var(--lh-note); }
+/* Another session's message (11-15): as a recap is, its sender above its words, a mark where it may relay others'. */
+.convo-event.is-peer { display: flex; gap: 8px; align-items: flex-start; margin: 0; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg-2); padding: 8px 12px; border-radius: var(--r); background: color-mix(in srgb, var(--term-accent-text) 6%, transparent); }
+.convo-event.is-peer > svg { flex: none; margin-top: 3px; color: var(--term-accent-text); }
+.convo-event.is-peer .convo-trouble-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; color: var(--term-fg-3); font-size: var(--fs-note); line-height: var(--lh-note); }
+.convo-peer-relayed { padding: 0 6px; border-radius: var(--r-xs); background: color-mix(in srgb, var(--term-fg) 7%, transparent); color: var(--term-fg-3); cursor: help; }
+.convo-peer-text { color: var(--term-fg); min-width: 0; overflow-wrap: anywhere; }
+.convo-peer-text p { margin: 0; }
+.convo-event.is-peer .link-btn { margin-top: 2px; font-size: var(--fs-note); line-height: var(--lh-note); }
+@media (forced-colors: active) { .convo-event.is-peer { border: 1px solid CanvasText; } }
 .convo-event.is-notice .convo-trouble-head { color: var(--term-fg-3); }
 .convo-event.is-notice.is-warn { background: color-mix(in srgb, var(--term-warn-text) 9%, transparent); }
 .convo-event.is-notice.is-warn .convo-trouble-head { color: var(--term-warn-text); }

@@ -65,6 +65,7 @@ const (
 const (
 	EventCompact     = "compact"      // the conversation was compacted
 	EventIdleCompact = "idle_compact" // (said after it) it was so while the session sat idle
+	EventPeer        = "peer"         // another session's agent wrote to this one (Claude Code's cross-session message), taken in
 	EventScheduled   = "scheduled"    // a scheduled task (or /loop) set a turn going
 	// The plan's usage limit (Claude Code's subscription): reached (until
 	// ResetsAt, of Kind), to go on of itself once it resets, reset, the
@@ -196,6 +197,11 @@ type Event struct {
 	Why  string `json:"why,omitempty"`
 	// (notice) how loud: "notice", "warning".
 	Level string `json:"level,omitempty"`
+	// (peer) which session wrote (its name), and whether it said it may pass
+	// on words others wrote (Claude Code's notice of that, taken off its
+	// words: a mark).
+	From    string `json:"from,omitempty"`
+	Relayed bool   `json:"relayed,omitempty"`
 	// (limit) when it resets (Unix seconds), and of what: "five_hour", …
 	ResetsAt  int64  `json:"resets_at,omitempty"`
 	LimitKind string `json:"limit_kind,omitempty"`
@@ -393,6 +399,7 @@ const (
 	maxTasks        = 50       // tasks of a task list
 	maxTitle        = 300      // the session's title, a task's subject
 	maxMeta         = 120      // a model's, a mode's, a branch's name
+	maxPeers        = 64       // other sessions' addresses kept, for whose they are
 	maxQueue        = 20       // messages waiting to be taken in
 	maxPatch        = 12 << 10 // an edit's patch, all its lines
 	maxFiles        = 20       // the files of one call whose patches are kept

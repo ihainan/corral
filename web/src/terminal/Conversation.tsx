@@ -3930,9 +3930,66 @@ function FoldLine({ label, open, onToggle }: { label: string; open: boolean; onT
 // The marks of Claude Code's word on its own commands (convoItems noteEvent).
 const SAID_ICONS: Record<string, typeof Info> = { effort: GaugeIcon, exit: LogOut, clear: SquarePlus, restart: RotateCw, rename: TextCursorInput, monitor: Radar, bg: SquareTerminal, agent: Bot, goal: Target, artifact: FileText }
 
+// Another session's words, as markdown, with what a reader looks for in
+// them in code: a version, a commit, an image's tag, a path (11-15: "Live:
+// v0.2.0-steps-…-5b30c6d … Rollback is corral:rollback-…" read as one run of
+// words). Not inside code it wrote as code already.
+const PEER_TOKEN = /(~\/[\w./-]+|\/(?:home|tmp|etc|var|opt|usr|srv)\/[\w./-]+|\bv\d+\.\d+\.\d+[\w.-]*|\b[a-z][a-z0-9-]*:[a-z0-9][\w.-]*\d[\w.-]*|\b(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])[0-9a-f]{7,12}\b)/g
+export function peerMarkdown(text: string): string {
+  return text
+    .split(/(```[\s\S]*?```|`[^`\n]*`)/)
+    .map((x, i) => (i % 2 ? x : x.replace(PEER_TOKEN, (m) => '`' + m.replace(/[.,;:]+$/, '') + '`' + m.slice(m.replace(/[.,;:]+$/, '').length))))
+    .join('')
+}
+// Its first line, as the sender meant it to be seen first (Claude Code shows
+// a message's first line as its preview); a long one, to its first sentence.
+export function peerHead(text: string): { head: string; more: boolean } {
+  const t = text.trim()
+  const nl = t.indexOf('\n')
+  let head = nl < 0 ? t : t.slice(0, nl)
+  if (head.length > 200) {
+    const m = /^[\s\S]{20,200}?[。！？!?](?=\s|$)|^[\s\S]{20,200}?\.(?=\s)/.exec(head)
+    head = m ? m[0] : head.slice(0, 200).replace(/\s+\S*$/, '') + '…'
+  }
+  return { head, more: head.length < t.length }
+}
+
+// Another session's agent wrote to this one (11-15): whose, its first line,
+// the rest opened by a tap; where it said it may pass on what others wrote,
+// a mark (Claude Code's paragraph on that taken off its words).
+function PeerNote({ ev }: { ev: ConvoEvent }) {
+  const [open, setOpen] = useState(false)
+  const text = ev.text ?? ''
+  const { head, more } = peerHead(text)
+  return (
+    <div className="convo-event is-peer">
+      <MessagesSquare size={14} aria-hidden="true" />
+      <div className="convo-trouble-body">
+        <p className="convo-trouble-head">
+          {t('convo.queuedFromName', { name: ev.from ?? '?' })}
+          {ev.relayed && (
+            <span className="convo-peer-relayed" title={t('convo.peerRelayedLong')}>
+              {t('convo.peerRelayed')}
+            </span>
+          )}
+        </p>
+        <div className="convo-peer-text">
+          <Markdown text={peerMarkdown(open ? text : head)} />
+        </div>
+        {more && (
+          <button type="button" className="link-btn" aria-expanded={open} onClick={() => setOpen(!open)}>
+            {t(open ? 'convo.trouble.less' : 'convo.peerAll')}
+          </button>
+        )}
+      </div>
+    </div>
+  )
+}
+
 function EventNote({ ev, idle, sum }: { ev: ConvoEvent; idle?: boolean; sum?: ConvoEntry }) {
   const [open, setOpen] = useState(false)
   const showTerminal = useContext(ShowTerminal)
+  if (ev.kind === 'peer') return <PeerNote ev={ev} />
   // What went on while the person was away; a goal set or judged; any other notice.
   if (ev.kind === 'recap' || ev.kind === 'goal' || ev.kind === 'notice') {
     const head = ev.kind === 'recap' ? t('convo.recap') : ev.kind === 'goal' ? t(ev.set ? 'convo.goal.set' : ev.met ? 'convo.goal.met' : 'convo.goal.unmet') : ev.text ?? ''

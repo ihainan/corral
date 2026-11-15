@@ -49,7 +49,8 @@ import (
 // Everything else (file snapshots, API bookkeeping) is skipped.
 // Feed it whole lines in order.
 type Claude struct {
-	sub     bool // (a subagent's own log: its side-chain rows are its own)
+	sub     bool              // (a subagent's own log: its side-chain rows are its own)
+	peers   map[string]string // other sessions that wrote to this one: address → name (peerOf)
 	entries []*Entry
 	tools   map[string]toolRef
 	rev     int
@@ -1093,6 +1094,12 @@ func (c *Claude) user(r *claudeRow) {
 			var s string
 			if json.Unmarshal(r.Message.Content, &s) == nil {
 				c.metaArrived(s)
+				// (Another session's message, taken in: shown where it came,
+				// whose and its words — 11-15, gone from sight once it was no
+				// longer waiting, the turn it set going told by nothing.)
+				if ev := c.peerOf(s); ev != nil {
+					c.add(r, RoleNote, []Part{{Kind: KindEvent, Event: ev}})
+				}
 			}
 		}
 		return
@@ -1289,6 +1296,49 @@ func bodyAfterTag(s, tag string) string {
 	return strings.TrimSpace(body)
 }
 
+// relayedMark: Claude Code's mark, after another session's words, that the
+// session may pass on what others wrote (a paragraph of its own follows).
+const relayedMark = "<artifact-content-authored-by-others/>"
+
+// peerWords: another session's words, its envelope off, and Claude Code's
+// note of words relayed (the mark and its paragraph, at their end) taken off
+// as well, and whether there was one.
+func peerWords(s string) (string, bool) {
+	body := bodyAfterTag(s, "cross-session-message")
+	if i := strings.Index(body, relayedMark); i >= 0 {
+		return strings.TrimSpace(body[:i]), true
+	}
+	return body, false
+}
+
+// peerOf: a message another session's agent wrote to this one (as Claude
+// Code takes it in: "Another Claude session sent a message:" and its
+// envelope), as an event; nil where s is none. Its sender's address kept,
+// for this one's answers to it (SendMessage to that address) to say whose.
+func (c *Claude) peerOf(s string) *Event {
+	i := strings.Index(s, "<cross-session-message")
+	if i < 0 {
+		return nil
+	}
+	m := crossSession.FindStringSubmatch(s[i:])
+	if m == nil {
+		return nil
+	}
+	words, relayed := peerWords(s[i:])
+	words = clean(words)
+	if words == "" {
+		return nil
+	}
+	name := clip(m[1], maxMeta)
+	if a := crossSessionAddr.FindStringSubmatch(s[i:]); a != nil && name != "" {
+		if c.peers == nil || len(c.peers) >= maxPeers {
+			c.peers = map[string]string{}
+		}
+		c.peers[clip(a[1], maxMeta)] = name
+	}
+	return &Event{Kind: EventPeer, From: name, Text: clip(words, maxDetail), Relayed: relayed}
+}
+
 // queuedText: what a message waiting to be taken in says, who it is from
 // (another session's agent) and whether it is a notice rather than anyone's
 // message. "" when it is of none of these.
@@ -1296,7 +1346,8 @@ func queuedText(s string) (text, from string, note bool) {
 	if m := crossSession.FindStringSubmatch(s); m != nil {
 		// (The envelope says where it came from, down to a socket and the
 		// hops it took: of that, only which session it was.)
-		return bodyAfterTag(s, "cross-session-message"), clip(m[1], maxMeta), true
+		w, _ := peerWords(s) // (Claude Code's note of words relayed: not the sender's)
+		return w, clip(m[1], maxMeta), true
 	}
 	if strings.HasPrefix(strings.TrimSpace(s), "[Cross-session idle notice]") {
 		return strings.TrimSpace(s), "", true
@@ -1765,6 +1816,13 @@ func (c *Claude) assistant(r *claudeRow) {
 		case "tool_use", "server_tool_use":
 			t := &Tool{ID: clip(b.ID, maxID), Name: clip(b.Name, 128)}
 			t.Title, t.Detail, t.Old, t.New = toolInput(b.Name, b.Input)
+			// (Another session written to by its address: by its name, as its
+			// message said it — not a socket's path.)
+			if b.Name == "SendMessage" && strings.HasPrefix(t.Title, "uds:") {
+				if n := c.peers[t.Title]; n != "" {
+					t.Title = n
+				}
+			}
 			// (What a subagent hands back is its answer, shown as one: kept as a text is.)
 			if b.Name == subagentHandback {
 				var h struct {
@@ -2613,12 +2671,13 @@ func resultText(raw json.RawMessage) (text string, images, refs int) {
 // purposes in tags; the person's own text that happens to start with "<" is
 // kept as it is.
 var (
-	envelopeTag  = regexp.MustCompile(`^\s*<([a-z][a-z0-9-]*)[\s>]`)
-	taskSummary  = regexp.MustCompile(`(?s)<summary>(.*?)</summary>`)
-	taskStatus   = regexp.MustCompile(`(?s)<status>(.*?)</status>`)
-	taskID       = regexp.MustCompile(`(?s)<task-id>(.*?)</task-id>`)
-	crossSession = regexp.MustCompile(`^\s*<cross-session-message[^>]*\bfrom-name="([^"]*)"`)
-	taskEvent    = regexp.MustCompile(`(?s)<event>(.*?)</event>`)
+	envelopeTag      = regexp.MustCompile(`^\s*<([a-z][a-z0-9-]*)[\s>]`)
+	taskSummary      = regexp.MustCompile(`(?s)<summary>(.*?)</summary>`)
+	taskStatus       = regexp.MustCompile(`(?s)<status>(.*?)</status>`)
+	taskID           = regexp.MustCompile(`(?s)<task-id>(.*?)</task-id>`)
+	crossSession     = regexp.MustCompile(`^\s*<cross-session-message[^>]*\bfrom-name="([^"]*)"`)
+	crossSessionAddr = regexp.MustCompile(`^\s*<cross-session-message[^>]*\sfrom="([^"]*)"`)
+	taskEvent        = regexp.MustCompile(`(?s)<event>(.*?)</event>`)
 	// "[Monitor expired after 30m with 2 events delivered. Re-arm it if you
 	// still need the watch.]", "[Monitor timed out — re-arm if needed.]",
 	// "[Monitor stopped]"…

@@ -103,7 +103,9 @@ export interface ConvoShell {
 // and after; how long it took), a notice that that was while it sat idle,
 // a scheduled task (or a loop's) set a turn going with its prompt.
 export interface ConvoEvent {
-  kind: 'compact' | 'idle_compact' | 'scheduled' | 'limit' | 'limit_wait' | 'limit_reset' | 'limit_cancelled' | 'recap' | 'goal' | 'notice' | 'task' | 'model' | 'said'
+  kind: 'compact' | 'idle_compact' | 'scheduled' | 'limit' | 'limit_wait' | 'limit_reset' | 'limit_cancelled' | 'recap' | 'goal' | 'notice' | 'task' | 'model' | 'said' | 'peer'
+  from?: string // (peer) the session that wrote, by its name
+  relayed?: boolean // (peer) it said it may pass on words others wrote
   trigger?: string
   pre?: number
   post?: number
