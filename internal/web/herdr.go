@@ -843,6 +843,7 @@ func (s *Server) watchHerdr(sess *term.Session, h *store.Host) {
 		},
 	)
 	latest = w.Latest
+	go s.recheckSeen(ctx, sess, rounds, w.Latest) // (see recheck)
 	s.herdrSocks.setServer(sess.ID, server, sess.OwnerID, w.LatestAt, w.Again)
 	// An agent looked at: the last summary goes again, with it no longer
 	// "done"; or what one left running told.

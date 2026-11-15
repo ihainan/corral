@@ -62,7 +62,35 @@ type seenRounds struct {
 	wrote  map[string]int64 // (what it found: pane → its log last written, unix ms)
 	lost   bool             // (herdr lost: what went on meanwhile is looked for once it is back)
 	gen    int64            // (looks begun before herdr was last lost or back count for nothing)
+
+	// A "done" that may be one looked at, over again (see recheck): last,
+	// the latest look at each pane (this watcher's, or kept from before
+	// it); left, when it last went from "done" to another status (unix
+	// ms); pending, the round of "done" its log is to be read for; quiet,
+	// the round its log said was the one looked at.
+	last    map[string]store.AgentSeen
+	left    map[string]int64
+	pending map[string]int64
+	quiet   map[string]int64
 }
+
+// seenAwayMax: how long an agent may be away from "done" and still be
+// taken, back, for a "done" looked at over again if its log says so
+// (see recheck). Longer, it was at work.
+const seenAwayMax = 60 * time.Second
+
+// recheck: herdr counts every change of an agent's state, not its turns'
+// ends only. herdr 0.8 seen (11-15): a Codex finished on 11-12, looked at
+// on 11-14 and nothing written since, was told anew at 09:13 (from
+// "#2535" to "#2746", its screen and log as they were), when another
+// client of its app-server daemon came in; looked at, it was "done" in
+// For you again. So a "done" of a pane looked at before, back after a
+// short while at another status (or first seen by this watcher, kept
+// from before it, its mark not that looked at), is read for in its log:
+// one not written since that look is the "done" looked at. Till that is
+// read, and where its log is not known for sure, it is "done": a turn's
+// end hidden is worse than one told twice. (Codex only, the one seen to
+// do it: see codexRecheck.)
 
 type seenRound struct {
 	status, session string
@@ -78,9 +106,7 @@ func (r *seenRounds) changed(pane, to, session string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if to == herdr.StatusGone {
-		delete(r.at, pane)
-		delete(r.seen, pane)
-		delete(r.prior, pane)
+		r.forget(pane)
 		return
 	}
 	if to != herdr.StatusDone {
@@ -100,10 +126,82 @@ func (r *seenRounds) next(pane, status, session string) seenRound {
 	if r.at == nil {
 		r.at = map[string]seenRound{}
 	}
+	was, had := r.at[pane]
+	now := time.Now().UnixMilli()
+	if had && was.status == herdr.StatusDone && status != herdr.StatusDone {
+		setMs(&r.left, pane, now)
+	}
 	r.n++
 	x := seenRound{status: status, session: session, n: r.n}
 	r.at[pane] = x
+	if status == herdr.StatusDone {
+		// (Back to "done" soon, or first seen with a look kept from before
+		// this watcher: its log is read for whether it is the one looked
+		// at. See recheck.)
+		left, away := r.left[pane]
+		_, kept := r.prior[pane]
+		if l, ok := r.last[pane]; ok && l.Session == session && (had && away && now-left <= seenAwayMax.Milliseconds() || !had && kept) {
+			setMs(&r.pending, pane, x.n)
+		}
+		delete(r.left, pane)
+	}
 	return x
+}
+
+// forget: pane is gone. (With r.mu held.)
+func (r *seenRounds) forget(pane string) {
+	delete(r.at, pane)
+	delete(r.seen, pane)
+	delete(r.prior, pane)
+	delete(r.last, pane)
+	delete(r.left, pane)
+	delete(r.pending, pane)
+	delete(r.quiet, pane)
+}
+
+func setMs(m *map[string]int64, k string, v int64) {
+	if *m == nil {
+		*m = map[string]int64{}
+	}
+	(*m)[k] = v
+}
+
+// toCheck: the panes whose log is to be read (see recheck), by the round
+// of "done" each is to be read for.
+func (r *seenRounds) toCheck() map[string]int64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.pending) == 0 {
+		return nil
+	}
+	out := make(map[string]int64, len(r.pending))
+	for p, n := range r.pending {
+		out[p] = n
+	}
+	return out
+}
+
+// checked takes in what pane's log said for its round of "done" round:
+// wrote, when it was last written (unix ms, the gateway's clock; 0: not
+// known). Not written since pane was last looked at: that round is told
+// as the one looked at. (Asked for a round no longer the pane's: nothing.)
+func (r *seenRounds) checked(pane string, round, wrote int64) {
+	r.mu.Lock()
+	if r.pending[pane] == round {
+		delete(r.pending, pane)
+	}
+	x, ok := r.at[pane]
+	l, looked := r.last[pane]
+	if !ok || x.n != round || x.status != herdr.StatusDone || !looked || l.Session != x.session || wrote <= 0 || wrote > l.At {
+		r.mu.Unlock()
+		return
+	}
+	setMs(&r.quiet, pane, round)
+	poke := r.poke
+	r.mu.Unlock()
+	if poke != nil {
+		poke()
+	}
 }
 
 // number gives each agent of sum its round: a status or an agent session
@@ -146,6 +244,9 @@ func (r *seenRounds) number(sum *herdrSummary, old bool) {
 		if !here[p] {
 			delete(r.at, p)
 			delete(r.seen, p)
+			delete(r.left, p)
+			delete(r.pending, p)
+			delete(r.quiet, p)
 		}
 	}
 }
@@ -189,6 +290,12 @@ func (r *seenRounds) markSeen(pane string, round int64, session string) (bool, e
 		x.at = k.At
 		r.seen[pane] = x
 	}
+	if l, ok := r.last[pane]; !ok || l.At < k.At { // (of its round still: see recheck)
+		if r.last == nil {
+			r.last = map[string]store.AgentSeen{}
+		}
+		r.last[pane] = k
+	}
 	poke := r.poke
 	r.mu.Unlock()
 	if poke != nil {
@@ -209,7 +316,11 @@ func (r *seenRounds) current(pane string) (seenRound, bool) {
 // watcher; keep, how to keep more (as it is looked at, before it is said
 // noted).
 func newSeenRounds(prior map[string]store.AgentSeen, keep func(pane string, a store.AgentSeen) error) *seenRounds {
-	return &seenRounds{prior: prior, keep: keep}
+	last := make(map[string]store.AgentSeen, len(prior))
+	for p, k := range prior {
+		last[p] = k
+	}
+	return &seenRounds{prior: prior, keep: keep, last: last}
 }
 
 // wantsLook: a look over the host is wanted for what was kept (see
@@ -289,6 +400,8 @@ func (r *seenRounds) withSeen(sum herdrSummary) herdrSummary {
 				w.Agents[j].Status = herdr.StatusIdle
 			} else if k, ok := r.prior[a.PaneID]; ok && k.Session == a.Session && r.lookedBefore(k, a) {
 				w.Agents[j].Status = herdr.StatusIdle // (looked at before this watcher: see seenRounds)
+			} else if q, ok := r.quiet[a.PaneID]; ok && q == a.Round && a.Round != 0 {
+				w.Agents[j].Status = herdr.StatusIdle // (its log not written since it was looked at: see recheck)
 			}
 		}
 		ws[i] = w
