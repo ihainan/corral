@@ -273,28 +273,44 @@ func TestParseGitChangesStates(t *testing.T) {
 func TestGitCallsBounded(t *testing.T) {
 	var c gitCalls
 	ctx := context.Background()
-	big := &gitChanges{Files: []gitChangedFile{{Path: strings.Repeat("x", 4<<20)}}}
+	one := func(context.Context) ([]byte, error) { return []byte("1"), nil }
+	big := func(context.Context) ([]byte, error) { return make([]byte, 4<<20), nil }
+	// What it counts is what it holds: its bytes, each answer's.
+	held := func() int {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		n := 0
+		for _, e := range c.m {
+			n += len(e.b)
+		}
+		if n != c.bytes {
+			t.Fatalf("counted %d, held %d", c.bytes, n)
+		}
+		return n
+	}
 	for i := 0; i < 3*gitCacheMax; i++ {
-		c.do(ctx, strconv.Itoa(i), time.Hour, func(context.Context) (any, error) { return 1, nil })
+		c.do(ctx, strconv.Itoa(i), time.Hour, one)
 	}
 	if len(c.m) > gitCacheMax {
 		t.Fatalf("%d kept", len(c.m))
 	}
+	held()
 	for i := 0; i < 20; i++ {
-		c.do(ctx, "big"+strconv.Itoa(i), time.Hour, func(context.Context) (any, error) { return big, nil })
+		c.do(ctx, "big"+strconv.Itoa(i), time.Hour, big)
 	}
-	if c.bytes > gitCacheBytes {
-		t.Fatalf("%d bytes kept", c.bytes)
+	if n := held(); n > gitCacheBytes {
+		t.Fatalf("%d bytes kept", n)
 	}
-	c.do(ctx, "short", time.Millisecond, func(context.Context) (any, error) { return 1, nil })
+	c.do(ctx, "short", time.Millisecond, one)
 	time.Sleep(5 * time.Millisecond)
-	c.do(ctx, "next", time.Hour, func(context.Context) (any, error) { return 1, nil })
+	c.do(ctx, "next", time.Hour, one)
 	c.mu.Lock()
 	_, kept := c.m["short"]
 	c.mu.Unlock()
 	if kept {
 		t.Fatal("kept past its while")
 	}
+	held()
 }
 
 // Through the gateway: the pane's folder from tmux, the script run on the host,
@@ -347,7 +363,7 @@ func TestGitChangesEndpoint(t *testing.T) {
 	}
 }
 
-// The pane as the host is asked of it: none of a tmux session's (so not a key
+// The pane as the host is asked of it: a tmux pane of its form, else none (so not a key
 // the page can vary), a herdr pane's of its form.
 func TestGitPane(t *testing.T) {
 	tmux, hd := &term.Session{Persistence: "tmux"}, &term.Session{Persistence: "herdr"}
@@ -356,7 +372,7 @@ func TestGitPane(t *testing.T) {
 		in   string
 		want string
 		ok   bool
-	}{{tmux, "%3", "", true}, {tmux, "anything", "", true}, {hd, "w1:p2", "w1:p2", true}, {hd, "w1 p2", "", false}, {hd, strings.Repeat("a", gitPaneMax+1), "", false}, {hd, "", "", true}} {
+	}{{tmux, "%3", "%3", true}, {tmux, "anything", "", true}, {hd, "w1:p2", "w1:p2", true}, {hd, "w1 p2", "", false}, {hd, strings.Repeat("a", gitPaneMax+1), "", false}, {hd, "", "", true}} {
 		if got, ok := gitPane(c.s, c.in); got != c.want || ok != c.ok {
 			t.Errorf("%s %q: %q %v", c.s.Persistence, c.in, got, ok)
 		}
@@ -364,8 +380,7 @@ func TestGitPane(t *testing.T) {
 }
 
 // Review, 11-15 (2): the cap fell in a change of type's second chunk's head —
-// its first read, its second not: said cut, not whole. And an answer counts
-// the host's output it holds on to, not only what it shows.
+// its first read, its second not: said cut, not whole.
 func TestGitChangesCutTypeChange(t *testing.T) {
 	s := ":120000 100644 a b T\x00link\x00:100644 100644 a b M\x00z.txt\x00" +
 		"1\t1\tlink\x001\t0\tz.txt\x00\x00" +
@@ -374,9 +389,5 @@ func TestGitChangesCutTypeChange(t *testing.T) {
 	files, _ := parseGitDiff(s, true)
 	if len(files) != 2 || files[0].Path != "link" || !files[0].Cut || len(files[0].Hunks) != 1 || !files[1].Omitted {
 		t.Fatalf("%+v", files)
-	}
-	g := &gitChanges{raw: 2 << 20, Files: files}
-	if g.approxSize() < 2<<20 {
-		t.Fatalf("size %d", g.approxSize())
 	}
 }

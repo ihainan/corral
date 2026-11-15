@@ -175,17 +175,17 @@ func TestGitInfoCommandRuns(t *testing.T) {
 func TestGitCallsOneAtATime(t *testing.T) {
 	var c gitCalls
 	var calls atomic.Int32
-	slow := func(context.Context) (any, error) {
+	slow := func(context.Context) ([]byte, error) {
 		calls.Add(1)
 		time.Sleep(50 * time.Millisecond)
-		return 1, nil
+		return []byte("1"), nil
 	}
 	var wg sync.WaitGroup
 	for range 5 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if v, err := c.do(context.Background(), "k", time.Second, slow); err != nil || v != 1 {
+			if v, err := c.do(context.Background(), "k", time.Second, slow); err != nil || string(v) != "1" {
 				t.Errorf("%v %v", v, err)
 			}
 		}()
@@ -213,14 +213,14 @@ func TestGitCallsOneAtATime(t *testing.T) {
 	if err := <-done; err == nil {
 		t.Fatal("the one who gave up was answered")
 	}
-	if v, err := c.do(context.Background(), "k2", time.Second, slow); err != nil || v != 1 {
+	if v, err := c.do(context.Background(), "k2", time.Second, slow); err != nil || string(v) != "1" {
 		t.Fatalf("the other: %v %v", v, err)
 	}
 	if calls.Load() != 3 {
 		t.Fatalf("asked %d times", calls.Load())
 	}
 	// An error is not kept.
-	fail := func(context.Context) (any, error) { calls.Add(1); return nil, errGitUnsaid }
+	fail := func(context.Context) ([]byte, error) { calls.Add(1); return nil, errGitUnsaid }
 	c.do(context.Background(), "k3", time.Minute, fail)
 	c.do(context.Background(), "k3", time.Minute, fail)
 	if calls.Load() != 5 {

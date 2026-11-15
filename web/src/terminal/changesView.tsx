@@ -222,31 +222,25 @@ export function ChangesView({ sid, pane, base, start, acts, onClose }: { sid: st
                   {open &&
                     (f.binary ? (
                       <p className="gch-file-note">{t('gch.binary')}</p>
-                    ) : f.omitted ? (
-                      <div className="gch-file-note">
-                        <span>{typeof st === 'string' && st !== 'loading' ? st : t('gch.omitted')}</span>
-                        <button type="button" className="btn" disabled={st === 'loading'} onClick={() => loadAlone(f)}>
-                          {st === 'loading' ? t('common.loading') : t('gch.load')}
-                        </button>
-                      </div>
-                    ) : f.hunks?.length ? (
+                    ) : (
                       <>
-                        <Hunks hunks={f.hunks} className="is-whole" />
-                        {/* (Cut with others: read alone it may come whole — a change of type's second half, say.) */}
-                        {f.cut && (
+                        {!!f.hunks?.length && <Hunks hunks={f.hunks} className="is-whole" />}
+                        {/* (Left out, or cut with others — lines of it or none, a change of type's second
+                            half, say: said so whatever was read, and read alone on asking; asked again
+                            after a failure — review, 11-15. Read alone and still cut: said, no more to ask.) */}
+                        {f.omitted || f.cut ? (
                           <div className="gch-file-note">
-                            <span>{typeof st === 'string' && st !== 'loading' ? st : t('gch.cut')}</span>
-                            {!st && (
-                              <button type="button" className="btn" onClick={() => loadAlone(f)}>
-                                {t('gch.load')}
+                            <span>{typeof st === 'string' && st !== 'loading' ? st : t(f.omitted ? 'gch.omitted' : 'gch.cut')}</span>
+                            {typeof st !== 'object' && (
+                              <button type="button" className="btn" disabled={st === 'loading'} onClick={() => loadAlone(f)}>
+                                {st === 'loading' ? t('common.loading') : t(st ? 'common.retry' : 'gch.load')}
                               </button>
                             )}
-                            {st === 'loading' && <span>{t('common.loading')}</span>}
                           </div>
+                        ) : (
+                          !f.hunks?.length && <p className="gch-file-note">{t(f.from ? 'gch.movedOnly' : 'gch.noLines')}</p>
                         )}
                       </>
-                    ) : (
-                      <p className="gch-file-note">{t(f.from ? 'gch.movedOnly' : 'gch.noLines')}</p>
                     ))}
                   {!open && n > 0 && (
                     <button type="button" className="gch-file-note gch-unfold" onClick={() => put(setFolded, f.path, false)}>

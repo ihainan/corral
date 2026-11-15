@@ -274,10 +274,12 @@ func parseGitPR(out string) (gh bool, pr *gitPR, ok bool) {
 
 // gitCalls caches each folder's answer a while, and has a second asker of
 // one under way wait for it rather than ask the host again. An answer is
-// kept only its while (ttl) and no longer; and at most gitCacheMax of them,
-// gitCacheBytes in all (as their approxSize says: a Changes answer may be
-// megabytes), the oldest going first — keys the page varies (a file's path)
-// cannot grow it past that (review, 11-15).
+// kept as the JSON it is sent as — its bytes and nothing else, so what it
+// holds is what it counts (the parsed answer's strings kept the host's
+// whole output alive behind them: three reviews running, 11-15) — only
+// its while (ttl) and no longer; at most gitCacheMax of them, gitCacheBytes
+// in all, the oldest going first: keys the page varies (a file's path)
+// cannot grow it past that.
 type gitCalls struct {
 	mu    sync.Mutex
 	m     map[string]*gitCall
@@ -288,8 +290,7 @@ type gitCall struct {
 	done chan struct{}
 	at   time.Time
 	ttl  time.Duration
-	size int
-	v    any
+	b    []byte
 	err  error
 }
 
@@ -298,12 +299,9 @@ const (
 	gitCacheBytes = 32 << 20
 )
 
-// sized: an answer that says roughly how much it holds.
-type sized interface{ approxSize() int }
-
 // f runs on a context of its own (gitWork long), not the first asker's: one
 // asker giving up does not fail the others, nor end what still runs.
-func (c *gitCalls) do(ctx context.Context, key string, ttl time.Duration, f func(context.Context) (any, error)) (any, error) {
+func (c *gitCalls) do(ctx context.Context, key string, ttl time.Duration, f func(context.Context) ([]byte, error)) ([]byte, error) {
 	c.mu.Lock()
 	if c.m == nil {
 		c.m = map[string]*gitCall{}
@@ -313,13 +311,13 @@ func (c *gitCalls) do(ctx context.Context, key string, ttl time.Duration, f func
 		case <-e.done:
 			if e.err == nil && time.Since(e.at) < ttl {
 				c.mu.Unlock()
-				return e.v, nil
+				return e.b, nil
 			}
 		default:
 			c.mu.Unlock()
 			select {
 			case <-e.done:
-				return e.v, e.err
+				return e.b, e.err
 			case <-ctx.Done():
 				return nil, ctx.Err()
 			}
@@ -332,17 +330,14 @@ func (c *gitCalls) do(ctx context.Context, key string, ttl time.Duration, f func
 	go func() {
 		wctx, cancel := context.WithTimeout(context.Background(), gitWork)
 		defer cancel()
-		v, err := f(wctx)
+		b, err := f(wctx)
 		c.mu.Lock()
-		e.v, e.err, e.at = v, err, time.Now()
-		if sz, ok := v.(sized); ok && err == nil {
-			e.size = sz.approxSize()
-		}
+		e.b, e.err, e.at = b, err, time.Now()
 		if c.m[key] == e {
 			if err != nil {
 				delete(c.m, key)
 			} else {
-				c.bytes += e.size
+				c.bytes += len(e.b)
 				c.sweep(gitCacheMax)
 			}
 		}
@@ -351,7 +346,7 @@ func (c *gitCalls) do(ctx context.Context, key string, ttl time.Duration, f func
 	}()
 	select {
 	case <-e.done:
-		return e.v, e.err
+		return e.b, e.err
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
@@ -385,14 +380,14 @@ func (c *gitCalls) sweep(max int) {
 }
 
 func (c *gitCalls) drop(k string) {
-	c.bytes -= c.m[k].size
+	c.bytes -= len(c.m[k].b)
 	delete(c.m, k)
 }
 
 // gitPane: the pane the page names as the host is asked of it (paneCwd) — a
-// herdr pane's id, of its form; none of a tmux session's, whose folder is
-// its active pane's whatever the page says (so not a key of the cache it
-// could vary: review, 11-15).
+// herdr pane's id, of its form; a tmux pane's of its ("%3"); anything else
+// of a tmux session's as none, its active pane (so not a key of the cache
+// it could vary: review, 11-15).
 func gitPane(sess *term.Session, pane string) (string, bool) {
 	if pane == "" {
 		return "", true
@@ -401,6 +396,10 @@ func gitPane(sess *term.Session, pane string) (string, bool) {
 		return "", false
 	}
 	if sess.Persistence != "herdr" {
+		// (A tmux pane of its form is asked of — paneCwd; anything else, as none: its active one.)
+		if tmuxPaneID.MatchString(pane) {
+			return pane, true
+		}
 		return "", true
 	}
 	if !herdrPaneID.MatchString(pane) {
@@ -447,7 +446,7 @@ func (s *Server) gitAnswer(w http.ResponseWriter, r *http.Request, pr bool) {
 		}
 		key += "\x00" + root + "\x00" + branch
 	}
-	v, err := s.gitCalls.do(ctx, key, ttl, func(ctx context.Context) (any, error) {
+	v, err := s.gitCalls.do(ctx, key, ttl, func(ctx context.Context) ([]byte, error) {
 		cwd, err := s.paneCwd(ctx, sess, pane)
 		if err != nil {
 			return nil, err
@@ -464,14 +463,14 @@ func (s *Server) gitAnswer(w http.ResponseWriter, r *http.Request, pr bool) {
 			if !ok {
 				return nil, errGitUnsaid
 			}
-			return map[string]any{"gh": gh, "pr": p}, nil
+			return json.Marshal(map[string]any{"gh": gh, "pr": p})
 		}
 		g := parseGitInfo(string(out))
 		if g.Reason == "timeout" {
 			return nil, errGitUnsaid
 		}
 		g.Dir = cwd
-		return g, nil
+		return json.Marshal(g)
 	})
 	switch {
 	case errors.Is(err, errGitNoDir):
@@ -485,6 +484,6 @@ func (s *Server) gitAnswer(w http.ResponseWriter, r *http.Request, pr bool) {
 	case err != nil:
 		writeError(w, http.StatusBadGateway, "host_error", "the host did not say")
 	default:
-		writeJSON(w, http.StatusOK, v)
+		writeJSONBytes(w, r, http.StatusOK, v)
 	}
 }

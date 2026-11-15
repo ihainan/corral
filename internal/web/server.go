@@ -619,19 +619,25 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 func writeJSONCompressed(w http.ResponseWriter, r *http.Request, status int, v any) {
 	var buf bytes.Buffer
 	_ = json.NewEncoder(&buf).Encode(v)
+	writeJSONBytes(w, r, status, buf.Bytes())
+}
+
+// writeJSONBytes is writeJSONCompressed of an answer encoded already (one
+// kept as its bytes: the session card's git, git_info.go's gitCalls).
+func writeJSONBytes(w http.ResponseWriter, r *http.Request, status int, b []byte) {
 	h := w.Header()
 	h.Set("Content-Type", "application/json; charset=utf-8")
 	h.Set("Cache-Control", "no-store")
 	h.Add("Vary", "Accept-Encoding")
-	if buf.Len() < compressFrom || !acceptsEncoding(r.Header.Get("Accept-Encoding"), "gzip") {
+	if len(b) < compressFrom || !acceptsEncoding(r.Header.Get("Accept-Encoding"), "gzip") {
 		w.WriteHeader(status)
-		_, _ = w.Write(buf.Bytes())
+		_, _ = w.Write(b)
 		return
 	}
 	h.Set("Content-Encoding", "gzip")
 	w.WriteHeader(status)
 	zw, _ := gzip.NewWriterLevel(w, gzip.BestSpeed)
-	_, _ = zw.Write(buf.Bytes())
+	_, _ = zw.Write(b)
 	_ = zw.Close()
 }
 

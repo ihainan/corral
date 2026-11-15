@@ -604,16 +604,22 @@ func removeTreeCommand(p string) string {
 
 // Terminal folder ----------------------------------------------------------------
 
-// apiFilesCwd reports the folder the terminal is in, where the host can tell
-// (see sessionCwd). Otherwise the path is empty.
+// apiFilesCwd reports the folder the terminal is in (?pane=: that pane's),
+// where the host can tell (see paneCwd). Otherwise the path is empty.
 func (s *Server) apiFilesCwd(w http.ResponseWriter, r *http.Request) {
 	sess, ok := s.runningSession(w, r)
 	if !ok {
 		return
 	}
+	// (?pane=: that pane's — a conversation's, for a path it names relative to its folder.)
+	pane, ok := gitPane(sess, r.URL.Query().Get("pane"))
+	if !ok {
+		writeError(w, http.StatusBadRequest, "bad_request", "no such pane")
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
-	cwd, err := s.sessionCwd(ctx, sess)
+	cwd, err := s.paneCwd(ctx, sess, pane)
 	if errors.Is(err, sshx.ErrBusy) {
 		writeError(w, http.StatusTooManyRequests, "busy", "the host is still answering earlier requests")
 		return
@@ -634,7 +640,13 @@ func (s *Server) paneCwd(ctx context.Context, sess *term.Session, pane string) (
 	cwd := ""
 	switch sess.Persistence {
 	case "tmux":
-		out, err := sshx.Output(ctx, sess.Client(), tmuxCwdCommand(sess.TmuxSession), 8192)
+		// (A pane of its own named — the conversation's, "%3" — that pane's, where it is
+		// of this session; none: its active one. Never another's for it: review 11-15.)
+		cmd := tmuxCwdCommand(sess.TmuxSession)
+		if tmuxPaneID.MatchString(pane) {
+			cmd = tmuxPaneCwdCommand(sess.TmuxSession, pane)
+		}
+		out, err := sshx.Output(ctx, sess.Client(), cmd, 8192)
 		if errors.Is(err, sshx.ErrBusy) {
 			return "", err
 		}
@@ -673,6 +685,15 @@ func tmuxCwdCommand(name string) string {
 	script := `PATH="$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"; ` +
 		`exec tmux -u display-message -p -t "=$1:" '#{pane_current_path}'`
 	return "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(name)
+}
+
+// tmuxPaneCwdCommand prints a pane's folder, where that pane is of the
+// session named (else nothing). Fixed script; the validated session name
+// and pane id ("%3") are its arguments.
+func tmuxPaneCwdCommand(name, pane string) string {
+	script := `PATH="$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"; ` +
+		`s=$(tmux -u display-message -p -t "$2" '#{session_name}' 2>/dev/null) && [ "$s" = "$1" ] && exec tmux -u display-message -p -t "$2" '#{pane_current_path}'; exit 0`
+	return "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(name) + " " + sshx.QuoteShell(pane)
 }
 
 // Transfers --------------------------------------------------------------------

@@ -525,3 +525,37 @@ func TestGeminiCommandLine(t *testing.T) {
 		}
 	}
 }
+
+// A pane named (a conversation's, "%3"): that pane's folder, where it is of
+// this session; another session's: none, never the active pane's instead.
+func TestFilesCwdOfAPane(t *testing.T) {
+	h := newHarness(t)
+	admin := h.admin()
+	home := t.TempDir()
+	srv := h.sshServer(home)
+	bin := filepath.Join(home, ".local", "bin")
+	os.MkdirAll(bin, 0o755)
+	os.WriteFile(filepath.Join(bin, "tmux"), []byte(`#!/bin/sh
+case "$5|$6" in
+  "=work:|#{pane_current_path}") echo /srv/active ;;
+  "%3|#{session_name}") echo work ;;
+  "%3|#{pane_current_path}") echo /srv/pane3 ;;
+  "%9|#{session_name}") echo other ;;
+  "%9|#{pane_current_path}") echo /srv/elsewhere ;;
+esac
+`), 0o755)
+	srv.HandleExec(testutil.ShellExec(home, func(cmd string) bool { return strings.Contains(cmd, "display-message") }))
+	r := admin.do("POST", "/api/hosts", map[string]any{"name": "box", "address": "127.0.0.1", "port": srv.Addr.Port,
+		"username": "alice", "auth": "password", "password": "alice-pass", "persistence": "tmux", "tmux_session": "work"})
+	mustStatus(t, r, 201, "create host")
+	r = admin.do("POST", "/api/sessions", map[string]any{"host_id": r.json()["id"]})
+	mustStatus(t, r, 201, "open session")
+	url := "/api/sessions/" + r.json()["id"].(string) + "/files/cwd"
+	for q, want := range map[string]string{"": "/srv/active", "?pane=%253": "/srv/pane3", "?pane=%259": ""} {
+		r := admin.do("GET", url+q, nil)
+		mustStatus(t, r, 200, "cwd "+q)
+		if r.json()["path"] != want {
+			t.Errorf("%q: %v, want %q", q, r.json()["path"], want)
+		}
+	}
+}

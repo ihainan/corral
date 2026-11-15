@@ -22,6 +22,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"path"
@@ -126,29 +127,9 @@ type gitChanges struct {
 	More          bool     `json:"more,omitempty"`
 	Untracked     []string `json:"untracked,omitempty"`
 	UntrackedMore bool     `json:"untracked_more,omitempty"`
-	raw           int      // (the host's output it was read from, its size: see approxSize)
 }
 
 // approxSize: roughly what it holds, for the cache's bound (gitCalls).
-// (Its strings are of the host's output, which they keep whole: that is
-// counted whole, raw, with what was made of it.)
-func (g *gitChanges) approxSize() int {
-	n := g.raw + len(g.Root) + len(g.Base)
-	for _, f := range g.Files {
-		n += 64 + len(f.Path) + len(f.From)
-		for _, h := range f.Hunks {
-			n += 32
-			for _, l := range h.Lines {
-				n += 16 + len(l)
-			}
-		}
-	}
-	for _, u := range g.Untracked {
-		n += 16 + len(u)
-	}
-	return n
-}
-
 // errGitTimeout: the diff was given up on (too slow): not kept.
 var errGitTimeout = errors.New("git took too long")
 
@@ -536,7 +517,7 @@ func (s *Server) apiGitChanges(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	w.Header().Set("Cache-Control", "no-store")
 	key := "changes\x00" + sess.ID + "\x00" + pane + "\x00" + against + "\x00" + file + "\x00" + from
-	v, err := s.gitCalls.do(ctx, key, gitInfoTTL, func(ctx context.Context) (any, error) {
+	v, err := s.gitCalls.do(ctx, key, gitInfoTTL, func(ctx context.Context) ([]byte, error) {
 		cwd, err := s.paneCwd(ctx, sess, pane)
 		if err != nil {
 			return nil, err
@@ -553,8 +534,7 @@ func (s *Server) apiGitChanges(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return nil, err
 		}
-		g.raw = len(out)
-		return &g, nil
+		return json.Marshal(g) // (kept as these bytes alone: see gitCalls)
 	})
 	switch {
 	case errors.Is(err, errGitNoDir):
@@ -566,6 +546,6 @@ func (s *Server) apiGitChanges(w http.ResponseWriter, r *http.Request) {
 	case err != nil:
 		writeError(w, http.StatusBadGateway, "host_error", "the host did not say")
 	default:
-		writeJSONCompressed(w, r, http.StatusOK, v)
+		writeJSONBytes(w, r, http.StatusOK, v)
 	}
 }

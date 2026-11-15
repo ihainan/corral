@@ -792,10 +792,11 @@ const homes = new Map<string, string | Promise<string>>()
 // there is said so, not opened as another or as nothing. Its folder listed
 // to find it (one the host lists only in part, and does not show it in that
 // part, is taken as there: the act itself then says).
-// (No folder of its row — a tmux session's has no row: the session's own,
-// its active pane's, which is the conversation's — review, 11-15.)
-async function underCwd(sid: string, cwd: string | undefined, rel: string): Promise<string> {
-  if (!cwd) cwd = await api<{ path?: string }>('GET', `/api/sessions/${sid}/files/cwd`).then((r) => r.path, () => undefined)
+// (No folder of its row — a tmux session's has no row: its pane's, the
+// conversation's own, asked of the host; never the focused one's, which may
+// be another's — review, 11-15. No pane known: not known.)
+async function underCwd(sid: string, cwd: string | undefined, pane: string | undefined, rel: string): Promise<string> {
+  if (!cwd && pane) cwd = await api<{ path?: string }>('GET', `/api/sessions/${sid}/files/cwd?pane=` + encodeURIComponent(pane)).then((r) => r.path, () => undefined)
   if (!cwd?.startsWith('/')) throw new Error(t('convo.path.noCwd'))
   const base = cwd.replace(/\/+$/, '') // ("/": "", the root's files "/x")
   const full = base + '/' + rel
@@ -891,13 +892,13 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   activeNow.current = active
   useEffect(() => void actN.current++, [sid, active])
   // (The agent's folder as it is when a relative path is acted on.)
-  const cwdNow = useRef<string | undefined>(undefined)
-  cwdNow.current = row?.a.cwd
+  const cwdNow = useRef<{ cwd?: string; pane?: string }>({})
+  cwdNow.current = { cwd: row?.a.cwd, pane: convo.bind?.pane ?? cur.pane } // (its pane: the conversation's, or the entry's shown — never the focused one)
   const fileActs = useMemo((): FileActs => {
     const whole = (p: string, then: (p: string) => void) => {
       const n = ++actN.current
       const rel = !p.startsWith('/') && p !== '~' && !p.startsWith('~/')
-      ;(rel ? underCwd(sid, cwdNow.current, p) : atHome(sid, p)).then(
+      ;(rel ? underCwd(sid, cwdNow.current.cwd, cwdNow.current.pane, p) : atHome(sid, p)).then(
         (q) => n === actN.current && activeNow.current && then(q),
         (e) => n === actN.current && toast(rel ? (e instanceof Error ? e.message : String(e)) : t('convo.path.noHome'), true),
       )
