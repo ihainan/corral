@@ -28,9 +28,9 @@ export function geminiPath(p: string): string | null {
 // told from the words alone: this guesses). (link: the target of a file
 // link of Codex's, where what follows the name is its lines whatever the
 // name — it writes them so.)
-export function codeRef(s: string, link = false): { path: string; lines?: LineSpan } | null {
+export function codeRef(s: string, link = false): { path: string; lines?: LineSpan; rel?: boolean } | null {
   const t = s.trim()
-  if (!/^(?:\/(?!\/)|~\/)[^\s`'"<>|;&$]{0,1023}$/.test(t) || t === '/' || t === '~/' || /\/\.{1,2}(\/|$)/.test(t)) return null
+  if (!/^(?:\/(?!\/)|~\/)[^\s`'"<>|;&$]{0,1023}$/.test(t) || t === '/' || t === '~/' || /\/\.{1,2}(\/|$)/.test(t)) return relRef(t, link)
   const m = LINES.exec(t)
   const path = m ? t.slice(0, m.index) : t
   if (!m || !(link ? /\/[^/]+$/ : NAMED_FILE).test(path)) return { path: t }
@@ -46,3 +46,23 @@ export type LineSpan = { from: number; to: number }
 
 const LINES = /(?::(\d{1,7})(?::\d{1,7}|-(\d{1,7}))?|#L(\d{1,7})(?:C\d{1,7})?(?:-L?(\d{1,7})(?:C\d{1,7})?)?)$/
 const NAMED_FILE = /\/(?:[^/]*\.[^/.:#]+|Makefile|Dockerfile|Containerfile|Rakefile|Gemfile|Jenkinsfile|Vagrantfile|BUILD|WORKSPACE|Justfile|justfile|makefile|GNUmakefile)$/
+
+// A path relative to the agent's folder ("src/foo.ts:42", "paradigm.md:82-103"):
+// taken only where it can be told for a file's — a folder before a name with
+// an extension, or lines after one ("origin/main", "console.log", "v1.2",
+// "*.ts" are not) — and, in a link of its own, any name. Made whole only when
+// acted on, with the agent's folder as it is then, and looked for there
+// first: the call may have been made in another (rel: so).
+const REL = /^(?:\.\/)?(?![-@])[^\s`'"<>|;&$*?[\]{}\\]{1,1024}$/
+const REL_FILE = /(?:^|\/)[^/]*[^/.]\.[^/.:#]*[A-Za-z][^/.:#]*$|(?:^|\/)(?:Makefile|Dockerfile|Containerfile|Justfile|justfile|makefile|GNUmakefile)$/
+function relRef(t: string, link: boolean): { path: string; lines?: LineSpan; rel: true } | null {
+  if (!REL.test(t) || t.includes('://') || t.startsWith('/') || t.startsWith('~') || /(^|\/)\.{1,2}(\/|$)/.test(t.replace(/^\.\//, ''))) return null
+  const m = LINES.exec(t)
+  const path = (m ? t.slice(0, m.index) : t).replace(/^\.\//, '')
+  if (!path || path.endsWith('/') || !REL_FILE.test(path) || (!m && !link && !path.includes('/'))) return null
+  if (!m) return { path, rel: true }
+  const from = Number(m[1] ?? m[3])
+  const to = Number(m[2] ?? m[4] ?? from)
+  if (!from) return { path, rel: true }
+  return { path, lines: { from: Math.min(from, to || from), to: Math.max(from, to) }, rel: true }
+}

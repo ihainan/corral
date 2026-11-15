@@ -786,6 +786,30 @@ const tmuxCmds = new Map<string, { cmds: RowCmds; at: number }>()
 // path answers with it), to make "~/…" whole. (Kept once had: the same
 // account's home does not move.)
 const homes = new Map<string, string | Promise<string>>()
+// A path relative to the agent's folder ("src/foo.ts"), made whole with that
+// folder as it is now — and looked for there first: the agent may have
+// named it from another (a worktree, a folder gone to since), and a file not
+// there is said so, not opened as another or as nothing. Its folder listed
+// to find it (one the host lists only in part, and does not show it in that
+// part, is taken as there: the act itself then says).
+function underCwd(sid: string, cwd: string | undefined, rel: string): Promise<string> {
+  const base = (cwd ?? '').replace(/\/+$/, '')
+  if (!base.startsWith('/')) return Promise.reject(new Error(t('convo.path.noCwd')))
+  const full = base + '/' + rel
+  const dir = full.slice(0, full.lastIndexOf('/')) || '/'
+  const name = full.slice(full.lastIndexOf('/') + 1)
+  const gone = () => new Error(t('convo.path.notUnder', { path: rel, cwd: base }))
+  return api<{ entries?: { name: string; type: string }[]; truncated?: boolean }>('GET', `/api/sessions/${sid}/files?path=` + encodeURIComponent(dir)).then(
+    (r) => {
+      const e = r.entries?.find((x) => x.name === name)
+      if (e ? e.type === 'dir' : !r.truncated) throw gone()
+      return full
+    },
+    (e) => {
+      throw e instanceof ApiError && (e.code === 'file_not_found' || e.code === 'not_a_folder' || e.status === 404) ? gone() : new Error(errorText(e))
+    },
+  )
+}
 function atHome(sid: string, p: string): Promise<string> {
   if (p !== '~' && !p.startsWith('~/')) return Promise.resolve(p)
   const join = (home: string) => home.replace(/\/+$/, '') + p.slice(1) || '/'
@@ -863,12 +887,16 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   const activeNow = useRef(active)
   activeNow.current = active
   useEffect(() => void actN.current++, [sid, active])
+  // (The agent's folder as it is when a relative path is acted on.)
+  const cwdNow = useRef<string | undefined>(undefined)
+  cwdNow.current = row?.a.cwd
   const fileActs = useMemo((): FileActs => {
     const whole = (p: string, then: (p: string) => void) => {
       const n = ++actN.current
-      atHome(sid, p).then(
+      const rel = !p.startsWith('/') && p !== '~' && !p.startsWith('~/')
+      ;(rel ? underCwd(sid, cwdNow.current, p) : atHome(sid, p)).then(
         (q) => n === actN.current && activeNow.current && then(q),
-        () => n === actN.current && toast(t('convo.path.noHome'), true),
+        (e) => n === actN.current && toast(rel ? (e instanceof Error ? e.message : String(e)) : t('convo.path.noHome'), true),
       )
     }
     // (Looked at: a picture as one, anything else as text — the host says if it is. One at a time.)

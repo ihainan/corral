@@ -44,10 +44,11 @@ export function breakable(text: string): ReactNode {
 // its words, as a path to act on where the page can (null: as code, the
 // whole path in its title). Never drawn as the markdown it was written in.
 export const FileLinkOf = createContext<((label: string, target: string) => ReactNode | null) | undefined>(undefined)
-function FileLink({ label, target }: { label: string; target: string }) {
+function FileLink({ label, target, rel = false }: { label: string; target: string; rel?: boolean }) {
   const draw = useContext(FileLinkOf)
   const words = label.replace(/^`(.*)`$/, '$1') // ("[`a.go`](…)": the words, not their quotes)
-  return draw?.(words, target) ?? <code title={target}>{words}</code>
+  // (A relative one the page cannot act on — none of a file, or no session: its words, as written.)
+  return draw?.(words, target) ?? (rel ? <>{inline(label)}</> : <code title={target}>{words}</code>)
 }
 
 const fence = /^\s{0,3}(`{3,}|~{3,})\s*([^`\s]*)/
@@ -318,6 +319,8 @@ const spans: { re: RegExp; make: (m: RegExpExecArray, key: number) => ReactNode 
   { re: /\[([^\]]{1,500})\]\((https?:\/\/[^\s)]{1,2000})\)/g, make: (m, k) => link(m[2], <CodeSpanOf.Provider value={undefined}>{inline(m[1])}</CodeSpanOf.Provider>, k) },
   // (Its words may hold one level of [brackets] — a route's [id].ts; its path one level of (parens).)
   { re: /\[((?:[^[\]\n]|\[[^[\]\n]{0,200}\]){1,500})\]\((\/(?!\/)(?:[^\s()]|\([^\s()]{0,200}\)){1,2000})\)/g, make: (m, k) => <FileLink key={k} label={m[1]} target={m[2]} /> },
+  // (A link to a file relative to the agent's folder, as Claude Code writes them: "[a.ts](src/a.ts#L42)". No scheme, no anchor alone.)
+  { re: /\[((?:[^[\]\n]|\[[^[\]\n]{0,200}\]){1,500})\]\(((?![a-zA-Z][\w+.-]*:|#|\/)[^\s()<>]{1,1024})\)/g, make: (m, k) => <FileLink key={k} label={m[1]} target={m[2]} rel /> },
   { re: new RegExp(`https?://[^\\s<>()${wide}"']{0,2000}[^\\s<>()${wide}"'.,;:!?]`, 'g'), make: (m, k) => link(m[0], m[0], k) },
   // (Its last a code span whole, or a mark that is neither a space nor a backtick: **`SKILL.md`** bold too — 11-13,
   // before, a bold ending in code kept its stars.)

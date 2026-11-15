@@ -152,7 +152,12 @@ export function TextPreview({ sid, path, tail = false, lines: at0, onClose, onRe
         title={name}
         titleText={path}
         oneLine
-        sub={fileWhere(path, read ? formatSize(read.size) : undefined, at && (at.to > at.from ? t('preview.lines', { from: at.from, to: at.to }) : t('preview.line', { n: at.from })))}
+        sub={fileWhere(
+          path,
+          read ? formatSize(read.size) : undefined,
+          // (Lines it does not have — changed since they were named: how many it has, not lines not shown.)
+          at && (read && !read.cut && at.from > lines ? t('preview.onlyLines', { n: lines }) : at.to > at.from ? t('preview.lines', { from: at.from, to: at.to }) : t('preview.line', { n: at.from })),
+        )}
         subText={path}
         tools={
           <FileTools
