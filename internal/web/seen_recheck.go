@@ -14,15 +14,18 @@ import (
 const (
 	seenRecheckEvery = 3 * time.Second
 	seenRecheckWait  = 10 * time.Second // (all of it: finding the logs, reading when they were written)
+	seenRecheckTries = 5                // reads that fail (the host, not the log's binding) before it is left "done"
 )
 
 // recheckSeen reads, for each "done" that may be one looked at over again
 // (see recheck), when its Codex last wrote its log, and tells rounds.
-// Only a log known for sure to be the pane's (codexLogSure); any other, or
-// a read that fails, leaves it "done".
+// Only a log known for sure to be the pane's (codexLogSure); any other
+// leaves it "done", as does a read that failed seenRecheckTries times.
 func (s *Server) recheckSeen(ctx context.Context, sess *term.Session, rounds *seenRounds, latest func() *herdr.Snapshot) {
 	tick := time.NewTicker(seenRecheckEvery)
 	defer tick.Stop()
+	failed := map[seenCheck]int{} // (by pane's round and mark: see below)
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -39,9 +42,13 @@ func (s *Server) recheckSeen(ctx context.Context, sess *term.Session, rounds *se
 		}
 		cctx, cancel := context.WithTimeout(ctx, seenRecheckWait)
 		logs := map[string]string{} // pane → its log
+		unread := map[string]bool{} // panes whose read failed (the host's doing): tried again
 		for pane := range pend {
 			if hp, ok := snapPane(snap, pane); ok && strings.Contains(strings.ToLower(hp.Agent), "codex") {
-				if log := s.codexLogSure(cctx, sess, hp.ID); log != "" {
+				log, err := s.codexLogSure(cctx, sess, hp.ID)
+				if err != nil {
+					unread[pane] = true
+				} else if log != "" {
 					logs[pane] = log
 				}
 			}
@@ -59,10 +66,25 @@ func (s *Server) recheckSeen(ctx context.Context, sess *term.Session, rounds *se
 			if err == nil {
 				wrote = onGatewayClock(parseLogsWrote(string(out), panes), string(out), got)
 			}
+			if err != nil || wrote == nil {
+				for _, p := range panes {
+					unread[p] = true
+				}
+			}
 		}
 		cancel()
 		for pane, c := range pend {
+			if unread[pane] {
+				k := seenCheck{n: c.n, mark: pane + "\x00" + c.mark}
+				if failed[k]++; failed[k] < seenRecheckTries {
+					continue // (asked again next time)
+				}
+				delete(failed, k)
+			}
 			rounds.checked(pane, c, wrote[pane], gen) // (0: not known, "done")
+		}
+		if len(failed) > 64 {
+			clear(failed) // (of rounds long over)
 		}
 	}
 }
@@ -98,16 +120,17 @@ func snapPane(snap *herdr.Snapshot, pane string) (herdr.Pane, bool) {
 // title read at the look its name whole; no other live conversation of its
 // folder of that name, none talked in since it started that no Codex is
 // told at (a thread begun or resumed in it since, maybe). "" otherwise.
-func (s *Server) codexLogSure(ctx context.Context, sess *term.Session, pane string) string {
+// (err: the look failed, the host's doing; asked again.)
+func (s *Server) codexLogSure(ctx context.Context, sess *term.Session, pane string) (string, error) {
 	socket := s.herdrSocks.get(sess.ID)
 	if socket == "" {
-		return ""
+		return "", nil
 	}
 	panes, err := s.codexPanes.run(ctx, sess, socket, pane)
 	if err != nil {
-		return ""
+		return "", err
 	}
-	return codexRecheckLog(panes, pane)
+	return codexRecheckLog(panes, pane), nil
 }
 
 // codexRecheckLog: codexLogSure's rule, on what a look found.

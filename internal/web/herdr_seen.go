@@ -217,10 +217,17 @@ func (r *seenRounds) checked(pane string, c seenCheck, wrote, gen int64) {
 		return
 	}
 	if wrote > l.At {
-		// (Written since it was looked at: a look kept from before, told
-		// by an older read of its log, says nothing of it.)
+		// (Written since it was looked at: the look of its round, or kept
+		// from before and told by an older read of its log, is of before.)
 		delete(r.prior, pane)
+		if sn, ok := r.seen[pane]; ok && sn.n == x.n {
+			delete(r.seen, pane)
+		}
+		poke := r.poke
 		r.mu.Unlock()
+		if poke != nil {
+			poke()
+		}
 		return
 	}
 	if r.quiet == nil {
@@ -261,14 +268,9 @@ func (r *seenRounds) number(sum *herdrSummary, old bool) {
 				x.mark = a.Mark // (the latest: a look keeps what it was when looked at)
 				r.at[a.PaneID] = x
 				// (Its state changed with no status between told — two
-				// changes in one snapshot, say: a look, and what its log
-				// said, are of before; read again. See recheck.)
-				if was != "" && x.status == herdr.StatusDone {
-					if sn, ok := r.seen[a.PaneID]; ok && sn.n == x.n {
-						delete(r.seen, a.PaneID)
-					}
-					delete(r.prior, a.PaneID)
-				}
+				// changes in one snapshot, say: what its log said is of
+				// before, and a look stands only till its log is read and
+				// says written since; read again. See recheck.)
 				q, quiet := r.quiet[a.PaneID]
 				l, looked := r.last[a.PaneID]
 				if quiet && q.mark != a.Mark || was != "" && x.status == herdr.StatusDone && looked && l.Session == x.session {
@@ -453,7 +455,7 @@ func (r *seenRounds) withSeen(sum herdrSummary) herdrSummary {
 			if a.Status != herdr.StatusDone {
 				continue
 			}
-			if x, ok := r.seen[a.PaneID]; ok && x.n == a.Round && x.session == a.Session && (x.mark == "" || a.Mark == "" || x.mark == a.Mark) {
+			if x, ok := r.seen[a.PaneID]; ok && x.n == a.Round && x.session == a.Session {
 				w.Agents[j].Status = herdr.StatusIdle
 			} else if k, ok := r.prior[a.PaneID]; ok && k.Session == a.Session && r.lookedBefore(k, a) {
 				w.Agents[j].Status = herdr.StatusIdle // (looked at before this watcher: see seenRounds)

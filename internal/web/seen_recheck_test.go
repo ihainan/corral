@@ -289,11 +289,13 @@ func TestSeenRecheckMark(t *testing.T) {
 	}
 }
 
-// A look holds for the state it was taken in: another mark in the same
-// round of "done" (a turn begun and ended between two snapshots) is
-// "done", for one looked at by this watcher or kept from before it (its
-// verdict of the log of then), till its log says otherwise.
-func TestSeenLookHoldsForItsMark(t *testing.T) {
+// A look stands, another mark in the same round of "done" (a turn begun
+// and ended between two snapshots, or a state flicker), till its log is
+// read and says written since: then "done", for one looked at by this
+// watcher or kept from before it (told by an older read). Not read, or
+// read and not written since: as it was. herdr begun again (another
+// terminal): the look kept stands as before.
+func TestSeenLookHoldsTillItsLogSays(t *testing.T) {
 	sum := func(q *seenRounds, mark string) herdrSummary {
 		s := seenSum(herdr.StatusDone, "")
 		s.Workspaces[0].Agents[0].Mark = mark
@@ -303,30 +305,74 @@ func TestSeenLookHoldsForItsMark(t *testing.T) {
 	status := func(q *seenRounds, mark string) string {
 		return q.withSeen(sum(q, mark)).Workspaces[0].Agents[0].Status
 	}
-	// Looked at by this watcher.
+	for _, c := range []struct {
+		name  string
+		wrote int64 // (from the look: +, written since)
+		read  bool
+		want  string
+	}{
+		{"not read", 0, false, herdr.StatusIdle},
+		{"not known", 0, true, herdr.StatusIdle},
+		{"not written since", -500, true, herdr.StatusIdle},
+		{"written since", 5000, true, herdr.StatusDone},
+	} {
+		// Looked at by this watcher.
+		var k store.AgentSeen
+		q := newSeenRounds(nil, func(_ string, a store.AgentSeen) error { k = a; return nil })
+		q.changed("w1:p1", herdr.StatusDone, "")
+		s := sum(q, "term_a#5")
+		if !marked(q, "w1:p1", s.Workspaces[0].Agents[0].Round, "") {
+			t.Fatal("not looked at")
+		}
+		sum(q, "term_a#7")
+		if c.read {
+			a, g := q.toCheck()
+			w := int64(0)
+			if c.wrote != 0 {
+				w = k.At + c.wrote
+			}
+			q.checked("w1:p1", a["w1:p1"], w, g)
+		}
+		if got := status(q, "term_a#7"); got != c.want {
+			t.Errorf("looked at, %s: %s, want %s", c.name, got, c.want)
+		}
+		// Kept from before, of another terminal, told by the first look.
+		q = newSeenRounds(map[string]store.AgentSeen{"w1:p1": {At: 1000, Mark: "term_a#5"}}, nil)
+		_, lg := q.wantsLook()
+		q.lookedOver(map[string]int64{"w1:p1": 900}, lg)
+		if got := status(q, "term_b#9"); got != herdr.StatusIdle {
+			t.Fatalf("another terminal, not written since: %s", got)
+		}
+		q.mu.Lock()
+		q.pending = nil // (the first sight's read: not this one)
+		q.mu.Unlock()
+		sum(q, "term_b#11")
+		if c.read {
+			a, g := q.toCheck()
+			w := int64(0)
+			if c.wrote != 0 {
+				w = 1000 + c.wrote
+			}
+			q.checked("w1:p1", a["w1:p1"], w, g)
+		}
+		if got := status(q, "term_b#11"); got != c.want {
+			t.Errorf("kept, %s: %s, want %s", c.name, got, c.want)
+		}
+	}
+	// herdr begun again while watched: the look kept stands, by its log.
 	q := newSeenRounds(nil, nil)
 	q.changed("w1:p1", herdr.StatusDone, "")
 	s := sum(q, "term_a#5")
-	if !marked(q, "w1:p1", s.Workspaces[0].Agents[0].Round, "") || status(q, "term_a#5") != herdr.StatusIdle {
+	if !marked(q, "w1:p1", s.Workspaces[0].Agents[0].Round, "") {
 		t.Fatal("not looked at")
 	}
-	if got := status(q, "term_a#7"); got != herdr.StatusDone {
-		t.Fatalf("another mark, looked at before it: %s", got)
-	}
-	a, g := q.toCheck()
-	q.checked("w1:p1", a["w1:p1"], time.Now().UnixMilli()+5000, g) // (written since)
-	if got := status(q, "term_a#7"); got != herdr.StatusDone {
-		t.Fatalf("written since: %s", got)
-	}
-	// Kept from before, of another terminal, told by the first look's log.
-	q = newSeenRounds(map[string]store.AgentSeen{"w1:p1": {At: 1000, Mark: "term_a#5"}}, nil)
+	q.lostHerdr()
 	_, lg := q.wantsLook()
+	sum(q, "term_b#2") // (back)
+	_, lg = q.wantsLook()
 	q.lookedOver(map[string]int64{"w1:p1": 900}, lg)
-	if got := status(q, "term_b#9"); got != herdr.StatusIdle {
-		t.Fatalf("another terminal, not written since: %s", got)
-	}
-	if got := status(q, "term_b#11"); got != herdr.StatusDone {
-		t.Fatalf("then another mark: %s", got)
+	if got := status(q, "term_b#2"); got != herdr.StatusIdle {
+		t.Fatalf("herdr begun again, not written since: %s", got)
 	}
 }
 
