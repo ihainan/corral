@@ -70,11 +70,16 @@ export function FilesDialog(props: Props) {
 
 // The same in the dock's Files tab: no dialog round it, no close of its own;
 // a text file looked at is shown in the tab (onFile), a picture as here.
-export function FilesBrowser(props: Omit<Props, 'onClose'> & { onFile: (path: string) => void }) {
+// pane: the conversation's — its folder is the "terminal's" asked for (null:
+// none known, and none asked: never the focused pane's — review, 11-15); go:
+// a new ask of the page (start or reveal), gone to here, not by a new browser
+// (an upload going stays); active: its tab and page shown (a question of an
+// upload waits for it: not over another page).
+export function FilesBrowser(props: Omit<Props, 'onClose'> & { onFile: (path: string) => void; pane: string | null; go: number; active: boolean }) {
   return <FilesPanel {...props} onClose={() => {}} docked={{ onFile: props.onFile }} />
 }
 
-function FilesPanel({ sessionId, start, reveal, onPath, onInsert, onClose, docked }: Props & { docked?: { onFile: (path: string) => void } }) {
+function FilesPanel({ sessionId, start, reveal, onPath, onInsert, onClose, docked, pane, go = 0, active = true }: Props & { docked?: { onFile: (path: string) => void }; pane?: string | null; go?: number; active?: boolean }) {
   const toast = useToast()
   const base = `/api/sessions/${sessionId}/files`
   const [path, setPath] = useState<string | null>(null)
@@ -188,7 +193,8 @@ function FilesPanel({ sessionId, start, reveal, onPath, onInsert, onClose, docke
     setLoading(true)
     let p = ''
     try {
-      p = (await api<{ path: string }>('GET', base + '/cwd', undefined, { timeoutMs: 15000 })).path
+      if (pane === null) throw new Error(t('files.noCwd')) // (no pane of its own known: not the focused one's)
+      p = (await api<{ path: string }>('GET', base + '/cwd' + (pane ? '?pane=' + encodeURIComponent(pane) : ''), undefined, { timeoutMs: 15000 })).path
       if (!p && !quiet && n === seq.current) toast(t('files.noCwd'), true)
     } catch (e) {
       if (!quiet && n === seq.current) toast(errorText(e), true)
@@ -214,6 +220,16 @@ function FilesPanel({ sessionId, start, reveal, onPath, onInsert, onClose, docke
     else void goTerminalFolder(true)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId])
+  // (Asked again, the browser kept: gone to, a file to show marked anew.)
+  const went = useRef(go)
+  useEffect(() => {
+    if (went.current === go) return
+    went.current = go
+    markedSaid.current = false
+    if (marked) void load(marked.dir, true)
+    else if (start) void load(start, true)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [go])
 
   const markHere = !!marked && !!listing && listing.path === marked.dir
   const needle = filterQ.trim().toLowerCase()
@@ -638,8 +654,8 @@ function FilesPanel({ sessionId, start, reveal, onPath, onInsert, onClose, docke
           upload(files)
         }}
       />
-      {dialog}
-      {question}
+      {active && dialog}
+      {active && question}
       {viewing && <PictureDialog sid={sessionId} path={viewing} onClose={() => setViewing(null)} />}
       {reading && <TextPreview sid={sessionId} path={reading} onClose={() => setReading(null)} />}
     </div>

@@ -7,7 +7,7 @@
 // counts; whether it is open, its tab and its width are the person's (kept
 // in this browser); what each tab shows is per conversation, kept while the
 // page is.
-import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { FolderOpen, GitCompareArrows, SquareTerminal, X } from 'lucide-react'
 import { api } from '../api'
 import { t } from '../i18n'
@@ -208,7 +208,7 @@ export function Dock({
       {/* (Files kept once shown — its folder, an upload going — while another tab is: hidden, not gone.) */}
       {filesShown && (
         <div className="convo-tray-body" role="tabpanel" id="dock-panel-files" aria-labelledby="dock-tab-files" hidden={tab !== 'files'}>
-          <DockFiles key={of + ' ' + ident} of={of} sid={sid} pane={pane} ask={ask} onInsert={onInsert} />
+          <DockFiles key={of + ' ' + ident} of={of} mem={of + ' ' + ident} sid={sid} pane={pane} ask={ask} onInsert={onInsert} active={active && tab === 'files'} />
         </div>
       )}
       <div className="convo-tray-body" role="tabpanel" id={'dock-panel-' + tab} aria-labelledby={'dock-tab-' + tab} hidden={tab === 'files'}>
@@ -261,44 +261,62 @@ function DockChanges({ of, sid, pane, start, acts }: { of: string; sid: string; 
 }
 
 // The Files tab: the file panel's browser, in the conversation's folder at
-// first (its pane's, asked of the host — not the focused one's), where it
-// was after; a text file looked at shown in the tab, its close back to the
-// folder. What the page asks (ask) is taken once.
-function DockFiles({ of, sid, pane, ask, onInsert }: { of: string; sid: string; pane: string; ask?: FilesAsk; onInsert: (path: string) => void }) {
-  const kept = filesKept.get(of) ?? {}
+// first (its pane's, asked of the host — never the focused one's: none known,
+// none asked, and said so), where it was after; a text file looked at shown
+// in the tab (its close, or Esc, back to the folder). What the page asks
+// (ask) is taken once, and gone to in the same browser — an upload going is
+// not dropped for it. Kept per agent: the conversation's pane, and its agent
+// there (another, /resume, starts anew — review, 11-15).
+function DockFiles({ of, mem, sid, pane, ask, onInsert, active }: { of: string; mem: string; sid: string; pane: string; ask?: FilesAsk; onInsert: (path: string) => void; active: boolean }) {
+  const root = useRef<HTMLDivElement>(null)
+  const kept = filesKept.get(mem) ?? {}
   const fresh = !!ask && askTaken.get(of) !== ask.n
   const [view, setView] = useState(() => {
     if (fresh) askTaken.set(of, ask!.n)
-    return fresh ? fromAsk(ask!, kept) : { start: kept.dir ?? null, reveal: undefined as string | undefined, file: kept.file, n: 0 }
+    return fresh ? fromAsk(ask!, kept) : { start: kept.dir ?? null, reveal: undefined as string | undefined, file: kept.file, n: 0, asked: 0 }
   })
-  // (Another ask, the tab open already: that one.)
+  // (Another ask, the tab open already: that one — a folder gone to in the same browser, a file asked again scrolled to again.)
   useEffect(() => {
     if (!ask || askTaken.get(of) === ask.n) return
     askTaken.set(of, ask.n)
-    setView((v) => ({ ...fromAsk(ask, filesKept.get(of) ?? {}), n: v.n + (ask.kind === 'file' ? 0 : 1) }))
-  }, [ask, of])
-  useEffect(() => void filesKept.set(of, { ...(filesKept.get(of) ?? {}), file: view.file }), [of, view.file])
-  // (Its folder at first: the pane's, asked; none known — the browser's own way, the terminal's.)
-  const [cwd, setCwd] = useState<string | null | undefined>(view.start || view.reveal ? null : undefined)
+    setView((v) => {
+      const a = fromAsk(ask, filesKept.get(mem) ?? {})
+      return ask.kind === 'file' ? { ...v, file: a.file, asked: v.asked + 1 } : { ...a, n: v.n + 1, asked: v.asked }
+    })
+  }, [ask, of, mem])
+  useEffect(() => void filesKept.set(mem, { ...(filesKept.get(mem) ?? {}), file: view.file }), [mem, view.file])
+  // (Its folder at first: the pane's, asked; not known — no pane, or the host said none: home, said so.)
+  const [cwd, setCwd] = useState<string | null | undefined>(view.start || view.reveal ? null : pane ? undefined : null)
   useEffect(() => {
     if (cwd !== undefined) return
     const ctl = new AbortController()
-    api<{ path?: string }>('GET', `/api/sessions/${sid}/files/cwd` + (pane ? '?pane=' + encodeURIComponent(pane) : ''), undefined, { signal: ctl.signal, timeoutMs: 12000 }).then(
+    api<{ path?: string }>('GET', `/api/sessions/${sid}/files/cwd?pane=` + encodeURIComponent(pane), undefined, { signal: ctl.signal, timeoutMs: 12000 }).then(
       (r) => !ctl.signal.aborted && setCwd(r.path || null),
       () => !ctl.signal.aborted && setCwd(null),
     )
     return () => ctl.abort()
   }, [cwd, sid, pane])
+  // (Said as it is found — the home folder listed after does not make it known.)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const unknown = useMemo(() => cwd === null && !view.start && !view.reveal && !filesKept.get(mem)?.dir, [cwd])
   if (cwd === undefined) return <p className="convo-tray-note">{t('common.loading')}</p>
+  const back = () => {
+    setView((v) => ({ ...v, file: undefined }))
+    // (Its focus to the folder: a second Esc there shuts the dock.)
+    requestAnimationFrame(() => root.current?.querySelector<HTMLElement>('.files-list button, .crumb')?.focus())
+  }
   return (
     <>
-      <div className="convo-tray-files" hidden={!!view.file}>
+      <div className="convo-tray-files" hidden={!!view.file} ref={root}>
+        {unknown && <p className="convo-tray-hint">{t('dock.noCwd')}</p>}
         <FilesBrowser
-          key={view.n}
           sessionId={sid}
           start={view.start ?? cwd}
           reveal={view.reveal}
-          onPath={(p) => filesKept.set(of, { ...(filesKept.get(of) ?? {}), dir: p })}
+          pane={pane || null}
+          go={view.n}
+          active={active}
+          onPath={(p) => filesKept.set(mem, { ...(filesKept.get(mem) ?? {}), dir: p })}
           onInsert={onInsert}
           onFile={(p) => setView((v) => ({ ...v, file: { path: p } }))}
         />
@@ -309,17 +327,18 @@ function DockFiles({ of, sid, pane, ask, onInsert }: { of: string; sid: string; 
           sid={sid}
           path={view.file.path}
           lines={view.file.lines}
+          asked={view.asked}
           docked
-          onClose={() => setView((v) => ({ ...v, file: undefined }))}
-          onReveal={() => setView((v) => ({ start: null, reveal: v.file!.path, file: undefined, n: v.n + 1 }))}
+          onClose={back}
+          onReveal={() => setView((v) => ({ start: null, reveal: v.file!.path, file: undefined, n: v.n + 1, asked: v.asked }))}
         />
       )}
     </>
   )
 }
 
-function fromAsk(a: FilesAsk, kept: { dir?: string }) {
-  if (a.kind === 'file') return { start: kept.dir ?? null, reveal: undefined, file: { path: a.path, lines: a.lines }, n: 0 }
-  if (a.kind === 'open') return { start: a.path, reveal: undefined, file: undefined, n: 0 }
-  return { start: null, reveal: a.path, file: undefined, n: 0 }
+function fromAsk(a: FilesAsk, kept: { dir?: string }): { start: string | null; reveal?: string; file?: { path: string; lines?: LineSpan }; n: number; asked: number } {
+  if (a.kind === 'file') return { start: kept.dir ?? null, reveal: undefined, file: { path: a.path, lines: a.lines }, n: 0, asked: 0 }
+  if (a.kind === 'open') return { start: a.path, reveal: undefined, file: undefined, n: 0, asked: 0 }
+  return { start: null, reveal: a.path, file: undefined, n: 0, asked: 0 }
 }

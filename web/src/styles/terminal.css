@@ -1064,6 +1064,7 @@ button.gch-ut:hover { background: var(--term-hover); }
 .convo-tray .convo-panelwin-screen { flex: 1; max-height: none; }
 .convo-tray-note { display: flex; flex-direction: column; align-items: flex-start; gap: 12px; padding: 24px 16px; color: var(--term-fg-2); font-size: var(--fs-sub); line-height: var(--lh-sub); }
 .convo-tray-note p { margin: 0; }
+.convo-tray-hint { flex: none; margin: 0; padding: 8px 16px 0; color: var(--term-fg-3); font-size: var(--fs-note); line-height: var(--lh-note); }
 .term-root .convo-changes-see { flex: none; height: 30px; padding: 0 10px; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg); }
 .term-root .convo-changes-see:hover { background: var(--term-hover); }
 
