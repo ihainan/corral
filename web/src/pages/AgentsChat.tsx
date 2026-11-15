@@ -1459,11 +1459,22 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     const gone = new Set(found.map((f) => f.p.id))
     // (Put back in its input together, sent by one Enter as one message: the
     // others in it went too, whichever of them it was paired with — the log
-    // read before the Enter's answer came, the first by its own words.)
+    // read before the Enter's answer came, the first by its own words. Only
+    // where that message is exactly a run of them, one after another, as
+    // Codex joins them: not one whose words merely appear in it — p14b-1.)
     for (const { p, s } of found) {
       if (!p.unqueued) continue
       const whole = squeezed(s.text)
-      for (const q of mine) if (q.unqueued && ofThis(q.bind) && !gone.has(q.id) && whole.includes(squeezed(q.text))) gone.add(q.id)
+      const group = mine.filter((q) => q.unqueued && ofThis(q.bind)).sort((a, b) => a.id - b.id)
+      const at = group.findIndex((q) => q.id === p.id)
+      run: for (let i = 0; i <= at; i++)
+        for (let j = at; j < group.length; j++) {
+          if (j === i) continue
+          if (squeezed(group.slice(i, j + 1).map((q) => q.text).join('\n')) === whole) {
+            for (const q of group.slice(i, j + 1)) gone.add(q.id)
+            break run
+          }
+        }
     }
     if (found.length || changed) {
       setSent(() => mine.filter((p) => !gone.has(p.id)))
@@ -1534,14 +1545,14 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   // shown, this page was not here to see it end — review p14-2.)
   const wasWorking = useRef(true)
   useEffect(() => {
-    if (!codex) return // (not yet known a Codex: as if not yet shown)
+    if (!codex || !convo.bind) return // (not yet known a Codex, nor its conversation: as if not yet shown — p14b-2)
     const ended = wasWorking.current && !working
     wasWorking.current = working
     if (!ended) return
-    const tm = setTimeout(() => setSent((ps) => ps.map((p) => (p.queued && p.state === 'waiting' && ofThis(p.bind) ? { ...p, look: 'looking' as const, relook: (p.relook ?? 0) + 1 } : p))), 1500)
+    const tm = setTimeout(() => setSent((ps) => ps.map((p) => (p.queued && p.state === 'waiting' && ofThis(p.bind) ? { ...p, look: 'looking' as const, looked: true, relook: (p.relook ?? 0) + 1 } : p))), 1500)
     return () => clearTimeout(tm)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [working, codex])
+  }, [working, codex, bindKey])
   const shownSent = sent.filter((p) => ofThis(p.bind))
   // Gone to a subagent: when it is first shown (this agent's view in front,
   // the page not hidden), and let go of WENT_SHOWN_MS after.
