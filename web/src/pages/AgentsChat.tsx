@@ -2577,8 +2577,13 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
         const r = await api<{ pressed: boolean }>('POST', `/api/sessions/${sid}/conversation/sent-enter`, { ...pressBody(), text: p.text }, { timeoutMs: PRESS_MS })
         if (r.pressed) {
           // (Waited for in the log again, as when it was sent.)
-          lookedAt.delete(id)
+          lookedAt.delete(id * 10 + (p.relook ?? 0))
           setSent((ps) => ps.map((q) => (q.id === id ? { ...q, state: 'waiting' as const, look: undefined, looked: false, quiet: false, at: Date.now() } : q)))
+          // (Read now and a little later, as a send is: an answer quick enough
+          // may come and go between two of herdr's words, none to wake a read.)
+          convo.refresh()
+          setTimeout(() => convo.refresh(), 1500)
+          setTimeout(() => convo.refresh(), 4000)
         }
         return r.pressed
       }}
