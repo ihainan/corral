@@ -88,6 +88,11 @@ type DialOptions struct {
 	// owns it from the call on, on every path, and calls it once when the
 	// channel is really over (or was never opened).
 	Release func()
+	// AwaitSlot: an Aux one, where MaxAuxPerConn are unfinished, waits up to
+	// this long for one to end rather than being refused at once (ErrBusy):
+	// for what a person asked for (an answer pressed), not a look of the
+	// gateway's own, which comes again anyway (as ExecOptions.AwaitSlot).
+	AwaitSlot time.Duration
 	// Dedicated means no terminal depends on the connection: if the channel
 	// will not end within StuckGrace of being given up, the connection is
 	// closed.
@@ -113,6 +118,10 @@ func openGuarded(ctx context.Context, c *ssh.Client, network, addr string, opt D
 	release := oneShot(opt.Release)
 	if opt.Aux {
 		aux, ok := takeAux(c)
+		for until := time.Now().Add(opt.AwaitSlot); !ok && time.Now().Before(until) && ctx.Err() == nil; {
+			time.Sleep(50 * time.Millisecond)
+			aux, ok = takeAux(c)
+		}
 		if !ok {
 			release()
 			return nil, ErrBusy

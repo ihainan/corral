@@ -946,9 +946,17 @@ func (s *Server) herdrSession(w http.ResponseWriter, r *http.Request) (*term.Ses
 
 // herdrDial connects to a session's herdr, or writes the error and returns nil.
 func herdrDial(w http.ResponseWriter, ctx context.Context, sess *term.Session, socket string) *herdr.Client {
+	return herdrDialWait(w, ctx, sess, socket, 0)
+}
+
+// herdrDialWait is herdrDial waiting up to await for a side operation's
+// slot: an answer the person pressed, right after another whose channels the
+// host has not closed yet, waits for them rather than being refused (11-15:
+// refused so, under load, about one time in three in the tests).
+func herdrDialWait(w http.ResponseWriter, ctx context.Context, sess *term.Session, socket string, await time.Duration) *herdr.Client {
 	// herdr traffic is a side operation on the terminal's connection: while
 	// too many earlier ones are unfinished, new ones are refused.
-	c, err := herdr.Dial(ctx, sess.Client(), socket)
+	c, err := herdr.DialWait(ctx, sess.Client(), socket, await)
 	if errors.Is(err, sshx.ErrBusy) {
 		writeError(w, http.StatusTooManyRequests, "herdr_busy", "herdr is still answering earlier actions")
 		return nil
@@ -1433,11 +1441,11 @@ func (s *Server) replyToPane(w http.ResponseWriter, r *http.Request, sess *term.
 		return
 	}
 	defer func() { turn() }() // (once only: given back below, as soon as it may be)
-	reader := herdrDial(w, ctx, sess, socket)
+	reader := herdrDialWait(w, ctx, sess, socket, 2*time.Second)
 	if reader == nil {
 		return
 	}
-	typer := herdrDial(w, ctx, sess, socket)
+	typer := herdrDialWait(w, ctx, sess, socket, 2*time.Second)
 	if typer == nil {
 		reader.Close()
 		return

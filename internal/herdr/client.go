@@ -147,9 +147,15 @@ var dialTimeout = 10 * time.Second
 // a side operation: it is never cut off by closing the connection, and while
 // sshx.MaxAuxPerConn of them are unfinished, Dial fails with sshx.ErrBusy.
 func Dial(ctx context.Context, c *ssh.Client, socketPath string) (*Client, error) {
-	ctx, cancel := context.WithTimeout(ctx, dialTimeout)
+	return DialWait(ctx, c, socketPath, 0)
+}
+
+// DialWait is Dial waiting up to await for a side operation's slot on c
+// where all are taken (sshx.DialOptions.AwaitSlot): for what a person asked.
+func DialWait(ctx context.Context, c *ssh.Client, socketPath string, await time.Duration) (*Client, error) {
+	ctx, cancel := context.WithTimeout(ctx, dialTimeout+await)
 	defer cancel()
-	conn, err := sshx.DialVia(ctx, c, "unix", socketPath, sshx.DialOptions{Aux: true})
+	conn, err := sshx.DialVia(ctx, c, "unix", socketPath, sshx.DialOptions{Aux: true, AwaitSlot: await})
 	if err != nil {
 		return nil, fmt.Errorf("cannot reach herdr socket: %w", err)
 	}
