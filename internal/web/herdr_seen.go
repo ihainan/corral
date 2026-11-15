@@ -97,8 +97,9 @@ const seenAwayMax = 60 * time.Second
 // from before it, its mark not that looked at), is read for in its log:
 // one not written since that look is the "done" looked at. Till that is
 // read, and where its log is not known for sure, it is "done": a turn's
-// end hidden is worse than one told twice. (Codex only, the one seen to
-// do it: see codexRecheck.)
+// end hidden is worse than one told twice. (herdr's count is the same for
+// every agent's: Codex's and Claude Code's are read for, their logs known
+// for sure; OpenCode's are not — see recheckSeen.)
 
 type seenRound struct {
 	status, session string

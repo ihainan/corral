@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -18,9 +19,11 @@ const (
 )
 
 // recheckSeen reads, for each "done" that may be one looked at over again
-// (see recheck), when its Codex last wrote its log, and tells rounds.
-// Only a log known for sure to be the pane's (codexLogSure); any other
-// leaves it "done", as does a read that failed seenRecheckTries times.
+// (see recheck), when its agent last wrote its log, and tells rounds.
+// Only a log known for sure to be the pane's: a Codex's, codexLogSure; a
+// Claude Code's, by the session herdr says it runs. Any other (OpenCode's
+// database, all its sessions' in one file, written by any of them) leaves
+// it "done", as does a read that failed seenRecheckTries times.
 func (s *Server) recheckSeen(ctx context.Context, sess *term.Session, rounds *seenRounds, latest func() *herdr.Snapshot) {
 	tick := time.NewTicker(seenRecheckEvery)
 	defer tick.Stop()
@@ -48,13 +51,20 @@ func (s *Server) recheckSeen(ctx context.Context, sess *term.Session, rounds *se
 		logs := map[string]string{} // pane → its log
 		unread := map[string]bool{} // panes whose read failed (the host's doing): tried again
 		for pane := range pend {
-			if hp, ok := snapPane(snap, pane); ok && strings.Contains(strings.ToLower(hp.Agent), "codex") {
+			hp, ok := snapPane(snap, pane)
+			switch agent := strings.ToLower(hp.Agent); {
+			case !ok:
+			case strings.Contains(agent, "codex"):
 				log, err := s.codexLogSure(cctx, sess, hp.ID)
 				if err != nil {
 					unread[pane] = true
 				} else if log != "" {
 					logs[pane] = log
 				}
+			case strings.Contains(agent, "claude") && hp.AgentSession != nil && claudeSessionID.MatchString(hp.AgentSession.Value):
+				// (Its session's log, by the id herdr's integration says:
+				// that session's for sure.)
+				logs[pane] = "claude:" + hp.AgentSession.Value
 			}
 		}
 		var lo, hi map[string]int64
@@ -168,14 +178,28 @@ func codexRecheckLog(panes map[string]codexPane, pane string) string {
 // logsWroteCommand prints, for each of files in turn, a line "w=" and when
 // it was last written: unix ms where the host's date tells them (GNU
 // date -r), else unix seconds (GNU stat, or BSD's and macOS's: no %N in
-// their date, no -c in their stat); empty: not read.
+// their date, no -c in their stat); empty: not read. A file
+// "claude:<session id>" is that Claude Code session's log, wherever its
+// folder put it (the newest of that name, under the account's own config).
 func logsWroteCommand(files []string) string {
-	q := make([]string, len(files))
-	for i, f := range files {
-		q[i] = sshx.QuoteShell(f)
+	var b strings.Builder
+	for _, f := range files {
+		if sid, ok := strings.CutPrefix(f, "claude:"); ok {
+			if !claudeSessionID.MatchString(sid) {
+				b.WriteString(`f=; `)
+			} else {
+				b.WriteString(`f=$(ls -t "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/projects/*/` + sid + `.jsonl 2>/dev/null | head -n 1); `)
+			}
+		} else {
+			b.WriteString(`f=` + sshx.QuoteShell(f) + `; `)
+		}
+		b.WriteString(`t=; if [ -n "$f" ]; then t=$(date -r "$f" +%s%3N 2>/dev/null); case $t in ""|*[!0-9]*) t=$(stat -c %Y -- "$f" 2>/dev/null || stat -f %m -- "$f" 2>/dev/null);; esac; fi; printf 'w=%s\n' "$t"; `)
 	}
-	return `for f in ` + strings.Join(q, " ") + `; do t=$(date -r "$f" +%s%3N 2>/dev/null); case $t in ""|*[!0-9]*) t=$(stat -c %Y -- "$f" 2>/dev/null || stat -f %m -- "$f" 2>/dev/null);; esac; printf 'w=%s\n' "$t"; done`
+	return strings.TrimSuffix(b.String(), "; ")
 }
+
+// claudeSessionID: a Claude Code session's id as herdr tells it.
+var claudeSessionID = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
 // parseLogsWrote reads logsWroteCommand's lines, for panes in the order of
 // its files: when each was last written, unix ms on the host's clock, no

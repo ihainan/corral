@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -156,6 +157,33 @@ func TestLogsWrote(t *testing.T) {
 	lo, hi := parseLogsWrote(string(out), []string{"p0", "p1"})
 	if _, ok := lo["p0"]; ok || lo["p1"] != at.UnixMilli() || hi["p1"] != at.UnixMilli() {
 		t.Fatalf("%v %v (written %d)", lo, hi, at.UnixMilli())
+	}
+	// (A Claude Code session's log, by its id, under the account's config;
+	// one of an id not there; one not an id at all, never put in the command.)
+	conf := t.TempDir()
+	sid := "0f9a2c1e-1111-4222-8333-944455556666"
+	if err := os.MkdirAll(filepath.Join(conf, "projects", "-home-x-proj"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cl := filepath.Join(conf, "projects", "-home-x-proj", sid+".jsonl")
+	if err := os.WriteFile(cl, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(cl, at, at); err != nil {
+		t.Fatal(err)
+	}
+	cmd := logsWroteCommand([]string{"claude:" + sid, "claude:0f9a2c1e-1111-4222-8333-000000000000", "claude:x; touch /tmp/no", a})
+	if strings.Contains(cmd, "touch") {
+		t.Fatalf("not an id, put in: %s", cmd)
+	}
+	c := exec.Command("sh", "-c", cmd)
+	c.Env = append(os.Environ(), "CLAUDE_CONFIG_DIR="+conf)
+	if out, err = c.Output(); err != nil {
+		t.Fatal(err)
+	}
+	lo, _ = parseLogsWrote(string(out), []string{"c0", "c1", "c2", "p1"})
+	if lo["c0"] != at.UnixMilli() || lo["p1"] != at.UnixMilli() || len(lo) != 2 {
+		t.Fatalf("Claude Code's: %v (%q)", lo, out)
 	}
 	// (A host whose date tells seconds only: that second's first and last
 	// millisecond.)
