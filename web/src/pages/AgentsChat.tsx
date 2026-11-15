@@ -117,6 +117,8 @@ const COMPACT_QUIET = 15000
 // (A Codex says so too of a request tried again — its retries come within
 // seconds of going quiet: looked at sooner and more often.)
 const CODEX_LOOK = 5000
+// (How often a Codex's screen is looked at for "Implement this plan?" while its plan waits.)
+const PLAN_LOOK = 3000
 const CODEX_QUIET = 2000
 const COMPACT_UNTIL = 240000
 // Of each turn's end asked about (by its key): the looks left, what was
@@ -1064,7 +1066,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   const bound = (convo.status === 'ready' || (convo.status === 'none' && convo.reason === 'no_log')) && !!convo.bind && (!herdr || convo.bind.pane === cur.pane)
   // (The answer card reads the pane's screen: it needs no log read.)
   // (An answer card: herdr's, or, where Claude Code's file says it waits for an answer, the conversation's.)
-  const waits = herdr ? !!row && agent?.status === 'blocked' && !agent.other : !!convo.bind && convo.agentStatus === 'waiting' && answerable(convo.waitingFor)
+  const waitsFor = herdr ? !!row && agent?.status === 'blocked' && !agent.other : !!convo.bind && convo.agentStatus === 'waiting' && answerable(convo.waitingFor)
   // (Claude Code's, its process known: through the conversation, which
   // checks on the host, right before the keys, that this process still
   // waits for an answer on the screen shown; a Codex in tmux likewise (its
@@ -1256,14 +1258,16 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   const [modeNow, setModeNow] = useState<{ mode: string; bind: string; was?: string; last: number; gen: number } | null>(null)
   const [modeBusy, setModeBusy] = useState(false)
   const lastSeq = convo.entries.findLast((e: ConvoEntry) => e.role === 'user')?.seq ?? 0
-  if (modeNow && (modeNow.bind !== bindKey || convo.meta?.mode !== modeNow.was || lastSeq > modeNow.last || convo.gen !== modeNow.gen)) setModeNow(null)
-  const canMode = bound && !notClaude && convo.status === 'ready' && !!convo.meta && agent?.status !== 'blocked' && !agent?.other
+  // (A Codex's: its collaboration mode, plan or default — Shift+Tab goes from one to the other; its log says it at once.)
+  const modeWas = codex ? convo.meta?.collab : convo.meta?.mode
+  if (modeNow && (modeNow.bind !== bindKey || modeWas !== modeNow.was || lastSeq > modeNow.last || convo.gen !== modeNow.gen)) setModeNow(null)
+  const canMode = bound && (!notClaude || codex) && convo.status === 'ready' && !!convo.meta && agent?.status !== 'blocked' && !agent?.other
   // To the mode picked: Shift+Tab on the host until its screen shows it
   // (one it was not started with is not there: it is left as it was).
   // (The log as it is when a switch is answered: what it says by then is
   // of before the switch, and goes over it only once it changes again.)
-  const logNow = useRef({ bind: bindKey, was: convo.meta?.mode, last: lastSeq, gen: convo.gen })
-  logNow.current = { bind: bindKey, was: convo.meta?.mode, last: lastSeq, gen: convo.gen }
+  const logNow = useRef({ bind: bindKey, was: modeWas, last: lastSeq, gen: convo.gen })
+  logNow.current = { bind: bindKey, was: modeWas, last: lastSeq, gen: convo.gen }
   const pickMode = (target: string) => {
     const b = convo.bind
     if (!b || modeBusy) return
@@ -1816,6 +1820,39 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       gone.abort()
     }
   }, [lookCompact, bindKey, sid, codex])
+  // A Codex's plan put to the person ("Implement this plan?", plan mode):
+  // neither its title nor herdr says it waits, so its menu is looked for on
+  // its screen while its log has a plan not answered and it is at rest; there,
+  // it is answered as any question, from its card.
+  const lookPlan = bound && codex && !!active && !working && asked?.name === 'ExitPlanMode' && !asked.done
+  const [planAsked, setPlanAsked] = useState(false)
+  useEffect(() => {
+    setPlanAsked(false)
+    if (!lookPlan) return
+    let live = true
+    let busy = false
+    const gone = new AbortController()
+    const look = () => {
+      if (busy || document.hidden) return
+      busy = true
+      api<{ plan_asked?: boolean }>('POST', `/api/sessions/${sid}/conversation/suggestion?for=plan`, compactNow.current.body(), { timeoutMs: PRESS_MS, signal: gone.signal })
+        .then(
+          (r) => live && setPlanAsked(!!r.plan_asked),
+          () => {},
+        )
+        .finally(() => {
+          busy = false
+        })
+    }
+    look()
+    const timer = setInterval(look, PLAN_LOOK)
+    return () => {
+      live = false
+      clearInterval(timer)
+      gone.abort()
+    }
+  }, [lookPlan, bindKey, sid])
+  const waits = waitsFor || (lookPlan && planAsked)
   useEffect(() => {
     if (!askKey) return
     let a = suggestAsks.get(askKey)
@@ -2447,7 +2484,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       composer={composer}
       onSendNow={canPress && !notClaude ? () => press('now') : undefined}
       sendNow={said?.what === 'now' && said.bind === bindKey ? said.text : undefined}
-      mode={{ now: modeNow?.bind === bindKey ? modeNow.mode : undefined, busy: modeBusy, onPick: canMode ? pickMode : undefined }}
+      mode={{ now: modeNow?.bind === bindKey ? modeNow.mode : undefined, busy: modeBusy, onPick: canMode ? pickMode : undefined, codex }}
       model={canModel || modelBusy ? { list: models?.bind === bindKey ? models.list : null, unread: models?.bind === bindKey && !!models.unread, byLog: models?.bind === bindKey && !!models.byLog, fresh: !!models?.at && Date.now() - models.at < 60000, busy: modelBusy, can: canModel, onOpen: openModels, onPick: pickModel, of: bindKey, ...(codex ? { efforts: CODEX_EFFORTS } : {}) } : undefined}
       effort={{ now: effortNow?.bind === bindKey ? effortNow.effort : undefined, busy: effortBusy, can: canEffort, onPick: pickEffort }}
       lead={lead}

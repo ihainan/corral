@@ -58,6 +58,9 @@ func (s *Server) suggestion(w http.ResponseWriter, ctx context.Context, sess *te
 		if review != "" {
 			out["reviewing"] = review
 		}
+		if codexPlanPrompt(sgr.ReplaceAllString(string(res.Out), "")) {
+			out["plan_asked"] = true // (it asks whether to carry its plan out: answered from the page as any question)
+		}
 		writeJSON(w, http.StatusOK, out)
 		return
 	}

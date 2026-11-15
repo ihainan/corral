@@ -1,6 +1,7 @@
 package web
 
 import (
+	"regexp"
 	"context"
 	"errors"
 	"net/http"
@@ -27,6 +28,28 @@ const convoModeMost = 6
 // there and no mode line (an older Claude Code says nothing of that one);
 // "" where it cannot be told (a question in front of it, say).
 func modeOnScreen(screen string) string {
+	return modeOnScreenOf("claude", screen)
+}
+
+// modeOnScreenOf: modeOnScreen for agent's screen — a Codex's, its
+// collaboration mode: "plan" where its footer says "Plan mode" (at the
+// right of its status line, "(shift+tab to cycle)" after it where there is
+// room: 0.167, 11-15), "default" where its input is there without it; ""
+// where its input is not told apart (a menu, a dialog in front of it).
+func modeOnScreenOf(agent, screen string) string {
+	if agent == "codex" {
+		lines := strings.Split(strings.TrimRight(screen, "\n"), "\n")
+		_, foot, footed, ok := codexInputSpan(lines)
+		if !ok || !footed {
+			return ""
+		}
+		for _, l := range lines[foot:] {
+			if codexPlanMode.MatchString(l) {
+				return "plan"
+			}
+		}
+		return "default"
+	}
 	lines := strings.Split(strings.TrimRight(screen, "\n"), "\n")
 	foot := strings.Join(lines[max(0, len(lines)-modeFoot):], "\n")
 	if m := screenMode(foot); m != "" {
@@ -37,6 +60,13 @@ func modeOnScreen(screen string) string {
 	}
 	return ""
 }
+
+// codexPlanMode: Codex's footer saying it is in plan mode, at the right.
+var codexPlanMode = regexp.MustCompile(`(?:^|\s{2,}|… )Plan mode(?: \(shift\+tab to cycle\))?\s*$`)
+
+// codexModes: the collaboration modes a Codex may be switched to (Shift+Tab
+// goes from one to the other).
+var codexModes = map[string]bool{"default": true, "plan": true}
 
 // modeFoot: the screen's last lines its mode and input box are looked for
 // in (the input's box, its mode line and a status line of a few lines).
@@ -53,7 +83,11 @@ const modeFoot = 12
 // any other (see convoSendCommand): another process there, nothing more is
 // pressed. The pane's turn is given back once the last command has ended on
 // the host.
-func (s *Server) convoModeTo(w http.ResponseWriter, ctx context.Context, sess *term.Session, pane, socket string, pid, start int64, sid string, press []string, target string, outcome, reason *string, release func()) {
+func (s *Server) convoModeTo(w http.ResponseWriter, ctx context.Context, sess *term.Session, agent, pane, socket string, pid, start int64, sid string, press []string, target string, outcome, reason *string, release func()) {
+	gate := "free"
+	if agent == "codex" {
+		gate = "cfree" // (whether Codex waits, its title says)
+	}
 	var ended sync.WaitGroup
 	defer func() {
 		go func() {
@@ -70,7 +104,7 @@ func (s *Server) convoModeTo(w http.ResponseWriter, ctx context.Context, sess *t
 		writeError(w, http.StatusBadGateway, "no_screen", "the pane's screen could not be read")
 		return
 	}
-	from := modeOnScreen(string(res.Out))
+	from := modeOnScreenOf(agent, string(res.Out))
 	if from == "" {
 		*outcome, *reason = "looked", "unsure"
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "mode": "", "pressed": false})
@@ -85,7 +119,7 @@ func (s *Server) convoModeTo(w http.ResponseWriter, ctx context.Context, sess *t
 	for i := 0; i < convoModeMost; i++ {
 		ended.Add(1)
 		// (Not while it waits: Shift+Tab is a question's then. Exit 9.)
-		res, err := sshx.Exec(ctx, sess.Client(), convoGatedCommand("free", sess.Persistence, sess.TmuxSession, pane, socket, pid, start, sid, 0, press, convoModeLines), 16<<10,
+		res, err := sshx.Exec(ctx, sess.Client(), convoGatedCommand(gate, sess.Persistence, sess.TmuxSession, pane, socket, pid, start, sid, 0, press, convoModeLines), 16<<10,
 			sshx.ExecOptions{Stdin: strings.NewReader(""), Release: ended.Done})
 		var exitErr *sshx.ExitError
 		switch {
@@ -120,7 +154,7 @@ func (s *Server) convoModeTo(w http.ResponseWriter, ctx context.Context, sess *t
 			writeError(w, http.StatusBadGateway, "unknown", "it is not known whether the key arrived")
 			return
 		}
-		now = modeOnScreen(string(res.Out))
+		now = modeOnScreenOf(agent, string(res.Out))
 		switch now {
 		case target:
 			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "mode": now, "pressed": true})

@@ -167,10 +167,11 @@ function codexLines(text: string): string[] | null {
   while (end < lines.length && goesOn(lines, end)) end++
   const tail = lines.slice(end).map((l) => l.trim()).filter(Boolean).join(' ')
   // (Only its own phrases, between "|" and "or": anything else left over is no hint.)
-  const rest = tail.replace(codexHint, ' ').replace(/[|\s]+|\bor\b/gi, '')
+  const rest = tail.replace(codexHint, ' ').replace(/[|·\s]+|\bor\b/gi, '')
   return !rest ? lines.slice(0, end) : null
 }
-const codexHint = /(?:press\s+)?(?:tab|enter|esc|space|←\/→|↑\/↓)\s+to\s+(?:add\s+notes|submit(?:\s+(?:all|answer))?|navigate(?:\s+questions)?|interrupt|confirm|cancel|go\s+back|select(?:\s+(?!or\b)[a-z]+){0,3})\b/gi
+// (0.167's: "enter select · esc back", no "to", "·" between.)
+const codexHint = /(?:press\s+)?(?:tab|enter|esc|space|←\/→|↑\/↓)\s+(?:to\s+)?(?:add\s+notes|submit(?:\s+(?:all|answer))?|navigate(?:\s+questions)?|interrupt|confirm|cancel|go\s+back|back|select(?:\s+(?!or\b)(?!esc\b)[a-z]+){0,3})\b/gi
 
 // The question asked over a menu on the screen: the line above it that
 // asks (ends in a question mark), else "".

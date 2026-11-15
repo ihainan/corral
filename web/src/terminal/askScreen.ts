@@ -192,6 +192,25 @@ export function readAskScreen(text: string): AskScreen {
     if (!whole(opts) || !tailOK(after.slice(last + 1))) return { kind: 'unknown' }
     return { kind: 'review', answers, incomplete: rest.slice(0, ready).some((l) => /not answered all questions/.test(l)), options: opts }
   }
+  // (Codex's plan put to the person — plan mode, 0.167: "Implement this
+  // plan?", its choices marked "›", what each does beside it, its keys
+  // last.)
+  const cx = lines.findLastIndex((l) => /^\s*Implement this plan\?\s*$/.test(l))
+  if (cx >= 0) {
+    const after = lines.slice(cx + 1)
+    const opts: ScreenOption[] = []
+    let last = -1
+    after.forEach((l, i) => {
+      const m = /^\s*(›)?\s*(\d{1,2})\.\s+(.*?)\s*$/.exec(l)
+      if (!m) return
+      const [label, desc] = m[3].split(/\s{2,}/, 2)
+      opts.push({ n: Number(m[2]), label, cursor: !!m[1], ...(desc ? { desc } : {}) })
+      last = i
+    })
+    const keys = after.slice(last + 1).filter((l) => l.trim())
+    if (whole(opts) && keys.length === 1 && /^\s*enter (?:to )?select\b.*\besc\b/i.test(keys[0])) return { kind: 'plan', options: opts }
+    return { kind: 'unknown' }
+  }
   // (A plan's question, the last one on the screen, its menu last.)
   const asks = lines.findLastIndex((l) => /Would you like to proceed\?|Claude wants to exit plan mode/.test(l))
   if (asks >= 0 && !lines.slice(asks + 1).some((l) => /\?\s*$/.test(l)) && lines.slice(0, asks + 1).some((l) => /Ready to code\?|Exit plan mode\?/.test(l))) {

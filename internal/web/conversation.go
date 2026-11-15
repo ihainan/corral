@@ -2913,6 +2913,11 @@ cx=
 # ("cscreen:…": a command of Codex's, not while it waits, on the screen
 # read, its input seen empty there.)
 case $gate in cfree|creply:*|cscreen:*) cx=1 gate=${gate#c} ;; esac
+# ("preply:…": Codex's "Implement this plan?", which its title does not
+# say it waits on: the screen read just before by the gateway and found
+# that question, its digest the one answered — checked here as any reply's.)
+cxplan=
+case $gate in preply:*) cx=1 cxplan=1 gate=${gate#p} ;; esac
 # ("ofree:<sha256>": a message to OpenCode 2, as "free" — not while it asks
 # for an answer, which takes its input's place; nor onto words in its input:
 # its input as the gateway saw it empty, its digest, the same here.)
@@ -3128,6 +3133,10 @@ waiting() {
     if [ "${d%% *}" = "$oc" ]; then st=idle; else st=draft; fi
     return 0
   fi
+  if [ -n "$cxplan" ]; then
+    st=waiting wf=plan
+    return 0
+  fi
   if [ -n "$cx" ]; then
     # (Codex 0.164 titles its terminal "[ ! ] Action Required | …", blinking
     # with "[ . ] …", while it waits for an answer, and only then. Not read
@@ -3297,7 +3306,7 @@ if [ -n "$gate" ]; then
     [ "${d%% *}" = "${gate#look:}" ] || exit 10 ;;
   reply:*)
     [ "$st" = waiting ] || exit 9
-    case $wf in "permission prompt"|"input needed"|"sandbox request"|"worker request") ;; *) exit 9;; esac
+    case $wf in "permission prompt"|"input needed"|"sandbox request"|"worker request"|plan) ;; *) exit 9;; esac
     command -v sha256sum >/dev/null 2>&1 || exit 11
     if [ "$mode" = tmux ]; then d=$(tmux -u capture-pane -p -t "$p" 2>/dev/null 9>&- | STEADYSCREEN | sha256sum)
     else d=$(HERDR_SOCKET_PATH=$sock herdr pane read "$p" --source visible 2>/dev/null 9>&- | STEADYSCREEN | sha256sum); fi
@@ -3950,7 +3959,7 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	// itself while it works. Not Claude Code's /clear and /rename.)
 	codexCommand := front.agent == "codex" && what == "command" && (text == "/compact" || text == "/new" || strings.HasPrefix(text, "/rename "))
 	// (Its picker, for its model and effort, as Claude Code's: convo_codex_model.go.)
-	codexModel := front.agent == "codex" && (what == "models" || what == "model")
+	codexModel := front.agent == "codex" && (what == "models" || what == "model" || (what == "mode" && codexModes[b.Mode])) // (its collaboration mode: plan or default)
 	if what == "command" && front.agent == "claude" && text == "/new" {
 		reason = "bad_request"
 		writeError(w, http.StatusBadRequest, "bad_request", "not a command of Claude Code's")
@@ -4072,7 +4081,7 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	if what == "mode" && b.Mode != "" {
 		release := turn
 		turn = func() {} // (convoModeTo gives it back, once its last command has ended on the host)
-		s.convoModeTo(w, ctx, sess, b.Pane, socket, b.PID, b.Start, b.Session, press, b.Mode, &outcome, &reason, release)
+		s.convoModeTo(w, ctx, sess, front.agent, b.Pane, socket, b.PID, b.Start, b.Session, press, b.Mode, &outcome, &reason, release)
 		return
 	}
 	release := turn
@@ -4093,6 +4102,9 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		gate = "reply:" + b.Digest
 		if front.agent == "codex" {
 			gate = "c" + gate // (its title says it waits)
+			if s.codexPlanAsked(ctx, sess, b.Pane, socket, b.Digest) {
+				gate = "p" + gate[1:] // (but not for "Implement this plan?": its screen does — codexPlanAsked)
+			}
 		}
 	case front.agent == "claude" && (what == "send" || what == "send_now" || what == "mode"):
 		gate = "free" // (not while it waits: what is typed would go to its question)

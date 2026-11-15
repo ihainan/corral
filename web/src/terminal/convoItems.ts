@@ -507,7 +507,7 @@ export function mcpTool(name: string): { server: string; tool: string } | null {
 export const toolName = (name: string) => mcpTool(name)?.tool ?? name
 
 // The word a step's line starts with: what it did, or (live) does.
-export type Verb = Category | 'write' | 'task' | 'ask' | 'wait' | 'stop' | 'page' | 'send' | 'skill' | 'agents' | 'cron' | 'advisor' | 'browser' | 'doc' | 'mcp'
+export type Verb = Category | 'write' | 'task' | 'ask' | 'plan' | 'wait' | 'stop' | 'page' | 'send' | 'skill' | 'agents' | 'cron' | 'advisor' | 'browser' | 'doc' | 'mcp'
 export function verbOf(name: string): Verb | null {
   switch (name) {
     case 'Write':
@@ -519,6 +519,8 @@ export function verbOf(name: string): Verb | null {
     case 'AskUserQuestion':
     case 'request_user_input': // (Codex's)
       return 'ask'
+    case 'ExitPlanMode': // (Claude Code's plan put to the person; Codex's proposed in plan mode)
+      return 'plan'
     case 'Monitor':
     case 'Sleep': // (Codex's clock.sleep)
       return 'wait'

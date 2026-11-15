@@ -199,6 +199,7 @@ export interface ConvoTask {
 export interface ConvoMeta {
   model?: string // the model's id, as the API named it
   mode?: string // the permission mode: default, acceptEdits, plan, auto, ...
+  collab?: string // (Codex) its collaboration mode: default, plan
   effort?: string // how hard it is asked to think: low, medium, high, xhigh, max
   branch?: string
   forked?: boolean // a copy of another (Codex's): its log has only what came after; before, in the other's

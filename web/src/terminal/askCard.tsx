@@ -111,6 +111,8 @@ const sameQ = (x: AskScreen, q: Q): x is Q =>
 // (The plan's first line, shown on the screen too: that very plan.)
 export function planOn(call: ConvoTool | undefined, s: AskScreen, text: string): boolean {
   if (!call || call.name !== 'ExitPlanMode' || call.done || s.kind !== 'plan') return false
+  // (Codex's question: of the one plan its log has not had answered — the plan itself scrolled off its screen, maybe.)
+  if (/^\s*Implement this plan\?\s*$/m.test(text)) return true
   const first = (call.plan ?? '').split('\n').map((l) => flat(l.replace(/^#+\s*/, '').replace(/[`*_]/g, ''))).find(Boolean)
   return !first || flat(text.replace(/[`*_]/g, '')).includes(first)
 }
@@ -421,7 +423,7 @@ export function ReviewPanel({ shown, digest, target, drive, busy }: { shown: Ext
 export function PlanPanel({ call, shown, digest, target, drive, busy, onScreen, alive }: { call: ConvoTool; shown: Extract<AskScreen, { kind: 'plan' }>; digest: string; target: ReplyTarget; drive: Drive; busy: boolean; onScreen: () => void; alive: () => boolean }) {
   return (
     <div className="convo-ask-structured">
-      <div className="convo-ask-q">{t('ask.plan')}</div>
+      <div className="convo-ask-q">{t(target.agent === 'codex' ? 'ask.planCodex' : 'ask.plan')}</div>
       {call.plan ? (
         <div className="convo-ask-plan convo-md">
           <Markdown text={call.plan} />
@@ -440,6 +442,8 @@ export function PlanPanel({ call, shown, digest, target, drive, busy, onScreen, 
       <Choices digest={digest} options={shown.options.filter((o) => !/^Tell Claude what to change$/i.test(o.label))} busy={busy} onPick={(n) => drive((now) => step(withAlive(target, alive), now, [String(n)], (x) => x.kind !== 'plan'))} />
       {(() => {
         const change = shown.options.find((o) => /^Tell Claude what to change$/i.test(o.label))
+        // (Codex's has no such choice: "No, stay in Plan mode", then a message, is how a change is asked for.)
+        if (!change && shown.options.some((o) => /^No, stay in Plan mode$/i.test(o.label))) return <p className="convo-ask-hint">{t('ask.codexPlanChange')}</p>
         return change && target.fill ? (
           <OwnBox label={t('own.change')} hint={t('own.changeHint')} keep={call.id ? `${target.key} ${call.id} plan` : undefined} busy={busy} onGo={(text) => drive((now) => ownWords(target, now, planChange(change.n), text, alive))} />
         ) : (

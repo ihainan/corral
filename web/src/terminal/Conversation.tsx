@@ -2356,7 +2356,10 @@ const modeName = (m: string) => ((MODES as readonly string[]).includes(m) ? t(`c
 // Switching the permission mode from the page, to one picked from a menu
 // (Shift+Tab until it is there, on the host): now, what the last switch went
 // to (the log says it only with the next message); busy, one on its way.
-export type ModeSwitch = { now?: string; busy: boolean; onPick?: (mode: string) => void }
+// (codex: a Codex's — its collaboration mode, plan or default, what is switched; its approval policy shown otherwise.)
+export type ModeSwitch = { now?: string; busy: boolean; onPick?: (mode: string) => void; codex?: boolean }
+// (A Codex's collaboration modes, in Shift+Tab's order.)
+const CODEX_MODES = ['default', 'plan'] as const
 // (Those Shift+Tab goes through, in its order; which a session has depends on how it was started.)
 const PICKED_MODES = ['default', 'acceptEdits', 'plan', 'auto', 'bypassPermissions'] as const
 // Each mode's mark, and a line of what it lets the agent do (11-14: five names to tell apart by name alone).
@@ -2577,6 +2580,9 @@ function Runs({ meta, active, mode, model, effort, quota, via, auth }: { meta: C
   const used = meta.context ?? 0
   // (Where it is not known: past the smaller window, the session has the
   // larger one. Known and filled past, it was not that one after all.)
+  // (A Codex's chip: "Plan" while in plan mode, else its approval policy.)
+  const collabNow = mode?.codex ? mode.now || meta.collab || 'default' : undefined
+  const shownMode = collabNow === 'plan' ? modeName('plan') : modeName((mode?.codex ? meta.mode : mode?.now || meta.mode) || 'default')
   const known = meta.window && used <= meta.window ? meta.window : 0
   const windows = known ? [known] : WINDOWS.filter((w) => w >= used || w === WINDOWS[WINDOWS.length - 1])
   // (The gauge: of its window, else of the smaller it may be.)
@@ -2584,7 +2590,7 @@ function Runs({ meta, active, mode, model, effort, quota, via, auth }: { meta: C
   return (
     // (The focus gone elsewhere, as by Tab, while the model menu is open, the list read or not: closed.)
     <div className="convo-runs" ref={box} onBlur={(e) => (open === 'model' || open === 'effort' || open === 'mode') && !box.current?.contains(e.relatedTarget as Node | null) && setOpen(false)}>
-      {(mode?.now || meta.mode) &&
+      {(mode?.now || meta.mode || (mode?.codex && meta.collab)) &&
         (mode?.onPick || mode?.busy ? (
           <button
             ref={modeBtn}
@@ -2598,12 +2604,12 @@ function Runs({ meta, active, mode, model, effort, quota, via, auth }: { meta: C
             onClick={() => !mode.busy && setOpen(open === 'mode' ? false : 'mode')} // (not disabled while busy: the focus it has stays)
           >
             {mode.busy ? <span className="convo-spin" aria-hidden="true" /> : null}
-            {mode.busy ? t('convo.modeSwitching') : modeName(mode.now || meta.mode!)}
+            {mode.busy ? t('convo.modeSwitching') : shownMode}
             {!mode.busy && <ChevronsUpDown size={12} aria-hidden="true" />}
           </button>
         ) : (
           <span className="convo-runs-item convo-runs-mode" title={t('convo.modeHint')}>
-            {modeName(mode?.now || meta.mode!)}
+            {shownMode}
           </span>
         ))}
       <span className="spacer" />
@@ -2785,8 +2791,8 @@ function Runs({ meta, active, mode, model, effort, quota, via, auth }: { meta: C
           ref={menu}
           onBlur={(e) => !box.current?.contains(e.relatedTarget as Node | null) && setOpen(false)} // (Tab out of it: closed)
         >
-          {PICKED_MODES.map((m) => {
-            const now = (mode.now || meta.mode) === m
+          {(mode.codex ? CODEX_MODES : PICKED_MODES).map((m) => {
+            const now = mode.codex ? collabNow === m : (mode.now || meta.mode) === m
             return (
               <button
                 key={m}
@@ -2804,13 +2810,13 @@ function Runs({ meta, active, mode, model, effort, quota, via, auth }: { meta: C
                   const Ic = MODE_ICON[m]
                   return <Ic size={16} className="convo-mode-ic" aria-hidden="true" />
                 })()}
-                <span className="convo-models-label">{modeName(m)}</span>
-                <span className="convo-models-desc">{t(`convo.modeDesc.${m}` as I18nKey)}</span>
+                <span className="convo-models-label">{mode.codex ? t(m === 'plan' ? 'convo.mode.plan' : 'convo.mode.codexDefault') : modeName(m)}</span>
+                <span className="convo-models-desc">{t(mode.codex ? (m === 'plan' ? 'convo.modeDesc.codexPlan' : 'convo.modeDesc.codexDefault') : (`convo.modeDesc.${m}` as I18nKey))}</span>
                 {now && <Check size={14} className="convo-mode-check" aria-hidden="true" />}
               </button>
             )
           })}
-          <p className="convo-runs-note">{t('convo.modeNote')}</p>
+          {!mode.codex && <p className="convo-runs-note">{t('convo.modeNote')}</p>}
         </div>
       )}
       {open === 'effort' && effort && (
@@ -5059,6 +5065,8 @@ function object(tool: ConvoTool): { text: string; code: boolean } {
   // A command: what it is for, as Claude Code says it; else the command,
   // without the "cd <folder> &&" that begins many alike (all of it opened).
   if (tool.stdin) return { text: stdinSaid(tool.stdin).obj, code: false }
+  // (A plan: its first line, its heading's marks left out.)
+  if (v === 'plan') return { text: (tool.plan ?? '').split('\n').map((l) => l.replace(/^#+\s*/, '').replace(/[`*_]/g, '').trim()).find(Boolean) ?? '', code: false }
   if (v === 'cmd' && tool.title) return { text: tool.title, code: false }
   if (v === 'cmd' && d) return { text: d.replace(/^cd\s+(?:"[^"]*"|'[^']*'|[^\s&;|]+)\s*&&\s*/, ''), code: true }
   if (tool.title) return { text: tool.title, code: false }
@@ -5078,6 +5086,7 @@ const VERB_SAID: Record<Verb, { v: I18nKey; live: I18nKey }> = {
   agent: { v: 'convo.v.agent', live: 'convo.live.agent' },
   task: { v: 'convo.v.task', live: 'convo.live.task' },
   ask: { v: 'convo.v.ask', live: 'convo.live.ask' },
+  plan: { v: 'convo.v.plan', live: 'convo.live.plan' },
   wait: { v: 'convo.v.wait', live: 'convo.live.wait' },
   stop: { v: 'convo.v.stop', live: 'convo.live.stop' },
   page: { v: 'convo.v.page', live: 'convo.live.page' },
@@ -5282,9 +5291,15 @@ function ToolRow({ tool, onCopy, live }: { tool: ConvoTool; onCopy: (s: string) 
               ))}
             </dl>
           )}
+          {tool.plan && (
+            // (The plan put to the person, whole: as its card showed it, and after.)
+            <div className="convo-ask-plan convo-md">
+              <Markdown text={tool.plan} />
+            </div>
+          )}
           {tool.same ? <div className="convo-result-head">{t('convo.noChange')}</div> : tool.patch ? <Hunks hunks={tool.patch} cut={tool.patch_cut} /> : isEdit && <Diff old={tool.old ?? ''} new={tool.new ?? ''} />}
           {!tool.done ? (
-            <div className="convo-result-head">{t('convo.running')}</div>
+            v === 'plan' ? null : <div className="convo-result-head">{t('convo.running')}</div>
           ) : result ? (
             <>
               <div className="convo-result-head">
