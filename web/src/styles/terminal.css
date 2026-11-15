@@ -1038,6 +1038,29 @@ button.gch-ut:hover { background: var(--term-hover); }
 @container (max-width: 1300px) {
   .convo-panel { position: absolute; inset: 0 0 0 auto; z-index: 6; width: min(100%, 620px); box-shadow: -8px 0 28px rgba(0, 0, 0, 0.25); }
 }
+/* The dock (dock.tsx): in the panels' slot, its width the person's (inline);
+   over the thread, from the right, where the thread would keep too little
+   (is-over, as the panels are at 1300 and under). Its edge a grip. */
+.convo-tray { position: relative; max-width: 100%; }
+.convo-tray.is-over { position: absolute; inset: 0 0 0 auto; z-index: 6; box-shadow: -8px 0 28px rgba(0, 0, 0, 0.25); }
+.convo-tray-grip { position: absolute; top: 0; bottom: 0; left: -4px; z-index: 1; width: 8px; cursor: col-resize; touch-action: none; }
+.convo-tray-grip:hover, .convo-tray-grip:focus-visible { background: var(--term-accent-soft); outline: none; }
+.convo-tray-head { flex: none; display: flex; align-items: center; gap: 8px; padding: 8px 8px 8px 12px; border-bottom: 1px solid var(--term-line); }
+.convo-tray-tabs { flex: 1; min-width: 0; display: flex; gap: 4px; }
+.convo-tray-tab { display: inline-flex; align-items: center; gap: 6px; padding: 6px 10px; border: 0; border-radius: var(--r-sm); background: none; color: var(--term-fg-2); font: inherit; font-size: var(--fs-sub); line-height: var(--lh-sub); white-space: nowrap; cursor: pointer; }
+.convo-tray-tab:hover { color: var(--term-fg); background: var(--term-hover); }
+.convo-tray-tab[aria-selected='true'] { background: var(--term-accent-soft); color: var(--term-accent-text); font-weight: 500; }
+.convo-tray-tab:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: -2px; }
+.convo-tray-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.convo-tray-bar { flex: none; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 16px 0; }
+.convo-tray-sub { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--term-fg-3); font-size: var(--fs-note); line-height: var(--lh-note); }
+.convo-tray-bar .link-btn { flex: none; font-size: var(--fs-note); line-height: var(--lh-note); }
+.gch.is-docked { border-top: 0; padding: 8px 16px 24px; }
+.gch.is-docked .gch-file-head { top: -8px; } /* (its padding above, as .gch's 12 in the dialog) */
+.convo-tray .convo-panelwin { flex: 1; min-height: 0; border: 0; border-radius: 0; }
+.convo-tray .convo-panelwin-screen { flex: 1; max-height: none; }
+.convo-tray-note { display: flex; flex-direction: column; align-items: flex-start; gap: 12px; padding: 24px 16px; color: var(--term-fg-2); font-size: var(--fs-sub); line-height: var(--lh-sub); }
+.convo-tray-note p { margin: 0; }
 .term-root .convo-changes-see { flex: none; height: 30px; padding: 0 10px; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg); }
 .term-root .convo-changes-see:hover { background: var(--term-hover); }
 

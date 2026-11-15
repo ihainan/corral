@@ -2507,6 +2507,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
         return r.pressed
       }}
       onShowTerminal={openTerminal}
+      dockTerminal={{ can: liveFor(convo.bind?.agent) && !!convo.bind, press: pressBody, onFull: openTerminal, letters: convo.bind?.agent === 'codex' }}
       onLook={liveFor(convo.bind?.agent) && convo.bind ? () => setLiveOf(bindKey) : undefined}
       onCopied={() => toast(t('common.copied'))}
       composer={composer}

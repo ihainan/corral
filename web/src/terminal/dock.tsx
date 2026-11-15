@@ -1,0 +1,227 @@
+// The dock: a panel beside the thread on a wide screen (over it, from the
+// right, where the thread would keep too little of its own — as the turn's
+// panels are), its tabs what the agent's work is looked at in without a
+// dialog over it: the Changes of its folder, its Terminal as it is now.
+// (Files to come.) Shown in the slot those panels are in, and put aside
+// while one of them is open. Opened from the bar's toggle or the card's
+// counts; whether it is open, its tab and its width are the person's (kept
+// in this browser); what each tab shows is per conversation, kept while the
+// page is.
+import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
+import { GitCompareArrows, SquareTerminal, X } from 'lucide-react'
+import { api } from '../api'
+import { t } from '../i18n'
+import { usePrefs } from '../prefs'
+import { ChangesBody, useChanges, type ChangesActs, type ChangesAgainst } from './changesView'
+import { PanelWindow } from './PanelWindow'
+
+export type DockTab = 'changes' | 'terminal'
+const TABS: DockTab[] = ['changes', 'terminal']
+
+// What the Terminal tab is given: whether the pane's screen can be shown
+// here (liveFor: AgentsChat's one switch for it), what a key is pressed with,
+// the whole terminal.
+// (letters: a letter pressed only on the screen shown — Codex's, as the composer's live panel.)
+export type DockTerminal = { can: boolean; press: () => Record<string, unknown>; onFull: () => void; letters?: boolean }
+
+// The person's: kept in this browser (none there — private, blocked: as at first).
+const KEY = 'corral.dock'
+type Kept = { open: boolean; tab: DockTab; width: number }
+export const DOCK_W = { min: 400, max: 720, at: 480 }
+export function dockKept(): Kept {
+  try {
+    const v = JSON.parse(localStorage.getItem(KEY) ?? 'null') as Partial<Kept> | null
+    return {
+      open: v?.open === true,
+      tab: v?.tab && TABS.includes(v.tab) ? v.tab : 'changes',
+      width: typeof v?.width === 'number' ? Math.min(DOCK_W.max, Math.max(DOCK_W.min, v.width)) : DOCK_W.at,
+    }
+  } catch {
+    return { open: false, tab: 'changes', width: DOCK_W.at }
+  }
+}
+export function keepDock(k: Partial<Kept>) {
+  try {
+    localStorage.setItem(KEY, JSON.stringify({ ...dockKept(), ...k }))
+  } catch {
+    /* (not kept: as it is now, this page) */
+  }
+}
+
+// Per conversation, while the page is: which of the Changes it showed.
+const against = new Map<string, ChangesAgainst>()
+
+// The base the card names (the remote's default branch): asked as the card
+// asks, for the tab to offer it.
+function useBase(sid: string, pane: string, on: boolean, given?: string) {
+  const [base, setBase] = useState<string | undefined>(given)
+  useEffect(() => {
+    if (given) return setBase(given)
+    if (!on) return
+    const ctl = new AbortController()
+    api<{ base?: string }>('GET', `/api/sessions/${sid}/git` + (pane ? '?pane=' + encodeURIComponent(pane) : ''), undefined, { signal: ctl.signal, timeoutMs: 20000 }).then(
+      (g) => !ctl.signal.aborted && setBase(g.base),
+      () => {},
+    )
+    return () => ctl.abort()
+  }, [sid, pane, on, given])
+  return base
+}
+
+export function Dock({
+  of,
+  tab,
+  onTab,
+  start,
+  terminal,
+  acts,
+  over,
+  width,
+  onWidth,
+  onClose,
+  active,
+  onSettled,
+  toast,
+}: {
+  of: string // (the conversation: "<session> <pane>")
+  tab: DockTab
+  onTab: (t: DockTab) => void
+  start?: { against: ChangesAgainst; base?: string; n: number } // (the card's counts tapped: that reading, n each time)
+  terminal?: DockTerminal
+  acts?: ChangesActs
+  over: boolean // (over the thread, not beside it)
+  width: number
+  onWidth: (w: number) => void
+  onClose: () => void
+  active: boolean
+  onSettled: () => void
+  toast: (s: string, bad?: boolean) => void
+}) {
+  usePrefs()
+  const [sid, pane = ''] = of.split(' ')
+  const root = useRef<HTMLElement>(null)
+  // (Tabs as a tablist: the arrows between them, Home and End; the one shown the one reached by Tab.)
+  const tabKeys = (e: ReactKeyboardEvent) => {
+    const i = TABS.indexOf(tab)
+    const to = e.key === 'ArrowRight' ? TABS[(i + 1) % TABS.length] : e.key === 'ArrowLeft' ? TABS[(i + TABS.length - 1) % TABS.length] : e.key === 'Home' ? TABS[0] : e.key === 'End' ? TABS[TABS.length - 1] : null
+    if (!to) return
+    e.preventDefault()
+    onTab(to)
+    requestAnimationFrame(() => root.current?.querySelector<HTMLElement>(`[data-tab="${to}"]`)?.focus())
+  }
+  // (Esc closes it only from within it — the composer's Esc stops the agent. The
+  // terminal's screen takes its own keys, Esc too, before they come here.)
+  const onKey = (e: ReactKeyboardEvent) => {
+    if (e.key !== 'Escape' || e.defaultPrevented) return
+    e.preventDefault()
+    e.stopPropagation()
+    onClose()
+  }
+  // Its edge, to make it wider or narrower: by a drag, or the arrows when focused.
+  const drag = (e: React.PointerEvent) => {
+    e.preventDefault()
+    const x0 = e.clientX
+    const w0 = width
+    const move = (ev: PointerEvent) => onWidth(Math.min(DOCK_W.max, Math.max(DOCK_W.min, w0 + (x0 - ev.clientX))))
+    const up = () => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', up)
+    }
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', up)
+  }
+  const gripKeys = (e: ReactKeyboardEvent) => {
+    const step = e.shiftKey ? 80 : 20
+    const w = e.key === 'ArrowLeft' ? width + step : e.key === 'ArrowRight' ? width - step : e.key === 'Home' ? DOCK_W.max : e.key === 'End' ? DOCK_W.min : null
+    if (w === null) return
+    e.preventDefault()
+    onWidth(Math.min(DOCK_W.max, Math.max(DOCK_W.min, w)))
+  }
+  return (
+    <aside className={'convo-panel convo-tray' + (over ? ' is-over' : '')} style={{ width }} aria-label={t('dock.title')} ref={root} onKeyDown={onKey}>
+      {!over && (
+        <div
+          className="convo-tray-grip"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label={t('dock.width')}
+          aria-valuemin={DOCK_W.min}
+          aria-valuemax={DOCK_W.max}
+          aria-valuenow={width}
+          tabIndex={0}
+          onPointerDown={drag}
+          onKeyDown={gripKeys}
+        />
+      )}
+      <div className="convo-tray-head">
+        <div className="convo-tray-tabs" role="tablist" aria-label={t('dock.title')} onKeyDown={tabKeys}>
+          {TABS.map((k) => (
+            <button
+              key={k}
+              type="button"
+              role="tab"
+              id={'dock-tab-' + k}
+              data-tab={k}
+              className="convo-tray-tab"
+              aria-selected={tab === k}
+              aria-controls={'dock-panel-' + k}
+              tabIndex={tab === k ? 0 : -1}
+              onClick={() => onTab(k)}
+            >
+              {k === 'changes' ? <GitCompareArrows size={15} /> : <SquareTerminal size={15} />}
+              {t(k === 'changes' ? 'dock.changes' : 'dock.terminal')}
+            </button>
+          ))}
+        </div>
+        <button type="button" className="icon-btn convo-tray-close" onClick={onClose} aria-label={t('dock.close')} title={t('dock.close')}>
+          <X size={18} />
+        </button>
+      </div>
+      <div className="convo-tray-body" role="tabpanel" id={'dock-panel-' + tab} aria-labelledby={'dock-tab-' + tab}>
+        {tab === 'changes' ? (
+          <DockChanges key={of} of={of} sid={sid} pane={pane} start={start} acts={acts} />
+        ) : terminal?.can ? (
+          <PanelWindow key={of} sid={sid} active={active} press={terminal.press} onSettled={onSettled} toast={toast} live={{ onFull: terminal.onFull, letters: terminal.letters }} />
+        ) : (
+          <div className="convo-tray-note">
+            <p>{t('dock.noScreen')}</p>
+            {terminal && (
+              <button type="button" className="btn" onClick={terminal.onFull}>
+                <SquareTerminal size={15} /> {t('convo.showTerminal')}
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+    </aside>
+  )
+}
+
+// The Changes tab: the view's body, its reading the one this conversation
+// showed last (or the card's, tapped), a line over it to read again.
+function DockChanges({ of, sid, pane, start, acts }: { of: string; sid: string; pane: string; start?: { against: ChangesAgainst; base?: string; n: number }; acts?: ChangesActs }) {
+  const base = useBase(sid, pane, true, start?.base)
+  const c = useChanges(sid, pane, base ?? start?.base, start?.against ?? against.get(of) ?? 'work')
+  // (The card's counts tapped again, the dock open already: that reading.)
+  const seen = useRef(start?.n)
+  useEffect(() => {
+    if (start && start.n !== seen.current) {
+      seen.current = start.n
+      c.setAgainst(start.against)
+    }
+  }, [start, c])
+  useEffect(() => void against.set(of, c.against), [of, c.against])
+  return (
+    <>
+      <div className="convo-tray-bar">
+        <span className="convo-tray-sub" title={c.root}>
+          {c.sub ?? t('common.loading')}
+        </span>
+        <button type="button" className="link-btn" onClick={c.reload}>
+          {t('preview.reload')}
+        </button>
+      </div>
+      <ChangesBody c={c} base={base} acts={acts} className="is-docked" />
+    </>
+  )
+}

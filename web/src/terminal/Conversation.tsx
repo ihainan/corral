@@ -1,5 +1,5 @@
 import { createContext, Fragment, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { ArrowDown, ArrowUp, Bot, Check, MessagesSquare, FilePen, Hand, ListChecks, ShieldOff, Sparkles, Copy, Cpu, FileText, Gauge as GaugeIcon, LogOut, Radar, SquarePlus, SquareTerminal, Target, TextCursorInput, FolderOpen, Info, Image as ImageIcon, ImageOff, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, Clock, Download, Eye, GitBranch, Keyboard, ListOrdered, Loader, MoreHorizontal, MoreVertical, PanelLeft, Pin, RotateCw, Search, TriangleAlert, X, Plus } from 'lucide-react'
+import { PanelRight, ArrowDown, ArrowUp, Bot, Check, MessagesSquare, FilePen, Hand, ListChecks, ShieldOff, Sparkles, Copy, Cpu, FileText, Gauge as GaugeIcon, LogOut, Radar, SquarePlus, SquareTerminal, Target, TextCursorInput, FolderOpen, Info, Image as ImageIcon, ImageOff, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, Clock, Download, Eye, GitBranch, Keyboard, ListOrdered, Loader, MoreHorizontal, MoreVertical, PanelLeft, Pin, RotateCw, Search, TriangleAlert, X, Plus } from 'lucide-react'
 import { t, getLang, type I18nKey } from '../i18n'
 import { api } from '../api'
 import { asHeld, dayStart, FOLDED, foldAt, GROUPS, inGroup, listOrder, pinned, type ConvoListRow, type RowCmds } from './agentOrder'
@@ -12,6 +12,7 @@ import { CodeSpanOf, FileLinkOf, Markdown } from './markdown'
 import { codeRef, type LineSpan } from './paths'
 import { Hunks } from './hunks'
 import { ChangesView, type ChangesAgainst } from './changesView'
+import { Dock, dockKept, keepDock, type DockTab, type DockTerminal } from './dock'
 import { useSubConvo } from './subagent'
 import { useSubScan, type SubScanAgent } from './subscan'
 import { NEW_AGENT } from './newAgent'
@@ -133,6 +134,8 @@ const SIDE_W_KEY = 'corral.convoSideWidth'
 const SIDE_W = 288
 const SIDE_W_MIN = 220
 const SIDE_W_MAX = 520
+// (The thread's own width the dock leaves it, beside it; less, the dock goes over it.)
+const DOCK_THREAD = 560
 const sideWidthMax = (view: number) => Math.min(SIDE_W_MAX, Math.floor(view / 2))
 const sideWidthOf = (w: number, view: number) => Math.max(SIDE_W_MIN, Math.min(Math.round(w), sideWidthMax(view)))
 const isTouchOnly = isCoarse()
@@ -208,6 +211,7 @@ export function ConversationView({
   onResend,
   onLook,
   onShowTerminal,
+  dockTerminal,
   onCopied,
   composer,
   onSendNow,
@@ -242,6 +246,7 @@ export function ConversationView({
   onResend?: (id: number) => void // (one a subagent took in: back in the composer, to send to this one)
   onLook?: () => void // (its terminal shown here, where it can be)
   onShowTerminal: () => void
+  dockTerminal?: DockTerminal // (the dock's Terminal tab: the pane's screen, where it can be shown)
   onCopied: () => void
   composer?: ReactNode // (the terminal's composer, while it is open)
   onSendNow?: () => void // (messages wait to be taken in: Claude Code's "send now")
@@ -1246,6 +1251,33 @@ export function ConversationView({
   // The session card: shut, over the thread under its button, or a sheet from the bottom (narrow, or from the menu).
   const [card, setCard] = useState<'' | 'pop' | 'sheet'>('')
   const [gitChanges, setGitChanges] = useState<{ against: ChangesAgainst; base?: string } | null>(null) // (the Changes view, from the card)
+  // The dock (dock.tsx): on a screen 768 wide or more; open, its tab and
+  // width the person's. Beside the thread where the thread keeps DOCK_THREAD
+  // of its own beside the list, else over it, from the right.
+  const [dockable, setDockable] = useState(() => window.matchMedia('(min-width: 768px)').matches)
+  useEffect(() => {
+    const mq = window.matchMedia('(min-width: 768px)')
+    const on = () => setDockable(mq.matches)
+    mq.addEventListener('change', on)
+    return () => mq.removeEventListener('change', on)
+  }, [])
+  const [dockOpen, setDockOpenState] = useState(() => dockKept().open)
+  const [dockTab, setDockTabState] = useState<DockTab>(() => dockKept().tab)
+  const [dockW, setDockWState] = useState(() => dockKept().width)
+  const [dockStart, setDockStart] = useState<{ against: ChangesAgainst; base?: string; n: number } | undefined>()
+  const dockBtn = useRef<HTMLButtonElement>(null)
+  const setDockOpen = (v: boolean) => {
+    setDockOpenState(v)
+    keepDock({ open: v })
+  }
+  const setDockTab = (v: DockTab) => {
+    setDockTabState(v)
+    keepDock({ tab: v })
+  }
+  const setDockW = (v: number) => {
+    setDockWState(v)
+    keepDock({ width: v })
+  }
   useEffect(() => setGitChanges(null), [convo.of]) // (another agent's: not this one's changes)
   const cardBtn = useRef<HTMLButtonElement>(null)
   if (card && !active) setCard('') // (behind a terminal tab: shut)
@@ -1624,6 +1656,19 @@ export function ConversationView({
               <span className={cls}>{says}</span>
             )
           })()}
+          {convo.of && convo.status === 'ready' && dockable && (
+            <button
+              ref={dockBtn}
+              type="button"
+              className="icon-btn convo-tray-btn"
+              aria-pressed={dockOpen}
+              onClick={() => setDockOpen(!dockOpen)}
+              aria-label={t(dockOpen ? 'dock.close' : 'dock.open')}
+              title={t(dockOpen ? 'dock.close' : 'dock.open')}
+            >
+              <PanelRight size={18} aria-hidden="true" />
+            </button>
+          )}
           {convo.of && convo.status === 'ready' && (
             <button
               ref={cardBtn}
@@ -1673,7 +1718,13 @@ export function ConversationView({
           acts={{
             onFolder: files?.open ? (dir) => files.open!(dir) : undefined,
             onChanges: (key, path) => show(key, path),
-            onGitChanges: (against, base) => setGitChanges({ against, base }),
+            // (In the dock where there is one; else the view as a dialog.)
+            onGitChanges: (against, base) => {
+              if (!dockable) return setGitChanges({ against, base })
+              setDockStart((d) => ({ against, base, n: (d?.n ?? 0) + 1 }))
+              setDockTab('changes')
+              setDockOpen(true)
+            },
             onRunning: (id) => {
               const r = convo.running?.find((x) => x.id === id) ?? hostCmd(id)
               if (!r) return
@@ -1877,6 +1928,27 @@ export function ConversationView({
           nav={workNav(bgCmd.id)}
           onClose={() => setBgCmd(null)}
           active={active}
+        />
+      )}
+      {/* (The dock in the panels' slot: put aside while one of them is open.) */}
+      {dockable && dockOpen && convo.of && convo.status === 'ready' && !(changes && shownEdits) && !subs?.length && !bgCmd && (
+        <Dock
+          of={convo.of}
+          tab={dockTab}
+          onTab={setDockTab}
+          start={dockStart}
+          terminal={dockTerminal}
+          acts={files ? { view: (p) => files.view(p), open: files.open } : undefined}
+          over={viewW <= 1300 || viewW - (sideShown ? sideWidth : 0) - dockW < DOCK_THREAD}
+          width={dockW}
+          onWidth={setDockW}
+          onClose={() => {
+            setDockOpen(false)
+            requestAnimationFrame(() => dockBtn.current?.focus())
+          }}
+          active={active}
+          onSettled={convo.refresh}
+          toast={toast}
         />
       )}
       {picking && side && <Picker rows={rows} onClose={unpick} searchFirst={picking === 'search'} />}

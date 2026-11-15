@@ -80,9 +80,15 @@ function Counts({ add, del }: { add: number; del: number }) {
   )
 }
 
-export function ChangesView({ sid, pane, base, start, acts, onClose }: { sid: string; pane: string; base?: string; start: ChangesAgainst; acts?: ChangesActs; onClose: () => void }) {
-  usePrefs() // (its colours follow the theme)
+// What the view reads and keeps (the dialog's and the dock's tab alike):
+// one reading of the changes, against the working tree or the base, each
+// file's fold and the files read alone.
+export function useChanges(sid: string, pane: string, base: string | undefined, start: ChangesAgainst) {
   const [against, setAgainst] = useState<ChangesAgainst>(base ? start : 'work')
+  // (Base known later — the dock asks the card's git itself: its first word then kept.)
+  useEffect(() => {
+    if (!base && against === 'base') setAgainst('work')
+  }, [base, against])
   const [read, setRead] = useState<Changes | null>(null)
   const [error, setError] = useState('')
   const [again, setAgain] = useState(0)
@@ -150,22 +156,40 @@ export function ChangesView({ sid, pane, base, start, acts, onClose }: { sid: st
   const root = read?.root ?? ''
   const full = (p: string) => root.replace(/\/+$/, '') + '/' + p
   const sub = read?.repo ? [root, t('card.filesN', { n: files.length }) + (read.more ? '+' : '')].join(' · ') : undefined
+  return { against, setAgainst, read, error, reload: () => setAgain((n) => n + 1), folded, setFolded, alone, put, files, foldAtFirst, loadAlone, add, del, root, full, sub }
+}
+export type ChangesState = ReturnType<typeof useChanges>
+
+export function ChangesView({ sid, pane, base, start, acts, onClose }: { sid: string; pane: string; base?: string; start: ChangesAgainst; acts?: ChangesActs; onClose: () => void }) {
+  usePrefs() // (its colours follow the theme)
+  const c = useChanges(sid, pane, base, start)
   return (
     <Dialog title={t('gch.title')} onClose={onClose} wide hideTitle className="dlg gch-dialog">
       <DialogHead
         icon={<GitCompareArrows size={18} />}
         title={t('gch.title')}
         oneLine
-        sub={sub}
-        subText={root}
+        sub={c.sub}
+        subText={c.root}
         tools={
-          <HeadTool label={t('preview.reload')} onClick={() => setAgain((n) => n + 1)}>
+          <HeadTool label={t('preview.reload')} onClick={c.reload}>
             <RotateCw size={16} />
           </HeadTool>
         }
         onClose={onClose}
       />
-      <div className={'gch term-vars ' + (isDark() ? 'dark' : 'light')}>
+      <ChangesBody c={c} base={base} acts={acts} />
+    </Dialog>
+  )
+}
+
+// The view's body: its two readings to choose from, the files, their diffs,
+// the untracked. (className: where it is — the dock's tab has its own.)
+export function ChangesBody({ c, base, acts, className = '' }: { c: ChangesState; base?: string; acts?: ChangesActs; className?: string }) {
+  const { against, setAgainst, read, error, folded, alone, put, files, foldAtFirst, loadAlone, add, del, full } = c
+  const setFolded = c.setFolded
+  return (
+      <div className={'gch term-vars ' + (isDark() ? 'dark' : 'light') + (className ? ' ' + className : '')}>
         <div className="gch-bar">
           {base ? (
             <div className="gch-tabs" role="tablist" aria-label={t('gch.title')}>
@@ -184,7 +208,7 @@ export function ChangesView({ sid, pane, base, start, acts, onClose }: { sid: st
         {error ? (
           <div className="gch-note" role="alert">
             <p>{error}</p>
-            <button type="button" className="btn" onClick={() => setAgain((n) => n + 1)}>{t('common.retry')}</button>
+            <button type="button" className="btn" onClick={c.reload}>{t('common.retry')}</button>
           </div>
         ) : !read ? (
           <p className="gch-note">{t('common.loading')}</p>
@@ -280,6 +304,5 @@ export function ChangesView({ sid, pane, base, start, acts, onClose }: { sid: st
           </>
         )}
       </div>
-    </Dialog>
   )
 }
