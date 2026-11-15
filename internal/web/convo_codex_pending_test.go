@@ -218,3 +218,17 @@ func TestCodexIdleInputFastTier(t *testing.T) {
 		t.Fatalf("a draft: %v", err)
 	}
 }
+
+// A draft in its input, idle or at work: told; none: not.
+func TestCodexHasDraft(t *testing.T) {
+	screen := "• Working (6s • esc to interrupt)\n\n› Ask Codex to do anything\n\n  GPT-6.1-Sol high Fast · ~/p · Working · Context 95% left\n  ← for agents · ? for shortcuts\n"
+	if codexHasDraft(screen) {
+		t.Error("empty, at work: a draft")
+	}
+	if !codexHasDraft(strings.Replace(screen, "Ask Codex to do anything", "half typed", 1)) {
+		t.Error("a draft, at work: not told")
+	}
+	if codexHasDraft("no box at all") {
+		t.Error("an unknown screen: a draft")
+	}
+}

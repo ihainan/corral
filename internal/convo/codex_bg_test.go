@@ -319,3 +319,19 @@ func TestCodexProcPolledEnded(t *testing.T) {
 		t.Errorf("its step ended: %+v", tl)
 	}
 }
+
+// Review cxreal1: a poll whose result is not printed, another command's
+// is; a poll of several: not taken for the end of what was polled.
+func TestCodexProcPolledNotEnded(t *testing.T) {
+	poll := `{"timestamp":"2026-11-15T04:15:00.000Z","type":"response_item","payload":{"type":"custom_tool_call","status":"completed","call_id":"call_q","name":"exec","input":"await tools.write_stdin({session_id:37552,chars:\"\"}); text(await tools.exec_command({cmd:\"ls\"}));"}}` + "\n"
+	pollOut := `{"timestamp":"2026-11-15T04:15:01.000Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call_q","output":[{"type":"input_text","text":"Script completed\nOutput:\n"},{"type":"input_text","text":"{\"chunk_id\":\"b\",\"exit_code\":0,\"output\":\"x\"}"}]}}` + "\n"
+	c := feedAll(bgItemBefore, bgUser, bgCall, bgOut, bgSaid, bgDone, bgUser2, poll, pollOut)
+	if got := runningIDs(c); got != "cmd:proc:37552@2026-11-15T04:14:12.050Z:sleep 45; echo bg-done" {
+		t.Errorf("another command's result taken for its end: %q", got)
+	}
+	two := strings.Replace(poll, `await tools.write_stdin({session_id:37552,chars:\"\"}); text(await tools.exec_command({cmd:\"ls\"}));`, `text(await tools.write_stdin({session_id:37552,chars:\"\"})); text(await tools.write_stdin({session_id:99,chars:\"\"}));`, 1)
+	c = feedAll(bgItemBefore, bgUser, bgCall, bgOut, bgSaid, bgDone, bgUser2, two, pollOut)
+	if got := runningIDs(c); got == "" {
+		t.Errorf("a poll of two: one's exit taken for its end")
+	}
+}

@@ -1,6 +1,7 @@
 package web
 
 import (
+	"errors"
 	"regexp"
 	"strconv"
 	"strings"
@@ -200,4 +201,10 @@ func codexPasteParts(text string) []int {
 		parts = append(parts, len(text)-at)
 	}
 	return parts
+}
+
+// codexHasDraft: Codex's input holds words (typed in the terminal), whether
+// it works or not (a message sent while it works goes in as it works).
+func codexHasDraft(screen string) bool {
+	return errors.Is(codexIdleInput(strings.ReplaceAll(screen, "esc to interrupt", "")), errDraft)
 }

@@ -372,6 +372,7 @@ func (c *Codex) provTold(cmd string) {
 
 var (
 	stdinOf  = regexp.MustCompile(`write_stdin\(\s*\{\s*session_id\s*:\s*"?(\d{1,10})`)
+	execOf   = regexp.MustCompile(`exec_command\s*\(`)
 	cellIDOf = regexp.MustCompile(`Script running with cell ID ([\w-]{1,64})`)
 )
 
@@ -386,6 +387,9 @@ func (c *Codex) scriptPolls(id, script string) {
 	}
 	if c.polls == nil || len(c.polls) >= maxScriptCalls {
 		c.polls = map[string][]string{}
+	}
+	if execOf.MatchString(script) {
+		sids = append(sids, "") // (a command of its own too: whose result is whose is not told — see procsPolled)
 	}
 	c.polls[id] = sids
 }
@@ -423,36 +427,57 @@ func (c *Codex) scriptOfWait(id string) string {
 	return ""
 }
 
-// procsPolled: what script (call id) gave back, its script done: the
-// processes it looked at again that do not come back as still running
-// have ended. (Only where it printed what came back — some chunk of an
-// exec_command's or write_stdin's: else no word either way.)
+// procsPolled: what script (call id) gave back, its script done, where it
+// looked again at one process and ran no command of its own: an exit code
+// with no session in it is that process's end. (Of several, or with
+// commands of its own, which result is whose is not told: left as it is.)
 func (c *Codex) procsPolled(script string, raw json.RawMessage, going []string) {
 	sids := c.polls[script]
-	if len(sids) == 0 {
+	if len(sids) != 1 || len(c.scriptCmds[script]) != 0 || len(going) != 0 {
 		return
 	}
 	text := rawOutput(raw) // (as Codex wrote it: codexResult takes its "Script completed" off)
-	if !strings.HasPrefix(strings.TrimSpace(text), "Script completed") || !strings.Contains(text, `{"chunk_id"`) {
+	if !strings.HasPrefix(strings.TrimSpace(text), "Script completed") || !exitedChunk(text) {
 		return
 	}
-	still := map[string]bool{}
-	for _, sid := range going {
-		still[sid] = true
+	sid := sids[0]
+	p := c.procs[sid]
+	if p == nil {
+		return
 	}
-	for _, sid := range sids {
-		p := c.procs[sid]
-		if p == nil || still[sid] {
+	c.endRun(p.id)
+	delete(c.procs, sid)
+	if p.t != nil {
+		p.t.Done = true
+		c.touch([]*Tool{p.t})
+	}
+	c.overAt(sid, p.t)
+}
+
+// exitedChunk: text holds an exec_command/write_stdin result with an exit
+// code and no session (a process that has ended).
+func exitedChunk(text string) bool {
+	for i := 0; i < len(text); {
+		j := strings.Index(text[i:], `{"chunk_id"`)
+		if j < 0 {
+			return false
+		}
+		i += j
+		var r struct {
+			Session  json.RawMessage `json:"session_id"`
+			ExitCode json.RawMessage `json:"exit_code"`
+		}
+		d := json.NewDecoder(strings.NewReader(text[i:]))
+		if d.Decode(&r) != nil {
+			i++
 			continue
 		}
-		c.endRun(p.id)
-		delete(c.procs, sid)
-		if p.t != nil {
-			p.t.Done = true
-			c.touch([]*Tool{p.t})
+		i += int(d.InputOffset())
+		if len(r.ExitCode) > 0 && string(r.ExitCode) != "null" && len(r.Session) == 0 {
+			return true
 		}
-		c.overAt(sid, p.t)
 	}
+	return false
 }
 
 // rawOutput: a call's output's words as they are, its blocks' joined (a

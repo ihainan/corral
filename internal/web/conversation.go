@@ -3836,10 +3836,11 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		}
 	}
 	// (A Codex's screen only looked at — what it does now, for the page to
-	// say: nothing typed — needs it to be the same process, not its thread
-	// told for sure: a daemon's Codex is often bound weakly, 11-15.)
+	// say: nothing typed — needs it to be the same process, its thread not
+	// told for sure (a daemon's Codex is often bound weakly, 11-15); one told
+	// to be another is not this conversation's.)
 	lookOnly := what == "suggest" && front != nil && front.agent == "codex"
-	if front == nil || front.pid != b.PID || front.start != b.Start || (front.sid != b.Session && !lookOnly) {
+	if front == nil || front.pid != b.PID || front.start != b.Start || (front.sid != b.Session && !(lookOnly && front.sid == "")) {
 		reason = "agent_changed"
 		writeError(w, http.StatusConflict, "agent_changed", "that pane no longer runs this agent")
 		return
@@ -4001,6 +4002,20 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	case front.agent == "claude" && what == "interrupt":
 		gate = "stop" // (a subagent's conversation shown: Escape would stop that one — agent-view.md)
 	case front.agent == "codex" && (what == "send" || what == "send_now"):
+		// (Nor onto words in its input — a draft typed in the terminal: one
+		// message of both, 11-15 review. Where its screen cannot be read or
+		// told, as before: the host's gate still keeps it out of an approval.)
+		sctx, scancel := context.WithTimeout(ctx, 10*time.Second)
+		res, err := sshx.Exec(sctx, sess.Client(), convoScreenCommand(sess.Persistence, b.Pane, socket), 512<<10, sshx.ExecOptions{AwaitSlot: pressSlotWait(what)})
+		scancel()
+		if err == nil {
+			if shown, _, _ := screenOf(res.Out); codexHasDraft(shown) {
+				ended.Done()
+				reason = "draft"
+				writeError(w, http.StatusConflict, "draft", "its input holds words typed in the terminal")
+				return
+			}
+		}
 		gate = "cfree" // (likewise: typed into its approval, the Enter would answer it)
 	case front.agent == "opencode" && front.ocService && what == "send":
 		// (OpenCode 2: likewise — its question or permission prompt takes
@@ -4787,10 +4802,10 @@ func pressSlotWait(what string) time.Duration {
 
 // codexStillFresh: pane's Codex (pid, start) has begun no conversation yet,
 // as a look begun now finds it (herdr: Codex's own word, Fresh); a tmux
-// pane's, as the conversation's read found it (the caller's convoBound).
+// pane's: not told (false).
 func (s *Server) codexStillFresh(ctx context.Context, sess *term.Session, socket, pane string, pid, start int64) bool {
 	if sess.Persistence != "herdr" {
-		return true
+		return false // (a tmux pane's: nothing to tell it by — its daemon may have begun one: refused, as before)
 	}
 	if socket == "" {
 		return false
