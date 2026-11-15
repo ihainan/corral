@@ -1081,10 +1081,13 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       if (e.gone || (e.role === 'note' && !e.parts.some((p) => p.text))) continue // (a notice: troubles, events)
       if (e.role !== 'assistant') return undefined
       const last = e.parts[e.parts.length - 1]?.tool
-      return last && !last.done && (last.name === 'AskUserQuestion' || last.name === 'ExitPlanMode') ? last : undefined
+      if (last && !last.done && (last.name === 'AskUserQuestion' || last.name === 'ExitPlanMode')) return last
+      // (Codex's plan: words of its after it in the same message — review p4-3.)
+      const plan = e.parts.findLast((p) => p.tool)?.tool
+      return plan && !plan.done && plan.name === 'ExitPlanMode' && convo.bind?.agent === 'codex' ? plan : undefined
     }
     return undefined
-  }, [convo.entries])
+  }, [convo.entries, convo.bind?.agent])
   // (Any call of the agent's not come back yet: what a permission is of.)
   const pendingCall = useMemo(() => {
     for (let i = convo.entries.length - 1; i >= 0; i--) {

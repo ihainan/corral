@@ -111,8 +111,6 @@ const sameQ = (x: AskScreen, q: Q): x is Q =>
 // (The plan's first line, shown on the screen too: that very plan.)
 export function planOn(call: ConvoTool | undefined, s: AskScreen, text: string): boolean {
   if (!call || call.name !== 'ExitPlanMode' || call.done || s.kind !== 'plan') return false
-  // (Codex's question: of the one plan its log has not had answered — the plan itself scrolled off its screen, maybe.)
-  if (/^\s*Implement this plan\?\s*$/m.test(text)) return true
   const first = (call.plan ?? '').split('\n').map((l) => flat(l.replace(/^#+\s*/, '').replace(/[`*_]/g, ''))).find(Boolean)
   return !first || flat(text.replace(/[`*_]/g, '')).includes(first)
 }

@@ -108,3 +108,15 @@ func TestCodexModeOnScreen(t *testing.T) {
 		}
 	}
 }
+
+// "Implement this plan?" with its last choice marked (the cursor moved
+// there): a menu, not the input — no mode read off it (review p4-2).
+func TestCodexMenuLastMarked(t *testing.T) {
+	screen := "  Implement this plan?\n\n  1. Yes, implement this plan\n  2. Yes, clear context and implement\n› 3. No, stay in Plan mode\n\n  enter select · esc back\n"
+	if got := modeOnScreenOf("codex", screen); got != "" {
+		t.Errorf("mode %q off a menu", got)
+	}
+	if err := codexIdleInput(screen); err != errScreen {
+		t.Errorf("idle: %v", err)
+	}
+}

@@ -156,15 +156,20 @@ func codexTypedFoot(foot string) bool {
 var codexEmptyHints = regexp.MustCompile(`^(?:← for agents · )?\? for shortcuts\b`)
 
 // codexMenu: lines[at] is a menu's marked choice, not the input: "› 1.
-// Yes, proceed", the next choice under it, and Codex's keys for its menus
+// Yes, proceed", another choice beside it, and Codex's keys for its menus
 // under them ("Press enter to confirm or esc to cancel", "enter select · esc
 // back"). A draft of a numbered list, one line or more, has none of those
 // keys under it (review r2a-3, r2b-2).
 func codexMenu(lines []string, at, end int) bool {
-	if !codexMenuChoice.MatchString(lines[at]) || at+1 >= end || !codexMenuNext.MatchString(lines[at+1]) {
+	if !codexMenuChoice.MatchString(lines[at]) {
 		return false
 	}
-	for _, l := range lines[at+2 : end] {
+	// (Another choice beside it: under it, or above — the marked one the
+	// last, its cursor moved there: review p4-2.)
+	if !(at+1 < end && codexMenuNext.MatchString(lines[at+1])) && !(at > 0 && codexMenuNext.MatchString(lines[at-1])) {
+		return false
+	}
+	for _, l := range lines[at+1 : end] {
 		if codexMenuKeys.MatchString(l) {
 			return true
 		}
