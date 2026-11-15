@@ -835,9 +835,13 @@ details.adv > .form { margin-top: 16px; }
 .dialog.text-preview-dialog { max-width: min(1100px, calc(100vw - 32px)); width: 100%; }
 .text-preview-mode { flex: none; gap: 6px; }
 .text-preview { position: relative; flex: 1 1 auto; min-height: 160px; overflow: auto; overscroll-behavior: contain; background: var(--term-bg); color: var(--term-fg); border-top: 1px solid var(--line); }
-.text-preview-code { display: grid; grid-template-columns: auto 1fr; min-width: max-content; font: var(--fs-sub)/var(--lh-sub) var(--font-mono); }
+.text-preview-code { position: relative; display: grid; grid-template-columns: auto 1fr; min-width: max-content; font: var(--fs-sub)/var(--lh-sub) var(--font-mono); }
 .text-preview-nums { position: sticky; left: 0; margin: 0; padding: 12px 10px 12px 16px; text-align: right; color: var(--term-fg-3); background: var(--term-bg); border-right: 1px solid var(--term-line); user-select: none; }
-.text-preview-text { margin: 0; padding: 12px 16px; white-space: pre; tab-size: 4; }
+.text-preview-text { position: relative; margin: 0; padding: 12px 16px; white-space: pre; tab-size: 4; }
+/* The lines a reference named: a band behind them across the text (lines are
+   one --lh-sub each, nothing wraps), their numbers marked in the column. */
+.text-preview-mark { position: absolute; left: 0; right: 0; top: calc(12px + var(--mark-at) * var(--lh-sub)); height: calc(var(--mark-n) * var(--lh-sub)); background: var(--term-accent-soft); pointer-events: none; }
+.text-preview-nums .is-marked { display: block; margin: 0 -10px 0 -16px; padding: 0 10px 0 16px; color: var(--term-accent-text); background: var(--term-accent-soft); }
 .text-preview-text code { font: inherit; background: none; padding: 0; }
 .text-preview-md { max-width: 760px; margin: 0 auto; padding: 20px 24px 32px; font-size: var(--fs-body); line-height: var(--lh-body); }
 .text-preview-cut { position: sticky; left: 0; top: 0; z-index: 1; margin: 0; padding: 8px 16px; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-warn-text); background: var(--term-chrome); border-bottom: 1px solid var(--term-line); }

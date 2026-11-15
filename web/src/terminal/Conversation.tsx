@@ -9,7 +9,7 @@ import { composing, foldAllKey, helpKey, jumpKey, onMac, sideKey, switchKey } fr
 import { keepNames, keptNames, local } from '../storage'
 import { useFlip } from '../flip'
 import { CodeSpanOf, FileLinkOf, Markdown } from './markdown'
-import { codePath } from './paths'
+import { codeRef, type LineSpan } from './paths'
 import { useSubConvo } from './subagent'
 import { useSubScan, type SubScanAgent } from './subscan'
 import { NEW_AGENT } from './newAgent'
@@ -1459,14 +1459,15 @@ export function ConversationView({
     </>
   )
   // (A path in an answer's code span: acted on, its session live.)
+  // (With the lines it names, if any: looked at there.)
   const codeSpan = useCallback((text: string) => {
-    const p = files ? codePath(text) : null
-    return p ? <PathCode path={p} text={text} /> : null
+    const r = files ? codeRef(text) : null
+    return r ? <PathCode path={r.path} lines={r.lines} text={text} /> : null
   }, [files])
   // (A file link of Codex's: its words shown, the path behind them acted on and copied.)
   const fileLink = useCallback((label: string, target: string) => {
-    const p = files ? codePath(target) : null
-    return p ? <PathCode path={p} text={label} copy={p} /> : null
+    const r = files ? codeRef(target, true) : null
+    return r ? <PathCode path={r.path} lines={r.lines} text={label} copy={r.path} /> : null
   }, [files])
   // A copy of it up to the end of one of the person's turns: cut before the
   // next message they typed (one taken in during that turn is of it).
@@ -4155,7 +4156,7 @@ const WordsAsWritten = createContext(false)
 // session the conversation is read through): shown in the files panel,
 // downloaded, looked at (a picture). Not there once that session has ended.
 // (tail: a file looked at from its end — a command's output, newest last.)
-export type FileActs = { logPic?: (from: string) => string; reveal: (path: string) => void; download: (path: string) => void; view: (path: string, group?: string[]) => void; tail?: (path: string) => void; open?: (dir: string) => void; thumb?: (path: string, signal: AbortSignal) => Promise<Blob> } // (open: a folder, opened in the file panel; group: the pictures shown with it, gone through in the viewer; thumb: a picture to show small, asked of the host as the others are)
+export type FileActs = { logPic?: (from: string) => string; reveal: (path: string) => void; download: (path: string) => void; view: (path: string, group?: string[], lines?: LineSpan) => void; tail?: (path: string) => void; open?: (dir: string) => void; thumb?: (path: string, signal: AbortSignal) => Promise<Blob> } // (open: a folder, opened in the file panel; group: the pictures shown with it, gone through in the viewer; lines: a text file's, shown scrolled to and marked; thumb: a picture to show small, asked of the host as the others are)
 const FileActsOf = createContext<FileActs | undefined>(undefined)
 
 // A path the host can be asked for: absolute. (A relative one is not made
@@ -4167,18 +4168,20 @@ export function fullPath(p: string): string | null {
 
 
 // Such a span, while its session is live: a menu of what can be done with it.
-function PathCode({ path, text, copy = text }: { path: string; text: string; copy?: string }) {
+// (lines: those it names, the file looked at there; its heading says them.)
+function PathCode({ path, lines, text, copy = text }: { path: string; lines?: LineSpan; text: string; copy?: string }) {
   const acts = useContext(FileActsOf)!
   const copyOf = useContext(CopyOf)
   const dir = path.endsWith('/')
+  const at = lines ? ':' + lines.from + (lines.to > lines.from ? '-' + lines.to : '') : ''
   return (
     <Menu
-      label={path}
-      heading={path}
+      label={path + at}
+      heading={path + at}
       items={() =>
         [
           { label: t('convo.path.copy'), icon: <Copy size={16} />, onSelect: () => copyOf?.(copy) },
-          !dir && previewable(path) ? { label: t(IMAGE_EXT.test(path) ? 'convo.path.view' : 'preview.item'), icon: IMAGE_EXT.test(path) ? <ImageIcon size={16} /> : <Eye size={16} />, onSelect: () => acts.view(path) } : null,
+          !dir && previewable(path) ? { label: t(IMAGE_EXT.test(path) ? 'convo.path.view' : 'preview.item'), icon: IMAGE_EXT.test(path) ? <ImageIcon size={16} /> : <Eye size={16} />, onSelect: () => acts.view(path, undefined, lines) } : null,
           { label: t('convo.path.reveal'), icon: <FolderOpen size={16} />, onSelect: () => acts.reveal(dir ? path.replace(/\/+$/, '') || '/' : path) },
           dir ? null : { label: t('convo.path.download'), icon: <Download size={16} />, onSelect: () => acts.download(path) },
         ].filter(Boolean) as MenuItem[]

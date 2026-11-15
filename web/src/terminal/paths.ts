@@ -18,14 +18,31 @@ export function geminiPath(p: string): string | null {
 
 // A code span of an answer that is a path and nothing else (an absolute
 // one, or one under the home folder, "~/…", which the page makes whole
-// with the host's home when it is acted on; a line number after a file's name, "file.go:42", "Makefile:42",
-// left off — not after another name of no extension: "backup-12:30" may be
-// the name. Which it is cannot be told from the words alone: this guesses.) Paths in
-// the prose itself are left as they are — too much there only looks like
-// one (an address's path, a route, one on another host).
-export function codePath(s: string): string | null {
+// with the host's home when it is acted on). Paths in the prose itself are
+// left as they are — too much there only looks like one (an address's path,
+// a route, one on another host).
+// The lines it names after a file's name are taken apart from it, the file
+// looked at there: ":12", ":12:5" (a column: not kept), ":82-103", or as
+// Codex may link one, "#L12", "#L12C5", "#L12-L20". Not after another name
+// of no extension: "backup-12:30" may be the name (which it is cannot be
+// told from the words alone: this guesses). (link: the target of a file
+// link of Codex's, where what follows the name is its lines whatever the
+// name — it writes them so.)
+export function codeRef(s: string, link = false): { path: string; lines?: LineSpan } | null {
   const t = s.trim()
   if (!/^(?:\/(?!\/)|~\/)[^\s`'"<>|;&$]{0,1023}$/.test(t) || t === '/' || t === '~/' || /\/\.{1,2}(\/|$)/.test(t)) return null
-  const m = /^(.*\/(?:[^/]*\.[^/.:]+|Makefile|Dockerfile|Containerfile|Rakefile|Gemfile|Jenkinsfile|Vagrantfile|BUILD|WORKSPACE|Justfile|justfile|makefile|GNUmakefile))(?::\d+(?::\d+)?)$/.exec(t)
-  return m ? m[1] : t
+  const m = LINES.exec(t)
+  const path = m ? t.slice(0, m.index) : t
+  if (!m || !(link ? /\/[^/]+$/ : NAMED_FILE).test(path)) return { path: t }
+  const from = Number(m[1] ?? m[3])
+  const to = Number(m[2] ?? m[4] ?? from)
+  // (Line 0 is none: the file from its top.)
+  if (!from) return { path }
+  return { path, lines: { from: Math.min(from, to || from), to: Math.max(from, to) } }
 }
+
+// The lines a reference names in its file, first to last (one: both the same).
+export type LineSpan = { from: number; to: number }
+
+const LINES = /(?::(\d{1,7})(?::\d{1,7}|-(\d{1,7}))?|#L(\d{1,7})(?:C\d{1,7})?(?:-L?(\d{1,7})(?:C\d{1,7})?)?)$/
+const NAMED_FILE = /\/(?:[^/]*\.[^/.:#]+|Makefile|Dockerfile|Containerfile|Rakefile|Gemfile|Jenkinsfile|Vagrantfile|BUILD|WORKSPACE|Justfile|justfile|makefile|GNUmakefile)$/

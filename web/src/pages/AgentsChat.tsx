@@ -11,7 +11,7 @@ import { chromeVars, corralDark, corralLight } from '../terminal/themes'
 import { HostHistoryDialog } from '../terminal/hostHistory'
 import { CardNotice, useClaudeCard, type ClaudeCard } from '../terminal/cardNotice'
 import { attachedIn, expandForClaude, expandPastes, getDraft, keepDraft, keepPaste, keepSent, keptSent, remember, sentHistory, unsendable } from '../terminal/drafts'
-import { geminiPath, shellPath } from '../terminal/paths'
+import { geminiPath, shellPath, type LineSpan } from '../terminal/paths'
 import { useCompletion } from '../terminal/Completion'
 import { PanelWindow } from '../terminal/PanelWindow'
 import { convoTarget, herdrTarget, InlineReply } from '../terminal/ReplyDialog'
@@ -854,6 +854,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   // A text file of its host read in the page.
   const [reading, setReading] = useState<string | null>(null)
   const [readingEnd, setReadingEnd] = useState(false) // (looked at from its end: a command's output)
+  const [readingAt, setReadingAt] = useState<LineSpan | undefined>() // (the lines it was opened at, scrolled to and marked)
   // (A path under the home folder, "~/…": made whole with the host's home
   // first. Only the latest asked is acted on, and not once the agent or the
   // page is left meanwhile: a slow first answer of the home must not open
@@ -871,7 +872,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       )
     }
     // (Looked at: a picture as one, anything else as text — the host says if it is. One at a time.)
-    const look = (q: string, end = false, group?: string[]) => (IMAGE_EXT.test(q) ? (setReading(null), setViewSet(group && group.length > 1 ? group : null), setViewing(q)) : (setViewing(null), setReadingEnd(end), setReading(q)))
+    const look = (q: string, end = false, group?: string[], at?: LineSpan) => (IMAGE_EXT.test(q) ? (setReading(null), setViewSet(group && group.length > 1 ? group : null), setViewing(q)) : (setViewing(null), setReadingEnd(end), setReadingAt(at), setReading(q)))
     // (A picture of the log alone: no file to make whole, a picture whatever its name.)
     const showPic = (q: string, group?: string[]) => (setReading(null), setViewSet(group && group.length > 1 ? group : null), setViewing(q))
     return {
@@ -879,7 +880,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       reveal: (p) => whole(p, (q) => (setFilesIn(false), setFilesAt(q))),
       open: (p) => whole(p, (q) => (setFilesIn(true), setFilesAt(q))),
       download: (p) => (isLogPic(p) ? download(sid, p) : whole(p, (q) => download(sid, q))),
-      view: (p, group) => (isLogPic(p) ? showPic(p, group) : whole(p, (q) => (IMAGE_EXT.test(q) ? showPic(q, group) : look(q, false, group)))),
+      view: (p, group, at) => (isLogPic(p) ? showPic(p, group) : whole(p, (q) => (IMAGE_EXT.test(q) ? showPic(q, group) : look(q, false, group, at)))),
       tail: (p) => whole(p, (q) => look(q, true)),
       thumb: (p, signal) => lookAt(sid, p, { signal }),
     }
@@ -2455,6 +2456,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
         sid={sid}
         path={reading}
         tail={readingEnd}
+        lines={readingAt}
         onClose={() => setReading(null)}
         onReveal={() => {
           setReading(null)
