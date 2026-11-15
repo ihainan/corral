@@ -1239,7 +1239,6 @@ func (c *Codex) itemsTell() {
 			e.Parts, e.Rev = kept, c.rev
 		}
 	}
-	c.procsStepped() // (processes still running whose script's line went: codex_bg.go)
 }
 
 // searched: a search the agent made on the web (on its call's line, if

@@ -22,9 +22,7 @@ const maxScriptCalls = 64
 
 type codexProc struct {
 	id string // its step's (and running's) id
-	t  *Tool
-	at *Entry // (no step yet: the entry of its script's line, where one goes once those lines go)
-	cmd string
+	t  *Tool  // (nil: set going before commands were told of on their own — the running list only)
 }
 
 // scriptRan notes the commands a code-mode call's script runs (as read out
@@ -120,18 +118,11 @@ func (c *Codex) procsGoing(r *codexRow, id string, sids []string) {
 		if c.procs == nil || len(c.procs) >= maxRunning {
 			c.procs = map[string]*codexProc{}
 		}
-		p := &codexProc{id: step, cmd: cmd}
+		p := &codexProc{id: step}
 		if c.itemCmds {
 			p.t = &Tool{ID: step, Name: "Bash", Detail: clip(clean(cmd), maxDetail)}
 			c.add(r, step, RoleAssistant, []Part{{Kind: KindTool, Tool: p.t}})
 			c.mark(step, p.t)
-		} else {
-			for _, t := range c.tools[id] {
-				if t.at != nil {
-					p.at = t.at // (its script's line: a step goes there once it goes)
-					break
-				}
-			}
 		}
 		c.procs[sid] = p
 		what := cmd
@@ -335,21 +326,5 @@ func (c *Codex) provTold(cmd string) {
 				return
 			}
 		}
-	}
-}
-
-
-// procsStepped: commands are told of on their own from now (itemsTell):
-// the script lines that stood for processes still running went; each gets
-// a step of its own, where its line was.
-func (c *Codex) procsStepped() {
-	for _, p := range c.procs {
-		if p.t != nil || p.at == nil {
-			continue
-		}
-		p.t = &Tool{ID: p.id, Name: "Bash", Detail: clip(clean(p.cmd), maxDetail), at: p.at}
-		p.at.Parts = append(p.at.Parts, Part{Kind: KindTool, Tool: p.t})
-		p.at.Rev = c.rev
-		c.mark(p.id, p.t)
 	}
 }

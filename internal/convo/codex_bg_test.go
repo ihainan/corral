@@ -269,11 +269,9 @@ func TestCodexProcsReview3(t *testing.T) {
 		return
 	}
 	// 1. Started before commands were told of on their own, then one is:
-	// its step, where its script's line was, not gone.
+	// running still (its script's line gone with the rest), its end shown
+	// once, as any command's.
 	c := feedAll(bgUser, bgCall, bgOut, bgSaid, bgDone, bgUser2, bgItemBefore)
-	if n, done := count(c); n != 1 || done != 0 {
-		t.Errorf("1: %d steps, %d done", n, done)
-	}
 	if got := runningIDs(c); got != "cmd:proc:37552:sleep 45; echo bg-done" {
 		t.Errorf("1: running %q", got)
 	}
