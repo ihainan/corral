@@ -140,3 +140,36 @@ var claudeOwnBlocks = regexp.MustCompile(`(?s)<system-reminder>.*?</system-remin
 // in for its own (a command run, its output, a task's notice) and what it
 // holds — not any tag the person may write.
 var wholeEnvelope = regexp.MustCompile(`(?s)<(command-name|command-message|command-args|local-command-stdout|local-command-stderr|bash-input|bash-stdout|bash-stderr|task-notification)>.*?</(command-name|command-message|command-args|local-command-stdout|local-command-stderr|bash-input|bash-stdout|bash-stderr|task-notification)>`)
+
+// codexPlanParts: Codex's words in which it proposes a plan (plan mode:
+// "<proposed_plan>…</proposed_plan>", 0.167, its own screen showing it as
+// "Proposed Plan", then asking "Implement this plan?"): the words around
+// it, and the plan as Claude Code's is shown — an ExitPlanMode put to the
+// person, not answered yet. nil: none in them.
+func codexPlanParts(text string) ([]Part, *Tool) {
+	const open, shut = "<proposed_plan>", "</proposed_plan>"
+	i := strings.Index(text, open)
+	if i < 0 {
+		return nil, nil
+	}
+	rest := text[i+len(open):]
+	j := strings.Index(rest, shut)
+	if j < 0 {
+		return nil, nil // (cut short: its words as they are)
+	}
+	plan := strings.TrimSpace(rest[:j])
+	if plan == "" {
+		return nil, nil
+	}
+	t := &Tool{Name: "ExitPlanMode", Title: "Plan"}
+	t.Plan, t.PlanCut = cut(clean(plan), maxPlan)
+	var parts []Part
+	if before := strings.TrimSpace(text[:i]); before != "" {
+		parts = append(parts, textPart(KindText, before))
+	}
+	parts = append(parts, Part{Kind: KindTool, Tool: t})
+	if after := strings.TrimSpace(rest[j+len(shut):]); after != "" {
+		parts = append(parts, textPart(KindText, after))
+	}
+	return parts, t
+}

@@ -803,3 +803,44 @@ func TestCodexSpawnAgentID(t *testing.T) {
 		t.Fatalf("not an id: %+v", ts[0])
 	}
 }
+
+// A plan proposed in plan mode (0.167, real words: "<proposed_plan>…"): the
+// words around it, and the plan put to the person as Claude Code's is,
+// waiting; answered by their next message.
+func TestCodexProposedPlan(t *testing.T) {
+	said := `{"timestamp":"2026-11-15T11:27:01.000Z","type":"response_item","payload":{"type":"message","id":"it_9","role":"assistant","content":[{"type":"output_text","text":"I looked at it.\n\n<proposed_plan>\n# Fix the tests\n\n1. Read the failing test.\n2. Change the code.\n</proposed_plan>"}]}}` + "\n"
+	c := feedAll(said)
+	var plan *Tool
+	words := ""
+	for _, e := range c.Since(0) {
+		for _, p := range e.Parts {
+			if p.Tool != nil && p.Tool.Name == "ExitPlanMode" {
+				plan = p.Tool
+			}
+			words += p.Text
+		}
+	}
+	if plan == nil || plan.Done || !strings.HasPrefix(plan.Plan, "# Fix the tests") || strings.Contains(plan.Plan, "proposed_plan") {
+		t.Fatalf("plan: %+v", plan)
+	}
+	if words != "I looked at it." {
+		t.Errorf("words: %q", words)
+	}
+	c.Feed([]byte(fnUser(t, "u2", "Implement the plan.")))
+	for _, e := range c.Since(0) {
+		for _, p := range e.Parts {
+			if p.Tool != nil && p.Tool.Name == "ExitPlanMode" && !p.Tool.Done {
+				t.Error("answered by the next message: not done")
+			}
+		}
+	}
+	// (Cut short, its end not there: its words as they are.)
+	c = feedAll(strings.Replace(said, `\n</proposed_plan>`, "", 1))
+	for _, e := range c.Since(0) {
+		for _, p := range e.Parts {
+			if p.Tool != nil {
+				t.Errorf("a plan of words cut short: %+v", p.Tool)
+			}
+		}
+	}
+}

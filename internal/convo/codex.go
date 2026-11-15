@@ -1009,6 +1009,17 @@ func codexTrouble(raw json.RawMessage) *Trouble {
 
 // userSaid: a message of the person's. The first names the conversation
 // (Codex names none); it answers the questions put to them before.
+// ask: t is put to the person, waiting on their answer (a question, a
+// plan): answered by their next message (userSaid).
+func (c *Codex) ask(t *Tool) {
+	if len(c.asked) >= maxAsked {
+		c.asked[0].Done = true // (the oldest goes, as over: the latest is to be answered)
+		c.touch(c.asked[:1])
+		c.asked = append([]*Tool(nil), c.asked[1:]...)
+	}
+	c.asked = append(c.asked, t)
+}
+
 func (c *Codex) userSaid(r *codexRow, id string, parts []Part) {
 	if len(parts) == 0 {
 		return
@@ -1365,6 +1376,11 @@ func (c *Codex) item(r *codexRow, p *codexPayload) {
 				continue
 			}
 			got := codexDisplayParts(b.Text)
+			if pp, plan := codexPlanParts(b.Text); plan != nil {
+				got = pp // (a plan it proposes, in plan mode: put to the person, as Claude Code's is)
+				plan.ID = clip(p.ID+":plan", maxID)
+				c.ask(plan)
+			}
 			// (Every call waits for its result, one whose long command was
 			// kept as its result too: the result comes in its place.)
 			if kind, _, _, ok := importedRecord(b.Text); ok && kind == "call" && len(got) == 1 && got[0].Tool != nil && !c.importLost {
@@ -1456,12 +1472,7 @@ func (c *Codex) item(r *codexRow, p *codexPayload) {
 		}
 		for _, t := range kept {
 			if strings.HasPrefix(t.Name, "request_user_input") {
-				if len(c.asked) >= maxAsked {
-					c.asked[0].Done = true // (the oldest goes, as over: the latest is to be answered)
-					c.touch(c.asked[:1])
-					c.asked = append([]*Tool(nil), c.asked[1:]...)
-				}
-				c.asked = append(c.asked, t)
+				c.ask(t)
 			}
 		}
 		if out, ok := c.orphans[id]; ok {
