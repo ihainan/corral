@@ -520,6 +520,7 @@ export function verbOf(name: string): Verb | null {
     case 'request_user_input': // (Codex's)
       return 'ask'
     case 'Monitor':
+    case 'Sleep': // (Codex's clock.sleep)
       return 'wait'
     case 'TaskStop':
       return 'stop'

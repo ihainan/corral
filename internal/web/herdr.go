@@ -315,6 +315,12 @@ func summarize(session string, s *herdr.Snapshot, times *agentTimes, old bool) h
 			continue
 		}
 		thread, bare := codexTitleParts(p.Agent, p.Title, p.Cwd)
+		if isCodexAgent(p.Agent) && codexTitleWaits(p.Title) {
+			// (Waiting for an answer, a Codex titles its terminal so — a
+			// state, not a name: its thread's name is looked for, as for a
+			// bare title, not the state shown as one.)
+			thread, bare = "", true
+		}
 		out.Workspaces[i].Agents = append(out.Workspaces[i].Agents,
 			herdrAgent{ThreadTitle: truncate(thread, 120), BareTitle: bare, PaneID: p.ID, Agent: p.Agent, Status: p.AgentStatus, Title: truncate(p.Title, 120), Cwd: p.Cwd, Session: agentSession(p), Since: paneSince(p, times, old),
 				Tab: p.TabID, TabLabel: truncate(tabs[p.TabID], 120), Tabs: tabCount[p.WorkspaceID], Label: truncate(named[p.ID], 120), Mark: statusMark(p)})

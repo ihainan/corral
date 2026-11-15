@@ -65,6 +65,12 @@ func codexFn(ns, name, args string) (tools []*Tool, tasks []Task) {
 		return []*Tool{{Name: "Bash", Title: clip(strings.TrimSpace(str("justification")), maxTitle), Detail: clip(clean(cmd), maxDetail)}}, nil
 	case "write_stdin":
 		return []*Tool{stdinTool(a["session_id"], str("chars"))}, nil
+	case "sleep":
+		// (clock.sleep: it waits, as long as it said — ended early by a
+		// message of the person's.)
+		var ms float64
+		_ = json.Unmarshal(a["duration_ms"], &ms)
+		return []*Tool{{Name: "Sleep", Detail: sleepFor(ms)}}, nil
 	case "wait":
 		return []*Tool{{Name: "BashOutput", Detail: clip("cell "+rawWord(a["cell_id"]), maxDetail), fromCall: true}}, nil
 	case "view_image":
@@ -512,4 +518,26 @@ func keyLike(s string) bool {
 		}
 	}
 	return up && low && digit || hex && digit && (low || up)
+}
+
+// sleepFor: how long a sleep is to be, as a step says it ("12s", "2m 30s",
+// "1h 5m"); "" where it does not say.
+func sleepFor(ms float64) string {
+	if ms <= 0 || ms > 1e9 {
+		return ""
+	}
+	sec := int64(ms/1000 + 0.5)
+	switch {
+	case sec < 60:
+		return fmt.Sprintf("%ds", max(sec, 1))
+	case sec < 3600:
+		if sec%60 == 0 {
+			return fmt.Sprintf("%dm", sec/60)
+		}
+		return fmt.Sprintf("%dm %ds", sec/60, sec%60)
+	}
+	if sec%3600/60 == 0 {
+		return fmt.Sprintf("%dh", sec/3600)
+	}
+	return fmt.Sprintf("%dh %dm", sec/3600, sec%3600/60)
 }

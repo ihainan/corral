@@ -364,7 +364,7 @@ func (s *Server) bgSession(sess *term.Session, pane, said string) string {
 			}
 		}
 	}
-	return ""
+	return s.codexPanes.threadOf(sess.ID, pane) // (a Codex's, as the short look found it: its thread)
 }
 
 // locatedEverywhere notes what a herdr pane runs (sid; "" none) for each

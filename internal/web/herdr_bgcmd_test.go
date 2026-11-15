@@ -67,6 +67,20 @@ func TestParseCmdScanMonitor(t *testing.T) {
 	}
 }
 
+// A Codex's command, by the thread it was run for (its environment's
+// CODEX_THREAD_ID): by that thread, its title what its shell runs.
+func TestParseCmdScanCodex(t *testing.T) {
+	const thread = "01a1dd7f-4856-7042-8ad2-f46c56372e85"
+	out := "clock\t1700000000\t100\n" +
+		"cmd\t8597\t4000\tcodex:" + thread + "\tsleep 45; echo bg-done\n" +
+		"cmd\t8600\t4100\tcodex:not-a-thread\techo\n"
+	got, whole := parseCmdScan(out)
+	c := got[thread]
+	if !whole || len(got) != 1 || len(c) != 1 || c[0].Task != "codex-8597" || c[0].Title != "sleep 45; echo bg-done" || c[0].Out != "" {
+		t.Fatalf("got %+v", got)
+	}
+}
+
 // Told only for a Claude Code agent done or idle, of the session it is at,
 // while what was found is recent; a look that fails tells nothing.
 func TestCmdProberTells(t *testing.T) {

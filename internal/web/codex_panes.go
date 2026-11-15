@@ -517,6 +517,37 @@ func (c *codexPaneLooks) run(ctx context.Context, sess *term.Session, socket, ta
 	return got, nil
 }
 
+// threadOf: the thread pane's Codex is at, as the last look that came back
+// found it — no look begun for it — where it tells it of one Codex there,
+// at a thread no other pane is at; "" otherwise. (For what is only shown —
+// the commands it left running — not for where keys go.)
+func (c *codexPaneLooks) threadOf(sessID, pane string) string {
+	c.mu.Lock()
+	l := c.by[sessID]
+	c.mu.Unlock()
+	if l == nil {
+		return ""
+	}
+	select {
+	case <-l.done:
+	default:
+		return "" // (still being looked: the one before it is not kept)
+	}
+	if l.err != nil {
+		return ""
+	}
+	x, ok := l.got[pane]
+	if !ok || x.Several || !convoUUID.MatchString(x.Thread) {
+		return ""
+	}
+	for p, o := range l.got {
+		if p != pane && o.Thread == x.Thread {
+			return ""
+		}
+	}
+	return strings.ToLower(x.Thread)
+}
+
 // forget: what was kept of a terminal session (closed).
 func (c *codexPaneLooks) forget(id string) {
 	c.mu.Lock()

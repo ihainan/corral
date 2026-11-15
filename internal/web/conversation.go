@@ -3763,9 +3763,10 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	// (Claude Code's own keys and picker: not for Codex or OpenCode. A
 	// Codex in tmux is answered here, its screen read: in herdr, by herdr.)
 	codexAnswer := front.agent == "codex" && sess.Persistence == "tmux" && (what == "screen" || what == "reply")
-	// (A Codex's own commands from the menu: /compact, /new; it refuses them
+	// (A Codex's own commands from the menu: /compact, /new, /rename (its
+	// thread's name, as commandText takes it); it refuses them
 	// itself while it works. Not Claude Code's /clear and /rename.)
-	codexCommand := front.agent == "codex" && what == "command" && (text == "/compact" || text == "/new")
+	codexCommand := front.agent == "codex" && what == "command" && (text == "/compact" || text == "/new" || strings.HasPrefix(text, "/rename "))
 	// (Its picker, for its model and effort, as Claude Code's: convo_codex_model.go.)
 	codexModel := front.agent == "codex" && (what == "models" || what == "model")
 	if what == "command" && front.agent == "claude" && text == "/new" {
@@ -3773,7 +3774,7 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		writeError(w, http.StatusBadRequest, "bad_request", "not a command of Claude Code's")
 		return
 	}
-	codexLook := front.agent == "codex" && (what == "sent_missing" || what == "sent_enter") // (its input told apart: codexInputArea)
+	codexLook := front.agent == "codex" && (what == "sent_missing" || what == "sent_enter" || what == "suggest") // (its input told apart: codexInputArea; its screen's word of what it does: convo_codex_note.go)
 	// (OpenCode's terminal, shown here as it is where a message to it was
 	// refused: its screen, and keys pressed there only on the screen shown —
 	// the "look" gate, whoever's the screen is.)
@@ -3816,7 +3817,7 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	if what == "suggest" {
 		release := turn
 		turn = func() {} // (the screen read gives it back, once it has ended on the host)
-		s.suggestion(w, ctx, sess, b.Pane, socket, &outcome, &reason, release)
+		s.suggestion(w, ctx, sess, b.Pane, socket, front.agent, &outcome, &reason, release)
 		return
 	}
 	if what == "card" {

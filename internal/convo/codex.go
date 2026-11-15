@@ -83,6 +83,13 @@ type Codex struct {
 	runOrder []string
 	ranOut   map[string]bool
 	since    int64
+	// scriptCmds: the commands of code-mode calls (by call id); procs: the
+	// processes their scripts left running, by session id (codex_bg.go).
+	scriptCmds map[string][]string
+	procs      map[string]*codexProc
+	// provs: code-mode calls out whose commands are shown meanwhile, by
+	// call id: the entry that has them.
+	provs map[string]*Entry
 }
 
 type codexPlan struct {
@@ -778,12 +785,14 @@ func (c *Codex) event(r *codexRow, p *codexPayload) {
 		c.backtrack(p.NumTurns)
 	case "task_complete":
 		c.working, c.known = false, true
+		c.provAllDone() // (a call of its never answered: not left running)
 		if t := codexTrouble(p.Error); t != nil && !c.errSaid {
 			c.add(r, "", RoleNote, []Part{{Kind: KindTrouble, Trouble: t}})
 		}
 		c.errSaid = false
 	case "turn_aborted":
 		c.working, c.known = false, true
+		c.provAllDone()
 		if p.Reason == "interrupted" {
 			c.add(r, "", RoleNote, []Part{textPart(KindText, "[Request interrupted by user]")})
 		}
@@ -1131,12 +1140,15 @@ func (c *Codex) ranCommand(r *codexRow, it *codexItem) {
 		cmd = it.Parsed[0].Cmd // (what it means to run, without the shell it runs it in)
 	}
 	failed := it.Status == "failed" || (it.ExitCode != nil && *it.ExitCode != 0)
-	if it.Status != "in_progress" {
-		c.endRun(id) // (a command left running when its call came back: ended now)
-	}
 	out := it.Output
 	if it.ExitCode != nil && *it.ExitCode != 0 {
 		out = fmt.Sprintf("Exit code %d\n%s", *it.ExitCode, out)
+	}
+	if c.procEnded(it, out, failed) {
+		return // (a process a script left running: its step, in its turn — codex_bg.go)
+	}
+	if it.Status != "in_progress" {
+		c.endRun(id) // (a command left running when its call came back: ended now)
 	}
 	// (Of a function call's command: the call's line has it.)
 	if ts, ok := c.tools[id]; ok {
@@ -1154,6 +1166,9 @@ func (c *Codex) ranCommand(r *codexRow, it *codexItem) {
 	c.itemsTell()
 	if strings.TrimSpace(cmd) == "" {
 		return
+	}
+	if it.Status != "in_progress" {
+		c.provTold(cmd) // (shown meanwhile as its call's line: this is it)
 	}
 	t := &Tool{ID: id, Name: "Bash", Detail: clip(clean(cmd), maxDetail)}
 	// (Told of again as it ends: the line it had is the one that changes.)
@@ -1229,6 +1244,8 @@ type codexItem struct {
 	Output   string          `json:"aggregated_output"`
 	ExitCode *int            `json:"exit_code"`
 	Query    string          `json:"query"`
+	// ProcessID: the process a command ran in (CommandExecution).
+	ProcessID json.RawMessage `json:"process_id"`
 	// FileChange, ImageView, McpToolCall, Extension
 	Changes   map[string]codexChange `json:"changes"`
 	Path      string                 `json:"path"`
@@ -1339,6 +1356,7 @@ func (c *Codex) item(r *codexRow, p *codexPayload) {
 					t.fromCall = true
 				}
 			}
+			c.scriptRan(id, tools)
 		}
 		var parts []Part
 		room := maxParts
@@ -1347,10 +1365,17 @@ func (c *Codex) item(r *codexRow, p *codexPayload) {
 				room = maxParts - 1 // (a question it puts keeps its place: what it waits on)
 			}
 		}
+		provisional := false
 		for _, t := range tools {
 			t.ID = id
 			if t.fromCall && c.itemCmds {
-				continue // (each of its things is told of on its own)
+				// (Each of its things is told of on its own, once done: its
+				// commands shown meanwhile, while it is out, as running —
+				// gone when what it gave back comes, codex_bg.go.)
+				if t.Name != "Bash" {
+					continue
+				}
+				t.prov, provisional = true, true
 			}
 			if len(parts) >= room && !strings.HasPrefix(t.Name, "request_user_input") {
 				parts[len(parts)-1].Tool.MoreFiles++ // (of what one call did, as many lines as an entry holds)
@@ -1363,6 +1388,9 @@ func (c *Codex) item(r *codexRow, p *codexPayload) {
 			return
 		}
 		c.add(r, p.ID, RoleAssistant, parts)
+		if provisional {
+			c.provOut(id)
+		}
 		kept := make([]*Tool, 0, len(parts))
 		for _, pt := range parts {
 			kept = append(kept, pt.Tool)
@@ -1392,6 +1420,14 @@ func (c *Codex) item(r *codexRow, p *codexPayload) {
 			delete(c.orphans, id)
 		}
 	case "custom_tool_call_output", "function_call_output":
+		if c.provDone(clip(p.CallID, maxID)) {
+			// (Its lines were shown only while it was out: what it did is
+			// told of on its own; what it left running, as such.)
+			if p.Type == "custom_tool_call_output" {
+				c.procsGoing(r, clip(p.CallID, maxID), p.Output)
+			}
+			return
+		}
 		var out codexOut
 		out.text, out.failed, out.images = codexResult(p.Output)
 		out.goesOn, out.at = cmdGoesOn(p.Output), r.Timestamp
@@ -1404,6 +1440,9 @@ func (c *Codex) item(r *codexRow, p *codexPayload) {
 				c.orphans = map[string]codexOut{}
 			}
 			c.orphans[id] = out
+		}
+		if p.Type == "custom_tool_call_output" {
+			c.procsGoing(r, id, p.Output) // (processes its script left running: codex_bg.go)
 		}
 	}
 }

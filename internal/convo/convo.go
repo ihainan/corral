@@ -323,6 +323,9 @@ type Tool struct {
 	// of the commands it means to run; where it tells of each command on
 	// its own as well, those are what is shown and this goes.
 	fromCall bool
+	// prov: a line of a code-mode script's, shown only while its call is
+	// out (each command told of on its own once done: codex_bg.go).
+	prov bool
 	// at: (Codex) the entry the line is in, whose Rev changes with it.
 	at *Entry
 	// waits: (Codex) a question put to the person by its _async call,

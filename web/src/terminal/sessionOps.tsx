@@ -18,8 +18,9 @@ export function SessionOpDialog({ op, name, codex, onSend, onClose, onShowTermin
   // (Typed into its input, not sent: what is there now is for the terminal to see to, not to be typed again.)
   const [left, setLeft] = useState(false)
   const line = text.replace(/\s+/g, ' ').trim()
-  const command = codex ? (op === 'compact' ? '/compact' : '/new') : op === 'compact' ? (line ? '/compact ' + line : '/compact') : op === 'rename' ? '/rename ' + line : '/clear'
-  const body = codex ? (op === 'compact' ? t('ops.compact.bodyCodex') : t('ops.clear.bodyCodex')) : t(`ops.${op}.body`)
+  // (A Codex's: /compact takes nothing more; /rename its thread's name, as Claude Code's.)
+  const command = op === 'rename' ? '/rename ' + line : codex ? (op === 'compact' ? '/compact' : '/new') : op === 'compact' ? (line ? '/compact ' + line : '/compact') : '/clear'
+  const body = codex && op !== 'rename' ? (op === 'compact' ? t('ops.compact.bodyCodex') : t('ops.clear.bodyCodex')) : t(op === 'rename' && codex ? 'ops.rename.bodyCodex' : `ops.${op}.body`)
   const ready = op !== 'rename' || !!line
   const submit = async (e?: FormEvent) => {
     e?.preventDefault()
@@ -48,7 +49,7 @@ export function SessionOpDialog({ op, name, codex, onSend, onClose, onShowTermin
     <Dialog title={t(`ops.${op}.title`)} onClose={close} busy={busy} icon={op === 'compact' ? <Archive size={18} /> : op === 'rename' ? <TextCursorInput size={18} /> : <SquarePlus size={18} />}>
       <form className="form" onSubmit={submit}>
         <p className="lead">{body}</p>
-        {op !== 'clear' && !codex && (
+        {op !== 'clear' && (!codex || op === 'rename') && (
           <input
             className="input"
             value={text}

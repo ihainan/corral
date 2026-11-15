@@ -114,6 +114,10 @@ const SUGGEST_AT = [1500, 4000, 9000]
 // else). Each look takes the pane's turn a moment, as a send does.
 const COMPACT_LOOK = 10000
 const COMPACT_QUIET = 15000
+// (A Codex says so too of a request tried again — its retries come within
+// seconds of going quiet: looked at sooner and more often.)
+const CODEX_LOOK = 5000
+const CODEX_QUIET = 5000
 const COMPACT_UNTIL = 240000
 // Of each turn's end asked about (by its key): the looks left, what was
 // found, the latest look (only its answer is taken), whether one is on its
@@ -1725,13 +1729,17 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   // Compacting (its log silent a minute or two meanwhile): read off its
   // screen while it works with nothing new; forgotten at the log's next word.
   const [compacting, setCompacting] = useState(false)
+  const [retrying, setRetrying] = useState<{ n: number; of: number; why?: string } | null>(null)
   const compactNow = useRef({ changedAt: convo.changedAt, body: pressBody })
   compactNow.current = { changedAt: convo.changedAt, body: pressBody }
   // (Not while a tool it called runs, the long silences: it compacts only
   // between them.)
   const toolOut = useMemo(() => callOut(convo.entries), [convo.entries])
-  const lookCompact = bound && !notClaude && !!active && working && !toolOut
-  useEffect(() => setCompacting(false), [convo.changedAt, bindKey, lookCompact])
+  const lookCompact = bound && (!notClaude || codex) && !!active && working && !toolOut
+  useEffect(() => {
+    setCompacting(false)
+    setRetrying(null)
+  }, [convo.changedAt, bindKey, lookCompact])
   useEffect(() => {
     if (!lookCompact) return
     let live = true
@@ -1746,28 +1754,29 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     const timer = setInterval(() => {
       const at = compactNow.current.changedAt
       const quiet = Date.now() - Math.max(at, from)
-      if (busy || document.hidden || quiet < COMPACT_QUIET || (quiet > COMPACT_UNTIL && seenAt !== at)) return
+      if (busy || document.hidden || quiet < (codex ? CODEX_QUIET : COMPACT_QUIET) || (quiet > COMPACT_UNTIL && seenAt !== at)) return
       busy = true
       // (for=busy: said apart from the suggestion's own looks, in the gateway's log; not read.)
-      api<{ compacting?: boolean }>('POST', `/api/sessions/${sid}/conversation/suggestion?for=busy`, compactNow.current.body(), { timeoutMs: PRESS_MS, signal: gone.signal })
+      api<{ compacting?: boolean; retrying?: { n: number; of: number; why?: string } }>('POST', `/api/sessions/${sid}/conversation/suggestion?for=busy`, compactNow.current.body(), { timeoutMs: PRESS_MS, signal: gone.signal })
         .then(
           (r) => {
             if (!live || compactNow.current.changedAt !== at) return
-            seenAt = r.compacting ? at : -1
+            seenAt = r.compacting || r.retrying ? at : -1
             setCompacting(!!r.compacting)
+            setRetrying(r.retrying && r.retrying.n > 0 ? r.retrying : null)
           },
           () => {},
         )
         .finally(() => {
           busy = false
         })
-    }, COMPACT_LOOK)
+    }, codex ? CODEX_LOOK : COMPACT_LOOK)
     return () => {
       live = false
       clearInterval(timer)
       gone.abort()
     }
-  }, [lookCompact, bindKey, sid])
+  }, [lookCompact, bindKey, sid, codex])
   useEffect(() => {
     if (!askKey) return
     let a = suggestAsks.get(askKey)
@@ -2203,7 +2212,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     if (op && op.key !== bindKey) setOp(null)
   }, [op, bindKey])
   // (A Codex's: compact and start anew, as Claude Code's.)
-  const opsOf = codex ? (['compact', 'clear'] as const) : notClaude ? ([] as const) : (['compact', 'rename', 'clear'] as const)
+  const opsOf = codex ? (['compact', 'rename', 'clear'] as const) : notClaude ? ([] as const) : (['compact', 'rename', 'clear'] as const)
   const canOps = canModel || canEffort || (bound && opsOf.length > 0 && convo.status === 'ready' && (agent?.status === 'idle' || agent?.status === 'done') && !agent?.other)
   const runOp = (b: NonNullable<typeof convo.bind>, text: string) => {
     return api('POST', `/api/sessions/${sid}/conversation/command`, { pane: b.pane, pid: b.pid, start: b.start, session: b.session, text }, { timeoutMs: PRESS_MS }).then(
@@ -2343,6 +2352,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       convo={convo}
       agent={agent}
       compacting={compacting}
+      retrying={retrying}
       pending={panelOpen ? shownSent.map((p) => (p.state === 'waiting' && isCommand(p.text) ? { ...p, opened: true } : p)) : shownSent}
       ask={
         waits && replyTo ? (

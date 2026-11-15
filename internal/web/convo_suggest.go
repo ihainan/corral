@@ -30,7 +30,7 @@ func (s *Server) apiConversationSuggestion(w http.ResponseWriter, r *http.Reques
 	s.convoPress(w, r, "suggest")
 }
 
-func (s *Server) suggestion(w http.ResponseWriter, ctx context.Context, sess *term.Session, pane, socket string, outcome, reason *string, release func()) {
+func (s *Server) suggestion(w http.ResponseWriter, ctx context.Context, sess *term.Session, pane, socket, agent string, outcome, reason *string, release func()) {
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	res, err := sshx.Exec(ctx, sess.Client(), convoColorScreenCommand(sess.Persistence, pane, socket), 512<<10, sshx.ExecOptions{Release: release})
@@ -45,6 +45,19 @@ func (s *Server) suggestion(w http.ResponseWriter, ctx context.Context, sess *te
 	// one's placeholder ("Message @…"), and a card above it that one's —
 	// agent-view.md.)
 	out := map[string]any{"suggestion": ""}
+	if agent == "codex" {
+		// (A Codex: no suggestion of its own here; what it does that its log
+		// does not say — compacting, a request tried again.)
+		compacting, retry := codexWorkNote(sgr.ReplaceAllString(string(res.Out), ""))
+		if compacting {
+			out["compacting"] = true
+		}
+		if retry != nil {
+			out["retrying"] = retry
+		}
+		writeJSON(w, http.StatusOK, out)
+		return
+	}
 	if claudeOwner(sgr.ReplaceAllString(string(res.Out), ""), false) == "main" {
 		out["suggestion"] = suggestionOf(string(res.Out))
 		// (Claude Code's card above its box, if one is there: read off the same screen.)

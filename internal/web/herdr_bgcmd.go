@@ -95,7 +95,7 @@ func (p *cmdProber) consider(pane, agent, status, session string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	ended := status == herdr.StatusDone || status == herdr.StatusIdle
-	if !ended || !strings.Contains(strings.ToLower(agent), "claude") || !convoUUID.MatchString(session) {
+	if a := strings.ToLower(agent); !ended || !(strings.Contains(a, "claude") || strings.Contains(a, "codex")) || !convoUUID.MatchString(session) {
 		delete(p.ended, pane)
 		return
 	}
@@ -247,7 +247,7 @@ func cmdScanCommand() string {
 	script := `btime=$(sed -n 's/^btime \([0-9]*\)$/\1/p' /proc/stat 2>/dev/null); hz=$(getconf CLK_TCK 2>/dev/null)
 printf 'clock\t%s\t%s\n' "$btime" "$hz"
 if command -v pgrep >/dev/null 2>&1; then
-  claudes=$( { pgrep -x claude; pgrep -f '[c]laude-code/cli'; } 2>/dev/null | sort -u | grep -vx "$$")
+  claudes=$( { pgrep -x claude; pgrep -f '[c]laude-code/cli'; pgrep -x codex; } 2>/dev/null | sort -u | grep -vx "$$")
   kids=$(for c in $claudes; do
     [ -O "/proc/$c" ] || continue
     # (Read twice: a child ending while the list is read may leave others out of that reading.)
@@ -256,7 +256,7 @@ if command -v pgrep >/dev/null 2>&1; then
 else
   claudes=" $(for d in /proc/[0-9]*; do
     [ -O "$d" ] || continue
-    case "$(head -c 16 "$d/comm" 2>/dev/null) $(tr '\0' ' ' <"$d/cmdline" 2>/dev/null)" in claude\ *|*claude-code"/cli"*) printf '%s ' "${d#/proc/}";; esac
+    case "$(head -c 16 "$d/comm" 2>/dev/null) $(tr '\0' ' ' <"$d/cmdline" 2>/dev/null)" in claude\ *|codex\ *|*claude-code"/cli"*) printf '%s ' "${d#/proc/}";; esac
   done)"
   kids=$(for d in /proc/[0-9]*; do case $claudes in *" $(sed 's/^.*) //' "$d/stat" 2>/dev/null | cut -d' ' -f2) "*) echo "${d#/proc/}";; esac; done)
 fi
@@ -266,15 +266,28 @@ for k in $kids; do
   case $l in
   */tasks/*.output|*/tasks/*.output" (deleted)") ;;
   *)
-    case $(tr '\0\n' '  ' <"/proc/$k/cmdline" 2>/dev/null) in *"&& eval '"*"pwd -P >| "*) ;; *) continue;; esac
-    s=$(tr '\n\0' ' \n' <"/proc/$k/environ" 2>/dev/null | sed -n 's/^CLAUDE_CODE_SESSION_ID=\([0-9a-fA-F-]*\)$/\1/p' | head -n 1)
-    [ -n "$s" ] || continue
-    l="monitor:$s";;
+    case $(tr '\0\n' '  ' <"/proc/$k/cmdline" 2>/dev/null) in
+    *"&& eval '"*"pwd -P >| "*)
+      s=$(tr '\n\0' ' \n' <"/proc/$k/environ" 2>/dev/null | sed -n 's/^CLAUDE_CODE_SESSION_ID=\([0-9a-fA-F-]*\)$/\1/p' | head -n 1)
+      [ -n "$s" ] || continue
+      l="monitor:$s";;
+    *)
+      # (A command a Codex runs — its app-server's or its own child, of a
+      # tool call of a thread: by that thread.)
+      e=$(tr '\n\0' ' \n' <"/proc/$k/environ" 2>/dev/null)
+      printf '%s\n' "$e" | grep -q '^CODEX_TOOL_CALL_ID=.' || continue
+      s=$(printf '%s\n' "$e" | sed -n 's/^CODEX_THREAD_ID=\([0-9a-fA-F-]*\)$/\1/p' | head -n 1)
+      [ -n "$s" ] || continue
+      l="codex:$s";;
+    esac;;
   esac
   [ "$n" -lt 256 ] || { echo more; exit 0; }
   n=$((n + 1))
   st=$(sed 's/^.*) //' "/proc/$k/stat" 2>/dev/null | cut -d' ' -f20)
-  t=$(tr '\0\n\t' '   ' <"/proc/$k/cmdline" 2>/dev/null | awk -v "m=&& eval '" '` + cmdEvalAwk + `' | head -c 400)
+  case $l in
+  codex:*) t=$(tr '\0\n\t' '   ' <"/proc/$k/cmdline" 2>/dev/null | sed -n 's/^[^ ]*sh -l\{0,1\}c //p' | head -c 400);;
+  *) t=$(tr '\0\n\t' '   ' <"/proc/$k/cmdline" 2>/dev/null | awk -v "m=&& eval '" '` + cmdEvalAwk + `' | head -c 400);;
+  esac
   printf 'cmd\t%s\t%s\t%s\t%s\n' "$k" "$st" "$(printf '%s' "$l" | tr '\t\n' '  ')" "$t"
 done
 exit 0`
@@ -285,6 +298,10 @@ exit 0`
 // shell runs the command so, after setting itself up; the command may hold
 // another).
 const cmdEvalAwk = `{ i = index($0, m); if (i) print substr($0, i + length(m)) }`
+
+// cmdCodex: what a Codex's command's line says in place of where its output
+// goes: the thread it was run for.
+var cmdCodex = regexp.MustCompile(`^codex:([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$`)
 
 // cmdMonitor: what a Monitor's line says in place of where its output goes.
 var cmdMonitor = regexp.MustCompile(`^monitor:([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$`)
@@ -326,6 +343,8 @@ func parseCmdScan(out string) (cmds map[string][]bgCmd, whole bool) {
 				}
 			} else if m := cmdMonitor.FindStringSubmatch(f[3]); m != nil && cmdPID.MatchString(f[1]) {
 				session, task = m[1], "monitor-"+f[1] // (its task's name is not told: its process's, for one)
+			} else if m := cmdCodex.FindStringSubmatch(f[3]); m != nil && cmdPID.MatchString(f[1]) {
+				session, task = m[1], "codex-"+f[1]
 			} else {
 				continue
 			}
