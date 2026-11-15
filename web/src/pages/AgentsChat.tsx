@@ -1113,7 +1113,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   }, [convo.entries])
   const replyTo = useMemo(
     () => {
-      let to = viaConvo && convo.bind ? convoTarget(sid, convo.bind, cur.s.persistence === 'tmux') : herdr && row ? herdrTarget(sid, row.a) : null
+      let to = viaConvo && convo.bind ? convoTarget(sid, convo.bind, cur.s.persistence === 'tmux' || cur.s.persistence === 'herdr') : herdr && row ? herdrTarget(sid, row.a) : null
       // (OpenCode's in herdr, answered by herdr: where what it asks is not
       // made out, its terminal here as it is — not its screen as words.)
       const b = convo.bind

@@ -4008,7 +4008,7 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		writeError(w, http.StatusConflict, "unsupported", "not for this agent")
 		return
 	}
-	if b.Fill && (front.agent != "claude" || sess.Persistence != "tmux") { // (Claude Code's prompts' rows only, in tmux, as tried: plans/5-claude-own-words.md)
+	if b.Fill && front.agent != "claude" { // (Claude Code's prompts' rows only, as tried: plans/5-claude-own-words.md; herdr too, bracketed paste, 11-15)
 		reason = "unsupported"
 		writeError(w, http.StatusConflict, "unsupported", "not for this agent")
 		return

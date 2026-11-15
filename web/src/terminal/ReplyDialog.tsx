@@ -94,8 +94,8 @@ export function convoTarget(sessionId: string, bind: { pane: string; pid: number
     screen,
     // (Claude Code's alone count down: another's answers are not sent again — review587.)
     reply: ({ alive, once, ...b }) => steadily((x) => api('POST', base + '/reply', { ...who, ...x }), screen, b, once || bind.agent !== 'claude' ? () => false : alive),
-    // (Claude Code's, in tmux: as tried — plans/5-claude-own-words.md. Its
-    // tries made by ownWords.)
+    // (Claude Code's, in tmux and herdr: as tried — plans/5-claude-own-words.md.
+    // Its tries made by ownWords.)
     fill: canFill && bind.agent === 'claude' ? (b) => api('POST', base + '/reply', { ...who, ...b, fill: true }) : undefined,
     live: (bind.agent ?? 'claude') === 'claude' ? { sid: sessionId, press: () => who } : undefined,
   }
