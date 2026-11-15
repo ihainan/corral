@@ -134,6 +134,7 @@ export function NewAgentDialog({ sessions, onDone, onOpen, onClose }: { sessions
           opened = await api<SessionInfo>('POST', '/api/sessions', { host_id: sess.host_id, cols: 160, rows: 50, open: { kind: 'tmux', name: r.tmux } })
         } catch (e) {
           setError(t('newAgent.tmuxNotOpened', { name: r.tmux, why: errorText(e) }))
+          setBusy(false) // (it may be closed now: what is said stays till then — review b2b-1)
           return
         }
         onDone(opened, '', said)

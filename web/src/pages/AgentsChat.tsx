@@ -1840,7 +1840,21 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   // log says nothing of that, 0.167. Its turns run on by themselves, the log
   // never quiet: the work's own looks do not come.)
   const goalSet = codex && convo.entries.some((e) => e.parts.some((p) => p.tool && (p.tool.name === 'create_goal' || p.tool.name === 'update_goal')))
-  const lookGoal = bound && goalSet && !!active
+  // (Its goal set before what was read of its log: its footer looked at once as it is opened — review b2b-2.)
+  const goalSeen = !!goalNote && goalNote.bind === bindKey
+  const lookGoal = bound && (goalSet || goalSeen) && !!active
+  useEffect(() => {
+    if (!codex || !bound || !active) return
+    let live = true
+    api<{ goal?: string }>('POST', `/api/sessions/${sid}/conversation/suggestion?for=goal`, compactNow.current.body(), { timeoutMs: PRESS_MS }).then(
+      (r) => live && r.goal && setGoalNote({ g: r.goal, bind: bindKey }),
+      () => {},
+    )
+    return () => {
+      live = false
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [codex, bound, active, bindKey, sid])
   useEffect(() => {
     if (!lookGoal) return
     let live = true

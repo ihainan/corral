@@ -225,8 +225,10 @@ func (s *Server) newAgent(ctx context.Context, w http.ResponseWriter, sess *term
 		// (A Codex's conversation taken up or copied: in the home its log is in.)
 		home := ""
 		if kind == "codex" && src != "" {
-			if i := strings.Index(src, "/sessions/"); i > 0 {
-				home = src[:i]
+			// (<home>/sessions/<year>/<month>/<day>/rollout-…: up from the log, not
+			// at the first "/sessions/", which a home's own path may hold — review b2b-3.)
+			if s := path.Dir(path.Dir(path.Dir(path.Dir(src)))); path.Base(s) == "sessions" {
+				home = path.Dir(s)
 			}
 		}
 		out, err := sshx.Output(ctx, sess.Client(), agentTmuxCmd(name, dir, kind, home, how), 8<<10)
@@ -341,13 +343,24 @@ func agentTmuxCmd(name, dir, kind, home string, how agentStart) string {
 	t := q("=" + name + ":") // (that session exactly, its window: options and panes are a window's)
 	return `PATH="$HOME/.local/bin:$HOME/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 tmux new-session -d -s ` + q(name) + ` -c ` + q(dir) + ` ` + q(inner) + ` \; set-option -t ` + t + ` remain-on-exit on 2>&1 || exit 1
-sleep 2
-if [ "$(tmux list-panes -t ` + t + ` -F '#{pane_dead}' 2>/dev/null | head -n 1)" != 0 ]; then
+sh=$(basename "${SHELL:-/bin/sh}")
+dead() {
+  [ "$(tmux list-panes -t ` + t + ` -F '#{pane_dead}' 2>/dev/null | head -n 1)" != 0 ] || return 1
   echo exited
   tmux capture-pane -p -t ` + t + ` 2>/dev/null | grep -v '^$' | tail -n 8
   tmux kill-session -t ` + q("="+name) + ` 2>/dev/null
   exit 3
-fi
+}
+# (Its login shell's profile read first, however long that takes (10 s
+# at most): the agent in its place, then a moment for it to fail at once
+# — review b2b-4.)
+i=0
+while [ $i -lt 20 ]; do
+  sleep 0.5; dead
+  [ "$(tmux list-panes -t ` + t + ` -F '#{pane_current_command}' 2>/dev/null | head -n 1)" = "$sh" ] || break
+  i=$((i + 1))
+done
+sleep 1.5; dead
 tmux set-option -u -t ` + t + ` remain-on-exit 2>/dev/null
 echo started`
 }
