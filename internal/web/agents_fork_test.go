@@ -105,13 +105,13 @@ func TestForkRequests(t *testing.T) {
 	path := "/api/sessions/" + id + "/agents"
 	const u = "0b5d3f0e-1c1a-4f7e-9d1e-2a3b4c5d6e7f"
 	for name, b := range map[string]map[string]any{
-		"fork without a session":   {"kind": "claude", "fork": true},
-		"fork of opencode":         {"kind": "opencode", "resume": u, "fork": true},
-		"at without fork":          {"kind": "claude", "resume": u, "at": u, "dir": "/tmp"},
-		"at of codex":              {"kind": "codex", "resume": u, "fork": true, "at": u},
-		"at not a uuid":            {"kind": "claude", "resume": u, "fork": true, "at": "x"},
-		"fork in a worktree":       {"kind": "claude", "resume": u, "fork": true, "worktree": true},
-		"session not a uuid":       {"kind": "claude", "resume": "../x", "fork": true},
+		"fork without a session": {"kind": "claude", "fork": true},
+		"fork of opencode":       {"kind": "opencode", "resume": u, "fork": true},
+		"at without fork":        {"kind": "claude", "resume": u, "at": u, "dir": "/tmp"},
+		"at of codex":            {"kind": "codex", "resume": u, "fork": true, "at": u},
+		"at not a uuid":          {"kind": "claude", "resume": u, "fork": true, "at": "x"},
+		"fork in a worktree":     {"kind": "claude", "resume": u, "fork": true, "worktree": true},
+		"session not a uuid":     {"kind": "claude", "resume": "../x", "fork": true},
 	} {
 		b["key"] = "k-" + strconv.Itoa(len(name)) + "-abcdefgh"
 		mustStatus(t, admin.do("POST", path, b), 400, name)
