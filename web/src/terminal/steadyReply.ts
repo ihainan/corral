@@ -12,10 +12,12 @@ import type { ReplyTarget } from './ReplyDialog'
 // count starts again — not the one answered).
 // (Its words differ by version — 2.1.318: "will automatically block this
 // request in …, to avoid holding up an unattended session" — and its time:
-// "1:57", or in units, "45s", "1m 5s". The sentence whole, its lines its
+// "1:57", or in units, "45s", "1m 5s"; or, 2.1.323 on, where it is not
+// redrawn each second, "about 2 minutes", "about 45 seconds", rounded: 11-15,
+// a prompt's Yes refused six times over, the prompt run out. The sentence whole, its lines its
 // own, once on the screen, and the prompt's choices right under it: a
 // command's own words that say so are not taken for it — review581/582.)
-const WARNING = /^([^\S\n]*(?:⚠[^\S\n]*)?Claude\s+Code\s+will\s+automatically\s+(?:deny|block)\s+this\s+request\s+in\s+)(\d+(?::\d\d)+|\d+\s*[hms](?:\s*\d+\s*[hms])*)(,\s+to\s+avoid\s+(?:blocking\s+progress\s+on|holding\s+up)\s+an\s+unattended\s+session[^\S\n]*)$/gm
+const WARNING = /^([^\S\n]*(?:⚠[^\S\n]*)?Claude\s+Code\s+will\s+automatically\s+(?:deny|block)\s+this\s+request\s+in\s+)(\d+(?::\d\d)+|\d+\s*[hms](?:\s*\d+\s*[hms])*|about\s+\d+\s+(?:minute|second)s?)(,\s+to\s+avoid\s+(?:blocking\s+progress\s+on|holding\s+up)\s+an\s+unattended\s+session[^\S\n]*)$/gm
 // (Its choices right under it — or under the prompt's own question between
 // them, as 2.1.31x draws it: "⚠ … unattended session", a blank line, "Do
 // you want to proceed?", the choices. 11-05: not taken for one, its
@@ -24,9 +26,10 @@ const WARNING = /^([^\S\n]*(?:⚠[^\S\n]*)?Claude\s+Code\s+will\s+automatically\
 // "END?", a numbered "1. step?" taken in and so not seen — review.)
 const CHOICES_UNDER = /^\n(?:[^\S\n]*\n){0,2}(?:[^\S\n]*Do you want to [^\n]*\?[^\S\n]*\n(?:[^\S\n]*\n)?)?[^\S\n]*(?:❯[^\S\n]*)?1\.[^\S\n]/
 
-// countdown: the screen with its count taken out, and the count (seconds);
-// null where it shows none, or more than one.
-function countdown(text: string): { rest: string; secs: number } | null {
+// countdown: the screen with its count taken out, the count (seconds) and
+// how finely it is told (seconds: 60 for "about 2 minutes", rounded to the
+// minute); null where it shows none, or more than one.
+function countdown(text: string): { rest: string; secs: number; step: number } | null {
   const all = [...text.matchAll(WARNING)]
   if (all.length !== 1) return null
   const m = all[0]
@@ -39,9 +42,14 @@ function countdown(text: string): { rest: string; secs: number } | null {
   if (!under || /^[^\S\n]*(?:❯[^\S\n]*)?1\.[^\S\n]/m.test(text.slice(m.index! + m[0].length + under[0].length))) return null
   const t = m[2]
   let secs = 0
-  if (t.includes(':')) for (const p of t.split(':')) secs = secs * 60 + Number(p)
+  let step = 1
+  const about = /^about\s+(\d+)\s+(minute|second)/.exec(t)
+  if (about) {
+    step = about[2] === 'minute' ? 60 : 1
+    secs = Number(about[1]) * step
+  } else if (t.includes(':')) for (const p of t.split(':')) secs = secs * 60 + Number(p)
   else for (const [, n, u] of t.matchAll(/(\d+)\s*([hms])/g)) secs += Number(n) * (u === 'h' ? 3600 : u === 'm' ? 60 : 1)
-  return { rest: text.slice(0, m.index) + m[1] + '…' + m[3] + text.slice(m.index! + m[0].length), secs }
+  return { rest: text.slice(0, m.index) + m[1] + '…' + m[3] + text.slice(m.index! + m[0].length), secs, step }
 }
 
 export const countsDown = (text: string) => countdown(text) !== null
@@ -51,7 +59,8 @@ export const countsDown = (text: string) => countdown(text) !== null
 // between them — no more, two seconds allowed (a count shown rounded), nor
 // less, three (the reads' own time): a prompt that ran out meanwhile, one of
 // the same words drawn anew showing a count a little lower, is not it —
-// review587.
+// review587. (A count told to the minute, "about 2 minutes": a minute more
+// either way.)
 export function steadySame(a: string, was: number, b: string, now: number): boolean {
   if (a === b) return true
   const x = countdown(a)
@@ -59,7 +68,8 @@ export function steadySame(a: string, was: number, b: string, now: number): bool
   if (!x || !y || x.rest !== y.rest) return false
   const fell = x.secs - y.secs
   const took = (now - was) / 1000
-  return y.secs <= x.secs && fell <= took + 2 && fell >= took - 3
+  const step = Math.max(x.step, y.step)
+  return y.secs <= x.secs && fell <= took + step + 1 && fell >= took - step - 2
 }
 
 // (at: when it was read, as kept.)

@@ -537,6 +537,8 @@ html.term-dark .overlay, html.term-dark .menu, html.term-dark .toast {
 .term-root .convo .btn-ghost:hover { background: var(--term-hover); }
 .convo-main { flex: 1; min-width: 0; display: flex; flex-direction: column; position: relative; }
 .convo-scroll-wrap { flex: 1; min-height: 0; display: flex; flex-direction: column; position: relative; container-type: inline-size; }
+/* (The thread keeps some of the height however tall the card under it: 11-15, a long command's card left it none and nothing could be scrolled. A phone's keyboard up: it gives way first, as before.) */
+html:not(.kb-open) .convo-scroll-wrap { min-height: min(30vh, 240px); }
 /* The thread fades into the composer under it, not cut off mid-line */
 .convo-scroll-wrap::after { content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 20px; background: linear-gradient(to bottom, transparent, var(--term-bg)); pointer-events: none; }
 .convo-scroll { flex: 1; min-height: 0; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; overflow-anchor: none; /* (what goes in above is made up for by hand: Safari has no anchoring) */ }
@@ -1227,7 +1229,8 @@ button.convo-task-line:hover .convo-task-name { color: var(--term-fg); }
 .convo-dock > * { flex: none; }
 .convo-dock > .convo-dock-ask { flex: 0 1 auto; min-height: 96px; }
 .convo-dock-ask .convo-ask { box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18); }
-.convo-ask-block { max-height: min(34vh, 300px); white-space: pre-wrap; overflow-wrap: anywhere; overflow: auto; }
+/* (A long command scrolls in its own box: the choices under it stay in sight — 11-15, a 40-line command pushed them out.) */
+.convo-ask-block { max-height: min(22vh, 220px); white-space: pre-wrap; overflow-wrap: anywhere; overflow: auto; }
 .convo-ask-block > span { display: block; }
 /* (What a permission is for, above its command; what Claude Code notes under it, as words.)
    Only the paragraph: a choice's own description is a span, and keeps its smaller, quieter one. */
@@ -1925,7 +1928,7 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 .convo-panelwin-key { flex: 1 0 calc(25% - 6px); min-height: 44px; border: 1px solid var(--term-line); border-radius: var(--r); background: var(--term-key, var(--term-chrome)); color: var(--term-fg); font-size: 14px; cursor: pointer; }
 .convo-panelwin-key:active { background: var(--term-hover); }
 /* (Its room taken back by the card: as tall as the screen allows, not cut to a scroll of its own.) */
-.convo-dock:has(.composer.is-asked) > .convo-dock-ask { max-height: min(80vh, 640px); }
+.convo-dock:has(.composer.is-asked) > .convo-dock-ask { max-height: min(64vh, 600px); }
 .convo-dock .composer.is-asked .agents-chat-why { margin-bottom: 0; }
 .term-root .agents-chat-why.is-note { color: var(--term-fg-3); }
 /* The send and stop circle on a touch screen: 44 to touch, the circle 38 inside it, no ring drawn round it */
