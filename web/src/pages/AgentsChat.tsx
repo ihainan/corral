@@ -117,7 +117,7 @@ const COMPACT_QUIET = 15000
 // (A Codex says so too of a request tried again — its retries come within
 // seconds of going quiet: looked at sooner and more often.)
 const CODEX_LOOK = 5000
-const CODEX_QUIET = 5000
+const CODEX_QUIET = 2000
 const COMPACT_UNTIL = 240000
 // Of each turn's end asked about (by its key): the looks left, what was
 // found, the latest look (only its answer is taken), whether one is on its
@@ -1737,8 +1737,6 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   // (Not while a tool it called runs, the long silences: it compacts only
   // between them.)
   const toolOut = useMemo(() => callOut(convo.entries), [convo.entries])
-  const toolOutNow = useRef(toolOut)
-  toolOutNow.current = toolOut
   // (A Codex's also while a call of its is out: its approvals reviewer looks
   // at that call's command then — its screen's word, its log's none.)
   const lookCompact = bound && (!notClaude || codex) && !!active && working && (!toolOut || codex)
@@ -1778,7 +1776,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
         .finally(() => {
           busy = false
         })
-    }, codex ? (toolOutNow.current ? CODEX_LOOK * 2 : CODEX_LOOK) : COMPACT_LOOK)
+    }, codex ? CODEX_LOOK : COMPACT_LOOK)
     return () => {
       live = false
       clearInterval(timer)

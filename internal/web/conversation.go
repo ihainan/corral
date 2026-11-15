@@ -3835,7 +3835,11 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 			}
 		}
 	}
-	if front == nil || front.pid != b.PID || front.start != b.Start || front.sid != b.Session {
+	// (A Codex's screen only looked at — what it does now, for the page to
+	// say: nothing typed — needs it to be the same process, not its thread
+	// told for sure: a daemon's Codex is often bound weakly, 11-15.)
+	lookOnly := what == "suggest" && front != nil && front.agent == "codex"
+	if front == nil || front.pid != b.PID || front.start != b.Start || (front.sid != b.Session && !lookOnly) {
 		reason = "agent_changed"
 		writeError(w, http.StatusConflict, "agent_changed", "that pane no longer runs this agent")
 		return
