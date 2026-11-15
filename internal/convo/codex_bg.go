@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -23,8 +24,11 @@ import (
 const maxScriptCalls = 64
 
 type codexProc struct {
-	id string // its step's (and running's) id
-	t  *Tool  // (nil: set going before commands were told of on their own — the running list only)
+	id   string // its step's (and running's) id
+	t    *Tool  // (nil: set going before commands were told of on their own — the running list only)
+	call string // the call whose script set it going
+	cmd  string // its command, where told ("": several of the script's)
+	n    int    // (its place among those the call set going)
 }
 
 // scriptRan notes the commands a code-mode call's script runs (as read out
@@ -127,15 +131,45 @@ func (c *Codex) procsGoing(r *codexRow, id string, sids []string) {
 			}
 			delete(c.procs, k)
 		}
-		p := &codexProc{id: step}
+		p := &codexProc{id: step, call: id, cmd: cmd, n: len(c.procs)}
 		if c.itemCmds {
-			p.t = &Tool{ID: step, Name: "Bash", Detail: clip(clean(cmd), maxDetail)}
+			p.t = p.step()
 			c.add(r, step, RoleAssistant, []Part{{Kind: KindTool, Tool: p.t}})
 			c.mark(step, p.t)
 		}
 		c.procs[sid] = p
 		c.setGoing(step, "cmd", cmd, r.Timestamp) // ("": the page says "a command in the background")
 	}
+}
+
+// step: the step of a process a script left running, running.
+func (p *codexProc) step() *Tool {
+	return &Tool{ID: p.id, Name: "Bash", Detail: clip(clean(p.cmd), maxDetail)}
+}
+
+// stepsInPlace: commands are told of on their own in this conversation now
+// (itemsTell), the script lines of its calls gone: the processes a call
+// left running before that was known (no step of their own: the call's
+// line stood for them) get theirs where that line was, in its turn — as
+// had it been known from the first (a conversation whose first command is
+// one left running; the part of a log read first, whose rows that tell
+// commands on their own all came before it). parts: an entry's, call the
+// call whose line goes from it; what goes in its place.
+func (c *Codex) stepsInPlace(call string) []Part {
+	var ps []*codexProc
+	for _, p := range c.procs {
+		if p.t == nil && p.call == call {
+			ps = append(ps, p)
+		}
+	}
+	slices.SortFunc(ps, func(a, b *codexProc) int { return a.n - b.n })
+	var parts []Part
+	for _, p := range ps {
+		p.t = p.step()
+		c.mark(p.id, p.t)
+		parts = append(parts, Part{Kind: KindTool, Tool: p.t})
+	}
+	return parts
 }
 
 // procEnded: a CommandExecution of a process a script left running: its
@@ -147,6 +181,9 @@ func (c *Codex) procEnded(it *codexItem, out string, failed bool) bool {
 	p := c.procs[sid]
 	if sid == "" || p == nil || it.Status == "in_progress" {
 		return false
+	}
+	if p.t == nil && !c.itemCmds {
+		c.itemsTell() // (told of on their own after all — this is one: its step, in its turn, first)
 	}
 	c.endRun(p.id)
 	delete(c.procs, sid)

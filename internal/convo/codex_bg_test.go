@@ -335,3 +335,45 @@ func TestCodexProcPolledNotEnded(t *testing.T) {
 		t.Errorf("a poll of two: one's exit taken for its end")
 	}
 }
+
+// The conversation's first command one left running (nothing told of on its
+// own yet: the script's line stands for it): its end, told on its own,
+// makes it a step in its turn, where that line was — not a step of the
+// turn going on when it ended (A7, 11-15).
+func TestCodexFirstCommandLeftRunning(t *testing.T) {
+	c := feedAll(bgUser, bgCall, bgOut, bgSaid, bgDone)
+	if got := runningIDs(c); got != "cmd:proc:37552@2026-11-15T04:14:12.050Z:sleep 45; echo bg-done" {
+		t.Fatalf("still running: %q", got)
+	}
+	callAt := -1
+	for i, e := range c.entries {
+		for _, p := range e.Parts {
+			if p.Tool != nil && p.Tool.ID == "call_7_0" {
+				callAt = i
+			}
+		}
+	}
+	if callAt < 0 {
+		t.Fatal("the script's line not shown")
+	}
+	c.Feed([]byte(bgUser2 + bgEnded))
+	if got := runningIDs(c); got != "" {
+		t.Errorf("told of as ended: %q", got)
+	}
+	at, tl := entryOf(c, "proc:37552@2026-11-15T04:14:12.050Z")
+	if tl == nil || !tl.Done || !strings.Contains(tl.Result, "bg-done") || tl.Detail != "sleep 45; echo bg-done" {
+		t.Fatalf("its step: %+v", tl)
+	}
+	if at != callAt {
+		t.Errorf("its step in entry %d, its call's line was in %d", at, callAt)
+	}
+	n := 0
+	for _, x := range toolsOf(c) {
+		if strings.Contains(x.Detail, "sleep 45") {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("%d steps of it", n)
+	}
+}

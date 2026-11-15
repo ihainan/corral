@@ -423,6 +423,18 @@ func (c *Codex) Prepend(other Parser) {
 			c.asked = c.asked[n:]
 		}
 	}
+	// (Each command told of on its own in either part: the lines of the
+	// calls that run them go, in the part before this one too — before
+	// the processes are put together: those left running before it was
+	// known get their steps so.)
+	if c.itemCmds || o.itemCmds {
+		if !c.itemCmds {
+			c.rev++       // (this part's entries change: told as of a revision after the page's)
+			c.itemsTell() // (told of on their own in the part before: this part's script lines go too)
+		}
+		o.itemCmds = false
+		o.itemsTell()
+	}
 	c.prependProcs(o) // (its processes left running: codex_bg.go)
 	// What the part before set going and was never told had ended: still
 	// going, unless what was read since says it has ended. What the part
@@ -463,16 +475,6 @@ func (c *Codex) Prepend(other Parser) {
 		}
 		delete(c.running, c.runOrder[at])
 		c.runOrder = append(c.runOrder[:at:at], c.runOrder[at+1:]...)
-	}
-	// (Each command told of on its own in either part: the lines of the
-	// calls that run them go, in the part before this one too.)
-	if c.itemCmds || o.itemCmds {
-		if !c.itemCmds {
-			c.rev++       // (this part's entries change: told as of a revision after the page's)
-			c.itemsTell() // (told of on their own in the part before: this part's script lines go too)
-		}
-		o.itemCmds = false
-		o.itemsTell()
 	}
 	// (Its calls whose lines went, then or now: what came back of them here is let be.)
 	for id := range o.hidden {
@@ -1240,6 +1242,10 @@ func (c *Codex) itemsTell() {
 				dropped = true
 				if ts := c.tools[p.Tool.ID]; len(ts) > 0 && ts[0] == p.Tool {
 					c.hide(p.Tool.ID)
+					for _, s := range c.stepsInPlace(p.Tool.ID) {
+						s.Tool.at = e
+						kept = append(kept, s)
+					}
 				}
 				continue
 			}
