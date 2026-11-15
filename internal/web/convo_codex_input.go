@@ -73,8 +73,8 @@ func codexInputSpan(lines []string) (at, foot int, footed, ok bool) {
 			break
 		}
 	}
-	if at < 0 || codexMenuChoice.MatchString(lines[at]) {
-		return 0, 0, false, false
+	if at < 0 || codexMenuChoice.MatchString(lines[at]) && at+1 < len(lines) && codexMenuNext.MatchString(lines[at+1]) {
+		return 0, 0, false, false // (a menu: its choice marked, the next under it — a draft "1. …" is not one: review r2a-3)
 	}
 	blank := -1
 	for i := at + 1; i < end; i++ {
@@ -128,8 +128,18 @@ func codexInputArea(screen string) (area, rest string, ok bool) {
 	return area, rest, true
 }
 
-// (A menu's choice, marked: "› 1. Yes, proceed".)
-var codexMenuChoice = regexp.MustCompile(`^›\s*\d+\.\s`)
+// codexOneLineFoot: a block under Codex's input, after a blank line, that
+// may be its status line of the person's own: one line (Codex cuts it
+// short, "…", rather than wrap it). More: words of the input's.
+func codexOneLineFoot(rest string) bool {
+	return rest != "" && !strings.Contains(rest, "\n")
+}
+
+// (A menu's choice, marked: "› 1. Yes, proceed"; its next under it, "  2. …".)
+var (
+	codexMenuChoice = regexp.MustCompile(`^›\s*\d+\.\s`)
+	codexMenuNext   = regexp.MustCompile(`^\s+\d+\.\s`)
+)
 
 // codexInputMax: the most lines Codex's input runs to above its footer
 // (it grows with what it holds, then scrolls).
@@ -144,7 +154,12 @@ func codexTypedIn(screen, text string, whole bool) bool {
 	if !ok {
 		return false
 	}
-	// (Under it, an unknown footer or the end of the message itself: either.)
+	// (Under it, an unknown footer or the end of the message itself: either
+	// — a footer of one line only: more is words of the input's, and the
+	// message is not there whole without them: review r2a-4.)
+	if rest != "" && !codexOneLineFoot(rest) {
+		return codexBoxHas(area+"\n"+rest, text, whole)
+	}
 	return codexBoxHas(area, text, whole) || rest != "" && codexBoxHas(area+"\n"+rest, text, whole)
 }
 

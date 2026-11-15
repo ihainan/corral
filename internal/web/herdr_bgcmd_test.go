@@ -94,6 +94,15 @@ func TestParseCmdScanCodexSandbox(t *testing.T) {
 	if c := got[thread]; len(c) != 1 || c[0].Task != "codex-3350595" || c[0].Title != "sleep 45; echo bg-done" {
 		t.Fatalf("got %+v", got)
 	}
+	// (Its command not found under it — a sandbox of another make: the
+	// wrapper stands for it, its command not told.)
+	alone := "clock\t1700000000\t100\n" +
+		"cmd\t3350549\t97783192\tcodex:" + thread + "\t/home/u/.codex/tmp/arg0-linux/codex-arg0A58kWq/codex-linux-sandbox --sandbox-policy-cwd /home/u/proj\n" +
+		"cmd\t3350700\t97783100\tcodex:" + thread + "\tsleep 9\n" // (begun before it: not its command)
+	got, _ = parseCmdScan(alone)
+	if c := got[thread]; len(c) != 2 || c[1].Task != "codex-3350549" || c[1].Title != "" {
+		t.Fatalf("alone: %+v", got)
+	}
 }
 
 // Told only for a Claude Code agent done or idle, of the session it is at,

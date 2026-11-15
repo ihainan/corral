@@ -1236,7 +1236,9 @@ func (c *Codex) itemsTell() {
 	}
 	c.itemCmds = true
 	for _, e := range c.entries {
-		kept, dropped := e.Parts[:0], false
+		// (A new slice: steps put in place of a call's line may be more than
+		// the parts gone before them — review r2a-6.)
+		kept, dropped := make([]Part, 0, len(e.Parts)), false
 		for _, p := range e.Parts {
 			if p.Kind == KindTool && p.Tool != nil && p.Tool.fromCall {
 				dropped = true

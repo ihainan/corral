@@ -35,37 +35,60 @@ func (s *Server) codexRunningOnHost(sess *term.Session, st *convoState) {
 		return
 	}
 	thread := strings.ToLower(st.bind.Session)
-	n := 0
+	var ids []string
 	for _, r := range cx.Running() {
 		if r.Kind == "cmd" {
-			n++
+			ids = append(ids, r.ID)
 		}
 	}
-	p.readAt(thread, n > 0 && cx.Status() == "idle") // (looked for while it has some, at rest)
+	n := len(ids)
+	p.readAt(thread, n > 0 && cx.Status() == "idle", strings.Join(ids, " ")) // (looked for while it has some, at rest)
 	live, ok := p.readSeen(thread)
 	if !ok || n == 0 {
 		return
 	}
-	cx.EndedOnHost(func(r convo.Running) bool { return codexRunGone(r, live, n) })
+	all := cx.Running()
+	cx.EndedOnHost(func(r convo.Running) bool { return codexRunGone(r, live, n, all) })
 }
 
 // codexRunGone: running r (one of n commands running) has no process on
 // the host, which runs live of this conversation's: none at all; or more
-// are running than live, and r's command is none of theirs (named, and
-// all of them named: else which ended is not told).
-func codexRunGone(r convo.Running, live []bgCmd, n int) bool {
+// are running than live, every one live is one of them by its command (the
+// one's words in the other's: "exec sleep 30" runs as "sleep 30", a long
+// one cut short — review r2a-5), and r is none of those — else which ended
+// is not told.
+func codexRunGone(r convo.Running, live []bgCmd, n int, all []convo.Running) bool {
 	if len(live) == 0 {
 		return true
 	}
-	what := strings.Join(strings.Fields(r.What), " ")
-	if what == "" || n <= len(live) {
+	if n <= len(live) || codexRunWords(r.What) == "" {
 		return false
 	}
 	for _, l := range live {
-		t := strings.Join(strings.Fields(l.Title), " ")
-		if t == "" || strings.HasPrefix(what, strings.TrimSuffix(t, "…")) || strings.HasPrefix(t, what) {
+		found := false
+		for _, o := range all {
+			if o.Kind == "cmd" && codexSameCmd(o.What, l.Title) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false // (a process not told apart by its command: which ended, not known)
+		}
+		if codexSameCmd(r.What, l.Title) {
 			return false
 		}
 	}
 	return true
+}
+
+func codexRunWords(s string) string {
+	return strings.TrimSuffix(strings.Join(strings.Fields(s), " "), "…")
+}
+
+// codexSameCmd: a command as the log says it and as the host runs it are
+// the same, as far as their words tell.
+func codexSameCmd(what, title string) bool {
+	a, b := codexRunWords(what), codexRunWords(title)
+	return a != "" && b != "" && (strings.Contains(a, b) || strings.Contains(b, a))
 }

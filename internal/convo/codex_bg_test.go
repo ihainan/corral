@@ -416,3 +416,42 @@ func TestCodexEndedOnHost(t *testing.T) {
 		t.Errorf("running again: %q", got)
 	}
 }
+
+// Told ended by the host before its step was made (commands not yet told of
+// on their own): its step, made later, is done; a call's line among other
+// parts, two processes put in its place, takes nothing of them (review r2a).
+func TestCodexEndedOnHostBeforeItsStep(t *testing.T) {
+	c := feedAll(bgUser, bgCall, bgOut, bgSaid, bgDone)
+	if !c.EndedOnHost(func(Running) bool { return true }) {
+		t.Fatal("nothing ended")
+	}
+	c.Feed([]byte(bgUser2 + bgItemBefore))
+	_, tl := entryOf(c, "proc:37552@2026-11-15T04:14:12.050Z")
+	if tl == nil || !tl.Done {
+		t.Fatalf("its step: %+v", tl)
+	}
+	if got := runningIDs(c); got != "" {
+		t.Errorf("running: %q", got)
+	}
+}
+
+func TestCodexStepsInPlaceKeepOtherParts(t *testing.T) {
+	c := NewCodex()
+	call := &Tool{ID: "call_x", Name: "Bash", fromCall: true}
+	other := &Tool{ID: "ask_1", Name: "request_user_input"}
+	e := &Entry{ID: "e1", Parts: []Part{{Kind: KindTool, Tool: call}, {Kind: KindTool, Tool: other}}}
+	c.entries = []*Entry{e}
+	c.tools = map[string][]*Tool{"call_x": {call}}
+	c.procs = map[string]*codexProc{
+		"1": {id: "proc:1@t", call: "call_x", cmd: "sleep 1", n: 0},
+		"2": {id: "proc:2@t", call: "call_x", cmd: "sleep 2", n: 1},
+	}
+	c.itemsTell()
+	var ids []string
+	for _, p := range e.Parts {
+		ids = append(ids, p.Tool.ID)
+	}
+	if got := strings.Join(ids, " "); got != "proc:1@t proc:2@t ask_1" {
+		t.Errorf("parts: %s", got)
+	}
+}

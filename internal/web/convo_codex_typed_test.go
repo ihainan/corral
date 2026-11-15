@@ -34,6 +34,10 @@ func TestCodexTypedIn(t *testing.T) {
 		{"an unknown footer under it", codexScreen("› "+msg, "  something else"), msg, true, true},
 		{"no footer at all", "• done\n\n› " + msg + "\n\n\n", msg, true, true},
 		{"the agent's words under it", "› " + msg + "\n\n• answered\n", msg, false, false},
+		// (review r2a-4: no footer shown, two lines after a blank one: words of the input's.)
+		{"more of a draft under it", "• done\n\n› " + msg + "\n\n  extra draft\n  more of it\n", msg, true, false},
+		// (review r2a-3: a draft beginning "1. ": not a menu.)
+		{"a draft like a menu's choice", codexScreen("› 1. " + msg), "1. " + msg, true, true},
 		{"a menu's choice", codexScreen("› 1. Yes, proceed\n  2. No"), "1. Yes, proceed", false, false},
 		{"too short to tell", codexScreen("› go"), "go", false, false},
 		// (review502: the draft goes on with words like a footer's, then more: not the message whole.)

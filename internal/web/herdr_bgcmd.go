@@ -81,6 +81,7 @@ type cmdProber struct {
 
 type cmdPane struct {
 	session string
+	mark    string    // (a read conversation's: what it left running, as read)
 	from    time.Time // when it came to done or idle: what a look begun before found is not told of it
 	told    time.Time // when it was last considered (see forget)
 }
@@ -118,9 +119,11 @@ func (p *cmdProber) consider(pane, agent, status, session string) {
 }
 
 // readAt: a chat page read session's conversation (a Codex thread), at rest
-// or not as its log says (idle): what it left running is looked for while
-// it is, as of when it came to rest.
-func (p *cmdProber) readAt(session string, idle bool) {
+// or not as its log says (idle), leaving running what mark says (its
+// commands' ids): what it left running is looked for while it is, as of
+// when it came to rest so — another mark (a turn read whole between two
+// reads, that set more going: review r2a-2) is a rest anew.
+func (p *cmdProber) readAt(session string, idle bool, mark string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if !idle || !convoUUID.MatchString(session) {
@@ -130,12 +133,12 @@ func (p *cmdProber) readAt(session string, idle bool) {
 	if p.read == nil {
 		p.read = map[string]cmdPane{}
 	}
-	if was, ok := p.read[session]; ok {
+	if was, ok := p.read[session]; ok && was.mark == mark {
 		was.told = time.Now()
 		p.read[session] = was
 		return
 	}
-	p.read[session] = cmdPane{session: session, from: time.Now(), told: time.Now()}
+	p.read[session] = cmdPane{session: session, mark: mark, from: time.Now(), told: time.Now()}
 	p.soon = time.Now().Add(p.soonBy)
 	select {
 	case p.wake <- struct{}{}:
@@ -360,10 +363,17 @@ var cmdCodex = regexp.MustCompile(`^codex:([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-f
 // sandbox (Linux: codex-linux-sandbox, and bwrap under it; macOS:
 // sandbox-exec), the command their child, found as well — 0.167.2,
 // sandbox workspace-write, 11-15.
-func codexSandboxWrapper(cmdline string) bool {
+// "outer" for what Codex runs a command in (codex-linux-sandbox,
+// sandbox-exec), "inner" for what that runs it in (bwrap), "" for neither.
+func codexSandboxWrapper(cmdline string) string {
 	first, _, _ := strings.Cut(strings.TrimSpace(cmdline), " ")
-	base := first[strings.LastIndex(first, "/")+1:]
-	return base == "codex-linux-sandbox" || base == "bwrap" || base == "sandbox-exec"
+	switch first[strings.LastIndex(first, "/")+1:] {
+	case "codex-linux-sandbox", "sandbox-exec":
+		return "outer"
+	case "bwrap":
+		return "inner"
+	}
+	return ""
 }
 
 // cmdMonitor: what a Monitor's line says in place of where its output goes.
@@ -385,7 +395,7 @@ func parseCmdScan(out string) (cmds map[string][]bgCmd, whole bool) {
 		cmd     bgCmd
 		start   int64
 	}
-	var all []found
+	var all, wrappers []found
 	for _, line := range strings.Split(out, "\n") {
 		f := strings.SplitN(line, "\t", 5)
 		switch {
@@ -408,8 +418,12 @@ func parseCmdScan(out string) (cmds map[string][]bgCmd, whole bool) {
 			} else if m := cmdMonitor.FindStringSubmatch(f[3]); m != nil && cmdPID.MatchString(f[1]) {
 				session, task = m[1], "monitor-"+f[1] // (its task's name is not told: its process's, for one)
 			} else if m := cmdCodex.FindStringSubmatch(f[3]); m != nil && cmdPID.MatchString(f[1]) {
-				if codexSandboxWrapper(f[4]) {
-					continue // (its sandbox's process around the command, found as well: one command, not two)
+				switch codexSandboxWrapper(f[4]) {
+				case "outer":
+					wrappers = append(wrappers, found{session: strings.ToLower(m[1]), cmd: bgCmd{Task: "codex-" + f[1]}, start: start})
+					continue // (see below)
+				case "inner":
+					continue // (bwrap, under codex-linux-sandbox: that one stands for it)
 				}
 				session, task = m[1], "codex-"+f[1]
 			} else {
@@ -420,6 +434,27 @@ func parseCmdScan(out string) (cmds map[string][]bgCmd, whole bool) {
 	}
 	if btime <= 0 {
 		whole = false // (no /proc: no process of any agent found, which is not none running)
+	}
+	// (A Codex's sandbox around a command — codex-linux-sandbox, bwrap —:
+	// the command itself is found too where what runs it under the sandbox
+	// is a Codex as well (0.167.2 on Linux, 11-15): then one command, not
+	// two. Where no command of its thread begun as late is found, the
+	// wrapper stands for one, its command not told (cut short among its
+	// arguments): a command running all the same — review r2a-9.)
+	slices.SortStableFunc(wrappers, func(a, b found) int { return int(min(max(a.start-b.start, -1), 1)) })
+	paired := map[int]bool{}
+	for _, w := range wrappers {
+		inner := -1
+		for i, c := range all {
+			if !paired[i] && c.session == w.session && c.start >= w.start && (inner < 0 || c.start < all[inner].start) {
+				inner = i
+			}
+		}
+		if inner >= 0 {
+			paired[inner] = true
+			continue
+		}
+		all = append(all, w)
 	}
 	slices.SortStableFunc(all, func(a, b found) int { return int(min(max(a.start-b.start, -1), 1)) })
 	got := map[string][]bgCmd{}

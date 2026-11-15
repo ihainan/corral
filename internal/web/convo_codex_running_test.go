@@ -8,26 +8,43 @@ import (
 )
 
 func TestCodexRunGone(t *testing.T) {
-	run := func(what string) convo.Running { return convo.Running{ID: "proc:1@x", Kind: "cmd", What: what} }
-	srv := []bgCmd{{Task: "codex-11", Title: "python3 -m http.server 18799 --bind 127.0.0.1"}}
+	run := func(what string) convo.Running {
+		return convo.Running{ID: "proc:" + what + "@x", Kind: "cmd", What: what}
+	}
+	const srv = "python3 -m http.server 18799 --bind 127.0.0.1"
+	live := func(titles ...string) []bgCmd {
+		var out []bgCmd
+		for i, x := range titles {
+			out = append(out, bgCmd{Task: "codex-" + string(rune('a'+i)), Title: x})
+		}
+		return out
+	}
 	for _, c := range []struct {
-		name string
-		r    convo.Running
-		live []bgCmd
-		n    int
-		gone bool
+		name    string
+		r       string
+		running []string
+		live    []bgCmd
+		gone    bool
 	}{
-		{"none of its left", run("sleep 45"), nil, 1, true},
-		{"none left, unnamed", run(""), nil, 2, true},
-		{"its own still there", run("python3 -m http.server 18799 --bind 127.0.0.1"), srv, 1, false},
-		{"as many running as there: not told which", run("sleep 45"), srv, 1, false},
-		{"one more running, this one not there", run("sleep 45"), srv, 2, true},
-		{"one more, this one there", run("python3 -m http.server 18799 --bind 127.0.0.1"), srv, 2, false},
-		{"one more, this one unnamed", run(""), srv, 2, false},
-		{"one more, one there unnamed", run("sleep 45"), []bgCmd{{Task: "codex-12"}}, 2, false},
-		{"its title cut short there", run("for i in $(seq 1 100); do echo tick $i; sleep 1; done"), []bgCmd{{Task: "codex-13", Title: "for i in $(seq 1 100); do echo…"}}, 2, false},
+		{"none of its left", "sleep 45", []string{"sleep 45"}, nil, true},
+		{"none left, unnamed", "", []string{"", ""}, nil, true},
+		{"its own still there", srv, []string{srv}, live(srv), false},
+		{"as many running as there: not told which", "sleep 45", []string{"sleep 45"}, live(srv), false},
+		{"one more running, this one not there", "sleep 45", []string{"sleep 45", srv}, live(srv), true},
+		{"one more, this one there", srv, []string{"sleep 45", srv}, live(srv), false},
+		{"one more, this one unnamed", "", []string{"", srv}, live(srv), false},
+		{"one more, the one there of no command told", "sleep 45", []string{"sleep 45", srv}, live(""), false},
+		{"one more, the one there none of them", "sleep 45", []string{"sleep 45", srv}, live("node server.js"), false},
+		{"its title cut short there", "for i in $(seq 1 100); do echo tick $i; sleep 1; done", []string{"for i in $(seq 1 100); do echo tick $i; sleep 1; done", "sleep 9"}, live("for i in $(seq 1 100); do echo…"), false},
+		// (review r2a-5: run as exec, the host shows what it became.)
+		{"exec'd: the one there is it", "exec sleep 30", []string{"exec sleep 30", "sleep 45; echo x"}, live("sleep 30"), false},
+		{"exec'd: the other one gone", "sleep 45; echo x", []string{"exec sleep 30", "sleep 45; echo x"}, live("sleep 30"), true},
 	} {
-		if got := codexRunGone(c.r, c.live, c.n); got != c.gone {
+		var all []convo.Running
+		for _, w := range c.running {
+			all = append(all, run(w))
+		}
+		if got := codexRunGone(run(c.r), c.live, len(all), all); got != c.gone {
 			t.Errorf("%s: gone %v", c.name, got)
 		}
 	}
@@ -42,7 +59,7 @@ func TestCmdProberReadSeen(t *testing.T) {
 	if _, ok := p.readSeen(th); ok {
 		t.Fatal("not read")
 	}
-	p.readAt(th, true)
+	p.readAt(th, true, "a")
 	p.at, p.cmds = time.Now().Add(-time.Second), map[string][]bgCmd{}
 	if _, ok := p.readSeen(th); ok {
 		t.Error("a look begun before it came to rest")
@@ -51,10 +68,15 @@ func TestCmdProberReadSeen(t *testing.T) {
 	if live, ok := p.readSeen(th); !ok || len(live) != 0 {
 		t.Errorf("none left: %v %v", live, ok)
 	}
-	p.readAt(th, true) // (read again, at rest still: as of when it came to rest)
+	p.readAt(th, true, "a") // (read again, at rest still: as of when it came to rest)
 	if _, ok := p.readSeen(th); !ok {
 		t.Error("read again")
 	}
+	p.readAt(th, true, "a b") // (at rest again, more set going meanwhile: a rest anew — review r2a-2)
+	if _, ok := p.readSeen(th); ok {
+		t.Error("a look begun before more was set going")
+	}
+	p.at = time.Now()
 	if _, ok := p.readSeen("01a1dd95-0000-7270-ad56-1d53266a6fd0"); ok {
 		t.Error("another conversation's")
 	}
@@ -63,11 +85,11 @@ func TestCmdProberReadSeen(t *testing.T) {
 		t.Error("an old look")
 	}
 	p.at = time.Now()
-	p.readAt(th, false)
+	p.readAt(th, false, "a b")
 	if _, ok := p.readSeen(th); ok {
 		t.Error("at work: what it runs now is its turn's")
 	}
-	p.readAt("not an id", true)
+	p.readAt("not an id", true, "a")
 	if len(p.read) != 0 {
 		t.Error("not an id, looked for")
 	}

@@ -29,6 +29,7 @@ type codexProc struct {
 	call string // the call whose script set it going
 	cmd  string // its command, where told ("": several of the script's)
 	n    int    // (its place among those the call set going)
+	over bool   // told ended by the host before it had a step (EndedOnHost): its step, when made, is done
 }
 
 // scriptRan notes the commands a code-mode call's script runs (as read out
@@ -144,7 +145,7 @@ func (c *Codex) procsGoing(r *codexRow, id string, sids []string) {
 
 // step: the step of a process a script left running, running.
 func (p *codexProc) step() *Tool {
-	return &Tool{ID: p.id, Name: "Bash", Detail: clip(clean(p.cmd), maxDetail)}
+	return &Tool{ID: p.id, Name: "Bash", Detail: clip(clean(p.cmd), maxDetail), Done: p.over}
 }
 
 // stepsInPlace: commands are told of on their own in this conversation now
@@ -558,7 +559,11 @@ func (c *Codex) EndedOnHost(gone func(Running) bool) bool {
 	for _, id := range ended {
 		c.endRun(id)
 		for _, p := range c.procs {
-			if p.id == id && p.t != nil && !p.t.Done {
+			if p.id != id {
+				continue
+			}
+			p.over = true // (a step made for it later: done — review r2a-7)
+			if p.t != nil && !p.t.Done {
 				p.t.Done = true
 				c.touch([]*Tool{p.t})
 			}

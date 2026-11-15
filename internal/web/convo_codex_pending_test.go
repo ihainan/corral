@@ -232,6 +232,9 @@ func TestCodexHasDraft(t *testing.T) {
 	if !codexHasDraft(typed) {
 		t.Error("words typed not told")
 	}
+	if !codexHasDraft("\x1b[0m\x1b[1m›\x1b[0m 1. 检查失败原因" + foot) {
+		t.Error("a draft beginning \"1. \" taken for a menu (review r2a-3)")
+	}
 	if codexHasDraft("no box at all") {
 		t.Error("an unknown screen: a draft")
 	}
