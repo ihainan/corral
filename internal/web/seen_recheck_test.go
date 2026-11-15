@@ -422,3 +422,43 @@ func TestSeenLookRaces(t *testing.T) {
 		}
 	}
 }
+
+// A host whose clock is told to the second: the log's earliest time is
+// moved back by what the host's now may have left out.
+func TestHostNowInSeconds(t *testing.T) {
+	for out, want := range map[string]bool{
+		"w=1\nnow=1794706675000\x00": true,
+		"now=1794706675\x00":         true,
+		"now=1794706675123\x00":      false,
+		"no time":                    false,
+	} {
+		if got := hostNowInSeconds(out); got != want {
+			t.Errorf("%q: %v", out, got)
+		}
+	}
+}
+
+// Looked at while its mark moved on (the look being kept): taken, and its
+// log read for.
+func TestSeenLookedAsItMoved(t *testing.T) {
+	var q *seenRounds
+	sum := func(mark string) herdrSummary {
+		s := seenSum(herdr.StatusDone, "")
+		s.Workspaces[0].Agents[0].Mark = mark
+		q.number(&s, false)
+		return s
+	}
+	q = newSeenRounds(nil, func(string, store.AgentSeen) error {
+		sum("term_a#7")
+		return nil
+	})
+	q.changed("w1:p1", herdr.StatusDone, "")
+	s := sum("term_a#5")
+	round := s.Workspaces[0].Agents[0].Round
+	if !marked(q, "w1:p1", round, "") {
+		t.Fatal("not taken")
+	}
+	if p := pend(q); p["w1:p1"].n != round || p["w1:p1"].mark != "term_a#7" {
+		t.Fatalf("not read for: %v", p)
+	}
+}

@@ -70,6 +70,11 @@ func (s *Server) recheckSeen(ctx context.Context, sess *term.Session, rounds *se
 			if err == nil {
 				l, h := parseLogsWrote(string(out), panes)
 				lo, hi = onGatewayClock(l, string(out), got), onGatewayClock(h, string(out), got)
+				if hostNowInSeconds(string(out)) {
+					for p := range lo {
+						lo[p] -= 999 // (the host's now told to the second: up to 999 ms later than said)
+					}
+				}
 			}
 			if err != nil || lo == nil || hi == nil {
 				for _, p := range panes {
@@ -196,4 +201,16 @@ func parseLogsWrote(out string, panes []string) (lo, hi map[string]int64) {
 		i++
 	}
 	return lo, hi
+}
+
+// hostNowInSeconds: the host's time hostNowCommand printed last in out is
+// to the second only (a date with no %N, its milliseconds "000").
+func hostNowInSeconds(out string) bool {
+	i := strings.LastIndex(out, "now=")
+	if i < 0 {
+		return false
+	}
+	v, _, _ := strings.Cut(out[i+len("now="):], "\x00")
+	n, err := strconv.ParseInt(v, 10, 64)
+	return err == nil && (n < 1e11 || n%1000 == 0)
 }

@@ -323,10 +323,15 @@ func (r *seenRounds) markSeen(pane string, round int64, session string) (bool, e
 		}
 	}
 	r.mu.Lock()
-	if y, ok := r.at[pane]; !ok || y.n != x.n { // (its mark may have been filled in meanwhile: the same round)
+	y, ok := r.at[pane]
+	if !ok || y.n != x.n { // (its mark may have been filled in meanwhile: the same round)
 		r.mu.Unlock()
 		return false, nil // (another round meanwhile: what was kept is of before it)
 	}
+	// (Another mark than it had while it was kept: its state changed
+	// meanwhile, the look taken all the same; its log read for, as for a
+	// mark moved on after it — see number and recheck.)
+	moved := x.mark != "" && y.mark != x.mark
 	if r.lost || r.gen != gen {
 		// (herdr lost, or lost and back, since it was asked: its round may
 		// be over unseen; told by the look, as what was kept before.)
@@ -342,6 +347,9 @@ func (r *seenRounds) markSeen(pane string, round int64, session string) (bool, e
 		}
 		x.at = k.At
 		r.seen[pane] = x
+	}
+	if moved && y.status == herdr.StatusDone {
+		setMs(&r.pending, pane, y.n)
 	}
 	if l, ok := r.last[pane]; !ok || l.At < k.At { // (of its round still: see recheck)
 		if r.last == nil {
