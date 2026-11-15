@@ -133,3 +133,23 @@ func TestUUIDV7Time(t *testing.T) {
 		t.Error("a v4 taken")
 	}
 }
+
+// A copy ("codex fork", 0.167): its first line names the original's log by
+// its writer — the original's own id for its first log, a segment's id for
+// one rewound — a log of another thread, found all the same.
+func TestCodexBaseLogFork(t *testing.T) {
+	const day = "/h/.codex/sessions/2026/11/15"
+	const src = "01a1dff5-1931-73c3-9a56-5747dad23014"
+	const copyID = "01a1dff5-50a7-7130-b294-d74e463261b7"
+	const seg = "01a1dff5-3333-7b22-8b91-b1f46090634d"
+	srcFirst := "rollout-2026-11-15T16-05-40-" + src + ".jsonl"
+	srcSeg := "rollout-2026-11-15T16-05-50-" + src + "_" + seg + ".jsonl"
+	copyLog := "rollout-2026-11-15T16-05-58-" + copyID + ".jsonl"
+	d := fakeDir{day: infos(t, srcFirst, srcSeg, copyLog)}
+	if got, _ := codexBaseLog(d, day+"/"+copyLog, copyID, src); got != day+"/"+srcFirst {
+		t.Errorf("the original's first log: %q", got)
+	}
+	if got, _ := codexBaseLog(d, day+"/"+copyLog, copyID, seg); got != day+"/"+srcSeg {
+		t.Errorf("the original's segment: %q", got)
+	}
+}

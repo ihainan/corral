@@ -588,3 +588,81 @@ func TestConvoGensOfThisRun(t *testing.T) {
 	}
 	fmt.Println(convoGens.Load())
 }
+
+// A copy ("codex fork <id>") run against the daemon, in the folder of the
+// Codex it is a copy of: each is given its own — the copy for sure, by what
+// its log says it is a copy of; the original not contesting it — and a copy
+// with another conversation begun there since is not told by this.
+func TestDaemonLogFork(t *testing.T) {
+	const sec = 1000
+	now := int64(1_700_000_000_000)
+	src, cp, third := "01a17600-0000-7000-8000-0000000000f1", "01a17600-0000-7000-8000-0000000000f2", "01a17600-0000-7000-8000-0000000000f3"
+	logOf := func(sid string) string {
+		return "/home/u/.codex/sessions/2026/10/26/rollout-2026-10-26T10-00-00-" + sid + ".jsonl"
+	}
+	orig := convoProc{pid: 7, start: 70, agent: "codex", cwd: "/w", started: now - 600*sec}
+	fork := convoProc{pid: 8, start: 80, agent: "codex", cwd: "/w", started: now - 50*sec}
+	cands := []convoCand{
+		{log: logOf(src), cwd: "/w", began: now - 590*sec, wrote: now - 60*sec},
+		{log: logOf(cp), cwd: "/w", began: now - 49*sec, wrote: now - 49*sec, forkedFrom: src},
+	}
+	l := convoLocated{procs: []convoProc{orig, fork}, cands: cands, hostNow: now, forkOf: map[int64]string{8: src}}
+	srv := &Server{}
+	p := l.procs[1]
+	if took, sure, _ := srv.daemonLog(&p, l); !took || !sure || p.sid != cp {
+		t.Fatalf("the copy: took %v sure %v sid %q", took, sure, p.sid)
+	}
+	o := l.procs[0]
+	if took, sure, _ := srv.daemonLog(&o, l); !took || sure || o.sid != src {
+		t.Fatalf("the original: took %v sure %v sid %q", took, sure, o.sid)
+	}
+	// (The copy again, after the original's look: still its own.)
+	p = l.procs[1]
+	if _, sure, _ := srv.daemonLog(&p, l); !sure || p.sid != cp {
+		t.Fatalf("the copy again: sure %v sid %q", sure, p.sid)
+	}
+	// Another conversation begun there since the copy started: not told by this.
+	srv2 := &Server{}
+	l2 := l
+	l2.cands = append(append([]convoCand{}, cands...), convoCand{log: logOf(third), cwd: "/w", began: now - 20*sec, wrote: now - 5*sec})
+	p = l2.procs[1]
+	if _, sure, _ := srv2.daemonLog(&p, l2); sure {
+		t.Fatalf("told for sure with another begun since: %q", p.sid)
+	}
+}
+
+// A Codex's command line, as the host scripts read it: its subcommand, a
+// prompt not taken for one, and what a copy is a copy of.
+func TestCodexArgsAwk(t *testing.T) {
+	run := func(want string, args ...string) string {
+		cmd := exec.Command("awk", "-v", "want="+want, codexArgsAwk)
+		cmd.Stdin = strings.NewReader(strings.Join(append([]string{"/usr/bin/codex"}, args...), "\001") + "\001")
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	const id = "01a1DFF5-1931-73c3-9a56-5747dad23014"
+	for _, c := range []struct {
+		args       []string
+		sub, forks string
+	}{
+		{nil, "", ""},
+		{[]string{"resume", id}, "resume", ""},
+		{[]string{"-m", "gpt", "fork", id}, "fork", strings.ToLower(id)},
+		{[]string{"fix the failing tests"}, "", ""},
+		{[]string{"-c", "x=1", "exec", "hi"}, "exec", ""},
+		{[]string{"-p", "exec"}, "", ""},
+		{[]string{"review"}, "review", ""},
+		{[]string{"--", "exec"}, "", ""},
+		{[]string{"fork", "not-an-id"}, "fork", ""},
+	} {
+		if got := run("sub", c.args...); got != c.sub {
+			t.Errorf("%q: sub %q, want %q", c.args, got, c.sub)
+		}
+		if got := run("fork", c.args...); got != c.forks {
+			t.Errorf("%q: fork %q, want %q", c.args, got, c.forks)
+		}
+	}
+}

@@ -140,6 +140,11 @@ def endpoint(pid, start):
         return r.stdout.decode('utf-8', 'replace')[:300]
     except Exception:
         return ''
+# (Codex's subcommands: a first word that is none of them, a sentence say,
+# is the prompt it was started with — codex "fix the tests", interactive.
+# A word like one, not known, is taken as one: not looked at.)
+SUBS = {'exec', 'e', 'review', 'login', 'logout', 'mcp', 'mcp-server', 'app-server', 'completion', 'sandbox', 'debug', 'apply', 'a', 'resume', 'fork', 'cloud', 'cloud-tasks', 'features', 'help', 'proto', 'responses-api-proxy', 'stdio-to-uds', 'generate-ts', 'plugin', 'update'}
+WORD = re.compile(r'^[a-z][a-z0-9-]*$')
 def sub_and_id(args):
     pos, skip = [], False
     for a in args:
@@ -155,8 +160,21 @@ def sub_and_id(args):
         if len(pos) == 2:
             break
     sub = pos[0] if pos else ''
+    if sub and sub not in SUBS and not WORD.match(sub):
+        sub = ''  # (its prompt)
     tid = pos[1] if sub == 'resume' and len(pos) > 1 and UUID.fullmatch(pos[1]) else ''
-    return sub, tid
+    # ("codex fork <id>": the conversation it is a copy of, not its own.)
+    of = pos[1] if sub == 'fork' and len(pos) > 1 and UUID.fullmatch(pos[1]) else ''
+    return sub, tid, of
+def forked_from(path):
+    # (A copy's log's first line, its session_meta: what it is a copy of.)
+    try:
+        with open(path, 'rb') as f:
+            head = f.readline(256 << 10)
+        m = json.loads(head).get('payload') or {}
+        return str(m.get('forked_from_id') or '').lower()
+    except (OSError, ValueError, AttributeError):
+        return ''
 def under_herdr(pid):
     for _ in range(40):
         try:
@@ -248,8 +266,8 @@ for d in os.listdir('/proc'):
         cwd = os.readlink(p + '/cwd')
     except (OSError, ValueError, IndexError):
         continue
-    sub, tid = sub_and_id(args)
-    if sub not in ('', 'resume'):
+    sub, tid, fork_of = sub_and_id(args)
+    if sub not in ('', 'resume', 'fork'):
         continue
     home = env.get(b'CODEX_HOME', b'').decode('utf-8', 'replace') or os.path.join(env.get(b'HOME', b'').decode('utf-8', 'replace') or os.path.expanduser('~'), '.codex')
     home = home.rstrip('/')
@@ -281,7 +299,7 @@ for d in os.listdir('/proc'):
         mine = env.get(b'HERDR_SOCKET_PATH', b'').decode('utf-8', 'replace') == sock
         pane = env.get(b'HERDR_PANE_ID', b'').decode('utf-8', 'replace') if mine else ''
     procs.append({'pid': d, 'start': str(start), 'started': started, 'cwd': cwd, 'home': home, 'argv': tid, 'opened': opened,
-                  'fg': fg, 'sub': sub, 'any': any_log, 'pane': pane})
+                  'fg': fg, 'sub': sub, 'any': any_log, 'pane': pane, 'fork_of': fork_of.lower()})
 claims = {}
 for q in procs:
     con = con_of(q['home'])
@@ -307,6 +325,17 @@ for q in sorted(procs, key=lambda q: (q['pane'], q['pid'])):
             break
     if not tid and q['argv']:
         tid, src = q['argv'], 'argv'
+    # (A copy, run against the daemon: the one conversation of its folder
+    # begun since it started that is a copy of the one its argument names —
+    # told by its arguments as a resume's is.)
+    if not tid and q['fork_of'] and con is not None and q['started'] > 0:
+        try:
+            rows = con.execute('SELECT id, rollout_path FROM threads WHERE cwd = ? AND created_at >= ? AND ' + TALKED, (q['cwd'], q['started'] // 1000 - 5)).fetchall()
+        except sqlite3.Error:
+            rows = []
+        copies = [r[0] for r in rows if r[1] and forked_from(r[1]) == q['fork_of']]
+        if len(copies) == 1:
+            tid, src = copies[0], 'argv'
     # Conversations of its folder talked in since it started (begun, or
     # written to: a resume writes), live now: those no other Codex is told
     # at, but its own, are unexplained — one begun or resumed in it since,

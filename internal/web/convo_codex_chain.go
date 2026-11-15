@@ -20,6 +20,8 @@ import (
 // writer of the log before (the thread's own id for its first log),
 // end_byte_offset: how much of that log comes before, end_ordinal_exclusive:
 // the ordinal its rows go on at}. Rewound again, the same, from that one.
+// A copy ("codex fork", 0.167) begins the same way: history_base names the
+// original's log (its writer), how much of it comes before.
 // The whole conversation is each log before up to where the next goes on
 // from it, then the last; what was rewound stays in the log before, past
 // that point, and is not read. (Its database names the last.)
@@ -73,7 +75,8 @@ type dirLister interface {
 const codexBaseDirMax = 20000
 
 // codexBaseLog finds the log a Codex log (log, of thread) goes on from,
-// written by writer: in its own day's folder, else in that of the day the
+// written by writer — of the same thread, or of the one it is a copy of:
+// in its own day's folder, else in that of the day the
 // writer's id was made (a UUIDv7's time), or the day either side (the
 // folder is named by the host's local day). "" where none, or more than one.
 func codexBaseLog(c dirLister, log, thread, writer string) (string, error) {
@@ -103,10 +106,14 @@ func codexBaseLog(c dirLister, log, thread, writer string) (string, error) {
 		found := ""
 		for _, e := range entries {
 			m := codexSegmentName.FindStringSubmatch(e.Name())
-			if m == nil || !e.Mode().IsRegular() || !strings.EqualFold(m[1], thread) {
+			if m == nil || !e.Mode().IsRegular() {
 				continue
 			}
-			if (writer == strings.ToLower(thread) && m[2] == "") || strings.EqualFold(m[2], writer) {
+			// (Written by writer: a thread's first log is written by the thread
+			// itself, a segment by its own id. Of this thread, rewound — or of
+			// another, the one a copy of it goes on from ("codex fork": its
+			// first line names the original's log the same way, 0.167).)
+			if (m[2] == "" && strings.EqualFold(m[1], writer)) || strings.EqualFold(m[2], writer) {
 				if found != "" {
 					return "", nil // (two alike: not guessed between)
 				}

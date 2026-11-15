@@ -158,6 +158,22 @@ func (b *b64Strip) end(dst []byte) []byte {
 // a pane (tmuxPane, validated), a second that pane's terminal. Linux only (/proc):
 // elsewhere it prints the record "noproc". Fixed script; the mode and the
 // validated tmux session name are its only arguments.
+// codexArgsAwk reads a Codex's command line (its words split by \001, its
+// program first): want=sub, its subcommand — its first word after options
+// and their values, none after "--"; a first word that is no subcommand
+// (one known, or a word like one), a sentence say, is the prompt it was
+// started with: none, interactive. want=fork: of "codex fork <id>", the id.
+// (No ' in it: put between ' in the scripts.)
+const codexArgsAwk = `BEGIN { RS = "\001" } NR == 1 { next } skip { skip = 0; next }
+  /^--$/ { exit } /^-/ { if ($0 ~ /^(-[cmpsaCi]|--(config|model|profile|sandbox|ask-for-approval|cd|image|add-dir|local-provider|remote|remote-auth-token-env|enable|disable))$/) skip = 1; next }
+  { n++; a[n] = $0; if (n == 2) exit }
+  END {
+    s = a[1]
+    if (s != "" && s !~ /^[a-z][a-z0-9-]*$/) s = ""
+    if (want == "sub") print s
+    else if (s == "fork" && length(a[2]) == 36 && a[2] ~ /^[0-9a-fA-F-]+$/) print tolower(a[2])
+  }`
+
 func convoLocateCommand(mode, tmuxName, tmuxPane string) string {
 	return convoLocateWith(mode, tmuxName, tmuxPane, "", "")
 }
@@ -227,10 +243,13 @@ case $hz in ''|*[!0-9]*|0) hz=;; esac
 # Codex's subcommand ($1 its pid): its first word after options and their
 # values ("codex -p exec" is no exec; "codex -c x=1 exec" is), none after
 # "--". Those that do not converse (exec, review, …) are no agent to type to.
+# (A sentence there is the prompt it was started with: none — codexArgsAwk.)
 codex_sub() {
-  tr '\0' '\001' <"/proc/$1/cmdline" 2>/dev/null | awk 'BEGIN { RS = "\001" } NR == 1 { next } skip { skip = 0; next }
-    /^--$/ { exit } /^-/ { if ($0 ~ /^(-[cmpsaCi]|--(config|model|profile|sandbox|ask-for-approval|cd|image|add-dir|local-provider|remote|remote-auth-token-env|enable|disable))$/) skip = 1; next }
-    { print; exit }'
+  tr '\0' '\001' <"/proc/$1/cmdline" 2>/dev/null | awk -v want=sub '` + codexArgsAwk + `'
+}
+# ("codex fork <id>": the conversation it is a copy of.)
+codex_fork_of() {
+  tr '\0' '\001' <"/proc/$1/cmdline" 2>/dev/null | awk -v want=fork '` + codexArgsAwk + `'
 }
 ` + convoEndpointSh + `
 # A process's record: what it is, where its log is, and where it runs.
@@ -380,7 +399,7 @@ for d in $codexes; do
   while IFS= read -r l; do
     case $l in ''|*"$nl"*) continue;; "$cxhome"/sessions/*/rollout-*.jsonl) ;; *) continue;; esac
     codex_subagent "$l" && continue
-    printf 'cand=%s\ncandcwd=%s\ncandts=%s\ncandmtime=%s\0' "$l" "$(meta_of "$l" cwd)" "$(meta_of "$l" timestamp)" "$(stat -c %Y "$l" 2>/dev/null)"
+    printf 'cand=%s\ncandcwd=%s\ncandts=%s\ncandmtime=%s\ncandfork=%s\0' "$l" "$(meta_of "$l" cwd)" "$(meta_of "$l" timestamp)" "$(stat -c %Y "$l" 2>/dev/null)" "$(meta_of "$l" forked_from_id)"
   done <<CORRAL_FD_LINKS
 $links
 CORRAL_FD_LINKS
@@ -393,6 +412,8 @@ for d in $codexes; do
   pid=${d#/proc/}
   sub=$(codex_sub "$pid")
   case $sub in exec|e|exec-server|review|apply|a|login|logout|mcp|mcp-server|app-server|completion|sandbox|debug|cloud|features) continue;; esac
+  # (A copy: what it is a copy of, for the daemon's log of it — daemonLog.)
+  [ "$sub" = fork ] && printf 'forkof=%s %s\0' "$pid" "$(codex_fork_of "$pid")"
   codex_fds "$d"
   log=$cxlog any=$cxany
   if [ -n "$cxpend" ]; then
@@ -649,9 +670,10 @@ type convoAnc struct {
 // convoCand is a log Codex's app-server daemon holds: a conversation it
 // runs for some Codex of the user's, which keeps none open itself.
 type convoCand struct {
-	log, cwd string
-	began    int64 // (unix milliseconds; 0 when its head did not say)
-	wrote    int64 // when it was last written to (unix milliseconds; 0 when not known)
+	log, cwd   string
+	forkedFrom string // (a copy's: the conversation it is a copy of, its head's forked_from_id)
+	began      int64  // (unix milliseconds; 0 when its head did not say)
+	wrote      int64  // when it was last written to (unix milliseconds; 0 when not known)
 }
 
 // procWrote is when the process last wrote to its log, as the list of
@@ -723,10 +745,11 @@ type convoLocated struct {
 	procs                          []convoProc
 	cands                          []convoCand
 	tmuxActive, tmuxPID, tmuxTitle string
-	tmuxTTY                        string // (the active pane's terminal)
-	paneTTY                        string // (the terminal of the pane asked of)
-	noProc                         bool   // the host has no /proc
-	hostNow                        int64  // the host's clock when it was looked at, unix milliseconds (0: not known)
+	tmuxTTY                        string           // (the active pane's terminal)
+	paneTTY                        string           // (the terminal of the pane asked of)
+	noProc                         bool             // the host has no /proc
+	hostNow                        int64            // the host's clock when it was looked at, unix milliseconds (0: not known)
+	forkOf                         map[int64]string // ("codex fork <id>": by pid, the conversation each is a copy of)
 }
 
 // now: the host's clock when it was looked at (to the end of its second),
@@ -773,6 +796,10 @@ func parseConvoLocate(out string) (l convoLocated) {
 					if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
 						c.wrote = n * 1000
 					}
+				case "candfork":
+					if convoUUID.MatchString(v) {
+						c.forkedFrom = strings.ToLower(v)
+					}
 				}
 			}
 			if t, err := time.Parse(time.RFC3339, ts); err == nil {
@@ -781,6 +808,16 @@ func parseConvoLocate(out string) (l convoLocated) {
 			c.cwd = unescapeJSON(c.cwd)
 			if _, ok := cleanRemotePath(c.log); ok && c.cwd != "" {
 				l.cands = append(l.cands, c)
+			}
+			continue
+		}
+		if v, ok := strings.CutPrefix(rec, "forkof="); ok {
+			pid, id, _ := strings.Cut(v, " ")
+			if n, err := strconv.ParseInt(pid, 10, 64); err == nil && n > 0 && convoUUID.MatchString(id) {
+				if l.forkOf == nil {
+					l.forkOf = map[int64]string{}
+				}
+				l.forkOf[n] = strings.ToLower(id)
 			}
 			continue
 		}
@@ -1315,18 +1352,32 @@ func onlyItsByTime(p *convoProc, c *convoCand, l convoLocated) bool {
 // whose Codex is no longer there is of none; nor is one begun before every
 // Codex there started. Then nothing is shown rather than another's. One
 // already found to be this Codex's (its screen showed it) is of it still.
-func (s *Server) daemonLog(p *convoProc, l convoLocated) (took, refused bool) {
+//
+// A copy ("codex fork <id>") is told for sure (sure): the one conversation
+// begun where it runs since it started, and that one a copy of the one its
+// argument names (its log's head says so) — not left to where and when
+// alone, which two Codexes in one folder, the original's and the copy's,
+// both fit; nor taken by another Codex there by that.
+func (s *Server) daemonLog(p *convoProc, l convoLocated) (took, sure, refused bool) {
 	if p == nil || p.agent != "codex" || p.log != "" || p.cwd == "" || p.started <= 0 {
-		return false, false
+		return false, false, false
 	}
 	alive := aliveCodex(l)
 	s.convoClaimed.seeAlive(l, alive, l.now())
+	if src := l.forkOf[p.pid]; src != "" {
+		if c := forkCand(p, src, l); c != nil {
+			if sid := convoSessionOf(c.log); sid != "" && s.convoClaimed.take(sid, p.id(), p.started, alive, l.now(), true) {
+				p.log, p.sid = c.log, sid
+				return true, true, false
+			}
+		}
+	}
 	var best *convoCand
 	var bestSID string
 	for i := range l.cands {
 		c := &l.cands[i]
 		sid := convoSessionOf(c.log)
-		if c.cwd != p.cwd || sid == "" {
+		if c.cwd != p.cwd || sid == "" || copyOfAnother(p, c, l) {
 			continue
 		}
 		if !s.convoClaimed.owns(sid, p.id()) {
@@ -1350,13 +1401,46 @@ func (s *Server) daemonLog(p *convoProc, l convoLocated) (took, refused bool) {
 		}
 	}
 	if best == nil {
-		return false, refused
+		return false, false, refused
 	}
 	if !s.convoClaimed.take(bestSID, p.id(), p.started, alive, l.now(), false) {
-		return false, true // (there is one, but it is another Codex's)
+		return false, false, true // (there is one, but it is another Codex's)
 	}
 	p.log, p.sid = best.log, bestSID
-	return true, refused
+	return true, false, refused
+}
+
+// forkCand: a copy's own log among those its daemon holds (see daemonLog):
+// the only one begun where it runs since it started — another Codex's copy
+// left out — and that one a copy of src. Else nil.
+func forkCand(p *convoProc, src string, l convoLocated) *convoCand {
+	var found *convoCand
+	for i := range l.cands {
+		c := &l.cands[i]
+		if c.cwd != p.cwd || c.began <= 0 || c.began+convoBeganSlack < p.started || copyOfAnother(p, c, l) {
+			continue
+		}
+		if found != nil || c.forkedFrom != src {
+			return nil // (another begun there since: which it is at, not told by this)
+		}
+		found = c
+	}
+	return found
+}
+
+// copyOfAnother: c is the copy another Codex running there was started to
+// make ("codex fork <id>", c a copy of that id, begun since it started).
+func copyOfAnother(p *convoProc, c *convoCand, l convoLocated) bool {
+	if c.forkedFrom == "" {
+		return false
+	}
+	for i := range l.procs {
+		q := &l.procs[i]
+		if q.agent == "codex" && q.id() != p.id() && l.forkOf[q.pid] == c.forkedFrom && q.cwd == c.cwd && q.started > 0 && c.began+convoBeganSlack >= q.started {
+			return true
+		}
+	}
+	return false
 }
 
 // convoClaims remembers which Codex each conversation was found to be of,
@@ -1666,16 +1750,20 @@ type convoState struct {
 	olderChecked bool
 	hops         int
 	olderSeen    map[string]bool // (the logs gone back through: none twice — review r2b-6)
-	more         bool            // the last read stopped before the end
-	status       string          // (tmux) the process's own word: "busy", "idle", or "" when not known
-	skipping     bool            // in a line too long to keep, until its end
-	long         []byte          // a line longer than a read, so far, its images' data left out (nil when not in one)
-	strip        b64Strip
-	ocCursor     int64 // (OpenCode) rows written since this are read next (unix ms)
-	ocCursorK    int   // (OpenCode) and, stopped within its millisecond, the last row read in it
-	ocCursorID   string
-	noReaderAt   time.Time // (OpenCode) when reading found no python3
-	sub          bool      // a subagent's own log (see apiConversationSubagent)
+	// chainStart: gone back through at least one log to one that goes on
+	// from none — the conversation's own start read, whatever the last log
+	// is (a copy, a segment after a rewind): not said to be elsewhere.
+	chainStart bool
+	more       bool   // the last read stopped before the end
+	status     string // (tmux) the process's own word: "busy", "idle", or "" when not known
+	skipping   bool   // in a line too long to keep, until its end
+	long       []byte // a line longer than a read, so far, its images' data left out (nil when not in one)
+	strip      b64Strip
+	ocCursor   int64 // (OpenCode) rows written since this are read next (unix ms)
+	ocCursorK  int   // (OpenCode) and, stopped within its millisecond, the last row read in it
+	ocCursorID string
+	noReaderAt time.Time // (OpenCode) when reading found no python3
+	sub        bool      // a subagent's own log (see apiConversationSubagent)
 }
 
 // newParser: a parser for the log read, a subagent's own as such (its
@@ -1692,6 +1780,10 @@ func (st *convoState) meta() convo.Meta {
 	if st.agent == "codex" {
 		name := st.log[strings.LastIndexByte(st.log, '/')+1:]
 		m.HistoryPartial = codexRolloutName.MatchString(name) && strings.Contains(name, "_")
+		if st.chainStart {
+			// (What came before it read too, from the logs it goes on from, to its start.)
+			m.HistoryPartial, m.Forked = false, false
+		}
 	}
 	return m
 }
@@ -2210,7 +2302,9 @@ func (s *Server) locateScan(ctx context.Context, sess *term.Session, st *convoSt
 		}
 		var refused bool
 		held := p != nil && p.agent == "codex" && p.log == "" // (its log, if any, its daemon's)
-		guessed, refused = s.daemonLog(p, l)
+		var took, sure bool
+		took, sure, refused = s.daemonLog(p, l)
+		guessed = took && !sure // (a copy told by what it is a copy of: not a guess)
 		// What the pane shows has the last word on which conversation it
 		// is at: a Codex that has begun another (/new), or resumed one,
 		// shows that one's words, as does one of two Codexes there that
@@ -2236,6 +2330,11 @@ func (s *Server) locateScan(ctx context.Context, sess *term.Session, st *convoSt
 				// is not told. Not read: what was learnt before stands.)
 				if log, sid, on, read := s.screenSays(ctx, sess, pane, p, l, p.log, st.screenLog); read {
 					st.screenNo, st.screenWeak = false, false
+					// (A copy told for sure shows what came before it, the
+					// original's words, as its own: that is no word on another.)
+					if sure && sid != "" && sid == l.forkOf[p.pid] {
+						log, sid = p.log, p.sid
+					}
 					if sid != "" && sid != st.screenSID {
 						if c := candAt(l, log, p.cwd); c == nil || on < s.screenEnoughFor(p, c, sid, l) {
 							st.screenWeak = true
@@ -2340,7 +2439,7 @@ func (st *convoState) adopt(sid, log, agent, reason string) {
 		st.sid, st.log, st.agent = sid, log, agent
 		st.parser = convo.New(agent)
 		st.offset, st.size, st.mtime, st.older, st.skipping, st.from = 0, -1, time.Time{}, false, false, 0
-		st.olderLog, st.olderChecked, st.hops, st.olderSeen = "", false, 0, nil
+		st.olderLog, st.olderChecked, st.hops, st.olderSeen, st.chainStart = "", false, 0, nil, false
 		st.grewAt = time.Time{} // (another log's: its own, from its first look)
 		st.long, st.strip, st.ocCursor, st.ocCursorK, st.ocCursorID = nil, b64Strip{}, 0, 0, ""
 	}
@@ -2392,7 +2491,7 @@ func (s *Server) readConvo(sess *term.Session, st *convoState) (more bool, err e
 			st.gen = convoGens.Add(1)
 			st.parser = st.newParser()
 			st.offset, st.older, st.skipping, st.from = 0, codexChains(st), false, 0
-			st.olderLog, st.olderChecked, st.hops, st.olderSeen = "", false, 0, nil
+			st.olderLog, st.olderChecked, st.hops, st.olderSeen, st.chainStart = "", false, 0, nil, false
 			st.long, st.strip = nil, b64Strip{}
 			if st.bind != nil {
 				st.parser.QueueSince(st.bind.started) // (as locateConvo says it)
@@ -2683,6 +2782,7 @@ func (s *Server) codexHop(c *sftplite.Client, st *convoState) (went bool, err er
 	}
 	b, ok := codexHistoryBase(head)
 	if !ok {
+		st.chainStart = st.hops > 0 // (its own start, reached from a log after it)
 		return false, nil
 	}
 	m := codexSegmentName.FindStringSubmatch(path.Base(log))
@@ -3062,9 +3162,7 @@ front() {
     kind=codex
     # (Codex, not run with exec (its arguments, its log's head): the
     # session's log is the one it has open and wrote last, as locating chose it.)
-    cs=$(tr '\0' '\001' <"/proc/$pid/cmdline" 2>/dev/null | awk 'BEGIN { RS = "\001" } NR == 1 { next } skip { skip = 0; next }
-      /^--$/ { exit } /^-/ { if ($0 ~ /^(-[cmpsaCi]|--(config|model|profile|sandbox|ask-for-approval|cd|image|add-dir|local-provider|remote|remote-auth-token-env|enable|disable))$/) skip = 1; next }
-      { print; exit }')
+    cs=$(tr '\0' '\001' <"/proc/$pid/cmdline" 2>/dev/null | awk -v want=sub '` + codexArgsAwk + `')
     case $cs in exec|e|exec-server|review|apply|a|login|logout|mcp|mcp-server|app-server|completion|sandbox|debug|cloud|features) return 1;; esac
     codex_fds "/proc/$pid"
     lg=$cxlog any=$cxany
@@ -4544,7 +4642,7 @@ func (s *Server) subagentAnswer(w http.ResponseWriter, r *http.Request, sess *te
 		st.gen = convoGens.Add(1)
 		st.parser = st.newParser()
 		st.offset, st.size, st.mtime, st.older, st.skipping, st.from = 0, -1, time.Time{}, false, false, 0
-		st.olderLog, st.olderChecked, st.hops, st.olderSeen = "", false, 0, nil
+		st.olderLog, st.olderChecked, st.hops, st.olderSeen, st.chainStart = "", false, 0, nil, false
 		st.long, st.strip = nil, b64Strip{}
 	}
 	more, err := s.readConvo(sess, st)
