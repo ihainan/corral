@@ -232,6 +232,7 @@ export function ConversationView({
   forkWhole,
   onDraft,
   compacting,
+  goal,
   retrying,
   reviewing,
 }: {
@@ -267,6 +268,7 @@ export function ConversationView({
   onForkAt?: (at: string | undefined) => void // (a copy of it up to the end of a turn can be started: cut before at, the next message typed; none, all of it)
   onDraft?: (text: string) => void // (words put in its composer, not sent: the session card's requests of the agent)
   compacting?: boolean // (its screen says it compacts the conversation: its log silent till done)
+  goal?: string // (a Codex's goal, as its footer last said it: "Pursuing goal (141K / 200K)")
   retrying?: { n: number; of: number; why?: string } | null // (a Codex's screen says its request failed and is tried again: its log silent meanwhile)
   reviewing?: string // (a Codex's approvals reviewer looks at this command now: its screen's word)
 }) {
@@ -1888,6 +1890,7 @@ export function ConversationView({
         {convo.status === 'ready' && convo.meta && (
           <Runs
             meta={convo.meta}
+            goal={convo.bind?.agent === 'codex' ? goal : undefined}
             active={active}
             mode={mode}
             model={model}
@@ -2438,6 +2441,22 @@ const MODES = ['default', 'acceptEdits', 'plan', 'auto', 'bypassPermissions', 'd
 // (One of none of these: OpenCode's agent — build, or one of the person's own — as its status line has it, capitalised.)
 const modeName = (m: string) => ((MODES as readonly string[]).includes(m) ? t(`convo.mode.${m}` as I18nKey) : m.charAt(0).toUpperCase() + m.slice(1))
 
+// A Codex's goal as its footer says it, in the page's words: how it goes,
+// and what it has used of its budget ("141K / 200K").
+function goalSaid(g: string): string {
+  const used = /\(([^)]*)\)/.exec(g)?.[1]?.replace(/\s*tokens$/, '') ?? ''
+  const how = /^Pursuing goal/i.test(g)
+    ? t('convo.goalChip.pursuing')
+    : /^Goal unmet/i.test(g)
+      ? t('convo.goalChip.unmet')
+      : /^Goal (?:complete|achieved|met)/i.test(g)
+        ? t('convo.goalChip.done')
+        : /^Goal paused/i.test(g)
+          ? t('convo.goalChip.paused')
+          : g.replace(/\s*\(.*$/, '')
+  return t('convo.goalChip', { how }) + (used ? ' · ' + used : '')
+}
+
 // Switching the permission mode from the page, to one picked from a menu
 // (Shift+Tab until it is there, on the host): now, what the last switch went
 // to (the log says it only with the next message); busy, one on its way.
@@ -2515,7 +2534,7 @@ const effortName = (e: string) => ((EFFORTS as readonly string[]).includes(e) ? 
 // (via, auth: where its requests go and how it signs in, as its process on
 // the host says — see convoBind. Shown only where that is not the model
 // maker's own door: the quiet case, which is most of them, says nothing.)
-function Runs({ meta, active, mode, model, effort, quota, via, auth }: { meta: ConvoMeta; active: boolean; mode?: ModeSwitch; model?: ModelSwitch; effort?: EffortSwitch; quota?: QuotaOf; via?: string; auth?: string }) {
+function Runs({ meta, goal, active, mode, model, effort, quota, via, auth }: { meta: ConvoMeta; goal?: string; active: boolean; mode?: ModeSwitch; model?: ModelSwitch; effort?: EffortSwitch; quota?: QuotaOf; via?: string; auth?: string }) {
   const [open, setOpen] = useState<false | 'ctx' | 'model' | 'effort' | 'mode'>(false) // (which of its pop-ups)
   // (Another agent bound meanwhile — the pane's program changed: its model and effort menus, of the one before, closed;
   // opened again, the list read is the new one's.)
@@ -2697,6 +2716,12 @@ function Runs({ meta, active, mode, model, effort, quota, via, auth }: { meta: C
             {shownMode}
           </span>
         ))}
+      {goal && (
+        // (A Codex's goal: how it goes and what it has used, as its footer says.)
+        <span className="convo-runs-item convo-runs-goal" title={goal}>
+          {goalSaid(goal)}
+        </span>
+      )}
       <span className="spacer" />
       {meta.branch && (
         <span className="convo-runs-item convo-runs-branch" title={t('convo.branch', { b: meta.branch })}>
@@ -5190,6 +5215,7 @@ const VERB_SAID: Record<Verb, { v: I18nKey; live: I18nKey }> = {
   task: { v: 'convo.v.task', live: 'convo.live.task' },
   ask: { v: 'convo.v.ask', live: 'convo.live.ask' },
   plan: { v: 'convo.v.plan', live: 'convo.live.plan' },
+  goal: { v: 'convo.v.goal', live: 'convo.live.goal' },
   wait: { v: 'convo.v.wait', live: 'convo.live.wait' },
   stop: { v: 'convo.v.stop', live: 'convo.live.stop' },
   page: { v: 'convo.v.page', live: 'convo.live.page' },

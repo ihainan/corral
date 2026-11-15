@@ -140,3 +140,22 @@ func (s *Server) codexPlanAsked(ctx context.Context, sess *term.Session, pane, s
 	text, d, _ := screenOf(res.Out)
 	return d == digest && codexPlanPrompt(text)
 }
+
+// codexGoalOnScreen: what Codex's footer says of its goal (0.167, at the
+// right of its status line: "Pursuing goal (141K / 200K)", "Goal unmet
+// (202K / 200K tokens)", "Goal complete"…), as said; "" where it says none.
+func codexGoalOnScreen(screen string) string {
+	lines := strings.Split(strings.TrimRight(screen, "\n"), "\n")
+	_, foot, footed, ok := codexInputSpan(lines)
+	if !ok || !footed {
+		return ""
+	}
+	for _, l := range lines[foot:] {
+		if m := codexGoalNote.FindStringSubmatch(l); m != nil {
+			return strings.TrimSpace(m[1])
+		}
+	}
+	return ""
+}
+
+var codexGoalNote = regexp.MustCompile(`(?:^|\s{2,}|… )((?:Pursuing goal|Goal [a-z]+)(?: \([^)]{1,40}\))?)\s*$`)

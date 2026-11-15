@@ -119,6 +119,8 @@ const COMPACT_QUIET = 15000
 const CODEX_LOOK = 5000
 // (How often a Codex's screen is looked at for "Implement this plan?" while its plan waits.)
 const PLAN_LOOK = 3000
+// (How often a Codex given a goal has its footer looked at for how the goal goes.)
+const GOAL_LOOK = 10000
 const CODEX_QUIET = 2000
 const COMPACT_UNTIL = 240000
 // Of each turn's end asked about (by its key): the looks left, what was
@@ -1779,6 +1781,8 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   const [compacting, setCompacting] = useState(false)
   const [retrying, setRetrying] = useState<{ n: number; of: number; why?: string } | null>(null)
   const [reviewing, setReviewing] = useState('')
+  // (A Codex's goal, as its footer last said it: kept till another look says otherwise, of this agent.)
+  const [goalNote, setGoalNote] = useState<{ g: string; bind: string } | null>(null)
   const compactNow = useRef({ changedAt: convo.changedAt, body: pressBody })
   compactNow.current = { changedAt: convo.changedAt, body: pressBody }
   // (Not while a tool it called runs, the long silences: it compacts only
@@ -1809,9 +1813,10 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       if (busy || document.hidden || quiet < (codex ? CODEX_QUIET : COMPACT_QUIET) || (quiet > COMPACT_UNTIL && seenAt !== at)) return
       busy = true
       // (for=busy: said apart from the suggestion's own looks, in the gateway's log; not read.)
-      api<{ compacting?: boolean; retrying?: { n: number; of: number; why?: string }; reviewing?: string }>('POST', `/api/sessions/${sid}/conversation/suggestion?for=busy`, compactNow.current.body(), { timeoutMs: PRESS_MS, signal: gone.signal })
+      api<{ compacting?: boolean; retrying?: { n: number; of: number; why?: string }; reviewing?: string; goal?: string }>('POST', `/api/sessions/${sid}/conversation/suggestion?for=busy`, compactNow.current.body(), { timeoutMs: PRESS_MS, signal: gone.signal })
         .then(
           (r) => {
+            if (live && codex) setGoalNote(r.goal ? { g: r.goal, bind: bindKey } : null)
             if (!live || compactNow.current.changedAt !== at) return
             seenAt = r.compacting || r.retrying || r.reviewing ? at : -1
             setCompacting(!!r.compacting)
@@ -1830,6 +1835,38 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       gone.abort()
     }
   }, [lookCompact, bindKey, sid, codex])
+  // (A Codex given a goal — its log says it set one —: its footer looked at
+  // now and then while shown, whatever it does, for how the goal goes; its
+  // log says nothing of that, 0.167. Its turns run on by themselves, the log
+  // never quiet: the work's own looks do not come.)
+  const goalSet = codex && convo.entries.some((e) => e.parts.some((p) => p.tool && (p.tool.name === 'create_goal' || p.tool.name === 'update_goal')))
+  const lookGoal = bound && goalSet && !!active
+  useEffect(() => {
+    if (!lookGoal) return
+    let live = true
+    let busy = false
+    const gone = new AbortController()
+    const look = () => {
+      if (busy || document.hidden) return
+      busy = true
+      api<{ goal?: string }>('POST', `/api/sessions/${sid}/conversation/suggestion?for=goal`, compactNow.current.body(), { timeoutMs: PRESS_MS, signal: gone.signal })
+        .then(
+          (r) => live && setGoalNote(r.goal ? { g: r.goal, bind: bindKey } : null),
+          () => {},
+        )
+        .finally(() => {
+          busy = false
+        })
+    }
+    look()
+    const timer = setInterval(look, GOAL_LOOK)
+    return () => {
+      live = false
+      clearInterval(timer)
+      gone.abort()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lookGoal, bindKey, sid])
   // A Codex's plan put to the person ("Implement this plan?", plan mode):
   // neither its title nor herdr says it waits, so its menu is looked for on
   // its screen while its log has a plan not answered and it is at rest; there,
@@ -2458,6 +2495,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       convo={convo}
       agent={agent}
       compacting={compacting}
+      goal={goalNote?.bind === bindKey ? goalNote.g : undefined}
       retrying={retrying}
       reviewing={reviewing}
       pending={panelOpen ? shownSent.map((p) => (p.state === 'waiting' && isCommand(p.text) ? { ...p, opened: true } : p)) : shownSent}

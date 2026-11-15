@@ -65,3 +65,17 @@ func TestCodexPlanPrompt(t *testing.T) {
 		}
 	}
 }
+
+// Its goal as its footer says it (0.167, real lines).
+func TestCodexGoalOnScreen(t *testing.T) {
+	for screen, want := range map[string]string{
+		"› Ask Codex to do anything\n\n  GPT-6.1-Sol high · ~/p · Ready · Context 100% left · 01a1df5d-de2b-7e52-9360-6067cb35bcfc      Goal unmet (202K / 200K tokens)\n  ← for agents · ? for shortcuts\n": "Goal unmet (202K / 200K tokens)",
+		"› Ask Codex to do anything\n\n  GPT-6.1-Sol high · ~/p · Working · Co… Pursuing goal (141K / 200K)\n":                                                                                               "Pursuing goal (141K / 200K)",
+		"› Ask Codex to do anything\n\n  GPT-6.1-Sol high · ~/p · Ready\n  ← for agents · ? for shortcuts\n":                                                                                                 "",
+		"› my Goal unmet (1K) words\n\n  GPT-6.1-Sol high · ~/p\n":                                                                                                                                           "",
+	} {
+		if got := codexGoalOnScreen(screen); got != want {
+			t.Errorf("%q: %q, want %q", screen[:40], got, want)
+		}
+	}
+}

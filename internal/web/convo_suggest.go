@@ -58,6 +58,9 @@ func (s *Server) suggestion(w http.ResponseWriter, ctx context.Context, sess *te
 		if review != "" {
 			out["reviewing"] = review
 		}
+		if g := codexGoalOnScreen(sgr.ReplaceAllString(string(res.Out), "")); g != "" {
+			out["goal"] = g // (its goal, as its footer says: its log says nothing of how it goes, 0.167)
+		}
 		if codexPlanPrompt(sgr.ReplaceAllString(string(res.Out), "")) {
 			out["plan_asked"] = true // (it asks whether to carry its plan out: answered from the page as any question)
 		}
