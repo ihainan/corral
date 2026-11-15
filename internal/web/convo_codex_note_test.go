@@ -1,6 +1,9 @@
 package web
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // Screens as a real Codex 0.167.2 drew them (cxaudit.py, 11-15).
 func TestCodexWorkNote(t *testing.T) {
@@ -28,5 +31,13 @@ func TestCodexWorkNote(t *testing.T) {
 		if compact != c.compact || (retry == nil) != (c.retry == nil) || (retry != nil && *retry != *c.retry) {
 			t.Errorf("%s: %v %+v", name, compact, retry)
 		}
+	}
+}
+
+// Its approvals reviewer at work (auto_review), a real screen (11-15).
+func TestCodexWorkNoteReview(t *testing.T) {
+	screen := "• Reviewing approval request (5s • esc to interrupt)\n  └ /usr/bin/zsh -lc \"printf 'hello\\n' > /home/u/outside.txt\"\n\n› Ask Codex to do anything\n\n  GPT-6.1-Sol high Fast · ~/p · Working\n"
+	if _, _, review := codexWorkNoteAll(screen); !strings.Contains(review, "outside.txt") {
+		t.Fatalf("review: %q", review)
 	}
 }

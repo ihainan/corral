@@ -76,7 +76,10 @@ const codexFootMax = 6
 // its hints ("? for shortcuts", "esc again to edit previous message"), its
 // notes ("⚠ 1 warning · f2 to view"), each the whole line but for what
 // stands at its right, two spaces off or more.
-var codexFooter = regexp.MustCompile(`^(?:[A-Za-z][\w./-]*(?: (?:default|minimal|low|medium|high|xhigh|max))? · (?:~|/).*|Context \d+% (?:left|used)(?: · .*)?|\? for shortcuts|esc again to edit previous message|ctrl \+ c again to quit|⚠ \d+ warnings? · f2 to view)(?:\s{2,}\S.*)?$`)
+// (Its model, its effort, its service tier where one is set ("Fast": 11-15,
+// the person's own), then its folder; "← for agents" before "? for
+// shortcuts" in a Codex that has agents to go to.)
+var codexFooter = regexp.MustCompile(`^(?:[A-Za-z][\w./-]*(?: (?:default|minimal|low|medium|high|xhigh|max|ultra))?(?: [A-Z][A-Za-z]+)? · (?:~|/).*|Context \d+% (?:left|used)(?: · .*)?|(?:← for agents · )?\? for shortcuts|esc again to edit previous message|ctrl \+ c again to quit|⚠ \d+ warnings? · f2 to view)(?:\s{2,}\S.*)?$`)
 
 // codexInputArea: what Codex's input holds — its last line beginning
 // "› " above its footer (the person's messages above begin so too: the

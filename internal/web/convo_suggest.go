@@ -48,12 +48,15 @@ func (s *Server) suggestion(w http.ResponseWriter, ctx context.Context, sess *te
 	if agent == "codex" {
 		// (A Codex: no suggestion of its own here; what it does that its log
 		// does not say — compacting, a request tried again.)
-		compacting, retry := codexWorkNote(sgr.ReplaceAllString(string(res.Out), ""))
+		compacting, retry, review := codexWorkNoteAll(sgr.ReplaceAllString(string(res.Out), ""))
 		if compacting {
 			out["compacting"] = true
 		}
 		if retry != nil {
 			out["retrying"] = retry
+		}
+		if review != "" {
+			out["reviewing"] = review
 		}
 		writeJSON(w, http.StatusOK, out)
 		return

@@ -206,3 +206,15 @@ func TestCodexIdleInput(t *testing.T) {
 		}
 	}
 }
+
+// A real Codex 0.167.2 of the person's config (service tier Fast, agents),
+// 11-15: its footer read so, its input idle.
+func TestCodexIdleInputFastTier(t *testing.T) {
+	screen := "• 已向 outside.txt 写入一行 hello。\n  Worked for 14s • 4:20 PM\n\n\n› Ask Codex to do anything\n\n  GPT-6.1-Sol high Fast · ~/tmp/cxlive/proj · Ready · Context 95% left · Fast · 回复 ok 两个字母 · Main [default]\n  ← for agents · ? for shortcuts\n"
+	if err := codexIdleInput(screen); err != nil {
+		t.Fatalf("idle: %v", err)
+	}
+	if err := codexIdleInput(strings.Replace(screen, "Ask Codex to do anything", "half typed", 1)); err != errDraft {
+		t.Fatalf("a draft: %v", err)
+	}
+}

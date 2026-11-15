@@ -31,6 +31,14 @@ type codexRetry struct {
 // that its log does not: compacting, or a request tried again (n of m, and
 // why); neither where its status line says other.
 func codexWorkNote(screen string) (compacting bool, retry *codexRetry) {
+	compacting, retry, _ = codexWorkNoteAll(screen)
+	return
+}
+
+// codexWorkNoteAll: codexWorkNote, and the command its approvals reviewer
+// looks at now ("• Reviewing approval request (5s …)", the command on the
+// line under it: approvals_reviewer = auto_review), "" none.
+func codexWorkNoteAll(screen string) (compacting bool, retry *codexRetry, review string) {
 	lines := strings.Split(strings.ReplaceAll(screen, "\r", ""), "\n")
 	// (Above its input box only — its last line beginning "›": what is in
 	// the box, typed or pasted, is no word of what it does.)
@@ -47,24 +55,27 @@ func codexWorkNote(screen string) (compacting bool, retry *codexRetry) {
 			continue
 		}
 		what := m[1]
+		under := ""
+		if i+1 < len(lines) {
+			if w, ok := strings.CutPrefix(strings.TrimSpace(lines[i+1]), "└ "); ok {
+				under = strings.TrimSpace(w)
+			}
+		}
 		if strings.HasPrefix(what, "Compacting context") {
-			return true, nil
+			return true, nil, ""
+		}
+		if what == "Reviewing approval request" {
+			return false, nil, clipRunes(under, 200)
 		}
 		if r := codexRetrying.FindStringSubmatch(what); r != nil {
 			n, _ := strconv.Atoi(r[1])
 			of, _ := strconv.Atoi(r[2])
 			if n < 1 || of < n {
-				return false, nil
+				return false, nil, ""
 			}
-			why := ""
-			if i+1 < len(lines) {
-				if w, ok := strings.CutPrefix(strings.TrimSpace(lines[i+1]), "└ "); ok {
-					why = clipRunes(strings.TrimSpace(w), 200)
-				}
-			}
-			return false, &codexRetry{N: n, Of: of, Why: why}
+			return false, &codexRetry{N: n, Of: of, Why: clipRunes(under, 200)}, ""
 		}
-		return false, nil
+		return false, nil, ""
 	}
-	return false, nil
+	return false, nil, ""
 }

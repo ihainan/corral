@@ -1731,15 +1731,21 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   // screen while it works with nothing new; forgotten at the log's next word.
   const [compacting, setCompacting] = useState(false)
   const [retrying, setRetrying] = useState<{ n: number; of: number; why?: string } | null>(null)
+  const [reviewing, setReviewing] = useState('')
   const compactNow = useRef({ changedAt: convo.changedAt, body: pressBody })
   compactNow.current = { changedAt: convo.changedAt, body: pressBody }
   // (Not while a tool it called runs, the long silences: it compacts only
   // between them.)
   const toolOut = useMemo(() => callOut(convo.entries), [convo.entries])
-  const lookCompact = bound && (!notClaude || codex) && !!active && working && !toolOut
+  const toolOutNow = useRef(toolOut)
+  toolOutNow.current = toolOut
+  // (A Codex's also while a call of its is out: its approvals reviewer looks
+  // at that call's command then — its screen's word, its log's none.)
+  const lookCompact = bound && (!notClaude || codex) && !!active && working && (!toolOut || codex)
   useEffect(() => {
     setCompacting(false)
     setRetrying(null)
+    setReviewing('')
   }, [convo.changedAt, bindKey, lookCompact])
   useEffect(() => {
     if (!lookCompact) return
@@ -1758,20 +1764,21 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       if (busy || document.hidden || quiet < (codex ? CODEX_QUIET : COMPACT_QUIET) || (quiet > COMPACT_UNTIL && seenAt !== at)) return
       busy = true
       // (for=busy: said apart from the suggestion's own looks, in the gateway's log; not read.)
-      api<{ compacting?: boolean; retrying?: { n: number; of: number; why?: string } }>('POST', `/api/sessions/${sid}/conversation/suggestion?for=busy`, compactNow.current.body(), { timeoutMs: PRESS_MS, signal: gone.signal })
+      api<{ compacting?: boolean; retrying?: { n: number; of: number; why?: string }; reviewing?: string }>('POST', `/api/sessions/${sid}/conversation/suggestion?for=busy`, compactNow.current.body(), { timeoutMs: PRESS_MS, signal: gone.signal })
         .then(
           (r) => {
             if (!live || compactNow.current.changedAt !== at) return
-            seenAt = r.compacting || r.retrying ? at : -1
+            seenAt = r.compacting || r.retrying || r.reviewing ? at : -1
             setCompacting(!!r.compacting)
             setRetrying(r.retrying && r.retrying.n > 0 ? r.retrying : null)
+            setReviewing(r.reviewing ?? '')
           },
           () => {},
         )
         .finally(() => {
           busy = false
         })
-    }, codex ? CODEX_LOOK : COMPACT_LOOK)
+    }, codex ? (toolOutNow.current ? CODEX_LOOK * 2 : CODEX_LOOK) : COMPACT_LOOK)
     return () => {
       live = false
       clearInterval(timer)
@@ -2354,6 +2361,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       agent={agent}
       compacting={compacting}
       retrying={retrying}
+      reviewing={reviewing}
       pending={panelOpen ? shownSent.map((p) => (p.state === 'waiting' && isCommand(p.text) ? { ...p, opened: true } : p)) : shownSent}
       ask={
         waits && replyTo ? (
