@@ -958,6 +958,9 @@ func (s *Server) convoBound(sess *term.Session, pane string, pid, start int64) (
 		return "", "", "busy"
 	}
 	defer st.mu.Unlock()
+	if st.bind != nil && st.bind.PID == pid && st.bind.Start == start && st.log == "" && st.reason == convoNoLog {
+		return "", "", "fresh" // (bound, with no log yet: its first message is to come)
+	}
 	if st.bind == nil || st.bind.PID != pid || st.bind.Start != start || st.log == "" || st.sid == "" {
 		return "", "", ""
 	}
@@ -3812,6 +3815,11 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 				reason = "busy"
 				writeError(w, http.StatusTooManyRequests, "busy", "its conversation is being read: try again in a moment")
 				return
+			case why == "fresh" && b.Session == convoNoSession && s.codexStillFresh(ctx, sess, socket, b.Pane, front.pid, front.start):
+				// (Read with no log, as the page shows it, and none begun since
+				// — its first message, from the page: 11-15, a Codex begun in
+				// the terminal could not be written to from the page at all.)
+				front.sid = convoNoSession
 			default:
 				// (Weak, none, or another's: agent_changed below — what is shown
 				// is checked anew, by the scan; nothing is typed by a log's age.)
@@ -4771,4 +4779,22 @@ func pressSlotWait(what string) time.Duration {
 		return 0
 	}
 	return 2 * time.Second
+}
+
+// codexStillFresh: pane's Codex (pid, start) has begun no conversation yet,
+// as a look begun now finds it (herdr: Codex's own word, Fresh); a tmux
+// pane's, as the conversation's read found it (the caller's convoBound).
+func (s *Server) codexStillFresh(ctx context.Context, sess *term.Session, socket, pane string, pid, start int64) bool {
+	if sess.Persistence != "herdr" {
+		return true
+	}
+	if socket == "" {
+		return false
+	}
+	panes, err := s.codexPanes.run(ctx, sess, socket, pane)
+	if err != nil {
+		return false
+	}
+	c, ok := panes[pane]
+	return ok && c.Fresh && !c.Several && c.PID == pid && c.Start == start
 }
