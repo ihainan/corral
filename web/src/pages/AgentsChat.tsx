@@ -714,7 +714,7 @@ const keptTitle = (titles: Titles, e: Entry): string | undefined => {
 // afterTs: the time of the log's last entry when it went; read anew (other
 // seqs), only a turn after that can be it.)
 // (wentSeen: when one found gone to a subagent was first shown, its note let go of WENT_SHOWN_MS after.)
-type Sent = ConvoPending & { bind: string; after: number; gen: number; at: number; was?: string; afterTs?: string; beforeQueued?: number[]; looked?: boolean; wentSeen?: number; sinceAt?: number /* (the agent's state's time as the gateway said it when sent) */ }
+type Sent = ConvoPending & { bind: string; after: number; gen: number; at: number; was?: string; afterTs?: string; beforeQueued?: number[]; looked?: boolean; wentSeen?: number; sinceAt?: number /* (the agent's state's time as the gateway said it when sent) */; relook?: number /* (looked at again: a queued one, its turn over) */ }
 
 // What was sent and not seen in the log yet, as this tab kept it (the page
 // reloaded meanwhile): looked for again in all of the log, by its time as
@@ -1494,8 +1494,9 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   // agent and back builds it anew, and the same read must not go twice.)
   useEffect(() => {
     for (const p of sent) {
-      if (p.look !== 'looking' || lookedAt.has(p.id) || !convo.bind || !ofThis(p.bind)) continue
-      lookedAt.add(p.id)
+      const lk = p.id * 10 + (p.relook ?? 0) // (each look of it once)
+      if (p.look !== 'looking' || lookedAt.has(lk) || !convo.bind || !ofThis(p.bind)) continue
+      lookedAt.add(lk)
       if (lookedAt.size > 200) for (const q of [...lookedAt].slice(0, 100)) lookedAt.delete(q)
       const bind = bindKey // (the answer is of that conversation, not of whichever is open when it comes)
       const after = (f: (q: Sent) => Sent) => setSent((ps) => ps.map((q) => (q.id === p.id && q.bind === bind ? f(q) : q)))
@@ -1507,7 +1508,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
               ? { ...q, look: { went: r.went } }
               : // (Its words, on the screen, in the box of this conversation.)
                 r.known && r.waiting && (!r.view || r.view === 'main')
-                ? { ...q, look: undefined, state: 'stuck' as const }
+                ? { ...q, look: undefined, state: 'stuck' as const, queued: false }
                 : { ...q, look: undefined },
           ),
         )
@@ -1515,6 +1516,18 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     }
   }, [sent, convo.bind, sid, bindKey])
 
+  // (A Codex's message queued after its turn, the turn over — or stopped, which
+  // puts what was queued back into its input, not sent —: its input looked at
+  // again; its words there, said so, Enter a tap away.)
+  const wasWorking = useRef(working)
+  useEffect(() => {
+    const ended = wasWorking.current && !working
+    wasWorking.current = working
+    if (!ended || !codex) return
+    const tm = setTimeout(() => setSent((ps) => ps.map((p) => (p.queued && p.state === 'waiting' && ofThis(p.bind) ? { ...p, look: 'looking' as const, relook: (p.relook ?? 0) + 1 } : p))), 1500)
+    return () => clearTimeout(tm)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [working, codex])
   const shownSent = sent.filter((p) => ofThis(p.bind))
   // Gone to a subagent: when it is first shown (this agent's view in front,
   // the page not hidden), and let go of WENT_SHOWN_MS after.
