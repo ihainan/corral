@@ -79,7 +79,7 @@ func (s *Server) apiNewAgent(w http.ResponseWriter, r *http.Request) {
 		Key      string `json:"key"`
 	}
 	if err := readJSON(r, &b); err != nil || !agentKinds[b.Kind] || !newAgentKey.MatchString(b.Key) ||
-		(b.Resume != "" && (!sessionUUID.MatchString(b.Resume) || b.Kind != "claude" && !(b.Kind == "codex" && b.Fork))) ||
+		(b.Resume != "" && (!sessionUUID.MatchString(b.Resume) || b.Kind != "claude" && b.Kind != "codex")) ||
 		(b.Fork && b.Resume == "") || (b.At != "" && (!b.Fork || b.Kind != "claude" || !sessionUUID.MatchString(b.At))) ||
 		(b.Worktree && (worktreeFlag[b.Kind] == "" || b.Resume != "")) {
 		writeError(w, http.StatusBadRequest, "bad_request", "folder, kind and key are required")
@@ -148,7 +148,8 @@ func (s *Server) newAgent(ctx context.Context, w http.ResponseWriter, sess *term
 	// A copy: of the session's log found by its id, in the folder it began
 	// in (not the one asked for: the copy is of that folder's session).
 	var src string
-	if how.fork {
+	// (A Codex's taken up: in the folder it began in, as its copy's is.)
+	if how.fork || (kind == "codex" && how.resume != "") {
 		var err error
 		src, dir, err = s.forkSource(ctx, sess, kind, how.resume)
 		if errors.Is(err, errForkNotFound) {
@@ -260,6 +261,8 @@ func agentStartCmd(socket, pane, name, kind string, how agentStart) string {
 	switch {
 	case how.resume != "" && how.fork && kind == "codex":
 		args = append(args, "fork", how.resume)
+	case how.resume != "" && kind == "codex":
+		args = append(args, "resume", how.resume) // (taken up: codex resume <id>)
 	case how.resume != "" && how.fork:
 		args = append(args, "--resume", how.resume, "--fork-session")
 	case how.resume != "":

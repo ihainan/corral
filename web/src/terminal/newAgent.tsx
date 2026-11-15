@@ -104,7 +104,8 @@ export function NewAgentDialog({ sessions, onDone, onOpen, onClose }: { sessions
     setOldsBusy(true)
     setError('')
     try {
-      const r = await api<{ sessions: Old[]; partial?: boolean }>('GET', `/api/sessions/${sess.id}/claude-sessions?` + new URLSearchParams({ dir }))
+      // (Claude Code's of the folder, from its project's logs; Codex's, from its own database.)
+      const r = await api<{ sessions: Old[]; partial?: boolean }>('GET', `/api/sessions/${sess.id}/${kind === 'codex' ? 'codex' : 'claude'}-sessions?` + new URLSearchParams({ dir }))
       if (n === asked.n) setOlds(r.sessions)
     } catch (e) {
       if (n === asked.n) setError(e instanceof ApiError && e.code === 'bad_folder' ? t('newAgent.badFolder') : errorText(e))
@@ -118,7 +119,7 @@ export function NewAgentDialog({ sessions, onDone, onOpen, onClose }: { sessions
     setBusy(true)
     setError('')
     try {
-      const body = { dir: dir.trim(), kind, label: label.trim(), resume: kind === 'claude' ? resume : '', fork: kind === 'claude' && copying, worktree: inWorktree }
+      const body = { dir: dir.trim(), kind, label: label.trim(), resume: kind !== 'opencode' ? resume : '', fork: kind !== 'opencode' && copying, worktree: inWorktree }
       const r = await api<{ pane: string }>('POST', `/api/sessions/${sess.id}/agents`, { ...body, key: keyOf(sess.id + '\n' + JSON.stringify(body)) }, { timeoutMs: 90000 })
       keepDir(dir.trim())
       local.set(KIND, kind)
@@ -185,7 +186,7 @@ export function NewAgentDialog({ sessions, onDone, onOpen, onClose }: { sessions
           <span>{t('newAgent.kind')}</span>
           <div className="seg seg-marks" role="radiogroup">
             {(['claude', 'codex', 'opencode'] as const).map((k) => (
-              <button key={k} type="button" role="radio" aria-checked={kind === k} aria-pressed={kind === k} onClick={() => (setKind(k), k !== 'claude' && setResume(''))}>
+              <button key={k} type="button" role="radio" aria-checked={kind === k} aria-pressed={kind === k} onClick={() => (k !== kind && (asked.n++, setOlds(null), setResume(''), setOldsBusy(false)), setKind(k))}>
                 <AgentGlyph program={k} />
                 {t(`newAgent.kind.${k}`)}
               </button>
@@ -205,9 +206,9 @@ export function NewAgentDialog({ sessions, onDone, onOpen, onClose }: { sessions
           <span>{t('newAgent.label')}</span>
           <input className="input" value={label} maxLength={40} placeholder={t('newAgent.labelHint')} onChange={(e) => setLabel(e.target.value)} />
         </label>
-        {/* (Not Claude Code: going on with an old conversation is not offered here — said, not just missing.) */}
-        {kind !== 'claude' && <p className="hint">{t(kind === 'codex' ? 'newAgent.noResumeCodex' : 'newAgent.noResumeOpencode')}</p>}
-        {kind === 'claude' && (
+        {/* (OpenCode: going on with an old conversation is not offered here — said, not just missing.) */}
+        {kind === 'opencode' && <p className="hint">{t('newAgent.noResumeOpencode')}</p>}
+        {kind !== 'opencode' && (
           <div className="field new-agent-old">
             {olds === null ? (
               <button type="button" className="link-btn" onClick={() => void listOld()} disabled={oldsBusy || !dir.trim()}>

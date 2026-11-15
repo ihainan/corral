@@ -154,7 +154,22 @@ func (s *Server) forkCheckAt(ctx context.Context, sess *term.Session, src string
 // each found (at most two).
 func forkFindCommand(kind, id string) string {
 	if kind == "codex" {
-		return `find "${CODEX_HOME:-$HOME/.codex}/sessions" -mindepth 4 -maxdepth 4 -type f -name ` + sshx.QuoteShell("rollout-*-"+id+".jsonl") + ` 2>/dev/null | head -n 2`
+		// (In the account's home, and those its running Codexes were given:
+		// one set in a shell's profile, which this command does not read.)
+		return `homes="${CODEX_HOME:-$HOME/.codex}"
+for d in /proc/[0-9]*; do
+  [ -O "$d" ] && [ "$(cat "$d/comm" 2>/dev/null)" = codex ] || continue
+  h=$(tr '\0' '\n' <"$d/environ" 2>/dev/null | sed -n 's/^CODEX_HOME=//p' | head -n 1)
+  [ -n "$h" ] || continue
+  case "
+$homes
+" in *"
+$h
+"*) ;; *) homes="$homes
+$h";; esac
+done
+printf '%s
+' "$homes" | head -n 8 | while IFS= read -r h; do find "$h/sessions" -mindepth 4 -maxdepth 4 -type f -name ` + sshx.QuoteShell("rollout-*-"+id+".jsonl") + ` 2>/dev/null; done | head -n 2`
 	}
 	return `find "$HOME/.claude/projects" -mindepth 2 -maxdepth 2 -type f -name ` + sshx.QuoteShell(id+".jsonl") + ` 2>/dev/null | head -n 2`
 }

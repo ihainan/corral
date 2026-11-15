@@ -107,7 +107,6 @@ func TestForkRequests(t *testing.T) {
 	for name, b := range map[string]map[string]any{
 		"fork without a session":   {"kind": "claude", "fork": true},
 		"fork of opencode":         {"kind": "opencode", "resume": u, "fork": true},
-		"codex taken up, not copy": {"kind": "codex", "resume": u, "dir": "/tmp"},
 		"at without fork":          {"kind": "claude", "resume": u, "at": u, "dir": "/tmp"},
 		"at of codex":              {"kind": "codex", "resume": u, "fork": true, "at": u},
 		"at not a uuid":            {"kind": "claude", "resume": u, "fork": true, "at": "x"},
@@ -117,4 +116,6 @@ func TestForkRequests(t *testing.T) {
 		b["key"] = "k-" + strconv.Itoa(len(name)) + "-abcdefgh"
 		mustStatus(t, admin.do("POST", path, b), 400, name)
 	}
+	// (A Codex's taken up, not copied: asked for, looked for on the host — none there here.)
+	mustStatus(t, admin.do("POST", path, map[string]any{"kind": "codex", "resume": u, "dir": "/tmp", "key": "k-codex-resume-abcdefgh"}), 404, "codex taken up")
 }
