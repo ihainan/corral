@@ -127,8 +127,15 @@ export function NewAgentDialog({ sessions, onDone, onOpen, onClose }: { sessions
       local.set(KIND, kind)
       const said = !resume || copying ? first.trim() : ''
       if (r.tmux) {
-        // (A tmux session of its own: a terminal opened on it here, gone to as any other.)
-        const opened = await api<SessionInfo>('POST', '/api/sessions', { host_id: sess.host_id, cols: 160, rows: 50, open: { kind: 'tmux', name: r.tmux } })
+        // (A tmux session of its own: a terminal opened on it here, gone to as any other.
+        // One not opened — a password asked for each time, say —: it runs all the same, said so.)
+        let opened: SessionInfo
+        try {
+          opened = await api<SessionInfo>('POST', '/api/sessions', { host_id: sess.host_id, cols: 160, rows: 50, open: { kind: 'tmux', name: r.tmux } })
+        } catch (e) {
+          setError(t('newAgent.tmuxNotOpened', { name: r.tmux, why: errorText(e) }))
+          return
+        }
         onDone(opened, '', said)
         return
       }

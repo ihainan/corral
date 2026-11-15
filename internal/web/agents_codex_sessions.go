@@ -46,7 +46,7 @@ func codexSessionsCommand(dir string) string {
 exec python3 -I -c ` + sshx.QuoteShell(codexSessionsScript) + ` ` + sshx.QuoteShell(dir)
 }
 
-const codexSessionsScript = `import json, os, re, sqlite3, sys
+const codexSessionsScript = `import json, os, re, sqlite3, sys, urllib.parse
 d = sys.argv[1]
 if d == '~' or d.startswith('~/'):
     d = os.path.expanduser(d)
@@ -89,7 +89,7 @@ for home in homes[:8]:
     if not best:
         continue
     try:
-        con = sqlite3.connect('file:' + best + '?mode=ro', uri=True, timeout=2)
+        con = sqlite3.connect('file:' + urllib.parse.quote(best) + '?mode=ro', uri=True, timeout=2)
         for r in con.execute("SELECT id, name, title, first_user_message, updated_at FROM threads WHERE cwd = ? AND source IN ('cli', 'vscode') AND COALESCE(thread_source, '') NOT IN ('guardian_review', 'subagent') AND COALESCE(archived, 0) = 0 ORDER BY updated_at DESC LIMIT 50", (d,)):
             if r[0] in seen:
                 continue

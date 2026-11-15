@@ -49,11 +49,12 @@ func (s *Server) forkSource(ctx context.Context, sess *term.Session, kind, id st
 	if err != nil {
 		return "", "", err
 	}
-	found := strings.Fields(strings.TrimSpace(string(out)))
-	if len(found) != 1 || strings.ContainsAny(string(out), "\r") {
+	// (One a line: a path may have spaces in it — review b2-6.)
+	found := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
+	if len(found) != 1 || found[0] == "" || !strings.HasPrefix(found[0], "/") || strings.ContainsAny(string(out), "\r") {
 		return "", "", errForkNotFound // (none, or two alike: not guessed between)
 	}
-	src = strings.TrimSpace(string(out))
+	src = found[0]
 	err = s.withSFTP(ctx, sess, convoReadLimit, func(c *sftplite.Client) error {
 		// (Codex's first line has its instructions in it: tens of KB.)
 		n := sessionHead
@@ -155,21 +156,19 @@ func (s *Server) forkCheckAt(ctx context.Context, sess *term.Session, src string
 func forkFindCommand(kind, id string) string {
 	if kind == "codex" {
 		// (In the account's home, and those its running Codexes were given:
-		// one set in a shell's profile, which this command does not read.)
-		return `homes="${CODEX_HOME:-$HOME/.codex}"
+		// one set in a shell's profile, which this command does not read;
+		// each by its real path, one home however written — review b2-5.)
+		return `nl='
+'
+homes=$(cd "${CODEX_HOME:-$HOME/.codex}" 2>/dev/null && pwd -P)
 for d in /proc/[0-9]*; do
   [ -O "$d" ] && [ "$(cat "$d/comm" 2>/dev/null)" = codex ] || continue
   h=$(tr '\0' '\n' <"$d/environ" 2>/dev/null | sed -n 's/^CODEX_HOME=//p' | head -n 1)
   [ -n "$h" ] || continue
-  case "
-$homes
-" in *"
-$h
-"*) ;; *) homes="$homes
-$h";; esac
+  h=$(cd "$h" 2>/dev/null && pwd -P) || continue
+  case "$nl$homes$nl" in *"$nl$h$nl"*) ;; *) homes="$homes$nl$h";; esac
 done
-printf '%s
-' "$homes" | head -n 8 | while IFS= read -r h; do find "$h/sessions" -mindepth 4 -maxdepth 4 -type f -name ` + sshx.QuoteShell("rollout-*-"+id+".jsonl") + ` 2>/dev/null; done | head -n 2`
+printf '%s\n' "$homes" | grep -v '^$' | head -n 8 | while IFS= read -r h; do find "$h/sessions" -mindepth 4 -maxdepth 4 -type f -name ` + sshx.QuoteShell("rollout-*-"+id+".jsonl") + ` 2>/dev/null; done | head -n 2`
 	}
 	return `find "$HOME/.claude/projects" -mindepth 2 -maxdepth 2 -type f -name ` + sshx.QuoteShell(id+".jsonl") + ` 2>/dev/null | head -n 2`
 }

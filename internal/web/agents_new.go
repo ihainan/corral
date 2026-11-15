@@ -222,14 +222,21 @@ func (s *Server) newAgent(ctx context.Context, w http.ResponseWriter, sess *term
 	// named after it, in the folder; the page opens a terminal on it.
 	if socket == "" {
 		name := agentName(label, kind)
-		out, err := sshx.Output(ctx, sess.Client(), agentTmuxCmd(name, dir, kind, how), 4<<10)
-		if err != nil {
+		// (A Codex's conversation taken up or copied: in the home its log is in.)
+		home := ""
+		if kind == "codex" && src != "" {
+			if i := strings.Index(src, "/sessions/"); i > 0 {
+				home = src[:i]
+			}
+		}
+		out, err := sshx.Output(ctx, sess.Client(), agentTmuxCmd(name, dir, kind, home, how), 8<<10)
+		if err != nil || !strings.HasSuffix(strings.TrimSpace(string(out)), "started") {
 			keep = false
-			why := strings.TrimSpace(string(out))
-			if why == "" {
+			why := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(string(out)), "exited"))
+			if why == "" && err != nil {
 				why = err.Error()
 			}
-			writeError(w, http.StatusUnprocessableEntity, "start_failed", truncate(why, 300))
+			writeError(w, http.StatusUnprocessableEntity, "start_failed", truncate(maskSecrets(why), 600))
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"tmux": name})
@@ -316,16 +323,33 @@ func agentArgs(kind string, how agentStart) []string {
 
 // agentTmuxCmd: a tmux session of its own (name) on the host, in dir,
 // running the agent of kind through the account's login shell (its
-// profile read: where its programs are, its CODEX_HOME), every value
-// quoted. Prints nothing; fails where tmux does (a name taken meanwhile).
-func agentTmuxCmd(name, dir, kind string, how agentStart) string {
+// profile read: where its programs are, its CODEX_HOME; home, where given:
+// the CODEX_HOME the conversation taken up is in), every value quoted.
+// Its pane kept a moment if the agent exits at once: then what it said is
+// printed after "exited" and the session closed, exit 3 (a tmux session
+// made is no agent started — review b2-4). "started" otherwise.
+func agentTmuxCmd(name, dir, kind, home string, how agentStart) string {
 	q := sshx.QuoteShell
 	run := "exec " + q(kind)
+	if home != "" {
+		run = "CODEX_HOME=" + q(home) + " " + run
+	}
 	for _, a := range agentArgs(kind, how) {
 		run += " " + q(a)
 	}
 	inner := `exec "${SHELL:-/bin/sh}" -lc ` + q(run)
-	return `PATH="$HOME/.local/bin:$HOME/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH" tmux new-session -d -s ` + q(name) + ` -c ` + q(dir) + ` ` + q(inner) + ` 2>&1`
+	t := q("=" + name + ":") // (that session exactly, its window: options and panes are a window's)
+	return `PATH="$HOME/.local/bin:$HOME/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+tmux new-session -d -s ` + q(name) + ` -c ` + q(dir) + ` ` + q(inner) + ` \; set-option -t ` + t + ` remain-on-exit on 2>&1 || exit 1
+sleep 2
+if [ "$(tmux list-panes -t ` + t + ` -F '#{pane_dead}' 2>/dev/null | head -n 1)" != 0 ]; then
+  echo exited
+  tmux capture-pane -p -t ` + t + ` 2>/dev/null | grep -v '^$' | tail -n 8
+  tmux kill-session -t ` + q("="+name) + ` 2>/dev/null
+  exit 3
+fi
+tmux set-option -u -t ` + t + ` remain-on-exit 2>/dev/null
+echo started`
 }
 
 // startAgent runs herdr's own `agent start` on the host, against the

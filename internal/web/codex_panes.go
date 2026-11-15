@@ -90,7 +90,7 @@ exec python3 -I -c ` + sshx.QuoteShell(codexPanesScript) + ` ` + sshx.QuoteShell
 // state_<n>.sqlite of its CODEX_HOME, read only; the log, the one it has
 // open, else the database's rollout_path, else the newest of
 // sessions/*/*/*/rollout-*-<thread>.jsonl.)
-const codexPanesScript = `import glob, json, os, re, sqlite3, subprocess, sys
+const codexPanesScript = `import glob, json, os, re, sqlite3, subprocess, sys, urllib.parse
 sock = sys.argv[1]
 endpoint_sh = sys.argv[2]  # (codex_ep and what it uses: the scan's own, run for each)
 known = set(sys.argv[3].split(',')) if len(sys.argv) > 3 and sys.argv[3] else set()
@@ -186,7 +186,7 @@ def con_of(home):
         if m and int(m.group(1)) > n:
             best, n = os.path.join(home, name), int(m.group(1))
     try:
-        dbs[home] = sqlite3.connect('file:' + best + '?mode=ro', uri=True, timeout=2) if best else None
+        dbs[home] = sqlite3.connect('file:' + urllib.parse.quote(best) + '?mode=ro', uri=True, timeout=2) if best else None
     except sqlite3.Error:
         dbs[home] = None
     return dbs[home]

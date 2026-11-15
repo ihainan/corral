@@ -63,24 +63,55 @@ func TestAgentTmuxCmd(t *testing.T) {
 		}
 	}
 	// (tmux: its last argument, the shell command, run as tmux runs it — sh -c.)
-	write("tmux", `printf 'tmux:%s\n' "$@" >>"$LOG"; for a; do last=$a; done; exec sh -c "$last"`)
+	// (new-session: its shell command, the argument before ";", run as tmux runs it — sh -c; its pane alive.)
+	write("tmux", `printf 'tmux:%s\n' "$@" >>"$LOG"
+case $1 in
+new-session) prev=; for a; do [ "$a" = ";" ] && break; prev=$a; done; sh -c "$prev" ;;
+list-panes) echo 0 ;;
+esac`)
 	write("fakeshell", `printf 'shell:%s\n' "$@" >>"$LOG"; [ "$1" = -lc ] && exec sh -c "$2"`)
-	write("codex", `printf 'codex:%s\n' "$@" >>"$LOG"`)
+	write("codex", `printf 'codex:%s\n' "$@" >>"$LOG"; printf 'home:%s\n' "$CODEX_HOME" >>"$LOG"`)
 	dir := "/w/it's my proj"
-	cmd := agentTmuxCmd("fix-tests-abcde", dir, "codex", agentStart{resume: "01a1df42-8f07-7d43-b8b7-c6bad45f5528"})
+	cmd := agentTmuxCmd("fix-tests-abcde", dir, "codex", "/w/codex home", agentStart{resume: "01a1df42-8f07-7d43-b8b7-c6bad45f5528"})
 	c := exec.Command("sh", "-c", cmd)
 	c.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"), "SHELL="+filepath.Join(bin, "fakeshell"), "LOG="+logf, "HOME="+bin)
-	if out, err := c.CombinedOutput(); err != nil {
+	out, err := c.CombinedOutput()
+	if err != nil || !strings.HasSuffix(strings.TrimSpace(string(out)), "started") {
 		t.Fatal(err, string(out))
 	}
 	b, _ := os.ReadFile(logf)
 	got := string(b)
-	for _, want := range []string{"tmux:new-session\ntmux:-d\ntmux:-s\ntmux:fix-tests-abcde\ntmux:-c\ntmux:" + dir + "\n", "shell:-lc\n", "codex:resume\ncodex:01a1df42-8f07-7d43-b8b7-c6bad45f5528\n"} {
+	for _, want := range []string{"tmux:new-session\ntmux:-d\ntmux:-s\ntmux:fix-tests-abcde\ntmux:-c\ntmux:" + dir + "\n", "shell:-lc\n", "codex:resume\ncodex:01a1df42-8f07-7d43-b8b7-c6bad45f5528\n", "tmux:remain-on-exit\n", "home:/w/codex home\n"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("%q not in:\n%s", want, got)
 		}
 	}
-	if !strings.Contains(agentTmuxCmd("x", "/w/p", "claude", agentStart{}), "--settings") {
+	if !strings.Contains(agentTmuxCmd("x", "/w/p", "claude", "", agentStart{}), "--settings") {
 		t.Error("Claude Code's question hook not given")
+	}
+}
+
+// A Codex conversation's log found once in a home however written (its
+// default with a slash at its end), its path with a space in it.
+func TestForkFindCodexHomes(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "codex home")
+	id := "01a1df42-8f07-7d43-b8b7-c6bad45f5528"
+	day := filepath.Join(home, "sessions", "2026", "11", "15")
+	if err := os.MkdirAll(day, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	log := filepath.Join(day, "rollout-2026-11-15T10-00-00-"+id+".jsonl")
+	if err := os.WriteFile(log, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c := exec.Command("sh", "-c", forkFindCommand("codex", id))
+	c.Env = append(os.Environ(), "CODEX_HOME="+home+"/")
+	out, err := c.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	real, _ := filepath.EvalSymlinks(log)
+	if got := strings.TrimRight(string(out), "\n"); got != real {
+		t.Fatalf("%q, want %q", got, real)
 	}
 }
