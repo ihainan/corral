@@ -29,7 +29,7 @@ import { ackBg, answeredHerdr, expectSession, paneWaits, waitingTitle, isCodex, 
 import { type RowCmds } from '../terminal/agentOrder'
 import { conversationReadable, prefetchConversation } from '../terminal/conversation'
 import { holdTermMode, tmuxKey } from '../terminal/chatSend'
-import { isCommand, pairSent, sameMessage, type Submission } from '../terminal/sentSeen'
+import { isCommand, pairSent, sameMessage, squeezed, type Submission } from '../terminal/sentSeen'
 import { viewRefusal } from '../terminal/sendView'
 import { agentKey, sessionWhich } from '../terminal/sessionName'
 import { agentMark } from '../terminal/agentIcons'
@@ -1456,8 +1456,16 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       }
     }
     if (u.size > 200) for (const q of [...u].sort((x, y) => Math.abs(x) - Math.abs(y)).slice(0, 100)) u.delete(q)
+    const gone = new Set(found.map((f) => f.p.id))
+    // (Put back in its input together, sent by one Enter as one message: the
+    // others in it went too, whichever of them it was paired with — the log
+    // read before the Enter's answer came, the first by its own words.)
+    for (const { p, s } of found) {
+      if (!p.unqueued) continue
+      const whole = squeezed(s.text)
+      for (const q of mine) if (q.unqueued && ofThis(q.bind) && !gone.has(q.id) && whole.includes(squeezed(q.text))) gone.add(q.id)
+    }
     if (found.length || changed) {
-      const gone = new Set(found.map((f) => f.p.id))
       setSent(() => mine.filter((p) => !gone.has(p.id)))
     }
   }, [convo.entries, convo.queued, convo.gen, convo.status, sent, bindKey, queueShown])
@@ -1499,7 +1507,10 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       lookedAt.add(lk)
       if (lookedAt.size > 200) for (const q of [...lookedAt].slice(0, 100)) lookedAt.delete(q)
       const bind = bindKey // (the answer is of that conversation, not of whichever is open when it comes)
-      const after = (f: (q: Sent) => Sent) => setSent((ps) => ps.map((q) => (q.id === p.id && q.bind === bind ? f(q) : q)))
+      // (Only the look it answers: an older one answering late, after another
+      // was asked or its fate known, changes nothing — review p14-3.)
+      const relook = p.relook ?? 0
+      const after = (f: (q: Sent) => Sent) => setSent((ps) => ps.map((q) => (q.id === p.id && q.bind === bind && (q.relook ?? 0) === relook && q.state === 'waiting' ? f(q) : q)))
       api<{ waiting: boolean; known: boolean; view?: string; went?: ConvoWent | null }>('POST', `/api/sessions/${sid}/conversation/sent-missing`, { ...pressBody(), text: p.text, ago: Date.now() - p.at }, { timeoutMs: PRESS_MS })
         .then((r) =>
           after((q) =>
@@ -1519,11 +1530,14 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   // (A Codex's message queued after its turn, the turn over — or stopped, which
   // puts what was queued back into its input, not sent —: its input looked at
   // again; its words there, said so, Enter a tap away.)
-  const wasWorking = useRef(working)
+  // (Shown first not at work: looked at too — stopped while another agent was
+  // shown, this page was not here to see it end — review p14-2.)
+  const wasWorking = useRef(true)
   useEffect(() => {
+    if (!codex) return // (not yet known a Codex: as if not yet shown)
     const ended = wasWorking.current && !working
     wasWorking.current = working
-    if (!ended || !codex) return
+    if (!ended) return
     const tm = setTimeout(() => setSent((ps) => ps.map((p) => (p.queued && p.state === 'waiting' && ofThis(p.bind) ? { ...p, look: 'looking' as const, relook: (p.relook ?? 0) + 1 } : p))), 1500)
     return () => clearTimeout(tm)
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2574,11 +2588,24 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       onEnter={async (id) => {
         const p = sent.find((q) => q.id === id)
         if (!p) return false
-        const r = await api<{ pressed: boolean }>('POST', `/api/sessions/${sid}/conversation/sent-enter`, { ...pressBody(), text: p.text }, { timeoutMs: PRESS_MS })
+        const enter = (text: string) => api<{ pressed: boolean }>('POST', `/api/sessions/${sid}/conversation/sent-enter`, { ...pressBody(), text }, { timeoutMs: PRESS_MS })
+        // (Several queued, their turn stopped: Codex puts them all back in its
+        // input, one after another, one message now — Enter sends them as one.
+        // Asked for as that, the box holding all of them and nothing else; else
+        // this one alone, as the box may hold it, the others taken out there.)
+        const group = p.unqueued ? sent.filter((q) => q.unqueued && q.state === 'stuck' && q.bind === p.bind).sort((a, b) => a.id - b.id) : []
+        const all = group.length > 1 ? group.map((q) => q.text).join('\n') : ''
+        let r = all ? await enter(all) : await enter(p.text)
+        const joined = !!all && r.pressed
+        if (all && !r.pressed) r = await enter(p.text)
         if (r.pressed) {
-          // (Waited for in the log again, as when it was sent.)
+          // (Waited for in the log again, as when it was sent: all of them, as the one they now are.)
           lookedAt.delete(id * 10 + (p.relook ?? 0))
-          setSent((ps) => ps.map((q) => (q.id === id ? { ...q, state: 'waiting' as const, look: undefined, looked: false, quiet: false, at: Date.now() } : q)))
+          const others = new Set(joined ? group.filter((q) => q.id !== id).map((q) => q.id) : [])
+          const shown = joined ? group.map((q) => q.shown ?? q.text).join('\n') : undefined
+          setSent((ps) =>
+            ps.flatMap((q) => (others.has(q.id) ? [] : q.id === id ? [{ ...q, ...(joined ? { text: all, shown } : {}), state: 'waiting' as const, look: undefined, looked: false, quiet: false, at: Date.now() }] : [q])),
+          )
           // (Read now and a little later, as a send is: an answer quick enough
           // may come and go between two of herdr's words, none to wake a read.)
           convo.refresh()
