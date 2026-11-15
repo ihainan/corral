@@ -237,6 +237,7 @@ export interface MenuItem {
   title?: string
   checked?: boolean // an on/off one (a menuitemcheckbox): on or not
   hint?: string // a line under it, where all can read it (a touch screen shows no title): why it is off, say
+  keys?: string[] // the page's keys that do the same, each in a box at its end (not on a touch screen: no keys there)
   group?: string // a small heading over it: the first of a group of items of one kind
 }
 
@@ -309,6 +310,13 @@ function MenuEntry({ item, close }: { item: MenuItem; close: () => void }) {
       ) : (
         <span>{item.label}</span>
       )}
+      {item.keys?.length ? (
+        <span className="menu-keys" aria-hidden="true">
+          {item.keys.map((k) => (
+            <kbd key={k}>{k}</kbd>
+          ))}
+        </span>
+      ) : null}
     </>
   )
   return (

@@ -533,6 +533,10 @@ a.setting:hover { text-decoration: none; background: var(--bg-hover); }
 .menu-item:disabled { color: var(--fg-3); cursor: default; }
 .menu-item-text { display: flex; flex-direction: column; min-width: 0; }
 .menu-hint { font-size: var(--fs-note); line-height: var(--lh-note); color: var(--fg-3); font-weight: 400; }
+/* A menu item's key, as the page's list of keys draws one (terminal.css .page-keys kbd): at its end; none where there are no keys. */
+.menu-keys { margin-left: auto; padding-left: 12px; display: inline-flex; gap: 4px; }
+.menu-keys kbd { min-width: 20px; padding: 0 6px; border: 1px solid var(--line-strong); border-bottom-width: 2px; border-radius: var(--r-sm); background: var(--bg-subtle); color: var(--fg-3); font-family: var(--font-mono); font-size: var(--fs-note); line-height: var(--lh-note); text-align: center; }
+@media (pointer: coarse) { .menu-keys { display: none; } }
 .sheet-list .menu-item:has(.menu-hint) { padding-top: 6px; padding-bottom: 6px; }
 .menu-item:disabled:hover { background: none; }
 .menu-item:hover { background: var(--bg-hover); text-decoration: none; }

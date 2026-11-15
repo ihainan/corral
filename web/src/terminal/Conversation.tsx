@@ -1651,11 +1651,11 @@ export function ConversationView({
                 { label: t('convoSearch.item'), icon: <Search size={16} />, group: t('menu.group.find'), onSelect: () => setSearching(true) },
                 ...(convo.of && (convo.bind?.agent === 'claude' || convo.bind?.agent === 'codex') ? [{ label: t('turns.item'), icon: <ListOrdered size={16} />, onSelect: () => (setSearching(false), setTurnsShown(true)) }] : []),
                 // (All steps opened or folded: the menu's, as Ctrl+O is a Mac's only.)
-                { label: t(allOpen ? 'pageKeys.foldAll' : 'pageKeys.openAll'), icon: allOpen ? <ChevronsDownUp size={16} /> : <ChevronsUpDown size={16} />, disabled: !list.length, onSelect: () => (setOpened({}), setUnfolded({}), setAllOpen((v) => !v)) },
+                { label: t(allOpen ? 'pageKeys.foldAll' : 'pageKeys.openAll'), icon: allOpen ? <ChevronsDownUp size={16} /> : <ChevronsUpDown size={16} />, keys: mac ? ['Ctrl+O'] : undefined, disabled: !list.length, onSelect: () => (setOpened({}), setUnfolded({}), setAllOpen((v) => !v)) },
                 ...(convo.of && convo.status === 'ready' ? [{ label: t('card.open'), icon: <Info size={16} />, onSelect: () => setCard(cardMode()) }] : []),
                 { label: t('convoExport.item'), icon: <Download size={16} />, disabled: !list.length, onSelect: () => doExport() },
                 // (On every device: a tablet's keyboard has these keys too.)
-                { label: t('pageKeys.item'), icon: <Keyboard size={16} />, onSelect: () => setKeysShown('menu') },
+                { label: t('pageKeys.item'), icon: <Keyboard size={16} />, keys: ['?'], onSelect: () => setKeysShown('menu') },
                 ...more().map((m, i) => (m && i === 0 ? { ...m, separator: true } : m)),
               ]}
               button={(open, toggle) => (
