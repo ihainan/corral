@@ -63,7 +63,8 @@ type newAgents struct {
 }
 
 // POST /api/sessions/{id}/agents {"dir", "kind", "label", "resume", "fork", "at", "worktree", "key"}
-// → {"workspace", "pane"}; 409 unsupported (not herdr), in_progress (that
+// → {"workspace", "pane"} (from a tmux session: {"tmux": its own session's
+// name}); 409 unsupported (neither), in_progress (that
 // key under way), 429 busy (another under way); 400 bad_folder; 422
 // start_failed (herdr's own words; "closed": the workspace made for it was
 // closed again).
@@ -90,8 +91,16 @@ func (s *Server) apiNewAgent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_folder", "a folder's full path (or one under ~/) is required")
 		return
 	}
-	sess, socket := s.herdrSession(w, r)
-	if sess == nil {
+	// (A tmux session's: the agent in a tmux session of its own — see newAgent.)
+	var sess *term.Session
+	var socket string
+	if ts, err := s.terms.Get(currentUser(r).ID, r.PathValue("id")); err == nil && ts.Persistence == "tmux" {
+		if ts.State() != term.StateRunning {
+			writeError(w, http.StatusConflict, "not_running", "this session is not running")
+			return
+		}
+		sess = ts
+	} else if sess, socket = s.herdrSession(w, r); sess == nil {
 		return
 	}
 	u := currentUser(r)
@@ -209,6 +218,23 @@ func (s *Server) newAgent(ctx context.Context, w http.ResponseWriter, sess *term
 			}
 		}()
 	}
+	// From a tmux session (no herdr): the agent in a tmux session of its own,
+	// named after it, in the folder; the page opens a terminal on it.
+	if socket == "" {
+		name := agentName(label, kind)
+		out, err := sshx.Output(ctx, sess.Client(), agentTmuxCmd(name, dir, kind, how), 4<<10)
+		if err != nil {
+			keep = false
+			why := strings.TrimSpace(string(out))
+			if why == "" {
+				why = err.Error()
+			}
+			writeError(w, http.StatusUnprocessableEntity, "start_failed", truncate(why, 300))
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"tmux": name})
+		return
+	}
 	c := herdrDial(w, ctx, sess, socket)
 	if c == nil {
 		keep = false
@@ -254,6 +280,20 @@ func agentStartCmd(socket, pane, name, kind string, how agentStart) string {
 	q := sshx.QuoteShell
 	cmd := `PATH="$HOME/.local/bin:$HOME/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH" HERDR_SOCKET_PATH=` + q(socket) +
 		` herdr agent start ` + q(name) + ` --kind ` + q(kind) + ` --pane ` + q(pane) + ` --timeout ` + strconv.FormatInt(newAgentWait.Milliseconds(), 10)
+	args := agentArgs(kind, how)
+	if len(args) > 0 {
+		cmd += ` --`
+		for _, a := range args {
+			cmd += " " + q(a)
+		}
+	}
+	return cmd + ` 2>&1`
+}
+
+// agentArgs: what an agent of kind is started with, after its program's
+// name: Claude Code the question hook inline; a session taken up or copied;
+// a worktree of its own (worktreeFlag).
+func agentArgs(kind string, how agentStart) []string {
 	var args []string
 	if kind == "claude" {
 		args = append(args, "--settings", askhook.Inline())
@@ -271,13 +311,21 @@ func agentStartCmd(socket, pane, name, kind string, how agentStart) string {
 	if how.worktree && worktreeFlag[kind] != "" {
 		args = append(args, worktreeFlag[kind])
 	}
-	if len(args) > 0 {
-		cmd += ` --`
-		for _, a := range args {
-			cmd += " " + q(a)
-		}
+	return args
+}
+
+// agentTmuxCmd: a tmux session of its own (name) on the host, in dir,
+// running the agent of kind through the account's login shell (its
+// profile read: where its programs are, its CODEX_HOME), every value
+// quoted. Prints nothing; fails where tmux does (a name taken meanwhile).
+func agentTmuxCmd(name, dir, kind string, how agentStart) string {
+	q := sshx.QuoteShell
+	run := "exec " + q(kind)
+	for _, a := range agentArgs(kind, how) {
+		run += " " + q(a)
 	}
-	return cmd + ` 2>&1`
+	inner := `exec "${SHELL:-/bin/sh}" -lc ` + q(run)
+	return `PATH="$HOME/.local/bin:$HOME/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH" tmux new-session -d -s ` + q(name) + ` -c ` + q(dir) + ` ` + q(inner) + ` 2>&1`
 }
 
 // startAgent runs herdr's own `agent start` on the host, against the

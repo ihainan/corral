@@ -6,10 +6,11 @@ import { Dialog } from '../components/ui'
 import { local } from '../storage'
 import { AgentGlyph } from './agentIcons'
 
-// A new agent from the conversation page (herdr sessions): a workspace of
-// its own in a folder, the agent started there (or Claude Code taking up a
-// session of before); its first message, if one is written, waits in its
-// composer. See the gateway's apiNewAgent.
+// A new agent from the conversation page: from a herdr session, a workspace
+// of its own in a folder, the agent started there; from a tmux session, a
+// tmux session of its own, a terminal opened on it here (or a conversation
+// of before taken up, or copied); its first message, if one is written,
+// waits in its composer. See the gateway's apiNewAgent.
 
 export const NEW_AGENT = 'corral:new-agent' // (asked from the list: the page opens this)
 
@@ -43,7 +44,8 @@ const lastKind = (): Kind => {
 const herdrOf = (s: SessionInfo) => (s.persistence === 'herdr' && s.meta?.t === 'herdr' && !s.meta.lost ? s.meta : null)
 
 export function NewAgentDialog({ sessions, onDone, onOpen, onClose }: { sessions: SessionInfo[]; onDone: (s: SessionInfo, pane: string, first: string) => void; onOpen: (s: SessionInfo, pane: string) => void; onClose: () => void }) {
-  const herdrs = sessions.filter((s) => herdrOf(s))
+  // (Where one may be started: herdr's sessions, and tmux's.)
+  const herdrs = sessions.filter((s) => herdrOf(s) || s.persistence === 'tmux')
   const [sid, setSid] = useState(herdrs[0]?.id ?? '')
   const sess = herdrs.find((s) => s.id === sid)
   // (Folders the agents there work in, then the ones started from here lately.)
@@ -120,10 +122,17 @@ export function NewAgentDialog({ sessions, onDone, onOpen, onClose }: { sessions
     setError('')
     try {
       const body = { dir: dir.trim(), kind, label: label.trim(), resume: kind !== 'opencode' ? resume : '', fork: kind !== 'opencode' && copying, worktree: inWorktree }
-      const r = await api<{ pane: string }>('POST', `/api/sessions/${sess.id}/agents`, { ...body, key: keyOf(sess.id + '\n' + JSON.stringify(body)) }, { timeoutMs: 90000 })
+      const r = await api<{ pane?: string; tmux?: string }>('POST', `/api/sessions/${sess.id}/agents`, { ...body, key: keyOf(sess.id + '\n' + JSON.stringify(body)) }, { timeoutMs: 90000 })
       keepDir(dir.trim())
       local.set(KIND, kind)
-      onDone(sess, r.pane, !resume || copying ? first.trim() : '')
+      const said = !resume || copying ? first.trim() : ''
+      if (r.tmux) {
+        // (A tmux session of its own: a terminal opened on it here, gone to as any other.)
+        const opened = await api<SessionInfo>('POST', '/api/sessions', { host_id: sess.host_id, cols: 160, rows: 50, open: { kind: 'tmux', name: r.tmux } })
+        onDone(opened, '', said)
+        return
+      }
+      onDone(sess, r.pane ?? '', said)
     } catch (err) {
       if (err instanceof ApiError && err.code === 'bad_folder') setError(t('newAgent.badFolder'))
       else if (err instanceof ApiError && err.code === 'no_session') setError(t('fork.noSession'))
@@ -153,7 +162,7 @@ export function NewAgentDialog({ sessions, onDone, onOpen, onClose }: { sessions
             >
               {herdrs.map((s) => (
                 <option key={s.id} value={s.id}>
-                  {s.host_name + (s.mux_session ? ' · ' + s.mux_session : '')}
+                  {s.host_name + (s.mux_session ? ' · ' + s.mux_session : '') + (s.persistence === 'tmux' ? ' · tmux' : '')}
                 </option>
               ))}
             </select>

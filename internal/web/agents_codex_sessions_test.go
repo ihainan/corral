@@ -49,3 +49,38 @@ func TestAgentStartCodexResume(t *testing.T) {
 		t.Fatalf("%s", cmd)
 	}
 }
+
+// An agent started in a tmux session of its own: run as the host would,
+// through stand-ins for tmux, the login shell and the agent, each saying what
+// it was given — every value through as given (a folder with a space and a
+// quote), the agent run in the login shell with its arguments.
+func TestAgentTmuxCmd(t *testing.T) {
+	bin := t.TempDir()
+	logf := filepath.Join(bin, "log")
+	write := func(name, body string) {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/sh\n"+body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// (tmux: its last argument, the shell command, run as tmux runs it — sh -c.)
+	write("tmux", `printf 'tmux:%s\n' "$@" >>"$LOG"; for a; do last=$a; done; exec sh -c "$last"`)
+	write("fakeshell", `printf 'shell:%s\n' "$@" >>"$LOG"; [ "$1" = -lc ] && exec sh -c "$2"`)
+	write("codex", `printf 'codex:%s\n' "$@" >>"$LOG"`)
+	dir := "/w/it's my proj"
+	cmd := agentTmuxCmd("fix-tests-abcde", dir, "codex", agentStart{resume: "01a1df42-8f07-7d43-b8b7-c6bad45f5528"})
+	c := exec.Command("sh", "-c", cmd)
+	c.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"), "SHELL="+filepath.Join(bin, "fakeshell"), "LOG="+logf, "HOME="+bin)
+	if out, err := c.CombinedOutput(); err != nil {
+		t.Fatal(err, string(out))
+	}
+	b, _ := os.ReadFile(logf)
+	got := string(b)
+	for _, want := range []string{"tmux:new-session\ntmux:-d\ntmux:-s\ntmux:fix-tests-abcde\ntmux:-c\ntmux:" + dir + "\n", "shell:-lc\n", "codex:resume\ncodex:01a1df42-8f07-7d43-b8b7-c6bad45f5528\n"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("%q not in:\n%s", want, got)
+		}
+	}
+	if !strings.Contains(agentTmuxCmd("x", "/w/p", "claude", agentStart{}), "--settings") {
+		t.Error("Claude Code's question hook not given")
+	}
+}

@@ -382,7 +382,7 @@ export function AgentsChat({ bar, active = true }: { bar?: ReactNode; active?: b
   const [arriving, setArriving] = useState<{ s: SessionInfo; pane: string; key: string; until: number; late?: boolean } | null>(null)
   const started = (s: SessionInfo, pane: string, first: string) => {
     setNewAgent(false)
-    const key = agentKey(s, pane)
+    const key = s.persistence === 'tmux' ? tmuxKey(s) : agentKey(s, pane) // (a tmux session of its own: its row)
     if (first) keepDraft('agents ' + key, first)
     setArriving({ s, pane, key, until: Date.now() + 30000 })
     // (Read again at once and in a second — herdr's summary takes a moment to have it: not at the next read, seconds on. 11-14.)
