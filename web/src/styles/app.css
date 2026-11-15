@@ -996,17 +996,54 @@ details.adv > .form { margin-top: 16px; }
   /* (Narrow cards: what the agents are doing in two lines, not cut after the first words — ux1101 PG-35.) */
   .live-sub { white-space: normal; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow-wrap: anywhere; }
 }
-/* A phone's running sessions: rows, as the hosts below, no screen in small (pages-1105 1.4). */
-.live-rows { list-style: none; margin: 0; padding: 0; }
-.live-row { position: relative; border-bottom: 1px solid var(--line); }
-.live-row .live-link { min-height: var(--row-min); justify-content: center; }
-.live-row .live-info { padding: 10px 48px 10px 8px; } /* (its words where the hosts' below begin) */
+/* Running sessions: cards as the hosts' below (11-15), no screen in small (pages-1105 1.4) — the
+   host's mark, which of its sessions, what its agents are doing; closed from the corner. */
+.live-rows { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 280px), 1fr)); gap: 12px; }
+.live-row { position: relative; min-width: 0; border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--bg); transition: border-color 0.15s var(--ease), background 0.15s var(--ease); }
+.live-row:hover { border-color: var(--line-strong); background: var(--bg-subtle); }
+.live-row .live-link { height: 100%; border-radius: var(--r-lg); }
+.live-row .live-info { gap: 10px; padding: 16px 48px 16px 16px; }
+.live-row .live-title { gap: 12px; }
+.live-row .live-name { font-size: var(--fs-body); line-height: var(--lh-ui); font-weight: 600; }
 .live-row .live-link:hover .live-info { background: none; }
-.live-row .live-link:active { background: var(--bg-hover); }
-.live-row .live-close { right: 2px; top: 50%; bottom: auto; transform: translateY(-50%); }
+.live-row .live-link:active { background: var(--bg-hover); border-radius: var(--r-lg); }
+.live-row .live-close { right: 8px; top: 12px; bottom: auto; }
 .live-row .live-sub { -webkit-line-clamp: 2; }
+.live-sub > .dot { vertical-align: middle; margin: 0 6px 2px 0; }
 .live-which { color: var(--fg-2); font-weight: 400; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 0 1 auto; }
 .live-name { flex: 0 1 auto; }
+/* Hosts as cards (11-15: "this page is plain" — a list of names and addresses with
+   nothing to tell one from another at a glance). Each its mark, a tint of its own hue;
+   its address in mono, as typed; what runs on it or when it was last used, at its foot.
+   As many to a row as fit, one on a phone. */
+.host-grid { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 280px), 1fr)); gap: 12px; }
+.host-card { position: relative; min-width: 0; }
+.host-card-main {
+  width: 100%; height: 100%; display: flex; flex-direction: column; align-items: stretch; gap: 10px; padding: 16px;
+  border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--bg); color: var(--fg); text-align: left; cursor: pointer;
+  transition: border-color 0.15s var(--ease), background 0.15s var(--ease), box-shadow 0.15s var(--ease);
+}
+.host-card-main:hover { border-color: var(--line-strong); background: var(--bg-subtle); }
+.host-card-main:active { background: var(--bg-hover); }
+.host-card-main:focus-visible { outline: none; border-color: var(--accent); box-shadow: var(--focus); }
+.host-card-main:disabled { cursor: progress; }
+.host-card-top { display: flex; align-items: center; gap: 12px; min-width: 0; padding-right: 32px; } /* (32: the menu's button over the corner) */
+.host-mark {
+  flex: none; width: 36px; height: 36px; border-radius: var(--r); display: grid; place-items: center;
+  font-size: var(--fs-sub); line-height: var(--lh-sub); font-weight: 600; letter-spacing: 0.02em;
+  /* (Its hue, mixed toward the page's words and its ground: darker on light, lighter on dark, one rule for both.) */
+  color: color-mix(in oklab, hsl(var(--h) 62% 48%) 72%, var(--fg));
+  background: color-mix(in oklab, hsl(var(--h) 70% 55%) 15%, var(--bg));
+}
+.host-card-name { min-width: 0; font-size: var(--fs-body); line-height: var(--lh-ui); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.host-card-addr { font-family: var(--font-mono); font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--fg-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.host-card-foot { display: flex; align-items: center; gap: 8px; margin-top: auto; min-height: var(--lh-note); font-size: var(--fs-note); line-height: var(--lh-note); color: var(--fg-3); }
+.host-card-state { display: inline-flex; align-items: center; gap: 6px; min-width: 0; white-space: nowrap; }
+.host-card-state.is-run { color: var(--ok); }
+.host-card-state.is-wait { color: var(--warn); font-weight: 600; }
+.host-card-when { margin-left: auto; white-space: nowrap; }
+.host-card-menu { position: absolute; top: 12px; right: 8px; }
+
 /* Searching a long list, and its order (hosts: pages-1105 1.5). */
 .page-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin: 4px 0 8px; }
 .page-search { min-width: 0; flex: 1 1 240px; display: flex; align-items: center; gap: 8px; height: var(--h-input); padding: 0 12px; border: 1px solid var(--line-input); border-radius: var(--r); color: var(--fg-3); background: var(--bg); }

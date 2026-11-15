@@ -264,27 +264,33 @@ export function HostsPage() {
               <button type="button" className="link-btn" onClick={() => setQ('')}>{t('common.clearSearch')}</button>
             </p>
           )}
-          <ul className="rows">
-            {shownHosts.map((h) => (
-              <li key={h.id} className="row-group">
-                <div className="row">
-                  <button className="row-main no-icon has-state" onClick={() => connect(h)} disabled={busyHost === h.id} aria-label={`${t('hosts.connect')} ${h.name}`} aria-describedby={'hs-' + h.id}>
-                    <span className="row-title">{h.name}</span>
-                    {(() => {
-                      const st = hostState(h.id)
-                      return st ? <span className={'row-state ' + (st.wait ? 'is-wait' : 'is-run')}>{st.text}</span> : <span className="row-state" />
-                    })()}
-                    <span className="row-meta">
-                      {/* ("8 天前连接": which time it is — ux1101 PG-11.) */}
-                      {busyHost === h.id ? t('hosts.connecting') : h.last_connected_at ? t('hosts.lastConnected', { when: relTime(h.last_connected_at) }) : ''}
+          <ul className="host-grid">
+            {shownHosts.map((h) => {
+              const st = hostState(h.id)
+              return (
+                <li key={h.id} className="host-card">
+                  <button className="host-card-main" onClick={() => connect(h)} disabled={busyHost === h.id} aria-label={`${t('hosts.connect')} ${h.name}`} aria-describedby={'hs-' + h.id}>
+                    <span className="host-card-top">
+                      <HostMark name={h.name} />
+                      <span className="host-card-name">{h.name}</span>
                     </span>
-                    <span className="row-sub" id={'hs-' + h.id}>
+                    <span className="host-card-addr" id={'hs-' + h.id}>
                       {h.username}@{h.address}
                       {h.port !== 22 ? ':' + h.port : ''}
                       {h.jump_host_id ? ' · ' + t('host.via', { name: hosts?.find((x) => x.id === h.jump_host_id)?.name ?? '?' }) : ''}
                     </span>
+                    <span className="host-card-foot">
+                      {st && (
+                        <span className={'host-card-state ' + (st.wait ? 'is-wait' : 'is-run')}>
+                          <span className={'dot ' + (st.wait ? 'warn' : 'ok')} aria-hidden="true" />
+                          {st.text}
+                        </span>
+                      )}
+                      {/* ("8 天前连接": which time it is — ux1101 PG-11.) */}
+                      <span className="host-card-when">{busyHost === h.id ? t('hosts.connecting') : h.last_connected_at ? t('hosts.lastConnected', { when: relTime(h.last_connected_at) }) : ''}</span>
+                    </span>
                   </button>
-                  <div className="row-actions">
+                  <div className="host-card-menu">
                     <Menu
                       label={h.name}
                       button={(open, toggle) => (
@@ -300,9 +306,9 @@ export function HostsPage() {
                       ]}
                     />
                   </div>
-                </div>
-              </li>
-            ))}
+                </li>
+              )
+            })}
           </ul>
         </section>
       )}
@@ -310,6 +316,30 @@ export function HostsPage() {
       {dialogs}
       {code.dialog}
     </main>
+  )
+}
+
+// A host's mark (11-15): its initials on a tint of its own, the same hue
+// for the same name wherever it shows, so a host is found by colour as well
+// as by its name — "Home Services" HS, "dev-230" D2, "101" 10.
+// (Eight hues apart enough to tell: from a hue anywhere on the wheel, two
+// hosts came out near each other more often than not.)
+const HOST_HUES = [214, 162, 268, 24, 338, 192, 44, 128]
+export function hostHue(name: string): number {
+  let h = 0
+  for (const c of name) h = (h * 31 + c.codePointAt(0)!) >>> 0
+  return HOST_HUES[h % HOST_HUES.length]
+}
+export function hostInitials(name: string): string {
+  const w = name.trim().split(/[\s._-]+/).filter(Boolean)
+  const two = w.length > 1 ? [...w[0]][0] + [...w[1]][0] : [...name.trim()].slice(0, 2).join('')
+  return two.toUpperCase() || '?'
+}
+function HostMark({ name }: { name: string }) {
+  return (
+    <span className="host-mark" style={{ '--h': hostHue(name) } as React.CSSProperties} aria-hidden="true">
+      {hostInitials(name)}
+    </span>
   )
 }
 
@@ -338,11 +368,12 @@ function LiveCard({ s, all, stale, onClose }: { s: SessionInfo; all: SessionInfo
       <a className="live-link" href={'/t/' + s.id} onClick={linkHandler('/t/' + s.id)} aria-label={`${s.host_name}：${label}`} aria-describedby={'ld-' + s.id} title={s.title || undefined}>
         <span className="live-info">
           <span className="live-title">
-            <span className={'dot ' + dot} aria-hidden="true" />
+            <HostMark name={s.host_name} />
             <span className="live-name">{s.host_name}</span>
             <span className="live-which">{which}</span>
           </span>
           <span className="live-sub" id={'ld-' + s.id}>
+            <span className={'dot ' + dot} aria-hidden="true" />
             {marked && <span className={waiting > 0 ? 'live-wait' : 'live-done'}>{herdrState}</span>}
             {marked && detail ? ' · ' : ''}
             {detail}
