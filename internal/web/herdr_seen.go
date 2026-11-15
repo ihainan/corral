@@ -168,25 +168,32 @@ func setMs(m *map[string]int64, k string, v int64) {
 
 // toCheck: the panes whose log is to be read (see recheck), by the round
 // of "done" each is to be read for.
-func (r *seenRounds) toCheck() map[string]int64 {
+// gen: the reads', for checked. (None while herdr is lost.)
+func (r *seenRounds) toCheck() (map[string]int64, int64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if len(r.pending) == 0 {
-		return nil
+	if len(r.pending) == 0 || r.lost {
+		return nil, r.gen
 	}
 	out := make(map[string]int64, len(r.pending))
 	for p, n := range r.pending {
 		out[p] = n
 	}
-	return out
+	return out, r.gen
 }
 
 // checked takes in what pane's log said for its round of "done" round:
 // wrote, when it was last written (unix ms, the gateway's clock; 0: not
 // known). Not written since pane was last looked at: that round is told
-// as the one looked at. (Asked for a round no longer the pane's: nothing.)
-func (r *seenRounds) checked(pane string, round, wrote int64) {
+// as the one looked at. (Asked for a round no longer the pane's: nothing.
+// Read before herdr was last lost or back, gen not the rounds': nothing,
+// and it is read again.)
+func (r *seenRounds) checked(pane string, round, wrote, gen int64) {
 	r.mu.Lock()
+	if r.lost || gen != r.gen {
+		r.mu.Unlock()
+		return
+	}
 	if r.pending[pane] == round {
 		delete(r.pending, pane)
 	}
@@ -347,6 +354,12 @@ func (r *seenRounds) lostHerdr() {
 		}
 		delete(r.seen, p)
 	}
+	// (What a log said is of before: a round told by it is read for again
+	// once herdr is back, a turn ended meanwhile in the same round.)
+	for p, q := range r.quiet {
+		setMs(&r.pending, p, q)
+	}
+	r.quiet = nil
 	r.lost, r.looked, r.wrote = true, false, nil
 	r.gen++
 }

@@ -29,7 +29,7 @@ func (s *Server) recheckSeen(ctx context.Context, sess *term.Session, rounds *se
 			return
 		case <-tick.C:
 		}
-		pend := rounds.toCheck()
+		pend, gen := rounds.toCheck()
 		if len(pend) == 0 {
 			continue
 		}
@@ -41,7 +41,7 @@ func (s *Server) recheckSeen(ctx context.Context, sess *term.Session, rounds *se
 		logs := map[string]string{} // pane → its log
 		for pane := range pend {
 			if hp, ok := snapPane(snap, pane); ok && strings.Contains(strings.ToLower(hp.Agent), "codex") {
-				if log := s.codexLogSure(cctx, sess, hp); log != "" {
+				if log := s.codexLogSure(cctx, sess, hp.ID); log != "" {
 					logs[pane] = log
 				}
 			}
@@ -62,7 +62,7 @@ func (s *Server) recheckSeen(ctx context.Context, sess *term.Session, rounds *se
 		}
 		cancel()
 		for pane, round := range pend {
-			rounds.checked(pane, round, wrote[pane]) // (0: not known, "done")
+			rounds.checked(pane, round, wrote[pane], gen) // (0: not known, "done")
 		}
 	}
 }
@@ -89,30 +89,45 @@ func snapPane(snap *herdr.Snapshot, pane string) (herdr.Pane, bool) {
 	return found, ok
 }
 
-// codexLogSure: the log of pane's Codex, where it is known for sure: the
-// conversation page's binding where it is not weak (see convoState.weak),
-// else the short look's where codexPaneSure takes it. "" otherwise.
-func (s *Server) codexLogSure(ctx context.Context, sess *term.Session, pane herdr.Pane) string {
-	if st := s.convos.peek(sess.ID + "\x00" + pane.ID); st != nil {
-		st.mu.Lock()
-		log, agent, reason, sub, weak := st.log, st.agent, st.reason, st.sub, st.weak
-		st.mu.Unlock()
-		if agent == "codex" && reason == "" && !sub && !weak && codexLogName.MatchString(log) {
-			return log
-		}
-	}
+// codexLogSure: the log of pane's Codex, where a look begun now tells it
+// for sure — surer than for showing it (the conversation page's binding,
+// even one not weak, may be of a thread the pane has left since; and
+// codexPaneSure takes a title cut short, or one of a name another
+// conversation of its folder has): one interactive Codex there, at a
+// thread no other pane is at, with its log; that thread named, the pane's
+// title read at the look its name whole; no other live conversation of its
+// folder of that name, none talked in since it started that no Codex is
+// told at (a thread begun or resumed in it since, maybe). "" otherwise.
+func (s *Server) codexLogSure(ctx context.Context, sess *term.Session, pane string) string {
 	socket := s.herdrSocks.get(sess.ID)
 	if socket == "" {
 		return ""
 	}
-	panes, err := s.codexPanes.of(ctx, sess, socket)
+	panes, err := s.codexPanes.run(ctx, sess, socket, pane)
 	if err != nil {
 		return ""
 	}
-	if c, ok := codexPaneSure(panes, pane.ID, pane); ok && codexLogName.MatchString(c.Path) {
-		return c.Path
+	return codexRecheckLog(panes, pane)
+}
+
+// codexRecheckLog: codexLogSure's rule, on what a look found.
+func codexRecheckLog(panes map[string]codexPane, pane string) string {
+	c, ok := panes[pane]
+	if !ok || c.Several || c.Thread == "" || c.Name == "" || !codexLogName.MatchString(c.Path) {
+		return ""
 	}
-	return ""
+	if !c.titleRead || c.SameName != 0 || c.Unexplained != 0 {
+		return ""
+	}
+	if thread, bare := codexTitleParts("codex", c.TitleNow, c.Cwd); bare || thread != c.Name {
+		return ""
+	}
+	for p, o := range panes {
+		if p != pane && o.Thread == c.Thread {
+			return ""
+		}
+	}
+	return c.Path
 }
 
 // logsWroteCommand prints, for each of files in turn, a line "w=" and when
