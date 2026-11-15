@@ -1988,6 +1988,8 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
             convo.refresh()
             return toast(t('agents.codexBegun'), true)
           }
+          // (Words typed in its terminal input: not sent onto them — what to do, said.)
+          if (e instanceof ApiError && e.code === 'draft' && b.agent === 'codex') return toast(t('agents.codexDraft'), true)
           // (Another agent in the pane now: the page reads it at once — the
           // gateway looks again for it — to be seen before sending there.)
           if (e instanceof ApiError && e.code === 'agent_changed') {
