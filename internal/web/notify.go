@@ -439,6 +439,7 @@ func (s *Server) onHerdrTransition(sess *term.Session, h *store.Host, tr herdr.T
 		return
 	}
 	if tr.To == herdr.StatusDone && tr.From == herdr.StatusWorking {
+		doneAt := time.Now().UnixMilli()
 		note.Title, note.TitleZh, note.Quiet = agent+" finished", agentZh+" 已完成", true
 		// Not while subagents it sent off are out (it works on once they
 		// are back); and only if, once that is known, it is done still, in
@@ -450,6 +451,14 @@ func (s *Server) onHerdrTransition(sess *term.Session, h *store.Host, tr herdr.T
 				return
 			}
 			if !still() || s.paneWatched(sess.ID, tr.Pane.ID) {
+				return
+			}
+			// (Its log not written for a while before: herdr telling
+			// "done" again, nothing done — doneQuiet. Not known: it goes.)
+			lctx, cancel := context.WithTimeout(context.Background(), seenRecheckWait)
+			wrote, known := s.paneLogWrote(lctx, sess, tr.Pane)
+			cancel()
+			if known && doneQuiet(wrote, doneAt) {
 				return
 			}
 			note.Body, note.BodyZh = s.doneBody(sess, tr, round, where)

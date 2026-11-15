@@ -51,20 +51,13 @@ func (s *Server) recheckSeen(ctx context.Context, sess *term.Session, rounds *se
 		logs := map[string]string{} // pane → its log
 		unread := map[string]bool{} // panes whose read failed (the host's doing): tried again
 		for pane := range pend {
-			hp, ok := snapPane(snap, pane)
-			switch agent := strings.ToLower(hp.Agent); {
-			case !ok:
-			case strings.Contains(agent, "codex"):
-				log, err := s.codexLogSure(cctx, sess, hp.ID)
+			if hp, ok := snapPane(snap, pane); ok {
+				log, err := s.paneLogRef(cctx, sess, hp)
 				if err != nil {
 					unread[pane] = true
 				} else if log != "" {
 					logs[pane] = log
 				}
-			case strings.Contains(agent, "claude") && hp.AgentSession != nil && claudeSessionID.MatchString(hp.AgentSession.Value):
-				// (Its session's log, by the id herdr's integration says:
-				// that session's for sure.)
-				logs[pane] = "claude:" + hp.AgentSession.Value
 			}
 		}
 		var lo, hi map[string]int64
@@ -109,6 +102,55 @@ func (s *Server) recheckSeen(ctx context.Context, sess *term.Session, rounds *se
 			rounds.checked(pane, c, lo[pane], hi[pane], gen) // (0: not known, "done")
 		}
 	}
+}
+
+// paneLogRef: the log of the agent in hp known for sure to be its, as
+// logsWroteCommand takes it: a Codex's, codexLogSure; a Claude Code's, by
+// the session herdr's integration says it runs ("claude:<id>"). "": none
+// known for sure (OpenCode's database, all its sessions' in one file); an
+// error: the host not read.
+func (s *Server) paneLogRef(ctx context.Context, sess *term.Session, hp herdr.Pane) (string, error) {
+	switch agent := strings.ToLower(hp.Agent); {
+	case strings.Contains(agent, "codex"):
+		return s.codexLogSure(ctx, sess, hp.ID)
+	case strings.Contains(agent, "claude") && hp.AgentSession != nil && claudeSessionID.MatchString(hp.AgentSession.Value):
+		return "claude:" + hp.AgentSession.Value, nil
+	}
+	return "", nil
+}
+
+// paneLogWrote: when the agent in hp last wrote its log (paneLogRef), on
+// the gateway's clock, unix ms (the latest it may have been); ok false
+// where that is not known.
+func (s *Server) paneLogWrote(ctx context.Context, sess *term.Session, hp herdr.Pane) (hi int64, ok bool) {
+	ref, err := s.paneLogRef(ctx, sess, hp)
+	if err != nil || ref == "" {
+		return 0, false
+	}
+	out, err := sshx.Output(ctx, sess.Client(), logsWroteCommand([]string{ref})+"; "+hostNowCommand, 512)
+	got := time.Now().UnixMilli()
+	if err != nil {
+		return 0, false
+	}
+	_, h := parseLogsWrote(string(out), []string{"p"})
+	h = onGatewayClock(h, string(out), got)
+	if t, there := h["p"]; there {
+		return t, true
+	}
+	return 0, false
+}
+
+// doneQuietFor: a "finished" whose agent's log was last written longer ago
+// than this before it is no turn's end — a turn's end is written there as
+// it ends (Codex's task_complete, Claude Code's last answer) — but herdr
+// telling a status again (its count goes up for any change: a client of
+// Codex's daemon come in, 11-15): no alert.
+const doneQuietFor = 60 * time.Second
+
+// doneQuiet: doneQuietFor's rule — the log last written at wrote (gateway
+// clock, unix ms), the agent told done at at.
+func doneQuiet(wrote, at int64) bool {
+	return wrote > 0 && wrote < at-doneQuietFor.Milliseconds()
 }
 
 // snapPane: pane as snap has it, its agent's entry first (its agent named).

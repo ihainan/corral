@@ -490,3 +490,24 @@ func TestSeenLookedAsItMoved(t *testing.T) {
 		t.Fatalf("not read for: %v", p)
 	}
 }
+
+// A "finished" alert: none where the agent's log was last written well
+// before it was told done (herdr telling a status again); one where it was
+// written as the turn ended, or when that is not known.
+func TestDoneQuiet(t *testing.T) {
+	at := int64(1794706675000)
+	for _, c := range []struct {
+		wrote int64
+		quiet bool
+	}{
+		{at - 2*24*3600*1000, true}, // (finished days ago, looked at since: 09:13, 11-15)
+		{at - 61_000, true},
+		{at - 3_000, false}, // (its turn's end, written as it ended)
+		{at + 500, false},
+		{0, false}, // (not known)
+	} {
+		if got := doneQuiet(c.wrote, at); got != c.quiet {
+			t.Errorf("written %d ms before: quiet %v", at-c.wrote, got)
+		}
+	}
+}
