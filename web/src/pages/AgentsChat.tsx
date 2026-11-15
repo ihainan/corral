@@ -217,7 +217,7 @@ const labelOf = (e: Entry, said: string, hosts: number, named = true): { title: 
 function cmdsOf(r: AgentRow): RowCmds | undefined {
   const a = r.a
   if (r.lost || !a.bg_cmds || (a.status !== 'done' && a.status !== 'idle')) return undefined
-  return { n: a.bg_cmds, list: (a.bg_cmd_list ?? []).map((c) => ({ title: c.title, since: c.since })) }
+  return { n: a.bg_cmds, list: (a.bg_cmd_list ?? []).map((c) => ({ task: c.task, title: c.title, since: c.since, out: c.out })) }
 }
 
 // Pins kept to at most max: those of agents not on the list let go, the

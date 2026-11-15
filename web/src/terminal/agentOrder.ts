@@ -25,7 +25,7 @@ export interface ConvoListRow {
 // them (what each runs, when it began, unix ms).
 export interface RowCmds {
   n: number
-  list: { title?: string; since?: number }[]
+  list: { task?: string; title?: string; since?: number; out?: string }[]
 }
 
 // What is for the person to do: one waiting for an answer, one done and not

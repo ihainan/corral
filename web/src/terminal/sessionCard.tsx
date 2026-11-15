@@ -18,6 +18,7 @@ import { t } from '../i18n'
 import { Dialog, DialogHead } from '../components/ui'
 import { duration } from './convoTime'
 import type { ConvoTask } from './conversation'
+import type { RowCmds } from './agentOrder'
 
 type GitInfo = {
   repo: boolean
@@ -52,6 +53,10 @@ export interface CardData {
   // What the agent's log says it changed, of what is loaded of it.
   edits: { files: CardFile[]; add: number; del: number } | null
   running: { id: string; kind: string; what: string; ts?: string }[]
+  // What its processes on the host say it left running in the background,
+  // its turn over (11-15: the bar said "5 background commands", and which
+  // was nowhere to be seen); those the log tells of already not again.
+  cmds?: RowCmds
   tasks: ConvoTask[] | null
   ctx: { used: number; window?: number } | null
   model?: string
@@ -133,6 +138,8 @@ function Counts({ add, del }: { add: number; del: number }) {
 function CardBody({ data, acts, close }: { data: CardData; acts: CardActs; close: () => void }) {
   const { git, pr, error, retry } = useGit(data.sid, data.pane)
   const now = Date.now()
+  const procCmds = (data.cmds?.list ?? []).filter((c) => !c.task || !data.running.some((r) => r.id === c.task))
+  const procMore = data.cmds ? Math.max(data.cmds.n - data.cmds.list.length, 0) : 0
   const ago = (ms: number) => t('card.ago', { d: duration(Math.max(now - ms, 0)) })
   const act = (f: () => void) => () => {
     close()
@@ -257,14 +264,26 @@ function CardBody({ data, acts, close }: { data: CardData; acts: CardActs; close
         </section>
       )}
 
-      {data.running.length > 0 && (
-        <section className="scard-sec">
+      {(data.running.length > 0 || procCmds.length > 0) && (
+        <section className="scard-sec" data-sec="running">
           <h3 className="scard-head">{t('card.running')}</h3>
           {data.running.map((r) => (
             <Row key={r.id} icon={r.kind === 'agent' ? <Bot size={16} /> : <Terminal size={16} />} onClick={act(() => acts.onRunning(r.id))} sub={r.ts ? t('convo.bgFor', { for: duration(Math.max(now - Date.parse(r.ts), 0)) }) : undefined}>
               <span className="scard-one">{r.what || t(r.kind === 'agent' ? 'convo.bgAgent' : 'convo.bgCmd')}</span>
             </Row>
           ))}
+          {procCmds.map((c, i) => (
+            <Row
+              key={c.task || i}
+              icon={<Terminal size={16} />}
+              onClick={c.task ? act(() => acts.onRunning(c.task!)) : undefined}
+              title={c.title}
+              sub={c.since ? t('convo.bgFor', { for: duration(Math.max(now - c.since, 0)) }) : undefined}
+            >
+              <code className="scard-one scard-cmd">{c.title || t('convo.bgCmd')}</code>
+            </Row>
+          ))}
+          {procMore > 0 && <p className="scard-dim scard-more">{t('convo.bgCmdsMore', { n: procMore })}</p>}
         </section>
       )}
 
@@ -344,7 +363,8 @@ export function SessionCard({ data, acts, anchor, sheet, onClose }: { data: Card
     if (sheet) return
     const away = (e: PointerEvent) => {
       const n = e.target as Node
-      if (!box.current?.contains(n) && !anchor?.contains(n)) closeRef.current()
+      // (Nor on another that toggles it — the bar's background commands: 11-15.)
+      if (!box.current?.contains(n) && !anchor?.contains(n) && !(n instanceof Element && n.closest('[data-card-toggle]'))) closeRef.current()
     }
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return

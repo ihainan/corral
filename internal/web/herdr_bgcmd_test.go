@@ -1,6 +1,7 @@
 package web
 
 import (
+	"fmt"
 	"context"
 	"errors"
 	"os/exec"
@@ -39,6 +40,9 @@ func TestParseCmdScan(t *testing.T) {
 	if c[0].Task != "b1" || c[0].Title != "npm run dev -- --port '3000'" || c[0].Since != 1_700_000_000_000+40_000 {
 		t.Errorf("first: %+v", c[0])
 	}
+	if c[0].Out != "" || c[2].Out != dir+"b2.output" { // (a deleted one's: none)
+		t.Errorf("its output: %q %q", c[0].Out, c[2].Out)
+	}
 	if c[1].Task != "b3" || c[1].Title != "cat > f <<'EOF' a long one cut short" || c[2].Task != "b2" || c[2].Title != "cd ~/w && sh suite.sh > log 2>&1" {
 		t.Errorf("then: %+v", c[1:])
 	}
@@ -73,7 +77,11 @@ func TestCmdProberTells(t *testing.T) {
 		if fail.Load() {
 			return nil, false, errors.New("no")
 		}
-		return map[string][]bgCmd{cmdSess: {{Task: "b1", Title: "a"}, {Task: "b2"}, {Task: "b3"}, {Task: "b4"}}}, true, nil
+		many := []bgCmd{{Task: "b1", Title: "a"}}
+		for i := 2; i <= 10; i++ {
+			many = append(many, bgCmd{Task: fmt.Sprintf("b%d", i)})
+		}
+		return map[string][]bgCmd{cmdSess: many}, true, nil
 	})
 	p.every = 50 * time.Millisecond
 	poked := make(chan struct{}, 8)
@@ -96,7 +104,7 @@ func TestCmdProberTells(t *testing.T) {
 	p.consider("w1:p1", "claude", "done", cmdSess)
 	<-scans
 	<-poked
-	if a := sum(); a.BgCmds != 4 || len(a.BgCmdList) != maxCmdsShown || a.BgCmdList[0].Title != "a" {
+	if a := sum(); a.BgCmds != 10 || len(a.BgCmdList) != maxCmdsShown || a.BgCmdList[0].Title != "a" {
 		t.Fatalf("told %d %+v", a.BgCmds, a.BgCmdList)
 	}
 	// Another session in the pane (as herdr tells it): not its.

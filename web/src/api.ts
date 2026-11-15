@@ -314,7 +314,7 @@ export interface HerdrAgent {
   bg_since?: number
   // Commands it left running in the background (done or idle): how many, the first listed.
   bg_cmds?: number
-  bg_cmd_list?: { task: string; title?: string; since?: number }[]
+  bg_cmd_list?: { task: string; title?: string; since?: number; out?: string }[]
   // Its tab, the tab's name, how many tabs its workspace has; the name the pane was given (if one was).
   tab?: string
   tab_label?: string

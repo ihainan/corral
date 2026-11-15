@@ -41,7 +41,7 @@ const (
 )
 
 const (
-	maxCmdsShown = 3 // listed per agent (all are counted)
+	maxCmdsShown = 8 // listed per agent (all are counted; the card lists each, 11-15)
 	cmdScanMax   = 128 << 10
 )
 
@@ -51,6 +51,9 @@ type bgCmd struct {
 	Task  string `json:"task"`
 	Title string `json:"title,omitempty"`
 	Since int64  `json:"since,omitempty"`
+	// Out: the file its output goes to (none for a Monitor's), for the page
+	// to show its end, as of one the log told of.
+	Out string `json:"out,omitempty"`
 }
 
 type cmdProber struct {
@@ -315,15 +318,18 @@ func parseCmdScan(out string) (cmds map[string][]bgCmd, whole bool) {
 			if err != nil || start < 0 {
 				continue
 			}
-			var session, task string
+			var session, task, out string
 			if m := cmdOutput.FindStringSubmatch(f[3]); m != nil {
 				session, task = m[1], m[2]
+				if m[3] == "" && strings.HasPrefix(f[3], "/") {
+					out = f[3] // (deleted: nothing there to read)
+				}
 			} else if m := cmdMonitor.FindStringSubmatch(f[3]); m != nil && cmdPID.MatchString(f[1]) {
 				session, task = m[1], "monitor-"+f[1] // (its task's name is not told: its process's, for one)
 			} else {
 				continue
 			}
-			all = append(all, found{session: strings.ToLower(session), cmd: bgCmd{Task: task, Title: cmdTitle(f[4])}, start: start})
+			all = append(all, found{session: strings.ToLower(session), cmd: bgCmd{Task: task, Title: cmdTitle(f[4]), Out: out}, start: start})
 		}
 	}
 	slices.SortStableFunc(all, func(a, b found) int { return int(min(max(a.start-b.start, -1), 1)) })

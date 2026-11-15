@@ -1137,6 +1137,9 @@ details.adv > .form { margin-top: 16px; }
 .scard-dim { color: var(--fg-3); font-size: var(--fs-note); line-height: var(--lh-note); white-space: nowrap; }
 .scard-main > .scard-dim { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .scard-one { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+/* A command left running on the host: its own words, as typed (11-15). */
+.scard-cmd { display: block; font-family: var(--font-mono); font-size: var(--fs-note); line-height: var(--lh-note); }
+.scard-more { margin: 0; padding: 4px 10px; }
 .scard-mono { font-family: var(--font-mono); }
 .scard-note { margin: 0; padding: 6px 10px; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--fg-2); }
 .scard-kv { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 2px 12px; padding: 4px 10px; font-size: var(--fs-sub); line-height: var(--lh-sub); }

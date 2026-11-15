@@ -529,6 +529,14 @@ export function ConversationView({
     setSubs(null)
     setBgCmd(r)
   }, [])
+  // What it left running in the background, as its processes on the host
+  // say (its turn over; not said while it asks something): the bar counts
+  // them, the card lists them, and each opens as one of the log's would.
+  const hostCmds = agent?.cmds && agent.status !== 'blocked' ? agent.cmds : undefined
+  const hostCmd = (id: string): ConvoRunning | undefined => {
+    const c = hostCmds?.list.find((x) => x.task === id)
+    return c && { id, kind: 'cmd', what: c.title ?? '', cmd: c.title, out: c.out, ts: c.since ? new Date(c.since).toISOString() : undefined }
+  }
   // On a touch screen, a subagent's panel is a screen of its own: the phone's
   // back (a swipe, its key) shuts it, as it would a page, rather than leaving
   // the agent. One entry for the panel, put on when it opens; taken off when it
@@ -1367,7 +1375,7 @@ export function ConversationView({
   if (working && lastUser && now >= lastUser) workedFor = duration(now - lastUser)
   if (answered && waits) status = t('convo.answered')
   if (agent?.bg) status = t(agent.bg === 'running' ? 'convo.status.bg' : agent.bg === 'stale' ? 'convo.status.bgStale' : 'convo.status.working')
-  else if (agent?.cmds && agent.status !== 'blocked') status = agent.cmds.n > 1 ? t('convo.bgCmds', { n: agent.cmds.n }) : t('convo.bgCmds1')
+  else if (hostCmds) status = hostCmds.n > 1 ? t('convo.bgCmds', { n: hostCmds.n }) : t('convo.bgCmds1')
   // (Its name as the list names its row — the workspace's or pane's name first, the
   // session's title under it — so the bar and the list say one thing: 11-13, the
   // bar had them the other way round. Where the list has no row of it, as before.)
@@ -1560,20 +1568,39 @@ export function ConversationView({
           ) : (
             <span className="convo-bar-pick is-static">{label}</span>
           )}
-          <span className={'convo-bar-status' + (agent && !convo.failing && !stop ? ' is-' + (agent.bg === 'running' || agent.bg === 'checking' ? 'working' : answered && waits ? 'answered' : agent.status) : '')}>
-            {working && !convo.failing && !stop && <span className="convo-spin" aria-hidden="true" />}
-            {convo.failing ? (
-              t('convo.paused', { time: clockMs(convo.okAt) })
+          {(() => {
+            const cls = 'convo-bar-status' + (agent && !convo.failing && !stop ? ' is-' + (agent.bg === 'running' || agent.bg === 'checking' ? 'working' : answered && waits ? 'answered' : agent.status) : '')
+            const says = (
+              <>
+                {working && !convo.failing && !stop && <span className="convo-spin" aria-hidden="true" />}
+                {convo.failing ? (
+                  t('convo.paused', { time: clockMs(convo.okAt) })
+                ) : (
+                  stop || (
+                    <>
+                      {status}
+                      {/* (How long: dropped where the bar is narrow, the name needing the room.) */}
+                      {workedFor && !agent?.bg && !(agent?.cmds && agent.status !== 'blocked') && <span className="convo-bar-dur"> · {workedFor}</span>}
+                    </>
+                  )
+                )}
+              </>
+            )
+            // (Commands left in the background: which, at a press — the card, where each is listed. 11-15)
+            return hostCmds && !agent?.bg && !convo.failing && !stop && convo.of && convo.status === 'ready' ? (
+              <button type="button" className={cls + ' is-act'} data-card-toggle aria-haspopup="dialog" aria-expanded={!!card} title={t('convo.bgCmdsShow')}
+                onClick={() => {
+                  setCard(card ? '' : cardMode())
+                  // (Opened for them: the commands in sight, below the folder and the changes.)
+                  if (!card) window.setTimeout(() => document.querySelector('.scard [data-sec="running"]')?.scrollIntoView({ block: 'nearest' }), 80)
+                }}
+              >
+                {says}
+              </button>
             ) : (
-              stop || (
-                <>
-                  {status}
-                  {/* (How long: dropped where the bar is narrow, the name needing the room.) */}
-                  {workedFor && !agent?.bg && !(agent?.cmds && agent.status !== 'blocked') && <span className="convo-bar-dur"> · {workedFor}</span>}
-                </>
-              )
-            )}
-          </span>
+              <span className={cls}>{says}</span>
+            )
+          })()}
           {convo.of && convo.status === 'ready' && (
             <button
               ref={cardBtn}
@@ -1619,12 +1646,12 @@ export function ConversationView({
       )}
       {card && convo.of && (
         <SessionCard
-          data={cardData(convo, list, mode, effort)}
+          data={cardData(convo, list, mode, effort, hostCmds)}
           acts={{
             onFolder: files?.open ? (dir) => files.open!(dir) : undefined,
             onChanges: (key, path) => show(key, path),
             onRunning: (id) => {
-              const r = convo.running?.find((x) => x.id === id)
+              const r = convo.running?.find((x) => x.id === id) ?? hostCmd(id)
               if (!r) return
               if (r.kind === 'agent' && isSubId(r.id)) openSub({ agent: r.id, title: r.what })
               else openCmd(r)
@@ -1812,7 +1839,7 @@ export function ConversationView({
           key={bgCmd.id}
           of={convo.of}
           r={convo.running?.find((x) => x.id === bgCmd.id) ?? bgCmd}
-          gone={!convo.running?.some((x) => x.id === bgCmd.id)}
+          gone={!convo.running?.some((x) => x.id === bgCmd.id) && !hostCmds?.list.some((c) => c.task === bgCmd.id)}
           nav={workNav(bgCmd.id)}
           onClose={() => setBgCmd(null)}
           active={active}
@@ -3369,7 +3396,7 @@ const KEY_SIDE = mac ? '⌘B' : 'Ctrl+B'
 // its tasks, its context (its window only where known: past the window, not
 // that one), its model, effort and mode as they are now (a switch's, before
 // the log says it).
-function cardData(convo: Convo, list: Item[], mode?: ModeSwitch, effort?: EffortSwitch): CardData {
+function cardData(convo: Convo, list: Item[], mode?: ModeSwitch, effort?: EffortSwitch, cmds?: RowCmds): CardData {
   const [sid, pane = ''] = (convo.of ?? '').split(' ')
   const files = new Map<string, { path: string; add: number; del: number; key: string }>()
   let add = 0
@@ -3392,6 +3419,7 @@ function cardData(convo: Convo, list: Item[], mode?: ModeSwitch, effort?: Effort
     pane,
     edits: files.size ? { files: [...files.values()].reverse(), add, del } : null,
     running: convo.running ?? [],
+    cmds,
     tasks: convo.tasks?.length ? convo.tasks : null,
     ctx: used ? { used, window: meta.window && used <= meta.window ? meta.window : undefined } : null,
     model: meta.model ? modelName(meta.model) : undefined,
