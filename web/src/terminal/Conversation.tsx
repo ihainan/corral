@@ -1721,6 +1721,10 @@ export function ConversationView({
             // (In the dock where there is one; else the view as a dialog.)
             onGitChanges: (against, base) => {
               if (!dockable) return setGitChanges({ against, base })
+              // (A turn's panel in its slot: shut for it — the dock is not drawn under one.)
+              setChanges(null)
+              setSubs(null)
+              setBgCmd(null)
               setDockStart((d) => ({ against, base, n: (d?.n ?? 0) + 1 }))
               setDockTab('changes')
               setDockOpen(true)
@@ -1934,6 +1938,7 @@ export function ConversationView({
       {dockable && dockOpen && convo.of && convo.status === 'ready' && !(changes && shownEdits) && !subs?.length && !bgCmd && (
         <Dock
           of={convo.of}
+          ident={convo.bind ? [convo.bind.pid, convo.bind.start, convo.bind.session].join(' ') : ''}
           pane={convo.of.split(' ')[1] || convo.bind?.pane || ''}
           tab={dockTab}
           onTab={setDockTab}

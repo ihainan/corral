@@ -83,13 +83,14 @@ function Counts({ add, del }: { add: number; del: number }) {
 // What the view reads and keeps (the dialog's and the dock's tab alike):
 // one reading of the changes, against the working tree or the base, each
 // file's fold and the files read alone.
-export function useChanges(sid: string, pane: string, base: string | undefined, start: ChangesAgainst) {
-  const [against, setAgainst] = useState<ChangesAgainst>(base ? start : 'work')
-  // (Base known later — the dock asks the card's git itself: its first word then kept.)
-  useEffect(() => {
-    if (!base && against === 'base') setAgainst('work')
-  }, [base, against])
+export function useChanges(sid: string, pane: string, start: ChangesAgainst) {
+  // (Asked as it was chosen, the base known yet or not — the host finds the base
+  // itself; a folder with none says so, and the working tree is shown instead.)
+  const [against, setAgainst] = useState<ChangesAgainst>(start)
   const [read, setRead] = useState<Changes | null>(null)
+  useEffect(() => {
+    if (against === 'base' && read && !read.repo && read.reason === 'nobase') setAgainst('work')
+  }, [against, read])
   const [error, setError] = useState('')
   const [again, setAgain] = useState(0)
   // (Each file's fold, by path, once the person has opened or folded it; files read alone.
@@ -162,7 +163,7 @@ export type ChangesState = ReturnType<typeof useChanges>
 
 export function ChangesView({ sid, pane, base, start, acts, onClose }: { sid: string; pane: string; base?: string; start: ChangesAgainst; acts?: ChangesActs; onClose: () => void }) {
   usePrefs() // (its colours follow the theme)
-  const c = useChanges(sid, pane, base, start)
+  const c = useChanges(sid, pane, base ? start : 'work')
   return (
     <Dialog title={t('gch.title')} onClose={onClose} wide hideTitle className="dlg gch-dialog">
       <DialogHead
@@ -188,14 +189,15 @@ export function ChangesView({ sid, pane, base, start, acts, onClose }: { sid: st
 export function ChangesBody({ c, base, acts, className = '' }: { c: ChangesState; base?: string; acts?: ChangesActs; className?: string }) {
   const { against, setAgainst, read, error, folded, alone, put, files, foldAtFirst, loadAlone, add, del, full } = c
   const setFolded = c.setFolded
+  const shownBase = base ?? read?.base // (the dock's: known from the card's git, or from a reading against it)
   return (
       <div className={'gch term-vars ' + (isDark() ? 'dark' : 'light') + (className ? ' ' + className : '')}>
         <div className="gch-bar">
-          {base ? (
+          {shownBase ? (
             <div className="gch-tabs" role="tablist" aria-label={t('gch.title')}>
               {(['work', 'base'] as const).map((a) => (
                 <button key={a} type="button" role="tab" className="gch-tab" aria-selected={against === a} onClick={() => setAgainst(a)}>
-                  {a === 'work' ? t('gch.work') : t('card.vsBase', { base })}
+                  {a === 'work' ? t('gch.work') : t('card.vsBase', { base: shownBase })}
                 </button>
               ))}
             </div>

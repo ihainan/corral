@@ -48,8 +48,11 @@ export function keepDock(k: Partial<Kept>) {
   }
 }
 
-// Per conversation, while the page is: which of the Changes it showed.
+// Per conversation, while the page is: which of the Changes it showed; and
+// the card's tap last taken (each taken once: a later remount — back from
+// the Terminal tab — shows what was chosen since, not the tap again).
 const against = new Map<string, ChangesAgainst>()
+const tapTaken = new Map<string, number>()
 
 // The base the card names (the remote's default branch): asked as the card
 // asks, for the tab to offer it.
@@ -70,6 +73,7 @@ function useBase(sid: string, pane: string, on: boolean, given?: string) {
 
 export function Dock({
   of,
+  ident,
   pane,
   tab,
   onTab,
@@ -86,6 +90,7 @@ export function Dock({
 }: {
   of: string // (the conversation: "<session> <pane>")
   pane: string // (its pane: of's, or a tmux session's conversation's own)
+  ident: string // (the agent there now — its process and session: another, /resume or a new one in the pane, is shown anew, no key of the last one's screen going to it)
   tab: DockTab
   onTab: (t: DockTab) => void
   start?: { against: ChangesAgainst; base?: string; n: number } // (the card's counts tapped: that reading, n each time)
@@ -101,6 +106,7 @@ export function Dock({
 }) {
   usePrefs()
   const sid = of.split(' ')[0]
+  const coarse = window.matchMedia('(pointer: coarse)').matches // (no keys there: no word of one)
   const root = useRef<HTMLElement>(null)
   // (Tabs as a tablist: the arrows between them, Home and End; the one shown the one reached by Tab.)
   const tabKeys = (e: ReactKeyboardEvent) => {
@@ -114,6 +120,13 @@ export function Dock({
   // (Esc closes it only from within it — the composer's Esc stops the agent. The
   // terminal's screen takes its own keys, Esc too, before they come here.)
   const onKey = (e: ReactKeyboardEvent) => {
+    // (F6, as between an app's panes: from the terminal's screen — which takes
+    // Tab and Esc for the terminal — back to the tabs; it is no key of the host's.)
+    if (e.key === 'F6' && !e.altKey && !e.ctrlKey && !e.metaKey) {
+      e.preventDefault()
+      root.current?.querySelector<HTMLElement>('.convo-tray-tab[aria-selected="true"]')?.focus()
+      return
+    }
     if (e.key !== 'Escape' || e.defaultPrevented) return
     e.preventDefault()
     e.stopPropagation()
@@ -181,9 +194,9 @@ export function Dock({
       </div>
       <div className="convo-tray-body" role="tabpanel" id={'dock-panel-' + tab} aria-labelledby={'dock-tab-' + tab}>
         {tab === 'changes' ? (
-          <DockChanges key={of} of={of} sid={sid} pane={pane} start={start} acts={acts} />
+          <DockChanges key={of + ' ' + ident} of={of} sid={sid} pane={pane} start={start} acts={acts} />
         ) : terminal?.can ? (
-          <PanelWindow key={of} sid={sid} active={active} press={terminal.press} onSettled={onSettled} toast={toast} live={{ onFull: terminal.onFull, letters: terminal.letters }} />
+          <PanelWindow key={of + ' ' + ident} sid={sid} active={active} press={terminal.press} onSettled={onSettled} toast={toast} live={{ onFull: terminal.onFull, letters: terminal.letters, note: coarse ? undefined : t('dock.leaveKey') }} />
         ) : (
           <div className="convo-tray-note">
             <p>{t('dock.noScreen')}</p>
@@ -203,15 +216,15 @@ export function Dock({
 // showed last (or the card's, tapped), a line over it to read again.
 function DockChanges({ of, sid, pane, start, acts }: { of: string; sid: string; pane: string; start?: { against: ChangesAgainst; base?: string; n: number }; acts?: ChangesActs }) {
   const base = useBase(sid, pane, true, start?.base)
-  const c = useChanges(sid, pane, base ?? start?.base, start?.against ?? against.get(of) ?? 'work')
-  // (The card's counts tapped again, the dock open already: that reading.)
-  const seen = useRef(start?.n)
+  const fresh = (s?: { n: number }) => !!s && tapTaken.get(of) !== s.n
+  const [first] = useState(() => (fresh(start) ? start!.against : against.get(of) ?? 'work'))
+  const c = useChanges(sid, pane, first)
+  // (The card's counts tapped — at the first or again, the dock open already: that reading, once.)
   useEffect(() => {
-    if (start && start.n !== seen.current) {
-      seen.current = start.n
-      c.setAgainst(start.against)
-    }
-  }, [start, c])
+    if (!start || !fresh(start)) return
+    tapTaken.set(of, start.n)
+    if (c.against !== start.against) c.setAgainst(start.against)
+  })
   useEffect(() => void against.set(of, c.against), [of, c.against])
   return (
     <>
