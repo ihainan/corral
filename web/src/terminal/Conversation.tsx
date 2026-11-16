@@ -1284,6 +1284,8 @@ export function ConversationView({
   const [dockTab, setDockTabState] = useState<DockTab>(() => dockKept().tab)
   const [dockW, setDockWState] = useState(() => dockKept().width)
   const [dockStart, setDockStart] = useState<{ against: ChangesAgainst; base?: string; n: number } | undefined>()
+  // (Over the whole of the thread's column, for a screen wider than the dock: not kept — closed, or another agent's, back to its width.)
+  const [dockBig, setDockBig] = useState(false)
   const dockBtn = useRef<HTMLButtonElement>(null)
   // (Another agent in the pane — its process or session: the card's last tap,
   // its base the last one's repository's, is not this one's — review, 11-15.)
@@ -1293,6 +1295,7 @@ export function ConversationView({
   useEffect(() => {
     setDockStart(undefined)
     setFilesAsk(undefined)
+    setDockBig(false)
   }, [convo.of, bindIdent])
   const dockHere = dockable && !!convo.of && convo.status === 'ready'
   const toFiles = useRef<(a: Omit<FilesAsk, 'n'>) => void>(() => {})
@@ -1313,6 +1316,7 @@ export function ConversationView({
   const setDockOpen = (v: boolean) => {
     setDockOpenState(v)
     keepDock({ open: v })
+    if (!v) setDockBig(false)
   }
   const setDockTab = (v: DockTab) => {
     setDockTabState(v)
@@ -2006,9 +2010,12 @@ export function ConversationView({
           start={dockStart}
           ask={filesAsk}
           onInsert={(p) => dockSink?.insert(p)}
-          terminal={dockTerminal}
+          // (The keys' program named, and the message box gone back to from its screen.)
+          terminal={dockTerminal && { ...dockTerminal, who: convo.bind?.agent === 'claude' ? 'Claude Code' : agentName(convo.bind?.agent), onComposer: () => root.current?.querySelector<HTMLElement>('.composer-input')?.focus() }}
           acts={files ? { view: (p) => files.view(p), open: files.open } : undefined}
           over={viewW <= 1300 || viewW - (sideShown ? sideWidth : 0) - dockW < DOCK_THREAD}
+          expanded={dockBig ? viewW - (sideShown ? sideWidth : 0) : 0}
+          onExpand={setDockBig}
           width={dockW}
           onWidth={setDockW}
           onClose={() => {

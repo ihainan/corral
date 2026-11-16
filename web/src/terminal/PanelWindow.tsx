@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { api, ApiError, errorText } from '../api'
 import { t } from '../i18n'
 import { isCoarse } from '../components/ui'
@@ -33,6 +33,11 @@ function keyOf(e: React.KeyboardEvent): string | null {
 }
 
 const TOUCH_KEYS: [string, string][] = [['up', '↑'], ['down', '↓'], ['left', '←'], ['right', '→'], ['tab', 'Tab'], ['space', 'Space'], ['enter', 'Enter'], ['esc', 'Esc']]
+const KEY_WORD: Record<string, string> = Object.fromEntries([...TOUCH_KEYS, ['shift+tab', 'Shift+Tab'], ['backspace', 'Backspace']])
+const keyWord = (k: string) => KEY_WORD[k] ?? k
+// (How long a key's "sent" stays said; a screen not read for longer than STALE, while it is looked at, is said to be maybe old.)
+const SAID_FOR = 2000
+const STALE = 3000
 
 const runStyle = (r: AnsiRun): React.CSSProperties => {
   const color = r.inverse ? r.background ?? 'var(--panel-bg)' : r.color
@@ -52,13 +57,28 @@ const runStyle = (r: AnsiRun): React.CSSProperties => {
 // away (words, which keys one by one cannot be, go there).
 // (letters: a letter, as Enter or a number, only on the screen shown — Codex's approvals answer to "y", "p".)
 // (onLeave: where F6 takes the focus from its screen — the dock's tabs; none: its own head's first button.)
-export type PanelLive = { onClose?: () => void; onFull?: () => void; note?: string; letters?: boolean; onLeave?: () => void }
+// (who: the program the keys go to, as named to the person ("Claude Code"); onComposer: the message box, gone back to.)
+export type PanelLive = { onClose?: () => void; onFull?: () => void; note?: string; letters?: boolean; onLeave?: () => void; who?: string; onComposer?: () => void }
 export function PanelWindow({ sid, active, press, onSettled, toast, live }: { live?: PanelLive; sid: string; active: boolean; press: () => Record<string, unknown>; onSettled: () => void; toast: (s: string, bad?: boolean) => void }) {
   const [screen, setScreen] = useState({ text: '', digest: '' })
   const [lost, setLost] = useState(false)
   const [said, setSaid] = useState('')
+  // What became of the last key, said by the keys (a key sent said for a moment;
+  // one not sent, or not taken, till the next) — set only when it changes, so
+  // that it is said once to a screen reader.
+  const [keySaid, setKeySaid] = useState<{ text: string; bad: boolean } | null>(null)
+  const keySaidTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
+  const sayKey = useCallback((text: string, bad: boolean) => {
+    clearTimeout(keySaidTimer.current)
+    setKeySaid((was) => (was?.text === text && was.bad === bad ? was : { text, bad }))
+    if (!bad && text) keySaidTimer.current = setTimeout(() => setKeySaid(null), SAID_FOR)
+  }, [])
+  useEffect(() => () => clearTimeout(keySaidTimer.current), [])
+  // (Its keys taken: the screen focused. Said above it, as what the keys do then.)
+  const [taking, setTaking] = useState(false)
   const box = useRef<HTMLPreElement>(null)
-  const at = useRef({ shown: '', stale: true, reading: false, pumping: false, queue: [] as Pressed[], fails: 0, escDone: 0, escGoing: false, alive: true, look: null as AbortController | null })
+  const screenId = useId()
+  const at = useRef({ shown: '', stale: true, reading: false, pumping: false, queue: [] as Pressed[], fails: 0, escDone: 0, escGoing: false, alive: true, look: null as AbortController | null, readAt: 0 })
   const isLive = useRef(!!live)
   const letters = useRef(!!live?.letters)
   letters.current = !!live?.letters
@@ -85,6 +105,7 @@ export function PanelWindow({ sid, active, press, onSettled, toast, live }: { li
       if (!a.alive) return
       a.stale = false
       a.fails = 0
+      a.readAt = Date.now()
       setLost(false)
       setScreen({ text: r.text, digest: (isLive.current ? r.look : r.digest) ?? r.digest })
     } catch (e) {
@@ -115,14 +136,17 @@ export function PanelWindow({ sid, active, press, onSettled, toast, live }: { li
           if (Date.now() - a.escDone < ESC_AGAIN) continue // (the last may have shut it, however long that took to go)
           a.escGoing = true
         }
+        if (a.alive) sayKey(t('panel.sending', { key: keyWord(k) }), false)
         try {
           // (What the key left comes back with it: another round trip for it would be
           // most of what a key takes on a far-off host.)
           const r = await api<{ text?: string; digest?: string; look?: string }>('POST', `/api/sessions/${sid}/conversation/panel`, { ...pressNow.current(), keys: [k], ...(settlesHere(k) ? { digest } : {}), ...(isLive.current ? { live: true } : {}) }, { timeoutMs: 15000 })
           a.stale = true
           if (a.alive) setSaid('')
+          if (a.alive) sayKey(t('panel.sent', { key: keyWord(k) }), false)
           if (a.alive && typeof r?.text === 'string' && typeof r.digest === 'string') {
             a.stale = false
+            a.readAt = Date.now()
             setLost(false)
             setScreen({ text: r.text, digest: (isLive.current ? r.look : r.digest) ?? r.digest })
           }
@@ -130,9 +154,15 @@ export function PanelWindow({ sid, active, press, onSettled, toast, live }: { li
         } catch (e) {
           a.queue.length = 0 // (what was pressed after it was meant for what this would have shown)
           a.stale = true
-          if (e instanceof ApiError && e.code === 'screen_changed') setSaid(t('panel.changed'))
-          else if (e instanceof ApiError && e.code === 'no_dialog') onSettledNow.current()
-          else toastNow.current(e instanceof ApiError ? errorText(e) : t('panel.failed'), true)
+          if (!a.alive) {
+            /* (gone: nothing to say it on) */
+          } else if (e instanceof ApiError && e.code === 'screen_changed') sayKey(t('panel.changed'), true)
+          else if (e instanceof ApiError && e.code === 'no_dialog') (sayKey('', false), onSettledNow.current())
+          else {
+            const why = e instanceof ApiError ? errorText(e) : t('panel.failed')
+            sayKey(why, true)
+            if (!isLive.current) toastNow.current(why, true) // (a panel of its own: as before, too)
+          }
         } finally {
           if (k === 'esc') {
             a.escDone = Date.now()
@@ -143,19 +173,19 @@ export function PanelWindow({ sid, active, press, onSettled, toast, live }: { li
     } finally {
       a.pumping = false
     }
-  }, [sid, read])
+  }, [sid, read, sayKey])
 
   const send = useCallback(
     (k: string) => {
       const a = at.current
       if (k === 'esc' && (a.escGoing || a.queue.some((x) => x.k === 'esc'))) return
       if (settlesHere(k) && !a.shown) return // (nothing on show yet)
-      if (a.queue.length >= QUEUE) return
+      if (a.queue.length >= QUEUE) return sayKey(t('panel.tooFast', { key: keyWord(k) }), true)
       a.queue.push({ k, digest: a.shown })
       a.look?.abort() // (a look under way would hold it up behind it)
       void pump()
     },
-    [pump],
+    [pump, sayKey],
   )
 
   // Read over and over while it is open and seen; the focus on it for its keys.
@@ -183,7 +213,47 @@ export function PanelWindow({ sid, active, press, onSettled, toast, live }: { li
     if (active && !isCoarse() && !isLive.current) box.current?.focus({ preventScroll: true })
   }, [active])
 
+  // Whether what is shown may be old: not read for STALE while it is looked at
+  // — counted from when it came back into sight, not from a read before (a tab
+  // in the background, its looks paused, is not old the moment it is back).
+  const [now, setNow] = useState(() => Date.now())
+  const seenSince = useRef(Date.now())
+  useEffect(() => {
+    if (!active) return
+    seenSince.current = Date.now()
+    const back = () => {
+      if (!document.hidden) seenSince.current = Date.now()
+    }
+    document.addEventListener('visibilitychange', back)
+    const i = setInterval(() => setNow(Date.now()), 1000)
+    return () => {
+      document.removeEventListener('visibilitychange', back)
+      clearInterval(i)
+    }
+  }, [active])
+  const readAt = at.current.readAt
+  const oldFor = readAt ? now - Math.max(readAt, seenSince.current) : 0
+  const old = !!live && !lost && !!readAt && !document.hidden && oldFor > STALE ? Math.round((now - readAt) / 1000) : 0
+
   const lines = useMemo(() => ansiLines(screen.text), [screen.text])
+  // (A screen wider than its room: a fade on the side more of it is on.)
+  const view = useRef<HTMLDivElement>(null)
+  const [more, setMore] = useState({ left: false, right: false })
+  const measure = useCallback(() => {
+    const el = box.current
+    if (!el) return
+    const left = el.scrollLeft > 1
+    const right = el.scrollWidth - el.clientWidth - el.scrollLeft > 1
+    setMore((m) => (m.left === left && m.right === right ? m : { left, right }))
+  }, [])
+  useLayoutEffect(measure, [lines, measure])
+  useEffect(() => {
+    const el = box.current
+    if (!el || typeof ResizeObserver === 'undefined') return
+    const ro = new ResizeObserver(measure)
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [measure])
   // (What a key goes with: what has been drawn, not what was read.)
   useLayoutEffect(() => {
     at.current.shown = screen.digest
@@ -195,10 +265,20 @@ export function PanelWindow({ sid, active, press, onSettled, toast, live }: { li
     if (el && pinned.current) el.scrollTop = el.scrollHeight
   }, [lines])
 
+  const who = live?.who || t('panel.whoTerminal')
+  // (The keys as buttons: on a touch screen, and by a live screen everywhere — an
+  // approval answered without the screen focused, nor its keys learnt.)
+  const keyBar = isCoarse() || !!live
+  const keyStatus = (
+    <span className={'convo-panelwin-stat' + (keySaid?.bad ? ' is-bad' : '')} role="status">
+      {keySaid?.text ?? ''}
+    </span>
+  )
   return (
     <div className="convo-panelwin" role="group" aria-label={t(live ? 'panel.liveTitle' : 'panel.title')}>
-      <div className="convo-panelwin-head">
-        <span className="convo-panelwin-title">{t(live ? 'panel.liveTitle' : 'panel.title')}</span>
+      <div className={'convo-panelwin-head' + (live ? ' is-live' : '')}>
+        {/* (Live: one short line — what a click does, and where words go; the rest said once its keys are taken.) */}
+        {!live && <span className="convo-panelwin-title">{t('panel.title')}</span>}
         {!isCoarse() && <span className="convo-panelwin-hint">{t(live ? 'panel.liveHint' : 'panel.hint')}</span>}
         {live?.onFull && (
           <button type="button" className="link-btn convo-panelwin-close" onClick={live.onFull}>
@@ -218,49 +298,91 @@ export function PanelWindow({ sid, active, press, onSettled, toast, live }: { li
         )}
       </div>
       {live?.note && <p className="convo-panelwin-note">{live.note}</p>}
-      {live && !isCoarse() && <p className="convo-panelwin-note">{t('panel.leaveKey')}</p>}
-      {/* (Takes the keys: what is pressed here goes to the panel.) */}
-      <pre
-        ref={box}
-        className="convo-panelwin-screen"
-        tabIndex={0}
-        aria-label={t(live ? 'panel.liveScreen' : 'panel.screen')}
-        onScroll={(e) => {
-          const el = e.currentTarget
-          pinned.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24
-        }}
-        onKeyDown={(e) => {
-          // (Its screen takes Tab and Esc for the terminal: F6, as between an app's
-          // panes, is the way out — never a key of the host's — review, 11-15.)
-          if (live && e.key === 'F6' && !e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
+      {/* (Its keys taken: said plainly, with the ways out — F6, or back to the message box.) */}
+      {live && taking && !isCoarse() && (
+        <div className="convo-panelwin-taking" id={screenId + '-taking'}>
+          <span>{t('panel.taking', { who })}</span>
+          {live.onComposer && (
+            <button
+              type="button"
+              className="link-btn"
+              // (Pressed with the screen focused: not a blur first that would take the bar away under the pointer.)
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={live.onComposer}
+            >
+              {t('panel.toComposer')}
+            </button>
+          )}
+        </div>
+      )}
+      <div ref={view} className={'convo-panelwin-view' + (more.left ? ' more-left' : '') + (more.right ? ' more-right' : '')}>
+        {/* (Takes the keys: what is pressed here goes to the panel.) */}
+        <pre
+          ref={box}
+          id={screenId}
+          className="convo-panelwin-screen"
+          tabIndex={0}
+          aria-label={t(live ? 'panel.liveScreen' : 'panel.screen')}
+          aria-describedby={live && taking ? screenId + '-taking' : undefined}
+          onFocus={() => setTaking(true)}
+          onBlur={() => setTaking(false)}
+          onScroll={(e) => {
+            const el = e.currentTarget
+            pinned.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24
+            measure()
+          }}
+          onPaste={(e) => {
+            // (Words are not keys one by one: said, not sent in part.)
+            e.preventDefault()
+            sayKey(t('panel.noPaste'), true)
+          }}
+          onKeyDown={(e) => {
+            // (Its screen takes Tab and Esc for the terminal: F6, as between an app's
+            // panes, is the way out — never a key of the host's — review, 11-15.)
+            if (live && e.key === 'F6' && !e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
+              e.preventDefault()
+              e.stopPropagation()
+              if (live.onLeave) live.onLeave()
+              else e.currentTarget.parentElement?.parentElement?.querySelector<HTMLElement>('.convo-panelwin-head button')?.focus()
+              return
+            }
+            const k = keyOf(e)
+            if (!k) {
+              // (A character it cannot pass on — another script's, an input method's: said, not dropped unseen.)
+              if (!e.altKey && !e.ctrlKey && !e.metaKey && (e.key.length === 1 || e.nativeEvent.isComposing || e.keyCode === 229)) {
+                e.preventDefault()
+                sayKey(t('panel.noText'), true)
+              }
+              return
+            }
             e.preventDefault()
             e.stopPropagation()
-            if (live.onLeave) live.onLeave()
-            else e.currentTarget.parentElement?.querySelector<HTMLElement>('.convo-panelwin-head button')?.focus()
-            return
-          }
-          const k = keyOf(e)
-          if (!k) return
-          e.preventDefault()
-          e.stopPropagation()
-          send(k)
-        }}
-      >
-        {lines.map((runs, i) => (
-          <div key={i} className="convo-panelwin-line">
-            {runs.length ? runs.map((r, j) => <span key={j} style={runStyle(r)}>{r.text}</span>) : ' '}
-          </div>
-        ))}
-      </pre>
-      {(said || lost) && <p className="convo-panelwin-note">{lost ? t('panel.lost') : said}</p>}
-      {isCoarse() && (
-        <div className="convo-panelwin-keys">
+            send(k)
+          }}
+        >
+          {lines.map((runs, i) => (
+            <div key={i} className="convo-panelwin-line">
+              {runs.length ? runs.map((r, j) => <span key={j} style={runStyle(r)}>{r.text}</span>) : ' '}
+            </div>
+          ))}
+        </pre>
+      </div>
+      {(said || lost || old > 0) && (
+        <p className="convo-panelwin-note" role="status">
+          {lost ? t('panel.lost') : said || t('panel.old', { s: old })}
+        </p>
+      )}
+      {keyBar ? (
+        <div className={'convo-panelwin-keys' + (isCoarse() ? '' : ' is-compact')}>
           {TOUCH_KEYS.map(([k, label]) => (
-            <button key={k} type="button" className="convo-panelwin-key" onClick={() => send(k)} aria-label={label}>
+            <button key={k} type="button" className="convo-panelwin-key" onClick={() => send(k)} aria-label={t('panel.sendKey', { key: label, who })} title={t('panel.sendKey', { key: label, who })}>
               {label}
             </button>
           ))}
+          {keyStatus}
         </div>
+      ) : (
+        <p className="convo-panelwin-note convo-panelwin-statline">{keyStatus}</p>
       )}
     </div>
   )

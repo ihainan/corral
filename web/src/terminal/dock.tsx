@@ -8,7 +8,7 @@
 // in this browser); what each tab shows is per conversation, kept while the
 // page is.
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
-import { FolderOpen, GitCompareArrows, SquareTerminal, X } from 'lucide-react'
+import { FolderOpen, GitCompareArrows, Maximize2, Minimize2, SquareTerminal, X } from 'lucide-react'
 import { api } from '../api'
 import { t } from '../i18n'
 import { usePrefs } from '../prefs'
@@ -32,7 +32,7 @@ export type DockSink = { file: (path: string, lines?: LineSpan) => void; files: 
 // here (liveFor: AgentsChat's one switch for it), what a key is pressed with,
 // the whole terminal.
 // (letters: a letter pressed only on the screen shown — Codex's, as the composer's live panel.)
-export type DockTerminal = { can: boolean; press: () => Record<string, unknown>; onFull: () => void; letters?: boolean }
+export type DockTerminal = { can: boolean; press: () => Record<string, unknown>; onFull: () => void; letters?: boolean; who?: string; onComposer?: () => void }
 
 // The person's: kept in this browser (none there — private, blocked: as at first).
 const KEY = 'corral.dock'
@@ -96,6 +96,8 @@ export function Dock({
   terminal,
   acts,
   over,
+  expanded,
+  onExpand,
   width,
   onWidth,
   onClose,
@@ -114,6 +116,8 @@ export function Dock({
   terminal?: DockTerminal
   acts?: ChangesActs
   over: boolean // (over the thread, not beside it)
+  expanded: number // (over the whole of the thread's column, this wide — the side list left in sight: for a screen wider than the dock; 0: not)
+  onExpand: (v: boolean) => void
   width: number
   onWidth: (w: number) => void
   onClose: () => void
@@ -143,7 +147,9 @@ export function Dock({
     if (e.key !== 'Escape' || e.defaultPrevented) return
     e.preventDefault()
     e.stopPropagation()
-    onClose()
+    // (Expanded: back beside the thread first.)
+    if (expanded) onExpand(false)
+    else onClose()
   }
   // Its edge, to make it wider or narrower: by a drag, or the arrows when focused.
   const drag = (e: React.PointerEvent) => {
@@ -166,8 +172,9 @@ export function Dock({
     onWidth(Math.min(DOCK_W.max, Math.max(DOCK_W.min, w)))
   }
   return (
-    <aside className={'convo-panel convo-tray' + (over ? ' is-over' : '')} style={{ width }} aria-label={t('dock.title')} ref={root} onKeyDown={onKey}>
-      {!over && (
+    <aside className={'convo-panel convo-tray' + (over || expanded ? ' is-over' : '') + (expanded ? ' is-expanded' : '')} style={{ width: expanded ? Math.max(width, expanded) : width }} aria-label={t('dock.title')} ref={root} onKeyDown={onKey}>
+      {/* (Its edge kept over the thread too: one gone over it as it widened can be made narrower again.) */}
+      {!expanded && (
         <div
           className="convo-tray-grip"
           role="separator"
@@ -201,6 +208,9 @@ export function Dock({
             </button>
           ))}
         </div>
+        <button type="button" className="icon-btn convo-tray-expand" aria-pressed={!!expanded} onClick={() => onExpand(!expanded)} aria-label={t(expanded ? 'dock.collapse' : 'dock.expand')} title={t(expanded ? 'dock.collapse' : 'dock.expand')}>
+          {expanded ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
+        </button>
         <button type="button" className="icon-btn convo-tray-close" onClick={onClose} aria-label={t('dock.close')} title={t('dock.close')}>
           <X size={18} />
         </button>
@@ -215,7 +225,7 @@ export function Dock({
         {tab === 'files' ? null : tab === 'changes' ? (
           <DockChanges key={of + ' ' + ident} of={of} sid={sid} pane={pane} start={start} acts={acts} />
         ) : terminal?.can ? (
-          <PanelWindow key={of + ' ' + ident} sid={sid} active={active} press={terminal.press} onSettled={onSettled} toast={toast} live={{ onFull: terminal.onFull, letters: terminal.letters, onLeave: () => root.current?.querySelector<HTMLElement>('.convo-tray-tab[aria-selected="true"]')?.focus() }} />
+          <PanelWindow key={of + ' ' + ident} sid={sid} active={active} press={terminal.press} onSettled={onSettled} toast={toast} live={{ onFull: terminal.onFull, letters: terminal.letters, who: terminal.who, onComposer: terminal.onComposer, onLeave: () => root.current?.querySelector<HTMLElement>('.convo-tray-tab[aria-selected="true"]')?.focus() }} />
         ) : (
           <div className="convo-tray-note">
             <p>{t('dock.noScreen')}</p>

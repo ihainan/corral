@@ -1065,6 +1065,10 @@ button.gch-ut:hover { background: var(--term-hover); }
 .gch.is-docked .gch-file-head { top: -8px; } /* (its padding above, as .gch's 12 in the dialog) */
 .convo-tray .convo-panelwin { flex: 1; min-height: 0; border: 0; border-radius: 0; }
 .convo-tray .convo-panelwin-screen { flex: 1; max-height: none; }
+.convo-tray .convo-panelwin-view { flex: 1; }
+/* (Expanded: over the whole of the thread's column.) */
+.convo-tray.is-expanded { max-width: none; }
+.convo-tray-expand { flex: none; }
 .convo-tray-note { display: flex; flex-direction: column; align-items: flex-start; gap: 12px; padding: 24px 16px; color: var(--term-fg-2); font-size: var(--fs-sub); line-height: var(--lh-sub); }
 .convo-tray-note p { margin: 0; }
 .convo-tray-hint { flex: none; margin: 0; padding: 8px 16px 0; color: var(--term-fg-3); font-size: var(--fs-note); line-height: var(--lh-note); }
@@ -2010,11 +2014,39 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 .term-root .convo-panelwin-close { flex: none; margin-left: auto; color: var(--term-fg-2); font-size: 13px; }
 .convo-panelwin-screen { margin: 0; padding: 10px 12px; max-height: min(56vh, 520px); overflow: auto; background: var(--panel-bg); color: var(--panel-fg); font-family: var(--font-mono, ui-monospace, Menlo, Consolas, monospace); font-size: 12.5px; line-height: 1.35; white-space: pre; outline: none; }
 .convo-panelwin-screen:focus-visible { box-shadow: inset 0 0 0 2px var(--term-accent-text); }
+/* (A live screen: its keys taken shown on any focus, a click's too — not the keyboard's alone.) */
+.convo-panelwin-head.is-live { flex-wrap: wrap; row-gap: 2px; }
+.convo-panelwin-head.is-live .convo-panelwin-hint { flex: 1 1 12em; white-space: normal; }
+.convo-panelwin-head.is-live .convo-panelwin-close { margin-left: 0; }
+.convo-panelwin-taking { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; padding: 6px 12px; background: var(--term-accent-soft); color: var(--term-accent-text); font-size: 13px; line-height: 1.4; }
+.convo-panelwin-taking > span { flex: 1 1 14em; min-width: 0; }
+.term-root .convo-panelwin-taking .link-btn { flex: none; color: var(--term-accent-text); font-size: 13px; text-decoration: underline; }
+.convo-panelwin-view { position: relative; display: flex; flex-direction: column; min-height: 0; }
+.convo-panelwin-view .convo-panelwin-screen:focus { box-shadow: inset 0 0 0 2px var(--term-accent-text); }
+/* (More of the screen to one side: a fade there, and the scrollbar kept in sight.) */
+.convo-panelwin-view::before, .convo-panelwin-view::after { content: ''; position: absolute; top: 0; bottom: 12px; width: 32px; pointer-events: none; opacity: 0; transition: opacity 0.15s var(--ease); z-index: 1; }
+.convo-panelwin-view::before { left: 0; background: linear-gradient(to right, var(--panel-bg), transparent); }
+.convo-panelwin-view::after { right: 0; background: linear-gradient(to left, var(--panel-bg), transparent); }
+.convo-panelwin-view.more-left::before, .convo-panelwin-view.more-right::after { opacity: 1; }
+.convo-panelwin-view .convo-panelwin-screen::-webkit-scrollbar { height: 12px; width: 10px; }
+.convo-panelwin-view .convo-panelwin-screen::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.28); border-radius: 6px; border: 2px solid var(--panel-bg); }
+.convo-panelwin-view .convo-panelwin-screen::-webkit-scrollbar-track, .convo-panelwin-view .convo-panelwin-screen::-webkit-scrollbar-corner { background: var(--panel-bg); }
+.convo-panelwin-stat { flex: 1 1 8em; min-width: 0; align-self: center; color: var(--term-fg-2); font-size: 12px; line-height: 1.35; }
+.convo-panelwin-stat.is-bad { color: var(--term-warn-text); }
+.convo-panelwin-statline { padding-top: 0; padding-bottom: 0; }
+.convo-panelwin-statline:has(.convo-panelwin-stat:empty) { height: 0; overflow: hidden; }
 .convo-panelwin-line { min-height: 1.35em; }
 .convo-panelwin-note { margin: 0; padding: 6px 12px; color: var(--term-fg-2); font-size: 13px; }
 .convo-panelwin-keys { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px; }
 .convo-panelwin-key { flex: 1 0 calc(25% - 6px); min-height: 44px; border: 1px solid var(--term-line); border-radius: var(--r); background: var(--term-key, var(--term-chrome)); color: var(--term-fg); font-size: 14px; cursor: pointer; }
 .convo-panelwin-key:active { background: var(--term-hover); }
+/* (A desk's: one row of small keys, what became of the last one beside them.) */
+.convo-panelwin-keys.is-compact { flex-wrap: wrap; align-items: center; gap: 4px; padding: 6px 8px; border-top: 1px solid var(--term-line); }
+.convo-panelwin-keys.is-compact .convo-panelwin-key { flex: none; min-width: 32px; min-height: 26px; padding: 0 8px; font-size: 12px; }
+.convo-panelwin-keys.is-compact .convo-panelwin-key:hover { background: var(--term-hover); }
+.convo-panelwin-keys.is-compact .convo-panelwin-stat { margin-left: 4px; }
+.convo-panelwin-keys:not(.is-compact) .convo-panelwin-stat { flex-basis: 100%; }
+.convo-panelwin-keys:not(.is-compact) .convo-panelwin-stat:empty { display: none; }
 /* (Its room taken back by the card: as tall as the screen allows, not cut to a scroll of its own.) */
 .convo-dock:has(.composer.is-asked) > .convo-dock-ask { max-height: min(64vh, 600px); }
 .convo-dock .composer.is-asked .agents-chat-why { margin-bottom: 0; }
