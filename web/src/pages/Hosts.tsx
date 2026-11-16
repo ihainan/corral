@@ -122,6 +122,7 @@ export function HostsPage() {
     )
 
   const empty = hosts !== null && hosts.length === 0
+  const hues = hostHues(hosts)
   // Each host's sessions, as its row says them (11-05): agents waiting, in
   // their colour and weight, else that it runs — words, no badge.
   const hostState = (id: number): { text: string; wait: boolean } | null => {
@@ -189,7 +190,7 @@ export function HostsPage() {
           <h2 id="live-title" data-flip="live" data-flip-in="">{t('hosts.running')}<span className="section-n">{running.length}</span></h2>
           <ul className="live-rows">
             {running.map((s) => (
-              <LiveCard key={s.id} s={s} all={running} stale={sessFailed} onClose={(label) => closeSession(s, label)} />
+              <LiveCard key={s.id} s={s} all={running} stale={sessFailed} hue={hues.get(s.host_id)} onClose={(label) => closeSession(s, label)} />
             ))}
           </ul>
         </section>
@@ -271,7 +272,7 @@ export function HostsPage() {
                 <li key={h.id} className="host-card">
                   <button className="host-card-main" onClick={() => connect(h)} disabled={busyHost === h.id} aria-label={`${t('hosts.connect')} ${h.name}`} aria-describedby={'hs-' + h.id}>
                     <span className="host-card-top">
-                      <HostMark name={h.name} />
+                      <HostMark name={h.name} hue={hues.get(h.id)} />
                       <span className="host-card-name">{h.name}</span>
                     </span>
                     <span className="host-card-addr" id={'hs-' + h.id}>
@@ -320,24 +321,26 @@ export function HostsPage() {
 }
 
 // A host's mark (11-15): its initials on a tint of its own, the same hue
-// for the same name wherever it shows, so a host is found by colour as well
-// as by its name — "Home Services" HS, "dev-230" D2, "101" 10.
-// (Eight hues apart enough to tell: from a hue anywhere on the wheel, two
-// hosts came out near each other more often than not.)
-const HOST_HUES = [214, 162, 268, 24, 338, 192, 44, 128]
-export function hostHue(name: string): number {
-  let h = 0
-  for (const c of name) h = (h * 31 + c.codePointAt(0)!) >>> 0
-  return HOST_HUES[h % HOST_HUES.length]
+// wherever the host shows (its card, the dot of its running sessions), so a
+// host is found by colour as well as by its name — "Home Services" HS,
+// "dev-230" D2, "101" 10.
+// The hue is given by the host's place among the user's hosts (oldest first),
+// not by its name (11-16): from a name, three hosts came out two greens and a
+// purple, and two alike read as two of a kind. No green, amber or red here:
+// those are what the page says states in (running, waiting, failed).
+const HOST_HUES = [214, 278, 188, 338, 26]
+export function hostHues(hosts: Host[] | null): Map<number, number> {
+  const ids = (hosts ?? []).map((h) => h.id).sort((a, b) => a - b)
+  return new Map(ids.map((id, i) => [id, HOST_HUES[i % HOST_HUES.length]]))
 }
 export function hostInitials(name: string): string {
   const w = name.trim().split(/[\s._-]+/).filter(Boolean)
   const two = w.length > 1 ? [...w[0]][0] + [...w[1]][0] : [...name.trim()].slice(0, 2).join('')
   return two.toUpperCase() || '?'
 }
-function HostMark({ name }: { name: string }) {
+function HostMark({ name, hue }: { name: string; hue: number | undefined }) {
   return (
-    <span className="host-mark" style={{ '--h': hostHue(name) } as React.CSSProperties} aria-hidden="true">
+    <span className="host-mark" style={{ '--h': hue ?? HOST_HUES[0] } as React.CSSProperties} aria-hidden="true">
       {hostInitials(name)}
     </span>
   )
@@ -349,7 +352,7 @@ function HostMark({ name }: { name: string }) {
 // 1.4); herdr agents waiting for an answer said first, in their colour. Their
 // state when herdr was lost since, or the list could not be read just now
 // (stale), is not told as now: it is said to be unknown (1.2).
-function LiveCard({ s, all, stale, onClose }: { s: SessionInfo; all: SessionInfo[]; stale: boolean; onClose: (label: string) => void }) {
+function LiveCard({ s, all, stale, hue, onClose }: { s: SessionInfo; all: SessionInfo[]; stale: boolean; hue: number | undefined; onClose: (label: string) => void }) {
   const which = sessionWhich(s, all)
   const ag = sessionAgents(s)
   const unknown = !!ag && (ag.lost || stale)
@@ -375,7 +378,7 @@ function LiveCard({ s, all, stale, onClose }: { s: SessionInfo; all: SessionInfo
             </span>
             <span className="live-which">{which}</span>
             <span className="live-host">
-              <span className="live-host-dot" style={{ '--h': hostHue(s.host_name) } as React.CSSProperties} aria-hidden="true" />
+              {hue !== undefined && <span className="live-host-dot" style={{ '--h': hue } as React.CSSProperties} aria-hidden="true" />}
               {s.host_name}
             </span>
           </span>
