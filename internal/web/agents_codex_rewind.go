@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/ihainan/corral/internal/herdr"
 	"github.com/ihainan/corral/internal/sshx"
@@ -529,13 +530,34 @@ func codexHoldsOnly(s, typed, status string) bool {
 	return foot == "" || (status != "" && codexDigitless(strings.TrimSpace(foot)) == codexDigitless(status))
 }
 
-// codexDigitless: s with the figures a status line moves — a percentage
-// ("50%"), a count of tokens ("12K", "1.2M", "141K / 200K"), a time
-// ("12:30", "3m") — as one mark: the same status line whatever they say now;
-// not other digits (a model's version, a folder's name: review fork8-4).
-var codexDigits = regexp.MustCompile(`\b[0-9]+(?:[.,][0-9]+)?(?:%|[KkMm]\b|[smhd]\b)|\b[0-9]{1,2}:[0-9]{2}\b`)
+// codexDigitless: s with the figures a status line moves as one mark — a
+// figure standing alone (after a space, a bracket, a slash or "·", at the
+// start), with its unit if any ("50%", "12K", "1.2M", "123", "3m", "12:30"),
+// those in a row ("1m 0s", "141K / 200K") as one — so it is the same line
+// whatever they say now; not digits within a word ("gpt-6.1", "proj2",
+// "ctx-32k": review fork8-4, fork9-1, fork9-2).
+var (
+	codexFigure  = regexp.MustCompile(`(^|[\s(\[/·])[0-9]+(?:[.,:][0-9]+)*(?:%|[KkMmGg]|[smhd]|ms)?(?:$|[\s)\]/·,])`)
+	codexFigures = regexp.MustCompile(`#(?:[\s/]*#)+`)
+)
 
-func codexDigitless(s string) string { return codexDigits.ReplaceAllString(s, "#") }
+func codexDigitless(s string) string {
+	// (Twice: figures side by side share the space between them.)
+	for range 2 {
+		s = codexFigure.ReplaceAllStringFunc(s, func(m string) string {
+			r := []rune(m)
+			head, tail := "", ""
+			if len(r) > 0 && !unicode.IsDigit(r[0]) {
+				head = string(r[0])
+			}
+			if n := len(r); n > 0 && strings.ContainsRune(" \t)]/·,", r[n-1]) {
+				tail = string(r[n-1])
+			}
+			return head + "#" + tail
+		})
+	}
+	return codexFigures.ReplaceAllString(s, "#")
+}
 
 // codexRestStatus: of a screen of Codex at rest, its input empty, the first
 // line of its footer — its status line, where it has one (its hints, "? for

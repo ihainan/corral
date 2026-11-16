@@ -140,3 +140,33 @@ func TestTmuxCopyCodexSh(t *testing.T) {
 		t.Errorf("two children taken: %q", got)
 	}
 }
+
+// A status line's moving figures set aside, alone or in a row, whatever
+// their unit; digits within a word kept (review fork8-4, fork9-1, fork9-2).
+func TestCodexDigitless(t *testing.T) {
+	same := [][2]string{
+		{"gpt · Context 50% left · 5h 11% used", "gpt · Context 48% left · 5h 12% used"},
+		{"123 tokens", "124 tokens"},
+		{"999 tokens", "1K tokens"},
+		{"elapsed 59s", "elapsed 1m 0s"},
+		{"141K / 200K", "142K / 200K"},
+		{"at 12:30", "at 12:31"},
+		{"(50%)", "(49%)"},
+	}
+	for _, c := range same {
+		if codexDigitless(c[0]) != codexDigitless(c[1]) {
+			t.Errorf("%q and %q not taken alike: %q, %q", c[0], c[1], codexDigitless(c[0]), codexDigitless(c[1]))
+		}
+	}
+	other := [][2]string{
+		{"gpt-6.1 · ~/proj1", "gpt-7.2 · ~/proj2"},
+		{"~/ctx-32k", "~/ctx-128k"},
+		{"~/job-1m", "~/job-2m"},
+		{"main", "main2"},
+	}
+	for _, c := range other {
+		if codexDigitless(c[0]) == codexDigitless(c[1]) {
+			t.Errorf("%q and %q taken alike: %q", c[0], c[1], codexDigitless(c[0]))
+		}
+	}
+}
