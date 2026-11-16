@@ -44,7 +44,7 @@ export function ForkDialog({
   dir: string
   name: string
   check?: () => string // (asked again as it is sent: why not now, or '')
-  onDone: (pane: string, first: string, opened?: SessionInfo, rewound?: boolean, named?: boolean) => void // (opened: from a tmux session, the terminal opened on the copy's own; rewound: false where a Codex's rewind was not seen to end there)
+  onDone: (pane: string, first: string, opened?: SessionInfo, rewound?: boolean, named?: boolean, rw?: CodexRewind) => void // (rw: as counted when sent) // (opened: from a tmux session, the terminal opened on the copy's own; rewound: false where a Codex's rewind was not seen to end there)
   onClose: () => void
 }) {
   const [label, setLabel] = useState(() => t('fork.defaultName', { name }).slice(0, 40))
@@ -88,10 +88,10 @@ export function ForkDialog({
           setBusy(false)
           return
         }
-        onDone('', first.trim(), opened, r.rewound, r.named)
+        onDone('', first.trim(), opened, r.rewound, r.named, rw)
         return
       }
-      onDone(r.pane ?? '', first.trim(), undefined, r.rewound, r.named)
+      onDone(r.pane ?? '', first.trim(), undefined, r.rewound, r.named, rw)
     } catch (err) {
       if (err instanceof ApiError && err.code === 'no_session') setError(t('fork.noSession'))
       else if (err instanceof ApiError && err.code === 'bad_message') setError(t('fork.badMessage'))

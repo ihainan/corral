@@ -2769,16 +2769,18 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
         dir={forking.dir}
         name={forking.name}
         check={forking.at ? undefined : stillAtRest(forking.key)}
-        onDone={(pane, first, opened, rewound, named) => {
+        onDone={(pane, first, opened, rewound, named, rw) => {
           const f = forking
           setForking(null)
           onStarted(opened ?? f.s, pane, first)
           // (A Codex's copy is told by its name: one not given it may not be shown here.)
           if (f.kind === 'codex' && named === false && rewound !== false) toast(t('fork.notNamed'), true)
-          if (f.rewind) {
+          // (As counted when it was sent, not when the dialog opened — review fork5-3.)
+          const sent = rw ?? f.rewind
+          if (sent) {
             if (rewound === false) toast(t('fork.notRewound'), true)
-            else if (f.rewind.alike) toast(t('fork.rewoundAlike'), true)
-            else if (!f.rewind.clear) toast(t('fork.leftInTerminal'))
+            else if (sent.alike) toast(t('fork.rewoundAlike'), true)
+            else if (!sent.clear) toast(t('fork.leftInTerminal'))
           }
         }}
         onClose={() => setForking(null)}

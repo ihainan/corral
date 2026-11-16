@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 
@@ -94,6 +95,47 @@ type herdrRewindPane struct {
 	sess   *term.Session
 	socket string
 	pane   string
+	// (The Codex found in it once started, by its pid and start: each key
+	// pressed only while that very process is in front there — another in
+	// the pane since is not keyed to: review fork5-1.)
+	pid, start int64
+}
+
+// herdrRewindPaneOf: the pane's one Codex, as a look begun now finds it.
+func (s *Server) herdrRewindPaneOf(ctx context.Context, sess *term.Session, socket, pane string) (herdrRewindPane, bool) {
+	var c codexPane
+	ok := false
+	for i := 0; i < 20 && ctx.Err() == nil; i++ {
+		if panes, err := s.codexPanes.run(ctx, sess, socket, pane); err == nil {
+			if c, ok = panes[pane]; ok && !c.Several && c.PID > 0 && c.Start > 0 {
+				break
+			}
+			ok = false
+		}
+		sleepCtx(ctx, 500*time.Millisecond)
+	}
+	if !ok {
+		return herdrRewindPane{}, false
+	}
+	return herdrRewindPane{sess: sess, socket: socket, pane: pane, pid: c.PID, start: c.Start}, true
+}
+
+// still: that process is alive, the same one (its start), in front on its
+// terminal, in that herdr pane.
+func (p herdrRewindPane) still(ctx context.Context) error {
+	cmd := `pid=` + strconv.FormatInt(p.pid, 10) + ` start=` + strconv.FormatInt(p.start, 10) + ` pane=` + sshx.QuoteShell(p.pane) + `
+stat=$(tr '\n' ' ' <"/proc/$pid/stat" 2>/dev/null) || exit 3
+rest=${stat##*) }
+[ "$(printf '%s' "$rest" | cut -d' ' -f20)" = "$start" ] || exit 3
+pgrp=$(printf '%s' "$rest" | cut -d' ' -f3); tpgid=$(printf '%s' "$rest" | cut -d' ' -f6)
+[ -n "$pgrp" ] && [ "$pgrp" = "$tpgid" ] || exit 3
+tr '\0\n' '\n\001' <"/proc/$pid/environ" 2>/dev/null | grep -qxF "HERDR_PANE_ID=$pane" || exit 3
+echo ok`
+	out, err := sshx.Output(ctx, p.sess.Client(), cmd, 64)
+	if err != nil || strings.TrimSpace(string(out)) != "ok" {
+		return errors.New("not the Codex it was")
+	}
+	return nil
 }
 
 func (p herdrRewindPane) with(ctx context.Context, f func(c *herdr.Client) error) error {
@@ -106,10 +148,16 @@ func (p herdrRewindPane) with(ctx context.Context, f func(c *herdr.Client) error
 }
 
 func (p herdrRewindPane) press(ctx context.Context, key string) error {
+	if err := p.still(ctx); err != nil {
+		return err
+	}
 	return p.with(ctx, func(c *herdr.Client) error { return c.SendKeys(ctx, p.pane, []string{key}) })
 }
 
 func (p herdrRewindPane) typeText(ctx context.Context, text string) error {
+	if err := p.still(ctx); err != nil {
+		return err
+	}
 	return p.with(ctx, func(c *herdr.Client) error { return c.SendInput(ctx, p.pane, text, []string{}) })
 }
 
@@ -290,10 +338,7 @@ func codexNameDo(ctx context.Context, p rewindPane, name, cwd string) string {
 	// (What was typed seen whole in its input, nothing else there, before Enter.)
 	// (Nothing else in its input — no words under it taken for its footer —
 	// and it at rest: review fork4b-5.)
-	if !rewindWait(ctx, p, 3*time.Second, func(s string) bool {
-		area, foot, known, ok := codexInputArea(s)
-		return ok && (foot == "" || known) && squeeze(area) == squeeze("/rename "+name) && !strings.Contains(s, "esc to interrupt") && !strings.Contains(s, "Browsing transcript")
-	}) {
+	if !rewindWait(ctx, p, 3*time.Second, func(s string) bool { return codexHoldsOnly(s, "/rename "+name) }) {
 		return "not seen typed"
 	}
 	if err := p.press(ctx, "enter"); err != nil {
@@ -348,4 +393,16 @@ func codexInputHolds(s string, want []rune) bool {
 		return false
 	}
 	return strings.HasPrefix(strings.TrimPrefix(squeeze(area), "›"), string(want))
+}
+
+// codexHoldsOnly: Codex at rest, its input holding typed and nothing else —
+// under it its footer, known or of one line (a status line of the person's,
+// whatever it shows: review fork5-2), not lines that may be words of a
+// draft.
+func codexHoldsOnly(s, typed string) bool {
+	if strings.Contains(s, "esc to interrupt") || strings.Contains(s, "Browsing transcript") {
+		return false
+	}
+	area, foot, known, ok := codexInputArea(s)
+	return ok && (foot == "" || known || codexTypedFoot(foot)) && squeeze(area) == squeeze(typed)
 }

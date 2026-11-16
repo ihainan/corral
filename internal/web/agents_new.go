@@ -293,7 +293,8 @@ func (s *Server) newAgent(ctx context.Context, w http.ResponseWriter, sess *term
 	default:
 		out := map[string]any{"workspace": ws, "pane": pane}
 		if kind == "codex" && how.fork {
-			s.codexForkAfter(ctx, out, herdrRewindPane{sess: sess, socket: socket, pane: pane}, true, how, label, dir)
+			hp, found := s.herdrRewindPaneOf(ctx, sess, socket, pane)
+			s.codexForkAfter(ctx, out, hp, found, how, label, dir)
 		}
 		writeJSON(w, http.StatusOK, out)
 	}
