@@ -38,21 +38,32 @@ func TestCodexInputHolds(t *testing.T) {
 func TestCodexHoldsOnly(t *testing.T) {
 	ansi := regexp.MustCompile(`\x1b\[[0-9;?]*[a-zA-Z]`)
 	typed := "/rename proj fork 1a2b"
-	for _, name := range []string{"default.draft", "limits.draft", "gitbranch.draft", "nocolor.draft", "threadid.draft", "misc.draft", "user.draft", "fast.draft"} {
+	read := func(name string) string {
 		b, err := os.ReadFile("testdata/codex-shapes/" + name + ".ansi")
 		if err != nil {
 			t.Fatal(err)
 		}
-		scr := strings.Replace(ansi.ReplaceAllString(string(b), ""), "half typed draft", typed, 1)
-		if !codexHoldsOnly(scr, typed) {
-			t.Errorf("%s: not seen alone", name)
+		return ansi.ReplaceAllString(string(b), "")
+	}
+	for _, shape := range []string{"default", "limits", "gitbranch", "nocolor", "threadid", "misc", "user", "fast"} {
+		status := codexRestStatus(read(shape + ".empty"))
+		scr := strings.Replace(read(shape+".draft"), "half typed draft", typed, 1)
+		if !codexHoldsOnly(scr, typed, status) {
+			t.Errorf("%s: not seen alone (status %q)", shape, status)
 		}
-		if codexHoldsOnly(scr, typed+" more") {
-			t.Errorf("%s: taken for other words", name)
+		if codexHoldsOnly(scr, typed+" more", status) {
+			t.Errorf("%s: taken for other words", shape)
 		}
 	}
-	two := "› " + typed + "\n\n  a draft line\n  and another\n"
-	if codexHoldsOnly(two, typed) {
-		t.Error("a draft's lines under it taken for its footer")
+	for _, scr := range []string{
+		"› " + typed + "\n\n  a draft line\n  and another\n",
+		"› " + typed + "\n\n  extra draft\n", // (one line of a draft's, no status line at rest: fork6-3)
+	} {
+		if codexHoldsOnly(scr, typed, "") {
+			t.Errorf("a draft's line under it taken for its footer: %q", scr)
+		}
+	}
+	if codexHoldsOnly("› "+typed+"\n\n  extra draft\n", typed, "GPT-6.1-Sol high · ~/cxreal/proj") {
+		t.Error("a draft's line taken for the status line it was not")
 	}
 }

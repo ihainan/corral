@@ -101,8 +101,10 @@ type herdrRewindPane struct {
 	pid, start int64
 }
 
-// herdrRewindPaneOf: the pane's one Codex, as a look begun now finds it.
-func (s *Server) herdrRewindPaneOf(ctx context.Context, sess *term.Session, socket, pane string) (herdrRewindPane, bool) {
+// herdrRewindPaneOf: the pane's one Codex, as a look begun now finds it —
+// and that one started as the copy of src ("codex fork <src>", its command
+// line says), not another put there since (review fork6-1).
+func (s *Server) herdrRewindPaneOf(ctx context.Context, sess *term.Session, socket, pane, src string) (herdrRewindPane, bool) {
 	var c codexPane
 	ok := false
 	for i := 0; i < 20 && ctx.Err() == nil; i++ {
@@ -114,26 +116,52 @@ func (s *Server) herdrRewindPaneOf(ctx context.Context, sess *term.Session, sock
 		}
 		sleepCtx(ctx, 500*time.Millisecond)
 	}
-	if !ok {
+	if !ok || !codexForkOf(ctx, sess, c.PID, c.Start, src) {
 		return herdrRewindPane{}, false
 	}
 	return herdrRewindPane{sess: sess, socket: socket, pane: pane, pid: c.PID, start: c.Start}, true
 }
 
-// still: that process is alive, the same one (its start), in front on its
-// terminal, in that herdr pane.
-func (p herdrRewindPane) still(ctx context.Context) error {
-	cmd := `pid=` + strconv.FormatInt(p.pid, 10) + ` start=` + strconv.FormatInt(p.start, 10) + ` pane=` + sshx.QuoteShell(p.pane) + `
+// codexForkOf: process pid (of that start; 0: any) was started "codex
+// fork <src>".
+func codexForkOf(ctx context.Context, sess *term.Session, pid, start int64, src string) bool {
+	cmd := `pid=` + strconv.FormatInt(pid, 10) + ` start=` + strconv.FormatInt(start, 10) + `
+stat=$(tr '\n' ' ' <"/proc/$pid/stat" 2>/dev/null) || exit 3
+rest=${stat##*) }
+[ "$start" = 0 ] || [ "$(printf '%s' "$rest" | cut -d' ' -f20)" = "$start" ] || exit 3
+[ "$(head -c 16 "/proc/$pid/comm" 2>/dev/null)" = codex ] || exit 3
+tr '\0' '\001' <"/proc/$pid/cmdline" 2>/dev/null | awk -v want=fork '` + codexArgsAwk + `'`
+	out, err := sshx.Output(ctx, sess.Client(), "sh -c "+sshx.QuoteShell(cmd), 128)
+	return err == nil && src != "" && strings.EqualFold(strings.TrimSpace(string(out)), src)
+}
+
+// codexForkOfPid: codexForkOf of the process pid, whatever its start.
+func codexForkOfPid(ctx context.Context, sess *term.Session, pid int64, src string) bool {
+	return pid > 0 && codexForkOf(ctx, sess, pid, 0, src)
+}
+
+// sendSh: a command that presses (send-keys) or types (send-text) arg in
+// the pane — by herdr's own command, in the same command as the check that
+// that very process is alive (its start), in front on its terminal, in that
+// pane: nothing between the check and the key (review fork6-2).
+func (p herdrRewindPane) sendSh(how, arg string) string {
+	q := sshx.QuoteShell
+	return `PATH="$HOME/.local/bin:$HOME/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+pid=` + strconv.FormatInt(p.pid, 10) + ` start=` + strconv.FormatInt(p.start, 10) + ` pane=` + q(p.pane) + `
 stat=$(tr '\n' ' ' <"/proc/$pid/stat" 2>/dev/null) || exit 3
 rest=${stat##*) }
 [ "$(printf '%s' "$rest" | cut -d' ' -f20)" = "$start" ] || exit 3
 pgrp=$(printf '%s' "$rest" | cut -d' ' -f3); tpgid=$(printf '%s' "$rest" | cut -d' ' -f6)
 [ -n "$pgrp" ] && [ "$pgrp" = "$tpgid" ] || exit 3
 tr '\0\n' '\n\001' <"/proc/$pid/environ" 2>/dev/null | grep -qxF "HERDR_PANE_ID=$pane" || exit 3
+HERDR_SOCKET_PATH=` + q(p.socket) + ` herdr pane ` + how + ` "$pane" ` + q(arg) + ` >/dev/null 2>&1 || exit 6
 echo ok`
-	out, err := sshx.Output(ctx, p.sess.Client(), cmd, 64)
+}
+
+func (p herdrRewindPane) send(ctx context.Context, how, arg string) error {
+	out, err := sshx.Output(ctx, p.sess.Client(), "sh -c "+sshx.QuoteShell(p.sendSh(how, arg)), 64)
 	if err != nil || strings.TrimSpace(string(out)) != "ok" {
-		return errors.New("not the Codex it was")
+		return errors.New("not sent: not the Codex it was, or herdr refused it")
 	}
 	return nil
 }
@@ -148,17 +176,11 @@ func (p herdrRewindPane) with(ctx context.Context, f func(c *herdr.Client) error
 }
 
 func (p herdrRewindPane) press(ctx context.Context, key string) error {
-	if err := p.still(ctx); err != nil {
-		return err
-	}
-	return p.with(ctx, func(c *herdr.Client) error { return c.SendKeys(ctx, p.pane, []string{key}) })
+	return p.send(ctx, "send-keys", key)
 }
 
 func (p herdrRewindPane) typeText(ctx context.Context, text string) error {
-	if err := p.still(ctx); err != nil {
-		return err
-	}
-	return p.with(ctx, func(c *herdr.Client) error { return c.SendInput(ctx, p.pane, text, []string{}) })
+	return p.send(ctx, "send-text", text)
 }
 
 func (p herdrRewindPane) title(ctx context.Context) (t string, err error) {
@@ -329,20 +351,40 @@ func codexNameCopy(ctx context.Context, p rewindPane, name, cwd string) bool {
 }
 
 func codexNameDo(ctx context.Context, p rewindPane, name, cwd string) string {
-	if !rewindWait(ctx, p, 15*time.Second, func(s string) bool { return codexIdleInput(s) == nil && !strings.Contains(s, "Browsing transcript") }) {
+	var idle string
+	if !rewindWait(ctx, p, 15*time.Second, func(s string) bool {
+		if codexIdleInput(s) != nil || strings.Contains(s, "Browsing transcript") {
+			return false
+		}
+		idle = s
+		return true
+	}) {
 		return "not ready"
 	}
+	// (Its status line as it is at rest: under what is typed, only that —
+	// a line of a draft's is not — review fork6-3.)
+	status := codexRestStatus(idle)
 	if err := p.typeText(ctx, "/rename "+name); err != nil {
 		return "typed: " + err.Error()
 	}
 	// (What was typed seen whole in its input, nothing else there, before Enter.)
 	// (Nothing else in its input — no words under it taken for its footer —
 	// and it at rest: review fork4b-5.)
-	if !rewindWait(ctx, p, 3*time.Second, func(s string) bool { return codexHoldsOnly(s, "/rename "+name) }) {
+	held := func(s string) bool { return codexHoldsOnly(s, "/rename "+name, status) }
+	if !rewindWait(ctx, p, 3*time.Second, held) {
 		return "not seen typed"
 	}
 	if err := p.press(ctx, "enter"); err != nil {
-		return "enter: " + err.Error()
+		// (Refused at once — herdr still taking the words before it, once in
+		// some runs —: pressed again only where they are seen still there,
+		// alone, Codex at rest: not twice on a screen it went on from.)
+		sleepCtx(ctx, codexRewindStep)
+		if !rewindWait(ctx, p, 2*time.Second, held) {
+			return "enter: " + err.Error()
+		}
+		if err := p.press(ctx, "enter"); err != nil {
+			return "enter: " + err.Error()
+		}
 	}
 	until := time.Now().Add(5 * time.Second)
 	for {
@@ -396,13 +438,31 @@ func codexInputHolds(s string, want []rune) bool {
 }
 
 // codexHoldsOnly: Codex at rest, its input holding typed and nothing else —
-// under it its footer, known or of one line (a status line of the person's,
-// whatever it shows: review fork5-2), not lines that may be words of a
-// draft.
-func codexHoldsOnly(s, typed string) bool {
+// under it nothing, or its status line as it was at rest (status: of a
+// status line of the person's, whatever it shows — review fork5-2; not a
+// line of a draft's taken for one — fork6-3), or a footer known.
+func codexHoldsOnly(s, typed, status string) bool {
 	if strings.Contains(s, "esc to interrupt") || strings.Contains(s, "Browsing transcript") {
 		return false
 	}
 	area, foot, known, ok := codexInputArea(s)
-	return ok && (foot == "" || known || codexTypedFoot(foot)) && squeeze(area) == squeeze(typed)
+	if !ok || squeeze(area) != squeeze(typed) {
+		return false
+	}
+	return foot == "" || known || (status != "" && strings.TrimSpace(foot) == status)
+}
+
+// codexRestStatus: of a screen of Codex at rest, its input empty, the first
+// line of its footer — its status line, where it has one (its hints, "? for
+// shortcuts", are gone once words are typed) — "" where none.
+func codexRestStatus(s string) string {
+	_, foot, _, ok := codexInputArea(s)
+	if !ok || foot == "" {
+		return ""
+	}
+	first := strings.TrimSpace(strings.SplitN(foot, "\n", 2)[0])
+	if codexEmptyHints.MatchString(first) {
+		return ""
+	}
+	return first
 }
