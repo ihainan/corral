@@ -1411,34 +1411,85 @@ func (s *Server) daemonLog(p *convoProc, l convoLocated) (took, sure, refused bo
 }
 
 // forkCand: a copy's own log among those its daemon holds (see daemonLog):
-// the only one begun where it runs since it started — another Codex's copy
-// left out — and that one a copy of src. Else nil.
+// the only conversation begun where it runs since it started — its logs
+// taken together (one rewound has a segment of its own, whose head names no
+// original: review fork-4), another Codex's copy left out — that one a copy
+// of src made by it (forkerFor). Its log written last; else nil.
 func forkCand(p *convoProc, src string, l convoLocated) *convoCand {
 	var found *convoCand
+	sid, mine := "", false
 	for i := range l.cands {
 		c := &l.cands[i]
 		if c.cwd != p.cwd || c.began <= 0 || c.began+convoBeganSlack < p.started || copyOfAnother(p, c, l) {
 			continue
 		}
-		if found != nil || c.forkedFrom != src {
+		cs := convoSessionOf(c.log)
+		if cs == "" {
+			continue
+		}
+		if sid != "" && cs != sid {
 			return nil // (another begun there since: which it is at, not told by this)
 		}
-		found = c
+		sid = cs
+		if c.forkedFrom == src {
+			if q := forkerFor(c, l); q != nil && q.id() == p.id() {
+				mine = true
+			}
+		}
+		if found == nil || c.wrote > found.wrote || (c.wrote == found.wrote && c.began > found.began) {
+			found = c
+		}
+	}
+	if !mine {
+		return nil
 	}
 	return found
 }
 
-// copyOfAnother: c is the copy another Codex running there was started to
-// make ("codex fork <id>", c a copy of that id, begun since it started).
-func copyOfAnother(p *convoProc, c *convoCand, l convoLocated) bool {
-	if c.forkedFrom == "" {
-		return false
+// forkerFor: the Codex running where c (a copy's first log) was begun that
+// was started to make it — copying its original there, the last so started
+// before it began; nil where none, or where another so started near enough
+// the same time that which made it is not told (review fork-2).
+func forkerFor(c *convoCand, l convoLocated) *convoProc {
+	if c.forkedFrom == "" || c.began <= 0 {
+		return nil
+	}
+	var found *convoProc
+	for i := range l.procs {
+		q := &l.procs[i]
+		if q.agent != "codex" || q.cwd != c.cwd || l.forkOf[q.pid] != c.forkedFrom || q.started <= 0 || q.started > c.began+convoBeganSlack {
+			continue
+		}
+		if found == nil || q.started > found.started {
+			found = q
+		}
+	}
+	if found == nil {
+		return nil
 	}
 	for i := range l.procs {
 		q := &l.procs[i]
-		if q.agent == "codex" && q.id() != p.id() && l.forkOf[q.pid] == c.forkedFrom && q.cwd == c.cwd && q.started > 0 && c.began+convoBeganSlack >= q.started {
-			return true
+		if q.id() != found.id() && q.agent == "codex" && q.cwd == c.cwd && l.forkOf[q.pid] == c.forkedFrom && q.started > 0 && q.started <= c.began+convoBeganSlack && found.started-q.started < convoBeganSlack {
+			return nil
 		}
+	}
+	return found
+}
+
+// copyOfAnother: c is of a copy another Codex running there was started to
+// make (forkerFor its conversation's first log).
+func copyOfAnother(p *convoProc, c *convoCand, l convoLocated) bool {
+	sid := convoSessionOf(c.log)
+	if sid == "" {
+		return false
+	}
+	for i := range l.cands {
+		o := &l.cands[i]
+		if o.forkedFrom == "" || o.cwd != c.cwd || convoSessionOf(o.log) != sid {
+			continue
+		}
+		q := forkerFor(o, l)
+		return q != nil && q.id() != p.id()
 	}
 	return false
 }
@@ -2330,10 +2381,17 @@ func (s *Server) locateScan(ctx context.Context, sess *term.Session, st *convoSt
 				// is not told. Not read: what was learnt before stands.)
 				if log, sid, on, read := s.screenSays(ctx, sess, pane, p, l, p.log, st.screenLog); read {
 					st.screenNo, st.screenWeak = false, false
-					// (A copy told for sure shows what came before it, the
-					// original's words, as its own: that is no word on another.)
-					if sure && sid != "" && sid == l.forkOf[p.pid] {
-						log, sid = p.log, p.sid
+					// (A copy is never taken for its original by the original's
+					// words: told for sure, they are its own while nothing on
+					// its screen says otherwise — forkShowsItsOwn; else which
+					// it is at is not told — review fork-1, fork-2.)
+					if src := l.forkOf[p.pid]; src != "" && sid != "" && sid == src {
+						if sure && s.forkShowsItsOwn(ctx, sess, pane, p, p.log) {
+							log, sid = p.log, p.sid
+						} else {
+							log, sid = "", ""
+							st.screenNo = true
+						}
 					}
 					if sid != "" && sid != st.screenSID {
 						if c := candAt(l, log, p.cwd); c == nil || on < s.screenEnoughFor(p, c, sid, l) {
