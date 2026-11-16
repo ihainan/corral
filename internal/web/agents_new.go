@@ -80,6 +80,7 @@ func (s *Server) apiNewAgent(w http.ResponseWriter, r *http.Request) {
 		// message back-th from the last, its words at_text — codexRewind.)
 		Back     int    `json:"back"`
 		AtText   string `json:"at_text"`
+		Clear    bool   `json:"clear"`    // (its input emptied after: the message taken to the page's own)
 		Worktree bool   `json:"worktree"` // (not with resume: a session taken up stays where it was)
 		Key      string `json:"key"`
 	}
@@ -88,7 +89,7 @@ func (s *Server) apiNewAgent(w http.ResponseWriter, r *http.Request) {
 		(b.Fork && b.Resume == "") || (b.At != "" && (!b.Fork || b.Kind != "claude" || !sessionUUID.MatchString(b.At))) ||
 		(b.Worktree && (worktreeFlag[b.Kind] == "" || b.Resume != "")) ||
 		(b.Back != 0 && (!b.Fork || b.Kind != "codex" || b.Back < 1 || b.Back > codexRewindMax || strings.TrimSpace(b.AtText) == "" || utf8.RuneCountInString(b.AtText) > 4000)) ||
-		(b.Back == 0 && b.AtText != "") {
+		(b.Back == 0 && (b.AtText != "" || b.Clear)) {
 		writeError(w, http.StatusBadRequest, "bad_request", "folder, kind and key are required")
 		return
 	}
@@ -133,7 +134,7 @@ func (s *Server) apiNewAgent(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), newAgentWait+30*time.Second)
 	defer cancel()
 	rec := &recorder{header: http.Header{}}
-	s.newAgent(ctx, rec, sess, socket, dir, b.Kind, b.Label, agentStart{resume: b.Resume, fork: b.Fork, at: b.At, worktree: b.Worktree, back: b.Back, atText: b.AtText})
+	s.newAgent(ctx, rec, sess, socket, dir, b.Kind, b.Label, agentStart{resume: b.Resume, fork: b.Fork, at: b.At, worktree: b.Worktree, back: b.Back, atText: b.AtText, clear: b.Clear})
 	s.newAgents.finish(key, who, run, rec.status, rec.body.Bytes())
 	for k, v := range rec.header {
 		w.Header()[k] = v
@@ -159,6 +160,7 @@ type agentStart struct {
 	worktree bool
 	back     int    // (a Codex's copy: rewound to before the person's message back-th from the last — codexRewind)
 	atText   string // (its words)
+	clear    bool   // (its input emptied once seen holding them)
 }
 
 func (s *Server) newAgent(ctx context.Context, w http.ResponseWriter, sess *term.Session, socket, dir, kind, label string, how agentStart) {
@@ -251,7 +253,11 @@ func (s *Server) newAgent(ctx context.Context, w http.ResponseWriter, sess *term
 		}
 		out2 := map[string]any{"tmux": name}
 		if kind == "codex" && how.back > 0 {
-			out2["rewound"] = codexRewind(ctx, tmuxRewindPane{sess: sess, name: name}, how.back, how.atText)
+			rewound := false
+			if tp, ok := tmuxRewindPaneOf(ctx, sess, name); ok {
+				rewound = codexRewind(ctx, tp, how.back, how.atText, how.clear)
+			}
+			out2["rewound"] = rewound
 		}
 		writeJSON(w, http.StatusOK, out2)
 		return
@@ -290,7 +296,7 @@ func (s *Server) newAgent(ctx context.Context, w http.ResponseWriter, sess *term
 	default:
 		out := map[string]any{"workspace": ws, "pane": pane}
 		if kind == "codex" && how.back > 0 {
-			out["rewound"] = codexRewind(ctx, herdrRewindPane{sess: sess, socket: socket, pane: pane}, how.back, how.atText)
+			out["rewound"] = codexRewind(ctx, herdrRewindPane{sess: sess, socket: socket, pane: pane}, how.back, how.atText, how.clear)
 		}
 		writeJSON(w, http.StatusOK, out)
 	}

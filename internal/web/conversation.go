@@ -162,7 +162,8 @@ func (b *b64Strip) end(dst []byte) []byte {
 // program first): want=sub, its subcommand — its first word after options
 // and their values, none after "--"; a first word that is no subcommand
 // (one known, or a word like one), a sentence say, is the prompt it was
-// started with: none, interactive. want=fork: of "codex fork <id>", the id.
+// started with: none, interactive. want=fork, want=resume: of "codex fork
+// <id>", "codex resume <id>", the id.
 // (No ' in it: put between ' in the scripts.)
 const codexArgsAwk = `BEGIN { RS = "\001" } NR == 1 { next } skip { skip = 0; next }
   /^--$/ { exit } /^-/ { if ($0 ~ /^(-[cmpsaCi]|--(config|model|profile|sandbox|ask-for-approval|cd|image|add-dir|local-provider|remote|remote-auth-token-env|enable|disable))$/) skip = 1; next }
@@ -171,7 +172,7 @@ const codexArgsAwk = `BEGIN { RS = "\001" } NR == 1 { next } skip { skip = 0; ne
     s = a[1]
     if (s != "" && s !~ /^[a-z][a-z0-9-]*$/) s = ""
     if (want == "sub") print s
-    else if (s == "fork" && length(a[2]) == 36 && a[2] ~ /^[0-9a-fA-F-]+$/) print tolower(a[2])
+    else if (s == want && length(a[2]) == 36 && a[2] ~ /^[0-9a-fA-F-]+$/) print tolower(a[2])
   }`
 
 func convoLocateCommand(mode, tmuxName, tmuxPane string) string {
@@ -247,9 +248,13 @@ case $hz in ''|*[!0-9]*|0) hz=;; esac
 codex_sub() {
   tr '\0' '\001' <"/proc/$1/cmdline" 2>/dev/null | awk -v want=sub '` + codexArgsAwk + `'
 }
-# ("codex fork <id>": the conversation it is a copy of.)
+# ("codex fork <id>": the conversation it is a copy of; "codex resume
+# <id>": the one it was started at.)
 codex_fork_of() {
   tr '\0' '\001' <"/proc/$1/cmdline" 2>/dev/null | awk -v want=fork '` + codexArgsAwk + `'
+}
+codex_resume_of() {
+  tr '\0' '\001' <"/proc/$1/cmdline" 2>/dev/null | awk -v want=resume '` + codexArgsAwk + `'
 }
 ` + convoEndpointSh + `
 # A process's record: what it is, where its log is, and where it runs.
@@ -414,6 +419,7 @@ for d in $codexes; do
   case $sub in exec|e|exec-server|review|apply|a|login|logout|mcp|mcp-server|app-server|completion|sandbox|debug|cloud|features) continue;; esac
   # (A copy: what it is a copy of, for the daemon's log of it — daemonLog.)
   [ "$sub" = fork ] && printf 'forkof=%s %s\0' "$pid" "$(codex_fork_of "$pid")"
+  [ "$sub" = resume ] && printf 'resumeof=%s %s\0' "$pid" "$(codex_resume_of "$pid")"
   codex_fds "$d"
   log=$cxlog any=$cxany
   if [ -n "$cxpend" ]; then
@@ -750,6 +756,7 @@ type convoLocated struct {
 	noProc                         bool             // the host has no /proc
 	hostNow                        int64            // the host's clock when it was looked at, unix milliseconds (0: not known)
 	forkOf                         map[int64]string // ("codex fork <id>": by pid, the conversation each is a copy of)
+	resumeOf                       map[int64]string // ("codex resume <id>": by pid, the conversation each was started at)
 }
 
 // now: the host's clock when it was looked at (to the end of its second),
@@ -808,6 +815,16 @@ func parseConvoLocate(out string) (l convoLocated) {
 			c.cwd = unescapeJSON(c.cwd)
 			if _, ok := cleanRemotePath(c.log); ok && c.cwd != "" {
 				l.cands = append(l.cands, c)
+			}
+			continue
+		}
+		if v, ok := strings.CutPrefix(rec, "resumeof="); ok {
+			pid, id, _ := strings.Cut(v, " ")
+			if n, err := strconv.ParseInt(pid, 10, 64); err == nil && n > 0 && convoUUID.MatchString(id) {
+				if l.resumeOf == nil {
+					l.resumeOf = map[int64]string{}
+				}
+				l.resumeOf[n] = strings.ToLower(id)
 			}
 			continue
 		}
@@ -1380,6 +1397,15 @@ func (s *Server) daemonLog(p *convoProc, l convoLocated) (took, sure, refused bo
 		if c.cwd != p.cwd || sid == "" || copyOfAnother(p, c, l) {
 			continue
 		}
+		// (The one it was started at, "codex resume <id>", begun whenever: a
+		// guess as any here, its screen to show it — not left out for having
+		// begun before it started, as one of another's is.)
+		if r := l.resumeOf[p.pid]; r != "" && strings.EqualFold(sid, r) {
+			if best == nil || c.wrote > best.wrote || (c.wrote == best.wrote && c.began > best.began) {
+				best, bestSID = c, sid
+			}
+			continue
+		}
 		if !s.convoClaimed.owns(sid, p.id()) {
 			// Begun where this Codex runs, and after it started: one begun
 			// before it is another's.
@@ -1447,33 +1473,54 @@ func forkCand(p *convoProc, src string, l convoLocated) *convoCand {
 }
 
 // forkerFor: the Codex running where c (a copy's first log) was begun that
-// was started to make it — copying its original there, the last so started
-// before it began; nil where none, or where another so started near enough
-// the same time that which made it is not told (review fork-2).
+// was started to make it. Of those copying its original there, started
+// before it began, each that has made another copy of it already — one
+// begun before c and before any other of them started, so its — is left
+// out; one left is the one. More than one: which made it is not told (one
+// slow to begin its copy may begin it after another has started — review
+// fork2-6). nil then, or where none.
 func forkerFor(c *convoCand, l convoLocated) *convoProc {
 	if c.forkedFrom == "" || c.began <= 0 {
 		return nil
 	}
-	var found *convoProc
+	copying := func(q *convoProc, before int64) bool {
+		return q.agent == "codex" && q.cwd == c.cwd && l.forkOf[q.pid] == c.forkedFrom && q.started > 0 && q.started <= before+convoBeganSlack
+	}
+	var qs []*convoProc
 	for i := range l.procs {
-		q := &l.procs[i]
-		if q.agent != "codex" || q.cwd != c.cwd || l.forkOf[q.pid] != c.forkedFrom || q.started <= 0 || q.started > c.began+convoBeganSlack {
-			continue
-		}
-		if found == nil || q.started > found.started {
-			found = q
+		if copying(&l.procs[i], c.began) {
+			qs = append(qs, &l.procs[i])
 		}
 	}
-	if found == nil {
+	var left []*convoProc
+	for _, q := range qs {
+		made := false
+		for j := range l.cands {
+			o := &l.cands[j]
+			if o == c || o.log == c.log || o.forkedFrom != c.forkedFrom || o.cwd != c.cwd || o.began <= 0 || o.began >= c.began || !copying(q, o.began) {
+				continue
+			}
+			// (Begun before any other of them started: only q could have made it.)
+			alone := true
+			for _, r := range qs {
+				if r != q && copying(r, o.began) {
+					alone = false
+					break
+				}
+			}
+			if alone {
+				made = true
+				break
+			}
+		}
+		if !made {
+			left = append(left, q)
+		}
+	}
+	if len(left) != 1 {
 		return nil
 	}
-	for i := range l.procs {
-		q := &l.procs[i]
-		if q.id() != found.id() && q.agent == "codex" && q.cwd == c.cwd && l.forkOf[q.pid] == c.forkedFrom && q.started > 0 && q.started <= c.began+convoBeganSlack && found.started-q.started < convoBeganSlack {
-			return nil
-		}
-	}
-	return found
+	return left[0]
 }
 
 // copyOfAnother: c is of a copy another Codex running there was started to
@@ -2386,7 +2433,7 @@ func (s *Server) locateScan(ctx context.Context, sess *term.Session, st *convoSt
 					// its screen says otherwise — forkShowsItsOwn; else which
 					// it is at is not told — review fork-1, fork-2.)
 					if src := l.forkOf[p.pid]; src != "" && sid != "" && sid == src {
-						if sure && s.forkShowsItsOwn(ctx, sess, pane, p, p.log) {
+						if sure && s.forkShowsItsOwn(ctx, sess, pane, p, p.log, src) {
 							log, sid = p.log, p.sid
 						} else {
 							log, sid = "", ""

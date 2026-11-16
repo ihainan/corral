@@ -15,6 +15,11 @@ import { expectSession, renamedHerdr } from './agents'
 // folder the conversation began in, its first message waiting in its
 // composer (not on the agent's command line, where it could be taken for
 // one of its options).
+// A Codex's copy up to before the person's message at: how many of their
+// messages from it on its transcript goes back over, its words, whether
+// another begins alike, whether it can be taken whole to the page's input.
+export type CodexRewind = { back: number; text: string; alike: boolean; clear: boolean; at: string }
+
 export function ForkDialog({
   sessionId,
   hostId,
@@ -22,6 +27,7 @@ export function ForkDialog({
   source,
   at,
   rewind,
+  rewindNow,
   dir,
   name,
   check,
@@ -33,7 +39,8 @@ export function ForkDialog({
   kind: 'claude' | 'codex'
   source: string
   at?: string
-  rewind?: { back: number; text: string; alike?: boolean } // (a Codex's copy, rewound to before the person's message back-th from the last, its words text)
+  rewind?: CodexRewind // (a Codex's copy, rewound to before the person's message back-th from the last, its words text)
+  rewindNow?: () => CodexRewind | undefined // (asked again as it is sent: the conversation may have gone on meanwhile)
   dir: string
   name: string
   check?: () => string // (asked again as it is sent: why not now, or '')
@@ -42,7 +49,7 @@ export function ForkDialog({
 }) {
   const [label, setLabel] = useState(() => t('fork.defaultName', { name }).slice(0, 40))
   // (A Codex's copy up to a turn: the message after it, put back here to change and send.)
-  const [first, setFirst] = useState(() => rewind?.text ?? '')
+  const [first, setFirst] = useState(() => (rewind?.clear ? rewind.text : ''))
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   // (One key for one thing asked: said again unchanged, the same copy.)
@@ -62,7 +69,14 @@ export function ForkDialog({
     setBusy(true)
     setError('')
     try {
-      const body = { dir, kind, label: label.trim(), resume: source, fork: true, at: at ?? '', ...(rewind ? { back: rewind.back, at_text: rewind.text } : {}) }
+      // (Counted again now: a turn gone on meanwhile moves where it goes back to — review fork2-8.)
+      const rw = rewind ? rewindNow?.() : undefined
+      if (rewind && !rw) {
+        setError(t('fork.atGone'))
+        setBusy(false)
+        return
+      }
+      const body = { dir, kind, label: label.trim(), resume: source, fork: true, at: at ?? '', ...(rw ? { back: rw.back, at_text: rw.text, clear: rw.clear } : {}) }
       const r = await api<{ pane?: string; tmux?: string; rewound?: boolean }>('POST', `/api/sessions/${sessionId}/agents`, { ...body, key: keyOf(JSON.stringify(body)) }, { timeoutMs: 90000 })
       if (r.tmux) {
         // (From a tmux session: the copy in a tmux session of its own, a terminal opened on it here — as a new agent's.)

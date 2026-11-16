@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"strings"
 	"time"
@@ -29,25 +30,42 @@ type rewindPane interface {
 	screen(ctx context.Context) (string, error)
 }
 
-// tmuxRewindPane: a tmux session of its own, the copy in its one pane.
+// tmuxRewindPane: a tmux session of its own, the copy in its one pane —
+// that pane by its id, and the process tmux started in it (its pid), as
+// first found: each key pressed only while the pane is still that one,
+// that process alive in it (review fork2-1).
 type tmuxRewindPane struct {
-	sess *term.Session
-	name string
+	sess    *term.Session
+	pane    string // (%N)
+	panePID string
 }
 
-func (p tmuxRewindPane) target() string { return sshx.QuoteShell("=" + p.name + ":") }
+// tmuxRewindPaneOf: the session's pane and its process now.
+func tmuxRewindPaneOf(ctx context.Context, sess *term.Session, name string) (tmuxRewindPane, bool) {
+	out, err := sshx.Output(ctx, sess.Client(), "tmux display-message -p -t "+sshx.QuoteShell("="+name+":")+" '#{pane_id} #{pane_pid} #{pane_dead}'", 1<<10)
+	f := strings.Fields(string(out))
+	if err != nil || len(f) != 3 || !tmuxPane.MatchString(f[0]) || !isDigits(f[1]) || f[2] != "0" {
+		return tmuxRewindPane{}, false
+	}
+	return tmuxRewindPane{sess: sess, pane: f[0], panePID: f[1]}, true
+}
+
+// tmuxRewindCheck: the pane is still the one found, its process alive in it.
+func (p tmuxRewindPane) check() string {
+	return `set -- $(tmux display-message -p -t ` + sshx.QuoteShell(p.pane) + ` '#{pane_pid} #{pane_dead}' 2>/dev/null); [ "$1" = ` + sshx.QuoteShell(p.panePID) + ` ] && [ "$2" = 0 ] || exit 3; `
+}
 
 func (p tmuxRewindPane) press(ctx context.Context, key string) error {
 	k := replyPress("tmux", []string{key})[0]
 	if key == "ctrl+c" {
 		k = "C-c"
 	}
-	_, err := sshx.Output(ctx, p.sess.Client(), "tmux send-keys -t "+p.target()+" "+sshx.QuoteShell(k), 1<<10)
+	_, err := sshx.Output(ctx, p.sess.Client(), p.check()+"tmux send-keys -t "+sshx.QuoteShell(p.pane)+" "+sshx.QuoteShell(k), 1<<10)
 	return err
 }
 
 func (p tmuxRewindPane) screen(ctx context.Context) (string, error) {
-	out, err := sshx.Output(ctx, p.sess.Client(), "tmux -u capture-pane -p -t "+p.target(), 256<<10)
+	out, err := sshx.Output(ctx, p.sess.Client(), p.check()+"tmux -u capture-pane -p -t "+sshx.QuoteShell(p.pane), 256<<10)
 	return string(out), err
 }
 
@@ -92,22 +110,22 @@ var codexRewindStep = 300 * time.Millisecond
 // once its input is seen holding them. Nothing pressed where its input is not
 // seen ready; nothing more where its transcript is not seen browsed. (Not
 // done: which step, logged.)
-func codexRewind(ctx context.Context, p rewindPane, back int, at string) bool {
-	why := codexRewindDo(ctx, p, back, at)
+func codexRewind(ctx context.Context, p rewindPane, back int, at string, clear bool) bool {
+	why := codexRewindDo(ctx, p, back, at, clear)
 	if why != "" {
 		slog.Warn("codex fork: not rewound", "step", why)
 	}
 	return why == ""
 }
 
-func codexRewindDo(ctx context.Context, p rewindPane, back int, at string) (why string) {
+func codexRewindDo(ctx context.Context, p rewindPane, back int, at string, clear bool) (why string) {
 	if back < 1 || back > codexRewindMax || strings.TrimSpace(at) == "" {
 		return "asked"
 	}
-	// (Its input in front, as it is once started: not a dialog, nor still drawing.)
+	// (Its input in front and empty, it at rest, as it is once started: not a
+	// dialog, nor at work, nor still drawing — review fork2-7.)
 	if !rewindWait(ctx, p, 15*time.Second, func(s string) bool {
-		_, _, _, ok := codexInputArea(s)
-		return ok && !strings.Contains(s, "Browsing transcript")
+		return codexIdleInput(s) == nil && !strings.Contains(s, "Browsing transcript")
 	}) {
 		return "not ready"
 	}
@@ -135,12 +153,17 @@ func codexRewindDo(ctx context.Context, p rewindPane, back int, at string) (why 
 	// folded or cut — the transcript no longer browsed.)
 	want := []rune(squeeze(strings.SplitN(strings.TrimSpace(at), "\n", 2)[0]))
 	want = want[:min(len(want), 40)]
+	// (Its words back in its input, it at rest — words there, not its
+	// placeholder, which a message of a few of its letters would match.)
 	if !rewindWait(ctx, p, 5*time.Second, func(s string) bool {
 		area, _, _, ok := codexInputArea(s)
 		box := strings.TrimPrefix(squeeze(area), "›")
-		return ok && len(want) > 0 && !strings.Contains(s, "Browsing transcript") && strings.HasPrefix(box, string(want))
+		return ok && len(want) > 0 && !strings.Contains(s, "Browsing transcript") && errors.Is(codexIdleInput(s), errDraft) && !codexEmptyInput(area) && strings.HasPrefix(box, string(want))
 	}) {
 		return "not seen in its input"
+	}
+	if !clear {
+		return "" // (left in its input: a picture in it, or too long for the page's)
 	}
 	// (Its input emptied — Ctrl+C on words there clears them, nothing else —
 	// for the page to send to: that message is put in the page's own input,

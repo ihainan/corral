@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -701,6 +702,16 @@ func TestDaemonLogForkTwoAndRewound(t *testing.T) {
 			t.Errorf("%d told for sure, two started together: %q", p.pid, p.sid)
 		}
 	}
+	// (The first slow to begin its copy, after the second started: which made which, not told — review fork2-6.)
+	slow := two
+	slow.procs = []convoProc{f1, {pid: 9, start: 90, agent: "codex", cwd: "/w", started: now - 57*sec}}
+	slow.cands = []convoCand{two.cands[0], {log: logOf(c1), cwd: "/w", began: now - 55*sec, wrote: now - 55*sec, forkedFrom: src}, {log: logOf(c2), cwd: "/w", began: now - 54*sec, wrote: now - 54*sec, forkedFrom: src}}
+	for i := range slow.procs {
+		p := slow.procs[i]
+		if _, sure, _ := (&Server{}).daemonLog(&p, slow); sure {
+			t.Errorf("%d told for sure, its copy begun after the other started: %q", p.pid, p.sid)
+		}
+	}
 	one := convoLocated{procs: []convoProc{f1}, hostNow: now, forkOf: map[int64]string{8: src}, cands: []convoCand{
 		{log: logOf(src), cwd: "/w", began: now - 600*sec, wrote: now - 100*sec},
 		{log: logOf(c1), cwd: "/w", began: now - 59*sec, wrote: now - 50*sec, forkedFrom: src},
@@ -718,12 +729,45 @@ func TestForkSaidAfter(t *testing.T) {
 		if role == "user" {
 			return `{"timestamp":"2026-11-15T10:00:00Z","type":"event_msg","payload":{"type":"user_message","message":"` + text + `"}}` + "\n"
 		}
-		return `{"timestamp":"2026-11-15T10:00:00Z","type":"event_msg","payload":{"type":"agent_message","message":"` + text + `"}}` + "\n"
+		return `{"timestamp":"2026-11-15T10:00:00Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"` + text + `"}]}}` + "\n"
 	}
 	pre := line("user", "before the fork please") + line("agent", "the same old answer here")
 	post := line("user", "the original goes on alone") + line("agent", "the same old answer here")
 	got := forkSaidAfter(pre, post)
-	if len(got) != 1 || !strings.Contains(got[0], "originalgoes") && !strings.Contains(got[0], "original") {
+	if len(got) != 1 || !strings.Contains(got[0], "original") {
 		t.Errorf("said after: %q", got)
+	}
+	// (A long one: its start and its end, as a screen shows only part of it.)
+	long := strings.Repeat("word ", 30) + "the very end of it"
+	got = forkSaidAfter(pre, line("agent", long)+line("user", "and a later question here"))
+	if len(got) < 2 || !slices.ContainsFunc(got, func(w string) bool { return strings.HasSuffix(w, "theveryendofit") }) {
+		t.Errorf("long: %q", got)
+	}
+}
+
+// A Codex started at an old conversation ("codex resume <id>"), its log its
+// daemon's: that one is its own (a guess, for its screen to confirm), not
+// left out for having begun before it started; one begun in it since and
+// written later goes before it (/new).
+func TestDaemonLogResume(t *testing.T) {
+	const sec = 1000
+	now := int64(1_700_000_000_000)
+	old, other, fresh := "01a17600-0000-7000-8000-0000000000d1", "01a17600-0000-7000-8000-0000000000d2", "01a17600-0000-7000-8000-0000000000d3"
+	logOf := func(sid string) string {
+		return "/home/u/.codex/sessions/2026/10/26/rollout-2026-10-26T10-00-00-" + sid + ".jsonl"
+	}
+	p := convoProc{pid: 8, start: 80, agent: "codex", cwd: "/w", started: now - 30*sec}
+	l := convoLocated{procs: []convoProc{p}, hostNow: now, resumeOf: map[int64]string{8: old}, cands: []convoCand{
+		{log: logOf(old), cwd: "/w", began: now - 3600*sec, wrote: now - 10*sec},
+		{log: logOf(other), cwd: "/w", began: now - 7200*sec, wrote: now - 5*sec},
+	}}
+	q := l.procs[0]
+	if took, sure, _ := (&Server{}).daemonLog(&q, l); !took || sure || q.sid != old {
+		t.Fatalf("resumed: took %v sure %v sid %q", took, sure, q.sid)
+	}
+	l.cands = append(l.cands, convoCand{log: logOf(fresh), cwd: "/w", began: now - 4*sec, wrote: now - 1*sec})
+	q = l.procs[0]
+	if _, _, _ = (&Server{}).daemonLog(&q, l); q.sid != fresh {
+		t.Fatalf("begun anew in it: sid %q", q.sid)
 	}
 }

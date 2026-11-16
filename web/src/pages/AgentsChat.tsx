@@ -18,7 +18,7 @@ import { PanelWindow } from '../terminal/PanelWindow'
 import { convoTarget, herdrTarget, InlineReply } from '../terminal/ReplyDialog'
 import { SessionOpDialog, type SessionOp } from '../terminal/sessionOps'
 import { NEW_AGENT, NewAgentDialog } from '../terminal/newAgent'
-import { ForkDialog, RenameDialog, type RenameTarget } from '../terminal/agentOps'
+import { type CodexRewind, ForkDialog, RenameDialog, type RenameTarget } from '../terminal/agentOps'
 import { agentWho, ChimeCounter, chime, countsOf } from '../terminal/chime'
 import { AgentList, CODEX_EFFORTS, ConversationView, glanceOf, type ConvoAgent, type ConvoListRow, type ConvoPending, type ConvoWent, type FileActs, type ModelOpt } from '../terminal/Conversation'
 import { FilesDialog } from '../terminal/FilesDialog'
@@ -2435,7 +2435,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   // known). Of the one shown, its session as bound; of another, as herdr
   // tells it. While it is at rest (as the list says it): not a turn in
   // the middle (a check when asked, not a hold on it).
-  const [forking, setForking] = useState<{ s: SessionInfo; kind: 'claude' | 'codex'; source: string; at?: string; rewind?: { back: number; text: string; alike?: boolean }; dir: string; name: string; key: string } | null>(null)
+  const [forking, setForking] = useState<{ s: SessionInfo; kind: 'claude' | 'codex'; source: string; at?: string; rewind?: CodexRewind; dir: string; name: string; key: string } | null>(null)
   // (All of it: asked again as it is sent, of the list now — another
   // window may have set it to work meanwhile — review585-11.)
   const entriesNow = useRef(entries)
@@ -2459,19 +2459,25 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   // person's messages, from that one on, its transcript is gone back over —
   // as its "←" steps them, one a message sent at rest — and that one's words.)
   const codexRewindOf = (at: string) => {
-    const all = convo.entries
-    const i = all.findIndex((x) => x.id === at && x.role === 'user')
+    const all = convoEntriesNow.current
+    const i = all.findIndex((x) => x.id === at && x.role === 'user' && !x.gone)
     if (i < 0) return undefined
-    const users = all.filter((x) => x.role === 'user' && !x.mid)
-    const back = all.slice(i).filter((x) => x.role === 'user' && !x.mid).length
+    // (Not one taken back, which its transcript no longer has — review fork2-9.)
+    const typed = (x: ConvoEntry) => x.role === 'user' && !x.mid && !x.gone
+    const users = all.filter(typed)
+    const back = all.slice(i).filter(typed).length
     const words = (x: ConvoEntry) => x.parts.map((p) => (p.kind === 'text' ? p.text : '')).join('\n').trim()
     const text = words(all[i])
     // (Another of the person's messages beginning as it does — "continue" twice — is not told
     // from it by what comes back in the copy's input: its rewind not said to be sure.)
     const head = (x: string) => x.split('\n', 1)[0].replace(/\s+/g, '').slice(0, 40)
     const alike = users.filter((x) => head(words(x)) === head(text)).length > 1
-    return back > 0 && text ? { back, text: text.slice(0, 4000), alike } : undefined
+    // (Taken to the page's input only whole: one with a picture, or too long for it, left in the copy's — review fork2-10.)
+    const clear = !all[i].parts.some((p) => p.kind === 'image') && text.length <= 4000
+    return back > 0 && text ? { back, text: text.slice(0, 4000), alike, clear, at } : undefined
   }
+  const convoEntriesNow = useRef(convo.entries)
+  convoEntriesNow.current = convo.entries
   const forkOf = (e: Entry, at?: string) => {
     const r = e.row
     const shown = e.key === cur.key && e.s.id === cur.s.id
@@ -2755,14 +2761,19 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
         source={forking.source}
         at={forking.at}
         rewind={forking.rewind}
+        rewindNow={forking.rewind ? () => codexRewindOf(forking.rewind!.at) : undefined}
         dir={forking.dir}
         name={forking.name}
-        check={forking.at || forking.rewind ? undefined : stillAtRest(forking.key)}
+        check={forking.at ? undefined : stillAtRest(forking.key)}
         onDone={(pane, first, opened, rewound) => {
           const f = forking
           setForking(null)
           onStarted(opened ?? f.s, pane, first)
-          if (f.rewind && (rewound === false || f.rewind.alike)) toast(t(rewound === false ? 'fork.notRewound' : 'fork.rewoundAlike'), true)
+          if (f.rewind) {
+            if (rewound === false) toast(t('fork.notRewound'), true)
+            else if (f.rewind.alike) toast(t('fork.rewoundAlike'), true)
+            else if (!f.rewind.clear) toast(t('fork.leftInTerminal'))
+          }
         }}
         onClose={() => setForking(null)}
       />
