@@ -735,6 +735,11 @@ func (s *Server) codexFront(ctx context.Context, sess *term.Session, socket, pan
 	if err != nil {
 		return nil
 	}
+	// (Its title as read now, in this very look — herdr's word of it may be
+	// behind: just named, a fork's copy say.)
+	if f, ok := panes[pane]; ok && f.titleRead {
+		hp.Title = f.TitleNow
+	}
 	c, ok := codexPaneSure(panes, pane, hp)
 	if !ok || !codexPressSure(c) {
 		return nil
