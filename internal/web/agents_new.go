@@ -70,19 +70,25 @@ type newAgents struct {
 // closed again).
 func (s *Server) apiNewAgent(w http.ResponseWriter, r *http.Request) {
 	var b struct {
-		Dir      string `json:"dir"`
-		Kind     string `json:"kind"`
-		Label    string `json:"label"`
-		Resume   string `json:"resume"`
-		Fork     bool   `json:"fork"`     // (resume a copy: Claude Code's or Codex's; the folder, the session's own)
-		At       string `json:"at"`       // (fork: of it up to before this message the person typed; Claude Code's)
+		Dir    string `json:"dir"`
+		Kind   string `json:"kind"`
+		Label  string `json:"label"`
+		Resume string `json:"resume"`
+		Fork   bool   `json:"fork"` // (resume a copy: Claude Code's or Codex's; the folder, the session's own)
+		At     string `json:"at"`   // (fork: of it up to before this message the person typed; Claude Code's)
+		// (fork, Codex's: rewound in its own terminal to before the person's
+		// message back-th from the last, its words at_text — codexRewind.)
+		Back     int    `json:"back"`
+		AtText   string `json:"at_text"`
 		Worktree bool   `json:"worktree"` // (not with resume: a session taken up stays where it was)
 		Key      string `json:"key"`
 	}
 	if err := readJSON(r, &b); err != nil || !agentKinds[b.Kind] || !newAgentKey.MatchString(b.Key) ||
 		(b.Resume != "" && (!sessionUUID.MatchString(b.Resume) || b.Kind != "claude" && b.Kind != "codex")) ||
 		(b.Fork && b.Resume == "") || (b.At != "" && (!b.Fork || b.Kind != "claude" || !sessionUUID.MatchString(b.At))) ||
-		(b.Worktree && (worktreeFlag[b.Kind] == "" || b.Resume != "")) {
+		(b.Worktree && (worktreeFlag[b.Kind] == "" || b.Resume != "")) ||
+		(b.Back != 0 && (!b.Fork || b.Kind != "codex" || b.Back < 1 || b.Back > codexRewindMax || strings.TrimSpace(b.AtText) == "" || utf8.RuneCountInString(b.AtText) > 4000)) ||
+		(b.Back == 0 && b.AtText != "") {
 		writeError(w, http.StatusBadRequest, "bad_request", "folder, kind and key are required")
 		return
 	}
@@ -127,7 +133,7 @@ func (s *Server) apiNewAgent(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), newAgentWait+30*time.Second)
 	defer cancel()
 	rec := &recorder{header: http.Header{}}
-	s.newAgent(ctx, rec, sess, socket, dir, b.Kind, b.Label, agentStart{resume: b.Resume, fork: b.Fork, at: b.At, worktree: b.Worktree})
+	s.newAgent(ctx, rec, sess, socket, dir, b.Kind, b.Label, agentStart{resume: b.Resume, fork: b.Fork, at: b.At, worktree: b.Worktree, back: b.Back, atText: b.AtText})
 	s.newAgents.finish(key, who, run, rec.status, rec.body.Bytes())
 	for k, v := range rec.header {
 		w.Header()[k] = v
@@ -140,7 +146,7 @@ func (s *Server) apiNewAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	actx, acancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
 	defer acancel()
-	s.audit(r.WithContext(actx), "agents.new", sess.HostName, map[string]any{"session": sess.ID, "kind": b.Kind, "resume": b.Resume != "", "fork": b.Fork, "at": b.At != "", "worktree": b.Worktree, "outcome": outcome})
+	s.audit(r.WithContext(actx), "agents.new", sess.HostName, map[string]any{"session": sess.ID, "kind": b.Kind, "resume": b.Resume != "", "fork": b.Fork, "at": b.At != "" || b.Back > 0, "worktree": b.Worktree, "outcome": outcome})
 }
 
 // agentStart: how an agent is started: anew (in a worktree of its own, or
@@ -151,6 +157,8 @@ type agentStart struct {
 	fork     bool
 	at       string
 	worktree bool
+	back     int    // (a Codex's copy: rewound to before the person's message back-th from the last — codexRewind)
+	atText   string // (its words)
 }
 
 func (s *Server) newAgent(ctx context.Context, w http.ResponseWriter, sess *term.Session, socket, dir, kind, label string, how agentStart) {
@@ -241,7 +249,11 @@ func (s *Server) newAgent(ctx context.Context, w http.ResponseWriter, sess *term
 			writeError(w, http.StatusUnprocessableEntity, "start_failed", truncate(maskSecrets(why), 600))
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"tmux": name})
+		out2 := map[string]any{"tmux": name}
+		if kind == "codex" && how.back > 0 {
+			out2["rewound"] = codexRewind(ctx, tmuxRewindPane{sess: sess, name: name}, how.back, how.atText)
+		}
+		writeJSON(w, http.StatusOK, out2)
 		return
 	}
 	c := herdrDial(w, ctx, sess, socket)
@@ -276,7 +288,11 @@ func (s *Server) newAgent(ctx context.Context, w http.ResponseWriter, sess *term
 		// (Started or not, it cannot be told: left as it is, for the person to see.)
 		writeErrorExtra(w, http.StatusBadGateway, "unknown", why, map[string]any{"workspace": ws, "pane": pane})
 	default:
-		writeJSON(w, http.StatusOK, map[string]any{"workspace": ws, "pane": pane})
+		out := map[string]any{"workspace": ws, "pane": pane}
+		if kind == "codex" && how.back > 0 {
+			out["rewound"] = codexRewind(ctx, herdrRewindPane{sess: sess, socket: socket, pane: pane}, how.back, how.atText)
+		}
+		writeJSON(w, http.StatusOK, out)
 	}
 }
 

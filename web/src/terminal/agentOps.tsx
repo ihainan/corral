@@ -21,6 +21,7 @@ export function ForkDialog({
   kind,
   source,
   at,
+  rewind,
   dir,
   name,
   check,
@@ -32,14 +33,16 @@ export function ForkDialog({
   kind: 'claude' | 'codex'
   source: string
   at?: string
+  rewind?: { back: number; text: string; alike?: boolean } // (a Codex's copy, rewound to before the person's message back-th from the last, its words text)
   dir: string
   name: string
   check?: () => string // (asked again as it is sent: why not now, or '')
-  onDone: (pane: string, first: string, opened?: SessionInfo) => void // (opened: from a tmux session, the terminal opened on the copy's own)
+  onDone: (pane: string, first: string, opened?: SessionInfo, rewound?: boolean) => void // (opened: from a tmux session, the terminal opened on the copy's own; rewound: false where a Codex's rewind was not seen to end there)
   onClose: () => void
 }) {
   const [label, setLabel] = useState(() => t('fork.defaultName', { name }).slice(0, 40))
-  const [first, setFirst] = useState('')
+  // (A Codex's copy up to a turn: the message after it, put back here to change and send.)
+  const [first, setFirst] = useState(() => rewind?.text ?? '')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   // (One key for one thing asked: said again unchanged, the same copy.)
@@ -59,8 +62,8 @@ export function ForkDialog({
     setBusy(true)
     setError('')
     try {
-      const body = { dir, kind, label: label.trim(), resume: source, fork: true, at: at ?? '' }
-      const r = await api<{ pane?: string; tmux?: string }>('POST', `/api/sessions/${sessionId}/agents`, { ...body, key: keyOf(JSON.stringify(body)) }, { timeoutMs: 90000 })
+      const body = { dir, kind, label: label.trim(), resume: source, fork: true, at: at ?? '', ...(rewind ? { back: rewind.back, at_text: rewind.text } : {}) }
+      const r = await api<{ pane?: string; tmux?: string; rewound?: boolean }>('POST', `/api/sessions/${sessionId}/agents`, { ...body, key: keyOf(JSON.stringify(body)) }, { timeoutMs: 90000 })
       if (r.tmux) {
         // (From a tmux session: the copy in a tmux session of its own, a terminal opened on it here — as a new agent's.)
         let opened: SessionInfo
@@ -71,10 +74,10 @@ export function ForkDialog({
           setBusy(false)
           return
         }
-        onDone('', first.trim(), opened)
+        onDone('', first.trim(), opened, r.rewound)
         return
       }
-      onDone(r.pane ?? '', first.trim())
+      onDone(r.pane ?? '', first.trim(), undefined, r.rewound)
     } catch (err) {
       if (err instanceof ApiError && err.code === 'no_session') setError(t('fork.noSession'))
       else if (err instanceof ApiError && err.code === 'bad_message') setError(t('fork.badMessage'))
@@ -87,9 +90,9 @@ export function ForkDialog({
   }
   const close = () => !busy && onClose()
   return (
-    <Dialog title={t(at ? 'fork.titleAt' : 'fork.title')} onClose={close} icon={<GitBranch size={18} />}>
+    <Dialog title={t(at || rewind ? 'fork.titleAt' : 'fork.title')} onClose={close} icon={<GitBranch size={18} />}>
       <form className="form" onSubmit={submit}>
-        <p className="lead">{t(at ? 'fork.bodyAt' : 'fork.body')}</p>
+        <p className="lead">{t(rewind ? 'fork.bodyAtCodex' : at ? 'fork.bodyAt' : 'fork.body')}</p>
         <p className="hint">{t('fork.shared')}</p>
         <label className="field">
           <span>{t('newAgent.label')}</span>

@@ -2435,7 +2435,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   // known). Of the one shown, its session as bound; of another, as herdr
   // tells it. While it is at rest (as the list says it): not a turn in
   // the middle (a check when asked, not a hold on it).
-  const [forking, setForking] = useState<{ s: SessionInfo; kind: 'claude' | 'codex'; source: string; at?: string; dir: string; name: string; key: string } | null>(null)
+  const [forking, setForking] = useState<{ s: SessionInfo; kind: 'claude' | 'codex'; source: string; at?: string; rewind?: { back: number; text: string; alike?: boolean }; dir: string; name: string; key: string } | null>(null)
   // (All of it: asked again as it is sent, of the list now — another
   // window may have set it to work meanwhile — review585-11.)
   const entriesNow = useRef(entries)
@@ -2455,6 +2455,23 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     if (!r || r.lost) return t('fork.gone')
     return r.status !== 'idle' && r.status !== 'done' ? t('fork.onlyIdle') : ''
   }
+  // (A Codex's copy up to before the person's message at: how many of the
+  // person's messages, from that one on, its transcript is gone back over —
+  // as its "←" steps them, one a message sent at rest — and that one's words.)
+  const codexRewindOf = (at: string) => {
+    const all = convo.entries
+    const i = all.findIndex((x) => x.id === at && x.role === 'user')
+    if (i < 0) return undefined
+    const users = all.filter((x) => x.role === 'user' && !x.mid)
+    const back = all.slice(i).filter((x) => x.role === 'user' && !x.mid).length
+    const words = (x: ConvoEntry) => x.parts.map((p) => (p.kind === 'text' ? p.text : '')).join('\n').trim()
+    const text = words(all[i])
+    // (Another of the person's messages beginning as it does — "continue" twice — is not told
+    // from it by what comes back in the copy's input: its rewind not said to be sure.)
+    const head = (x: string) => x.split('\n', 1)[0].replace(/\s+/g, '').slice(0, 40)
+    const alike = users.filter((x) => head(words(x)) === head(text)).length > 1
+    return back > 0 && text ? { back, text: text.slice(0, 4000), alike } : undefined
+  }
   const forkOf = (e: Entry, at?: string) => {
     const r = e.row
     const shown = e.key === cur.key && e.s.id === cur.s.id
@@ -2463,15 +2480,20 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       // folder the log's, as the gateway finds it.)
       const b = shown ? convo.bind : null
       const kind = b?.agent === 'claude' || b?.agent === 'codex' ? b.agent : null
-      if (!b || !kind || !b.session || (at && kind !== 'claude')) return null
-      return { s: e.s, kind, source: b.session, at, dir: '~', name: e.s.mux_session || 'tmux', key: e.key } as const
+      if (!b || !kind || !b.session) return null
+      const rewind = at && kind === 'codex' ? codexRewindOf(at) : undefined
+      if (at && kind === 'codex' && !rewind) return null
+      return { s: e.s, kind, source: b.session, at: rewind ? undefined : at, rewind, dir: '~', name: e.s.mux_session || 'tmux', key: e.key } as const
     }
     if (e.s.persistence !== 'herdr' || !r || r.lost) return null
     const prog = (shown && convo.bind?.agent) || (isCodex(r.a.agent) ? 'codex' : isOpenCode(r.a.agent) ? 'opencode' : /claude/i.test(r.a.agent) ? 'claude' : '')
     const source = (shown && convo.bind?.session) || r.a.session || ''
-    if ((prog !== 'claude' && prog !== 'codex') || !source || (at && prog !== 'claude')) return null
+    if ((prog !== 'claude' && prog !== 'codex') || !source) return null
+    // (A Codex's, up to a turn: its whole copy rewound in its own terminal — only the one shown, by its conversation.)
+    const rewind = at && prog === 'codex' && shown ? codexRewindOf(at) : undefined
+    if (at && prog === 'codex' && !rewind) return null
     const name = (r.ws && r.ws !== '~' ? r.ws : '') || dirName(r.a.cwd) || r.a.agent
-    return { s: e.s, kind: prog, source, at, dir: r.a.cwd, name, key: e.key } as const
+    return { s: e.s, kind: prog, source, at: rewind ? undefined : at, rewind, dir: r.a.cwd, name, key: e.key } as const
   }
   const forkItem = (e: Entry): MenuItem | null => {
     const f = forkOf(e)
@@ -2683,7 +2705,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
           f.setSelectionRange(f.value.length, f.value.length)
         })
       }}
-      onForkAt={forkOf(cur, 'probe') ? forkHere : undefined}
+      onForkAt={forkOf(cur) ? forkHere : undefined}
       forkWhole={cur.row ? cur.row.status === 'idle' || cur.row.status === 'done' : cur.s.persistence === 'tmux' && (agent?.status === 'idle' || agent?.status === 'done')}
     />
     {viewing && active && (
@@ -2732,13 +2754,15 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
         kind={forking.kind}
         source={forking.source}
         at={forking.at}
+        rewind={forking.rewind}
         dir={forking.dir}
         name={forking.name}
-        check={forking.at ? undefined : stillAtRest(forking.key)}
-        onDone={(pane, first, opened) => {
+        check={forking.at || forking.rewind ? undefined : stillAtRest(forking.key)}
+        onDone={(pane, first, opened, rewound) => {
           const f = forking
           setForking(null)
           onStarted(opened ?? f.s, pane, first)
+          if (f.rewind && (rewound === false || f.rewind.alike)) toast(t(rewound === false ? 'fork.notRewound' : 'fork.rewoundAlike'), true)
         }}
         onClose={() => setForking(null)}
       />
