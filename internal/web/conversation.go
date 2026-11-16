@@ -235,7 +235,7 @@ codex_sub() {
 ` + convoEndpointSh + `
 # A process's record: what it is, where its log is, and where it runs.
 rec() { # pid start fg procstart sid log agent [via]
-  env=$(tr '\0' '\n' <"/proc/$1/environ" 2>/dev/null | grep -E '^(HERDR_PANE_ID|HERDR_SOCKET_PATH|TMUX|TMUX_PANE)=' | head -c 4096)
+  env=$(tr '\0\n' '\n\001' <"/proc/$1/environ" 2>/dev/null | grep -E '^(HERDR_PANE_ID|HERDR_SOCKET_PATH|TMUX|TMUX_PANE)=' | head -c 4096)
   link_of "/proc/$1/fd/0" 200; tty=$l
   # (Read with the shell's own read: a process started for each step of
   # each of them, as many as there are, is most of what this takes.)
@@ -3056,7 +3056,7 @@ front() {
   pgrp=$(printf '%s' "$rest" | cut -d' ' -f3); tpgid=$(printf '%s' "$rest" | cut -d' ' -f6)
   [ -n "$pgrp" ] && [ "$pgrp" = "$tpgid" ] || return 1
   if [ "$mode" = tmux ]; then k=TMUX_PANE; else k=HERDR_PANE_ID; fi
-  tr '\0' '\n' <"/proc/$pid/environ" 2>/dev/null | grep -qxF "$k=$p" || return 1
+  tr '\0\n' '\n\001' <"/proc/$pid/environ" 2>/dev/null | grep -qxF "$k=$p" || return 1
   kind=claude
   if [ "$(head -c 16 "/proc/$pid/comm" 2>/dev/null)" = codex ]; then
     kind=codex
