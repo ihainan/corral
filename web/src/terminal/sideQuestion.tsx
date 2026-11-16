@@ -36,7 +36,10 @@ export const SIDE_MAX = 2000 // (runes, as the gateway counts them)
 const ASK_MS = 125_000
 
 // Kept per agent: the Corral session, the pane, the process and its session.
+// (drafts: what is written and not yet asked — kept too, while the page is
+// another tab's and the dialog is not drawn.)
 const kept = new Map<string, Asked[]>()
+const drafts = new Map<string, string>()
 const heard = new Set<() => void>()
 let ids = 0
 const tell = () => heard.forEach((f) => f())
@@ -49,7 +52,7 @@ function put(key: string, a: Asked) {
   // (The oldest dropped first; never this one, nor one still being answered.)
   for (const k of [...kept.keys()]) {
     if (kept.size <= AGENTS) break
-    if (k !== key && !kept.get(k)!.some((x) => x.state === 'asking')) kept.delete(k)
+    if (k !== key && !kept.get(k)!.some((x) => x.state === 'asking')) kept.delete(k), drafts.delete(k)
   }
   tell()
 }
@@ -94,7 +97,15 @@ export function SideQuestion({ sid, bind, model, onClose }: { sid: string; bind:
   usePrefs() // (its colours follow the theme)
   const key = keyOf(sid, bind)
   const list = useKept(key)
-  const [text, setText] = useState('')
+  const [text, setTextNow] = useState(() => drafts.get(key) ?? '')
+  const setText = (v: string) => {
+    setTextNow(v)
+    drafts.delete(key)
+    if (v) {
+      drafts.set(key, v) // (to the end: the oldest of them dropped past AGENTS)
+      for (const k of drafts.keys()) if (drafts.size > AGENTS && k !== key) drafts.delete(k)
+    }
+  }
   const asking = list.some((a) => a.state === 'asking')
   // (How long the one under way has waited, by the second.)
   const [, tick] = useState(0)

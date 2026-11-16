@@ -111,10 +111,12 @@ CORRAL_SIDE_ENV
 		// (Claude Code as the shell finds it; else as the agent's own PATH does — one put there by
 		// nvm, say: its folder, where its node is too, put first on the copy's PATH, and no more of
 		// the agent's PATH, of which only folders by their whole path are looked in; else the one
-		// the process runs, where that is Claude Code's own build.)
-		`C=$(command -v claude 2>/dev/null); ` +
-		`if [ -z "$C" ]; then set -f; o=$IFS; IFS=:; for d in $ap; do case $d in /*) if [ -f "$d/claude" ] && [ -x "$d/claude" ]; then C=$d/claude; PATH="$d:$PATH"; break; fi;; esac; done; IFS=$o; set +f; fi; ` +
-		`if [ -z "$C" ]; then e=$(readlink "/proc/$p/exe" 2>/dev/null); case $e in */claude/versions/*) [ -x "$e" ] && C=$e;; esac; fi; ` +
+		// the process runs, where that is Claude Code's own build. At each, only a file that may be
+		// run: BusyBox's command -v names one that may not.)
+		`run_ok() { [ -f "$1" ] && [ -x "$1" ]; }; ` +
+		`C=$(command -v claude 2>/dev/null); run_ok "$C" || C=; ` +
+		`if [ -z "$C" ]; then set -f; o=$IFS; IFS=:; for d in $ap; do case $d in /*) if run_ok "$d/claude"; then C=$d/claude; PATH="$d:$PATH"; break; fi;; esac; done; IFS=$o; set +f; fi; ` +
+		`if [ -z "$C" ]; then e=$(readlink "/proc/$p/exe" 2>/dev/null); case $e in */claude/versions/*) run_ok "$e" && C=$e;; esac; fi; ` +
 		`[ -n "$C" ] || { echo 'E noclaude'; exit 0; }; ` +
 		// (Ended for sure, with all it started: run in a process group of its own (setsid), the
 		// whole group killed when its time is up, and once it has ended whatever of it is left — a
@@ -131,13 +133,14 @@ CORRAL_SIDE_ENV
 		// (An asynchronous command's input is /dev/null unless it is given one: this script's, as 3.
 		// Not a group leader, setsid makes the copy one in place — its pid its group's. The watch
 		// is a group of its own too, its sleep with it: killed whole once the copy has ended, it
-		// leaves nothing behind — by its pid as well: the copy may end before the watch's setsid
-		// has made its group, and the wait for it must not last its whole sleep. Neither holds
+		// leaves nothing behind — by its pid first, then its group: the copy may end before the
+		// watch's setsid has made its group (its pid killed, its sleep never begins), and the wait
+		// for it must not last its whole sleep. Neither holds
 		// the answer's pipe but the copy. No "--" before a group: dash's kill takes none.)
 		`exec 3<&0; ` +
 		`{ setsid "$C" "$@" <&3 3<&- 2>/dev/null & cp=$!; ` +
 		`setsid sh -c 'sleep "$1"; kill -KILL "-$2"' sh "$S" "$cp" </dev/null >/dev/null 2>&1 3<&- & w=$!; ` +
-		`wait "$cp"; rc=$?; kill -KILL "-$cp" 2>/dev/null; kill -KILL "-$w" "$w" 2>/dev/null; wait "$w" 2>/dev/null; ` +
+		`wait "$cp"; rc=$?; kill -KILL "-$cp" 2>/dev/null; kill -KILL "$w" 2>/dev/null; kill -KILL "-$w" 2>/dev/null; wait "$w" 2>/dev/null; ` +
 		`printf '\n%s RC %s\n' "$N" "$rc"; } | head -c ` + strconv.Itoa(sideAnswerCap) + `; exit 0`
 	return "sh -c " + sshx.QuoteShell(script) + " corral " + strconv.FormatInt(pid, 10) + " " + strconv.FormatInt(start, 10) + " " +
 		sshx.QuoteShell(sid) + " " + sshx.QuoteShell(model) + " " + sshx.QuoteShell(nonce) + " " + strconv.Itoa(secs)

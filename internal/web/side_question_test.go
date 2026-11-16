@@ -247,6 +247,8 @@ func TestSideQuestionCommandRuns(t *testing.T) {
 	// the copy's PATH and no more of the agent's; a folder by a relative name not looked in.
 	os.WriteFile(filepath.Join(work, "rel", "claude"), []byte("#!/bin/sh\necho wrong > '"+seen+"/wrong'\n"), 0o755)
 	os.Rename(filepath.Join(bin, "claude"), filepath.Join(nvm, "claude"))
+	// (One on the login shell's PATH that may not be run — BusyBox's command -v names it — passed over.)
+	os.WriteFile(filepath.Join(bin, "claude"), []byte("#!/bin/sh\necho wrong > '"+seen+"/wrong'\n"), 0o644)
 	os.Remove(filepath.Join(seen, "env"))
 	if a, err := parseSideAnswer(run(start, "", "q"), "f00d"); err != nil || !a.OK {
 		t.Errorf("on the agent's PATH: %+v %v", a, err)
@@ -257,6 +259,7 @@ func TestSideQuestionCommandRuns(t *testing.T) {
 	if p := "\n" + read("env"); !strings.Contains(p, "\nPATH="+nvm+":"+home+"/.local/bin:") || strings.Contains(p, "rel:") {
 		t.Errorf("the copy's PATH: %q", p[strings.Index(p, "\nPATH="):][:200])
 	}
+	os.Remove(filepath.Join(bin, "claude"))
 	os.Rename(filepath.Join(nvm, "claude"), filepath.Join(bin, "claude"))
 	// Nothing of the run left behind, the copy quick: no watch still sleeping.
 	runSecs := func(secs int, q string) (sideAnswer, time.Duration) {
