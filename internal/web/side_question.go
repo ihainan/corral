@@ -73,8 +73,14 @@ func sideQuestionText(q string) (string, bool) {
 // never one. Where it runs, and its environment of sideEnvNames, are the
 // process's own, read from /proc on the host.
 func sideQuestionCommand(pid, start int64, sid, model, nonce string) string {
+	return sideQuestionRun(pid, start, sid, model, nonce, sideRunSecs)
+}
+
+// sideQuestionRun is sideQuestionCommand with its time on the host, in
+// seconds (tests: a short one).
+func sideQuestionRun(pid, start int64, sid, model, nonce string, secs int) string {
 	script := `PATH="$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"; ` +
-		`p=$1; st=$2; sid=$3; m=$4; N=$5; ` +
+		`p=$1; st=$2; sid=$3; m=$4; N=$5; S=$6; ` +
 		// (Still that process — its start time after the last ") ", whatever its name — at that
 		// session, as its session file says now (not one it has left by /clear or /resume
 		// since it was found). Asked before and after what is read of it: what is read is its.)
@@ -87,9 +93,10 @@ func sideQuestionCommand(pid, start int64, sid, model, nonce string) string {
 		// (Its config folder and how it signs in and where its requests go — those of claude_ep's
 		// list, as it was started with them, none it had not: not the login shell's. Nothing else
 		// of its environment: its pane's would make the copy look like the pane's agent. Each
-		// variable read whole, by the NULs between them: a value with a line break in it is not
-		// taken for another variable — and is not taken.)
-		`ev=$(tr '\0' '\001' <"/proc/$p/environ" 2>/dev/null | awk 'BEGIN { RS = "\001" } /^(` + strings.ReplaceAll(sideEnvNames, " ", "|") + `)=/ && index($0, "\n") == 0 { print }' | head -c 16384); ` +
+		// variable read whole, by the NULs between them — they alone made line breaks, its own
+		// line breaks made \001s: no value can pass for another variable — and one with a line
+		// break or a \001 in it is not taken.)
+		`ev=$(tr '\0\n' '\n\001' <"/proc/$p/environ" 2>/dev/null | awk -v x="$(printf '\001')" '/^(` + strings.ReplaceAll(sideEnvNames, " ", "|") + `)=/ && index($0, x) == 0 { print }' | head -c 16384); ` +
 		`same || { echo 'E gone'; exit 0; }; ` +
 		`[ -n "$cwd" ] && cd -- "$cwd" 2>/dev/null || { echo 'E nodir'; exit 0; }; ` +
 		`unset ` + sideEnvNames + ` TMUX TMUX_PANE HERDR_PANE_ID HERDR_SOCKET_PATH; ` +
@@ -103,10 +110,13 @@ CORRAL_SIDE_ENV
 		`C=$(command -v claude 2>/dev/null); ` +
 		`if [ -z "$C" ]; then e=$(readlink "/proc/$p/exe" 2>/dev/null); case $e in */claude/versions/*) [ -x "$e" ] && C=$e;; esac; fi; ` +
 		`[ -n "$C" ] || { echo 'E noclaude'; exit 0; }; ` +
-		`T=; if command -v timeout >/dev/null 2>&1; then T=timeout; elif command -v gtimeout >/dev/null 2>&1; then T=gtimeout; else echo 'E notimeout'; exit 0; fi; ` +
-		// (Killed in the end, whatever it does with the first signal: by -k where the timeout has
-		// it, else by KILL at once. Neither: not run, as it may never end.)
-		`if $T -k 1 2 true 2>/dev/null; then K='-k 5'; elif $T -s KILL 2 true 2>/dev/null; then K='-s KILL'; else echo 'E notimeout'; exit 0; fi; ` +
+		// (Ended for sure, with all it started — a "claude" that is a wrapper, its child the one
+		// asking the model: by GNU's timeout, which signals the command's whole process group and
+		// kills it 5s after; else, where setsid is (BusyBox's timeout signals one process only),
+		// the copy in a process group of its own, killed whole when its time is up. Neither: not
+		// run, as it may never end.)
+		`G=; for t in timeout gtimeout; do command -v $t >/dev/null 2>&1 && $t --version 2>/dev/null | head -n 1 | grep -q 'GNU coreutils' && { G=$t; break; }; done; ` +
+		`[ -n "$G" ] || command -v setsid >/dev/null 2>&1 || { echo 'E notimeout'; exit 0; }; ` +
 		// (No MCP server started — "--tools" alone still starts the user's and the project's —
 		// no hook run, no tool to use.)
 		`set -- -p --resume "$sid" --fork-session --no-session-persistence --tools "" --strict-mcp-config --mcp-config '{"mcpServers":{}}' --settings '{"disableAllHooks":true}' --output-format json; ` +
@@ -114,9 +124,18 @@ CORRAL_SIDE_ENV
 		`printf '%s OUT\n' "$N"; ` +
 		// (The question is this script's input, given on to it: never in a command line, which
 		// any user of the host can read.)
-		`{ $T $K ` + strconv.Itoa(sideRunSecs) + ` "$C" "$@" 2>/dev/null; printf '\n%s RC %s\n' "$N" "$?"; } | head -c ` + strconv.Itoa(sideAnswerCap) + `; exit 0`
+		`if [ -n "$G" ]; then ` +
+		`{ $G -k 5 "$S" "$C" "$@" 2>/dev/null; printf '\n%s RC %s\n' "$N" "$?"; } | head -c ` + strconv.Itoa(sideAnswerCap) + `; ` +
+		// (An asynchronous command's input is /dev/null unless it is given one: this script's, as 3.
+		// Not a group leader, setsid makes the copy one in place — its pid its group's — and the
+		// watch kills that group, its output not the answer's pipe, so the answer's end is not
+		// held for it. No "--" before the group: dash's kill takes none.)
+		`else exec 3<&0; ` +
+		`{ setsid "$C" "$@" <&3 2>/dev/null & cp=$!; ` +
+		`( sleep "$S"; kill -KILL "-$cp" 2>/dev/null ) </dev/null >/dev/null 2>&1 & w=$!; ` +
+		`wait "$cp"; rc=$?; kill "$w" 2>/dev/null; printf '\n%s RC %s\n' "$N" "$rc"; } | head -c ` + strconv.Itoa(sideAnswerCap) + `; fi; exit 0`
 	return "sh -c " + sshx.QuoteShell(script) + " corral " + strconv.FormatInt(pid, 10) + " " + strconv.FormatInt(start, 10) + " " +
-		sshx.QuoteShell(sid) + " " + sshx.QuoteShell(model) + " " + sshx.QuoteShell(nonce)
+		sshx.QuoteShell(sid) + " " + sshx.QuoteShell(model) + " " + sshx.QuoteShell(nonce) + " " + strconv.Itoa(secs)
 }
 
 // sideEnvNames: what of a Claude Code's environment its side question's copy
@@ -315,12 +334,12 @@ func (s *Server) apiConversationSide(w http.ResponseWriter, r *http.Request) {
 	}
 
 	nonce := gitNonce()
-	began := time.Now()
 	res, err := sshx.Exec(ctx, sess.Client(), sideQuestionCommand(b.PID, b.Start, b.Session, b.Model, nonce), sideAnswerCap+256, sshx.ExecOptions{Stdin: strings.NewReader(q), AwaitSlot: 2 * time.Second})
 	if !res.Ended && !errors.Is(err, sshx.ErrBusy) {
 		held = false
 		id := sess.ID
-		time.AfterFunc(time.Until(began.Add(sideHostEnd)), func() { sideGive(id) })
+		// (From now: the copy may have begun on the host as late as this.)
+		time.AfterFunc(sideHostEnd, func() { sideGive(id) })
 	}
 	var a sideAnswer
 	if err == nil {

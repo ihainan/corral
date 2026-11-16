@@ -45,9 +45,10 @@ function put(key: string, a: Asked) {
   const list = (kept.get(key) ?? []).filter((x) => x.id !== a.id)
   kept.delete(key) // (to the end: the one asked of last)
   kept.set(key, [...list, a].slice(-KEEP))
-  for (const k of kept.keys()) {
+  // (The oldest dropped first; never this one, nor one still being answered.)
+  for (const k of [...kept.keys()]) {
     if (kept.size <= AGENTS) break
-    if (!kept.get(k)!.some((x) => x.state === 'asking')) kept.delete(k)
+    if (k !== key && !kept.get(k)!.some((x) => x.state === 'asking')) kept.delete(k)
   }
   tell()
 }

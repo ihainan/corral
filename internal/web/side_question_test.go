@@ -64,7 +64,7 @@ func TestSideQuestionCommandFlags(t *testing.T) {
 			t.Errorf("%q in %s", not, cmd)
 		}
 	}
-	if !strings.HasSuffix(cmd, " corral 42 4242 '0b7c2a1e-1111-4222-8333-444455556666' 'claude-opus-5-5' 'abcd'") {
+	if !strings.HasSuffix(cmd, " corral 42 4242 '0b7c2a1e-1111-4222-8333-444455556666' 'claude-opus-5-5' 'abcd' 90") {
 		t.Errorf("arguments: %s", cmd)
 	}
 }
@@ -135,7 +135,8 @@ func TestSideQuestionCommandRuns(t *testing.T) {
 	agent.Dir = work
 	agent.Env = []string{"PATH=/usr/bin:/bin", "CLAUDE_CONFIG_DIR=" + filepath.Join(home, "cfg"), "ANTHROPIC_BASE_URL=https://relay.example.com/x", "TMUX_PANE=%9", "HERDR_PANE_ID=p1", "SECRET_OTHER=no",
 		// (A value with a line break that reads as another variable: neither taken.)
-		"SMUGGLE=x\nANTHROPIC_AUTH_TOKEN=stolen", "ANTHROPIC_API_KEY=k1\nANTHROPIC_BASE_URL=https://evil.example"}
+		"SMUGGLE=x\nANTHROPIC_AUTH_TOKEN=stolen", "ANTHROPIC_API_KEY=k1\nANTHROPIC_BASE_URL=https://evil.example",
+		"SMUGGLE2=y\x01ANTHROPIC_AUTH_TOKEN=stolen2"}
 	if err := agent.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -211,7 +212,7 @@ func TestSideQuestionCommandRuns(t *testing.T) {
 			t.Errorf("no %q in env", want)
 		}
 	}
-	for _, not := range []string{"\nANTHROPIC_API_KEY=", "\nANTHROPIC_AUTH_TOKEN=", "evil.example", "stolen", "\nTMUX_PANE=", "\nHERDR_PANE_ID=", "\nSECRET_OTHER=", "\nSMUGGLE=", "/outer"} {
+	for _, not := range []string{"\nANTHROPIC_API_KEY=", "\nANTHROPIC_AUTH_TOKEN=", "evil.example", "stolen", "\x01", "\nTMUX_PANE=", "\nHERDR_PANE_ID=", "\nSECRET_OTHER=", "\nSMUGGLE=", "/outer"} {
 		if strings.Contains(env, not) {
 			t.Errorf("%q in env", not)
 		}
@@ -238,16 +239,39 @@ func TestSideQuestionCommandRuns(t *testing.T) {
 		t.Errorf("ran for another session")
 	}
 	setSession("0b7c2a1e-1111-4222-8333-444455556666")
-	// A timeout without -k: killed outright (-s KILL), a copy that ignores TERM ended all the same.
-	os.WriteFile(filepath.Join(bin, "timeout"), []byte("#!/bin/sh\n[ \"$1\" = -k ] && exit 125\nprintf '%s\\n' \"$@\" > '"+seen+"/timeout'\n[ \"$1 $2\" = '-s KILL' ] || exit 125\nshift 3\nexec /usr/bin/timeout -s KILL 1 \"$@\"\n"), 0o755)
-	os.WriteFile(filepath.Join(bin, "claude"), []byte("#!/bin/sh\ntrap '' TERM\nsleep 30\n"), 0o755)
-	began := time.Now()
-	a, err = parseSideAnswer(run(start, "", "q"), "f00d")
-	if err != nil || a.Reason != "timeout" || time.Since(began) > 10*time.Second {
-		t.Errorf("no -k: %+v %v after %s", a, err, time.Since(began))
+	// Its time up, all it started ended too — a "claude" that is a wrapper, its child the one
+	// that would ask the model, and that ignores TERM: by GNU's timeout (here), and by the
+	// copy's own process group where the timeout is not GNU's (BusyBox's).
+	os.WriteFile(filepath.Join(bin, "claude"), []byte("#!/bin/sh\ntrap '' TERM\nsh -c \"trap '' TERM; echo \\$\\$ > '"+seen+"/child'; sleep 30\" &\nwait\n"), 0o755)
+	alive := func() bool {
+		b, err := os.ReadFile(filepath.Join(seen, "child"))
+		if err != nil {
+			return false
+		}
+		_, err = os.Stat("/proc/" + strings.TrimSpace(string(b)))
+		return err == nil
 	}
-	if got := read("timeout"); !strings.HasPrefix(got, "-s\nKILL\n90\n") {
-		t.Errorf("timeout run as %q", got)
+	for _, how := range []string{"gnu", "busybox"} {
+		if how == "busybox" {
+			// (A timeout that is not GNU's: the script does not use it.)
+			os.WriteFile(filepath.Join(bin, "timeout"), []byte("#!/bin/sh\necho 'BusyBox timeout'\nexit 1\n"), 0o755)
+		}
+		os.Remove(filepath.Join(seen, "child"))
+		began := time.Now()
+		c := exec.Command("sh", "-c", sideQuestionRun(pid, start, "0b7c2a1e-1111-4222-8333-444455556666", "", "f00d", 1))
+		c.Env = []string{"HOME=" + home, "PATH=/usr/bin:/bin"}
+		c.Stdin = strings.NewReader("q")
+		out, _ := c.CombinedOutput()
+		a, err := parseSideAnswer(string(out), "f00d")
+		if err != nil || a.Reason != "timeout" || time.Since(began) > 12*time.Second {
+			t.Errorf("%s: %+v %v after %s: %q", how, a, err, time.Since(began), out)
+		}
+		for i := 0; i < 20 && alive(); i++ {
+			time.Sleep(100 * time.Millisecond)
+		}
+		if alive() {
+			t.Errorf("%s: the wrapper's child still runs", how)
+		}
 	}
 }
 

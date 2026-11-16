@@ -342,11 +342,12 @@ for f in "$HOME"/.claude/sessions/*.json; do
   case $ps in ''|*[!0-9]*) continue;; esac
   case $sid in *[!0-9a-fA-F-]*) continue;; ????????-????-????-????-????????????) ;; *) continue;; esac
   # (Not a side question's copy of a conversation — a "claude -p" the
-  # gateway runs, marked so in its environment — which writes a file here
+  # gateway runs, marked so in its environment (read by its NULs: no value
+  # can pass for the mark) — which writes a file here
   # while it runs, under a session of its own: no agent to show or type to.
   # A "claude -p" of the person's own is found as before. side_question.go)
   json_str entrypoint
-  if [ "$v" = sdk-cli ] && tr '\0' '\n' <"/proc/$pid/environ" 2>/dev/null | grep -qx 'CORRAL_SIDE_COPY=1'; then continue; fi
+  if [ "$v" = sdk-cli ] && tr '\0\n' '\n\001' <"/proc/$pid/environ" 2>/dev/null | grep -qx 'CORRAL_SIDE_COPY=1'; then continue; fi
   log=
   for l in "$HOME"/.claude/projects/*/"$sid".jsonl; do
     case $l in *"$nl"*) continue;; esac
