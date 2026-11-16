@@ -382,9 +382,9 @@ done
 sleep 1.5; dead
 tmux set-option -u -t ` + t + ` remain-on-exit 2>/dev/null
 # (The pane it was made with, as tmux said on making it: the one the agent
-# runs in, whichever is active there later.)
-set -- $made
-[ $# -eq 2 ] && echo "pane $1 $2"
+# runs in, whichever is active there later. Not split by the shell: zsh
+# does not split words — review fork4b-4.)
+case $made in %*' '*) echo "pane $made";; esac
 echo started`
 }
 

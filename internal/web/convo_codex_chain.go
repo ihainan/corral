@@ -61,6 +61,22 @@ func codexHistoryBase(head []byte) (codexBase, bool) {
 	return codexBase{writer: strings.ToLower(b.Thread), end: b.End, ordinal: b.Ordinal}, true
 }
 
+// codexHeadStarts: a Codex log's first line (head: the log's start), read
+// whole, is its session_meta and goes on from no log before it.
+func codexHeadStarts(head []byte) bool {
+	line, _, found := bytes.Cut(head, []byte("\n"))
+	if !found {
+		return false
+	}
+	var m struct {
+		Type    string `json:"type"`
+		Payload struct {
+			Base json.RawMessage `json:"history_base"`
+		} `json:"payload"`
+	}
+	return json.Unmarshal(line, &m) == nil && m.Type == "session_meta" && (len(m.Payload.Base) == 0 || string(m.Payload.Base) == "null")
+}
+
 // codexSegmentName: a Codex log's name — rollout-<time>-<thread>.jsonl, or
 // a segment of it after a rewind, rollout-<time>-<thread>_<writer>.jsonl:
 // its thread and writer ("" for the first).

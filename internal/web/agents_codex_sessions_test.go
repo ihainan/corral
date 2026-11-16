@@ -67,18 +67,29 @@ func TestAgentTmuxCmd(t *testing.T) {
 	// (new-session: its shell command, the argument before ";", run as tmux runs it — sh -c; its pane alive.)
 	write("tmux", `printf 'tmux:%s\n' "$@" >>"$LOG"
 case $1 in
-new-session) prev=; for a; do [ "$a" = ";" ] && break; prev=$a; done; sh -c "$prev" ;;
+new-session) prev=; for a; do [ "$a" = ";" ] && break; prev=$a; done; sh -c "$prev"; echo '%42 12345' ;;
 list-panes) echo 0 ;;
 esac`)
 	write("fakeshell", `printf 'shell:%s\n' "$@" >>"$LOG"; [ "$1" = -lc ] && exec sh -c "$2"`)
 	write("codex", `printf 'codex:%s\n' "$@" >>"$LOG"; printf 'home:%s\n' "$CODEX_HOME" >>"$LOG"`)
 	dir := "/w/it's my proj"
 	cmd := agentTmuxCmd("fix-tests-abcde", dir, "codex", "/w/codex home", agentStart{resume: "01a1df42-8f07-7d43-b8b7-c6bad45f5528"})
-	c := exec.Command("sh", "-c", cmd)
-	c.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"), "SHELL="+filepath.Join(bin, "fakeshell"), "LOG="+logf, "HOME="+bin)
-	out, err := c.CombinedOutput()
-	if err != nil || !strings.HasSuffix(strings.TrimSpace(string(out)), "started") {
-		t.Fatal(err, string(out))
+	// (Run as the account's shell runs it — sh, or zsh, which does not split words: review fork4b-4.)
+	shells := []string{"sh"}
+	if _, err := exec.LookPath("zsh"); err == nil {
+		shells = append(shells, "zsh")
+	}
+	for _, sh := range shells {
+		c := exec.Command(sh, "-c", cmd)
+		c.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"), "SHELL="+filepath.Join(bin, "fakeshell"), "LOG="+logf, "HOME="+bin)
+		out, err := c.CombinedOutput()
+		if err != nil || !strings.HasSuffix(strings.TrimSpace(string(out)), "started") {
+			t.Fatal(sh, err, string(out))
+		}
+		// (The pane it was made with, as tmux said it.)
+		if !strings.Contains(string(out), "pane %42 12345\n") {
+			t.Errorf("%s: the pane made not told: %q", sh, out)
+		}
 	}
 	b, _ := os.ReadFile(logf)
 	got := string(b)

@@ -2471,7 +2471,9 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     // (Another of the person's messages beginning as it does — "continue" twice — is not told
     // from it by what comes back in the copy's input: its rewind not said to be sure.)
     const head = (x: string) => x.split('\n', 1)[0].replace(/\s+/g, '').slice(0, 40)
-    const alike = users.filter((x) => head(words(x)) === head(text)).length > 1
+    // (Or one beginning with it, or it with that one — "continue", "continue please" — review fork4b-3.)
+    const mine = head(text)
+    const alike = users.filter((x) => x !== all[i] && (head(words(x)).startsWith(mine) || mine.startsWith(head(words(x))))).length > 0
     // (Taken to the page's input only whole: one with a picture, or too long for it, left in the copy's — review fork2-10.)
     const clear = !all[i].parts.some((p) => p.kind === 'image') && text.length <= 4000
     return back > 0 && text ? { back, text: text.slice(0, 4000), alike, clear, at } : undefined
@@ -2512,7 +2514,8 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   // the last, as all of it, while it is at rest.
   const forkHere = (at: string | undefined) => {
     const f = forkOf(cur, at)
-    if (!f) return
+    // (A Codex's, before a message of pictures alone: no words of it to see come back — review fork4b-6.)
+    if (!f) return void (at && convo.bind?.agent === 'codex' && toast(t('fork.atNoText'), true))
     const st = cur.row ? cur.row.status : agent?.status
     if (!at && st !== 'idle' && st !== 'done') return toast(t('fork.onlyIdle'), true)
     setForking(f)

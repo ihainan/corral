@@ -58,8 +58,9 @@ func tmuxMadePane(sess *term.Session, out string) (tmuxRewindPane, bool) {
 }
 
 // tmuxRewindCheck: the pane is still the one found, its process alive in it.
+// (Run by sh, whatever the account's shell: zsh does not split words — review fork4b-4.)
 func (p tmuxRewindPane) check() string {
-	return `set -- $(tmux display-message -p -t ` + sshx.QuoteShell(p.pane) + ` '#{pane_pid} #{pane_dead}' 2>/dev/null); [ "$1" = ` + sshx.QuoteShell(p.panePID) + ` ] && [ "$2" = 0 ] || exit 3; `
+	return `[ "$(tmux display-message -p -t ` + sshx.QuoteShell(p.pane) + ` '#{pane_pid} #{pane_dead}' 2>/dev/null)" = ` + sshx.QuoteShell(p.panePID+" 0") + ` ] || exit 3; `
 }
 
 func (p tmuxRewindPane) press(ctx context.Context, key string) error {
@@ -170,20 +171,32 @@ func codexRewindDo(ctx context.Context, p rewindPane, back int, at string, clear
 	if err := p.press(ctx, "esc"); err != nil {
 		return "esc: " + err.Error()
 	}
-	sleepCtx(ctx, codexRewindStep)
+	// (Each key only on the screen it is for, read just before — another
+	// connection to the terminal may have done something meanwhile: review
+	// fork4b-1.)
+	if !rewindWait(ctx, p, 3*time.Second, func(s string) bool { return strings.Contains(s, "esc again to edit previous message") }) {
+		return "not asked for the second esc"
+	}
 	if err := p.press(ctx, "esc"); err != nil {
 		return "esc: " + err.Error()
 	}
-	if !rewindWait(ctx, p, 4*time.Second, func(s string) bool { return strings.Contains(s, "Browsing transcript") }) {
+	browsing := func(s string) bool { return strings.Contains(s, "Browsing transcript") }
+	if !rewindWait(ctx, p, 4*time.Second, browsing) {
 		return "not browsed"
 	}
 	for i := 1; i < back; i++ {
+		if !rewindWait(ctx, p, 2*time.Second, browsing) {
+			return "no longer browsed"
+		}
 		if err := p.press(ctx, "left"); err != nil {
 			return "left: " + err.Error()
 		}
 		sleepCtx(ctx, codexRewindStep/2)
 	}
 	sleepCtx(ctx, codexRewindStep)
+	if !rewindWait(ctx, p, 2*time.Second, browsing) {
+		return "no longer browsed"
+	}
 	if err := p.press(ctx, "enter"); err != nil {
 		return "enter: " + err.Error()
 	}
@@ -203,6 +216,9 @@ func codexRewindDo(ctx context.Context, p rewindPane, back int, at string, clear
 	// for the page to send to: that message is put in the page's own input,
 	// to change and send, rather than left where a message from the page
 	// would be refused as words not its own.)
+	if !rewindWait(ctx, p, time.Second, func(s string) bool { return codexInputHolds(s, want) }) {
+		return "no longer in its input"
+	}
 	if err := p.press(ctx, "ctrl+c"); err != nil {
 		return "ctrl+c: " + err.Error()
 	}
@@ -272,9 +288,11 @@ func codexNameDo(ctx context.Context, p rewindPane, name, cwd string) string {
 		return "typed: " + err.Error()
 	}
 	// (What was typed seen whole in its input, nothing else there, before Enter.)
+	// (Nothing else in its input — no words under it taken for its footer —
+	// and it at rest: review fork4b-5.)
 	if !rewindWait(ctx, p, 3*time.Second, func(s string) bool {
-		area, _, _, ok := codexInputArea(s)
-		return ok && squeeze(area) == squeeze("/rename "+name)
+		area, foot, known, ok := codexInputArea(s)
+		return ok && (foot == "" || known) && squeeze(area) == squeeze("/rename "+name) && !strings.Contains(s, "esc to interrupt") && !strings.Contains(s, "Browsing transcript")
 	}) {
 		return "not seen typed"
 	}
@@ -306,16 +324,13 @@ func (s *Server) codexForkAfter(ctx context.Context, out map[string]any, p rewin
 		out["named"] = false
 		return
 	}
+	// (Named first: /rename is no message of the person's — its transcript
+	// steps over it — and a rewind may leave words in its input after, a
+	// picture's say, that nothing is to be typed over: review fork4b-7.)
+	out["named"] = codexNameCopy(ctx, p, codexForkName(label), dir)
 	if how.back > 0 {
 		out["rewound"] = codexRewind(ctx, p, how.back, how.atText, how.clear)
 	}
-	// (Not where its rewind left words in its input — a picture's, too long
-	// for the page's —: nothing typed over them.)
-	if how.back > 0 && !how.clear {
-		out["named"] = false
-		return
-	}
-	out["named"] = codexNameCopy(ctx, p, codexForkName(label), dir)
 }
 
 // codexInputHolds: Codex at rest, its input in front holding words that

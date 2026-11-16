@@ -1011,6 +1011,9 @@ func (s *Server) convoBound(sess *term.Session, pane string, pid, start int64) (
 	if st.weak {
 		return "", "", "weak" // (a weak binding vouches for nothing)
 	}
+	if st.named {
+		return "", "", "named" // (by its title then: read anew for a press — review fork4a-1)
+	}
 	return st.log, st.sid, ""
 }
 
@@ -1737,6 +1740,10 @@ type convoState struct {
 	// from none — the conversation's own start read, whatever the last log
 	// is (a copy, a segment after a rewind): not said to be elsewhere.
 	chainStart bool
+	// named: bound by its conversation's name, its pane's title showing it
+	// (tmux, codexTmuxNamed): vouching for a press only with its title read
+	// anew then — it may have gone to another since (/new, /resume).
+	named      bool
 	more       bool   // the last read stopped before the end
 	status     string // (tmux) the process's own word: "busy", "idle", or "" when not known
 	skipping   bool   // in a line too long to keep, until its end
@@ -2345,11 +2352,13 @@ func (s *Server) locateScan(ctx context.Context, sess *term.Session, st *convoSt
 		// told by its conversation's name, its pane's title showing it now,
 		// no other live conversation of its folder of that name, as a herdr
 		// pane's is: codexTmuxNamed.)
+		named := false
 		if sess.Persistence == "tmux" && held && p != nil && (p.log == "" || guessed) {
 			if c, ok := s.codexTmuxNamed(ctx, sess, p, l); ok {
-				p.log, p.sid, guessed, refused = c.Path, c.Thread, false, false
+				p.log, p.sid, guessed, refused, named = c.Path, c.Thread, false, false, true
 			}
 		}
+		st.named = named
 		st.bind = nil
 		if p != nil {
 			b := &convoBind{PID: p.pid, Start: p.start, Session: p.sid, Agent: p.agent, Pane: p.herdrPane, Via: p.ep, Auth: p.auth}
@@ -2768,7 +2777,10 @@ func (s *Server) codexHop(c *sftplite.Client, st *convoState) (went bool, err er
 	}
 	b, ok := codexHistoryBase(head)
 	if !ok {
-		st.chainStart = st.hops > 0 // (its own start, reached from a log after it)
+		// (Its own start, reached from a log after it — only where its first
+		// line was read whole and goes on from none: one not read whole may
+		// — review fork4a-2.)
+		st.chainStart = st.hops > 0 && codexHeadStarts(head)
 		return false, nil
 	}
 	m := codexSegmentName.FindStringSubmatch(path.Base(log))

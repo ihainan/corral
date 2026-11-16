@@ -153,3 +153,22 @@ func TestCodexBaseLogFork(t *testing.T) {
 		t.Errorf("the original's segment: %q", got)
 	}
 }
+
+// A log's own start: its first line read whole, no history_base in it; one
+// cut short, or going on from another, is not (review fork4a-2).
+func TestCodexHeadStarts(t *testing.T) {
+	for _, c := range []struct {
+		head string
+		want bool
+	}{
+		{`{"type":"session_meta","payload":{"id":"x","cwd":"/w"}}` + "\n{}", true},
+		{`{"type":"session_meta","payload":{"id":"x","history_base":null}}` + "\n", true},
+		{`{"type":"session_meta","payload":{"id":"x","history_base":{"thread_id":"y","end_byte_offset":5,"end_ordinal_exclusive":2}}}` + "\n", false},
+		{`{"type":"session_meta","payload":{"id":"x","base_instructions":"long and cut`, false},
+		{`{"type":"event_msg","payload":{}}` + "\n", false},
+	} {
+		if got := codexHeadStarts([]byte(c.head)); got != c.want {
+			t.Errorf("%.60q: %v, want %v", c.head, got, c.want)
+		}
+	}
+}
