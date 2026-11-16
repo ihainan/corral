@@ -341,6 +341,10 @@ for f in "$HOME"/.claude/sessions/*.json; do
   json_num procStart; ps=$v
   case $ps in ''|*[!0-9]*) continue;; esac
   case $sid in *[!0-9a-fA-F-]*) continue;; ????????-????-????-????-????????????) ;; *) continue;; esac
+  # (Not a "claude -p" — a side question's copy of a conversation, which
+  # writes a file here while it runs, under a session of its own: no agent
+  # to show or type to. side_question.go)
+  json_str entrypoint; [ "$v" = sdk-cli ] && continue
   log=
   for l in "$HOME"/.claude/projects/*/"$sid".jsonl; do
     case $l in *"$nl"*) continue;; esac

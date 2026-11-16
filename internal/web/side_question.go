@@ -1,0 +1,311 @@
+package web
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"regexp"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+	"unicode"
+	"unicode/utf8"
+
+	"github.com/ihainan/corral/internal/sshx"
+)
+
+// A side question (Claude Code's /btw, from the page): a question asked of
+// a Claude Code's conversation as it stands, mid-turn too, answered beside
+// it and never written into it. Claude Code's own /btw answer is in neither
+// its log nor anything else that can be read, so the gateway asks a copy:
+// on the host, "claude -p --resume <its session> --fork-session
+// --no-session-persistence" (no tools, no hooks), from where the agent runs
+// and with its CLAUDE_CONFIG_DIR, so its log is the one resumed. The agent
+// is not interrupted, nothing is added to its log and no session file is
+// left. It is a model call of its own, on the account the agent's is on.
+// (Seen on 2.1.325: --bare reads no login, so it is not used; without
+// stdin closed it waits 3s for it.)
+
+const (
+	sideQuestionMax  = 2000              // runes of a question
+	sideAnswerCap    = 256 << 10         // bytes of what the host prints (its JSON cut there: a failure)
+	sideRunSecs      = 90                // the host's own limit on the run
+	sideRequestLimit = 100 * time.Second // the gateway's, past the host's (and its kill's)
+)
+
+// sideModel: a model's name as Claude Code's --model takes it (an alias, an
+// id, a Bedrock or Vertex one, a "[1m]" suffix), never one that would read
+// as an option.
+var sideModel = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/@\[\]-]{0,127}$`)
+
+// sideQuestionText: the question as it is passed (trimmed), and whether it
+// may be: some words, no longer than sideQuestionMax, valid UTF-8, no
+// control characters but a line break and a tab, and not begun with "-"
+// (given as input, not an argument, it could not be read as an option: a
+// second guard).
+func sideQuestionText(q string) (string, bool) {
+	q = strings.TrimSpace(q)
+	if q == "" || !utf8.ValidString(q) || utf8.RuneCountInString(q) > sideQuestionMax || strings.HasPrefix(q, "-") {
+		return "", false
+	}
+	if strings.ContainsFunc(q, func(r rune) bool {
+		return r != '\n' && r != '\t' && (unicode.IsControl(r) || r == ' ' || r == ' ')
+	}) {
+		return "", false
+	}
+	return q, true
+}
+
+// sideQuestionCommand asks Claude Code process pid (started at start, by
+// /proc/<pid>/stat's field 22) the question given as its input (and passed
+// on as the copy's) of its session sid, as a copy of the session that is
+// not kept: see above. It prints "E <why>" (gone:
+// the process has ended or is another; nodir; noclaude; notimeout), or
+// "<nonce> OUT", the command's JSON (cut at sideAnswerCap) and
+// "<nonce> RC <status>" where it ran to its end. Fixed script; pid and start
+// are numbers, sid a UUID, model sideModel's and the nonce hex, each
+// quoted, all positional arguments; the question (sideQuestionText's) is
+// never one. Where it runs, and its environment of sideEnvNames, are the
+// process's own, read from /proc on the host.
+func sideQuestionCommand(pid, start int64, sid, model, nonce string) string {
+	script := `PATH="$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"; ` +
+		`p=$1; st=$2; sid=$3; m=$4; N=$5; ` +
+		// (Still that process: its start time after the last ") ", whatever its name.)
+		`x=; { IFS= read -r x; } <"/proc/$p/stat" 2>/dev/null; x=${x##*) }; set -f; set -- $x; set +f; ` +
+		`[ -n "$x" ] && [ "${20-}" = "$st" ] || { echo 'E gone'; exit 0; }; ` +
+		`cwd=$(readlink "/proc/$p/cwd" 2>/dev/null); ` +
+		`[ -n "$cwd" ] && cd -- "$cwd" 2>/dev/null || { echo 'E nodir'; exit 0; }; ` +
+		// (Its config folder and how it signs in and where its requests go — those of claude_ep's
+		// list, as it was started with them, none it had not: not the login shell's. Nothing else
+		// of its environment: its pane's would make the copy look like the pane's agent.)
+		`unset ` + sideEnvNames + ` TMUX TMUX_PANE HERDR_PANE_ID HERDR_SOCKET_PATH; ` +
+		`ev=$(tr '\0' '\n' <"/proc/$p/environ" 2>/dev/null | grep -E '^(` + strings.ReplaceAll(sideEnvNames, " ", "|") + `)=' | head -c 16384); ` +
+		`while IFS= read -r v; do case $v in ?*=*) export "$v";; esac; done <<CORRAL_SIDE_ENV
+$ev
+CORRAL_SIDE_ENV
+` +
+		// (Claude Code as the shell finds it; else the one the process runs, where that is Claude Code's own build.)
+		`C=$(command -v claude 2>/dev/null); ` +
+		`if [ -z "$C" ]; then e=$(readlink "/proc/$p/exe" 2>/dev/null); case $e in */claude/versions/*) [ -x "$e" ] && C=$e;; esac; fi; ` +
+		`[ -n "$C" ] || { echo 'E noclaude'; exit 0; }; ` +
+		`T=; if command -v timeout >/dev/null 2>&1; then T=timeout; elif command -v gtimeout >/dev/null 2>&1; then T=gtimeout; else echo 'E notimeout'; exit 0; fi; ` +
+		`K=; $T -k 1 2 true 2>/dev/null && K='-k 5'; ` +
+		// (No MCP server started — "--tools" alone still starts the user's and the project's —
+		// no hook run, no tool to use.)
+		`set -- -p --resume "$sid" --fork-session --no-session-persistence --tools "" --strict-mcp-config --mcp-config '{"mcpServers":{}}' --settings '{"disableAllHooks":true}' --output-format json; ` +
+		`[ -n "$m" ] && set -- "$@" --model "$m"; ` +
+		`printf '%s OUT\n' "$N"; ` +
+		// (The question is this script's input, given on to it: never in a command line, which
+		// any user of the host can read.)
+		`{ $T $K ` + strconv.Itoa(sideRunSecs) + ` "$C" "$@" 2>/dev/null; printf '\n%s RC %s\n' "$N" "$?"; } | head -c ` + strconv.Itoa(sideAnswerCap) + `; exit 0`
+	return "sh -c " + sshx.QuoteShell(script) + " corral " + strconv.FormatInt(pid, 10) + " " + strconv.FormatInt(start, 10) + " " +
+		sshx.QuoteShell(sid) + " " + sshx.QuoteShell(model) + " " + sshx.QuoteShell(nonce)
+}
+
+// sideEnvNames: what of a Claude Code's environment its side question's copy
+// is run with (claude_ep's list): its config folder, where its requests go
+// and how it signs in.
+const sideEnvNames = "CLAUDE_CONFIG_DIR ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX"
+
+// sideAnswer is what the page is told of a side question asked.
+type sideAnswer struct {
+	OK         bool    `json:"ok"`
+	Answer     string  `json:"answer,omitempty"`
+	Reason     string  `json:"reason,omitempty"` // (not ok: gone, nodir, noclaude, notimeout, timeout, cut, failed, error)
+	DurationMs int64   `json:"duration_ms,omitempty"`
+	CostUSD    float64 `json:"cost_usd,omitempty"`
+}
+
+var errSideOutput = errors.New("side question: output not understood")
+
+// parseSideAnswer reads sideQuestionCommand's output.
+func parseSideAnswer(out, nonce string) (sideAnswer, error) {
+	if why, ok := strings.CutPrefix(out, "E "); ok {
+		why = strings.TrimSpace(why)
+		switch why {
+		case "gone", "nodir", "noclaude", "notimeout":
+			return sideAnswer{Reason: why}, nil
+		}
+		return sideAnswer{}, errSideOutput
+	}
+	body, ok := strings.CutPrefix(out, nonce+" OUT\n")
+	if !ok {
+		return sideAnswer{}, errSideOutput
+	}
+	i := strings.LastIndex(body, "\n"+nonce+" RC ")
+	if i < 0 {
+		return sideAnswer{Reason: "cut"}, nil // (past the cap: the end not reached)
+	}
+	rc, err := strconv.Atoi(strings.TrimSpace(body[i+len("\n"+nonce+" RC "):]))
+	if err != nil {
+		return sideAnswer{}, errSideOutput
+	}
+	if rc == 124 || rc == 137 || rc == 143 {
+		return sideAnswer{Reason: "timeout"}, nil
+	}
+	var res struct {
+		Type     string   `json:"type"`
+		Subtype  string   `json:"subtype"`
+		IsError  bool     `json:"is_error"`
+		Result   *string  `json:"result"`
+		Duration int64    `json:"duration_ms"`
+		Cost     *float64 `json:"total_cost_usd"`
+	}
+	if json.Unmarshal([]byte(strings.TrimSpace(body[:i])), &res) != nil || res.Type != "result" {
+		return sideAnswer{Reason: "failed"}, nil // (it said nothing that can be read: not logged in, say)
+	}
+	a := sideAnswer{DurationMs: max(res.Duration, 0)}
+	if res.Cost != nil && *res.Cost > 0 {
+		a.CostUSD = *res.Cost
+	}
+	if res.IsError || res.Subtype != "success" || res.Result == nil || rc != 0 {
+		a.Reason = "error"
+		if res.Result != nil {
+			a.Answer = *res.Result // (Claude Code's own word on it: "Not logged in", a limit reached)
+		}
+		return a, nil
+	}
+	a.OK, a.Answer = true, *res.Result
+	return a, nil
+}
+
+// sideAsking: the Corral sessions a side question is under way in — one at
+// a time to each, as it holds one of the host connection's few channels
+// for up to a minute and a half.
+var sideAsking = struct {
+	sync.Mutex
+	m map[string]bool
+}{m: map[string]bool{}}
+
+func sideTake(id string) bool {
+	sideAsking.Lock()
+	defer sideAsking.Unlock()
+	if sideAsking.m[id] {
+		return false
+	}
+	sideAsking.m[id] = true
+	return true
+}
+
+func sideGive(id string) {
+	sideAsking.Lock()
+	delete(sideAsking.m, id)
+	sideAsking.Unlock()
+}
+
+// POST /api/sessions/{id}/conversation/side {pane, pid, start, session,
+// model?, question}: the question asked of that Claude Code's conversation
+// beside it (see above) — the process the pane runs now, at that session,
+// as a press checks it. Its answer, or why there is none (sideAnswer).
+// Each is audited, without its words.
+func (s *Server) apiConversationSide(w http.ResponseWriter, r *http.Request) {
+	sess, ok := s.runningSession(w, r)
+	if !ok {
+		return
+	}
+	var b struct {
+		Pane     string `json:"pane"`
+		PID      int64  `json:"pid"`
+		Start    int64  `json:"start"`
+		Session  string `json:"session"`
+		Model    string `json:"model"`
+		Question string `json:"question"`
+	}
+	err := readJSON(r, &b)
+	q, qOK := sideQuestionText(b.Question)
+	if err != nil || !qOK || (b.Model != "" && !sideModel.MatchString(b.Model)) || b.PID <= 0 || b.Start <= 0 ||
+		!convoUUID.MatchString(b.Session) || b.Session == convoNoSession ||
+		(sess.Persistence == "herdr" && !herdrPane.MatchString(b.Pane)) || (sess.Persistence == "tmux" && !tmuxPane.MatchString(b.Pane)) {
+		writeError(w, http.StatusBadRequest, "bad_request", "the pane, the process, its session and a question are required")
+		return
+	}
+	if sess.Persistence != "herdr" && sess.Persistence != "tmux" {
+		writeError(w, http.StatusConflict, "unsupported", "only in tmux and herdr sessions")
+		return
+	}
+	outcome, reason := "refused", ""
+	defer func() {
+		actx, acancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
+		defer acancel()
+		detail := map[string]any{"session": sess.ID, "pane": b.Pane, "pid": b.PID, "start": b.Start, "claude_session": b.Session, "length": utf8.RuneCountInString(q), "outcome": outcome}
+		if b.Model != "" {
+			detail["model"] = b.Model
+		}
+		if reason != "" {
+			detail["reason"] = reason
+		}
+		s.audit(r.WithContext(actx), "conversation.side", sess.HostName, detail)
+	}()
+	expiry, err := s.auth.LoginExpiry(r.Context(), loginHash(r))
+	if err != nil {
+		reason = "signed_out"
+		writeError(w, http.StatusUnauthorized, "unauthorized", "please sign in")
+		return
+	}
+	if !sideTake(sess.ID) {
+		reason = "busy"
+		writeError(w, http.StatusTooManyRequests, "busy", "another side question is still being answered here")
+		return
+	}
+	defer sideGive(sess.ID)
+	ctx, cancel := context.WithDeadline(r.Context(), expiry)
+	defer cancel()
+	ctx, cancelRun := context.WithTimeout(ctx, sideRequestLimit)
+	defer cancelRun()
+	untrack := s.trackPending(currentUser(r).ID, &liveSocket{loginHash: loginHash(r), hostID: sess.HostID, cancel: cancel})
+	defer untrack()
+
+	// The pane's agent is that process, a Claude Code, at that session — as
+	// the pane's conversation is read and a press checks it.
+	tmuxTarget := ""
+	if sess.Persistence == "tmux" {
+		tmuxTarget = b.Pane
+	}
+	lctx, lcancel := context.WithTimeout(ctx, 15*time.Second)
+	lr, err := sshx.Exec(lctx, sess.Client(), convoLocateCommand(sess.Persistence, sess.TmuxSession, tmuxTarget), convoLocateMax, sshx.ExecOptions{AwaitSlot: 2 * time.Second})
+	lcancel()
+	switch {
+	case errors.Is(err, sshx.ErrBusy):
+		reason = "busy"
+		writeError(w, http.StatusTooManyRequests, "busy", "the host is still answering earlier requests")
+		return
+	case err != nil:
+		reason = "host_error"
+		writeError(w, http.StatusBadGateway, "host_error", "the host did not answer")
+		return
+	}
+	l := parseConvoLocate(string(lr.Out))
+	socket := s.herdrSocks.get(sess.ID)
+	front := pickConvoProc(l.procs, sess.Persistence, b.Pane, socket, l.tmuxPID, l.paneTTY, s.herdrSocks.sid(sess.ID, b.Pane))
+	if front == nil || front.agent != "claude" || front.pid != b.PID || front.start != b.Start || front.sid != b.Session {
+		reason = "agent_changed"
+		writeError(w, http.StatusConflict, "agent_changed", "that pane no longer runs this agent")
+		return
+	}
+
+	nonce := gitNonce()
+	res, err := sshx.Exec(ctx, sess.Client(), sideQuestionCommand(b.PID, b.Start, b.Session, b.Model, nonce), sideAnswerCap+256, sshx.ExecOptions{Stdin: strings.NewReader(q), AwaitSlot: 2 * time.Second})
+	var a sideAnswer
+	if err == nil {
+		a, err = parseSideAnswer(string(res.Out), nonce)
+	}
+	switch {
+	case errors.Is(err, sshx.ErrBusy):
+		reason = "busy"
+		writeError(w, http.StatusTooManyRequests, "busy", "the host is still answering earlier requests")
+	case errors.Is(err, context.DeadlineExceeded) && ctx.Err() != nil && time.Now().Before(expiry):
+		reason = "timeout"
+		writeError(w, http.StatusGatewayTimeout, "timeout", "no answer in time")
+	case err != nil:
+		reason = "host_error"
+		writeError(w, http.StatusBadGateway, "host_error", "the host did not say")
+	default:
+		outcome = "answered"
+		if !a.OK {
+			outcome, reason = "failed", a.Reason
+		}
+		writeJSON(w, http.StatusOK, a)
+	}
+}
