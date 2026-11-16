@@ -48,7 +48,7 @@ func TestCodexHoldsOnly(t *testing.T) {
 		}
 		return ansi.ReplaceAllString(string(b), "")
 	}
-	for _, shape := range []string{"default", "limits", "gitbranch", "nocolor", "threadid", "misc", "user", "fast"} {
+	for _, shape := range []string{"default", "limits", "gitbranch", "nocolor", "threadid", "misc", "user", "fast", "empty", "narrow"} {
 		status := codexRestStatus(read(shape + ".empty"))
 		scr := strings.Replace(read(shape+".draft"), "half typed draft", typed, 1)
 		if !codexHoldsOnly(scr, typed, status) {
@@ -72,6 +72,10 @@ func TestCodexHoldsOnly(t *testing.T) {
 	// (A line like a footer, with no status line at rest: a draft's — review fork7-1.)
 	if codexHoldsOnly("› "+typed+"\n\n  Context 50% left\n", typed, "") {
 		t.Error("a draft's line like a footer taken for one")
+	}
+	// (Other digits not taken as moving: another model, another folder — review fork8-4.)
+	if codexHoldsOnly("› "+typed+"\n\n  gpt-7.2 · ~/proj2\n", typed, "gpt-6.1 · ~/proj1") {
+		t.Error("another status line taken for its own")
 	}
 	// (Its figures moved since: the same status line — review fork7-3.)
 	if !codexHoldsOnly("› "+typed+"\n\n  gpt · Context 48% left · 5h 12% used\n", typed, "gpt · Context 50% left · 5h 11% used") {

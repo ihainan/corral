@@ -111,7 +111,10 @@ func (p tmuxRewindPane) check() string {
 	c := `[ "$(tmux display-message -p -t ` + sshx.QuoteShell(p.pane) + ` '#{pane_pid} #{pane_dead}' 2>/dev/null)" = ` + sshx.QuoteShell(p.panePID+" 0") + ` ] || exit 3; `
 	if p.cxPID != "" {
 		// (And its Codex still that one: its start — review fork7-2.)
-		c += `s=$(tr '\n' ' ' <` + sshx.QuoteShell("/proc/"+p.cxPID+"/stat") + ` 2>/dev/null) || exit 3; r=${s##*) }; [ "$(printf '%s' "$r" | cut -d' ' -f20)" = ` + sshx.QuoteShell(p.cxStart) + ` ] || exit 3; `
+		// (And in front on its terminal: a key the pane takes goes to what is
+		// in front there — review fork8-5.)
+		c += `s=$(tr '\n' ' ' <` + sshx.QuoteShell("/proc/"+p.cxPID+"/stat") + ` 2>/dev/null) || exit 3; r=${s##*) }; [ "$(printf '%s' "$r" | cut -d' ' -f20)" = ` + sshx.QuoteShell(p.cxStart) + ` ] || exit 3; ` +
+			`g=$(printf '%s' "$r" | cut -d' ' -f3); f=$(printf '%s' "$r" | cut -d' ' -f6); [ -n "$g" ] && [ "$g" = "$f" ] || exit 3; `
 	}
 	return c
 }
@@ -121,12 +124,12 @@ func (p tmuxRewindPane) press(ctx context.Context, key string) error {
 	if key == "ctrl+c" {
 		k = "C-c"
 	}
-	_, err := rewindExec(ctx, p.sess, p.check()+"tmux send-keys -t "+sshx.QuoteShell(p.pane)+" "+sshx.QuoteShell(k), 1<<10)
+	_, err := rewindSend(ctx, p.sess, p.check()+"tmux send-keys -t "+sshx.QuoteShell(p.pane)+" "+sshx.QuoteShell(k), 1<<10)
 	return notSent(err)
 }
 
 func (p tmuxRewindPane) typeText(ctx context.Context, text string) error {
-	_, err := rewindExec(ctx, p.sess, p.check()+"tmux send-keys -l -t "+sshx.QuoteShell(p.pane)+" -- "+sshx.QuoteShell(text), 1<<10)
+	_, err := rewindSend(ctx, p.sess, p.check()+"tmux send-keys -l -t "+sshx.QuoteShell(p.pane)+" -- "+sshx.QuoteShell(text), 1<<10)
 	return notSent(err)
 }
 
@@ -204,27 +207,58 @@ HERDR_SOCKET_PATH=` + q(p.socket) + ` herdr pane ` + how + ` "$pane" ` + q(arg) 
 echo ok`
 }
 
-// rewindExec: cmd on the host, waiting for a side operation's slot rather
-// than refused at once where the connection is busy (the page reading the
-// while): ErrBusy where it still is — then nothing ran.
+// rewindExec: a look on the host (a screen, a title), waiting for a side
+// operation's slot rather than refused at once where the connection is busy
+// (the page reading the while).
 func rewindExec(ctx context.Context, sess *term.Session, cmd string, limit int) ([]byte, error) {
 	res, err := sshx.Exec(ctx, sess.Client(), cmd, limit, sshx.ExecOptions{AwaitSlot: 5 * time.Second})
 	return res.Out, err
 }
 
-// errNotSent: a key not sent for sure — the check refused it (3) or herdr
-// did (6) — as against one whose fate is not known (the host not answering):
-// only the first may be pressed again (review fork7-4).
+// rewindSend: a key or text sent — not waiting for a slot: a key late on a
+// screen read before it is not sent; refused (ErrBusy, nothing ran), the
+// screen is read again first (pressOn) — review fork8-2.
+func rewindSend(ctx context.Context, sess *term.Session, cmd string, limit int) ([]byte, error) {
+	return sshx.Output(ctx, sess.Client(), cmd, limit)
+}
+
+// pressOn: key pressed (text typed, where typed) on a screen seen to be as
+// on says, read just before; not sent for sure (errNotSent): read again,
+// and pressed once it is again, while within lasts.
+func pressOn(ctx context.Context, p rewindPane, within time.Duration, on func(string) bool, key string, typed bool) error {
+	until := time.Now().Add(within)
+	for {
+		left := time.Until(until)
+		if left <= 0 || !rewindWait(ctx, p, left, on) {
+			return errors.New("not as it was to be")
+		}
+		var err error
+		if typed {
+			err = p.typeText(ctx, key)
+		} else {
+			err = p.press(ctx, key)
+		}
+		if !errors.Is(err, errNotSent) {
+			return err
+		}
+		sleepCtx(ctx, codexRewindStep)
+	}
+}
+
+// errNotSent: a key not sent for sure — the check refused it (3), or the
+// connection was busy (nothing ran) — as against one whose fate is not
+// known (herdr's command failing, the host not answering): only the first
+// may be pressed again (review fork7-4, fork8-1).
 var errNotSent = errors.New("not sent: not the Codex it was, or herdr refused it")
 
 func (p herdrRewindPane) send(ctx context.Context, how, arg string) error {
-	out, err := rewindExec(ctx, p.sess, "sh -c "+sshx.QuoteShell(p.sendSh(how, arg)), 64)
+	out, err := rewindSend(ctx, p.sess, "sh -c "+sshx.QuoteShell(p.sendSh(how, arg)), 64)
 	var exitErr *sshx.ExitError
 	switch {
 	case err == nil && strings.TrimSpace(string(out)) == "ok":
 		return nil
-	case errors.As(err, &exitErr) && (exitErr.Status == 3 || exitErr.Status == 6), errors.Is(err, sshx.ErrBusy):
-		return errNotSent // (refused before anything was sent: the check, herdr, or the connection busy)
+	case errors.As(err, &exitErr) && exitErr.Status == 3, errors.Is(err, sshx.ErrBusy):
+		return errNotSent // (refused before anything was sent: the check, or the connection busy — not herdr's own failing, which may have sent it: review fork8-1)
 	case err != nil:
 		return err
 	}
@@ -296,52 +330,38 @@ func codexRewindDo(ctx context.Context, p rewindPane, back int, at string, clear
 	if back < 1 || back > codexRewindMax || strings.TrimSpace(at) == "" {
 		return "asked"
 	}
-	// (Its input in front and empty, it at rest, as it is once started: not a
-	// dialog, nor at work, nor still drawing — review fork2-7.)
-	if !rewindWait(ctx, p, 15*time.Second, func(s string) bool {
-		return codexIdleInput(s) == nil && !strings.Contains(s, "Browsing transcript")
-	}) {
-		return "not ready"
-	}
-	if err := p.press(ctx, "esc"); err != nil {
+	// (Each key only on the screen it is for, read just before; refused
+	// before it was sent, read again and pressed once it is again: pressOn —
+	// another connection to the terminal may do something meanwhile, review
+	// fork4b-1, fork8-2.)
+	// Its input in front and empty, it at rest, as it is once started: not a
+	// dialog, nor at work, nor still drawing (review fork2-7).
+	atRest := func(s string) bool { return codexIdleInput(s) == nil && !strings.Contains(s, "Browsing transcript") }
+	if err := pressOn(ctx, p, 15*time.Second, atRest, "esc", false); err != nil {
 		return "esc: " + err.Error()
 	}
-	// (Each key only on the screen it is for, read just before — another
-	// connection to the terminal may have done something meanwhile: review
-	// fork4b-1.)
-	if !rewindWait(ctx, p, 3*time.Second, func(s string) bool { return strings.Contains(s, "esc again to edit previous message") }) {
-		return "not asked for the second esc"
-	}
-	if err := p.press(ctx, "esc"); err != nil {
-		return "esc: " + err.Error()
+	asksAgain := func(s string) bool { return strings.Contains(s, "esc again to edit previous message") }
+	if err := pressOn(ctx, p, 3*time.Second, asksAgain, "esc", false); err != nil {
+		return "esc again: " + err.Error()
 	}
 	browsing := func(s string) bool { return strings.Contains(s, "Browsing transcript") }
-	if !rewindWait(ctx, p, 4*time.Second, browsing) {
-		return "not browsed"
-	}
 	for i := 1; i < back; i++ {
-		if !rewindWait(ctx, p, 2*time.Second, browsing) {
-			return "no longer browsed"
-		}
-		if err := p.press(ctx, "left"); err != nil {
+		if err := pressOn(ctx, p, 4*time.Second, browsing, "left", false); err != nil {
 			return "left: " + err.Error()
 		}
 		sleepCtx(ctx, codexRewindStep/2)
 	}
 	sleepCtx(ctx, codexRewindStep)
-	if !rewindWait(ctx, p, 2*time.Second, browsing) {
-		return "no longer browsed"
-	}
-	if err := p.press(ctx, "enter"); err != nil {
+	if err := pressOn(ctx, p, 4*time.Second, browsing, "enter", false); err != nil {
 		return "enter: " + err.Error()
 	}
 	// (Its words back in its input — the first line of them, where it may be
-	// folded or cut — the transcript no longer browsed.)
+	// folded or cut — the transcript no longer browsed; words there, not its
+	// placeholder, which a message of a few of its letters would match.)
 	want := []rune(squeeze(strings.SplitN(strings.TrimSpace(at), "\n", 2)[0]))
 	want = want[:min(len(want), 40)]
-	// (Its words back in its input, it at rest — words there, not its
-	// placeholder, which a message of a few of its letters would match.)
-	if !rewindWait(ctx, p, 5*time.Second, func(s string) bool { return codexInputHolds(s, want) }) {
+	holds := func(s string) bool { return codexInputHolds(s, want) }
+	if !rewindWait(ctx, p, 5*time.Second, holds) {
 		return "not seen in its input"
 	}
 	if !clear {
@@ -351,10 +371,7 @@ func codexRewindDo(ctx context.Context, p rewindPane, back int, at string, clear
 	// for the page to send to: that message is put in the page's own input,
 	// to change and send, rather than left where a message from the page
 	// would be refused as words not its own.)
-	if !rewindWait(ctx, p, time.Second, func(s string) bool { return codexInputHolds(s, want) }) {
-		return "no longer in its input"
-	}
-	if err := p.press(ctx, "ctrl+c"); err != nil {
+	if err := pressOn(ctx, p, 2*time.Second, holds, "ctrl+c", false); err != nil {
 		return "ctrl+c: " + err.Error()
 	}
 	if !rewindWait(ctx, p, 3*time.Second, func(s string) bool { return codexIdleInput(s) == nil }) {
@@ -429,30 +446,18 @@ func codexNameDo(ctx context.Context, p rewindPane, name, cwd string) string {
 	// (Its status line as it is at rest: under what is typed, only that —
 	// a line of a draft's is not — review fork6-3.)
 	status := codexRestStatus(idle)
-	if err := p.typeText(ctx, "/rename "+name); err != nil {
+	atRest := func(s string) bool { return codexIdleInput(s) == nil && !strings.Contains(s, "Browsing transcript") }
+	if err := pressOn(ctx, p, 3*time.Second, atRest, "/rename "+name, true); err != nil {
 		return "typed: " + err.Error()
 	}
 	// (What was typed seen whole in its input, nothing else there, before Enter.)
 	// (Nothing else in its input — no words under it taken for its footer —
 	// and it at rest: review fork4b-5.)
 	held := func(s string) bool { return codexHoldsOnly(s, "/rename "+name, status) }
-	if !rewindWait(ctx, p, 3*time.Second, held) {
-		return "not seen typed"
-	}
-	if err := p.press(ctx, "enter"); err != nil {
-		// (Refused at once, for sure — herdr still taking the words before
-		// it, once in some runs —: pressed again only where they are seen
-		// still there, alone, Codex at rest. Not where it may have gone.)
-		if !errors.Is(err, errNotSent) {
-			return "enter: " + err.Error()
-		}
-		sleepCtx(ctx, codexRewindStep)
-		if !rewindWait(ctx, p, 2*time.Second, held) {
-			return "enter: " + err.Error()
-		}
-		if err := p.press(ctx, "enter"); err != nil {
-			return "enter: " + err.Error()
-		}
+	// (Refused before it was sent — the connection busy, the check —: pressed
+	// again only where the words are seen still there, alone, Codex at rest.)
+	if err := pressOn(ctx, p, 4*time.Second, held, "enter", false); err != nil {
+		return "enter: " + err.Error()
 	}
 	until := time.Now().Add(5 * time.Second)
 	for {
@@ -524,9 +529,11 @@ func codexHoldsOnly(s, typed, status string) bool {
 	return foot == "" || (status != "" && codexDigitless(strings.TrimSpace(foot)) == codexDigitless(status))
 }
 
-// codexDigitless: s with its runs of digits (and what joins them: "1.5",
-// "12:30") as one mark: the same status line whatever its figures say now.
-var codexDigits = regexp.MustCompile(`[0-9]+(?:[.,:][0-9]+)*`)
+// codexDigitless: s with the figures a status line moves — a percentage
+// ("50%"), a count of tokens ("12K", "1.2M", "141K / 200K"), a time
+// ("12:30", "3m") — as one mark: the same status line whatever they say now;
+// not other digits (a model's version, a folder's name: review fork8-4).
+var codexDigits = regexp.MustCompile(`\b[0-9]+(?:[.,][0-9]+)?(?:%|[KkMm]\b|[smhd]\b)|\b[0-9]{1,2}:[0-9]{2}\b`)
 
 func codexDigitless(s string) string { return codexDigits.ReplaceAllString(s, "#") }
 
@@ -540,6 +547,11 @@ func codexRestStatus(s string) string {
 	}
 	first := strings.TrimSpace(strings.SplitN(foot, "\n", 2)[0])
 	if codexEmptyHints.MatchString(first) {
+		// (Its hints, and right of them, past a gap, what it says of itself —
+		// "100% context left" — which stays once words are typed: that.)
+		if i := strings.Index(first, "   "); i >= 0 {
+			return strings.TrimSpace(first[i:])
+		}
 		return ""
 	}
 	return first
