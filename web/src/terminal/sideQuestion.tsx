@@ -29,6 +29,7 @@ type Asked = {
 }
 
 const KEEP = 5
+const AGENTS = 8 // (of so many agents at most: those asked of last)
 export const SIDE_MAX = 2000 // (runes, as the gateway counts them)
 // (The gateway's run is 90s on the host, and 100s in all: a little past that.)
 const ASK_MS = 110_000
@@ -42,7 +43,12 @@ const keyOf = (sid: string, b: SideBind) => [sid, b.pane, b.pid, b.start, b.sess
 
 function put(key: string, a: Asked) {
   const list = (kept.get(key) ?? []).filter((x) => x.id !== a.id)
+  kept.delete(key) // (to the end: the one asked of last)
   kept.set(key, [...list, a].slice(-KEEP))
+  for (const k of kept.keys()) {
+    if (kept.size <= AGENTS) break
+    if (!kept.get(k)!.some((x) => x.state === 'asking')) kept.delete(k)
+  }
   tell()
 }
 

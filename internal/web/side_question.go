@@ -33,6 +33,10 @@ const (
 	sideAnswerCap    = 256 << 10         // bytes of what the host prints (its JSON cut there: a failure)
 	sideRunSecs      = 90                // the host's own limit on the run
 	sideRequestLimit = 100 * time.Second // the gateway's, past the host's (and its kill's)
+	// sideHostEnd: by when a copy begun has surely ended on the host (its
+	// timeout, the kill 5s after, and some): one not seen to end is waited
+	// for till then before another is asked in the session.
+	sideHostEnd = sideRunSecs*time.Second + 10*time.Second
 )
 
 // sideModel: a model's name as Claude Code's --model takes it (an alias, an
@@ -71,26 +75,38 @@ func sideQuestionText(q string) (string, bool) {
 func sideQuestionCommand(pid, start int64, sid, model, nonce string) string {
 	script := `PATH="$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"; ` +
 		`p=$1; st=$2; sid=$3; m=$4; N=$5; ` +
-		// (Still that process: its start time after the last ") ", whatever its name.)
-		`x=; { IFS= read -r x; } <"/proc/$p/stat" 2>/dev/null; x=${x##*) }; set -f; set -- $x; set +f; ` +
-		`[ -n "$x" ] && [ "${20-}" = "$st" ] || { echo 'E gone'; exit 0; }; ` +
+		// (Still that process — its start time after the last ") ", whatever its name — at that
+		// session, as its session file says now (not one it has left by /clear or /resume
+		// since it was found). Asked before and after what is read of it: what is read is its.)
+		`same() { x=; { IFS= read -r x; } <"/proc/$p/stat" 2>/dev/null; x=${x##*) }; set -f; set -- $x; set +f; ` +
+		`[ -n "$x" ] && [ "${20-}" = "$st" ] || return 1; ` +
+		`c=$(head -c 65536 "$HOME/.claude/sessions/$p.json" 2>/dev/null | tr -d '\n'); ` +
+		`[ "$(printf '%s' "$c" | grep -o '"sessionId" *: *"[0-9a-fA-F-]*"' | head -n 1 | sed 's/.*"\([0-9a-fA-F-]*\)"$/\1/')" = "$sid" ]; }; ` +
+		`same && [ -r "/proc/$p/environ" ] || { echo 'E gone'; exit 0; }; ` +
 		`cwd=$(readlink "/proc/$p/cwd" 2>/dev/null); ` +
-		`[ -n "$cwd" ] && cd -- "$cwd" 2>/dev/null || { echo 'E nodir'; exit 0; }; ` +
 		// (Its config folder and how it signs in and where its requests go — those of claude_ep's
 		// list, as it was started with them, none it had not: not the login shell's. Nothing else
-		// of its environment: its pane's would make the copy look like the pane's agent.)
+		// of its environment: its pane's would make the copy look like the pane's agent. Each
+		// variable read whole, by the NULs between them: a value with a line break in it is not
+		// taken for another variable — and is not taken.)
+		`ev=$(tr '\0' '\001' <"/proc/$p/environ" 2>/dev/null | awk 'BEGIN { RS = "\001" } /^(` + strings.ReplaceAll(sideEnvNames, " ", "|") + `)=/ && index($0, "\n") == 0 { print }' | head -c 16384); ` +
+		`same || { echo 'E gone'; exit 0; }; ` +
+		`[ -n "$cwd" ] && cd -- "$cwd" 2>/dev/null || { echo 'E nodir'; exit 0; }; ` +
 		`unset ` + sideEnvNames + ` TMUX TMUX_PANE HERDR_PANE_ID HERDR_SOCKET_PATH; ` +
-		`ev=$(tr '\0' '\n' <"/proc/$p/environ" 2>/dev/null | grep -E '^(` + strings.ReplaceAll(sideEnvNames, " ", "|") + `)=' | head -c 16384); ` +
 		`while IFS= read -r v; do case $v in ?*=*) export "$v";; esac; done <<CORRAL_SIDE_ENV
 $ev
 CORRAL_SIDE_ENV
 ` +
+		// (The copy says what it is: the locating scan does not take it for an agent.)
+		`export ` + sideCopyMark + `; ` +
 		// (Claude Code as the shell finds it; else the one the process runs, where that is Claude Code's own build.)
 		`C=$(command -v claude 2>/dev/null); ` +
 		`if [ -z "$C" ]; then e=$(readlink "/proc/$p/exe" 2>/dev/null); case $e in */claude/versions/*) [ -x "$e" ] && C=$e;; esac; fi; ` +
 		`[ -n "$C" ] || { echo 'E noclaude'; exit 0; }; ` +
 		`T=; if command -v timeout >/dev/null 2>&1; then T=timeout; elif command -v gtimeout >/dev/null 2>&1; then T=gtimeout; else echo 'E notimeout'; exit 0; fi; ` +
-		`K=; $T -k 1 2 true 2>/dev/null && K='-k 5'; ` +
+		// (Killed in the end, whatever it does with the first signal: by -k where the timeout has
+		// it, else by KILL at once. Neither: not run, as it may never end.)
+		`if $T -k 1 2 true 2>/dev/null; then K='-k 5'; elif $T -s KILL 2 true 2>/dev/null; then K='-s KILL'; else echo 'E notimeout'; exit 0; fi; ` +
 		// (No MCP server started — "--tools" alone still starts the user's and the project's —
 		// no hook run, no tool to use.)
 		`set -- -p --resume "$sid" --fork-session --no-session-persistence --tools "" --strict-mcp-config --mcp-config '{"mcpServers":{}}' --settings '{"disableAllHooks":true}' --output-format json; ` +
@@ -106,6 +122,11 @@ CORRAL_SIDE_ENV
 // sideEnvNames: what of a Claude Code's environment its side question's copy
 // is run with (claude_ep's list): its config folder, where its requests go
 // and how it signs in.
+// sideCopyMark: in the environment of a side question's copy (claude -p),
+// which writes a session file while it runs: no agent of a pane, left out
+// by the locating scan (see convoLocateWith).
+const sideCopyMark = "CORRAL_SIDE_COPY=1"
+
 const sideEnvNames = "CLAUDE_CONFIG_DIR ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX"
 
 // sideAnswer is what the page is told of a side question asked.
@@ -248,7 +269,16 @@ func (s *Server) apiConversationSide(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusTooManyRequests, "busy", "another side question is still being answered here")
 		return
 	}
-	defer sideGive(sess.ID)
+	// (Given back once the copy has ended — where it was not seen to end (this
+	// request given up on it, the connection lost), once its own timeout on
+	// the host has surely ended it: a question asked again before would be a
+	// second at once, the first still running there.)
+	held := true
+	defer func() {
+		if held {
+			sideGive(sess.ID)
+		}
+	}()
 	ctx, cancel := context.WithDeadline(r.Context(), expiry)
 	defer cancel()
 	ctx, cancelRun := context.WithTimeout(ctx, sideRequestLimit)
@@ -285,7 +315,13 @@ func (s *Server) apiConversationSide(w http.ResponseWriter, r *http.Request) {
 	}
 
 	nonce := gitNonce()
+	began := time.Now()
 	res, err := sshx.Exec(ctx, sess.Client(), sideQuestionCommand(b.PID, b.Start, b.Session, b.Model, nonce), sideAnswerCap+256, sshx.ExecOptions{Stdin: strings.NewReader(q), AwaitSlot: 2 * time.Second})
+	if !res.Ended && !errors.Is(err, sshx.ErrBusy) {
+		held = false
+		id := sess.ID
+		time.AfterFunc(time.Until(began.Add(sideHostEnd)), func() { sideGive(id) })
+	}
 	var a sideAnswer
 	if err == nil {
 		a, err = parseSideAnswer(string(res.Out), nonce)

@@ -133,7 +133,9 @@ func TestSideQuestionCommandRuns(t *testing.T) {
 	// The "agent": a process of its own, its folder and environment its own.
 	agent := exec.Command("sleep", "60")
 	agent.Dir = work
-	agent.Env = []string{"PATH=/usr/bin:/bin", "CLAUDE_CONFIG_DIR=" + filepath.Join(home, "cfg"), "ANTHROPIC_BASE_URL=https://relay.example.com/x", "TMUX_PANE=%9", "HERDR_PANE_ID=p1", "SECRET_OTHER=no"}
+	agent.Env = []string{"PATH=/usr/bin:/bin", "CLAUDE_CONFIG_DIR=" + filepath.Join(home, "cfg"), "ANTHROPIC_BASE_URL=https://relay.example.com/x", "TMUX_PANE=%9", "HERDR_PANE_ID=p1", "SECRET_OTHER=no",
+		// (A value with a line break that reads as another variable: neither taken.)
+		"SMUGGLE=x\nANTHROPIC_AUTH_TOKEN=stolen", "ANTHROPIC_API_KEY=k1\nANTHROPIC_BASE_URL=https://evil.example"}
 	if err := agent.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -152,6 +154,16 @@ func TestSideQuestionCommandRuns(t *testing.T) {
 			time.Sleep(10 * time.Millisecond)
 		}
 	}
+	// (Its session file, as Claude Code keeps one: at that session.)
+	sessions := filepath.Join(home, ".claude", "sessions")
+	os.MkdirAll(sessions, 0o755)
+	setSession := func(sid string) {
+		doc := `{"pid":` + strconv.FormatInt(pid, 10) + `,"sessionId":"` + sid + `","procStart":"` + strconv.FormatInt(start, 10) + `"}`
+		if err := os.WriteFile(filepath.Join(sessions, strconv.FormatInt(pid, 10)+".json"), []byte(doc), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	setSession("0b7c2a1e-1111-4222-8333-444455556666")
 	// (Its environment read: what /proc says once it has exec'd.)
 	for i := 0; i < 100; i++ {
 		if b, _ := os.ReadFile("/proc/" + strconv.FormatInt(pid, 10) + "/environ"); strings.Contains(string(b), "TMUX_PANE") {
@@ -194,12 +206,12 @@ func TestSideQuestionCommandRuns(t *testing.T) {
 		t.Errorf("cwd %q", got)
 	}
 	env := "\n" + read("env")
-	for _, want := range []string{"\nCLAUDE_CONFIG_DIR=" + filepath.Join(home, "cfg") + "\n", "\nANTHROPIC_BASE_URL=https://relay.example.com/x\n"} {
+	for _, want := range []string{"\nCLAUDE_CONFIG_DIR=" + filepath.Join(home, "cfg") + "\n", "\nANTHROPIC_BASE_URL=https://relay.example.com/x\n", "\nCORRAL_SIDE_COPY=1\n"} {
 		if !strings.Contains(env, want) {
 			t.Errorf("no %q in env", want)
 		}
 	}
-	for _, not := range []string{"\nANTHROPIC_API_KEY=", "\nTMUX_PANE=", "\nHERDR_PANE_ID=", "\nSECRET_OTHER=", "/outer"} {
+	for _, not := range []string{"\nANTHROPIC_API_KEY=", "\nANTHROPIC_AUTH_TOKEN=", "evil.example", "stolen", "\nTMUX_PANE=", "\nHERDR_PANE_ID=", "\nSECRET_OTHER=", "\nSMUGGLE=", "/outer"} {
 		if strings.Contains(env, not) {
 			t.Errorf("%q in env", not)
 		}
@@ -216,6 +228,26 @@ func TestSideQuestionCommandRuns(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(seen, "args")); err == nil {
 		t.Errorf("ran for another process")
+	}
+	// The process now at another session (/clear, /resume since it was found): nothing run.
+	setSession("9f9f9f9f-1111-4222-8333-444455556666")
+	if a, _ := parseSideAnswer(run(start, "", "q"), "f00d"); a.Reason != "gone" {
+		t.Errorf("another session: %+v", a)
+	}
+	if _, err := os.Stat(filepath.Join(seen, "args")); err == nil {
+		t.Errorf("ran for another session")
+	}
+	setSession("0b7c2a1e-1111-4222-8333-444455556666")
+	// A timeout without -k: killed outright (-s KILL), a copy that ignores TERM ended all the same.
+	os.WriteFile(filepath.Join(bin, "timeout"), []byte("#!/bin/sh\n[ \"$1\" = -k ] && exit 125\nprintf '%s\\n' \"$@\" > '"+seen+"/timeout'\n[ \"$1 $2\" = '-s KILL' ] || exit 125\nshift 3\nexec /usr/bin/timeout -s KILL 1 \"$@\"\n"), 0o755)
+	os.WriteFile(filepath.Join(bin, "claude"), []byte("#!/bin/sh\ntrap '' TERM\nsleep 30\n"), 0o755)
+	began := time.Now()
+	a, err = parseSideAnswer(run(start, "", "q"), "f00d")
+	if err != nil || a.Reason != "timeout" || time.Since(began) > 10*time.Second {
+		t.Errorf("no -k: %+v %v after %s", a, err, time.Since(began))
+	}
+	if got := read("timeout"); !strings.HasPrefix(got, "-s\nKILL\n90\n") {
+		t.Errorf("timeout run as %q", got)
 	}
 }
 
@@ -280,8 +312,9 @@ func TestSideQuestionEndpoint(t *testing.T) {
 }
 
 // A side question's copy (claude -p, its session file's entrypoint
-// "sdk-cli") is no agent: the scan leaves it out; a Claude Code beside it
-// is found as before.
+// "sdk-cli", marked in its environment) is no agent: the scan leaves it
+// out; a Claude Code beside it, and a claude -p of the person's own, are
+// found as before.
 func TestConvoLocateSkipsSideCopy(t *testing.T) {
 	if _, err := os.Stat("/proc/self/stat"); err != nil {
 		t.Skip("no /proc")
@@ -303,14 +336,18 @@ func TestConvoLocateSkipsSideCopy(t *testing.T) {
 		return ""
 	}
 	procs := map[string]int{}
-	for name, entry := range map[string]string{"agent": "cli", "copy": "sdk-cli"} {
+	for name, entry := range map[string]string{"agent": "cli", "copy": "sdk-cli", "own": "sdk-cli"} {
 		p := exec.Command("sleep", "60")
+		p.Env = []string{"PATH=/usr/bin:/bin"}
+		if name == "copy" {
+			p.Env = append(p.Env, sideCopyMark)
+		}
 		if err := p.Start(); err != nil {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { p.Process.Kill(); p.Wait() })
 		procs[name] = p.Process.Pid
-		sid := map[string]string{"agent": "0b7c2a1e-1111-4222-8333-444455556666", "copy": "9f9f9f9f-1111-4222-8333-444455556666"}[name]
+		sid := map[string]string{"agent": "0b7c2a1e-1111-4222-8333-444455556666", "copy": "9f9f9f9f-1111-4222-8333-444455556666", "own": "7e7e7e7e-1111-4222-8333-444455556666"}[name]
 		doc := `{"pid":` + strconv.Itoa(p.Process.Pid) + `,"sessionId":"` + sid + `","procStart":"` + startOf(p.Process.Pid) + `","kind":"interactive","entrypoint":"` + entry + `"}`
 		if err := os.WriteFile(filepath.Join(sessions, strconv.Itoa(p.Process.Pid)+".json"), []byte(doc), 0o644); err != nil {
 			t.Fatal(err)
@@ -332,5 +369,9 @@ func TestConvoLocateSkipsSideCopy(t *testing.T) {
 	}
 	if _, ok := found[int64(procs["copy"])]; ok {
 		t.Errorf("the side question's copy taken for an agent")
+	}
+	// (A "claude -p" of the person's own, unmarked: found as before.)
+	if found[int64(procs["own"])] != "7e7e7e7e-1111-4222-8333-444455556666" {
+		t.Errorf("a claude -p of the person's own not found: %v", found)
 	}
 }

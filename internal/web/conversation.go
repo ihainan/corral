@@ -341,10 +341,12 @@ for f in "$HOME"/.claude/sessions/*.json; do
   json_num procStart; ps=$v
   case $ps in ''|*[!0-9]*) continue;; esac
   case $sid in *[!0-9a-fA-F-]*) continue;; ????????-????-????-????-????????????) ;; *) continue;; esac
-  # (Not a "claude -p" — a side question's copy of a conversation, which
-  # writes a file here while it runs, under a session of its own: no agent
-  # to show or type to. side_question.go)
-  json_str entrypoint; [ "$v" = sdk-cli ] && continue
+  # (Not a side question's copy of a conversation — a "claude -p" the
+  # gateway runs, marked so in its environment — which writes a file here
+  # while it runs, under a session of its own: no agent to show or type to.
+  # A "claude -p" of the person's own is found as before. side_question.go)
+  json_str entrypoint
+  if [ "$v" = sdk-cli ] && tr '\0' '\n' <"/proc/$pid/environ" 2>/dev/null | grep -qx 'CORRAL_SIDE_COPY=1'; then continue; fi
   log=
   for l in "$HOME"/.claude/projects/*/"$sid".jsonl; do
     case $l in *"$nl"*) continue;; esac

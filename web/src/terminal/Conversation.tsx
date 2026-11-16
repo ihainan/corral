@@ -1263,9 +1263,13 @@ export function ConversationView({
   const [gitChanges, setGitChanges] = useState<{ against: ChangesAgainst; base?: string } | null>(null) // (the Changes view, from the card)
   // A side question (Claude Code's /btw): of a Claude Code bound at a session
   // whose log there is to copy — not of one begun anew, with none yet.
-  const [btwShown, setBtwShown] = useState(false)
+  // (Open: of which agent — its pane, process and session. Another bound
+  // meanwhile, or none, closes it: a question written for one is not sent
+  // to another.)
+  const [btwShown, setBtwShown] = useState('')
   const sideBind = convo.of && convo.status === 'ready' && convo.bind?.agent === 'claude' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(convo.bind.session) && !/^0{8}-/.test(convo.bind.session) ? convo.bind : undefined
-  if (btwShown && !sideBind) setBtwShown(false) // (the agent gone, or another: what it was asked of is not this)
+  const sideIdent = sideBind ? [convo.of, sideBind.pane, sideBind.pid, sideBind.start, sideBind.session].join(' ') : ''
+  if (btwShown && btwShown !== sideIdent) setBtwShown('')
   // The dock (dock.tsx): on a screen 768 wide or more; open, its tab and
   // width the person's. Beside the thread where the thread keeps DOCK_THREAD
   // of its own beside the list, else over it, from the right.
@@ -1735,7 +1739,7 @@ export function ConversationView({
                 // (In three groups, each headed: finding and reading here; the agent; the conversation itself.)
                 { label: t('convoSearch.item'), icon: <Search size={16} />, group: t('menu.group.find'), onSelect: () => setSearching(true) },
                 ...(convo.of && (convo.bind?.agent === 'claude' || convo.bind?.agent === 'codex') ? [{ label: t('turns.item'), icon: <ListOrdered size={16} />, onSelect: () => (setSearching(false), setTurnsShown(true)) }] : []),
-                ...(sideBind ? [{ label: t('side.item'), icon: <MessageCircleQuestion size={16} />, onSelect: () => setBtwShown(true) }] : []),
+                ...(sideBind ? [{ label: t('side.item'), icon: <MessageCircleQuestion size={16} />, onSelect: () => setBtwShown(sideIdent) }] : []),
                 // (All steps opened or folded: the menu's, as Ctrl+O is a Mac's only.)
                 { label: t(allOpen ? 'pageKeys.foldAll' : 'pageKeys.openAll'), icon: allOpen ? <ChevronsDownUp size={16} /> : <ChevronsUpDown size={16} />, keys: mac ? ['Ctrl+O'] : undefined, disabled: !list.length, onSelect: () => (setOpened({}), setUnfolded({}), setAllOpen((v) => !v)) },
                 ...(convo.of && convo.status === 'ready' ? [{ label: t('card.open'), icon: <Info size={16} />, onSelect: () => setCard(cardMode()) }] : []),
@@ -1793,13 +1797,14 @@ export function ConversationView({
           onClose={() => setGitChanges(null)}
         />
       )}
-      {btwShown && sideBind && convo.of && (
+      {btwShown && btwShown === sideIdent && sideBind && convo.of && (
         <SideQuestion
+          key={sideIdent}
           sid={convo.of.split(' ')[0]}
           bind={{ pane: sideBind.pane, pid: sideBind.pid, start: sideBind.start, session: sideBind.session }}
           model={convo.meta?.model}
           onClose={() => {
-            setBtwShown(false)
+            setBtwShown('')
             requestAnimationFrame(() => root.current?.querySelector<HTMLElement>('.convo-runs-side')?.focus())
           }}
         />
@@ -1952,7 +1957,7 @@ export function ConversationView({
             }
             via={convo.bind?.via}
             auth={convo.bind?.auth}
-            onSide={sideBind ? () => setBtwShown(true) : undefined}
+            onSide={sideBind ? () => setBtwShown(sideIdent) : undefined}
           />
         )}
       </div>
