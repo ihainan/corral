@@ -754,6 +754,19 @@ func (s *Server) locateCodexFast(ctx context.Context, sess *term.Session, st *co
 	}
 	c, ok := codexPaneSure(panes, pane, hp)
 	if !ok {
+		// (Named, herdr's word of its title not caught up yet — just named,
+		// a fork's copy say —: its title read now, as a press reads it.)
+		if f, found := panes[pane]; found && f.Name != "" && !f.Several && f.Thread != "" {
+			if fresh, err := s.codexPanes.run(ctx, sess, socket, pane); err == nil {
+				if fc, has := fresh[pane]; has && fc.titleRead {
+					hp2 := hp
+					hp2.Title = fc.TitleNow
+					c, ok = codexPaneSure(fresh, pane, hp2)
+				}
+			}
+		}
+	}
+	if !ok {
 		// (A Codex just started, its conversation not begun: none to read,
 		// as the scan would find — told so without it, rather than by a scan
 		// at each read till its first message.)

@@ -109,7 +109,7 @@ func (p herdrRewindPane) press(ctx context.Context, key string) error {
 }
 
 func (p herdrRewindPane) typeText(ctx context.Context, text string) error {
-	return p.with(ctx, func(c *herdr.Client) error { return c.SendInput(ctx, p.pane, text, nil) })
+	return p.with(ctx, func(c *herdr.Client) error { return c.SendInput(ctx, p.pane, text, []string{}) })
 }
 
 func (p herdrRewindPane) title(ctx context.Context) (t string, err error) {
