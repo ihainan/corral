@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Check, ChevronDown, CircleStop, Code2, MoreHorizontal, Pencil, Plus, Search, Server, Trash2, X, Eye } from 'lucide-react'
+import { Check, ChevronDown, CircleStop, Code2, MoreHorizontal, Pencil, Plus, Search, Server, SquareTerminal, Trash2, X, Eye } from 'lucide-react'
 import { api, authGen, type Host, type SessionInfo, type SharedSession } from '../api'
 import { relTime, t } from '../i18n'
 import { linkHandler, navigate } from '../router'
@@ -367,10 +367,17 @@ function LiveCard({ s, all, stale, onClose }: { s: SessionInfo; all: SessionInfo
     <li className="live-row" data-flip={'l:' + s.id} data-flip-in="">
       <a className="live-link" href={'/t/' + s.id} onClick={linkHandler('/t/' + s.id)} aria-label={`${s.host_name}：${label}`} aria-describedby={'ld-' + s.id} title={s.title || undefined}>
         <span className="live-info">
+          {/* (A session, not a host: a terminal's mark, the session named first, its
+              host after it in its hue — 11-16, the two read alike at a glance.) */}
           <span className="live-title">
-            <HostMark name={s.host_name} />
-            <span className="live-name">{s.host_name}</span>
+            <span className="live-mark" aria-hidden="true">
+              <SquareTerminal size={18} strokeWidth={1.75} />
+            </span>
             <span className="live-which">{which}</span>
+            <span className="live-host">
+              <span className="live-host-dot" style={{ '--h': hostHue(s.host_name) } as React.CSSProperties} aria-hidden="true" />
+              {s.host_name}
+            </span>
           </span>
           <span className="live-sub" id={'ld-' + s.id}>
             <span className={'dot ' + dot} aria-hidden="true" />

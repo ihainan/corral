@@ -1015,12 +1015,16 @@ details.adv > .form { margin-top: 16px; }
 /* Running sessions: cards as the hosts' below (11-15), no screen in small (pages-1105 1.4) — the
    host's mark, which of its sessions, what its agents are doing; closed from the corner. */
 .live-rows { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 280px), 1fr)); gap: 12px; }
-.live-row { position: relative; min-width: 0; border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--bg); transition: border-color 0.15s var(--ease), background 0.15s var(--ease); }
-.live-row:hover { border-color: var(--line-strong); background: var(--bg-subtle); }
+/* (A session's card filled, no rule round it, smaller: the hosts' below are outlined — 11-16.) */
+.live-row { position: relative; min-width: 0; border: 1px solid transparent; border-radius: var(--r-lg); background: var(--bg-subtle); transition: border-color 0.15s var(--ease), background 0.15s var(--ease); }
+.live-row:hover { background: var(--bg-hover); }
 .live-row .live-link { height: 100%; border-radius: var(--r-lg); }
-.live-row .live-info { gap: 10px; padding: 16px 48px 16px 16px; }
-.live-row .live-title { gap: 12px; }
-.live-row .live-name { font-size: var(--fs-body); line-height: var(--lh-ui); font-weight: 600; }
+.live-row .live-info { gap: 6px; padding: 12px 48px 12px 12px; }
+.live-row .live-title { gap: 10px; }
+.live-mark { flex: none; width: 32px; height: 32px; border-radius: var(--r); display: grid; place-items: center; color: var(--fg-2); background: var(--bg); border: 1px solid var(--line); }
+.live-row .live-which { font-size: var(--fs-body); line-height: var(--lh-ui); font-weight: 600; color: var(--fg); }
+.live-host { flex: none; display: inline-flex; align-items: center; gap: 6px; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--fg-2); white-space: nowrap; }
+.live-host-dot { width: 8px; height: 8px; border-radius: 50%; background: color-mix(in oklab, hsl(var(--h) 62% 50%) 85%, var(--fg)); }
 .live-row .live-link:hover .live-info { background: none; }
 .live-row .live-link:active { background: var(--bg-hover); border-radius: var(--r-lg); }
 .live-row .live-close { right: 8px; top: 12px; bottom: auto; }
