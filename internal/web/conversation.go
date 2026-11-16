@@ -4738,6 +4738,9 @@ setting_env() {
   pv=$(tr '\n' ' ' <"$1" 2>/dev/null | head -c 65536 | sed -n 's/.*"env"[ ]*:[ ]*{\([^}]*\)}.*/\1/p' |
     sed -n "s/.*\"$2\"[ ]*:[ ]*\"\([^\"]*\)\".*/\1/p" | head -c 400)
 }
+# (A process's environment, here and in codex_ep, is read a variable a line:
+# its NULs made line breaks, its own line breaks made \001 — a value with a
+# line break in it cannot pass for another variable.)
 # Where a Claude Code's requests go and how it signs in: ep (the host, none
 # where it is Anthropic's own), auth (login, key, token, bedrock, vertex).
 #
@@ -4748,7 +4751,7 @@ setting_env() {
 # first; the project's are taken as those where it runs ($2), which is where
 # it was started in all but the odd case.
 claude_ep() { # pid cwd
-  aev=$(tr '\0' '\n' <"/proc/$1/environ" 2>/dev/null |
+  aev=$(tr '\0\n' '\n\001' <"/proc/$1/environ" 2>/dev/null |
     grep -E '^(ANTHROPIC_BASE_URL|ANTHROPIC_AUTH_TOKEN|ANTHROPIC_API_KEY|CLAUDE_CODE_USE_BEDROCK|CLAUDE_CODE_USE_VERTEX|CLAUDE_CONFIG_DIR)=' | head -c 4096)
   bu= au=
   cfgd=$(printf '%s\n' "$aev" | sed -n 's/^CLAUDE_CONFIG_DIR=//p' | head -1)
@@ -4788,7 +4791,7 @@ toml_of() {
 # config names (its profile's, else its own); that provider's base_url is
 # the address. None of them: OpenAI's own, which nothing is shown of.
 codex_ep() { # pid
-  aev=$(tr '\0' '\n' <"/proc/$1/environ" 2>/dev/null | grep -E '^(CODEX_HOME|OPENAI_BASE_URL)=' | head -c 2048)
+  aev=$(tr '\0\n' '\n\001' <"/proc/$1/environ" 2>/dev/null | grep -E '^(CODEX_HOME|OPENAI_BASE_URL)=' | head -c 2048)
   cfgd=$(printf '%s\n' "$aev" | sed -n 's/^CODEX_HOME=//p' | head -1)
   [ -n "$cfgd" ] || cfgd=$HOME/.codex
   sf=$cfgd/config.toml

@@ -98,6 +98,8 @@ func TestEndpointClaude(t *testing.T) {
 		{"Amazon's, which has no address to show", []string{"HOME=" + home, "ANTHROPIC_BASE_URL=https://relay.example.com", "CLAUDE_CODE_USE_BEDROCK=1"}, "|bedrock"},
 		{"Google's", []string{"HOME=" + home, "CLAUDE_CODE_USE_VERTEX=true"}, "|vertex"},
 		{"the flag off", []string{"HOME=" + home, "CLAUDE_CODE_USE_BEDROCK=0"}, "|login"},
+		// (A value with a line break in it that reads as another variable: not taken for one.)
+		{"a variable forged in a value", []string{"HOME=" + home, "OTHER=x\nANTHROPIC_BASE_URL=https://forged.example.com\nANTHROPIC_AUTH_TOKEN=t"}, "|login"},
 	} {
 		if got := runEndpointSh(t, c.env, probe, empty); got != c.want {
 			t.Errorf("%s: %q, wanted %q", c.name, got, c.want)
@@ -148,6 +150,10 @@ model_provider = "other"
 	probe := `codex_ep $$; printf '%s' "$ep"`
 	if got := runEndpointSh(t, []string{"HOME=" + home}, probe); got != "sub2api.example.com" {
 		t.Errorf("the config's provider: %q", got)
+	}
+	// (A value with a line break in it that reads as another variable: not taken for one.)
+	if got := runEndpointSh(t, []string{"HOME=" + home, "OTHER=x\nCODEX_HOME=/nowhere"}, probe); got != "sub2api.example.com" {
+		t.Errorf("a CODEX_HOME forged in a value: %q", got)
 	}
 	// Its command line wins: the provider named there, or the one the
 	// profile named there holds.
