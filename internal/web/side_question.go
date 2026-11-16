@@ -90,8 +90,8 @@ func sideQuestionRun(pid, start int64, sid, model, nonce string, secs int) strin
 		`[ "$(printf '%s' "$c" | grep -o '"sessionId" *: *"[0-9a-fA-F-]*"' | head -n 1 | sed 's/.*"\([0-9a-fA-F-]*\)"$/\1/')" = "$sid" ]; }; ` +
 		`same && [ -r "/proc/$p/environ" ] || { echo 'E gone'; exit 0; }; ` +
 		`cwd=$(readlink "/proc/$p/cwd" 2>/dev/null); ` +
-		// (Its config folder and how it signs in and where its requests go — those of claude_ep's
-		// list, as it was started with them, none it had not: not the login shell's. Nothing else
+		// (Its config folder and how it signs in and where its requests go — sideEnvNames, as it
+		// was started with them, none it had not: not the login shell's. Nothing else
 		// of its environment: its pane's would make the copy look like the pane's agent. Each
 		// variable read whole, by the NULs between them — they alone made line breaks, its own
 		// line breaks made \001s: no value can pass for another variable — and one with a line
@@ -110,13 +110,11 @@ CORRAL_SIDE_ENV
 		`C=$(command -v claude 2>/dev/null); ` +
 		`if [ -z "$C" ]; then e=$(readlink "/proc/$p/exe" 2>/dev/null); case $e in */claude/versions/*) [ -x "$e" ] && C=$e;; esac; fi; ` +
 		`[ -n "$C" ] || { echo 'E noclaude'; exit 0; }; ` +
-		// (Ended for sure, with all it started — a "claude" that is a wrapper, its child the one
-		// asking the model: by GNU's timeout, which signals the command's whole process group and
-		// kills it 5s after; else, where setsid is (BusyBox's timeout signals one process only),
-		// the copy in a process group of its own, killed whole when its time is up. Neither: not
-		// run, as it may never end.)
-		`G=; for t in timeout gtimeout; do command -v $t >/dev/null 2>&1 && $t --version 2>/dev/null | head -n 1 | grep -q 'GNU coreutils' && { G=$t; break; }; done; ` +
-		`[ -n "$G" ] || command -v setsid >/dev/null 2>&1 || { echo 'E notimeout'; exit 0; }; ` +
+		// (Ended for sure, with all it started: run in a process group of its own (setsid), the
+		// whole group killed when its time is up, and once it has ended whatever of it is left — a
+		// "claude" that is a wrapper may end before the child it started, which would hold the
+		// answer's pipe open. No setsid: not run, as it may never end.)
+		`command -v setsid >/dev/null 2>&1 || { echo 'E notimeout'; exit 0; }; ` +
 		// (No MCP server started — "--tools" alone still starts the user's and the project's —
 		// no hook run, no tool to use.)
 		`set -- -p --resume "$sid" --fork-session --no-session-persistence --tools "" --strict-mcp-config --mcp-config '{"mcpServers":{}}' --settings '{"disableAllHooks":true}' --output-format json; ` +
@@ -124,29 +122,33 @@ CORRAL_SIDE_ENV
 		`printf '%s OUT\n' "$N"; ` +
 		// (The question is this script's input, given on to it: never in a command line, which
 		// any user of the host can read.)
-		`if [ -n "$G" ]; then ` +
-		`{ $G -k 5 "$S" "$C" "$@" 2>/dev/null; printf '\n%s RC %s\n' "$N" "$?"; } | head -c ` + strconv.Itoa(sideAnswerCap) + `; ` +
 		// (An asynchronous command's input is /dev/null unless it is given one: this script's, as 3.
-		// Not a group leader, setsid makes the copy one in place — its pid its group's — and the
-		// watch kills that group, its output not the answer's pipe, so the answer's end is not
-		// held for it. No "--" before the group: dash's kill takes none.)
-		`else exec 3<&0; ` +
-		`{ setsid "$C" "$@" <&3 2>/dev/null & cp=$!; ` +
-		`( sleep "$S"; kill -KILL "-$cp" 2>/dev/null ) </dev/null >/dev/null 2>&1 & w=$!; ` +
-		`wait "$cp"; rc=$?; kill "$w" 2>/dev/null; printf '\n%s RC %s\n' "$N" "$rc"; } | head -c ` + strconv.Itoa(sideAnswerCap) + `; fi; exit 0`
+		// Not a group leader, setsid makes the copy one in place — its pid its group's. The watch
+		// is a group of its own too, its sleep with it: killed whole once the copy has ended, it
+		// leaves nothing behind. Neither holds the answer's pipe but the copy. No "--" before a
+		// group: dash's kill takes none.)
+		`exec 3<&0; ` +
+		`{ setsid "$C" "$@" <&3 3<&- 2>/dev/null & cp=$!; ` +
+		`setsid sh -c 'sleep "$1"; kill -KILL "-$2"' sh "$S" "$cp" </dev/null >/dev/null 2>&1 3<&- & w=$!; ` +
+		`wait "$cp"; rc=$?; kill -KILL "-$cp" 2>/dev/null; kill -KILL "-$w" 2>/dev/null; wait "$w" 2>/dev/null; ` +
+		`printf '\n%s RC %s\n' "$N" "$rc"; } | head -c ` + strconv.Itoa(sideAnswerCap) + `; exit 0`
 	return "sh -c " + sshx.QuoteShell(script) + " corral " + strconv.FormatInt(pid, 10) + " " + strconv.FormatInt(start, 10) + " " +
 		sshx.QuoteShell(sid) + " " + sshx.QuoteShell(model) + " " + sshx.QuoteShell(nonce) + " " + strconv.Itoa(secs)
 }
 
 // sideEnvNames: what of a Claude Code's environment its side question's copy
-// is run with (claude_ep's list): its config folder, where its requests go
-// and how it signs in.
+// is run with, none of the login shell's: its config folder, where its
+// requests go and how it signs in (claude_ep's list, an account's token
+// given by setup-token, and what picks Amazon's or Google's account) — so
+// the copy asks as the agent does, on its account.
 // sideCopyMark: in the environment of a side question's copy (claude -p),
 // which writes a session file while it runs: no agent of a pane, left out
 // by the locating scan (see convoLocateWith).
 const sideCopyMark = "CORRAL_SIDE_COPY=1"
 
-const sideEnvNames = "CLAUDE_CONFIG_DIR ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX"
+const sideEnvNames = "CLAUDE_CONFIG_DIR ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN " +
+	"CLAUDE_CODE_USE_BEDROCK AWS_PROFILE AWS_REGION AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_BEARER_TOKEN_BEDROCK " +
+	"CLAUDE_CODE_USE_VERTEX ANTHROPIC_VERTEX_PROJECT_ID CLOUD_ML_REGION GOOGLE_APPLICATION_CREDENTIALS"
 
 // sideAnswer is what the page is told of a side question asked.
 type sideAnswer struct {

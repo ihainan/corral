@@ -133,7 +133,7 @@ func TestSideQuestionCommandRuns(t *testing.T) {
 	// The "agent": a process of its own, its folder and environment its own.
 	agent := exec.Command("sleep", "60")
 	agent.Dir = work
-	agent.Env = []string{"PATH=/usr/bin:/bin", "CLAUDE_CONFIG_DIR=" + filepath.Join(home, "cfg"), "ANTHROPIC_BASE_URL=https://relay.example.com/x", "TMUX_PANE=%9", "HERDR_PANE_ID=p1", "SECRET_OTHER=no",
+	agent.Env = []string{"PATH=/usr/bin:/bin", "CLAUDE_CONFIG_DIR=" + filepath.Join(home, "cfg"), "ANTHROPIC_BASE_URL=https://relay.example.com/x", "CLAUDE_CODE_OAUTH_TOKEN=agent-token", "TMUX_PANE=%9", "HERDR_PANE_ID=p1", "SECRET_OTHER=no",
 		// (A value with a line break that reads as another variable: neither taken.)
 		"SMUGGLE=x\nANTHROPIC_AUTH_TOKEN=stolen", "ANTHROPIC_API_KEY=k1\nANTHROPIC_BASE_URL=https://evil.example",
 		"SMUGGLE2=y\x01ANTHROPIC_AUTH_TOKEN=stolen2"}
@@ -175,7 +175,7 @@ func TestSideQuestionCommandRuns(t *testing.T) {
 	run := func(start int64, model, q string, extra ...string) string {
 		c := exec.Command("sh", "-c", sideQuestionCommand(pid, start, "0b7c2a1e-1111-4222-8333-444455556666", model, "f00d"))
 		// (The login shell's own: a key and a pane of its own, none of them to reach the copy.)
-		c.Env = append([]string{"HOME=" + home, "PATH=/usr/bin:/bin", "ANTHROPIC_API_KEY=outer", "TMUX_PANE=%1", "CLAUDE_CONFIG_DIR=/outer"}, extra...)
+		c.Env = append([]string{"HOME=" + home, "PATH=/usr/bin:/bin", "ANTHROPIC_API_KEY=outer", "TMUX_PANE=%1", "CLAUDE_CONFIG_DIR=/outer", "AWS_PROFILE=outer", "CLAUDE_CODE_OAUTH_TOKEN=outer-token"}, extra...)
 		c.Stdin = strings.NewReader(q)
 		out, err := c.CombinedOutput()
 		if err != nil {
@@ -207,12 +207,12 @@ func TestSideQuestionCommandRuns(t *testing.T) {
 		t.Errorf("cwd %q", got)
 	}
 	env := "\n" + read("env")
-	for _, want := range []string{"\nCLAUDE_CONFIG_DIR=" + filepath.Join(home, "cfg") + "\n", "\nANTHROPIC_BASE_URL=https://relay.example.com/x\n", "\nCORRAL_SIDE_COPY=1\n"} {
+	for _, want := range []string{"\nCLAUDE_CONFIG_DIR=" + filepath.Join(home, "cfg") + "\n", "\nANTHROPIC_BASE_URL=https://relay.example.com/x\n", "\nCLAUDE_CODE_OAUTH_TOKEN=agent-token\n", "\nCORRAL_SIDE_COPY=1\n"} {
 		if !strings.Contains(env, want) {
 			t.Errorf("no %q in env", want)
 		}
 	}
-	for _, not := range []string{"\nANTHROPIC_API_KEY=", "\nANTHROPIC_AUTH_TOKEN=", "evil.example", "stolen", "\x01", "\nTMUX_PANE=", "\nHERDR_PANE_ID=", "\nSECRET_OTHER=", "\nSMUGGLE=", "/outer"} {
+	for _, not := range []string{"\nANTHROPIC_API_KEY=", "\nANTHROPIC_AUTH_TOKEN=", "evil.example", "stolen", "\x01", "\nTMUX_PANE=", "\nHERDR_PANE_ID=", "\nSECRET_OTHER=", "\nSMUGGLE=", "/outer", "\nAWS_PROFILE=", "outer-token"} {
 		if strings.Contains(env, not) {
 			t.Errorf("%q in env", not)
 		}
@@ -239,11 +239,36 @@ func TestSideQuestionCommandRuns(t *testing.T) {
 		t.Errorf("ran for another session")
 	}
 	setSession("0b7c2a1e-1111-4222-8333-444455556666")
-	// Its time up, all it started ended too — a "claude" that is a wrapper, its child the one
-	// that would ask the model, and that ignores TERM: by GNU's timeout (here), and by the
-	// copy's own process group where the timeout is not GNU's (BusyBox's).
-	os.WriteFile(filepath.Join(bin, "claude"), []byte("#!/bin/sh\ntrap '' TERM\nsh -c \"trap '' TERM; echo \\$\\$ > '"+seen+"/child'; sleep 30\" &\nwait\n"), 0o755)
-	alive := func() bool {
+	// Nothing of the run left behind, the copy quick: no watch still sleeping.
+	runSecs := func(secs int, q string) (sideAnswer, time.Duration) {
+		began := time.Now()
+		c := exec.Command("sh", "-c", sideQuestionRun(pid, start, "0b7c2a1e-1111-4222-8333-444455556666", "", "f00d", secs))
+		c.Env = []string{"HOME=" + home, "PATH=/usr/bin:/bin"}
+		c.Stdin = strings.NewReader(q)
+		out, _ := c.Output()
+		a, err := parseSideAnswer(string(out), "f00d")
+		if err != nil {
+			t.Errorf("%v: %q", err, out)
+		}
+		return a, time.Since(began)
+	}
+	sleeping := func(secs string) bool {
+		ds, _ := filepath.Glob("/proc/[0-9]*/cmdline")
+		for _, d := range ds {
+			if b, _ := os.ReadFile(d); string(b) == "sleep\x00"+secs+"\x00" {
+				return true
+			}
+		}
+		return false
+	}
+	if a, _ := runSecs(37, "q"); !a.OK {
+		t.Errorf("quick: %+v", a)
+	}
+	time.Sleep(200 * time.Millisecond)
+	if sleeping("37") {
+		t.Errorf("the watch's sleep left running")
+	}
+	child := func() bool {
 		b, err := os.ReadFile(filepath.Join(seen, "child"))
 		if err != nil {
 			return false
@@ -251,26 +276,23 @@ func TestSideQuestionCommandRuns(t *testing.T) {
 		_, err = os.Stat("/proc/" + strings.TrimSpace(string(b)))
 		return err == nil
 	}
-	for _, how := range []string{"gnu", "busybox"} {
-		if how == "busybox" {
-			// (A timeout that is not GNU's: the script does not use it.)
-			os.WriteFile(filepath.Join(bin, "timeout"), []byte("#!/bin/sh\necho 'BusyBox timeout'\nexit 1\n"), 0o755)
-		}
+	for _, c := range []struct{ how, script string }{
+		// (A wrapper, its child the one that would ask the model, both ignoring TERM: its time up.)
+		{"hangs", "#!/bin/sh\ntrap '' TERM\nsh -c \"trap '' TERM; echo \\$\\$ > '" + seen + "/child'; sleep 30\" &\nwait\n"},
+		// (A wrapper that ends at once, its child left holding the answer's pipe.)
+		{"leaves", "#!/bin/sh\nsh -c \"echo \\$\\$ > '" + seen + "/child'; sleep 30\" &\nsleep 0.3\nexit 0\n"},
+	} {
+		os.WriteFile(filepath.Join(bin, "claude"), []byte(c.script), 0o755)
 		os.Remove(filepath.Join(seen, "child"))
-		began := time.Now()
-		c := exec.Command("sh", "-c", sideQuestionRun(pid, start, "0b7c2a1e-1111-4222-8333-444455556666", "", "f00d", 1))
-		c.Env = []string{"HOME=" + home, "PATH=/usr/bin:/bin"}
-		c.Stdin = strings.NewReader("q")
-		out, _ := c.CombinedOutput()
-		a, err := parseSideAnswer(string(out), "f00d")
-		if err != nil || a.Reason != "timeout" || time.Since(began) > 12*time.Second {
-			t.Errorf("%s: %+v %v after %s: %q", how, a, err, time.Since(began), out)
+		a, took := runSecs(2, "q")
+		if took > 8*time.Second || (c.how == "hangs" && a.Reason != "timeout") {
+			t.Errorf("%s: %+v after %s", c.how, a, took)
 		}
-		for i := 0; i < 20 && alive(); i++ {
+		for i := 0; i < 20 && child(); i++ {
 			time.Sleep(100 * time.Millisecond)
 		}
-		if alive() {
-			t.Errorf("%s: the wrapper's child still runs", how)
+		if child() {
+			t.Errorf("%s: the wrapper's child still runs", c.how)
 		}
 	}
 }
