@@ -23,8 +23,8 @@ func TestSideQuestionText(t *testing.T) {
 		{"中文的问题", "中文的问题", true},
 		{"", "", false},
 		{"   \n ", "", false},
-		{"-v what", "", false},
-		{"  --help", "", false},
+		{"- a list item?", "- a list item?", true},
+		{"  --help", "--help", true},
 		{"bell\a", "", false},
 		{"esc\x1b[2J", "", false},
 		{"nul\x00", "", false},
@@ -254,7 +254,6 @@ func TestSideQuestionEndpoint(t *testing.T) {
 	}
 	for i, bad := range []func(m map[string]any){
 		func(m map[string]any) { m["question"] = "" },
-		func(m map[string]any) { m["question"] = "-v" },
 		func(m map[string]any) { m["question"] = "a\x1bb" },
 		func(m map[string]any) { m["question"] = strings.Repeat("x", sideQuestionMax+1) },
 		func(m map[string]any) { m["model"] = "--bare" },

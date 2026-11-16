@@ -853,6 +853,28 @@ details.adv > .form { margin-top: 16px; }
 .text-preview-cut.is-end { top: auto; bottom: 0; border-bottom: 0; border-top: 1px solid var(--term-line); }
 .text-preview .picture-note { color: var(--term-fg-2); }
 /* The Changes view (terminal.css: its body): as tall as it may be, so its tabs do not move as each is read. */
+/* A side question (sideQuestion.tsx): the questions asked, each with its answer, over the box to ask in. */
+.dialog.side-dialog { max-width: min(760px, calc(100vw - 32px)); width: 100%; max-height: min(860px, calc(var(--vv-h, 100dvh) - 32px)); }
+.side-body { gap: 14px; }
+.side-note { margin: 0; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--fg-3); }
+.side-qa { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.side-q { margin: 0; align-self: flex-end; max-width: 85%; padding: 8px 12px; border-radius: var(--r); background: var(--accent-soft); color: var(--fg); white-space: pre-wrap; overflow-wrap: anywhere; }
+.side-a { min-width: 0; overflow-wrap: anywhere; }
+.side-wait { margin: 0; display: flex; align-items: center; gap: 8px; color: var(--fg-3); font-variant-numeric: tabular-nums; }
+.side-wait .convo-spin { margin-right: 0; border-color: var(--line-strong); border-top-color: var(--accent); }
+.side-meta { display: flex; align-items: center; gap: 12px; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--fg-3); font-variant-numeric: tabular-nums; }
+.side-meta .spacer { flex: 1; }
+.side-failed { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; color: var(--danger); overflow-wrap: anywhere; }
+.side-failed .btn { gap: 6px; }
+.side-kept { margin: 0; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--fg-3); text-align: center; }
+.side-foot { align-items: flex-end; flex-wrap: wrap; }
+.side-input { flex: 1 1 240px; min-width: 0; max-height: 40vh; }
+.side-long { order: 3; flex-basis: 100%; margin: 0; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--danger); }
+@media (max-width: 520px) {
+  .sheet-mode .dialog.side-dialog { max-width: none; }
+  .side-input { flex-basis: 100%; }
+  .side-q { max-width: 100%; }
+}
 .dialog.gch-dialog { max-width: min(1100px, calc(100vw - 32px)); width: 100%; height: min(900px, calc(var(--vv-h, 100dvh) - 32px)); }
 @media (max-width: 520px) {
   .sheet-mode .dialog.text-preview-dialog { max-width: none; }

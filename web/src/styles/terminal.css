@@ -595,6 +595,9 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-runs-item.is-switch:hover:not(:disabled):not([aria-disabled='true']), .convo-runs-item.is-switch[aria-expanded='true'] { background: var(--term-hover); color: var(--term-fg); }
 .convo-runs-item.is-switch:focus-visible { outline: 2px solid var(--term-accent-text); outline-offset: 1px; }
 .convo-runs-item.is-switch:disabled, .convo-runs-item.is-switch[aria-disabled='true'] { cursor: progress; }
+.convo-runs-side { flex: none; }
+/* (Narrow: its icon alone, its name said by its label.) */
+@media (max-width: 520px) { .convo-runs-side-name { display: none; } }
 /* The models to switch to: as the picker lists them, the session's ticked */
 .convo-models { display: flex; flex-direction: column; gap: 1px; padding: 6px; }
 /* (The mode's, under its name on the left.) */

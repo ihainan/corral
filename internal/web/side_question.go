@@ -42,12 +42,11 @@ var sideModel = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/@\[\]-]{0,127}$`)
 
 // sideQuestionText: the question as it is passed (trimmed), and whether it
 // may be: some words, no longer than sideQuestionMax, valid UTF-8, no
-// control characters but a line break and a tab, and not begun with "-"
-// (given as input, not an argument, it could not be read as an option: a
-// second guard).
+// control characters but a line break and a tab. (It is the command's
+// input, never an argument: one begun with "-" is no option.)
 func sideQuestionText(q string) (string, bool) {
 	q = strings.TrimSpace(q)
-	if q == "" || !utf8.ValidString(q) || utf8.RuneCountInString(q) > sideQuestionMax || strings.HasPrefix(q, "-") {
+	if q == "" || !utf8.ValidString(q) || utf8.RuneCountInString(q) > sideQuestionMax {
 		return "", false
 	}
 	if strings.ContainsFunc(q, func(r rune) bool {

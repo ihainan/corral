@@ -1,5 +1,5 @@
 import { createContext, Fragment, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { PanelRight, ArrowDown, ArrowUp, Bot, Check, MessagesSquare, FilePen, Hand, ListChecks, ShieldOff, Sparkles, Copy, Cpu, FileText, Gauge as GaugeIcon, LogOut, Radar, SquarePlus, SquareTerminal, Target, TextCursorInput, FolderOpen, Info, Image as ImageIcon, ImageOff, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, Clock, Download, Eye, GitBranch, Keyboard, ListOrdered, Loader, MoreHorizontal, MoreVertical, PanelLeft, Pin, RotateCw, Search, TriangleAlert, X, Plus } from 'lucide-react'
+import { PanelRight, ArrowDown, ArrowUp, Bot, Check, MessagesSquare, FilePen, Hand, ListChecks, ShieldOff, Sparkles, Copy, Cpu, FileText, Gauge as GaugeIcon, LogOut, Radar, SquarePlus, SquareTerminal, Target, TextCursorInput, FolderOpen, Info, Image as ImageIcon, ImageOff, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, ChevronsDownUp, ChevronsUpDown, Clock, Download, Eye, GitBranch, Keyboard, ListOrdered, Loader, MessageCircleQuestion, MoreHorizontal, MoreVertical, PanelLeft, Pin, RotateCw, Search, TriangleAlert, X, Plus } from 'lucide-react'
 import { t, getLang, type I18nKey } from '../i18n'
 import { api } from '../api'
 import { asHeld, dayStart, FOLDED, foldAt, GROUPS, inGroup, listOrder, pinned, type ConvoListRow, type RowCmds } from './agentOrder'
@@ -12,6 +12,7 @@ import { CodeSpanOf, FileLinkOf, Markdown } from './markdown'
 import { codeRef, type LineSpan } from './paths'
 import { Hunks } from './hunks'
 import { ChangesView, type ChangesAgainst } from './changesView'
+import { SideQuestion } from './sideQuestion'
 import { Dock, dockKept, keepDock, type DockSink, type DockTab, type DockTerminal, type FilesAsk } from './dock'
 import { useSubConvo } from './subagent'
 import { useSubScan, type SubScanAgent } from './subscan'
@@ -1260,6 +1261,11 @@ export function ConversationView({
   // The session card: shut, over the thread under its button, or a sheet from the bottom (narrow, or from the menu).
   const [card, setCard] = useState<'' | 'pop' | 'sheet'>('')
   const [gitChanges, setGitChanges] = useState<{ against: ChangesAgainst; base?: string } | null>(null) // (the Changes view, from the card)
+  // A side question (Claude Code's /btw): of a Claude Code bound at a session
+  // whose log there is to copy — not of one begun anew, with none yet.
+  const [btwShown, setBtwShown] = useState(false)
+  const sideBind = convo.of && convo.status === 'ready' && convo.bind?.agent === 'claude' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(convo.bind.session) && !/^0{8}-/.test(convo.bind.session) ? convo.bind : undefined
+  if (btwShown && !sideBind) setBtwShown(false) // (the agent gone, or another: what it was asked of is not this)
   // The dock (dock.tsx): on a screen 768 wide or more; open, its tab and
   // width the person's. Beside the thread where the thread keeps DOCK_THREAD
   // of its own beside the list, else over it, from the right.
@@ -1729,6 +1735,7 @@ export function ConversationView({
                 // (In three groups, each headed: finding and reading here; the agent; the conversation itself.)
                 { label: t('convoSearch.item'), icon: <Search size={16} />, group: t('menu.group.find'), onSelect: () => setSearching(true) },
                 ...(convo.of && (convo.bind?.agent === 'claude' || convo.bind?.agent === 'codex') ? [{ label: t('turns.item'), icon: <ListOrdered size={16} />, onSelect: () => (setSearching(false), setTurnsShown(true)) }] : []),
+                ...(sideBind ? [{ label: t('side.item'), icon: <MessageCircleQuestion size={16} />, onSelect: () => setBtwShown(true) }] : []),
                 // (All steps opened or folded: the menu's, as Ctrl+O is a Mac's only.)
                 { label: t(allOpen ? 'pageKeys.foldAll' : 'pageKeys.openAll'), icon: allOpen ? <ChevronsDownUp size={16} /> : <ChevronsUpDown size={16} />, keys: mac ? ['Ctrl+O'] : undefined, disabled: !list.length, onSelect: () => (setOpened({}), setUnfolded({}), setAllOpen((v) => !v)) },
                 ...(convo.of && convo.status === 'ready' ? [{ label: t('card.open'), icon: <Info size={16} />, onSelect: () => setCard(cardMode()) }] : []),
@@ -1784,6 +1791,17 @@ export function ConversationView({
           start={gitChanges.against}
           acts={files ? { view: (p) => files.view(p), open: files.open } : undefined}
           onClose={() => setGitChanges(null)}
+        />
+      )}
+      {btwShown && sideBind && convo.of && (
+        <SideQuestion
+          sid={convo.of.split(' ')[0]}
+          bind={{ pane: sideBind.pane, pid: sideBind.pid, start: sideBind.start, session: sideBind.session }}
+          model={convo.meta?.model}
+          onClose={() => {
+            setBtwShown(false)
+            requestAnimationFrame(() => root.current?.querySelector<HTMLElement>('.convo-runs-side')?.focus())
+          }}
         />
       )}
       {keysShown && (
@@ -1934,6 +1952,7 @@ export function ConversationView({
             }
             via={convo.bind?.via}
             auth={convo.bind?.auth}
+            onSide={sideBind ? () => setBtwShown(true) : undefined}
           />
         )}
       </div>
@@ -2561,7 +2580,7 @@ const effortName = (e: string) => ((EFFORTS as readonly string[]).includes(e) ? 
 // (via, auth: where its requests go and how it signs in, as its process on
 // the host says — see convoBind. Shown only where that is not the model
 // maker's own door: the quiet case, which is most of them, says nothing.)
-function Runs({ meta, goal, active, mode, model, effort, quota, via, auth }: { meta: ConvoMeta; goal?: string; active: boolean; mode?: ModeSwitch; model?: ModelSwitch; effort?: EffortSwitch; quota?: QuotaOf; via?: string; auth?: string }) {
+function Runs({ meta, goal, active, mode, model, effort, quota, via, auth, onSide }: { meta: ConvoMeta; goal?: string; active: boolean; mode?: ModeSwitch; model?: ModelSwitch; effort?: EffortSwitch; quota?: QuotaOf; via?: string; auth?: string; onSide?: () => void }) {
   const [open, setOpen] = useState<false | 'ctx' | 'model' | 'effort' | 'mode'>(false) // (which of its pop-ups)
   // (Another agent bound meanwhile — the pane's program changed: its model and effort menus, of the one before, closed;
   // opened again, the list read is the new one's.)
@@ -2748,6 +2767,13 @@ function Runs({ meta, goal, active, mode, model, effort, quota, via, auth }: { m
         <span className="convo-runs-item convo-runs-goal" title={goal}>
           {goalSaid(goal)}
         </span>
+      )}
+      {onSide && (
+        // (A side question (/btw): the thread's own, beside the composer — a Claude Code's.)
+        <button type="button" className="convo-runs-item convo-runs-side is-switch" onClick={onSide} aria-label={t('side.item')} title={t('side.note')}>
+          <MessageCircleQuestion size={13} aria-hidden="true" />
+          <span className="convo-runs-side-name">{t('side.item')}</span>
+        </button>
       )}
       <span className="spacer" />
       {meta.branch && (
