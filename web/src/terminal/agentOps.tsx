@@ -44,7 +44,7 @@ export function ForkDialog({
   dir: string
   name: string
   check?: () => string // (asked again as it is sent: why not now, or '')
-  onDone: (pane: string, first: string, opened?: SessionInfo, rewound?: boolean) => void // (opened: from a tmux session, the terminal opened on the copy's own; rewound: false where a Codex's rewind was not seen to end there)
+  onDone: (pane: string, first: string, opened?: SessionInfo, rewound?: boolean, named?: boolean) => void // (opened: from a tmux session, the terminal opened on the copy's own; rewound: false where a Codex's rewind was not seen to end there)
   onClose: () => void
 }) {
   const [label, setLabel] = useState(() => t('fork.defaultName', { name }).slice(0, 40))
@@ -77,7 +77,7 @@ export function ForkDialog({
         return
       }
       const body = { dir, kind, label: label.trim(), resume: source, fork: true, at: at ?? '', ...(rw ? { back: rw.back, at_text: rw.text, clear: rw.clear } : {}) }
-      const r = await api<{ pane?: string; tmux?: string; rewound?: boolean }>('POST', `/api/sessions/${sessionId}/agents`, { ...body, key: keyOf(JSON.stringify(body)) }, { timeoutMs: 90000 })
+      const r = await api<{ pane?: string; tmux?: string; rewound?: boolean; named?: boolean }>('POST', `/api/sessions/${sessionId}/agents`, { ...body, key: keyOf(JSON.stringify(body)) }, { timeoutMs: 90000 })
       if (r.tmux) {
         // (From a tmux session: the copy in a tmux session of its own, a terminal opened on it here — as a new agent's.)
         let opened: SessionInfo
@@ -88,10 +88,10 @@ export function ForkDialog({
           setBusy(false)
           return
         }
-        onDone('', first.trim(), opened, r.rewound)
+        onDone('', first.trim(), opened, r.rewound, r.named)
         return
       }
-      onDone(r.pane ?? '', first.trim(), undefined, r.rewound)
+      onDone(r.pane ?? '', first.trim(), undefined, r.rewound, r.named)
     } catch (err) {
       if (err instanceof ApiError && err.code === 'no_session') setError(t('fork.noSession'))
       else if (err instanceof ApiError && err.code === 'bad_message') setError(t('fork.badMessage'))

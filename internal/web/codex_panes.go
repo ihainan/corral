@@ -109,7 +109,7 @@ if tmux:
 def title_now(pane):
     if tmux:
         try:
-            r = subprocess.run(['tmux', 'display-message', '-p', '-t', pane, '#{pane_title}'], capture_output=True, timeout=5, env=dict(os.environ, PATH=PATH))
+            r = subprocess.run(['tmux', '-u', 'display-message', '-p', '-t', pane, '#{pane_title}'], capture_output=True, timeout=5, env=dict(os.environ, PATH=PATH))
             return r.stdout.decode('utf-8', 'replace').rstrip('\n') if r.returncode == 0 else None
         except Exception:
             return None
@@ -779,4 +779,38 @@ func (s *Server) locateCodexFast(ctx context.Context, sess *term.Session, st *co
 	st.guessed = false
 	st.adopt(c.Thread, c.Path, "codex", "")
 	return true
+}
+
+// codexTmuxNamed: a tmux pane's Codex (p, as the scan found it, its log its
+// daemon's) at the conversation its name tells, as a look begun now finds
+// it: one Codex there, that process, its thread named, the pane's title
+// showing that name whole right now, no other live conversation of its
+// folder of that name (codexPressSure) — the conversation taken as its own
+// (claimed, as one its screen showed).
+func (s *Server) codexTmuxNamed(ctx context.Context, sess *term.Session, p *convoProc, l convoLocated) (codexPane, bool) {
+	if p == nil || p.agent != "codex" || !tmuxPane.MatchString(p.tmuxPane) {
+		return codexPane{}, false
+	}
+	panes, err := s.codexPanes.run(ctx, sess, "tmux", p.tmuxPane)
+	if err != nil {
+		return codexPane{}, false
+	}
+	c, ok := panes[p.tmuxPane]
+	if !ok || c.Several || c.PID != p.pid || c.Start != p.start || c.Src == "fd" || c.Thread == "" || c.Path == "" || c.Name == "" || !codexPressSure(c) {
+		return codexPane{}, false
+	}
+	if !s.convoClaimed.take(strings.ToLower(c.Thread), p.id(), p.started, aliveCodex(l), l.now(), true) {
+		return codexPane{}, false // (another Codex's)
+	}
+	return c, true
+}
+
+// codexTmuxNamedNow: codexTmuxNamed for a press: front's log and session
+// set to what its name tells, where it does.
+func (s *Server) codexTmuxNamedNow(ctx context.Context, sess *term.Session, front *convoProc, l convoLocated) bool {
+	c, ok := s.codexTmuxNamed(ctx, sess, front, l)
+	if ok {
+		front.log, front.sid = c.Path, strings.ToLower(c.Thread)
+	}
+	return ok
 }

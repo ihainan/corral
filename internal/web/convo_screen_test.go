@@ -92,7 +92,7 @@ func TestDaemonLogKeepsWhatTheScreenShowed(t *testing.T) {
 	c := convoCand{log: cxA, cwd: "/w", began: now - 299*sec, wrote: now - 10*sec}
 	both := convoLocated{procs: []convoProc{first, second}, cands: []convoCand{c}, hostNow: now}
 	p := both.procs[1]
-	if took, _, refused := srv.daemonLog(&p, both); took || !refused {
+	if took, refused := srv.daemonLog(&p, both); took || !refused {
 		t.Fatalf("taken by where and when: %v %v", took, refused)
 	}
 	alive := aliveCodex(both)
@@ -109,7 +109,7 @@ func TestDaemonLogKeepsWhatTheScreenShowed(t *testing.T) {
 		t.Errorf("the other took it: %q", q.sid)
 	}
 	p = both.procs[1]
-	if took, _, _ := srv.daemonLog(&p, both); !took || p.sid != sid {
+	if took, _ := srv.daemonLog(&p, both); !took || p.sid != sid {
 		t.Errorf("not kept by the one whose screen showed it: %v %q", took, p.sid)
 	}
 	// The other cannot take it by its screen either, while this one runs.

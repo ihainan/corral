@@ -248,11 +248,7 @@ case $hz in ''|*[!0-9]*|0) hz=;; esac
 codex_sub() {
   tr '\0' '\001' <"/proc/$1/cmdline" 2>/dev/null | awk -v want=sub '` + codexArgsAwk + `'
 }
-# ("codex fork <id>": the conversation it is a copy of; "codex resume
-# <id>": the one it was started at.)
-codex_fork_of() {
-  tr '\0' '\001' <"/proc/$1/cmdline" 2>/dev/null | awk -v want=fork '` + codexArgsAwk + `'
-}
+# ("codex resume <id>": the conversation it was started at.)
 codex_resume_of() {
   tr '\0' '\001' <"/proc/$1/cmdline" 2>/dev/null | awk -v want=resume '` + codexArgsAwk + `'
 }
@@ -417,8 +413,6 @@ for d in $codexes; do
   pid=${d#/proc/}
   sub=$(codex_sub "$pid")
   case $sub in exec|e|exec-server|review|apply|a|login|logout|mcp|mcp-server|app-server|completion|sandbox|debug|cloud|features) continue;; esac
-  # (A copy: what it is a copy of, for the daemon's log of it — daemonLog.)
-  [ "$sub" = fork ] && printf 'forkof=%s %s\0' "$pid" "$(codex_fork_of "$pid")"
   [ "$sub" = resume ] && printf 'resumeof=%s %s\0' "$pid" "$(codex_resume_of "$pid")"
   codex_fds "$d"
   log=$cxlog any=$cxany
@@ -755,7 +749,6 @@ type convoLocated struct {
 	paneTTY                        string           // (the terminal of the pane asked of)
 	noProc                         bool             // the host has no /proc
 	hostNow                        int64            // the host's clock when it was looked at, unix milliseconds (0: not known)
-	forkOf                         map[int64]string // ("codex fork <id>": by pid, the conversation each is a copy of)
 	resumeOf                       map[int64]string // ("codex resume <id>": by pid, the conversation each was started at)
 }
 
@@ -825,16 +818,6 @@ func parseConvoLocate(out string) (l convoLocated) {
 					l.resumeOf = map[int64]string{}
 				}
 				l.resumeOf[n] = strings.ToLower(id)
-			}
-			continue
-		}
-		if v, ok := strings.CutPrefix(rec, "forkof="); ok {
-			pid, id, _ := strings.Cut(v, " ")
-			if n, err := strconv.ParseInt(pid, 10, 64); err == nil && n > 0 && convoUUID.MatchString(id) {
-				if l.forkOf == nil {
-					l.forkOf = map[int64]string{}
-				}
-				l.forkOf[n] = strings.ToLower(id)
 			}
 			continue
 		}
@@ -1369,32 +1352,19 @@ func onlyItsByTime(p *convoProc, c *convoCand, l convoLocated) bool {
 // whose Codex is no longer there is of none; nor is one begun before every
 // Codex there started. Then nothing is shown rather than another's. One
 // already found to be this Codex's (its screen showed it) is of it still.
-//
-// A copy ("codex fork <id>") is told for sure (sure): the one conversation
-// begun where it runs since it started, and that one a copy of the one its
-// argument names (its log's head says so) — not left to where and when
-// alone, which two Codexes in one folder, the original's and the copy's,
-// both fit; nor taken by another Codex there by that.
-func (s *Server) daemonLog(p *convoProc, l convoLocated) (took, sure, refused bool) {
+func (s *Server) daemonLog(p *convoProc, l convoLocated) (took, refused bool) {
 	if p == nil || p.agent != "codex" || p.log != "" || p.cwd == "" || p.started <= 0 {
-		return false, false, false
+		return false, false
 	}
 	alive := aliveCodex(l)
 	s.convoClaimed.seeAlive(l, alive, l.now())
-	if src := l.forkOf[p.pid]; src != "" {
-		if c := forkCand(p, src, l); c != nil {
-			if sid := convoSessionOf(c.log); sid != "" && s.convoClaimed.take(sid, p.id(), p.started, alive, l.now(), true) {
-				p.log, p.sid = c.log, sid
-				return true, true, false
-			}
-		}
-	}
 	var best *convoCand
 	var bestSID string
+	resumed := false // (best is the one it was started at: not claimed by this — review fork3-6)
 	for i := range l.cands {
 		c := &l.cands[i]
 		sid := convoSessionOf(c.log)
-		if c.cwd != p.cwd || sid == "" || copyOfAnother(p, c, l) {
+		if c.cwd != p.cwd || sid == "" {
 			continue
 		}
 		// (The one it was started at, "codex resume <id>", begun whenever: a
@@ -1402,7 +1372,7 @@ func (s *Server) daemonLog(p *convoProc, l convoLocated) (took, sure, refused bo
 		// begun before it started, as one of another's is.)
 		if r := l.resumeOf[p.pid]; r != "" && strings.EqualFold(sid, r) {
 			if best == nil || c.wrote > best.wrote || (c.wrote == best.wrote && c.began > best.began) {
-				best, bestSID = c, sid
+				best, bestSID, resumed = c, sid, true
 			}
 			continue
 		}
@@ -1423,122 +1393,28 @@ func (s *Server) daemonLog(p *convoProc, l convoLocated) (took, sure, refused bo
 			}
 		}
 		if best == nil || c.wrote > best.wrote || (c.wrote == best.wrote && c.began > best.began) {
-			best, bestSID = c, sid
+			best, bestSID, resumed = c, sid, false
 		}
 	}
 	if best == nil {
-		return false, false, refused
+		return false, refused
+	}
+	// (The one it was started at, its argument's: a guess for its screen to
+	// confirm, which claims it then — not claimed by the argument, which it
+	// may have gone on from since, so that another Codex at it is not kept
+	// from it.)
+	if resumed {
+		if s.convoClaimed.ownedByAnother(bestSID, p.id(), alive) {
+			return false, true
+		}
+		p.log, p.sid = best.log, bestSID
+		return true, refused
 	}
 	if !s.convoClaimed.take(bestSID, p.id(), p.started, alive, l.now(), false) {
-		return false, false, true // (there is one, but it is another Codex's)
+		return false, true // (there is one, but it is another Codex's)
 	}
 	p.log, p.sid = best.log, bestSID
-	return true, false, refused
-}
-
-// forkCand: a copy's own log among those its daemon holds (see daemonLog):
-// the only conversation begun where it runs since it started — its logs
-// taken together (one rewound has a segment of its own, whose head names no
-// original: review fork-4), another Codex's copy left out — that one a copy
-// of src made by it (forkerFor). Its log written last; else nil.
-func forkCand(p *convoProc, src string, l convoLocated) *convoCand {
-	var found *convoCand
-	sid, mine := "", false
-	for i := range l.cands {
-		c := &l.cands[i]
-		if c.cwd != p.cwd || c.began <= 0 || c.began+convoBeganSlack < p.started || copyOfAnother(p, c, l) {
-			continue
-		}
-		cs := convoSessionOf(c.log)
-		if cs == "" {
-			continue
-		}
-		if sid != "" && cs != sid {
-			return nil // (another begun there since: which it is at, not told by this)
-		}
-		sid = cs
-		if c.forkedFrom == src {
-			if q := forkerFor(c, l); q != nil && q.id() == p.id() {
-				mine = true
-			}
-		}
-		if found == nil || c.wrote > found.wrote || (c.wrote == found.wrote && c.began > found.began) {
-			found = c
-		}
-	}
-	if !mine {
-		return nil
-	}
-	return found
-}
-
-// forkerFor: the Codex running where c (a copy's first log) was begun that
-// was started to make it. Of those copying its original there, started
-// before it began, each that has made another copy of it already — one
-// begun before c and before any other of them started, so its — is left
-// out; one left is the one. More than one: which made it is not told (one
-// slow to begin its copy may begin it after another has started — review
-// fork2-6). nil then, or where none.
-func forkerFor(c *convoCand, l convoLocated) *convoProc {
-	if c.forkedFrom == "" || c.began <= 0 {
-		return nil
-	}
-	copying := func(q *convoProc, before int64) bool {
-		return q.agent == "codex" && q.cwd == c.cwd && l.forkOf[q.pid] == c.forkedFrom && q.started > 0 && q.started <= before+convoBeganSlack
-	}
-	var qs []*convoProc
-	for i := range l.procs {
-		if copying(&l.procs[i], c.began) {
-			qs = append(qs, &l.procs[i])
-		}
-	}
-	var left []*convoProc
-	for _, q := range qs {
-		made := false
-		for j := range l.cands {
-			o := &l.cands[j]
-			if o == c || o.log == c.log || o.forkedFrom != c.forkedFrom || o.cwd != c.cwd || o.began <= 0 || o.began >= c.began || !copying(q, o.began) {
-				continue
-			}
-			// (Begun before any other of them started: only q could have made it.)
-			alone := true
-			for _, r := range qs {
-				if r != q && copying(r, o.began) {
-					alone = false
-					break
-				}
-			}
-			if alone {
-				made = true
-				break
-			}
-		}
-		if !made {
-			left = append(left, q)
-		}
-	}
-	if len(left) != 1 {
-		return nil
-	}
-	return left[0]
-}
-
-// copyOfAnother: c is of a copy another Codex running there was started to
-// make (forkerFor its conversation's first log).
-func copyOfAnother(p *convoProc, c *convoCand, l convoLocated) bool {
-	sid := convoSessionOf(c.log)
-	if sid == "" {
-		return false
-	}
-	for i := range l.cands {
-		o := &l.cands[i]
-		if o.forkedFrom == "" || o.cwd != c.cwd || convoSessionOf(o.log) != sid {
-			continue
-		}
-		q := forkerFor(o, l)
-		return q != nil && q.id() != p.id()
-	}
-	return false
+	return true, refused
 }
 
 // convoClaims remembers which Codex each conversation was found to be of,
@@ -1585,6 +1461,15 @@ func (c *convoClaims) owns(sid string, p procID) bool {
 	defer c.mu.Unlock()
 	was, ok := c.by[sid]
 	return ok && was.pid != 0 && was.of() == p
+}
+
+// ownedByAnother: the conversation was found to be another Codex's, one
+// running now.
+func (c *convoClaims) ownedByAnother(sid string, p procID, alive map[procID]bool) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	was, ok := c.by[sid]
+	return ok && was.pid != 0 && was.of() != p && alive[was.of()]
 }
 
 // take: the conversation is taken as that process's own, if it may be — it
@@ -2400,9 +2285,7 @@ func (s *Server) locateScan(ctx context.Context, sess *term.Session, st *convoSt
 		}
 		var refused bool
 		held := p != nil && p.agent == "codex" && p.log == "" // (its log, if any, its daemon's)
-		var took, sure bool
-		took, sure, refused = s.daemonLog(p, l)
-		guessed = took && !sure // (a copy told by what it is a copy of: not a guess)
+		guessed, refused = s.daemonLog(p, l)
 		// What the pane shows has the last word on which conversation it
 		// is at: a Codex that has begun another (/new), or resumed one,
 		// shows that one's words, as does one of two Codexes there that
@@ -2428,18 +2311,6 @@ func (s *Server) locateScan(ctx context.Context, sess *term.Session, st *convoSt
 				// is not told. Not read: what was learnt before stands.)
 				if log, sid, on, read := s.screenSays(ctx, sess, pane, p, l, p.log, st.screenLog); read {
 					st.screenNo, st.screenWeak = false, false
-					// (A copy is never taken for its original by the original's
-					// words: told for sure, they are its own while nothing on
-					// its screen says otherwise — forkShowsItsOwn; else which
-					// it is at is not told — review fork-1, fork-2.)
-					if src := l.forkOf[p.pid]; src != "" && sid != "" && sid == src {
-						if sure && s.forkShowsItsOwn(ctx, sess, pane, p, p.log, src) {
-							log, sid = p.log, p.sid
-						} else {
-							log, sid = "", ""
-							st.screenNo = true
-						}
-					}
 					if sid != "" && sid != st.screenSID {
 						if c := candAt(l, log, p.cwd); c == nil || on < s.screenEnoughFor(p, c, sid, l) {
 							st.screenWeak = true
@@ -2467,6 +2338,16 @@ func (s *Server) locateScan(ctx context.Context, sess *term.Session, st *convoSt
 				p.log, p.sid, guessed = st.screenLog, st.screenSID, true
 			case st.screenWeak && p.log == "":
 				refused = true // (it is at one, shown too little of to tell which)
+			}
+		}
+		// (tmux: a Codex its daemon keeps the log of, not told by where and
+		// when nor by its screen — a copy's, the original's Codex there too —
+		// told by its conversation's name, its pane's title showing it now,
+		// no other live conversation of its folder of that name, as a herdr
+		// pane's is: codexTmuxNamed.)
+		if sess.Persistence == "tmux" && held && p != nil && (p.log == "" || guessed) {
+			if c, ok := s.codexTmuxNamed(ctx, sess, p, l); ok {
+				p.log, p.sid, guessed, refused = c.Path, c.Thread, false, false
 			}
 		}
 		st.bind = nil
@@ -4164,6 +4045,9 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 				// — its first message, from the page: 11-15, a Codex begun in
 				// the terminal could not be written to from the page at all.)
 				front.sid = convoNoSession
+			case sess.Persistence == "tmux" && why != "busy" && s.codexTmuxNamedNow(ctx, sess, front, l):
+				// (Named, its pane's title showing that name now, looked at
+				// now: as a herdr pane's codexFront — codexTmuxNamed.)
 			default:
 				// (Weak, none, or another's: agent_changed below — what is shown
 				// is checked anew, by the scan; nothing is typed by a log's age.)

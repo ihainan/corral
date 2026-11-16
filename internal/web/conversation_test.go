@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -590,48 +589,6 @@ func TestConvoGensOfThisRun(t *testing.T) {
 	fmt.Println(convoGens.Load())
 }
 
-// A copy ("codex fork <id>") run against the daemon, in the folder of the
-// Codex it is a copy of: each is given its own — the copy for sure, by what
-// its log says it is a copy of; the original not contesting it — and a copy
-// with another conversation begun there since is not told by this.
-func TestDaemonLogFork(t *testing.T) {
-	const sec = 1000
-	now := int64(1_700_000_000_000)
-	src, cp, third := "01a17600-0000-7000-8000-0000000000f1", "01a17600-0000-7000-8000-0000000000f2", "01a17600-0000-7000-8000-0000000000f3"
-	logOf := func(sid string) string {
-		return "/home/u/.codex/sessions/2026/10/26/rollout-2026-10-26T10-00-00-" + sid + ".jsonl"
-	}
-	orig := convoProc{pid: 7, start: 70, agent: "codex", cwd: "/w", started: now - 600*sec}
-	fork := convoProc{pid: 8, start: 80, agent: "codex", cwd: "/w", started: now - 50*sec}
-	cands := []convoCand{
-		{log: logOf(src), cwd: "/w", began: now - 590*sec, wrote: now - 60*sec},
-		{log: logOf(cp), cwd: "/w", began: now - 49*sec, wrote: now - 49*sec, forkedFrom: src},
-	}
-	l := convoLocated{procs: []convoProc{orig, fork}, cands: cands, hostNow: now, forkOf: map[int64]string{8: src}}
-	srv := &Server{}
-	p := l.procs[1]
-	if took, sure, _ := srv.daemonLog(&p, l); !took || !sure || p.sid != cp {
-		t.Fatalf("the copy: took %v sure %v sid %q", took, sure, p.sid)
-	}
-	o := l.procs[0]
-	if took, sure, _ := srv.daemonLog(&o, l); !took || sure || o.sid != src {
-		t.Fatalf("the original: took %v sure %v sid %q", took, sure, o.sid)
-	}
-	// (The copy again, after the original's look: still its own.)
-	p = l.procs[1]
-	if _, sure, _ := srv.daemonLog(&p, l); !sure || p.sid != cp {
-		t.Fatalf("the copy again: sure %v sid %q", sure, p.sid)
-	}
-	// Another conversation begun there since the copy started: not told by this.
-	srv2 := &Server{}
-	l2 := l
-	l2.cands = append(append([]convoCand{}, cands...), convoCand{log: logOf(third), cwd: "/w", began: now - 20*sec, wrote: now - 5*sec})
-	p = l2.procs[1]
-	if _, sure, _ := srv2.daemonLog(&p, l2); sure {
-		t.Fatalf("told for sure with another begun since: %q", p.sid)
-	}
-}
-
 // A Codex's command line, as the host scripts read it: its subcommand, a
 // prompt not taken for one, and what a copy is a copy of.
 func TestCodexArgsAwk(t *testing.T) {
@@ -668,83 +625,6 @@ func TestCodexArgsAwk(t *testing.T) {
 	}
 }
 
-// Two Codexes copying one original in one folder: each its own copy, made
-// after it started; started together, neither (review fork-2); a copy rewound since, its segment's head naming no
-// original: still its own, the segment written last (review fork-4).
-func TestDaemonLogForkTwoAndRewound(t *testing.T) {
-	const sec = 1000
-	now := int64(1_700_000_000_000)
-	src, c1, c2, w := "01a17600-0000-7000-8000-0000000000e1", "01a17600-0000-7000-8000-0000000000e2", "01a17600-0000-7000-8000-0000000000e3", "01a17600-0000-7000-8000-0000000000e4"
-	logOf := func(name string) string {
-		return "/home/u/.codex/sessions/2026/10/26/rollout-2026-10-26T10-00-00-" + name + ".jsonl"
-	}
-	f1 := convoProc{pid: 8, start: 80, agent: "codex", cwd: "/w", started: now - 60*sec}
-	f2 := convoProc{pid: 9, start: 90, agent: "codex", cwd: "/w", started: now - 30*sec}
-	two := convoLocated{procs: []convoProc{f1, f2}, hostNow: now, forkOf: map[int64]string{8: src, 9: src}, cands: []convoCand{
-		{log: logOf(src), cwd: "/w", began: now - 600*sec, wrote: now - 100*sec},
-		{log: logOf(c1), cwd: "/w", began: now - 59*sec, wrote: now - 59*sec, forkedFrom: src},
-		{log: logOf(c2), cwd: "/w", began: now - 29*sec, wrote: now - 29*sec, forkedFrom: src},
-	}}
-	// (Started half a minute apart: each its own copy, made just after it started.)
-	for i, want := range []string{c1, c2} {
-		p := two.procs[i]
-		if _, sure, _ := (&Server{}).daemonLog(&p, two); !sure || p.sid != want {
-			t.Errorf("%d: sure %v sid %q, want %q", p.pid, sure, p.sid, want)
-		}
-	}
-	// (Started at the same moment: which made which is not told.)
-	same := two
-	same.procs = []convoProc{f1, {pid: 9, start: 90, agent: "codex", cwd: "/w", started: now - 60*sec + 500}}
-	same.cands = []convoCand{two.cands[0], two.cands[1], {log: logOf(c2), cwd: "/w", began: now - 58*sec, wrote: now - 58*sec, forkedFrom: src}}
-	for i := range same.procs {
-		p := same.procs[i]
-		if _, sure, _ := (&Server{}).daemonLog(&p, same); sure {
-			t.Errorf("%d told for sure, two started together: %q", p.pid, p.sid)
-		}
-	}
-	// (The first slow to begin its copy, after the second started: which made which, not told — review fork2-6.)
-	slow := two
-	slow.procs = []convoProc{f1, {pid: 9, start: 90, agent: "codex", cwd: "/w", started: now - 57*sec}}
-	slow.cands = []convoCand{two.cands[0], {log: logOf(c1), cwd: "/w", began: now - 55*sec, wrote: now - 55*sec, forkedFrom: src}, {log: logOf(c2), cwd: "/w", began: now - 54*sec, wrote: now - 54*sec, forkedFrom: src}}
-	for i := range slow.procs {
-		p := slow.procs[i]
-		if _, sure, _ := (&Server{}).daemonLog(&p, slow); sure {
-			t.Errorf("%d told for sure, its copy begun after the other started: %q", p.pid, p.sid)
-		}
-	}
-	one := convoLocated{procs: []convoProc{f1}, hostNow: now, forkOf: map[int64]string{8: src}, cands: []convoCand{
-		{log: logOf(src), cwd: "/w", began: now - 600*sec, wrote: now - 100*sec},
-		{log: logOf(c1), cwd: "/w", began: now - 59*sec, wrote: now - 50*sec, forkedFrom: src},
-		{log: logOf(c1 + "_" + w), cwd: "/w", began: now - 40*sec, wrote: now - 5*sec},
-	}}
-	p := one.procs[0]
-	if _, sure, _ := (&Server{}).daemonLog(&p, one); !sure || p.sid != c1 || p.log != logOf(c1+"_"+w) {
-		t.Errorf("rewound copy: sure %v sid %q log %q", sure, p.sid, p.log)
-	}
-}
-
-// What the original said after the copy was made: only what it had not said before.
-func TestForkSaidAfter(t *testing.T) {
-	line := func(role, text string) string {
-		if role == "user" {
-			return `{"timestamp":"2026-11-15T10:00:00Z","type":"event_msg","payload":{"type":"user_message","message":"` + text + `"}}` + "\n"
-		}
-		return `{"timestamp":"2026-11-15T10:00:00Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"` + text + `"}]}}` + "\n"
-	}
-	pre := line("user", "before the fork please") + line("agent", "the same old answer here")
-	post := line("user", "the original goes on alone") + line("agent", "the same old answer here")
-	got := forkSaidAfter(pre, post)
-	if len(got) != 1 || !strings.Contains(got[0], "original") {
-		t.Errorf("said after: %q", got)
-	}
-	// (A long one: its start and its end, as a screen shows only part of it.)
-	long := strings.Repeat("word ", 30) + "the very end of it"
-	got = forkSaidAfter(pre, line("agent", long)+line("user", "and a later question here"))
-	if len(got) < 2 || !slices.ContainsFunc(got, func(w string) bool { return strings.HasSuffix(w, "theveryendofit") }) {
-		t.Errorf("long: %q", got)
-	}
-}
-
 // A Codex started at an old conversation ("codex resume <id>"), its log its
 // daemon's: that one is its own (a guess, for its screen to confirm), not
 // left out for having begun before it started; one begun in it since and
@@ -762,12 +642,17 @@ func TestDaemonLogResume(t *testing.T) {
 		{log: logOf(other), cwd: "/w", began: now - 7200*sec, wrote: now - 5*sec},
 	}}
 	q := l.procs[0]
-	if took, sure, _ := (&Server{}).daemonLog(&q, l); !took || sure || q.sid != old {
-		t.Fatalf("resumed: took %v sure %v sid %q", took, sure, q.sid)
+	srv := &Server{}
+	if took, _ := srv.daemonLog(&q, l); !took || q.sid != old {
+		t.Fatalf("resumed: took %v sid %q", took, q.sid)
+	}
+	// (Not claimed by its argument: its screen claims it — review fork3-6.)
+	if srv.convoClaimed.owns(old, q.id()) {
+		t.Fatal("claimed by its argument alone")
 	}
 	l.cands = append(l.cands, convoCand{log: logOf(fresh), cwd: "/w", began: now - 4*sec, wrote: now - 1*sec})
 	q = l.procs[0]
-	if _, _, _ = (&Server{}).daemonLog(&q, l); q.sid != fresh {
+	if _, _ = (&Server{}).daemonLog(&q, l); q.sid != fresh {
 		t.Fatalf("begun anew in it: sid %q", q.sid)
 	}
 }

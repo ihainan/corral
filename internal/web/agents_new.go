@@ -252,12 +252,9 @@ func (s *Server) newAgent(ctx context.Context, w http.ResponseWriter, sess *term
 			return
 		}
 		out2 := map[string]any{"tmux": name}
-		if kind == "codex" && how.back > 0 {
-			rewound := false
-			if tp, ok := tmuxRewindPaneOf(ctx, sess, name); ok {
-				rewound = codexRewind(ctx, tp, how.back, how.atText, how.clear)
-			}
-			out2["rewound"] = rewound
+		if kind == "codex" && how.fork {
+			tp, ok := tmuxMadePane(sess, string(out))
+			s.codexForkAfter(ctx, out2, tp, ok, how, label, dir)
 		}
 		writeJSON(w, http.StatusOK, out2)
 		return
@@ -295,8 +292,8 @@ func (s *Server) newAgent(ctx context.Context, w http.ResponseWriter, sess *term
 		writeErrorExtra(w, http.StatusBadGateway, "unknown", why, map[string]any{"workspace": ws, "pane": pane})
 	default:
 		out := map[string]any{"workspace": ws, "pane": pane}
-		if kind == "codex" && how.back > 0 {
-			out["rewound"] = codexRewind(ctx, herdrRewindPane{sess: sess, socket: socket, pane: pane}, how.back, how.atText, how.clear)
+		if kind == "codex" && how.fork {
+			s.codexForkAfter(ctx, out, herdrRewindPane{sess: sess, socket: socket, pane: pane}, true, how, label, dir)
 		}
 		writeJSON(w, http.StatusOK, out)
 	}
@@ -364,7 +361,7 @@ func agentTmuxCmd(name, dir, kind, home string, how agentStart) string {
 	inner := `exec "${SHELL:-/bin/sh}" -lc ` + q(run)
 	t := q("=" + name + ":") // (that session exactly, its window: options and panes are a window's)
 	return `PATH="$HOME/.local/bin:$HOME/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
-tmux new-session -d -s ` + q(name) + ` -c ` + q(dir) + ` ` + q(inner) + ` \; set-option -t ` + t + ` remain-on-exit on 2>&1 || exit 1
+made=$(tmux new-session -d -P -F '#{pane_id} #{pane_pid}' -s ` + q(name) + ` -c ` + q(dir) + ` ` + q(inner) + ` \; set-option -t ` + t + ` remain-on-exit on 2>&1) || { printf '%s\n' "$made"; exit 1; }
 sh=$(basename "${SHELL:-/bin/sh}")
 dead() {
   [ "$(tmux list-panes -t ` + t + ` -F '#{pane_dead}' 2>/dev/null | head -n 1)" != 0 ] || return 1
@@ -384,6 +381,10 @@ while [ $i -lt 20 ]; do
 done
 sleep 1.5; dead
 tmux set-option -u -t ` + t + ` remain-on-exit 2>/dev/null
+# (The pane it was made with, as tmux said on making it: the one the agent
+# runs in, whichever is active there later.)
+set -- $made
+[ $# -eq 2 ] && echo "pane $1 $2"
 echo started`
 }
 

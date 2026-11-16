@@ -82,7 +82,7 @@ esac`)
 	}
 	b, _ := os.ReadFile(logf)
 	got := string(b)
-	for _, want := range []string{"tmux:new-session\ntmux:-d\ntmux:-s\ntmux:fix-tests-abcde\ntmux:-c\ntmux:" + dir + "\n", "shell:-lc\n", "codex:resume\ncodex:01a1df42-8f07-7d43-b8b7-c6bad45f5528\n", "tmux:remain-on-exit\n", "home:/w/codex home\n"} {
+	for _, want := range []string{"tmux:new-session\ntmux:-d\ntmux:-P\ntmux:-F\ntmux:#{pane_id} #{pane_pid}\ntmux:-s\ntmux:fix-tests-abcde\ntmux:-c\ntmux:" + dir + "\n", "shell:-lc\n", "codex:resume\ncodex:01a1df42-8f07-7d43-b8b7-c6bad45f5528\n", "tmux:remain-on-exit\n", "home:/w/codex home\n"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("%q not in:\n%s", want, got)
 		}

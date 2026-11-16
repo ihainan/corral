@@ -2,6 +2,8 @@ package web
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"log/slog"
 	"strings"
@@ -27,7 +29,9 @@ import (
 // enter) and its screen read.
 type rewindPane interface {
 	press(ctx context.Context, key string) error
+	typeText(ctx context.Context, text string) error // (as typed: no Enter)
 	screen(ctx context.Context) (string, error)
+	title(ctx context.Context) (string, error) // (the terminal's title, as the agent set it)
 }
 
 // tmuxRewindPane: a tmux session of its own, the copy in its one pane —
@@ -40,14 +44,17 @@ type tmuxRewindPane struct {
 	panePID string
 }
 
-// tmuxRewindPaneOf: the session's pane and its process now.
-func tmuxRewindPaneOf(ctx context.Context, sess *term.Session, name string) (tmuxRewindPane, bool) {
-	out, err := sshx.Output(ctx, sess.Client(), "tmux display-message -p -t "+sshx.QuoteShell("="+name+":")+" '#{pane_id} #{pane_pid} #{pane_dead}'", 1<<10)
-	f := strings.Fields(string(out))
-	if err != nil || len(f) != 3 || !tmuxPane.MatchString(f[0]) || !isDigits(f[1]) || f[2] != "0" {
-		return tmuxRewindPane{}, false
+// tmuxMadePane: the pane a new tmux session was made with, as
+// agentTmuxCmd's output says it ("pane %N PID", as tmux said it on making
+// it — not whichever pane is active there later: review fork3-4).
+func tmuxMadePane(sess *term.Session, out string) (tmuxRewindPane, bool) {
+	for _, line := range strings.Split(out, "\n") {
+		f := strings.Fields(line)
+		if len(f) == 3 && f[0] == "pane" && tmuxPane.MatchString(f[1]) && isDigits(f[2]) {
+			return tmuxRewindPane{sess: sess, pane: f[1], panePID: f[2]}, true
+		}
 	}
-	return tmuxRewindPane{sess: sess, pane: f[0], panePID: f[1]}, true
+	return tmuxRewindPane{}, false
 }
 
 // tmuxRewindCheck: the pane is still the one found, its process alive in it.
@@ -62,6 +69,16 @@ func (p tmuxRewindPane) press(ctx context.Context, key string) error {
 	}
 	_, err := sshx.Output(ctx, p.sess.Client(), p.check()+"tmux send-keys -t "+sshx.QuoteShell(p.pane)+" "+sshx.QuoteShell(k), 1<<10)
 	return err
+}
+
+func (p tmuxRewindPane) typeText(ctx context.Context, text string) error {
+	_, err := sshx.Output(ctx, p.sess.Client(), p.check()+"tmux send-keys -l -t "+sshx.QuoteShell(p.pane)+" -- "+sshx.QuoteShell(text), 1<<10)
+	return err
+}
+
+func (p tmuxRewindPane) title(ctx context.Context) (string, error) {
+	out, err := sshx.Output(ctx, p.sess.Client(), p.check()+"tmux -u display-message -p -t "+sshx.QuoteShell(p.pane)+" '#{pane_title}'", 4<<10)
+	return strings.TrimRight(string(out), "\n"), err
 }
 
 func (p tmuxRewindPane) screen(ctx context.Context) (string, error) {
@@ -89,6 +106,27 @@ func (p herdrRewindPane) with(ctx context.Context, f func(c *herdr.Client) error
 
 func (p herdrRewindPane) press(ctx context.Context, key string) error {
 	return p.with(ctx, func(c *herdr.Client) error { return c.SendKeys(ctx, p.pane, []string{key}) })
+}
+
+func (p herdrRewindPane) typeText(ctx context.Context, text string) error {
+	return p.with(ctx, func(c *herdr.Client) error { return c.SendInput(ctx, p.pane, text, nil) })
+}
+
+func (p herdrRewindPane) title(ctx context.Context) (t string, err error) {
+	err = p.with(ctx, func(c *herdr.Client) error {
+		snap, err := c.Snapshot(ctx)
+		if err != nil {
+			return err
+		}
+		for _, pn := range snap.Panes {
+			if pn.ID == p.pane {
+				t = pn.Title
+				return nil
+			}
+		}
+		return errors.New("no such pane")
+	})
+	return t, err
 }
 
 func (p herdrRewindPane) screen(ctx context.Context) (s string, err error) {
@@ -155,11 +193,7 @@ func codexRewindDo(ctx context.Context, p rewindPane, back int, at string, clear
 	want = want[:min(len(want), 40)]
 	// (Its words back in its input, it at rest — words there, not its
 	// placeholder, which a message of a few of its letters would match.)
-	if !rewindWait(ctx, p, 5*time.Second, func(s string) bool {
-		area, _, _, ok := codexInputArea(s)
-		box := strings.TrimPrefix(squeeze(area), "›")
-		return ok && len(want) > 0 && !strings.Contains(s, "Browsing transcript") && errors.Is(codexIdleInput(s), errDraft) && !codexEmptyInput(area) && strings.HasPrefix(box, string(want))
-	}) {
+	if !rewindWait(ctx, p, 5*time.Second, func(s string) bool { return codexInputHolds(s, want) }) {
 		return "not seen in its input"
 	}
 	if !clear {
@@ -200,4 +234,103 @@ func sleepCtx(ctx context.Context, d time.Duration) {
 	case <-ctx.Done():
 	case <-t.C:
 	}
+}
+
+// A copy started from the page is named — "/rename <name>", typed in its own
+// terminal as the person would — a name of its own: then its pane's title
+// shows that name while it is at that conversation (and not once it has
+// gone to another, its original say), which tells it, as a named Codex is
+// told in herdr and tmux alike (codexPressSure). Till named it shows its
+// original's name, copied with it, and no word on which it is at.
+
+// codexForkName: the name given a copy, from the fork's label.
+func codexForkName(label string) string {
+	b := make([]byte, 2)
+	_, _ = rand.Read(b)
+	label = strings.Join(strings.Fields(label), " ")
+	if label == "" {
+		label = "fork"
+	}
+	return label + " " + hex.EncodeToString(b)
+}
+
+// codexNameCopy names the copy in p (its folder cwd) name: true once its pane's
+// title is seen showing it. Typed only with Codex at rest, its input empty.
+func codexNameCopy(ctx context.Context, p rewindPane, name, cwd string) bool {
+	why := codexNameDo(ctx, p, name, cwd)
+	if why != "" {
+		slog.Warn("codex fork: not named", "step", why)
+	}
+	return why == ""
+}
+
+func codexNameDo(ctx context.Context, p rewindPane, name, cwd string) string {
+	if !rewindWait(ctx, p, 15*time.Second, func(s string) bool { return codexIdleInput(s) == nil && !strings.Contains(s, "Browsing transcript") }) {
+		return "not ready"
+	}
+	if err := p.typeText(ctx, "/rename "+name); err != nil {
+		return "typed: " + err.Error()
+	}
+	// (What was typed seen whole in its input, nothing else there, before Enter.)
+	if !rewindWait(ctx, p, 3*time.Second, func(s string) bool {
+		area, _, _, ok := codexInputArea(s)
+		return ok && squeeze(area) == squeeze("/rename "+name)
+	}) {
+		return "not seen typed"
+	}
+	if err := p.press(ctx, "enter"); err != nil {
+		return "enter: " + err.Error()
+	}
+	until := time.Now().Add(5 * time.Second)
+	for {
+		if t, err := p.title(ctx); err == nil {
+			if thread, bare := codexTitleParts("codex", t, cwd); !bare && thread == name {
+				return ""
+			}
+		}
+		if time.Now().After(until) || ctx.Err() != nil {
+			return "title not seen"
+		}
+		sleepCtx(ctx, codexRewindStep)
+	}
+}
+
+// codexForkAfter: a Codex copy just started from the page (in p, if found):
+// rewound where asked (out "rewound"), then named (out "named") — so that
+// its chat can tell it; the folder dir, a name from label.
+func (s *Server) codexForkAfter(ctx context.Context, out map[string]any, p rewindPane, found bool, how agentStart, label, dir string) {
+	if !found {
+		if how.back > 0 {
+			out["rewound"] = false
+		}
+		out["named"] = false
+		return
+	}
+	if how.back > 0 {
+		out["rewound"] = codexRewind(ctx, p, how.back, how.atText, how.clear)
+	}
+	// (Not where its rewind left words in its input — a picture's, too long
+	// for the page's —: nothing typed over them.)
+	if how.back > 0 && !how.clear {
+		out["named"] = false
+		return
+	}
+	out["named"] = codexNameCopy(ctx, p, codexForkName(label), dir)
+}
+
+// codexInputHolds: Codex at rest, its input in front holding words that
+// begin as want does (letters, spaces squeezed out) — words, not its
+// placeholder, which a message of a few of its letters would match; its
+// footer gone or not, as words there hide its hints and a default status
+// line has none (review fork3-9: codexIdleInput takes no footer for no
+// screen of its).
+func codexInputHolds(s string, want []rune) bool {
+	if len(want) == 0 || strings.Contains(s, "Browsing transcript") || strings.Contains(s, "esc to interrupt") {
+		return false
+	}
+	area, _, _, ok := codexInputArea(s)
+	if !ok || codexEmptyInput(area) {
+		return false
+	}
+	return strings.HasPrefix(strings.TrimPrefix(squeeze(area), "›"), string(want))
 }

@@ -2761,14 +2761,16 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
         source={forking.source}
         at={forking.at}
         rewind={forking.rewind}
-        rewindNow={forking.rewind ? () => codexRewindOf(forking.rewind!.at) : undefined}
+        rewindNow={forking.rewind ? () => (convo.bind?.session === forking.source ? codexRewindOf(forking.rewind!.at) : undefined) : undefined}
         dir={forking.dir}
         name={forking.name}
         check={forking.at ? undefined : stillAtRest(forking.key)}
-        onDone={(pane, first, opened, rewound) => {
+        onDone={(pane, first, opened, rewound, named) => {
           const f = forking
           setForking(null)
           onStarted(opened ?? f.s, pane, first)
+          // (A Codex's copy is told by its name: one not given it may not be shown here.)
+          if (f.kind === 'codex' && named === false && rewound !== false) toast(t('fork.notNamed'), true)
           if (f.rewind) {
             if (rewound === false) toast(t('fork.notRewound'), true)
             else if (f.rewind.alike) toast(t('fork.rewoundAlike'), true)

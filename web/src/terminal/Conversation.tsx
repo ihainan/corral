@@ -1559,7 +1559,8 @@ export function ConversationView({
     const next = (e: ConvoEntry) => {
       const all = entriesRef.current
       const i = all.findIndex((x) => x.seq === e.seq)
-      return i < 0 ? null : all.slice(i + 1).find((x) => x.role === 'user' && !x.mid && x.id)?.id
+      // (Not one taken back: the conversation no longer has it — review fork3-10.)
+      return i < 0 ? null : all.slice(i + 1).find((x) => x.role === 'user' && !x.mid && !x.gone && x.id)?.id
     }
     return {
       go: (e: ConvoEntry) => {
