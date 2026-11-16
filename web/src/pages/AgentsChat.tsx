@@ -2473,7 +2473,8 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     const head = (x: string) => x.split('\n', 1)[0].replace(/\s+/g, '').slice(0, 40)
     // (Or one beginning with it, or it with that one — "continue", "continue please" — review fork4b-3.)
     const mine = head(text)
-    const alike = users.filter((x) => x !== all[i] && (head(words(x)).startsWith(mine) || mine.startsWith(head(words(x))))).length > 0
+    // (One of pictures alone begins with nothing: not alike any.)
+    const alike = users.filter((x) => x !== all[i] && head(words(x)) !== '' && (head(words(x)).startsWith(mine) || mine.startsWith(head(words(x))))).length > 0
     // (Taken to the page's input only whole: one with a picture, or too long for it, left in the copy's — review fork2-10.)
     const clear = !all[i].parts.some((p) => p.kind === 'image') && text.length <= 4000
     return back > 0 && text ? { back, text: text.slice(0, 4000), alike, clear, at } : undefined
