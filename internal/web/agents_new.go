@@ -254,12 +254,8 @@ func (s *Server) newAgent(ctx context.Context, w http.ResponseWriter, sess *term
 		out2 := map[string]any{"tmux": name}
 		if kind == "codex" && how.fork {
 			tp, ok := tmuxMadePane(sess, string(out))
-			// (The pane's own process is the Codex itself — its login shell
-			// exec's it —: that one started as the copy, review fork6-1.)
-			if ok {
-				pid, _ := strconv.ParseInt(tp.panePID, 10, 64)
-				ok = codexForkOfPid(ctx, sess, pid, how.resume)
-			}
+			// (Its Codex, started as the copy — review fork6-1, fork7-2.)
+			ok = ok && tmuxCopyCodex(ctx, &tp, how.resume)
 			s.codexForkAfter(ctx, out2, tp, ok, how, label, dir)
 		}
 		writeJSON(w, http.StatusOK, out2)

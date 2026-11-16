@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"log/slog"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -43,6 +44,52 @@ type tmuxRewindPane struct {
 	sess    *term.Session
 	pane    string // (%N)
 	panePID string
+	// (Its Codex: the pane's process itself — its login shell exec's it — or,
+	// where that is npm's node, which keeps itself and starts Codex under it
+	// on a Node without execve, its one child named codex: by pid and start,
+	// each key only while it is that one — review fork7-2.)
+	cxPID, cxStart string
+}
+
+// tmuxCopyCodexSh: the script printing "<pid> <start> <fork argument>" of
+// the Codex of the pane whose process is pp (see tmuxRewindPane).
+func tmuxCopyCodexSh(pp string) string {
+	return `pp=` + sshx.QuoteShell(pp) + `
+start_of() { s=$(tr '\n' ' ' <"/proc/$1/stat" 2>/dev/null) || return 1; r=${s##*) }; printf '%s' "$r" | cut -d' ' -f20; }
+pid=
+if [ "$(head -c 16 "/proc/$pp/comm" 2>/dev/null)" = codex ]; then pid=$pp
+else
+  for c in $(cat /proc/$pp/task/*/children 2>/dev/null); do
+    [ "$(head -c 16 "/proc/$c/comm" 2>/dev/null)" = codex ] || continue
+    [ -z "$pid" ] || exit 3 # (two: not guessed between)
+    pid=$c
+  done
+fi
+[ -n "$pid" ] || exit 3
+st=$(start_of "$pid") || exit 3
+printf '%s %s ' "$pid" "$st"
+tr '\0' '\001' <"/proc/$pid/cmdline" 2>/dev/null | awk -v want=fork '` + codexArgsAwk + `'`
+}
+
+// tmuxCopyCodex: the pane's Codex (see tmuxRewindPane), started as the copy
+// of src ("codex fork <src>"): set in p; false where not found so.
+func tmuxCopyCodex(ctx context.Context, p *tmuxRewindPane, src string) bool {
+	cmd := tmuxCopyCodexSh(p.panePID)
+	var out []byte
+	var err error
+	for i := 0; i < 10 && ctx.Err() == nil; i++ {
+		out, err = rewindExec(ctx, p.sess, "sh -c "+sshx.QuoteShell(cmd), 256)
+		if err == nil {
+			break
+		}
+		sleepCtx(ctx, 500*time.Millisecond) // (node not yet started it)
+	}
+	f := strings.Fields(string(out))
+	if err != nil || len(f) != 3 || !isDigits(f[0]) || !isDigits(f[1]) || src == "" || !strings.EqualFold(f[2], src) {
+		return false
+	}
+	p.cxPID, p.cxStart = f[0], f[1]
+	return true
 }
 
 // tmuxMadePane: the pane a new tmux session was made with, as
@@ -61,7 +108,12 @@ func tmuxMadePane(sess *term.Session, out string) (tmuxRewindPane, bool) {
 // tmuxRewindCheck: the pane is still the one found, its process alive in it.
 // (Run by sh, whatever the account's shell: zsh does not split words — review fork4b-4.)
 func (p tmuxRewindPane) check() string {
-	return `[ "$(tmux display-message -p -t ` + sshx.QuoteShell(p.pane) + ` '#{pane_pid} #{pane_dead}' 2>/dev/null)" = ` + sshx.QuoteShell(p.panePID+" 0") + ` ] || exit 3; `
+	c := `[ "$(tmux display-message -p -t ` + sshx.QuoteShell(p.pane) + ` '#{pane_pid} #{pane_dead}' 2>/dev/null)" = ` + sshx.QuoteShell(p.panePID+" 0") + ` ] || exit 3; `
+	if p.cxPID != "" {
+		// (And its Codex still that one: its start — review fork7-2.)
+		c += `s=$(tr '\n' ' ' <` + sshx.QuoteShell("/proc/"+p.cxPID+"/stat") + ` 2>/dev/null) || exit 3; r=${s##*) }; [ "$(printf '%s' "$r" | cut -d' ' -f20)" = ` + sshx.QuoteShell(p.cxStart) + ` ] || exit 3; `
+	}
+	return c
 }
 
 func (p tmuxRewindPane) press(ctx context.Context, key string) error {
@@ -69,22 +121,22 @@ func (p tmuxRewindPane) press(ctx context.Context, key string) error {
 	if key == "ctrl+c" {
 		k = "C-c"
 	}
-	_, err := sshx.Output(ctx, p.sess.Client(), p.check()+"tmux send-keys -t "+sshx.QuoteShell(p.pane)+" "+sshx.QuoteShell(k), 1<<10)
-	return err
+	_, err := rewindExec(ctx, p.sess, p.check()+"tmux send-keys -t "+sshx.QuoteShell(p.pane)+" "+sshx.QuoteShell(k), 1<<10)
+	return notSent(err)
 }
 
 func (p tmuxRewindPane) typeText(ctx context.Context, text string) error {
-	_, err := sshx.Output(ctx, p.sess.Client(), p.check()+"tmux send-keys -l -t "+sshx.QuoteShell(p.pane)+" -- "+sshx.QuoteShell(text), 1<<10)
-	return err
+	_, err := rewindExec(ctx, p.sess, p.check()+"tmux send-keys -l -t "+sshx.QuoteShell(p.pane)+" -- "+sshx.QuoteShell(text), 1<<10)
+	return notSent(err)
 }
 
 func (p tmuxRewindPane) title(ctx context.Context) (string, error) {
-	out, err := sshx.Output(ctx, p.sess.Client(), p.check()+"tmux -u display-message -p -t "+sshx.QuoteShell(p.pane)+" '#{pane_title}'", 4<<10)
+	out, err := rewindExec(ctx, p.sess, p.check()+"tmux -u display-message -p -t "+sshx.QuoteShell(p.pane)+" '#{pane_title}'", 4<<10)
 	return strings.TrimRight(string(out), "\n"), err
 }
 
 func (p tmuxRewindPane) screen(ctx context.Context) (string, error) {
-	out, err := sshx.Output(ctx, p.sess.Client(), p.check()+"tmux -u capture-pane -p -t "+sshx.QuoteShell(p.pane), 256<<10)
+	out, err := rewindExec(ctx, p.sess, p.check()+"tmux -u capture-pane -p -t "+sshx.QuoteShell(p.pane), 256<<10)
 	return string(out), err
 }
 
@@ -122,22 +174,16 @@ func (s *Server) herdrRewindPaneOf(ctx context.Context, sess *term.Session, sock
 	return herdrRewindPane{sess: sess, socket: socket, pane: pane, pid: c.PID, start: c.Start}, true
 }
 
-// codexForkOf: process pid (of that start; 0: any) was started "codex
-// fork <src>".
+// codexForkOf: process pid (of that start) was started "codex fork <src>".
 func codexForkOf(ctx context.Context, sess *term.Session, pid, start int64, src string) bool {
 	cmd := `pid=` + strconv.FormatInt(pid, 10) + ` start=` + strconv.FormatInt(start, 10) + `
 stat=$(tr '\n' ' ' <"/proc/$pid/stat" 2>/dev/null) || exit 3
 rest=${stat##*) }
-[ "$start" = 0 ] || [ "$(printf '%s' "$rest" | cut -d' ' -f20)" = "$start" ] || exit 3
+[ "$(printf '%s' "$rest" | cut -d' ' -f20)" = "$start" ] || exit 3
 [ "$(head -c 16 "/proc/$pid/comm" 2>/dev/null)" = codex ] || exit 3
 tr '\0' '\001' <"/proc/$pid/cmdline" 2>/dev/null | awk -v want=fork '` + codexArgsAwk + `'`
 	out, err := sshx.Output(ctx, sess.Client(), "sh -c "+sshx.QuoteShell(cmd), 128)
 	return err == nil && src != "" && strings.EqualFold(strings.TrimSpace(string(out)), src)
-}
-
-// codexForkOfPid: codexForkOf of the process pid, whatever its start.
-func codexForkOfPid(ctx context.Context, sess *term.Session, pid int64, src string) bool {
-	return pid > 0 && codexForkOf(ctx, sess, pid, 0, src)
 }
 
 // sendSh: a command that presses (send-keys) or types (send-text) arg in
@@ -158,12 +204,31 @@ HERDR_SOCKET_PATH=` + q(p.socket) + ` herdr pane ` + how + ` "$pane" ` + q(arg) 
 echo ok`
 }
 
+// rewindExec: cmd on the host, waiting for a side operation's slot rather
+// than refused at once where the connection is busy (the page reading the
+// while): ErrBusy where it still is — then nothing ran.
+func rewindExec(ctx context.Context, sess *term.Session, cmd string, limit int) ([]byte, error) {
+	res, err := sshx.Exec(ctx, sess.Client(), cmd, limit, sshx.ExecOptions{AwaitSlot: 5 * time.Second})
+	return res.Out, err
+}
+
+// errNotSent: a key not sent for sure — the check refused it (3) or herdr
+// did (6) — as against one whose fate is not known (the host not answering):
+// only the first may be pressed again (review fork7-4).
+var errNotSent = errors.New("not sent: not the Codex it was, or herdr refused it")
+
 func (p herdrRewindPane) send(ctx context.Context, how, arg string) error {
-	out, err := sshx.Output(ctx, p.sess.Client(), "sh -c "+sshx.QuoteShell(p.sendSh(how, arg)), 64)
-	if err != nil || strings.TrimSpace(string(out)) != "ok" {
-		return errors.New("not sent: not the Codex it was, or herdr refused it")
+	out, err := rewindExec(ctx, p.sess, "sh -c "+sshx.QuoteShell(p.sendSh(how, arg)), 64)
+	var exitErr *sshx.ExitError
+	switch {
+	case err == nil && strings.TrimSpace(string(out)) == "ok":
+		return nil
+	case errors.As(err, &exitErr) && (exitErr.Status == 3 || exitErr.Status == 6), errors.Is(err, sshx.ErrBusy):
+		return errNotSent // (refused before anything was sent: the check, herdr, or the connection busy)
+	case err != nil:
+		return err
 	}
-	return nil
+	return errors.New("not known whether it was sent")
 }
 
 func (p herdrRewindPane) with(ctx context.Context, f func(c *herdr.Client) error) error {
@@ -375,9 +440,12 @@ func codexNameDo(ctx context.Context, p rewindPane, name, cwd string) string {
 		return "not seen typed"
 	}
 	if err := p.press(ctx, "enter"); err != nil {
-		// (Refused at once — herdr still taking the words before it, once in
-		// some runs —: pressed again only where they are seen still there,
-		// alone, Codex at rest: not twice on a screen it went on from.)
+		// (Refused at once, for sure — herdr still taking the words before
+		// it, once in some runs —: pressed again only where they are seen
+		// still there, alone, Codex at rest. Not where it may have gone.)
+		if !errors.Is(err, errNotSent) {
+			return "enter: " + err.Error()
+		}
 		sleepCtx(ctx, codexRewindStep)
 		if !rewindWait(ctx, p, 2*time.Second, held) {
 			return "enter: " + err.Error()
@@ -445,12 +513,22 @@ func codexHoldsOnly(s, typed, status string) bool {
 	if strings.Contains(s, "esc to interrupt") || strings.Contains(s, "Browsing transcript") {
 		return false
 	}
-	area, foot, known, ok := codexInputArea(s)
+	area, foot, _, ok := codexInputArea(s)
 	if !ok || squeeze(area) != squeeze(typed) {
 		return false
 	}
-	return foot == "" || known || (status != "" && strings.TrimSpace(foot) == status)
+	// (Under it nothing, or its status line as it was at rest — not any line
+	// that looks like a footer, which words of a draft may: review fork7-1 —
+	// its figures as they are now: a context's percentage, a limit's, may
+	// have moved since — fork7-3.)
+	return foot == "" || (status != "" && codexDigitless(strings.TrimSpace(foot)) == codexDigitless(status))
 }
+
+// codexDigitless: s with its runs of digits (and what joins them: "1.5",
+// "12:30") as one mark: the same status line whatever its figures say now.
+var codexDigits = regexp.MustCompile(`[0-9]+(?:[.,:][0-9]+)*`)
+
+func codexDigitless(s string) string { return codexDigits.ReplaceAllString(s, "#") }
 
 // codexRestStatus: of a screen of Codex at rest, its input empty, the first
 // line of its footer — its status line, where it has one (its hints, "? for
@@ -465,4 +543,14 @@ func codexRestStatus(s string) string {
 		return ""
 	}
 	return first
+}
+
+// notSent: err as errNotSent where nothing was sent for sure — the check
+// refused it (3), or the connection was busy.
+func notSent(err error) error {
+	var exitErr *sshx.ExitError
+	if errors.As(err, &exitErr) && exitErr.Status == 3 || errors.Is(err, sshx.ErrBusy) {
+		return errNotSent
+	}
+	return err
 }

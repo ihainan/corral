@@ -2,9 +2,12 @@ package web
 
 import (
 	"os"
+	"os/exec"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Words back in Codex's input after a rewind, as real screens of several
@@ -65,5 +68,71 @@ func TestCodexHoldsOnly(t *testing.T) {
 	}
 	if codexHoldsOnly("› "+typed+"\n\n  extra draft\n", typed, "GPT-6.1-Sol high · ~/cxreal/proj") {
 		t.Error("a draft's line taken for the status line it was not")
+	}
+	// (A line like a footer, with no status line at rest: a draft's — review fork7-1.)
+	if codexHoldsOnly("› "+typed+"\n\n  Context 50% left\n", typed, "") {
+		t.Error("a draft's line like a footer taken for one")
+	}
+	// (Its figures moved since: the same status line — review fork7-3.)
+	if !codexHoldsOnly("› "+typed+"\n\n  gpt · Context 48% left · 5h 12% used\n", typed, "gpt · Context 50% left · 5h 11% used") {
+		t.Error("its status line, its figures moved, not taken")
+	}
+}
+
+// The copy's Codex in its tmux pane: the pane's process itself, or — npm's
+// node keeping itself on a Node without execve — its one child named codex
+// (review fork7-2); its fork argument read.
+func TestTmuxCopyCodexSh(t *testing.T) {
+	if _, err := os.Stat("/proc/self/task"); err != nil {
+		t.Skip("no /proc")
+	}
+	dir := t.TempDir()
+	codex := dir + "/codex"
+	// (A program named codex: sh copied, so its comm says codex.)
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("no sh")
+	}
+	b, err := os.ReadFile(sh)
+	if err != nil {
+		t.Skip(err)
+	}
+	if err := os.WriteFile(codex, b, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const id = "01a1e301-0b3e-7b40-8617-af7d350a7eb7"
+	run := func(pp int) string {
+		out, _ := exec.Command("sh", "-c", tmuxCopyCodexSh(strconv.Itoa(pp))).Output()
+		return strings.TrimSpace(string(out))
+	}
+	// Itself: codex -c 'sleep 5' fork <id> (sh takes "fork" and id as $0, $1).
+	self := exec.Command(codex, "-c", "sleep 5", "fork", id)
+	if err := self.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer self.Process.Kill()
+	time.Sleep(200 * time.Millisecond)
+	if got := strings.Fields(run(self.Process.Pid)); len(got) != 3 || got[0] != strconv.Itoa(self.Process.Pid) || got[2] != id {
+		t.Errorf("the pane's own Codex: %q", got)
+	}
+	// Under a parent of another name (as npm's node): its one child named codex.
+	parent := exec.Command("sh", "-c", `"$0" -c 'sleep 5' fork `+id+`; true`, codex)
+	if err := parent.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer parent.Process.Kill()
+	time.Sleep(300 * time.Millisecond)
+	if got := strings.Fields(run(parent.Process.Pid)); len(got) != 3 || got[0] == strconv.Itoa(parent.Process.Pid) || got[2] != id {
+		t.Errorf("a child of the pane's process: %q", got)
+	}
+	// Two children named codex: not guessed between.
+	two := exec.Command("sh", "-c", `"$0" -c 'sleep 5' fork `+id+` & "$0" -c 'sleep 5' fork `+id+`; wait`, codex)
+	if err := two.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer two.Process.Kill()
+	time.Sleep(300 * time.Millisecond)
+	if got := run(two.Process.Pid); got != "" {
+		t.Errorf("two children taken: %q", got)
 	}
 }
