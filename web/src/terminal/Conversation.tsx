@@ -1797,7 +1797,8 @@ export function ConversationView({
           onClose={() => setGitChanges(null)}
         />
       )}
-      {btwShown && btwShown === sideIdent && sideBind && convo.of && (
+      {/* (Over this page only while it is the one shown: not over a terminal's tab gone to — kept, and shown again on coming back.) */}
+      {btwShown && btwShown === sideIdent && sideBind && convo.of && active && (
         <SideQuestion
           key={sideIdent}
           sid={convo.of.split(' ')[0]}

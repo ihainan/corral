@@ -133,7 +133,11 @@ func TestSideQuestionCommandRuns(t *testing.T) {
 	// The "agent": a process of its own, its folder and environment its own.
 	agent := exec.Command("sleep", "60")
 	agent.Dir = work
-	agent.Env = []string{"PATH=/usr/bin:/bin", "CLAUDE_CONFIG_DIR=" + filepath.Join(home, "cfg"), "ANTHROPIC_BASE_URL=https://relay.example.com/x", "CLAUDE_CODE_OAUTH_TOKEN=agent-token", "TMUX_PANE=%9", "HERDR_PANE_ID=p1", "SECRET_OTHER=no",
+	// (Its PATH: a folder by a relative name, which is not looked in, and one of nvm's, say.)
+	nvm := filepath.Join(home, "nvm", "bin")
+	os.MkdirAll(nvm, 0o755)
+	os.MkdirAll(filepath.Join(work, "rel"), 0o755)
+	agent.Env = []string{"PATH=rel:" + nvm + ":/usr/bin:/bin", "AWS_SHARED_CREDENTIALS_FILE=/agent/creds", "CLAUDE_CONFIG_DIR=" + filepath.Join(home, "cfg"), "ANTHROPIC_BASE_URL=https://relay.example.com/x", "CLAUDE_CODE_OAUTH_TOKEN=agent-token", "TMUX_PANE=%9", "HERDR_PANE_ID=p1", "SECRET_OTHER=no",
 		// (A value with a line break that reads as another variable: neither taken.)
 		"SMUGGLE=x\nANTHROPIC_AUTH_TOKEN=stolen", "ANTHROPIC_API_KEY=k1\nANTHROPIC_BASE_URL=https://evil.example",
 		"SMUGGLE2=y\x01ANTHROPIC_AUTH_TOKEN=stolen2"}
@@ -175,7 +179,7 @@ func TestSideQuestionCommandRuns(t *testing.T) {
 	run := func(start int64, model, q string, extra ...string) string {
 		c := exec.Command("sh", "-c", sideQuestionCommand(pid, start, "0b7c2a1e-1111-4222-8333-444455556666", model, "f00d"))
 		// (The login shell's own: a key and a pane of its own, none of them to reach the copy.)
-		c.Env = append([]string{"HOME=" + home, "PATH=/usr/bin:/bin", "ANTHROPIC_API_KEY=outer", "TMUX_PANE=%1", "CLAUDE_CONFIG_DIR=/outer", "AWS_PROFILE=outer", "CLAUDE_CODE_OAUTH_TOKEN=outer-token"}, extra...)
+		c.Env = append([]string{"HOME=" + home, "PATH=/usr/bin:/bin", "ANTHROPIC_API_KEY=outer", "TMUX_PANE=%1", "CLAUDE_CONFIG_DIR=/outer", "AWS_PROFILE=outer", "AWS_CONFIG_FILE=/outer/aws", "CLAUDE_CODE_OAUTH_TOKEN=outer-token"}, extra...)
 		c.Stdin = strings.NewReader(q)
 		out, err := c.CombinedOutput()
 		if err != nil {
@@ -207,12 +211,12 @@ func TestSideQuestionCommandRuns(t *testing.T) {
 		t.Errorf("cwd %q", got)
 	}
 	env := "\n" + read("env")
-	for _, want := range []string{"\nCLAUDE_CONFIG_DIR=" + filepath.Join(home, "cfg") + "\n", "\nANTHROPIC_BASE_URL=https://relay.example.com/x\n", "\nCLAUDE_CODE_OAUTH_TOKEN=agent-token\n", "\nCORRAL_SIDE_COPY=1\n"} {
+	for _, want := range []string{"\nCLAUDE_CONFIG_DIR=" + filepath.Join(home, "cfg") + "\n", "\nANTHROPIC_BASE_URL=https://relay.example.com/x\n", "\nCLAUDE_CODE_OAUTH_TOKEN=agent-token\n", "\nAWS_SHARED_CREDENTIALS_FILE=/agent/creds\n", "\nCORRAL_SIDE_COPY=1\n"} {
 		if !strings.Contains(env, want) {
 			t.Errorf("no %q in env", want)
 		}
 	}
-	for _, not := range []string{"\nANTHROPIC_API_KEY=", "\nANTHROPIC_AUTH_TOKEN=", "evil.example", "stolen", "\x01", "\nTMUX_PANE=", "\nHERDR_PANE_ID=", "\nSECRET_OTHER=", "\nSMUGGLE=", "/outer", "\nAWS_PROFILE=", "outer-token"} {
+	for _, not := range []string{"\nANTHROPIC_API_KEY=", "\nANTHROPIC_AUTH_TOKEN=", "evil.example", "stolen", "\x01", "\nTMUX_PANE=", "\nHERDR_PANE_ID=", "\nSECRET_OTHER=", "\nSMUGGLE=", "/outer", "\nAWS_PROFILE=", "\nAWS_CONFIG_FILE=", "outer-token"} {
 		if strings.Contains(env, not) {
 			t.Errorf("%q in env", not)
 		}
@@ -239,6 +243,21 @@ func TestSideQuestionCommandRuns(t *testing.T) {
 		t.Errorf("ran for another session")
 	}
 	setSession("0b7c2a1e-1111-4222-8333-444455556666")
+	// Claude Code on the agent's own PATH only (nvm's, say): found there, its folder first on
+	// the copy's PATH and no more of the agent's; a folder by a relative name not looked in.
+	os.WriteFile(filepath.Join(work, "rel", "claude"), []byte("#!/bin/sh\necho wrong > '"+seen+"/wrong'\n"), 0o755)
+	os.Rename(filepath.Join(bin, "claude"), filepath.Join(nvm, "claude"))
+	os.Remove(filepath.Join(seen, "env"))
+	if a, err := parseSideAnswer(run(start, "", "q"), "f00d"); err != nil || !a.OK {
+		t.Errorf("on the agent's PATH: %+v %v", a, err)
+	}
+	if _, err := os.Stat(filepath.Join(seen, "wrong")); err == nil {
+		t.Errorf("a relative PATH folder looked in")
+	}
+	if p := "\n" + read("env"); !strings.Contains(p, "\nPATH="+nvm+":"+home+"/.local/bin:") || strings.Contains(p, "rel:") {
+		t.Errorf("the copy's PATH: %q", p[strings.Index(p, "\nPATH="):][:200])
+	}
+	os.Rename(filepath.Join(nvm, "claude"), filepath.Join(bin, "claude"))
 	// Nothing of the run left behind, the copy quick: no watch still sleeping.
 	runSecs := func(secs int, q string) (sideAnswer, time.Duration) {
 		began := time.Now()
@@ -267,6 +286,17 @@ func TestSideQuestionCommandRuns(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 	if sleeping("37") {
 		t.Errorf("the watch's sleep left running")
+	}
+	// A copy that ends at once, before the watch's setsid may have run: never waited out.
+	os.WriteFile(filepath.Join(bin, "claude"), []byte("#!/bin/sh\nprintf '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"x\"}\\n'\n"), 0o755)
+	for i := 0; i < 30; i++ {
+		if a, took := runSecs(37, ""); !a.OK || took > 3*time.Second {
+			t.Fatalf("instant copy %d: %+v after %s", i, a, took)
+		}
+	}
+	time.Sleep(200 * time.Millisecond)
+	if sleeping("37") {
+		t.Errorf("an instant copy's watch left sleeping")
 	}
 	child := func() bool {
 		b, err := os.ReadFile(filepath.Join(seen, "child"))

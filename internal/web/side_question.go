@@ -97,6 +97,8 @@ func sideQuestionRun(pid, start int64, sid, model, nonce string, secs int) strin
 		// line breaks made \001s: no value can pass for another variable — and one with a line
 		// break or a \001 in it is not taken.)
 		`ev=$(tr '\0\n' '\n\001' <"/proc/$p/environ" 2>/dev/null | awk -v x="$(printf '\001')" '/^(` + strings.ReplaceAll(sideEnvNames, " ", "|") + `)=/ && index($0, x) == 0 { print }' | head -c 16384); ` +
+		// (Its PATH too, only to find Claude Code by, below: not the copy's.)
+		`ap=$(tr '\0\n' '\n\001' <"/proc/$p/environ" 2>/dev/null | sed -n 's/^PATH=//p' | head -n 1); ` +
 		`same || { echo 'E gone'; exit 0; }; ` +
 		`[ -n "$cwd" ] && cd -- "$cwd" 2>/dev/null || { echo 'E nodir'; exit 0; }; ` +
 		`unset ` + sideEnvNames + ` TMUX TMUX_PANE HERDR_PANE_ID HERDR_SOCKET_PATH; ` +
@@ -106,8 +108,12 @@ CORRAL_SIDE_ENV
 ` +
 		// (The copy says what it is: the locating scan does not take it for an agent.)
 		`export ` + sideCopyMark + `; ` +
-		// (Claude Code as the shell finds it; else the one the process runs, where that is Claude Code's own build.)
+		// (Claude Code as the shell finds it; else as the agent's own PATH does — one put there by
+		// nvm, say: its folder, where its node is too, put first on the copy's PATH, and no more of
+		// the agent's PATH, of which only folders by their whole path are looked in; else the one
+		// the process runs, where that is Claude Code's own build.)
 		`C=$(command -v claude 2>/dev/null); ` +
+		`if [ -z "$C" ]; then set -f; o=$IFS; IFS=:; for d in $ap; do case $d in /*) if [ -f "$d/claude" ] && [ -x "$d/claude" ]; then C=$d/claude; PATH="$d:$PATH"; break; fi;; esac; done; IFS=$o; set +f; fi; ` +
 		`if [ -z "$C" ]; then e=$(readlink "/proc/$p/exe" 2>/dev/null); case $e in */claude/versions/*) [ -x "$e" ] && C=$e;; esac; fi; ` +
 		`[ -n "$C" ] || { echo 'E noclaude'; exit 0; }; ` +
 		// (Ended for sure, with all it started: run in a process group of its own (setsid), the
@@ -125,12 +131,13 @@ CORRAL_SIDE_ENV
 		// (An asynchronous command's input is /dev/null unless it is given one: this script's, as 3.
 		// Not a group leader, setsid makes the copy one in place — its pid its group's. The watch
 		// is a group of its own too, its sleep with it: killed whole once the copy has ended, it
-		// leaves nothing behind. Neither holds the answer's pipe but the copy. No "--" before a
-		// group: dash's kill takes none.)
+		// leaves nothing behind — by its pid as well: the copy may end before the watch's setsid
+		// has made its group, and the wait for it must not last its whole sleep. Neither holds
+		// the answer's pipe but the copy. No "--" before a group: dash's kill takes none.)
 		`exec 3<&0; ` +
 		`{ setsid "$C" "$@" <&3 3<&- 2>/dev/null & cp=$!; ` +
 		`setsid sh -c 'sleep "$1"; kill -KILL "-$2"' sh "$S" "$cp" </dev/null >/dev/null 2>&1 3<&- & w=$!; ` +
-		`wait "$cp"; rc=$?; kill -KILL "-$cp" 2>/dev/null; kill -KILL "-$w" 2>/dev/null; wait "$w" 2>/dev/null; ` +
+		`wait "$cp"; rc=$?; kill -KILL "-$cp" 2>/dev/null; kill -KILL "-$w" "$w" 2>/dev/null; wait "$w" 2>/dev/null; ` +
 		`printf '\n%s RC %s\n' "$N" "$rc"; } | head -c ` + strconv.Itoa(sideAnswerCap) + `; exit 0`
 	return "sh -c " + sshx.QuoteShell(script) + " corral " + strconv.FormatInt(pid, 10) + " " + strconv.FormatInt(start, 10) + " " +
 		sshx.QuoteShell(sid) + " " + sshx.QuoteShell(model) + " " + sshx.QuoteShell(nonce) + " " + strconv.Itoa(secs)
@@ -147,7 +154,7 @@ CORRAL_SIDE_ENV
 const sideCopyMark = "CORRAL_SIDE_COPY=1"
 
 const sideEnvNames = "CLAUDE_CONFIG_DIR ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN " +
-	"CLAUDE_CODE_USE_BEDROCK AWS_PROFILE AWS_REGION AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_BEARER_TOKEN_BEDROCK " +
+	"CLAUDE_CODE_USE_BEDROCK AWS_PROFILE AWS_CONFIG_FILE AWS_SHARED_CREDENTIALS_FILE AWS_REGION AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_BEARER_TOKEN_BEDROCK " +
 	"CLAUDE_CODE_USE_VERTEX ANTHROPIC_VERTEX_PROJECT_ID CLOUD_ML_REGION GOOGLE_APPLICATION_CREDENTIALS"
 
 // sideAnswer is what the page is told of a side question asked.
@@ -302,8 +309,6 @@ func (s *Server) apiConversationSide(w http.ResponseWriter, r *http.Request) {
 	}()
 	ctx, cancel := context.WithDeadline(r.Context(), expiry)
 	defer cancel()
-	ctx, cancelRun := context.WithTimeout(ctx, sideRequestLimit)
-	defer cancelRun()
 	untrack := s.trackPending(currentUser(r).ID, &liveSocket{loginHash: loginHash(r), hostID: sess.HostID, cancel: cancel})
 	defer untrack()
 
@@ -335,6 +340,9 @@ func (s *Server) apiConversationSide(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// (The run's own time from now: not the scan's taken out of it.)
+	ctx, cancelRun := context.WithTimeout(ctx, sideRequestLimit)
+	defer cancelRun()
 	nonce := gitNonce()
 	res, err := sshx.Exec(ctx, sess.Client(), sideQuestionCommand(b.PID, b.Start, b.Session, b.Model, nonce), sideAnswerCap+256, sshx.ExecOptions{Stdin: strings.NewReader(q), AwaitSlot: 2 * time.Second})
 	if !res.Ended && !errors.Is(err, sshx.ErrBusy) {

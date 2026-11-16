@@ -31,8 +31,9 @@ type Asked = {
 const KEEP = 5
 const AGENTS = 8 // (of so many agents at most: those asked of last)
 export const SIDE_MAX = 2000 // (runes, as the gateway counts them)
-// (The gateway's run is 90s on the host, and 100s in all: a little past that.)
-const ASK_MS = 110_000
+// (The gateway's scan first, up to 15s, then the run, 90s on the host and
+// 100s in all: a little past the two.)
+const ASK_MS = 125_000
 
 // Kept per agent: the Corral session, the pane, the process and its session.
 const kept = new Map<string, Asked[]>()
