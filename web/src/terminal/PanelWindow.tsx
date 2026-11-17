@@ -68,10 +68,11 @@ export function PanelWindow({ sid, active, press, onSettled, toast, live }: { li
   // that it is said once to a screen reader.
   const [keySaid, setKeySaid] = useState<{ text: string; bad: boolean } | null>(null)
   const keySaidTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
-  const sayKey = useCallback((text: string, bad: boolean) => {
+  // (clears: a key sent, said for a moment; one going stays till it has gone, however long that takes.)
+  const sayKey = useCallback((text: string, bad: boolean, clears = false) => {
     clearTimeout(keySaidTimer.current)
     setKeySaid((was) => (was?.text === text && was.bad === bad ? was : { text, bad }))
-    if (!bad && text) keySaidTimer.current = setTimeout(() => setKeySaid(null), SAID_FOR)
+    if (clears) keySaidTimer.current = setTimeout(() => setKeySaid(null), SAID_FOR)
   }, [])
   useEffect(() => () => clearTimeout(keySaidTimer.current), [])
   // (Its keys taken: the screen focused. Said above it, as what the keys do then.)
@@ -143,7 +144,7 @@ export function PanelWindow({ sid, active, press, onSettled, toast, live }: { li
           const r = await api<{ text?: string; digest?: string; look?: string }>('POST', `/api/sessions/${sid}/conversation/panel`, { ...pressNow.current(), keys: [k], ...(settlesHere(k) ? { digest } : {}), ...(isLive.current ? { live: true } : {}) }, { timeoutMs: 15000 })
           a.stale = true
           if (a.alive) setSaid('')
-          if (a.alive) sayKey(t('panel.sent', { key: keyWord(k) }), false)
+          if (a.alive) sayKey(t('panel.sent', { key: keyWord(k) }), false, true)
           if (a.alive && typeof r?.text === 'string' && typeof r.digest === 'string') {
             a.stale = false
             a.readAt = Date.now()
@@ -214,15 +215,21 @@ export function PanelWindow({ sid, active, press, onSettled, toast, live }: { li
   }, [active])
 
   // Whether what is shown may be old: not read for STALE while it is looked at
-  // — counted from when it came back into sight, not from a read before (a tab
-  // in the background, its looks paused, is not old the moment it is back).
+  // and no key is going or waiting (the looks wait for those) — counted from
+  // when it came back into sight, not from a read before: a tab in the
+  // background, or the page another tab's, is not old the moment it is back.
   const [now, setNow] = useState(() => Date.now())
   const seenSince = useRef(Date.now())
+  const wasActive = useRef(active)
+  if (active && !wasActive.current) seenSince.current = Date.now() // (back in sight: from now, this very render)
+  wasActive.current = active
   useEffect(() => {
     if (!active) return
-    seenSince.current = Date.now()
     const back = () => {
-      if (!document.hidden) seenSince.current = Date.now()
+      if (!document.hidden) {
+        seenSince.current = Date.now()
+        setNow(Date.now())
+      }
     }
     document.addEventListener('visibilitychange', back)
     const i = setInterval(() => setNow(Date.now()), 1000)
@@ -231,9 +238,11 @@ export function PanelWindow({ sid, active, press, onSettled, toast, live }: { li
       clearInterval(i)
     }
   }, [active])
+  const busy = at.current.pumping || at.current.queue.length > 0
+  if (busy) seenSince.current = Math.max(seenSince.current, Date.now()) // (a key going: counted again from when it has gone)
   const readAt = at.current.readAt
   const oldFor = readAt ? now - Math.max(readAt, seenSince.current) : 0
-  const old = !!live && !lost && !!readAt && !document.hidden && oldFor > STALE ? Math.round((now - readAt) / 1000) : 0
+  const old = !!live && active && !lost && !busy && !!readAt && !document.hidden && oldFor > STALE ? Math.round((now - readAt) / 1000) : 0
 
   const lines = useMemo(() => ansiLines(screen.text), [screen.text])
   // (A screen wider than its room: a fade on the side more of it is on.)
@@ -368,8 +377,10 @@ export function PanelWindow({ sid, active, press, onSettled, toast, live }: { li
         </pre>
       </div>
       {(said || lost || old > 0) && (
-        <p className="convo-panelwin-note" role="status">
-          {lost ? t('panel.lost') : said || t('panel.old', { s: old })}
+        // (What is said once: the seconds, which count on, beside it and not read out each time.)
+        <p className="convo-panelwin-note">
+          <span role="status">{lost ? t('panel.lost') : said || t('panel.old')}</span>
+          {!lost && !said && old > 0 && <span aria-hidden="true">{' ' + t('panel.oldAgo', { s: old })}</span>}
         </p>
       )}
       {keyBar ? (

@@ -97,6 +97,7 @@ export function Dock({
   acts,
   over,
   expanded,
+  canExpand,
   onExpand,
   width,
   onWidth,
@@ -117,6 +118,7 @@ export function Dock({
   acts?: ChangesActs
   over: boolean // (over the thread, not beside it)
   expanded: number // (over the whole of the thread's column, this wide — the side list left in sight: for a screen wider than the dock; 0: not)
+  canExpand: boolean // (the thread's column wider than the dock: something to expand to)
   onExpand: (v: boolean) => void
   width: number
   onWidth: (w: number) => void
@@ -172,7 +174,7 @@ export function Dock({
     onWidth(Math.min(DOCK_W.max, Math.max(DOCK_W.min, w)))
   }
   return (
-    <aside className={'convo-panel convo-tray' + (over || expanded ? ' is-over' : '') + (expanded ? ' is-expanded' : '')} style={{ width: expanded ? Math.max(width, expanded) : width }} aria-label={t('dock.title')} ref={root} onKeyDown={onKey}>
+    <aside className={'convo-panel convo-tray' + (over || expanded ? ' is-over' : '') + (expanded ? ' is-expanded' : '')} style={{ width: expanded || width }} aria-label={t('dock.title')} ref={root} onKeyDown={onKey}>
       {/* (Its edge kept over the thread too: one gone over it as it widened can be made narrower again.) */}
       {!expanded && (
         <div
@@ -208,9 +210,11 @@ export function Dock({
             </button>
           ))}
         </div>
-        <button type="button" className="icon-btn convo-tray-expand" aria-pressed={!!expanded} onClick={() => onExpand(!expanded)} aria-label={t(expanded ? 'dock.collapse' : 'dock.expand')} title={t(expanded ? 'dock.collapse' : 'dock.expand')}>
-          {expanded ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
-        </button>
+        {(canExpand || !!expanded) && (
+          <button type="button" className="icon-btn convo-tray-expand" aria-pressed={!!expanded} onClick={() => onExpand(!expanded)} aria-label={t(expanded ? 'dock.collapse' : 'dock.expand')} title={t(expanded ? 'dock.collapse' : 'dock.expand')}>
+            {expanded ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
+          </button>
+        )}
         <button type="button" className="icon-btn convo-tray-close" onClick={onClose} aria-label={t('dock.close')} title={t('dock.close')}>
           <X size={18} />
         </button>

@@ -2011,10 +2011,27 @@ export function ConversationView({
           ask={filesAsk}
           onInsert={(p) => dockSink?.insert(p)}
           // (The keys' program named, and the message box gone back to from its screen.)
-          terminal={dockTerminal && { ...dockTerminal, who: convo.bind?.agent === 'claude' ? 'Claude Code' : agentName(convo.bind?.agent), onComposer: () => root.current?.querySelector<HTMLElement>('.composer-input')?.focus() }}
+          // (Back to it: the dock put beside the thread first, the box not under it; where the box is
+          // not to be had — a panel of Claude Code's or a question shown in its place — the dock's tabs,
+          // the screen left all the same.)
+          terminal={
+            dockTerminal && {
+              ...dockTerminal,
+              who: convo.bind?.agent === 'claude' ? 'Claude Code' : agentName(convo.bind?.agent),
+              onComposer: () => {
+                setDockBig(false)
+                requestAnimationFrame(() => {
+                  const box = root.current?.querySelector<HTMLElement>('.composer-input')
+                  if (box && box.getClientRects().length) box.focus()
+                  if (!box || document.activeElement !== box) root.current?.querySelector<HTMLElement>('.convo-tray-tab[aria-selected="true"]')?.focus()
+                })
+              },
+            }
+          }
           acts={files ? { view: (p) => files.view(p), open: files.open } : undefined}
           over={viewW <= 1300 || viewW - (sideShown ? sideWidth : 0) - dockW < DOCK_THREAD}
           expanded={dockBig ? viewW - (sideShown ? sideWidth : 0) : 0}
+          canExpand={viewW - (sideShown ? sideWidth : 0) > dockW + 80}
           onExpand={setDockBig}
           width={dockW}
           onWidth={setDockW}
