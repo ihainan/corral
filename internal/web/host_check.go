@@ -261,9 +261,10 @@ func authorizedLine(publicKey string) (line, typ, data string, ok bool) {
 // present" or "<nonce> E <why>". Fixed POSIX script, run by sh whatever the
 // user's shell is (fish too): it has no single quote nor backslash in it,
 // so that it is the same however the login shell reads a quoted word. Its
-// one argument is a hex nonce; the key comes on its input, never on the
-// command line.
+// arguments: a hex nonce, and authorizedKeysScan; the key comes on its
+// input, never on the command line.
 const installKeyScript = `N=$1
+A=$2
 say() { echo; echo "$N $*"; }
 umask 077
 [ -n "$HOME" ] && [ -d "$HOME" ] || { say E nohome; exit 0; }
@@ -281,22 +282,11 @@ if [ ! -e "$d" ]; then mkdir -m 700 "$d" 2>/dev/null || { say E mkdir; exit 0; }
 [ -d "$d" ] || { say E notdir; exit 0; }
 [ -L "$f" ] && { say E link; exit 0; }
 if [ -e "$f" ] && [ ! -f "$f" ]; then say E notfile; exit 0; fi
-p=
 if [ -f "$f" ]; then
-  while IFS= read -r l || [ -n "$l" ]; do
-    set -f
-    set -- $l
-    set +f
-    case ${1-} in "#"*|"") continue;; esac
-    while [ $# -ge 2 ]; do
-      if [ "$1" = "$t" ] && [ "$2" = "$b" ]; then p=1; break; fi
-      case $1 in ssh-*|ecdsa-*|sk-*) break;; esac
-      shift
-    done
-    [ -z "$p" ] || break
-  done < "$f"
+  awk -v t="$t" -v b="$b" "$A" "$f" 2>/dev/null
+  case $? in 0) say OK present; exit 0;; 1) ;; *) say E scan; exit 0;; esac
 fi
-[ -z "$p" ] || { say OK present; exit 0; }
+
 new=
 [ -e "$f" ] || new=1
 if [ -z "$new" ] && [ ! -w "$f" ]; then say E notwritable; exit 0; fi
@@ -307,9 +297,39 @@ echo "$k" >> "$f" 2>/dev/null || { say E write; exit 0; }
 say OK added
 `
 
-// installKeyCommand: installKeyScript run by sh, with the nonce.
+// authorizedKeysScan is the awk program installKeyScript asks whether the key
+// (t, b: its type and data) is an entry of authorized_keys already: exit 0
+// it is, 1 it is not. A line is read as sshd reads it — a comment or a blank
+// line is none; options, if any, end at the first space or tab outside
+// double quotes (a backslash-escaped quote inside them no end); then the
+// key's type and data; a CR at its end dropped (CRLF files). Like the
+// script, no single quote nor backslash in it (the characters made with
+// sprintf), so it is passed as it is, quoted, under any login shell.
+const authorizedKeysScan = `BEGIN { tab = sprintf("%c", 9); cr = sprintf("%c", 13); bs = sprintf("%c", 92); dq = sprintf("%c", 34); ws = "[ " tab "]+"; found = 0 }
+{
+  l = $0
+  if (substr(l, length(l), 1) == cr) l = substr(l, 1, length(l) - 1)
+  sub("^" ws, "", l)
+  if (l == "" || substr(l, 1, 1) == "#") next
+  if (l !~ ("^(ssh-|ecdsa-|sk-)[^ " tab "]*[ " tab "]")) {
+    q = 0
+    for (i = 1; i <= length(l); i++) {
+      c = substr(l, i, 1)
+      if (c == dq && (i == 1 || substr(l, i - 1, 1) != bs)) q = !q
+      else if (!q && (c == " " || c == tab)) break
+    }
+    l = substr(l, i)
+    sub("^" ws, "", l)
+  }
+  n = split(l, f, ws)
+  if (n >= 2 && f[1] == t && f[2] == b) { found = 1; exit }
+}
+END { exit (found ? 0 : 1) }
+`
+
+// installKeyCommand: installKeyScript run by sh, with the nonce and authorizedKeysScan.
 func installKeyCommand(nonce string) string {
-	return "sh -c " + sshx.QuoteShell(installKeyScript) + " corral " + sshx.QuoteShell(nonce)
+	return "sh -c " + sshx.QuoteShell(installKeyScript) + " corral " + sshx.QuoteShell(nonce) + " " + sshx.QuoteShell(authorizedKeysScan)
 }
 
 // POST /api/hosts/install-key: the form's key put on the host — signed in
@@ -452,7 +472,7 @@ func installSaid(out, nonce string) string {
 }
 
 // installReasons: the words installKeyScript says why it did not in.
-var installReasons = map[string]bool{"nohome": true, "nokey": true, "dirlink": true, "mkdir": true, "notdir": true, "link": true, "notfile": true, "notwritable": true, "write": true}
+var installReasons = map[string]bool{"scan": true, "nohome": true, "nokey": true, "dirlink": true, "mkdir": true, "notdir": true, "link": true, "notfile": true, "notwritable": true, "write": true}
 
 // checkFailure is checkDial's account of a dial's failure (its jump host
 // and the rest, as there).

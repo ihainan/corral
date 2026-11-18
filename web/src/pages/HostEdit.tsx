@@ -44,6 +44,10 @@ export function HostEditPage({ id }: { id?: number }) {
   const [checking, setChecking] = useState(false)
   // (body: the form it was of — "Save anyway" saves that; a field changed since, it is no more.)
   const [check, setCheck] = useState<{ c: HostCheck; forSave: boolean; body: Record<string, unknown> } | null>(null)
+  // (Counted on at each change of the connection's fields, however made — a
+  // key generated or imported meanwhile too: a check's answer of an older
+  // count is of another form, dropped, and nothing saved on it.)
+  const formRev = useRef(0)
 
   // The user's hosts, for the jump host choice.
   const loadHosts = useCallback(() => {
@@ -180,10 +184,13 @@ export function HostEditPage({ id }: { id?: number }) {
       requestAnimationFrame(() => focusField(c.field!))
     }
   }
+  // (null: the form changed while it ran — its answer is not of this form.)
   const runCheck = async (body: ReturnType<typeof formBody>) => {
     setChecking(true)
+    const rev = formRev.current
     try {
-      return await api<HostCheck>('POST', '/api/hosts/test', { ...body, id: editing ? id : 0 }, { timeoutMs: 60000 })
+      const c = await api<HostCheck>('POST', '/api/hosts/test', { ...body, id: editing ? id : 0 }, { timeoutMs: 60000 })
+      return rev === formRev.current ? c : null
     } finally {
       setChecking(false)
     }
@@ -208,7 +215,7 @@ export function HostEditPage({ id }: { id?: number }) {
 
   const submit = async (e: FormEvent) => {
     e.preventDefault()
-    if (busy || checking) return
+    if (busy || checking || generating) return
     const a = splitAddress()
     if (!checkFields(a)) return
     setErrors({})
@@ -216,27 +223,29 @@ export function HostEditPage({ id }: { id?: number }) {
     const body = formBody(a)
     // (A new host, or its connection changed: connected to first. Only the name or its own settings: saved.)
     if (connChanged(body)) {
-      let c: HostCheck
+      let c: HostCheck | null
       try {
         c = await runCheck(body)
       } catch (err) {
         showRefusal(err)
         return
       }
+      if (!c) return // (changed meanwhile: neither said nor saved — Save again checks what it is now)
       if (!c.ok) return showCheck(c, true, body)
     }
     await save(body)
   }
 
   const testOnly = async () => {
-    if (busy || checking) return
+    if (busy || checking || generating) return
     const a = splitAddress()
     if (!checkFields(a)) return
     setErrors({})
     setCheck(null)
     const body = formBody(a)
     try {
-      showCheck(await runCheck(body), false, body)
+      const c = await runCheck(body)
+      if (c) showCheck(c, false, body)
     } catch (err) {
       showRefusal(err)
     }
@@ -253,7 +262,10 @@ export function HostEditPage({ id }: { id?: number }) {
   const checkedOf = useRef('')
   useEffect(() => {
     const now = JSON.stringify([address, port, username, auth, password, credentialId, jumpId])
-    if (checkedOf.current && now !== checkedOf.current) setCheck(null)
+    if (checkedOf.current && now !== checkedOf.current) {
+      setCheck(null)
+      formRev.current++
+    }
     checkedOf.current = now
   }, [address, port, username, auth, password, credentialId, jumpId])
 
@@ -419,11 +431,11 @@ export function HostEditPage({ id }: { id?: number }) {
         )}
         <div className="form-actions">
           <a className="btn" href="/" onClick={linkHandler('/')}>{t('common.cancel')}</a>
-          <button type="button" className="btn" onClick={testOnly} disabled={busy || checking}>
+          <button type="button" className="btn" onClick={testOnly} disabled={busy || checking || generating}>
             <PlugZap size={16} />
             {t('host.test')}
           </button>
-          <button className="btn btn-primary" disabled={busy || checking} aria-busy={checking || busy}>
+          <button className="btn btn-primary" disabled={busy || checking || generating} aria-busy={checking || busy}>
             {checking ? t('host.connecting') : busy ? t('common.saving') : t('common.save')}
           </button>
         </div>

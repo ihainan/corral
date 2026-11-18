@@ -251,12 +251,12 @@ func TestHostInstallKey(t *testing.T) {
 // installKeyScript: no single quote nor backslash in it (the same however a
 // login shell — fish too — reads its quoted word); and it runs by itself.
 func TestInstallKeyScriptPlain(t *testing.T) {
-	if strings.ContainsAny(installKeyScript, `'\`) {
+	if strings.ContainsAny(installKeyScript, `'\`) || strings.ContainsAny(authorizedKeysScan, `'\`) {
 		t.Fatalf("a quote or backslash in the script")
 	}
 	home := t.TempDir()
 	run := func(in string) string {
-		c := exec.Command("sh", "-c", installKeyScript, "corral", "abc")
+		c := exec.Command("sh", "-c", installKeyScript, "corral", "abc", authorizedKeysScan)
 		c.Env = []string{"HOME=" + home, "PATH=/usr/bin:/bin"}
 		c.Stdin = strings.NewReader(in)
 		out, _ := c.CombinedOutput()
@@ -285,6 +285,21 @@ func TestInstallKeyScriptPlain(t *testing.T) {
 	os.WriteFile(filepath.Join(home, ".ssh", "authorized_keys"), []byte(`from="10.0.0.0/8",command="echo hi there" ssh-ed25519 CCCC c`+"\n"), 0o600)
 	if got := run("ssh-ed25519 CCCC x\n"); got != "abc OK present" {
 		t.Errorf("after options: %q", got)
+	}
+	// (Options quoting spaces, tabs and key-like words; an escaped quote in them; CRLF; no comment.)
+	for _, c := range []struct{ file, key, want string }{
+		{`from="10.0.0.0/8",command="echo ssh-backup ready" ssh-ed25519 DDDD` + "\n", "ssh-ed25519 DDDD x", "OK present"},
+		{`command="echo ssh-ed25519 EEEE ignored" ssh-ed25519 OTHER` + "\n", "ssh-ed25519 EEEE x", "OK added"},
+		{"command=\"echo\tssh-x\" ssh-ed25519 FFFF\n", "ssh-ed25519 FFFF x", "OK present"},
+		{`command="say \"hi there\"" ssh-ed25519 GGGG c` + "\n", "ssh-ed25519 GGGG x", "OK present"},
+		{`from="10.0.0.0/8" ssh-ed25519 HHHH` + "\r\n", "ssh-ed25519 HHHH x", "OK present"},
+		{"ssh-ed25519 IIII\r\n", "ssh-ed25519 IIII x", "OK present"},
+		{"   \t# ssh-ed25519 JJJJ\n\n", "ssh-ed25519 JJJJ x", "OK added"},
+	} {
+		os.WriteFile(filepath.Join(home, ".ssh", "authorized_keys"), []byte(c.file), 0o600)
+		if got := run(c.key + "\n"); got != "abc "+c.want {
+			t.Errorf("%q: %q", c.file, got)
+		}
 	}
 	os.RemoveAll(filepath.Join(home, ".ssh"))
 	// A home's .ssh that is a file: said.
