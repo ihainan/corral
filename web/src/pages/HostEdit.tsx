@@ -42,7 +42,8 @@ export function HostEditPage({ id }: { id?: number }) {
   // The last check: running ('checking'), what it found, and whether it was
   // Save's (then "Save anyway" is offered where it did not get through).
   const [checking, setChecking] = useState(false)
-  const [check, setCheck] = useState<{ c: HostCheck; forSave: boolean } | null>(null)
+  // (body: the form it was of — "Save anyway" saves that; a field changed since, it is no more.)
+  const [check, setCheck] = useState<{ c: HostCheck; forSave: boolean; body: Record<string, unknown> } | null>(null)
 
   // The user's hosts, for the jump host choice.
   const loadHosts = useCallback(() => {
@@ -172,8 +173,8 @@ export function HostEditPage({ id }: { id?: number }) {
   }
   // A check's finding on the form: its reason on the field it belongs to;
   // all of it in the box by the buttons.
-  const showCheck = (c: HostCheck, forSave: boolean) => {
-    setCheck({ c, forSave })
+  const showCheck = (c: HostCheck, forSave: boolean, body: Record<string, unknown>) => {
+    setCheck({ c, forSave, body })
     if (!c.ok && c.field) {
       setErrors({ [c.field]: checkText(c, auth, false) })
       requestAnimationFrame(() => focusField(c.field!))
@@ -222,7 +223,7 @@ export function HostEditPage({ id }: { id?: number }) {
         showRefusal(err)
         return
       }
-      if (!c.ok) return showCheck(c, true)
+      if (!c.ok) return showCheck(c, true, body)
     }
     await save(body)
   }
@@ -233,18 +234,28 @@ export function HostEditPage({ id }: { id?: number }) {
     if (!checkFields(a)) return
     setErrors({})
     setCheck(null)
+    const body = formBody(a)
     try {
-      showCheck(await runCheck(formBody(a)), false)
+      showCheck(await runCheck(body), false, body)
     } catch (err) {
       showRefusal(err)
     }
   }
+  // (What was checked, as it was: the form cannot change meanwhile — it is held while a check runs, and a change after drops the check.)
   const saveAnyway = () => {
-    if (busy || checking) return
+    if (busy || checking || !check) return
+    const body = check.body as ReturnType<typeof formBody>
     setCheck(null)
     setErrors({})
-    void save(formBody({ address, username, port }))
+    void save(body)
   }
+  // A field of the connection changed after a check: what it found is not of this.
+  const checkedOf = useRef('')
+  useEffect(() => {
+    const now = JSON.stringify([address, port, username, auth, password, credentialId, jumpId])
+    if (checkedOf.current && now !== checkedOf.current) setCheck(null)
+    checkedOf.current = now
+  }, [address, port, username, auth, password, credentialId, jumpId])
 
   // The key put on the host with a password typed once (its own dialog).
   const [installing, setInstalling] = useState(false)
@@ -268,6 +279,8 @@ export function HostEditPage({ id }: { id?: number }) {
         <h1>{editing ? t('host.editTitle') : t('host.newTitle')}</h1>
       </div>
       <form className="form" onSubmit={submit} noValidate>
+        {/* (Held while a check runs: what is saved after it is what was checked.) */}
+        <fieldset className="form-hold" disabled={checking}>
         <div className="row2">
           <Field label={t('host.address')} htmlFor="h-addr" error={fe('address')}>
             <input id="h-addr" className="input" value={address} onChange={(e) => setAddress(e.target.value)} onBlur={splitAddress} placeholder={t('host.addressPlaceholder')}
@@ -395,6 +408,7 @@ export function HostEditPage({ id }: { id?: number }) {
             </Field>
           </div>
         </details>
+        </fieldset>
 
         {errors[''] && <p className="err" role="alert">{errors['']}</p>}
         {check && <CheckNote c={check.c} auth={auth} onSaveAnyway={check.forSave && !check.c.ok ? saveAnyway : undefined} busy={busy} />}
@@ -529,6 +543,7 @@ function InstallKeyDialog({ body, user, address, onClose, onDone }: { body: () =
 // Server field messages are English; the common ones have a translation.
 const fieldMessages: Record<string, Parameters<typeof t>[0]> = {
   'a host cannot be reached through itself': 'hostField.jumpSelf',
+  'the address changed: enter the password to check it': 'hostField.passwordMoved',
   'choose one of your hosts': 'hostField.jumpChoose',
   'that host is itself reached through another one': 'hostField.jumpChained',
   'that host needs a saved password or key to be a jump host': 'hostField.jumpNoCred',

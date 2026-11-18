@@ -325,6 +325,8 @@ textarea.input { height: auto; min-height: var(--h-input); padding: 8px 12px; li
 .form-actions .btn { min-width: 80px; }
 .form-actions { flex-wrap: wrap; }
 @media (max-width: 520px) { .form-actions > * { flex: 1 1 auto; } }
+/* (The host form's fields, held while a check runs: no box of its own.) */
+.form-hold { display: contents; border: 0; margin: 0; padding: 0; min-width: 0; }
 /* A connection check's finding (HostEdit.tsx), by the form's buttons: tinted, an icon before its words. */
 .host-check { display: flex; gap: 10px; align-items: flex-start; padding: 12px 14px; border-radius: var(--r); background: var(--bg-subtle); border: 1px solid var(--line); }
 .host-check > svg { flex: none; margin-top: 2px; }

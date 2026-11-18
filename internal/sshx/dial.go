@@ -242,7 +242,9 @@ func Dial(ctx context.Context, guard *netguard.Guard, t Target) (*Result, error)
 		if errors.As(err, &hk) {
 			return nil, hk
 		}
-		if isAuthError(err) {
+		// (Signing in refused only once the host's key was decided on: what a
+		// host says before that, or as its own disconnect, is not taken for it.)
+		if verified != nil && isAuthError(err) {
 			if t.ProbeOnly {
 				return &Result{SeenKey: seen}, ErrProbed
 			}
@@ -290,6 +292,10 @@ func isAuthError(err error) bool {
 		return false
 	}
 	b := []byte(err.Error())
+	// (A disconnect's own words are the host's: never taken for x/crypto's.)
+	if bytes.Contains(b, []byte("ssh: disconnect, reason")) {
+		return false
+	}
 	return bytes.Contains(b, []byte("unable to authenticate")) || bytes.Contains(b, []byte("unexpected message type 51 (expected 60)"))
 }
 

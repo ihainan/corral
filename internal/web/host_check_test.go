@@ -102,9 +102,13 @@ func TestHostTestOutcomes(t *testing.T) {
 	if strings.Contains(string(r.Body), ssh.FingerprintSHA256(srv.HostKey)) {
 		t.Errorf("the test pinned the new key: %s", r.Body)
 	}
-	// Another address: a new machine, its key shown, not compared.
+	// Another address: a new machine, its key shown, not compared (the password typed: the stored one stays home).
 	srv2 := h.sshServer(t.TempDir())
-	want(test(checkForm(srv2.Addr.Port, map[string]any{"id": hostID, "password": ""})), true, "", "", "")
+	got = test(checkForm(srv2.Addr.Port, map[string]any{"id": hostID}))
+	want(got, true, "", "", "")
+	if got["fingerprint"] != ssh.FingerprintSHA256(srv2.HostKey) {
+		t.Errorf("moved: %v", got)
+	}
 	// Another user's host: not found.
 	b := h.member(admin, "bob")
 	if r := b.do("POST", "/api/hosts/test", edit); r.Status != 404 {
@@ -258,9 +262,19 @@ func TestInstallKeyScriptPlain(t *testing.T) {
 		out, _ := c.CombinedOutput()
 		return strings.TrimSpace(string(out))
 	}
+	// (Its words on a line of their own, whatever came before them.)
+	if got := installSaid("banner without a newline\nabc OK added\n", "abc"); got != "OK added" {
+		t.Errorf("installSaid: %q", got)
+	}
+	if got := installSaid("bannerabc OK added", "abc"); got != "" {
+		t.Errorf("installSaid run into: %q", got)
+	}
 	if got := run(""); got != "abc E nokey" {
 		t.Errorf("no key: %q", got)
 	}
+	// (A key only in a comment, or in another's comment: not there.)
+	os.MkdirAll(filepath.Join(home, ".ssh"), 0o700)
+	os.WriteFile(filepath.Join(home, ".ssh", "authorized_keys"), []byte("# ssh-ed25519 AAAA\nssh-rsa ZZZZ note ssh-ed25519 AAAA\n"), 0o600)
 	if got := run("ssh-ed25519 AAAA one\n"); got != "abc OK added" {
 		t.Errorf("first: %q", got)
 	}
@@ -268,6 +282,11 @@ func TestInstallKeyScriptPlain(t *testing.T) {
 	if got := run("ssh-ed25519 AAAA two\n"); got != "abc OK present" {
 		t.Errorf("other comment: %q", got)
 	}
+	os.WriteFile(filepath.Join(home, ".ssh", "authorized_keys"), []byte(`from="10.0.0.0/8",command="echo hi there" ssh-ed25519 CCCC c`+"\n"), 0o600)
+	if got := run("ssh-ed25519 CCCC x\n"); got != "abc OK present" {
+		t.Errorf("after options: %q", got)
+	}
+	os.RemoveAll(filepath.Join(home, ".ssh"))
 	// A home's .ssh that is a file: said.
 	os.RemoveAll(filepath.Join(home, ".ssh"))
 	os.WriteFile(filepath.Join(home, ".ssh"), nil, 0o600)
@@ -424,3 +443,91 @@ func sshDialPassword(addr, user, pass string) (*ssh.Client, error) {
 }
 
 func quoteForTest(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
+
+// Editing a host with a stored password, its address or port changed: the
+// password is not sent to the new one (it must be typed).
+func TestHostTestStoredPasswordStaysHome(t *testing.T) {
+	h := newHarness(t)
+	a := h.member(h.admin(), "alice")
+	srv := h.sshServer(t.TempDir())
+	r := a.do("POST", "/api/hosts", checkForm(srv.Addr.Port, map[string]any{"name": "box"}))
+	mustStatus(t, r, 201, "create")
+	id := r.json()["id"]
+	other := h.sshServer(t.TempDir())
+	r = a.do("POST", "/api/hosts/test", checkForm(other.Addr.Port, map[string]any{"id": id, "password": ""}))
+	if ex, _ := r.json()["extra"].(map[string]any); r.Status != 422 || ex["field"] != "password" {
+		t.Errorf("moved: %d %s", r.Status, r.Body)
+	}
+	if other.Attempts() != 0 {
+		t.Errorf("the stored password was sent to the new address")
+	}
+	// (As it was: the stored one used.)
+	r = a.do("POST", "/api/hosts/test", checkForm(srv.Addr.Port, map[string]any{"id": id, "password": ""}))
+	if r.Status != 200 || r.json()["ok"] != true {
+		t.Errorf("same address: %d %s", r.Status, r.Body)
+	}
+}
+
+// The key signed in with after it is put on: to the machine the password
+// went to (its key then), not one that took its place meanwhile.
+func TestHostInstallKeyVerifiesTheSameMachine(t *testing.T) {
+	h := newHarness(t)
+	a := h.member(h.admin(), "alice")
+	home := t.TempDir()
+	srv := h.sshServer(home)
+	srv.AcceptKeysFrom(filepath.Join(home, ".ssh", "authorized_keys"))
+	run := testutil.ShellExec(home, func(cmd string) bool { return strings.HasPrefix(cmd, "sh -c ") })
+	srv.HandleExec(func(cmd string) func(ssh.Channel) {
+		srv.RotateHostKey() // (another machine answers from now on)
+		return run(cmd)
+	})
+	r := a.do("POST", "/api/credentials", map[string]any{"name": "laptop", "mode": "generate"})
+	mustStatus(t, r, 201, "key")
+	f := checkForm(srv.Addr.Port, map[string]any{"auth": "key", "credential_id": r.json()["id"], "password": "", "install_password": "alice-pass"})
+	r = a.do("POST", "/api/hosts/install-key", f)
+	mustStatus(t, r, 200, "install")
+	if j := r.json(); j["ok"] == true || j["stage"] != "verify:hostkey" {
+		t.Errorf("another machine took it: %s", r.Body)
+	}
+}
+
+// A host that says, before its key is decided on, words a refused sign-in
+// would have: not taken for one (nor a probe for reached).
+func TestHostTestDisconnectWordsNotAuth(t *testing.T) {
+	h := newHarness(t)
+	a := h.member(h.admin(), "alice")
+	ln, _ := net.Listen("tcp", "127.0.0.1:0")
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			c.Write([]byte("SSH-2.0-liar\r\n"))
+			desc := "ssh: unable to authenticate, unexpected message type 51 (expected 60)"
+			payload := []byte{1, 0, 0, 0, 2}
+			payload = append(payload, byte(len(desc)>>24), byte(len(desc)>>16), byte(len(desc)>>8), byte(len(desc)))
+			payload = append(payload, desc...)
+			payload = append(payload, 0, 0, 0, 0)
+			pad := 8 - (5+len(payload))%8
+			if pad < 4 {
+				pad += 8
+			}
+			n := 1 + len(payload) + pad
+			pkt := []byte{byte(n >> 24), byte(n >> 16), byte(n >> 8), byte(n), byte(pad)}
+			pkt = append(pkt, payload...)
+			pkt = append(pkt, make([]byte, pad)...)
+			c.Write(pkt)
+			c.Close()
+		}
+	}()
+	port := ln.Addr().(*net.TCPAddr).Port
+	for _, f := range []map[string]any{checkForm(port, map[string]any{"auth": "ask", "password": ""}), checkForm(port, nil)} {
+		r := a.do("POST", "/api/hosts/test", f)
+		mustStatus(t, r, 200, "test")
+		if j := r.json(); j["ok"] == true || j["stage"] == "auth" {
+			t.Errorf("%v: %s", f["auth"], r.Body)
+		}
+	}
+}

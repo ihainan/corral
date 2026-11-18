@@ -94,13 +94,18 @@ func (s *Server) hostCheckTarget(ctx context.Context, w http.ResponseWriter, r *
 		switch {
 		case b.Password != "":
 			t.Password = b.Password
-		case h != nil && h.Auth == store.AuthPassword && h.CredentialID != nil:
+		// (The one stored: only to where it was stored for — another address, port or jump
+		// host is another machine, which a password it was not given for is not sent to.)
+		case h != nil && h.Auth == store.AuthPassword && h.CredentialID != nil && h.Address == b.Address && h.Port == b.Port && sameID(h.JumpHostID, b.JumpHostID):
 			_, sec, err := s.openCredential(ctx, u.ID, *h.CredentialID)
 			if err != nil {
 				s.internalError(w, r, err)
 				return t, nil, false
 			}
 			t.Password = sec.Password
+		case h != nil && h.Auth == store.AuthPassword && h.CredentialID != nil:
+			writeErrorExtra(w, http.StatusUnprocessableEntity, "invalid_field", "the address changed: enter the password to check it", map[string]string{"field": "password"})
+			return t, nil, false
 		default:
 			writeErrorExtra(w, http.StatusUnprocessableEntity, "invalid_field", "enter the password", map[string]string{"field": "password"})
 			return t, nil, false
@@ -247,7 +252,10 @@ func authorizedLine(publicKey string) (line, typ, data string, ok bool) {
 // installKeyScript puts the key line read from its input into the user's
 // ~/.ssh/authorized_keys: the folder made (700) and the file (600) where
 // they are not there; the line added only where that key (its type and
-// data) is not already in it, at the end, nothing else of it touched. A
+// data, as an entry: after any options, not in a comment) is not already
+// in it, at the end, nothing else of it touched. Its words on a line of
+// their own (a login file's output without a line break before it is not
+// run into them). A
 // link, or what is not a folder or a file there, or a file it may not write
 // to, is said, not replaced. It prints "<nonce> OK added", "<nonce> OK
 // present" or "<nonce> E <why>". Fixed POSIX script, run by sh whatever the
@@ -256,7 +264,7 @@ func authorizedLine(publicKey string) (line, typ, data string, ok bool) {
 // one argument is a hex nonce; the key comes on its input, never on the
 // command line.
 const installKeyScript = `N=$1
-say() { echo "$N $*"; }
+say() { echo; echo "$N $*"; }
 umask 077
 [ -n "$HOME" ] && [ -d "$HOME" ] || { say E nohome; exit 0; }
 d=$HOME/.ssh
@@ -273,7 +281,22 @@ if [ ! -e "$d" ]; then mkdir -m 700 "$d" 2>/dev/null || { say E mkdir; exit 0; }
 [ -d "$d" ] || { say E notdir; exit 0; }
 [ -L "$f" ] && { say E link; exit 0; }
 if [ -e "$f" ] && [ ! -f "$f" ]; then say E notfile; exit 0; fi
-if [ -f "$f" ] && grep -qF -e "$t $b" "$f" 2>/dev/null; then say OK present; exit 0; fi
+p=
+if [ -f "$f" ]; then
+  while IFS= read -r l || [ -n "$l" ]; do
+    set -f
+    set -- $l
+    set +f
+    case ${1-} in "#"*|"") continue;; esac
+    while [ $# -ge 2 ]; do
+      if [ "$1" = "$t" ] && [ "$2" = "$b" ]; then p=1; break; fi
+      case $1 in ssh-*|ecdsa-*|sk-*) break;; esac
+      shift
+    done
+    [ -z "$p" ] || break
+  done < "$f"
+fi
+[ -z "$p" ] || { say OK present; exit 0; }
 new=
 [ -e "$f" ] || new=1
 if [ -z "$new" ] && [ ! -w "$f" ]; then say E notwritable; exit 0; fi
@@ -370,12 +393,7 @@ func (s *Server) installKey(ctx context.Context, form *store.Host, keyed sshx.Ta
 		}
 		return hostCheck{Stage: "install", Reason: "failed"}, nil
 	}
-	said := ""
-	for _, l := range strings.Split(string(out.Out), "\n") {
-		if rest, ok := strings.CutPrefix(strings.TrimSpace(l), nonce+" "); ok {
-			said = rest
-		}
-	}
+	said := installSaid(string(out.Out), nonce)
 	installed := ""
 	switch {
 	case said == "OK added":
@@ -391,6 +409,25 @@ func (s *Server) installKey(ctx context.Context, form *store.Host, keyed sshx.Ta
 	default:
 		return hostCheck{Stage: "install", Reason: "failed"}, nil
 	}
+	// (Signed in with the key to the very machine the password went to: its key
+	// as that connection saw it, whatever is on record.)
+	first := res.SeenKey
+	prev := keyed.Verify
+	keyed.Verify = func(seen *sshx.Pinned) error {
+		if prev != nil {
+			if err := prev(seen); err != nil {
+				return err
+			}
+		}
+		if first == nil || !bytes.Equal(first.KeyData, seen.KeyData) {
+			exp := ""
+			if first != nil {
+				exp = first.Fingerprint
+			}
+			return &sshx.HostKeyChangedError{Expected: exp, Got: seen.Fingerprint}
+		}
+		return nil
+	}
 	c, err := s.checkDial(ctx, form, keyed)
 	if err != nil {
 		return c, err
@@ -400,6 +437,18 @@ func (s *Server) installKey(ctx context.Context, form *store.Host, keyed sshx.Ta
 		c.Stage = "verify:" + c.Stage
 	}
 	return c, nil
+}
+
+// installSaid: what installKeyScript said, from its output (a line of its
+// own, its nonce first; the last of them), "" for none.
+func installSaid(out, nonce string) string {
+	said := ""
+	for _, l := range strings.Split(out, "\n") {
+		if rest, ok := strings.CutPrefix(strings.TrimRight(l, "\r"), nonce+" "); ok {
+			said = rest
+		}
+	}
+	return said
 }
 
 // installReasons: the words installKeyScript says why it did not in.
