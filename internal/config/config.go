@@ -269,18 +269,18 @@ func extraOrigin(u *url.URL) (origin, host string, err error) {
 
 const (
 	// Unset, SSH targets may be anywhere (the public internet too: a VPS is
-	// the commonest host of a gateway run for oneself) but the gateway's own
-	// machine (defaultDenied): what listens there on loopback alone is not
-	// for its users to reach. Those who share a gateway narrow it.
+	// the commonest host of a gateway run for oneself) but loopback
+	// (defaultDenied): what listens on the gateway's machine for itself alone
+	// is not for its users to reach. (Its other addresses are not refused.) Those who share a gateway narrow it.
 	defaultAllowed = "0.0.0.0/0,::/0"
 	defaultDenied  = "127.0.0.0/8,::1/128"
 	// Never a host, or a cloud's metadata service, whatever is allowed:
 	// unspecified, link-local (the metadata of AWS, GCP, Azure, Tencent,
 	// Huawei), Alibaba Cloud's metadata (in the shared range 100.64.0.0/10,
-	// Tailscale's), AWS's IPv6 metadata (in fc00::/7), multicast,
+	// Tailscale's), Azure's WireServer, AWS's IPv6 metadata (in fc00::/7), multicast,
 	// reserved and broadcast, and the ranges kept for documentation.
-	alwaysDenied = "0.0.0.0/8,169.254.0.0/16,100.100.100.200/32,192.0.2.0/24,198.51.100.0/24,203.0.113.0/24,224.0.0.0/4,240.0.0.0/4," +
-		"::/128,fe80::/10,fd00:ec2::254/128,2001:db8::/32,ff00::/8"
+	alwaysDenied = "0.0.0.0/8,169.254.0.0/16,100.100.100.200/32,168.63.129.16/32,192.0.2.0/24,198.51.100.0/24,203.0.113.0/24,224.0.0.0/4,240.0.0.0/4," +
+		"::/128,fe80::/10,fd00:ec2::254/128,2001:db8::/32,3fff::/20,ff00::/8"
 )
 
 func Load() (*Config, error) {
@@ -333,14 +333,19 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
-	if c.AllowedNetworks, err = parsePrefixes(env("CORRAL_ALLOWED_NETWORKS", defaultAllowed)); err != nil {
-		return nil, fmt.Errorf("CORRAL_ALLOWED_NETWORKS: %w", err)
+	// (Blank, as unset: not a list that allows nothing.)
+	allowed := os.Getenv("CORRAL_ALLOWED_NETWORKS")
+	if strings.Trim(allowed, " \t,") == "" {
+		allowed = ""
 	}
 	denied := alwaysDenied
-	// (Loopback is refused only with the default: a list given names what it
-	// allows, 127.0.0.1 too if it is in it.)
-	if env("CORRAL_ALLOWED_NETWORKS", "") == "" {
-		denied += "," + defaultDenied
+	if allowed == "" {
+		// (Loopback is refused only with the default: a list given names what
+		// it allows, 127.0.0.1 too if it is in it.)
+		allowed, denied = defaultAllowed, denied+","+defaultDenied
+	}
+	if c.AllowedNetworks, err = parsePrefixes(allowed); err != nil {
+		return nil, fmt.Errorf("CORRAL_ALLOWED_NETWORKS: %w", err)
 	}
 	if extra := env("CORRAL_DENIED_NETWORKS", ""); extra != "" {
 		denied += "," + extra

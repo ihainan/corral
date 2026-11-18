@@ -263,8 +263,8 @@ All settings are environment variables. Only the first two are required.
 | `CORRAL_MASTER_KEY` / `CORRAL_MASTER_KEY_FILE` | (required) | 32 random bytes, base64 (`corral genkey`); encrypts stored credentials. The file wins if both are set |
 | `CORRAL_LISTEN` | `127.0.0.1:8080` (`0.0.0.0:8080` in the image) | Listen address |
 | `CORRAL_DATA_DIR` | `./data` (`/data` in the image) | Database and recordings |
-| `CORRAL_ALLOWED_NETWORKS` | everywhere but loopback | Networks SSH targets may resolve to, comma-separated. Unset, any address but the gateway's own machine (`127.0.0.0/8`, `::1`); set, only those named (add `127.0.0.1/32` to reach the gateway's machine) |
-| `CORRAL_DENIED_NETWORKS` | — | Extra networks to refuse. Always refused, whatever is allowed: `0.0.0.0/8`, link-local (`169.254.0.0/16`, `fe80::/10`: most clouds' instance metadata), Alibaba Cloud's metadata `100.100.100.200`, AWS's `fd00:ec2::254`, multicast, reserved and documentation ranges. An IPv6 address that carries an IPv4 one (NAT64, 6to4, Teredo) is held to the rules for that IPv4 address too |
+| `CORRAL_ALLOWED_NETWORKS` | everywhere but loopback | Networks SSH targets may resolve to, comma-separated. Unset, any address but loopback (`127.0.0.0/8`, `::1`); the gateway machine's other addresses are not refused. Set, only those named (`127.0.0.1/32` among them to reach loopback) |
+| `CORRAL_DENIED_NETWORKS` | — | Extra networks to refuse. Always refused, whatever is allowed: `0.0.0.0/8`, link-local (`169.254.0.0/16`, `fe80::/10`: most clouds' instance metadata), Alibaba Cloud's metadata `100.100.100.200`, Azure's WireServer `168.63.129.16`, AWS's `fd00:ec2::254`, multicast, reserved and documentation ranges. An IPv6 address that carries an IPv4 one by a known translation (NAT64's `64:ff9b::/96` and `64:ff9b:1::/48`, SIIT, 6to4, Teredo) is held to the rules for that IPv4 address too; a network's own NAT64 prefix is not recognised, so on such a network list the allowed networks instead |
 | `CORRAL_TRUSTED_PROXIES` | — | Proxies whose `X-Forwarded-For` is believed |
 | `CORRAL_DETACH_TIMEOUT` | `24h` | How long a session runs with nobody viewing it |
 | `CORRAL_MAX_SESSIONS_PER_USER` | `20` | Open sessions per user |
@@ -294,8 +294,8 @@ All settings are environment variables. Only the first two are required.
 - **The gateway acts with the users' SSH credentials.** Run it on a machine you
   trust as much as the hosts behind it.
 - **Narrow where SSH may go when you share the gateway.** By default users may
-  connect anywhere but the gateway's own machine, the public internet
-  included, as one would from their own computer. On a gateway shared by many,
+  connect anywhere but loopback, the public internet and the gateway
+  machine's other addresses included, as one would from their own computer. On a gateway shared by many,
   set `CORRAL_ALLOWED_NETWORKS` to the networks your hosts are in (say
   `10.0.0.0/8,100.64.0.0/10` for a LAN and Tailscale): otherwise anyone signed
   in can use the gateway's place in the network to try addresses and ports.

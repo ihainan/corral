@@ -46,13 +46,16 @@ func (g *Guard) Allowed(a netip.Addr) bool {
 var (
 	nat64      = netip.MustParsePrefix("64:ff9b::/96")
 	nat64Local = netip.MustParsePrefix("64:ff9b:1::/48")
+	siit       = netip.MustParsePrefix("::ffff:0:0:0/96") // (IPv4-translated, RFC 2765: not the mapped ::ffff:0:0/96)
 	sixToFour  = netip.MustParsePrefix("2002::/16")
 	teredo     = netip.MustParsePrefix("2001::/32")
 	compat4    = netip.MustParsePrefix("::/96")
 )
 
-// embedded4: the IPv4 addresses an IPv6 address stands for, by the
-// translations that reach one from it (RFC 6052, 3056, 4380, 4291).
+// embedded4: the IPv4 addresses an IPv6 address may stand for, by the
+// translations that reach one from it (RFC 6052, 8215, 2765, 3056, 4380,
+// 4291). A network's own NAT64 prefix (RFC 6052's network-specific) cannot
+// be known here: its addresses are taken as IPv6 ones.
 func embedded4(a netip.Addr) []netip.Addr {
 	if !a.Is6() {
 		return nil
@@ -60,15 +63,31 @@ func embedded4(a netip.Addr) []netip.Addr {
 	b := a.As16()
 	v4 := func(x, y, z, w byte) netip.Addr { return netip.AddrFrom4([4]byte{x, y, z, w}) }
 	switch {
-	case nat64.Contains(a):
+	case nat64.Contains(a), siit.Contains(a):
 		return []netip.Addr{v4(b[12], b[13], b[14], b[15])}
 	case compat4.Contains(a): // (not :: or ::1, nor another of 0.0.0.0/8: never an IPv4 one)
 		if b[12] == 0 {
 			return nil
 		}
 		return []netip.Addr{v4(b[12], b[13], b[14], b[15])}
-	case nat64Local.Contains(a): // (a /48 prefix: the address around the u octet, b[8])
-		return []netip.Addr{v4(b[6], b[7], b[9], b[10])}
+	case nat64Local.Contains(a):
+		// (The local-use block takes a prefix of any of RFC 6052's lengths
+		// within it, and which one the network uses is not known here:
+		// each reading is held to the rules, but those that come out in
+		// 0.0.0.0/8 — the zeros of another length's prefix, never an
+		// address a NAT64 is given.)
+		var out []netip.Addr
+		for _, c := range []netip.Addr{
+			v4(b[6], b[7], b[9], b[10]),    // /48
+			v4(b[7], b[9], b[10], b[11]),   // /56
+			v4(b[9], b[10], b[11], b[12]),  // /64
+			v4(b[12], b[13], b[14], b[15]), // /96
+		} {
+			if c.As4()[0] != 0 {
+				out = append(out, c)
+			}
+		}
+		return out
 	case sixToFour.Contains(a):
 		return []netip.Addr{v4(b[2], b[3], b[4], b[5])}
 	case teredo.Contains(a): // (its server, and its client obscured)
