@@ -118,8 +118,15 @@ func (s *Server) hostCheckTarget(ctx context.Context, w http.ResponseWriter, r *
 	}
 	var pinned *store.HostKey
 	if h != nil && h.Address == b.Address && h.Port == b.Port && sameID(h.JumpHostID, b.JumpHostID) {
-		if k, err := s.store.HostKey(ctx, u.ID, h.ID); err == nil {
+		// (Not pinned yet: only ErrNotFound. Any other failure to read it is no
+		// leave to sign in to whatever key is shown — as a connection's own does.)
+		k, err := checkHostKey(s, ctx, u.ID, h.ID)
+		switch {
+		case err == nil:
 			pinned = k
+		case !errors.Is(err, store.ErrNotFound):
+			s.internalError(w, r, err)
+			return t, nil, false
 		}
 	}
 	// (Decided in the handshake, before any credential is sent, as a connection's is.)
@@ -130,6 +137,11 @@ func (s *Server) hostCheckTarget(ctx context.Context, w http.ResponseWriter, r *
 		return nil
 	}
 	return t, form, true
+}
+
+// checkHostKey reads a host's pinned key for a check (a test's to fail).
+var checkHostKey = func(s *Server, ctx context.Context, ownerID, hostID int64) (*store.HostKey, error) {
+	return s.store.HostKey(ctx, ownerID, hostID)
 }
 
 // checkDial dials t (its jump host, for form, first), closes what it got at
@@ -283,8 +295,9 @@ if [ ! -e "$d" ]; then mkdir -m 700 "$d" 2>/dev/null || { say E mkdir; exit 0; }
 [ -L "$f" ] && { say E link; exit 0; }
 if [ -e "$f" ] && [ ! -f "$f" ]; then say E notfile; exit 0; fi
 if [ -f "$f" ]; then
+  [ -r "$f" ] || { say E notreadable; exit 0; }
   awk -v t="$t" -v b="$b" "$A" "$f" 2>/dev/null
-  case $? in 0) say OK present; exit 0;; 1) ;; *) say E scan; exit 0;; esac
+  case $? in 0) say OK present; exit 0;; 3) ;; *) say E scan; exit 0;; esac
 fi
 
 new=
@@ -299,10 +312,13 @@ say OK added
 
 // authorizedKeysScan is the awk program installKeyScript asks whether the key
 // (t, b: its type and data) is an entry of authorized_keys already: exit 0
-// it is, 1 it is not. A line is read as sshd reads it — a comment or a blank
-// line is none; options, if any, are name or name="value" separated by
-// commas (a backslash-escaped quote inside a value no end), up to a space or
-// tab — a line whose options are not so is no entry, as sshd refuses it;
+// it is, 3 it is not (anything else: it could not be read). A line is read as sshd reads it — a comment or a blank
+// line is none; options, if any, are those sshd knows — a flag, or one
+// taking a value as name="value" (names in any case) — separated by
+// commas, up to a space or tab; inside a value a backslash escapes a double
+// quote and nothing else (sshd's rule: "\\"" ends no value, a lone
+// backslash is itself). A line whose options are not so is no entry, as
+// sshd refuses it;
 // then the key's type and data (an RSA key's rsa-sha2-256 and rsa-sha2-512,
 // which sshd takes for it, too); a CR at its end dropped (CRLF files). Only
 // a line with the key's data in it, and of no more than 64 KiB, is read
@@ -311,7 +327,13 @@ say OK added
 // that does is the key added again, which sshd minds not. Like the
 // script, no single quote nor backslash in it (the characters made with
 // sprintf), so it is passed as it is, quoted, under any login shell.
-const authorizedKeysScan = `BEGIN { tab = sprintf("%c", 9); cr = sprintf("%c", 13); bs = sprintf("%c", 92); dq = sprintf("%c", 34); ws = "[ " tab "]+"; found = 0 }
+const authorizedKeysScan = `BEGIN {
+  tab = sprintf("%c", 9); cr = sprintf("%c", 13); bs = sprintf("%c", 92); dq = sprintf("%c", 34); ws = "[ " tab "]+"; found = 0
+  n = split("agent-forwarding cert-authority no-agent-forwarding no-port-forwarding no-pty no-user-rc no-x11-forwarding port-forwarding pty user-rc x11-forwarding restrict touch-required no-touch-required verify-required", a, " ")
+  for (k = 1; k <= n; k++) flag[a[k]] = 1
+  n = split("command environment expiry-time from permitlisten permitopen principals tunnel", a, " ")
+  for (k = 1; k <= n; k++) valued[a[k]] = 1
+}
 {
   l = $0
   if (substr(l, length(l), 1) == cr) l = substr(l, 1, length(l) - 1)
@@ -326,21 +348,23 @@ const authorizedKeysScan = `BEGIN { tab = sprintf("%c", 9); cr = sprintf("%c", 1
       s0 = i
       while (i <= L && substr(l, i, 1) ~ /[A-Za-z0-9_-]/) i++
       if (i == s0) { ok = 0; break }
+      name = tolower(substr(l, s0, i - s0))
       c = substr(l, i, 1)
       if (c == "=") {
+        if (!(name in valued)) { ok = 0; break }
         i++
         if (substr(l, i, 1) != dq) { ok = 0; break }
         i++
         while (i <= L) {
           c = substr(l, i, 1)
-          if (c == bs) { i += 2; continue }
+          if (c == bs && substr(l, i + 1, 1) == dq) { i += 2; continue }
           if (c == dq) break
           i++
         }
         if (i > L) { ok = 0; break }
         i++
         c = substr(l, i, 1)
-      }
+      } else if (!(name in flag)) { ok = 0; break }
       if (c == ",") { i++; continue }
       if (c == " " || c == tab) break
       ok = 0
@@ -354,7 +378,7 @@ const authorizedKeysScan = `BEGIN { tab = sprintf("%c", 9); cr = sprintf("%c", 1
   if (n < 2 || f[2] != b) next
   if (f[1] == t || (t == "ssh-rsa" && (f[1] == "rsa-sha2-256" || f[1] == "rsa-sha2-512"))) { found = 1; exit }
 }
-END { exit (found ? 0 : 1) }
+END { exit (found ? 0 : 3) }
 `
 
 // installKeyCommand: installKeyScript run by sh, with the nonce and authorizedKeysScan.
@@ -502,7 +526,7 @@ func installSaid(out, nonce string) string {
 }
 
 // installReasons: the words installKeyScript says why it did not in.
-var installReasons = map[string]bool{"scan": true, "nohome": true, "nokey": true, "dirlink": true, "mkdir": true, "notdir": true, "link": true, "notfile": true, "notwritable": true, "write": true}
+var installReasons = map[string]bool{"notreadable": true, "scan": true, "nohome": true, "nokey": true, "dirlink": true, "mkdir": true, "notdir": true, "link": true, "notfile": true, "notwritable": true, "write": true}
 
 // checkFailure is checkDial's account of a dial's failure (its jump host
 // and the rest, as there).

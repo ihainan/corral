@@ -1,6 +1,8 @@
 package web
 
 import (
+	"context"
+	"errors"
 	"net"
 	"os"
 	"os/exec"
@@ -272,6 +274,19 @@ func TestInstallKeyScriptPlain(t *testing.T) {
 	if got := run(""); got != "abc E nokey" {
 		t.Errorf("no key: %q", got)
 	}
+	// (Readable, or said: not taken for "not there", nor the key run onto a last line with no newline.)
+	os.MkdirAll(filepath.Join(home, ".ssh"), 0o700)
+	os.WriteFile(filepath.Join(home, ".ssh", "authorized_keys"), []byte("ssh-ed25519 OLD x"), 0o200)
+	if os.Geteuid() != 0 {
+		if got := run("ssh-ed25519 NEW x\n"); got != "abc E notreadable" {
+			t.Errorf("unreadable: %q", got)
+		}
+		os.Chmod(filepath.Join(home, ".ssh", "authorized_keys"), 0o600)
+		if b, _ := os.ReadFile(filepath.Join(home, ".ssh", "authorized_keys")); string(b) != "ssh-ed25519 OLD x" {
+			t.Errorf("unreadable, changed: %q", b)
+		}
+	}
+	os.RemoveAll(filepath.Join(home, ".ssh"))
 	// (A key only in a comment, or in another's comment: not there.)
 	os.MkdirAll(filepath.Join(home, ".ssh"), 0o700)
 	os.WriteFile(filepath.Join(home, ".ssh", "authorized_keys"), []byte("# ssh-ed25519 AAAA\nssh-rsa ZZZZ note ssh-ed25519 AAAA\n"), 0o600)
@@ -303,6 +318,14 @@ func TestInstallKeyScriptPlain(t *testing.T) {
 		{"rsa-sha2-256 NNNN\n", "ssh-rsa NNNN x", "OK present"},
 		{`from="1.2.3.4" rsa-sha2-512 OOOO c` + "\n", "ssh-rsa OOOO x", "OK present"},
 		{"rsa-sha2-256 PPPP\n", "ssh-ed25519 PPPP x", "OK added"},
+		// (A backslash escapes a quote only — "\\\"" ends no value: sshd's rule.)
+		{`from="10.0.0.0/8",command="echo \\"hello\\"" ssh-ed25519 QQQQ` + "\n", "ssh-ed25519 QQQQ x", "OK present"},
+		{`command="a\b" ssh-ed25519 RRRR` + "\n", "ssh-ed25519 RRRR x", "OK present"},
+		// (Options sshd does not know, a valued one without its value, a flag given one: no entry.)
+		{"unknown-option ssh-ed25519 SSSS\n", "ssh-ed25519 SSSS x", "OK added"},
+		{"command ssh-ed25519 TTTT\n", "ssh-ed25519 TTTT x", "OK added"},
+		{`no-pty="x" ssh-ed25519 UUUU` + "\n", "ssh-ed25519 UUUU x", "OK added"},
+		{`NO-PTY,Restrict,Command="x" ssh-ed25519 VVVV` + "\n", "ssh-ed25519 VVVV x", "OK present"},
 	} {
 		os.WriteFile(filepath.Join(home, ".ssh", "authorized_keys"), []byte(c.file), 0o600)
 		if got := run(c.key + "\n"); got != "abc "+c.want {
@@ -552,5 +575,30 @@ func TestHostTestDisconnectWordsNotAuth(t *testing.T) {
 		if j := r.json(); j["ok"] == true || j["stage"] == "auth" {
 			t.Errorf("%v: %s", f["auth"], r.Body)
 		}
+	}
+}
+
+// A host's pinned key that cannot be read (not "none yet"): the check stops
+// before dialling — no password sent to whatever key a host shows.
+func TestHostTestPinnedKeyUnreadable(t *testing.T) {
+	h := newHarness(t)
+	a := h.member(h.admin(), "alice")
+	srv := h.sshServer(t.TempDir())
+	r := a.do("POST", "/api/hosts", checkForm(srv.Addr.Port, map[string]any{"name": "box"}))
+	mustStatus(t, r, 201, "create")
+	id := r.json()["id"]
+	old := checkHostKey
+	checkHostKey = func(*Server, context.Context, int64, int64) (*store.HostKey, error) { return nil, errors.New("database is locked") }
+	t.Cleanup(func() { checkHostKey = old })
+	before := srv.Attempts()
+	r = a.do("POST", "/api/hosts/test", checkForm(srv.Addr.Port, map[string]any{"id": id, "password": ""}))
+	if r.Status != 500 || srv.Attempts() != before {
+		t.Errorf("unreadable pin: %d %s, %d password checks", r.Status, r.Body, srv.Attempts()-before)
+	}
+	// (None yet — ErrNotFound — is a host not pinned: checked.)
+	checkHostKey = func(*Server, context.Context, int64, int64) (*store.HostKey, error) { return nil, store.ErrNotFound }
+	r = a.do("POST", "/api/hosts/test", checkForm(srv.Addr.Port, map[string]any{"id": id, "password": ""}))
+	if r.Status != 200 || r.json()["ok"] != true {
+		t.Errorf("not pinned: %d %s", r.Status, r.Body)
 	}
 }

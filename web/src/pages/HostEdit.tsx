@@ -256,7 +256,8 @@ export function HostEditPage({ id }: { id?: number }) {
   // (What was checked, as it was: the form cannot change meanwhile — it is held while a check runs, and a change after drops the check.)
   const saveAnyway = () => {
     if (busy || checking || !check) return
-    const body = check.body as ReturnType<typeof formBody>
+    // (The connection as it was checked; the name, which is no part of a check, as it is now.)
+    const body = { ...(check.body as ReturnType<typeof formBody>), name }
     setCheck(null)
     setErrors({})
     void save(body)
