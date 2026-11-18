@@ -651,6 +651,8 @@ const zh = {
   'convo.err.working': '它正在工作，等它停下再切换。',
   'convo.modeUnknown': '已切换权限模式，屏幕上没读到新模式，下一条消息后会显示',
   'convo.branch': '分支：{b}',
+  'convo.branchRow': '分支',
+  'convo.viaRow': '请求发往',
   'convo.via': '走 {host}',
   'convo.viaHint': '这个会话的请求发到 {host}，不是模型厂商自己的地址。这里只看得见这一跳，看不见它背后是什么。',
   'convo.viaNote': '不显示订阅额度：这个会话的请求走 {host}，用的不是账号订阅。',
@@ -2022,6 +2024,7 @@ const zh = {
   'convo.event.sep': ' · ',
   'convo.switchKeysMac': '⌥↑↓ 切换',
   'convo.effortShort': '思考：{e}',
+  'convo.effortWord': '思考：',
   // ux1101 B3
   'term.fontNow': '当前字号 {n}',
   'term.closeSessionTab': '标签页会一起关闭。',
@@ -2833,6 +2836,8 @@ const en: Record<Key, string> = {
   'convo.err.working': 'It is working: switch once it stops.',
   'convo.modeUnknown': 'Switched the permission mode; the screen did not say to which. It shows after the next message.',
   'convo.branch': 'Branch: {b}',
+  'convo.branchRow': 'Branch',
+  'convo.viaRow': 'Requests go to',
   'convo.via': 'via {host}',
   'convo.viaHint': 'This session’s requests go to {host}, not to the model maker’s own door. Only this first hop is seen from here, not what is behind it.',
   'convo.viaNote': 'No subscription use is shown: this session’s requests go to {host}, not to the account’s subscription.',
@@ -4204,6 +4209,7 @@ const en: Record<Key, string> = {
   'convo.event.sep': ' · ',
   'convo.switchKeysMac': '⌥↑↓ to switch',
   'convo.effortShort': 'Thinking: {e}',
+  'convo.effortWord': 'Thinking: ',
   // ux1101 B3
   'term.fontNow': 'Size {n}',
   'term.closeSessionTab': ' Its tab closes too.',

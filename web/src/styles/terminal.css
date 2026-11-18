@@ -653,7 +653,15 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 .convo-runs-bar.is-warn i { background: var(--term-warn-text); }
 .convo-runs-bar.is-danger i { background: var(--term-danger-text); }
 .convo-runs-note { margin: 4px 0 0; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-3); }
-@media (max-width: 420px) { .convo-runs-branch { display: none; } }
+/* (A phone, 11-18: seven things on a line cut to "自动模", "H", "Op…", "走 127.0.0".
+   The branch and where the requests go give way, said in the context's pop-up
+   instead; what is left is whole.) */
+@media (max-width: 520px) { .convo-runs-branch, .convo-runs-via { display: none; } }
+@media (min-width: 520.02px) { .convo-runs-row.is-narrow-only { display: none; } }
+@media (max-width: 400px) {
+  .convo-runs-effort-word { display: none; }
+  .convo-runs-effort::before { content: "·"; margin-right: 1px; } /* (after the model, as "Opus 5.5 · 高") */
+}
 .convo-col {
   max-width: 780px; margin: 0 auto; display: flex; flex-direction: column; gap: 12px;
   padding: 16px max(16px, env(safe-area-inset-right, 0px)) 28px max(16px, env(safe-area-inset-left, 0px));

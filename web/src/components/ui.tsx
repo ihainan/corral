@@ -128,6 +128,7 @@ export function useFocusTrap<T extends HTMLElement>(onClose: () => void) {
 export function Dialog(props: { title: string; onClose: () => void; children: ReactNode; sheet?: boolean; hideTitle?: boolean; wide?: boolean; seeThrough?: boolean; guard?: boolean; busy?: boolean; icon?: ReactNode; tone?: 'danger' | 'warn'; sub?: ReactNode; className?: string; dialogProps?: React.HTMLAttributes<HTMLDivElement> }) {
   const dismiss = () => !props.guard && !props.busy && props.onClose()
   const ref = useFocusTrap<HTMLDivElement>(dismiss)
+  useSheetDrag(ref, props.sheet !== false && !props.guard && !props.busy, props.onClose)
   return createPortal(
     <div className={'overlay' + (props.sheet !== false ? ' sheet-mode' : '') + (props.seeThrough ? ' see-through' : '')} onMouseDown={(e) => e.target === e.currentTarget && dismiss()}>
       <div {...props.dialogProps} className={'dialog' + (props.wide ? ' dialog-wide' : '') + (props.className ? ' ' + props.className : '')} role="dialog" aria-modal="true" aria-label={props.title} ref={ref}>
@@ -155,6 +156,86 @@ export function Dialog(props: { title: string; onClose: () => void; children: Re
     </div>,
     document.body,
   )
+}
+
+// A bottom sheet pulled down closes (11-18: the bar on its top said it
+// could be, and nothing came of it). Only where it is drawn as a sheet
+// (narrow, app.css), not while it may not be closed (guard, busy); a pull
+// is taken only from where nothing above the finger is scrolled down, in
+// a field nothing, and only downwards and more down than across — else
+// the sheet's own scrolling (or a wide screen's, sideways) is left alone.
+// Let go past a fifth of it, or flicked down, it goes; else it springs back.
+const SHEET_QUERY = '(max-width: 520px)'
+function useSheetDrag(ref: React.RefObject<HTMLDivElement | null>, on: boolean, onClose: () => void) {
+  const closeRef = useRef(onClose)
+  closeRef.current = onClose
+  useEffect(() => {
+    const el = ref.current
+    if (!on || !el) return
+    let y0 = 0, x0 = 0, dy = 0, state: 'idle' | 'maybe' | 'drag' | 'off' = 'idle'
+    // (Where the finger was lately: how fast it moved as it let go, not on the whole.)
+    let trail: { y: number; t: number }[] = []
+    const scrolledAbove = (n: Node | null) => {
+      for (let e = n instanceof Element ? n : n?.parentElement ?? null; e && e !== el.parentElement; e = e.parentElement) {
+        if (e.scrollTop > 0) return true
+        if (e === el) break
+      }
+      return false
+    }
+    const start = (ev: TouchEvent) => {
+      state = 'off'
+      if (ev.touches.length !== 1 || !window.matchMedia(SHEET_QUERY).matches) return
+      const tgt = ev.target as Element | null
+      if (tgt?.closest('input, textarea, select, [contenteditable="true"], .convo-panelwin-screen') || scrolledAbove(tgt)) return
+      y0 = ev.touches[0].clientY; x0 = ev.touches[0].clientX; dy = 0
+      trail = [{ y: y0, t: ev.timeStamp }]
+      state = 'maybe'
+    }
+    const move = (ev: TouchEvent) => {
+      if (state === 'off' || state === 'idle') return
+      const d = ev.touches[0].clientY - y0, dx = Math.abs(ev.touches[0].clientX - x0)
+      if (state === 'maybe') {
+        if (Math.abs(d) < 6 && dx < 6) return
+        if (d <= 0 || dx > d) { state = 'off'; return } // (up, or across: the sheet's own)
+        state = 'drag'
+        el.style.transition = 'none'
+      }
+      ev.preventDefault() // (the page under it not pulled too)
+      dy = Math.max(0, d)
+      trail.push({ y: ev.touches[0].clientY, t: ev.timeStamp })
+      while (trail.length > 2 && ev.timeStamp - trail[1].t > 100) trail.shift()
+      el.style.transform = `translateY(${dy}px)`
+    }
+    const end = () => {
+      if (state !== 'drag') { state = 'idle'; return }
+      state = 'idle'
+      const a = trail[0], b = trail[trail.length - 1]
+      const fast = dy > 24 && (b.y - a.y) / Math.max(1, b.t - a.t) > 0.5 // (px/ms)
+      const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+      if (dy > el.offsetHeight / 5 || fast) {
+        if (reduce) return closeRef.current()
+        el.style.transition = 'transform 0.16s ease-in'
+        el.style.transform = `translateY(${el.offsetHeight}px)`
+        window.setTimeout(() => closeRef.current(), 160)
+      } else {
+        el.style.transition = reduce ? 'none' : 'transform 0.18s ease-out'
+        el.style.transform = ''
+      }
+    }
+    el.addEventListener('touchstart', start, { passive: true })
+    el.addEventListener('touchmove', move, { passive: false })
+    el.addEventListener('touchend', end)
+    const cancel = () => { dy = 0; trail = [{ y: 0, t: 0 }]; end() } // (taken from it: back, not closed)
+    el.addEventListener('touchcancel', cancel)
+    return () => {
+      el.removeEventListener('touchstart', start)
+      el.removeEventListener('touchmove', move)
+      el.removeEventListener('touchend', end)
+      el.removeEventListener('touchcancel', cancel)
+      el.style.transform = ''
+      el.style.transition = ''
+    }
+  }, [ref, on])
 }
 
 // The head of a dialog whose body is a thing to look at (a file, a picture,

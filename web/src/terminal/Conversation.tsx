@@ -2611,6 +2611,18 @@ const effortName = (e: string) => ((EFFORTS as readonly string[]).includes(e) ? 
 // (via, auth: where its requests go and how it signs in, as its process on
 // the host says — see convoBind. Shown only where that is not the model
 // maker's own door: the quiet case, which is most of them, says nothing.)
+// How hard it thinks, as the row under the box says it: "思考：高"; on a
+// very narrow phone the level alone, beside the model as Claude Code's own
+// line has it ("Opus 5.5 · 高") — 11-18, the model was cut for it.
+function EffortSaid({ level }: { level: string }) {
+  return (
+    <span>
+      <span className="convo-runs-effort-word">{t('convo.effortWord')}</span>
+      {effortName(level)}
+    </span>
+  )
+}
+
 function Runs({ meta, goal, active, mode, model, effort, quota, via, auth, onSide }: { meta: ConvoMeta; goal?: string; active: boolean; mode?: ModeSwitch; model?: ModelSwitch; effort?: EffortSwitch; quota?: QuotaOf; via?: string; auth?: string; onSide?: () => void }) {
   const [open, setOpen] = useState<false | 'ctx' | 'model' | 'effort' | 'mode'>(false) // (which of its pop-ups)
   // (Another agent bound meanwhile — the pane's program changed: its model and effort menus, of the one before, closed;
@@ -2869,7 +2881,7 @@ function Runs({ meta, goal, active, mode, model, effort, quota, via, auth, onSid
               setOpen(open === which ? false : which)
             }}
           >
-            {t('convo.effortShort', { e: effortName(level) })}
+            <EffortSaid level={level} />
             <ChevronsUpDown size={12} aria-hidden="true" />
           </button>
           ) : model?.efforts && model.can ? (
@@ -2886,11 +2898,11 @@ function Runs({ meta, goal, active, mode, model, effort, quota, via, auth, onSid
                 setOpen(open === 'model' ? false : 'model')
               }}
             >
-              {t('convo.effortShort', { e: effortName(level) })}
+              <EffortSaid level={level} />
               <ChevronsUpDown size={12} aria-hidden="true" />
             </button>
           ) : (
-            <span className="convo-runs-item convo-runs-effort" title={t('convo.effort') + ': ' + effortName(level)}>{t('convo.effortShort', { e: effortName(level) })}</span>
+            <span className="convo-runs-item convo-runs-effort" title={t('convo.effort') + ': ' + effortName(level)}><EffortSaid level={level} /></span>
           )
         })()}
       {/* Where its requests go, when that is somewhere of the person's own
@@ -3088,6 +3100,20 @@ function Runs({ meta, goal, active, mode, model, effort, quota, via, auth, onSid
               <div className="convo-runs-row">
                 <span>{t('convo.model')}</span>
                 <span title={meta.model}>{modelName(meta.model)}</span>
+              </div>
+            )}
+            {/* (On a phone the row under the box leaves out the branch and where the
+                requests go — 11-18, it was cut to "H" and "走 127.0.0": said here.) */}
+            {meta.branch && (
+              <div className="convo-runs-row is-narrow-only">
+                <span>{t('convo.branchRow')}</span>
+                <span>{meta.branch}</span>
+              </div>
+            )}
+            {where && (
+              <div className="convo-runs-row is-narrow-only">
+                <span>{t('convo.viaRow')}</span>
+                <span>{where}</span>
               </div>
             )}
             {meta.answer && <AnswerPart answer={meta.answer} />}
