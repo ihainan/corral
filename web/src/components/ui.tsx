@@ -175,6 +175,11 @@ function useSheetDrag(ref: React.RefObject<HTMLDivElement | null>, on: boolean, 
     let y0 = 0, x0 = 0, dy = 0, state: 'idle' | 'maybe' | 'drag' | 'off' = 'idle'
     // (Where the finger was lately: how fast it moved as it let go, not on the whole.)
     let trail: { y: number; t: number }[] = []
+    let timer = 0 // (the close after its slide; dropped if the hook ends first)
+    const back = () => {
+      el.style.transition = window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'none' : 'transform 0.18s ease-out'
+      el.style.transform = ''
+    }
     const scrolledAbove = (n: Node | null) => {
       for (let e = n instanceof Element ? n : n?.parentElement ?? null; e && e !== el.parentElement; e = e.parentElement) {
         if (e.scrollTop > 0) return true
@@ -183,6 +188,8 @@ function useSheetDrag(ref: React.RefObject<HTMLDivElement | null>, on: boolean, 
       return false
     }
     const start = (ev: TouchEvent) => {
+      // (A second finger mid-pull: the pull let go of, the sheet back.)
+      if (state === 'drag') back()
       state = 'off'
       if (ev.touches.length !== 1 || !window.matchMedia(SHEET_QUERY).matches) return
       const tgt = ev.target as Element | null
@@ -206,32 +213,31 @@ function useSheetDrag(ref: React.RefObject<HTMLDivElement | null>, on: boolean, 
       while (trail.length > 2 && ev.timeStamp - trail[1].t > 100) trail.shift()
       el.style.transform = `translateY(${dy}px)`
     }
-    const end = () => {
+    const end = (ev?: TouchEvent) => {
       if (state !== 'drag') { state = 'idle'; return }
       state = 'idle'
       const a = trail[0], b = trail[trail.length - 1]
-      const fast = dy > 24 && (b.y - a.y) / Math.max(1, b.t - a.t) > 0.5 // (px/ms)
-      const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+      // (Moving as it let go: held still after, it was no flick.)
+      const fast = !!ev && dy > 24 && ev.timeStamp - b.t < 60 && (b.y - a.y) / Math.max(1, b.t - a.t) > 0.5 // (px/ms)
       if (dy > el.offsetHeight / 5 || fast) {
-        if (reduce) return closeRef.current()
+        if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return closeRef.current()
         el.style.transition = 'transform 0.16s ease-in'
         el.style.transform = `translateY(${el.offsetHeight}px)`
-        window.setTimeout(() => closeRef.current(), 160)
-      } else {
-        el.style.transition = reduce ? 'none' : 'transform 0.18s ease-out'
-        el.style.transform = ''
-      }
+        timer = window.setTimeout(() => { timer = 0; closeRef.current() }, 160)
+      } else back()
     }
     el.addEventListener('touchstart', start, { passive: true })
     el.addEventListener('touchmove', move, { passive: false })
     el.addEventListener('touchend', end)
-    const cancel = () => { dy = 0; trail = [{ y: 0, t: 0 }]; end() } // (taken from it: back, not closed)
+    const cancel = () => { dy = 0; end() } // (taken from it: back, not closed)
     el.addEventListener('touchcancel', cancel)
     return () => {
       el.removeEventListener('touchstart', start)
       el.removeEventListener('touchmove', move)
       el.removeEventListener('touchend', end)
       el.removeEventListener('touchcancel', cancel)
+      // (Unmounted, or no longer to be closed — guard, busy — in its slide: not closed now.)
+      window.clearTimeout(timer)
       el.style.transform = ''
       el.style.transition = ''
     }

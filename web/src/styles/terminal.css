@@ -656,8 +656,12 @@ html.kb-open .convo-dock { padding-bottom: 6px; }
 /* (A phone, 11-18: seven things on a line cut to "自动模", "H", "Op…", "走 127.0.0".
    The branch and where the requests go give way, said in the context's pop-up
    instead; what is left is whole.) */
-@media (max-width: 520px) { .convo-runs-branch, .convo-runs-via { display: none; } }
-@media (min-width: 520.02px) { .convo-runs-row.is-narrow-only { display: none; } }
+/* (Only where the context's pop-up is there to say them in: has-ctx.) */
+.convo-runs-row.is-narrow-only { display: none; }
+@media (max-width: 520px) {
+  .convo-runs.has-ctx .convo-runs-branch, .convo-runs.has-ctx .convo-runs-via { display: none; }
+  .convo-runs-row.is-narrow-only { display: flex; }
+}
 @media (max-width: 400px) {
   .convo-runs-effort-word { display: none; }
   .convo-runs-effort::before { content: "·"; margin-right: 1px; } /* (after the model, as "Opus 5.5 · 高") */

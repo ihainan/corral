@@ -2782,7 +2782,7 @@ function Runs({ meta, goal, active, mode, model, effort, quota, via, auth, onSid
   const full = Math.min(1, used / windows[0])
   return (
     // (The focus gone elsewhere, as by Tab, while the model menu is open, the list read or not: closed.)
-    <div className="convo-runs" ref={box} onBlur={(e) => (open === 'model' || open === 'effort' || open === 'mode') && !box.current?.contains(e.relatedTarget as Node | null) && setOpen(false)}>
+    <div className={'convo-runs' + (used > 0 ? ' has-ctx' : '')} ref={box} onBlur={(e) => (open === 'model' || open === 'effort' || open === 'mode') && !box.current?.contains(e.relatedTarget as Node | null) && setOpen(false)}>
       {(mode?.now || meta.mode || (mode?.codex && meta.collab)) &&
         (mode?.onPick || mode?.busy ? (
           <button
