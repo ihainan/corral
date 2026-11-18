@@ -26,8 +26,58 @@ func New(allowed, denied []netip.Prefix) *Guard {
 	return &Guard{allowed: allowed, denied: denied, resolver: net.DefaultResolver}
 }
 
+// Allowed says whether a may be connected to: it is in an allowed network
+// and in no denied one, and so is every IPv4 address an IPv6 one carries
+// (NAT64, 6to4, Teredo, IPv4-compatible): 64:ff9b::a9fe:a9fe is
+// 169.254.169.254 by way of a NAT64 gateway.
 func (g *Guard) Allowed(a netip.Addr) bool {
 	a = a.Unmap()
+	if !g.allowedOne(a) {
+		return false
+	}
+	for _, v4 := range embedded4(a) {
+		if !g.allowedOne(v4) {
+			return false
+		}
+	}
+	return true
+}
+
+var (
+	nat64      = netip.MustParsePrefix("64:ff9b::/96")
+	nat64Local = netip.MustParsePrefix("64:ff9b:1::/48")
+	sixToFour  = netip.MustParsePrefix("2002::/16")
+	teredo     = netip.MustParsePrefix("2001::/32")
+	compat4    = netip.MustParsePrefix("::/96")
+)
+
+// embedded4: the IPv4 addresses an IPv6 address stands for, by the
+// translations that reach one from it (RFC 6052, 3056, 4380, 4291).
+func embedded4(a netip.Addr) []netip.Addr {
+	if !a.Is6() {
+		return nil
+	}
+	b := a.As16()
+	v4 := func(x, y, z, w byte) netip.Addr { return netip.AddrFrom4([4]byte{x, y, z, w}) }
+	switch {
+	case nat64.Contains(a):
+		return []netip.Addr{v4(b[12], b[13], b[14], b[15])}
+	case compat4.Contains(a): // (not :: or ::1, nor another of 0.0.0.0/8: never an IPv4 one)
+		if b[12] == 0 {
+			return nil
+		}
+		return []netip.Addr{v4(b[12], b[13], b[14], b[15])}
+	case nat64Local.Contains(a): // (a /48 prefix: the address around the u octet, b[8])
+		return []netip.Addr{v4(b[6], b[7], b[9], b[10])}
+	case sixToFour.Contains(a):
+		return []netip.Addr{v4(b[2], b[3], b[4], b[5])}
+	case teredo.Contains(a): // (its server, and its client obscured)
+		return []netip.Addr{v4(b[4], b[5], b[6], b[7]), v4(^b[12], ^b[13], ^b[14], ^b[15])}
+	}
+	return nil
+}
+
+func (g *Guard) allowedOne(a netip.Addr) bool {
 	if !a.IsValid() {
 		return false
 	}

@@ -412,7 +412,7 @@ func (s *Server) dialForOpen(ctx context.Context, w http.ResponseWriter, r *http
 				map[string]any{"expected": hk.Expected, "got": hk.Got})
 		case errors.Is(err, netguard.ErrForbidden):
 			s.audit(r, "session.forbidden", hostTarget(h), nil)
-			writeError(w, http.StatusForbidden, "target_forbidden", "this address is not allowed by the administrator")
+			writeError(w, http.StatusForbidden, "target_forbidden", "this address is not allowed (CORRAL_ALLOWED_NETWORKS, CORRAL_DENIED_NETWORKS)")
 		case errors.Is(err, sshx.ErrAuthFailed):
 			s.audit(r, "session.auth_failed", hostTarget(h), nil)
 			writeError(w, http.StatusUnprocessableEntity, "auth_failed", "the host rejected the user name or credential")

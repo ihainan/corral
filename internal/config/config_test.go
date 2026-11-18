@@ -1,6 +1,7 @@
 package config
 
 import (
+	"net/netip"
 	"strings"
 	"testing"
 )
@@ -209,5 +210,41 @@ func TestExtraURLsAndForwardDomain(t *testing.T) {
 	t.Setenv("CORRAL_EXTRA_URLS", "http://ssh.example.test:8080")
 	if _, err := Load(); err == nil {
 		t.Error("plain HTTP beside forwarded ports: accepted")
+	}
+}
+
+// SSH targets: unset, anywhere but loopback and what is always refused; a
+// list given, what it names (loopback too), and the always-refused still.
+func TestNetworkDefaults(t *testing.T) {
+	t.Setenv("CORRAL_MASTER_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	t.Setenv("CORRAL_PUBLIC_URL", "https://ssh.example.com")
+	t.Setenv("CORRAL_ALLOWED_NETWORKS", "")
+	t.Setenv("CORRAL_DENIED_NETWORKS", "")
+	has := func(ps []netip.Prefix, s string) bool {
+		for _, p := range ps {
+			if p == netip.MustParsePrefix(s) {
+				return true
+			}
+		}
+		return false
+	}
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !has(c.AllowedNetworks, "0.0.0.0/0") || !has(c.AllowedNetworks, "::/0") {
+		t.Errorf("default allowed %v, want everywhere", c.AllowedNetworks)
+	}
+	for _, p := range []string{"127.0.0.0/8", "::1/128", "169.254.0.0/16", "100.100.100.200/32", "fd00:ec2::254/128"} {
+		if !has(c.DeniedNetworks, p) {
+			t.Errorf("default denied lacks %s: %v", p, c.DeniedNetworks)
+		}
+	}
+	t.Setenv("CORRAL_ALLOWED_NETWORKS", "127.0.0.1/32,10.0.0.0/8")
+	if c, err = Load(); err != nil {
+		t.Fatal(err)
+	}
+	if has(c.DeniedNetworks, "127.0.0.0/8") || !has(c.DeniedNetworks, "169.254.0.0/16") {
+		t.Errorf("with a list given, denied %v: want the always-refused only", c.DeniedNetworks)
 	}
 }
