@@ -112,6 +112,7 @@ export function HostEditPage({ id }: { id?: number }) {
     try {
       const k = await api<KeyCred>('POST', '/api/credentials', { name: name ? `${name} key` : 'corral key', mode: 'generate' })
       setKeys((ks) => [...ks, k])
+      formRev.current++ // (now, not after the render: a check answering meanwhile is of the key before)
       setCredentialId(k.id)
     } catch (e) {
       toast(errorText(e), true)
@@ -127,13 +128,15 @@ export function HostEditPage({ id }: { id?: number }) {
 
   // "alice@10.0.0.5:2222" pasted into the address fills user name and port too.
   // Runs on blur and again on submit, since Enter submits without a blur.
-  const splitAddress = () => {
+  // (forCheck: split as a check of it starts — the split values are the form it is of, not a change after it.)
+  const splitAddress = (forCheck = false) => {
     const m = address.trim().match(/^(?:([^@\s]+)@)?(\[[0-9a-fA-F:]+\]|[^:\s]+)(?::(\d{1,5}))?$/)
     if (!m || (!m[1] && !m[3])) return { address, username, port }
     const out = { address: m[2].replace(/^\[|\]$/g, ''), username: m[1] ?? username, port: m[3] ?? port }
     setAddress(out.address)
     setUsername(out.username)
     setPort(out.port)
+    if (forCheck) checkedOf.current = JSON.stringify([out.address, out.port, out.username, auth, password, credentialId, jumpId])
     toast(t('host.addressSplit'))
     return out
   }
@@ -216,7 +219,7 @@ export function HostEditPage({ id }: { id?: number }) {
   const submit = async (e: FormEvent) => {
     e.preventDefault()
     if (busy || checking || generating) return
-    const a = splitAddress()
+    const a = splitAddress(true)
     if (!checkFields(a)) return
     setErrors({})
     setCheck(null)
@@ -238,7 +241,7 @@ export function HostEditPage({ id }: { id?: number }) {
 
   const testOnly = async () => {
     if (busy || checking || generating) return
-    const a = splitAddress()
+    const a = splitAddress(true)
     if (!checkFields(a)) return
     setErrors({})
     setCheck(null)
@@ -295,7 +298,7 @@ export function HostEditPage({ id }: { id?: number }) {
         <fieldset className="form-hold" disabled={checking}>
         <div className="row2">
           <Field label={t('host.address')} htmlFor="h-addr" error={fe('address')}>
-            <input id="h-addr" className="input" value={address} onChange={(e) => setAddress(e.target.value)} onBlur={splitAddress} placeholder={t('host.addressPlaceholder')}
+            <input id="h-addr" className="input" value={address} onChange={(e) => setAddress(e.target.value)} onBlur={() => splitAddress()} placeholder={t('host.addressPlaceholder')}
               autoCapitalize="none" autoCorrect="off" spellCheck={false} inputMode="url" required aria-invalid={!!fe('address')} />
           </Field>
           {/* (A Field as the others, its error under it: ux1101 PG-19.) */}
@@ -445,6 +448,7 @@ export function HostEditPage({ id }: { id?: number }) {
           onClose={() => setImporting(false)}
           onDone={(k) => {
             setKeys((ks) => [...ks.filter((x) => x.id !== k.id), k])
+            formRev.current++
             setCredentialId(k.id)
           }}
         />

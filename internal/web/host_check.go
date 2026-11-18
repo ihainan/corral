@@ -300,29 +300,59 @@ say OK added
 // authorizedKeysScan is the awk program installKeyScript asks whether the key
 // (t, b: its type and data) is an entry of authorized_keys already: exit 0
 // it is, 1 it is not. A line is read as sshd reads it — a comment or a blank
-// line is none; options, if any, end at the first space or tab outside
-// double quotes (a backslash-escaped quote inside them no end); then the
-// key's type and data; a CR at its end dropped (CRLF files). Like the
+// line is none; options, if any, are name or name="value" separated by
+// commas (a backslash-escaped quote inside a value no end), up to a space or
+// tab — a line whose options are not so is no entry, as sshd refuses it;
+// then the key's type and data (an RSA key's rsa-sha2-256 and rsa-sha2-512,
+// which sshd takes for it, too); a CR at its end dropped (CRLF files). Only
+// a line with the key's data in it, and of no more than 64 KiB, is read
+// further (BusyBox's awk takes a long line a character at a time in time
+// that grows with its square): one longer is taken for none — the worst
+// that does is the key added again, which sshd minds not. Like the
 // script, no single quote nor backslash in it (the characters made with
 // sprintf), so it is passed as it is, quoted, under any login shell.
 const authorizedKeysScan = `BEGIN { tab = sprintf("%c", 9); cr = sprintf("%c", 13); bs = sprintf("%c", 92); dq = sprintf("%c", 34); ws = "[ " tab "]+"; found = 0 }
 {
   l = $0
   if (substr(l, length(l), 1) == cr) l = substr(l, 1, length(l) - 1)
+  if (index(l, b) == 0 || length(l) > 65536) next
   sub("^" ws, "", l)
   if (l == "" || substr(l, 1, 1) == "#") next
-  if (l !~ ("^(ssh-|ecdsa-|sk-)[^ " tab "]*[ " tab "]")) {
-    q = 0
-    for (i = 1; i <= length(l); i++) {
+  if (l !~ ("^(ssh-|ecdsa-|sk-|rsa-sha2-)[^ " tab "]*[ " tab "]")) {
+    L = length(l)
+    i = 1
+    ok = 1
+    while (1) {
+      s0 = i
+      while (i <= L && substr(l, i, 1) ~ /[A-Za-z0-9_-]/) i++
+      if (i == s0) { ok = 0; break }
       c = substr(l, i, 1)
-      if (c == dq && (i == 1 || substr(l, i - 1, 1) != bs)) q = !q
-      else if (!q && (c == " " || c == tab)) break
+      if (c == "=") {
+        i++
+        if (substr(l, i, 1) != dq) { ok = 0; break }
+        i++
+        while (i <= L) {
+          c = substr(l, i, 1)
+          if (c == bs) { i += 2; continue }
+          if (c == dq) break
+          i++
+        }
+        if (i > L) { ok = 0; break }
+        i++
+        c = substr(l, i, 1)
+      }
+      if (c == ",") { i++; continue }
+      if (c == " " || c == tab) break
+      ok = 0
+      break
     }
+    if (!ok) next
     l = substr(l, i)
     sub("^" ws, "", l)
   }
   n = split(l, f, ws)
-  if (n >= 2 && f[1] == t && f[2] == b) { found = 1; exit }
+  if (n < 2 || f[2] != b) next
+  if (f[1] == t || (t == "ssh-rsa" && (f[1] == "rsa-sha2-256" || f[1] == "rsa-sha2-512"))) { found = 1; exit }
 }
 END { exit (found ? 0 : 1) }
 `

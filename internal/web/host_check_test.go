@@ -295,6 +295,14 @@ func TestInstallKeyScriptPlain(t *testing.T) {
 		{`from="10.0.0.0/8" ssh-ed25519 HHHH` + "\r\n", "ssh-ed25519 HHHH x", "OK present"},
 		{"ssh-ed25519 IIII\r\n", "ssh-ed25519 IIII x", "OK present"},
 		{"   \t# ssh-ed25519 JJJJ\n\n", "ssh-ed25519 JJJJ x", "OK added"},
+		// (Options sshd refuses — a value not quoted, a quote not closed, options alone: no entry.)
+		{"command=unquoted ssh-ed25519 KKKK\n", "ssh-ed25519 KKKK x", "OK added"},
+		{`command="never closed ssh-ed25519 LLLL` + "\n", "ssh-ed25519 LLLL x", "OK added"},
+		{"no-pty,no-agent-forwarding ssh-ed25519 MMMM c\n", "ssh-ed25519 MMMM x", "OK present"},
+		// (An RSA key's other names, as sshd takes them for it.)
+		{"rsa-sha2-256 NNNN\n", "ssh-rsa NNNN x", "OK present"},
+		{`from="1.2.3.4" rsa-sha2-512 OOOO c` + "\n", "ssh-rsa OOOO x", "OK present"},
+		{"rsa-sha2-256 PPPP\n", "ssh-ed25519 PPPP x", "OK added"},
 	} {
 		os.WriteFile(filepath.Join(home, ".ssh", "authorized_keys"), []byte(c.file), 0o600)
 		if got := run(c.key + "\n"); got != "abc "+c.want {
