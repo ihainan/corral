@@ -240,7 +240,7 @@ func TestNetworkDefaults(t *testing.T) {
 			t.Errorf("default denied lacks %s: %v", p, c.DeniedNetworks)
 		}
 	}
-	t.Setenv("CORRAL_ALLOWED_NETWORKS", " , ") // (blank: as unset)
+	t.Setenv("CORRAL_ALLOWED_NETWORKS", " ,\n,\t") // (blank: as unset)
 	if c, err = Load(); err != nil || !has(c.AllowedNetworks, "0.0.0.0/0") {
 		t.Fatalf("blank allowed: %v %v, want the default", c.AllowedNetworks, err)
 	}

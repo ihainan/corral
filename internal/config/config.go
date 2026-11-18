@@ -335,7 +335,7 @@ func Load() (*Config, error) {
 
 	// (Blank, as unset: not a list that allows nothing.)
 	allowed := os.Getenv("CORRAL_ALLOWED_NETWORKS")
-	if strings.Trim(allowed, " \t,") == "" {
+	if strings.TrimSpace(strings.ReplaceAll(allowed, ",", "")) == "" { // (as parsePrefixes reads it)
 		allowed = ""
 	}
 	denied := alwaysDenied
