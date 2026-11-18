@@ -102,6 +102,15 @@ var (
 	tmuxUnsafe = regexp.MustCompile(`[^A-Za-z0-9_-]`)
 )
 
+// hostDefaultName: a host's name where none is given — its address, cut to
+// the 64 characters a name may have.
+func hostDefaultName(addr string) string {
+	if r := []rune(addr); len(r) > 64 {
+		return string(r[:64])
+	}
+	return addr
+}
+
 // defaultTmuxSession is "corral-<user>" with characters tmux would rewrite replaced.
 func defaultTmuxSession(username string) string {
 	name := "corral-" + tmuxUnsafe.ReplaceAllString(username, "_")
@@ -121,14 +130,18 @@ func (s *Server) validateHost(ctx context.Context, owner *store.User, hostID int
 	b.Name = strings.TrimSpace(b.Name)
 	b.Address = strings.TrimSpace(b.Address)
 	b.Username = strings.TrimSpace(b.Username)
-	if b.Name == "" || len([]rune(b.Name)) > 64 {
-		return &fieldError{"name", "required, at most 64 characters"}
-	}
 	addr := strings.TrimSuffix(strings.TrimPrefix(b.Address, "["), "]")
 	if !hostnameRE.MatchString(addr) && !strings.Contains(addr, ":") {
 		return &fieldError{"address", "must be a host name or IP address"}
 	}
 	b.Address = addr
+	// (No name given: the address is its name, as the form says it will be.)
+	if b.Name == "" {
+		b.Name = hostDefaultName(addr)
+	}
+	if len([]rune(b.Name)) > 64 {
+		return &fieldError{"name", "at most 64 characters"}
+	}
 	if b.Port == 0 {
 		b.Port = 22
 	}

@@ -1,10 +1,10 @@
-import { useCallback, useEffect, useState, type FormEvent } from 'react'
-import { ChevronLeft, ChevronRight, FileKey, KeyRound } from 'lucide-react'
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
+import { CheckCircle2, ChevronLeft, ChevronRight, FileKey, KeyRound, PlugZap, TriangleAlert, Upload } from 'lucide-react'
 import { api, ApiError, errorText, type Host, type KeyCred } from '../api'
 import { hasKey, t } from '../i18n'
 import { linkHandler, navigate } from '../router'
-import { CopyButton, Field, LoadError, useToast } from '../components/ui'
-import { hostFormErrors } from './pageText'
+import { CopyButton, Dialog, Field, LoadError, useToast } from '../components/ui'
+import { checkText, hostFormErrors, type HostCheck } from './pageText'
 import { AskHookRow, BellHookRow } from '../terminal/askHook'
 import { ImportDialog } from './Keys'
 
@@ -35,6 +35,14 @@ export function HostEditPage({ id }: { id?: number }) {
   // elsewhere since (stale), and the form can then be opened again.
   const [version, setVersion] = useState<number | undefined>(undefined)
   const [stale, setStale] = useState(false)
+  // The connection as it was loaded: Save checks it first where it is new or
+  // any of it changed (address, port, user, how it signs in, its key or
+  // password, its jump host).
+  const orig = useRef<{ address: string; port: string; username: string; auth: Auth; credentialId: number | null; jumpId: number | null } | null>(null)
+  // The last check: running ('checking'), what it found, and whether it was
+  // Save's (then "Save anyway" is offered where it did not get through).
+  const [checking, setChecking] = useState(false)
+  const [check, setCheck] = useState<{ c: HostCheck; forSave: boolean } | null>(null)
 
   // The user's hosts, for the jump host choice.
   const loadHosts = useCallback(() => {
@@ -56,6 +64,7 @@ export function HostEditPage({ id }: { id?: number }) {
     setJumpId(h.jump_host_id ?? null)
     if (h.jump_host_id) setAdvOpen(true)
     setVersion(h.version)
+    orig.current = { address: h.address, port: String(h.port), username: h.username, auth: h.auth, credentialId: h.auth === 'key' ? h.credential_id : null, jumpId: h.jump_host_id ?? null }
     setLoaded(true)
   }, [])
 
@@ -128,48 +137,120 @@ export function HostEditPage({ id }: { id?: number }) {
   // Focus to a field by its name as the server says it (one with no list
   // to choose from, a key: the button beside its message).
   const focusField = (f: string) => {
+    if (f === 'jump_host_id') setAdvOpen(true)
     const id: Record<string, string> = { name: 'h-name', address: 'h-addr', port: 'h-port', username: 'h-user', password: 'h-pass', credential_id: 'h-key', jump_host_id: 'h-jump' }
     const el = (id[f] && document.getElementById(id[f])) || (f === 'credential_id' ? document.getElementById('h-key-new') : f === 'auth' ? document.querySelector<HTMLElement>('[aria-labelledby="auth-label"] button') : null)
     el?.focus()
   }
 
-  const submit = async (e: FormEvent) => {
-    e.preventDefault()
-    if (busy) return
-    const a = splitAddress()
-    // Every field at fault is marked at once, focus on the first; the
-    // server's answer stays the last word for what is not checked here.
+  // The form as it is sent: to save, to check, or to put the key on the host with.
+  const formBody = (a: { address: string; username: string; port: string }) => ({
+    name,
+    address: a.address,
+    port: a.port === '' ? 22 : Number(a.port), // (left empty: the usual SSH port)
+    username: a.username,
+    auth,
+    password: auth === 'password' ? password : '',
+    credential_id: auth === 'key' ? credentialId : null,
+    jump_host_id: jumpId,
+  })
+  // Checked here as the server would first, every field at fault marked at
+  // once, the focus on the first; false where any is.
+  const checkFields = (a: { address: string; username: string; port: string }) => {
     const found = hostFormErrors({ name, address: a.address, port: a.port, username: a.username, auth, credentialId, password, hadPassword })
-    if (found.length > 0) {
-      setErrors(Object.fromEntries(found.map(([f, k]) => [f, t(k)])))
-      focusField(found[0][0])
-      return
+    if (found.length === 0) return true
+    setErrors(Object.fromEntries(found.map(([f, k]) => [f, t(k)])))
+    focusField(found[0][0])
+    return false
+  }
+  // What the server refused of the form (a field, the host changed, …): shown as Save shows it.
+  const showRefusal = (err: unknown) => {
+    const field = err instanceof ApiError ? err.field : undefined
+    setStale(err instanceof ApiError && err.code === 'host_changed')
+    setErrors({ [field ?? '']: err instanceof ApiError && err.code === 'invalid_field' ? fieldMessage(field, err.message) : errorText(err) })
+    if (field) requestAnimationFrame(() => focusField(field))
+  }
+  // A check's finding on the form: its reason on the field it belongs to;
+  // all of it in the box by the buttons.
+  const showCheck = (c: HostCheck, forSave: boolean) => {
+    setCheck({ c, forSave })
+    if (!c.ok && c.field) {
+      setErrors({ [c.field]: checkText(c, auth, false) })
+      requestAnimationFrame(() => focusField(c.field!))
     }
+  }
+  const runCheck = async (body: ReturnType<typeof formBody>) => {
+    setChecking(true)
+    try {
+      return await api<HostCheck>('POST', '/api/hosts/test', { ...body, id: editing ? id : 0 }, { timeoutMs: 60000 })
+    } finally {
+      setChecking(false)
+    }
+  }
+  const connChanged = (body: ReturnType<typeof formBody>) => {
+    const o = orig.current
+    if (!editing || !o) return true
+    return o.address !== body.address || o.port !== String(body.port) || o.username !== body.username || o.auth !== body.auth || o.credentialId !== body.credential_id || o.jumpId !== body.jump_host_id || (auth === 'password' && password !== '')
+  }
+
+  const save = async (body: ReturnType<typeof formBody>) => {
     setBusy(true)
-    setErrors({})
-    // Left empty, the usual SSH port.
-    const portN = a.port === '' ? 22 : Number(a.port)
-    const body = {
-      name, address: a.address, port: portN, username: a.username, auth,
-      password: auth === 'password' ? password : '',
-      credential_id: auth === 'key' ? credentialId : null,
-      jump_host_id: jumpId,
-    }
     try {
       if (editing) await api('PUT', '/api/hosts/' + id, { ...body, version })
       else await api('POST', '/api/hosts', body)
       navigate('/')
     } catch (err) {
-      const field = err instanceof ApiError ? err.field : undefined
-      setStale(err instanceof ApiError && err.code === 'host_changed')
-      setErrors({ [field ?? '']: err instanceof ApiError && err.code === 'invalid_field' ? fieldMessage(field, err.message) : errorText(err) })
-      if (field === 'jump_host_id') setAdvOpen(true)
+      showRefusal(err)
       setBusy(false)
-      if (field) requestAnimationFrame(() => focusField(field))
     }
   }
 
+  const submit = async (e: FormEvent) => {
+    e.preventDefault()
+    if (busy || checking) return
+    const a = splitAddress()
+    if (!checkFields(a)) return
+    setErrors({})
+    setCheck(null)
+    const body = formBody(a)
+    // (A new host, or its connection changed: connected to first. Only the name or its own settings: saved.)
+    if (connChanged(body)) {
+      let c: HostCheck
+      try {
+        c = await runCheck(body)
+      } catch (err) {
+        showRefusal(err)
+        return
+      }
+      if (!c.ok) return showCheck(c, true)
+    }
+    await save(body)
+  }
+
+  const testOnly = async () => {
+    if (busy || checking) return
+    const a = splitAddress()
+    if (!checkFields(a)) return
+    setErrors({})
+    setCheck(null)
+    try {
+      showCheck(await runCheck(formBody(a)), false)
+    } catch (err) {
+      showRefusal(err)
+    }
+  }
+  const saveAnyway = () => {
+    if (busy || checking) return
+    setCheck(null)
+    setErrors({})
+    void save(formBody({ address, username, port }))
+  }
+
+  // The key put on the host with a password typed once (its own dialog).
+  const [installing, setInstalling] = useState(false)
+
   const fe = (f: string) => errors[f] || undefined
+  const portLong = !!check && !check.c.ok && check.c.field === 'port' && !!fe('port')
   // Hosts this one can go through: the user's others that are reached
   // directly and have a saved credential (and the one chosen, whatever it is now).
   const jumpChoices = (hosts ?? []).filter((h) => h.id === jumpId || (h.id !== id && !h.jump_host_id && h.auth !== 'ask'))
@@ -187,9 +268,6 @@ export function HostEditPage({ id }: { id?: number }) {
         <h1>{editing ? t('host.editTitle') : t('host.newTitle')}</h1>
       </div>
       <form className="form" onSubmit={submit} noValidate>
-        <Field label={t('host.name')} htmlFor="h-name" error={fe('name')}>
-          <input id="h-name" className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder={t('host.namePlaceholder')} required aria-invalid={!!fe('name')} />
-        </Field>
         <div className="row2">
           <Field label={t('host.address')} htmlFor="h-addr" error={fe('address')}>
             <input id="h-addr" className="input" value={address} onChange={(e) => setAddress(e.target.value)} onBlur={splitAddress} placeholder={t('host.addressPlaceholder')}
@@ -197,13 +275,23 @@ export function HostEditPage({ id }: { id?: number }) {
           </Field>
           {/* (A Field as the others, its error under it: ux1101 PG-19.) */}
           <div className="port">
-            <Field label={t('host.port')} htmlFor="h-port" error={fe('port')}>
-              <input id="h-port" className="input" value={port} onChange={(e) => setPort(e.target.value.replace(/\D/g, ''))} inputMode="numeric" placeholder="22" aria-invalid={!!fe('port')} />
+            <Field label={t('host.port')} htmlFor="h-port" error={portLong ? undefined : fe('port')}>
+              <input id="h-port" className="input" value={port} onChange={(e) => setPort(e.target.value.replace(/\D/g, ''))} inputMode="numeric" placeholder="22" aria-invalid={!!fe('port')} aria-describedby={portLong ? 'h-port-err' : undefined} />
             </Field>
           </div>
         </div>
+        {/* (A connection's reason on the port, longer than its narrow box: under the row, its width.) */}
+        {portLong && (
+          <p className="err" id="h-port-err" role="alert">
+            {fe('port')}
+          </p>
+        )}
         <Field label={t('host.username')} htmlFor="h-user" error={fe('username')}>
           <input id="h-user" className="input" value={username} onChange={(e) => setUsername(e.target.value)} autoCapitalize="none" autoCorrect="off" spellCheck={false} required aria-invalid={!!fe('username')} />
+        </Field>
+        {/* (Optional: left empty, the host is called by its address — said in the box as it will be.) */}
+        <Field label={t('host.name')} htmlFor="h-name" error={fe('name')} optional>
+          <input id="h-name" className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder={address.trim() ? t('host.nameDefault', { addr: address.trim() }) : t('host.namePlaceholder')} aria-invalid={!!fe('name')} />
         </Field>
 
         <div className="field field-group-start">
@@ -262,6 +350,12 @@ export function HostEditPage({ id }: { id?: number }) {
                   <code>{selectedKey.public_key}</code>
                   <CopyButton text={selectedKey.public_key} />
                 </div>
+                <div className="key-acts">
+                  <button type="button" id="h-key-install" className="btn" onClick={() => setInstalling(true)} disabled={busy || checking}>
+                    <Upload size={16} />
+                    {t('host.installKey')}
+                  </button>
+                </div>
               </>
             )}
           </div>
@@ -303,6 +397,7 @@ export function HostEditPage({ id }: { id?: number }) {
         </details>
 
         {errors[''] && <p className="err" role="alert">{errors['']}</p>}
+        {check && <CheckNote c={check.c} auth={auth} onSaveAnyway={check.forSave && !check.c.ok ? saveAnyway : undefined} busy={busy} />}
         {stale && (
           <div>
             <button type="button" className="btn" onClick={reopen} disabled={busy}>{t('host.reopen')}</button>
@@ -310,7 +405,13 @@ export function HostEditPage({ id }: { id?: number }) {
         )}
         <div className="form-actions">
           <a className="btn" href="/" onClick={linkHandler('/')}>{t('common.cancel')}</a>
-          <button className="btn btn-primary" disabled={busy}>{busy ? t('common.saving') : t('common.save')}</button>
+          <button type="button" className="btn" onClick={testOnly} disabled={busy || checking}>
+            <PlugZap size={16} />
+            {t('host.test')}
+          </button>
+          <button className="btn btn-primary" disabled={busy || checking} aria-busy={checking || busy}>
+            {checking ? t('host.connecting') : busy ? t('common.saving') : t('common.save')}
+          </button>
         </div>
       </form>
       {importing && (
@@ -322,9 +423,106 @@ export function HostEditPage({ id }: { id?: number }) {
           }}
         />
       )}
+      {installing && selectedKey && (
+        <InstallKeyDialog
+          body={() => ({ ...formBody({ address, username, port }), id: editing ? id : 0 })}
+          user={username}
+          address={address}
+          onClose={() => setInstalling(false)}
+          onDone={() => {
+            setCheck(null)
+            setErrors({})
+          }}
+        />
+      )}
       {editing && loaded && <AskHookRow hostId={id} hostName={name} />}
       {editing && loaded && <BellHookRow hostId={id} hostName={name} />}
     </main>
+  )
+}
+
+// What a check found, by the buttons: got through (and how far — a host
+// asked for its password each time is reached, not signed in to), or why
+// not; Save's failed, "Save anyway" beside it (a machine may only be off).
+function CheckNote({ c, auth, onSaveAnyway, busy }: { c: HostCheck; auth: Auth; onSaveAnyway?: () => void; busy: boolean }) {
+  return (
+    <div className={'host-check' + (c.ok ? ' is-ok' : ' is-bad')} role={c.ok ? 'status' : 'alert'}>
+      {c.ok ? <CheckCircle2 size={18} aria-hidden="true" /> : <TriangleAlert size={18} aria-hidden="true" />}
+      <div className="host-check-text">
+        {/* (A reason on a field: said there; here, that it is, and what more there is to it.) */}
+        <p>{c.ok || !c.field ? checkText(c, auth) : t('host.check.seeField')}</p>
+        {!c.ok && c.field && c.stage === 'hostkey' && c.expected && <p className="host-check-fp">{t('host.check.hostkeyDetail', { expected: c.expected, got: c.fingerprint ?? '' })}</p>}
+        {c.ok && c.fingerprint && <p className="host-check-fp">{t('host.check.fingerprint', { fp: c.fingerprint })}</p>}
+        {onSaveAnyway && (
+          <div className="host-check-acts">
+            {/* (Only where it may be: not reached at all.) */}
+            {c.stage === 'connect' && <span className="hint">{t('host.check.saveAnywayHint')}</span>}
+            <button type="button" className="btn" onClick={onSaveAnyway} disabled={busy}>
+              {t('host.check.saveAnyway')}
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// The form's key put on the host: signed in with the password typed here,
+// this once (not kept, nor sent anywhere else), the key added to its
+// ~/.ssh/authorized_keys, then signed in with the key to see it take.
+function InstallKeyDialog({ body, user, address, onClose, onDone }: { body: () => Record<string, unknown>; user: string; address: string; onClose: () => void; onDone: () => void }) {
+  const [pw, setPw] = useState('')
+  const [going, setGoing] = useState(false)
+  const [res, setRes] = useState<HostCheck | null>(null)
+  const [err, setErr] = useState('')
+  const go = async (e: FormEvent) => {
+    e.preventDefault()
+    if (going || !pw) return
+    setGoing(true)
+    setErr('')
+    setRes(null)
+    try {
+      const r = await api<HostCheck>('POST', '/api/hosts/install-key', { ...body(), install_password: pw }, { timeoutMs: 90000 })
+      setRes(r)
+      if (r.ok) {
+        setPw('')
+        onDone()
+      }
+    } catch (x) {
+      setErr(x instanceof ApiError && x.code === 'invalid_field' ? fieldMessage(x.field, x.message) : errorText(x))
+    } finally {
+      setGoing(false)
+    }
+  }
+  return (
+    <Dialog title={t('host.install.title')} onClose={onClose} busy={going} icon={<Upload size={18} />} sub={t('host.install.sub', { target: (user || '?') + '@' + (address || '?') })}>
+      <form className="form" onSubmit={go} noValidate>
+        {!res?.ok && (
+          <Field label={t('host.install.password')} htmlFor="h-install-pass" hint={t('host.install.passwordHint')} error={res && !res.ok && res.field === 'install_password' ? checkText(res, 'key') : undefined}>
+            <input id="h-install-pass" className="input" type="password" autoComplete="off" value={pw} onChange={(e) => setPw(e.target.value)} disabled={going} />
+          </Field>
+        )}
+        {res && (res.ok || res.field !== 'install_password') && (
+          <div className={'host-check' + (res.ok ? ' is-ok' : ' is-bad')} role={res.ok ? 'status' : 'alert'}>
+            {res.ok ? <CheckCircle2 size={18} aria-hidden="true" /> : <TriangleAlert size={18} aria-hidden="true" />}
+            <div className="host-check-text">
+              <p>{checkText(res, 'key')}</p>
+            </div>
+          </div>
+        )}
+        {err && <p className="err" role="alert">{err}</p>}
+        <div className="dialog-actions">
+          <button type="button" className="btn" onClick={onClose} disabled={going}>
+            {t(res?.ok ? 'common.close' : 'common.cancel')}
+          </button>
+          {!res?.ok && (
+            <button className="btn btn-primary" disabled={going || !pw} aria-busy={going}>
+              {going ? t('host.connecting') : t('host.install.go')}
+            </button>
+          )}
+        </div>
+      </form>
+    </Dialog>
   )
 }
 

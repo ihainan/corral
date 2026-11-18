@@ -12,7 +12,7 @@ const HOSTNAME = /^[A-Za-z0-9_]([A-Za-z0-9._-]{0,251}[A-Za-z0-9_])?$/
 export function hostFormErrors(v: HostFormValues): [field: string, key: I18nKey][] {
   const out: [string, I18nKey][] = []
   const name = v.name.trim()
-  if (!name || [...name].length > 64) out.push(['name', 'hostField.name'])
+  if ([...name].length > 64) out.push(['name', 'hostField.name']) // (left empty: the address, as the server names it)
   const addr = v.address.trim().replace(/^\[|\]$/g, '')
   if (!HOSTNAME.test(addr) && !addr.includes(':')) out.push(['address', 'hostField.address'])
   const port = v.port === '' ? 22 : Number(v.port)
@@ -24,6 +24,46 @@ export function hostFormErrors(v: HostFormValues): [field: string, key: I18nKey]
   // (A password to save, none kept before: one must be given — review.)
   if (v.auth === 'password' && v.password !== undefined && !v.password && !v.hadPassword) out.push(['password', 'hostField.password'])
   return out
+}
+
+// What a connection check found (POST /api/hosts/test, /install-key): see
+// host_check.go. stage: address, jump, connect, ssh, hostkey, auth; install
+// and "verify:<stage>" for putting the key on; reason, a word of a fixed list.
+export type HostCheck = {
+  ok: boolean
+  stage?: string
+  reason?: string
+  field?: string
+  fingerprint?: string
+  expected?: string
+  login_tested: boolean
+  open?: boolean
+  installed?: 'added' | 'present'
+}
+
+// A check's finding in words. auth: how the form signs in (a refusal is of
+// the password, or of the key).
+export function checkText(c: HostCheck, auth: 'password' | 'key' | 'ask', detail = true): string {
+  if (c.ok) {
+    if (c.installed) return t(c.installed === 'present' ? 'host.install.present' : 'host.install.added')
+    if (c.open) return t('host.check.open')
+    return t(c.login_tested ? 'host.check.ok' : 'host.check.okNoLogin')
+  }
+  let stage = c.stage ?? ''
+  let verify = false
+  if (stage.startsWith('verify:')) {
+    verify = true
+    stage = stage.slice('verify:'.length)
+  }
+  const reason = c.reason ?? ''
+  const k = (s: string) => (hasKey(s) ? t(s as I18nKey) : '')
+  let said = ''
+  if (stage === 'auth' && (reason === 'refused' || reason === 'not_offered')) said = k(`host.check.auth.${reason}.${c.field === 'install_password' ? 'password' : auth === 'key' ? 'key' : 'password'}`)
+  // (An address the guard refuses: in the words opening a terminal says it in.)
+  if (stage === 'address' && reason === 'forbidden') said = t('error.target_forbidden')
+  if (!said) said = k(`host.check.${stage}.${reason}`) || k(`host.check.${stage}`) || t('host.check.other')
+  if (detail && stage === 'hostkey' && c.expected) said += ' ' + t('host.check.hostkeyDetail', { expected: c.expected, got: c.fingerprint ?? '' })
+  return verify ? t('host.install.verifyFailed', { why: said }) : said
 }
 
 // An audit entry's action in words ("convo.screen" → "读取智能体屏幕"); one

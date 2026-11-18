@@ -323,6 +323,18 @@ textarea.input { height: auto; min-height: var(--h-input); padding: 8px 12px; li
 @media (prefers-color-scheme: dark) { :root:not([data-theme='light']) .seg button[aria-pressed='true'] { background: var(--bg-active); box-shadow: 0 0 0 1px var(--line-strong); } }
 .form-actions { display: flex; gap: 8px; justify-content: flex-end; }
 .form-actions .btn { min-width: 80px; }
+.form-actions { flex-wrap: wrap; }
+@media (max-width: 520px) { .form-actions > * { flex: 1 1 auto; } }
+/* A connection check's finding (HostEdit.tsx), by the form's buttons: tinted, an icon before its words. */
+.host-check { display: flex; gap: 10px; align-items: flex-start; padding: 12px 14px; border-radius: var(--r); background: var(--bg-subtle); border: 1px solid var(--line); }
+.host-check > svg { flex: none; margin-top: 2px; }
+.host-check.is-ok > svg { color: var(--ok); }
+.host-check.is-bad { background: var(--danger-soft); border-color: transparent; }
+.host-check.is-bad > svg { color: var(--danger); }
+.host-check-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; overflow-wrap: anywhere; }
+.host-check-text p { margin: 0; }
+.host-check-fp { font-size: var(--fs-note); line-height: var(--lh-note); color: var(--fg-2); }
+.host-check-acts { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
 @media (pointer: coarse) {
   .form-actions {
     position: sticky; bottom: calc(49px + env(safe-area-inset-bottom, 0px)); z-index: 5;

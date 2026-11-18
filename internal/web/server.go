@@ -201,6 +201,8 @@ func (s *Server) registerRoutes() {
 
 	s.handle("GET /api/hosts", SignedIn, s.apiListHosts)
 	s.handle("POST /api/hosts", SignedIn, s.apiCreateHost)
+	s.handle("POST /api/hosts/test", SignedIn, s.apiTestHost)
+	s.handle("POST /api/hosts/install-key", SignedIn, s.apiInstallHostKey)
 	s.handle("GET /api/hosts/{id}", SignedIn, s.apiGetHost)
 	s.handle("PUT /api/hosts/{id}", SignedIn, s.apiUpdateHost)
 	s.handle("DELETE /api/hosts/{id}", SignedIn, s.apiDeleteHost)

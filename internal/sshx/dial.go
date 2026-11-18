@@ -50,6 +50,12 @@ type Target struct {
 	// any credential is sent; it replaces the Pinned/Accept comparison.
 	Verify func(seen *Pinned) error
 
+	// ProbeOnly: no credential is sent — only SSH's "none" method is tried —
+	// and its being refused is the host reached as far as signing in (a check
+	// of a host whose password is asked each time: ProbeError). Set by the
+	// host check only.
+	ProbeOnly bool
+
 	// Jump, when set, is the host this one is reached through: the gateway
 	// connects to it, and from there to Address:Port. The network guard
 	// applies to the jump host's address; the second hop starts on the jump
@@ -89,6 +95,14 @@ type Result struct {
 }
 
 var ErrAuthFailed = errors.New("authentication failed")
+
+// ErrAuthNotOffered: the host offered none of the ways of signing in tried —
+// a password where it takes keys only, say. It is an ErrAuthFailed.
+var ErrAuthNotOffered = fmt.Errorf("%w: the host does not offer this way of signing in", ErrAuthFailed)
+
+// ErrProbed: a ProbeOnly dial reached the host as far as signing in (its key
+// seen and decided on, no credential sent). Result has the key seen.
+var ErrProbed = errors.New("reached the host up to signing in")
 
 // errHandshakeThroughJump: the handshake with a host reached through a jump
 // host failed (what the other side said is not kept).
@@ -133,8 +147,11 @@ func Dial(ctx context.Context, guard *netguard.Guard, t Target) (*Result, error)
 				return answers, nil
 			}))
 	}
-	if len(auths) == 0 {
+	if len(auths) == 0 && !t.ProbeOnly {
 		return nil, errors.New("no credentials available for this host")
+	}
+	if t.ProbeOnly {
+		auths = nil // ("none" alone: nothing of the user's is sent)
 	}
 
 	seen := &Pinned{}
@@ -226,6 +243,12 @@ func Dial(ctx context.Context, guard *netguard.Guard, t Target) (*Result, error)
 			return nil, hk
 		}
 		if isAuthError(err) {
+			if t.ProbeOnly {
+				return &Result{SeenKey: seen}, ErrProbed
+			}
+			if notOffered(err) {
+				return nil, ErrAuthNotOffered
+			}
 			return nil, ErrAuthFailed
 		}
 		if jump != nil {
@@ -258,8 +281,22 @@ func Dial(ctx context.Context, guard *netguard.Guard, t Target) (*Result, error)
 	return &Result{Client: client, SeenKey: seen, Replaced: replaced}, nil
 }
 
+// isAuthError: signing in refused. (Also x/crypto's "unexpected message type
+// 51 (expected 60)": an OpenSSH answering a keyboard-interactive try, after a
+// password refused, with SSH_MSG_USERAUTH_FAILURE itself — seen against the
+// corral-sshd container, 11-18 — which it otherwise calls a failed handshake.)
 func isAuthError(err error) bool {
-	return err != nil && bytes.Contains([]byte(err.Error()), []byte("unable to authenticate"))
+	if err == nil {
+		return false
+	}
+	b := []byte(err.Error())
+	return bytes.Contains(b, []byte("unable to authenticate")) || bytes.Contains(b, []byte("unexpected message type 51 (expected 60)"))
+}
+
+// notOffered: of what was tried, the host took none for a try (x/crypto
+// tries only what the host lists, and says it attempted "none" alone).
+func notOffered(err error) bool {
+	return bytes.Contains([]byte(err.Error()), []byte("attempted methods [none]"))
 }
 
 // keepalive probes the server and closes the client when it stops answering, so

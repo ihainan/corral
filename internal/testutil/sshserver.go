@@ -33,6 +33,26 @@ type SSHServer struct {
 	onExec       func(cmd string) func(ch ssh.Channel)
 	onChannel    func(nc ssh.NewChannel) bool
 	beforeAuth   func()
+	signer       ssh.Signer
+	keysFile     string // AcceptKeysFrom: an authorized_keys file read at each key offered
+	noPassword   bool   // PasswordOff: password sign-in not offered at all
+}
+
+// AcceptKeysFrom makes later connections take a key listed in the
+// authorized_keys file at path (read anew at each key offered, as sshd does).
+func (s *SSHServer) AcceptKeysFrom(path string) {
+	s.mu.Lock()
+	s.keysFile = path
+	s.mu.Unlock()
+	s.build()
+}
+
+// PasswordOff makes later connections not offer password sign-in at all.
+func (s *SSHServer) PasswordOff() {
+	s.mu.Lock()
+	s.noPassword = true
+	s.mu.Unlock()
+	s.build()
 }
 
 // BeforeAuth runs f in every password check before answering it, e.g. to hold
@@ -104,8 +124,20 @@ func (s *SSHServer) RotateHostKey() {
 	if err != nil {
 		panic(err)
 	}
-	cfg := &ssh.ServerConfig{
-		PasswordCallback: func(c ssh.ConnMetadata, pw []byte) (*ssh.Permissions, error) {
+	s.mu.Lock()
+	s.signer = signer
+	s.mu.Unlock()
+	s.build()
+}
+
+// build makes the config later connections are served with.
+func (s *SSHServer) build() {
+	s.mu.Lock()
+	signer, keysFile, noPassword := s.signer, s.keysFile, s.noPassword
+	s.mu.Unlock()
+	cfg := &ssh.ServerConfig{}
+	if !noPassword {
+		cfg.PasswordCallback = func(c ssh.ConnMetadata, pw []byte) (*ssh.Permissions, error) {
 			s.mu.Lock()
 			s.AuthAttempts++
 			beforeAuth := s.beforeAuth
@@ -117,7 +149,34 @@ func (s *SSHServer) RotateHostKey() {
 				return nil, nil
 			}
 			return nil, errAuth
-		},
+		}
+	}
+	// (Password sign-in off: keys still offered — none taken without a file —
+	// as an sshd with PasswordAuthentication no does.)
+	if keysFile != "" || noPassword {
+		cfg.PublicKeyCallback = func(c ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
+			if keysFile == "" {
+				return nil, errAuth
+			}
+			if c.User() != s.user {
+				return nil, errAuth
+			}
+			b, err := os.ReadFile(keysFile)
+			if err != nil {
+				return nil, errAuth
+			}
+			for len(b) > 0 {
+				k, _, _, rest, err := ssh.ParseAuthorizedKey(b)
+				if err != nil {
+					break
+				}
+				if bytes.Equal(k.Marshal(), key.Marshal()) {
+					return nil, nil
+				}
+				b = rest
+			}
+			return nil, errAuth
+		}
 	}
 	cfg.AddHostKey(signer)
 	s.mu.Lock()
