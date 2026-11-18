@@ -544,9 +544,10 @@ function InstallKeyDialog({ body, user, address, onClose, onDone }: { body: () =
         {err && <p className="err" role="alert">{err}</p>}
         <div className="dialog-actions">
           <button type="button" className="btn" onClick={onClose} disabled={going}>
-            {t(res?.ok ? 'common.close' : 'common.cancel')}
+            {t(res?.ok || res?.reason === 'present_but_refused' ? 'common.close' : 'common.cancel')}
           </button>
-          {!res?.ok && (
+          {/* (There already, its sign-in refused: trying again does the same — the line is to be seen to on the host.) */}
+          {!res?.ok && res?.reason !== 'present_but_refused' && (
             <button className="btn btn-primary" disabled={going || !pw} aria-busy={going}>
               {going ? t('host.connecting') : t('host.install.go')}
             </button>

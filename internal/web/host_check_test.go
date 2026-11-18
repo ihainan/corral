@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 
@@ -287,50 +289,40 @@ func TestInstallKeyScriptPlain(t *testing.T) {
 		}
 	}
 	os.RemoveAll(filepath.Join(home, ".ssh"))
-	// (A key only in a comment, or in another's comment: not there.)
+	// Present: the key's data as a whole field of a line not blank nor a comment, whatever else
+	// it has — options of any sort (read or not as sshd would), the type's name, a comment.
 	os.MkdirAll(filepath.Join(home, ".ssh"), 0o700)
-	os.WriteFile(filepath.Join(home, ".ssh", "authorized_keys"), []byte("# ssh-ed25519 AAAA\nssh-rsa ZZZZ note ssh-ed25519 AAAA\n"), 0o600)
-	if got := run("ssh-ed25519 AAAA one\n"); got != "abc OK added" {
-		t.Errorf("first: %q", got)
-	}
-	// The same key with another comment, or options before it: present.
-	if got := run("ssh-ed25519 AAAA two\n"); got != "abc OK present" {
-		t.Errorf("other comment: %q", got)
-	}
-	os.WriteFile(filepath.Join(home, ".ssh", "authorized_keys"), []byte(`from="10.0.0.0/8",command="echo hi there" ssh-ed25519 CCCC c`+"\n"), 0o600)
-	if got := run("ssh-ed25519 CCCC x\n"); got != "abc OK present" {
-		t.Errorf("after options: %q", got)
-	}
-	// (Options quoting spaces, tabs and key-like words; an escaped quote in them; CRLF; no comment.)
-	for _, c := range []struct{ file, key, want string }{
-		{`from="10.0.0.0/8",command="echo ssh-backup ready" ssh-ed25519 DDDD` + "\n", "ssh-ed25519 DDDD x", "OK present"},
-		{`command="echo ssh-ed25519 EEEE ignored" ssh-ed25519 OTHER` + "\n", "ssh-ed25519 EEEE x", "OK added"},
-		{"command=\"echo\tssh-x\" ssh-ed25519 FFFF\n", "ssh-ed25519 FFFF x", "OK present"},
-		{`command="say \"hi there\"" ssh-ed25519 GGGG c` + "\n", "ssh-ed25519 GGGG x", "OK present"},
-		{`from="10.0.0.0/8" ssh-ed25519 HHHH` + "\r\n", "ssh-ed25519 HHHH x", "OK present"},
-		{"ssh-ed25519 IIII\r\n", "ssh-ed25519 IIII x", "OK present"},
-		{"   \t# ssh-ed25519 JJJJ\n\n", "ssh-ed25519 JJJJ x", "OK added"},
-		// (Options sshd refuses — a value not quoted, a quote not closed, options alone: no entry.)
-		{"command=unquoted ssh-ed25519 KKKK\n", "ssh-ed25519 KKKK x", "OK added"},
-		{`command="never closed ssh-ed25519 LLLL` + "\n", "ssh-ed25519 LLLL x", "OK added"},
-		{"no-pty,no-agent-forwarding ssh-ed25519 MMMM c\n", "ssh-ed25519 MMMM x", "OK present"},
-		// (An RSA key's other names, as sshd takes them for it.)
-		{"rsa-sha2-256 NNNN\n", "ssh-rsa NNNN x", "OK present"},
-		{`from="1.2.3.4" rsa-sha2-512 OOOO c` + "\n", "ssh-rsa OOOO x", "OK present"},
-		{"rsa-sha2-256 PPPP\n", "ssh-ed25519 PPPP x", "OK added"},
-		// (A backslash escapes a quote only — "\\\"" ends no value: sshd's rule.)
-		{`from="10.0.0.0/8",command="echo \\"hello\\"" ssh-ed25519 QQQQ` + "\n", "ssh-ed25519 QQQQ x", "OK present"},
-		{`command="a\b" ssh-ed25519 RRRR` + "\n", "ssh-ed25519 RRRR x", "OK present"},
-		// (Options sshd does not know, a valued one without its value, a flag given one: no entry.)
-		{"unknown-option ssh-ed25519 SSSS\n", "ssh-ed25519 SSSS x", "OK added"},
-		{"command ssh-ed25519 TTTT\n", "ssh-ed25519 TTTT x", "OK added"},
-		{`no-pty="x" ssh-ed25519 UUUU` + "\n", "ssh-ed25519 UUUU x", "OK added"},
-		{`NO-PTY,Restrict,Command="x" ssh-ed25519 VVVV` + "\n", "ssh-ed25519 VVVV x", "OK present"},
+	for _, c := range []struct{ name, file, key, want string }{
+		{"plain", "ssh-ed25519 AAAA one\n", "ssh-ed25519 AAAA x", "OK present"},
+		{"from= and command=", `from="10.0.0.0/8",command="echo hi there" ssh-ed25519 CCCC c` + "\n", "ssh-ed25519 CCCC x", "OK present"},
+		{"quoted key-like words", `from="10.0.0.0/8",command="echo ssh-backup ready" ssh-ed25519 DDDD` + "\n", "ssh-ed25519 DDDD x", "OK present"},
+		{"escaped quotes", `from="10.0.0.0/8",command="echo \\"hello\\"" ssh-ed25519 QQQQ` + "\n", "ssh-ed25519 QQQQ x", "OK present"},
+		{"empty comma field", `from="10.0.0.0/8", ssh-ed25519 BBBB` + "\n", "ssh-ed25519 BBBB x", "OK present"},
+		{"no-verify-required", "no-verify-required sk-ssh-ed25519@openssh.com SKSK\n", "sk-ssh-ed25519@openssh.com SKSK x", "OK present"},
+		{"duplicate command=", `command="a",command="b" ssh-ed25519 DUPC` + "\n", "ssh-ed25519 DUPC x", "OK present"},
+		{"bad expiry-time", `expiry-time="not-a-time" ssh-ed25519 EXPT` + "\n", "ssh-ed25519 EXPT x", "OK present"},
+		{"unknown option", "unknown-option ssh-ed25519 UNKN\n", "ssh-ed25519 UNKN x", "OK present"},
+		{"tab separated, CRLF", "ssh-ed25519\tTABK\tc\r\n", "ssh-ed25519 TABK x", "OK present"},
+		{"CRLF, no comment", `from="10.0.0.0/8" ssh-ed25519 HHHH` + "\r\n", "ssh-ed25519 HHHH x", "OK present"},
+		{"RSA by another name", "rsa-sha2-256 NNNN\n", "ssh-rsa NNNN x", "OK present"},
+		{"only in another line's comment (taken as present)", "ssh-rsa ZZZZ note ssh-ed25519 CMNT\n", "ssh-ed25519 CMNT x", "OK present"},
+		// Absent: commented out, blank-led comment, or only a part of a field.
+		{"commented copy", "# ssh-ed25519 HASH\n", "ssh-ed25519 HASH x", "OK added"},
+		{"commented after blanks", "   \t# ssh-ed25519 JJJJ\n\n", "ssh-ed25519 JJJJ x", "OK added"},
+		{"inside a longer field", "ssh-ed25519 XPARTX c\n", "ssh-ed25519 PART x", "OK added"},
+		{"inside a quoted word", `command="echo=PRTQ" ssh-ed25519 OTHER` + "\n", "ssh-ed25519 PRTQ x", "OK added"},
 	} {
 		os.WriteFile(filepath.Join(home, ".ssh", "authorized_keys"), []byte(c.file), 0o600)
 		if got := run(c.key + "\n"); got != "abc "+c.want {
-			t.Errorf("%q: %q", c.file, got)
+			t.Errorf("%s: %q", c.name, got)
 		}
+	}
+	// (A long line: looked through once.)
+	big := `command="` + strings.Repeat("a", 2<<20) + `" ssh-ed25519 LONG c` + "\n"
+	os.WriteFile(filepath.Join(home, ".ssh", "authorized_keys"), []byte(big), 0o600)
+	began := time.Now()
+	if got := run("ssh-ed25519 LONG x\n"); got != "abc OK present" || time.Since(began) > 5*time.Second {
+		t.Errorf("long line: %q in %s", got, time.Since(began))
 	}
 	os.RemoveAll(filepath.Join(home, ".ssh"))
 	// A home's .ssh that is a file: said.
@@ -422,9 +414,15 @@ func TestHostCheckRealSSHD(t *testing.T) {
 		return m
 	}
 	// (As the user, by password: ~/.ssh kept aside, put back after.)
+	// (OpenSSH 10 holds a source back a while after failed sign-ins — PerSourcePenalties,
+	// authfail:5 min:15 — so a connection refused at once is tried again, for a minute.)
 	sh := func(script string) string {
 		t.Helper()
 		c, err := sshDialPassword(addr, user, pass)
+		for i := 0; err != nil && i < 30; i++ {
+			time.Sleep(2 * time.Second)
+			c, err = sshDialPassword(addr, user, pass)
+		}
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -471,6 +469,21 @@ func TestHostCheckRealSSHD(t *testing.T) {
 	r = a.do("POST", "/api/hosts/test", kf)
 	if j := r.json(); j["ok"] != true || j["login_tested"] != true {
 		t.Errorf("the key, after: %s", r.Body)
+	}
+	// Lines sshd refuses, with the key's data in them: taken as there, the key's sign-in refused —
+	// said so, nothing added.
+	blob := strings.Fields(pubOf(t, a, keyID))[1]
+	for _, bad := range []string{`command="a",command="b" ssh-ed25519 ` + blob, `expiry-time="not-a-time" ssh-ed25519 ` + blob} {
+		time.Sleep(16 * time.Second) // (the penalty of the refused sign-ins before let lapse)
+		sh(`printf "%s\n" ` + quoteForTest(bad) + ` > ~/.ssh/authorized_keys`)
+		kf["install_password"] = pass
+		r = a.do("POST", "/api/hosts/install-key", kf)
+		if j := r.json(); j["reason"] != "present_but_refused" {
+			t.Errorf("%s: %s", bad, r.Body)
+		}
+		if got := strings.TrimSpace(sh(`grep -c . ~/.ssh/authorized_keys`)); got != "1" {
+			t.Errorf("%s: added to (%s lines)", bad, got)
+		}
 	}
 	// Linked: said, not replaced.
 	sh(`rm -f ~/.ssh/authorized_keys; : > ~/` + tag + `/real; ln -s ~/` + tag + `/real ~/.ssh/authorized_keys`)
@@ -601,4 +614,47 @@ func TestHostTestPinnedKeyUnreadable(t *testing.T) {
 	if r.Status != 200 || r.json()["ok"] != true {
 		t.Errorf("not pinned: %d %s", r.Status, r.Body)
 	}
+}
+
+// The key there already but signing in with it refused (its line not what it
+// seems): said so, and nothing added.
+func TestHostInstallKeyPresentButRefused(t *testing.T) {
+	h := newHarness(t)
+	a := h.member(h.admin(), "alice")
+	home := t.TempDir()
+	srv := h.sshServer(home)
+	ak := filepath.Join(home, ".ssh", "authorized_keys")
+	srv.AcceptKeysFrom(ak)
+	srv.HandleExec(testutil.ShellExec(home, func(cmd string) bool { return strings.HasPrefix(cmd, "sh -c ") }))
+	r := a.do("POST", "/api/credentials", map[string]any{"name": "laptop", "mode": "generate"})
+	mustStatus(t, r, 201, "key")
+	blob := strings.Fields(r.json()["public_key"].(string))[1]
+	// (Its data only in another line's comment: taken as there; the server takes no key from it.)
+	os.MkdirAll(filepath.Join(home, ".ssh"), 0o700)
+	line := "ssh-rsa NOTAKEY note ssh-ed25519 " + blob + "\n"
+	os.WriteFile(ak, []byte(line), 0o600)
+	f := checkForm(srv.Addr.Port, map[string]any{"auth": "key", "credential_id": r.json()["id"], "password": "", "install_password": "alice-pass"})
+	r = a.do("POST", "/api/hosts/install-key", f)
+	mustStatus(t, r, 200, "install")
+	if j := r.json(); j["ok"] == true || j["stage"] != "install" || j["reason"] != "present_but_refused" || j["installed"] != "present" {
+		t.Errorf("present but refused: %s", r.Body)
+	}
+	if b, _ := os.ReadFile(ak); string(b) != line {
+		t.Errorf("added to: %q", b)
+	}
+}
+
+// pubOf: a key's public key, as the user's list of keys has it.
+func pubOf(t *testing.T, c *client, id any) string {
+	t.Helper()
+	r := c.do("GET", "/api/credentials", nil)
+	var list []map[string]any
+	_ = json.Unmarshal(r.Body, &list)
+	for _, k := range list {
+		if k["id"] == id {
+			return k["public_key"].(string)
+		}
+	}
+	t.Fatalf("no key %v", id)
+	return ""
 }

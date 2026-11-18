@@ -296,7 +296,7 @@ if [ ! -e "$d" ]; then mkdir -m 700 "$d" 2>/dev/null || { say E mkdir; exit 0; }
 if [ -e "$f" ] && [ ! -f "$f" ]; then say E notfile; exit 0; fi
 if [ -f "$f" ]; then
   [ -r "$f" ] || { say E notreadable; exit 0; }
-  awk -v t="$t" -v b="$b" "$A" "$f" 2>/dev/null
+  awk -v b="$b" "$A" "$f" 2>/dev/null
   case $? in 0) say OK present; exit 0;; 3) ;; *) say E scan; exit 0;; esac
 fi
 
@@ -311,72 +311,27 @@ say OK added
 `
 
 // authorizedKeysScan is the awk program installKeyScript asks whether the key
-// (t, b: its type and data) is an entry of authorized_keys already: exit 0
-// it is, 3 it is not (anything else: it could not be read). A line is read as sshd reads it — a comment or a blank
-// line is none; options, if any, are those sshd knows — a flag, or one
-// taking a value as name="value" (names in any case) — separated by
-// commas, up to a space or tab; inside a value a backslash escapes a double
-// quote and nothing else (sshd's rule: "\\"" ends no value, a lone
-// backslash is itself). A line whose options are not so is no entry, as
-// sshd refuses it;
-// then the key's type and data (an RSA key's rsa-sha2-256 and rsa-sha2-512,
-// which sshd takes for it, too); a CR at its end dropped (CRLF files). Only
-// a line with the key's data in it, and of no more than 64 KiB, is read
-// further (BusyBox's awk takes a long line a character at a time in time
-// that grows with its square): one longer is taken for none — the worst
-// that does is the key added again, which sshd minds not. Like the
-// script, no single quote nor backslash in it (the characters made with
-// sprintf), so it is passed as it is, quoted, under any login shell.
-const authorizedKeysScan = `BEGIN {
-  tab = sprintf("%c", 9); cr = sprintf("%c", 13); bs = sprintf("%c", 92); dq = sprintf("%c", 34); ws = "[ " tab "]+"; found = 0
-  n = split("agent-forwarding cert-authority no-agent-forwarding no-port-forwarding no-pty no-user-rc no-x11-forwarding port-forwarding pty user-rc x11-forwarding restrict touch-required no-touch-required verify-required", a, " ")
-  for (k = 1; k <= n; k++) flag[a[k]] = 1
-  n = split("command environment expiry-time from permitlisten permitopen principals tunnel", a, " ")
-  for (k = 1; k <= n; k++) valued[a[k]] = 1
-}
+// is in authorized_keys already: exit 0 it is, 3 it is not (anything else:
+// it could not be read). It leans to "it is": any line — but a blank one or
+// one whose first character not blank is "#" — with the key's data (b, its
+// base64) as a whole field of it, between blanks or at an end, whatever
+// else the line has (options, the type's name, a comment, another key's
+// comment). Options are not read: sshd's rules for them are many, and a
+// line misread as without the key would have the key added again, without
+// what that line restricts it to. A CR at a line's end is dropped (CRLF
+// files). Each line is looked through for the data once, then blanks made
+// spaces, so a long one costs little (BusyBox's awk too). Like the script,
+// no single quote nor backslash in it (its tab and CR made by sprintf), so
+// it is passed as it is, quoted, under any login shell.
+const authorizedKeysScan = `BEGIN { tab = sprintf("%c", 9); cr = sprintf("%c", 13); found = 0 }
 {
   l = $0
+  if (index(l, b) == 0) next
   if (substr(l, length(l), 1) == cr) l = substr(l, 1, length(l) - 1)
-  if (index(l, b) == 0 || length(l) > 65536) next
-  sub("^" ws, "", l)
+  gsub(tab, " ", l)
+  sub("^ +", "", l)
   if (l == "" || substr(l, 1, 1) == "#") next
-  if (l !~ ("^(ssh-|ecdsa-|sk-|rsa-sha2-)[^ " tab "]*[ " tab "]")) {
-    L = length(l)
-    i = 1
-    ok = 1
-    while (1) {
-      s0 = i
-      while (i <= L && substr(l, i, 1) ~ /[A-Za-z0-9_-]/) i++
-      if (i == s0) { ok = 0; break }
-      name = tolower(substr(l, s0, i - s0))
-      c = substr(l, i, 1)
-      if (c == "=") {
-        if (!(name in valued)) { ok = 0; break }
-        i++
-        if (substr(l, i, 1) != dq) { ok = 0; break }
-        i++
-        while (i <= L) {
-          c = substr(l, i, 1)
-          if (c == bs && substr(l, i + 1, 1) == dq) { i += 2; continue }
-          if (c == dq) break
-          i++
-        }
-        if (i > L) { ok = 0; break }
-        i++
-        c = substr(l, i, 1)
-      } else if (!(name in flag)) { ok = 0; break }
-      if (c == ",") { i++; continue }
-      if (c == " " || c == tab) break
-      ok = 0
-      break
-    }
-    if (!ok) next
-    l = substr(l, i)
-    sub("^" ws, "", l)
-  }
-  n = split(l, f, ws)
-  if (n < 2 || f[2] != b) next
-  if (f[1] == t || (t == "ssh-rsa" && (f[1] == "rsa-sha2-256" || f[1] == "rsa-sha2-512"))) { found = 1; exit }
+  if (index(" " l " ", " " b " ") > 0) { found = 1; exit }
 }
 END { exit (found ? 0 : 3) }
 `
@@ -507,7 +462,13 @@ func (s *Server) installKey(ctx context.Context, form *store.Host, keyed sshx.Ta
 		return c, err
 	}
 	c.Installed = installed
-	if !c.OK {
+	switch {
+	case c.OK:
+	case installed == "present" && c.Stage == "auth":
+		// (There already, and signing in with it refused: that line is not
+		// what it seems — restricted, or not right. Nothing is added.)
+		c.Stage, c.Reason, c.Field = "install", "present_but_refused", ""
+	default:
 		c.Stage = "verify:" + c.Stage
 	}
 	return c, nil
