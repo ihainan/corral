@@ -312,13 +312,21 @@ func (o *OIDC) finish(ctx context.Context, origin, state, code, cookie string) (
 		Email: str(claims["email"]), Name: str(claims["name"]), Next: f.next, LinkUser: f.linkUser, LinkLogin: f.linkLogin}
 	groups, found := claimAt(claims, o.cfg.GroupsClaim)
 	if !found && (len(o.cfg.Allowed) > 0 || len(o.cfg.Admins) > 0) && o.userinfo {
-		// (Not in the ID token: the provider asked, by the access token this once.)
-		if ui, err := o.provider.UserInfo(o.ctx(ctx), oauth2.StaticTokenSource(tok)); err == nil && ui.Subject == idt.Subject {
-			var uc map[string]any
-			if ui.Claims(&uc) == nil {
-				groups, _ = claimAt(uc, o.cfg.GroupsClaim)
-			}
+		// (Not in the ID token: the provider asked, by the access token this once.
+		// Not read — its answer failed, or was another's — is no "no groups": a
+		// passing fault must not make an administrator none.)
+		ui, err := o.provider.UserInfo(o.ctx(ctx), oauth2.StaticTokenSource(tok))
+		if err != nil {
+			return base, ssoErr(ReasonUnreachable, err)
 		}
+		if ui.Subject != idt.Subject {
+			return base, ssoErr(ReasonInvalidToken, errors.New("userinfo of another subject"))
+		}
+		var uc map[string]any
+		if err := ui.Claims(&uc); err != nil {
+			return base, ssoErr(ReasonUnreachable, err)
+		}
+		groups, _ = claimAt(uc, o.cfg.GroupsClaim)
 	}
 	c.Groups = groups
 	return c, nil
@@ -399,6 +407,9 @@ type SignedIn struct {
 	Created  bool
 	RoleWas  string
 	RoleKept bool // the provider's groups would have made it no administrator, but it is the last one
+	// WantRole: the role the groups give it (CORRAL_OIDC_ADMIN_GROUPS; "": roles kept in
+	// Corral), set by SyncRole once its login is made — not before, nor for a sign-in refused.
+	WantRole string
 }
 
 // SignIn lets c's person in: its account (made now, the first time — no
@@ -425,14 +436,11 @@ func (o *OIDC) SignIn(ctx context.Context, c *Claimed) (*SignedIn, error) {
 			want = store.RoleAdmin
 		}
 	}
-	out := &SignedIn{}
+	out := &SignedIn{WantRole: want}
 	b, err := o.st.IdentityBySubject(ctx, c.Issuer, c.Subject)
 	switch {
 	case errors.Is(err, store.ErrNotFound):
-		role := want
-		if role == "" {
-			role = store.RoleMember
-		}
+		role := store.RoleMember // (an administrator only once its login is made: SyncRole)
 		display := c.Name
 		if display == "" {
 			display = c.Username
@@ -458,19 +466,26 @@ func (o *OIDC) SignIn(ctx context.Context, c *Claimed) (*SignedIn, error) {
 	}
 	_ = o.st.TouchIdentity(ctx, id)
 	out.User, out.RoleWas = u, u.Role
-	if want != "" && u.Role != want {
-		switch err := o.st.UpdateUserGuarded(ctx, u.ID, &want, nil); {
-		case errors.Is(err, store.ErrLastAdmin):
-			out.RoleKept = true
-		case err != nil:
-			return nil, err
-		default:
-			if out.User, err = o.st.UserByID(ctx, u.ID); err != nil {
-				return nil, err
-			}
-		}
-	}
 	return out, nil
+}
+
+// SyncRole gives the account its groups' role (in.WantRole), now its login
+// (hash) is made and stands — in one transaction with the check that it
+// does, and that the identity is still bound; never leaving no
+// administrator. in is updated with what became of it.
+func (o *OIDC) SyncRole(ctx context.Context, in *SignedIn, c *Claimed, hash string) error {
+	if in.WantRole == "" {
+		return nil
+	}
+	was, kept, err := o.st.SyncSSORole(ctx, hash, in.User.ID, c.Issuer, c.Subject, in.WantRole)
+	if err != nil {
+		return err
+	}
+	in.RoleWas, in.RoleKept = was, kept
+	if !kept {
+		in.User.Role = in.WantRole
+	}
+	return nil
 }
 
 func limit(s string, n int) string {
@@ -563,7 +578,9 @@ func (o *OIDC) signedOut(c *Claimed) bool {
 // signed in, checked by the caller).
 func (o *OIDC) Link(ctx context.Context, c *Claimed) error {
 	id := &store.OIDCIdentity{Issuer: c.Issuer, Subject: c.Subject, UsernameHint: limit(c.Username, 128), Email: limit(c.Email, 254), Name: limit(c.Name, 128)}
-	switch err := o.st.LinkIdentity(ctx, c.LinkUser, id); {
+	switch err := o.st.LinkIdentityForLogin(ctx, c.LinkUser, c.LinkLogin, id); {
+	case errors.Is(err, store.ErrNotFound):
+		return ssoErr(ReasonLinkLogin, nil)
 	case errors.Is(err, store.ErrIdentityTaken):
 		return ssoErr(ReasonIdentityTaken, nil)
 	case errors.Is(err, store.ErrAlreadyLinked):
@@ -637,6 +654,13 @@ func (o *OIDC) Logout(ctx context.Context, raw string) (map[string]int64, error)
 	}
 	if claims.Exp != nil && time.Unix(int64(*claims.Exp), 0).Before(now.Add(-skew)) {
 		return nil, errors.New("expired")
+	}
+	// (Not before its time: go-oidc's own check of nbf goes with the expiry's, skipped here.)
+	if v, ok := all["nbf"]; ok {
+		var nbf float64
+		if json.Unmarshal(v, &nbf) != nil || time.Unix(int64(nbf), 0).After(now.Add(skew)) {
+			return nil, errors.New("not valid yet")
+		}
 	}
 	iss := o.cfg.Issuer // (as identities are kept: see Finish)
 	key := iss + "\x00" + claims.Jti

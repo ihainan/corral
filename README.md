@@ -346,9 +346,11 @@ of, its own passwords.
 2. **Capability config**: *Client authentication* on (a confidential client),
    *Standard flow* on; *Direct access grants* and *Implicit flow* off.
 3. **Login settings**: *Valid redirect URIs*
-   `https://corral.example.com/api/auth/oidc/callback` (one per Corral
-   domain); *Valid post logout redirect URIs* `https://corral.example.com/login`;
-   *Web origins* `https://corral.example.com`.
+   `https://corral.example.com/api/auth/oidc/callback`; *Valid post logout
+   redirect URIs* `https://corral.example.com/login`; *Web origins*
+   `https://corral.example.com`. Each of these once per Corral domain
+   (`CORRAL_PUBLIC_URL` and every `CORRAL_EXTRA_URLS` one): a sign-in, and a
+   sign-out, come back to the domain they began on.
 4. **Advanced › Advanced settings**: *Proof Key for Code Exchange Code
    Challenge Method* `S256`.
 5. **Logout settings**: *Front channel logout* off; *Backchannel logout URL*

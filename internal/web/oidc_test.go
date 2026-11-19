@@ -908,3 +908,111 @@ func TestSSOUnlinkRoleNow(t *testing.T) {
 		t.Errorf("unlink of a member under admins: %v", err)
 	}
 }
+
+// Review part A (ai-04's Codex pass).
+
+// Linking from a login signed out (or ended) by the time it is written: nothing linked.
+func TestSSOLinkNeedsTheLogin(t *testing.T) {
+	op := newFakeOP(t)
+	h := newHarness(t, withOIDC(op, "", nil))
+	h.admin()
+	root, _ := h.store.UserByName(t.Context(), "root")
+	id := &store.OIDCIdentity{Issuer: op.issuer(), Subject: "sub-x"}
+	if err := h.store.LinkIdentityForLogin(t.Context(), root.ID, "no-such-login", id); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("a login gone: %v", err)
+	}
+	if ids, _ := h.store.IdentitiesOf(t.Context(), root.ID); len(ids) != 0 {
+		t.Errorf("linked: %v", ids)
+	}
+}
+
+// The groups' role is given only once the login stands: a sign-in refused changes none.
+func TestSSORoleOnlyWithTheLogin(t *testing.T) {
+	op := newFakeOP(t)
+	h := newHarness(t, withOIDC(op, "", func(c *config.OIDCConfig) { c.Admins = []string{"corral-admins"} }))
+	h.admin()
+	hash, _ := auth.HashPassword("a-local-password-1")
+	u, _ := h.store.CreateUser(t.Context(), "mem", "", hash, store.RoleMember)
+	if err := h.store.LinkIdentity(t.Context(), u.ID, &store.OIDCIdentity{Issuer: op.issuer(), Subject: "sub-mem"}); err != nil {
+		t.Fatal(err)
+	}
+	c := &auth.Claimed{Issuer: op.issuer(), Subject: "sub-mem", Groups: []string{"corral-admins"}, IssuedAt: time.Now()}
+	in, err := h.srv.oidc.SignIn(t.Context(), c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if now, _ := h.store.UserByID(t.Context(), u.ID); now.Role != store.RoleMember {
+		t.Errorf("promoted before its login: %s", now.Role)
+	}
+	if _, err := h.store.UnlinkIdentity(t.Context(), u.ID, op.issuer(), nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := h.srv.oidc.StartSession(t.Context(), in.User, c, "127.0.0.1", "t"); err == nil {
+		t.Fatal("a login after the unlink")
+	}
+	if now, _ := h.store.UserByID(t.Context(), u.ID); now.Role != store.RoleMember {
+		t.Errorf("promoted by a refused sign-in: %s", now.Role)
+	}
+	// (By a sign-in that stands: promoted.)
+	op.who = fakeWho{Sub: "sub-new", Username: "newadm", Groups: []string{"corral-admins"}}
+	b := newBrowser(t, h)
+	b.signIn("/")
+	if me := meOf(t, b); me["role"] != "admin" {
+		t.Errorf("a new administrator by its groups: %v", me)
+	}
+}
+
+// Groups from userinfo that could not be read: no sign-in, no role changed.
+func TestSSOUserinfoDown(t *testing.T) {
+	op := newFakeOP(t)
+	h := newHarness(t, withOIDC(op, "", func(c *config.OIDCConfig) { c.Admins = []string{"corral-admins"} }))
+	h.admin()
+	op.groupsByUserinfo = true
+	op.who = fakeWho{Sub: "sub-adm", Username: "adm", Groups: []string{"corral-admins"}}
+	b := newBrowser(t, h)
+	b.signIn("/")
+	if me := meOf(t, b); me["role"] != "admin" {
+		t.Fatalf("by userinfo's groups: %v", me)
+	}
+	op.userinfoFails = true
+	if got := ssoError(t, newBrowser(t, h).signIn("/")); got != "provider_unreachable" {
+		t.Errorf("userinfo down: %q", got)
+	}
+	if u, _ := h.store.UserByName(t.Context(), "adm"); u.Role != store.RoleAdmin {
+		t.Errorf("demoted by a fault: %s", u.Role)
+	}
+	// (Read, and none: a real "no groups" — demoted.)
+	op.userinfoFails = false
+	op.who.Groups = []string{}
+	newBrowser(t, h).signIn("/")
+	if u, _ := h.store.UserByName(t.Context(), "adm"); u.Role != store.RoleMember {
+		t.Errorf("no groups read: %s", u.Role)
+	}
+}
+
+// A logout token not valid yet (nbf ahead): refused; one valid since: taken.
+func TestSSOLogoutNotBefore(t *testing.T) {
+	op := newFakeOP(t)
+	h := newHarness(t, withOIDC(op, "", nil))
+	h.admin()
+	b := newBrowser(t, h)
+	b.signIn("/")
+	if got := postLogout(t, h, op.logoutToken("sub-alice", "", func(c map[string]any) { c["nbf"] = time.Now().Add(10 * time.Minute).Unix() })); got != 400 || meOf(t, b) == nil {
+		t.Errorf("nbf ahead: %d", got)
+	}
+	if got := postLogout(t, h, op.logoutToken("sub-alice", "", func(c map[string]any) { c["nbf"] = time.Now().Add(-time.Minute).Unix() })); got != 200 || meOf(t, b) != nil {
+		t.Errorf("nbf past: %d", got)
+	}
+}
+
+// Two-step setup for an account with no password: said so, not a wrong password.
+func TestSSOOnlyTOTP(t *testing.T) {
+	op := newFakeOP(t)
+	h := newHarness(t, withOIDC(op, "", nil))
+	h.admin()
+	b := newBrowser(t, h)
+	b.signIn("/")
+	if r := b.api("POST", "/api/me/totp/begin", map[string]any{"password": "anything"}); r.Status != 409 || r.code() != "no_password" {
+		t.Errorf("totp begin: %d %s", r.Status, r.Body)
+	}
+}

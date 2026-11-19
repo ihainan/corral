@@ -42,6 +42,9 @@ type fakeOP struct {
 	clientID  string
 	secret    string
 	breakPKCE bool // the next code's challenge is not the one the gateway sent
+	// groups only by userinfo (not in the ID token); userinfo failing.
+	groupsByUserinfo bool
+	userinfoFails    bool
 }
 
 type fakeKey struct {
@@ -154,7 +157,10 @@ func (op *fakeOP) token(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	claims := map[string]any{"iss": op.issuer(), "sub": c.who.Sub, "aud": op.clientID, "exp": now.Add(5 * time.Minute).Unix(), "iat": now.Unix(),
 		"nonce": c.nonce, "preferred_username": c.who.Username, "email": c.who.Email, "name": c.who.Name, "sid": c.who.Sid}
-	if c.who.Groups != nil {
+	op.mu.Lock()
+	byUI := op.groupsByUserinfo
+	op.mu.Unlock()
+	if c.who.Groups != nil && !byUI {
 		claims["groups"] = c.who.Groups
 	}
 	op.mu.Lock()
@@ -213,8 +219,12 @@ func (op *fakeOP) jwks(w http.ResponseWriter, r *http.Request) {
 
 func (op *fakeOP) userinfo(w http.ResponseWriter, r *http.Request) {
 	op.mu.Lock()
-	who := op.who
+	who, fails := op.who, op.userinfoFails
 	op.mu.Unlock()
+	if fails {
+		http.Error(w, "down", http.StatusServiceUnavailable)
+		return
+	}
 	writeJSON(w, 200, map[string]any{"sub": who.Sub, "groups": who.Groups})
 }
 

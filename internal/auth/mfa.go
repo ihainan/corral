@@ -409,6 +409,11 @@ func (s *Service) ResetTOTP(ctx context.Context, userID int64) error {
 // confirmPassword re-checks the password of a signed-in user before a
 // change to how they sign in; wrong ones count like wrong codes.
 func (s *Service) confirmPassword(u *store.User, password string) error {
+	// (None to confirm — single sign-on its only way in, the provider its second step:
+	// said so, not taken for a wrong one, nor counted.)
+	if !u.HasPassword() {
+		return ErrNoPassword
+	}
 	done, allowed := s.takeAttempt(u.ID)
 	if !allowed {
 		return ErrRateLimited

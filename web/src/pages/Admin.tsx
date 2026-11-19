@@ -158,7 +158,7 @@ export function AdminUsersPage() {
                     {
                       label: t('admin.resetPassword'),
                       icon: <KeySquare size={16} />,
-                      onSelect: () => setDialog(<ResetDialog user={u} onClose={() => setDialog(null)} />),
+                      onSelect: () => setDialog(<ResetDialog user={u} onClose={() => setDialog(null)} onDone={load} />),
                     },
                     u.totp
                       ? {
@@ -199,7 +199,19 @@ export function AdminUsersPage() {
                                 />,
                               ),
                           }
-                        : { label: t('admin.ssoUnlink'), icon: <Unlink size={16} />, disabled: true, hint: t(u.has_password ? 'admin.ssoNoWayHint' : 'admin.ssoOnlyHint') }
+                        : {
+                            label: t('admin.ssoUnlink'),
+                            icon: <Unlink size={16} />,
+                            disabled: true,
+                            // (What it would take, as the server rules: a password, and one it may use.)
+                            hint: t(
+                              boot?.local_login === 'off'
+                                ? 'admin.ssoHintOff'
+                                : boot?.local_login === 'admins' && u.role !== 'admin'
+                                  ? 'admin.ssoHintAdminsOnly'
+                                  : 'admin.ssoOnlyHint',
+                            ),
+                          }
                       : null,
                     u.disabled
                       ? { label: t('admin.enable'), icon: <UserCheck size={16} />, separator: true, onSelect: () => update(u, { disabled: false }) }
@@ -378,7 +390,7 @@ function CreateUserDialog({ onClose, onCreated }: { onClose: () => void; onCreat
   )
 }
 
-function ResetDialog({ user, onClose }: { user: AdminUser; onClose: () => void }) {
+function ResetDialog({ user, onClose, onDone }: { user: AdminUser; onClose: () => void; onDone?: () => void }) {
   const toast = useToast()
   const [pw, setPw] = useState('')
   const [mustChange, setMustChange] = useState(true)
@@ -391,6 +403,7 @@ function ResetDialog({ user, onClose }: { user: AdminUser; onClose: () => void }
     try {
       await api('POST', `/api/admin/users/${user.id}/password`, { password: pw, must_change: mustChange })
       toast(t('settings.saved'))
+      onDone?.() // (the row as it is now: a password where there was none)
       onClose()
     } catch (err) {
       setError(errorText(err))

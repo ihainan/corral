@@ -27,6 +27,8 @@ func (s *Server) writeMFAError(w http.ResponseWriter, r *http.Request, err error
 		writeError(w, http.StatusUnauthorized, "mfa_expired", "the sign-in step expired; sign in again")
 	case errors.Is(err, auth.ErrNoEnrolment):
 		writeError(w, http.StatusConflict, "no_enrolment", "start the set-up again")
+	case errors.Is(err, auth.ErrNoPassword):
+		writeError(w, http.StatusConflict, "no_password", "this account has no password; an administrator can set one")
 	case errors.Is(err, auth.ErrInvalidLogin):
 		writeError(w, http.StatusUnprocessableEntity, "wrong_password", "the password is wrong")
 	case errors.Is(err, auth.ErrTOTPOff):

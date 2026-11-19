@@ -151,8 +151,17 @@ func (s *Server) apiOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		s.ssoFailed(w, r, c, err, false)
 		return
 	}
-	tok, _, err := s.oidc.StartSession(r.Context(), in.User, c, s.clientIP(r), r.UserAgent())
+	tok, hash, err := s.oidc.StartSession(r.Context(), in.User, c, s.clientIP(r), r.UserAgent())
 	if err != nil {
+		s.ssoFailed(w, r, c, err, false)
+		return
+	}
+	// (Its groups' role only now, the login made and standing: a sign-in refused changed none.)
+	if err := s.oidc.SyncRole(r.Context(), in, c, hash); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			err = &auth.SSOError{Reason: auth.ReasonSignedOut}
+		}
+		_ = s.store.DeleteLoginSession(context.WithoutCancel(r.Context()), hash)
 		s.ssoFailed(w, r, c, err, false)
 		return
 	}

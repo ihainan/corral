@@ -1,12 +1,12 @@
 import { useEffect, useLayoutEffect, useState, type FormEvent, type ReactNode } from 'react'
 import { ChevronRight, Film, KeyRound, LogOut, Minus, Plus, ScrollText, Users } from 'lucide-react'
 import { disablePush, enablePush, pushState, syncPush, type PushState } from '../push'
-import { api, errorText, type Me } from '../api'
-import { getLang, setLang, t, type Lang } from '../i18n'
+import { api, ApiError, errorText, type Me } from '../api'
+import { getLang, hasKey, setLang, t, type Lang } from '../i18n'
 import { setPrefs, usePrefs } from '../prefs'
 import { linkHandler } from '../router'
 import { rememberSettingsScroll, signOut, takeSettingsScroll, useSession } from '../app'
-import { Confirm, Dialog, Field, useToast } from '../components/ui'
+import { Confirm, Dialog, Field, LoadError, useToast } from '../components/ui'
 import { CurrentScheme, SchemeDialog } from '../terminal/SchemePicker'
 import { TwoStepSetting } from './TwoStep'
 import { ssoErrorText } from './Auth'
@@ -332,7 +332,12 @@ function SSOSetting() {
   const [busy, setBusy] = useState(false)
   const [asking, setAsking] = useState(false)
   const [err, setErr] = useState(() => new URLSearchParams(location.search).get('sso_error') ?? '')
-  const load = () => api<Me>('GET', '/api/me').then(setMe, () => {})
+  // (Not read: said so, with a retry — never shown as "not linked".)
+  const [failed, setFailed] = useState(false)
+  const load = () => {
+    setFailed(false)
+    return api<Me>('GET', '/api/me').then(setMe, () => setFailed(true))
+  }
   useEffect(() => {
     void load()
     const q = new URLSearchParams(location.search)
@@ -349,7 +354,8 @@ function SSOSetting() {
       const r = await api<{ url: string }>('POST', '/api/me/oidc/link')
       location.assign(r.url)
     } catch (e) {
-      toast(errorText(e), true)
+      // (The provider's state in the page's words: sso.error.*, as the sign-in page says it.)
+      toast(e instanceof ApiError && hasKey('sso.error.' + e.code) ? ssoErrorText(e.code) : errorText(e), true)
       setBusy(false)
     }
   }
@@ -362,13 +368,24 @@ function SSOSetting() {
   const pwOK = !!me?.has_password && (boot?.local_login === 'all' || !boot?.local_login || (boot.local_login === 'admins' && me?.role === 'admin'))
   const who = id ? id.username_hint || id.email || id.subject : ''
   const host = id ? (() => { try { return new URL(id.issuer).host } catch { return id.issuer } })() : ''
+  if (failed) {
+    return (
+      <Setting label={t('sso.row')}>
+        <LoadError text={t('sso.loadFailed')} onRetry={() => void load()} />
+      </Setting>
+    )
+  }
   return (
     <Setting
       label={t('sso.row')}
       hint={
         <>
-          {id ? t('sso.linkedAs', { who, host }) : t('sso.notLinked')}
-          {id && !pwOK && <span className="hint-block">{t(me?.has_password ? 'sso.onlyWayMode' : 'sso.onlyWay')}</span>}
+          {!me ? t('common.loading') : id ? t('sso.linkedAs', { who, host }) : t('sso.notLinked')}
+          {id && !pwOK && (
+            <span className="hint-block">
+              {t(boot?.local_login === 'off' ? 'sso.onlyWayOff' : me?.has_password ? 'sso.onlyWayMode' : 'sso.onlyWay')}
+            </span>
+          )}
           {err && <span className="err hint-block" role="alert">{ssoErrorText(err)}</span>}
         </>
       }

@@ -46,6 +46,17 @@ export function TwoStepSetting() {
     if (me) setMe({ ...me, totp: on })
     load()
   }
+  // (No password: single sign-on its only way in, the provider's own second step its second step.)
+  if (me?.has_password === false && !status?.on) {
+    return (
+      <div className="setting">
+        <div className="setting-label">
+          <span>{t('totp.title')}</span>
+          <span className="hint">{t('totp.bySSO')}</span>
+        </div>
+      </div>
+    )
+  }
   return (
     // (Off, one button at the right as the password row's; on, two that go
     // under the words on a narrow screen — ux1101 PG-24.)

@@ -136,11 +136,25 @@ func trimTo(s string, n int) string {
 // in, and signed in at the provider as it). ErrIdentityTaken: another
 // account's; ErrAlreadyLinked: this one has an identity of that provider.
 func (s *Store) LinkIdentity(ctx context.Context, userID int64, id *OIDCIdentity) error {
+	return s.linkIdentity(ctx, userID, "", id)
+}
+
+func (s *Store) linkIdentity(ctx context.Context, userID int64, loginHash string, id *OIDCIdentity) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	if loginHash != "" {
+		var n int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM login_sessions l JOIN users u ON u.id = l.user_id
+			WHERE l.token_hash = ? AND l.user_id = ? AND u.disabled = 0`, loginHash, userID).Scan(&n); err != nil {
+			return err
+		}
+		if n == 0 {
+			return ErrNotFound
+		}
+	}
 	var owner int64
 	switch err := tx.QueryRowContext(ctx, `SELECT user_id FROM oidc_identities WHERE issuer = ? AND subject = ?`, id.Issuer, id.Subject).Scan(&owner); {
 	case err == nil && owner == userID:
@@ -166,6 +180,14 @@ func (s *Store) LinkIdentity(ctx context.Context, userID int64, id *OIDCIdentity
 		return err
 	}
 	return tx.Commit()
+}
+
+// LinkIdentityForLogin is LinkIdentity for an account that asked from login
+// loginHash: only while that login is still signed in and the account is
+// not disabled, checked in the same transaction (ErrNotFound where not) —
+// a login signed out, or ended by a password reset, meanwhile links nothing.
+func (s *Store) LinkIdentityForLogin(ctx context.Context, userID int64, loginHash string, id *OIDCIdentity) error {
+	return s.linkIdentity(ctx, userID, loginHash, id)
 }
 
 // UnlinkIdentity removes an account's binding to the provider (issuer), and
@@ -327,6 +349,40 @@ func endOIDCLogins(ctx context.Context, tx *sql.Tx, issuer, subject, sid string)
 		}
 	}
 	return out, rows.Err()
+}
+
+// SyncSSORole sets the role single sign-on's groups give an account (want),
+// once its login (tokenHash) is made: only while that login still stands and
+// the identity is still bound to the account, in one transaction — a sign-in
+// refused or undone meanwhile changes no role — and never leaving no
+// enabled administrator (kept true: left as it was). It gives back the role
+// it had.
+func (s *Store) SyncSSORole(ctx context.Context, tokenHash string, userID int64, issuer, subject, want string) (was string, kept bool, err error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", false, err
+	}
+	defer tx.Rollback()
+	if err := tx.QueryRowContext(ctx, `SELECT u.role FROM users u
+		JOIN login_sessions l ON l.user_id = u.id AND l.token_hash = ?
+		JOIN oidc_identities i ON i.user_id = u.id AND i.issuer = ? AND i.subject = ?
+		WHERE u.id = ? AND u.disabled = 0`, tokenHash, issuer, subject, userID).Scan(&was); err != nil {
+		return "", false, notFound(err)
+	}
+	if was == want {
+		return was, false, nil
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE users SET role = ? WHERE id = ?`, want, userID); err != nil {
+		return "", false, err
+	}
+	var admins int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE role = ? AND disabled = 0`, RoleAdmin).Scan(&admins); err != nil {
+		return "", false, err
+	}
+	if admins == 0 {
+		return was, true, nil // (rolled back: the last one stays one)
+	}
+	return was, false, tx.Commit()
 }
 
 // HasPassword: the account has a password (not single sign-on alone).
