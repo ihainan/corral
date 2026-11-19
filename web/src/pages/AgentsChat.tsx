@@ -964,12 +964,21 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     // (Its turn over, with subagents out or that being read for: the thread
     // is of a turn that ended, whatever the list says of the agent.)
     const ended = !row.lost && (row.a.bg === 'running' || row.a.bg === 'checking') && (row.a.status === 'done' || row.a.status === 'idle')
-    const status = row.lost ? 'unknown' : ended && row.bg !== 'stale' ? (row.a.status as 'done' | 'idle') : row.status
+    const herdrSays = row.lost ? 'unknown' : ended && row.bg !== 'stale' ? (row.a.status as 'done' | 'idle') : row.status
     const bg = row.lost ? undefined : row.bg
+    // (This pane's Claude Code, its process's file read: of it, and of no other agent.)
+    const ownCC = !row.lost && convo.bind?.pane === row.a.pane_id && (convo.bind.agent ?? 'claude') === 'claude' && !convo.failing
+    // (Asking, as Claude Code's own file says — "input needed" for a question,
+    // a permission: herdr, which reads its screen, may call it idle then.
+    // 11-19: a question with long Chinese choices, herdr said idle, and the
+    // chat page showed nothing to answer while the terminal waited on it.
+    // The file only: the gateway reads it for a herdr pane only to say it waits.)
+    const ccAsks = ownCC && convo.agentStatus === 'waiting' && answerable(convo.waitingFor)
+    const status = ccAsks && herdrSays !== 'unknown' ? 'blocked' : herdrSays
     // (A dialog of Claude Code's own open, /usage say: herdr calls it idle,
     // its session file says it waits. Of this pane's process only, and of
     // Claude Code's: no other agent says so.)
-    const dialog = !row.lost && status !== 'blocked' && convo.bind?.pane === row.a.pane_id && (convo.bind.agent ?? 'claude') === 'claude' && !convo.failing && convo.agentStatus === 'waiting' && !answerable(convo.waitingFor)
+    const dialog = ownCC && status !== 'blocked' && convo.agentStatus === 'waiting' && !answerable(convo.waitingFor)
     return { where: row.ws === '~' ? '' : row.ws, title, status, bg, dialog, cmds: cmdsOf(row), other: readsLog(row.a.agent) ? undefined : row.a.agent, program: row.a.agent }
   }, [herdr, row, convo.bind, convo.agentStatus, convo.waitingFor, convo.bgCmds, convo.failing, convoTitle, convo.entries])
   // A finished one looked at here is seen: the gateway keeps it, so it is
