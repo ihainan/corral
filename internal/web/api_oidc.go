@@ -250,13 +250,13 @@ func (s *Server) apiAdminOIDCUnlink(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) unlink(w http.ResponseWriter, r *http.Request, u *store.User, by string) {
-	// (Its password not one it may sign in with — CORRAL_LOCAL_LOGIN — single sign-on is its way in still.)
-	if u.HasPassword() && !s.auth.PasswordAllowed(u) {
+	// (Its password not one it may sign in with — CORRAL_LOCAL_LOGIN, by its role as it is
+	// in the unlink's own transaction — single sign-on is its way in still.)
+	ended, err := s.store.UnlinkIdentity(r.Context(), u.ID, s.oidc.Issuer(), s.auth.RoleMayUsePassword)
+	switch {
+	case errors.Is(err, store.ErrNoWayIn):
 		writeError(w, http.StatusConflict, "no_way_in", "this account may not sign in with its password, so single sign-on is its only way in")
 		return
-	}
-	ended, err := s.store.UnlinkIdentity(r.Context(), u.ID, s.oidc.Issuer())
-	switch {
 	case errors.Is(err, store.ErrNoPassword):
 		writeError(w, http.StatusConflict, "sso_only", "this account can only sign in with single sign-on")
 		return

@@ -29,6 +29,8 @@ var (
 	ErrAlreadyLinked = errors.New("this account is already linked to that provider")
 	// ErrNoPassword: the account has no password, single sign-on being its only way in.
 	ErrNoPassword = errors.New("this account has no password")
+	// ErrNoWayIn: the account's password may not be used to sign in (CORRAL_LOCAL_LOGIN).
+	ErrNoWayIn = errors.New("this account may not sign in with its password")
 )
 
 const identityCols = `issuer, subject, user_id, username_hint, email, name, created_at, last_login_at`
@@ -170,18 +172,24 @@ func (s *Store) LinkIdentity(ctx context.Context, userID int64, id *OIDCIdentity
 // ends the logins made by it. ErrNoPassword where the account has no
 // password (it would have no way in left); ErrNotFound where it had none.
 // It gives back the logins ended.
-func (s *Store) UnlinkIdentity(ctx context.Context, userID int64, issuer string) ([]string, error) {
+// usable says, of the account's role as it is in the transaction, whether
+// its password may be used to sign in (CORRAL_LOCAL_LOGIN): where not,
+// ErrNoWayIn — unlinked, it would have none.
+func (s *Store) UnlinkIdentity(ctx context.Context, userID int64, issuer string, usable func(role string) bool) ([]string, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback()
-	var hash string
-	if err := tx.QueryRowContext(ctx, `SELECT password_hash FROM users WHERE id = ?`, userID).Scan(&hash); err != nil {
+	var hash, role string
+	if err := tx.QueryRowContext(ctx, `SELECT password_hash, role FROM users WHERE id = ?`, userID).Scan(&hash, &role); err != nil {
 		return nil, notFound(err)
 	}
 	if hash == "" {
 		return nil, ErrNoPassword
+	}
+	if usable != nil && !usable(role) {
+		return nil, ErrNoWayIn
 	}
 	var subject string
 	if err := tx.QueryRowContext(ctx, `SELECT subject FROM oidc_identities WHERE user_id = ? AND issuer = ?`, userID, issuer).Scan(&subject); err != nil {

@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/url"
 	"os"
@@ -677,7 +678,7 @@ func TestSSOUnlinkedMidSignIn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := h.store.UnlinkIdentity(t.Context(), root.ID, op.issuer()); err != nil {
+	if _, err := h.store.UnlinkIdentity(t.Context(), root.ID, op.issuer(), nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := h.srv.oidc.StartSession(t.Context(), in.User, c, "127.0.0.1", "t"); err == nil {
@@ -831,5 +832,79 @@ func TestSSOOldIssuerNotShown(t *testing.T) {
 	}
 	if r := root.do("GET", "/api/admin/users", nil); strings.Contains(string(r.Body), "old.example") {
 		t.Errorf("admin list: %s", r.Body)
+	}
+}
+
+// Review 3 (Codex).
+
+// A subject's logouts out of order: the latest kept, not undone by an earlier one come later.
+func TestSSOLogoutsOutOfOrder(t *testing.T) {
+	op := newFakeOP(t)
+	h := newHarness(t, withOIDC(op, "", nil))
+	h.admin()
+	newBrowser(t, h).signIn("/")
+	u, _ := h.store.UserByName(t.Context(), "alice")
+	t2 := time.Now()
+	if _, err := h.srv.oidc.Logout(t.Context(), op.logoutToken("sub-alice", "", func(c map[string]any) { c["iat"] = t2.Unix() })); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.srv.oidc.Logout(t.Context(), op.logoutToken("sub-alice", "", func(c map[string]any) { c["iat"] = t2.Add(-30 * time.Second).Unix() })); err != nil {
+		t.Fatal(err)
+	}
+	c := &auth.Claimed{Issuer: op.issuer(), Subject: "sub-alice", Sid: "s", IssuedAt: t2.Add(-10 * time.Second)}
+	if _, _, err := h.srv.oidc.StartSession(t.Context(), u, c, "127.0.0.1", "t"); err == nil {
+		t.Errorf("a login from before the latest logout")
+	}
+}
+
+// A sign-in whose ID token is older than a logout's mark is kept: not finished.
+func TestSSOStaleSignIn(t *testing.T) {
+	op := newFakeOP(t)
+	h := newHarness(t, withOIDC(op, "", nil))
+	h.admin()
+	newBrowser(t, h).signIn("/")
+	u, _ := h.store.UserByName(t.Context(), "alice")
+	c := &auth.Claimed{Issuer: op.issuer(), Subject: "sub-alice", Sid: "s", IssuedAt: time.Now().Add(-11 * time.Minute)}
+	if _, _, err := h.srv.oidc.StartSession(t.Context(), u, c, "127.0.0.1", "t"); err == nil {
+		t.Errorf("a stale sign-in finished")
+	}
+}
+
+// admins only: made an ordinary user after its password (and code) were checked — no login.
+func TestLocalLoginRoleAtLoginTime(t *testing.T) {
+	op := newFakeOP(t)
+	h := newHarness(t, withOIDC(op, config.LocalLoginAdmins, nil))
+	h.admin()
+	hash, _ := auth.HashPassword("a-local-password-1")
+	u, err := h.store.CreateUser(t.Context(), "adm2", "", hash, store.RoleAdmin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	role := store.RoleMember
+	if err := h.store.UpdateUserGuarded(t.Context(), u.ID, &role, nil); err != nil {
+		t.Fatal(err)
+	}
+	// (As the session is made: its role then, not the one read before.)
+	if err := h.store.CreateLoginSessionIfCurrent(t.Context(), "zz", u.ID, hash, "", "", false, true); err == nil {
+		t.Errorf("a password login of an ordinary user made")
+	}
+}
+
+// Unlinking decides by the role in its own transaction.
+func TestSSOUnlinkRoleNow(t *testing.T) {
+	op := newFakeOP(t)
+	h := newHarness(t, withOIDC(op, config.LocalLoginAdmins, nil))
+	h.admin()
+	hash, _ := auth.HashPassword("a-local-password-1")
+	u, _ := h.store.CreateUser(t.Context(), "adm3", "", hash, store.RoleAdmin)
+	if err := h.store.LinkIdentity(t.Context(), u.ID, &store.OIDCIdentity{Issuer: op.issuer(), Subject: "sub-adm3"}); err != nil {
+		t.Fatal(err)
+	}
+	role := store.RoleMember
+	if err := h.store.UpdateUserGuarded(t.Context(), u.ID, &role, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.store.UnlinkIdentity(t.Context(), u.ID, op.issuer(), h.auth.RoleMayUsePassword); !errors.Is(err, store.ErrNoWayIn) {
+		t.Errorf("unlink of a member under admins: %v", err)
 	}
 }

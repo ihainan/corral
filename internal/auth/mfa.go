@@ -267,7 +267,7 @@ func (s *Service) LoginMFA(ctx context.Context, token, code, ip, ua string) (*st
 	if len(ua) > 300 {
 		ua = ua[:300]
 	}
-	if err := s.store.CreateLoginSessionIfCurrent(ctx, thash, u.ID, c.pwHash, ip, ua, false); err != nil {
+	if err := s.store.CreateLoginSessionIfCurrent(ctx, thash, u.ID, c.pwHash, ip, ua, false, s.localLogin == "admins"); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return nil, "", ErrChallengeGone
 		}

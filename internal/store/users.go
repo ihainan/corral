@@ -273,11 +273,16 @@ func (s *Store) CreateLoginSession(ctx context.Context, tokenHash string, userID
 // a password change or a disable therefore cannot complete after it.
 // passwordOnly: also only if two-step sign-in is (still) off, so a password
 // checked just before it was turned on cannot skip the code.
-func (s *Store) CreateLoginSessionIfCurrent(ctx context.Context, tokenHash string, userID int64, verifiedHash, ip, ua string, passwordOnly bool) error {
+// adminOnly: only while the account is an administrator (CORRAL_LOCAL_LOGIN=admins:
+// not one made an ordinary user since its password was checked).
+func (s *Store) CreateLoginSessionIfCurrent(ctx context.Context, tokenHash string, userID int64, verifiedHash, ip, ua string, passwordOnly, adminOnly bool) error {
 	now := s.unix()
 	cond := ""
 	if passwordOnly {
 		cond = " AND totp_ciphertext IS NULL"
+	}
+	if adminOnly {
+		cond += " AND role = '" + RoleAdmin + "'"
 	}
 	return affectedOrNotFound(s.db.ExecContext(ctx,
 		`INSERT INTO login_sessions (token_hash, user_id, created_at, last_seen_at, ip, user_agent)

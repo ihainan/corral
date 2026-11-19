@@ -156,6 +156,11 @@ func (s *Service) SetLocalLogin(mode string) { s.localLogin = mode }
 // PasswordAllowed: the account may sign in with its password (has one, and CORRAL_LOCAL_LOGIN lets it).
 func (s *Service) PasswordAllowed(u *store.User) bool { return u.HasPassword() && s.passwordAllowed(u) }
 
+// RoleMayUsePassword: an account of role may sign in with a password (CORRAL_LOCAL_LOGIN).
+func (s *Service) RoleMayUsePassword(role string) bool {
+	return s.passwordAllowed(&store.User{Role: role})
+}
+
 // passwordAllowed: the account may sign in with a password (CORRAL_LOCAL_LOGIN).
 func (s *Service) passwordAllowed(u *store.User) bool {
 	switch s.localLogin {
@@ -238,7 +243,7 @@ func (s *Service) Login(ctx context.Context, username, password, ip, ua string) 
 	}
 	// Created only if the password we just verified is still the current one.
 	// Not if two-step sign-in was turned on since u was read: then a code is due.
-	if err := s.store.CreateLoginSessionIfCurrent(ctx, hash, u.ID, u.PasswordHash(), ip, ua, true); err != nil {
+	if err := s.store.CreateLoginSessionIfCurrent(ctx, hash, u.ID, u.PasswordHash(), ip, ua, true, s.localLogin == "admins"); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return nil, "", ErrInvalidLogin
 		}

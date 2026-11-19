@@ -168,7 +168,7 @@ func TestTwoStepRaces(t *testing.T) {
 
 	// A password login that read the account before two-step was turned on
 	// cannot create a login without the code.
-	if err := h.store.CreateLoginSessionIfCurrent(ctx, "x1", stale.ID, stale.PasswordHash(), "", "", true); err == nil {
+	if err := h.store.CreateLoginSessionIfCurrent(ctx, "x1", stale.ID, stale.PasswordHash(), "", "", true, false); err == nil {
 		t.Fatal("password-only login created while two-step is on")
 	}
 	// A second set-up cannot replace the active secret.

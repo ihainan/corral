@@ -104,12 +104,18 @@ type OIDC struct {
 	userinfo bool
 	tried    time.Time
 	flows    map[string]*ssoFlow // by state
-	jtis     map[string]time.Time
+	jtis     map[string]jtiUse
 	// What back-channel logout ended lately: a provider's session (by sid),
 	// and a subject's sessions begun no later than its logout (by when the
 	// logout token was issued) — a sign-in finishing after it is refused.
 	outSid map[string]time.Time
 	outSub map[string]time.Time
+}
+
+// jtiUse: a logout token's jti, being acted on (busy) or used.
+type jtiUse struct {
+	at   time.Time
+	busy bool
 }
 
 type ssoFlow struct {
@@ -129,7 +135,7 @@ func NewOIDC(cfg *config.OIDCConfig, svc *Service, client *http.Client) *OIDC {
 	if client == nil {
 		client = &http.Client{Timeout: httpTimeout}
 	}
-	return &OIDC{cfg: cfg, st: svc.store, svc: svc, client: client, now: time.Now, flows: map[string]*ssoFlow{}, jtis: map[string]time.Time{},
+	return &OIDC{cfg: cfg, st: svc.store, svc: svc, client: client, now: time.Now, flows: map[string]*ssoFlow{}, jtis: map[string]jtiUse{},
 		outSid: map[string]time.Time{}, outSub: map[string]time.Time{}}
 }
 
@@ -507,6 +513,11 @@ func SuggestUsername(preferred, email, subject string) string {
 // disabled, and still has the password it had (where it has one) — not one
 // disabled or changed meanwhile.
 func (o *OIDC) StartSession(ctx context.Context, u *store.User, c *Claimed, ip, ua string) (string, string, error) {
+	// (Fresh only: a sign-in its ID token older than a logout's mark is kept is not
+	// one the mark could still be needed for — see Logout.)
+	if c.IssuedAt.IsZero() || o.now().Sub(c.IssuedAt) > iatMaxAge {
+		return "", "", ssoErr(ReasonFlow, nil)
+	}
 	if o.signedOut(c) {
 		return "", "", ssoErr(ReasonSignedOut, nil)
 	}
@@ -630,8 +641,8 @@ func (o *OIDC) Logout(ctx context.Context, raw string) (map[string]int64, error)
 	iss := o.cfg.Issuer // (as identities are kept: see Finish)
 	key := iss + "\x00" + claims.Jti
 	o.mu.Lock()
-	for k, at := range o.jtis {
-		if now.Sub(at) > jtiTTL {
+	for k, j := range o.jtis {
+		if !j.busy && now.Sub(j.at) > jtiTTL {
 			delete(o.jtis, k)
 		}
 	}
@@ -647,12 +658,18 @@ func (o *OIDC) Logout(ctx context.Context, raw string) (map[string]int64, error)
 	}
 	_, seen := o.jtis[key]
 	if !seen {
-		// (Marked before what it ends is looked for: a sign-in finishing meanwhile is refused.)
+		// (Being acted on: the same token at once again is refused, not let end what it named twice.)
+		o.jtis[key] = jtiUse{at: now, busy: true}
+		// (Marked before what it ends is looked for: a sign-in finishing meanwhile is refused.
+		// A subject's: the latest logout's time kept, not one issued earlier and come later.)
 		if claims.Sid != "" {
 			o.outSid[iss+"\x00"+claims.Sid] = now
 		}
 		if claims.Sid == "" && t.Subject != "" {
-			o.outSub[iss+"\x00"+t.Subject] = t.IssuedAt
+			k := iss + "\x00" + t.Subject
+			if t.IssuedAt.After(o.outSub[k]) {
+				o.outSub[k] = t.IssuedAt
+			}
 		}
 	}
 	o.mu.Unlock()
@@ -660,12 +677,16 @@ func (o *OIDC) Logout(ctx context.Context, raw string) (map[string]int64, error)
 		return nil, errors.New("this logout token was used already")
 	}
 	ended, err := o.st.EndOIDCLogins(ctx, iss, t.Subject, claims.Sid)
-	if err != nil {
-		return nil, err // (not noted as used: the provider may send it again)
-	}
 	o.mu.Lock()
-	o.jtis[key] = now
+	if err != nil {
+		delete(o.jtis, key) // (not used: the provider may send it again)
+	} else {
+		o.jtis[key] = jtiUse{at: o.now()}
+	}
 	o.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
 	return ended, nil
 }
 
