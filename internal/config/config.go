@@ -31,6 +31,12 @@ type Config struct {
 
 	MasterKey []byte
 
+	// OIDC: single sign-on with one OpenID Connect provider (nil: none).
+	OIDC *OIDCConfig
+	// LocalLogin: who may sign in with a password — all, admins or off
+	// (off only with OIDC: it removes the way back in without the provider).
+	LocalLogin string
+
 	// Targets a user may connect to. Addresses are checked after DNS resolution.
 	AllowedNetworks []netip.Prefix
 	DeniedNetworks  []netip.Prefix
@@ -386,7 +392,124 @@ func Load() (*Config, error) {
 		}
 		c.UploadMaxBytes = int64(n) << 20
 	}
+	if c.OIDC, err = loadOIDC(); err != nil {
+		return nil, err
+	}
+	switch c.LocalLogin = strings.ToLower(strings.TrimSpace(env("CORRAL_LOCAL_LOGIN", LocalLoginAll))); c.LocalLogin {
+	case LocalLoginAll, LocalLoginAdmins:
+	case LocalLoginOff:
+		if c.OIDC == nil {
+			return nil, errors.New("CORRAL_LOCAL_LOGIN=off needs single sign-on (CORRAL_OIDC_ISSUER): no one could sign in")
+		}
+	default:
+		return nil, fmt.Errorf("CORRAL_LOCAL_LOGIN: all, admins or off, got %q", c.LocalLogin)
+	}
 	return c, nil
+}
+
+// OIDCConfig is single sign-on with an OpenID Connect provider: its
+// issuer (discovered from it), the client Corral is registered as, what to
+// ask for, and how groups decide who gets in and who is an administrator.
+type OIDCConfig struct {
+	Issuer       string
+	ClientID     string
+	ClientSecret string
+	Scopes       []string
+	GroupsClaim  string   // a claim's name, or a dotted path to one (realm_access.roles)
+	Allowed      []string // groups one must be in to sign in; none: anyone the provider lets in
+	Admins       []string // groups whose members are administrators, decided at each sign-in; none: roles kept in Corral
+	Button       string   // the sign-in button's words ("": the page's own)
+	EndSession   bool     // signing out also signs out at the provider (where it has an end_session_endpoint)
+}
+
+// LocalLogin values.
+const (
+	LocalLoginAll    = "all"
+	LocalLoginAdmins = "admins"
+	LocalLoginOff    = "off"
+)
+
+// loadOIDC reads CORRAL_OIDC_*: nil where no issuer is set.
+func loadOIDC() (*OIDCConfig, error) {
+	issuer := strings.TrimSpace(os.Getenv("CORRAL_OIDC_ISSUER"))
+	if issuer == "" {
+		for _, k := range []string{"CORRAL_OIDC_CLIENT_ID", "CORRAL_OIDC_CLIENT_SECRET", "CORRAL_OIDC_CLIENT_SECRET_FILE"} {
+			if os.Getenv(k) != "" {
+				return nil, fmt.Errorf("%s is set but CORRAL_OIDC_ISSUER is not", k)
+			}
+		}
+		return nil, nil
+	}
+	if err := checkIssuer(issuer); err != nil {
+		return nil, err
+	}
+	c := &OIDCConfig{Issuer: issuer, ClientID: strings.TrimSpace(os.Getenv("CORRAL_OIDC_CLIENT_ID"))}
+	if c.ClientID == "" {
+		return nil, errors.New("CORRAL_OIDC_ISSUER needs CORRAL_OIDC_CLIENT_ID")
+	}
+	secret, file := os.Getenv("CORRAL_OIDC_CLIENT_SECRET"), os.Getenv("CORRAL_OIDC_CLIENT_SECRET_FILE")
+	switch {
+	case secret != "" && file != "":
+		return nil, errors.New("set CORRAL_OIDC_CLIENT_SECRET or CORRAL_OIDC_CLIENT_SECRET_FILE, not both")
+	case file != "":
+		b, err := os.ReadFile(file)
+		if err != nil {
+			return nil, fmt.Errorf("CORRAL_OIDC_CLIENT_SECRET_FILE: %w", err)
+		}
+		secret = strings.TrimSpace(string(b))
+	}
+	if secret == "" {
+		return nil, errors.New("CORRAL_OIDC_ISSUER needs CORRAL_OIDC_CLIENT_SECRET or CORRAL_OIDC_CLIENT_SECRET_FILE (Corral is a confidential client)")
+	}
+	c.ClientSecret = secret
+	c.Scopes = []string{"openid"}
+	for _, sc := range strings.Fields(strings.ReplaceAll(env("CORRAL_OIDC_SCOPES", "openid profile email"), ",", " ")) {
+		if sc != "openid" && !slices.Contains(c.Scopes, sc) {
+			c.Scopes = append(c.Scopes, sc)
+		}
+	}
+	c.GroupsClaim = strings.TrimSpace(env("CORRAL_OIDC_GROUPS_CLAIM", "groups"))
+	c.Allowed = listOf(os.Getenv("CORRAL_OIDC_ALLOWED_GROUPS"))
+	c.Admins = listOf(os.Getenv("CORRAL_OIDC_ADMIN_GROUPS"))
+	c.Button = strings.TrimSpace(os.Getenv("CORRAL_OIDC_BUTTON"))
+	switch v := strings.ToLower(strings.TrimSpace(os.Getenv("CORRAL_OIDC_END_SESSION"))); v {
+	case "", "false", "0", "no":
+	case "true", "1", "yes":
+		c.EndSession = true
+	default:
+		return nil, fmt.Errorf("CORRAL_OIDC_END_SESSION: true or false, got %q", v)
+	}
+	return c, nil
+}
+
+// checkIssuer: an issuer is an https:// URL — or, for trying it out on one
+// machine, http:// to localhost or a loopback address — with no query, fragment or credentials.
+func checkIssuer(issuer string) error {
+	u, err := url.Parse(issuer)
+	if err != nil || u.Host == "" || u.RawQuery != "" || u.Fragment != "" || u.User != nil {
+		return fmt.Errorf("CORRAL_OIDC_ISSUER: an absolute URL with no query, fragment or credentials, got %q", issuer)
+	}
+	switch u.Scheme {
+	case "https":
+		return nil
+	case "http":
+		h := u.Hostname()
+		if h == "localhost" || h == "127.0.0.1" || h == "::1" {
+			return nil
+		}
+	}
+	return fmt.Errorf("CORRAL_OIDC_ISSUER must be https:// (http:// only to localhost, for development), got %q", issuer)
+}
+
+// listOf: a comma-separated list, its items trimmed, empty ones dropped.
+func listOf(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func loadMasterKey() ([]byte, error) {

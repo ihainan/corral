@@ -24,6 +24,11 @@ var (
 	ErrUnauthorized  = errors.New("not signed in")
 	ErrSamePassword  = errors.New("choose a password other than the one you were given")
 	ErrBadRole       = errors.New("invalid role")
+	// ErrLocalLoginOff: the password was right, but this account may not sign
+	// in with one (CORRAL_LOCAL_LOGIN): single sign-on is its way in.
+	ErrLocalLoginOff = errors.New("signing in with a password is turned off for this account")
+	// ErrNoPassword: the account has no password to check or change (single sign-on only).
+	ErrNoPassword = errors.New("this account has no password")
 )
 
 // Failed logins before the account starts backing off, and the cap on the wait.
@@ -54,6 +59,9 @@ type Service struct {
 	OnUserGone  func(userID int64) // called when a user's access must end now (disable, password change)
 	touchMu     sync.Mutex
 	lastTouched map[string]time.Time
+
+	// localLogin: who may sign in with a password (config.LocalLogin*: "all", "admins", "off").
+	localLogin string
 
 	vault   *vault.Vault // seals authenticator secrets (see UseVault)
 	mfaOnce sync.Once
@@ -139,6 +147,33 @@ func (s *Service) CompleteSetup(ctx context.Context, token, username, displayNam
 // invite redemption (everything that hashes a password for an anonymous caller).
 func (s *Service) AllowAttempt(ip string) bool { return s.limiter.allow(ip, s.now()) }
 
+// SetLocalLogin sets who may sign in with a password: "all", "admins" or "off".
+func (s *Service) SetLocalLogin(mode string) { s.localLogin = mode }
+
+// passwordAllowed: the account may sign in with a password (CORRAL_LOCAL_LOGIN).
+func (s *Service) passwordAllowed(u *store.User) bool {
+	switch s.localLogin {
+	case "off":
+		return false
+	case "admins":
+		return u.Role == store.RoleAdmin
+	}
+	return true
+}
+
+// verifyPassword is the one check of a password against an account's: every
+// sign-in, change and confirmation goes by it. An account with no password
+// (single sign-on only) matches none — the empty one neither — and is
+// checked against a dummy hash all the same, so that how long it takes does
+// not tell such an account from one with a password.
+func verifyPassword(pw string, u *store.User) (bool, error) {
+	if !u.HasPassword() {
+		_, err := CheckPassword(pw, dummyHash)
+		return false, err
+	}
+	return CheckPassword(pw, u.PasswordHash())
+}
+
 // Login checks credentials and, on success, returns a new session token.
 func (s *Service) Login(ctx context.Context, username, password, ip, ua string) (*store.User, string, error) {
 	if !s.AllowAttempt(ip) {
@@ -158,18 +193,24 @@ func (s *Service) Login(ctx context.Context, username, password, ip, ua string) 
 	if until := time.Unix(u.LockedUntil(), 0); until.After(now) {
 		return nil, "", &LockedError{RetryAfter: until.Sub(now).Round(time.Second)}
 	}
-	ok, err := CheckPassword(password, u.PasswordHash())
+	ok, err := verifyPassword(password, u)
 	if err != nil {
 		return nil, "", err // busy: not the user's fault, not counted
 	}
 	if !ok {
-		if err := s.recordFailure(ctx, u, now); err != nil {
-			return nil, "", err
+		if u.HasPassword() {
+			if err := s.recordFailure(ctx, u, now); err != nil {
+				return nil, "", err
+			}
 		}
 		return nil, "", ErrInvalidLogin
 	}
 	if u.Disabled {
 		return nil, "", ErrInvalidLogin
+	}
+	// (Only once the password was right: a wrong one says the same whoever's account it is.)
+	if !s.passwordAllowed(u) {
+		return u, "", ErrLocalLoginOff
 	}
 	if u.TOTP {
 		// The failure count is reset once the code is right too.
@@ -362,7 +403,10 @@ func (s *Service) HasLogin(ctx context.Context, userID int64) (bool, error) {
 // ChangePassword verifies the current password, stores the new one and signs
 // out every other browser, atomically with respect to admin resets.
 func (s *Service) ChangePassword(ctx context.Context, u *store.User, current, next, keepSession string) error {
-	ok, err := CheckPassword(current, u.PasswordHash())
+	if !u.HasPassword() {
+		return ErrNoPassword // (an administrator gives it one)
+	}
+	ok, err := verifyPassword(current, u)
 	if err != nil {
 		return err
 	}

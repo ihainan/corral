@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { api, ApiError, errorText, type Me } from '../api'
-import { t } from '../i18n'
+import { hasKey, t } from '../i18n'
 import { navigate } from '../router'
 import { syncPrefsFromServer } from '../prefs'
 import { useSession } from '../app'
-import { Eye, EyeOff } from 'lucide-react'
+import { Eye, EyeOff, KeyRound } from 'lucide-react'
 import { BrandMark, Field, isCoarse } from '../components/ui'
 
 function AuthFrame({ title, titleHidden, intro, children }: { title: string; titleHidden?: boolean; intro?: string; children: React.ReactNode }) {
@@ -49,8 +49,18 @@ function nextPath() {
   return n && n.startsWith('/') && !n.startsWith('//') ? n : '/'
 }
 
+// What single sign-on sent the browser back to sign in with: why it did not
+// get in (the gateway's ?sso_error=), in the page's words.
+export function ssoErrorText(code: string): string {
+  const k = 'sso.error.' + code
+  return hasKey(k) ? t(k as Parameters<typeof t>[0]) : t('sso.error.other')
+}
+
 export function LoginPage() {
-  const { setMe } = useSession()
+  const { setMe, boot } = useSession()
+  const sso = boot?.oidc?.enabled ? boot.oidc : null
+  const localOff = !!sso && boot?.local_login === 'off'
+  const ssoError = new URLSearchParams(location.search).get('sso_error') ?? ''
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [busy, setBusy] = useState(false)
@@ -101,8 +111,23 @@ export function LoginPage() {
       />
     )
   }
+  // (Off to the provider, by a plain link: it is a page of its own, and back to the callback.)
+  const ssoButton = sso && (
+    <a className={'btn btn-block auth-sso' + (localOff ? ' btn-primary' : '')} href={'/api/auth/oidc/start?next=' + encodeURIComponent(nextPath())}>
+      <KeyRound size={16} aria-hidden="true" />
+      {sso.button || t('sso.button')}
+    </a>
+  )
   return (
     <AuthFrame title={t('login.title')} titleHidden>
+      {ssoError && (
+        <p className="err auth-sso-err" role="alert">
+          {ssoErrorText(ssoError)}
+        </p>
+      )}
+      {localOff ? (
+        <div className="form">{ssoButton}</div>
+      ) : (
       <form className="form" onSubmit={submit} noValidate>
         {/* (Focus starts in the first field where a keyboard is at hand, not
             on a touch screen, where it would pop the keyboard up — ux1101 PG-49.) */}
@@ -118,7 +143,16 @@ export function LoginPage() {
         <button className="btn btn-primary btn-block" disabled={busy}>
           {busy ? t('login.submitting') : t('login.submit')}
         </button>
+        {ssoButton && (
+          <>
+            <p className="auth-or" aria-hidden="true">
+              <span>{t('sso.or')}</span>
+            </p>
+            {ssoButton}
+          </>
+        )}
       </form>
+      )}
     </AuthFrame>
   )
 }

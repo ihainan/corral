@@ -9,6 +9,7 @@ import { rememberSettingsScroll, signOut, takeSettingsScroll, useSession } from 
 import { Confirm, Dialog, Field, useToast } from '../components/ui'
 import { CurrentScheme, SchemeDialog } from '../terminal/SchemePicker'
 import { TwoStepSetting } from './TwoStep'
+import { ssoErrorText } from './Auth'
 import { CustomKeysSection } from './CustomKeys'
 import { playChime } from '../terminal/chime'
 import { setScreenReader, useScreenReader } from '../terminal/screenReader'
@@ -251,6 +252,7 @@ export function SettingsPage() {
         <div className="settings-group">
           <ProfileSetting onDirty={setProfileDirty} />
           <PasswordSetting />
+          {boot?.oidc?.enabled && <SSOSetting />}
           <TwoStepSetting />
           {/* Phones have no sidebar: sign-out is the account's last row. (Not
               in red: signing out loses nothing — ux1101 PG-56.) */}
@@ -309,10 +311,75 @@ function ProfileSetting({ onDirty }: { onDirty: (dirty: boolean) => void }) {
 
 function PasswordSetting() {
   const [open, setOpen] = useState(false)
+  const { me } = useSession()
+  // (Single sign-on its only way in: no password to change — an administrator gives it one.)
+  const none = me?.has_password === false
   return (
-    <Setting label={t('settings.passwordRow')}>
-      <button type="button" className="btn" onClick={() => setOpen(true)}>{t('settings.password')}</button>
+    <Setting label={t('settings.passwordRow')} hint={none ? t('sso.noPassword') : undefined}>
+      <button type="button" className="btn" onClick={() => setOpen(true)} disabled={none}>{t('settings.password')}</button>
       {open && <PasswordDialog onClose={() => setOpen(false)} />}
+    </Setting>
+  )
+}
+
+// The account's single sign-on: the identity it is linked to (and undoing
+// that, where a password is left to sign in with), or linking one — off to
+// the provider and back here.
+function SSOSetting() {
+  const toast = useToast()
+  const [me, setMe] = useState<Me | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [asking, setAsking] = useState(false)
+  const [err, setErr] = useState(() => new URLSearchParams(location.search).get('sso_error') ?? '')
+  const load = () => api<Me>('GET', '/api/me').then(setMe, () => {})
+  useEffect(() => {
+    void load()
+    const q = new URLSearchParams(location.search)
+    if (q.get('sso') === 'linked') toast(t('sso.linked'))
+    // (Said once: not again on a reload.)
+    if (q.has('sso') || q.has('sso_error')) history.replaceState(history.state, '', location.pathname)
+  }, [toast])
+  const id = me?.sso?.[0]
+  const link = async () => {
+    if (busy) return
+    setBusy(true)
+    setErr('')
+    try {
+      const r = await api<{ url: string }>('POST', '/api/me/oidc/link')
+      location.assign(r.url)
+    } catch (e) {
+      toast(errorText(e), true)
+      setBusy(false)
+    }
+  }
+  const unlink = async () => {
+    await api('DELETE', '/api/me/oidc')
+    toast(t('sso.unlinked'))
+    await load()
+  }
+  const who = id ? id.username_hint || id.email || id.subject : ''
+  const host = id ? (() => { try { return new URL(id.issuer).host } catch { return id.issuer } })() : ''
+  return (
+    <Setting
+      label={t('sso.row')}
+      hint={
+        <>
+          {id ? t('sso.linkedAs', { who, host }) : t('sso.notLinked')}
+          {id && me?.has_password === false && <span className="hint-block">{t('sso.onlyWay')}</span>}
+          {err && <span className="err hint-block" role="alert">{ssoErrorText(err)}</span>}
+        </>
+      }
+    >
+      {id ? (
+        <button type="button" className="btn" onClick={() => setAsking(true)} disabled={me?.has_password === false}>
+          {t('sso.unlink')}
+        </button>
+      ) : (
+        <button type="button" className="btn" onClick={link} disabled={busy || !me}>
+          {t('sso.link')}
+        </button>
+      )}
+      {asking && <Confirm title={t('sso.unlinkTitle')} body={t('sso.unlinkBody')} confirm={t('sso.unlink')} danger onConfirm={unlink} onClose={() => setAsking(false)} />}
     </Setting>
   )
 }

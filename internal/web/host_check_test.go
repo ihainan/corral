@@ -601,7 +601,9 @@ func TestHostTestPinnedKeyUnreadable(t *testing.T) {
 	mustStatus(t, r, 201, "create")
 	id := r.json()["id"]
 	old := checkHostKey
-	checkHostKey = func(*Server, context.Context, int64, int64) (*store.HostKey, error) { return nil, errors.New("database is locked") }
+	checkHostKey = func(*Server, context.Context, int64, int64) (*store.HostKey, error) {
+		return nil, errors.New("database is locked")
+	}
 	t.Cleanup(func() { checkHostKey = old })
 	before := srv.Attempts()
 	r = a.do("POST", "/api/hosts/test", checkForm(srv.Addr.Port, map[string]any{"id": id, "password": ""}))

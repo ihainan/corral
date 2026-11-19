@@ -92,14 +92,9 @@ func HashPassword(pw string) (string, error) {
 		argon2.Version, argonMemory, argonTime, argonThreads, b64.EncodeToString(salt), b64.EncodeToString(key)), nil
 }
 
-// VerifyPassword reports whether pw matches; a busy server counts as a mismatch.
-// Login paths that track failures use CheckPassword to tell the two apart.
-func VerifyPassword(pw, encoded string) bool {
-	ok, _ := CheckPassword(pw, encoded)
-	return ok
-}
-
-// CheckPassword returns ErrBusy when no hashing slot became free in time, so a
+// CheckPassword checks pw against an encoded hash; an account's password is
+// checked by verifyPassword (service.go) only, which this is the work of.
+// It returns ErrBusy when no hashing slot became free in time, so a
 // flood of requests cannot make a correct password look wrong (and lock the account).
 func CheckPassword(pw, encoded string) (bool, error) {
 	parts := strings.Split(encoded, "$")

@@ -408,7 +408,7 @@ func (s *Service) confirmPassword(u *store.User, password string) error {
 	if !allowed {
 		return ErrRateLimited
 	}
-	ok, err := CheckPassword(password, u.PasswordHash())
+	ok, err := verifyPassword(password, u)
 	done(ok || err != nil) // a busy server is not a wrong password
 	if err != nil {
 		return err

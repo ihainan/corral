@@ -41,10 +41,14 @@ type meView struct {
 	// The password was set by an administrator: nothing but changing it (and
 	// signing out) is allowed until then.
 	MustChangePassword bool `json:"must_change_password,omitempty"`
+	// HasPassword: false for an account single sign-on is the only way into.
+	HasPassword bool `json:"has_password"`
+	// SSO: its bindings to single sign-on (where asked for: Settings).
+	SSO []*store.OIDCIdentity `json:"sso,omitempty"`
 }
 
 func viewMe(u *store.User) *meView {
-	return &meView{ID: u.ID, Username: u.Username, DisplayName: u.DisplayName, Role: u.Role, TOTP: u.TOTP, MustChangePassword: u.MustChangePassword}
+	return &meView{ID: u.ID, Username: u.Username, DisplayName: u.DisplayName, Role: u.Role, TOTP: u.TOTP, MustChangePassword: u.MustChangePassword, HasPassword: u.HasPassword()}
 }
 
 func (s *Server) apiBootstrap(w http.ResponseWriter, r *http.Request) {
@@ -63,6 +67,10 @@ func (s *Server) apiBootstrap(w http.ResponseWriter, r *http.Request) {
 		"upload_max_bytes": s.cfg.UploadMaxBytes,
 		"recording":        s.cfg.Recording,
 		"user":             nil,
+		"local_login":      s.cfg.LocalLogin,
+	}
+	if s.oidc != nil {
+		out["oidc"] = map[string]any{"enabled": true, "button": s.oidc.Button()}
 	}
 	if u := currentUser(r); u != nil {
 		out["user"] = viewMe(u)
@@ -141,6 +149,10 @@ func (s *Server) apiLogin(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, auth.ErrInvalidLogin):
 			s.auditAs(r, nil, "login.failed", truncate(b.Username, 64), signInAs(b.Username))
 			writeError(w, http.StatusUnauthorized, "invalid_login", "wrong username or password")
+		case errors.Is(err, auth.ErrLocalLoginOff):
+			// (Said only once the password was right: a wrong one is the same whoever's account.)
+			s.auditAs(r, u, "login.local_off", u.Username, nil)
+			writeError(w, http.StatusForbidden, "local_login_off", "sign in with single sign-on")
 		default:
 			s.internalError(w, r, err)
 		}
@@ -167,6 +179,8 @@ func (s *Server) apiLogout(w http.ResponseWriter, r *http.Request) {
 	// (and the push subscriptions and forward access hanging off it) behind.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 10*time.Second)
 	defer cancel()
+	// (Asked before it ends: a login single sign-on made signs out at the provider too, where so set.)
+	next := s.ssoLogoutURL(ctx, r, hash)
 	err := s.auth.Logout(ctx, hash)
 	s.closeSockets(currentUser(r).ID, hash) // what is open ends either way
 	if err != nil {
@@ -176,11 +190,24 @@ func (s *Server) apiLogout(w http.ResponseWriter, r *http.Request) {
 	}
 	s.audit(r, "logout", "", nil)
 	s.clearSessionCookie(w)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	out := map[string]any{"ok": true}
+	if next != "" {
+		out["redirect"] = next
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) apiMe(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, viewMe(currentUser(r)))
+	me := viewMe(currentUser(r))
+	if s.oidc != nil {
+		ids, err := s.store.IdentitiesOf(r.Context(), me.ID)
+		if err != nil {
+			s.internalError(w, r, err)
+			return
+		}
+		me.SSO = ids
+	}
+	writeJSON(w, http.StatusOK, me)
 }
 
 func (s *Server) apiUpdateMe(w http.ResponseWriter, r *http.Request) {
@@ -219,6 +246,10 @@ func (s *Server) apiChangePassword(w http.ResponseWriter, r *http.Request) {
 	if err := s.auth.ChangePassword(r.Context(), u, b.Current, b.Next, keep); err != nil {
 		if errors.Is(err, auth.ErrInvalidLogin) {
 			writeError(w, http.StatusUnprocessableEntity, "wrong_password", "current password is wrong")
+			return
+		}
+		if errors.Is(err, auth.ErrNoPassword) {
+			writeError(w, http.StatusConflict, "no_password", "this account has no password; an administrator can set one")
 			return
 		}
 		s.writeAccountError(w, r, err)
@@ -627,7 +658,9 @@ func (s *Server) writeAccountError(w http.ResponseWriter, r *http.Request, err e
 
 type adminUserView struct {
 	*store.User
-	Sessions int `json:"open_sessions"`
+	Sessions    int                   `json:"open_sessions"`
+	HasPassword bool                  `json:"has_password"`
+	SSO         []*store.OIDCIdentity `json:"sso,omitempty"`
 }
 
 func (s *Server) apiAdminListUsers(w http.ResponseWriter, r *http.Request) {
@@ -635,6 +668,12 @@ func (s *Server) apiAdminListUsers(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.internalError(w, r, err)
 		return
+	}
+	ids := map[int64][]*store.OIDCIdentity{}
+	if all, err := s.store.AllIdentities(r.Context()); err == nil {
+		for _, i := range all {
+			ids[i.UserID] = append(ids[i.UserID], i)
+		}
 	}
 	out := make([]adminUserView, 0, len(users))
 	for _, u := range users {
@@ -644,7 +683,7 @@ func (s *Server) apiAdminListUsers(w http.ResponseWriter, r *http.Request) {
 				n++
 			}
 		}
-		out = append(out, adminUserView{User: u, Sessions: n})
+		out = append(out, adminUserView{User: u, Sessions: n, HasPassword: u.HasPassword(), SSO: ids[u.ID]})
 	}
 	writeJSON(w, http.StatusOK, out)
 }

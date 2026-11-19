@@ -36,6 +36,9 @@ const (
 	Public Access = iota
 	SignedIn
 	AdminOnly
+	// External: called by another server, not a browser (the single sign-on
+	// provider's back-channel logout): no site check, no login read.
+	External
 )
 
 type Route struct {
@@ -48,6 +51,7 @@ type Server struct {
 	cfg      *config.Config
 	store    *store.Store
 	auth     *auth.Service
+	oidc     *auth.OIDC // single sign-on (nil: not set up)
 	vault    *vault.Vault
 	guard    *netguard.Guard
 	terms    *term.Manager
@@ -116,6 +120,8 @@ type Deps struct {
 	Log      *slog.Logger
 	Static   fs.FS // built frontend; nil serves a placeholder
 	Notifier *notify.Notifier
+	// OIDCClient: what the single sign-on provider is asked by (nil: one of its own).
+	OIDCClient *http.Client
 }
 
 func New(d Deps) *Server {
@@ -124,6 +130,13 @@ func New(d Deps) *Server {
 		pending: map[int64]map[*liveSocket]struct{}{}, herdrSocks: herdrSockets{path: map[string]string{}},
 		notifier: d.Notifier, vis: visibility{seen: map[string]map[*liveSocket]bool{}}, fwd: newForwarder(), files: newSFTPPool(), code: codeServers{jobs: map[[2]int64]*codeJob{}}}
 	s.restores.ctx, s.restores.stop = context.WithCancel(context.Background())
+	s.auth.SetLocalLogin(s.cfg.LocalLogin)
+	if s.cfg.OIDC != nil {
+		s.oidc = auth.NewOIDC(s.cfg.OIDC, s.auth, d.OIDCClient)
+	}
+	if s.cfg.LocalLogin == config.LocalLoginOff && s.log != nil {
+		s.log.Warn("CORRAL_LOCAL_LOGIN=off: no one can sign in with a password, administrators neither — single sign-on is the only way in")
+	}
 	if s.notifier != nil {
 		s.notifier.SetBadges(s.agentsWaiting) // (the app icon's number: agents waiting)
 	}
@@ -183,6 +196,9 @@ func (s *Server) registerRoutes() {
 	s.handle("POST /api/setup", Public, s.apiSetup)
 	s.handle("POST /api/login", Public, s.apiLogin)
 	s.handle("POST /api/login/code", Public, s.apiLoginMFA)
+	s.handle("GET /api/auth/oidc/start", Public, s.apiOIDCStart)
+	s.handle("GET /api/auth/oidc/callback", Public, s.apiOIDCCallback)
+	s.handle("POST /api/auth/oidc/backchannel", External, s.apiOIDCBackchannel)
 	s.handle("GET /api/invites/{token}", Public, s.apiInviteInfo)
 	s.handle("POST /api/invites/{token}/redeem", Public, s.apiInviteRedeem)
 
@@ -191,6 +207,8 @@ func (s *Server) registerRoutes() {
 	s.handle("GET /api/me", SignedIn, s.apiMe)
 	s.handle("PUT /api/me", SignedIn, s.apiUpdateMe)
 	s.handle("POST /api/me/password", SignedIn, s.apiChangePassword)
+	s.handle("POST /api/me/oidc/link", SignedIn, s.apiOIDCLink)
+	s.handle("DELETE /api/me/oidc", SignedIn, s.apiOIDCUnlink)
 	s.handle("GET /api/me/settings", SignedIn, s.apiGetSettings)
 	s.handle("PATCH /api/me/settings", SignedIn, s.apiPatchSettings)
 	s.handle("GET /api/me/totp", SignedIn, s.apiTOTPStatus)
@@ -302,6 +320,7 @@ func (s *Server) registerRoutes() {
 	s.handle("PUT /api/admin/users/{id}", AdminOnly, s.apiAdminUpdateUser)
 	s.handle("POST /api/admin/users/{id}/password", AdminOnly, s.apiAdminResetPassword)
 	s.handle("POST /api/admin/users/{id}/totp/reset", AdminOnly, s.apiAdminResetTOTP)
+	s.handle("DELETE /api/admin/users/{id}/oidc", AdminOnly, s.apiAdminOIDCUnlink)
 	s.handle("POST /api/admin/users", AdminOnly, s.apiAdminCreateUser)
 	s.handle("POST /api/admin/invites", AdminOnly, s.apiAdminCreateInvite)
 	s.handle("GET /api/admin/audit", AdminOnly, s.apiAdminAudit)
@@ -335,6 +354,11 @@ func (s *Server) handle(pattern string, access Access, h http.HandlerFunc) {
 // guardRequest applies the cross-site check and the declared access level.
 func (s *Server) guardRequest(access Access, h http.HandlerFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if access == External {
+			r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+			h(w, r)
+			return
+		}
 		if !s.sameOrigin(r) {
 			writeError(w, http.StatusForbidden, "bad_origin", "request did not come from this site")
 			return

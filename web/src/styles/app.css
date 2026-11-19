@@ -265,6 +265,13 @@ code, .mono { font-family: var(--font-mono); font-size: var(--fs-sub); }
 .btn-ghost { background: transparent; border-color: transparent; }
 .btn-ghost:hover { background: var(--bg-hover); }
 .btn-block { width: 100%; }
+/* Single sign-on on the sign-in page: its button under the form, "or" between them. */
+.auth-sso { display: inline-flex; align-items: center; justify-content: center; gap: 8px; text-decoration: none; }
+.auth-or { display: flex; align-items: center; gap: 12px; margin: 0; color: var(--fg-3); font-size: var(--fs-note); line-height: var(--lh-note); }
+.auth-or::before, .auth-or::after { content: ''; flex: 1; height: 1px; background: var(--line); }
+.auth-sso-err { margin: 0 0 16px; }
+.hint-block { display: block; margin-top: 4px; }
+.row-title .sso-badge { margin-left: 8px; padding: 0 6px; border-radius: var(--r-xs); background: var(--accent-soft); color: var(--accent-text); font-weight: 500; font-size: var(--fs-note); line-height: var(--lh-note); }
 .icon-btn {
   display: inline-grid; place-items: center; width: 36px; height: 36px; border-radius: var(--r);
   border: 0; background: transparent; color: var(--fg-3); cursor: pointer; flex: none; position: relative;

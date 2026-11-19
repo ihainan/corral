@@ -238,8 +238,10 @@ async function signOutOnce(setMe: (m: Me | null) => void, toast: (m: string, e?:
   freezePrefs(true)
   await sendPendingPrefs(3000)
   await disablePush().catch(() => {})
+  let next = ''
   try {
-    await api('POST', '/api/logout')
+    const r = await api<{ redirect?: string }>('POST', '/api/logout')
+    next = r?.redirect ?? ''
   } catch (e) {
     // A 401 means we were already signed out; anything else did not sign us out.
     if (!(e instanceof ApiError && e.status === 401)) {
@@ -251,6 +253,11 @@ async function signOutOnce(setMe: (m: Me | null) => void, toast: (m: string, e?:
   resetPrefsSession()
   freezePrefs(false)
   setMe(null)
+  // (A login single sign-on made: signed out at the provider too, where so set; back to /login after.)
+  if (next) {
+    location.assign(next)
+    return
+  }
   navigate('/login', true)
 }
 

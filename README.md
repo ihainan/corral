@@ -284,6 +284,93 @@ All settings are environment variables. Only the first two are required.
 | `CORRAL_WEBHOOK_PREFIXES` | — (webhooks off) | URL prefixes users may send alert webhooks to |
 | `CORRAL_RESTORE_SESSIONS` | `on` | `off`: tmux and herdr terminals open when the gateway stops are not opened again when it starts (see Restarts) |
 | `CORRAL_STATIC_DIR` | — (embedded) | Serve the web interface from this directory instead (front-end development) |
+| `CORRAL_LOCAL_LOGIN` | `all` | Who may sign in with a password: `all`, `admins` (administrators only; everyone else uses single sign-on), or `off` (nobody; needs `CORRAL_OIDC_ISSUER`). See Single sign-on |
+| `CORRAL_OIDC_ISSUER` | — (single sign-on off) | The OpenID Connect provider's issuer URL, `https://` (or `http://localhost` for development). Its endpoints and keys are discovered from it |
+| `CORRAL_OIDC_CLIENT_ID` | (required with an issuer) | The client Corral is registered as at the provider |
+| `CORRAL_OIDC_CLIENT_SECRET` / `CORRAL_OIDC_CLIENT_SECRET_FILE` | (required with an issuer) | The client's secret (Corral is a confidential client); set one of the two |
+| `CORRAL_OIDC_SCOPES` | `openid profile email` | Scopes asked for, space- or comma-separated; `openid` is always included |
+| `CORRAL_OIDC_GROUPS_CLAIM` | `groups` | The claim holding the person's groups: a name, or a dotted path (`realm_access.roles`) |
+| `CORRAL_OIDC_ALLOWED_GROUPS` | — (anyone the provider signs in) | Groups whose members may sign in, comma-separated |
+| `CORRAL_OIDC_ADMIN_GROUPS` | — (roles managed in Corral) | Groups whose members are administrators, comma-separated; checked at every sign-in, and members of none become ordinary users (never the last administrator) |
+| `CORRAL_OIDC_BUTTON` | `使用单点登录` / `Sign in with SSO` | The sign-in button's words |
+| `CORRAL_OIDC_END_SESSION` | `false` | `true`: signing out of a session single sign-on made also signs out at the provider (if it has an `end_session_endpoint`) |
+
+</details>
+
+## Single sign-on
+
+Corral can sign people in with any OpenID Connect provider (Keycloak,
+Authentik, Authelia, Azure AD / Entra ID, Okta, Google …) beside, or instead
+of, its own passwords.
+
+- **How it works.** The Authorization Code flow with PKCE (`S256`), a state
+  and a nonce; Corral is a confidential client. The ID token's signature is
+  checked against the provider's published keys (refetched when a new key
+  appears), with only asymmetric algorithms accepted (never `none`, never
+  `HS*`), and its issuer, audience (and authorized party), expiry, issue time
+  and nonce are checked too. The provider's tokens are not kept.
+- **Who is who.** A person is the provider's *issuer and subject* (`sub`):
+  never an email or a user name, which a provider may let people change. The
+  first sign-in creates the account (no password); its user name comes from
+  `preferred_username` (else the email), and if that name is taken, `-2`,
+  `-3` … is added: an existing account is never taken over. Existing
+  accounts are never linked by email: a signed-in user links their account
+  in Settings › Account › Single sign-on, which keeps their password working.
+  An account with no password cannot be unlinked (disable it instead, or give
+  it a password first).
+- **Groups.** With `CORRAL_OIDC_ALLOWED_GROUPS`, only members of those groups
+  get in. With `CORRAL_OIDC_ADMIN_GROUPS`, group membership decides at every
+  sign-in who is an administrator. A disabled Corral account stays out
+  whatever the provider says. Corral's own two-step sign-in is not asked of a
+  single sign-on sign-in (the provider handles that); it still applies to the
+  same account's password sign-in.
+- **Signing out.** Corral supports OpenID Connect **back-channel logout**:
+  register `https://<your Corral>/api/auth/oidc/backchannel` at the provider,
+  and when someone signs out there, or an administrator ends their session,
+  Corral ends the sessions single sign-on made for them (their password
+  sessions are left alone). With `CORRAL_OIDC_END_SESSION=true`, signing out
+  of Corral also signs out at the provider.
+- **Several domains.** Each `CORRAL_PUBLIC_URL` / `CORRAL_EXTRA_URLS` origin
+  signs in on its own domain: register `https://<each>/api/auth/oidc/callback`
+  as a redirect URI. Forwarded ports and VS Code sign in through the main site
+  as before.
+- **Keeping a way in.** `CORRAL_LOCAL_LOGIN=off` removes password sign-in for
+  everyone, administrators included: if the provider is down or misconfigured,
+  nobody gets in. `admins` keeps it for administrators as a way back in.
+
+<details>
+<summary><b>Example: Keycloak</b></summary>
+
+1. In your realm, **Clients › Create client**: type *OpenID Connect*, client
+   ID `corral`.
+2. **Capability config**: *Client authentication* on (a confidential client),
+   *Standard flow* on; *Direct access grants* and *Implicit flow* off.
+3. **Login settings**: *Valid redirect URIs*
+   `https://corral.example.com/api/auth/oidc/callback` (one per Corral
+   domain); *Valid post logout redirect URIs* `https://corral.example.com/login`;
+   *Web origins* `https://corral.example.com`.
+4. **Advanced › Advanced settings**: *Proof Key for Code Exchange Code
+   Challenge Method* `S256`.
+5. **Logout settings**: *Front channel logout* off; *Backchannel logout URL*
+   `https://corral.example.com/api/auth/oidc/backchannel`; *Backchannel logout
+   session required* on.
+6. **Client scopes › corral-dedicated › Add mapper › By configuration ›
+   Group Membership**: name `groups`, *Token Claim Name* `groups`, *Full group
+   path* off, *Add to ID token* on.
+7. **Credentials**: copy the *Client secret*.
+
+```sh
+CORRAL_OIDC_ISSUER=https://id.example.com/realms/example
+CORRAL_OIDC_CLIENT_ID=corral
+CORRAL_OIDC_CLIENT_SECRET_FILE=/run/secrets/corral-oidc
+CORRAL_OIDC_ALLOWED_GROUPS=corral-users,corral-admins
+CORRAL_OIDC_ADMIN_GROUPS=corral-admins
+CORRAL_LOCAL_LOGIN=admins
+```
+
+With *Full group path* on, groups arrive as `/corral-users`: list them so.
+Keycloak asks before signing out when Corral sends no ID token hint
+(`CORRAL_OIDC_END_SESSION=true`), since Corral does not keep the ID token.
 
 </details>
 

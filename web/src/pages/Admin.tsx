@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
-import { ChevronRight, KeyRound, KeySquare, MoreHorizontal, ScrollText, Search, Send, Shield, Smartphone, UserCheck, UserPlus, UserX } from 'lucide-react'
+import { ChevronRight, KeyRound, KeySquare, MoreHorizontal, ScrollText, Search, Send, Shield, Smartphone, Unlink, UserCheck, UserPlus, UserX } from 'lucide-react'
 import { api, ApiError, errorText, type AdminUser, type AuditEntry } from '../api'
 import { t } from '../i18n'
 import { PhoneBack, useSession } from '../app'
@@ -103,6 +103,8 @@ export function AdminUsersPage() {
                 <span className="row-title">
                   {u.display_name || u.username}
                   {u.id === me?.id && <span className="you">{t('admin.you')}</span>}
+                  {/* (Linked to single sign-on: a tag by the name; who at the provider, in the line under it.) */}
+                  {u.sso?.length ? <span className="sso-badge" title={u.sso.map((i) => i.issuer).join(', ')}>SSO</span> : null}
                 </span>
                 {u.role === 'admin' && <span className="row-meta">{t('admin.roleAdmin')}</span>}
                 {(() => {
@@ -113,6 +115,11 @@ export function AdminUsersPage() {
                   if (u.disabled) parts.push(<span key="d" className="state-danger">{t('admin.disabled')}</span>)
                   if (u.open_sessions > 0) parts.push(t('admin.openSessions', { n: u.open_sessions }))
                   if (u.totp) parts.push(t('admin.twoStep'))
+                  // (Single sign-on: as whom at the provider; with no password, its only way in.)
+                  if (u.sso?.length) {
+                    const i = u.sso[0]
+                    parts.push(t(u.has_password ? 'admin.ssoLinked' : 'admin.ssoOnly', { who: i.username_hint || i.email || i.subject }))
+                  }
                   parts.push(t('admin.createdAt', { when: whenText(u.created_at) }))
                   return <span className="row-sub">{parts.flatMap((x, i) => (i ? [' · ', x] : [x]))}</span>
                 })()}
@@ -171,6 +178,28 @@ export function AdminUsersPage() {
                               />,
                             ),
                         }
+                      : null,
+                    u.sso?.length
+                      ? u.has_password
+                        ? {
+                            label: t('admin.ssoUnlink'),
+                            icon: <Unlink size={16} />,
+                            onSelect: () =>
+                              setDialog(
+                                <Confirm
+                                  title={t('admin.ssoUnlink')}
+                                  body={t('admin.ssoUnlinkBody', { name: u.display_name || u.username })}
+                                  confirm={t('admin.ssoUnlink')}
+                                  danger
+                                  onClose={() => setDialog(null)}
+                                  onConfirm={async () => {
+                                    await api('DELETE', '/api/admin/users/' + u.id + '/oidc')
+                                    load()
+                                  }}
+                                />,
+                              ),
+                          }
+                        : { label: t('admin.ssoUnlink'), icon: <Unlink size={16} />, disabled: true, hint: t('admin.ssoOnlyHint') }
                       : null,
                     u.disabled
                       ? { label: t('admin.enable'), icon: <UserCheck size={16} />, separator: true, onSelect: () => update(u, { disabled: false }) }

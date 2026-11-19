@@ -252,3 +252,38 @@ func TestNetworkDefaults(t *testing.T) {
 		t.Errorf("with a list given, denied %v: want the always-refused only", c.DeniedNetworks)
 	}
 }
+
+func TestOIDCConfig(t *testing.T) {
+	for _, c := range []struct {
+		issuer string
+		ok     bool
+	}{
+		{"https://id.example.com/realms/corral", true},
+		{"http://localhost:8080/realms/x", true},
+		{"http://127.0.0.1:8080", true},
+		{"http://id.example.com", false},
+		{"https://id.example.com?x=1", false},
+		{"https://u:p@id.example.com", false},
+		{"ftp://id.example.com", false},
+	} {
+		if err := checkIssuer(c.issuer); (err == nil) != c.ok {
+			t.Errorf("%s: %v", c.issuer, err)
+		}
+	}
+	t.Setenv("CORRAL_OIDC_ISSUER", "https://id.example.com")
+	t.Setenv("CORRAL_OIDC_CLIENT_ID", "corral")
+	if _, err := loadOIDC(); err == nil {
+		t.Errorf("no secret taken")
+	}
+	t.Setenv("CORRAL_OIDC_CLIENT_SECRET", "s")
+	t.Setenv("CORRAL_OIDC_CLIENT_SECRET_FILE", "/x")
+	if _, err := loadOIDC(); err == nil {
+		t.Errorf("both secrets taken")
+	}
+	t.Setenv("CORRAL_OIDC_CLIENT_SECRET_FILE", "")
+	t.Setenv("CORRAL_OIDC_SCOPES", "profile, email groups")
+	c, err := loadOIDC()
+	if err != nil || strings.Join(c.Scopes, " ") != "openid profile email groups" || c.GroupsClaim != "groups" {
+		t.Errorf("%+v %v", c, err)
+	}
+}

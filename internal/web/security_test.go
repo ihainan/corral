@@ -32,11 +32,20 @@ func TestRouteTableIsExplicit(t *testing.T) {
 		"POST /api/login/code":     true, // the code step; needs the token the password step returned
 		"GET /api/invites/{token}": true, "POST /api/invites/{token}/redeem": true,
 		"GET /fwd/{id}": true, // checks the sign-in itself and redirects to it
+		// Single sign-on: off to the provider (rate-limited, the next page only this site's),
+		// and back from it (the flow taken once, bound to the browser's cookie).
+		"GET /api/auth/oidc/start": true, "GET /api/auth/oidc/callback": true,
 	}
+	// Called by another server, not a browser: no site check, no login (the
+	// provider's back-channel logout, which verifies its own token).
+	external := map[string]bool{"POST /api/auth/oidc/backchannel": true}
 	for _, r := range h.srv.Routes() {
 		key := r.Method + " " + r.Pattern
 		if r.Access == Public && !public[key] {
 			t.Errorf("route %s is public but not in the reviewed public list", key)
+		}
+		if r.Access == External && !external[key] {
+			t.Errorf("route %s is external but not in the reviewed external list", key)
 		}
 		if strings.HasPrefix(r.Pattern, "/api/admin/") && r.Access != AdminOnly {
 			t.Errorf("admin route %s is not admin-only", key)

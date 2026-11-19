@@ -7,6 +7,20 @@ export interface Me {
   role: 'admin' | 'member'
   totp?: boolean // two-step sign-in is on
   must_change_password?: boolean // an administrator set the password: choose one's own first
+  has_password?: boolean // false: single sign-on is its only way in
+  sso?: SSOIdentity[] // its bindings to single sign-on (GET /api/me)
+}
+
+// An account's binding to an identity of the single sign-on provider.
+export interface SSOIdentity {
+  issuer: string
+  subject: string
+  user_id: number
+  username_hint: string
+  email: string
+  name: string
+  created_at: number
+  last_login_at: number
 }
 
 export interface Bootstrap {
@@ -20,6 +34,8 @@ export interface Bootstrap {
   recording: boolean // sessions are recorded
   recordings?: boolean // there are recordings this user may see (or sessions are recorded)
   user: Me | null
+  oidc?: { enabled: boolean; button: string } // single sign-on is set up
+  local_login?: 'all' | 'admins' | 'off' // who may sign in with a password
 }
 
 export interface Host {
@@ -110,6 +126,8 @@ export interface AdminUser {
   totp: boolean
   created_at: number
   open_sessions: number
+  has_password: boolean // false: single sign-on its only way in
+  sso?: SSOIdentity[] // its bindings to single sign-on
 }
 
 export interface AuditEntry {
