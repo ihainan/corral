@@ -327,6 +327,7 @@ function PasswordSetting() {
 // the provider and back here.
 function SSOSetting() {
   const toast = useToast()
+  const { boot } = useSession()
   const [me, setMe] = useState<Me | null>(null)
   const [busy, setBusy] = useState(false)
   const [asking, setAsking] = useState(false)
@@ -357,6 +358,8 @@ function SSOSetting() {
     toast(t('sso.unlinked'))
     await load()
   }
+  // (Its password one it may sign in with: else single sign-on is its only way in, and it stays.)
+  const pwOK = !!me?.has_password && (boot?.local_login === 'all' || !boot?.local_login || (boot.local_login === 'admins' && me?.role === 'admin'))
   const who = id ? id.username_hint || id.email || id.subject : ''
   const host = id ? (() => { try { return new URL(id.issuer).host } catch { return id.issuer } })() : ''
   return (
@@ -365,13 +368,13 @@ function SSOSetting() {
       hint={
         <>
           {id ? t('sso.linkedAs', { who, host }) : t('sso.notLinked')}
-          {id && me?.has_password === false && <span className="hint-block">{t('sso.onlyWay')}</span>}
+          {id && !pwOK && <span className="hint-block">{t(me?.has_password ? 'sso.onlyWayMode' : 'sso.onlyWay')}</span>}
           {err && <span className="err hint-block" role="alert">{ssoErrorText(err)}</span>}
         </>
       }
     >
       {id ? (
-        <button type="button" className="btn" onClick={() => setAsking(true)} disabled={me?.has_password === false}>
+        <button type="button" className="btn" onClick={() => setAsking(true)} disabled={!pwOK}>
           {t('sso.unlink')}
         </button>
       ) : (

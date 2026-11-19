@@ -11,7 +11,7 @@ const USER_FILTERS: UserFilter[] = ['all', 'admin', 'disabled', 'no2fa']
 const USER_SEARCH_FROM = 8 // (users: more than this, and the search shows)
 
 export function AdminUsersPage() {
-  const { me } = useSession()
+  const { me, boot } = useSession()
   const toast = useToast()
   const [users, setUsers] = useState<AdminUser[] | null>(null)
   const [failed, setFailed] = useState(false)
@@ -180,7 +180,7 @@ export function AdminUsersPage() {
                         }
                       : null,
                     u.sso?.length
-                      ? u.has_password
+                      ? u.has_password && (boot?.local_login !== 'off' && (boot?.local_login !== 'admins' || u.role === 'admin'))
                         ? {
                             label: t('admin.ssoUnlink'),
                             icon: <Unlink size={16} />,
@@ -199,7 +199,7 @@ export function AdminUsersPage() {
                                 />,
                               ),
                           }
-                        : { label: t('admin.ssoUnlink'), icon: <Unlink size={16} />, disabled: true, hint: t('admin.ssoOnlyHint') }
+                        : { label: t('admin.ssoUnlink'), icon: <Unlink size={16} />, disabled: true, hint: t(u.has_password ? 'admin.ssoNoWayHint' : 'admin.ssoOnlyHint') }
                       : null,
                     u.disabled
                       ? { label: t('admin.enable'), icon: <UserCheck size={16} />, separator: true, onSelect: () => update(u, { disabled: false }) }

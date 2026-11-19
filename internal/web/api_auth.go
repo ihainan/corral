@@ -205,7 +205,12 @@ func (s *Server) apiMe(w http.ResponseWriter, r *http.Request) {
 			s.internalError(w, r, err)
 			return
 		}
-		me.SSO = ids
+		// (The provider configured now: a binding to one used before is none of its.)
+		for _, i := range ids {
+			if i.Issuer == s.oidc.Issuer() {
+				me.SSO = append(me.SSO, i)
+			}
+		}
 	}
 	writeJSON(w, http.StatusOK, me)
 }
@@ -670,9 +675,11 @@ func (s *Server) apiAdminListUsers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ids := map[int64][]*store.OIDCIdentity{}
-	if all, err := s.store.AllIdentities(r.Context()); err == nil {
+	if all, err := s.store.AllIdentities(r.Context()); err == nil && s.oidc != nil {
 		for _, i := range all {
-			ids[i.UserID] = append(ids[i.UserID], i)
+			if i.Issuer == s.oidc.Issuer() {
+				ids[i.UserID] = append(ids[i.UserID], i)
+			}
 		}
 	}
 	out := make([]adminUserView, 0, len(users))

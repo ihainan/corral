@@ -238,6 +238,11 @@ func (s *Service) LoginMFA(ctx context.Context, token, code, ip, ua string) (*st
 		release(true)
 		return nil, "", ErrChallengeGone
 	}
+	// (Allowed a password still: not made an ordinary user meanwhile, where only administrators may use one.)
+	if !s.passwordAllowed(u) {
+		release(true)
+		return nil, "", ErrChallengeGone
+	}
 	if _, err := s.verifyCode(ctx, u, code); err != nil {
 		if errors.Is(err, ErrTOTPOff) {
 			release(true)

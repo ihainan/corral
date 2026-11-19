@@ -205,6 +205,31 @@ func (s *Store) TouchIdentity(ctx context.Context, id *OIDCIdentity) error {
 	return err
 }
 
+// CreateSSOLogin makes a login single sign-on let in, noted as made by it
+// (the identity, the provider's session sid), in one transaction: only
+// while the account is not disabled, still has the password it had
+// (verifiedHash; "" for none), and is still bound to that identity — not
+// one unlinked or disabled meanwhile. ErrNotFound where it is not so.
+func (s *Store) CreateSSOLogin(ctx context.Context, tokenHash string, userID int64, verifiedHash, ip, ua, issuer, subject, sid string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	now := s.unix()
+	if err := affectedOrNotFound(tx.ExecContext(ctx,
+		`INSERT INTO login_sessions (token_hash, user_id, created_at, last_seen_at, ip, user_agent)
+		 SELECT ?, id, ?, ?, ?, ? FROM users WHERE id = ? AND password_hash = ? AND disabled = 0
+		   AND EXISTS (SELECT 1 FROM oidc_identities WHERE issuer = ? AND subject = ? AND user_id = users.id)`,
+		tokenHash, now, now, ip, ua, userID, verifiedHash, issuer, subject)); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO oidc_logins (token_hash, issuer, subject, sid) VALUES (?, ?, ?, ?)`, tokenHash, issuer, subject, sid); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 // RecordOIDCLogin notes that a login was made by single sign-on as the
 // identity, in the provider's session sid ("" where it gave none).
 func (s *Store) RecordOIDCLogin(ctx context.Context, tokenHash, issuer, subject, sid string) error {

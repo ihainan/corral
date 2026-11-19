@@ -250,6 +250,11 @@ func (s *Server) apiAdminOIDCUnlink(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) unlink(w http.ResponseWriter, r *http.Request, u *store.User, by string) {
+	// (Its password not one it may sign in with — CORRAL_LOCAL_LOGIN — single sign-on is its way in still.)
+	if u.HasPassword() && !s.auth.PasswordAllowed(u) {
+		writeError(w, http.StatusConflict, "no_way_in", "this account may not sign in with its password, so single sign-on is its only way in")
+		return
+	}
 	ended, err := s.store.UnlinkIdentity(r.Context(), u.ID, s.oidc.Issuer())
 	switch {
 	case errors.Is(err, store.ErrNoPassword):
@@ -278,16 +283,21 @@ func (s *Server) apiOIDCBackchannel(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found", "single sign-on is not set up")
 		return
 	}
-	if !s.ssoAllowed(r, "backchannel") {
+	// (Counted are the ones refused only: a provider signing many people out
+	// at once is not held back, and what it ends is ended.)
+	key := "sso-backchannel:" + s.clientIP(r)
+	if s.auth.Exhausted(key) {
 		writeError(w, http.StatusTooManyRequests, "rate_limited", "too many requests")
 		return
 	}
 	if err := r.ParseForm(); err != nil {
+		s.auth.AllowAttempt(key)
 		writeError(w, http.StatusBadRequest, "invalid_request", "the logout token could not be read")
 		return
 	}
 	ended, err := s.oidc.Logout(r.Context(), r.PostForm.Get("logout_token"))
 	if err != nil {
+		s.auth.AllowAttempt(key)
 		s.audit(r, "auth.sso.denied", "", map[string]any{"reason": "bad_logout_token"})
 		writeError(w, http.StatusBadRequest, "invalid_request", "the logout token was not accepted")
 		return

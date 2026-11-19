@@ -147,8 +147,14 @@ func (s *Service) CompleteSetup(ctx context.Context, token, username, displayNam
 // invite redemption (everything that hashes a password for an anonymous caller).
 func (s *Service) AllowAttempt(ip string) bool { return s.limiter.allow(ip, s.now()) }
 
+// Exhausted: key has no attempts left in the window (asking does not count as one).
+func (s *Service) Exhausted(key string) bool { return s.limiter.over(key, s.now()) }
+
 // SetLocalLogin sets who may sign in with a password: "all", "admins" or "off".
 func (s *Service) SetLocalLogin(mode string) { s.localLogin = mode }
+
+// PasswordAllowed: the account may sign in with its password (has one, and CORRAL_LOCAL_LOGIN lets it).
+func (s *Service) PasswordAllowed(u *store.User) bool { return u.HasPassword() && s.passwordAllowed(u) }
 
 // passwordAllowed: the account may sign in with a password (CORRAL_LOCAL_LOGIN).
 func (s *Service) passwordAllowed(u *store.User) bool {
@@ -198,10 +204,10 @@ func (s *Service) Login(ctx context.Context, username, password, ip, ua string) 
 		return nil, "", err // busy: not the user's fault, not counted
 	}
 	if !ok {
-		if u.HasPassword() {
-			if err := s.recordFailure(ctx, u, now); err != nil {
-				return nil, "", err
-			}
+		// (Counted for an account with no password too: it backs off as any
+		// account does, not telling whether it has one.)
+		if err := s.recordFailure(ctx, u, now); err != nil {
+			return nil, "", err
 		}
 		return nil, "", ErrInvalidLogin
 	}
@@ -548,6 +554,14 @@ type window struct {
 
 func newIPLimiter(limit int, w time.Duration) *ipLimiter {
 	return &ipLimiter{limit: limit, window: w, hits: map[string]*window{}}
+}
+
+// over: ip has used up its attempts in the window (not counted as one).
+func (l *ipLimiter) over(ip string, now time.Time) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	w := l.hits[ip]
+	return w != nil && now.Sub(w.start) <= l.window && w.n >= l.limit
 }
 
 func (l *ipLimiter) allow(ip string, now time.Time) bool {

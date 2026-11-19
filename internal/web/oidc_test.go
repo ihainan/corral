@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"net/http"
 	"net/url"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ihainan/corral/internal/auth"
 	"github.com/ihainan/corral/internal/config"
 	"github.com/ihainan/corral/internal/store"
 )
@@ -85,6 +87,7 @@ func TestSSOSignInMakesTheAccount(t *testing.T) {
 func TestSSONextIsThisSitesOnly(t *testing.T) {
 	op := newFakeOP(t)
 	h := newHarness(t, withOIDC(op, "", nil))
+	h.admin()
 	for _, n := range []string{"//evil.example", "/\\evil.example", "https://evil.example", "%2F%2Fevil", "/ok\\x", "javascript:alert(1)"} {
 		b := newBrowser(t, h)
 		res := b.signIn(n)
@@ -106,6 +109,7 @@ func TestSSONextIsThisSitesOnly(t *testing.T) {
 func TestSSOBadTokens(t *testing.T) {
 	op := newFakeOP(t)
 	h := newHarness(t, withOIDC(op, "", nil))
+	h.admin()
 	cases := map[string]func(){
 		"wrong aud":          func() { op.tamper = func(c map[string]any) { c["aud"] = "someone-else" } },
 		"wrong iss":          func() { op.tamper = func(c map[string]any) { c["iss"] = "https://evil.example" } },
@@ -132,8 +136,8 @@ func TestSSOBadTokens(t *testing.T) {
 			t.Errorf("%s: %q %s", name, got, res.Header.Get("Location"))
 		}
 	}
-	if n, _ := h.store.CountUsers(t.Context()); n != 0 {
-		t.Errorf("accounts made: %d", n)
+	if n, _ := h.store.CountUsers(t.Context()); n != 1 {
+		t.Errorf("accounts made: %d", n-1)
 	}
 	if len(auditHas(t, h, "auth.sso.denied")) < len(cases) {
 		t.Errorf("not audited")
@@ -144,6 +148,7 @@ func TestSSOBadTokens(t *testing.T) {
 func TestSSOKeyRotation(t *testing.T) {
 	op := newFakeOP(t)
 	h := newHarness(t, withOIDC(op, "", nil))
+	h.admin()
 	newBrowser(t, h).signIn("/")
 	before := op.jwksHits
 	op.rotate()
@@ -160,6 +165,7 @@ func TestSSOKeyRotation(t *testing.T) {
 func TestSSOFlowBound(t *testing.T) {
 	op := newFakeOP(t)
 	h := newHarness(t, withOIDC(op, "", nil))
+	h.admin()
 	// Another browser finishing it (no flow cookie): refused.
 	a := newBrowser(t, h)
 	res := a.get("/api/auth/oidc/start")
@@ -490,6 +496,7 @@ func TestSSOExtraOrigin(t *testing.T) {
 		extra = "http://localhost:" + c.PublicURL.Port()
 		c.ExtraOrigins = []string{extra}
 	})
+	h.admin()
 	b := newBrowser(t, h)
 	b.base = extra
 	res := b.get("/api/auth/oidc/start")
@@ -514,6 +521,7 @@ func TestSSOExtraOrigin(t *testing.T) {
 func TestSSORateLimited(t *testing.T) {
 	op := newFakeOP(t)
 	h := newHarness(t, withOIDC(op, "", nil))
+	h.admin()
 	b := newBrowser(t, h)
 	limited := false
 	for i := 0; i < 40 && !limited; i++ {
@@ -566,3 +574,262 @@ func TestPasswordChecksGoOneWay(t *testing.T) {
 }
 
 func strconvI(v any) string { return strconv.FormatInt(int64(v.(float64)), 10) }
+
+// Review 2 (Codex) — each as it reproduced, now refused.
+
+// Audiences besides Corral: not trusted (an ID token, and a logout token).
+func TestSSOOnlyOurAudience(t *testing.T) {
+	op := newFakeOP(t)
+	h := newHarness(t, withOIDC(op, "", nil))
+	h.admin()
+	op.tamper = func(c map[string]any) { c["aud"] = []string{"corral", "untrusted"}; c["azp"] = "corral" }
+	if got := ssoError(t, newBrowser(t, h).signIn("/")); got != "invalid_token" {
+		t.Errorf("ID token for others too: %q", got)
+	}
+	b := newBrowser(t, h)
+	b.signIn("/")
+	tok := op.logoutToken("sub-alice", "", func(c map[string]any) { c["aud"] = []string{"corral", "untrusted"} })
+	res, _ := http.PostForm(h.ts.URL+"/api/auth/oidc/backchannel", url.Values{"logout_token": {tok}})
+	res.Body.Close()
+	if res.StatusCode != 400 || meOf(t, b) == nil {
+		t.Errorf("logout token for others too: %d", res.StatusCode)
+	}
+}
+
+func postLogout(t *testing.T, h *harness, tok string) int {
+	t.Helper()
+	res, err := http.PostForm(h.ts.URL+"/api/auth/oidc/backchannel", url.Values{"logout_token": {tok}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	return res.StatusCode
+}
+
+// A nonce in a logout token, null too: refused. A fractional exp: taken.
+func TestSSOLogoutTokenEdges(t *testing.T) {
+	op := newFakeOP(t)
+	h := newHarness(t, withOIDC(op, "", nil))
+	h.admin()
+	b := newBrowser(t, h)
+	b.signIn("/")
+	if got := postLogout(t, h, op.logoutToken("sub-alice", "", func(c map[string]any) { c["nonce"] = nil })); got != 400 || meOf(t, b) == nil {
+		t.Errorf("nonce null: %d", got)
+	}
+	if got := postLogout(t, h, op.logoutToken("sub-alice", "", func(c map[string]any) { c["exp"] = float64(time.Now().Add(time.Minute).Unix()) + 0.5 })); got != 200 || meOf(t, b) != nil {
+		t.Errorf("fractional exp: %d", got)
+	}
+}
+
+// A long sid is kept whole (or refused), never cut to collide with another.
+func TestSSOLongSid(t *testing.T) {
+	op := newFakeOP(t)
+	h := newHarness(t, withOIDC(op, "", nil))
+	h.admin()
+	prefix := strings.Repeat("x", 255)
+	op.who.Sid = prefix + "y"
+	a := newBrowser(t, h)
+	a.signIn("/")
+	op.who.Sid = prefix
+	b := newBrowser(t, h)
+	b.signIn("/")
+	if postLogout(t, h, op.logoutToken("", prefix, nil)) != 200 || meOf(t, b) != nil || meOf(t, a) == nil {
+		t.Errorf("the prefix's logout: a %v, b %v", meOf(t, a) != nil, meOf(t, b) != nil)
+	}
+	if postLogout(t, h, op.logoutToken("", prefix+"y", nil)) != 200 || meOf(t, a) != nil {
+		t.Errorf("the long sid's logout did not end it")
+	}
+	op.who.Sid = strings.Repeat("z", 2000)
+	if got := ssoError(t, newBrowser(t, h).signIn("/")); got != "invalid_token" {
+		t.Errorf("a sid too long to keep: %q", got)
+	}
+}
+
+// A logout that failed to end what it named may be sent again.
+func TestSSOLogoutRetry(t *testing.T) {
+	op := newFakeOP(t)
+	h := newHarness(t, withOIDC(op, "", nil))
+	h.admin()
+	b := newBrowser(t, h)
+	b.signIn("/")
+	tok := op.logoutToken("sub-alice", "", nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := h.srv.oidc.Logout(ctx, tok); err == nil {
+		t.Fatal("expected a failure")
+	}
+	if _, err := h.srv.oidc.Logout(t.Context(), tok); err != nil || meOf(t, b) != nil {
+		t.Errorf("retry: %v, still signed in %v", err, meOf(t, b) != nil)
+	}
+}
+
+// Unlinked between its sign-in and its login being made: no login.
+func TestSSOUnlinkedMidSignIn(t *testing.T) {
+	op := newFakeOP(t)
+	h := newHarness(t, withOIDC(op, "", nil))
+	h.admin()
+	root, _ := h.store.UserByName(t.Context(), "root")
+	if err := h.store.LinkIdentity(t.Context(), root.ID, &store.OIDCIdentity{Issuer: op.issuer(), Subject: "sub-root"}); err != nil {
+		t.Fatal(err)
+	}
+	c := &auth.Claimed{Issuer: op.issuer(), Subject: "sub-root", Sid: "sid-root", IssuedAt: time.Now()}
+	in, err := h.srv.oidc.SignIn(t.Context(), c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.store.UnlinkIdentity(t.Context(), root.ID, op.issuer()); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := h.srv.oidc.StartSession(t.Context(), in.User, c, "127.0.0.1", "t"); err == nil {
+		t.Errorf("a login made after the unlink")
+	}
+}
+
+// Ended by the provider before its login was made (between the two): the login is refused.
+func TestSSOLogoutBeforeLogin(t *testing.T) {
+	op := newFakeOP(t)
+	h := newHarness(t, withOIDC(op, "", nil))
+	h.admin()
+	newBrowser(t, h).signIn("/") // (alice's account)
+	u, _ := h.store.UserByName(t.Context(), "alice")
+	c := &auth.Claimed{Issuer: op.issuer(), Subject: "sub-alice", Sid: "sid-late", IssuedAt: time.Now().Add(-time.Second)}
+	if _, err := h.srv.oidc.Logout(t.Context(), op.logoutToken("", "sid-late", nil)); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := h.srv.oidc.StartSession(t.Context(), u, c, "127.0.0.1", "t"); err == nil {
+		t.Errorf("a login of a session the provider ended")
+	}
+	c2 := &auth.Claimed{Issuer: op.issuer(), Subject: "sub-alice", Sid: "sid-other", IssuedAt: time.Now().Add(-time.Second)}
+	if _, err := h.srv.oidc.Logout(t.Context(), op.logoutToken("sub-alice", "", nil)); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := h.srv.oidc.StartSession(t.Context(), u, c2, "127.0.0.1", "t"); err == nil {
+		t.Errorf("a login from before the subject's logout")
+	}
+}
+
+// Many good logouts from the provider: none held back.
+func TestSSOBackchannelNotLimitedWhenGood(t *testing.T) {
+	op := newFakeOP(t)
+	h := newHarness(t, withOIDC(op, "", nil))
+	h.admin()
+	b := newBrowser(t, h)
+	b.signIn("/")
+	for i := 0; i < 40; i++ {
+		if got := postLogout(t, h, op.logoutToken("", "other-"+strconv.Itoa(i), nil)); got != 200 {
+			t.Fatalf("%d: %d", i, got)
+		}
+	}
+	if got := postLogout(t, h, op.logoutToken("sub-alice", "", nil)); got != 200 || meOf(t, b) != nil {
+		t.Errorf("after many: %d", got)
+	}
+}
+
+// Wrong passwords: an account with none backs off as one with a password does.
+func TestSSOOnlyLocksLikeAny(t *testing.T) {
+	op := newFakeOP(t)
+	h := newHarness(t, withOIDC(op, "", nil))
+	root := h.admin()
+	mustStatus(t, root.do("POST", "/api/admin/users", map[string]any{"username": "local", "password": "valid-password-1", "role": "member", "must_change": false}), 201, "local")
+	newBrowser(t, h).signIn("/") // (alice: no password)
+	got := map[string]string{}
+	for _, name := range []string{"local", "alice"} {
+		var r resp
+		for i := 0; i < 6; i++ {
+			r = (&client{h: h}).do("POST", "/api/login", map[string]any{"username": name, "password": "wrong-password"})
+		}
+		got[name] = r.code()
+	}
+	if got["local"] != got["alice"] {
+		t.Errorf("told apart: %v", got)
+	}
+}
+
+// Before the first administrator is made: no account by single sign-on (setup still works).
+func TestSSONotBeforeSetup(t *testing.T) {
+	op := newFakeOP(t)
+	h := newHarness(t, withOIDC(op, "", nil))
+	if got := ssoError(t, newBrowser(t, h).signIn("/")); got != "setup_needed" {
+		t.Errorf("before setup: %q", got)
+	}
+	h.admin()
+}
+
+// Made an ordinary user between its password and its code (admins only): no login.
+func TestLocalLoginRecheckedAtCode(t *testing.T) {
+	op := newFakeOP(t)
+	h := newHarness(t, withOIDC(op, config.LocalLoginAdmins, nil))
+	root := h.admin()
+	mustStatus(t, root.do("POST", "/api/admin/users", map[string]any{"username": "second", "password": "second-password-1", "role": "admin", "must_change": false}), 201, "second")
+	c := &client{h: h}
+	mustStatus(t, c.do("POST", "/api/login", map[string]string{"username": "second", "password": "second-password-1"}), 200, "second")
+	secret, _ := enableTOTP(t, c, "second-password-1")
+	attempt, challenge := loginStep(t, h, "second", "second-password-1")
+	u, _ := h.store.UserByName(t.Context(), "second")
+	role := store.RoleMember
+	if err := h.store.UpdateUserGuarded(t.Context(), u.ID, &role, nil); err != nil {
+		t.Fatal(err)
+	}
+	r := attempt.do("POST", "/api/login/code", map[string]string{"token": challenge, "code": auth.TOTPCode(secret, time.Now().Add(30*time.Second))})
+	if r.Status == 200 || attempt.cookie != "" {
+		t.Errorf("signed in after demotion: %d %s", r.Status, r.Body)
+	}
+}
+
+// Unlinking where its password may not be used (off; admins for a member): refused.
+func TestSSOUnlinkKeepsAWayIn(t *testing.T) {
+	for _, mode := range []string{config.LocalLoginOff, config.LocalLoginAdmins} {
+		t.Run(mode, func(t *testing.T) {
+			op := newFakeOP(t)
+			h := newHarness(t, withOIDC(op, mode, nil))
+			h.admin()
+			hash, _ := auth.HashPassword("a-local-password-1")
+			role := store.RoleMember
+			if mode == config.LocalLoginOff {
+				role = store.RoleAdmin
+			}
+			u, err := h.store.CreateUser(t.Context(), "linked", "Linked", hash, role)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := h.store.LinkIdentity(t.Context(), u.ID, &store.OIDCIdentity{Issuer: op.issuer(), Subject: op.who.Sub}); err != nil {
+				t.Fatal(err)
+			}
+			b := newBrowser(t, h)
+			b.signIn("/")
+			if r := b.api("DELETE", "/api/me/oidc", nil); r.Status != 409 || r.code() != "no_way_in" {
+				t.Errorf("unlink: %d %s", r.Status, r.Body)
+			}
+		})
+	}
+}
+
+// The configured issuer is the identity's, whatever spelling of it the token has.
+func TestSSOIdentityByConfiguredIssuer(t *testing.T) {
+	op := newFakeOP(t)
+	h := newHarness(t, withOIDC(op, "", nil))
+	h.admin()
+	b := newBrowser(t, h)
+	b.signIn("/")
+	ids, _ := h.store.AllIdentities(t.Context())
+	if len(ids) != 1 || ids[0].Issuer != op.issuer() {
+		t.Errorf("issuer kept: %v", ids)
+	}
+}
+
+// A binding to a provider used before: not shown as this one's.
+func TestSSOOldIssuerNotShown(t *testing.T) {
+	op := newFakeOP(t)
+	h := newHarness(t, withOIDC(op, "", nil))
+	root := h.admin()
+	u, _ := h.store.UserByName(t.Context(), "root")
+	if err := h.store.LinkIdentity(t.Context(), u.ID, &store.OIDCIdentity{Issuer: "https://old.example", Subject: "old-root"}); err != nil {
+		t.Fatal(err)
+	}
+	if j := root.do("GET", "/api/me", nil).json(); j["sso"] != nil {
+		t.Errorf("an old provider's binding shown: %v", j["sso"])
+	}
+	if r := root.do("GET", "/api/admin/users", nil); strings.Contains(string(r.Body), "old.example") {
+		t.Errorf("admin list: %s", r.Body)
+	}
+}

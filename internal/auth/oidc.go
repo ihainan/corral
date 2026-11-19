@@ -83,6 +83,8 @@ const (
 	ReasonLinked        = "already_linked"       // (linking) this account has an identity of the provider already
 	ReasonLinkLogin     = "link_signed_out"      // (linking) not signed in as the account that asked any more
 	ReasonBusy          = "busy"                 // too many sign-ins under way
+	ReasonSetup         = "setup_needed"         // Corral's first administrator is not made yet
+	ReasonSignedOut     = "signed_out"           // the provider ended that session meanwhile (back-channel)
 )
 
 // OIDC is single sign-on with the configured provider.
@@ -103,6 +105,11 @@ type OIDC struct {
 	tried    time.Time
 	flows    map[string]*ssoFlow // by state
 	jtis     map[string]time.Time
+	// What back-channel logout ended lately: a provider's session (by sid),
+	// and a subject's sessions begun no later than its logout (by when the
+	// logout token was issued) — a sign-in finishing after it is refused.
+	outSid map[string]time.Time
+	outSub map[string]time.Time
 }
 
 type ssoFlow struct {
@@ -122,7 +129,8 @@ func NewOIDC(cfg *config.OIDCConfig, svc *Service, client *http.Client) *OIDC {
 	if client == nil {
 		client = &http.Client{Timeout: httpTimeout}
 	}
-	return &OIDC{cfg: cfg, st: svc.store, svc: svc, client: client, now: time.Now, flows: map[string]*ssoFlow{}, jtis: map[string]time.Time{}}
+	return &OIDC{cfg: cfg, st: svc.store, svc: svc, client: client, now: time.Now, flows: map[string]*ssoFlow{}, jtis: map[string]time.Time{},
+		outSid: map[string]time.Time{}, outSub: map[string]time.Time{}}
 }
 
 // Button is the sign-in button's words ("": the page's own).
@@ -226,6 +234,7 @@ func (o *OIDC) Begin(ctx context.Context, origin, next string, linkUser int64, l
 // account being linked (0: a sign-in).
 type Claimed struct {
 	Issuer, Subject, Sid  string
+	IssuedAt              time.Time // the ID token's
 	Groups                []string
 	Username, Email, Name string
 	Next                  string
@@ -291,7 +300,9 @@ func (o *OIDC) finish(ctx context.Context, origin, state, code, cookie string) (
 	if err := o.checkID(idt, claims, f.nonce); err != nil {
 		return base, ssoErr(ReasonInvalidToken, err)
 	}
-	c := &Claimed{Issuer: idt.Issuer, Subject: idt.Subject, Sid: str(claims["sid"]), Username: str(claims["preferred_username"]),
+	// (The configured issuer, not the token's spelling of it: go-oidc takes Google's
+	// "accounts.google.com" for "https://accounts.google.com" — one person, one identity.)
+	c := &Claimed{Issuer: o.cfg.Issuer, Subject: idt.Subject, Sid: str(claims["sid"]), IssuedAt: idt.IssuedAt, Username: str(claims["preferred_username"]),
 		Email: str(claims["email"]), Name: str(claims["name"]), Next: f.next, LinkUser: f.linkUser, LinkLogin: f.linkLogin}
 	groups, found := claimAt(claims, o.cfg.GroupsClaim)
 	if !found && (len(o.cfg.Allowed) > 0 || len(o.cfg.Admins) > 0) && o.userinfo {
@@ -313,8 +324,14 @@ func (o *OIDC) checkID(idt *oidc.IDToken, claims map[string]any, nonce string) e
 	if idt.Subject == "" || len(idt.Subject) > 255 {
 		return errors.New("no subject")
 	}
-	azp, hasAzp := claims["azp"]
-	if (len(idt.Audience) > 1 || hasAzp) && str(azp) != o.cfg.ClientID {
+	if sid, ok := claims["sid"]; ok && len(str(sid)) > 1024 {
+		return errors.New("a session id that cannot be kept whole")
+	}
+	// (Corral alone: an ID token for other clients too is not one to trust.)
+	if len(idt.Audience) != 1 || idt.Audience[0] != o.cfg.ClientID {
+		return errors.New("audiences other than this client")
+	}
+	if azp, hasAzp := claims["azp"]; hasAzp && str(azp) != o.cfg.ClientID {
 		return errors.New("authorized party is not this client")
 	}
 	now := o.now()
@@ -384,6 +401,13 @@ type SignedIn struct {
 // administrators' groups where they are configured (never the last
 // administrator made none).
 func (o *OIDC) SignIn(ctx context.Context, c *Claimed) (*SignedIn, error) {
+	// (Not before the first administrator is made by the setup link: an account
+	// made by a sign-in now would end setup with no one to run Corral.)
+	if n, err := o.st.CountUsers(ctx); err != nil {
+		return nil, err
+	} else if n == 0 {
+		return nil, ssoErr(ReasonSetup, nil)
+	}
 	if len(o.cfg.Allowed) > 0 && !inAny(c.Groups, o.cfg.Allowed) {
 		return nil, ssoErr(ReasonNotAllowed, nil)
 	}
@@ -483,6 +507,9 @@ func SuggestUsername(preferred, email, subject string) string {
 // disabled, and still has the password it had (where it has one) — not one
 // disabled or changed meanwhile.
 func (o *OIDC) StartSession(ctx context.Context, u *store.User, c *Claimed, ip, ua string) (string, string, error) {
+	if o.signedOut(c) {
+		return "", "", ssoErr(ReasonSignedOut, nil)
+	}
 	tok, hash, err := NewToken()
 	if err != nil {
 		return "", "", err
@@ -490,17 +517,35 @@ func (o *OIDC) StartSession(ctx context.Context, u *store.User, c *Claimed, ip, 
 	if len(ua) > 300 {
 		ua = ua[:300]
 	}
-	if err := o.st.CreateLoginSessionIfCurrent(ctx, hash, u.ID, u.PasswordHash(), ip, ua, false); err != nil {
+	if err := o.st.CreateSSOLogin(ctx, hash, u.ID, u.PasswordHash(), ip, ua, c.Issuer, c.Subject, c.Sid); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			return "", "", ssoErr(ReasonDisabled, err)
+			return "", "", ssoErr(ReasonDisabled, err) // (disabled, or unlinked, meanwhile)
 		}
 		return "", "", err
 	}
-	if err := o.st.RecordOIDCLogin(ctx, hash, c.Issuer, c.Subject, limit(c.Sid, 255)); err != nil {
+	// (Ended by the provider while it was being made: the logout marks its
+	// session before ending what it finds, so one of the two sees the other.)
+	if o.signedOut(c) {
 		_ = o.st.DeleteLoginSession(context.WithoutCancel(ctx), hash)
-		return "", "", err
+		return "", "", ssoErr(ReasonSignedOut, nil)
 	}
 	return tok, hash, nil
+}
+
+// signedOut: c's session (or c's subject, since before c's token was
+// issued) was ended by the provider lately.
+func (o *OIDC) signedOut(c *Claimed) bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if c.Sid != "" {
+		if _, ok := o.outSid[c.Issuer+"\x00"+c.Sid]; ok {
+			return true
+		}
+	}
+	if at, ok := o.outSub[c.Issuer+"\x00"+c.Subject]; ok && !c.IssuedAt.After(at) {
+		return true
+	}
+	return false
 }
 
 // Link binds c's identity to the account that asked (its login still
@@ -549,50 +594,79 @@ func (o *OIDC) Logout(ctx context.Context, raw string) (map[string]int64, error)
 	if err != nil {
 		return nil, err
 	}
+	if len(t.Audience) != 1 || t.Audience[0] != o.cfg.ClientID {
+		return nil, errors.New("audiences other than this client")
+	}
+	var all map[string]json.RawMessage
+	if err := t.Claims(&all); err != nil {
+		return nil, err
+	}
 	var claims struct {
 		Sid    string                     `json:"sid"`
 		Jti    string                     `json:"jti"`
-		Exp    *json.Number               `json:"exp"`
-		Nonce  *string                    `json:"nonce"`
+		Exp    *float64                   `json:"exp"`
 		Events map[string]json.RawMessage `json:"events"`
 	}
 	if err := t.Claims(&claims); err != nil {
 		return nil, err
 	}
+	_, hasNonce := all["nonce"] // (null too: a logout token has none)
 	now := o.now()
 	switch {
 	case t.IssuedAt.IsZero() || t.IssuedAt.After(now.Add(skew)) || t.IssuedAt.Before(now.Add(-logoutMaxAge-skew)):
 		return nil, errors.New("issued at an unlikely time")
-	case claims.Nonce != nil:
+	case hasNonce:
 		return nil, errors.New("a logout token has no nonce")
 	case claims.Events == nil || len(claims.Events[BackchannelEvent]) == 0 || claims.Events[BackchannelEvent][0] != '{':
 		return nil, errors.New("not a back-channel logout event")
 	case t.Subject == "" && claims.Sid == "":
 		return nil, errors.New("neither a subject nor a session")
-	case claims.Jti == "":
-		return nil, errors.New("no jti")
+	case claims.Jti == "" || len(claims.Jti) > 1024 || len(claims.Sid) > 1024:
+		return nil, errors.New("no jti, or one too long")
 	}
-	if claims.Exp != nil {
-		if e, err := claims.Exp.Int64(); err != nil || time.Unix(e, 0).Before(now.Add(-skew)) {
-			return nil, errors.New("expired")
-		}
+	if claims.Exp != nil && time.Unix(int64(*claims.Exp), 0).Before(now.Add(-skew)) {
+		return nil, errors.New("expired")
 	}
+	iss := o.cfg.Issuer // (as identities are kept: see Finish)
+	key := iss + "\x00" + claims.Jti
 	o.mu.Lock()
 	for k, at := range o.jtis {
 		if now.Sub(at) > jtiTTL {
 			delete(o.jtis, k)
 		}
 	}
-	key := t.Issuer + "\x00" + claims.Jti
+	for k, at := range o.outSid {
+		if now.Sub(at) > iatMaxAge+skew {
+			delete(o.outSid, k)
+		}
+	}
+	for k, at := range o.outSub {
+		if now.Sub(at) > iatMaxAge+skew {
+			delete(o.outSub, k)
+		}
+	}
 	_, seen := o.jtis[key]
 	if !seen {
-		o.jtis[key] = now
+		// (Marked before what it ends is looked for: a sign-in finishing meanwhile is refused.)
+		if claims.Sid != "" {
+			o.outSid[iss+"\x00"+claims.Sid] = now
+		}
+		if claims.Sid == "" && t.Subject != "" {
+			o.outSub[iss+"\x00"+t.Subject] = t.IssuedAt
+		}
 	}
 	o.mu.Unlock()
 	if seen {
 		return nil, errors.New("this logout token was used already")
 	}
-	return o.st.EndOIDCLogins(ctx, t.Issuer, t.Subject, claims.Sid)
+	ended, err := o.st.EndOIDCLogins(ctx, iss, t.Subject, claims.Sid)
+	if err != nil {
+		return nil, err // (not noted as used: the provider may send it again)
+	}
+	o.mu.Lock()
+	o.jtis[key] = now
+	o.mu.Unlock()
+	return ended, nil
 }
 
 // jwtType: the "typ" of a JWS's protected header ("" where it has none).
