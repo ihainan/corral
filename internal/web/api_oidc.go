@@ -161,7 +161,7 @@ func (s *Server) apiOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, store.ErrNotFound) {
 			err = &auth.SSOError{Reason: auth.ReasonSignedOut}
 		}
-		_ = s.store.DeleteLoginSession(context.WithoutCancel(r.Context()), hash)
+		s.endSSOLogin(r, hash, c)
 		s.ssoFailed(w, r, c, err, false)
 		return
 	}
@@ -175,6 +175,31 @@ func (s *Server) apiOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	s.auditAs(r, in.User, "auth.sso.login", in.User.Username, d)
 	s.setSessionCookie(w, tok)
 	http.Redirect(w, r, safeNext(c.Next), http.StatusFound)
+}
+
+// endSSOLogin ends a login single sign-on made but could not finish (its
+// role not synced; its cookie never sent) as a sign-out does: with its
+// user's last valid login, their sessions' records go too. Tried twice;
+// where it still fails, said (logged, audited as cleanup_failed), the login
+// left standing being no secret.
+func (s *Server) endSSOLogin(r *http.Request, hash string, c *auth.Claimed) bool {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 10*time.Second)
+	defer cancel()
+	var err error
+	for range 2 {
+		if err = s.auth.Logout(ctx, hash); err == nil {
+			return true
+		}
+	}
+	s.log.Error("single sign-on: a login it could not finish was not ended", "err", err)
+	d := map[string]any{"reason": "cleanup_failed"}
+	target := ""
+	if c != nil {
+		d["issuer"] = c.Issuer
+		target = truncate(c.Username, 64)
+	}
+	s.auditAs(r, nil, "auth.sso.denied", target, d)
+	return false
 }
 
 // ssoLink binds the identity c to the account that asked — only while the

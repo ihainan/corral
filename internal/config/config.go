@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 )
 
 type Config struct {
@@ -486,8 +487,9 @@ func loadOIDC() (*OIDCConfig, error) {
 // machine, http:// to localhost or a loopback address — with no query, fragment or credentials.
 func checkIssuer(issuer string) error {
 	u, err := url.Parse(issuer)
-	// (A "?" or "#" even with nothing after it: discovery's path would go into the query or fragment.)
-	if err != nil || u.Host == "" || strings.ContainsAny(issuer, "?# \t\r\n") || u.User != nil {
+	// (A "?" or "#" even with nothing after it: discovery's path would go into the query or fragment.
+	// Whitespace of any kind, U+00A0 and U+3000 among it, nowhere.)
+	if err != nil || u.Host == "" || strings.ContainsAny(issuer, "?#") || strings.IndexFunc(issuer, unicode.IsSpace) >= 0 || u.User != nil {
 		return fmt.Errorf("CORRAL_OIDC_ISSUER: an absolute URL with no query, fragment or credentials, got %q", issuer)
 	}
 	switch u.Scheme {

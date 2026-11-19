@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -1014,5 +1015,58 @@ func TestSSOOnlyTOTP(t *testing.T) {
 	b.signIn("/")
 	if r := b.api("POST", "/api/me/totp/begin", map[string]any{"password": "anything"}); r.Status != 409 || r.code() != "no_password" {
 		t.Errorf("totp begin: %d %s", r.Status, r.Body)
+	}
+}
+
+// A login single sign-on made but could not finish is ended as a sign-out
+// is: with the user's last login, their sessions' records go too.
+func TestSSOUnfinishedLoginEndsAsLogout(t *testing.T) {
+	op := newFakeOP(t)
+	h := newHarness(t, withOIDC(op, "", nil))
+	h.admin()
+	ctx := t.Context()
+	u, _ := h.store.CreateUser(ctx, "mem", "", "", store.RoleMember)
+	host, err := h.store.CreateHost(ctx, &store.Host{OwnerID: u.ID, Name: "h", Address: "10.0.0.1", Port: 22, Username: "a", Auth: store.AuthPassword})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, l := range []string{"other", "unfinished"} {
+		if err := h.store.CreateLoginSession(ctx, l, u.ID, "127.0.0.1", "t"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tab := &store.OpenTab{SessionID: "s1", OwnerID: u.ID, HostID: host.ID, Kind: "tmux", Name: "main", HostConfig: "c", Cols: 80, Rows: 24, AliveAt: time.Now().Unix()}
+	if err := h.store.RegisterTab(ctx, tab, "other", h.srv.auth.LoginRule(), func(*store.Host) bool { return true }); err != nil {
+		t.Fatal(err)
+	}
+	tabs := func() int {
+		all, err := h.store.OpenTabs(ctx, 100)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(all)
+	}
+	r := httptest.NewRequest("GET", "/api/auth/oidc/callback", nil)
+	if !h.srv.endSSOLogin(r, "unfinished", &auth.Claimed{Issuer: op.issuer()}) {
+		t.Fatal("not ended")
+	}
+	if _, err := h.store.LoginSessionByHash(ctx, "unfinished"); err == nil {
+		t.Error("the unfinished login stands")
+	}
+	if tabs() != 1 {
+		t.Error("records gone with another login left")
+	}
+	// (The other browser signed out meanwhile: this one was the last.)
+	if err := h.store.CreateLoginSession(ctx, "unfinished2", u.ID, "127.0.0.1", "t"); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.store.DeleteLoginSession(ctx, "other"); err != nil {
+		t.Fatal(err)
+	}
+	if !h.srv.endSSOLogin(r, "unfinished2", &auth.Claimed{Issuer: op.issuer()}) {
+		t.Fatal("not ended")
+	}
+	if n := tabs(); n != 0 {
+		t.Errorf("records left after the last login: %d", n)
 	}
 }

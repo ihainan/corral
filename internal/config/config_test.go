@@ -268,6 +268,9 @@ func TestOIDCConfig(t *testing.T) {
 		{"https://id.example.com/realms/x?", false},
 		{"https://id.example.com/realms/x#", false},
 		{"https://id.example.com/realms/x ", false},
+		{"https://id.example.com/realms/x\u00a0", false},
+		{"https://id.example.com/re\u3000alms/x", false},
+		{"https://id.example.com/realms/x\u2003", false},
 	} {
 		if err := checkIssuer(c.issuer); (err == nil) != c.ok {
 			t.Errorf("%s: %v", c.issuer, err)
