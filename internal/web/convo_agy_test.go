@@ -52,6 +52,17 @@ func TestAgyIdleInputAndBoxPipeParity(t *testing.T) {
 		"Press ? for help",
 	}, "\n")
 
+	// Live reproduction: background task strip between two extra rules below the input box.
+	idleWithBgTaskStrip := strings.Join([]string{
+		"⣾  Running command...",
+		rule,
+		">",
+		rule,
+		"  ● [21:48:39] cd /repo && gh run watch 44747496286 --exit-status ... running",
+		rule,
+		"esc to cancel                               auto · Gemini 4 Neon · high · 1 task(s) · /tasks",
+	}, "\n")
+
 	withDraft := strings.Join([]string{
 		"● Done.",
 		rule,
@@ -96,6 +107,9 @@ func TestAgyIdleInputAndBoxPipeParity(t *testing.T) {
 	if err := agyIdleInput(idleWrappedPlaceholder); err != nil {
 		t.Fatalf("idleWrappedPlaceholder err = %v, want nil", err)
 	}
+	if err := agyIdleInput(idleWithBgTaskStrip); err != nil {
+		t.Fatalf("idleWithBgTaskStrip err = %v, want nil", err)
+	}
 	if err := agyIdleInput(withDraft); !errors.Is(err, errDraft) {
 		t.Fatalf("withDraft err = %v, want errDraft", err)
 	}
@@ -112,6 +126,7 @@ func TestAgyIdleInputAndBoxPipeParity(t *testing.T) {
 		"idlePlaceholder":        idlePlaceholder,
 		"idleAcceptEdits":        idleAcceptEdits,
 		"idleWrappedPlaceholder": idleWrappedPlaceholder,
+		"idleWithBgTaskStrip":    idleWithBgTaskStrip,
 		"withDraft":              withDraft,
 	} {
 		want, ok := agyBoxDigest([]byte(scr))
@@ -285,5 +300,79 @@ func TestAgyNonInterSh(t *testing.T) {
 		if got != tc.want {
 			t.Fatalf("agy_noninter(%v) = %v, want %v", tc.args, got, tc.want)
 		}
+	}
+}
+
+func TestAgyColorDraftModeAndSentHelpers(t *testing.T) {
+	rule := strings.Repeat("─", 80)
+
+	// ANSI grey dynamic suggestion must NOT be treated as a user draft.
+	ansiSuggestion := strings.Join([]string{
+		"\x1b[90m" + rule + "\x1b[0m",
+		"\x1b[94m>\x1b[39m \x1b[90mTry asking to run the test suite\x1b[39m",
+		"\x1b[90m" + rule + "\x1b[0m",
+		"? for shortcuts                                      auto · Gemini 4 Neon · high",
+	}, "\n")
+	if err := agyIdleInputColor(ansiSuggestion); err != nil {
+		t.Fatalf("ansiSuggestion err = %v, want nil", err)
+	}
+
+	ansi256Suggestion := strings.Join([]string{
+		"\x1b[38;5;8m" + rule + "\x1b[0m",
+		"\x1b[38;5;12m>\x1b[0m \x1b[38;5;8mCustom dynamic hint\x1b[0m",
+		"\x1b[38;5;8m" + rule + "\x1b[0m",
+		"? for shortcuts                                      plan · Gemini 4 Neon · high",
+	}, "\n")
+	if err := agyIdleInputColor(ansi256Suggestion); err != nil {
+		t.Fatalf("ansi256Suggestion err = %v, want nil", err)
+	}
+
+	// Normal-colour user draft MUST still be refused as errDraft.
+	ansiDraft := strings.Join([]string{
+		"\x1b[90m" + rule + "\x1b[0m",
+		"\x1b[94m>\x1b[39m fix the failing build",
+		"\x1b[90m" + rule + "\x1b[0m",
+		"? for shortcuts                                      auto · Gemini 4 Neon · high",
+	}, "\n")
+	if err := agyIdleInputColor(ansiDraft); !errors.Is(err, errDraft) {
+		t.Fatalf("ansiDraft err = %v, want errDraft", err)
+	}
+
+	// Mode parsing across all 4 agy modes + background task strip + prompt.
+	if got := agyModeOnScreen(ansiSuggestion); got != "auto" {
+		t.Fatalf("mode auto = %q", got)
+	}
+	if got := agyModeOnScreen(ansi256Suggestion); got != "plan" {
+		t.Fatalf("mode plan = %q", got)
+	}
+	acceptScr := strings.Join([]string{rule, ">", rule, "? for shortcuts   accept-edits · Gemini 4 Neon · high"}, "\n")
+	if got := agyModeOnScreen(acceptScr); got != "acceptEdits" {
+		t.Fatalf("mode acceptEdits = %q", got)
+	}
+	defaultScr := strings.Join([]string{rule, ">", rule, "? for shortcuts   Gemini 4 Neon · high"}, "\n")
+	if got := agyModeOnScreen(defaultScr); got != "default" {
+		t.Fatalf("mode default = %q", got)
+	}
+	if got := agyModeOnScreen("Run this command?\n> 1. Yes, run command\n  2. No, cancel"); got != "" {
+		t.Fatalf("mode during prompt = %q, want empty", got)
+	}
+
+	// Sent-missing / sent-enter input checks.
+	if waiting, known := agyInInput(ansiDraft, "fix the failing build"); !waiting || !known {
+		t.Fatalf("agyInInput waiting=%v known=%v, want true true", waiting, known)
+	}
+	if !agyTypedWhole(ansiDraft, "fix the failing build") {
+		t.Fatalf("agyTypedWhole should be true")
+	}
+	if waiting, known := agyInInput(defaultScr, "fix the failing build"); waiting || !known {
+		t.Fatalf("agyInInput empty box waiting=%v known=%v, want false true", waiting, known)
+	}
+
+	// Turns outline filter.
+	if !turnLine("agy", []byte(`{"step_index":0,"type":"USER_INPUT","content":"hi"}`)) {
+		t.Fatalf("turnLine should match agy USER_INPUT")
+	}
+	if turnLine("agy", []byte(`{"step_index":1,"type":"PLANNER_RESPONSE","content":"hi"}`)) {
+		t.Fatalf("turnLine should skip agy PLANNER_RESPONSE")
 	}
 }

@@ -596,7 +596,7 @@ export function ConversationView({
   // All the work going on, as the bar over the composer lists it: subagents
   // (where they can be looked into) and commands — one after another from a
   // panel, whichever it is (11-14). By the log's ids only.
-  const subsOk = !convo.bind?.agent || convo.bind.agent === 'claude' || convo.bind.agent === 'codex'
+  const subsOk = !convo.bind?.agent || convo.bind.agent === 'claude' || convo.bind.agent === 'codex' || convo.bind.agent === 'agy'
   const work = (convo.running ?? []).filter((r) => (r.kind === 'agent' && isSubId(r.id) && subsOk) || r.kind === 'cmd')
   const workNav = (id: string): WorkNav | undefined => {
     const i = work.findIndex((r) => r.id === id)
@@ -1743,7 +1743,7 @@ export function ConversationView({
               items={() => [
                 // (In three groups, each headed: finding and reading here; the agent; the conversation itself.)
                 { label: t('convoSearch.item'), icon: <Search size={16} />, group: t('menu.group.find'), onSelect: () => setSearching(true) },
-                ...(convo.of && (convo.bind?.agent === 'claude' || convo.bind?.agent === 'codex') ? [{ label: t('turns.item'), icon: <ListOrdered size={16} />, onSelect: () => (setSearching(false), setTurnsShown(true)) }] : []),
+                ...(convo.of && (convo.bind?.agent === 'claude' || convo.bind?.agent === 'codex' || convo.bind?.agent === 'agy') ? [{ label: t('turns.item'), icon: <ListOrdered size={16} />, onSelect: () => (setSearching(false), setTurnsShown(true)) }] : []),
                 ...(sideBind ? [{ label: t('side.item'), icon: <MessageCircleQuestion size={16} />, onSelect: () => setBtwShown(sideIdent) }] : []),
                 // (All steps opened or folded: the menu's, as Ctrl+O is a Mac's only.)
                 { label: t(allOpen ? 'pageKeys.foldAll' : 'pageKeys.openAll'), icon: allOpen ? <ChevronsDownUp size={16} /> : <ChevronsUpDown size={16} />, keys: mac ? ['Ctrl+O'] : undefined, disabled: !list.length, onSelect: () => (setOpened({}), setUnfolded({}), setAllOpen((v) => !v)) },
@@ -1937,7 +1937,7 @@ export function ConversationView({
             items={convo.running}
             waiting={waitingOn}
             openCmd={openCmd}
-            openSub={!convo.bind?.agent || convo.bind.agent === 'claude' || convo.bind.agent === 'codex' ? openSub : undefined}
+            openSub={!convo.bind?.agent || convo.bind.agent === 'claude' || convo.bind.agent === 'codex' || convo.bind.agent === 'agy' ? openSub : undefined}
           />
         )}
         {composer}
@@ -2538,9 +2538,11 @@ function goalSaid(g: string): string {
 // (Shift+Tab until it is there, on the host): now, what the last switch went
 // to (the log says it only with the next message); busy, one on its way.
 // (codex: a Codex's — its collaboration mode, plan or default, what is switched; its approval policy shown otherwise.)
-export type ModeSwitch = { now?: string; busy: boolean; onPick?: (mode: string) => void; codex?: boolean }
+export type ModeSwitch = { now?: string; busy: boolean; onPick?: (mode: string) => void; codex?: boolean; agy?: boolean }
 // (A Codex's collaboration modes, in Shift+Tab's order.)
 const CODEX_MODES = ['default', 'plan'] as const
+// (Antigravity CLI's execution modes, in Shift+Tab's order.)
+const AGY_MODES = ['default', 'acceptEdits', 'plan', 'auto'] as const
 // (Those Shift+Tab goes through, in its order; which a session has depends on how it was started.)
 const PICKED_MODES = ['default', 'acceptEdits', 'plan', 'auto', 'bypassPermissions'] as const
 // Each mode's mark, and a line of what it lets the agent do (11-14: five names to tell apart by name alone).
@@ -2775,7 +2777,8 @@ function Runs({ meta, goal, active, mode, model, effort, quota, via, auth, onSid
   // larger one. Known and filled past, it was not that one after all.)
   // (A Codex's chip: "Plan" while in plan mode, else its approval policy.)
   const collabNow = mode?.codex ? mode.now || meta.collab || 'default' : undefined
-  const shownMode = collabNow === 'plan' ? modeName('plan') : modeName((mode?.codex ? meta.mode : mode?.now || meta.mode) || 'default')
+  const agyModeNow = mode?.agy ? mode.now || meta.mode : undefined
+  const shownMode = collabNow === 'plan' ? modeName('plan') : mode?.agy ? (agyModeNow ? modeName(agyModeNow) : t('convo.modeTitle')) : modeName((mode?.codex ? meta.mode : mode?.now || meta.mode) || 'default')
   const known = meta.window && used <= meta.window ? meta.window : 0
   const windows = known ? [known] : WINDOWS.filter((w) => w >= used || w === WINDOWS[WINDOWS.length - 1])
   // (The gauge: of its window, else of the smaller it may be.)
@@ -2783,7 +2786,7 @@ function Runs({ meta, goal, active, mode, model, effort, quota, via, auth, onSid
   return (
     // (The focus gone elsewhere, as by Tab, while the model menu is open, the list read or not: closed.)
     <div className={'convo-runs' + (used > 0 ? ' has-ctx' : '')} ref={box} onBlur={(e) => (open === 'model' || open === 'effort' || open === 'mode') && !box.current?.contains(e.relatedTarget as Node | null) && setOpen(false)}>
-      {(mode?.now || meta.mode || (mode?.codex && meta.collab)) &&
+      {(mode?.now || meta.mode || (mode?.codex && meta.collab) || (mode?.agy && mode.onPick)) &&
         (mode?.onPick || mode?.busy ? (
           <button
             ref={modeBtn}
@@ -3014,7 +3017,7 @@ function Runs({ meta, goal, active, mode, model, effort, quota, via, auth, onSid
           ref={menu}
           onBlur={(e) => !box.current?.contains(e.relatedTarget as Node | null) && setOpen(false)} // (Tab out of it: closed)
         >
-          {(mode.codex ? CODEX_MODES : PICKED_MODES).map((m) => {
+          {(mode.codex ? CODEX_MODES : mode.agy ? AGY_MODES : PICKED_MODES).map((m) => {
             const now = mode.codex ? collabNow === m : (mode.now || meta.mode) === m
             return (
               <button

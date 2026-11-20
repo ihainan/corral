@@ -3007,7 +3007,7 @@ const en: Record<Key, string> = {
   'convo.modeDesc.codexDefault': 'Writes code and runs commands, asking first as its approval setting says',
   'convo.modeDesc.codexPlan': 'Reads and plans only, then asks whether to carry the plan out',
   'convo.mode.codexDefault': 'Default',
-  'convo.modeDesc.auto': 'Claude Code judges: what is safe it just does',
+  'convo.modeDesc.auto': 'Judges as it goes: what is safe it just does',
   'convo.modeDesc.bypassPermissions': 'Asks nothing, runs everything: use with care',
   'convo.mode.default': 'Ask first',
   'convo.mode.acceptEdits': 'Accept edits',

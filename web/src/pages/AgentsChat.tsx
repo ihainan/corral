@@ -1286,7 +1286,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   // (A Codex's: its collaboration mode, plan or default — Shift+Tab goes from one to the other; its log says it at once.)
   const modeWas = codex ? convo.meta?.collab : convo.meta?.mode
   if (modeNow && (modeNow.bind !== bindKey || modeWas !== modeNow.was || lastSeq > modeNow.last || convo.gen !== modeNow.gen)) setModeNow(null)
-  const canMode = bound && (!notClaude || codex) && convo.status === 'ready' && !!convo.meta && agent?.status !== 'blocked' && !agent?.other
+  const canMode = bound && (!notClaude || codex || agy) && convo.status === 'ready' && !!convo.meta && agent?.status !== 'blocked' && !agent?.other
   // To the mode picked: Shift+Tab on the host until its screen shows it
   // (one it was not started with is not there: it is left as it was).
   // (The log as it is when a switch is answered: what it says by then is
@@ -1649,7 +1649,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     [],
   )
   const field = useRef<HTMLTextAreaElement>(null)
-  const completion = useCompletion({ sessionId: sid, field, draft, setDraft, agent: row?.a.agent ?? convo.bind?.agent ?? (codex ? 'codex' : 'claude'), pane: herdr ? cur.pane : convo.bind?.pane })
+  const completion = useCompletion({ sessionId: sid, field, draft, setDraft, agent: row?.a.agent ?? convo.bind?.agent ?? (agy ? 'agy' : codex ? 'codex' : 'claude'), pane: herdr ? cur.pane : convo.bind?.pane })
   // The commands button: a "/" put where a command goes, for the list that opens on one (the
   // same as typed: typing on narrows it). With words in the box it goes in front of them, the
   // command they are then for; given up (pressed again, Escape, the box left) that "/" goes.
@@ -2705,7 +2705,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       composer={composer}
       onSendNow={canPress && !notClaude ? () => press('now') : undefined}
       sendNow={said?.what === 'now' && said.bind === bindKey ? said.text : undefined}
-      mode={{ now: modeNow?.bind === bindKey ? modeNow.mode : undefined, busy: modeBusy, onPick: canMode ? pickMode : undefined, codex }}
+      mode={{ now: modeNow?.bind === bindKey ? modeNow.mode : undefined, busy: modeBusy, onPick: canMode ? pickMode : undefined, codex, agy }}
       model={canModel || modelBusy ? { list: models?.bind === bindKey ? models.list : null, unread: models?.bind === bindKey && !!models.unread, byLog: models?.bind === bindKey && !!models.byLog, fresh: !!models?.at && Date.now() - models.at < 60000, busy: modelBusy, can: canModel, onOpen: openModels, onPick: pickModel, of: bindKey, ...(codex ? { efforts: CODEX_EFFORTS } : {}) } : undefined}
       effort={{ now: effortNow?.bind === bindKey ? effortNow.effort : undefined, busy: effortBusy, can: canEffort, onPick: pickEffort }}
       lead={lead}

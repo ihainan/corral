@@ -72,6 +72,8 @@ func turnLine(agent string, line []byte) bool {
 		return bytes.Contains(line, []byte(`"type":"user"`)) || bytes.Contains(line, []byte(`"type": "user"`))
 	case "codex":
 		return bytes.Contains(line, []byte(`"UserMessage"`)) || bytes.Contains(line, []byte(`"user_message"`))
+	case "agy":
+		return bytes.Contains(line, []byte(`"USER_INPUT"`))
 	}
 	return false
 }
@@ -377,7 +379,7 @@ func (s *Server) apiConversationTurns(w http.ResponseWriter, r *http.Request) {
 	}
 	log, agent, reason, gen, sub, from := main.log, main.agent, main.reason, main.gen, main.sub, main.from
 	main.mu.Unlock()
-	if log == "" || reason != "" || sub || (agent != "claude" && agent != "codex") {
+	if log == "" || reason != "" || sub || (agent != "claude" && agent != "codex" && agent != "agy") {
 		writeError(w, http.StatusConflict, "unsupported", "no log of Claude Code's or Codex's read here")
 		return
 	}

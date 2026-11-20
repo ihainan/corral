@@ -2525,6 +2525,12 @@ func (s *Server) readConvo(sess *term.Session, st *convoState) (more bool, err e
 				// shown meanwhile), taken in by a later request.
 				if st.agent == "claude" && !st.sub {
 					st.lookEarlierTitle(sess, st.offset+convoTitleSlack)
+				} else if ag, ok := st.parser.(*convo.Agy); ok && !st.sub {
+					if head, herr := c.ReadRange(st.log, 0, 16<<10); herr == nil {
+						tmp := convo.NewAgy()
+						tmp.Feed(head)
+						ag.SetTitle(tmp.Title())
+					}
 				}
 			}
 		}
@@ -3062,11 +3068,13 @@ case $gate in preply:*) cx=1 cxplan=1 gate=${gate#p} ;; esac
 oc=
 case $gate in ofree:*) oc=${gate#ofree:} gate=free ;; esac
 # ("afree:<sha256>": a message or command to agy — input box present and
-# unchanged; "areply:<sha256>": an answer to a tmux agy — input box absent
-# and screen digest unchanged.)
+# unchanged; "amode": input box present for Shift+Tab / Enter;
+# "areply:<sha256>": an answer to a tmux agy — input box absent and screen
+# digest unchanged.)
 agy=
 case $gate in
   afree:*) agy=${gate#afree:} gate=free ;;
+  amode) agy=present gate=free ;;
   areply:*) agy=reply gate=reply:${gate#areply:} ;;
 esac
 case $rd in ''|*[!0-9]*) rd=0;; esac
@@ -3105,6 +3113,7 @@ screen() {
   [ "$rd" -gt 0 ] || return 0
   sleep 0.7
   if [ "$mode" = tmux ]; then s=$(tmux -u capture-pane -p -t "$p" 2>/dev/null 9>&-) || exit 8
+  elif [ "$kind" = agy ]; then s=$(HERDR_SOCKET_PATH=$sock herdr pane read "$p" --source recent --lines 60 2>/dev/null 9>&- || HERDR_SOCKET_PATH=$sock herdr pane read "$p" --source visible 2>/dev/null 9>&-) || exit 8
   else s=$(HERDR_SOCKET_PATH=$sock herdr pane read "$p" --source visible 2>/dev/null 9>&-) || exit 8; fi
   printf '%s\n' "$s" | awk -v n="$rd" '{ a[NR] = $0 } NF { last = NR } END { for (i = last - n + 1; i <= last; i++) if (i > 0) print a[i] }'
 }
@@ -3306,6 +3315,10 @@ waiting() {
     fi
     st=waiting
     [ -n "$box" ] || return 0
+    if [ "$agy" = present ]; then
+      st=idle
+      return 0
+    fi
     command -v sha256sum >/dev/null 2>&1 || { st=title-unread; return 0; }
     d=$(printf '%s\n' "$box" | sha256sum)
     if [ "${d%% *}" = "$agy" ]; then st=idle; else st=draft; fi
@@ -3478,6 +3491,7 @@ if [ -n "$gate" ]; then
     # (Read first, on its own: a read that failed names no screen, whatever came of it.)
     lk=$(mktemp) || exit 10
     if [ "$mode" = tmux ]; then tmux -u capture-pane -p -e -t "$p" >"$lk" 2>/dev/null || { rm -f "$lk"; exit 10; }
+    elif [ "$kind" = agy ]; then { HERDR_SOCKET_PATH=$sock herdr pane read "$p" --source recent --lines 60 --format ansi >"$lk" 2>/dev/null || HERDR_SOCKET_PATH=$sock herdr pane read "$p" --source visible --format ansi >"$lk" 2>/dev/null; } || { rm -f "$lk"; exit 10; }
     else HERDR_SOCKET_PATH=$sock herdr pane read "$p" --source visible --format ansi >"$lk" 2>/dev/null || { rm -f "$lk"; exit 10; }; fi
     [ -s "$lk" ] || { rm -f "$lk"; exit 10; }
     d=$(cat "$lk" | LOOKDIGEST); rm -f "$lk"; lk=
@@ -4164,8 +4178,10 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	// the "look" gate, whoever's the screen is.)
 	agyAnswer := front.agent == "agy" && sess.Persistence == "tmux" && (what == "screen" || what == "reply")
 	agyCommand := front.agent == "agy" && what == "command" && (text == "/compact" || text == "/clear")
+	agyMode := front.agent == "agy" && what == "mode" && agyModes[b.Mode]
+	agyLook := front.agent == "agy" && (what == "sent_missing" || what == "sent_enter")
 	ocLive := (front.agent == "opencode" || front.agent == "codex" || front.agent == "agy") && (what == "panel_screen" || (what == "panel" && b.Live)) // (and Codex's / Agy's: terminal as it is, a key only on the screen shown)
-	if (front.agent == "codex" || front.agent == "opencode" || front.agent == "agy") && what != "send" && what != "interrupt" && !codexAnswer && !codexCommand && !codexModel && !codexLook && !ocLive && !agyAnswer && !agyCommand {
+	if (front.agent == "codex" || front.agent == "opencode" || front.agent == "agy") && what != "send" && what != "interrupt" && !codexAnswer && !codexCommand && !codexModel && !codexLook && !ocLive && !agyAnswer && !agyCommand && !agyMode && !agyLook {
 		reason = "unsupported"
 		writeError(w, http.StatusConflict, "unsupported", "not for this agent")
 		return
@@ -4228,9 +4244,9 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		return
 	}
 	if what == "sent_enter" {
-		if front.agent != "claude" && front.agent != "codex" {
+		if front.agent != "claude" && front.agent != "codex" && front.agent != "agy" {
 			outcome, reason = "refused", "not_claude"
-			writeError(w, http.StatusConflict, "not_claude", "only Claude Code's and Codex's input can be told apart")
+			writeError(w, http.StatusConflict, "not_claude", "only Claude Code's, Codex's and Antigravity's input can be told apart")
 			return
 		}
 		release := turn
@@ -4252,7 +4268,7 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		}
 		release := turn
 		turn = func() {} // (the screen read gives it back, once it has ended on the host)
-		s.convoPanelScreen(w, ctx, sess, b.Pane, socket, &outcome, &reason, release)
+		s.convoPanelScreen(w, ctx, sess, front.agent, b.Pane, socket, &outcome, &reason, release)
 		return
 	}
 	// (An answer goes one at a time to the pane, whichever connection of
@@ -4305,22 +4321,23 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 		}
 	case front.agent == "agy" && (what == "send" || what == "command"):
 		// (Antigravity CLI: verify its input box is present and empty before
-		// typing so messages and slash commands never land on a prompt or draft.)
+		// typing so messages and slash commands never land on a prompt or draft;
+		// ANSI colour distinguishes grey placeholders/suggestions from drafts.)
 		refuse := func(status int, code, msg string) {
 			ended.Done()
 			reason = code
 			writeError(w, status, code, msg)
 		}
 		sctx, scancel := context.WithTimeout(ctx, 10*time.Second)
-		res, err := sshx.Exec(sctx, sess.Client(), agyScreenCommand(sess.Persistence, b.Pane, socket), 512<<10, sshx.ExecOptions{})
+		res, err := sshx.Exec(sctx, sess.Client(), agyColorScreenCommand(sess.Persistence, b.Pane, socket), 512<<10, sshx.ExecOptions{})
 		scancel()
 		if err != nil {
 			refuse(http.StatusBadGateway, "no_screen", "the pane's screen could not be read")
 			return
 		}
-		shown, _, _ := screenOf(res.Out)
-		box, boxed := agyBoxDigest(res.Out)
-		switch err := agyIdleInput(shown); {
+		plain := sgr.ReplaceAllString(string(res.Out), "")
+		box, boxed := agyBoxDigest([]byte(plain))
+		switch err := agyIdleInputColor(string(res.Out)); {
 		case errors.Is(err, errAgyAsks):
 			refuse(http.StatusConflict, "agent_waiting", "it asks for an answer: answer it in the terminal first")
 			return
@@ -4634,8 +4651,47 @@ func (s *Server) apiConversationSubagent(w http.ResponseWriter, r *http.Request)
 	main.mu.Lock()
 	root, agentKind, reason, mainSID := main.log, main.agent, main.reason, main.sid
 	main.mu.Unlock()
-	if root == "" || reason != "" || (agentKind != "claude" && agentKind != "codex") || main.sub || !strings.HasSuffix(root, ".jsonl") {
+	if root == "" || reason != "" || (agentKind != "claude" && agentKind != "codex" && agentKind != "agy") || main.sub || !strings.HasSuffix(root, ".jsonl") {
 		writeError(w, http.StatusConflict, "not_located", "the conversation is not read yet")
+		return
+	}
+	// An Antigravity CLI subagent: <base>/brain/<sub-uuid>/.system_generated/logs/transcript_full.jsonl.
+	if agentKind == "agy" {
+		if !sessionUUID.MatchString(agent) {
+			writeError(w, http.StatusBadRequest, "bad_request", "bad pane or subagent")
+			return
+		}
+		bi := strings.LastIndex(root, "/brain/")
+		if bi < 0 {
+			writeError(w, http.StatusForbidden, "not_allowed", "not a subagent's log")
+			return
+		}
+		brain := root[:bi] + "/brain"
+		subDir := brain + "/" + agent
+		sysDir := subDir + "/.system_generated"
+		logsDir := sysDir + "/logs"
+		file := logsDir + "/transcript_full.jsonl"
+		err := s.withSFTP(r.Context(), sess, convoReadLimit, func(c *sftplite.Client) error {
+			for _, p := range []string{brain, subDir, sysDir, logsDir, file} {
+				fi, err := c.Lstat(p)
+				if err != nil {
+					return err
+				}
+				if fi.Mode()&fs.ModeSymlink != 0 || (p == file && !fi.Mode().IsRegular()) || (p != file && !fi.IsDir()) {
+					return errSubagentFile
+				}
+			}
+			return nil
+		})
+		if errors.Is(err, errSubagentFile) {
+			writeError(w, http.StatusForbidden, "not_allowed", "not a subagent's log")
+			return
+		}
+		if err != nil {
+			writeFileError(w, err)
+			return
+		}
+		s.subagentAnswer(w, r, sess, key+"\x00"+root+"\x00"+agent, "agy", file, agent, gen, rev, older)
 		return
 	}
 	// A Codex's subagent: its own log, beside the session's (codexSubagentLog).

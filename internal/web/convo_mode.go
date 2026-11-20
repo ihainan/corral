@@ -42,6 +42,9 @@ func modeOnScreen(screen string) string {
 // room: 0.167, 11-15), "default" where its input is there without it; ""
 // where its input is not told apart (a menu, a dialog in front of it).
 func modeOnScreenOf(agent, screen string) string {
+	if agent == "agy" {
+		return agyModeOnScreen(screen)
+	}
 	if agent == "codex" {
 		lines := strings.Split(strings.TrimRight(screen, "\n"), "\n")
 		_, foot, footed, ok := codexInputSpan(lines)
@@ -74,6 +77,9 @@ var codexPlanMode = regexp.MustCompile(`(?:^|\s{2,}|… )Plan mode(?: \(shift\+t
 // goes from one to the other).
 var codexModes = map[string]bool{"default": true, "plan": true}
 
+// agyModes: the execution modes Antigravity CLI cycles through on Shift+Tab.
+var agyModes = map[string]bool{"default": true, "acceptEdits": true, "plan": true, "auto": true}
+
 // modeFoot: the screen's last lines its mode and input box are looked for
 // in (the input's box, its mode line and a status line of a few lines).
 const modeFoot = 12
@@ -93,6 +99,8 @@ func (s *Server) convoModeTo(w http.ResponseWriter, ctx context.Context, sess *t
 	gate := "free"
 	if agent == "codex" {
 		gate = "cfree" // (whether Codex waits, its title says)
+	} else if agent == "agy" {
+		gate = "amode" // (agy's input box must be visible; Shift+Tab cycles mode)
 	}
 	var ended sync.WaitGroup
 	defer func() {
@@ -104,7 +112,11 @@ func (s *Server) convoModeTo(w http.ResponseWriter, ctx context.Context, sess *t
 	ctx, cancel := context.WithTimeout(ctx, 40*time.Second)
 	defer cancel()
 	ended.Add(1)
-	res, err := sshx.Exec(ctx, sess.Client(), convoScreenCommand(sess.Persistence, pane, socket), 256<<10, sshx.ExecOptions{Release: ended.Done})
+	scrCmd := convoScreenCommand(sess.Persistence, pane, socket)
+	if agent == "agy" {
+		scrCmd = agyScreenCommand(sess.Persistence, pane, socket)
+	}
+	res, err := sshx.Exec(ctx, sess.Client(), scrCmd, 256<<10, sshx.ExecOptions{Release: ended.Done})
 	if err != nil {
 		*reason = "no_screen"
 		writeError(w, http.StatusBadGateway, "no_screen", "the pane's screen could not be read")
@@ -164,9 +176,9 @@ func (s *Server) convoModeTo(w http.ResponseWriter, ctx context.Context, sess *t
 		// (A Codex's: one press goes to its other mode, its footer drawn a while
 		// after — longer in 0.169 —: read again for it before taking it for
 		// missing, or pressing again, back where it began.)
-		for j := 0; agent == "codex" && now == from && j < 6; j++ {
+		for j := 0; (agent == "codex" || agent == "agy") && now == from && j < 6; j++ {
 			time.Sleep(400 * time.Millisecond)
-			if out, err := sshx.Output(ctx, sess.Client(), convoScreenCommand(sess.Persistence, pane, socket), 256<<10); err == nil {
+			if out, err := sshx.Output(ctx, sess.Client(), scrCmd, 256<<10); err == nil {
 				now = modeOnScreenOf(agent, string(out))
 			}
 		}

@@ -89,6 +89,11 @@ func NewAgy() *Agy { return &Agy{} }
 
 func (c *Agy) Rev() int         { return c.rev }
 func (c *Agy) Title() string    { return c.title }
+func (c *Agy) SetTitle(t string) {
+	if c.title == "" && t != "" {
+		c.title = clip(clean(firstLineOf(t)), maxTitle)
+	}
+}
 func (c *Agy) Meta() Meta       { return c.meta }
 func (c *Agy) Trimmed() bool    { return c.trimmed }
 func (c *Agy) Tasks() []Task    { return nil }
@@ -231,6 +236,10 @@ func (c *Agy) plannerResponse(r agyRow) {
 		if eff := agyEffortOfModel(r.Model); eff != "" {
 			c.meta.Effort = eff
 		}
+		if w := agyModelWindow(r.Model); w > 0 {
+			c.meta.Window = w
+			c.meta.WindowBy = "model"
+		}
 	}
 	if ctx := r.InputTokens + r.CacheReadTokens; ctx > 0 {
 		c.meta.Context = ctx
@@ -320,6 +329,13 @@ func (c *Agy) applyGeneric(e *Entry, t *Tool, r agyRow) {
 	if t.Name == "AskUserQuestion" && len(t.Asks) > 0 {
 		if ans := agyParseAnswers(body, len(t.Asks)); len(ans) > 0 {
 			t.Answers = ans
+		}
+	}
+
+	// Subagent conversationId returned by invoke_subagent (mapped to Agent).
+	if t.Name == "Agent" && t.AgentID == "" {
+		if subID := agyParseSubagentID(body); subID != "" {
+			t.AgentID = subID
 		}
 	}
 
@@ -524,6 +540,9 @@ func (c *Agy) Prepend(other Parser) {
 	}
 	if c.meta.Effort == "" {
 		c.meta.Effort = o.meta.Effort
+	}
+	if c.meta.Window == 0 && o.meta.Window > 0 {
+		c.meta.Window, c.meta.WindowBy = o.meta.Window, o.meta.WindowBy
 	}
 	if c.meta.Context == 0 {
 		c.meta.Context = o.meta.Context
@@ -818,6 +837,31 @@ func agyEffortOfModel(model string) string {
 		}
 	}
 	return ""
+}
+
+func agyModelWindow(model string) int64 {
+	m := strings.ToLower(strings.TrimSpace(model))
+	switch {
+	case strings.HasPrefix(m, "gemini-"):
+		return 1_000_000
+	case strings.HasPrefix(m, "claude-opus-5"), strings.HasPrefix(m, "claude-sonnet-5"):
+		return 1_000_000
+	case strings.HasPrefix(m, "claude-"):
+		return 200_000
+	case strings.HasPrefix(m, "gpt-oss-"):
+		return 128_000
+	}
+	return 0
+}
+
+var agySubagentIDRe = regexp.MustCompile(`(?i)(?:conversation[_\s]?id\s*[:=]\s*"?|["\s(])([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})`)
+
+func agyParseSubagentID(body string) string {
+	m := agySubagentIDRe.FindStringSubmatch(body)
+	if m == nil {
+		return ""
+	}
+	return strings.ToLower(m[1])
 }
 
 // agyStripTimestamps drops leading "Created At: ..." and "Completed At: ..."

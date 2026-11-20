@@ -35,6 +35,9 @@ func TestAgyBasicTurnAndTools(t *testing.T) {
 	if meta.Model != "gemini-4-neon-high" || meta.Effort != "high" {
 		t.Fatalf("meta model/effort = %q/%q", meta.Model, meta.Effort)
 	}
+	if meta.Window != 1_000_000 || meta.WindowBy != "model" {
+		t.Fatalf("meta window = %d (%q), want 1000000 (model)", meta.Window, meta.WindowBy)
+	}
 	if meta.Context != 51500 {
 		t.Fatalf("meta context = %d, want 51500", meta.Context)
 	}
@@ -158,5 +161,22 @@ func TestAgyPrependPairsOrphans(t *testing.T) {
 	}
 	if newer.Meta().Model != "gemini-4-neon-medium" || newer.Meta().Effort != "medium" {
 		t.Fatalf("meta after Prepend = %+v", newer.Meta())
+	}
+}
+
+func TestAgySubagentIDAndSetTitle(t *testing.T) {
+	ag := NewAgy()
+	ag.SetTitle("Long session title")
+	if ag.Title() != "Long session title" {
+		t.Fatalf("SetTitle = %q", ag.Title())
+	}
+	subUUID := "11111111-2222-3333-4444-555555555555"
+	ag.Feed([]byte(strings.Join([]string{
+		`{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-11-20T09:00:00Z","tool_calls":[{"name":"invoke_subagent","args":{"TypeName":"research","Role":"Code Researcher","Prompt":"Survey repo"}}]}`,
+		`{"step_index":2,"source":"SYSTEM","type":"GENERIC","status":"DONE","created_at":"2026-11-20T09:00:01Z","content":"Created At: 2026-11-20T17:00:00+08:00\nSubagent launched with conversationId: ` + subUUID + `"}`,
+	}, "\n") + "\n"))
+	entries := ag.Since(0)
+	if len(entries) != 1 || entries[0].Parts[0].Tool.Name != "Agent" || entries[0].Parts[0].Tool.AgentID != subUUID {
+		t.Fatalf("subagent tool = %+v", entries[0].Parts[0].Tool)
 	}
 }

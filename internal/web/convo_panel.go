@@ -51,10 +51,14 @@ func panelOK(keys []string, digest string) bool {
 	return !panelSettles(keys[0]) || hexDigest.MatchString(digest)
 }
 
-func (s *Server) convoPanelScreen(w http.ResponseWriter, ctx context.Context, sess *term.Session, pane, socket string, outcome, reason *string, release func()) {
+func (s *Server) convoPanelScreen(w http.ResponseWriter, ctx context.Context, sess *term.Session, agent, pane, socket string, outcome, reason *string, release func()) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	res, err := sshx.Exec(ctx, sess.Client(), convoColorScreenCommand(sess.Persistence, pane, socket), 512<<10, sshx.ExecOptions{Release: release})
+	cmd := convoColorScreenCommand(sess.Persistence, pane, socket)
+	if agent == "agy" {
+		cmd = agyColorScreenCommand(sess.Persistence, pane, socket)
+	}
+	res, err := sshx.Exec(ctx, sess.Client(), cmd, 512<<10, sshx.ExecOptions{Release: release})
 	if err != nil {
 		// (Given up on by the page, a key having come: nothing to say of it, and
 		// nothing to note — it is no failure to read.)

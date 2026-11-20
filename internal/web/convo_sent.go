@@ -65,7 +65,11 @@ func (s *Server) sentMissing(w http.ResponseWriter, ctx context.Context, sess *t
 		writeJSON(w, http.StatusOK, map[string]any{"went": went})
 		return
 	}
-	res, err := sshx.Exec(ctx, sess.Client(), convoScreenCommand(sess.Persistence, pane, socket), 256<<10, sshx.ExecOptions{Release: release})
+	scrCmd := convoScreenCommand(sess.Persistence, pane, socket)
+	if agent == "agy" {
+		scrCmd = agyScreenCommand(sess.Persistence, pane, socket)
+	}
+	res, err := sshx.Exec(ctx, sess.Client(), scrCmd, 256<<10, sshx.ExecOptions{Release: release})
 	if err != nil {
 		*outcome, *reason = "unknown", "no_screen"
 		writeError(w, http.StatusBadGateway, "no_screen", "the pane's screen could not be read")
@@ -75,6 +79,8 @@ func (s *Server) sentMissing(w http.ResponseWriter, ctx context.Context, sess *t
 	waiting, known := inInput(screen, text)
 	if agent == "codex" {
 		waiting, known = codexInInput(screen, text)
+	} else if agent == "agy" {
+		waiting, known = agyInInput(screen, text)
 	}
 	// (Claude Code's: who has its input box now — a subagent's conversation
 	// shown in front, a list holding the keys — where a message typed then
@@ -120,7 +126,11 @@ func (s *Server) sentEnter(w http.ResponseWriter, ctx context.Context, sess *ter
 			release()
 		}()
 	}()
-	res, err := sshx.Exec(ctx, sess.Client(), convoScreenCommand(sess.Persistence, pane, socket), 256<<10, sshx.ExecOptions{Release: held.Done})
+	scrCmd := convoScreenCommand(sess.Persistence, pane, socket)
+	if agent == "agy" {
+		scrCmd = agyScreenCommand(sess.Persistence, pane, socket)
+	}
+	res, err := sshx.Exec(ctx, sess.Client(), scrCmd, 256<<10, sshx.ExecOptions{Release: held.Done})
 	if err != nil {
 		*outcome, *reason = "unknown", "no_screen"
 		writeError(w, http.StatusBadGateway, "no_screen", "the pane's screen could not be read")
@@ -129,6 +139,8 @@ func (s *Server) sentEnter(w http.ResponseWriter, ctx context.Context, sess *ter
 	whole := typedWhole
 	if agent == "codex" {
 		whole = func(screen, text string) bool { return codexTypedIn(screen, text, true) }
+	} else if agent == "agy" {
+		whole = agyTypedWhole
 	}
 	if !whole(string(res.Out), text) {
 		*outcome, *reason = "refused", "not_in_input"
@@ -143,6 +155,8 @@ func (s *Server) sentEnter(w http.ResponseWriter, ctx context.Context, sess *ter
 	freeGate := "enter" // (as "free", the box not brought back in front: the words in it are ours, where they are — agent-view.md)
 	if agent == "codex" {
 		freeGate = "cfree" // (whether Codex waits, its title says — an approval come meanwhile is not answered by this Enter: review502)
+	} else if agent == "agy" {
+		freeGate = "amode" // (agy's input box present: Enter goes there, never into a prompt)
 	}
 	_, err = sshx.Exec(ctx, sess.Client(), convoGatedCommand(freeGate, sess.Persistence, sess.TmuxSession, pane, socket, pid, start, sid, 0, enter, sendLines), sendOut,
 		sshx.ExecOptions{Stdin: strings.NewReader(""), Release: held.Done})
