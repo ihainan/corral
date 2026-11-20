@@ -31,6 +31,27 @@ func TestAgyIdleInputAndBoxPipeParity(t *testing.T) {
 		"? for shortcuts                                      auto · Gemini 4 Neon · high",
 	}, "\n")
 
+	idleAcceptEdits := strings.Join([]string{
+		"● Done.",
+		rule,
+		"> Accept-edits mode: file edits auto-appr...",
+		rule,
+		"? for shortcuts",
+		"accept-edits · Gemini 4 Neon · high",
+	}, "\n")
+
+	idleWrappedPlaceholder := strings.Join([]string{
+		"● Done.",
+		rule,
+		"> Auto mode: edits & safe commands auto-approved",
+		"  (shift+tab to cycle)",
+		rule,
+		"? for shortcuts",
+		"auto · Gemini 4 Neon · high",
+		"Update available",
+		"Press ? for help",
+	}, "\n")
+
 	withDraft := strings.Join([]string{
 		"● Done.",
 		rule,
@@ -69,6 +90,12 @@ func TestAgyIdleInputAndBoxPipeParity(t *testing.T) {
 	if err := agyIdleInput(idlePlaceholder); err != nil {
 		t.Fatalf("idlePlaceholder err = %v, want nil", err)
 	}
+	if err := agyIdleInput(idleAcceptEdits); err != nil {
+		t.Fatalf("idleAcceptEdits err = %v, want nil", err)
+	}
+	if err := agyIdleInput(idleWrappedPlaceholder); err != nil {
+		t.Fatalf("idleWrappedPlaceholder err = %v, want nil", err)
+	}
 	if err := agyIdleInput(withDraft); !errors.Is(err, errDraft) {
 		t.Fatalf("withDraft err = %v, want errDraft", err)
 	}
@@ -81,9 +108,11 @@ func TestAgyIdleInputAndBoxPipeParity(t *testing.T) {
 
 	// Verify Go agyBoxDigest and shell agyBoxPipe produce identical SHA-256 digests.
 	for name, scr := range map[string]string{
-		"idleEmpty":       idleEmpty,
-		"idlePlaceholder": idlePlaceholder,
-		"withDraft":       withDraft,
+		"idleEmpty":              idleEmpty,
+		"idlePlaceholder":        idlePlaceholder,
+		"idleAcceptEdits":        idleAcceptEdits,
+		"idleWrappedPlaceholder": idleWrappedPlaceholder,
+		"withDraft":              withDraft,
 	} {
 		want, ok := agyBoxDigest([]byte(scr))
 		if !ok {

@@ -3297,7 +3297,7 @@ waiting() {
   if [ -n "$agy" ]; then
     st=title-unread wf=
     if [ "$mode" = tmux ]; then ags=$(tmux -u capture-pane -p -t "$p" 2>/dev/null 9>&-) || return 0
-    else ags=$(HERDR_SOCKET_PATH=$sock herdr pane read "$p" --source visible 2>/dev/null 9>&-) || return 0; fi
+    else ags=$(HERDR_SOCKET_PATH=$sock herdr pane read "$p" --source recent --lines 60 2>/dev/null 9>&- || HERDR_SOCKET_PATH=$sock herdr pane read "$p" --source visible 2>/dev/null 9>&-) || return 0; fi
     [ -n "$ags" ] || return 0
     box=$(printf '%s\n' "$ags" | AGYBOXPIPE 2>/dev/null)
     if [ "$agy" = reply ]; then
@@ -4312,7 +4312,7 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 			writeError(w, status, code, msg)
 		}
 		sctx, scancel := context.WithTimeout(ctx, 10*time.Second)
-		res, err := sshx.Exec(sctx, sess.Client(), convoScreenCommand(sess.Persistence, b.Pane, socket), 512<<10, sshx.ExecOptions{})
+		res, err := sshx.Exec(sctx, sess.Client(), agyScreenCommand(sess.Persistence, b.Pane, socket), 512<<10, sshx.ExecOptions{})
 		scancel()
 		if err != nil {
 			refuse(http.StatusBadGateway, "no_screen", "the pane's screen could not be read")

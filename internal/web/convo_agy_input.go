@@ -6,7 +6,20 @@ import (
 	"errors"
 	"regexp"
 	"strings"
+
+	"github.com/ihainan/corral/internal/sshx"
 )
+
+// agyScreenCommand prints the live bottom of an agy pane. In herdr,
+// --source recent --lines 60 reads the live tail even when the user has
+// scrolled up in the pane (whereas --source visible returns the scrolled-up
+// viewport without the input box), falling back to --source visible if needed.
+func agyScreenCommand(mode, pane, socket string) string {
+	script := `PATH="$HOME/.local/bin:$HOME/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+if [ "$1" = tmux ]; then tmux -u capture-pane -p -t "$2" 2>/dev/null 9>&-
+else HERDR_SOCKET_PATH=$3 herdr pane read "$2" --source recent --lines 60 2>/dev/null 9>&- || HERDR_SOCKET_PATH=$3 herdr pane read "$2" --source visible 2>/dev/null 9>&-; fi`
+	return "sh -c " + sshx.QuoteShell(script) + " corral " + sshx.QuoteShell(mode) + " " + sshx.QuoteShell(pane) + " " + sshx.QuoteShell(socket)
+}
 
 // Antigravity CLI (agy) process and screen helpers.
 //
@@ -68,8 +81,9 @@ var agyAsking = []string{
 // agyRule: a horizontal rule drawn above and below agy's input box (≥12 box-drawing dashes).
 var agyRule = regexp.MustCompile(`^[ \t]*─{12,}[ \t]*$`)
 
-// agyPlaceholder: grey hint lines agy shows inside an empty input box.
-var agyPlaceholder = regexp.MustCompile(`^(?:Auto mode:|Accept edits:|Plan mode:|Type a message|Ask anything|Press |Send a message|\s*$)`)
+// agyPlaceholder: grey hint lines agy shows inside an empty input box across
+// its modes (auto, accept-edits, plan, default).
+var agyPlaceholder = regexp.MustCompile(`^(?:Auto mode:|Accept[- ]edits(?: mode)?:|Plan mode:|Manual mode:|Default mode:|Type a message|Ask anything|Press |Send a message|\s*$)`)
 
 // agyIdleInput checks that agy's input box (two horizontal rules enclosing
 // "> ...") is visible at the foot of the screen and holds no user draft.
@@ -91,14 +105,19 @@ func agyIdleInput(screen string) error {
 	if !strings.HasPrefix(first, ">") {
 		return errScreen
 	}
+	var parts []string
 	for i := top + 1; i < bot; i++ {
 		t := strings.TrimSpace(lines[i])
 		if i == top+1 {
 			t = strings.TrimSpace(strings.TrimPrefix(strings.TrimLeft(lines[i], " \t"), ">"))
 		}
-		if t != "" && !agyPlaceholder.MatchString(t) {
-			return errDraft
+		if t != "" {
+			parts = append(parts, t)
 		}
+	}
+	joined := strings.Join(parts, " ")
+	if joined != "" && !agyPlaceholder.MatchString(joined) {
+		return errDraft
 	}
 	return nil
 }
@@ -108,7 +127,7 @@ func agyIdleInput(screen string) error {
 func agyBoxBounds(lines []string) (top, bot int, ok bool) {
 	seen := 0
 	bot = -1
-	for i := len(lines) - 1; i >= 0 && seen < 4; i-- {
+	for i := len(lines) - 1; i >= 0 && seen < 8; i-- {
 		t := strings.TrimSpace(lines[i])
 		if t == "" {
 			continue
@@ -122,8 +141,9 @@ func agyBoxBounds(lines []string) (top, bot int, ok bool) {
 	if bot < 2 {
 		return 0, 0, false
 	}
-	// Search up to 12 lines above the bottom rule for the matching top rule.
-	for i := bot - 2; i >= 0 && bot-i <= 14; i-- {
+	// Search up to 38 lines above the bottom rule for the matching top rule
+	// (tall enough for multi-line pasted messages at gate_enter).
+	for i := bot - 2; i >= 0 && bot-i <= 40; i-- {
 		if agyRule.MatchString(lines[i]) {
 			if strings.HasPrefix(strings.TrimLeft(lines[i+1], " \t"), ">") {
 				return i, bot, true
@@ -173,7 +193,7 @@ function is_rule(s,  t) {
 { a[NR] = $0 }
 END {
   s = 0; bot = 0
-  for (i = NR; i >= 1 && s < 4; i--) {
+  for (i = NR; i >= 1 && s < 8; i--) {
     t = a[i]; gsub(/^[ 	]+/, "", t)
     if (t == "") continue
     s++
@@ -181,7 +201,7 @@ END {
   }
   if (bot < 3) exit
   top = 0
-  for (i = bot - 2; i >= 1 && bot - i <= 14; i--) {
+  for (i = bot - 2; i >= 1 && bot - i <= 40; i--) {
     if (is_rule(a[i])) {
       t = a[i + 1]; sub(/^[ 	]+/, "", t)
       if (substr(t, 1, 1) == ">") top = i
