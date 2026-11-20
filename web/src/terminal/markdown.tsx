@@ -40,7 +40,8 @@ export function breakable(text: string): ReactNode {
   out.push(text.slice(at))
   return out
 }
-// A link to a file on the host, as Codex writes them ("[a.go:12](/home/me/a.go:12)"):
+// A link to a file on the host, as Codex writes them ("[a.go:12](/home/me/a.go:12)")
+// or Antigravity CLI writes them ("[a.go](file:///home/me/a.go#L12)"):
 // its words, as a path to act on where the page can (null: as code, the
 // whole path in its title). Never drawn as the markdown it was written in.
 export const FileLinkOf = createContext<((label: string, target: string) => ReactNode | null) | undefined>(undefined)
@@ -49,6 +50,14 @@ function FileLink({ label, target, rel = false }: { label: string; target: strin
   const words = label.replace(/^`(.*)`$/, '$1') // ("[`a.go`](…)": the words, not their quotes)
   // (A relative one the page cannot act on — none of a file, or no session: its words, as written.)
   return draw?.(words, target) ?? (rel ? <>{inline(label)}</> : <code title={target}>{words}</code>)
+}
+function decodeFileTarget(target: string): string {
+  try {
+    const d = decodeURIComponent(target)
+    return /[\x00-\x1f\x7f]/.test(d) ? target : d
+  } catch {
+    return target
+  }
 }
 
 const fence = /^\s{0,3}(`{3,}|~{3,})\s*([^`\s]*)/
@@ -319,6 +328,8 @@ const spans: { re: RegExp; make: (m: RegExpExecArray, key: number) => ReactNode 
   { re: /\[([^\]]{1,500})\]\((https?:\/\/[^\s)]{1,2000})\)/g, make: (m, k) => link(m[2], <CodeSpanOf.Provider value={undefined}>{inline(m[1])}</CodeSpanOf.Provider>, k) },
   // (Its words may hold one level of [brackets] — a route's [id].ts; its path one level of (parens).)
   { re: /\[((?:[^[\]\n]|\[[^[\]\n]{0,200}\]){1,500})\]\((\/(?!\/)(?:[^\s()]|\([^\s()]{0,200}\)){1,2000})\)/g, make: (m, k) => <FileLink key={k} label={m[1]} target={m[2]} /> },
+  // (A file:// link to a file on the host, as Antigravity CLI writes them: "[a.go](file:///home/me/a.go#L10-L20)".)
+  { re: /\[((?:[^[\]\n]|\[[^[\]\n]{0,200}\]){1,500})\]\(file:\/\/(?:localhost)?(\/(?!\/)(?:[^\s()]|\([^\s()]{0,200}\)){1,2000})\)/gi, make: (m, k) => <FileLink key={k} label={m[1]} target={decodeFileTarget(m[2])} /> },
   // (A link to a file relative to the agent's folder, as Claude Code writes them: "[a.ts](src/a.ts#L42)". No scheme, no anchor alone.)
   { re: /\[((?:[^[\]\n]|\[[^[\]\n]{0,200}\]){1,500})\]\(((?![a-zA-Z][\w+.-]*:|#|\/)[^\s()<>]{1,1024})\)/g, make: (m, k) => <FileLink key={k} label={m[1]} target={m[2]} rel /> },
   { re: new RegExp(`https?://[^\\s<>()${wide}"']{0,2000}[^\\s<>()${wide}"'.,;:!?]`, 'g'), make: (m, k) => link(m[0], m[0], k) },
