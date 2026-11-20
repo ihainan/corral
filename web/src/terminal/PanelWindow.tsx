@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { api, ApiError, errorText } from '../api'
-import { t } from '../i18n'
+import { t, type I18nKey } from '../i18n'
 import { isCoarse } from '../components/ui'
 import { ansiLines, type AnsiRun } from './ansi'
+import { readNoticeDialog, type NoticeAction } from './noticeDialog'
 
 // A panel of Claude Code's own (/rewind, /resume, /mcp, /config…), which it
 // draws on its screen and tells its log nothing of till it is shut: the
@@ -35,6 +36,31 @@ function keyOf(e: React.KeyboardEvent): string | null {
 const TOUCH_KEYS: [string, string][] = [['up', '↑'], ['down', '↓'], ['left', '←'], ['right', '→'], ['tab', 'Tab'], ['space', 'Space'], ['enter', 'Enter'], ['esc', 'Esc']]
 const KEY_WORD: Record<string, string> = Object.fromEntries([...TOUCH_KEYS, ['shift+tab', 'Shift+Tab'], ['backspace', 'Backspace']])
 const keyWord = (k: string) => KEY_WORD[k] ?? k
+const NOTICE_LABELS: Record<string, I18nKey> = {
+  continue: 'notice.act.continue',
+  confirm: 'notice.act.confirm',
+  cancel: 'notice.act.cancel',
+  close: 'notice.act.close',
+  'stay in auto mode': 'notice.act.stayAuto',
+  'leave for accept edits mode and stop': 'notice.act.leaveAuto',
+}
+const noticeLabel = (a: NoticeAction) => {
+  const k = NOTICE_LABELS[a.hint.toLowerCase()]
+  return k ? t(k) : a.hint.charAt(0).toUpperCase() + a.hint.slice(1)
+}
+const URL_PART = /(https?:\/\/[^\s<>()]+[^\s<>().,;:!?'"])/g
+function renderLinked(text: string) {
+  const parts = text.split(URL_PART)
+  return parts.map((p, i) =>
+    i % 2 === 1 ? (
+      <a key={i} href={p} target="_blank" rel="noopener noreferrer">
+        {p}
+      </a>
+    ) : (
+      <Fragment key={i}>{p}</Fragment>
+    ),
+  )
+}
 // (How long a key's "sent" stays said; a screen not read for longer than STALE, while it is looked at, is said to be maybe old.)
 const SAID_FOR = 2000
 const STALE = 3000
@@ -58,11 +84,17 @@ const runStyle = (r: AnsiRun): React.CSSProperties => {
 // (letters: a letter, as Enter or a number, only on the screen shown — Codex's approvals answer to "y", "p".)
 // (onLeave: where F6 takes the focus from its screen — the dock's tabs; none: its own head's first button.)
 // (who: the program the keys go to, as named to the person ("Claude Code"); onComposer: the message box, gone back to.)
-export type PanelLive = { onClose?: () => void; onFull?: () => void; note?: string; letters?: boolean; onLeave?: () => void; who?: string; onComposer?: () => void }
-export function PanelWindow({ sid, active, press, onSettled, toast, live }: { live?: PanelLive; sid: string; active: boolean; press: () => Record<string, unknown>; onSettled: () => void; toast: (s: string, bad?: boolean) => void }) {
+export type PanelLive = { onClose?: () => void; onFull?: () => void; note?: string; letters?: boolean; onLeave?: () => void; who?: string; onComposer?: () => void; canNotice?: boolean; onNoticeSent?: () => void }
+export function PanelWindow({ sid, active, press, onSettled, toast, live, onFull }: { live?: PanelLive; sid: string; active: boolean; press: () => Record<string, unknown>; onSettled: () => void; toast: (s: string, bad?: boolean) => void; onFull?: () => void }) {
   const [screen, setScreen] = useState({ text: '', digest: '' })
+  const [loaded, setLoaded] = useState(false)
+  const [pumping, setPumping] = useState(false)
+  const [rawView, setRawView] = useState(false)
+  const [noticeDismissed, setNoticeDismissed] = useState(false)
   const [lost, setLost] = useState(false)
   const [said, setSaid] = useState('')
+  const allowNotice = !live || !!live.canNotice
+  const fullAction = live?.onFull ?? onFull
   // What became of the last key, said by the keys (a key sent said for a moment;
   // one not sent, or not taken, till the next) — set only when it changes, so
   // that it is said once to a screen reader.
@@ -85,6 +117,13 @@ export function PanelWindow({ sid, active, press, onSettled, toast, live }: { li
   letters.current = !!live?.letters
   const settlesHere = (k: string) => settles(k) || (letters.current && /^[A-Za-z0-9._/]$/.test(k))
   isLive.current = !!live
+  const allowNoticeNow = useRef(allowNotice)
+  allowNoticeNow.current = allowNotice
+  const rawViewNow = useRef(rawView)
+  rawViewNow.current = rawView
+  const hasNoticeNow = useRef(false)
+  const onNoticeSentNow = useRef(live?.onNoticeSent)
+  onNoticeSentNow.current = live?.onNoticeSent
   const activeNow = useRef(active)
   activeNow.current = active
   const pressNow = useRef(press)
@@ -107,13 +146,17 @@ export function PanelWindow({ sid, active, press, onSettled, toast, live }: { li
       a.stale = false
       a.fails = 0
       a.readAt = Date.now()
+      setLoaded(true)
       setLost(false)
       setScreen({ text: r.text, digest: (isLive.current ? r.look : r.digest) ?? r.digest })
     } catch (e) {
       // (Given up for a key, or another of its presses under way: no failure to read.)
       if (look.signal.aborted || (e instanceof ApiError && e.code === 'busy')) return
       a.fails++
-      if (a.alive && a.fails >= FAILS) setLost(true)
+      if (a.alive && a.fails >= FAILS) {
+        setLoaded(true)
+        setLost(true)
+      }
     } finally {
       a.reading = false
       if (a.look === look) a.look = null
@@ -124,6 +167,7 @@ export function PanelWindow({ sid, active, press, onSettled, toast, live }: { li
     const a = at.current
     if (a.pumping) return
     a.pumping = true
+    setPumping(true)
     try {
       // (Till none is left: one pressed during the read after the last is sent too.)
       while (a.alive && (a.queue.length || a.stale)) {
@@ -133,6 +177,7 @@ export function PanelWindow({ sid, active, press, onSettled, toast, live }: { li
           continue
         }
         const { k, digest } = a.queue.shift()!
+        const fromNotice = allowNoticeNow.current && !rawViewNow.current && hasNoticeNow.current
         if (k === 'esc') {
           if (Date.now() - a.escDone < ESC_AGAIN) continue // (the last may have shut it, however long that took to go)
           a.escGoing = true
@@ -148,8 +193,17 @@ export function PanelWindow({ sid, active, press, onSettled, toast, live }: { li
           if (a.alive && typeof r?.text === 'string' && typeof r.digest === 'string') {
             a.stale = false
             a.readAt = Date.now()
+            setLoaded(true)
             setLost(false)
             setScreen({ text: r.text, digest: (isLive.current ? r.look : r.digest) ?? r.digest })
+            if (fromNotice) {
+              const nextPlain = ansiLines(r.text).map((runs) => runs.map((x) => x.text).join(''))
+              if (!readNoticeDialog(nextPlain)) {
+                setNoticeDismissed(true)
+                onNoticeSentNow.current?.()
+                onSettledNow.current()
+              }
+            }
           }
           if (k === 'esc' || settlesHere(k)) setTimeout(() => onSettledNow.current(), 700)
         } catch (e) {
@@ -158,8 +212,14 @@ export function PanelWindow({ sid, active, press, onSettled, toast, live }: { li
           if (!a.alive) {
             /* (gone: nothing to say it on) */
           } else if (e instanceof ApiError && e.code === 'screen_changed') sayKey(t('panel.changed'), true)
-          else if (e instanceof ApiError && e.code === 'no_dialog') (sayKey('', false), onSettledNow.current())
-          else {
+          else if (e instanceof ApiError && e.code === 'no_dialog') {
+            sayKey('', false)
+            if (fromNotice) {
+              setNoticeDismissed(true)
+              onNoticeSentNow.current?.()
+            }
+            onSettledNow.current()
+          } else {
             const why = e instanceof ApiError ? errorText(e) : t('panel.failed')
             sayKey(why, true)
             if (!isLive.current) toastNow.current(why, true) // (a panel of its own: as before, too)
@@ -173,6 +233,7 @@ export function PanelWindow({ sid, active, press, onSettled, toast, live }: { li
       }
     } finally {
       a.pumping = false
+      if (a.alive) setPumping(false)
     }
   }, [sid, read, sayKey])
 
@@ -212,7 +273,7 @@ export function PanelWindow({ sid, active, press, onSettled, toast, live }: { li
     // does not: what is being typed in the box goes on going there, a key in
     // the terminal only once the person has gone to it.)
     if (active && !isCoarse() && !isLive.current) box.current?.focus({ preventScroll: true })
-  }, [active])
+  }, [active, loaded, rawView])
 
   // Whether what is shown may be old: not read for STALE while it is looked at
   // and no key is going or waiting (the looks wait for those) — counted from
@@ -238,13 +299,25 @@ export function PanelWindow({ sid, active, press, onSettled, toast, live }: { li
       clearInterval(i)
     }
   }, [active])
-  const busy = at.current.pumping || at.current.queue.length > 0
+  const busy = pumping || at.current.pumping || at.current.queue.length > 0
   if (busy) seenSince.current = Math.max(seenSince.current, Date.now()) // (a key going: counted again from when it has gone)
   const readAt = at.current.readAt
   const oldFor = readAt ? now - Math.max(readAt, seenSince.current) : 0
   const old = !!live && active && !lost && !busy && !!readAt && !document.hidden && oldFor > STALE ? Math.round((now - readAt) / 1000) : 0
 
   const lines = useMemo(() => ansiLines(screen.text), [screen.text])
+  const notice = useMemo(
+    () => (allowNotice && loaded ? readNoticeDialog(lines.map((runs) => runs.map((r) => r.text).join(''))) : null),
+    [allowNotice, loaded, lines],
+  )
+  hasNoticeNow.current = !!notice
+  const noticeTitle = notice?.title ?? ''
+  useEffect(() => {
+    if (noticeTitle) {
+      setRawView(false)
+      setNoticeDismissed(false)
+    }
+  }, [noticeTitle])
   // (A screen wider than its room: a fade on the side more of it is on.)
   const view = useRef<HTMLDivElement>(null)
   const [more, setMore] = useState({ left: false, right: false })
@@ -255,14 +328,14 @@ export function PanelWindow({ sid, active, press, onSettled, toast, live }: { li
     const right = el.scrollWidth - el.clientWidth - el.scrollLeft > 1
     setMore((m) => (m.left === left && m.right === right ? m : { left, right }))
   }, [])
-  useLayoutEffect(measure, [lines, measure])
+  useLayoutEffect(measure, [lines, measure, loaded, rawView, noticeTitle])
   useEffect(() => {
     const el = box.current
     if (!el || typeof ResizeObserver === 'undefined') return
     const ro = new ResizeObserver(measure)
     ro.observe(el)
     return () => ro.disconnect()
-  }, [measure])
+  }, [measure, loaded, rawView, noticeTitle])
   // (What a key goes with: what has been drawn, not what was read.)
   useLayoutEffect(() => {
     at.current.shown = screen.digest
@@ -272,7 +345,74 @@ export function PanelWindow({ sid, active, press, onSettled, toast, live }: { li
   useLayoutEffect(() => {
     const el = box.current
     if (el && pinned.current) el.scrollTop = el.scrollHeight
-  }, [lines])
+  }, [lines, loaded, rawView, noticeTitle])
+
+  if (allowNotice && noticeDismissed && !notice) {
+    return (
+      <div className="convo-notice" role="status">
+        <p className="convo-notice-clip">{t('notice.sent')}</p>
+      </div>
+    )
+  }
+  if (allowNotice && !loaded && !lost) {
+    return (
+      <div className="convo-notice" role="status">
+        <p className="convo-notice-clip">{t('notice.loading')}</p>
+      </div>
+    )
+  }
+  if (allowNotice && notice && !rawView) {
+    const primaryIdx = notice.actions.findIndex((a) => a.key !== 'esc' && !a.disabled)
+    return (
+      <div className="convo-notice" role="group" aria-label={notice.title}>
+        <div className="convo-notice-head">
+          <span className="convo-notice-tag">{t('notice.tag')}</span>
+          <div className="convo-notice-links">
+            <button type="button" className="link-btn convo-notice-link" onClick={() => setRawView(true)}>
+              {t('notice.showTerminal')}
+            </button>
+            {fullAction && (
+              <button type="button" className="link-btn convo-notice-link" onClick={fullAction}>
+                {t('panel.full')}
+              </button>
+            )}
+          </div>
+        </div>
+        <h3 className="convo-notice-title">{notice.title}</h3>
+        {notice.paragraphs.length > 0 && (
+          <div className="convo-notice-body">
+            {notice.paragraphs.map((p, i) => (
+              <p key={i}>{renderLinked(p)}</p>
+            ))}
+          </div>
+        )}
+        {notice.clipped && <p className="convo-notice-clip">{t('notice.clipped')}</p>}
+        <div className="convo-notice-acts">
+          {notice.actions.map((a, i) => (
+            <button
+              key={a.key}
+              type="button"
+              className={(i === primaryIdx ? 'btn btn-primary' : 'btn btn-ghost') + ' convo-notice-act'}
+              disabled={busy || !!a.disabled || !screen.digest}
+              title={a.disabled ? t('notice.tallerWindow') : undefined}
+              onClick={() => send(a.key)}
+            >
+              <span>{noticeLabel(a)}</span>
+              <span className="convo-notice-key" aria-hidden="true">
+                {keyWord(a.key)}
+              </span>
+            </button>
+          ))}
+        </div>
+        {notice.actions.some((a) => a.disabled) && <p className="convo-notice-clip">{t('notice.tallerWindow')}</p>}
+        {(lost || keySaid?.text) && (
+          <p className={'convo-notice-stat' + (keySaid?.bad ? ' is-bad' : '')} role="status">
+            {lost ? t('panel.lost') : keySaid?.text}
+          </p>
+        )}
+      </div>
+    )
+  }
 
   const who = live?.who || t('panel.whoTerminal')
   // (The keys as buttons: on a touch screen, and by a live screen everywhere — an
@@ -289,22 +429,29 @@ export function PanelWindow({ sid, active, press, onSettled, toast, live }: { li
         {/* (Live: one short line — what a click does, and where words go; the rest said once its keys are taken.) */}
         {!live && <span className="convo-panelwin-title">{t('panel.title')}</span>}
         {!isCoarse() && <span className="convo-panelwin-hint">{t(live ? 'panel.liveHint' : 'panel.hint')}</span>}
-        {live?.onFull && (
-          <button type="button" className="link-btn convo-panelwin-close" onClick={live.onFull}>
-            {t('panel.full')}
-          </button>
-        )}
-        {live ? (
-          live.onClose && (
-            <button type="button" className="link-btn convo-panelwin-close" onClick={live.onClose}>
-              {t('common.close')}
+        <div className="convo-panelwin-head-acts">
+          {allowNotice && notice && rawView && (
+            <button type="button" className="link-btn convo-panelwin-close" onClick={() => setRawView(false)}>
+              {t('notice.backToCard')}
             </button>
-          )
-        ) : (
-          <button type="button" className="link-btn convo-panelwin-close" onClick={() => send('esc')}>
-            {t('agents.closeDialog')}
-          </button>
-        )}
+          )}
+          {fullAction && (
+            <button type="button" className="link-btn convo-panelwin-close" onClick={fullAction}>
+              {t('panel.full')}
+            </button>
+          )}
+          {live ? (
+            live.onClose && (
+              <button type="button" className="link-btn convo-panelwin-close" onClick={live.onClose}>
+                {t('common.close')}
+              </button>
+            )
+          ) : (
+            <button type="button" className="link-btn convo-panelwin-close" onClick={() => send('esc')}>
+              {t('agents.closeDialog')}
+            </button>
+          )}
+        </div>
       </div>
       {live?.note && <p className="convo-panelwin-note">{live.note}</p>}
       {/* (Its keys taken: said plainly, with the ways out — F6, or back to the message box.) */}

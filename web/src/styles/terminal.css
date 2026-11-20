@@ -2023,7 +2023,26 @@ button.convo-queue-row.is-note:last-child { border-radius: 0 0 var(--r-lg) var(-
 .convo-panelwin-head { display: flex; align-items: baseline; gap: 10px; min-width: 0; padding: 8px 12px; font-size: 13px; color: var(--term-fg-2); }
 .convo-panelwin-title { flex: none; color: var(--term-fg); font-weight: 500; }
 .convo-panelwin-hint { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--term-fg-3); }
-.term-root .convo-panelwin-close { flex: none; margin-left: auto; color: var(--term-fg-2); font-size: 13px; }
+.convo-panelwin-head-acts { flex: none; margin-left: auto; display: flex; align-items: baseline; gap: 10px; }
+.term-root .convo-panelwin-close { flex: none; color: var(--term-fg-2); font-size: 13px; }
+/* Notice / confirmation dialog read off a Claude Code terminal screen (noticeDialog.ts). */
+.convo-notice { display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; border: 1px solid var(--term-line); border-radius: var(--r-lg); background: var(--term-bg); font-family: var(--font-ui); animation: fade 0.1s var(--ease); }
+.convo-notice-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 12px; }
+.convo-notice-tag { font-size: var(--fs-note); line-height: var(--lh-note); font-weight: 500; color: var(--term-fg-3); }
+.convo-notice-links { display: flex; align-items: center; gap: 12px; }
+.term-root .convo-notice-link { font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-2); }
+.convo-notice-title { margin: 0; font-size: var(--fs-h3); line-height: var(--lh-h3); font-weight: 600; color: var(--term-fg); overflow-wrap: anywhere; }
+.convo-notice-body { display: flex; flex-direction: column; gap: 6px; max-height: min(40vh, 320px); overflow-y: auto; overscroll-behavior: contain; }
+.convo-notice-body p { margin: 0; font-size: var(--fs-sub); line-height: var(--lh-sub); color: var(--term-fg-2); overflow-wrap: anywhere; }
+.convo-notice-body a { color: var(--term-accent-text); text-decoration: underline; word-break: break-all; }
+.convo-notice-clip { margin: 0; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-3); }
+.convo-notice-acts { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding-top: 4px; }
+.convo-notice-act { display: inline-flex; align-items: center; gap: 6px; }
+.convo-notice-act.btn-ghost { border: 1px solid var(--term-line); color: var(--term-fg); }
+.convo-notice-key { font-size: var(--fs-note); line-height: var(--lh-note); opacity: 0.72; }
+.convo-notice-stat { margin: 0; font-size: var(--fs-note); line-height: var(--lh-note); color: var(--term-fg-2); }
+.convo-notice-stat.is-bad { color: var(--term-warn-text); }
+@media (pointer: coarse) { .convo-notice-act { min-height: 40px; padding: 8px 14px; } }
 .convo-panelwin-screen { margin: 0; padding: 10px 12px; max-height: min(56vh, 520px); overflow: auto; background: var(--panel-bg); color: var(--panel-fg); font-family: var(--font-mono, ui-monospace, Menlo, Consolas, monospace); font-size: 12.5px; line-height: 1.35; white-space: pre; outline: none; }
 .convo-panelwin-screen:focus-visible { box-shadow: inset 0 0 0 2px var(--term-accent-text); }
 /* (A live screen: its keys taken shown on any focus, a click's too — not the keyboard's alone.) */

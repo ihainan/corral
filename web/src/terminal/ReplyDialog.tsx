@@ -822,7 +822,20 @@ export function InlineReply({ target, onLoaded, resizedAt, active = true, held, 
     return (
       <div className="convo-ask-live">
         {hookHint}
-        <PanelWindow key={target.key} sid={target.live.sid} press={target.live.press} active={active} onSettled={() => {}} toast={toast} live={{ note: t('panel.waiting'), onFull: showTerminal }} />
+        <PanelWindow
+          key={target.key}
+          sid={target.live.sid}
+          press={target.live.press}
+          active={active}
+          onSettled={() => void load()}
+          toast={toast}
+          live={{
+            note: t('panel.waiting'),
+            onFull: showTerminal,
+            canNotice: (target.agent ?? 'claude') === 'claude',
+            onNoticeSent: () => setSent(answered.current || 'notice'),
+          }}
+        />
       </div>
     )
   }

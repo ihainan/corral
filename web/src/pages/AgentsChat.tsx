@@ -2221,7 +2221,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       )}
       {/* (Something written while it works: what will become of it, said while it is typed — the placeholder that said so is gone by then.) */}
       {!blocked && draft.trim() && agent?.status === 'working' && <p className="agents-chat-why is-note">{t(steers ? 'convo.steerNote' : 'convo.queueNote')}</p>}
-      {panelOpen && <PanelWindow key={bindKey} sid={sid} active={active} press={pressBody} onSettled={convo.refresh} toast={toast} />}
+      {panelOpen && <PanelWindow key={bindKey} sid={sid} active={active} press={pressBody} onSettled={convo.refresh} onFull={() => openTerminal()} toast={toast} />}
       {!panelOpen && !waits && liveOf === bindKey && <PanelWindow key={'live ' + bindKey} sid={sid} active={active} press={pressBody} onSettled={convo.refresh} toast={toast} live={{ onClose: () => setLiveOf(null), onFull: () => openTerminal(), letters: convo.bind?.agent === 'codex' }} />}
       <div className="composer-box">
         <AttachStrip
