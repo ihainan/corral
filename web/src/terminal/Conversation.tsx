@@ -2493,11 +2493,18 @@ function QueuedNote({ q }: { q: ConvoQueued }) {
   )
 }
 
-// A model's id as people call it: claude-opus-5-5 is Opus 5.5.
+// A model's id as people call it: claude-opus-5-5 is Opus 5.5;
+// agy's ids carry their effort suffix (gemini-4-neon-high -> Gemini 4 Neon).
 export function modelName(id: string): string {
-  const m = /^claude-(opus|sonnet|haiku|fable)-(\d+)(?:-(\d{1,2}))?(?:-\d{8})?(?:\[.*\])?$/.exec(id)
-  if (!m) return id
-  return m[1][0].toUpperCase() + m[1].slice(1) + ' ' + m[2] + (m[3] ? '.' + m[3] : '')
+  const base = id.replace(/-(?:low|medium|high|xhigh|max)$/i, '')
+  const m = /^claude-(opus|sonnet|haiku|fable)-(\d+)(?:-(\d{1,2}))?(?:-\d{8})?(?:\[.*\])?$/.exec(base)
+  if (m) return m[1][0].toUpperCase() + m[1].slice(1) + ' ' + m[2] + (m[3] ? '.' + m[3] : '')
+  if (id === 'gemini-pro-orchestrator-neon') return 'Orchestrator (Neon)'
+  if (id === 'gemini-pro-orchestrator-g1-pro') return 'Orchestrator (Argon)'
+  if (/^gpt-oss-(\d+b)$/i.test(base)) return 'GPT-OSS ' + base.slice(8).toUpperCase()
+  const gm = /^gemini-(\d+(?:\.\d+)?)-([a-z]+)$/i.exec(base)
+  if (gm) return 'Gemini ' + gm[1] + ' ' + gm[2][0].toUpperCase() + gm[2].slice(1)
+  return id
 }
 
 // A key for a dialog open over the page (or already taken): not the page's.
@@ -2550,7 +2557,7 @@ const MODE_ICON: Record<(typeof PICKED_MODES)[number], typeof Info> = { default:
 
 // Switching the model, from a menu of what Claude Code's picker offers
 // (list: null while it is read), for the session only.
-export type ModelOpt = { label: string; desc?: string; current?: boolean }
+export type ModelOpt = { label: string; desc?: string; current?: boolean; efforts?: string[] }
 // (fresh: the list read a moment ago, its "current" to go by; can: it may be switched now.)
 // (efforts: a Codex's, chosen with its model, its picker's second step.)
 // A Codex's efforts as its picker names them (its second step), their
@@ -2568,7 +2575,7 @@ export const CODEX_EFFORTS = Object.keys(EFFORT_WORDS)
 // that never arrives leaves the menu saying it is still reading, for as
 // long as it is left open.
 // (byLog: the list is one the gateway kept, with no word of which it is on — marked by the log's model, see rowByLog.)
-export type ModelSwitch = { list: ModelOpt[] | null; fresh: boolean; busy: boolean; can: boolean; unread?: boolean; byLog?: boolean; onOpen: () => void; onPick: (label: string, effort?: string) => void; efforts?: string[]; of?: string }
+export type ModelSwitch = { list: ModelOpt[] | null; now?: string; fresh: boolean; busy: boolean; can: boolean; unread?: boolean; byLog?: boolean; onOpen: () => void; onPick: (label: string, effort?: string) => void; efforts?: string[]; of?: string }
 
 // How hard the agent is asked to think (Claude Code's /effort), for the
 // session only. The levels are its slider's, in its order.
@@ -2744,23 +2751,36 @@ function Runs({ meta, goal, active, mode, model, effort, quota, via, auth, onSid
   // agent must not already choose the two together (a Codex's picker
   // does: its efforts hang under each model instead).
   const merged = !!model?.can && !!effort?.can && !model?.efforts
+  const shownModel = model?.now || meta.model
+  const shownEffort = effort?.now !== undefined ? effort.now : meta.effort
   // (The one it is on, as the rows tick it; and how hard it thinks now.)
-  const nowOf = (o: ModelOpt) => (model!.byLog ? o.label === rowByLog(model!.list!, meta.model) : model!.fresh && model!.list!.some((x) => x.current) ? !!o.current : modelName(meta.model!).toLowerCase() === o.label.toLowerCase())
-  const nowRow = model?.list && meta.model ? model.list.find(nowOf) : undefined
-  const nowEffort = merged ? effort!.now || meta.effort : meta.effort?.toLowerCase()
+  const nowOf = (o: ModelOpt) => (model!.byLog ? o.label === rowByLog(model!.list!, shownModel) : model!.fresh && model!.list!.some((x) => x.current) ? !!o.current : modelName(shownModel!).toLowerCase() === o.label.toLowerCase())
+  const nowRow = model?.list && shownModel ? model.list.find(nowOf) : undefined
+  const nowEffort = merged ? shownEffort : meta.effort?.toLowerCase()
   const toModel = stage.model ?? nowRow?.label
-  const toEffort = stage.effort ?? (merged ? nowEffort : undefined)
   const toRow = model?.list?.find((o) => o.label === toModel)
+  const hasPerModelEfforts = !!model?.list?.some((o) => o.efforts?.length)
+  const mergedEfforts: readonly string[] = hasPerModelEfforts ? (toRow?.efforts ?? []) : EFFORTS
+  const rawToEffort = stage.effort ?? (merged ? nowEffort : undefined)
+  const toEffort =
+    merged && hasPerModelEfforts
+      ? mergedEfforts.length === 0
+        ? undefined
+        : rawToEffort && mergedEfforts.includes(rawToEffort)
+          ? rawToEffort
+          : mergedEfforts[mergedEfforts.length - 1]
+      : rawToEffort
   const modelMoved = !!toModel && toModel !== nowRow?.label
-  const effortMoved = !!stage.effort && (model?.efforts ? effortWord(stage.effort) !== nowEffort || modelMoved : stage.effort !== nowEffort)
+  const effortMoved = !!toEffort && (model?.efforts ? !!stage.effort && (effortWord(stage.effort) !== nowEffort || modelMoved) : hasPerModelEfforts ? toEffort !== nowEffort : !!stage.effort && stage.effort !== nowEffort)
   const toSaid = [toRow ? named(toRow)[0] : toModel, toEffort ? (model?.efforts ? t(EFFORT_WORDS[toEffort] ?? 'convo.effort') : effortName(toEffort)) : ''].filter(Boolean).join(' · ')
   // Taken: the model and the effort in one switch (Claude Code's picker takes both
-  // with one "s", a Codex's with its model); the effort alone, with the model it is
-  // on; the model alone, as before (a line typed, where that is known to work).
+  // with one "s", a Codex's with its model, agy's via /model <id> or /effort <level>);
+  // the effort alone, with the model it is on; the model alone, as before.
   mergedNow.current = merged
   moveEffort.current = (d) => {
-    const i = Math.max(0, EFFORTS.indexOf((toEffort ?? 'medium') as (typeof EFFORTS)[number]))
-    setStage((st) => ({ ...st, effort: EFFORTS[Math.min(EFFORTS.length - 1, Math.max(0, i + d))] }))
+    if (!mergedEfforts.length) return
+    const i = Math.max(0, mergedEfforts.indexOf(toEffort ?? mergedEfforts[0]))
+    setStage((st) => ({ ...st, effort: mergedEfforts[Math.min(mergedEfforts.length - 1, Math.max(0, i + d))] }))
   }
   const apply = () => {
     if (!model || model.busy || (!modelMoved && !effortMoved)) return
@@ -2768,6 +2788,8 @@ function Runs({ meta, goal, active, mode, model, effort, quota, via, auth, onSid
     modelBtn.current?.focus()
     setGoing(toSaid)
     if (model.efforts) model.onPick(toModel!, stage.effort)
+    else if (mode?.agy && !modelMoved && effortMoved && toEffort) effort?.onPick(toEffort)
+    else if (mode?.agy && toModel) model.onPick(toModel, toEffort)
     else if (effortMoved && toModel) model.onPick(toModel, stage.effort)
     else if (effortMoved) effort?.onPick(stage.effort!)
     else model.onPick(toModel!)
@@ -2854,17 +2876,17 @@ function Runs({ meta, goal, active, mode, model, effort, quota, via, auth, onSid
                 so they are the one chip — the menu behind them is one. */}
             {going && model.busy
               ? t('convo.modelGoing', { what: going })
-              : merged && meta.effort
-                ? t('convo.modelEffortChip', { m: modelName(meta.model), e: effortName(effort!.now || meta.effort!) })
-                : modelName(meta.model)}
+              : merged && shownEffort
+                ? t('convo.modelEffortChip', { m: modelName(shownModel!), e: effortName(shownEffort) })
+                : modelName(shownModel!)}
             {going && model.busy ? <Loader size={12} className="convo-running-spin" aria-hidden="true" /> : <ChevronsUpDown size={12} aria-hidden="true" />}
           </button>
         ) : (
-          <span className="convo-runs-item convo-runs-model" title={meta.model}>{modelName(meta.model)}</span>
+          <span className="convo-runs-item convo-runs-model" title={shownModel}>{modelName(shownModel!)}</span>
         ))}
-      {meta.effort && !(merged && meta.model && model) &&
+      {shownEffort && !(merged && shownModel && model) &&
         (() => {
-          const level = effort?.now || meta.effort! // (what the switch took, else what the log says)
+          const level = shownEffort // (what the switch took, else what the log says)
           return effort?.can || effort?.busy ? (
           <button
             ref={effortBtn}
@@ -2979,11 +3001,11 @@ function Runs({ meta, goal, active, mode, model, effort, quota, via, auth, onSid
               — as Claude Code's own picker has it (its slider sits under
               the models) and as the chat apps have come to. A Codex's
               efforts are already chosen with its model, above. */}
-          {merged && effort && (
+          {merged && effort && mergedEfforts.length > 0 && (
             <>
               <p className="convo-models-group" aria-hidden="true">{t('convo.effort')}</p>
               <div className="convo-models-efforts" role="group" aria-label={t('convo.effort')}>
-                {EFFORTS.map((e) => (
+                {mergedEfforts.map((e) => (
                   <button
                     key={e}
                     type="button"

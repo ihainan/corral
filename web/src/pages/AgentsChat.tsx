@@ -1335,17 +1335,18 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     warnedDefault.current = true
     toast(t('convo.err.defaultChanged'), true)
   }, [convo.defaultChanged, toast])
-  const canModel = bound && (!notClaude || codex) && convo.status === 'ready' && !!convo.meta?.model && (agent?.status === 'idle' || agent?.status === 'done') && !agent?.other
-  // How hard it is asked to think, set through Claude Code's /effort, for
-  // this session only. Offered only where its log has said one: a Claude
-  // Code without /effort never does, and nothing is typed to find out.
+  const [modelNow, setModelNow] = useState<{ model: string; bind: string; was?: string } | null>(null)
+  if (modelNow && (modelNow.bind !== bindKey || convo.meta?.model !== modelNow.was)) setModelNow(null)
+  const canModel = bound && (!notClaude || codex || agy) && convo.status === 'ready' && !!convo.meta?.model && (agent?.status === 'idle' || agent?.status === 'done') && !agent?.other
+  // How hard it is asked to think, set through Claude Code's /effort (or agy's /effort),
+  // for this session only. Offered only where its log has said one (or on agy with a model).
   // (effortNow: what a switch took, until the log says it — an answer
   // names the level, and /effort writes no row of its own. Dropped when
   // the conversation changes under it, or the log says another.)
   const [effortNow, setEffortNow] = useState<{ effort: string; bind: string; was?: string } | null>(null)
   const [effortBusy, setEffortBusy] = useState(false)
   if (effortNow && (effortNow.bind !== bindKey || convo.meta?.effort !== effortNow.was)) setEffortNow(null)
-  const canEffort = bound && !notClaude && convo.status === 'ready' && !!convo.meta?.effort && (agent?.status === 'idle' || agent?.status === 'done') && !agent?.other
+  const canEffort = bound && ((!notClaude && !!convo.meta?.effort) || (agy && !!convo.meta?.model)) && convo.status === 'ready' && (agent?.status === 'idle' || agent?.status === 'done') && !agent?.other
   const pressBody = () => {
     const b = convo.bind!
     return { pane: b.pane, pid: b.pid, start: b.start, session: b.session }
@@ -1399,8 +1400,11 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
     // (kept: the list as the gateway kept it, its picker not opened — which
     // of them it is on is not said with it, and is marked by the
     // conversation's own log as that goes: see rowByLog.)
-    own(api<{ models: ModelOpt[]; kept?: boolean }>('POST', `/api/sessions/${sid}/conversation/models`, pressBody(), { timeoutMs: MODEL_MS }))
-      .then((r) => setModels((m) => (m?.bind === bind ? { list: r.models, bind, at: Date.now(), byLog: !!r.kept } : m)))
+    own(api<{ models: ModelOpt[]; kept?: boolean; effort?: string }>('POST', `/api/sessions/${sid}/conversation/models`, pressBody(), { timeoutMs: MODEL_MS }))
+      .then((r) => {
+        setModels((m) => (m?.bind === bind ? { list: r.models, bind, at: Date.now(), byLog: !!r.kept } : m))
+        if (agy && r.effort !== undefined) setEffortNow({ effort: r.effort, bind, was: convo.meta?.effort })
+      })
       .catch((e) => {
         // (Said in the menu as well as in the toast: left on "reading" it
         // would look as though the picker were still being waited for.)
@@ -1411,15 +1415,24 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
   }
   const pickModel = (label: string, effort?: string) => {
     if (!convo.bind || modelBusy) return
+    const bind = bindKey
+    const wasModel = convo.meta?.model
+    const wasEffort = convo.meta?.effort
     setModelBusy(true)
-    own(api<{ restored?: boolean; unconfirmed?: boolean }>('POST', `/api/sessions/${sid}/conversation/model`, { ...pressBody(), model: label, ...(effort ? { effort } : {}) }, { timeoutMs: MODEL_MS }))
+    own(api<{ model?: string; effort?: string; restored?: boolean; unconfirmed?: boolean }>('POST', `/api/sessions/${sid}/conversation/model`, { ...pressBody(), model: label, ...(effort ? { effort } : {}) }, { timeoutMs: MODEL_MS }))
       .then((r) => {
         toast(t('convo.modelSet', { m: effort ? `${label} · ${effort}` : label }) + (r.restored ? t('convo.modelRestored') : '') + (r.unconfirmed ? t('convo.modelUnconfirmed') : ''))
         // (Not said by its log: the list's mark is left where it was, not moved by a guess.)
         // (A list marked by the log — see rowByLog — is marked by it alone: read at once, not at the next tick,
         // for what was just switched to. Nothing is kept here of what was clicked: the log says it, as it says a
         // /model typed in the terminal.)
-        if (!r.unconfirmed) setModels((m) => m && { ...m, list: m.list && m.list.map((o) => ({ ...o, current: o.label === label })) })
+        if (!r.unconfirmed) {
+          setModels((m) => m && { ...m, list: m.list && m.list.map((o) => ({ ...o, current: o.label === label })) })
+          if (agy) {
+            setModelNow({ model: r.model || label, bind, was: wasModel })
+            setEffortNow({ effort: r.effort ?? effort ?? '', bind, was: wasEffort })
+          }
+        }
         convo.refresh()
       })
       .catch((e) => toast(refusal(e), true))
@@ -2706,7 +2719,7 @@ function AgentChat({ cur, entries, all, titles, onPick, active, toast, composerE
       onSendNow={canPress && !notClaude ? () => press('now') : undefined}
       sendNow={said?.what === 'now' && said.bind === bindKey ? said.text : undefined}
       mode={{ now: modeNow?.bind === bindKey ? modeNow.mode : undefined, busy: modeBusy, onPick: canMode ? pickMode : undefined, codex, agy }}
-      model={canModel || modelBusy ? { list: models?.bind === bindKey ? models.list : null, unread: models?.bind === bindKey && !!models.unread, byLog: models?.bind === bindKey && !!models.byLog, fresh: !!models?.at && Date.now() - models.at < 60000, busy: modelBusy, can: canModel, onOpen: openModels, onPick: pickModel, of: bindKey, ...(codex ? { efforts: CODEX_EFFORTS } : {}) } : undefined}
+      model={canModel || modelBusy ? { list: models?.bind === bindKey ? models.list : null, now: modelNow?.bind === bindKey ? modelNow.model : undefined, unread: models?.bind === bindKey && !!models.unread, byLog: models?.bind === bindKey && !!models.byLog, fresh: !!models?.at && Date.now() - models.at < 60000, busy: modelBusy, can: canModel, onOpen: openModels, onPick: pickModel, of: bindKey, ...(codex ? { efforts: CODEX_EFFORTS } : {}) } : undefined}
       effort={{ now: effortNow?.bind === bindKey ? effortNow.effort : undefined, busy: effortBusy, can: canEffort, onPick: pickEffort }}
       lead={lead}
       more={more}

@@ -32,11 +32,12 @@ import (
 
 // modelOpt is one of the picker's models, as it shows them.
 type modelOpt struct {
-	N       int    `json:"-"` // its number in the picker
-	Label   string `json:"label"`
-	Desc    string `json:"desc,omitempty"`
-	Current bool   `json:"current,omitempty"` // (the session's now: ✔)
-	at      bool   // the picker's cursor is on it
+	N       int      `json:"-"` // its number in the picker
+	Label   string   `json:"label"`
+	Desc    string   `json:"desc,omitempty"`
+	Current bool     `json:"current,omitempty"` // (the session's now: ✔)
+	Efforts []string `json:"efforts,omitempty"` // (per-model supported efforts, when they differ by model: agy)
+	at      bool     // the picker's cursor is on it
 }
 
 // modelPicker is what the screen shows of the picker; ok false when it

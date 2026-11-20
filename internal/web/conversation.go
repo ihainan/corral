@@ -4179,9 +4179,10 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	agyAnswer := front.agent == "agy" && sess.Persistence == "tmux" && (what == "screen" || what == "reply")
 	agyCommand := front.agent == "agy" && what == "command" && (text == "/compact" || text == "/clear")
 	agyMode := front.agent == "agy" && what == "mode" && agyModes[b.Mode]
+	agyModel := front.agent == "agy" && (what == "models" || what == "model" || what == "effort")
 	agyLook := front.agent == "agy" && (what == "sent_missing" || what == "sent_enter")
 	ocLive := (front.agent == "opencode" || front.agent == "codex" || front.agent == "agy") && (what == "panel_screen" || (what == "panel" && b.Live)) // (and Codex's / Agy's: terminal as it is, a key only on the screen shown)
-	if (front.agent == "codex" || front.agent == "opencode" || front.agent == "agy") && what != "send" && what != "interrupt" && !codexAnswer && !codexCommand && !codexModel && !codexLook && !ocLive && !agyAnswer && !agyCommand && !agyMode && !agyLook {
+	if (front.agent == "codex" || front.agent == "opencode" || front.agent == "agy") && what != "send" && what != "interrupt" && !codexAnswer && !codexCommand && !codexModel && !codexLook && !ocLive && !agyAnswer && !agyCommand && !agyMode && !agyModel && !agyLook {
 		reason = "unsupported"
 		writeError(w, http.StatusConflict, "unsupported", "not for this agent")
 		return
@@ -4204,6 +4205,14 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	if what == "models" || what == "model" {
 		release := turn
 		turn = func() {} // (convoModel gives it back, once its steps have ended on the host)
+		if front.agent == "agy" {
+			if what == "models" {
+				s.convoAgyModels(w, ctx, sess, b.Pane, socket, &outcome, &reason, release)
+			} else {
+				s.convoAgyModel(w, ctx, sess, b.Pane, socket, b.PID, b.Start, b.Session, b.Model, b.Effort, &outcome, &reason, release)
+			}
+			return
+		}
 		if front.agent != "codex" {
 			noteModelFront(modelFrontKey(sess.ID, b.Pane, b.PID, b.Start, b.Session), modelFront{via: front.ep, auth: front.auth, at: time.Now()})
 		}
@@ -4213,6 +4222,10 @@ func (s *Server) convoPress(w http.ResponseWriter, r *http.Request, what string)
 	if what == "effort" {
 		release := turn
 		turn = func() {} // (convoEffort gives it back, once its steps have ended on the host)
+		if front.agent == "agy" {
+			s.convoAgyEffort(w, ctx, sess, b.Pane, socket, b.PID, b.Start, b.Session, b.Effort, &outcome, &reason, release)
+			return
+		}
 		s.convoEffort(w, ctx, sess, b.Pane, socket, b.PID, b.Start, b.Session, b.Effort, &outcome, &reason, release)
 		return
 	}
